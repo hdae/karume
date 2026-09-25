@@ -15,6 +15,8 @@
  * - {@link declaredContainer} … manifest の `weights.<部品>.<dtype>` に入る**宣言だけ**の容器
  * - {@link linearComponent} / {@link tensorlessContainer} … 実行できる最小の部品（`linear`
  *   1 段）と、宣言だけの部品（突合の門を踏むための器）
+ * - {@link runLinearProbe} … `linearComponent` の Session を 1 回 run して出力を返す（重みが
+ *   GPU まで届いたかの観測点）
  */
 
 import {
@@ -24,7 +26,7 @@ import {
   writeModelContainer,
   type WriteOptions,
 } from "../../../runtime/tests/helpers/container-write.ts";
-import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
+import { type IrDeclaration, parseIrDeclarationValue, type Session } from "@karume/runtime";
 
 export { parseIrDeclarationValue };
 
@@ -110,19 +112,28 @@ const declarationOf = (spec: TensorlessGraphSpec): IrDeclaration =>
     }],
   });
 
+/**
+ * 宣言だけの容器 1 本の**書く前の入力**（疑似 HF で配る `serveContainer` へ渡す形）。グラフ名 =
+ * 配布 manifest の weights キー — container-v1 §2.1。
+ */
+export const tensorlessInput = (
+  graph: string,
+  spec: TensorlessGraphSpec,
+  assets: readonly AssetInput[] = [],
+): ModelInput => ({
+  graphs: { [graph]: declarationOf(spec) },
+  consts: [],
+  weights: [],
+  assets: [...assets],
+  provenance: { license: "test" },
+});
+
 /** 宣言だけの容器 1 本（グラフ名 = 配布 manifest の weights キー — container-v1 §2.1）。 */
 export const tensorlessContainer = async (
   graph: string,
   spec: TensorlessGraphSpec,
   assets: readonly AssetInput[] = [],
-): Promise<TestContainer> =>
-  await writeContainer({
-    graphs: { [graph]: declarationOf(spec) },
-    consts: [],
-    weights: [],
-    assets: [...assets],
-    provenance: { license: "test" },
-  });
+): Promise<TestContainer> => await writeContainer(tensorlessInput(graph, spec, assets));
 
 const f32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Float32Array.from(values).buffer);
@@ -173,6 +184,23 @@ export const linearComponent = (
     assets: [],
     provenance: { license: "test" },
   };
+};
+
+/**
+ * {@link runLinearProbe} の期待値（{@link linearComponent} の既定値 w = 0.5・b = 0.25 のとき）。
+ *
+ * `linear` は `y[m, n] = Σ_k x[m, k] · w[n, k] + b[n]`（runtime の CPU 参照 `reference/ops.ts`）
+ * なので、`x = [[1, 2], [3, 4]]` から `[[1.75, 1.75], [3.75, 3.75]]`。値は全て 2 進で割り切れる
+ * ので f32 で厳密に一致する。重みの block を読まずに 0 埋めの buffer を上げた形では 0 が出る。
+ */
+export const LINEAR_PROBE_Y: readonly number[] = [1.75, 1.75, 3.75, 3.75];
+
+/** {@link linearComponent} の Session を `x = [[1, 2], [3, 4]]` で 1 回 run し、`y` を平らな列で返す。 */
+export const runLinearProbe = async (session: Session): Promise<number[]> => {
+  const outputs = await session.run({
+    x: { dtype: "f32", shape: [2, 2], data: Float32Array.from([1, 2, 3, 4]) },
+  });
+  return Array.from(outputs["y"].data);
 };
 
 /** 全量面（`from*Assets`）へ渡す部品キー（part 0 から添字順）。 */

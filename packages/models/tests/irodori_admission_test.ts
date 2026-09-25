@@ -19,7 +19,20 @@ import {
   partAssets,
   tensorlessContainer,
   type TensorlessGraphSpec,
+  tensorlessInput,
 } from "./helpers/container-fixture.ts";
+import {
+  HUB_URL,
+  MANIFEST_PATH,
+  REPO,
+  serveContainer,
+  serveRepos,
+  SHA,
+} from "./helpers/container-loading-fixture.ts";
+import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
+
+/** 部品差し替え先の疑似リポ。 */
+const OTHER_REPO = "karume-test/replacement";
 
 /** `models/karume-irodori-v4-small/karume.json` の `pipelineConfig` 実物（23 欄）。 */
 const CONFIG = {
@@ -353,4 +366,68 @@ Deno.test("admitIrodori: dit の記号次元が 1 本でなければ落とす（
     Error,
     "dit の記号次元が 1 本でない（[B, S]）",
   );
+});
+
+Deno.test("fromPretrained: components で差した dit の次元が違えば重みを取る前に落ちる（差し替え席が配線されている）", async () => {
+  // 差し替え先の dit だけ latentDim を 64 に焼く（元リポの 8 本は突合 13 点を全て通る）。
+  // 差し替え席を配線し忘れると、元リポのまま突合を通って資産の取得へ進み、別の文言で落ちる。
+  const specs = graphSpecs();
+  let weights: Record<string, unknown> = {};
+  let files: (readonly [string, Uint8Array<ArrayBuffer>])[] = [];
+  for (const name of COMPONENTS) {
+    const served = await serveContainer(`${name}/model.f32`, tensorlessInput(name, specs[name]));
+    weights = { ...weights, [name]: { f32: served.entry } };
+    files = [...files, ...served.files];
+  }
+  const wide = [1, "S", CONFIG.latentDim * 2];
+  const widened: TensorlessGraphSpec = {
+    ...specs.dit,
+    inputs: specs.dit.inputs.map((input) =>
+      input.name === "x_t" ? { ...input, shape: wide } : input
+    ),
+    output: { ...specs.dit.output, shape: wide },
+  };
+  const replacement = await serveContainer("other/dit.f32", tensorlessInput("dit", widened));
+  const modelOf = (entries: Record<string, unknown>) => ({
+    test: {
+      pipeline: "irodori/1",
+      weights: entries,
+      assets: { tokenizer: { ...FILE, path: "tokenizer.json" } },
+      quants: {
+        f32: {
+          weights: Object.fromEntries(Object.keys(entries).map((key) => [key, "f32"])),
+          session: {},
+        },
+      },
+      defaultQuant: "f32",
+      pipelineConfig: CONFIG,
+    },
+  });
+  const mock = serveRepos([
+    { repo: REPO, models: modelOf(weights), files },
+    {
+      repo: OTHER_REPO,
+      models: modelOf({ dit: { f32: replacement.entry } }),
+      files: replacement.files,
+    },
+  ]);
+
+  const error = await assertRejects(
+    () =>
+      IrodoriPipeline.fromPretrained({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, {
+        fetch: mock.fetch,
+        caches: new MemoryCacheStorage(),
+        components: { dit: { source: { repo: OTHER_REPO, revision: SHA, hubUrl: HUB_URL } } },
+      }),
+    Error,
+    "グラフ記述が manifest の宣言と違う",
+  );
+  assertStringIncludes(error.message, "dit");
+  // 差し替え先の manifest を引いた（= 席が loader まで届いた）。検査は 2 つの manifest の宣言
+  // だけで済むので、どちらのリポの容器も 1 本も取っていない（資産の tokenizer にも進んでいない）。
+  assertEquals(
+    mock.requests.filter((request) => request.repo === OTHER_REPO),
+    [{ repo: OTHER_REPO, path: MANIFEST_PATH }],
+  );
+  assertEquals(mock.paths.filter((path) => path !== MANIFEST_PATH), []);
 });
