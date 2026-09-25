@@ -4,7 +4,10 @@
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
+import { ContainerFormatError } from "../src/format/container/header.ts";
+import { sortedObject } from "../src/format/container/json.ts";
 import { canonicalIrJson, IrError, parseIrDeclaration } from "../src/format/ir.ts";
+import { writeGraphContainer } from "./helpers/container-write.ts";
 
 type Json = Record<string, unknown>;
 
@@ -133,5 +136,56 @@ describe("canonicalIrJson", () => {
       true,
     );
     assertEquals(text.includes('"attrs":{},"states":{"k":"aa","v":"kv"}}'), true);
+  });
+});
+
+describe("容器 descriptor の正準直列化（docs/container-v1.md §0・ir-v2.md「正準直列化」）", () => {
+  it("const 束縛は (graph, initializer) の code point 順に並ぶ（UTF-16 単位の順ではない）", async () => {
+    // U+FFFF と U+1F600 は code point 順なら U+FFFF が先、UTF-16 単位の順（サロゲート 0xD83D が
+    // 0xFFFF より小さい）なら U+1F600 が先になる — 並びが割れる最小の組。
+    const emoji = "\u{1F600}";
+    const last = "￿";
+    const graph = parseIrDeclaration(JSON.stringify({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["add"] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [4] }],
+      outputs: ["y"],
+      initializers: { [emoji]: {}, [last]: {} },
+      values: {
+        [emoji]: { dtype: "f32", shape: [4] },
+        [last]: { dtype: "f32", shape: [4] },
+        "h": { dtype: "f32", shape: [4] },
+        "y": { dtype: "f32", shape: [4] },
+      },
+      nodes: [
+        { op: "add", ins: ["x", emoji], outs: ["h"], attrs: {} },
+        { op: "add", ins: ["h", last], outs: ["y"], attrs: {} },
+      ],
+    }));
+    const constOf = (initializer: string) => ({
+      graph: "g",
+      initializer,
+      bytes: new Uint8Array(new ArrayBuffer(16)),
+      encoding: { codec: "f32" as const },
+    });
+    const { descriptorBytes } = await writeGraphContainer({
+      graphs: { g: graph },
+      consts: [constOf(emoji), constOf(last)],
+      weights: [],
+      assets: [],
+      provenance: { license: "apache-2.0" },
+    });
+    const text = new TextDecoder().decode(descriptorBytes);
+    const constants = text.slice(text.indexOf('"constants"'));
+    assertEquals(
+      constants.indexOf(`"initializer":"${last}"`) < constants.indexOf(`"initializer":"${emoji}"`),
+      true,
+    );
+  });
+
+  it("キー __proto__ は書き手の側でも拒否する（読み手が拒否する名前を書かない）", () => {
+    assertThrows(() => sortedObject({ ["__proto__"]: 1 }), ContainerFormatError, "__proto__");
   });
 });

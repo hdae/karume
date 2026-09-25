@@ -23,6 +23,7 @@ import {
 } from "./codecs.ts";
 import { alignUp, ContainerFormatError } from "./header.ts";
 import {
+  compareCodePoints,
   decodeJsonDocument,
   encodeJsonBytes,
   isJsonObject,
@@ -452,7 +453,7 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
   if (graphNames.length > MAX_GRAPHS) {
     fail(`${path}.graphs の件数 ${graphNames.length} が上限 ${MAX_GRAPHS} を超える`);
   }
-  const graphs: Record<string, IrDeclaration> = {};
+  const graphs: Record<string, IrDeclaration> = Object.create(null);
   for (const name of graphNames) {
     if (!GRAPH_NAME_PATTERN.test(name)) {
       fail(`${path}.graphs: グラフ名 '${name}' が語彙外（${GRAPH_NAME_PATTERN}）`);
@@ -537,7 +538,9 @@ export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
   const seen = new Set<string>();
   for (const [i, entry] of region.constants.entries()) {
     const entryPath = `${path}.constants[${i}]`;
-    const graph = descriptor.graphs[entry.graph];
+    const graph = Object.hasOwn(descriptor.graphs, entry.graph)
+      ? descriptor.graphs[entry.graph]
+      : undefined;
     if (graph === undefined) fail(`${entryPath}.graph: 未宣言のグラフ '${entry.graph}'`);
     const declared = graph.initializers[entry.initializer];
     if (declared === undefined) {
@@ -608,9 +611,9 @@ export const serializeGraphDescriptor = (descriptor: GraphDescriptor): Uint8Arra
 
 const sortConstants = (constants: readonly ConstantBinding[]): ConstantBinding[] =>
   [...constants].sort((a, b) => {
-    const byGraph = a.graph < b.graph ? -1 : a.graph > b.graph ? 1 : 0;
+    const byGraph = compareCodePoints(a.graph, b.graph);
     if (byGraph !== 0) return byGraph;
-    return a.initializer < b.initializer ? -1 : a.initializer > b.initializer ? 1 : 0;
+    return compareCodePoints(a.initializer, b.initializer);
   });
 
 // ---------------------------------------------------------------------------
@@ -695,10 +698,10 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
   );
 
   const bindingObject = requireObject(object["binding"], `${path}.binding`);
-  const binding: Record<string, Record<string, WeightSupply>> = {};
+  const binding: Record<string, Record<string, WeightSupply>> = Object.create(null);
   for (const graphName of Object.keys(bindingObject)) {
     const graphPath = `${path}.binding['${graphName}']`;
-    const supplies: Record<string, WeightSupply> = {};
+    const supplies: Record<string, WeightSupply> = Object.create(null);
     for (const [name, raw] of Object.entries(requireObject(bindingObject[graphName], graphPath))) {
       supplies[requireString(name, `${graphPath} のキー`)] = parseSupply(
         raw,
@@ -709,7 +712,7 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
   }
 
   const assetsObject = requireObject(object["assets"], `${path}.assets`);
-  const assets: Record<string, AssetBinding> = {};
+  const assets: Record<string, AssetBinding> = Object.create(null);
   for (const [name, raw] of Object.entries(assetsObject)) {
     const assetPath = `${path}.assets['${name}']`;
     requireString(name, `${path}.assets のキー`);
@@ -899,14 +902,14 @@ export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescrip
     }
   }
   for (const [graphName, declaration] of Object.entries(graph.graphs)) {
-    const supplies = model.binding[graphName] ?? {};
+    const supplies = Object.hasOwn(model.binding, graphName) ? model.binding[graphName] : {};
     const expected = sortedByCodePoints(
       Object.entries(declaration.initializers)
         .filter(([name, init]) => !init.shared && !constSupplied.has(`${graphName}/${name}`))
         .map(([name]) => name),
     );
     const bound = sortedByCodePoints(Object.keys(supplies));
-    const missing = expected.filter((name) => !supplies[name]);
+    const missing = expected.filter((name) => !Object.hasOwn(supplies, name));
     const surplus = bound.filter((name) => !expected.includes(name));
     if (missing.length > 0 || surplus.length > 0) {
       fail(

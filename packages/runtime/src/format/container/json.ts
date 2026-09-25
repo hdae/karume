@@ -8,6 +8,7 @@
  *   `JSON.stringify` = ECMAScript `Number::toString` がそのまま正準。
  */
 
+import { ContainerFormatError } from "./header.ts";
 import { MAX_JSON_DEPTH } from "./limits.ts";
 
 export type JsonObject = Readonly<Record<string, unknown>>;
@@ -96,13 +97,22 @@ export const compareCodePoints = (a: string, b: string): number => {
 export const sortedByCodePoints = (keys: Iterable<string>): string[] =>
   [...keys].sort(compareCodePoints);
 
-/** オブジェクトのキーを code point 順に並べ替えた写し（値は `map` で変換 — 既定は恒等）。 */
+/**
+ * オブジェクトのキーを code point 順に並べ替えた写し（値は `map` で変換 — 既定は恒等）。
+ *
+ * MUST: キー `__proto__` は書き手の側でも拒否する（docs/container-v1.md §0）。読み手が拒否する
+ * 名前を書けば、自分の出力を自分で読めない。写しの器も null プロトタイプにして、キーが
+ * [[Prototype]] の設定に化けて黙って消える経路を持たない。
+ */
 export const sortedObject = <T>(
   source: Readonly<Record<string, T>>,
   map: (value: T, key: string) => unknown = (value) => value,
 ): Record<string, unknown> => {
-  const out: Record<string, unknown> = {};
-  for (const key of sortedByCodePoints(Object.keys(source))) out[key] = map(source[key], key);
+  const out: Record<string, unknown> = Object.create(null);
+  for (const key of sortedByCodePoints(Object.keys(source))) {
+    if (key === "__proto__") throw new ContainerFormatError("キー '__proto__' は書けない");
+    out[key] = map(source[key], key);
+  }
   return out;
 };
 
