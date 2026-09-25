@@ -37,9 +37,9 @@
  * ## mel 基底は焼かずに資産から受け取る
  *
  * `librosa.filters.mel(sr=16000, n_fft=512, n_mels=80, fmin=0, fmax=8000)`（Slaney 正規化）の
- * `[80, 257]` を、manifest v2 の **`assets` 席**（quant 選択に依存しない無条件ファイル —
- * ADR 0041 §3）へ f32 safetensors 1 テンソルで載せ、パイプラインが読んで
- * {@link extractFeatures} へ渡す。sbv2 の `style_vectors` / `speaker_embeddings` と同じ席・
+ * `[80, 257]` を、manifest の **`assets` 席**（quant 選択に依存しない無条件ファイル —
+ * ADR 0041 §3・`karume/5` でも残る — ADR 0109 決定 4）へ f32 safetensors 1 テンソルで載せ、
+ * パイプラインが読んで {@link extractFeatures} へ渡す。sbv2 の `style_vectors` / `speaker_embeddings` と同じ席・
  * 同じ流儀（`src/sbv2/style.ts`）。
  *
  * 式から作り直す選択は**採らない**: 上流も「JS には行列をエクスポートして共有する」形で、
@@ -135,6 +135,17 @@ export const extractFeatures = (audio: Float32Array, melBasis: Float32Array): Vo
       `extractFeatures: 波形が ${audio.length} サンプルしかない` +
         `（${N_FFT} サンプル = ${(N_FFT / SAMPLE_RATE) * 1000}ms 以上が要る）`,
     );
+  }
+  for (let index = 0; index < audio.length; index += 1) {
+    const value = audio[index];
+    // MUST: 非有限サンプルはここで落とす — NaN 1 点で発話内 z 化が全特徴を NaN にし、GPU を
+    // 1 run 回した後に「ロジットが非有限」という資産の故障に見える文言で落ちる。波形は呼び手の
+    // 引数そのものなので入力起因（ADR 0107 決定 2）。
+    if (!Number.isFinite(value)) {
+      throw new ModelInputError(
+        `extractFeatures: 波形の ${index} 番目のサンプル ${value} が非有限`,
+      );
+    }
   }
 
   const window = hannWindow(WIN_LENGTH);

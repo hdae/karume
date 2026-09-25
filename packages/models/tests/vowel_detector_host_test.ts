@@ -160,6 +160,21 @@ Deno.test("特徴: 1 フレームも取れない波形は fail loudly（NaN を�
   );
 });
 
+Deno.test("特徴: 非有限のサンプルは位置と値を添えて入力エラーで落とす（NaN の特徴を GPU へ渡さない）", () => {
+  // NaN 1 点で発話内 z 化の平均が NaN になり全 83 次元が汚れる。波形は呼び手の引数そのもの
+  // なので入力起因（ADR 0107 決定 2）。末尾に置いて「先頭だけ見る」検査も捕まえる。
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const tainted = Float32Array.from(audio);
+    const at = tainted.length - 1;
+    tainted[at] = value;
+    assertThrows(
+      () => extractFeatures(tainted, melBasis),
+      ModelInputError,
+      `波形の ${at} 番目のサンプル ${value} が非有限`,
+    );
+  }
+});
+
 Deno.test("特徴: mel 基底の要素数が違えば受け付けない", () => {
   assertThrows(
     () => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)),
