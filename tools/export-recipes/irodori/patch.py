@@ -62,6 +62,14 @@ def patches_applied() -> bool:
     return _APPLIED
 
 
+# Third-party code notice (decided 2026-09-25 — `irodori/THIRD_PARTY_NOTICES.md`).
+# `_flat_qkv_attention_forward` below is adapted from `ModernBertAttention.forward` in
+# huggingface/transformers (`src/transformers/models/modernbert/modeling_modernbert.py`,
+# `transformers==5.14.1`). It is verbatim except for how qkv is split; that part was changed.
+# License: Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+# Upstream copyright notice, copied verbatim from the header of that file:
+#
+#   Copyright 2024 Answer.AI, LightOn, and contributors, and the HuggingFace Inc. team. All rights reserved.  # noqa: E501
 def _flat_qkv_attention_forward(
     self: Any,
     hidden_states: torch.Tensor,
@@ -181,6 +189,13 @@ def _real_pair_apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> tor
     return x * cos + swapped * sin
 
 
+# Third-party code notice (decided 2026-09-25 — `irodori/THIRD_PARTY_NOTICES.md`).
+# The rank-1 branch of `_split_weight_rms_norm_forward` below reproduces `RMSNorm.forward` in
+# Aratako/Irodori-TTS (https://github.com/Aratako/Irodori-TTS, `irodori_tts/model.py`) verbatim;
+# the rank ≥ 2 branch is new. License: MIT License (the upstream repository's `LICENSE`).
+# Upstream copyright notice, copied verbatim from that `LICENSE`:
+#
+#   Copyright (c) 2026 Aratako
 def _split_weight_rms_norm_forward(self: Any, x: torch.Tensor) -> torch.Tensor:
     """`irodori_tts.model.RMSNorm.forward` の同値実装（rank ≥ 2 weight を分割する）。
 
@@ -201,6 +216,14 @@ def _split_weight_rms_norm_forward(self: Any, x: torch.Tensor) -> torch.Tensor:
     return (normalized * self.weight).to(x_dtype)
 
 
+# Third-party code notice (decided 2026-09-25 — `irodori/THIRD_PARTY_NOTICES.md`).
+# `_folded_rms_low_rank_adaln_forward` below is adapted from `LowRankAdaLN.forward` in
+# Aratako/Irodori-TTS (https://github.com/Aratako/Irodori-TTS, `irodori_tts/model.py`). It is
+# verbatim except for the normalization line; that line was changed.
+# License: MIT License (the upstream repository's `LICENSE`).
+# Upstream copyright notice, copied verbatim from that `LICENSE`:
+#
+#   Copyright (c) 2026 Aratako
 def _folded_rms_low_rank_adaln_forward(
     self: Any, x: torch.Tensor, cond_embed: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
