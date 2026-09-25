@@ -135,3 +135,4 @@ f16/i8 格納実行・dist の quant 表・models の session 配線）は SBV2 
 決定 14 の「pin は据え置き」は 0.5.0 リリースで解消した — `IRODORI_V4_SMALL_CURRENT` が
 席名改名後の revision を指し、`revision: "main"` の明示は不要になった。席名は
 ADR [0074](0074-quant-seat-naming.md) の移行表どおり `w4` → `i8+dit4`。
+決定 7 の他の席名も同じ移行表で改名した（`w8` → `i8`・既定 `w8a8` → `i8-a8`）。本文の旧名は当時の記録として残す。
