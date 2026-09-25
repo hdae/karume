@@ -11,7 +11,10 @@ requires-python = ">=3.12"
 # （ADR 0065 決定 7）— 上流由来コードの provenance は recipe 側が負う。
 license = "MIT"
 license-files = ["LICENSE"]
-# numpy は safetensors.torch の save/load が内部で要求する（torch 経由では入らない）。
+# numpy は core が直接使う — emit / convert はテンソルのバイト列を `Tensor.numpy()` 経由で
+# 取り出し（格納 payload・定数の digest）、dist は `.npy` / ckpt から移した表を
+# `safetensors.numpy` で資産のバイト列にする（`table_payload`）。goldens が使う
+# safetensors.torch も内部で要求する（どれも torch 経由では入らない）。
 # torchvision は `torchvision::deform_conv2d`（DCNv2 = 第 1' 層 op・ADR 0055）の op 登録に
 # 要る — ハンドラのキー（`torch.ops.torchvision.deform_conv2d.default`）と golden 生成の
 # 両方が import を前提にするので、グループではなく基本依存に置く。

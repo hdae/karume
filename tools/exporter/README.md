@@ -134,8 +134,10 @@ the declaration, and is **required** when the models being bundled declare diffe
 (for example one repository per speaker); overriding it also requires an explicit `--out`.
 
 The layout inside a distribution is uniform — `<model>/…` subtrees plus `shared/`, with only
-`karume.json` and `README.md` at the root — and a single-model repository follows the same rule
-(otherwise adding a second model would move every existing path).
+`karume.json` and `README.md` at the root, plus the legal-text seats `LICENSE.md` / `NOTICE.md`
+when a pipeline's upstream weight license requires them (`Pipeline.root_files`; no other name may
+be written there) — and a single-model repository follows the same rule (otherwise adding a second
+model would move every existing path).
 
 `karume dist` writes a **model card `README.md`** after assembly and `verify_dist`
 (`karume.modelcard` — including the ADR 0037 §3 frontmatter), from a template per pipeline. The
@@ -456,7 +458,7 @@ writes, re-reads and verifies, and only then swaps the result into place.
 | `publish`       | the one path that places a distribution form: write → re-read and verify payloads, assets and descriptors → swap into place                                     |
 | `goldens`       | the golden spec table and generation driver                                                                                                                     |
 | `golden_models` | the tiny golden fixtures themselves — `nn.Module` definitions and input generators                                                                              |
-| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel symmetric i8)                                                                              |
+| `quantize`      | weight fake-quant for the storage dtypes (f16 rounding / per-channel i8 / group-wise i4)                                                                        |
 | `act_quant`     | per-token symmetric i8 fake-quant for activations (the torch mirror of the w8a8 execution path)                                                                 |
 | `extents`       | identity of dimension lengths — the one place symbolic (`SymInt`) lengths are compared without a guard                                                          |
 | `rope`          | model-independent export check that RoPE frequency buffers were lifted out to constant-folding leaves                                                           |
@@ -494,7 +496,7 @@ export on a mismatch (this runs both at the exit of `convert` and in `assert_op_
 `publish_model` applies before writing). Only the decisions that need bindings (zero-length axes,
 exceeding Tmax) are held by the runtime-side layer.
 
-## Supported scope (as of perf-a)
+## Supported scope
 
 **The op count and the contracts are authoritative in
 `packages/runtime/tests/fixtures/op-contracts.json`** (both TS-side `packages/runtime/src/ops.ts`
