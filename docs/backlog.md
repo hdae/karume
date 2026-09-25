@@ -357,8 +357,18 @@ later の「decode 速度の残り」。
   gemma4 生成 API・GEMV 族・tokenizer の追加で失効している）
 - ライセンス interview（export-recipes の family 別 provenance を upstream revision 単位で
   人間確認 — 再編の release gate。**公開 4 リポぶんは波 K-4 の人間ゲートで先行実施**）。
-  **公開済みは 7 家族 10 エントリで、重み行（Revision used / Weights license）が未記録なのは
-  irodori / sbv2 / siglip2 の 3 家族**（anima / depth_anything / gemma4 / birefnet・lucida は記入済み）。
+  **2026-09-25 に実施済み**（利用者が上流のモデルページを確認 + HF キャッシュの `refs/main` で
+  Revision used を転記）。公開済みは `models/` の配布ミラーで数えて **7 家族 11 リポ**（anima 2・
+  birefnet 2〈birefnet-hr / lucida〉・depth_anything・gemma4・irodori 2・sbv2-jvnv・siglip2）。
+  埋めた台帳は anima / gemma4（drafter `google/gemma-4-E2B-it-assistant` のブロックを新設）/
+  irodori / sbv2 / siglip2 の 5 本。理由つきの Unrecorded のまま残る行 = modernbert-ja-310m の
+  revision（ローカルに記録なし）・Semantic-DACVAE-Japanese（親）の revision（未取得）。
+  Unverified のまま残る行 = anima-copycat-20260610 の revision（手置き・version id / sha256 なし）・
+  anima-wai-v1.0 の Civitai 許可欄が上流ライセンスを広げ得るか・sbv2 の style-bert-vits2（AGPL）の
+  帰属（下の裁定待ち）・depth_anything の Weights license（revision 照合前）。
+  **FN（`rufflet17/voice_models`）は HF にライセンス記載も README も無いので公開不可**（明確になるまで）。
+  **裁定待ち**: anima が同梱する `LICENSE.md` は v1.2 の本文だが、Base（`Anima-Base-v1.0-Diffusers`）は
+  v1.0（差は §2(b)/(c)/(e) の商用条件 — v1.2 の方が緩い）。台帳には事実として記録済み。
   コード依存ブロック（transformers / PyTorch 等）の Code license / Attribution は上流 LICENSE の
   現物で 2026-09-05 に記入済み。上流 revision を機械可読に残す席は容器の
   `provenance.upstreamRevision`（[container-v1](container-v1.md) §2.3）。埋めているのは sbv2 と minicpm5 の
