@@ -61,7 +61,7 @@ IR v1 に **`states{}` セクション**を追加する: `name → { dtype, shap
 
 - 「鍵は容量」は**トレードオフの選択であって業界の既定ではない**と明記する — llama.cpp は
   逆に「256 境界へ量子化した論理 extent」を鍵に入れて成立している（調査 §1.1 (a)）。karume
-  が容量鍵を選ぶ理由は、PreparedPlan（ADR 0042）が bindings 完全一致鍵 + LRU（上限は 0042 決定 2 — 現行 8）であり、
+  が容量鍵を選ぶ理由は、PreparedPlan（ADR 0042）が bindings 完全一致鍵 + LRU（上限は `PREPARED_PLAN_CAPACITY` — 0042 決定 2）であり、
   extent を鍵に入れると decode が毎 token 別計画になるため。
 - **論理長は「値」**: `pastLength`（確定済み KV の論理長）と `queryLength`（今回 step の
   実 token 数）は**独立の実行時スカラ**として渡す。shape symbol にも attrs にもしない

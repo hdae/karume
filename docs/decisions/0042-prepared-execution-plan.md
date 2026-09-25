@@ -53,6 +53,8 @@ MUST: レシピは GPUBindGroup と run 寿命バッファを持たない。持�
   使い回す局所性だけを拾う器」という位置づけは不変で、増やしても効かない形〈run ごとに shape が変わる〉は
   1 本目から効かない）。追い出しはホストオブジェクトのみ（GPU 資源は
   paramsCache / PipelineCache が所有 — ここで destroy すると別計画の直参照が破棄済みを掴む）。
+  追記: 2026-09-08 に 12 へ（ADR [0096](0096-speculative-decoding.md)・根拠は
+  `packages/runtime/src/runtime/executor.ts` の `PREPARED_PLAN_CAPACITY` の doc）。
 
 ### 3. 常設診断 `lastRunPrepared {hit, cachedPlans}`
 
