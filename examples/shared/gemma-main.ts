@@ -603,68 +603,71 @@ export const runGemmaCli = async (
     };
     Deno.addSignalListener("SIGINT", onInterrupt);
 
-    write("> ");
-    for await (const raw of readLines()) {
-      const line = raw.trim();
-      if (line === "") {
-        write("> ");
-        continue;
-      }
-      if (line === "/exit" || line === "/quit") break;
-      if (line === "/reset") {
-        // 会話を捨てる = セッションを畳んで同じ設定で組み直す（履歴も KV も持っているのは
-        // セッションなので、捨てる口を別に持たない）。
-        await session.dispose();
-        session = new Gemma4ChatSession(pipeline, sessionOptions);
-        write("(reset)\n> ");
-        continue;
-      }
-
-      const controller = new AbortController();
-      turn = controller;
-      const timer = generationTimer();
-      turnRuns = 0;
-      lastTiming = undefined;
-      // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
-      const stream = session.send(line, {
-        onPrefill: showPrefill,
-        onToken: timer.onToken,
-        signal: controller.signal,
-      });
-      try {
-        // 片は逐次復号器が**確定させたぶん**だけで、連結すると全体の decode と一致する。
-        for await (const chunk of stream) {
-          // 本文が出始めたら prefill の行は用済み（1 片目で 1 度だけ効く）。
-          clearPrefill();
-          write(chunk);
-        }
-        report(await stream.done, timer.finish());
-      } catch (error) {
-        clearPrefill();
-        if (error instanceof GenerationCapacityError) {
-          // 溢れ処理で落とせるものが尽きた = この 1 発話だけで入り切らない。判断に要る実値は
-          // 例外の欄が運ぶ（文言を読み解かない）。
-          write(
-            `\n  [入り切らない: ${error.constraint} 上限 ${error.limit} に対し` +
-              ` 既存 ${error.pastLength} + prompt ${error.promptLength}` +
-              `（この長さなら maxNewTokens ≤ ${error.maxNewTokens}）— 発話を短くするか /reset]\n`,
-          );
-        } else if (error === controller.signal.reason) {
-          // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
-          // `aborted` で settle するので、生成できた token 数はそのまま読める。
-          report(await stream.done, timer.finish());
-        } else {
-          throw error;
-        }
-      } finally {
-        turn = undefined;
-      }
-
+    // MUST: 想定外の例外で抜けてもシグナルを外し session を畳む（pipeline の解放より先に）。
+    try {
       write("> ");
-    }
+      for await (const raw of readLines()) {
+        const line = raw.trim();
+        if (line === "") {
+          write("> ");
+          continue;
+        }
+        if (line === "/exit" || line === "/quit") break;
+        if (line === "/reset") {
+          // 会話を捨てる = セッションを畳んで同じ設定で組み直す（履歴も KV も持っているのは
+          // セッションなので、捨てる口を別に持たない）。
+          await session.dispose();
+          session = new Gemma4ChatSession(pipeline, sessionOptions);
+          write("(reset)\n> ");
+          continue;
+        }
 
-    Deno.removeSignalListener("SIGINT", onInterrupt);
-    await session.dispose();
+        const controller = new AbortController();
+        turn = controller;
+        const timer = generationTimer();
+        turnRuns = 0;
+        lastTiming = undefined;
+        // 発行した stream は必ず汲み切るか break で閉じる（ターンの締めは列の終端で走る）。
+        const stream = session.send(line, {
+          onPrefill: showPrefill,
+          onToken: timer.onToken,
+          signal: controller.signal,
+        });
+        try {
+          // 片は逐次復号器が**確定させたぶん**だけで、連結すると全体の decode と一致する。
+          for await (const chunk of stream) {
+            // 本文が出始めたら prefill の行は用済み（1 片目で 1 度だけ効く）。
+            clearPrefill();
+            write(chunk);
+          }
+          report(await stream.done, timer.finish());
+        } catch (error) {
+          clearPrefill();
+          if (error instanceof GenerationCapacityError) {
+            // 溢れ処理で落とせるものが尽きた = この 1 発話だけで入り切らない。判断に要る実値は
+            // 例外の欄が運ぶ（文言を読み解かない）。
+            write(
+              `\n  [入り切らない: ${error.constraint} 上限 ${error.limit} に対し` +
+                ` 既存 ${error.pastLength} + prompt ${error.promptLength}` +
+                `（この長さなら maxNewTokens ≤ ${error.maxNewTokens}）— 発話を短くするか /reset]\n`,
+            );
+          } else if (error === controller.signal.reason) {
+            // 中断でも「成功した run のぶんだけ」会話は進んでいる。done は reject ではなく
+            // `aborted` で settle するので、生成できた token 数はそのまま読める。
+            report(await stream.done, timer.finish());
+          } else {
+            throw error;
+          }
+        } finally {
+          turn = undefined;
+        }
+
+        write("> ");
+      }
+    } finally {
+      Deno.removeSignalListener("SIGINT", onInterrupt);
+      await session.dispose();
+    }
     write("\nbye\n");
   };
 
