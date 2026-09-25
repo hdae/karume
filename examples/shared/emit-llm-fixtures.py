@@ -1,7 +1,8 @@
 """CLI 用 Unicode 表と公式 tokenizer の参照列を再生成する（実行時には不要）。
 
 リポジトリの tools/.venv/bin/python で実行する。公式のローカル tokenizer を使用し、
-取得・重みの変換・既存 fixture の上書きは行わない。--out の結果を Deno テストで確認してから採用する。
+取得・重みの変換・既存 fixture の上書きは行わない。--out の結果を Deno テストで確認してから
+採用する。
 """
 
 import argparse
@@ -18,15 +19,14 @@ def main() -> None:
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(repo / "tools" / "export-recipes"))
-    from anima import text as at
     from transformers import AutoTokenizer
+
+    from anima import text as at
 
     unicode_path = args.out / "llm-unicode.json"
     parity_path = args.out / "llm-tokenizer-parity.json"
     if unicode_path.exists() or parity_path.exists():
-        raise FileExistsError(
-            "出力先に生成済みの表があります。別の --out を指定してください。"
-        )
+        raise FileExistsError("出力先に生成済みの表があります。別の --out を指定してください。")
     classes = at.build_char_classes()
     print("classes", at.verify_char_classes(classes), flush=True)
     fold = at.build_case_fold()
@@ -55,7 +55,8 @@ def main() -> None:
         "日本の首都を都市名だけで答えてください。",
     ]
     rng = random.Random(111)
-    alphabet = list("abcdAZ0123456789 \n\t.,!?日本語フランス") + [
+    alphabet = [
+        *"abcdAZ0123456789 \n\t.,!?日本語フランス",
         "é",
         "\u0301",
         "\u089a",
@@ -71,17 +72,13 @@ def main() -> None:
         "𝟘",
         "Ⅷ",
     ]
-    texts = prompts + [
-        "".join(rng.choices(alphabet, k=rng.randrange(1, 100))) for _ in range(60)
-    ]
+    texts = prompts + ["".join(rng.choices(alphabet, k=rng.randrange(1, 100))) for _ in range(60)]
     fixtures = {}
     for family, folder in [
         ("qwen3", "qwen3/Qwen3-0.6B"),
         ("minicpm5", "minicpm5/MiniCPM5-2B"),
     ]:
-        tok = AutoTokenizer.from_pretrained(
-            repo / "inputs" / folder, local_files_only=True
-        )
+        tok = AutoTokenizer.from_pretrained(repo / "inputs" / folder, local_files_only=True)
         cases = []
         for text in texts:
             ids = tok.encode(text, add_special_tokens=True)
@@ -99,9 +96,7 @@ def main() -> None:
         chats = []
         for system in [None, "Answer briefly. 日本語で答えてください。", ""]:
             for prompt in prompts[:3] + prompts[-2:]:
-                messages = (
-                    [] if system is None else [{"role": "system", "content": system}]
-                )
+                messages = [] if system is None else [{"role": "system", "content": system}]
                 messages.append({"role": "user", "content": prompt})
                 chats.append(
                     {
@@ -137,9 +132,7 @@ def main() -> None:
                     {"user": "Previous question?", "assistant": answer},
                     {"user": "次の質問", "assistant": "e\u0301 👩🏽\u200d💻"},
                 ]
-                messages = (
-                    [] if system is None else [{"role": "system", "content": system}]
-                )
+                messages = [] if system is None else [{"role": "system", "content": system}]
                 for turn in turns:
                     messages.extend(
                         [

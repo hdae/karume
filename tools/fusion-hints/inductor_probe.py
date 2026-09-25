@@ -1,17 +1,20 @@
-"""fusion-hints `inductor` の実行体 — Inductor（torch.compile の CUDA バックエンド）が**どのノード列を
-1 カーネルに畳むか**を取り出し、IR の op 名列に写して candidates.jsonl の未掴の鎖と突き合わせる。
+"""fusion-hints `inductor` の実行体 — Inductor（torch.compile の CUDA バックエンド）が
+**どのノード列を 1 カーネルに畳むか**を取り出し、IR の op 名列に写して candidates.jsonl の未掴の鎖と
+突き合わせる。
 Deno 側（tools/fusion-hints/main.ts `inductor`）が CUDA venv の python で subprocess として呼ぶ。
 
-入力は exporter の golden 台帳（karume.goldens.GOLDEN_SPECS — 契約表の全 op を被覆する tiny モデル
-31 本）と、この台本が持つ**鎖モデル**（実資産の候補表で上位に出る鎖を最小構成で組んだもの:
-残差 rms_norm→add・linear→rms_norm→add・gelu_tanh·mul・RoPE 片・softmax 鎖・adaLN 変調）。tiny なので
-Inductor の**構造**判断（pointwise / reduction をどこまで畳むか）までが射程で、形状依存の判断
-（tiling・reduction の分割）は実資産の ExportedProgram が要る（2026-09-04 裁定 1-4 = この波では採らない）。
+入力は exporter の golden 台帳（karume.goldens.GOLDEN_SPECS — 契約表の全 op を被覆する tiny
+モデル 31 本）と、この台本が持つ**鎖モデル**（実資産の候補表で上位に出る鎖を最小構成で組んだもの:
+残差 rms_norm→add・linear→rms_norm→add・gelu_tanh·mul・RoPE 片・softmax 鎖・adaLN 変調）。tiny
+なので Inductor の**構造**判断（pointwise / reduction をどこまで畳むか）までが射程で、形状依存の
+判断（tiling・reduction の分割）は実資産の ExportedProgram が要る（2026-09-04 裁定 1-4 = この波では
+採らない）。
 
-方法: 同じモジュールを 2 回 export し、片方は exporter と同じ手順（分解 → normalize → convert）で IR に、
-片方は分解のまま `torch._inductor.compile` へ渡して Scheduler.codegen をすり替え、融合後のノード群
-（FusedSchedulerNode / SchedulerNode / ExternKernelSchedulerNode）と各メンバーの fx ノード名を捕まえる。
-IR ノードの出力名は fx ノード名（convert.py の out_name）なので、名前で join して IR の op 名列にする。
+方法: 同じモジュールを 2 回 export し、片方は exporter と同じ手順（分解 → normalize → convert）で
+IR に、片方は分解のまま `torch._inductor.compile` へ渡して Scheduler.codegen をすり替え、融合後の
+ノード群（FusedSchedulerNode / SchedulerNode / ExternKernelSchedulerNode）と各メンバーの fx
+ノード名を捕まえる。IR ノードの出力名は fx ノード名（convert.py の out_name）なので、名前で join
+して IR の op 名列にする。
 normalize が消したノード（RoPE 表の畳み込み等）は写像相手が無いので unmatched に数える。
 
 使い方: python inductor_probe.py --out <dir> [--candidates <candidates.jsonl> ...]
@@ -29,11 +32,12 @@ from typing import Any
 
 import torch
 import torch._inductor
+from torch import nn
+from torch._inductor.scheduler import Scheduler
+
 from karume.convert import PRESERVED_OP_PREFIXES, convert, curated_decompositions
 from karume.goldens import GOLDEN_SPECS, GoldenSpec, _rng
 from karume.normalize import normalize_graph
-from torch import nn
-from torch._inductor.scheduler import Scheduler
 
 # --- 実資産の候補表で上位に出る鎖の最小モデル（形は小さく・構造だけを写す） -----------------
 
@@ -67,9 +71,7 @@ class GatedGelu(nn.Module):
 class RopeHalf(nn.Module):
     """RoPE の半回転（slice / neg / cat / mul / add）— gemma4 decode で 35 本未掴の鎖。"""
 
-    def forward(
-        self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         half = x.shape[-1] // 2
         x1, x2 = x[..., :half], x[..., half:]
         rotated = torch.cat((-x2, x1), dim=-1)
@@ -79,9 +81,7 @@ class RopeHalf(nn.Module):
 class SoftmaxChain(nn.Module):
     """分解 attention の `bmm,softmax,bmm`（5 グラフ計 128 ブロック）。"""
 
-    def forward(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         scores = torch.matmul(q, k.transpose(-1, -2)) * 0.25
         probs = torch.softmax(scores, dim=-1)
         return torch.matmul(probs, v)
@@ -128,7 +128,7 @@ def _chain_specs() -> list[tuple[str, nn.Module, tuple[torch.Tensor, ...]]]:
 # --- Inductor の融合決定を捕まえる -------------------------------------------------------------
 
 
-class _Captured(Exception):
+class _Captured(Exception):  # noqa: N818 — 異常ではなく捕獲の合図なので Error と呼ばない
     pass
 
 
@@ -148,9 +148,7 @@ def inductor_groups(
     # forward 内で作る定数（arange / ones）も CUDA へ寄せる（既定 device）。勾配は要らないので切る
     # （karume.gru_scan_* の custom op は autograd 式を持たない — 推論専用）。
     with torch.no_grad(), torch.device("cuda"):
-        ep = torch.export.export(
-            module, args, dynamic_shapes=dynamic_shapes, strict=False
-        )
+        ep = torch.export.export(module, args, dynamic_shapes=dynamic_shapes, strict=False)
         decomposed = ep.run_decompositions(curated_decompositions(preserved))
         gm = decomposed.module()
     captured: dict[str, Any] = {}
@@ -219,9 +217,7 @@ def probe(
     module = module.eval()
     ops = ir_ops(module, args, dynamic_shapes, symbol_names, preserved)
     rows: list[dict[str, Any]] = []
-    for index, group in enumerate(
-        inductor_groups(module, args, dynamic_shapes, preserved)
-    ):
+    for index, group in enumerate(inductor_groups(module, args, dynamic_shapes, preserved)):
         # origins（分解前の fx 名）と members（Inductor 内部名）の両方で IR ノードを引く。
         names = set(group["members"]) | set(group["origins"])
         matched = sorted((ops[n] for n in names if n in ops), key=lambda pair: pair[0])
@@ -240,25 +236,17 @@ def probe(
 
 def _contains(sequence: Sequence[str], chain: Sequence[str]) -> bool:
     n = len(chain)
-    return any(
-        list(sequence[i : i + n]) == list(chain) for i in range(len(sequence) - n + 1)
-    )
+    return any(list(sequence[i : i + n]) == list(chain) for i in range(len(sequence) - n + 1))
 
 
-def compare(
-    rows: list[dict[str, Any]], candidates: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+def compare(rows: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """候補の op 名列ごとに fused（1 群に連続で入る）/ split（全 op は見えたが 1 群にならない）/
     unobserved（op が golden にも鎖モデルにも現れない）を付ける。"""
-    fused_groups = [
-        r for r in rows if r["kind"] == "FusedSchedulerNode" and len(r["ir_ops"]) >= 2
-    ]
+    fused_groups = [r for r in rows if r["kind"] == "FusedSchedulerNode" and len(r["ir_ops"]) >= 2]
     seen_ops = {op for r in rows for op in r["ir_ops"]}
     results: list[dict[str, Any]] = []
     for cand in candidates:
-        chain = [
-            op for op in cand["ops"] if op != "reshape"
-        ]  # reshape は 0 dispatch の別名化
+        chain = [op for op in cand["ops"] if op != "reshape"]  # reshape は 0 dispatch の別名化
         if len(chain) < 2:
             status = "trivial"
             witness = None
@@ -316,9 +304,7 @@ def main() -> int:
 
         def build(
             spec: GoldenSpec = spec,
-        ) -> tuple[
-            nn.Module, tuple[torch.Tensor, ...], Any, Sequence[str], Sequence[str]
-        ]:
+        ) -> tuple[nn.Module, tuple[torch.Tensor, ...], Any, Sequence[str], Sequence[str]]:
             g = _rng()
             return (
                 spec.build(g),
@@ -345,7 +331,8 @@ def main() -> int:
                 f"{name}: {sum(1 for r in rows if r['model'] == name)} groups",
                 file=sys.stderr,
             )
-        except Exception as error:  # noqa: BLE001 — golden 1 本の失敗で掃引を止めない（理由は failures に残す）
+        except Exception as error:
+            # golden 1 本の失敗で掃引を止めない（理由は failures に残す）。
             failures[name] = f"{type(error).__name__}: {str(error)[:200]}"
             print(f"{name}: FAILED {failures[name]}", file=sys.stderr)
 
@@ -378,9 +365,7 @@ def main() -> int:
         "candidates": len(candidates),
         "verdicts": tally,
     }
-    (out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
-    )
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

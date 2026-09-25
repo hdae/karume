@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 
 TARGET_PASS_MS = 80.0
 MAX_REPS = 1024
@@ -50,9 +50,7 @@ def _weight(shape: list[int], dtype: torch.dtype) -> torch.Tensor:
 
 def _needs(case: Case, ins: int) -> None:
     if len(case["in_shapes"]) != ins:
-        raise ValueError(
-            f"{case['op']}: 入力 {len(case['in_shapes'])} 本（{ins} 本の契約）"
-        )
+        raise ValueError(f"{case['op']}: 入力 {len(case['in_shapes'])} 本（{ins} 本の契約）")
 
 
 def build_linear(case: Case) -> Build:
@@ -74,9 +72,7 @@ def build_attention(case: Case) -> Build:
 
     def make(dtype: torch.dtype) -> Callable[[], torch.Tensor]:
         q, k, v = _act(q_shape, dtype), _act(k_shape, dtype), _act(v_shape, dtype)
-        return lambda: F.scaled_dot_product_attention(
-            q, k, v, scale=scale, enable_gqa=gqa
-        )
+        return lambda: F.scaled_dot_product_attention(q, k, v, scale=scale, enable_gqa=gqa)
 
     return make
 
@@ -116,11 +112,7 @@ def build_binary(
 
         def make(dtype: torch.dtype) -> Callable[[], torch.Tensor]:
             a = _act(a_shape, dtype)
-            b = (
-                _act(b_shape, dtype)
-                if case["storage"][1] is None
-                else _weight(b_shape, dtype)
-            )
+            b = _act(b_shape, dtype) if case["storage"][1] is None else _weight(b_shape, dtype)
             return lambda: fn(a, b)
 
         return make
@@ -271,7 +263,8 @@ def set_tf32(enabled: bool) -> None:
 
 
 class Heater:
-    """クロック張り付けの filler（bench.ts の Heater と同じ役）: f16 matmul 2048×4096×4096 を 8 回。"""
+    """クロック張り付けの filler（bench.ts の Heater と同じ役）: f16 matmul 2048×4096×4096 を
+    8 回。"""
 
     def __init__(self) -> None:
         self.a = torch.randn(2048, 4096, device="cuda", dtype=torch.float16)
@@ -295,9 +288,7 @@ class Heater:
                 return
 
 
-def measure(
-    fn: Callable[[], torch.Tensor], heater: Heater, rounds: int
-) -> tuple[float, int]:
+def measure(fn: Callable[[], torch.Tensor], heater: Heater, rounds: int) -> tuple[float, int]:
     """1 呼び出しの GPU 時間（ms・min）と反復数。反復は 1 パス ≈80ms まで積む（cuda Event）。"""
     fn()
     torch.cuda.synchronize()
@@ -354,11 +345,10 @@ def main() -> int:
     errors_by_column: dict[str, dict[str, Any]] = {}
     for index, case in enumerate(cases):
         builder = BUILDERS.get(case["op"])
-        label = f"[{index + 1}/{len(cases)}] {case['component']} {case['op']} {json.dumps(case['in_shapes'])}"
+        shapes = json.dumps(case["in_shapes"])
+        label = f"[{index + 1}/{len(cases)}] {case['component']} {case['op']} {shapes}"
         if builder is None:
-            skipped[f"{case['op']}: 写像なし"] = (
-                skipped.get(f"{case['op']}: 写像なし", 0) + 1
-            )
+            skipped[f"{case['op']}: 写像なし"] = skipped.get(f"{case['op']}: 写像なし", 0) + 1
             print(f"{label} skipped: 写像なし", file=sys.stderr)
             continue
         try:
@@ -394,11 +384,10 @@ def main() -> int:
                 ms, reps = measure(fn, heater, args.rounds)
                 record["ms"][name] = ms
                 record["reps"][name] = reps
-                record["mem_mib"][name] = (
-                    torch.cuda.max_memory_allocated() - base
-                ) / 2**20
+                record["mem_mib"][name] = (torch.cuda.max_memory_allocated() - base) / 2**20
             except (RuntimeError, ValueError, TypeError, NotImplementedError) as error:
-                # 列ごとに理由を残して次へ（1 列の失敗で行を捨てない）。torch の失敗は RuntimeError 系。
+                # 列ごとに理由を残して次へ（1 列の失敗で行を捨てない）。torch の失敗は
+                # RuntimeError 系。
                 record["errors"][name] = f"{type(error).__name__}: {str(error)[:160]}"
             finally:
                 set_tf32(False)
@@ -411,9 +400,7 @@ def main() -> int:
                 record["ms"]["compile_f16"] = ms
                 record["reps"]["compile_f16"] = reps
             except (RuntimeError, ValueError, TypeError, NotImplementedError) as error:
-                record["errors"]["compile_f16"] = (
-                    f"{type(error).__name__}: {str(error)[:160]}"
-                )
+                record["errors"]["compile_f16"] = f"{type(error).__name__}: {str(error)[:160]}"
             finally:
                 torch._dynamo.reset()
                 torch.cuda.empty_cache()
@@ -438,12 +425,9 @@ def main() -> int:
         "skipped": skipped,
         # 列名 → {count, example}（0 件の列は載らない）。Deno 側が comparison.json の頭へ写す。
         "errors": errors_by_column,
-        "columns": [name for name, _, _ in COLUMNS]
-        + (["compile_f16"] if args.compile else []),
+        "columns": [name for name, _, _ in COLUMNS] + (["compile_f16"] if args.compile else []),
     }
-    (out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
-    )
+    (out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

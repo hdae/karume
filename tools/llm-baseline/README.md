@@ -78,6 +78,12 @@ one target at each window boundary. No external model implementation source is c
 
 ## Validation and recorded results
 
+The tests are **not** run by CI or by `deno task verify`: they import `transformers` /
+`accelerate`, which the default `uv sync` of `tools/` does not install. Run them by hand, from the
+repository root with the full venv (`(cd tools && uv sync --all-groups)`), whenever you change
+anything under `tools/llm-baseline/` or the container reader it uses. CI only lints and
+format-checks this directory.
+
 ```sh
 PYTHONPATH=tools/export-recipes tools/.venv/bin/python -m pytest -q tools/llm-baseline
 cd tools/export-recipes

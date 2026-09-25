@@ -36,14 +36,21 @@ def main() -> None:
         tokenizer.chat_template = args.chat_template.read_text()
     if not isinstance(tokenizer.chat_template, str) or not tokenizer.chat_template:
         raise ValueError(
-            "公式の会話テンプレートがありません。--chat-template で対応するファイルを指定してください"
+            "公式の会話テンプレートがありません。"
+            "--chat-template で対応するファイルを指定してください"
         )
     generation = json.loads((checkpoint / "generation_config.json").read_text())
     stops = generation["eos_token_id"]
     stops = stops if isinstance(stops, list) else [stops]
     texts = {
-        "english-list": "Write a numbered list of twenty practical tips for learning a new language. Give one short sentence for each tip.",
-        "japanese-list": "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。それぞれ一文で説明してください。",
+        "english-list": (
+            "Write a numbered list of twenty practical tips for learning a new language. "
+            "Give one short sentence for each tip."
+        ),
+        "japanese-list": (
+            "プログラミングを学ぶ人に向けたアドバイスを20個、番号付きで挙げてください。"
+            "それぞれ一文で説明してください。"
+        ),
     }
     cases = []
     for name, prompt in texts.items():

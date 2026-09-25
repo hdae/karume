@@ -46,6 +46,10 @@ jobs:
       - name: Publish dry-run
         # 認証不要（denoland/deno#22679 修正済み）。3 パッケージの公開グラフを検証する。
         run: deno publish --dry-run
+      - name: Lockfile is up to date
+        # 上の step が deno.lock を書き換えていたら、コミットされた lock が陳腐化している。
+        # `deno task --frozen` は子の `deno check` へ伝わらないので、書き換えの有無を差分で見る。
+        run: git diff --exit-code deno.lock
 
   exporter-core:
     # PyPI `karume`（汎用 exporter core）の門番。torch は pytorch-cpu index の CPU wheel なので
@@ -123,11 +127,20 @@ jobs:
         run: uv run --locked ruff check
       - name: Format
         run: uv run --locked ruff format --check
-      # tools/llm-baseline は workspace 外の台本群で自前の ruff 設定を持たないので、recipe と同じ
-      # 設定で縛る。--config を明示するのは、祖先に設定が無いファイルへの ruff の設定探索に頼らない
-      # ため。pytest は載せない: テストが transformers / accelerate を importorskip 無しで読み、
-      # 既定 sync では入らない。
-      - name: Lint (llm-baseline)
-        run: uv run --locked ruff check --config pyproject.toml ../llm-baseline
-      - name: Format (llm-baseline)
-        run: uv run --locked ruff format --check --config pyproject.toml ../llm-baseline
+      # tools/llm-baseline と workspace 外の単発台本（llm-speed / opbench / fusion-hints の torch 側・
+      # examples の fixture 生成）は自前の ruff 設定を持たないので、recipe と同じ設定で縛る。
+      # --config を明示するのは、祖先に設定が無いファイルへの ruff の設定探索に頼らないため。
+      # llm-baseline の pytest は載せない: テストが transformers / accelerate を importorskip 無しで
+      # 読み、既定 sync では入らない（手元で回す手順は tools/llm-baseline/README.md）。
+      - name: Lint (workspace-external scripts)
+        run: >-
+          uv run --locked ruff check --config pyproject.toml ../llm-baseline
+          ../llm-speed/prepare.py ../llm-speed/torch_bench.py ../llm-speed/test_timing.py
+          ../opbench/torch_bench.py ../fusion-hints/inductor_probe.py
+          ../../examples/shared/emit-llm-fixtures.py
+      - name: Format (workspace-external scripts)
+        run: >-
+          uv run --locked ruff format --check --config pyproject.toml ../llm-baseline
+          ../llm-speed/prepare.py ../llm-speed/torch_bench.py ../llm-speed/test_timing.py
+          ../opbench/torch_bench.py ../fusion-hints/inductor_probe.py
+          ../../examples/shared/emit-llm-fixtures.py
