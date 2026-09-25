@@ -222,6 +222,20 @@ later の「decode 速度の残り」。
   [研究記録](research/2026-09-24-prerelease-gpu-measurements.md) の 2）: piece を part へ束ねると E2B でフェンスが
   37 → 6 本になり、PLE 構築は約 −0.2 s・代償は構築時の VRAM +192 MiB。**2026-09-24 裁定 = 当面束ねない**
   （0.13.0 のリリース前レビューで再確認・実装の規模は研究記録の 2 の結論）。
+  代替案（2026-09-25 起票・未着手）: 束ねずにフェンスを **1 本先行**させる（次の piece の供給を前のフェンスの完了前に始める）。
+  staging は同時に 2 part ぶん生きるので、先行を許すのは合計バイトが上限以下のときに限る（ADR 0108 決定 9 の
+  「本数と合計バイトの両方で制限」）。重みの part 256 MiB では +256 MiB になり束ねる案の +192 MiB より大きいので、
+  対象は PLE 席（32 MiB の piece）だけ。kill: PLE 構築 −0.3 s 未満（候補の採否は [perf-ledger](perf-ledger.md) の L-16 と併せて見る）。
+- **hub ≤ 0.4 の `karume/1` 名前空間の回収グルーの撤去条件（起票 2026-09-25・0.13.0 は据え置き）**:
+  `packages/hub/src/cache.ts` の `purgeLegacyCaches` は `loadManifest` の入口で取得元に関わらず毎回走り、
+  `clearHubCache` も旧名前空間を回収する。撤去条件は ADR 0080 にも backlog にも無い。決めること: ① 撤去の時点
+  （旧版からの移行期間をどこで閉じるか）② 列挙の失敗を op `"delete"` で通知している点を `"open"` に寄せるか。
+- **`gemma4_qat` の fixture テスト 25 本が CI では丸ごと SKIP（起票 2026-09-25）**: `tools/export-recipes/gemma4_qat/tests/`
+  の `series_fixture.py` と `test_fixed.py` が module 直下の `pytest.importorskip("transformers")` を持ち、`transformers` は
+  `gemma4-qat` group にしか無いので、既定の sync で回る CI の recipes ジョブでは test_audit 1・test_fixed 12・
+  test_plan 12 の 25 本が収集ごと SKIP される。決めること: a) `transformers` をスタブ化し上流突合を 1〜2 本残す
+  （`checkpoint.py` の `isinstance(QuantizedEmbedding)` に注意）か、b) CI に `--group gemma4-qat` を足すか
+  （CI 時間と上流突合の強さの交換）。
 - **container-v1 §6.2 の codec 台帳と実装のずれ（起票 2026-09-24）**: 仕様の台帳エントリは `decodeCpu` /
   `executableOps` / `wgsl` を持つが、実装の `CodecEntry`（`packages/runtime/src/format/container/codecs.ts`）は
   `layout` / `packing` / `scale` / `grouping` / `zeroPoint` だけで、圧縮のまま常駐できる op の判定は今も別々の
@@ -243,7 +257,8 @@ later の「decode 速度の残り」。
 
 - **decode 速度の残り（2026-09-20 に now から移動）**: H-27 段 ②（先行投入・ADR 0066 の opt-in 例外・greedy 限定・期待 Deno −5 / Chrome −2.2 ms）、
   小物 K-48 段 1（rms_norm→SRQ 融合 70 本・0.19 ms）/ K-49（slice 別名化）/ K-50（k+v 連結 GEMV）、K-46（int8 KV — メモリ項目）。
-  復活条件: decode 速度を再び主題にするとき（H-27 の前提 = H-28 の GPU 常駐席は済・prefill のアリーナ経路のプール化を先に）。
+  復活条件: decode 速度を再び主題にするとき（H-27 の前提 = H-28 の GPU 常駐席は済・research 2026-09-19 §15.2 の TTFT 帰属の再測定を先に
+  — 「prefill のアリーナ経路」はヒット run には無いと 2026-09-25 の追記で訂正済み）。
   候補の採否と kill 基準は [perf-ledger](perf-ledger.md)、帰属は [research 2026-09-19](research/2026-09-19-qat-speed-recon.md)。
 
 - **層内の大融合を塞ぐ 3 契約の裁定（起票 2026-09-19）**: WebML との dispatch 差（1,132 → 約 316 本）のうち約 480 本は
@@ -370,7 +385,8 @@ later の「decode 速度の残り」。
 - **karume-sbv2-fn の HF 公開**（2026-08-20 保留裁定 — 波 K で一時「出典表記つき公開」へ
   振れたが撤回）。upstream の書面条件 = Booth 頒布ページの「商用可・クレジット不要・マージ
   自由」のみで**再配布は未言及**・配布者の素性も未確認。復活 = 配布者への再配布可否の確認、
-  またはユーザーの再裁定。焼き方（別 pipeline `--pipeline sbv2-fn` — FN 系の帰属を持つ）は維持。ローカルミラーは常設
+  またはユーザーの再裁定。焼き方（別 pipeline `--pipeline sbv2-fn` — FN 系の帰属を持つ）は維持。
+  帰属は最小記述（条件の引用・頒布者の詳細は書かない — 2026-08-20 裁定・`a7ed68e0`）。ローカルミラーは常設
   しない（2026-08-30 裁定 — e2e の門はライセンス記述が正の jvnv へ付け替え・fn ミラー削除。
   再生成 = assets-layout の dist コマンドで `inputs/sbv2/FN*` から）
 - **SBV2 `adjust_word2ph` の移植**（2026-08-21 不採用裁定 — ADR 0072 決定 8）。音素数が変わる

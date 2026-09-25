@@ -553,6 +553,24 @@ prefill（M = 64・chunk 形）は run ごとに一時バッファをアリー�
 （既定は host のまま）。対策候補は prefill の一時バッファを run 間で使い回す（アリーナのプール化 / 予算内の backing）で、
 先行投入（H-27）や GPU 常駐を既定にする段で改めて扱う。
 
+**2026-09-25 追記（帰属の訂正 — 上の本文は 2026-09-20 時点の読みとして残す）**: 上の「prefill は run ごとに一時バッファを
+アリーナで確保・破棄する経路」はコードと合わない。同じ形の 2 本目以降の prefill はヒット run で、中間バッファは
+`#activateBacking`（`packages/runtime/src/runtime/executor.ts`）が引く slot backing に常駐する。アリーナが run 寿命で
+領域を確保するのはミス run（その形の 1 本目）だけで、ヒット run でアリーナが確保するのは readback の staging だけ
+（`tests/gpu_plan_backing_test.ts`「backed run の確保は readback staging の 1 本だけ」が固定している）。backing は
+この計測（2026-09-20）より前（2026-08-18）から在り、既定の backing 予算 256 MiB と PLE 予算の下では計測条件で退役も起きない。
+「decode は backing 常駐で確保を伴わない」も厳密には違う — decode も token ごとに MAP_READ の staging を 1 本作って捨てる
+（greedy は `gpu/context.ts`・sampler 経路は executor の readback）。
+世代ごとに確保・破棄が実際に起きている実体は 2 つ: ① `pipeline.sequence()` ごとの GenerationContext（KV スロット・
+capacity 4096 で full 層だけでも約 50 MB）— 計測器 `tools/llm-speed/browser/karume.ts` は世代ごとに sequence を作って捨てる、
+② その context が最初の run で焼き直す state の bind group（診断 `stateBacking.rebindCount`）。
+機序の候補（全て推測・未計測）: (a) 世代ごとの KV の新規確保と破棄が Dawn 側の解放遅延と VRAM 逼迫を招く、
+(b) 新しいバッファの初回使用時の zero-init（pass 境界の timestamp の外に出る GPU 仕事）、(c) staging の MAP_READ 確保が逼迫下で遅くなる。
+どれも「アリーナのプール化」では消えないので、上の対策候補は取り下げる。
+次の測定: 同じ 12 世代連続のジョブで prefill run ごとに `diagnostics().lastRun.allocCount / allocatedBytes` と
+`stateBacking.rebindCount` を記録し、sequence を世代間で使い回すアームを足して、伸びが context の作り直しに付くのか
+staging に付くのかを分ける（backlog later「decode 速度の残り」の H-27 先行条件）。H-28 の席の採否（既定は host のまま）は変わらない。
+
 ## 16. K-45 段 1a — packed int8 活性（opt-in 席 `packedStaticQuantize`）の A/B（2026-09-19・RTX）
 
 実装は `57416eb`（ADR 0105・全形の u32 一致 540 件・64 token id 列一致）と追補（SRQ カーネルの再設計 + 形ごとの採否フラグ・ADR 0105 追記 1）。
