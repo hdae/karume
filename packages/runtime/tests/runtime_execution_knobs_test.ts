@@ -1,5 +1,5 @@
 // 実行形ノブの受理集合検査（{@link assertExecutionKnobs}）の門 — GPU に触れない純関数なので、
-// アダプタ無し環境でも回帰を撃てる位置に置く。`createSession` 経由の GPU テストは「実構築でも
+// アダプタ無し環境でも回帰を撃てる位置に置く。`createSessionFromContainer` 経由の GPU テストは「実構築でも
 // 拒否される」1 本だけを残し、値の総当たりはここが正本。
 
 import { assertEquals, assertThrows } from "@std/assert";

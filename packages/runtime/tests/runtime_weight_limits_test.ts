@@ -1,8 +1,8 @@
 // 重み・state の確保寸法を device の絶対上限と突き合わせる門（確保の**前**に落とす）。
 //
-// 動機は「確保失敗の検出は shard 単位 errorScope に全面依存」（ADR 0070 決定 4）の弱点 —
+// 動機は「確保失敗の検出は block 単位 errorScope に全面依存」（ADR 0070 決定 4）の弱点 —
 // errorScope の網は実装の報告品質に依存し（out-of-memory scope が黙る device が実在する —
-// docs/known-issues.md の Metal 節）、捕まえても診断は shard 粒度で、数 GiB 転送した後にしか
+// docs/known-issues.md の Metal 節）、捕まえても診断は block 粒度で、数 GiB 転送した後にしか
 // 出ない。無効バッファへの writeBuffer は警告も出さない no-op なので、網が抜けた先は
 // 「重みが空のまま走り出す」になる。
 //
@@ -290,7 +290,7 @@ const f16LinearModel = (): BoundContainer => {
   return memoryModel(graph, supplied);
 };
 
-Deno.test("createSession は上限超過の重みを createBuffer より前に落とす", async () => {
+Deno.test("createSessionFromContainer は上限超過の重みを createBuffer より前に落とす", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(32, 64));
   const error = await assertRejects(
