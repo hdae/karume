@@ -5,7 +5,8 @@
 **どの initializer をどの格納で焼くか**だけで、それが {@link stored_model} の 1 本道に閉じる
 （ここが枝分かれすると export は緑のまま実行だけ落ちる）。
 
-格納の分岐は **f16（ADR 0018）と i8（ADR 0019）と i4（ADR 0069）**。
+格納の分岐は **f16（ADR 0018）と i8（ADR 0019）と i4（ADR 0069）**、それに固定 packed の
+経路（{@link _plan_fixed_weights} — i2 はこの経路だけ・ADR 0097）。
 
 ## 適格判定（ADR 0018 / 0019 — f16 と i8 で**同じ規則**・i4 だけ狭い）
 
@@ -391,10 +392,10 @@ class _StoragePlan:
 
     #: IR 値名 → 新しい initializer 宣言（全バイトを書き終えてから commit する）。
     declarations: dict[str, IrInitializer]
-    #: 追加で格納する companion scale（safetensors キー → テンソル）。scale は小さいので
+    #: 追加で格納する companion scale（容器のテンソルキー → テンソル）。scale は小さいので
     #: 計画段で実体化してよい（重み本体と違って集合で持ってもピークに出ない）。
     scales: dict[str, torch.Tensor]
-    #: safetensors キー → 書き出し直前に掛ける変換。
+    #: 容器のテンソルキー → 書き出し直前に掛ける変換。
     conversions: dict[str, _Conversion]
 
 
@@ -621,9 +622,9 @@ def _plan_weight_dtype(
         # MUST: initializer 名 ↔ テンソルキーは 1:1。潰れると適格検査は後勝ちで残った 1 名しか
         # 見ないのに、計画ループは適格な**全ての**名前を回す — 実体は key 単位で packed に
         # 変換され、適格外だった名前の宣言は f32 のまま残るので、形も型も合ったまま値だけが
-        # 壊れる。現行の convert 経路（torch.export の placeholder → FQN は単射・`_emit_const`
-        # は digest 一意）では到達しないが、その 1:1 は上流の実装挙動 1 点に乗っているだけで
-        # どこにも書かれていないので、ここを唯一の門にする。
+        # 壊れる。現行の convert 経路（torch.export の placeholder → FQN は単射・
+        # `Converter._add_const` は digest 一意）では到達しないが、その 1:1 は上流の実装挙動
+        # 1 点に乗っているだけでどこにも書かれていないので、ここを唯一の門にする。
         names_by_key: dict[str, list[str]] = {}
         for name in sorted(bakeable):
             names_by_key.setdefault(graph.initializers[name].tensor, []).append(name)
@@ -791,7 +792,10 @@ def storage_breakdown(graph: IrGraph) -> StorageBreakdown:
     """
     compressed_tensors = compressed_bytes = plain_tensors = plain_bytes = scale_bytes = 0
     axes = weight_channel_axes(graph)
-    for name, initializer in graph.initializers.items():
+    # 数えるのは**この容器に書くバイト**だけ — 共有宣言は貸し手のバイトを借りるので除く
+    # （除外の規則は {@link bakeable_initializers} の 1 箇所）。
+    for name in sorted(bakeable_initializers(graph)):
+        initializer = graph.initializers[name]
         shape = [int(dim) for dim in graph.values[name].shape]
         count = 1
         for dim in shape:

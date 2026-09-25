@@ -266,8 +266,8 @@ SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
 #: 分解させるとカーネル粒度と 1 対 1 でなくなるものだけを外す:
 #:
 #: - `linear` — addmm + view に散る（実測 16 本 / 2 層）。融合カーネル 1 本が正。
-#: - `layer_norm` — native_layer_norm（**3 出力**）+ getitem になり、IR v1 の単一出力前提と
-#:   衝突する。ここは保存が事実上必須。
+#: - `layer_norm` — native_layer_norm（**3 出力**）+ getitem になり、多出力 aten の getitem
+#:   結線は sampling の実需まで先送り（ADR 0068 追記）なので受けられない。ここは保存が事実上必須。
 #: - `softmax` — `aten._softmax` になるだけで得が無い。safe-softmax の 1 カーネルを保つ。
 #: - `gelu` — erf / tanh 近似の合成に散る（M0 から保存）。
 #: - `conv1d` / `conv2d` / `conv_transpose1d` — 汎用 `aten.convolution` 形になる。
@@ -853,8 +853,9 @@ class Converter:
         self.graph.symbols = list(self.sym_names.values())
         # MUST: 出力名は**集合**（docs/ir-v2.md の outputs 欄・受理側 `verify.parse_ir_graph` が
         # 重複を拒否する）。重複は ①同じ値を 2 度返す forward ②構造同一の 2 出力を `_emit` の
-        # CSE が 1 本へ畳んだ形、の 2 経路で出る。検証を挟まない `emit.write_model` の直呼びは
-        # 受理側の門を通らないので、「書けたが読めない」配布形が残る — 組み立ての出口で落とす。
+        # CSE が 1 本へ畳んだ形、の 2 経路で出る。書き出し（`publish.publish_container`）は
+        # `parse_ir_graph` を通らないので、「書けたが読めない」配布形が残る — 組み立ての出口で
+        # 落とす。
         duplicated = sorted(
             {name for name in self.graph.outputs if self.graph.outputs.count(name) > 1}
         )

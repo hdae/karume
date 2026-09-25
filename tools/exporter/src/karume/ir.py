@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 
 IR_FORMAT = "karume-ir"
 IR_VERSION = 1
-#: グラフ JSON を載せる safetensors `__metadata__` のキー。
+#: 旧配布形（safetensors 方言）でグラフ JSON を載せていた `__metadata__` のキー（読むのは
+#: 移行 CLI の `karume.legacy` / `karume.migrate` だけ）。
 IR_METADATA_KEY = "karume_ir"
 
 #: 非負整数、または `coeff·sym+offset` の正準表記（dims.py）。
@@ -21,16 +22,16 @@ IrDim = int | str
 
 #: group 量子化格納（`i4`）の group 長の下限（受理集合は **2 冪かつこれ以上** — ADR 0069
 #: 決定 2・ORT と同制約）。ライタ（emit）と検証（verify）が同じ受理集合を見るための 1 本
-#: （TS 側の正本は `packages/runtime/src/format/ir.ts`）。
+#: （TS 側の正本は `packages/runtime/src/format/container/codecs.ts` の `MIN_GROUP_SIZE`）。
 MIN_GROUP_SIZE = 16
 
 
 @dataclass(frozen=True)
 class IrStorage:
-    """格納 dtype。実行経路があるのは f32 / f16 / i8 / i4 と、記号依存定数の i32。"""
+    """格納 dtype。実行経路があるのは f32 / f16 / i8 / i4 / i2 と、記号依存定数の i32。"""
 
     dtype: str
-    #: 量子化格納の scale テンソルの safetensors キー（storage.dtype == "i8" / "i4" のみ）。
+    #: 量子化格納の scale テンソルの容器のテンソルキー（storage.dtype == "i8" / "i4" / "i2" のみ）。
     scale: str | None = None
     #: group 量子化の group 長（storage.dtype == "i4" では必須 — ADR 0069 決定 2）。
     group_size: int | None = None
@@ -64,12 +65,12 @@ class IrInitializer:
 
     MUST: `tensor`（自前のバイト）と `shared`（貸し手のバイトを借りる）は**排他でどちらか
     1 つ**。両方 / どちらも無い形は verify が落とす（組み立て層は検査を持たない —
-    モジュール docstring）。共有側は shard に 1 バイトも書かないので `storage.scale` を
+    モジュール docstring）。共有側は容器に 1 バイトも書かないので `storage.scale` を
     持たない（scale は貸し手の常駐重みが持つ）。
     """
 
     storage: IrStorage
-    #: safetensors のテンソルキー（自前バイトのとき）。
+    #: 容器のテンソルキー（自前バイトのとき）。
     tensor: str | None = None
     #: 貸し手コンテナのテンソルキー参照（共有のとき）。
     shared: IrShared | None = None
