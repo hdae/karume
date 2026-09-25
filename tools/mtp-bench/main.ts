@@ -263,10 +263,6 @@ const note = (text: string): void => {
   Deno.stderr.writeSync(encoder.encode(text));
 };
 
-/** cwd 基準のディレクトリ URL（末尾 `/` を必ず付ける — `new URL` の相対解決の前提）。 */
-const directoryUrl = (path: string): URL =>
-  new URL(path.endsWith("/") ? path : `${path}/`, `file://${Deno.cwd()}/`);
-
 /** 与えられた PLE 常駐上限（省略時は manifest の索引から全量常駐を導く — {@link resolveAsset}）。 */
 const maxResidentPleBytesArg = integer("max-resident-ple-bytes");
 
@@ -332,40 +328,45 @@ const sha256Hex = async (text: string): Promise<string> => {
  * 常駐が薄いと 1 ターンの間に block の読み直しが入り、その壁が生成相に混ざる。
  *
  * 読むのは part 0（descriptor）と索引の block だけで、重みの part には触らない。
+ *
+ * MUST: `source` は CLI の path を**素のまま**渡す（`fromPretrained` と同じ綴り）。URL の
+ * `pathname` は percent encode 済みで、空白や非 ASCII を含む path では別のディレクトリを指す。
  */
-const allResidentPleBytes = async (mirror: URL): Promise<number> => {
-  const loaded = await loadManifest(denoDirectory(mirror.pathname));
+const allResidentPleBytes = async (source: string): Promise<number> => {
+  const loaded = await loadManifest(denoDirectory(source));
   const container = resolveSelection(loaded.manifest, { weights: ["model"] }).containers["model"];
   if (container === undefined) {
-    throw new Error(`${mirror.href}: manifest に部品 'model' の容器が無い`);
+    throw new Error(`${source}: manifest に部品 'model' の容器が無い`);
   }
   const opened = await openContainer(
     { kind: "source", source: openContainerSource(loaded, container) },
     container.descriptor,
   );
   return gemma4PleTotalBytes(
-    await readGemma4PleIndex(`mtp-bench ${mirror.href}`, gemma4PleAssetSource(opened)),
+    await readGemma4PleIndex(`mtp-bench ${source}`, gemma4PleAssetSource(opened)),
   );
 };
 
 /**
- * 配布形の manifest を **1 回だけ**読み、同定と PLE 予算を同じ本文から出す。
+ * 配布形の manifest を読み、同定と PLE 予算を出す。
  *
- * 2 度読むと、同定に使った本文と予算を出した本文が別物になり得る（走行中に焼き直せば実際にそう
- * なる）。`--max-resident-ple-bytes` を与えた走行では索引を読まない — 予算が要らないのに索引の
- * 欠けで落ちるのは、測れる走行を測れなくするだけである。
+ * NOTE: PLE 予算を導く走行では manifest を **2 回**読む（同定はこの本文・予算は
+ * `loadManifest` の読み）。hub に「読んだ本文から `LoadedManifest` を組む」口が無いためで、
+ * 2 回の読みの間に焼き直すと、同定に使った本文と予算を出した本文が別物になり得る（計測中に
+ * ミラーを焼き直さないこと）。`--max-resident-ple-bytes` を与えた走行では索引を読まない —
+ * 予算が要らないのに索引の欠けで落ちるのは、測れる走行を測れなくするだけである。
  *
  * MUST: 呼ぶのは `main()` の中（トップレベルで読むと、壊れた `--source` の例外が `runMain` の
  * `printError` を通らず外皮しか画面に残らない）。
  */
 const resolveAsset = async (
-  mirror: URL,
+  source: string,
 ): Promise<{ asset: AssetIdentity; maxResidentPleBytes: number }> => {
-  const text = Deno.readTextFileSync(new URL(MANIFEST_FILENAME, mirror));
+  const text = Deno.readTextFileSync(`${source}/${MANIFEST_FILENAME}`);
   const manifest = parseManifest(text);
   const entry = manifest.models[manifest.defaultModel];
   if (entry === undefined) {
-    throw new Error(`${mirror.href}: manifest の defaultModel '${manifest.defaultModel}' が無い`);
+    throw new Error(`${source}: manifest の defaultModel '${manifest.defaultModel}' が無い`);
   }
   return {
     asset: {
@@ -373,7 +374,7 @@ const resolveAsset = async (
       defaultQuant: entry.defaultQuant,
       manifestSha256: await sha256Hex(text),
     },
-    maxResidentPleBytes: maxResidentPleBytesArg ?? await allResidentPleBytes(mirror),
+    maxResidentPleBytes: maxResidentPleBytesArg ?? await allResidentPleBytes(source),
   };
 };
 
@@ -533,7 +534,7 @@ const main = async (): Promise<void> => {
     recordRunTiming(timing, { mode, kind: phase.kind, measured }, stats);
   };
 
-  const { asset, maxResidentPleBytes } = await resolveAsset(directoryUrl(source));
+  const { asset, maxResidentPleBytes } = await resolveAsset(source);
 
   const started = performance.now();
   note(`[mtp-bench] ${source} を読み込む（drafter k=${kArg ?? "配布形の段数"}）\n`);
