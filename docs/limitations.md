@@ -870,6 +870,16 @@ DiT を解放した**後**にしかロードできない（4 本同時常駐は 
 `stage` イベント（段の Session 構築前 / 解放後）と `vae-tile` イベント（タイル 1 枚ごと）で
 GB 級ロードとタイル decode の進捗は観測できる。
 
+## anima: 1920px 超〜2048px の解像度は rope のモデル宣言外の位置を使う（受理する・品質は未実測）
+
+各辺の受理上限 2048px は rope の軸別素表の行数 128（= latent 256）から来ている。素表の行数を決めているのは
+t 軸の上限で、モデルが宣言する h / w 軸の範囲（`rope.max_size` = 120 トークン = 1920px）はそれより低い。
+そのため 1920px を超え 2048px までの要求は、表の行としては引けるが、モデルが学習時に宣言した範囲の**外側の位置**を使う。
+位置の値は上流と同じ式で決まるので、静的形とのビット一致は保たれる。差が出るとすれば学習分布の外の位置に由来する
+**品質だけ**で、これは実測していない。受理集合はこの理由では狭めない（2026-09-04 裁定 — 実測なしに配布形の自由度を削らない）。
+実用上は S の上限と VRAM が先に効く。経緯は [ADR 0036](decisions/0036-freeform-resolution.md) の検出限界 2、
+コード側の記録は `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE。
+
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
 export 済みグラフ（台本 `tools/export-recipes/embeddinggemma/export.py`）は `attention_mask` を
@@ -1593,6 +1603,22 @@ WebGPUのsubgroups / subgroup-size-control、WGSLのsubgroup_id、32レーンの
 Deno 2.9.6では必要機能が未提供。Chromeでの実走とM2の追試は済みだが、M2の既定採用は見送っている。
 これらはquant.sessionの保存語彙には含めない。既存のworkgroup / parallelを選び直せる。
 数値・対象形状・未検収範囲は[ADR 0100](decisions/0100-rms-subgroup-reduction.md)と[0101](decisions/0101-linear-gemv-subgroup.md)を参照する。
+
+## subgroup 変種の実走検査は自動では走らない（Chrome の /check.html と往復比較が手動の門）
+
+`rmsNormReduce: "subgroup32"` と `linearGemvReduce: "parallel-subgroup32"` の実走検査
+（`gpu_rms_norm_subgroup_test.ts` / `gpu_linear_gemv_subgroup_test.ts` の「subgroups 実走」step）は、
+必要機能が揃わない device では明示 SKIP になる。Deno 2.9.6 は `subgroups` を提供しないので、`deno task verify` と CI では
+**どの走行でも実行されない**。SKIP を赤にする門番（GPU アダプタ無しを赤にする `gpu_gate_test.ts` に当たるもの）も無い。
+自動の検査が見るのは WGSL の生成（スナップショット）と受理・拒否の分岐までで、subgroup 命令を実際に撃った数値は見ない。
+実走の門は手動で、Chrome で次の 2 つを回す（手順は `tools/llm-speed/browser/README.md`）。
+
+- GEMV: 計測ページの `/check.html` が、並列と `parallel-subgroup32` の u32 一致を検査して `PASS` / `FAIL` を出す
+  （`packages/runtime/tests/helpers/gemv-subgroup-check.ts` と同じ検査）。
+- RMS: `/check.html` の対象外。計測ページの「RMSの2経路を往復比較」（`fused → subgroup32 → subgroup32 → fused`）で
+  生成が崩れないことを見る。縮約順が変わるので生成文は変わりうる。
+
+subgroup 変種の WGSL や選択条件を変えたときは、この 2 つを回すまで実走は未検証として扱う。
 
 ## states attention の行統計/PV融合（2026-09-15）
 
