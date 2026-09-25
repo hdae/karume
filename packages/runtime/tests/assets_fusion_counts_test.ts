@@ -455,7 +455,7 @@ Deno.test({
   },
 });
 
-// 配布形も先頭shardをmanifestから引く。旧seriesとQATの両方で発行順を守る。
+// 配布形も先頭part（part 0）をmanifestから引く。旧seriesとQATの両方で発行順を守る。
 for (const family of ["gemma4", "gemma4-qat"]) {
   const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
   const manifestUrl = new URL("karume.json", root);
@@ -468,8 +468,9 @@ for (const family of ["gemma4", "gemma4-qat"]) {
     ignore: !available,
     fn: async () => {
       const manifest: ContainerManifest = JSON.parse(await Deno.readTextFile(manifestUrl));
-      const [weights] = Object.values(manifest.models.e2b.weights.model);
-      const head = weights.container.parts[0];
+      // MUST: quant は名指しする（下の SRQ の期待値は i2 / i4 の格納と group 長に依存する —
+      // manifest の並びの先頭を採ると、quant を足した日に並び順で期待値が割れる）。
+      const head = containerPart0(manifest, "e2b", "model", "i4");
       if (head.repo !== undefined) {
         throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
       }
