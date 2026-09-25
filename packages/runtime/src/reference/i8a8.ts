@@ -224,6 +224,11 @@ type LinearW4a8Input = {
  */
 export const referenceLinearW4a8 = (input: LinearW4a8Input): Float32Array<ArrayBuffer> => {
   const { x, weight, weightScale, bias, m, n, k, groupSize } = input;
+  // MUST: group 長そのものの値域を先に見る。非整数（k=5, g=2.5）は groups が整数でも活性と重みの
+  // 添字が非整数になって NaN を、負（k=4, g=-2）は group ループが 0 回で bias を黙って返す。
+  if (!Number.isSafeInteger(groupSize) || groupSize < 1) {
+    throw new I8a8Error(`w4a8 参照: group 長 ${groupSize} が正の整数でない`);
+  }
   const groups = k / groupSize;
   // MUST: 突合の前に落とす。端数のある `k` は group ループが `[m,k]` 平坦の**次の行**の活性を
   // 足し込み（col=0）、非整数の scale 添字で NaN を返す（col≥1）— どちらも「オラクルが黙って

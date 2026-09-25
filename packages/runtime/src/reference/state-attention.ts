@@ -60,9 +60,26 @@ export type StateAttentionRefInput = StateAttentionRefShape & {
   readonly scale: number;
 };
 
+/**
+ * 論理長 `past` と窓 `window` の値域（どちらも非負の整数）。
+ *
+ * MUST: 容量との比較より先に見る。負の `window` は `stateSliding` が false なので黙って full
+ * 扱いになり、負の `past` は live 列を 0 本へ潰して厳密 0 を返す — どちらも「オラクルが黙って
+ * 別の数を返す」形で、突合の赤ではなく誤った期待値になる。
+ */
+const assertPastAndWindow = (where: string, past: number, window: number): void => {
+  if (!Number.isSafeInteger(past) || past < 0) {
+    throw new ReferenceOpError(`${where}: pastLength ${past} が非負の整数でない`);
+  }
+  if (!Number.isSafeInteger(window) || window < 0) {
+    throw new ReferenceOpError(`${where}: window ${window} が非負の整数でない（0 = full）`);
+  }
+};
+
 /** 形と論理長の整合（取り違えを突合の前で落とす）。 */
 const assertShape = (shape: StateAttentionRefShape): void => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = shape;
+  assertPastAndWindow("states 形", past, window);
   if (batch < 1 || heads < 1 || kvHeads < 1 || chunkRows < 1 || depth < 1 || capacity < 1) {
     throw new ReferenceOpError(
       `states 形の形が正でない（B=${batch} H=${heads} Hkv=${kvHeads} M=${chunkRows} D=${depth} C=${capacity}）`,
@@ -213,6 +230,7 @@ export type StateAppendRefInput = {
  */
 export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   const { kvPlanes, chunkRows, depth, capacity, window, past, query } = input;
+  assertPastAndWindow("state_append", past, window);
   if (kvPlanes < 1 || chunkRows < 1 || depth < 1 || capacity < 1) {
     throw new ReferenceOpError(
       `state_append の形が正でない（B·Hkv=${kvPlanes} M=${chunkRows} D=${depth} C=${capacity}）`,
@@ -276,6 +294,7 @@ export const referenceStateAttentionReadonly = (
   input: StateAttentionReadonlyRefInput,
 ): RefTensor => {
   const { batch, heads, kvHeads, depth, capacity, window, past } = input;
+  assertPastAndWindow("readonly", past, window);
   if (batch < 1 || heads < 1 || kvHeads < 1 || depth < 1 || capacity < 1) {
     throw new ReferenceOpError(
       `readonly の形が正でない（B=${batch} H=${heads} Hkv=${kvHeads} D=${depth} C=${capacity}）`,

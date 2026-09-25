@@ -209,6 +209,41 @@ Deno.test("w4a8 参照: k が group 長で割り切れない入力は計算に�
   );
 });
 
+Deno.test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算に入る前に落ちる", () => {
+  const input = {
+    weightScale: new Array(4).fill(1),
+    bias: [0, 0],
+    m: 1,
+    n: 2,
+  };
+  // k=5 / g=2.5 は groups = 2 で整除の門を通るが、活性と重みの添字が非整数になり NaN を返す
+  assertThrows(
+    () =>
+      referenceLinearW4a8({
+        ...input,
+        x: new Array(5).fill(1),
+        weight: new Array(10).fill(1),
+        k: 5,
+        groupSize: 2.5,
+      }),
+    I8a8Error,
+    "正の整数",
+  );
+  // k=4 / g=-2 は groups = -2 で group ループが 0 回になり、bias をそのまま返す
+  assertThrows(
+    () =>
+      referenceLinearW4a8({
+        ...input,
+        x: new Array(4).fill(1),
+        weight: new Array(8).fill(1),
+        k: 4,
+        groupSize: -2,
+      }),
+    I8a8Error,
+    "正の整数",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // ⑥ referenceAttentionQkI8a8 — 半スケールが q / k の両側へ掛かる
 // ---------------------------------------------------------------------------
