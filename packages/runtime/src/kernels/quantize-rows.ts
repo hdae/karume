@@ -1,5 +1,5 @@
 /**
- * 活性の **per-token symmetric int8 量子化**（w8a8 実行経路の前段 — ADR 0025 予定 /
+ * 活性の **per-token symmetric int8 量子化**（w8a8 実行経路の前段 — ADR 0025 /
  * 設計は docs/research/2026-08-03-dp4a-w8a8-design.md §4.2）。
  *
  * `[rows, dim]` の連続レイアウトを行（= token）ごとに量子化して 2 本の出力を書く:
