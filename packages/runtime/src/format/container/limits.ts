@@ -60,7 +60,7 @@ export const MAX_DESCRIPTOR_BYTES = 32 * MIB;
 export const MAX_JSON_DEPTH = 64;
 
 /**
- * `fromContainer(bytes)`（単一形の全量 ArrayBuffer の口）だけに掛かる上限（§10 —
+ * `openContainer({ kind: "bytes" })`（単一形の全量 ArrayBuffer の口）だけに掛かる上限（§10 —
  * Chromium の単一 ArrayBuffer 上限。実測は `packages/hub/src/fetch.ts` に記録）。
  */
 export const MAX_SINGLE_CONTAINER_BYTES = 2_145_386_496;
