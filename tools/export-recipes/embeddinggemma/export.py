@@ -1,4 +1,4 @@
-"""実重み EmbeddingGemma-300m（文埋め込み）を IR v1 コンテナ + golden io へ書き出す台本。
+"""実重み EmbeddingGemma-300m（文埋め込み）を IR v2 の容器 + golden io へ書き出す台本。
 
 `deberta/export.py` と同じ役割（実重み・実トークン列での数値一致）を、SentenceTransformer 形の
 **単一ベクトル出力**モデルで受け持つ。生成物は `outputs/series/` 配下で、リポジトリ直下の
@@ -30,6 +30,8 @@ attention）。台本ローカルの指定で、既定の分解表には入れ�
 渡す bool の帯マスクは `normalize._additive_attn_mask` が加算型 f32 `[1,1,T,T]` へ落とし、
 定数畳み込みで Tmax 定数 + `sym_prefix_slice` になる。分解経路へ落ちる道は**残さない** —
 保存が通らなければ export ごと落ちるのが正しい（黙って別の数値経路に切り替わらない）。
+出た IR の形（attention の本数・帯マスクの供給元・入力 2 本）は {@link assert_ir_form} が
+公開前に検める。
 
 MUST: 語彙外へ落ちる書き方を避ける。`torch.mean(dim=)` / `keepdim=True` / `x**2` /
 `linalg_vector_norm` はいずれも IR 語彙に無い op（`mean.dim` / keepdim 付き reduce / `pow` /
@@ -42,8 +44,8 @@ NOTE: `pool_mask` は全 1 で採る（マスク無しで呼ぶ以上、0 を混
 
 ## 出力レイアウト
 
-    outputs/series/embeddinggemma-300m/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/embeddinggemma-300m/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/embeddinggemma-300m/model-NNNNN-of-NNNNN.krm 重み・定数 + 2 文書の記述
+    outputs/series/embeddinggemma-300m/io.<case>.safetensors    入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グラフ入力名>` / `output.<位置>`）。
 
@@ -53,6 +55,10 @@ io のテンソルキー規約は tiny golden / DeBERTa と同じ（`input.<グ�
 **静的次元**として batch を固定し、`query-en` を N 行に複製した単一 golden ケース
 （`io.batchN.safetensors`）だけを書く — linear の GPU 時間が skinny-M（M=T）に律速されて
 いる仮説を、M = batch×T を大きくして白黒つけるための資産（`--out` で置き場を明示する）。
+
+NOTE: N>1 は現状 core の変換段（`karume/convert.py`）で fail loudly する（`docs/known-issues.md`
+の「EmbeddingGemma の batch>1 export が変換段で通らない」）。フラグは変換側の一般化の日のために
+維持している。
 """
 
 from __future__ import annotations
@@ -73,8 +79,10 @@ from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.ir import IrGraph
+from karume.ops import ATTENTION_OP, SYM_PREFIX_SLICE_OP
 from karume.pipeline import export_to_file
 from karume.rope import assert_rope_lifted
+from karume.shapes import declared_shape
 
 #: 公式重みの置き場（`hf download google/embeddinggemma-300m` の展開先）。
 DEFAULT_MODEL_DIR = INPUTS_ROOT / "embeddinggemma" / "google-300m"
@@ -107,10 +115,28 @@ OUTPUT_PREFIX = "output."
 DENSE_DIRS = ("2_Dense", "3_Dense")
 #: Dense の safetensors が持つ唯一のテンソルキー（bias 無しの `nn.Linear` 1 本）。
 DENSE_WEIGHT_KEY = "linear.weight"
+#: Dense の活性化（sentence-transformers の綴り）。ラッパは Dense を素の linear として畳む。
+DENSE_ACTIVATION = "torch.nn.modules.linear.Identity"
+#: `modules.json` の type 列 — ラッパ（{@link EmbeddingWrapper}）が 1 本に畳む 5 段そのもの。
+SENTENCE_TRANSFORMER_MODULES = (
+    "sentence_transformers.models.Transformer",
+    "sentence_transformers.models.Pooling",
+    "sentence_transformers.models.Dense",
+    "sentence_transformers.models.Dense",
+    "sentence_transformers.models.Normalize",
+)
+#: Pooling の設定の置き場（modules.json の 1_Pooling）。
+POOLING_DIR = "1_Pooling"
+#: Pooling 方式の欄で true であってよい唯一のもの（ラッパは masked mean を決め打ちする）。
+POOLING_MODE = "pooling_mode_mean_tokens"
 
 #: 記号次元 T の上限。sliding_window（512）と同値にする — 畳み込みの評価点そのものなので
 #: 上げると帯マスク定数が Tmax² で膨らむ（ADR 0010）。
 SYM_MAX = 512
+
+#: グラフ入力の名前（ラッパの forward 引数名）。{@link assert_ir_form} が「この 2 本だけ」を
+#: 見る — 帯マスクが畳み込まれずに入力へ残ると 3 本目が生える。
+GRAPH_INPUTS = ("input_ids", "pool_mask")
 
 #: masked mean の分母の下限（sentence-transformers の Pooling と同値）。
 POOL_EPS = 1e-9
@@ -212,6 +238,12 @@ def load_dense(model_dir: Path, name: str) -> nn.Linear:
     config = json.loads((model_dir / name / "config.json").read_text(encoding="utf-8"))
     if config["bias"]:
         raise ValueError(f"{name}: bias 付きの Dense は想定外（公式配布は bias=false）")
+    # 欄が無いときも落とす（sentence-transformers の Dense は省略時に Tanh を掛ける）。
+    if config.get("activation_function") != DENSE_ACTIVATION:
+        raise ValueError(
+            f"{name}: activation_function {config.get('activation_function')!r} は想定外"
+            f"（ラッパは {DENSE_ACTIVATION} として畳む）"
+        )
     dense = nn.Linear(config["in_features"], config["out_features"], bias=False)
     weight = load_file(str(model_dir / name / CHECKPOINT_FILE))[DENSE_WEIGHT_KEY]
     if tuple(weight.shape) != tuple(dense.weight.shape):
@@ -224,9 +256,39 @@ def load_dense(model_dir: Path, name: str) -> nn.Linear:
     return dense
 
 
+def assert_sentence_transformer_layout(model_dir: Path) -> None:
+    """上流の 5 段構成と Pooling 方式が、ラッパの決め打ちと同じであることを検査する。
+
+    MUST: 構成は上流の宣言（`modules.json` / `1_Pooling/config.json`）から読んで突き合わせる
+    — golden は同じラッパから採るので、上流が Pooling を CLS に変えたり Normalize を外したり
+    しても TS 側の突合は緑のまま通る。`include_prompt` も見るのは、`pool_mask` を全 1 で採る
+    （プロンプト接頭辞も平均に入る）前提と対になるため。
+    """
+    modules = json.loads((model_dir / "modules.json").read_text(encoding="utf-8"))
+    types = tuple(module["type"] for module in modules)
+    if types != SENTENCE_TRANSFORMER_MODULES:
+        raise ValueError(
+            f"modules.json の構成 {types} がラッパの 5 段 {SENTENCE_TRANSFORMER_MODULES} でない"
+        )
+    pooling = json.loads((model_dir / POOLING_DIR / "config.json").read_text(encoding="utf-8"))
+    modes = sorted(
+        key for key, value in pooling.items() if key.startswith("pooling_mode_") and value
+    )
+    if modes != [POOLING_MODE]:
+        raise ValueError(f"{POOLING_DIR}: pooling 方式 {modes} が {POOLING_MODE} だけでない")
+    if pooling.get("include_prompt") is not True:
+        raise ValueError(
+            f"{POOLING_DIR}: include_prompt {pooling.get('include_prompt')!r} は想定外"
+            "（pool_mask を全 1 で採る前提と合わない）"
+        )
+
+
 def load_wrapper(model_dir: Path) -> EmbeddingWrapper:
     """本体 + Dense 2 段を読み、RoPE バッファを降格した export 可能なラッパを返す。"""
     from transformers import Gemma3TextModel
+
+    # 本体を読む前に構成を検める（数百 MB を読んでから落ちない）。
+    assert_sentence_transformer_layout(model_dir)
 
     model = Gemma3TextModel.from_pretrained(
         model_dir, dtype=torch.float32, attn_implementation="sdpa"
@@ -291,6 +353,59 @@ def build_batch_case(
     batched_ids = ids.expand(batch, -1).contiguous()
     batched_mask = torch.ones_like(batched_ids, dtype=torch.float32)
     return f"batch{batch}", batched_ids, batched_mask
+
+
+def assert_ir_form(graph: IrGraph, config: Any, sym_max: int) -> dict[str, Any]:
+    """IR が「SDPA を保存した形」かつ「帯マスクが T 非依存の定数」であることを検査する。
+
+    どちらも**数値は合ったまま静かに壊れる**種類の性質で、golden io の突合では捕まらない:
+
+    - SDPA が分解経路へ落ちると attention op が層数に足りなくなり、runtime は融合 attention を
+      使えない（遅い資産になる — モジュール docstring の MUST）
+    - 帯マスクがグラフ入力に残ると「ホストが毎回 T² を作って渡す」形になる（ADR 0010）
+
+    mask 定数は層種別（sliding-window / 全結合）ごとに別の帯なので、本数は縛らない。
+    """
+    layers = int(config.num_hidden_layers)
+
+    names = [spec.name for spec in graph.inputs]
+    if names != list(GRAPH_INPUTS):
+        raise AssertionError(
+            f"グラフ入力が {names} — {list(GRAPH_INPUTS)} の 2 本でない"
+            "（帯マスクが畳み込まれずに入力へ残っている可能性）"
+        )
+
+    producer = {out: node for node in graph.nodes for out in node.outs}
+    attentions = [node for node in graph.nodes if node.op == ATTENTION_OP]
+    if len(attentions) != layers:
+        raise AssertionError(
+            f"attention が {len(attentions)} 本（{layers} 層と一致しない"
+            " — SDPA が分解経路へ落ちた可能性）"
+        )
+
+    mask_constants: set[str] = set()
+    for index, node in enumerate(attentions):
+        where = f"attention[{index}]"
+        if len(node.ins) != 4:
+            raise AssertionError(f"{where}: ins が {len(node.ins)} 本（q / k / v / mask の 4 本）")
+        source = producer.get(node.ins[3])
+        if source is None or source.op != SYM_PREFIX_SLICE_OP:
+            found = (
+                "ノード出力でない（グラフ入力か initializer 直結）" if source is None else source.op
+            )
+            raise AssertionError(
+                f"{where}: mask の供給元が {found} — Tmax 定数の {SYM_PREFIX_SLICE_OP} でない"
+            )
+        constant = source.ins[0]
+        if constant not in graph.initializers:
+            raise AssertionError(f"{where}: mask の元 '{constant}' が initializer でない")
+        shape = declared_shape(graph, constant)
+        if shape != [1, 1, sym_max, sym_max]:
+            raise AssertionError(
+                f"{where}: mask 定数の shape {shape} が Tmax 形 [1, 1, {sym_max}, {sym_max}] と違う"
+            )
+        mask_constants.add(constant)
+    return {"attention_nodes": len(attentions), "mask_constants": sorted(mask_constants)}
 
 
 def _write_io(
@@ -429,6 +544,8 @@ def export_series(
             dynamic_shapes=({1: seq}, {1: seq}),
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
+        # MUST: 公開より前に形を検める（SDPA 保存と帯マスク定数 — 数値の突合では捕まらない）。
+        form = assert_ir_form(graph, wrapper.model.config, sym_max)
         written, embeddings = _write_io(wrapper, graph, cases, staged)
         # MUST: 公開より前に評価する（この系列で唯一の非恒真な検査 — 落ちたら席ごと消える）。
         sanity = (
@@ -442,6 +559,7 @@ def export_series(
         "model_bytes": sum(p.stat().st_size for p in container_parts(out_dir / MODEL_FILE)),
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
+        "form": form,
         "io": written,
         "case_lengths": {name: int(ids.shape[1]) for name, ids, _ in cases},
         "batch": batch,
