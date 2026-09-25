@@ -79,10 +79,12 @@ class IrError(ValueError):
 
 
 class ContainerError(ValueError):
-    """コンテナの合流規則・safetensors のレイアウト規則の違反、または capability 不足。
+    """safetensors のレイアウト規則の違反・capability 不足・容器 → IR 文書の変換の不整合、
+    および IR 受理規則違反の包み（{@link assert_ir_accepted}）。
 
-    合流規則は 2 文書 + 束縛表に、safetensors のレイアウト規則は移行 CLI の入力（旧 shard）と
-    資産に掛かる。
+    safetensors のレイアウト規則は移行 CLI の入力（旧 shard）と資産に掛かる。合流規則
+    （2 文書 + 束縛表）の違反はこの型ではなく `karume.container.ContainerFormatError`
+    （TS 側と同名の型）で出る — 型で分岐する呼び手は両方を捕まえる。
     """
 
 
@@ -213,6 +215,21 @@ def _as_storage_dtype(value: Any, where: str) -> str:
     return dtype
 
 
+def _integral_float_to_int(value: Any) -> Any:
+    """JSON の `1.0` / `1e0` のような整数値の float を int へ正規化する（他の値はそのまま）。
+
+    MUST: 整数を読む欄（次元・group 長）は全てこれを通す。TS 側は JSON.parse が単一の number を
+    返すので整数値の float という区別が無く（`Number.isSafeInteger(1.0)` は true）、Python が
+    float を丸ごと拒むと**ランタイムが読める graph をエクスポータの検証だけが読めない**
+    乖離になる（受理集合はどちらの向きにもずれてはいけない）。非整数値の float は
+    `is_integer()` が False なので呼び手の型検査で従来どおり落ち、非有限値はそもそも JSON 読みの
+    時点で弾かれる。safe range 超過は呼び手の int 側の検査に載る。
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
     shape: list[int | str] = []
     for index, dim in enumerate(_as_array(value, where)):
@@ -220,15 +237,9 @@ def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
         # bool は int の派生だが次元ではない。
         if isinstance(dim, bool):
             raise IrError(f"{at}: 次元が数値でも文字列でもない")
-        # MUST: JSON の `1.0` / `1e0` は int へ正規化する。TS 側は JSON.parse が単一の number を
-        # 返すので整数値の float という区別が無く（`Number.isSafeInteger(1.0)` は true）、Python が
-        # float を丸ごと拒むと**ランタイムが読める graph をエクスポータの検証だけが読めない**
-        # 乖離になる（受理集合はどちらの向きにもずれてはいけない）。非整数値の float は
-        # `is_integer()` が False なので下の「数値でも文字列でもない」で従来どおり落ち、非有限値は
-        # そもそも parse_graph_json が JSON 読みの時点で弾く。safe range 超過も int 側の検査
-        # （`> MAX_SAFE_INT`）に載る = TS の `Number.isSafeInteger` と同じ受理集合になる。
-        if isinstance(dim, float) and dim.is_integer():
-            dim = int(dim)
+        # safe range 超過は下の int 側の検査（`> MAX_SAFE_INT`）に載る = TS の
+        # `Number.isSafeInteger` と同じ受理集合になる。
+        dim = _integral_float_to_int(dim)
         if isinstance(dim, int):
             if dim < 0 or dim > MAX_SAFE_INT:
                 raise IrError(f"{at}: 次元 {dim} が非負整数でない")
@@ -298,7 +309,7 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
     """格納の記述子。
 
     `shared`（ADR 0096 段 2 の共有 initializer）は **`dtype` の 1 キーだけ**を持つ: 借り手の
-    shard にはバイトが 1 つも無いので、付随実体を記述する欄（`scale`）も group の刻み
+    容器にはバイトが 1 つも無いので、付随実体を記述する欄（`scale`）も group の刻み
     （`group_size`）も**貸し手側だけが持つ**。写すと同じ事実が 2 箇所に生え、どちらで dequant
     するかが宣言から決まらない。i8 / i4 の「scale 必須」「i4 は group_size 必須」も
     この側には掛からない（掛けると共有宣言が原理的に書けない）。
@@ -334,15 +345,7 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
     group_size = None
     if has_group_size:
-        raw = obj["group_size"]
-        # MUST: JSON の `32.0` / `3.2e1` は int へ正規化する（`_parse_shape` と同じ理由・同じ
-        # 1 行）。TS 側は JSON.parse が単一の number を返すので整数値の float という区別が
-        # 無く（`Number.isSafeInteger(32.0)` は true）、Python が float を丸ごと拒むと
-        # **ランタイムが読める graph をエクスポータの検証だけが読めない**乖離になる。非整数値
-        # （`32.5`）は `is_integer()` が False なので下の「正整数でない」で従来どおり落ち、
-        # 非有限値は parse_graph_json が JSON 読みの時点で弾く。
-        if isinstance(raw, float) and raw.is_integer():
-            raw = int(raw)
+        raw = _integral_float_to_int(obj["group_size"])
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
             raise IrError(f"{where}.group_size: 正整数でない")
         # TS 側は JSON の数値として読むので 2^53−1 を超える値は整数として持てない
@@ -680,7 +683,9 @@ def _check_declarations(
             shape = values[name].shape
             if len(shape) != 2 or any(dim <= 0 for dim in shape) or shape[1] % 16:
                 raise IrError(f"graph.values['{name}']: i2 は正の rank 2・行長は16の倍数が必要")
-        if storage_dtype == "i4":
+        # 共有 initializer は group_size を宣言できない（_parse_storage）— group の刻みは
+        # 貸し手の常駐重みが正本で、貸し手の容器が合流層で見る（ADR 0096 段 2）。
+        if storage_dtype == "i4" and not initializers[name].is_shared:
             _check_group_quantized_shape(name, initializers[name], values[name])
     for node in nodes:
         for out in node.outs:
@@ -1000,7 +1005,7 @@ def assert_op_contracts(graph: IrGraph) -> None:
 #: safetensors dtype → 1 要素の **bit** 数（サイズ表）。バイト長は `numel × bits / 8` の
 #: 厳密一致で見る。TS 側 `packages/runtime/src/format/safetensors.ts` の DTYPE_BYTES の
 #: **上位集合**で、方言 dtype の `I4` / `I2` はこの表だけが持つ（TS の読み手は受理しない —
-#: 旧 shard を読む移行 CLI が要る）。
+#: 旧 shard を読む移行 CLI が要る）。受理は {@link _LEGACY_ONLY_DTYPES} が移行入力に限る。
 #: MUST: 整列表（READER_DTYPE_ALIGN）と分けて持つ（ADR 0069 決定 2 の 3 面分離）— `I4` は
 #: 1 バイトに 2 要素を詰めるので「要素サイズ = 整列」が成り立たない。
 READER_DTYPE_BITS = {
@@ -1032,6 +1037,11 @@ READER_DTYPE_ALIGN = {
     "I64": 8,
     "BOOL": 1,
 }
+
+#: TS の読み手が拒否する方言 dtype（旧 shard の packed 4bit / 2bit）。`assert_reader_layout` は
+#: 移行 CLI の入力検査（`allow_legacy_dtypes=True`）でだけ受理する — 資産の門で受理すると
+#: 「Python の門は緑・ブラウザのリーダだけ落ちる」資産が書ける。
+_LEGACY_ONLY_DTYPES = frozenset({"I4", "I2"})
 
 _HEADER_LENGTH_BYTES = 8
 
@@ -1104,7 +1114,7 @@ def _read_header(path: str | Path) -> tuple[dict[str, Any], int, int]:
     return header, data_start, file_size - data_start
 
 
-def assert_reader_layout(path: str | Path) -> None:
+def assert_reader_layout(path: str | Path, *, allow_legacy_dtypes: bool = False) -> None:
     """safetensors のレイアウト規則を見る（TS 側 `format/safetensors.ts` と同じ規則）。
 
     HF の `safe_open` は読めるのに Karume が読めないファイルが作れる — リーダは
@@ -1112,7 +1122,8 @@ def assert_reader_layout(path: str | Path) -> None:
     を要求し、後者は要素数が奇数の F16（バイト長 ≡ 2 mod 4）の直後に F32 / I32 / I4 を置くと
     破れる（docs/limitations.md）。使う経路は 2 つ: 移行 CLI が旧 shard を読む前の入力検査
     （`karume.legacy`）と、資産の safetensors を書いた直後の門（recipe の資産の書き手）。
-    方言 dtype の `I4` / `I2` だけは TS の読み手より余分に受理する（旧 shard の読み取り用）。
+    方言 dtype の `I4` / `I2` は `allow_legacy_dtypes=True`（移行 CLI の入力検査）のときだけ
+    受理する。既定は TS の読み手と同じ dtype 集合（資産の門）。
 
     MUST: この検査は `safetensors` のリーダを通さない（通すと同じ規則の再実装ではなく
     「別のリーダが読めた」だけの主張になる）。ヘッダ JSON を直に読んで規則を写す。
@@ -1128,6 +1139,11 @@ def assert_reader_layout(path: str | Path) -> None:
         dtype = entry["dtype"]
         if dtype not in READER_DTYPE_BITS:
             raise ContainerError(f"{where}: リーダが知らない dtype '{dtype}'")
+        if dtype in _LEGACY_ONLY_DTYPES and not allow_legacy_dtypes:
+            raise ContainerError(
+                f"{where}: リーダが知らない dtype '{dtype}'"
+                "（方言 dtype — 旧 shard の移行入力でだけ受理）"
+            )
         offsets = entry["data_offsets"]
         if not isinstance(offsets, list) or len(offsets) != 2:
             raise ContainerError(f"{where}: data_offsets が 2 要素の配列でない: {offsets!r}")
@@ -1261,7 +1277,10 @@ def _declared_tensor(
     if not isinstance(raw, list):
         raise ContainerFormatError(f"{where}: `values` の shape が配列でない")
     shape: list[int] = []
-    for dim in raw:
+    for raw_dim in raw:
+        # 容器の JSON 読みは float を int に変えない — graph の `_parse_shape` と同じ受理集合に
+        # 揃える（ランタイムは `4.0` を次元 4 として読む）。
+        dim = _integral_float_to_int(raw_dim)
         if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
             raise ContainerFormatError(
                 f"{where}: initializer の shape に記号次元は使えない（{dim!r}）"
@@ -1533,13 +1552,50 @@ def verify_container(paths: Sequence[str | Path], *, blocks: bool = False) -> Ve
 
     `paths` は単一形なら 1 本、分割形なら **part 0 から順に**並べた part 列。既定で掛かるのは
     「宣言で決まる規則」全部（読み手の構造検査 + 上の合流層）で、**実バイトは読まない**
-    （§7 のハッシュ 3 分離）。`blocks=True` は全 block を取り直して sha256 まで突き合わせる
-    — 「コンテナを検証する」経路はこの 1 本だけ MUST（CLI もここを通る）。
+    （§7 のハッシュ 3 分離）。`blocks=True` は全 block を取り直して sha256 まで突き合わせ、
+    `ternary` の payload のコード検査（§6.3）も掛ける — 「コンテナを検証する」経路はこの 1 本
+    だけ MUST（CLI もここを通る）。
     """
     read = read_container([Path(path) for path in paths])
     if blocks:
         read.verify_blocks()
-    return VerifiedContainer(read, bind_graphs(read.graph, read.model))
+    bound = bind_graphs(read.graph, read.model)
+    if blocks:
+        _assert_ternary_payloads(read, bound)
+    return VerifiedContainer(read, bound)
+
+
+#: 2 bit コードのどれかが 0 のバイト（`ternary` の値域外 — container-v1 §6.3）。
+_TERNARY_CODE_ZERO_BYTES = frozenset(
+    byte for byte in range(256) if any((byte >> shift) & 3 == 0 for shift in (0, 2, 4, 6))
+)
+
+
+def _assert_ternary_payloads(read: ReadContainer, bound: Mapping[str, BoundGraph]) -> None:
+    """`ternary` 宣言の追加条件: payload の全 2 bit コードが `{1, 2, 3}`（container-v1 §6.3）。
+
+    TS `assertTernaryCodes`（ロード時に block を読むたびに掛かる）の鏡像。ここに無いと
+    「verify は緑・ロードで初めて落ちる」形になる。見るのは payload だけ（末尾の詰め物は除く）。
+    """
+    for graph_name, graph in bound.items():
+        for name, supply in graph.supplies.items():
+            if supply.encoding.codec != "ternary":
+                continue
+            for block in supply.blocks:
+                payload = read.block(block.id)[: block.payload_bytes]
+                offending = next(
+                    (
+                        index
+                        for index, byte in enumerate(payload)
+                        if byte in _TERNARY_CODE_ZERO_BYTES
+                    ),
+                    None,
+                )
+                if offending is not None:
+                    raise ContainerFormatError(
+                        f"graph '{graph_name}' initializer '{name}': ternary の payload に"
+                        f"コード 0（三値の値域外）がある（バイト {offending}）"
+                    )
 
 
 # ---- CLI ------------------------------------------------------------------

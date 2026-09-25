@@ -9,10 +9,12 @@ TS 側 `packages/runtime/src/format/container/bind.ts` の鏡像なので、こ�
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 from container_fixture import (
     FIXTURE_BLOCK_BYTES,
     FIXTURE_PATH,
@@ -36,7 +38,10 @@ from karume.container import (
     WeightSupply,
     numbered_name,
     write_graph_container,
+    write_model_container,
 )
+from karume.emit import FixedQuantizedWeight, stored_model
+from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.verify import InitializerSupply, bind_graphs, verify_container
 
 #: 手組みの descriptor が持つ sha256 欄（合流層は実バイトを読まないので値は効かない）。
@@ -187,6 +192,22 @@ class TestTheDeclarationRules:
     def test_a_symbolic_shape_cannot_hold_an_entity(self) -> None:
         with pytest.raises(ContainerFormatError, match="記号次元は使えない"):
             bind([4, "T"], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")])
+
+    def test_an_integral_float_dimension_is_read_as_the_integer(self) -> None:
+        """他の書き手の `4.0` はランタイム（JSON の number）と同じく次元 4 として読む。
+
+        graph の `_parse_shape` と同じ受理集合 — exporter の検証だけが拒むと、ランタイムが
+        読める容器をエクスポータだけが読めない乖離になる。
+        """
+        supply = bind(
+            [4.0, 32], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")]
+        )
+
+        assert [(block.rows, block.payload_bytes) for block in supply.blocks] == [((0, 4), 512)]
+
+    def test_a_fractional_dimension_is_still_refused(self) -> None:
+        with pytest.raises(ContainerFormatError, match=r"initializer の shape.*（4\.5）"):
+            bind([4.5, 32], WeightSupply(BlockEncoding("f32"), block="w1"), [("w1", 512, "weight")])
 
     def test_an_initializer_without_a_value_declaration_is_refused(self) -> None:
         graph = GraphDescriptor(
@@ -425,3 +446,69 @@ class TestTheIrAcceptanceGate:
         )
 
         verify.assert_ir_accepted(verify_container([path]).read)
+
+
+def ternary_container(tmp_path: Path, packed: bytes) -> list[Path]:
+    """`ternary` を宣言した 2 行 × 16 要素（1 行 4 バイト）の容器を書く。
+
+    三値の量子化器はまだ無い（段 6）ので、i2 の固定重みを書き手へ通し、束縛の codec だけを
+    `ternary` へ差し替える（値の詰め方と scale は `int2-off` と同じ — container-v1 §6.3）。
+    """
+    graph = IrGraph(
+        symbols=[],
+        inputs=[IrInput(name="ids", dtype="i32", shape=[2])],
+        outputs=["y"],
+        initializers={"w": IrInitializer(tensor="w", storage=IrStorage(dtype="f32"))},
+        values={"w": IrValue(dtype="f32", shape=[2, 16]), "y": IrValue(dtype="f32", shape=[2, 16])},
+        nodes=[IrNode(op="embedding", ins=["w", "ids"], outs=["y"], attrs={"padding_idx": -1})],
+    )
+    fixed = FixedQuantizedWeight(
+        dtype="i2",
+        packed=torch.frombuffer(bytearray(packed), dtype=torch.uint8).reshape(2, 4),
+        scale=torch.tensor([[0.375], [1.25]]),
+    )
+    stored = stored_model(
+        graph,
+        {"w": torch.empty(2, 16, dtype=torch.float32, device="meta")},
+        fixed_weights={"w": fixed},
+    )
+    bindings = {
+        key: replace(encoding, codec="ternary") if encoding.codec == "int2-off" else encoding
+        for key, encoding in stored.bindings.items()
+    }
+    return write_model_container(
+        tmp_path / "ternary.krm",
+        stored.graph,
+        stored.tensors,
+        bindings,
+        graph_name="t",
+        provenance=Provenance(license="mit"),
+    )
+
+
+#: 全 2 bit コードが {1, 2, 3} の 2 行ぶん（0x6D = 01 10 11 01 など）。
+TERNARY_PACKED = bytes([0x6D, 0xB6, 0xDB, 0x79] * 2)
+
+
+class TestTheTernaryPayload:
+    """`ternary` の payload にコード 0（q = −2）があれば verify が拒否する（container-v1 §6.3）。
+
+    TS はロード時に同じ検査（`assertTernaryCodes`）を掛けるので、ここが無いと「verify は
+    緑・ロードで初めて落ちる」形になる。
+    """
+
+    def test_a_payload_whose_codes_are_all_in_1_to_3_is_accepted(self, tmp_path: Path) -> None:
+        verified = verify_container(ternary_container(tmp_path, TERNARY_PACKED), blocks=True)
+
+        assert verified.graphs["t"].supplies["w"].encoding.codec == "ternary"
+
+    def test_a_payload_with_a_code_0_is_refused(self, tmp_path: Path) -> None:
+        packed = bytearray(TERNARY_PACKED)
+        packed[5] = 0b00_10_10_10
+        paths = ternary_container(tmp_path, bytes(packed))
+
+        with pytest.raises(
+            ContainerFormatError,
+            match=r"initializer 'w': ternary の payload にコード 0.*（バイト 5）",
+        ):
+            verify_container(paths, blocks=True)
