@@ -15,7 +15,11 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import type { GpuFeaturesSpec } from "@karume/hub";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
-import { assertGpuFeaturesGranted, toAcquireGpuOptions } from "../src/session/gpu-features.ts";
+import {
+  assertGpuFeaturesGranted,
+  sessionGpuFeatures,
+  toAcquireGpuOptions,
+} from "../src/session/gpu-features.ts";
 
 Deno.test("toAcquireGpuOptions: 宣言された feature だけを要求する", () => {
   // 宣言が無い / 明示的に false の配布形で feature を要求しにいくと、持たないアダプタでは
@@ -61,4 +65,35 @@ Deno.test("assertGpuFeaturesGranted: 要求していない配布形は no-op（�
   assertGpuFeaturesGranted(undefined, gpu, WHERE);
   assertGpuFeaturesGranted({}, gpu, WHERE);
   assertGpuFeaturesGranted({ shaderF16: false }, gpu, WHERE);
+});
+
+// ---- 実効 SessionOptions から導く要求（上書き口を持つ家族の席）--------------------
+
+Deno.test("sessionGpuFeatures: f16 計算を実効設定が選べば shader-f16 を要求に足す", () => {
+  // 明示の `linearCompute: "f16"` を quant 宣言（shader-f16 を要求しない）に重ねた形。足さないと
+  // 自前で取る device が feature を持たず、重みを全部上げた後の Session 構築で落ちる。
+  assertEquals(sessionGpuFeatures(undefined, { linearCompute: "f16" }), { shaderF16: true });
+  assertEquals(sessionGpuFeatures({ shaderF16: false }, { attentionCompute: "f16" }), {
+    shaderF16: true,
+  });
+  // 共有 GPU の経路では、足した要求がそのまま admission 席の検査に掛かる（重みを取る前に落ちる）。
+  assertThrows(
+    () =>
+      assertGpuFeaturesGranted(
+        sessionGpuFeatures(undefined, { linearCompute: "f16" }),
+        noFeatureGpu(),
+        WHERE,
+      ),
+    Error,
+    "shader-f16",
+  );
+});
+
+Deno.test("sessionGpuFeatures: 要らない・宣言済みなら宣言をそのまま返す（要求を増やさない）", () => {
+  // s16（`attentionScoreStorage: "f16"`）は shader-f16 に依らない格納形（ADR 0030 決定 1）。
+  assertEquals(sessionGpuFeatures(undefined, {}), undefined);
+  assertEquals(sessionGpuFeatures(undefined, { attentionScoreStorage: "f16" }), undefined);
+  assertEquals(sessionGpuFeatures(undefined, { linearCompute: "a8" }), undefined);
+  const declared = { shaderF16: true };
+  assertEquals(sessionGpuFeatures(declared, { linearCompute: "f16" }) === declared, true);
 });

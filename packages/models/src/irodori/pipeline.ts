@@ -342,6 +342,14 @@ export type IrodoriPipelineOptions = {
    * `error === controller.signal.reason` で自分の中断を識別できる）。
    */
   readonly signal?: AbortSignal;
+  /**
+   * `dit` の linear の実行形を quant の宣言より優先して指定する（省略時は quant の `session` の
+   * 宣言 → runtime 既定の順 — ADR 0058 追記 2026-09-26）。`"f16"` は device の shader-f16 を要し、
+   * 自前で取る GPU には要求を足す。共有 GPU（`gpu`）が持たなければ重みを取る前に落ちる。
+   * 不正な値は `ModelInputError`（ADR 0107）。attention 系のノブは受けない（効く席が `dit` の
+   * グラフに無い — `src/irodori/admission.ts` の `IRODORI_SESSION_POLICY`）。
+   */
+  readonly linearCompute?: SessionOptions["linearCompute"];
 };
 
 /**
@@ -400,7 +408,7 @@ const buildIrodoriState = async (
   open: ComponentOpener,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
-  const { config, quant, quantName, ditSymbol, ditSessionOptions } = admitted;
+  const { config, quantName, ditSymbol, ditSessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const backbone = open(BACKBONE);
   const textProj = open(TEXT_PROJ);
@@ -422,7 +430,7 @@ const buildIrodoriState = async (
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link "./admission.ts"} の `admitIrodori` が既に同じ 1 本で見ているが、自前で取った
   // device はここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
     // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
@@ -430,7 +438,7 @@ const buildIrodoriState = async (
     // 譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、待機中に積まれたクリック
     // 由来の中断タスクはまだ実行されていない。
     await settleAbort(options.signal);
-    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `IrodoriPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `IrodoriPipeline: quant '${quantName}'`);
     return {
       gpu,
       ownsGpu,
@@ -842,6 +850,7 @@ export class IrodoriPipeline {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.linearCompute === undefined ? {} : { linearCompute: options.linearCompute }),
     };
     // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
     const { admitted, assets, open } = await loadContainerComponents(

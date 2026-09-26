@@ -47,6 +47,7 @@ import {
 } from "@karume/runtime";
 import {
   type DistributionSource,
+  type GpuFeaturesSpec,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -93,9 +94,10 @@ import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
-import { toSessionOptions } from "../session/options.ts";
+import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
@@ -233,6 +235,27 @@ export const latentSnapshot = (
 ): () => AnimaLatentSnapshot =>
 (): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
 
+/**
+ * Anima が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。優先順位・値域・組合せ・
+ * 送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合だけを決める。
+ *
+ * linear / 融合 attention の実行形 3 欄を受け、並列 GEMV と融合の 4 欄は受けない — 配布形が
+ * 宣言し参照値で確かめてあるのは前者だけで、後者（Gemma の decode 向けに足したノブ）は
+ * Anima のグラフでは効く席も数値も確かめていない組合せだから。
+ *
+ * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const ANIMA_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: true,
+  attentionCompute: true,
+  attentionScoreStorage: true,
+  linearGemvReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
 /** 構築オプション（{@link AnimaPipeline.fromAssets} / {@link AnimaPipeline.fromPretrained} 共通）。 */
 export type AnimaPipelineOptions = {
   /**
@@ -266,6 +289,25 @@ export type AnimaPipelineOptions = {
    * `error === controller.signal.reason` で自分の中断を識別できる）。
    */
   readonly signal?: AbortSignal;
+  /**
+   * linear の実行形を quant の宣言より優先して指定する（省略時は quant の `session` の宣言 →
+   * runtime 既定の順 — ADR 0058 追記 2026-09-26）。効くのは **DiT（transformer）の Session だけ**で、
+   * text 系と VAE は quant の宣言どおり（f32）に走る（quant 席の `session` と同じ適用範囲）。`"f16"` は device の shader-f16 を要し、
+   * 自前で取る GPU には要求を足す。共有 GPU（`gpu`）が持たなければ重みを取る前に落ちる。
+   * 不正な値・組合せは `ModelInputError`（ADR 0107）。
+   */
+  readonly linearCompute?: SessionOptions["linearCompute"];
+  /**
+   * 融合 attention の実行形を quant の宣言より優先して指定する（優先順位と shader-f16 の扱いは
+   * {@link AnimaPipelineOptions.linearCompute} と同じ）。`attentionScoreStorage: "f16"` との
+   * 同時指定は runtime が受けない組合せなので `ModelInputError`。
+   */
+  readonly attentionCompute?: SessionOptions["attentionCompute"];
+  /**
+   * 融合 attention の S の格納形を quant の宣言より優先して指定する（優先順位は
+   * {@link AnimaPipelineOptions.linearCompute} と同じ・shader-f16 は要らない）。
+   */
+  readonly attentionScoreStorage?: SessionOptions["attentionScoreStorage"];
 };
 
 /**
@@ -573,7 +615,10 @@ type AnimaAdmission = {
   readonly config: AnimaPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
+  /** 明示指定と quant 宣言を合成した実効設定（{@link ANIMA_SESSION_POLICY}）。 */
   readonly sessionOptions: SessionOptions;
+  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
@@ -637,6 +682,13 @@ export class AnimaPipeline {
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.linearCompute === undefined ? {} : { linearCompute: options.linearCompute }),
+      ...(options.attentionCompute === undefined
+        ? {}
+        : { attentionCompute: options.attentionCompute }),
+      ...(options.attentionScoreStorage === undefined
+        ? {}
+        : { attentionScoreStorage: options.attentionScoreStorage }),
     };
     // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
     const { admitted, assets, open } = await loadContainerComponents(
@@ -717,14 +769,22 @@ export class AnimaPipeline {
       );
     }
     const quant = entry.quants[quantName];
-    const sessionOptions = toSessionOptions(quant.session);
+    // 明示 > quant 宣言 > runtime 既定（全家族共通の 1 本）。未対応の宣言も誤った明示指定も
+    // ここで落とす（重みの part を取る前）。
+    const sessionOptions = resolveSessionOptions(
+      ANIMA_SESSION_POLICY,
+      quant.session,
+      options,
+      `AnimaPipeline: quant '${quantName}'`,
+    );
+    const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
     // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
     // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
     // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
     if (options.gpu !== undefined) {
       assertGpuFeaturesGranted(
-        quant.gpuFeatures,
+        gpuFeatures,
         options.gpu,
         `AnimaPipeline: quant '${quantName}'`,
       );
@@ -735,7 +795,7 @@ export class AnimaPipeline {
       );
     }
 
-    return { config, quantName, quant, sessionOptions };
+    return { config, quantName, quant, sessionOptions, gpuFeatures };
   }
 
   /**
@@ -751,7 +811,7 @@ export class AnimaPipeline {
     open: ComponentOpener,
     options: AnimaPipelineOptions,
   ): Promise<AnimaPipeline> {
-    const { config, quant, quantName, sessionOptions } = admitted;
+    const { config, quantName, sessionOptions, gpuFeatures } = admitted;
 
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
     // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
@@ -780,7 +840,7 @@ export class AnimaPipeline {
     // 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。共有 GPU は
     // {@link AnimaPipeline.#admit} が既に同じ 1 本で見ているが、自前で取った device は
     // ここが唯一の門。
-    const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
+    const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
     const ownsGpu = options.gpu === undefined;
     try {
       // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
@@ -788,7 +848,7 @@ export class AnimaPipeline {
       // ここでもマクロタスクへ譲る: `acquireGpu` の await 解決はマイクロタスク継続なので、
       // 待機中に積まれたクリック由来の中断タスクはまだ実行されていない。
       await settleAbort(options.signal);
-      assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `AnimaPipeline: quant '${quantName}'`);
+      assertGpuFeaturesGranted(gpuFeatures, gpu, `AnimaPipeline: quant '${quantName}'`);
       return new AnimaPipeline({
         gpu,
         ownsGpu,

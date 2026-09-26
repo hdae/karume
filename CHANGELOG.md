@@ -20,6 +20,22 @@ measurements in `docs/research/`.
 - `SessionDiagnostics.lastRunPipelines`: per-pipeline-key dispatch counts of the last run as
   planned, filled with or without `gpuTiming` and on the resident path (`enqueue`) too; the key
   spelling is a diagnostic label outside semver.
+- `AnimaPipelineOptions` accepts `linearCompute`, `attentionCompute` and `attentionScoreStorage`, and
+  `IrodoriPipelineOptions` accepts `linearCompute`; in both families they apply to the DiT
+  session only (text encoders and the VAE keep the quant declaration). An explicit value wins over
+  the quant's `session` declaration, which wins over the runtime default; invalid values and
+  combinations the runtime rejects throw `ModelInputError` before any weight bytes are fetched, and
+  an `"f16"` choice adds `shader-f16` to the GPU requirements.
+- `sessionOptionsViolation(options)` (`@karume/runtime`): the GPU-independent acceptance check of
+  `SessionOptions` (types, spellings, combinations, ranges) that session construction applies,
+  returned as a message so callers can reject options before loading weights.
+
+### Changed
+
+- Every pipeline now composes its session options through one shared rule (explicit > quant
+  declaration > runtime default) and rejects, before fetching weights, a manifest `session` key the
+  family does not accept; previously the non-Gemma families passed any declared key through to the
+  runtime. All published quants are accepted unchanged.
 
 ## [0.13.0] - 2026-09-25
 

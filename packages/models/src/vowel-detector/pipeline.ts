@@ -97,7 +97,7 @@ import {
   assertRequiredLimitsSatisfied,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
-import { toSessionOptions } from "../session/options.ts";
+import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   type FromPretrainedComponentOptions,
@@ -376,11 +376,34 @@ type VowelDetectorState = {
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
+/**
+ * vowel-detector が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
+ * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
+ * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ *
+ * どのキーも受けないのは、実行ノブを宣言した quant を持たない（配布形は未公開・export は f32
+ * の既定経路だけ）から（宣言が現れたら、受ける前に参照値で確かめる — 黙って runtime へ流さない）。
+ *
+ * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const VOWEL_DETECTOR_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: false,
+  attentionCompute: false,
+  attentionScoreStorage: false,
+  linearGemvReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
 /** 家族 admission（{@link admitVowelDetector}）が確定させる材料。 */
 type VowelDetectorAdmission = {
   readonly config: VowelDetectorPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
+  /** quant 宣言を受理表で通した実効設定（{@link VOWEL_DETECTOR_SESSION_POLICY}）。 */
+  readonly sessionOptions: SessionOptions;
   /** 時間軸の記号名（`assertGraph` がグラフから読んだもの）。 */
   readonly symbol: string;
 };
@@ -435,6 +458,13 @@ const admitVowelDetector = (
     );
   }
   const quant = entry.quants[quantName];
+  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  const sessionOptions = resolveSessionOptions(
+    VOWEL_DETECTOR_SESSION_POLICY,
+    quant.session,
+    {},
+    `VowelDetectorPipeline: quant '${quantName}'`,
+  );
 
   const graph = open(GRAPH_ROLE);
   const symbol = assertGraph(graph, config);
@@ -455,7 +485,7 @@ const admitVowelDetector = (
     );
   }
 
-  return { config, quantName, quant, symbol };
+  return { config, quantName, quant, symbol, sessionOptions };
 };
 
 /**
@@ -471,7 +501,7 @@ const openVowelDetectorState = async (
   open: ComponentOpener,
   options: VowelDetectorPipelineOptions = {},
 ): Promise<VowelDetectorState> => {
-  const { config, quant, quantName, symbol } = admitted;
+  const { config, quant, quantName, symbol, sessionOptions } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const graph = open(GRAPH_ROLE);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
@@ -495,7 +525,7 @@ const openVowelDetectorState = async (
     config,
     graph,
     symbol,
-    sessionOptions: toSessionOptions(quant.session),
+    sessionOptions,
     melBasis,
     ...(options.onRunDiagnostics === undefined
       ? {}

@@ -59,7 +59,7 @@ describe("Gemmaのquant実行設定", () => {
       assertThrows(
         () => resolve(fast, { linearGemvReduce }, "test"),
         ModelInputError,
-        "parallelが必要",
+        "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
       );
       assertEquals(
         resolve(fast, {
@@ -72,7 +72,7 @@ describe("Gemmaのquant実行設定", () => {
     assertThrows(
       () => resolve({}, { fuseLinearStaticQuantize: true }, "test"),
       ModelInputError,
-      "parallelが必要",
+      "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
     assertEquals(
       resolve({ fuseLinearStaticQuantize: true }, {
@@ -94,12 +94,12 @@ describe("Gemmaのquant実行設定", () => {
     assertThrows(
       () => resolve({ packedStaticQuantize: true }, {}, "test"),
       Error,
-      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
     assertThrows(
       () => resolve({}, { packedStaticQuantize: true }, "test"),
       ModelInputError,
-      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
     assertThrows(
       () =>
@@ -109,7 +109,7 @@ describe("Gemmaのquant実行設定", () => {
           packedStaticQuantize: true,
         }, "test"),
       ModelInputError,
-      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
   });
   it("SessionSpecの全キーが許可表か拒否パスのどちらかに現れる", () => {
@@ -188,7 +188,7 @@ describe("Gemmaのquant実行設定", () => {
     assertThrows(
       () => resolve({ linearGemvReduce: "sequential" }, { fuseLinearStaticQuantize: true }, "test"),
       ModelInputError,
-      "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
+      "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
     assertEquals(
       resolve({ packedStaticQuantize: true, linearGemvReduce: "parallel" }, {}, "test"),
@@ -203,7 +203,7 @@ describe("Gemmaのquant実行設定", () => {
           linearGemvReduce: "sequential",
         }, "test"),
       ModelInputError,
-      "packedStaticQuantizeはlinearGemvReduce: parallelが必要",
+      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
   });
 });
@@ -216,7 +216,7 @@ describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
     assertThrows(
       () => assertGemmaSessionOverrides({ fuseLinearStaticQuantize: true }, "test"),
       ModelInputError,
-      "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
+      "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
     const bogus = {};
     Object.defineProperty(bogus, "fuseRmsNormAdd", { value: 1, enumerable: true });

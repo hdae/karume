@@ -349,7 +349,7 @@ Deno.test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開�
         tokenizer: junk,
       }, { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" }),
     ModelInputError,
-    "fuseLinearStaticQuantizeはlinearGemvReduce: parallelが必要",
+    "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
   );
   assertEquals(error.message.includes("fromAssets"), true, error.message);
 });

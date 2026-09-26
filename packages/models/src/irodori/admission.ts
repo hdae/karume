@@ -11,7 +11,7 @@
  */
 
 import type { SessionOptions } from "@karume/runtime";
-import type { Manifest, ModelEntry, Quant } from "@karume/hub";
+import type { GpuFeaturesSpec, Manifest, ModelEntry, Quant } from "@karume/hub";
 
 import {
   IRODORI_PIPELINE_MAJOR,
@@ -24,8 +24,9 @@ import { settleAbort } from "../concurrency/abort.ts";
 import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
 } from "../session/gpu-features.ts";
-import { toSessionOptions } from "../session/options.ts";
+import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { assetComponentOpener, type ComponentOpener, type GraphOwner } from "../hub/components.ts";
 import { readAssetBuffer, readAssetJson } from "../hub/asset-readers.ts";
 import { assertGraphInputDim } from "../hub/graph-gates.ts";
@@ -152,6 +153,30 @@ const assertOutputDim = (
   }
 };
 
+/**
+ * irodori が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。効く先は `dit` の
+ * Session だけ（{@link IrodoriAdmission.ditSessionOptions}）。優先順位・値域・組合せ・送出型の
+ * 分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合だけを決める。
+ *
+ * `attentionCompute` / `attentionScoreStorage` を受けないのは、`dit` の attention が実行時の
+ * bool マスク入力を持つため融合 attention の契約に載らず、SDPA を保存しない分解経路
+ * （matmul + safe_softmax）で書き出されている — 融合 attention のノブが効く席がグラフに無い —
+ * から（`tools/export-recipes/irodori/export.py` の `dit` 境界節）。並列 GEMV と融合の 4 欄は
+ * 配布形が宣言せず、irodori の参照値で確かめていない組合せなので受けない。
+ *
+ * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const IRODORI_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: true,
+  attentionCompute: false,
+  attentionScoreStorage: false,
+  linearGemvReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
 /** 家族 admission（{@link admitIrodori}）が確定させる材料。 */
 export type IrodoriAdmission = {
   readonly config: IrodoriPipelineConfig;
@@ -165,7 +190,10 @@ export type IrodoriAdmission = {
    * truth から 1 度だけ導く」）。
    */
   readonly ditSymbol: string;
+  /** 明示指定と quant 宣言を合成した `dit` の実効設定（{@link IRODORI_SESSION_POLICY}）。 */
   readonly ditSessionOptions: SessionOptions;
+  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
@@ -225,6 +253,15 @@ export const admitIrodori = async (
     );
   }
   const quant = entry.quants[quantName];
+  // 明示 > quant 宣言 > runtime 既定（全家族共通の 1 本）。未対応の宣言も誤った明示指定も
+  // 部品を開く前に落とす（manifest と呼び手の指定だけで決まる判定なので、容器を待たない）。
+  const ditSessionOptions = resolveSessionOptions(
+    IRODORI_SESSION_POLICY,
+    quant.session,
+    options,
+    `IrodoriPipeline: quant '${quantName}'`,
+  );
+  const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, ditSessionOptions);
 
   // 8 本の部品が全部開けることをこの席で見る（開いていない役割は供給口が fail loudly）。
   // 引き当ての間に中断の境目を置く。
@@ -278,14 +315,12 @@ export const admitIrodori = async (
   }
   const ditSymbol = ditSymbols[0];
 
-  const ditSessionOptions = toSessionOptions(quant.session);
-
   // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
   // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
-      quant.gpuFeatures,
+      gpuFeatures,
       options.gpu,
       `IrodoriPipeline: quant '${quantName}'`,
     );
@@ -296,5 +331,5 @@ export const admitIrodori = async (
     );
   }
 
-  return { config, quantName, quant, ditSymbol, ditSessionOptions };
+  return { config, quantName, quant, ditSymbol, ditSessionOptions, gpuFeatures };
 };

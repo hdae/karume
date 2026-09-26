@@ -103,6 +103,24 @@ export const assertExecutionKnobs = (
   stateAttentionReduce: StateAttentionReduce,
   linearGemvReduce: LinearGemvReduce,
 ): void => {
+  const violation = executionKnobsViolation(
+    linearCompute,
+    attentionCompute,
+    attentionScoreStorage,
+    stateAttentionReduce,
+    linearGemvReduce,
+  );
+  if (violation !== undefined) throw new ExecutionError(violation);
+};
+
+/** {@link assertExecutionKnobs} の判定本体（違反の文言を返し、送出は呼び手が決める）。 */
+const executionKnobsViolation = (
+  linearCompute: NonNullable<SessionOptions["linearCompute"]>,
+  attentionCompute: ComputePrecision,
+  attentionScoreStorage: ScoreStorage,
+  stateAttentionReduce: StateAttentionReduce,
+  linearGemvReduce: LinearGemvReduce,
+): string | undefined => {
   const knobs: readonly (readonly [string, string, Readonly<Record<string, true>>])[] = [
     ["linearCompute", linearCompute, LINEAR_COMPUTES],
     ["attentionCompute", attentionCompute, ATTENTION_COMPUTES],
@@ -117,12 +135,133 @@ export const assertExecutionKnobs = (
         typeof value === "string" ? JSON.stringify(value) : typeof value
       }（受理するのは ${Object.keys(accepted).map((accept) => `'${accept}'`).join(" / ")}）`
     );
-  if (violations.length === 0) return;
-  throw new ExecutionError(
-    `SessionOptions の実行形ノブ ${violations.length} 本が受理集合の外（既定へ黙って縮退させない）:\n` +
-      `${violations.join("\n")}\n` +
-      "綴りを確認すること（linearCompute の 'i8a8' は 0.5.0 で 'a8' へ改名した — ADR 0074 決定 3）",
+  if (violations.length === 0) return undefined;
+  return `SessionOptions の実行形ノブ ${violations.length} 本が受理集合の外（既定へ黙って縮退させない）:\n` +
+    `${violations.join("\n")}\n` +
+    "綴りを確認すること（linearCompute の 'i8a8' は 0.5.0 で 'a8' へ改名した — ADR 0074 決定 3）";
+};
+
+/**
+ * 省略された実行形ノブへ runtime 既定を入れた値（{@link sessionOptionsViolation} と
+ * {@link buildSessionState} が同じ 1 本で読む — 既定の綴りを 2 か所に書くと、判定した値と
+ * 構築に使う値が割れうる）。
+ */
+const executionKnobDefaults = (options: SessionOptions) => ({
+  rmsNormReduce: options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce,
+  linearCompute: options.linearCompute ?? "f32",
+  attentionCompute: options.attentionCompute ?? "f32",
+  attentionScoreStorage: options.attentionScoreStorage ?? "f32",
+  stateAttentionReduce: options.stateAttentionReduce ?? "sequential",
+  linearGemvReduce: options.linearGemvReduce ?? "sequential",
+  planBackingBudgetBytes: options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES,
+});
+
+/**
+ * {@link SessionOptions} のうち **GPU の能力に依らない**受理条件（型・綴り・組合せ・値域）を
+ * 1 本で判定し、最初の違反の文言を返す（違反が無ければ `undefined`）。
+ *
+ * Session 構築（`createSessionFromContainer` / `PreparedModel.createContainerSession`）は
+ * 入口でこの関数を呼び、違反を `ExecutionError` として送出する。構築まで待たずに同じ判定を
+ * 借りたい呼び手 — 配布形の宣言と利用者の明示指定を合成して、**重みを 1 バイトも取る前**に
+ * 不受理を落としたい上位層 — のために公開している。送出型を返さず文言だけを返すのは、同じ
+ * 違反でも打つ手が出所（配布形の宣言か、呼び手の指定か）で違い、型を選べるのは出所を知って
+ * いる呼び手だけだから。
+ *
+ * MUST: GPU の能力（`shader-f16` / subgroups）を要る条件はここに含めない — それは device を
+ * 見ないと決まらないので、構築側に残る。ここが `undefined` を返しても構築が落ちることはある。
+ * MUST: 診断で利用者の変換（`toString` / `Symbol.toPrimitive`）を呼ばない（{@link assertExecutionKnobs}
+ * と同じ規律）。
+ * NOTE: 省略した欄は runtime 既定（`f32` / `sequential` 等）として判定する。`null` のような
+ * 欄の値も `??` で既定に読まれる（構築と同じ読み方）ので、「欄はあるが値が不正」を
+ * 既定へ戻さずに拒否したい呼び手は、自分の入口で値域を先に見ること。
+ */
+export const sessionOptionsViolation = (options: SessionOptions): string | undefined => {
+  if (
+    options.fuseLinearStaticQuantize !== undefined &&
+    typeof options.fuseLinearStaticQuantize !== "boolean"
+  ) {
+    return "options.fuseLinearStaticQuantize はbooleanでなければならない";
+  }
+  if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
+    return "options.fuseRmsNormAdd はbooleanでなければならない";
+  }
+  if (
+    options.packedStaticQuantize !== undefined &&
+    typeof options.packedStaticQuantize !== "boolean"
+  ) {
+    return "options.packedStaticQuantize はbooleanでなければならない";
+  }
+  const {
+    rmsNormReduce,
+    linearCompute,
+    attentionCompute,
+    attentionScoreStorage,
+    stateAttentionReduce,
+    linearGemvReduce,
+    planBackingBudgetBytes,
+  } = executionKnobDefaults(options);
+  if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
+    // 診断で利用者の変換を呼ばない（`String(x)` は `Symbol.toPrimitive` / `toString` を走らせ、
+    // 例外を投げるオブジェクトでは `ExecutionError` の代わりにそれが抜ける）。
+    return `options.rmsNormReduce: 未対応の値 ${
+      typeof rmsNormReduce === "string" ? JSON.stringify(rmsNormReduce) : typeof rmsNormReduce
+    }`;
+  }
+  // MUST: 綴りの検査は既定代入の直後・以降の全ゲートより前。ここを通った後は s16×c16 ゲートも
+  // f16 feature ゲートも union 内の値だけを見ればよい。
+  const knobs = executionKnobsViolation(
+    linearCompute,
+    attentionCompute,
+    attentionScoreStorage,
+    stateAttentionReduce,
+    linearGemvReduce,
   );
+  if (knobs !== undefined) return knobs;
+  if (
+    options.fuseLinearStaticQuantize === true &&
+    (linearGemvReduce !== "parallel" || linearCompute !== "f32")
+  ) {
+    return "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応";
+  }
+  // packed 活性の変種を持つのは並列 GEMV 族だけ（ADR 0105）。黙って f32 経路へ落とすと
+  // 「指定したのに効かない」席になるので、融合と同じ流儀で拒否する。
+  if (
+    options.packedStaticQuantize === true &&
+    (linearGemvReduce !== "parallel" || linearCompute !== "f32")
+  ) {
+    return "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応";
+  }
+  if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
+    return `linearGemvReduce: ${linearGemvReduce} は linearCompute: f32 のみ対応`;
+  }
+  // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
+  if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {
+    return `options.planBackingBudgetBytes ${
+      describeInputValue(planBackingBudgetBytes)
+    } は非負の安全な整数で` +
+      "なければならない";
+  }
+  // 行ブロック gemv の並列度目標も同じ形で検査する（0 / 負 / 非整数は「スレッド数の目標」として
+  // 意味を持たず、黙って受けると rows が最大のまま選ばれた走行になる）。
+  const linearGemvRowsThreadTarget = options.linearGemvRowsThreadTarget;
+  if (
+    linearGemvRowsThreadTarget !== undefined &&
+    (!Number.isSafeInteger(linearGemvRowsThreadTarget) || linearGemvRowsThreadTarget < 1)
+  ) {
+    return `options.linearGemvRowsThreadTarget ${
+      describeInputValue(linearGemvRowsThreadTarget)
+    } は 1 以上の` +
+      "安全な整数でなければならない";
+  }
+  // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
+  // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
+  // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
+  if (attentionScoreStorage === "f16" && attentionCompute === "f16") {
+    return "attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に指定できない" +
+      "（attentionCompute 'f16' は S を array<f16> で持つ別の格納形 — " +
+      "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'a8' にすること）";
+  }
+  return undefined;
 };
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
@@ -494,31 +633,22 @@ export const buildSessionState = async (
   batches: AsyncIterable<WeightBatch>,
   options: SessionOptions,
 ): Promise<SessionState> => {
-  if (
-    options.fuseLinearStaticQuantize !== undefined &&
-    typeof options.fuseLinearStaticQuantize !== "boolean"
-  ) {
-    throw new ExecutionError("options.fuseLinearStaticQuantize はbooleanでなければならない");
-  }
-  if (options.fuseRmsNormAdd !== undefined && typeof options.fuseRmsNormAdd !== "boolean") {
-    throw new ExecutionError("options.fuseRmsNormAdd はbooleanでなければならない");
-  }
-  if (
-    options.packedStaticQuantize !== undefined &&
-    typeof options.packedStaticQuantize !== "boolean"
-  ) {
-    throw new ExecutionError("options.packedStaticQuantize はbooleanでなければならない");
-  }
-  const rmsNormReduce = options.rmsNormReduce === undefined ? "workgroup" : options.rmsNormReduce;
-  if (rmsNormReduce !== "workgroup" && rmsNormReduce !== "subgroup32") {
-    // 診断で利用者の変換を呼ばない（`String(x)` は `Symbol.toPrimitive` / `toString` を走らせ、
-    // 例外を投げるオブジェクトでは `ExecutionError` の代わりにそれが抜ける）。
-    throw new ExecutionError(
-      `options.rmsNormReduce: 未対応の値 ${
-        typeof rmsNormReduce === "string" ? JSON.stringify(rmsNormReduce) : typeof rmsNormReduce
-      }`,
-    );
-  }
+  // MUST: GPU の能力に依らない検査（型・綴り・組合せ・値域）は全て {@link sessionOptionsViolation}
+  // の 1 本で先に見る。models 側の合成（明示 > 宣言 > 既定）が重み取得前に同じ判定を借りるので、
+  // ここで条件を書き足すと 2 つの入口の受理集合が割れる。
+  const violation = sessionOptionsViolation(options);
+  if (violation !== undefined) throw new ExecutionError(violation);
+  const {
+    rmsNormReduce,
+    linearCompute,
+    attentionCompute,
+    attentionScoreStorage,
+    stateAttentionReduce,
+    linearGemvReduce,
+    planBackingBudgetBytes,
+  } = executionKnobDefaults(options);
+  const linearGemvRowsThreadTarget = options.linearGemvRowsThreadTarget;
+  // 以降は GPU の能力（feature / WGSL 言語機能）を見る門だけ。
   if (
     rmsNormReduce === "subgroup32" &&
     (!gpu.features.has("subgroups") || !gpu.features.has("subgroup-size-control") ||
@@ -528,45 +658,6 @@ export const buildSessionState = async (
       "rmsNormReduce: subgroup32 は acquireGpu({ subgroups: true }) が必要",
     );
   }
-  const linearCompute = options.linearCompute ?? "f32";
-  const attentionCompute = options.attentionCompute ?? "f32";
-  const attentionScoreStorage = options.attentionScoreStorage ?? "f32";
-  const stateAttentionReduce = options.stateAttentionReduce ?? "sequential";
-  const linearGemvReduce = options.linearGemvReduce ?? "sequential";
-  const planBackingBudgetBytes = options.planBackingBudgetBytes ??
-    DEFAULT_PLAN_BACKING_BUDGET_BYTES;
-  // MUST: 綴りの検査は既定代入の直後・以降の全ゲートより前。ここを通った後は s16×c16 ゲートも
-  // f16 feature ゲートも union 内の値だけを見ればよい。
-  assertExecutionKnobs(
-    linearCompute,
-    attentionCompute,
-    attentionScoreStorage,
-    stateAttentionReduce,
-    linearGemvReduce,
-  );
-  if (
-    options.fuseLinearStaticQuantize === true &&
-    (linearGemvReduce !== "parallel" || linearCompute !== "f32")
-  ) {
-    throw new ExecutionError(
-      "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
-    );
-  }
-  // packed 活性の変種を持つのは並列 GEMV 族だけ（ADR 0105）。黙って f32 経路へ落とすと
-  // 「指定したのに効かない」席になるので、融合と同じ流儀で拒否する。
-  if (
-    options.packedStaticQuantize === true &&
-    (linearGemvReduce !== "parallel" || linearCompute !== "f32")
-  ) {
-    throw new ExecutionError(
-      "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
-    );
-  }
-  if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
-    throw new ExecutionError(
-      `linearGemvReduce: ${linearGemvReduce} は linearCompute: f32 のみ対応`,
-    );
-  }
   if (
     linearGemvReduce === "parallel-subgroup32" &&
     (!gpu.features.has("subgroups") || !gpu.features.has("subgroup-size-control") ||
@@ -574,39 +665,6 @@ export const buildSessionState = async (
   ) {
     throw new ExecutionError(
       "linearGemvReduce: parallel-subgroup32 は acquireGpu({ subgroups: true }) が必要",
-    );
-  }
-  // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
-  if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {
-    throw new ExecutionError(
-      `options.planBackingBudgetBytes ${
-        describeInputValue(planBackingBudgetBytes)
-      } は非負の安全な整数で` +
-        "なければならない",
-    );
-  }
-  // 行ブロック gemv の並列度目標も同じ形で検査する（0 / 負 / 非整数は「スレッド数の目標」として
-  // 意味を持たず、黙って受けると rows が最大のまま選ばれた走行になる）。
-  const linearGemvRowsThreadTarget = options.linearGemvRowsThreadTarget;
-  if (
-    linearGemvRowsThreadTarget !== undefined &&
-    (!Number.isSafeInteger(linearGemvRowsThreadTarget) || linearGemvRowsThreadTarget < 1)
-  ) {
-    throw new ExecutionError(
-      `options.linearGemvRowsThreadTarget ${
-        describeInputValue(linearGemvRowsThreadTarget)
-      } は 1 以上の` +
-        "安全な整数でなければならない",
-    );
-  }
-  // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
-  // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
-  // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
-  if (attentionScoreStorage === "f16" && attentionCompute === "f16") {
-    throw new ExecutionError(
-      "attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に指定できない" +
-        "（attentionCompute 'f16' は S を array<f16> で持つ別の格納形 — " +
-        "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'a8' にすること）",
     );
   }
   // MUST: f16 計算を要求されたのに feature が無い device なら**ここで落とす**。黙って f32

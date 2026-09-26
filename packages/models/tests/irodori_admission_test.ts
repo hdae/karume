@@ -13,7 +13,9 @@
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { parseManifest } from "@karume/hub";
-import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
+import { IrodoriPipeline, type IrodoriPipelineOptions } from "../src/irodori/pipeline.ts";
+import { ModelInputError } from "../src/errors.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
   declaredContainer,
   partAssets,
@@ -430,4 +432,61 @@ Deno.test("fromPretrained: components で差した dit の次元が違えば重�
     [{ repo: OTHER_REPO, path: MANIFEST_PATH }],
   );
   assertEquals(mock.paths.filter((path) => path !== MANIFEST_PATH), []);
+});
+
+// ---- 実行ノブの明示指定（明示 > quant 宣言 > runtime 既定 — ADR 0058 追記 2026-09-26）----------
+
+/** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
+const optionsWith = (key: string, value: unknown): IrodoriPipelineOptions => {
+  const options: IrodoriPipelineOptions = {};
+  Object.defineProperty(options, key, { value, enumerable: true });
+  return options;
+};
+
+Deno.test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突合より前に ModelInputError", async () => {
+  // dit の宣言を 1 軸壊してある — 合成がグラフ突合より後ろなら、突合の文言で落ちる。
+  const manifest = parseManifest(manifestText());
+  const broken = await assetsWith(breakInput("dit", "x_t", 2, CONFIG.latentDim + 1));
+  await assertRejects(
+    () =>
+      IrodoriPipeline.fromAssets({ manifest, assets: broken }, optionsWith("linearCompute", null)),
+    ModelInputError,
+    "linearComputeが不正",
+  );
+  // dit の attention は融合 attention の契約に載らない（分解経路）ので、効く席が無い。
+  await assertRejects(
+    () =>
+      IrodoriPipeline.fromAssets(
+        { manifest, assets: broken },
+        optionsWith("attentionCompute", "f16"),
+      ),
+    ModelInputError,
+    "attentionComputeはこの系列では指定できない",
+  );
+});
+
+Deno.test("admitIrodori: 受理される linearCompute の明示は突合を通って資産の段まで進む", async () => {
+  await assertRejects(
+    async () =>
+      await IrodoriPipeline.fromAssets({
+        manifest: parseManifest(manifestText()),
+        assets: await assetsWith(),
+      }, { linearCompute: "a8" }),
+    Error,
+    "irodori: 資産 'tokenizer' が無い",
+  );
+});
+
+Deno.test("admitIrodori: 明示の f16 を共有 GPU が持たなければ GPU 取得前に名指しで落ちる", async () => {
+  // quant 宣言は shader-f16 を要求しない。要求は実効設定から導く（黙って f32 へ落とさず、
+  // 重みを上げた後の Session 構築まで遅らせもしない）。
+  await assertRejects(
+    async () =>
+      await IrodoriPipeline.fromAssets({
+        manifest: parseManifest(manifestText()),
+        assets: await assetsWith(),
+      }, { gpu: fakeGpuContext(fakeDevice()), linearCompute: "f16" }),
+    Error,
+    "shader-f16",
+  );
 });

@@ -385,6 +385,10 @@
       {
         "name": "readAdapterLimits",
         "kind": "function"
+      },
+      {
+        "name": "sessionOptionsViolation",
+        "kind": "function"
       }
     ]
   }

@@ -35,6 +35,7 @@ import { ANIMA_SAMPLER_TYPES } from "../anima.ts";
 import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
   AnimaPipeline,
+  type AnimaPipelineOptions,
   denoiseStep,
   latentSnapshot,
   resolveNegativePrompt,
@@ -43,6 +44,7 @@ import { Randn } from "../src/anima/random.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /** この系列の weights 部品（`src/anima/pipeline.ts` の `COMPONENT_KEYS` と同じ 4 本）。 */
 const WEIGHT_NAMES = ["text_encoder", "text_conditioner", "transformer", "vae_decoder"] as const;
@@ -237,6 +239,92 @@ Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で
     AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
   );
   assertStrictEquals(error, reason);
+});
+
+// ---- 実行ノブの明示指定（明示 > quant 宣言 > runtime 既定 — ADR 0058 追記 2026-09-26）----------
+
+/** quant の `session` だけを差し替えた manifest（他の欄は {@link manifestText} の骨格）。 */
+const manifestWithSession = (session: Record<string, unknown>) =>
+  parseManifest(manifestText({
+    quants: {
+      "f16+dit8-a8-attn8-s16": {
+        weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "f16"])),
+        session,
+      },
+    },
+  }));
+
+/** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
+const optionsWith = (key: string, value: unknown): AnimaPipelineOptions => {
+  const options: AnimaPipelineOptions = {};
+  Object.defineProperty(options, key, { value, enumerable: true });
+  return options;
+};
+
+Deno.test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組合せなら資産に触る前に ModelInputError", async () => {
+  // 宣言は s16 だけ（単独なら通る）。明示の c16 と組んで初めて runtime が受けない形になるので、
+  // 打つ手は「指定を直す」= 入力起因。資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
+  await assertRejects(
+    () =>
+      AnimaPipeline.fromAssets(
+        { manifest: manifestWithSession({ attentionScoreStorage: "f16" }), assets: emptyAssets },
+        { attentionCompute: "f16" },
+      ),
+    ModelInputError,
+    "同時に指定できない",
+  );
+});
+
+Deno.test("fromAssets: 不正な明示値と Anima が受けないノブは資産に触る前に ModelInputError", async () => {
+  const manifest = parseManifest(manifestText());
+  // null は quant 宣言へも runtime 既定へも戻さない。
+  await assertRejects(
+    () =>
+      AnimaPipeline.fromAssets(
+        { manifest, assets: emptyAssets },
+        optionsWith("linearCompute", null),
+      ),
+    ModelInputError,
+    "linearComputeが不正",
+  );
+  // 並列 GEMV は Anima の受理表の外 — 黙って捨てると「指定したのに効かない」になる。
+  await assertRejects(
+    () =>
+      AnimaPipeline.fromAssets(
+        { manifest, assets: emptyAssets },
+        optionsWith("linearGemvReduce", "parallel"),
+      ),
+    ModelInputError,
+    "linearGemvReduceはこの系列では指定できない",
+  );
+});
+
+Deno.test("fromAssets: 受理される明示は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () =>
+      AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, {
+        linearCompute: "f16",
+        attentionScoreStorage: "f16",
+      }),
+    Error,
+    "資産 'tokenizer' が無い",
+  );
+});
+
+Deno.test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産に触る前に名指しで落ちる", async () => {
+  // quant 宣言は shader-f16 を要求しない。要求は実効設定から導く（黙って f32 へ落とさず、
+  // 重みを上げた後の Session 構築まで遅らせもしない）。
+  const manifest = parseManifest(manifestText());
+  await assertRejects(
+    () =>
+      AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, {
+        gpu: fakeGpuContext(fakeDevice()),
+        linearCompute: "f16",
+      }),
+    Error,
+    "shader-f16",
+  );
 });
 
 Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {

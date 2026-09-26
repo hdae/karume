@@ -95,7 +95,7 @@ import {
   assertRequiredLimitsSatisfied,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
-import { toSessionOptions } from "../session/options.ts";
+import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { withSession } from "../session/with-session.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
@@ -549,11 +549,34 @@ export const assertTiledBert = (tiled: TiledBert, phonemes: number): void => {
   }
 };
 
+/**
+ * sbv2 が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
+ * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
+ * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ *
+ * `linearCompute` だけを受けるのは、配布形（`i8-a8`）が宣言し参照値で確かめてあるのがこの 1 欄だけ
+ * だから（他の欄は sbv2 のグラフで効く席も数値も確かめていない組合せ）。
+ *
+ * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const SBV2_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: true,
+  attentionCompute: false,
+  attentionScoreStorage: false,
+  linearGemvReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
 /** 家族 admission（{@link admitSbv2}）が確定させる材料。 */
 type Sbv2Admission = {
   readonly config: Sbv2PipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
+  /** quant 宣言を受理表で通した実効設定（{@link SBV2_SESSION_POLICY}）。 */
+  readonly sessionOptions: SessionOptions;
 };
 
 /**
@@ -606,6 +629,13 @@ const admitSbv2 = (
     );
   }
   const quant = entry.quants[quantName];
+  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  const sessionOptions = resolveSessionOptions(
+    SBV2_SESSION_POLICY,
+    quant.session,
+    {},
+    `Sbv2Pipeline: quant '${quantName}'`,
+  );
 
   // 部品が 3 本とも開けることをこの席で見る（供給口は後段と同じ 1 本 — 開いていない役割は
   // fail loudly）。グラフ幅の突合は表のバイト列が要るので {@link buildSbv2State} に残る。
@@ -623,7 +653,7 @@ const admitSbv2 = (
     );
   }
 
-  return { config, quantName, quant };
+  return { config, quantName, quant, sessionOptions };
 };
 
 /**
@@ -640,7 +670,7 @@ const buildSbv2State = async (
   open: ComponentOpener,
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
-  const { config, quant, quantName } = admitted;
+  const { config, quant, quantName, sessionOptions } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const front = open(FRONT);
   const voice = open(VOICE);
@@ -661,9 +691,6 @@ const buildSbv2State = async (
         " と違う（front / voice が別の話者埋め込みを要求している）",
     );
   }
-  // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
-  const sessionOptions = toSessionOptions(quant.session);
-
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitSbv2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
@@ -687,6 +714,7 @@ const buildSbv2State = async (
     textEncoder,
     front,
     voice,
+    // 低精度ノブは front / voice の Session にだけ効かせる（モジュール doc の MUST）。
     sessionOptions,
     ...(options.onRunDiagnostics === undefined
       ? {}

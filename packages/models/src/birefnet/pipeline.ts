@@ -64,6 +64,7 @@ import {
   type GpuContext,
   type Session,
   type SessionDiagnostics,
+  type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
 import {
@@ -96,7 +97,7 @@ import {
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
-import { toSessionOptions } from "../session/options.ts";
+import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   type FromPretrainedComponentOptions,
@@ -331,11 +332,34 @@ type BirefnetState = {
   readonly onRunDiagnostics?: (diagnostics: SessionDiagnostics) => void;
 };
 
+/**
+ * birefnet が受ける実行ノブ（manifest の quant 宣言）。合成規則（明示 > 宣言 > runtime 既定）・
+ * 値域・組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合
+ * だけを決める。明示の上書き口は持たない（構築オプションに実行ノブの欄が無い）。
+ *
+ * どのキーも受けないのは、配布形が f32 の既定経路だけで、実行ノブを宣言した quant を持たない
+ * から（宣言が現れたら、受ける前に参照値で確かめる — 黙って runtime へ流さない）。
+ *
+ * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const BIREFNET_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: false,
+  attentionCompute: false,
+  attentionScoreStorage: false,
+  linearGemvReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
 /** 家族 admission（{@link admitBirefnet}）が確定させる材料。 */
 type BirefnetAdmission = {
   readonly config: BirefnetPipelineConfig;
   readonly quantName: string;
   readonly quant: Quant;
+  /** quant 宣言を受理表で通した実効設定（{@link BIREFNET_SESSION_POLICY}）。 */
+  readonly sessionOptions: SessionOptions;
 };
 
 /**
@@ -384,6 +408,13 @@ const admitBirefnet = (
     );
   }
   const quant = entry.quants[quantName];
+  // 未対応の宣言は部品を開く前（= 重みの part を取る前）に落とす（全家族共通の 1 本）。
+  const sessionOptions = resolveSessionOptions(
+    BIREFNET_SESSION_POLICY,
+    quant.session,
+    {},
+    `BirefnetPipeline: quant '${quantName}'`,
+  );
 
   const matte = open(MATTE);
   // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、
@@ -417,7 +448,7 @@ const admitBirefnet = (
     );
   }
 
-  return { config, quantName, quant };
+  return { config, quantName, quant, sessionOptions };
 };
 
 /**
@@ -430,7 +461,7 @@ const openBirefnetState = async (
   open: ComponentOpener,
   options: BirefnetPipelineOptions = {},
 ): Promise<BirefnetState> => {
-  const { config, quant, quantName } = admitted;
+  const { config, quant, quantName, sessionOptions } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const matte = open(MATTE);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
@@ -445,7 +476,7 @@ const openBirefnetState = async (
       ownsGpu,
       config,
       matte,
-      session: await matte.createSession(gpu, toSessionOptions(quant.session)),
+      session: await matte.createSession(gpu, sessionOptions),
       ...(options.onRunDiagnostics === undefined
         ? {}
         : { onRunDiagnostics: options.onRunDiagnostics }),

@@ -30,6 +30,7 @@ import {
   type GpuContext,
   readAdapterLimits,
   type RequiredLimits,
+  type SessionOptions,
 } from "@karume/runtime";
 
 type GpuFeatureEntry = {
@@ -43,6 +44,13 @@ type GpuFeatureEntry = {
   readonly label: string;
   /** 診断に載せる取り直し方。 */
   readonly reacquire: string;
+  /**
+   * 実効 `SessionOptions` がこの feature を device に要求するか（runtime の Session 構築が
+   * 同じ条件で落とす — `@karume/runtime` の `buildSessionState` の f16 門）。
+   */
+  readonly requiredBy: (options: SessionOptions) => boolean;
+  /** 要求するときに宣言へ足す欄（{@link sessionGpuFeatures}）。 */
+  readonly declare: GpuFeaturesSpec;
 };
 
 const FEATURES: { readonly [K in keyof Required<GpuFeaturesSpec>]: GpuFeatureEntry } = {
@@ -52,7 +60,31 @@ const FEATURES: { readonly [K in keyof Required<GpuFeaturesSpec>]: GpuFeatureEnt
     enabled: (gpu) => gpu.shaderF16Enabled,
     label: "shader-f16",
     reacquire: "acquireGpu({ shaderF16: true })",
+    requiredBy: (options) => options.linearCompute === "f16" || options.attentionCompute === "f16",
+    declare: { shaderF16: true },
   },
+};
+
+/**
+ * quant の宣言した feature に、**実効** `SessionOptions`（明示指定を合成した後 —
+ * `./options.ts` の `resolveSessionOptions`）が要る feature を足す。
+ *
+ * MUST: 明示の上書き口を持つ家族は、要求（`acquireGpu`）と検査（共有 GPU）をこの返り値で
+ * 行う。quant の宣言だけを見ると、宣言が要求しない `linearCompute: "f16"` を明示したとき
+ * 自前で取る device が shader-f16 を持たず、重みを全部上げた後の Session 構築で落ちる
+ * （共有 GPU なら admission 席で落とせたはずの能力不足が、取得の後まで遅れる）。
+ * NOTE: 何も足さないときは `spec` をそのまま返す（上書きの無い家族と同じ値になる）。
+ */
+export const sessionGpuFeatures = (
+  spec: GpuFeaturesSpec | undefined,
+  options: SessionOptions,
+): GpuFeaturesSpec | undefined => {
+  let merged = spec;
+  for (const feature of Object.values(FEATURES)) {
+    const declared = merged !== undefined && feature.wanted(merged);
+    if (!declared && feature.requiredBy(options)) merged = { ...merged, ...feature.declare };
+  }
+  return merged;
 };
 
 /** 宣言された feature だけを要求する `acquireGpu` のオプションを組む。 */

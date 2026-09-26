@@ -6,7 +6,8 @@ import { denoDirectory } from "@karume/hub/deno";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../gemma4-qat.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -22,7 +23,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
   }
   describe({
     name: `${family}: quant定義からGEMVを選ぶ（実GPU）`,
-    ignore: !available || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+    ignore: !available || !GPU_AVAILABLE,
     fn: () => {
       it("既定quant・参照quant・明示上書きの優先順位を守る", async () => {
         const original = await Deno.readTextFile(new URL("karume.json", root));
@@ -145,8 +146,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               },
             ] as const
           ) {
-            const gpu = await acquireGpu({ gpuTiming: true });
-            const keys = new Set<string>();
+            // NOTE: census は計測に依らない `lastRunPipelines`。`onRunDiagnostics` を付けると GPU 上の
+            // greedy 出力経路は外れる（src/gemma/pipeline.ts の `greedyOutput`）— 下の census は
+            // フック有りの経路のもので、この前提は計測を外しても変わらない。
+            const gpu = await acquireGpu();
+            const census: SessionDiagnostics["lastRunPipelines"][] = [];
             try {
               const options = {
                 gpu,
@@ -155,7 +159,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 maxResidentPleBytes: 0,
                 ...mode.options,
                 onRunDiagnostics: (d: SessionDiagnostics) => {
-                  for (const row of d.lastRunTiming?.entries ?? []) keys.add(row.key);
+                  census.push(d.lastRunPipelines);
                 },
               } satisfies Gemma4QatFromPretrainedOptions;
               const source = denoDirectory(temp);
@@ -174,26 +178,17 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 assert(text.length > 0);
                 assert(stop.tokens > 1);
                 runs.set(mode.name, { text, stop });
-                assert([...keys].some((key) => key.startsWith("linear_gemv")));
-                assertEquals(
-                  [...keys].some((key) => key.endsWith(":static-quantize:v1")),
-                  mode.srq,
-                );
-                assertEquals(
-                  [...keys].some((key) => key.startsWith("rms_norm_add:")),
-                  mode.rms,
-                );
-                assertEquals(
-                  [...keys].some((key) => key.startsWith("linear_gemv_parallel")),
-                  mode.parallel,
-                  mode.name,
-                );
-                // packed 変種のキーは既存キーの末尾に断片が付く（ADR 0105 決定 4）。
-                assertEquals(
-                  [...keys].some((key) => key.endsWith(":packed-x-i8")),
-                  mode.packed,
-                  mode.name,
-                );
+                const merged = mergeCensus(census, mode.name);
+                assert(merged.some((row) => row.key.startsWith("linear_gemv")));
+                // 実効の席（quant 席の宣言 + 明示指定の合成結果）を両側で見る — 非参照値は
+                // 変種が 1 本以上・参照値は変種が 0 本（packed 変種のキーは既存キーの末尾に
+                // 断片が付く — ADR 0105 決定 4。述語は tests/helpers/pipeline-census.ts）。
+                assertSeatsApplied(merged, {
+                  linearGemvReduce: mode.parallel ? "parallel" : "sequential",
+                  fuseRmsNormAdd: mode.rms,
+                  fuseLinearStaticQuantize: mode.srq,
+                  packedStaticQuantize: mode.packed,
+                }, mode.name);
               } finally {
                 await pipeline.dispose();
               }
@@ -214,8 +209,8 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           }
           assertEquals(runs.get("reference"), runs.get("override"));
           if (family === "gemma4") {
-            const gpu = await acquireGpu({ gpuTiming: true });
-            const phaseKeys = new Map<string, Set<string>>();
+            const gpu = await acquireGpu();
+            const phaseCensus = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
             try {
               const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(temp), {
                 gpu,
@@ -228,9 +223,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 // 近い値のtokenでargmaxが割れうるので、一致を門にする席へ倒す。
                 stateAttentionReduce: "sequential",
                 onRunDiagnostics: (d, phase) => {
-                  const keys = phaseKeys.get(phase.kind) ?? new Set<string>();
-                  for (const row of d.lastRunTiming?.entries ?? []) keys.add(row.key);
-                  phaseKeys.set(phase.kind, keys);
+                  const phaseRuns = phaseCensus.get(phase.kind) ?? [];
+                  phaseRuns.push(d.lastRunPipelines);
+                  phaseCensus.set(phase.kind, phaseRuns);
                 },
               });
               try {
@@ -264,13 +259,13 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 }
                 assertEquals(outputs[1], outputs[0], "高速quantの投機/非投機");
                 for (const phase of ["decode", "draft", "verify"]) {
-                  const keys = phaseKeys.get(phase);
-                  assert(keys !== undefined, phase);
-                  assert([...keys].some((k) => k.startsWith("linear_gemv_parallel")), phase);
+                  const phaseRuns = phaseCensus.get(phase);
+                  assert(phaseRuns !== undefined, phase);
                   // RMS融合の適用はtarget側のdecode/verifyで見る。
-                  if (phase !== "draft") {
-                    assert([...keys].some((k) => k.startsWith("rms_norm_add:")), phase);
-                  }
+                  assertSeatsApplied(mergeCensus(phaseRuns, phase), {
+                    linearGemvReduce: "parallel",
+                    ...(phase === "draft" ? {} : { fuseRmsNormAdd: true }),
+                  }, phase);
                 }
               } finally {
                 await pipeline.dispose();
@@ -315,7 +310,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   linearGemvReduce: "sequential",
                 }),
               Error,
-              "parallelが必要",
+              "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
             );
           }
           assert(requested.includes("karume.json"));
