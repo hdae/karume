@@ -33,8 +33,9 @@
  *   有効な device は 1 dispatch = 1 pass に開くので壁が伸び、さらに観測席（`onRunDiagnostics`）を
  *   渡すと pipeline は GPU 上の greedy 出力経路を組まない（`pipeline.ts` の `#build`）— 計測 ON の
  *   壁は製品経路の壁ではない。観測席は計測 ON のときだけ渡す（OFF の走行は製品と同じ経路）。
- * - 基準は最初の `--set`。gemma 家族の `stateAttentionReduce` 既定は `"parallel"` なので、参照経路を
- *   基準にしたいときは基準の set に `"sequential"` を**明示**する。
+ * - 基準は最初の `--set`。`stateAttentionReduce` も他のノブと同じく quant の宣言に従う（宣言が
+ *   無ければ runtime の参照経路 `"sequential"`）。宣言を持つ quant で参照経路を基準にしたいときは、
+ *   基準の set に `"sequential"` を**明示**する。
  */
 
 import { gemma4ChatPrompt, Gemma4Pipeline } from "../../packages/models/gemma.ts";
@@ -42,7 +43,6 @@ import type { Gemma4RunPhase } from "../../packages/models/gemma.ts";
 import { Gemma4QatPipeline } from "../../packages/models/gemma4-qat.ts";
 import { gemma4StopTokens } from "../../packages/models/src/gemma/text/chat.ts";
 import { resolveGemmaSessionOptions } from "../../packages/models/src/gemma/session-options.ts";
-import { GEMMA4_STATE_ATTENTION_REDUCE } from "../../packages/models/src/gemma/pipeline.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import { MANIFEST_FILENAME, parseManifest } from "../../packages/hub/mod.ts";
 import { acquireGpu } from "../../packages/runtime/mod.ts";
@@ -183,16 +183,18 @@ const main = async (): Promise<void> => {
   const declaredSession = quantEntry.session;
 
   // 上書きと宣言の合成は pipeline と**同じ関数**で解く（組合せの誤りはモデルを読む前に落ちる）。
-  // stateAttentionReduce は quant 宣言の語彙に無い家族既定なので、同じ既定定数で補う。
+  // stateAttentionReduce だけは記録用に実効値を埋める: 合成は未指定の欄を作らない（runtime が
+  // 既定を持つ）ので、summary を読む側が「どの縮約形で走ったか」を runtime の既定から推し量らずに
+  // 済むよう、上書きも宣言も無い set は参照経路 `"sequential"`（ADR 0058 決定 2）と明記する。
   const resolved = new Map(args.sets.map((set) => [
     set.label,
     {
+      stateAttentionReduce: "sequential",
       ...resolveGemmaSessionOptions(
         declaredSession,
         set.overrides,
         `flag-bench --set ${set.label}`,
       ),
-      stateAttentionReduce: set.overrides.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
     },
   ]));
 
@@ -391,7 +393,7 @@ const main = async (): Promise<void> => {
       return {
         ...one,
         overrides: set.overrides,
-        // quant 宣言 + 上書きを pipeline と同じ関数で解いた 4 欄 + stateAttentionReduce。
+        // quant 宣言 + 上書きを pipeline と同じ関数で解いた欄（stateAttentionReduce は実効値で必ず埋まる）。
         resolvedSession: resolved.get(set.label),
         deviceFeatures: features.get(set.label),
       };

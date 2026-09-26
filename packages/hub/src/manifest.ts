@@ -163,6 +163,7 @@ const LINEAR_COMPUTE: readonly LinearCompute[] = ["f32", "a8", "f16"];
 const ATTENTION_COMPUTE: readonly AttentionCompute[] = ["f32", "f16", "a8"];
 const SCORE_STORAGE: readonly ScoreStorage[] = ["f32", "f16"];
 const LINEAR_GEMV_REDUCE = ["sequential", "parallel"] as const;
+const STATE_ATTENTION_REDUCE = ["sequential", "parallel", "parallel-fused"] as const;
 /**
  * `session` のキー allowlist — `Required<SessionSpec>` の**網羅表**として持つ。
  *
@@ -176,6 +177,7 @@ const SESSION_KEYS: Readonly<Record<keyof Required<SessionSpec>, true>> = {
   attentionCompute: true,
   attentionScoreStorage: true,
   linearGemvReduce: true,
+  stateAttentionReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
   packedStaticQuantize: true,
@@ -325,6 +327,11 @@ export type SessionSpec = {
   readonly attentionCompute?: AttentionCompute;
   readonly attentionScoreStorage?: ScoreStorage;
   readonly linearGemvReduce?: "sequential" | "parallel";
+  /**
+   * states 形 attention ①QK / ③PV の縮約形（ADR 0104 追記 2026-09-26〈語彙への昇格〉）。
+   * 宣言が無ければ読み手は runtime の参照経路（`"sequential"`）で走る。
+   */
+  readonly stateAttentionReduce?: "sequential" | "parallel" | "parallel-fused";
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;
   /**
@@ -796,6 +803,13 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   const attentionCompute = readEnum(fail, raw, "attentionCompute", ATTENTION_COMPUTE, at);
   const attentionScoreStorage = readEnum(fail, raw, "attentionScoreStorage", SCORE_STORAGE, at);
   const linearGemvReduce = readEnum(fail, raw, "linearGemvReduce", LINEAR_GEMV_REDUCE, at);
+  const stateAttentionReduce = readEnum(
+    fail,
+    raw,
+    "stateAttentionReduce",
+    STATE_ATTENTION_REDUCE,
+    at,
+  );
   const fuseRmsNormAdd = readBoolean(fail, raw, "fuseRmsNormAdd", at);
   const fuseLinearStaticQuantize = readBoolean(fail, raw, "fuseLinearStaticQuantize", at);
   const packedStaticQuantize = readBoolean(fail, raw, "packedStaticQuantize", at);
@@ -804,6 +818,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
     ...(attentionCompute === undefined ? {} : { attentionCompute }),
     ...(attentionScoreStorage === undefined ? {} : { attentionScoreStorage }),
     ...(linearGemvReduce === undefined ? {} : { linearGemvReduce }),
+    ...(stateAttentionReduce === undefined ? {} : { stateAttentionReduce }),
     ...(fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
     ...(fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize }),
     ...(packedStaticQuantize === undefined ? {} : { packedStaticQuantize }),

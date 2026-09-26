@@ -71,10 +71,11 @@ loudly in a pre-flight step, before any model is loaded — it never falls back 
 variant.
 
 **The reference condition is explicit.** Precedence is: explicit override > the quant's `session`
-declaration > the family / runtime default. The Gemma family's `stateAttentionReduce` default is
-`"parallel"`, not the runtime's reference `"sequential"`, so a reference set meant to be the reference
-path must say `{"stateAttentionReduce":"sequential"}`. An empty `{}` means "the quant's declaration
-and the family defaults, as shipped".
+declaration > the runtime default. `stateAttentionReduce` follows the same rule as every other knob:
+a quant that does not declare it runs the runtime's reference `"sequential"`, while `i4-gemvpar` and
+`i4-fast` declare a parallel form. A reference set meant to be the reference path on such a quant must
+say `{"stateAttentionReduce":"sequential"}`. An empty `{}` means "the quant's declaration, as
+shipped".
 
 ```sh
 # Wall clock (timing off): reference path vs. one flag
@@ -132,20 +133,20 @@ Per generation (one JSONL line, `type: "run"`):
 
 The final line (`type: "summary"`, also printed to stdout) carries the derived values:
 
-| Field                                                              | Meaning                                                                                                                                                                |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gpuTiming`                                                        | The timing mode of the whole file                                                                                                                                      |
-| `host`                                                             | `os`, `arch`, `deno`, and the `adapter` (`vendor` / `architecture` / `device` / `description`)                                                                         |
-| `config`                                                           | Source, family, model, quant, `manifestSha256` (SHA-256 of the manifest body), the quant's `quantSession` declaration, rounds, tokens, capacity, prompts               |
-| `reference`                                                        | The first set's label                                                                                                                                                  |
-| `sets[]`                                                           | Per set: `overrides`, `resolvedSession` (declaration + overrides, resolved as the pipeline does, plus `stateAttentionReduce`), `deviceFeatures`, and the medians below |
-| `decodeMsPerToken`, `ttftMs`                                       | Medians of the measured generations                                                                                                                                    |
-| `gpuDecodeMsPerStep`, `gpuDispatchesPerStep`, `gpuPrefillMsPerRun` | With `--gpu-timing` only: medians of the per-generation values                                                                                                         |
-| `deltaPercent`                                                     | `(value / reference − 1) × 100` for each of the above — negative is faster / fewer                                                                                     |
-| `tokensIdenticalAcrossVisits`                                      | Every generation of this set (warm-ups included) produced one token sequence per prompt                                                                                |
-| `tokensMatchReference`                                             | …and it is the reference's sequence. `false` means the flag changed the output — expected for flags that change summation order                                        |
-| `appliedKeys`                                                      | With `--gpu-timing` only: the set's `decodePipelines`, identical across all of its generations                                                                         |
-| `noKeyChange`                                                      | With `--gpu-timing` only, on every set but the reference: `true` when the set ran exactly the reference's set of pipeline keys (counts are not compared)               |
+| Field                                                              | Meaning                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gpuTiming`                                                        | The timing mode of the whole file                                                                                                                                                                                          |
+| `host`                                                             | `os`, `arch`, `deno`, and the `adapter` (`vendor` / `architecture` / `device` / `description`)                                                                                                                             |
+| `config`                                                           | Source, family, model, quant, `manifestSha256` (SHA-256 of the manifest body), the quant's `quantSession` declaration, rounds, tokens, capacity, prompts                                                                   |
+| `reference`                                                        | The first set's label                                                                                                                                                                                                      |
+| `sets[]`                                                           | Per set: `overrides`, `resolvedSession` (declaration + overrides, resolved as the pipeline does; `stateAttentionReduce` is always filled in, `"sequential"` when neither sets it), `deviceFeatures`, and the medians below |
+| `decodeMsPerToken`, `ttftMs`                                       | Medians of the measured generations                                                                                                                                                                                        |
+| `gpuDecodeMsPerStep`, `gpuDispatchesPerStep`, `gpuPrefillMsPerRun` | With `--gpu-timing` only: medians of the per-generation values                                                                                                                                                             |
+| `deltaPercent`                                                     | `(value / reference − 1) × 100` for each of the above — negative is faster / fewer                                                                                                                                         |
+| `tokensIdenticalAcrossVisits`                                      | Every generation of this set (warm-ups included) produced one token sequence per prompt                                                                                                                                    |
+| `tokensMatchReference`                                             | …and it is the reference's sequence. `false` means the flag changed the output — expected for flags that change summation order                                                                                            |
+| `appliedKeys`                                                      | With `--gpu-timing` only: the set's `decodePipelines`, identical across all of its generations                                                                                                                             |
+| `noKeyChange`                                                      | With `--gpu-timing` only, on every set but the reference: `true` when the set ran exactly the reference's set of pipeline keys (counts are not compared)                                                                   |
 
 **Which kernels actually ran.** A flag can be a silent no-op: `linearGemvReduce: "parallel"` (and the
 fusions that build on it) applies only to the matrix shapes listed in the parallel GEMV table

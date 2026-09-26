@@ -68,9 +68,9 @@ them is lost:
   right shape and dtype, so nothing downstream would notice it.
 - storage is **mixed**: embeddings are int8 (ADR
   [0019](../../../docs/decisions/0019-i8-weight-execution.md)) and linear weights are packed int4
-  (ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md)). Neither alone works here — the
-  embeddings are the majority of the parameters and are not int4-eligible, while the linear weights
-  are what int4 exists for. The tied `lm_head` shares its tensor with the main embedding, so it is
+  (ADR [0069](../../../docs/decisions/0069-packed-w4-storage.md)). The embeddings are the majority
+  of the parameters; the runtime can execute int4 embeddings too (ADR 0069, addendum 6), but this
+  recipe keeps them at int8, while the linear weights are what int4 exists for. The tied `lm_head` shares its tensor with the main embedding, so it is
   rounded exactly once, on the int8 side. The form check counts the storage dtypes of the written
   container against the two fake-quant ledgers, because a weight that falls out of the eligibility
   test is otherwise left as float32 in silence.
@@ -527,16 +527,21 @@ distribution is spelled out by the caller, since `fromPretrained` has no default
 
 ## Quant execution variants
 
-E2B distributions provide `i4` (reference summation), `i4-gemvpar` (parallel
-GEMV), and `i4-fast` (parallel GEMV plus RMS-add fusion). The default is
-`i4-fast`; all three reference the same model and drafter weight files.
-E4B entries carry the same three quants over the model weights alone; their
-default is `i4` for now, until the faster seats are measured on E4B.
+E2B distributions provide `i4` (reference summation for GEMV and attention),
+`i4-gemvpar` (parallel GEMV and parallel attention), and `i4-fast` (parallel GEMV,
+RMS-add fusion, and parallel attention with fused row statistics —
+`stateAttentionReduce: "parallel-fused"`). The default is `i4-fast`; all three
+reference the same model and drafter weight files. The attention form is a quant
+declaration like the others: `i4` declares none, so it runs the runtime's reference
+path. E4B entries carry the same three quants and the same declarations over the
+model weights alone; their default is `i4` for now, until the faster seats are
+measured on E4B.
 
 Explicit runtime options override each quant setting, including
 `fuseRmsNormAdd: false`. Reassembling into a new output directory updates the
 metadata without requantizing weights. Existing distributions and pinned public
-revisions remain unchanged. The `karume/5` manifest needs a hub/models reader
-of 0.13.0 or later.
+revisions remain unchanged. A manifest that declares `stateAttentionReduce` needs a
+hub/models reader that knows that key (the release after 0.13.0); older readers
+reject it.
 Submission policy and prefill buckets are separate host options.
 See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).

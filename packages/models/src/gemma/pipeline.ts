@@ -289,14 +289,14 @@ export type Gemma4PipelineOptions = {
     phase: Gemma4RunPhase,
   ) => void;
   /**
-   * states 形 attention ③PV の縮約形（省略時は {@link GEMMA4_STATE_ATTENTION_REDUCE} =
-   * `"parallel"`）。
+   * states 形 attention ①QK / ③PV の縮約形。明示値 → 選択 quant の session → runtime の参照経路
+   * `"sequential"` の順で解決する（他の quant 実行ノブと同じ規則 — ADR 0104 追記 2026-09-26）。
+   * fromAssets には quant が無いため、未指定なら sequential。家族のコード既定は持たない。
    *
    * `"parallel"` は KV 長方向を 16 レーンで分担する変種（perf-ledger K-12）で、decode の
    * attention が KV 長に比例して伸びる形を潰す（P=16K で 82 → 41 ms/token）。縮約順が違うので
    * `"sequential"`（runtime の参照経路）とビット同一ではないが、gemma4 の greedy / chat golden は
-   * 両者で同一 — 既定への昇格はユーザーの品質裁定（2026-09-03）と golden の再走を同一コミットで
-   * 行った（ADR 0058 決定 6・ADR 0067 追記 2026-09-03）。`"sequential"` は parity の突合や
+   * 両者で同一（ADR 0058 決定 6・ADR 0067 追記 2026-09-03）。`"sequential"` は parity の突合や
    * 「順序依存の差を疑う」ときに戻す口。
    * `"parallel-fused"` は少数行・短い列上限で行統計と PV を融合する任意指定（ADR 0102）。
    * 加算順は parallel と同じで、対象外の形は parallel の経路を使う。
@@ -382,16 +382,6 @@ export type Gemma4PipelineOptions = {
     readonly gate?: SpeculationGateOptions;
   };
 };
-
-/**
- * gemma4 パイプラインが Session に与える ③PV の縮約形の既定
- * （{@link Gemma4PipelineOptions.stateAttentionReduce}）。
- *
- * MUST: runtime 側の既定（`"sequential"` = 参照経路 — ADR 0058 決定 2）は動かさない。既定を
- * 変えるのは「品質裁定を経た家族のパイプライン」だけで、低レベル面（`createSession` を自分で
- * 呼ぶ消費者・decode 系列の検収門）は参照経路のまま。
- */
-export const GEMMA4_STATE_ATTENTION_REDUCE: StateAttentionReduce = "parallel";
 
 /**
  * gemma4 パイプラインが使う prefill バケットの既定
@@ -571,8 +561,11 @@ type Gemma4State = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly session: Session;
-  /** Session 構築に使った不変の設定。中間メモリ見積りにも同じ値を渡す。 */
-  readonly stateAttentionReduce: StateAttentionReduce;
+  /**
+   * Session 構築に使った不変の設定。中間メモリ見積りにも同じ値を渡す（未指定 = 欄ごと無い =
+   * 見積りも runtime の既定で読む）。
+   */
+  readonly stateAttentionReduce?: StateAttentionReduce;
   /**
    * 製品グラフの宣言（`estimateSessionMemory` の材料 — ADR 0070 決定 5 の estimator は
    * `graph + 常駐計画` から純関数で出る）。
@@ -1120,9 +1113,9 @@ class GemmaPipeline {
           options.linearGemvReduce === "parallel-subgroup32",
       });
     const ownsGpu = options.gpu === undefined;
-    // ③PV の縮約形は家族の既定（K-12 昇格済み）— 呼び手が明示すればそれに従う。予算は
+    // quant 実行ノブ（③PV の縮約形を含む）は合成済みの値（明示 > quant 宣言）だけを渡し、
     // 未指定なら欄ごと渡さない（既定値をここに写すと、runtime 側で既定が動いたときに
-    // この家族だけ古い値で走る）。drafter Session にも同じノブを渡す。
+    // この家族だけ古い値で走る — 予算も同じ）。drafter Session にも同じノブを渡す。
     const sessionOptions = {
       ...(options.fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd: options.fuseRmsNormAdd }),
       ...(options.fuseLinearStaticQuantize === undefined
@@ -1133,7 +1126,9 @@ class GemmaPipeline {
         : { packedStaticQuantize: options.packedStaticQuantize }),
       ...(options.rmsNormReduce === undefined ? {} : { rmsNormReduce: options.rmsNormReduce }),
       ...(options.submitPolicy === undefined ? {} : { submitPolicy: options.submitPolicy }),
-      stateAttentionReduce: options.stateAttentionReduce ?? GEMMA4_STATE_ATTENTION_REDUCE,
+      ...(options.stateAttentionReduce === undefined
+        ? {}
+        : { stateAttentionReduce: options.stateAttentionReduce }),
       ...(options.linearGemvReduce === undefined
         ? {}
         : { linearGemvReduce: options.linearGemvReduce }),
@@ -1189,7 +1184,9 @@ class GemmaPipeline {
         gpu,
         ownsGpu,
         session,
-        stateAttentionReduce: sessionOptions.stateAttentionReduce,
+        ...(sessionOptions.stateAttentionReduce === undefined
+          ? {}
+          : { stateAttentionReduce: sessionOptions.stateAttentionReduce }),
         ...(greedyOutput === undefined ? {} : { greedyOutput }),
         graph: model.graph,
         wiring,
@@ -1562,7 +1559,9 @@ class GemmaPipeline {
       },
       maxStorageBufferBindingSize,
       maxBufferSize,
-      stateAttentionReduce: this.#state.stateAttentionReduce,
+      ...(this.#state.stateAttentionReduce === undefined
+        ? {}
+        : { stateAttentionReduce: this.#state.stateAttentionReduce }),
       ...budget,
     });
     // 小出力 decode の補助 Session と、PLE を GPU 常駐にした席のぶん（ADR 0085 追記）。

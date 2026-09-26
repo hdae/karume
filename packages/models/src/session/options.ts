@@ -63,6 +63,8 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
     attentionScoreStorage === undefined ? {} : { attentionScoreStorage },
   linearGemvReduce: ({ linearGemvReduce }) =>
     linearGemvReduce === undefined ? {} : { linearGemvReduce },
+  stateAttentionReduce: ({ stateAttentionReduce }) =>
+    stateAttentionReduce === undefined ? {} : { stateAttentionReduce },
   fuseRmsNormAdd: ({ fuseRmsNormAdd }) => fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd },
   fuseLinearStaticQuantize: ({ fuseLinearStaticQuantize }) =>
     fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize },
@@ -96,6 +98,9 @@ const SCORE_STORAGES: Readonly<
 > = { f32: true, f16: true };
 const LINEAR_GEMV_REDUCES: Readonly<Record<NonNullable<SessionOptions["linearGemvReduce"]>, true>> =
   { sequential: true, parallel: true, "parallel-subgroup32": true };
+const STATE_ATTENTION_REDUCES: Readonly<
+  Record<NonNullable<SessionOptions["stateAttentionReduce"]>, true>
+> = { sequential: true, parallel: true, "parallel-fused": true };
 
 /**
  * 欄 1 つぶんの値域の門（欄が無ければ通す）。
@@ -124,6 +129,10 @@ const VALUE_GATES: {
     linearGemvReduce === undefined || isOneOf(LINEAR_GEMV_REDUCES, linearGemvReduce)
       ? undefined
       : "linearGemvReduceが不正",
+  stateAttentionReduce: ({ stateAttentionReduce }) =>
+    stateAttentionReduce === undefined || isOneOf(STATE_ATTENTION_REDUCES, stateAttentionReduce)
+      ? undefined
+      : "stateAttentionReduceが不正",
   fuseRmsNormAdd: ({ fuseRmsNormAdd }) =>
     fuseRmsNormAdd === undefined || typeof fuseRmsNormAdd === "boolean"
       ? undefined

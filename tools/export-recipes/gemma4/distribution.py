@@ -207,7 +207,8 @@ GEMMA4_OUTPUT_PATHS: Mapping[str, str] = {
 
 #: 容器の束縛表に**必ず在る**格納の語彙。製品グラフは混成なので 2 つとも要求する（他
 #: family の {@link assert_storage} は 1 つずつしか見ないので、表を 2 枚持って 2 度掛ける）。
-#: i8 は埋め込み（i4 適格外・recipe README の "not int4-eligible"）・i4 は linear の重み。
+#: i8 は埋め込み（i4 は runtime 上は適格〈ADR 0069 追記 6〉だが、この recipe は i8 に留める
+#: 選択をしている）・i4 は linear の重み。
 #: 片方だけを要求すると「埋め込みまで i4 に落ちた系列」「linear が i8 のままの系列」が
 #: それぞれ素通りする — どちらも shape も manifest も正しいまま、品質と速度だけが変わる。
 #: drafter は**単一格納**（linear まで i8 — `gemma4/export_drafter.py` の実測）なので、要求は
@@ -265,45 +266,65 @@ def gemma4_weights(model: str) -> Mapping[str, Mapping[str, WeightFiles]]:
 #: いない drafter の格納を名乗らない）。
 GEMMA4_DRAFTER_QUANT_NOTE = " The drafter head is int8 throughout."
 
-#: 同じ格納系列に参照加算・GEMV並列加算・RMS融合を用意する（ADR 0098 / 0104）。
-#: 明示したi4の意味を保持し、既定quantだけを高速化付きへ向ける。
-#: `i4` の説明の drafter の 1 文は {@link gemma4_quants} がモデルごとに足す。
+#: 同じ格納系列に参照加算・並列加算・融合を用意する（ADR 0098 / 0104）。
+#: `i4` は `session` を空に保つ = GEMV も attention も runtime の参照経路（ADR 0104 追記
+#: 2026-09-26 — attention の縮約形も manifest の宣言になり、家族のコード既定は無い）。
+#: `i4-gemvpar` は従来の実効（GEMV 並列 + attention 並列）を宣言で保存する席、`i4-fast` は
+#: E2B の実測（2026-09-26・B570）で全フラグが速度低下なしだった束。
+#: `i4` の説明の drafter の 1 文と、速度の実測の有無の 1 文は {@link gemma4_quants} が
+#: モデルごとに足す。
 GEMMA4_QUANTS: Mapping[str, Any] = {
     GEMMA4_DTYPE: {
         "weights": {},
         "session": {},
         "label": "Packed int4 linear, int8 embeddings",
-        "description": "The only storage series: the main model's linear weights in packed int4"
-        " (group 32) and its embedding tables in int8, which are not int4-eligible.",
+        "description": "Packed int4 (group 32) linear weights and int8 embedding tables (a recipe"
+        " choice); GEMV and attention use the reference summation order.",
     },
     "i4-gemvpar": {
         "weights": {},
-        "session": {"linearGemvReduce": "parallel"},
-        "label": "Packed int4 with parallel GEMV",
-        "description": "The same packed weights as i4, with parallel GEMV summation. "
-        "Faster on tested E2B devices; rounding and generated tokens can differ. "
-        "Select i4 for the reference summation order.",
+        "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
+        "label": "Packed int4 with parallel GEMV and attention",
+        "description": "The same packed weights as i4, with parallel GEMV and attention "
+        "summation. Rounding and generated tokens can differ. "
+        "Select i4 for the reference order.",
     },
     "i4-fast": {
         "weights": {},
-        "session": {"linearGemvReduce": "parallel", "fuseRmsNormAdd": True},
-        "label": "Packed int4 with parallel GEMV and RMS fusion",
-        "description": "Same weights as i4; parallel GEMV and RMS-add fusion for E2B. "
-        "Use i4 for reference summation or i4-gemvpar without fusion. "
+        "session": {
+            "linearGemvReduce": "parallel",
+            "fuseRmsNormAdd": True,
+            "stateAttentionReduce": "parallel-fused",
+        },
+        "label": "Packed int4 with parallel GEMV, RMS fusion and fused attention",
+        "description": "Same weights as i4; parallel GEMV, RMS-add fusion, fused parallel "
+        "attention. Use i4 for reference summation, i4-gemvpar without fusion. "
         "Requires fusion-option support.",
     },
+}
+
+#: 並列・融合の席（`i4-gemvpar` / `i4-fast`）の説明に足す、速度の実測の有無の 1 文。
+#: MUST: キー集合は帰属表（`GEMMA4_UPSTREAM`）と一致する（tests が固定する）— 計っていない
+#: モデルの席に「速い」と書かない（E4B の束は E4B のベンチ後に決める）。
+GEMMA4_SPEED_NOTE: Mapping[str, str] = {
+    "e2b": " Faster on tested E2B devices.",
+    "e4b": " Speed not yet measured on E4B.",
 }
 
 
 def gemma4_quants(model: str) -> dict[str, Any]:
     """モデルの quant 表（席は全モデル共通の 3 つ・drafter を配るモデルだけ `i4` に 1 文足す）。
 
-    NOTE: E4B も E2B と同じ 3 席を当面そのまま持つ — どの席を既定にするか（束の中身）は
-    実測で決める（{@link GEMMA4_DEFAULT_QUANT}）。
+    並列・融合の 2 席には速度の実測の有無を 1 文足す（{@link GEMMA4_SPEED_NOTE}）。
+
+    NOTE: E4B も E2B と同じ 3 席・同じ宣言を当面そのまま持つ — どの席を既定にするか・束の
+    中身は E4B の実測で決める（{@link GEMMA4_DEFAULT_QUANT}）。
     """
     quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
     if gemma4_has_drafter(model):
         quants[GEMMA4_DTYPE]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
+    for name in ("i4-gemvpar", "i4-fast"):
+        quants[name]["description"] += GEMMA4_SPEED_NOTE[model]
     return quants
 
 

@@ -59,3 +59,41 @@ Status: acceptedは決定そのものの承認状態であり、以下の項目�
 `quants[].session` の欄がそのまま引き継がれている（0109 決定 2）。「重み shard 取得前の admission」の
 shard は、ADR [0108](0108-container-format.md) 以降はコンテナの part を指す。格納の正本は codec / layout
 （0108 決定 12 / 13・[container-v1](../container-v1.md) §6）。
+
+## 追記（2026-09-26）— `stateAttentionReduce` を manifest 語彙へ昇格し、models の家族既定を撤去する
+
+利用者裁定（2026-09-26「昇格 = a」）。states 形 attention の縮約形 `stateAttentionReduce`
+（`"sequential"` / `"parallel"` / `"parallel-fused"` — runtime `SessionOptions` と同じ値域）を hub の
+`SessionSpec` に加え、他の quant 実行ノブと同じ合成規則（明示 > quant 宣言 > runtime 既定 —
+[ADR 0111](0111-session-options-composition.md)）に乗せた。Gemma の受理表は true、他 7 家族は false。
+
+**撤去したもの**: `@karume/models` のコード既定 `GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`（全 quant 席と
+`fromAssets` へ注入していた）。これがあると `session` が空の `i4` 席も `fromAssets` も runtime の参照経路に
+ならず、[ADR 0110](0110-practical-tier-numerics-contract.md) 決定 1（実用層の束の正本は manifest の quant 席
+だけで、models 側に値の既定表を持たない）と衝突していた（perf-recon の Fable レビュー F01）。実効値はいまは合成の結果だけで決まる。
+
+**配布 recipe の宣言**（従来の実効を宣言で保存し、挙動変更を最小にする）:
+
+| 系列 / 席                        | 撤去前の実効（attention） | 宣言（`session`）                                                                            |
+| -------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------- |
+| 通常 E2B / E4B `i4`              | `parallel`（家族既定）    | 空 = `sequential`（**挙動変更**）                                                            |
+| 通常 E2B / E4B `i4-gemvpar`      | `parallel`（家族既定）    | `linearGemvReduce: parallel`・`stateAttentionReduce: parallel`                               |
+| 通常 E2B / E4B `i4-fast`         | `parallel`（家族既定）    | `linearGemvReduce: parallel`・`fuseRmsNormAdd: true`・`stateAttentionReduce: parallel-fused` |
+| QAT E2B / E4B `i4`               | `parallel`（家族既定）    | 空 = `sequential`（**挙動変更**・QAT E4B では既定席）                                        |
+| QAT E2B `i4-gemvpar` / `i4-fast` | `parallel`（家族既定）    | 従来の宣言 + `stateAttentionReduce: parallel`（束の中身の見直しは QAT のベンチ後）           |
+
+- 通常 E2B の `i4-fast` を `parallel-fused` にしたのは同日の実測による（Intel Arc B570・`tools/flag-bench`・
+  quant `i4` + `stateAttentionReduce: sequential` を基準・ABBA 2 巡・96 token・`outputs/bench/flag-bench/2026-09-26/`）。
+  GPU decode ms/step の基準比は GEMV parallel −34.1% / RMS→add 融合 −8.3% / attention parallel −16.0% /
+  parallel-fused −16.2% / 3 つ全部（attention parallel）−46.9% / 3 つ全部（parallel-fused）−47.9%。壁時計
+  （計測 OFF の別走行）も同じ順で −28.0% / −28.7%。token 列は全設定で訪問間同一かつ基準と同一。速度が下がる
+  フラグは無かった。parallel-fused の加算順は parallel と同じ（[ADR 0102](0102-state-attention-stats-pv-fusion.md)）。
+- E4B（通常）は同じ 3 席を E2B と同じ宣言で持ち、既定は `i4` のまま。E4B の説明文は速度を名乗らず
+  「未計測」と書く。束と既定は E4B のベンチ後に決める。QAT E2B / E4B の束も未計測。
+- `fromAssets` は manifest を持たないので、明示しなければ `sequential`（従来は `parallel`）。
+- この変更より前に組んだ配布（公開済みの pin を含む — 宣言を持たない）を新しい models で読むと、全 quant 席が
+  `sequential` で走る。宣言を持つ配布へ上げ直すまでの間の挙動で、明示の `stateAttentionReduce` で戻せる。
+- **互換**: 旧 reader（0.13.x の hub）は `session` の未知キーを拒否する（本 ADR「保存語彙と互換性」と同じ）。
+  `stateAttentionReduce` を宣言する新しい配布は、このキーを知る hub / models でしか読めない — CHANGELOG に
+  Breaking として記す。公開済みの配布と pin はこの変更で書き換えず、再アップロードと pin の更新は次リリースに
+  まとめる（[ADR 0073](0073-models-source-pin.md)）。

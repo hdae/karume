@@ -118,6 +118,14 @@ known-issues の Metal 節）。
 検証門は決定 4 の 3 点セット（参照経路の門は無変更・A/B 帯門・census 門）を段ごとに持つ。既定への昇格は
 `Gemma4Pipeline` で済（決定 6 の品質裁定 2026-09-03）で、runtime の既定は `"sequential"` のまま。
 
+**2026-09-26 追補**: `Gemma4Pipeline` のコード既定（`"parallel"`）は撤去し、席の値は quant 席の manifest
+宣言（`session.stateAttentionReduce` — 語彙へ昇格）が決めるようにした（[ADR 0104](0104-gemma-fast-quant.md)
+追記 2026-09-26）。家族の既定を models のコードに持つと `session` が空の席まで参照経路でなくなり、
+[ADR 0110](0110-practical-tier-numerics-contract.md) 決定 1（実用層の束の正本は manifest の quant 席だけで、
+models 側に値の既定表を持たない）と衝突するため。
+宣言の無い席（`i4`）と `fromAssets` は runtime の参照経路 `"sequential"` で走り、高速な縮約形は
+`i4-gemvpar` / `i4-fast` の宣言で選ばれる。
+
 ## 追記（2026-09-13）— runtimeの参照既定とmodelsの性能既定を区別する
 
 利用者は「数値的に一致する検証済み経路」と「できるだけ高速なモデル既定」の両立を再確認し、

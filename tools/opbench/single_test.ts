@@ -211,6 +211,25 @@ Deno.test("sessionOptionsOf: 配布の既定 quant（i4-fast）が宣言する�
   });
 });
 
+Deno.test("sessionOptionsOf: attention の縮約形（通常 E2B の i4-fast の宣言）を写し、綴りの外は落ちる", () => {
+  // 通常 Gemma E2B の i4-fast（ADR 0104 追記 2026-09-26）— attention の縮約形も manifest 語彙。
+  const fast = {
+    linearGemvReduce: "parallel",
+    stateAttentionReduce: "parallel-fused",
+    fuseRmsNormAdd: true,
+  } as const;
+  assertEquals(sessionOptionsOf(fast), fast);
+  assertEquals(sessionOptionsOf(fast, { stateAttentionReduce: "sequential" }), {
+    ...fast,
+    stateAttentionReduce: "sequential",
+  });
+  assertThrows(
+    () => sessionOptionsOf({ stateAttentionReduce: "parallel-subgroup32" }),
+    Error,
+    "stateAttentionReduce",
+  );
+});
+
 Deno.test("sessionOptionsOf: 真偽値のノブに真偽値以外が来たら落ちる", () => {
   assertThrows(() => sessionOptionsOf({ fuseRmsNormAdd: "yes" }), Error, "fuseRmsNormAdd");
   assertThrows(() => sessionOptionsOf({}, { fuseRmsNormAdd: "yes" }), Error, "真偽値でない");

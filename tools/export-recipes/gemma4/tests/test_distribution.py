@@ -212,11 +212,15 @@ class TestGemma4Layout:
         assert list(model["quants"]) == ["i4", "i4-gemvpar", "i4-fast"]
         assert model["defaultQuant"] == "i4-fast"
         assert model["quants"]["i4-gemvpar"]["weights"] == model["quants"]["i4"]["weights"]
-        assert model["quants"]["i4-gemvpar"]["session"] == {"linearGemvReduce": "parallel"}
+        assert model["quants"]["i4-gemvpar"]["session"] == {
+            "linearGemvReduce": "parallel",
+            "stateAttentionReduce": "parallel",
+        }
         assert model["quants"]["i4-fast"]["weights"] == model["quants"]["i4"]["weights"]
         assert model["quants"]["i4-fast"]["session"] == {
             "linearGemvReduce": "parallel",
             "fuseRmsNormAdd": True,
+            "stateAttentionReduce": "parallel-fused",
         }
         # 役割ごとに基底格納が違う（drafter は linear まで i8）ので、自動補完が 2 席とも
         # それぞれの唯一の dtype ラベルで埋める。
@@ -968,6 +972,7 @@ class TestGemma4E4B:
         """キー集合が帰属表と一致しないと、未宣言のモデルが組み立て時に KeyError で落ちる。"""
         assert set(gemma4_distribution.GEMMA4_DEFAULT_QUANT) == set(GEMMA4_UPSTREAM)
         assert set(gemma4_distribution.GEMMA4_TOKENIZER_SERIES) == set(GEMMA4_UPSTREAM)
+        assert set(gemma4_distribution.GEMMA4_SPEED_NOTE) == set(GEMMA4_UPSTREAM)
         for model, quant in gemma4_distribution.GEMMA4_DEFAULT_QUANT.items():
             assert quant in gemma4_distribution.gemma4_quants(model)
 
@@ -995,6 +1000,20 @@ class TestGemma4E4B:
         assert entry["defaultQuant"] == "i4"
         # E2B の既定は据え置き（E4B の暫定は E2B の束に影響しない）。
         assert gemma4_distribution.GEMMA4_DEFAULT_QUANT["e2b"] == "i4-fast"
+
+    def test_the_unmeasured_seats_carry_the_e2b_declarations_without_a_speed_claim(
+        self, tmp_path: Path
+    ) -> None:
+        """E4B の並列・融合の席は E2B と同じ宣言のまま、速いとは名乗らない（E4B は未計測）。"""
+        _, manifest = _assemble_e4b(tmp_path)
+        entry = manifest["models"]["e4b"]
+        e2b = gemma4_distribution.gemma4_quants("e2b")
+
+        for name in ("i4-gemvpar", "i4-fast"):
+            description = entry["quants"][name]["description"]
+            assert entry["quants"][name]["session"] == e2b[name]["session"]
+            assert "not yet measured" in description.lower()
+            assert "faster" not in description.lower()
 
     def test_the_card_names_no_drafter_for_an_e4b_only_manifest(self, tmp_path: Path) -> None:
         """配っていない drafter の上流を出所に書かない（base_model は manifest から導く）。"""

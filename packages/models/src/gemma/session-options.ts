@@ -10,7 +10,11 @@ import {
 
 type GemmaSessionOptions = Pick<
   SessionOptions,
-  "linearGemvReduce" | "fuseRmsNormAdd" | "fuseLinearStaticQuantize" | "packedStaticQuantize"
+  | "linearGemvReduce"
+  | "stateAttentionReduce"
+  | "fuseRmsNormAdd"
+  | "fuseLinearStaticQuantize"
+  | "packedStaticQuantize"
 >;
 
 /**
@@ -18,8 +22,12 @@ type GemmaSessionOptions = Pick<
  * 分類は全家族共通の {@link resolveSessionOptions} が持ち、ここは受理集合だけを決める。
  *
  * linear / attention の実行形（`linearCompute` / `attentionCompute` / `attentionScoreStorage`）を
- * 受けないのは、Gemma の配布形が宣言するのは並列 GEMV と融合の 4 欄だけで、それ以外の宣言は
- * 検証されていない組合せだから（ADR 0104）。
+ * 受けないのは、Gemma の配布形が宣言するのは並列 GEMV・states 形 attention の縮約形・融合の
+ * 5 欄だけで、それ以外の宣言は検証されていない組合せだから（ADR 0104）。
+ *
+ * `stateAttentionReduce` も他の欄と同じ規則に乗る（ADR 0104 追記 2026-09-26）: 宣言が無い quant
+ * 席（参照の `i4`）と manifest を持たない `fromAssets` は runtime の参照経路 `"sequential"` で
+ * 走る。家族のコード既定は持たない — 持つと `session` が空の席まで参照経路でなくなる。
  *
  * NOTE: `export` は同値テストがミラーの全 quant を同じ表で通すため（`mod.ts` / サブパス面には
  * 出さない — ADR 0008）。
@@ -29,6 +37,7 @@ export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: true,
+  stateAttentionReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
   packedStaticQuantize: true,

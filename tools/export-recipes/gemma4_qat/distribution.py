@@ -124,23 +124,29 @@ QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4"}
 
 
 def qat_quants(model: str) -> Mapping[str, Any]:
-    """参照quantを保持し、検収済みE2Bに並列・融合の定義を足す（ADR 0104）。"""
+    """参照quantを保持し、検収済みE2Bに並列・融合の定義を足す（ADR 0104）。
+
+    `i4` は `session` を空に保つ = GEMV も attention も runtime の参照経路。E2B の 2 席は
+    attention の縮約形 `"parallel"` を宣言で持つ（ADR 0104 追記 2026-09-26 — 以前は models の
+    家族既定が注入していた実効を manifest へ移した。束の中身の見直しは QAT のベンチ後）。
+    """
     checkpoint_name(model)
     quant = {
         "weights": {"model": "i4"},
         "session": {},
         "label": "Fixed mixed int2/int4/int8 with SRQ",
         "description": "Official mobile QAT integers and scales, preserved without "
-        "requantization; fixed activation rounding (SRQ).",
+        "requantization; fixed activation rounding (SRQ). GEMV and attention use the "
+        "reference summation order.",
     }
     quants = {"i4": quant}
     if model == "e2b":
         quants["i4-gemvpar"] = {
             **quant,
-            "session": {"linearGemvReduce": "parallel"},
-            "label": "Fixed mixed QAT with parallel GEMV",
-            "description": "The same fixed QAT weights and SRQ as i4, with parallel GEMV "
-            "summation. Rounding and generated tokens can differ. "
+            "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
+            "label": "Fixed mixed QAT with parallel GEMV and attention",
+            "description": "The same fixed QAT weights and SRQ as i4, with parallel GEMV and "
+            "attention summation. Rounding and generated tokens can differ. "
             "Select i4 for the reference summation order.",
         }
         quants["i4-fast"] = {
@@ -150,11 +156,12 @@ def qat_quants(model: str) -> Mapping[str, Any]:
                 "fuseRmsNormAdd": True,
                 "fuseLinearStaticQuantize": True,
                 "packedStaticQuantize": True,
+                "stateAttentionReduce": "parallel",
             },
             "label": "Fixed mixed QAT with parallel GEMV and fusion",
-            "description": "Same fixed QAT weights; parallel GEMV, RMS-add and linear-SRQ "
-            "fusion, and packed int8 activations for E2B. Use i4 for reference summation "
-            "or i4-gemvpar without fusion. Requires fusion-option support.",
+            "description": "Same fixed QAT weights; parallel GEMV and attention, RMS-add and "
+            "linear-SRQ fusion, packed int8 activations. Use i4 for reference summation, "
+            "i4-gemvpar without fusion. Requires fusion-option support.",
         }
     return quants
 

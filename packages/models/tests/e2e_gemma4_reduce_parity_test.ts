@@ -33,7 +33,7 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
 /**
- * 比べる 2 つの縮約順。**両方を明示的に渡す**（省略時の既定が `"parallel"` であることは census の
+ * 比べる 2 つの縮約順。**両方を明示的に渡す**（省略時の実効〈quant 宣言 → 参照経路〉は census の
  * 担当で、ここが見るのは「2 つの経路が同じ列を出す」ことだけ）。
  */
 const REDUCERS = ["parallel", "sequential"] as const;

@@ -71,6 +71,7 @@ Deno.test("toSessionOptions: SessionSpec の全キーを写す（キー追加の
     attentionCompute: "f16",
     attentionScoreStorage: "f16",
     linearGemvReduce: "sequential",
+    stateAttentionReduce: "parallel-fused",
     fuseRmsNormAdd: false,
     fuseLinearStaticQuantize: false,
     packedStaticQuantize: false,
@@ -92,12 +93,13 @@ Deno.test("toSessionOptions: 融合の明示falseとtrueを保持する", () => 
 
 // ---- 合成（明示 > quant 宣言 > runtime 既定）— ADR 0058 追記 2026-09-26 ------------------
 
-/** 7 キーを全て受ける受理表（規則そのものを家族の表から切り離して見るため）。 */
+/** 8 キーを全て受ける受理表（規則そのものを家族の表から切り離して見るため）。 */
 const ALL: FamilySessionPolicy = {
   linearCompute: true,
   attentionCompute: true,
   attentionScoreStorage: true,
   linearGemvReduce: true,
+  stateAttentionReduce: true,
   fuseRmsNormAdd: true,
   fuseLinearStaticQuantize: true,
   packedStaticQuantize: true,
@@ -109,6 +111,7 @@ const LINEAR_ONLY: FamilySessionPolicy = {
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,
+  stateAttentionReduce: false,
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
   packedStaticQuantize: false,
@@ -120,6 +123,7 @@ const FULL: Required<SessionSpec> = {
   attentionCompute: "f32",
   attentionScoreStorage: "f32",
   linearGemvReduce: "parallel",
+  stateAttentionReduce: "parallel",
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
   packedStaticQuantize: false,
@@ -186,6 +190,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
       attentionCompute: "attentionComputeが不正",
       attentionScoreStorage: "attentionScoreStorageが不正",
       linearGemvReduce: "linearGemvReduceが不正",
+      stateAttentionReduce: "stateAttentionReduceが不正",
       fuseRmsNormAdd: "fuseRmsNormAddはbooleanでなければならない",
       fuseLinearStaticQuantize: "fuseLinearStaticQuantizeはbooleanでなければならない",
       packedStaticQuantize: "packedStaticQuantizeはbooleanでなければならない",

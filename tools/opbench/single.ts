@@ -334,6 +334,9 @@ const SCORE_STORAGE: Readonly<Record<ScoreStorage, true>> = { f32: true, f16: tr
 const LINEAR_GEMV_REDUCE: Readonly<
   Record<NonNullable<SessionSpec["linearGemvReduce"]>, true>
 > = { sequential: true, parallel: true };
+const STATE_ATTENTION_REDUCE: Readonly<
+  Record<NonNullable<SessionSpec["stateAttentionReduce"]>, true>
+> = { sequential: true, parallel: true, "parallel-fused": true };
 
 const isAccepted = <T extends string>(
   accepted: Readonly<Record<T, true>>,
@@ -376,6 +379,9 @@ const SESSION_KNOBS: {
   }),
   linearGemvReduce: (value) => ({
     linearGemvReduce: choice("linearGemvReduce", LINEAR_GEMV_REDUCE, value),
+  }),
+  stateAttentionReduce: (value) => ({
+    stateAttentionReduce: choice("stateAttentionReduce", STATE_ATTENTION_REDUCE, value),
   }),
   fuseRmsNormAdd: (value) => ({ fuseRmsNormAdd: flag("fuseRmsNormAdd", value) }),
   fuseLinearStaticQuantize: (value) => ({

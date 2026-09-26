@@ -181,9 +181,15 @@ Deno.test({
 });
 
 /**
- * **census**（ADR 0058 決定 4 ③）— `Gemma4Pipeline` の既定（`GEMMA4_STATE_ATTENTION_REDUCE` =
- * `"parallel"`・K-12 昇格）で ③' のキー（`:par`）が**実際に走り**、③（逐次）のキーが 1 本も出ない
- * こと。`stateAttentionReduce: "sequential"` を渡せば逆になる（戻す口が生きていること）。
+ * **census**（ADR 0058 決定 4 ③）— ③PV の縮約形が**合成の規則どおり**に効くこと: 明示 > quant 宣言 >
+ * runtime の参照経路（ADR 0104 追記 2026-09-26 — 家族のコード既定は無い）。
+ *
+ * - `i4`（`session` が空）は参照経路 ③ で走り、③' のキーが 1 本も出ない（宣言の無い席が参照経路に
+ *   戻っていること — 家族のコード既定が再び紛れ込むと赤になる）。
+ * - `i4-gemvpar`（`stateAttentionReduce: "parallel"` を宣言）は ③' で走り、③ のキーが出ない。
+ * - 同じ席でも明示の `"sequential"` が宣言に勝つ（戻す口が生きていること）。
+ * - 既定 quant（E2B = `i4-fast`・`"parallel-fused"` を宣言）は ③ のキーが出ない。融合 kernel
+ *   （`attention_state_stats_pv`）が選ばれるかは列上限で決まるので、③' か融合のどちらかが走れば足りる。
  *
  * NOTE: 席が効くのは **decode（M = 1）の dispatch だけ**になった（perf-ledger K-13 段 2）。
  * prefill 計画（M = `chunkLength` ≥ 16）は席に依らず ③ₜ（V 行タイル共有・キーに幾何断片
@@ -195,13 +201,26 @@ Deno.test({
  * `greedyOutput`）。census はフック有りの経路のもので、この前提は計測を外しても変わらない。
  */
 Deno.test({
-  name:
-    "gemma4 配布形: パイプラインの既定は ③' 並列縮約で走り、sequential 指定で参照経路へ戻る（census）",
+  name: "gemma4 配布形: ③PV の縮約形は明示 > quant 宣言 > 参照経路の順で決まる（census）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
-    for (const reduce of ["parallel", "sequential"] as const) {
-      await t.step(`stateAttentionReduce = ${reduce}`, async () => {
+    const cases = [
+      { name: "i4（宣言なし）→ 参照経路", options: { quant: "i4" }, expect: "sequential" },
+      {
+        name: "i4-gemvpar（宣言 parallel）→ ③'",
+        options: { quant: "i4-gemvpar" },
+        expect: "parallel",
+      },
+      {
+        name: "i4-gemvpar + 明示 sequential → 参照経路",
+        options: { quant: "i4-gemvpar", stateAttentionReduce: "sequential" },
+        expect: "sequential",
+      },
+      { name: "既定 quant（宣言 parallel-fused）→ ③ 無し", options: {}, expect: "parallel-fused" },
+    ] as const;
+    for (const one of cases) {
+      await t.step(one.name, async () => {
         const gpu = await acquireGpu();
         const runs: SessionDiagnostics["lastRunPipelines"][] = [];
         try {
@@ -211,8 +230,7 @@ Deno.test({
             onRunDiagnostics: (diagnostics) => {
               runs.push(diagnostics.lastRunPipelines);
             },
-            // 既定を見る側は欄そのものを渡さない（省略時の既定が問われている）。
-            ...(reduce === "sequential" ? { stateAttentionReduce: "sequential" } : {}),
+            ...one.options,
           });
           try {
             const { messages } = caseOf(CASES[0].fixture);
@@ -228,21 +246,31 @@ Deno.test({
         } finally {
           gpu.destroy();
         }
-        const keys = mergeCensus(runs, reduce).map((row) => row.key);
+        const keys = mergeCensus(runs, one.name).map((row) => row.key);
         const pv = keys.filter((key) => key.startsWith("attention_state_pv"));
         assert(pv.length > 0, `内訳に ③PV のキーが無い（${keys.join(" / ")}）`);
         // 3 経路へ分ける（幾何断片 `:f32:reg…` = ③ₜ / `:par` = ③' / 残り = ③ 参照経路）。
         const tiled = pv.filter((key) => key.includes(":f32:reg"));
         const parallel = pv.filter((key) => key.includes(":par"));
         const sequential = pv.filter((key) => !key.includes(":f32:reg") && !key.includes(":par"));
+        // 行統計と PV の融合（ADR 0102）は ③PV と別のキー族。
+        const fused = keys.filter((key) => key.startsWith("attention_state_stats_pv"));
         // prefill 計画は席に依らず ③ₜ（席の指定は decode 側にしか効かない）。
         assert(tiled.length > 0, `③ₜ のキーが走っていない（${pv.join(" / ")}）`);
-        if (reduce === "parallel") {
-          assert(parallel.length > 0, `③' のキーが走っていない（${pv.join(" / ")}）`);
-          assertEquals(sequential, [], `既定なのに ③（逐次）のキーが混ざっている`);
-        } else {
+        if (one.expect === "sequential") {
           assert(sequential.length > 0, `③（逐次）のキーが走っていない（${pv.join(" / ")}）`);
-          assertEquals(parallel, [], `sequential 指定なのに ③' のキーが混ざっている`);
+          assertEquals(parallel, [], `参照経路のはずが ③' のキーが混ざっている`);
+          assertEquals(fused, [], `参照経路のはずが融合のキーが混ざっている`);
+        } else if (one.expect === "parallel") {
+          assert(parallel.length > 0, `③' のキーが走っていない（${pv.join(" / ")}）`);
+          assertEquals(sequential, [], `parallel の宣言なのに ③（逐次）のキーが混ざっている`);
+          assertEquals(fused, [], `parallel の宣言なのに融合のキーが混ざっている`);
+        } else {
+          assert(
+            parallel.length + fused.length > 0,
+            `③' も融合も走っていない（${keys.join(" / ")}）`,
+          );
+          assertEquals(sequential, [], `parallel-fused の宣言なのに ③（逐次）のキーが混ざっている`);
         }
       });
     }

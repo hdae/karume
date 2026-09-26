@@ -112,6 +112,33 @@ describe("Gemmaのquant実行設定", () => {
       "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
   });
+  it("stateAttentionReduceは他の欄と同じ規則で解け、宣言が無ければ欄を作らない", () => {
+    // 家族のコード既定は持たない（ADR 0104 追記 2026-09-26）。欄が無い = runtime の参照経路
+    // `"sequential"` — `session` が空の `i4` 席と、GEMV だけを宣言する席がこの形になる。
+    assertEquals(resolve({}, {}, "test"), {});
+    assertEquals(resolve({ linearGemvReduce: "parallel" }, {}, "test"), {
+      linearGemvReduce: "parallel",
+    });
+    // 通常 E2B の i4-fast と同じ宣言 — 3 欄とも宣言から素通りする。
+    const fastE2b = {
+      linearGemvReduce: "parallel",
+      stateAttentionReduce: "parallel-fused",
+      fuseRmsNormAdd: true,
+    } as const;
+    assertEquals(resolve(fastE2b, {}, "test"), fastE2b);
+    // 明示が宣言に勝つ（参照経路へ戻す口）。
+    assertEquals(resolve(fastE2b, { stateAttentionReduce: "sequential" }, "test"), {
+      ...fastE2b,
+      stateAttentionReduce: "sequential",
+    });
+    assertEquals(resolve({}, { stateAttentionReduce: "parallel" }, "test"), {
+      stateAttentionReduce: "parallel",
+    });
+    // 宣言を持たない面（fromAssets）も 3 値とも受ける。
+    for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
+      assertGemmaSessionOverrides({ stateAttentionReduce }, "test");
+    }
+  });
   it("SessionSpecの全キーが許可表か拒否パスのどちらかに現れる", () => {
     // hubのSESSION_KEYSとmodelsのWRITERSは`Required<SessionSpec>`の網羅表なので、ノブが
     // 増えれば型検査が落ちる。Gemmaだけは手書きの文字列比較4本（ADR 0104の3欄 +
@@ -123,12 +150,14 @@ describe("Gemmaのquant実行設定", () => {
       attentionCompute: "f16",
       attentionScoreStorage: "f16",
       linearGemvReduce: "sequential",
+      stateAttentionReduce: "sequential",
       fuseRmsNormAdd: false,
       fuseLinearStaticQuantize: false,
       packedStaticQuantize: false,
     };
     const accepted = [
       "linearGemvReduce",
+      "stateAttentionReduce",
       "fuseRmsNormAdd",
       "fuseLinearStaticQuantize",
       "packedStaticQuantize",
@@ -157,6 +186,7 @@ describe("Gemmaのquant実行設定", () => {
     // 通さないため（resolveは4種類の異なる理由でthrowする）。
     const invalid = [
       ["linearGemvReduce", "linearGemvReduceが不正"],
+      ["stateAttentionReduce", "stateAttentionReduceが不正"],
       ["fuseRmsNormAdd", "fuseRmsNormAddはbooleanでなければならない"],
       ["fuseLinearStaticQuantize", "fuseLinearStaticQuantizeはbooleanでなければならない"],
       ["packedStaticQuantize", "packedStaticQuantizeはbooleanでなければならない"],
@@ -231,6 +261,7 @@ describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
     const explicit = [
       {},
       { linearGemvReduce: "parallel" },
+      { stateAttentionReduce: "parallel-fused" },
       { fuseLinearStaticQuantize: true },
       { packedStaticQuantize: true, linearGemvReduce: "sequential" },
       { packedStaticQuantize: true, linearGemvReduce: "parallel" },

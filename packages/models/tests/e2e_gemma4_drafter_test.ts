@@ -48,7 +48,6 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { denoDirectory } from "@karume/hub/deno";
-import { GEMMA4_STATE_ATTENTION_REDUCE } from "../src/gemma/pipeline.ts";
 import type { Gemma4Assets } from "../src/gemma/pipeline.ts";
 // MUST: 入口は**公開面**から取る（`src/...` を直に掴むと、面が痩せていても門が緑のままになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../gemma.ts";
@@ -449,8 +448,9 @@ Deno.test({
     const targetOpened = await targetComponent();
     const drafterOpened = await drafterComponent();
     const gpu = await acquireGpu();
-    // 家族の既定（③PV の縮約形）で回す — 製品の decode と同じ実行形にする。
-    const sessionOptions = { stateAttentionReduce: GEMMA4_STATE_ATTENTION_REDUCE };
+    // ③PV は並列縮約で回す — 通常版の配布席（`i4-gemvpar` の `"parallel"`・`i4-fast` の
+    // `"parallel-fused"` も加算順は同じ — ADR 0102）の decode と同じ縮約順にする。
+    const sessionOptions = { stateAttentionReduce: "parallel" } as const;
     const target: Session = await targetOpened.createSession(gpu, sessionOptions);
     let drafterSession: Session | undefined;
     try {

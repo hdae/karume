@@ -511,8 +511,9 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   行ブロックなど）を含めた同一は `e2e_gemma4_speculative_test.ts` が 2 段で門にしている — 投機⑤ = verify 行 0 と
   decode の logits の u32 一致（attention 3 変種 × `linearGemvReduce: "parallel"`・attention `"sequential"` /
   `"parallel"` × GEMV `"sequential"`・RMS→add 融合〈と linear→SRQ 指定〉の組）、投機① / ② = 生成 token 列の
-  一致（① = `"sequential"` 席・② = 通常版 E2B の配布形の既定席 `i4-fast` + attention `"parallel"` の 3 ケース × 200 token と
-  ゲート付き = always）。2026-09-26 の Intel Arc B570 実測で全組一致・既定席の相違 0/200 × 3 ケース
+  一致（① = `"sequential"` 席・② = 通常版 E2B の配布形の既定席 `i4-fast` の 3 ケース × 200 token と
+  ゲート付き = always。下の B570 実測時点の attention は `"parallel"`（旧家族既定）で、同日 `i4-fast` の宣言は
+  `"parallel-fused"` へ移った — 新しい宣言での再測定は未了）。2026-09-26 の Intel Arc B570 実測で全組一致・既定席の相違 0/200 × 3 ケース
   （[research 2026-09-26](research/2026-09-26-gemma4-speculative-determinism.md)）。u32 の門は attention 3 変種 × GEMV 2 種 × RMS→add 融合の全 12 組（+ linear→SRQ 指定）を覆う（2026-09-26 に全組へ広げた）。
 - **保証は device ごとである**。門が確かめるのは gemma4 レーンを回した機の device だけで、門が赤の機では M=1 と M=4 の
   相違が実在する（縮約の実行順は grid-stride の分割が device の限界値で変わるので、機を跨いだ主張はしない）。
@@ -1401,16 +1402,20 @@ VRAM は容量に比例して伸びる（full 層 KV
   32 / 256 / 512 / 768 で一致したが、余裕の小さい step では反転しうる。検収の golden は配布形の
   宣言値で採る。
 - **`capacity` は token 列に効かない**（仕事量は論理長で切られ、値は容量非依存 — ビット門あり）。
-- **decode の attention は `Gemma4Pipeline` では並列縮約（③PV の KV 並列 = perf-ledger K-12〈M < 16 の計画〉・
-  ①QK の D 並列 = K-14〈M ≤ 8 の計画 — decode と投機の verify・2026-09-09 に M=1 から広げた〉）が既定**。prefill 計画（M ≥ 16）は席に依らず GEMM 骨格のタイル経路
-  ①ₜ / ③ₜ（K-13・参照経路とビット同一 — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)）（`GEMMA4_STATE_ATTENTION_REDUCE = "parallel"`）。①′ の帯は ① との差
+- **decode の attention の縮約形は quant 席の宣言で決まる**（2026-09-26 に models のコード既定 `"parallel"` を撤去し
+  manifest 語彙へ昇格 — [ADR 0104 追記](decisions/0104-gemma-fast-quant.md)）: `i4-gemvpar` と QAT E2B の `i4-fast` は
+  並列縮約 `"parallel"`（③PV の KV 並列 = perf-ledger K-12〈M < 16 の計画〉・①QK の D 並列 = K-14〈M ≤ 8 の計画 —
+  decode と投機の verify・2026-09-09 に M=1 から広げた〉）、通常 gemma4 の `i4-fast` は `"parallel-fused"`（同じ加算順で
+  行統計と PV を融合 — 下の「行統計/PV融合」節）、宣言の無い `i4` と `fromAssets` は runtime の参照経路 `"sequential"`。
+  prefill 計画（M ≥ 16）は席に依らず GEMM 骨格のタイル経路
+  ①ₜ / ③ₜ（K-13・参照経路とビット同一 — [research 2026-09-06](research/2026-09-06-state-attention-tiled-k13.md)）。①′ の帯は ① との差
   3.58e-7 / f64 参照との差 4.17e-7（帯 5e-6・[research 2026-09-06](research/2026-09-06-state-qk-parallel-k14.md)）。
   ③′ について:runtime の参照経路 `"sequential"` とは縮約順が
   違い（A/B 帯 5e-6・実測は ③ との差 2.4e-7・f64 参照との差 3.99e-7）、gemma4 の golden は両者で同一。
   帯の実測範囲は縮約長 live 1〜16,384（`gpu_state_attention_parallel_test.ts` の門 — 最悪値は live が
   小さい側で出る）+ 65,536（手実測）: live 4,096 / 16,384 / 65,536 で ③' vs f64 = 8.6e-9 / 1.5e-8 /
   1.8e-8（帯の 1/100・2026-09-03 レビュー実測）。
-  `Gemma4PipelineOptions.stateAttentionReduce: "sequential"` で参照経路へ戻せる。
+  `Gemma4PipelineOptions.stateAttentionReduce: "sequential"`（または quant `i4`）で参照経路へ戻せる。
   低レベル面（`createSessionFromContainer` / `createContainerSession` を自分で呼ぶ消費者）の既定は runtime のまま `"sequential"`。
 - `chunkLength` の上限は焼いた記号 `M` の trace 上限で、配布形が `pipelineConfig.maxChunkLength`
   として宣言する（E2B は 768）。超える値は宣言の門で落ちる（2026-09-03 実測: 宣言が無かった頃は
@@ -1632,7 +1637,8 @@ subgroup 変種の WGSL や選択条件を変えたときは、この 2 つを�
 
 `stateAttentionReduce: "parallel-fused"` は[ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md)の任意指定。
 M<=8・静的列上限<=1024のstates形だけを融合し、対象外とreadonlyは従来parallel経路を維持する。
-RTX/Chromeとカーネル数値の検収を行い、M2の性能検収は残る。モデルの既定・quant宣言は変更していない。
+RTX/Chromeとカーネル数値の検収を行い、M2の性能検収は残る。2026-09-26 に通常 gemma4 の `i4-fast` が宣言した
+（B570 の実測で参照比の速度低下なし・parallel とほぼ同等 — [ADR 0104 追記](decisions/0104-gemma-fast-quant.md)）。M2 と他の席は未変更。
 
 ## gemma4: PLE の GPU 常駐席が要るもの（2026-09-19・opt-in）
 

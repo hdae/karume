@@ -31,8 +31,13 @@
   前提となるbatchの一括読戻しとcontext予約は[ADR 0054](../docs/decisions/0054-resident-loop-and-fence.md)、[0066](../docs/decisions/0066-generation-context-state-slots.md)、[0083](../docs/decisions/0083-generation-api-surface.md)。
 - 高速化の既定は明示的なquant宣言で選ぶ。通常/QAT E2Bの新しい配布recipeは`i4-fast`をdefaultQuantにする。
   並列GEMVとRMS融合、QATだけlinear→SRQ融合を宣言する。旧`i4-gemvpar`も保持する。
-  呼び手の明示指定 → quant.session → runtime参照既定の順。旧`i4`・fromAssets・公開済み資産は自動変更しない。
-  E4Bは`i4`を維持する。[ADR 0104](../docs/decisions/0104-gemma-fast-quant.md)が正本。
+  attentionの縮約形`stateAttentionReduce`も2026-09-26にmanifest語彙へ昇格し、modelsの家族既定（parallel）は撤去した。
+  `i4`（session空）とfromAssetsはruntimeの参照経路sequential、`i4-gemvpar`とQAT E2Bの`i4-fast`はparallel、
+  通常の`i4-fast`はparallel-fused（B570実測でGPU decode −47.9%・token同一）を宣言する。
+  呼び手の明示指定 → quant.session → runtime参照既定の順。公開済み資産は次リリースの再アップロードまで自動変更しない
+  （新しいmodelsで旧manifestを読むと全席がsequential）。
+  通常E4Bは3席ともE2Bと同じ宣言・既定`i4`（未計測 — 束と既定はE4Bのベンチ後）。QAT E4Bは`i4`のみ。
+  [ADR 0104](../docs/decisions/0104-gemma-fast-quant.md)（追記 2026-09-26）が正本。
 - RMS→add融合はM2検収済みで、新しいE2B高速quantへ宣言する。融合＋投入768は比較画面の基準で、投入政策のモデル既定化は別の残件。
   RMS/GEMVのsubgroup方式は任意指定のみ。M2の既定採用は見送り、Deno 2.9.6は必要機能が未提供。
   [ADR 0099](../docs/decisions/0099-rms-norm-add-fusion.md)、[0100](../docs/decisions/0100-rms-subgroup-reduction.md)、[0101](../docs/decisions/0101-linear-gemv-subgroup.md)を参照。
@@ -42,7 +47,7 @@
 - [添付参照資料を現行コードで再検証](../docs/research/2026-09-14-reference-rope-optimization.md)。要素順を保つpermuteのコピーを省く（[ADR 0011](../docs/decisions/0011-layout-strategy.md#要素順を保つpermute2026-09-14)）。
   Gemma両E2Bのdecodeで100 dispatchを削減。数値設定・WGSLは不変。M2の20生成は出力一致、速度上昇は別時刻の比較なので全てを変更効果へ帰属しない。RMS→RoPE融合の試作は全体利得が小さく保留。
 - [attentionの行統計・PV融合](../docs/research/2026-09-15-attention-fusion.md)を任意指定`parallel-fused`で追加（[ADR 0102](../docs/decisions/0102-state-attention-stats-pv-fusion.md)）。
-  M≤8・列上限≤1024のstates形だけ。[M2の80生成](../docs/research/2026-09-15-linear-static-quantize-fusion.md#利用者のm2-attention結果)は出力一致したが速度の利得は無く、任意指定に残す。モデル既定は不変。
+  M≤8・列上限≤1024のstates形だけ。[M2の80生成](../docs/research/2026-09-15-linear-static-quantize-fusion.md#利用者のm2-attention結果)は出力一致したが速度の利得は無かった。2026-09-26にB570の実測で通常gemma4の`i4-fast`が宣言した（上の項）。
 - [保留候補の併用再検証](../docs/research/2026-09-15-held-combinations.md)は920生成とGPU帰属まで完了。
   最大併用を既定には採用しない。単独の[linear→SRQ融合](../docs/research/2026-09-15-linear-static-quantize-fusion.md)を任意指定`fuseLinearStaticQuantize`で統合（[ADR 0103](../docs/decisions/0103-linear-static-quantize-fusion.md)）。[M2の40生成](../docs/research/2026-09-15-m2-linear-srq-adoption.md)も出力一致し、小幅な改善方向。任意採用を維持し、同じ追試は再依頼しない。RMS融合と合わせた[quant宣言・明示指定優先](../docs/research/2026-09-15-gemma-fast-quant.md)を統合。広い併用は試作のまま。
 - [MiniCPM5](../examples/minicpm5/README.md) / [Qwen3](../examples/qwen3/README.md)はローカル変換資産を使う短文脈の対話CLI。

@@ -124,13 +124,17 @@ class TestQatQuants:
         assert list(modes) == ["i4", "i4-gemvpar", "i4-fast"]
         assert modes["i4"]["session"] == {}
         assert modes["i4-gemvpar"]["weights"] == modes["i4"]["weights"]
-        assert modes["i4-gemvpar"]["session"] == {"linearGemvReduce": "parallel"}
+        assert modes["i4-gemvpar"]["session"] == {
+            "linearGemvReduce": "parallel",
+            "stateAttentionReduce": "parallel",
+        }
         assert modes["i4-fast"]["weights"] == modes["i4"]["weights"]
         assert modes["i4-fast"]["session"] == {
             "linearGemvReduce": "parallel",
             "fuseRmsNormAdd": True,
             "fuseLinearStaticQuantize": True,
             "packedStaticQuantize": True,
+            "stateAttentionReduce": "parallel",
         }
 
     def test_unmeasured_e4b_keeps_its_single_reference_mode(self):

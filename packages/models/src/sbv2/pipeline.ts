@@ -565,6 +565,7 @@ export const SBV2_SESSION_POLICY: FamilySessionPolicy = {
   attentionCompute: false,
   attentionScoreStorage: false,
   linearGemvReduce: false,
+  stateAttentionReduce: false,
   fuseRmsNormAdd: false,
   fuseLinearStaticQuantize: false,
   packedStaticQuantize: false,

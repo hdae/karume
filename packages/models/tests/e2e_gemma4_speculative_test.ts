@@ -11,14 +11,15 @@
 //    （token/cycle）は README 2 ケースに床を置く（床を割る = drafter か受理判定の退行で、
 //    「動くが速くならない」形をここで落とす）。
 //    NOTE: 席を `"sequential"` に倒すのは、runtime の参照経路（decode〈M=1〉も verify〈M=4〉も
-//    ① + ③ の同じ縮約カーネル）で契約と床を採るためである。既定席の `"parallel"` も ①′ の適用
-//    条件が M ≤ 8 なので decode と verify は同じ縮約順を通り、M=1 / M=4 の一致は下の②（token 列）と
-//    ⑤（logits の u32）が別に門で固定している。
+//    ① + ③ の同じ縮約カーネル）で契約と床を採るためである。既定席の `"parallel-fused"` も ①′ と
+//    融合の適用条件が M ≤ 8 なので decode と verify は同じ縮約順を通り、M=1 / M=4 の一致は下の②
+//    （token 列）と⑤（logits の u32）が別に門で固定している。
 //    NOTE: 門は `speculative: "always"`（ゲート無しの常時投機）で回す — 床も厳密一致も「常に
 //    投機」の契約だからである。既定の自己採算ゲート（段 4-B ④・`speculative: true`）は最後の
 //    step が別に見る（列の一致だけが門で、落ちた step 数は壁時計依存なのでログのみ）。
 // ② **既定席の同一性**（`fromPretrained` の既定 = 配布形の既定 quant `i4-fast`〈GEMV parallel +
-//    RMS→add 融合〉+ models 既定の attention `"parallel"`）… ①と同じ 3 ケースを既定席で回し、
+//    RMS→add 融合 + attention `"parallel-fused"` — 3 つとも quant の宣言〉）… ①と同じ 3 ケースを
+//    既定席で回し、
 //    投機 / 非投機の token 列が一致する（相違 0）ことを門にする。自己採算ゲート付き
 //    （`speculative: true`）の列が always と一致することも同じ席で門にする — ゲートは壁時計で
 //    M=1 と M=4 を切り替えるので、その選択が出力を変えないこと（= 実用層のデバイス内決定性）は
@@ -460,7 +461,7 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
-// ②③④ 既定席（i4-fast + attention parallel）— 同一性・phase の観測・見積りの厳密門
+// ②③④ 既定席（i4-fast = GEMV parallel + RMS→add 融合 + attention parallel-fused）— 同一性・phase の観測・見積りの厳密門
 // ---------------------------------------------------------------------------
 
 /** run 1 本ぶんの観測（phase + その run の同期区間で読んだ診断）。 */
@@ -504,7 +505,7 @@ Deno.test({
     const k = GEMMA4_DRAFT_STEPS;
     try {
       await t.step(
-        "② 既定席（i4-fast + attention parallel）で投機 / 非投機の token 列が一致する",
+        "② 既定席（i4-fast）で投機 / 非投機の token 列が一致する",
         async () => {
           for (const name of CASES) {
             const golden = await readGoldenCase(name);

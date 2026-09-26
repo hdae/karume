@@ -1041,6 +1041,42 @@ Deno.test("parseManifest: quantのGEMV加算指定を保持し、未指定と不
   }
 });
 
+Deno.test("parseManifest: quantのattention縮約形を保持し、未指定と不正値を区別する", async (t) => {
+  for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
+    await t.step(stateAttentionReduce, () => {
+      const manifest = parseManifest(withModel({
+        quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce } } },
+      }));
+      assertEquals(manifest.models.m.quants.q.session, { stateAttentionReduce });
+    });
+  }
+  assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
+  // `parallel-subgroup32` は GEMV の語彙で attention には無い（綴りの取り違えを通さない）。
+  for (const value of ["auto", "Parallel", "parallel-subgroup32", 1, true, null]) {
+    await t.step(`${JSON.stringify(value)}は拒否`, () => {
+      assertThrows(
+        () =>
+          parseManifest(withModel({
+            quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce: value } } },
+          })),
+        HubError,
+      );
+    });
+  }
+  // 実配布の通常 E2B i4-fast と同じ形（GEMV・RMS 融合との同時宣言）を 1 件固定する。
+  await t.step("linearGemvReduce・fuseRmsNormAddと同時に宣言できる", () => {
+    const session = {
+      linearGemvReduce: "parallel",
+      stateAttentionReduce: "parallel-fused",
+      fuseRmsNormAdd: true,
+    } as const;
+    const manifest = parseManifest(withModel({
+      quants: { q: { weights: { net: "f16" }, session } },
+    }));
+    assertEquals(manifest.models.m.quants.q.session, session);
+  });
+});
+
 Deno.test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", async (t) => {
   for (const key of ["fuseRmsNormAdd", "fuseLinearStaticQuantize", "packedStaticQuantize"]) {
     for (const value of [false, true]) {
