@@ -51,7 +51,16 @@ import { encodePng } from "../src/image/png.ts";
 import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { openResults } from "../../runtime/tests/helpers/results.ts";
+import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
+import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  referenceMismatchMessage,
+  type ReferenceSettlement,
+  registerReferenceGate,
+  settleOrObserve,
+} from "../../runtime/tests/helpers/reference.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -104,6 +113,17 @@ const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 /** マット PNG と決着の置き場（`outputs/verify/<環境キー>/<日付>_birefnet/` — 消して安全）。 */
 const results = openResults("birefnet");
+/**
+ * マット logits の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。
+ *
+ * 実物は**グラフ出力そのもの**（sigmoid 前の logit `[1,1,H,W]` f32 を safetensors 1 本にした
+ * もの — テンソル名 = グラフの出力名・metadata なし）。量子化前の出力なので、f32 のどこか 1 ビット
+ * 動けば sha が動く。目視用のマット PNG / 白地合成 PNG は 8bit へ落とした後の像で、量子化境界を
+ * またがない差を見逃す（加えて PNG の圧縮はランタイムの版で変わりうる）ので sha の対象にしない。
+ */
+const references = openReferences(
+  new URL("fixtures/references/birefnet.json", import.meta.url),
+);
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
@@ -111,11 +131,15 @@ const IO_SUFFIX = ".safetensors";
 const seriesRoot = (series: Series): URL => new URL(`${series.name}/`, SERIES_PARENT);
 
 /**
- * マット PNG（目視確認用の成果物）の名前。**系列名を前に付ける** — 同じ名前へ書くと、後に
- * 走った系列のマットが先の系列のものを黙って置き換える。
+ * 実物（目視用のマット PNG / 白地合成 PNG と、sha の対象のマット logits safetensors）の名前。
+ * **系列名を前に付ける** — 同じ名前へ書くと、後に走った系列のマットが先の系列のものを黙って
+ * 置き換える。`file` は種類と拡張子（`matte.png` / `cutout.png` / `matte.safetensors`）。
  */
-const artifactName = (series: Series, caseName: string, kind: string): string =>
-  `${series.name}-${caseName}-${kind}.png`;
+const artifactName = (series: Series, caseName: string, file: string): string =>
+  `${series.name}-${caseName}-${file}`;
+
+/** 参照値のケース ID（系列 × 画像 — 同じ画像でも系列が違えば別のマット）。 */
+const referenceCaseId = (series: Series, caseName: string): string => `${series.name}/${caseName}`;
 
 /**
  * 実画像そのものを焼き直すコマンド（プロンプト / seed の正本は台本側）。台本は
@@ -263,10 +287,14 @@ const cutoutToPng = (
   return encodePng(rgba, image.width, image.height);
 };
 
+/** 実画像の群が揃った系列（参照門が数えるケースの範囲 — 登録時に同期で決まる）。 */
+const RUNNABLE_SERIES: Series[] = [];
+
 for (const series of SERIES) {
   const goldens = goldenCount(series);
   /** 実画像の群。golden と画像の**両方**が揃ってはじめて実走する。 */
   const realAvailable = goldens > 0 && IMAGES_PRESENT;
+  if (realAvailable) RUNNABLE_SERIES.push(series);
 
   if (!realAvailable) {
     console.warn(
@@ -348,59 +376,87 @@ for (const series of SERIES) {
       //
       // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 「PNG を渡したら
       // 意味のあるマットが返る」ところまでを検査にする。ついでに α マットと白地合成を PNG で
-      // 書き出す（数値の門だけでは形が見えないため — 目視確認用の成果物であって、門ではない）。
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, seriesRoot(series)));
-      // グラフ名は helpers/series-graphs.ts の 1 本から引く（門番と同じ正本）。
-      const parsed = prepareContainer(opened, seriesGraph(series.name));
-      const [outputName] = parsed.graph.outputs;
-      const width = staticDim(parsed, 3);
-      const height = staticDim(parsed, 2);
-      const inputName = parsed.graph.inputs[0].name;
+      // 書き出す（数値の門だけでは形が見えないため — 目視確認用の成果物で、sha の対象ではない）。
+      // sha の対象は量子化前の出力そのもの（マット logits の f32 safetensors — {@link references}）
+      // で、判別とは別の主張「同じ機で 1 ビットも動いていない」を言う。順序は 4 枚を回す →
+      // 判別 → 画像ごとに sha の決着を積む → 系列の決着を積む → sha の不一致を落とす（判別が
+      // 割れた出力から参照行を作らない）。
       const started = performance.now();
-
-      const gpu = await acquireGpu();
-      const session = await parsed.createContainerSession(gpu);
+      const elapsedMs = (): number => Math.round(performance.now() - started);
+      /** 画像ごとの前景比（判別の材料。途中で落ちた回も、測れたぶんを note に残す）。 */
       const ratios = new Map<string, number>();
+      const ratioNote = (): string =>
+        [...ratios].map(([name, ratio]) => `${name} ${ratio.toFixed(4)}`).join(" / ");
+      /** sha が参照と食い違った画像（全画像の決着を積み終えてからまとめて落とす）。 */
+      const mismatches: { readonly label: string; readonly settlement: ReferenceSettlement }[] = [];
       try {
-        // 4 枚を 1 Session で回す（重みは 964MB — 画像ごとに組み直す理由が無い）。
-        for (const real of REAL_CASES) {
-          const image = resizeRgb8(
-            await decodePng(await readImage(real.file), real.file),
-            width,
-            height,
-          );
-          const pixels = normalizeToNchw(image, IMAGE_MEAN, IMAGE_STD);
-          const output = (await session.run({
-            [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
-          }))[outputName];
-          // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-          assert(output.dtype === "f32", `${real.name}: マットの dtype が ${output.dtype}`);
-          ratios.set(real.name, foregroundRatio(output.data));
+        const opened = await openSeriesContainer(new URL(MODEL_FILE, seriesRoot(series)));
+        // グラフ名は helpers/series-graphs.ts の 1 本から引く（門番と同じ正本）。
+        const parsed = prepareContainer(opened, seriesGraph(series.name));
+        const [outputName] = parsed.graph.outputs;
+        const width = staticDim(parsed, 3);
+        const height = staticDim(parsed, 2);
+        const inputName = parsed.graph.inputs[0].name;
 
-          const alpha = alphaFromLogits(output.data);
-          await Deno.writeFile(
-            results.artifact(artifactName(series, real.name, "matte")),
-            await matteToPng(alpha, width, height),
-          );
-          await Deno.writeFile(
-            results.artifact(artifactName(series, real.name, "cutout")),
-            await cutoutToPng(image, alpha),
-          );
+        /** 画像ごとの sha の実物（判別が通ってから突き合わせる）。 */
+        const logits: {
+          readonly caseId: string;
+          readonly artifact: string;
+          readonly bytes: Uint8Array<ArrayBuffer>;
+          readonly elapsedMs: number;
+        }[] = [];
+        const gpu = await acquireGpu();
+        try {
+          // マット logits の sha をこの機の行として書きうる経路なので、キーを採ったアダプタと
+          // 実行アダプタの同一性を先に見る（複数 GPU の機で取り違えると別の機の行になる）。
+          assertAdapterMatchesEnvironment(gpu);
+          const session = await parsed.createContainerSession(gpu);
+          try {
+            // 4 枚を 1 Session で回す（重みは 964MB — 画像ごとに組み直す理由が無い）。
+            for (const real of REAL_CASES) {
+              const imageStarted = performance.now();
+              const image = resizeRgb8(
+                await decodePng(await readImage(real.file), real.file),
+                width,
+                height,
+              );
+              const pixels = normalizeToNchw(image, IMAGE_MEAN, IMAGE_STD);
+              const output = (await session.run({
+                [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
+              }))[outputName];
+              // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+              assert(output.dtype === "f32", `${real.name}: マットの dtype が ${output.dtype}`);
+              ratios.set(real.name, foregroundRatio(output.data));
+              logits.push({
+                caseId: referenceCaseId(series, real.name),
+                artifact: artifactName(series, real.name, "matte.safetensors"),
+                bytes: f32ArtifactBytes(outputName, output.shape, output.data),
+                elapsedMs: Math.round(performance.now() - imageStarted),
+              });
+
+              // 目視用の PNG（8bit へ落とした像 — sha の対象ではない）。
+              const alpha = alphaFromLogits(output.data);
+              await Deno.writeFile(
+                results.artifact(artifactName(series, real.name, "matte.png")),
+                await matteToPng(alpha, width, height),
+              );
+              await Deno.writeFile(
+                results.artifact(artifactName(series, real.name, "cutout.png")),
+                await cutoutToPng(image, alpha),
+              );
+            }
+          } finally {
+            await session.dispose();
+          }
+        } finally {
+          gpu.destroy();
         }
-      } finally {
-        await session.dispose();
-        gpu.destroy();
-      }
 
-      const ratioOf = (name: string): number => {
-        const ratio = ratios.get(name);
-        assert(ratio !== undefined, `${name} の前景比が無い`);
-        return ratio;
-      };
-      const note = REAL_CASES.map((real) => `${real.name} ${ratioOf(real.name).toFixed(4)}`)
-        .join(" / ");
-      const elapsedMs = performance.now() - started;
-      try {
+        const ratioOf = (name: string): number => {
+          const ratio = ratios.get(name);
+          assert(ratio !== undefined, `${name} の前景比が無い`);
+          return ratio;
+        };
         for (const personCase of REAL_PERSON_CASES) {
           for (const sceneCase of REAL_SCENE_CASES) {
             assert(
@@ -410,16 +466,66 @@ for (const series of SERIES) {
             );
           }
         }
+
+        // 判別が通った出力だけを参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばし、
+        // 実測 sha を積む — settleOrObserve）。
+        for (const entry of logits) {
+          const outcome = await settleOrObserve(references, results, {
+            id: entry.caseId,
+            artifact: entry.artifact,
+            bytes: entry.bytes,
+          });
+          await results.record({
+            id: entry.caseId,
+            ...outcome.fields,
+            elapsedMs: entry.elapsedMs,
+          });
+          if (outcome.settlement?.check.status === "fail") {
+            mismatches.push({ label: entry.caseId, settlement: outcome.settlement });
+          }
+        }
       } catch (cause) {
-        // 決着を残してから落とす（実物と前景比が手元に無いと、赤の読み解きが始められない）。
-        await results.record({ id: series.name, status: "fail", elapsedMs, note });
+        // 決着を残してから落とす（前景比が手元に無いと赤の読み解きが始められない。決着の無いまま
+        // 抜けると、同じ日の前回の走行の決着が席に居座る）。記録の I/O 失敗で元の例外を置き換えない
+        // （recordFailure）。
+        await recordFailure(results, {
+          id: series.name,
+          status: "fail",
+          elapsedMs: elapsedMs(),
+          note: `${ratioNote()} / 失敗: ${cause instanceof Error ? cause.message : String(cause)}`,
+        });
         throw cause;
       }
-      await results.record({ id: series.name, status: "pass", elapsedMs, note });
+      // sha の不一致は系列の決着にも出す（系列の行だけを読んでも赤が分かる）。
+      await results.record({
+        id: series.name,
+        status: mismatches.length === 0 ? "pass" : "fail",
+        elapsedMs: elapsedMs(),
+        note: mismatches.length === 0
+          ? ratioNote()
+          : `${ratioNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
+      });
       console.log(
-        `[karume] BiRefNet のマット PNG を ${results.dir.pathname} へ書いた` +
-          `（${series.name}-<ケース>-matte.png / -cutout.png）`,
+        `[karume] BiRefNet のマットを ${results.dir.pathname} へ書いた` +
+          `（${series.name}-<ケース>-matte.safetensors / -matte.png / -cutout.png）`,
+      );
+      // 決着は画像ごと・系列ごとに積み終えている（先に投げると実測 sha が結果に残らない）。
+      assert(
+        mismatches.length === 0,
+        mismatches.map(({ label, settlement }) =>
+          referenceMismatchMessage(label, settlement, references)
+        ).join("\n"),
       );
     },
   });
 }
+
+// GPU も資産も揃った系列だけが sha 門を走らせる（揃わない系列のケースは参照値の欠けとして
+// 数えない — 節ごと SKIP しているため）。
+const RUNNABLE = GPU_AVAILABLE && RUNNABLE_SERIES.length > 0;
+const CASE_IDS: readonly string[] = RUNNABLE_SERIES.flatMap((series) =>
+  REAL_CASES.map((entry) => referenceCaseId(series, entry.name))
+);
+if (RUNNABLE) references.warnMissing(CASE_IDS);
+// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "photo-corridor": {
+      "deno-intel-graphics-bmg-g21": "9b542797f4e3a3b8f93922eff71254676df2b3993ed7710d5acb1ae4f1d68b66"
+    },
+    "photo-landscape": {
+      "deno-intel-graphics-bmg-g21": "5794ad5954160bd4d0922e4725919dd4945e85a7aee2aa98b2dc5103de2ed043"
+    },
+    "photo-portrait": {
+      "deno-intel-graphics-bmg-g21": "8139f1a1bd5501fb8e33774cdff1f4c2121136f1e9a4413a800b41ce5287145d"
+    },
+    "photo-street": {
+      "deno-intel-graphics-bmg-g21": "5bc0c8524056a8c496db6e481bdee940f7b1495d82edd3001b5a30e7632353bc"
+    }
+  }
+}

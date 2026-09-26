@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "e2b/i4": {
+      "deno-intel-graphics-bmg-g21": "cb5e7583408c10f206b4d845fd28a4b0fd0f96809e62ce0049d18538b5dd2c0c"
+    },
+    "e2b/i4-fast": {
+      "deno-intel-graphics-bmg-g21": "fc2dac3e8162d3cd12d13ca82651132b7611826d4cbcc9c43e5aa662f7504101"
+    },
+    "e2b/i4-gemvpar": {
+      "deno-intel-graphics-bmg-g21": "fc2dac3e8162d3cd12d13ca82651132b7611826d4cbcc9c43e5aa662f7504101"
+    },
+    "e4b/i4": {
+      "deno-intel-graphics-bmg-g21": "db74c5e34cfb45529038b72f12fa9fb69016682ac775cafcdb0a32b4c8d4c794"
+    },
+    "e4b/i4-fast": {
+      "deno-intel-graphics-bmg-g21": "2bd5609af54d9098840f6026cf6fe6abb1fcec3aa376be77c80794800c9ae7f7"
+    },
+    "e4b/i4-gemvpar": {
+      "deno-intel-graphics-bmg-g21": "2bd5609af54d9098840f6026cf6fe6abb1fcec3aa376be77c80794800c9ae7f7"
+    }
+  }
+}

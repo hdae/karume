@@ -58,6 +58,16 @@ import { extractFeatures, FEATURE_DIM, SAMPLE_RATE } from "../src/vowel-detector
 import { logitsToSegments, toLab } from "../src/vowel-detector/postprocess.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
+import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
+import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  referenceMismatchMessage,
+  type ReferenceOutcome,
+  registerReferenceGate,
+  settleOrObserve,
+} from "../../runtime/tests/helpers/reference.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -266,6 +276,25 @@ const INPUT_NAME = "features";
 
 const audioFile = (entry: Case): string => `vowel-${entry.name}.wav`;
 
+/** ロジットの実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_vowel-detector/` — 消して安全）。 */
+const results = openResults("vowel-detector");
+/**
+ * ロジットの sha256 参照値（環境キーごとの行 — `helpers/reference.ts`）。ケース ID は
+ * ケース名そのもの。
+ *
+ * `.lab` の完全一致とは**主張が違う** — `.lab` は argmax を経た離散の列なので、ロジットが
+ * 動いてもラベルが変わらなければ通る。こちらはロジットそのもの（f32 のビット列）を固定し、
+ * 「同じ機で 1 ビットも動いていない」を言う。実物はロジット 1 本の safetensors
+ * （{@link logitsArtifact} — `f32ArtifactBytes`: テンソル名 = グラフの出力名・metadata なし）で、
+ * sha はそのファイルのバイト列に対して採る。
+ */
+const references = openReferences(
+  new URL("fixtures/references/vowel-detector.json", import.meta.url),
+);
+
+/** ロジットの実物のファイル名（結果の席からの相対）。 */
+const logitsArtifact = (entry: Case): string => `${entry.name}-logits.safetensors`;
+
 /** SKIP 時にそのまま貼れる生成コマンド（グラフは 1 本 — 長さの指定は要らない）。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python -m vowel_detector.export";
 
@@ -335,9 +364,13 @@ if (!available) {
   );
 }
 
+/** 実走するケース（系列・WAV・GPU が揃ったもの — 参照門が数える範囲）。 */
+const RUNNABLE_CASES: Case[] = [];
+
 for (const entry of CASES) {
   /** 実音声の門。系列と WAV の**両方**が揃ってはじめて実走する。 */
   const audioAvailable = available && exists(new URL(audioFile(entry), CORPUS_DIR));
+  if (audioAvailable && GPU_AVAILABLE) RUNNABLE_CASES.push(entry);
 
   if (available && !audioAvailable) {
     console.warn(
@@ -350,61 +383,104 @@ for (const entry of CASES) {
     name: `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）`,
     ignore: !audioAvailable || !GPU_AVAILABLE,
     fn: async () => {
-      const wavBytes = await Deno.readFile(new URL(audioFile(entry), CORPUS_DIR));
-      // ① 期待 `.lab` を採った音声と、いま読んでいる音声が同一であること。**tolerance では
-      // 吸収されない差**（台本を回し直して期待値を採り直していない）を、実行の前に名指しで落とす。
-      assertEquals(
-        await sha256Hex(wavBytes),
-        entry.sha256,
-        `${audioFile(entry)} が期待 .lab を採った音声と違う（採り直す: ${AUDIO_COMMAND}）`,
-      );
-
-      const wav = decodeWav(wavBytes);
-      assertEquals(wav.sampleRate, SAMPLE_RATE, `${audioFile(entry)} の周波数`);
-      const features = extractFeatures(wav.data, melBasis);
-      assertEquals(features.frames, entry.frames, `${entry.name} の 10ms フレーム数`);
-      // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落として偶数長で回す（切り捨てで
-      // あって pad ではない — 冒頭の「pad は 1 要素も無い」）。
-      const usable = features.frames - (features.frames % 2);
-      assertEquals(usable, entry.length, `${entry.name} の偶数化フレーム数`);
-
-      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
-      const parsed = prepareContainer(opened, MODEL_GRAPH);
-      assertSymbolicTimeAxis(parsed);
-      const [outputName] = parsed.graph.outputs;
-
-      const gpu = await acquireGpu();
-      const session = await parsed.createContainerSession(gpu);
-      let logits: Float32Array;
+      // 所要時間は WAV の読みから決着の記録の直前まで（失敗した回も同じ範囲で残す）。
+      const started = performance.now();
+      const elapsedMs = (): number => Math.round(performance.now() - started);
+      /** ③の決着（`.lab` が通った後でだけ採る — 記録の後で不一致を落とすために外へ持ち出す）。 */
+      let outcome: ReferenceOutcome;
       try {
-        const output = (await session.run({
-          [INPUT_NAME]: {
-            dtype: "f32",
-            shape: [1, usable, FEATURE_DIM],
-            data: features.data.slice(0, usable * FEATURE_DIM),
-          },
-        }))[outputName];
-        // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-        assert(output.dtype === "f32", `${entry.name}: ロジットの dtype が ${output.dtype}`);
-        assertEquals(output.shape, [1, usable / 2, CLASS_COUNT], `${entry.name}: 出力の形`);
-        logits = output.data;
-      } finally {
-        await session.dispose();
-        gpu.destroy();
-      }
-
-      // ② `.lab` の完全一致（tolerance を持たない離散の門）。
-      const segments = logitsToSegments(logits, usable / 2);
-      assertEquals(toLab(segments), entry.lab, `${entry.name} の .lab`);
-
-      if (entry.name === VOWEL_CASE) {
-        // 期待 `.lab` の一致とは別の主張（{@link VOWEL_SEQUENCE}）。
+        const wavBytes = await Deno.readFile(new URL(audioFile(entry), CORPUS_DIR));
+        // ① 期待 `.lab` を採った音声と、いま読んでいる音声が同一であること。**tolerance では
+        // 吸収されない差**（台本を回し直して期待値を採り直していない）を、実行の前に名指しで落とす。
         assertEquals(
-          segments.map((segment) => segment.label).filter((label) => label !== "pau"),
-          [...VOWEL_SEQUENCE],
-          "「あ、い、う、え、お。」から 5 母音が順に出ていない",
+          await sha256Hex(wavBytes),
+          entry.sha256,
+          `${audioFile(entry)} が期待 .lab を採った音声と違う（採り直す: ${AUDIO_COMMAND}）`,
         );
+
+        const wav = decodeWav(wavBytes);
+        assertEquals(wav.sampleRate, SAMPLE_RATE, `${audioFile(entry)} の周波数`);
+        const features = extractFeatures(wav.data, melBasis);
+        assertEquals(features.frames, entry.frames, `${entry.name} の 10ms フレーム数`);
+        // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落として偶数長で回す（切り捨てで
+        // あって pad ではない — 冒頭の「pad は 1 要素も無い」）。
+        const usable = features.frames - (features.frames % 2);
+        assertEquals(usable, entry.length, `${entry.name} の偶数化フレーム数`);
+
+        const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+        const parsed = prepareContainer(opened, MODEL_GRAPH);
+        assertSymbolicTimeAxis(parsed);
+        const [outputName] = parsed.graph.outputs;
+
+        const gpu = await acquireGpu();
+        let logits: Float32Array<ArrayBuffer>;
+        try {
+          // ロジットの sha をこの機の行として書きうる経路なので、キーを採ったアダプタと
+          // 実行アダプタの同一性を先に見る（複数 GPU の機で取り違えると別の機の行になる）。
+          assertAdapterMatchesEnvironment(gpu);
+          const session = await parsed.createContainerSession(gpu);
+          try {
+            const output = (await session.run({
+              [INPUT_NAME]: {
+                dtype: "f32",
+                shape: [1, usable, FEATURE_DIM],
+                data: features.data.slice(0, usable * FEATURE_DIM),
+              },
+            }))[outputName];
+            // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+            assert(output.dtype === "f32", `${entry.name}: ロジットの dtype が ${output.dtype}`);
+            assertEquals(output.shape, [1, usable / 2, CLASS_COUNT], `${entry.name}: 出力の形`);
+            logits = output.data;
+          } finally {
+            await session.dispose();
+          }
+        } finally {
+          gpu.destroy();
+        }
+
+        // ② `.lab` の完全一致（tolerance を持たない離散の門）。
+        const segments = logitsToSegments(logits, usable / 2);
+        assertEquals(toLab(segments), entry.lab, `${entry.name} の .lab`);
+
+        if (entry.name === VOWEL_CASE) {
+          // 期待 `.lab` の一致とは別の主張（{@link VOWEL_SEQUENCE}）。
+          assertEquals(
+            segments.map((segment) => segment.label).filter((label) => label !== "pau"),
+            [...VOWEL_SEQUENCE],
+            "「あ、い、う、え、お。」から 5 母音が順に出ていない",
+          );
+        }
+
+        // ③ ロジットの sha。①②が通った後でだけ採る（`.lab` が割れた出力から参照行を作らない）。
+        // 比較モードでこの機の行が無ければ突合だけを飛ばし、実測 sha を積む（settleOrObserve）。
+        outcome = await settleOrObserve(references, results, {
+          id: entry.name,
+          artifact: logitsArtifact(entry),
+          bytes: f32ArtifactBytes(outputName, [1, usable / 2, CLASS_COUNT], logits),
+        });
+      } catch (cause) {
+        // 決着を残してから落とす（決着の無いまま抜けると、同じ日の前回の走行の決着が席に
+        // 居座る）。記録の I/O 失敗で元の例外を置き換えない（recordFailure）。
+        await recordFailure(results, {
+          id: entry.name,
+          status: "fail",
+          elapsedMs: elapsedMs(),
+          note: cause instanceof Error ? cause.message : String(cause),
+        });
+        throw cause;
+      }
+      await results.record({ id: entry.name, ...outcome.fields, elapsedMs: elapsedMs() });
+      // 決着（実測 sha）を積んだ後で落とす — 先に投げると実測 sha が結果に残らない。
+      if (outcome.settlement?.check.status === "fail") {
+        throw new Error(referenceMismatchMessage(entry.name, outcome.settlement, references));
       }
     },
   });
 }
+
+/** sha 門が数えるケース（系列・WAV・GPU が揃ったもの — 登録時に同期で決まる）。 */
+const CASE_IDS: readonly string[] = RUNNABLE_CASES.map((entry) => entry.name);
+const RUNNABLE = CASE_IDS.length > 0;
+if (RUNNABLE) references.warnMissing(CASE_IDS);
+// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

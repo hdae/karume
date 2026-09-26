@@ -31,10 +31,10 @@
 //
 // ## 資産が無い環境
 //
-// golden（`outputs/series/`）も入力の実画像（`outputs/misc/corpus/`）も深度 PNG の書き出し先
-// （`outputs/bench/`）もリポジトリ管理外。ただし性格は割れていて、**読み**の corpus はホスト
-// 資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の bench は `rm -rf` で常に安全に
-// 消せる席である。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**
+// golden（`outputs/series/`）も入力の実画像（`outputs/misc/corpus/`）も深度の書き出し先
+// （`outputs/verify/<環境キー>/<日付>_depth-anything/`）もリポジトリ管理外。ただし性格は割れて
+// いて、**読み**の corpus はホスト資産（消すと台本での焼き直しと凍結コピーが要る）、**書き**の
+// verify は `rm -rf` で常に安全に消せる席である。**1 件も無ければ明示 SKIP**、**golden が中途半端に欠けていれば FAIL**
 // （欠けの FAIL は runtime 側の「資産の完全性」テストが名指しで出す —— 系列ディレクトリの
 // 列挙はあちらが持つ）。
 // ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは
@@ -56,7 +56,16 @@ import { encodePng } from "../src/image/png.ts";
 import { decodePng } from "../../runtime/tests/helpers/png-decode.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { openResults } from "../../runtime/tests/helpers/results.ts";
+import { openResults, recordFailure } from "../../runtime/tests/helpers/results.ts";
+import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  referenceMismatchMessage,
+  type ReferenceSettlement,
+  registerReferenceGate,
+  settleOrObserve,
+} from "../../runtime/tests/helpers/reference.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
@@ -123,8 +132,20 @@ const MODEL_GRAPH = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** 深度 PNG と決着の置き場（`outputs/verify/<環境キー>/<日付>_depth-anything/` — 消して安全）。 */
+/** 深度の実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_depth-anything/` — 消して安全）。 */
 const results = openResults("depth-anything");
+/**
+ * 深度の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。ケース ID は
+ * ケース名そのもの（系列は 1 本）。
+ *
+ * 実物は**グラフ出力そのもの**（深度 `[1,H,W]` f32 を safetensors 1 本にしたもの — テンソル名 =
+ * グラフの出力名・metadata なし）。量子化前の出力なので、f32 のどこか 1 ビット動けば sha が動く。
+ * 目視用の深度 PNG は min-max 正規化 → 疑似カラーの 8bit へ落とした像で、量子化境界をまたがない
+ * 差を見逃す（加えて PNG の圧縮はランタイムの版で変わりうる）ので sha の対象にしない。
+ */
+const references = openReferences(
+  new URL("fixtures/references/depth-anything.json", import.meta.url),
+);
 
 /**
  * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。ケース名とファイル名の正本は
@@ -429,56 +450,84 @@ Deno.test({
     //
     // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 「PNG を渡したら
     // 意味のある深度が返る」ところまでを検査にする。ついでに深度地図を PNG で書き出す
-    // （数値の門だけでは形が見えないため — 目視確認用の成果物であって、門ではない）。
-    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
-    const parsed = prepareContainer(opened, MODEL_GRAPH);
-    const [outputName] = parsed.graph.outputs;
-    const width = staticDim(parsed, 3);
-    const height = staticDim(parsed, 2);
-    // 相対矩形も PNG も一辺だけで索く（正方でなければ黙って別の場所を測ってしまう）。
-    assertEquals(width, height, "領域の判別は正方形の地図を前提にする");
-    const inputName = parsed.graph.inputs[0].name;
+    // （数値の門だけでは形が見えないため — 目視確認用の成果物で、sha の対象ではない）。sha の
+    // 対象は量子化前の出力そのもの（深度 `[1,H,W]` f32 の safetensors — {@link references}）で、
+    // 判別とは別の主張「同じ機で 1 ビットも動いていない」を言う。順序は 4 枚を回す → 判別 →
+    // 画像ごとに sha の決着を積む → 系列の決着を積む → sha の不一致を落とす（判別が割れた出力
+    // から参照行を作らない）。
     const started = performance.now();
-
-    const gpu = await acquireGpu();
-    const session = await parsed.createContainerSession(gpu);
+    const elapsedMs = (): number => Math.round(performance.now() - started);
+    /** 画像ごとの領域平均（判別の材料。途中で落ちた回も、測れたぶんを note に残す）。 */
     const means = new Map<string, { near: number; far: number }>();
+    const meansNote = (): string =>
+      [...means].map(([name, measured]) =>
+        `${name} ${measured.near.toFixed(4)}/${measured.far.toFixed(4)}`
+      ).join(" / ");
+    /** sha が参照と食い違った画像（全画像の決着を積み終えてからまとめて落とす）。 */
+    const mismatches: { readonly label: string; readonly settlement: ReferenceSettlement }[] = [];
     try {
-      // 4 枚を 1 Session で回す（重みは 99MB — 画像ごとに組み直す理由が無い）。
-      for (const real of REAL_CASES) {
-        const pixels = await preprocessImage(
-          await readImage(real.file),
-          real.file,
-          width,
-          height,
-        );
-        const output = (await session.run({
-          [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
-        }))[outputName];
-        // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-        assert(output.dtype === "f32", `${real.name}: 深度の dtype が ${output.dtype}`);
-        assertEquals(output.shape, [1, height, width], `${real.name}: 深度地図の形`);
-        const [near, far] = REAL_REGIONS[real.name];
-        means.set(real.name, {
-          near: regionMean(output.data, width, near),
-          far: regionMean(output.data, width, far),
-        });
-        await Deno.writeFile(
-          results.artifact(`${real.name}-depth.png`),
-          await depthToPng(output.data, width),
-        );
-      }
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
+      const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
+      const parsed = prepareContainer(opened, MODEL_GRAPH);
+      const [outputName] = parsed.graph.outputs;
+      const width = staticDim(parsed, 3);
+      const height = staticDim(parsed, 2);
+      // 相対矩形も PNG も一辺だけで索く（正方でなければ黙って別の場所を測ってしまう）。
+      assertEquals(width, height, "領域の判別は正方形の地図を前提にする");
+      const inputName = parsed.graph.inputs[0].name;
 
-    const elapsedMs = performance.now() - started;
-    const note = REAL_CASES.map((real) => {
-      const measured = means.get(real.name);
-      return `${real.name} ${measured?.near.toFixed(4)}/${measured?.far.toFixed(4)}`;
-    }).join(" / ");
-    try {
+      /** 画像ごとの sha の実物（判別が通ってから突き合わせる）。 */
+      const depths: {
+        readonly caseId: string;
+        readonly artifact: string;
+        readonly bytes: Uint8Array<ArrayBuffer>;
+        readonly elapsedMs: number;
+      }[] = [];
+      const gpu = await acquireGpu();
+      try {
+        // 深度の sha をこの機の行として書きうる経路なので、キーを採ったアダプタと
+        // 実行アダプタの同一性を先に見る（複数 GPU の機で取り違えると別の機の行になる）。
+        assertAdapterMatchesEnvironment(gpu);
+        const session = await parsed.createContainerSession(gpu);
+        try {
+          // 4 枚を 1 Session で回す（重みは 99MB — 画像ごとに組み直す理由が無い）。
+          for (const real of REAL_CASES) {
+            const imageStarted = performance.now();
+            const pixels = await preprocessImage(
+              await readImage(real.file),
+              real.file,
+              width,
+              height,
+            );
+            const output = (await session.run({
+              [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
+            }))[outputName];
+            // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+            assert(output.dtype === "f32", `${real.name}: 深度の dtype が ${output.dtype}`);
+            assertEquals(output.shape, [1, height, width], `${real.name}: 深度地図の形`);
+            const [near, far] = REAL_REGIONS[real.name];
+            means.set(real.name, {
+              near: regionMean(output.data, width, near),
+              far: regionMean(output.data, width, far),
+            });
+            depths.push({
+              caseId: real.name,
+              artifact: `${real.name}-depth.safetensors`,
+              bytes: f32ArtifactBytes(outputName, output.shape, output.data),
+              elapsedMs: Math.round(performance.now() - imageStarted),
+            });
+            // 目視用の PNG（min-max 正規化 → 疑似カラーの 8bit — sha の対象ではない）。
+            await Deno.writeFile(
+              results.artifact(`${real.name}-depth.png`),
+              await depthToPng(output.data, width),
+            );
+          }
+        } finally {
+          await session.dispose();
+        }
+      } finally {
+        gpu.destroy();
+      }
+
       for (const real of REAL_CASES) {
         const measured = means.get(real.name);
         assert(measured !== undefined, `${real.name} の領域平均が無い`);
@@ -489,15 +538,62 @@ Deno.test({
             ` 遠側 ${far.label} の ${measured.far} 以下 — 構図の遠近を当てられていない`,
         );
       }
+
+      // 判別が通った出力だけを参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばし、
+      // 実測 sha を積む — settleOrObserve）。
+      for (const entry of depths) {
+        const outcome = await settleOrObserve(references, results, {
+          id: entry.caseId,
+          artifact: entry.artifact,
+          bytes: entry.bytes,
+        });
+        await results.record({
+          id: entry.caseId,
+          ...outcome.fields,
+          elapsedMs: entry.elapsedMs,
+        });
+        if (outcome.settlement?.check.status === "fail") {
+          mismatches.push({ label: entry.caseId, settlement: outcome.settlement });
+        }
+      }
     } catch (cause) {
-      // 決着を残してから落とす（実物と領域平均が手元に無いと、赤の読み解きが始められない）。
-      await results.record({ id: SERIES_NAME, status: "fail", elapsedMs, note });
+      // 決着を残してから落とす（領域平均が手元に無いと赤の読み解きが始められない。決着の無いまま
+      // 抜けると、同じ日の前回の走行の決着が席に居座る）。記録の I/O 失敗で元の例外を置き換えない
+      // （recordFailure）。
+      await recordFailure(results, {
+        id: SERIES_NAME,
+        status: "fail",
+        elapsedMs: elapsedMs(),
+        note: `${meansNote()} / 失敗: ${cause instanceof Error ? cause.message : String(cause)}`,
+      });
       throw cause;
     }
-    await results.record({ id: SERIES_NAME, status: "pass", elapsedMs, note });
+    // sha の不一致は系列の決着にも出す（系列の行だけを読んでも赤が分かる）。
+    await results.record({
+      id: SERIES_NAME,
+      status: mismatches.length === 0 ? "pass" : "fail",
+      elapsedMs: elapsedMs(),
+      note: mismatches.length === 0
+        ? meansNote()
+        : `${meansNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
+    });
     console.log(
-      `[karume] Depth Anything の深度 PNG を ${results.dir.pathname} へ書いた` +
-        "（<ケース>-depth.png）",
+      `[karume] Depth Anything の深度を ${results.dir.pathname} へ書いた` +
+        "（<ケース>-depth.safetensors / -depth.png）",
+    );
+    // 決着は画像ごと・系列ごとに積み終えている（先に投げると実測 sha が結果に残らない）。
+    assert(
+      mismatches.length === 0,
+      mismatches.map(({ label, settlement }) =>
+        referenceMismatchMessage(label, settlement, references)
+      ).join("\n"),
     );
   },
 });
+
+/** sha 門が走る条件（実画像の群 + GPU — 判別のテストと同じ）。 */
+const RUNNABLE = REAL_AVAILABLE && GPU_AVAILABLE;
+const CASE_IDS: readonly string[] = REAL_CASES.map((entry) => entry.name);
+if (RUNNABLE) references.warnMissing(CASE_IDS);
+// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });
