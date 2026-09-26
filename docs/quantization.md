@@ -50,6 +50,21 @@ manifest へ保存できるキーの正本は `packages/hub/src/manifest.ts` の
 | `gpuFeatures.shaderF16`      | 可（`session` の外・`Quant.gpuFeatures`）    | 任意                                                    | ADR [0038](decisions/0038-manifest-v1.md)                                                                                                                                        |
 | `requiredLimits`             | 可（`Quant.requiredLimits`）                 | 任意（重み取得前の admission で拒否）                   | ADR [0038](decisions/0038-manifest-v1.md)・[0089](decisions/0089-memory-limits-preflight.md)                                                                                     |
 
+### 表 2-b — 数値を変えるノブの契約クラス（ADR [0110](decisions/0110-practical-tier-numerics-contract.md) 決定 2・9）
+
+E = TS 鏡像と atol=0 / C = ホスト丸め + 既存 f32 カーネルと atol=0 / R = 加算順だけが違う（f64 帯は参照経路の op 帯のまま）/ Q = 参照より広い帯（近似・入居 0）。
+
+| ノブ（値）                                                             | クラス | 備考                                  |
+| ---------------------------------------------------------------------- | ------ | ------------------------------------- |
+| `linearCompute: "a8"`                                                  | E      | dp4a vs エミュも atol=0               |
+| `attentionCompute: "a8"`                                               | E      | ③PV の qP 生成だけ統計門              |
+| `linearCompute` / `attentionCompute: "f16"`                            | C      | 入力を f16 に丸めた f32 変種と atol=0 |
+| `attentionScoreStorage: "f16"`                                         | C      | S をホストで丸めた f32 変種と atol=0  |
+| `stateAttentionReduce: "parallel"` / `"parallel-fused"`                | R      | 4 点型そろう                          |
+| `linearGemvReduce: "parallel"`                                         | R      | 故障注入の記録が未整備（猶予条項）    |
+| `rmsNormReduce` / `linearGemvReduce` の subgroup32                     | R      | A/B 帯と故障注入が未整備（猶予条項）  |
+| `fuseRmsNormAdd` / `fuseLinearStaticQuantize` / `packedStaticQuantize` | E      | 融合前の経路と u32 一致               |
+
 ## 表 3 — quant 席（配布上の名前）
 
 正本 = 各 `tools/export-recipes/<family>/distribution.py` の quant 表。
