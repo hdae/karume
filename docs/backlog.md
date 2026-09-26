@@ -21,6 +21,8 @@
   ① E4B 通常の export は later 節、⑤ HF 再アップロード + pin 更新は release 節へ移した。
   次のイテレーション候補 = SUMMARY §9.3 の波 2（DiT 速度: B3 anima DiT 常駐 → B4 irodori
   H-30 → B1 → B2）/ 波 3（メモリ: E1 BiRefNet f16 系列 → E2 → E5 → E4）/ 波 4（実用層カーネル: C2 VAE conv i8a8 → C1 → D2 → D1 → D3）。
+  **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
+  既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
   台帳の候補は perf-ledger 2026-09-26 節（K-59〜K-69・L-20〜L-23）。
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
@@ -370,6 +372,8 @@ later の「decode 速度の残り」。
   `stateAttentionReduce` の昇格（Breaking — CHANGELOG `[Unreleased]`）と E4B QAT の `i4-gemvpar` / `i4-fast` を
   配布に反映する。次リリースに束ねる（pin の焼き方は ADR [0073](decisions/0073-models-source-pin.md)・
   [release-runbook](release-runbook.md) §2 / §3）。ローカルミラーは焼き直し済み。
+- **birefnet-hr / lucida の HF 再アップロード + pin 更新（E1 段 1 — ADR [0113](decisions/0113-birefnet-weight-series.md)）**:
+  f32 系列 4 本の焼き直し（上流 revision つき — `--dtype f32`）と f16 席を含めて配布に反映する。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
