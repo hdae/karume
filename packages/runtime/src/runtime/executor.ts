@@ -86,6 +86,7 @@ import {
   executeBakedPlan,
   type GenerationEncoding,
   type GenerationLimits,
+  pipelineCensus,
   planRecipes,
   type StepRecipe,
   type ValueBinding,
@@ -590,6 +591,12 @@ export class Session {
   #lastRunFusions: FusionCounts | undefined;
   #lastRunParams: ParamsCacheStats | undefined;
   #lastRunPrepared: PreparedPlanStats | undefined;
+  /**
+   * 直近 run が積んだレシピ列（`diagnostics().lastRunPipelines` の源）。集計表ではなく列そのものを
+   * 持ち、表は読まれたときだけ {@link pipelineCensus} で導出する（ホットパスに集計を載せない・
+   * 導出できる表を独立に持たない）。
+   */
+  #lastRunRecipes: readonly StepRecipe[] | undefined;
   /**
    * 導出相（ステップ列 → レシピ列 — {@link RecipeBuilder}）。Session が持つのは 1 個だけで、
    * 状態は自身の {@link Session.#state} をそのまま渡す（run 寿命の器は面に載らない）。
@@ -1229,6 +1236,9 @@ export class Session {
       lastRunFusions: this.#lastRunFusions,
       lastRunParams: this.#lastRunParams,
       lastRunPrepared: this.#lastRunPrepared,
+      lastRunPipelines: this.#lastRunRecipes === undefined
+        ? undefined
+        : pipelineCensus(this.#lastRunRecipes),
       planBacking: {
         // MUST: 保持集合から毎回導出する（独立に足し引きするカウンタで持たない — #contexts と同じ規律）。
         residentBytes: [...this.#backings.values()].reduce(
@@ -1316,6 +1326,7 @@ export class Session {
     // 観測点が消えると、融合が外れた状態がヒット run の裏に隠れる）。
     this.#lastRunFusions = derived.fusions;
     this.#lastRunPrepared = undefined;
+    this.#lastRunRecipes = undefined;
     // MUST: 「直近 run」の席は導出の入口で**まとめて**倒す。成功経路でしか代入しない席
     // （#lastRun / #lastRunParams）を残すと、失敗した実行の直後の診断が「落ちた実行の
     // 融合回数」と「1 本前の成功 run のアリーナ / params 実績」を混ぜて 1 つの run として
@@ -1479,6 +1490,9 @@ export class Session {
                 generation: limits,
               });
             }
+            // MUST: `#lastRunPrepared` と同じ位置で埋める（2 席が同じ run の同じ決着点を語る —
+            // enqueue も同じ）。
+            this.#lastRunRecipes = recipes;
             this.#lastRunPrepared = {
               hit: prepared !== undefined,
               cachedPlans: this.#state.prepared.size,
@@ -1777,6 +1791,7 @@ export class Session {
         const values = data[index];
         if (values !== undefined) this.#writeInput(activated.backing, spec.name, values);
       });
+      this.#lastRunRecipes = recipes;
       this.#lastRunPrepared = {
         hit: prepared !== undefined,
         cachedPlans: this.#state.prepared.size,

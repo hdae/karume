@@ -15,6 +15,12 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `SessionDiagnostics.lastRunPipelines`: per-pipeline-key dispatch counts of the last run as
+  planned, filled with or without `gpuTiming` and on the resident path (`enqueue`) too; the key
+  spelling is a diagnostic label outside semver.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

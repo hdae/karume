@@ -713,6 +713,30 @@ export type BakedGeneration = {
 };
 
 /**
+ * レシピ列の**計画上の** dispatch 本数をパイプラインキー別に数える（キーの辞書順 — コード単位
+ * 比較でロケール非依存）。`SessionDiagnostics.lastRunPipelines` の実体。
+ *
+ * MUST: 源は run ごとのレシピ列そのもの（独立に足し引きするカウンタを持たない）。Session 累積の
+ * 使用キー集合（src/gpu/pipeline-cache.ts）は導出済み計画に当たった run では更新されないので、
+ * 「この run が何を積んだか」の源にならない。
+ * NOTE: 論理長から workgroup 数を算出する dispatch（states 形）は仕事量ゼロの step で実際には
+ * 積まれない（{@link dispatchWithWork}）が、ここはそれも 1 本と数える — 計画の census であって
+ * 発行の census ではない。引数を `dispatches[].key` だけの構造型にしているのは、数えるのに
+ * それ以外を読まないため（テストが GPU 実体無しで列を組める）。
+ */
+export const pipelineCensus = (
+  recipes: readonly { readonly dispatches: readonly { readonly key: string }[] }[],
+): readonly { readonly key: string; readonly dispatchCount: number }[] => {
+  const counts = new Map<string, number>();
+  for (const recipe of recipes) {
+    for (const { key } of recipe.dispatches) counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, dispatchCount]) => ({ key, dispatchCount }));
+};
+
+/**
  * 焼き込み済み bind group の実行。run が出す GPU 操作はこの dispatch だけで、確保・解放も
  * createBindGroup も出ない（ミス run は {@link bakeAllBindGroups} で組んだ group を渡す）。
  *

@@ -62,5 +62,12 @@
   せず raw tick のまま返すので、`timestampPeriod` ≠ 1 の GPU（Arc B570 = 52.0833 ns）では決定 3 の
   「ns 合計」が ns ではなく約 52 分の 1 に出る。WebGPU API は period を露出しないので karume は
   補正しない（`docs/known-issues.md`「Intel Arc B570」節）。
+- 追記（2026-09-26）: **パイプラインキーの一覧は計測の専有でなくなった**。
+  `SessionDiagnostics.lastRunPipelines` が直近 run のキー別 dispatch 本数を、計測の有無にも
+  経路（run / 常駐経路の `enqueue`）にも依らず返す — 源は run ごとのレシピ列で、読まれたときだけ
+  導出する。計測を使えない常駐経路（ADR 0054）でも縮退がキーに出たか（ADR 0058 決定 3）を
+  読めるようにするため。本数は**計画上**の値で、states 形の仕事量ゼロ dispatch（実際には積まない）
+  も数えるぶん、この ADR の内訳の `dispatchCount` より多く出ることがある。内訳（時間）が要るとき
+  は引き続き `gpuTiming: true` の別 run で採る。
 - 却下案: B = チャンク粒度計測（op 混在で内訳にならない）/ C = CPU 時刻の細分化
   （onSubmittedWorkDone は累積完了 — ADR 0004 の既知の罠）。

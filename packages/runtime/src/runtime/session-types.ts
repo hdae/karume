@@ -667,6 +667,24 @@ export type SessionDiagnostics = {
    */
   readonly lastRunPrepared: PreparedPlanStats | undefined;
   /**
+   * 直近 run の**計画上の** dispatch 本数（パイプラインキー別・キーの辞書順）。run のたびに丸ごと
+   * 置き換わり、中身は計画時に決まる（{@link SessionDiagnostics.lastRunFusions} と同じ）。埋まる
+   * のは {@link SessionDiagnostics.lastRunPrepared} と同じ時点で、未実行の Session と導出相の
+   * 途中で落ちた run では undefined。
+   *
+   * 計測（`acquireGpu` の `gpuTiming`）に依らず、常駐経路（`enqueue` / `enqueueRead`）でも埋まる。
+   * 縮退はパイプラインキーに出る（ADR 0058 決定 3）が、キーの一覧を
+   * {@link SessionDiagnostics.lastRunTiming} だけに載せると計測を要求した device でしか読めず、
+   * 計測を使えない常駐経路（ADR 0054）では縮退が観測できない — この欄がその穴を塞ぐ。
+   * NOTE: 数えるのは計画上の本数。論理長から workgroup 数を算出する states 形の dispatch は、
+   * その step の仕事量がゼロなら実際には積まれないので、`lastRunTiming` の `dispatchCount` より
+   * 多く出ることがある（それ以外の dispatch は実発行と 1 対 1）。
+   * NOTE: キーの綴りは診断用のラベルで semver の対象外（変種の追加・改名で予告なく変わる）。
+   */
+  readonly lastRunPipelines:
+    | readonly { readonly key: string; readonly dispatchCount: number }[]
+    | undefined;
+  /**
    * transient slot の GPU backing の実績（run ごとではなく Session の現況 + 累計）。
    * 未構築の Session では `{ residentBytes: 0, inputBytes: 0, retainedCount: 0, buildCount: 0 }`。
    */
