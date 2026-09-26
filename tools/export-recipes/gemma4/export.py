@@ -463,6 +463,10 @@ def renamed_state(
 
     tied な `lm_head.weight` は state_dict に**同じテンソルを 2 度**載せる — チェックポイントに
     実体が無く（`_tied_weights_keys`）、載せないと `load_state_dict` の missing に出る。
+
+    MUST: 各テンソルは**チェックポイントと記憶を共有しない複製**にする（`copy=True`）。
+    {@link load_model_and_tables} は `assign=True` でこの実体をモデルにそのまま所有させるので、
+    元が f32 のテンソル（`.to` が複製を作らない）がファイルの写像を指したまま残る形を作らない。
     """
     ignored = tuple(str(pattern) for pattern in model._keys_to_ignore_on_load_unexpected)
     state: dict[str, torch.Tensor] = {}
@@ -480,7 +484,7 @@ def renamed_state(
                 rows = torch.cat([sliced[row : row + 1, :] for row in probe])
                 state[name] = rows.to(torch.float32)
                 continue
-            state[name] = handle.get_tensor(key).to(torch.float32)
+            state[name] = handle.get_tensor(key).to(torch.float32, copy=True)
     if EMBED_TOKENS_KEY not in state:
         raise ValueError(f"チェックポイントに '{CHECKPOINT_TEXT_PREFIX}embed_tokens.weight' が無い")
     state[LM_HEAD_KEY] = state[EMBED_TOKENS_KEY]
@@ -499,6 +503,52 @@ def build_wrapper(model: nn.Module, tables: nn.ModuleList) -> Gemma4Wrapper:
     return Gemma4Wrapper(model, tables).eval()
 
 
+def materialize_non_persistent_buffers(model: nn.Module) -> None:
+    """meta で組んだモデルの非永続 buffer を、上流の初期化（`initialize_weights`）で実体化する。
+
+    非永続 buffer（RoPE の `*_inv_freq` / `*_original_inv_freq`・`embed_scale`）は state_dict に
+    載らないので `load_state_dict` では埋まらない。値は上流 `_init_weights` が config から
+    決定的に計算する — 上流 `from_pretrained` の meta 読み込み（`empty_like` へ移してから
+    `initialize_weights`）と同じ手順で、CPU で組んだとき post_init が書く値と同じ 1 本を通す
+    （式をここへ写さない）。パラメータはまだ meta なので、乱数初期化は実体を持たずに素通りする。
+
+    MUST: 実体化の器は NaN で埋める — 上流 `_init_weights` が書かない非永続 buffer が
+    増えたら NaN が残り、{@link assert_materialized} が落とす（`empty` の不定値を黙って使わない）。
+    """
+    for name, buffer in list(model.named_non_persistent_buffers()):
+        parent, _, leaf = name.rpartition(".")
+        model.get_submodule(parent).register_buffer(
+            leaf, torch.full_like(buffer, float("nan"), device="cpu"), persistent=False
+        )
+    model.initialize_weights()
+
+
+def assert_materialized(model: nn.Module) -> None:
+    """meta で組んで読み込んだモデルに実体の無い席・未初期化の buffer・解けた tie が無いか検査する。
+
+    `load_state_dict(assign=True)` はキーごとに新しい `Parameter` を据えるので、tied な
+    `lm_head.weight` と主 embedding が**別の Parameter**（記憶は共有）に割れる。割れたままだと
+    torch.export が 2 本の initializer として出す（容器が変わる）ので、tie の同一性も見る。
+    """
+    tensors = [
+        *model.named_parameters(remove_duplicate=False),
+        *model.named_buffers(remove_duplicate=False),
+    ]
+    on_meta = [name for name, tensor in tensors if tensor.is_meta]
+    if on_meta:
+        raise AssertionError(f"meta のまま残った席がある（読み込みで埋まっていない）: {on_meta}")
+    unset = [
+        name for name, buffer in model.named_non_persistent_buffers() if bool(buffer.isnan().any())
+    ]
+    if unset:
+        raise AssertionError(
+            f"非永続 buffer {unset} が上流の初期化で埋まっていない"
+            "（上流 _init_weights が扱わない buffer が増えた可能性）"
+        )
+    if model.lm_head.weight is not model.model.embed_tokens.weight:
+        raise AssertionError("tied な lm_head.weight が主 embedding と別の Parameter に割れている")
+
+
 def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
     """実重みを f32 で読んだ text モデルと PLE の 35 分割を返す（検査席の表は載ったまま）。
 
@@ -506,6 +556,12 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
     decode 台本（{@link gemma4.export_decode}）が同じ素材を別のラッパ形・別の RoPE 形
     （ホスト供給の受け渡し口への差し替え）で使うから。素材の読み方と 3 つの等価検査（PLE 表の行数・
     KV 共有層の残骸落とし・35 分割のビット一致）は 1 箇所に閉じる。
+
+    MUST: モデルは `meta` で組み、{@link renamed_state} の f32 実体を `assign=True` で**そのまま
+    所有**させる。CPU で組んでから `load_state_dict` で写すと、乱数初期化の f32 実体と
+    state_dict が読み込みの瞬間に同時に生き、PLE 以外の重みが 2 度載る（E4B で約 35 GiB —
+    RAM 31 GiB の機で溢れる）。非永続 buffer は {@link materialize_non_persistent_buffers}、
+    tie は上流 `tie_weights` で戻し、{@link assert_materialized} で検査する。
     """
     from transformers import Gemma4ForCausalLM
 
@@ -523,15 +579,19 @@ def load_model_and_tables(model_dir: Path) -> tuple[nn.Module, nn.ModuleList]:
     config.vocab_size_per_layer_input = ple.PLE_PROBE_ROWS
     config._attn_implementation = ATTENTION_NAME
 
-    model = Gemma4ForCausalLM(config).eval()
+    with torch.device("meta"):
+        model = Gemma4ForCausalLM(config).eval()
+    materialize_non_persistent_buffers(model)
     state, dropped = renamed_state(model, model_file, probe)
     if not dropped:
         raise ValueError(
             "KV 共有層の k/v 残骸が 1 本も捨てられなかった"
             "（上流の _keys_to_ignore_on_load_unexpected が空 — 層構成の前提が変わった可能性）"
         )
-    model.load_state_dict(state)
+    model.load_state_dict(state, assign=True)
     del state
+    model.tie_weights()
+    assert_materialized(model)
     tables = ple.load_per_layer_tables(
         model_file,
         PLE_CHECKPOINT_KEY,

@@ -10,6 +10,9 @@
 - `assert_ir_form` が repeat_kv 実体化・mask のグラフ入力残り・層種別の head_dim 取り違え・
   causal と帯の定数共有・格納 dtype の本数違いを**実際に検出**すること
 - golden の長さ規律（窓より長いケースが 1 本以上）と sanity が実際に落とすこと
+- meta で組む読み込み経路（`load_model_and_tables`）が、CPU で組んで写す従来の読み込みと
+  全パラメータ・全 buffer・tie で一致すること（偽チェックポイントで。tiny config の KV 共有層は
+  full の所有層を持たず上流 forward が通らないので、出力ではなく全席の値で突き合わせる）
 
 transformers を要するケースだけ `importorskip` で SKIP する（既定 sync の CI ではモデル系
 依存が入らない — ADR 0065 の 2 job 構成）。
@@ -18,10 +21,12 @@ transformers を要するケースだけ `importorskip` で SKIP する（既定
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 from gemma4 import export as gx
@@ -242,6 +247,138 @@ class TestAssertPerLayerSplit:
 
         with pytest.raises(AssertionError, match="形"):
             ple.assert_per_layer_split(model, short, probe)
+
+
+# ---- 読み込み経路（meta 構築 + assign） --------------------------------------
+
+
+#: 偽チェックポイントの KV 共有層（`_tiny_text_config` の `num_kv_shared_layers=1` → 末尾の層）。
+SHARED_LAYER = len(LAYER_TYPES) - 1
+
+
+def _full_table_config():
+    """PLE 表を全行（{@link VOCAB}）持つ tiny config — チェックポイント側の形。"""
+    config = _tiny_text_config()
+    config.vocab_size_per_layer_input = VOCAB
+    return config
+
+
+def _write_checkpoint(directory: Path) -> Path:
+    """multimodal の綴り（`model.language_model.*`）で bf16 の偽チェックポイントを書く。
+
+    上流の公式チェックポイントと同じく、tied な `lm_head.weight` は載せず、KV 共有層には
+    k/v の残骸を、text 以外には vision 塔のキーを 1 本混ぜる（読み飛ばしの経路も踏ませる）。
+    """
+    transformers = pytest.importorskip("transformers")
+    torch.manual_seed(0)
+    source = transformers.Gemma4ForCausalLM(_full_table_config())
+    tensors: dict[str, torch.Tensor] = {}
+    for name, tensor in source.state_dict().items():
+        if name == gx.LM_HEAD_KEY:
+            continue
+        # 乱数初期化のままだと norm / layer_scalar が 1 の定数で、取り違えが値に映らない。
+        noisy = tensor + 0.01 * torch.randn(tensor.shape)
+        key = gx.CHECKPOINT_TEXT_PREFIX + name[len(gx.MODEL_TEXT_PREFIX) :]
+        tensors[key] = noisy.to(torch.bfloat16).contiguous()
+    owner = f"{gx.CHECKPOINT_TEXT_PREFIX}layers.0.self_attn"
+    residue = f"{gx.CHECKPOINT_TEXT_PREFIX}layers.{SHARED_LAYER}.self_attn"
+    for leaf in ("k_proj.weight", "v_proj.weight", "k_norm.weight"):
+        tensors[f"{residue}.{leaf}"] = tensors[f"{owner}.{leaf}"].clone()
+    tensors["model.vision_tower.stray.weight"] = torch.zeros(2, 2, dtype=torch.bfloat16)
+    path = directory / gx.CHECKPOINT_FILE
+    save_file(tensors, str(path))
+    return path
+
+
+def _conventional_load(model_file: Path) -> nn.Module:
+    """変更前の読み込み（CPU で乱数初期化してから `load_state_dict` で写す）— 同一性の対照。"""
+    transformers = pytest.importorskip("transformers")
+    gx.register_attention()
+    config = _full_table_config()
+    probe = ple.probe_rows(VOCAB)
+    config.vocab_size_per_layer_input = ple.PLE_PROBE_ROWS
+    config._attn_implementation = gx.ATTENTION_NAME
+    model = transformers.Gemma4ForCausalLM(config).eval()
+    state, _ = gx.renamed_state(model, model_file, probe)
+    model.load_state_dict(state)
+    return model
+
+
+def _slots(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
+    return [
+        *model.named_parameters(remove_duplicate=False),
+        *model.named_buffers(remove_duplicate=False),
+    ]
+
+
+class TestLoadModelAndTables:
+    """meta 構築 + `assign=True` の読み込みが、従来の読み込みとモデルの全席で同一であること。"""
+
+    @pytest.fixture
+    def loaded(self, tmp_path, monkeypatch):
+        model_file = _write_checkpoint(tmp_path)
+        monkeypatch.setattr(gx, "load_text_config", lambda _: _full_table_config())
+        model, tables = gx.load_model_and_tables(tmp_path)
+        return model, tables, _conventional_load(model_file)
+
+    def test_every_slot_is_real_and_equal_to_the_conventional_load(self, loaded):
+        model, _, reference = loaded
+        expected = _slots(reference)
+
+        actual = _slots(model)
+
+        assert [name for name, _ in actual] == [name for name, _ in expected]
+        for (name, tensor), (_, want) in zip(actual, expected, strict=True):
+            assert tensor.device.type == "cpu", name
+            assert tensor.dtype == want.dtype, name
+            assert tensor.requires_grad == want.requires_grad, name
+            assert tensor.is_contiguous(), name
+            assert torch.equal(tensor, want), name
+
+    def test_the_non_persistent_buffers_keep_their_kind(self, loaded):
+        """RoPE / embed_scale が永続側へ化けると state_dict の形が変わる。"""
+        model, _, reference = loaded
+
+        names = [name for name, _ in model.named_non_persistent_buffers()]
+
+        assert names == [name for name, _ in reference.named_non_persistent_buffers()]
+        assert any(name.endswith("inv_freq") for name in names)
+
+    def test_the_head_stays_tied_to_the_embedding(self, loaded):
+        """MUST: 割れると torch.export が tied 実体を 2 本の initializer に出す。"""
+        model, _, _ = loaded
+
+        assert model.lm_head.weight is model.model.embed_tokens.weight
+
+
+class TestAssertMaterialized:
+    """読み込み後の検査が、実体の抜け・未初期化 buffer・解けた tie を実際に落とすこと。"""
+
+    @pytest.fixture
+    def model(self):
+        transformers = pytest.importorskip("transformers")
+        return transformers.Gemma4ForCausalLM(_tiny_text_config()).eval()
+
+    def test_a_faithfully_built_model_passes(self, model):
+        gx.assert_materialized(model)
+
+    def test_a_slot_left_on_meta_fails_loudly(self, model):
+        model.model.norm.weight = nn.Parameter(torch.empty(HIDDEN, device="meta"))
+
+        with pytest.raises(AssertionError, match="meta"):
+            gx.assert_materialized(model)
+
+    def test_a_buffer_the_upstream_init_did_not_fill_fails_loudly(self, model):
+        model.model.embed_tokens.embed_scale.fill_(float("nan"))
+
+        with pytest.raises(AssertionError, match="埋まっていない"):
+            gx.assert_materialized(model)
+
+    def test_a_split_tie_fails_loudly(self, model):
+        model.lm_head.weight = nn.Parameter(model.model.embed_tokens.weight.detach())
+
+        with pytest.raises(AssertionError, match="割れている"):
+            gx.assert_materialized(model)
 
 
 # ---- 量子化の対象割り付け --------------------------------------------------
