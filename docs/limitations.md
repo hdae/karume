@@ -981,7 +981,8 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
   fma 収縮 0・符号付きゼロ一致）。実データの潜在／速度場（単位分散級）では実質到達しない
   領域で、参照ケースの WAV sha256 門 2 本は digest 完全一致 — 門が恒久の検出器。
 - **常駐経路では `lastRun`（run アリーナ実績）と `lastRunTiming` が `undefined`**（enqueue は
-  アリーナも計測窓も作らない）。`planBacking` / `submit` / `lastRunPrepared` は従来どおり。
+  アリーナも計測窓も作らない）。`planBacking` / `submit` / `lastRunPrepared` は従来どおりで、パイプライン
+  キーの一覧は計測に依らない `lastRunPipelines`（直近 run の計画上のキー別 dispatch 本数）で読める。
 - **gpuTiming 有効の device、および `generate` / `generateLatent` へ `onEvent` を渡した生成は
   従来のホストループへ分岐**（計測: batch と非両立で `beginBatch` が拒否 / onEvent: 1 batch +
   単一フェンスの区間は step の完了そのものをホストから観測できず、`enqueue` 時点の発火は
