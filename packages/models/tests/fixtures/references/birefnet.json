@@ -2,6 +2,18 @@
   "schema": 1,
   "kind": "sha256",
   "cases": {
+    "birefnet-hr-1024-f16/photo-corridor": {
+      "deno-intel-graphics-bmg-g21": "d7136f3095b56a09750296e9d5141a4f562cb569f6f078138305ba92229be07a"
+    },
+    "birefnet-hr-1024-f16/photo-landscape": {
+      "deno-intel-graphics-bmg-g21": "1947f21c8fb83a5d716df55cb445bd9a717e89b09cce8b8ce35ab934448be3ca"
+    },
+    "birefnet-hr-1024-f16/photo-portrait": {
+      "deno-intel-graphics-bmg-g21": "c56a72c6c1abed8b964abeff17b5e1c341a14d713422a6c5e4c2858b9573a911"
+    },
+    "birefnet-hr-1024-f16/photo-street": {
+      "deno-intel-graphics-bmg-g21": "ac6a80c4b43364c88048fc121a0ef591b60918dbef929b243c6a0277ecc01749"
+    },
     "birefnet-hr-1024/photo-corridor": {
       "deno-intel-graphics-bmg-g21": "d7136f3095b56a09750296e9d5141a4f562cb569f6f078138305ba92229be07a"
     },
@@ -13,6 +25,18 @@
     },
     "birefnet-hr-1024/photo-street": {
       "deno-intel-graphics-bmg-g21": "ac6a80c4b43364c88048fc121a0ef591b60918dbef929b243c6a0277ecc01749"
+    },
+    "lucida-1024-f16/photo-corridor": {
+      "deno-intel-graphics-bmg-g21": "b829785fbc619e21bd8fc5b1b9e14ca2c554c914d76057a3ad91818b9ecc12c4"
+    },
+    "lucida-1024-f16/photo-landscape": {
+      "deno-intel-graphics-bmg-g21": "f81d34ea3e86e53465a09640d994fde0810d25b34d1bcbba9a78175da64f4b52"
+    },
+    "lucida-1024-f16/photo-portrait": {
+      "deno-intel-graphics-bmg-g21": "343b769829cab9659da83b006ed2a594282f9db8461ece9a27f5c515c7fcbfb4"
+    },
+    "lucida-1024-f16/photo-street": {
+      "deno-intel-graphics-bmg-g21": "110d08e55aab7739d7cb0863f257f7bd6be5aeaba3db6a76c44d07b90cb31563"
     },
     "lucida-1024/photo-corridor": {
       "deno-intel-graphics-bmg-g21": "86868bad2ca1148f1282beca172a3b870c1172b81e48040f3c0ba4d5afe7bfe4"

@@ -69,8 +69,9 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
  * 実画像も系列も 1024² なので **resize は恒等**（`resizeRgb8` の台は scale 1 で重み 1 点に
  * 縮む）。残るのは正規化の畳み方の差だけ: TS は `(u8 − mean·255) / (std·255)` を 1 回で、
  * torch 側は同梱 `handler.py` の `ToTensor`（`u8 / 255`）→ `Normalize`（`(x − mean) / std`）で
- * **丸めが 1 回多い**。実測はこの差だけで、**2 系列 × 4 ケースとも maxAbs 4.768e-7**
- * （\|ref\| 上端 2.64 に対し 2 ulp）。
+ * **丸めが 1 回多い**。実測はこの差だけで、**4 系列 × 4 ケースとも maxAbs 4.768e-7**
+ * （\|ref\| 上端 2.64 に対し 2 ulp。f16 の 2 系列は入力の golden が f32 系列とビット一致する —
+ * 2026-09-26 の突合）。
  *
  * atol 1e-6 は実測 4.768e-7 の約 2.1 倍。
  *
@@ -100,11 +101,22 @@ type Series = {
 const EXPORT_PREFIX =
   "cd tools/export-recipes && uv run --group birefnet python -m birefnet.export";
 
+/**
+ * 実画像の golden を持つ系列（1024² だけ — 2048² は実画像 golden を採らない）。格納 dtype の f16 系列
+ * （ADR 0113）も同じ判別と sha の参照値に掛ける。f16 系列の参照値の行は実 GPU で
+ * `KARUME_REFERENCE=write` を回して作る（行が無い機ではそのケースが明示 SKIP + 参照門が赤）。
+ */
 const SERIES: readonly Series[] = [
   { name: "birefnet-hr-1024", generate: `${EXPORT_PREFIX} --real-images` },
   {
     name: "lucida-1024",
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,
+  },
+  { name: "birefnet-hr-1024-f16", generate: `${EXPORT_PREFIX} --dtype f16 --real-images` },
+  {
+    name: "lucida-1024-f16",
+    generate:
+      `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
   },
 ];
 

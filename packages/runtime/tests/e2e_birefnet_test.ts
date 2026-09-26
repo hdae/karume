@@ -17,6 +17,13 @@
 // テストを止めている（{@link HELD_SERIES} — decoder 末尾の 1 dispatch がドライバのジョブ上限を
 // 超えてプロセスごと落ちるため）。
 //
+// **格納 dtype も系列の軸**（ADR 0113）: f32 系列に加えて `--dtype f16` の系列
+// （`<モデル>-<解像度>-f16`）を別系列として実走する。f16 系列の golden は丸めた重みで採った torch
+// 出力なので、突合に出るのはここでも**ランタイムの数値誤差だけ**（量子化誤差は export 時の
+// `quality.json` が持つ）。系列 root の取り違え（f32 の席に f16 資産・その逆）は数値では検出
+// できない（tolerance が同桁なので互いの資産を通す — ADR 0027 / 0029）ので、容器の**圧縮格納
+// dtype の集合**を系列の宣言と突き合わせる検査（GPU 不要）を別に持つ。
+//
 // **許容誤差は系列ごとに独立して実測する**（`SERIES` の各行が自分の tolerance を持つ）。
 // 共有すると、片方を測り直したときにもう片方が黙って緩む — 2 系列は同じ構造でも logit の
 // 値域が桁で違う（実測: BiRefNet_HR の \|ref\| 上端 64.1 に対し Lucida は 1078.1）。
@@ -59,6 +66,8 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
+  type CodecLayout,
+  codecLayout,
   parseSafetensors,
   prepareContainer,
   type PreparedModel,
@@ -216,13 +225,61 @@ const LUCIDA_REAL_TOLERANCE: Tolerance = { atol: 3e-2, rtol: 0 };
 const LUCIDA_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1.5e-3, rtol: 0 };
 
 /**
+ * **BiRefNet_HR の f16 系列**（`birefnet-hr-{1024,2048}-f16` — ADR 0113）の許容誤差。値は f32 系列の
+ * {@link HR_SYNTHETIC_TOLERANCE} / {@link HR_REAL_TOLERANCE} / {@link HR_2048_SYNTHETIC_TOLERANCE}
+ * と**同じ**。
+ *
+ * 根拠: 上流 BiRefNet_HR の checkpoint は f16 なので f16 への丸めが恒等で、**golden は f32 系列と
+ * ビット一致**する（export 時の品質の門が 8 ケースで強制し、1024² は 2026-09-26 に f32 系列の
+ * golden とも入出力のビット一致を突合済み）。GPU 側も「重みの f32 値が同一・`unpack2x16float` は
+ * 厳密・縮約順は格納で分岐しない」ので f32 系列と同じ出力になる見込み（推測・未実測 — 実 GPU で
+ * 2 系列の出力を突き合わせて確かめる）。
+ *
+ * 値が同じでも**定数は分ける**（モジュール docstring の「系列ごとに独立」— 片方を測り直したときに
+ * もう片方が黙って動かないように）。
+ */
+const HR_F16_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
+const HR_F16_REAL_TOLERANCE: Tolerance = { atol: 5e-3, rtol: 0 };
+const HR_F16_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 4e-3, rtol: 0 };
+
+/**
+ * **Lucida の f16 系列**（`lucida-{1024,2048}-f16` — ADR 0113）の許容誤差。
+ *
+ * 1024² は実測から導いた（Intel Arc B570・2026-09-26・`atol=rtol=0` の素の突合・出力 1 本）:
+ *
+ * | ケース         | maxAbs   | maxRel   |
+ * | -------------- | -------- | -------- |
+ * | checker        | 2.29e-5  | 3.87e-6  |
+ * | disc           | 8.97e-5  | 3.38e-3  |
+ * | noise          | 3.77e-5  | 1.72e-1  |
+ * | ramp           | 5.34e-4  | 2.35e-1  |
+ * | photo-portrait | 7.02e-3  | 4.46e-2  |
+ * | photo-street   | 1.28e-3  | 5.46e-2  |
+ * | photo-corridor | 3.48e-5  | 4.78e-6  |
+ * | photo-landscape| 4.72e-5  | 7.16e-3  |
+ *
+ * 合成の atol 2.5e-3 は最悪 5.34e-4（ramp）の約 4.7 倍、実画像の atol 3e-2 は最悪 7.02e-3（portrait）の
+ * 約 4.3 倍（f32 系列と同じ導出法）。f32 系列（ramp 1.1e-4 級）より合成の最悪が 1 桁大きいのは、丸めた
+ * 重みで採った golden との実装誤差が f16 の値の並びで別の丸め境界を踏むため（推測 — 量子化誤差そのものは
+ * golden に含まれ、ここには出ない）。
+ *
+ * TODO: 2048² は **B570 では測れない**（`HELD_SERIES` — deform_conv2d のジョブ上限）。f32 系列の
+ * {@link LUCIDA_2048_SYNTHETIC_TOLERANCE} と同じ値を仮置きし、走れる機で `atol=rtol=0` の素の突合から
+ * 導出して置き換える。
+ */
+const LUCIDA_F16_SYNTHETIC_TOLERANCE: Tolerance = { atol: 2.5e-3, rtol: 0 };
+const LUCIDA_F16_REAL_TOLERANCE: Tolerance = { atol: 3e-2, rtol: 0 };
+const LUCIDA_F16_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1.5e-3, rtol: 0 };
+
+/**
  * 二値マスク（`logit > 0` = `sigmoid > 0.5`）が torch と食い違ってよい画素の割合。
  *
  * この門が出力側の tolerance と別に要るのは、**成果物がマスクだから**。tolerance は「値が
  * 近い」しか言わず、境界の画素（logit ≈ 0）は近いままいくらでも符号が反転しうる。逆にここ
  * だけでは値の回帰を捉えられない（飽和域の誤差は符号を変えない）ので、両方を持つ。
  *
- * 実測は **2 系列 × 8 ケースとも 0 / 1,048,576**（合成 4 + 実画像 4）。0 をそのまま門に
+ * 実測は **f32 の 2 系列 × 8 ケースとも 0 / 1,048,576**（合成 4 + 実画像 4）。f16 の 4 系列
+ * （ADR 0113）は実測待ちで、同じ上限を仮に掛けている。0 をそのまま門に
  * しないのは、境界画素の符号が別のバックエンドやドライバで動きうるため — 1e-4 は 1024² で
  * 104 画素に相当し、マットの見た目には出ない量。実装バグ側は数万〜数十万画素が反転するので、
  * この閾値の 3 桁以上上に出る。**系列で共有する**のは、これが数値の量ではなく「マスクとしての
@@ -241,7 +298,21 @@ type Series = {
   readonly tolerance: Tolerance;
   /** 実画像ケースの許容誤差（同上）。 */
   readonly realTolerance: Tolerance;
+  /**
+   * 容器の**圧縮格納 dtype の集合**として宣言されているべきもの（f32 系列は空 — ADR 0029 決定 2 の
+   * 形）。系列 root の取り違えと `--dtype` の付け忘れは数値では見えないので、これだけが区別する。
+   */
+  readonly compressedStorage: readonly CompressedStorage[];
 };
+
+/** 圧縮格納の語彙のうち、この family の系列が持ちうるもの（段 1 は f16 まで — ADR 0113）。 */
+type CompressedStorage = "f16";
+
+/**
+ * 格納検査で数える圧縮格納か（素の格納 = f32 と i32 の添字表**以外の全部**）。列挙ではなく除外で
+ * 書くのは、codec の語彙に layout が増えたとき、新しい圧縮格納を黙って数え漏らさないため。
+ */
+const isCompressedLayout = (layout: CodecLayout): boolean => layout !== "f32" && layout !== "i32";
 
 const EXPORT_PREFIX =
   "cd tools/export-recipes && uv run --group birefnet python -m birefnet.export";
@@ -257,24 +328,58 @@ const SERIES: readonly Series[] = [
     generate: `${EXPORT_PREFIX} --real-images`,
     tolerance: HR_SYNTHETIC_TOLERANCE,
     realTolerance: HR_REAL_TOLERANCE,
+    compressedStorage: [],
   },
   {
     name: "birefnet-hr-2048",
     generate: `${EXPORT_PREFIX} --resolution 2048`,
     tolerance: HR_2048_SYNTHETIC_TOLERANCE,
     realTolerance: HR_REAL_TOLERANCE,
+    compressedStorage: [],
   },
   {
     name: "lucida-1024",
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,
     tolerance: LUCIDA_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_REAL_TOLERANCE,
+    compressedStorage: [],
   },
   {
     name: "lucida-2048",
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --resolution 2048`,
     tolerance: LUCIDA_2048_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_REAL_TOLERANCE,
+    compressedStorage: [],
+  },
+  {
+    name: "birefnet-hr-1024-f16",
+    generate: `${EXPORT_PREFIX} --dtype f16 --real-images`,
+    tolerance: HR_F16_SYNTHETIC_TOLERANCE,
+    realTolerance: HR_F16_REAL_TOLERANCE,
+    compressedStorage: ["f16"],
+  },
+  {
+    name: "birefnet-hr-2048-f16",
+    generate: `${EXPORT_PREFIX} --dtype f16 --resolution 2048`,
+    tolerance: HR_F16_2048_SYNTHETIC_TOLERANCE,
+    realTolerance: HR_F16_REAL_TOLERANCE,
+    compressedStorage: ["f16"],
+  },
+  {
+    name: "lucida-1024-f16",
+    generate:
+      `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
+    tolerance: LUCIDA_F16_SYNTHETIC_TOLERANCE,
+    realTolerance: LUCIDA_F16_REAL_TOLERANCE,
+    compressedStorage: ["f16"],
+  },
+  {
+    name: "lucida-2048-f16",
+    generate:
+      `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --resolution 2048`,
+    tolerance: LUCIDA_F16_2048_SYNTHETIC_TOLERANCE,
+    realTolerance: LUCIDA_F16_REAL_TOLERANCE,
+    compressedStorage: ["f16"],
   },
 ];
 
@@ -304,12 +409,16 @@ const B570_JOB_TIMEOUT =
  *
  * - `birefnet-hr-2048` / `lucida-2048` の `deno-intel-graphics-bmg-g21`（Intel Arc B570・Linux xe
  *   ドライバ）: docs/limitations.md「BiRefNet 系」節（2026-09-20 実測・裁定 2026-09-26）。
+ * - 同じ 2 系列の f16 版（`-f16`）も同じ機で止める — 落ちる dispatch は deform_conv2d で、その重みは
+ *   f16 系列でも f32 格納のまま（適格外）なので、格納 dtype を変えても同じ 1 dispatch が走る。
  */
 const HELD_SERIES: Readonly<
   Record<string, Readonly<Record<string, { readonly reason: string }>>>
 > = {
   "birefnet-hr-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
   "lucida-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+  "birefnet-hr-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+  "lucida-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
 };
 
 /** この走行の機で止める理由（無ければ `undefined` = 止めない）。 */
@@ -554,6 +663,35 @@ for (const series of SERIES) {
           `（採り直す: ${series.generate}）`,
       );
       assert(modelPresent(new URL(MODEL_FILE, root)), `${MODEL_FILE} が無い`);
+    },
+  });
+
+  Deno.test({
+    name: `BiRefNet 格納: ${series.name} — 容器の圧縮格納 dtype の集合が系列の宣言と一致する`,
+    // GPU 不要（容器を開いて束縛表を読むだけ）。held の機でも走らせる — 止める理由は dispatch。
+    ignore: !modelPresent(new URL(MODEL_FILE, root)),
+    fn: async () => {
+      // 系列と資産の格納 dtype が一致する（root 取り違え / `--dtype` の付け忘れの唯一の検出器 —
+      // {@link Series.compressedStorage}）。本数ではなく**集合**で見るのは、f16 系列に別の圧縮
+      // 格納が混ざる形を「圧縮が 1 本以上ある」で通さないため（ADR 0029 決定 2・e2e_sbv2 と同じ形）。
+      const parsed = prepareContainer(
+        await openSeriesContainer(new URL(MODEL_FILE, root)),
+        graphName,
+      );
+      const compressed = [
+        ...new Set(
+          Object.values(parsed.graph.initializers)
+            .flatMap((initializer) =>
+              initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)]
+            )
+            .filter(isCompressedLayout),
+        ),
+      ].sort();
+      assertEquals(
+        compressed,
+        [...series.compressedStorage].sort(),
+        `${series.name}: 圧縮格納 dtype の集合が系列と食い違う（採り直す: ${series.generate}）`,
+      );
     },
   });
 
