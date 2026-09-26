@@ -1594,6 +1594,7 @@ M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認�
 [M2での速度改善と短文出力](research/2026-09-13-m2-gemv-adoption.md)は確認済み。広い品質評価は残る。
 通常/QAT E2Bの新しい配布recipeは、parallelとRMS→add融合（QATはさらにlinear→SRQ融合とpacked int8活性）を宣言した `i4-fast` を既定quantに選ぶ（[ADR 0104](decisions/0104-gemma-fast-quant.md)）。parallelだけの `i4-gemvpar` も保持する。
 従来の `i4`・runtime・fromAssetsの逐次既定は維持する。既存の配布形や公開pinは自動で変更しない。
+gemma4 E2B の drafter（i8・`[256,3072]` / `[262144,256]` 等）の形は表に無く、`i4-fast` でも 68 本中 66 本の linear が逐次のまま走る（束の census 表が参照 66 で固定 — perf-ledger K-59）。
 
 ## packed int8 活性（`packedStaticQuantize`・2026-09-19）
 

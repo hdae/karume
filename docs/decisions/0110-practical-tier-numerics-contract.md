@@ -194,5 +194,9 @@ LLM は固定評価 + 出力の読解。未実施の人間評価を実施済み�
 - 初回の実測（B570・2026-09-26）: anima 既定席 step 1 latent の relRMS 1.43e-2（1024）/ 1.19e-2（512）、
   attentionCompute を外した故障注入は 1.08e-2（全部入りの 0.90 倍 — 床を 0 より上に置く根拠にならず、ノブ単位は
   census が持つ）。irodori `i8-a8` 3.6e-3 / 5.8e-3。sbv2 `i8-a8` front 4 出力 1.5e-4〜5.2e-3。上限 = 実測 × 2。
-- sbv2 の観測点は front の 4 出力（波形長が変わりうるので最終波形は帯にしない）。gemma（LLM）と f32 のみの
+- sbv2 の観測点は front の 4 出力（波形長が変わりうるので最終波形は帯にしない）。
+- 決定 5 ① の census の正本は束の census 表（`packages/models/tests/helpers/census-table.ts` — 鍵 = 実効 SessionOptions・値 =
+  部品 × 相ごとの期待本数と参照経路の残り）。`census_table_test.ts` はローカルミラーの非参照束に行が無ければ赤にする。
+  行を置かない席（prefill の並列 GEMV / attention・parallel-fused・anima の attention 席）は chunk 行数・容量・device 上限に
+  依るためで、そこは従来の「1 本以上 / 0 本」の検査が残る（導出関数の追加は残件）。gemma（LLM）と f32 のみの
   4 系列にはまだ同機 A/B も sha 行も無い（要判断 — SUMMARY §12.2）。
