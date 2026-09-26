@@ -140,6 +140,31 @@ overwrite each other. Compare several seeds: a single seed can favor either samp
 The elapsed time on the last line includes loading, which every invocation repeats, so it is not a
 speed comparison between samplers.
 
+## Generating several images from one pipeline
+
+This demo builds a pipeline, generates one image and exits, so every run loads all four models
+again. A program that keeps one `AnimaPipeline` and calls `generate` repeatedly can keep the DiT
+loaded between calls with `residency: "transformer"`, set as a pipeline option or per request. The
+request value decides whether the DiT stays loaded after that call, so pass `"per-stage"` on the
+last image to release it:
+
+```ts
+const pipeline = await AnimaPipeline.fromPretrained(from, { residency: "transformer" });
+for (const [index, prompt] of prompts.entries()) {
+  const last = index === prompts.length - 1;
+  await pipeline.generate({ prompt, ...(last ? { residency: "per-stage" } : {}) });
+}
+```
+
+Keeping the DiT raises peak VRAM, because the text and VAE stages load while it stays resident
+(about 2.6 GiB more at 1024² with the default quant), so it does not fit 4 GB GPUs. When a stage runs
+out of memory while the DiT is being kept loaded, the pipeline drops the DiT, retries that stage
+once and stops keeping the DiT for the rest of its life (a DiT loaded in the same call is only kept
+once its stage has finished). `onEvent` receives a `residency` event for each of these changes. The
+default, `"per-stage"`, loads and releases each model inside every `generate` as before. The design
+and the VRAM figures are in
+[ADR 0112](../../docs/decisions/0112-anima-transformer-residency.md).
+
 ## Regenerating the evaluation images
 
 `eval-images.ts` re-renders the four sample images (seeds 42 to 45) that several tests use as

@@ -43,6 +43,18 @@
         "kind": "typeAlias"
       },
       {
+        "name": "AnimaResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaResidencyAction",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaResidencyReason",
+        "kind": "typeAlias"
+      },
+      {
         "name": "AnimaRunComponent",
         "kind": "typeAlias"
       },
@@ -566,6 +578,18 @@
       },
       {
         "name": "AnimaPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaResidency",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaResidencyAction",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "AnimaResidencyReason",
         "kind": "typeAlias"
       },
       {

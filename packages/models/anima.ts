@@ -34,6 +34,17 @@ export type { AnimaSamplerType } from "./src/anima/config.ts";
 export { ANIMA_SAMPLER_TYPES } from "./src/anima/config.ts";
 
 /**
+ * DiT の常駐（ADR 0112）の語彙。{@link AnimaPipelineOptions} / {@link AnimaGenerateRequest} の
+ * `residency` が受ける値と、`residency` イベント（{@link AnimaGenerateEvent}）の `action` /
+ * `reason`。消費側が理由で分岐する（格下げを UI に出す等）ときに綴りを書き直さずに済むよう型を出す。
+ */
+export type {
+  AnimaResidency,
+  AnimaResidencyAction,
+  AnimaResidencyReason,
+} from "./src/anima/residency.ts";
+
+/**
  * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
  * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。リポの分割軸は
  * 「公式 / 追加学習」（ADR 0087）で 2 エントリ:

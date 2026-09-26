@@ -10,14 +10,23 @@
  * 4. latent を per-channel 逆正規化 → `vae_decoder` を**常時タイル**で通す
  * 5. RGBA 化して返す（PNG 化は `encodePng` — パイプライン非依存の共通処理）
  *
- * ## MUST: グラフは 1 本ずつ開いて閉じる（4 本同時常駐は VRAM で不成立 — ADR 0016）
+ * ## MUST: 既定ではグラフは 1 本ずつ開いて閉じる（ADR 0016 / 0112）
  *
- * 解放の**位置**に意味がある。テキスト経路（1.4GB 級）を DiT ロードの**前**に、DiT
- * （3.7GB）を VAE ロードの**前**に解放する。実測機の GPUBuffer 総確保量の天井は 7,280MiB で、
- * テキスト経路と DiT が同時に生きると 5.2GB になり活性を乗せる余地が薄くなる。
+ * 既定の `residency: "per-stage"` では解放の**位置**に意味がある。テキスト経路（重み 1,396MiB）を
+ * DiT ロードの**前**に、DiT を VAE ロードの**前**に解放する。DiT の重みは quant 席で倍違う
+ * （既定席 `f16+dit8-a8-attn8-s16` = 1,875MiB・`f16` 席 = 3,733MiB — 2026-08-05 final-perf-bench
+ * の VRAM 表）。VAE を常時タイルにした後は**チェーン最大は DiT 段**で、既定の VRAM の前提は
+ * 「最大の段 1 本ぶん」。
  * したがって {@link AnimaPipeline.fromAssets} は **Session を 1 本も張らない** —
  * 開くのはコンテナ（`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は
  * {@link AnimaPipeline.generate} の中で段ごとに張っては畳む。
+ *
+ * opt-in の `residency: "transformer"` は DiT の Session だけを generate を跨いで持ち続ける
+ * （状態機械は `residency.ts`）。text / VAE の段は常駐 DiT の**上に**乗るので、チェーン最大は
+ * 必ず上がる（既定席 1024² で常駐ぶん +2,646MiB — ADR 0112）。そこで他の段が
+ * `GpuOutOfMemoryError` を投げたら常駐 DiT を退避してその段を 1 回だけやり直し、以後この
+ * pipeline は常駐しない（格下げ）。常駐 DiT も最初の generate の DiT 段で作る（構築時には
+ * 張らない）。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
  * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
@@ -113,6 +122,15 @@ import {
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer, readWholeAsset } from "../hub/asset-readers.ts";
+import {
+  type AnimaResidency,
+  type AnimaResidencyAction,
+  type AnimaResidencyReason,
+  assertAnimaResidency,
+  DEFAULT_ANIMA_RESIDENCY,
+  type ResidencyNotice,
+  TransformerResidency,
+} from "./residency.ts";
 
 /** manifest の weights / assets 表に現れる名前（ADR 0041 §3 の規約名）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -159,16 +177,31 @@ export type AnimaGenerateRequest = {
    */
   readonly sampler?: AnimaSamplerType;
   /**
+   * **この generate の後に** DiT の Session を持ち続けるか（{@link AnimaResidency}）。省略時は
+   * {@link AnimaPipelineOptions.residency}。
+   *
+   * 開始時に常駐 DiT が既にあれば、値に関わらずそれを使う（読み直さない）。連続生成では
+   * 途中を `"transformer"`、**最後の 1 枚だけ `"per-stage"`** にすると、その generate の後に
+   * 常駐 DiT が解放される（`residency` イベントの `released` / `request`）。
+   * OOM の退避で格下げ済みの pipeline では `"transformer"` を求めても持たず、
+   * `released` / `downgraded` を名乗る。未知の綴りは GPU に触る前に `ModelInputError`。
+   */
+  readonly residency?: AnimaResidency;
+  /**
    * 生成イベントの観測席（{@link AnimaGenerateEvent}）— 段の開始 / 終了・denoise の 1 step
-   * 完了・VAE タイル 1 枚の完了ごとに呼ばれる。
+   * 完了・VAE タイル 1 枚の完了・DiT 常駐の変化ごとに呼ばれる。
    *
    * **await する**（発火の順序が決定的になり、消費側で間引き / スロットリングができる）。
    * **例外は握らない**（`onRunDiagnostics` と同じ流儀 = fail loudly）— 副産物として
-   * **throw が step 粒度の中断手段**になる（生成は reject し、Session は `withSession` の
-   * `finally` で解放される）。
+   * **throw が step 粒度の中断手段**になる（生成は reject し、段の Session は解放される）。
+   * 持ち越した常駐 DiT を捨てるのは denoise ループ内（`denoise-step`）の throw だけで、そのとき
+   * `residency` の `evicted` / `failure` を名乗る。`stage` / `vae-tile` / `residency` の通知での
+   * throw では常駐 DiT は健全なので捨てない（ただし実効値が `"per-stage"` なら手放して
+   * `released` / `request` を名乗る — 失敗した generate でも「この後に持たない」指示は効く）。
+   * これらの通知で元と同じ例外を投げ直しても、生成が投げるのは元の例外 1 本のまま。
    *
-   * NOTE: 毎 step の VAE プレビューは提供しない。VAE は DiT を解放した**後**にしかロード
-   * できない（VRAM の MUST — モジュール doc）ので、途中結果として渡せるのは生 latent
+   * NOTE: 毎 step の VAE プレビューは提供しない。既定の段ごと運転では VAE は DiT を解放した
+   * **後**にしかロードできない（VRAM の MUST — モジュール doc）ので、途中結果として渡せるのは生 latent
    * （`copyLatents`）だけ。プレビューは `approximatePreview`（`@karume/models/anima`）が
    * この latent から近似する。
    *
@@ -197,7 +230,13 @@ export type AnimaLatentSnapshot = {
 
 /** {@link AnimaGenerateRequest.onEvent} が受ける生成イベント。 */
 export type AnimaGenerateEvent =
-  /** 段の Session 構築の**前**（`start`）と解放の**後**（`end`）— GB 級ロードの進捗が見える。 */
+  /**
+   * 段の開始（`start`）と終了（`end`）。段ごと運転では Session 構築の**前**と解放の**後**に
+   * 当たり、GB 級ロードの進捗が見える。持ち越した常駐 DiT を実効値 `"transformer"` で使う
+   * `transformer` 段では start → end にロードも解放も入らない（段の本体だけ）。実効値
+   * `"per-stage"` で使う段では解放（手放し）が、OOM で退避した段では解放と段ごとのロードが
+   * start → end の中に入る。途中で落ちたら `end` は出ない。
+   */
   | { readonly kind: "stage"; readonly component: AnimaRunComponent; readonly at: "start" | "end" }
   | {
     readonly kind: "denoise-step";
@@ -210,7 +249,28 @@ export type AnimaGenerateEvent =
     readonly copyLatents: () => AnimaLatentSnapshot;
   }
   /** VAE タイル 1 枚の decode 完了（`tile` は 1-based）。 */
-  | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
+  | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number }
+  /**
+   * DiT の常駐の変化（ADR 0112）。既定の段ごと運転で常駐と無関係な generate では出ない。
+   *
+   * - `retained` / `request`: DiT をこの generate の後も持ち続ける（`transformer` 段の end の前）。
+   * - `released` / `request`: 持ち越した常駐 DiT を、実効値 `"per-stage"` に従って手放した
+   *   （DiT 段の end の前 — generate が DiT 段の前で失敗したときは、その失敗の後に出る）。
+   * - `released` / `downgraded`: 常駐を求められたが、OOM の退避で格下げ済みなので持たない。
+   * - `evicted` / `out-of-memory`: 常駐 DiT がある状態で段が `GpuOutOfMemoryError` を投げたので
+   *   常駐 DiT を捨て、**その段を 1 回だけ最初からやり直す**（DiT 段なら段ごと運転で —
+   *   `denoise-step` / `vae-tile` はこの後 1 から出直す）。以後この pipeline は常駐しない。DiT 段で
+   *   退避するのは前の generate から持ち越した DiT だけ（この generate で作った DiT の OOM は段ごと
+   *   運転と同じ VRAM 構成なので、退避せずにそのまま投げる — ADR 0112 決定 3）。
+   * - `evicted` / `failure`: 持ち越した常駐 DiT を使った DiT 段が失敗した（denoise ループ内の
+   *   `onEvent` の throw を含む）ので常駐 DiT を捨てた。
+   */
+  | {
+    readonly kind: "residency";
+    readonly component: "transformer";
+    readonly action: AnimaResidencyAction;
+    readonly reason: AnimaResidencyReason;
+  };
 
 /**
  * 途中 latent を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
@@ -309,6 +369,19 @@ export type AnimaPipelineOptions = {
    * {@link AnimaPipelineOptions.linearCompute} と同じ・shader-f16 は要らない）。
    */
   readonly attentionScoreStorage?: SessionOptions["attentionScoreStorage"];
+  /**
+   * generate の後に DiT の Session を持ち続けるかの既定（{@link AnimaResidency}・省略時
+   * `"per-stage"` = 段ごとに張って畳む従来の挙動）。generate ごとに
+   * {@link AnimaGenerateRequest.residency} で上書きできる。
+   *
+   * `"transformer"` は 2 回目以降の generate で DiT の読み直し・計画の導出・中間バッファの作り直しを
+   * 消す代わりに、text / VAE の段が常駐 DiT の上に乗る（既定席 1024² で +2,646MiB・4 GB 級の
+   * GPU では使えない — docs/limitations.md）。VRAM が足りずに OOM したら常駐 DiT を退避して
+   * その段をやり直し、以後は常駐しない（`residency` イベントで名乗る — ADR 0112）。
+   * 構築時には Session を張らない（常駐 DiT は最初の generate の DiT 段で作る）。
+   * 未知の綴りは重みを取る前に `ModelInputError`。
+   */
+  readonly residency?: AnimaResidency;
 };
 
 /**
@@ -545,6 +618,72 @@ const planDynDit = (
   };
 };
 
+/** 段の本体が受ける run（出力 1 本を返す — 観測席への通知込み）。 */
+type StageRun = (inputs: Record<string, Tensor>) => Promise<Tensor>;
+
+/** Session 1 本の run を段の本体向けに包む（出力 1 本を取り出し、観測席へ診断を渡す）。 */
+const stageRun = (
+  session: Session,
+  model: ModelComponent,
+  observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
+): StageRun => {
+  const outputName = model.graph.outputs[0];
+  return async (inputs) => {
+    const outputs = await session.run(inputs);
+    if (observe !== undefined) observe(session.diagnostics());
+    return outputs[outputName];
+  };
+};
+
+/**
+ * 常駐 DiT を OOM で退避した後、解放が device に届くのを待つ。
+ *
+ * Intel / wgpu は `destroy()` の解放が次の device poll まで遅れ、全 `destroy()` の直後に確保し直すと
+ * 同じ OOM を踏む（docs/known-issues.md「Intel Arc B570」節）。素の WebGPU の probe（B570・2026-09-26・
+ * 1 GiB を destroy → `onSubmittedWorkDone` → 1 GiB を確保し直して 256 MiB を書く）では、この待ちだけで
+ * 確保も書き込みも通った（docs/research/2026-09-26-anima-residency-bench.md）。固定の sleep は足さない。
+ * NOTE: 同じ機で pipeline の退避 → やり直し（evict-probe・ダミー 6 GiB）は device lost になった。原因は
+ * 解放待ちの長さではなく未特定（known-issues）。
+ *
+ * MUST: device 消失と競わせる — 消失後の `onSubmittedWorkDone` が解決しない実装がありうる
+ * （runtime の `raceDeviceLost` の doc）。消失したら待たずに戻り、やり直しの段が消失の例外で
+ * fail loudly になる。
+ *
+ * NOTE: `export` は GPU 無しで「device 消失で解決する」を縛るテストのため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const settleReleasedMemory = async (gpu: GpuContext): Promise<void> => {
+  let unsubscribe: () => void = () => {};
+  const lost = new Promise<void>((resolve) => {
+    unsubscribe = gpu.onLost(() => resolve());
+  });
+  try {
+    await Promise.race([gpu.device.queue.onSubmittedWorkDone(), lost]);
+  } finally {
+    unsubscribe();
+  }
+};
+
+/**
+ * pipeline の `dispose` の本体: 常駐 DiT を畳んでから GPU を破棄する（`destroyGpu` は内部で取った
+ * GPU のときだけ渡す — 共有 GPU は呼び出し側の所有物）。
+ *
+ * MUST: 常駐 DiT が先（flush-before-destroy）。畳むのに失敗しても GPU は返す（`disposeSteps` の doc —
+ * 失敗は全部回した後に投げる）。
+ *
+ * NOTE: `export` は GPU 無しで順序と失敗の扱いを縛るテストのため（`mod.ts` / サブパス面には出さない
+ * — ADR 0008）。実 GPU の e2e は「常駐 DiT が畳まれたこと」を観測する口を持たない（GpuContext に
+ * live バイトの診断が無い）。
+ */
+export const disposeResidencyThenGpu = (
+  residency: { readonly dispose: () => Promise<void> },
+  destroyGpu: (() => void) | undefined,
+): Promise<void> =>
+  disposeSteps([
+    () => residency.dispose(),
+    ...(destroyGpu === undefined ? [] : [destroyGpu]),
+  ]);
+
 /**
  * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
  * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の段が確保に
@@ -555,21 +694,12 @@ const withSession = async <T>(
   model: ModelComponent,
   sessionOptions: SessionOptions,
   observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
-  body: (
-    run: (inputs: Record<string, Tensor>) => Promise<Tensor>,
-    session: Session,
-  ) => Promise<T>,
+  body: (run: StageRun) => Promise<T>,
 ): Promise<T> => {
   const session = await model.createSession(gpu, sessionOptions);
   let failure: { readonly error: unknown } | undefined;
   try {
-    const outputName = model.graph.outputs[0];
-    const run = async (inputs: Record<string, Tensor>): Promise<Tensor> => {
-      const outputs = await session.run(inputs);
-      if (observe !== undefined) observe(session.diagnostics());
-      return outputs[outputName];
-    };
-    return await body(run, session);
+    return await body(stageRun(session, model, observe));
   } catch (error) {
     failure = { error };
     throw error;
@@ -605,6 +735,8 @@ type AnimaState = {
   readonly transformer: ModelComponent;
   readonly ropeBase: RopeBase;
   readonly vaeDecoder: ModelComponent;
+  /** generate が request で上書きしなかったときの実効 residency（検査済み）。 */
+  readonly residency: AnimaResidency;
   readonly onRunDiagnostics?: (
     component: AnimaRunComponent,
     diagnostics: SessionDiagnostics,
@@ -620,6 +752,8 @@ type AnimaAdmission = {
   readonly sessionOptions: SessionOptions;
   /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
+  /** 構築オプションの residency（検査済み・省略時は既定）。 */
+  readonly residency: AnimaResidency;
 };
 
 /**
@@ -639,9 +773,18 @@ export class AnimaPipeline {
    * 更新される派生状態になる）。
    */
   #disposal: Promise<void> | undefined;
+  /**
+   * DiT の常駐の席（ADR 0112）。pipeline の所有物 — `options.gpu` を共有していても `dispose` で
+   * 畳む。鎖（{@link AnimaPipeline.#chain}）の内側からだけ触る。
+   */
+  readonly #residency: TransformerResidency<Session>;
 
   private constructor(state: AnimaState) {
     this.#state = state;
+    this.#residency = new TransformerResidency<Session>({
+      dispose: (session) => session.dispose(),
+      settleRelease: () => settleReleasedMemory(state.gpu),
+    });
   }
 
   /**
@@ -690,6 +833,7 @@ export class AnimaPipeline {
       ...(options.attentionScoreStorage === undefined
         ? {}
         : { attentionScoreStorage: options.attentionScoreStorage }),
+      ...(options.residency === undefined ? {} : { residency: options.residency }),
     };
     // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
     const { admitted, assets, open } = await loadContainerComponents(
@@ -779,6 +923,10 @@ export class AnimaPipeline {
       `AnimaPipeline: quant '${quantName}'`,
     );
     const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
+    // residency も同じ席で見る（未知の綴りを重みの取得の後まで持ち越さない）。
+    const residency = options.residency === undefined
+      ? DEFAULT_ANIMA_RESIDENCY
+      : assertAnimaResidency(options.residency, "AnimaPipeline: residency");
 
     // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
     // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
@@ -796,7 +944,7 @@ export class AnimaPipeline {
       );
     }
 
-    return { config, quantName, quant, sessionOptions, gpuFeatures };
+    return { config, quantName, quant, sessionOptions, gpuFeatures, residency };
   }
 
   /**
@@ -812,7 +960,7 @@ export class AnimaPipeline {
     open: ComponentOpener,
     options: AnimaPipelineOptions,
   ): Promise<AnimaPipeline> {
-    const { config, quantName, sessionOptions, gpuFeatures } = admitted;
+    const { config, quantName, sessionOptions, gpuFeatures, residency } = admitted;
 
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
     // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
@@ -861,6 +1009,7 @@ export class AnimaPipeline {
         transformer,
         ropeBase,
         vaeDecoder,
+        residency,
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
@@ -950,6 +1099,11 @@ export class AnimaPipeline {
     if (!Number.isFinite(guidance)) {
       throw new ModelInputError(`guidanceScale ${guidance} が有限の数でない`);
     }
+    // 実効 residency（request ?? 構築オプション）。意味は「この generate の**後に** DiT を持つか」
+    // — 開始時の常駐 DiT は値に関わらず使う（`residency.ts` の `transformerSource`）。
+    const residency = request.residency === undefined
+      ? state.residency
+      : assertAnimaResidency(request.residency, "residency");
 
     const wantsUncond = needsUncond(guidance);
     const negativePrompt = resolveNegativePrompt(
@@ -965,23 +1119,22 @@ export class AnimaPipeline {
       : async (event) => {
         await onEvent(event);
       };
-    /** 段 1 本を回す（`stage` を Session 構築の前と解放の後に挟む — 途中で落ちたら `end` は出ない）。 */
+    const notifyResidency = (notice: ResidencyNotice): Promise<void> =>
+      emit({ kind: "residency", component: "transformer", ...notice });
+    /**
+     * DiT 以外の段 1 本を回す（`stage` を Session 構築の前と解放の後に挟む — 途中で落ちたら
+     * `end` は出ない）。常駐 DiT がある状態の OOM は退避して段を 1 回だけやり直す
+     * （`TransformerResidency.runStage`）。text 系 / VAE は quant の session を受けない（`{}`）。
+     */
     const withStage = async <T>(
-      component: AnimaRunComponent,
+      component: Exclude<AnimaRunComponent, "transformer">,
       model: ModelComponent,
-      sessionOptions: SessionOptions,
-      body: (
-        run: (inputs: Record<string, Tensor>) => Promise<Tensor>,
-        session: Session,
-      ) => Promise<T>,
+      body: (run: StageRun) => Promise<T>,
     ): Promise<T> => {
       await emit({ kind: "stage", component, at: "start" });
-      const result = await withSession(
-        state.gpu,
-        model,
-        sessionOptions,
-        observer(state, component),
-        body,
+      const result = await this.#residency.runStage(
+        () => withSession(state.gpu, model, {}, observer(state, component), body),
+        notifyResidency,
       );
       await emit({ kind: "stage", component, at: "end" });
       return result;
@@ -994,183 +1147,205 @@ export class AnimaPipeline {
       : undefined;
     const sigmas = sigmaSchedule(steps, state.config.scheduler.shift);
 
-    // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
-    const hidden = await withStage(
-      "text_encoder",
-      state.textEncoder,
-      {},
-      (run) =>
-        Promise.all([
-          run({ input_ids: idsTensor(positive.qwenIds) }),
-          ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
-        ]),
-    );
-    const embeds = await withStage(
-      "text_conditioner",
-      state.textConditioner,
-      {},
-      (run) =>
-        Promise.all([
-          run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
-          ...(negative === undefined ? [] : [
-            run({
-              source_hidden_states: hidden[1],
-              target_input_ids: idsTensor(negative.t5Ids),
-            }),
+    // GPU に触る段（text 段以降）で generate が失敗したら、実効値 per-stage の「この generate の後に
+    // 持たない」指示を効かせる（DiT 段より前の失敗 — text 段・`stage` の onEvent の throw 等 — でも
+    // 持ち越した DiT を手放す）。DiT 段の中の失敗は `runTransformer` が決着させている。入力の検査
+    // （ここより上）で落ちた要求は GPU にも常駐の席にも触らない。
+    try {
+      // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
+      const hidden = await withStage(
+        "text_encoder",
+        state.textEncoder,
+        (run) =>
+          Promise.all([
+            run({ input_ids: idsTensor(positive.qwenIds) }),
+            ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
           ]),
-        ]),
-    );
-
-    // --- ③ denoise（DiT を N step。VAE ロードの前に解放する）-----------------
-    // 低精度計算のノブ（quant の session）は **DiT の Session にだけ**効かせる —
-    // text 系 / VAE は対象外（比較の軸を DiT 1 本に保つ）。
-    const { latents, latentShape } = await withStage(
-      "transformer",
-      state.transformer,
-      state.sessionOptions,
-      async (run) => {
-        const model = state.transformer;
-        const plan = planDynDit(model, state.ropeBase, resolution);
-        const [, projWidth] = staticInputShape(model, "timesteps_proj");
-        const embedShape = staticInputShape(model, "encoder_hidden_states");
-        const [, rows, width] = embedShape;
-        if (embeds[0].shape[2] !== width) {
-          throw new Error(`conditioner 出力の幅 ${embeds[0].shape[2]} が DiT の ${width} と違う`);
-        }
-        /**
-         * latent 1 枚を DiT へ通す。入口で patchify、出口で unpatchify を挟むだけで、
-         * 呼び出し側（CFG / Euler）は latent だけを見る。
-         */
-        const predict = async (
-          current: Float32Array<ArrayBuffer>,
-          proj: Tensor,
-          embed: Float32Array<ArrayBuffer>,
-        ): Promise<Float32Array> => {
-          const output = await run({
-            tokens: {
-              dtype: "f32",
-              shape: plan.tokenShape,
-              data: patchifyLatents(current, plan.latentShape, plan.geometry),
-            },
-            timesteps_proj: proj,
-            encoder_hidden_states: { dtype: "f32", shape: embedShape, data: embed },
-            rope_cos: { dtype: "f32", shape: plan.ropeShape, data: plan.cos },
-            rope_sin: { dtype: "f32", shape: plan.ropeShape, data: plan.sin },
-          });
-          return unpatchifyTokens(
-            asF32(output, "DiT 出力（S 形）"),
-            plan.latentShape,
-            plan.geometry,
-          );
-        };
-        const padded = embeds.map((embed) => padSequence(embed, rows));
-        const elements = plan.latentShape.reduce((a, b) => a * b, 1);
-        let current = new Randn(seed).normals(elements);
-        // DPM++ 2M が読む唯一の履歴（step 0 では無い）。Euler 経路では常に undefined のまま。
-        let previousX0: Float32Array<ArrayBuffer> | undefined;
-        for (let index = 0; index < steps; index += 1) {
-          const proj: Tensor = {
-            dtype: "f32",
-            shape: [1, projWidth],
-            data: timestepsProj(
-              sigmas[index],
-              projWidth,
-              state.config.scheduler.numTrainTimesteps,
-            ),
-          };
-          const predictions: Float32Array[] = [];
-          for (const embed of padded) predictions.push(await predict(current, proj, embed));
-          const update = denoiseStep(sampler, {
-            sample: current,
-            cond: predictions[0],
-            uncond: predictions[1],
-            guidance,
-            sigmas,
-            index,
-            previousX0,
-          });
-          current = update.sample;
-          previousX0 = update.previousX0;
-          await emit({
-            kind: "denoise-step",
-            step: index + 1,
-            steps,
-            sigma: sigmas[index],
-            copyLatents: latentSnapshot(current, plan.latentShape),
-          });
-        }
-        return { latents: current, latentShape: plan.latentShape };
-      },
-    );
-
-    // --- ④ 逆正規化 → VAE decode（常時タイル — ADR 0038 §4）-------------------
-    const { mean: latentsMean, std: latentsStd } = animaLatents();
-    const denormalized = denormalizeLatents(latents, latentShape, latentsMean, latentsStd);
-    const decoded = await withStage(
-      "vae_decoder",
-      state.vaeDecoder,
-      {},
-      async (run) => {
-        const tileShape = staticInputShape(state.vaeDecoder, "latents");
-        const sampleShape = staticOutputShape(state.vaeDecoder);
-        const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
-        const tiles = tileCount(geometry);
-        const blendsOf = (axis: typeof geometry.rows): number[] =>
-          axis.starts.slice(1).map((_, index) => blendExtentAt(axis, geometry.scale, index + 1));
-        let decodedTiles = 0;
-        const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
-          const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
-          const sample = asF32(output, `VAE 出力（タイル ${row},${col}）`);
-          decodedTiles += 1;
-          await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
-          return sample;
-        });
-        // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
-        // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
-        return {
-          pixels,
-          width: geometry.cols.extent * geometry.scale,
-          height: geometry.rows.extent * geometry.scale,
-          tiles,
-          // ブレンド幅は**対ごと**（丸め等間隔なので 1 latent まで動く）。診断に載るのは
-          // 幾何そのもので、代表値へ畳むと食い違いの手掛かりが消える。
-          blend: [blendsOf(geometry.rows), blendsOf(geometry.cols)] as const,
-        };
-      },
-    );
-
-    // MUST: 出た画像の寸法はノブではなく**資産**が決める。ここで食い違うなら開いた export が
-    // 想定と違うので、黙って返さない。要素数との整合は `imageToRgba` が見る。
-    if (decoded.width !== resolution.width || decoded.height !== resolution.height) {
-      throw new Error(
-        `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${
-          formatResolution(resolution)
-        } と違う（タイル ${decoded.tiles} 枚 / ブレンド 縦 [${decoded.blend[0]}] 横 [${
-          decoded.blend[1]
-        }]px）`,
       );
-    }
+      const embeds = await withStage(
+        "text_conditioner",
+        state.textConditioner,
+        (run) =>
+          Promise.all([
+            run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
+            ...(negative === undefined ? [] : [
+              run({
+                source_hidden_states: hidden[1],
+                target_input_ids: idsTensor(negative.t5Ids),
+              }),
+            ]),
+          ]),
+      );
 
-    const rgba = imageToRgba(decoded.pixels, decoded.width, decoded.height);
-    return {
-      width: decoded.width,
-      height: decoded.height,
-      data: new Uint8Array(rgba.buffer),
-    };
+      // --- ③ denoise（DiT を N step。段ごと運転なら VAE ロードの前に解放する）---------
+      // 低精度計算のノブ（quant の session）は **DiT の Session にだけ**効かせる —
+      // text 系 / VAE は対象外（比較の軸を DiT 1 本に保つ）。
+      // Session の出所（常駐 / 新規に常駐 / 段ごと）と段の後の扱いは `TransformerResidency` が
+      // 決める（ADR 0112）。本体は OOM の退避後のやり直しで**最初から**呼び直されるので、denoise の
+      // 状態（乱数・latent・DPM の履歴）は本体の中で作る。
+      const observeTransformer = observer(state, "transformer");
+      await emit({ kind: "stage", component: "transformer", at: "start" });
+      const { latents, latentShape } = await this.#residency.runTransformer({
+        effective: residency,
+        open: () => state.transformer.createSession(state.gpu, state.sessionOptions),
+        notify: notifyResidency,
+        body: async (session) => {
+          const model = state.transformer;
+          const run = stageRun(session, model, observeTransformer);
+          const plan = planDynDit(model, state.ropeBase, resolution);
+          const [, projWidth] = staticInputShape(model, "timesteps_proj");
+          const embedShape = staticInputShape(model, "encoder_hidden_states");
+          const [, rows, width] = embedShape;
+          if (embeds[0].shape[2] !== width) {
+            throw new Error(`conditioner 出力の幅 ${embeds[0].shape[2]} が DiT の ${width} と違う`);
+          }
+          /**
+           * latent 1 枚を DiT へ通す。入口で patchify、出口で unpatchify を挟むだけで、
+           * 呼び出し側（CFG / Euler）は latent だけを見る。
+           */
+          const predict = async (
+            current: Float32Array<ArrayBuffer>,
+            proj: Tensor,
+            embed: Float32Array<ArrayBuffer>,
+          ): Promise<Float32Array> => {
+            const output = await run({
+              tokens: {
+                dtype: "f32",
+                shape: plan.tokenShape,
+                data: patchifyLatents(current, plan.latentShape, plan.geometry),
+              },
+              timesteps_proj: proj,
+              encoder_hidden_states: { dtype: "f32", shape: embedShape, data: embed },
+              rope_cos: { dtype: "f32", shape: plan.ropeShape, data: plan.cos },
+              rope_sin: { dtype: "f32", shape: plan.ropeShape, data: plan.sin },
+            });
+            return unpatchifyTokens(
+              asF32(output, "DiT 出力（S 形）"),
+              plan.latentShape,
+              plan.geometry,
+            );
+          };
+          const padded = embeds.map((embed) => padSequence(embed, rows));
+          const elements = plan.latentShape.reduce((a, b) => a * b, 1);
+          let current = new Randn(seed).normals(elements);
+          // DPM++ 2M が読む唯一の履歴（step 0 では無い）。Euler 経路では常に undefined のまま。
+          let previousX0: Float32Array<ArrayBuffer> | undefined;
+          for (let index = 0; index < steps; index += 1) {
+            const proj: Tensor = {
+              dtype: "f32",
+              shape: [1, projWidth],
+              data: timestepsProj(
+                sigmas[index],
+                projWidth,
+                state.config.scheduler.numTrainTimesteps,
+              ),
+            };
+            const predictions: Float32Array[] = [];
+            for (const embed of padded) predictions.push(await predict(current, proj, embed));
+            const update = denoiseStep(sampler, {
+              sample: current,
+              cond: predictions[0],
+              uncond: predictions[1],
+              guidance,
+              sigmas,
+              index,
+              previousX0,
+            });
+            current = update.sample;
+            previousX0 = update.previousX0;
+            await emit({
+              kind: "denoise-step",
+              step: index + 1,
+              steps,
+              sigma: sigmas[index],
+              copyLatents: latentSnapshot(current, plan.latentShape),
+            });
+          }
+          return { latents: current, latentShape: plan.latentShape };
+        },
+      });
+      await emit({ kind: "stage", component: "transformer", at: "end" });
+
+      // --- ④ 逆正規化 → VAE decode（常時タイル — ADR 0038 §4）-------------------
+      const { mean: latentsMean, std: latentsStd } = animaLatents();
+      const denormalized = denormalizeLatents(latents, latentShape, latentsMean, latentsStd);
+      const decoded = await withStage(
+        "vae_decoder",
+        state.vaeDecoder,
+        async (run) => {
+          const tileShape = staticInputShape(state.vaeDecoder, "latents");
+          const sampleShape = staticOutputShape(state.vaeDecoder);
+          const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
+          const tiles = tileCount(geometry);
+          const blendsOf = (axis: typeof geometry.rows): number[] =>
+            axis.starts.slice(1).map((_, index) => blendExtentAt(axis, geometry.scale, index + 1));
+          let decodedTiles = 0;
+          const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
+            const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
+            const sample = asF32(output, `VAE 出力（タイル ${row},${col}）`);
+            decodedTiles += 1;
+            await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
+            return sample;
+          });
+          // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
+          // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
+          return {
+            pixels,
+            width: geometry.cols.extent * geometry.scale,
+            height: geometry.rows.extent * geometry.scale,
+            tiles,
+            // ブレンド幅は**対ごと**（丸め等間隔なので 1 latent まで動く）。診断に載るのは
+            // 幾何そのもので、代表値へ畳むと食い違いの手掛かりが消える。
+            blend: [blendsOf(geometry.rows), blendsOf(geometry.cols)] as const,
+          };
+        },
+      );
+
+      // MUST: 出た画像の寸法はノブではなく**資産**が決める。ここで食い違うなら開いた export が
+      // 想定と違うので、黙って返さない。要素数との整合は `imageToRgba` が見る。
+      if (decoded.width !== resolution.width || decoded.height !== resolution.height) {
+        throw new Error(
+          `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${
+            formatResolution(resolution)
+          } と違う（タイル ${decoded.tiles} 枚 / ブレンド 縦 [${decoded.blend[0]}] 横 [${
+            decoded.blend[1]
+          }]px）`,
+        );
+      }
+
+      const rgba = imageToRgba(decoded.pixels, decoded.width, decoded.height);
+      return {
+        width: decoded.width,
+        height: decoded.height,
+        data: new Uint8Array(rgba.buffer),
+      };
+    } catch (error) {
+      throw await this.#residency.releaseIfRequested(error, residency, notifyResidency);
+    }
   }
 
   /**
-   * 解放する。**内部で取得した GPU だけ**破棄する（`options.gpu` で渡された GpuContext は
-   * 呼び出し側の所有物なので触らない）。
+   * 解放する。常駐 DiT（{@link AnimaPipelineOptions.residency}）は必ず畳み、**内部で取得した GPU
+   * だけ**破棄する（`options.gpu` で渡された GpuContext は呼び出し側の所有物なので触らない）。
+   *
+   * `options.gpu` を共有していても dispose は必須 — 常駐 DiT（既定席 1024² で約 2.6 GiB）は共有
+   * device の上に残り続ける。device が失われていると常駐 DiT の破棄（Session の flush）が失敗し、
+   * dispose が reject しうる（内部で取った GPU はそれでも破棄する）。
    *
    * MUST: in-flight の生成の完了を待ってから破棄する（flush-before-destroy）— 破棄も鎖に
    * 載せることで、待ちと破棄の順序を 1 箇所で決める。2 度目以降も同じ完了を返す（先に返すと
    * 呼び出し側が「破棄済み」と見なして次へ進む）。
    */
   dispose(): Promise<void> {
-    this.#disposal ??= this.#chain(() => {
-      if (this.#state.ownsGpu) this.#state.gpu.destroy();
-    });
+    // MUST: 常駐 DiT を先に畳んでから GPU を破棄する（flush-before-destroy）。常駐 DiT は共有 GPU
+    // （`options.gpu`）でも pipeline の所有物なので必ず畳む。畳むのに失敗しても内部で取った GPU は
+    // 返す（`disposeSteps` の doc）。
+    this.#disposal ??= this.#chain(() =>
+      disposeResidencyThenGpu(
+        this.#residency,
+        this.#state.ownsGpu ? () => this.#state.gpu.destroy() : undefined,
+      )
+    );
     return this.#disposal;
   }
 

@@ -49,11 +49,12 @@
 
 import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { type FileRef, parseManifest, resolveSelection, selectionRefs } from "@karume/hub";
-import { acquireGpu } from "@karume/runtime";
+import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import type { Manifest } from "@karume/hub";
 import {
   type AnimaGenerateEvent,
   AnimaPipeline,
+  type AnimaResidency,
   type AnimaSamplerType,
   encodePng,
   type GeneratedImage,
@@ -372,7 +373,8 @@ const withTurbo = async (
   quant: string,
   options: {
     readonly caches?: CacheStorage;
-    readonly onRunDiagnostics?: (component: string) => void;
+    readonly onRunDiagnostics?: (component: string, diagnostics: SessionDiagnostics) => void;
+    readonly residency?: AnimaResidency;
   },
   body: (pipeline: AnimaPipeline) => Promise<void>,
 ): Promise<AnimaPipeline> => {
@@ -388,6 +390,7 @@ const withTurbo = async (
         ...(options.onRunDiagnostics === undefined
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
+        ...(options.residency === undefined ? {} : { residency: options.residency }),
       },
     );
     await body(pipeline);
@@ -756,6 +759,11 @@ Deno.test({
               log.push(`tile:${event.tile}/${event.tiles}`);
               return;
             }
+            // 既定の段ごと運転では出ない — 出たら下の期待列と食い違って落ちる。
+            if (event.kind === "residency") {
+              log.push(`residency:${event.action}/${event.reason}`);
+              return;
+            }
             log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
             const snapshot = event.copyLatents();
             shapes.push(snapshot.shape.join("x"));
@@ -828,6 +836,8 @@ Deno.test({
                     ? `stage:${event.component}:${event.at}`
                     : event.kind === "denoise-step"
                     ? `step:${event.step}`
+                    : event.kind === "residency"
+                    ? `residency:${event.action}/${event.reason}`
                     : `tile:${event.tile}`,
                 );
                 if (event.kind === "denoise-step" && event.step === abortAt) {
@@ -937,6 +947,295 @@ Deno.test({
       gpu.destroy();
       await server.shutdown();
     }
+  },
+});
+
+// --- DiT 常駐（residency — ADR 0112）------------------------------------------
+//
+// 常駐は数値を変えない設計なので、**新しい参照行を 1 本も足さない**（`fixtures/references/anima.json`
+// が無変更であることが門）。全ケースを既存の行（turbo 1024 / 512）の双子として回し、常駐の有無・
+// 解像度の往復・持ち越しと解放・中断後の作り直しのどれを通っても同じバイトが出ることを要求する。
+//
+// 寿命は `onRunDiagnostics` の transformer の診断で観測する（同じ Session を使い回していれば
+// generate を跨いでも導出済み計画に当たり、backing の構築回数も重みのバイト数も増えない —
+// 段ごと運転なら generate ごとに新しい Session なので最初の run は必ず外れる）。
+//
+// MUST: 双子の突合は `references.check` / `record` を通さない（通すと作るモードで新しい行が書かれる）。
+// 双子の行がこの環境に無い機ではケースごと SKIP する（行は既存ケースの走行が作る）。
+
+/** 常駐の双子に使う既存の行（turbo 1024 / 512 — {@link REFERENCE} の 0 と 1）。 */
+const RESIDENCY_TWINS = {
+  1024: caseIdOf(REFERENCE[0].quant, REFERENCE[0].resolution),
+  512: caseIdOf(REFERENCE[1].quant, REFERENCE[1].resolution),
+} as const;
+
+const RESIDENCY_RUNNABLE = RUNNABLE &&
+  references.lookup(RESIDENCY_TWINS[1024]) !== undefined &&
+  references.lookup(RESIDENCY_TWINS[512]) !== undefined;
+
+/** イベント 1 つをログの綴りにする（段 / 常駐だけ — step とタイルは数だけ見れば足りる）。 */
+const residencyLogOf = (event: AnimaGenerateEvent): string | undefined => {
+  if (event.kind === "stage") return `stage:${event.component}:${event.at}`;
+  if (event.kind === "residency") return `residency:${event.action}/${event.reason}`;
+  return undefined;
+};
+
+/**
+ * 既存の行を双子に 1 枚焼いて突き合わせる（行は書かない）。戻り値はその generate の段 / 常駐の
+ * イベント列。実物と決着は結果の席に残す（`label` は結果の id — 参照行の鍵ではない）。
+ */
+const assertResidencyTwin = async (
+  label: string,
+  pipeline: AnimaPipeline,
+  size: 512 | 1024,
+  residency: AnimaResidency | undefined,
+): Promise<string[]> => {
+  const twin = RESIDENCY_TWINS[size];
+  const log: string[] = [];
+  const started = performance.now();
+  const image = await pipeline.generate({
+    prompt: PROMPT,
+    resolution: { width: size, height: size },
+    steps: STEPS,
+    seed: SEED,
+    ...(residency === undefined ? {} : { residency }),
+    onEvent: (event) => {
+      const entry = residencyLogOf(event);
+      if (entry !== undefined) log.push(entry);
+    },
+  });
+  const png = await encodePng(image.data, image.width, image.height);
+  const actual = await sha256Hex(png);
+  const elapsedMs = performance.now() - started;
+  console.log(
+    `[e2e] ${label}: ${(elapsedMs / 1000).toFixed(1)}s / PNG ${png.length}B / sha256 ${actual}`,
+  );
+  await assertRunningAdapter();
+  const expected = references.lookup(twin);
+  if (expected === undefined) {
+    throw new Error(`${twin} の行がこの環境に無い（SKIP の条件と食い違う）`);
+  }
+  const artifact = `${label}.png`;
+  const dumped = results.artifact(artifact);
+  await Deno.writeFile(dumped, png);
+  await results.record({
+    id: label,
+    status: actual === expected ? "pass" : "fail",
+    expected,
+    actual,
+    artifact,
+    elapsedMs,
+    note: `${twin} の双子（DiT 常駐 — 参照行は持たない）`,
+  });
+  if (actual !== expected) {
+    throw new Error(
+      mismatchReport(`${label}（双子 ${twin}）`, image, png, expected, actual, dumped),
+    );
+  }
+  return log;
+};
+
+/** transformer の run ごとの診断を generate 単位で束ねる観測席。 */
+const transformerRuns = () => {
+  const perGenerate: SessionDiagnostics[][] = [];
+  return {
+    perGenerate,
+    /** 次の generate の束を始める（generate の直前に呼ぶ）。 */
+    begin: () => perGenerate.push([]),
+    observe: (component: string, diagnostics: SessionDiagnostics): void => {
+      if (component === "transformer") perGenerate.at(-1)?.push(diagnostics);
+    },
+  };
+};
+
+/** 段ごとの `stage` の前後と、DiT 段の end の直前に来るべき常駐イベントを並べた期待列。 */
+const expectedStages = (residency: readonly string[]): string[] => [
+  "stage:text_encoder:start",
+  "stage:text_encoder:end",
+  "stage:text_conditioner:start",
+  "stage:text_conditioner:end",
+  "stage:transformer:start",
+  ...residency.map((entry) => `residency:${entry}`),
+  "stage:transformer:end",
+  "stage:vae_decoder:start",
+  "stage:vae_decoder:end",
+];
+
+Deno.test({
+  name:
+    'e2e(実GPU): residency "transformer" は同じケースの 2 回目も解像度の往復も参照 sha256 の双子と' +
+    "一致し、DiT を読み直さない",
+  ignore: !RESIDENCY_RUNNABLE,
+  fn: async (t) => {
+    const { quant } = REFERENCE[0];
+    const runs = transformerRuns();
+    await withTurbo(quant, { residency: "transformer", onRunDiagnostics: runs.observe }, async (
+      pipeline,
+    ) => {
+      const generate = async (label: string, size: 512 | 1024): Promise<void> => {
+        runs.begin();
+        const log = await assertResidencyTwin(label, pipeline, size, undefined);
+        assertEquals(log, expectedStages(["retained/request"]), `${label} のイベント列`);
+      };
+      const weightsOf = (diagnostics: SessionDiagnostics): number =>
+        diagnostics.weights.allocatedBytes;
+
+      await t.step(
+        "(a) 1024² を 2 回: 2 回とも双子の行と一致し、2 回目は計画にも backing にも当たる",
+        async () => {
+          await generate("residency-1024-first", 1024);
+          await generate("residency-1024-second", 1024);
+          const [first, second] = runs.perGenerate;
+          assertEquals(first.length, STEPS);
+          assertEquals(second.length, STEPS);
+          // 段ごと運転なら 2 回目の最初の run は新しい Session なので必ず外れる（常駐の直接証拠）。
+          assertEquals(
+            second[0].lastRunPrepared?.hit,
+            true,
+            "2 回目の最初の run が導出済み計画に当たらない",
+          );
+          assertEquals(
+            second.at(-1)?.planBacking.buildCount,
+            first.at(-1)?.planBacking.buildCount,
+            "2 回目の generate で backing を作り直している",
+          );
+          assertEquals(weightsOf(second[0]), weightsOf(first[0]), "2 回目で重みのバイト数が増えた");
+        },
+      );
+
+      await t.step(
+        "(b) 512² → 1024² → 512² の往復: 各解像度の双子と一致し、保持する backing は 1 本まで",
+        async () => {
+          await generate("residency-roundtrip-512-first", 512);
+          await generate("residency-roundtrip-1024", 1024);
+          await generate("residency-roundtrip-512-second", 512);
+        },
+      );
+
+      const all = runs.perGenerate.flat();
+      for (const diagnostics of all) {
+        assertEquals(
+          diagnostics.planBacking.retainedCount <= 1,
+          true,
+          `backing を ${diagnostics.planBacking.retainedCount} 本保持している`,
+        );
+      }
+      // 重みアリーナは params キャッシュの実体も抱える（`SessionDiagnostics.weights` の doc）ので、
+      // 解像度を変えて新しい計画を導いた run では params のぶんだけ本数とバイト数が増える。
+      // 「重みを読み直していない」の厳密な形は「最初の run 以降に増えた本数 = 各 run が確保した
+      // params の本数」— initializer の再アップロードが 1 本でも混ざれば右辺より大きくなる。
+      const [first, ...later] = all;
+      const paramsAllocated = later.reduce(
+        (sum, diagnostics) => sum + (diagnostics.lastRunParams?.allocCount ?? 0),
+        0,
+      );
+      assertEquals(
+        (later.at(-1) ?? first).weights.allocCount - first.weights.allocCount,
+        paramsAllocated,
+        "generate を跨いで重みアリーナに params 以外の確保が増えた（重みの読み直し）",
+      );
+    });
+  },
+});
+
+Deno.test({
+  name:
+    "e2e(実GPU): residency の request 上書き（持つ → 手放す）・中断後の作り直し・常駐ありの dispose",
+  ignore: !RESIDENCY_RUNNABLE,
+  fn: async (t) => {
+    const { quant } = REFERENCE[1];
+    const runs = transformerRuns();
+    // 構築オプションは既定（per-stage）のまま、request だけで常駐を切り替える。
+    const disposed = await withTurbo(
+      quant,
+      { onRunDiagnostics: runs.observe },
+      async (pipeline) => {
+        await t.step(
+          "(c) request 1 = transformer で持ち、request 2 = per-stage が使ってから手放す",
+          async () => {
+            runs.begin();
+            assertEquals(
+              await assertResidencyTwin("residency-request-retain", pipeline, 512, "transformer"),
+              expectedStages(["retained/request"]),
+            );
+            runs.begin();
+            assertEquals(
+              await assertResidencyTwin("residency-request-release", pipeline, 512, "per-stage"),
+              expectedStages(["released/request"]),
+            );
+            // request 2 は持ち越した DiT を使った（読み直していない）。
+            assertEquals(
+              runs.perGenerate[1][0].lastRunPrepared?.hit,
+              true,
+              "持ち越した DiT を使っていない",
+            );
+          },
+        );
+
+        await t.step(
+          "(d) onEvent の throw で DiT 段を中断すると常駐 DiT を捨て、次の generate は作り直して一致する",
+          async () => {
+            runs.begin();
+            await assertResidencyTwin("residency-before-abort", pipeline, 512, "transformer");
+            const seen: string[] = [];
+            const abortAt = 2;
+            await assertRejects(
+              () =>
+                pipeline.generate({
+                  prompt: PROMPT,
+                  resolution: { width: 512, height: 512 },
+                  steps: abortAt,
+                  seed: SEED,
+                  onEvent: (event) => {
+                    seen.push(
+                      event.kind === "denoise-step"
+                        ? `step:${event.step}`
+                        : residencyLogOf(event) ?? `tile:${event.kind}`,
+                    );
+                    if (event.kind === "denoise-step" && event.step === abortAt) {
+                      throw new Error("購読側で中断");
+                    }
+                  },
+                }),
+              Error,
+              "購読側で中断",
+            );
+            // 中断の直後に常駐 DiT を捨てたことを名乗り、段は正常終了しない（end は出ない）。
+            assertEquals(seen.slice(-2), [`step:${abortAt}`, "residency:evicted/failure"]);
+            assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
+
+            runs.begin();
+            assertEquals(
+              await assertResidencyTwin("residency-after-abort", pipeline, 512, "transformer"),
+              expectedStages(["retained/request"]),
+            );
+            // 捨てた後なので、最初の run は新しい Session（導出済み計画に当たらない）。
+            assertEquals(
+              runs.perGenerate.at(-1)?.[0].lastRunPrepared?.hit,
+              false,
+              "捨てたはずの DiT を使っている",
+            );
+          },
+        );
+        // (e) ここを抜けると `withTurbo` の `await using` が常駐 DiT を抱えたまま dispose する
+        // （(d) の最後の generate が retained で抜けている）。
+      },
+    );
+    // NOTE: 縛るのは「常駐を持ったままの dispose が reject せずに済み、以後の生成を受けない」まで。
+    // 常駐 DiT が実際に畳まれたことは観測しない — GpuContext / device に live バイトの診断が無く、
+    // 共有 GPU で「dispose 後に DiT 相当が確保できる」を見ても VRAM に余裕のある機では常駐が
+    // 残っていても通る（判別にならない）。「常駐 DiT を畳んでから GPU を破棄する」順序と失敗の扱いは
+    // `anima_residency_test.ts` の `disposeResidencyThenGpu` が GPU 無しで縛る。
+    await t.step(
+      "(e) 常駐を持ったままの dispose は投げずに済み、以後は生成を受けない",
+      async () => {
+        await assertRejects(
+          () => disposed.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
+          Error,
+          "dispose 済み",
+        );
+      },
+    );
   },
 });
 

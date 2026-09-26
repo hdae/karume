@@ -1,7 +1,7 @@
 // `AnimaPipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
 // （実 GPU の E2E は P3 波 2）。
 //
-// ここで押さえるのは 5 つ:
+// ここで押さえるのは 6 つ:
 //  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反と資産の解析を落とす
 //     （未知 model / pipeline 名 / 未知 major / 未知 quant / 資産の不在）。落とす位置が
 //     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
@@ -16,6 +16,10 @@
 //  ⑤ denoise ループの更新則の選択点（`denoiseStep`）が実効サンプラー（request の `sampler`
 //     ↩ manifest の `scheduler.type`）どおりに分かれ、`"euler"` は履歴を持たない（実 GPU の
 //     PNG 門は両方の更新則を通るが、あちらは資産と GPU が要る）。
+//  ⑥ `residency`（DiT 常駐 — ADR 0112）の綴りを、構築オプションは admission 席で、request は
+//     `generate` の入口（GPU に触る前）で落とす。後者は偽の GPU で組んだ pipeline で結線ごと縛る
+//     （sampler と違って実 GPU の e2e に綴り違いのケースが無い）。状態遷移そのもの（持つ / 手放す /
+//     退避）は `anima_residency_test.ts` が見る。
 //
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
@@ -34,6 +38,7 @@ import { parseManifest } from "@karume/hub";
 import { ANIMA_SAMPLER_TYPES } from "../anima.ts";
 import { assertAnimaSamplerType } from "../src/anima/config.ts";
 import {
+  type AnimaGenerateRequest,
   AnimaPipeline,
   type AnimaPipelineOptions,
   denoiseStep,
@@ -44,6 +49,7 @@ import { Randn } from "../src/anima/random.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
+import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /** この系列の weights 部品（`src/anima/pipeline.ts` の `COMPONENT_KEYS` と同じ 4 本）。 */
@@ -325,6 +331,139 @@ Deno.test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ�
     Error,
     "shader-f16",
   );
+});
+
+// ---- DiT 常駐の構築オプション（ADR 0112）---------------------------------------------------
+
+Deno.test("fromAssets: residency の未知の綴りは資産に触る前に ModelInputError", async () => {
+  // 綴り違いが黙って段ごと運転になると、opt-in が効いていないことに速度でしか気付けない。
+  // 資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
+  const manifest = parseManifest(manifestText());
+  for (const value of ["transformers", null]) {
+    await assertRejects(
+      () =>
+        AnimaPipeline.fromAssets(
+          { manifest, assets: emptyAssets },
+          optionsWith("residency", value),
+        ),
+      ModelInputError,
+      "AnimaPipeline: residency: 期待 'per-stage' / 'transformer'",
+    );
+  }
+});
+
+Deno.test("fromAssets: 受理される residency は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
+  // 構築は Session を 1 本も張らない（常駐 DiT は最初の generate で作る）ので、transformer でも
+  // 構築段の順序は変わらない。
+  const manifest = parseManifest(manifestText());
+  for (const residency of ["per-stage", "transformer"] as const) {
+    await assertRejects(
+      () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { residency }),
+      Error,
+      "資産 'tokenizer' が無い",
+    );
+  }
+});
+
+/**
+ * GPU の手前まで組める資産一式。構築は Session を 1 本も張らないので、偽の GPU でも組み上がる —
+ * 要るのは解析される資産（tokenizer 2 本の最小 JSON と、`transformer` の容器の rope 素表）だけ。
+ */
+const buildableAssets = async (): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
+  const encode = (value: unknown): Uint8Array<ArrayBuffer> =>
+    new TextEncoder().encode(JSON.stringify(value));
+  // `anima_tokenizer_test.ts` の createTokenizers の門と同じ最小形（"aba" が両方で 2 トークン以上）。
+  const tokenizer = encode({
+    vocabText: "a\nb\nab",
+    vocabCount: 3,
+    mergesText: "a b",
+    mergesCount: 1,
+    addedTokens: [],
+    classes: { letter: [[0x61, 0x7a]], number: [], space: [[0x20, 0x20]] },
+    caseFold: [],
+    nfcSegments: [],
+    maxLength: 8,
+  });
+  const tokenizer2 = encode({
+    vocabText: "<pad>\n</s>\n<unk>\n▁\na\nb",
+    scores: [0, 0, 0, -1, -1, -2],
+    unkId: 2,
+    eosId: 1,
+    addedTokens: [],
+    space: [[0x20, 0x20]],
+    normalizer: { single: [], multi: [], extend: [], breakAfter: [], prepend: [] },
+    maxLength: 8,
+  });
+  const ropeTable = (): DumpTensor => ({ dtype: "F32", shape: [2, 1], data: new Float32Array(2) });
+  const rope = writeSafetensors(
+    new Map(["t", "h", "w"].flatMap((axis) => [
+      [`cos_${axis}`, ropeTable()] as const,
+      [`sin_${axis}`, ropeTable()] as const,
+    ])),
+    {},
+  );
+  const transformer = await tensorlessContainer(
+    "transformer",
+    { inputs: [{ name: "x", shape: [1, 4] }], output: { name: "y", shape: [1, 4] } },
+    [{ name: "rope_base", role: "rope-base", bytes: rope }],
+  );
+  const others = Object.fromEntries(
+    Object.entries(COMPONENTS).filter(([key]) => !key.startsWith("transformer[")),
+  );
+  return {
+    ...others,
+    ...partAssets("transformer", transformer),
+    tokenizer,
+    tokenizer_2: tokenizer2,
+  };
+};
+
+/** TS の型を通らない値を 1 欄だけ差した request（JS の呼び手の綴り違いの再現）。 */
+const requestWith = (key: string, value: unknown): AnimaGenerateRequest => {
+  const request: AnimaGenerateRequest = { prompt: "aba" };
+  Object.defineProperty(request, key, { value, enumerable: true });
+  return request;
+};
+
+Deno.test("generate: request の residency の未知の綴りは GPU に触る前に ModelInputError（入口の結線）", async () => {
+  // 綴り違いの "transformers" が入口を素通りすると、段ごと運転として走り（常駐の席の判断は
+  // "transformer" との一致しか見ない）、通知も出ない = 黙って遅い経路。偽の GPU は Session を
+  // 組めないので、入口を抜ければ最初の段の構築で別の例外に化ける（下の対のテスト）。
+  const manifest = parseManifest(manifestText());
+  await using pipeline = await AnimaPipeline.fromAssets(
+    { manifest, assets: await buildableAssets() },
+    { gpu: fakeGpuContext(fakeDevice()) },
+  );
+  const events: string[] = [];
+  const request = requestWith("residency", "transformers");
+  await assertRejects(
+    () => pipeline.generate({ ...request, onEvent: (event) => void events.push(event.kind) }),
+    ModelInputError,
+    "residency: 期待 'per-stage' / 'transformer'（実際 'transformers'）",
+  );
+  assertEquals(events, [], "入口の検査より先に段へ入っている");
+});
+
+Deno.test("generate: 受理される residency は入口を通って最初の段（GPU）まで進む（門が恒真でないことの対）", async () => {
+  const manifest = parseManifest(manifestText());
+  await using pipeline = await AnimaPipeline.fromAssets(
+    { manifest, assets: await buildableAssets() },
+    { gpu: fakeGpuContext(fakeDevice()) },
+  );
+  for (const residency of ["per-stage", "transformer"] as const) {
+    const events: string[] = [];
+    const error = await assertRejects(() =>
+      pipeline.generate({
+        prompt: "aba",
+        residency,
+        onEvent: (event) => {
+          if (event.kind === "stage") events.push(`${event.component}:${event.at}`);
+        },
+      })
+    );
+    assert(!(error instanceof ModelInputError), `${residency}: 入口で落ちている（${error}）`);
+    assertEquals(events, ["text_encoder:start"], `${residency}: 最初の段に入っていない`);
+  }
 });
 
 Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {

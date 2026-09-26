@@ -75,6 +75,12 @@ export type {
 /** `AnimaGenerateRequest.sampler` の語彙（型と値の並び — `./anima` を参照）。 */
 export type { AnimaSamplerType } from "./src/anima/config.ts";
 export { ANIMA_SAMPLER_TYPES } from "./src/anima/config.ts";
+/** `AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` と `residency` イベントの語彙（`./anima` を参照）。 */
+export type {
+  AnimaResidency,
+  AnimaResidencyAction,
+  AnimaResidencyReason,
+} from "./src/anima/residency.ts";
 /**
  * 解像度の綴り（`1344x768` / 正方の略記 `512`）と受理集合。**受理集合の正本はこのパッケージ**
  * （ADR 0038 §2）なので、{@link ImageSize} だけ出して生成器を出さないと、CLI / UI が `WxH` の
