@@ -119,8 +119,10 @@ class TestQatQuants:
         for name, quant in qat_quants(model).items():
             assert_quant_presentation(f"{model}.{name}", quant)
 
-    def test_parallel_uses_the_same_weights_and_keeps_the_reference(self):
-        modes = qat_quants("e2b")
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_parallel_uses_the_same_weights_and_keeps_the_reference(self, model):
+        """E2B / E4B とも同じ 3 席・同じ宣言（E4B は 2026-09-26 の実測で席を新設した）。"""
+        modes = qat_quants(model)
         assert list(modes) == ["i4", "i4-gemvpar", "i4-fast"]
         assert modes["i4"]["session"] == {}
         assert modes["i4-gemvpar"]["weights"] == modes["i4"]["weights"]
@@ -134,13 +136,17 @@ class TestQatQuants:
             "fuseRmsNormAdd": True,
             "fuseLinearStaticQuantize": True,
             "packedStaticQuantize": True,
-            "stateAttentionReduce": "parallel",
+            "stateAttentionReduce": "parallel-fused",
         }
 
-    def test_unmeasured_e4b_keeps_its_single_reference_mode(self):
-        modes = qat_quants("e4b")
-        assert list(modes) == ["i4"]
-        assert modes["i4"]["session"] == {}
+    def test_only_the_e4b_fast_mode_names_its_measurement(self):
+        """実測の 1 文は E4B の `i4-fast` だけに付き、E2B の説明と他の席は同じ文面のまま。"""
+        e2b, e4b = qat_quants("e2b"), qat_quants("e4b")
+        for name in ("i4", "i4-gemvpar"):
+            assert e4b[name] == e2b[name]
+        assert e4b["i4-fast"]["description"] == e2b["i4-fast"]["description"] + (
+            " E4B decode time -42% (B570)."
+        )
 
     def test_unknown_model_is_rejected(self):
         with pytest.raises(ValueError, match="未対応"):
@@ -148,9 +154,9 @@ class TestQatQuants:
 
 
 class TestQatDefaultQuant:
-    @pytest.mark.parametrize(("model", "expected"), [("e2b", "i4-fast"), ("e4b", "i4")])
-    def test_measured_series_takes_the_fused_default(self, model, expected):
-        assert QAT_DEFAULT_QUANT[model] == expected
+    @pytest.mark.parametrize("model", ["e2b", "e4b"])
+    def test_measured_series_takes_the_fused_default(self, model):
+        assert QAT_DEFAULT_QUANT[model] == "i4-fast"
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_default_names_a_quant_the_model_offers(self, model):

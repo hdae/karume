@@ -45,6 +45,11 @@ measurements in `docs/research/`.
   declaration > runtime default) and rejects, before fetching weights, a manifest `session` key the
   family does not accept; previously the non-Gemma families passed any declared key through to the
   runtime. All published quants are accepted unchanged.
+- Gemma 4 QAT recipe: E4B gains the `i4-gemvpar` and `i4-fast` quants (the same declarations as
+  E2B) and now defaults to `i4-fast`; the E2B and E4B `i4-fast` declare
+  `stateAttentionReduce: "parallel-fused"` instead of `"parallel"`. On an Intel Arc B570, `i4-fast`
+  cut GPU decode time per step by 49.3% (E2B) and 41.7% (E4B) against `i4`, and no single flag was
+  slower on its own. Rebuild the distribution to pick up the new quants; no requantization is needed.
 
 ### Breaking
 
@@ -56,11 +61,11 @@ measurements in `docs/research/`.
 - `@karume/models`: Gemma 4 pipelines no longer apply a built-in `stateAttentionReduce: "parallel"`
   default. The attention reduction now comes from the explicit option, else the selected quant's
   declaration, else the runtime's reference `"sequential"`. As a result the `i4` quants (regular and
-  QAT, including QAT E4B's default), `fromAssets`, and every quant of a distribution built before
+  QAT), `fromAssets`, and every quant of a distribution built before
   this change (one that does not declare the key) run the reference attention path; pass
-  `stateAttentionReduce: "parallel"` to keep the previous behaviour. The rebuilt recipes declare it explicitly: `i4-gemvpar` and the QAT E2B
-  `i4-fast` declare `"parallel"` (unchanged behaviour), and the regular Gemma 4 `i4-fast` now
-  declares `"parallel-fused"` (same summation order as `"parallel"`; on an Intel Arc B570, E2B
+  `stateAttentionReduce: "parallel"` to keep the previous behaviour. The rebuilt recipes declare it explicitly: `i4-gemvpar` declares
+  `"parallel"` (unchanged behaviour), and the `i4-fast` quants (regular and QAT) now declare
+  `"parallel-fused"` (same summation order as `"parallel"`; on an Intel Arc B570, regular E2B
   GPU decode time −47.9% against `i4` with the reference attention, versus −46.9% with
   `"parallel"`, with identical tokens).
 

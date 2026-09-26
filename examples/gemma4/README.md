@@ -179,7 +179,7 @@ Updated E2B distributions default to `i4-fast`, which uses the same packed weigh
 as `i4` and declares `session.linearGemvReduce: "parallel"` together with
 `session.fuseRmsNormAdd: true`. `i4-gemvpar` declares parallel GEMV alone, and `i4`
 retains the reference summation order. Existing distributions retain their declared
-default until rebuilt; QAT E4B still defaults to `i4`.
+default until rebuilt. Rebuilt QAT distributions default to `i4-fast` for both E2B and E4B.
 
 An explicit `--linear-gemv-reduce sequential` or `parallel` overrides the selected
 quant, and `--fuse-rms-norm-add <true|false>` does the same for the RMS-norm/add fusion

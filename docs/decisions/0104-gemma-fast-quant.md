@@ -97,3 +97,34 @@ shard は、ADR [0108](0108-container-format.md) 以降はコンテナの part �
   `stateAttentionReduce` を宣言する新しい配布は、このキーを知る hub / models でしか読めない — CHANGELOG に
   Breaking として記す。公開済みの配布と pin はこの変更で書き換えず、再アップロードと pin の更新は次リリースに
   まとめる（[ADR 0073](0073-models-source-pin.md)）。
+
+**QAT の束の確定（同日・利用者裁定「単体でベンチし、速度低下が無ければ全部入り。attention の 2 値は全部入り同士で
+比べて勝った方」）**: 同じ `tools/flag-bench`（Intel Arc B570・quant `i4` を基準・ABBA 2 巡・96 token・
+`outputs/bench/flag-bench/2026-09-26/qat-*.stdout.json`）で QAT E2B / E4B を計った。GPU decode ms/step と壁時計の
+基準比（負 = 速い）:
+
+| フラグ（単体・`i4` 基準）                        | QAT E2B GPU | QAT E2B 壁 | QAT E4B GPU | QAT E4B 壁 |
+| ------------------------------------------------ | ----------: | ---------: | ----------: | ---------: |
+| `linearGemvReduce: parallel`                     |      −17.5% |     −16.7% |      −26.6% |     −17.4% |
+| `fuseRmsNormAdd`                                 |       −1.4% |      −1.3% |       −1.1% |      −0.9% |
+| `stateAttentionReduce: parallel`                 |       −7.1% |      −5.7% |       −7.1% |      −5.1% |
+| `stateAttentionReduce: parallel-fused`           |       −7.4% |      −7.2% |       −6.5% |      −5.8% |
+| `fuseLinearStaticQuantize`（+ GEMV parallel）    |      −34.1% |     −20.8% |      −30.9% |     −20.0% |
+| `packedStaticQuantize`（+ GEMV parallel）        |      −18.8% |     −18.4% |      −29.7% |     −19.0% |
+| 全部入り（attention `parallel`）                 |      −48.6% |     −29.6% |      −41.6% |     −29.2% |
+| 全部入り（attention `parallel-fused`）— **採用** |  **−49.3%** |     −29.6% |  **−41.7%** |     −29.5% |
+
+速度が下がる単体フラグは無く、全部入りの 2 形では `parallel-fused` が GPU decode で速い（E4B の差は 0.1 pt で
+実質同等 — 採否の規則どおり速い方を採った）。token 列は全設定で訪問間同一（QAT は参照席と生成 token が
+違う — 既知）。適用キーの census は全 set で基準から動いた（E4B は並列 GEMV の実測表に E4B の行を足した後の値）。
+この結果で recipe を次のとおりにした（上の表の QAT の 2 行と「QAT E2B / E4B の束も未計測」を置き換える）:
+
+| 系列 / 席                       | 宣言（`session`）                                                                                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| QAT E2B / E4B `i4`              | 空 = 参照経路（E4B の既定席ではなくなった）                                                                                                                  |
+| QAT E2B / E4B `i4-gemvpar`      | `linearGemvReduce: parallel`・`stateAttentionReduce: parallel`（E4B は新設）                                                                                 |
+| QAT E2B / E4B `i4-fast`（既定） | `linearGemvReduce: parallel`・`fuseRmsNormAdd: true`・`fuseLinearStaticQuantize: true`・`packedStaticQuantize: true`・`stateAttentionReduce: parallel-fused` |
+
+QAT E4B は本 ADR の当初の範囲（E2B のみ・検収項目の「E4B 非適用」）の外だったが、この実測で E2B と同じ 3 席を
+持ち `i4-fast` を既定にする（利用者裁定「E4B にも `i4-fast` を作り実測で決める」）。E4B の `i4-fast` の説明文だけが
+実測の 1 文（GPU decode −42%・B570）を持つ。通常 E4B は未計測のまま（既定 `i4`）。

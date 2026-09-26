@@ -120,15 +120,23 @@ def fixed_storage_counts(graph: Mapping[str, Any], layouts: Mapping[str, str]) -
 #: 系列ごとの既定 quant。実測で検収した席だけを既定にするので導出できず、宣言が要る
 #: （ADR 0104）。`qat_plan` の中の分岐に書くと `qat_quants` のキーと二重管理になり、
 #: 片方だけ書き換えると既定が存在しない quant を指すため、純データとして 1 箇所に置く。
-QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4"}
+#: E2B / E4B とも `i4-fast`（2026-09-26・Arc B570 の flag-bench で単体フラグが全て速度低下
+#: なし → 全部入り — ADR 0104 追記 2026-09-26）。
+QAT_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": "i4-fast"}
+
+#: `i4-fast` の説明に足す実測の 1 文（GPU decode ms/step の `i4` 比）。E2B は従来どおり
+#: 実測を説明に書かない。E4B は初めて席を持つので、既定にした根拠の数字を 1 つだけ添える
+#: （表示欄の上限 200 字の内側）。
+QAT_FAST_MEASURED_NOTE: Mapping[str, str] = {"e2b": "", "e4b": " E4B decode time -42% (B570)."}
 
 
 def qat_quants(model: str) -> Mapping[str, Any]:
-    """参照quantを保持し、検収済みE2Bに並列・融合の定義を足す（ADR 0104）。
+    """参照quantを保持し、同じ重みに並列・融合の定義を足す（ADR 0104）。
 
-    `i4` は `session` を空に保つ = GEMV も attention も runtime の参照経路。E2B の 2 席は
-    attention の縮約形 `"parallel"` を宣言で持つ（ADR 0104 追記 2026-09-26 — 以前は models の
-    家族既定が注入していた実効を manifest へ移した。束の中身の見直しは QAT のベンチ後）。
+    `i4` は `session` を空に保つ = GEMV も attention も runtime の参照経路。`i4-gemvpar` は
+    GEMV と attention の並列（融合なし）、`i4-fast` は単体で速度低下の無かったフラグの全部入りで、
+    attention は `parallel` より GPU decode が速かった `"parallel-fused"`（ADR 0104 追記
+    2026-09-26）。E2B と E4B は同じ 3 席・同じ宣言を持つ。
     """
     checkpoint_name(model)
     quant = {
@@ -139,31 +147,31 @@ def qat_quants(model: str) -> Mapping[str, Any]:
         "requantization; fixed activation rounding (SRQ). GEMV and attention use the "
         "reference summation order.",
     }
-    quants = {"i4": quant}
-    if model == "e2b":
-        quants["i4-gemvpar"] = {
+    return {
+        "i4": quant,
+        "i4-gemvpar": {
             **quant,
             "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
             "label": "Fixed mixed QAT with parallel GEMV and attention",
             "description": "The same fixed QAT weights and SRQ as i4, with parallel GEMV and "
             "attention summation. Rounding and generated tokens can differ. "
             "Select i4 for the reference summation order.",
-        }
-        quants["i4-fast"] = {
+        },
+        "i4-fast": {
             **quant,
             "session": {
                 "linearGemvReduce": "parallel",
                 "fuseRmsNormAdd": True,
                 "fuseLinearStaticQuantize": True,
                 "packedStaticQuantize": True,
-                "stateAttentionReduce": "parallel",
+                "stateAttentionReduce": "parallel-fused",
             },
             "label": "Fixed mixed QAT with parallel GEMV and fusion",
-            "description": "Same fixed QAT weights; parallel GEMV and attention, RMS-add and "
-            "linear-SRQ fusion, packed int8 activations. Use i4 for reference summation, "
-            "i4-gemvpar without fusion. Requires fusion-option support.",
-        }
-    return quants
+            "description": "Same QAT weights; parallel GEMV, fused parallel attention, RMS-add "
+            "and linear-SRQ fusion, packed int8 activations. Use i4 for reference sums. "
+            "Needs fusion-option support." + QAT_FAST_MEASURED_NOTE[model],
+        },
+    }
 
 
 #: 旧 sidecar 世代の記録が名乗る PLE の本数 → 容器の資産の block 本数（schema 3 の繰り上げ）。

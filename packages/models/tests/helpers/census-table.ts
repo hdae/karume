@@ -29,6 +29,8 @@
  *   limits — `assets_fusion_counts_test.ts` と同じ）。states 形 attention は
  *   `recipe-builders/attention.ts` の選択（M ≤ 8 で ①' / M < 16 で ③'・readonly は常に ①'③'）と
  *   M ≤ 8 の行ブロック 1 枚から、attention ノード 1 本あたり ①③ 各 1 本。
+ *   gemma4-qat E4B の行はこの手筋で導いた（同じ計算が E2B の既知値 275 / 2・106・275・70 + 70・
+ *   35 層を再現することを確かめてから、M 1 / 4 / 8〈prefill の RMS→add は M 32 / 768〉で読んだ値）。
  *
  * ## 書かないもの（未導出 — 行 / 相 / 席を置かない）
  *
@@ -269,7 +271,26 @@ const GEMMA4_E2B_STATE_PARALLEL = { variant: 70, reference: 0 } as const;
 /** drafter の readonly attention 12 本 × ①' / ③' 各 1 本（readonly は席に依らず常に並列形）。 */
 const GEMMA4_E2B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const;
 
+/**
+ * gemma4-qat E4B（製品グラフ・42 層）: linear 344 本のうち並列 GEMV は 342 本 — 形ごとの内訳は
+ * runtime `gpu_linear_gemv_parallel_census_test.ts` の QAT E4B の describe が固定している。残り 2 本は
+ * E2B と同じ機序（i2 の lm_head と f32 格納の per_layer_model_projection）で逐次へ落ちる。
+ */
+const GEMMA4_QAT_E4B_GEMV = { variant: 342, reference: 2 } as const;
+/** RMS→add 融合（M 1〜8 の decode 計画と M 32 / 768 の prefill 計画で同じ本数）。 */
+const GEMMA4_QAT_E4B_RMS_ADD = { variant: 127 } as const;
+/** linear→SRQ 融合（並列 GEMV に落ちる 342 本の全て — M ≤ 8）。 */
+const GEMMA4_QAT_E4B_LINEAR_SRQ = { variant: 342 } as const;
+/**
+ * packed int8 活性: 生産側の単体 SRQ（packed 変種）84 本 + それを読む並列 GEMV の packed 変種 84 本
+ * （o 42 + down 42 — g2048 / g4096 の l32。E2B の 70 + 70 と同じ内訳の取り方）。
+ */
+const GEMMA4_QAT_E4B_PACKED = { variant: 168 } as const;
+/** states 形 attention: 製品グラフの 42 層 × ①' / ③' 各 1 本（M ≤ 8・行ブロック 1 枚）。 */
+const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
+
 const E2B = ["e2b"] as const;
+const E4B = ["e4b"] as const;
 
 /** irodori v4 系の DiT: linear 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て i8 × k % 4 == 0）。 */
 const IRODORI_DIT_A8 = { variant: 317, reference: 0 } as const;
@@ -406,7 +427,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // 配布ミラーの `i4-fast`。
+    // 配布ミラーの `i4-fast`（③ の parallel-fused は未導出 — ファイル冒頭）。
     family: "gemma4-qat",
     models: E2B,
     session: {
@@ -414,7 +435,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       fuseRmsNormAdd: true,
       fuseLinearStaticQuantize: true,
       packedStaticQuantize: true,
-      stateAttentionReduce: "parallel",
+      stateAttentionReduce: "parallel-fused",
     },
     census: {
       target: {
@@ -424,14 +445,12 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
           fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
           fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
-          stateAttentionReduce: GEMMA4_E2B_STATE_PARALLEL,
         },
         verify: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
           fuseRmsNormAdd: GEMMA4_E2B_RMS_ADD,
           fuseLinearStaticQuantize: GEMMA4_QAT_E2B_LINEAR_SRQ,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
-          stateAttentionReduce: GEMMA4_E2B_STATE_PARALLEL,
         },
       },
     },
@@ -503,6 +522,54 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
         decode: {
           linearGemvReduce: GEMMA4_QAT_E2B_GEMV,
           packedStaticQuantize: GEMMA4_QAT_E2B_PACKED,
+        },
+      },
+    },
+  },
+  // --- gemma4-qat E4B（drafter を持たない）----------------------------------
+  {
+    // 配布ミラーの `i4-gemvpar`。
+    family: "gemma4-qat",
+    models: E4B,
+    session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
+    census: {
+      target: {
+        decode: {
+          linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
+          stateAttentionReduce: GEMMA4_QAT_E4B_STATE_PARALLEL,
+        },
+        verify: {
+          linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
+          stateAttentionReduce: GEMMA4_QAT_E4B_STATE_PARALLEL,
+        },
+      },
+    },
+  },
+  {
+    // 配布ミラーの `i4-fast`（③ の parallel-fused は未導出 — ファイル冒頭）。
+    family: "gemma4-qat",
+    models: E4B,
+    session: {
+      linearGemvReduce: "parallel",
+      fuseRmsNormAdd: true,
+      fuseLinearStaticQuantize: true,
+      packedStaticQuantize: true,
+      stateAttentionReduce: "parallel-fused",
+    },
+    census: {
+      target: {
+        prefill: { fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD },
+        decode: {
+          linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
+          fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
+          fuseLinearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          packedStaticQuantize: GEMMA4_QAT_E4B_PACKED,
+        },
+        verify: {
+          linearGemvReduce: GEMMA4_QAT_E4B_GEMV,
+          fuseRmsNormAdd: GEMMA4_QAT_E4B_RMS_ADD,
+          fuseLinearStaticQuantize: GEMMA4_QAT_E4B_LINEAR_SRQ,
+          packedStaticQuantize: GEMMA4_QAT_E4B_PACKED,
         },
       },
     },

@@ -29,14 +29,15 @@
   用語は[glossary](../docs/glossary.md)、量子化方式の全数は[quantization](../docs/quantization.md)が索引を持つ。
 - Gemmaの温度0・非投機decodeはGPU内topkと8B読戻しを使う。prefill、一般sampling、penalty/bias、投機、診断は従来経路。
   前提となるbatchの一括読戻しとcontext予約は[ADR 0054](../docs/decisions/0054-resident-loop-and-fence.md)、[0066](../docs/decisions/0066-generation-context-state-slots.md)、[0083](../docs/decisions/0083-generation-api-surface.md)。
-- 高速化の既定は明示的なquant宣言で選ぶ。通常/QAT E2Bの新しい配布recipeは`i4-fast`をdefaultQuantにする。
+- 高速化の既定は明示的なquant宣言で選ぶ。通常E2BとQAT E2B / E4Bの新しい配布recipeは`i4-fast`をdefaultQuantにする。
   並列GEMVとRMS融合、QATだけlinear→SRQ融合を宣言する。旧`i4-gemvpar`も保持する。
   attentionの縮約形`stateAttentionReduce`も2026-09-26にmanifest語彙へ昇格し、modelsの家族既定（parallel）は撤去した。
-  `i4`（session空）とfromAssetsはruntimeの参照経路sequential、`i4-gemvpar`とQAT E2Bの`i4-fast`はparallel、
-  通常の`i4-fast`はparallel-fused（B570実測でGPU decode −47.9%・token同一）を宣言する。
+  `i4`（session空）とfromAssetsはruntimeの参照経路sequential、`i4-gemvpar`はparallel、
+  `i4-fast`は通常・QATともparallel-fusedを宣言する（B570実測のGPU decode: 通常E2B −47.9%・token同一 /
+  QAT E2B −49.3%・QAT E4B −41.7% — 単体フラグに速度低下なし → 全部入り）。
   呼び手の明示指定 → quant.session → runtime参照既定の順。公開済み資産は次リリースの再アップロードまで自動変更しない
   （新しいmodelsで旧manifestを読むと全席がsequential）。
-  通常E4Bは3席ともE2Bと同じ宣言・既定`i4`（未計測 — 束と既定はE4Bのベンチ後）。QAT E4Bは`i4`のみ。
+  通常E4Bは3席ともE2Bと同じ宣言・既定`i4`（未計測 — 束と既定はE4Bのベンチ後）。QAT E4BはE2Bと同じ3席・既定`i4-fast`。
   [ADR 0104](../docs/decisions/0104-gemma-fast-quant.md)（追記 2026-09-26）が正本。
 - RMS→add融合はM2検収済みで、新しいE2B高速quantへ宣言する。融合＋投入768は比較画面の基準で、投入政策のモデル既定化は別の残件。
   RMS/GEMVのsubgroup方式は任意指定のみ。M2の既定採用は見送り、Deno 2.9.6は必要機能が未提供。

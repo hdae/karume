@@ -61,11 +61,12 @@ deno task demo:gemma4-qat --quant i4-fast
 ```
 
 All three quant labels require a distribution built with the current recipe; rebuild the local
-distribution if `--quant i4-fast` reports an unknown quant. E2B then defaults to `i4-fast`, which
-uses the same packed weights as `i4` and declares `session.linearGemvReduce: "parallel"` together
-with `session.fuseRmsNormAdd: true`, `session.fuseLinearStaticQuantize: true`, and
-`session.packedStaticQuantize: true`. `i4-gemvpar` declares parallel GEMV alone, and `i4` retains
-the reference summation order. QAT E4B still defaults to `i4`.
+distribution if `--quant i4-fast` reports an unknown quant. E2B and E4B then default to `i4-fast`,
+which uses the same packed weights as `i4` and declares `session.linearGemvReduce: "parallel"`
+together with `session.fuseRmsNormAdd: true`, `session.fuseLinearStaticQuantize: true`,
+`session.packedStaticQuantize: true`, and `session.stateAttentionReduce: "parallel-fused"`.
+`i4-gemvpar` declares parallel GEMV and parallel attention without the fusions, and `i4` retains
+the reference summation order.
 
 Individual knobs override what the selected quant declares:
 
