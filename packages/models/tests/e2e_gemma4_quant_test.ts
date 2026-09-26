@@ -4,9 +4,16 @@ import { describe, it } from "@std/testing/bdd";
 import { localDirectory, parseManifest } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
-import { gemma4ChatPrompt, Gemma4Pipeline } from "../gemma.ts";
+import { gemma4ChatPrompt, Gemma4Pipeline, type Gemma4RunPhase } from "../gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../gemma4-qat.ts";
 import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import type { SessionOverrides } from "../src/session/options.ts";
+import {
+  assertRowCensus,
+  censusRowOf,
+  effectiveSessionOptions,
+  gemmaComponentOf,
+} from "./helpers/census-table.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
 
@@ -41,6 +48,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             ? { fuseLinearStaticQuantize: true, packedStaticQuantize: true }
             : {}),
         } as const;
+        // 差し替えた manifest の quant 席の宣言（束の census 表を引く鍵の材料にもする）。
+        const quantSessions = {
+          i4: reference.session,
+          "i4-gemvpar": { linearGemvReduce: "parallel" },
+          "i4-fast": fastSession,
+        } as const;
         const manifest = {
           ...raw,
           models: {
@@ -50,8 +63,8 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               defaultQuant: "i4-fast",
               quants: {
                 ...entry.quants,
-                "i4-gemvpar": { ...reference, session: { linearGemvReduce: "parallel" } },
-                "i4-fast": { ...reference, session: fastSession },
+                "i4-gemvpar": { ...reference, session: quantSessions["i4-gemvpar"] },
+                "i4-fast": { ...reference, session: quantSessions["i4-fast"] },
                 unsupported: { ...reference, session: { linearCompute: "f16" } },
               },
             },
@@ -149,8 +162,18 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             // NOTE: census は計測に依らない `lastRunPipelines`。`onRunDiagnostics` を付けると GPU 上の
             // greedy 出力経路は外れる（src/gemma/pipeline.ts の `greedyOutput`）— 下の census は
             // フック有りの経路のもので、この前提は計測を外しても変わらない。
+            // 実効の束（差し替えた quant 席の宣言 + 明示指定を家族の合成に通した値）。
+            const { quant = "i4-fast", ...overrides }:
+              & { readonly quant?: keyof typeof quantSessions }
+              & SessionOverrides = mode.options;
+            const row = censusRowOf(
+              family,
+              "e2b",
+              effectiveSessionOptions(family, quantSessions[quant], overrides, mode.name),
+            );
             const gpu = await acquireGpu();
             const census: SessionDiagnostics["lastRunPipelines"][] = [];
+            const byPhase = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
             try {
               const options = {
                 gpu,
@@ -158,8 +181,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 chunkLength: 32,
                 maxResidentPleBytes: 0,
                 ...mode.options,
-                onRunDiagnostics: (d: SessionDiagnostics) => {
+                onRunDiagnostics: (d: SessionDiagnostics, phase: Gemma4RunPhase) => {
                   census.push(d.lastRunPipelines);
+                  byPhase.set(phase.kind, [...(byPhase.get(phase.kind) ?? []), d.lastRunPipelines]);
                 },
               } satisfies Gemma4QatFromPretrainedOptions;
               const source = denoDirectory(temp);
@@ -189,6 +213,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   fuseLinearStaticQuantize: mode.srq,
                   packedStaticQuantize: mode.packed,
                 }, mode.name);
+                // 束の census 表に行があれば、相ごと・run ごとに本数ちょうどで見る（並列 GEMV の
+                // 適格表から一部の形が外れて逐次へ落ちると、上の 1 本以上の検査は通るがここで赤）。
+                if (row !== undefined) {
+                  const checked = assertRowCensus(row, byPhase, gemmaComponentOf, mode.name);
+                  assert(checked > 0, `${mode.name}: 表の期待と突き合わせた run が 1 本も無い`);
+                }
               } finally {
                 await pipeline.dispose();
               }
@@ -266,6 +296,24 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                     linearGemvReduce: "parallel",
                     ...(phase === "draft" ? {} : { fuseRmsNormAdd: true }),
                   }, phase);
+                }
+                // 束の census 表（既定 quant の宣言 + 明示の sequential）に行があれば、相ごと・
+                // run ごとに本数ちょうどで見る（drafter の逐次 GEMV への縮退本数もここで固定）。
+                const row = censusRowOf(
+                  family,
+                  "e2b",
+                  effectiveSessionOptions(family, quantSessions["i4-fast"], {
+                    stateAttentionReduce: "sequential",
+                  }, "speculative"),
+                );
+                if (row !== undefined) {
+                  const checked = assertRowCensus(
+                    row,
+                    phaseCensus,
+                    gemmaComponentOf,
+                    "speculative",
+                  );
+                  assert(checked > 0, "speculative: 表の期待と突き合わせた run が 1 本も無い");
                 }
               } finally {
                 await pipeline.dispose();

@@ -16,7 +16,8 @@
  *    **下限が要る**のが肝で、`linearCompute` が黙って f32 経路へ落ちると差は**小さくなる**
  *    （ADR 0028 決定 6 — 沈黙フォールバックは誤差が小さい側に出る）。上限だけの門は
  *    「i8a8 が一度も走っていない」を緑で通す。
- * 3. **パイプラインキーの census**（{@link MEASURED.ditKeys}）— `dit` の run が実際に i8a8 GEMM と
+ * 3. **パイプラインキーの census**（{@link MEASURED.ditKeys} と束の census 表
+ *    `helpers/census-table.ts`）— `dit` の run が実際に i8a8 GEMM と
  *    `quantize_rows` を回し、f32 の linear カーネルを **1 回も**回していないこと。2 の下限が
  *    分布の話であるのに対し、こちらは実行そのものの直接観測。
  *
@@ -34,11 +35,12 @@
  * （テストを消して無音で緑にしない — ADR 0005）。
  */
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "@karume/runtime";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { IrodoriPipeline } from "../mod.ts";
 import { requireCensus, SEAT_SIGNATURES } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { assertRowCensus, censusRowOf, effectiveSessionOptions } from "./helpers/census-table.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import {
   ASSETS_DIR,
@@ -51,6 +53,7 @@ import {
   loadLocalAssets,
   manifestText,
   MODEL,
+  modelEntry,
   readCase,
   readManifest,
   worstDifference,
@@ -94,19 +97,21 @@ const MEASURED: {
    */
   readonly zBand: readonly [number, number] | undefined;
   /**
-   * `dit` の 1 forward あたりに走る i8a8 系カーネルの dispatch 数。
+   * `dit` の 1 forward あたりに走る `quantize_rows` の dispatch 数。
    *
    * DiT の linear は 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て 4 の倍数で i8-a8 適格・
    * 量子化 recon の sizeBreakdown）。i8a8 の linear は「活性を per-token i8 へ落とす
    * `quantize_rows` → 整数内積の GEMM」の対で走るので、期待は本数の関数として書ける。
+   * GEMM 側（席 `linearCompute: "a8"` の変種キー）の本数は束の census 表
+   * （`helpers/census-table.ts`）が持つ — 席の本数の正本を 1 か所にするため。
    *
    * 導出: `undefined` のままこの門を走らせ、ログに出る実測本数を書き写す（源は計測に依らない
    * census = `lastRunPipelines`）。
    */
-  readonly ditKeys: { readonly i8a8Linear: number; readonly quantizeRows: number } | undefined;
+  readonly ditKeys: { readonly quantizeRows: number } | undefined;
 } = {
   zBand: [0.1, 6],
-  ditKeys: { i8a8Linear: 317, quantizeRows: 317 },
+  ditKeys: { quantizeRows: 317 },
 };
 
 /** census の生成で使う発話長（秒）。`duration` を回さず S を小さく固定する。 */
@@ -252,7 +257,17 @@ Deno.test({
     try {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, QUANT);
+      // 束の census 表の行（鍵は quant 席の宣言を家族の合成に通した実効設定）。この門は `i8-a8`
+      // 席そのものの門なので、行が無いのは表の欠落として落とす。
+      const where = `irodori ${MODEL}/${QUANT}`;
+      const row = censusRowOf(
+        "irodori",
+        MODEL,
+        effectiveSessionOptions("irodori", modelEntry(manifest).quants[QUANT].session, {}, where),
+      );
+      assert(row !== undefined, `${where}: 束の census 表（helpers/census-table.ts）に行が無い`);
       const observed: KeyCensus[] = [];
+      const ditRuns: SessionDiagnostics["lastRunPipelines"][] = [];
       await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
         gpu,
         model: MODEL,
@@ -260,6 +275,7 @@ Deno.test({
         onRunDiagnostics: (component, diagnostics) => {
           if (component !== "dit") return;
           observed.push(censusOf(diagnostics));
+          ditRuns.push(diagnostics.lastRunPipelines);
         },
       });
       // `durationSeconds` で S を固定するのは `duration` を回さず短く保つため（見たいのは
@@ -287,16 +303,19 @@ Deno.test({
         0,
         "f32 骨格の linear が走っている（適格判定が外れて一部が黙って f32 経路へ落ちた）",
       );
+      // 席の変種（i8a8 GEMM）と参照経路に残った linear を run ごとにちょうどの本数で見る。
+      const checked = assertRowCensus(row, new Map([["step", ditRuns]]), () => "dit", where);
+      assert(checked > 0, `${where}: 表の期待と突き合わせた run が 1 本も無い`);
       if (MEASURED.ditKeys === undefined) {
         throw new Error(
-          `i8-a8 のキー本数が未導出（実測 i8a8 linear ${first.i8a8Linear} / ` +
-            `quantize_rows ${first.quantizeRows}）— 上のログの実測を \`MEASURED.ditKeys\` へ書く`,
+          `i8-a8 のキー本数が未導出（実測 quantize_rows ${first.quantizeRows}）— 上のログの` +
+            "実測を `MEASURED.ditKeys` へ書く",
         );
       }
       assertEquals(
-        { i8a8Linear: first.i8a8Linear, quantizeRows: first.quantizeRows },
-        MEASURED.ditKeys,
-        "dit の i8a8 系 dispatch 数が期待と違う（DiT の linear 本数か融合が動いた）",
+        first.quantizeRows,
+        MEASURED.ditKeys.quantizeRows,
+        "dit の quantize_rows の dispatch 数が期待と違う（DiT の linear 本数か融合が動いた）",
       );
     } finally {
       gpu.destroy();

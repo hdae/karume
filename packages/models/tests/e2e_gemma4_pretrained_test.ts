@@ -35,6 +35,13 @@ import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
 import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
 import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import type { SessionOverrides } from "../src/session/options.ts";
+import {
+  assertRowCensus,
+  censusRowOf,
+  effectiveSessionOptions,
+  gemmaComponentOf,
+} from "./helpers/census-table.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 import { mirrorAvailable, openGemma4Ple } from "./helpers/gemma-mirror.ts";
@@ -219,16 +226,32 @@ Deno.test({
       },
       { name: "既定 quant（宣言 parallel-fused）→ ③ 無し", options: {}, expect: "parallel-fused" },
     ] as const;
+    const manifest = parseManifest(MANIFEST_TEXT ?? "");
+    const entry = manifest.models.e2b;
     for (const one of cases) {
       await t.step(one.name, async () => {
+        // 実効の束（選んだ quant 席の宣言 + 明示指定を家族の合成に通した値）→ 束の census 表の行。
+        const { quant = entry.defaultQuant, ...overrides }:
+          & { readonly quant?: string }
+          & SessionOverrides = one.options;
+        const row = censusRowOf(
+          "gemma4",
+          "e2b",
+          effectiveSessionOptions("gemma4", entry.quants[quant].session, overrides, one.name),
+        );
         const gpu = await acquireGpu();
         const runs: SessionDiagnostics["lastRunPipelines"][] = [];
+        const byPhase = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
         try {
           const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
             gpu,
             maxResidentPleBytes: await maxResidentPleBytes(),
-            onRunDiagnostics: (diagnostics) => {
+            onRunDiagnostics: (diagnostics, phase) => {
               runs.push(diagnostics.lastRunPipelines);
+              byPhase.set(phase.kind, [
+                ...(byPhase.get(phase.kind) ?? []),
+                diagnostics.lastRunPipelines,
+              ]);
             },
             ...one.options,
           });
@@ -271,6 +294,12 @@ Deno.test({
             `③' も融合も走っていない（${keys.join(" / ")}）`,
           );
           assertEquals(sequential, [], `parallel-fused の宣言なのに ③（逐次）のキーが混ざっている`);
+        }
+        // 束の census 表に行があれば、相ごと・run ごとに席の本数ちょうどで見る（③ の経路分けは
+        // 上の検査が持ち、表は並列 GEMV・RMS→add 融合・①'③' の本数を持つ）。
+        if (row !== undefined) {
+          const checked = assertRowCensus(row, byPhase, gemmaComponentOf, one.name);
+          assert(checked > 0, `${one.name}: 表の期待と突き合わせた run が 1 本も無い`);
         }
       });
     }
