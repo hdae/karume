@@ -90,6 +90,9 @@ errorScope（0.03ms/run）・GC（mutator 0.999）・await 連鎖（残差 81ms�
 2. **キー検査（lastRunTiming の entries を見る形）は計測が無効だと黙って空振りする** —
    既定 off 化に伴い、キー期待値を壊しても素の `acquireGpu()` では緑のまま通ることを実証
    （故障注入 F7）。packages/runtime/tests/helpers/gpu.ts の `TIMING_ACQUIRE_OPTIONS` 経由が MUST。
+   追記（2026-09-26）: census の源は計測非依存の `SessionDiagnostics.lastRunPipelines` へ移り、
+   `TIMING_ACQUIRE_OPTIONS` は削除した（ADR 0110 決定 5・helpers/pipeline-census.ts）。この知見は
+   「計測表を源にすると空振りする」という記録として残す。
 3. **`encoder.finish()` の単価は「累積作成バッファ数」に比例し destroy では下がらない**
    （micro 実測 +5µs/pass/1,000 本）— params キャッシュ（recon 案 2・保留枠）が装置代の
    成長も止める根拠。
