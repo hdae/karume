@@ -34,6 +34,7 @@ import { Randn } from "../src/sbv2/host/random.ts";
 import { parseSbv2PipelineConfig } from "../src/sbv2/config.ts";
 import { tileBertToPhoneLevel, type TiledBert } from "../src/sbv2/text/bert-tile.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /** この系列の weights 部品（`src/sbv2/pipeline.ts` の `COMPONENT_KEYS` と同じ 3 本）。 */
 const WEIGHT_NAMES = ["front", "voice", "text_encoder"] as const;
@@ -150,6 +151,36 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
     Error,
     "利用可能: FN4",
   );
+});
+
+Deno.test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落としても、admission が共有 GPU の shader-f16 不足を名指しで落とす", async () => {
+  // 要求する feature は「宣言 ∪ 実効設定が要る feature」（`sessionGpuFeatures`）。`gpuFeatures` だけを
+  // 見ると、この配布形は admission を素通りし、重みを上げた後の Session 構築まで落ちない。
+  const f16Compute = parseManifest(manifestText({
+    quants: {
+      i8: {
+        weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "i8"])),
+        session: { linearCompute: "f16" },
+      },
+    },
+  }));
+  const shared = { gpu: fakeGpuContext(fakeDevice()) };
+  await assertRejects(
+    () => Sbv2Pipeline.fromAssets({ manifest: f16Compute, assets: COMPONENTS }, shared),
+    Error,
+    "Sbv2Pipeline: quant 'i8' は shader-f16 を要求するが",
+  );
+  // 対照: f16 計算を言わない quant は同じ共有 GPU で admission を通り、資産の段まで進む
+  // （門が恒真でないことの対）。
+  const error = await assertRejects(
+    () =>
+      Sbv2Pipeline.fromAssets(
+        { manifest: parseManifest(manifestText()), assets: COMPONENTS },
+        shared,
+      ),
+    Error,
+  );
+  assertFalse(error.message.includes("shader-f16"), error.message);
 });
 
 Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {

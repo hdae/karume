@@ -94,6 +94,7 @@ import {
 } from "@karume/runtime";
 import {
   type DistributionSource,
+  type GpuFeaturesSpec,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -119,6 +120,7 @@ import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
@@ -396,6 +398,8 @@ type DepthAnythingAdmission = {
   readonly quant: Quant;
   /** quant 宣言を受理表で通した実効設定（{@link DEPTH_ANYTHING_SESSION_POLICY}）。 */
   readonly sessionOptions: SessionOptions;
+  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
@@ -452,6 +456,7 @@ const admitDepthAnything = (
     {},
     `DepthAnythingPipeline: quant '${quantName}'`,
   );
+  const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const depth = open(DEPTH);
   // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、中間段の
@@ -473,7 +478,7 @@ const admitDepthAnything = (
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
-      quant.gpuFeatures,
+      gpuFeatures,
       options.gpu,
       `DepthAnythingPipeline: quant '${quantName}'`,
     );
@@ -484,7 +489,7 @@ const admitDepthAnything = (
     );
   }
 
-  return { config, quantName, quant, sessionOptions };
+  return { config, quantName, quant, sessionOptions, gpuFeatures };
 };
 
 /**
@@ -497,17 +502,17 @@ const openDepthAnythingState = async (
   open: ComponentOpener,
   options: DepthAnythingPipelineOptions = {},
 ): Promise<DepthAnythingState> => {
-  const { config, quant, quantName, sessionOptions } = admitted;
+  const { config, quantName, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const depth = open(DEPTH);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitDepthAnything} が既に同じ 1 本で見ているが、自前で取った device は
   // ここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `DepthAnythingPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `DepthAnythingPipeline: quant '${quantName}'`);
     return {
       gpu,
       ownsGpu,

@@ -8,7 +8,7 @@
 // 動いていない = 既存の参照値（sha 行）が動かないことの根拠になる。受理表が宣言を拒否する
 // quant が 1 つでもあれば、それは配布済みの資産を読めなくする退行としてここで落ちる。
 //
-// 併せて、上書き口を持つ家族（anima / irodori）が GPU へ要求する feature（`sessionGpuFeatures`）も
+// 併せて、全家族が GPU へ要求する feature（`sessionGpuFeatures` — 宣言 ∪ 実効設定が要る feature）も
 // 宣言そのままであることを見る（要求が増えると、同じ資産を読む device の条件が黙って厳しくなる）。
 //
 // ミラーが無い機では理由を出して**明示 SKIP** する（`runtime/tests/assets_fusion_counts_test.ts`
@@ -50,9 +50,6 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   siglip2: SIGLIP2_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
 };
-
-/** 上書き口を持ち、GPU への要求を実効設定から導く家族（`sessionGpuFeatures` を通す席）。 */
-const DERIVES_GPU_FEATURES: ReadonlySet<string> = new Set(["anima", "irodori"]);
 
 /**
  * ミラー 1 本の manifest を読む（無ければ `undefined`）。
@@ -110,12 +107,10 @@ Deno.test({
           const resolved = resolveSessionOptions(policy, quant.session, {}, where);
           assertEquals(resolved, toSessionOptions(quant.session), where);
           if (policy === GEMMA_SESSION_POLICY) {
-            // gemma の入口が実際に呼ぶ包みも同じ値（呼び先 gemma/pipeline.ts は変えていない）。
+            // gemma の入口が実際に呼ぶ包みも同じ値（resolveGemmaSessionOptions の呼び方は変えていない）。
             assertEquals(resolveGemmaSessionOptions(quant.session, {}, where), resolved, where);
           }
-          if (DERIVES_GPU_FEATURES.has(family)) {
-            assertEquals(sessionGpuFeatures(quant.gpuFeatures, resolved), quant.gpuFeatures, where);
-          }
+          assertEquals(sessionGpuFeatures(quant.gpuFeatures, resolved), quant.gpuFeatures, where);
           checked++;
         }
       }

@@ -1,6 +1,6 @@
 // manifest の `gpuFeatures`（device 生成時にしか要求できない feature）→ `acquireGpu` の要求への
 // 写像。ADR 0038 §3 の綴りの契約で、抜けは**沈黙劣化**（配布形が要求した能力を持たない device で
-// 実行が進む）になる。7 家族が同じ 1 本を使うので、門もここ 1 本に集約する（元は 7 家族が
+// 実行が進む）になる。8 家族全部が同じ 1 本を使うので、門もここ 1 本に集約する（元は 7 家族が
 // `quant.gpuFeatures?.shaderF16 === true` を 1 行ずつ独立に読んでいた — レビュー M1-V9）。
 //
 // 取得後の検査（`assertGpuFeaturesGranted`）も GPU 無しで踏む。`GpuContext` は runtime が値と

@@ -55,6 +55,7 @@ import {
 import {
   type DistributionSource,
   type FetchAssetsOptions,
+  type GpuFeaturesSpec,
   type HubRepoRef,
   loadManifest,
   resolveSelection,
@@ -76,7 +77,12 @@ import {
 import { readAssetBuffer } from "../hub/asset-readers.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
-import { assertRequiredLimitsBeforeDownload } from "../session/gpu-features.ts";
+import {
+  assertGpuFeaturesGranted,
+  assertRequiredLimitsBeforeDownload,
+  sessionGpuFeatures,
+  toAcquireGpuOptions,
+} from "../session/gpu-features.ts";
 import {
   GEMMA4_PIPELINE_NAME,
   type Gemma4DefaultSampler,
@@ -956,6 +962,8 @@ class GemmaPipeline {
           options,
           `${where}: quant '${quantName}'`,
         );
+        const quantWhere = `${entry}: quant '${quantName}'`;
+        const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, quantSession);
         const model = open(MODEL);
         const admitted = admitGemma4(
           model,
@@ -973,15 +981,16 @@ class GemmaPipeline {
             ),
           }
           : { family };
+        // MUST: 共有 GPU の feature 不足はこの席で落とす（自前で取る device と違って要求できず、
+        // 重みを落とす前に判る唯一の門 — 後段の検査も同じ `session/gpu-features.ts` の 1 本）。
+        if (options.gpu !== undefined) {
+          assertGpuFeaturesGranted(gpuFeatures, options.gpu, quantWhere);
+        }
         // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
         // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
         // 他 7 家族と違って席が閉包側にあるのは、{@link admitGemma4} が構築オプションを
         // 受け取らない（グラフだけで決まる）ため。
-        await assertRequiredLimitsBeforeDownload(
-          quant.requiredLimits,
-          options.gpu,
-          `${entry}: quant '${quantName}'`,
-        );
+        await assertRequiredLimitsBeforeDownload(quant.requiredLimits, options.gpu, quantWhere);
         // PLE の索引は**容器の資産**（ADR 0109 決定 4）なので、この席で読めて突合まで閉じる —
         // 索引が指す block が容器に在るか・役割と長さが宣言どおりかを全件列挙する。
         //
@@ -991,7 +1000,13 @@ class GemmaPipeline {
         // 書き手の規約（ADR 0109 決定 4 / container-v1 §4.2）があるからで、索引の part を取っても
         // 重みの part には手が伸びない。
         const pleIndex = await readGemma4PleIndex(where, model);
-        return { ...admitted, pleIndex, quantSession, admission };
+        return {
+          ...admitted,
+          pleIndex,
+          quantSession,
+          admission,
+          requested: { gpuFeatures, where: quantWhere },
+        };
       },
       {
         ...hubOptions,
@@ -1002,6 +1017,7 @@ class GemmaPipeline {
     return await GemmaPipeline.#build(
       admitted.admission,
       admitted,
+      admitted.requested,
       open,
       {
         tokenizer: assetBytes(where, assets, TOKENIZER_ASSET),
@@ -1068,7 +1084,9 @@ class GemmaPipeline {
     const admission: GemmaFamilyAdmission = family === "gemma4-qat"
       ? { family, model: admitGemma4Qat(model.graph) }
       : { family };
-    return await GemmaPipeline.#build(admission, admitted, open, {
+    // この面は manifest を持たないので宣言は無い — 要求するのは実効設定が要る feature だけ。
+    const requested = { gpuFeatures: sessionGpuFeatures(undefined, options), where };
+    return await GemmaPipeline.#build(admission, admitted, requested, open, {
       tokenizer: input.tokenizer,
       pleIndex,
     }, options);
@@ -1085,10 +1103,15 @@ class GemmaPipeline {
    *
    * 投機を指定したときは drafter Session も**ここで 1 本**張る（会話ごとではない — ADR 0096
    * 段 2 の裁定「束ね口は context」）。順序は target が先で、drafter はその埋め込み表を借りる。
+   *
+   * @param requested 要求する feature（quant 宣言 ∪ 実効設定が要る feature —
+   *   `sessionGpuFeatures`）と、その診断の主語。drafter Session も同じ device に張るので
+   *   drafter のぶんを別に要求しない。
    */
   static async #build(
     admission: GemmaFamilyAdmission,
     admitted: Gemma4Admission,
+    requested: { readonly gpuFeatures: GpuFeaturesSpec | undefined; readonly where: string },
     open: ComponentOpener,
     assets: Gemma4SidecarAssets,
     options: Gemma4PipelineOptions,
@@ -1109,6 +1132,7 @@ class GemmaPipeline {
       : assertSpeculative("Gemma4Pipeline", options.speculative);
     const gpu = options.gpu ??
       await acquireGpu({
+        ...toAcquireGpuOptions(requested.gpuFeatures),
         subgroups: options.rmsNormReduce === "subgroup32" ||
           options.linearGemvReduce === "parallel-subgroup32",
       });
@@ -1152,6 +1176,9 @@ class GemmaPipeline {
     let session: Session | undefined;
     let pleGpu: Gemma4PleResident | undefined;
     try {
+      // MUST: 自前で取った device の feature 検査はここが唯一の門（共有 GPU は admission 席でも
+      // 同じ 1 本を通る）。try の中に置くのは、落ちたとき内部で取った device を返すため。
+      assertGpuFeaturesGranted(requested.gpuFeatures, gpu, requested.where);
       // 束縛上限の不足は**重み 1.5GiB のアップロードより前**に落とす（graph-first と同じ並び）。
       pleGpu = residency === "host" ? undefined : await createGemma4PleResident({
         gpu,

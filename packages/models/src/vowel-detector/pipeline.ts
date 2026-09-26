@@ -73,6 +73,7 @@ import {
 } from "@karume/runtime";
 import {
   type DistributionSource,
+  type GpuFeaturesSpec,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -95,6 +96,7 @@ import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
@@ -405,6 +407,8 @@ type VowelDetectorAdmission = {
   readonly quant: Quant;
   /** quant 宣言を受理表で通した実効設定（{@link VOWEL_DETECTOR_SESSION_POLICY}）。 */
   readonly sessionOptions: SessionOptions;
+  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
   /** 時間軸の記号名（`assertGraph` がグラフから読んだもの）。 */
   readonly symbol: string;
 };
@@ -466,6 +470,7 @@ const admitVowelDetector = (
     {},
     `VowelDetectorPipeline: quant '${quantName}'`,
   );
+  const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const graph = open(GRAPH_ROLE);
   const symbol = assertGraph(graph, config);
@@ -475,7 +480,7 @@ const admitVowelDetector = (
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
-      quant.gpuFeatures,
+      gpuFeatures,
       options.gpu,
       `VowelDetectorPipeline: quant '${quantName}'`,
     );
@@ -486,7 +491,7 @@ const admitVowelDetector = (
     );
   }
 
-  return { config, quantName, quant, symbol, sessionOptions };
+  return { config, quantName, quant, symbol, sessionOptions, gpuFeatures };
 };
 
 /**
@@ -502,7 +507,7 @@ const openVowelDetectorState = async (
   open: ComponentOpener,
   options: VowelDetectorPipelineOptions = {},
 ): Promise<VowelDetectorState> => {
-  const { config, quant, quantName, symbol, sessionOptions } = admitted;
+  const { config, quantName, symbol, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const graph = open(GRAPH_ROLE);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
@@ -511,10 +516,10 @@ const openVowelDetectorState = async (
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitVowelDetector} が既に同じ 1 本で見ているが、自前で取った device は
   // ここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
   } catch (error) {
     // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
     if (ownsGpu) gpu.destroy();

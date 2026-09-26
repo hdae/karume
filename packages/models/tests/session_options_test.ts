@@ -1,6 +1,6 @@
 // manifest の `session`（manifest 所有語彙）→ runtime `SessionOptions` の写像。
 // ADR 0038 §3 の綴りの契約そのもので、抜けは**沈黙劣化**（未知キーは runtime が黙って無視する）
-// になる。7 家族が同じ 1 本を使うので、門もここ 1 本に集約する（元は anima / sbv2 の
+// になる。8 家族全部が同じ 1 本を使うので、門もここ 1 本に集約する（元は anima / sbv2 の
 // pipeline テストへ 2 本に割れていて、残り 5 家族は写像を直接叩く門を持っていなかった）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";

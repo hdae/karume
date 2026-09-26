@@ -52,6 +52,7 @@ import {
 } from "@karume/runtime";
 import {
   type DistributionSource,
+  type GpuFeaturesSpec,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -93,6 +94,7 @@ import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
@@ -578,6 +580,8 @@ type Sbv2Admission = {
   readonly quant: Quant;
   /** quant 宣言を受理表で通した実効設定（{@link SBV2_SESSION_POLICY}）。 */
   readonly sessionOptions: SessionOptions;
+  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
@@ -637,6 +641,7 @@ const admitSbv2 = (
     {},
     `Sbv2Pipeline: quant '${quantName}'`,
   );
+  const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   // 部品が 3 本とも開けることをこの席で見る（供給口は後段と同じ 1 本 — 開いていない役割は
   // fail loudly）。グラフ幅の突合は表のバイト列が要るので {@link buildSbv2State} に残る。
@@ -646,7 +651,7 @@ const admitSbv2 = (
   // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(quant.gpuFeatures, options.gpu, `Sbv2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `Sbv2Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
@@ -654,7 +659,7 @@ const admitSbv2 = (
     );
   }
 
-  return { config, quantName, quant, sessionOptions };
+  return { config, quantName, quant, sessionOptions, gpuFeatures };
 };
 
 /**
@@ -671,7 +676,7 @@ const buildSbv2State = async (
   open: ComponentOpener,
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
-  const { config, quant, quantName, sessionOptions } = admitted;
+  const { config, quantName, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const front = open(FRONT);
   const voice = open(VOICE);
@@ -695,10 +700,10 @@ const buildSbv2State = async (
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitSbv2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
   } catch (error) {
     // 内部で取った GPU は、ここで投げると誰も解放できなくなるので返してから落とす。
     if (ownsGpu) gpu.destroy();

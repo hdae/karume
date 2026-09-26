@@ -2,17 +2,19 @@
  * `Quant` が宣言する **GPU 前提**（`gpuFeatures` = device 生成時にしか要求できない GPU
  * feature — ADR 0038 §3 / `requiredLimits` = 満たすべき device limit の最小値 — ADR 0038 §7）
  * → `acquireGpu` の要求と、突き合わせ相手（取得済み `GpuContext` またはアダプタ実測値）に
- * 対する検査の写像（**パイプライン非依存の共通処理** — feature 面は 7 家族の `fromAssets` が、
- * limits 面は 8 家族の `fromPretrained` が同じ形で使う）。
+ * 対する検査の写像（**パイプライン非依存の共通処理** — feature 面は 8 家族全部の admission と
+ * 構築（`fromAssets` / `fromPretrained` の両面）が、limits 面は 8 家族の `fromPretrained` が
+ * 同じ形で使う）。
  *
  * MUST: barrel には出さない（同居する `options.ts` と同じ理由 — 配布形の宣言を runtime の
  * ノブへ翻訳する内部機構で、利用者が触る面ではない）。`session` の写像と同居させてあるのは、
  * どちらも**同じ `Quant` の欄**を runtime のノブへ翻訳する処理だから。
  *
  * MUST: 表のキー集合は `Required<GpuFeaturesSpec>` の**網羅** — `GpuFeaturesSpec` に feature が
- * 増えたらこの宣言が型検査で落ちる。7 家族が `quant.gpuFeatures?.<欄> === true` を 1 行ずつ
- * 独立に読む形だと、欄が増えたとき**どの家族も型検査を通ったまま**その要求を黙って落とす
- * （= 配布形が要求した能力を持たない device で実行が進む沈黙劣化）。
+ * 増えたらこの宣言が型検査で落ちる。全家族がこの表の 1 本を通る — 家族ごとに
+ * `quant.gpuFeatures?.<欄> === true` を 1 行ずつ独立に読む形だと、欄が増えたとき**どの家族も
+ * 型検査を通ったまま**その要求を黙って落とす（= 配布形が要求した能力を持たない device で実行が
+ * 進む沈黙劣化）。
  *
  * MUST: 「要求（`acquireGpu` へ何を渡すか）」と「検査（共有 GPU で有効になっているか）」を
  * 同じ 1 エントリに置く。別の表に分けると、片方だけ追随した形（要求はするが検査しない）が
@@ -69,11 +71,14 @@ const FEATURES: { readonly [K in keyof Required<GpuFeaturesSpec>]: GpuFeatureEnt
  * quant の宣言した feature に、**実効** `SessionOptions`（明示指定を合成した後 —
  * `./options.ts` の `resolveSessionOptions`）が要る feature を足す。
  *
- * MUST: 明示の上書き口を持つ家族は、要求（`acquireGpu`）と検査（共有 GPU）をこの返り値で
- * 行う。quant の宣言だけを見ると、宣言が要求しない `linearCompute: "f16"` を明示したとき
- * 自前で取る device が shader-f16 を持たず、重みを全部上げた後の Session 構築で落ちる
- * （共有 GPU なら admission 席で落とせたはずの能力不足が、取得の後まで遅れる）。
- * NOTE: 何も足さないときは `spec` をそのまま返す（上書きの無い家族と同じ値になる）。
+ * MUST: 全家族が、要求（`acquireGpu`）と検査（共有 GPU・取得後）をこの返り値で行う — 明示の
+ * 上書き口を持たない家族も含む。quant の宣言（`gpuFeatures`）だけを見ると、宣言が要求しない
+ * f16 compute（明示の `linearCompute: "f16"`、または `session` には書いたが `gpuFeatures` を
+ * 書き落とした配布形）のとき、自前で取る device が shader-f16 を持たず、重みを全部上げた後の
+ * Session 構築で落ちる（共有 GPU なら admission 席で落とせたはずの能力不足が、取得の後まで
+ * 遅れる）。「要求する feature = 宣言 ∪ 実効設定が要る feature」を家族ごとに書き分けない。
+ * NOTE: 何も足さないときは `spec` をそのまま返す（宣言だけを見る形と同じ値になる — 配布形
+ * ミラーの全 quant がこの形であることは `tests/session_options_mirror_test.ts` が見る）。
  */
 export const sessionGpuFeatures = (
   spec: GpuFeaturesSpec | undefined,

@@ -55,6 +55,7 @@ import {
 } from "@karume/runtime";
 import {
   type DistributionSource,
+  type GpuFeaturesSpec,
   type HubRepoRef,
   loadManifest,
   type Manifest,
@@ -75,6 +76,7 @@ import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
   assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
@@ -287,6 +289,8 @@ type Siglip2Admission = {
   readonly quant: Quant;
   /** quant 宣言を受理表で通した実効設定（{@link SIGLIP2_SESSION_POLICY}）。 */
   readonly sessionOptions: SessionOptions;
+  /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
 };
 
 /**
@@ -342,6 +346,7 @@ const admitSiglip2 = (
     {},
     `Siglip2Pipeline: quant '${quantName}'`,
   );
+  const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
 
   const vision = open(VISION);
   // グラフの宣言と pipelineConfig の突合。入出力が 1 本ずつであることまで見るのは、text tower
@@ -363,7 +368,7 @@ const admitSiglip2 = (
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
     assertGpuFeaturesGranted(
-      quant.gpuFeatures,
+      gpuFeatures,
       options.gpu,
       `Siglip2Pipeline: quant '${quantName}'`,
     );
@@ -374,7 +379,7 @@ const admitSiglip2 = (
     );
   }
 
-  return { config, quantName, quant, sessionOptions };
+  return { config, quantName, quant, sessionOptions, gpuFeatures };
 };
 
 /**
@@ -387,16 +392,16 @@ const openSiglip2State = async (
   open: ComponentOpener,
   options: Siglip2PipelineOptions = {},
 ): Promise<Siglip2State> => {
-  const { config, quant, quantName, sessionOptions } = admitted;
+  const { config, quantName, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const vision = open(VISION);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitSiglip2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(quant.gpuFeatures));
+  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
   const ownsGpu = options.gpu === undefined;
   try {
-    assertGpuFeaturesGranted(quant.gpuFeatures, gpu, `Siglip2Pipeline: quant '${quantName}'`);
+    assertGpuFeaturesGranted(gpuFeatures, gpu, `Siglip2Pipeline: quant '${quantName}'`);
     return {
       gpu,
       ownsGpu,
