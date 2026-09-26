@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "siglip2-base-patch16-224/checker": {
+      "deno-intel-graphics-bmg-g21": "9c736d848aae20badee6ebcdf3b4465cb03779ff4f17cb69fd98c805c53c41b4"
+    },
+    "siglip2-base-patch16-224/noise": {
+      "deno-intel-graphics-bmg-g21": "18a48d5ace037b3fdf077006ac8d331f9db0d4f75579092b9aed3d2068b99d6b"
+    },
+    "siglip2-base-patch16-224/photo-corridor": {
+      "deno-intel-graphics-bmg-g21": "0925029c4cd0a48cb922d24faf3c492aec9128a8b1c30686c13ecf368c673d25"
+    },
+    "siglip2-base-patch16-224/photo-landscape": {
+      "deno-intel-graphics-bmg-g21": "d826c39c3cd9b39d3e163c8742297f2ba6f58106d74b3e343b6fa637b84956af"
+    },
+    "siglip2-base-patch16-224/photo-portrait": {
+      "deno-intel-graphics-bmg-g21": "b14b3c10e88e4de4c713a0565a574fae6aa9e3bc23488290545cf99d39e3b3ee"
+    },
+    "siglip2-base-patch16-224/photo-street": {
+      "deno-intel-graphics-bmg-g21": "c7e864da28bc239d640fc1d95c97168c7d428aaf4e7e9d483ec258d7d7ea38ac"
+    },
+    "siglip2-base-patch16-224/ramp": {
+      "deno-intel-graphics-bmg-g21": "227d0c91842d77432db3af5d5ff3ef0f8674a62d1642fb1aece3e20fabba45ff"
+    },
+    "siglip2-base-patch16-224/ramp-dim": {
+      "deno-intel-graphics-bmg-g21": "cb5278e6617708b97a5d625c4fd468f603c4686d35cb8e26c3578c8219639687"
+    },
+    "siglip2-so400m-patch14-384/checker": {
+      "deno-intel-graphics-bmg-g21": "e1b10f34d331f9463f89148ac03aef978c33598cedbd84cdae0545d4a63927b1"
+    },
+    "siglip2-so400m-patch14-384/noise": {
+      "deno-intel-graphics-bmg-g21": "9b2dea73514e37c41b98acff691a59e5e0399e7a074d39bfb4af978cf6d26ea3"
+    },
+    "siglip2-so400m-patch14-384/photo-corridor": {
+      "deno-intel-graphics-bmg-g21": "53b2368e5d61b8795d65bac0144057a499c47ae973d73338e7407a5ca8c5e00e"
+    },
+    "siglip2-so400m-patch14-384/photo-landscape": {
+      "deno-intel-graphics-bmg-g21": "580510e611daaed5b9a2312726b9b0f91383b650f382a65a79e9f3891db0bf4d"
+    },
+    "siglip2-so400m-patch14-384/photo-portrait": {
+      "deno-intel-graphics-bmg-g21": "35f68126913c27d5058533b03a19391b92fd3c18bf4b27e37cf4205f0d9f598b"
+    },
+    "siglip2-so400m-patch14-384/photo-street": {
+      "deno-intel-graphics-bmg-g21": "fee58a4312270f8350d7e4738518e68024f8490b7b3293d44770493449ef96a9"
+    },
+    "siglip2-so400m-patch14-384/ramp": {
+      "deno-intel-graphics-bmg-g21": "91807c4a51614f374c98f00f1fa86f783ec6d55e043d19f51676778128650872"
+    },
+    "siglip2-so400m-patch14-384/ramp-dim": {
+      "deno-intel-graphics-bmg-g21": "92b06af8b6f25084e505f55c474126dc88c49e3404b7e0ee0103dab96dff3a8b"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "capital-en": {
+      "deno-intel-graphics-bmg-g21": "a0c3b6a9641a8d033c2dc1ee54bb5601af83990d8721214c381fec3fb62a6ead"
+    },
+    "capital-ja": {
+      "deno-intel-graphics-bmg-g21": "28d17fccae77f37fcadc6148da0821acc2b54e4a1f52791a9c45b1b2f70b9756"
+    },
+    "context-en": {
+      "deno-intel-graphics-bmg-g21": "888e8391f4cfe26f8e72ee7aae1dd43903198b5045dfad655c4e880a1c6180f8"
+    }
+  }
+}

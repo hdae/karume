@@ -59,6 +59,14 @@ import { compareTensors, formatAllclose, type Tolerance } from "../src/reference
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  referenceMismatchMessage,
+  type ReferenceSettlement,
+  registerReferenceGate,
+  settleOrObserve,
+} from "./helpers/reference.ts";
 import { openResults, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesGraph } from "./helpers/series-graphs.ts";
@@ -311,6 +319,23 @@ const cosine = (first: Float32Array, second: Float32Array): number => {
  */
 const results = openResults("siglip2-golden");
 
+/**
+ * pooled 出力の sha256 参照値（環境ごとの行 — ADR 0106。行の ID は結果と同じ `<系列>/<ケース>`）。
+ *
+ * tolerance 突合は torch との**機をまたいだ**近さを言うだけで、この機で数値が 1 ビット動いた
+ * 退行（縮約順序・fma 融合の変化）は帯の内側に隠れる。sha の行はそちらを掴む追加検査で、
+ * tolerance 突合を置き換えない。
+ */
+const references = openReferences(
+  new URL("./fixtures/references/siglip2-golden.json", import.meta.url),
+);
+
+/**
+ * 登録した golden ケースの ID（参照門と `warnMissing` が数える集合 — 登録時に同期で決まる）。
+ * 資産のある系列のケースだけが入るので、空 = どの系列にも資産が無い。
+ */
+const caseIds: string[] = [];
+
 for (const series of SERIES) {
   const root = seriesRoot(series);
   /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
@@ -385,10 +410,13 @@ for (const series of SERIES) {
     const caseName = entry.name;
     /** ケース ID（系列が違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${caseName}`;
+    if (!entry.ignore) caseIds.push(caseId);
     Deno.test({
       name: `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: entry.ignore || !GPU_AVAILABLE,
       fn: async () => {
+        /** sha の決着（突合したときだけ — 記録の後で不一致を落とすために外へ持ち出す）。 */
+        let settlement: ReferenceSettlement | undefined;
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const [opened, ioBytes] = await Promise.all([
             openSeriesContainer(new URL(MODEL_FILE, root)),
@@ -444,6 +472,24 @@ for (const series of SERIES) {
                 });
                 assert(report.pass, `${where}: ${formatAllclose(report)}`);
               });
+
+              // tolerance 突合が通った出力を実物（safetensors 1 本・metadata なし）にし、この機の
+              // 参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばす — settleOrObserve）。
+              // 出力が増えたら先頭だけを黙って固定しない。
+              assertEquals(parsed.graph.outputs.length, 1, `${series.name}: グラフ出力の本数`);
+              const [pooled] = parsed.graph.outputs;
+              const pooledTensor = outputs[pooled];
+              assert(
+                pooledTensor.dtype === "f32",
+                `${pooled}: 実物にする出力の dtype が ${pooledTensor.dtype}`,
+              );
+              const outcome = await settleOrObserve(references, results, {
+                id: caseId,
+                artifact: `${series.name}-${caseName}.safetensors`,
+                bytes: f32ArtifactBytes(pooled, pooledTensor.shape, pooledTensor.data),
+              });
+              settlement = outcome.settlement;
+              return outcome.fields;
             } finally {
               await session.dispose();
             }
@@ -451,6 +497,10 @@ for (const series of SERIES) {
             gpu.destroy();
           }
         });
+        // 決着（実測 sha）を結果に積んだ後で落とす — 先に投げると実測が結果に残らない。
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(caseId, settlement, references));
+        }
       },
     });
   }
@@ -518,3 +568,7 @@ for (const series of SERIES) {
     },
   });
 }
+
+const RUNNABLE = caseIds.length > 0 && GPU_AVAILABLE;
+if (RUNNABLE) references.warnMissing(caseIds);
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds });

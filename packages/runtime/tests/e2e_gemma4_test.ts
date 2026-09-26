@@ -45,6 +45,14 @@ import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  referenceMismatchMessage,
+  type ReferenceSettlement,
+  registerReferenceGate,
+  settleOrObserve,
+} from "./helpers/reference.ts";
 import { openResults, recordFailure, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesGraph } from "./helpers/series-graphs.ts";
@@ -221,6 +229,17 @@ const loadCase = async (
 };
 
 /**
+ * 最終位置（`[1,T,V]` の T−1 行）の logits。③の greedy と sha の実物が**同じ行**を見る
+ * （切り出しを 2 か所に持つと、片方だけ位置がずれた形が作れてしまう）。
+ */
+const lastLogits = (logits: Tensor, where: string): Float32Array<ArrayBuffer> => {
+  assert(logits.dtype === "f32", `${where}: logits が f32 でない`);
+  assertEquals(logits.shape.length, 3, `${where}: logits の rank`);
+  const vocab = logits.shape[2];
+  return logits.data.subarray((logits.shape[1] - 1) * vocab, logits.shape[1] * vocab);
+};
+
+/**
  * 最終位置（`[1,T,V]` の T−1 行）の 1 位トークンと**2 位との差**。
  *
  * 走査は `>` の狭義比較なので、同値のときは**小さい添字**が残る（GPU 側と golden 側で同じ規則
@@ -230,10 +249,7 @@ const greedyTop = (
   logits: Tensor,
   where: string,
 ): { readonly top: number; readonly margin: number } => {
-  assert(logits.dtype === "f32", `${where}: logits が f32 でない`);
-  assertEquals(logits.shape.length, 3, `${where}: logits の rank`);
-  const vocab = logits.shape[2];
-  const row = logits.data.subarray((logits.shape[1] - 1) * vocab, logits.shape[1] * vocab);
+  const row = lastLogits(logits, where);
   let top = 0;
   let best = row[0];
   let second = Number.NEGATIVE_INFINITY;
@@ -305,6 +321,20 @@ const assertGemma4Form = (model: PreparedModel): number => {
  */
 const results = openResults("gemma4-golden");
 
+/**
+ * 最終位置の logits 行の sha256 参照値（環境ごとの行 — ADR 0106。行の ID はケース名 = 結果と同じ）。
+ *
+ * ②の tolerance 突合は torch との**機をまたいだ**近さを言うだけで、この機で数値が 1 ビット動いた
+ * 退行は帯の内側に隠れる。sha の行はそちらを掴む追加検査で、②③を置き換えない。
+ *
+ * 実物にするのは**最終位置の 1 行 `[1,V]`** だけで、全 logits `[1,T,262144]` は持たない。
+ * causal なので最終行は全位置・全層の計算に依存し（どこか 1 ビット動けばここに出る）、検出器
+ * として足りる。全 logits は T=598 で 627MB あり、毎回残す結果の席には載せられない。
+ */
+const references = openReferences(
+  new URL("./fixtures/references/gemma4-golden.json", import.meta.url),
+);
+
 Deno.test({
   name: "Gemma 4 E2B 資産: 期待するケースとモデル本体が揃っている",
   // 完全に空の環境だけ「生成していない」として SKIP。**何か 1 つでも**あれば欠けは FAIL
@@ -360,7 +390,13 @@ Deno.test({
         try {
           /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
           const tops: number[] = [];
+          /**
+           * 参照行と食い違ったケースの診断。ケースの席に決着を積んでから、**全ケースを回した後で**
+           * まとめて落とす（途中で投げると残りのケースの実測 sha が結果に残らない）。
+           */
+          const mismatches: string[] = [];
           for (const caseName of CASES) {
+            let settlement: ReferenceSettlement | undefined;
             await runRecordedCase(results, {
               id: caseName,
               // 決着はケースの席に残る — 系列の catch で二重に積まない。
@@ -411,7 +447,29 @@ Deno.test({
                   `golden 余裕 ${golden.margin.toExponential(3)} / ${formatAllclose(report)}`,
               );
               tops.push(observed.top);
+
+              // ②③が通った後で、③と同じ最終行を実物（safetensors 1 本・metadata なし）にし、
+              // この機の参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばす —
+              // settleOrObserve）。
+              const row = lastLogits(actual, `${caseName} GPU`);
+              const outcome = await settleOrObserve(references, results, {
+                id: caseName,
+                artifact: `${caseName}-last-logits.safetensors`,
+                bytes: f32ArtifactBytes(outputName, [1, row.length], row),
+              });
+              settlement = outcome.settlement;
+              return outcome.fields;
             });
+            if (settlement?.check.status === "fail") {
+              mismatches.push(referenceMismatchMessage(caseName, settlement, references));
+            }
+          }
+          // sha の不一致を恒真化の門より先に落とす（門が先に投げると不一致の診断文が出ない —
+          // 決着は各ケースの席に積んであるので、順序は診断文のためだけのもの）。
+          if (mismatches.length > 0) {
+            // 不一致の決着は各ケースの席に積んである — 系列の catch で二重に積まない。
+            caseSettled = true;
+            throw new Error(mismatches.join("\n"));
           }
           // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
           // ランタイム側にも置く）。期待は ` Paris` / `東京` の 2 種（export.py の
@@ -561,3 +619,7 @@ Deno.test({
     }
   },
 });
+
+const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
+if (RUNNABLE) references.warnMissing(CASES);
+registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASES });

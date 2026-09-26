@@ -11,9 +11,11 @@
 // 系列は**モデル × 解像度ごとに 1 本**（下の {@link SERIES}）。BiRefNet_HR（上流の
 // 高解像度チェックポイント）と Lucida（その fine-tune — 構造は完全に同一で重みだけが違う）を
 // 別系列として実走する。shifted-window マスクも H/W padding のゼロ定数も解像度依存の定数と
-// して焼かれるので、解像度が変われば別のグラフになる。ここで実走するのはどちらも **1024²** で、
-// 2048²（本家 handler の General-HR）は実行段が未実測（conv2d の dispatch 上限と中間 3.22GB
-// — birefnet/export.py の docstring）。
+// して焼かれるので、解像度が変われば別のグラフになる。解像度は **1024²** と **2048²**（本家
+// handler の General-HR）の 2 通りで、どちらも {@link SERIES} に入り、tolerance は系列ごとに
+// 実測済み（2048² は RTX 3080 Ti で全緑）。ただし 2048² は Intel Arc B570 の機では GPU を使う
+// テストを止めている（{@link HELD_SERIES} — decoder 末尾の 1 dispatch がドライバのジョブ上限を
+// 超えてプロセスごと落ちるため）。
 //
 // **許容誤差は系列ごとに独立して実測する**（`SERIES` の各行が自分の tolerance を持つ）。
 // 共有すると、片方を測り直したときにもう片方が黙って緩む — 2 系列は同じ構造でも logit の
@@ -64,7 +66,7 @@ import {
   type Tensor,
 } from "../mod.ts";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
-import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
+import { assertAdapterMatchesEnvironment, ENVIRONMENT } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { openResults, runRecordedCase } from "./helpers/results.ts";
@@ -276,6 +278,50 @@ const SERIES: readonly Series[] = [
   },
 ];
 
+/** 2048² 系列を Intel Arc B570 で止める理由（{@link HELD_SERIES} の 2 行が共有する）。 */
+const B570_JOB_TIMEOUT =
+  "decoder 末尾の deform_conv2d 1 dispatch（出力 [1,256,1024,1024]・1024² の 1.66 s から ≈ 6.6 s の" +
+  "見込み）が Linux xe ドライバの compute ジョブ上限 5 s を超えて device lost になり、Deno はそれを" +
+  "例外にせずプロセスごと panic する（後続の検証まで止まる — docs/limitations.md「BiRefNet 系」節）。" +
+  "deform_conv2d の分割か高速化で解消したらこの行を消す";
+
+/**
+ * 環境キーごとに **GPU を使うテストを止める**系列。外側のキーは {@link SERIES} の系列名、内側は
+ * **環境キー**（`<ランタイム>-<アダプタ名 slug>` — ADR 0106 決定 2・参照値の行と同じ流儀）。
+ *
+ * 行を環境キーごとに持つのは、**止める理由がその機にしか無い**ため。全機共通で止めると、走れる
+ * 機（RTX 3080 Ti では 2048² も全緑）の検証まで黙って消える。行がある機でも**資産の完全性
+ * テスト（GPU 不要）は走らせる** — 止めるのは device を触るテスト（golden 突合・幾何判別）だけ。
+ *
+ * この SKIP は ADR 0005 の「全 SKIP は明示 FAIL」門番（tests/gpu_gate_test.ts — GPU アダプタの
+ * 有無だけを見る）とは独立で、**行がある環境だけに効く**。GPU 無しの機は環境キーを持たないので
+ * どの行にも当たらない（そこでは元から GPU テストが SKIP される）。止めた系列は登録時に
+ * `console.warn` で 1 度名乗る（無音の SKIP にしない）。
+ *
+ * MUST: 行を足すのは、その機で**走らせるとプロセスごと落ちる**（= 後続の検証まで道連れにする）
+ * 場合に限り、根拠と「解消したらこの行を消す」を理由文に書く。数値が合わない系列を止める
+ * 場所ではない（それは赤のまま直す）。
+ *
+ * - `birefnet-hr-2048` / `lucida-2048` の `deno-intel-graphics-bmg-g21`（Intel Arc B570・Linux xe
+ *   ドライバ）: docs/limitations.md「BiRefNet 系」節（2026-09-20 実測・裁定 2026-09-26）。
+ */
+const HELD_SERIES: Readonly<
+  Record<string, Readonly<Record<string, { readonly reason: string }>>>
+> = {
+  "birefnet-hr-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+  "lucida-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+};
+
+/** この走行の機で止める理由（無ければ `undefined` = 止めない）。 */
+const heldReason = (series: Series): string | undefined => {
+  const environment = ENVIRONMENT.key;
+  if (environment === undefined) return undefined;
+  if (!Object.hasOwn(HELD_SERIES, series.name)) return undefined;
+  const byEnvironment = HELD_SERIES[series.name];
+  if (!Object.hasOwn(byEnvironment, environment)) return undefined;
+  return byEnvironment[environment].reason;
+};
+
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
@@ -440,6 +486,10 @@ const discoveryOf = (series: Series): Discovery => {
 
 for (const series of SERIES) {
   const found = discoveryOf(series);
+  const held = heldReason(series);
+  if (held !== undefined) {
+    console.warn(`[karume] ${series.name} はこの環境（${ENVIRONMENT.key}）で SKIP: ${held}`);
+  }
   if (!found.available) {
     console.warn(
       `[karume] ${seriesRoot(series).pathname} に export 済み資産が無いため実重み BiRefNet ` +
@@ -454,6 +504,26 @@ for (const series of SERIES) {
 }
 
 /**
+ * 環境キーの書式（`helpers/environment.ts` の `environmentKey` が作る綴り — `<ランタイム>-<slug>`、
+ * slug は小文字英数字を `-` 1 つで繋いだもの・両端に `-` なし）。
+ */
+const ENVIRONMENT_KEY_FORMAT = /^(deno|chrome)-[a-z0-9]+(-[a-z0-9]+)*$/;
+
+Deno.test("BiRefNet 環境別の SKIP 表: 行は実走する系列を指し、内側のキーは環境キーの書式", () => {
+  // 系列名の綴り違いは行を黙って効かなくする（止めたはずの系列が走ってプロセスごと落ちる）。
+  const names = new Set(SERIES.map((series) => series.name));
+  assertEquals(Object.keys(HELD_SERIES).filter((name) => !names.has(name)), []);
+  // 環境キーの綴り違い（大文字・商標記号・空白の残り）も同じく行を黙って効かなくする —
+  // `environmentKey` はこの書式の外を作らないので、外れた行はどの機にも当たらない。
+  const malformed = Object.entries(HELD_SERIES).flatMap(([series, byEnvironment]) =>
+    Object.keys(byEnvironment)
+      .filter((key) => !ENVIRONMENT_KEY_FORMAT.test(key))
+      .map((key) => `${series} / ${key}`)
+  );
+  assertEquals(malformed, []);
+});
+
+/**
  * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_birefnet-golden/` — 消して安全）。
  *
  * 系列名を `<family>-golden` にするのは、models 側の e2e（`birefnet`）が同じ根へ書くため
@@ -466,6 +536,8 @@ for (const series of SERIES) {
   const root = seriesRoot(series);
   /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
   const graphName = seriesGraph(series.name);
+  /** この機で GPU テストを止める系列か（{@link HELD_SERIES} — 資産の完全性テストには掛けない）。 */
+  const held = heldReason(series) !== undefined;
 
   Deno.test({
     name: `BiRefNet 資産: ${series.name} — 期待するケースとモデル本体が揃っている`,
@@ -510,7 +582,7 @@ for (const series of SERIES) {
     const caseId = `${series.name}/${caseName}`;
     Deno.test({
       name: `BiRefNet ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）`,
-      ignore: entry.ignore || !GPU_AVAILABLE,
+      ignore: entry.ignore || !GPU_AVAILABLE || held,
       fn: async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const [opened, ioBytes] = await Promise.all([
@@ -588,7 +660,7 @@ for (const series of SERIES) {
 
   Deno.test({
     name: `BiRefNet 幾何判別: ${series.name} — disc の円内 logit 平均が円外を上回る`,
-    ignore: !found.available || !GPU_AVAILABLE,
+    ignore: !found.available || !GPU_AVAILABLE || held,
     fn: async () => {
       // golden 突合だけだと「期待値と合っている」ことしか言えず、マットとして意味のある出力かは
       // 別問題（一様に潰れた出力は期待値も同じく潰れていれば通ってしまう）。ここは**画像の中の
