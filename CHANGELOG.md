@@ -30,6 +30,15 @@ measurements in `docs/research/`.
   `SessionOptions` (types, spellings, combinations, ranges) that session construction applies,
   returned as a message so callers can reject options before loading weights.
 
+- Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
+  sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,
+  empty `session`), the observation point is where the seat first takes effect (step-1 latent / sbv2
+  front outputs), and the gate checks determinism, census and a declared relRMS band. `results.json`
+  gains the optional `comparisons` field (schema unchanged) and `tools/verify-diff` renders it.
+- `tools/flag-bench`: a Deno benchmark that compares Gemma execution flags against a reference on the
+  same machine (GPU time as the primary metric, wall clock secondary) and records which kernel keys
+  actually ran.
+
 ### Changed
 
 - Every pipeline now composes its session options through one shared rule (explicit > quant

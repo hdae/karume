@@ -251,3 +251,10 @@ Markdown（`--json` 可）で出す。
 - 記録として残す代替（採らない）: anima の全ケースを参照経路の席（`f16+dit8`）へ付け替え、実用席の
   行を外す。A/B 帯門と census が無い間は実用席の唯一の E2E 検出器を消すことになるため、両方が入った後
   に再検討する。
+
+## 追記（2026-09-26・その 2）— `results.json` の任意欄 `comparisons`
+
+自機 A/B 門（ADR 0110 決定 5）の実測を `comparisons`（`{ output, reference, practical, relRms, maxAbs, band? }`）
+に積む。追記決定 2 の `measurements` と同じく schema 1 のままの任意欄で、派生値（帯に対する比）は持たず、
+非有限は `null` になる。読む側は `tools/verify-diff` がケースごとの A/B 表を出す。帯は環境キー別の行にしない
+（ADR 0110 決定 4）。
