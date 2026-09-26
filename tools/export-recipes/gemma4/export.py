@@ -1,24 +1,30 @@
-"""実重み Gemma 4 E2B（text デコーダ）を **1-shot 形**で `model.krm`（IR v2）+ golden io へ
-書き出す台本。
+"""実重み Gemma 4 E2B / E4B（text デコーダ・`--model e2b|e4b`・既定 e2b）を **1-shot 形**で
+`model.krm`（IR v2）+ golden io へ書き出す台本。
 
 `minicpm5/export.py` の鏡像（`input_ids[1,T] → logits[1,T,262144]`・KV cache 無し）だが、
 検収の主眼は 2 つ増えている:
 
-- **層種別 2 本の帯マスク**（sliding 28 層 / full 7 層）が、どちらも T 非依存の Tmax 定数 +
-  `sym_prefix_slice` に畳まれること（ADR 0010 — `embeddinggemma/export.py` の帯マスクと同じ機構を
-  **因果**版で 2 種）。
+- **層種別 2 本の帯マスク**（sliding / full — E2B は 28 / 7 層・E4B は 35 / 7 層）が、どちらも
+  T 非依存の Tmax 定数 + `sym_prefix_slice` に畳まれること（ADR 0010 —
+  `embeddinggemma/export.py` の帯マスクと同じ機構を**因果**版で 2 種）。
 - **混成量子化**（embedding 系 i8 × linear i4 — ADR 0069 決定 5 / `weight_dtype_overrides`）を
   実モデルで通すこと。E2B は語彙 262144 × PLE 表 8960 列という「embedding が重みの過半を占める」
   形なので、i4 一本でも i8 一本でも成り立たない。
 
-    uv run --with 'transformers==5.14.1' python -m gemma4.export
+    uv run --with 'transformers==5.14.1' python -m gemma4.export              # E2B
+    uv run --with 'transformers==5.14.1' python -m gemma4.export --model e4b  # E4B
+
+`--model` が決めるのは既定の置き場（素材 `inputs/gemma4/<チェックポイント>/` と系列
+`outputs/series/gemma4-<model>/`）だけで、形（層数・head 数・KV 共有・PLE の寸法）は全部
+上流 config から導く — モデル名で分岐する数は台本に無い。
 
 transformers は **5.14.1 でピン**する（`minicpm5/export.py` と同じ理由 — モデリングコードが
 変わるとグラフ形が変わる）。pyproject.toml / uv.lock には入れず `--with` で一時的に足す。
 
 ## 何をグラフに載せるか
 
-`Gemma4ForCausalLM` の forward 丸ごと 1 本（35 層 + tied `lm_head` + `final_logit_softcapping`）。
+`Gemma4ForCausalLM` の forward 丸ごと 1 本（全層〈E2B 35 / E4B 42〉+ tied `lm_head` +
+`final_logit_softcapping`）。
 公式チェックポイントは multimodal（`Gemma4ForConditionalGeneration`）なので、text 部のキー
 `model.language_model.*` を `model.*` へ**付け替えて** text 専用のモデルへ読み込む
 （{@link renamed_state}）。vision / audio 塔は読まない。トークナイズと chat template の適用は
@@ -30,10 +36,10 @@ MUST: head_dim は**層種別で違う**（sliding = `config.head_dim` 256 / ful
 
 ## GQA / MQA を「真の形」で出す
 
-Gemma 4 E2B は 8:1 の MQA。迂回の理由と方法は `minicpm5/export.py` と同文 —
-transformers の公開拡張点（`AttentionInterface.register`）へ {@link gqa_sdpa_attention} を
-登録し、`repeat_kv` を通さず `enable_gqa=True` で SDPA を呼ぶ。IR の attention は
-`q[1,8,T,D] / k[1,1,T,D] / v[1,1,T,D]` になる。
+Gemma 4 E2B は 8:1 の MQA（`num_key_value_heads` 1）、E4B は 4:1 の GQA（同 2）。迂回の理由と
+方法は `minicpm5/export.py` と同文 — transformers の公開拡張点（`AttentionInterface.register`）へ
+{@link gqa_sdpa_attention} を登録し、`repeat_kv` を通さず `enable_gqa=True` で SDPA を呼ぶ。
+IR の attention は `q[1,8,T,D] / k[1,Hkv,T,D] / v[1,Hkv,T,D]`（Hkv = `num_key_value_heads`）になる。
 
 `Gemma4TextAttention` は attention 実装へ `sliding_window=` を渡してくるが、
 {@link gqa_sdpa_attention} は**受理して無視する** — 窓の意味論は下の mask 辞書が正本で、
@@ -49,9 +55,10 @@ transformers の公開拡張点（`AttentionInterface.register`）へ {@link gqa
 **グラフ入力は `input_ids` 1 本だけ**になる。mask が `None` で届く経路は
 {@link gqa_sdpa_attention} が fail loudly にする（非因果に化ける形を残さない）。
 
-## PLE（Per-Layer Embeddings）を 35 分割で持つ
+## PLE（Per-Layer Embeddings）を層別に分割して持つ
 
-`embed_tokens_per_layer` の 1 枚表（f32 で 9.4GB）は**層別 35 本へ割って**持つ — 割り方も
+`embed_tokens_per_layer` の 1 枚表（f32 で E2B 9.4GB / E4B 11.3GB）は**層別 L 本〈E2B 35 /
+E4B 42〉へ割って**持つ — 割り方も
 行ブロック読みもビット一致検査も {@link gemma4.ple} が正本（台本 3 本が同じ 1 本を通す）。
 台本側の契約はグラフの呼び方だけ: `stack` で組んだ `[1,T,35,256]` を `per_layer_inputs=` で
 上流へ渡す（`input_ids` と `per_layer_inputs` の同時指定は上流が拒否するので、
@@ -78,8 +85,8 @@ scale 台帳が実値と食い違う）。格納は既定 `i8` + linear を 1 �
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b/model.krm             重み・定数 + 2 文書の記述
-    outputs/series/gemma4-e2b/io.<case>.safetensors 入力と torch CPU での期待出力
+    outputs/series/gemma4-<model>/model.krm             重み・定数 + 2 文書の記述
+    outputs/series/gemma4-<model>/io.<case>.safetensors 入力と torch CPU での期待出力
 
 io のテンソルキー規約は tiny golden / DeBERTa / EmbeddingGemma / MiniCPM5 と同じ
 （`input.<グラフ入力名>` / `output.<位置>`）。logits は語彙 262144 なので 1 ケースあたり
@@ -111,8 +118,15 @@ from torch.export import Dim
 
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
 from gemma4 import ple, rope
-from gemma4.card import GEMMA4_LICENSE
-from gemma4.distribution import GEMMA4_ROLE
+from gemma4.card import GEMMA4_LICENSE, GEMMA4_UPSTREAM
+from gemma4.distribution import (
+    GEMMA4_DEFAULT_MODEL,
+    GEMMA4_INPUTS_DIRNAME,
+    GEMMA4_PREFIX,
+    GEMMA4_ROLE,
+    gemma4_checkpoint,
+    gemma4_series_name,
+)
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
@@ -123,11 +137,32 @@ from karume.quantize import Int4Report, Int8Report, fake_quant_int4, fake_quant_
 from karume.rope import assert_rope_lifted
 from karume.shapes import declared_shape
 
-#: 公式重みの置き場（`hf download google/gemma-4-E2B-it` の展開先）。
-DEFAULT_MODEL_DIR = INPUTS_ROOT / "gemma4" / "gemma-4-E2B-it"
 
-#: 生成物の既定の置き場。
-DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b"
+def checkpoint_dir(model: str) -> Path:
+    """公式重みの置き場（`hf download google/gemma-4-<E2B|E4B>-it` の展開先）。
+
+    綴りは帰属表（`gemma4.card.GEMMA4_UPSTREAM`）から導く — 配布 recipe の
+    `gemma4_sources` と同じ 1 本（未知のモデルはそこで fail loudly）。
+    """
+    return INPUTS_ROOT / GEMMA4_INPUTS_DIRNAME / gemma4_checkpoint(model)
+
+
+def series_dir(model: str, suffix: str | None = None) -> Path:
+    """系列の既定の置き場（`outputs/series/gemma4-<model>[-<suffix>]/`）。
+
+    接尾を持たないのは 1-shot 系列（`gemma4-e2b/`）だけ。接尾つきの綴りは配布 recipe の
+    `gemma4_series_name` と同じ 1 本を通す（書き手と読み手が同じ 1 語から組む）。
+    """
+    gemma4_checkpoint(model)
+    name = f"{GEMMA4_PREFIX}-{model}" if suffix is None else gemma4_series_name(model, suffix)
+    return SERIES_ROOT / name
+
+
+#: 既定モデル（E2B）の公式重みの置き場。`--model` で選ぶ置き場は {@link checkpoint_dir}。
+DEFAULT_MODEL_DIR = checkpoint_dir(GEMMA4_DEFAULT_MODEL)
+
+#: 既定モデル（E2B）の生成物の既定の置き場。
+DEFAULT_OUT_DIR = series_dir(GEMMA4_DEFAULT_MODEL)
 
 MODEL_FILE = "model.krm"
 
@@ -304,7 +339,7 @@ def gqa_sdpa_attention(
     scaling: float | None = None,
     **kwargs: Any,
 ) -> tuple[torch.Tensor, None]:
-    """`repeat_kv` を通さず `enable_gqa=True` で SDPA を呼ぶ attention 実装（MQA 形の保存）。
+    """`repeat_kv` を通さず `enable_gqa=True` で SDPA を呼ぶ attention 実装（MQA / GQA 形の保存）。
 
     transformers の `AttentionInterface` が要求する呼び出し規約そのまま
     （`(module, q, k, v, attention_mask, dropout=…, scaling=…, **kwargs)` →
@@ -857,24 +892,71 @@ def export_series(model_dir: Path, out_dir: Path, *, sym_max: int = SYM_MAX) -> 
     }
 
 
-def series_parser(
-    description: str, out_dir: Path, *, with_sym_max: bool = True
-) -> argparse.ArgumentParser:
-    """この family の 3 台本に共通な CLI の骨組み（`--model-dir` / `--out` / `--sym-max`）。
+#: モデル依存の既定値（dest → `model → 値`）を parser に運ぶ dest。**CLI の引数ではない**
+#: （`set_defaults` で載せ、{@link resolve_series_args} が取り除く）。
+MODEL_DEFAULTS = "model_defaults"
 
-    系列で違うのは既定の出力先と、chunk 系列だけが足す `--positions` / `--steps` だけ
-    （{@link gemma4.export_decode.run_variant_cli}）。3 つの入口で綴りや既定が割れると、
-    「台本ごとに違う名前の同じノブ」が生える。
+
+def add_model_default(
+    parser: argparse.ArgumentParser, dest: str, default: Callable[[str], Path]
+) -> None:
+    """`dest` の既定値を `--model` から導く形で登録する（未指定 = `None` のときだけ効く）。
+
+    `--out` / `--reference` の既定は選んだモデルの系列で決まる（`gemma4-<model>-…`）が、
+    argparse の既定は parse より前に 1 つに決まる。既定を `None` にしておき、parse の後で
+    モデルから埋める。
+    """
+    defaults = dict(parser.get_default(MODEL_DEFAULTS) or {})
+    defaults[dest] = default
+    parser.set_defaults(**{MODEL_DEFAULTS: defaults})
+
+
+def series_parser(
+    description: str,
+    out_dir: Callable[[str], Path],
+    *,
+    with_sym_max: bool = True,
+    models: Sequence[str] = tuple(GEMMA4_UPSTREAM),
+) -> argparse.ArgumentParser:
+    """この family の台本に共通な CLI の骨組み（`--model` / `--model-dir` / `--out` /
+    `--sym-max`）。
+
+    系列で違うのは既定の出力先（`out_dir` = モデル名 → 置き場）と、chunk 系列だけが足す
+    `--steps` / `--reference` だけ（{@link gemma4.export_decode.run_variant_cli}）。入口ごとに
+    綴りや既定が割れると、「台本ごとに違う名前の同じノブ」が生える。
+
+    `--model` の既定は E2B（`GEMMA4_DEFAULT_MODEL` — 省略時の既定パスと挙動は E2B 専用だった
+    頃と同じ）。`--model-dir` / `--out` を省くと選んだモデルの置き場
+    （{@link checkpoint_dir} / `out_dir`）になる。
 
     `with_sym_max=False` は chunk 記号を持たない台本（MTP drafter）用 — 効かないノブを
-    受理して黙って捨てない（fail loudly）ために、`--sym-max` 自体を登録しない。
+    受理して黙って捨てない（fail loudly）ために、`--sym-max` 自体を登録しない。`models` は
+    選べるモデルの集合で、台本が特定のモデルにしか正しくない既定を持つとき（drafter）に絞る。
     """
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
-    parser.add_argument("--out", type=Path, default=out_dir)
+    parser.add_argument("--model", choices=tuple(models), default=GEMMA4_DEFAULT_MODEL)
+    parser.add_argument("--model-dir", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=None)
+    add_model_default(parser, "model_dir", checkpoint_dir)
+    add_model_default(parser, "out", out_dir)
     if with_sym_max:
         parser.add_argument("--sym-max", type=int, default=SYM_MAX)
     return parser
+
+
+def resolve_series_args(args: argparse.Namespace) -> dict[str, Any]:
+    """parse 結果を「モデル依存の既定を埋めた dest → 値」へ畳む（`model` と運び役は除く）。
+
+    `--model` は既定の置き場を決めるためだけのノブで、`export_series` へは渡らない — 台本は
+    素材（`model_dir`）と config から形を導くので、モデル名そのものを読む席が無い。
+    """
+    values = dict(vars(args))
+    defaults = values.pop(MODEL_DEFAULTS)
+    model = values.pop("model")
+    for dest, default in defaults.items():
+        if values[dest] is None:
+            values[dest] = default(model)
+    return values
 
 
 def run_series_cli(
@@ -884,19 +966,19 @@ def run_series_cli(
 ) -> None:
     """CLI を解いて `run(model_dir, out, **残りのノブ)` を呼び、要約 JSON を刷る。
 
-    MUST: `--model-dir` / `--out` 以外は**そのまま名前付きで**渡す — argparse の dest と
-    各 `export_series` のキーワード名が同じ綴りであることが条件で、系列ごとにノブの本数が
-    違っても受け渡しを書き足さずに済む形。
+    MUST: `--model` / `--model-dir` / `--out` 以外は**そのまま名前付きで**渡す — argparse の
+    dest と各 `export_series` のキーワード名が同じ綴りであることが条件で、系列ごとにノブの
+    本数が違っても受け渡しを書き足さずに済む形。
     """
-    args = parser.parse_args(argv)
-    positional = ("model_dir", "out")
-    options = {name: value for name, value in vars(args).items() if name not in positional}
-    summary = run(args.model_dir, args.out, **options)
-    print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
+    options = resolve_series_args(parser.parse_args(argv))
+    model_dir = options.pop("model_dir")
+    out = options.pop("out")
+    summary = run(model_dir, out, **options)
+    print(json.dumps({"model_dir": str(model_dir), **summary}, indent=1, ensure_ascii=False))
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    run_series_cli(series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR), export_series, argv)
+    run_series_cli(series_parser(__doc__.split("\n\n")[0], series_dir), export_series, argv)
 
 
 if __name__ == "__main__":

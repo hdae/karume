@@ -1,4 +1,5 @@
-"""実重み Gemma 4 E2B を **token-only 既定出口**（ADR 0068 決定 4）の states 形へ書き出す台本。
+"""実重み Gemma 4 E2B / E4B（`--model`）を **token-only 既定出口**（ADR 0068 決定 4）の
+states 形へ書き出す台本。
 
 `export_decode.py`（logits opt-in 形 — 全 M 行に lm_head を通し `[logits, token]` を出す）の
 **既定形**版。chunk 系列の経路（素材の読み方・states 手術・RoPE のホスト供給・混成量子化・
@@ -18,7 +19,8 @@ variant 記述（{@link VARIANT}）と入口だけ。出口の差は次の 3 点
 
 ## golden はこの系列では作らない（logits opt-in 系列との交差検証が門）
 
-logits を出さない形の greedy 期待列は logits opt-in 系列（`gemma4-e2b-decode/`）の
+logits を出さない形の greedy 期待列は**同じモデルの** logits opt-in 系列
+（`gemma4-<model>-decode/`）の
 `greedy.<case>.safetensors` と**同一のはず**（同じ重み・同じ丸め・同じ手術・出口の行選択が
 同じ行を指す）。検収門（`e2e_gemma4_token_exit_test.ts`）はそれをそのまま流用して
 「両系列の token 列が厳密一致」を見る — 系列間の交差検証そのものが門になり、torch 参照の
@@ -35,8 +37,8 @@ MUST: 記録を書くために logits opt-in 系列を**再 export しない** �
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-decode-token/model.krm        重み・定数 + 2 文書の記述
-    outputs/series/gemma4-e2b-decode-token/reference.json   出所記録（指紋 + 流用 golden）
+    outputs/series/gemma4-<model>-decode-token/model.krm        重み・定数 + 2 文書の記述
+    outputs/series/gemma4-<model>-decode-token/reference.json   出所記録（指紋 + 流用 golden）
 """
 
 from __future__ import annotations
@@ -46,13 +48,17 @@ from collections.abc import Sequence
 import torch
 from torch.nn import functional
 
-from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import ple
+from gemma4.distribution import GEMMA4_DEFAULT_MODEL
 
-#: 生成物の既定の置き場（logits opt-in 系列とは別ディレクトリ — 出口の違う別資産）。
-DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-decode-token"
+#: この台本の系列の接尾（`gemma4-<model>-decode-token/` — logits opt-in 系列とは別ディレクトリ・
+#: 出口の違う別資産）。
+TOKEN_SUFFIX = "decode-token"
+
+#: 既定モデル（E2B）の生成物の既定の置き場。
+DEFAULT_OUT_DIR = one_shot.series_dir(GEMMA4_DEFAULT_MODEL, TOKEN_SUFFIX)
 
 
 class TokenOnlyChunkWrapper(decode.DecodeChunkWrapper):
@@ -113,7 +119,7 @@ class TokenOnlyChunkWrapper(decode.DecodeChunkWrapper):
 #: MUST: `goldens=False` — この系列は自分の greedy 記録を採らない（検収門が logits opt-in 系列の
 #: `greedy.<case>.safetensors` を流用し、両系列の token 列が厳密一致することを門にする）。
 VARIANT = decode.ChunkVariant(
-    out_dir=DEFAULT_OUT_DIR, wrapper=TokenOnlyChunkWrapper, token_only=True, goldens=False
+    suffix=TOKEN_SUFFIX, wrapper=TokenOnlyChunkWrapper, token_only=True, goldens=False
 )
 
 

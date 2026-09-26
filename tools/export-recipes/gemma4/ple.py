@@ -1,4 +1,7 @@
-"""Gemma 4 の PLE（Per-Layer Embeddings）— 1 枚表を層別 35 本へ割って持つ側の正本。
+"""Gemma 4 の PLE（Per-Layer Embeddings）— 1 枚表を層別 L 本へ割って持つ側の正本。
+
+本数 L は `num_hidden_layers`（E2B 35 / E4B 42）で、関数は全て config と表の形から導く。
+以下の数字は E2B（L = 35）で書いてある — E4B は表の列が 10752・f32 実体が 11.3GB。
 
 `embed_tokens_per_layer` は `[262144, 35×256]` の 1 枚表で、f32 実体は 9.4GB — **WebGPU の
 1 バッファ上限を単独で超える**（i8 格納でも 2.19GiB）。そこで層別 35 本の `nn.Embedding`

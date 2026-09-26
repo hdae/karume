@@ -13,8 +13,10 @@ core だけで観測できる層（規模上限・quant 完全写像・staging/s
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -102,6 +104,11 @@ def _container_with_ple(
 
 #: tiny な PLE を 2 block 以上へ割る block 上限（block 跨ぎを 1 度は踏む）。
 _PLE_BLOCK_BYTES = fixture.LAYERS * fixture.DIM * (fixture.VOCAB // 2)
+
+#: 帰属表に**無い**モデル名とその上流の綴り（未知のモデルを落とす門の入力）。E4B が帰属表へ
+#: 入ったので、門の入力は実在しない綴りにしてある。
+UNLISTED_MODEL = "unlisted"
+UNLISTED_CHECKPOINT = "gemma-4-unlisted-it"
 
 #: 合成の寸法で成立する実行時ノブ（実物は 768 / 4096・合成の位置上限は 37）。
 SMALL_CHUNK = 2
@@ -684,7 +691,7 @@ class TestGemma4Naming:
 
     def test_it_refuses_a_model_outside_the_attribution_table(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="知らない"):
-            gemma4_sources(tmp_path, "e4b")
+            gemma4_sources(tmp_path, UNLISTED_MODEL)
 
 
 class TestGemma4Card:
@@ -763,8 +770,8 @@ class TestGemma4Card:
     def test_it_refuses_a_model_outside_the_attribution_table(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled
         other = json.loads(json.dumps(manifest))
-        other["models"]["e4b"] = other["models"].pop(GEMMA4_DEFAULT_MODEL)
-        other["defaultModel"] = "e4b"
+        other["models"][UNLISTED_MODEL] = other["models"].pop(GEMMA4_DEFAULT_MODEL)
+        other["defaultModel"] = UNLISTED_MODEL
         with pytest.raises(ValueError, match="帰属表に無い"):
             render_gemma4_model_card(other, "hdae/karume-gemma4")
 
@@ -892,5 +899,183 @@ class TestGemma4LegalText:
         out_dir, _ = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
-        with pytest.raises(AssertionError, match="gemma-4-E4B-it"):
-            _assert_notice_names(notice, [*GEMMA4_UPSTREAM.values(), "google/gemma-4-E4B-it"])
+        with pytest.raises(AssertionError, match=UNLISTED_CHECKPOINT):
+            _assert_notice_names(
+                notice, [*GEMMA4_UPSTREAM.values(), f"google/{UNLISTED_CHECKPOINT}"]
+            )
+
+
+#: E4B の上流 `tokenizer.json` の代役（門は中身を読まず sha256 だけを突き合わせる）。
+_UPSTREAM_TOKENIZER = b'{"model": "upstream tokenizer stand-in"}'
+
+
+def _e4b_sources(root: Path) -> Gemma4Sources:
+    """E4B の入力 — drafter 無し・トークナイザは E2B の系列を借りる（共有の表の既定どおり）。"""
+    return Gemma4Sources(
+        product=root / "series" / "gemma4-e4b-product",
+        drafter=None,
+        tokenizer=root / "series" / "gemma4-e2b-tokenizer",
+        model=root / "inputs" / "gemma-4-E4B-it",
+    )
+
+
+def _build_e4b(
+    root: Path, *, upstream: bytes = _UPSTREAM_TOKENIZER, recorded: bytes | None = None
+) -> Gemma4Sources:
+    """E4B の最小系列（`recorded` = トークナイザ資産が名乗る出所のバイト列・既定は上流と同一）。"""
+    sources = _e4b_sources(root)
+    source_bytes = upstream if recorded is None else recorded
+    fixture.write_series(
+        sources.product,
+        sources.tokenizer,
+        sources.model,
+        # 借り手 drafter 系列は fixture が既定で product の隣へ書く（E4B の計画は読まない）。
+        tokenizer={
+            **fixture.tokenizer_asset(),
+            "source": {"sha256": hashlib.sha256(source_bytes).hexdigest()},
+        },
+    )
+    (sources.model / "tokenizer.json").write_bytes(upstream)
+    return sources
+
+
+def _assemble_e4b(root: Path) -> tuple[Path, dict[str, Any]]:
+    sources = _build_e4b(root)
+    out_dir = root / "models" / "e4b-only"
+    manifest = assemble_family(
+        [gemma4_plan(sources, "e4b")],
+        out_dir,
+        "e4b",
+        root_files=gemma4_distribution.PIPELINE.root_files,
+    )
+    return out_dir, manifest
+
+
+class TestGemma4E4B:
+    """E4B の model entry — drafter 無し・quant は E2B と同じ 3 席・既定は暫定 `i4`。"""
+
+    def test_the_upstream_and_the_series_names_follow_the_model(self, tmp_path: Path) -> None:
+        assert GEMMA4_UPSTREAM["e4b"] == "google/gemma-4-E4B-it"
+        sources = gemma4_sources(tmp_path, "e4b")
+
+        assert sources.product == tmp_path / "gemma4-e4b-product"
+        assert sources.model.name == "gemma-4-E4B-it"
+        # drafter は配らない・トークナイザは E2B の系列を共有する。
+        assert sources.drafter is None
+        assert sources.tokenizer == tmp_path / "gemma4-e2b-tokenizer"
+
+    def test_every_model_declares_a_default_quant_and_a_tokenizer_series(self) -> None:
+        """キー集合が帰属表と一致しないと、未宣言のモデルが組み立て時に KeyError で落ちる。"""
+        assert set(gemma4_distribution.GEMMA4_DEFAULT_QUANT) == set(GEMMA4_UPSTREAM)
+        assert set(gemma4_distribution.GEMMA4_TOKENIZER_SERIES) == set(GEMMA4_UPSTREAM)
+        for model, quant in gemma4_distribution.GEMMA4_DEFAULT_QUANT.items():
+            assert quant in gemma4_distribution.gemma4_quants(model)
+
+    def test_the_entry_declares_no_drafter(self, tmp_path: Path) -> None:
+        """drafter 役が weights に無いことが「投機を張れない」の唯一の表現。
+
+        読み手は `speculative` 指定のロードを weights の解決で落とす（部品を 1 つも取る前）。
+        """
+        out_dir, manifest = _assemble_e4b(tmp_path)
+        entry = manifest["models"]["e4b"]
+
+        assert list(entry["weights"]) == [GEMMA4_ROLE]
+        assert not (out_dir / "e4b" / GEMMA4_DRAFTER_ROLE).exists()
+        for quant in entry["quants"].values():
+            assert quant["weights"] == {GEMMA4_ROLE: "i4"}
+            assert "drafter" not in quant["description"].lower()
+
+    def test_the_entry_carries_the_three_quants_with_i4_as_the_default(
+        self, tmp_path: Path
+    ) -> None:
+        _, manifest = _assemble_e4b(tmp_path)
+        entry = manifest["models"]["e4b"]
+
+        assert sorted(entry["quants"]) == ["i4", "i4-fast", "i4-gemvpar"]
+        assert entry["defaultQuant"] == "i4"
+        # E2B の既定は据え置き（E4B の暫定は E2B の束に影響しない）。
+        assert gemma4_distribution.GEMMA4_DEFAULT_QUANT["e2b"] == "i4-fast"
+
+    def test_the_card_names_no_drafter_for_an_e4b_only_manifest(self, tmp_path: Path) -> None:
+        """配っていない drafter の上流を出所に書かない（base_model は manifest から導く）。"""
+        _, manifest = _assemble_e4b(tmp_path)
+
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        assert "google/gemma-4-E4B-it" in card
+        assert "gemma-4-E2B-it-assistant" not in card
+        assert "drafter head" not in card
+
+    def test_the_card_still_names_the_e2b_drafter_when_e2b_ships_it(self, gemma4_assembled) -> None:
+        """恒真化の門 — drafter を運ぶモデルが居れば drafter の上流は base_model に残る。"""
+        _, manifest = gemma4_assembled
+
+        card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
+
+        assert "google/gemma-4-E2B-it-assistant" in card
+
+    def test_both_models_share_one_tokenizer_file(self, tmp_path: Path) -> None:
+        """同じ系列を指す 2 モデルの資産は `shared/` へ 1 回だけ置かれる（core の共有席）。"""
+        e4b = _build_e4b(tmp_path)
+        e2b = _sources(tmp_path)
+        fixture.write_series(
+            e2b.product,
+            e2b.tokenizer,
+            e2b.model,
+            # E2B は同じ資産を読む（E4B が書いた出所つきの資産をそのまま使う）。
+            tokenizer=json.loads((e4b.tokenizer / "tokenizer.json").read_text(encoding="utf-8")),
+        )
+        out_dir = tmp_path / "models" / "both"
+
+        manifest = assemble_family(
+            [gemma4_plan(e2b, "e2b"), gemma4_plan(e4b, "e4b")],
+            out_dir,
+            "e2b",
+            root_files=gemma4_distribution.PIPELINE.root_files,
+        )
+
+        paths = {
+            name: model["assets"][GEMMA4_TOKENIZER_ROLE]["path"]
+            for name, model in manifest["models"].items()
+        }
+        assert paths["e2b"] == paths["e4b"]
+        assert paths["e4b"].startswith("shared/")
+        # E2B は drafter を運び続ける（E4B を足しても E2B の entry は変わらない）。
+        assert GEMMA4_DRAFTER_ROLE in manifest["models"]["e2b"]["weights"]
+
+    def test_it_refuses_a_borrowed_tokenizer_compiled_from_another_upstream(
+        self, tmp_path: Path
+    ) -> None:
+        """共有の前提（上流が同一バイト）が崩れた組は落とす — 語彙数が同じでも id 列は割れうる。"""
+        sources = _build_e4b(tmp_path, recorded=b"a different upstream tokenizer")
+
+        with pytest.raises(DistError, match="共有の前提"):
+            gemma4_plan(sources, "e4b")
+
+    def test_it_refuses_a_borrowed_tokenizer_without_a_recorded_source(
+        self, tmp_path: Path
+    ) -> None:
+        sources = _build_e4b(tmp_path)
+        (sources.tokenizer / "tokenizer.json").write_text(
+            json.dumps(fixture.tokenizer_asset()), encoding="utf-8"
+        )
+
+        with pytest.raises(DistError, match=r"source\.sha256"):
+            gemma4_plan(sources, "e4b")
+
+    def test_it_refuses_a_drafter_series_for_a_model_without_a_drafter(
+        self, tmp_path: Path
+    ) -> None:
+        """drafter を配らないモデルに席があれば、別モデル向けの drafter が紛れ込んだ組。"""
+        sources = _build_e4b(tmp_path)
+        smuggled = replace(sources, drafter=tmp_path / "series" / "gemma4-e2b-drafter")
+
+        with pytest.raises(DistError, match="drafter 系列"):
+            gemma4_plan(smuggled, "e4b")
+
+    def test_it_refuses_an_e2b_plan_whose_drafter_series_is_missing(self, tmp_path: Path) -> None:
+        """drafter を配るモデルの席が空なら、黙って投機なしの配布形が出来る形を落とす。"""
+        sources = replace(_build(tmp_path), drafter=None)
+
+        with pytest.raises(DistError, match="drafter 系列"):
+            gemma4_plan(sources, "e2b")

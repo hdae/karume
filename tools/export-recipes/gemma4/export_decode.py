@@ -1,5 +1,5 @@
-"""実重み Gemma 4 E2B を **states 形の chunk グラフ**（`model.krm`〈IR v2〉+ golden）へ
-書き出す台本。
+"""実重み Gemma 4 E2B / E4B（`--model e2b|e4b`・既定 e2b）を **states 形の chunk グラフ**
+（`model.krm`〈IR v2〉+ golden）へ書き出す台本。
 
 ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（GenerationContext と
 名前付き state スロット）/
@@ -12,7 +12,8 @@ ADR [0066](../../../docs/decisions/0066-generation-context-state-slots.md)（Gen
 {@link _shared.decode_series}、1-shot 形のヘルパは {@link gemma4.export} で、どちらも import
 して再利用する（同じ規律を 2 箇所に書かない）。
 
-    uv run --with 'transformers==5.14.1' python -m gemma4.export_decode
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_decode              # E2B
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b  # E4B
 
 ## この台本は chunk 系列 2 本の中核でもある
 
@@ -66,18 +67,20 @@ MUST: `karume.rope.assert_rope_lifted` は**適用しない** — あれは `inv
 
 ## KV 共有層は「所有層のスロットを読む」（1-shot 形との構造差 その 2）
 
-E2B は 35 層のうち後ろ 20 層（`num_kv_shared_layers`）が KV を共有する。上流は共有開始より
-前の層のうち **その layer_type で最後の層**の k / v を `shared_kv_states[layer_type]` に置き、
-共有層はそれをそのまま使う（modeling_gemma4.py:1287 / 1735）。よってスロットは
-**所有層ぶんの 30 本**（層 0..14 × k/v）だけで、層 15..34 は sliding なら層 13 の・full なら
-層 14 のスロットを読む（{@link kv_owner_layers}）。
+後ろ `num_kv_shared_layers` 層が KV を共有する（E2B は 35 層のうち後ろ 20 層・E4B は 42 層の
+うち後ろ 18 層）。上流は共有開始より前の層のうち **その layer_type で最後の層**の k / v を
+`shared_kv_states[layer_type]` に置き、共有層はそれをそのまま使う（modeling_gemma4.py:1287 /
+1735）。よってスロットは**所有層ぶん**（E2B は層 0..14 × k/v の 30 本・E4B は層 0..23 の 48 本）
+だけで、共有層は sliding なら E2B 層 13 / E4B 層 22 の・full なら E2B 層 14 / E4B 層 23 の
+スロットを読む（{@link kv_owner_layers} — 番号は config から導き、台本は持たない）。
 
 手術（`karume.states.to_states_form`）は同じスロットへの複数登録を受理し、導出 shape /
 `window` / **append の入力名**の完全一致を検査する（states.py の `_register`）。共有層の k / v が
 所有層の**同じ値テンソル**であることは traced グラフが持っている事実なので、この検査が
 「割り当てを間違えていない」ことの実証になる（間違えれば入力名が食い違って落ちる）。
-`state_append` は所有層ぶんの 30 本で、それぞれ**そのスロットの最後の読者の直後**に置かれる
-（順序と window 宣言の一致は `verify._assert_state_order` の担当 — ここでは写さない）。
+`state_append` は所有層ぶんの本数（E2B 30 / E4B 48）で、それぞれ**そのスロットの最後の読者の
+直後**に置かれる（順序と window 宣言の一致は `verify._assert_state_order` の担当 —
+ここでは写さない）。
 
 ## 窓幅 512 はそのまま宣言できる（意味論が厳密同値）
 
@@ -97,7 +100,7 @@ ring はこの容量で閉じるので、記号のままだと `C - (window + SL
 
 `attention` の第 4 入力は 1-shot 形と同じ層種別 2 本の加算 mask 辞書
 （{@link gemma4.export.additive_causal_mask} / `additive_sliding_mask`）だが、states 形では
-causal も窓も**述語計算**になるので mask tensor は要らない。手術が全 35 本から mask 入力を
+causal も窓も**述語計算**になるので mask tensor は要らない。手術が全層の attention から mask 入力を
 落とし、Tmax² 定数 2 本と `sym_prefix_slice` を刈る。{@link assert_ir_form_decode} はその残骸が
 1 本も残っていないことを見る（残ると「誰も読まない 4.5MiB」が配布物に居座る）。
 
@@ -110,9 +113,9 @@ causal も窓も**述語計算**になるので mask tensor は要らない。�
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-decode/model.krm                 重み・定数 + 2 文書の記述
-    outputs/series/gemma4-e2b-decode/io.<case>.safetensors     無 pad 全長の入出力
-    outputs/series/gemma4-e2b-decode/greedy.<case>.safetensors greedy 継続 K step の期待列
+    outputs/series/gemma4-<model>-decode/model.krm                 重み・定数 + 2 文書の記述
+    outputs/series/gemma4-<model>-decode/io.<case>.safetensors     無 pad 全長の入出力
+    outputs/series/gemma4-<model>-decode/greedy.<case>.safetensors greedy 継続 K step の期待列
 
 `io.*` は 1-shot 形と同じキー規約（`input.<グラフ入力名>` / `output.<位置>`）。`greedy.*` は
 **decode 検収の正本**で、`prompt` i32 `[T]` / `expected` i32 `[K]` / `margin` f32 `[K]` を持つ。
@@ -134,11 +137,10 @@ from torch import nn
 from torch.export import Dim
 
 from _shared.decode_series import _write_greedy, assert_case_room, positions_for
-from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import ple, provenance
 from gemma4 import rope as rope_math
-from gemma4.distribution import GEMMA4_ROLE
+from gemma4.distribution import GEMMA4_DEFAULT_MODEL, GEMMA4_ROLE
 from karume.artifacts import staged_publication
 from karume.container import AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
@@ -148,10 +150,14 @@ from karume.pipeline import export_module, publish_model
 from karume.shapes import declared_shape
 from karume.states import StateAttentionSpec, StatesPlan, to_states_form
 
-#: 生成物の既定の置き場（1-shot 系列とは別ディレクトリ — グラフの形が違う別資産）。
-#: 素材（`--model-dir` の既定）は 1-shot 形と同じで、綴りは共通の CLI 骨組みが持つ
-#: （{@link gemma4.export.series_parser}）。
-DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-decode"
+#: この台本の系列の接尾（`gemma4-<model>-decode/` — 1-shot 系列とは別ディレクトリ・グラフの
+#: 形が違う別資産）。golden を採らない系列（token-only / 製品）が流用する greedy 期待列の
+#: 置き場でもある（`--reference` の既定）。
+DECODE_SUFFIX = "decode"
+
+#: 既定モデル（E2B）の生成物の既定の置き場。素材（`--model-dir` の既定）は 1-shot 形と同じで、
+#: 綴りは共通の CLI 骨組みが持つ（{@link gemma4.export.series_parser}）。
+DEFAULT_OUT_DIR = one_shot.series_dir(GEMMA4_DEFAULT_MODEL, DECODE_SUFFIX)
 
 #: グラフ入力の名前（chunk ラッパの forward 引数名）。{@link assert_ir_form_decode} が
 #: 「この綴りだけ」を見るための正本。
@@ -452,8 +458,9 @@ class ChunkVariant:
     作らない（席を作ると「片方だけ違う経路」が書けるようになる）。
     """
 
-    #: 生成物の既定の置き場（系列ごとに別ディレクトリ — グラフの形が違う別資産）。
-    out_dir: Path
+    #: 系列名の接尾（`gemma4-<model>-<suffix>/` — 系列ごとに別ディレクトリ・グラフの形が
+    #: 違う別資産）。置き場はモデルで決まるので、ここはモデルに依らない接尾だけを持つ。
+    suffix: str
     #: 組む chunk ラッパ（{@link DecodeChunkWrapper} の継承鎖のどれか）。
     wrapper: type[DecodeChunkWrapper]
     #: 出口が token-only（`last_row` 入力が増え、出力が token 1 本 — ADR 0068 決定 4）か。
@@ -466,10 +473,15 @@ class ChunkVariant:
     #: 実際に使っているが、そちらは `export_series` を通らずラッパ欄だけを読む。
     goldens: bool
 
+    @property
+    def out_dir(self) -> Path:
+        """既定モデル（E2B）の置き場（`--model` で選ぶ置き場は `gemma4.export.series_dir`）。"""
+        return one_shot.series_dir(GEMMA4_DEFAULT_MODEL, self.suffix)
+
 
 #: この台本の系列（logits opt-in 形 — 全 M 行の logits と token を出す）。
 DECODE = ChunkVariant(
-    out_dir=DEFAULT_OUT_DIR, wrapper=DecodeChunkWrapper, token_only=False, goldens=True
+    suffix=DECODE_SUFFIX, wrapper=DecodeChunkWrapper, token_only=False, goldens=True
 )
 
 
@@ -508,7 +520,7 @@ def kv_owner_layers(config: Any) -> dict[str, int]:
 
     上流は「共有開始より前の層のうち、その layer_type で**最後**の層」の k / v を
     `shared_kv_states[layer_type]` へ置き、共有層はそれを読む（modeling_gemma4.py:1287）。
-    E2B は sliding → 層 13 / full → 層 14。
+    E2B は sliding → 層 13 / full → 層 14、E4B は sliding → 層 22 / full → 層 23。
 
     MUST: 所有層の無い layer_type が共有側に居たら落とす（上流なら `shared_kv_states` の
     KeyError になる形で、層構成の前提そのものが崩れている）。
@@ -581,9 +593,10 @@ def states_plan(
 ) -> StatesPlan:
     """層種別と KV 共有を反映した手術指定（スロットは**所有層ぶんだけ**）。
 
-    - 層 0..14（自前 KV）: 自分の k / v スロット。sliding は `window = sliding_window`・
-      full は window 無し。
-    - 層 15..34（共有読者）: 自分のスロットを作らず、layer_type の所有層のスロットを読む。
+    - 共有開始より前の層（自前 KV — E2B は 0..14・E4B は 0..23）: 自分の k / v スロット。
+      sliding は `window = sliding_window`・full は window 無し。
+    - 共有開始以後の層（共有読者 — E2B は 15..34・E4B は 24..41）: 自分のスロットを作らず、
+      layer_type の所有層のスロットを読む。
       sliding の読者は同じ `window` を宣言する（states.py の `_register` が完全一致を検査）。
 
     容量は層種別で分ける: **sliding スロットは `window + SLIDING_SLACK_ROWS` の実数**（ring は
@@ -1239,11 +1252,18 @@ def run_variant_cli(variant: ChunkVariant, description: str, argv: Sequence[str]
     golden を採る系列だけの `--steps` と、採らない系列だけの `--reference`（流用する golden
     系列の置き場）だけ。位置の上限はモデルの宣言なので、ノブにしない。
     """
-    parser = one_shot.series_parser(description, variant.out_dir)
+    parser = one_shot.series_parser(
+        description, partial(one_shot.series_dir, suffix=variant.suffix)
+    )
     if variant.goldens:
         parser.add_argument("--steps", type=int, default=GREEDY_STEPS)
     else:
-        parser.add_argument("--reference", type=Path, default=DEFAULT_OUT_DIR)
+        # 流用先は**同じモデル**の logits opt-in 系列（別モデルの golden は prompt の突合では
+        # 落ちない — トークナイザが同一なので prompt は一致してしまう）。
+        parser.add_argument("--reference", type=Path, default=None)
+        one_shot.add_model_default(
+            parser, "reference", partial(one_shot.series_dir, suffix=DECODE_SUFFIX)
+        )
     one_shot.run_series_cli(parser, partial(export_series, variant), argv)
 
 

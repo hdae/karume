@@ -270,6 +270,16 @@ class TestTheCommandLine:
         assert (args.model_dir, args.out) == (tmp_path / "m", tmp_path / "o")
         assert not hasattr(args, "sym_max")
 
+    def test_it_refuses_a_model_it_has_no_drafter_for(self, capsys):
+        """drafter 台本は E2B 専用（上流も貸し手の既定も E2B）— `--model e4b` は起動で落ちる。
+
+        受理すると E2B の drafter を E4B の貸し手へ黙って焼く形になる（E4B の drafter は未対応）。
+        """
+        with pytest.raises(SystemExit):
+            drafter.build_parser().parse_args(["--model", "e4b"])
+
+        assert "--model" in capsys.readouterr().err
+
     def test_the_one_shot_skeleton_keeps_the_chunk_symbol_bound(self):
         """省くのは drafter だけ — 既定の骨組みは `--sym-max` を持ち続ける。"""
         args = gx.series_parser("one-shot", Path("out")).parse_args(["--sym-max", "512"])

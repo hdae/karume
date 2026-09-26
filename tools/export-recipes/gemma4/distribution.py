@@ -5,7 +5,8 @@
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
 配布するのは**グラフ 2 本（製品 + 借り手の drafter）+ 付帯資産 1 種**
-（ADR 0084 決定 5 / 0096 段 2 / 0109 決定 4）:
+（ADR 0084 決定 5 / 0096 段 2 / 0109 決定 4）。drafter は上流の drafter を持つモデル
+（`e2b`）だけで、`e4b` はグラフ 1 本 + 付帯資産（{@link gemma4_has_drafter}）:
 
 - `model` — 製品グラフのコンテナ（`gemma4/export_product.py` が書く `.krm` の part 列。PLE を
   グラフから外し、出口を最終行 logits にした 1 系列）。格納は**混成**で、埋め込みが i8・
@@ -16,7 +17,8 @@
 - `drafter` — MTP drafter のコンテナ（`gemma4/export_drafter.py`・ADR 0096 段 2）。格納は
   **i8 単一**で、linear まで i8（i4 g32 に落とすと受理率が 1 〜 3 割落ちる — 台本の実測）。
   役割ごとに dtype ラベルが違うので、quant 表の `weights` 写像は 2 席とも埋まる。
-- `tokenizer` — compile 済みトークナイザ資産（`gemma4/tokenizer.py`・ADR 0084 決定 1）
+- `tokenizer` — compile 済みトークナイザ資産（`gemma4/tokenizer.py`・ADR 0084 決定 1）。上流が
+  同一のモデルどうしは 1 系列を共有する（{@link GEMMA4_TOKENIZER_SERIES}）
 
 `pipelineConfig` は 2 系統に割れる（Irodori と同じ分け方）: **モデルが決める数**
 （`maxPosition` = 上流 `text_config.max_position_embeddings`・`rope` = 層種別ごとの式の
@@ -64,6 +66,7 @@ from karume.dist import (
     complete_quant_weights,
     graph_inputs,
     ir_graph,
+    sha256_file,
 )
 from karume.ple import (
     PLE_INDEX_ASSET,
@@ -75,7 +78,12 @@ from karume.ple import (
 )
 from karume.verify import ContainerError
 
-from .card import GEMMA4_UPSTREAM, render_gemma4_model_card
+from .card import (
+    GEMMA4_DRAFTER_ROLE,
+    GEMMA4_DRAFTER_UPSTREAM,
+    GEMMA4_UPSTREAM,
+    render_gemma4_model_card,
+)
 from .rope import (
     BAKED_TABLE_INFIX,
     FULL_ATTENTION,
@@ -119,6 +127,9 @@ GEMMA4_TOKENIZER_FILE = "tokenizer.json"
 #: （位置の上限・RoPE の式）の出どころ。text 部は `config.json` の `text_config` 節。
 GEMMA4_GENERATION_CONFIG_FILE = "generation_config.json"
 GEMMA4_CONFIG_FILE = "config.json"
+#: 上流チェックポイントのトークナイザ（compile 前の HF 形）。トークナイザ系列を他モデルと
+#: 共有するときの突合相手（{@link assert_gemma4_tokenizer_source}）。
+GEMMA4_CHECKPOINT_TOKENIZER_FILE = "tokenizer.json"
 GEMMA4_TEXT_CONFIG_KEY = "text_config"
 GEMMA4_MAX_POSITION_KEY = "max_position_embeddings"
 GEMMA4_HIDDEN_SIZE_KEY = "hidden_size"
@@ -126,8 +137,20 @@ GEMMA4_HIDDEN_SIZE_KEY = "hidden_size"
 #: 役割名（manifest の weights / assets が指す内部キー）。
 GEMMA4_ROLE = "model"
 GEMMA4_TOKENIZER_ROLE = "tokenizer"
-#: MTP drafter の役割名（weights の 2 本目 — 貸し手 `model` が居ないと単独では実行できない）。
-GEMMA4_DRAFTER_ROLE = "drafter"
+# MTP drafter の役割名 `GEMMA4_DRAFTER_ROLE`（weights の 2 本目 — 貸し手 `model` が居ないと
+# 単独では実行できない）は `gemma4.card` から import する — カードが manifest の weights から
+# drafter の有無を引くので、綴りの正本を card 側に置いた（card → distribution の import は
+# 循環になる）。drafter を配るモデルは `GEMMA4_DRAFTER_UPSTREAM` の表に載っているものだけ。
+
+#: モデル → compile 済みトークナイザ資産を持つ系列の**モデル名**（`gemma4-<これ>-tokenizer`）。
+#:
+#: E4B の上流 `tokenizer.json` は E2B と**バイト同一**（sha256 `cc8d3a0c…fe0f`・2026-09-26 実測）
+#: なので、E2B の系列を共有する（compile 済み資産は出所の path を中に書くため、E4B 側で
+#: compile し直すとバイト列が割れ、組み立ての共有席〈`shared/`〉へ畳めなくなる）。
+#: MUST: 共有の前提（同一バイト）は組み立て時に機械で見る —
+#: {@link assert_gemma4_tokenizer_source} が資産の出所 sha256 と当該モデルの上流
+#: `tokenizer.json` を突き合わせる。上流が割れた日は、表を自分の系列へ向け直す。
+GEMMA4_TOKENIZER_SERIES: Mapping[str, str] = {"e2b": "e2b", "e4b": "e2b"}
 
 #: グラフ入力の名前と並び（正本は `gemma4/export_product.py` — ラッパの forward 引数名）。
 #: 実行側は名前で束ねるので、1 つでも綴りが変われば束ねられない。RoPE の 4 本はホストが
@@ -220,16 +243,38 @@ GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     GEMMA4_DRAFTER_ROLE: {GEMMA4_DRAFTER_DTYPE: WeightFiles(GEMMA4_DRAFTER_ROLE)},
 }
 
+
+def gemma4_has_drafter(model: str) -> bool:
+    """このモデルが MTP drafter を配るか（drafter の上流表 `GEMMA4_DRAFTER_UPSTREAM` に載るか）。"""
+    return model in GEMMA4_DRAFTER_UPSTREAM
+
+
+def gemma4_weights(model: str) -> Mapping[str, Mapping[str, WeightFiles]]:
+    """モデルの weights 宣言 — drafter を配らないモデルは `model` 役 1 本だけ。
+
+    MUST: drafter の無いモデルに drafter 役を宣言しない。manifest の weights にその役が
+    無いことが「このモデルは投機を張れない」の唯一の表現で、読み手は `speculative` 指定の
+    ロードを weights の解決（hub `ResolveOptions.weights`）で fail loudly に落とす。
+    """
+    if gemma4_has_drafter(model):
+        return GEMMA4_WEIGHTS
+    return {GEMMA4_ROLE: GEMMA4_WEIGHTS[GEMMA4_ROLE]}
+
+
+#: `i4` の説明のうち drafter に触れる 1 文（drafter を配るモデルの席にだけ付ける — 配って
+#: いない drafter の格納を名乗らない）。
+GEMMA4_DRAFTER_QUANT_NOTE = " The drafter head is int8 throughout."
+
 #: 同じ格納系列に参照加算・GEMV並列加算・RMS融合を用意する（ADR 0098 / 0104）。
 #: 明示したi4の意味を保持し、既定quantだけを高速化付きへ向ける。
+#: `i4` の説明の drafter の 1 文は {@link gemma4_quants} がモデルごとに足す。
 GEMMA4_QUANTS: Mapping[str, Any] = {
     GEMMA4_DTYPE: {
         "weights": {},
         "session": {},
         "label": "Packed int4 linear, int8 embeddings",
         "description": "The only storage series: the main model's linear weights in packed int4"
-        " (group 32) and its embedding tables in int8, which are not int4-eligible. The drafter"
-        " head is int8 throughout.",
+        " (group 32) and its embedding tables in int8, which are not int4-eligible.",
     },
     "i4-gemvpar": {
         "weights": {},
@@ -249,7 +294,24 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
     },
 }
 
-GEMMA4_DEFAULT_QUANT = "i4-fast"
+
+def gemma4_quants(model: str) -> dict[str, Any]:
+    """モデルの quant 表（席は全モデル共通の 3 つ・drafter を配るモデルだけ `i4` に 1 文足す）。
+
+    NOTE: E4B も E2B と同じ 3 席を当面そのまま持つ — どの席を既定にするか（束の中身）は
+    実測で決める（{@link GEMMA4_DEFAULT_QUANT}）。
+    """
+    quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
+    if gemma4_has_drafter(model):
+        quants[GEMMA4_DTYPE]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
+    return quants
+
+
+#: モデルごとの既定 quant。実測で検収した席だけを既定にするので導出できず、宣言が要る
+#: （ADR 0104 — QAT 側 `gemma4_qat.distribution.QAT_DEFAULT_QUANT` と同じ形）。キー集合は
+#: 帰属表（`GEMMA4_UPSTREAM`）と一致する MUST（tests が固定する）。
+#: NOTE: E4B の `i4` は**暫定**（参照加算の席）— 高速化の束はベンチの実測で決める。
+GEMMA4_DEFAULT_QUANT: Mapping[str, str] = {"e2b": "i4-fast", "e4b": GEMMA4_DTYPE}
 
 #: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
 #: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
@@ -341,22 +403,31 @@ def gemma4_series_name(model: str, suffix: str) -> str:
 class Gemma4Sources:
     """組み立ての入力。系列 2 本（製品グラフ + PLE〈容器の資産〉/ トークナイザ資産）と、
     上流チェックポイント（推奨サンプラの出どころ — 読むのは
-    `generation_config.json` 1 本だけで、重みには触らない）。
+    `generation_config.json` 1 本だけで、重みには触らない。トークナイザ系列を他モデルと共有する
+    ときだけ `tokenizer.json` も読む）。
+
+    `drafter` が `None` のモデルは drafter を配らない（{@link gemma4_has_drafter}）。
     """
 
     product: Path
-    drafter: Path
+    drafter: Path | None
     tokenizer: Path
     model: Path
 
 
 def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
     """系列の親ディレクトリ（`outputs/series/`）と `_shared.paths` の綴りから入力を引く。"""
+    checkpoint = gemma4_checkpoint(model)
     return Gemma4Sources(
         product=series_dir / gemma4_series_name(model, GEMMA4_PRODUCT_SUFFIX),
-        drafter=series_dir / gemma4_series_name(model, GEMMA4_DRAFTER_SUFFIX),
-        tokenizer=series_dir / gemma4_series_name(model, GEMMA4_TOKENIZER_SUFFIX),
-        model=INPUTS_ROOT / GEMMA4_INPUTS_DIRNAME / gemma4_checkpoint(model),
+        drafter=(
+            series_dir / gemma4_series_name(model, GEMMA4_DRAFTER_SUFFIX)
+            if gemma4_has_drafter(model)
+            else None
+        ),
+        tokenizer=series_dir
+        / gemma4_series_name(GEMMA4_TOKENIZER_SERIES[model], GEMMA4_TOKENIZER_SUFFIX),
+        model=INPUTS_ROOT / GEMMA4_INPUTS_DIRNAME / checkpoint,
     )
 
 
@@ -506,12 +577,13 @@ def gemma4_placements(sources: Gemma4Sources) -> dict[str, Path]:
     この表に無いものは出力へ入らない（製品系列に同居する `ple.probe.safetensors` と
     `reference.json`・drafter 系列の `drafter-golden.*.safetensors` はこれで落ちる — どれも
     検収と出所記録のためのもので実行に要らない）。PLE は `model` 容器の中なので席を持たない。
+    drafter を配らないモデル（`sources.drafter is None`）は drafter の席も持たない。
     """
-    return {
-        GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE,
-        GEMMA4_DRAFTER_ROLE: sources.drafter / GEMMA4_MODEL_FILE,
-        GEMMA4_TOKENIZER_ROLE: sources.tokenizer / GEMMA4_TOKENIZER_FILE,
-    }
+    placements = {GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE}
+    if sources.drafter is not None:
+        placements[GEMMA4_DRAFTER_ROLE] = sources.drafter / GEMMA4_MODEL_FILE
+    placements[GEMMA4_TOKENIZER_ROLE] = sources.tokenizer / GEMMA4_TOKENIZER_FILE
+    return placements
 
 
 #: assets の宣言（asset 名 → 役割名）。PLE は容器の中へ移ったので、残るのはトークナイザ 1 本。
@@ -888,6 +960,33 @@ def assert_gemma4_tokenizer(path: Path, vocab_size: int) -> None:
         )
 
 
+def assert_gemma4_tokenizer_source(path: Path, checkpoint_tokenizer: Path) -> None:
+    """compile 済みトークナイザ資産が**このチェックポイントの `tokenizer.json` と同じバイト列**
+    から compile されたことを見る（トークナイザ系列を他モデルと共有するときの門）。
+
+    compile 台本（`_shared.gemma_tokenizer.emit`）は出所の sha256 を資産の `source` 欄へ書く。
+    共有の前提（上流の `tokenizer.json` が同一 — {@link GEMMA4_TOKENIZER_SERIES}）はその欄と
+    当該モデルの上流を突き合わせる以外に確かめようがない。
+
+    MUST: 語彙数の一致（{@link assert_gemma4_tokenizer}）では足りない — 同じ語彙数で merges や
+    特殊トークンだけが違うトークナイザは、id が範囲内に収まったまま**別の id 列**を作る。
+    """
+    raw = _read_json(path, "compile 済みトークナイザ資産")
+    source = raw.get("source") if isinstance(raw, dict) else None
+    recorded = source.get("sha256") if isinstance(source, dict) else None
+    if not isinstance(recorded, str):
+        raise DistError(f"{path}: source.sha256 が無い — 出所を突き合わせられない資産は共有しない")
+    if not checkpoint_tokenizer.is_file():
+        raise DistError(f"上流のトークナイザが無い: {checkpoint_tokenizer}")
+    actual = sha256_file(checkpoint_tokenizer)
+    if recorded != actual:
+        raise DistError(
+            f"{path} は sha256 {recorded} の tokenizer.json から compile されたが、"
+            f" {checkpoint_tokenizer} は {actual} — 共有の前提（上流が同一）が崩れている"
+            "（このモデルのトークナイザ系列を自分の上流から compile し直す）"
+        )
+
+
 def gemma4_sampler(model_dir: Path) -> dict[str, Any]:
     """上流 `generation_config.json` の推奨サンプラを `pipelineConfig.sampler` へ写す。
 
@@ -978,8 +1077,20 @@ def gemma4_pipeline_config(
 
 
 def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> ModelPlan:
-    """gemma4 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。"""
+    """gemma4 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。
+
+    drafter の有無はモデルで決まる（{@link gemma4_has_drafter}）。MUST: `sources` の drafter 席と
+    食い違えば落とす — drafter を配るモデルの席が空なら黙って投機なしの配布形が出来、配らない
+    モデルに席があれば別モデル向けの drafter が紛れ込む。
+    """
     assert_model_name(model)
+    gemma4_checkpoint(model)
+    if (sources.drafter is not None) != gemma4_has_drafter(model):
+        raise DistError(
+            f"モデル '{model}' の drafter 系列が"
+            f" {'無い' if sources.drafter is None else f'指定されている（{sources.drafter}）'}"
+            f" — drafter を配るモデルは {sorted(GEMMA4_DRAFTER_UPSTREAM)} だけ"
+        )
     placements = gemma4_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, GEMMA4_STORAGE_REQUIREMENTS)
@@ -994,10 +1105,11 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
     vocab_size = gemma4_vocab_size(graph, container)
     hidden_size = gemma4_hidden_size(text_config, where)
     assert_gemma4_graph(graph, container, index, rope, hidden_size)
-    drafter_container = placements[GEMMA4_DRAFTER_ROLE]
-    assert_gemma4_drafter_graph(
-        ir_graph(drafter_container), drafter_container, graph, container, rope, hidden_size
-    )
+    drafter_container = placements.get(GEMMA4_DRAFTER_ROLE)
+    if drafter_container is not None:
+        assert_gemma4_drafter_graph(
+            ir_graph(drafter_container), drafter_container, graph, container, rope, hidden_size
+        )
     if index["tokens"] != vocab_size:
         raise DistError(
             f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
@@ -1005,6 +1117,12 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         )
     assert_gemma4_ple_assets(container, index)
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
+    # 他モデルの系列を借りるときだけ出所を突き合わせる — 自分の系列は同じチェックポイントの
+    # `tokenizer.json` から compile した資産なので、共有の前提（同一バイト）がそもそも無い。
+    if GEMMA4_TOKENIZER_SERIES[model] != model:
+        assert_gemma4_tokenizer_source(
+            placements[GEMMA4_TOKENIZER_ROLE], sources.model / GEMMA4_CHECKPOINT_TOKENIZER_FILE
+        )
     pipeline_config = gemma4_pipeline_config(
         gemma4_max_position(text_config, where),
         rope,
@@ -1013,6 +1131,7 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
         max_chunk_length=GEMMA4_MAX_CHUNK_LENGTH,
         capacity=GEMMA4_CAPACITY,
     )
+    weights = gemma4_weights(model)
     return ModelPlan(
         name=model,
         pipeline=GEMMA4_PIPELINE,
@@ -1020,15 +1139,12 @@ def gemma4_plan(sources: Gemma4Sources, model: str = GEMMA4_DEFAULT_MODEL) -> Mo
             role: Artifact(GEMMA4_OUTPUT_PATHS[role], source=source)
             for role, source in placements.items()
         },
-        weights=GEMMA4_WEIGHTS,
+        weights=weights,
         assets=GEMMA4_ASSETS,
         # requiredLimits は書かない — core の dist が組み立て時に一括導出して焼く
         # （karume/limits.py。計画側の手書きは二重管理として拒否される）。
-        quants=complete_quant_weights(
-            GEMMA4_WEIGHTS,
-            GEMMA4_QUANTS if model == "e2b" else {GEMMA4_DTYPE: GEMMA4_QUANTS[GEMMA4_DTYPE]},
-        ),
-        default_quant=GEMMA4_DEFAULT_QUANT if model == "e2b" else GEMMA4_DTYPE,
+        quants=complete_quant_weights(weights, gemma4_quants(model)),
+        default_quant=GEMMA4_DEFAULT_QUANT[model],
         pipeline_config=pipeline_config,
     )
 
@@ -1051,8 +1167,10 @@ def gemma4_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: 2 件目が入った瞬間に赤くなる）。
 GEMMA4_NOTICE_MARKDOWN = """# NOTICE
 
-This repository redistributes a modified form of `google/gemma-4-E2B-it`, which is licensed under
-the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were made:
+This repository redistributes modified forms of `google/gemma-4-E2B-it` and
+`google/gemma-4-E4B-it`, which are licensed under the Apache License, Version 2.0 (see
+`LICENSE.md`). The models actually included are identified in `README.md` and `karume.json`.
+The following changes were made:
 
 - The **text decoder only** was extracted; the vision and audio towers were never read.
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
@@ -1065,8 +1183,9 @@ the Apache License, Version 2.0 (see `LICENSE.md`). The following changes were m
 - **Rotary position embeddings were moved out of the graph**: the cosine and sine rows are built
   by the host from the declared parameters and passed in as ordinary graph inputs.
 
-This repository also redistributes a modified form of `google/gemma-4-E2B-it-assistant` (the
-multi-token-prediction drafter head), which is licensed under the same Apache License, Version 2.0.
+For the `e2b` model only, this repository also redistributes a modified form of
+`google/gemma-4-E2B-it-assistant` (the multi-token-prediction drafter head), which is licensed
+under the same Apache License, Version 2.0.
 The same changes apply — text decoder re-expressed in the Karume container format, weights
 quantized — with two more: the drafter's clustered sparse output head was replaced by a dense
 projection over the full vocabulary, and the drafter reads the key/value states and the embedding

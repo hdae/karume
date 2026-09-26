@@ -52,13 +52,22 @@ GEMMA4_TITLE = "Gemma 4 Text Decoder — Karume"
 #: モデル名 → 上流チェックポイントの HF リポ ID。**この 1 表が「どのモデルが何の重みか」の
 #: 唯一の事実**で、`gemma4.distribution` は系列名 / 入力素材のディレクトリ名をここから導く。
 #: 載っていないモデル名は帰属を書けないので、カードは描かずに落ちる。
-GEMMA4_UPSTREAM: Mapping[str, str] = {"e2b": "google/gemma-4-E2B-it"}
+GEMMA4_UPSTREAM: Mapping[str, str] = {
+    "e2b": "google/gemma-4-E2B-it",
+    "e4b": "google/gemma-4-E4B-it",
+}
 
-#: MTP drafter の上流（ADR 0096 段 2）。**モデル名の軸には載らない** — `e2b` 1 モデルが
-#: 2 つの上流チェックポイントから出来ているので、帰属表（モデル名 → 上流）とは別の席で持つ。
-#: 再配布している以上 Apache 2.0 §4(b) の告知対象で、綴りの正本はここ 1 箇所
-#: （`gemma4.export_drafter.ASSISTANT_REPO` / `NOTICE.md` の散文と同じもの）。
-GEMMA4_DRAFTER_UPSTREAM = "google/gemma-4-E2B-it-assistant"
+#: MTP drafter の weights の役割名（manifest の `weights` のキー）。カードは「drafter を
+#: 運んでいるモデル」を manifest のこのキーから引くので、綴りの正本をここに置き、
+#: `gemma4.distribution` が import する（distribution → card の一方向を保つため）。
+GEMMA4_DRAFTER_ROLE = "drafter"
+
+#: モデル名 → MTP drafter の上流（ADR 0096 段 2）。帰属表（モデル名 → 上流）とは別の席で
+#: 持つ — `e2b` 1 モデルが 2 つの上流チェックポイントから出来ているため。**この表に無い
+#: モデルは drafter を配らない**（`gemma4.distribution` が drafter 役の有無をここから決める —
+#: E4B の drafter は未対応）。再配布している以上 Apache 2.0 §4(b) の告知対象で、綴りの正本は
+#: ここ 1 箇所（`gemma4.export_drafter.ASSISTANT_REPO` / `NOTICE.md` の散文と同じもの）。
+GEMMA4_DRAFTER_UPSTREAM: Mapping[str, str] = {"e2b": "google/gemma-4-E2B-it-assistant"}
 
 #: ライセンス（実地確認 2026-09-01 — チェックポイント snapshot の README frontmatter が
 #: `license: apache-2.0` を名乗り、その `license_link` 先が Apache 2.0 の本文を載せている）。
@@ -83,7 +92,8 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         upstream.append(GEMMA4_UPSTREAM[name])
     # MUST: drafter の上流も `base_model` に載せる — 再配布しているのは 2 本で、片方を
     # 落とすと「出所を名乗っていない再配布」になる（`GEMMA4_DRAFTER_UPSTREAM` の MUST）。
-    upstream.append(GEMMA4_DRAFTER_UPSTREAM)
+    # 逆に drafter を運んでいないモデルの drafter は名乗らない（配っていない上流を出所に書かない）。
+    upstream.extend(_gemma4_drafter_upstreams(manifest))
     return CardMetadata(
         pipeline_tag=GEMMA4_PIPELINE_TAG,
         base_model=tuple(upstream),
@@ -96,6 +106,28 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         license_link=GEMMA4_LICENSE_LINK,
         tags=(GEMMA4_PIPELINE_TAG, "webgpu", "gemma", "llm"),
     )
+
+
+def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
+    """manifest が drafter を**実際に運んでいる**モデルの drafter 上流（モデルの並び順）。
+
+    drafter の有無はモデルごとに違う（E4B は drafter 無し）ので、有無は manifest の
+    `weights` から引く（カードの数値・事実は manifest から導く MUST — モジュール docstring）。
+
+    MUST: drafter を運んでいるのに上流表に無いモデルでは描かない — 出所を名乗れない
+    再配布になる（{@link _gemma4_metadata} の帰属表の門と同じ理由）。
+    """
+    upstream: list[str] = []
+    for name, model in manifest["models"].items():
+        if GEMMA4_DRAFTER_ROLE not in model["weights"]:
+            continue
+        if name not in GEMMA4_DRAFTER_UPSTREAM:
+            raise ValueError(
+                f"モデル '{name}' は drafter を運んでいるが、drafter の上流が表に無い"
+                f"（既知: {sorted(GEMMA4_DRAFTER_UPSTREAM)}）— 出所を名乗れないカードは描かない"
+            )
+        upstream.append(GEMMA4_DRAFTER_UPSTREAM[name])
+    return upstream
 
 
 def _gemma4_upstream_spellings(manifest: Mapping[str, Any]) -> str:
@@ -155,15 +187,16 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
             f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
         )
-    lines.append(
-        f"- **`{GEMMA4_DRAFTER_UPSTREAM.rsplit('-', 1)[-1]}`**:"
-        f" [{GEMMA4_DRAFTER_UPSTREAM}](https://huggingface.co/{GEMMA4_DRAFTER_UPSTREAM}), the"
-        " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms. It"
-        " is redistributed here with its clustered sparse output head replaced by a dense"
-        " projection over the full vocabulary, and it reads the key/value states and embedding"
-        " table of the main model rather than carrying its own. Its own weights are quantized to"
-        " int8 throughout, linear layers included, rather than to packed int4."
-    )
+    for drafter in _gemma4_drafter_upstreams(manifest):
+        lines.append(
+            f"- **`{drafter.rsplit('-', 1)[-1]}`**:"
+            f" [{drafter}](https://huggingface.co/{drafter}), the"
+            " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms."
+            " It is redistributed here with its clustered sparse output head replaced by a dense"
+            " projection over the full vocabulary, and it reads the key/value states and embedding"
+            " table of the main model rather than carrying its own. Its own weights are quantized"
+            " to int8 throughout, linear layers included, rather than to packed int4."
+        )
     lines += [
         "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
         "  decoder was extracted and re-expressed in the Karume container format; linear weights",

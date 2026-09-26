@@ -1,4 +1,4 @@
-# Gemma 4 E2B export recipe
+# Gemma 4 E2B / E4B export recipe
 
 **Outside the wheel** — this recipe is repo-only (ADR
 [0065](../../../docs/decisions/0065-exporter-core-recipe-split.md)). It produces four series and,
@@ -7,7 +7,15 @@ distribution" below).
 
 Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-The checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
+Two checkpoints are supported, chosen with `--model e2b|e4b` (default `e2b`): `google/gemma-4-E2B-it`
+and `google/gemma-4-E4B-it`. Every shape the scripts check (layer count, head counts, KV sharing,
+PLE size) is derived from the checkpoint's own `config.json`; the model name only picks the default
+input and output directories. E4B ships **without an MTP drafter**, and it shares E2B's compiled
+tokenizer asset because the upstream `tokenizer.json` files are byte-identical (the assembly checks
+that by sha256). The license notes below were established for E2B; E4B's snapshot carries the same
+Apache 2.0 frontmatter.
+
+The E2B checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
 text — the earlier claim here that the weights fell under the Gemma Terms of Use was wrong; that
 was Gemma 3 knowledge carried over, retracted 2026-09-01). The per-revision license interview (ADR
@@ -172,14 +180,16 @@ graphs together.
 
 ## Requirements
 
-The weights go under `inputs/gemma4/gemma-4-E2B-it/` (see
-[docs/assets-layout.md](../../../docs/assets-layout.md)). They are `bfloat16` on disk (10.2 GB for
+The weights go under `inputs/gemma4/gemma-4-E2B-it/` (E4B: `inputs/gemma4/gemma-4-E4B-it/`; see
+[docs/assets-layout.md](../../../docs/assets-layout.md)). E2B's are `bfloat16` on disk (10.2 GB for
 the whole multimodal checkpoint). The text decoder alone is 4.63 B parameters, so it occupies about
 18.5 GB once loaded as `float32`, and the export needs headroom on top of that — plan for a machine
 with 24 GB of free RAM or more. The recipe deliberately avoids two easy ways to double that figure:
 the packed PLE table is streamed from the file into the 35 split tables in row blocks instead of
 being materialized once as a whole, and the model itself is constructed with only a handful of PLE
 rows (the ones the split check reads).
+
+The memory figures above are for E2B. **E4B has not been measured.**
 
 The golden files are large: `io.context-en.safetensors` alone holds 624 MB of logits, and the three
 cases come to roughly 640 MB. The decode series writes the same io files plus three small greedy
@@ -405,6 +415,19 @@ uv run python -m gemma4.tokenizer   # tokenizer asset + parity fixture (no trans
 uv run --with 'transformers==5.14.1' python -m gemma4.chat   # chat parity fixture
 ```
 
+For E4B, pass `--model e4b` to the four graph scripts; the default input directory and output
+series (`outputs/series/gemma4-e4b-*`) follow the model, and `--reference` defaults to the same
+model's decode series. The product series borrows its greedy records from the decode series, so
+the decode series has to exist first:
+
+```sh
+uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b
+uv run --with 'transformers==5.14.1' python -m gemma4.export_product --model e4b
+```
+
+`export_drafter.py`, `tokenizer.py` and `chat.py` have no E4B form: E4B has no drafter here, and
+its tokenizer asset is E2B's.
+
 Both fixture writers print the `deno fmt` command to run afterwards — the committed shape of a
 fixture is whatever the repository formatter produces (`deno task verify` checks it).
 
@@ -417,7 +440,11 @@ rather than declared as a dependency group.
 ```sh
 cd tools/export-recipes
 uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0 GiB)
+uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
 ```
+
+`--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
+so an E4B-only build should name its own `--out`.
 
 The distribution folds **three series** into one HF repository. The product container
 (`gemma4-e2b-product`) holds the weights and the PLE assets in one `krm`, split into parts of the
@@ -426,6 +453,10 @@ default 256 MiB length, with every PLE block in a part of its own. The MTP draft
 `speculative`. The third is the compiled tokenizer asset (`gemma4-e2b-tokenizer`). The
 acceptance-only files that live beside the containers (`ple.probe.safetensors`, `reference.json`,
 `drafter-golden.*.safetensors`) are not in the placement table and therefore never reach the output.
+An `e4b` entry reads `gemma4-e4b-product` and E2B's `gemma4-e2b-tokenizer`, and declares no
+`drafter` weights: a load that asks for `speculative` fails when the weights are resolved, before
+any part is fetched. With both models in one build, the identical tokenizer file is folded into
+`shared/`.
 Layout inside the repository:
 
 | Manifest seat                  | Path                                      |
@@ -478,7 +509,9 @@ dtype and manifest all correct, and shows up only as wrong values):
 - the PLE index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, every
   block the index names is an asset of the `model` container with the same role and length, and no
   PLE asset is left that the index does not name
-- the compiled tokenizer names the compile format and has exactly `V` rows
+- the compiled tokenizer names the compile format and has exactly `V` rows; when a model borrows
+  another model's tokenizer series (E4B), the asset's recorded source sha256 matches that model's
+  own upstream `tokenizer.json`
 - the checkpoint's recommended sampler is present and inside the range the TypeScript
   `pipelineConfig` parser accepts
 
@@ -497,6 +530,8 @@ distribution is spelled out by the caller, since `fromPretrained` has no default
 E2B distributions provide `i4` (reference summation), `i4-gemvpar` (parallel
 GEMV), and `i4-fast` (parallel GEMV plus RMS-add fusion). The default is
 `i4-fast`; all three reference the same model and drafter weight files.
+E4B entries carry the same three quants over the model weights alone; their
+default is `i4` for now, until the faster seats are measured on E4B.
 
 Explicit runtime options override each quant setting, including
 `fuseRmsNormAdd: false`. Reassembling into a new output directory updates the

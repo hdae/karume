@@ -78,10 +78,10 @@ golden は丸めた後の `wrapper` をそのまま回す（{@link export_series
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +97,12 @@ from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import export_product as product
 from gemma4 import ple, provenance
-from gemma4.distribution import GEMMA4_CHUNK_LENGTH, GEMMA4_DRAFTER_ROLE
+from gemma4.distribution import (
+    GEMMA4_CHUNK_LENGTH,
+    GEMMA4_DEFAULT_MODEL,
+    GEMMA4_DRAFTER_ROLE,
+    GEMMA4_DRAFTER_SUFFIX,
+)
 from karume.artifacts import staged_publication
 from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -1117,7 +1122,15 @@ def example_inputs(wrapper: DrafterWrapper, specs: Mapping[str, Any]) -> tuple[t
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = one_shot.series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR, with_sym_max=False)
+    # MUST: `--model` は E2B だけを受ける — drafter の上流（{@link ASSISTANT_REPO}）も貸し手の
+    # 既定（`--product-dir`）も E2B 専用の綴りなので、別モデルを受理すると E2B の drafter を
+    # 別モデルの貸し手へ黙って焼く（E4B の drafter は未対応）。
+    parser = one_shot.series_parser(
+        __doc__.split("\n\n")[0],
+        partial(one_shot.series_dir, suffix=GEMMA4_DRAFTER_SUFFIX),
+        with_sym_max=False,
+        models=(GEMMA4_DEFAULT_MODEL,),
+    )
     parser.add_argument("--steps", type=int, default=DRAFT_STEPS)
     parser.add_argument("--product-dir", type=Path, default=DEFAULT_PRODUCT_DIR)
     parser.add_argument("--cycles", type=int, default=GOLDEN_CYCLES)
@@ -1127,13 +1140,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    options = {
-        name: value for name, value in vars(args).items() if name not in ("model_dir", "out")
-    }
-    summary = export_series(args.model_dir, args.out, **options)
-    print(json.dumps({"model_dir": str(args.model_dir), **summary}, indent=1, ensure_ascii=False))
+    one_shot.run_series_cli(build_parser(), export_series, argv)
 
 
 if __name__ == "__main__":

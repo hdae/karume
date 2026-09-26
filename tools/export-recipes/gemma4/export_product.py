@@ -1,11 +1,13 @@
-"""実重み Gemma 4 E2B を **製品グラフ**（PLE 外出し + 選択行の logits / hidden）へ書き出す台本。
+"""実重み Gemma 4 E2B / E4B（`--model`）を **製品グラフ**（PLE 外出し + 選択行の logits /
+hidden）へ書き出す台本。
 
 ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 6（出口は選択行の
 logits・sampling はホスト維持）と ADR
 [0085](../../../docs/decisions/0085-ple-host-gather.md)（PLE をホスト gather へ外出し）を
 **1 回の再 export に載せる**（案 α — ADR 0083 Consequences / backlog now の段 1b）。
 
-    uv run --with 'transformers==5.14.1' python -m gemma4.export_product
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_product              # E2B
+    uv run --with 'transformers==5.14.1' python -m gemma4.export_product --model e4b  # E4B
 
 ## 既存 2 系列との差は入口 2 本・出口 2 本
 
@@ -13,10 +15,10 @@ chunk 系列の経路（素材の読み方・RoPE のホスト供給・KV 共有
 {@link gemma4.export_decode} の中核をそのまま通す（import して使う — 同じ規律を 2 箇所に
 書かない）。差分は 3 点だけ:
 
-- 入力に **`per_layer_inputs[1,M,35,256]` f32** が増える。PLE lookup は `input_ids` **だけ**を
-  引数に取る純粋な行 lookup なので、グラフから外してホストが供給する通常のグラフ入力に
-  なる（ADR 0085 決定 6 — ランタイムの契約は 1 文字も変わらない）。容器からは i8 35 表
-  2,240MiB + per-row scale 35MiB が消える。
+- 入力に **`per_layer_inputs[1,M,L,256]` f32**（L = 層数 — E2B 35 / E4B 42）が増える。
+  PLE lookup は `input_ids` **だけ**を引数に取る純粋な行 lookup なので、グラフから外して
+  ホストが供給する通常のグラフ入力になる（ADR 0085 決定 6 — ランタイムの契約は 1 文字も
+  変わらない）。容器からは i8 35 表 2,240MiB + per-row scale 35MiB が消える（E2B の数字）。
 - 入力に **`last_row[R]` i32** が増える（token-only 系列と同じ行選択の配線 —
   {@link gemma4.export_decode.TOKEN_ONLY_LAST_ROW}）。行数が記号 {@link ROW_SYMBOL} なのは
   投機デコードの verify run が 1 回で複数行を採点するため。**通常の prefill / decode は
@@ -44,7 +46,8 @@ MUST: 再配置は **ビット同一**であること（{@link assert_ple_assets
 
 ## golden はこの系列でも作らない（logits opt-in 系列との交差 parity が門）
 
-期待列は `gemma4-e2b-decode/greedy.<case>.safetensors` を流用する（token-only 系列と同じ形 —
+期待列は**同じモデルの** `gemma4-<model>-decode/greedy.<case>.safetensors` を流用する
+（token-only 系列と同じ形 —
 {@link gemma4.export_token} の docstring）。**ホスト側 PLE gather + `argmax(logits)`** で回した
 列が既存 golden と厳密一致することが段 1b の合格線で（検収門は
 `packages/models/tests/e2e_gemma4_product_test.ts`）、どの資産の組で見るべきかの束ねは
@@ -56,9 +59,9 @@ TS 側の loader の出力と突き合わせて見る。
 
 ## 出力レイアウト
 
-    outputs/series/gemma4-e2b-product/model.krm                 重み・定数 + 2 文書 + PLE の資産
-    outputs/series/gemma4-e2b-product/ple.probe.safetensors     逆量子化ビット一致の参照
-    outputs/series/gemma4-e2b-product/reference.json            出所記録（指紋 + 流用 golden）
+    outputs/series/gemma4-<model>-product/model.krm              重み・定数 + 2 文書 + PLE の資産
+    outputs/series/gemma4-<model>-product/ple.probe.safetensors  逆量子化ビット一致の参照
+    outputs/series/gemma4-<model>-product/reference.json         出所記録（指紋 + 流用 golden）
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ import json
 import sys
 from collections.abc import Buffer, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -77,11 +81,10 @@ from torch.nn import functional
 
 from _shared.container_read import open_container, read_asset
 from _shared.decode_series import assert_case_room, positions_for
-from _shared.paths import SERIES_ROOT
 from gemma4 import export as one_shot
 from gemma4 import export_decode as decode
 from gemma4 import ple, provenance
-from gemma4.distribution import GEMMA4_ROLE
+from gemma4.distribution import GEMMA4_DEFAULT_MODEL, GEMMA4_PRODUCT_SUFFIX, GEMMA4_ROLE
 from karume.artifacts import staged_publication
 from karume.container import BLOCK_MAX_BYTES, AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -99,8 +102,9 @@ from karume.quantize import quantize_to_int8
 from karume.shapes import declared_shape
 from karume.states import to_states_form
 
-#: 生成物の既定の置き場（既存 2 系列とは別ディレクトリ — 入口も出口も違う別資産）。
-DEFAULT_OUT_DIR = SERIES_ROOT / "gemma4-e2b-product"
+#: 既定モデル（E2B）の生成物の既定の置き場（既存 2 系列とは別ディレクトリ — 入口も出口も違う
+#: 別資産）。系列の接尾は配布 recipe の `GEMMA4_PRODUCT_SUFFIX`（読み手と同じ 1 語）。
+DEFAULT_OUT_DIR = one_shot.series_dir(GEMMA4_DEFAULT_MODEL, GEMMA4_PRODUCT_SUFFIX)
 
 #: 流用する greedy 期待列の置き場（正本は logits opt-in 系列 — token-only 系列と同じ参照先）。
 REFERENCE_DIR = decode.DEFAULT_OUT_DIR
@@ -205,7 +209,7 @@ class ProductChunkWrapper(decode.DecodeChunkWrapper):
 #: 本台本はそちらを通らない — 製品形の差（入口 2 本増・出口 logits・PLE 資産）は
 #: `ChunkVariant` の 4 欄に載らないので、系列の駆動はこのモジュールが持つ。
 _LOAD_VARIANT = decode.ChunkVariant(
-    out_dir=DEFAULT_OUT_DIR, wrapper=ProductChunkWrapper, token_only=False, goldens=False
+    suffix=GEMMA4_PRODUCT_SUFFIX, wrapper=ProductChunkWrapper, token_only=False, goldens=False
 )
 
 
@@ -884,8 +888,15 @@ def export_series(
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = one_shot.series_parser(__doc__.split("\n\n")[0], DEFAULT_OUT_DIR)
-    parser.add_argument("--reference", type=Path, default=REFERENCE_DIR)
+    parser = one_shot.series_parser(
+        __doc__.split("\n\n")[0], partial(one_shot.series_dir, suffix=GEMMA4_PRODUCT_SUFFIX)
+    )
+    # 流用先は**同じモデル**の logits opt-in 系列（token-only 台本の `--reference` と同じ規律 —
+    # {@link gemma4.export_decode.run_variant_cli}）。
+    parser.add_argument("--reference", type=Path, default=None)
+    one_shot.add_model_default(
+        parser, "reference", partial(one_shot.series_dir, suffix=decode.DECODE_SUFFIX)
+    )
     one_shot.run_series_cli(parser, export_series, argv)
 
 

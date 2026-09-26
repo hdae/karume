@@ -25,7 +25,11 @@ import torch
 from torch import nn
 
 from gemma4 import export as gx
+from gemma4 import export_decode as decode
+from gemma4 import export_product as product
+from gemma4 import export_token as token
 from gemma4 import ple
+from gemma4.distribution import gemma4_series_name
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 
 #: tiny な被験体の形。head_dim は層種別で**違う値**にする（実物 E2B の 256 / 512 と同じ罠を
@@ -522,3 +526,80 @@ class TestGoldenCases:
     def test_the_expectations_are_not_all_the_same_token(self):
         """定数出力の検出線が恒真にならない条件（期待が 1 種類だと `_sanity` の後段が死ぬ）。"""
         assert len(set(gx.GREEDY_EXPECTATIONS.values())) > 1
+
+
+class TestModelAxis:
+    """`--model e2b|e4b` は既定の置き場だけを決める（形は config から導く — 台本に分岐は無い）。"""
+
+    @staticmethod
+    def _resolve(parser, argv):
+        return gx.resolve_series_args(parser.parse_args(argv))
+
+    def test_the_default_model_keeps_the_e2b_paths(self):
+        """`--model` 省略時の既定は E2B 専用だった頃と同じ置き場。"""
+        resolved = self._resolve(gx.series_parser("one-shot", gx.series_dir), [])
+
+        assert resolved["model_dir"] == gx.DEFAULT_MODEL_DIR
+        assert resolved["out"] == gx.DEFAULT_OUT_DIR
+        assert gx.DEFAULT_MODEL_DIR.name == "gemma-4-E2B-it"
+        assert gx.DEFAULT_OUT_DIR.name == "gemma4-e2b"
+
+    def test_e4b_reads_its_own_checkpoint_and_writes_its_own_series(self):
+        resolved = self._resolve(gx.series_parser("one-shot", gx.series_dir), ["--model", "e4b"])
+
+        assert resolved["model_dir"].name == "gemma-4-E4B-it"
+        assert resolved["out"].name == "gemma4-e4b"
+        # モデル名は置き場を決めるだけで、`export_series` へは渡らない。
+        assert "model" not in resolved
+
+    def test_explicit_paths_win_over_the_model_default(self, tmp_path):
+        resolved = self._resolve(
+            gx.series_parser("one-shot", gx.series_dir),
+            ["--model", "e4b", "--model-dir", str(tmp_path / "m"), "--out", str(tmp_path / "o")],
+        )
+
+        assert (resolved["model_dir"], resolved["out"]) == (tmp_path / "m", tmp_path / "o")
+
+    def test_an_unknown_model_is_refused(self, capsys):
+        with pytest.raises(SystemExit):
+            gx.series_parser("one-shot", gx.series_dir).parse_args(["--model", "e8b"])
+
+        assert "--model" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("script", "suffix"),
+        [(decode, "decode"), (token, "decode-token"), (product, "product")],
+    )
+    def test_the_chunk_series_names_follow_the_model(self, script, suffix):
+        """chunk 系列は `gemma4-<model>-<接尾>`（配布 recipe の `gemma4_series_name` と同綴り）。"""
+        assert script.DEFAULT_OUT_DIR.name == gemma4_series_name("e2b", suffix)
+        assert gx.series_dir("e4b", suffix).name == gemma4_series_name("e4b", suffix)
+
+    @pytest.mark.parametrize(
+        ("script", "series"),
+        [(token, "gemma4-e4b-decode-token"), (product, "gemma4-e4b-product")],
+    )
+    def test_the_borrowed_goldens_default_to_the_same_models_decode_series(
+        self, monkeypatch, capsys, script, series
+    ):
+        """golden を採らない系列の `--reference` 既定は**同じモデル**の logits opt-in 系列。
+
+        トークナイザが同一なので、E2B の golden を E4B へ流用しても prompt の突合は通って
+        しまう — 既定の取り違えは export 時の門では落ちない。
+        """
+        captured: dict[str, object] = {}
+
+        def run(*args, **options):
+            captured.update(options, args=args)
+            return {}
+
+        # 各 CLI は呼び出し時にモジュールの `export_series` を引く（token-only は
+        # `export_decode.run_variant_cli` 経由）。
+        monkeypatch.setattr(decode if script is token else script, "export_series", run)
+        script.main(["--model", "e4b"])
+        capsys.readouterr()
+
+        *_, model_dir, out = captured["args"]
+        assert model_dir.name == "gemma-4-E4B-it"
+        assert out.name == series
+        assert captured["reference"].name == "gemma4-e4b-decode"

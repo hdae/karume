@@ -1,5 +1,9 @@
 """gemma4 E2B のトークナイザ資産の compile と parity フィクスチャ採取（ADR 0084 決定 1）。
 
+E4B はこの資産を共有する（上流 `tokenizer.json` が E2B とバイト同一 — 共有の前提は配布側の
+`gemma4.distribution.assert_gemma4_tokenizer_source` が組み立て時に sha256 で突き合わせる）
+ので、この台本に `--model` の軸は無い。
+
     uv run python -m gemma4.tokenizer
 
 出力は 2 系統（**1 回の実行で必ず両方** — {@link _shared.gemma_tokenizer.emit}）:
