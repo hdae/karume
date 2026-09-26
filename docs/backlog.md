@@ -21,12 +21,12 @@
   ① E4B 通常の export は later 節、⑤ HF 再アップロード + pin 更新は release 節へ移した。
   次のイテレーション候補 = SUMMARY §9.3 の波 2（DiT 速度: B3 anima DiT 常駐 → B4 irodori
   H-30 → B1 → B2）/ 波 3（メモリ: E1 BiRefNet f16 系列 → E2 → E5 → E4）/ 波 4（実用層カーネル: C2 VAE conv i8a8 → C1 → D2 → D1 → D3）。
-  **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
-  既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
   台帳の候補は perf-ledger 2026-09-26 節（K-59〜K-69・L-20〜L-23）。
   **イテレーション 2「DiT 速度」（2026-09-26〜）**: **B3 は済・採用**（anima の DiT 常駐・opt-in のまま — ADR [0112](decisions/0112-anima-transformer-residency.md)。
   利得は kill 線を超えた — 数値は perf-ledger H-4 と [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。
   OOM 退避 → やり直しが B570 で device lost になった件は later 節（H-35）。**次 = B4 irodori H-30**。
+  **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
+  既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
