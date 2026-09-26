@@ -12,6 +12,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import { parseResultsDocument } from "../../../tools/verify-diff/diff.ts";
 import type { Environment } from "./helpers/environment.ts";
 import {
@@ -439,4 +440,85 @@ Deno.test("往復: runRecordedCase が積んだ A/B の実測は comparisons と
   } finally {
     Deno.removeSync(temporary, { recursive: true });
   }
+});
+
+// sha 門を兼ねるケース（reference.ts の settleReference の決着を verdict に載せる）。欄は
+// ResultEntry の宣言順に並び、載せなかったケースの決着の形は従来のまま変わらない。
+describe("runRecordedCase の決着に載せた参照値の欄", () => {
+  it("written の決着は status / actual / artifact を写し、expected を持たない", async () => {
+    const { results, entries } = fakeResults();
+    await runRecordedCase(results, { id: "golden-0" }, ({ measurements }) => {
+      measurements.push(MEASUREMENT);
+      return Promise.resolve({
+        status: "written",
+        actual: "b".repeat(64),
+        artifact: "golden-0.safetensors",
+      });
+    });
+    assertEquals(entries.length, 1);
+    assertEquals(Object.keys(entries[0]), [
+      "id",
+      "status",
+      "actual",
+      "artifact",
+      "elapsedMs",
+      "measurements",
+    ]);
+    assertEquals(entries[0].status, "written");
+    assertEquals(entries[0].actual, "b".repeat(64));
+    assertEquals(entries[0].artifact, "golden-0.safetensors");
+  });
+
+  it("expected / actual / artifact / note を ResultEntry の宣言順に写す", async () => {
+    const { results, entries } = fakeResults();
+    await runRecordedCase(results, { id: "golden-1" }, () =>
+      Promise.resolve({
+        note: "sha 不一致",
+        artifact: "golden-1.safetensors",
+        actual: "b".repeat(64),
+        expected: "a".repeat(64),
+        status: "fail",
+      }));
+    assertEquals(Object.keys(entries[0]), [
+      "id",
+      "status",
+      "expected",
+      "actual",
+      "artifact",
+      "elapsedMs",
+      "note",
+      "measurements",
+    ]);
+    assertEquals(entries[0].status, "fail");
+    assertEquals(entries[0].expected, "a".repeat(64));
+  });
+
+  it("参照値の欄を持たない決着の entry は従来の形のまま", async () => {
+    const { results, entries } = fakeResults();
+    await runRecordedCase(results, { id: "plain" }, () => Promise.resolve({ status: "pass" }));
+    assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "measurements"]);
+  });
+
+  it("rewritten の決着は verify-diff の読み手まで届く", async () => {
+    const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+    try {
+      const root = new URL(`file://${temporary}/`);
+      const results = openResults("golden", { root, environment: ENVIRONMENT });
+      await runRecordedCase(results, { id: "rewritten" }, () =>
+        Promise.resolve({
+          status: "rewritten",
+          expected: "a".repeat(64),
+          actual: "b".repeat(64),
+          artifact: "rewritten.safetensors",
+        }));
+      const text = await Deno.readTextFile(new URL("results.json", results.dir));
+      const [entry] = parseResultsDocument(JSON.parse(text)).cases;
+      assertEquals(
+        [entry.id, entry.status, entry.expected, entry.actual, entry.artifact],
+        ["rewritten", "rewritten", "a".repeat(64), "b".repeat(64), "rewritten.safetensors"],
+      );
+    } finally {
+      Deno.removeSync(temporary, { recursive: true });
+    }
+  });
 });

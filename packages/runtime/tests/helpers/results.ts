@@ -262,10 +262,14 @@ export type RecordedCase = {
  * 本体が例外なしに戻ったときの決着。戻り値を省いた本体は `pass`。
  *
  * `fail` を返すのは「全出力を測り終えてから落とす」ケース — 決着（note つき）を残したあとで
- * 呼び手が assert する。
+ * 呼び手が assert する。sha 門を兼ねるケースは参照値の決着（`written` / `rewritten` を含む）と
+ * `expected` / `actual` / `artifact` を載せる（`reference.ts` の `referenceEntryFields` の写し）。
  */
 export type CaseVerdict = {
-  readonly status: "pass" | "fail";
+  readonly status: ResultStatus;
+  readonly expected?: string;
+  readonly actual?: string;
+  readonly artifact?: string;
   readonly note?: string;
 };
 
@@ -291,9 +295,10 @@ export type RecordedCaseSpec = {
  * - 本体が投げた: `fail` を {@link recordFailure} で積んでから**同じ例外を投げ直す**。決着の
  *   無いまま抜けると、この席には同じ日の前回の走行の決着が居座る。
  *
- * どちらの経路でも欄の並び（id / status / elapsedMs / note / measurements / comparisons）は
- * 同じで、所要時間は呼んだ時点から記録の直前までを測る。`comparisons` は本体が 1 本以上
- * 積んだときだけ載る。
+ * どちらの経路でも欄の並びは {@link ResultEntry} の宣言順（id / status / expected / actual /
+ * artifact / elapsedMs / note / measurements / comparisons）で、所要時間は呼んだ時点から記録の
+ * 直前までを測る。`expected` / `actual` / `artifact` は戻った決着が持つときだけ、`comparisons`
+ * は本体が 1 本以上積んだときだけ載る。
  */
 export const runRecordedCase = async (
   results: Results,
@@ -325,6 +330,9 @@ export const runRecordedCase = async (
   await results.record({
     id,
     status: verdict?.status ?? "pass",
+    ...(verdict?.expected === undefined ? {} : { expected: verdict.expected }),
+    ...(verdict?.actual === undefined ? {} : { actual: verdict.actual }),
+    ...(verdict?.artifact === undefined ? {} : { artifact: verdict.artifact }),
     elapsedMs: elapsedMs(),
     ...(verdict?.note === undefined ? {} : { note: verdict.note }),
     measurements,

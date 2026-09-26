@@ -22,10 +22,29 @@
  * MUST: 「参照が無いので全 SKIP」を無音の緑にしない。{@link registerReferenceGate} が
  * ADR 0005 の門番と同じ形（opt-out つき）で 1 本落とす。門が数えるのは**呼び手が登録した
  * ケース**だけである（{@link referenceGatePasses}）。
+ *
+ * ## 呼び手の型（sha 門を持つ e2e）
+ *
+ * - **既存テストの中の追加検査**として sha を採る: 元の検査（tolerance 突合・判別・`.lab` の
+ *   完全一致など）が**通った後で** {@link settleOrObserve} を呼ぶ（元の検査が割れた出力から行を
+ *   作らない）→ 返った欄（{@link ReferenceOutcome.fields}）を結果へ積む → **積んだ後に**
+ *   突合の `fail` を {@link referenceMismatchMessage} で落とす（先に投げると実測 sha が結果に
+ *   残らない）。比較モードで行が無いケースも同じ 1 本を通り、決着の形は 1 つに決まっている —
+ *   実物を書き、sha を採り、`status: "pass"` + `actual` + `artifact`（`expected` 無し）を積む。
+ *   突合はしないが実測 sha は結果に残るので、`tools/verify-diff` が環境をまたいで `actual` を
+ *   比べられる（行の作り方は登録時の {@link References.warnMissing} が出す）。
+ * - **テストそのものが sha 門**: `ignore: !RUNNABLE || references.lacksReference(id)` で登録し、
+ *   本体は {@link settleReference} → {@link referenceEntryFields} を上と同じ順で積んでから落とす
+ *   （行が無いケースは本体まで来ない）。
+ *
+ * どちらもファイル末尾で {@link References.warnMissing} と {@link registerReferenceGate} を呼ぶ。
+ * 実物が f32 テンソルなら {@link f32ArtifactBytes}（safetensors 1 本・metadata なし）で作る。
  */
 
 import { assert } from "@std/assert";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
+import type { ResultEntry, Results } from "./results.ts";
+import { buildSafetensors } from "./safetensors.ts";
 
 /** 参照値を作るモード。未設定（= 比較だけ）は `undefined` で表す。 */
 export type ReferenceMode = "write" | "rewrite";
@@ -312,4 +331,172 @@ export const registerReferenceGate = (
       );
     },
   });
+};
+
+/**
+ * バイト列の sha256（小文字 16 進 64 桁）。
+ *
+ * NOTE: `src/format/container` にも同名の関数があるが、こちらは検証の物差しなので
+ * 検査対象の実装に寄りかからず Web Crypto を直に呼ぶ。
+ */
+export const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+/** {@link settleReference} の決着（結果への記録は呼び手が行う）。 */
+export type ReferenceSettlement = {
+  /** 実物ファイルのバイト列の sha256（結果の `actual` 欄に入る値）。 */
+  readonly sha256: string;
+  readonly check: ReferenceCheck;
+  /** 実物の置き場（結果の席の中）。 */
+  readonly artifactUrl: URL;
+};
+
+/**
+ * 実物を結果の席へ書き、その sha256 を参照値と突き合わせる（sha 門の共通の末端）。
+ *
+ * - 実物は**突合の前に**、成功・失敗を問わず書く（不一致のときだけ残す形だと、一致した回の
+ *   実物が手元に無く、次に割れたときの A/B が採れない）。
+ * - sha は書いたのと同じバイト列から採る（結果の `actual` と実物の sha が常に一致する）。
+ *
+ * 結果への記録はしない — 呼び手が {@link referenceEntryFields} で `record` するか、
+ * `runRecordedCase` の決着に載せる。不一致でも投げない（記録より先に投げると実測 sha が結果に
+ * 残らない）。比較モードで行が無いケースは {@link References.check} が投げる — 追加検査として
+ * sha を採る呼び手はこれではなく {@link settleOrObserve} を使う（行が無いケースの決着の形が
+ * そこで 1 つに決まる）。
+ */
+export const settleReference = async (
+  references: References,
+  results: Pick<Results, "artifact">,
+  settled: {
+    /** 参照値のケース ID。 */
+    readonly id: string;
+    /** 実物のファイル名（結果の席からの相対）。 */
+    readonly artifact: string;
+    readonly bytes: Uint8Array<ArrayBuffer>;
+  },
+): Promise<ReferenceSettlement> => {
+  const artifactUrl = results.artifact(settled.artifact);
+  await Deno.writeFile(artifactUrl, settled.bytes);
+  const sha256 = await sha256Hex(settled.bytes);
+  const check = references.check(settled.id, sha256);
+  announceCheck(settled.id, check, sha256);
+  return { sha256, check, artifactUrl };
+};
+
+/**
+ * 決着を結果 1 件の欄へ写す（`status` / `expected` / `actual` / `artifact` の順）。
+ *
+ * `expected` は {@link expectedOf} に従う（作った回は欄ごと持たない・焼き直した回は旧い値）。
+ */
+export const referenceEntryFields = (
+  settlement: ReferenceSettlement,
+  artifact: string,
+): Pick<ResultEntry, "status" | "expected" | "actual" | "artifact"> => {
+  const expected = expectedOf(settlement.check);
+  return {
+    status: settlement.check.status,
+    ...(expected === undefined ? {} : { expected }),
+    actual: settlement.sha256,
+    artifact,
+  };
+};
+
+/** {@link settleOrObserve} の決着。 */
+export type ReferenceOutcome = {
+  /** 結果 1 件の欄（`status` / `expected` / `actual` / `artifact` の順 — そのまま広げて積む）。 */
+  readonly fields: Pick<ResultEntry, "status" | "expected" | "actual" | "artifact">;
+  /** 突き合わせた決着。比較モードで行が無く、突合を飛ばした回は `undefined`。 */
+  readonly settlement: ReferenceSettlement | undefined;
+};
+
+/**
+ * 追加検査としての sha の末端（モジュール doc「呼び手の型」の 1 つめ）。
+ *
+ * - 行がある、または作るモード: {@link settleReference} の決着（欄は {@link referenceEntryFields}）。
+ * - 比較モードで行が無い: 突合だけを飛ばす。実物は同じく書き、sha も同じバイト列から採る。
+ *   決着は `status: "pass"`（呼ぶのは元の検査が通った後）+ `actual` + `artifact` で、`expected`
+ *   は持たない（突き合わせた相手がいない）。
+ *
+ * 分岐を呼び手ごとに書かせないのは、行が無いケースの結果の形が系列ごとに割れるため（実測 sha を
+ * 積む系列と何も積まない系列が混ざると、環境横断の `actual` 比較が一部の系列でしか効かない）。
+ */
+export const settleOrObserve = async (
+  references: References,
+  results: Pick<Results, "artifact">,
+  settled: {
+    /** 参照値のケース ID。 */
+    readonly id: string;
+    /** 実物のファイル名（結果の席からの相対）。 */
+    readonly artifact: string;
+    readonly bytes: Uint8Array<ArrayBuffer>;
+  },
+): Promise<ReferenceOutcome> => {
+  if (references.lacksReference(settled.id)) {
+    await Deno.writeFile(results.artifact(settled.artifact), settled.bytes);
+    return {
+      fields: {
+        status: "pass",
+        actual: await sha256Hex(settled.bytes),
+        artifact: settled.artifact,
+      },
+      settlement: undefined,
+    };
+  }
+  const settlement = await settleReference(references, results, settled);
+  return { fields: referenceEntryFields(settlement, settled.artifact), settlement };
+};
+
+/**
+ * f32 テンソル 1 本を実物（safetensors 1 本）のバイト列にする。テンソル名は呼び手が渡す
+ * グラフの出力名、dtype は `F32`、shape は出力のまま。
+ *
+ * MUST: metadata を入れない — 走行ごとに変わる値（時刻・チェックアウト）が混ざると数値が同じ
+ * でも sha が動き、参照行が「数値の退行」ではなく「走らせた時刻」を掴む。
+ * MUST: shape の要素数とデータ長の食い違いは throw（切り出し違いの実物を黙って固定しない）。
+ */
+export const f32ArtifactBytes = (
+  name: string,
+  shape: readonly number[],
+  data: Float32Array<ArrayBuffer>,
+): Uint8Array<ArrayBuffer> => {
+  const count = shape.reduce((product, dim) => product * dim, 1);
+  if (count !== data.length) {
+    throw new Error(
+      `実物 '${name}': shape [${
+        shape.join(",")
+      }] の要素数 ${count} とデータ長 ${data.length} が食い違う`,
+    );
+  }
+  return new Uint8Array(buildSafetensors([{
+    name,
+    dtype: "F32",
+    shape,
+    data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+  }]));
+};
+
+/**
+ * 参照値と食い違ったときの診断文。
+ *
+ * MUST: ここで tolerance に逃げない。参照は sha256 しか無い（参照のバイト列は持っていない）
+ * ので先頭差分位置は原理的に出せない — 代わりに実物と fixture の置き場を並べ、人が突き合わせ
+ * られる形にする。不一致でない決着を渡すのは呼び手の誤りなので throw する。
+ */
+export const referenceMismatchMessage = (
+  label: string,
+  settlement: ReferenceSettlement,
+  references: Pick<References, "fixtureUrl">,
+): string => {
+  const { check } = settlement;
+  if (check.status !== "fail") {
+    throw new Error(`${label}: 決着が '${check.status}' なので不一致の診断は作れない`);
+  }
+  return `${label}: 実物の sha256 が参照と一致しない\n` +
+    `  期待 ${check.expected}\n  実際 ${settlement.sha256}\n` +
+    `  実物 ${settlement.artifactUrl.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）\n` +
+    `  参照値 ${references.fixtureUrl.pathname}\n` +
+    "  tolerance に逃げない — 意図した変更なら、何が変わったのかを言えたうえで " +
+    "KARUME_REFERENCE=rewrite で焼き直すこと";
 };

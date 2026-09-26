@@ -1,4 +1,5 @@
-// 環境別の参照値 fixture（`packages/models/tests/fixtures/references/*.json`）の読み書き。
+// 環境別の参照値 fixture（models 側 e2e は `packages/models/tests/fixtures/references/*.json`、
+// runtime 側 e2e は `packages/runtime/tests/fixtures/references/*.json`）の読み書き。
 //
 // ここで縛るのは**モードの意味論**そのもの: 未設定は比較だけ、`write` は無い行を足すだけ、
 // `rewrite` は現環境の行だけを上書きする。この 3 つのどれかが緩むと、門が「他の機の参照値と
@@ -6,9 +7,23 @@
 //
 // 実 GPU も環境変数も要らない — 環境とモードは引数で注入する。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import type { Environment } from "./helpers/environment.ts";
-import { openReferences, parseReferenceMode, referenceGatePasses } from "./helpers/reference.ts";
+import { parseSafetensors } from "../mod.ts";
+import {
+  f32ArtifactBytes,
+  openReferences,
+  parseReferenceMode,
+  referenceEntryFields,
+  referenceGatePasses,
+  referenceMismatchMessage,
+  type ReferenceSettlement,
+  settleOrObserve,
+  settleReference,
+  sha256Hex,
+} from "./helpers/reference.ts";
+import { openResults, type Results } from "./helpers/results.ts";
 
 const CURRENT = "deno-intel-graphics-bmg-g21";
 const OTHER = "deno-nvidia-geforce-rtx-3080-ti";
@@ -254,4 +269,298 @@ Deno.test("参照 fixture: KARUME_REFERENCE の未知の綴りは throw する",
   assertEquals(parseReferenceMode("rewrite"), "rewrite");
   assertThrows(() => parseReferenceMode("1"), Error, "KARUME_REFERENCE");
   assertThrows(() => parseReferenceMode(""), Error, "KARUME_REFERENCE");
+});
+
+// --- 参照値の決着（settleReference と、その結果・診断への写し）-----------------------
+//
+// ここで縛るのは「実物は突合の成否に依らず結果の席に残る」「sha は実物のバイト列から採る」
+// 「決着の写しが expected の有無を取り違えない」の 3 つ。どれかが崩れると、割れた回の A/B の
+// 材料が消えるか、結果 JSON が参照値を作った回を「何かと突き合わせた」と誤読させる。
+
+/** fixture と結果の席を同じ一時ディレクトリに置く（実 GPU も outputs/ も要らない）。 */
+const withSeats = async (
+  cases: Record<string, Record<string, string>>,
+  body: (fixtureUrl: URL, results: Results) => Promise<void>,
+): Promise<void> => {
+  const dir = Deno.makeTempDirSync({ prefix: "karume-reference-settle-" });
+  try {
+    const base = new URL(`file://${dir}/`);
+    const fixtureUrl = new URL("references.json", base);
+    Deno.writeTextFileSync(
+      fixtureUrl,
+      `${JSON.stringify({ schema: 1, kind: "sha256", cases }, undefined, 2)}\n`,
+    );
+    const results = openResults("settle", {
+      root: new URL("verify/", base),
+      environment: environment(CURRENT),
+    });
+    await body(fixtureUrl, results);
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
+};
+
+const BYTES = new TextEncoder().encode("karume-artifact");
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+/** fixture 文書の `cases`（ケース → 環境キー → sha）の形か。 */
+const isCasesDocument = (
+  value: unknown,
+): value is { readonly cases: Record<string, Record<string, string>> } =>
+  isRecord(value) && isRecord(value.cases) &&
+  Object.values(value.cases).every((rows) =>
+    isRecord(rows) && Object.values(rows).every((sha) => typeof sha === "string")
+  );
+
+/** ディスク上の fixture の `cases` を読む（型ガードで絞る — 形が崩れていれば落ちる）。 */
+const readCases = (fixtureUrl: URL): Record<string, Record<string, string>> => {
+  const document: unknown = JSON.parse(Deno.readTextFileSync(fixtureUrl));
+  assert(isCasesDocument(document), `${fixtureUrl.pathname} が { cases } の形でない`);
+  return document.cases;
+};
+
+describe("sha256Hex", () => {
+  it("FIPS 180-2 の既知ベクトル（'abc'）と一致する小文字 16 進 64 桁を返す", async () => {
+    assertEquals(
+      await sha256Hex(new TextEncoder().encode("abc")),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  });
+});
+
+describe("settleReference", () => {
+  it("write モードで行が無ければ実測を行として書き、実物を結果の席に残す", async () => {
+    await withSeats({}, async (fixtureUrl, results) => {
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: "write",
+      });
+      const settlement = await settleReference(references, results, {
+        id: "case-1",
+        artifact: "case-1.png",
+        bytes: BYTES,
+      });
+      const expectedSha = await sha256Hex(BYTES);
+      assertEquals(settlement.check, { status: "written" });
+      assertEquals(settlement.sha256, expectedSha);
+      assertEquals(settlement.artifactUrl.href, new URL("case-1.png", results.dir).href);
+      // sha は実物ファイルのバイト列と一致する（結果の actual と実物が食い違わない）。
+      const onDisk = await Deno.readFile(settlement.artifactUrl);
+      assertEquals(onDisk, BYTES);
+      assertEquals(await sha256Hex(onDisk), settlement.sha256);
+      assertEquals(readCases(fixtureUrl)["case-1"], { [CURRENT]: expectedSha });
+    });
+  });
+
+  it("比較モードで行と食い違えば fail を返し、実物は書かれ、行は動かない", async () => {
+    await withSeats({ "case-1": { [CURRENT]: SHA_A } }, async (fixtureUrl, results) => {
+      const before = Deno.readTextFileSync(fixtureUrl);
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: undefined,
+      });
+      const settlement = await settleReference(references, results, {
+        id: "case-1",
+        artifact: "case-1.safetensors",
+        bytes: BYTES,
+      });
+      assertEquals(settlement.check, { status: "fail", expected: SHA_A });
+      assertEquals(
+        await Deno.readFile(settlement.artifactUrl),
+        BYTES,
+        "不一致の回に実物が残っていない",
+      );
+      assertEquals(Deno.readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
+    });
+  });
+
+  it("比較モードで一致すれば pass を返す", async () => {
+    const sha = await sha256Hex(BYTES);
+    await withSeats({ "case-1": { [CURRENT]: sha } }, async (fixtureUrl, results) => {
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: undefined,
+      });
+      const settlement = await settleReference(references, results, {
+        id: "case-1",
+        artifact: "case-1.png",
+        bytes: BYTES,
+      });
+      assertEquals(settlement.check, { status: "pass", expected: sha });
+    });
+  });
+});
+
+// 追加検査としての sha の末端。行が無いケースの決着の形を 1 つに決めるのがこの関数の役目で、
+// 崩れると「実測 sha を積む系列と何も積まない系列」が再び混ざる（環境横断の actual 比較が
+// 一部の系列でしか効かなくなる）。
+describe("settleOrObserve", () => {
+  it("比較モードで行が無ければ突合を飛ばし、実物を書いて pass + actual + artifact（expected 無し）を返す", async () => {
+    await withSeats({ "case-1": { [OTHER]: SHA_A } }, async (fixtureUrl, results) => {
+      const before = Deno.readTextFileSync(fixtureUrl);
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: undefined,
+      });
+      const outcome = await settleOrObserve(references, results, {
+        id: "case-1",
+        artifact: "case-1.safetensors",
+        bytes: BYTES,
+      });
+      assertEquals(outcome.settlement, undefined);
+      assertEquals(outcome.fields, {
+        status: "pass",
+        actual: await sha256Hex(BYTES),
+        artifact: "case-1.safetensors",
+      });
+      assertEquals(Object.keys(outcome.fields), ["status", "actual", "artifact"]);
+      assertEquals(
+        await Deno.readFile(new URL("case-1.safetensors", results.dir)),
+        BYTES,
+        "突合を飛ばした回に実物が残っていない",
+      );
+      // 他環境の行（OTHER）とは突き合わせず、この環境の行も作らない。
+      assertEquals(Deno.readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
+    });
+  });
+
+  it("比較モードで行があれば突き合わせ、決着と referenceEntryFields の欄を返す", async () => {
+    await withSeats({ "case-1": { [CURRENT]: SHA_A } }, async (fixtureUrl, results) => {
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: undefined,
+      });
+      const outcome = await settleOrObserve(references, results, {
+        id: "case-1",
+        artifact: "case-1.safetensors",
+        bytes: BYTES,
+      });
+      assertEquals(outcome.settlement?.check, { status: "fail", expected: SHA_A });
+      assertEquals(outcome.fields, {
+        status: "fail",
+        expected: SHA_A,
+        actual: await sha256Hex(BYTES),
+        artifact: "case-1.safetensors",
+      });
+    });
+  });
+
+  it("write モードで行が無ければ行を作り、written の欄を返す", async () => {
+    await withSeats({}, async (fixtureUrl, results) => {
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: "write",
+      });
+      const outcome = await settleOrObserve(references, results, {
+        id: "case-1",
+        artifact: "case-1.safetensors",
+        bytes: BYTES,
+      });
+      const sha = await sha256Hex(BYTES);
+      assertEquals(outcome.settlement?.check, { status: "written" });
+      assertEquals(outcome.fields, {
+        status: "written",
+        actual: sha,
+        artifact: "case-1.safetensors",
+      });
+      assertEquals(readCases(fixtureUrl)["case-1"], { [CURRENT]: sha });
+    });
+  });
+});
+
+describe("f32ArtifactBytes", () => {
+  const data = Float32Array.from([0.5, -1, 2.25, Number.MIN_VALUE, -0, 3]);
+
+  it("テンソル名・F32・shape・値のビット列をそのまま持ち、metadata を持たない", () => {
+    const bytes = f32ArtifactBytes("logits", [1, 2, 3], data);
+    const parsed = parseSafetensors(bytes.buffer);
+    assertEquals([...parsed.tensors.keys()], ["logits"]);
+    assertEquals(parsed.metadata.size, 0);
+    const view = parsed.tensors.get("logits");
+    assert(view !== undefined);
+    assertEquals(view.dtype, "F32");
+    assertEquals(view.shape, [1, 2, 3]);
+    // ビット列で比べる（-0 と 0 を同一視しない）。
+    assertEquals(
+      new Uint8Array(parsed.buffer, view.byteOffset, view.byteLength),
+      new Uint8Array(data.buffer),
+    );
+  });
+
+  it("同じ入力から同じバイト列を作る（sha が走行ごとに動かない）", () => {
+    assertEquals(
+      f32ArtifactBytes("logits", [1, 2, 3], data),
+      f32ArtifactBytes("logits", [1, 2, 3], data),
+    );
+  });
+
+  it("shape の要素数とデータ長が食い違えば throw する", () => {
+    assertThrows(() => f32ArtifactBytes("logits", [1, 2, 2], data), Error, "食い違う");
+  });
+});
+
+/** 写しの検査用の決着（実物の置き場は写しに関与しない）。 */
+const settlementOf = (check: ReferenceSettlement["check"]): ReferenceSettlement => ({
+  sha256: SHA_B,
+  check,
+  artifactUrl: new URL("file:///verify/case-1.png"),
+});
+
+describe("referenceEntryFields", () => {
+  it("written は expected を欄ごと持たない", () => {
+    const fields = referenceEntryFields(settlementOf({ status: "written" }), "case-1.png");
+    assertEquals(fields, { status: "written", actual: SHA_B, artifact: "case-1.png" });
+    assertEquals(Object.keys(fields), ["status", "actual", "artifact"]);
+  });
+
+  it("rewritten は焼き直す前の値を expected に持つ", () => {
+    const fields = referenceEntryFields(
+      settlementOf({ status: "rewritten", previous: SHA_A }),
+      "case-1.png",
+    );
+    assertEquals(Object.keys(fields), ["status", "expected", "actual", "artifact"]);
+    assertEquals(fields, {
+      status: "rewritten",
+      expected: SHA_A,
+      actual: SHA_B,
+      artifact: "case-1.png",
+    });
+  });
+
+  it("pass / fail は突き合わせた行を expected に持つ", () => {
+    for (const status of ["pass", "fail"] as const) {
+      assertEquals(
+        referenceEntryFields(settlementOf({ status, expected: SHA_A }), "case-1.png"),
+        { status, expected: SHA_A, actual: SHA_B, artifact: "case-1.png" },
+      );
+    }
+  });
+});
+
+describe("referenceMismatchMessage", () => {
+  const fixtureUrl = new URL("file:///repo/fixtures/references/family.json");
+
+  it("期待 / 実測の sha・実物の置き場・fixture の置き場を含む", () => {
+    const message = referenceMismatchMessage(
+      "case-1",
+      settlementOf({ status: "fail", expected: SHA_A }),
+      { fixtureUrl },
+    );
+    assertStringIncludes(message, "case-1");
+    assertStringIncludes(message, `期待 ${SHA_A}`);
+    assertStringIncludes(message, `実際 ${SHA_B}`);
+    assertStringIncludes(message, "/verify/case-1.png");
+    assertStringIncludes(message, "/repo/fixtures/references/family.json");
+    assertStringIncludes(message, "tolerance に逃げない");
+  });
+
+  it("不一致でない決着を渡されたら throw する（呼び手の誤りを黙って文にしない）", () => {
+    assertThrows(
+      () => referenceMismatchMessage("case-1", settlementOf({ status: "written" }), { fixtureUrl }),
+      Error,
+      "'written'",
+    );
+  });
 });
