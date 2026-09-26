@@ -27,6 +27,8 @@ uv run --group birefnet python -m birefnet.export --verify     # eager equivalen
 uv run --group birefnet python -m birefnet.export --resolution 2048
 uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida
 uv run --group birefnet python -m birefnet.export --real-images
+uv run --group birefnet python -m birefnet.export --dtype f16 --real-images   # f16 series (ADR 0113)
+uv run --group birefnet python -m birefnet.export --dtype f16 --resolution 2048
 uv run python dist.py --pipeline birefnet --model 1024 --model 2048 \
     --out ../../models/karume-birefnet-hr
 uv run python dist.py --pipeline lucida --model 1024 --model 2048 \
@@ -51,6 +53,36 @@ cannot carry both. Within one repository the two resolutions live side by side a
 `1024` and `2048` (decisions 1 and 8, the same shape as SigLIP2's base / so400m), with `1024` as
 the default because it is the first `--model` on the command line. Assembling two models at once
 needs an explicit `--out`: a repository name cannot be derived from a list of model names.
+
+## Weight storage series (f32 / f16)
+
+`--dtype f16` writes a separate series (`<model>-<resolution>-f16`, e.g. `birefnet-hr-1024-f16`);
+the f32 series keeps its unsuffixed name. `dist` needs **both** series of every resolution it
+assembles: the distribution carries two quant seats, `f32` (the default) and `f16`, laid out as
+`matte/model.f32.krm` and `matte/model.f16.krm`. `--dtype` is exclusive with `--verify`, whose
+reference is the unpatched f32 eager model.
+
+The weights are rounded right after loading and **before** the patch layer runs. The BatchNorm
+rewrite derives its per-channel scale and shift in f32 from the (rounded) statistics; rounding after
+it would move those f32-stored constants without saving any memory. Only the weights consumed by
+linear / convolution / embedding slots (including the relative-position tables and the deformable
+convolutions' offset / modulator convolutions) are stored as f16 — window masks, zero-padding
+constants, the deformable convolutions' sampling weights (`regular_conv`), biases and normalization
+parameters stay f32 — so the resident weights shrink to 509 MiB at 1024² rather than to half of
+919 MiB.
+
+The upstream BiRefNet_HR checkpoint is itself stored in f16, so its `f16` series is lossless: the
+golden outputs are bit-identical to the f32 series'. Lucida is stored in f32, so its `f16` series is
+quantized. Every compressed series gets a `quality.json`: in the same process, before rounding, the
+export runs the unrounded f32 weights through the patched graph on the 4 synthetic and the 4 real
+images (the real images are used even without `--real-images`), and records the difference to the
+rounded weights' outputs (max abs / relative RMS of the logits, binary-mask disagreement, alpha MAE,
+8-bit alpha steps). If the checkpoint's floating-point tensors are all f16, anything short of a
+bit-identical output in every case fails the export before anything is published. For a lossy
+checkpoint the numbers are recorded and the export fails if the worst case's alpha MAE reaches half
+an 8-bit alpha step (0.5 / 255 ≈ 1.96e-3 — a provisional line, ADR 0113), or if the outputs did not
+move at all. Without `--real-images`, the rounded outputs of the 4 real images still go through the
+foreground-ratio ordering check.
 
 `transformers` is pinned with `==` (the patch layer replaces class attributes of the module the
 `trust_remote_code` loader produced); the group is declared in [`../pyproject.toml`](../pyproject.toml).

@@ -35,6 +35,15 @@ measurements in `docs/research/`.
   empty `session`), the observation point is where the seat first takes effect (step-1 latent / sbv2
   front outputs), and the gate checks determinism, census and a declared relRMS band. `results.json`
   gains the optional `comparisons` field (schema unchanged) and `tools/verify-diff` renders it.
+- BiRefNet recipe: an `f16` weight series (`python -m birefnet.export --dtype f16`, exclusive with
+  `--verify`) and an `f16` quant seat next to `f32` in the `birefnet` / `lucida` distributions
+  (ADR 0113). The default seat stays `f32`. For BiRefNet_HR the `f16` seat is lossless — the
+  upstream checkpoint is itself stored in f16 — while Lucida's is quantized; the NOTICE and model
+  card say which. Each compressed series records its export-time quantization error against the
+  unrounded f32 outputs in `quality.json`, and the export refuses to publish an `f16` series of an
+  all-f16 checkpoint unless every case is bit-identical, or a lossy one whose worst alpha MAE
+  reaches half an 8-bit alpha step (a provisional line). At 1024² the resident weights drop from
+  919 MiB to 509 MiB. The published repositories pick the seat up at the next release.
 - `tools/flag-bench`: a Deno benchmark that compares Gemma execution flags against a reference on the
   same machine (GPU time as the primary metric, wall clock secondary) and records which kernel keys
   actually ran.

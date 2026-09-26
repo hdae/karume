@@ -22,27 +22,33 @@ from typing import Any
 import pytest
 from container_series import i2_container, placed_paths, replace_component, write_component
 from ir_fixtures import Shape, ir_container
-from upstream_fixture import FIXTURE_REVISION, stamp_fixture_provenance
+from upstream_fixture import FIXTURE_REVISION, OTHER_REVISION, stamp_fixture_provenance
 
 from _shared.licenses import mit_license
 from birefnet.card import BIREFNET_LICENSE, BIREFNET_UPSTREAM
 from birefnet.distribution import (
     BIREFNET_COPYRIGHTS,
     BIREFNET_DEFAULT_MODEL,
+    BIREFNET_DEFAULT_QUANT,
     BIREFNET_HR_CHECKPOINT,
     BIREFNET_IMAGE_MEAN,
     BIREFNET_IMAGE_STD,
     BIREFNET_LUCIDA_CHECKPOINT,
     BIREFNET_MODELS,
     BIREFNET_OUTPUT_PATHS,
+    BIREFNET_PLAIN_DTYPE,
+    BIREFNET_QUANT_SEATS,
     BIREFNET_ROLE,
     BIREFNET_STORAGE_FORBIDDEN,
+    BIREFNET_STORAGE_REQUIREMENTS,
+    BIREFNET_WEIGHT_DTYPES,
     BIREFNET_WEIGHTS,
     LUCIDA_PIPELINE,
     PIPELINE,
     BirefnetSources,
     birefnet_plan,
     birefnet_repo_name,
+    birefnet_role,
     birefnet_series_name,
     birefnet_sources,
 )
@@ -155,24 +161,39 @@ def _build_birefnet_sources(
     checkpoint: str = BIREFNET_HR_CHECKPOINT,
     model: str = BIREFNET_DEFAULT_MODEL,
     side: int | None = None,
+    storage: str = BIREFNET_PLAIN_DTYPE,
+    f16_storage: str = "f16",
+    f16_side: int | None = None,
     **container: Any,
 ) -> BirefnetSources:
-    """系列を偽資産で再現する（配布しない `io.*` の混入込み）。
+    """系列を偽資産で再現する（配布しない `io.*` / `quality.json` の混入込み）。
 
     並びは `_shared.paths` の実レイアウト（`outputs/series/`）に揃える — CLI 経路のテストが
-    root を差し替えるだけで同じ木を指せる形。系列は checkpoint × 解像度で 1 本ずつなので、
-    偽資産の寸法は既定で**モデル名から**引く。`side` はその対応を**故意にずらす**ための席
-    （系列を 1 本掴み違えた形をそのまま再現する）。
+    root を差し替えるだけで同じ木を指せる形。系列は checkpoint × 解像度 × 格納 dtype で 1 本ずつ
+    （{@link BIREFNET_WEIGHT_DTYPES} の全部を焼く）なので、偽資産の寸法は既定で**モデル名から**
+    引く。`side` / `f16_side` はその対応を**故意にずらす**ための席（系列を 1 本掴み違えた形を
+    そのまま再現する）。
+
+    `storage` は **f32 席の系列**の格納形（禁止表の門のケース）、`f16_storage` は f16 席の系列の
+    格納形（要求表の門のケース）。残りのグラフ宣言の軸（`**container`）は全 dtype の系列に掛ける。
     """
-    sources = BirefnetSources(
-        series=root / "outputs" / "series" / birefnet_series_name(checkpoint, model)
-    )
-    write_component(
-        sources.series / "model.krm",
-        _birefnet_container(side=side if side is not None else int(model), **container),
-    )
-    # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
-    _write(sources.series / "io.ramp.safetensors", b"io-fixture")
+    sources = birefnet_sources(root / "outputs" / "series", checkpoint, model)
+    shapes = {BIREFNET_PLAIN_DTYPE: (storage, side), "f16": (f16_storage, f16_side)}
+    for dtype, series in sources.series_by_dtype.items():
+        seat_storage, seat_side = shapes[dtype]
+        write_component(
+            series / "model.krm",
+            _birefnet_container(
+                storage=seat_storage,
+                side=seat_side if seat_side is not None else int(model),
+                **container,
+            ),
+        )
+        # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+        _write(series / "io.ramp.safetensors", b"io-fixture")
+        if dtype != BIREFNET_PLAIN_DTYPE:
+            # 圧縮系列の品質計測の記録（`birefnet/export.py` の QUALITY_FILE）も配布に入らない。
+            _write(series / "quality.json", b"{}")
     return sources
 
 
@@ -217,10 +238,13 @@ class TestBirefnetLayout:
         assert model["pipeline"] == "birefnet/1"
         assert list(model["weights"]) == [BIREFNET_ROLE]
         assert model["assets"] == {}
-        assert list(model["quants"]) == ["f32"]
+        assert list(model["quants"]) == ["f32", "f16"]
+        # 既定は f32 のまま（ADR 0113 — 既定席の変更は段 2 の品質実測の後の裁定）。
         assert model["defaultQuant"] == "f32"
         assert model["quants"]["f32"]["weights"] == {BIREFNET_ROLE: "f32"}
+        assert model["quants"]["f16"]["weights"] == {BIREFNET_ROLE: "f16"}
         assert model["quants"]["f32"]["session"] == {}
+        assert model["quants"]["f16"]["session"] == {}
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_birefnet_sources(tmp_path)
@@ -241,7 +265,7 @@ class TestBirefnetLayout:
         原理的に検出できない（ADR 0027 / 0029）。
         """
         sources = _build_birefnet_sources(tmp_path, storage=storage)
-        with pytest.raises(DistError, match=rf"{BIREFNET_ROLE}: .* {intruder} がある"):
+        with pytest.raises(DistError, match=rf"{birefnet_role('f32')}: .* {intruder} がある"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
     def test_the_plain_f32_series_passes_both_storage_gates(self, tmp_path: Path) -> None:
@@ -258,14 +282,16 @@ class TestBirefnetLayout:
         """
         compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "i32"}
 
-        assert set(BIREFNET_STORAGE_FORBIDDEN[BIREFNET_ROLE]) == compressed
+        assert set(BIREFNET_STORAGE_FORBIDDEN[birefnet_role("f32")]) == compressed
 
     def test_it_refuses_an_i2_series_in_the_f32_seat(self, tmp_path: Path) -> None:
         """`ir_container` では書けない i2（QAT 系列の固定 packed 値）も、束縛表の現物で落ちる。"""
         sources = _build_birefnet_sources(tmp_path)
-        replace_component(sources.series / "model.krm", i2_container(named=BIREFNET_ROLE))
+        replace_component(
+            sources.series_by_dtype["f32"] / "model.krm", i2_container(named=BIREFNET_ROLE)
+        )
 
-        with pytest.raises(DistError, match=rf"{BIREFNET_ROLE}: .* i2 がある"):
+        with pytest.raises(DistError, match=rf"{birefnet_role('f32')}: .* i2 がある"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
 
@@ -296,6 +322,40 @@ class TestBirefnetContainerProvenance:
 
         with pytest.raises(DistError, match="upstreamRevision を持たない"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+    def test_every_dtype_series_names_the_same_upstream_revision(self, tmp_path: Path) -> None:
+        """正常形: f32 / f16 の系列が同じ revision を名乗れば組める（下の故障注入の対照）。"""
+        sources = _build_birefnet_sources(tmp_path)
+
+        birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+    def test_it_refuses_the_f16_series_of_another_checkpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """故障注入: HR の f32 系列 + Lucida の f16 系列（ライセンスはどちらも MIT・寸法も同じ）。
+
+        出所の門がライセンスと revision の有無だけを見ていると、別 checkpoint の系列が 1 モデルの
+        2 席として組み上がる（2026-09-26 レビュー A-1）。revision の一致がそれを落とす。
+        """
+        hr = _build_birefnet_sources(tmp_path / "hr")
+        stamp_fixture_provenance(
+            monkeypatch,
+            Provenance(
+                license=BIREFNET_LICENSE, notice=NOTICE_FILENAME, upstream_revision=OTHER_REVISION
+            ),
+        )
+        lucida = _build_birefnet_sources(tmp_path / "lucida", checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
+        mixed = BirefnetSources(
+            series_by_dtype={
+                "f32": hr.series_by_dtype["f32"],
+                "f16": lucida.series_by_dtype["f16"],
+            }
+        )
+
+        with pytest.raises(DistError, match="上流 revision が食い違う") as raised:
+            birefnet_plan(mixed, BIREFNET_HR_CHECKPOINT)
+        assert FIXTURE_REVISION in str(raised.value)
+        assert OTHER_REVISION in str(raised.value)
 
 
 class TestBirefnetPipelineConfig:
@@ -433,7 +493,7 @@ class TestBirefnetModelCard:
             f'  // model: "{BIREFNET_DEFAULT_MODEL}",'
             f" // default — available: {BIREFNET_DEFAULT_MODEL}" in card
         )
-        assert '  // quant: "f32", // default — available: f32' in card
+        assert '  // quant: "f32", // default — available: f16 / f32' in card
         assert "the only one this repository ships" not in card
 
     def test_the_attribution_follows_the_checkpoint_of_the_repository(self, tmp_path: Path) -> None:
@@ -564,7 +624,10 @@ class TestBirefnetCli:
             for model in BIREFNET_MODELS:
                 expected = f"{name}-{model}"
                 assert birefnet_series_name(checkpoint, model) == expected
-                assert birefnet_sources(tmp_path, checkpoint, model).series.name == expected
+                assert (
+                    birefnet_sources(tmp_path, checkpoint, model).series_by_dtype["f32"].name
+                    == expected
+                )
 
     def test_it_refuses_a_checkpoint_it_has_no_attribution_for(self, tmp_path: Path) -> None:
         """帰属表に無い checkpoint は「出所を名乗れない」ので、系列を探す前に落とす。"""
@@ -579,7 +642,7 @@ class TestBirefnetCli:
         sources = _build_birefnet_sources(tmp_path, checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
         monkeypatch.setattr(dist, "DIST_ROOT", tmp_path / "models")
 
-        main(["--pipeline", "lucida", "--series", str(sources.series.parent)])
+        main(["--pipeline", "lucida", "--series", str(sources.series_by_dtype["f32"].parent)])
 
         out_dir = tmp_path / "models" / "karume-lucida"
         expected = _in_subtree(BIREFNET_DEFAULT_MODEL, _placed_paths())
@@ -597,7 +660,7 @@ class TestBirefnetLegalText:
                 "--pipeline",
                 _PIPELINE_NAMES[checkpoint],
                 "--series",
-                str(sources.series.parent),
+                str(sources.series_by_dtype["f32"].parent),
                 "--out",
                 str(out_dir),
             ]
@@ -641,3 +704,132 @@ class TestBirefnetLegalText:
         assert "Copyright (c) 2026 egeorcun" in license_text
         assert "Copyright (c) 2024 ZhengPeng" in license_text
         assert BIREFNET_UPSTREAM[BIREFNET_LUCIDA_CHECKPOINT] in notice
+
+
+class TestBirefnetWeightDtypes:
+    """格納 dtype の軸（ADR 0113 — f32 / f16 の 2 席・系列は dtype ごとに別 root）。"""
+
+    def test_each_dtype_has_its_own_output_path(self) -> None:
+        """格納 dtype をファイル名に出す（1 ディレクトリに 2 系列が並んでも取り違えない綴り）。"""
+        assert {
+            birefnet_role("f32"): f"{BIREFNET_ROLE}/model.f32.krm",
+            birefnet_role("f16"): f"{BIREFNET_ROLE}/model.f16.krm",
+        } == BIREFNET_OUTPUT_PATHS
+
+    def test_every_seat_requires_its_own_storage(self) -> None:
+        assert {
+            birefnet_role(dtype): dtype for dtype in BIREFNET_WEIGHT_DTYPES
+        } == BIREFNET_STORAGE_REQUIREMENTS
+
+    def test_only_the_plain_seat_has_a_forbidden_table(self) -> None:
+        """f16 席の取り違え（f32 系列）は要求検査で落ちるので、禁止表は f32 席だけ。"""
+        assert set(BIREFNET_STORAGE_FORBIDDEN) == {birefnet_role(BIREFNET_PLAIN_DTYPE)}
+
+    def test_the_series_root_carries_the_dtype_suffix(self, tmp_path: Path) -> None:
+        """f32 は接尾なし（既存系列の綴り）・f16 は `-f16`（`birefnet.export.default_out_dir`）。"""
+        sources = birefnet_sources(tmp_path, BIREFNET_HR_CHECKPOINT, BIREFNET_DEFAULT_MODEL)
+        assert {dtype: path.name for dtype, path in sources.series_by_dtype.items()} == {
+            "f32": "birefnet-hr-1024",
+            "f16": "birefnet-hr-1024-f16",
+        }
+
+    def test_it_refuses_a_dtype_it_does_not_ship(self) -> None:
+        with pytest.raises(DistError, match="は配らない"):
+            birefnet_series_name(BIREFNET_HR_CHECKPOINT, BIREFNET_DEFAULT_MODEL, "i8")
+
+    def test_it_refuses_the_plain_series_in_the_f16_seat(self, tmp_path: Path) -> None:
+        """f16 席に f32 系列（`--dtype f16` を付け忘れた書き出し）— 要求検査が落とす。"""
+        sources = _build_birefnet_sources(tmp_path, f16_storage="f32")
+        with pytest.raises(DistError, match=rf"{birefnet_role('f16')}: .* f16 が無い"):
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+    def test_it_refuses_when_the_f16_series_is_missing(self, tmp_path: Path) -> None:
+        """片方の系列だけでは組まない（f16 席が宣言だけあって中身の無い配布形を作らない）。"""
+        sources = _build_birefnet_sources(tmp_path)
+        for path in sources.series_by_dtype["f16"].iterdir():
+            path.unlink()
+        sources.series_by_dtype["f16"].rmdir()
+
+        with pytest.raises(DistError) as raised:
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+        assert sources.series_by_dtype["f16"].name in str(raised.value)
+
+    def test_it_checks_the_graph_of_every_dtype_series(self, tmp_path: Path) -> None:
+        """MUST: f16 系列も寸法を見る（別解像度で焼いた f16 系列が同じモデル名で同居しない）。"""
+        sources = _build_birefnet_sources(tmp_path, f16_side=512)
+        with pytest.raises(DistError, match=rf"モデル '{BIREFNET_DEFAULT_MODEL}' が名乗る"):
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+    def test_every_shipped_dtype_has_exactly_one_quant_seat(self) -> None:
+        """quant 席の表は表示欄を手で持つ別表 — dtype 表と鍵がずれると、weights だけ宣言して
+        席が無い（または中身の無い席がある）配布形になる（2026-09-26 レビュー F8）。"""
+        assert set(BIREFNET_QUANT_SEATS) == set(BIREFNET_WEIGHT_DTYPES)
+        assert all(name == seat.dtype for name, seat in BIREFNET_QUANT_SEATS.items())
+
+    def test_the_quant_seats_carry_display_fields_and_f32_stays_the_default(
+        self, birefnet_assembled
+    ) -> None:
+        """表示欄（ADR 0075）は席の表から manifest へ同じ文字列で入る。"""
+        _, manifest = birefnet_assembled
+        quants = _birefnet_model(manifest)["quants"]
+        for name, seat in BIREFNET_QUANT_SEATS.items():
+            assert quants[name]["label"] == seat.label
+            assert quants[name]["description"] == seat.description
+        assert BIREFNET_DEFAULT_QUANT == "f32"
+
+    def test_the_quality_record_is_not_distributed(self, birefnet_assembled) -> None:
+        out_dir, _ = birefnet_assembled
+        assert list(out_dir.rglob("quality.json")) == []
+
+
+class TestBirefnetStorageNotice:
+    """NOTICE の格納の説明は配る席と checkpoint の格納から組む（中身と食い違わない）。"""
+
+    def _notice(self, tmp_path: Path, checkpoint: str) -> str:
+        return TestBirefnetLegalText()._legal(tmp_path, checkpoint)[1]
+
+    @staticmethod
+    def _prose(notice: str) -> str:
+        """折り返しを畳んだ本文（文言の検査は改行の位置に依らない）。"""
+        return " ".join(notice.split())
+
+    @pytest.mark.parametrize("checkpoint", [BIREFNET_HR_CHECKPOINT, BIREFNET_LUCIDA_CHECKPOINT])
+    def test_the_storage_lines_are_wrapped_like_the_rest_of_the_template(
+        self, tmp_path: Path, checkpoint: str
+    ) -> None:
+        notice = self._notice(tmp_path, checkpoint)
+        assert max(len(line) for line in notice.splitlines()) <= 100
+
+    @pytest.mark.parametrize("checkpoint", [BIREFNET_HR_CHECKPOINT, BIREFNET_LUCIDA_CHECKPOINT])
+    def test_it_names_what_stays_f32_in_the_f16_seat(self, tmp_path: Path, checkpoint: str) -> None:
+        """f16 格納は linear / conv / embedding（相対位置表）。f32 に残るのは deform の sampling
+        weights（`regular_conv` — offset / modulator conv は f16）と bias / norm で、BN の α / β は
+        統計から導いた値（2026-09-26 レビュー A-3 / F4）。"""
+        prose = self._prose(self._notice(tmp_path, checkpoint))
+        assert "linear, convolution and embedding (relative-position) weights" in prose
+        assert "sampling weights (`regular_conv`)" in prose
+        assert "derived per-channel affine in f32" in prose
+        assert "the deformable convolutions' weights," not in prose
+
+    def test_every_seat_is_described(self, tmp_path: Path) -> None:
+        notice = self._notice(tmp_path, BIREFNET_HR_CHECKPOINT)
+        for dtype in BIREFNET_WEIGHT_DTYPES:
+            assert f"  - `{dtype}`:" in notice
+
+    def test_the_hr_f16_seat_is_lossless_because_the_checkpoint_is_f16(
+        self, tmp_path: Path
+    ) -> None:
+        """HR の checkpoint 自身が f16 — f32 席は正確に広げただけで、f16 席は値を変えない。"""
+        notice = self._prose(self._notice(tmp_path, BIREFNET_HR_CHECKPOINT))
+        assert "the checkpoint itself is stored in f16" in notice
+        assert "widened exactly from f16 to f32" in notice
+        assert "**quantized**" not in notice
+        # 旧文面「source checkpoint's own f32 values」は HR では事実と違った（上流は f16）。
+        assert "own f32 values" not in notice
+
+    def test_the_lucida_f16_seat_is_declared_quantized(self, tmp_path: Path) -> None:
+        """Lucida は f32 の checkpoint — f16 席は丸めた値で、そう名乗る（無損失を装わない）。"""
+        notice = self._prose(self._notice(tmp_path, BIREFNET_LUCIDA_CHECKPOINT))
+        assert "no quantization" not in notice.lower()
+        assert "`f16`: **quantized**" in notice
+        assert "`f32`: the checkpoint's own f32 values, unchanged." in notice

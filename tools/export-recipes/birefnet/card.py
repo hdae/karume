@@ -17,7 +17,8 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import textwrap
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -88,6 +89,10 @@ BIREFNET_RESOURCES: Mapping[str, BirefnetResources] = {
 #: 上の表を採った条件（実測の性格そのものなので、`pipelineConfig` からは導出しない）。
 BIREFNET_RESOURCE_MEASUREMENT = "measured 2026-09-05 on an RTX 3080 Ti"
 
+#: 上の表を採った quant 席。MUST: カードは総確保を**この席の数として**名乗る — f16 席の総確保は
+#: 実測していない（常駐の重みが減るぶん小さいはずだが、推し量った数は載せない — 冒頭の MUST）。
+BIREFNET_RESOURCE_QUANT = "f32"
+
 #: 上流の論文（BiRefNet — 系列の共通の出典）。
 BIREFNET_PAPER = "arxiv.org/abs/2401.03407"
 
@@ -109,6 +114,13 @@ class BirefnetCheckpoint:
     tagline: str
     #: 帰属節の追加行（学習データのライセンス等 — 上流ごとに違う事実）。
     attribution: tuple[str, ...]
+    #: 上流 checkpoint の浮動小数の格納 dtype（safetensors ヘッダの実測 2026-09-25 —
+    #: HR は F16 687 本・Lucida は F32 687 本）。どの quant 席が値を変えずに持てるか
+    #: （{@link birefnet_storage_lines}）と `base_model_relation`（{@link _birefnet_relation}）が
+    #: ここから決まる。export 時の品質の門は
+    #: 同じ事実をヘッダから直接読む（`birefnet.export.checkpoint_dtypes`）ので、2 つの突合は
+    #: `birefnet/tests/test_export.py` が実重みのある機で持つ。
+    stored_dtype: str
 
 
 #: 実地確認（2026-08-13 — HF の model API）: どちらも `license: mit`。
@@ -125,6 +137,7 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
             " others) are distributed for research purposes — check them against your own use"
             " case.",
         ),
+        stored_dtype="f16",
     ),
     "lucida": BirefnetCheckpoint(
         repo="egeorcun/lucida",
@@ -146,6 +159,7 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
             " pixels), so the preprocessing this pipeline applies would be counted twice, and"
             " upstream ships it to run inside a larger ComfyUI pipeline rather than bare.",
         ),
+        stored_dtype="f32",
     ),
 }
 
@@ -154,6 +168,104 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
 BIREFNET_UPSTREAM: Mapping[str, str] = {
     name: entry.repo for name, entry in BIREFNET_CHECKPOINTS.items()
 }
+
+#: manifest の weights キー（= `birefnet.distribution.BIREFNET_ROLE`）。distribution がこの
+#: モジュールを import するので、循環を避けてここでも綴る — 一致は
+#: `birefnet/tests/test_card.py` が見る。
+BIREFNET_MATTE_WEIGHTS = "matte"
+
+#: 格納 dtype → ビット幅（席が checkpoint の値を変えずに持てるかの判定 — 狭い席は丸める）。
+#: MUST: 知らない dtype は描かない（段 2 の i8 は席と一緒にここへ足す — 推し量った文面を
+#: 法的テキストへ載せない）。
+_STORAGE_BITS: Mapping[str, int] = {"f32": 32, "f16": 16}
+
+
+def _storage_bits(dtype: str) -> int:
+    bits = _STORAGE_BITS.get(dtype)
+    if bits is None:
+        raise ValueError(
+            f"格納 dtype '{dtype}' の文面を持たない（既知: {' / '.join(_STORAGE_BITS)}）"
+            " — 推し量った文面を NOTICE / カードへ載せない"
+        )
+    return bits
+
+
+#: 格納の説明を折り返す幅（NOTICE / カードのテンプレートの他の行と同じ約 100 字）。
+_STORAGE_LINE_WIDTH = 100
+
+
+def _wrapped(text: str, indent: str) -> str:
+    """Markdown の箇条 1 つを折り返す（続きの行は箇条の本文の位置へ字下げする）。"""
+    return textwrap.fill(
+        text,
+        width=_STORAGE_LINE_WIDTH,
+        initial_indent=indent,
+        subsequent_indent=" " * len(indent),
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+#: f16 格納になる重み（emit の適格判定が重みスロットとして圧縮する側 — 相対位置表は embedding の
+#: 重みスロット・deform の offset / modulator conv も通常の conv）。
+_F16_STORED = "the linear, convolution and embedding (relative-position) weights"
+
+#: f32 格納に残るもの。deform の sampling weights（`regular_conv` — `deform_conv2d` に渡る重みで、
+#: 重みスロットを持たない）と bias / norm。⑦ の BatchNorm は α / β を統計から f32 で導く派生定数
+#: なので、「広げた値」ではなく「導いた値」と書き分ける（2026-09-26 レビュー A-3 / F4）。
+_F32_KEPT = (
+    "the deformable convolutions' sampling weights (`regular_conv`), the biases and the"
+    " remaining normalization parameters"
+)
+_BATCHNORM_AFFINE = "inference-time BatchNorm is a derived per-channel affine in f32"
+
+
+def _seat_storage_line(dtype: str, stored: str) -> str:
+    """quant 席 1 つぶんの格納の説明（checkpoint の格納 `stored` との関係で文面が決まる）。"""
+    if dtype == "f32":
+        if stored == "f32":
+            return _wrapped("`f32`: the checkpoint's own f32 values, unchanged.", "  - ")
+        return _wrapped(
+            f"`f32`: the checkpoint's own values, widened exactly from {stored} to f32.", "  - "
+        )
+    if dtype == "f16" and stored == "f16":
+        return _wrapped(
+            f"`f16`: the checkpoint's own f16 values, kept as f16 in {_F16_STORED}; {_F32_KEPT}"
+            f" are widened exactly to f32, and {_BATCHNORM_AFFINE}.",
+            "  - ",
+        )
+    if dtype == "f16" and _storage_bits(stored) > _storage_bits(dtype):
+        return _wrapped(
+            "`f16`: **quantized** — every weight was rounded to the nearest f16 value before"
+            f" export; {_F16_STORED} are stored as f16, {_F32_KEPT} keep f32 storage,"
+            f" {_BATCHNORM_AFFINE}, and all computation stays in f32.",
+            "  - ",
+        )
+    raise ValueError(f"格納 {dtype} の席を {stored} の checkpoint について描く文面を持たない")
+
+
+def birefnet_storage_lines(checkpoint: str, dtypes: Sequence[str]) -> list[str]:
+    """quant 席ごとの格納の説明（NOTICE とカードの帰属節が**同じ 1 か所**から引く）。
+
+    `dtypes` は配布形が持つ席の格納 dtype（カードは manifest から・NOTICE は配布 recipe の表から
+    渡す）。見出しは「全ての席が checkpoint の値を変えずに持つか」で決まる — HR は checkpoint
+    自身が f16 なので f16 席も無損失で **No quantization** のまま、Lucida は f32 なので f16 席が
+    量子化になる（{@link BirefnetCheckpoint.stored_dtype}）。
+
+    MUST: 文面は配布形の中身と対応していること（NOTICE の MUST — 散文としては妥当なまま
+    `verify_dist` も manifest 検査も素通りするので、事実から組む）。
+    """
+    stored = _birefnet_entry(checkpoint).stored_dtype
+    if not dtypes:
+        raise ValueError("quant 席が 1 つも無い — 格納の説明を組めない")
+    lossless = all(_storage_bits(dtype) >= _storage_bits(stored) for dtype in dtypes)
+    heading = (
+        "**No quantization**: every quant seat stores the source checkpoint's own values"
+        f" (the checkpoint itself is stored in {stored}):"
+        if lossless
+        else f"**Quantization**: the source checkpoint is stored in {stored}; per quant seat:"
+    )
+    return [_wrapped(heading, "- "), *(_seat_storage_line(dtype, stored) for dtype in dtypes)]
 
 
 def _birefnet_entry(checkpoint: str) -> BirefnetCheckpoint:
@@ -187,7 +299,31 @@ def _birefnet_resources(config: Mapping[str, Any]) -> BirefnetResources:
     return resources
 
 
-def _birefnet_metadata(entry: BirefnetCheckpoint) -> CardMetadata:
+def _seat_dtypes(model: Mapping[str, Any]) -> list[str]:
+    """モデルの quant 席が指すマットの格納 dtype（manifest の並び・重複なし）。"""
+    seen: list[str] = []
+    for quant in model["quants"].values():
+        dtype = quant["weights"][BIREFNET_MATTE_WEIGHTS]
+        if dtype not in seen:
+            seen.append(dtype)
+    return seen
+
+
+def _birefnet_relation(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -> str | None:
+    """`base_model_relation` を導く（既定 quant の DL 実体が値を丸めているときだけ `quantized`）。
+
+    irodori / sbv2 / anima と同じ「既定 quant の DL 実体」の規則。値を変えない席（f32、HR の
+    f16）が既定なら 4 値のどれでもないので置かない（CardMetadata の doc — 4 値から一番近いものを
+    当てると、カードが事実でない主張を持つ）。
+    """
+    model = default_model(manifest)
+    dtype = model["quants"][model["defaultQuant"]]["weights"][BIREFNET_MATTE_WEIGHTS]
+    if _storage_bits(dtype) < _storage_bits(entry.stored_dtype):
+        return "quantized"
+    return None
+
+
+def _birefnet_metadata(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -> CardMetadata:
     """frontmatter を組む（`base_model` はこのリポが再配布する上流 1 本）。
 
     モデルが 2 つ並んでも上流は 1 つ — 同居しているのは同じ checkpoint の**解像度違い**で、
@@ -196,8 +332,7 @@ def _birefnet_metadata(entry: BirefnetCheckpoint) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=BIREFNET_PIPELINE_TAG,
         base_model=(entry.repo,),
-        # `base_model_relation` は置かない — 格納形を変えず（f32 のまま）コンテナだけを移した
-        # もので、adapter / merge / quantized / finetune のどれでもない（CardMetadata の doc）。
+        base_model_relation=_birefnet_relation(manifest, entry),
         license=BIREFNET_LICENSE,
         tags=(BIREFNET_PIPELINE_TAG, "background-removal", "webgpu", "birefnet"),
     )
@@ -237,8 +372,12 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
     ]
 
 
-def _birefnet_base_weights(entry: BirefnetCheckpoint) -> list[str]:
-    """帰属節。格納形を変えていないので「変換したもの」としてだけ主張する。"""
+def _birefnet_base_weights(manifest: Mapping[str, Any], checkpoint: str) -> list[str]:
+    """帰属節。変更点の列挙と、quant 席ごとの格納（{@link birefnet_storage_lines}）。
+
+    席の格納 dtype は manifest から引く（モジュール doc の MUST — dtype ラベルは手で持たない）。
+    """
+    entry = _birefnet_entry(checkpoint)
     return [
         "## Base weights and attribution",
         "",
@@ -248,8 +387,8 @@ def _birefnet_base_weights(entry: BirefnetCheckpoint) -> list[str]:
         *entry.attribution,
         f"- **Architecture**: BiRefNet ([{BIREFNET_PAPER}](https://{BIREFNET_PAPER})).",
         "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
-        "  container format. No retraining, no fine-tuning and **no quantization** — the",
-        "  weights are the source checkpoint's own f32 values. The graph is the upstream",
+        "  container format. No retraining and no fine-tuning; the stored values per quant seat",
+        "  are listed below. The graph is the upstream",
         "  `forward` with layout-only rewrites (windowing, the shifted-window roll, spatial",
         "  padding and the patch merges were folded into equivalent operations — bit-exact),",
         "  plus three rewrites that are equivalent up to floating-point rounding:",
@@ -257,6 +396,7 @@ def _birefnet_base_weights(entry: BirefnetCheckpoint) -> list[str]:
         "  pooling became a two-stage sum, and the decoder tail's 1×1 convolution was swapped",
         "  with the bilinear upsample it used to follow (both are linear, so they commute — this",
         "  removes two full-resolution intermediates).",
+        *birefnet_storage_lines(checkpoint, _seat_dtypes(default_model(manifest))),
     ]
 
 
@@ -324,6 +464,11 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
     """
     config = model["pipelineConfig"]
     resources = _birefnet_resources(config)
+    if BIREFNET_RESOURCE_QUANT not in model["quants"]:
+        raise ValueError(
+            f"実行資源を実測した quant '{BIREFNET_RESOURCE_QUANT}' がこのモデルの席に無い"
+            f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
+        )
     mean = " / ".join(str(value) for value in config["imageMean"])
     std = " / ".join(str(value) for value in config["imageStd"])
     return [
@@ -338,8 +483,10 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
         f"- **normalization**: `(pixel / 255 - mean) / std`, mean {mean}, std {std}",
         "- **output**: one alpha byte per pixel at the size of the image you passed in (the graph",
         "  itself emits pre-sigmoid logits; the sigmoid and the resize back happen on the host).",
-        f"- **required GPU memory**: {resources.total} allocated in total — the weights listed",
-        f"  above, resident, plus {resources.intermediates} for the intermediate tensors — and",
+        f"- **required GPU memory**: {resources.total} allocated in total with the"
+        f" `{BIREFNET_RESOURCE_QUANT}` quant — its",
+        f"  weights listed above, resident, plus {resources.intermediates} for the intermediate"
+        " tensors — and",
         f"  {resources.binding} ({BIREFNET_RESOURCE_MEASUREMENT});"
         f" one image takes {resources.run}.",
         "  WebGPU's default `maxStorageBufferBindingSize` is 128 MiB, so this is in practice a",
@@ -363,11 +510,11 @@ def render_birefnet_model_card(
     entry = _birefnet_entry(checkpoint)
     return render(
         (
-            frontmatter(_birefnet_metadata(entry)),
+            frontmatter(_birefnet_metadata(manifest, entry)),
             ["", f"# {entry.title}", ""],
             _birefnet_overview(manifest, entry),
             [""],
-            _birefnet_base_weights(entry),
+            _birefnet_base_weights(manifest, checkpoint),
             [""],
             models(manifest),
             [""],

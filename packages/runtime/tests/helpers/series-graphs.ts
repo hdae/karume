@@ -20,9 +20,13 @@
  */
 export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   "birefnet-hr-1024": { "": "matte" },
+  "birefnet-hr-1024-f16": { "": "matte" },
   "birefnet-hr-2048": { "": "matte" },
+  "birefnet-hr-2048-f16": { "": "matte" },
   "lucida-1024": { "": "matte" },
+  "lucida-1024-f16": { "": "matte" },
   "lucida-2048": { "": "matte" },
+  "lucida-2048-f16": { "": "matte" },
   "dacvae-32dim": { decoder: "codec_decoder", encoder: "codec_encoder" },
   "deberta": { "full-24layer": "text_encoder" },
   "deberta-i8": { "full-24layer": "text_encoder", "sbv2-22layer": "text_encoder" },

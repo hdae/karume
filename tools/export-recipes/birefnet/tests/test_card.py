@@ -20,7 +20,9 @@ import pytest
 
 from birefnet.card import (
     BIREFNET_CHECKPOINTS,
+    BIREFNET_MATTE_WEIGHTS,
     BIREFNET_RESOURCE_MEASUREMENT,
+    BIREFNET_RESOURCE_QUANT,
     BIREFNET_RESOURCES,
     BIREFNET_SUPPORTED_PIPELINE,
     BIREFNET_UPSTREAM,
@@ -177,8 +179,97 @@ class TestBirefnetResourceNote:
         assert BIREFNET_RESOURCE_MEASUREMENT in card
         assert "maxStorageBufferBindingSize" in card
 
+    def test_the_total_is_named_as_the_measured_seats_number(self) -> None:
+        """席が 2 つ並ぶカードで、総確保がどの席の実測かを言う（f16 席の総確保は未測 —
+        2026-09-26 レビュー F2）。"""
+        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, CHECKPOINT)
+        prose = " ".join(card.split())
+
+        assert BIREFNET_RESOURCE_QUANT == "f32"
+        assert f"{BIREFNET_RESOURCES[MODEL].total} allocated in total with the `f32` quant" in prose
+
+    def test_it_refuses_a_model_without_the_measured_seat(self) -> None:
+        """実測した席が無い配布形では、総確保を名乗れない（別の席の数として読まれる）。"""
+        manifest = _birefnet_manifest()
+        model = manifest["models"][MODEL]
+        model["quants"] = {"f16": {"weights": {"matte": "f16"}, "session": {}}}
+        model["weights"]["matte"] = {"f16": model["weights"]["matte"]["f32"]}
+        model["defaultQuant"] = "f16"
+
+        with pytest.raises(ValueError, match="実測した quant 'f32'"):
+            render_birefnet_model_card(manifest, REPO, CHECKPOINT)
+
     def test_it_does_not_carry_another_resolutions_measurement(self) -> None:
         """1 つの実測を全モデルへ写すと、片方のカードが**測っていない数**を名乗る。"""
         card = render_birefnet_model_card(_birefnet_manifest(MODEL), REPO, CHECKPOINT)
 
         assert BIREFNET_RESOURCES["2048"].total not in card
+
+
+def _with_seat(manifest: dict[str, Any], dtype: str, *, default: bool = False) -> dict[str, Any]:
+    """既定モデルへ `dtype` の weights と同名の quant 席を足す（`default` なら既定席にする）。"""
+    model = manifest["models"][manifest["defaultModel"]]
+    model["weights"]["matte"][dtype] = _container(
+        _ref(f"m/model.{dtype}-00001-of-00002.krm", 7, "e")
+    )
+    model["quants"][dtype] = {"weights": {"matte": dtype}, "session": {}}
+    if default:
+        model["defaultQuant"] = dtype
+    return manifest
+
+
+class TestBirefnetStorageAttribution:
+    """席ごとの格納の説明と `base_model_relation`（ADR 0113 — checkpoint の格納から決まる）。"""
+
+    def test_the_weights_key_is_the_distributions_role(self) -> None:
+        """カードは循環 import を避けて weights キーを自分で綴る — 配布 recipe と一致させる。"""
+        from birefnet.distribution import BIREFNET_ROLE
+
+        assert BIREFNET_MATTE_WEIGHTS == BIREFNET_ROLE
+
+    @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
+    def test_an_f32_default_declares_no_relation(self, checkpoint: str) -> None:
+        """f32 席は checkpoint の値を変えない — 4 値のどれでもないので置かない。"""
+        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, checkpoint)
+        assert "base_model_relation" not in card
+
+    def test_an_f16_default_for_the_f16_checkpoint_is_not_quantized(self) -> None:
+        """HR の checkpoint 自身が f16 — f16 席を既定にしても値は変わらない。"""
+        card = render_birefnet_model_card(
+            _with_seat(_birefnet_manifest(), "f16", default=True), REPO, "hr"
+        )
+        assert "base_model_relation" not in card
+
+    def test_an_f16_default_for_the_f32_checkpoint_is_quantized(self) -> None:
+        card = render_birefnet_model_card(
+            _with_seat(_birefnet_manifest(), "f16", default=True), REPO, "lucida"
+        )
+        assert "base_model_relation: quantized" in card
+
+    def test_the_storage_lines_follow_the_seats_in_the_manifest(self) -> None:
+        """dtype ラベルは manifest から — f32 だけの配布形は f16 席を名乗らない。"""
+        plain = render_birefnet_model_card(_birefnet_manifest(), REPO, "hr")
+        both = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, "hr")
+
+        assert "  - `f32`:" in plain and "  - `f16`:" not in plain
+        assert "  - `f32`:" in both and "  - `f16`:" in both
+
+    def test_the_hr_card_names_its_f16_checkpoint(self) -> None:
+        """旧文面「source checkpoint's own f32 values」は HR では事実と違った（上流は f16）。"""
+        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, "hr")
+
+        assert "**No quantization**" in card
+        assert "widened exactly from f16 to f32" in card
+        assert "own f32 values" not in card
+
+    def test_the_lucida_card_declares_its_f16_seat_quantized(self) -> None:
+        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, "lucida")
+
+        assert "**Quantization**" in card
+        assert "  - `f16`: **quantized**" in card
+        assert "  - `f32`: the checkpoint's own f32 values, unchanged." in card
+
+    def test_a_seat_it_has_no_wording_for_is_refused(self) -> None:
+        """段 2 の i8 は文面と一緒に足す — 推し量った文面を帰属節へ載せない。"""
+        with pytest.raises(ValueError, match="i8"):
+            render_birefnet_model_card(_with_seat(_birefnet_manifest(), "i8"), REPO, "hr")
