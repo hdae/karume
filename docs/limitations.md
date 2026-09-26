@@ -1585,6 +1585,7 @@ embed_vision 1・embed_audio 1）。vision / audio に着手する波の規模�
 `linearGemvReduce: "parallel"` は[ADR 0098](decisions/0098-linear-gemv-parallel.md)の任意指定。
 対象は実測した量子化行列と物理 M=1..8、f32 演算のみ。既定の逐次加算と bit 同一ではなく、QAT は生成列も変わり得る。
 M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認できる。E4B・他モデルの全面的な高速化を意味しない。
+対象形の表は allowlist で、載っていない形は `parallel` を指定しても黙って逐次加算へ縮退する。E4B の行（2026-09-26）は E2B の同じ役割の行の lanes を写した未実測の暫定で、QAT E4B の i2 lm_head は載っていない（[ADR 0098 追記 2026-09-26](decisions/0098-linear-gemv-parallel.md)）。
 [M2での速度改善と短文出力](research/2026-09-13-m2-gemv-adoption.md)は確認済み。広い品質評価は残る。
 通常/QAT E2Bの新しい配布recipeは、parallelとRMS→add融合（QATはさらにlinear→SRQ融合とpacked int8活性）を宣言した `i4-fast` を既定quantに選ぶ（[ADR 0104](decisions/0104-gemma-fast-quant.md)）。parallelだけの `i4-gemvpar` も保持する。
 従来の `i4`・runtime・fromAssetsの逐次既定は維持する。既存の配布形や公開pinは自動で変更しない。
@@ -1594,7 +1595,7 @@ M>8 と対象外形状は従来経路で、診断キーで適用範囲を確認�
 `packedStaticQuantize` は[ADR 0105](decisions/0105-packed-static-quantize-activations.md)の任意指定で、固定SRQが出すint8コード4個をu32 1語に詰めて並列GEMVへ渡す。
 QAT E2Bの `i4-fast` は既定でこれを宣言する（通常Gemma 4は `static_quantize` を持たないので宣言しない）。by-designの制約4点:
 
-- **packedになるのは実測で効いた4形状だけ**（`PARALLEL_SHAPES` の `packedActivations` が true の行 = K が長くlanes 32の形）。消費先が1本でもtrueでない行へ落ちるSRQはf32のまま残り、他21行（g32の12行を含む）は対象外。
+- **packedになるのは実測で効いた4形状と、それを写したE4Bの3形状だけ**（`PARALLEL_SHAPES` の `packedActivations` が true の行 = K が長くlanes 32の形。E4Bの3形状は未実測）。消費先が1本でもtrueでない行へ落ちるSRQはf32のまま残り、他40行（g32の23行を含む）は対象外。
 - **非有限値の扱いがf32経路と違う**。`NaN` は境界表の外側として ±127 / -128 へ飽和し（f32経路はNaNをそのまま流す）、`-0.0` はコード0 = `+0.0` へ落ちる。`±Inf` はf32経路も同じ表で飽和するので一致する。数値opt-inの射程（[ADR 0058](decisions/0058-numerics-opt-in-contract.md)）として受け入れる。
 - **確保量は1/4にならない**。出力テンソルの実体は宣言shapeのまま確保し、実際に書くのはその1/4。アリーナのバケットを動かさないための選択で、VRAMの節約ではない。
 - **`linearGemvReduce: "parallel"` かつ `linearCompute: "f32"` の組だけを受理する**。他の組合せとboolean以外の値はSession構築時に拒否し、黙ってf32経路へ落とさない。

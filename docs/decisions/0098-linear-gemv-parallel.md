@@ -68,3 +68,25 @@ M2（Metal）で同じ数式の 2 カーネル（f32 と packed 活性）が u32
 数値不変（掃引 540 組で不一致 0・QAT E2B の生成文が同一）、Metal では並列経路の出力が変更前から変わる
 （変種同士は揃う）。逐次 GEMV・行ブロックは従来の綴りのまま（subgroup32 変種は 2026-09-25 に揃えた — ADR 0101 追記）。経緯と実測は
 [0105 追記 4](0105-packed-static-quantize-activations.md#追記-42026-09-20-追記-3-の撤回と並列-gemv-族の積和を明示-fma-で綴る決定)。
+
+## 追記（2026-09-26）— E4B の行を E2B の同種行の lanes で足す（未実測）
+
+選択表（`PARALLEL_SHAPES`）は形の allowlist で、E4B の形は 1 行も無かった。このため E4B では
+`linearGemvReduce: "parallel"` と、その上に乗る linear→SRQ 融合（ADR 0103）・packed int8 活性（ADR 0105）が
+全 linear で縮退し、診断キーにしか出ない no-op になっていた。E4B のフラグ単体ベンチはこの表を埋めないと成立しない。
+
+- **決定 4 の「実測形状」の例外として、未実測の行を暫定で置く**。通常 E4B 12 行（i4 g32 11 + i8 lm_head 1）と
+  QAT E4B 10 行（i4 g512 / g2048 / g4096 8 + i8 2）。lanes と `packedActivations` は、E2B の**同じ役割**の行
+  （per_layer_model_projection・q・k/v・o・gate/up・down・per_layer_input_gate・per_layer_projection・lm_head、
+  sliding / full の別も含む）から写した推測。表の各行にその旨を書いた。
+- 形の出所。通常 E4B は配布ミラーが無いので上流 config（hidden 2560・intermediate 10240・kv 2・層 42・PLE 256・
+  double-wide MLP なし）から導いた。QAT E4B は配布ミラーのコンテナ記述子から、linear 344 本の実形・codec・group を読んだ。
+  両者の (n, k) は一致する。
+- 足していない形は 2 つ。QAT E4B の i2 lm_head（262144×2560）は E2B にも行が無い。QAT の f32 per_layer_model_projection
+  は f32 格納なので対象外（perf-ledger K-51）。
+- 数値の門。GPU テストの縮約長 × group に E4B の組を足し、FP64 参照との帯と M=1/4/8 の u32 一致を全 lanes で見る。
+  QAT E4B の製品グラフで各 linear が計画上どのキーへ落ちるかは、census テストが配布ミラーを根に固定する
+  （ミラーが無い機は明示 SKIP）。
+- 速度の採否は未決。E4B の flag-bench で per-key の census と GPU 時間を見て、遅い行は lanes を変えるか行を外す。
+  flag-bench は計測 ON の走行で、どのカーネルキーが走ったかを記録する。基準とキー集合が変わらない set には
+  `noKeyChange` を立てる。E4B の既定 quant は `i4` のまま変えない（ADR 0104）。

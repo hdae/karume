@@ -765,6 +765,7 @@ type ParallelShape = {
   readonly lanes: LinearGemvParallelLanes;
   /**
    * packed int8 活性（ADR 0105）で受け取る形か。**実測で速くなった行だけ true**。
+   * E4B の行だけは例外で、E2B の同じ役割の行の値を写した未実測の暫定（表の E4B 節）。
    *
    * 効くのは「K が長く lanes 32」= 1 スレッドが 1 重み語あたりに読む活性が多い形だけで、
    * K=1536 の lanes 2 / 4 と i8 は追加の unpack / 変換 / 乗算が利得を食い潰す
@@ -801,6 +802,54 @@ const PARALLEL_SHAPES: readonly ParallelShape[] = [
   { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32, packedActivations: true },
   { storage: "i2", n: 12288, k: 1536, lanes: 2, packedActivations: false },
   { storage: "i2", n: 1536, k: 12288, lanes: 32, packedActivations: true },
+  // ---- E4B（2026-09-26 追加）— 以下の行は**どれも未実測**。lanes / packedActivations は E2B の
+  // 同じ役割の行から写した推測で、E4B の flag-bench（per-key の census と GPU 時間）で見直す
+  // （ADR 0098 追記 2026-09-26）。形は通常 E4B = 上流 config（hidden 2560・intermediate 10240・
+  // kv 2・層 42・PLE 256）から、QAT E4B = 配布ミラーのコンテナ記述子から読んだ実形。
+  // E4B 通常 i4 g32: per_layer_model_projection（42×256）— lanes は E2B 8960×1536 から（未実測）
+  { storage: "i4", n: 10752, k: 2560, group: 32, lanes: 4, packedActivations: false },
+  // E4B 通常 i4 g32: q（sliding）— lanes は E2B 2048×1536 から（未実測）
+  { storage: "i4", n: 2048, k: 2560, group: 32, lanes: 4, packedActivations: false },
+  // E4B 通常 i4 g32: k / v（sliding）— lanes は E2B 256×1536 から（未実測）
+  { storage: "i4", n: 512, k: 2560, group: 32, lanes: 32, packedActivations: false },
+  // E4B 通常 i4 g32: per_layer_input_gate — lanes は E2B 256×1536 から（未実測）
+  { storage: "i4", n: 256, k: 2560, group: 32, lanes: 32, packedActivations: false },
+  // E4B 通常 i4 g32: o（sliding）— lanes は E2B 1536×2048 から（未実測）
+  { storage: "i4", n: 2560, k: 2048, group: 32, lanes: 32, packedActivations: false },
+  // E4B 通常 i4 g32: gate / up — lanes は E2B 6144×1536 から（未実測）
+  { storage: "i4", n: 10240, k: 2560, group: 32, lanes: 4, packedActivations: false },
+  // E4B 通常 i4 g32: down — lanes は E2B 1536×6144 から（未実測）
+  { storage: "i4", n: 2560, k: 10240, group: 32, lanes: 32, packedActivations: false },
+  // E4B 通常 i4 g32: per_layer_projection — lanes は E2B 1536×256 から（未実測）
+  { storage: "i4", n: 2560, k: 256, group: 32, lanes: 4, packedActivations: false },
+  // E4B 通常 i4 g32: q（full）— lanes は E2B 4096×1536 から（未実測）
+  { storage: "i4", n: 4096, k: 2560, group: 32, lanes: 4, packedActivations: false },
+  // E4B 通常 i4 g32: k / v（full）— lanes は E2B 512×1536 から（未実測）
+  { storage: "i4", n: 1024, k: 2560, group: 32, lanes: 32, packedActivations: false },
+  // E4B 通常 i4 g32: o（full）— lanes は E2B 1536×4096 から（未実測）
+  { storage: "i4", n: 2560, k: 4096, group: 32, lanes: 32, packedActivations: false },
+  // E4B 通常 i8: lm_head（tied embedding）— lanes は E2B 262144×1536 から（未実測）
+  { storage: "i8", n: 262144, k: 2560, lanes: 16, packedActivations: false },
+  // E4B QAT i4 g512: q（sliding）— lanes は E2B QAT 2048×1536 g512 から（未実測）
+  { storage: "i4", n: 2048, k: 2560, group: 512, lanes: 4, packedActivations: false },
+  // E4B QAT i4 g512: k / v（sliding）— lanes は E2B QAT 256×1536 g512 から（未実測）
+  { storage: "i4", n: 512, k: 2560, group: 512, lanes: 32, packedActivations: false },
+  // E4B QAT i4 g2048: o（sliding）— lanes / packed は E2B QAT 1536×2048 g2048 から（未実測）
+  { storage: "i4", n: 2560, k: 2048, group: 2048, lanes: 32, packedActivations: true },
+  // E4B QAT i4 g512: gate / up — lanes は E2B QAT 6144×1536 g512 から（未実測）
+  { storage: "i4", n: 10240, k: 2560, group: 512, lanes: 4, packedActivations: false },
+  // E4B QAT i4 g2048: down — lanes / packed は E2B QAT 1536×6144 g2048 から（未実測）
+  { storage: "i4", n: 2560, k: 10240, group: 2048, lanes: 32, packedActivations: true },
+  // E4B QAT i8: per_layer_input_gate — lanes は E2B QAT 256×1536 i8 から（未実測）
+  { storage: "i8", n: 256, k: 2560, lanes: 32, packedActivations: false },
+  // E4B QAT i8: per_layer_projection — lanes は E2B QAT 1536×256 i8 から（未実測）
+  { storage: "i8", n: 2560, k: 256, lanes: 4, packedActivations: false },
+  // E4B QAT i4 g512: q（full）— lanes は E2B QAT 4096×1536 g512 から（未実測）
+  { storage: "i4", n: 4096, k: 2560, group: 512, lanes: 4, packedActivations: false },
+  // E4B QAT i4 g512: k / v（full）— lanes は E2B QAT 512×1536 g512 から（未実測）
+  { storage: "i4", n: 1024, k: 2560, group: 512, lanes: 32, packedActivations: false },
+  // E4B QAT i4 g4096: o（full）— lanes / packed は E2B QAT 1536×4096 g4096 から（未実測）
+  { storage: "i4", n: 2560, k: 4096, group: 4096, lanes: 32, packedActivations: true },
 ];
 
 /** 実測表の行引き（M の範囲も含めて 1 箇所）。 */

@@ -119,15 +119,16 @@ Progress goes to stderr, one line per generation; **stdout carries only the fina
 
 Per generation (one JSONL line, `type: "run"`):
 
-| Field                                              | Meaning                                                                                                                         |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `set`, `visit`, `round`, `prompt`, `rep`, `warmup` | Where the line comes from (`rep` 0 is the warm-up)                                                                              |
-| `gpuTiming`                                        | Whether the device had GPU timing enabled                                                                                       |
-| `ttftMs`                                           | `generate()` call → first token event. The sequence (KV allocation) is created before the clock starts                          |
-| `decodeMsPerToken`                                 | `(completion − first token) / (delivered − 1)`                                                                                  |
-| `delivered`                                        | Token events received (a stop token counts)                                                                                     |
-| `tokensSha256`                                     | SHA-256 of the token ids spelled as JSON (`[1,2,…]`, UTF-8)                                                                     |
-| `gpu`                                              | With `--gpu-timing` only: per run kind (`prefill` / `decode`), `runs`, `msPerRun`, `dispatchesPerRun`, `clampedNegativeSamples` |
+| Field                                              | Meaning                                                                                                                                                                          |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set`, `visit`, `round`, `prompt`, `rep`, `warmup` | Where the line comes from (`rep` 0 is the warm-up)                                                                                                                               |
+| `gpuTiming`                                        | Whether the device had GPU timing enabled                                                                                                                                        |
+| `ttftMs`                                           | `generate()` call → first token event. The sequence (KV allocation) is created before the clock starts                                                                           |
+| `decodeMsPerToken`                                 | `(completion − first token) / (delivered − 1)`                                                                                                                                   |
+| `delivered`                                        | Token events received (a stop token counts)                                                                                                                                      |
+| `tokensSha256`                                     | SHA-256 of the token ids spelled as JSON (`[1,2,…]`, UTF-8)                                                                                                                      |
+| `gpu`                                              | With `--gpu-timing` only: per run kind (`prefill` / `decode`), `runs`, `msPerRun`, `dispatchesPerRun`, `clampedNegativeSamples`                                                  |
+| `decodePipelines`                                  | With `--gpu-timing` only: pipeline key → dispatches in one decode run (the planned census, `SessionDiagnostics.lastRunPipelines`). Every decode run of one generation must agree |
 
 The final line (`type: "summary"`, also printed to stdout) carries the derived values:
 
@@ -143,6 +144,19 @@ The final line (`type: "summary"`, also printed to stdout) carries the derived v
 | `deltaPercent`                                                     | `(value / reference − 1) × 100` for each of the above — negative is faster / fewer                                                                                     |
 | `tokensIdenticalAcrossVisits`                                      | Every generation of this set (warm-ups included) produced one token sequence per prompt                                                                                |
 | `tokensMatchReference`                                             | …and it is the reference's sequence. `false` means the flag changed the output — expected for flags that change summation order                                        |
+| `appliedKeys`                                                      | With `--gpu-timing` only: the set's `decodePipelines`, identical across all of its generations                                                                         |
+| `noKeyChange`                                                      | With `--gpu-timing` only, on every set but the reference: `true` when the set ran exactly the reference's set of pipeline keys (counts are not compared)               |
+
+**Which kernels actually ran.** A flag can be a silent no-op: `linearGemvReduce: "parallel"` (and the
+fusions that build on it) applies only to the matrix shapes listed in the parallel GEMV table
+(`PARALLEL_SHAPES`, ADR 0098); on any other shape the runtime keeps the sequential kernel and only the
+pipeline key tells. A timing-on run therefore also records which pipeline keys each decode step
+dispatched, and the summary marks a set whose key set equals the reference's with `noKeyChange: true`
+and prints one warning line on stderr. Such a set's GPU-time delta is measurement noise, not a
+"speed-neutral" result. A partial fallback (some shapes listed, others not) still changes the key set,
+so read `appliedKeys` for the per-key counts. Flags that do not select kernels (`submitPolicy`,
+`maxResidentPleBytes`, …) are expected to show `noKeyChange: true`. A timing-off run records no census — it does not pass the
+observation callback, so it stays on the shipping path.
 
 ## Discipline
 

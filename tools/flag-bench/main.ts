@@ -23,6 +23,9 @@
  * - Deno の GPU 時間は ns ではなく device の tick で返る（`docs/known-issues.md` の Arc B570 節 —
  *   B570 は 1 tick = 52.0833 ns で絶対値が約 52 分の 1）。周期は device の定数なので基準比 % は
  *   そのまま読めるが、ms の絶対値は period ≠ 1 の GPU では読まない。
+ * - `--gpu-timing` の走行では同じ観測席から decode run のキー別 dispatch 本数（`lastRunPipelines`）も
+ *   記録し、基準とキー集合が変わらない set を `noKeyChange` として報せる（並列 GEMV の適格表に
+ *   無い形ではフラグが縮退して no-op になり、GPU 時間だけでは「速度中立」と区別できない）。
  *
  * ## 読み方の注意
  *
@@ -49,6 +52,7 @@ import { runMain } from "../../examples/shared/run-main.ts";
 import { type BenchArgs, type FlagSet, needsSubgroups, parseArgs } from "./args.ts";
 import {
   abbaOrder,
+  addRunPipelines,
   addRunTiming,
   emptyRunGpuTally,
   gpuRecord,
@@ -228,6 +232,9 @@ const main = async (): Promise<void> => {
       throw new Error("[flag-bench] --gpu-timing を付けたが lastRunTiming が空（device が非対応）");
     }
     addRunTiming(tally, phase.kind, stats);
+    // どのカーネルキーが走ったか（計画上の census — 計測に依らない）。並列フラグが適格表に無い形で
+    // no-op になった set を、GPU 時間だけ見て「速度中立」と読み違えないための証跡。
+    addRunPipelines(tally, phase.kind, diagnostics.lastRunPipelines);
   };
 
   const load = (gpu: GpuContext, set: FlagSet): Promise<Gemma4Pipeline | Gemma4QatPipeline> => {
@@ -323,6 +330,9 @@ const main = async (): Promise<void> => {
           decodeMsPerToken: (endedAt - firstAt) / (ids.length - 1),
           tokensSha256: await sha256Hex(encoder.encode(JSON.stringify(ids))),
           ...(tally === undefined ? {} : { gpu: gpuRecord(tally) }),
+          ...(tally?.decodePipelines === undefined
+            ? {}
+            : { decodePipelines: tally.decodePipelines }),
         };
         rows.push(row);
         appendLine(args.out, row);
@@ -405,6 +415,14 @@ const main = async (): Promise<void> => {
             ` · ${one.gpuDispatchesPerStep?.toFixed(1)} dispatch/step`) +
         ` · 列 visit 間 ${one.tokensIdenticalAcrossVisits ? "同一" : "不一致"}` +
         ` / 基準と ${one.tokensMatchReference ? "同一" : "不一致"}\n`,
+    );
+  }
+  const unchanged = perSet.filter((one) => one.noKeyChange === true).map((one) => one.label);
+  if (unchanged.length > 0) {
+    const labels = unchanged.join(", ");
+    note(
+      `[flag-bench] 警告: decode のカーネルキー集合が基準 ${args.sets[0].label} と同じ set: ` +
+        `${labels}（カーネルを選び替えるフラグなら no-op — 適格表に無い形は縮退する）\n`,
     );
   }
 };

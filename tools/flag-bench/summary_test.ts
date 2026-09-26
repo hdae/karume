@@ -7,6 +7,7 @@
  * 2. **GPU 積算** — 種別ごとに分かれ、分母はその種別の run 本数・0 本の種別は欄ごと無い
  * 3. **要約** — 暖機を除いた中央値・基準比・token 列の一致（visit 間 / 基準と）
  * 4. **混ぜない** — 計測 ON と OFF の行が混ざった要約は落とす・計測 ON の行に内訳が欠けたら落とす
+ * 5. **census** — decode run のキー別本数を記録し、基準とキー集合が同じ set に `noKeyChange`
  *
  * NOTE: リポの慣習に合わせて `Deno.test`（文脈）+ `t.step`（振る舞い）で書く。
  */
@@ -14,11 +15,15 @@
 import { assert, assertAlmostEquals, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import {
   abbaOrder,
+  addRunPipelines,
   addRunTiming,
   emptyRunGpuTally,
   gpuRecord,
   median,
+  pipelineCensus,
   type RunRow,
+  sameCensus,
+  sameKeySet,
   summarizeSets,
 } from "./summary.ts";
 
@@ -218,5 +223,100 @@ Deno.test("summarizeSets: 簿記の破れ", async (t) => {
       "計測走行が無い",
     );
     assertThrows(() => summarizeSets([row({ set: "other" })], ["ref"]), Error, "未知の set");
+  });
+});
+
+Deno.test("pipelineCensus / addRunPipelines: decode run のキー別本数", async (t) => {
+  await t.step("行をキーの辞書順の キー → 本数 に畳み、同じキーの 2 行は落とす", () => {
+    const census = pipelineCensus([
+      { key: "rms_norm", dispatchCount: 43 },
+      { key: "linear_gemv_parallel_i4_g512:l4", dispatchCount: 126 },
+    ]);
+    assertEquals(Object.keys(census), ["linear_gemv_parallel_i4_g512:l4", "rms_norm"]);
+    assertEquals(census["rms_norm"], 43);
+    assertThrows(
+      () => pipelineCensus([{ key: "a", dispatchCount: 1 }, { key: "a", dispatchCount: 2 }]),
+      Error,
+      "2 行",
+    );
+  });
+  await t.step("decode run だけを記録し、prefill の census は器に入れない", () => {
+    const tally = emptyRunGpuTally();
+    addRunPipelines(tally, "prefill", [{ key: "linear_gemm", dispatchCount: 300 }]);
+    assertEquals(tally.decodePipelines, undefined);
+    addRunPipelines(tally, "decode", [{ key: "linear_gemv", dispatchCount: 300 }]);
+    assertEquals(tally.decodePipelines, { linear_gemv: 300 });
+  });
+  await t.step("1 生成の中で decode の census が変わったら落とす（本数だけの違いも）", () => {
+    const tally = emptyRunGpuTally();
+    addRunPipelines(tally, "decode", [{ key: "linear_gemv", dispatchCount: 300 }]);
+    addRunPipelines(tally, "decode", [{ key: "linear_gemv", dispatchCount: 300 }]);
+    assertThrows(
+      () => addRunPipelines(tally, "decode", [{ key: "linear_gemv", dispatchCount: 299 }]),
+      Error,
+      "変わった",
+    );
+  });
+  await t.step("decode run の census が無い・空なら落とす", () => {
+    assertThrows(() => addRunPipelines(emptyRunGpuTally(), "decode", undefined), Error, "空");
+    assertThrows(() => addRunPipelines(emptyRunGpuTally(), "decode", []), Error, "空");
+  });
+  await t.step("sameKeySet は本数を見ず、sameCensus は本数まで見る", () => {
+    assert(sameKeySet({ a: 1, b: 2 }, { b: 5, a: 1 }));
+    assertFalse(sameCensus({ a: 1, b: 2 }, { b: 5, a: 1 }));
+    assertFalse(sameKeySet({ a: 1 }, { a: 1, b: 1 }));
+    assertFalse(sameKeySet({ a: 1, b: 1 }, { a: 1, c: 1 }));
+  });
+});
+
+Deno.test("summarizeSets: 計測 ON の census（appliedKeys / noKeyChange）", async (t) => {
+  const gpu: RunRow["gpu"] = {
+    prefill: { runs: 1, msPerRun: 30, dispatchesPerRun: 500, clampedNegativeSamples: 0 },
+    decode: { runs: 95, msPerRun: 10, dispatchesPerRun: 400, clampedNegativeSamples: 0 },
+  };
+  const sequential = { linear_gemv_i4_g32: 300, rms_norm: 100 };
+  const parallel = { "linear_gemv_parallel_i4_g32:l4": 300, rms_norm: 100 };
+  const timed = (set: string, decodePipelines: RunRow["decodePipelines"], visit = 1): RunRow =>
+    row({ set, gpuTiming: true, gpu, decodePipelines, visit });
+  const rows: RunRow[] = [
+    timed("ref", sequential),
+    timed("ref", sequential, 4),
+    timed("gemvpar", parallel, 2),
+    timed("gemvpar", parallel, 3),
+    // 適格表に無い形で縮退した想定 — キー集合は基準と同じ（本数だけ違っても no-op 扱い）。
+    timed("noop", { linear_gemv_i4_g32: 300, rms_norm: 99 }, 5),
+  ];
+
+  await t.step("set ごとに appliedKeys を出し、基準とキー集合が同じ set にだけ noKeyChange", () => {
+    const [reference, gemvpar, noop] = summarizeSets(rows, ["ref", "gemvpar", "noop"]);
+    assertEquals(reference.appliedKeys, sequential);
+    assertEquals(gemvpar.appliedKeys, parallel);
+    assertFalse(Object.hasOwn(reference, "noKeyChange"));
+    assertEquals(gemvpar.noKeyChange, false);
+    assertEquals(noop.noKeyChange, true);
+  });
+  await t.step("census を記録していない行（計測 OFF・記録前）では欄ごと無い", () => {
+    const [reference] = summarizeSets([row({ set: "ref" })], ["ref"]);
+    assertFalse(Object.hasOwn(reference, "appliedKeys"));
+    assertFalse(Object.hasOwn(reference, "noKeyChange"));
+  });
+  await t.step("set の中で census が一部の走行にだけ在るなら落とす", () => {
+    const broken = [...rows, row({ set: "gemvpar", gpuTiming: true, gpu, visit: 3, rep: 2 })];
+    assertThrows(
+      () => summarizeSets(broken, ["ref", "gemvpar", "noop"]),
+      Error,
+      "decodePipelines が無い",
+    );
+  });
+  await t.step("set の中で census が走行ごとに違えば落とす", () => {
+    const drifted = [...rows, timed("gemvpar", sequential, 3)];
+    assertThrows(() => summarizeSets(drifted, ["ref", "gemvpar", "noop"]), Error, "走行ごとに違う");
+  });
+  await t.step("census を持つ set と持たない set が混ざっていたら落とす", () => {
+    const mixed = [
+      timed("ref", sequential),
+      row({ set: "gemvpar", gpuTiming: true, gpu, visit: 2 }),
+    ];
+    assertThrows(() => summarizeSets(mixed, ["ref", "gemvpar"]), Error, "混ざって");
   });
 });

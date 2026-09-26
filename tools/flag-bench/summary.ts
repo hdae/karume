@@ -50,7 +50,73 @@ export type KindTally = {
   dispatchCount: number;
   clampedNegativeSamples: number;
 };
-export type RunGpuTally = { readonly [K in RunKind]: KindTally };
+export type RunGpuTally = { readonly [K in RunKind]: KindTally } & {
+  /**
+   * decode run 1 本の**計画上の**キー別 dispatch 本数（`lastRunPipelines`）。1 生成の decode run は
+   * 同じ計画を回すので、最初の decode run で確定し、以降の run は一致を検査するだけ。
+   */
+  decodePipelines?: PipelineCensus;
+};
+
+/**
+ * パイプラインキー → 1 run の dispatch 本数（キーの辞書順）。どのカーネル変種が走ったかの記録で、
+ * 並列フラグが適格表に無い形で no-op になった set を「速度中立」と読み違えないための証跡。
+ */
+export type PipelineCensus = Readonly<Record<string, number>>;
+
+/** `SessionDiagnostics.lastRunPipelines` の行 → {@link PipelineCensus}。 */
+export const pipelineCensus = (
+  rows: readonly { readonly key: string; readonly dispatchCount: number }[],
+): PipelineCensus => {
+  const census: Record<string, number> = {};
+  for (const row of rows.toSorted((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))) {
+    if (Object.hasOwn(census, row.key)) {
+      throw new Error(`pipelineCensus: キー ${row.key} が 2 行ある`);
+    }
+    census[row.key] = row.dispatchCount;
+  }
+  return census;
+};
+
+/** キーと本数の両方が同じか。 */
+export const sameCensus = (left: PipelineCensus, right: PipelineCensus): boolean => {
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && right[key] === left[key]);
+};
+
+/** キーの集合だけが同じか（本数は見ない）。 */
+export const sameKeySet = (left: PipelineCensus, right: PipelineCensus): boolean => {
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key));
+};
+
+/**
+ * run 1 本の `lastRunPipelines` を器へ記録する（decode run だけ — prefill は計画が prompt 長で
+ * 変わり、フラグの効き目の比較には decode の 1 step が要る）。
+ *
+ * MUST: census が無い run・1 生成の中で decode の census が変わる run は落とす（欠けた / 混ざった
+ * 記録で「キーが変わらない」と読ませない）。
+ */
+export const addRunPipelines = (
+  tally: RunGpuTally,
+  kind: RunKind,
+  rows: readonly { readonly key: string; readonly dispatchCount: number }[] | undefined,
+): void => {
+  if (kind !== "decode") return;
+  if (rows === undefined || rows.length === 0) {
+    throw new Error("addRunPipelines: decode run の lastRunPipelines が空");
+  }
+  const census = pipelineCensus(rows);
+  if (tally.decodePipelines === undefined) {
+    tally.decodePipelines = census;
+    return;
+  }
+  if (!sameCensus(tally.decodePipelines, census)) {
+    throw new Error("addRunPipelines: 1 生成の中で decode run の census が変わった");
+  }
+};
 
 export const emptyRunGpuTally = (): RunGpuTally => {
   const one = (): KindTally => ({
@@ -128,6 +194,8 @@ export type RunRow = {
   readonly tokensSha256: string;
   /** `gpuTiming` のときだけ。 */
   readonly gpu?: RunGpuRecord;
+  /** `gpuTiming` のときだけ: decode run 1 本のキー別 dispatch 本数（{@link addRunPipelines}）。 */
+  readonly decodePipelines?: PipelineCensus;
 };
 
 /** 基準比（`(値 / 基準 − 1) × 100` — 正は遅い / 多い）。 */
@@ -153,6 +221,14 @@ export type SetSummary = {
   readonly tokensIdenticalAcrossVisits: boolean;
   /** prompt ごとに、この set と基準の全走行の token 列が 1 種類だったか（フラグが出力を変えたか）。 */
   readonly tokensMatchReference: boolean;
+  /** `gpuTiming` のときだけ: decode run 1 本のキー別 dispatch 本数（この set の全走行で同一）。 */
+  readonly appliedKeys?: PipelineCensus;
+  /**
+   * `gpuTiming` のときだけ・基準以外の set だけ: decode のキー集合が基準と同じか。true は
+   * 「カーネルの選択が 1 つも変わっていない」— カーネルを選び替えるはずのフラグなら no-op
+   * （適格表に無い形での縮退など）で、GPU 時間の差は計測の揺れでしかない。
+   */
+  readonly noKeyChange?: boolean;
 };
 
 export const median = (values: readonly number[]): number => {
@@ -184,6 +260,32 @@ type Measured = {
   readonly gpuDecodeMsPerStep?: number;
   readonly gpuDispatchesPerStep?: number;
   readonly gpuPrefillMsPerRun?: number;
+  readonly appliedKeys?: PipelineCensus;
+};
+
+/**
+ * set の全走行（暖機を含む・全 visit）の decode census を 1 つに畳む。フラグは Session 構築時に
+ * 固定される静的ノブなので、同じ set の走行は同じ計画を回す — 違えば記録が壊れている。
+ *
+ * census は全走行に在るか、どれにも無いか（census を記録する前の行）のどちらか。一部だけ在る
+ * のは記録の破れなので落とす。どれにも無ければ `undefined`（`appliedKeys` を出さない）。
+ */
+const setCensus = (label: string, rows: readonly RunRow[]): PipelineCensus | undefined => {
+  const recorded = rows.flatMap((row) =>
+    row.decodePipelines === undefined ? [] : [row.decodePipelines]
+  );
+  if (recorded.length === 0) return undefined;
+  const missing = rows.find((row) => row.decodePipelines === undefined);
+  if (missing !== undefined) {
+    throw new Error(
+      `summarizeSets: set ${label} の ${missing.prompt} visit ${missing.visit} rep ${missing.rep} に decodePipelines が無い`,
+    );
+  }
+  const [first] = recorded;
+  if (!recorded.every((census) => sameCensus(first, census))) {
+    throw new Error(`summarizeSets: set ${label} の decode census が走行ごとに違う`);
+  }
+  return first;
 };
 
 const gpuField = (
@@ -219,6 +321,7 @@ const measure = (label: string, rows: readonly RunRow[], gpuTiming: boolean): Me
         gpuDecodeMsPerStep: gpuField(label, measured, "decode", (r) => r.msPerRun),
         gpuDispatchesPerStep: gpuField(label, measured, "decode", (r) => r.dispatchesPerRun),
         gpuPrefillMsPerRun: gpuField(label, measured, "prefill", (r) => r.msPerRun),
+        appliedKeys: setCensus(label, rows),
       }
       : {}),
   };
@@ -249,6 +352,10 @@ export const summarizeSets = (
     measure(label, rows.filter((row) => row.set === label), gpuTiming)
   );
   const reference = all[0];
+  // census も set を跨いで全部在るか全部無いか（1 ファイル = 1 回の起動なので混ざらない）。
+  if (new Set(all.map((one) => one.appliedKeys === undefined)).size > 1) {
+    throw new Error("summarizeSets: decodePipelines を持つ set と持たない set が混ざっている");
+  }
   const referenceShas = shasByPrompt(reference.rows);
   return all.map((one) => {
     const ownShas = shasByPrompt(one.rows);
@@ -290,6 +397,11 @@ export const summarizeSets = (
       },
       tokensIdenticalAcrossVisits: identical,
       tokensMatchReference: matches,
+      ...(one.appliedKeys === undefined ? {} : { appliedKeys: one.appliedKeys }),
+      // 基準自身には立てない（自明に true で、警告の対象にならない）。
+      ...(one === reference || one.appliedKeys === undefined || reference.appliedKeys === undefined
+        ? {}
+        : { noKeyChange: sameKeySet(one.appliedKeys, reference.appliedKeys) }),
     };
   });
 };

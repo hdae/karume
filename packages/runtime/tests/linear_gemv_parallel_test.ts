@@ -26,6 +26,32 @@ describe("GEMV並列加算の選択とコード生成", () => {
     assertEquals(linearGemvParallelLanes("i4", 1, 260, 1536, 32), undefined);
     assertEquals(linearGemvParallelLanes("f16", 1, 256, 1536), undefined);
   });
+  it("通常 E4B（i4 g32 + i8 lm_head）の形を E2B の同種行の lanes で選ぶ（未実測の写し）", () => {
+    // 形は上流 config（hidden 2560・intermediate 10240・kv 2・層 42・PLE 256）から導いた実形。
+    // QAT E4B は配布ミラーの記述子を根にする census テスト側が見る。
+    const rows: readonly [number, number, 4 | 16 | 32][] = [
+      [10752, 2560, 4],
+      [2048, 2560, 4],
+      [512, 2560, 32],
+      [256, 2560, 32],
+      [2560, 2048, 32],
+      [10240, 2560, 4],
+      [2560, 10240, 32],
+      [2560, 256, 4],
+      [4096, 2560, 4],
+      [1024, 2560, 32],
+      [2560, 4096, 32],
+    ];
+    for (const m of [1, 4, 8]) {
+      for (const [n, k, lanes] of rows) {
+        assertEquals(linearGemvParallelLanes("i4", m, n, k, 32), lanes, `i4 ${n}×${k} M${m}`);
+      }
+      assertEquals(linearGemvParallelLanes("i8", m, 262144, 2560), 16);
+    }
+    assertEquals(linearGemvParallelLanes("i4", 9, 10240, 2560, 32), undefined);
+    // i2 の lm_head（QAT E4B）は E2B にも行が無いので足していない。
+    assertEquals(linearGemvParallelLanes("i2", 1, 262144, 2560), undefined);
+  });
   it("キーが加算形・格納・group・laneを区別する", () => {
     const keys = new Map<string, string>();
     for (const storage of ["i2", "i4", "i8"] as const) {
