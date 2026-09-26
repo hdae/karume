@@ -33,14 +33,14 @@ describe({
       const adapter = await navigator.gpu.requestAdapter();
       const features = new Set<string>(adapter?.features ?? []);
       const host: GPU & { wgslLanguageFeatures?: Iterable<string> } = navigator.gpu;
-      const supported = features.has("timestamp-query") && features.has("subgroups") &&
+      const supported = features.has("subgroups") &&
         features.has("subgroup-size-control") &&
         new Set(host.wgslLanguageFeatures).has("subgroup_id");
       await t.step({
         name: "subgroups実走（Deno未対応なら明示SKIP、Chromeは別途同じ検査を実行）",
         ignore: !supported,
         fn: async () => {
-          const gpu = await acquireGpu({ subgroups: true, gpuTiming: true });
+          const gpu = await acquireGpu({ subgroups: true });
           try {
             await checkGemvSubgroup(gpu);
             await checkGemvSubgroupCensus(gpu);

@@ -183,6 +183,9 @@ GpuDeviceLostError: flush 中に device が失われた（再構築が必要） 
 **見立てのまま**（逐語の裏付けはまだ無い）。傍証として、単一 query set の
 `packages/runtime/tests/gpu_timing_test.ts` は同じ M2 で緑 = 失敗は本数依存であって無条件ではない。
 wgpu#9414 の「timestamp 全ゼロ」はこの構成では観測されていない。
+**2026-09-26**: census を計測非依存化した（源を `lastRunPipelines` へ移し、census テストから
+`gpuTiming: true` と `TIMESTAMP_QUERY_AVAILABLE` 判定を外した）ので、query set 本数依存のこの赤
+（13 本目）は消える見込み — M2 での確認待ち。
 
 切り分け実験（実機が要る・1 ターンだけ走らせる）:
 

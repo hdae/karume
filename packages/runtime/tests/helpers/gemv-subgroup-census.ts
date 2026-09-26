@@ -4,6 +4,7 @@ import type { GpuContext } from "../../src/gpu/device.ts";
 import { createSessionFromContainer } from "../../src/runtime/executor.ts";
 import type { TensorInput } from "./container-write.ts";
 import { type DeclarationJson, f32Bytes, GRAPH_NAME, openModelBytes } from "./model-fixture.ts";
+import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./pipeline-census.ts";
 
 /** 格納の呼び名 → codec 台帳の登録名（i2 は per-channel の `int2-off`）。 */
 const CODEC: Readonly<Record<"i2" | "i4" | "i8", CodecName>> = {
@@ -86,14 +87,12 @@ export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> =>
           const output = (await session.run({ x: { dtype: "f32", shape: [m, k], data: input } })).y;
           assertEquals(output.shape, [m, n]);
           for (const value of output.data) assert(Number.isFinite(value));
-          const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key);
-          assert(keys !== undefined && keys.length > 0);
+          const where = `${storage} M${m}`;
+          const census = requireCensus(session.diagnostics().lastRunPipelines, where);
           assertEquals(
-            keys.some((key) =>
-              key.startsWith("linear_gemv_parallel") && key.endsWith(":subgroup32")
-            ),
+            countDispatches(census, SEAT_SIGNATURES.linearGemvReduce["parallel-subgroup32"]) > 0,
             parallel && m <= 8 && n !== 36,
-            `${storage} M${m} ${keys}`,
+            `${where} ${census.map((row) => row.key)}`,
           );
           if (parallel && m <= 8 && n !== 36) {
             const first = new Uint32Array(output.data.buffer, output.data.byteOffset, n)

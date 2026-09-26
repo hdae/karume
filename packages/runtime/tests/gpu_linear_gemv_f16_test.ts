@@ -19,12 +19,8 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import {
-  GPU_AVAILABLE,
-  SHADER_F16_AVAILABLE,
-  TIMESTAMP_QUERY_AVAILABLE,
-  TIMING_ACQUIRE_OPTIONS,
-} from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 
 const activation = (length: number): Float32Array<ArrayBuffer> =>
@@ -96,7 +92,7 @@ const run = async (
     const { y } = await session.run({ x: data.input });
     return {
       output: y,
-      keys: session.diagnostics().lastRunTiming?.entries.map((e) => e.key) ?? [],
+      keys: requireCensus(session.diagnostics().lastRunPipelines, "linear").map((row) => row.key),
     };
   } finally {
     await session.dispose();
@@ -110,7 +106,7 @@ Deno.test({
   name: "f16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (
         const [n, k] of [[64, 128], [100, 40], [36, 48], [68, 56], [4, 8], [32, 24], [36, 136], [
@@ -122,10 +118,8 @@ Deno.test({
         const actual = await run(gpu, data);
         // f16 の門は M=1 だけ。M=2 は同じ M16N16 GEMM 骨格で、族内比較にはならない。
         const expected = await run(gpu, fixture(2, n, k));
-        if (TIMESTAMP_QUERY_AVAILABLE) {
-          assertEquals(actual.keys, [linearGemvKey("f16")]);
-          assertEquals(expected.keys, [linearKey("f16", true, "f32", 2)]);
-        }
+        assertEquals(actual.keys, [linearGemvKey("f16")]);
+        assertEquals(expected.keys, [linearKey("f16", true, "f32", 2)]);
         assertEquals(actual.output.shape, [1, n]);
         assertEquals(bits(actual.output), bits(expected.output).subarray(0, n), `n=${n} k=${k}`);
         const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
@@ -141,7 +135,7 @@ Deno.test({
   name: "f16 GEMV の行数・K 整列・N 整列の門と f32 格納の別変種を検証する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (
         const c of [
@@ -153,13 +147,11 @@ Deno.test({
       ) {
         const data = fixture(c.m, c.n, c.k, c.storage);
         const actual = await run(gpu, data);
-        if (TIMESTAMP_QUERY_AVAILABLE) {
-          assertEquals(actual.keys, [
-            c.storage === "f32"
-              ? linearGemvKey("f32")
-              : linearKey(c.storage, c.k % 4 === 0 && c.n % 4 === 0, "f32", c.m),
-          ]);
-        }
+        assertEquals(actual.keys, [
+          c.storage === "f32"
+            ? linearGemvKey("f32")
+            : linearKey(c.storage, c.k % 4 === 0 && c.n % 4 === 0, "f32", c.m),
+        ]);
         const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
         assert(report.pass, formatAllclose(report));
       }
@@ -171,10 +163,10 @@ Deno.test({
 
 Deno.test({
   name: "f16 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
-  // 検査はキーだけ（数値は上のケースが持つ）なので、timestamp が無い機では空の緑にせず SKIP する。
-  ignore: !SHADER_F16_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  // 検査はキーだけ（数値は上のケースが持つ）。census は計測に依らないので shader-f16 だけを見る。
+  ignore: !SHADER_F16_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu({ ...TIMING_ACQUIRE_OPTIONS, shaderF16: true });
+    const gpu = await acquireGpu({ shaderF16: true });
     try {
       const actual = await run(gpu, fixture(1, 36, 40), { linearCompute: "f16" });
       assertEquals(actual.keys, [linearKey("f16", true, "f16", 1)]);

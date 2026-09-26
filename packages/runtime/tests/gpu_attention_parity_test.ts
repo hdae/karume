@@ -29,7 +29,8 @@ import {
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
 import { attentionPvKey, attentionQkKey } from "../src/kernels/attention.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
@@ -372,7 +373,7 @@ Deno.test({
   name: "加算 mask は i8a8 とは組めない（黙って縮退しない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const { graph, inputs } = maskedAttention();
       // i8a8 との組み合わせは fail loudly（縮退しない）
@@ -394,16 +395,15 @@ Deno.test({
  * **census**（ADR 0058 決定 4）。mask 変種が実際に走ったか・dispatch が増えていないかは
  * キーと本数でしか見えない（mask を丸ごと落としても形は通る）。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
- * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
- * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると検査が 1 つも
- * 走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
+ * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
+ * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 Deno.test({
-  name: "加算 mask は ①QK のキーと束縛だけを増やす（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "加算 mask は ①QK のキーと束縛だけを増やす（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const { graph, inputs } = maskedAttention();
       const session = await createSessionFromContainer(
@@ -413,8 +413,7 @@ Deno.test({
       );
       try {
         await session.run(inputs);
-        const entries = session.diagnostics().lastRunTiming?.entries ?? [];
-        assert(entries.length > 0, "内訳が空（キー検査が空振りしている）");
+        const entries = requireCensus(session.diagnostics().lastRunPipelines, "masked attention");
         const keys = entries.map((entry) => entry.key);
         // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
         assertEquals(entries.reduce((sum, entry) => sum + entry.dispatchCount, 0), 3);

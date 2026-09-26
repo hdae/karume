@@ -54,7 +54,8 @@ import {
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus, SEAT_SIGNATURES } from "./helpers/pipeline-census.ts";
 import { openResults, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesGraph } from "./helpers/series-graphs.ts";
@@ -141,19 +142,13 @@ type KeyCensus = {
  * `otherLinear` に入らず 0 のまま通る。
  */
 const isLinearKey = (key: string): boolean => key.startsWith("linear");
-const isI8a8 = (key: string): boolean => key.includes(":i8a8:");
+const isI8a8 = SEAT_SIGNATURES.linearCompute.a8;
 const isQuantizeRows = (key: string): boolean => key.startsWith("quantize_rows:");
 
 const censusOf = (diagnostics: SessionDiagnostics): KeyCensus => {
-  const entries = diagnostics.lastRunTiming?.entries;
-  // MUST: 計測が無効な run を「0 本」として数えない — `otherLinear: 0` の検査が黙って空振り
-  // する（`acquireGpu({ gpuTiming: true })` を渡し忘れた形が緑のまま通る）。
-  if (entries === undefined) {
-    throw new Error(
-      "run に lastRunTiming が無い（計測が有効な device で走っていない — この門は " +
-        "acquireGpu({ gpuTiming: true }) を前提にしている）",
-    );
-  }
+  // MUST: census の無い run を「0 本」として数えない — `otherLinear: 0` の検査が黙って空振り
+  // する（requireCensus が undefined / 空を落とす）。
+  const entries = requireCensus(diagnostics.lastRunPipelines, "deberta w8a8");
   let i8a8Linear = 0;
   let quantizeRows = 0;
   let otherLinear = 0;
@@ -311,24 +306,16 @@ for (const file of FILES) {
   });
 }
 
-if (RUNNABLE && !TIMESTAMP_QUERY_AVAILABLE) {
-  console.warn(
-    "[karume] アダプタが 'timestamp-query' を列挙しないため DeBERTa w8a8 のキー census を SKIP " +
-      "する（数値門は残る — ADR 0021 の計測は device 作成時にしか要求できない）",
-  );
-}
-
 Deno.test({
   name:
     `DeBERTa w8a8（${VARIANT}）: run が i8a8 GEMM と quantize_rows だけで linear を回す（キー census）`,
-  ignore: !(RUNNABLE && TIMESTAMP_QUERY_AVAILABLE),
+  ignore: !RUNNABLE,
   fn: async () => {
     // 内訳は T に依らない（計画は記号次元の束縛で形が変わるだけで、dispatch の並びは同じ）ので
     // 1 ケースで足りる。`padded` を使うのはマスク経路まで同じ run に乗せるため。
     const file = `${ACT_IO_PREFIX}padded${IO_SUFFIX}`;
     const { parsed, inputs } = await openCase(file);
-    // MUST: 計測は device 作成時の opt-in（既定は要求しない）。
-    const gpu = await acquireGpu({ gpuTiming: true });
+    const gpu = await acquireGpu();
     try {
       const session = await parsed.createContainerSession(gpu, { linearCompute: "a8" });
       try {

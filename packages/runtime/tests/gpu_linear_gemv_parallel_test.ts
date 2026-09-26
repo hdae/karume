@@ -70,6 +70,23 @@ describe({
               group: 4096,
             });
           }
+          // E4B の行（2026-09-26・lanes は E2B から写した未実測）の縮約長 × group。1 出力の算術は
+          // (格納, k, group, lanes) だけで決まり n は dispatch 数しか変えないので、n は上と同じ 36 列
+          // （workgroup の列数で割り切れない端を含む）で全 lanes を回す。i2 は E4B の行を持たない。
+          if (storage === "i4") {
+            shapes.push(
+              { k: 2560, group: 32 },
+              { k: 10240, group: 32 },
+              { k: 2048, group: 32 },
+              { k: 256, group: 32 },
+              { k: 2560, group: 512 },
+              { k: 2048, group: 2048 },
+              { k: 10240, group: 2048 },
+            );
+          }
+          if (storage === "i8") {
+            shapes.push({ k: 2560, group: undefined }, { k: 256, group: undefined });
+          }
           for (const { k, group } of shapes) {
             const n = 36;
             const data = fixture(storage, n, k, group);

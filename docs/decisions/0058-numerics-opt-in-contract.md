@@ -157,7 +157,9 @@ M2 実機の判定は **dp4a 厳密一致**（カナリア 16 本すべて緑・
   行のクラスは quant 席の `session` から導出し、別表に持たない）。anima の 11 ケース中 10 ケースが実用行。
 - **決定 4 ②③の読み替え**: 帯門の導出規則と恒真化対策は 0110 決定 3〜5（カーネル門の 4 点型・帯の導出・
   E2E は census + 同機参照層との床 + 崩壊上限）。census の源は計測に依らない診断欄
-  （`SessionDiagnostics.lastRunPipelines` — 直近 run の recipe 列から導く）へ移す。
+  （`SessionDiagnostics.lastRunPipelines` — 直近 run の recipe 列から導く）へ移す。決定 4 ③の census の
+  源は `lastRunPipelines` へ移し終え、述語の網羅表（数値を変える席 × 非参照値 → キーの判別述語）は
+  テスト helper（`packages/runtime/tests/helpers/pipeline-census.ts`）が持つ。
 - **決定 6 の拡張**: デバイス内決定性 MUST は実用層にも掛かる（0110 決定 6）。壁時計で経路を選ぶホスト側の
   適応方針は、選べる経路の同一性が当該 device で機械検証済みの場合に限る（追記 2026-08-29 一般則 3 の拡張）。
 - **将来課題①②③の解き方**: ① 合成規則は「明示指定 > quant 席の宣言 > runtime 既定」を全 family 共通の

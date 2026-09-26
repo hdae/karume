@@ -63,7 +63,8 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -433,7 +434,7 @@ Deno.test({
 
 type RunResult = {
   readonly output: Float32Array<ArrayBuffer>;
-  /** 走ったパイプラインキー（GPU 時間計測が無い環境では空）。 */
+  /** 走ったパイプラインキー（census — 計測に依らない）。 */
   readonly entries: readonly { readonly key: string; readonly dispatchCount: number }[];
 };
 
@@ -458,13 +459,9 @@ const runAttention = async (
   );
   try {
     const outputs = await session.run({ x0: q, x1: k, x2: v });
-    const timing = session.diagnostics().lastRunTiming;
     return {
       output: (outputs["y"] as Tensor).data as Float32Array<ArrayBuffer>,
-      entries: (timing?.entries ?? []).map((entry) => ({
-        key: entry.key,
-        dispatchCount: entry.dispatchCount,
-      })),
+      entries: requireCensus(session.diagnostics().lastRunPipelines, "attention"),
     };
   } finally {
     await session.dispose();
@@ -476,7 +473,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // MUST: **shader-f16 を要求しない既定の device** で走ること（i8a8 は feature ゲートの外）。
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
@@ -506,18 +503,16 @@ Deno.test({
  * **census**（ADR 0058 決定 4）。どの変種が実際に走ったかはキーでしか見えない
  * （i8a8 縮退も dp4a ↔ エミュも値はビット同一のまま経路だけが変わる）。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
- * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
- * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると変種選択の検査が
- * 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。数値契約は
- * 上のテストが計測なし機でも走り続ける。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
+ * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
+ * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 Deno.test({
   name:
-    "attentionCompute:'a8' の変種選択（①QK i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+    "attentionCompute:'a8' の変種選択（①QK i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
@@ -562,7 +557,7 @@ Deno.test({
   name: "attentionCompute:'a8' は D % 4 != 0 で f32 経路へ縮退する（出力はビット同一・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       // D = 13（4 の倍数でない）は ①QK の語境界条件を満たさないので f32 経路のまま。
       // この形は N = 19 も 4 の倍数でないので ③PV も同時に縮退する（段ごとの独立な判定と
@@ -579,13 +574,12 @@ Deno.test({
   },
 });
 
-/** 縮退が**沈黙**である以上キー検査が 2 本目の検出器。SKIP / 無条件 assert の理由は上の census と同じ。 */
+/** 縮退が**沈黙**である以上キー検査が 2 本目の検出器。無条件 assert の理由は上の census と同じ。 */
 Deno.test({
-  name:
-    "attentionCompute:'a8' の D % 4 != 0 縮退は i8a8 も量子化も 1 本も走らせない（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "attentionCompute:'a8' の D % 4 != 0 縮退は i8a8 も量子化も 1 本も走らせない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = { b: 1, h: 2, m: 17, n: 19 };
       const degraded = await runAttention(gpu, shape, 13, { attentionCompute: "a8" });

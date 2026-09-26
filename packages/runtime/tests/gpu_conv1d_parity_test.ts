@@ -58,7 +58,8 @@ import {
   openModelBytes,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -658,7 +659,7 @@ const conv1dKeysUsed = async (
   channels: number,
   groups: number,
 ): Promise<ReadonlySet<string>> => {
-  const gpu = await acquireGpu({ gpuTiming: true });
+  const gpu = await acquireGpu();
   const graph = singleOpDeclaration(
     "conv1d",
     [[1, channels, 8], [channels, channels / groups, 3], [channels]],
@@ -676,9 +677,9 @@ const conv1dKeysUsed = async (
       x1: fill([channels, channels / groups, 3], WEIGHT),
       x2: fill([channels], BIAS),
     });
-    const timing = session.diagnostics().lastRunTiming;
-    assert(timing !== undefined, "timestamp-query が無効（キー別内訳が取れない）");
-    return new Set(timing.entries.map((entry) => entry.key));
+    return new Set(
+      requireCensus(session.diagnostics().lastRunPipelines, "conv").map((row) => row.key),
+    );
   } finally {
     await session.dispose();
     gpu.destroy();
@@ -687,7 +688,7 @@ const conv1dKeysUsed = async (
 
 Deno.test({
   name: "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
     // Cin = Cout = 6・K=3 → kFlat = 18（groups=1）で 4 の倍数でないのでスカラ変種。
     // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行。
@@ -709,7 +710,7 @@ Deno.test({
  */
 Deno.test({
   name: "conv1d の executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
     // Cout = 96（`96 % 64 == 32`）→ 32 行。kFlat = 288・Lout = 8 なので v4。
     assertEquals(

@@ -38,7 +38,8 @@ import { assertEquals } from "@std/assert";
 import { acquireGpu } from "@karume/runtime";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { IrodoriPipeline } from "../mod.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus, SEAT_SIGNATURES } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import {
   ASSETS_DIR,
   DIST_COMMAND,
@@ -99,9 +100,8 @@ const MEASURED: {
    * 量子化 recon の sizeBreakdown）。i8a8 の linear は「活性を per-token i8 へ落とす
    * `quantize_rows` → 整数内積の GEMM」の対で走るので、期待は本数の関数として書ける。
    *
-   * 導出: `undefined` のままこの門を走らせ、ログに出る実測本数を書き写す。
-   * `timestamp-query` を持たないアダプタでは観測面そのものが無いので、その環境ではこの
-   * 1 本だけ SKIP する（数値側の被覆は判別帯が残る）。
+   * 導出: `undefined` のままこの門を走らせ、ログに出る実測本数を書き写す（源は計測に依らない
+   * census = `lastRunPipelines`）。
    */
   readonly ditKeys: { readonly i8a8Linear: number; readonly quantizeRows: number } | undefined;
 } = {
@@ -114,7 +114,7 @@ const CENSUS_SECONDS = 1;
 
 /** パイプラインキーの分類（綴りの正本は `src/kernels/linear{,-i8a8}.ts` / `quantize-rows.ts`）。 */
 const isLinearKey = (key: string): boolean => key.startsWith("linear:");
-const isI8a8 = (key: string): boolean => key.includes(":i8a8:");
+const isI8a8 = SEAT_SIGNATURES.linearCompute.a8;
 const isQuantizeRows = (key: string): boolean => key.startsWith("quantize_rows:");
 
 /** 1 run ぶんの分類済み dispatch 数。 */
@@ -124,11 +124,10 @@ type KeyCensus = {
   readonly plainLinear: number;
 };
 
-const censusOf = (diagnostics: SessionDiagnostics): KeyCensus | undefined => {
-  const entries = diagnostics.lastRunTiming?.entries;
-  // MUST: 計測が無効な run を「0 本」として数えない — キー検査が黙って空振りする
-  //（`acquireGpu({ gpuTiming: true })` を渡し忘れた形が、緑のまま通ってしまう）。
-  if (entries === undefined) return undefined;
+const censusOf = (diagnostics: SessionDiagnostics): KeyCensus => {
+  // MUST: census の無い run を「0 本」として数えない — キー検査が黙って空振りする
+  //（requireCensus が undefined / 空を落とす）。
+  const entries = requireCensus(diagnostics.lastRunPipelines, "dit");
   let i8a8Linear = 0;
   let quantizeRows = 0;
   let plainLinear = 0;
@@ -242,20 +241,14 @@ Deno.test({
   },
 });
 
-if (RUNNABLE && !TIMESTAMP_QUERY_AVAILABLE) {
-  console.warn(
-    "[karume] アダプタが 'timestamp-query' を列挙しないため i8-a8 のキー census を SKIP する" +
-      "（判別帯の 2 本は残る — ADR 0021 の計測は device 作成時にしか要求できない）",
-  );
-}
-
 Deno.test({
   name: `e2e(実GPU): dit の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
-  ignore: !(RUNNABLE && TIMESTAMP_QUERY_AVAILABLE),
+  ignore: !RUNNABLE,
   fn: async () => {
-    // MUST: 計測は device 作成時の opt-in（既定は要求しない）。ここで `gpu` を渡すので破棄も
-    // こちらの責任になる（渡した側が所有権を持つ — `IrodoriPipelineOptions.gpu`）。
-    const gpu = await acquireGpu({ gpuTiming: true });
+    // ここで `gpu` を渡すので破棄もこちらの責任になる（渡した側が所有権を持つ —
+    // `IrodoriPipelineOptions.gpu`）。計測を要求しない device なので DiT ループは常駐経路
+    // （src/irodori/pipeline.ts — `enqueue` ごとに観測席へ届き、census はその run のもの）。
+    const gpu = await acquireGpu();
     try {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, QUANT);
@@ -266,14 +259,7 @@ Deno.test({
         quant: QUANT,
         onRunDiagnostics: (component, diagnostics) => {
           if (component !== "dit") return;
-          const census = censusOf(diagnostics);
-          if (census === undefined) {
-            throw new Error(
-              "dit の run に lastRunTiming が無い（計測が有効な device で走っていない" +
-                " — この門は acquireGpu({ gpuTiming: true }) を前提にしている）",
-            );
-          }
-          observed.push(census);
+          observed.push(censusOf(diagnostics));
         },
       });
       // `durationSeconds` で S を固定するのは `duration` を回さず短く保つため（見たいのは

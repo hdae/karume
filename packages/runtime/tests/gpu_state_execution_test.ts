@@ -49,7 +49,8 @@ import { OpContractError } from "../src/ops.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { type DeclarationJson, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./helpers/pipeline-census.ts";
 
 /**
  * 突合の許容誤差。根拠は gpu_state_attention_test.ts の `STATE_TOLERANCE` と同じ
@@ -723,15 +724,14 @@ Deno.test({
 /**
  * **census**（ADR 0058 決定 4）— GQA 変種のキーが**実際に走った**ことを見る。
  *
- * MUST: 計測を要求しない device では明示 SKIP し、走るときは空の内訳を無条件に FAIL にする
- * （`entries` が空なら素通り、にすると全ケースが無検査のまま緑になる）。
+ * MUST: 源は計測に依らない `lastRunPipelines`。空の census は無条件に FAIL にする
+ * （`entries` が空なら素通り、にすると全ケースが無検査のまま緑になる — `requireCensus`）。
  */
 Deno.test({
-  name:
-    "states 形 attention の dispatch は変種キーどおりに走る（census・実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "states 形 attention の dispatch は変種キーどおりに走る（census・実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (
         const [label, model, sliding] of [
@@ -744,7 +744,9 @@ Deno.test({
         const context = await session.createGenerationContext({ chunkLength: 2 });
         try {
           await runStep(session, context, model, stepInputs(model, 2, 7), 2, 2);
-          const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
+          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map((row) =>
+            row.key
+          );
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           assertEquals(
             keys.includes(stateQkKey(sliding, model.heads !== model.kvHeads)),
@@ -783,11 +785,10 @@ Deno.test({
  * 真偽で直書きする（判定を輸入すると実装と一緒に間違える）。
  */
 Deno.test({
-  name:
-    "states 形 attention ①QK / ③PV の縮約形は席と計画の M どおりに走る（census・実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "states 形 attention ①QK / ③PV の縮約形は席と計画の M どおりに走る（census・実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (
         const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
@@ -815,7 +816,9 @@ Deno.test({
             chunkRows,
             chunkRows,
           );
-          const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
+          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map((row) =>
+            row.key
+          );
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           const gqa = model.heads !== model.kvHeads;
           for (
@@ -877,11 +880,10 @@ const TILED_SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 16
  * MUST: 期待は行ごとに**段ごとに**直書きする（判定を輸入すると実装と一緒に間違える）。
  */
 Deno.test({
-  name:
-    "states 形 attention ①QK / ③PV の 3 経路は計画の M と席どおりに走る（census・実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "states 形 attention ①QK / ③PV の 3 経路は計画の M と席どおりに走る（census・実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (
         const [label, model, sliding, reduce, chunkRows, qkExpected, pvExpected] of [
@@ -910,7 +912,9 @@ Deno.test({
             chunkRows,
             chunkRows,
           );
-          const keys = session.diagnostics().lastRunTiming?.entries.map((entry) => entry.key) ?? [];
+          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map((row) =>
+            row.key
+          );
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           const gqa = model.heads !== model.kvHeads;
           const shown = keys.join(" / ");
@@ -2099,11 +2103,8 @@ const FUSION_CASES = [
 /**
  * 席 `"parallel-fused"`（② と ③' の融合）を `Session.run` 経由で見る門の 1 本目 = 値。
  *
- * MUST: 数値一致とキー確認は**別テストに割る**（キー確認は下）。`TIMING_ACQUIRE_OPTIONS` は
- * timestamp-query 不在で `gpuTiming: false` に落ち、`lastRunTiming` が undefined になるので
- * キー確認は timestamp 付き device に閉じるしかない。一方 u32 一致は timestamp を要らないので、
- * 1 本にまとめると Session を通した唯一の数値一致まで timestamp 不在の device で丸ごと
- * skip され、結線の誤りを自動検証が 1 件も捕まえなくなる。
+ * NOTE: 数値一致とキー確認は別テストに割ってある（キー確認は下）。キー確認の源は計測に依らない
+ * census（`lastRunPipelines`）なので、どちらも計測の無い device で走る。
  */
 Deno.test({
   name: "parallel-fused は state 更新後も parallel と u32 一致する（実 GPU）",
@@ -2160,10 +2161,10 @@ Deno.test({
  * 立つキーは出揃う（値の進行は上のテストが見る）。
  */
 Deno.test({
-  name: "parallel-fused は適用形だけstats/PVをまとめる（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "parallel-fused は適用形だけstats/PVをまとめる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
         const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
@@ -2180,10 +2181,12 @@ Deno.test({
             chunkRows,
             chunkRows,
           );
-          const entries = session.diagnostics().lastRunTiming?.entries ?? [];
-          assert(entries.length > 0);
+          const entries = requireCensus(
+            session.diagnostics().lastRunPipelines,
+            `M=${chunkRows} cap=${capacity}`,
+          );
           assertEquals(
-            entries.some((e) => e.key.startsWith("attention_state_stats_pv:")),
+            countDispatches(entries, SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]) > 0,
             expectedFusion,
           );
           assertEquals(

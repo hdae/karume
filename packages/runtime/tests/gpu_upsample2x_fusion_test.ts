@@ -2,12 +2,13 @@
 // エクスポータと同じ expand 2 本の列を private 1-pass copy に置換しても、全ビットが
 // そのまま複製されることを固定する。
 
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // B>1 / C>1、H/W は奇数、かつ 2*3*5*7=210 は workgroup 幅 256 の非整数倍。
 const SHAPE = [2, 3, 5, 7] as const;
@@ -107,7 +108,7 @@ Deno.test({
   name: "VAE nearest x2 融合は実 export 列と同じ全要素を書き、2→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
     // コピー融合は算術をしないため、以下のビット列も全て保存されなければならない。
     new Uint32Array(x.data.buffer).set([
@@ -143,11 +144,10 @@ Deno.test({
       assertEquals(primitive.diagnostics().submit.dispatchCount, 2, "expand x2 primitive");
       assertEquals(fused.diagnostics().lastRunFusions?.upsample2x, 1, "融合カウンタ");
       assertEquals(primitive.diagnostics().lastRunFusions?.upsample2x, 0, "反例のカウンタは 0");
-      if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
-        const timing = fused.diagnostics().lastRunTiming;
-        assert(timing !== undefined, "計測を要求したのに lastRunTiming が無い（計測経路の破損）");
-        assertEquals(timing.entries.map((entry) => entry.key), [UPSAMPLE_2X_KEY]);
-      }
+      assertEquals(
+        requireCensus(fused.diagnostics().lastRunPipelines, "upsample2x").map((row) => row.key),
+        [UPSAMPLE_2X_KEY],
+      );
     } finally {
       await fused.dispose();
       await primitive.dispose();

@@ -41,7 +41,8 @@ import {
   openGraphModel,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
 const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
@@ -126,7 +127,7 @@ type RunResult = {
   readonly output: Tensor;
   /** **1 run 目**（アリーナ経路）の中間ピーク。 */
   readonly peakTransientBytes: number;
-  /** パイプラインキー別の dispatch 回数（timestamp-query がある機だけ埋まる）。 */
+  /** パイプラインキー別の dispatch 回数（census — 計測に依らない）。 */
   readonly dispatchCounts: ReadonlyMap<string, number>;
 };
 
@@ -172,7 +173,10 @@ const runAttention = async (
       if (run > 0) continue;
       peakTransientBytes = diagnostics.lastRun?.peakTransientBytes ?? 0;
       dispatchCounts = new Map(
-        (diagnostics.lastRunTiming?.entries ?? []).map((entry) => [entry.key, entry.dispatchCount]),
+        requireCensus(diagnostics.lastRunPipelines, "attention").map((row) => [
+          row.key,
+          row.dispatchCount,
+        ]),
       );
     }
     return { outputs, output: outputs[0], peakTransientBytes, dispatchCounts };
@@ -278,14 +282,14 @@ Deno.test({
  * **census**（ADR 0058 決定 4）。行窓変種のキー（`:rwa` / `:rwc`）が n ≥ 2 で**実際に走り**、
  * その dispatch 回数がちょうど枚数になること・1 枚では 1 本も立たないこと。
  *
- * MUST: `TIMING_ACQUIRE_OPTIONS` を渡す（素の `acquireGpu()` では `lastRunTiming` が
- * undefined になり、キー検査が黙って空振りする）。計測を要求できない機では**明示 SKIP**。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る — 空の census は
+ * tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
  */
 Deno.test({
-  name: "行窓のキーは n ≥ 2 でだけ立ち、dispatch 回数が枚数と一致する（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "行窓のキーは n ≥ 2 でだけ立ち、dispatch 回数が枚数と一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = SHAPES[2];
       for (const variant of VARIANTS) {

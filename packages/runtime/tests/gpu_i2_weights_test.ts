@@ -14,7 +14,8 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, SHADER_F16_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const weight = (
   n: number,
@@ -110,7 +111,7 @@ Deno.test({
   name: "INT2 linear は GEMV・行ブロック・prefill GEMM・端列で f32 展開とビット一致する",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (
         const [m, n, k] of [[1, 68, 192], [3, 68, 192], [8, 8192, 64], [64, 68, 64], [65, 68, 64], [
@@ -148,14 +149,14 @@ Deno.test({
             prepared.estimate().resident.weights.compressedBytes,
             w.bytes.byteLength + w.scale.byteLength,
           );
-          if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
-            const keys = diagnostics.lastRunTiming?.entries.map((e) => e.key) ?? [];
-            assert(keys.some((key) => key.includes(":wi2")));
-            assertEquals(
-              keys.some((key) => key.startsWith("linear_gemv:")),
-              m <= 64 && n % 4 === 0 && k % 64 === 0,
-            );
-          }
+          const keys = requireCensus(diagnostics.lastRunPipelines, "i2 linear").map((row) =>
+            row.key
+          );
+          assert(keys.some((key) => key.includes(":wi2")));
+          assertEquals(
+            keys.some((key) => key.startsWith("linear_gemv:")),
+            m <= 64 && n % 4 === 0 && k % 64 === 0,
+          );
         } finally {
           await baseline.dispose();
           await session.dispose();

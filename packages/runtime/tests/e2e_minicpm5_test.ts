@@ -34,7 +34,8 @@ import {
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 import { openResults, recordFailure, runRecordedCase } from "./helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { seriesGraph } from "./helpers/series-graphs.ts";
@@ -263,9 +264,9 @@ Deno.test({
       assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
       const outputName = parsed.graph.outputs[0];
       const declared = parsed.graph.values[outputName].dtype;
-      // MUST: 形の検査は数値門でも独立に持つ — 下の census は timestamp-query が無い device で
-      // SKIP するので、そこに結線しておくと `repeat_kv` 実体化形（Hkv=16）へ再エクスポートした
-      // 資産が数値だけ通って GQA の検収でなくなる（数値は実体化形と完全に同じ）。
+      // MUST: 形の検査は数値門でも独立に持つ — 下の census は別のテストなので、そこだけに結線して
+      // おくと（census だけが赤 / SKIP になる構成で）`repeat_kv` 実体化形（Hkv=16）へ
+      // 再エクスポートした資産が数値だけ通って GQA の検収でなくなる（数値は実体化形と完全に同じ）。
       assertGqaForm(parsed);
 
       const gpu = await acquireGpu();
@@ -362,15 +363,12 @@ Deno.test({
  * 走ったか、GQA 判定が落ちている。数値は tolerance 内に収まりうるので、**キーだけがこの
  * 区別をする**。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** する。
- * `TIMING_ACQUIRE_OPTIONS` は feature 不在で `gpuTiming: false` に落ちるので、そのまま走らせると
- * `lastRunTiming` が undefined になり、この検査が黙って空振りして緑になる。
- * NOTE: 数値の門（上のテスト）は素の `acquireGpu()` で走らせる — 常用と同じ device 構成のまま
- * 突合したいので、timestamp 書き込みが混ざる構成はこちらの 1 ケースに閉じる。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。undefined / 空は
+ * tests/helpers/pipeline-census.ts の `requireCensus` が落とす（空振りの緑にしない）。
  */
 Deno.test({
-  name: "MiniCPM5 census: attention 24 本が全て GQA 変種のキーで走る（実 GPU / timestamp-query）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "MiniCPM5 census: attention 24 本が全て GQA 変種のキーで走る（実 GPU）",
+  ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async () => {
     const parsed = prepareContainer(
       await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
@@ -378,7 +376,7 @@ Deno.test({
     );
     const layers = assertGqaForm(parsed);
 
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
     // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
     try {
@@ -387,9 +385,7 @@ Deno.test({
         // 最短のケース（T=6）1 本で足りる — 見るのは走ったパイプラインの種類と本数。
         const { inputs } = await loadCase("capital-en", parsed.graph.inputs);
         await session.run(inputs);
-        const entries = session.diagnostics().lastRunTiming?.entries;
-        assert(entries !== undefined, "lastRunTiming が無い（計測が有効な device のはず）");
-        assert(entries.length > 0, "内訳が空（キー検査が空振りしている）");
+        const entries = requireCensus(session.diagnostics().lastRunPipelines, "capital-en");
 
         // ①QK と ③PV（②stats は行統計で GQA の軸を持たないので対象外 — キーにも `:gqa` は付かない）
         const qk = entries.filter((entry) => entry.key.startsWith("attention_qk"));

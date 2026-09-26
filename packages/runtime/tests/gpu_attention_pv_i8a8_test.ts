@@ -80,7 +80,8 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -640,7 +641,7 @@ const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt
 
 type RunResult = {
   readonly output: Float32Array<ArrayBuffer>;
-  /** 走ったパイプラインキー（GPU 時間計測が無い環境では空）。 */
+  /** 走ったパイプラインキー（census — 計測に依らない）。 */
   readonly entries: readonly { readonly key: string; readonly dispatchCount: number }[];
 };
 
@@ -665,13 +666,9 @@ const runAttention = async (
   );
   try {
     const outputs = await session.run({ x0: q, x1: k, x2: v });
-    const timing = session.diagnostics().lastRunTiming;
     return {
       output: (outputs["y"] as Tensor).data as Float32Array<ArrayBuffer>,
-      entries: (timing?.entries ?? []).map((entry) => ({
-        key: entry.key,
-        dispatchCount: entry.dispatchCount,
-      })),
+      entries: requireCensus(session.diagnostics().lastRunPipelines, "attention"),
     };
   } finally {
     await session.dispose();
@@ -693,7 +690,7 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // MUST: **shader-f16 を要求しない既定の device** で走ること（i8a8 は feature ゲートの外）。
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
@@ -727,18 +724,16 @@ Deno.test({
  * **census**（ADR 0058 決定 4）。どの変種が実際に走ったかはキーでしか見えない
  * （i8a8 縮退も dp4a ↔ エミュも値はビット同一のまま経路だけが変わる）。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
- * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
- * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると変種選択の検査が
- * 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。数値契約は
- * 上のテストが計測なし機でも走り続ける。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
+ * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
+ * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 Deno.test({
   name:
-    "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+    "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
@@ -786,7 +781,7 @@ Deno.test({
   name: "attentionCompute:'a8' の両段縮退（D%4 / N%4 とも不適格）は f32 経路とビット同一（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       // 縮退は沈黙（検出器はキーと値の 2 本 — キー側は下の census が持つ）
       const both = { b: 1, h: 2, m: 17, n: 19 };
@@ -799,13 +794,13 @@ Deno.test({
   },
 });
 
-/** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。SKIP の理由は上の census と同じ。 */
+/** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。空の census を落とす理由は上の census と同じ。 */
 Deno.test({
   name:
-    "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+    "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       // ① N % 4 != 0 → ③PV だけ f32（①QK は D=20 で i8a8 のまま）
       const mixedPv = { b: 1, h: 2, m: 17, n: 19 };
@@ -860,7 +855,7 @@ Deno.test({
     // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ N·127² は i32 に収まるが、門は安全側。
     const n = LINEAR_I8A8_MAX_K + 4;
     const shape = { b: 1, h: 1, m: 1, n };
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       await assertRejects(
         () => runAttention(gpu, shape, 4, { attentionCompute: "a8" }),

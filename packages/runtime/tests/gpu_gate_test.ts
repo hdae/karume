@@ -56,8 +56,8 @@ Deno.test({
     assert(
       TIMESTAMP_QUERY_AVAILABLE,
       "アダプタが 'timestamp-query' を列挙せず、GPU 時間診断（ADR 0021）の実 GPU テストが " +
-        "全て SKIP された。ADR 0005 によりこれは FAIL として扱う（内訳が undefined になり、" +
-        "キー検査を持つケースも黙って空振りする）。この機で意図的に通すには " +
+        "全て SKIP された。ADR 0005 によりこれは FAIL として扱う（GPU 時間診断そのものを " +
+        "1 度も検証していない状態になる）。この機で意図的に通すには " +
         "KARUME_ALLOW_NO_TIMESTAMP_QUERY=1 を設定すること。",
     );
   },

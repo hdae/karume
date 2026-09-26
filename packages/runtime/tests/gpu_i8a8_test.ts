@@ -78,7 +78,8 @@ import {
   memoryModel,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -506,7 +507,7 @@ const runLinear = async (
     return {
       y: outputs["y"],
       pipelineCount: diagnostics.pipelineCount,
-      keys: (diagnostics.lastRunTiming?.entries ?? []).map((entry) => entry.key).sort(),
+      keys: requireCensus(diagnostics.lastRunPipelines, "linear").map((row) => row.key).sort(),
     };
   } finally {
     await session.dispose();
@@ -538,7 +539,7 @@ Deno.test({
     "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const testCase of LINEAR_CASES) {
         const prepared = prepareLinear(testCase);
@@ -549,16 +550,14 @@ Deno.test({
         assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
         // 実際に i8a8 経路を通っている（quantize_rows + i8a8 GEMM の 2 本）
         assertEquals(actual.pipelineCount, 2, `${testCase.name}: パイプライン本数`);
-        if (actual.keys.length > 0) {
-          assertEquals(
-            actual.keys,
-            [
-              linearI8a8Key(linearI8a8UsesVec4(testCase.n), true),
-              quantizeRowsKey(quantizeRowsGeometry(testCase.k)),
-            ].sort(),
-            `${testCase.name}: 走ったパイプラインキー`,
-          );
-        }
+        assertEquals(
+          actual.keys,
+          [
+            linearI8a8Key(linearI8a8UsesVec4(testCase.n), true),
+            quantizeRowsKey(quantizeRowsGeometry(testCase.k)),
+          ].sort(),
+          `${testCase.name}: 走ったパイプラインキー`,
+        );
       }
     } finally {
       gpu.destroy();
@@ -616,7 +615,7 @@ Deno.test({
   name: "i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
       // この 1 本が「エミュは数値同一」という主張の linear 側の機械的検出器（設計 §4.4。
@@ -629,13 +628,11 @@ Deno.test({
           const options: SessionOptions = { linearCompute: "a8", [I8A8_DOT]: dot };
           const actual = await runLinear(gpu, prepared, options);
           results[dot] = actual.y;
-          if (actual.keys.length > 0) {
-            assertEquals(
-              actual.keys.includes(linearI8a8Key(linearI8a8UsesVec4(testCase.n), dot === "dp4a")),
-              true,
-              `${testCase.name}: ${dot} のキー`,
-            );
-          }
+          assertEquals(
+            actual.keys.includes(linearI8a8Key(linearI8a8UsesVec4(testCase.n), dot === "dp4a")),
+            true,
+            `${testCase.name}: ${dot} のキー`,
+          );
         }
         assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs エミュ`);
         // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
@@ -651,18 +648,16 @@ Deno.test({
   name: "i8a8 は opt-in × i8 常駐 × k%4==0 のときだけ効く（既定は従来経路のまま・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       // ① 既定（linearCompute 省略）は i8 資産でも従来の f32 経路（linear 1 本だけ）
       const prepared = prepareLinear({ name: "default", m: 17, n: 19, k: 20 });
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
-      if (baseline.keys.length > 0) {
-        // 見たいのは「i8a8 ではなく f32 linear（wi8 格納）が 1 本だけ走った」こと。キーの
-        // 綴りそのものは tests/gemm_geometry_test.ts が固定するので、ここは同じ形状
-        //（m=17 → 小 M のタイル幾何バケット / n=19 でスカラ変種）から引く。
-        assertEquals(baseline.keys, [linearKey("i8", false, "f32", 17)], "既定のキー");
-      }
+      // 見たいのは「i8a8 ではなく f32 linear（wi8 格納）が 1 本だけ走った」こと。キーの
+      // 綴りそのものは tests/gemm_geometry_test.ts が固定するので、ここは同じ形状
+      //（m=17 → 小 M のタイル幾何バケット / n=19 でスカラ変種）から引く。
+      assertEquals(baseline.keys, [linearKey("i8", false, "f32", 17)], "既定のキー");
       // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**
       // （一致してしまうなら活性量子化が効いていない）
       const i8a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });
@@ -715,7 +710,7 @@ Deno.test({
         await session.dispose();
       }
     };
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const baseline = await runK0(gpu, {});
       const optIn = await runK0(gpu, { linearCompute: "a8" });
@@ -919,7 +914,7 @@ Deno.test({
     "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const testCase of W4A8_CASES) {
         const prepared = prepareW4a8(testCase);
@@ -930,26 +925,24 @@ Deno.test({
         assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
         // 実際に w4a8 経路を通っている（quantize_rows + w4a8 GEMM の 2 本）
         assertEquals(actual.pipelineCount, 2, `${testCase.name}: パイプライン本数`);
-        if (actual.keys.length > 0) {
-          const key = linearI8a8Key(
-            linearI8a8UsesVec4(testCase.n),
-            true,
-            undefined,
-            "i4",
-            testCase.groupSize,
-          );
-          assertEquals(
-            actual.keys,
-            [key, quantizeRowsKey(quantizeRowsGeometry(testCase.k))].sort(),
-            `${testCase.name}: 走ったパイプラインキー`,
-          );
-          // 診断で「i4 常駐 × その group 長」が読めること（ADR 0021）
-          assertEquals(
-            key.endsWith(`:wi4g${testCase.groupSize}`),
-            true,
-            `${testCase.name}: 判別子`,
-          );
-        }
+        const key = linearI8a8Key(
+          linearI8a8UsesVec4(testCase.n),
+          true,
+          undefined,
+          "i4",
+          testCase.groupSize,
+        );
+        assertEquals(
+          actual.keys,
+          [key, quantizeRowsKey(quantizeRowsGeometry(testCase.k))].sort(),
+          `${testCase.name}: 走ったパイプラインキー`,
+        );
+        // 診断で「i4 常駐 × その group 長」が読めること（ADR 0021）
+        assertEquals(
+          key.endsWith(`:wi4g${testCase.groupSize}`),
+          true,
+          `${testCase.name}: 判別子`,
+        );
       }
     } finally {
       gpu.destroy();
@@ -1010,7 +1003,7 @@ Deno.test({
     "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const dots: readonly I8a8Dot[] = ["dp4a", "emu"];
       for (const testCase of W4A8_CASES) {
@@ -1020,21 +1013,19 @@ Deno.test({
           const options: SessionOptions = { linearCompute: "a8", [I8A8_DOT]: dot };
           const actual = await runLinear(gpu, prepared, options);
           results[dot] = actual.y;
-          if (actual.keys.length > 0) {
-            assertEquals(
-              actual.keys.includes(
-                linearI8a8Key(
-                  linearI8a8UsesVec4(testCase.n),
-                  dot === "dp4a",
-                  undefined,
-                  "i4",
-                  testCase.groupSize,
-                ),
+          assertEquals(
+            actual.keys.includes(
+              linearI8a8Key(
+                linearI8a8UsesVec4(testCase.n),
+                dot === "dp4a",
+                undefined,
+                "i4",
+                testCase.groupSize,
               ),
-              true,
-              `${testCase.name}: ${dot} のキー`,
-            );
-          }
+            ),
+            true,
+            `${testCase.name}: ${dot} のキー`,
+          );
         }
         assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs エミュ`);
         // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
@@ -1051,20 +1042,18 @@ Deno.test({
     "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const testCase = W4A8_CASES[3];
       const prepared = prepareW4a8(testCase);
       // ① 既定（linearCompute 省略）は i4 資産でも従来の f32 計算経路（linear 1 本だけ）
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
-      if (baseline.keys.length > 0) {
-        assertEquals(
-          baseline.keys,
-          [linearKey("i4", false, "f32", testCase.m, testCase.groupSize)],
-          "既定のキー",
-        );
-      }
+      assertEquals(
+        baseline.keys,
+        [linearKey("i4", false, "f32", testCase.m, testCase.groupSize)],
+        "既定のキー",
+      );
       // MUST: 既定の値は活性 f32 のままなので w4a8 の参照とは**一致しない**。一致するなら
       // 活性量子化が効いていない = 期待値に f32 i4 経路を使ったのと同じ恒真化。
       const w4a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });

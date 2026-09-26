@@ -1,12 +1,13 @@
 // SiLU = x * sigmoid(x) の strict peephole（融合ルール silu — src/runtime/fusion.ts）。
 // エクスポータが出す隣接 2 ノードだけを 1 dispatch へ畳み、掴めない形は素の列へ落ちる。
 
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { siluKey } from "../src/kernels/silu.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // 256 スレッド workgroup の端数を通す長さ。
 const SHAPE = [257] as const;
@@ -132,7 +133,7 @@ Deno.test({
     "SiLU 融合は xs / sx 両順で primitive と有限ビット / NaN 分類が一致し、2→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     const x = testInput();
     try {
       for (const order of ["xs", "sx"] as const) {
@@ -163,18 +164,11 @@ Deno.test({
             0,
             `${order}: 反例のカウンタは 0`,
           );
-          if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
-            const timing = fused.diagnostics().lastRunTiming;
-            assert(
-              timing !== undefined,
-              `${order}: 計測を要求したのに lastRunTiming が無い（計測経路の破損）`,
-            );
-            assertEquals(
-              timing.entries.map((entry) => entry.key),
-              [siluKey(order === "xs" ? "x-sigmoid" : "sigmoid-x")],
-              `${order}: timing key`,
-            );
-          }
+          assertEquals(
+            requireCensus(fused.diagnostics().lastRunPipelines, order).map((row) => row.key),
+            [siluKey(order === "xs" ? "x-sigmoid" : "sigmoid-x")],
+            `${order}: census key`,
+          );
         } finally {
           await fused.dispose();
           await primitive.dispose();

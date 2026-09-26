@@ -61,9 +61,10 @@ import {
   i8a8TileN,
 } from "../src/kernels/i8a8-geometry.ts";
 import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
-import type { I8a8Dot } from "../src/runtime/session-types.ts";
+import type { I8a8Dot, SessionDiagnostics } from "../src/runtime/session-types.ts";
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { assertPipelineCensus } from "./helpers/pipeline-census.ts";
 
 /** `127·exp(S−m)` が半整数から離れているべき最小の余裕（WGSL の `exp` 誤差 ~1e-5 の桁上）。 */
 const QUANT_MARGIN = 0.3;
@@ -425,11 +426,11 @@ const QUERY = (i: number): number => (((i * 3) % 29) - 14) * 0.3717 + 0.0419;
 const KEY = (i: number): number => (((i * 3) % 41) - 20) * 0.2917 - 0.0173;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.3119;
 
-/** 融合 attention 1 ノードの Session を 1 回走らせ、走ったパイプラインキーを返す。 */
+/** 融合 attention 1 ノードの Session を 1 回走らせ、その run の census を返す。 */
 const runAttention = async (
   gpu: GpuContext,
   options: SessionOptions,
-): Promise<readonly string[]> => {
+): Promise<SessionDiagnostics["lastRunPipelines"]> => {
   const [b, h, m, n, d] = [1, 2, 20, 16, 8];
   const q = fill([b, h, m, d], QUERY);
   const k = fill([b, h, n, d], KEY);
@@ -445,7 +446,7 @@ const runAttention = async (
   );
   try {
     await session.run({ x0: q, x1: k, x2: v });
-    return (session.diagnostics().lastRunTiming?.entries ?? []).map((entry) => entry.key);
+    return session.diagnostics().lastRunPipelines;
   } finally {
     await session.dispose();
   }
@@ -455,7 +456,7 @@ Deno.test({
   name: "カナリアの判定は device 単位に 1 度で、a8 Session はその席を読む（実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       // 実機は健全なので、注入した判定をメモへ**先に**焼く（焼かなければ dp4a になる）。
       // Session がこの席を読んでいることは、キーが `:dp4aEmu` になることでしか観測できない。
@@ -488,31 +489,31 @@ Deno.test({
  * 変種選択に届いていることは**キーでしか観測できない**（dp4a と emu は同じ整数を返すので
  * 値は 1 ビットも変わらない）。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
- * 走るときは空の内訳を無条件に FAIL にする（「keys が空なら次の形へ」で守ると変種選択の
- * 検査が 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
+ * 無条件に FAIL にする（「keys が空なら次の形へ」で守ると変種選択の検査が 1 つも走らないまま
+ * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  * `acquireGpu` は呼ぶたび新しい device を作るのでメモの席もこのテスト専用。
  */
 Deno.test({
-  name:
-    "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU / timestamp-query・故障注入）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU・故障注入）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
         decideAttentionI8a8Dot(gpu, BREAK_DP4A)
       );
       assertEquals(seeded.dot, "emu");
       for (const pass of [1, 2]) {
-        const keys = new Set(await runAttention(gpu, { attentionCompute: "a8" }));
-        assert(keys.size > 0, `${pass} 本目: 内訳が空（キー検査が空振りしている）`);
+        const census = await runAttention(gpu, { attentionCompute: "a8" });
         const qkV4 = attentionQkI8a8UsesVec4(16);
         const pvV4 = attentionPvI8a8UsesVec4(8);
-        assert(keys.has(attentionQkI8a8Key(qkV4, false)), `${pass} 本目: ①QK が emu 変種でない`);
-        assert(!keys.has(attentionQkI8a8Key(qkV4, true)), `${pass} 本目: dp4a 変種が残っている`);
-        assert(keys.has(attentionPvI8a8Key(pvV4, false)), `${pass} 本目: ③PV が emu 変種でない`);
-        assert(!keys.has(attentionPvI8a8Key(pvV4, true)), `${pass} 本目: dp4a 変種が残っている`);
+        assertPipelineCensus(census, [
+          { label: "①QK の emu 変種", match: attentionQkI8a8Key(qkV4, false), atLeast: 1 },
+          { label: "①QK の dp4a 変種", match: attentionQkI8a8Key(qkV4, true), count: 0 },
+          { label: "③PV の emu 変種", match: attentionPvI8a8Key(pvV4, false), atLeast: 1 },
+          { label: "③PV の dp4a 変種", match: attentionPvI8a8Key(pvV4, true), count: 0 },
+        ], `${pass} 本目`);
       }
     } finally {
       gpu.destroy();

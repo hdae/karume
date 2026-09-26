@@ -30,11 +30,12 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
-import { acquireGpu } from "@karume/runtime";
+import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
 import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 import { mirrorAvailable, openGemma4Ple } from "./helpers/gemma-mirror.ts";
 
@@ -188,25 +189,27 @@ Deno.test({
  * prefill 計画（M = `chunkLength` ≥ 16）は席に依らず ③ₜ（V 行タイル共有・キーに幾何断片
  * `:f32:reg…` が載る）を選ぶ — ③ とビット同一なので既定経路に置ける。したがって 1 回の chat は
  * **必ず ③ₜ を含み**、席で入れ替わるのは残りの ③ / ③' の側になる。
- * MUST: 計測を要求しない device では明示 SKIP し、走るときは空の内訳を無条件に FAIL にする
- * （`entries` が空なら素通り、にすると無検査のまま緑になる）。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。census の無い run は
+ * 無条件に FAIL にする（`mergeCensus` — 空なら素通り、にすると無検査のまま緑になる）。
+ * NOTE: `onRunDiagnostics` を付けると GPU 上の greedy 出力経路は外れる（src/gemma/pipeline.ts の
+ * `greedyOutput`）。census はフック有りの経路のもので、この前提は計測を外しても変わらない。
  */
 Deno.test({
   name:
     "gemma4 配布形: パイプラインの既定は ③' 並列縮約で走り、sequential 指定で参照経路へ戻る（census）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
     for (const reduce of ["parallel", "sequential"] as const) {
       await t.step(`stateAttentionReduce = ${reduce}`, async () => {
-        const gpu = await acquireGpu({ gpuTiming: true });
-        const keys = new Set<string>();
+        const gpu = await acquireGpu();
+        const runs: SessionDiagnostics["lastRunPipelines"][] = [];
         try {
           const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
             gpu,
             maxResidentPleBytes: await maxResidentPleBytes(),
             onRunDiagnostics: (diagnostics) => {
-              for (const entry of diagnostics.lastRunTiming?.entries ?? []) keys.add(entry.key);
+              runs.push(diagnostics.lastRunPipelines);
             },
             // 既定を見る側は欄そのものを渡さない（省略時の既定が問われている）。
             ...(reduce === "sequential" ? { stateAttentionReduce: "sequential" } : {}),
@@ -225,8 +228,9 @@ Deno.test({
         } finally {
           gpu.destroy();
         }
-        const pv = [...keys].filter((key) => key.startsWith("attention_state_pv"));
-        assert(pv.length > 0, `内訳に ③PV のキーが無い（${[...keys].join(" / ")}）`);
+        const keys = mergeCensus(runs, reduce).map((row) => row.key);
+        const pv = keys.filter((key) => key.startsWith("attention_state_pv"));
+        assert(pv.length > 0, `内訳に ③PV のキーが無い（${keys.join(" / ")}）`);
         // 3 経路へ分ける（幾何断片 `:f32:reg…` = ③ₜ / `:par` = ③' / 残り = ③ 参照経路）。
         const tiled = pv.filter((key) => key.includes(":f32:reg"));
         const parallel = pv.filter((key) => key.includes(":par"));

@@ -84,7 +84,8 @@ import {
 } from "./helpers/model-fixture.ts";
 import { quantizeI4 } from "./helpers/i4.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /**
  * 活性。平坦添字の関数なので、**行 r の値は m によらず同じ**（行優先で `r·k + c`）—
@@ -104,12 +105,11 @@ const XS = (index: number): number => ((index % 11) - 5) * 0.375 + 0.125;
 const GEMM_ROWS = LINEAR_GEMV_MAX_ROWS + 1;
 
 /**
- * 比較相手が**本当に既定経路で走った**ことの検査（診断が取れる device のみ）。
+ * 比較相手が**本当に既定経路で走った**ことの検査。
  * MUST: 門の上限（recipe-builder）と `LINEAR_GEMV_MAX_ROWS` がずれて比較相手が GEMV 族へ流れると、
  * u32 一致は族内の自己比較になって恒真化する — その退化をここで機械的に止める。
  */
 const assertRanGemm = (name: string, keys: readonly string[]): void => {
-  if (keys.length === 0) return;
   assert(
     !ranGemv(keys),
     `${name}: 比較相手（M=${GEMM_ROWS}）が GEMV 族で走った（内訳: ${keys.join(" / ")}）`,
@@ -199,7 +199,7 @@ const linearI4Model = (
 
 type RunResult = {
   readonly output: Tensor;
-  /** その run で実際に走ったパイプラインキー（`timestamp-query` 不在なら空）。 */
+  /** その run で実際に走ったパイプラインキー（census — 計測に依らない）。 */
   readonly keys: readonly string[];
 };
 
@@ -213,8 +213,8 @@ const runLinear = async (
   const session = await createSessionFromContainer(gpu, await model, GRAPH_NAME);
   try {
     const output = (await session.run({ x: fill([m, k], XS) }))["y"];
-    const entries = session.diagnostics().lastRunTiming?.entries ?? [];
-    return { output, keys: entries.map((entry) => entry.key) };
+    const census = requireCensus(session.diagnostics().lastRunPipelines, "linear");
+    return { output, keys: census.map((row) => row.key) };
   } finally {
     await session.dispose();
   }
@@ -228,7 +228,7 @@ Deno.test({
   name: "M=1 の i4 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
         const { name, k, n, groupSize } = testCase;
@@ -388,7 +388,7 @@ Deno.test({
     "（実 GPU / 診断キー）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const door of DOOR_CASES) {
         const { k, n, groupSize } = door.shape;
@@ -401,8 +401,6 @@ Deno.test({
           door.m,
           k,
         );
-        // MUST: 列挙が無い device では診断が空になる（キー検査は数値側の門に任せて素通り）。
-        if (keys.length === 0) continue;
         const shown = keys.join(" / ");
         assertEquals(
           ranGemv(keys),
@@ -520,7 +518,7 @@ Deno.test({
   name: "M=1 の i8 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const testCase of I8_CASES) {
         const { name, k, n } = testCase;
@@ -653,7 +651,7 @@ Deno.test({
     "（実 GPU / 診断キー）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const door of DOOR_I8_CASES) {
         const { k, n } = door.shape;
@@ -666,8 +664,6 @@ Deno.test({
           door.m,
           k,
         );
-        // MUST: 列挙が無い device では診断が空になる（キー検査は数値側の門に任せて素通り）。
-        if (keys.length === 0) continue;
         const shown = keys.join(" / ");
         assertEquals(
           ranGemv(keys),
@@ -959,7 +955,6 @@ const checkRowsCase = async (
   }
 
   // ④ 行ブロック変種のキーで走ったこと（②③だけだと既定経路のままでも緑になる）
-  if (gemv.keys.length === 0) return;
   const key = linearGemvRowsKey(storage, groupSize, defaultLinearGemvRowsVariant(storage, m, n));
   assert(
     gemv.keys.includes(key),
@@ -971,7 +966,7 @@ Deno.test({
   name: "行ブロック（M ≥ 2）の i4 linear は既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const rowsCase of ROWS_CASES) {
         const { k, n } = rowsCase;
@@ -1000,7 +995,7 @@ Deno.test({
   name: "行ブロック（M ≥ 2）の i8 linear は既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const rowsCase of ROWS_I8_CASES) {
         const { k, n } = rowsCase;

@@ -1,12 +1,13 @@
 // half-split RoPE の exact peephole（融合ルール rope — src/runtime/fusion.ts）:
 // 既存 primitive 列とのビット parity と dispatch 削減を直接固定する。
 
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // H=1, S=3 では n=384 となり、256 スレッド workgroup の末尾端数も通る。
 type RopeOrder = "slice-first" | "direct-first";
@@ -147,7 +148,7 @@ Deno.test({
     "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     const inputs = ropeInputs(1, 3);
     try {
       for (const order of ["slice-first", "direct-first"] as const) {
@@ -192,15 +193,14 @@ Deno.test({
  * **census**（ADR 0058 決定 4）。融合が RoPE カーネル 1 本だけで済んでいることはキーでしか
  * 見えない（dispatch 数だけでは別カーネル 1 本へ化けた形を見逃す）。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
- * 走るときは内訳を無条件に検査する（`timing !== undefined` で守ると、計測なし機では
- * キー検査が 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。census は無条件に
+ * 検査する（空・undefined は tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
  */
 Deno.test({
-  name: "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     const inputs = ropeInputs(1, 3);
     try {
       for (const order of ["slice-first", "direct-first"] as const) {
@@ -211,9 +211,10 @@ Deno.test({
         );
         try {
           await fused.run(inputs);
-          const timing = fused.diagnostics().lastRunTiming;
-          assert(timing !== undefined, `${order}: 内訳が空（キー検査が空振りしている）`);
-          assertEquals(timing.entries.map((entry) => entry.key), [ROPE_KEY]);
+          assertEquals(
+            requireCensus(fused.diagnostics().lastRunPipelines, order).map((row) => row.key),
+            [ROPE_KEY],
+          );
         } finally {
           await fused.dispose();
         }
@@ -466,10 +467,10 @@ Deno.test({
 });
 
 Deno.test({
-  name: "BSHD RoPEは専用キーだけで走る（実GPU/timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "BSHD RoPEは専用キーだけで走る（実GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu({ gpuTiming: true });
+    const gpu = await acquireGpu();
     try {
       const session = await createSessionFromContainer(
         gpu,
@@ -482,9 +483,10 @@ Deno.test({
           cos: fill([1, 5, 1, 128], (i) => Math.cos(i)),
           sin: fill([1, 5, 1, 128], (i) => Math.sin(i)),
         });
-        const timing = session.diagnostics().lastRunTiming;
-        assert(timing !== undefined);
-        assertEquals(timing.entries.map((x) => x.key), [ROPE_BSHD_KEY]);
+        assertEquals(
+          requireCensus(session.diagnostics().lastRunPipelines, "bshd").map((row) => row.key),
+          [ROPE_BSHD_KEY],
+        );
       } finally {
         await session.dispose();
       }

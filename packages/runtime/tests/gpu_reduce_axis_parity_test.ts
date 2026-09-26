@@ -50,7 +50,8 @@ import { allclose } from "../src/reference/allclose.ts";
 import { referenceRowReduce, refTensor } from "../src/reference/ops.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import { fill, GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -519,7 +520,7 @@ const reduceKeysUsed = async (
   shape: readonly number[],
   axis: number,
 ): Promise<ReadonlySet<string>> => {
-  const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+  const gpu = await acquireGpu();
   const outShape = [...shape.slice(0, axis), ...shape.slice(axis + 1)];
   const graph = singleOpDeclaration("sum", [shape], [outShape], { attrs: { dim: axis } });
   const session = await createSessionFromContainer(
@@ -529,9 +530,9 @@ const reduceKeysUsed = async (
   );
   try {
     await session.run({ x0: fill(shape, SIGNED) });
-    const timing = session.diagnostics().lastRunTiming;
-    assert(timing !== undefined, "timestamp-query が無効（キー別内訳が取れない）");
-    return new Set(timing.entries.map((entry) => entry.key));
+    return new Set(
+      requireCensus(session.diagnostics().lastRunPipelines, "sum").map((row) => row.key),
+    );
   } finally {
     await session.dispose();
     gpu.destroy();
@@ -540,7 +541,7 @@ const reduceKeysUsed = async (
 
 Deno.test({
   name: "executor は縮約軸で 2 カーネルを踏み分ける（最終次元 = 行 / それ以外 = 軸・実 GPU）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
     assertEquals(
       await reduceKeysUsed([4, 6, 8], 2),

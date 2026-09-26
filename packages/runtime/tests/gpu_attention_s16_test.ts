@@ -97,7 +97,8 @@ import {
   openGraphModel,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -239,10 +240,7 @@ const runAttention = async (
     const diagnostics = session.diagnostics();
     return {
       output: outputs["y"].data as Float32Array<ArrayBuffer>,
-      entries: (diagnostics.lastRunTiming?.entries ?? []).map((entry) => ({
-        key: entry.key,
-        dispatchCount: entry.dispatchCount,
-      })),
+      entries: requireCensus(diagnostics.lastRunPipelines, "attention"),
       peakTransientBytes: diagnostics.lastRun?.peakTransientBytes ?? 0,
     };
   } finally {
@@ -474,7 +472,7 @@ Deno.test({
     "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const shape of S16_SHAPES) {
         const { name, b, h, m, n, d } = shape;
@@ -524,18 +522,15 @@ Deno.test({
 /**
  * **census**（ADR 0058 決定 4）。3 カーネルが**同時に** s16 へ切り替わったことをキーで見る。
  *
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、
- * 走るときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
- * `gpuTiming: false` に落ちるので、「entries が空なら何も見ない」で守ると変種選択の検査が
- * 1 つも走らないまま緑になる — gpu_attention_gqa_test.ts の census と同じ形）。数値契約
- * （atol=0 / peakTransient）は上のテストが計測なし機でも走り続ける。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
+ * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
+ * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 Deno.test({
-  name:
-    "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const shape of S16_SHAPES) {
         const { name, n } = shape;
@@ -577,7 +572,7 @@ Deno.test({
     "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const shape of DEGRADED_SHAPES) {
         const { name, d, n } = shape;
@@ -594,12 +589,12 @@ Deno.test({
   },
 });
 
-/** 非適格形の縮退を見る唯一の検出器（キー検査）。SKIP / 無条件 assert の理由は上の census と同じ。 */
+/** 非適格形の縮退を見る唯一の検出器（キー検査）。無条件 assert の理由は上の census と同じ。 */
 Deno.test({
-  name: "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const shape of DEGRADED_SHAPES) {
         const { name, why, n } = shape;
@@ -673,7 +668,7 @@ Deno.test({
     "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = A8_S16_SHAPE;
       const both = await runAttention(gpu, shape, {
@@ -696,13 +691,13 @@ Deno.test({
   },
 });
 
-/** 直交（3 軸が同時に立つ）を見る唯一の検出器。SKIP / 無条件 assert の理由は上の census と同じ。 */
+/** 直交（3 軸が同時に立つ）を見る唯一の検出器。無条件 assert の理由は上の census と同じ。 */
 Deno.test({
   name:
-    "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+    "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const shape = A8_S16_SHAPE;
       const both = await runAttention(gpu, shape, {

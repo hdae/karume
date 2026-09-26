@@ -53,7 +53,8 @@ import {
 import { generateGreedy } from "../src/generation/greedy.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const SERIES_NAME = "minicpm5-1b-decode";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
@@ -560,10 +561,10 @@ type StateCensus = {
  * 付かない**の両側で見る。
  */
 const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): StateCensus => {
-  const entries = diagnostics.lastRunTiming?.entries;
-  // MUST: 計測が無効な run を「0 本」として数えない — キー検査が黙って空振りする。
-  assert(entries !== undefined, `${where}: lastRunTiming が無い（計測が有効な device のはず）`);
-  assert(entries.length > 0, `${where}: 内訳が空（キー検査が空振りしている）`);
+  // MUST: census の無い run を「0 本」として数えない — キー検査が黙って空振りする。
+  // NOTE: 源は計画上の本数（states 形の仕事量ゼロの dispatch も 1 本）。ここの本数検査は全て
+  // 下限なので、発行より多く出る側の差は検査を緩めない。
+  const entries = requireCensus(diagnostics.lastRunPipelines, where);
 
   const family = (prefix: string) => entries.filter((entry) => entry.key.startsWith(prefix));
   const qk = family("attention_state_qk");
@@ -627,27 +628,15 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
   return census;
 };
 
-if (AVAILABLE && GPU_AVAILABLE && !TIMESTAMP_QUERY_AVAILABLE) {
-  console.warn(
-    "[karume] アダプタが 'timestamp-query' を列挙しないため MiniCPM5 decode の census を " +
-      "SKIP する（parity と logits の 2 本は残る — ADR 0021 の計測は device 作成時にしか" +
-      "要求できない）",
-  );
-}
-
 /**
- * ④census（実 GPU / timestamp-query）。
+ * ④census（実 GPU）。
  *
- * MUST: 計測を要求しない device では**明示 SKIP** する。`acquireGpu({ gpuTiming: true })` は
- * feature 不在で fail loudly するので、渡し忘れや縮退で `lastRunTiming` が undefined になった
- * 形は上の {@link assertStateCensus} が落とす。
- * NOTE: 数値の門（上のテスト）は素の `acquireGpu()` で走らせる — 常用と同じ device 構成のまま
- * 突合したいので、timestamp 書き込みが混ざる構成はこのテストに閉じる（1-shot 門と同じ分担で、
- * 4.03GiB の Session をもう 1 本組む代償はそこで払う）。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。undefined / 空は
+ * 上の {@link assertStateCensus} が落とす。
  */
 Deno.test({
-  name: "MiniCPM5 decode census: states 形カーネル族が GQA 変種で走る（実 GPU / timestamp-query）",
-  ignore: !AVAILABLE || !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "MiniCPM5 decode census: states 形カーネル族が GQA 変種で走る（実 GPU）",
+  ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
     const parsed = prepareContainer(opened, MODEL_GRAPH);
@@ -656,7 +645,7 @@ Deno.test({
     const golden = await loadGreedy("capital-en");
     assert(golden.prompt.length <= CHUNK_LENGTH, "census は 1 chunk で踏むケースを使う");
 
-    const gpu = await acquireGpu({ gpuTiming: true });
+    const gpu = await acquireGpu();
     const session = await parsed.createContainerSession(gpu);
     const context = await session.createGenerationContext({
       bindings: { [CAPACITY_SYMBOL]: CAPACITY },

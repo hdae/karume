@@ -19,7 +19,8 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 import { opTolerance } from "./helpers/op-tolerance.ts";
 
 const direct = async (
@@ -113,7 +114,7 @@ Deno.test({
     "rms_norm の 128 スレッド版は端の幅でも従来版とビット一致し、128 を超える幅は従来版を選ぶ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const dim of [1, 3, 17, 64, 127, 128, 129, 257]) {
         const rows = 19;
@@ -136,11 +137,14 @@ Deno.test({
           const { y } = await session.run({ x: input });
           assert(y.dtype === "f32");
           assertEquals(bits(y.data), bits(expected), `dim=${dim}`);
-          if (TIMESTAMP_QUERY_AVAILABLE) {
-            assertEquals(session.diagnostics().lastRunTiming?.entries.map((e) => e.key), [
+          assertEquals(
+            requireCensus(session.diagnostics().lastRunPipelines, `dim=${dim}`).map((row) =>
+              row.key
+            ),
+            [
               dim <= 128 ? RMS_NORM_128_KEY : RMS_NORM_KEY,
-            ]);
-          }
+            ],
+          );
           const reference = applyReferenceOp("rms_norm", [input, refTensor([dim], weight)], {
             eps: 1e-6,
           });

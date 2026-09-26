@@ -37,7 +37,8 @@ import {
   GRAPH_NAME,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
 
@@ -1072,7 +1073,7 @@ Deno.test({
       k,
       groupSize,
     });
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       const session = await createSessionFromContainer(
         gpu,
@@ -1091,25 +1092,17 @@ Deno.test({
         // 診断で w4a8 が走ったことが読める（格納判別子 + group 長 — ADR 0021 / 0069）
         const diagnostics = session.diagnostics();
         assertEquals(diagnostics.pipelineCount, 2, "quantize_rows + w4a8 GEMM の 2 本");
-        if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
-          // MUST: 計測を要求したのに内訳が無いなら赤 — `keys.length > 0` で守ると
-          // キー検査が黙って空振りする（helpers/gpu.ts の TIMING_ACQUIRE_OPTIONS）。
-          const entries = diagnostics.lastRunTiming?.entries;
-          assert(
-            entries !== undefined && entries.length > 0,
-            "計測を要求したのに lastRunTiming が無い（計測経路の破損）",
-          );
-          const keys = entries.map((entry) => entry.key);
-          assertEquals(
-            keys.includes(linearI8a8Key(linearI8a8UsesVec4(n), true, undefined, "i4", groupSize)),
-            true,
-            `走ったキー: ${keys.join(" / ")}`,
-          );
-          assert(
-            keys.some((key) => key.endsWith(`:wi4g${groupSize}`)),
-            "診断キーに i4 常駐の group 長が乗っていない",
-          );
-        }
+        // MUST: census が空なら赤 — `keys.length > 0` で守るとキー検査が黙って空振りする。
+        const keys = requireCensus(diagnostics.lastRunPipelines, "w4a8").map((row) => row.key);
+        assertEquals(
+          keys.includes(linearI8a8Key(linearI8a8UsesVec4(n), true, undefined, "i4", groupSize)),
+          true,
+          `走ったキー: ${keys.join(" / ")}`,
+        );
+        assert(
+          keys.some((key) => key.endsWith(`:wi4g${groupSize}`)),
+          "診断キーに i4 常駐の group 長が乗っていない",
+        );
       } finally {
         await session.dispose();
       }

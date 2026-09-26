@@ -6,12 +6,13 @@
 // 積）の storage 往復を消すので、丸め位置が素の列とずれれば有限値のビット列が動く。
 // workgroup u32 staging による丸め障壁が実バックエンドで効いているかは、ここでしか分からない。
 
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { ADALN_NORM_KEY } from "../src/kernels/adaln-norm.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
 import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /** 行内は 256 スレッド workgroup の端数を通す長さ、行数は grid-stride を 1 周以上させる。 */
 const ROWS = 5;
@@ -153,7 +154,7 @@ Deno.test({
     "adaLN 融合は窓 6 / 7 とも primitive と有限ビット / NaN 分類が一致し、4→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const gate of [true, false] as const) {
         const label = `窓 ${gate ? 7 : 6}`;
@@ -185,18 +186,11 @@ Deno.test({
             0,
             `${label}: 反例のカウンタは 0`,
           );
-          if (TIMING_ACQUIRE_OPTIONS.gpuTiming) {
-            const timing = fused.diagnostics().lastRunTiming;
-            assert(
-              timing !== undefined,
-              `${label}: 計測を要求したのに lastRunTiming が無い（計測経路の破損）`,
-            );
-            assertEquals(
-              timing.entries.map((entry) => entry.key),
-              [ADALN_NORM_KEY],
-              `${label}: timing key`,
-            );
-          }
+          assertEquals(
+            requireCensus(fused.diagnostics().lastRunPipelines, label).map((row) => row.key),
+            [ADALN_NORM_KEY],
+            `${label}: census key`,
+          );
         } finally {
           await fused.dispose();
           await primitive.dispose();

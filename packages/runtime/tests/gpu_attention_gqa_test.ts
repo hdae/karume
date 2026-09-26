@@ -30,7 +30,8 @@ import {
 } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE, TIMING_ACQUIRE_OPTIONS } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
@@ -155,7 +156,7 @@ const bandMask = (m: number, n: number, width: number, blocked: number): F32Tens
 
 type RunResult = {
   readonly output: Tensor;
-  /** 直近 run のパイプラインキー（timestamp-query が無い機では空）。 */
+  /** 直近 run のパイプラインキー（census — 計測に依らない）。 */
   readonly keys: readonly string[];
 };
 
@@ -188,8 +189,8 @@ const runAttention = async (
   );
   try {
     const output = (await session.run(inputs))["y"];
-    const entries = session.diagnostics().lastRunTiming?.entries ?? [];
-    return { output, keys: entries.map((entry) => entry.key) };
+    const census = requireCensus(session.diagnostics().lastRunPipelines, "attention");
+    return { output, keys: census.map((row) => row.key) };
   } finally {
     await session.dispose();
   }
@@ -372,18 +373,15 @@ Deno.test({
  * **census**（ADR 0058 決定 4）。r > 1 では GQA 変種のキーが**実際に走った**こと、r = 1 では
  * `:gqa` が 1 本も出ないこと（決定 2 の「r=1 はバイト同一」の実行側の裏）。
  *
- * MUST: `TIMING_ACQUIRE_OPTIONS` を渡す（素の `acquireGpu()` では `lastRunTiming` が
- * undefined になり、キー検査が黙って空振りする）。
- * MUST: 計測を要求しない device（`TIMESTAMP_QUERY_AVAILABLE` が偽）では**明示 SKIP** し、走る
- * ときは空の内訳を無条件に FAIL にする（`TIMING_ACQUIRE_OPTIONS` は feature 不在で
- * `gpuTiming: false` に落ちるので、「entries が空なら次の形へ」で守ると全ケースが無検査のまま
- * 緑になる — e2e_minicpm5_test.ts の census と同じ形）。
+ * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
+ * 無条件に FAIL にする（「entries が空なら次の形へ」で守ると全ケースが無検査のまま緑になる —
+ * tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 Deno.test({
-  name: "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU / timestamp-query）",
-  ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
+  name: "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU）",
+  ignore: !GPU_AVAILABLE,
   fn: async () => {
-    const gpu = await acquireGpu(TIMING_ACQUIRE_OPTIONS);
+    const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
         const { q, k, v } = inputsFor(shape);

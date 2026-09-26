@@ -34,10 +34,13 @@ export const SHADER_F16_AVAILABLE: boolean = await detectShaderF16();
 /**
  * GPU 時間診断（ADR 0021）が使えるアダプタか。
  *
- * MUST: 内訳（パイプラインキー別の GPU 実時間）を見るテストは `acquireGpu({gpuTiming: true})`
- * を明示的に渡す。既定は**要求しない**ので、渡し忘れると `lastRunTiming` が undefined に
- * なり、キー検査が「entries が空なら何も見ない」形で**黙って空振りする**。`true` は feature
- * 不在で fail loudly するため、列挙が無い環境ではこのフラグでケースごと SKIP する。
+ * MUST: GPU 実時間（`lastRunTiming`）そのものを見るテストは `acquireGpu({gpuTiming: true})`
+ * を明示的に渡し、列挙が無い環境ではこのフラグでケースごと SKIP する（`true` は feature
+ * 不在で fail loudly する）。
+ * MUST NOT: どのキーが何本走ったか（census）を見るために計測を要求する。census の源は計測に
+ * 依らない `lastRunPipelines`（tests/helpers/pipeline-census.ts）で、計測を要求すると計測の
+ * 無い機で SKIP になり、計測が device ごと落ちる機（Metal の query set 上限 —
+ * docs/known-issues.md）で赤になる。
  */
 const detectTimestampQuery = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;
@@ -47,18 +50,6 @@ const detectTimestampQuery = async (): Promise<boolean> => {
 };
 
 export const TIMESTAMP_QUERY_AVAILABLE: boolean = await detectTimestampQuery();
-
-/**
- * 内訳（パイプラインキー別の GPU 実時間）を読むテスト用の `acquireGpu` 引数。
- *
- * MUST: キー検査を持つテストはこれを渡す。素の `acquireGpu()` は計測を**要求しない**ので
- * `lastRunTiming` が undefined になり、`entries.length > 0` で守られたキー検査が**黙って
- * 空振りする**（数値だけ見て緑のまま通る）。列挙が無いアダプタでは `false` に落として
- * 数値側の被覆を残す（`true` は feature 不在で fail loudly するため）。
- */
-export const TIMING_ACQUIRE_OPTIONS: { readonly gpuTiming: boolean } = {
-  gpuTiming: TIMESTAMP_QUERY_AVAILABLE,
-};
 
 /**
  * 「アダプタ無しでの全 SKIP」を明示的に許可する opt-out。
@@ -81,8 +72,8 @@ export const ALLOW_NO_SHADER_F16: boolean = Deno.env.get("KARUME_ALLOW_NO_SHADER
 /**
  * 「`timestamp-query` 不在での SKIP」を明示的に許可する opt-out（同上）。
  *
- * この feature が無い機では GPU 時間診断（ADR 0021）のケースが消えるだけでなく、
- * `if (keys.length > 0)` で守られたキー検査が**黙って空振り**する（数値だけ見て緑になる）。
+ * この feature が無い機では GPU 時間診断（ADR 0021）のケースが消える（census は計測に
+ * 依らないので残る）。
  */
 export const ALLOW_NO_TIMESTAMP_QUERY: boolean =
   Deno.env.get("KARUME_ALLOW_NO_TIMESTAMP_QUERY") === "1";
@@ -103,7 +94,7 @@ if (!GPU_AVAILABLE) {
   if (!TIMESTAMP_QUERY_AVAILABLE) {
     console.warn(
       "[karume] アダプタが 'timestamp-query' を列挙しないため GPU 時間診断（ADR 0021）の " +
-        "実 GPU テストを SKIP する。数値の検証には影響しない（キー検査だけが落ちる）。" +
+        "実 GPU テストを SKIP する。数値の検証と census（キー別本数）には影響しない。" +
         "この機で意図的に通すには KARUME_ALLOW_NO_TIMESTAMP_QUERY=1 を設定する",
     );
   }
