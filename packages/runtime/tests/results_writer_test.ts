@@ -15,6 +15,7 @@ import {
 import { parseResultsDocument } from "../../../tools/verify-diff/diff.ts";
 import type { Environment } from "./helpers/environment.ts";
 import {
+  type Comparison,
   type Measurement,
   openResults,
   recordFailure,
@@ -391,6 +392,50 @@ Deno.test("往復: runRecordedCase が書いた results.json を verify-diff の
     // runRecordedCase 経由は測る前に投げた回も欄を持つ（空配列）。
     assertEquals(document.cases[1].measurements, []);
     assertEquals(document.cases[1].note, "Error: 測る前に落ちた");
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
+});
+
+// 自機 A/B 門（ADR 0110 決定 5）の実測は任意欄 `comparisons`。積んだケースだけが欄を持ち、
+// 非有限は null・未導出の帯は欄ごと落ちた形で、読み手（tools/verify-diff）がそのまま受ける。
+Deno.test("往復: runRecordedCase が積んだ A/B の実測は comparisons として読み手まで届く", async () => {
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const root = new URL(`file://${temporary}/`);
+    const results = openResults("anima-ab", { root, environment: ENVIRONMENT });
+    const comparison: Comparison = {
+      output: "step1-latent",
+      reference: "f16+dit8",
+      practical: "f16+dit8-a8-attn8-s16",
+      relRms: 1.2e-2,
+      maxAbs: 0.31,
+      band: { metric: "relRms", floor: 1e-3, ceiling: 2.5e-2 },
+    };
+    await runRecordedCase(results, { id: "banded" }, ({ comparisons }) => {
+      comparisons.push(comparison);
+      return Promise.resolve(undefined);
+    });
+    await runRecordedCase(results, { id: "unbanded" }, ({ comparisons }) => {
+      comparisons.push({ ...comparison, relRms: Number.NaN, band: undefined });
+      return Promise.resolve({ status: "fail", note: "帯が未導出" });
+    });
+    // 積まなかったケースは欄を持たない（A/B 門でないケースの決着の形は変わらない）。
+    await runRecordedCase(results, { id: "plain" }, () => Promise.resolve(undefined));
+
+    const text = await Deno.readTextFile(new URL("results.json", results.dir));
+    const document = parseResultsDocument(JSON.parse(text));
+    assertEquals(document.cases[0].comparisons, [comparison]);
+    const { band: _dropped, ...unbanded } = comparison;
+    assertEquals(document.cases[1].comparisons, [{ ...unbanded, relRms: null }]);
+    assertEquals(Object.hasOwn(document.cases[2], "comparisons"), false);
+    assertEquals(Object.keys(JSON.parse(text).cases[0]), [
+      "id",
+      "status",
+      "elapsedMs",
+      "measurements",
+      "comparisons",
+    ]);
   } finally {
     Deno.removeSync(temporary, { recursive: true });
   }

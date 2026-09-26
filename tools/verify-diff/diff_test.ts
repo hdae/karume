@@ -119,6 +119,61 @@ describe("results.json の境界の検査", () => {
     const report = buildDiff([loaded]);
     assertEquals(report.families[0].rows[0].cells["deno-a"].measurements?.[0].maxRel, null);
   });
+
+  it("comparisons を読む（非有限の null・帯の無い回を受け、壊れた帯は throw する）", () => {
+    const banded = {
+      output: "step1-latent",
+      reference: "f16+dit8",
+      practical: "f16+dit8-a8-attn8-s16",
+      relRms: 0.012,
+      maxAbs: 0.31,
+      band: { metric: "relRms" as const, floor: 0.001, ceiling: 0.025 },
+    };
+    // 帯の無い回は欄ごと無い（書き手の JSON.stringify が undefined の欄を落とす）。
+    const { band: _dropped, ...unbanded } = banded;
+    const loaded = seat("deno-a", "2026-09-26", "anima-ab", [{
+      id: "f16+dit8-a8-attn8-s16-1024",
+      status: "fail",
+      elapsedMs: 3,
+      comparisons: [banded, { ...unbanded, output: "m_p", relRms: null }],
+    }]);
+    assertEquals(loaded.document.cases[0].comparisons, [
+      banded,
+      { ...unbanded, output: "m_p", relRms: null },
+    ]);
+    const report = buildDiff([loaded]);
+    assertEquals(report.families[0].rows[0].cells["deno-a"].comparisons?.[0].relRms, 0.012);
+
+    const broken = (comparison: Record<string, unknown>) => () =>
+      seat("deno-a", "2026-09-26", "anima-ab", [{
+        id: "x",
+        status: "pass",
+        elapsedMs: 1,
+        comparisons: [comparison],
+      }]);
+    assertThrows(
+      broken({ ...banded, band: { ...banded.band, metric: "maxAbs" } }),
+      Error,
+      "未知の metric 'maxAbs'",
+    );
+    assertThrows(
+      broken({ ...banded, band: { metric: "relRms", floor: 0.001 } }),
+      Error,
+      "ceiling が数値でない",
+    );
+    assertThrows(broken({ ...banded, practical: 3 }), Error, "practical が文字列でない");
+    assertThrows(
+      () =>
+        seat("deno-a", "2026-09-26", "anima-ab", [{
+          id: "x",
+          status: "pass",
+          elapsedMs: 1,
+          comparisons: {},
+        }]),
+      Error,
+      "comparisons が配列でない",
+    );
+  });
 });
 
 describe("席の選び方", () => {

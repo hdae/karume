@@ -134,6 +134,52 @@ describe("verify-diff CLI: 読める根", () => {
     );
   });
 
+  it("自機 A/B の実測（comparisons）をケースごとの小表に並べる", async () => {
+    await withRoot(
+      (root) =>
+        writeSeat(
+          root,
+          "deno-a",
+          "2026-09-26_anima-ab",
+          document("anima-ab", "deno-a", [{
+            id: "f16+dit8-a8-attn8-s16-512",
+            status: "fail",
+            elapsedMs: 1,
+            comparisons: [
+              {
+                output: "step1-latent",
+                reference: "f16+dit8",
+                practical: "f16+dit8-a8-attn8-s16",
+                relRms: 0.0123,
+                maxAbs: 0.5,
+                band: { metric: "relRms", floor: 0.001, ceiling: 0.025 },
+              },
+              {
+                output: "zz-unbanded",
+                reference: "f16+dit8",
+                practical: "f16+dit8-a8-attn8-s16",
+                relRms: null,
+                maxAbs: null,
+              },
+            ],
+          }]),
+        ),
+      async (root) => {
+        const result = await run(["--root", root]);
+        assertEquals(result.code, 0, result.stderr);
+        assertStringIncludes(result.stdout, "### f16+dit8-a8-attn8-s16-512 の A/B");
+        assertStringIncludes(
+          result.stdout,
+          "| step1-latent | deno-a | f16+dit8 → f16+dit8-a8-attn8-s16 | 0.0123 | 0.5 | 0.001〜0.025 |",
+        );
+        assertStringIncludes(
+          result.stdout,
+          "| zz-unbanded | deno-a | f16+dit8 → f16+dit8-a8-attn8-s16 | null | null | 未導出 |",
+        );
+      },
+    );
+  });
+
   it("同じ系列・環境キー・日付の席が 2 つあると警告を出す（終了コードは 0 のまま）", async () => {
     await withRoot(
       async (root) => {

@@ -55,6 +55,37 @@ export type Measurement = {
   readonly stage: "karume" | "spec";
 };
 
+/** 自機 A/B 門の帯（ADR 0110 決定 5 — 宣言であって環境キー別の行ではない）。 */
+export type ComparisonBand = {
+  /** 帯を掛けた指標（今は相対 RMS だけ）。 */
+  readonly metric: "relRms";
+  readonly floor: number;
+  readonly ceiling: number;
+};
+
+/**
+ * 自機 A/B 門の実測 1 本（同じ機・同じ重みで `session` が空の参照席と、実用席の同じ観測点を比べた差）。
+ *
+ * {@link Measurement} と同じく、合格した回の差も残す（帯を導く材料は割れる前から要る）。
+ *
+ * MUST: 派生値（帯に対する比など）は持たない — {@link Measurement} の MUST と同じ理由。
+ * NOTE: 非有限（NaN / ±Inf）は `JSON.stringify` が `null` にする（読む側は null を受ける）。
+ * `band` が `undefined`（未導出・または記録だけの観測）なら欄ごと書かれない。
+ */
+export type Comparison = {
+  /** 観測点（`step1-latent` / グラフの出力名など）。 */
+  readonly output: string;
+  /** 参照席（`session` が空の quant 名）。 */
+  readonly reference: string;
+  /** 実用席（`session` を持つ quant 名）。 */
+  readonly practical: string;
+  /** ‖p − r‖₂ / ‖r‖₂。 */
+  readonly relRms: number;
+  readonly maxAbs: number;
+  /** 判定に使った帯。 */
+  readonly band: ComparisonBand | undefined;
+};
+
 /** `results.json` の `cases` に積む 1 件。 */
 export type ResultEntry = {
   readonly id: string;
@@ -77,6 +108,11 @@ export type ResultEntry = {
    * 空配列）。欄ごと持たないのは {@link Results.record} を直に呼ぶケースだけ。
    */
   readonly measurements?: readonly Measurement[];
+  /**
+   * 自機 A/B 門の実測（ADR 0110 決定 5）。{@link runRecordedCase} 経由のケースは**積んだときだけ**
+   * 持つ（A/B 門でないケースの決着の形は変えない）。
+   */
+  readonly comparisons?: readonly Comparison[];
 };
 
 /** 系列 1 本ぶんの結果の置き場。 */
@@ -218,6 +254,8 @@ export const recordFailure = async (results: Results, entry: ResultEntry): Promi
 export type RecordedCase = {
   /** 出力ごとの実測（合格した回も残す — 判定には使わない）。本体が積み、決着に載る。 */
   readonly measurements: Measurement[];
+  /** 自機 A/B 門の実測（本体が積み、1 本以上あるときだけ決着に載る）。 */
+  readonly comparisons: Comparison[];
 };
 
 /**
@@ -253,8 +291,9 @@ export type RecordedCaseSpec = {
  * - 本体が投げた: `fail` を {@link recordFailure} で積んでから**同じ例外を投げ直す**。決着の
  *   無いまま抜けると、この席には同じ日の前回の走行の決着が居座る。
  *
- * どちらの経路でも欄の並び（id / status / elapsedMs / note / measurements）は同じで、
- * 所要時間は呼んだ時点から記録の直前までを測る。
+ * どちらの経路でも欄の並び（id / status / elapsedMs / note / measurements / comparisons）は
+ * 同じで、所要時間は呼んだ時点から記録の直前までを測る。`comparisons` は本体が 1 本以上
+ * 積んだときだけ載る。
  */
 export const runRecordedCase = async (
   results: Results,
@@ -264,10 +303,13 @@ export const runRecordedCase = async (
   const { id, failureNote, onFailure } = recordedCase;
   const startedAt = performance.now();
   const measurements: Measurement[] = [];
+  const comparisons: Comparison[] = [];
   const elapsedMs = (): number => Math.round(performance.now() - startedAt);
+  const compared = (): { comparisons?: readonly Comparison[] } =>
+    comparisons.length === 0 ? {} : { comparisons };
   let verdict: CaseVerdict | undefined;
   try {
-    verdict = await body({ measurements });
+    verdict = await body({ measurements, comparisons });
   } catch (cause) {
     onFailure?.();
     await recordFailure(results, {
@@ -276,6 +318,7 @@ export const runRecordedCase = async (
       elapsedMs: elapsedMs(),
       ...(failureNote === undefined ? {} : { note: failureNote(cause) }),
       measurements,
+      ...compared(),
     });
     throw cause;
   }
@@ -285,5 +328,6 @@ export const runRecordedCase = async (
     elapsedMs: elapsedMs(),
     ...(verdict?.note === undefined ? {} : { note: verdict.note }),
     measurements,
+    ...compared(),
   });
 };

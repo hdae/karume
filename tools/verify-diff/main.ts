@@ -23,6 +23,7 @@
 import {
   buildDiff,
   type Cell,
+  type Comparison,
   type Difference,
   type DiffReport,
   type FamilyMatrix,
@@ -222,6 +223,39 @@ const measurementRows = (
   return rows;
 };
 
+/**
+ * 自機 A/B 門の実測（ADR 0110 決定 5）。帯は宣言なので並べるだけで、帯に対する比は出さない
+ * （帯の外なら門が既に赤で決着している — ここは環境間で relRMS がどれだけ動くかを見る表）。
+ */
+const comparisonRows = (
+  environments: readonly string[],
+  cells: Readonly<Record<string, Cell>>,
+): string[] => {
+  const rows: string[] = [];
+  const outputs = new Set<string>();
+  for (const environment of environments) {
+    const cell = Object.hasOwn(cells, environment) ? cells[environment] : undefined;
+    for (const comparison of cell?.comparisons ?? []) outputs.add(comparison.output);
+  }
+  for (const output of [...outputs].sort()) {
+    for (const environment of environments) {
+      const cell = Object.hasOwn(cells, environment) ? cells[environment] : undefined;
+      const found: Comparison | undefined = cell?.comparisons?.find((one) => one.output === output);
+      if (found === undefined) continue;
+      const band = found.band === undefined
+        ? "未導出"
+        : `${num(found.band.floor)}〜${num(found.band.ceiling)}`;
+      rows.push(
+        `| ${md(output)} | ${md(environment)} | ${md(found.reference)} → ${
+          md(found.practical)
+        } | ` +
+          `${num(found.relRms)} | ${num(found.maxAbs)} | ${band} |`,
+      );
+    }
+  }
+  return rows;
+};
+
 const renderFamily = (matrix: FamilyMatrix): string[] => {
   const lines: string[] = [`## ${matrix.family}`, ""];
   for (const one of matrix.selected) {
@@ -261,6 +295,14 @@ const renderFamily = (matrix: FamilyMatrix): string[] => {
     lines.push(`### ${row.id} の実測`, "");
     lines.push("| 出力 | 環境 | maxAbs | maxRel | 帯 | maxAbs/atol | 段 |");
     lines.push("| --- | --- | --- | --- | --- | --- | --- |");
+    lines.push(...rows, "");
+  }
+  for (const row of matrix.rows) {
+    const rows = comparisonRows(matrix.environments, row.cells);
+    if (rows.length === 0) continue;
+    lines.push(`### ${row.id} の A/B`, "");
+    lines.push("| 観測点 | 環境 | 参照席 → 実用席 | relRMS | maxAbs | 帯（relRMS） |");
+    lines.push("| --- | --- | --- | --- | --- | --- |");
     lines.push(...rows, "");
   }
   return lines;

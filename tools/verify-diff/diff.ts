@@ -29,6 +29,25 @@ export type Measurement = {
   readonly stage: "karume" | "spec";
 };
 
+/** 自機 A/B 門の帯（results.ts の `ComparisonBand` と同じ形）。 */
+export type ComparisonBand = {
+  readonly metric: "relRms";
+  readonly floor: number;
+  readonly ceiling: number;
+};
+
+/** 自機 A/B 門の実測（results.ts の `Comparison` — 参照席と実用席の同じ観測点の差）。 */
+export type Comparison = {
+  readonly output: string;
+  readonly reference: string;
+  readonly practical: string;
+  /** JSON では非有限が null になる。 */
+  readonly relRms: number | null;
+  readonly maxAbs: number | null;
+  /** 未導出（または記録だけの観測）の回は持たない。 */
+  readonly band?: ComparisonBand;
+};
+
 /** `results.json` の `cases` 1 件。 */
 export type ResultEntry = {
   readonly id: string;
@@ -39,6 +58,7 @@ export type ResultEntry = {
   readonly elapsedMs: number;
   readonly note?: string;
   readonly measurements?: readonly Measurement[];
+  readonly comparisons?: readonly Comparison[];
 };
 
 /** 結果を採ったチェックアウト（`git` が無い機で採られた結果は持たない = null）。 */
@@ -137,6 +157,33 @@ const parseMeasurement = (value: unknown, where: string): Measurement => {
   };
 };
 
+const BAND_METRICS: readonly ComparisonBand["metric"][] = ["relRms"];
+
+const parseComparison = (value: unknown, where: string): Comparison => {
+  const record = requireRecord(value, where);
+  let band: ComparisonBand | undefined;
+  if (Object.hasOwn(record, "band")) {
+    const raw = requireRecord(record.band, `${where}.band`);
+    const metric = requireString(raw, "metric", `${where}.band`);
+    // 未知の指標を黙って通すと、別の量の帯を relRMS の帯として並べてしまう。
+    const known = BAND_METRICS.find((candidate) => candidate === metric);
+    if (known === undefined) throw new Error(`${where}.band: 未知の metric '${metric}'`);
+    band = {
+      metric: known,
+      floor: requireNumber(raw, "floor", `${where}.band`),
+      ceiling: requireNumber(raw, "ceiling", `${where}.band`),
+    };
+  }
+  return {
+    output: requireString(record, "output", where),
+    reference: requireString(record, "reference", where),
+    practical: requireString(record, "practical", where),
+    relRms: nullableNumber(record, "relRms", where),
+    maxAbs: nullableNumber(record, "maxAbs", where),
+    ...(band === undefined ? {} : { band }),
+  };
+};
+
 const parseEntry = (value: unknown, where: string): ResultEntry => {
   const record = requireRecord(value, where);
   const id = requireString(record, "id", where);
@@ -149,6 +196,10 @@ const parseEntry = (value: unknown, where: string): ResultEntry => {
   if (measurements !== undefined && !Array.isArray(measurements)) {
     throw new Error(`${at}: measurements が配列でない`);
   }
+  const comparisons = record.comparisons;
+  if (comparisons !== undefined && !Array.isArray(comparisons)) {
+    throw new Error(`${at}: comparisons が配列でない`);
+  }
   return {
     id,
     status: requireStatus(record, at),
@@ -160,6 +211,11 @@ const parseEntry = (value: unknown, where: string): ResultEntry => {
     ...(measurements === undefined ? {} : {
       measurements: measurements.map((one, index) =>
         parseMeasurement(one, `${at}.measurements[${index}]`)
+      ),
+    }),
+    ...(comparisons === undefined ? {} : {
+      comparisons: comparisons.map((one, index) =>
+        parseComparison(one, `${at}.comparisons[${index}]`)
       ),
     }),
   };
@@ -221,6 +277,7 @@ export type Cell = {
   readonly elapsedMs: number;
   readonly note?: string;
   readonly measurements?: readonly Measurement[];
+  readonly comparisons?: readonly Comparison[];
 };
 
 /** 系列 1 本について、その環境から採った文書。 */
@@ -273,6 +330,7 @@ const toCell = (entry: ResultEntry): Cell => ({
   elapsedMs: entry.elapsedMs,
   ...(entry.note === undefined ? {} : { note: entry.note }),
   ...(entry.measurements === undefined ? {} : { measurements: entry.measurements }),
+  ...(entry.comparisons === undefined ? {} : { comparisons: entry.comparisons }),
 });
 
 const shortSha = (sha: string): string => sha.slice(0, 7);
