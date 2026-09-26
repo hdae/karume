@@ -1,10 +1,11 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-26（高速化 / メモリの波 イテレーション 1 完了 + 残件消化済み。次はイテレーション 2 の候補の相談〈SUMMARY §9.3 波 2〜4〉）
+> Last updated: 2026-09-26（高速化 / メモリの波 イテレーション 2「DiT 速度」— B3 = anima の DiT 常駐を採用。次は B4 irodori H-30）
 
 ## 現在の焦点
 
+- **イテレーション 2「DiT 速度」B3 = anima の DiT 常駐を採用（2026-09-26・opt-in のまま — [ADR 0112](../docs/decisions/0112-anima-transformer-residency.md)・B570 で 2 回目以降 2.45 s / 生成 = 壁の 10.4%）。OOM 退避 → やり直しは B570 で device lost になり未解決（原因未特定 — perf-ledger H-35）**。
 - **高速化 / メモリの波・イテレーション 1「契約と土台」完了 + 残件消化済み（2026-09-26）**: 数値経路を参照層（runtime 省略値 + 厳密オラクル + sha 参照行）と
   実用層（quant 席の `session` が束ねる opt-in）に分けた。契約は [ADR 0110](../docs/decisions/0110-practical-tier-numerics-contract.md)
   （契約クラス E / C / R / Q・カーネル門の 4 点型・E2E は census + 同機参照層との床 + 崩壊上限・実用層でもデバイス内決定性 MUST・

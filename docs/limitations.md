@@ -869,7 +869,7 @@ VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQue
 ## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
 
 `AnimaGenerateRequest.onEvent` の `denoise-step` が渡せる途中結果は **latent の写し**
-（`copyLatents()`）だけで、毎 step のプレビュー画像は by-design で提供しない。VAE decoder は
+（`copyLatents()`）だけで、毎 step のプレビュー画像は by-design で提供しない。既定の段ごと運転では VAE decoder は
 DiT を解放した**後**にしかロードできない（4 本同時常駐は VRAM で不成立 — ADR 0016 /
 `anima/pipeline.ts` のモジュール doc）ため、denoise ループの途中で VAE を回す経路が構造的に
 存在しない。プレビューが要る消費側は latent から近似する — そのための公開ヘルパが
@@ -878,8 +878,40 @@ DiT を解放した**後**にしかロードできない（4 本同時常駐は 
 （2026-08-24 実測）ので、`animaLatents()` の mean / std で逆正規化した値を渡すと白飛びした
 別物になる。係数自体は `export` しない MUST なので、消費側が自前で写し取る経路は無い
 （16ch → 3ch の線形射影であって厳密な decode ではない — 詳細は実装 doc が正本）。
-`stage` イベント（段の Session 構築前 / 解放後）と `vae-tile` イベント（タイル 1 枚ごと）で
+`stage` イベント（段の開始 / 終了 — 段ごと運転では Session 構築前 / 解放後）と `vae-tile` イベント（タイル 1 枚ごと）で
 GB 級ロードとタイル decode の進捗は観測できる。
+
+## Anima: DiT 常駐（`residency: "transformer"`）は VRAM の上限を上げる・4 GB 級では使えない
+
+`AnimaPipelineOptions.residency` / `AnimaGenerateRequest.residency` の `"transformer"` は DiT の Session を
+generate を跨いで持ち続ける opt-in で（ADR [0112](decisions/0112-anima-transformer-residency.md)）、既定の
+`"per-stage"` とは VRAM の前提が違う。by-design の制約:
+
+- **チェーン最大が上がる**。text 段と VAE 段が常駐 DiT の**上に**乗る。既定席（`f16+dit8-a8-attn8-s16`）の
+  1024² で常駐ぶんは +2,646 MiB（重み 1,871 + backing 768 + 入力 7 MiB — 2026-09-10 runtime 集計）、常駐時の
+  チェーン最大は約 3.9〜4.1 GiB（推測 — text 段の runtime 集計が無い）。段ごと運転のチェーン最大（DiT 段
+  2,647 MiB）より約 1.3〜1.5 GiB 高い。**4 GB 級の GPU では使えない**。
+- **quant 席で倍違う**。DiT の重みは既定席 1,875 MiB・`f16` 席 3,733 MiB（f32 計算 — 2026-08-05 final-perf-bench の
+  VRAM 表。上の 1,871 MiB は 2026-09-10 の runtime 集計で、同じ量の出典違い）。`f16` 席の常駐は text 段で
+  +3.7 GB を超えるので、8 GB 級でも余裕が薄い（未計測）。
+- **VRAM が足りなければ退避して段をやり直し、以後は常駐しない**（格下げ）。OOM の後に遅い経路へ落ちたことは
+  `residency` イベント（`evicted` / `out-of-memory` → 以後 `released` / `downgraded`）でしか分からない —
+  購読しないと、速度でしか気付けない。格下げは pipeline の寿命の間は戻らない（組み直すと戻る）。DiT 段で退避
+  するのは前の generate から持ち越した DiT だけで、同じ generate で作った DiT の OOM は段ごと運転と同じ VRAM 構成
+  なので退避せずにそのまま投げる（ADR 0112 決定 3）。
+- **退避は OOM を型（`GpuOutOfMemoryError`）で報告する環境でだけ働く**。Metal の out-of-memory errorScope が沈黙
+  する環境（known-issues「Metal で out-of-memory errorScope が沈黙する」節）では、常駐が VRAM を超えても退避も
+  格下げもイベントも起きない。
+- **退避の後のやり直しは Arc B570 では device lost になった**（原因未特定 — known-issues「Intel Arc B570」節）。
+  退避のイベントまでは出るが、やり直しの段が `GpuDeviceLostError` で失敗する。他機は未計測。
+- **退避した段は最初からやり直す**。DiT 段なら denoise を step 1 から回し直す（出る画素は同じ）ので、その
+  generate の `denoise-step` / `vae-tile` は 1 から出直し、壁時計は段 1 本ぶん延びる。
+- **解像度を変えても定常状態の常駐量は「重み + 最大の backing 1 本」まで**（予算 256 MiB を超える backing は
+  1 本だけ保持 — ADR 0095）。切り替えた直後の run では退役した古い backing が flush の後まで生きるので、一時的な
+  ピークはこれを超える。導出済み計画はホストのオブジェクトとして 12 本まで残る。
+- **利得は同じ pipeline で generate を繰り返す使い方にしか出ない**（`examples/anima/main.ts` のような 1 プロセス
+  1 生成では 0）。Arc B570 の 1024² turbo では 2 回目以降 2.45 s / 生成（壁の 10.4% —
+  [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。他機と Chrome は未計測。
 
 ## anima: 1920px 超〜2048px の解像度は rope のモデル宣言外の位置を使う（受理する・品質は未実測）
 

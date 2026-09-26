@@ -46,6 +46,22 @@ measurements in `docs/research/`.
   `packages/runtime/tests/fixtures/references/`. Where a row is an extra check on an existing
   test, it is created and compared only after that check passes, and a case without a row for the
   current environment still records its measured sha256 in `results.json`.
+- `AnimaPipelineOptions.residency` and `AnimaGenerateRequest.residency` (`"per-stage"` | `"transformer"`,
+  default `"per-stage"`, ADR 0112): `"transformer"` keeps the DiT session alive after a `generate`, so
+  the next `generate` on the same pipeline skips reloading the DiT weights, re-deriving its plan and
+  rebuilding its intermediate buffers (about 2.45 s, or 10.4% of the wall time, per image from the
+  second call onward, measured on an Intel Arc B570 at 1024² with the default quant). The request
+  value decides whether the DiT is kept after that call; a DiT that is already resident is always reused. Keeping it raises peak VRAM, because the
+  text and VAE stages load on top of it (about +2.6 GiB at 1024² with the default quant). When
+  another stage, or a DiT carried over from an earlier call, then runs out of memory (as a
+  `GpuOutOfMemoryError`), the pipeline drops the resident DiT, waits for the release to reach the
+  device, retries that stage once, and stays per-stage for the rest of its life. A DiT built in the
+  same call that runs out of memory is not evicted; the error is thrown as on the per-stage path.
+  A failed call with `"per-stage"` still releases a carried-over DiT. Unknown values throw
+  `ModelInputError` before any weight bytes are fetched. The
+  new `residency` event reports each change (`retained` / `released` / `evicted`, with the reason);
+  the `AnimaResidency`, `AnimaResidencyAction` and `AnimaResidencyReason` types are exported from
+  `@karume/models` and `@karume/models/anima`.
 
 ### Changed
 
@@ -68,6 +84,11 @@ measurements in `docs/research/`.
   dispatch exceeds the Linux xe driver's 5 s job limit and the resulting device-lost panic would
   stop the whole test process. The skip is per environment key and announced at registration; the
   asset-completeness test still runs, and other machines run the series as before.
+- Anima's `stage` event now marks the start and end of a stage. On the default per-stage path these
+  are still the points before the session is built and after it is released; for a DiT carried over
+  and kept (`"transformer"`), the `transformer` stage's start and end no longer bracket a weight load
+  or a release. With `"per-stage"` the release of a carried-over DiT happens inside them, and after
+  an out-of-memory eviction so do the release and the reload.
 
 ### Breaking
 
@@ -86,6 +107,10 @@ measurements in `docs/research/`.
   `"parallel-fused"` (same summation order as `"parallel"`; on an Intel Arc B570, regular E2B
   GPU decode time −47.9% against `i4` with the reference attention, versus −46.9% with
   `"parallel"`, with identical tokens).
+- `@karume/models`: `AnimaGenerateEvent` gains a fourth member, `{ kind: "residency" }`. TypeScript code
+  that handles the three previous kinds and narrows the remainder with `else` no longer type-checks;
+  add a `residency` branch. The event is only emitted when `residency: "transformer"` is used or a
+  resident DiT exists, so default-path event sequences are unchanged at runtime.
 
 ## [0.13.0] - 2026-09-25
 
