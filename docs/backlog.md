@@ -24,7 +24,8 @@
   台帳の候補は perf-ledger 2026-09-26 節（K-59〜K-69・L-20〜L-23）。
   **イテレーション 2「DiT 速度」（2026-09-26〜）**: **B3 は済・採用**（anima の DiT 常駐・opt-in のまま — ADR [0112](decisions/0112-anima-transformer-residency.md)。
   利得は kill 線を超えた — 数値は perf-ledger H-4 と [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。
-  OOM 退避 → やり直しが B570 で device lost になった件は later 節（H-35）。**次 = B4 irodori H-30**。
+  OOM 退避 → やり直しが B570 で device lost になった件は **先に調査**（H-35・利用者裁定 2026-09-26「一旦調査を」— later 節の
+  項目を参照。ブラウザ〈Chrome〉でも常駐と退避の挙動を確かめられる確認ページを併せて用意する）。**その後 = B4 irodori H-30**。
   **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
   既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
 
@@ -211,7 +212,9 @@ later の「decode 速度の残り」。
 
 - **anima 常駐の OOM 退避 → やり直しが B570 で device lost（起票 2026-09-26・perf-ledger H-35）**: 原因は未特定。
   runtime の OOM 後の再構築経路を調べる。先に素の WebGPU で同じ形を再現できるかを確かめる（分岐の基準は台帳）。
-  既定の段ごと運転には影響しない（常駐は opt-in）— 症状は known-issues「Intel Arc B570」節。
+  既定の段ごと運転には影響しない（常駐は opt-in）— 症状は known-issues「Intel Arc B570」節。**利用者裁定 2026-09-26 =
+  B4 より先に調査する（半日目安）。ブラウザ（Chrome・WebGPU）でも常駐の利得と退避の挙動を確かめられる確認ページ
+  （ローカル配布形を読む examples 形）を併せて用意する。**
 - **E4B 通常（gemma4）の export（裁定 4 = b・2026-09-26）**: RAM 48 GB 以上の機で export する。recipe（`--model e4b`・
   読み込みの meta 構築 + assign）は現状のまま（31 GiB 機では OOM する）。E4B 通常の席は E2B の束を
   暫定宣言・既定 `i4`。
@@ -379,7 +382,10 @@ later の「decode 速度の残り」。
   配布に反映する。次リリースに束ねる（pin の焼き方は ADR [0073](decisions/0073-models-source-pin.md)・
   [release-runbook](release-runbook.md) §2 / §3）。ローカルミラーは焼き直し済み。
 - **birefnet-hr / lucida の HF 再アップロード + pin 更新（E1 段 1 — ADR [0113](decisions/0113-birefnet-weight-series.md)）**:
-  f32 系列 4 本の焼き直し（上流 revision つき — `--dtype f32`）と f16 席を含めて配布に反映する。
+  f32 系列 4 本の焼き直し（上流 revision つき — `--dtype f32`）と f16 席を含めて配布に反映する。**利用者裁定
+  2026-09-26: HR の既定席を `f16` にする（上流 checkpoint が f16 なので無損失）。Lucida は f32 のまま（f16 は有損失 —
+  α の平均絶対差 最大 7.0e-5）。recipe の `BIREFNET_DEFAULT_QUANT` 相当の変更と pytest・カードの relation の追随は
+  配布反映の回に行う（ADR 0113 追記）。**
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
