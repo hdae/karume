@@ -1,11 +1,11 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-25（0.13.0 公開済み — Release / JSR 3 パッケージ / smoke:published 緑・runbook §5 の事後まで済。次はリリース後の波の着手順の相談〈2026-09-24 全域レビューの見送り項目・perf-ledger 起票分・admission 波・焼き直し波・コンテナ段4〜6〉）
+> Last updated: 2026-09-26（高速化 / メモリの波 イテレーション 1 完了 + 残件消化済み。次はイテレーション 2 の候補の相談〈SUMMARY §9.3 波 2〜4〉）
 
 ## 現在の焦点
 
-- **高速化 / メモリの波・イテレーション 1「契約と土台」完了（2026-09-26）**: 数値経路を参照層（runtime 省略値 + 厳密オラクル + sha 参照行）と
+- **高速化 / メモリの波・イテレーション 1「契約と土台」完了 + 残件消化済み（2026-09-26）**: 数値経路を参照層（runtime 省略値 + 厳密オラクル + sha 参照行）と
   実用層（quant 席の `session` が束ねる opt-in）に分けた。契約は [ADR 0110](../docs/decisions/0110-practical-tier-numerics-contract.md)
   （契約クラス E / C / R / Q・カーネル門の 4 点型・E2E は census + 同機参照層との床 + 崩壊上限・実用層でもデバイス内決定性 MUST・
   sha 行の参照行 / 実用行）、合成規則は [ADR 0111](../docs/decisions/0111-session-options-composition.md)（明示 > quant 宣言 > runtime 既定・
@@ -15,12 +15,16 @@
   — 旧 reader は新 manifest を拒否・`i4` / fromAssets は sequential = 参照経路）、`-fast` 束は B570 の実測で確定
   （E2B 通常 / QAT E2B / QAT E4B = 全部入り + attention parallel-fused・GPU decode −47.9 / −49.3 / −41.7% —
   [research 2026-09-26](../docs/research/2026-09-26-gemma-flag-bench.md)）。QAT E4B は 3 席・既定 `i4-fast`。
+  残件は裁定で消化済み: sha 参照行は 9 系列（anima / sbv2 / irodori + siglip2 / gemma4 の golden・birefnet / depth-anything の実画像・
+  vowel-detector の全鎖・gemma4 / gemma4-qat の quant 席 — [ADR 0106](../docs/decisions/0106-device-keyed-references.md) 追記その 3）・
+  BiRefNet 2048² は B570 の環境キーの held 行で明示 SKIP・`sessionGpuFeatures` は全 8 系列（ADR 0111 追記）。
+  次 = イテレーション 2 の候補（SUMMARY §9.3 の波 2〜4 — backlog now 節）。
   - 落とし穴: **HF の再アップロードと pin 更新は未**（次リリースにまとめる — それまで公開 pin を新 models で読むと全席 sequential）。
     ローカルミラー gemma4 / gemma4-qat は焼き直し済み（backup = `outputs/mirror-backup-2026-09-26/`）。
-  - E4B 通常は recipe（`--model e4b`・読み込みの meta 構築 + assign）まで済で、**export は 31 GiB 機で OOM**（PLE 表 f32 10.5 GiB を含む
-    定常 ≈ 27.8 GiB）— 要判断（PLE 表を i8 + scale で持つ recipe 改修 / 別機 / 見送り）。E4B 通常の席は E2B の束を暫定宣言・既定 `i4`。
-  - BiRefNet 2048² は B570 で device lost → Deno panic するので、この機ではフル verify の前に `outputs/series/{birefnet-hr-2048,lucida-2048}`
-    を `outputs/series-held-b570/` へ退避している（恒久策 = 環境キー別の明示 SKIP か deform の分割 — 要判断）。
+  - E4B 通常は recipe（`--model e4b`）まで済で、export は RAM 48 GB 以上の機で後日（backlog later・31 GiB 機では OOM）。
+    E4B 通常の席は E2B の束を暫定宣言・既定 `i4`。
+  - 落とし穴: held 行（`e2e_birefnet_test.ts` の `HELD_SERIES`）に行を足せるのは、その機で走らせるとプロセスごと落ちる系列だけ
+    （数値が合わない系列は赤のまま直す）。B570 の 2048² の行は `deform_conv2d` の分割か高速化（perf-ledger K-63）で消す。
   - 調査の正本は `.claude/reviews/2026-09-25_perf-recon/SUMMARY.md`（git 追跡外・§9.3 の波 2〜4 = 次のイテレーション候補・§12 = Fable レビュー 71 件の振り分け）。
 
 - **0.13.0 公開済み（2026-09-25）**: Release `v0.13.0` = `4b167df8`・JSR 3 パッケージ 0.13.0・`deno task smoke:published` 緑。焼き直し（10リポを系列から`karume dist`で・`karume/0.13.0`）→ HF再アップロード（旧safetensors削除つき）→ pin 10本（`f16b8998`）→ CHANGELOGの版の節（`867a33c7`・リリースノート起草時の突合で3コミット訂正）→ リリースノート（`outputs/release/release-notes-v0.13.0.draft.md`・独立検証3巡）→ Release → runbook §5の事後まで済。anima / anima-extraのpinは権利付与文を含むmainへ更新済み（`75b127b5`・karume.jsonはbyte同一）。断片化したpart 5本は2026-09-24に「そのまま公開し、実DL速度を測ってから対処」と裁定済み（[backlog](../docs/backlog.md)のlater）。次はリリース後の波の着手順の相談（2026-09-24全域レビューの見送り項目・perf-ledger起票分・admission波・焼き直し波・コンテナ段4〜6）。手順は[release-runbook](../docs/release-runbook.md)§0〜§5。**落とし穴**（次のリリース向け）:

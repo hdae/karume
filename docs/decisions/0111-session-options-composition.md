@@ -41,7 +41,7 @@ gemma だけが「明示指定 > quant 宣言 > runtime 既定」の合成を持
 6. **GPU feature の要求は実効設定から導く**（anima / irodori）: 明示の `"f16"` を shader-f16 を宣言しない quant
    に重ねたとき、quant 宣言だけ見ると自前で取る device が feature を持たず、重みを上げた後の構築で落ちる。
    `sessionGpuFeatures` が実効設定の要求を宣言へ足し、admission 席で名指しで落とす。上書き口の無い 6 系列への
-   統一は未決（今のミラーに該当は無い）。
+   統一は未決（今のミラーに該当は無い）→ 追記 2026-09-26 で全系列へ統一した。
 7. **runtime に一括軸（`numerics: "practical"` 等）は置かない**。束の中身は系列と格納型ごとに違い、manifest の
    quant 席だけが表せる（ADR 0058 追記 2026-09-26）。
 
@@ -61,3 +61,29 @@ gemma だけが「明示指定 > quant 宣言 > runtime 既定」の合成を持
   上位層のため）。
 - runtime の検査順序は「GPU 非依存の検査を全て先・GPU 能力の門を後」になった。単一違反の入力では不変で、複数の
   違反を同時に持つ入力でだけ先に出る文言が変わりうる。
+
+## 追記（2026-09-26）— GPU feature の要求を全系列で実効設定から導く（決定 6 の一般化）
+
+利用者の回答（2026-09-26・逐語）は「7. b, 必要になるまでそのまま。(通した方が綺麗であればaだけど)」で、主回答は b
+（上書き口の無い系列は据え置き）、a は「通した方が綺麗なら」の条件付きだった。オーケストレータはこの条件が成り立つと
+判定して a を採った。根拠は 2 つ: ① 8 系列が同じ形になり、`gpu-features.ts` の MUST（要求と検査を実効設定から導く）
+に「上書き口を持つ家族だけ」という例外が残らない ② 振る舞いの差が出るのは「f16 計算を宣言し `shaderF16` を書き
+落とした manifest」だけで、今のミラーに該当は無い（下の「振る舞いの差が出る唯一の形」）。
+決定 6 を全 8 系列の規則にした: 各系列の admission 席で
+`sessionGpuFeatures(quant.gpuFeatures, 実効 SessionOptions)` を 1 度だけ導き、共有 GPU の検査・`acquireGpu` の要求・
+取得後の検査の 3 か所がこの 1 つの値を見る（`packages/models/src/session/gpu-features.ts` の MUST）。
+
+- **理由**: 「要求する feature = 宣言 ∪ 実効設定が要る feature」を系列ごとに書き分けない。書き分けると、受理表
+  （決定 2）が f16 計算を受けるように変わった系列だけ要求が追随しない形が型検査を通る — 受理表を網羅写像にしたのと
+  同じ理由で、規則そのものを 1 本にする。
+- **振る舞いの差が出る唯一の形**: `session` で f16 計算（`linearCompute` / `attentionCompute` = `"f16"`）を宣言
+  しながら `gpuFeatures.shaderF16` を宣言しない manifest。今の受理表でこの宣言を受け、かつ従来導いていなかったのは
+  sbv2（`linearCompute`）だけ（anima / irodori は決定 6 で導き済み・f32 のみの 4 系列と gemma は f16 計算を受けない）。
+  その manifest は従来 Session 構築の f16 門で落ちていたが、共有 GPU なら admission 席で名指しで落ち、自前で取る
+  device なら feature を要求して通る。今のミラーに該当は無い（`session_options_mirror_test.ts` が全系列の全 quant で
+  「導いた要求 = 宣言」を見る）。
+- **gemma**: 従来は `quant.gpuFeatures` を一切読まず（宣言があっても要求も検査もしない — 沈黙劣化の形）、
+  `acquireGpu({ subgroups })` だけだった。`fromPretrained` は admission の閉包（`resolveGemmaSessionOptions` の席）で
+  導いて共有 GPU をその席で検査し、構築は `acquireGpu({ ...要求, subgroups })` と取得後の検査を通る。`fromAssets` は
+  manifest を持たないので宣言は無く、実効設定が要る feature だけを要求する（今の受理表では空）。drafter Session は
+  同じ device に張るので別に要求しない。今の gemma ミラーは `gpuFeatures` を宣言しないので、要求は従来と同じ。

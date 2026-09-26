@@ -15,9 +15,11 @@
   [0111](decisions/0111-session-options-composition.md)・`lastRunPipelines` + census 移行 + 束の census 表・同機 A/B 門（anima / irodori / sbv2）・
   `tools/flag-bench`・gemma 投機ゲートの門・`stateAttentionReduce` の manifest 昇格（Breaking）・`-fast` 束の実測確定
   （[research 2026-09-26](research/2026-09-26-gemma-flag-bench.md)）・gemma4 recipe の `--model e4b` と PARALLEL_SHAPES の E4B 行。
-  残件（要判断・完了報告 2026-09-26）: ① E4B 通常の export（31 GiB 機で OOM — PLE 表 f32 10.5 GiB）② sha 参照行を LLM / f32 のみの
-  4 系列へ広げるか（今は golden 帯だけ）③ BiRefNet 2048² の B570 用の明示 SKIP ④ `sessionGpuFeatures` を上書き口の無い 6 系列へ統一するか
-  ⑤ HF 再アップロード + pin 更新（次リリース）。次のイテレーション候補 = SUMMARY §9.3 の波 2（DiT 速度: B3 anima DiT 常駐 → B4 irodori
+  残件は消化済み（裁定 2026-09-26）: ② sha 参照行を 6 系列へ広げた（gemma4 / gemma4-qat の quant 席・siglip2 / gemma4 の golden・
+  birefnet / depth-anything の実画像・vowel-detector の全鎖 — ADR [0106](decisions/0106-device-keyed-references.md) 追記その 3）
+  ③ BiRefNet 2048² を B570 の環境キーの held 行で明示 SKIP（`HELD_SERIES`）④ `sessionGpuFeatures` を全 8 系列へ統一（ADR 0111 追記）。
+  ① E4B 通常の export は later 節、⑤ HF 再アップロード + pin 更新は release 節へ移した。
+  次のイテレーション候補 = SUMMARY §9.3 の波 2（DiT 速度: B3 anima DiT 常駐 → B4 irodori
   H-30 → B1 → B2）/ 波 3（メモリ: E1 BiRefNet f16 系列 → E2 → E5 → E4）/ 波 4（実用層カーネル: C2 VAE conv i8a8 → C1 → D2 → D1 → D3）。
   台帳の候補は perf-ledger 2026-09-26 節（K-59〜K-69・L-20〜L-23）。
 
@@ -202,6 +204,10 @@ later の「decode 速度の残り」。
 
 ## later
 
+- **E4B 通常（gemma4）の export（裁定 4 = b・2026-09-26）**: RAM 48 GB 以上の機で export する。recipe（`--model e4b`・
+  読み込みの meta 構築 + assign）は現状のまま（31 GiB 機では OOM する）。E4B 通常の席は E2B の束を
+  暫定宣言・既定 `i4`。
+
 - **0.13.0 の再アップロードで断片化した part 5 本（起票 2026-09-24・2026-09-24 裁定 = そのまま公開し、実 DL 速度を測ってから対処）**: `hf-upload.zsh` の断片化表で
   255 MiB 級の part のうち anima 2 本（`anima-turbo-v1.1` / `anima-v1.0` の `text_conditioner` part 3・3.6 MiB/term）・
   birefnet-hr 1 本（`2048/matte` part 3・4.1）・lucida 2 本（`2048/matte` part 3 / 6・0.9 / 8.8）が 10 MiB/term を下回った
@@ -360,6 +366,10 @@ later の「decode 速度の残り」。
 
 ## release — リリース準備波（しばらく先）
 
+- **gemma4 / gemma4-qat の HF 再アップロード + pin 更新（裁定 8 = a・2026-09-26）**: manifest 語彙
+  `stateAttentionReduce` の昇格（Breaking — CHANGELOG `[Unreleased]`）と E4B QAT の `i4-gemvpar` / `i4-fast` を
+  配布に反映する。次リリースに束ねる（pin の焼き方は ADR [0073](decisions/0073-models-source-pin.md)・
+  [release-runbook](release-runbook.md) §2 / §3）。ローカルミラーは焼き直し済み。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。

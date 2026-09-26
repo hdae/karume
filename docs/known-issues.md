@@ -215,7 +215,8 @@ M2 で赤のまま残ることを受容する**（Linux / Vulkan は緑・parall
 参照環境専用」の by-design で、**参照値を環境キーごとの行に替えて消化した**（ADR
 [0106](decisions/0106-device-keyed-references.md) — B570 の行 `deno-intel-graphics-bmg-g21` は
 作成済みなので、この機の門は再び「この機での退行」だけを指す）。BiRefNet 2048² の device lost は
-limitations「BiRefNet 系」節、
+この機の環境キーの held 行で明示 SKIP する（`e2e_birefnet_test.ts` の `HELD_SERIES` — フル走行はこの系列で
+止まらない・limitations「BiRefNet 系」節）、
 golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化（`e2e_golden_test.ts` の
 `OUTPUT_TOLERANCE`）、`createResident` 上限門はテスト前提（`maxBufferSize` が 4 の倍数）の穴で
 修正済み。

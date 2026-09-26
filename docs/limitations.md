@@ -267,16 +267,20 @@ device では走らない** — 欄が名乗るのは常駐分（重み・state�
 ない**点は配布形の制約として明示しておく。回避策は入れていない（実測して判断する側の話）。
 
 **2048² は Intel Arc B570（Linux xe ドライバ）では走らない — 1 dispatch がジョブ制限 5 秒を超える**
-（2026-09-20 実測・裁定 = 現状維持）。xe ドライバは compute ジョブ（= `queue.submit` 1 回）に
+（2026-09-20 実測・裁定 2026-09-26 = その機の環境キーで明示 SKIP）。xe ドライバは compute ジョブ（= `queue.submit` 1 回）に
 `job_timeout_ms` = 5,000 の上限を持ち（root 以外は変更不可・上限でも 10,000）、超えたジョブを殺して
 device lost にする。BiRefNet 2048² では decoder 末尾の `deform_conv2d`（dispatch #2276・出力
 `[1,256,1024,1024]`）1 本がこれを踏む — 二分探索で dispatch 単位に確定し、1 dispatch = 1 submit に
 しても再現（submit の時間予算分割〈ADR 0004〉は「単独で予算を超える dispatch は分割できない」ので
 効かない）。同じ dispatch は 1024²（出力 `[1,256,512,512]`）で 1.66 s なので、要素数 4 倍の 2048² は
 ≈ 6.6 s の見込み。1024² の 2 系列（birefnet-hr / lucida）は B570 でも全緑。Deno はこの device lost を
-例外にせず panic するので、verify のフル走行はここでプロセスごと止まる（known-issues「Intel Arc
-B570」節）。解消するなら kernel 側で `deform_conv2d` を複数 dispatch に分割するか高速化する — 速度の
-波を再開するときの候補で、今は入れない。
+例外にせず panic し、後続のテストまでプロセスごと止まる（known-issues「Intel Arc B570」節）。そのため
+`packages/runtime/tests/e2e_birefnet_test.ts` の `HELD_SERIES` に 2048² の 2 系列 × B570 の環境キー
+（`deno-intel-graphics-bmg-g21`）の行を置き、この機では GPU を使うテスト（golden 突合・幾何判別）を明示 SKIP する
+（登録時に warn・資産の完全性テストは走る・他の機には効かない — ADR
+[0106](decisions/0106-device-keyed-references.md) 追記 2026-09-26 その 3 の held 行）。解除条件は kernel 側で
+`deform_conv2d` を複数 dispatch に分割するか高速化して 1 dispatch を上限内に収めること
+（[perf-ledger](perf-ledger.md) K-63）で、そのとき行を消す。
 
 ## conv1d（groups==1）も同じ dispatch 上限で fail loudly になる（Lout ≈ 8.39M）
 
@@ -1215,8 +1219,9 @@ finish・使用予約・staging・区間ロックが取り残されるので、�
 ## DL 前の GPU 適合チェックは quant が宣言した feature と limits まで（合計・空きは見ない）
 
 quant が宣言する GPU 前提のうち、重みの part を取る前（家族 admission）に突き合わせるのは
-`gpuFeatures`（共有 GPU を渡された経路のみ — 自前で device を取る経路は要求として `acquireGpu`
-へ渡す）と `requiredLimits`（ADR 0089 決定 5・2026-09-01 結線）。limits の突き合わせ相手は、
+`gpuFeatures` に実効設定が要る feature（f16 計算 → shader-f16 — `sessionGpuFeatures`・全系列 —
+ADR 0111 追記 2026-09-26）を足したもの（共有 GPU を渡された経路のみ — 自前で device を取る経路は
+要求として `acquireGpu` へ渡す）と `requiredLimits`（ADR 0089 決定 5・2026-09-01 結線）。limits の突き合わせ相手は、
 共有 GPU なら `GpuContext.limits`、自前で取る経路なら直前に読んだアダプタ実測値
 （`readAdapterLimits` — アダプタは読んで捨てる）。残る限界:
 
@@ -1334,6 +1339,12 @@ B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべ
 数値の微小差）。この実測が環境別の行へ移した直接の動機で、B570 の行
 （`deno-intel-graphics-bmg-g21`）は作成済み。行の作り方・参照門（`KARUME_ALLOW_NO_REFERENCE` で opt-out）・結果の席
 （`outputs/verify/`）は ADR [0106](decisions/0106-device-keyed-references.md) が正本。
+
+行を持つ系列は 9 系列（2026-09-26 — ADR 0106 追記その 3）: anima / sbv2 / irodori の PNG / WAV に加え、siglip2 /
+gemma4 の golden（runtime 側 e2e — 行は `packages/runtime/tests/fixtures/references/<系列>-golden.json`）・
+birefnet / depth-anything の実画像・vowel-detector の全鎖の f32 出力（safetensors）と、gemma4 / gemma4-qat の
+quant 席の token id 列（JSON）。PNG の実物は数値に加えてエンコーダ（Deno の `CompressionStream`）にも依存し、
+環境キーは Deno の版を含まないので、Deno の版上げで数値が同じでも同じキーの PNG の行が割れうる（赤で気づく形）。
 
 機序: IEEE 754 の加減乗除はデバイス間でも完全同一だが、①超越関数（`exp` 等）の実装が
 ドライバ / コンパイラ依存 ②シェーダコンパイラの fma 融合判断（積和を 1 命令に融合すると

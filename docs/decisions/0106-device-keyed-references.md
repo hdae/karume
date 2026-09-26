@@ -258,3 +258,84 @@ Markdown（`--json` 可）で出す。
 に積む。追記決定 2 の `measurements` と同じく schema 1 のままの任意欄で、派生値（帯に対する比）は持たず、
 非有限は `null` になる。読む側は `tools/verify-diff` がケースごとの A/B 表を出す。帯は環境キー別の行にしない
 （ADR 0110 決定 4）。
+
+## 追記（2026-09-26・その 3）— 行を持つ系列の拡大・runtime 側の置き場・実物の規約・held 行
+
+### 追記決定 4: 行を持つ系列は 9 系列
+
+sha の行を持つ系列を、anima / sbv2 / irodori に加えて次の 6 系列へ広げる（利用者裁定 2026-09-26）。ケース ID と
+実物（sha を採るバイト列）は系列ごとに次のとおり。
+
+| 系列（fixture）                                            | 置き場  | ケース ID         | 実物                                                    | ケース数                         |
+| ---------------------------------------------------------- | ------- | ----------------- | ------------------------------------------------------- | -------------------------------- |
+| anima / sbv2 / irodori                                     | models  | ケース名          | PNG / WAV                                               | 決定 1                           |
+| siglip2 golden（`siglip2-golden`）                         | runtime | `<系列>/<ケース>` | pooled 出力の f32 safetensors                           | 16（2 系列 × 合成 4 + 実画像 4） |
+| gemma4 golden（`gemma4-golden`）                           | runtime | ケース名          | 最終位置の logits 行 `[1,V]` の f32 safetensors         | 3                                |
+| birefnet 実画像（`birefnet`）                              | models  | `<系列>/<ケース>` | マット logits の f32 safetensors                        | 8（1024² の 2 系列 × 4）         |
+| depth-anything 実画像（`depth-anything`）                  | models  | ケース名          | 深度の f32 safetensors                                  | 4                                |
+| vowel-detector 全鎖（`vowel-detector`）                    | models  | ケース名          | ロジットの f32 safetensors                              | 4                                |
+| gemma4 / gemma4-qat の quant 席（`gemma4` / `gemma4-qat`） | models  | `<model>/<quant>` | 固定プロンプトを greedy で 64 token 回した id 列の JSON | 3 / 6                            |
+
+- gemma4 / gemma4-qat の席は固定表に持たず、ミラーの manifest の**全 quant 席**から列挙する
+  （`packages/models/tests/helpers/gemma-reference.ts` の `mirrorSeats`）。今のミラーでは gemma4 = e2b の 3 席、
+  gemma4-qat = e2b / e4b の各 3 席（`i4` / `i4-gemvpar` / `i4-fast`）。固定表だと、配布形に席が増えたとき行の無い席が
+  黙って残る。行のクラス（参照行 / 実用行 — 前の追記）も同じ列挙で席の `session` から導く。
+- id 列の JSON は `{ "ids": [...] }`（2 スペース・末尾改行）。復号した本文と停止理由は `results.json` の `note` にだけ
+  載せる（本文は id 列から導かれるので、実物に入れると同じ変化を 2 度数える）。固定プロンプトは 64 token を超える
+  応答が出る依頼にし、上限より前に停止した走行からは行を作らない（固定される id 列が短くなり、門が弱くなる）。
+
+### 追記決定 5: runtime 側 e2e の fixture は `packages/runtime/tests/fixtures/references/`
+
+決定 1 の置き場は models 側 e2e のもの。runtime 側 e2e（golden）の行は
+`packages/runtime/tests/fixtures/references/<結果の席の family 名>.json`（`gemma4-golden` / `siglip2-golden`）に置く。
+ファイル名を結果の席の family 名（追記決定 2 の `<系列>-golden`）と揃えるのは、1 系列が runtime と models の両方に
+e2e を持つとき（gemma4）に、fixture と結果の席が同じ名前で対になり、models 側の fixture（`gemma4.json`）と取り違え
+ないため。形・書き出し順・モードの意味論は決定 1 / 3 と同じ。
+
+### 追記決定 6: 実物の規約
+
+- f32 テンソルの実物は **safetensors 1 本**（`packages/runtime/tests/helpers/reference.ts` の `f32ArtifactBytes`）。
+  テンソル名 = グラフの出力名・dtype `F32`・shape は出力のまま・**metadata なし**。走行ごとに変わる値（時刻・
+  チェックアウト）を metadata に入れると、数値が同じでも sha が動き、行が数値の退行ではなく走らせた時刻を掴む。
+  shape の要素数とデータ長が食い違えば throw する。
+- sha は**実物ファイルのバイト列**に対して採る（結果の `actual` と実物の sha が常に一致する）。
+- birefnet / depth-anything は目視用の PNG も書くが、sha の対象は量子化前の f32 出力にする。PNG は 8bit 化で
+  量子化境界をまたがない差を見逃す。
+- PNG の実物は数値に加えてエンコーダの実装にも依存する（IDAT の圧縮は Web 標準の `CompressionStream("deflate")` で、
+  Deno の版で出力が変わりうる）。環境キーは Deno の版を含まない（決定 2）ので、Deno の版上げで同じキーの PNG の行が
+  割れうる。これは赤で気づく形で、数値の不変を確かめてから `rewrite` する（決定 3 の「何が変わったのかを先に言える
+  とき」）。WAV（TS 実装の PCM 書き出し）と f32 safetensors は数値だけで決まる。
+
+### 追記決定 7: 既存の検査に足した sha の順序
+
+sha の行を既存テストの**追加検査**として足した系列（siglip2 / gemma4 の golden = tolerance 突合、birefnet /
+depth-anything の実画像 = 判別、vowel-detector の全鎖 = `.lab` の完全一致）は次の規約に従う
+（`reference.ts` のモジュール doc「呼び手の型」と `settleOrObserve` が正本）。
+
+1. 元の検査が**通った後で**行を作る・突き合わせる（元の検査が割れた出力から行を作らない）。
+2. 比較モードで現環境の行が無いケースは突合だけを飛ばし、実物を書いて `status: "pass"` + `actual` + `artifact`
+   （`expected` なし）を結果に積む。行が無くても実測 sha が残るので、`tools/verify-diff`（追記決定 3）が環境を
+   またいで `actual` を比べられる。この分岐は系列ごとに書かず `settleOrObserve` の 1 本に置く（系列ごとに割れると、
+   実測 sha を積む系列と何も積まない系列が混ざる）。
+3. 決着を結果に**積んでから**不一致で落とす（先に投げると実測 sha が結果に残らない）。
+
+テストそのものが sha 門の系列（anima / sbv2 / irodori・gemma の quant 席）は従来どおり、行が無いケースを `ignore` で
+明示 SKIP する。
+
+### 追記決定 8: held 行 — 環境キーの行で「その機では走らせない系列」を持つ
+
+環境キーの行を、参照値だけでなく**その機で止める系列**にも使う。置き場は
+`packages/runtime/tests/e2e_birefnet_test.ts` の `HELD_SERIES`（系列名 → 環境キー → 理由）。
+
+- 行を足せるのは、その機で走らせると**プロセスごと落ちる**（後続の検証まで道連れにする）場合だけ。数値が合わない
+  系列を止める場所ではない（それは赤のまま直す）。
+- 止めるのは device を触るテスト（golden 突合・幾何判別）だけで、資産の完全性テスト（GPU 不要）には掛けない。
+- 止めた系列は登録時に `console.warn` で 1 度名乗る（無音の SKIP にしない）。内側のキーが環境キーの書式であることは
+  自己テストが検査する（綴りの外れた行は黙って効かなくなるため）。
+- 行は環境キーごとに持つ（全機共通で止めると、走れる機の検証まで消える）。GPU の無い機は環境キーを持たないので
+  どの行にも当たらない。
+- 行の理由文には根拠と解除条件を書く。解消の合図 = 行を消す。
+- 現在の行: `birefnet-hr-2048` / `lucida-2048` × `deno-intel-graphics-bmg-g21`（Intel Arc B570・Linux xe ドライバ）。
+  decoder 末尾の `deform_conv2d` 1 dispatch がドライバの compute ジョブ上限 5 s を超えて device lost になり、Deno が
+  プロセスごと panic する。解除条件は `deform_conv2d` の分割か高速化で 1 dispatch を上限内に収めること
+  （[perf-ledger](../perf-ledger.md) K-63・[limitations](../limitations.md)「BiRefNet 系」節）。

@@ -38,6 +38,14 @@ measurements in `docs/research/`.
 - `tools/flag-bench`: a Deno benchmark that compares Gemma execution flags against a reference on the
   same machine (GPU time as the primary metric, wall clock secondary) and records which kernel keys
   actually ran.
+- Device-keyed sha256 reference rows for six more test suites: the SigLIP 2 and Gemma 4 golden
+  tests (f32 safetensors of the pooled output / the last-position logits row), the BiRefNet and
+  Depth Anything real-image tests and the vowel-detector end-to-end chain (f32 safetensors of the
+  raw output), and one row per Gemma 4 / Gemma 4 QAT quant seat, enumerated from the mirror's
+  manifest (the token ids of a fixed 64-token greedy prompt). Runtime-side fixtures live in
+  `packages/runtime/tests/fixtures/references/`. Where a row is an extra check on an existing
+  test, it is created and compared only after that check passes, and a case without a row for the
+  current environment still records its measured sha256 in `results.json`.
 
 ### Changed
 
@@ -45,11 +53,21 @@ measurements in `docs/research/`.
   declaration > runtime default) and rejects, before fetching weights, a manifest `session` key the
   family does not accept; previously the non-Gemma families passed any declared key through to the
   runtime. All published quants are accepted unchanged.
+- Every pipeline now derives its GPU feature requirements from the effective session options (the
+  quant's `gpuFeatures` plus `shader-f16` when an `"f16"` compute path is in effect), requests them
+  when it acquires its own device, and checks them on a shared `gpu` before fetching weights.
+  Gemma 4 pipelines previously ignored a quant's `gpuFeatures` declaration. Published distributions
+  request the same features as before.
 - Gemma 4 QAT recipe: E4B gains the `i4-gemvpar` and `i4-fast` quants (the same declarations as
   E2B) and now defaults to `i4-fast`; the E2B and E4B `i4-fast` declare
   `stateAttentionReduce: "parallel-fused"` instead of `"parallel"`. On an Intel Arc B570, `i4-fast`
   cut GPU decode time per step by 49.3% (E2B) and 41.7% (E4B) against `i4`, and no single flag was
   slower on its own. Rebuild the distribution to pick up the new quants; no requantization is needed.
+- The BiRefNet 2048² GPU tests (`birefnet-hr-2048` / `lucida-2048`) are skipped explicitly on the
+  Intel Arc B570 environment key (`deno-intel-graphics-bmg-g21`), where one `deform_conv2d`
+  dispatch exceeds the Linux xe driver's 5 s job limit and the resulting device-lost panic would
+  stop the whole test process. The skip is per environment key and announced at registration; the
+  asset-completeness test still runs, and other machines run the series as before.
 
 ### Breaking
 

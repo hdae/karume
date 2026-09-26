@@ -135,7 +135,9 @@ census（席を指定したとき変種が実際に走ること）は別の門�
 - そのコミットで `rewrite` しなかった環境の実用行は**削除する**（古い行を残さない）。その機で次に回した
   とき、明示 SKIP + 参照門の赤 → 自己 A/B → `write` の順で作り直す。
 - 現状の該当: anima の 11 ケース中 10 ケースが実用行、参照行は `f16-1024` の 1 ケース。sbv2 / irodori の
-  行は全て参照行。
+  行は全て参照行。gemma4（e2b）と gemma4-qat（e2b / e4b）の quant 席の行は `i4` が参照行、`i4-gemvpar` /
+  `i4-fast` が実用行。siglip2 / gemma4 の golden・birefnet / depth-anything の実画像・vowel-detector の全鎖の行は
+  `session` が空の経路なので全て参照行（行を持つ系列の一覧は ADR 0106 追記 2026-09-26 その 3）。
 
 ### 8. 品質裁定の分担
 
@@ -200,3 +202,7 @@ LLM は固定評価 + 出力の読解。未実施の人間評価を実施済み�
   行を置かない席（prefill の並列 GEMV / attention・parallel-fused・anima の attention 席）は chunk 行数・容量・device 上限に
   依るためで、そこは従来の「1 本以上 / 0 本」の検査が残る（導出関数の追加は残件）。gemma（LLM）と f32 のみの
   4 系列にはまだ同機 A/B も sha 行も無い（要判断 — SUMMARY §12.2）。
+- sha 参照行は 2026-09-26 に 9 系列へ広げた（ADR 0106 追記その 3）。gemma は quant 席ごとの token id 列を持ち、
+  `i4-gemvpar` / `i4-fast` の実用行が実用層の退行 + 決定性の検出器を兼ねる。f32 のみの 4 系列（birefnet /
+  depth-anything / siglip2 / vowel-detector）は golden・実画像・全鎖の f32 出力の参照行を持つ。同機 A/B 門は
+  この 5 系列（gemma + f32 のみ 4）にはまだ無い。
