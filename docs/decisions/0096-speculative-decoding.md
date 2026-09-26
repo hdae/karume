@@ -285,3 +285,23 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
 - ノブは pipeline の静的ノブ `Gemma4PipelineOptions.speculative.gate` として公開（計測・検収用・既定で十分・
   `"always"` のターンには降りない）。mtp-bench の `--gate-early-leave / --gate-burst-abort / --gate-burst-min /
   --gate-explore-base` で A/B できる。
+
+## 追記（2026-09-26・自己採算ゲートと決定性 — 決定 8 の「既定席では稀に割れうる」を撤回）
+
+- **裁定と根拠**: 実用層でもデバイス内決定性は MUST（利用者裁定 2026-09-26・ADR
+  [0110](0110-practical-tier-numerics-contract.md) 決定 6）。決定 8 のゲートは壁時計で
+  decode 形（M=1）と verify 形（M=4）を選ぶので、この 2 経路がビット同一であることを**機械検証**していれば、
+  どちらを選んでも出力は変わらずゲートは MUST に適合する（ADR [0058](0058-numerics-opt-in-contract.md) 追記
+  2026-08-29 の一般則 3 — ビット同一を根拠にする自動選択は機械検証つきに限る）。
+- **門の場所**（`packages/models/tests/e2e_gemma4_speculative_test.ts`）: 投機⑤ = verify 行 0 と decode 1 行の logits の u32 一致（attention 3 変種 × GEMV 2 種 × RMS→add 融合の全 12 組〈と linear→SRQ 指定〉）、投機② = 配布形の既定席（`i4-fast` + attention parallel）で
+  投機 / 非投機の token 列の一致（3 ケース × 200 token）とゲート付き = always の列の一致。② と ⑤ の
+  attention parallel × GEMV sequential は、この追記まで報告だけ（門ではない）だった。
+- **実測**（[research 2026-09-26](../research/2026-09-26-gemma4-speculative-determinism.md)・Intel Arc B570）:
+  既定席の相違 0/200 × 3 ケース・⑤ の u32 突合は門にした全組で一致（attention parallel × GEMV sequential も
+  相違 0/262,144 語・最大絶対差 0）。
+- **撤回**: 追記 2026-09-09（段 4 の実測と自己採算ゲート）の「既定席（parallel）ではゲートの切替が壁時計に
+  依るので、同一 seed でも稀に出力が変わりうる」は撤回する（その追記自体は当時の記録として残す）。
+  保証は **device ごと**で、門が赤の device では M=1 と M=4 の相違が実在する — その機で厳密な再現性が要るなら
+  `speculative: "always"` か `stateAttentionReduce: "sequential"` を選ぶ（両者は A/B・検収の席として残る）。
+  NOTE: 門は e2e レーンを回した device だけを検証する。一般則 3 が例に挙げる実走カナリア（利用者の device で
+  実行時に確かめる口）は無い。u32 の門は attention 3 変種 × GEMV 2 種 × RMS→add 融合の全 12 組（+ linear→SRQ 指定）を覆う（同日に全組へ広げ、B570 で全て相違 0）。

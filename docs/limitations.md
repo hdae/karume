@@ -500,27 +500,33 @@ i4 / i8 格納 × f32 計算の linear は 1 ≤ M ≤ 64 で GEMV 族（ADR [00
   意味のある用途は無いが、空を「全数」に読み替えると `speculative` の絞り込みの退行が黙って通るので
   空は空のまま。
 
-## 投機デコード（MTP 段 3・ADR 0096）: 投機は温度に依らず張る・既定席では argmax が稀に割れうる・drafter Session は pipeline に 1 本
+## 投機デコード（MTP 段 3・ADR 0096）: 投機は温度に依らず張る・M=1 / M=4 の同一は device ごとの門で保証・drafter Session は pipeline に 1 本
 
 - **投機は温度に依らず張られ、token 列は非投機と同一**（受理の抽選は行ごとに `sampler.next` を非投機と同じ
   logits・history・順序で 1 回ずつ呼ぶので RNG の消費列まで一致する）。受理率は温度で変わる — 配布形の
   推奨 sampler（温度 1.0）での値は未計測（段 4）。
-- **「投機あり = 非投機」の厳密一致は `stateAttentionReduce: "sequential"` でだけ保証する**。gemma4 の既定席
-  `"parallel"` でも**attention の縮約順自体は M=1 と M=4 で揃う**（①′ の適用条件が M ≤ 8・③′ は M < 16 なので、
-  decode も verify も ①′ + ③′）。それでも厳密一致を宣言しないのは、**M で形が変わる他経路（GEMV 族の行ブロック
-  など）を帯の全域で実測していない**ためで、近い値の token では argmax が割れうる（chunk 分割の prefill と
-  decode の間に元からある数値差と同じ種類）。既定席の相違は e2e が毎走行で報告する
-  （`e2e_gemma4_speculative_test.ts` の投機② = 生成 token 列・投機⑤ = verify 行 0 と decode の logits。
-  どちらも門ではなく実測の報告）。`linearGemvReduce: "parallel"` を併せた組の verify 行 0 / decode の
-  u32 一致だけは同テストが門として固定している。
+- **「投機あり = 非投機」の厳密一致は、既定席を含めて e2e の門で固定している**（2026-09-26 に「既定席では
+  稀に割れうる」の主張を撤回）。gemma4 の既定席 `"parallel"` でも attention の縮約順は M=1 と M=4 で揃う
+  （①′ の適用条件が M ≤ 8・③′ は M < 16 なので、decode も verify も ①′ + ③′）。M で形が変わる他経路（GEMV 族の
+  行ブロックなど）を含めた同一は `e2e_gemma4_speculative_test.ts` が 2 段で門にしている — 投機⑤ = verify 行 0 と
+  decode の logits の u32 一致（attention 3 変種 × `linearGemvReduce: "parallel"`・attention `"sequential"` /
+  `"parallel"` × GEMV `"sequential"`・RMS→add 融合〈と linear→SRQ 指定〉の組）、投機① / ② = 生成 token 列の
+  一致（① = `"sequential"` 席・② = 通常版 E2B の配布形の既定席 `i4-fast` + attention `"parallel"` の 3 ケース × 200 token と
+  ゲート付き = always）。2026-09-26 の Intel Arc B570 実測で全組一致・既定席の相違 0/200 × 3 ケース
+  （[research 2026-09-26](research/2026-09-26-gemma4-speculative-determinism.md)）。u32 の門は attention 3 変種 × GEMV 2 種 × RMS→add 融合の全 12 組（+ linear→SRQ 指定）を覆う（2026-09-26 に全組へ広げた）。
+- **保証は device ごとである**。門が確かめるのは gemma4 レーンを回した機の device だけで、門が赤の機では M=1 と M=4 の
+  相違が実在する（縮約の実行順は grid-stride の分割が device の限界値で変わるので、機を跨いだ主張はしない）。
+  そうした機で厳密な再現性が要るなら `speculative: "always"`（ゲート無し）か `stateAttentionReduce: "sequential"`
+  （runtime の参照経路で M=1 と M=4 が同じ縮約カーネル）を選ぶ。利用者の device で実行時に同一を確かめる
+  カナリアは無い。
 - **自己採算ゲートは既定 on で、切るのは壁時計である**（段 4-B ④・`speculative: true` の既定）。ゲートは cycle の壁と
   decode 1 step の壁を実行時に測り、投機が負けている間は M=1 の decode 形へ落ちる（判定は 16 cycle のブロック集計を
   2 本連続で見てから・戻るのは 8 cycle のバースト集計で〈強い負けのバーストは 4 cycle 目以降で打ち切る〉—
   1 サンプルでは受理数のばらつきに負ける。取り分は課題と host で決まり、
   採算閾値も RTX 1.72〜1.88 / M2 2.17〜2.6 と動くので固定値に焼けない — research 2026-09-09）。壁時計は走行ごとに
-  揺れるので、**既定席（`parallel`）では同じ seed でも稀に出力が変わりうる**（落ちた step は M=1・投機の cycle は
-  M=4 で、上の項の M 依存の経路差がそのまま出る — 近い値の token では argmax が割れる）。厳密な再現性が要るなら
-  `speculative: "always"`（ゲート無し）か `stateAttentionReduce: "sequential"`（M=1 と M=4 が u32 一致）を選ぶ。
+  揺れるが、選ばれる 2 経路（落ちた step の M=1・投機の cycle の M=4）は上の項の門でビット同一なので、**門が緑の
+  device では壁時計の選択は出力を変えない**（ADR 0058 追記 2026-08-29 の一般則 3・ADR 0096 追記 2026-09-26）。
+  e2e の投機② はゲート付きの列が always と一致することも既定席で門にしている。門が赤の device の扱いは上の項のとおり。
   落ちた step 数は `GenerationStop.speculation.plainSteps`・切替回数は `switches`（どちらも `"always"` では欄ごと無い）。
 - **`stateAttentionReduce` は drafter の readonly attention（①′ ③′）には効かない — parallel 固定**
   （席が効くのは target の states 形 attention だけ）。上の厳密一致は target の同一性の門なので

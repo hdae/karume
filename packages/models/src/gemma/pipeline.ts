@@ -477,10 +477,11 @@ export type Gemma4SequenceOptions = {
    * drafter が居ない pipeline では `false` / 未指定でだけ通る（`true` / `"always"` は fail loudly —
    * 指定は黙って無視される値ではなく、**元から選択肢が無い**）。
    *
-   * NOTE: ゲートは**壁時計**で切るので、既定席（`stateAttentionReduce: "parallel"`）では同じ
-   * seed でも稀に出力が変わりうる（verify 形 M=4 と decode 形 M=1 で ①QK の縮約順が違い、近い
-   * 値の token では argmax が割れる — `docs/limitations.md`）。厳密な再現性が要るなら
-   * `"always"` か `stateAttentionReduce: "sequential"` を選ぶ。
+   * NOTE: ゲートは**壁時計**で decode 形（M=1）と verify 形（M=4）を選ぶが、両者の同一性（logits
+   * の u32 一致とゲート付き / always の列一致）は e2e（`e2e_gemma4_speculative_test.ts`）が device
+   * ごとに門で固定しているので、壁時計の選択は出力を変えない（ADR 0096 追記 2026-09-26）。
+   * `"always"` と `stateAttentionReduce: "sequential"` は A/B・検収のための席として残る（門が赤の
+   * device では相違が実在するので、そこではこの 2 つを選ぶ — `docs/limitations.md`）。
    */
   readonly speculative?: boolean | "always";
 };

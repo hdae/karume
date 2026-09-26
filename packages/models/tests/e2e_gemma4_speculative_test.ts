@@ -10,15 +10,20 @@
 //    （「投機 == 非投機」だけでは、両側そろって別の列へ動く退行が緑のまま通る）。受理率
 //    （token/cycle）は README 2 ケースに床を置く（床を割る = drafter か受理判定の退行で、
 //    「動くが速くならない」形をここで落とす）。
-//    NOTE: 席を `"sequential"` に倒すのは、decode（M=1）と verify（M=4）が**同じ縮約カーネル**を
-//    通る形にするためである。既定の `"parallel"` は decode だけ別変種（KV 長を 16 レーンで分担）を
-//    使うので、同じ行でもビット同一にならない（下の②）。
+//    NOTE: 席を `"sequential"` に倒すのは、runtime の参照経路（decode〈M=1〉も verify〈M=4〉も
+//    ① + ③ の同じ縮約カーネル）で契約と床を採るためである。既定席の `"parallel"` も ①′ の適用
+//    条件が M ≤ 8 なので decode と verify は同じ縮約順を通り、M=1 / M=4 の一致は下の②（token 列）と
+//    ⑤（logits の u32）が別に門で固定している。
 //    NOTE: 門は `speculative: "always"`（ゲート無しの常時投機）で回す — 床も厳密一致も「常に
 //    投機」の契約だからである。既定の自己採算ゲート（段 4-B ④・`speculative: true`）は最後の
 //    step が別に見る（列の一致だけが門で、落ちた step 数は壁時計依存なのでログのみ）。
-// ② **既定席（`"parallel"`）の実測**（門ではない）… ①と同じ 3 ケースを既定席で回し、投機 /
-//    非投機の相違添字を報告する。①′（decode の変種）と①（verify）の縮約順の差が argmax を
-//    割る位置を数えるための実測席で、門にはしない（`docs/limitations.md`）。
+// ② **既定席の同一性**（`fromPretrained` の既定 = 配布形の既定 quant `i4-fast`〈GEMV parallel +
+//    RMS→add 融合〉+ models 既定の attention `"parallel"`）… ①と同じ 3 ケースを既定席で回し、
+//    投機 / 非投機の token 列が一致する（相違 0）ことを門にする。自己採算ゲート付き
+//    （`speculative: true`）の列が always と一致することも同じ席で門にする — ゲートは壁時計で
+//    M=1 と M=4 を切り替えるので、その選択が出力を変えないこと（= 実用層のデバイス内決定性）は
+//    この 2 経路のビット同一で成り立つ（ADR 0058 追記 2026-08-29 の一般則 3・ADR 0096 追記
+//    2026-09-26）。2026-09-26 の B570 実測で 3 ケースとも相違 0。
 // ③ **phase の観測**（`onRunDiagnostics`）… 1 sequence の生成で届く run 通知が
 //    `speculation.draftRuns` / `cycles` と本数まで一致し、verify 形（M=4 / R=4）の計画が
 //    2 cycle 目以降 LRU に**居続ける**（`lastRunPrepared.hit`）。state bind group の焼き直し
@@ -27,10 +32,12 @@
 //    **厳密一致**し、state は貸し手ぶん + 借り手の論理長 uniform 8 バイト、verify シナリオの
 //    `ioBytes` が decode より「行が 3 本増えたぶん」ちょうど大きい。drafter を勘定に入れ忘れたら
 //    どれも割れる。
-// ⑤ **カーネル同値**（u32）… ③の同一性が成り立つ前提そのもの: 同じ token・同じ位置の行を
+// ⑤ **カーネル同値**（u32）… ①②の同一性が成り立つ前提そのもの: 同じ token・同じ位置の行を
 //    verify 形（M=4 の deferred run の行 0）と decode 形（M=1 の immediate run）で流した logits が
-//    **u32 で厳密一致**する。①が割れたときに「受理判定の欠陥」と「カーネルの数値差」を切り分ける
-//    のがこの門で、`Session` を直に回す（`commit(0)` は生成面が出さない）。
+//    **u32 で厳密一致**する。①②が割れたときに「受理判定の欠陥」と「カーネルの数値差」を切り分ける
+//    のがこの門で、`Session` を直に回す（`commit(0)` は生成面が出さない）。席は attention 3 変種 ×
+//    GEMV 2 種 × RMS→add 融合の全 12 組（と linear→SRQ 指定）を同じ u32 門で固定する（2026-09-26 の
+//    B570 実測で全組一致）。
 //
 // ## 資産
 //
@@ -453,7 +460,7 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
-// ②③④ 既定席（parallel）— 相違の実測・phase の観測・見積りの厳密門
+// ②③④ 既定席（i4-fast + attention parallel）— 同一性・phase の観測・見積りの厳密門
 // ---------------------------------------------------------------------------
 
 /** run 1 本ぶんの観測（phase + その run の同期区間で読んだ診断）。 */
@@ -478,7 +485,7 @@ const ofKind = (records: readonly PhaseRecord[], kind: GenerationRunPhase["kind"
   records.filter((record) => record.phase.kind === kind);
 
 Deno.test({
-  name: "gemma4 投機②③④: 既定席の相違・phase の本数・見積りの合算（実 GPU）",
+  name: "gemma4 投機②③④: 既定席の同一性・phase の本数・見積りの合算（実 GPU）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     /** 観測を集める窓（step が開けている間だけ積む）。 */
@@ -497,7 +504,7 @@ Deno.test({
     const k = GEMMA4_DRAFT_STEPS;
     try {
       await t.step(
-        "② 既定席（parallel）の投機 / 非投機の相違を実測する（門ではない）",
+        "② 既定席（i4-fast + attention parallel）で投機 / 非投機の token 列が一致する",
         async () => {
           for (const name of CASES) {
             const golden = await readGoldenCase(name);
@@ -512,7 +519,8 @@ Deno.test({
               capacity,
               tokens: MAX_NEW_TOKENS,
             });
-            // 門にするのは「両方が要求ぶん出し切ること」だけ（列の一致は①の席でだけ契約する）。
+            // 既定席でも M=1（decode）と M=4（verify）はビット同一（⑤の門）なので、列の一致を
+            // ①と同じく門にする — 自己採算ゲートの壁時計の選択が出力を変えない前提がこれである。
             assertEquals(speculative.ids.length, MAX_NEW_TOKENS, `${name}: 投機側の token 数`);
             assertEquals(plain.ids.length, MAX_NEW_TOKENS, `${name}: 非投機側の token 数`);
             const first = commonPrefix(speculative.ids, plain.ids);
@@ -527,7 +535,48 @@ Deno.test({
                 } token/cycle / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ` +
                 `${plain.ms.toFixed(0)}ms`,
             );
+            // MUST: ログを門より先に出す（割れた機でも相違の位置と個数が記録に残るように）。
+            assertEquals(
+              diverged,
+              0,
+              `${name}: 既定席で投機 / 非投機の token 列が ${diverged}/${MAX_NEW_TOKENS} 個違う` +
+                `（最初 @${first}）— この機では M=1 と M=4 がビット同一でない`,
+            );
+            assertEquals(first, MAX_NEW_TOKENS, `${name}: 投機 / 非投機の共通接頭辞`);
           }
+        },
+      );
+
+      await t.step(
+        "② 既定席の自己採算ゲート付き（speculative: true）: always と同じ列を出す",
+        async () => {
+          // ゲートは cycle ごとに「投機 / decode 形」を壁時計で選ぶ。既定席でも両者はビット
+          // 同一（⑤の門）なので、どこで切り替わっても列は変わらない — ここが割れるなら切替
+          // そのもの（hidden の継ぎ・frontier の commit）か、既定席の M=1 / M=4 の同一性が壊れている。
+          const golden = await readGoldenCase("readme-recipes");
+          const capacity = capacityFor(pipeline, golden.prompt.length);
+          const gated = await runTurn(pipeline, golden.prompt, {
+            speculative: true,
+            capacity,
+            tokens: MAX_NEW_TOKENS,
+          });
+          const always = await runTurn(pipeline, golden.prompt, {
+            speculative: "always",
+            capacity,
+            tokens: MAX_NEW_TOKENS,
+          });
+          assertEquals(gated.ids, always.ids, "既定席: ゲート付き / always の token id 列");
+          assertEquals(gated.positions, always.positions, "既定席: 絶対位置列");
+          assertEquals(gated.stop.tokens, always.stop.tokens, "既定席: 生成 token 数");
+          const speculation = gated.stop.speculation;
+          assert(speculation !== undefined, "ゲート付きのターンに勘定が載っていない");
+          // MUST: 落ちた step 数は**門にしない**（壁時計依存で、host と負荷で変わる）。この機で
+          // どう出たかを記録するだけである。
+          console.log(
+            `[e2e] gemma4 投機② ゲート: ${gated.ids.length} token / ${speculation.cycles} cycle / ` +
+              `plain step ${speculation.plainSteps} / 切替 ${speculation.switches} / ` +
+              `ゲート ${gated.ms.toFixed(0)}ms vs always ${always.ms.toFixed(0)}ms`,
+          );
         },
       );
 
@@ -896,23 +945,34 @@ Deno.test({
         );
       });
 
+      // attention 3 変種 × GEMV 2 種 × RMS→add 融合の全組（① が持つ sequential × sequential × 融合なしを除く
+      // 11 組）を同じ u32 門で固定する — 自己採算ゲートは壁時計で M=1 / M=4 を選ぶので、選べるどの席でも
+      // 2 経路がビット同一でなければ実用層のデバイス内決定性（ADR 0110 決定 6）が成り立たない。
+      // 組を間引くと「門に無い組は同一を主張しない」という穴が残る（2026-09-26 に全組へ広げた）。
       for (const attention of ["sequential", "parallel", "parallel-fused"] as const) {
-        await t.step(
-          `GEMV並列加算 / attention=${attention} でverify行0とdecodeがu32一致する`,
-          async () => {
-            const { mismatches, left, right } = compare(await measure(attention, "parallel"));
-            assertEquals(mismatches, 0);
-            assertEquals(left, right);
-          },
-        );
-      }
-
-      for (const gemv of ["sequential", "parallel"] as const) {
-        await t.step(`RMS融合 / GEMV=${gemv}でverify行0とdecodeがu32一致する`, async () => {
-          const { mismatches, left, right } = compare(await measure("sequential", gemv, true));
-          assertEquals(mismatches, 0);
-          assertEquals(left, right);
-        });
+        for (const gemv of ["sequential", "parallel"] as const) {
+          for (const fuse of [false, true] as const) {
+            if (attention === "sequential" && gemv === "sequential" && !fuse) continue;
+            await t.step(
+              `attention=${attention} / GEMV=${gemv} / RMS融合=${fuse} でverify行0とdecodeがu32一致する`,
+              async () => {
+                const started = performance.now();
+                const { mismatches, firstIndex, maxAbsDiff, left, right } = compare(
+                  await measure(attention, gemv, fuse),
+                );
+                // MUST: ログを門より先に出す（割れた機でも相違の規模が記録に残るように）。
+                console.log(
+                  `[e2e] gemma4 投機⑤ ${attention}/${gemv}/fuse=${fuse}: u32 相違 ${mismatches}/${VOCAB} 語` +
+                    `（最初 @${firstIndex}）/ 最大絶対差 ${maxAbsDiff} / ${
+                      (performance.now() - started).toFixed(0)
+                    }ms`,
+                );
+                assertEquals(mismatches, 0);
+                assertEquals(left, right);
+              },
+            );
+          }
+        }
       }
 
       await t.step("linear→SRQ指定は通常版のMTP verify行0/decode一致を保つ", async () => {
@@ -921,15 +981,6 @@ Deno.test({
         );
         assertEquals(mismatches, 0);
         assertEquals(left, right);
-      });
-
-      await t.step("② 既定席（parallel）の差は実測だけ（門ではない）", async () => {
-        const started = performance.now();
-        const { mismatches, firstIndex, maxAbsDiff } = compare(await measure("parallel"));
-        console.log(
-          `[e2e] gemma4 投機⑤ parallel: u32 相違 ${mismatches}/${VOCAB} 語（最初 @${firstIndex}）/ ` +
-            `最大絶対差 ${maxAbsDiff} / ${(performance.now() - started).toFixed(0)}ms`,
-        );
       });
     } finally {
       gpu.destroy();
