@@ -5,6 +5,24 @@
 
 ## 現在の焦点
 
+- **高速化 / メモリの波・イテレーション 1「契約と土台」完了（2026-09-26）**: 数値経路を参照層（runtime 省略値 + 厳密オラクル + sha 参照行）と
+  実用層（quant 席の `session` が束ねる opt-in）に分けた。契約は [ADR 0110](../docs/decisions/0110-practical-tier-numerics-contract.md)
+  （契約クラス E / C / R / Q・カーネル門の 4 点型・E2E は census + 同機参照層との床 + 崩壊上限・実用層でもデバイス内決定性 MUST・
+  sha 行の参照行 / 実用行）、合成規則は [ADR 0111](../docs/decisions/0111-session-options-composition.md)（明示 > quant 宣言 > runtime 既定・
+  系列ごとの受理表・runtime の `sessionOptionsViolation`）。土台 = `SessionDiagnostics.lastRunPipelines`（計測非依存の census）・
+  census 移行 33 テスト + 束の census 表（`census-table.ts`）・同機 A/B 門（anima / irodori / sbv2・帯は B570 実測 ×2）・
+  `tools/flag-bench`・gemma 投機ゲートの M=1 / M=4 同一を全 12 組の門に。`stateAttentionReduce` を manifest 語彙へ昇格（**Breaking**
+  — 旧 reader は新 manifest を拒否・`i4` / fromAssets は sequential = 参照経路）、`-fast` 束は B570 の実測で確定
+  （E2B 通常 / QAT E2B / QAT E4B = 全部入り + attention parallel-fused・GPU decode −47.9 / −49.3 / −41.7% —
+  [research 2026-09-26](../docs/research/2026-09-26-gemma-flag-bench.md)）。QAT E4B は 3 席・既定 `i4-fast`。
+  - 落とし穴: **HF の再アップロードと pin 更新は未**（次リリースにまとめる — それまで公開 pin を新 models で読むと全席 sequential）。
+    ローカルミラー gemma4 / gemma4-qat は焼き直し済み（backup = `outputs/mirror-backup-2026-09-26/`）。
+  - E4B 通常は recipe（`--model e4b`・読み込みの meta 構築 + assign）まで済で、**export は 31 GiB 機で OOM**（PLE 表 f32 10.5 GiB を含む
+    定常 ≈ 27.8 GiB）— 要判断（PLE 表を i8 + scale で持つ recipe 改修 / 別機 / 見送り）。E4B 通常の席は E2B の束を暫定宣言・既定 `i4`。
+  - BiRefNet 2048² は B570 で device lost → Deno panic するので、この機ではフル verify の前に `outputs/series/{birefnet-hr-2048,lucida-2048}`
+    を `outputs/series-held-b570/` へ退避している（恒久策 = 環境キー別の明示 SKIP か deform の分割 — 要判断）。
+  - 調査の正本は `.claude/reviews/2026-09-25_perf-recon/SUMMARY.md`（git 追跡外・§9.3 の波 2〜4 = 次のイテレーション候補・§12 = Fable レビュー 71 件の振り分け）。
+
 - **0.13.0 公開済み（2026-09-25）**: Release `v0.13.0` = `4b167df8`・JSR 3 パッケージ 0.13.0・`deno task smoke:published` 緑。焼き直し（10リポを系列から`karume dist`で・`karume/0.13.0`）→ HF再アップロード（旧safetensors削除つき）→ pin 10本（`f16b8998`）→ CHANGELOGの版の節（`867a33c7`・リリースノート起草時の突合で3コミット訂正）→ リリースノート（`outputs/release/release-notes-v0.13.0.draft.md`・独立検証3巡）→ Release → runbook §5の事後まで済。anima / anima-extraのpinは権利付与文を含むmainへ更新済み（`75b127b5`・karume.jsonはbyte同一）。断片化したpart 5本は2026-09-24に「そのまま公開し、実DL速度を測ってから対処」と裁定済み（[backlog](../docs/backlog.md)のlater）。次はリリース後の波の着手順の相談（2026-09-24全域レビューの見送り項目・perf-ledger起票分・admission波・焼き直し波・コンテナ段4〜6）。手順は[release-runbook](../docs/release-runbook.md)§0〜§5。**落とし穴**（次のリリース向け）:
   - manifestの`generator`欄はvenvに入っている`karume`のdist-infoの版を写す — bumpの後は`(cd tools && uv sync --all-groups)`してから焼き、各`dist.py`の最終行が`karume/0.13.0`を名乗ることを確かめる（runbook §4のbumpの項）。
   - HFの旧ファイルは上げるときの`--delete`でしか消えない — 旧`*.safetensors`に加え、上げる直前にHFのtreeとローカルを突き合わせてHFにだけ在るpathを`--delete`に足す（runbook §2）。

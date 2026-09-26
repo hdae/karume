@@ -9,6 +9,18 @@
 
 ## now — 0.13.0 リリース後（2026-09-25）
 
+- **高速化 / メモリの波（起票 2026-09-25・利用者裁定 = 参照層 / 実用層の 2 層に分ける・実用層でもデバイス内決定性 MUST）**:
+  調査（Fable 5 レンズ + Opus 深掘り 19 + 反証 19 + Fable レビュー 4）の正本は `.claude/reviews/2026-09-25_perf-recon/SUMMARY.md`（git 追跡外）。
+  **イテレーション 1「契約と土台」は済（2026-09-26・19 コミット）**: ADR [0110](decisions/0110-practical-tier-numerics-contract.md) /
+  [0111](decisions/0111-session-options-composition.md)・`lastRunPipelines` + census 移行 + 束の census 表・同機 A/B 門（anima / irodori / sbv2）・
+  `tools/flag-bench`・gemma 投機ゲートの門・`stateAttentionReduce` の manifest 昇格（Breaking）・`-fast` 束の実測確定
+  （[research 2026-09-26](research/2026-09-26-gemma-flag-bench.md)）・gemma4 recipe の `--model e4b` と PARALLEL_SHAPES の E4B 行。
+  残件（要判断・完了報告 2026-09-26）: ① E4B 通常の export（31 GiB 機で OOM — PLE 表 f32 10.5 GiB）② sha 参照行を LLM / f32 のみの
+  4 系列へ広げるか（今は golden 帯だけ）③ BiRefNet 2048² の B570 用の明示 SKIP ④ `sessionGpuFeatures` を上書き口の無い 6 系列へ統一するか
+  ⑤ HF 再アップロード + pin 更新（次リリース）。次のイテレーション候補 = SUMMARY §9.3 の波 2（DiT 速度: B3 anima DiT 常駐 → B4 irodori
+  H-30 → B1 → B2）/ 波 3（メモリ: E1 BiRefNet f16 系列 → E2 → E5 → E4）/ 波 4（実用層カーネル: C2 VAE conv i8a8 → C1 → D2 → D1 → D3）。
+  台帳の候補は perf-ledger 2026-09-26 節（K-59〜K-69・L-20〜L-23）。
+
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
   [container-v1](container-v1.md)（accepted・2026-09-22 に段 1 着手を裁定）。**段 0 は済（2026-09-22）** = ADR + 仕様 + CPU 試作
