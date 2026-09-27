@@ -261,6 +261,25 @@ const GEOMETRY_M16N16: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
 const GEOMETRY_M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 
 /**
+ * {@link gemmGeometryForRows} の表そのもの（`rows <= maxRows` で最初に当たる規則・`maxRows` は
+ * 昇順・最後は上限なし）。境界 64 / 512 と各段の出どころは下の {@link gemmGeometryForRows} と
+ * 上の候補表の doc。
+ *
+ * MUST: 既定プロファイル（src/kernels/geometry-profile.ts の `DEFAULT_GEOMETRY_PROFILE`）の
+ * `gemmRows` は**この配列をそのまま参照する**。境界や幾何を向こうへ書き写すと既定が 2 か所に
+ * なり、片方だけ直したときに、プロファイル経路（matmul / bmm / linear）とこの表を直に引く経路
+ * （states 形 ①ₜ / ③ₜ・分解 attention の行ブロック）が同じ M で別の幾何を選ぶ。
+ */
+export const GEMM_ROWS_BUCKETS: readonly {
+  readonly maxRows: number;
+  readonly geometry: GemmGeometry;
+}[] = [
+  { maxRows: 64, geometry: GEOMETRY_M16N16 },
+  { maxRows: 512, geometry: GEOMETRY_M64N32 },
+  { maxRows: Number.POSITIVE_INFINITY, geometry: defaultGemmGeometry() },
+];
+
+/**
  * 行数 M から幾何を選ぶ**静的テーブル**（matmul / bmm / linear の 3 経路専用）。
  *
  * MUST: 純関数 = プラン時 shape だけの関数であること。実行時オートチューン（実測して選び直す）は
@@ -274,12 +293,18 @@ const GEOMETRY_M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
  * バケット境界 64 / 512 は掃引の実測境界（M=64 まで M16N16 が最良・M=318/512 は M64N32・
  * それより上は未実測 = 既定）。65〜512 段の採用は Anima / SBV2 の E2E A/B（ABBA・門込み）で
  * 退行なしを確認した上でのもの（research doc §4）。
+ *
+ * NOTE: これは**既定プロファイルの表**。Session の matmul / bmm / linear は adapter ごとの
+ * プロファイル（src/kernels/geometry-profile.ts の `gemmRowsGeometry`）を引き、既定プロファイルは
+ * この表（{@link GEMM_ROWS_BUCKETS}）をそのまま持つ。選択は「shape × adapter の静的な表」で、
+ * 実行時オートチューン禁止は不変（DECIDED: ADR 0115）。
  */
 export const gemmGeometryForRows = (rows: number): GemmGeometry => {
   assertU32Params("幾何の選択", { "行数 M": rows });
-  if (rows <= 64) return GEOMETRY_M16N16;
-  if (rows <= 512) return GEOMETRY_M64N32;
-  return defaultGemmGeometry();
+  // 最後の段は上限なし（Infinity）なので、u32 の行数は必ずどれかの段に当たる。
+  const bucket = GEMM_ROWS_BUCKETS.find((rule) => rows <= rule.maxRows) ??
+    GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
+  return bucket.geometry;
 };
 
 /**

@@ -47,8 +47,9 @@ import { LINEAR_SCALE_BINDING, linearKey, linearParams, linearWgsl } from "../..
 import type { PackedActivations } from "../fusion.ts";
 import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import { bmmKey, bmmParams, bmmWgsl } from "../../kernels/bmm.ts";
-import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
-import { gemmGeometryForRows, gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
+import { i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
+import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
+import { gemmRowsGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { matmulKey, matmulParams, matmulWgsl } from "../../kernels/matmul.ts";
 import { numel } from "../../ops.ts";
@@ -74,14 +75,18 @@ export const buildMatmul = async (
   // v4（vec4 の読み書き）は形状から導く 1 ビット。導出時に評価してキーと WGSL の
   // 両方へ渡す（同一キー ⇔ 同一バイト列は保たれる）。
   const v4 = gemmUsesVec4(k, n);
-  // MUST: タイル幾何は行数 M のバケット（src/kernels/gemm-geometry.ts）。キー・WGSL・
-  // dispatch の 3 つに**同じ m** を通す — 1 つでも渡し忘れると出力タイルが静かに欠ける。
-  const key = matmulKey(v4, m);
-  const { pipeline, layout, roles } = await face.state.cache.get(key, matmulWgsl(v4, m));
+  // MUST: タイル幾何は行数 M のバケット（adapter のプロファイル — src/kernels/geometry-profile.ts）。
+  // 1 回引いた幾何をキー・WGSL・dispatch の 3 つに**そのまま**通す — 1 つでも別の幾何になると
+  // 出力タイルが静かに欠ける。
+  const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
+  const key = matmulKey(v4, m, geometry);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    matmulWgsl(v4, m, geometry),
+  );
   const params = face.writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `matmul [${a.join(",")}] × [${b.join(",")}]`;
-  const geometry = gemmGeometryForRows(m);
   builder.dispatch({
     key,
     pipeline,
@@ -116,13 +121,17 @@ export const buildBmm = async (
   const [batch, m, k] = a;
   const n = b[2];
   const v4 = gemmUsesVec4(k, n);
-  // 幾何のバケットは**行列 1 枚の m**（バッチは z 軸で、タイル幾何とは独立）。
-  const key = bmmKey(v4, m);
-  const { pipeline, layout, roles } = await face.state.cache.get(key, bmmWgsl(v4, m));
+  // 幾何のバケットは**行列 1 枚の m**（バッチは z 軸で、タイル幾何とは独立）。キー・WGSL・
+  // dispatch へ同じ 1 回の返り値を通す（matmul と同じ規律）。
+  const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
+  const key = bmmKey(v4, m, undefined, geometry);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    bmmWgsl(v4, m, undefined, geometry),
+  );
   const params = face.writeParams(bmmParams(m, n, k), PARAMS_UNIFORM_USAGE);
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `bmm [${a.join(",")}] × [${b.join(",")}]`;
-  const geometry = gemmGeometryForRows(m);
   builder.dispatch({
     key,
     pipeline,
@@ -298,17 +307,17 @@ export const buildLinear = async (
     await buildLinearGemv(face, step, binds, outs, builder, "i8", m, n, k, undefined, packed);
     return;
   }
-  // MUST: タイル幾何は平坦化後の行数 m のバケット（src/kernels/gemm-geometry.ts）。
-  // キー・WGSL・dispatch に**同じ m** を通す。
-  const key = linearKey(weightStorage, v4, compute, m, groupSize);
+  // MUST: タイル幾何は平坦化後の行数 m のバケット（adapter のプロファイル —
+  // src/kernels/geometry-profile.ts）。1 回引いた幾何をキー・WGSL・dispatch に**そのまま**通す。
+  const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
+  const key = linearKey(weightStorage, v4, compute, m, groupSize, geometry);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    linearWgsl(weightStorage, v4, compute, m, groupSize),
+    linearWgsl(weightStorage, v4, compute, m, groupSize, geometry),
   );
   const params = face.writeParams(linearParams(m, n, k), PARAMS_UNIFORM_USAGE);
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `linear [${x.join(",")}] × [${weight.join(",")}]`;
-  const geometry = gemmGeometryForRows(m);
   builder.dispatch({
     key,
     pipeline,
@@ -484,10 +493,10 @@ const buildLinearI8a8 = async (
     workgroups: [gridStrideWorkgroups(m, quantizeGeometry.rowsPerGroup, limit), 1, 1],
   });
 
-  // ② 整数内積の GEMM。タイル幾何は op → 幾何の純関数が決める（src/kernels/i8a8-geometry.ts）
-  // — キーに載るので「同一キー → バイト同一 WGSL」は保たれる。
+  // ② 整数内積の GEMM。タイル幾何は adapter のプロファイルの op 別の欄
+  // （src/kernels/geometry-profile.ts）— キーに載るので「同一キー → バイト同一 WGSL」は保たれる。
   const v4 = linearI8a8UsesVec4(n);
-  const geometry = defaultI8a8Geometry("linear");
+  const geometry = face.state.geometryProfile.i8a8.linear;
   const dp4a = face.state.linearI8a8Dot === "dp4a";
   // MUST: key / wgsl とも **実際の常駐形**（`weightStorage`）で引く。i8 固定にすると i4 の
   // group scale が per-channel として配られる沈黙誤値になる（数値契約が別 — ADR 0076）。

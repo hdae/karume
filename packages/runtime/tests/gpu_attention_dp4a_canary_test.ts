@@ -56,6 +56,8 @@ import {
 } from "../src/kernels/attention-i8a8.ts";
 import {
   defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8GeometryKeyPart,
   i8a8KPacks,
   i8a8TileM,
   i8a8TileN,
@@ -65,6 +67,12 @@ import type { I8a8Dot, SessionDiagnostics } from "../src/runtime/session-types.t
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertPipelineCensus } from "./helpers/pipeline-census.ts";
+
+/** 既定プロファイルの i8a8 attention 幾何（既定の Session がカナリアへ渡すものと同じ）。 */
+const DEFAULT_CANARY_GEOMETRY = {
+  qk: defaultI8a8Geometry("attention_qk"),
+  pv: defaultI8a8Geometry("attention_pv"),
+};
 
 /** `127·exp(S−m)` が半整数から離れているべき最小の余裕（WGSL の `exp` 誤差 ~1e-5 の桁上）。 */
 const QUANT_MARGIN = 0.3;
@@ -127,7 +135,7 @@ const NUDGE_BOTH_BREAK_DP4A: CanaryWgslPatch = (wgsl) => BREAK_DP4A(NUDGE_BOTH(w
 
 Deno.test("カナリアの形は production 幾何の 1 タイル全域 × K タイル 2 枚以上を埋める", () => {
   const qkGeometry = defaultI8a8Geometry("attention_qk");
-  const qk = buildQkCase();
+  const qk = buildQkCase(qkGeometry);
   assertEquals(qk.rows, i8a8TileM(qkGeometry), "①QK の M がタイル辺と違う");
   assertEquals(qk.cols, i8a8TileN(qkGeometry), "①QK の N がタイル辺と違う");
   assert(
@@ -135,7 +143,7 @@ Deno.test("カナリアの形は production 幾何の 1 タイル全域 × K タ
     `①QK の K タイルが ${qk.depth / 4 / i8a8KPacks(qkGeometry)} 枚しかない`,
   );
   const pvGeometry = defaultI8a8Geometry("attention_pv");
-  const pv = buildPvCase();
+  const pv = buildPvCase(pvGeometry);
   assertEquals(pv.rows, i8a8TileM(pvGeometry), "③PV の M がタイル辺と違う");
   assertEquals(pv.depth, i8a8TileN(pvGeometry), "③PV の D がタイル辺と違う");
   assert(
@@ -145,7 +153,7 @@ Deno.test("カナリアの形は production 幾何の 1 タイル全域 × K タ
 });
 
 Deno.test("③PV の固定 S は f16 ちょうどで表せ、往復で 1 ビットも動かない（s16 変種の前提）", () => {
-  const pv = buildPvCase();
+  const pv = buildPvCase(DEFAULT_CANARY_GEOMETRY.pv);
   const words = packScoresF16(pv.scores);
   assertEquals(words.length, pv.scores.length / 2, "詰め直しの語数");
   for (let i = 0; i < pv.scores.length; i += 1) {
@@ -160,7 +168,7 @@ Deno.test("③PV の固定 S は f16 ちょうどで表せ、往復で 1 ビッ�
 });
 
 Deno.test("③PV の qP は丸め境界から十分離れている（GPU の exp 誤差では段が動かない）", () => {
-  const pv = buildPvCase();
+  const pv = buildPvCase(DEFAULT_CANARY_GEOMETRY.pv);
   let worst = Number.POSITIVE_INFINITY;
   const seen = new Set<number>();
   for (let row = 0; row < pv.rows; row += 1) {
@@ -178,7 +186,7 @@ Deno.test("③PV の qP は丸め境界から十分離れている（GPU の exp
 });
 
 Deno.test("①QK の既知解は f16 格納の可視域に収まり、定数に潰れていない", () => {
-  const qk = buildQkCase();
+  const qk = buildQkCase(DEFAULT_CANARY_GEOMETRY.qk);
   let distinct = 0;
   const values = new Set<number>();
   for (const value of qk.expected) {
@@ -196,7 +204,7 @@ Deno.test("①QK の既知解は f16 の丸め境界から sanity 帯より遠�
   // s16 変種は「既知解をホストで f16 に丸めた列」と突き合わせるので、既知解が丸め境界の
   // 近くにあると **帯の内側の差が f16 の 1 段（帯の 55 倍）へ増幅されて両腕とも帯外**になる。
   // 全要素でこの門が立つと「帯内の f32 差 ⇒ f16 の段は同じ」が固定入力に対する定理になる。
-  const qk = buildQkCase();
+  const qk = buildQkCase(DEFAULT_CANARY_GEOMETRY.qk);
   let worst = Number.POSITIVE_INFINITY;
   let at = -1;
   for (let i = 0; i < qk.expected.length; i += 1) {
@@ -265,7 +273,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const decision = await decideAttentionI8a8Dot(gpu);
+      const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY);
       // 期待はプラットフォームで分かれる: 参照機（Linux / NVIDIA）は dp4a-exact、Apple M2 は
       // 共有エピローグの 1 ULP 差により band-both-identical（known-issues の Metal 節）。
       // どちらでも**選ばれる腕は dp4a** — それがこのテストの主題。参照機のビット厳密性
@@ -286,11 +294,71 @@ Deno.test({
         // はない）。band 機では非対象 — 両腕の同一性は band-both-identical 分岐自体が検証済み。
         // MUST: 直接呼ぶときも device 単位の errorScope 区間ロックの中で（probe の doc）。
         const emu = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
-          probeAttentionI8a8Dot(gpu, "emu")
+          probeAttentionI8a8Dot(gpu, "emu", DEFAULT_CANARY_GEOMETRY)
         );
         assertEquals(emu.mismatch, undefined, "エミュ変種が既知解を外した");
         assert(emu.exact, "エミュ変種が atol=0 で一致していない");
         assertEquals(emu.variants.length, 6, "撃った変種が 6 本でない");
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 既定でない i8a8 attention 幾何（apple-metal-3 プロファイルが ①QK / ③PV に当てる形 —
+ * 64×64 タイル）。カナリアが「Session が渡した幾何の生成物」を撃っていることの検出器に使う。
+ */
+const PROFILE_GEOMETRY: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
+
+Deno.test({
+  name: "プロファイルの幾何を渡すとカナリアはその幾何の生成物を撃ち、判定が得られる（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const geometry = { qk: PROFILE_GEOMETRY, pv: PROFILE_GEOMETRY };
+    const gpu = await acquireGpu();
+    try {
+      // 判定そのもの: 既定でない幾何でも固定入力は 1 タイル全域を埋め、帯内の判定に着地する
+      // （両腕とも帯外なら decide が GpuFeatureError で落ちる）。
+      const decision = await decideAttentionI8a8Dot(gpu, geometry);
+      assert(decision.maxBandRatio <= 1, `帯余裕 ${decision.maxBandRatio} が帯外`);
+      assertEquals(
+        decision.exact,
+        decision.branch === "dp4a-exact" || decision.branch === "emu-exact",
+        "厳密一致フラグと分岐が食い違っている",
+      );
+
+      // 検出器: probe が組んだパイプラインキーが**渡した幾何**のキーそのもので、既定幾何の
+      // キーとは違う（既定幾何を直に引く実装へ戻ると、ここが既定のキーを返して落ちる）。
+      const probe = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
+        probeAttentionI8a8Dot(gpu, "dp4a", geometry)
+      );
+      const shapes = [[true, "f32"], [false, "f32"], [true, "f16"]] as const;
+      const expected = [
+        ...shapes.map(([v4, score]) => attentionQkI8a8Key(v4, true, score, PROFILE_GEOMETRY)),
+        ...shapes.map(([v4, score]) => attentionPvI8a8Key(v4, true, score, PROFILE_GEOMETRY)),
+      ];
+      const defaults = [
+        ...shapes.map(([v4, score]) =>
+          attentionQkI8a8Key(v4, true, score, DEFAULT_CANARY_GEOMETRY.qk)
+        ),
+        ...shapes.map(([v4, score]) =>
+          attentionPvI8a8Key(v4, true, score, DEFAULT_CANARY_GEOMETRY.pv)
+        ),
+      ];
+      assertEquals(
+        probe.variants.map((variant) => variant.key),
+        expected,
+        "カナリアが渡した幾何のキーで撃っていない",
+      );
+      for (const [index, key] of expected.entries()) {
+        const v4 = shapes[index % shapes.length][0];
+        assert(
+          key.includes(i8a8GeometryKeyPart(PROFILE_GEOMETRY, v4)),
+          `幾何の判別子が無い: ${key}`,
+        );
+        assert(key !== defaults[index], `既定幾何のキーと同じ: ${key}`);
       }
     } finally {
       gpu.destroy();
@@ -308,7 +376,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const decision = await decideAttentionI8a8Dot(gpu, BREAK_DP4A);
+      const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A);
       assertEquals(decision.dot, "emu");
       // 参照機は emu-exact、Apple M2 はエミュ側も 1 ULP 差なので band-single-arm 経由で emu
       // （どちらも「壊れた dp4a を捨てて emu を採る」という主題は同じ）。
@@ -334,7 +402,7 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const error = await assertRejects(
-        () => decideAttentionI8a8Dot(gpu, BREAK_BOTH),
+        () => decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_BOTH),
         GpuFeatureError,
       );
       // 診断は「どちらの腕が、どの生成物の、どの要素で外したか」まで持つ
@@ -359,7 +427,7 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const decision = await decideAttentionI8a8Dot(gpu, NUDGE_BOTH);
+      const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, NUDGE_BOTH);
       // 腕同士がビット同一 = 変種選択は数値に無関係（ADR 0058 決定 2）→ 既定の dp4a を採る
       assertEquals(decision.branch, "band-both-identical");
       assertEquals(decision.dot, "dp4a");
@@ -382,7 +450,7 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const error = await assertRejects(
-        () => decideAttentionI8a8Dot(gpu, SKEW_BOTH),
+        () => decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, SKEW_BOTH),
         GpuFeatureError,
       );
       assert(error.message.includes("attention_pv:v3:i8a8:"), error.message);
@@ -398,7 +466,11 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const decision = await decideAttentionI8a8Dot(gpu, NUDGE_BOTH_BREAK_DP4A);
+      const decision = await decideAttentionI8a8Dot(
+        gpu,
+        DEFAULT_CANARY_GEOMETRY,
+        NUDGE_BOTH_BREAK_DP4A,
+      );
       assertEquals(decision.branch, "band-single-arm");
       assertEquals(decision.dot, "emu");
       assert(!decision.exact, "帯内で通したのに厳密一致フラグが立っている");
@@ -461,7 +533,7 @@ Deno.test({
       // 実機は健全なので、注入した判定をメモへ**先に**焼く（焼かなければ dp4a になる）。
       // Session がこの席を読んでいることは、キーが `:dp4aEmu` になることでしか観測できない。
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
-        decideAttentionI8a8Dot(gpu, BREAK_DP4A)
+        decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A)
       );
       assertEquals(seeded.dot, "emu");
 
@@ -501,7 +573,7 @@ Deno.test({
     const gpu = await acquireGpu();
     try {
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
-        decideAttentionI8a8Dot(gpu, BREAK_DP4A)
+        decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A)
       );
       assertEquals(seeded.dot, "emu");
       for (const pass of [1, 2]) {

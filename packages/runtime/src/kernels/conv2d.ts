@@ -119,8 +119,8 @@ export const conv2dUsesVec4 = (kFlat: number, widthOut: number, strideW: number)
  * で、部分和がちょうど `−0.0` の位置に padding 由来の `+0.0` を足すと `+0.0` に転ぶ
  * （直接カーネルは padding を加算しないので `−0.0` が残る）。bias が 0 でない限り到達しない。
  *
- * `geometry` は明示の幾何（計測用 — src/kernels/gemm.ts の `GemmSpec`）で、渡すと `mTile` より
- * 優先する。辺と workgroup 形で `regM = tileM / wgY`・`regN = tileN / wgX` が決まるので、同じ綴りの
+ * `geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session ではプロファイルの値・
+ * 計測では掃引の候補）で、渡すと `mTile` より優先する。辺と workgroup 形で `regM = tileM / wgY`・`regN = tileN / wgX` が決まるので、同じ綴りの
  * まま幾何を判別できる。MUST: {@link conv2dIgemmWgsl} へ**同じ値**を通す。
  */
 export const conv2dIgemmKey = (

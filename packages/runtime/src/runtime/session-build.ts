@@ -25,6 +25,7 @@ import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gp
 import { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../gpu/submit.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
+import { type GeometryProfile, selectGeometryProfile } from "../kernels/geometry-profile.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { FusionCounts } from "./fusion.ts";
@@ -478,18 +479,26 @@ export type PreparedPlan = {
  * カナリアが「既知解と厳密一致ではないが sanity 帯には収まった」で決めた場合は**黙って
  * 通さない** — 警告をメモの実体の中で出すことで、device 単位に 1 度だけになる（Session ごとに
  * 出すと a8 の Session を並べただけで同じ 1 事実が繰り返し流れる）。
+ *
+ * カナリアは `profile` の i8a8 attention 幾何（production の ①QK / ③PV が実走する幾何）で撃つ。
+ * メモが device 単位のままでよいのは、プロファイルが同じ {@link GpuContext} の `adapterInfo` の
+ * 純関数（{@link selectGeometryProfile}）で、同じ device ならどの Session でも同じ幾何になるから。
  */
 const resolveAttentionI8a8Dot = async (
   gpu: GpuContext,
   forced: I8a8Dot | undefined,
   attentionCompute: ComputePrecision,
   dp4a: boolean,
+  profile: GeometryProfile,
 ): Promise<I8a8Dot> => {
   if (forced !== undefined) return forced;
   if (!dp4a) return "emu";
   if (attentionCompute !== "a8") return "dp4a";
   const decision = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(async () => {
-    const decided = await decideAttentionI8a8Dot(gpu);
+    const decided = await decideAttentionI8a8Dot(gpu, {
+      qk: profile.i8a8.attentionQk,
+      pv: profile.i8a8.attentionPv,
+    });
     if (!decided.exact) warnInexactAttentionCanary(decided);
     return decided;
   });
@@ -610,6 +619,12 @@ export type SessionState = {
   readonly attentionI8a8Dot: I8a8Dot;
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
   readonly rowBlockSplit: number | undefined;
+  /**
+   * GEMM 幾何のプロファイル（adapter から構築時に 1 度だけ選ぶ静的な表 — DECIDED: ADR 0115）。
+   * MUST: 構築後に選び直さない（同じ Session の導出済み計画・パイプラインキーが 1 本の表に
+   * 対応していることが、計画キャッシュをプロファイル抜きで引いてよい根拠）。
+   */
+  readonly geometryProfile: GeometryProfile;
   readonly fuseRmsNormAdd: boolean;
   readonly fuseLinearStaticQuantize: boolean;
   /** 固定 SRQ の活性を packed int8 で並列 GEMV へ渡す（ADR 0105）。 */
@@ -678,6 +693,10 @@ export const buildSessionState = async (
         "（feature は device 作成時にしか要求できない）",
     );
   }
+  // GEMM 幾何のプロファイル（DECIDED: ADR 0115）。adapter の (vendor, architecture) と埋め込みの
+  // 静的な表だけで決まり、実行中に選び直さない。壊れた表・同順位の衝突は**重みを 1 バイトも
+  // 上げる前に**落とす（その op に当たる run まで気づけない形にしない）。
+  const geometryProfile = selectGeometryProfile(gpu.adapterInfo);
 
   // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（batch
   // ループより前 = 1 バイトも上げる前）。確保失敗の検出は item（block）単位 errorScope
@@ -701,6 +720,7 @@ export const buildSessionState = async (
     options[I8A8_DOT],
     attentionCompute,
     dp4a,
+    geometryProfile,
   );
 
   const scheduler = new SubmitScheduler(gpu, options.submitPolicy);
@@ -1092,6 +1112,7 @@ export const buildSessionState = async (
     // **実走カナリアの判定**（上の `attentionI8a8Dot`）で決める。
     attentionI8a8Dot,
     rowBlockSplit: options[ROW_BLOCK_SPLIT],
+    geometryProfile,
     fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
     fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
     packedStaticQuantize: options.packedStaticQuantize ?? false,

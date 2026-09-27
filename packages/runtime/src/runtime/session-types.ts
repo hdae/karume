@@ -634,6 +634,15 @@ export type SessionDiagnostics = {
    */
   readonly buildStats: SessionBuildStats;
   /**
+   * この Session の GEMM 幾何プロファイルの名前（adapter の vendor / architecture から構築時に
+   * 1 度だけ選ばれる静的な表 — どれにも当たらない機は `"default"`）。Session の寿命を通じて不変。
+   *
+   * 幾何は数値契約を動かさない（担当割りだけ）ので値には出ないが、速度とパイプラインキーの
+   * 幾何判別子（`reg64x32r4x4w8` など）には出る。どの表で走ったかを名指す唯一の観測点。
+   * NOTE: 名前は診断用のラベルで semver の対象外（表の追加・改名で予告なく変わる）。
+   */
+  readonly geometryProfile: string;
+  /**
    * 直近 run の中間バッファ実績。未実行なら undefined。
    *
    * NOTE: slot backing に乗った run（{@link PlanBackingStats}）では中間バッファも入力バッファも

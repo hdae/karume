@@ -55,13 +55,8 @@ import {
   scoreStorageBytes,
 } from "../../kernels/score-storage.ts";
 import { attentionScale, stateWindow } from "../../ops.ts";
-import { defaultGemmGeometry, gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
-import {
-  defaultI8a8Geometry,
-  type I8a8Geometry,
-  i8a8TileM,
-  i8a8TileN,
-} from "../../kernels/i8a8-geometry.ts";
+import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
+import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { planRowBlocks } from "../fusion.ts";
 import { planStateAttention } from "../state-attention-plan.ts";
@@ -295,13 +290,18 @@ export const buildAttention = async (
   );
   const windowed = blocks.length > 1;
 
-  // 幾何はブロック行数に依らず既定（`defaultGemmGeometry` / `defaultI8a8Geometry`）なので、
-  // ①③ のパイプラインは全ブロックで共有する（ブロック間の差は uniform の
+  // 幾何はブロック行数に依らず adapter のプロファイルの欄（src/kernels/geometry-profile.ts）
+  // なので、①③ のパイプラインは全ブロックで共有する（ブロック間の差は uniform の
   // `row_offset` / `m` だけ）。
-  const geometry = defaultGemmGeometry();
+  // ①と③は**別の幾何でよい**（i8a8 変種が元から段ごとに別の幾何を持つのと同じ理由）: 段の間の
+  // 受け渡しは実体化した S と行統計だけで、S は ① の dispatch（①の幾何）が全要素を書き切り、
+  // ②③ は行・列の添字で読むだけ — タイル辺を段を跨いで共有するものは無い。
+  // MUST: 段ごとに 1 回引いた幾何を、その段のキー・WGSL・dispatch の 3 つへ**そのまま**通す。
+  const qkGeometry = face.state.geometryProfile.attention.qk;
+  const pvGeometry = face.state.geometryProfile.attention.pv;
   const hasMask = mask !== undefined;
   const qkV4 = gemmUsesVec4(depth, cols);
-  const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa, windowed);
+  const qkKey = attentionQkKey(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry);
   // i8a8 の量子化（①の k / ③の Vᵀ = **列側**）はブロックに依存しないので**ループ外で 1 回**。
   // MUST: ループ内へ入れない（値は同じまま仕事が枚数倍になる純粋な性能退行）。
   // q 側（qq / qs）も行に比例する仕事で総量は変わらないため同じくループ外に置き、①QK が
@@ -326,11 +326,11 @@ export const buildAttention = async (
       key: qkKey,
       ...await face.state.cache.get(
         qkKey,
-        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa, windowed),
+        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry),
       ),
     };
   const pvV4 = gemmUsesVec4(cols, depth);
-  const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa, windowed);
+  const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry);
   const pv: AttentionPvStage = pvI8a8
     ? await prepareAttentionPvI8a8(
       face,
@@ -346,7 +346,7 @@ export const buildAttention = async (
       key: pvKey,
       ...await face.state.cache.get(
         pvKey,
-        attentionPvWgsl(pvV4, compute, scoreStorage, gqa, windowed),
+        attentionPvWgsl(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry),
       ),
     };
   // ② 行統計 — 1 行 = 1 workgroup で、行方向は grid-stride（softmax と同じ形）。
@@ -421,8 +421,8 @@ export const buildAttention = async (
           ...(mask === undefined ? [] : [{ binding: ATTENTION_QK_MASK_BINDING, source: mask }]),
         ],
         workgroups: [
-          tiledWorkgroups(cols, gemmTileN(geometry), limit, `${where} ①QK`),
-          tiledWorkgroups(block.rows, gemmTileM(geometry), limit, `${where} ①QK`),
+          tiledWorkgroups(cols, gemmTileN(qkGeometry), limit, `${where} ①QK`),
+          tiledWorkgroups(block.rows, gemmTileM(qkGeometry), limit, `${where} ①QK`),
           tiledWorkgroups(batch, 1, limit, `${where} ①QK`),
         ],
       });
@@ -484,8 +484,8 @@ export const buildAttention = async (
           { binding: 4, source: outs[0] },
         ],
         workgroups: [
-          tiledWorkgroups(depth, gemmTileN(geometry), limit, `${where} ③PV`),
-          tiledWorkgroups(block.rows, gemmTileM(geometry), limit, `${where} ③PV`),
+          tiledWorkgroups(depth, gemmTileN(pvGeometry), limit, `${where} ③PV`),
+          tiledWorkgroups(block.rows, gemmTileM(pvGeometry), limit, `${where} ③PV`),
           tiledWorkgroups(batch, 1, limit, `${where} ③PV`),
         ],
       });
@@ -1079,11 +1079,12 @@ const prepareAttentionQkI8a8 = async (
   quantize(binds[1], kq, ks, batch * cols);
 
   // (c) 整数内積の GEMM（半スケールは dequant 側で q / k の両方へ — 設計 §2.1）。
-  // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。dispatch は
-  // ブロックごとなので、ここでは解決だけして呼び手へ返す。
+  // 幾何は ③PV と**別に**選ぶ（③ だけ N = D の 1 タイル化が勝つ — 実測）。プロファイルの
+  // op 別の欄から引く（src/kernels/geometry-profile.ts）。dispatch はブロックごとなので、
+  // ここでは解決だけして呼び手へ返す。
   const v4 = attentionQkI8a8UsesVec4(cols);
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const geometry = defaultI8a8Geometry("attention_qk");
+  const geometry = face.state.geometryProfile.i8a8.attentionQk;
   const key = attentionQkI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
@@ -1194,11 +1195,11 @@ const prepareAttentionPvI8a8 = async (
     workgroups: [gridStrideWorkgroups(batch * depth, quantizeGeometry.rowsPerGroup, limit), 1, 1],
   });
 
-  // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）。dispatch はブロック
-  // ごとなので、ここでは解決だけして呼び手へ返す。
+  // (c) 整数内積の GEMM（P̃ は A タイル充填で作る = 非実体化のまま）。幾何はプロファイルの
+  // op 別の欄。dispatch はブロックごとなので、ここでは解決だけして呼び手へ返す。
   const v4 = attentionPvI8a8UsesVec4(depth);
   const dp4a = face.state.attentionI8a8Dot === "dp4a";
-  const geometry = defaultI8a8Geometry("attention_pv");
+  const geometry = face.state.geometryProfile.i8a8.attentionPv;
   const key = attentionPvI8a8Key(v4, dp4a, scoreStorage, geometry, rowWindow);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,

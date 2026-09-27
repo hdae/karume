@@ -176,9 +176,10 @@ const rowsGeometry = (rows: number | undefined): GemmGeometry =>
  * キーと生成物の幾何が食い違い、キャッシュに載った別幾何の WGSL が dispatch 数と噛み合わずに
  * 出力タイルが欠落する（例外の出ない誤値）。
  *
- * `geometry` は**明示の幾何**（計測用の差し替え点 — {@link GemmSpec} の `geometry`）。渡すと
- * `rows` より優先する（{@link gemmWgsl} の解決と同じ規則）。渡してよいのは生成側が明示を読む op
- * （linear / attention_qk / attention_pv）のキーだけ — matmul / bmm の生成は明示を読まない。
+ * `geometry` は**明示の幾何**（{@link GemmSpec} の `geometry` — Session の経路では adapter の
+ * プロファイルが選んだ値・計測では tools/geometry-sweep の候補）。渡すと `rows` より優先する
+ * （{@link gemmWgsl} の解決と同じ規則）。渡してよいのは生成側が明示を読む op（matmul / bmm /
+ * linear / attention_qk / attention_pv）のキーだけ。
  * MUST: 生成へ渡すものと同じ値にする（理由は `rows` と同文）。省略時のキーは 1 バイトも動かない。
  */
 export const gemmKeyPart = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
@@ -254,11 +255,12 @@ export type GemmRowWindow = "a" | "c";
  * ADR 0067 決定 4 / perf-ledger K-13）で、uniform は骨格の `Dims` に states の欄を足した形
  * （キー・workgroup 算出・切替条件は src/kernels/state-attention.ts が持つ）。
  *
- * `linear` / `attention_qk` / `attention_pv` / `conv2d` の 4 variant だけが取る `geometry` は
- * **明示の幾何**で、渡すと op 別の解決（行数バケット・m タイル・既定固定）より優先する
- * （{@link resolveGeometry}）。用途は同じ shape で幾何だけを変える計測（tools/geometry-sweep —
- * perf-ledger K-70 の対象 op に限る）で、Session の経路（recipe-builders / executor）は渡さない。
- * 省略時の生成物は 1 バイトも動かない MUST。
+ * `matmul` / `bmm` / `linear` / `attention_qk` / `attention_pv` / `conv2d` の 6 variant だけが取る
+ * `geometry` は**明示の幾何**で、渡すと op 別の解決（行数バケット・m タイル・既定固定）より優先する
+ * （{@link resolveGeometry}）。渡し手は 2 つ — Session の導出相（recipe-builders）が adapter の
+ * プロファイル（src/kernels/geometry-profile.ts）から引いた値と、同じ shape で幾何だけを変える
+ * 計測（tools/geometry-sweep）。どちらも静的な選択で、実行時オートチューンではない
+ * （DECIDED: ADR 0115）。省略時の生成物は 1 バイトも動かない MUST。
  */
 type GemmSpec =
   | {
@@ -266,6 +268,8 @@ type GemmSpec =
     readonly v4: boolean;
     /** 出力の行数 M（幾何のバケット — 省略時は既定幾何）。 */
     readonly rows?: number;
+    /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+    readonly geometry?: GemmGeometry;
   }
   | {
     readonly op: "bmm";
@@ -274,6 +278,8 @@ type GemmSpec =
     readonly rows?: number;
     /** 行窓変種（{@link GemmRowWindow} — 省略時の生成物は 1 バイトも動かない）。 */
     readonly rowWindow?: GemmRowWindow;
+    /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+    readonly geometry?: GemmGeometry;
   }
   | {
     readonly op: "attention_qk" | "attention_pv";
@@ -2239,8 +2245,8 @@ ${fillBConv1d(geometry, v4)}`,
 
 /**
  * op 別の解決（conv1d / conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。
- * 明示の幾何（{@link GemmSpec} の `geometry` — linear / attention_qk / attention_pv / conv2d だけが
- * 取る）があれば、その 4 op ではそれを先に採る。
+ * 明示の幾何（{@link GemmSpec} の `geometry` — matmul / bmm / linear / attention_qk / attention_pv /
+ * conv2d だけが取る）があれば、その 6 op ではそれを先に採る。
  */
 const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
   // MUST: 明示は op 別の解決より先に見る。キー側（`gemmKeyPart` / conv2d の `conv2dIgemmKey`）も
@@ -2258,10 +2264,9 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
     case "attention_state_qk":
     case "attention_state_pv":
       return gemmGeometryForRows(spec.rows);
-    case "linear":
-      return spec.geometry ?? rowsGeometry(spec.rows);
+    // matmul / bmm / linear（行数バケット）
     default:
-      return rowsGeometry(spec.rows);
+      return spec.geometry ?? rowsGeometry(spec.rows);
   }
 };
 
@@ -2272,8 +2277,9 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
  * 行数バケット {@link rowsGeometry}・融合 attention は {@link defaultGemmGeometry}）で、門
  * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、既定を
  * 差し替えたときの影響がこの関数に閉じる。
- * `spec.geometry`（明示）は計測用の差し替え点（tools/geometry-sweep）であって実行時オートチューン
- * ではない — Session の経路は渡さず、ADR 0022 の MUST（選択は静的な shape の純関数）は不変。
+ * `spec.geometry`（明示）は Session の導出相が adapter のプロファイルから引いた値か、計測
+ * （tools/geometry-sweep）の候補で、どちらも実行時オートチューンではない — 選択は shape × adapter の
+ * 静的な表で、ADR 0022 の MUST（実行中に測って選び直さない）は不変（DECIDED: ADR 0115）。
  */
 export const gemmWgsl = (spec: GemmSpec): string => {
   const geometry = resolveGeometry(spec);

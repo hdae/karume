@@ -1231,6 +1231,7 @@ export class Session {
       weights: this.#state.weights.stats,
       storage: this.#state.storage,
       buildStats: this.#state.buildStats,
+      geometryProfile: this.#state.geometryProfile.id,
       lastRun: this.#lastRun,
       lastRunTiming: this.#state.scheduler.timing,
       lastRunFusions: this.#lastRunFusions,

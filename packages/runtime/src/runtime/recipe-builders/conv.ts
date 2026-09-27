@@ -56,6 +56,7 @@ import {
 } from "../../ops.ts";
 import { gemmMTileGeometry } from "../../kernels/gemm.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
+import { conv2dProfileGeometry } from "../../kernels/geometry-profile.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
 import { gruScanKey, gruScanParams, gruScanWgsl } from "../../kernels/gru-scan.ts";
 import type { RecipeBuildFace } from "../recipe-builder.ts";
@@ -350,9 +351,10 @@ export const buildConv2d = async (
  * MUST: バッチは **z 軸**（bmm と同じ）。N 側へ畳むと出力が `[Cout][B·Hout·Wout]` になり
  * NCHW と軸が入れ替わる — B = 1 でだけ一致するので実測形では露見しない。
  *
- * m タイルは形状の関数（{@link conv2dIgemmMTile}）で 64 行 / 32 行を選ぶ（ADR 0024 隣接）。
- * **n タイルは常に 64**（2048px の n 上限超過の扱いを動かさない）。どちらのタイル形でも
- * 出力はビット同一なので、これは純粋な dispatch の割り直しで数値契約に触れない。
+ * m タイルは形状の関数（{@link conv2dIgemmMTile}）で 64 行 / 32 行のクラスを選び（ADR 0024 隣接）、
+ * クラスごとの幾何は adapter のプロファイルの欄（src/kernels/geometry-profile.ts — 既定プロファイルは
+ * 従来の `gemmMTileGeometry(mTile)` のまま = 64 行クラスは 64×128・32 行クラスは 32×128 タイル）。どの幾何でも出力はビット同一なので、
+ * これは純粋な dispatch の割り直しで数値契約に触れない。
  */
 const buildConv2dIgemm = async (
   face: RecipeBuildFace,
@@ -368,12 +370,13 @@ const buildConv2dIgemm = async (
   const kFlat = dims.channelsIn * dims.kernelH * dims.kernelW;
   const v4 = conv2dUsesVec4(kFlat, dims.widthOut, dims.strideW);
   const mTile = conv2dIgemmMTile(m);
-  // 生成・キーと同じ解決点から幾何を引く（dispatch のタイル辺が WGSL の辺と構造的に一致）。
-  const geometry = gemmMTileGeometry(mTile);
-  const key = conv2dIgemmKey(weightStorage, v4, mTile);
+  // MUST: 1 回引いた幾何をキー・WGSL・dispatch の 3 つへ**そのまま**通す（dispatch のタイル辺が
+  // WGSL の辺と構造的に一致する — 実タイル辺の正本は幾何で、mTile はクラスの名前にすぎない）。
+  const geometry = conv2dProfileGeometry(face.state.geometryProfile, mTile);
+  const key = conv2dIgemmKey(weightStorage, v4, mTile, geometry);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
-    conv2dIgemmWgsl(weightStorage, v4, mTile),
+    conv2dIgemmWgsl(weightStorage, v4, mTile, geometry),
   );
   const params = face.writeParams(conv2dIgemmParams(dims), PARAMS_UNIFORM_USAGE);
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;

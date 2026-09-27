@@ -18,6 +18,7 @@ import {
   type GemmRowWindow,
   gemmWgsl,
 } from "./gemm.ts";
+import type { GemmGeometry } from "./gemm-geometry.ts";
 
 export type { GemmRowWindow };
 
@@ -28,12 +29,25 @@ export type { GemmRowWindow };
  * `window` は行窓変種の判別子（省略時は従来のキーと 1 バイトも変わらない）。**行オフセットと
  * 全 M は uniform 値なのでキーに載せない** — 載せるとブロックの本数だけ同じ WGSL が
  * パイプラインへ複製される。
+ *
+ * `geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session の bmm ノードでは adapter の
+ * プロファイルが選んだ値）。渡すと `rows` のバケットより優先し、MUST: キーと WGSL へ**同じ値**を
+ * 通す（`rows` と同じ規律）。
  */
-export const bmmKey = (v4: boolean, rows?: number, window?: GemmRowWindow): string =>
-  `bmm:v2:f32:${gemmKeyPart(v4, rows)}${window === undefined ? "" : `:rw${window}`}`;
+export const bmmKey = (
+  v4: boolean,
+  rows?: number,
+  window?: GemmRowWindow,
+  geometry?: GemmGeometry,
+): string =>
+  `bmm:v2:f32:${gemmKeyPart(v4, rows, geometry)}${window === undefined ? "" : `:rw${window}`}`;
 
-export const bmmWgsl = (v4: boolean, rows?: number, window?: GemmRowWindow): string =>
-  gemmWgsl({ op: "bmm", v4, rows, rowWindow: window });
+export const bmmWgsl = (
+  v4: boolean,
+  rows?: number,
+  window?: GemmRowWindow,
+  geometry?: GemmGeometry,
+): string => gemmWgsl({ op: "bmm", v4, rows, rowWindow: window, geometry });
 
 export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
   gemmParams("bmm", m, n, k);

@@ -112,8 +112,9 @@ const rowWindowKeyPart = (side: "a" | "c", rowWindow: boolean): string =>
   rowWindow ? `:rw${side}` : "";
 
 /**
- * ①QK のキー。`geometry` は明示の幾何（計測用 — src/kernels/gemm.ts の `GemmSpec`）で、
- * MUST: {@link attentionQkWgsl} へ**同じ値**を通す（省略時は既定幾何 = 既存キーのまま）。
+ * ①QK のキー。`geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session では
+ * プロファイルの値・計測では掃引の候補）で、MUST: {@link attentionQkWgsl} へ**同じ値**を通す
+ * （省略時は既定幾何 = 既存キーのまま）。
  */
 export const attentionQkKey = (
   v4: boolean,

@@ -32,8 +32,9 @@ export { LINEAR_SCALE_BINDING } from "./gemm.ts";
  * `groupSize` は i4 の group 長（i4 のとき必須）。shift を WGSL に焼くので**キーにも入れる**
  * （`:wi4g32` — 同一キー → バイト同一 WGSL の codegen 決定性）。
  *
- * `geometry` は明示の幾何（計測用 — src/kernels/gemm.ts の `GemmSpec`）。渡すと `rows` の
- * バケットより優先し、MUST: キーと WGSL へ**同じ値**を通す（`rows` と同じ規律）。
+ * `geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session ではプロファイルの値・
+ * 計測では掃引の候補）。渡すと `rows` のバケットより優先し、MUST: キーと WGSL へ**同じ値**を
+ * 通す（`rows` と同じ規律）。
  */
 export const linearKey = (
   weight: WeightStorage,

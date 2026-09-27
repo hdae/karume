@@ -56,12 +56,16 @@
  * - ③PV: `v4/s=f32` / `スカラ/s=f32` / `v4/s=f16`
  *
  * `スカラ × s=f16` は生成できない（s16 は v4 経路専用 — src/kernels/score-storage.ts）ので
- * 直積にはならない。**バッチ軸（B·H ≥ 2）はカナリアの守備範囲外** — base の算術は dp4a /
+ * 直積にはならない。幾何（タイル辺・担当割り）は **Session が選んだ幾何プロファイルの i8a8 attention
+ * 幾何**（src/kernels/geometry-profile.ts の `i8a8.attentionQk` / `i8a8.attentionPv`）をそのまま使う —
+ * production が実走する WGSL と 1 文字も違わない生成物を撃つためで、既定プロファイルなら従来どおり
+ * `defaultI8a8Geometry` の幾何になる。**バッチ軸（B·H ≥ 2）はカナリアの守備範囲外** — base の算術は dp4a /
  * emu で 1 文字も変わらない生成部分で、既存の GPU テストが検出器を持っている。
  *
  * ## 固定入力（凍結）
  *
- * 入力は全て決定的な純関数で作る（乱数は使わない — 失敗が再現しないため）。**量子化は
+ * 入力は全て決定的な純関数で作る（乱数は使わない — 失敗が再現しないため）。形（M / N / D）だけは
+ * 渡された幾何のタイル辺から導き、値の作り方（下記）は幾何に依らない。**量子化は
  * ホスト側で済ませて i8 ペイロードを直接上げる**ので、`quantize_rows` の除算（WGSL は
  * 2.5 ULP まで許される）はカナリアの経路に入らない = 既知解との一致は atol=0 で主張できる。
  * ③PV だけは `qP = round(127·exp(S−m))` を GPU が作るため `exp` の実装差が乗る。そこで
@@ -88,7 +92,7 @@
  * （実測は帯の **24.4 倍** — 旧固定入力は 0.018 倍だった）。
  */
 
-import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
+import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../kernels/i8a8-geometry.ts";
 import {
   ATTENTION_PV_V_SCALE_BINDING,
   ATTENTION_QK_K_SCALE_BINDING,
@@ -289,12 +293,11 @@ type PvCase = {
 };
 
 /**
- * ①QK の固定入力（**タイル辺は幾何から導く** — 既定の幾何を替えてもカナリアは 1 タイル
- * 全域を埋め続ける）。K は {@link QK_DEPTH} 固定で、既定の幾何では 16 タイル
+ * ①QK の固定入力（**タイル辺は渡された幾何から導く** — プロファイルが幾何を替えてもカナリアは
+ * 1 タイル全域を埋め続ける）。K は {@link QK_DEPTH} 固定で、既定の幾何では 16 タイル
  * （1 タイルだと巡回そのものが踏まれないので 2 タイル以上が要件 — テストが門にする）。
  */
-export const buildQkCase = (): QkCase => {
-  const geometry = defaultI8a8Geometry("attention_qk");
+export const buildQkCase = (geometry: I8a8Geometry): QkCase => {
   const rows = i8a8TileM(geometry);
   const cols = i8a8TileN(geometry);
   const depth = QK_DEPTH;
@@ -325,9 +328,8 @@ export const buildQkCase = (): QkCase => {
   };
 };
 
-/** ③PV の固定入力（同上 — ③ は ① と別の幾何を既定に取るので導出元も別）。 */
-export const buildPvCase = (): PvCase => {
-  const geometry = defaultI8a8Geometry("attention_pv");
+/** ③PV の固定入力（同上 — ③ は ① と別の幾何を取りうるので導出元も別）。 */
+export const buildPvCase = (geometry: I8a8Geometry): PvCase => {
   const rows = i8a8TileM(geometry);
   const depth = i8a8TileN(geometry);
   const cols = geometry.tileK * 2;
@@ -423,6 +425,15 @@ const unpackScoresF16 = (words: Uint32Array<ArrayBuffer>): Float32Array<ArrayBuf
 
 const STORAGE_IN = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST;
 const STORAGE_OUT = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_SRC;
+
+/**
+ * カナリアが撃つ融合 attention の i8a8 幾何（①QK / ③PV — Session が選んだプロファイルの
+ * `i8a8.attentionQk` / `i8a8.attentionPv` から組む）。
+ */
+export type AttentionI8a8CanaryGeometry = {
+  readonly qk: I8a8Geometry;
+  readonly pv: I8a8Geometry;
+};
 
 /** 1 変種を既知解と突き合わせた結果（{@link compareToReference}）。 */
 export type CanaryVariantOutcome = {
@@ -535,14 +546,14 @@ export type CanaryProbe = {
 export const probeAttentionI8a8Dot = async (
   gpu: GpuContext,
   dot: I8a8Dot,
+  geometry: AttentionI8a8CanaryGeometry,
   patch: CanaryWgslPatch = IDENTITY_PATCH,
 ): Promise<CanaryProbe> => {
   const device = gpu.device;
   const dp4a = dot === "dp4a";
-  const qk = buildQkCase();
-  const pv = buildPvCase();
-  const qkGeometry = defaultI8a8Geometry("attention_qk");
-  const pvGeometry = defaultI8a8Geometry("attention_pv");
+  const { qk: qkGeometry, pv: pvGeometry } = geometry;
+  const qk = buildQkCase(qkGeometry);
+  const pv = buildPvCase(pvGeometry);
   const limit = gpu.limits.maxComputeWorkgroupsPerDimension;
 
   const pipelineOf = async (key: string, wgsl: string): Promise<GPUComputePipeline> =>
@@ -841,12 +852,13 @@ const armsBitIdentical = (a: CanaryProbe, b: CanaryProbe): boolean =>
  */
 export const decideAttentionI8a8Dot = (
   gpu: GpuContext,
+  geometry: AttentionI8a8CanaryGeometry,
   patch: CanaryWgslPatch = IDENTITY_PATCH,
 ): Promise<AttentionI8a8Decision> =>
   gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
-    const dp4a = await probeAttentionI8a8Dot(gpu, "dp4a", patch);
+    const dp4a = await probeAttentionI8a8Dot(gpu, "dp4a", geometry, patch);
     if (dp4a.exact) return decide(dp4a, "dp4a-exact");
-    const emu = await probeAttentionI8a8Dot(gpu, "emu", patch);
+    const emu = await probeAttentionI8a8Dot(gpu, "emu", geometry, patch);
     if (emu.exact) return decide(emu, "emu-exact");
     if (dp4a.withinBand !== emu.withinBand) {
       return decide(dp4a.withinBand ? dp4a : emu, "band-single-arm");

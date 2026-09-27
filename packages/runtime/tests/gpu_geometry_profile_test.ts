@@ -1,0 +1,350 @@
+// GEMM 幾何のプロファイル（ADR 0115 — src/kernels/geometry-profile.ts）が Session の導出相まで
+// 結線されていることの実 GPU 検証。純関数の振る舞いは geometry_profile_test.ts。
+//
+// 見るのは 2 つ:
+//
+// 1. 選ばれたプロファイルの名前が診断（`SessionDiagnostics.geometryProfile`）に出る。
+// 2. 埋め込みの各プロファイル（src/kernels/geometry-profiles/）で組んだ Session の出力が、既定
+//    プロファイルの Session と**同じ入力で Uint32 一致**する。幾何が変えてよいのは担当割りだけ
+//    （ADR 0022 の数値契約）で、導出相がキー・WGSL・dispatch のどれか 1 つにだけ別の幾何を
+//    渡すと、出力タイルが欠けてここで値の差として出る。
+//    MUST: 値の一致だけでは結線の証拠にならない（プロファイルを無視しても一致する）ので、
+//    そのプロファイルの幾何判別子が**実際に走ったパイプラインキー**に載ったことも見る。
+//
+// プロファイルは adapter の (vendor, architecture) で選ばれるので、2 は **device は実物のまま、
+// adapterInfo だけをそのプロファイルの match に合わせた GpuContext** で Session を組む（ここで
+// 走る GPU はプロファイルを作った機ではないが、幾何でビットが動かないことは機に依らない命題 —
+// ADR 0022 追記）。既定側も adapterInfo を空にした GpuContext で組み、実機の adapter に
+// 将来プロファイルが当たっても比較の基準が既定のまま動かないようにする。
+// 埋め込みが 1 本も無い間は 2 を明示 SKIP する（空の一覧で緑にしない）。
+
+import { assert, assertEquals } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
+import { acquireGpu, GpuContext } from "../src/gpu/device.ts";
+import {
+  DEFAULT_GEOMETRY_PROFILE,
+  gemmRowsGeometry,
+  type GeometryProfile,
+  selectGeometryProfile,
+} from "../src/kernels/geometry-profile.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
+import {
+  type GemmGeometry,
+  gemmGeometryTileKeyPart,
+  gemmTileM,
+  gemmTileN,
+} from "../src/kernels/gemm-geometry.ts";
+import { i8a8GeometryKeyPart } from "../src/kernels/i8a8-geometry.ts";
+import { perChannelGroupSize } from "../src/format/container/codecs.ts";
+import type { OpenedContainer } from "../src/format/container/open.ts";
+import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
+import { I8A8_DOT, type SessionOptions } from "../src/runtime/session-types.ts";
+import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { quantizeI8 } from "./helpers/i8.ts";
+import {
+  f32Bytes,
+  fill,
+  GRAPH_NAME,
+  openGraphModel,
+  openModelBytes,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
+
+/** 符号と大きさを散らした決定的な列（乱数は使わない — 失敗が再現しないため）。 */
+const SIGNED = (index: number): number => ((index % 11) - 5) * 0.375 + 0.125;
+const WEIGHT = (index: number): number => ((index % 7) - 3) * 0.5 - 0.0625;
+const BIAS = (index: number): number => ((index % 5) - 2) * 0.25;
+
+const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
+
+/** 実際に走ったキーのうち、`prefix` で始まり `parts` を全て含むものがあること。 */
+type ExpectedKey = { readonly prefix: string; readonly parts: readonly string[] };
+
+type ProfileCase = {
+  readonly name: string;
+  readonly model: () => Promise<OpenedContainer>;
+  readonly inputs: Readonly<Record<string, Tensor>>;
+  readonly options?: SessionOptions;
+  /** そのプロファイルで走るはずの幾何の判別子。 */
+  readonly expected: (profile: GeometryProfile) => readonly ExpectedKey[];
+};
+
+const rowsKey = (prefix: string, rows: number) => (profile: GeometryProfile) => [
+  { prefix, parts: [gemmGeometryTileKeyPart(gemmRowsGeometry(profile, rows))] },
+];
+
+const linearCase = (m: number): ProfileCase => {
+  const [k, n] = [64, 96];
+  return {
+    name: `linear M=${m}`,
+    model: async () =>
+      await openGraphModel(singleOpDeclaration("linear", [[m, k], [n, k], [n]], [[m, n]])),
+    inputs: { x0: fill([m, k], SIGNED), x1: fill([n, k], WEIGHT), x2: fill([n], BIAS) },
+    expected: rowsKey("linear:", m),
+  };
+};
+
+/** conv2d の implicit GEMM キーは幾何を `igemm{tileM}x{tileN}` と `:wg{x}x{y}` で名乗る。 */
+const conv2dParts = (geometry: GemmGeometry): readonly string[] => [
+  `igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}`,
+  `:wg${geometry.wgX}x${geometry.wgY}`,
+];
+
+const conv2dCase = (channelsOut: number, rows: "rows64" | "rows32"): ProfileCase => {
+  const channelsIn = 8;
+  return {
+    name: `conv2d Cout=${channelsOut}（${rows} クラス）`,
+    model: async () =>
+      await openGraphModel(
+        singleOpDeclaration(
+          "conv2d",
+          [[1, channelsIn, 20, 20], [channelsOut, channelsIn, 3, 3], [channelsOut]],
+          [[1, channelsOut, 20, 20]],
+          { attrs: { stride: [1, 1], padding: [1, 1], dilation: [1, 1], groups: 1 } },
+        ),
+      ),
+    inputs: {
+      x0: fill([1, channelsIn, 20, 20], SIGNED),
+      x1: fill([channelsOut, channelsIn, 3, 3], WEIGHT),
+      x2: fill([channelsOut], BIAS),
+    },
+    expected: (profile) => [{
+      prefix: "conv2d:v3:f32:igemm",
+      parts: conv2dParts(profile.conv2d[rows]),
+    }],
+  };
+};
+
+const attentionCase = (compute: "f32" | "a8"): ProfileCase => {
+  const [b, h, m, n, d] = [1, 2, 300, 200, 64];
+  return {
+    name: `attention ${compute}`,
+    model: async () =>
+      await openGraphModel(
+        singleOpDeclaration("attention", [[b, h, m, d], [b, h, n, d], [b, h, n, d]], [[
+          b,
+          h,
+          m,
+          d,
+        ]], { attrs: { scale: halfScale(d) } }),
+      ),
+    inputs: {
+      x0: fill([b, h, m, d], SIGNED),
+      x1: fill([b, h, n, d], WEIGHT),
+      x2: fill([b, h, n, d], BIAS),
+    },
+    // 内積変種は両 Session で揃える（device 単位カナリアの判定を比較に混ぜない）。
+    options: compute === "a8" ? { attentionCompute: "a8", [I8A8_DOT]: "emu" } : {},
+    expected: (profile) =>
+      compute === "a8"
+        ? [
+          {
+            prefix: "attention_qk:v3:i8a8:",
+            parts: [i8a8GeometryKeyPart(profile.i8a8.attentionQk, false)],
+          },
+          {
+            prefix: "attention_pv:v3:i8a8:",
+            parts: [i8a8GeometryKeyPart(profile.i8a8.attentionPv, false)],
+          },
+        ]
+        : [
+          {
+            prefix: "attention_qk:v1:f32:",
+            parts: [gemmGeometryTileKeyPart(profile.attention.qk)],
+          },
+          {
+            prefix: "attention_pv:v1:f32:",
+            parts: [gemmGeometryTileKeyPart(profile.attention.pv)],
+          },
+        ],
+  };
+};
+
+/** i8 常駐の linear（`linearCompute: "a8"` で i8a8 経路へ落ちる形）。 */
+const linearI8a8Case = (): ProfileCase => {
+  const [m, k, n] = [300, 64, 96];
+  const weight = fill([n, k], (i) => WEIGHT(i) * (1 + (Math.floor(i / k) % 7) * 0.25));
+  const quantized = quantizeI8(weight.data, [n, k], 0);
+  const bias = fill([n], BIAS);
+  return {
+    name: "linear i8a8",
+    model: () =>
+      openModelBytes(
+        {
+          format: "karume-ir",
+          version: 2,
+          requires: { ops: ["linear"] },
+          symbols: [],
+          inputs: [{ name: "x0", dtype: "f32", shape: [m, k] }],
+          outputs: ["y"],
+          initializers: { w: {}, b: {} },
+          values: {
+            w: { dtype: "f32", shape: [n, k] },
+            b: { dtype: "f32", shape: [n] },
+            y: { dtype: "f32", shape: [m, n] },
+          },
+          nodes: [{ op: "linear", ins: ["x0", "w", "b"], outs: ["y"], attrs: {} }],
+        },
+        [
+          {
+            graph: GRAPH_NAME,
+            initializer: "b",
+            bytes: f32Bytes(bias.data),
+            encoding: { codec: "f32" },
+          },
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: quantized.bytes,
+            encoding: {
+              codec: "int8-sym",
+              groupSize: perChannelGroupSize(k),
+              scale: { bytes: f32Bytes(quantized.scale), dtype: "f32" },
+            },
+          },
+        ],
+      ),
+    inputs: { x0: fill([m, k], SIGNED) },
+    options: { linearCompute: "a8", [I8A8_DOT]: "emu" },
+    expected: (profile) => [{
+      prefix: "linear:v4:i8a8:",
+      parts: [i8a8GeometryKeyPart(profile.i8a8.linear, false)],
+    }],
+  };
+};
+
+const CASES: readonly ProfileCase[] = [
+  // 行数バケットの 3 段（≤ 64 / 65〜512 / 513〜）を 1 本ずつ
+  linearCase(40),
+  linearCase(300),
+  linearCase(1024),
+  {
+    name: "matmul M=700",
+    model: async () =>
+      await openGraphModel(singleOpDeclaration("matmul", [[700, 64], [64, 80]], [[700, 80]])),
+    inputs: { x0: fill([700, 64], SIGNED), x1: fill([64, 80], WEIGHT) },
+    expected: rowsKey("matmul:", 700),
+  },
+  {
+    name: "bmm M=600",
+    model: async () =>
+      await openGraphModel(
+        singleOpDeclaration("bmm", [[2, 600, 64], [2, 64, 80]], [[2, 600, 80]]),
+      ),
+    inputs: { x0: fill([2, 600, 64], SIGNED), x1: fill([2, 64, 80], WEIGHT) },
+    expected: rowsKey("bmm:", 600),
+  },
+  attentionCase("f32"),
+  attentionCase("a8"),
+  // Cout = 96 は M%64 = 32 なので 32 行クラス・128 は 64 行クラス（`conv2dIgemmMTile`）
+  conv2dCase(96, "rows32"),
+  conv2dCase(128, "rows64"),
+  linearI8a8Case(),
+];
+
+/**
+ * device は実物のまま、adapterInfo の vendor / architecture だけを差し替えた GpuContext
+ * （プロファイルの選択は Session 構築で adapterInfo から 1 度だけ行われる）。
+ *
+ * MUST: ここで作った GpuContext は destroy しない — device は元の GpuContext と共有で、破棄は
+ * 元の側 1 箇所に置く（二重の destroy は消失通知を予期しない側へ流す）。
+ */
+const contextAs = (gpu: GpuContext, vendor: string, architecture: string): GpuContext =>
+  new GpuContext(
+    gpu.device,
+    {
+      vendor,
+      architecture,
+      device: gpu.adapterInfo.device,
+      description: gpu.adapterInfo.description,
+      subgroupMinSize: gpu.adapterInfo.subgroupMinSize,
+      subgroupMaxSize: gpu.adapterInfo.subgroupMaxSize,
+      isFallbackAdapter: gpu.adapterInfo.isFallbackAdapter,
+    },
+    gpu.limits,
+    gpu.wgslLanguageFeatures,
+  );
+
+const words = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
+  new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.byteLength / 4);
+
+type CaseRun = {
+  readonly y: Uint32Array<ArrayBuffer>;
+  readonly profile: string;
+  readonly keys: readonly string[];
+};
+
+const runCase = async (gpu: GpuContext, testCase: ProfileCase): Promise<CaseRun> => {
+  const session = await createSessionFromContainer(
+    gpu,
+    await testCase.model(),
+    GRAPH_NAME,
+    testCase.options ?? {},
+  );
+  try {
+    const y = words((await session.run(testCase.inputs))["y"]);
+    const diagnostics = session.diagnostics();
+    const census = diagnostics.lastRunPipelines;
+    assert(census !== undefined, `${testCase.name}: 直近 run のパイプライン内訳が無い`);
+    return { y, profile: diagnostics.geometryProfile, keys: census.map((row) => row.key) };
+  } finally {
+    await session.dispose();
+  }
+};
+
+describe({
+  name: "幾何プロファイルの診断（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => {
+    it("Session は実機の adapter から選ばれたプロファイルの名前を診断に出す", async () => {
+      const gpu = await acquireGpu();
+      try {
+        const run = await runCase(gpu, linearCase(40));
+        assertEquals(run.profile, selectGeometryProfile(gpu.adapterInfo).id);
+        // adapterInfo が空の機（古い Chromium の adapter.info 欠落）は既定に落ちる
+        const blank = await runCase(contextAs(gpu, "", ""), linearCase(40));
+        assertEquals(blank.profile, DEFAULT_GEOMETRY_PROFILE.id);
+      } finally {
+        gpu.destroy();
+      }
+    });
+  },
+});
+
+describe({
+  name: "埋め込みプロファイルの幾何は既定プロファイルとビット同一（実 GPU）",
+  ignore: !GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0,
+  fn: () => {
+    for (const profile of BUILTIN_GEOMETRY_PROFILES) {
+      it(`'${profile.id}' の Session は全ケースで既定と Uint32 一致し、その幾何のキーで走る`, async () => {
+        const gpu = await acquireGpu();
+        try {
+          const baseline = contextAs(gpu, "", "");
+          const disguised = contextAs(
+            gpu,
+            profile.match.vendor ?? "",
+            profile.match.architecture ?? "",
+          );
+          for (const testCase of CASES) {
+            const expected = await runCase(baseline, testCase);
+            assertEquals(expected.profile, DEFAULT_GEOMETRY_PROFILE.id, testCase.name);
+            const actual = await runCase(disguised, testCase);
+            assertEquals(actual.profile, profile.id, testCase.name);
+            for (const { prefix, parts } of testCase.expected(profile)) {
+              assert(
+                actual.keys.some((key) =>
+                  key.startsWith(prefix) && parts.every((part) => key.includes(part))
+                ),
+                `${testCase.name}: ${prefix}…${parts.join("…")} のキーで走っていない` +
+                  `（実際: ${actual.keys.join(" / ")}）`,
+              );
+            }
+            assertEquals(actual.y, expected.y, `${testCase.name}: 既定プロファイルとビット不一致`);
+          }
+        } finally {
+          gpu.destroy();
+        }
+      });
+    }
+  },
+});

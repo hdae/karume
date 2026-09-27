@@ -30,6 +30,7 @@
 
 import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import type { IrGraph } from "../format/ir.ts";
 import type { RunArena } from "../gpu/arena.ts";
@@ -143,6 +144,11 @@ export type RecipeBuilderContext = {
    * ここにも同じノブが要る（強制分割 parity の足を経路ごとに別のノブにしない）。
    */
   readonly rowBlockSplit: number | undefined;
+  /**
+   * GEMM 幾何のプロファイル（executor の {@link SessionState} が構築時に 1 度だけ選ぶ —
+   * DECIDED: ADR 0115）。matmul / bmm / linear・融合 attention・conv2d・i8a8 の導出が幾何を引く先。
+   */
+  readonly geometryProfile: GeometryProfile;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly outputNames: ReadonlySet<string>;
 };
@@ -192,6 +198,7 @@ export type RecipeBuildFace = {
     | "linearI8a8Dot"
     | "attentionI8a8Dot"
     | "rowBlockSplit"
+    | "geometryProfile"
   >;
   readonly writeParams: (params: Uint32Array<ArrayBuffer>, usage: number) => GPUBuffer;
   readonly weightStorage: (step: NodePlan) => WeightStorage;

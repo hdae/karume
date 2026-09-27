@@ -7,15 +7,20 @@
  *
  * `rows`（= M）も同じく形状由来で、タイル幾何のバケット（src/kernels/gemm-geometry.ts の
  * `gemmGeometryForRows`）を決める。MUST: キー・WGSL・dispatch の 3 つに**同じ M** を通す。
+ *
+ * `geometry` は明示の幾何（src/kernels/gemm.ts の `GemmSpec` — Session では adapter の
+ * プロファイルが選んだ値）。渡すと `rows` のバケットより優先し、MUST: キーと WGSL へ**同じ値**を
+ * 通す（`rows` と同じ規律）。
  */
 
 import { gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import type { GemmGeometry } from "./gemm-geometry.ts";
 
-export const matmulKey = (v4: boolean, rows?: number): string =>
-  `matmul:v2:f32:${gemmKeyPart(v4, rows)}`;
+export const matmulKey = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
+  `matmul:v2:f32:${gemmKeyPart(v4, rows, geometry)}`;
 
-export const matmulWgsl = (v4: boolean, rows?: number): string =>
-  gemmWgsl({ op: "matmul", v4, rows });
+export const matmulWgsl = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
+  gemmWgsl({ op: "matmul", v4, rows, geometry });
 
 export const matmulParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
   gemmParams("matmul", m, n, k);

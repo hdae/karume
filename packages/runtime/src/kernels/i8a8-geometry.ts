@@ -165,8 +165,9 @@ const GEOMETRY_M64N128: I8a8Geometry = { regM: 8, regN: 8, wgX: 16, wgY: 8, tile
  *
  * 現状は op ごとの定数で、形状バケットは切っていない — L2（4096×8192×2048）だけは
  * `r16×8 wg8×8` が僅差（~6%）で勝つが、境界を 1 本切るとキー本数と検証面が倍になる。
- * 将来「手動チューンで作ったプロファイルを渡して既定を上書きする」形はここを差し替え点に
- * する（呼び出し側は幾何を受け取って流すだけなので、差し替えの影響がこの関数に閉じる）。
+ * 手動チューン（掃引）で作った adapter 別の表は、この関数ではなくプロファイル
+ * （src/kernels/geometry-profile.ts の `i8a8` 欄 — DECIDED: ADR 0115）が持つ。この関数は既定
+ * プロファイルの値の出どころで、Session の導出相はプロファイルから幾何を受け取って流すだけ。
  */
 export const defaultI8a8Geometry = (op: I8a8GemmOp): I8a8Geometry =>
   op === "attention_pv" ? GEOMETRY_M64N128 : GEOMETRY_M128N64;
