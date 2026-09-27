@@ -157,10 +157,13 @@ for (const [index, prompt] of prompts.entries()) {
 ```
 
 Keeping the DiT raises peak VRAM, because the text and VAE stages load while it stays resident
-(about 2.6 GiB more at 1024² with the default quant), so it does not fit 4 GB GPUs. When a stage runs
-out of memory while the DiT is being kept loaded, the pipeline drops the DiT, retries that stage
-once and stops keeping the DiT for the rest of its life (a DiT loaded in the same call is only kept
-once its stage has finished). `onEvent` receives a `residency` event for each of these changes. The
+(about 2.6 GiB more at 1024² with the default quant), so it does not fit 4 GB GPUs. While the DiT
+is kept loaded, the pipeline checks by a trial allocation, before the text stages and again before
+the VAE stage, that the next stages fit next to it, and drops the DiT before loading them if they
+do not. If a stage still runs out of memory while the DiT is kept loaded, the pipeline drops the
+DiT and retries that stage once. After either drop it stops keeping the DiT for the rest of its
+life (a DiT loaded in the same call is only kept once its stage has finished). `onEvent` receives
+a `residency` event for each of these changes. The
 default, `"per-stage"`, loads and releases each model inside every `generate` as before. The design
 and the VRAM figures are in
 [ADR 0112](../../docs/decisions/0112-anima-transformer-residency.md).

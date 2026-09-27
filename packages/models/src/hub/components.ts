@@ -34,8 +34,10 @@
  */
 
 import {
+  type AdmissionReport,
   type AssetReader,
   type ContainerInput,
+  type EstimateOptions,
   type GpuContext,
   openContainer,
   type OpenedContainer,
@@ -90,6 +92,19 @@ export type ModelComponent = GraphOwner & {
    * 読みより長く握らない（握ると家族側の常駐予算の外でホスト RAM が育つ）。
    */
   readonly asset: (name: string) => AssetReader;
+  /**
+   * 必要側のバイト数の見積り（`PreparedModel.estimate` そのもの — GPU に触らない純関数）。段を張る前に
+   * 「残りの VRAM に入るか」を量る呼び手（anima の常駐 DiT の先回り退避）が使う。
+   */
+  readonly estimate: (options: EstimateOptions) => AdmissionReport;
+  /**
+   * 重みの part（part 1 以降）の最大バイト長（part 0 = descriptor だけの容器では 0）。
+   *
+   * WHY: Session 構築は part を 1 本ずつアップロードし、実装（wgpu の `queue.writeBuffer`）の staging は
+   * その part のフェンスまで確保されたまま残る — 見積り（{@link ModelComponent.estimate}）が勘定しない
+   * 一時の上乗せは「最大の part 1 本ぶん」になる。
+   */
+  readonly maxPartBytes: number;
 };
 
 /**
@@ -142,6 +157,15 @@ export type LoadContainerOptions = FetchAssetsOptions & {
   readonly components?: Readonly<Record<string, ComponentSource>>;
 };
 
+/** 重みの part（part 1 以降）の最大バイト長（{@link ModelComponent.maxPartBytes}）。 */
+const maxWeightPartBytes = (opened: OpenedContainer): number => {
+  let max = 0;
+  for (let index = 1; index < opened.source.partCount; index += 1) {
+    max = Math.max(max, opened.source.partLength(index));
+  }
+  return max;
+};
+
 /** 開いた容器 1 本を {@link ModelComponent} に畳む（取得面 / 全量面が共有する 1 本）。 */
 const containerComponent = (opened: OpenedContainer, prepared: PreparedModel): ModelComponent => ({
   graph: prepared.graph,
@@ -150,6 +174,8 @@ const containerComponent = (opened: OpenedContainer, prepared: PreparedModel): M
     Object.entries(opened.model?.assets ?? {}).map(([name, asset]) => [name, asset.role]),
   ),
   asset: (name) => opened.asset(name),
+  estimate: (options) => prepared.estimate(options),
+  maxPartBytes: maxWeightPartBytes(opened),
 });
 
 /** 開いた部品の表から供給口を作る（開いていない役割は fail loudly）。 */

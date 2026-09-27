@@ -27,7 +27,10 @@ import {
   decideAfterFailedGenerate,
   decideAfterTransformer,
   evictsForMemory,
+  generateMemoryNeed,
+  HEADROOM_MARGIN_BYTES,
   type ResidencyNotice,
+  stageMemoryNeed,
   TransformerResidency,
   transformerSource,
 } from "../src/anima/residency.ts";
@@ -46,7 +49,16 @@ type FakeRequest = {
   readonly residency: AnimaResidency;
   /** 段ごとの故障の列（先頭から試行ごとに 1 つ消費・尽きたら成功）。 */
   readonly faults?: Partial<Record<"text" | "transformer" | "vae", Fault[]>>;
+  /** 試し確保が「入らない」を返す量る点（pipeline の先回りの退避の引き金 — 既定は全点で入る）。 */
+  readonly headroomShort?: readonly HeadroomPoint[];
 };
+
+/** pipeline が先回りの退避で量る 2 点（text 段の前 / DiT 段の後・VAE 段の前）。 */
+type HeadroomPoint = "text" | "vae";
+
+/** 台が量る点ごとに渡す必要量（値そのものに意味は無い — どちらの点の量りかを見分ける印）。 */
+const TEXT_NEED = 2 * 1024 * 1024 * 1024;
+const VAE_NEED = 1024 * 1024 * 1024;
 
 const oom = (where: string): GpuOutOfMemoryError =>
   new GpuOutOfMemoryError(`${where}: not enough memory left`);
@@ -60,8 +72,8 @@ type HarnessOptions = {
 };
 
 /**
- * pipeline の `#generate` と同じ呼び順で状態機械を回す台（text 段 → DiT 段 → VAE 段 — 失敗したら
- * `releaseIfRequested` を通して投げる）。`log` に GPU 側の出来事（構築 / 破棄 / 解放待ち / 段の試行）と
+ * pipeline の `#generate` と同じ呼び順で状態機械を回す台（先回りの量り → text 段 → DiT 段 → 先回りの
+ * 量り → VAE 段 — 失敗したら `releaseIfRequested` を通して投げる）。`log` に GPU 側の出来事（構築 / 破棄 / 解放待ち / 段の試行）と
  * 通知を時系列で積む。`disposals` は破棄の瞬間の状態機械の状態（MUST の順序の観測点）。
  */
 const createHarness = (options: HarnessOptions = {}) => {
@@ -73,6 +85,8 @@ const createHarness = (options: HarnessOptions = {}) => {
     readonly holding: boolean;
     readonly downgraded: boolean;
   }[] = [];
+  /** 先回りの退避の probe が呼ばれた点と必要量（`log` に混ぜない — 常駐ありの既存の列を変えない）。 */
+  const probes: { readonly point: HeadroomPoint; readonly need: number }[] = [];
   const residency: TransformerResidency<FakeSession> = new TransformerResidency<FakeSession>({
     dispose: (session) => {
       session.disposed = true;
@@ -109,8 +123,22 @@ const createHarness = (options: HarnessOptions = {}) => {
     return Promise.resolve(stage);
   };
 
+  /** pipeline と同じ形で 1 点を量る（常駐 DiT があるときだけ `ensureHeadroom` を呼ぶ）。 */
+  const ensureHeadroom = async (
+    request: FakeRequest,
+    point: HeadroomPoint,
+    need: number,
+  ): Promise<void> => {
+    if (!residency.holding) return;
+    await residency.ensureHeadroom(need, (bytes) => {
+      probes.push({ point, need: bytes });
+      return Promise.resolve(!(request.headroomShort?.includes(point) ?? false));
+    }, notify);
+  };
+
   const generate = async (request: FakeRequest): Promise<number> => {
     try {
+      await ensureHeadroom(request, "text", TEXT_NEED);
       await residency.runStage(attempt(request, "text"), notify);
       const used = await residency.runTransformer({
         effective: request.residency,
@@ -130,6 +158,7 @@ const createHarness = (options: HarnessOptions = {}) => {
         },
         notify,
       });
+      await ensureHeadroom(request, "vae", VAE_NEED);
       await residency.runStage(attempt(request, "vae"), notify);
       return used;
     } catch (error) {
@@ -137,7 +166,7 @@ const createHarness = (options: HarnessOptions = {}) => {
     }
   };
 
-  return { log, sessions, notices, disposals, residency, notify, generate };
+  return { log, sessions, notices, disposals, probes, residency, notify, generate };
 };
 
 describe("assertAnimaResidency", () => {
@@ -274,6 +303,26 @@ describe("evictsForMemory（退避に当たる失敗か）", () => {
     // validation や素の Error を退避でやり直すと、本当の原因が 2 度目の失敗に埋もれる。
     assertFalse(evictsForMemory(new GpuValidationError("x"), true));
     assertFalse(evictsForMemory(new Error("out-of-memory"), true), "文言では判定しない");
+  });
+});
+
+describe("stageMemoryNeed / generateMemoryNeed（先回りの退避の必要量）", () => {
+  const MIB = 1024 * 1024;
+
+  it("段 1 本の必要量は 見積りのピーク + 最大 part の staging + 余裕 512 MiB", () => {
+    assertEquals(HEADROOM_MARGIN_BYTES, 512 * MIB);
+    // text_encoder の実測（重み 1,138.5 MiB + 保持予算 256 MiB・part 256 MiB）の形。
+    assertEquals(
+      stageMemoryNeed({ peakAccountedBytes: 1394 * MIB }, 256 * MIB),
+      (1394 + 256 + 512) * MIB,
+    );
+    // part 0 だけの容器（重みの part が無い）では staging の項が 0。
+    assertEquals(stageMemoryNeed({ peakAccountedBytes: 10 * MIB }, 0), (10 + 512) * MIB);
+  });
+
+  it("generate の必要量は段ごとの最大（段は順に張って畳むので和ではない）", () => {
+    assertEquals(generateMemoryNeed([2162 * MIB, 1281 * MIB, 1212 * MIB]), 2162 * MIB);
+    assertEquals(generateMemoryNeed([1 * MIB, 3 * MIB, 2 * MIB]), 3 * MIB);
   });
 });
 
@@ -520,6 +569,239 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
     });
   });
 
+  describe("④' 先回りの退避（ensureHeadroom）", () => {
+    const NEED = 3 * 1024 * 1024 * 1024;
+
+    /** 呼ばれた必要量を積み、決めた答えを返す probe（`answer` が Error なら reject する）。 */
+    const recordingProbe = (answer: boolean | Error) => {
+      const calls: number[] = [];
+      const probe = (bytes: number): Promise<boolean> => {
+        calls.push(bytes);
+        return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+      };
+      return { calls, probe };
+    };
+
+    /** 1 回目の generate で DiT を席に載せた台（`log` / `notices` は空にしてある）。 */
+    const holdingHarness = async (options: HarnessOptions = {}) => {
+      const h = createHarness(options);
+      await h.generate({ residency: "transformer" });
+      assert(h.residency.holding);
+      h.log.length = 0;
+      h.notices.length = 0;
+      return h;
+    };
+
+    describe("ensureHeadroom 単体", () => {
+      it("常駐 DiT が無ければ probe を呼ばず、何も名乗らず、格下げもしない", async () => {
+        const h = createHarness();
+        const { calls, probe } = recordingProbe(false);
+        await h.residency.ensureHeadroom(NEED, probe, h.notify);
+        assertEquals(calls, []);
+        assertEquals(h.notices, []);
+        assertEquals(h.log, []);
+        assertFalse(h.residency.downgraded);
+      });
+
+      it("入るなら probe を必要量で 1 回だけ呼び、何も名乗らずに常駐を続ける", async () => {
+        const h = await holdingHarness();
+        const { calls, probe } = recordingProbe(true);
+        await h.residency.ensureHeadroom(NEED, probe, h.notify);
+        assertEquals(calls, [NEED]);
+        assertEquals(h.notices, []);
+        assertEquals(h.log, []);
+        assert(h.residency.holding);
+        assertFalse(h.residency.downgraded);
+      });
+
+      it("入らなければ 破棄 → 解放待ち → evicted / headroom の順に退避し、以後は段ごと運転に格下げ", async () => {
+        const h = await holdingHarness();
+        const { calls, probe } = recordingProbe(false);
+        await h.residency.ensureHeadroom(NEED, probe, h.notify);
+        assertEquals(calls, [NEED]);
+        assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
+        // 破棄の瞬間に格下げは立ち、席は空いている（MUST の順序）。
+        assertEquals(h.disposals.at(-1), { id: 1, holding: false, downgraded: true });
+        assertFalse(h.residency.holding);
+        assert(h.residency.downgraded);
+        assertEquals(
+          transformerSource({
+            effective: "transformer",
+            downgraded: h.residency.downgraded,
+            held: h.residency.holding,
+          }),
+          "per-stage",
+        );
+      });
+
+      it("probe が投げたらそのまま投げ、格下げも破棄もせず常駐を続ける（入らない ≠ 失敗）", async () => {
+        const h = await holdingHarness();
+        const failure = new GpuValidationError("probe: validation");
+        const { calls, probe } = recordingProbe(failure);
+        const error = await assertRejects(() => h.residency.ensureHeadroom(NEED, probe, h.notify));
+        assertStrictEquals(error, failure);
+        assertEquals(calls, [NEED]);
+        assertEquals(h.log, []);
+        assertEquals(h.notices, []);
+        assert(h.residency.holding);
+        assertFalse(h.residency.downgraded);
+      });
+
+      it("退避の破棄が失敗しても evicted / headroom を名乗り、後始末の失敗だけを並べた AggregateError で投げる", async () => {
+        const h = await holdingHarness({ disposeFails: true });
+        const { probe } = recordingProbe(false);
+        const error = await assertRejects(
+          () => h.residency.ensureHeadroom(NEED, probe, h.notify),
+          AggregateError,
+        );
+        // 元の失敗は無い — 並ぶのは後始末の失敗だけ（OOM の退避では先頭に元の OOM が来る）。
+        assertEquals(error.errors.map((cause: Error) => cause.message), ["dispose 1 に失敗"]);
+        assertEquals(error.message, "anima: DiT の後始末が失敗した");
+        assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
+        assert(h.residency.downgraded);
+        assertFalse(h.residency.holding);
+      });
+
+      it("解放待ちが reject しても evicted / headroom を名乗り、その失敗を AggregateError で投げる", async () => {
+        const h = await holdingHarness({ settleFails: true });
+        const { probe } = recordingProbe(false);
+        const error = await assertRejects(
+          () => h.residency.ensureHeadroom(NEED, probe, h.notify),
+          AggregateError,
+        );
+        assertEquals(error.errors.map((cause: Error) => cause.message), ["解放待ちに失敗"]);
+        assertEquals(h.notices, [{ action: "evicted", reason: "headroom" }]);
+        assert(h.residency.downgraded);
+        assertFalse(h.residency.holding);
+      });
+
+      it("後始末の失敗に通知の失敗が重なれば、両方を AggregateError に並べる", async () => {
+        const h = await holdingHarness({
+          settleFails: true,
+          notifyThrows: (notice) =>
+            notice.action === "evicted" ? new Error("購読側の失敗") : undefined,
+        });
+        const { probe } = recordingProbe(false);
+        const error = await assertRejects(
+          () => h.residency.ensureHeadroom(NEED, probe, h.notify),
+          AggregateError,
+        );
+        assertEquals(error.errors.map((cause: Error) => cause.message), [
+          "解放待ちに失敗",
+          "購読側の失敗",
+        ]);
+      });
+
+      it("後始末が通って evicted / headroom の通知で購読側が投げたら、その例外をそのまま投げる（格下げは残る）", async () => {
+        const reason = new Error("中止ボタン");
+        const h = await holdingHarness({
+          notifyThrows: (notice) => notice.action === "evicted" ? reason : undefined,
+        });
+        const { probe } = recordingProbe(false);
+        const error = await assertRejects(() => h.residency.ensureHeadroom(NEED, probe, h.notify));
+        assertStrictEquals(error, reason);
+        assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
+        assert(h.residency.downgraded);
+        assertFalse(h.residency.holding);
+      });
+    });
+
+    describe("generate の中の 2 つの量る点", () => {
+      it("text 段の前で入らなければ、段を張る前に退避し、DiT 段は段ごと運転で作り直して downgraded を名乗る", async () => {
+        const h = createHarness();
+        await h.generate({ residency: "transformer" });
+        h.log.length = 0;
+        h.probes.length = 0;
+        assertEquals(await h.generate({ residency: "transformer", headroomShort: ["text"] }), 2);
+        assertEquals(h.log, [
+          "dispose:1",
+          "settle",
+          "notice:evicted/headroom",
+          "attempt:text",
+          "open:2",
+          "body:2",
+          "dispose:2",
+          "notice:released/downgraded",
+          "attempt:vae",
+        ]);
+        // text 段の前の量りは text 系の必要量で、退避の後の VAE 段の前は量らない（席が空）。
+        assertEquals(h.probes, [{ point: "text", need: TEXT_NEED }]);
+      });
+
+      it("実効値 per-stage の generate で text 段の前に退避したら、DiT 段は何も名乗らない", async () => {
+        const h = createHarness();
+        await h.generate({ residency: "transformer" });
+        h.notices.length = 0;
+        await h.generate({ residency: "per-stage", headroomShort: ["text"] });
+        assertEquals(h.notices, [{ action: "evicted", reason: "headroom" }]);
+        assert(h.residency.downgraded);
+      });
+
+      it("最初の generate でも、DiT を席に載せた後の VAE 段の前で入らなければ退避する", async () => {
+        const h = createHarness();
+        assertEquals(await h.generate({ residency: "transformer", headroomShort: ["vae"] }), 1);
+        assertEquals(h.log, [
+          "attempt:text",
+          "open:1",
+          "body:1",
+          "notice:retained/request",
+          "dispose:1",
+          "settle",
+          "notice:evicted/headroom",
+          "attempt:vae",
+        ]);
+        // 席が空の text 段の前は量らず、VAE 段の前だけを VAE の必要量で量る。
+        assertEquals(h.probes, [{ point: "vae", need: VAE_NEED }]);
+        assert(h.residency.downgraded);
+        assertFalse(h.residency.holding);
+      });
+
+      it("持ち越した DiT の generate は 2 点とも量り、VAE 段の前で入らなければそこで退避する", async () => {
+        const h = createHarness();
+        await h.generate({ residency: "transformer" });
+        h.log.length = 0;
+        h.probes.length = 0;
+        assertEquals(await h.generate({ residency: "transformer", headroomShort: ["vae"] }), 1);
+        assertEquals(h.probes, [
+          { point: "text", need: TEXT_NEED },
+          { point: "vae", need: VAE_NEED },
+        ]);
+        assertEquals(h.log, [
+          "attempt:text",
+          "body:1",
+          "notice:retained/request",
+          "dispose:1",
+          "settle",
+          "notice:evicted/headroom",
+          "attempt:vae",
+        ]);
+      });
+
+      it("退避の後は格下げが残り、transformer を求められても常駐せず、量りもしない", async () => {
+        const h = createHarness();
+        await h.generate({ residency: "transformer" });
+        await h.generate({ residency: "transformer", headroomShort: ["text"] });
+        h.notices.length = 0;
+        h.probes.length = 0;
+        await h.generate({ residency: "transformer" });
+        assertEquals(h.notices, [{ action: "released", reason: "downgraded" }]);
+        assertEquals(h.probes, []);
+        assertFalse(h.residency.holding);
+      });
+
+      it("後始末が壊れた退避の後は段へ進まない（text 段の前）", async () => {
+        const h = createHarness({ settleFails: true });
+        await h.generate({ residency: "transformer" });
+        h.log.length = 0;
+        await assertRejects(
+          () => h.generate({ residency: "transformer", headroomShort: ["text"] }),
+          AggregateError,
+        );
+        assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
+      });
+    });
+  });
+
   describe("⑤ DiT 段の失敗", () => {
     it("常駐の席に載った DiT は捨てて evicted / failure を名乗り、元の例外をそのまま投げる", async () => {
       const h = createHarness();
@@ -659,13 +941,31 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
 });
 
 describe("settleReleasedMemory（退避の後の解放待ち）", () => {
-  it("onSubmittedWorkDone が解決すれば戻り、消失の購読を残さない", async () => {
+  it("空の submit を出してから onSubmittedWorkDone を待ち、消失の購読を残さない", async () => {
+    // 空の submit が「無効化された device の消失を表面化させる呼び出し」（pipeline.ts の doc）。
+    const calls: string[] = [];
     const { gpu } = losableGpuContext(undefined, {
-      onSubmittedWorkDone: () => Promise.resolve(),
+      submit: (commandBuffers) => void calls.push(`submit:${commandBuffers.length}`),
+      onSubmittedWorkDone: () => {
+        calls.push("onSubmittedWorkDone");
+        return Promise.resolve();
+      },
     });
     const baseline = gpu.pendingLostListeners;
     await settleReleasedMemory(gpu);
+    assertEquals(calls, ["submit:0", "onSubmittedWorkDone"]);
     assertEquals(gpu.pendingLostListeners, baseline, "消失の購読が積み残っている");
+  });
+
+  it("空の submit が消失を表面化させたら、onSubmittedWorkDone が解決しなくても待たずに戻る", async () => {
+    // Deno は無効化された device の消失を次の有効性検査（ここでは submit）で初めて解決する。
+    const { gpu, lose } = losableGpuContext(undefined, {
+      submit: () => lose(),
+      onSubmittedWorkDone: () => new Promise<void>(() => {}),
+    });
+    const baseline = gpu.pendingLostListeners;
+    await settleReleasedMemory(gpu);
+    assertEquals(gpu.pendingLostListeners, baseline);
   });
 
   it("onSubmittedWorkDone が解決しなくても、device が失われたら待たずに戻る", async () => {

@@ -49,7 +49,7 @@
 
 import { assertEquals, assertFalse, assertRejects, assertStrictEquals } from "@std/assert";
 import { type FileRef, parseManifest, resolveSelection, selectionRefs } from "@karume/hub";
-import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
+import { acquireGpu, type GpuContext, type SessionDiagnostics } from "@karume/runtime";
 import type { Manifest } from "@karume/hub";
 import {
   type AnimaGenerateEvent,
@@ -64,6 +64,7 @@ import { formatResolution } from "../anima.ts";
 import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
 import { sigmaSchedule } from "../src/anima/sampler.ts";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
+import { HEADROOM_MARGIN_BYTES } from "../src/anima/residency.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
@@ -375,6 +376,8 @@ const withTurbo = async (
     readonly caches?: CacheStorage;
     readonly onRunDiagnostics?: (component: string, diagnostics: SessionDiagnostics) => void;
     readonly residency?: AnimaResidency;
+    /** 共有 GPU（呼び手の所有物 — 破棄は呼び手）。 */
+    readonly gpu?: GpuContext;
   },
   body: (pipeline: AnimaPipeline) => Promise<void>,
 ): Promise<AnimaPipeline> => {
@@ -391,6 +394,7 @@ const withTurbo = async (
           ? {}
           : { onRunDiagnostics: options.onRunDiagnostics }),
         ...(options.residency === undefined ? {} : { residency: options.residency }),
+        ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
       },
     );
     await body(pipeline);
@@ -954,7 +958,8 @@ Deno.test({
 //
 // 常駐は数値を変えない設計なので、**新しい参照行を 1 本も足さない**（`fixtures/references/anima.json`
 // が無変更であることが門）。全ケースを既存の行（turbo 1024 / 512）の双子として回し、常駐の有無・
-// 解像度の往復・持ち越しと解放・中断後の作り直しのどれを通っても同じバイトが出ることを要求する。
+// 解像度の往復・持ち越しと解放・中断後の作り直し・空き不足での先回りの退避のどれを通っても同じバイトが
+// 出ることを要求する。
 //
 // 寿命は `onRunDiagnostics` の transformer の診断で観測する（同じ Session を使い回していれば
 // generate を跨いでも導出済み計画に当たり、backing の構築回数も重みのバイト数も増えない —
@@ -983,12 +988,15 @@ const residencyLogOf = (event: AnimaGenerateEvent): string | undefined => {
 /**
  * 既存の行を双子に 1 枚焼いて突き合わせる（行は書かない）。戻り値はその generate の段 / 常駐の
  * イベント列。実物と決着は結果の席に残す（`label` は結果の id — 参照行の鍵ではない）。
+ * `onLogged` はイベント列に 1 つ積むたびに待って呼ぶ（generate の途中で GPU の状態を変える口 —
+ * `onEvent` は待たれるので、呼び終わるまで次の段へ進まない）。
  */
 const assertResidencyTwin = async (
   label: string,
   pipeline: AnimaPipeline,
   size: 512 | 1024,
   residency: AnimaResidency | undefined,
+  onLogged?: (entry: string) => Promise<void>,
 ): Promise<string[]> => {
   const twin = RESIDENCY_TWINS[size];
   const log: string[] = [];
@@ -999,9 +1007,11 @@ const assertResidencyTwin = async (
     steps: STEPS,
     seed: SEED,
     ...(residency === undefined ? {} : { residency }),
-    onEvent: (event) => {
+    onEvent: async (event) => {
       const entry = residencyLogOf(event);
-      if (entry !== undefined) log.push(entry);
+      if (entry === undefined) return;
+      log.push(entry);
+      await onLogged?.(entry);
     },
   });
   const png = await encodePng(image.data, image.width, image.height);
@@ -1048,8 +1058,19 @@ const transformerRuns = () => {
   };
 };
 
-/** 段ごとの `stage` の前後と、DiT 段の end の直前に来るべき常駐イベントを並べた期待列。 */
-const expectedStages = (residency: readonly string[]): string[] => [
+/**
+ * 段ごとの `stage` の前後と、常駐イベントを並べた期待列。常駐イベントが出る場所は 3 つだけ:
+ * DiT 段の end の直前（`residency`）と、先回りの退避 `evicted/headroom` が出る 2 点 — text_encoder の
+ * start より前（`beforeText`）と、transformer の end と vae_decoder の start の間（`beforeVae`）。
+ * 後の 2 つは既定で空なので、先回りの退避を狙って起こすケース以外では「どちらの点にも何も出ない」まで
+ * を縛る。
+ */
+const expectedStages = (
+  residency: readonly string[],
+  headroom: { readonly beforeText?: readonly string[]; readonly beforeVae?: readonly string[] } =
+    {},
+): string[] => [
+  ...(headroom.beforeText ?? []).map((entry) => `residency:${entry}`),
   "stage:text_encoder:start",
   "stage:text_encoder:end",
   "stage:text_conditioner:start",
@@ -1057,6 +1078,7 @@ const expectedStages = (residency: readonly string[]): string[] => [
   "stage:transformer:start",
   ...residency.map((entry) => `residency:${entry}`),
   "stage:transformer:end",
+  ...(headroom.beforeVae ?? []).map((entry) => `residency:${entry}`),
   "stage:vae_decoder:start",
   "stage:vae_decoder:end",
 ];
@@ -1236,6 +1258,143 @@ Deno.test({
         );
       },
     );
+  },
+});
+
+// 先回りの退避（H-35）: 常駐 DiT の上の空きを実際に削り、generate が段を張る前に常駐 DiT を退避して
+// （OOM を踏まずに）通ることを見る。量る点は 2 つ（`residency.ts` の「退避の 2 本の線」）なので行も 2 本。
+// ダミーは書き込まない（`createBuffer` だけ — 書き込みの staging が device を失わせうる経路を門の側で
+// 踏まない）。
+//
+// - text 段の前: 2 回目の generate の前に「1 GiB のダミーを OOM まで積んでから 1 本だけ返す」— 残りは
+//   1〜2 GiB（確保の線の手前）で、text_encoder の必要量（見積りのピーク + 最大 part + 余裕 —
+//   `residency.ts` の `stageMemoryNeed`）より小さく、常駐 DiT を退避すれば全段が入る。
+// - VAE 段の前: 最初の generate の transformer の end（DiT を席に載せた直後）で、1 GiB に続けて
+//   256 MiB のダミーも OOM まで積む — 残りは 256 MiB 未満で、どの段の必要量（余裕 512 MiB を含む）より
+//   も小さいので、VAE の見積りの大きさに依らず必ず退避する。退避すれば DiT の重みぶんが空き、VAE が入る。
+
+/** ダミー 1 本の大きさ（`maxBufferSize` がこれより小さい device ではそちらに合わせる）。 */
+const HEADROOM_DUMMY_BYTES = 1024 * 1024 * 1024;
+/** 空きを詰め切るダミーの大きさ（{@link HEADROOM_MARGIN_BYTES} より小さいことが決定性の根拠）。 */
+const HEADROOM_TIGHT_DUMMY_BYTES = 256 * 1024 * 1024;
+/** 1 回の積み上げの本数の上限（OOM が返らない実装で無限に回らないための門）。 */
+const HEADROOM_DUMMY_LIMIT = 32;
+
+/** `size` のダミーを out-of-memory まで `dummies` に積む（積めた本数を返す）。 */
+const fillUntilOom = async (
+  gpu: GpuContext,
+  size: number,
+  dummies: GPUBuffer[],
+): Promise<number> => {
+  for (let count = 0;; count += 1) {
+    if (count >= HEADROOM_DUMMY_LIMIT) {
+      throw new Error(`ダミー ${count} 本を積んでも out-of-memory が返らない`);
+    }
+    gpu.device.pushErrorScope("out-of-memory");
+    const buffer = gpu.device.createBuffer({
+      label: `e2e-headroom-dummy-${dummies.length}`,
+      size,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    const failure = await gpu.device.popErrorScope();
+    if (failure !== null) {
+      buffer.destroy();
+      return count;
+    }
+    dummies.push(buffer);
+  }
+};
+
+/**
+ * 空きを削る（`tight` = false: 1 GiB を OOM まで積んで 1 本返す / true: 続けて 256 MiB も OOM まで積む）。
+ * 解放まで待ってから返る。戻り値は積んだまま残るダミー（破棄は呼び手）。
+ */
+const squeezeHeadroom = async (gpu: GpuContext, tight: boolean): Promise<GPUBuffer[]> => {
+  const size = Math.min(HEADROOM_DUMMY_BYTES, gpu.limits.maxBufferSize);
+  const dummies: GPUBuffer[] = [];
+  try {
+    const large = await fillUntilOom(gpu, size, dummies);
+    if (large === 0) throw new Error("前提: ダミーを 1 本も積めなかった");
+    const small = tight ? await fillUntilOom(gpu, HEADROOM_TIGHT_DUMMY_BYTES, dummies) : 0;
+    if (!tight) dummies.pop()?.destroy();
+    await gpu.device.queue.onSubmittedWorkDone();
+    const each = `${(size / 2 ** 30).toFixed(2)} GiB`;
+    console.log(
+      tight
+        ? `[e2e] headroom: ${each} × ${large} 本 + 256 MiB × ${small} 本で空きを 256 MiB 未満まで詰めた`
+        : `[e2e] headroom: ${each} × ${large - 1} 本を残して 1 本ぶんの空きを作った`,
+    );
+    return dummies;
+  } catch (error) {
+    for (const dummy of dummies) dummy.destroy();
+    throw error;
+  }
+};
+
+Deno.test({
+  name:
+    "e2e(実GPU): residency headroom — 常駐 DiT の上に空きが足りなければ text 段の前に evicted/headroom" +
+    " で退避し、2 回目も双子と一致する",
+  ignore: !RESIDENCY_RUNNABLE,
+  fn: async () => {
+    const { quant } = REFERENCE[1];
+    const gpu = await acquireGpu();
+    let dummies: GPUBuffer[] = [];
+    try {
+      await withTurbo(quant, { gpu, residency: "transformer" }, async (pipeline) => {
+        assertEquals(
+          await assertResidencyTwin("residency-headroom-first", pipeline, 512, undefined),
+          expectedStages(["retained/request"]),
+          "1 回目のイベント列",
+        );
+        dummies = await squeezeHeadroom(gpu, false);
+        // 2 回目は text 段の前に退避し（格下げ）、DiT 段は段ごと運転で作り直して手放す。PNG は 1 回目と
+        // 同じ双子の行と一致する（= 1 回目とビット同一）。
+        assertEquals(
+          await assertResidencyTwin("residency-headroom-second", pipeline, 512, undefined),
+          expectedStages(["released/downgraded"], { beforeText: ["evicted/headroom"] }),
+          "2 回目のイベント列",
+        );
+      });
+    } finally {
+      for (const dummy of dummies) dummy.destroy();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "e2e(実GPU): residency headroom — 最初の generate でも DiT を席に載せた後に空きが足りなければ" +
+    " VAE 段の前に evicted/headroom で退避し、双子と一致する",
+  ignore: !RESIDENCY_RUNNABLE,
+  fn: async () => {
+    // 決定性の根拠（詰めた後の空き < 256 MiB < 余裕 ≤ VAE の必要量）を門の側でも縛る。
+    assertEquals(HEADROOM_TIGHT_DUMMY_BYTES < HEADROOM_MARGIN_BYTES, true);
+    const { quant } = REFERENCE[1];
+    const gpu = await acquireGpu();
+    let dummies: GPUBuffer[] = [];
+    try {
+      await withTurbo(quant, { gpu, residency: "transformer" }, async (pipeline) => {
+        assertEquals(
+          await assertResidencyTwin(
+            "residency-headroom-vae",
+            pipeline,
+            512,
+            undefined,
+            async (entry) => {
+              // transformer の end は DiT を席に載せた後・VAE 段の前の量りの直前（pipeline.ts ③'）。
+              if (entry === "stage:transformer:end") dummies = await squeezeHeadroom(gpu, true);
+            },
+          ),
+          expectedStages(["retained/request"], { beforeVae: ["evicted/headroom"] }),
+          "イベント列",
+        );
+      });
+    } finally {
+      for (const dummy of dummies) dummy.destroy();
+      gpu.destroy();
+    }
   },
 });
 

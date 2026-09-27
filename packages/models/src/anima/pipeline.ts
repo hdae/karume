@@ -23,10 +23,12 @@
  *
  * opt-in の `residency: "transformer"` は DiT の Session だけを generate を跨いで持ち続ける
  * （状態機械は `residency.ts`）。text / VAE の段は常駐 DiT の**上に**乗るので、チェーン最大は
- * 必ず上がる（既定席 1024² で常駐ぶん +2,646MiB — ADR 0112）。そこで他の段が
- * `GpuOutOfMemoryError` を投げたら常駐 DiT を退避してその段を 1 回だけやり直し、以後この
- * pipeline は常駐しない（格下げ）。常駐 DiT も最初の generate の DiT 段で作る（構築時には
- * 張らない）。
+ * 必ず上がる（既定席 1024² で常駐ぶん +2,646MiB — ADR 0112）。そこで常駐 DiT がある時点で段を張る前に
+ * （text 段の前と、DiT 段の後・VAE 段の前の 2 点）、次の段が要る量を試し確保（runtime の
+ * `fitsHeadroom`）で量り、入らなければ常駐 DiT を**先に**退避する（OOM を踏む前 — 重みのアップロードの
+ * OOM は device を失わせうる: `residency.ts` の「退避の 2 本の線」）。見積りが外れて段が `GpuOutOfMemoryError` を投げたときは
+ * 常駐 DiT を退避してその段を 1 回だけやり直す（2 本目の線）。どちらの退避の後も、この pipeline は
+ * 常駐しない（格下げ）。常駐 DiT も最初の generate の DiT 段で作る（構築時には張らない）。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
  * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
@@ -48,6 +50,7 @@
 
 import {
   acquireGpu,
+  fitsHeadroom,
   type GpuContext,
   type Session,
   type SessionDiagnostics,
@@ -128,7 +131,9 @@ import {
   type AnimaResidencyReason,
   assertAnimaResidency,
   DEFAULT_ANIMA_RESIDENCY,
+  generateMemoryNeed,
   type ResidencyNotice,
+  stageMemoryNeed,
   TransformerResidency,
 } from "./residency.ts";
 
@@ -183,7 +188,7 @@ export type AnimaGenerateRequest = {
    * 開始時に常駐 DiT が既にあれば、値に関わらずそれを使う（読み直さない）。連続生成では
    * 途中を `"transformer"`、**最後の 1 枚だけ `"per-stage"`** にすると、その generate の後に
    * 常駐 DiT が解放される（`residency` イベントの `released` / `request`）。
-   * OOM の退避で格下げ済みの pipeline では `"transformer"` を求めても持たず、
+   * 退避（OOM / 空き不足）で格下げ済みの pipeline では `"transformer"` を求めても持たず、
    * `released` / `downgraded` を名乗る。未知の綴りは GPU に触る前に `ModelInputError`。
    */
   readonly residency?: AnimaResidency;
@@ -256,7 +261,16 @@ export type AnimaGenerateEvent =
    * - `retained` / `request`: DiT をこの generate の後も持ち続ける（`transformer` 段の end の前）。
    * - `released` / `request`: 持ち越した常駐 DiT を、実効値 `"per-stage"` に従って手放した
    *   （DiT 段の end の前 — generate が DiT 段の前で失敗したときは、その失敗の後に出る）。
-   * - `released` / `downgraded`: 常駐を求められたが、OOM の退避で格下げ済みなので持たない。
+   * - `released` / `downgraded`: 常駐を求められたが、退避（`out-of-memory` / `headroom`）で格下げ済み
+   *   なので持たない。
+   * - `evicted` / `headroom`: 次の段が要る量が常駐 DiT の上に入らない（試し確保が OOM）ので、**段を
+   *   張る前に**常駐 DiT を捨てた。出る場所は 2 つ — `text_encoder` の `stage` start より前（text_encoder /
+   *   text_conditioner の必要量で量った — 持ち越した DiT がある generate）か、`transformer` の `stage` end
+   *   と `vae_decoder` の `stage` start の間（vae_decoder の必要量で量った — その時点で DiT が席に載って
+   *   いるとき）。以後この pipeline は常駐しない（格下げ — OOM の退避と同じく戻さない）。text 段の前で
+   *   退避し、かつ実効値が `"transformer"` なら、この generate の DiT 段の end の前に `released` /
+   *   `downgraded` が続く（実効値 `"per-stage"` なら DiT 段は段ごと運転で何も名乗らない）。VAE 段の前で
+   *   退避したときは、DiT 段は既に `retained` / `request` を名乗っている。
    * - `evicted` / `out-of-memory`: 常駐 DiT がある状態で段が `GpuOutOfMemoryError` を投げたので
    *   常駐 DiT を捨て、**その段を 1 回だけ最初からやり直す**（DiT 段なら段ごと運転で —
    *   `denoise-step` / `vae-tile` はこの後 1 から出直す）。以後この pipeline は常駐しない。DiT 段で
@@ -486,6 +500,51 @@ const idsTensor = (values: Int32Array<ArrayBuffer>): Tensor => ({
 });
 
 /**
+ * 段 1 本が常駐 DiT の上に要るバイト数（`residency.ts` の {@link stageMemoryNeed}）。
+ *
+ * device の上限 2 つは全段に渡す — VAE の中間は上限で行ブロックが決まり、無いと見積りが落ちる
+ * （text 系にも同じ形で渡す — 段の実引数と同じ見積りにするため）。
+ */
+const stageNeed = (
+  state: AnimaState,
+  model: ModelComponent,
+  bindings: Record<string, number>,
+): number =>
+  stageMemoryNeed(
+    model.estimate({
+      maxStorageBufferBindingSize: state.gpu.limits.maxStorageBufferBindingSize,
+      maxBufferSize: state.gpu.limits.maxBufferSize,
+      bindings,
+    }),
+    model.maxPartBytes,
+  );
+
+/**
+ * text 段の前の量り（先回りの退避 — `residency.ts` の「退避の 2 本の線」）で使う、text_encoder /
+ * text_conditioner が常駐 DiT の上に要るバイト数（段ごとの最大 — {@link generateMemoryNeed}）。
+ *
+ * 束縛はこの generate が段へ実際に渡す形から取る: text_encoder の `T` = qwen の id 列の長さ、
+ * text_conditioner の `Tsrc` = その出力の長さ（= qwen の id 列の長さ）と `Ttgt` = T5 の id 列の長さ。
+ * CFG の 2 本（正 / 負）は同じ Session で順に回るので長いほうで量る。
+ */
+const textStagesNeed = (
+  state: AnimaState,
+  prompts: readonly ReturnType<AnimaTokenizers["encode"]>[],
+): number => {
+  const qwen = Math.max(...prompts.map((ids) => ids.qwenIds.length));
+  const t5 = Math.max(...prompts.map((ids) => ids.t5Ids.length));
+  return generateMemoryNeed([
+    stageNeed(state, state.textEncoder, { T: qwen }),
+    stageNeed(state, state.textConditioner, { Tsrc: qwen, Ttgt: t5 }),
+  ]);
+};
+
+/**
+ * VAE 段の前の量り（DiT 段の後）で使う、vae_decoder が常駐 DiT の上に要るバイト数（静的形 — 束縛なし）。
+ */
+const vaeStageNeed = (state: AnimaState): number => stageNeed(state, state.vaeDecoder, {});
+
+/**
  * 実際に uncond 側へ渡すネガティブプロンプトを決める（{@link AnimaPipeline.generate} の入口・
  * GPU に触れる前の純粋な検査）。
  *
@@ -636,14 +695,25 @@ const stageRun = (
 };
 
 /**
- * 常駐 DiT を OOM で退避した後、解放が device に届くのを待つ。
+ * 常駐 DiT を退避（OOM / 空き不足）した後、解放が device に届くのを待つ。
  *
  * Intel / wgpu は `destroy()` の解放が次の device poll まで遅れ、全 `destroy()` の直後に確保し直すと
  * 同じ OOM を踏む（docs/known-issues.md「Intel Arc B570」節）。素の WebGPU の probe（B570・2026-09-26・
  * 1 GiB を destroy → `onSubmittedWorkDone` → 1 GiB を確保し直して 256 MiB を書く）では、この待ちだけで
  * 確保も書き込みも通った（docs/research/2026-09-26-anima-residency-bench.md）。固定の sleep は足さない。
- * NOTE: 同じ機で pipeline の退避 → やり直し（evict-probe・ダミー 6 GiB）は device lost になった。原因は
- * 解放待ちの長さではなく未特定（known-issues）。
+ * NOTE: 同じ機で pipeline の退避 → やり直し（evict-probe・ダミー 6 GiB）が device lost になったのは、
+ * 段の OOM が `queue.writeBuffer` の staging 側で、その時点で device が無効化されていたため
+ * （docs/research/2026-09-27-h35-oom-device-lost.md）— 解放待ちでは直らない。主線は先回りの退避
+ * （`residency.ts` の「退避の 2 本の線」）。
+ *
+ * 待ちの前に空の `queue.submit([])` を 1 本出す。WHY: 致命的な OOM で無効化された device は、次の
+ * **有効性を検査する呼び出し**まで消失を見せない — Deno は wgpu の lost コールバックを登録しないので
+ * `device.lost` はその呼び出しで初めて解決し、`onSubmittedWorkDone` は有効性を検査しない（無効な device
+ * でも解決しうる）。空の submit がその呼び出しで、ついでに wgpu の保留中の destroy も流す。これで
+ * 死んだ device は退避の時点で消失を表面化させ、やり直しの段が遠くの別の症状で落ちない。
+ * submit がここで安全なのは、退避が走るのは使用量が確保の線（予算の 97%）以下のとき（先回りの試し確保は
+ * 解放まで待って返る・反応の退避は OOM で確保が拒まれた直後）か、device が既に死んでいるときだけ
+ * だから — wgpu の submit 後の 99% 線の判定（超えると device を失う）を踏まない。
  *
  * MUST: device 消失と競わせる — 消失後の `onSubmittedWorkDone` が解決しない実装がありうる
  * （runtime の `raceDeviceLost` の doc）。消失したら待たずに戻り、やり直しの段が消失の例外で
@@ -658,6 +728,7 @@ export const settleReleasedMemory = async (gpu: GpuContext): Promise<void> => {
     unsubscribe = gpu.onLost(() => resolve());
   });
   try {
+    gpu.device.queue.submit([]);
     await Promise.race([gpu.device.queue.onSubmittedWorkDone(), lost]);
   } finally {
     unsubscribe();
@@ -1121,6 +1192,8 @@ export class AnimaPipeline {
       };
     const notifyResidency = (notice: ResidencyNotice): Promise<void> =>
       emit({ kind: "residency", component: "transformer", ...notice });
+    /** 先回りの退避の試し確保（`TransformerResidency.ensureHeadroom` の `probe`）。 */
+    const probeHeadroom = (bytes: number): Promise<boolean> => fitsHeadroom(state.gpu, bytes);
     /**
      * DiT 以外の段 1 本を回す（`stage` を Session 構築の前と解放の後に挟む — 途中で落ちたら
      * `end` は出ない）。常駐 DiT がある状態の OOM は退避して段を 1 回だけやり直す
@@ -1152,6 +1225,19 @@ export class AnimaPipeline {
     // 持ち越した DiT を手放す）。DiT 段の中の失敗は `runTransformer` が決着させている。入力の検査
     // （ここより上）で落ちた要求は GPU にも常駐の席にも触らない。
     try {
+      // --- ①' 先回りの退避（text 段の前 — 持ち越した常駐 DiT があるときだけ）-------------
+      // text 系 2 段が常駐 DiT の上に入らなければ、OOM を踏む前に退避する（`residency.ts` の「退避の
+      // 2 本の線」）。試し確保の throw（validation / device 消失）はそのまま下の失敗経路へ流す。
+      // `holding` をここでも見るのは見積りの費用を段ごと運転に払わせないため（量るかどうかの判断は
+      // `ensureHeadroom` が持つ）。
+      if (this.#residency.holding) {
+        await this.#residency.ensureHeadroom(
+          textStagesNeed(state, negative === undefined ? [positive] : [positive, negative]),
+          probeHeadroom,
+          notifyResidency,
+        );
+      }
+
       // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
       const hidden = await withStage(
         "text_encoder",
@@ -1265,6 +1351,14 @@ export class AnimaPipeline {
         },
       });
       await emit({ kind: "stage", component: "transformer", at: "end" });
+
+      // --- ③' 先回りの退避（VAE 段の前 — この時点で常駐 DiT があるときだけ）----------------
+      // text 段の前の量りでは覆えない 2 つ — DiT をこの generate で作って席に載せた（最初の generate）
+      // と、持ち越した DiT が新しい解像度で backing を育てた — をここで量る（`residency.ts` の「退避の
+      // 2 本の線」）。DiT 段は常駐の恩恵を受け終えているので、退避はできるだけ遅いほうが得。
+      if (this.#residency.holding) {
+        await this.#residency.ensureHeadroom(vaeStageNeed(state), probeHeadroom, notifyResidency);
+      }
 
       // --- ④ 逆正規化 → VAE decode（常時タイル — ADR 0038 §4）-------------------
       const { mean: latentsMean, std: latentsStd } = animaLatents();

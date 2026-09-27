@@ -76,6 +76,8 @@ const spiedComponent = (log: SessionLog): ModelComponent => {
     asset: (name) => {
       throw new Error(`この fixture は資産を持たない: ${name}`);
     },
+    estimate: (options) => prepared.estimate(options),
+    maxPartBytes: 0,
     createSession: async (gpu, options) => {
       log.options.push(options);
       const session = await prepared.createContainerSession(gpu, options);

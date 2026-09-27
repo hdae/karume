@@ -35,6 +35,8 @@ export type FakeDeviceParts = {
   readonly popErrorScope?: () => Promise<GPUError | null>;
   /** `queue.onSubmittedWorkDone`（batch の完了フェンス）。未指定なら即決着。 */
   readonly onSubmittedWorkDone?: () => Promise<void>;
+  /** `queue.submit`（呼ばれたことを観測する検証で要る）。未指定なら何もしない。 */
+  readonly submit?: (commandBuffers: readonly GPUCommandBuffer[]) => void;
 };
 
 /** DOM 型全体は再現しないため cast で渡す（テスト専用の境界）。 */
@@ -48,6 +50,7 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
     popErrorScope: parts.popErrorScope ?? ((): Promise<GPUError | null> => Promise.resolve(null)),
     queue: {
       onSubmittedWorkDone: parts.onSubmittedWorkDone ?? ((): Promise<void> => Promise.resolve()),
+      submit: parts.submit ?? ((): void => undefined),
     },
   }) as unknown as GPUDevice;
 
