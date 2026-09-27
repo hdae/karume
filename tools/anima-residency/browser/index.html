@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Anima residency · Browser check</title>
+    <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      max-width: 1280px;
+      margin: 40px auto;
+      padding: 0 20px;
+      line-height: 1.6;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+    }
+    h2 {
+      font-size: 1.2rem;
+      margin-top: 32px;
+    }
+    .muted {
+      opacity: .75;
+    }
+    .controls {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin: 16px 0;
+      align-items: end;
+    }
+    label {
+      display: grid;
+      gap: 4px;
+    }
+    label.wide {
+      flex: 1 1 100%;
+    }
+    textarea {
+      font: inherit;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid #8886;
+      min-height: 3.2em;
+    }
+    input,
+    select,
+    button {
+      font: inherit;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #8886;
+    }
+    input[type="number"] {
+      width: 7em;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: .5;
+    }
+    #status {
+      padding: 14px;
+      background: #8881;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .table {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    td,
+    th {
+      text-align: left;
+      vertical-align: top;
+      padding: 10px;
+      border-bottom: 1px solid #8884;
+      white-space: nowrap;
+    }
+    td.wrap {
+      white-space: pre-wrap;
+      min-width: 14em;
+    }
+    td.error {
+      color: #d33;
+      overflow-wrap: anywhere;
+    }
+    img {
+      max-width: min(100%, 512px);
+      border-radius: 8px;
+      margin-top: 16px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Anima · DiT 常駐のブラウザ確認</h1>
+    <p
+      class="muted">pipeline は <code>residency: "transformer"</code> で 1 度だけ組み、全ての generate で使い回します。generate ごとの常駐指定は下の選択肢で変えます。ダミーバッファは pipeline と同じ GPU device に確保します。</p>
+    <div class="controls">
+      <label
+        class="wide">プロンプト<textarea id="prompt">1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, outdoors, smile, upper body, masterpiece, best quality</textarea></label>
+      <label
+        class="wide">ネガティブプロンプト（空欄 = 指定しない。guidance scale が 1 の配布既定では指定するとエラー）<input id="negative" type="text"></label>
+      <label>解像度<select id="resolution"><option value="512x512" selected>512x512</option><option value="1024x1024">1024x1024</option></select></label>
+      <label>steps（空欄 = 配布既定）<input id="steps" type="number" min="1" step="1"></label>
+      <label>guidance scale（空欄 = 配布既定）<input id="guidance" type="number" min="0" step="0.5"></label>
+      <label>seed<input id="seed" type="number" value="42" min="0" step="1"></label>
+      <label>次の generate の常駐<select id="residency"><option value="transformer" selected>transformer（DiT を持ち続ける）</option><option value="per-stage">per-stage（この後に手放す）</option></select></label>
+      <label>回数 N<input id="count" type="number" value="3" min="1" step="1"></label>
+      <button id="run">N 回生成</button>
+    </div>
+    <div class="controls">
+      <label>ダミー量（GiB）<input id="hold-gib" type="number" value="6" min="0.25" step="0.25"></label>
+      <button id="hold">VRAM を埋める（1 GiB ずつ STORAGE を確保・OOM で停止）</button>
+      <button id="release">ダミーを解放</button>
+      <button id="dispose">pipeline を破棄（ダミーと GPU device も）</button>
+      <button id="export" disabled>JSON を保存</button>
+    </div>
+    <p id="environment" class="muted"></p>
+    <p id="dummies" class="muted"></p>
+    <p id="status" role="status" aria-live="polite">準備中</p>
+    <div class="table">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>常駐指定</th>
+            <th>ダミー</th>
+            <th>所要 (ms)</th>
+            <th>段の時間</th>
+            <th>residency イベント</th>
+            <th>PNG sha256</th>
+            <th>エラー</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <h2>最新の画像</h2>
+    <img id="image" alt="最新の生成画像" hidden>
+    <script type="module" src="/runner.js"></script>
+  </body>
+</html>
