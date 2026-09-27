@@ -120,6 +120,18 @@ await が無い」ことで従来どおり保たれ、区間が短くなるだ�
   実行は止めない（警告 + 診断）。
 - 公開面は薄く（ADR 0008）: 見積り関数 1 本 + `SessionDiagnostics` への欄追加まで。
 
+> 追記（2026-09-27・ADR [0112](0112-anima-transformer-residency.md) の 2026-09-27 追記 / perf-ledger H-35）:
+> 「空き側との比較はしない」は**当て推量**について今も成り立つ。ただし `createBuffer` の非致命な試し確保で
+> 測った空き（runtime の `fitsHeadroom` — その量を確保して即 destroy し、解放を待ってから通ったかを返す）は、
+> 確保そのものが失敗するのと同じ検査（wgpu の予算チェック）を先に踏むだけなので、先回りの判断（anima の常駐
+> DiT の退避）に使ってよい。空き容量の値としては公開しない（二分探索で天井を測る用途は診断に留める）。
+> 最終門は従来どおり out-of-memory errorScope。
+>
+> **既知の食い違い**: 本決定は staging を estimator が数えるカテゴリに挙げるが、実装は
+> `queue.writeBuffer` の staging を `unaccounted` に置いている（`packages/runtime/src/runtime/estimate.ts` の
+> `UNACCOUNTED`）。現状の手当ては、先回りの必要量が最大の重み part（= staging）を明示的に足すこと
+> （`peakAccountedBytes` + `maxPartBytes` + 余裕 — ADR 0112 追記）。estimator 側へ staging を入れるかは未裁定。
+
 ### 6. 席（明示予約・実装先送り）
 
 - ストリーミング fake 展開（i4 → f32 の CPU 展開を shard 単位で行う適格外経路）は

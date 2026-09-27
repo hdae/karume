@@ -53,7 +53,8 @@ DiT 段にある（既定席 1024² で runtime 集計 2,647 MiB）。
    - ② の待ちの根拠: 素の WebGPU の probe（B570・2026-09-26 — [研究記録](../research/2026-09-26-anima-residency-bench.md)）で、
      満杯から 1 GiB を destroy した後 `onSubmittedWorkDone` **だけ**を待てば、同じ 1 GiB の再確保と 256 MiB の
      書き込みが通った（待ちは 11 ms。待たないと OOM）。固定の sleep は足さない。ただし退避経路を実機で踏むと、
-     やり直しの段が device lost になった（Consequences）— 解放待ちの長さでは説明できない。
+     やり直しの段が device lost になった（Consequences）— 原因は解放待ちの長さではなく、重みアップロードの
+     staging の OOM が device を失わせること（下の「追記（2026-09-27）」）。
    - ①② が失敗しても（破棄・解放待ちの例外）格下げは立ち席は空くので、③ を名乗ってから元の OOM を先頭にした
      `AggregateError` を投げる（やり直さない）。名乗らないと、常駐を失ったことが次の generate まで見えない。
 4. **格下げ**: 退避した pipeline は、その寿命の間は常駐しない。格下げ後に `"transformer"` を求められても
@@ -150,12 +151,89 @@ DiT 段にある（既定席 1024² で runtime 集計 2,647 MiB）。
   型 3 つが増えた（barrel と `./anima`）。
 - `stage` イベントの `transformer` の start → end は、常駐時に GB 級ロードの進捗を表さない。
 - 未計測: 常駐時の text / VAE 段のピーク（runtime 集計）、Chrome と B570 以外の機での利得。
-- **B570 では退避 → やり直しが device lost になった**（2026-09-26・台本 =
-  `outputs/bench/karume/2026-09-26_anima-residency/evict-probe.ts --dummy-gib 6`）。常駐 DiT の上で共有 device に
-  6 GiB のダミーを積むと、2 枚目の text_encoder 段が OOM し、`evicted` / `out-of-memory` までは設計どおり出た。
-  続くやり直しの text_encoder 構築（part 1 の重みアップロード中）で `GpuDeviceLostError`（reason unknown /
-  device was lost）が投げられ、生成は失敗した（黙っては落ちない）。素の WebGPU では `onSubmittedWorkDone` だけで
-  再確保が通るので、原因は解放待ちの長さではなく、**未特定**（known-issues「Intel Arc B570」節・調査は
-  perf-ledger H-35）。他機での退避経路は未計測。
+- **B570 の「退避 → やり直しが device lost」は原因が分かり、先回りの退避で塞いだ**（2026-09-27 — 下の
+  「追記（2026-09-27）」・[research 2026-09-27](../research/2026-09-27-h35-oom-device-lost.md)・perf-ledger H-35）。
+  2026-09-26 の観測は、常駐 DiT の上で共有 device に 6 GiB のダミーを積んだ 2 枚目で `evicted` / `out-of-memory`
+  までは出て、やり直しの text_encoder 構築（part 1 の重みアップロード中）が `GpuDeviceLostError` で失敗した
+  というもの（台本 = `outputs/bench/karume/2026-09-26_anima-residency/evict-probe.ts --dummy-gib 6`）。原因は
+  Deno（wgpu）で staging の OOM が device をその場で無効化することで、同じ再現は修正後に成功する。他機での
+  退避経路は未計測。
 - B570（VRAM 9.93 GiB）で退避が起きたのはダミー 6 GiB のときだけで、4 / 5 GiB では常駐のまま 2 枚目が通った
   （20.96 s / 20.87 s・PNG sha は 1 枚目と一致）。
+
+## 追記（2026-09-27）— 決定 3 の見直し: 測った空きで先に退避する（H-35）
+
+調査の正本は [research 2026-09-27](../research/2026-09-27-h35-oom-device-lost.md)（素の WebGPU の probe と
+wgpu-core / deno_webgpu / Dawn のソース）。ここには決定だけを書く。
+
+### なぜ決定 3（OOM を踏んでから退避する）に頼れないか
+
+- **OOM には 2 種類ある**。`createBuffer` の OOM は非致命で、device は生きている（WebGPU 仕様が「副作用なく
+  失敗したら out-of-memory」と保証する唯一の形）。`queue.writeBuffer` が内部で作る staging の OOM（`writeTexture`・
+  MAP_WRITE を持たない `mappedAtCreation`・submit・bind group 生成も同じ）は、wgpu-core が device をその場で
+  失わせる（`handle_hal_error` → `lose()`）。
+- **Deno は後者も普通の `GPUOutOfMemoryError` として out-of-memory errorScope へ届ける**。JS から 2 つは区別
+  できない。しかも Deno は wgpu の device lost コールバックを登録していないので、`device.lost` は次に検証を通る
+  呼び出し（submit / writeBuffer / createBuffer / mapAsync）まで解決しない（`onSubmittedWorkDone` は検証しない）。
+  決定 3 の退避は生きた device の OOM に見えたまま進み、やり直しの最初のアップロードで消失が表面化する。
+- OOM の判定そのものは wgpu の事前予算チェック（予算の 97%・submit / poll の後に 99% を超えると device lost —
+  limitations「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」節）。Arc B570（ReBAR）は
+  VRAM の heap が host-visible を兼ね、割り当て器が staging をそこへ置くので、VRAM が尽きると staging の OOM
+  として出る。Chrome（Dawn）も規則は同じ（OOM を errorScope へ通すのは createBuffer / createTexture /
+  createQuerySet だけ）だが、この機では staging をシステム RAM に置く（ソースからの推論・未実測）。
+
+### 足したもの
+
+1. **runtime の `fitsHeadroom(gpu, bytes)`**（公開 — `packages/runtime/src/gpu/headroom.ts`）: STORAGE バッファを
+   `maxBufferSize` 以下の等分に割って試し確保し、すぐ destroy して `onSubmittedWorkDone`（device 消失と競わせる）
+   で解放を確定させてから、入るなら `true`・OOM なら `false` を返す。validation と device 消失は投げる。中で
+   `queue.submit([])` は出さない（submit 後の 99% 線の判定は解放より先に走る）。結果はその瞬間の事実で、予約
+   ではない。
+2. **anima の先回りの退避**（`TransformerResidency.ensureHeadroom(need, probe, notify)`）: 常駐 DiT があるときだけ、
+   generate の中の 2 点で量る。
+   - text 段の前（持ち越した常駐 DiT があるとき）: need = text_encoder と text_conditioner の必要量の大きいほう。
+   - `stage` の `transformer` end の後・`vae_decoder` start の前（その時点で常駐 DiT があるとき）: need =
+     vae_decoder の必要量。最初の generate（その generate で作った DiT が席に載り、その上に VAE が乗る）と、
+     持ち越した DiT が新しい解像度で backing を育てた generate を覆う。VAE を text 段の前の量りに含めないのは、
+     DiT 段で常駐の恩恵を受け終えてから退避するほうが得だから。
+   - 段 1 本の必要量 = `ModelComponent.estimate(...).peakAccountedBytes`（重み + 保持集合の上限 — 束縛と device の
+     上限は段の実引数と同じ）+ `ModelComponent.maxPartBytes`（最大の重み part = その part のフェンスまで残る
+     staging）+ 余裕 512 MiB（`HEADROOM_MARGIN_BYTES`）。
+   - **余裕 512 MiB の根拠**: gpu-allocator のブロック 256 MiB（ブロック未満の確保が新しいブロックを切ると、
+     試し確保が見た量より最大 256 MiB 多く取られる）+ 99% 線までの幅（予算の 2% — 9.93 GiB の B570 で約
+     178 MiB）+ estimator の `unaccounted`（params・量子化の一時など）。常駐ぶん（既定席 1024² で +2,646 MiB）に
+     比べて小さい。
+   - **入らなければ**: 格下げ（決定 4 — 反応の退避と同じく pipeline の寿命の間戻らない）→ 常駐 DiT を破棄 →
+     解放待ち → `residency` イベントで `evicted` / `headroom` を名乗る。段をまだ張っていないのでやり直しは無い。
+     後始末が失敗したら、名乗ってから後始末の失敗を並べた `AggregateError` を投げる。
+   - **試し確保が投げたら**（validation / device 消失）: 格下げも退避もせず、そのまま投げる。「入らない」では
+     ないので、退避で片付けると本当の原因が埋もれる。
+3. **解放待ち（`settleReleasedMemory` — 決定 3 ②）は待つ前に `queue.submit([])` を 1 本出す**。検証を通る
+   呼び出しなので、致命な OOM で既に無効な device をその場で表面化させる（Deno が lost を解決する契機）。保留中の
+   destroy も flush される。99% 線の判定を踏んでも安全なのは、この待ちに来るのが使用量 97% 以下のとき（試し確保
+   か本物の確保が拒まれた直後）か、device が既に死んでいるときだけだから。
+4. 公開の `AnimaResidencyReason` に `"headroom"` が増えた。models 内部の `ModelComponent` に `estimate` と
+   `maxPartBytes` を足した。
+
+### 残すもの
+
+- **決定 3 の反応の退避は第二線として残す**（見積りが外れたとき・量った後に他プロセスが確保したとき）。踏んだ
+  OOM が `createBuffer` 側なら従来どおり退避してやり直す。staging 側なら device は既に無効で、解放待ちの
+  `submit([])` がそれを表面化させ、やり直しの段が `GpuDeviceLostError` で失敗する（黙っては落ちない）。
+
+### 棄却した案
+
+- **明示 staging**（`createBuffer(MAP_WRITE | COPY_SRC, mappedAtCreation)` → `copyBufferToBuffer`。確保が全部
+  `createBuffer` になるので OOM が非致命になる）— 棄却。Deno の `getMappedRange` は map した VRAM の範囲を CPU で
+  複製するので、1 GiB あたり 82.6 s かかる（現行の `queue.writeBuffer` は 0.28 s — research §3）。
+
+### B570 での検証（2026-09-27）
+
+- 再現台本 `evict-probe.ts --dummy-gib 6`: 1 枚目 23.44 s（`retained` / `request`）。2 枚目 23.46 s — generate
+  開始から 0.09 s（`text_encoder` の `stage` start の前）で `evicted` / `headroom`、DiT 段で `released` /
+  `downgraded`、生成は成功し PNG の sha は 1 枚目と一致（`16f7946acc33`）。OOM も device lost も出ない。
+- e2e（`--filter residency`）4 行緑。新しい 2 行 = text_encoder の前の退避（空きを 1 GiB 程度残す形）と、最初の
+  generate の VAE 段の前の退避（空き 256 MiB 未満）。
+- 費用: 常駐 DiT がある generate で試し確保 2 回ぶん（0.1 s 程度・実測は research）。段ごと運転では量らない。
+- Chrome での常駐と退避の挙動は、確認ページ（`tools/anima-residency/browser/`・`deno task bench:anima-browser` →
+  http://localhost:8788）で観察する。

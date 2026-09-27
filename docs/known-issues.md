@@ -254,17 +254,10 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   karume の `GpuDeviceLostError` 経路に到達する前にプロセスごと消えるので、verify のフル走行中に
   device lost が起きるとそこで走行が止まる（上の「フル走行が稀にフレークする」節の症状が
   「テスト 1 本の赤」ではなく「プロセス消滅」になる環境）。
-- **anima の DiT 常駐（ADR [0112](decisions/0112-anima-transformer-residency.md)）で、OOM 退避の後のやり直しが
-  device lost になる**（2026-09-26 実測・原因未特定）。再現 = `outputs/bench/karume/2026-09-26_anima-residency/evict-probe.ts
-  --dummy-gib 6`（常駐 DiT の上で共有 device に 6 GiB のダミーを積んで 2 枚目を生成する）。2 枚目の text_encoder 段が
-  OOM し、`evicted` / `out-of-memory` までは出る。続くやり直しの text_encoder 構築（part 1 の重みアップロード中）で
-  `GpuDeviceLostError`（reason unknown / device was lost）が投げられ、生成は失敗する（panic ではなく例外で届く）。
-  ダミー 4 / 5 GiB では退避は起きず、常駐のまま通る。素の WebGPU の probe では、1 GiB を destroy して
-  `onSubmittedWorkDone` だけを待てば再確保も書き込みも通るので、解放待ちの長さは原因ではない。推測: OOM を踏んだ
-  Session 構築の後始末と次のアップロードの相互作用、または xe の over-commit。同じ素の probe で、device を destroy
-  して 500 ms 待っても次の device で確保できる総量が 9 → 8 → 7 → 6 GiB と減った（観測のみ）。既定の段ごと運転には
-  影響しない（常駐は opt-in）。実測は [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)、調査は
-  perf-ledger H-35。
+- **device を破棄して作り直すと、次の device で確保できる総量が減る**（2026-09-26 観測のみ・原因未調査）。素の
+  WebGPU の probe で、device を満杯まで埋めては destroy して 500 ms 待つのを繰り返すと、次の device で確保できた
+  総量が 9 → 8 → 7 → 6 GiB と減った（[research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。上の
+  「`requestDevice` 自体が `Not enough memory left`」のフレークと同じ系統の可能性がある（推測）。
 
 ## EmbeddingGemma の batch>1 export が変換段で通らない
 

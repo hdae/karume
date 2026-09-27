@@ -1,11 +1,11 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-26（高速化 / メモリの波 イテレーション 2「DiT 速度」— B3 = anima の DiT 常駐を採用。次は B4 irodori H-30）
+> Last updated: 2026-09-27（高速化 / メモリの波 イテレーション 2「DiT 速度」— B3 = anima の DiT 常駐を採用・H-35 は先回りの退避で解消。残りは Chrome 確認ページ → B4 irodori H-30）
 
 ## 現在の焦点
 
-- **イテレーション 2「DiT 速度」B3 = anima の DiT 常駐を採用（2026-09-26・opt-in のまま — [ADR 0112](../docs/decisions/0112-anima-transformer-residency.md)・B570 で 2 回目以降 2.45 s / 生成 = 壁の 10.4%）。OOM 退避 → やり直しは B570 で device lost になり未解決（原因未特定 — perf-ledger H-35）**。
+- **イテレーション 2「DiT 速度」B3 = anima の DiT 常駐を採用（2026-09-26・opt-in のまま — [ADR 0112](../docs/decisions/0112-anima-transformer-residency.md)・B570 で 2 回目以降 2.45 s / 生成 = 壁の 10.4%）。常駐 DiT の退避は**先回りが主線**（2026-09-27 — text 段の前と VAE 段の前に runtime の `fitsHeadroom` で次の段の必要量を試し確保し、入らなければ段を張る前に手放す・`evicted` / `headroom`）で、OOM を踏んでからの退避は第二線。B570 の「退避 → やり直しが device lost」（perf-ledger H-35）はこれで解消（[ADR 0112 追記 2026-09-27](../docs/decisions/0112-anima-transformer-residency.md)・[research](../docs/research/2026-09-27-h35-oom-device-lost.md)）。残り = Chrome の確認ページ（`tools/anima-residency/browser/`）**。
 - **高速化 / メモリの波・イテレーション 1「契約と土台」完了 + 残件消化済み（2026-09-26）**: 数値経路を参照層（runtime 省略値 + 厳密オラクル + sha 参照行）と
   実用層（quant 席の `session` が束ねる opt-in）に分けた。契約は [ADR 0110](../docs/decisions/0110-practical-tier-numerics-contract.md)
   （契約クラス E / C / R / Q・カーネル門の 4 点型・E2E は census + 同機参照層との床 + 崩壊上限・実用層でもデバイス内決定性 MUST・
@@ -95,6 +95,7 @@
 - 入力起因の失敗（渡した要求そのものが受理できない）は`ModelInputError`で投げる。綴り違い（model / quant / sampler名）・呼び出し手順の違反（dispose済み・二重生成）・資産の齟齬・内部の前提の破れは**素の`Error`のまま**で、この型に混ぜない（[ADR 0107](../docs/decisions/0107-model-input-error.md)決定2 / 3）。
 - レーンを単独で回すと門番3本（`gpu_gate` / `assets_gate` / `distribution_gate`）は走らない（coreにしか無い）。レーンの緑をフルverifyの緑と同じ意味に扱わない。参照門だけは系列のe2eに同梱される。
 - Denoはtimestamp-queryの値をnsへ換算しない（wgpuのraw tickのまま）。B570は`timestampPeriod` 52.0833 nsなので`lastRunTiming` / `--diagnostics`の内訳は×52過小になる（RTXはperiod 1 nsで表面化しなかった・Chromeは換算する — [known-issues](../docs/known-issues.md)）。
+- Denoでは、errorScopeで捕まえた`GPUOutOfMemoryError`の時点でdeviceが既に死んでいることがある。生き残れるOOMは`createBuffer` / `createTexture`のものだけで、`queue.writeBuffer`のstaging・submit・bind group生成のOOMはwgpuがdeviceを失わせ、`device.lost`は次の検証を通る呼び出しまで解決しない。「OOMを踏んでから解放してやり直す」設計を新しく作らない — 空きは`fitsHeadroom`で先に測る（[limitations](../docs/limitations.md)の97%節・[ADR 0112追記](../docs/decisions/0112-anima-transformer-residency.md)）。
 - 全体verifyの失敗はログと失敗ファイルの単独実行で切り分ける。VRAM圧と断定しない。
   偽HF URLの固定repo/revisionとポート再利用で古いmanifestを拾う再現は[known-issues](../docs/known-issues.md)を参照。無断でcacheを消して合格扱いにしない。
 - Metalの診断付き実行によるdevice消失、GPUごとの下位bit差は[known-issues](../docs/known-issues.md)と[limitations](../docs/limitations.md)に記録。

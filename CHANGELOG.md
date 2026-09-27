@@ -29,6 +29,11 @@ measurements in `docs/research/`.
 - `sessionOptionsViolation(options)` (`@karume/runtime`): the GPU-independent acceptance check of
   `SessionOptions` (types, spellings, combinations, ranges) that session construction applies,
   returned as a message so callers can reject options before loading weights.
+- `fitsHeadroom(gpu, bytes)` (`@karume/runtime`): reports whether `bytes` can be allocated on the
+  device right now. It makes a trial `createBuffer` allocation (the one out-of-memory path WebGPU
+  guarantees not to lose the device), destroys it and waits for the release before answering
+  `true` or `false`. The answer is a point-in-time fact, not a reservation; validation errors and
+  device loss are thrown.
 
 - Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
   sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,
@@ -61,10 +66,15 @@ measurements in `docs/research/`.
   rebuilding its intermediate buffers (about 2.45 s, or 10.4% of the wall time, per image from the
   second call onward, measured on an Intel Arc B570 at 1024² with the default quant). The request
   value decides whether the DiT is kept after that call; a DiT that is already resident is always reused. Keeping it raises peak VRAM, because the
-  text and VAE stages load on top of it (about +2.6 GiB at 1024² with the default quant). When
-  another stage, or a DiT carried over from an earlier call, then runs out of memory (as a
+  text and VAE stages load on top of it (about +2.6 GiB at 1024² with the default quant). While a
+  DiT is resident, the pipeline checks with a trial allocation (`fitsHeadroom`), before the text
+  stages and again before the VAE stage, whether the next stage fits on top of it; if it does not,
+  the pipeline drops the resident DiT before building that stage (reason `headroom`) and stays
+  per-stage for the rest of its life. The check runs up front because on Deno an out-of-memory
+  error raised while uploading weights can already have lost the device. As a second line, when
+  another stage, or a DiT carried over from an earlier call, still runs out of memory (as a
   `GpuOutOfMemoryError`), the pipeline drops the resident DiT, waits for the release to reach the
-  device, retries that stage once, and stays per-stage for the rest of its life. A DiT built in the
+  device, retries that stage once, and likewise stays per-stage. A DiT built in the
   same call that runs out of memory is not evicted; the error is thrown as on the per-stage path.
   A failed call with `"per-stage"` still releases a carried-over DiT. Unknown values throw
   `ModelInputError` before any weight bytes are fetched. The

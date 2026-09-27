@@ -322,6 +322,22 @@ flush 頻度をどう変えても天井は動かない**（判定に入るのは
 - **天井付近では OOM ではなく device 消失になる境界がある**: 97% 線は `createBuffer` の OOM、
   99% 線は submit / poll のたびに判定される **device lost**。圧が少し高いだけで症状が
   「間欠の device 消失」に化けるので、確保失敗だけを見張っても取りこぼす。
+- **97% 線の OOM にも 2 種類あり、JS からは区別できない**（2026-09-27 調査 —
+  [research/2026-09-27](research/2026-09-27-h35-oom-device-lost.md)）: `createBuffer` の OOM は非致命で device は
+  生きている。`queue.writeBuffer` が内部で作る staging（`writeTexture`・MAP_WRITE を持たない `mappedAtCreation`
+  も同じ）・submit・bind group 生成の OOM は、wgpu が device をその場で失わせる。どちらも同じ
+  `GPUOutOfMemoryError`（文言 `not enough memory left`）として out-of-memory errorScope へ届く。
+- **Deno では `device.lost` が遅れて解決する**: Deno は wgpu の device lost コールバックを登録していないので、
+  `device.lost` は次に検証を通る呼び出し（submit / writeBuffer / createBuffer / mapAsync）まで解決しない
+  （`onSubmittedWorkDone` では解決しない）。errorScope で捕まえた OOM の時点で、device が既に死んでいることがある。
+- **ReBAR の GPU（Arc B570）では staging が VRAM の heap に載る**: VRAM の heap が host-visible を兼ね、割り当て器
+  （gpu-allocator）が staging をそこへ置くので、VRAM が尽きると staging 側の OOM（= device を失う側）として出る。
+- **Chrome（Dawn）も規則は同じ**（OOM を errorScope へ通すのは createBuffer / createTexture / createQuerySet だけ・
+  staging / submit の OOM は device lost）だが、staging を最大の heap（この機ではシステム RAM）に置く
+  （ソースからの推論・未実測）。
+- **帰結: 「OOM を踏んでから解放してやり直す」設計は Deno では当てにできない**。karume は非致命な `createBuffer` の
+  試し確保（runtime の `fitsHeadroom`）で空きを先に測り、入らなければ OOM を踏む前に手放す（anima の DiT 常駐 —
+  ADR [0112](decisions/0112-anima-transformer-residency.md) の 2026-09-27 追記）。
 - f16-1024 の PNG 門は**初回 run で瞬間 8,391MiB**（定常 5,723MiB）まで上がり、天井
   11,136MiB に対する余裕が 2.7GiB しか残らなかった。瞬間ピークの正体は重み staging の二重
   計上で、Session 生成時に submit を 1 回入れて解消済み（実測ピーク 5,723MiB・余裕 5.4GiB。
@@ -901,16 +917,21 @@ generate を跨いで持ち続ける opt-in で（ADR [0112](decisions/0112-anim
 - **quant 席で倍違う**。DiT の重みは既定席 1,875 MiB・`f16` 席 3,733 MiB（f32 計算 — 2026-08-05 final-perf-bench の
   VRAM 表。上の 1,871 MiB は 2026-09-10 の runtime 集計で、同じ量の出典違い）。`f16` 席の常駐は text 段で
   +3.7 GB を超えるので、8 GB 級でも余裕が薄い（未計測）。
-- **VRAM が足りなければ退避して段をやり直し、以後は常駐しない**（格下げ）。OOM の後に遅い経路へ落ちたことは
-  `residency` イベント（`evicted` / `out-of-memory` → 以後 `released` / `downgraded`）でしか分からない —
+- **VRAM が足りなければ常駐 DiT を手放し、以後は常駐しない**（格下げ）。text 段の前と VAE 段の前に次の段の
+  必要量を試し確保で量り、入らなければ段を張る前に手放す（`evicted` / `headroom`）。量りが外れて段が OOM したら
+  退避して段をやり直す（`evicted` / `out-of-memory`）。遅い経路へ落ちたことは
+  `residency` イベント（`evicted` → 以後 `released` / `downgraded`）でしか分からない —
   購読しないと、速度でしか気付けない。格下げは pipeline の寿命の間は戻らない（組み直すと戻る）。DiT 段で退避
   するのは前の generate から持ち越した DiT だけで、同じ generate で作った DiT の OOM は段ごと運転と同じ VRAM 構成
   なので退避せずにそのまま投げる（ADR 0112 決定 3）。
-- **退避は OOM を型（`GpuOutOfMemoryError`）で報告する環境でだけ働く**。Metal の out-of-memory errorScope が沈黙
+- **退避は OOM を型（`GpuOutOfMemoryError`）で報告する環境でだけ働く**（先回りの試し確保も同じ out-of-memory
+  errorScope で判定する）。Metal の out-of-memory errorScope が沈黙
   する環境（known-issues「Metal で out-of-memory errorScope が沈黙する」節）では、常駐が VRAM を超えても退避も
   格下げもイベントも起きない。
-- **退避の後のやり直しは Arc B570 では device lost になった**（原因未特定 — known-issues「Intel Arc B570」節）。
-  退避のイベントまでは出るが、やり直しの段が `GpuDeviceLostError` で失敗する。他機は未計測。
+- **OOM を踏んでからの退避（第二線）は、踏んだ OOM が重みアップロードの staging 側だと成り立たない**。Deno では
+  その OOM で device が既に無効になっており、やり直しの段が `GpuDeviceLostError` で失敗する（黙っては落ちない —
+  本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」節）。主線は先回りの退避で、
+  Arc B570 の再現（常駐 DiT + ダミー 6 GiB）は先回りの退避で通る（ADR 0112 の 2026-09-27 追記）。他機は未計測。
 - **退避した段は最初からやり直す**。DiT 段なら denoise を step 1 から回し直す（出る画素は同じ）ので、その
   generate の `denoise-step` / `vae-tile` は 1 から出直し、壁時計は段 1 本ぶん延びる。
 - **解像度を変えても定常状態の常駐量は「重み + 最大の backing 1 本」まで**（予算 256 MiB を超える backing は
