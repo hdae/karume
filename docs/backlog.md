@@ -382,10 +382,11 @@ later の「decode 速度の残り」。
   配布に反映する。次リリースに束ねる（pin の焼き方は ADR [0073](decisions/0073-models-source-pin.md)・
   [release-runbook](release-runbook.md) §2 / §3）。ローカルミラーは焼き直し済み。
 - **birefnet-hr / lucida の HF 再アップロード + pin 更新（E1 段 1 — ADR [0113](decisions/0113-birefnet-weight-series.md)）**:
-  f32 系列 4 本の焼き直し（上流 revision つき — `--dtype f32`）と f16 席を含めて配布に反映する。**利用者裁定
-  2026-09-26: HR の既定席を `f16` にする（上流 checkpoint が f16 なので無損失）。Lucida は f32 のまま（f16 は有損失 —
-  α の平均絶対差 最大 7.0e-5）。recipe の `BIREFNET_DEFAULT_QUANT` 相当の変更と pytest・カードの relation の追随は
-  配布反映の回に行う（ADR 0113 追記）。**
+  Lucida の f32 系列の焼き直し（上流 revision つき — `--dtype f32`）と f16 席を含めて配布に反映する。**利用者裁定
+  2026-09-26 / 09-27: HR は `f16` 席のみ（上流 `ZhengPeng7/BiRefNet_HR` は f16 の checkpoint 1 本だけで f32 は存在しない
+  — f32 席は同じ値を倍の VRAM で持つだけ）。Lucida は f32 既定 + f16 任意（f16 は有損失 — α の平均絶対差 最大 7.0e-5）。
+  recipe（`dist` の HR を f16 席 1 つで組める形・既定席・pytest・カードの relation）の変更と、HR の f32 系列 2 本 +
+  golden / sha 参照行 / `HELD_SERIES` の f32 行の退役は配布反映の回に行う（ADR 0113 追記）。**
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
