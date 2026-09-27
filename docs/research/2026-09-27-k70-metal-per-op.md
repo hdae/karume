@@ -245,6 +245,66 @@ M5 の「1024² 全体 80 s」は利用者の記憶だけで、同条件の記�
 - 先行実測の text 44 s / VAE 10 s の内訳（HTTP 取得・検証・アップロードの比 — §3.1。経路の違いは利用者確認済み）。
 - 同じ実行系どうしの比（B570 を Chrome で回した値）。本表は GPU の差と実行系の差が混ざった比。
 
+## 9. 幾何掃引の結果（M2 quick・2026-09-27 16:28）
+
+`tools/geometry-sweep` の Chrome ページを利用者の M2（Chrome 153 / metal-3・developer features 有効・timestamp は非量子化）で
+quick（op 5 族・33 ケース・177 行・rounds 5）で回した。JSON は `outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json`。
+失敗 0・**幾何間の出力 sha256 は全 177 行で既定と一致**（f32 も i8a8 も幾何でビットは動かない）・既定の再測定は全ケース 0.99〜1.01。
+「同幾何の B570 比」は B570 の quick（linear / i8a8-linear のみ・raw tick）の同じ幾何の対既定。
+
+| case                               | 既定幾何               | M2 既定 µs/disp | M2 TFLOPS | M2 最良幾何            | 対既定 |                           同幾何の B570 比 | 既定再測定 |
+| ---------------------------------- | ---------------------- | --------------: | --------: | ---------------------- | -----: | -----------------------------------------: | ---------: |
+| linear-m1024-n2048-k2048           | reg128x128r8x8w16      |           19694 |      0.44 | reg64x32r4x4w8         |  ×1.58 |                                      ×0.78 |      ×1.00 |
+| linear-m1024-n8192-k2048           | reg128x128r8x8w16      |           78673 |      0.44 | reg64x32r4x4w8         |  ×1.59 |                                      ×0.74 |      ×1.01 |
+| linear-m1024-n2048-k8192           | reg128x128r8x8w16      |           79499 |      0.43 | reg64x32r4x4w8         |  ×1.59 |                                      ×0.76 |      ×1.01 |
+| linear-m4096-n2048-k2048           | reg128x128r8x8w16      |           78817 |      0.44 | reg64x32r4x4w8         |  ×1.59 |   ×0.98（B570 最良 reg64x64r4x4w16 ×1.21） |      ×1.01 |
+| linear-m4096-n8192-k2048           | reg128x128r8x8w16      |          315760 |      0.44 | reg64x32r4x4w8         |  ×1.60 |                                      ×0.72 |      ×1.00 |
+| linear-m4096-n2048-k8192           | reg128x128r8x8w16      |          319085 |      0.43 | reg64x32r4x4w8         |  ×1.60 |                                      ×0.74 |      ×1.00 |
+| linear-m512-n2048-k1024            | reg64x32r4x4w8         |            3184 |      0.67 | reg64x32r4x4w8（既定） |  ×1.00 | ×1.00（B570 最良 reg128x128r8x8w16 ×1.41） |      ×1.00 |
+| linear-m64-n3072-k1024             | reg16x16r1x4w4         |            1418 |      0.28 | reg64x64r4x4w16        |  ×2.27 |    ×1.48（B570 最良 reg64x32r4x4w8 ×1.49） |      ×1.00 |
+| i8a8-linear-m1024-n2048-k2048      | tile128x64r8x8w8x16k16 |           20468 |      0.42 | tile64x64r8x4w16x8k16  |  ×1.06 |                                      ×0.83 |      ×1.00 |
+| i8a8-linear-m1024-n8192-k2048      | tile128x64r8x8w8x16k16 |           80518 |      0.43 | tile64x64r8x4w16x8k16  |  ×1.12 |                                      ×0.80 |      ×1.00 |
+| i8a8-linear-m1024-n2048-k8192      | tile128x64r8x8w8x16k16 |           81677 |      0.42 | tile64x64r8x4w16x8k16  |  ×1.13 |                                      ×0.84 |      ×1.01 |
+| i8a8-linear-m4096-n2048-k2048      | tile128x64r8x8w8x16k16 |           80660 |      0.43 | tile64x64r8x4w16x8k16  |  ×1.12 |                                      ×0.81 |      ×1.00 |
+| i8a8-linear-m4096-n8192-k2048      | tile128x64r8x8w8x16k16 |          322485 |      0.43 | tile64x64r8x4w16x8k16  |  ×1.12 |                                      ×0.64 |      ×1.00 |
+| i8a8-linear-m4096-n2048-k8192      | tile128x64r8x8w8x16k16 |          325153 |      0.42 | tile64x64r8x4w16x8k16  |  ×1.12 |                                      ×0.82 |      ×1.00 |
+| attention-qk-self-m1024-n1024      | reg128x128r8x8w16      |           10447 |      0.41 | reg64x32r4x4w8         |  ×1.58 |                                          - |      ×1.00 |
+| attention-pv-self-m1024-n1024      | reg128x128r8x8w16      |            7946 |      0.54 | reg64x64r8x4w16        |  ×1.66 |                                          - |      ×0.99 |
+| attention-qk-self-m4096-n4096      | reg128x128r8x8w16      |          162664 |      0.42 | reg64x32r4x4w8         |  ×1.55 |                                          - |      ×1.01 |
+| attention-pv-self-m4096-n4096      | reg128x128r8x8w16      |          126330 |      0.54 | reg64x64r8x4w16        |  ×1.67 |                                          - |      ×1.00 |
+| attention-qk-cross-m1024-n512      | reg128x128r8x8w16      |            5304 |      0.40 | reg64x32r4x4w8         |  ×1.60 |                                          - |      ×1.00 |
+| attention-pv-cross-m1024-n512      | reg128x128r8x8w16      |            4022 |      0.53 | reg64x64r8x4w16        |  ×1.67 |                                          - |      ×1.01 |
+| attention-qk-cross-m4096-n512      | reg128x128r8x8w16      |           20771 |      0.41 | reg64x32r4x4w8         |  ×1.57 |                                          - |      ×1.01 |
+| attention-pv-cross-m4096-n512      | reg128x128r8x8w16      |           15765 |      0.54 | reg64x64r8x4w16        |  ×1.66 |                                          - |      ×1.00 |
+| i8a8-attention-qk-self-m1024-n1024 | tile128x64r8x8w8x16k16 |           10599 |      0.41 | tile64x64r8x4w16x8k16  |  ×1.13 |                                          - |      ×1.00 |
+| i8a8-attention-pv-self-m1024-n1024 | tile64x128r8x8w16x8k16 |           10648 |      0.40 | tile64x64r8x4w16x8k16  |  ×1.10 |                                          - |      ×1.00 |
+| i8a8-attention-qk-self-m4096-n4096 | tile128x64r8x8w8x16k16 |          169757 |      0.40 | tile64x64r8x4w16x8k16  |  ×1.13 |                                          - |      ×1.00 |
+| i8a8-attention-pv-self-m4096-n4096 | tile64x128r8x8w16x8k16 |          168201 |      0.41 | tile64x64r8x4w16x8k16  |  ×1.09 |                                          - |      ×1.00 |
+| i8a8-attention-qk-cross-m1024-n512 | tile128x64r8x8w8x16k16 |            5309 |      0.40 | tile64x64r8x4w16x8k16  |  ×1.13 |                                          - |      ×1.00 |
+| i8a8-attention-pv-cross-m1024-n512 | tile64x128r8x8w16x8k16 |            5365 |      0.40 | tile64x64r8x4w16x8k16  |  ×1.11 |                                          - |      ×1.00 |
+| i8a8-attention-qk-cross-m4096-n512 | tile128x64r8x8w8x16k16 |           21222 |      0.40 | tile64x64r8x4w16x8k16  |  ×1.13 |                                          - |      ×1.00 |
+| i8a8-attention-pv-cross-m4096-n512 | tile64x128r8x8w16x8k16 |           21138 |      0.41 | tile64x64r8x4w16x8k16  |  ×1.09 |                                          - |      ×1.00 |
+| conv2d-c96-512x512                 | igemm32x128:wg16x4     |          139538 |      0.31 | igemm64x64:wg16x8      |  ×1.48 |                                          - |      ×0.99 |
+| conv2d-c192-256x256                | igemm64x128:wg16x8     |          103976 |      0.42 | igemm64x64:wg16x16     |  ×1.37 |                                          - |      ×1.00 |
+| conv2d-c384-128x128                | igemm64x128:wg16x8     |          122309 |      0.36 | igemm64x64:wg16x16     |  ×1.43 |                                          - |      ×1.00 |
+
+読み:
+
+- **f32 GEMM の大 M（DiT の linear）は、M2 では 64×32（`reg64x32r4x4w8`・128 スレッド・1 スレッド 16 累積）が既定 128×128 の
+  1.58〜1.60 倍。** 64×64（r8x4 w16x8 / r4x4 w16x16）も 1.52〜1.58 倍で、大タイルだけが外れている。B570 では同じ幾何が
+  0.72〜0.98 倍で既定が最速 — **勝つ幾何が GPU で逆転する**。
+- f32 attention も同じ: ①QK は 64×32 が 1.55〜1.60 倍、③PV は 64×64（r8x4 w16x8）が 1.66〜1.67 倍。
+- conv2d（VAE）は 64×64 が 1.37〜1.48 倍（Cout=96 の 32×128 既定・Cout=192 / 384 の 64×128 既定とも）。
+- **i8a8 は幾何ではほぼ動かない**（最良 tile64x64 r8x4 で 1.06〜1.13 倍）。M2 の i8a8 既定 20.5 ms/dispatch は、同 shape の f32 既定
+  19.7 ms と同じで、f32 を 64×32 にすれば 12.5 ms — Metal では a8 は幾何を直しても f32 に負ける（dp4a の展開が主因のまま）。
+- 小 M 64（text 段）は M2 で 64×64 が 2.27 倍、B570 でも 64×32 が 1.49 倍 — 既定 16×16 は両 GPU で外れている（K-67）。
+- 達成効率: M2 の f32 既定 0.44 TFLOPS → 64×32 で約 0.70 TFLOPS（公称 2.9〜3.6 の 20〜24%）。B570 の 36% にはまだ届かず、
+  full の格子（f32 54 幾何）で更に上がる余地がある。
+
+含意（裁定待ち）: 幾何の選択を「shape の純関数」から「shape × adapter の静的な表」（vendor `apple` なら Metal 向けの表）へ
+広げれば、M2 の DiT（f16 quant）は linear 85% × 1.6 倍 + attention で **約 1.5 倍**の見込み。既定 quant（i8a8）は Metal では
+f32 計算（i8 重み `:wi8`）へ落とすのが速い。ADR 0022 の MUST（実行時オートチューン禁止・キーに幾何判別子）は表が静的なら保てる。
+
 ## 参照
 
 - M2 の JSON: `outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-09-27T14-24-06.310Z.json`
