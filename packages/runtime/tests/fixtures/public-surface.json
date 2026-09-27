@@ -359,6 +359,10 @@
         "kind": "function"
       },
       {
+        "name": "fitsHeadroom",
+        "kind": "function"
+      },
+      {
         "name": "openContainer",
         "kind": "function"
       },

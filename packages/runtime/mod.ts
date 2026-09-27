@@ -95,6 +95,11 @@ export {
   GpuValidationError,
 } from "./src/gpu/error-scope.ts";
 /**
+ * 空き VRAM の試し確保（`createBuffer` の非致命な OOM で「今この量が入るか」を見る）。大きな確保を
+ * 伴う段の前に、OOM で device を失う経路（writeBuffer の staging）へ入る前の判断材料にする。
+ */
+export { fitsHeadroom } from "./src/gpu/headroom.ts";
+/**
  * GpuContext の構築は {@link acquireGpu} だけを入口にするため、型としてのみ公開する
  * （Session と同じ形）。値として公開すると `new GpuContext(...)` で planRequiredLimits /
  * assertLimitsGranted を迂回した device を渡せてしまい、limits 要求漏れの検出網が抜ける。
