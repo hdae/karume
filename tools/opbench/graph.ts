@@ -12,7 +12,7 @@
  * 家族ごとの「1 回」: gemma4 / gemma4-qat = 短い chat 1 ターン（prefill 1 run + decode N run）、
  * anima = 1 枚（text_encoder / text_conditioner / transformer step / vae_decoder タイル）、
  * siglip2 = 画像 1 枚の embed（vision 1 run）、irodori = 発話 1 本（条件エンコーダ各 1 run +
- * dit の step 群 + codec）。他家族は未対応で fail loudly。
+ * 条件側 K/V 射影 dit_context 1 run + dit の step 群 + codec）。他家族は未対応で fail loudly。
  */
 
 import type { GpuContext, SessionDiagnostics } from "../../packages/runtime/mod.ts";
@@ -133,7 +133,7 @@ export type OpComparison = {
 
 export type GraphComparison = {
   readonly scenario: string;
-  /** 突合に使った run（label が `runs` で始まるもの）の本数 — 表の値はその平均。 */
+  /** 突合に使った run（label が `runs` に当たるもの — `matchesRunsPrefix`）の本数 — 表の値はその平均。 */
   readonly runs: number;
   readonly rows: readonly OpComparison[];
   readonly unmapped_keys: readonly string[];
@@ -262,7 +262,8 @@ export const isDriveFamily = (name: string | undefined): name is DriveFamily =>
 /**
  * 突合に使う run の label 接頭辞の既定 — 家族ごとに「その 1 回の主役」が違う。gemma4 /
  * gemma4-qat は decode（prefill は形が違うので別勘定）、anima は transformer の step、siglip2 は
- * run が vision の 1 本だけ、irodori は step 数だけ回る dit。
+ * run が vision の 1 本だけ、irodori は step 数だけ回る dit
+ * （生成 1 回に 1 run の dit_context は含めない — {@link matchesRunsPrefix}）。
  */
 const DEFAULT_RUNS_PREFIX: Readonly<Record<DriveFamily, string>> = {
   gemma4: "decode",
@@ -273,6 +274,20 @@ const DEFAULT_RUNS_PREFIX: Readonly<Record<DriveFamily, string>> = {
 };
 
 export const defaultRunsPrefix = (family: DriveFamily): string => DEFAULT_RUNS_PREFIX[family];
+
+/**
+ * run の label が突合の接頭辞（`--runs`）に当たるか。label は全家族 `<名前>-<番号>` の形
+ * （gemma4 は `gemma4RunLabel`・他家族は `driveOnce` が `<component>-<n>` で振る）なので、
+ * **`-` の区切りまで**を比べる — 接頭辞そのもの（`decode-3` のような 1 本指定）か、接頭辞 + `-`
+ * で始まるものだけを拾う。
+ *
+ * MUST: 素の文字列前方一致にしない。irodori は `dit` と `dit_context` の 2 部品が同じ綴りで
+ * 始まり、前方一致だと 1 回きりの `dit_context-0` が step 群の `dit-*` に混ざって、平均の
+ * 分母と census 側の部品集合（`compareWithCensus` は run 群が触った部品に絞る）が同時に
+ * 狂う — 値はそれらしいまま突合表だけが壊れる。
+ */
+export const matchesRunsPrefix = (label: string, prefix: string): boolean =>
+  label === prefix || label.startsWith(`${prefix}-`);
 
 /**
  * gemma4 の run 1 本の label（`prefill-<chunk>` / `decode-<step>` / 投機の

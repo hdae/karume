@@ -12,6 +12,7 @@ import {
   gemma4RunLabel,
   irodoriCensusComponent,
   isDriveFamily,
+  matchesRunsPrefix,
   opOfKey,
   type RunRecord,
 } from "./graph.ts";
@@ -59,13 +60,14 @@ Deno.test("opOfKey: QAT i4-fast の decode に出るキーは既知の op へ落
 });
 
 Deno.test("irodoriCensusComponent: 観測席のハイフン綴りを census のアンダースコア綴りへ写す", () => {
-  // 8 名の全部を固定する（写し漏れが 1 つでもあると、その段だけ census と当たらない）。
+  // 9 名の全部を固定する（写し漏れが 1 つでもあると、その段だけ census と当たらない）。
   const components: readonly IrodoriRunComponent[] = [
     "backbone",
     "text-proj",
     "caption-proj",
     "speaker",
     "duration",
+    "dit-context",
     "dit",
     "codec-encoder",
     "codec-decoder",
@@ -76,6 +78,7 @@ Deno.test("irodoriCensusComponent: 観測席のハイフン綴りを census の�
     "caption_proj",
     "speaker",
     "duration",
+    "dit_context",
     "dit",
     "codec_encoder",
     "codec_decoder",
@@ -120,6 +123,39 @@ Deno.test("defaultRunsPrefix: 家族ごとに突合する run の接頭辞が決
     "vision",
     "dit",
   ]);
+});
+
+Deno.test("matchesRunsPrefix: irodori の既定接頭辞は dit の step 群だけを拾い、dit_context は拾わない", () => {
+  // label は driveOnce と同じ綴り（census 綴りの部品名 + `-` + 部品ごとの通し番号）で作る。
+  const irodoriLabel = (component: IrodoriRunComponent, n: number): string =>
+    `${irodoriCensusComponent(component)}-${n}`;
+  const prefix = defaultRunsPrefix("irodori");
+  assert(matchesRunsPrefix(irodoriLabel("dit", 0), prefix));
+  assert(matchesRunsPrefix(irodoriLabel("dit", 31), prefix));
+  // 素の前方一致だと `dit_context-0` が `dit` に当たる（1 回きりの K/V 射影が step の平均に混ざる）。
+  assertEquals(irodoriLabel("dit-context", 0), "dit_context-0");
+  assert(!matchesRunsPrefix(irodoriLabel("dit-context", 0), prefix));
+  // dit_context 自体は明示の接頭辞で拾える。
+  assert(matchesRunsPrefix(irodoriLabel("dit-context", 0), "dit_context"));
+});
+
+Deno.test("matchesRunsPrefix: 他家族の既定接頭辞と 1 本指定は従来どおり当たる", () => {
+  assert(
+    matchesRunsPrefix(gemma4RunLabel({ kind: "decode", step: 3 }), defaultRunsPrefix("gemma4")),
+  );
+  assert(
+    !matchesRunsPrefix(
+      gemma4RunLabel({ kind: "prefill", chunk: 1, chunks: 1 }),
+      defaultRunsPrefix("gemma4"),
+    ),
+  );
+  assert(matchesRunsPrefix(gemma4RunLabel({ kind: "prefill", chunk: 2, chunks: 4 }), "prefill"));
+  assert(matchesRunsPrefix("transformer-1", defaultRunsPrefix("anima")));
+  assert(!matchesRunsPrefix("text_encoder-0", defaultRunsPrefix("anima")));
+  assert(matchesRunsPrefix("vision-0", defaultRunsPrefix("siglip2")));
+  // label そのものを渡すと 1 本だけを拾う（`decode-1` が `decode-10` 以降を拾わない）。
+  assert(matchesRunsPrefix("decode-1", "decode-1"));
+  assert(!matchesRunsPrefix("decode-10", "decode-1"));
 });
 
 Deno.test("gemma4-qat も graph の駆動家族（label と既定接頭辞は通常 Gemma と同じ）", () => {

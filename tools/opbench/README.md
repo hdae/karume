@@ -214,13 +214,13 @@ point is the same one P-1 was measured through.
 
 What "one run" means per family:
 
-| Family       | One run                                                                          | Input flags                                                             |
-| ------------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `gemma4`     | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)           | `--prompt`, `--new-tokens` (default 8), `--capacity`, `--chunk-buckets` |
-| `gemma4-qat` | the same turn through `Gemma4QatPipeline` (`--model` is `e2b` or `e4b`)          | same as `gemma4`                                                        |
-| `anima`      | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles) | `--prompt`, `--steps` (default 2), `--size` (1024)                      |
-| `siglip2`    | one image embedded (`vision`, a single run)                                      | none — the image is synthetic (see below)                               |
-| `irodori`    | one utterance (each conditioner once, `dit` per step, then the codec)            | `--text`, `--seconds` (fractional, optional)                            |
+| Family       | One run                                                                                   | Input flags                                                             |
+| ------------ | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `gemma4`     | one short chat turn (`prefill` runs, one per chunk, + N `decode` runs)                    | `--prompt`, `--new-tokens` (default 8), `--capacity`, `--chunk-buckets` |
+| `gemma4-qat` | the same turn through `Gemma4QatPipeline` (`--model` is `e2b` or `e4b`)                   | same as `gemma4`                                                        |
+| `anima`      | one image (`text_encoder` / `text_conditioner` / `transformer` step / VAE tiles)          | `--prompt`, `--steps` (default 2), `--size` (1024)                      |
+| `siglip2`    | one image embedded (`vision`, a single run)                                               | none — the image is synthetic (see below)                               |
+| `irodori`    | one utterance (each conditioner once, `dit_context` once, `dit` per step, then the codec) | `--text`, `--seconds` (fractional, optional)                            |
 
 `--chunk-buckets 32,64,128` (or `none` to disable) overrides the prefill buckets the gemma4 pipeline
 declares, so the pad cost of a short prompt can be measured as a two-run A/B against `none`.
@@ -235,8 +235,9 @@ host path (a readback per forward, because the resident path's batching is incom
 timing windows), so the wall clock is close to twice the untimed one. The GPU times per key are
 still the ones to read; take the wall from a `--mode wall` process.
 
-With `--census` and `--scenario`, the runs whose label starts with `--runs` (default `decode` for
-gemma4 and gemma4-qat, `transformer` for anima, `vision` for siglip2, `dit` for irodori) are averaged
+With `--census` and `--scenario`, the runs whose label is `--runs` or starts with `--runs` followed
+by `-` (default `decode` for gemma4 and gemma4-qat, `transformer` for anima, `vision` for siglip2,
+`dit` for irodori — so `dit` takes the `dit-<n>` steps but not the one-off `dit_context-0`) are averaged
 and compared per op with the census's plain node
 count (rows that are neither fused nor aliased). Pipeline keys are mapped to ops by their leading
 word; variant names that differ from the op (`linear_gemv` → `linear`, `attention_state_*` →

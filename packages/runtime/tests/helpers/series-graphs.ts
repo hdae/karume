@@ -42,6 +42,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
     backbone: "backbone",
     "caption-proj": "caption_proj",
     dit: "dit",
+    "dit-context": "dit_context",
     duration: "duration",
     speaker: "speaker",
     "text-proj": "text_proj",

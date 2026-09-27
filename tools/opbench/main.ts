@@ -46,6 +46,7 @@ import {
   DRIVE_FAMILIES,
   driveOnce,
   isDriveFamily,
+  matchesRunsPrefix,
   type RunRecord,
 } from "./graph.ts";
 import { defaultVenv, runTorchBench, summarizeTorch, type TorchRecord } from "./torch.ts";
@@ -267,7 +268,7 @@ const USAGE = `使い方: deno run -A tools/opbench/main.ts <census|single|graph
     --mode timing|wall   timing = op 別 GPU 時間（既定・timestamp-query が要る）/ wall = 計測無効で壁だけ
     --census <dir>       突合する census の出力（--scenario と組で・省略時は突合しない）
     --scenario <name>    census のシナリオ（gemma4 / gemma4-qat = decode / prefill・anima = 1024px・siglip2 = native・irodori = representative）
-    --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 / gemma4-qat = decode / anima = transformer / siglip2 = vision / irodori = dit）— gemma4 の label は prefill-<chunk> / decode-<step> なので、prefill と書けば chunk が何本でも prefill 群が全部入る
+    --runs <prefix>      突合に使う run の label 接頭辞（既定 gemma4 / gemma4-qat = decode / anima = transformer / siglip2 = vision / irodori = dit）— label そのものか「接頭辞 + '-'」で始まるものを拾う（irodori の dit は dit_context-0 を拾わない）。gemma4 の label は prefill-<chunk> / decode-<step> なので、prefill と書けば chunk が何本でも prefill 群が全部入る
     --single <dir>       single の出力（op 別の single / graph 比を出す）
     --model / --quant    配布形の選択（既定 = manifest）
     --new-tokens <n>     gemma4 / gemma4-qat の生成 token 数（既定 8）/ --capacity <n> KV 容量（既定 = 配布形）/ --steps <n> --size <px> anima の step と辺（既定 2 / 1024・step は 2 以上）
@@ -483,7 +484,7 @@ const runGraph = async (args: ReadonlyMap<string, readonly string[]>): Promise<v
     gpu.destroy();
   }
   const compared: RunRecord[] = result.records.filter((record) =>
-    record.label.startsWith(runsPrefix)
+    matchesRunsPrefix(record.label, runsPrefix)
   );
   const comparison = censusDir === undefined || scenario === undefined ? null : compareWithCensus(
     compared,

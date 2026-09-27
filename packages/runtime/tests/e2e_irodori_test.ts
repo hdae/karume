@@ -9,7 +9,8 @@
 // リポジトリ管理外 — `.gitignore` の `outputs/`）。生成は `tools/exporter/export_irodori.py`
 // （コマンドは下の GENERATE_COMMAND がそのまま正本）。
 //
-// ターゲットは 6 本（recon の G1 / G1a / G1b / G2 / G3 と、ADR 0047 の G5'）:
+// ターゲットは 7 本（recon の G1 / G1a / G1b / G2 / G3 と、ADR 0047 の G5'、ADR 0114 で G5' から
+// 割り出した条件側 K/V 射影）:
 //
 // - `backbone`     — 同梱 ModernBERT-ja-310m（25 層）。`[1,T]` ids → `[1,T,768]`
 // - `text-proj`    — text 側 projector。`[1,T,768]` → `[1,T,512]`
@@ -18,7 +19,10 @@
 //   採るためだけに足してある（第 1 出力は `text-proj` と同じ生の projector 出力）
 // - `speaker`      — 参照 latent エンコーダ（8 層）+ `speaker_norm`。`[1,S,128]` → `[1,S,768]`
 // - `duration`     — `text_norm` + duration predictor。`[1,T,512]` ほか 4 本 → `[1]`
-// - `dit`          — DiT 1 step（12 層・G4 畳み込み形）。6 本 → `[1,S,32]`
+// - `dit-context`  — DiT の条件側 K/V 射影（12 ブロック × text / speaker / caption）。条件 state
+//   3 本 → **出力 24 本**（ブロックごとの K / V、各 `[1,1519,20,64]`）。形は全て静的
+// - `dit`          — DiT 1 step（12 層・G4 畳み込み形）。`x_t` / `t_embed` / `mask` + 条件側
+//   K/V 24 本 → `[1,S,32]`
 //
 // `dit` だけは**実行時 bool マスク**（`[1,1,1,S+1519]`）を入力に取り、SDPA を分解経路 +
 // `safe_softmax`（ADR 0044）で通す。K/V の連結軸が記号次元になる形（ADR 0046 の `S+1519`）を
@@ -31,9 +35,12 @@
 // speaker / caption のベクトルは `speaker` / `caption-proj` の torch 期待値から実装の
 // メソッドで作ったもの（生成は `export_irodori.py` の `_duration_cases`）。
 //
-// `dit` の 6 本も同じ鎖で、条件 state は `text-proj` / `caption-proj` / `speaker` の torch
-// 期待値を Tmax へ右 pad したもの（生成は `export_irodori.py` の `_dit_cases`）。**uncond
-// 3 変種は cond と x_t / t / 条件 state を共有し、違うのはマスクだけ**（ADR 0047 決定 1）。
+// `dit-context` と `dit` も同じ鎖で、`dit-context` の条件 state は `text-proj` / `caption-proj` /
+// `speaker` の torch 期待値を Tmax へ右 pad したもの（生成は `export_irodori.py` の `_dit_cases`）、
+// `dit` の K/V 24 本は **`dit-context` の torch 期待値そのもの**（`_dit_graph_inputs`）。**uncond
+// 3 変種は cond と x_t / t / 条件 state を共有し、違うのはマスクだけ**（ADR 0047 決定 1）— 条件
+// state が全ケースで同じなので、`dit-context` の golden は代表 1 本（`dit-cond-min`）になる
+// （`_dit_context_cases` が値の同一性で束ねる）。
 //
 // 記号次元はターゲットで違う（テキスト系と `duration` は T ≤ 512、`speaker` / `dit` は S ≤ 750）。
 // ケース名もターゲットで違うので、期待表は**ターゲット別**に持つ（下の EXPECTED_CASES）。
@@ -250,9 +257,49 @@ const DURATION_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 1e-6 };
  * 取り違え・条件 KV の連結順の入れ替え）の誤差は値域と同じ O(1) で、この閾値の 4〜5 桁上に
  * 出る（export 台本の `_dit_uncond_divergence` が実測する 4 本の相互差は 0.75〜1.92）。
  *
+ * ADR 0114 でグラフを割った後（条件側 K/V 24 本を `dit-context` の torch 期待値のまま入力で
+ * 受ける形）の再実測（2026-09-27・Arc B570）は maxAbs 4.53e-6〜7.99e-6（最悪 dit-uncond-speaker）で、
+ * 閾値との比は割る前と変わらない（条件側の射影誤差は入力が torch 値なのでここには入らない）。
+ *
  * NOTE: 他ターゲットの値を流用してはならない（同じ手順で実測し直すこと）。
  */
 const DIT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
+
+/**
+ * DiT の条件側 K/V 射影（`dit-context` — 12 ブロックぶんの `project_context_kv` を text /
+ * speaker / caption の連結順で並べたもの・ADR 0114）の許容誤差。出力 24 本の**全てに同じ値**を
+ * 使う（下の理由）。
+ *
+ * 実測（`atol=rtol=0` 相当の maxAbs・ケースは代表 1 本 `dit-cond-min`・出力 24 本
+ * `[1,1519,20,64]`・2026-09-27・Arc B570）。`|ref|` は全出力で 0 を含む（条件 state の右 pad 行が
+ * 0 に射影される）ので最小非ゼロを併記する:
+ *
+ * | 出力            | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | --------------- | ------- | ------- | ------------ | ------------------ |
+ * | context_k_0     | 6.48e-5 | 8.49e-2 | 64.21        | 3.08e-6            |
+ * | context_k_11    | 6.10e-5 | 2.62e-2 | 183.74       | 3.50e-6            |
+ * | context_v_11    | 3.43e-5 | 3.33e-2 | 43.65        | 8.11e-6            |
+ * | context_v_10    | 2.10e-5 | 1.72e-1 | 15.32        | 9.79e-6            |
+ * | 残る 20 本      | ≤1.53e-5 | ≤9.66e-1 | 7.46〜36.49 | ≥3.68e-7           |
+ *
+ * 他の実重みターゲットと同じく **atol 主役**（最小の非ゼロ \|ref\| が 3.68e-7 まで下がり、
+ * maxRel はそこ〈context_k_3〉で 0.97 に跳ねるが、その出力の maxAbs は 7.39e-6 でしかない）。
+ * atol 5e-4 は実測最悪 6.48e-5（context_k_0）の約 7.7 倍で、rtol 1e-6 の寄与は最大の上端
+ * \|ref\| = 183.74 でも 1.8e-4（atol の 1/2.7）。
+ *
+ * **`dit` の 5e-5 より 1 桁緩い**のは値域が 1〜2 桁大きいから（`dit` の出力は O(5)・ここは
+ * O(10〜180)）— 絶対誤差は値域に比例して伸びており（上端 64 と 184 の 2 本が最悪の 2 本）、
+ * \|ref\| 上端に対する比はどの出力も 1e-6 級に収まる。出力ごとに閾値を分けないのは、実測が代表
+ * 1 ケースしか無く、出力別の値はそのケースの値域への過適合になるため。実装バグ（K / V の
+ * 取り違え・ブロックの順序違い・条件 3 本の連結順の入れ替え・`text_norm` / `caption_norm` の
+ * 掛け忘れ）の誤差は値域と同じ O(1〜10) で、この閾値の 3〜4 桁上に出る。
+ *
+ * NOTE: 他ターゲットの値を流用してはならない（同じ手順で実測し直すこと）。
+ */
+const DIT_CONTEXT_TOLERANCE: Tolerance = { atol: 5e-4, rtol: 1e-6 };
+
+/** `dit-context` の出力本数（12 ブロック × K / V — 並びは `context_k_<i>`, `context_v_<i>` の交互）。 */
+const DIT_CONTEXT_OUTPUTS = 24;
 
 /**
  * ターゲット別 tolerance（**出力位置ごとの配列**）。表の穴は「別ターゲット / 別出力の値で
@@ -265,6 +312,7 @@ const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
   "speaker": [SPEAKER_TOLERANCE],
   "duration": [DURATION_TOLERANCE],
   "dit": [DIT_TOLERANCE],
+  "dit-context": Array.from({ length: DIT_CONTEXT_OUTPUTS }, () => DIT_CONTEXT_TOLERANCE),
 };
 
 const SERIES_NAME = "irodori-v4-small";
@@ -339,6 +387,7 @@ const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
     "dit-uncond-speaker",
     "dit-uncond-text",
   ],
+  "dit-context": ["dit-cond-min"],
 };
 
 const EXPECTED_TARGETS = Object.keys(EXPECTED_CASES).sort();

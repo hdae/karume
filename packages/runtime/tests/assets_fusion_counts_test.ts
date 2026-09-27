@@ -531,14 +531,27 @@ Deno.test({
   },
 });
 
-/** DiT の入力 shape（S = latent フレーム数。mask は `S+1519` の派生次元）。 */
+/** DiT の条件側 K/V 射影 `dit_context` の入力 shape（条件 state 3 本 — Tmax 右 pad 済み・静的）。 */
+const IRODORI_CONTEXT_SHAPES: Readonly<Record<string, readonly number[]>> = {
+  text_state: [1, 256, 512],
+  speaker_state: [1, 751, 768],
+  caption_state: [1, 512, 512],
+};
+
+/**
+ * DiT の入力 shape（S = latent フレーム数。mask は `S+1519` の派生次元）。条件側は `dit_context` の
+ * 出力 24 本（12 ブロック × K / V・各 `[1,1519,20,64]` — ADR 0114）を同名の入力で受ける。
+ */
 const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly number[]>> => ({
   x_t: [1, sequence, 32],
   t_embed: [1, 512],
   mask: [1, 1, 1, sequence + 1519],
-  text_state: [1, 256, 512],
-  speaker_state: [1, 751, 768],
-  caption_state: [1, 512, 512],
+  ...Object.fromEntries(
+    Array.from({ length: 12 }, (_, block) => block).flatMap((block) => [
+      [`context_k_${block}`, [1, 1519, 20, 64]],
+      [`context_v_${block}`, [1, 1519, 20, 64]],
+    ]),
+  ),
 });
 
 /**
@@ -550,7 +563,7 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  *   偶奇形は「式が似ている」で広げない MUST を掲げている（掴めなければ素の列で値は正しい）。
  * - adaln 0: ADALN_RULE の先頭 op は `layer_norm` だが、DiT の正規化は `rms_norm` 87 本で
  *   `layer_norm` は 1 本も無い。
- * - silu 17: 前段の条件 MLP 5 本 + 12 ブロック × 1 本。残る sigmoid 12 本は
+ * - silu 17: 前段の timestep MLP 5 本 + 12 ブロック × 1 本。残る sigmoid 12 本は
  *   `mul(v, sigmoid(u))` のゲート（自分自身に掛からないので SiLU ではない）。
  * - **rowBlockAttention 12**: 12 ブロックの分解 attention（`bmm → reshape → add(mask) →
  *   safe_softmax → expand → reshape → expand → reshape → bmm`）を全て掴む。この綴りを出すのは
@@ -580,6 +593,13 @@ Deno.test({
     for (const sequence of [125, 750]) {
       assertEquals(fusionCounts(graph, irodoriDitShapes(sequence)), expected, `S=${sequence}`);
     }
+    // 条件側 K/V 射影（ADR 0114 で `dit` から割り出した 72 linear + rms_norm + cat）は融合を 1 つも
+    // 掴まない — `dit` の 3 種がここへ移っていないことの対の観測点。
+    assertEquals(
+      fusionCounts(await readIrodoriGraph("dit_context"), IRODORI_CONTEXT_SHAPES),
+      NONE,
+      "dit_context",
+    );
   },
 });
 
