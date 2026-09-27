@@ -81,6 +81,8 @@ measurements in `docs/research/`.
   new `residency` event reports each change (`retained` / `released` / `evicted`, with the reason);
   the `AnimaResidency`, `AnimaResidencyAction` and `AnimaResidencyReason` types are exported from
   `@karume/models` and `@karume/models/anima`.
+- `SessionDiagnostics.geometryProfile`: the id of the tile-geometry profile the session selected
+  (`"default"` on adapters without a profile). The name is a diagnostic label outside semver.
 
 ### Changed
 
@@ -113,6 +115,20 @@ measurements in `docs/research/`.
   Intel Arc B570 with the default `i8-a8` quant, a voice-clone generation took 12.7% less wall time
   and a 30-second utterance 5.0% less; the waveform is bit-identical and the observed peak of GPU
   buffer memory is unchanged. This needs a distribution in the new layout (see **Breaking**).
+- GEMM tile geometry is now selected per adapter from built-in static profiles (ADR 0115), chosen
+  once at session construction from the adapter's vendor and architecture; nothing is measured at
+  run time. Adapters without a profile get byte-identical shaders and pipeline keys as before.
+  Apple `metal-3` under Chrome gets a profile measured on an M2, covering linear / matmul / bmm,
+  fused attention, conv2d and the i8a8 linear and attention kernels. Outputs stay bit-identical
+  across geometries.
+
+### Fixed
+
+- `@karume/runtime`: the fused-attention i8a8 ①QK shader generator produced wrong scores (whole
+  columns silently zero) for tile geometries whose per-thread K-side fill count is 5 or more: a
+  generated fill variable (`k4`) shadowed the K pack count. The default geometry and the Apple
+  profile were not affected. The fill variable is now named independently of the caller, and a
+  codegen test rejects any shadowed declaration across all candidate geometries.
 
 ### Breaking
 

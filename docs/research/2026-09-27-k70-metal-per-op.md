@@ -305,6 +305,43 @@ quick（op 5 族・33 ケース・177 行・rounds 5）で回した。JSON は `
 広げれば、M2 の DiT（f16 quant）は linear 85% × 1.6 倍 + attention で **約 1.5 倍**の見込み。既定 quant（i8a8）は Metal では
 f32 計算（i8 重み `:wi8`）へ落とすのが速い。ADR 0022 の MUST（実行時オートチューン禁止・キーに幾何判別子）は表が静的なら保てる。
 
+## 10. full 掃引と裁定（2026-09-27 追記）
+
+**M2 の full**（`outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json`・linear / attention / conv2d の
+格子全体・19 ケース・927 行）: 失敗 0・**全 927 行で出力 sha256 が既定と一致**。ケースごとの最良幾何:
+
+- linear の大 M（6 ケース）: `reg128x32r8x4w8` が ×1.68〜1.77。quick の最良 64×32 より上。
+- linear の M = 512: `reg128x32r8x4w8` ×1.10。M = 64: `reg64x64r4x4w16` ×2.26。
+- attention ①QK（4 ケース）: `reg128x32r8x4w8` が ×1.57〜1.83。
+- attention ③PV: `reg32x64r4x8w8` が ×1.36〜1.69。cross m1024-n512 だけは `reg64x128r4x8w16` ×1.18 が最良。
+- conv2d: c96 / c384 は `igemm128x64:wg16x16` が ×1.65 / ×1.71。c192 は `igemm64x64:wg16x16` ×1.36。
+- ③PV の 2 ケースで、ケース末尾の既定の再測定比が 1.1 を超えた（pv-self-m1024 ×1.228・pv-cross-m1024 ×1.126）。
+  この 2 ケースの比は機の揺れを含む。
+
+quick と full を生成規則（ADR 0115 §4 — クラスの全ケースで ×1.05 以上・幾何平均が最大）で合成した結果が
+`apple-metal-3` で、採用表は ADR 0115 Consequences が正本。③PV はクラスの全ケースで勝つ幾何として `reg64x64r8x4w16`
+（×1.49）が残った。
+
+**RTX 5070 Ti の full**（`outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-37-27.914Z.json`・Windows / Chrome 153・
+GPU timestamp ns・op 5 族・33 ケース・1599 行・既定の再測定比 0.992〜1.011）: 公開 Artifact（静的配信のページ）から
+取得した。Artifact の iframe で WebGPU が動く。
+
+- f32 の大 M（≥ 1024）は既定 `reg128x128r8x8w16` が最速（代替は ×0.93〜1.004）。
+- M = 512 は `reg128x128r8x8w16` が ×1.475（B570 の quick の ×1.41 と同じ傾向）。M = 64 は `reg32x32r2x4w8` が ×1.352
+  （B570 は 64×32 が ×1.49）。
+- attention ①QK は既定が最速（代替 ×0.92〜0.96）。③PV は `reg64x128r8x8w16` が ×1.02〜1.05 で、門の ×1.05 に届かない。
+- conv2d は既定が最速か僅差（c384 の `igemm128x128:wg16x16` ×1.092 だけ）。
+- **i8a8 は 3 欄とも `tile128x64r8x4w16x16k16` が全ケースで勝つ**: linear ×1.156〜1.256・①QK ×1.199〜1.238・
+  ③PV ×1.134〜1.306。
+
+**i8a8 ①QK の 16 幾何の不一致は誤値（同日に修正）**: RTX の full で、i8a8-attention の qk ケースが 16 幾何で既定と出力不一致に
+なった（B570 でも同じ 16 幾何）。原因は生成器の変数のシャドーイング（K 側の充填スロット 5 以上で `var k4` が K のパック数を隠す）で、
+本番の幾何は影響外。修正は CHANGELOG（Unreleased の Fixed）。この掃引 JSON の 16 幾何の速度値は無効（ロードを飛ばしている）。
+
+**裁定 → [ADR 0115](../decisions/0115-geometry-profiles.md)**: `apple-metal-3` を登録（perf-ledger K-71）。
+nvidia-blackwell プロファイルの生成（perf-ledger K-67）と i8a8 ①QK の修正は裁定待ち。「Metal で既定 quant の a8 を外す」は
+保留で、既定の quant 席を量子化にするか opt-in にするかの再検討に合流した。
+
 ## 参照
 
 - M2 の JSON: `outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-09-27T14-24-06.310Z.json`
@@ -312,6 +349,7 @@ f32 計算（i8 重み `:wi8`）へ落とすのが速い。ADR 0022 の MUST（�
 - B570 の JSON: `outputs/bench/karume/2026-09-27_metal-recon/anima-profile-intel-r-graphics-bmg-g21-f16-512x512-2026-09-27T12-59-55.939Z.json`
   と `…-f16+dit8-a8-attn8-s16-512x512-2026-09-27T13-00-17.267Z.json`
 - 先行の M2 実測: `outputs/bench-browser/anima-residency-browser-2026-09-27T12-19-09.299Z.json`（[research 2026-09-27 H-35](2026-09-27-h35-oom-device-lost.md) §6）
+- 幾何掃引の JSON（§9 / §10）: M2 quick `outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json`・M2 full `…-2026-09-27T18-31-46.471Z.json`・RTX 5070 Ti full `…-2026-09-27T18-37-27.914Z.json`
 - Codex の棚卸し（読み取り調査・仮説 3 本）: `.claude/reviews/2026-09-27_metal-recon/codex-inventory.md`（git 追跡外）
 - 仕事量の再集計: `.claude/reviews/2026-09-25_perf-recon/deep/B4-hoist-cfg-h30.md` §2.4（git 追跡外）
 - 確認ページと双子 CLI の使い方: `tools/anima-residency/browser/README.md`「Per-op GPU timing (K-70)」

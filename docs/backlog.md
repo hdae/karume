@@ -26,9 +26,16 @@
   利得は kill 線を超えた — 数値は perf-ledger H-4 と [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。
   OOM 退避 → やり直しが B570 で device lost になった件（H-35）は**調査と修正が済（2026-09-27）** — 原因は staging の OOM が
   device を失わせること・修正は測った空きで先に退避する形（ADR 0112 追記 2026-09-27・[research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md)）。
-  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**B4 irodori H-30 は済（2026-09-27・ADR [0114](decisions/0114-irodori-dit-context-split.md)）** — 条件側 K/V 射影を別グラフ `dit_context` に割った・ビット同一・採用（数値は perf-ledger H-30）。配布形の反映は release 節。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・次 = 幾何掃引（道具 `tools/geometry-sweep` 済・M2 の実測待ち）。
+  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**B4 irodori H-30 は済（2026-09-27・ADR [0114](decisions/0114-irodori-dit-context-split.md)）** — 条件側 K/V 射影を別グラフ `dit_context` に割った・ビット同一・採用（数値は perf-ledger H-30）。配布形の反映は release 節。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・幾何掃引（M2 の quick + full）から GEMM 幾何を adapter ごとの静的プロファイルで選ぶ実装と `apple-metal-3` の登録まで済（perf-ledger K-71・ADR [0115](decisions/0115-geometry-profiles.md)）・次 = M2 で anima の DiT を再測（利用者の Chrome で）。
   **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
   既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
+
+- **要検討: 既定の quant 席を量子化にするか opt-in（元の重み）にするか（起票 2026-09-27・利用者）**: 今は既定で w8a8 などの量子化席を選ぶ。
+  それが正当かを見直す。「Metal では既定 quant の a8 を外す」判断（perf-ledger K-70・ADR 0115 Consequences）は保留にしてここに合流した。
+
+- **幾何プロファイル（K-71）まわりの裁定待ち（起票 2026-09-27）**: 正本は ADR [0115](decisions/0115-geometry-profiles.md)。
+  ① 掃引にケースを足して裏付けを補うか（linear の M = 16 / 32 / 128 / 256・matmul / bmm — 今は M = 1〜63 が外挿・matmul / bmm は linear の実測を共有・ADR 0115 決定 6）。
+  ② RTX 5070 Ti の full 掃引から `nvidia-blackwell` プロファイルを生成するか（材料は perf-ledger K-67）。
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と

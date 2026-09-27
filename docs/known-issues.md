@@ -228,6 +228,8 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   `onSubmittedWorkDone` + 200 ms 後の 1 GiB は成功）。Intel / wgpu では `destroy()` の解放が次の
   device poll まで遅延する。テストは変えない（survivor を poll 後に取る形は「解放を返し損ねた
   実体を検出する」門の意味を弱める）。Metal の「errorScope 沈黙」とは別種（こちらは落ちる側）。
+  **赤になるのは全走行の中だけで、単独実行では緑**（2026-09-27 のフル verify で再確認・12 回中 10 回が赤）。
+  赤になるかは、その時点の VRAM の余力に依る。
   同じ遅延解放は**レーンを間隔なしに連続実行したときのフレーク**としても出る（2026-09-21: anima レーン
   〈9 分〉の直後に sbv2 レーンを回すと、runtime の golden `i8 / flow / p512` から後の 12 本が OOM —
   後続は `requestDevice` 自体が `Not enough memory left`。20 秒では足りないことがあり、数分空けて単独で回すと 198 本すべて緑）。

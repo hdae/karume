@@ -1,13 +1,18 @@
 # ACTIVE_DESIGN — Karume
 
 > 現在の設計とレビューの入口。履歴はADR / research / gitに置き、作業順は[backlog](../docs/backlog.md)、性能の採否は[perf-ledger](../docs/perf-ledger.md)を正本とする。
-> Last updated: 2026-09-27（高速化 / メモリの波 イテレーション 2「DiT 速度」— B3 = anima の DiT 常駐を採用・H-35 は先回りの退避で解消・B4 = irodori H-30 済〈ADR 0114〉。残りは Chrome 確認ページ・irodori 2 リポの再アップロード〈リリース時〉・K-70 は幾何掃引の結果待ち → 裁定）
+> Last updated: 2026-09-27（高速化 / メモリの波 イテレーション 2「DiT 速度」— B3 = anima の DiT 常駐を採用・H-35 は先回りの退避で解消・B4 = irodori H-30 済〈ADR 0114〉。残りは Chrome 確認ページ・irodori 2 リポの再アップロード〈リリース時〉・K-71 = GEMM 幾何の adapter 別プロファイルを実装し `apple-metal-3` を登録〈ADR 0115〉→ M2 の DiT 再測待ち・量子化 opt-in の再検討が保留中）
 
 ## 現在の焦点
 
 - **イテレーション 2「DiT 速度」B3 = anima の DiT 常駐を採用（2026-09-26・opt-in のまま — [ADR 0112](../docs/decisions/0112-anima-transformer-residency.md)・B570 で 2 回目以降 2.45 s / 生成 = 壁の 10.4%）。常駐 DiT の退避は**先回りが主線**（2026-09-27 — text 段の前と VAE 段の前に runtime の `fitsHeadroom` で次の段の必要量を試し確保し、入らなければ段を張る前に手放す・`evicted` / `headroom`）で、OOM を踏んでからの退避は第二線。B570 の「退避 → やり直しが device lost」（perf-ledger H-35）はこれで解消（[ADR 0112 追記 2026-09-27](../docs/decisions/0112-anima-transformer-residency.md)・[research](../docs/research/2026-09-27-h35-oom-device-lost.md)）。残り = Chrome の確認ページ（`tools/anima-residency/browser/`）**。
 - **B4 = irodori H-30 済（2026-09-27・[ADR 0114](../docs/decisions/0114-irodori-dit-context-split.md)）**: 条件側 K/V 射影を別グラフ `dit_context` に割り、生成 1 回だけ回して K / V 24 本（178.0 MiB）を常駐テンソルで `dit` へ渡す。ビット同一・B570 の voice-clone −12.7% / 30 s 発話 −5.0%。残り = irodori 2 リポ（v4-small / v4.1-small）の HF 再アップロード + pin 更新（配布形の breaking・リリース時 — backlog release 節）。**落とし穴**: `dit_context` と `dit` には同じ `ditSessionOptions` を渡す（別の席だと数値が動く）・`dit_context` の Session は `dit` を開く前に畳む（同じ batch に積むと出力スロットぶん VRAM が倍）。
-- **K-70（Apple / Metal での anima の遅さ）**: M2 の per-op 実測と帰属まで済。幾何掃引（`tools/geometry-sweep`）の M2 の結果待ち → 裁定。
+- **K-70 / K-71（Apple / Metal での anima の遅さ → GEMM 幾何のプロファイル）**: M2 の per-op 実測と帰属・幾何掃引（quick + full）まで済。GEMM 幾何を adapter の (vendor, architecture) の完全一致で選ぶ静的プロファイルを実装し、`apple-metal-3`（Chrome の M2）を生成・登録した（[ADR 0115](../docs/decisions/0115-geometry-profiles.md)・採用表は同 Consequences）。次 = M2 で anima の DiT を再測（`deno task bench:anima-browser`・PNG sha の一致も）。「Metal で既定 quant の a8 を外す」は保留 — 既定の quant 席を量子化にするか opt-in（元の重み）にするかの再検討に合流（backlog now）。nvidia-blackwell の生成・掃引ケースの追加は裁定待ち（backlog now）。i8a8 ①QK の 16 幾何の誤値（充填変数のシャドーイング）は同日に修正済み。**落とし穴**:
+  - プロファイルを `BUILTIN_GEOMETRY_PROFILES` に登録すると、per-profile の GPU テスト（`gpu_geometry_profile_test.ts` — 既定との Uint32 一致 + 幾何判別子が実走キーに載ること）が自動で走る。
+  - dp4a カナリアは Session が選んだプロファイルの i8a8 attention 幾何で撃つ（ADR 0115 決定 7）。既定の幾何に戻すと、プロファイルの機でカナリアと実走の WGSL が別物になる。
+  - Deno は architecture が空なので、今はどの機も既定プロファイルに落ちる（Chrome の綴り: M2 = `apple` / `metal-3`・RTX 5070 Ti = `nvidia` / `blackwell`）。
+  - 生成物（`src/kernels/geometry-profiles/<id>.ts`）は手で編集しない。再生成コマンドは生成物の冒頭コメントにある（`--from` の順序も生成物に効く）。
+  - i8a8 カーネルの充填の値変数は `bv<番号>` 固定（接頭辞 + 番号で組むと関数スコープの `k4` を隠して黙って誤値になる）。宣言名の重なりは `codegen_i8a8_shadowing_test.ts` が候補の全幾何で見る。
 - **高速化 / メモリの波・イテレーション 1「契約と土台」完了 + 残件消化済み（2026-09-26）**: 数値経路を参照層（runtime 省略値 + 厳密オラクル + sha 参照行）と
   実用層（quant 席の `session` が束ねる opt-in）に分けた。契約は [ADR 0110](../docs/decisions/0110-practical-tier-numerics-contract.md)
   （契約クラス E / C / R / Q・カーネル門の 4 点型・E2E は census + 同機参照層との床 + 崩壊上限・実用層でもデバイス内決定性 MUST・
