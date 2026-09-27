@@ -12,7 +12,13 @@
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
 
-import type { Session, SessionDiagnostics, SessionOptions, Tensor } from "@karume/runtime";
+import type {
+  RunInputs,
+  Session,
+  SessionDiagnostics,
+  SessionOptions,
+  Tensor,
+} from "@karume/runtime";
 
 import type { IrodoriGenerateEvent, IrodoriRunComponent, IrodoriState } from "./pipeline.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
@@ -103,7 +109,7 @@ export const withStageSession = async <T>(
   model: ModelComponent,
   sessionOptions: SessionOptions,
   body: (
-    run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
+    run: (inputs: RunInputs) => Promise<Record<string, Tensor>>,
     session: Session,
   ) => Promise<T>,
 ): Promise<T> => {

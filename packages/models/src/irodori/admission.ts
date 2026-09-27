@@ -38,6 +38,11 @@ export const CAPTION_PROJ = "caption_proj";
 export const SPEAKER = "speaker";
 export const DURATION = "duration";
 export const DIT = "dit";
+/**
+ * 条件側 K/V 射影（`dit` の各ブロックが条件 3 本から作る context K / V を、生成 1 回ぶんだけ
+ * 先に作るグラフ — DECIDED: ADR 0114）。出力はそのまま `dit` の同名入力になる。
+ */
+export const DIT_CONTEXT = "dit_context";
 export const CODEC_DECODER = "codec_decoder";
 export const CODEC_ENCODER = "codec_encoder";
 export const TOKENIZER = "tokenizer";
@@ -50,6 +55,7 @@ export const COMPONENT_KEYS = [
   SPEAKER,
   DURATION,
   DIT,
+  DIT_CONTEXT,
   CODEC_DECODER,
   CODEC_ENCODER,
 ] as const;
@@ -75,7 +81,7 @@ export const assetOpener = (assets: IrodoriAssets["assets"]): Promise<ComponentO
  * 資産 JSON を読む（decode / parse の門は {@link readAssetJson}）。
  *
  * NOTE: `export` は門を直接叩くテストのため（`fromAssets` 経由で此処へ届くには実 IR
- * コンテナ 8 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
+ * コンテナ 9 本が要る）。`mod.ts` / サブパス面には出さない（ADR 0008）。
  */
 export const assetJson = (
   assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>,
@@ -153,10 +159,78 @@ const assertOutputDim = (
   }
 };
 
+/** `dit` が forward ごとにホストから受ける入力（残りは全て `dit_context` の出力）。 */
+const DIT_STEP_INPUTS = ["x_t", "t_embed", "mask"] as const;
+
 /**
- * irodori が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。効く先は `dit` の
- * Session だけ（{@link IrodoriAdmission.ditSessionOptions}）。優先順位・値域・組合せ・送出型の
- * 分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合だけを決める。
+ * `dit_context` の出力と `dit` の入力の配線を見て、常駐テンソルの大きさを導く（DECIDED:
+ * ADR 0114 — 条件側 K / V は生成 1 回だけ回し、出力を常駐テンソルのまま `dit` へ渡す）。
+ *
+ * 見るのは 4 点:
+ * - `dit_context` は記号次元を持たない（常駐テンソルは確保時に大きさが要るので、S に依る形は
+ *   置けない）
+ * - 出力は 2 本以上の偶数本（ブロックごとの K / V の対 — ブロック数は宣言から導き、焼かない）
+ * - `dit` の入力名の集合 = {@link DIT_STEP_INPUTS} ∪ `dit_context` の出力名
+ * - 出力ごとに形が静的で、`dit` の同名入力と dtype・形が一致する
+ *
+ * MUST: 落とさない。常駐入力は**大きさしか**検査されない（runtime の `RunInput` の doc）ので、
+ * 形や dtype が食い違っていてもバイト数さえ合えば、別の並びとして読まれた K / V で沈黙のまま
+ * 回る。名前の食い違いは実行時にも落ちるが、GB 級の重みを落とした**後**になる。
+ */
+const admitDitContext = (
+  dit: GraphOwner,
+  ditContext: GraphOwner,
+): readonly DitContextOutput[] => {
+  const symbols = ditContext.graph.symbols;
+  if (symbols.length !== 0) {
+    throw new Error(
+      `irodori: dit_context が記号次元を持つ（[${symbols.join(", ")}]）— 出力は生成 1 回ぶんの` +
+        "静的な形でなければならない",
+    );
+  }
+  const outputs = ditContext.graph.outputs;
+  if (outputs.length < 2 || outputs.length % 2 !== 0) {
+    throw new Error(
+      `irodori: dit_context の出力が ${outputs.length} 本（ブロックごとの K / V の対 = 2 本以上の` +
+        "偶数本が要る）",
+    );
+  }
+  const ditInputs = new Map(dit.graph.inputs.map((input) => [input.name, input] as const));
+  const expected: readonly string[] = [...DIT_STEP_INPUTS, ...outputs];
+  const missing = expected.filter((name) => !ditInputs.has(name));
+  const extra = [...ditInputs.keys()].filter((name) => !expected.includes(name));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `irodori: dit の入力が {${DIT_STEP_INPUTS.join(", ")}} ∪ dit_context の出力と一致しない` +
+        `（dit に無い: [${missing.join(", ")}] / dit にだけある: [${extra.join(", ")}]）`,
+    );
+  }
+  return outputs.map((name) => {
+    const value = ditContext.graph.values[name];
+    if (value === undefined) throw new Error(`irodori: dit_context の出力 '${name}' の宣言が無い`);
+    // 上の集合の一致で必ずある（ここは型を絞るためだけに見る）。
+    const input = ditInputs.get(name);
+    if (input === undefined) throw new Error(`irodori: dit の入力 '${name}' が無い`);
+    const dims = value.shape.filter((dim): dim is number => typeof dim === "number");
+    const sameShape = value.shape.length === input.shape.length &&
+      value.shape.every((dim, axis) => dim === input.shape[axis]);
+    if (dims.length !== value.shape.length || value.dtype !== input.dtype || !sameShape) {
+      const produced = `${value.dtype} [${value.shape.join(", ")}]`;
+      const consumed = `${input.dtype} [${input.shape.join(", ")}]`;
+      throw new Error(
+        `irodori: dit_context の出力 '${name}'（${produced}）が dit の同名入力（${consumed}）と` +
+          "合わない（静的な同じ形・同じ dtype が要る）",
+      );
+    }
+    // 要素は全 dtype 4 バイト（ADR 0009）。
+    return { name, byteLength: dims.reduce((product, dim) => product * dim, 4) };
+  });
+};
+
+/**
+ * irodori が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。効く先は `dit` と
+ * `dit_context` の Session だけ（{@link IrodoriAdmission.ditSessionOptions}）。優先順位・値域・
+ * 組合せ・送出型の分類は全家族共通の `resolveSessionOptions` が持ち、ここは受理集合だけを決める。
  *
  * `attentionCompute` / `attentionScoreStorage` を受けないのは、`dit` の attention が実行時の
  * bool マスク入力を持つため融合 attention の契約に載らず、SDPA を保存しない分解経路
@@ -178,6 +252,16 @@ export const IRODORI_SESSION_POLICY: FamilySessionPolicy = {
   packedStaticQuantize: false,
 };
 
+/**
+ * `dit_context` の出力 1 本 = `dit` の同名入力 1 本（条件側 K / V — DECIDED: ADR 0114）。
+ * 名前と、常駐テンソルに取るバイト数（静的 shape の要素数 × 4 — ADR 0009 の意味論 dtype は
+ * 全て 4 バイト）。
+ */
+export type DitContextOutput = {
+  readonly name: string;
+  readonly byteLength: number;
+};
+
 /** 家族 admission（{@link admitIrodori}）が確定させる材料。 */
 export type IrodoriAdmission = {
   readonly config: IrodoriPipelineConfig;
@@ -191,7 +275,18 @@ export type IrodoriAdmission = {
    * truth から 1 度だけ導く」）。
    */
   readonly ditSymbol: string;
-  /** 明示指定と quant 宣言を合成した `dit` の実効設定（{@link IRODORI_SESSION_POLICY}）。 */
+  /**
+   * `dit_context` の出力列（宣言順）— 両経路の常駐テンソルの確保はこれだけを読む。
+   *
+   * MUST: 実行時に宣言から引き直さない（{@link IrodoriAdmission.ditSymbol} と同じ理由 — 「出力と
+   * `dit` の入力が名前・形で 1 対 1」を確かめた席と、バイト数を使う席を離さない）。
+   */
+  readonly ditContextOutputs: readonly DitContextOutput[];
+  /**
+   * 明示指定と quant 宣言を合成した `dit` と `dit_context` の実効設定
+   * （{@link IRODORI_SESSION_POLICY}）。条件側の linear は分割前は `dit` の中で同じ席で走って
+   * いたので、`dit_context` にも同じ 1 本を渡す（別の席で走らせると数値が動く）。
+   */
   readonly ditSessionOptions: SessionOptions;
   /** 実効設定が要る feature を quant 宣言へ足したもの（要求と検査の両方がこれを見る）。 */
   readonly gpuFeatures: GpuFeaturesSpec | undefined;
@@ -264,28 +359,30 @@ export const admitIrodori = async (
   );
   const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, ditSessionOptions);
 
-  // 8 本の部品が全部開けることをこの席で見る（開いていない役割は供給口が fail loudly）。
+  // 9 本の部品が全部開けることをこの席で見る（開いていない役割は供給口が fail loudly）。
   // 引き当ての間に中断の境目を置く。
   for (const key of COMPONENT_KEYS) {
     await settleAbort(options.signal);
     open(key);
   }
-  // グラフ突合は GPU より前（docstring の順序 MUST）。突合を掛けるのは下の 5 本。
+  // グラフ突合は GPU より前（docstring の順序 MUST）。突合を掛けるのは下の 6 本。
   const speaker = open(SPEAKER);
   const duration = open(DURATION);
   const dit = open(DIT);
+  const ditContext = open(DIT_CONTEXT);
   const codecDecoder = open(CODEC_DECODER);
   const codecEncoder = open(CODEC_ENCODER);
 
   // グラフの宣言と pipelineConfig の突合（ホストの式が読む数は全て config 由来）。
   assertStaticDim(dit, "x_t", 2, config.latentDim, "latentDim");
   assertStaticDim(dit, "t_embed", 1, config.timestepEmbedDim, "timestepEmbedDim");
-  assertStaticDim(dit, "text_state", 1, config.maxTextLen, "maxTextLen");
-  assertStaticDim(dit, "text_state", 2, config.textDim, "textDim");
-  assertStaticDim(dit, "speaker_state", 1, config.speakerRows, "speakerRows");
-  assertStaticDim(dit, "speaker_state", 2, config.speakerDim, "speakerDim");
-  assertStaticDim(dit, "caption_state", 1, config.maxCaptionLen, "maxCaptionLen");
-  assertStaticDim(dit, "caption_state", 2, config.captionDim, "captionDim");
+  // 条件 3 本を受けるのは `dit_context`（`dit` は K / V を受ける — ADR 0114）。
+  assertStaticDim(ditContext, "text_state", 1, config.maxTextLen, "maxTextLen");
+  assertStaticDim(ditContext, "text_state", 2, config.textDim, "textDim");
+  assertStaticDim(ditContext, "speaker_state", 1, config.speakerRows, "speakerRows");
+  assertStaticDim(ditContext, "speaker_state", 2, config.speakerDim, "speakerDim");
+  assertStaticDim(ditContext, "caption_state", 1, config.maxCaptionLen, "maxCaptionLen");
+  assertStaticDim(ditContext, "caption_state", 2, config.captionDim, "captionDim");
   assertStaticDim(duration, "text_state", 2, config.textDim, "textDim");
   assertStaticDim(duration, "speaker_vec", 1, config.speakerDim, "speakerDim");
   assertStaticDim(duration, "caption_vec", 1, config.captionDim, "captionDim");
@@ -315,6 +412,7 @@ export const admitIrodori = async (
     throw new Error(`irodori: dit の記号次元が 1 本でない（[${ditSymbols.join(", ")}]）`);
   }
   const ditSymbol = ditSymbols[0];
+  const ditContextOutputs = admitDitContext(dit, ditContext);
 
   // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
   // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
@@ -332,5 +430,13 @@ export const admitIrodori = async (
     );
   }
 
-  return { config, quantName, quant, ditSymbol, ditSessionOptions, gpuFeatures };
+  return {
+    config,
+    quantName,
+    quant,
+    ditSymbol,
+    ditContextOutputs,
+    ditSessionOptions,
+    gpuFeatures,
+  };
 };

@@ -1,6 +1,7 @@
 /**
- * Irodori の **`i8-a8` 席**の門（実 GPU）。重みは `i8` 席と**同じ i8 バイト**で、違いは `dit` の
- * Session に降りる `linearCompute: "a8"` だけ — DiT の linear 317 本が活性まで整数内積で走る。
+ * Irodori の **`i8-a8` 席**の門（実 GPU）。重みは `i8` 席と**同じ i8 バイト**で、違いは `dit` と
+ * `dit_context` の Session に降りる `linearCompute: "a8"` だけ — DiT の linear（`dit` 245 本 +
+ * 条件側 K/V 射影の `dit_context` 72 本 — ADR 0114）が活性まで整数内積で走る。
  *
  * ## なぜ latent 門（`e2e_irodori_latent_test.ts`）に席を足さないのか
  *
@@ -9,15 +10,15 @@
  * torch 鏡像は「同じ分布の別標本」になり、素直な「実測の 5〜10 倍」を閾値に採ると**恒真化する**
  * （どんな実装でも通る）。そこで検出力を 3 本に置き直す:
  *
- * 1. **整数の判断の完全一致** — S / forward 数 / latentDim。活性量子化は `dit` の Session の
- *    内側にしか掛からず、S を決める `duration` グラフは**その外**（quant の `session` は `dit`
- *    にだけ渡る — `pipeline.ts` のモジュール doc）。ここが割れたら席の配線が違う。
+ * 1. **整数の判断の完全一致** — S / forward 数 / latentDim。活性量子化は `dit` / `dit_context` の
+ *    Session の内側にしか掛からず、S を決める `duration` グラフは**その外**（quant の `session` は
+ *    `dit` と `dit_context` にだけ渡る — `pipeline.ts` のモジュール doc）。ここが割れたら席の配線が違う。
  * 2. **判別帯**（{@link MEASURED.zBand}）— `i8` golden との z maxAbs が \[下限, 上限\] に入る。
  *    **下限が要る**のが肝で、`linearCompute` が黙って f32 経路へ落ちると差は**小さくなる**
  *    （ADR 0028 決定 6 — 沈黙フォールバックは誤差が小さい側に出る）。上限だけの門は
  *    「i8a8 が一度も走っていない」を緑で通す。
  * 3. **パイプラインキーの census**（{@link MEASURED.ditKeys} と束の census 表
- *    `helpers/census-table.ts`）— `dit` の run が実際に i8a8 GEMM と
+ *    `helpers/census-table.ts`）— `dit` と `dit_context` の run が実際に i8a8 GEMM と
  *    `quantize_rows` を回し、f32 の linear カーネルを **1 回も**回していないこと。2 の下限が
  *    分布の話であるのに対し、こちらは実行そのものの直接観測。
  *
@@ -38,7 +39,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "@karume/runtime";
 import type { SessionDiagnostics } from "@karume/runtime";
-import { IrodoriPipeline } from "../mod.ts";
+import { IrodoriPipeline, type IrodoriRunComponent } from "../mod.ts";
 import { requireCensus, SEAT_SIGNATURES } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { assertRowCensus, censusRowOf, effectiveSessionOptions } from "./helpers/census-table.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -97,25 +98,40 @@ const MEASURED: {
    */
   readonly zBand: readonly [number, number] | undefined;
   /**
-   * `dit` の 1 forward あたりに走る `quantize_rows` の dispatch 数。
+   * 部品ごとの run 1 回あたりに走る `quantize_rows` の dispatch 数（`dit` は 1 forward・
+   * `dit_context` は生成 1 回の 1 run）。
    *
-   * DiT の linear は 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て 4 の倍数で i8-a8 適格・
-   * 量子化 recon の sizeBreakdown）。i8a8 の linear は「活性を per-token i8 へ落とす
-   * `quantize_rows` → 整数内積の GEMM」の対で走るので、期待は本数の関数として書ける。
-   * GEMM 側（席 `linearCompute: "a8"` の変種キー）の本数は束の census 表
-   * （`helpers/census-table.ts`）が持つ — 席の本数の正本を 1 か所にするため。
+   * DiT の linear は分割前の 1 グラフで 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て 4 の
+   * 倍数で i8-a8 適格・量子化 recon の sizeBreakdown）。ADR 0114 で条件側 K/V 射影 72 本〈12
+   * ブロック × text / speaker / caption × K / V〉を `dit_context` へ割り出したので、`dit` 245 本 +
+   * `dit_context` 72 本になった — **グラフが変わったための期待値の変更**で、本数を緩めたのでは
+   * ない。合計 317 の検査は置かない（部品ごとにちょうどで縛れば足り、合計は片方の取り違えを
+   * 打ち消しうる）。i8a8 の linear は「活性を per-token i8 へ落とす `quantize_rows` → 整数内積の
+   * GEMM」の対で走るので、期待は本数の関数として書ける。GEMM 側（席 `linearCompute: "a8"` の
+   * 変種キー）の本数は束の census 表（`helpers/census-table.ts`）が持つ — 席の本数の正本を
+   * 1 か所にするため。
    *
    * 導出: `undefined` のままこの門を走らせ、ログに出る実測本数を書き写す（源は計測に依らない
    * census = `lastRunPipelines`）。
    */
-  readonly ditKeys: { readonly quantizeRows: number } | undefined;
+  readonly ditKeys:
+    | { readonly quantizeRows: Readonly<Record<CensusComponent, number>> }
+    | undefined;
 } = {
   zBand: [0.1, 6],
-  ditKeys: { quantizeRows: 317 },
+  ditKeys: { quantizeRows: { dit: 245, "dit-context": 72 } },
 };
 
 /** census の生成で使う発話長（秒）。`duration` を回さず S を小さく固定する。 */
 const CENSUS_SECONDS = 1;
+
+/** census を採る部品（quant の `session` が降りる 2 本 — 観測席の綴り）。 */
+type CensusComponent = Extract<IrodoriRunComponent, "dit" | "dit-context">;
+const CENSUS_COMPONENTS: readonly CensusComponent[] = ["dit", "dit-context"];
+const isCensusComponent = (component: IrodoriRunComponent): component is CensusComponent =>
+  (CENSUS_COMPONENTS as readonly IrodoriRunComponent[]).includes(component);
+/** census 表の相（`dit` は denoise の step ごと・`dit_context` は生成 1 回の run）。 */
+const PHASE_OF: Readonly<Record<CensusComponent, string>> = { dit: "step", "dit-context": "run" };
 
 /** パイプラインキーの分類（綴りの正本は `src/kernels/linear{,-i8a8}.ts` / `quantize-rows.ts`）。 */
 const isLinearKey = (key: string): boolean => key.startsWith("linear:");
@@ -129,10 +145,10 @@ type KeyCensus = {
   readonly plainLinear: number;
 };
 
-const censusOf = (diagnostics: SessionDiagnostics): KeyCensus => {
+const censusOf = (diagnostics: SessionDiagnostics, component: CensusComponent): KeyCensus => {
   // MUST: census の無い run を「0 本」として数えない — キー検査が黙って空振りする
   //（requireCensus が undefined / 空を落とす）。
-  const entries = requireCensus(diagnostics.lastRunPipelines, "dit");
+  const entries = requireCensus(diagnostics.lastRunPipelines, component);
   let i8a8Linear = 0;
   let quantizeRows = 0;
   let plainLinear = 0;
@@ -247,7 +263,8 @@ Deno.test({
 });
 
 Deno.test({
-  name: `e2e(実GPU): dit の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
+  name:
+    `e2e(実GPU): dit / dit_context の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
   ignore: !RUNNABLE,
   fn: async () => {
     // ここで `gpu` を渡すので破棄もこちらの責任になる（渡した側が所有権を持つ —
@@ -266,16 +283,19 @@ Deno.test({
         effectiveSessionOptions("irodori", modelEntry(manifest).quants[QUANT].session, {}, where),
       );
       assert(row !== undefined, `${where}: 束の census 表（helpers/census-table.ts）に行が無い`);
-      const observed: KeyCensus[] = [];
-      const ditRuns: SessionDiagnostics["lastRunPipelines"][] = [];
+      const observed: Record<CensusComponent, KeyCensus[]> = { dit: [], "dit-context": [] };
+      const runs: Record<CensusComponent, SessionDiagnostics["lastRunPipelines"][]> = {
+        dit: [],
+        "dit-context": [],
+      };
       await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
         gpu,
         model: MODEL,
         quant: QUANT,
         onRunDiagnostics: (component, diagnostics) => {
-          if (component !== "dit") return;
-          observed.push(censusOf(diagnostics));
-          ditRuns.push(diagnostics.lastRunPipelines);
+          if (!isCensusComponent(component)) return;
+          observed[component].push(censusOf(diagnostics, component));
+          runs[component].push(diagnostics.lastRunPipelines);
         },
       });
       // `durationSeconds` で S を固定するのは `duration` を回さず短く保つため（見たいのは
@@ -286,37 +306,55 @@ Deno.test({
         durationSeconds: CENSUS_SECONDS,
       });
 
-      if (observed.length === 0) throw new Error("dit の run が 1 回も観測されなかった");
-      const first = observed[0];
-      console.log(
-        `[e2e] irodori ${MODEL}/${QUANT} census: dit run ${observed.length} 回 / ` +
-          `i8a8 linear ${first.i8a8Linear} 本 / quantize_rows ${first.quantizeRows} 本 / ` +
-          `f32 linear ${first.plainLinear} 本`,
-      );
-      // 全 forward が同じ計画で走る（uncond はマスク還元 — ADR 0047 決定 1）ので、本数は
-      // run ごとに揺れない。揺れたら「一部の run だけ別の経路へ落ちた」の直接の証拠になる。
-      for (const [index, census] of observed.entries()) {
-        assertEquals(census, first, `dit の run ${index} だけ dispatch の内訳が違う`);
-      }
+      if (observed.dit.length === 0) throw new Error("dit の run が 1 回も観測されなかった");
+      // 条件側 K/V は生成 1 回に 1 run（forward ごとに回っていたら ADR 0114 のホイストが外れている）。
       assertEquals(
-        first.plainLinear,
-        0,
-        "f32 骨格の linear が走っている（適格判定が外れて一部が黙って f32 経路へ落ちた）",
+        observed["dit-context"].length,
+        1,
+        "dit_context の run が生成 1 回に 1 回でない",
       );
-      // 席の変種（i8a8 GEMM）と参照経路に残った linear を run ごとにちょうどの本数で見る。
-      const checked = assertRowCensus(row, new Map([["step", ditRuns]]), () => "dit", where);
+      for (const component of CENSUS_COMPONENTS) {
+        const first = observed[component][0];
+        const count = observed[component].length;
+        console.log(
+          `[e2e] irodori ${MODEL}/${QUANT} census: ${component} run ${count} 回 / ` +
+            `i8a8 linear ${first.i8a8Linear} 本 / quantize_rows ${first.quantizeRows} 本 / ` +
+            `f32 linear ${first.plainLinear} 本`,
+        );
+        // 全 forward が同じ計画で走る（uncond はマスク還元 — ADR 0047 決定 1）ので、本数は
+        // run ごとに揺れない。揺れたら「一部の run だけ別の経路へ落ちた」の直接の証拠になる。
+        for (const [index, census] of observed[component].entries()) {
+          assertEquals(census, first, `${component} の run ${index} だけ dispatch の内訳が違う`);
+        }
+        assertEquals(
+          first.plainLinear,
+          0,
+          `${component}: f32 骨格の linear が走っている（適格判定が外れて一部が黙って f32 経路へ落ちた）`,
+        );
+      }
+      // 席の変種（i8a8 GEMM）と参照経路に残った linear を run ごとにちょうどの本数で見る
+      // （相 → 部品は census 表の軸の綴り — `dit` は step・`dit_context` は run）。
+      const checked = assertRowCensus(
+        row,
+        new Map(CENSUS_COMPONENTS.map((component) => [PHASE_OF[component], runs[component]])),
+        (phase) => phase === PHASE_OF.dit ? "dit" : "dit-context",
+        where,
+      );
       assert(checked > 0, `${where}: 表の期待と突き合わせた run が 1 本も無い`);
       if (MEASURED.ditKeys === undefined) {
         throw new Error(
-          `i8-a8 のキー本数が未導出（実測 quantize_rows ${first.quantizeRows}）— 上のログの` +
-            "実測を `MEASURED.ditKeys` へ書く",
+          `i8-a8 のキー本数が未導出（実測 quantize_rows dit ${observed.dit[0].quantizeRows} / ` +
+            `dit-context ${observed["dit-context"][0].quantizeRows}）— 上のログの実測を` +
+            " `MEASURED.ditKeys` へ書く",
         );
       }
-      assertEquals(
-        first.quantizeRows,
-        MEASURED.ditKeys.quantizeRows,
-        "dit の quantize_rows の dispatch 数が期待と違う（DiT の linear 本数か融合が動いた）",
-      );
+      for (const component of CENSUS_COMPONENTS) {
+        assertEquals(
+          observed[component][0].quantizeRows,
+          MEASURED.ditKeys.quantizeRows[component],
+          `${component} の quantize_rows の dispatch 数が期待と違う（DiT の linear 本数か融合が動いた）`,
+        );
+      }
     } finally {
       gpu.destroy();
     }

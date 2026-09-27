@@ -9,7 +9,7 @@
 //     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る —
 //     それより先の境界は実資産と GPU が要るのでここでは見られない。
 //
-// 観測の仕掛け: **全ケースで容器 8 本は揃えて**おく（中身は宣言だけ）。したがって
+// 観測の仕掛け: **全ケースで容器 9 本は揃えて**おく（中身は宣言だけ）。したがって
 //  - manifest 契約の違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の
 //    門が先（容器を開くのは admission の前 — `assetComponentOpener` は同期の供給口を返すため
 //    先に全部品を開く）
@@ -50,6 +50,7 @@ const WEIGHT_NAMES = [
   "speaker",
   "duration",
   "dit",
+  "dit_context",
   "codec_decoder",
   "codec_encoder",
 ] as const;
@@ -110,7 +111,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string => {
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
 /**
- * 開ける容器 8 本（宣言は最小 — グラフ突合そのものは `irodori_admission_test.ts` が実物と同じ
+ * 開ける容器 9 本（宣言は最小 — グラフ突合そのものは `irodori_admission_test.ts` が実物と同じ
  * 宣言で踏む）。`tokenizer` は入れない: 門を全部通った先で落ちる 1 本として残す。
  */
 const COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};

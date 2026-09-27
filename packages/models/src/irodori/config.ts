@@ -120,11 +120,11 @@ type IrodoriCfgScales = {
 };
 
 export type IrodoriPipelineConfig = {
-  /** text 側 token 列の上限（BOS 込み）。`dit` の `text_state` の宣言長でもある。 */
+  /** text 側 token 列の上限（BOS 込み）。`dit_context` の `text_state` の宣言長でもある。 */
   readonly maxTextLen: number;
-  /** caption 側 token 列の上限（BOS 込み）。`dit` の `caption_state` の宣言長でもある。 */
+  /** caption 側 token 列の上限（BOS 込み）。`dit_context` の `caption_state` の宣言長でもある。 */
   readonly maxCaptionLen: number;
-  /** `dit` の `speaker_state` の宣言行数（参照 latent の上限 + 平均トークン 1 本）。 */
+  /** `dit_context` の `speaker_state` の宣言行数（参照 latent の上限 + 平均トークン 1 本）。 */
   readonly speakerRows: number;
   /** `dit` の記号次元 S の上限。 */
   readonly ditSymMax: number;

@@ -18,8 +18,11 @@
  * 4. ホスト: 参照 latent を patch → `speaker` → **平均トークンを前置**（グラフの外）
  * 5. `duration` → log frames → ホストで S を決める（expm1 → 銀行家丸め → clamp）
  * 6. ホスト: 条件 state を Tmax へ右 pad + 区間マスクを組む
- * 7. `dit` を 1 セッションで 40〜100 forward（CFG 合成と Euler は GPU 常駐の小グラフ 2 本 —
- *    ループ全体が 1 batch で、ホストへ降りるのは最後の潜在 1 回だけ）→ latent
+ * 6'. `dit_context` を生成 1 回だけ回す（条件側 K/V 射影 — ブロックごとの context K / V を
+ *    常駐テンソルへ写し、Session は `dit` を開く前に畳む。DECIDED: ADR 0114）
+ * 7. `dit` を 1 セッションで 40〜100 forward（6' の K / V を常駐入力で受ける。CFG 合成と Euler
+ *    は GPU 常駐の小グラフ 2 本 — ループ全体が 1 batch で、ホストへ降りるのは最後の潜在 1 回
+ *    だけ）→ latent
  * 8. ホスト: 末尾トリムの位置を **z 上で**決める（`host/trim.ts`）
  * 9. `codec_decoder` を 1 セッションでタイルぶん回す（`codec.ts`）→ 全長の波形
  * 10. ホスト: 秒指定 / 末尾トリムの短いほうでサンプル単位に切る
@@ -29,9 +32,11 @@
  * {@link IrodoriPipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
  * （`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は {@link IrodoriPipeline.generate} の
  * 中で段ごとに張っては畳む。`backbone` だけで 1.26GB あるので、条件エンコーダと DiT を
- * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。DiT の段だけは `dit` に加えて
- * ホストで組んだ小グラフ 2 本（{@link "./dit-loop.ts"} の `runDitLoopResident`）を同時に張るが、
- * 重みを持たないノード 5 個ぶんなので VRAM の話には効かない。
+ * 同時に生かさない。codec も同じ理由で DiT を畳んでから張る。`dit_context` も `dit` を張る
+ * **前**に畳む（条件側の linear の重みと出力スロットを DiT のループ中に残さない — 残るのは
+ * 常駐テンソルに写した K / V だけ）。DiT の段だけは `dit` に加えてホストで組んだ小グラフ 2 本
+ * （{@link "./dit-loop.ts"} の `runDitLoopResident`）を同時に張るが、重みを持たないノード
+ * 5 個ぶんなので VRAM の話には効かない。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` / `generateLatent` は直列化鎖に載せ
  * （並行呼び出しは待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
@@ -46,10 +51,12 @@
  * 数秒〜十数秒が普通で、そこでは単発が通る。タイル化が要ると分かったら decoder と同じ形
  * （halo 付きの平行移動同変）をもう 1 本入れる。
  *
- * ## MUST: 低精度ノブが効くのは `dit` だけ
+ * ## MUST: 低精度ノブが効くのは `dit` と `dit_context` だけ
  *
- * quant の `session` は `dit` の Session にだけ渡す。条件エンコーダ 5 本は 1 回ずつしか
- * 回らず（合成時間の支配項は 40〜100 forward の DiT）、実行形ノブの比較軸を DiT に保つ。
+ * quant の `session` は `dit` と `dit_context` の Session にだけ渡す。条件エンコーダ 5 本は
+ * 1 回ずつしか回らず（合成時間の支配項は 40〜100 forward の DiT）、実行形ノブの比較軸を DiT に
+ * 保つ。`dit_context` は DiT から割り出した条件側で、分割前は `dit` の中で同じ席で走っていた
+ * — 別の席で走らせると数値が動く。
  *
  * ## MUST: uncond は「cond の state + 該当区間のマスク全 False」だけ（ADR 0047 決定 1）
  *
@@ -88,6 +95,8 @@ import {
   CODEC_ENCODER,
   COMPONENT_KEYS,
   DIT,
+  DIT_CONTEXT,
+  type DitContextOutput,
   DURATION,
   type IrodoriAdmission,
   SPEAKER,
@@ -258,7 +267,8 @@ export type IrodoriGenerateRequest = {
 
 /**
  * {@link IrodoriPipelineOptions.onRunDiagnostics} が受けるコンポーネント名。
- * `stage` イベント（{@link IrodoriGenerateEvent}）の段名も同じ 8 名。
+ * `stage` イベント（{@link IrodoriGenerateEvent}）の段名も同じ 9 名。綴りは weights の役割名の
+ * `_` を `-` にしたもの（`dit_context` → `dit-context`）。
  */
 export type IrodoriRunComponent =
   | "backbone"
@@ -266,6 +276,7 @@ export type IrodoriRunComponent =
   | "caption-proj"
   | "speaker"
   | "duration"
+  | "dit-context"
   | "dit"
   | "codec-encoder"
   | "codec-decoder";
@@ -314,7 +325,8 @@ export type IrodoriPipelineOptions = {
   /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
   readonly quant?: string;
   /**
-   * 実行 1 回ごとの診断を受け取る観測席（1 生成 = 条件エンコーダ 5〜7 回 + `dit` 40〜100 回）。
+   * 実行 1 回ごとの診断を受け取る観測席（1 生成 = 条件エンコーダ 5〜7 回 + `dit-context` 1 回 +
+   * `dit` 40〜100 回）。
    * op 別 GPU 時間（`lastRunTiming`）が要るときは `gpu` に
    * `acquireGpu({ gpuTiming: true })` を渡す（ADR 0021 — 既定は計測しない）。
    *
@@ -343,9 +355,9 @@ export type IrodoriPipelineOptions = {
    */
   readonly signal?: AbortSignal;
   /**
-   * `dit` の linear の実行形を quant の宣言より優先して指定する（省略時は quant の `session` の
-   * 宣言 → runtime 既定の順 — ADR 0058 追記 2026-09-26）。`"f16"` は device の shader-f16 を要し、
-   * 自前で取る GPU には要求を足す。共有 GPU（`gpu`）が持たなければ重みを取る前に落ちる。
+   * `dit` / `dit_context` の linear の実行形を quant の宣言より優先して指定する（省略時は quant の
+   * `session` の宣言 → runtime 既定の順 — ADR 0058 追記 2026-09-26）。`"f16"` は device の
+   * shader-f16 を要し、自前で取る GPU には要求を足す。共有 GPU（`gpu`）が持たなければ重みを取る前に落ちる。
    * 不正な値は `ModelInputError`（ADR 0107）。attention 系のノブは受けない（効く席が `dit` の
    * グラフに無い — `src/irodori/admission.ts` の `IRODORI_SESSION_POLICY`）。
    */
@@ -382,11 +394,14 @@ export type IrodoriState = {
   readonly speaker: ModelComponent;
   readonly duration: ModelComponent;
   readonly dit: ModelComponent;
+  readonly ditContext: ModelComponent;
   readonly codecEncoder: ModelComponent;
   readonly codecDecoder: ModelComponent;
   /** `dit` の記号次元 S の名前（導出は {@link "./admission.ts"} の `admitIrodori` の 1 度だけ）。 */
   readonly ditSymbol: string;
-  /** 低精度ノブ。**`dit` の Session にだけ**渡す（モジュール doc の MUST）。 */
+  /** `dit_context` の出力列（導出は {@link "./admission.ts"} の `admitIrodori` の 1 度だけ）。 */
+  readonly ditContextOutputs: readonly DitContextOutput[];
+  /** 低精度ノブ。**`dit` と `dit_context` の Session にだけ**渡す（モジュール doc の MUST）。 */
   readonly ditSessionOptions: SessionOptions;
   readonly onRunDiagnostics?: (
     component: IrodoriRunComponent,
@@ -408,7 +423,8 @@ const buildIrodoriState = async (
   open: ComponentOpener,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
-  const { config, quantName, ditSymbol, ditSessionOptions, gpuFeatures } = admitted;
+  const { config, quantName, ditSymbol, ditContextOutputs, ditSessionOptions, gpuFeatures } =
+    admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const backbone = open(BACKBONE);
   const textProj = open(TEXT_PROJ);
@@ -416,6 +432,7 @@ const buildIrodoriState = async (
   const speaker = open(SPEAKER);
   const duration = open(DURATION);
   const dit = open(DIT);
+  const ditContext = open(DIT_CONTEXT);
   const codecDecoder = open(CODEC_DECODER);
   const codecEncoder = open(CODEC_ENCODER);
 
@@ -450,9 +467,11 @@ const buildIrodoriState = async (
       speaker,
       duration,
       dit,
+      ditContext,
       codecEncoder,
       codecDecoder,
       ditSymbol,
+      ditContextOutputs,
       ditSessionOptions,
       ...(options.onRunDiagnostics === undefined
         ? {}
@@ -651,6 +670,7 @@ const generateLatent = async (
     speaker_state: rightPad(speakerState, caps.speaker, config.speakerDim, "speaker 条件"),
     caption_state: rightPad(captionState, caps.caption, config.captionDim, "caption 条件"),
   };
+  // `dit_context` の入力（⑥' で 1 度だけ使う — K / V に射影してから `dit` へ渡す）。
   const conditions = {
     text_state: f32(conditionValues.text_state, [1, caps.text, config.textDim]),
     speaker_state: f32(conditionValues.speaker_state, [1, caps.speaker, config.speakerDim]),
@@ -681,7 +701,7 @@ const generateLatent = async (
       } satisfies Tensor,
     }));
 
-  // --- ⑦ Euler + CFG independent -----------------------------------------
+  // --- ⑥' 条件側 K/V 射影 + ⑦ Euler + CFG independent（2 経路とも dit-loop.ts）---
   const noiseLength = frames * config.latentDim;
   const seed = request.seed ?? 0;
   let initial: Float32Array<ArrayBuffer>;
@@ -703,7 +723,6 @@ const generateLatent = async (
     initial,
     schedule: tSchedule(config.steps, config.initScale),
     frequencies: timestepFrequencies(config.timestepEmbedDim),
-    conditionValues,
     conditions,
     condMask,
     uncondVariants,
@@ -818,7 +837,8 @@ export class IrodoriPipeline {
    * 構築）。block は Session を組むその瞬間に part 順で読まれる（ADR 0109 —
    * `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
    * {@link FromPretrainedComponentOptions.components}（役割は `backbone` / `text_proj` /
-   * `caption_proj` / `speaker` / `duration` / `dit` / `codec_decoder` / `codec_encoder`）。
+   * `caption_proj` / `speaker` / `duration` / `dit` / `dit_context` / `codec_decoder` /
+   * `codec_encoder`）。
    * 文字列の `ref` は `{ repo }` と読む（= `main` 追従）。**`ref` は必須**（取得元に既定は
    * 無い — `src/hub/repo-ref.ts` の MUST）。
    *
@@ -894,7 +914,7 @@ export class IrodoriPipeline {
   ): Promise<IrodoriPipeline> {
     // MUST: 入口の中断検査は容器を開く**前**（`admitIrodori` の入口と同じ 1 本を前倒しする）。
     // 受け口は同期の供給口を返すために**先に全部品を開く**ので、ここを省くと中断済みの呼びが
-    // 8 本ぶんの容器を開いてから落ちる。
+    // 9 本ぶんの容器を開いてから落ちる。
     options.signal?.throwIfAborted();
     const open = await assetOpener(input.assets);
     const admitted = await admitIrodori(input.manifest, open, options);

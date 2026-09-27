@@ -17,7 +17,8 @@
  *
  * ## 値の出どころ（2026-09-26 時点・全て GPU 不要で導出）
  *
- * - **既存テストに散っていた値**: irodori DiT の i8a8 linear 317（`e2e_irodori_w8a8_test.ts`）・
+ * - **既存テストに散っていた値**: irodori DiT の i8a8 linear 317（`e2e_irodori_w8a8_test.ts` —
+ *   ADR 0114 でグラフを割った後は `dit` 245 + `dit_context` 72）・
  *   gemma4 E2B decode の GEMV 277（`e2e_gemma4_greedy_test.ts`）・RMS→add 融合 106 / linear→SRQ
  *   融合 275 / packed SRQ 70（`runtime/tests/assets_fusion_counts_test.ts`）。
  * - **配布ミラーの計画から機械的に導いた値**: 容器の part 0（グラフ宣言だけ）を読み、
@@ -204,7 +205,7 @@ export type PhaseCensus = { readonly [Seat in NumericSeat]?: SeatCount<Seat> };
 type FamilyAxes = {
   readonly gemma4: GemmaAxes;
   readonly "gemma4-qat": GemmaAxes;
-  readonly irodori: { readonly dit: "step" };
+  readonly irodori: { readonly dit: "step"; readonly "dit-context": "run" };
   readonly anima: { readonly transformer: "step" };
   readonly sbv2: { readonly front: "run"; readonly voice: "run" };
 };
@@ -292,8 +293,18 @@ const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
 const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
 
-/** irodori v4 系の DiT: linear 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て i8 × k % 4 == 0）。 */
-const IRODORI_DIT_A8 = { variant: 317, reference: 0 } as const;
+/**
+ * irodori v4 系の DiT: linear 245 本（分割前の 317 本の k ∈ {32, 192, 512, 768, 1280, 3680} — 全て
+ * i8 × k % 4 == 0）。
+ *
+ * 期待値の変更（317 → 245 / `dit_context` 72）はグラフが変わったため（ADR 0114 — 条件側 K/V
+ * 射影 72 本〈12 ブロック × text / speaker / caption × K / V〉を `dit_context` へ割り出した）。
+ * 本数を緩めたのではない。合計 317 の検査は置かない（部品ごとにちょうどで縛れば足り、合計は
+ * 片方の取り違えを打ち消しうる）。
+ */
+const IRODORI_DIT_A8 = { variant: 245, reference: 0 } as const;
+/** irodori v4 系の `dit_context`: 条件側 K/V 射影の linear 72 本（k ∈ {512, 768} — 生成 1 回に run 1 回）。 */
+const IRODORI_DIT_CONTEXT_A8 = { variant: 72, reference: 0 } as const;
 /** anima DiT: linear 454 本（公式 5 変種・追加 2 変種とも同じグラフ）。 */
 const ANIMA_DIT_LINEARS = { variant: 454, reference: 0 } as const;
 const ANIMA_MODELS = [
@@ -574,12 +585,15 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       },
     },
   },
-  // --- irodori（quant の session は dit にだけ渡る）--------------------------
+  // --- irodori（quant の session は dit と dit_context にだけ渡る）-----------
   {
     family: "irodori",
     models: ["v4-small", "v4.1-small"],
     session: { linearCompute: "a8" },
-    census: { dit: { step: { linearCompute: IRODORI_DIT_A8 } } },
+    census: {
+      dit: { step: { linearCompute: IRODORI_DIT_A8 } },
+      "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
+    },
   },
   // --- anima（quant の session は DiT = transformer にだけ渡る）---------------
   {

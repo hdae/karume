@@ -8,6 +8,7 @@
 
 import type {
   GpuContext,
+  RunInputs,
   Session,
   SessionDiagnostics,
   SessionOptions,
@@ -31,14 +32,14 @@ export const withSession = async <T>(
   sessionOptions: SessionOptions,
   observe: ((diagnostics: SessionDiagnostics) => void) | undefined,
   body: (
-    run: (inputs: Record<string, Tensor>) => Promise<Record<string, Tensor>>,
+    run: (inputs: RunInputs) => Promise<Record<string, Tensor>>,
     session: Session,
   ) => Promise<T>,
 ): Promise<T> => {
   const session = await model.createSession(gpu, sessionOptions);
   let failure: { readonly error: unknown } | undefined;
   try {
-    const run = async (inputs: Record<string, Tensor>): Promise<Record<string, Tensor>> => {
+    const run = async (inputs: RunInputs): Promise<Record<string, Tensor>> => {
       const outputs = await session.run(inputs);
       if (observe !== undefined) observe(session.diagnostics());
       return outputs;

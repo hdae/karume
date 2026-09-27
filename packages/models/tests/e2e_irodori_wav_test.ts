@@ -530,6 +530,9 @@ Deno.test({
             "stage:speaker:end",
             "stage:duration:start",
             "stage:duration:end",
+            // 段 6'（条件側 K/V 射影 — ADR 0114）は生成 1 回だけ、`dit` の段の前で開いて閉じる。
+            "stage:dit-context:start",
+            "stage:dit-context:end",
             "stage:dit:start",
             ...Array.from(
               { length: config.steps },
