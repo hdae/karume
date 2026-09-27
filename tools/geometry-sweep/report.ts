@@ -52,7 +52,7 @@ export type SweepRow = {
   /** 幾何の表示名（キー断片と同じ綴り）。 */
   readonly geometry: string;
   readonly geometryParams: GemmGeometry | I8a8Geometry;
-  /** 本番の解決（Session の経路）が選ぶ幾何か。 */
+  /** 既定プロファイルの幾何（比の土台）か。Session が実際に使う幾何は adapter のプロファイル。 */
   readonly isDefault: boolean;
   readonly key?: string;
   readonly workgroups?: readonly [number, number, number];

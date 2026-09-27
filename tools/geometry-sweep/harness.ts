@@ -255,7 +255,8 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
     ],
     prelude: [],
     output: "out",
-    // 本番の解決 = 行数バケット（linear.ts:311 `gemmGeometryForRows(m)`）
+    // 掃引の既定 = 既定プロファイルの幾何（行数バケット `gemmGeometryForRows(m)` — 比の土台）。
+    // Session が実際に使う幾何は adapter のプロファイル（src/kernels/geometry-profile.ts）
     defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);
@@ -296,7 +297,7 @@ const i8a8LinearPlan = (sweepCase: LinearCase, limit: number, dp4a: boolean): Ca
     ],
     prelude: [],
     output: "out",
-    // linear.ts:490
+    // 掃引の既定 = 既定プロファイルの i8a8 linear 幾何（比の土台）
     defaultCandidate: i8a8Candidate(defaultI8a8Geometry("linear")),
     launch: (candidate) => {
       const geometry = i8a8Of(candidate, sweepCase.id);
@@ -387,7 +388,8 @@ const attentionPlan = (sweepCase: AttentionCase, limit: number): CasePlan => {
     ],
   });
   const stagePv = sweepCase.stage === "pv";
-  // 本番の解決 = 既定固定（attention.ts:301 `defaultGemmGeometry()`）
+  // 掃引の既定 = 既定プロファイルの幾何（①QK / ③PV とも `defaultGemmGeometry()` — 比の土台）。
+  // Session が実際に使う幾何は adapter のプロファイル（src/kernels/geometry-profile.ts）
   const fallback = defaultGemmGeometry();
   return {
     resources: [
@@ -445,7 +447,7 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
     ],
   });
   const stagePv = sweepCase.stage === "pv";
-  // attention.ts の prepareAttentionQkI8a8 / prepareAttentionPvI8a8 が選ぶ既定（op 別）
+  // 掃引の既定 = 既定プロファイルの i8a8 attention 幾何（①QK / ③PV で別・比の土台）
   const qkDefault = defaultI8a8Geometry("attention_qk");
   const pvDefault = defaultI8a8Geometry("attention_pv");
   return {
@@ -510,7 +512,7 @@ const conv2dPlan = (sweepCase: Conv2dCase, limit: number): CasePlan => {
     ],
     prelude: [],
     output: "out",
-    // conv.ts:370-372（m タイルの行数から幾何を解く）
+    // 掃引の既定 = 既定プロファイルの conv2d 幾何（m タイルのクラス 64 / 32 行ごと・比の土台）
     defaultCandidate: conv2dCandidate(gemmMTileGeometry(mTile)),
     launch: (candidate) => {
       const geometry = gemmOf(candidate, sweepCase.id);

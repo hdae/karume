@@ -4,7 +4,7 @@ A local page that runs the GEMM tile geometry sweep (perf-ledger K-70) in Chrome
 same measurement core and the same JSON format as the Deno CLI. What is measured and the output
 format are described in [../README.md](../README.md).
 
-Run from the repository root. The page has not yet been checked on real hardware.
+Run from the repository root. The page has been run on an Apple M2 (Chrome 153) and, served from a static host, on an RTX 5070 Ti (Windows, Chrome 153).
 
 ```sh
 deno task bench:geometry-browser

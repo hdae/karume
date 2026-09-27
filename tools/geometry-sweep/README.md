@@ -45,6 +45,81 @@ With Chrome, see [browser/README.md](browser/README.md):
 deno task bench:geometry-browser
 ```
 
+## Generating a geometry profile (`profile`)
+
+The `profile` subcommand turns sweep results into a **geometry profile**: a static table of tile
+geometries for one adapter, written as TypeScript to
+`packages/runtime/src/kernels/geometry-profiles/<id>.ts` (perf-ledger K-71). The runtime picks one
+profile from the adapter's `(vendor, architecture)` in a fixed order and never measures anything
+at run time: automatic tuning at run time stays forbidden (ADR 0022). The sweep is the explicit
+tuning step; the profile stores its result in the source. The subcommand does not use the GPU.
+
+```sh
+deno run -A tools/geometry-sweep/main.ts profile \
+  --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json \
+  --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json \
+  --id apple-metal-3 --vendor apple --architecture metal-3 \
+  --out packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts
+```
+
+Flags:
+
+- `--from <sweep.json>` (repeatable) — sweep results of the same adapter. Several files can be
+  combined (for example a quick and a full sweep). Files whose `adapter.vendor` /
+  `adapter.architecture` differ from each other or from `--vendor` / `--architecture` are
+  rejected, as is the same file given twice. GPU timestamps are required: only sweeps whose
+  `gpuTiming.unit` is `ns` or `deno-raw-tick` and whose `gpuTiming.quantized` is false are
+  accepted. Wall-clock sweeps (unit `wall`, or no `gpuTiming`) and quantized sweeps are rejected,
+  because both shrink the ratios between geometries toward 1. To get timestamps, run the Deno CLI
+  on an adapter that lists `timestamp-query` (it then uses it automatically), or check
+  **GPU の timestamp で測る** on the Chrome page with the WebGPU developer features enabled.
+- `--id <id>` — the profile id (kebab-case). The output file must be named `<id>.ts`, and the
+  exported constant is the id in upper snake case (`APPLE_METAL_3`).
+- `--vendor <v>` and optionally `--architecture <a>` — the adapter the profile matches. Without
+  `--architecture`, the profile matches every architecture of that vendor.
+- `--out <file.ts>` — the generated file.
+- `--min-speedup N` (default 1.05, at least 1) — the smallest speed-up over the default geometry
+  that counts as a win.
+- `--check` — do not write; exit 0 when the existing file is byte-identical to what the command
+  would generate, and 1 otherwise (with a summary of the difference).
+
+Each field of the profile is one class of cases:
+
+| field                                                 | cases                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------ |
+| `gemmRows[0]`, `gemmRows[1]`, `gemmRows[2]`           | `linear` with M ≤ 64, 65–512, and above 512 (the runtime's bucket) |
+| `attention.qk`, `attention.pv`                        | `attention`, QK and PV                                             |
+| `conv2d.rows64`, `conv2d.rows32`                      | `conv2d`, by the m-tile (64 or 32 rows) of the case's default row  |
+| `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv` | `i8a8-linear`, and `i8a8-attention` QK and PV                      |
+
+For each class, a geometry is a candidate only if, in **every** case of the class, its output
+matched the default geometry's output and its speed-up over the default is at least
+`--min-speedup`. Among the candidates, the one with the highest geometric mean of the speed-ups
+wins (ties go to the name that sorts first). With no candidate, the field keeps the default
+geometry of the sweep. The default row of every case must use the runtime's current default
+geometry for its class; otherwise the command fails, because the speed-ups were measured against a
+different baseline (a sweep from an older runtime, or shifted class boundaries). A class with no
+cases in the sweep gets the runtime's default. When several
+sweeps measured the same case and geometry, the speed-up is the geometric mean of those
+measurements, and a single mismatched or failed measurement disqualifies the geometry. The
+`gemmRows` fields are decided from `linear` cases and also apply to `matmul` and `bmm`, which use
+the same kernel skeleton.
+
+The generated file starts with a comment that must not be edited by hand: the command that
+regenerates it, the path, SHA-256, and date of each sweep, the adapter, and for each class the
+chosen geometry with its geometric mean and every rejected geometry with the reason. The same
+information is in its `provenance` field. The file is formatted with `deno fmt` using the
+repository's settings, so regenerating from the same inputs gives the same bytes. The sweep files
+live under `outputs/` and are not tracked by git; the recorded SHA-256 tells whether a local file
+is the one the profile was generated from.
+
+The subcommand does not edit `geometry-profiles/index.ts`. For a new id, it prints the import to
+add and the constant to append to `BUILTIN_GEOMETRY_PROFILES`.
+
+`apple-metal-3.ts` combines the quick sweep (all five families, including int8) and the full sweep
+(`linear`, `attention`, and `conv2d` over the whole grid) on the Apple M2 (Chrome); the command
+that regenerates it is at the top of the file.
+
 ## What is measured
 
 The cases (`cases.ts`) are copied from the Anima op census

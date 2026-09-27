@@ -16,10 +16,18 @@
  *
  * アダプタが `timestamp-query` を列挙すれば `acquireGpu({ gpuTiming: true })` で取り、単位は
  * `deno-raw-tick`（Deno は timestamp を ns に換算しない）。列挙しなければ壁時計（`wall`）で回す。
+ *
+ * サブコマンド `profile`（GPU を使わない — `profile.ts`）は掃引の JSON から adapter 1 種の幾何
+ * プロファイルの生成物を書く（perf-ledger K-71）:
+ *
+ *   deno run -A tools/geometry-sweep/main.ts profile --from <sweep.json> --id <id> --vendor <v> \
+ *     [--architecture <a>] --out packages/runtime/src/kernels/geometry-profiles/<id>.ts \
+ *     [--min-speedup 1.05] [--check]
  */
 import { acquireGpu } from "../../packages/runtime/mod.ts";
 import { readCheckout } from "../anima-residency/browser/server.ts";
 import { SWEEP_CASES, SWEEP_OPS, type SweepCase, type SweepOp } from "./cases.ts";
+import { runProfileCommand } from "./profile.ts";
 import {
   createSweepContext,
   destroySweepContext,
@@ -302,4 +310,7 @@ const main = async (): Promise<void> => {
   if (failed > 0) Deno.exitCode = 1;
 };
 
-if (import.meta.main) await main();
+if (import.meta.main) {
+  if (Deno.args[0] === "profile") Deno.exitCode = await runProfileCommand(Deno.args.slice(1));
+  else await main();
+}
