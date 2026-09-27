@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Geometry sweep · Browser</title>
+    <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      max-width: 1280px;
+      margin: 40px auto;
+      padding: 0 20px;
+      line-height: 1.6;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 8px;
+    }
+    .muted {
+      opacity: .75;
+    }
+    .controls {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin: 16px 0;
+      align-items: end;
+    }
+    fieldset {
+      border: 1px solid #8886;
+      border-radius: 8px;
+      padding: 8px 14px;
+    }
+    fieldset label {
+      margin-right: 12px;
+      white-space: nowrap;
+    }
+    label.field {
+      display: grid;
+      gap: 4px;
+    }
+    input,
+    select,
+    button {
+      font: inherit;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #8886;
+    }
+    input[type="checkbox"] {
+      padding: 0;
+    }
+    input[type="number"] {
+      width: 6em;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: .5;
+    }
+    #status {
+      padding: 14px;
+      background: #8881;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .table {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    td,
+    th {
+      text-align: left;
+      vertical-align: top;
+      padding: 6px 10px;
+      border-bottom: 1px solid #8884;
+      white-space: nowrap;
+    }
+    td.num {
+      text-align: right;
+    }
+    tr.case th {
+      padding-top: 18px;
+      border-bottom: 1px solid #8888;
+    }
+    tr.default td {
+      font-weight: 600;
+    }
+    .bad {
+      color: #d33;
+      font-weight: 600;
+    }
+    td.error {
+      color: #d33;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>タイル幾何の掃引（K-70）</h1>
+    <p
+      class="muted">同じ shape・同じ入力のまま GEMM のタイル幾何だけを変えて、1 dispatch の時間と出力の一致を測ります。入力は合成データです（モデルは読みません）。各ケースの先頭行（太字）が本番の既定幾何で、「対既定」はその行に対する速さ（1 より大きい = 既定より速い）です。</p>
+    <div class="controls">
+      <fieldset id="ops">
+        <legend>op</legend>
+        <label><input type="checkbox" value="linear" checked> linear（f32・重み f16）</label>
+        <label><input type="checkbox" value="i8a8-linear" checked> i8a8-linear</label>
+        <label><input type="checkbox" value="attention" checked> attention（f32）</label>
+        <label><input type="checkbox" value="i8a8-attention" checked> i8a8-attention（s16）</label>
+        <label><input type="checkbox" value="conv2d" checked> conv2d（igemm・重み f16）</label>
+      </fieldset>
+      <label
+        class="field">候補<select id="set"><option value="quick" selected>quick（既定 + 4〜5 形）</option><option value="full">full（格子全体 — 長い）</option></select></label>
+      <label
+        class="field">rounds<input id="rounds" type="number" value="5" min="1" step="1"></label>
+      <label
+        class="field"><span><input id="timestamps" type="checkbox"> GPU の timestamp で測る（timestamp-query）</span><span id="timestamps-note" class="muted"></span></label>
+      <button id="start">開始</button>
+      <button id="stop" disabled>中断</button>
+      <button id="export" disabled>JSON を保存</button>
+    </div>
+    <p
+      class="muted">Chrome は WebGPU Developer Features（chrome://flags/#enable-webgpu-developer-features）を有効にしない限り timestamp を 100 µs 単位に丸めます。有効にしてから測ってください（1 pass ≈ 80 ms なので丸めの誤差は 0.1% 程度ですが、記録には量子化の疑いとして残ります）。timestamp で device を失った場合は、チェックを外すと壁時計で測れます。</p>
+    <p id="environment" class="muted"></p>
+    <p id="status" role="status" aria-live="polite">準備中</p>
+    <div class="table">
+      <table>
+        <thead>
+          <tr>
+            <th>幾何</th>
+            <th>µs / dispatch</th>
+            <th>対既定</th>
+            <th>TFLOPS</th>
+            <th>reps</th>
+            <th>出力の一致</th>
+            <th>エラー</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <script type="module" src="/runner.js"></script>
+  </body>
+</html>
