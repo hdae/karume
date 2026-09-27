@@ -13,23 +13,39 @@
  *
  * 失敗は表の行に出す（alert しない）— `GpuDeviceLostError` / `GpuOutOfMemoryError` の名前と文言を
  * そのまま残すのが、この確認の一番の観測点だから。
+ *
+ * op 別 GPU 時間（perf-ledger K-70）: quant と「GPU 時間を採る」は **GPU を取るときに確定**する
+ * （feature は device 作成時にしか要求できない — `acquireGpu` の `gpuTiming` / `shaderF16`）。計測が
+ * 有効なら `onRunDiagnostics` の `lastRunTiming` を段ごとに足し、`lastRunPipelines`（計測に依らない
+ * dispatch 本数）は常に足す（`../timing.ts`）。
  */
 import { acquireGpu, type GpuContext } from "../../../packages/runtime/mod.ts";
-import { localDirectory, parseManifest } from "../../../packages/hub/mod.ts";
+import { localDirectory, type ModelEntry, parseManifest } from "../../../packages/hub/mod.ts";
 import {
   type AnimaGenerateEvent,
   type AnimaGenerateRequest,
   AnimaPipeline,
   type AnimaResidency,
-  type AnimaResidencyAction,
-  type AnimaResidencyReason,
-  type AnimaRunComponent,
   parseResolution,
 } from "../../../packages/models/anima.ts";
 import { encodePng } from "../../../packages/models/mod.ts";
+import {
+  createGenerateRecorder,
+  DEFAULT_PROMPT,
+  type DummyHold,
+  type GenerateRecorder,
+  type PipelineLoad,
+  type Report,
+  REPORT_FORMAT,
+  type ResidencyRecord,
+  type Row,
+  type StageRecord,
+} from "../record.ts";
+import { looksQuantized, type StageGpuTiming, topEntries } from "../timing.ts";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
+const TIMESTAMP_QUERY = "timestamp-query";
 
 type ServerConfig = {
   readonly revision: string;
@@ -38,43 +54,8 @@ type ServerConfig = {
   readonly source: string;
 };
 
-/** 段 1 回ぶん（OOM 退避のやり直しでは同じ段が 2 回出る）。時刻は generate 開始からの ms。 */
-type StageTiming = { component: AnimaRunComponent; startMs: number; endMs?: number };
-
-type ResidencyRecord = {
-  readonly atMs: number;
-  readonly action: AnimaResidencyAction;
-  readonly reason: AnimaResidencyReason;
-  /** イベントが出た位置（開いている段 / 直前に閉じた段の後 / 最初の段の前）。 */
-  readonly position: string;
-};
-
-type Row = {
-  readonly index: number;
-  readonly residencyRequested: AnimaResidency;
-  readonly request: {
-    readonly prompt: string;
-    readonly negativePrompt?: string;
-    readonly resolution: { readonly width: number; readonly height: number };
-    readonly steps?: number;
-    readonly guidanceScale?: number;
-    readonly seed: number;
-  };
-  readonly dummyBytesHeld: number;
-  readonly wallMs: number;
-  readonly stages: readonly StageTiming[];
-  readonly residency: readonly ResidencyRecord[];
-  readonly pngSha256?: string;
-  readonly error?: { readonly name: string; readonly message: string };
-};
-
-type DummyHold = {
-  readonly at: string;
-  readonly requestedGib: number;
-  readonly allocatedBytes: number;
-  readonly buffers: number;
-  readonly stop?: string;
-};
+/** GPU を取った時点で確定する構成（変えるには「pipeline を破棄」— GPU ごと畳む）。 */
+type BuildChoice = { readonly quant: string; readonly gpuTiming: boolean };
 
 const element = <T extends HTMLElement>(id: string, type: new () => T): T => {
   const found = document.getElementById(id);
@@ -90,6 +71,9 @@ const ui = {
   guidance: element("guidance", HTMLInputElement),
   seed: element("seed", HTMLInputElement),
   residency: element("residency", HTMLSelectElement),
+  quant: element("quant", HTMLSelectElement),
+  gpuTiming: element("gpu-timing", HTMLInputElement),
+  gpuTimingNote: element("gpu-timing-note", HTMLElement),
   count: element("count", HTMLInputElement),
   run: element("run", HTMLButtonElement),
   holdGib: element("hold-gib", HTMLInputElement),
@@ -108,17 +92,35 @@ const state: {
   config?: ServerConfig;
   manifestSha256?: string;
   defaultModel?: string;
+  /** 既定モデルの manifest の欄（quant の選択肢と `gpuFeatures`）。 */
+  model?: ModelEntry;
+  /** 初期化時に読んだアダプタ（GPU を畳んだ後の書き出しでも機体を残すため）。 */
+  adapterInfo?: GPUAdapterInfo;
+  /** アダプタが `timestamp-query` を列挙したか。 */
+  timestampFeature: boolean;
   gpu?: GpuContext;
+  /** {@link BuildChoice}（`gpu` と同じ寿命）。 */
+  build?: BuildChoice;
   pipeline?: AnimaPipeline;
+  /** 進行中の generate の記録器（pipeline の `onRunDiagnostics` の行き先）。 */
+  recorder?: GenerateRecorder;
   deviceLost?: { readonly reason: string; readonly message: string };
   dummies: GPUBuffer[];
   dummyBytes: number;
   holds: DummyHold[];
-  pipelineLoads: { readonly at: string; readonly ms: number }[];
+  pipelineLoads: PipelineLoad[];
   rows: Row[];
   busy: boolean;
   imageUrl?: string;
-} = { dummies: [], dummyBytes: 0, holds: [], pipelineLoads: [], rows: [], busy: false };
+} = {
+  timestampFeature: false,
+  dummies: [],
+  dummyBytes: 0,
+  holds: [],
+  pipelineLoads: [],
+  rows: [],
+  busy: false,
+};
 
 const setStatus = (text: string): void => {
   ui.status.textContent = text;
@@ -157,11 +159,25 @@ const renderDummies = (): void => {
   ui.dummies.textContent = `ダミー確保中: ${gib(state.dummyBytes)}（${state.dummies.length} 本）`;
 };
 
+/** quant と計測の選択は GPU を持っている間は変えられない（{@link BuildChoice}）。 */
+const renderBuildControls = (): void => {
+  const locked = state.busy || state.gpu !== undefined;
+  ui.quant.disabled = locked || state.model === undefined;
+  ui.gpuTiming.disabled = locked || !state.timestampFeature;
+};
+
 const setBusy = (busy: boolean): void => {
   state.busy = busy;
   for (const button of [ui.run, ui.hold, ui.release, ui.dispose]) button.disabled = busy;
   ui.exportJson.disabled = busy || (state.rows.length === 0 && state.holds.length === 0);
+  renderBuildControls();
 };
+
+/** いま選ばれている構成（GPU を取るときに {@link BuildChoice} として確定させる）。 */
+const selectedChoice = (): BuildChoice => ({
+  quant: ui.quant.value,
+  gpuTiming: state.timestampFeature && ui.gpuTiming.checked,
+});
 
 /** ボタン操作の排他（同じ pipeline の generate / dispose を重ねない）。失敗は状態行へ。 */
 const exclusive = (action: () => Promise<void>) => async (): Promise<void> => {
@@ -193,9 +209,17 @@ const modelSource = localDirectory({
   },
 }, { label: "browser-anima-residency" });
 
-const ensureGpu = async (): Promise<GpuContext> => {
-  if (state.gpu !== undefined) return state.gpu;
+const ensureGpu = async (): Promise<{ gpu: GpuContext; build: BuildChoice }> => {
+  if (state.gpu !== undefined && state.build !== undefined) {
+    return { gpu: state.gpu, build: state.build };
+  }
+  const build = selectedChoice();
+  const quant = state.model?.quants[build.quant];
+  if (quant === undefined) throw Error(`quant ${build.quant} が manifest に無い`);
+  // 共有 GPU には pipeline が feature を足せないので、quant の宣言（shader-f16）はここで要求する。
   const gpu = await acquireGpu({
+    ...(build.gpuTiming ? { gpuTiming: true } : {}),
+    ...(quant.gpuFeatures?.shaderF16 === true ? { shaderF16: true } : {}),
     onDeviceLost: (info) => {
       state.deviceLost = { reason: info.reason, message: info.message };
       setStatus(
@@ -204,25 +228,44 @@ const ensureGpu = async (): Promise<GpuContext> => {
     },
   });
   state.gpu = gpu;
+  state.build = build;
+  renderBuildControls();
   ui.environment.textContent = `${adapterSummary(gpu.adapterInfo)} · 配布形 ${
     state.config?.source ?? "?"
-  }（${state.defaultModel ?? "?"}）`;
-  return gpu;
+  }（${state.defaultModel ?? "?"}）· quant ${build.quant} · GPU 時間 ${
+    gpu.gpuTimingEnabled ? "採る" : "採らない"
+  }`;
+  return { gpu, build };
 };
 
-const ensurePipeline = async (): Promise<AnimaPipeline> => {
-  if (state.pipeline !== undefined) return state.pipeline;
-  const gpu = await ensureGpu();
-  setStatus("pipeline を構築中（residency: transformer）");
+/** pipeline の `onRunDiagnostics` → 進行中の generate の記録器。 */
+const forwardRunDiagnostics = (
+  ...[component, diagnostics]: Parameters<GenerateRecorder["onRun"]>
+): void => {
+  if (state.recorder === undefined) throw Error(`${component} の run が generate の外で終わった`);
+  state.recorder.onRun(component, diagnostics);
+};
+
+const ensurePipeline = async (): Promise<{ pipeline: AnimaPipeline; build: BuildChoice }> => {
+  const { gpu, build } = await ensureGpu();
+  if (state.pipeline !== undefined) return { pipeline: state.pipeline, build };
+  setStatus(`pipeline を構築中（residency: transformer · quant ${build.quant}）`);
   const started = performance.now();
   state.pipeline = await AnimaPipeline.fromPretrained(modelSource, {
     gpu,
     residency: "transformer",
+    quant: build.quant,
+    onRunDiagnostics: forwardRunDiagnostics,
   });
   const ms = performance.now() - started;
-  state.pipelineLoads.push({ at: new Date().toISOString(), ms });
+  state.pipelineLoads.push({
+    at: new Date().toISOString(),
+    ms,
+    quant: build.quant,
+    gpuTiming: build.gpuTiming,
+  });
   setStatus(`pipeline 構築済み（${(ms / 1000).toFixed(2)} s）`);
-  return state.pipeline;
+  return { pipeline: state.pipeline, build };
 };
 
 const readRequest = (): Row["request"] => {
@@ -247,7 +290,7 @@ const readResidency = (): AnimaResidency => {
   return value;
 };
 
-const formatStages = (stages: readonly StageTiming[]): string =>
+const formatStages = (stages: readonly StageRecord[]): string =>
   stages.map(({ component, startMs, endMs }) =>
     `${component} ${endMs === undefined ? "(未完了)" : `${Math.round(endMs - startMs)} ms`}`
   ).join(" · ");
@@ -259,10 +302,60 @@ const formatResidency = (records: readonly ResidencyRecord[]): string =>
       `${action}/${reason} @${(atMs / 1000).toFixed(2)} s（${position}）`
     ).join("\n");
 
+const ms = (ns: number): string => (ns / 1e6).toFixed(1);
+
+/** 段 1 回ぶんの上位 10 キー（キー・ms・dispatch 本数・段に占める %）。 */
+const stageDetails = (component: string, gpu: StageGpuTiming): HTMLDetailsElement => {
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = `${component} ${ms(gpu.totalNs)} ms（run ${gpu.runs}${
+    gpu.clampedNegativeSamples === 0 ? "" : ` · 負の標本 ${gpu.clampedNegativeSamples}`
+  }${looksQuantized(gpu) ? " · 100 µs 量子化の疑い" : ""}）`;
+  const table = document.createElement("table");
+  table.className = "keys";
+  const head = document.createElement("tr");
+  for (const title of ["key", "ms", "dispatch", "%"]) {
+    const th = document.createElement("th");
+    th.textContent = title;
+    head.append(th);
+  }
+  table.append(head);
+  for (const entry of topEntries(gpu, 10)) {
+    const tr = document.createElement("tr");
+    for (
+      const value of [
+        entry.key,
+        ms(entry.ns),
+        entry.dispatchCount.toLocaleString(),
+        (entry.share * 100).toFixed(1),
+      ]
+    ) {
+      const td = document.createElement("td");
+      td.textContent = value;
+      tr.append(td);
+    }
+    table.append(tr);
+  }
+  details.append(summary, table);
+  return details;
+};
+
+const gpuCell = (stages: readonly StageRecord[]): HTMLTableCellElement => {
+  const td = document.createElement("td");
+  td.className = "wrap";
+  const timed = stages.filter((stage) => stage.gpu !== undefined);
+  if (timed.length === 0) td.textContent = "—";
+  for (const { component, gpu } of timed) {
+    if (gpu !== undefined) td.append(stageDetails(component, gpu));
+  }
+  return td;
+};
+
 const appendRow = (row: Row): void => {
   const tr = document.createElement("tr");
   const cells = [
     String(row.index),
+    row.quant,
     row.residencyRequested,
     gib(row.dummyBytesHeld),
     Math.round(row.wallMs).toLocaleString(),
@@ -274,9 +367,11 @@ const appendRow = (row: Row): void => {
   for (const [at, value] of cells.entries()) {
     const td = document.createElement("td");
     td.textContent = value;
-    if (at >= 4) td.className = "wrap";
-    if (at === 7 && value !== "") td.className = "wrap error";
+    if (at >= 5) td.className = "wrap";
+    if (at === 8 && value !== "") td.className = "wrap error";
     tr.append(td);
+    // 「GPU 時間」列は段の時間の隣に置く（壁と GPU を同じ段で見比べるため）。
+    if (at === 5) tr.append(gpuCell(row.stages));
   }
   ui.rows.append(tr);
 };
@@ -293,54 +388,54 @@ const generateOnce = async (label: string): Promise<Row> => {
   const residencyRequested = readResidency();
   const request = readRequest();
   const dummyBytesHeld = state.dummyBytes;
-  const stages: StageTiming[] = [];
-  const residency: ResidencyRecord[] = [];
-  let started = performance.now();
-  const position = (): string => {
-    const open = stages.findLast((stage) => stage.endMs === undefined);
-    if (open !== undefined) return `${open.component} の途中`;
-    const last = stages.at(-1);
-    return last === undefined ? "最初の段の前" : `${last.component} の後`;
-  };
+  const recorder = createGenerateRecorder(() => performance.now());
   const onEvent = (event: AnimaGenerateEvent): void => {
-    const atMs = performance.now() - started;
-    if (event.kind === "stage") {
-      if (event.at === "start") stages.push({ component: event.component, startMs: atMs });
-      else {
-        const open = stages.findLast((stage) =>
-          stage.component === event.component && stage.endMs === undefined
-        );
-        if (open !== undefined) open.endMs = atMs;
-      }
-      setStatus(`${label}: ${event.component} ${event.at}`);
-    } else if (event.kind === "residency") {
-      residency.push({ atMs, action: event.action, reason: event.reason, position: position() });
-    } else if (event.kind === "denoise-step") {
+    recorder.onEvent(event);
+    if (event.kind === "stage") setStatus(`${label}: ${event.component} ${event.at}`);
+    else if (event.kind === "denoise-step") {
       setStatus(`${label}: transformer step ${event.step}/${event.steps}`);
-    } else setStatus(`${label}: vae tile ${event.tile}/${event.tiles}`);
+    } else if (event.kind === "vae-tile") {
+      setStatus(`${label}: vae tile ${event.tile}/${event.tiles}`);
+    }
   };
-  const base = { index, residencyRequested, request, dummyBytesHeld };
+  let quant = state.build?.quant ?? selectedChoice().quant;
+  state.recorder = recorder;
   try {
-    const pipeline = await ensurePipeline();
+    const built = await ensurePipeline();
+    quant = built.build.quant;
     const generateRequest: AnimaGenerateRequest = {
       ...request,
       residency: residencyRequested,
       onEvent,
     };
-    started = performance.now();
-    const image = await pipeline.generate(generateRequest);
-    const wallMs = performance.now() - started;
+    recorder.restart();
+    const image = await built.pipeline.generate(generateRequest);
+    const wallMs = recorder.elapsedMs();
     const png = await encodePng(image.data, image.width, image.height);
     showImage(png);
-    return { ...base, wallMs, stages, residency, pngSha256: await sha256Hex(png) };
+    return {
+      index,
+      quant,
+      residencyRequested,
+      request,
+      dummyBytesHeld,
+      wallMs,
+      ...recorder.finish(),
+      pngSha256: await sha256Hex(png),
+    };
   } catch (error) {
     return {
-      ...base,
-      wallMs: performance.now() - started,
-      stages,
-      residency,
+      index,
+      quant,
+      residencyRequested,
+      request,
+      dummyBytesHeld,
+      wallMs: recorder.elapsedMs(),
+      ...recorder.finish(),
       error: describeError(error),
     };
+  } finally {
+    state.recorder = undefined;
   }
 };
 
@@ -371,7 +466,7 @@ const holdVram = async (): Promise<void> => {
   if (!Number.isFinite(requestedGib) || requestedGib <= 0) {
     throw Error(`ダミー量 ${ui.holdGib.value} GiB が正の数でない`);
   }
-  const gpu = await ensureGpu();
+  const { gpu } = await ensureGpu();
   const target = Math.round(requestedGib * 1024) * MIB;
   // 1 GiB ずつ（maxBufferSize がそれより小さければその大きさで — 4 バイト整列）。
   const pieceMax = Math.floor(Math.min(gpu.limits.maxBufferSize, GIB) / 4) * 4;
@@ -439,19 +534,23 @@ const disposeAll = async (): Promise<void> => {
   state.dummyBytes = 0;
   state.gpu?.destroy();
   state.gpu = undefined;
+  state.build = undefined;
   state.deviceLost = undefined;
   renderDummies();
+  renderBuildControls();
   setStatus(
     `pipeline・ダミー・GPU device を破棄しました${
       failure === undefined ? "" : `（dispose の失敗: ${failure}）`
-    }。次の生成で組み直します。`,
+    }。次の生成で組み直します（quant と GPU 時間の選択はここで変えられます）。`,
   );
 };
 
 const exportJson = (): void => {
-  const info = state.gpu?.adapterInfo;
-  const report = {
-    format: "karume-anima-residency-browser/1",
+  // pipeline を破棄した後（quant を替える途中）でも機体を残す — 初期化時に読んだアダプタで補う。
+  const info = state.gpu?.adapterInfo ?? state.adapterInfo;
+  const current = state.build ?? selectedChoice();
+  const report: Report = {
+    format: REPORT_FORMAT,
     date: new Date().toISOString(),
     userAgent: navigator.userAgent,
     adapter: info === undefined ? null : {
@@ -466,6 +565,8 @@ const exportJson = (): void => {
     source: state.config?.source,
     manifestSha256: state.manifestSha256,
     defaultModel: state.defaultModel,
+    quant: current.quant,
+    gpuTiming: { enabled: current.gpuTiming, feature: state.timestampFeature, unit: "ns" },
     pipelineResidency: "transformer",
     pipelineLoads: state.pipelineLoads,
     dummies: { heldBytes: state.dummyBytes, buffers: state.dummies.length, holds: state.holds },
@@ -477,13 +578,27 @@ const exportJson = (): void => {
   );
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `anima-residency-browser-${new Date().toISOString().replaceAll(":", "-")}.json`;
+  anchor.download = `anima-residency-browser-${current.quant}-${
+    new Date().toISOString().replaceAll(":", "-")
+  }.json`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+/** quant の選択肢を manifest の既定モデルの欄から埋める（既定 = `defaultQuant`）。 */
+const fillQuants = (model: ModelEntry): void => {
+  for (const [name, quant] of Object.entries(model.quants)) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = quant.label === undefined ? name : `${name}（${quant.label}）`;
+    option.selected = name === model.defaultQuant;
+    ui.quant.append(option);
+  }
+};
+
 const initialize = async (): Promise<void> => {
   setBusy(true);
+  ui.prompt.value = DEFAULT_PROMPT;
   const configResponse = await fetch("/config.json");
   if (!configResponse.ok) throw Error(`config.json HTTP ${configResponse.status}`);
   const config: ServerConfig = await configResponse.json();
@@ -494,11 +609,22 @@ const initialize = async (): Promise<void> => {
   }
   const manifestBytes = await manifestResponse.arrayBuffer();
   state.manifestSha256 = await sha256Hex(new Uint8Array(manifestBytes));
-  state.defaultModel = parseManifest(new TextDecoder().decode(manifestBytes)).defaultModel;
+  const manifest = parseManifest(new TextDecoder().decode(manifestBytes));
+  state.defaultModel = manifest.defaultModel;
+  const model = manifest.models[manifest.defaultModel];
+  if (model === undefined) throw Error(`defaultModel ${manifest.defaultModel} が models に無い`);
+  state.model = model;
+  fillQuants(model);
   const adapter = await navigator.gpu?.requestAdapter();
   if (!adapter || adapter.info.isFallbackAdapter) {
     throw Error("ハードウェア WebGPU を使える Chrome が必要です");
   }
+  state.adapterInfo = adapter.info;
+  state.timestampFeature = adapter.features.has(TIMESTAMP_QUERY);
+  ui.gpuTiming.checked = state.timestampFeature;
+  ui.gpuTimingNote.textContent = state.timestampFeature
+    ? ""
+    : `（このアダプタは ${TIMESTAMP_QUERY} を持たないので採れません — 段の壁時計と dispatch 本数だけ記録します）`;
   ui.environment.textContent = `${adapterSummary(adapter.info)} · 配布形 ${config.source}（${
     state.defaultModel ?? "?"
   }）· ${config.revision.slice(0, 8)}${config.dirty ? " (dirty)" : ""}`;

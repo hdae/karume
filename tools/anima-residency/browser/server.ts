@@ -27,6 +27,21 @@ export type ServerConfig = {
   readonly source: string;
 };
 
+/**
+ * 手元の checkout の版と未コミットの変更の有無（ページの `/config.json` と Deno の双子 CLI
+ * `../profile.ts` の JSON が同じ取り方で載せる）。
+ */
+export const readCheckout = async (): Promise<{ revision: string; dirty: boolean }> => {
+  const git = await new Deno.Command("git", { args: ["rev-parse", "HEAD"] }).output();
+  if (!git.success) throw Error("Cannot identify checkout revision");
+  const status = await new Deno.Command("git", { args: ["status", "--porcelain"] }).output();
+  if (!status.success) throw Error("Cannot inspect checkout changes");
+  return {
+    revision: new TextDecoder().decode(git.stdout).trim(),
+    dirty: status.stdout.length > 0,
+  };
+};
+
 export const createHandler = (
   sourceRoot: string,
   bundle: Uint8Array<ArrayBuffer>,
@@ -103,13 +118,8 @@ const main = async (): Promise<void> => {
     });
     if (!(await command.output()).success) throw Error("Browser bundle failed: runner.ts");
     const bundle = await Deno.readFile(output);
-    const git = await new Deno.Command("git", { args: ["rev-parse", "HEAD"] }).output();
-    if (!git.success) throw Error("Cannot identify checkout revision");
-    const status = await new Deno.Command("git", { args: ["status", "--porcelain"] }).output();
-    if (!status.success) throw Error("Cannot inspect checkout changes");
     const config: ServerConfig = {
-      revision: new TextDecoder().decode(git.stdout).trim(),
-      dirty: status.stdout.length > 0,
+      ...await readCheckout(),
       bundleSha256: Array.from(
         new Uint8Array(await crypto.subtle.digest("SHA-256", bundle)),
         (v) => v.toString(16).padStart(2, "0"),
