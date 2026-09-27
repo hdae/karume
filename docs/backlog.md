@@ -26,7 +26,7 @@
   利得は kill 線を超えた — 数値は perf-ledger H-4 と [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。
   OOM 退避 → やり直しが B570 で device lost になった件（H-35）は**調査と修正が済（2026-09-27）** — 原因は staging の OOM が
   device を失わせること・修正は測った空きで先に退避する形（ADR 0112 追記 2026-09-27・[research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md)）。
-  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**その後 = B4 irodori H-30**（着手 2026-09-27）。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— 確認ページに per-op GPU 時間を足して利用者の M2 / M5 で採る + Codex の棚卸し（裏で走行）。
+  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**その後 = B4 irodori H-30**（着手 2026-09-27）。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・次 = 幾何掃引（道具 `tools/geometry-sweep` 済・M2 の実測待ち）。
   **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
   既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
 
