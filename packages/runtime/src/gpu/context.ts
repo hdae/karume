@@ -478,7 +478,8 @@ export class GpuContext {
   }
 
   /**
-   * device を破棄する。VRAM を返すのはこの経路のみ。
+   * device を破棄する（device が握る VRAM を丸ごと返す最後の経路 — 個々のバッファは `destroy()` +
+   * poll で返る）。
    *
    * MUST: 未 submit のエンコードと生存中のバッファを持つ層（RunArena）を先に flush /
    * destroy してから呼ぶこと。破棄後の続行は `acquireGpu()` での再構築になる。

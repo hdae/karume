@@ -4,10 +4,10 @@
  * この層の責務は「実装差のある面（features / limits / WGSL 言語機能）を 1 箇所で正規化し、
  * 沈黙故障を全て loud な例外に変換すること」。
  *
- * MUST: device をモジュールスコープに捕獲しない。VRAM を返すのは `device.destroy()` のみで
- * （`buffer.destroy()` は 1 バイトも返さない）、解放後の続行は `acquireGpu()` からの再構築に
- * なる。device を握る層（PipelineCache / SubmitScheduler / RunArena）は全て GpuContext と
- * 同じ寿命で作り直せる構造でなければならない。
+ * MUST: device をモジュールスコープに捕獲しない。device を破棄した後の続行は `acquireGpu()` からの
+ * 再構築になる（個々の `buffer.destroy()` はそのバッファのぶんを次の poll で返すが、device を握る層は
+ * device の寿命に縛られる）。device を握る層（PipelineCache / SubmitScheduler / RunArena）は全て
+ * GpuContext と同じ寿命で作り直せる構造でなければならない。
  *
  * **この層の入口**で、実体は 2 つに分かれている: {@link "./acquire.ts"}（device を取って
  * GpuContext を組み立てるまで — アダプタ取得・limits / features の計画と検査・カナリアの実走）

@@ -184,7 +184,9 @@ export class RunArena {
    * submit するとコマンドバッファ丸ごと失敗し、同じスケジューラに相乗りしている無関係な
    * dispatch まで実行されないまま、誤った値が静かに残る。
    *
-   * NOTE: VRAM 自体が返るのは `device.destroy()` のみ。ここでの破棄は所有の終了。
+   * NOTE: ここでの破棄は所有の終了。破棄したバッファの VRAM は次の device poll（`onSubmittedWorkDone`
+   * 等）で予算へ返る（B570 の実測 — docs/research/2026-09-27-h35-oom-device-lost.md §5）。device が握る
+   * 全部を返すのは `device.destroy()`。
    */
   destroy(): Promise<void> {
     // MUST: 2 度目の destroy も同じ完了を待つ。先行する flush の完了前に返すと、呼び出し側が
