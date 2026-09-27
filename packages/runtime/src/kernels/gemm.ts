@@ -175,9 +175,14 @@ const rowsGeometry = (rows: number | undefined): GemmGeometry =>
  * MUST: `rows` は生成（{@link gemmWgsl}）へ渡すものと**同じ値**にする。片方だけ渡し忘れると
  * キーと生成物の幾何が食い違い、キャッシュに載った別幾何の WGSL が dispatch 数と噛み合わずに
  * 出力タイルが欠落する（例外の出ない誤値）。
+ *
+ * `geometry` は**明示の幾何**（計測用の差し替え点 — {@link GemmSpec} の `geometry`）。渡すと
+ * `rows` より優先する（{@link gemmWgsl} の解決と同じ規則）。渡してよいのは生成側が明示を読む op
+ * （linear / attention_qk / attention_pv）のキーだけ — matmul / bmm の生成は明示を読まない。
+ * MUST: 生成へ渡すものと同じ値にする（理由は `rows` と同文）。省略時のキーは 1 バイトも動かない。
  */
-export const gemmKeyPart = (v4: boolean, rows?: number): string =>
-  `${gemmGeometryTileKeyPart(rowsGeometry(rows))}${v4 ? "v4" : ""}`;
+export const gemmKeyPart = (v4: boolean, rows?: number, geometry?: GemmGeometry): string =>
+  `${gemmGeometryTileKeyPart(geometry ?? rowsGeometry(rows))}${v4 ? "v4" : ""}`;
 
 /**
  * 内積の**計算**変種（ADR 0028）。`"f16"` は共有タイルを f16 に落とす形で、
@@ -248,6 +253,12 @@ export type GemmRowWindow = "a" | "c";
  * `attention_state_qk` / `attention_state_pv` は states 形 ①ₜ / ③ₜ（K / V の行タイル共有 —
  * ADR 0067 決定 4 / perf-ledger K-13）で、uniform は骨格の `Dims` に states の欄を足した形
  * （キー・workgroup 算出・切替条件は src/kernels/state-attention.ts が持つ）。
+ *
+ * `linear` / `attention_qk` / `attention_pv` / `conv2d` の 4 variant だけが取る `geometry` は
+ * **明示の幾何**で、渡すと op 別の解決（行数バケット・m タイル・既定固定）より優先する
+ * （{@link resolveGeometry}）。用途は同じ shape で幾何だけを変える計測（tools/geometry-sweep —
+ * perf-ledger K-70 の対象 op に限る）で、Session の経路（recipe-builders / executor）は渡さない。
+ * 省略時の生成物は 1 バイトも動かない MUST。
  */
 type GemmSpec =
   | {
@@ -287,6 +298,8 @@ type GemmSpec =
      * 1 バイトも動かない MUST。
      */
     readonly rowWindow?: boolean;
+    /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+    readonly geometry?: GemmGeometry;
   }
   | {
     /**
@@ -333,26 +346,37 @@ type GemmSpec =
      * `dims.k` から導けるため params の形は変わらない。
      */
     readonly weightGroupShift?: number;
+    /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}）。 */
+    readonly geometry?: GemmGeometry;
   }
-  | {
-    /**
-     * 1D / 2D の implicit GEMM。**A タイル（重み）・bias-first・store は完全に共通**で、
-     * 違うのは B タイル（x の暗黙 gather）が平坦 k を `(ic, k)` に割るか `(ic, kh, kw)` に
-     * 割るか、と uniform の幾何欄だけ。
-     */
-    readonly op: "conv1d" | "conv2d";
-    readonly v4: boolean;
-    readonly weight: WeightStorage;
-    /** m タイルの行数（`conv2dIgemmMTile` が返す 64 行か {@link GEMM_MTILE_SMALL} の 32 行）。 */
-    readonly mTile: number;
-    /**
-     * i4 の group 長の log2（`weight: "i4"` のとき**必須**・他では禁止 — ADR 0069 決定 5 の
-     * conv1d 追補）。conv は重みが **A 側**なので、scale 添字は linear の鏡映で
-     * `arow · (dims.k >> shift) + (ak0 >> shift)`（`dims.k = Cin·K` = 平坦後の行長）。
-     * MUST: **conv1d だけ**が取る（conv2d に i4 の適格判定は無い — {@link gemmWgsl} の門）。
-     */
-    readonly weightGroupShift?: number;
-  };
+  | (
+    & {
+      /**
+       * 1D / 2D の implicit GEMM。**A タイル（重み）・bias-first・store は完全に共通**で、
+       * 違うのは B タイル（x の暗黙 gather）が平坦 k を `(ic, k)` に割るか `(ic, kh, kw)` に
+       * 割るか、と uniform の幾何欄だけ。
+       */
+      readonly v4: boolean;
+      readonly weight: WeightStorage;
+      /** m タイルの行数（`conv2dIgemmMTile` が返す 64 行か {@link GEMM_MTILE_SMALL} の 32 行）。 */
+      readonly mTile: number;
+      /**
+       * i4 の group 長の log2（`weight: "i4"` のとき**必須**・他では禁止 — ADR 0069 決定 5 の
+       * conv1d 追補）。conv は重みが **A 側**なので、scale 添字は linear の鏡映で
+       * `arow · (dims.k >> shift) + (ak0 >> shift)`（`dims.k = Cin·K` = 平坦後の行長）。
+       * MUST: **conv1d だけ**が取る（conv2d に i4 の適格判定は無い — {@link gemmWgsl} の門）。
+       */
+      readonly weightGroupShift?: number;
+    }
+    & (
+      | { readonly op: "conv1d" }
+      | {
+        readonly op: "conv2d";
+        /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}。渡すと `mTile` より優先）。 */
+        readonly geometry?: GemmGeometry;
+      }
+    )
+  );
 
 /**
  * uniform の Dims（3 語 `{m,n,k}`）。uniform アドレス空間の struct は 16 バイト整列になるため、
@@ -2214,22 +2238,28 @@ ${fillBConv1d(geometry, v4)}`,
   );
 
 /**
- * op 別の解決（conv1d / conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op =
- * 行数バケット）。
+ * op 別の解決（conv1d / conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。
+ * 明示の幾何（{@link GemmSpec} の `geometry` — linear / attention_qk / attention_pv / conv2d だけが
+ * 取る）があれば、その 4 op ではそれを先に採る。
  */
 const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
+  // MUST: 明示は op 別の解決より先に見る。キー側（`gemmKeyPart` / conv2d の `conv2dIgemmKey`）も
+  // 同じ優先順で解くので、片方だけ明示を読み落とすとキーと生成物の幾何が食い違う。
   switch (spec.op) {
     case "conv1d":
-    case "conv2d":
       return gemmMTileGeometry(spec.mTile);
+    case "conv2d":
+      return spec.geometry ?? gemmMTileGeometry(spec.mTile);
     case "attention_qk":
     case "attention_pv":
-      return defaultGemmGeometry();
+      return spec.geometry ?? defaultGemmGeometry();
     // states 形 ①ₜ / ③ₜ は**行数バケットを通す**（融合 attention が通さないのは Anima の
     // 実測選定を動かさないためで、states 形にはその前提が無い — 実効 M は chunk 行数そのもの）。
     case "attention_state_qk":
     case "attention_state_pv":
       return gemmGeometryForRows(spec.rows);
+    case "linear":
+      return spec.geometry ?? rowsGeometry(spec.rows);
     default:
       return rowsGeometry(spec.rows);
   }
@@ -2242,6 +2272,8 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
  * 行数バケット {@link rowsGeometry}・融合 attention は {@link defaultGemmGeometry}）で、門
  * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、既定を
  * 差し替えたときの影響がこの関数に閉じる。
+ * `spec.geometry`（明示）は計測用の差し替え点（tools/geometry-sweep）であって実行時オートチューン
+ * ではない — Session の経路は渡さず、ADR 0022 の MUST（選択は静的な shape の純関数）は不変。
  */
 export const gemmWgsl = (spec: GemmSpec): string => {
   const geometry = resolveGeometry(spec);

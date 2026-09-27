@@ -25,6 +25,14 @@ import {
 import { bmmKey, bmmWgsl } from "../src/kernels/bmm.ts";
 import { linearKey, linearWgsl } from "../src/kernels/linear.ts";
 import { matmulKey, matmulWgsl } from "../src/kernels/matmul.ts";
+import {
+  attentionPvKey,
+  attentionPvWgsl,
+  attentionQkKey,
+  attentionQkWgsl,
+} from "../src/kernels/attention.ts";
+import { conv2dIgemmKey, conv2dIgemmWgsl } from "../src/kernels/conv2d.ts";
+import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 
 /** 表の代表点（バケットごとに「境界の内側」と「境界を 1 越えた側」を持つ）。 */
 const BUCKET_ROWS = [1, 4, 16, 17, 64, 65, 128, 4096] as const;
@@ -172,4 +180,70 @@ Deno.test("同じ行数からは常にバイト単位で同じ WGSL が出る（
   assertNotEquals(matmulWgsl(true, 512), matmulWgsl(true, 513));
   assertEquals(matmulWgsl(true, 4), matmulWgsl(true, 32));
   assertEquals(matmulWgsl(true, 65), matmulWgsl(true, 512));
+});
+
+// 明示の幾何（src/kernels/gemm.ts の `GemmSpec.geometry` — tools/geometry-sweep の計測用の差し替え点）。
+// 守るのは 2 点: 省略時の生成物が 1 バイトも動かないこと（本番の経路は渡さない）と、渡したときに
+// キーと WGSL が**同じ幾何**を名乗ること（片方だけ読み落とすとキャッシュに載った別幾何の WGSL が
+// dispatch 数と噛み合わずタイルが欠ける）。
+
+Deno.test("明示の幾何に本番の解決と同じ幾何を渡すと、キーも WGSL も省略時とバイト同一", () => {
+  for (const rows of BUCKET_ROWS) {
+    const geometry = geometryOf(rows);
+    assertEquals(
+      linearKey("f16", true, "f32", rows, undefined, geometry),
+      linearKey("f16", true, "f32", rows),
+    );
+    assertEquals(
+      linearWgsl("f16", true, "f32", rows, undefined, geometry),
+      linearWgsl("f16", true, "f32", rows),
+    );
+  }
+  const fixed = defaultGemmGeometry();
+  assertEquals(
+    attentionQkKey(true, "f32", "f32", false, false, false, fixed),
+    attentionQkKey(true),
+  );
+  assertEquals(
+    attentionQkWgsl(true, "f32", "f32", false, false, false, fixed),
+    attentionQkWgsl(true),
+  );
+  assertEquals(attentionPvKey(true, "f32", "f32", false, false, fixed), attentionPvKey(true));
+  assertEquals(attentionPvWgsl(true, "f32", "f32", false, false, fixed), attentionPvWgsl(true));
+  for (const mTile of [64, 32]) {
+    const geometry = gemmMTileGeometry(mTile);
+    assertEquals(conv2dIgemmKey("f16", true, mTile, geometry), conv2dIgemmKey("f16", true, mTile));
+    assertEquals(
+      conv2dIgemmWgsl("f16", true, mTile, geometry),
+      conv2dIgemmWgsl("f16", true, mTile),
+    );
+  }
+});
+
+Deno.test("明示の幾何は op 別の解決より優先し、キーと WGSL が同じ幾何を名乗る", () => {
+  const explicit: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 8 };
+  const workgroup = `@compute @workgroup_size(${explicit.wgX}, ${explicit.wgY})`;
+  // linear: M=4096 のバケット（既定 128×128）を上書きする
+  assertEquals(
+    linearKey("f16", true, "f32", 4096, undefined, explicit),
+    "linear:v2:f32:reg32x32r4x4w8v4:wf16",
+  );
+  assertEquals(linearWgsl("f16", true, "f32", 4096, undefined, explicit).includes(workgroup), true);
+  // 融合 attention: 既定固定を上書きする
+  assertEquals(
+    attentionQkKey(true, "f32", "f32", false, false, false, explicit),
+    "attention_qk:v1:f32:reg32x32r4x4w8v4",
+  );
+  assertEquals(
+    attentionPvWgsl(true, "f32", "f32", false, false, explicit).includes(workgroup),
+    true,
+  );
+  // conv2d: m タイルの解決を上書きする（辺と workgroup 形で幾何が決まる綴り）
+  assertEquals(conv2dIgemmKey("f16", true, 64, explicit), "conv2d:v3:f32:igemm32x32v4:wg8x8:wf16");
+  assertEquals(conv2dIgemmWgsl("f16", true, 64, explicit).includes(workgroup), true);
+  // 門は明示でも同じ（穴の空くタイル形は生成時に落ちる）
+  assertThrows(
+    () => linearWgsl("f16", true, "f32", 4096, undefined, { regM: 3, regN: 4, wgX: 8, wgY: 8 }),
+    CodegenError,
+  );
 });

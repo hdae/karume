@@ -15,6 +15,7 @@
  */
 
 import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
+import type { GemmGeometry } from "./gemm-geometry.ts";
 import {
   i4GroupKeyPart,
   i4GroupShift,
@@ -30,6 +31,9 @@ export { LINEAR_SCALE_BINDING } from "./gemm.ts";
  *
  * `groupSize` は i4 の group 長（i4 のとき必須）。shift を WGSL に焼くので**キーにも入れる**
  * （`:wi4g32` — 同一キー → バイト同一 WGSL の codegen 決定性）。
+ *
+ * `geometry` は明示の幾何（計測用 — src/kernels/gemm.ts の `GemmSpec`）。渡すと `rows` の
+ * バケットより優先し、MUST: キーと WGSL へ**同じ値**を通す（`rows` と同じ規律）。
  */
 export const linearKey = (
   weight: WeightStorage,
@@ -37,12 +41,13 @@ export const linearKey = (
   compute: GemmCompute = "f32",
   rows?: number,
   groupSize?: number,
+  geometry?: GemmGeometry,
 ): string => {
   i4GroupShift("linear", weight, groupSize);
   // i8 の scale 読出しを保護した世代。未変更の格納形式のキーは維持する。
-  return `linear:v${weight === "i8" ? 3 : 2}:f32:${gemmKeyPart(v4, rows)}${weightKeyPart(weight)}${
-    i4GroupKeyPart(groupSize)
-  }${gemmComputeKeyPart(compute)}`;
+  return `linear:v${weight === "i8" ? 3 : 2}:f32:${gemmKeyPart(v4, rows, geometry)}${
+    weightKeyPart(weight)
+  }${i4GroupKeyPart(groupSize)}${gemmComputeKeyPart(compute)}`;
 };
 
 export const linearWgsl = (
@@ -51,6 +56,7 @@ export const linearWgsl = (
   compute: GemmCompute = "f32",
   rows?: number,
   groupSize?: number,
+  geometry?: GemmGeometry,
 ): string =>
   gemmWgsl({
     op: "linear",
@@ -59,6 +65,7 @@ export const linearWgsl = (
     compute,
     rows,
     weightGroupShift: i4GroupShift("linear", weight, groupSize),
+    geometry,
   });
 
 export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>

@@ -47,7 +47,7 @@
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
 import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
-import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
+import { GEMM_TILE, type GemmGeometry, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -118,25 +118,31 @@ export const conv2dUsesVec4 = (kFlat: number, widthOut: number, strideW: number)
  * NOTE: 出力は直接カーネルと**ビット同一**（縮約順序が厳密一致）。唯一の例外は符号付きゼロ
  * で、部分和がちょうど `−0.0` の位置に padding 由来の `+0.0` を足すと `+0.0` に転ぶ
  * （直接カーネルは padding を加算しないので `−0.0` が残る）。bias が 0 でない限り到達しない。
+ *
+ * `geometry` は明示の幾何（計測用 — src/kernels/gemm.ts の `GemmSpec`）で、渡すと `mTile` より
+ * 優先する。辺と workgroup 形で `regM = tileM / wgY`・`regN = tileN / wgX` が決まるので、同じ綴りの
+ * まま幾何を判別できる。MUST: {@link conv2dIgemmWgsl} へ**同じ値**を通す。
  */
 export const conv2dIgemmKey = (
   weight: WeightStorage,
   v4: boolean,
   mTile: number = GEMM_TILE,
+  geometry?: GemmGeometry,
 ): string => {
-  // MUST: キーの幾何は生成と**同じ解決点**（`gemmMTileGeometry`）から導く。mTile を直に
-  // 埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
-  const geometry = gemmMTileGeometry(mTile);
-  return `conv2d:v3:f32:igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}${
+  // MUST: キーの幾何は生成と**同じ解決点**（明示 → `gemmMTileGeometry` の順）から導く。mTile を
+  // 直に埋めると、幾何を差し替えたときにキーだけが古い辺を名乗って別物の WGSL へ衝突する。
+  const resolved = geometry ?? gemmMTileGeometry(mTile);
+  return `conv2d:v3:f32:igemm${gemmTileM(resolved)}x${gemmTileN(resolved)}${
     v4 ? "v4" : ""
-  }:wg${geometry.wgX}x${geometry.wgY}${weightKeyPart(weight)}`;
+  }:wg${resolved.wgX}x${resolved.wgY}${weightKeyPart(weight)}`;
 };
 
 export const conv2dIgemmWgsl = (
   weight: WeightStorage,
   v4: boolean,
   mTile: number = GEMM_TILE,
-): string => gemmWgsl({ op: "conv2d", v4, weight, mTile });
+  geometry?: GemmGeometry,
+): string => gemmWgsl({ op: "conv2d", v4, weight, mTile, geometry });
 
 /**
  * m タイルの行数の選択（ADR 0024 隣接の 32 行変種）。

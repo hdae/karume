@@ -61,6 +61,7 @@ import {
   type GemmRowWindowSpan,
   gemmWgsl,
 } from "./gemm.ts";
+import type { GemmGeometry } from "./gemm-geometry.ts";
 import {
   assertScoreStorageSupported,
   scoreArrayType,
@@ -110,6 +111,10 @@ const gqaKeyPart = (gqa: boolean): string => gqa ? ":gqa" : "";
 const rowWindowKeyPart = (side: "a" | "c", rowWindow: boolean): string =>
   rowWindow ? `:rw${side}` : "";
 
+/**
+ * ①QK のキー。`geometry` は明示の幾何（計測用 — src/kernels/gemm.ts の `GemmSpec`）で、
+ * MUST: {@link attentionQkWgsl} へ**同じ値**を通す（省略時は既定幾何 = 既存キーのまま）。
+ */
 export const attentionQkKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
@@ -117,21 +122,24 @@ export const attentionQkKey = (
   mask = false,
   gqa = false,
   rowWindow = false,
+  geometry?: GemmGeometry,
 ): string =>
-  `attention_qk:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
-    maskKeyPart(mask)
-  }${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
+  `attention_qk:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${
+    scoreKeyPart(score)
+  }${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
 
+/** ③PV のキー（`geometry` の規律は {@link attentionQkKey} と同じ）。 */
 export const attentionPvKey = (
   v4: boolean,
   compute: GemmCompute = "f32",
   score: ScoreStorage = "f32",
   gqa = false,
   rowWindow = false,
+  geometry?: GemmGeometry,
 ): string =>
-  `attention_pv:v1:f32:${gemmKeyPart(v4)}${gemmComputeKeyPart(compute)}${scoreKeyPart(score)}${
-    gqaKeyPart(gqa)
-  }${rowWindowKeyPart("c", rowWindow)}`;
+  `attention_pv:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${
+    scoreKeyPart(score)
+  }${gqaKeyPart(gqa)}${rowWindowKeyPart("c", rowWindow)}`;
 
 /**
  * ② の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）が受け持てる 1 スレッドあたりの
@@ -177,7 +185,8 @@ export const attentionQkWgsl = (
   mask = false,
   gqa = false,
   rowWindow = false,
-): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa, rowWindow });
+  geometry?: GemmGeometry,
+): string => gemmWgsl({ op: "attention_qk", v4, compute, score, mask, gqa, rowWindow, geometry });
 
 export const attentionPvWgsl = (
   v4: boolean,
@@ -185,7 +194,8 @@ export const attentionPvWgsl = (
   score: ScoreStorage = "f32",
   gqa = false,
   rowWindow = false,
-): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa, rowWindow });
+  geometry?: GemmGeometry,
+): string => gemmWgsl({ op: "attention_pv", v4, compute, score, gqa, rowWindow, geometry });
 
 /**
  * ② 行統計。**現行 softmax.ts のパス①②をそのまま切り出したもの**で、書き出しだけが
