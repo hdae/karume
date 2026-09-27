@@ -49,6 +49,9 @@ listens only on the loopback interface. The inputs are synthetic, so no model is
 - **JSON を保存** downloads the last sweep as `geometry-sweep-browser-<timestamp>.json`. Save it to
   `outputs/bench-browser/` to keep it next to the other browser results (that directory is not
   tracked by git).
+- **JSON を表示** / **JSON をコピー** put the same JSON into a text area on the page and copy it to
+  the clipboard. Use them where the page is served from a static host that blocks downloads (the
+  page, `runner.js` and a static `config.json` can be published as they are; all paths are relative).
 
 ## Suggested run on Apple / Metal
 

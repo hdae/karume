@@ -52,6 +52,9 @@ const ui = {
   start: element("start", HTMLButtonElement),
   stop: element("stop", HTMLButtonElement),
   exportJson: element("export", HTMLButtonElement),
+  showJson: element("show-json", HTMLButtonElement),
+  copyJson: element("copy-json", HTMLButtonElement),
+  jsonOut: element("json-out", HTMLTextAreaElement),
   status: element("status", HTMLElement),
   environment: element("environment", HTMLElement),
   rows: element("rows", HTMLTableSectionElement),
@@ -154,6 +157,8 @@ const setRunning = (running: boolean): void => {
   ui.start.disabled = running;
   ui.stop.disabled = !running;
   ui.exportJson.disabled = running || state.report === undefined;
+  ui.showJson.disabled = ui.exportJson.disabled;
+  ui.copyJson.disabled = ui.exportJson.disabled;
   for (const input of ui.ops.querySelectorAll("input")) input.disabled = running;
   ui.set.disabled = running;
   ui.rounds.disabled = running;
@@ -301,9 +306,34 @@ const exportJson = (): void => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
+/**
+ * ダウンロードが塞がれた置き場（Artifact のような sandbox）向けの逃げ道: JSON をページ内の textarea に出す。
+ * 「コピー」は clipboard API が拒まれたら textarea を選択状態にして手でコピーできるようにする。
+ */
+const showJson = (): void => {
+  const report = state.report;
+  if (report === undefined) return;
+  ui.jsonOut.value = JSON.stringify(report, null, 2);
+  ui.jsonOut.hidden = false;
+};
+
+const copyJson = async (): Promise<void> => {
+  showJson();
+  try {
+    await navigator.clipboard.writeText(ui.jsonOut.value);
+    ui.status.textContent = "JSON をクリップボードへコピーしました。";
+  } catch {
+    ui.jsonOut.focus();
+    ui.jsonOut.select();
+    ui.status.textContent =
+      "クリップボードが使えないので、選択した JSON を手でコピーしてください。";
+  }
+};
+
 const initialize = async (): Promise<void> => {
   setRunning(true);
-  const configResponse = await fetch("/config.json");
+  // 相対 path にするのは、同じページと bundle を静的な置き場（Artifact など）にそのまま載せるため。
+  const configResponse = await fetch("config.json");
   if (!configResponse.ok) throw Error(`config.json HTTP ${configResponse.status}`);
   state.config = await configResponse.json();
   const adapter = await navigator.gpu?.requestAdapter();
@@ -338,4 +368,6 @@ ui.stop.addEventListener("click", () => {
   setStatus("今の幾何を測り終えたところで止めます…");
 });
 ui.exportJson.addEventListener("click", exportJson);
+ui.showJson.addEventListener("click", showJson);
+ui.copyJson.addEventListener("click", () => void copyJson());
 initialize().catch((error: unknown) => setStatus(describeError(error)));

@@ -31,7 +31,7 @@ describe("geometry sweep browser server", () => {
     const page = await handler(new Request("http://localhost/"));
     assertEquals(page.status, 200);
     assertEquals(page.headers.get("Content-Type"), "text/html; charset=utf-8");
-    assertEquals((await page.text()).includes('src="/runner.js"'), true);
+    assertEquals((await page.text()).includes('src="runner.js"'), true);
     const runner = await handler(new Request("http://localhost/runner.js"));
     assertEquals(runner.headers.get("Content-Type"), "text/javascript");
     assertEquals(new Uint8Array(await runner.arrayBuffer()), new Uint8Array([1, 2, 3]));
