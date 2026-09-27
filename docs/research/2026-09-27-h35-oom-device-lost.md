@@ -136,4 +136,12 @@ VRAM を CPU が読む速度（約 12 MB/s）がそのまま出るので、Deno 
 - e2e `--filter residency`: 4 行緑。新しい 2 行 = text_encoder の前の退避（空きを 1 GiB 程度残す形）と、最初の
   generate の VAE 段の前の退避（空き 256 MiB 未満）。
 - 試し確保の費用: 512 MiB の `fitsHeadroom` 単体で 31 ms。常駐 DiT がある generate は 2 回量る（0.1 s 程度）。
+- **M2（利用者・Apple M2 24 GB・Chrome 153・metal-3・確認ページ `tools/anima-residency/browser`・512²・seed 42・
+  `outputs/bench-browser/anima-residency-browser-2026-09-27T12-19-09.299Z.json`）**: 常駐 on の 4 generate は
+  1 枚目 234.4 s（text_encoder 43.6 / conditioner 12.0 / DiT 168.3〈初回ロード込み〉/ VAE 10.0 s）、2〜4 枚目 146.5〜
+  147.6 s（DiT 79.6〜80.0 s）で、毎回 `retained` / `request`・PNG sha は 4 枚とも一致（常駐の利得 ≈ 87 s /
+  generate）。ダミーは 1 GiB × **80 本（85,899,345,920 B）まで 1 度も OOM にならず**、その上での 4 枚目も退避なしで
+  通った（146.5 s・sha 一致）。Metal（Dawn）は `createBuffer` で物理メモリを裏付けないため、試し確保もダミーも
+  「入る」としか答えず、**この機では先回りの退避は起きない**（known-issues「Metal で out-of-memory errorScope が
+  沈黙する」節と同じ性質 — 書き込んで初めて圧が掛かる）。連続生成の利得と決定性は設計どおり。
 - B3 ベンチ（ABBA・n=8・1024² turbo・`bench.ts --count 4`・2026-09-27）での試し確保 2 回込みの壁: 常駐あり 中央値 **20.86 s**（前日の試し確保なし 21.05 s）・段ごと運転 23.52 s（前日 23.49 s）→ 利得 2.66 s / 11.3%（前日 2.45 s / 10.4%）。試し確保の費用は走行間のばらつきに埋もれる（PNG sha は 20 走行とも一致・`results-2026-09-27T10-54-12Z.json`）。

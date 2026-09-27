@@ -927,7 +927,10 @@ generate を跨いで持ち続ける opt-in で（ADR [0112](decisions/0112-anim
 - **退避は OOM を型（`GpuOutOfMemoryError`）で報告する環境でだけ働く**（先回りの試し確保も同じ out-of-memory
   errorScope で判定する）。Metal の out-of-memory errorScope が沈黙
   する環境（known-issues「Metal で out-of-memory errorScope が沈黙する」節）では、常駐が VRAM を超えても退避も
-  格下げもイベントも起きない。
+  格下げもイベントも起きない。実測（2026-09-27・利用者の M2 24 GB / Chrome 153 / metal-3・確認ページ）: 1 GiB の
+  STORAGE ダミーを **80 本（80 GiB）**作っても OOM は 1 度も出ず、その上で常駐 DiT の generate（512²）も退避なしで
+  通った — Metal は確保時に物理メモリを裏付けないので、試し確保もダミーも「入る」としか答えない
+  （[research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md) §6）。
 - **OOM を踏んでからの退避（第二線）は、踏んだ OOM が重みアップロードの staging 側だと成り立たない**。Deno では
   その OOM で device が既に無効になっており、やり直しの段が `GpuDeviceLostError` で失敗する（黙っては落ちない —
   本ファイルの「Deno では GPUBuffer の総確保がドライバ申告予算の 97% で頭打ちになる」節）。主線は先回りの退避で、
