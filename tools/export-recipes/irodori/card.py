@@ -150,10 +150,11 @@ def _irodori_overview(manifest: Mapping[str, Any], upstream: IrodoriUpstream) ->
         "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
         "browser and in Deno.",
         "",
-        "- Eight graphs make up the chain: a shared Japanese ModernBERT `backbone`, the",
+        "- Nine graphs make up the chain: a shared Japanese ModernBERT `backbone`, the",
         "  `text_proj` and `caption_proj` condition projectors, the reference-latent `speaker`",
-        "  encoder, the `duration` predictor, the `dit` itself (one forward per Euler step, plus",
-        "  one per classifier-free-guidance branch), and the DACVAE codec"
+        "  encoder, the `duration` predictor, the DiT split in two — `dit_context` (the",
+        "  conditioning keys / values, once per generation) and `dit` (one forward per Euler step,",
+        "  plus one per classifier-free-guidance branch) — and the DACVAE codec"
         f" ([{IRODORI_CODEC_MODEL}](https://huggingface.co/{IRODORI_CODEC_MODEL}))",
         "  as `codec_decoder` / `codec_encoder`.",
         "- **Text in, waveform out.** `generate()` returns f32 mono samples at the codec's sample",
@@ -200,12 +201,12 @@ def _irodori_base_weights(upstream: IrodoriUpstream) -> list[str]:
         "  the Apache License 2.0 text is included in `LICENSE.md` for the codec components.",
         "- **Changes made here** (also listed in `NOTICE.md`): conversion into the Karume",
         "  container format and **quantization** of the weights — every component is stored",
-        "  as `f32` / `f16` / `i8` series, and `dit` adds an `i4` series rounded with GPTQ",
-        "  calibration (the quant table below says which storage each quant selects; `f32` is",
-        "  not quantized). The codec stores its weight-normalized convolutions as effective",
-        "  weights, keeps only the mean half of `quantizer.in_proj` in `codec_encoder`, and",
-        "  bypasses the watermarking branch in `codec_decoder`; constant sub-expressions are",
-        "  precomputed. No retraining, no fine-tuning.",
+        "  as `f32` / `f16` / `i8` series, and the DiT (`dit` / `dit_context`) adds an `i4` series",
+        "  rounded with GPTQ calibration (the quant table below says which storage each quant",
+        "  selects; `f32` is not quantized). The codec stores its weight-normalized convolutions",
+        "  as effective weights, keeps only the mean half of `quantizer.in_proj` in",
+        "  `codec_encoder`, and bypasses the watermarking branch in `codec_decoder`; constant",
+        "  sub-expressions are precomputed. No retraining, no fine-tuning.",
     ]
 
 

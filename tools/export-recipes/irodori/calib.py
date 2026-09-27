@@ -10,10 +10,12 @@ scale 台帳の中身だけで、emit 側の格納経路も配布形のバイト
 1. **stage 列** — DiT の `blocks` をそのまま並べたもの（{@link dit_stages}）。上流の
    `DiffusionBlock.forward` が「hidden を第 1 位置引数で受けて hidden を返す」形なので
    **包まない**。接頭辞 {@link STAGE_PREFIX} は `blocks` で、これは
-   **配布ラッパ（`irodori.export.DitGraph`）の FQN 空間でもある** — ラッパは DiT の部分木を
-   `self.blocks` / `self.in_proj` / `self.out_proj` / `self.cond_module` と**同じ属性名**で
-   抱える（`irodori.export.TARGET_SCALE_SOURCES` の `dit` 行が張り替え無しなのはこのため）。
-   ここが外れると scale 台帳のキーが容器の initializer 名（= 束縛表の鍵）と空振りする。
+   **配布ラッパ（`irodori.export.DitGraph` / `DitContextGraph`）の FQN 空間でもある** —
+   ラッパは DiT の部分木を `blocks.<b>.…` / `in_proj` / `out_proj` / `cond_module` と**同じ
+   属性名**で抱える（`irodori.export.TARGET_SCALE_SOURCES` の DiT 2 行が張り替え無しなのは
+   このため）。1 つの block の重みは 2 本のラッパに分かれて載る（条件側 K/V 射影は
+   `dit-context`・残りは `dit` — ADR 0114）が、stage は block 丸ごとのまま（校正の駆動は割る前と
+   同じ）。ここが外れると scale 台帳のキーが容器の initializer 名（= 束縛表の鍵）と空振りする。
 2. **先頭 stage への入力** — {@link capture_stage_batches} が**参照 denoise を実際に回して**
    先頭 block への `(args, kwargs)` を forward_pre_hook で捕まえる。自前で組み直さないのは
    計測リグ（`irodori.measure_quant`）と同文で、拡散モデルでは加えて「活性が t で動く」ので
@@ -26,22 +28,23 @@ scale 台帳の中身だけで、emit 側の格納経路も配布形のバイト
 
 MUST（駆動が**素の DiT** である理由 — この recipe 固有の制約）: `irodori.export` の丸めは
 「`load_*` の直後・パッチ前の参照より前」に置かれ（`irodori.export.fake_quant` の順序 MUST）、
-一方で配布ラッパ `DitGraph` は**パッチ後でしか動かない**（実数形 RoPE 表を渡すため —
-`irodori.patch` のモジュール docstring）。両方は同時に満たせないので、校正の参照ループは
-**上流の正本経路**（`irodori_tts.rf.sample_euler_rf_cfg` が素の `TextToLatentRFDiT` を回す形）
-で採る。素の経路と `DitGraph` が同じ値を出すことは、**同じ export 実行の中で**
-`irodori.export` の eager 同値門（`EAGER_EQUIV_ATOL = 0`）が全 golden ケースについて実測
-する — 「stage 逐次 ≡ 素の block ループ」（ここの門）と合わせて、stage 分解が配布グラフの
-経路と一致することが 2 本の実測で閉じる。
+一方で配布ラッパ（`DitContextGraph` / `DitGraph`）は**パッチ後でしか動かない**（実数形 RoPE 表を
+渡すため — `irodori.patch` のモジュール docstring）。両方は同時に満たせないので、校正の参照
+ループは**上流の正本経路**（`irodori_tts.rf.sample_euler_rf_cfg` が素の `TextToLatentRFDiT` を
+回す形）で採る。素の経路と配布ラッパ 2 本の合成が同じ値を出すことは、**同じ export 実行の中で**
+`irodori.export` の eager 同値門（`EAGER_EQUIV_ATOL = 0`・分割の同値門を含む）が全 golden
+ケースについて実測する — 「stage 逐次 ≡ 素の block ループ」（ここの門）と合わせて、stage 分解が
+配布グラフの経路と一致することが 2 本の実測で閉じる。
 
 MUST: 参照ループは `use_context_kv_cache=False` で回す（{@link capture_stage_batches}）—
 上流の既定（True）は条件 K/V を**block ごとに別のキャッシュ**で渡すので、1 つの kwargs を
 全 stage で使い回す core の駆動と噛み合わず、しかも stage 分解一致門より前に静かに壊れる。
-False は配布グラフの綴り（毎 forward 内で `project_context_kv` を計算 — ADR 0047 決定 3）
-とも一致する。
+配布グラフは条件側 K/V を別グラフ（`dit-context`）で 1 回だけ作る（ADR 0114 — 上流のキャッシュと
+同じ意味論）が、値は同じ `project_context_kv` の出力なので、False で採った活性とビット単位で同じ。
+条件側の射影が stage の**中**で走ることは、その 72 本が GPTQ で自分の入力を見るための要件でもある。
 
 NOTE（`irodori.measure_quant` のリグと共有しない理由）: あちらは 3 グリッド × 品質計測のための
-足場で、駆動は**パッチ後の `DitGraph`**（`DitBlockStage` という写しを持つ）に閉じている。
+足場で、駆動は**パッチ後の配布ラッパ**（`DitBlockStage` という写しを持つ）に閉じている。
 export 側はパッチ前の素の経路・配布条件（stage 外を先に丸める）・出荷可能な台帳の取り出しが
 要る。写しを 1 本にまとめると、片方の前提が動いたときにもう片方が黙って追随する — 各リグが
 自前の一致門で独立に自己検証する形にしてある。
@@ -220,12 +223,13 @@ def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
 
     適格は 2 条件の積で決まる:
 
-    1. **配布グラフに載る重みであること** — 判定は `irodori.export.DitGraph` の
-       `named_parameters` との交差で採る。素の `TextToLatentRFDiT` は backbone / projector /
-       speaker / duration の**コピーを内側に持つ**（`irodori.pipeline_ref` の NOTE）ので、
-       名前で絞らないと他役割の linear まで i4 に化ける。名指しの一覧
-       （`blocks` / `in_proj` / `out_proj` / `cond_module`）を持たないのは、上流が DiT の
-       構成を変えた日に一覧だけが古いまま通るのを避けるため。
+    1. **配布グラフに載る重みであること** — 判定は DiT の配布ラッパ 2 本
+       （`irodori.export.dit_wrappers` — `dit-context` / `dit`）の `named_parameters` の**和**との
+       交差で採る（割る前の `DitGraph` 1 本の所有と同じ集合 — ADR 0114）。素の
+       `TextToLatentRFDiT` は backbone / projector / speaker / duration の**コピーを内側に持つ**
+       （`irodori.pipeline_ref` の NOTE）ので、名前で絞らないと他役割の linear まで i4 に化ける。
+       名指しの一覧（`blocks` / `in_proj` / `out_proj` / `cond_module`）を持たないのは、上流が
+       DiT の構成を変えた日に一覧だけが古いまま通るのを避けるため。
     2. **量子化軸が group 長で割り切れること** — i4 は端数 group を作らない MUST
        （ADR 0069 決定 2）。実重み（12 block）では linear 317 本すべてが g32 整除だが
        （`docs/research/2026-08-12-irodori-quant-recon.md` の k ヒストグラム）、**前提にせず
@@ -237,7 +241,8 @@ def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
     """
     owned = {
         name.removesuffix(".weight")
-        for name, _parameter in ex.DitGraph(dit, sym_max).named_parameters()
+        for wrapper in ex.dit_wrappers(dit, sym_max).by_target().values()
+        for name, _parameter in wrapper.named_parameters()
     }
     names: set[str] = set()
     for fqn, weight, axis in iter_quant_targets(dit, (nn.Linear,)):
@@ -253,7 +258,8 @@ def dit_i4_names(dit: nn.Module, sym_max: int) -> frozenset[str]:
         names.add(name)
     if not names:
         raise AssertionError(
-            "DiT に i4 適格な linear が 1 本も無い（DitGraph の構成が台本の想定と食い違っている）"
+            "DiT に i4 適格な linear が 1 本も無い"
+            "（DiT のラッパの構成が台本の想定と食い違っている）"
         )
     return frozenset(names)
 

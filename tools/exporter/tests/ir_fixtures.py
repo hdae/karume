@@ -144,6 +144,7 @@ def ir_container(
     storage: str = "f32",
     inputs: Sequence[tuple[str, Shape]] = (),
     outputs: Sequence[Shape] = ([1],),
+    output_names: Sequence[str] | None = None,
     weights: Sequence[str] = ("weight",),
     baked: tuple[str, int] | None = None,
     symbols: Sequence[str] = (),
@@ -165,7 +166,9 @@ def ir_container(
 
     `inputs`（名前と shape）と `outputs`（出力ごとの宣言 shape）は family 固有の門が読む席。
     入力はどのノードも消費しない宣言だけの席で、出力は小さな定数を `expand` した値なので、
-    2048×2048 のような宣言でも実バイトは数十バイトのまま。
+    2048×2048 のような宣言でも実バイトは数十バイトのまま。`output_names` は出力の値名
+    （既定 `out_<位置>`）— ランタイムが出力を**名前で**束ねる family（常駐テンソルへ写す境界 —
+    irodori の `dit_context`）の門が綴りを読む席。
 
     `weights` は linear の重みになる initializer 名（層数を数える門が読む綴り）。
     `baked` は `(記号名, 焼き込み上限)` で、`sym_prefix_slice` の焼き込み定数を 1 本足す
@@ -189,7 +192,7 @@ def ir_container(
     なるかは現物のバイト数が決めるので、渡した側は本数を仮定せず**現物を観測する**こと。
     """
     graph, tensors, scales, overrides = _spec(
-        mark, storage, inputs, outputs, weights, baked, symbols
+        mark, storage, inputs, outputs, weights, baked, symbols, output_names
     )
     return _write(
         graph,
@@ -275,8 +278,11 @@ def _spec(
     weights: Sequence[str],
     baked: tuple[str, int] | None,
     symbols: Sequence[str],
+    output_names: Sequence[str] | None = None,
 ) -> tuple[IrGraph, dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, str]]:
     """spec からグラフ・格納テンソル・scale 台帳・格納 dtype の 1 本単位指定を組む。"""
+    if output_names is not None and len(output_names) != len(outputs):
+        raise ValueError(f"出力 {len(outputs)} 本に名前 {len(output_names)} 本")
     initializers: dict[str, IrInitializer] = {}
     values: dict[str, IrValue] = {}
     nodes: list[IrNode] = []
@@ -358,7 +364,7 @@ def _spec(
     for index, shape in enumerate(outputs):
         seed = f"{_OWN}seed{index}"
         declare(seed, _ramp(*([1] * len(shape))))
-        out = f"out_{index}"
+        out = f"out_{index}" if output_names is None else output_names[index]
         values[out] = IrValue(dtype="f32", shape=list(shape))
         nodes.append(IrNode(op="expand", ins=[seed], outs=[out], attrs={}))
         graph_outputs.append(out)

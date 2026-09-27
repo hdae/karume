@@ -74,11 +74,14 @@ linear）とは**集合が違う** — 校正の駆動（`calibrate_stages`）�
 校正入力は **{@link irodori.pipeline_ref.PIPELINE_CASES} 2 件の参照ループ（f32・CFG 込み）の
 全 step**で、step ごとに先頭 DiT block への `(hidden, 付随引数)` を捕まえて 1 バッチにする
 （{@link capture_case_batches}）。拡散モデルの活性は t で分布が動くので、**step を横断して**
-採らないと後半 step の分布だけ校正から漏れる。付随引数（`cond_embed` / 条件 state /
-マスク / RoPE 表）は `DitGraph.forward` がループの**前**に 1 回作って全 block へ同じものを
-渡すので、stage 間で不変にできる（`advance_kwargs` は要らない）。
+採らないと後半 step の分布だけ校正から漏れる。付随引数（`cond_embed` / norm 済みの条件 state /
+マスク / RoPE 表）は block ループの**前**に 1 回作られて全 block へ同じものが渡るので、stage 間で
+不変にできる（`advance_kwargs` は要らない）。条件 state は `dit-context`（`DitContextGraph`）が
+生成 1 回だけ norm を掛け、`cond_embed` / マスク / RoPE 表は `DitGraph.forward` が作る — stage は
+条件側 K/V 射影を**block の中で**計算し直す（GPTQ がその 72 本の入力を見るため — ADR 0114 で
+配布グラフを割った後も、校正の stage は block 丸ごと）。
 
-MUST: 捕捉は**丸めを 1 本も当てる前**（pristine）に 1 回だけ。stage 分解が `DitGraph` の
+MUST: 捕捉は**丸めを 1 本も当てる前**（pristine）に 1 回だけ。stage 分解が配布ラッパ 2 本の
 1 forward と**ビット一致**することも、丸める前にその場で実測する
 （{@link assert_stage_split_matches_graph}）— block 本体の写しが上流とずれると、値が静かに
 別物になったまま表だけ出る。
@@ -776,14 +779,19 @@ def apply_weight_quant(
 
 
 def role_graphs(graphs: ip.HostGraphs) -> dict[str, nn.Module]:
-    """役割 → **配布グラフ**（`irodori.export.export_series` が emit する 6 本のラッパ）。"""
+    """役割 → **配布グラフ**（`irodori.export.export_series` が emit する 7 本のラッパ）。
+
+    DiT の役割は 2 本のラッパ（`dit-context` / `dit` — ADR 0114）を 1 つの木に束ねて返す — 丸めの
+    役割（`TextToLatentRFDiT` 丸ごと）と配布グラフが 1 対 2 になったので、サイズ試算の計数は
+    2 本の和で採る（共有の `k_norm` は `named_modules` の重複除去で 1 度だけ数えられる）。
+    """
     return {
         ex.TARGET_BACKBONE: graphs.backbone,
         ex.TARGET_TEXT_PROJ: graphs.text_proj,
         ex.TARGET_CAPTION_PROJ: graphs.caption_proj,
         ex.TARGET_SPEAKER: graphs.speaker,
         ex.TARGET_DURATION: graphs.duration,
-        ex.TARGET_DIT: graphs.dit,
+        ex.TARGET_DIT: nn.ModuleList([graphs.dit_context, graphs.dit]),
     }
 
 
@@ -863,11 +871,12 @@ def load_modules(model_dir: Path, source_dir: Path) -> Loaded:
 def build_graphs(
     modules: Mapping[str, nn.Module], config: Any, model_config: Mapping[str, Any]
 ) -> ip.HostGraphs:
-    """`irodori.pipeline_ref.emit` と同じ 6 本のグラフラッパ。
+    """`irodori.pipeline_ref.emit` と同じ 7 本のグラフラッパ。
 
     MUST: **パッチ適用後**でしか正しく動かない（実数形 RoPE 表を渡すため）。
     """
     speaker_max = ex.speaker_sym_max(model_config)
+    dit_graphs = ex.dit_wrappers(modules[ex.TARGET_DIT], ex.dit_sym_max(config))
     return ip.HostGraphs(
         backbone=ex.BackboneGraph(modules[ex.TARGET_BACKBONE]),
         text_proj=ex.ProjectorGraph(modules[ex.TARGET_TEXT_PROJ]),
@@ -876,7 +885,8 @@ def build_graphs(
         ),
         speaker=ex.SpeakerGraph(modules[ex.TARGET_SPEAKER], modules["speaker_norm"], speaker_max),
         duration=ex.DurationGraph(modules[ex.TARGET_DURATION], modules["text_norm"]),
-        dit=ex.DitGraph(modules[ex.TARGET_DIT], ex.dit_sym_max(config)),
+        dit_context=dit_graphs.context,
+        dit=dit_graphs.dit,
     )
 
 
@@ -953,7 +963,11 @@ class DitBlockStage(nn.Module):
     `TextToLatentRFDiT` の block は `DiffusionBlock.forward` を持つが、`DitGraph` は
     それを呼ばずに attention の同値実装（{@link irodori.export.DitGraph._attention}）へ
     展開するので、block をそのまま stage にすると**測っている経路が別物**になる。attention は
-    その staticmethod を直に借りて写しを増やさない。
+    その staticmethod を直に借りて写しを増やさない。条件側 K/V は配布では `dit-context` が
+    生成 1 回だけ作る（ADR 0114）が、stage は同じ 1 実装
+    （{@link irodori.export.DitContextGraph.block_context}）を**block の中で**呼ぶ — 条件側の射影
+    72 本も block の重みで、GPTQ がその入力（norm 済みの条件 state）を見る必要があるため。値は
+    配布の経路とビット単位で同じ（同じモジュールを同じ入力で呼ぶ）。
 
     MUST: 写しが上流とずれていないことは {@link assert_stage_split_matches_graph} が丸める前に
     ビット一致で実測する（`nn.Dropout(p=0.0)` を落とすのは `DitGraph` と同じ厳密恒等）。
@@ -980,17 +994,26 @@ class DitBlockStage(nn.Module):
     ) -> torch.Tensor:
         block = getattr(self, self.child)
         h, attention_gate = block.attention_adaln(x, cond_embed)
+        context_k, context_v = ex.DitContextGraph.block_context(
+            block.attention, text, speaker, caption
+        )
         x = x + attention_gate * ex.DitGraph._attention(
-            block.attention, h, text, speaker, caption, mask, freqs
+            block.attention, h, context_k, context_v, mask, freqs
         )
         h, mlp_gate = block.mlp_adaln(x, cond_embed)
         return x + mlp_gate * block.mlp(h)
 
 
 def dit_stages(graph: nn.Module) -> tuple[StageSpec, ...]:
-    """実行順の DiT block を `(モデル内 FQN 接頭辞, stage)` で返す。"""
+    """実行順の DiT block を `(モデル内 FQN 接頭辞, stage)` で返す。
+
+    stage が抱えるのは**実モジュールの block 丸ごと**（`DitGraph.source_blocks`）— `DitGraph` の
+    `blocks` は条件側の射影を除いた器（配布の所有の範囲）なので、そちらを包むと条件側の 72 本が
+    校正から漏れる。
+    """
     return tuple(
-        (DIT_BLOCK_PREFIX, DitBlockStage(index, block)) for index, block in enumerate(graph.blocks)
+        (DIT_BLOCK_PREFIX, DitBlockStage(index, block))
+        for index, block in enumerate(graph.source_blocks)
     )
 
 
@@ -1024,7 +1047,10 @@ def calib_targets(stages: Sequence[StageSpec]) -> tuple[dict[str, torch.Tensor],
 
 
 def capture_case_batches(
-    graph: nn.Module, run_reference: Callable[[], object], limit: int
+    context_graph: nn.Module,
+    graph: nn.Module,
+    run_reference: Callable[[], object],
+    limit: int,
 ) -> tuple[list[StageBatch], tuple[torch.Tensor, ...]]:
     """1 ケースの参照ループ（f32・CFG 込み）から **step ごとに 1 バッチ**捕まえる。
 
@@ -1035,10 +1061,10 @@ def capture_case_batches(
     を受ける（`irodori.pipeline_ref._euler` は step ごとに 1 本の `x_t` しか作らない）ので、
     `x_t` の**同一性**で step 境界を割り、新しくなった直後の 1 forward = cond 側だけを採る。
 
-    捕まえるのは `DitGraph` が block ループの**前**に作る一式（`cond_embed` / 正規化済みの
-    text・caption / speaker state / 連結マスク / RoPE 表）と、先頭 block への hidden。
-    自前で組み直さないのは、組み直した瞬間に `DitGraph` の綴りと黙って割れうるから
-    （EG の Catcher と同じ規律）。
+    捕まえるのは block ループの**前**に作られる一式 — norm 済みの text・caption と speaker state は
+    `context_graph`（`dit-context`・生成 1 回 — ADR 0114）から、`cond_embed` / 連結マスク /
+    RoPE 表と先頭 block への hidden は `graph`（`dit`）の forward から。自前で組み直さないのは、
+    組み直した瞬間にラッパの綴りと黙って割れうるから（EG の Catcher と同じ規律）。
 
     `limit` を捕まえ切ったら番兵で参照ループを畳む — `run_case` は CFG ありのループの**後**に
     CFG 無しのループをもう 1 周回すので、畳まないと「同じ step の別軌道」まで混ざる。
@@ -1047,6 +1073,16 @@ def capture_case_batches(
     probe: list[tuple[torch.Tensor, ...]] = []
     state: dict[str, Any] = {"x_t": None, "take": False}
     pending: dict[str, torch.Tensor] = {}
+    conditions: dict[str, torch.Tensor] = {}
+
+    def on_context(_module: nn.Module, args: tuple[Any, ...]) -> None:
+        conditions["speaker"] = args[1].detach()
+
+    def on_text(_module: nn.Module, _args: tuple[Any, ...], output: torch.Tensor) -> None:
+        conditions["text"] = output.detach()
+
+    def on_caption(_module: nn.Module, _args: tuple[Any, ...], output: torch.Tensor) -> None:
+        conditions["caption"] = output.detach()
 
     def on_graph(_module: nn.Module, args: tuple[Any, ...]) -> None:
         if args[0] is state["x_t"]:
@@ -1054,20 +1090,17 @@ def capture_case_batches(
             return
         if len(batches) >= limit:
             raise _CalibStepsReached
+        missing = sorted({"text", "speaker", "caption"} - set(conditions))
+        if missing:
+            raise SystemExit(
+                f"dit が dit-context より先に回った（条件 {missing} を捕まえていない）"
+                " — 参照ループの綴りが台本の想定と食い違っている"
+            )
         state["x_t"] = args[0]
         state["take"] = True
         pending["mask"] = args[2]
-        pending["speaker"] = args[4]
         if not probe:
             probe.append(tuple(args))
-
-    def on_text(_module: nn.Module, _args: tuple[Any, ...], output: torch.Tensor) -> None:
-        if state["take"]:
-            pending["text"] = output.detach()
-
-    def on_caption(_module: nn.Module, _args: tuple[Any, ...], output: torch.Tensor) -> None:
-        if state["take"]:
-            pending["caption"] = output.detach()
 
     def on_block(_module: nn.Module, args: tuple[Any, ...]) -> None:
         if not state["take"]:
@@ -1078,9 +1111,9 @@ def capture_case_batches(
                 (hidden,),
                 {
                     "cond_embed": args[1].detach(),
-                    "text": pending["text"],
-                    "speaker": pending["speaker"],
-                    "caption": pending["caption"],
+                    "text": conditions["text"],
+                    "speaker": conditions["speaker"],
+                    "caption": conditions["caption"],
                     "mask": pending["mask"],
                     "freqs": graph.rope_table[: int(hidden.shape[1])],
                 },
@@ -1089,9 +1122,10 @@ def capture_case_batches(
         state["take"] = False
 
     handles = [
+        context_graph.register_forward_pre_hook(on_context),
+        context_graph.text_norm.register_forward_hook(on_text),
+        context_graph.caption_norm.register_forward_hook(on_caption),
         graph.register_forward_pre_hook(on_graph),
-        graph.text_norm.register_forward_hook(on_text),
-        graph.caption_norm.register_forward_hook(on_caption),
         graph.blocks[0].attention_adaln.register_forward_pre_hook(on_block),
     ]
     try:
@@ -1166,7 +1200,9 @@ def build_calib_rig(
     batches: list[StageBatch] = []
     steps: dict[str, int] = {}
     for case in ip.PIPELINE_CASES:
-        caught, probe = capture_case_batches(graph, lambda case=case: run_reference(case), limit)
+        caught, probe = capture_case_batches(
+            graphs.dit_context, graph, lambda case=case: run_reference(case), limit
+        )
         if not batches:
             # `probe` と `caught[0]` は**同じ forward**（先頭 step の cond 側）。
             assert_stage_split_matches_graph(graph, probe, caught[0], stages)

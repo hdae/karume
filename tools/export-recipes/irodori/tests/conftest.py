@@ -17,9 +17,41 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from _shared.paths import REPO_ROOT
 
 #: `irodori.export.DEFAULT_SOURCE_DIR` と同じ置き場（綴りが割れると片方だけ空振りする）。
 IRODORI_SOURCE_DIR = REPO_ROOT / "inputs" / "irodori" / "Irodori-TTS"
 if IRODORI_SOURCE_DIR.is_dir() and str(IRODORI_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(IRODORI_SOURCE_DIR))
+
+
+@pytest.fixture
+def restore_forward():
+    """`irodori.patch.apply_patches` のクラス属性の差し替えをテスト後に戻す。
+
+    差し替えはプロセス全域なので、戻さないと後続のテストがパッチ後の実装で回る。
+
+    `apply_patches` は `irodori_tts`（git 追跡外の clone — 上で `sys.path` へ足す）も
+    差し替えるので、無い環境ではこのフィクスチャを使うテストだけを skip する。パッチの同値
+    （`test_patch.py`）と DiT の分割の同値（`test_export.py`）の両方が使うのでここに置く。
+    """
+    from irodori import patch as patch_irodori
+
+    modernbert = pytest.importorskip("transformers.models.modernbert.modeling_modernbert")
+    irodori_model = pytest.importorskip("irodori_tts.model")
+    original = modernbert.ModernBertAttention.forward
+    original_rope = irodori_model.apply_rotary_emb
+    original_norm = irodori_model.RMSNorm.forward
+    original_adaln = irodori_model.LowRankAdaLN.forward
+    applied = patch_irodori._APPLIED
+    try:
+        yield irodori_model
+    finally:
+        modernbert.ModernBertAttention.forward = original
+        irodori_model.apply_rotary_emb = original_rope
+        irodori_model.RMSNorm.forward = original_norm
+        irodori_model.LowRankAdaLN.forward = original_adaln
+        patch_irodori._APPLIED = applied
+        patch_irodori._ORIGINAL_APPLY_ROTARY_EMB = None

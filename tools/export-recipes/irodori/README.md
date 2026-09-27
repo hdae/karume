@@ -13,52 +13,57 @@ contracts live in [`../../exporter/README.md`](../../exporter/README.md).
 
 ## Real-weight Irodori-TTS export and E2E (waves 1–4)
 
-Six text-side graphs plus the DACVAE codec pair, with host-side goldens. The numbering below names
+Seven text-side graphs plus the DACVAE codec pair, with host-side goldens. The numbering below names
 the steps used throughout this file; the scripts read each other's outputs, so a **clean tree** has
 to run them in the order given at the end of this section, not in the listed one:
 
 ```sh
 # 0. one-time inputs: inputs/irodori/{v4-small,v4.1-small,dacvae-32dim,Irodori-TTS,dacvae-src}/
 uv run python -m irodori.dacvae.convert                                  # 1. codec pth → safetensors
-uv run --with 'transformers==5.14.1' python -m irodori.export            # 2. six graphs + io goldens
+uv run --with 'transformers==5.14.1' python -m irodori.export            # 2. seven graphs + io goldens
 uv run --with 'transformers==5.14.1' python -m irodori.tokenizer_ref     # 3. tokenizer asset + goldens + parity fixture (deno fmt it)
 uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref      # 4. full-loop latent goldens
 uv run --with descript-audiotools --with einops \
     --with 'transformers==5.14.1' python -m irodori.dacvae.host          # 5. host preprocessing goldens
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export  # 6. codec graphs + io goldens
-uv run python dist.py --pipeline irodori                                 # 7. distribution (8 graphs + tokenizer)
+uv run python dist.py --pipeline irodori                                 # 7. distribution (9 graphs + tokenizer)
 ```
 
 The distribution carries **f16 and i8 weight-storage series** next to f32 (ADR 0050), plus an i4
-series for `dit` (below), so step 7 needs f32 / f16 / i8 (all eight roles) and i4 (`dit`).
+series for the DiT's two graphs (below), so step 7 needs f32 / f16 / i8 (all nine roles) and i4
+(`dit` and `dit-context`).
 Regenerate the f16 and i8 sides with the same three scripts (order caveats are identical; the
 codec / full-loop inputs stay on the f32 series on purpose — inputs are dtype-neutral):
 
 ```sh
-uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16     # 2'. six graphs
+uv run --with 'transformers==5.14.1' python -m irodori.export --dtype f16     # 2'. seven graphs
 uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype f16   # 4'. full-loop goldens
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype f16  # 6'. codec
-uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8      # 2'''. six graphs
+uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i8      # 2'''. seven graphs
 uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i8    # 4'''. full-loop goldens
 uv run --with descript-audiotools --with einops python -m irodori.dacvae.export --dtype i8  # 6'''. codec
 ```
 
-The `i8+dit4` quant seat adds an **i4 series for `dit` only** — the other seven roles share the i8 bytes,
-so nothing else is re-exported for it. Only the DiT block weights outside the adaLN modulation are
-stored as i4 (168 linears); the 144 adaLN linears (`attention_adaln`, `mlp_adaln`) and the five
-linears outside the blocks (`in_proj`, `out_proj`, `cond_module.{0,2,4}`) are stored as i8 in the
-same container — both exclusions come from listening judgements. Step 7 requires this series; the
+The `i8+dit4` quant seat adds an **i4 series for the DiT only** — its two graphs, `dit` and
+`dit-context` (the conditioning keys / values, computed once per generation — ADR 0114); the other
+seven roles share the i8 bytes, so nothing else is re-exported for it. Only the DiT block weights
+outside the adaLN modulation are stored as i4 (168 linears: the 72 conditioning key / value
+projections in `dit-context`, the other 96 in `dit`); the 144 adaLN linears (`attention_adaln`,
+`mlp_adaln`) and the five linears outside the blocks (`in_proj`, `out_proj`, `cond_module.{0,2,4}`)
+are stored as i8 in the `dit` container — both exclusions come from listening judgements. The
+rounding runs once on the whole DiT and the two containers are written from that one result, with
+the same `calib_provenance.json` next to each. Step 7 requires this series; the
 rounding is GPTQ-calibrated by default and takes about 20–25 minutes of CPU time (twelve
 calibration cases × the full reference loop — 1,447 s for v4-small and 1,183 s for v4.1-small,
 measured 2026-09-05):
 
 ```sh
-uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i4   # 2''. dit only, calibrated
+uv run --with 'transformers==5.14.1' python -m irodori.export --dtype i4   # 2''. dit + dit-context, calibrated
 uv run --with 'transformers==5.14.1' python -m irodori.pipeline_ref --dtype i4  # 4''. full-loop goldens
 ```
 
-Step 4'' **reads the container step 2'' wrote** (it is the only series whose goldens are baked from
-the shipped bytes rather than from a second calibration run), so it must follow 2''.
+Step 4'' **reads the two containers step 2'' wrote** (it is the only series whose goldens are baked
+from the shipped bytes rather than from a second calibration run), so it must follow 2''.
 
 `--no-calib` swaps the calibration for plain RTN. It exists for smoke runs only: the storage form is
 byte-identical either way, so `dist` — and step 4'' — refuse the result by reading the
@@ -70,7 +75,8 @@ them load the codec step 1 converts. A **full** rebuild from scratch therefore r
 **1 → 4 → 5 → 2 → 3 → 6 → 7**, not the listing order above (that one stops on the first script).
 The i4 series is the one place where the dependency runs the other way (step 4'' reads what step 2''
 wrote, above). Incremental regeneration of a single script is safe as long as its inputs above
-exist. Design records: ADR 0044 / 0046 / 0047 (graphs), 0048 (host port), 0049 (codec integration).
+exist. Design records: ADR 0044 / 0046 / 0047 / 0114 (graphs), 0048 (host port), 0049 (codec
+integration).
 
 ## Another model of the same architecture (v4.1-small)
 

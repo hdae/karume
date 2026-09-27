@@ -134,6 +134,12 @@ _IRODORI_MASK_TOTAL = 10 + _IRODORI_SPEAKER_ROWS + 14
 #: backbone の hidden 幅（projector の入力 — pipelineConfig には現れない数）。
 _IRODORI_HIDDEN = 32
 
+#: 合成 DiT のブロック数と、条件側 K/V 1 本の形（`[1, 条件 3 区間の合計, heads, head_dim]`）。
+#: **実重みの 12 ブロック / 20 heads × 64 とは違う数** — 組み立て側がブロック数を焼いていれば
+#: この合成で落ちる（境界の本数は `dit_context` の出力から導く — ADR 0114）。
+_IRODORI_DIT_BLOCKS = 2
+_IRODORI_CONTEXT_SHAPE = [1, _IRODORI_MASK_TOTAL, 2, 4]
+
 #: 偽コーデックの `metadata.json`（`irodori/dacvae/convert.py` が書く形）。**実物とは違う数**
 #: （48kHz / hop 1920 ではない）にして、`sampleRate` / `hopLength` を焼き込んでいれば落ちるように
 #: する。`frameRate` 25 と噛み合う組み合わせを選ぶ（12,000 = 25 × 480）。
@@ -186,12 +192,22 @@ _IRODORI_CONFIG_KEYS = (
 )
 
 
-#: グラフ 1 本の形（入力の名前と shape・出力本数・記号名）。
-_Spec = tuple[list[tuple[str, list[Any]]], int, str]
+#: グラフ 1 本の形（入力の名前と shape・出力・記号名）。出力は本数（各 `[1]`・名前は既定）か、
+#: 名前つきの `(名前, shape)` の並び（ランタイムが出力を名前で束ねる `dit_context`）。
+_Spec = tuple[list[tuple[str, list[Any]]], int | list[tuple[str, list[Any]]], str]
+
+
+def _context_kv(blocks: int = _IRODORI_DIT_BLOCKS) -> list[tuple[str, list[Any]]]:
+    """条件側 K/V の境界（`dit_context` の出力 = `dit` の 4 本目以降の入力）の名前と形。"""
+    return [
+        (name, list(_IRODORI_CONTEXT_SHAPE))
+        for index in range(blocks)
+        for name in (f"context_k_{index}", f"context_v_{index}")
+    ]
 
 
 def _irodori_specs() -> dict[str, _Spec]:
-    """8 グラフの形 — {@link _IRODORI_CONFIG} と噛み合う。
+    """9 グラフの形 — {@link _IRODORI_CONFIG} と噛み合う。
 
     門に落とすケースも正当なコンテナ（{@link _irodori_input}）もここから作る — 形の正本を
     2 つ持つと、片方だけ動いた日に門が黙って別の形を見る。
@@ -220,17 +236,26 @@ def _irodori_specs() -> dict[str, _Spec]:
             1,
             "T",
         ),
+        # DiT は 2 本に割れている（ADR 0114）— 条件 state は `dit_context` の入力、`dit` は
+        # 条件側 K/V を入力に取る。
         "dit": (
             [
                 ("x_t", [1, "S", latent_dim]),
                 ("t_embed", [1, _IRODORI_CONFIG["timestep_embed_dim"]]),
                 ("mask", [1, 1, 1, f"S+{_IRODORI_MASK_TOTAL}"]),
+                *_context_kv(),
+            ],
+            1,
+            "S",
+        ),
+        "dit_context": (
+            [
                 ("text_state", [1, _IRODORI_CONFIG["max_text_len"], text_dim]),
                 ("speaker_state", [1, _IRODORI_SPEAKER_ROWS, speaker_dim]),
                 ("caption_state", [1, _IRODORI_CONFIG["max_caption_len"], caption_dim]),
             ],
-            1,
-            "S",
+            _context_kv(),
+            "",
         ),
         # コーデック 2 本（別系列・純畳み込み）。入力幅が latentDim / hopLength と噛み合う。
         "codec_decoder": ([("latent", [1, "S", latent_dim])], 1, "S"),
@@ -248,6 +273,7 @@ def _irodori_input(dtype: str, role: str, spec: _Spec | None = None) -> list[byt
     見る門（{@link IRODORI_STORAGE_FORBIDDEN}）はこの形にも同じように掛かる。
     """
     inputs, outputs, _symbol = _irodori_specs()[role] if spec is None else spec
+    named_outputs = [(None, [1]) for _ in range(outputs)] if isinstance(outputs, int) else outputs
     return ir_container(
         mark=f"irodori-{role}-{dtype}",
         # 疑似系列も**部品名で名乗る**（容器のグラフ名 = manifest の weights のキー
@@ -255,7 +281,8 @@ def _irodori_input(dtype: str, role: str, spec: _Spec | None = None) -> list[byt
         named=role,
         storage=dtype,
         inputs=tuple((name, shape) for name, shape in inputs),
-        outputs=[[1] for _ in range(outputs)],
+        outputs=[shape for _name, shape in named_outputs],
+        output_names=None if isinstance(outputs, int) else [name for name, _ in named_outputs],
     )
 
 
@@ -273,7 +300,7 @@ def _build_irodori_sources(
     並びは `_shared.paths` の実レイアウト（`outputs/series/` と `inputs/`）に揃える — CLI 経路の
     テストが root を差し替えるだけで同じ木を指せる形。コーデックは**別系列・別入力素材**
     （`dacvae-32dim`）なので、Irodori 本体とは別の 2 ディレクトリへ置く。系列は格納 dtype
-    ごとに 1 本ずつ（`IRODORI_DTYPE_ROLES` — i4 だけは `dit` 1 役なので系列も 1 ディレクトリ）。
+    ごとに 1 本ずつ（`IRODORI_DTYPE_ROLES` — i4 だけは DiT の 2 役なので系列も 2 ディレクトリ）。
     """
     series_root = root / "outputs" / "series"
     suffix = {dtype: "" if dtype == "f32" else f"-{dtype}" for dtype in IRODORI_WEIGHT_DTYPES}
@@ -305,11 +332,13 @@ def _build_irodori_sources(
             # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
             _write(series / directory / "io.case0.safetensors", b"io-fixture")
     if calib_provenance is not None:
-        # 校正条件の記録（`irodori.export._write_calib_provenance` が i4 の `dit` 直下へ書く）。
-        _write(
-            sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS["dit"] / CALIB_PROVENANCE_FILE,
-            json.dumps(calib_provenance, ensure_ascii=False).encode("utf-8"),
-        )
+        # 校正条件の記録（`irodori.export._write_calib_provenance` が i4 の DiT 2 本の直下へ
+        # 同じものを書く）。
+        for role in IRODORI_DTYPE_ROLES["i4"]:
+            _write(
+                sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS[role] / CALIB_PROVENANCE_FILE,
+                json.dumps(calib_provenance, ensure_ascii=False).encode("utf-8"),
+            )
     if codec_metadata is not None:
         _write(
             sources.codec_model / "metadata.json",
@@ -357,7 +386,9 @@ class TestIrodoriLayout:
         assert list(out_dir.rglob("golden.*")) == []
         assert list(out_dir.rglob("nfkc-diff.json")) == []
 
-    def test_it_declares_the_eight_graphs_and_the_tokenizer(self, irodori_assembled) -> None:
+    def test_it_declares_the_nine_graphs_and_the_tokenizer(self, irodori_assembled) -> None:
+        """9 本 = 8 本から DiT が `dit_context` / `dit` の 2 本に割れた形（グラフが変わったので
+        期待値を変えた — ADR 0114）。"""
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         assert model["pipeline"] == "irodori/1"
@@ -367,6 +398,7 @@ class TestIrodoriLayout:
             "codec_decoder",
             "codec_encoder",
             "dit",
+            "dit_context",
             "duration",
             "speaker",
             "text_proj",
@@ -398,6 +430,8 @@ class TestIrodoriLayout:
         # 席表の同 MUST）。ここが緩むと「速いが荒い」構成が int4 の席名のまま出る。
         assert model["quants"]["i8+dit4"]["session"] == {}
         assert model["quants"]["i8+dit4"]["weights"]["dit"] == "i4"
+        # 条件側 K/V 射影も i4 のまま（割る前は `dit` の中で i4 格納だった — ADR 0114）。
+        assert model["quants"]["i8+dit4"]["weights"]["dit_context"] == "i4"
 
     def test_every_quant_points_at_its_own_storage_series(self, irodori_assembled) -> None:
         """席と現物の対応（圧縮席のファイルが実際に F16 / I8 / I4 格納であることは組み立て門が
@@ -424,7 +458,11 @@ class TestIrodoriLayout:
     def test_the_dit4_seat_shares_the_i8_bytes_for_the_other_seven_roles(
         self, irodori_assembled
     ) -> None:
-        """`i8+dit4` が新しく足すファイルは `dit` の 1 本だけ（他 7 役は `i8` とバイト共有）。"""
+        """`i8+dit4` が新しく足すファイルは DiT の 2 本だけ（他 7 役は `i8` とバイト共有）。
+
+        割る前は `dit` の 1 本だった — DiT が `dit_context` / `dit` に割れたので集合が 2 本に
+        なった（ADR 0114）。
+        """
         _, manifest = irodori_assembled
         model = _irodori_model(manifest)
         differing = {
@@ -433,7 +471,7 @@ class TestIrodoriLayout:
             if label != model["quants"]["i8"]["weights"][role]
         }
 
-        assert differing == {"dit"}
+        assert differing == {"dit", "dit_context"}
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_irodori_sources(tmp_path)
@@ -602,12 +640,16 @@ class TestIrodoriGraphGate:
     def test_it_refuses_a_graph_that_declares_another_conditioning_length(
         self, tmp_path: Path
     ) -> None:
-        """条件 state の宣言長がずれても右 pad は通る（別の位置の条件を読んで沈黙する）。"""
+        """条件 state の宣言長がずれても右 pad は通る（別の位置の条件を読んで沈黙する）。
+
+        条件 state は `dit_context` の入力（ADR 0114 で `dit` から移った）なので、曲げる相手も
+        そちら。
+        """
 
         def stretch(ins: list[tuple[str, list[Any]]]) -> None:
-            ins[3][1][1] = _IRODORI_CONFIG["max_text_len"] + 1
+            ins[0][1][1] = _IRODORI_CONFIG["max_text_len"] + 1
 
-        sources = self._sources(tmp_path, "dit", self._bent("dit", stretch))
+        sources = self._sources(tmp_path, "dit_context", self._bent("dit_context", stretch))
         with pytest.raises(DistError, match="maxTextLen"):
             irodori_plan(sources)
 
@@ -625,6 +667,91 @@ class TestIrodoriGraphGate:
         sources = self._sources(tmp_path, "dit", self._bent("dit", bend))
         with pytest.raises(DistError, match="mask"):
             irodori_plan(sources)
+
+    def test_it_does_not_bake_the_dit_block_count(self, tmp_path: Path) -> None:
+        """境界の本数は `dit_context` の出力から導く — ブロック数を変えた対も通る（ADR 0114）。"""
+        inputs, _outputs, symbol = _irodori_specs()["dit"]
+        sources = _build_irodori_sources(
+            tmp_path,
+            specs={
+                "dit": ([*inputs[:3], *_context_kv(3)], 1, symbol),
+                "dit_context": (_irodori_specs()["dit_context"][0], _context_kv(3), ""),
+            },
+        )
+
+        assert irodori_plan(sources).weights["dit_context"]
+
+    def test_it_refuses_context_outputs_out_of_the_boundary_order(self, tmp_path: Path) -> None:
+        """ランタイムは常駐テンソルを名前で束ねる — K と V が入れ替わると別の値を読む。"""
+        inputs, outputs, symbol = _irodori_specs()["dit_context"]
+        assert isinstance(outputs, list)
+        swapped = [outputs[1], outputs[0], *outputs[2:]]
+        sources = self._sources(tmp_path, "dit_context", (inputs, swapped, symbol))
+        with pytest.raises(DistError, match="境界名"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_context_graph_with_an_unpaired_output(self, tmp_path: Path) -> None:
+        inputs, outputs, symbol = _irodori_specs()["dit_context"]
+        assert isinstance(outputs, list)
+        sources = self._sources(tmp_path, "dit_context", (inputs, outputs[:-1], symbol))
+        with pytest.raises(DistError, match="K / V の対"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_context_graph_whose_inputs_are_reordered(self, tmp_path: Path) -> None:
+        def swap(ins: list[tuple[str, list[Any]]]) -> None:
+            ins[0], ins[2] = ins[2], ins[0]
+
+        sources = self._sources(tmp_path, "dit_context", self._bent("dit_context", swap))
+        with pytest.raises(DistError, match="グラフ入力"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_dit_built_for_another_block_count(self, tmp_path: Path) -> None:
+        """`dit` の入力の本数は `dit_context` の出力から導いた並びと一致しなければならない。"""
+        inputs, _outputs, symbol = _irodori_specs()["dit"]
+        sources = self._sources(tmp_path, "dit", ([*inputs[:3], *_context_kv(3)], 1, symbol))
+        with pytest.raises(DistError, match="グラフ入力"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_boundary_whose_shape_differs_between_the_two_graphs(
+        self, tmp_path: Path
+    ) -> None:
+        def widen(ins: list[tuple[str, list[Any]]]) -> None:
+            ins[3][1][2] += 1
+
+        sources = self._sources(tmp_path, "dit", self._bent("dit", widen))
+        with pytest.raises(DistError, match="食い違う"):
+            irodori_plan(sources)
+
+    def test_it_refuses_a_context_length_that_misses_the_mask_segments(
+        self, tmp_path: Path
+    ) -> None:
+        """両側で形が揃っていても、長さが mask の条件 3 区間の合計と違えば区間割りがずれる。"""
+        longer = [1, _IRODORI_MASK_TOTAL + 1, *_IRODORI_CONTEXT_SHAPE[2:]]
+        context_inputs, outputs, _symbol = _irodori_specs()["dit_context"]
+        dit_inputs, _dit_outputs, symbol = _irodori_specs()["dit"]
+        assert isinstance(outputs, list)
+        sources = _build_irodori_sources(
+            tmp_path,
+            specs={
+                "dit_context": (context_inputs, [(name, longer) for name, _ in outputs], ""),
+                "dit": (
+                    [*dit_inputs[:3], *((name, list(longer)) for name, _ in dit_inputs[3:])],
+                    1,
+                    symbol,
+                ),
+            },
+        )
+        with pytest.raises(DistError, match="条件 3 区間"):
+            irodori_plan(sources)
+
+    def test_a_series_holding_only_one_side_of_the_dit_pair_is_refused(self) -> None:
+        """`dit` は `dit_context` の出力を入力に取る — 片側だけの系列は実行できない。"""
+        from irodori.distribution import _assert_irodori_dit_boundary
+
+        with pytest.raises(DistError, match="対の片側"):
+            _assert_irodori_dit_boundary(
+                {"dit": {"inputs": [], "outputs": ["v"]}}, {"dit": Path("dit")}, {}
+            )
 
     def test_it_refuses_a_codec_decoder_for_another_latent_width(self, tmp_path: Path) -> None:
         """別次元の DACVAE を混ぜると shape は合ったまま別の声になる。"""
@@ -785,7 +912,7 @@ class TestIrodoriStorageSeries:
             irodori_plan(sources)
 
     def test_every_graph_role_carries_every_seat_its_series_declares(self) -> None:
-        """要求表 / 禁止表 / 宣言が同じ席（8 役 × f32/f16/i8 + `dit` の i4）を指す。
+        """要求表 / 禁止表 / 宣言が同じ席（9 役 × f32/f16/i8 + DiT 2 本の i4）を指す。
 
         片方だけ席が増えると、増えたほうが黙って無検査のまま配布形に並ぶ。
         """
@@ -794,9 +921,11 @@ class TestIrodoriStorageSeries:
         }
 
         assert set(IRODORI_STORAGE_REQUIREMENTS) == expected
+        # i8 席の I4 禁止は i4 系列を持つ DiT の 2 本（割る前は `dit` 1 本 — ADR 0114）。
         assert set(IRODORI_STORAGE_FORBIDDEN) == {
             *(f"{role}_f32" for role in IRODORI_GRAPH_ROLES),
             "dit_i8",
+            "dit_context_i8",
         }
         # 禁止は**圧縮系列ぶん全部**（1 つでも抜けると、抜けたほうの資産が f32 席を素通りする）。
         assert set(IRODORI_STORAGE_FORBIDDEN[f"{IRODORI_GRAPH_ROLES[0]}_f32"]) == {
@@ -806,9 +935,48 @@ class TestIrodoriStorageSeries:
         }
         # i8 席は I4 の不在で締める（i4 系列も I8 を含むので、要求検査だけでは塞がらない）。
         assert set(IRODORI_STORAGE_FORBIDDEN["dit_i8"]) == {"i4"}
+        assert set(IRODORI_STORAGE_FORBIDDEN["dit_context_i8"]) == {"i4"}
         assert {
             files.file for labels in IRODORI_WEIGHTS.values() for files in labels.values()
         } == expected
+
+    def test_the_dit_pair_moves_together_through_every_table(self) -> None:
+        """DiT の 2 本（ADR 0114）は i4 系列・i8 席の I4 禁止・`i8+dit4` の例外に**対で**載る。
+
+        片側だけだと、`dit_context` の条件側射影 72 本が i8 のまま i4 席に並ぶ（席の数値が動く）か、
+        i8 席へ i4 資産が挿さる。
+        """
+        pair = {"dit", "dit_context"}
+
+        assert set(IRODORI_DTYPE_ROLES["i4"]) == pair
+        assert {role for role, dtype in IRODORI_QUANT_SEATS["i8+dit4"].roles.items()} == pair
+        assert set(IRODORI_QUANT_SEATS["i8+dit4"].roles.values()) == {"i4"}
+        assert {f"{role}_i8" for role in pair} <= set(IRODORI_STORAGE_FORBIDDEN)
+        assert IRODORI_SERIES_DIRS["dit_context"] == "dit-context"
+
+    def test_every_static_dim_names_an_input_of_its_graph(self) -> None:
+        """静的次元表の (役割, 入力) は、その役割の入力の並びに実在する（表どうしの整合）。
+
+        条件 state 3 本は `dit_context` の入力（ADR 0114 で `dit` から移った）— 片方の表だけが
+        動くと、門が存在しない入力の軸を引いて KeyError になるか、黙って見なくなる。
+        """
+        from irodori.distribution import (
+            IRODORI_CONTEXT_INPUTS,
+            IRODORI_DIT_HEAD_INPUTS,
+            IRODORI_GRAPH_SHAPES,
+            IRODORI_STATIC_DIMS,
+        )
+
+        inputs = {role: names for role, (names, _outputs) in IRODORI_GRAPH_SHAPES.items()}
+        inputs["dit_context"] = IRODORI_CONTEXT_INPUTS
+        inputs["dit"] = IRODORI_DIT_HEAD_INPUTS
+
+        assert set(inputs) == set(IRODORI_GRAPH_ROLES)
+        for role, name, _axis, _field in IRODORI_STATIC_DIMS:
+            assert name in inputs[role], (role, name)
+        assert {
+            name for role, name, _axis, _field in IRODORI_STATIC_DIMS if role == "dit_context"
+        } == set(IRODORI_CONTEXT_INPUTS)
 
     def test_every_seat_starts_from_a_storage_dtype_of_the_vocabulary(self) -> None:
         """席名は ADR 0074 の文法 — `<格納>` は資産ヘッダの語彙（決定 2）。`w8` / `w4` は廃した。"""
@@ -864,7 +1032,7 @@ class TestIrodoriStorageSeries:
                 sources.codec_series_by_dtype[dtype].name
                 == irodori.dacvae.export.default_out_root(Path(IRODORI_CODEC_NAME), dtype).name
             )
-        # コーデックは i4 系列を持たない（`IRODORI_DTYPE_ROLES` の i4 は `dit` だけ）。
+        # コーデックは i4 系列を持たない（`IRODORI_DTYPE_ROLES` の i4 は DiT の 2 本だけ）。
         assert set(sources.codec_series_by_dtype) == {"f32", "f16", "i8"}
 
 
@@ -886,6 +1054,37 @@ class TestIrodoriCalibProvenance:
         sources = _build_irodori_sources(tmp_path, calib_provenance=None)
 
         with pytest.raises(DistError, match="校正条件の記録が無い"):
+            irodori_plan(sources)
+
+    def test_a_missing_record_on_the_context_side_is_refused(self, tmp_path: Path) -> None:
+        """記録は DiT の 2 本とも要る（`dit` 側だけ見ると `dit_context` の古い export が通る）。"""
+        sources = _build_irodori_sources(tmp_path)
+        (
+            sources.series_by_dtype["i4"]
+            / IRODORI_SERIES_DIRS["dit_context"]
+            / CALIB_PROVENANCE_FILE
+        ).unlink()
+
+        with pytest.raises(DistError, match="校正条件の記録が無い"):
+            irodori_plan(sources)
+
+    def test_records_that_differ_between_the_two_dit_graphs_are_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """2 本は 1 回の export で同じ丸めを書き分けたもの — 記録が違えば別々の実行の系列。
+
+        どちらの記録も単独では配布の条件を満たす（下限以上の予算）ので、1 本ずつの判定では
+        通ってしまう形。
+        """
+        sources = _build_irodori_sources(tmp_path)
+        _write(
+            sources.series_by_dtype["i4"]
+            / IRODORI_SERIES_DIRS["dit_context"]
+            / CALIB_PROVENANCE_FILE,
+            json.dumps({**_IRODORI_CALIB_PROVENANCE, "steps": 41}).encode("utf-8"),
+        )
+
+        with pytest.raises(DistError, match="役割ごとに違う"):
             irodori_plan(sources)
 
     def test_an_uncalibrated_series_is_refused(self, tmp_path: Path) -> None:

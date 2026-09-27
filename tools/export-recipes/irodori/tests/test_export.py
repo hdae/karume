@@ -15,12 +15,15 @@
 - `duration` の `aux_features` 非依存の実測が、依存していたら落ちる
 - `dit` の cond / uncond 3 変種が**互いに違う**ことの実測が、同じなら落ちる
 - 条件 state の右 pad が宣言長を超えたら落ちる
+- DiT を `dit-context` / `dit` に割った対（ADR 0114）が、上流 `forward_with_encoded_conditions`
+  と**ビット一致**し、2 本の所有が「条件側の射影 / 残り」に割れ、IR の境界名が契約の綴りになる
 """
 
 from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,8 +33,10 @@ from torch import nn
 from irodori import export as ir
 from irodori import patch as patch_irodori
 from irodori import pipeline_ref as ip
-from karume.ir import IrGraph, IrValue
-from karume.pipeline import export_to_file
+from irodori.distribution import _assert_irodori_dit_boundary, irodori_context_kv_names
+from karume.dist import ir_graph
+from karume.ir import IrGraph, IrInput, IrNode, IrValue
+from karume.pipeline import export_to_file, publish_model
 from karume.quantize import quantize_to_int8
 
 #: `_static_scheme_evidence` / `build_cases` が読む config の最小形。
@@ -818,15 +823,44 @@ class TinyRopeEncoder(nn.Module):
         self.blocks = nn.ModuleList([nn.Linear(4, 4, bias=False)])
 
 
+class TinyJointAttention(nn.Module):
+    """`JointAttention` の**子の顔ぶれ**だけを写した代役（計算は持たない — 張り替えを見るだけ）。
+
+    並びも実物と同じ（self 側 3 本 → 条件側 6 本 → gate / wo → q/k ノルム）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        for name in ("wq", "wk", "wv", *ir.CONTEXT_KV_PROJECTIONS, "gate", "wo"):
+            setattr(self, name, nn.Linear(4, 4, bias=False))
+        self.q_norm = ScalingNorm(1.0)
+        self.k_norm = ScalingNorm(1.0)
+
+
+class TinyDitBlock(nn.Module):
+    """`DiffusionBlock` の子の顔ぶれ（attention + mlp + 2 本の adaLN）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention = TinyJointAttention()
+        self.mlp = nn.Linear(4, 4, bias=False)
+        self.attention_adaln = nn.Linear(4, 4, bias=False)
+        self.mlp_adaln = nn.Linear(4, 4, bias=False)
+
+
 class TinyDit(nn.Module):
-    """`DitGraph` が抱える部分木 + **抱えない**枝（`load_dit` が丸ごと組む内側のコピー相当）。"""
+    """DiT のラッパ 2 本が抱える部分木 + **抱えない**枝（`load_dit` が丸ごと組む内側のコピー相当）。
+
+    block は実物の子の顔ぶれを持つ（DiT を `dit-context` / `dit` に割った — ADR 0114 — ので、
+    1 つの block の重みが 2 本のラッパへどう分かれるかを表で見るには block の中身が要る）。
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.head_dim = 4
         self.cond_module = nn.Linear(4, 4, bias=False)
         self.in_proj = nn.Linear(4, 4, bias=False)
-        self.blocks = nn.ModuleList([nn.Linear(4, 4, bias=False)])
+        self.blocks = nn.ModuleList([TinyDitBlock()])
         self.out_norm = ScalingNorm(1.0)
         self.out_proj = nn.Linear(4, 4, bias=False)
         self.text_norm = ScalingNorm(1.0)
@@ -903,7 +937,12 @@ class TestTargetScales:
         ]
 
     def test_weights_the_dit_wrapper_does_not_hold_are_dropped(self):
-        """`load_dit` は DiT **丸ごと**を組むので、台帳には使わない枝の scale まで載る。"""
+        """`load_dit` は DiT **丸ごと**を組むので、台帳には使わない枝の scale まで載る。
+
+        DiT を 2 本に割った（ADR 0114）ので、`dit` が受け取るのは条件側の射影を除いた block の
+        linear と block 外 — 条件側の 6 本は `dit-context` へ行く（期待値はグラフが変わったぶん
+        だけ動いた）。
+        """
         pytest.importorskip("irodori_tts")
         module = TinyDit()
         wrapper = ir.DitGraph(module, 8)
@@ -911,12 +950,37 @@ class TestTargetScales:
         rebased = self._rebased(ir.TARGET_DIT, wrapper, module)
 
         assert rebased == [
-            "blocks.0.weight",
+            "blocks.0.attention.gate.weight",
+            "blocks.0.attention.wk.weight",
+            "blocks.0.attention.wo.weight",
+            "blocks.0.attention.wq.weight",
+            "blocks.0.attention.wv.weight",
+            "blocks.0.attention_adaln.weight",
+            "blocks.0.mlp.weight",
+            "blocks.0.mlp_adaln.weight",
             "cond_module.weight",
             "in_proj.weight",
             "out_proj.weight",
         ]
         assert "pretrained_text_backbone.weight" not in rebased
+
+    def test_the_context_wrapper_receives_only_the_conditioning_projections(self):
+        """`dit-context` は同じ `dit` 役の台帳から、条件側の射影 6 本 × ブロックだけを拾う。
+
+        丸めは `export_series` と同じく `dit` 役（`TextToLatentRFDiT` 丸ごと）に 1 回だけ当てる —
+        `dit-context` 役の台帳というものは無い。
+        """
+        module = TinyDit()
+        wrapper = ir.DitContextGraph(module)
+        with torch.random.fork_rng():
+            torch.manual_seed(0)
+            scales = ir.fake_quant("i8", {ir.TARGET_DIT: module}).scales
+
+        rebased = sorted(ir.target_scales(ir.TARGET_DIT_CONTEXT, wrapper, scales))
+
+        assert rebased == sorted(
+            f"blocks.0.attention.{name}.weight" for name in ir.CONTEXT_KV_PROJECTIONS
+        )
 
     def test_a_stale_prefix_fails_loudly(self, monkeypatch):
         """MUST: 1 本も当たらない張り替えを黙って空で返さない（emit まで気づけなくなる）。"""
@@ -936,6 +1000,410 @@ class TestTargetScales:
         wrapper = ir.ProjectorGraph(TinyResidualProjector())
 
         assert ir.target_scales(ir.TARGET_TEXT_PROJ, wrapper, {}) == {}
+
+
+#: 小さな実物 DiT の条件の宣言長（`_dit_cases` が右 pad する長さ）と speaker の patch 後上限。
+TINY_MODEL_CONFIG = {"max_text_len": 6, "max_caption_len": 7}
+TINY_SPEAKER_MAX = 4
+#: `dit` の mask の条件側の総長（text 6 + speaker 4+1 + caption 7）。
+TINY_CONTEXT_TOTAL = 6 + (TINY_SPEAKER_MAX + 1) + 7
+
+
+def _tiny_real_dit() -> nn.Module:
+    """上流の `TextToLatentRFDiT` そのもの（小さな config・scratch の条件エンコーダ）。
+
+    head_dim は実重みと同じ 64（RoPE の実数化のビット一致は形依存 — `irodori.patch` の NOTE。
+    64 では 0）、heads は 2（`_apply_rotary_half` が heads 軸を半分に割る）。重みは全部を
+    決定的な乱数で上書きする — 上流は `out_proj` を 0 で初期化するので、そのままだと出力が
+    恒等的に 0 になり比較が恒真になる。
+    """
+    irodori_model = pytest.importorskip("irodori_tts.model")
+    from irodori_tts.config import ModelConfig
+
+    config = ModelConfig(
+        latent_dim=4,
+        model_dim=128,
+        num_layers=2,
+        num_heads=2,
+        mlp_ratio=1.0,
+        text_vocab_size=16,
+        text_dim=16,
+        text_layers=1,
+        text_heads=1,
+        text_mlp_ratio=1.0,
+        use_caption_condition=True,
+        use_speaker_condition=True,
+        caption_vocab_size=16,
+        caption_dim=16,
+        caption_layers=1,
+        caption_heads=1,
+        caption_mlp_ratio=1.0,
+        speaker_dim=16,
+        speaker_layers=1,
+        speaker_heads=1,
+        speaker_mlp_ratio=1.0,
+        timestep_embed_dim=16,
+        adaln_rank=4,
+    )
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        model = irodori_model.TextToLatentRFDiT(config).eval()
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.normal_(0.0, 0.2)
+    return model
+
+
+class _TinySplit:
+    """小さな実物 DiT で、`export_series` の DiT の段（ケース → パッチ前の参照 → 入力の組み）を
+    同じ関数で踏んだ結果。"""
+
+    def __init__(self, model: nn.Module) -> None:
+        from irodori_tts.model import TextToLatentRFDiT, get_timestep_embedding
+
+        source = SimpleNamespace(
+            prepend_masked_mean_token=TextToLatentRFDiT._prepend_masked_mean_token,
+            timestep_embedding=get_timestep_embedding,
+        )
+        generator = torch.Generator().manual_seed(5)
+        self.sym_max = ir.dit_sym_max(model.cfg)
+        self.inputs, reference = ir._dit_cases(
+            source,
+            model.cfg,
+            TINY_MODEL_CONFIG,
+            model.text_norm,
+            model.caption_norm,
+            TINY_SPEAKER_MAX,
+            self.sym_max,
+            {ir.DIT_TEXT_SOURCE: torch.randn(1, 5, 16, generator=generator)},
+            {ir.DIT_CAPTION_SOURCE: torch.randn(1, 3, 16, generator=generator)},
+            {ir.DIT_SPEAKER_SOURCE: torch.randn(1, 3, 16, generator=generator)},
+        )
+        self.pristine = ir._pristine_dit_outputs(model, reference)
+        self.context_inputs, self.owner = ir._dit_context_cases(self.inputs)
+        self.context = ir._pristine_dit_context_outputs(model, self.context_inputs)
+        self.dit_inputs = ir._dit_graph_inputs(
+            self.inputs,
+            self.owner,
+            self.context,
+            irodori_context_kv_names(len(model.blocks)),
+        )
+
+
+@pytest.fixture
+def tiny_split(restore_forward) -> tuple[nn.Module, _TinySplit]:
+    """パッチ前に参照を採り、パッチを当ててから返す（`export_series` の ①→② の順序）。"""
+    model = _tiny_real_dit()
+    split = _TinySplit(model)
+    patch_irodori.apply_patches()
+    return model, split
+
+
+class TestDitSplit:
+    """DiT を `dit-context`（条件側 K/V・生成 1 回）と `dit` に割る（ADR 0114）。
+
+    MUST: 割っても数値は 1 ビットも動かない — 参照層の sha 門（WAV / latent）は不変が期待値。
+    """
+
+    def test_the_composed_pair_reproduces_the_upstream_forward_bit_for_bit(self, tiny_split):
+        """分割の同値門そのもの（uncond 3 変種と S の両端 2 / 750 を含む全ケース・atol 0）。"""
+        model, split = tiny_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        composed = ir.ComposedDitGraph(wrappers.context, wrappers.dit)
+
+        for name, args in split.inputs.items():
+            diff = ir._check_wrapper_equivalence(
+                composed, tuple(args.values()), (split.pristine[name],), name, 0.0
+            )
+            assert diff == 0.0, name
+
+    def test_the_context_graph_matches_the_upstream_kv_cache(self, tiny_split):
+        """`dit-context` の golden は上流 `build_context_kv_cache` の値（ラッパ自身ではない）。"""
+        model, split = tiny_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+
+        for representative, states in split.context_inputs.items():
+            assert (
+                ir._check_wrapper_equivalence(
+                    wrappers.context,
+                    tuple(states.values()),
+                    split.context[representative],
+                    representative,
+                    0.0,
+                )
+                == 0.0
+            )
+
+    def test_the_dit_graph_fed_with_the_context_golden_matches_upstream(self, tiny_split):
+        """`dit` の golden 入力（K/V = `dit-context` の期待値）で上流の出力にビット一致する。"""
+        model, split = tiny_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+
+        for name, args in split.dit_inputs.items():
+            assert list(args) == list(wrappers.dit.input_names), "golden 入力の並びが IR と違う"
+            assert (
+                ir._check_wrapper_equivalence(
+                    wrappers.dit, tuple(args.values()), (split.pristine[name],), name, 0.0
+                )
+                == 0.0
+            )
+
+    def test_the_context_outputs_are_one_k_and_one_v_per_block_in_order(self, tiny_split):
+        """出力は 2 × ブロック数本で、ブロック b の K / V（1 段目の連結）が b の昇順に並ぶ。"""
+        model, split = tiny_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        states = next(iter(split.context_inputs.values()))
+
+        with torch.no_grad():
+            outputs = wrappers.context(*states.values())
+            text = model.text_norm(states["text_state"])
+            caption = model.caption_norm(states["caption_state"])
+
+        assert len(outputs) == 2 * len(model.blocks)
+        assert wrappers.context.output_names == (
+            "context_k_0",
+            "context_v_0",
+            "context_k_1",
+            "context_v_1",
+        )
+        for index, block in enumerate(model.blocks):
+            key, value = ir.DitContextGraph.block_context(
+                block.attention, text, states["speaker_state"], caption
+            )
+            assert torch.equal(outputs[2 * index], key)
+            assert torch.equal(outputs[2 * index + 1], value)
+            assert tuple(key.shape) == (1, TINY_CONTEXT_TOTAL, 2, 64)
+        # 取り違えの検出力: ブロックごとに値が違う（同じなら順序の入れ替えが素通りする）。
+        assert not torch.equal(outputs[0], outputs[2])
+
+    def test_a_swapped_block_order_breaks_the_composition(self, tiny_split):
+        """故障注入: ブロック 0 と 1 の K/V を入れ替えて渡すと、上流とのビット一致が崩れる。"""
+        model, split = tiny_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        args = split.dit_inputs["dit-cond-1s"]
+        values = list(args.values())
+        values[3:5], values[5:7] = values[5:7], values[3:5]
+
+        with pytest.raises(AssertionError, match="eager 同値が崩れた"):
+            ir._check_wrapper_equivalence(
+                wrappers.dit, tuple(values), (split.pristine["dit-cond-1s"],), "swap", 0.0
+            )
+
+    def test_the_two_wrappers_split_the_old_ownership_and_share_only_k_norm(self):
+        """所有の和 = 割る前の `DitGraph` が抱えていた部分木の全重み・重なりは `k_norm` だけ。
+
+        所有 = 容器の initializer（張り替え・読み戻し・i4 適格の判定の前提）なので、ここが崩れると
+        格納指定が未知キーで落ちるか、重みがどちらの容器にも載らない。
+        """
+        model = _tiny_real_dit()
+        wrappers = ir.dit_wrappers(model, ir.dit_sym_max(model.cfg))
+        context = {name for name, _ in wrappers.context.named_parameters()}
+        rest = {name for name, _ in wrappers.dit.named_parameters()}
+        before = {
+            f"{prefix}.{name}"
+            for prefix in (
+                "cond_module",
+                "in_proj",
+                "blocks",
+                "out_norm",
+                "out_proj",
+                "text_norm",
+                "caption_norm",
+            )
+            for name, _ in model.get_submodule(prefix).named_parameters()
+        }
+
+        assert context | rest == before
+        assert context & rest == {
+            f"blocks.{index}.attention.k_norm.weight" for index in range(len(model.blocks))
+        }
+        assert {name for name in context if ".attention.w" in name} == {
+            f"blocks.{index}.attention.{projection}.weight"
+            for index in range(len(model.blocks))
+            for projection in ir.CONTEXT_KV_PROJECTIONS
+        }
+        assert not {name for name in rest if name.startswith(("text_norm", "caption_norm"))}
+
+    def test_every_case_with_the_same_states_shares_one_context_golden(self, tiny_split):
+        """uncond 3 変種は cond の state のまま — `dit-context` の golden は 1 組で足りる。"""
+        _model, split = tiny_split
+
+        assert list(split.context_inputs) == [ir.DIT_CASES[0][0]]
+        assert set(split.owner) == {name for name, *_rest in ir.DIT_CASES}
+        assert set(split.owner.values()) == {ir.DIT_CASES[0][0]}
+
+    def test_the_exported_boundary_carries_the_contract_names(self, tiny_split, tmp_path):
+        """IR の境界名（`dit-context` の出力 / `dit` の 4 本目以降の入力）が契約の綴りになり、
+        組み立ての門（`irodori.distribution`）がそのまま受け取る。
+
+        torch.export は可変長引数を `context_<i>`・出力を FX ノード名で名乗る — 付け替えが
+        外れるとランタイムが常駐テンソルを名前で束ねられない。
+        """
+        model, split = tiny_split
+        wrappers = ir.dit_wrappers(model, split.sym_max)
+        paths = {
+            ir.TARGET_DIT_CONTEXT: tmp_path / ir.TARGET_DIT_CONTEXT / ir.MODEL_FILE,
+            ir.TARGET_DIT: tmp_path / ir.TARGET_DIT / ir.MODEL_FILE,
+        }
+        context_graph = publish_model(
+            paths[ir.TARGET_DIT_CONTEXT],
+            *ir.export_ir(
+                wrappers.context,
+                tuple(next(iter(split.context_inputs.values())).values()),
+                axis=ir.TargetAxis(None, None, 0, {}, ir.PRESERVED_OP_PREFIXES),
+                output_names=wrappers.context.output_names,
+            ),
+            provenance=ir.PROVENANCE,
+            graph_name="dit_context",
+        )
+        dit_graph = publish_model(
+            paths[ir.TARGET_DIT],
+            *ir.export_ir(
+                wrappers.dit,
+                tuple(split.dit_inputs["dit-cond-1s"].values()),
+                axis=ir.TargetAxis(
+                    ir.DIT_TORCH_DIM,
+                    ir.DIT_SYMBOL,
+                    split.sym_max,
+                    {0: (1, 0), 2: (3, TINY_CONTEXT_TOTAL)},
+                    ir.PRESERVED_OP_PREFIXES,
+                ),
+                input_names=wrappers.dit.input_names,
+            ),
+            provenance=ir.PROVENANCE,
+            graph_name="dit",
+        )
+
+        assert [spec.name for spec in context_graph.inputs] == [
+            "text_state",
+            "speaker_state",
+            "caption_state",
+        ]
+        assert tuple(context_graph.outputs) == wrappers.context.output_names
+        assert context_graph.symbols == []
+        assert tuple(spec.name for spec in dit_graph.inputs) == wrappers.dit.input_names
+        _assert_irodori_dit_boundary(
+            {
+                role: ir_graph(path)
+                for role, path in (
+                    ("dit_context", paths[ir.TARGET_DIT_CONTEXT]),
+                    ("dit", paths[ir.TARGET_DIT]),
+                )
+            },
+            {"dit_context": paths[ir.TARGET_DIT_CONTEXT], "dit": paths[ir.TARGET_DIT]},
+            {"maxTextLen": 6, "speakerRows": TINY_SPEAKER_MAX + 1, "maxCaptionLen": 7},
+        )
+        # golden io は IR の入力名と一致して初めて書ける（`_write_io` の門）。
+        written = ir._write_io(
+            dit_graph,
+            {"dit-cond-1s": split.dit_inputs["dit-cond-1s"]},
+            {"dit-cond-1s": (split.pristine["dit-cond-1s"],)},
+            tmp_path,
+        )
+        assert written == [f"{ir.IO_PREFIX}dit-cond-1s{ir.IO_SUFFIX}"]
+
+
+class TestPristineDitContextOrdering:
+    def test_taking_the_context_reference_after_patching_fails_loudly(self, monkeypatch):
+        """MUST: パッチ後に採るとラッパと同じ経路の値になり、同値門が恒真化する。"""
+        monkeypatch.setattr(patch_irodori, "_APPLIED", True)
+
+        with pytest.raises(AssertionError, match="パッチ適用後に参照を採ろうとした"):
+            ir._pristine_dit_context_outputs(TinyDit(), {})
+
+
+class TestDitContextCases:
+    """`dit-context` の golden は条件 state の組ごとに 1 本（組は値で判定する）。"""
+
+    @staticmethod
+    def _states(seed: int) -> dict[str, torch.Tensor]:
+        generator = torch.Generator().manual_seed(seed)
+        return {
+            name: torch.randn(1, 3, 2, generator=generator)
+            for name in ("text_state", "speaker_state", "caption_state")
+        }
+
+    def test_cases_with_equal_states_share_the_first_case_as_representative(self):
+        shared = self._states(0)
+        cases = {
+            "a": {"x_t": torch.zeros(1), **shared},
+            "b": {"x_t": torch.ones(1), **{key: value.clone() for key, value in shared.items()}},
+        }
+
+        groups, owner = ir._dit_context_cases(cases)
+
+        assert list(groups) == ["a"]
+        assert owner == {"a": "a", "b": "a"}
+        assert list(groups["a"]) == ["text_state", "speaker_state", "caption_state"]
+
+    def test_a_case_with_another_state_gets_its_own_golden(self):
+        shared = self._states(0)
+        other = {**shared, "speaker_state": shared["speaker_state"] + 1.0}
+        cases = {"a": {"x_t": torch.zeros(1), **shared}, "b": {"x_t": torch.zeros(1), **other}}
+
+        groups, owner = ir._dit_context_cases(cases)
+
+        assert list(groups) == ["a", "b"]
+        assert owner == {"a": "a", "b": "b"}
+
+
+def _boundary_graph() -> IrGraph:
+    """入力 2 本・出力 2 本（ノードの出力）の最小グラフ（境界名の付け替えの被験体）。"""
+    return IrGraph(
+        inputs=[
+            IrInput(name="x", dtype="f32", shape=[1, 2]),
+            IrInput(name="context_0", dtype="f32", shape=[1, 2]),
+        ],
+        outputs=["add", "add_1"],
+        values={
+            "add": IrValue(dtype="f32", shape=[1, 2]),
+            "add_1": IrValue(dtype="f32", shape=[1, 2]),
+        },
+        nodes=[
+            IrNode(op="add", ins=["x", "context_0"], outs=["add"], attrs={}),
+            IrNode(op="add", ins=["add", "context_0"], outs=["add_1"], attrs={}),
+        ],
+    )
+
+
+class TestNameBoundary:
+    def test_inputs_and_outputs_are_renamed_by_position_everywhere(self):
+        renamed = ir.name_boundary(
+            _boundary_graph(), inputs=("x", "context_k_0"), outputs=("first", "second")
+        )
+
+        assert [spec.name for spec in renamed.inputs] == ["x", "context_k_0"]
+        assert renamed.outputs == ["first", "second"]
+        assert set(renamed.values) == {"first", "second"}
+        assert [node.ins for node in renamed.nodes] == [
+            ["x", "context_k_0"],
+            ["first", "context_k_0"],
+        ]
+        assert [node.outs for node in renamed.nodes] == [["first"], ["second"]]
+
+    def test_the_original_graph_is_left_untouched(self):
+        graph = _boundary_graph()
+
+        ir.name_boundary(graph, outputs=("first", "second"))
+
+        assert graph.outputs == ["add", "add_1"]
+
+    def test_a_count_mismatch_fails_loudly(self):
+        with pytest.raises(AssertionError, match="名前 1 本"):
+            ir.name_boundary(_boundary_graph(), outputs=("only",))
+
+    def test_a_name_that_collides_with_a_remaining_value_fails_loudly(self):
+        """潰すと宣言が黙って 1 本消える。"""
+        with pytest.raises(AssertionError, match="衝突"):
+            ir.name_boundary(_boundary_graph(), outputs=("add", "x"))
+
+    def test_an_output_that_is_not_produced_by_a_node_fails_loudly(self):
+        """入力をそのまま返す出力を付け替えると、入力名まで動く。"""
+        graph = _boundary_graph()
+        graph.outputs = ["x", "add_1"]
+
+        with pytest.raises(AssertionError, match="ノードの出力でない"):
+            ir.name_boundary(graph, outputs=("first", "second"))
 
 
 class TestProvenance:

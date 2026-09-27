@@ -21,9 +21,10 @@
 - `--no-calib` が opt-out として本当に校正を回さないこと
 
 模型は tiny な骨格で、**実物と同じ FQN**（`blocks.<i>` / `in_proj` / `out_proj` /
-`cond_module.<i>`）と**同じ呼び出しの形**（block は 11 引数を全て keyword で受けて hidden を
-返す・DiT は他役割のコピーを内側に持つ）を写す。名前まで写すのは、実物向けの判定
-（{@link irodori.calib.dit_i4_names} が `DitGraph` との交差で採る形）を差し替えずに門を試すため。
+`cond_module.<i>`・attention の条件側射影 `wk_text` … と `k_norm`）と**同じ呼び出しの形**（block は
+11 引数を全て keyword で受けて hidden を返す・DiT は他役割のコピーを内側に持つ）を写す。名前まで
+写すのは、実物向けの判定（{@link irodori.calib.dit_i4_names} が DiT の配布ラッパ 2 本
+〈`dit-context` / `dit` — ADR 0114〉の所有の和との交差で採る形）を差し替えずに門を試すため。
 """
 
 from __future__ import annotations
@@ -67,10 +68,39 @@ class TinyNorm(nn.Module):
 
 
 class TinyAttention(nn.Module):
+    """`JointAttention` の子の顔ぶれ（self 側 2 本 + 条件側の射影 6 本 + 共有の `k_norm`）。
+
+    条件側の射影と `k_norm` は、DiT を `dit-context` / `dit` に割った（ADR 0114）後の所有の分け方
+    （`irodori.export.CONTEXT_KV_PROJECTIONS`）を模型でも踏むために持つ — 名前が実物と同じで
+    なければ `DitContextGraph` が組めない。
+    """
+
     def __init__(self, width: int = HIDDEN) -> None:
         super().__init__()
         self.wq = nn.Linear(width, HIDDEN, bias=False)
         self.wo = nn.Linear(HIDDEN, HIDDEN, bias=False)
+        for name in ir.CONTEXT_KV_PROJECTIONS:
+            setattr(self, name, nn.Linear(CONTEXT, HIDDEN, bias=False))
+        self.k_norm = TinyNorm(HIDDEN)
+
+    def context(
+        self, text_state: torch.Tensor, speaker_state: torch.Tensor, caption_state: torch.Tensor
+    ) -> torch.Tensor:
+        """条件側の射影 6 本を全部通した項（どれか 1 本でも校正の入力が捕まらないと落ちる形）。"""
+        pooled = torch.zeros(())
+        for prefix, state in (
+            ("text", text_state),
+            ("speaker", speaker_state),
+            ("caption", caption_state),
+        ):
+            keys = getattr(self, f"wk_{prefix}")(state)
+            values = getattr(self, f"wv_{prefix}")(state)
+            pooled = (
+                pooled
+                + self.k_norm(keys).mean(dim=1, keepdim=True)
+                + values.mean(dim=1, keepdim=True)
+            )
+        return pooled
 
 
 class TinyBlock(nn.Module):
@@ -105,11 +135,7 @@ class TinyBlock(nn.Module):
         self_mask: torch.Tensor | None = None,
         context_kv: tuple[torch.Tensor, ...] | None = None,
     ) -> torch.Tensor:
-        context = (
-            text_state.mean(dim=1, keepdim=True)
-            + speaker_state.mean(dim=1, keepdim=True)
-            + caption_state.mean(dim=1, keepdim=True)
-        )
+        context = self.attention.context(text_state, speaker_state, caption_state)
         attended = torch.tanh(self.attention.wq(x) + context)
         return x + self.attention.wo(self.mlp(attended)) * self.modulation(cond_embed)
 
@@ -416,12 +442,15 @@ class TestStageSplit:
 
         names = calib.stage_linear_names(calib.dit_stages(dit))
 
+        # 条件側の射影 6 本も block の中（模型が実物の子の顔ぶれを持つようになった — ADR 0114 で
+        # 配布グラフは割れたが、校正の stage は block 丸ごとのまま）。
         assert names == {
             f"blocks.{index}.{child}"
             for index in range(2)
             for child in (
                 "attention.wq",
                 "attention.wo",
+                *(f"attention.{name}" for name in ir.CONTEXT_KV_PROJECTIONS),
                 "mlp",
                 "attention_adaln.1",
                 "mlp_adaln.1",
@@ -476,7 +505,8 @@ class TestCapturedKwargs:
 
 class TestEligibleSet:
     def test_only_the_linears_the_shipped_graph_holds_are_eligible(self):
-        """DiT が内側に持つ他役割のコピーは i4 に載らない（`DitGraph` との交差で決まる）。"""
+        """DiT が内側に持つ他役割のコピーは i4 に載らない（配布ラッパ 2 本の所有の和との交差で
+        決まる）。"""
         dit = make_dit(blocks=2)
 
         names = calib.dit_i4_names(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
@@ -621,8 +651,11 @@ class TestCalibratedI4:
 
         result = quantize(dit)
 
-        graph = ir.DitGraph(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
-        owned = {name for name, _p in graph.named_parameters()}
+        # 配布グラフは `dit-context` / `dit` の 2 本（ADR 0114）— FQN 空間は 2 本の所有の和。
+        wrappers = ir.dit_wrappers(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
+        owned = {
+            name for graph in wrappers.by_target().values() for name, _p in graph.named_parameters()
+        }
         overrides = result.overrides[ir.TARGET_DIT]
         assert set(overrides) <= owned, "i4 席のキーが配布グラフの FQN 空間に無い"
         assert set(overrides) == {
@@ -670,11 +703,40 @@ class TestCalibratedI4:
 
         result = quantize(dit)
 
-        graph = ir.DitGraph(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
-        overrides = ir.target_weight_dtypes(ir.TARGET_DIT, graph, result.overrides)
-        scales = ir.target_scales(ir.TARGET_DIT, graph, result.scales)
-        assert set(overrides) == set(result.overrides[ir.TARGET_DIT])
-        assert set(overrides) <= set(scales), "i4 指定の重みに scale が無い（emit が落ちる）"
+        # DiT の 2 本（ADR 0114）へ張り替えた和が、丸めた側の格納指定と過不足なく一致する。
+        wrappers = ir.dit_wrappers(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
+        rebased: dict[str, str] = {}
+        for target, graph in wrappers.by_target().items():
+            overrides = ir.target_weight_dtypes(target, graph, result.overrides)
+            scales = ir.target_scales(target, graph, result.scales)
+            assert set(overrides) <= set(scales), f"{target}: i4 指定の重みに scale が無い"
+            rebased.update(overrides)
+        assert rebased == dict(result.overrides[ir.TARGET_DIT])
+
+    def test_the_i4_set_is_split_by_ownership_between_the_two_dit_graphs(self, stub_capture):
+        """MUST: 丸めは 1 回・i4 の集合は「block 内 − adaLN」のまま、2 本のラッパの所有で割れる。
+
+        `dit-context` が受け取るのは条件側の射影（i4）だけで i8 は 1 本も無く、`dit` は残りの
+        block 内 i4 と i8 の全部を受け取る。2 本が**互いに素**で和が丸めた側の全量 — 重なれば
+        同じ重みを 2 本の容器へ別々に焼くことになり、漏れれば格納指定が消える。
+        """
+        dit = make_dit(blocks=2)
+        stub_capture(dit)
+
+        result = quantize(dit)
+
+        wrappers = ir.dit_wrappers(dit, ir.dit_sym_max(SimpleNamespace(latent_patch_size=1)))
+        context = ir.target_weight_dtypes(ir.TARGET_DIT_CONTEXT, wrappers.context, result.overrides)
+        rest = ir.target_weight_dtypes(ir.TARGET_DIT, wrappers.dit, result.overrides)
+        assert set(context) == {
+            f"blocks.{index}.attention.{name}.weight"
+            for index in range(2)
+            for name in ir.CONTEXT_KV_PROJECTIONS
+        }
+        assert set(context.values()) == {"i4"}
+        assert not set(context) & set(rest)
+        assert {**context, **rest} == dict(result.overrides[ir.TARGET_DIT])
+        assert {"i4", "i8"} <= set(rest.values())
 
     def test_calibration_produces_a_different_rounding_from_plain_rtn(self, stub_capture):
         """校正が素通りしたら格納形が同じなので資産からは読めない — 値差で実測する。"""
@@ -786,7 +848,8 @@ class TestOptOut:
 
         assert seen["no_calib"] is False
         assert seen["calib_steps"] is None
-        assert seen["targets"] == (ir.TARGET_DIT,)
+        # i4 系列は DiT の 2 本（割る前は `dit` 1 本 — ADR 0114）。
+        assert seen["targets"] == (ir.TARGET_DIT, ir.TARGET_DIT_CONTEXT)
 
     def test_the_calibration_knobs_are_refused_outside_i4(self, monkeypatch):
         """効かないノブを黙って受けない（i8 に校正の経路は 1 本も無い）。"""
@@ -853,6 +916,19 @@ class TestCalibProvenance:
             ir._write_calib_provenance("i8", None, ir.TARGET_DIT, staged)
 
         assert not (final / "calib_provenance.json").exists()
+
+    def test_both_dit_targets_carry_the_same_record(self, tmp_path):
+        """DiT の 2 本は同じ丸めを書き分けたもの（ADR 0114）— 組み立て側は両方の一致を見る。"""
+        import json
+
+        records = []
+        for target in (ir.TARGET_DIT, ir.TARGET_DIT_CONTEXT):
+            directory = tmp_path / target
+            directory.mkdir()
+            name = ir._write_calib_provenance("i4", make_plan(steps=3), target, directory)
+            records.append(json.loads((directory / name).read_text(encoding="utf-8")))
+
+        assert records[0] == records[1]
 
     def test_it_is_not_written_for_other_targets(self, tmp_path):
         assert ir._write_calib_provenance("i4", make_plan(), ir.TARGET_BACKBONE, tmp_path) is None

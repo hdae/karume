@@ -1,8 +1,8 @@
 """実重み Irodori-TTS v4-Small を IR v2 コンテナ（`krm`）+ golden io へ書き出す台本。
 
 今回のスコープは**テキスト条件エンコーダ**（recon の G1 / G1a / G1b）・**speaker encoder /
-duration predictor**（同 G2 / G3）・**DiT 1 step**（同 G5' = G4 を畳んだ形・ADR 0047）で、
-codec（G6 / G7）は別台本 `irodori/dacvae/export.py` が書き出す。
+duration predictor**（同 G2 / G3）・**DiT**（条件側 K/V 射影 G4 と 1 step の G5 の 2 本 —
+ADR 0047 / 0114）で、codec（G6 / G7）は別台本 `irodori/dacvae/export.py` が書き出す。
 
     cd tools/export-recipes
     uv run --with 'transformers==5.14.1' python -m irodori.export
@@ -20,7 +20,7 @@ transformers は **5.14.1 でピン**する（`embeddinggemma/export.py` と同�
 `irodori_tts/__init__.py` 経由になるが、そこが引く追加依存は transformers だけなので、
 限定 import の細工は要らない。
 
-## 何をグラフに載せるか（6 ターゲット・B=1・T / S は記号次元）
+## 何をグラフに載せるか（7 ターゲット・B=1・T / S は記号次元）
 
 | ターゲット     | 入力          | 出力          | 中身                                  |
 | -------------- | ------------- | ------------- | ------------------------------------- |
@@ -29,7 +29,8 @@ transformers は **5.14.1 でピン**する（`embeddinggemma/export.py` と同�
 | `caption-proj` | `[1,T,768]`   | `[1,T,512]`×2 | caption 側 projector（+ `caption_norm`）|
 | `speaker`      | `[1,S,128]`   | `[1,S,768]`   | `ReferenceLatentEncoder` + 出力 norm  |
 | `duration`     | 下記 5 本     | `[1]`         | `text_norm` + duration（token-sum 形）|
-| `dit`          | 下記 6 本     | `[1,S,32]`    | DiT 1 step（12 層・G4 畳み込み形）    |
+| `dit-context`  | 下記 3 本     | 下記 24 本    | 条件側 K/V 射影（12 層・生成 1 回）   |
+| `dit`          | 下記 27 本    | `[1,S,32]`    | DiT 1 step（12 層・条件側 K/V は入力）|
 
 `duration` の入力 5 本は `text_state [1,T,512]` / `speaker_vec [1,768]` /
 `has_speaker [1,1]`（bool）/ `caption_vec [1,512]` / `has_caption [1,1]`（bool）。
@@ -92,23 +93,49 @@ recon の「系列入力なし」は**この重みでは成り立たない**: `d
   「モデルファイルから取り出してホストへ配る値」になり、参照なし / caption なしの正規経路が
   モデルファイル 1 個で閉じなくなる（ADR 0010 の代替案 2 を却下した理由と同じ）
 
-### `dit`（G5' = G4 を畳んだ形）の境界
+### `dit-context` → `dit`（G4 = 条件側 K/V の事前射影 + G5 = DiT 1 step）の境界
 
-設計の正本は ADR 0047。入力 6 本は
+設計の正本は ADR 0047（決定 3 は ADR 0114 が置き換える）。`dit-context` の入力 3 本は
+
+| 名前            | shape                | 中身                                                    |
+| --------------- | -------------------- | ------------------------------------------------------- |
+| `text_state`    | `[1,256,512]`        | `text-proj` の出力を `max_text_len` へ右 pad            |
+| `speaker_state` | `[1,751,768]`        | `speaker` の出力 + 平均トークン前置を 750+1 へ右 pad    |
+| `caption_state` | `[1,512,512]`        | `caption-proj` の出力を `max_caption_len` へ右 pad      |
+
+で、出力は各ブロック b の条件側 K / V（`context_k_<b>` / `context_v_<b>`・各 `[1,1519,20,64]`）を
+b の昇順に K → V で並べた 24 本。中身は上流 `JointAttention.project_context_kv` と 1 段目の連結
+（text / speaker / caption — 1519 = 256 + 751 + 512）で、K は `k_norm` 済み・RoPE は掛からない。
+`dit` の入力は
 
 | 名前            | shape                | 中身                                                    |
 | --------------- | -------------------- | ------------------------------------------------------- |
 | `x_t`           | `[1,S,32]`           | patch 済み latent（S = 記号次元・min 2 / max 750）      |
 | `t_embed`       | `[1,512]`            | `get_timestep_embedding(t, 512)`（**ホスト昇格**）      |
 | `mask`          | `[1,1,1,S+1519]`     | bool。self / text / speaker / caption の順に連結        |
-| `text_state`    | `[1,256,512]`        | `text-proj` の出力を `max_text_len` へ右 pad            |
-| `speaker_state` | `[1,751,768]`        | `speaker` の出力 + 平均トークン前置を 750+1 へ右 pad    |
-| `caption_state` | `[1,512,512]`        | `caption-proj` の出力を `max_caption_len` へ右 pad      |
+| `context_*_<b>` | `[1,1519,20,64]`     | `dit-context` の出力そのもの（24 本・同名・同じ並び）   |
+
+**G4 は割る**（DECIDED: ADR 0114 — ADR 0047 決定 3「畳む」を置き換える）: 条件側 K/V 射影は
+`x_t` / `t_embed` / `mask` のどれにも依存しないので、1 生成の全 forward（代表 60・
+voice-clone 100）で同じ値を出す。これを `dit-context` として生成 1 回だけ回し、出力 24 本
+（178 MiB）を常駐テンソル（ADR 0054）で `dit` へ渡す。旧決定の前提「別グラフにすると出力
+178MB を毎 run アップロードする」は常駐テンソルで消えた。境界は 1 段目の連結の**後ろ** —
+`dit` に残るのは self の K/V との記号軸 `cat`（2 段目・`S+1519` — ADR 0046）から先。
+
+MUST: 割っても数値は 1 ビットも動かない — `dit-context` は同じモジュールのメソッドを同じ順で
+呼び、`dit` は割る前と同じ演算を同じ値で行う。`ComposedDitGraph`（`dit(x_t, t_embed, mask,
+*dit_context(条件 state))`）がパッチ前の上流 `forward_with_encoded_conditions` と全ケース
+`EAGER_EQUIV_ATOL = 0` で一致することを `export_series` が毎回実測する。
+
+MUST: 境界の名前は `irodori.distribution.irodori_context_kv_names` の綴り（ランタイムは常駐
+テンソルを**名前で**束ねる — `copyOutputs` と `dit` の入力）。torch.export は可変長引数を
+`context_<i>`・出力を FX ノード名で名乗るので、export の後で IR の境界名を付け替える
+（{@link name_boundary}）。ブロック数は焼かない（`len(model.blocks)` から導く）。
 
 MUST: **`t_embed` はグラフに入れない** — `get_timestep_embedding` は `cos` を使い、`cos` は
 IR の op 語彙に無い（`sin` だけを足した第 1 層の判断 — ADR 0043）。ホストが 3 行で作る。
 
-MUST: **`text_norm` / `caption_norm` はこのグラフが内包する**（入力は projector の生の出力）。
+MUST: **`text_norm` / `caption_norm` は `dit-context` が内包する**（入力は projector の生の出力）。
 `duration` が `text_norm` を内包しているのと同じ理由で、外に出すと 2 本の学習済み RMSNorm
 weight が「モデルファイルから取り出してホストへ配る値」になり、正規経路がモデルファイル
 1 個で閉じなくなる（ADR 0010 の代替案 2 を却下した理由）。pad 行は 0 で、`rms_norm(0)` は
@@ -116,16 +143,12 @@ weight が「モデルファイルから取り出してホストへ配る値」�
 speaker 側だけ norm が上流（`speaker` ターゲット）にあるのは、平均トークンの前置が
 ホストに残るため（G2 の境界 — 上の節）。
 
-**G4（context-KV 事前射影）は畳む**（ADR 0047 決定 3）: 各層の `project_context_kv` を
-グラフ内で毎回計算する。別グラフにすると出力 178MB を毎 run アップロードすることになり、
-再計算 59.6 GFLOP/forward を払うほうが差し引き速い。分岐点は「入力値の Session 常駐」。
-
-**uncond はマスクだけで表す**（同決定 1）: 上流の CFG は text / speaker / caption の
+**uncond はマスクだけで表す**（ADR 0047 決定 1）: 上流の CFG は text / speaker / caption の
 各 uncond で「state を 0 にした context KV」をもう一組作るが、マスクが 0 の区間の寄与は
 `exp(−inf)=0` で厳密に 0 なので、**cond の KV のままマスクだけ 0 にした結果とビット一致**する。
 golden の uncond 3 変種は上流の uncond（state 0 + マスク 0）で参照値を採り、グラフには
-**cond の state + 区間 0 のマスク**を渡す — `EAGER_EQUIV_ATOL = 0` の同値検証が通ることが、
-そのままこの決定の実証になっている。
+**cond の state から作った K/V + 区間 0 のマスク**を渡す — `EAGER_EQUIV_ATOL = 0` の同値検証が
+通ることが、そのままこの決定の実証になっている（`dit-context` は cond の 1 組だけを回せば足りる）。
 
 MUST: SDPA は**保存しない**（既定の分解表 = `PRESERVED_OP_PREFIXES`）。マスクが実行時の
 bool 入力なので融合 attention の契約（マスク無し / 加算型 `[1,1,M,N]`）に載らず、分解経路 +
@@ -181,14 +204,17 @@ tolerance）が圧縮資産へ黙って掛かるため、系列は必ず分け�
 i8 は per-channel symmetric（ADR 0019）で、丸めと同時に採れる scale 台帳を emit へ渡す
 （{@link TARGET_SCALE_SOURCES} が「素のモジュール内 FQN → ラッパ内 FQN」の張り替えを持つ）。
 
-`--dtype i4` は **`dit` だけの系列**（{@link DTYPE_TARGETS}）で、DiT の **block 内から adaLN を
-除いた** linear が group32 symmetric int4（ADR 0069）・adaLN（`attention_adaln` / `mlp_adaln`）と
-block 外（`in_proj` / `out_proj` / `cond_module`）と残りは i8 の混成。丸めは既定で
-**GPTQ 校正付き**（`irodori.calib` — 参照 denoise から採った活性で i4 側の丸め先を選び直す）で、
-`--no-calib`
-だけが opt-out。校正の有無は格納形を 1 バイトも変えないので、条件は `calib_provenance.json`
-（{@link _write_calib_provenance}）に残して組み立て側が突き合わせる。他 7 役は quant 席 `i8+dit4`
-でも i8 系列のバイトを共有するので、i4 系列は書かない。
+`--dtype i4` は **DiT の 2 本（`dit` / `dit-context`）だけの系列**（{@link DTYPE_TARGETS}）で、
+DiT の **block 内から adaLN を除いた** linear 168 本が group32 symmetric int4（ADR 0069）・
+adaLN（`attention_adaln` / `mlp_adaln`）と block 外（`in_proj` / `out_proj` / `cond_module`）と
+残りは i8 の混成。168 本のうち条件側 K/V 射影 72 本は `dit-context`、残り 96 本は `dit` の
+容器に載る — 丸めは `TextToLatentRFDiT` 丸ごとに 1 回だけ当て、同じ丸め結果を 2 つの
+ラッパが所有の範囲で書き分ける（ADR 0114）。丸めは既定で **GPTQ 校正付き**
+（`irodori.calib` — 参照 denoise から採った活性で i4 側の丸め先を選び直す）で、
+`--no-calib` だけが opt-out。校正の有無は格納形を 1 バイトも変えないので、条件は
+`calib_provenance.json`（{@link _write_calib_provenance} — 2 本に同じもの）に残して
+組み立て側が突き合わせる。他 7 役は quant 席 `i8+dit4` でも i8 系列のバイトを共有するので、
+i4 系列は書かない。
 
 MUST: `--dtype` は emit 専用（`export_sbv2.py` の `--verify` 排他と同じ性格）。この台本は
 検証専用モードを持たないので機械的な排他は要らないが、丸めた重みで採った参照を
@@ -206,6 +232,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import inspect
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -229,8 +256,8 @@ from karume.convert import (
     normalize_boundary_tensor,
 )
 from karume.dist import NOTICE_FILENAME
-from karume.ir import IrGraph
-from karume.pipeline import export_to_file
+from karume.ir import IrGraph, IrInput
+from karume.pipeline import export_module, publish_model
 from karume.quantize import (
     QUANT_CHANNEL_AXES,
     fake_quant_int4,
@@ -241,7 +268,13 @@ from karume.rope import ROPE_BUFFER_NAMES, assert_rope_lifted
 
 from . import patch
 from .card import IRODORI_LICENSE
-from .distribution import CALIB_PROVENANCE_FILE, IRODORI_SERIES_ROLES
+from .distribution import (
+    CALIB_PROVENANCE_FILE,
+    IRODORI_CONTEXT_INPUTS,
+    IRODORI_DIT_HEAD_INPUTS,
+    IRODORI_SERIES_ROLES,
+    irodori_context_kv_names,
+)
 
 if TYPE_CHECKING:  # 実行時は遅延 import（下の {@link _fake_quant_i4} の NOTE）
     from karume.quant_calib import StageSpec
@@ -253,8 +286,8 @@ DEFAULT_MODEL_DIR = INPUTS_ROOT / "irodori" / "v4-small"
 
 #: 書き出せる格納 dtype。`i8` は波 2（ADR 0050 決定 6 の分岐点 = S ドリフトの実測材料）で
 #: 足した。**w8a8 は後続の波**（活性量子化は dist の席と判別帯 E2E が要る）。`i4` は
-#: **`dit` だけの系列**（{@link DTYPE_TARGETS}）で、丸めは既定で GPTQ 校正付き
-#: （{@link _fake_quant_i4}）。
+#: **DiT の 2 本（`dit` / `dit-context`）だけの系列**（{@link DTYPE_TARGETS}）で、丸めは既定で
+#: GPTQ 校正付き（{@link _fake_quant_i4}）。
 WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 
 #: モデル実装（GitHub `Aratako/Irodori-TTS` の clone）の置き場。
@@ -314,14 +347,19 @@ TARGET_CAPTION_PROJ = "caption-proj"
 TARGET_SPEAKER = "speaker"
 TARGET_DURATION = "duration"
 TARGET_DIT = "dit"
+#: DiT の条件側 K/V 射影（生成 1 回・`dit` の入力を作る — ADR 0114）。綴りは `text-proj` と同じ
+#: ハイフン形で、部品名（manifest の weights のキー）は `dit_context`
+#: （`irodori.distribution.IRODORI_SERIES_DIRS`）。
+TARGET_DIT_CONTEXT = "dit-context"
 #: 同じ token 列 golden ケースを共有する 3 本（backbone を 2 つの projector が食う鎖）。
 TEXT_TARGETS = (TARGET_BACKBONE, TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ)
-TARGETS = (*TEXT_TARGETS, TARGET_SPEAKER, TARGET_DURATION, TARGET_DIT)
+TARGETS = (*TEXT_TARGETS, TARGET_SPEAKER, TARGET_DURATION, TARGET_DIT, TARGET_DIT_CONTEXT)
 
-#: 格納 dtype ごとに書き出すターゲット。i4 系列が `dit` だけなのは、i4 の実行経路が linear の
+#: 格納 dtype ごとに書き出すターゲット。i4 系列が DiT の 2 本だけなのは、i4 の実行経路が linear の
 #: 重みスロット限定（ADR 0069 決定 5）で、DiT 以外の役割は quant 席 `i8+dit4` でも **i8 系列の
 #: バイトをそのまま共有する**から（`irodori.distribution.IRODORI_QUANT_SEATS`）— 他役割の
-#: i4 系列を書いても配布表が引かない。
+#: i4 系列を書いても配布表が引かない。`dit-context` を含めるのは、割る前はその 72 本が `dit` の
+#: 中で i4 格納だったから（i8 へ落とすと席の数値が動く — ADR 0114）。
 #:
 #: MUST: 既定を絞るだけでなく `--target` の明示も拒否する（{@link main}）。「書いたのに配布表が
 #: 引かない系列」が黙って残ると、次の波で「i4 の他役割も測ってある」という事実でない前提の
@@ -330,7 +368,7 @@ DTYPE_TARGETS: Mapping[str, tuple[str, ...]] = {
     "f32": TARGETS,
     "f16": TARGETS,
     "i8": TARGETS,
-    "i4": (TARGET_DIT,),
+    "i4": (TARGET_DIT, TARGET_DIT_CONTEXT),
 }
 
 #: テキスト系 3 本の記号次元名（IR に載る名前）。
@@ -350,7 +388,7 @@ DIT_SYMBOL = "S"
 #: `TypeError: unsupported operand type(s) for +: 'SingletonRegistry' and 'int'` になる。
 #: `dit` は `mask` の宣言に派生次元（`S+1519` — ADR 0046）を使う唯一のターゲットなので、
 #: ここだけがこの罠を踏む（`speaker` の `Dim("S")` は派生を作らないので無事）。IR 側の名前は
-#: `export_to_file(symbol_names=…)` が torch の内部シンボル（`s27` 等）から付け替えるため、
+#: `export_module(symbol_names=…)` が torch の内部シンボル（`s27` 等）から付け替えるため、
 #: torch 名が何であっても IR には `DIT_SYMBOL` が載る。
 DIT_TORCH_DIM = "L"
 
@@ -785,8 +823,8 @@ def load_dit(
 
     backbone は `load_pretrained_backbone_weights=False` で構成する（HF への接続も乱数初期化も
     走らない — 載せる重みは全て state_dict 側から来る）。**このターゲットは backbone を
-    グラフに載せない**（`DitGraph` が持つのは DiT 本体の部分木だけ）ので、ここで構成された
-    backbone は参照の一部にもならない。
+    グラフに載せない**（`DitContextGraph` / `DitGraph` が持つのは DiT 本体の部分木だけ）ので、
+    ここで構成された backbone は参照の一部にもならない。
     """
     model = source.dit_cls(
         config,
@@ -948,41 +986,270 @@ class DurationGraph(nn.Module):
         return torch.log1p(frames.sum(dim=1).clamp_min(0.0))
 
 
+#: `JointAttention` の子のうち**条件側 K/V の射影だけ**が使うもの（上流 `project_context_kv` の
+#: 綴り）。`dit-context` はこれらと {@link SHARED_KEY_NORM} を抱え、`dit` は**それ以外の子**を
+#: 抱える（{@link DitContextGraph} / {@link DitGraph}）— `dit` 側は補集合で決めるので、上流が
+#: attention に子を足しても `dit` の所有から漏れない。改名は `getattr` が落とす。
+CONTEXT_KV_PROJECTIONS: tuple[str, ...] = (
+    "wk_text",
+    "wv_text",
+    "wk_speaker",
+    "wv_speaker",
+    "wk_caption",
+    "wv_caption",
+)
+
+#: self 側の K と条件側の K の両方に掛かる q/k ノルム（上流 `JointAttention.k_norm`）。
+#: 2 本のラッパが両方とも抱え、2 本の容器に同じ値で並ぶ。
+SHARED_KEY_NORM = "k_norm"
+
+
+def _submodule_view(children: Mapping[str, nn.Module]) -> nn.Module:
+    """実モジュールの子を**同じ属性名で**抱えるだけの器（forward を持たない）。
+
+    DiT を 2 グラフに割ると、1 つの `DiffusionBlock` / `JointAttention` の重みが 2 本のラッパへ
+    分かれる。実モジュールをそのまま抱えると両方のラッパが全重みを所有してしまい、
+    「ラッパの所有パラメタ = 容器の initializer」（scale 台帳と格納指定の張り替え・i4 系列の
+    読み戻し・i4 適格の判定がどれもこれを前提にする）が崩れる — 所有していても消費しない
+    重みへの格納指定は emit が未知キーで落とし、読み戻しは「コンテナに無い」で落とす。
+
+    器には**同じモジュールオブジェクト**を登録するだけなので、FQN
+    （`blocks.<b>.attention.wk_text.weight`）も Parameter の実体も割る前と同じ。計算は実モジュールの
+    メソッドがそのまま行う（torch.export の重みの差し替えはモジュールオブジェクトの属性に効くので、
+    器を経ても実モジュールを経ても同じ席を指す）。
+    """
+    view = nn.Module()
+    for name, child in children.items():
+        view.add_module(name, child)
+    return view
+
+
+class DitContextGraph(nn.Module):
+    """条件側 K/V 射影（`dit-context`・生成 1 回）の export 用ラッパ（ADR 0114）。
+
+    入力は条件 state 3 本（projector の生の出力を Tmax 右 pad したもの — 割る前の `dit` の
+    4〜6 本目）、出力は各ブロックの条件側 K / V（1 段目の連結）を
+    `irodori.distribution.irodori_context_kv_names` の並びで 2 × ブロック数本。
+
+    上流との対応: `text_norm` / `caption_norm` を掛け（`encode_conditions` と同じ位置 —
+    `rms_norm` は行ごとの縮約なので pad の前後で先頭行は同値・pad 行は 0 のまま）、各ブロックの
+    `JointAttention.project_context_kv` を**そのまま呼ぶ**（上流 `build_context_kv_cache` と同じ
+    呼び方）。写しているのは 1 段目の連結の順序だけで、それは上流 `JointAttention.forward` の
+    `torch.cat(context_k, dim=1)` の text 以降と同じ要素・同じ順（`cat` は結合的）。
+
+    所有するのは条件側の射影 6 本 × ブロック・共有の `k_norm`・`text_norm` / `caption_norm` だけ
+    （{@link _submodule_view}）。
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.text_norm = model.text_norm
+        self.caption_norm = model.caption_norm
+        self.blocks = nn.ModuleList(
+            _submodule_view(
+                {
+                    "attention": _submodule_view(
+                        {
+                            name: getattr(block.attention, name)
+                            for name in (*CONTEXT_KV_PROJECTIONS, SHARED_KEY_NORM)
+                        }
+                    )
+                }
+            )
+            for block in model.blocks
+        )
+        # 計算の呼び先（実モジュールの `JointAttention`）。tuple は nn.Module の登録対象に
+        # ならないので、所有パラメタは上の器だけに載る。
+        self.attentions: tuple[nn.Module, ...] = tuple(block.attention for block in model.blocks)
+
+    @property
+    def output_names(self) -> tuple[str, ...]:
+        """IR の出力名（export 後に {@link name_boundary} が付け替える綴り）。"""
+        return irodori_context_kv_names(len(self.attentions))
+
+    def forward(
+        self,
+        text_state: torch.Tensor,
+        speaker_state: torch.Tensor,
+        caption_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        text = self.text_norm(text_state)
+        caption = self.caption_norm(caption_state)
+        outputs: list[torch.Tensor] = []
+        for attention in self.attentions:
+            outputs.extend(self.block_context(attention, text, speaker_state, caption))
+        return tuple(outputs)
+
+    @staticmethod
+    def block_context(
+        attention: nn.Module,
+        text: torch.Tensor,
+        speaker: torch.Tensor,
+        caption: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """1 ブロックの条件側 `(K, V)`（`project_context_kv` + 1 段目の連結）。
+
+        受ける条件は norm 済み（`text_norm` / `caption_norm` を掛けた後）。
+
+        `irodori.measure_quant` の stage 分解もこれを呼ぶ（校正の stage は条件側の射影を block の
+        中に含むので、写しを増やさずに同じ 1 実装を使う）。
+        """
+        projected = attention.project_context_kv(
+            text_context=text, speaker_context=speaker, caption_context=caption
+        )
+        if len(projected) != 6:
+            raise AssertionError(
+                f"context KV が {len(projected)} 本（text / speaker / caption の 3 条件 = 6 本）"
+                " — この重みは 3 条件とも有効なはずで、条件の有無が config と食い違っている"
+            )
+        k_text, v_text, k_speaker, v_speaker, k_caption, v_caption = projected
+        return (
+            torch.cat([k_text, k_speaker, k_caption], dim=1),
+            torch.cat([v_text, v_speaker, v_caption], dim=1),
+        )
+
+
+def _dit_block_view(block: nn.Module) -> nn.Module:
+    """`dit` が所有する 1 ブロックの器（attention は条件側の射影を除いた子だけ）。
+
+    子の並びは実モジュールのまま（`attention` の位置も変えない）— 所有パラメタの並びを割る前と
+    揃えておく。
+    """
+    return _submodule_view(
+        {
+            name: (
+                _submodule_view(
+                    {
+                        key: grandchild
+                        for key, grandchild in child.named_children()
+                        if key not in CONTEXT_KV_PROJECTIONS
+                    }
+                )
+                if name == "attention"
+                else child
+            )
+            for name, child in block.named_children()
+        }
+    )
+
+
 class DitGraph(nn.Module):
-    """DiT 1 step（`forward_with_encoded_conditions`）の export 用ラッパ。
+    """DiT 1 step（`forward_with_encoded_conditions`）の export 用ラッパ（条件側 K/V は入力）。
 
     元の `forward_with_encoded_conditions` との差は 4 点で、いずれも入力契約（B=1・条件は
     Tmax 右 pad・マスクは self / text / speaker / caption の順に連結）の下で厳密恒等:
 
     - `t_embed` を**引数で受ける**（`get_timestep_embedding` はホスト — `cos` が語彙に無い）
-    - `text_norm` / `caption_norm` を**このグラフが掛ける**（入力は projector の生の出力。
-      `rms_norm` は行ごとの縮約なので、pad の前に掛けても後に掛けても先頭行は同値。
-      pad 行は 0 で、`rms_norm(0)` も厳密に 0）
+    - 条件側 K/V を**引数で受ける**（{@link DitContextGraph} の出力そのもの — 上流の
+      `context_kv_cache` と同じ値。ADR 0114）
     - `JointAttention` の**マスク 4 本の連結を引数 1 本で受ける**（上流の
       `torch.cat(context_masks, dim=1)[:, None, None, :]` と同じもの）。K/V の連結は
-      **記号軸 cat**（`S+1519` — ADR 0046）で、条件側の 3 本は静的軸 cat に畳んである
-      （`cat` は結合的で、どちらの括り方でも同じ要素が同じ順に並ぶ）
+      **記号軸 cat**（`S+1519` — ADR 0046）で、条件側の 3 本は `dit-context` 側の静的軸 cat に
+      畳んである（`cat` は結合的で、どちらの括り方でも同じ要素が同じ順に並ぶ）
     - `nn.Dropout(p=0.0)` を落とす（eval では厳密恒等）
 
-    K/V の射影（`project_context_kv`）は**毎 forward グラフ内で計算する**（G4 の畳み込み —
-    ADR 0047 決定 3）。射影も RoPE も q/k ノルムも実モジュールのメソッドをそのまま呼ぶので、
-    このラッパが写しているのは「連結の順序」と「residual の組み立て」だけ。
+    RoPE も q/k ノルムも実モジュールのメソッドをそのまま呼ぶので、このラッパが写しているのは
+    「連結の順序」と「residual の組み立て」だけ。入力は `x_t` / `t_embed` / `mask` に続けて
+    条件側 K/V を 2 × ブロック数本（**可変長引数** — ブロック数を焼かない）で、IR の入力名は
+    export 後に {@link input_names} へ付け替える。
 
     RoPE 表は `speaker` と同じく **Smax で焼いた実数形定数**（`irodori.patch` の
     `real_pair_rope_table`）で、`[:seq_len]` の記号 prefix スライスが ADR 0010 の経路に乗る。
+
+    所有するのは条件側の射影を除いた部分木（{@link _submodule_view}）で、`text_norm` /
+    `caption_norm` は持たない（`dit-context` へ移った）。
     """
 
     def __init__(self, model: nn.Module, sym_max: int) -> None:
         super().__init__()
         self.cond_module = model.cond_module
         self.in_proj = model.in_proj
-        self.blocks = model.blocks
+        self.blocks = nn.ModuleList(_dit_block_view(block) for block in model.blocks)
         self.out_norm = model.out_norm
         self.out_proj = model.out_proj
-        self.text_norm = model.text_norm
-        self.caption_norm = model.caption_norm
         # 素の属性（lifted tensor constant）にする — SpeakerGraph と同じ理由。
         self.rope_table = patch.real_pair_rope_table(model.head_dim, sym_max)
+        # 計算の呼び先（実モジュールの `DiffusionBlock`）。tuple は nn.Module の登録対象に
+        # ならないので、所有パラメタは上の器だけに載る。
+        self.source_blocks: tuple[nn.Module, ...] = tuple(model.blocks)
+
+    @property
+    def input_names(self) -> tuple[str, ...]:
+        """IR の入力名（export 後に {@link name_boundary} が付け替える綴り）。"""
+        return (
+            *IRODORI_DIT_HEAD_INPUTS,
+            *irodori_context_kv_names(len(self.source_blocks)),
+        )
+
+    def forward(
+        self,
+        x_t: torch.Tensor,
+        t_embed: torch.Tensor,
+        mask: torch.Tensor,
+        *context: torch.Tensor,
+    ) -> torch.Tensor:
+        if len(context) != 2 * len(self.source_blocks):
+            raise ValueError(
+                f"条件側 K/V が {len(context)} 本（2 × ブロック数 = {2 * len(self.source_blocks)}"
+                " 本のはず）"
+            )
+        cond_embed = self.cond_module(t_embed)[:, None, :]
+        x = self.in_proj(x_t)
+        # 上流の `_rope_freqs(x.shape[1])` と同じ長さまで切る（`JointAttention` 側の
+        # `freqs_cis[:seq_len]` は、この時点で恒等になる）。
+        freqs = self.rope_table[: x.shape[1]]
+        for index, block in enumerate(self.source_blocks):
+            h, attention_gate = block.attention_adaln(x, cond_embed)
+            x = x + attention_gate * self._attention(
+                block.attention, h, context[2 * index], context[2 * index + 1], mask, freqs
+            )
+            h, mlp_gate = block.mlp_adaln(x, cond_embed)
+            x = x + mlp_gate * block.mlp(h)
+        return self.out_proj(self.out_norm(x))
+
+    @staticmethod
+    def _attention(
+        attention: nn.Module,
+        x: torch.Tensor,
+        context_k: torch.Tensor,
+        context_v: torch.Tensor,
+        mask: torch.Tensor,
+        freqs: torch.Tensor,
+    ) -> torch.Tensor:
+        """`JointAttention.forward` の同値実装（条件側 K/V は射影済み + 連結済みマスク）。"""
+        bsz, seq_len, _ = x.shape
+        heads, head_dim = attention.heads, attention.head_dim
+        q = attention.wq(x).reshape(bsz, seq_len, heads, head_dim)
+        k_self = attention.wk(x).reshape(bsz, seq_len, heads, head_dim)
+        v_self = attention.wv(x).reshape(bsz, seq_len, heads, head_dim)
+
+        q = attention.q_norm(q)
+        k_self = attention.k_norm(k_self)
+        q = attention._apply_rotary_half(q, freqs)
+        k_self = attention._apply_rotary_half(k_self, freqs)
+
+        k = torch.cat([k_self, context_k], dim=1)
+        v = torch.cat([v_self, context_v], dim=1)
+
+        y = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=mask, is_causal=False
+        ).transpose(1, 2)
+        y = y.reshape(bsz, seq_len, attention.dim)
+        y = y * torch.sigmoid(attention.gate(x))
+        return attention.wo(y)
+
+
+class ComposedDitGraph(nn.Module):
+    """`dit(x_t, t_embed, mask, *dit_context(条件 state 3 本))` — 割る前と同じ 6 入力の合成。
+
+    分割の同値門の被験体で、export はしない（{@link export_series} がパッチ前の上流
+    `forward_with_encoded_conditions` と atol 0 で突き合わせる — ADR 0114）。
+    """
+
+    def __init__(self, context: DitContextGraph, dit: DitGraph) -> None:
+        super().__init__()
+        self.context = context
+        self.dit = dit
 
     def forward(
         self,
@@ -993,64 +1260,29 @@ class DitGraph(nn.Module):
         speaker_state: torch.Tensor,
         caption_state: torch.Tensor,
     ) -> torch.Tensor:
-        cond_embed = self.cond_module(t_embed)[:, None, :]
-        text = self.text_norm(text_state)
-        caption = self.caption_norm(caption_state)
-        x = self.in_proj(x_t)
-        # 上流の `_rope_freqs(x.shape[1])` と同じ長さまで切る（`JointAttention` 側の
-        # `freqs_cis[:seq_len]` は、この時点で恒等になる）。
-        freqs = self.rope_table[: x.shape[1]]
-        for block in self.blocks:
-            h, attention_gate = block.attention_adaln(x, cond_embed)
-            x = x + attention_gate * self._attention(
-                block.attention, h, text, speaker_state, caption, mask, freqs
-            )
-            h, mlp_gate = block.mlp_adaln(x, cond_embed)
-            x = x + mlp_gate * block.mlp(h)
-        return self.out_proj(self.out_norm(x))
+        return self.dit(x_t, t_embed, mask, *self.context(text_state, speaker_state, caption_state))
 
-    @staticmethod
-    def _attention(
-        attention: nn.Module,
-        x: torch.Tensor,
-        text: torch.Tensor,
-        speaker: torch.Tensor,
-        caption: torch.Tensor,
-        mask: torch.Tensor,
-        freqs: torch.Tensor,
-    ) -> torch.Tensor:
-        """`JointAttention.forward` の同値実装（連結済み K/V + 連結済みマスク）。"""
-        bsz, seq_len, _ = x.shape
-        heads, head_dim = attention.heads, attention.head_dim
-        q = attention.wq(x).reshape(bsz, seq_len, heads, head_dim)
-        k_self = attention.wk(x).reshape(bsz, seq_len, heads, head_dim)
-        v_self = attention.wv(x).reshape(bsz, seq_len, heads, head_dim)
-        projected = attention.project_context_kv(
-            text_context=text, speaker_context=speaker, caption_context=caption
-        )
-        if len(projected) != 6:
-            raise AssertionError(
-                f"context KV が {len(projected)} 本（text / speaker / caption の 3 条件 = 6 本）"
-                " — この重みは 3 条件とも有効なはずで、条件の有無が config と食い違っている"
-            )
-        k_text, v_text, k_speaker, v_speaker, k_caption, v_caption = projected
 
-        q = attention.q_norm(q)
-        k_self = attention.k_norm(k_self)
-        q = attention._apply_rotary_half(q, freqs)
-        k_self = attention._apply_rotary_half(k_self, freqs)
+class DitWrappers(NamedTuple):
+    """DiT の配布ラッパ 2 本（{@link dit_wrappers} の戻り）。"""
 
-        context_k = torch.cat([k_text, k_speaker, k_caption], dim=1)
-        context_v = torch.cat([v_text, v_speaker, v_caption], dim=1)
-        k = torch.cat([k_self, context_k], dim=1)
-        v = torch.cat([v_self, context_v], dim=1)
+    context: DitContextGraph
+    dit: DitGraph
 
-        y = torch.nn.functional.scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=mask, is_causal=False
-        ).transpose(1, 2)
-        y = y.reshape(bsz, seq_len, attention.dim)
-        y = y * torch.sigmoid(attention.gate(x))
-        return attention.wo(y)
+    def by_target(self) -> dict[str, nn.Module]:
+        """ターゲット名 → ラッパ（書き出し・張り替え・読み戻しが引く形）。"""
+        return {TARGET_DIT_CONTEXT: self.context, TARGET_DIT: self.dit}
+
+
+def dit_wrappers(model: nn.Module, sym_max: int) -> DitWrappers:
+    """DiT の配布ラッパ 2 本を組む。
+
+    2 本の所有パラメタの和が「DiT の配布グラフに載る重み」の全量で、共通部分は `k_norm` だけ
+    （{@link DitContextGraph} / {@link DitGraph}）。i4 適格の判定（`irodori.calib.dit_i4_names`）・
+    i4 系列の読み戻し（`irodori.pipeline_ref`）・計測リグ（`irodori.measure_quant`）もここから
+    組む — ラッパの組を 1 箇所で決める。
+    """
+    return DitWrappers(context=DitContextGraph(model), dit=DitGraph(model, sym_max))
 
 
 def golden_case_body(name: str, kind: str, body: str, normalize_text: Any) -> str:
@@ -1367,11 +1599,13 @@ def _dit_cases(
     caption_proj: Mapping[str, torch.Tensor],
     speaker: Mapping[str, torch.Tensor],
 ) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, dict[str, torch.Tensor]]]:
-    """`dit` のグラフ入力と、**実モジュール呼び出し用**の完全な引数を組む。
+    """DiT の**条件 state 形**の入力と、**実モジュール呼び出し用**の完全な引数を組む。
 
-    戻りは `(グラフ入力, 参照呼び出しの kwargs)`。前者は 6 本のグラフ入力そのもの、後者は
-    `forward_with_encoded_conditions` の引数（**norm 済み**の条件 state と区間マスク）で、
-    参照値を採るのに使う。
+    戻りは `(条件 state 形の入力, 参照呼び出しの kwargs)`。前者は割る前の `dit` の 6 入力
+    （`x_t` / `t_embed` / `mask` + 条件 state 3 本）で、分割の同値門（{@link ComposedDitGraph}）の
+    入力と、`dit-context` / `dit` のグラフ入力（{@link _dit_context_cases} /
+    {@link _dit_graph_inputs}）の出どころになる。後者は `forward_with_encoded_conditions` の引数
+    （**norm 済み**の条件 state と区間マスク）で、参照値を採るのに使う。
 
     MUST: 条件 state は上流ターゲットの torch 期待値から鎖にし、平均トークンの前置と
     `t_embed` は実装の関数を**呼んで**作る（式を写さない）。
@@ -1497,6 +1731,90 @@ def _pristine_dit_outputs(
     if patch.patches_applied():
         raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
     return {name: _call_dit(model, args) for name, args in reference.items()}
+
+
+def _dit_context_cases(
+    dit_inputs: Mapping[str, Mapping[str, torch.Tensor]],
+) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, str]]:
+    """`dit-context` のケース（条件 state の組ごとに 1 本）と、DiT ケース → その代表名。
+
+    `dit-context` の入力は条件 state 3 本だけなので、それが同じ DiT ケースは同じ K/V を産む
+    （uncond 3 変種は cond の state のままマスクだけが違う — ADR 0047 決定 1）。組の同一性は
+    **値で判定する**（ケース表の作り方を前提にしない）ので、表に別の state を使うケースが
+    足されれば代表が 1 本増えるだけで済む。代表名は組に最初に現れた DiT ケースの名前。
+    """
+    groups: dict[str, dict[str, torch.Tensor]] = {}
+    owner: dict[str, str] = {}
+    for name, args in dit_inputs.items():
+        states = {key: args[key] for key in IRODORI_CONTEXT_INPUTS}
+        found = next(
+            (
+                representative
+                for representative, kept in groups.items()
+                if all(torch.equal(kept[key], states[key]) for key in IRODORI_CONTEXT_INPUTS)
+            ),
+            None,
+        )
+        if found is None:
+            groups[name] = states
+            found = name
+        owner[name] = found
+    return groups, owner
+
+
+def _pristine_dit_context_outputs(
+    model: nn.Module, cases: Mapping[str, Mapping[str, torch.Tensor]]
+) -> dict[str, tuple[torch.Tensor, ...]]:
+    """**パッチ前**の条件側 K/V（`dit-context` の golden 期待値 — 2 × ブロック数本の組）。
+
+    採り方は上流の正本経路そのもの: DiT 自身の `text_norm` / `caption_norm` を掛けた条件で
+    `build_context_kv_cache`（= 各ブロックの `project_context_kv` — 上流が
+    `use_context_kv_cache=True` で使うキャッシュ）を呼び、各ブロックの text / speaker / caption を
+    上流 `JointAttention.forward` の連結順で並べる。ラッパ（{@link DitContextGraph}）の出力は
+    パッチ後にこれと atol 0 で突き合わせる — ラッパ自身の出力を期待値にすると恒真になる。
+    """
+    if patch.patches_applied():
+        raise AssertionError("パッチ適用後に参照を採ろうとした（同値検証が恒真化する）")
+    outputs: dict[str, tuple[torch.Tensor, ...]] = {}
+    for name, states in cases.items():
+        with torch.no_grad():
+            cache = model.build_context_kv_cache(
+                text_state=model.text_norm(states["text_state"]),
+                speaker_state=states["speaker_state"],
+                caption_state=model.caption_norm(states["caption_state"]),
+            )
+        flat: list[torch.Tensor] = []
+        for projected in cache:
+            if len(projected) != 6:
+                raise AssertionError(
+                    f"上流の context KV キャッシュが {len(projected)} 本（3 条件 = 6 本のはず）"
+                )
+            k_text, v_text, k_speaker, v_speaker, k_caption, v_caption = projected
+            flat.append(torch.cat([k_text, k_speaker, k_caption], dim=1))
+            flat.append(torch.cat([v_text, v_speaker, v_caption], dim=1))
+        outputs[name] = tuple(flat)
+    return outputs
+
+
+def _dit_graph_inputs(
+    dit_inputs: Mapping[str, Mapping[str, torch.Tensor]],
+    owner: Mapping[str, str],
+    context: Mapping[str, Sequence[torch.Tensor]],
+    names: Sequence[str],
+) -> dict[str, dict[str, torch.Tensor]]:
+    """`dit` のグラフ入力（`x_t` / `t_embed` / `mask` + 条件側 K/V を境界名で）。
+
+    K/V は `dit-context` の**パッチ前の期待値**そのもの（鎖 — 上流ターゲットの torch 期待値を
+    下流の入力にする、`duration` と同じ形）。並びは IR の入力の並び（forward の引数順）と同じに
+    する — 同値門はこの dict の値を位置で渡す。
+    """
+    return {
+        name: {
+            **{key: args[key] for key in IRODORI_DIT_HEAD_INPUTS},
+            **dict(zip(names, context[owner[name]], strict=True)),
+        }
+        for name, args in dit_inputs.items()
+    }
 
 
 def _dit_uncond_divergence(pristine: Mapping[str, torch.Tensor]) -> dict[str, float]:
@@ -1725,7 +2043,8 @@ class TargetAxis(NamedTuple):
     """ターゲット別の記号次元の宣言と、SDPA の扱い。
 
     - `torch_dim` / `symbol`: torch の `Dim` 名と IR に載る名前。**別々に持つ** —
-      `dit` は torch 名に `"S"` を使えない（`DIT_TORCH_DIM` の MUST）。
+      `dit` は torch 名に `"S"` を使えない（`DIT_TORCH_DIM` の MUST）。記号次元を持たない
+      ターゲット（`dit-context` — 入力は Tmax 右 pad 済みの静的形）は両方 `None`。
     - `dynamic`: **入力位置 → (軸, オフセット)**。オフセット 0 は素のシンボル、非 0 は
       派生次元（`S+1519` — ADR 0046 / `dit` の `mask` だけ）。
     - `preserved`: 分解表から外す op。融合 attention（ADR 0023）を使うのはマスクが無いか
@@ -1733,8 +2052,8 @@ class TargetAxis(NamedTuple):
       （+ `safe_softmax` — ADR 0044）に落とす。
     """
 
-    torch_dim: str
-    symbol: str
+    torch_dim: str | None
+    symbol: str | None
     upper: int
     dynamic: Mapping[int, tuple[int, int]]
     preserved: tuple[str, ...]
@@ -1746,6 +2065,119 @@ def _dynamic_axis(found: tuple[int, int] | None, seq: Any) -> dict[int, Any] | N
         return None
     axis, offset = found
     return {axis: seq if offset == 0 else seq + offset}
+
+
+def _dynamic_shapes(wrapper: nn.Module, axis: TargetAxis, count: int) -> tuple[Any, ...]:
+    """入力位置ごとの指定を、forward の引数の**木構造**へ揃えた `dynamic_shapes`。
+
+    torch.export は可変長引数（`DitGraph` の `*context`）を 1 本の tuple の部分木として受けるので、
+    平らな並びのままだと「inputs と dynamic_shapes の構造が違う」で落ちる。可変長引数より前の
+    位置引数はそのまま、残りを 1 本の tuple に束ねる。
+    """
+    seq = (
+        None if axis.torch_dim is None else Dim(axis.torch_dim, min=MIN_SYM_LENGTH, max=axis.upper)
+    )
+    flat = tuple(_dynamic_axis(axis.dynamic.get(index), seq) for index in range(count))
+    parameters = inspect.signature(wrapper.forward).parameters.values()
+    if not any(parameter.kind is parameter.VAR_POSITIONAL for parameter in parameters):
+        return flat
+    fixed = sum(
+        1
+        for parameter in parameters
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+    )
+    return (*flat[:fixed], flat[fixed:])
+
+
+def name_boundary(
+    graph: IrGraph,
+    *,
+    inputs: Sequence[str] | None = None,
+    outputs: Sequence[str] | None = None,
+) -> IrGraph:
+    """IR の境界名（グラフ入力 / 出力）を**位置どおりに**付け替えた新しいグラフを返す。
+
+    torch.export は forward の可変長引数を `<引数名>_<i>`、出力を FX ノード名（`cat_3` 等）で
+    名乗る。ランタイムは DiT の境界を名前で束ねる（`copyOutputs` と `dit` の入力 — ADR 0114）
+    ので、契約の綴り（`irodori.distribution.irodori_context_kv_names`）へ export の後で付け替える。
+    並びは forward の引数順 / 戻り値の順そのもの（torch.export が保つ）なので、位置で対応させる。
+    `None` の側は触らない。
+
+    MUST: 付け替え先が残る値名と衝突したら落とす（潰すと宣言が黙って 1 本消える）。出力が
+    ノードを経ない値（入力 / initializer をそのまま返す形）なら落とす — 付け替えると入力名や
+    重みの鍵まで動く。
+    """
+    rename: dict[str, str] = {}
+    if inputs is not None:
+        current = [spec.name for spec in graph.inputs]
+        if len(current) != len(inputs):
+            raise AssertionError(f"入力 {len(current)} 本に名前 {len(inputs)} 本を当てようとした")
+        rename.update({old: new for old, new in zip(current, inputs, strict=True) if old != new})
+    if outputs is not None:
+        if len(graph.outputs) != len(outputs):
+            raise AssertionError(
+                f"出力 {len(graph.outputs)} 本に名前 {len(outputs)} 本を当てようとした"
+            )
+        produced = {name for node in graph.nodes for name in node.outs}
+        for old, new in zip(graph.outputs, outputs, strict=True):
+            if old not in produced:
+                raise AssertionError(
+                    f"出力 '{old}' がノードの出力でない（入力 / initializer をそのまま返している）"
+                )
+            if old != new:
+                rename[old] = new
+    occupied = {spec.name for spec in graph.inputs} | set(graph.values) | set(graph.initializers)
+    targets = list(rename.values())
+    clashes = sorted((occupied - set(rename)) & set(targets))
+    if clashes or len(set(targets)) != len(targets):
+        raise AssertionError(f"境界名の付け替え先が既存の値名と衝突する: {clashes or targets}")
+
+    def renamed(name: str) -> str:
+        return rename.get(name, name)
+
+    return IrGraph(
+        symbols=list(graph.symbols),
+        inputs=[
+            IrInput(name=renamed(spec.name), dtype=spec.dtype, shape=list(spec.shape))
+            for spec in graph.inputs
+        ],
+        outputs=[renamed(name) for name in graph.outputs],
+        initializers=dict(graph.initializers),
+        values={renamed(name): value for name, value in graph.values.items()},
+        states=dict(graph.states),
+        nodes=[
+            dataclasses.replace(
+                node,
+                ins=[renamed(name) for name in node.ins],
+                outs=[renamed(name) for name in node.outs],
+            )
+            for node in graph.nodes
+        ],
+    )
+
+
+def export_ir(
+    wrapper: nn.Module,
+    example: tuple[torch.Tensor, ...],
+    *,
+    axis: TargetAxis,
+    input_names: Sequence[str] | None = None,
+    output_names: Sequence[str] | None = None,
+) -> tuple[IrGraph, dict[str, torch.Tensor]]:
+    """ラッパ 1 本を IR へ変換し、境界名を付け替える（`karume.pipeline.export_to_file` の前半を
+    割って、公開の前に {@link name_boundary} を挟める形にしたもの）。
+
+    公開（`karume.pipeline.publish_model`）は呼び手の {@link export_series} が行う — グラフ名
+    （部品名）を名乗る位置を 1 箇所に保つため（`tests/test_graph_names.py` の門）。
+    """
+    graph, tensors = export_module(
+        wrapper,
+        example,
+        dynamic_shapes=_dynamic_shapes(wrapper, axis, len(example)),
+        symbol_names=() if axis.symbol is None else (axis.symbol,),
+        preserved=axis.preserved,
+    )
+    return name_boundary(graph, inputs=input_names, outputs=output_names), tensors
 
 
 def _graph_summary(graph: IrGraph, path: Path) -> dict[str, Any]:
@@ -1771,7 +2203,8 @@ class FakeQuantResult(NamedTuple):
     #: 張り替えは {@link target_weight_dtypes}。既定 `weight_dtype` が適格外を静かに f32 で
     #: 残すのに対し、明示指定は満たせなければ emit が fail loudly する（`karume.emit` の
     #: `_plan_weight_dtype`）— i4 系列で配布グラフの linear 317 本を 1 本単位で名指しする
-    #: （block 内から adaLN を除いた 168 本が `i4` / adaLN 144 本 + block 外 5 本 = 149 本が `i8`）
+    #: （block 内から adaLN を除いた 168 本が `i4` / adaLN 144 本 + block 外 5 本 = 149 本が `i8`。
+    #: 容器は `dit` が i4 96 + i8 149 本・`dit-context` が i4 72 本）
     #: のはそのため。**i8 側を明示 `i8` で名指しするのは必須**: 既定 `weight_dtype` が `i4` な
     #: ので、指定を落とすと `_plan_weight_dtype`
     #: が i4 適格の linear を既定で i4 計画へ流し、group scale が無い（i8 の per-channel scale
@@ -1811,10 +2244,13 @@ TARGET_SCALE_SOURCES: Mapping[str, tuple[tuple[str, str, str], ...]] = MappingPr
         TARGET_CAPTION_PROJ: ((TARGET_CAPTION_PROJ, "", "projection.projector."),),
         TARGET_SPEAKER: ((TARGET_SPEAKER, "", "encoder."),),
         TARGET_DURATION: ((TARGET_DURATION, "", "predictor."),),
-        # `DitGraph` は DiT 本体の部分木を**同じ属性名**で持つ（張り替え不要）。台帳には
-        # `load_dit` が丸ごと組む内側のコピー（backbone 等）も載るが、ラッパの
+        # `DitGraph` / `DitContextGraph` は DiT 本体の部分木を**同じ属性名**で持つ（張り替え
+        # 不要）。2 本とも同じ `dit` 役の台帳（`TextToLatentRFDiT` 丸ごとを 1 回丸めた結果）を
+        # 引き、所有の範囲（{@link _submodule_view}）で自然に割れる。台帳には `load_dit` が丸ごと
+        # 組む内側のコピー（backbone 等）と相手側ラッパの重みも載るが、ラッパの
         # `named_parameters` に無いので落ちる。
         TARGET_DIT: ((TARGET_DIT, "", ""),),
+        TARGET_DIT_CONTEXT: ((TARGET_DIT, "", ""),),
     }
 )
 
@@ -1917,6 +2353,10 @@ def _write_calib_provenance(
     `--no-calib` でも**書く**（消すのではなく `rtn` と記録する）— 不在は「古い export」とも
     読めてしまい、組み立て側が「校正なしを配ろうとした」を名指しで拒否できない。
 
+    i4 系列を持つターゲット（DiT の 2 本 — {@link DTYPE_TARGETS}）の**両方に同じ記録**を書く。
+    2 本は同じ丸めを 2 つのラッパで書き分けたもの（ADR 0114）で、組み立て側は両方を読んで
+    一致まで見る。
+
     MUST: i4 以外では**古い記録を消す**（全域関数）。ただし記録の不在を実際に保証しているのは
     据え替えの側 — 呼び手（`export_series`）は常に空の作業席を渡し、`swap_into_place` は元の
     中身を 1 つも引き継がないディレクトリ丸ごとの rename なので、i4 で採った系列を別 dtype で
@@ -1926,7 +2366,7 @@ def _write_calib_provenance(
     from . import calib
 
     path = target_dir / CALIB_PROVENANCE_FILE
-    if dtype != "i4" or target != TARGET_DIT or plan is None:
+    if dtype != "i4" or target not in DTYPE_TARGETS["i4"] or plan is None:
         path.unlink(missing_ok=True)
         return None
     record = {
@@ -2001,6 +2441,12 @@ def _fake_quant_i4(
     block 外を i8 へ移した後も韻律のずれが残った。コストは +13.1 MiB（dit i4 payload の
     +6.0%）。判定はセグメント一致（{@link irodori.calib.is_adaln}）で、i4 に残るのは block 内
     168 本。
+
+    DiT を 2 グラフに割った後（ADR 0114）も丸めは `TextToLatentRFDiT` 丸ごとに **1 回**で、
+    校正の駆動（stage = block 丸ごと・校正入力）も割る前と同じ。168 本は容器の上で
+    `dit-context`（条件側 K/V 射影 72 本）と `dit`（残り 96 本）に分かれて載るが、それは
+    {@link TARGET_SCALE_SOURCES} の張り替えが各ラッパの所有の範囲で台帳を拾うだけで決まる —
+    ここが返す台帳と格納指定は `dit` 役 1 本のまま。
 
     2 つの述語は「block 内 − adaLN」を境に**排他に**割る（`quantize.py` の
     混成 MUST）。`dit` は `TextToLatentRFDiT` **丸ごと**（backbone / projector / speaker /
@@ -2313,8 +2759,19 @@ def export_series(
         _first(pristine[TARGET_SPEAKER]),
     )
     dit_pristine = _pristine_dit_outputs(dit, dit_reference)
-    pristine[TARGET_DIT] = _single(dit_pristine)
     dit_divergence = _dit_uncond_divergence(dit_pristine)
+    # `dit-context` は条件 state の組ごとに 1 本（全 DiT ケースで同じ組なら 1 本）。期待値は
+    # 上流のキャッシュ経路（`build_context_kv_cache`）でパッチ前に採り、`dit` の golden 入力の
+    # K/V にもそのまま使う（鎖）。
+    context_inputs, context_owner = _dit_context_cases(dit_inputs)
+    pristine[TARGET_DIT_CONTEXT] = _pristine_dit_context_outputs(dit, context_inputs)
+    pristine[TARGET_DIT] = _single(dit_pristine)
+    dit_graph_inputs = _dit_graph_inputs(
+        dit_inputs,
+        context_owner,
+        pristine[TARGET_DIT_CONTEXT],
+        irodori_context_kv_names(len(dit.blocks)),
+    )
 
     # ---- ② パッチ適用（ここから先で採った eager 値は参照に使えない） ----
     rope_buffers = sorted(
@@ -2323,19 +2780,21 @@ def export_series(
     patch.apply_patches()
 
     # ---- ③ ラッパの eager 同値（パッチ + マスク落としの両方をここで実測する） ----
+    dit_graphs = dit_wrappers(dit, dit_max)
     graphs = {
         TARGET_BACKBONE: BackboneGraph(backbone),
         TARGET_TEXT_PROJ: ProjectorGraph(projectors[TARGET_TEXT_PROJ]),
         TARGET_CAPTION_PROJ: CaptionProjectorGraph(projectors[TARGET_CAPTION_PROJ], caption_norm),
         TARGET_SPEAKER: SpeakerGraph(speaker_encoder, speaker_norm, speaker_max),
         TARGET_DURATION: DurationGraph(duration, text_norm),
-        TARGET_DIT: DitGraph(dit, dit_max),
+        **dit_graphs.by_target(),
     }
     graph_args: dict[str, dict[str, dict[str, torch.Tensor]]] = {
         TARGET_BACKBONE: {name: {"input_ids": ids} for name, _kind, ids in cases},
         TARGET_SPEAKER: {name: {"latent": latent} for name, latent in speaker_cases},
         TARGET_DURATION: duration_inputs,
-        TARGET_DIT: dit_inputs,
+        TARGET_DIT: dit_graph_inputs,
+        TARGET_DIT_CONTEXT: context_inputs,
     }
     for target in (TARGET_TEXT_PROJ, TARGET_CAPTION_PROJ):
         graph_args[target] = {
@@ -2354,12 +2813,27 @@ def export_series(
         )
         for target, module in graphs.items()
     }
+    # 分割の同値門（ADR 0114）: 割った 2 本を合成したものが、パッチ前の上流
+    # `forward_with_encoded_conditions` と全ケースでビット一致する。上の `dit` 単体の門は
+    # 「K/V = 上流キャッシュの値」を入力に取るので、`dit-context` のラッパ自身がその値を
+    # 作れることまでは含まない — 合成で 2 本の噛み合わせ（名前ではなく位置の並び）まで見る。
+    split_equivalence = max(
+        _check_wrapper_equivalence(
+            ComposedDitGraph(dit_graphs.context, dit_graphs.dit),
+            tuple(args.values()),
+            pristine[TARGET_DIT][name],
+            f"dit-split/{name}",
+            EAGER_EQUIV_ATOL,
+        )
+        for name, args in dit_inputs.items()
+    )
 
     # ---- ④ export と golden の書き出し ----
     # ターゲット別の記号次元の宣言（{@link TargetAxis}）。テキスト系 3 本と duration は
     # T（512）で、speaker は S（参照 latent の patch 後上限）、dit も S（latent 長 750 —
     # 別グラフなので名前は衝突しない）。duration の 2〜5 本目（条件ベクトルと bool）と
-    # dit の 2 / 4〜6 本目（t_embed と条件 state）は記号を持たない固定 shape。
+    # dit の 2 / 4 本目以降（t_embed と条件側 K/V）は記号を持たない固定 shape で、dit-context は
+    # 記号次元そのものを持たない（入力は Tmax 右 pad 済み）。
     axes: dict[str, TargetAxis] = {
         TARGET_BACKBONE: TargetAxis(
             TEXT_SYMBOL, TEXT_SYMBOL, sym_max, {0: (1, 0)}, PRESERVED_OP_PREFIXES_WITH_ATTENTION
@@ -2387,36 +2861,39 @@ def export_series(
             {0: (1, 0), 2: (3, dit_context_total)},
             PRESERVED_OP_PREFIXES,
         ),
+        TARGET_DIT_CONTEXT: TargetAxis(None, None, 0, {}, PRESERVED_OP_PREFIXES),
     }
     written: dict[str, Any] = {}
     for target in targets:
-        axis = axes[target]
         target_dir = out_dir / target
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         by_case = graph_args[target]
         longest = max(by_case, key=lambda name: next(iter(by_case[name].values())).shape[1])
-        example = tuple(by_case[longest].values())
-        seq = Dim(axis.torch_dim, min=MIN_SYM_LENGTH, max=axis.upper)
         # MUST: 生成物はターゲットごとの作業席へ書き、揃ってから据える（門より前に final へ
         # 置かない — dacvae 側 `export_series` と同じ規律・原語は
         # `karume.artifacts.staged_publication`）。
         with staged_publication(target_dir) as staged:
             # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
             staged.mkdir()
-            graph = export_to_file(
+            exported, tensors = export_ir(
                 graphs[target],
-                example,
+                tuple(by_case[longest].values()),
+                axis=axes[target],
+                # DiT の境界だけ IR の名前を契約の綴りへ付け替える（{@link name_boundary}）。
+                input_names=dit_graphs.dit.input_names if target == TARGET_DIT else None,
+                output_names=(
+                    dit_graphs.context.output_names if target == TARGET_DIT_CONTEXT else None
+                ),
+            )
+            graph = publish_model(
                 staged / MODEL_FILE,
+                exported,
+                tensors,
                 provenance=PROVENANCE,
                 # グラフ名は**部品名**（= karume.json の weights のキー）。ディレクトリ名
                 # とは綴りが違う（`caption-proj` → `caption_proj`）ので逆引き表を通す
                 # （container-v1 §2.1）。
                 graph_name=IRODORI_SERIES_ROLES[target],
-                dynamic_shapes=tuple(
-                    _dynamic_axis(axis.dynamic.get(index), seq) for index in range(len(example))
-                ),
-                symbol_names=(axis.symbol,),
-                preserved=axis.preserved,
                 weight_dtype=dtype,
                 weight_scales=target_scales(target, graphs[target], quantized.scales),
                 weight_dtype_overrides=target_weight_dtypes(
@@ -2424,7 +2901,7 @@ def export_series(
                 ),
             )
             io_files = _write_io(graph, by_case, pristine[target], staged)
-            # 校正条件の記録（i4 の `dit` のみ）。**stdout の要約は人が読むためのもの**で、
+            # 校正条件の記録（i4 の DiT 2 本のみ）。**stdout の要約は人が読むためのもの**で、
             # 機械の突き合わせは `calib_provenance.json` が持つ。
             calib_provenance = _write_calib_provenance(dtype, calib_plan, target, staged)
         written[target] = {
@@ -2443,12 +2920,14 @@ def export_series(
         "dit_case_lengths": {name: int(args["x_t"].shape[1]) for name, args in dit_inputs.items()},
         "dit_sym_max": dit_max,
         "dit_context_total": dit_context_total,
+        "dit_context_cases": context_owner,
         "dit_uncond_divergence": dit_divergence,
         "rope_buffers_lifted": rope_buffers,
         "static_scheme_max_abs": {k: float(f"{v:.3e}") for k, v in static_evidence.items()},
         "no_reference_max_abs": no_reference_max_abs,
         "duration_aux_inert_max_abs": aux_inert,
         "eager_equivalence_max_abs": equivalence,
+        "dit_split_equivalence_max_abs": split_equivalence,
         "projector_divergence": sanity,
         "norm_divergence": round(norm_divergence, 5),
     }
@@ -2484,8 +2963,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=WEIGHT_DTYPES,
         default="f32",
         help="重みの格納 dtype（f16 / i8 / i4 は fake-quant してから適格スロットだけ圧縮格納する"
-        " — ADR 0018 / 0019 / 0027 / 0050 / 0069。i4 は dit だけの系列で、丸めは既定で"
-        " GPTQ 校正付き。**emit 専用**）",
+        " — ADR 0018 / 0019 / 0027 / 0050 / 0069。i4 は DiT の 2 本（dit / dit-context）"
+        "だけの系列で、丸めは既定で GPTQ 校正付き。**emit 専用**）",
     )
     parser.add_argument(
         "--target",

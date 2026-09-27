@@ -39,30 +39,6 @@ class TestTheSplitArgumentItself:
             assert torch.equal(lhs, rhs), f"{index} 本目が一致しない"
 
 
-@pytest.fixture
-def restore_forward():
-    """クラス属性の差し替えをテスト後に戻す（差し替えはプロセス全域）。
-
-    `apply_patches` は `irodori_tts`（git 追跡外の clone — conftest が `sys.path` へ足す）も
-    差し替えるので、無い環境ではこのフィクスチャを使うテストだけを skip する。
-    """
-    irodori_model = pytest.importorskip("irodori_tts.model")
-    original = modernbert.ModernBertAttention.forward
-    original_rope = irodori_model.apply_rotary_emb
-    original_norm = irodori_model.RMSNorm.forward
-    original_adaln = irodori_model.LowRankAdaLN.forward
-    applied = patch_irodori._APPLIED
-    try:
-        yield irodori_model
-    finally:
-        modernbert.ModernBertAttention.forward = original
-        irodori_model.apply_rotary_emb = original_rope
-        irodori_model.RMSNorm.forward = original_norm
-        irodori_model.LowRankAdaLN.forward = original_adaln
-        patch_irodori._APPLIED = applied
-        patch_irodori._ORIGINAL_APPLY_ROTARY_EMB = None
-
-
 def _tiny_attention(
     layer_idx: int,
 ) -> tuple[torch.nn.Module, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:

@@ -4,12 +4,14 @@
 `karume.dist` が持つ。ここが持つのは **Irodori 固有の事実**だけ: どの系列ディレクトリから何を
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
-配布するのは**実行に要る 8 グラフ + tokenizer 資産 1 本**だけ。8 のうち 2 本は波形 ↔ latent の
+配布するのは**実行に要る 9 グラフ + tokenizer 資産 1 本**だけ。9 のうち 2 本は波形 ↔ latent の
 コーデック（DACVAE — 上流では別リポ・別重みだが、テキストから音声まで 1 リポで完走させるため
-ここへ同梱する）。格納形は f32 / f16 / i8 の 3 系列（`dit` だけ **i4 の 4 本目**を持つ）で、
+ここへ同梱する）、2 本は DiT を割った対（条件側 K/V 射影の `dit_context` と step ごとの `dit` —
+ADR 0114）。格納形は f32 / f16 / i8 の 3 系列（DiT の 2 本だけ **i4 の 4 本目**を持つ）で、
 quant 席は 5 つ（`f32` / `f16` / `i8` / `i8-a8` / `i8+dit4`）。`i8` と `i8-a8` は**同じ i8 バイト
-を共有**し、違うのは実行形ノブだけ。`i8+dit4` は `dit` だけを i4 系列から採り、他 7 役は `i8`
-と同じ i8 バイトを共有する（唯一の混成席 — {@link IRODORI_QUANT_SEATS} の裁定）。
+を共有**し、違うのは実行形ノブだけ。`i8+dit4` は DiT の 2 本（`dit` / `dit_context`）だけを i4
+系列から採り、他 7 役は `i8` と同じ i8 バイトを共有する（唯一の混成席 —
+{@link IRODORI_QUANT_SEATS} の裁定）。
 
 `pipelineConfig` は 2 系統に割れる: **モデル固有の数**（条件 state の宣言長・話者行数・
 latent 幅・t_embed 幅）はチェックポイントの config から導出し、**実行時ノブ**（step 数・
@@ -87,6 +89,7 @@ IRODORI_SERIES_DIRS: Mapping[str, str] = {
     "speaker": "speaker",
     "duration": "duration",
     "dit": "dit",
+    "dit_context": "dit-context",
 }
 
 #: コーデック（DACVAE）の 1 語 — **別リポ・別重み**なので系列も入力素材も専用の名前を持つ
@@ -101,7 +104,7 @@ IRODORI_CODEC_DIRS: Mapping[str, str] = {
     "codec_encoder": "encoder",
 }
 
-#: グラフを持つ役割の全体（Irodori 本体 6 + コーデック 2）。
+#: グラフを持つ役割の全体（Irodori 本体 7 + コーデック 2）。
 IRODORI_GRAPH_ROLES: tuple[str, ...] = (*IRODORI_SERIES_DIRS, *IRODORI_CODEC_DIRS)
 
 #: 系列のターゲットディレクトリ名 → 役割名（上の 2 表の逆引き）。**書き手が容器のグラフを
@@ -137,16 +140,18 @@ IRODORI_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16", "i8", "i4")
 #: 格納 dtype → その系列が持つ**役割**（`irodori.export.DTYPE_TARGETS` /
 #: `irodori.dacvae.export.WEIGHT_DTYPES` と対）。
 #:
-#: MUST: i4 は `dit` だけ。i4 の実行経路は linear の重みスロット限定（ADR 0069 決定 5）で、
-#: DiT 以外の 7 役は quant 席 `i8+dit4` でも **i8 系列のバイトをそのまま共有する**
-#: （{@link IRODORI_QUANT_SEATS}）— 他役割の i4 系列は書き出す側も持たない。表をここ 1 箇所に
-#: 置くのは、出力 path / 格納 dtype 要求 / weights 宣言 / 配置表の 4 つが「どの (役割, dtype) が
-#: 実在するか」で同じ判断をするため（別々に持つと、席を 1 つ足した日に片方だけ更新される）。
+#: MUST: i4 は DiT の 2 本（`dit` / `dit_context`）だけ。i4 の実行経路は linear の重みスロット
+#: 限定（ADR 0069 決定 5）で、DiT 以外の 7 役は quant 席 `i8+dit4` でも **i8 系列のバイトを
+#: そのまま共有する**（{@link IRODORI_QUANT_SEATS}）— 他役割の i4 系列は書き出す側も持たない。
+#: `dit_context` を i4 に**含める**のは、割る前はその 72 本（条件側 K/V 射影）が `dit` の中で
+#: i4 格納だったから — i8 へ落とすと席の数値が動く（ADR 0114）。表をここ 1 箇所に置くのは、
+#: 出力 path / 格納 dtype 要求 / weights 宣言 / 配置表の 4 つが「どの (役割, dtype) が実在するか」で
+#: 同じ判断をするため（別々に持つと、席を 1 つ足した日に片方だけ更新される）。
 IRODORI_DTYPE_ROLES: Mapping[str, tuple[str, ...]] = {
     "f32": IRODORI_GRAPH_ROLES,
     "f16": IRODORI_GRAPH_ROLES,
     "i8": IRODORI_GRAPH_ROLES,
-    "i4": ("dit",),
+    "i4": ("dit", "dit_context"),
 }
 
 #: 圧縮していない系列の dtype（系列 root に接尾が付かない唯一の席で、quant に依存しない
@@ -217,10 +222,11 @@ IRODORI_STORAGE_REQUIREMENTS: Mapping[str, str] = {
 #: **圧縮側の格納の語彙全部**の不在を併せて要求して初めて系列 × 格納が集合として一意に
 #: なる。逆向き（圧縮席へ f32 資産）は {@link assert_storage} が要求の不在で落とす。
 #:
-#: MUST: **i8 席も i4 の不在を要求する**（`dit` だけが両方の系列を持つ）。i4 系列は
-#: **i4 + i8 + f32 の混成**（block 内の adaLN 以外 168 本が i4・block 外 5 本 + adaLN 144 本が
-#: i8・bias / norm / scale が f32 — 聴感裁定 2026-08-23 で block 外と adaLN を i4 から外した。
-#: `irodori.export._fake_quant_i4`）なので、
+#: MUST: **i8 席も i4 の不在を要求する**（DiT の 2 本だけが両方の系列を持つ）。`dit` の i4 系列は
+#: **i4 + i8 + f32 の混成**（block 内の adaLN と条件側 K/V 射影を除いた 96 本が i4・block 外
+#: 5 本 + adaLN 144 本が i8・bias / norm / scale が f32 — 聴感裁定 2026-08-23 で block 外と adaLN を
+#: i4 から外した。`irodori.export._fake_quant_i4`）、`dit_context` の i4 系列は条件側 K/V 射影
+#: 72 本が i4・norm が f32 なので、
 #: 「i8 を含む」という要求検査は i4 系列でも満たされてしまう。i8 席と i4 系列を分けているのは
 #: **この禁止表だけ**で、外すと既定席 `i8-a8` の `linearCompute: "a8"` が i4 常駐で走る w4a8
 #: 経路（ADR 0076）へ黙って化ける。混成になる前も「i4 系列が i8 席を名乗れるかどうかが上流の
@@ -235,8 +241,8 @@ IRODORI_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     **{irodori_role(role, "i8"): ("i4",) for role in IRODORI_DTYPE_ROLES["i4"]},
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。8 グラフとも f32 / f16 / i8 の 3 席を持ち（`dit` は
-#: さらに i4）、{@link complete_quant_weights} の自動補完は掛からないので quant 表が全役割を
+#: weights の宣言（dtype ラベル → 役割名）。9 グラフとも f32 / f16 / i8 の 3 席を持ち（DiT の
+#: 2 本はさらに i4）、{@link complete_quant_weights} の自動補完は掛からないので quant 表が全役割を
 #: 名指しする。
 IRODORI_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
     role: {
@@ -273,6 +279,11 @@ class QuantSeat(NamedTuple):
 #: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4）。**Irodori は空** — 混成席
 #: `i8+dit4` のトークン `dit` は weights 名そのもの（略称ではない）なので、対応表を出すと
 #: 「`dit` は `dit` です」という行がカードに生えるだけになる。
+#:
+#: NOTE: DiT を 2 グラフに割った後（ADR 0114）も、トークン `dit` は DiT 全体（`dit` と条件側の
+#: `dit_context`）を指す。この表の形（トークン 1 つ → weights 名 1 つ）では 2 本を名指せず、
+#: 席名そのものを変えるのは配布の breaking なので、席の説明文（`description`）が DiT と呼ぶ範囲で
+#: 両方を覆う。
 IRODORI_QUANT_ABBREVIATIONS: Mapping[str, str] = {}
 
 #: quant 席の綴り → {@link QuantSeat}。席名は ADR 0074 の文法
@@ -283,9 +294,11 @@ IRODORI_QUANT_ABBREVIATIONS: Mapping[str, str] = {}
 #: そのドリフトは **GPTQ 校正で消えた**（`docs/research/2026-08-20-gptq-awq-calibrated-rounding.md`
 #: §6 — 校正付き丸めで S は f32 と完全一致）。`i8` / `i8-a8` の 8 役一律は従来どおり。
 #:
-#: MUST: `i8-a8` の `linearCompute` は **`dit` の Session にだけ**降りる（models 側 `pipeline.ts`
-#: のモジュール doc）— DiT の linear 317 本が唯一の適格集合で、条件エンコーダ 5 本は 1 生成に
-#: 1 回しか走らない。
+#: MUST: `i8-a8` の `linearCompute` は **DiT の 2 本（`dit` / `dit_context`）の Session にだけ**
+#: 降りる（models 側 `pipeline.ts` のモジュール doc）— DiT の linear 317 本が唯一の適格集合で、
+#: 条件エンコーダ 5 本は 1 生成に 1 回しか走らない。`dit_context`（条件側 K/V 射影 72 本）も同じ席で
+#: 回すのは、割る前はその 72 本が `dit` の中でこの席の実行形で走っていたから — 別の実行形で
+#: 回すと数値が動く（ADR 0114）。
 #:
 #: MUST: `i8+dit4` は **`linearCompute` を宣言しない**。i4 常駐 × i8 活性は w4a8 経路
 #: （ADR 0076・group 部分縮約）に乗るが、その構成は irodori では**一度も測っていない**
@@ -328,7 +341,7 @@ IRODORI_QUANT_SEATS: Mapping[str, QuantSeat] = {
         label="Lowest memory (int4 DiT)",
         description="The DiT in GPTQ-calibrated int4 (group-32) while the other seven graphs stay"
         " int8 — the smallest download and the least resident memory.",
-        roles={"dit": "i4"},
+        roles={"dit": "i4", "dit_context": "i4"},
     ),
 }
 
@@ -393,6 +406,10 @@ IRODORI_SAMPLING_DEFAULTS: Mapping[str, Any] = {
 #: {@link sbv2.distribution.assert_bert_hidden} と同じ機序 — `caption_proj` が 1 出力の資産に
 #: 差し替わると `caption_vec` を第 1 出力から採る別のベクトルで duration が回り、shape は
 #: 合ったまま沈黙する）。
+#:
+#: DiT の 2 本（`dit_context` / `dit`）はここに載せない — 境界の本数がブロック数で決まる
+#: （ADR 0114）ので固定の並びでは書けず、2 本の宣言を突き合わせて導く
+#: （{@link _assert_irodori_dit_boundary}）。
 IRODORI_GRAPH_SHAPES: Mapping[str, tuple[tuple[str, ...], int]] = {
     "backbone": (("input_ids",), 1),
     "text_proj": (("hidden",), 1),
@@ -402,24 +419,50 @@ IRODORI_GRAPH_SHAPES: Mapping[str, tuple[tuple[str, ...], int]] = {
         ("text_state", "speaker_vec", "has_speaker", "caption_vec", "has_caption"),
         1,
     ),
-    "dit": (("x_t", "t_embed", "mask", "text_state", "speaker_state", "caption_state"), 1),
     # コーデック 2 本は位置表もマスクも持たない純畳み込み網（入力 1 本 / 出力 1 本）。
     "codec_decoder": (("latent",), 1),
     "codec_encoder": (("wav",), 1),
 }
 
+#: `dit_context` の入力の並び（条件 state 3 本 — projector の生の出力を Tmax 右 pad したもの。
+#: `text_norm` / `caption_norm` はこのグラフの内側で掛かる）。
+IRODORI_CONTEXT_INPUTS: tuple[str, ...] = ("text_state", "speaker_state", "caption_state")
+
+#: `dit` の先頭 3 入力の並び。この後ろに条件側 K/V（{@link irodori_context_kv_names}）が続く。
+IRODORI_DIT_HEAD_INPUTS: tuple[str, ...] = ("x_t", "t_embed", "mask")
+
+
+def irodori_context_kv_names(blocks: int) -> tuple[str, ...]:
+    """条件側 K/V の境界名（`dit_context` の出力 = `dit` の 4 本目以降の入力）。
+
+    ブロック b ごとに `context_k_<b>` → `context_v_<b>` の順で、b の昇順に並べる。ランタイムは
+    常駐テンソルをこの**名前**で束ねる（`copyOutputs` と `dit` の入力）ので、書き手
+    （`irodori.export` が IR の境界名を付け替える）と読み手（{@link _assert_irodori_dit_boundary}）
+    がここ 1 箇所の綴りから組む。
+
+    MUST: ブロック数は焼かない — 呼び手が上流の構成（export 側は `len(model.blocks)`）か、
+    焼かれたグラフの宣言（組み立て側は `dit_context` の出力本数）から渡す。
+    """
+    if blocks < 1:
+        raise ValueError(f"DiT のブロック数が {blocks}（1 以上）")
+    return tuple(
+        name for index in range(blocks) for name in (f"context_k_{index}", f"context_v_{index}")
+    )
+
+
 #: `(役割, グラフ入力, 軸, pipelineConfig の欄)` — グラフの**静的**次元と宣言の突合表。
 #: TS 側 `IrodoriPipeline.fromAssets` の `assertStaticDim` と同じ組み合わせを**焼く側でも**
-#: 見る（配ってから利用者の手元で初めて落ちる形にしない）。
+#: 見る（配ってから利用者の手元で初めて落ちる形にしない）。条件 state 3 本は `dit_context` の
+#: 入力（ADR 0114 で `dit` から移った）。
 IRODORI_STATIC_DIMS: tuple[tuple[str, str, int, str], ...] = (
     ("dit", "x_t", 2, "latentDim"),
     ("dit", "t_embed", 1, "timestepEmbedDim"),
-    ("dit", "text_state", 1, "maxTextLen"),
-    ("dit", "text_state", 2, "textDim"),
-    ("dit", "speaker_state", 1, "speakerRows"),
-    ("dit", "speaker_state", 2, "speakerDim"),
-    ("dit", "caption_state", 1, "maxCaptionLen"),
-    ("dit", "caption_state", 2, "captionDim"),
+    ("dit_context", "text_state", 1, "maxTextLen"),
+    ("dit_context", "text_state", 2, "textDim"),
+    ("dit_context", "speaker_state", 1, "speakerRows"),
+    ("dit_context", "speaker_state", 2, "speakerDim"),
+    ("dit_context", "caption_state", 1, "maxCaptionLen"),
+    ("dit_context", "caption_state", 2, "captionDim"),
     ("duration", "text_state", 2, "textDim"),
     ("duration", "speaker_vec", 1, "speakerDim"),
     ("duration", "caption_vec", 1, "captionDim"),
@@ -667,7 +710,7 @@ def irodori_pipeline_config(
 def assert_irodori_graphs(
     placements: Mapping[str, Path], pipeline_config: Mapping[str, Any]
 ) -> None:
-    """8 グラフが**読み出せて**、入力の並び・出力本数・静的次元が宣言どおりであることを見る。
+    """9 グラフが**読み出せて**、入力の並び・出力本数・静的次元が宣言どおりであることを見る。
 
     MUST: ずれても shape は合ったままロードも実行も通る組み合わせがある（`caption_proj` の
     出力本数・条件 state の宣言長・`speaker` の patch 幅）ので、配布形を並べる前にここで落とす。
@@ -676,7 +719,7 @@ def assert_irodori_graphs(
 
     MUST: **格納 dtype の系列を 1 本残らず**掛ける。f16 系列は f32 とは別プロセスの emit なので、
     片方だけ検査すると「f32 は宣言どおりだが f16 だけ別の版」が素通りする（格納 dtype の一致は
-    {@link assert_storage} が見るが、あちらはグラフ宣言を一切見ない）。i4 系列は `dit` 1 本しか
+    {@link assert_storage} が見るが、あちらはグラフ宣言を一切見ない）。i4 系列は DiT の 2 本しか
     持たない（{@link IRODORI_DTYPE_ROLES}）ので、その系列に**在る役割だけ**を掛ける。
     """
     for dtype, roles in IRODORI_DTYPE_ROLES.items():
@@ -691,9 +734,11 @@ def _assert_irodori_graph_set(
 ) -> None:
     """1 系列ぶんのグラフを検査する（`placements` のキーは dtype 接尾の無いグラフ役割名）。
 
-    その系列に**在る役割だけ**を受ける（i4 系列は `dit` 1 本）。役割を跨ぐ突合（`speaker` の
+    その系列に**在る役割だけ**を受ける（i4 系列は DiT の 2 本）。役割を跨ぐ突合（`speaker` の
     patch 幅）は両方が在るときだけ掛ける — 片方しか無い系列で「掛からなかった」ことは
-    {@link assert_irodori_graphs} の全 dtype ループが他系列で埋める。
+    {@link assert_irodori_graphs} の全 dtype ループが他系列で埋める。DiT の 2 本は例外で、
+    **対でしか意味を持たない**（`dit` は `dit_context` の出力を入力に取る）ので、どの系列でも
+    揃っていることを要求する（{@link _assert_irodori_dit_boundary}）。
     """
     graphs = {role: ir_graph(path) for role, path in placements.items()}
     for role, (expected_inputs, expected_outputs) in IRODORI_GRAPH_SHAPES.items():
@@ -735,18 +780,94 @@ def _assert_irodori_graph_set(
                 f"{placements['speaker']} の入力 'latent' の軸 2 が {width!r}、pipelineConfig の"
                 f" latentDim × speakerPatchSize は {patched}"
             )
-    # `dit` の `mask` は「latent S + 条件 3 区間」の長さで宣言される（ADR 0046 の派生次元）。
-    # 区間の合計がずれると、マスクの区間割りだけが黙って別の位置を指す。
-    symbols = graphs["dit"].get("symbols")
-    if not isinstance(symbols, list) or len(symbols) != 1:
-        raise DistError(f"{placements['dit']}: 記号次元が 1 本でない（{symbols!r}）")
+    _assert_irodori_dit_boundary(graphs, placements, pipeline_config)
+
+
+def _assert_irodori_dit_boundary(
+    graphs: Mapping[str, Mapping[str, Any]],
+    placements: Mapping[str, Path],
+    pipeline_config: Mapping[str, Any],
+) -> None:
+    """DiT の 2 本（`dit_context` → `dit`）の境界を、2 本の宣言と pipelineConfig で突き合わせる。
+
+    MUST: 境界の本数（= 2 × ブロック数）は**焼かれた `dit_context` の出力から導く**（写しの
+    ブロック数を持たない — ADR 0114）。その上で次を見る:
+
+    - `dit_context` の入力が {@link IRODORI_CONTEXT_INPUTS}、出力が
+      {@link irodori_context_kv_names} の並び（ランタイムは常駐テンソルを名前で束ねる）
+    - `dit` の入力が {@link IRODORI_DIT_HEAD_INPUTS} + 同じ境界名の並び、出力が 1 本
+    - 境界の各 1 本の形が両側で一致し、条件側の長さ（軸 1）が `mask` の条件 3 区間の合計と
+      一致する — ずれると `dit` の K/V の連結が別の長さのまま、マスクだけが区間を指す
+    - `dit` の `mask` の軸 3 が `S+<条件 3 区間の合計>`（ADR 0046 の派生次元）
+    """
+    present = {role for role in ("dit_context", "dit") if role in graphs}
+    if not present:
+        return
+    if present != {"dit_context", "dit"}:
+        missing = sorted({"dit_context", "dit"} - present)
+        raise DistError(
+            f"DiT の対の片側 {missing} が系列に無い — `dit` は `dit_context` の出力を入力に取る"
+            "ので、片方だけでは実行できない（ADR 0114）"
+        )
+    context, dit = graphs["dit_context"], graphs["dit"]
+    context_path, dit_path = placements["dit_context"], placements["dit"]
+    names = tuple(graph_inputs(context, context_path))
+    if names != IRODORI_CONTEXT_INPUTS:
+        raise DistError(
+            f"{context_path} のグラフ入力が {list(names)} で、期待の {list(IRODORI_CONTEXT_INPUTS)}"
+            " と違う"
+        )
+    outputs = context.get("outputs")
+    if not isinstance(outputs, list) or not outputs or len(outputs) % 2:
+        raise DistError(
+            f"{context_path} のグラフ出力 {outputs!r} が K / V の対（2 × ブロック数本）でない"
+        )
+    boundary = irodori_context_kv_names(len(outputs) // 2)
+    if tuple(outputs) != boundary:
+        raise DistError(
+            f"{context_path} のグラフ出力が {outputs[:4]}… で、境界名 {list(boundary[:4])}… の"
+            "並びでない — ランタイムは常駐テンソルを名前で束ねるので、綴りか順序が違えば別の"
+            "ブロックの K / V を読む"
+        )
+    dit_inputs = graph_inputs(dit, dit_path)
+    expected = (*IRODORI_DIT_HEAD_INPUTS, *boundary)
+    if tuple(dit_inputs) != expected:
+        raise DistError(
+            f"{dit_path} のグラフ入力が {list(dit_inputs)[:5]}…（{len(dit_inputs)} 本）で、"
+            f"{context_path} の出力から導いた並び {list(expected[:5])}…（{len(expected)} 本）と違う"
+        )
+    dit_outputs = dit.get("outputs")
+    if not isinstance(dit_outputs, list) or len(dit_outputs) != 1:
+        raise DistError(f"{dit_path} のグラフ出力が 1 本でない（{dit_outputs!r}）")
     total = sum(
         pipeline_config[field_name] for field_name in ("maxTextLen", "speakerRows", "maxCaptionLen")
     )
-    declared_mask = graph_inputs(graphs["dit"], placements["dit"])["mask"][3]
+    values = context.get("values")
+    if not isinstance(values, Mapping):
+        raise DistError(f"{context_path}: IR メタデータに values が無い")
+    for name in boundary:
+        entry = values.get(name)
+        produced = entry.get("shape") if isinstance(entry, Mapping) else None
+        consumed = dit_inputs[name]
+        if produced != consumed:
+            raise DistError(
+                f"境界 '{name}' の形が {context_path} の出力 {produced!r} /"
+                f" {dit_path} の入力 {consumed!r} で食い違う"
+            )
+        if len(consumed) < 2 or consumed[1] != total:
+            raise DistError(
+                f"{dit_path} の入力 '{name}' の軸 1 が {consumed[1:2]!r}、pipelineConfig の"
+                f" 条件 3 区間の合計は {total} — K / V の連結と mask の区間割りが別の長さになる"
+            )
+    # `dit` の `mask` は「latent S + 条件 3 区間」の長さで宣言される（ADR 0046 の派生次元）。
+    # 区間の合計がずれると、マスクの区間割りだけが黙って別の位置を指す。
+    symbols = dit.get("symbols")
+    if not isinstance(symbols, list) or len(symbols) != 1:
+        raise DistError(f"{dit_path}: 記号次元が 1 本でない（{symbols!r}）")
+    declared_mask = dit_inputs["mask"][3]
     if declared_mask != f"{symbols[0]}+{total}":
         raise DistError(
-            f"{placements['dit']} の入力 'mask' の軸 3 が {declared_mask!r}、pipelineConfig の"
+            f"{dit_path} の入力 'mask' の軸 3 が {declared_mask!r}、pipelineConfig の"
             f" 条件 3 区間の合計は {total}（期待 '{symbols[0]}+{total}'）"
         )
 
@@ -762,25 +883,38 @@ def assert_irodori_calib_provenance(sources: IrodoriSources) -> None:
     anima の `assert_calib_provenance` と同じ「別々の台本が持つ同じ事実は組み立て時に必ず
     突き合わせる」規律をここにも敷く。判定そのものは `_shared.calib_provenance` が正本
     （golden 焼き直しの門〈`irodori.pipeline_ref._shippable_calib`〉と同じ 1 実装で決める）。
+
+    i4 系列を持つ役割（DiT の 2 本 — {@link IRODORI_DTYPE_ROLES}）の**全部**を見る。2 本は同じ
+    `TextToLatentRFDiT` を 1 回の GPTQ で丸めた結果を 2 つのラッパで書き分けたもの（ADR 0114）
+    なので、記録は同一でなければならない — 違えば別々の export 実行（別の予算・別の丸め）の
+    系列を 1 つの席に並べている。
     """
-    directory = IRODORI_SERIES_DIRS["dit"]
-    path = sources.series_by_dtype["i4"] / directory / CALIB_PROVENANCE_FILE
-    if not path.is_file():
-        raise DistError(
-            f"i4 系列の校正条件の記録が無い: {path}"
-            "（`python -m irodori.export --dtype i4` で再エクスポートすると書かれる）"
+    records: dict[str, Any] = {}
+    for role in IRODORI_DTYPE_ROLES["i4"]:
+        path = sources.series_by_dtype["i4"] / IRODORI_SERIES_DIRS[role] / CALIB_PROVENANCE_FILE
+        if not path.is_file():
+            raise DistError(
+                f"i4 系列の校正条件の記録が無い: {path}"
+                "（`python -m irodori.export --dtype i4` で再エクスポートすると書かれる）"
+            )
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as cause:
+            raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
+        complaint = calib_complaint(
+            record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
         )
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError as cause:
-        raise DistError(f"校正条件の記録を解析できない: {path} — {cause}") from cause
-    complaint = calib_complaint(
-        record, method=CALIB_SHIPPABLE_METHOD, at_least=irodori_calib_floor()
-    )
-    if complaint is not None:
+        if complaint is not None:
+            raise DistError(
+                f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
+                " — `--no-calib` / smoke 予算の生成物は配布に使わない"
+            )
+        records[role] = record
+    if len({json.dumps(record, sort_keys=True) for record in records.values()}) > 1:
         raise DistError(
-            f"i4 系列の校正条件が配布の条件を満たしていない: {path} は{complaint}"
-            " — `--no-calib` / smoke 予算の生成物は配布に使わない"
+            f"i4 系列の校正条件の記録が役割ごとに違う（{records}）— DiT の 2 本は 1 回の export で"
+            " 書き分けたものでなければならない（`python -m irodori.export --dtype i4` で両方を"
+            "書き直す）"
         )
 
 
@@ -890,8 +1024,9 @@ The following changes were made:
   waveform output layers on the decoding path.
 - Constant sub-expressions of the graphs, such as rotary position tables and the reciprocals in
   the codec's Snake activations, were precomputed and stored as constants.
-- **The weights were quantized**: every graph is also stored as `f16` and `i8`, and `dit` adds an
-  `i4` series rounded with GPTQ calibration. The `f32` series is not quantized.
+- **The weights were quantized**: every graph is also stored as `f16` and `i8`, and the DiT's two
+  graphs (`dit` and `dit_context`) add an `i4` series rounded with GPTQ calibration. The `f32`
+  series is not quantized.
 
 No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """

@@ -1,7 +1,7 @@
 r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop latent golden）。
 
 `irodori/export.py` がグラフを、`irodori/tokenizer_ref.py` がテキスト前処理の資産を出すのに対し、
-こちらが出すのは「グラフを 6 本回して latent を作るまで」の**最終値**。W3 のホスト実装
+こちらが出すのは「グラフを 7 本回して latent を作るまで」の**最終値**。W3 のホスト実装
 （TS のパイプライン）が突き合わせる統合門の参照値そのもので、値は
 **export したグラフ基準**（= `irodori/export.py` の Graph ラッパ = eager 同値実装）で採る。
 
@@ -17,9 +17,9 @@ r"""Irodori-TTS v4 の**ホスト側アルゴリズム**の数の正（full-loop
 重み**で計算される（ADR 0018 / 0019 / 0027 / 0050 — 系列ごとに golden を焼き直す形）。
 
 `--dtype i4`（配布の quant 席 `i8+dit4`）だけは丸めが 2 段になる: 段 1 は全役割を **i8 席と同一の
-fake-quant**、段 2 は **`--dtype i4` で export 済みの `dit` コンテナを読み戻して**ラッパ所有
-パラメタを上書きする（{@link restore_dit_from_i4_series}）。したがってこの系列は
-**export を先に走らせてある**ことが前提。
+fake-quant**、段 2 は **`--dtype i4` で export 済みの DiT の 2 コンテナ（`dit` / `dit-context`）を
+読み戻して**ラッパ所有パラメタを上書きする（{@link restore_dit_from_i4_series}）。したがってこの
+系列は**export を先に走らせてある**ことが前提。
 
 出力（既定 `outputs/series/irodori-v4-small{,-f16,-i8,-i4}/pipeline/`・`.gitignore` 配下）:
 
@@ -37,7 +37,8 @@ fake-quant**、段 2 は **`--dtype i4` で export 済みの `dit` コンテナ�
 4. `duration` の 5 入力を組む（`speaker_vec` = 平均トークン / `caption_vec` =
    **`caption-proj` の第 2 出力**の masked mean）
 5. S 決定: `expm1(log_frames)` → 銀行家丸め → `[min_frames, max_frames]` へ clamp
-6. 条件 state を Tmax へ右 pad ・区間マスクを組む（ADR 0047）
+6. 条件 state を Tmax へ右 pad ・区間マスクを組む（ADR 0047）→ `dit-context` を**1 回だけ**回して
+   条件側 K/V を作る（ADR 0114 — 以降の全 forward がこの値を共有する）
 7. Euler 40 step + CFG independent（`t ∈ [0.5, 1.0]` の step だけ・uncond は
    **該当区間のマスクを全 False にするだけ** — ADR 0047 決定 1）
 
@@ -53,8 +54,9 @@ emit の前に全て実測し、1 つでも外れたら**何も書かない**（
 
 - **S の決定が上流と一致**すること（上流 `predict_duration_log_frames` から独立に S を出す）
 - **最終 z が上流の `sample_euler_rf_cfg` と一致**すること（2 段判定）。
-  グラフ経路は「条件 KV を毎 forward 再計算・列を詰めて backbone を呼ぶ・uncond をマスク還元」
-  の 3 点で上流と実装が違うので**ビット一致はしない**。1 段目は固定閾値
+  グラフ経路は「条件 KV を cond の state から 1 組だけ作る（上流は変種ごとのキャッシュを batch で
+  作る）・列を詰めて backbone を呼ぶ・uncond をマスク還元」の 3 点で上流と実装が違うので
+  **ビット一致はしない**。1 段目は固定閾値
   {@link EULER_REFERENCE_ATOL}。誤差の蓄積・増幅のされ方はモデル × 入力 × 丸めで桁ごと
   動く（v4.1 f16 で実測 37,107 倍 — 定数コメントの追記 2026-09-01）ので、超過時は増幅率を
   実測し {@link euler_reference_within_sensitivity} で正規化判定する。それでも落ちたら
@@ -66,6 +68,7 @@ emit の前に全て実測し、1 つでも外れたら**何も書かない**（
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -113,8 +116,9 @@ MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
 #:
 #: 実測（下の常設門が毎回出す・40 step）は **full = 1.03e-4 / no-ref = 1.80e-5** で、z の
 #: 値域は \|z\| 上端 5.10 / 4.33。閾値 1e-3 は実測最悪の約 9.7 倍で、値域の 1/5000。
-#: 差の出どころは 3 つとも**構造的**: ①グラフ経路は条件 KV を毎 forward 再計算する
-#: （上流はキャッシュ）②backbone を詰めた列で呼ぶ（上流は 256 へ pad —
+#: 差の出どころは 3 つとも**構造的**: ①グラフ経路は条件 KV を cond の state から 1 組だけ
+#: 作る（上流は変種ごとのキャッシュを cond / uncond の batch で作る）②backbone を詰めた列で呼ぶ
+#: （上流は 256 へ pad —
 #: `_static_scheme_evidence` が 1e-5 台と実測）③uncond をマスク還元で表す（上流は
 #: state 0 + マスク 0）。いずれも数学的には恒等で、残るのは f32 の縮約順序差だけ。
 #: 40 step の Euler がそれを増幅した結果がこの桁で（1 step では 1.4e-5 / 4.5e-6 と実測）、
@@ -308,13 +312,15 @@ def _packed_caption_ids(tokenizer: Any, caption: str, bos_id: int, max_length: i
 
 
 class HostGraphs(NamedTuple):
-    """ホストが回す 5 本のグラフ（`irodori/export.py` の eager 同値ラッパそのもの）。"""
+    """ホストが回す 7 本のグラフ（`irodori/export.py` の eager 同値ラッパそのもの）。"""
 
     backbone: nn.Module
     text_proj: nn.Module
     caption_proj: nn.Module
     speaker: nn.Module
     duration: nn.Module
+    #: 条件側 K/V 射影（生成 1 回 — ADR 0114）。出力は `dit` の 4 本目以降の入力そのもの。
+    dit_context: nn.Module
     dit: nn.Module
 
 
@@ -335,7 +341,7 @@ def _euler(
     graphs: HostGraphs,
     source: ex.IrodoriSource,
     noise: torch.Tensor,
-    states: Sequence[torch.Tensor],
+    context: Sequence[torch.Tensor],
     used: Mapping[str, int],
     caps: Mapping[str, int],
     enabled: Sequence[str],
@@ -347,6 +353,10 @@ def _euler(
     上流 `rf.sample_euler_rf_cfg` の写しは 3 点だけ（残りは全て上流の関数を呼ぶ）:
     `v = v_cond + Σ scale_k (v_cond - v_k)` / `x += v (t_next - t)` /
     CFG を掛ける区間 `cfg_min_t ≤ t ≤ cfg_max_t`。突合は {@link EULER_REFERENCE_ATOL}。
+
+    `context` は `dit-context` の出力（条件側 K/V・{@link run_case} が 1 回だけ作る）で、cond も
+    uncond も同じ値を使う（uncond はマスクだけで表す — ADR 0047 決定 1）。forward 数は `dit` の
+    回数で、`dit-context` の 1 回は数えない（TS 側の数え方と同じ）。
     """
     x_t = noise
     masks = {
@@ -357,12 +367,12 @@ def _euler(
         t, t_next = schedule[index], schedule[index + 1]
         with torch.no_grad():
             t_embed = source.timestep_embedding(t.reshape(1), embed_dim).to(x_t.dtype)
-            v_cond = graphs.dit(x_t, t_embed, masks[None], *states)
+            v_cond = graphs.dit(x_t, t_embed, masks[None], *context)
             forwards += 1
             v = v_cond
             if enabled and CFG_MIN_T <= float(t) <= CFG_MAX_T:
                 for name in enabled:
-                    v_uncond = graphs.dit(x_t, t_embed, masks[name], *states)
+                    v_uncond = graphs.dit(x_t, t_embed, masks[name], *context)
                     forwards += 1
                     v = v + CFG_SCALES[name] * (v_cond - v_uncond)
             x_t = x_t + v * (t_next - t)
@@ -482,6 +492,10 @@ def run_case(
         ex._right_pad(speaker_state, caps["speaker"], f"{case.name} の speaker 条件"),
         ex._right_pad(caption_state, caps["caption"], f"{case.name} の caption 条件"),
     )
+    # 条件側 K/V は生成 1 回だけ作り、下の Euler（CFG あり / なし / 感度の摂動走行）が全て共有する
+    # — TS 側が常駐テンソルで渡す値と同じ位置で同じ回数だけ作る（ADR 0114）。
+    with torch.no_grad():
+        context = graphs.dit_context(*states)
 
     # ---- ⑦ Euler + CFG ----
     # 有効な CFG は上流 `resolve_cfg_scales` / `sample_euler_rf_cfg` の条件どおり:
@@ -498,10 +512,10 @@ def run_case(
         generator=torch.Generator(device="cpu").manual_seed(case.seed),
     )
     latent, forwards = _euler(
-        graphs, source, noise, states, used, caps, enabled, embed_dim, schedule
+        graphs, source, noise, context, used, caps, enabled, embed_dim, schedule
     )
     cond_only, _forwards = _euler(
-        graphs, source, noise, states, used, caps, (), embed_dim, schedule
+        graphs, source, noise, context, used, caps, (), embed_dim, schedule
     )
     cfg_effect = float((latent - cond_only).abs().max())
     if cfg_effect < CFG_EFFECT_MIN:
@@ -515,7 +529,7 @@ def run_case(
             graphs,
             source,
             noise + SENSITIVITY_EPS,
-            states,
+            context,
             used,
             caps,
             enabled,
@@ -728,10 +742,11 @@ def t_embed_table(source: ex.IrodoriSource, schedule: torch.Tensor, dim: int) ->
 #: i4 系列の読み戻しで受け付ける格納の layout → 生バイトを載せる器。
 #:
 #: i4 は packed 4bit（1 バイトに 2 要素 — ADR 0069 決定 2）なので器は uint8 で、論理形へ戻すのは
-#: `karume.emit.unpack_int4`。i8 が並ぶのは **block 外の 5 本**（`in_proj` / `out_proj` /
-#: `cond_module.{0,2,4}`）と **adaLN 144 本**（`attention_adaln` / `mlp_adaln`）の計 149 本
-#: （どちらも聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）。
-#: ここに無い格納（f16 / bf16）が `dit` のコンテナに現れたら、i8+dit4 席の混成が想定と違う形で
+#: `karume.emit.unpack_int4`。i8 が並ぶのは `dit` の容器の **block 外の 5 本**（`in_proj` /
+#: `out_proj` / `cond_module.{0,2,4}`）と **adaLN 144 本**（`attention_adaln` / `mlp_adaln`）の計
+#: 149 本（どちらも聴感裁定 2026-08-23 で i4 から外した。`irodori.export._fake_quant_i4`）で、
+#: `dit-context` の容器は i4（条件側 K/V 射影 72 本）と f32（norm）だけ。
+#: ここに無い格納（f16 / bf16）が DiT の容器に現れたら、i8+dit4 席の混成が想定と違う形で
 #: 出荷されている（{@link restore_dit_from_i4_series} が落とす）。
 _RESTORE_STORAGE: Mapping[str, torch.dtype] = {
     "f32": torch.float32,
@@ -744,7 +759,7 @@ _SCALED_STORAGE = frozenset({"i8", "i4"})
 
 
 class RestoredDit(NamedTuple):
-    """i4 系列から読み戻した `dit` の記録（meta.json の `i4Source` に載る）。"""
+    """i4 系列の容器 1 本から読み戻した記録（meta.json の `i4Source` にターゲットごとに載る）。"""
 
     #: 読んだコンテナ（= 配布へ入るバイトそのもの）。
     container: Path
@@ -752,8 +767,8 @@ class RestoredDit(NamedTuple):
     calib: Mapping[str, Any]
     #: i4 格納だったパラメタの本数（コンテナが正 — 期待値をコードに焼かない）。
     int4: int
-    #: i8 格納だったパラメタの本数（block 外の `in_proj` / `out_proj` / `cond_module` と
-    #: block 内の adaLN — 実重みでは 149 本）。
+    #: i8 格納だったパラメタの本数（`dit` の block 外の `in_proj` / `out_proj` / `cond_module` と
+    #: block 内の adaLN — 実重みでは 149 本。`dit-context` は 0 本）。
     int8: int
     #: f32 格納のまま読み戻したパラメタの本数（bias / norm）。
     plain: int
@@ -842,21 +857,28 @@ def _dequantize_stored(dtype: str, raw: torch.Tensor, scale: torch.Tensor) -> to
     return raw.to(torch.float32) * scale
 
 
-def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> RestoredDit:
-    """i4 系列の**出荷バイト**で、`dit` のラッパ所有パラメタを丸ごと上書きする（丸めの段 2）。
+def restore_dit_from_i4_series(
+    wrappers: Mapping[str, nn.Module], series_root: Path
+) -> dict[str, RestoredDit]:
+    """i4 系列の**出荷バイト**で、DiT の配布ラッパの所有パラメタを丸ごと上書きする（丸めの段 2）。
 
     段 1（{@link emit}）は全役割を **i8 席と同一の fake-quant** で丸める — quant 席 `i8+dit4` は
     他 7 役に i8 席の i8 バイトを共有させる混成席（`irodori.distribution.IRODORI_QUANT_SEATS`）
-    なので、条件エンコーダ側の丸めは i8 golden と同一が正しい。ここはその上に `dit` だけを
+    なので、条件エンコーダ側の丸めは i8 golden と同一が正しい。ここはその上に DiT だけを
     重ねる段で、**校正をもう 1 度走らせない**: GPTQ の丸め先は捕捉した活性に依るので「2 回の
     校正が同じ丸めを出す」ことはどこも保証していない。golden が見た重みは配布バイトそのもの、
     を機械で言い切れる唯一の形が「エクスポート済みの系列を読み戻す」。
 
-    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（i8 格納の 149 本も、f32
+    `wrappers` はターゲット名 → ラッパ（`irodori.export.DitWrappers.by_target` — `dit` と
+    `dit-context`）で、容器は `series_root/<ターゲット>/model.krm`。ラッパの所有パラメタは
+    `TextToLatentRFDiT` の Parameter そのもの（張り替えずに同じ属性名で抱える）なので、ラッパ
+    経由の上書きが DiT 本体にも通る。2 本の所有は `k_norm` だけが重なる（ADR 0114）。
+
+    上書きは i4 格納だけでなく**ラッパ所有パラメタの全部**（`dit` の i8 格納 149 本も、f32
     格納の bias / norm も、コンテナの値で書く）。元値と一致するはずの側もコンテナから書くことで、
     「golden が見た重み = 配布バイト」に例外席を作らない。
 
-    門（どれも fail loudly・1 つでも外れたら golden を 1 バイトも書かせない）:
+    門（どれも fail loudly・1 つでも外れたら golden を 1 バイトも書かせない）— 容器ごとに:
 
     - **provenance**: 系列が GPTQ 校正付きで丸められたこと（{@link _shippable_calib}）
     - **形**: 上書き対象の FQN がラッパ所有パラメタと過不足なく一致すること（コンテナに在るのに
@@ -868,9 +890,50 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
       いないのに i8 golden を i8+dit4 golden と呼ぶ事故は、数値も形も合うので他のどの門にも
       掛からない）
 
+    2 本の間で:
+
+    - **校正条件の記録が同一**であること — 2 本は 1 回の export で同じ丸めを書き分けたもの。
+      違えば別々の実行の系列が並んでいる
+    - **両方の容器に在るテンソル（共有の `k_norm`）の格納が同一**であること — 後から読んだ側が
+      先の値を黙って上書きする形にしない
+
     NOTE: `karume/4` には「ヘッダの I4 集合 = IR 宣言の i4 集合」という突合があったが、容器では
     格納の正本が束縛表 1 本（宣言と実体が別々に動けない — container-v1 §5）になったので、
     その突合は恒真になった。宣言と payload の噛み合わせは `verify_container` が受ける。
+    """
+    if not wrappers:
+        raise SystemExit("i4 系列の読み戻し先のラッパが 1 本も無い")
+    seen: dict[str, tuple[str, str]] = {}
+    restored = {
+        target: _restore_container(target, wrapper, series_root / target, seen)
+        for target, wrapper in wrappers.items()
+    }
+    calibs = {target: dict(record.calib) for target, record in restored.items()}
+    if len({json.dumps(calib, sort_keys=True) for calib in calibs.values()}) > 1:
+        raise SystemExit(
+            f"i4 系列の校正条件の記録がターゲットごとに違う（{calibs}）— DiT の 2 本は 1 回の"
+            " export で書き分けたものでなければならない（`python -m irodori.export --dtype i4`"
+            " で両方を書き直す）"
+        )
+    return restored
+
+
+def _stored_digest(entry: StoredTensor) -> str:
+    """格納 1 本の同一性の鍵（layout・形・payload・scale の sha256）。"""
+    digest = hashlib.sha256()
+    digest.update(f"{entry.layout}:{list(entry.shape)}:{entry.group_size}".encode())
+    digest.update(entry.payload)
+    digest.update(entry.scale or b"")
+    return digest.hexdigest()
+
+
+def _restore_container(
+    target: str, wrapper: nn.Module, series_dir: Path, seen: dict[str, tuple[str, str]]
+) -> RestoredDit:
+    """容器 1 本ぶんの読み戻し（門の中身は {@link restore_dit_from_i4_series}）。
+
+    `seen` は先に読んだ容器のテンソルキー → `(ターゲット, 格納の鍵)`。同じキーが 2 本目に
+    現れたら格納の同一を見てから上書きする。
     """
     container = series_dir / ex.MODEL_FILE
     if not all(part.is_file() for part in container_parts(container)):
@@ -887,11 +950,20 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
         raise SystemExit(
             f"{container}: 上書き対象がラッパ所有パラメタと一致しない —"
             f" コンテナに無い {absent[:3]} / モジュールに無い {extra[:3]}"
-            "（DitGraph の構成と export した系列のどちらかが動いている）"
+            "（DiT のラッパの構成と export した系列のどちらかが動いている）"
         )
     int4_keys = frozenset(key for key, entry in stored.items() if entry.layout == "i4")
     if not int4_keys:
         raise SystemExit(f"{container}: i4 格納のテンソルが 1 本も無い（i4 系列ではない）")
+    for key, entry in stored.items():
+        digest = _stored_digest(entry)
+        previous = seen.get(key)
+        if previous is not None and previous[1] != digest:
+            raise SystemExit(
+                f"{container}: '{key}' の格納が {previous[0]} の容器と違う — 2 本の容器が別々の"
+                " export 実行から来ている（共有のテンソルは同じバイトのはず）"
+            )
+        seen[key] = (target, digest)
 
     # 1 本ずつ「戻して → 比べて → 書いて → 捨てる」。全部を f32 で持ってから書くと、`dit` の
     # f32 一式（1.4GB 級）と同じ大きさの複製がもう 1 つ同時に生きる（`karume.emit` が格納側で
@@ -928,7 +1000,7 @@ def restore_dit_from_i4_series(wrapper: nn.Module, series_dir: Path) -> Restored
     int8 = sum(1 for entry in stored.values() if entry.layout == "i8")
     plain = len(stored) - len(int4_keys) - int8
     print(
-        f"[fake-quant] {ex.TARGET_DIT}: i4 系列の出荷バイトで上書きした —"
+        f"[fake-quant] {target}: i4 系列の出荷バイトで上書きした —"
         f" i4 {len(int4_keys)} 本（うち段 1 と値が違うもの {changed} 本）/"
         f" i8 {int8} 本 / f32 {plain} 本・校正 {calib}",
         flush=True,
@@ -988,9 +1060,10 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     #
     # MUST（i4 = 配布の quant 席 `i8+dit4`）: 丸めを 2 段に割る。段 1 はここで **i8 席と同一の
     # fake-quant**（i8+dit4 席は他 7 役に i8 席の i8 バイトを共有させるので、条件エンコーダ側の
-    # 丸めは i8 golden と同一が正しい）、段 2 は {@link restore_dit_from_i4_series} が `dit` の
-    # ラッパ所有パラメタだけを出荷バイトで上書きする。`irodori.export.fake_quant` の i4 経路を呼んで
-    # 校正をここでもう 1 度走らせない理由は段 2 の docstring。
+    # 丸めは i8 golden と同一が正しい）、段 2 は {@link restore_dit_from_i4_series} が DiT の 2 本
+    # （`dit` / `dit-context`）のラッパ所有パラメタだけを出荷バイトで上書きする。
+    # `irodori.export.fake_quant` の i4 経路を呼んで校正をここでもう 1 度走らせない理由は段 2 の
+    # docstring。
     quantized = ex.fake_quant(
         "i8" if dtype == "i4" else dtype,
         {
@@ -1007,10 +1080,10 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     )
     restored = (
         restore_dit_from_i4_series(
-            # ラッパ所有パラメタは `dit` の Parameter そのもの（`DitGraph` は張り替えずに
+            # ラッパ所有パラメタは `dit` の Parameter そのもの（DiT のラッパは張り替えずに
             # 同じ属性名で抱える）なので、ラッパ経由の上書きが `dit` 側にも通る。
-            ex.DitGraph(dit, ex.dit_sym_max(config)),
-            ex.default_out_root(model_dir, dtype) / ex.TARGET_DIT,
+            ex.dit_wrappers(dit, ex.dit_sym_max(config)).by_target(),
+            ex.default_out_root(model_dir, dtype),
         )
         if dtype == "i4"
         else None
@@ -1021,13 +1094,15 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     # ここで当てて構わない。
     patch.apply_patches()
     speaker_max = ex.speaker_sym_max(model_config)
+    dit_graphs = ex.dit_wrappers(dit, ex.dit_sym_max(config))
     graphs = HostGraphs(
         backbone=ex.BackboneGraph(backbone),
         text_proj=ex.ProjectorGraph(text_projector),
         caption_proj=ex.CaptionProjectorGraph(caption_projector, caption_norm),
         speaker=ex.SpeakerGraph(speaker_encoder, speaker_norm, speaker_max),
         duration=ex.DurationGraph(duration_predictor, text_norm),
-        dit=ex.DitGraph(dit, ex.dit_sym_max(config)),
+        dit_context=dit_graphs.context,
+        dit=dit_graphs.dit,
     )
     caps = {
         "text": int(model_config["max_text_len"]),
@@ -1171,14 +1246,18 @@ def emit(model_dir: Path, source_dir: Path, out_dir: Path, dtype: str = "f32") -
     }
     if restored is not None:
         # MUST: 既存キーを 1 つも動かさない（deno 側の latent 門が読む）。i4 のときだけ足す
-        # 1 本で、`fakeQuant` が段 1（i8）しか語らないぶんの出所をここが受け持つ。
+        # 1 本で、`fakeQuant` が段 1（i8）しか語らないぶんの出所をここが受け持つ。中身は
+        # ターゲット（DiT の 2 本）ごとの記録で、読み手は人間だけ（機械の突合は読み戻しの門）。
         meta_payload["i4Source"] = {
-            "container": str(restored.container),
-            "calib": restored.calib,
-            "int4Tensors": restored.int4,
-            "int8Tensors": restored.int8,
-            "f32Tensors": restored.plain,
-            "changedByRestore": restored.changed,
+            target: {
+                "container": str(record.container),
+                "calib": record.calib,
+                "int4Tensors": record.int4,
+                "int8Tensors": record.int8,
+                "f32Tensors": record.plain,
+                "changedByRestore": record.changed,
+            }
+            for target, record in restored.items()
         }
     (out_dir / META_FILE).write_text(
         json.dumps(meta_payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
@@ -1207,7 +1286,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         default="f32",
         help="重みの格納 dtype（f16 / i8 は golden を fake-quant 後の重みで焼き直す"
         " — ADR 0018 / 0019 / 0027 / 0050。i4 は i8 席と同じ丸めの上に、export 済みの"
-        " i4 系列（--model-dir から導く）の出荷バイトで dit を上書きする — ADR 0069）",
+        " i4 系列（--model-dir から導く）の出荷バイトで DiT の 2 本（dit / dit-context）を"
+        "上書きする — ADR 0069 / 0114）",
     )
     args = parser.parse_args(argv)
     out_dir = default_out_dir(args.model_dir, args.dtype) if args.out is None else args.out

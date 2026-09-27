@@ -24,7 +24,7 @@ from torch import nn
 from irodori import export as ex
 from irodori import measure_quant as mq
 from irodori import pipeline_ref as ip
-from karume.quantize import QUANT_MODULE_TYPES
+from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
 
 
 class TestMetrics:
@@ -705,15 +705,13 @@ class TestW4Tables:
 # **同値門が実際に落ちること**（検出力）を代役の stage で実測する。
 
 
-def _tiny_context(
-    text: torch.Tensor,
-    speaker: torch.Tensor,
-    caption: torch.Tensor,
-    mask: torch.Tensor,
-    freqs: torch.Tensor,
-) -> torch.Tensor:
-    """付随引数 5 本を全部混ぜた項（1 本でも取り違えたら出力が変わる形にする）。"""
-    pooled = text.mean(dim=1) + speaker.mean(dim=1) + caption.mean(dim=1)
+def _tiny_pooled(text: torch.Tensor, speaker: torch.Tensor, caption: torch.Tensor) -> torch.Tensor:
+    """条件側の射影の代役（`dit-context` が生成 1 回だけ作る値 — 3 本の条件を全部混ぜる）。"""
+    return text.mean(dim=1) + speaker.mean(dim=1) + caption.mean(dim=1)
+
+
+def _tiny_mix(pooled: torch.Tensor, mask: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    """条件側の値にマスクと RoPE 表を混ぜた項（1 本でも取り違えたら出力が変わる形にする）。"""
     return pooled[:, None, :] * float(mask.sum()) + freqs[None, :, :]
 
 
@@ -735,15 +733,36 @@ class TinyBlock(nn.Module):
         self.mlp = nn.Linear(features, features, bias=False)
 
 
+class TinyContextGraph(nn.Module):
+    """`DitContextGraph` の代役 — 条件 state 3 本に norm を掛け、ブロックごとの条件側の値を返す。
+
+    DiT を `dit-context` / `dit` に割った（ADR 0114）形の写し: norm 済みの条件は**生成 1 回**だけ
+    作られ、`dit` はそれを入力で受ける。
+    """
+
+    def __init__(self, features: int = 32, blocks: int = 2) -> None:
+        super().__init__()
+        self.blocks = blocks
+        self.text_norm = nn.LayerNorm(features)
+        self.caption_norm = nn.LayerNorm(features)
+
+    def forward(
+        self, text_state: torch.Tensor, speaker_state: torch.Tensor, caption_state: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        pooled = _tiny_pooled(
+            self.text_norm(text_state), speaker_state, self.caption_norm(caption_state)
+        )
+        return tuple(pooled for _ in range(self.blocks))
+
+
 class TinyGraph(nn.Module):
-    """`DitGraph` の代役 — 引数の並びと「付随引数を block ループの**前**に 1 回作る」形の写し。"""
+    """`DitGraph` の代役 — 引数の並び（`x_t` / `t_embed` / `mask` + 条件側の値）と「付随引数を
+    block ループの**前**に 1 回作る」形の写し。"""
 
     def __init__(self, features: int = 32, blocks: int = 2, sym_max: int = 8) -> None:
         super().__init__()
         self.features = features
         self.cond_module = nn.Linear(features, features, bias=False)
-        self.text_norm = nn.LayerNorm(features)
-        self.caption_norm = nn.LayerNorm(features)
         self.in_proj = nn.Linear(features, features, bias=False)
         self.blocks = nn.ModuleList(TinyBlock(features) for _ in range(blocks))
         self.out_norm = nn.LayerNorm(features)
@@ -755,23 +774,23 @@ class TinyGraph(nn.Module):
         x_t: torch.Tensor,
         t_embed: torch.Tensor,
         mask: torch.Tensor,
-        text_state: torch.Tensor,
-        speaker_state: torch.Tensor,
-        caption_state: torch.Tensor,
+        *context: torch.Tensor,
     ) -> torch.Tensor:
         cond_embed = self.cond_module(t_embed)[:, None, :]
-        text = self.text_norm(text_state)
-        caption = self.caption_norm(caption_state)
         x = self.in_proj(x_t)
         freqs = self.rope_table[: x.shape[1]]
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
             h = block.attention_adaln(x, cond_embed)
-            x = x + block.mlp(h) + _tiny_context(text, speaker_state, caption, mask, freqs)
+            x = x + block.mlp(h) + _tiny_mix(context[index], mask, freqs)
         return self.out_proj(self.out_norm(x))
 
 
 class TinyStage(nn.Module):
-    """`TinyGraph` の block 1 枚ぶん（{@link mq.DitBlockStage} と同じ子の名付け方）。"""
+    """`TinyGraph` の block 1 枚ぶん（{@link mq.DitBlockStage} と同じ子の名付け方）。
+
+    条件側の値は block の**中で**作り直す（{@link mq.DitBlockStage} が条件側の射影を block の中で
+    呼ぶのと同じ形 — 校正がその重みの入力を見るため）。
+    """
 
     def __init__(self, index: int, block: nn.Module) -> None:
         super().__init__()
@@ -790,7 +809,7 @@ class TinyStage(nn.Module):
     ) -> torch.Tensor:
         block = getattr(self, self.child)
         h = block.attention_adaln(x, cond_embed)
-        return x + block.mlp(h) + _tiny_context(text, speaker, caption, mask, freqs)
+        return x + block.mlp(h) + _tiny_mix(_tiny_pooled(text, speaker, caption), mask, freqs)
 
 
 class BrokenStage(TinyStage):
@@ -807,8 +826,14 @@ def tiny_stages(graph: TinyGraph, stage_cls: type[TinyStage] = TinyStage) -> tup
     )
 
 
-def tiny_reference(graph: TinyGraph, steps: int, forwards_per_step: int) -> list[int]:
-    """`pipeline_ref._euler` と同じ形の参照ループ（**同じ `x_t`** を step 内で使い回す）。"""
+def tiny_reference(
+    context_graph: TinyContextGraph, graph: TinyGraph, steps: int, forwards_per_step: int
+) -> list[int]:
+    """`pipeline_ref.run_case` / `_euler` と同じ形の参照ループ。
+
+    条件側の値は**生成 1 回**だけ `dit-context` で作り（ADR 0114）、step 内の forward は
+    **同じ `x_t`** を使い回す。
+    """
     torch.manual_seed(7)
     seen: list[int] = []
     x_t = torch.randn(1, 4, graph.features)
@@ -818,13 +843,18 @@ def tiny_reference(graph: TinyGraph, steps: int, forwards_per_step: int) -> list
     speaker = torch.randn(1, 3, graph.features)
     caption = torch.randn(1, 2, graph.features)
     with torch.no_grad():
+        context = context_graph(text, speaker, caption)
         for _step in range(steps):
             out = x_t
             for _forward in range(forwards_per_step):
-                out = graph(x_t, t_embed, mask, text, speaker, caption)
+                out = graph(x_t, t_embed, mask, *context)
                 seen.append(1)
             x_t = x_t + out
     return seen
+
+
+def tiny_pair() -> tuple[TinyContextGraph, TinyGraph]:
+    return TinyContextGraph(), TinyGraph()
 
 
 class TestCalibConfigTable:
@@ -896,19 +926,20 @@ class TestCalibTargets:
 class TestCatcher:
     def test_it_takes_one_batch_per_step_not_per_forward(self):
         """CFG の uncond forward は**同じ `x_t`** を受ける — step を数えるのはその同一性。"""
-        graph = TinyGraph()
+        context, graph = tiny_pair()
 
         batches, _probe = mq.capture_case_batches(
-            graph, lambda: tiny_reference(graph, 3, 4), limit=40
+            context, graph, lambda: tiny_reference(context, graph, 3, 4), limit=40
         )
 
         assert len(batches) == 3
 
     def test_the_keyword_arguments_carry_the_whole_side_input(self):
-        graph = TinyGraph()
+        """条件（norm 済み）は `dit-context` から、マスクと RoPE 表は `dit` の forward から採る。"""
+        context, graph = tiny_pair()
 
         batches, _probe = mq.capture_case_batches(
-            graph, lambda: tiny_reference(graph, 1, 1), limit=40
+            context, graph, lambda: tiny_reference(context, graph, 1, 1), limit=40
         )
 
         (hidden,), kwargs = batches[0]
@@ -917,45 +948,67 @@ class TestCatcher:
 
     def test_the_limit_cuts_the_reference_loop_short(self):
         """捕まえ切ったら畳む — `run_case` は CFG 有りの後にもう 1 周回すので混ざらせない。"""
-        graph = TinyGraph()
+        context, graph = tiny_pair()
         seen: list[int] = []
 
         batches, _probe = mq.capture_case_batches(
-            graph, lambda: seen.extend(tiny_reference(graph, 10, 2)), limit=2
+            context, graph, lambda: seen.extend(tiny_reference(context, graph, 10, 2)), limit=2
         )
 
         assert len(batches) == 2
         assert len(seen) == 0  # 番兵で抜けるので参照ループは最後まで走らない
 
     def test_the_hooks_are_removed_even_though_the_loop_was_aborted(self):
-        graph = TinyGraph()
+        context, graph = tiny_pair()
 
-        mq.capture_case_batches(graph, lambda: tiny_reference(graph, 5, 1), limit=1)
+        mq.capture_case_batches(
+            context, graph, lambda: tiny_reference(context, graph, 5, 1), limit=1
+        )
 
+        assert not context._forward_pre_hooks
+        assert not context.text_norm._forward_hooks
+        assert not context.caption_norm._forward_hooks
         assert not graph._forward_pre_hooks
-        assert not graph.text_norm._forward_hooks
-        assert not graph.caption_norm._forward_hooks
         assert not graph.blocks[0].attention_adaln._forward_pre_hooks
 
     def test_a_loop_that_never_reaches_the_graph_is_fail_loudly(self):
+        context, graph = tiny_pair()
+
         with pytest.raises(SystemExit, match="1 step も"):
-            mq.capture_case_batches(TinyGraph(), lambda: None, limit=4)
+            mq.capture_case_batches(context, graph, lambda: None, limit=4)
+
+    def test_a_dit_forward_before_the_context_graph_is_fail_loudly(self):
+        """条件（norm 済み）を捕まえる前に `dit` が回る形 — 前のケースの条件を黙って流用しない。"""
+        context, graph = tiny_pair()
+        x_t = torch.randn(1, 4, graph.features)
+
+        def dit_only() -> None:
+            with torch.no_grad():
+                graph(
+                    x_t,
+                    torch.randn(1, graph.features),
+                    torch.ones((1, 1, 1, 6), dtype=torch.bool),
+                    *(torch.randn(1, graph.features) for _ in graph.blocks),
+                )
+
+        with pytest.raises(SystemExit, match="dit-context より先に"):
+            mq.capture_case_batches(context, graph, dit_only, limit=4)
 
 
 class TestStageSplitGate:
     def test_a_faithful_split_reproduces_the_graph_bit_for_bit(self):
-        graph = TinyGraph()
+        context, graph = tiny_pair()
         batches, probe = mq.capture_case_batches(
-            graph, lambda: tiny_reference(graph, 1, 1), limit=1
+            context, graph, lambda: tiny_reference(context, graph, 1, 1), limit=1
         )
 
         mq.assert_stage_split_matches_graph(graph, probe, batches[0], tiny_stages(graph))
 
     def test_a_split_that_drops_a_side_input_is_fail_loudly(self):
         """MUST: 写しがずれたら落とす — ずれた経路の GPTQ は数字からは読めない。"""
-        graph = TinyGraph()
+        context, graph = tiny_pair()
         batches, probe = mq.capture_case_batches(
-            graph, lambda: tiny_reference(graph, 1, 1), limit=1
+            context, graph, lambda: tiny_reference(context, graph, 1, 1), limit=1
         )
 
         with pytest.raises(SystemExit, match="ビット一致しない"):
@@ -964,11 +1017,56 @@ class TestStageSplitGate:
             )
 
 
+class TestDitBlockStageOnTheRealModules:
+    """{@link mq.DitBlockStage} の写しが、上流の実モジュールで組んだ配布ラッパ 2 本とビット一致。
+
+    DiT を割った（ADR 0114）後も校正の stage は block 丸ごとで、条件側の射影を block の**中で**
+    計算し直す — その経路が「`dit-context` の出力を入力で受ける `dit`」と同じ値を出すことを、
+    小さな実物 DiT（`irodori/tests/test_export.py` と同じ組み方）で実測する。
+    """
+
+    def test_the_stage_split_reproduces_the_dit_graph_bit_for_bit(self, restore_forward):
+        from irodori import patch as patch_irodori
+        from irodori.tests.test_export import _tiny_real_dit, _TinySplit
+
+        model = _tiny_real_dit()
+        split = _TinySplit(model)
+        patch_irodori.apply_patches()
+        wrappers = ex.dit_wrappers(model, split.sym_max)
+        args = split.inputs["dit-cond-1s"]
+
+        def run() -> None:
+            with torch.no_grad():
+                context = wrappers.context(
+                    args["text_state"], args["speaker_state"], args["caption_state"]
+                )
+                wrappers.dit(args["x_t"], args["t_embed"], args["mask"], *context)
+
+        batches, probe = mq.capture_case_batches(wrappers.context, wrappers.dit, run, limit=1)
+        stages = mq.dit_stages(wrappers.dit)
+
+        mq.assert_stage_split_matches_graph(wrappers.dit, probe, batches[0], stages)
+        # 校正の stage は block 丸ごと — 条件側の射影も入る（配布では `dit-context` の容器へ載る
+        # 側）。小さな構成は g32 に揃えていないので、走査の門（`calib_targets`）ではなく対象の
+        # 列挙そのもので見る。
+        scanned = {
+            f"{prefix}.{local}"
+            for prefix, stage in stages
+            for local, _weight, _axis in iter_quant_targets(stage, (nn.Linear,))
+        }
+        assert {
+            f"blocks.{index}.attention.{name}.weight"
+            for index in range(len(model.blocks))
+            for name in ex.CONTEXT_KV_PROJECTIONS
+        } <= scanned
+
+
 def _tiny_rig(graph: TinyGraph, steps: int = 2) -> mq.CalibRig:
+    context = TinyContextGraph(graph.features, len(graph.blocks))
     stages = tiny_stages(graph)
     scan, counts = mq.calib_targets(stages)
     batches, _probe = mq.capture_case_batches(
-        graph, lambda: tiny_reference(graph, steps, 1), limit=steps
+        context, graph, lambda: tiny_reference(context, graph, steps, 1), limit=steps
     )
     return mq.CalibRig(
         stages=stages,
