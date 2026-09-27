@@ -26,7 +26,7 @@
   利得は kill 線を超えた — 数値は perf-ledger H-4 と [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。
   OOM 退避 → やり直しが B570 で device lost になった件（H-35）は**調査と修正が済（2026-09-27）** — 原因は staging の OOM が
   device を失わせること・修正は測った空きで先に退避する形（ADR 0112 追記 2026-09-27・[research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md)）。
-  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**その後 = B4 irodori H-30**（着手 2026-09-27）。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・次 = 幾何掃引（道具 `tools/geometry-sweep` 済・M2 の実測待ち）。
+  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**B4 irodori H-30 は済（2026-09-27・ADR [0114](decisions/0114-irodori-dit-context-split.md)）** — 条件側 K/V 射影を別グラフ `dit_context` に割った・ビット同一・採用（数値は perf-ledger H-30）。配布形の反映は release 節。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・次 = 幾何掃引（道具 `tools/geometry-sweep` 済・M2 の実測待ち）。
   **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
   既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
 
@@ -230,6 +230,7 @@ later の「decode 速度の残り」。
   手作業なこと（[release-runbook](release-runbook.md) §0）。設計は未着手。
 - **irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す（起票 2026-09-24）**: 2 リポの 83 ファイルが
   同一 sha256。0.13.0 の再アップロードでは見送り、次の breaking 波で判断する（2026-09-24 ユーザー裁定）。
+  irodori 2 リポの再アップロード（release 節 — `dit_context` の追加）と同じ回に行う。
   上の「越境参照をツール側で扱いやすくする」が前提。
 - **HTTP Range 取得（ADR 0108 段 6）の前倒し候補（起票 2026-09-24・判断はリリース後）**: ADR
   [0109](decisions/0109-manifest-v5-container.md) 決定 7 の前倒し条件は「段 2 の RAM ピーク harness で cold の
@@ -383,6 +384,10 @@ later の「decode 速度の残り」。
   — f32 席は同じ値を倍の VRAM で持つだけ）。Lucida は f32 既定 + f16 任意（f16 は有損失 — α の平均絶対差 最大 7.0e-5）。
   recipe（`dist` の HR を f16 席 1 つで組める形・既定席・pytest・カードの relation）の変更と、HR の f32 系列 2 本 +
   golden / sha 参照行 / `HELD_SERIES` の f32 行の退役は配布反映の回に行う（ADR 0113 追記）。**
+- **irodori 2 リポ（`irodori-v4-small` / `irodori-v4.1-small`）の HF 再アップロード + pin 更新（B4 = ADR [0114](decisions/0114-irodori-dit-context-split.md)）**:
+  配布形に役割 `dit_context` が増えた（breaking — 持たない配布形は新しい models で部品の欠落として落ちる）。later の
+  「irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す」と同じ breaking 波の回に行う。ローカルミラーは
+  v4-small が焼き直し済み・v4.1-small は焼き直し中（2026-09-27）。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。

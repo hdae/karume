@@ -108,6 +108,11 @@ measurements in `docs/research/`.
   and kept (`"transformer"`), the `transformer` stage's start and end no longer bracket a weight load
   or a release. With `"per-stage"` the release of a carried-over DiT happens inside them, and after
   an out-of-memory eviction so do the release and the reload.
+- Irodori generation is faster: the DiT's conditioning keys / values, which do not change across
+  denoising steps, are now computed once per generation instead of in every forward pass. On an
+  Intel Arc B570 with the default `i8-a8` quant, a voice-clone generation took 12.7% less wall time
+  and a 30-second utterance 5.0% less; the waveform is bit-identical and the observed peak of GPU
+  buffer memory is unchanged. This needs a distribution in the new layout (see **Breaking**).
 
 ### Breaking
 
@@ -130,6 +135,16 @@ measurements in `docs/research/`.
   that handles the three previous kinds and narrows the remainder with `else` no longer type-checks;
   add a `residency` branch. The event is only emitted when `residency: "transformer"` is used or a
   resident DiT exists, so default-path event sequences are unchanged at runtime.
+- Irodori distribution layout: the DiT is split into two graphs, and the manifest `weights` gain a
+  `dit_context` component (in all four weight series, f32 / f16 / i8 / i4) that takes the three
+  conditioning states; `dit` now takes the conditioning keys / values it produces instead. The
+  `i8+dit4` quant takes both DiT graphs from the int4 series. This release's `@karume/models` rejects a
+  distribution without `dit_context` as a missing component before any weight bytes are fetched,
+  and older releases cannot run the new layout. The published Irodori repositories and the pinned
+  revisions are updated at the next release.
+- `@karume/models`: `IrodoriRunComponent`, and with it the Irodori `stage` event's stage names, gain
+  `"dit-context"` (run once per generation, before the DiT loop). TypeScript code that switches
+  exhaustively over the previous eight names no longer type-checks.
 
 ## [0.13.0] - 2026-09-25
 
