@@ -32,7 +32,13 @@ import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../src/gpu/submit.ts";
-import { defaultI8a8Geometry, i8a8TileM, i8a8TileN } from "../src/kernels/i8a8-geometry.ts";
+import {
+  defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8GeometryKeyPart,
+  i8a8TileM,
+  i8a8TileN,
+} from "../src/kernels/i8a8-geometry.ts";
 import {
   QUANTIZE_ROWS_KEY,
   QUANTIZE_ROWS_WGSL,
@@ -220,6 +226,7 @@ const runAttentionQkI8a8 = async (
   shape: QkShape,
   prepared: PreparedQk,
   dot: I8a8Dot,
+  geometry: I8a8Geometry = defaultI8a8Geometry("attention_qk"),
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { batch, m, n, d } = shape;
   const scheduler = new SubmitScheduler(gpu);
@@ -262,8 +269,11 @@ const runAttentionQkI8a8 = async (
 
     const v4 = attentionQkI8a8UsesVec4(n);
     const dp4a = dot === "dp4a";
-    const pipelineKey = attentionQkI8a8Key(v4, dp4a);
-    const { pipeline, layout } = await cache.get(pipelineKey, attentionQkI8a8Wgsl(v4, dp4a));
+    const pipelineKey = attentionQkI8a8Key(v4, dp4a, "f32", geometry);
+    const { pipeline, layout } = await cache.get(
+      pipelineKey,
+      attentionQkI8a8Wgsl(v4, dp4a, "f32", geometry),
+    );
     const params = arena.allocHostWritten(16, UNIFORM_IN);
     gpu.device.queue.writeBuffer(params, 0, attentionQkI8a8Params(m, n, d, prepared.scale));
     const scores = arena.allocRegion(Math.max(4, batch * m * n * 4));
@@ -278,9 +288,8 @@ const runAttentionQkI8a8 = async (
         { binding: ATTENTION_QK_K_SCALE_BINDING, resource: { buffer: key.scales } },
       ],
     });
-    // MUST: dispatch の辺は**このカーネルの幾何**から導く（キー・生成物と同じ解決点）。
+    // MUST: dispatch の辺は**このカーネルの幾何**（キー・生成物へ渡したものと同じ）から導く。
     // 定数を渡すと実タイル辺と食い違い、下回った側でタイルが欠落して沈黙誤値になる。
-    const geometry = defaultI8a8Geometry("attention_qk");
     scheduler.dispatch(pipeline, bindGroup, [
       tiledWorkgroups(n, i8a8TileN(geometry), limit, shape.name),
       tiledWorkgroups(m, i8a8TileM(geometry), limit, shape.name),
@@ -343,6 +352,47 @@ Deno.test({
             [...head0].some((value, index) => value !== head1[index]),
             `${shape.name}: head 0 と head 1 の S が同一（base の取り違えが値に出ない）`,
           );
+        }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 充填の値変数が関数スコープの `k4`（K のパック数）を覆い隠していた欠陥（2026-09-27）の検出器。
+    // 1 スレッドが埋める K 側スロット数 = regN · tileK / 4 / wgY が 5 以上の幾何で、5 番目以降の
+    // 列が黙って 0 になっていた。既定幾何（2 スロット）では踏めないので、8 / 16 スロットの幾何で撃つ。
+    const geometries: readonly I8a8Geometry[] = [
+      { regM: 4, regN: 4, wgX: 8, wgY: 4, tileK: 32 },
+      { regM: 8, regN: 8, wgX: 8, wgY: 4, tileK: 32 },
+    ];
+    for (const geometry of geometries) {
+      const slots = geometry.regN * (geometry.tileK / 4) / geometry.wgY;
+      assert(
+        slots >= 5,
+        `${i8a8GeometryKeyPart(geometry, false)}: 充填スロット ${slots} では欠陥を踏まない`,
+      );
+    }
+    const gpu = await acquireGpu();
+    try {
+      for (const geometry of geometries) {
+        for (const dot of ["dp4a", "emu"] as const) {
+          for (const shape of QK_SHAPES) {
+            const prepared = prepareQk(shape);
+            const actual = await runAttentionQkI8a8(gpu, shape, prepared, dot, geometry);
+            assertExact(
+              actual,
+              prepared.expected,
+              `${shape.name} / ${i8a8GeometryKeyPart(geometry, false)} / ${dot}`,
+            );
+            assert(new Set([...actual]).size > 1, `${shape.name}: S が定数`);
+          }
         }
       }
     } finally {

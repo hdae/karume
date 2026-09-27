@@ -118,26 +118,26 @@ fn main(
     }
     sa[sa_at + 32u] = av1;
     let vpack = t * 4u + wp;
-    var v0 = 0u;
+    var bv0 = 0u;
     if (wcol0 < dims.n && vpack < k4) {
-      v0 = vq[vrow_base0 + vpack];
+      bv0 = vq[vrow_base0 + vpack];
     }
-    sb[sb_at] = v0;
-    var v1 = 0u;
+    sb[sb_at] = bv0;
+    var bv1 = 0u;
     if (wcol1 < dims.n && vpack < k4) {
-      v1 = vq[vrow_base1 + vpack];
+      bv1 = vq[vrow_base1 + vpack];
     }
-    sb[sb_at + 32u] = v1;
-    var v2 = 0u;
+    sb[sb_at + 32u] = bv1;
+    var bv2 = 0u;
     if (wcol2 < dims.n && vpack < k4) {
-      v2 = vq[vrow_base2 + vpack];
+      bv2 = vq[vrow_base2 + vpack];
     }
-    sb[sb_at + 64u] = v2;
-    var v3 = 0u;
+    sb[sb_at + 64u] = bv2;
+    var bv3 = 0u;
     if (wcol3 < dims.n && vpack < k4) {
-      v3 = vq[vrow_base3 + vpack];
+      bv3 = vq[vrow_base3 + vpack];
     }
-    sb[sb_at + 96u] = v3;
+    sb[sb_at + 96u] = bv3;
     workgroupBarrier();
     // 共有ロード 16 回（B の 8 語 + A の 8 語）で 64 個の整数内積 = 256 MAC。
     // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）

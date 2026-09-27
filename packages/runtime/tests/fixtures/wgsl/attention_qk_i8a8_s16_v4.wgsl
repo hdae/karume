@@ -111,16 +111,16 @@ fn main(
     }
     sa[sa_at + 96u] = av3;
     let kpack = t * 4u + wp;
-    var k0 = 0u;
+    var bv0 = 0u;
     if (wcol0 < dims.n && kpack < k4) {
-      k0 = kq[krow_base0 + kpack];
+      bv0 = kq[krow_base0 + kpack];
     }
-    sb[sb_at] = k0;
-    var k1 = 0u;
+    sb[sb_at] = bv0;
+    var bv1 = 0u;
     if (wcol1 < dims.n && kpack < k4) {
-      k1 = kq[krow_base1 + kpack];
+      bv1 = kq[krow_base1 + kpack];
     }
-    sb[sb_at + 32u] = k1;
+    sb[sb_at + 32u] = bv1;
     workgroupBarrier();
     // 共有ロード 16 回（B の 8 語 + A の 8 語）で 64 個の整数内積 = 256 MAC。
     // 縮約は i32 の厳密加算なので**順序に依存しない**（f32 骨格と違い加算順は数値契約に無い）

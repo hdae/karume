@@ -230,17 +230,26 @@ const fillA = (geometry: I8a8Geometry, name: string): string => {
 ${slots}`;
 };
 
-/** B タイルの充填（範囲外は 0 埋め — `idot(0, x) == 0` なので K 端数でも厳密）。 */
+/**
+ * B タイルの充填（範囲外は 0 埋め — `idot(0, x) == 0` なので K 端数でも厳密）。
+ *
+ * MUST: スロットの値変数は `bv<番号>` 固定で、呼び手の接頭辞（`value`）から組まない。①QK の接頭辞 `k`
+ * で組むと 5 番目のスロットが `var k4` になり、関数スコープの `let k4`（K のパック数）を覆い隠す —
+ * WGSL ではシャドーイングが合法なのでコンパイルも validation も通り、以降のスロットの範囲判定
+ * `kpack < k4` が常に偽になって S の列が黙って 0 になる（充填スロット 5 以上の 16 幾何で実測）。
+ * 検出器は tests/codegen_i8a8_shadowing_test.ts（宣言名の重なり）と tests/gpu_attention_i8a8_test.ts
+ * （スロット 8 / 16 の幾何で参照と atol=0）。
+ */
 const fillB = (geometry: I8a8Geometry, name: string, baseName: string, value: string): string => {
   const stride = i8a8FillStride(geometry);
   const slots = Array.from(
     { length: i8a8BSlots(geometry) },
     (_, slot) =>
-      `    var ${value}${slot} = 0u;
+      `    var bv${slot} = 0u;
     if (wcol${slot} < dims.n && ${value}pack < k4) {
-      ${value}${slot} = ${name}[${baseName}${slot} + ${value}pack];
+      bv${slot} = ${name}[${baseName}${slot} + ${value}pack];
     }
-    sb[sb_at${at(slot * stride)}] = ${value}${slot};`,
+    sb[sb_at${at(slot * stride)}] = bv${slot};`,
   ).join("\n");
   return `    let ${value}pack = t * ${i8a8KPacks(geometry)}u + wp;
 ${slots}`;
