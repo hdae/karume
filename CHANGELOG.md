@@ -83,6 +83,13 @@ measurements in `docs/research/`.
   `@karume/models` and `@karume/models/anima`.
 - `SessionDiagnostics.geometryProfile`: the id of the tile-geometry profile the session selected
   (`"default"` on adapters without a profile). The name is a diagnostic label outside semver.
+- `acquireGpu({ geometryProfile })`: inject one static tile-geometry profile for the device (ADR
+  0115), for adapters without a built-in profile — typically the table `tools/geometry-sweep`
+  generates from a sweep on that machine. When given, the adapter's vendor and architecture are
+  not consulted, every session on the device and the dp4a canary use the table, and nothing is
+  measured at run time. A malformed table throws `GpuFeatureError` before any device is created.
+  The types `GeometryProfile`, `GemmRowsRule`, `GemmGeometry` and `I8a8Geometry` are exported for
+  it; the built-in tables themselves are not.
 
 ### Changed
 
