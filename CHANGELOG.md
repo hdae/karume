@@ -122,7 +122,9 @@ measurements in `docs/research/`.
   fused attention, conv2d and the i8a8 linear and attention kernels. NVIDIA `blackwell` under
   Chrome gets a profile measured on an RTX 5070 Ti that changes the f32 GEMM tiles for M ≤ 512 and
   the i8a8 linear and attention tiles; its other kernels keep the default. Outputs stay
-  bit-identical across geometries.
+  bit-identical across geometries. On an M2 under Chrome, the 512² DiT stage of Anima's `f16`
+  quant took 45 s instead of 80 s (GPU time 44 s instead of 77 s) and the default quant 71 s
+  instead of 82 s; the PNG bytes are unchanged.
 
 ### Fixed
 

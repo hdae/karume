@@ -275,15 +275,15 @@ export type GeometryProfile = {
 
 ## 検収
 
-| 項目                                                                                         | 結果                                                      |
-| -------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| 既定プロファイルで codegen スナップショットが無変更で緑（WGSL・キーのバイト同一）            | ✅（`codegen_wgsl_test` / `codegen_dispatch_test` 79 本） |
-| `selectGeometryProfile` の選択順（完全一致 → vendor のみ → 既定）と同順位 2 本の fail loudly | ✅（`geometry_profile_test`）                             |
-| 生成器が M2 の掃引 JSON から `apple-metal-3` を作る                                          | ✅（quick + full の合成・Consequences の採用表）          |
-| B570 でのフル verify（既定プロファイルが選ばれ、sha256 参照門が全一致）                      | ✅（2026-09-27・3410 passed / 0 failed / 26 ignored）     |
-| M2（Chrome）で anima の DiT 段の GPU 時間・壁時計（適用前 / 後・f16 quant と既定 quant）     | 未計測                                                    |
-| M2 で適用前後の PNG sha256 が一致（幾何でビットが動かないことの E2E での確認）               | 未計測                                                    |
-| 確認ページ・診断に選ばれたプロファイルの `id` が出る                                         | 未計測（診断欄 `geometryProfile` は実装済み）             |
+| 項目                                                                                         | 結果                                                             |
+| -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| 既定プロファイルで codegen スナップショットが無変更で緑（WGSL・キーのバイト同一）            | ✅（`codegen_wgsl_test` / `codegen_dispatch_test` 79 本）        |
+| `selectGeometryProfile` の選択順（完全一致 → vendor のみ → 既定）と同順位 2 本の fail loudly | ✅（`geometry_profile_test`）                                    |
+| 生成器が M2 の掃引 JSON から `apple-metal-3` を作る                                          | ✅（quick + full の合成・Consequences の採用表）                 |
+| B570 でのフル verify（既定プロファイルが選ばれ、sha256 参照門が全一致）                      | ✅（2026-09-27・3410 passed / 0 failed / 26 ignored）            |
+| M2（Chrome）で anima の DiT 段の GPU 時間・壁時計（適用前 / 後・f16 quant と既定 quant）     | ✅（2026-09-29・512²・f16 quant ×1.78・既定 ×1.15 — 追記決定 4） |
+| M2 で適用前後の PNG sha256 が一致（幾何でビットが動かないことの E2E での確認）               | ✅（f16 `041027e63559`・既定 `0a5695470e4a` とも一致）           |
+| 確認ページ・診断に選ばれたプロファイルの `id` が出る                                         | 未計測（診断欄 `geometryProfile` は実装済み）                    |
 
 ## 追記（2026-09-29）— 掃引ケースの追加と `nvidia-blackwell` の登録（利用者裁定 2026-09-29）
 
@@ -370,3 +370,27 @@ export type GeometryProfile = {
   境界は runtime の既定の表（`GEMM_ROWS_BUCKETS`・ADR 0022）と共有なので、変えるなら既定プロファイルの門と一緒に別 ADR で。
 - M2 でも bmm の M = 64 の 2 ケースは反復の上限 1024 に当たった（追記決定 1 の末尾・再測定比は範囲内）。
 - 検収: 追記分の表の「M2（Chrome）で full を再走し 3 本から再生成」は ✅（2026-09-29）。B570 の per-profile GPU テストは緑。
+
+### 追記決定 4: M2 の DiT 再測で `apple-metal-3` を確定する（2026-09-29・K-71 採用）
+
+- 計測 = 利用者の M2 24 GB（Chrome 153・`apple` / `metal-3`）・確認ページ（`deno task bench:anima-browser`）・512²・seed 42・
+  DiT 常駐（2 回目以降の値）・checkout `cb87ab93`（DiT の幾何は現行と同じ。text_encoder の linear だけ当時の ≤ 64 の規則
+  `reg64x64r4x4w16` で走っており、追記決定 3 で既定へ戻った — text 段 1.9 s のうち linear は 0.13 s で影響は無視できる）。
+  記録 = `outputs/bench-browser/anima-residency-browser-f16-2026-09-29T17-15-47.294Z.json`（比較元は 2026-09-27 の 2 本）。
+
+  | 席（512²）        | 項目             |          2026-09-27（既定幾何） | 2026-09-29（`apple-metal-3`） |            比 |
+  | ----------------- | ---------------- | ------------------------------: | ----------------------------: | ------------: |
+  | `f16`             | DiT 段（壁時計） |                          80.5 s |                        45.1 s |         ×1.78 |
+  | `f16`             | DiT 段（GPU）    |                          77.3 s |                        44.2 s |         ×1.75 |
+  | `f16`             | 内訳 linear      |                          65.4 s |                        37.1 s |         ×1.76 |
+  | `f16`             | 内訳 ①QK / ③PV   |                     3.7 / 2.8 s |                   2.0 / 1.6 s | ×1.85 / ×1.75 |
+  | 既定（i8a8・s16） | DiT 段（壁時計） |                          81.5 s |                        71.1 s |         ×1.15 |
+  | 既定（i8a8・s16） | DiT 段（GPU）    |                          79.5 s |                        69.9 s |         ×1.14 |
+  | 両席              | VAE 段           |                      3.9〜4.4 s |                         2.9 s |          ×1.4 |
+  | 両席              | PNG sha256       | `041027e63559` / `0a5695470e4a` |                          同じ |          一致 |
+
+- kill 線（f16 quant の DiT 段が 1.3 倍未満なら再検討）を超えたので、`apple-metal-3` を採用で確定する（perf-ledger K-71 ✅）。
+  research §9 の見込み（linear ×1.74・attention ×1.5〜1.7 から DiT 段 約 1.5 倍）に対し、実測は ×1.78 で見込みどおり。
+- M2 では **既定 quant（a8）が f16 quant より 1.58 倍遅い**（71.1 s 対 45.1 s）。09-27 の「a8 の利得ゼロ」は、幾何の直った
+  f32 経路が伸びたぶん「a8 が損」に変わった。これは「既定の quant 席を量子化にするか opt-in にするか」の再検討の材料
+  （backlog now・`.claude/reviews/2026-09-29_quant-default-recon/`）で、本 ADR では動かさない。

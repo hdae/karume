@@ -342,6 +342,29 @@ GPU timestamp ns・op 5 族・33 ケース・1599 行・既定の再測定比 0.
 nvidia-blackwell プロファイルの生成（perf-ledger K-67）と i8a8 ①QK の修正は裁定待ち。「Metal で既定 quant の a8 を外す」は
 保留で、既定の quant 席を量子化にするか opt-in にするかの再検討に合流した。
 
+## 11. プロファイル適用後の M2 再測（2026-09-29 追記・時点スナップショット）
+
+利用者の M2（Chrome 153・`apple` / `metal-3`）で確認ページ（`deno task bench:anima-browser`）を 512²・seed 42・DiT 常駐で
+回した（checkout `cb87ab93`・記録 `outputs/bench-browser/anima-residency-browser-f16-2026-09-29T17-15-47.294Z.json`）。
+2 回目以降の値。比較元は §3 / §9 の 2026-09-27 の 2 本。
+
+| 席（512²）        | 項目             | 2026-09-27（既定幾何） | 2026-09-29（`apple-metal-3`） |            比 |
+| ----------------- | ---------------- | ---------------------: | ----------------------------: | ------------: |
+| `f16`             | DiT 段（壁時計） |                 80.5 s |                        45.1 s |         ×1.78 |
+| `f16`             | DiT 段（GPU）    |                 77.3 s |                        44.2 s |         ×1.75 |
+| `f16`             | 内訳 linear      |                 65.4 s |                        37.1 s |         ×1.76 |
+| `f16`             | 内訳 ①QK / ③PV   |            3.7 / 2.8 s |                   2.0 / 1.6 s | ×1.85 / ×1.75 |
+| 既定（i8a8・s16） | DiT 段（壁時計） |                 81.5 s |                        71.1 s |         ×1.15 |
+| 既定（i8a8・s16） | DiT 段（GPU）    |                 79.5 s |                        69.9 s |         ×1.14 |
+| 両席              | VAE 段           |             3.9〜4.4 s |                         2.9 s |          ×1.4 |
+| 両席              | PNG sha256       |                   同じ |                          同じ |          一致 |
+
+- §9 の見込み（linear ×1.74・attention ×1.5〜1.7 → DiT 段 約 1.5 倍）に対し、f16 quant の実測は ×1.78。
+- 既定 quant（a8）は M2 では f16 quant より 1.58 倍遅い（71.1 s 対 45.1 s）。§9 の「a8 の利得ゼロ」は、f32 経路の幾何が直った
+  ぶん「損」に変わった。判断は量子化 opt-in の再検討へ（backlog now）。
+- text_encoder の linear は当時の ≤ 64 の規則 `reg64x64r4x4w16` で走っている（ADR 0115 追記決定 3 で既定へ戻った）。
+  text 段 1.9 s のうち linear は 0.13 s で、DiT 段の比較には影響しない。
+
 ## 参照
 
 - M2 の JSON: `outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-09-27T14-24-06.310Z.json`

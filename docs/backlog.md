@@ -26,7 +26,7 @@
   利得は kill 線を超えた — 数値は perf-ledger H-4 と [research 2026-09-26](research/2026-09-26-anima-residency-bench.md)）。
   OOM 退避 → やり直しが B570 で device lost になった件（H-35）は**調査と修正が済（2026-09-27）** — 原因は staging の OOM が
   device を失わせること・修正は測った空きで先に退避する形（ADR 0112 追記 2026-09-27・[research 2026-09-27](research/2026-09-27-h35-oom-device-lost.md)）。
-  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**B4 irodori H-30 は済（2026-09-27・ADR [0114](decisions/0114-irodori-dit-context-split.md)）** — 条件側 K/V 射影を別グラフ `dit_context` に割った・ビット同一・採用（数値は perf-ledger H-30）。配布形の反映は release 節。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・幾何掃引（M2 の quick + full）から GEMM 幾何を adapter ごとの静的プロファイルで選ぶ実装と `apple-metal-3` の登録まで済（perf-ledger K-71・ADR [0115](decisions/0115-geometry-profiles.md)）・次 = M2 で anima の DiT を再測（利用者の Chrome で）。
+  残り = ブラウザ〈Chrome〉で常駐と退避の挙動を確かめられる確認ページ（`tools/anima-residency/browser/`・作業中）。**B4 irodori H-30 は済（2026-09-27・ADR [0114](decisions/0114-irodori-dit-context-split.md)）** — 条件側 K/V 射影を別グラフ `dit_context` に割った・ビット同一・採用（数値は perf-ledger H-30）。配布形の反映は release 節。**並行**: Apple / Metal での anima の遅さの帰属（perf-ledger K-70・2026-09-27 起票）— M2 の per-op 実測と帰属まで済（大タイルの GEMM 幾何 + i8a8 の Metal 展開・[research 2026-09-27 K-70](research/2026-09-27-k70-metal-per-op.md)）・幾何掃引（M2 の quick + full）から GEMM 幾何を adapter ごとの静的プロファイルで選ぶ実装と `apple-metal-3` の登録まで済（perf-ledger K-71・ADR [0115](decisions/0115-geometry-profiles.md)）・M2 の DiT 再測で確定（2026-09-29・f16 quant ×1.78）。
   **イテレーション 3（メモリ）の E1 段 1 = BiRefNet の f16 系列は recipe / dist / テスト / 4 系列の export まで済（2026-09-26・ADR [0113](decisions/0113-birefnet-weight-series.md)）** — 残りは実 GPU の golden 突合・Lucida f16 の tolerance 導出・実画像の sha 参照行の作成と、段 2（i8 計画 + i8 系列）。
   既存の f32 系列 4 本は上流 revision を持たないため、配布に反映するときは `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える）。
 
@@ -38,7 +38,8 @@
 - **幾何プロファイル（K-71）まわり（起票 2026-09-27・裁定 2026-09-29 = 推奨案で全承認）**: 正本は ADR [0115 追記 2026-09-29](decisions/0115-geometry-profiles.md)。
   ① 掃引ケースの追加は済（linear の M = 16 / 32 / 128 / 256・matmul 3 本〈linear の鏡像 — census に rank-2 matmul は無い〉・bmm 5 本〈census〉。生成器は 3 経路のケースで `gemmRows` を決める）。
   M2 の full 再走（op = linear / matmul / bmm）と `apple-metal-3` の 3 本からの再生成も済（2026-09-29）: `gemmRows` ≤ 64 と 65〜512 は既定へ戻り、> 512 は `reg128x32r8x4w8` ×1.65 で維持（DiT の幾何は不変 — ADR 0115 追記決定 3）。
-  観察 = ≤ 64 の中で最良幾何が M 16 / 32 / 64 で割れる（境界の細分化は別起票候補）。残り = M2 で anima の DiT 再測（利用者・実行中）。
+  観察 = ≤ 64 の中で最良幾何が M 16 / 32 / 64 で割れる（境界の細分化は別起票候補）。M2 の anima 再測も済（2026-09-29・512² の DiT 段 f16 quant ×1.78・既定 ×1.15・PNG sha 一致 → **K-71 採用で確定**・ADR 0115 追記決定 4）。
+  同じ再測で Metal では既定 quant（a8）が f16 より 1.58 倍遅い — 量子化 opt-in の再検討の材料。
   ② `nvidia-blackwell` は生成・登録済（B570 の per-profile GPU テスト緑）。残り = RTX 5070 Ti（Chrome）で anima の登録前後の PNG sha 一致と診断 `geometryProfile` の確認（利用者）。
   ③ **裁定待ち**: 小さい bmm 3 ケース（1 dispatch 15〜40 µs）が反復の上限 1024（`tools/opbench` と共有の `MAX_REPS`）で pass が目標 80 ms に届かず、既定の再測定比が 0.7〜1.55 と揺れる（B570）。
   対処の候補 = 掃引だけ上限を上げる / 生成器が再測定比の範囲外のケースを落とす / 許容して README に明記。
