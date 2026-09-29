@@ -1,6 +1,6 @@
 /**
- * タイル幾何の掃引の計測核（perf-ledger K-70 — Deno の `main.ts` とブラウザの `browser/runner.ts`
- * が共有する。使うのは WebGPU 標準 API と runtime の src だけ）。
+ * タイル幾何の掃引の計測核（perf-ledger K-70 — Deno の `main.ts` とブラウザのページ `tools/gpu-lab` の
+ * 掃引タブが共有する。使うのは WebGPU 標準 API と runtime の src だけ）。
  *
  * 同じ shape・同じ入力のまま**幾何だけ**を変えて 1 dispatch の時間を測る。WGSL とキーは runtime の
  * 生成入口に明示の幾何を渡して作る（`linearWgsl(…, geometry)` 等 — Session の経路は通らない）ので、
@@ -131,16 +131,14 @@ import {
   type SweepCase,
 } from "./cases.ts";
 import {
+  type CandidateSet,
   conv2dCandidate,
-  conv2dCandidates,
+  conv2dCandidatesIn,
   gemmCandidate,
-  gemmCandidates,
+  gemmCandidatesIn,
   type GeometryCandidate,
   i8a8Candidate,
-  i8a8Candidates,
-  quickConv2dCandidates,
-  quickGemmCandidates,
-  quickI8a8Candidates,
+  i8a8CandidatesIn,
 } from "./geometries.ts";
 import {
   type CaseSummary,
@@ -179,8 +177,8 @@ const FILL_CHUNK_BYTES = 16 * 1024 * 1024;
 export type SweepSettings = {
   /** 計測 round の数（既定 {@link ROUNDS}）。 */
   readonly rounds: number;
-  /** `--quick` の小集合で回すか。 */
-  readonly quick: boolean;
+  /** 候補集合（geometries.ts の {@link CandidateSet}）。 */
+  readonly candidateSet: CandidateSet;
   /** timestamp-query が有効なときの単位（Chrome = `ns`・Deno = `deno-raw-tick`）。 */
   readonly timestampUnit: "ns" | "deno-raw-tick";
 };
@@ -639,19 +637,19 @@ export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): Ca
   }
 };
 
-/** op 族ごとの候補（`quick` は小集合）。既定幾何は含まれていなくても {@link sweepCase} が先頭に足す。 */
-export const candidatesFor = (sweepCase: SweepCase, quick: boolean): GeometryCandidate[] => {
+/** op 族ごとの候補（`set` の集合）。既定幾何は含まれていなくても {@link sweepCase} が先頭に足す。 */
+export const candidatesFor = (sweepCase: SweepCase, set: CandidateSet): GeometryCandidate[] => {
   switch (sweepCase.op) {
     case "linear":
     case "matmul":
     case "bmm":
     case "attention":
-      return quick ? quickGemmCandidates() : gemmCandidates();
+      return gemmCandidatesIn(set);
     case "conv2d":
-      return quick ? quickConv2dCandidates() : conv2dCandidates();
+      return conv2dCandidatesIn(set);
     case "i8a8-linear":
     case "i8a8-attention":
-      return quick ? quickI8a8Candidates() : i8a8Candidates();
+      return i8a8CandidatesIn(set);
   }
 };
 
@@ -1353,7 +1351,7 @@ export const runSweep = async (
     const result = await sweepCase(
       context,
       target,
-      candidatesFor(target, settings.quick),
+      candidatesFor(target, settings.candidateSet),
       settings,
       hooks,
     );

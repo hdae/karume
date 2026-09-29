@@ -25,11 +25,11 @@ const withModelRoot = async (
   }
 };
 
-describe("anima residency browser server", () => {
+describe("gpu lab server", () => {
   it("answers only localhost hosts and read-only methods", async () => {
     await withModelRoot(async (_root, handler) => {
       assertEquals((await handler(new Request("http://evil.example/config.json"))).status, 403);
-      assertEquals((await handler(new Request("http://192.168.1.2:8788/"))).status, 403);
+      assertEquals((await handler(new Request("http://192.168.1.2:8790/"))).status, 403);
       const post = await handler(new Request("http://localhost/config.json", { method: "POST" }));
       assertEquals(post.status, 405);
     });
@@ -37,7 +37,7 @@ describe("anima residency browser server", () => {
 
   it("serves config.json with the checkout identity and cross-origin isolation headers", async () => {
     await withModelRoot(async (_root, handler) => {
-      const response = await handler(new Request("http://127.0.0.1:8788/config.json"));
+      const response = await handler(new Request("http://127.0.0.1:8790/config.json"));
       assertEquals(response.status, 200);
       assertEquals(response.headers.get("Cross-Origin-Opener-Policy"), "same-origin");
       assertEquals(response.headers.get("Cross-Origin-Embedder-Policy"), "require-corp");
@@ -46,15 +46,15 @@ describe("anima residency browser server", () => {
     });
   });
 
-  it("serves the page, the bundled runner and model byte ranges inside the source root", async () => {
+  it("serves the page, the bundle and model byte ranges inside the source root", async () => {
     await withModelRoot(async (_root, handler) => {
       const page = await handler(new Request("http://localhost/"));
       assertEquals(page.status, 200);
       assertEquals(page.headers.get("Content-Type"), "text/html; charset=utf-8");
-      assertEquals((await page.text()).includes('src="/runner.js"'), true);
-      const runner = await handler(new Request("http://localhost/runner.js"));
-      assertEquals(runner.headers.get("Content-Type"), "text/javascript");
-      assertEquals(new Uint8Array(await runner.arrayBuffer()), new Uint8Array([1, 2, 3]));
+      assertEquals((await page.text()).includes('src="main.js"'), true);
+      const bundle = await handler(new Request("http://localhost/main.js"));
+      assertEquals(bundle.headers.get("Content-Type"), "text/javascript");
+      assertEquals(new Uint8Array(await bundle.arrayBuffer()), new Uint8Array([1, 2, 3]));
       const range = await handler(
         new Request("http://localhost/models/anima/shared/part.krm", {
           headers: { Range: "bytes=1-3" },
@@ -79,6 +79,38 @@ describe("anima residency browser server", () => {
       const missing = await handler(new Request("http://localhost/models/anima/absent.krm"));
       assertEquals(missing.status, 404);
       await missing.body?.cancel();
+    });
+  });
+
+  it("starts without a distribution: the page and config are served, the model path is 404", async () => {
+    const config: ServerConfig = { ...CONFIG, source: null };
+    const handler = createHandler(undefined, new Uint8Array([1, 2, 3]), config);
+    const page = await handler(new Request("http://localhost/"));
+    assertEquals(page.status, 200);
+    await page.body?.cancel();
+    const served = await handler(new Request("http://localhost/config.json"));
+    assertEquals(served.status, 200);
+    assertEquals(await served.json(), config);
+    const manifest = await handler(new Request("http://localhost/models/anima/karume.json"));
+    assertEquals(manifest.status, 404);
+    await manifest.body?.cancel();
+  });
+
+  it("serves no page source or repository file — only the page, bundle, config and model", async () => {
+    await withModelRoot(async (_root, handler) => {
+      for (
+        const path of [
+          "/index.html",
+          "/browser/index.html",
+          "/browser/main.ts",
+          "/server.ts",
+          "/../../deno.json",
+        ]
+      ) {
+        const response = await handler(new Request(`http://localhost${path}`));
+        assertEquals(response.status, 404, path);
+        await response.body?.cancel();
+      }
     });
   });
 });

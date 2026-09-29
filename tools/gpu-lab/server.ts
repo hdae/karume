@@ -1,14 +1,21 @@
 /**
- * anima の DiT 常駐（ADR 0112）を Chrome（WebGPU）で確かめるページのローカルサーバ。
- *
- * 連続 generate・常駐の on / off・ダミー確保で VRAM を埋めた後の退避（`evicted` / `headroom` と
- * `evicted` / `out-of-memory`）を、Chrome の device で観測する。速度計測の比較ページではない。
+ * GPU lab（掃引 → 幾何プロファイルの生成 → 注入して Anima を実行、を 1 ページで回す PoC —
+ * ADR 0115 追記決定 6）のローカルサーバ。
  *
  * 配信の形は `tools/llm-speed/browser/server.ts` と同じ（localhost 限定・COOP / COEP / CORP・
  * 起動時に `deno bundle --platform browser`・モデルは根の中に閉じて Range 対応で配る）。
- * 区間配信と根の閉じ込めはそちらの実装をそのまま使う（同じ規則を二重に持たない）。
+ * 区間配信と根の閉じ込めはそちらの実装をそのまま使う（同じ規則を二重に持たない）。配るのはページ
+ * （`browser/index.html`）・bundle（`/main.js`）・`/config.json`・Anima の配布形（`/models/anima/…`）だけ。
+ *
+ * 配布形（`karume.json` を持つディレクトリ）が無くても起動する — 掃引とプロファイルのタブはモデルを
+ * 使わない。そのときは `/config.json` の `source` が null、`/models/anima/…` は 404 で、Anima のタブは
+ * 操作を無効にする。
  */
-import { containedPath, fileResponse } from "../../llm-speed/browser/server.ts";
+import { containedPath, fileResponse } from "../llm-speed/browser/server.ts";
+import { readCheckout } from "../shared/checkout.ts";
+
+const DEFAULT_PORT = 8790;
+const DEFAULT_SOURCE = "models/karume-anima";
 
 const headers = (): Headers =>
   new Headers({
@@ -23,31 +30,20 @@ export type ServerConfig = {
   readonly revision: string;
   readonly dirty: boolean;
   readonly bundleSha256: string;
-  /** 配布形ディレクトリの名前（パスは出さない — 手元の構成をページへ漏らさない）。 */
-  readonly source: string;
+  /**
+   * 配布形ディレクトリの名前（パスは出さない — 手元の構成をページへ漏らさない）。配布形が無ければ
+   * null（Anima のタブはこれを見て操作を無効にする）。
+   */
+  readonly source: string | null;
 };
 
-/**
- * 手元の checkout の版と未コミットの変更の有無（ページの `/config.json` と Deno の双子 CLI
- * `../profile.ts` の JSON が同じ取り方で載せる）。
- */
-export const readCheckout = async (): Promise<{ revision: string; dirty: boolean }> => {
-  const git = await new Deno.Command("git", { args: ["rev-parse", "HEAD"] }).output();
-  if (!git.success) throw Error("Cannot identify checkout revision");
-  const status = await new Deno.Command("git", { args: ["status", "--porcelain"] }).output();
-  if (!status.success) throw Error("Cannot inspect checkout changes");
-  return {
-    revision: new TextDecoder().decode(git.stdout).trim(),
-    dirty: status.stdout.length > 0,
-  };
-};
-
+/** `sourceRoot` は配布形の実 path（無ければ undefined — `/models/anima/…` は全て 404）。 */
 export const createHandler = (
-  sourceRoot: string,
+  sourceRoot: string | undefined,
   bundle: Uint8Array<ArrayBuffer>,
   config: ServerConfig,
 ): (req: Request) => Promise<Response> => {
-  const staticRoot = decodeURIComponent(new URL(".", import.meta.url).pathname);
+  const page = decodeURIComponent(new URL("browser/index.html", import.meta.url).pathname);
   return async (req) => {
     const url = new URL(req.url);
     if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
@@ -57,12 +53,12 @@ export const createHandler = (
     try {
       const h = headers();
       if (url.pathname === "/config.json") return Response.json(config, { headers: h });
-      if (url.pathname === "/runner.js") {
+      if (url.pathname === "/main.js") {
         h.set("Content-Type", "text/javascript");
         return new Response(bundle, { headers: h });
       }
-      if (url.pathname === "/") return await fileResponse(req, `${staticRoot}/index.html`);
-      if (url.pathname.startsWith("/models/anima/")) {
+      if (url.pathname === "/") return await fileResponse(req, page);
+      if (url.pathname.startsWith("/models/anima/") && sourceRoot !== undefined) {
         const path = url.pathname.slice("/models/anima/".length);
         return await fileResponse(req, await containedPath(sourceRoot, path));
       }
@@ -80,9 +76,22 @@ export const createHandler = (
   };
 };
 
+/** 配布形の実 path（`karume.json` を持つディレクトリでなければ undefined — 無いこと自体は正常）。 */
+const findDistribution = async (sourceRoot: string): Promise<string | undefined> => {
+  try {
+    const realSource = await Deno.realPath(sourceRoot);
+    return (await Deno.stat(`${realSource}/karume.json`)).isFile ? realSource : undefined;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return undefined;
+    throw error;
+  }
+};
+
 const main = async (): Promise<void> => {
   if (Deno.args.includes("--help")) {
-    console.log("deno task bench:anima-browser [--port 8788] [--source models/karume-anima]");
+    console.log(
+      `deno task bench:gpu-lab [--port ${DEFAULT_PORT}] [--source ${DEFAULT_SOURCE}]`,
+    );
     return;
   }
   const args = new Map<string, string>();
@@ -94,16 +103,18 @@ const main = async (): Promise<void> => {
     ) throw Error(`Invalid option ${key}`);
     args.set(key, value);
   }
-  const port = Number(args.get("--port") ?? 8788);
+  const port = Number(args.get("--port") ?? DEFAULT_PORT);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw Error("Invalid port");
-  const sourceRoot = args.get("--source") ?? "models/karume-anima";
-  const realSource = await Deno.realPath(sourceRoot);
-  if (!(await Deno.stat(`${realSource}/karume.json`)).isFile) {
-    throw Error(`${sourceRoot} has no karume.json`);
+  const sourceRoot = args.get("--source") ?? DEFAULT_SOURCE;
+  const realSource = await findDistribution(sourceRoot);
+  if (realSource === undefined) {
+    console.warn(
+      `${sourceRoot} has no karume.json — serving without the Anima distribution (the Anima tab is disabled; pass --source to enable it)`,
+    );
   }
-  const build = await Deno.makeTempDir({ prefix: "karume-anima-residency-" });
+  const build = await Deno.makeTempDir({ prefix: "karume-gpu-lab-" });
   try {
-    const output = `${build}/runner.js`;
+    const output = `${build}/main.js`;
     const command = new Deno.Command(Deno.execPath(), {
       args: [
         "bundle",
@@ -111,12 +122,12 @@ const main = async (): Promise<void> => {
         "browser",
         "--output",
         output,
-        decodeURIComponent(new URL("runner.ts", import.meta.url).pathname),
+        decodeURIComponent(new URL("browser/main.ts", import.meta.url).pathname),
       ],
       stdout: "inherit",
       stderr: "inherit",
     });
-    if (!(await command.output()).success) throw Error("Browser bundle failed: runner.ts");
+    if (!(await command.output()).success) throw Error("Browser bundle failed: browser/main.ts");
     const bundle = await Deno.readFile(output);
     const config: ServerConfig = {
       ...await readCheckout(),
@@ -124,7 +135,7 @@ const main = async (): Promise<void> => {
         new Uint8Array(await crypto.subtle.digest("SHA-256", bundle)),
         (v) => v.toString(16).padStart(2, "0"),
       ).join(""),
-      source: realSource.slice(realSource.lastIndexOf("/") + 1),
+      source: realSource === undefined ? null : realSource.slice(realSource.lastIndexOf("/") + 1),
     };
     console.log(`Open http://localhost:${port} in Chrome. Ctrl+C stops the server.`);
     const abort = new AbortController();

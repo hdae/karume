@@ -1,13 +1,14 @@
 /**
  * 掃引の記録（`karume-geometry-sweep/2`）の形と、行を既定幾何と突き合わせる純関数。
  *
- * Deno の CLI（`main.ts`）とブラウザのページ（`browser/runner.ts`）が同じ型で JSON を書く —
+ * Deno の CLI（`main.ts`）とブラウザのページ（`tools/gpu-lab` の掃引タブ）が同じ型で JSON を書く —
  * 2 本が別々に組むと、M2 / Chrome と B570 / Deno の JSON を並べる段で形が黙ってずれる。
  */
 import type { GemmGeometry } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
 import { looksQuantized } from "../anima-residency/timing.ts";
 import type { SweepOp } from "./cases.ts";
+import type { CandidateSet } from "./geometries.ts";
 
 /**
  * 記録の形式。/2 = /1 の `nsPerDispatch` を単位中立な `perDispatch` に改名し、ケース単位の
@@ -124,6 +125,9 @@ export type Report = {
   /** i8a8 の整数内積に `dot4I8Packed` を使ったか（WGSL 言語機能の列挙 — 数値は同一）。 */
   readonly dp4a: boolean;
   readonly settings: {
+    /** 候補集合（`quick` / `quick+` / `full`）。この欄より前の JSON は `quick` だけを持つ。 */
+    readonly candidateSet: CandidateSet;
+    /** 互換の欄: `candidateSet === "quick"` のときだけ true（`quick+` は false）。 */
     readonly quick: boolean;
     readonly ops: readonly SweepOp[];
     /** `--case` で絞ったとき（無ければ op の全ケース）。 */

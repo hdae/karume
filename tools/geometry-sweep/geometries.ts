@@ -9,6 +9,9 @@
  * 範囲の上限（`threads ≤ 256`・タイル辺 ≤ 128）は既定幾何（M128N128 / 256 スレッド）を天井に置く
  * もの: WebGPU の既定上限（workgroup 256 invocation・共有 16,384 B）の内側に収まり、f32 骨格の
  * 共有 `64·(tileM + tileN)` B は 128 + 128 でちょうど 16,384 B になる。
+ *
+ * 候補集合は 3 段（{@link CandidateSet}）: `quick`（既定 + 4〜5 形）・`quick+`（quick ∪ 登録済み
+ * プロファイルの採用幾何 — 既定）・`full`（格子全体）。
  */
 import {
   assertGemmGeometry,
@@ -26,6 +29,7 @@ import {
   i8a8GeometryKeyPart,
 } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
 import { CodegenError } from "../../packages/runtime/src/codegen/errors.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../../packages/runtime/src/kernels/geometry-profiles/index.ts";
 
 /** f32 骨格（linear / 融合 attention / conv2d の implicit GEMM）の候補 1 つ。 */
 export type GemmCandidate = {
@@ -184,3 +188,80 @@ export const quickConv2dCandidates = (): GemmCandidate[] =>
   quickGemmCandidates()
     .filter(({ geometry }) => [64, 128].includes(gemmTileN(geometry)))
     .map(({ geometry }) => conv2dCandidate(geometry));
+
+/**
+ * `quick+` の f32 集合 = quick ∪ 登録済みプロファイル（`BUILTIN_GEOMETRY_PROFILES`）の `gemmRows` の
+ * 全規則と `attention.qk` / `pv`。登録済みの表の幾何を毎回測り直すのは、既定と並べて「その表が
+ * この機でも速いか」を quick の時間で読むため（生成器は欄の全ケースで測った幾何しか候補にしない
+ * ので、表の採用幾何が集合に無いと、表を作り直す掃引でその欄が既定へ後退する）。
+ */
+export const quickPlusGemmCandidates = (): GemmCandidate[] =>
+  unique([
+    ...quickGemmCandidates(),
+    ...BUILTIN_GEOMETRY_PROFILES.flatMap((profile) => [
+      ...profile.gemmRows.map((rule) => gemmCandidate(rule.geometry)),
+      gemmCandidate(profile.attention.qk),
+      gemmCandidate(profile.attention.pv),
+    ]),
+  ]);
+
+/**
+ * `quick+` の conv2d 集合 = f32 の quick+ のうち tileN ∈ {64, 128} ∪ 登録済みプロファイルの
+ * `conv2d.rows64` / `rows32`（表の conv2d 幾何は tileN の条件に依らず足す）。
+ */
+export const quickPlusConv2dCandidates = (): GemmCandidate[] =>
+  unique([
+    ...quickPlusGemmCandidates()
+      .filter(({ geometry }) => [64, 128].includes(gemmTileN(geometry)))
+      .map(({ geometry }) => conv2dCandidate(geometry)),
+    ...BUILTIN_GEOMETRY_PROFILES.flatMap((profile) => [
+      conv2dCandidate(profile.conv2d.rows64),
+      conv2dCandidate(profile.conv2d.rows32),
+    ]),
+  ]);
+
+/** `quick+` の i8a8 集合 = quick ∪ 登録済みプロファイルの `i8a8` の 3 欄。 */
+export const quickPlusI8a8Candidates = (): I8a8Candidate[] =>
+  unique([
+    ...quickI8a8Candidates(),
+    ...BUILTIN_GEOMETRY_PROFILES.flatMap((profile) => [
+      i8a8Candidate(profile.i8a8.linear),
+      i8a8Candidate(profile.i8a8.attentionQk),
+      i8a8Candidate(profile.i8a8.attentionPv),
+    ]),
+  ]);
+
+/** 候補集合の語彙（CLI の `--set`・ページの select・JSON の `settings.candidateSet`）。 */
+export const CANDIDATE_SETS = ["quick+", "quick", "full"] as const;
+
+export type CandidateSet = typeof CANDIDATE_SETS[number];
+
+/** 集合を指定しないときの既定（`quick+` — 登録済みの表の幾何まで quick の時間で測る）。 */
+export const DEFAULT_CANDIDATE_SET: CandidateSet = "quick+";
+
+export const isCandidateSet = (value: string): value is CandidateSet =>
+  (CANDIDATE_SETS as readonly string[]).includes(value);
+
+/** f32 骨格（linear / matmul / bmm / 融合 attention）の集合。 */
+export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] =>
+  set === "quick"
+    ? quickGemmCandidates()
+    : set === "quick+"
+    ? quickPlusGemmCandidates()
+    : gemmCandidates();
+
+/** conv2d の implicit GEMM の集合。 */
+export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] =>
+  set === "quick"
+    ? quickConv2dCandidates()
+    : set === "quick+"
+    ? quickPlusConv2dCandidates()
+    : conv2dCandidates();
+
+/** i8a8 族の集合。 */
+export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] =>
+  set === "quick"
+    ? quickI8a8Candidates()
+    : set === "quick+"
+    ? quickPlusI8a8Candidates()
+    : i8a8Candidates();

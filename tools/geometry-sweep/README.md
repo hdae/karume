@@ -17,7 +17,7 @@ output is bit-identical to the one produced by the default geometry.
 With Deno (any machine with WebGPU; run from the repository root):
 
 ```sh
-deno run -A tools/geometry-sweep/main.ts --quick --op linear --op i8a8-linear
+deno run -A tools/geometry-sweep/main.ts --set quick --op linear --op i8a8-linear
 ```
 
 Flags:
@@ -26,9 +26,13 @@ Flags:
   `attention`, `i8a8-attention`, `conv2d`.
 - `--case <id>` (repeatable) — only these cases (ids are listed in `cases.ts` and printed in the
   table).
-- `--quick` — a small candidate set (the defaults plus 4–5 geometries). Without it, the full grid
-  runs (54 f32 geometries, 48 int8 geometries, 21 conv2d geometries per case), which takes a long
-  time; on a slow GPU, prefer `--quick` or narrow the run with `--op` / `--case`.
+- `--set <quick|quick+|full>` — the candidate set (see "What is measured"). `quick` is the
+  defaults plus 4–5 geometries; `quick+` adds every geometry that a registered profile uses;
+  `full` is the whole grid (the f32 set has 54 geometries, the int8 set 48, and the conv2d set 21;
+  each case is measured with every geometry of its family's set), which takes a long time — on a slow GPU, prefer `quick+` or narrow the run with `--op` /
+  `--case`. **The default is `quick+`.** Before `--set` existed, running without a flag swept
+  the full grid; pass `--set full` for that now.
+- `--quick` — the same as `--set quick` (kept for existing commands). Give the set only once.
 - `--rounds N` (default 5) — timed passes per geometry.
 - `--out <file.json>` (default
   `outputs/bench/karume/<date>_geometry-sweep/geometry-sweep-<adapter>-<time>.json`).
@@ -40,10 +44,11 @@ divided by the first measurement); outside 0.9–1.1 it is flagged in red as a h
 case. Failed rows and mismatched outputs are also red. The CLI exits with status 1 when any row
 failed (`error`); a mismatched output does not change the exit status.
 
-With Chrome, see [browser/README.md](browser/README.md):
+With Chrome, use the **掃引** tab of the GPU lab page ([../gpu-lab/README.md](../gpu-lab/README.md)),
+which runs the same measurement core and writes the same JSON:
 
 ```sh
-deno task bench:geometry-browser
+deno task bench:gpu-lab
 ```
 
 ## Generating a geometry profile (`profile`)
@@ -73,7 +78,9 @@ Flags:
   accepted. Wall-clock sweeps (unit `wall`, or no `gpuTiming`) and quantized sweeps are rejected,
   because both shrink the ratios between geometries toward 1. To get timestamps, run the Deno CLI
   on an adapter that lists `timestamp-query` (it then uses it automatically), or check
-  **GPU の timestamp で測る** on the Chrome page with the WebGPU developer features enabled.
+  **GPU の timestamp で測る** in the GPU settings of the GPU lab page with the WebGPU developer
+  features enabled. The page's **プロファイル** tab runs the same rules on sweep results in the
+  browser.
 - `--id <id>` — the profile id (kebab-case). The output file must be named `<id>.ts`, and the
   exported constant is the id in upper snake case (`APPLE_METAL_3`).
 - `--vendor <v>` and optionally `--architecture <a>` — the adapter the profile matches. Without
@@ -160,6 +167,22 @@ as the pipeline keys of each op, without the `v4` marker (`reg128x128r8x8w16` fo
 attention, `tile128x64r8x8w8x16k16` for int8, `igemm64x128:wg16x8` for conv2d). `matmul` and `bmm`
 use the f32 grid and the same default as `linear` (the row bucket of M).
 
+Three candidate sets are drawn from these grids (`--set`, and the **候補** selector of the page):
+
+| set                | f32 (`linear`, `matmul`, `bmm`, `attention`)                                                      | `conv2d`                                                                                                             | int8                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `quick`            | the default plus `64×64/256`, `64×64/128`, `64×32/128`, `32×32/64`                                | the f32 `quick` set restricted to n-tiles of 64 and 128                                                              | both defaults plus the 4 int8 counterparts (`tileK` 16)     |
+| `quick+` (default) | `quick` plus every `gemmRows` rule and `attention.qk` / `attention.pv` of each registered profile | the f32 `quick+` set restricted to n-tiles of 64 and 128, plus `conv2d.rows64` / `rows32` of each registered profile | `quick` plus the 3 `i8a8` fields of each registered profile |
+| `full`             | the whole f32 grid                                                                                | the f32 grid restricted to n-tiles of 64 and 128                                                                     | the whole int8 grid                                         |
+
+The registered profiles are the ones in `BUILTIN_GEOMETRY_PROFILES`
+(`packages/runtime/src/kernels/geometry-profiles/index.ts`). `quick+` adds only a few geometries
+to `quick` (with `apple-metal-3` and `nvidia-blackwell` registered, the `quick+` sets have 8 f32,
+6 conv2d, and 7 int8 geometries, against 5, 3, and 6 in the `quick` sets; each case is measured
+with every geometry of its family's set), so a sweep shows whether a registered table also wins on
+this machine at about the cost of a quick sweep, and a profile regenerated from a `quick+` sweep can
+keep a field that an earlier sweep adopted. A geometry listed twice is measured once.
+
 Inputs are deterministic pseudo-random data; PV cases first run QK and the row statistics once
 with the default geometry to get realistic scores.
 
@@ -186,7 +209,9 @@ the case.
   `quantized` is true when every timed pass is a multiple of 100 µs (Chrome without the WebGPU
   developer features flag).
 - `dp4a` — whether the int8 kernels used `dot4I8Packed` (the numbers are identical either way).
-- `settings` — `quick`, `ops`, `cases`, `rounds`, `targetPassMs`, `maxReps`, `warmupNs`,
+- `settings` — `candidateSet` (`quick`, `quick+`, or `full`; absent in files written before it
+  was added), `quick` (kept for compatibility: true only when `candidateSet` is `quick`), `ops`,
+  `cases`, `rounds`, `targetPassMs`, `maxReps`, `warmupNs`,
   `warmupMinRuns`, and `wallTimingNote` (the wall-clock caveat below, in words).
 - `cases[]`, one per case: `caseId` and `defaultRepeat: { perDispatch, driftRatio }` (the default
   geometry measured again at the end of the case; `driftRatio` = repeat / first, outside 0.9–1.1

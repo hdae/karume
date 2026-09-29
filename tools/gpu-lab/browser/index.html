@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>GPU lab</title>
+    <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.5;
+    }
+    [hidden] {
+      display: none !important;
+    }
+    header {
+      padding: 10px 20px 8px;
+      border-bottom: 1px solid #8886;
+    }
+    .bar {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    h1 {
+      font-size: 1.3rem;
+      margin: 0;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+    }
+    .tabs button[aria-selected="true"] {
+      background: #8883;
+      font-weight: 600;
+    }
+    main {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 10px 20px 14px;
+    }
+    section[data-tab] {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: auto;
+    }
+    .muted {
+      opacity: .75;
+    }
+    p {
+      margin: 0;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: end;
+    }
+    fieldset {
+      border: 1px solid #8886;
+      border-radius: 8px;
+      padding: 4px 12px 8px;
+      margin: 0;
+    }
+    fieldset label {
+      margin-right: 12px;
+      white-space: nowrap;
+    }
+    label.field {
+      display: grid;
+      gap: 2px;
+    }
+    label.wide {
+      flex: 1 1 100%;
+    }
+    input,
+    select,
+    button,
+    textarea {
+      font: inherit;
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid #8886;
+    }
+    input[type="checkbox"] {
+      padding: 0;
+    }
+    input[type="number"] {
+      width: 6em;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: default;
+      opacity: .5;
+    }
+    textarea {
+      box-sizing: border-box;
+    }
+    textarea.code {
+      width: 100%;
+      font-family: ui-monospace, monospace;
+      font-size: .85rem;
+    }
+    .status {
+      padding: 8px 12px;
+      background: #8881;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    /* 結果の表はタブの中の残りの高さで縦にスクロールする（ページ全体を伸ばさない） */
+    .scroll {
+      flex: 1;
+      min-height: 12rem;
+      overflow: auto;
+      border: 1px solid #8884;
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    td,
+    th {
+      text-align: left;
+      vertical-align: top;
+      padding: 5px 10px;
+      border-bottom: 1px solid #8884;
+      white-space: nowrap;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      background: Canvas;
+      z-index: 1;
+    }
+    td.num {
+      text-align: right;
+    }
+    td.wrap {
+      white-space: pre-wrap;
+      min-width: 12em;
+    }
+    tr.case th {
+      padding-top: 14px;
+      border-bottom: 1px solid #8888;
+    }
+    tr.default td {
+      font-weight: 600;
+    }
+    .bad {
+      color: #d33;
+      font-weight: 600;
+    }
+    td.good {
+      font-weight: 600;
+    }
+    td.error {
+      color: #d33;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    details {
+      margin-bottom: 4px;
+    }
+    summary {
+      cursor: pointer;
+    }
+    table.keys {
+      width: auto;
+      margin: 4px 0 8px;
+    }
+    table.keys td,
+    table.keys th {
+      padding: 2px 8px;
+    }
+    .split {
+      flex: 1;
+      min-height: 12rem;
+      display: flex;
+      gap: 12px;
+    }
+    .split > .scroll {
+      min-width: 0;
+    }
+    .image-pane {
+      flex: 0 0 min(30%, 384px);
+      overflow: auto;
+    }
+    .image-pane img {
+      max-width: 100%;
+      border-radius: 8px;
+    }
+    .columns {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+      gap: 16px;
+    }
+    .column {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .column textarea.code {
+      flex: 1;
+      min-height: 12rem;
+      resize: none;
+    }
+    .sources {
+      max-height: 8rem;
+      flex: none;
+      min-height: 0;
+    }
+    </style>
+  </head>
+  <body>
+    <header data-ui="header">
+      <div class="bar">
+        <h1>GPU lab</h1>
+        <nav class="tabs" role="tablist" aria-label="区画">
+          <button role="tab" data-tab-button="sweep" aria-selected="true">1. 掃引</button>
+          <button role="tab" data-tab-button="profile"
+            aria-selected="false">2. プロファイル</button>
+          <button role="tab" data-tab-button="anima" aria-selected="false">3. Anima</button>
+        </nav>
+        <div class="controls">
+          <label
+            class="field">GPU 設定: 幾何プロファイル<select data-ui="profile"></select></label>
+          <label><input data-ui="timestamps" type="checkbox"> GPU の timestamp で測る（timestamp-query）</label>
+          <button data-ui="apply">適用</button>
+          <span data-ui="pending" class="bad"></span>
+        </div>
+      </div>
+      <p data-ui="environment" class="muted"></p>
+      <p data-ui="gpu-status" class="muted" role="status" aria-live="polite">準備中</p>
+    </header>
+    <main>
+      <section data-tab="sweep" role="tabpanel" aria-label="掃引">
+        <p
+          class="muted">同じ shape・同じ入力のまま GEMM のタイル幾何だけを変えて、1 dispatch の時間と出力の一致を測ります（入力は合成データ）。各ケースの先頭行（太字）が本番の既定幾何で、「対既定」はその行に対する速さ（1 より大きい = 既定より速い）です。各幾何を明示して測るので、GPU 設定の幾何プロファイルは結果に効きません（timestamp の設定は効きます）。Chrome は WebGPU Developer Features（chrome://flags/#enable-webgpu-developer-features）を有効にしない限り timestamp を 100 µs 単位に丸めます。</p>
+        <div class="controls">
+          <fieldset data-ui="ops">
+            <legend>op</legend>
+            <label><input type="checkbox" value="linear" checked> linear（f32・重み f16）</label>
+            <label><input type="checkbox" value="matmul" checked> matmul（f32・linear の鏡像）</label>
+            <label><input type="checkbox" value="bmm" checked> bmm（f32）</label>
+            <label><input type="checkbox" value="i8a8-linear" checked> i8a8-linear</label>
+            <label><input type="checkbox" value="attention" checked> attention（f32）</label>
+            <label><input type="checkbox" value="i8a8-attention" checked> i8a8-attention（s16）</label>
+            <label><input type="checkbox" value="conv2d" checked> conv2d（igemm・重み f16）</label>
+          </fieldset>
+          <label
+            class="field">候補<select data-ui="set"><option value="quick+">quick+（quick + 登録済みの表の幾何）</option><option value="quick">quick（既定 + 4〜5 形）</option><option value="full">full（格子全体 — 長い）</option></select></label>
+          <label
+            class="field">rounds<input data-ui="rounds" type="number" value="5" min="1" step="1"></label>
+          <button data-ui="start">開始</button>
+          <button data-ui="stop" disabled>中断</button>
+          <button data-ui="export" disabled>JSON を保存</button>
+          <button data-ui="show-json" disabled>JSON を表示</button>
+          <button data-ui="copy-json" disabled>JSON をコピー</button>
+        </div>
+        <textarea data-ui="json-out" class="code" readonly hidden rows="8" spellcheck="false"
+          aria-label="掃引の JSON"></textarea>
+        <p data-ui="info" class="muted"></p>
+        <p data-ui="status" class="status" role="status" aria-live="polite">準備中</p>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>幾何</th>
+                <th>µs / dispatch</th>
+                <th>対既定</th>
+                <th>TFLOPS</th>
+                <th>reps</th>
+                <th>出力の一致</th>
+                <th>エラー</th>
+              </tr>
+            </thead>
+            <tbody data-ui="rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section data-tab="profile" role="tabpanel" aria-label="プロファイル" hidden>
+        <p
+          class="muted">掃引の記録から幾何プロファイル（adapter 1 種ぶんの静的な幾何の表）を作ります。規則は CLI（tools/geometry-sweep/main.ts profile）と同じ: 欄の全ケースで出力が既定と一致し、既定比が下限以上の幾何のうち幾何平均が最大のもの。GPU の timestamp で測った掃引（量子化なし）だけを受けます。作った表は GPU 設定で注入でき、登録用のコマンドでリポへ焼き込めます。</p>
+        <div class="columns">
+          <div class="column">
+            <div class="controls">
+              <label><input data-ui="use-latest" type="checkbox"> 掃引タブの直近の結果を使う <span
+                  data-ui="latest-label" class="muted"></span></label>
+            </div>
+            <div class="controls">
+              <label
+                class="field">掃引の JSON を読み込む（複数可）<input data-ui="files" type="file"
+                  accept=".json,application/json" multiple></label>
+              <label
+                class="field wide">掃引の JSON を貼り付ける<textarea data-ui="paste" class="code" rows="2"
+                  spellcheck="false"></textarea></label>
+              <button data-ui="add-paste">貼り付けを足す</button>
+            </div>
+            <div class="scroll sources">
+              <table>
+                <thead>
+                  <tr>
+                    <th>記録（path）</th>
+                    <th>adapter</th>
+                    <th>日付</th>
+                    <th>行</th>
+                    <th>sha256</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody data-ui="sources"></tbody>
+              </table>
+            </div>
+            <div class="controls">
+              <label class="field">id<input data-ui="id" type="text"></label>
+              <label class="field">vendor<input data-ui="vendor" type="text"></label>
+              <label class="field">architecture<input data-ui="architecture" type="text"></label>
+              <label><input data-ui="vendor-only" type="checkbox"> vendor だけで当てる</label>
+              <span class="muted">既定比の下限 <span data-ui="min-speedup"></span></span>
+              <button data-ui="generate">表を作る</button>
+              <button data-ui="apply" disabled>この表を適用</button>
+            </div>
+            <p data-ui="status" class="status" role="status" aria-live="polite">準備中</p>
+            <div class="scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>欄</th>
+                    <th>範囲</th>
+                    <th>ケース</th>
+                    <th>結果</th>
+                    <th>対既定（幾何平均・最小〜最大）</th>
+                    <th>退けた幾何</th>
+                  </tr>
+                </thead>
+                <tbody data-ui="verdicts"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="column">
+            <div class="controls">
+              <label
+                class="field">出力<select data-ui="output-kind"><option value="ts">TS の生成物（整形前 — 登録は CLI が整形して書く）</option><option value="app">アプリ用 TS（acquireGpu の geometryProfile に渡す定数）</option><option value="json">注入の JSON（acquireGpu の geometryProfile）</option><option value="command">登録のコマンド</option></select></label>
+              <button data-ui="copy-output" disabled>コピー</button>
+              <button data-ui="save-output" disabled>保存</button>
+            </div>
+            <textarea data-ui="output" class="code" readonly spellcheck="false"
+              aria-label="生成物"></textarea>
+          </div>
+        </div>
+      </section>
+      <section data-tab="anima" role="tabpanel" aria-label="Anima" hidden>
+        <p
+          class="muted">pipeline は <code>residency: "transformer"</code> で 1 度だけ組み、全ての generate で使い回します。GPU は GPU 設定（幾何プロファイル・timestamp）と quant で取り、ダミーバッファも同じ GPU device に確保します。quant は GPU を取るとき（最初の generate か「VRAM を埋める」）に確定し、切り替えるには「pipeline を破棄」を押してから選び直します。GPU 時間を採ると 1 dispatch = 1 pass に開くので、所要（壁時計）は採らないときと比べられません。</p>
+        <div class="controls">
+          <label
+            class="field wide">プロンプト<textarea data-ui="prompt" rows="2"></textarea></label>
+          <label
+            class="field wide">ネガティブプロンプト（空欄 = 指定しない。guidance scale が 1 の配布既定では指定するとエラー）<input data-ui="negative" type="text"></label>
+          <label
+            class="field">解像度<select data-ui="resolution"><option value="512x512" selected>512x512</option><option value="1024x1024">1024x1024</option></select></label>
+          <label
+            class="field">steps（空欄 = 配布既定）<input data-ui="steps" type="number" min="1" step="1"></label>
+          <label
+            class="field">guidance scale（空欄 = 配布既定）<input data-ui="guidance" type="number" min="0" step="0.5"></label>
+          <label
+            class="field">seed<input data-ui="seed" type="number" value="42" min="0" step="1"></label>
+          <label
+            class="field">次の generate の常駐<select data-ui="residency"><option value="transformer" selected>transformer（DiT を持ち続ける）</option><option value="per-stage">per-stage（この後に手放す）</option></select></label>
+          <label class="field">quant（次に組む pipeline）<select data-ui="quant"></select></label>
+          <label
+            class="field">回数 N<input data-ui="count" type="number" value="3" min="1" step="1"></label>
+          <button data-ui="run">N 回生成</button>
+        </div>
+        <div class="controls">
+          <label
+            class="field">ダミー量（GiB）<input data-ui="hold-gib" type="number" value="6" min="0.25" step="0.25"></label>
+          <button data-ui="hold">VRAM を埋める（1 GiB ずつ STORAGE を確保・OOM で停止）</button>
+          <button data-ui="release">ダミーを解放</button>
+          <button data-ui="dispose">pipeline を破棄（ダミーと GPU device も）</button>
+          <button data-ui="export" disabled>JSON を保存</button>
+        </div>
+        <p data-ui="info" class="muted"></p>
+        <p data-ui="dummies" class="muted"></p>
+        <p data-ui="status" class="status" role="status" aria-live="polite">準備中</p>
+        <div class="split">
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>quant</th>
+                  <th>常駐指定</th>
+                  <th>ダミー</th>
+                  <th>所要 (ms)</th>
+                  <th>段の時間</th>
+                  <th>GPU 時間</th>
+                  <th>幾何プロファイル</th>
+                  <th>residency イベント</th>
+                  <th>PNG sha256</th>
+                  <th>エラー</th>
+                </tr>
+              </thead>
+              <tbody data-ui="rows"></tbody>
+            </table>
+          </div>
+          <div class="image-pane">
+            <p class="muted">最新の画像</p>
+            <img data-ui="image" alt="最新の生成画像" hidden>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

@@ -1,11 +1,12 @@
 /**
- * anima の段ごとの op 別 GPU 時間を Deno で採る CLI（確認ページ `browser/` の双子 — perf-ledger K-70）。
+ * anima の段ごとの op 別 GPU 時間を Deno で採る CLI（確認ページ `tools/gpu-lab` の Anima タブの双子 — perf-ledger K-70）。
  *
  * ページと同じ記録器（`record.ts`）と集計（`timing.ts`）で、ページの「JSON を保存」と**同じ形**
  * （`karume-anima-residency-browser/2`）の JSON を書く。違いは `userAgent` が
  * `{ deno: Deno.version.deno }` になること、bundle が無いので `bundleSha256` が無いこと、ダミー確保を
  * しないこと、`gpuTiming.unit` が `"deno-raw-tick"` になること（Deno は timestamp を ns へ換算
- * しない — docs/known-issues.md「Intel Arc B570」節。B570 では 1 tick = 52.08 ns）。
+ * しない — docs/known-issues.md「Intel Arc B570」節。B570 では 1 tick = 52.08 ns）、幾何プロファイルを
+ * 注入しないので `geometryProfileRequested` が常に `auto` で `geometryProfileInjected` が無いこと。
  *
  * pipeline は `residency: "transformer"` で 1 度だけ組み、`--count` 回 generate する（1 回目が常駐
  * DiT を作るので、2 回目以降が常駐の効いた定常の形）。アダプタが `timestamp-query` を列挙すれば
@@ -30,7 +31,7 @@ import {
   parseResolution,
 } from "../../packages/models/anima.ts";
 import { encodePng } from "../../packages/models/mod.ts";
-import { readCheckout } from "./browser/server.ts";
+import { readCheckout } from "../shared/checkout.ts";
 import {
   createGenerateRecorder,
   DEFAULT_PROMPT,
@@ -222,6 +223,7 @@ const main = async (): Promise<void> => {
         const base = {
           index,
           quant: quantName,
+          geometryProfileRequested: "auto" as const,
           residencyRequested: "transformer" as const,
           request,
           dummyBytesHeld: 0,
@@ -272,6 +274,7 @@ const main = async (): Promise<void> => {
       manifestSha256: await sha256Hex(manifestBytes),
       defaultModel: manifest.defaultModel,
       quant: quantName,
+      geometryProfileRequested: "auto",
       gpuTiming: { enabled: gpu.gpuTimingEnabled, feature: timestampFeature, unit },
       pipelineResidency: "transformer",
       pipelineLoads,

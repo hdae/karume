@@ -20,16 +20,13 @@ import type { SweepOp } from "./cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
 import {
   deriveProfile,
-  displayPath,
-  formatTypeScript,
-  parseProfileFlags,
   parseSweepReport,
-  type ProfileFlags,
   renderProfileSource,
   ROWS_BUCKETS,
   type SlotVerdict,
   type SweepSource,
-} from "./profile.ts";
+} from "./derive.ts";
+import { displayPath, formatTypeScript, parseProfileFlags, type ProfileFlags } from "./profile.ts";
 import { REPORT_FORMAT } from "./report.ts";
 
 const ENTRY = new URL("./main.ts", import.meta.url);

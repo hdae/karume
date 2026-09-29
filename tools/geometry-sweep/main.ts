@@ -1,5 +1,5 @@
 /**
- * タイル幾何の掃引を Deno で回す CLI（ブラウザのページ `browser/` の双子 — perf-ledger K-70）。
+ * タイル幾何の掃引を Deno で回す CLI（ブラウザのページ `tools/gpu-lab` の掃引タブの双子 — perf-ledger K-70）。
  *
  * 同じ shape・同じ入力のまま幾何だけを変えて 1 dispatch の時間と出力 digest を採り、既定幾何に対する
  * 速さの比の表を標準出力へ、全行を JSON（`karume-geometry-sweep/2` — `report.ts`）へ書く。
@@ -8,10 +8,11 @@
  *
  * 使い方（リポ直下から・GPU が学習で使われていないことを先に `outputs/diag/gpu-busy.zsh` で確認）:
  *
- *   deno run -A tools/geometry-sweep/main.ts --quick --op linear --op i8a8-linear
+ *   deno run -A tools/geometry-sweep/main.ts --set quick --op linear --op i8a8-linear
  *
  * フラグ: `--op <族>`（複数可・既定は全族 — linear / matmul / bmm / i8a8-linear / attention /
- * i8a8-attention / conv2d）`--case <id>`（複数可・cases.ts の id で絞る）`--quick`（小集合）`--rounds N`（既定 5）
+ * i8a8-attention / conv2d）`--case <id>`（複数可・cases.ts の id で絞る）`--set <quick|quick+|full>`
+ * （候補集合・既定 quick+ — geometries.ts）`--quick`（`--set quick` の別名）`--rounds N`（既定 5）
  * `--out <json>`（既定 outputs/bench/karume/<日付>_geometry-sweep/geometry-sweep-<adapter>-<時刻>.json）。
  *
  * アダプタが `timestamp-query` を列挙すれば `acquireGpu({ gpuTiming: true })` で取り、単位は
@@ -25,8 +26,14 @@
  *     [--min-speedup 1.05] [--check]
  */
 import { acquireGpu } from "../../packages/runtime/mod.ts";
-import { readCheckout } from "../anima-residency/browser/server.ts";
+import { readCheckout } from "../shared/checkout.ts";
 import { SWEEP_CASES, SWEEP_OPS, type SweepCase, type SweepOp } from "./cases.ts";
+import {
+  CANDIDATE_SETS,
+  type CandidateSet,
+  DEFAULT_CANDIDATE_SET,
+  isCandidateSet,
+} from "./geometries.ts";
 import { runProfileCommand } from "./profile.ts";
 import {
   createSweepContext,
@@ -55,7 +62,7 @@ const TIMESTAMP_QUERY = "timestamp-query";
 type Flags = {
   readonly ops: readonly SweepOp[];
   readonly cases: readonly string[];
-  readonly quick: boolean;
+  readonly candidateSet: CandidateSet;
   readonly rounds: number;
   readonly out?: string;
 };
@@ -63,17 +70,27 @@ type Flags = {
 const isSweepOp = (value: string): value is SweepOp =>
   (SWEEP_OPS as readonly string[]).includes(value);
 
-/** `--quick` 以外は `--key value` の対（未知のキーは落とす — 綴り違いが既定で走らない）。 */
+/**
+ * `--quick` 以外は `--key value` の対（未知のキーは落とす — 綴り違いが既定で走らない）。
+ * 候補集合の指定（`--set` / `--quick`）は 1 回だけ（2 回目は値が同じでも落とす — どちらが効いたかを
+ * 読み手に推測させない）。
+ */
 export const parseFlags = (argv: readonly string[]): Flags => {
   const ops: SweepOp[] = [];
   const cases: string[] = [];
-  let quick = false;
+  let candidateSet: CandidateSet | undefined;
   let rounds = ROUNDS;
   let out: string | undefined;
+  const chooseSet = (set: CandidateSet, spelled: string): void => {
+    if (candidateSet !== undefined) {
+      throw new Error(`候補集合を 2 回指定している（${spelled}・先に ${candidateSet}）`);
+    }
+    candidateSet = set;
+  };
   for (let at = 0; at < argv.length; at += 1) {
     const key = argv[at];
     if (key === "--quick") {
-      quick = true;
+      chooseSet("quick", "--quick");
       continue;
     }
     const value = argv[at + 1];
@@ -94,6 +111,12 @@ export const parseFlags = (argv: readonly string[]): Flags => {
         }
         cases.push(value);
         break;
+      case "--set":
+        if (!isCandidateSet(value)) {
+          throw new Error(`--set ${value} は ${CANDIDATE_SETS.join(" / ")} のどれでもない`);
+        }
+        chooseSet(value, `--set ${value}`);
+        break;
       case "--rounds":
         rounds = Number(value);
         if (!Number.isInteger(rounds) || rounds < 1) {
@@ -110,7 +133,7 @@ export const parseFlags = (argv: readonly string[]): Flags => {
   return {
     ops: ops.length === 0 ? SWEEP_OPS : ops,
     cases,
-    quick,
+    candidateSet: candidateSet ?? DEFAULT_CANDIDATE_SET,
     rounds,
     ...(out === undefined ? {} : { out }),
   };
@@ -219,15 +242,13 @@ const main = async (): Promise<void> => {
   console.log(
     `[geometry-sweep] ${
       gpu.adapterInfo.description || gpu.adapterInfo.vendor
-    } · 単位 ${context.unit} · ${
-      flags.quick ? "quick" : "full"
-    } · rounds ${flags.rounds} · dp4a ${context.dp4a} · ${selected.length} ケース`,
+    } · 単位 ${context.unit} · ${flags.candidateSet} · rounds ${flags.rounds} · dp4a ${context.dp4a} · ${selected.length} ケース`,
   );
   let current: string | undefined;
   try {
     await runSweep(context, selected, {
       rounds: flags.rounds,
-      quick: flags.quick,
+      candidateSet: flags.candidateSet,
       timestampUnit: "deno-raw-tick",
     }, {
       onProgress: (message) => console.error(`  … ${message}`),
@@ -272,7 +293,8 @@ const main = async (): Promise<void> => {
       },
       dp4a: context.dp4a,
       settings: {
-        quick: flags.quick,
+        candidateSet: flags.candidateSet,
+        quick: flags.candidateSet === "quick",
         ops: flags.ops,
         ...(flags.cases.length === 0 ? {} : { cases: flags.cases }),
         rounds: flags.rounds,

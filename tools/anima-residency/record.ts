@@ -1,7 +1,7 @@
 /**
  * anima の generate 1 回ぶんの記録と、書き出す JSON（`karume-anima-residency-browser/2`）の形。
  *
- * 確認ページ（`browser/runner.ts`）と Deno の双子 CLI（`profile.ts`）が同じ記録器と同じ型を使う —
+ * 確認ページ（`tools/gpu-lab` の Anima タブ）と Deno の双子 CLI（`profile.ts`）が同じ記録器と同じ型を使う —
  * 2 本が別々に組むと、JSON を並べて比べる段で形が黙ってずれる（perf-ledger K-70）。
  */
 import type {
@@ -11,7 +11,7 @@ import type {
   AnimaResidencyReason,
   AnimaRunComponent,
 } from "../../packages/models/anima.ts";
-import type { SessionDiagnostics } from "../../packages/runtime/mod.ts";
+import type { GeometryProfile, SessionDiagnostics } from "../../packages/runtime/mod.ts";
 import {
   aggregateRuns,
   type PipelineCount,
@@ -53,10 +53,30 @@ export type ResidencyRecord = {
   readonly position: string;
 };
 
+/**
+ * どの幾何プロファイルを `acquireGpu` に頼んだか（ADR 0115 追記決定 6 の注入口）: `auto` = 注入なし
+ * （adapter の (vendor, architecture) で埋め込みの表が選ばれる）・`default` = 既定の表を注入・
+ * `builtin:<id>` = 埋め込みの表 `<id>` を注入・`generated:<id>` = ページで掃引から作った表を注入。
+ * 段ごとの `geometryProfile`（診断）は使われた表の id だけで注入か埋め込みかを区別しないので、この欄で
+ * 補う。CLI は注入しないので常に `auto`。
+ */
+export type GeometryProfileRequested =
+  | "auto"
+  | "default"
+  | `builtin:${string}`
+  | `generated:${string}`;
+
 export type Row = {
   readonly index: number;
   /** この generate を回した pipeline の quant（pipeline を組み直すと変わりうるので行ごと）。 */
   readonly quant: string;
+  /** この generate を回した GPU に頼んだ幾何プロファイル（GPU を取り直すと変わりうるので行ごと）。 */
+  readonly geometryProfileRequested: GeometryProfileRequested;
+  /**
+   * この generate を回した GPU に注入した表の値そのもの（`auto` のときは無い）。生成した表は作り直すと
+   * 同じ id で中身が変わるので、id の要求だけでは後から何を使ったか辿れない。
+   */
+  readonly geometryProfileInjected?: GeometryProfile;
   readonly residencyRequested: AnimaResidency;
   readonly request: {
     readonly prompt: string;
@@ -109,6 +129,16 @@ export type Report = {
   readonly defaultModel?: string;
   /** いま組んでいる（無ければ次に組む）pipeline の quant。行ごとの値は `rows[].quant`。 */
   readonly quant: string;
+  /**
+   * いま持っている（無ければ次に取る）GPU に頼んだ幾何プロファイル（{@link GeometryProfileRequested}）。
+   * 行ごとの値は `rows[].geometryProfileRequested`。
+   */
+  readonly geometryProfileRequested: GeometryProfileRequested;
+  /**
+   * いま持っている（無ければ次に取る）GPU に注入する表の値そのもの（`auto` のときは無い）。行ごとの
+   * 値は `rows[].geometryProfileInjected`。
+   */
+  readonly geometryProfileInjected?: GeometryProfile;
   readonly gpuTiming: {
     /** いま持っている（無ければ次に取る）GPU で計測を要求したか。行ごとの有無は `stages[].gpu`。 */
     readonly enabled: boolean;
