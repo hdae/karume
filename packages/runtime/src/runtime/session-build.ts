@@ -481,8 +481,10 @@ export type PreparedPlan = {
  * 出すと a8 の Session を並べただけで同じ 1 事実が繰り返し流れる）。
  *
  * カナリアは `profile` の i8a8 attention 幾何（production の ①QK / ③PV が実走する幾何）で撃つ。
- * メモが device 単位のままでよいのは、プロファイルが同じ {@link GpuContext} の `adapterInfo` の
- * 純関数（{@link selectGeometryProfile}）で、同じ device ならどの Session でも同じ幾何になるから。
+ * メモが device 単位のままでよいのは、プロファイルが同じ {@link GpuContext} の注入された表
+ * （`acquireGpu({ geometryProfile })`）か、無ければ `adapterInfo` の純関数
+ * （{@link selectGeometryProfile}）で、どちらも device の寿命の間は不変 — 同じ device ならどの
+ * Session でも同じ幾何になるから。
  */
 const resolveAttentionI8a8Dot = async (
   gpu: GpuContext,
@@ -620,7 +622,8 @@ export type SessionState = {
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
   readonly rowBlockSplit: number | undefined;
   /**
-   * GEMM 幾何のプロファイル（adapter から構築時に 1 度だけ選ぶ静的な表 — DECIDED: ADR 0115）。
+   * GEMM 幾何のプロファイル（`acquireGpu` で注入された表、無ければ adapter から構築時に 1 度だけ
+   * 選ぶ静的な表 — DECIDED: ADR 0115）。
    * MUST: 構築後に選び直さない（同じ Session の導出済み計画・パイプラインキーが 1 本の表に
    * 対応していることが、計画キャッシュをプロファイル抜きで引いてよい根拠）。
    */
@@ -693,10 +696,16 @@ export const buildSessionState = async (
         "（feature は device 作成時にしか要求できない）",
     );
   }
-  // GEMM 幾何のプロファイル（DECIDED: ADR 0115）。adapter の (vendor, architecture) と埋め込みの
-  // 静的な表だけで決まり、実行中に選び直さない。壊れた表・同順位の衝突は**重みを 1 バイトも
-  // 上げる前に**落とす（その op に当たる run まで気づけない形にしない）。
-  const geometryProfile = selectGeometryProfile(gpu.adapterInfo);
+  // GEMM 幾何のプロファイル（DECIDED: ADR 0115）。`acquireGpu({ geometryProfile })` で注入された
+  // 表があればそれ（門は device を作る前に通過済み・`match` は見ない）、無ければ adapter の
+  // (vendor, architecture) と埋め込みの静的な表で決まる。どちらも実行中に選び直さない。埋め込み側の
+  // 壊れた表・同順位の衝突は**重みを 1 バイトも上げる前に**落とす（その op に当たる run まで
+  // 気づけない形にしない）。
+  // MUST: 選択はここ 1 箇所。dp4a カナリア（`resolveAttentionI8a8Dot`）と診断の id
+  // （`SessionState.geometryProfile`）はこの返り値を引く — 別々に選ぶと、カナリアが検証した幾何と
+  // 実走の幾何が食い違いうる。
+  const geometryProfile = gpu[RUNTIME_INTERNAL].geometryProfile ??
+    selectGeometryProfile(gpu.adapterInfo);
 
   // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（batch
   // ループより前 = 1 バイトも上げる前）。確保失敗の検出は item（block）単位 errorScope

@@ -17,6 +17,11 @@
 // ADR 0022 追記）。既定側も adapterInfo を空にした GpuContext で組み、実機の adapter に
 // 将来プロファイルが当たっても比較の基準が既定のまま動かないようにする。
 // 埋め込みが 1 本も無い間は 2 を明示 SKIP する（空の一覧で緑にしない）。
+//
+// 3. `acquireGpu({ geometryProfile })` で注入した表は、adapter の (vendor, architecture) を見ずに
+//    使われる（`match` も見ない）。2 と同じ 3 点（診断の名前・実走キーの幾何判別子・既定との Uint32
+//    一致）に加え、i8a8 attention の dp4a カナリアがその表の幾何で撃つことを、カナリアが
+//    コンパイルした WGSL で見る。
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
@@ -28,6 +33,10 @@ import {
   selectGeometryProfile,
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
+import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
+import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
+import { attentionPvI8a8Wgsl, attentionQkI8a8Wgsl } from "../src/kernels/attention-i8a8.ts";
+import { dp4aAvailable } from "../src/kernels/linear-i8a8.ts";
 import {
   type GemmGeometry,
   gemmGeometryTileKeyPart,
@@ -244,12 +253,18 @@ const CASES: readonly ProfileCase[] = [
 
 /**
  * device は実物のまま、adapterInfo の vendor / architecture だけを差し替えた GpuContext
- * （プロファイルの選択は Session 構築で adapterInfo から 1 度だけ行われる）。
+ * （プロファイルの選択は Session 構築で adapterInfo から 1 度だけ行われる）。`injected` は
+ * `acquireGpu({ geometryProfile })` が GpuContext に渡すのと同じ注入の席。
  *
  * MUST: ここで作った GpuContext は destroy しない — device は元の GpuContext と共有で、破棄は
  * 元の側 1 箇所に置く（二重の destroy は消失通知を予期しない側へ流す）。
  */
-const contextAs = (gpu: GpuContext, vendor: string, architecture: string): GpuContext =>
+const contextAs = (
+  gpu: GpuContext,
+  vendor: string,
+  architecture: string,
+  injected?: GeometryProfile,
+): GpuContext =>
   new GpuContext(
     gpu.device,
     {
@@ -263,6 +278,8 @@ const contextAs = (gpu: GpuContext, vendor: string, architecture: string): GpuCo
     },
     gpu.limits,
     gpu.wgslLanguageFeatures,
+    undefined,
+    injected,
   );
 
 const words = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
@@ -290,6 +307,29 @@ const runCase = async (gpu: GpuContext, testCase: ProfileCase): Promise<CaseRun>
   } finally {
     await session.dispose();
   }
+};
+
+/** 1 ケースを既定の Session と比べ、`profile` の名前・幾何判別子のキー・Uint32 一致を見る。 */
+const assertRunsWithProfile = async (
+  baseline: GpuContext,
+  subject: GpuContext,
+  profile: GeometryProfile,
+  testCase: ProfileCase,
+): Promise<void> => {
+  const expected = await runCase(baseline, testCase);
+  assertEquals(expected.profile, DEFAULT_GEOMETRY_PROFILE.id, testCase.name);
+  const actual = await runCase(subject, testCase);
+  assertEquals(actual.profile, profile.id, testCase.name);
+  for (const { prefix, parts } of testCase.expected(profile)) {
+    assert(
+      actual.keys.some((key) =>
+        key.startsWith(prefix) && parts.every((part) => key.includes(part))
+      ),
+      `${testCase.name}: ${prefix}…${parts.join("…")} のキーで走っていない` +
+        `（実際: ${actual.keys.join(" / ")}）`,
+    );
+  }
+  assertEquals(actual.y, expected.y, `${testCase.name}: 既定プロファイルとビット不一致`);
 };
 
 describe({
@@ -326,25 +366,101 @@ describe({
             profile.match.architecture ?? "",
           );
           for (const testCase of CASES) {
-            const expected = await runCase(baseline, testCase);
-            assertEquals(expected.profile, DEFAULT_GEOMETRY_PROFILE.id, testCase.name);
-            const actual = await runCase(disguised, testCase);
-            assertEquals(actual.profile, profile.id, testCase.name);
-            for (const { prefix, parts } of testCase.expected(profile)) {
-              assert(
-                actual.keys.some((key) =>
-                  key.startsWith(prefix) && parts.every((part) => key.includes(part))
-                ),
-                `${testCase.name}: ${prefix}…${parts.join("…")} のキーで走っていない` +
-                  `（実際: ${actual.keys.join(" / ")}）`,
-              );
-            }
-            assertEquals(actual.y, expected.y, `${testCase.name}: 既定プロファイルとビット不一致`);
+            await assertRunsWithProfile(baseline, disguised, profile, testCase);
           }
         } finally {
           gpu.destroy();
         }
       });
     }
+  },
+});
+
+describe({
+  name: "acquireGpu で注入した幾何プロファイル（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => {
+    it("apple-metal-3 を注入した device の Session は全ケースでその表の名前・幾何のキーで走り、既定と Uint32 一致する", async () => {
+      const plain = await acquireGpu();
+      // 渡した表は acquire 時に複製される — 後から書き換えても device の表（id）は変わらない
+      const handedOver = structuredClone(APPLE_METAL_3);
+      const injected = await acquireGpu({ geometryProfile: handedOver });
+      (handedOver as { id: string }).id = "changed-after-acquire";
+      try {
+        const baseline = contextAs(plain, "", "");
+        for (const testCase of CASES) {
+          await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
+        }
+      } finally {
+        injected.destroy();
+        plain.destroy();
+      }
+    });
+
+    it("注入した表は adapter と match を見ない（apple-metal-3 に当たる adapter でも、別 vendor の表が使われる）", async () => {
+      const gpu = await acquireGpu();
+      try {
+        const baseline = contextAs(gpu, "", "");
+        // 埋め込みの選択なら apple-metal-3 が当たる adapter に、match が nvidia の表を注入する
+        const subject = contextAs(gpu, "apple", "metal-3", NVIDIA_BLACKWELL);
+        assertEquals(selectGeometryProfile(subject.adapterInfo).id, APPLE_METAL_3.id);
+        for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
+          await assertRunsWithProfile(baseline, subject, NVIDIA_BLACKWELL, testCase);
+        }
+      } finally {
+        gpu.destroy();
+      }
+    });
+  },
+});
+
+describe({
+  name: "dp4a カナリアは注入した表の i8a8 attention 幾何で撃つ（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => {
+    it("attentionCompute a8 の Session 構築で、カナリアが注入した表の ①QK / ③PV 幾何の WGSL をコンパイルする", async (context) => {
+      const gpu = await acquireGpu({ geometryProfile: APPLE_METAL_3 });
+      try {
+        if (!dp4aAvailable(gpu.wgslLanguageFeatures)) {
+          // 非広告の device ではカナリアが走らない（emu 直行）— 見る対象が無いので明示 SKIP
+          console.warn(`SKIP ${context.name}: dot4I8Packed が広告されていない`);
+          return;
+        }
+        const compiled: string[] = [];
+        const device = gpu.device;
+        const createShaderModule = device.createShaderModule.bind(device);
+        device.createShaderModule = (descriptor) => {
+          compiled.push(descriptor.code);
+          return createShaderModule(descriptor);
+        };
+        const testCase = attentionCase("a8");
+        const session = await createSessionFromContainer(
+          gpu,
+          await testCase.model(),
+          GRAPH_NAME,
+          { attentionCompute: "a8" },
+        );
+        try {
+          assertEquals(session.diagnostics().geometryProfile, APPLE_METAL_3.id);
+        } finally {
+          await session.dispose();
+        }
+        // カナリアは dp4a の腕を必ず先に撃つ（v4 / S = f32 の組を含む）
+        const injectedQk = attentionQkI8a8Wgsl(true, true, "f32", APPLE_METAL_3.i8a8.attentionQk);
+        const injectedPv = attentionPvI8a8Wgsl(true, true, "f32", APPLE_METAL_3.i8a8.attentionPv);
+        const defaultQk = attentionQkI8a8Wgsl(
+          true,
+          true,
+          "f32",
+          DEFAULT_GEOMETRY_PROFILE.i8a8.attentionQk,
+        );
+        assert(injectedQk !== defaultQk, "注入した表の ①QK 幾何が既定と同じ（検査が空振りする）");
+        assert(compiled.includes(injectedQk), "カナリアが注入した表の ①QK 幾何を撃っていない");
+        assert(compiled.includes(injectedPv), "カナリアが注入した表の ③PV 幾何を撃っていない");
+        assert(!compiled.includes(defaultQk), "カナリアが既定の ①QK 幾何を撃った");
+      } finally {
+        gpu.destroy();
+      }
+    });
   },
 });

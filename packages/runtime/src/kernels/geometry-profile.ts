@@ -42,6 +42,11 @@ import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
  */
 export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGeometry };
 
+/**
+ * GEMM 幾何のプロファイル = op × バケットごとのタイル幾何の静的な表（DECIDED: ADR 0115）。
+ * 埋め込みの表（`./geometry-profiles/`）は adapter の (vendor, architecture) で選ばれ、利用者は
+ * `acquireGpu({ geometryProfile })` で自分の掃引から作った表を注入できる（公開面には型だけ出す）。
+ */
 export type GeometryProfile = {
   /** プロファイルの名前（`"default"` / `"apple-metal-3"` など — 生成物のファイル名と一致）。 */
   readonly id: string;

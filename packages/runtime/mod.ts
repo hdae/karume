@@ -119,6 +119,15 @@ export type {
   ResidentTensor,
 } from "./src/gpu/device.ts";
 
+/**
+ * GEMM 幾何のプロファイル（ADR 0115）は**型だけ**公開する — `AcquireGpuOptions.geometryProfile` に
+ * 渡す表の形（`tools/geometry-sweep` の生成物が満たす形）。既定の表・埋め込みの一覧・選択関数は
+ * 値として出さない（内部の codegen 語彙で、道具は `src/` から import する）。
+ */
+export type { GemmRowsRule, GeometryProfile } from "./src/kernels/geometry-profile.ts";
+export type { GemmGeometry } from "./src/kernels/gemm-geometry.ts";
+export type { I8a8Geometry } from "./src/kernels/i8a8-geometry.ts";
+
 export type { ArenaStats } from "./src/gpu/arena.ts";
 export { DEFAULT_SUBMIT_POLICY, SubmitPolicyError } from "./src/gpu/submit.ts";
 /**

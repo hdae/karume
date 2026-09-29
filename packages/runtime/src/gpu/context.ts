@@ -22,6 +22,9 @@ import type { AttentionI8a8Decision } from "./attention-dp4a-canary.ts";
 // MUST: acquire.ts からも型だけを取る（値を取ると冒頭の「acquire → context の一方向」が
 // 壊れる）。消去される参照なので、実行時の import グラフは acquire → context のまま。
 import type { DeviceLostHandler, RequiredLimits } from "./acquire.ts";
+// MUST: kernels からも型だけを取る（冒頭の attention-dp4a-canary と同じ理由 — この層から kernels への
+// 実体の import を作らない）。
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { STORAGE_USAGE } from "./arena.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "./error-scope.ts";
 import { PipelineCache } from "./pipeline-cache.ts";
@@ -145,6 +148,17 @@ type GpuContextInternals = {
    * （{@link GpuContext} 冒頭「errorScope 区間の不変条件」）。
    */
   pipelines(): PipelineCache;
+  /**
+   * `acquireGpu({ geometryProfile })` で注入された GEMM 幾何のプロファイル（DECIDED: ADR 0115）。
+   * 注入が無ければ undefined で、Session 構築が adapter から埋め込みの表を選ぶ。
+   *
+   * 読み手は Session 構築の選択 1 箇所だけ（dp4a カナリアの幾何と診断の `geometryProfile` は
+   * その選択の結果を引く）。利用者の面に出さないのは、渡した本人は値を知っていて、Session が
+   * 実際に使った表は `SessionDiagnostics.geometryProfile` で観測できるから。
+   * MUST: device の寿命の間は不変（同じ device の Session・カナリアの判定メモが 1 本の表に
+   * 対応していることが、判定を device 単位でメモしてよい根拠）。
+   */
+  readonly geometryProfile?: GeometryProfile;
 };
 
 /**
@@ -249,6 +263,7 @@ export class GpuContext {
     limits: RequiredLimits,
     wgslLanguageFeatures: ReadonlySet<string>,
     onDeviceLost?: DeviceLostHandler,
+    geometryProfile?: GeometryProfile,
   ) {
     this.device = device;
     this.adapterInfo = adapterInfo;
@@ -269,6 +284,7 @@ export class GpuContext {
         this.#pipelines ??= new PipelineCache(this.device);
         return this.#pipelines;
       },
+      geometryProfile,
     };
     if (onDeviceLost !== undefined) {
       this.onLost((info) => {

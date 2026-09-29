@@ -8,11 +8,13 @@
 // 2. **既定プロファイルは既存の選択と同じ値**で、導出相がそれを明示で渡してもキーと WGSL が
 //    省略時とバイト同一（= 既定の機では 1 バイトも動かない）。
 // 3. **壊れた表は Session 構築の門で落ちる**（昇順でない規則・最後が Infinity でない規則・
-//    整除の破れた幾何）。
+//    整除の破れた幾何）。`acquireGpu({ geometryProfile })` で注入した表は **device を作る前に**
+//    落ちる（navigator.gpu を差し替えて requestDevice に届かないことを見る）。
 
-import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { CodegenError } from "../src/codegen/errors.ts";
+import { acquireGpu, GpuFeatureError, REQUIRED_LIMIT_KEYS } from "../src/gpu/device.ts";
 import {
   assertGeometryProfile,
   conv2dProfileGeometry,
@@ -423,6 +425,89 @@ describe("conv2dProfileGeometry と幾何の門", () => {
     ];
     for (const [name, profile] of broken) {
       assertThrows(() => selectGeometryProfile(adapter, [profile]), CodegenError, name, name);
+    }
+  });
+});
+
+/** requestDevice に届いたことを示す番兵（実 device は作らない）。 */
+class DeviceRequested extends Error {
+  override readonly name = "DeviceRequested";
+}
+
+/**
+ * `navigator.gpu` を、requestDevice の呼び出し回数を数えて番兵で落ちる偽物に差し替えて `body` を
+ * 走らせる（GPU 不要・実機があっても device を作らない）。差し替えは finally で必ず外す。
+ */
+const withCountingGpu = async (body: () => Promise<void>): Promise<number> => {
+  let deviceRequests = 0;
+  const adapter = {
+    limits: Object.fromEntries(REQUIRED_LIMIT_KEYS.map((key) => [key, 1 << 20])),
+    features: new Set<string>(),
+    requestDevice: (): Promise<never> => {
+      deviceRequests += 1;
+      return Promise.reject(new DeviceRequested("requestDevice に届いた"));
+    },
+  };
+  Object.defineProperty(navigator, "gpu", {
+    value: { requestAdapter: () => Promise.resolve(adapter) },
+    configurable: true,
+  });
+  try {
+    await body();
+  } finally {
+    Reflect.deleteProperty(navigator, "gpu");
+  }
+  return deviceRequests;
+};
+
+describe("acquireGpu の幾何プロファイル注入口", () => {
+  it("正しい表は門を通って requestDevice まで進む（差し替えが経路に乗っていることの対照）", async () => {
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: APPLE_METAL3 }),
+        DeviceRequested,
+      );
+    });
+    assertEquals(requests, 1);
+  });
+
+  it("壊れた表（id が空・整除の破れた幾何）は device を作る前に fail loudly", async () => {
+    const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 8, wgY: 8 };
+    const broken: readonly (readonly [string, GeometryProfile, string])[] = [
+      ["id が空", profileOf("", { vendor: "test" }), "id が空"],
+      [
+        "gemmRows の幾何",
+        profileOf("rows", { vendor: "test" }, {
+          gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: hole }],
+        }),
+        "gemmRows",
+      ],
+      [
+        "attention.pv の幾何",
+        profileOf("pv", { vendor: "test" }, { attention: { qk: M64N64, pv: hole } }),
+        "attention.pv",
+      ],
+      [
+        "i8a8.linear の幾何",
+        profileOf("i8a8", { vendor: "test" }, {
+          i8a8: {
+            ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+            linear: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+          },
+        }),
+        "i8a8.linear",
+      ],
+    ];
+    for (const [name, profile, message] of broken) {
+      const requests = await withCountingGpu(async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: profile }),
+          GpuFeatureError,
+          message,
+          name,
+        );
+      });
+      assertEquals(requests, 0, `${name}: 壊れた表で requestDevice に届いた`);
     }
   });
 });

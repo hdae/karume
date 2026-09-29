@@ -115,6 +115,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GemmGeometry",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GemmRowsRule",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GenerationContext",
         "kind": "class"
       },
@@ -124,6 +132,10 @@
       },
       {
         "name": "GenerationRun",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometryProfile",
         "kind": "typeAlias"
       },
       {
@@ -165,6 +177,10 @@
       {
         "name": "GpuValidationError",
         "kind": "class"
+      },
+      {
+        "name": "I8a8Geometry",
+        "kind": "typeAlias"
       },
       {
         "name": "IrDeclaration",

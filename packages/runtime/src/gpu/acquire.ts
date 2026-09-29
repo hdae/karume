@@ -15,6 +15,8 @@ import {
   TIMESTAMP_QUERY_FEATURE,
 } from "./context.ts";
 import { withPipelineScope } from "./error-scope.ts";
+import { CodegenError } from "../codegen/errors.ts";
+import { assertGeometryProfile, type GeometryProfile } from "../kernels/geometry-profile.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
 /** navigator.gpu が無い / アダプタを取得できない。 */
@@ -525,6 +527,27 @@ export type AcquireGpuOptions = {
    * 能力を取得するだけでは計算経路を変えない。SessionのrmsNormReduceは別途指定する。
    */
   readonly subgroups?: boolean;
+  /**
+   * GEMM 幾何の静的なプロファイル 1 本の注入（DECIDED: ADR 0115）。未知の device で、利用者が
+   * 自分の機で回した掃引（`tools/geometry-sweep` の生成物）の表を当てるための口。
+   *
+   * - `undefined`（既定）= adapter の (vendor, architecture) から埋め込みの表を 1 本選ぶ
+   *   （当たらなければ既定プロファイル）。
+   * - 指定あり = adapter を見ずに**この表を使う**。`match` は照合に使わない（別の機の表を当てて
+   *   A/B する用途があるため）。
+   *
+   * device の性質なので GPU 単位で渡す（`SessionOptions` には無い）。同じ device の全 Session と
+   * i8a8 attention の dp4a カナリアが同じ表を使い、実行中に選び直すことはない（ADR 0022 追記の
+   * 実行時オートチューン禁止）。幾何が変えるのは担当割りだけで K の縮約順は不変だが、出力の一致は
+   * 掃引の門（既定との出力一致）で確かめる実測命題 — 利用者が持ち込む任意の表について runtime が
+   * 保証するものではない。選ばれた表の `id` は `Session.diagnostics().geometryProfile` で観測する。
+   *
+   * 渡した表は複製して保持する（呼び手が後から書き換えても device の寿命の間の表は変わらない）。
+   * MUST: 壊れた表（id が空・`match` の形の破れ・`gemmRows` の昇順 / 末尾 Infinity の破れ・
+   * 整除の破れた幾何）は **device を作る前に** {@link GpuFeatureError} で落とす（壊れた表で
+   * device を作らない — 利用者入力に起因する失敗なので公開のエラー型）。
+   */
+  readonly geometryProfile?: GeometryProfile;
   /** テスト専用（{@link LIMIT_CAPS}）。requiredLimits を**絞る**方向にだけ効く。 */
   readonly [LIMIT_CAPS]?: LimitCaps;
 };
@@ -562,6 +585,12 @@ const requestAdapterOrThrow = async (
  * 途中の失敗は全て例外（黙って能力を落とした device を返さない）。
  */
 export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuContext> => {
+  // 利用者が渡した表の門はアダプタにも device にも触れる前（GPU に依らない入力の検査）。
+  // 複製するのは、呼び手が後から書き換えても device の寿命の間の表が変わらないようにするため
+  // （Infinity は structuredClone を通る）。
+  const geometryProfile = options.geometryProfile === undefined
+    ? undefined
+    : cloneCheckedGeometryProfile(options.geometryProfile);
   const { gpu, adapter } = await requestAdapterOrThrow(options.adapter);
   const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
   // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
@@ -598,7 +627,25 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     limits,
     languageFeatures,
     options.onDeviceLost,
+    geometryProfile,
   );
+};
+
+/**
+ * 注入された表の門（{@link assertGeometryProfile}）を通し、通った表を複製して返す。門の失敗は
+ * 内部の {@link CodegenError} ではなく公開の {@link GpuFeatureError} で伝える（利用者入力の失敗は
+ * 公開型で捌ける — `subgroups` の検査と同じ流儀）。
+ */
+const cloneCheckedGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
+  try {
+    assertGeometryProfile(profile);
+  } catch (error) {
+    if (error instanceof CodegenError) {
+      throw new GpuFeatureError(`geometryProfile: ${error.message}`);
+    }
+    throw error;
+  }
+  return structuredClone(profile);
 };
 
 /**
