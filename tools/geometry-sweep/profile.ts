@@ -28,7 +28,7 @@
  * `deno-raw-tick`、かつ `gpuTiming.quantized` が false）だけを受ける。壁時計と 100 µs 丸めは
  * 幾何どうしの比を 1 へ縮めるので、勝ち負けの判定に使えない。
  *
- * クラスの境界は runtime の既定の表と同じ: linear の行数 ≤ 64 / ≤ 512 / それ以上
+ * クラスの境界は runtime の既定の表と同じ: linear / matmul / bmm の行数 ≤ 64 / ≤ 512 / それ以上
  * （`GEMM_ROWS_BUCKETS`）、融合 attention の ①QK / ③PV、conv2d の m タイル 64 / 32 行
  * （既定の行の tileM）、i8a8 の linear / ①QK / ③PV。掃引にケースが無いクラスは runtime の既定を
  * そのまま書く（理由を生成物のコメントに残す）。
@@ -423,8 +423,10 @@ const SLOTS: readonly SlotSpec[] = [
   },
 ];
 
-/** linear の行数（`caseShape` の `M{m} N{n} K{k}`）。 */
+/** linear / matmul の行数（`caseShape` の `M{m} N{n} K{k}`）。 */
 const LINEAR_SHAPE = /^M(\d+) N\d+ K\d+$/;
+/** bmm の行列 1 枚の行数（`caseShape` の `B{batch} M{m} N{n} K{k}` — バッチは z 軸でバケットに効かない）。 */
+const BMM_SHAPE = /^B\d+ M(\d+) N\d+ K\d+$/;
 /** 融合 attention の段（`caseShape` の `{qk|pv} BH…`）。 */
 const ATTENTION_SHAPE = /^(qk|pv) BH\d+ M\d+ N\d+ D\d+$/;
 
@@ -437,7 +439,8 @@ const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
 };
 
 /**
- * 行の欄。linear は shape の M・attention は shape の段・conv2d は**そのケースの既定の行の tileM**
+ * 行の欄。linear / matmul / bmm は shape の M（本番の 3 経路が同じ gemmRows の表を M で引く —
+ * src/runtime/recipe-builders/linear.ts）・attention は shape の段・conv2d は**そのケースの既定の行の tileM**
  * （本番の m タイルの選択 `conv2dIgemmMTile` が選んだ側 — 掃引が既定として測った幾何が正本）。
  */
 const slotOf = (
@@ -446,8 +449,10 @@ const slotOf = (
   where: string,
 ): ProfileSlot => {
   switch (row.op) {
-    case "linear": {
-      const matched = LINEAR_SHAPE.exec(row.shape);
+    case "linear":
+    case "matmul":
+    case "bmm": {
+      const matched = (row.op === "bmm" ? BMM_SHAPE : LINEAR_SHAPE).exec(row.shape);
       if (matched === null) {
         throw new Error(`${where}: ${row.caseId} の shape を読めない（${row.shape}）`);
       }
@@ -812,7 +817,7 @@ export const renderProfileSource = (
       "採否の基準: クラスの全ケースで出力が既定と一致し、既定比が " +
       `${formatRatio(flags.minSpeedup)} 以上の幾何のうち、`,
       "ケース間の幾何平均が最大のもの。無ければ既定（掃引の既定の行の幾何）。同じケースを複数の掃引が",
-      "測っていれば、比はその観測の幾何平均。gemmRows は linear の実測で決め、同じ骨格の matmul / bmm にも効く。",
+      "測っていれば、比はその観測の幾何平均。gemmRows は掃引にある linear / matmul / bmm のケースで決め、3 経路に同じ表が効く。",
       "",
       "採否:",
       "",

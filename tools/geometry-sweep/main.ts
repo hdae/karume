@@ -10,8 +10,8 @@
  *
  *   deno run -A tools/geometry-sweep/main.ts --quick --op linear --op i8a8-linear
  *
- * フラグ: `--op <族>`（複数可・既定は全族 — linear / i8a8-linear / attention / i8a8-attention /
- * conv2d）`--case <id>`（複数可・cases.ts の id で絞る）`--quick`（小集合）`--rounds N`（既定 5）
+ * フラグ: `--op <族>`（複数可・既定は全族 — linear / matmul / bmm / i8a8-linear / attention /
+ * i8a8-attention / conv2d）`--case <id>`（複数可・cases.ts の id で絞る）`--quick`（小集合）`--rounds N`（既定 5）
  * `--out <json>`（既定 outputs/bench/karume/<日付>_geometry-sweep/geometry-sweep-<adapter>-<時刻>.json）。
  *
  * アダプタが `timestamp-query` を列挙すれば `acquireGpu({ gpuTiming: true })` で取り、単位は

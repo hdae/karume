@@ -30,7 +30,9 @@ listens only on the loopback interface. The inputs are synthetic, so no model is
 
 ## Using the page
 
-- **op** — the kernel families to sweep (all are checked by default).
+- **op** — the kernel families to sweep (all are checked by default): `linear`, `matmul` (mirrors
+  of `linear` cases — no census has a rank-2 matmul), `bmm` (rows of the Anima op census),
+  `i8a8-linear`, `attention`, `i8a8-attention`, and `conv2d`.
 - **候補** (candidates) — `quick` runs the default geometry plus 4–5 others per case; `full` runs
   the whole grid and takes a long time on a slow GPU.
 - **rounds** — timed passes per geometry (default 5; the minimum is kept).

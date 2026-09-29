@@ -8,14 +8,29 @@
  *
  * `censusCount` は census の `count`（そのグラフ 1 本 = 各コンポーネント 1 回の forward の中の
  * ノード本数）。M = 1024（512²）の行は census に無い — 1024px の行の M（S = 4096）を 512px の
- * S = 1024 に置き換えたもので、ノード本数は解像度に依らないので同じ count を載せる。
+ * S = 1024 に置き換えたもので、ノード本数は解像度に依らないので同じ count を載せる。linear の
+ * M = 16 / 32 / 128 / 256 も同じく census の行の M を置き換えた形で、行数バケット（≤ 64 / 65〜512）の
+ * 中を 1 点で決めない（ADR 0115 決定 6）ための対照。
+ *
+ * rank-2 の matmul は census に無い（anima を含む全系列の census に行が無い）。matmul のケースは
+ * linear の各バケット 1 本の**鏡像**（同じ M / N / K・B 側は `[K,N]`）で、census 由来でないことを
+ * `censusCount: 0` と `mirrorOf`（鏡像元の linear のケース id）で表す。
  */
 
 /** 掃引の op 族（CLI の `--op` とページのチェックボックスの語彙）。 */
-export type SweepOp = "linear" | "i8a8-linear" | "attention" | "i8a8-attention" | "conv2d";
+export type SweepOp =
+  | "linear"
+  | "matmul"
+  | "bmm"
+  | "i8a8-linear"
+  | "attention"
+  | "i8a8-attention"
+  | "conv2d";
 
 export const SWEEP_OPS: readonly SweepOp[] = [
   "linear",
+  "matmul",
+  "bmm",
   "i8a8-linear",
   "attention",
   "i8a8-attention",
@@ -34,6 +49,38 @@ export type LinearCase = {
   readonly k: number;
   readonly censusCount: number;
   /** census のどの行か（コンポーネントと census 上の入力形）。 */
+  readonly source: string;
+};
+
+/**
+ * matmul（`a[M,K] · b[K,N]`・f32 × f32）。linear と同じ GEMM 骨格で、違いは B 側を `[K,N]` の
+ * dense で読む充填と bias が無いことだけ。census に行が無いので linear のケースの鏡像を測る。
+ */
+export type MatmulCase = {
+  readonly id: string;
+  readonly op: "matmul";
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  /** census に matmul の行は無いので常に 0。 */
+  readonly censusCount: 0;
+  /** 鏡像元の linear のケース id（同じ M / N / K）。 */
+  readonly mirrorOf: string;
+  readonly source: string;
+};
+
+/**
+ * bmm（`a[B,M,K] · b[B,K,N]`・f32 × f32）。バッチは dispatch の z 軸で、タイル幾何のバケットは
+ * 行列 1 枚の M（src/runtime/recipe-builders/linear.ts の buildBmm）。
+ */
+export type BmmCase = {
+  readonly id: string;
+  readonly op: "bmm";
+  readonly batch: number;
+  readonly m: number;
+  readonly n: number;
+  readonly k: number;
+  readonly censusCount: number;
   readonly source: string;
 };
 
@@ -76,7 +123,7 @@ export type Conv2dCase = {
   readonly source: string;
 };
 
-export type SweepCase = LinearCase | AttentionCase | Conv2dCase;
+export type SweepCase = LinearCase | MatmulCase | BmmCase | AttentionCase | Conv2dCase;
 
 /** census の attention の `attrs.scale`（DiT の self / cross 共通 — `128^-0.25`）。 */
 const DIT_ATTENTION_SCALE = 0.2973017692565918;
@@ -125,6 +172,16 @@ const LINEAR_CASES: readonly LinearCase[] = [
     censusCount: 56,
     source: "transformer [1,512,1024] × [2048,1024]",
   },
+  ...[128, 256].map((m): LinearCase => ({
+    // 65〜512 のバケットの中の対照（上の M 512 の行の M を置換）
+    id: linearId("linear", m, 2048, 1024),
+    op: "linear",
+    m,
+    n: 2048,
+    k: 1024,
+    censusCount: 56,
+    source: `transformer [1,${m},1024] × [2048,1024]（census の M 512 を ${m} に置換）`,
+  })),
   {
     // 小 M の対照（census: text_encoder の `[1,64,1024] × [3072,1024]`・格納 f16）
     id: linearId("linear", 64, 3072, 1024),
@@ -135,8 +192,62 @@ const LINEAR_CASES: readonly LinearCase[] = [
     censusCount: 56,
     source: "text_encoder [1,64,1024] × [3072,1024]",
   },
+  ...[16, 32].map((m): LinearCase => ({
+    // ≤ 64 のバケットの中の対照（上の M 64 の行の M を置換）
+    id: linearId("linear", m, 3072, 1024),
+    op: "linear",
+    m,
+    n: 3072,
+    k: 1024,
+    censusCount: 56,
+    source: `text_encoder [1,${m},1024] × [3072,1024]（census の M 64 を ${m} に置換）`,
+  })),
   ...ditLinear("i8a8-linear"),
 ];
+
+/**
+ * matmul の鏡像 3 本（linear の行数バケット ≤ 64 / 65〜512 / > 512 から 1 本ずつ — 同じ M / N / K）。
+ * census に matmul の行が無いので、表（gemmRows）が matmul にも効く以上、その骨格で遅い幾何を
+ * 採らないための観測として置く。
+ */
+const MATMUL_CASES: readonly MatmulCase[] = [
+  { m: 64, n: 3072, k: 1024 },
+  { m: 512, n: 2048, k: 1024 },
+  { m: 4096, n: 2048, k: 2048 },
+].map(({ m, n, k }) => {
+  const mirrorOf = linearId("linear", m, n, k);
+  return {
+    id: `matmul-m${m}-n${n}-k${k}`,
+    op: "matmul" as const,
+    m,
+    n,
+    k,
+    censusCount: 0 as const,
+    mirrorOf,
+    source: `${mirrorOf} の鏡像 [${m},${k}] × [${k},${n}]（census に matmul の行は無い）`,
+  };
+});
+
+/**
+ * bmm 5 本（census: text_encoder の 2 形・text_conditioner の 3 形。形は
+ * `[B,M,K] × [B,K,N]` で census の in_shapes そのまま）。
+ */
+const BMM_CASES: readonly BmmCase[] = [
+  { component: "text_encoder", batch: 16, m: 64, k: 64, n: 128, count: 28 },
+  { component: "text_encoder", batch: 16, m: 64, k: 128, n: 64, count: 28 },
+  { component: "text_conditioner", batch: 16, m: 512, k: 64, n: 64, count: 12 },
+  { component: "text_conditioner", batch: 16, m: 512, k: 64, n: 512, count: 6 },
+  { component: "text_conditioner", batch: 16, m: 512, k: 512, n: 64, count: 6 },
+].map(({ component, batch, m, k, n, count }) => ({
+  id: `bmm-b${batch}-m${m}-n${n}-k${k}`,
+  op: "bmm" as const,
+  batch,
+  m,
+  n,
+  k,
+  censusCount: count,
+  source: `${component} bmm [${batch},${m},${k}] × [${batch},${k},${n}]`,
+}));
 
 /** DiT の attention 4 形（census: transformer の self `[1,16,4096,128]`²・cross N = 512・各 count 28）。 */
 const DIT_ATTENTION: readonly { readonly kind: string; readonly m: number; readonly n: number }[] =
@@ -193,6 +304,8 @@ const CONV2D_CASES: readonly Conv2dCase[] = [
 /** 全ケース（op 族の順 = {@link SWEEP_OPS}）。 */
 export const SWEEP_CASES: readonly SweepCase[] = [
   ...LINEAR_CASES.filter((c) => c.op === "linear"),
+  ...MATMUL_CASES,
+  ...BMM_CASES,
   ...LINEAR_CASES.filter((c) => c.op === "i8a8-linear"),
   ...ATTENTION_CASES.filter((c) => c.op === "attention"),
   ...ATTENTION_CASES.filter((c) => c.op === "i8a8-attention"),
@@ -203,8 +316,11 @@ export const SWEEP_CASES: readonly SweepCase[] = [
 export const caseFlops = (sweepCase: SweepCase): number => {
   switch (sweepCase.op) {
     case "linear":
+    case "matmul":
     case "i8a8-linear":
       return 2 * sweepCase.m * sweepCase.n * sweepCase.k;
+    case "bmm":
+      return 2 * sweepCase.batch * sweepCase.m * sweepCase.n * sweepCase.k;
     case "attention":
     case "i8a8-attention":
       return 2 * sweepCase.batchHeads * sweepCase.m * sweepCase.n * sweepCase.d;
@@ -215,12 +331,18 @@ export const caseFlops = (sweepCase: SweepCase): number => {
   }
 };
 
-/** 表示用の形状 1 行。 */
+/**
+ * 表示用の形状 1 行。生成器（profile.ts の slotOf）が linear / matmul / bmm の M を正規表現で
+ * 読むので、M の綴り（`M{m}`）を変えるときは slotOf と揃える。
+ */
 export const caseShape = (sweepCase: SweepCase): string => {
   switch (sweepCase.op) {
     case "linear":
+    case "matmul":
     case "i8a8-linear":
       return `M${sweepCase.m} N${sweepCase.n} K${sweepCase.k}`;
+    case "bmm":
+      return `B${sweepCase.batch} M${sweepCase.m} N${sweepCase.n} K${sweepCase.k}`;
     case "attention":
     case "i8a8-attention":
       return `${sweepCase.stage} BH${sweepCase.batchHeads} M${sweepCase.m} N${sweepCase.n} D${sweepCase.d}`;

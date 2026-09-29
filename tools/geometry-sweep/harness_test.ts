@@ -5,7 +5,15 @@ import { gemmMTileGeometry } from "../../packages/runtime/src/kernels/gemm.ts";
 import { defaultGemmGeometry } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
 import { defaultI8a8Geometry } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
 import { linearWgsl } from "../../packages/runtime/src/kernels/linear.ts";
-import type { AttentionCase, Conv2dCase, LinearCase, SweepCase } from "./cases.ts";
+import {
+  type AttentionCase,
+  type BmmCase,
+  type Conv2dCase,
+  type LinearCase,
+  type MatmulCase,
+  SWEEP_CASES,
+  type SweepCase,
+} from "./cases.ts";
 import {
   conv2dCandidate,
   gemmCandidate,
@@ -141,6 +149,20 @@ Deno.test("束縛表の書き込み先の位置が WGSL と違えば落ちる（
     Error,
     "書き込み束縛",
   );
+});
+
+Deno.test("matmul / bmm の全ケースの束縛表は、既定幾何の WGSL の storage の役割と噛み合う", () => {
+  const dense = SWEEP_CASES.filter((target) => target.op === "matmul" || target.op === "bmm");
+  assertEquals(new Set(dense.map((target) => target.op)), new Set(["matmul", "bmm"]));
+  for (const target of dense) {
+    const plan = casePlan(target, 65535, false);
+    const launch = plan.launch(plan.defaultCandidate);
+    assertBindingRoles(launch, parseStorageRoles(launch.wgsl));
+    // 束縛の名前は全て資源表にあり、出力は書き込み先
+    const names = new Set(plan.resources.map((spec) => spec.name));
+    for (const name of launch.bindings) assert(names.has(name), `${target.id}: ${name}`);
+    assert(launch.writes.includes(plan.output), target.id);
+  }
 });
 
 Deno.test("束縛表の本数が WGSL と違えば落ちる", () => {
@@ -366,5 +388,100 @@ Deno.test({
       destroySweepContext(context);
       gpu.destroy();
     }
+  },
+});
+
+/**
+ * dense の GEMM（matmul / bmm — bias 無し・B 側 `[K,N]`）の CPU 参照 2 本（非融合 / fma 縮約）。
+ * 丸め順は linear の参照と同じ（K 昇順の逐次積和）。bmm は行列 `batch` 枚を連続に並べる。
+ */
+const denseReferences = async (
+  target: MatmulCase | BmmCase,
+): Promise<{ readonly plain: string; readonly contracted: string }> => {
+  const batch = target.op === "bmm" ? target.batch : 1;
+  const { m, n, k } = target;
+  const a = new Float32Array(resourceWords(target, "a").buffer);
+  const b = new Float32Array(resourceWords(target, "b").buffer);
+  const plain = new Float32Array(batch * m * n);
+  const contracted = new Float32Array(batch * m * n);
+  for (let z = 0; z < batch; z += 1) {
+    for (let row = 0; row < m; row += 1) {
+      for (let col = 0; col < n; col += 1) {
+        let acc = 0;
+        let fused = 0;
+        for (let at = 0; at < k; at += 1) {
+          const left = a[(z * m + row) * k + at];
+          const right = b[(z * k + at) * n + col];
+          acc = Math.fround(acc + Math.fround(left * right));
+          fused = fmaF32(left, right, fused);
+        }
+        plain[(z * m + row) * n + col] = acc;
+        contracted[(z * m + row) * n + col] = fused;
+      }
+    }
+  }
+  return { plain: await digestOf(plain), contracted: await digestOf(contracted) };
+};
+
+/**
+ * 既定幾何と 64×64/256 の 2 行を測り、既定の出力が CPU 参照のどちらかとビット同一で、もう 1 行が
+ * 既定と一致すること（束縛・params・dispatch の取り違えは参照と食い違う）。
+ */
+const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promise<void> => {
+  const { plain, contracted } = await denseReferences(target);
+  const gpu = await acquireGpu(timestampQuery ? { gpuTiming: true } : {});
+  const context = await createSweepContext(gpu, "deno-raw-tick");
+  try {
+    const { rows } = await sweepCase(context, target, [GEMM_64X64], { rounds: 1 });
+    assertEquals(rows.length, 2);
+    for (const row of rows) assertEquals(row.error, undefined, row.error);
+    const digest = rows[0].outputSha256;
+    assert(
+      digest === plain || digest === contracted,
+      `${target.op}: 出力 ${digest} が非融合の CPU 参照 ${plain} とも fma 縮約の CPU 参照 ${contracted} とも一致しない（束縛・params・dispatch のどれかが違う）`,
+    );
+    assertEquals(rows[1].identicalToDefault, true);
+  } finally {
+    destroySweepContext(context);
+    gpu.destroy();
+  }
+};
+
+Deno.test({
+  name:
+    "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
+  ignore: adapter === null,
+  fn: async () => {
+    // M / N / K を全て違う値にする（m・n・k の取り違えが寸法の食い違いとして出る）
+    await assertDenseMatchesReference({
+      id: "test-matmul-cpu-m64-n48-k32",
+      op: "matmul",
+      m: 64,
+      n: 48,
+      k: 32,
+      censusCount: 0,
+      mirrorOf: "test",
+      source: "test",
+    });
+  },
+});
+
+Deno.test({
+  name:
+    "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
+  ignore: adapter === null,
+  fn: async () => {
+    // 入力は資源ごとの擬似乱数列なのでバッチごとに値が違う — z のオフセットを取り違えると
+    // （全バッチが 0 枚目を読む・書き先が重なる・書き残しが 0 のまま）参照と一致しない
+    await assertDenseMatchesReference({
+      id: "test-bmm-cpu-b3-m64-n48-k32",
+      op: "bmm",
+      batch: 3,
+      m: 64,
+      n: 48,
+      k: 32,
+      censusCount: 1,
+      source: "test",
+    });
   },
 });

@@ -7,7 +7,8 @@ slower, the int8 `tile128x64` tile ~29×, and the medium `reg64x32` tile ~4.4×.
 the tile geometry. This tool measures **the same shape with only the geometry changed**, so the two
 machines can be compared by ratios.
 
-For every case (a kernel and a shape taken from Anima's op census) it runs the production kernel
+For every case (a kernel and a shape taken from Anima's op census, or derived from one of its
+rows — see "What is measured") it runs the production kernel
 generator with an explicit geometry for each candidate, times one dispatch, and checks that the
 output is bit-identical to the one produced by the default geometry.
 
@@ -21,8 +22,8 @@ deno run -A tools/geometry-sweep/main.ts --quick --op linear --op i8a8-linear
 
 Flags:
 
-- `--op <family>` (repeatable; default: all) — `linear`, `i8a8-linear`, `attention`,
-  `i8a8-attention`, `conv2d`.
+- `--op <family>` (repeatable; default: all) — `linear`, `matmul`, `bmm`, `i8a8-linear`,
+  `attention`, `i8a8-attention`, `conv2d`.
 - `--case <id>` (repeatable) — only these cases (ids are listed in `cases.ts` and printed in the
   table).
 - `--quick` — a small candidate set (the defaults plus 4–5 geometries). Without it, the full grid
@@ -85,12 +86,12 @@ Flags:
 
 Each field of the profile is one class of cases:
 
-| field                                                 | cases                                                              |
-| ----------------------------------------------------- | ------------------------------------------------------------------ |
-| `gemmRows[0]`, `gemmRows[1]`, `gemmRows[2]`           | `linear` with M ≤ 64, 65–512, and above 512 (the runtime's bucket) |
-| `attention.qk`, `attention.pv`                        | `attention`, QK and PV                                             |
-| `conv2d.rows64`, `conv2d.rows32`                      | `conv2d`, by the m-tile (64 or 32 rows) of the case's default row  |
-| `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv` | `i8a8-linear`, and `i8a8-attention` QK and PV                      |
+| field                                                 | cases                                                                                                               |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `gemmRows[0]`, `gemmRows[1]`, `gemmRows[2]`           | `linear`, `matmul`, and `bmm` with M ≤ 64, 65–512, and above 512 (the runtime's bucket; for `bmm`, M of one matrix) |
+| `attention.qk`, `attention.pv`                        | `attention`, QK and PV                                                                                              |
+| `conv2d.rows64`, `conv2d.rows32`                      | `conv2d`, by the m-tile (64 or 32 rows) of the case's default row                                                   |
+| `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv` | `i8a8-linear`, and `i8a8-attention` QK and PV                                                                       |
 
 For each class, a geometry is a candidate only if, in **every** case of the class, its output
 matched the default geometry's output and its speed-up over the default is at least
@@ -102,8 +103,16 @@ different baseline (a sweep from an older runtime, or shifted class boundaries).
 cases in the sweep gets the runtime's default. When several
 sweeps measured the same case and geometry, the speed-up is the geometric mean of those
 measurements, and a single mismatched or failed measurement disqualifies the geometry. The
-`gemmRows` fields are decided from `linear` cases and also apply to `matmul` and `bmm`, which use
-the same kernel skeleton.
+`gemmRows` fields apply to `linear`, `matmul`, and `bmm` alike (the same kernel skeleton reads
+the same table), so they are decided from the cases of all three: a geometry that is fast on
+`linear` but below `--min-speedup` on a `matmul` or `bmm` case of the same bucket is not
+adopted.
+
+Because a candidate must have been measured in **every** case of its class, sweep new cases with
+the same candidate set as the existing sweeps of that class. Combining a `--quick` sweep of the
+new cases with a full sweep of the old ones drops every geometry that only the full grid
+contains, since the quick sweep never measured it in the new cases; a class that gains cases must
+be re-swept with the full grid.
 
 The generated file starts with a comment that must not be edited by hand: the command that
 regenerates it, the path, SHA-256, and date of each sweep, the adapter, and for each class the
@@ -116,23 +125,31 @@ is the one the profile was generated from.
 The subcommand does not edit `geometry-profiles/index.ts`. For a new id, it prints the import to
 add and the constant to append to `BUILTIN_GEOMETRY_PROFILES`.
 
-`apple-metal-3.ts` combines the quick sweep (all five families, including int8) and the full sweep
-(`linear`, `attention`, and `conv2d` over the whole grid) on the Apple M2 (Chrome); the command
-that regenerates it is at the top of the file.
+`apple-metal-3.ts` combines the quick sweep (the five families of that time, including int8; no
+`matmul` or `bmm` cases) and the full sweep (`linear`, `attention`, and `conv2d` over the whole
+grid) on the Apple M2 (Chrome). `nvidia-blackwell.ts` comes from one full sweep of the same five
+families on the RTX 5070 Ti (Windows, Chrome). The command that regenerates each file is at the
+top of the file.
 
 ## What is measured
 
 The cases (`cases.ts`) are copied from the Anima op census
 (`outputs/bench/karume-anima/2026-09-04_op-census/summary.json`, 1024px, S = 4096); the 512px rows
-replace M = 4096 with 1024.
+replace M = 4096 with 1024. The `linear` rows with M = 16 and 32 replace M = 64 of the text encoder
+row, and those with M = 128 and 256 replace M = 512 of the cross-attention k / v projection, so
+that each row bucket is measured at more than one point. `bmm` rows are the census rows as they
+are. No census has a rank-2 `matmul` row, so the `matmul` cases **mirror** one `linear` case per
+row bucket (the same M, N, and K, with B read as `[K,N]`); they have `censusCount` 0.
 
-| family           | kernel                                | shapes                                                                                                              |
-| ---------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `linear`         | f32 GEMM, f16 weights                 | DiT M ∈ {1024, 4096} × (N, K) ∈ {(2048, 2048), (8192, 2048), (2048, 8192)}; M 512 K 1024 N 2048; M 64 K 1024 N 3072 |
-| `i8a8-linear`    | int8 × int8 dot product               | the DiT shapes above                                                                                                |
-| `attention`      | fused attention QK and PV, f32 scores | B·H 16, D 128: self M = N ∈ {1024, 4096}; cross M ∈ {1024, 4096}, N 512                                             |
-| `i8a8-attention` | int8 QK and PV, f16 scores (s16)      | the attention shapes above                                                                                          |
-| `conv2d`         | implicit GEMM, f16 weights            | the top 3 VAE layers (Cout 96 at 512², 192 at 256², 384 at 128²)                                                    |
+| family           | kernel                                 | shapes                                                                                                                                        |
+| ---------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `linear`         | f32 GEMM, f16 weights                  | DiT M ∈ {1024, 4096} × (N, K) ∈ {(2048, 2048), (8192, 2048), (2048, 8192)}; M ∈ {128, 256, 512} K 1024 N 2048; M ∈ {16, 32, 64} K 1024 N 3072 |
+| `matmul`         | f32 GEMM, f32 × f32                    | mirrors of `linear`: M 64 K 1024 N 3072; M 512 K 1024 N 2048; M 4096 K 2048 N 2048                                                            |
+| `bmm`            | f32 batched GEMM (batch on the z axis) | B 16: text encoder (M, K, N) ∈ {(64, 64, 128), (64, 128, 64)}; text conditioner (M, K, N) ∈ {(512, 64, 64), (512, 64, 512), (512, 512, 64)}   |
+| `i8a8-linear`    | int8 × int8 dot product                | the DiT shapes above                                                                                                                          |
+| `attention`      | fused attention QK and PV, f32 scores  | B·H 16, D 128: self M = N ∈ {1024, 4096}; cross M ∈ {1024, 4096}, N 512                                                                       |
+| `i8a8-attention` | int8 QK and PV, f16 scores (s16)       | the attention shapes above                                                                                                                    |
+| `conv2d`         | implicit GEMM, f16 weights             | the top 3 VAE layers (Cout 96 at 512², 192 at 256², 384 at 128²)                                                                              |
 
 The candidates (`geometries.ts`) are grids filtered by the runtime's own geometry checks: f32
 `regM ∈ {1,2,4,8}`, `regN ∈ {4,8}`, `wgX, wgY ∈ {4,8,16}` with at most 256 threads and tile sides
@@ -140,7 +157,8 @@ up to 128; int8 `regM, regN ∈ {4,8}`, `wgX ∈ {8,16}`, `wgY ∈ {4,8,16}`, `t
 uses the f32 grid restricted to n-tiles of 64 and 128. The geometry that the production code picks
 for the case always runs first and is marked as the default. Geometry names use the same spelling
 as the pipeline keys of each op, without the `v4` marker (`reg128x128r8x8w16` for f32 linear and
-attention, `tile128x64r8x8w8x16k16` for int8, `igemm64x128:wg16x8` for conv2d).
+attention, `tile128x64r8x8w8x16k16` for int8, `igemm64x128:wg16x8` for conv2d). `matmul` and `bmm`
+use the f32 grid and the same default as `linear` (the row bucket of M).
 
 Inputs are deterministic pseudo-random data; PV cases first run QK and the row statistics once
 with the default geometry to get realistic scores.

@@ -34,7 +34,7 @@
  * 渡している `binds` の並び（binding 1 から順）を写した表。表は PipelineCache が WGSL から採る
  * storage の役割（`roles` — src/gpu/pipeline-cache.ts `parseStorageRoles`）と突き合わせ、束縛の本数と
  * 書き込み先の位置が食い違えば行を失敗にする（{@link assertBindingRoles}）。役割の同じ束縛どうしの
- * 入れ替わりは役割では見えない — linear は CPU 参照の突合テスト（harness_test.ts）が検出器。寸法の
+ * 入れ替わりは役割では見えない — linear / matmul / bmm は CPU 参照の突合テスト（harness_test.ts）が検出器。寸法の
  * 式は各 recipe-builder の確保と params 関数から写す（{@link casePlan} の各枝に `file:line`）。
  *
  * ## ビット同一の確認
@@ -73,6 +73,8 @@ import {
   i8a8TileN,
 } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
 import { linearKey, linearParams, linearWgsl } from "../../packages/runtime/src/kernels/linear.ts";
+import { matmulKey, matmulParams, matmulWgsl } from "../../packages/runtime/src/kernels/matmul.ts";
+import { bmmKey, bmmParams, bmmWgsl } from "../../packages/runtime/src/kernels/bmm.ts";
 import {
   dp4aAvailable,
   linearI8a8Key,
@@ -121,10 +123,12 @@ import {
 } from "../opbench/bench.ts";
 import {
   type AttentionCase,
+  type BmmCase,
   caseFlops,
   caseShape,
   type Conv2dCase,
   type LinearCase,
+  type MatmulCase,
   type SweepCase,
 } from "./cases.ts";
 import {
@@ -271,6 +275,80 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
           tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
           tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
           1,
+        ],
+      };
+    },
+  };
+};
+
+/** f32 matmul — src/runtime/recipe-builders/linear.ts:65-107（buildMatmul）。 */
+const matmulPlan = (sweepCase: MatmulCase, limit: number): CasePlan => {
+  const { m, n, k } = sweepCase;
+  // linear.ts:77
+  const v4 = gemmUsesVec4(k, n);
+  return {
+    resources: [
+      // a[m,k] / b[k,n] / c[m,n]（束縛 1..3 = binds[0] / binds[1] / outs[0] の順・linear.ts:96-100。
+      // 名前は WGSL の束縛名 — kernels/gemm.ts の denseWgsl）
+      { name: "a", bytes: m * k * F32, fill: "f32" },
+      { name: "b", bytes: k * n * F32, fill: "f32" },
+      { name: "c", bytes: m * n * F32, fill: "none" },
+    ],
+    prelude: [],
+    output: "c",
+    // 掃引の既定 = 既定プロファイルの幾何（行数バケット `gemmGeometryForRows(m)` — 比の土台）。
+    // Session が実際に使う幾何は adapter のプロファイル（linear.ts:81 の gemmRowsGeometry）
+    defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
+    launch: (candidate) => {
+      const geometry = gemmOf(candidate, sweepCase.id);
+      return {
+        // linear.ts:82-87
+        key: matmulKey(v4, m, geometry),
+        wgsl: matmulWgsl(v4, m, geometry),
+        params: matmulParams(m, n, k),
+        bindings: ["a", "b", "c"],
+        writes: ["c"],
+        // linear.ts:101-105
+        workgroups: [
+          tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
+          tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
+          1,
+        ],
+      };
+    },
+  };
+};
+
+/** f32 bmm（バッチは z 軸）— src/runtime/recipe-builders/linear.ts:113-153（buildBmm）。 */
+const bmmPlan = (sweepCase: BmmCase, limit: number): CasePlan => {
+  const { batch, m, n, k } = sweepCase;
+  // linear.ts:123
+  const v4 = gemmUsesVec4(k, n);
+  return {
+    resources: [
+      // a[batch,m,k] / b[batch,k,n] / c[batch,m,n]（束縛 1..3 = linear.ts:141-145）
+      { name: "a", bytes: batch * m * k * F32, fill: "f32" },
+      { name: "b", bytes: batch * k * n * F32, fill: "f32" },
+      { name: "c", bytes: batch * m * n * F32, fill: "none" },
+    ],
+    prelude: [],
+    output: "c",
+    // 掃引の既定 = 既定プロファイルの幾何（行列 1 枚の m のバケット — linear.ts:124-126）
+    defaultCandidate: gemmCandidate(gemmGeometryForRows(m)),
+    launch: (candidate) => {
+      const geometry = gemmOf(candidate, sweepCase.id);
+      return {
+        // linear.ts:127-132（行窓無し）
+        key: bmmKey(v4, m, undefined, geometry),
+        wgsl: bmmWgsl(v4, m, undefined, geometry),
+        params: bmmParams(m, n, k),
+        bindings: ["a", "b", "c"],
+        writes: ["c"],
+        // linear.ts:146-151（バッチは z 軸の 1 workgroup = 1 バッチ）
+        workgroups: [
+          tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
+          tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
+          tiledWorkgroups(batch, 1, limit, sweepCase.id),
         ],
       };
     },
@@ -538,6 +616,10 @@ export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): Ca
   switch (sweepCase.op) {
     case "linear":
       return linearPlan(sweepCase, limit);
+    case "matmul":
+      return matmulPlan(sweepCase, limit);
+    case "bmm":
+      return bmmPlan(sweepCase, limit);
     case "i8a8-linear":
       return i8a8LinearPlan(sweepCase, limit, dp4a);
     case "attention":
@@ -553,6 +635,8 @@ export const casePlan = (sweepCase: SweepCase, limit: number, dp4a: boolean): Ca
 export const candidatesFor = (sweepCase: SweepCase, quick: boolean): GeometryCandidate[] => {
   switch (sweepCase.op) {
     case "linear":
+    case "matmul":
+    case "bmm":
     case "attention":
       return quick ? quickGemmCandidates() : gemmCandidates();
     case "conv2d":

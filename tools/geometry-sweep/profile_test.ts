@@ -47,6 +47,20 @@ const linearCase = (m: number): CaseRef => ({
   shape: `M${m} N64 K64`,
 });
 
+/** matmul の shape は linear と同じ綴り（cases.ts の caseShape）。 */
+const matmulCase = (m: number): CaseRef => ({
+  caseId: `matmul-m${m}`,
+  op: "matmul",
+  shape: `M${m} N64 K64`,
+});
+
+/** bmm の shape はバッチを前に置く（cases.ts の caseShape — バケットは行列 1 枚の M）。 */
+const bmmCase = (batch: number, m: number): CaseRef => ({
+  caseId: `bmm-b${batch}-m${m}`,
+  op: "bmm",
+  shape: `B${batch} M${m} N64 K64`,
+});
+
 type Measured = {
   readonly speedup?: number;
   readonly identical?: boolean;
@@ -218,6 +232,42 @@ describe("deriveProfile: 規則の抽出", () => {
     assertEquals(verdictOf(verdicts, "gemmRows[2]").cases, ["linear-m513"]);
     assertEquals(verdictOf(verdicts, "conv2d.rows32").cases, ["conv2d-c96-m32"]);
     assertEquals(verdictOf(verdicts, "conv2d.rows64").cases, ["conv2d-c192-m64"]);
+  });
+
+  it("matmul / bmm の行は shape の M で gemmRows の欄に入る（bmm はバッチ数に依らず行列 1 枚の M）", () => {
+    const small: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
+    const verdicts = deriveProfile([
+      source([
+        ...caseRows(matmulCase(64), small, []),
+        ...caseRows(bmmCase(600, 64), small, []),
+        ...caseRows(matmulCase(65), A, []),
+        ...caseRows(bmmCase(16, 512), A, []),
+        ...caseRows(matmulCase(4096), BIG, []),
+      ]),
+    ], OPTIONS);
+    assertEquals(verdictOf(verdicts, "gemmRows[0]").cases, ["bmm-b600-m64", "matmul-m64"]);
+    assertEquals(verdictOf(verdicts, "gemmRows[1]").cases, ["bmm-b16-m512", "matmul-m65"]);
+    assertEquals(verdictOf(verdicts, "gemmRows[2]").cases, ["matmul-m4096"]);
+  });
+
+  it("matmul / bmm の観測も欄の全ケースに数える（そこで ×1.05 未満なら linear で速くても採らない）", () => {
+    const verdicts = deriveProfile([
+      source([
+        ...caseRows(linearCase(1024), BIG, [[A, { speedup: 1.5 }], [B, { speedup: 1.2 }]]),
+        ...caseRows(matmulCase(4096), BIG, [[A, { speedup: 1.02 }], [B, { speedup: 1.2 }]]),
+        ...caseRows(linearCase(512), A, [[B, { speedup: 1.5 }]]),
+        ...caseRows(bmmCase(16, 512), A, [[B, { speedup: 1.04 }]]),
+      ]),
+    ], OPTIONS);
+    const large = verdictOf(verdicts, "gemmRows[2]");
+    assertEquals(large.cases, ["linear-m1024", "matmul-m4096"]);
+    assertEquals(large.outcome.kind, "adopted");
+    assertEquals(large.outcome.geometry, B);
+    assertStringIncludes(rejectionOf(large, A), "matmul-m4096 で ×1.020 < ×1.050");
+    const middle = verdictOf(verdicts, "gemmRows[1]");
+    assertEquals(middle.outcome.kind, "default");
+    assertEquals(middle.outcome.geometry, A);
+    assertStringIncludes(rejectionOf(middle, B), "bmm-b16-m512 で ×1.040 < ×1.050");
   });
 
   it("掃引にケースが無いクラスは runtime の既定を書き、理由を残す", () => {

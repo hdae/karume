@@ -16,11 +16,11 @@
  * プロファイルが違えばキーも違い、device 寿命のパイプラインキャッシュで取り違えは起きない。
  *
  * 適用範囲（プロファイルを引く経路）は matmul / bmm / linear の行数バケット・融合 attention f32 の
- * ①QK / ③PV・conv2d の implicit GEMM・i8a8 の linear / 融合 attention ①QK / ③PV だけ。行数バケットは
- * 掃引が linear でしか測っていないが、matmul / bmm は linear と同じ GEMM 骨格（幾何の意味・K 縮約順が
- * 同じで、B 側の充填だけが違う）なので linear の実測で決めた表を共有する — matmul / bmm 単独の速度は
- * 掃引に無い。states 形 attention（①ₜ / ③ₜ）・分解 attention の行ブロック・conv1d の implicit GEMM は
- * 既定の選択のまま（掃引の対象外 — 測っていない経路を表で動かさない）。
+ * ①QK / ③PV・conv2d の implicit GEMM・i8a8 の linear / 融合 attention ①QK / ③PV だけ。行数バケットの
+ * 表は matmul / bmm / linear の 3 経路で共有する（同じ GEMM 骨格 — 幾何の意味・K 縮約順が同じで、
+ * B 側の充填だけが違う）。掃引は 3 経路のケースを持ち、生成器はその全部で速い幾何だけを採る
+ * （tools/geometry-sweep の profile）。states 形 attention（①ₜ / ③ₜ）・分解 attention の行ブロック・
+ * conv1d の implicit GEMM は既定の選択のまま（掃引の対象外 — 測っていない経路を表で動かさない）。
  */
 
 import { CodegenError } from "../codegen/errors.ts";

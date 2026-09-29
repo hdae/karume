@@ -1,6 +1,7 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { gemmUsesVec4 } from "../../packages/runtime/src/kernels/gemm.ts";
+import { GEMM_ROWS_BUCKETS } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
 import { LINEAR_I8A8_MAX_K } from "../../packages/runtime/src/kernels/linear-i8a8.ts";
 import { attentionScoreUsesF16 } from "../../packages/runtime/src/kernels/score-storage.ts";
 import { conv2dIgemmMTile, conv2dUsesVec4 } from "../../packages/runtime/src/kernels/conv2d.ts";
@@ -15,17 +16,51 @@ describe("形状表", () => {
     }
   });
 
-  it("census 上の本数は正の整数で、演算数は正", () => {
+  it("census 由来のケースは census 上の本数が正の整数で、演算数は正", () => {
     for (const sweepCase of SWEEP_CASES) {
+      if (sweepCase.op === "matmul") continue;
       assert(Number.isInteger(sweepCase.censusCount) && sweepCase.censusCount > 0, sweepCase.id);
       assert(caseFlops(sweepCase) > 0, sweepCase.id);
     }
+  });
+
+  it("matmul は census に無い鏡像で、本数 0・鏡像元は同じ M / N / K の linear のケース", () => {
+    const matmuls = SWEEP_CASES.flatMap((sweepCase) =>
+      sweepCase.op === "matmul" ? [sweepCase] : []
+    );
+    assert(matmuls.length > 0);
+    for (const sweepCase of matmuls) {
+      assertEquals(sweepCase.censusCount, 0, sweepCase.id);
+      assert(caseFlops(sweepCase) > 0, sweepCase.id);
+      assertStringIncludes(sweepCase.source, sweepCase.mirrorOf, sweepCase.id);
+      const mirror = SWEEP_CASES.find((other) => other.id === sweepCase.mirrorOf);
+      assert(
+        mirror !== undefined && mirror.op === "linear",
+        `${sweepCase.id}: 鏡像元が linear に無い`,
+      );
+      assertEquals(
+        [mirror.m, mirror.n, mirror.k],
+        [sweepCase.m, sweepCase.n, sweepCase.k],
+        sweepCase.id,
+      );
+    }
+  });
+
+  it("matmul は gemmRows の 3 バケット（≤ 64 / 65〜512 / > 512）を 1 本ずつ持つ", () => {
+    const buckets = SWEEP_CASES.flatMap((sweepCase) =>
+      sweepCase.op === "matmul"
+        ? [GEMM_ROWS_BUCKETS.findIndex((bucket) => sweepCase.m <= bucket.maxRows)]
+        : []
+    );
+    assertEquals(buckets.sort(), [0, 1, 2]);
   });
 
   it("本番と同じ vec4 経路に乗る形だけを持つ（掃引の対象は本番の生成物）", () => {
     for (const sweepCase of SWEEP_CASES) {
       switch (sweepCase.op) {
         case "linear":
+        case "matmul":
+        case "bmm":
           assert(gemmUsesVec4(sweepCase.k, sweepCase.n), sweepCase.id);
           break;
         case "i8a8-linear":
