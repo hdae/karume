@@ -10,7 +10,7 @@
  *
  * 1. 1 compute pass に同じ dispatch を `reps` 本積み、pass の `timestampWrites`（beginning / end）の
  *    差 ÷ `reps` を 1 dispatch の時間とする。`reps` は 1 pass ≈ {@link TARGET_PASS_MS} になる本数
- *    （{@link calibrateReps}・上限 {@link MAX_REPS}）。
+ *    （{@link calibrateReps}・上限は掃引専用の {@link SWEEP_MAX_REPS}）。
  * 2. 代表値は `rounds` 回の **min**（熱ドリフトを吸う）。timestamp の差が負だった round は
  *    0 に丸めて記録に残すが min の候補から外す（全 round が負なら行を失敗にする）。
  * 3. 幾何ごとに、計測の前に pass を「累計 ≥ {@link WARMUP_NS} かつ ≥ {@link WARMUP_MIN_RUNS} 回」まで
@@ -115,7 +115,6 @@ import {
 import { scoreStorageBytes } from "../../packages/runtime/src/kernels/score-storage.ts";
 import {
   calibrateReps,
-  MAX_REPS,
   ROUNDS,
   TARGET_PASS_MS,
   WARMUP_MIN_RUNS,
@@ -151,7 +150,16 @@ import {
   type TimingUnit,
 } from "./report.ts";
 
-export { MAX_REPS, ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS };
+export { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS };
+
+/**
+ * 掃引の `reps` の上限（計測の規約 1）。opbench の `MAX_REPS`（1024）は出力の readback とメモリが
+ * 反復に比例して増えるので打ち切る上限だが、掃引は同じバッファに重ね打ちするので反復を増やしても
+ * readback もメモリも増えない。1 dispatch 15 µs で 1 pass ≈ {@link TARGET_PASS_MS} に要る反復は
+ * 5,334（1024 では 15 ms にしかならず、既定幾何の再測定比が 0.70〜1.55 と揺れた）・5 µs でも
+ * 16,000 で上限内。opbench の `MAX_REPS` は変えない（あちらの打ち切りの理由はそのまま残る）。
+ */
+export const SWEEP_MAX_REPS = 16384;
 
 /**
  * 空回しの打ち切り（計測の規約 3 — opbench の `pinClocks` と同じ 64 回）。reps が上限で頭打ちの
@@ -245,13 +253,13 @@ const i8a8Of = (candidate: GeometryCandidate, where: string): I8a8Geometry => {
 const rawWeightBytes = (payloadBytes: number): number =>
   payloadBytes + ((4 - (payloadBytes % 4)) % 4);
 
-/** f32 linear（重み f16 格納）— src/runtime/recipe-builders/linear.ts:302-329 の GEMM 経路。 */
+/** f32 linear（重み f16 格納）— src/runtime/recipe-builders/linear.ts:310-337 の GEMM 経路。 */
 const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
   const { m, n, k } = sweepCase;
   const v4 = gemmUsesVec4(k, n);
   return {
     resources: [
-      // x[m,k] / W[n,k] / b[n] / out[m,n]（束縛 1..4 = binds の順・linear.ts:318-321。f16 は scale 無し）
+      // x[m,k] / W[n,k] / b[n] / out[m,n]（束縛 1..4 = binds の順・linear.ts:327-331。f16 は scale 無し）
       { name: "x", bytes: m * k * F32, fill: "f32" },
       { name: "w", bytes: rawWeightBytes(n * k * 2), fill: "f16" },
       { name: "bias", bytes: n * F32, fill: "f32" },
@@ -270,7 +278,7 @@ const linearPlan = (sweepCase: LinearCase, limit: number): CasePlan => {
         params: linearParams(m, n, k),
         bindings: ["x", "w", "bias", "out"],
         writes: ["out"],
-        // linear.ts:323-327
+        // linear.ts:332-336
         workgroups: [
           tiledWorkgroups(n, gemmTileN(geometry), limit, sweepCase.id),
           tiledWorkgroups(m, gemmTileM(geometry), limit, sweepCase.id),
@@ -1104,7 +1112,7 @@ const timeLaunch = async (
   let probeNs: number;
   for (;;) {
     const { wallNs } = await runPass(context, ready, reps, false);
-    if (wallNs >= PROBE_MIN_NS || reps >= MAX_REPS) {
+    if (wallNs >= PROBE_MIN_NS || reps >= SWEEP_MAX_REPS) {
       const average = wallNs / reps;
       const slope = previous === undefined
         ? 0
@@ -1115,9 +1123,9 @@ const timeLaunch = async (
       break;
     }
     previous = { reps, wallNs };
-    reps = Math.min(MAX_REPS, reps * 2);
+    reps = Math.min(SWEEP_MAX_REPS, reps * 2);
   }
-  reps = calibrateReps(probeNs);
+  reps = calibrateReps(probeNs, TARGET_PASS_MS, SWEEP_MAX_REPS);
   await warmUp(context, ready, reps);
   const gpuRounds: number[] = [];
   const wallRounds: number[] = [];

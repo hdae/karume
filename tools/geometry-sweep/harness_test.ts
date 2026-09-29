@@ -5,6 +5,7 @@ import { gemmMTileGeometry } from "../../packages/runtime/src/kernels/gemm.ts";
 import { defaultGemmGeometry } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
 import { defaultI8a8Geometry } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
 import { linearWgsl } from "../../packages/runtime/src/kernels/linear.ts";
+import { calibrateReps } from "../opbench/bench.ts";
 import {
   type AttentionCase,
   type BmmCase,
@@ -28,7 +29,9 @@ import {
   destroySweepContext,
   joinChunkDigests,
   resourceWordStream,
+  SWEEP_MAX_REPS,
   sweepCase,
+  TARGET_PASS_MS,
 } from "./harness.ts";
 
 // 形状表の DiT 形は 1 本 数 ms 〜 数百 ms なので、GPU テストは同じ経路の小さい形で回す
@@ -173,6 +176,14 @@ Deno.test("束縛表の本数が WGSL と違えば落ちる", () => {
     Error,
     "storage 束縛",
   );
+});
+
+Deno.test("1 dispatch 15 µs の小さいケースでも、掃引の反復は opbench の上限 1024 を超えて pass が目標長に届く", () => {
+  const nsPerDispatch = 15e3;
+  const reps = calibrateReps(nsPerDispatch, TARGET_PASS_MS, SWEEP_MAX_REPS);
+  assertEquals(reps, 5334);
+  assert(reps > 1024);
+  assert(reps * nsPerDispatch >= TARGET_PASS_MS * 1e6);
 });
 
 Deno.test({

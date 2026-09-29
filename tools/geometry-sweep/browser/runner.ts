@@ -11,8 +11,8 @@ import { SWEEP_CASES, SWEEP_OPS, type SweepOp } from "../cases.ts";
 import {
   createSweepContext,
   destroySweepContext,
-  MAX_REPS,
   runSweep,
+  SWEEP_MAX_REPS,
   type SweepContext,
   TARGET_PASS_MS,
   WARMUP_MIN_RUNS,
@@ -227,7 +227,7 @@ const runOnce = async (): Promise<void> => {
     ops,
     rounds,
     targetPassMs: TARGET_PASS_MS,
-    maxReps: MAX_REPS,
+    maxReps: SWEEP_MAX_REPS,
     warmupNs: WARMUP_NS,
     warmupMinRuns: WARMUP_MIN_RUNS,
     wallTimingNote: WALL_TIMING_NOTE,

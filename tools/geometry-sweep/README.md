@@ -170,9 +170,12 @@ until they add up to at least `WARMUP_NS` (500 ms) and `WARMUP_MIN_RUNS` (3) pas
 passes; the sum uses GPU time when the unit is `ns` and the wall clock otherwise (Deno raw ticks
 are not nanoseconds). A round whose timestamp difference is negative is kept as 0 in `rounds` but
 is not a candidate for the minimum; if every round is negative, the row fails. The repetition
-count is estimated from the wall clock. Without `timestamp-query`, the same procedure uses the
-wall clock of each pass. After the last geometry of a case, the default geometry is measured once
-more with the same procedure, to show whether the machine drifted during the case.
+count is estimated from the wall clock and capped at 16,384 (`SWEEP_MAX_REPS`, not opbench's 1024:
+the sweep writes the same buffers on every repetition, so more repetitions cost no extra readback
+or memory), so even a 5 µs dispatch fills an 80 ms pass. Without `timestamp-query`, the same
+procedure uses the wall clock of each pass. After the last geometry of a case, the default
+geometry is measured once more with the same procedure, to show whether the machine drifted during
+the case.
 
 ## Output (`karume-geometry-sweep/2`)
 

@@ -130,6 +130,10 @@ export type Report = {
     readonly cases?: readonly string[];
     readonly rounds: number;
     readonly targetPassMs: number;
+    /**
+     * この掃引の `reps` の上限（harness.ts の `SWEEP_MAX_REPS`）。掃引専用の上限を分ける前の JSON は
+     * opbench と共有の 1024 — どの上限で取られた掃引かをこの欄で見分ける。
+     */
     readonly maxReps: number;
     /** 幾何ごとの空回しの下限（累計時間 ns — tools/opbench/bench.ts の `WARMUP_NS`）。 */
     readonly warmupNs: number;
