@@ -2,7 +2,8 @@
 //
 // 検証の眼目は 3 点:
 //
-// 1. **選択が決定的**（完全一致 > vendor だけ > 既定・同順位 2 本は adapter に依らず落ちる）。
+// 1. **選択が決定的**（description まで完全一致 > (vendor, architecture) > vendor だけ > 既定・
+//    同順位 2 本は adapter に依らず落ちる・`match` を省いた表は選ばれず注入でだけ使われる）。
 //    一覧の並び順や他機の都合で選択が揺れると、環境キーごとの参照 sha の行と「どの幾何で
 //    走ったか」の対応が崩れる。
 // 2. **既定プロファイルは既存の選択と同じ値**で、導出相がそれを明示で渡してもキーと WGSL が
@@ -11,7 +12,7 @@
 //    整除の破れた幾何）。`acquireGpu({ geometryProfile })` で注入した表は **device を作る前に**
 //    落ちる（navigator.gpu を差し替えて requestDevice に届かないことを見る）。
 
-import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { acquireGpu, GpuFeatureError, REQUIRED_LIMIT_KEYS } from "../src/gpu/device.ts";
@@ -24,6 +25,8 @@ import {
   selectGeometryProfile,
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
+import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
+import { NVIDIA_BLACKWELL } from "../src/kernels/geometry-profiles/nvidia-blackwell.ts";
 import {
   defaultGemmGeometry,
   type GemmGeometry,
@@ -53,15 +56,30 @@ import {
 const M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 const M64N64: GemmGeometry = { regM: 8, regN: 4, wgX: 16, wgY: 8 };
 
-/** 既定プロファイルから id と match だけ差し替えた表（幾何の中身は選択の検査に効かない）。 */
+/**
+ * 既定プロファイルから id と match だけ差し替えた表（幾何の中身は選択の検査に効かない）。
+ * `match` が undefined なら**キーごと省く**（`match: undefined` の欄を持つ表ではなく、注入専用の表の形）。
+ */
 const profileOf = (
   id: string,
   match: GeometryProfile["match"],
   overrides: Partial<GeometryProfile> = {},
-): GeometryProfile => ({ ...DEFAULT_GEOMETRY_PROFILE, id, match, ...overrides });
+): GeometryProfile => {
+  const { match: _defaultMatch, ...geometry } = DEFAULT_GEOMETRY_PROFILE;
+  return match === undefined
+    ? { ...geometry, id, ...overrides }
+    : { ...geometry, id, match, ...overrides };
+};
 
 const APPLE = profileOf("apple", { vendor: "apple" });
 const APPLE_METAL3 = profileOf("apple-metal-3", { vendor: "apple", architecture: "metal-3" });
+const APPLE_M2 = profileOf("apple-m2", {
+  vendor: "apple",
+  architecture: "metal-3",
+  description: "Apple M2",
+});
+/** `match` を省いた注入専用の表（自動選択の対象外）。 */
+const OPT_IN = profileOf("opt-in", undefined);
 
 /** 表の代表点（バケットごとに「境界ちょうど」と「境界を 1 越えた側」を持つ）。 */
 const BUCKET_ROWS = [1, 64, 65, 512, 513, 4096] as const;
@@ -155,19 +173,217 @@ describe("selectGeometryProfile の選択順", () => {
     );
   });
 
-  it("埋め込みの一覧は全て門を通り、既定を含まず、各表は自分の match の adapter で選ばれる", () => {
+  it("埋め込みの一覧は全て門を通り、既定を含まず、match のある各表は自分の match の adapter で選ばれる", () => {
     // 空の adapter（古い Chromium の adapter.info 欠落）では既定に落ちる
     assertStrictEquals(
-      selectGeometryProfile({ vendor: "", architecture: "" }),
+      selectGeometryProfile({ vendor: "", architecture: "", description: "" }),
       DEFAULT_GEOMETRY_PROFILE,
     );
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-      const vendor = profile.match.vendor;
+      assertGeometryProfile(profile);
+      assert(profile.id !== DEFAULT_GEOMETRY_PROFILE.id, `${profile.id}: 既定が一覧に入っている`);
+      // match を省いた表は注入専用（自動選択の対象外 — 選ばれないことは選択順の検査が見る）
+      const { match } = profile;
+      if (match === undefined) continue;
+      const vendor = match.vendor;
       assertEquals(typeof vendor, "string", `${profile.id}: vendor 未指定の埋め込み表`);
       // architecture 未指定の表は、architecture を返さない adapter（Deno）で当たる
-      const adapter = { vendor: vendor ?? "", architecture: profile.match.architecture ?? "" };
+      const adapter = {
+        vendor: vendor ?? "",
+        architecture: match.architecture ?? "",
+        description: match.description ?? "",
+      };
       assertStrictEquals(selectGeometryProfile(adapter), profile, profile.id);
+      // description で照合する表は、description の取れない adapter（フラグ無しの Chrome）に当たらない
+      if (match.description !== undefined) {
+        assert(
+          selectGeometryProfile({ ...adapter, description: "" }) !== profile,
+          `${profile.id}: description の無い adapter に当たった`,
+        );
+      }
     }
+  });
+});
+
+/** 値と、そこから辿れる全てのオブジェクト / 配列が凍結されているか（凍結されていない最初の path）。 */
+const unfrozenPath = (value: unknown, path: string): string | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  if (!Object.isFrozen(value)) return path;
+  for (const [key, child] of Object.entries(value)) {
+    const found = unfrozenPath(child, `${path}.${key}`);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+};
+
+describe("公開の一覧 BUILTIN_GEOMETRY_PROFILES は深く凍結した複製", () => {
+  it("一覧と各表の全ての入れ子が凍結され、書き換えは TypeError で落ちる", () => {
+    assertEquals(unfrozenPath(BUILTIN_GEOMETRY_PROFILES, "BUILTIN_GEOMETRY_PROFILES"), undefined);
+    const [first] = BUILTIN_GEOMETRY_PROFILES;
+    assertThrows(() => {
+      (first.gemmRows[0].geometry as { regM: number }).regM = 1;
+    }, TypeError);
+    assertThrows(() => {
+      (BUILTIN_GEOMETRY_PROFILES as GeometryProfile[]).push(DEFAULT_GEOMETRY_PROFILE);
+    }, TypeError);
+  });
+
+  it("値は生成物の定数と同じで、定数そのものは凍結しない（読み込み時に他の module の値を書き換えない）", () => {
+    // 欄の落ちた複製（凍結の複製が型の新しい欄を写し忘れた形）もここで落ちる
+    assertEquals(BUILTIN_GEOMETRY_PROFILES, [APPLE_METAL_3, NVIDIA_BLACKWELL]);
+    for (const profile of [APPLE_METAL_3, NVIDIA_BLACKWELL]) {
+      assert(!Object.isFrozen(profile), `${profile.id}: 生成物の定数が凍結された`);
+      assert(!Object.isFrozen(profile.gemmRows[0].geometry), `${profile.id}: 幾何が凍結された`);
+    }
+  });
+});
+
+describe("description の照合と match を省いた注入専用の表", () => {
+  it("description まで一致する規則が (vendor, architecture) だけの規則より先に当たり、一覧の並び順に依らない", () => {
+    const adapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
+    for (
+      const profiles of [
+        [APPLE, APPLE_METAL3, APPLE_M2],
+        [APPLE_M2, APPLE_METAL3, APPLE],
+        [APPLE_METAL3, APPLE_M2],
+      ]
+    ) {
+      assertStrictEquals(selectGeometryProfile(adapter, profiles), APPLE_M2);
+    }
+  });
+
+  it("description の規則は description が空・無い・違う adapter に当たらず、次の順位へ落ちる", () => {
+    const profiles = [APPLE, APPLE_METAL3, APPLE_M2];
+    for (
+      const adapter of [
+        { vendor: "apple", architecture: "metal-3", description: "" },
+        { vendor: "apple", architecture: "metal-3" },
+        { vendor: "apple", architecture: "metal-3", description: "Apple M5" },
+        // 前方一致・部分一致・大小文字の揃えはしない
+        { vendor: "apple", architecture: "metal-3", description: "Apple M2 Pro" },
+        { vendor: "apple", architecture: "metal-3", description: "apple m2" },
+      ]
+    ) {
+      assertStrictEquals(
+        selectGeometryProfile(adapter, profiles),
+        APPLE_METAL3,
+        JSON.stringify(adapter),
+      );
+    }
+    // (vendor, architecture) の規則が無ければ vendor だけの規則 → 既定の順に落ちる
+    const m5 = { vendor: "apple", architecture: "metal-3", description: "Apple M5" };
+    assertStrictEquals(selectGeometryProfile(m5, [APPLE, APPLE_M2]), APPLE);
+    assertStrictEquals(selectGeometryProfile(m5, [APPLE_M2]), DEFAULT_GEOMETRY_PROFILE);
+    // description が同じでも architecture が違えば当たらない
+    assertStrictEquals(
+      selectGeometryProfile(
+        { vendor: "apple", architecture: "metal-2", description: "Apple M2" },
+        [APPLE_M2],
+      ),
+      DEFAULT_GEOMETRY_PROFILE,
+    );
+  });
+
+  it("match を省いた表はどの adapter にも当たらない（照合する欄が全て一致しても既定へ落ちる）", () => {
+    assert(!Object.hasOwn(OPT_IN, "match"), "検査対象の表が match のキーを持っている");
+    // 省いた表の中身が他の規則の表と同じでも、選択の対象に入らないことを見る
+    const adapters = [
+      { vendor: "apple", architecture: "metal-3", description: "Apple M2" },
+      { vendor: "", architecture: "", description: "" },
+      { vendor: "nvidia", architecture: "blackwell" },
+    ];
+    for (const adapter of adapters) {
+      assertStrictEquals(
+        selectGeometryProfile(adapter, [OPT_IN]),
+        DEFAULT_GEOMETRY_PROFILE,
+        JSON.stringify(adapter),
+      );
+    }
+    // 他の規則と並べても選択は他の規則だけで決まる
+    assertStrictEquals(selectGeometryProfile(adapters[0], [OPT_IN, APPLE]), APPLE);
+  });
+
+  it("match を省いた表も門と id の重複検査は受ける（一覧に置いたまま壊れた表に気づけない形にしない）", () => {
+    const adapter = { vendor: "apple", architecture: "metal-3" };
+    assertThrows(
+      () => selectGeometryProfile(adapter, [OPT_IN, profileOf("opt-in", { vendor: "apple" })]),
+      CodegenError,
+      "id が重複",
+    );
+    assertThrows(
+      () =>
+        selectGeometryProfile(adapter, [
+          profileOf("opt-in-broken", undefined, { gemmRows: [] }),
+        ]),
+      CodegenError,
+      "gemmRows が空",
+    );
+    // 省いた表は同順位の衝突に数えない（match を持たない表同士は照合で競合しない）
+    assertStrictEquals(
+      selectGeometryProfile(adapter, [OPT_IN, profileOf("opt-in-2", undefined)]),
+      DEFAULT_GEOMETRY_PROFILE,
+    );
+  });
+
+  it("description だけ・vendor と description だけ・空文字の description の match は門で落ちる", () => {
+    const adapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
+    const cases: readonly (readonly [string, GeometryProfile, string])[] = [
+      [
+        "description だけ",
+        profileOf("desc-only", { description: "Apple M2" }),
+        "vendor と architecture の両方と組",
+      ],
+      [
+        "vendor と description だけ",
+        profileOf("vendor-desc", { vendor: "apple", description: "Apple M2" }),
+        "vendor と architecture の両方と組",
+      ],
+      [
+        "architecture と description だけ",
+        profileOf("arch-desc", { architecture: "metal-3", description: "Apple M2" }),
+        "vendor と対",
+      ],
+      [
+        "description が空文字",
+        profileOf("empty-desc", { vendor: "apple", architecture: "metal-3", description: "" }),
+        "空文字にしない",
+      ],
+    ];
+    for (const [name, profile, message] of cases) {
+      assertThrows(() => assertGeometryProfile(profile), CodegenError, message, name);
+      assertThrows(() => selectGeometryProfile(adapter, [profile]), CodegenError, message, name);
+    }
+  });
+
+  it("同じ (vendor, architecture, description) の 2 本は、その機でなくても fail loudly・description が違えば並べられる", () => {
+    const unrelated = { vendor: "intel", architecture: "xe2", description: "Intel Arc B570" };
+    assertThrows(
+      () =>
+        selectGeometryProfile(unrelated, [
+          APPLE_M2,
+          profileOf("apple-m2-copy", {
+            vendor: "apple",
+            architecture: "metal-3",
+            description: "Apple M2",
+          }),
+        ]),
+      CodegenError,
+      "同じ順位に 2 本当たる",
+    );
+    const m5 = profileOf("apple-m5", {
+      vendor: "apple",
+      architecture: "metal-3",
+      description: "Apple M5",
+    });
+    const profiles = [APPLE_METAL3, APPLE_M2, m5];
+    assertStrictEquals(
+      selectGeometryProfile(
+        { vendor: "apple", architecture: "metal-3", description: "Apple M5" },
+        profiles,
+      ),
+      m5,
+    );
+    assertStrictEquals(selectGeometryProfile(unrelated, profiles), DEFAULT_GEOMETRY_PROFILE);
   });
 });
 
@@ -461,20 +677,45 @@ const withCountingGpu = async (body: () => Promise<void>): Promise<number> => {
 };
 
 describe("acquireGpu の幾何プロファイル注入口", () => {
-  it("正しい表は門を通って requestDevice まで進む（差し替えが経路に乗っていることの対照）", async () => {
-    const requests = await withCountingGpu(async () => {
-      await assertRejects(
-        () => acquireGpu({ geometryProfile: APPLE_METAL3 }),
-        DeviceRequested,
-      );
-    });
-    assertEquals(requests, 1);
+  it("正しい表（match を省いた注入専用の表・description 付きの表を含む）は門を通って requestDevice まで進む（差し替えが経路に乗っていることの対照）", async () => {
+    for (const profile of [APPLE_METAL3, OPT_IN, APPLE_M2]) {
+      const requests = await withCountingGpu(async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: profile }),
+          DeviceRequested,
+          undefined,
+          profile.id,
+        );
+      });
+      assertEquals(requests, 1, profile.id);
+    }
+  });
+
+  it("公開の一覧の凍結した表もそのまま注入でき、保持する複製（structuredClone）は凍結を持ち越さない", async () => {
+    for (const profile of BUILTIN_GEOMETRY_PROFILES) {
+      const requests = await withCountingGpu(async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: profile }),
+          DeviceRequested,
+          undefined,
+          profile.id,
+        );
+      });
+      assertEquals(requests, 1, profile.id);
+      // 注入経路の複製は structuredClone（acquire.ts）— 凍結は複製に写らない
+      assertEquals(unfrozenPath(structuredClone(profile), profile.id), profile.id);
+    }
   });
 
   it("壊れた表（id が空・整除の破れた幾何）は device を作る前に fail loudly", async () => {
     const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 8, wgY: 8 };
     const broken: readonly (readonly [string, GeometryProfile, string])[] = [
       ["id が空", profileOf("", { vendor: "test" }), "id が空"],
+      [
+        "description だけの match",
+        profileOf("desc-only", { description: "Apple M2" }),
+        "vendor と architecture の両方と組",
+      ],
       [
         "gemmRows の幾何",
         profileOf("rows", { vendor: "test" }, {

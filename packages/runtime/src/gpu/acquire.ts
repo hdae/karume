@@ -531,8 +531,9 @@ export type AcquireGpuOptions = {
    * GEMM 幾何の静的なプロファイル 1 本の注入（DECIDED: ADR 0115）。未知の device で、利用者が
    * 自分の機で回した掃引（`tools/geometry-sweep` の生成物）の表を当てるための口。
    *
-   * - `undefined`（既定）= adapter の (vendor, architecture) から埋め込みの表を 1 本選ぶ
-   *   （当たらなければ既定プロファイル）。
+   * - `undefined`（既定）= adapter の (vendor, architecture, description) から埋め込みの表を 1 本選ぶ
+   *   （当たらなければ既定プロファイル）。`match` を省いた埋め込みの表は自動では選ばれない（注入専用 —
+   *   `BUILTIN_GEOMETRY_PROFILES` から id で引いてここへ渡す）。
    * - 指定あり = adapter を見ずに**この表を使う**。`match` は照合に使わない（別の機の表を当てて
    *   A/B する用途があるため）。
    *

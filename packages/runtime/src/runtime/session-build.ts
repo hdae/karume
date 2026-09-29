@@ -698,8 +698,9 @@ export const buildSessionState = async (
   }
   // GEMM 幾何のプロファイル（DECIDED: ADR 0115）。`acquireGpu({ geometryProfile })` で注入された
   // 表があればそれ（門は device を作る前に通過済み・`match` は見ない）、無ければ adapter の
-  // (vendor, architecture) と埋め込みの静的な表で決まる。どちらも実行中に選び直さない。埋め込み側の
-  // 壊れた表・同順位の衝突は**重みを 1 バイトも上げる前に**落とす（その op に当たる run まで
+  // (vendor, architecture, description) と埋め込みの静的な表で決まる（`adapterInfo` をそのまま
+  // 渡すので `description` も照合に載る・`match` を省いた埋め込みの表は注入でだけ使われる）。
+  // どちらも実行中に選び直さない。埋め込み側の壊れた表・同順位の衝突は**重みを 1 バイトも上げる前に**落とす（その op に当たる run まで
   // 気づけない形にしない）。
   // MUST: 選択はここ 1 箇所。dp4a カナリア（`resolveAttentionI8a8Dot`）と診断の id
   // （`SessionState.geometryProfile`）はこの返り値を引く — 別々に選ぶと、カナリアが検証した幾何と

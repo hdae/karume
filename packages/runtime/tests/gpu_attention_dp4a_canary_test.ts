@@ -307,8 +307,9 @@ Deno.test({
 });
 
 /**
- * 既定でない i8a8 attention 幾何（apple-metal-3 プロファイルが ①QK / ③PV に当てる形 —
- * 64×64 タイル）。カナリアが「Session が渡した幾何の生成物」を撃っていることの検出器に使う。
+ * 既定でない i8a8 attention 幾何（64×64 タイル — 既定は ①QK 128×64 / ③PV 64×128、apple-metal-3
+ * プロファイルが当てるのは ①QK tile32x64 / ③PV tile16x128 で、どちらとも別の形）。カナリアが
+ * 「Session が渡した幾何の生成物」を撃っていることの検出器に使う。
  */
 const PROFILE_GEOMETRY: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
 

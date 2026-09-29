@@ -120,11 +120,17 @@ export type {
 } from "./src/gpu/device.ts";
 
 /**
- * GEMM 幾何のプロファイル（ADR 0115）は**型だけ**公開する — `AcquireGpuOptions.geometryProfile` に
- * 渡す表の形（`tools/geometry-sweep` の生成物が満たす形）。既定の表・埋め込みの一覧・選択関数は
- * 値として出さない（内部の codegen 語彙で、道具は `src/` から import する）。
+ * GEMM 幾何のプロファイル（ADR 0115）は型と**埋め込みの一覧**を公開する — 型は
+ * `AcquireGpuOptions.geometryProfile` に渡す表の形（`tools/geometry-sweep` の生成物が満たす形）。
+ * 一覧（`BUILTIN_GEOMETRY_PROFILES`）は埋め込みの全ての表 — adapter の (vendor, architecture, description)
+ * で自動選択される表と、`match` を省いた注入専用の表（自動選択されない）— で、アプリが id で引いて
+ * `acquireGpu({ geometryProfile })` に渡すための値（ADR 0115 追記決定 7）。一覧も各表も深く凍結してある
+ * （書き換えると全 Session の自動選択が黙って変わるため）— 手を加えた表を注入するなら
+ * `structuredClone` してから書き換える。
+ * 既定の表と選択関数は値として出さない（内部の codegen 語彙で、道具は `src/` から import する）。
  */
 export type { GemmRowsRule, GeometryProfile } from "./src/kernels/geometry-profile.ts";
+export { BUILTIN_GEOMETRY_PROFILES } from "./src/kernels/geometry-profiles/index.ts";
 export type { GemmGeometry } from "./src/kernels/gemm-geometry.ts";
 export type { I8a8Geometry } from "./src/kernels/i8a8-geometry.ts";
 

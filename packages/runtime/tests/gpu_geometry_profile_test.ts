@@ -11,14 +11,16 @@
 //    MUST: 値の一致だけでは結線の証拠にならない（プロファイルを無視しても一致する）ので、
 //    そのプロファイルの幾何判別子が**実際に走ったパイプラインキー**に載ったことも見る。
 //
-// プロファイルは adapter の (vendor, architecture) で選ばれるので、2 は **device は実物のまま、
-// adapterInfo だけをそのプロファイルの match に合わせた GpuContext** で Session を組む（ここで
-// 走る GPU はプロファイルを作った機ではないが、幾何でビットが動かないことは機に依らない命題 —
-// ADR 0022 追記）。既定側も adapterInfo を空にした GpuContext で組み、実機の adapter に
-// 将来プロファイルが当たっても比較の基準が既定のまま動かないようにする。
+// プロファイルは adapter の (vendor, architecture, description) で選ばれるので、2 は **device は
+// 実物のまま、adapterInfo だけをそのプロファイルの match に合わせた GpuContext** で Session を組む
+// （ここで走る GPU はプロファイルを作った機ではないが、幾何でビットが動かないことは機に依らない
+// 命題 — ADR 0022 追記）。`match` を省いた注入専用の表は adapter では選ばれないので、同じ偽装無しの
+// GpuContext に**注入の席**から渡して組む（全表を回す — 自動選択されない表も既定とビット同一で
+// なければ注入した利用者の出力が動く）。既定側も adapterInfo を空にした GpuContext で組み、実機の
+// adapter に将来プロファイルが当たっても比較の基準が既定のまま動かないようにする。
 // 埋め込みが 1 本も無い間は 2 を明示 SKIP する（空の一覧で緑にしない）。
 //
-// 3. `acquireGpu({ geometryProfile })` で注入した表は、adapter の (vendor, architecture) を見ずに
+// 3. `acquireGpu({ geometryProfile })` で注入した表は、adapter の (vendor, architecture, description) を見ずに
 //    使われる（`match` も見ない）。2 と同じ 3 点（診断の名前・実走キーの幾何判別子・既定との Uint32
 //    一致）に加え、i8a8 attention の dp4a カナリアがその表の幾何で撃つことを、カナリアが
 //    コンパイルした WGSL で見る。
@@ -252,9 +254,10 @@ const CASES: readonly ProfileCase[] = [
 ];
 
 /**
- * device は実物のまま、adapterInfo の vendor / architecture だけを差し替えた GpuContext
- * （プロファイルの選択は Session 構築で adapterInfo から 1 度だけ行われる）。`injected` は
- * `acquireGpu({ geometryProfile })` が GpuContext に渡すのと同じ注入の席。
+ * device は実物のまま、adapterInfo の vendor / architecture / description だけを差し替えた
+ * GpuContext（プロファイルの選択は Session 構築で adapterInfo から 1 度だけ行われる）。description も
+ * 明示で渡す — 実機の値を写すと、description で照合する表が走らせた機によって当たったり外れたりする。
+ * `injected` は `acquireGpu({ geometryProfile })` が GpuContext に渡すのと同じ注入の席。
  *
  * MUST: ここで作った GpuContext は destroy しない — device は元の GpuContext と共有で、破棄は
  * 元の側 1 箇所に置く（二重の destroy は消失通知を予期しない側へ流す）。
@@ -263,6 +266,7 @@ const contextAs = (
   gpu: GpuContext,
   vendor: string,
   architecture: string,
+  description: string,
   injected?: GeometryProfile,
 ): GpuContext =>
   new GpuContext(
@@ -271,7 +275,7 @@ const contextAs = (
       vendor,
       architecture,
       device: gpu.adapterInfo.device,
-      description: gpu.adapterInfo.description,
+      description,
       subgroupMinSize: gpu.adapterInfo.subgroupMinSize,
       subgroupMaxSize: gpu.adapterInfo.subgroupMaxSize,
       isFallbackAdapter: gpu.adapterInfo.isFallbackAdapter,
@@ -342,7 +346,7 @@ describe({
         const run = await runCase(gpu, linearCase(40));
         assertEquals(run.profile, selectGeometryProfile(gpu.adapterInfo).id);
         // adapterInfo が空の機（古い Chromium の adapter.info 欠落）は既定に落ちる
-        const blank = await runCase(contextAs(gpu, "", ""), linearCase(40));
+        const blank = await runCase(contextAs(gpu, "", "", ""), linearCase(40));
         assertEquals(blank.profile, DEFAULT_GEOMETRY_PROFILE.id);
       } finally {
         gpu.destroy();
@@ -356,17 +360,23 @@ describe({
   ignore: !GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0,
   fn: () => {
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-      it(`'${profile.id}' の Session は全ケースで既定と Uint32 一致し、その幾何のキーで走る`, async () => {
+      const route = profile.match === undefined ? "注入" : "adapter の選択";
+      it(`'${profile.id}'（${route}）の Session は全ケースで既定と Uint32 一致し、その幾何のキーで走る`, async () => {
         const gpu = await acquireGpu();
         try {
-          const baseline = contextAs(gpu, "", "");
-          const disguised = contextAs(
-            gpu,
-            profile.match.vendor ?? "",
-            profile.match.architecture ?? "",
-          );
+          const baseline = contextAs(gpu, "", "", "");
+          // match のある表は adapter を偽装して選択の経路（description を含む）で、match を省いた
+          // 注入専用の表は注入の席で組む（adapter は空 — 選択では既定にしか落ちない）。
+          const subject = profile.match === undefined
+            ? contextAs(gpu, "", "", "", profile)
+            : contextAs(
+              gpu,
+              profile.match.vendor ?? "",
+              profile.match.architecture ?? "",
+              profile.match.description ?? "",
+            );
           for (const testCase of CASES) {
-            await assertRunsWithProfile(baseline, disguised, profile, testCase);
+            await assertRunsWithProfile(baseline, subject, profile, testCase);
           }
         } finally {
           gpu.destroy();
@@ -387,7 +397,7 @@ describe({
       const injected = await acquireGpu({ geometryProfile: handedOver });
       (handedOver as { id: string }).id = "changed-after-acquire";
       try {
-        const baseline = contextAs(plain, "", "");
+        const baseline = contextAs(plain, "", "", "");
         for (const testCase of CASES) {
           await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
         }
@@ -400,9 +410,15 @@ describe({
     it("注入した表は adapter と match を見ない（apple-metal-3 に当たる adapter でも、別 vendor の表が使われる）", async () => {
       const gpu = await acquireGpu();
       try {
-        const baseline = contextAs(gpu, "", "");
+        const baseline = contextAs(gpu, "", "", "");
         // 埋め込みの選択なら apple-metal-3 が当たる adapter に、match が nvidia の表を注入する
-        const subject = contextAs(gpu, "apple", "metal-3", NVIDIA_BLACKWELL);
+        const subject = contextAs(
+          gpu,
+          "apple",
+          "metal-3",
+          APPLE_METAL_3.match?.description ?? "",
+          NVIDIA_BLACKWELL,
+        );
         assertEquals(selectGeometryProfile(subject.adapterInfo).id, APPLE_METAL_3.id);
         for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
           await assertRunsWithProfile(baseline, subject, NVIDIA_BLACKWELL, testCase);

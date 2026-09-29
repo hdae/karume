@@ -4,8 +4,8 @@
  * 幾何（どのスレッドがどの出力を担当するか）の最良点は GPU によって逆転する — Apple M2 で
  * 1.4〜1.7 倍速い幾何が Arc B570 では 0.72〜0.98 倍になる（docs/research/2026-09-27-k70-metal-per-op.md
  * §9）。共通の既定 1 本ではどちらかが負けるので、選択を「shape の純関数」から「shape ×
- * プロファイルの純関数」へ広げ、プロファイルは adapter の (vendor, architecture) から決定的な順で
- * 1 本選ぶ。
+ * プロファイルの純関数」へ広げ、プロファイルは adapter の (vendor, architecture, description) から
+ * 決定的な順で 1 本選ぶ（`match` を省いた表は自動選択されず、注入でだけ使われる）。
  *
  * MUST: プロファイルは**純データ**（副作用なし・実行時に外から読まない）。明示のチューニング
  * （tools/geometry-sweep の掃引）で測った結果を生成物としてソースに埋め込む
@@ -44,17 +44,26 @@ export type GemmRowsRule = { readonly maxRows: number; readonly geometry: GemmGe
 
 /**
  * GEMM 幾何のプロファイル = op × バケットごとのタイル幾何の静的な表（DECIDED: ADR 0115）。
- * 埋め込みの表（`./geometry-profiles/`）は adapter の (vendor, architecture) で選ばれ、利用者は
- * `acquireGpu({ geometryProfile })` で自分の掃引から作った表を注入できる（公開面には型だけ出す）。
+ * 埋め込みの表（`./geometry-profiles/`）は adapter の (vendor, architecture, description) で選ばれ、
+ * 利用者は `acquireGpu({ geometryProfile })` で自分の掃引から作った表か埋め込みの表
+ * （公開面の `BUILTIN_GEOMETRY_PROFILES` — ADR 0115 追記決定 7）を注入できる。
  */
 export type GeometryProfile = {
   /** プロファイルの名前（`"default"` / `"apple-metal-3"` など — 生成物のファイル名と一致）。 */
   readonly id: string;
   /**
-   * どの adapter に当てるか（`GPUAdapterInfo` の `vendor` / `architecture` と文字列の完全一致）。
-   * 両方 undefined は既定プロファイル（{@link DEFAULT_GEOMETRY_PROFILE}）だけの形。
+   * どの adapter に当てるか（`GPUAdapterInfo` の `vendor` / `architecture` / `description` と文字列の
+   * 完全一致）。全欄 undefined（`{}`）は既定プロファイル（{@link DEFAULT_GEOMETRY_PROFILE}）だけの形。
+   *
+   * 省略 = 自動選択の対象外（注入専用 = オプトイン — ADR 0115 追記決定 7）。同じ vendor /
+   * architecture を名乗る別の機（Chrome の Apple M2 と M5 は両方 `apple` / `metal-3`）へ黙って
+   * 当てたくない表は、`match` を省いて埋め込み、アプリが id で引いて注入する。
    */
-  readonly match: { readonly vendor?: string; readonly architecture?: string };
+  readonly match?: {
+    readonly vendor?: string;
+    readonly architecture?: string;
+    readonly description?: string;
+  };
   /** linear / matmul / bmm（行数バケット）。 */
   readonly gemmRows: readonly GemmRowsRule[];
   /** 融合 attention f32 の ①QK / ③PV。S は両段の間で実体化されるので、段ごとに別の幾何でよい。 */
@@ -147,14 +156,23 @@ export const assertGeometryProfile = (profile: GeometryProfile): void => {
   if (profile.id.length === 0) {
     throw new CodegenError("幾何プロファイル: id が空（診断で選ばれた表を名指せない）");
   }
-  const { vendor, architecture } = profile.match;
-  if (vendor === "" || architecture === "") {
-    throw new CodegenError(
-      `${where}: match の vendor / architecture は空文字にしない（未指定は省く）`,
-    );
-  }
-  if (architecture !== undefined && vendor === undefined) {
-    throw new CodegenError(`${where}: match の architecture は vendor と対で指定する`);
+  if (profile.match !== undefined) {
+    const { vendor, architecture, description } = profile.match;
+    if (vendor === "" || architecture === "" || description === "") {
+      throw new CodegenError(
+        `${where}: match の vendor / architecture / description は空文字にしない（未指定は省く）`,
+      );
+    }
+    if (architecture !== undefined && vendor === undefined) {
+      throw new CodegenError(`${where}: match の architecture は vendor と対で指定する`);
+    }
+    // description は機種の名前で、vendor / architecture の内側を分けるためだけの欄。単独で許すと
+    // 別 vendor の同名（または空の vendor の機）に当たる形が作れる。
+    if (description !== undefined && (vendor === undefined || architecture === undefined)) {
+      throw new CodegenError(
+        `${where}: match の description は vendor と architecture の両方と組で指定する`,
+      );
+    }
   }
   assertGemmRowsRules(profile.gemmRows, where);
   for (
@@ -178,15 +196,24 @@ export const assertGeometryProfile = (profile: GeometryProfile): void => {
   }
 };
 
-/** 選択の照合に使う adapter の 2 欄（`GpuContext.adapterInfo` はそのまま渡せる）。 */
-type AdapterIdentity = { readonly vendor: string; readonly architecture: string };
+/**
+ * 選択の照合に使う adapter の欄（`GpuContext.adapterInfo` はそのまま渡せる）。`description` は
+ * `GPUAdapterInfo.description` そのままで、空文字は「無い」と同じ扱い（フラグ無しの Chrome は空を返す）。
+ */
+type AdapterIdentity = {
+  readonly vendor: string;
+  readonly architecture: string;
+  readonly description?: string;
+};
 
 /**
  * adapter に当てるプロファイルを 1 本選ぶ（Session 構築で 1 度だけ呼ぶ）。
  *
- * 選択順（決定的）: ① `match` の vendor と architecture が両方一致 → ② architecture 未指定で
- * vendor だけ一致 → ③ {@link DEFAULT_GEOMETRY_PROFILE}。照合は文字列の完全一致（正規化も前方一致も
- * しない）。
+ * 選択順（決定的）: ① `match` の vendor・architecture・description が全て一致 → ② description
+ * 未指定で vendor と architecture が一致 → ③ architecture 未指定で vendor だけ一致 →
+ * ④ {@link DEFAULT_GEOMETRY_PROFILE}。照合は文字列の完全一致（正規化も前方一致も部分一致もしない）。
+ * adapter の description が空・無いなら①には当たらない。`match` を省いた表は照合しない（注入専用）が、
+ * 門と id の重複検査は受ける（壊れた表を一覧に置いたまま気づけない形にしない）。
  *
  * MUST: 同じ順位に 2 本当たりうる一覧は fail loudly — 一覧の並び順で黙って 1 本を選ぶと、一覧の
  * 編集だけで選択が変わる。**当たった adapter に限らず一覧そのもので落とす**（同じ `match` を持つ
@@ -202,34 +229,48 @@ export const selectGeometryProfile = (
   const matches = new Set<string>();
   for (const profile of profiles) {
     assertGeometryProfile(profile);
-    const { vendor, architecture } = profile.match;
-    if (vendor === undefined) {
-      throw new CodegenError(
-        `幾何プロファイル '${profile.id}': match が空（全 adapter に当たる表は既定プロファイルだけ）`,
-      );
-    }
     if (ids.has(profile.id)) {
       throw new CodegenError(`幾何プロファイル '${profile.id}': id が重複（診断で表を名指せない）`);
     }
     ids.add(profile.id);
+    if (profile.match === undefined) continue;
+    const { vendor, architecture, description } = profile.match;
+    if (vendor === undefined) {
+      throw new CodegenError(
+        `幾何プロファイル '${profile.id}': match が空（全 adapter に当たる表は既定プロファイルだけ — ` +
+          "注入専用の表は match を省く）",
+      );
+    }
     // JSON の配列形は区切り文字の衝突が起きない（`a/b` + `c` と `a` + `b/c` を取り違えない）。
-    const match = JSON.stringify([vendor, architecture ?? null]);
+    const match = JSON.stringify([vendor, architecture ?? null, description ?? null]);
     if (matches.has(match)) {
       throw new CodegenError(
         `幾何プロファイル '${profile.id}': match（vendor=${vendor} / architecture=${
           architecture ?? "（未指定）"
+        } / description=${
+          description ?? "（未指定）"
         }）が他のプロファイルと同じ（同じ順位に 2 本当たる）`,
       );
     }
     matches.add(match);
   }
+  // match を省いた表は `profile.match?.vendor` が undefined で、文字列の adapter.vendor に一致しない。
+  const described = adapter.description === "" ? undefined : adapter.description;
+  const withDescription = described === undefined
+    ? undefined
+    : profiles.find((profile) =>
+      profile.match?.vendor === adapter.vendor &&
+      profile.match.architecture === adapter.architecture &&
+      profile.match.description === described
+    );
+  if (withDescription !== undefined) return withDescription;
   const exact = profiles.find((profile) =>
-    profile.match.vendor === adapter.vendor && profile.match.architecture !== undefined &&
-    profile.match.architecture === adapter.architecture
+    profile.match?.vendor === adapter.vendor && profile.match.architecture !== undefined &&
+    profile.match.architecture === adapter.architecture && profile.match.description === undefined
   );
   if (exact !== undefined) return exact;
   const vendorOnly = profiles.find((profile) =>
-    profile.match.vendor === adapter.vendor && profile.match.architecture === undefined
+    profile.match?.vendor === adapter.vendor && profile.match.architecture === undefined
   );
   return vendorOnly ?? DEFAULT_GEOMETRY_PROFILE;
 };

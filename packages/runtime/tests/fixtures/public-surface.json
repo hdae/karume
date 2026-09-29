@@ -31,6 +31,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "BUILTIN_GEOMETRY_PROFILES",
+        "kind": "variable"
+      },
+      {
         "name": "BatchScope",
         "kind": "class"
       },
