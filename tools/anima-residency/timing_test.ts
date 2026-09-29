@@ -7,7 +7,7 @@ import {
   snapshotRun,
   topEntries,
 } from "./timing.ts";
-import { createGenerateRecorder } from "./record.ts";
+import { createGenerateRecorder, geometryProfilesOf, type StageRunDiagnostics } from "./record.ts";
 
 /** 計測ありの run 1 回ぶんの診断（`workgroupCount` は集計に載らない欄として混ぜておく）。 */
 const timedRun = (
@@ -28,6 +28,15 @@ const untimedRun = (
 ): RunDiagnostics => ({
   lastRunTiming: undefined,
   lastRunPipelines: pipelines,
+});
+
+/** 記録器へ渡す診断（Session が名乗る幾何プロファイルの id を添える）。 */
+const onDevice = (
+  diagnostics: RunDiagnostics,
+  geometryProfile = "default",
+): StageRunDiagnostics => ({
+  ...diagnostics,
+  geometryProfile,
 });
 
 describe("aggregateRuns", () => {
@@ -155,7 +164,7 @@ describe("createGenerateRecorder", () => {
     recorder.restart();
     recorder.onEvent({ kind: "stage", component: "text_encoder", at: "start" });
     clock += 10;
-    recorder.onRun("text_encoder", timedRun([{ key: "te", ns: 7, dispatchCount: 1 }]));
+    recorder.onRun("text_encoder", onDevice(timedRun([{ key: "te", ns: 7, dispatchCount: 1 }])));
     recorder.onEvent({ kind: "stage", component: "text_encoder", at: "end" });
     recorder.onEvent({ kind: "stage", component: "transformer", at: "start" });
     clock += 5;
@@ -165,8 +174,8 @@ describe("createGenerateRecorder", () => {
       action: "retained",
       reason: "request",
     });
-    recorder.onRun("transformer", timedRun([{ key: "dit", ns: 40, dispatchCount: 2 }]));
-    recorder.onRun("transformer", timedRun([{ key: "dit", ns: 60, dispatchCount: 2 }]));
+    recorder.onRun("transformer", onDevice(timedRun([{ key: "dit", ns: 40, dispatchCount: 2 }])));
+    recorder.onRun("transformer", onDevice(timedRun([{ key: "dit", ns: 60, dispatchCount: 2 }])));
     clock += 20;
     recorder.onEvent({ kind: "stage", component: "transformer", at: "end" });
     const { stages, residency } = recorder.finish();
@@ -196,10 +205,54 @@ describe("createGenerateRecorder", () => {
       () =>
         recorder.onRun(
           "vae_decoder",
-          untimedRun([{ key: "vae", dispatchCount: 1 }]),
+          onDevice(untimedRun([{ key: "vae", dispatchCount: 1 }])),
         ),
       Error,
       "段の外",
+    );
+  });
+
+  it("records the geometry profile each stage's session reported, keeping stages that differ apart", () => {
+    const recorder = createGenerateRecorder(() => 0);
+    recorder.onEvent({ kind: "stage", component: "text_encoder", at: "start" });
+    recorder.onRun(
+      "text_encoder",
+      onDevice(untimedRun([{ key: "te", dispatchCount: 1 }]), "apple-metal-3"),
+    );
+    recorder.onEvent({ kind: "stage", component: "text_encoder", at: "end" });
+    recorder.onEvent({ kind: "stage", component: "transformer", at: "start" });
+    recorder.onRun(
+      "transformer",
+      onDevice(untimedRun([{ key: "dit", dispatchCount: 2 }]), "nvidia-blackwell"),
+    );
+    recorder.onEvent({ kind: "stage", component: "transformer", at: "end" });
+    // run が 1 回も終わらない段（VAE の段が最初の run を終える前に落ちた形）には id が無い。
+    recorder.onEvent({ kind: "stage", component: "vae_decoder", at: "start" });
+    const { stages } = recorder.finish();
+    assertEquals(
+      stages.map(({ component, geometryProfile }) => ({ component, geometryProfile })),
+      [
+        { component: "text_encoder", geometryProfile: "apple-metal-3" },
+        { component: "transformer", geometryProfile: "nvidia-blackwell" },
+        { component: "vae_decoder", geometryProfile: undefined },
+      ],
+    );
+    assertEquals(Object.hasOwn(stages[2], "geometryProfile"), false);
+    assertEquals(geometryProfilesOf(stages), ["apple-metal-3", "nvidia-blackwell"]);
+  });
+
+  it("fails loudly when runs of one stage name different geometry profiles", () => {
+    const recorder = createGenerateRecorder(() => 0);
+    recorder.onEvent({ kind: "stage", component: "transformer", at: "start" });
+    recorder.onRun("transformer", onDevice(untimedRun([{ key: "dit", dispatchCount: 1 }])));
+    assertThrows(
+      () =>
+        recorder.onRun(
+          "transformer",
+          onDevice(untimedRun([{ key: "dit", dispatchCount: 1 }]), "apple-metal-3"),
+        ),
+      Error,
+      "幾何プロファイルが割れた",
     );
   });
 });

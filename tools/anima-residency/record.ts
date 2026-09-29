@@ -11,6 +11,7 @@ import type {
   AnimaResidencyReason,
   AnimaRunComponent,
 } from "../../packages/models/anima.ts";
+import type { SessionDiagnostics } from "../../packages/runtime/mod.ts";
 import {
   aggregateRuns,
   type PipelineCount,
@@ -35,6 +36,11 @@ export type StageRecord = {
   readonly component: AnimaRunComponent;
   readonly startMs: number;
   readonly endMs?: number;
+  /**
+   * その段の run を回した Session が選んだ GEMM 幾何プロファイルの id（ADR 0115 —
+   * `SessionDiagnostics.geometryProfile`）。run が 1 回も終わらなかった段では無い。
+   */
+  readonly geometryProfile?: string;
   readonly gpu?: StageGpuTiming;
   readonly pipelines: readonly PipelineCount[];
 };
@@ -129,8 +135,22 @@ type OpenStage = {
   readonly component: AnimaRunComponent;
   readonly startMs: number;
   endMs?: number;
+  geometryProfile?: string;
   readonly samples: RunSample[];
 };
+
+/** 記録器が run ごとに読む診断（集計の 2 欄 + 幾何プロファイルの id）。 */
+export type StageRunDiagnostics = RunDiagnostics & Pick<SessionDiagnostics, "geometryProfile">;
+
+/**
+ * 段の記録に出た幾何プロファイルの id（重複を除き、最初に出た順）。
+ *
+ * 同じ device の Session は全段で同じ id を名乗るはずなので、普通は 1 つ。2 つ以上なら段ごとの
+ * `geometryProfile` を読む（ここで 1 つに畳まない）。
+ */
+export const geometryProfilesOf = (stages: readonly StageRecord[]): string[] => [
+  ...new Set(stages.flatMap(({ geometryProfile }) => geometryProfile ?? [])),
+];
 
 /** generate 1 回ぶんの記録器（{@link createGenerateRecorder}）。 */
 export type GenerateRecorder = {
@@ -140,7 +160,7 @@ export type GenerateRecorder = {
   /** `stage` と `residency` を記録する（進捗表示は呼び手が持つ）。 */
   readonly onEvent: (event: AnimaGenerateEvent) => void;
   /** pipeline の `onRunDiagnostics` から回す。run はその時点で開いている同名の段に帰属させる。 */
-  readonly onRun: (component: AnimaRunComponent, diagnostics: RunDiagnostics) => void;
+  readonly onRun: (component: AnimaRunComponent, diagnostics: StageRunDiagnostics) => void;
   readonly finish: () => {
     readonly stages: readonly StageRecord[];
     readonly residency: readonly ResidencyRecord[];
@@ -184,13 +204,23 @@ export const createGenerateRecorder = (now: () => number): GenerateRecorder => {
       // MUST: 段の外の run は帰属先が無い — pipeline の段の境目の前提が崩れているので落とす
       // （黙って捨てると GPU 時間の合計が段の実際より小さく出る）。
       if (open === undefined) throw new Error(`${component} の run が段の外で終わった`);
+      // MUST: 1 段の run は 1 本の device の上の Session なので id は 1 つ — 割れたら前提が
+      // 崩れているので落とす（どちらか 1 つを黙って残すと、どの表で走ったかを取り違える）。
+      const { geometryProfile } = diagnostics;
+      if (open.geometryProfile !== undefined && open.geometryProfile !== geometryProfile) {
+        throw new Error(
+          `${component} の段で幾何プロファイルが割れた（${open.geometryProfile} と ${geometryProfile}）`,
+        );
+      }
+      open.geometryProfile = geometryProfile;
       open.samples.push(snapshotRun(diagnostics));
     },
     finish: () => ({
-      stages: stages.map(({ component, startMs, endMs, samples }) => ({
+      stages: stages.map(({ component, startMs, endMs, geometryProfile, samples }) => ({
         component,
         startMs,
         ...(endMs === undefined ? {} : { endMs }),
+        ...(geometryProfile === undefined ? {} : { geometryProfile }),
         ...aggregateRuns(samples),
       })),
       residency,

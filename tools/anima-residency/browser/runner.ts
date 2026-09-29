@@ -34,6 +34,7 @@ import {
   DEFAULT_PROMPT,
   type DummyHold,
   type GenerateRecorder,
+  geometryProfilesOf,
   type PipelineLoad,
   type Report,
   REPORT_FORMAT,
@@ -94,6 +95,8 @@ const state: {
   defaultModel?: string;
   /** 既定モデルの manifest の欄（quant の選択肢と `gpuFeatures`）。 */
   model?: ModelEntry;
+  /** GPU を取ったときに書いた環境行（直近の generate の幾何プロファイルを足す土台）。 */
+  environment?: string;
   /** 初期化時に読んだアダプタ（GPU を畳んだ後の書き出しでも機体を残すため）。 */
   adapterInfo?: GPUAdapterInfo;
   /** アダプタが `timestamp-query` を列挙したか。 */
@@ -230,11 +233,12 @@ const ensureGpu = async (): Promise<{ gpu: GpuContext; build: BuildChoice }> => 
   state.gpu = gpu;
   state.build = build;
   renderBuildControls();
-  ui.environment.textContent = `${adapterSummary(gpu.adapterInfo)} · 配布形 ${
+  state.environment = `${adapterSummary(gpu.adapterInfo)} · 配布形 ${
     state.config?.source ?? "?"
   }（${state.defaultModel ?? "?"}）· quant ${build.quant} · GPU 時間 ${
     gpu.gpuTimingEnabled ? "採る" : "採らない"
   }`;
+  ui.environment.textContent = state.environment;
   return { gpu, build };
 };
 
@@ -351,6 +355,28 @@ const gpuCell = (stages: readonly StageRecord[]): HTMLTableCellElement => {
   return td;
 };
 
+/** 全段で同じ id なら 1 つ、割れていれば段ごとに全部（ADR 0115 の幾何プロファイル）。 */
+const geometryCell = (stages: readonly StageRecord[]): HTMLTableCellElement => {
+  const td = document.createElement("td");
+  const ids = geometryProfilesOf(stages);
+  if (ids.length > 1) {
+    td.className = "wrap";
+    td.textContent = stages.flatMap(({ component, geometryProfile }) =>
+      geometryProfile === undefined ? [] : [`${component} ${geometryProfile}`]
+    ).join("\n");
+  } else {
+    td.textContent = ids[0] ?? "—";
+  }
+  return td;
+};
+
+/** 環境行に直近の generate で選ばれた幾何プロファイルを足す（run が 1 回も終わらなければ据え置き）。 */
+const showGeometryProfiles = (row: Row): void => {
+  const ids = geometryProfilesOf(row.stages);
+  if (ids.length === 0 || state.environment === undefined) return;
+  ui.environment.textContent = `${state.environment} · 幾何プロファイル ${ids.join(" / ")}`;
+};
+
 const appendRow = (row: Row): void => {
   const tr = document.createElement("tr");
   const cells = [
@@ -370,8 +396,8 @@ const appendRow = (row: Row): void => {
     if (at >= 5) td.className = "wrap";
     if (at === 8 && value !== "") td.className = "wrap error";
     tr.append(td);
-    // 「GPU 時間」列は段の時間の隣に置く（壁と GPU を同じ段で見比べるため）。
-    if (at === 5) tr.append(gpuCell(row.stages));
+    // 「GPU 時間」列は段の時間の隣に置く（壁と GPU を同じ段で見比べるため）。その隣が幾何プロファイル。
+    if (at === 5) tr.append(gpuCell(row.stages), geometryCell(row.stages));
   }
   ui.rows.append(tr);
 };
@@ -448,6 +474,7 @@ const runGenerates = async (): Promise<void> => {
     const row = await generateOnce(`generate ${i + 1}/${count}`);
     state.rows.push(row);
     appendRow(row);
+    showGeometryProfiles(row);
     if (row.error !== undefined) {
       setStatus(`generate ${i + 1}/${count} が失敗したので止めました（表の行を参照）`);
       return;

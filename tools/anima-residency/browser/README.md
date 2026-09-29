@@ -44,10 +44,14 @@ so the cross-repository layout of `karume-anima-extra` is not supported.
 
 Each generate adds one table row: requested residency, dummy GiB held at the start, wall time
 (`generate()` call to resolution, PNG encoding excluded), the start-to-end time of every stage
-(a stage retried after an out-of-memory eviction appears twice), the residency events as
-`action/reason @seconds (position)`, the first 12 hex digits of the PNG's SHA-256, and the error
-name and message when the generate fails. A failed generate stops the remaining runs of that
-batch. The latest image is shown below the table.
+(a stage retried after an out-of-memory eviction appears twice), the GEMM geometry profile the
+sessions selected (ADR 0115 — `SessionDiagnostics.geometryProfile`, chosen once per session from
+the adapter's vendor and architecture; one id when every stage reports the same one, otherwise
+`component id` for every stage), the residency events as `action/reason @seconds (position)`,
+the first 12 hex digits of the PNG's SHA-256, and the error name and message when the generate
+fails. A failed generate stops the remaining runs of that batch. The latest image is shown below
+the table. After each generate, the environment line above the table also shows the geometry
+profile id(s) of that generate.
 
 ## What to confirm
 
@@ -66,6 +70,12 @@ batch. The latest image is shown below the table.
    the **same PNG SHA-256** as before. After an eviction the pipeline is downgraded for good:
    later residency-on rows list `released/downgraded`. If no eviction appears, raise the dummy
    size; if the allocation stops early, the status line says where.
+4. **The expected geometry profile is selected.** After the first generate, the **幾何プロファイル**
+   column and the environment line show one id: `apple-metal-3` on an Apple M2 in Chrome,
+   `nvidia-blackwell` on an RTX 5070 Ti, and `default` on any other GPU. A different id means
+   the adapter reported a vendor or architecture other than the one the profile matches — keep
+   the JSON, which records the adapter. Several ids in one row mean sessions on the same device
+   selected different profiles, which should not happen; report it.
 
 The pre-emptive check costs up to two trial allocations per generate (about 0.1 s; the measured numbers
 are in `docs/research/2026-09-27-h35-oom-device-lost.md`, which also explains why an
@@ -79,9 +89,9 @@ probe; record what the page shows.
 **JSON を保存** downloads `anima-residency-browser-<quant>-<timestamp>.json` with the adapter
 information, user agent, checkout revision and dirty flag, bundle hash, distribution name,
 manifest SHA-256, pipeline build times, the dummy allocations (each request and how much was
-allocated), any device loss, and every table row including the request and the full PNG
-SHA-256. Save it to `outputs/bench-browser/` to keep it next to the other browser results (that
-directory is not tracked by git).
+allocated), any device loss, and every table row including the request, the full PNG SHA-256,
+and each stage's `geometryProfile`. Save it to `outputs/bench-browser/` to keep it next to the
+other browser results (that directory is not tracked by git).
 
 ## Per-op GPU timing (K-70)
 
@@ -131,8 +141,10 @@ On top of the fields listed under [Export](#export), version 2 adds:
 - `quant` (the current or next pipeline's quant) and `gpuTiming: { enabled, feature, unit }`;
 - per row: `quant`;
 - per stage (`rows[].stages[]`): `gpu: { totalNs, runs, clampedNegativeSamples, entries: [{ key,
-  ns, dispatchCount }] }` (every key, sorted by `ns` descending; absent when timing is off) and
-  `pipelines: [{ key, dispatchCount }]` (sorted by key);
+  ns, dispatchCount }] }` (every key, sorted by `ns` descending; absent when timing is off),
+  `pipelines: [{ key, dispatchCount }]` (sorted by key), and `geometryProfile` (the id the
+  stage's session selected; absent when no run of the stage finished — added within version 2, so
+  older version 2 files lack it);
 - per pipeline build (`pipelineLoads[]`): `quant` and `gpuTiming`.
 
 The downloaded file is named `anima-residency-browser-<quant>-<timestamp>.json`.
