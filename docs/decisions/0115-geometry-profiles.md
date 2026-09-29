@@ -377,7 +377,7 @@ export type GeometryProfile = {
 
 ### 追記決定 4: M2 の DiT 再測で `apple-metal-3` を確定する（2026-09-29・K-71 採用）
 
-- 計測 = 利用者の M2 24 GB（Chrome 153・`apple` / `metal-3`）・確認ページ（`deno task bench:anima-browser`）・512²・seed 42・
+- 計測 = 利用者の M2 24 GB（Chrome 153・`apple` / `metal-3`）・確認ページ（当時の `deno task bench:anima-browser` — 同日夜に `tools/gpu-lab` の Anima タブへ統合）・512²・seed 42・
   DiT 常駐（2 回目以降の値）・checkout `cb87ab93`（DiT の幾何は現行と同じ。text_encoder の linear だけ当時の ≤ 64 の規則
   `reg64x64r4x4w16` で走っており、追記決定 3 で既定へ戻った — text 段 1.9 s のうち linear は 0.13 s で影響は無視できる）。
   記録 = `outputs/bench-browser/anima-residency-browser-f16-2026-09-29T17-15-47.294Z.json`（比較元は 2026-09-27 の 2 本）。
@@ -439,3 +439,20 @@ export type GeometryProfile = {
   スナップショットが無変更。故障注入 3 通り（門を外す・選択を adapter のみに戻す・カナリアにだけ adapter の選択を渡す）で赤を確認。
 - PoC の導線（同日裁定・別コミット）: 1 ページの道具 `tools/gpu-lab` で「掃引（quick+）→ 生成 → 注入して Anima を実行」を回す。
   掃引の候補集合 quick+ = quick ∪ 登録済みプロファイルの採用幾何。
+
+### 追記 7: PoC の道具 `tools/gpu-lab` — 掃引 → 生成 → 注入 → 実行を 1 ページで回す（2026-09-29・利用者裁定）
+
+- 1 ページ 3 タブ（掃引 / プロファイル / Anima）・サーバ 1 本（`deno task bench:gpu-lab`・既定ポート 8790・localhost 限定・ポート転送で
+  別の機の Chrome から使う）。旧 2 ページ（掃引の Chrome ページ・Anima の確認ページ）は吸収して削除した。Deno の双子 CLI
+  （`tools/geometry-sweep/main.ts`・`tools/anima-residency/profile.ts`）は残る。
+- 掃引の候補集合は 3 段: `quick`（既定 + 4〜5 形）・**`quick+`（既定 — quick ∪ 登録済みプロファイルの採用幾何）**・`full`（格子全体）。
+  quick+ を既定にした理由: quick の固定集合には M2 の勝ち幾何（`reg128x32r8x4w8`）も RTX の i8a8 の勝ち幾何も無く、他の機で勝った幾何を
+  未知の機で試すのが安い（所要は quick とほぼ同じ）。CLI は `--set <quick|quick+|full>`（省略 = quick+・`--quick` は `--set quick` の別名）、
+  JSON は `settings.candidateSet`（互換の `settings.quick` は `candidateSet === "quick"` のときだけ true）。登録用の表は full で。
+- プロファイルのタブは生成器の純関数（`tools/geometry-sweep/derive.ts` — CLI と共有・Deno 非依存）でその場で表を作り、TS の生成物・
+  注入の JSON・アプリ用 TS（`@karume/runtime` の型を import）・登録のコマンドを出す。「適用」は GPU を取り直して注入する（Anima の
+  pipeline とダミーは畳む）。
+- Anima の JSON（`karume-anima-residency-browser/2`）に `geometryProfileRequested`（`auto` / `default` / `builtin:<id>` / `generated:<id>`）と
+  `geometryProfileInjected`（注入した表の値・auto では無い）を足した。段ごとの診断 `geometryProfile` は使われた表の id で、注入か埋め込みかは
+  この 2 欄で読む。
+- 検収はページの README「What to confirm」1〜7（利用者の実機で）。

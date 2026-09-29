@@ -235,5 +235,5 @@ wgpu-core / deno_webgpu / Dawn のソース）。ここには決定だけを書�
 - e2e（`--filter residency`）4 行緑。新しい 2 行 = text_encoder の前の退避（空きを 1 GiB 程度残す形）と、最初の
   generate の VAE 段の前の退避（空き 256 MiB 未満）。
 - 費用: 常駐 DiT がある generate で試し確保 2 回ぶん（0.1 s 程度・実測は research）。段ごと運転では量らない。
-- Chrome での常駐と退避の挙動は、確認ページ（`tools/anima-residency/browser/`・`deno task bench:anima-browser` →
+- Chrome での常駐と退避の挙動は、確認ページ（2026-09-29 に `tools/gpu-lab` の Anima タブへ統合 — `deno task bench:gpu-lab` →
   http://localhost:8788）で観察する。
