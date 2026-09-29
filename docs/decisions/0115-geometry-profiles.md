@@ -175,7 +175,8 @@ export type GeometryProfile = {
 - `gemmRows` の ≤ 64 は M = 64 の 1 ケース、65〜512 は M = 512 の 1 ケースで決まる。M = 1〜63 の実測は無く、
   その区間への適用は外挿になる。f16 / f32 重みの linear は M = 1 だけが GEMV なので、M = 2〜64 にこの表が効く。
 - `i8a8` の 3 欄は M ≥ 1024 の実測だけで決まり、全行数に効く（今の既定も行数で分けていない）。
-- 掃引にケースを足して裏付けを補う案（linear の M = 16 / 32 / 128 / 256・matmul / bmm）は利用者の裁定待ち。
+- 掃引にケースを足して裏付けを補う案（linear の M = 16 / 32 / 128 / 256・matmul / bmm）は採用した（利用者裁定
+  2026-09-29 — 追記決定 1。上の 2 点は `apple-metal-3` の時点の記述で、M2 の full 再走待ち）。
 
 **今回は既定のままにする経路**（プロファイルを引かず、今の選択を使い続ける）:
 
@@ -264,7 +265,7 @@ export type GeometryProfile = {
   attention・conv2d は既定が最速か僅差だった（③PV の最良が ×1.02〜1.05・conv2d は c384 の ×1.092 だけ）。余地は中 M 512（`reg128x128r8x8w16` ×1.475）・小 M 64
   （`reg32x32r2x4w8` ×1.352）・i8a8 の 3 欄（`tile128x64r8x4w16x16k16` が全ケースで ×1.13〜1.31）にある。
   B570 の quick でも中 M 512 で 128×128 が ×1.41・小 M 64 で 64×32 が ×1.49。プロファイルを作るかは K-67 で
-  利用者が裁定する。
+  利用者が裁定する。→ `nvidia-blackwell` は 2026-09-29 に生成・登録した（追記決定 2）。
 - **「Metal では既定 quant の a8 を外す」は別 ADR**。M2 の i8a8 は幾何を直しても f32 と同じ時間で（research §9）、
   幾何の表では解けない。quant の選択（配布の席）の話なので、本 ADR の外で裁定する。
   この判断は保留中で、既定の quant 席を量子化にするか opt-in（元の重み）にするかの再検討に合流する（利用者裁定 2026-09-27）。
@@ -281,3 +282,64 @@ export type GeometryProfile = {
 | M2（Chrome）で anima の DiT 段の GPU 時間・壁時計（適用前 / 後・f16 quant と既定 quant）     | 未計測                                                    |
 | M2 で適用前後の PNG sha256 が一致（幾何でビットが動かないことの E2E での確認）               | 未計測                                                    |
 | 確認ページ・診断に選ばれたプロファイルの `id` が出る                                         | 未計測（診断欄 `geometryProfile` は実装済み）             |
+
+## 追記（2026-09-29）— 掃引ケースの追加と `nvidia-blackwell` の登録（利用者裁定 2026-09-29）
+
+### 追記決定 1: `gemmRows` は linear / matmul / bmm のケースで決める（決定 6 の更新）
+
+- 掃引（`tools/geometry-sweep`）に次のケースを足した。linear の M = 16 / 32（text_encoder の形 `[1,M,1024] × [3072,1024]` の
+  M を置換）と M = 128 / 256（transformer の cross-attention k / v 射影の形 `[1,M,1024] × [2048,1024]` の M を置換）。
+  matmul 3 本 — rank-2 の matmul は anima を含むどの系列の op census にも行が無いので、linear の各行数バケット 1 本の
+  **鏡像**（同じ M / N / K・B 側は `[K,N]`）を測る。census 由来でないことは `censusCount: 0` と `mirrorOf`（鏡像元の
+  linear のケース id）で表す。bmm 5 本 — anima の census の text_encoder 2 形・text_conditioner 3 形をそのまま。
+- 生成器の規則: 行数バケットの欄に入るケースは linear / matmul / bmm の全部。表が 3 経路に効く以上、matmul / bmm の
+  ケースで ×1.05 未満の幾何は、linear で速くても採らない。生成物の文言は「掃引にある linear / matmul / bmm のケースで
+  決め」（linear だけの掃引から作った表が、測っていない op で決めたと読めないように）。
+- 既存の生成物との関係: `apple-metal-3` は linear だけの掃引から作られたままで、値は不変（文言 1 行だけ再生成）。
+  **M2 で再走するときは full**（op = linear / matmul / bmm）。生成器は「欄の全ケースで測った幾何」しか候補にしないので、
+  新ケースを quick だけで足すと、quick 集合に無い採用幾何 `reg128x32r8x4w8` が「測っていない」で落ちて欄が後退する。
+- B570 の quick 実走（新ケースだけ・判断材料で、B570 の表は作らない）: ≤ 64 の M = 16 / 32 では大タイルが ×0.30〜0.77
+  と大きく負け、65〜512 では M = 128 の最良が ×1.019 に留まる一方 M = 256 と matmul M = 512 は ×1.4〜1.7 で、
+  1 点で欄を決める外挿のリスクを裏付けた。
+- 小さい bmm 3 本（1 dispatch が 15〜40 µs）は反復の上限 1024（`tools/opbench` と共有の `MAX_REPS` — 出力 readback の
+  線形増を抑える目的で、同じバッファに重ね打ちする掃引には当てはまらない）で pass が目標 80 ms に届かず、既定の
+  再測定比が 0.705〜1.552 と揺れた。対処（掃引だけ上限を上げる / 生成器が再測定比の範囲外のケースを落とす / 許容）は
+  利用者の裁定待ち（backlog now）。
+
+### 追記決定 2: `nvidia-blackwell`（Chrome の RTX 5070 Ti = `nvidia` / `blackwell`）を生成・登録する
+
+- 入力 = RTX 5070 Ti（Windows・Chrome 153）の full 掃引 1 本（2026-09-27T18-37・5 族 33 ケース・1,599 行・失敗 0・
+  出力不一致 0・既定の再測定比が範囲外のケース 0）。生成規則は決定 4 のまま（`--min-speedup 1.05`）。
+
+  | 欄                 | 採用                      | 対既定（幾何平均・最小〜最大） | ケース       |
+  | ------------------ | ------------------------- | -----------------------------: | ------------ |
+  | `gemmRows` ≤ 64    | `reg32x32r2x4w8`          |                         ×1.352 | 1（M = 64）  |
+  | `gemmRows` 65〜512 | `reg128x128r8x8w16`       |                         ×1.475 | 1（M = 512） |
+  | `gemmRows` > 512   | 既定のまま                |                              — | 6            |
+  | `attention.qk`     | 既定のまま                |                              — | 4            |
+  | `attention.pv`     | 既定のまま                |                              — | 4            |
+  | `conv2d.rows64`    | 既定のまま                |                              — | 2            |
+  | `conv2d.rows32`    | 既定のまま                |                              — | 1            |
+  | `i8a8.linear`      | `tile128x64r8x4w16x16k16` |         ×1.194（1.156〜1.256） | 6            |
+  | `i8a8.attentionQk` | `tile128x64r8x4w16x16k16` |         ×1.214（1.199〜1.238） | 4            |
+  | `i8a8.attentionPv` | `tile128x64r8x4w16x16k16` |         ×1.212（1.134〜1.306） | 4            |
+
+- dispatch 上限: `gemmRows` ≤ 64 の tileN 32 で linear の N 側上限は 2,097,120（実用形では届かない）。i8a8 の tileN は
+  64 で既定と同じ。conv2d は既定のまま。
+- `gemmRows` の ≤ 64 と 65〜512 は、`apple-metal-3` と同じく M = 64 / M = 512 の各 1 ケースで決まっている。追記決定 1 の
+  新ケースは RTX ではまだ測っていない（B570 の観察は上）。RTX で full を再走したら `--from` を 2 本にして再生成する。
+- 検収: B570 の per-profile GPU テスト（`gpu_geometry_profile_test` — 既定との Uint32 一致 + 幾何判別子が実走キーに
+  載ること）は緑。RTX 5070 Ti（Chrome）での anima の登録前後の PNG sha256 一致と、診断 `geometryProfile` が
+  `nvidia-blackwell` になることは未計測（利用者作業）。
+- 注: RTX の掃引で i8a8-attention の cross M = 1024 の 2 ケースは反復の上限 1024 に当たっている（再測定比は範囲内）。
+
+### 検収（追記分）
+
+| 項目                                                                                            | 結果                                            |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| 掃引に linear M 16 / 32 / 128 / 256・matmul 3・bmm 5 を足し、B570 で失敗 0・出力不一致 0        | ✅（2026-09-29・65 行）                         |
+| matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認） |
+| 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                            |
+| `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                |
+| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | 未実施（利用者作業）                            |
+| RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | 未計測（利用者作業）                            |

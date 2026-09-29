@@ -119,8 +119,10 @@ measurements in `docs/research/`.
   once at session construction from the adapter's vendor and architecture; nothing is measured at
   run time. Adapters without a profile get byte-identical shaders and pipeline keys as before.
   Apple `metal-3` under Chrome gets a profile measured on an M2, covering linear / matmul / bmm,
-  fused attention, conv2d and the i8a8 linear and attention kernels. Outputs stay bit-identical
-  across geometries.
+  fused attention, conv2d and the i8a8 linear and attention kernels. NVIDIA `blackwell` under
+  Chrome gets a profile measured on an RTX 5070 Ti that changes the f32 GEMM tiles for M ≤ 512 and
+  the i8a8 linear and attention tiles; its other kernels keep the default. Outputs stay
+  bit-identical across geometries.
 
 ### Fixed
 

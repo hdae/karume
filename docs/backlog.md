@@ -32,10 +32,15 @@
 
 - **要検討: 既定の quant 席を量子化にするか opt-in（元の重み）にするか（起票 2026-09-27・利用者）**: 今は既定で w8a8 などの量子化席を選ぶ。
   それが正当かを見直す。「Metal では既定 quant の a8 を外す」判断（perf-ledger K-70・ADR 0115 Consequences）は保留にしてここに合流した。
+  **材料集めは済（2026-09-29）**: `.claude/reviews/2026-09-29_quant-default-recon/SUMMARY.md`（git 追跡外）— 席の決まり方（recipe の定数・hub の解決・利用者の口）・
+  系列 × 席 33 行の表（格納型・session 宣言・DL サイズ・契約クラス）・席別の実測（B570 / M2 / RTX・未計測を明示）・既定を量子化にした過去の根拠の引用・論点 3 案が守るもの。次 = 利用者と議論。
 
-- **幾何プロファイル（K-71）まわりの裁定待ち（起票 2026-09-27）**: 正本は ADR [0115](decisions/0115-geometry-profiles.md)。
-  ① 掃引にケースを足して裏付けを補うか（linear の M = 16 / 32 / 128 / 256・matmul / bmm — 今は M = 1〜63 が外挿・matmul / bmm は linear の実測を共有・ADR 0115 決定 6）。
-  ② RTX 5070 Ti の full 掃引から `nvidia-blackwell` プロファイルを生成するか（材料は perf-ledger K-67）。
+- **幾何プロファイル（K-71）まわり（起票 2026-09-27・裁定 2026-09-29 = 推奨案で全承認）**: 正本は ADR [0115 追記 2026-09-29](decisions/0115-geometry-profiles.md)。
+  ① 掃引ケースの追加は済（linear の M = 16 / 32 / 128 / 256・matmul 3 本〈linear の鏡像 — census に rank-2 matmul は無い〉・bmm 5 本〈census〉。生成器は 3 経路のケースで `gemmRows` を決める）。
+  残り = M2（利用者の Chrome）で **full**（op = linear / matmul / bmm）を再走 → `apple-metal-3` を `--from` 3 本で再生成（quick だけでは採用幾何 `reg128x32r8x4w8` が「測っていない」で落ちる）。
+  ② `nvidia-blackwell` は生成・登録済（B570 の per-profile GPU テスト緑）。残り = RTX 5070 Ti（Chrome）で anima の登録前後の PNG sha 一致と診断 `geometryProfile` の確認（利用者）。
+  ③ **裁定待ち**: 小さい bmm 3 ケース（1 dispatch 15〜40 µs）が反復の上限 1024（`tools/opbench` と共有の `MAX_REPS`）で pass が目標 80 ms に届かず、既定の再測定比が 0.7〜1.55 と揺れる（B570）。
+  対処の候補 = 掃引だけ上限を上げる / 生成器が再測定比の範囲外のケースを落とす / 許容して README に明記。
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
