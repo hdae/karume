@@ -10,6 +10,7 @@ import {
 import {
   assertGeometryProfile,
   DEFAULT_GEOMETRY_PROFILE,
+  selectGeometryProfile,
 } from "../../packages/runtime/src/kernels/geometry-profile.ts";
 import {
   buildGeometryProfile,
@@ -34,6 +35,7 @@ const sweep = (name: string, sha256: string): SweepSource =>
     date: "2026-09-29T00:00:00.000Z",
     adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
     gpuTiming: { feature: true, unit: "ns", quantized: false },
+    cases: [{ caseId: "linear-m1024", defaultRepeat: { perDispatch: 1, driftRatio: 1 } }],
     rows: [
       {
         caseId: "linear-m1024",
@@ -128,6 +130,57 @@ describe("buildGeometryProfile", () => {
       "{ maxRows: Number.POSITIVE_INFINITY, geometry: { regM: 4, regN: 4, wgX: 8, wgY: 16 } },",
     );
     assertStringIncludes(source, 'provenance: { sweep: "a.json, b.json", sha256: "sha-a, sha-b"');
+  });
+});
+
+describe("buildGeometryProfile: description と注入専用", () => {
+  const described = { ...SPEC, description: "Test GPU" };
+  const optIn = {
+    from: SPEC.from,
+    id: SPEC.id,
+    optIn: true,
+    out: SPEC.out,
+    minSpeedup: SPEC.minSpeedup,
+  } as const;
+  const adapter = { vendor: "apple", architecture: "metal-3", description: "Test GPU" };
+
+  it("description を指定した表は match に description を持ち、その機種にだけ当たる", () => {
+    const profile = buildGeometryProfile(described, SOURCES, deriveProfile(SOURCES, described));
+    assertEquals(profile.match, {
+      vendor: "apple",
+      architecture: "metal-3",
+      description: "Test GPU",
+    });
+    assertEquals(selectGeometryProfile(adapter, [profile]), profile);
+    assertEquals(
+      selectGeometryProfile({ ...adapter, description: "" }, [profile]),
+      DEFAULT_GEOMETRY_PROFILE,
+    );
+  });
+
+  it("注入専用の表は match の欄ごと無く、門を通り、同じ adapter でも自動では選ばれない", () => {
+    const profile = buildGeometryProfile(optIn, SOURCES, deriveProfile(SOURCES, optIn));
+    assert(!("match" in profile), JSON.stringify(profile));
+    assertGeometryProfile(profile);
+    assertEquals(selectGeometryProfile(adapter, [profile]), DEFAULT_GEOMETRY_PROFILE);
+    assert(!("match" in JSON.parse(profileJson(profile))));
+  });
+
+  it("TS の生成物: description は match に書き、注入専用は match の行を書かない", () => {
+    const withDescription = renderProfileSource(
+      described,
+      SOURCES,
+      deriveProfile(SOURCES, described),
+    );
+    assertStringIncludes(
+      withDescription,
+      'match: { vendor: "apple", architecture: "metal-3", description: "Test GPU" },',
+    );
+    assertStringIncludes(withDescription, "--description 'Test GPU'");
+    const injected = renderProfileSource(optIn, SOURCES, deriveProfile(SOURCES, optIn));
+    assert(!injected.includes("match:"), injected);
+    assertStringIncludes(injected, "--id test-gpu --opt-in \\");
+    assertStringIncludes(injected, "**注入専用**");
   });
 });
 

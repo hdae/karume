@@ -24,12 +24,20 @@ const DECODER = new TextDecoder();
 
 export type ProfileFlags = ProfileSpec & { readonly check: boolean };
 
-/** `--check` 以外は `--key value` の対（未知のキーは落とす — 綴り違いが既定で走らない）。 */
+/**
+ * `--check` と `--opt-in` 以外は `--key value` の対（未知のキーは落とす — 綴り違いが既定で走らない）。
+ *
+ * 表の相手は `--vendor` [`--architecture`] [`--description`]（生成物の `match`）か、`--opt-in`
+ * （`match` を省いた注入専用の表）のどちらか一方。両方を渡したら落とす — 注入専用のつもりの表が
+ * 自動選択に載る / その逆を黙って起こさない。
+ */
 export const parseProfileFlags = (argv: readonly string[]): ProfileFlags => {
   const from: string[] = [];
   let id: string | undefined;
   let vendor: string | undefined;
   let architecture: string | undefined;
+  let description: string | undefined;
+  let optIn = false;
   let out: string | undefined;
   let minSpeedup = DEFAULT_MIN_SPEEDUP;
   let check = false;
@@ -37,6 +45,10 @@ export const parseProfileFlags = (argv: readonly string[]): ProfileFlags => {
     const key = argv[at];
     if (key === "--check") {
       check = true;
+      continue;
+    }
+    if (key === "--opt-in") {
+      optIn = true;
       continue;
     }
     const value = argv[at + 1];
@@ -57,6 +69,9 @@ export const parseProfileFlags = (argv: readonly string[]): ProfileFlags => {
       case "--architecture":
         architecture = value;
         break;
+      case "--description":
+        description = value;
+        break;
       case "--out":
         out = value;
         break;
@@ -75,21 +90,30 @@ export const parseProfileFlags = (argv: readonly string[]): ProfileFlags => {
   if (id === undefined || !PROFILE_ID.test(id)) {
     throw new Error(`--id は英小文字始まりの kebab-case（${id ?? "無し"}）`);
   }
-  if (vendor === undefined || vendor === "") throw new Error("--vendor が要る");
   if (out === undefined) throw new Error("--out <生成物の .ts> が要る");
   // MUST: ファイル名 = id（index.ts の一覧と runtime の診断が id からファイルを辿れる形を保つ）
   const basename = out.slice(out.lastIndexOf("/") + 1);
   if (basename !== `${id}.ts`) {
     throw new Error(`--out のファイル名は ${id}.ts（${basename}）`);
   }
+  const common = { from, id, out, minSpeedup, check };
+  if (optIn) {
+    if (vendor !== undefined || architecture !== undefined || description !== undefined) {
+      throw new Error(
+        "--opt-in（match を省いた注入専用の表）は --vendor / --architecture / --description と同時に指定しない",
+      );
+    }
+    return { ...common, optIn: true };
+  }
+  if (vendor === undefined || vendor === "") {
+    throw new Error("--vendor が要る（自動選択しない注入専用の表は --opt-in）");
+  }
+  if (description === "") throw new Error("--description は空文字にしない（未指定は省く）");
   return {
-    from,
-    id,
+    ...common,
     vendor,
     ...(architecture === undefined ? {} : { architecture }),
-    out,
-    minSpeedup,
-    check,
+    ...(description === undefined ? {} : { description }),
   };
 };
 
@@ -190,7 +214,8 @@ const readTextOrUndefined = async (path: string): Promise<string | undefined> =>
 
 /**
  * `geometry-profiles/index.ts` の一覧（別の担当の手書き — 生成器は書き換えない）に載っているかの
- * 案内。載っていなければ足す行を出す。
+ * 案内。載っていなければ足す行を出す。一覧は 1 本で、`match` を省いた注入専用の表も同じ一覧に足す
+ * （自動選択されないだけで、公開面の `BUILTIN_GEOMETRY_PROFILES` から id で引ける）。
  */
 const indexHint = async (flags: ProfileFlags): Promise<string[]> => {
   const directory = flags.out.slice(0, Math.max(0, flags.out.lastIndexOf("/"))) || ".";
@@ -203,7 +228,9 @@ const indexHint = async (flags: ProfileFlags): Promise<string[]> => {
   return [
     `[geometry-profile] ${indexPath} の BUILTIN_GEOMETRY_PROFILES にまだ載っていない — 次を足す:`,
     `  import { ${name} } from "./${flags.id}.ts";`,
-    `  （BUILTIN_GEOMETRY_PROFILES の配列に ${name} を加える）`,
+    `  （BUILTIN_GEOMETRY_PROFILES の配列に ${name} を加える${
+      flags.optIn === true ? " — 注入専用の表も同じ一覧（match が無いので自動選択はされない）" : ""
+    }）`,
   ];
 };
 

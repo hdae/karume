@@ -21,9 +21,9 @@
  * サブコマンド `profile`（GPU を使わない — `profile.ts`）は掃引の JSON から adapter 1 種の幾何
  * プロファイルの生成物を書く（perf-ledger K-71）:
  *
- *   deno run -A tools/geometry-sweep/main.ts profile --from <sweep.json> --id <id> --vendor <v> \
- *     [--architecture <a>] --out packages/runtime/src/kernels/geometry-profiles/<id>.ts \
- *     [--min-speedup 1.05] [--check]
+ *   deno run -A tools/geometry-sweep/main.ts profile --from <sweep.json> --id <id> \
+ *     (--vendor <v> [--architecture <a> [--description <d>]] | --opt-in) \
+ *     --out packages/runtime/src/kernels/geometry-profiles/<id>.ts [--min-speedup 1.05] [--check]
  */
 import { acquireGpu } from "../../packages/runtime/mod.ts";
 import { readCheckout } from "../shared/checkout.ts";

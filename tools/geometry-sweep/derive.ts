@@ -6,8 +6,9 @@
  *
  * 幾何の選択は runtime では「shape × adapter の静的な表」で、実行時オートチューンは禁止のまま
  * （ADR 0022 決定 3 の MUST）。この道具は**明示のチューニング（掃引）で測った結果をソースへ焼き込む
- * 側**で、runtime は生成物を adapter の (vendor, architecture) で 1 本選ぶだけ — 実行時には測らない。
- * 利用者が自分の掃引から作った表は `acquireGpu({ geometryProfile })` で注入もできる（{@link profileJson}）。
+ * 側**で、runtime は生成物を adapter の (vendor, architecture, description) で 1 本選ぶだけ — 実行時には
+ * 測らない。`match` を省いた表（`--opt-in`）は自動選択されない注入専用の表になる。利用者が自分の掃引から
+ * 作った表は `acquireGpu({ geometryProfile })` で注入もできる（{@link profileJson}）。
  *
  * ## 規則の導出
  *
@@ -25,6 +26,12 @@
  *   （quick と full を重ねる用途 — 1 度でも不一致・失敗した幾何は採らない）。
  * - 掃引の既定の行の幾何が今の runtime の既定と違えば生成しない（fail loudly）。既定比は既定の行に
  *   対する比なので、土台が今の既定と別物なら「既定より速い」が今の runtime では成り立たない。
+ *
+ * 材料の門: 掃引ごとに、既定の再測定比（`cases[].defaultRepeat.driftRatio`）が
+ * `DEFAULT_DRIFT_RANGE`（report.ts — 0.9〜1.1）の外か、再測定が失敗 / 無いケースは、その掃引の比の観測から
+ * 外す（{@link deriveProfile}）。比の土台（既定の値）がケースの途中で動いた疑いがあり、どの幾何の既定比も
+ * 信用できないから。外すのは比だけで、出力の不一致と失敗はそのケースでも判定に効く（出力の一致は正しさの
+ * 門で熱に依らない）。外したケースは採否の行に全部残す。
  *
  * 入力の門（ADR 0115 §4）: GPU の timestamp で測った掃引（`gpuTiming.unit` が `ns` か
  * `deno-raw-tick`、かつ `gpuTiming.quantized` が false）だけを受ける。壁時計と 100 µs 丸めは
@@ -51,7 +58,7 @@ import {
 } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
 import { SWEEP_OPS, type SweepOp } from "./cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
-import { REPORT_FORMAT } from "./report.ts";
+import { DEFAULT_DRIFT_RANGE, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
 /** `--min-speedup` の既定（既定比がこれ未満の勝ちは測定の揺れと区別しない）。 */
 export const DEFAULT_MIN_SPEEDUP = 1.05;
@@ -60,14 +67,33 @@ export const DEFAULT_MIN_SPEEDUP = 1.05;
 export const PROFILE_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
 /**
- * 生成の入力のうち掃引の記録以外（CLI の `--from` / `--id` / `--vendor` / `--architecture` / `--out` /
- * `--min-speedup`）。`from` と `out` は生成物のコメントの再生成コマンドに載る path。
+ * 表を当てる adapter（生成物の `match`）。`vendor` / `architecture` / `description` は runtime の選択と
+ * 同じ文字列の完全一致で、`description` は `architecture` と組でだけ指定できる（runtime の門と同じ条件）。
+ * `optIn` は `match` を省いた**注入専用**の表 — runtime は自動では選ばず、アプリが id で引いて
+ * `acquireGpu({ geometryProfile })` へ渡す（ADR 0115 追記決定 7）。
  */
-export type ProfileSpec = {
+export type ProfileTarget =
+  | {
+    readonly optIn?: undefined;
+    readonly vendor: string;
+    readonly architecture?: string;
+    readonly description?: string;
+  }
+  | {
+    readonly optIn: true;
+    readonly vendor?: undefined;
+    readonly architecture?: undefined;
+    readonly description?: undefined;
+  };
+
+/**
+ * 生成の入力のうち掃引の記録以外（CLI の `--from` / `--id` / `--vendor` / `--architecture` /
+ * `--description` / `--opt-in` / `--out` / `--min-speedup`）。`from` と `out` は生成物のコメントの
+ * 再生成コマンドに載る path。
+ */
+export type ProfileSpec = ProfileTarget & {
   readonly from: readonly string[];
   readonly id: string;
-  readonly vendor: string;
-  readonly architecture?: string;
   readonly out: string;
   readonly minSpeedup: number;
 };
@@ -93,6 +119,15 @@ type SweepObservation = {
   readonly error?: string;
 };
 
+/** ケース末尾の既定の再測定（`cases[]` のうち生成が読む欄 — report.ts の `CaseSummary`）。 */
+type SweepCaseRepeat = {
+  readonly caseId: string;
+  /** 再測定 ÷ 初回（`defaultRepeat.driftRatio`）。 */
+  readonly driftRatio?: number;
+  /** 再測定の失敗（`defaultRepeatError`）。 */
+  readonly error?: string;
+};
+
 /** 掃引の記録 1 本（unknown 境界で検査したもの）。 */
 export type SweepSource = {
   /** 表示と再生成コマンドに載せる path（リポ直下からの相対）。 */
@@ -100,6 +135,7 @@ export type SweepSource = {
   readonly sha256: string;
   readonly date: string;
   readonly adapter: SweepAdapter;
+  readonly cases: readonly SweepCaseRepeat[];
   readonly rows: readonly SweepObservation[];
 };
 
@@ -187,6 +223,23 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
   };
 };
 
+const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
+  if (!isRecord(value)) throw new Error(`${where}: オブジェクトでない`);
+  const repeat = value.defaultRepeat;
+  if (repeat !== undefined && !isRecord(repeat)) {
+    throw new Error(`${where}: defaultRepeat がオブジェクトでない`);
+  }
+  const driftRatio = repeat === undefined
+    ? undefined
+    : optional(repeat, "driftRatio", isPositiveNumber, `${where} defaultRepeat`);
+  const error = optional(value, "defaultRepeatError", isString, where);
+  return {
+    caseId: requireString(value, "caseId", where),
+    ...(driftRatio === undefined ? {} : { driftRatio }),
+    ...(error === undefined ? {} : { error }),
+  };
+};
+
 /**
  * 掃引の記録を読む（unknown 境界 — 生成が読む欄だけを検査して fail loudly）。
  *
@@ -232,6 +285,19 @@ export const parseSweepReport = (
       `${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(gpuTiming.quantized)}）`,
     );
   }
+  // 既定の再測定（cases[]）は材料の門が読む — 無い記録は「どのケースも再測定が無い」になるので、
+  // 黙って全ケースを外さずに落とす
+  if (!Array.isArray(parsed.cases)) {
+    throw new Error(`${where}: cases が配列でない（ケースごとの既定の再測定が読めない）`);
+  }
+  const cases = parsed.cases.map((entry, index) =>
+    parseCaseRepeat(entry, `${where} cases[${index}]`)
+  );
+  const caseIds = new Set<string>();
+  for (const { caseId } of cases) {
+    if (caseIds.has(caseId)) throw new Error(`${where}: cases に ${caseId} が 2 本`);
+    caseIds.add(caseId);
+  }
   if (!Array.isArray(parsed.rows)) throw new Error(`${where}: rows が配列でない`);
   const rows = parsed.rows.map((row, index) => parseRow(row, `${where} rows[${index}]`));
   const defaults = new Map<string, number>();
@@ -252,6 +318,7 @@ export const parseSweepReport = (
       architecture: requireString(adapter, "architecture", `${where} adapter`),
       description: requireString(adapter, "description", `${where} adapter`),
     },
+    cases,
     rows,
   };
 };
@@ -440,7 +507,39 @@ export type SlotVerdict = {
     };
   /** 採らなかった幾何と理由（名前の昇順）。 */
   readonly rejected: readonly { readonly name: string; readonly reason: string }[];
+  /** このクラスのケースのうち、掃引ごとに比の材料から外したもの（掃引を渡した順 → ケース id の昇順）。 */
+  readonly excluded: readonly ExcludedCase[];
 };
+
+/** 掃引 1 本の中で比の材料から外したケース（{@link exclusionReason}）— 出力の一致と失敗は見る。 */
+export type ExcludedCase = {
+  readonly path: string;
+  readonly caseId: string;
+  /** 「既定の再測定比 ×1.160 が範囲外」など（{@link excludedCaseLine} が文にする）。 */
+  readonly reason: string;
+};
+
+/** 外したケースの 1 行（生成物のコメント・標準出力・ページで同じ文）。 */
+export const excludedCaseLine = (excluded: ExcludedCase): string =>
+  `掃引 ${excluded.path}: ${excluded.caseId} は${excluded.reason}のため比の材料から外した（出力の一致と失敗は見る）`;
+
+/**
+ * ケースをその掃引の比の材料から外す理由（外さないなら undefined）。
+ *
+ * 既定の再測定比（ケースの末尾で既定をもう 1 度測った値 ÷ 初回）が {@link DEFAULT_DRIFT_RANGE} の外なら、
+ * 熱・クロックがケースの途中で動いた疑いがあり、比の土台（既定の値）ごと揺れている — そのケースの既定比は
+ * どの幾何についても信用できない。再測定が失敗した・無いケースは揺れを確かめられないので同じ扱い。
+ */
+const exclusionReason = (repeat: SweepCaseRepeat | undefined): string | undefined => {
+  if (repeat?.error !== undefined) return `既定の再測定が失敗（${repeat.error}）`;
+  if (repeat?.driftRatio === undefined) return "既定の再測定が無い";
+  return driftOutOfRange(repeat.driftRatio)
+    ? `既定の再測定比 ${formatRatio(repeat.driftRatio)} が範囲外`
+    : undefined;
+};
+
+/** クラスに振り分けた行（`included` = 材料に残したか）。 */
+type SlotRow = { readonly row: SweepObservation; readonly included: boolean };
 
 type Eligibility =
   | {
@@ -454,22 +553,37 @@ type Eligibility =
 /**
  * 候補 1 つの判定。クラスの**全ケース**を見る — 測っていない・失敗・不一致・比が無いケースが
  * 1 つでもあれば落とし（ケース id の昇順で最初のもの）、全ケースが揃えば最も負けたケースで門を見る。
+ *
+ * 失敗と出力の不一致は、比の材料から外した行（`included: false`）も含めて見る — 出力の一致は正しさの門で
+ * 熱・クロックに依らないから、どれか 1 本の掃引で不一致 / 失敗ならその幾何は採らない。比は材料に残した行
+ * だけから取り、全掃引で比の材料から外したケース（`unmeasured`）は、どの幾何も比を測っていない扱い。
  */
 const judgeCandidate = (
   cases: readonly string[],
-  observations: ReadonlyMap<string, readonly SweepObservation[]>,
+  observations: ReadonlyMap<string, readonly SlotRow[]>,
+  unmeasured: ReadonlySet<string>,
   minSpeedup: number,
 ): Eligibility => {
   const perCase: { readonly caseId: string; readonly speedup: number }[] = [];
   for (const caseId of cases) {
-    const seen = observations.get(caseId) ?? [];
-    if (seen.length === 0) return { eligible: false, reason: `${caseId} で測っていない` };
-    const failed = seen.find((row) => row.error !== undefined);
+    const all = (observations.get(caseId) ?? []).map(({ row }) => row);
+    const failed = all.find((row) => row.error !== undefined);
     if (failed !== undefined) {
       return { eligible: false, reason: `${caseId} で失敗（${failed.error}）` };
     }
-    if (seen.some((row) => row.identicalToDefault === false)) {
+    if (all.some((row) => row.identicalToDefault === false)) {
       return { eligible: false, reason: `${caseId} で出力が既定と不一致` };
+    }
+    const seen = (observations.get(caseId) ?? []).flatMap(({ row, included }) =>
+      included ? [row] : []
+    );
+    if (seen.length === 0) {
+      return {
+        eligible: false,
+        reason: unmeasured.has(caseId)
+          ? `${caseId} で測っていない（全掃引で比の材料から外した）`
+          : `${caseId} で測っていない`,
+      };
     }
     const speedups: number[] = [];
     for (const row of seen) {
@@ -498,10 +612,11 @@ const judgeCandidate = (
 
 const judgeSlot = (
   spec: SlotSpec,
-  rows: readonly SweepObservation[],
+  slotRows: readonly SlotRow[],
+  excluded: readonly ExcludedCase[],
   minSpeedup: number,
 ): SlotVerdict => {
-  if (rows.length === 0) {
+  if (slotRows.length === 0) {
     const { name, geometry } = spec.fallback();
     return {
       slot: spec.slot,
@@ -509,9 +624,17 @@ const judgeSlot = (
       cases: [],
       outcome: { kind: "default", name, geometry, reason: "掃引にこのクラスのケースが無い" },
       rejected: [],
+      excluded,
     };
   }
+  // 既定の行の門とケースの一覧は比の材料から外した行も含めて見る（外すのは比の観測だけ — 土台の検査と
+  // 出力の一致・失敗は記録そのものに掛ける）
+  const rows = slotRows.map(({ row }) => row);
   const cases = [...new Set(rows.map((row) => row.caseId))].sort();
+  const measured = new Set(
+    slotRows.filter(({ included }) => included).map(({ row }) => row.caseId),
+  );
+  const unmeasured = new Set(cases.filter((caseId) => !measured.has(caseId)));
   const defaults = rows.filter((row) => row.isDefault);
   const defaultKeys = new Set(defaults.map((row) => geometryKey(row.geometryParams)));
   // MUST: クラスの既定は 1 つ。割れていれば比の土台がケースごとに違う（掃引の版違いなど）
@@ -534,23 +657,25 @@ const judgeSlot = (
   }
   const byName = new Map<
     string,
-    { geometry: Geometry; observations: Map<string, SweepObservation[]> }
+    { geometry: Geometry; observations: Map<string, SlotRow[]> }
   >();
-  for (const row of rows) {
+  for (const slotRow of slotRows) {
+    const { row } = slotRow;
     if (row.isDefault || row.geometry === defaultRow.geometry) continue;
     const entry = byName.get(row.geometry) ??
-      { geometry: row.geometryParams, observations: new Map<string, SweepObservation[]>() };
+      { geometry: row.geometryParams, observations: new Map<string, SlotRow[]>() };
     if (geometryKey(entry.geometry) !== geometryKey(row.geometryParams)) {
       throw new Error(`${spec.slot}: 幾何 ${row.geometry} の geometryParams が行ごとに違う`);
     }
-    entry.observations.set(row.caseId, [...(entry.observations.get(row.caseId) ?? []), row]);
+    // 外した行も観測に載せる — 比には使わないが、失敗と出力の不一致は判定に効く（judgeCandidate）
+    entry.observations.set(row.caseId, [...(entry.observations.get(row.caseId) ?? []), slotRow]);
     byName.set(row.geometry, entry);
   }
   const judged = [...byName.entries()]
     .map(([name, entry]) => ({
       name,
       geometry: entry.geometry,
-      eligibility: judgeCandidate(cases, entry.observations, minSpeedup),
+      eligibility: judgeCandidate(cases, entry.observations, unmeasured, minSpeedup),
     }))
     .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   const eligible = judged
@@ -579,7 +704,9 @@ const judgeSlot = (
         kind: "default",
         name: defaultRow.geometry,
         geometry: defaultRow.geometryParams,
-        reason: `全ケースで出力が一致し ${formatRatio(minSpeedup)} 以上の幾何が無い`,
+        reason: unmeasured.size === cases.length
+          ? "クラスの全ケースを全掃引で比の材料から外した"
+          : `全ケースで出力が一致し ${formatRatio(minSpeedup)} 以上の幾何が無い`,
       }
       : {
         kind: "adopted",
@@ -590,17 +717,29 @@ const judgeSlot = (
         max: winner.max,
       },
     rejected,
+    excluded,
   };
 };
 
-/** 掃引の記録（1 本以上・同じ adapter）から欄ごとの採否を出す（純関数）。 */
+/** 表の相手の表示（`vendor / architecture / description` — 指定した欄だけ）。 */
+const targetLabel = (target: ProfileTarget): string =>
+  target.optIn === true
+    ? "（注入専用 — match なし）"
+    : [target.vendor, target.architecture, target.description]
+      .filter((part) => part !== undefined).join(" / ");
+
+/**
+ * 掃引の記録（1 本以上・同じ adapter）から欄ごとの採否を出す（純関数）。
+ *
+ * 材料の門: 掃引ごとに、既定の再測定比が範囲外か再測定が失敗 / 無いケース（{@link exclusionReason}）は
+ * **その掃引の**比の観測から外す。同じケースを別の掃引が測っていればそちらの比で判定し、どの掃引にも
+ * 残らないケースはどの幾何も比を測っていない扱い（クラスの全ケースで勝つ規則により欄は既定のまま）。
+ * 出力の不一致と失敗は外したケースでも判定に残す — 出力の一致は正しさの門で熱に依らないので、外した掃引で
+ * 不一致 / 失敗の幾何は他の掃引で一致していても候補にしない。外すかどうかの選択肢は持たない（規則は 1 つ）。
+ */
 export const deriveProfile = (
   sources: readonly SweepSource[],
-  options: {
-    readonly vendor: string;
-    readonly architecture?: string;
-    readonly minSpeedup: number;
-  },
+  options: ProfileTarget & { readonly minSpeedup: number },
 ): readonly SlotVerdict[] => {
   if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い");
   // 生成物の gemmRows は 3 段の欄で書く — runtime の段数が変われば欄と境界の対応が崩れる
@@ -608,6 +747,12 @@ export const deriveProfile = (
     throw new Error(
       `runtime の行数バケットが ${ROWS_BUCKETS.length} 段（生成器の欄は ${ROWS_SLOTS.length} 段）`,
     );
+  }
+  // runtime の門（assertGeometryProfile）と同じ条件 — 生成してから注入・登録の段で落ちる前に止める。
+  // description は機種の名前で、vendor / architecture の内側を分けるためだけの欄
+  if (options.description === "") throw new Error("description は空文字にしない（未指定は省く）");
+  if (options.description !== undefined && options.architecture === undefined) {
+    throw new Error("description は vendor と architecture の両方と組で指定する");
   }
   const seen = new Map<string, string>();
   for (const source of sources) {
@@ -617,40 +762,70 @@ export const deriveProfile = (
       throw new Error(`同じ掃引を 2 度渡している（${twin} と ${source.path}）`);
     }
     seen.set(source.sha256, source.path);
-    // MUST: 別の adapter の実測を混ぜない（表は adapter ごとの答え — B570 と M2 は逆を指す）
-    const { vendor, architecture } = source.adapter;
+    // MUST: 別の adapter の実測を混ぜない（表は adapter ごとの答え — B570 と M2 は逆を指す）。
+    // description を指定したら、その機種の掃引だけ（同じ vendor / architecture の別機種を混ぜない）
+    const { vendor, architecture, description } = source.adapter;
     if (
-      vendor !== options.vendor ||
-      (options.architecture !== undefined && architecture !== options.architecture)
+      options.optIn !== true && (
+        vendor !== options.vendor ||
+        (options.architecture !== undefined && architecture !== options.architecture) ||
+        (options.description !== undefined && description !== options.description)
+      )
     ) {
       throw new Error(
-        `${source.path}: adapter ${vendor} / ${architecture} が指定した vendor ${options.vendor}${
-          options.architecture === undefined ? "" : ` / architecture ${options.architecture}`
+        `${source.path}: adapter ${vendor} / ${architecture} / ${description} が指定した ${
+          targetLabel(options)
         } と合わない`,
       );
     }
+    // MUST: 掃引どうしも description まで一致（空どうしは一致・片方だけ空は不一致）— --opt-in や
+    // --description 省略では上の門が description を見ないので、同じ vendor / architecture の別機種
+    // （M2 と M5 など）が混ざるのをここで止める
     const first = sources[0].adapter;
-    if (vendor !== first.vendor || architecture !== first.architecture) {
+    if (
+      vendor !== first.vendor || architecture !== first.architecture ||
+      description !== first.description
+    ) {
       throw new Error(
-        `${source.path}: adapter ${vendor} / ${architecture} が ${
+        `${source.path}: adapter ${vendor} / ${architecture} / ${description} が ${
           sources[0].path
-        } の ${first.vendor} / ${first.architecture} と違う`,
+        } の ${first.vendor} / ${first.architecture} / ${first.description} と違う`,
       );
     }
   }
-  const bySlot = new Map<ProfileSlot, SweepObservation[]>();
+  const bySlot = new Map<ProfileSlot, SlotRow[]>();
+  const excludedBySlot = new Map<ProfileSlot, ExcludedCase[]>();
   for (const source of sources) {
     const conv2dDefaultTileM = new Map(
       source.rows
         .filter((row) => row.op === "conv2d" && row.isDefault)
         .map((row) => [row.caseId, gemmTileM(row.geometryParams)] as const),
     );
+    const repeats = new Map(source.cases.map((repeat) => [repeat.caseId, repeat] as const));
+    const excludedHere = new Map<string, { readonly slot: ProfileSlot; readonly reason: string }>();
     for (const row of source.rows) {
       const slot = slotOf(row, conv2dDefaultTileM, source.path);
-      bySlot.set(slot, [...(bySlot.get(slot) ?? []), row]);
+      const reason = exclusionReason(repeats.get(row.caseId));
+      if (reason !== undefined) excludedHere.set(row.caseId, { slot, reason });
+      bySlot.set(slot, [...(bySlot.get(slot) ?? []), { row, included: reason === undefined }]);
+    }
+    const byCaseId = [...excludedHere.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    for (const [caseId, { slot, reason }] of byCaseId) {
+      excludedBySlot.set(slot, [
+        ...(excludedBySlot.get(slot) ?? []),
+        { path: source.path, caseId, reason },
+      ]);
     }
   }
-  return SLOTS.map((spec) => judgeSlot(spec, bySlot.get(spec.slot) ?? [], options.minSpeedup));
+  return SLOTS.map((spec) =>
+    judgeSlot(
+      spec,
+      bySlot.get(spec.slot) ?? [],
+      excludedBySlot.get(spec.slot) ?? [],
+      options.minSpeedup,
+    )
+  );
 };
 
 /** `apple-metal-3` → `APPLE_METAL_3`。 */
@@ -666,20 +841,33 @@ export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
         formatRatio(outcome.min)
       }〜${formatRatio(outcome.max)}）`
       : `- ${head}: 既定 ${outcome.name} のまま（${outcome.reason}）`;
-    return [line, ...verdict.rejected.map(({ name, reason }) => `  - ${name}: ${reason}`)];
+    return [
+      line,
+      ...verdict.excluded.map((excluded) => `  - ${excludedCaseLine(excluded)}`),
+      ...verdict.rejected.map(({ name, reason }) => `  - ${name}: ${reason}`),
+    ];
   });
 
 /** シェルにそのまま貼れる形（空白・記号を含む語だけ単引用符で包む）。 */
 const shellWord = (word: string): string =>
   /^[A-Za-z0-9_./:=@%+-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
 
+/** 表の相手を指す CLI の引数（`--opt-in` か `--vendor` [`--architecture`] [`--description`]）。 */
+const targetFlags = (target: ProfileTarget): string[] =>
+  target.optIn === true ? ["--opt-in"] : [
+    "--vendor",
+    shellWord(target.vendor),
+    ...(target.architecture === undefined
+      ? []
+      : ["--architecture", shellWord(target.architecture)]),
+    ...(target.description === undefined ? [] : ["--description", shellWord(target.description)]),
+  ];
+
 /** 再生成コマンド（`--check` 抜き・行継続つきの複数行）。 */
 export const regenerateCommand = (flags: ProfileSpec): string[] => [
   "deno run -A tools/geometry-sweep/main.ts profile \\",
   ...flags.from.map((path) => `  --from ${shellWord(path)} \\`),
-  `  --id ${shellWord(flags.id)} --vendor ${shellWord(flags.vendor)}${
-    flags.architecture === undefined ? "" : ` --architecture ${shellWord(flags.architecture)}`
-  } \\`,
+  `  --id ${shellWord(flags.id)} ${targetFlags(flags).join(" ")} \\`,
   `  --out ${shellWord(flags.out)} --min-speedup ${flags.minSpeedup}`,
 ];
 
@@ -721,10 +909,19 @@ export const renderProfileSource = (
     ...comment([
       `幾何プロファイル \`${flags.id}\`（**生成物 — 手で編集しない**）。`,
       "",
-      `tools/geometry-sweep の \`profile\` が掃引の記録から書いた、adapter \`${flags.vendor}${
-        flags.architecture === undefined ? "" : ` / ${flags.architecture}`
-      }\` 用のタイル幾何の`,
-      "静的な表（perf-ledger K-71）。runtime は adapter の (vendor, architecture) でこの表を選ぶだけで、",
+      ...(flags.optIn === true
+        ? [
+          "tools/geometry-sweep の `profile` が掃引の記録から書いた、タイル幾何の静的な表（perf-ledger K-71）。",
+          "**注入専用**（`match` を省いた表）: runtime は自動では選ばない — アプリが `BUILTIN_GEOMETRY_PROFILES`",
+          "から id で引いて `acquireGpu({ geometryProfile })` に渡す（ADR 0115 追記決定 7）。",
+        ]
+        : [
+          `tools/geometry-sweep の \`profile\` が掃引の記録から書いた、adapter \`${
+            targetLabel(flags)
+          }\` 用のタイル幾何の`,
+          "静的な表（perf-ledger K-71）。runtime は adapter の `match`（vendor / architecture / description の",
+          "完全一致）でこの表を選ぶだけ。",
+        ]),
       "実行時には測らない（オートチューン禁止 — ADR 0022 決定 3）。値を変えるときは掃引を取り直して",
       "下のコマンドで再生成する。",
       "",
@@ -740,6 +937,10 @@ export const renderProfileSource = (
       `${formatRatio(flags.minSpeedup)} 以上の幾何のうち、`,
       "ケース間の幾何平均が最大のもの。無ければ既定（掃引の既定の行の幾何）。同じケースを複数の掃引が",
       "測っていれば、比はその観測の幾何平均。gemmRows は掃引にある linear / matmul / bmm のケースで決め、3 経路に同じ表が効く。",
+      `材料の門: 掃引ごとに、既定の再測定比（cases[].defaultRepeat.driftRatio）が ${DEFAULT_DRIFT_RANGE.min}〜${DEFAULT_DRIFT_RANGE.max} の外か、`,
+      "再測定が失敗 / 無いケースはその掃引の比の材料から外す（出力の一致と失敗は見る — 外した掃引で不一致 /",
+      "失敗の幾何は採らない。比は同じケースを他の掃引が測っていればそちらで判定し、どの掃引にも残らなければ",
+      "測っていない扱い）。外したケースは採否の欄ごとに「掃引 …」の行で示す。",
       "",
       "採否:",
       "",
@@ -758,12 +959,15 @@ export const renderProfileSource = (
  * （{@link renderProfileSource}）とアプリ用の TS（{@link renderAppProfileSource}）が同じ行を書く。
  */
 const profileDeclaration = (profile: GeneratedProfile): string[] => {
-  const { provenance } = profile;
-  const match = profile.match.architecture === undefined
-    ? `{ vendor: ${JSON.stringify(profile.match.vendor)} }`
-    : `{ vendor: ${JSON.stringify(profile.match.vendor)}, architecture: ${
-      JSON.stringify(profile.match.architecture)
-    } }`;
+  const { provenance, match } = profile;
+  // match を省いた表（注入専用）は欄ごと書かない — `match: {}` は runtime の門が落とす別物
+  const matchLine = match === undefined ? [] : [
+    `match: { ${
+      (["vendor", "architecture", "description"] as const)
+        .flatMap((key) => match[key] === undefined ? [] : [`${key}: ${JSON.stringify(match[key])}`])
+        .join(", ")
+    } },`,
+  ];
   const maxRows = (value: number): string =>
     value === Number.POSITIVE_INFINITY ? "Number.POSITIVE_INFINITY" : String(value);
   const gemmRows = profile.gemmRows.map((rule, index) =>
@@ -774,7 +978,7 @@ const profileDeclaration = (profile: GeneratedProfile): string[] => {
   return [
     `export const ${profileConstName(profile.id)}: GeometryProfile = {`,
     `id: ${JSON.stringify(profile.id)},`,
-    `match: ${match},`,
+    ...matchLine,
     "gemmRows: [",
     ...gemmRows,
     "],",
@@ -841,7 +1045,7 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * 注入する値の両方の正本）。`provenance` は掃引の path / sha256 / 日付を渡した順に `", "` で連結する。
  */
 export const buildGeometryProfile = (
-  spec: Pick<ProfileSpec, "id" | "vendor" | "architecture">,
+  spec: { readonly id: string } & ProfileTarget,
   sources: readonly SweepSource[],
   verdicts: readonly SlotVerdict[],
 ): GeneratedProfile => {
@@ -853,9 +1057,13 @@ export const buildGeometryProfile = (
   const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
   return {
     id: spec.id,
-    match: spec.architecture === undefined
-      ? { vendor: spec.vendor }
-      : { vendor: spec.vendor, architecture: spec.architecture },
+    ...(spec.optIn === true ? {} : {
+      match: {
+        vendor: spec.vendor,
+        ...(spec.architecture === undefined ? {} : { architecture: spec.architecture }),
+        ...(spec.description === undefined ? {} : { description: spec.description }),
+      },
+    }),
     gemmRows: ROWS_SLOTS.map((slot, index) => ({
       maxRows: ROWS_BUCKETS[index],
       geometry: gemmSlot(verdicts, slot),

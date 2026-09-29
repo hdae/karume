@@ -67,11 +67,14 @@ text stage on the download; compare stage times only after the weights are cache
 - **GPU 設定** (GPU settings) — the geometry profile and **GPU の timestamp で測る（timestamp-query）**.
   Nothing changes until **適用** (apply); `未適用の変更があります` marks a pending change. The
   profile choices are:
-  - `自動` (auto) — no injection: the runtime selects a built-in profile from the adapter's vendor and
-    architecture (the option shows which one this adapter gets).
+  - `自動` (auto) — no injection: the runtime selects a built-in profile from the adapter's vendor,
+    architecture, and description (the option shows which one this adapter gets).
   - `default` — inject the default table.
-  - each built-in profile id (`apple-metal-3`, `nvidia-blackwell`) — inject that table on any GPU
-    (for A/B runs of another machine's table). It is recorded as `builtin:<id>`.
+  - each built-in profile id (every entry of `BUILTIN_GEOMETRY_PROFILES`) — inject that table on any
+    GPU (for A/B runs of another machine's table). It is recorded as `builtin:<id>`. The label
+    says `（注入 — <description> 用）` for a table that matches a description, `（注入 — <vendor> /
+    <architecture> 用）` otherwise, and `（注入専用）` for a table without `match`: the runtime never
+    selects such a table by itself, so this list is the way to use it.
   - `生成した表: <id>` — inject the table made in the profile tab (appears after the first one).
     When the profile tab starts deriving a new table, the option is removed until the new table
     is ready, unless it is the applied table, which stays and is marked `（適用中）`.
@@ -130,11 +133,18 @@ Builds a geometry profile from sweep results with the same pure functions as the
   taken over the bytes given: for a file, the bytes read from it (the same value as the CLI); for
   the in-memory sweep, the bytes **JSON を保存** writes; for pasted text, its UTF-8 encoding.
 - **id / vendor / architecture** — blank fields use the first input's adapter (the placeholders show
-  the values); type to override. **vendor だけで当てる** leaves `architecture` out of `match`. The
-  minimum speed-up is fixed at ×1.05 (the CLI default).
+  the values); type to override. **vendor だけで当てる** leaves `architecture` out of `match`.
+  **description でも照合する** (off by default) adds the first input's adapter description to `match`
+  (shown next to the box; it fails when the description is empty), like the CLI's `--description`.
+  **注入専用（自動選択しない）** leaves `match` out, like `--opt-in`: the runtime never selects the
+  table, and the vendor, architecture, and description controls are disabled. The minimum
+  speed-up is fixed at ×1.05 (the CLI default).
 - **表を作る** derives the table. The table lists, per field, the cases, the result (`採用 <geometry>`
-  with the geometric mean and range of its speed-ups, or `既定 <geometry> のまま` with the reason), and
-  every rejected geometry with its reason. Errors (adapters that differ, a sweep given twice, a
+  with the geometric mean and range of its speed-ups, or `既定 <geometry> のまま` with the reason),
+  every rejected geometry with its reason, and the cases dropped from a sweep because the default
+  re-measurement was outside 0.9–1.1, failed, or is missing (`比の材料から外したケース` — their
+  speed-ups are not used, but a mismatch or a failure there still rejects the geometry; the rule is
+  the CLI's, see `tools/geometry-sweep/README.md`). Errors (adapters that differ, a sweep given twice, a
   default row that is not the current runtime default) stop the generation and are shown as is.
 - **出力** — one of four texts, with **コピー** and **保存**:
   - **TS の生成物** — the source the CLI would write, before `deno fmt` (saved as `<id>.ts`).

@@ -56,7 +56,7 @@ deno task bench:gpu-lab
 The `profile` subcommand turns sweep results into a **geometry profile**: a static table of tile
 geometries for one adapter, written as TypeScript to
 `packages/runtime/src/kernels/geometry-profiles/<id>.ts` (perf-ledger K-71). The runtime picks one
-profile from the adapter's `(vendor, architecture)` in a fixed order and never measures anything
+profile from the adapter's `(vendor, architecture, description)` in a fixed order and never measures anything
 at run time: automatic tuning at run time stays forbidden (ADR 0022). The sweep is the explicit
 tuning step; the profile stores its result in the source. The subcommand does not use the GPU.
 
@@ -64,7 +64,9 @@ tuning step; the profile stores its result in the source. The subcommand does no
 deno run -A tools/geometry-sweep/main.ts profile \
   --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json \
   --from outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json \
-  --id apple-metal-3 --vendor apple --architecture metal-3 \
+  --from outputs/bench-browser/geometry-sweep-browser-2026-09-29T13-08-11.329Z.json \
+  --from outputs/bench-browser/geometry-sweep-browser-2026-09-29T21-04-14.586Z.json \
+  --id apple-metal-3 --vendor apple --architecture metal-3 --description 'Apple M2' \
   --out packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts
 ```
 
@@ -72,8 +74,11 @@ Flags:
 
 - `--from <sweep.json>` (repeatable) — sweep results of the same adapter. Several files can be
   combined (for example a quick and a full sweep). Files whose `adapter.vendor` /
-  `adapter.architecture` differ from each other or from `--vendor` / `--architecture` are
-  rejected, as is the same file given twice. GPU timestamps are required: only sweeps whose
+  `adapter.architecture` / `adapter.description` differ from each other are rejected (two empty
+  descriptions match, one empty and one not do not), so sweeps of two chips never mix even with
+  `--opt-in` or without `--description`. Files that differ from `--vendor` / `--architecture` /
+  `--description` (when given) are rejected too, and so is the same file given twice. Files without `cases[]` (the default re-measurement of
+  each case) are rejected. GPU timestamps are required: only sweeps whose
   `gpuTiming.unit` is `ns` or `deno-raw-tick` and whose `gpuTiming.quantized` is false are
   accepted. Wall-clock sweeps (unit `wall`, or no `gpuTiming`) and quantized sweeps are rejected,
   because both shrink the ratios between geometries toward 1. To get timestamps, run the Deno CLI
@@ -85,6 +90,17 @@ Flags:
   exported constant is the id in upper snake case (`APPLE_METAL_3`).
 - `--vendor <v>` and optionally `--architecture <a>` — the adapter the profile matches. Without
   `--architecture`, the profile matches every architecture of that vendor.
+- `--description <d>` (optional, needs `--architecture`) — also match the adapter's
+  `description`, exactly (for example `'Apple M2'`). Chrome reports the same vendor and
+  architecture for different chips (`apple` / `metal-3` for both the M2 and the M5); with a
+  description, the profile only reaches the chip it was measured on. The runtime tries
+  `(vendor, architecture, description)` first, then `(vendor, architecture)` without a
+  description, then the vendor alone. An adapter that reports an empty description never matches a
+  profile with a description. There is no default: pass it explicitly.
+- `--opt-in` — instead of `--vendor` / `--architecture` / `--description` (giving both fails):
+  the profile has no `match` and the runtime never selects it by itself. It is still listed in
+  `BUILTIN_GEOMETRY_PROFILES` (exported by `@karume/runtime`); an application looks it up by
+  `id` and passes it to `acquireGpu({ geometryProfile })`.
 - `--out <file.ts>` — the generated file.
 - `--min-speedup N` (default 1.05, at least 1) — the smallest speed-up over the default geometry
   that counts as a win.
@@ -99,6 +115,18 @@ Each field of the profile is one class of cases:
 | `attention.qk`, `attention.pv`                        | `attention`, QK and PV                                                                                              |
 | `conv2d.rows64`, `conv2d.rows32`                      | `conv2d`, by the m-tile (64 or 32 rows) of the case's default row                                                   |
 | `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv` | `i8a8-linear`, and `i8a8-attention` QK and PV                                                                       |
+
+Before the rule, each sweep drops the speed-ups of the cases whose default re-measurement is
+unreliable: the `driftRatio` in `cases[]` (repeat / first) is outside 0.9–1.1, the repeat failed,
+or there is no repeat. The machine drifted during such a case, so every speed-up measured against its
+default is suspect. Only the speed-ups are dropped: an output mismatch or a failure in a dropped case
+still rejects the geometry, because matching the default's output is a correctness check that does
+not depend on heat. A dropped case is dropped only from that sweep: if another sweep measured the
+same case, its speed-ups come from that sweep. A case dropped from every sweep counts as not
+measured, so no geometry can win its class, and the field keeps the default. Every dropped case is
+listed with its reason in the generated file (under its field, as
+`掃引 <path>: <case> は…のため比の材料から外した（出力の一致と失敗は見る）`) and in the command's
+output. There is no option to keep them.
 
 For each class, a geometry is a candidate only if, in **every** case of the class, its output
 matched the default geometry's output and its speed-up over the default is at least
@@ -132,11 +160,10 @@ is the one the profile was generated from.
 The subcommand does not edit `geometry-profiles/index.ts`. For a new id, it prints the import to
 add and the constant to append to `BUILTIN_GEOMETRY_PROFILES`.
 
-`apple-metal-3.ts` combines the quick sweep (the five families of that time, including int8; no
-`matmul` or `bmm` cases) and the full sweep (`linear`, `attention`, and `conv2d` over the whole
-grid) on the Apple M2 (Chrome). `nvidia-blackwell.ts` comes from one full sweep of the same five
-families on the RTX 5070 Ti (Windows, Chrome). The command that regenerates each file is at the
-top of the file.
+`apple-metal-3.ts` combines four sweeps on the Apple M2 (Chrome) and matches the description
+`Apple M2`, so other chips that report `apple` / `metal-3` keep the default table.
+`nvidia-blackwell.ts` combines two full sweeps on the RTX 5070 Ti (Windows, Chrome). The command
+that regenerates each file is at the top of the file.
 
 ## What is measured
 

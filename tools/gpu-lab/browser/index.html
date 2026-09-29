@@ -303,7 +303,7 @@
       </section>
       <section data-tab="profile" role="tabpanel" aria-label="プロファイル" hidden>
         <p
-          class="muted">掃引の記録から幾何プロファイル（adapter 1 種ぶんの静的な幾何の表）を作ります。規則は CLI（tools/geometry-sweep/main.ts profile）と同じ: 欄の全ケースで出力が既定と一致し、既定比が下限以上の幾何のうち幾何平均が最大のもの。GPU の timestamp で測った掃引（量子化なし）だけを受けます。作った表は GPU 設定で注入でき、登録用のコマンドでリポへ焼き込めます。</p>
+          class="muted">掃引の記録から幾何プロファイル（adapter 1 種ぶんの静的な幾何の表）を作ります。規則は CLI（tools/geometry-sweep/main.ts profile）と同じ: 欄の全ケースで出力が既定と一致し、既定比が下限以上の幾何のうち幾何平均が最大のもの。GPU の timestamp で測った掃引（量子化なし）だけを受け、既定の再測定比が 0.9〜1.1 の外か再測定が失敗 / 無いケースはその掃引の比の材料から外します（出力の一致と失敗は見ます）。作った表は GPU 設定で注入でき、登録用のコマンドでリポへ焼き込めます。</p>
         <div class="columns">
           <div class="column">
             <div class="controls">
@@ -339,6 +339,9 @@
               <label class="field">vendor<input data-ui="vendor" type="text"></label>
               <label class="field">architecture<input data-ui="architecture" type="text"></label>
               <label><input data-ui="vendor-only" type="checkbox"> vendor だけで当てる</label>
+              <label><input data-ui="match-description" type="checkbox"> description でも照合する（adapter の値 <span
+                  data-ui="description-label" class="muted"></span>）</label>
+              <label><input data-ui="opt-in" type="checkbox"> 注入専用（自動選択しない）</label>
               <span class="muted">既定比の下限 <span data-ui="min-speedup"></span></span>
               <button data-ui="generate">表を作る</button>
               <button data-ui="apply" disabled>この表を適用</button>
@@ -353,7 +356,7 @@
                     <th>ケース</th>
                     <th>結果</th>
                     <th>対既定（幾何平均・最小〜最大）</th>
-                    <th>退けた幾何</th>
+                    <th>退けた幾何 · 比の材料から外したケース</th>
                   </tr>
                 </thead>
                 <tbody data-ui="verdicts"></tbody>

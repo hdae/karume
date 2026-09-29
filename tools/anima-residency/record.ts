@@ -55,7 +55,7 @@ export type ResidencyRecord = {
 
 /**
  * どの幾何プロファイルを `acquireGpu` に頼んだか（ADR 0115 追記決定 6 の注入口）: `auto` = 注入なし
- * （adapter の (vendor, architecture) で埋め込みの表が選ばれる）・`default` = 既定の表を注入・
+ * （adapter の (vendor, architecture, description) で埋め込みの表が選ばれる）・`default` = 既定の表を注入・
  * `builtin:<id>` = 埋め込みの表 `<id>` を注入・`generated:<id>` = ページで掃引から作った表を注入。
  * 段ごとの `geometryProfile`（診断）は使われた表の id だけで注入か埋め込みかを区別しないので、この欄で
  * 補う。CLI は注入しないので常に `auto`。

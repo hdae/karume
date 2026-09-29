@@ -8,7 +8,11 @@
  * 入力の門（GPU の timestamp で測った掃引だけ・adapter を混ぜない・既定の行が今の runtime の既定）も
  * 同じ — 拒まれたらその理由を状態行へそのまま出す（fail loudly）。
  *
- * 出すもの: 欄ごとの採否と退けた理由の表・TS の生成物（整形前 — 整形は CLI の `deno fmt`）・アプリ用の
+ * 表の相手（`match`）は id / vendor / architecture の欄に加えて、「description でも照合する」（記録の adapter の
+ * description を `match` に足す — 同じ vendor / architecture を名乗る別の機種に当てない）と「注入専用」
+ * （`match` を省く — 自動選択されず、id で引いて注入する表）を選べる。CLI の `--description` / `--opt-in`。
+ *
+ * 出すもの: 欄ごとの採否と退けた理由・比の材料から外したケースの表・TS の生成物（整形前 — 整形は CLI の `deno fmt`）・アプリ用の
  * TS（`@karume/runtime` の型で書いた定数 — アプリが `acquireGpu({ geometryProfile })` へ渡す）・注入に
  * 使う JSON（`acquireGpu({ geometryProfile })` の値）・リポへ登録するコマンド（CLI の `profile` —
  * 生成物を整形して書き、`geometry-profiles/index.ts` へ足す行を案内する）。
@@ -18,6 +22,7 @@ import {
   buildGeometryProfile,
   DEFAULT_MIN_SPEEDUP,
   deriveProfile,
+  excludedCaseLine,
   formatRatio,
   type GeneratedProfile,
   parseSweepReport,
@@ -90,6 +95,12 @@ type OutputKind = keyof Generated["outputs"];
 const isOutputKind = (value: string): value is OutputKind =>
   value === "ts" || value === "app" || value === "json" || value === "command";
 
+type AdapterFields = {
+  readonly vendor: string;
+  readonly architecture: string;
+  readonly description: string;
+};
+
 /** adapter から id の既定を作る（kebab-case・英小文字始まり — 生成器の id の規則）。 */
 const autoId = (adapter: { readonly vendor: string; readonly architecture: string }): string => {
   const slug = [adapter.vendor, adapter.architecture].filter((part) => part !== "").join("-")
@@ -109,6 +120,9 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     vendor: element(root, "vendor", HTMLInputElement),
     architecture: element(root, "architecture", HTMLInputElement),
     vendorOnly: element(root, "vendor-only", HTMLInputElement),
+    matchDescription: element(root, "match-description", HTMLInputElement),
+    descriptionLabel: element(root, "description-label", HTMLElement),
+    optIn: element(root, "opt-in", HTMLInputElement),
     minSpeedup: element(root, "min-speedup", HTMLElement),
     generate: element(root, "generate", HTMLButtonElement),
     apply: element(root, "apply", HTMLButtonElement),
@@ -165,8 +179,11 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     return sources;
   };
 
-  /** 表の相手の adapter（最初の記録・無ければこのページの adapter）から id / vendor / architecture の既定。 */
-  const autoAdapter = (): { readonly vendor: string; readonly architecture: string } =>
+  /**
+   * 表の相手の adapter（最初の記録・無ければこのページの adapter）から id / vendor / architecture /
+   * description の既定。
+   */
+  const autoAdapter = (): AdapterFields =>
     (ui.useLatest.checked ? deps.latestSweep()?.adapter : undefined) ??
       state.loaded[0]?.source.adapter ?? deps.adapterInfo;
 
@@ -177,23 +194,47 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     ui.architecture.placeholder = adapter.architecture === ""
       ? "（自動 — 空なので vendor だけで当てる）"
       : `${adapter.architecture}（自動）`;
+    ui.descriptionLabel.textContent = adapter.description === ""
+      ? "— 空なので照合に使えない"
+      : `— ${adapter.description}`;
+  };
+
+  /** 注入専用なら match の欄（vendor / architecture / description）は使わないので触れなくする。 */
+  const syncTargetControls = (): void => {
+    const optIn = ui.optIn.checked;
+    ui.vendor.disabled = optIn;
+    ui.architecture.disabled = optIn;
+    ui.vendorOnly.disabled = optIn;
+    ui.matchDescription.disabled = optIn;
   };
 
   const readSpec = (sources: readonly SweepSource[]): ProfileSpec => {
     const adapter = sources[0].adapter;
     const id = ui.id.value.trim() || autoId(adapter);
     if (!PROFILE_ID.test(id)) throw Error(`id は英小文字始まりの kebab-case（${id}）`);
+    const common = {
+      from: sources.map((source) => source.path),
+      id,
+      out: `${PROFILE_DIRECTORY}/${id}.ts`,
+      minSpeedup: DEFAULT_MIN_SPEEDUP,
+    };
+    if (ui.optIn.checked) return { ...common, optIn: true };
     const vendor = ui.vendor.value.trim() || adapter.vendor;
     if (vendor === "") throw Error("vendor が空（入力するか、adapter の vendor を持つ記録を使う）");
     const typed = ui.architecture.value.trim() || adapter.architecture;
     const architecture = ui.vendorOnly.checked || typed === "" ? undefined : typed;
+    // description は記録の adapter の値そのもの（手入力にしない — 照合は完全一致で、綴りの違いは黙って外れる）
+    if (ui.matchDescription.checked && adapter.description === "") {
+      throw Error(
+        "記録の adapter の description が空で照合に使えない（description を返す環境で測った記録を使う）",
+      );
+    }
+    const description = ui.matchDescription.checked ? adapter.description : undefined;
     return {
-      from: sources.map((source) => source.path),
-      id,
+      ...common,
       vendor,
       ...(architecture === undefined ? {} : { architecture }),
-      out: `${PROFILE_DIRECTORY}/${id}.ts`,
-      minSpeedup: DEFAULT_MIN_SPEEDUP,
+      ...(description === undefined ? {} : { description }),
     };
   };
 
@@ -244,19 +285,35 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     const { outcome } = verdict;
     const rejected = document.createElement("td");
     rejected.className = "wrap";
-    if (verdict.rejected.length === 0) rejected.textContent = "—";
-    else {
+    const disclosure = (label: string, lines: readonly string[]): HTMLDetailsElement => {
       const details = document.createElement("details");
       const summary = document.createElement("summary");
-      summary.textContent = `${verdict.rejected.length} 本`;
+      summary.textContent = label;
       const list = document.createElement("ul");
-      for (const { name, reason } of verdict.rejected) {
+      for (const line of lines) {
         const item = document.createElement("li");
-        item.textContent = `${name}: ${reason}`;
+        item.textContent = line;
         list.append(item);
       }
       details.append(summary, list);
-      rejected.append(details);
+      return details;
+    };
+    if (verdict.rejected.length === 0 && verdict.excluded.length === 0) rejected.textContent = "—";
+    if (verdict.rejected.length > 0) {
+      rejected.append(
+        disclosure(
+          `${verdict.rejected.length} 本`,
+          verdict.rejected.map(({ name, reason }) => `${name}: ${reason}`),
+        ),
+      );
+    }
+    if (verdict.excluded.length > 0) {
+      rejected.append(
+        disclosure(
+          `比の材料から外したケース ${verdict.excluded.length} 件`,
+          verdict.excluded.map(excludedCaseLine),
+        ),
+      );
     }
     tr.append(
       cell(verdict.slot),
@@ -322,10 +379,15 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     renderOutput();
     deps.offerGenerated(profile);
     const adopted = verdicts.filter((verdict) => verdict.outcome.kind === "adopted").length;
+    const excluded = verdicts.reduce((sum, verdict) => sum + verdict.excluded.length, 0);
     status(
-      `表 ${spec.id} を作りました（採用 ${adopted} 欄 · 既定のまま ${
+      `表 ${spec.id}${
+        spec.optIn === true ? "（注入専用）" : ""
+      } を作りました（採用 ${adopted} 欄 · 既定のまま ${
         verdicts.length - adopted
-      } 欄 · 記録 ${sources.length} 本）。「この表を適用」で GPU 設定に注入します。`,
+      } 欄 · 記録 ${sources.length} 本${
+        excluded === 0 ? "" : ` · 比の材料から外したケース ${excluded} 件`
+      }）。「この表を適用」で GPU 設定に注入します。`,
     );
   };
 
@@ -401,6 +463,7 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     }),
   );
   ui.useLatest.addEventListener("change", renderPlaceholders);
+  ui.optIn.addEventListener("change", syncTargetControls);
   ui.generate.addEventListener("click", guarded(generate));
   ui.apply.addEventListener("click", guarded(deps.applyGenerated));
   ui.outputKind.addEventListener("change", renderOutput);
@@ -416,6 +479,7 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
   );
   ui.saveOutput.addEventListener("click", saveOutput);
   refresh();
+  syncTargetControls();
   renderOutput();
   status("材料の掃引を選んで「表を作る」。");
   return { refresh };

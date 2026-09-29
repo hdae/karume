@@ -134,6 +134,7 @@ const initialize = async (): Promise<void> => {
 
   const renderEnvironment = (): void => {
     const { choice, timestamps } = state.settings;
+    // adapterInfo は description ごと渡す（description で照合する表の選択は runtime と同じ）
     const profile = choice.kind === "auto"
       ? `自動 → ${selectGeometryProfile(adapterInfo).id}`
       : `${requestedLabel(choice)}（注入）`;
@@ -286,12 +287,17 @@ const initialize = async (): Promise<void> => {
     ui.profile.replaceChildren(
       option("auto", `自動 — adapter で選ぶ（→ ${selectGeometryProfile(adapterInfo).id}）`),
       option("default", "default（既定の表を注入）"),
+      // 埋め込みの全表（match を省いた注入専用の表も — 自動では選ばれないので、ここが使う入口）
       ...BUILTIN_GEOMETRY_PROFILES.map(({ id, match }) =>
         option(
           `${BUILTIN_PREFIX}${id}`,
-          `${id}（注入 — ${
-            [match.vendor, match.architecture].filter((v) => v !== undefined).join(" / ")
-          } 用）`,
+          match === undefined
+            ? `${id}（注入専用）`
+            : match.description !== undefined
+            ? `${id}（注入 — ${match.description} 用）`
+            : `${id}（注入 — ${
+              [match.vendor, match.architecture].filter((v) => v !== undefined).join(" / ")
+            } 用）`,
         )
       ),
     );

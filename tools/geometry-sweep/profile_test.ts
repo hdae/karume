@@ -25,6 +25,7 @@ import {
   ROWS_BUCKETS,
   type SlotVerdict,
   type SweepSource,
+  verdictLines,
 } from "./derive.ts";
 import { displayPath, formatTypeScript, parseProfileFlags, type ProfileFlags } from "./profile.ts";
 import { REPORT_FORMAT } from "./report.ts";
@@ -96,14 +97,21 @@ const caseRows = (
 
 const ADAPTER = { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" };
 
+/** ケースごとの既定の再測定（`cases[]`）。既定は全ケースで比 1（材料から外さない）。 */
+type Repeats = Readonly<Record<string, Record<string, unknown>>>;
+
 const report = (
   rows: readonly Record<string, unknown>[],
   adapter: Record<string, string> = ADAPTER,
+  repeats: Repeats = {},
 ): Record<string, unknown> => ({
   format: REPORT_FORMAT,
   date: "2026-09-27T00:00:00.000Z",
   adapter,
   gpuTiming: { feature: true, unit: "ns", quantized: false },
+  cases: [...new Set(rows.map((entry) => String(entry.caseId)))].map((caseId) =>
+    repeats[caseId] ?? { caseId, defaultRepeat: { perDispatch: 1, driftRatio: 1 } }
+  ),
   rows,
 });
 
@@ -318,6 +326,236 @@ describe("deriveProfile: 規則の抽出", () => {
   });
 });
 
+describe("deriveProfile: 既定の再測定比が範囲外のケースは、その掃引の材料から外す", () => {
+  const ref = linearCase(1024);
+  const wide = linearCase(4096);
+  const drift = (caseId: string, driftRatio: number): Record<string, unknown> => ({
+    caseId,
+    defaultRepeat: { perDispatch: 1, driftRatio },
+  });
+  /** `cases[]` を指定した掃引（指定しないケースは比 1）。 */
+  const sweepWith = (
+    rows: readonly Record<string, unknown>[],
+    name: string,
+    repeats: Repeats,
+  ): SweepSource =>
+    parseSweepReport(report(rows, ADAPTER, repeats), { path: name, sha256: `sha-${name}` });
+
+  it("範囲外の掃引の観測は比に数えず、他の掃引の同じケースで判定する", () => {
+    // 外さなければ A の比は √(0.5 × 1.3) ≈ ×0.806 で退けられる
+    const drifted = sweepWith(caseRows(ref, BIG, [[A, { speedup: 0.5 }]]), "drifted.json", {
+      [ref.caseId]: drift(ref.caseId, 1.2),
+    });
+    const steady = source(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "steady.json");
+    const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows[2]");
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, A);
+    assertEquals(verdict.outcome.geomean, 1.3);
+    assertEquals(verdict.cases, [ref.caseId]);
+    assertEquals(verdict.excluded, [
+      { path: "drifted.json", caseId: ref.caseId, reason: "既定の再測定比 ×1.200 が範囲外" },
+    ]);
+  });
+
+  it("外した掃引の出力の不一致と失敗は、他の掃引で一致・成功していても候補を落とす", () => {
+    // 外すのは比だけ — 出力の一致は正しさの門で熱に依らない
+    const drifted = sweepWith(
+      caseRows(ref, BIG, [
+        [A, { speedup: 1.3, identical: false }],
+        [B, { speedup: 1.3, error: "device lost" }],
+      ]),
+      "drifted.json",
+      { [ref.caseId]: drift(ref.caseId, 1.2) },
+    );
+    const steady = source(
+      caseRows(ref, BIG, [[A, { speedup: 1.3 }], [B, { speedup: 1.3 }]]),
+      "steady.json",
+    );
+    const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows[2]");
+    assertEquals(verdict.outcome.kind, "default");
+    assertEquals(verdict.outcome.geometry, BIG);
+    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で出力が既定と不一致`);
+    assertEquals(rejectionOf(verdict, B), `${ref.caseId} で失敗（device lost）`);
+  });
+
+  it("全掃引で外したケースは測っていない扱いで、欄は既定のまま（ケースの一覧には残る）", () => {
+    const rows = [
+      ...caseRows(ref, BIG, [[A, { speedup: 1.3 }]]),
+      ...caseRows(wide, BIG, [[A, { speedup: 1.3 }]]),
+    ];
+    const verdict = verdictOf(
+      deriveProfile([
+        sweepWith(rows, "first.json", { [wide.caseId]: drift(wide.caseId, 1.15) }),
+        sweepWith(rows, "second.json", { [wide.caseId]: drift(wide.caseId, 0.8) }),
+      ], OPTIONS),
+      "gemmRows[2]",
+    );
+    assertEquals(verdict.cases, [ref.caseId, wide.caseId]);
+    assertEquals(verdict.outcome.kind, "default");
+    assertEquals(verdict.outcome.geometry, BIG);
+    assertEquals(
+      rejectionOf(verdict, A),
+      `${wide.caseId} で測っていない（全掃引で比の材料から外した）`,
+    );
+    assertEquals(verdict.excluded.map((entry) => [entry.path, entry.caseId]), [
+      ["first.json", wide.caseId],
+      ["second.json", wide.caseId],
+    ]);
+  });
+
+  it("クラスの全ケースを外したら、欄は既定でその理由を残す", () => {
+    const verdict = verdictOf(
+      deriveProfile([
+        sweepWith(caseRows(ref, BIG, [[A, { speedup: 1.5 }]]), "sweep.json", {
+          [ref.caseId]: drift(ref.caseId, 1.5),
+        }),
+      ], OPTIONS),
+      "gemmRows[2]",
+    );
+    assert(verdict.outcome.kind === "default");
+    assertEquals(verdict.outcome.geometry, BIG);
+    assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+  });
+
+  it("範囲の両端（×0.9 / ×1.1）は外さず、再測定の失敗・欄なし・ケースの記録なしは外す", () => {
+    const cases = [900, 1100, 2048, 3072, 4096].map(linearCase);
+    const built = report(
+      cases.flatMap((entry) => caseRows(entry, BIG, [[A, { speedup: 1.2 }]])),
+      ADAPTER,
+      {
+        [cases[0].caseId]: drift(cases[0].caseId, 0.9),
+        [cases[1].caseId]: drift(cases[1].caseId, 1.1),
+        [cases[2].caseId]: { caseId: cases[2].caseId, defaultRepeatError: "device lost" },
+        [cases[3].caseId]: { caseId: cases[3].caseId },
+      },
+    );
+    // cases[4] はケースの記録（cases[] の要素）ごと無い — 掃引が途中で止まった記録の形
+    const truncated = {
+      ...built,
+      cases: (built.cases as readonly Record<string, unknown>[])
+        .filter((entry) => entry.caseId !== cases[4].caseId),
+    };
+    const verdict = verdictOf(
+      deriveProfile([parseSweepReport(truncated, { path: "sweep.json", sha256: "0" })], OPTIONS),
+      "gemmRows[2]",
+    );
+    assertEquals(verdict.excluded.map(({ caseId, reason }) => [caseId, reason]), [
+      [cases[2].caseId, "既定の再測定が失敗（device lost）"],
+      [cases[3].caseId, "既定の再測定が無い"],
+      [cases[4].caseId, "既定の再測定が無い"],
+    ]);
+  });
+
+  it("外したケースは採否の行と生成物のコメントに理由つきで出る", () => {
+    const drifted = sweepWith(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "drifted.json", {
+      [ref.caseId]: drift(ref.caseId, 1.16),
+    });
+    const steady = source(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "steady.json");
+    const flags = {
+      from: ["drifted.json", "steady.json"],
+      id: "test-gpu",
+      vendor: "apple",
+      architecture: "metal-3",
+      out: "profiles/test-gpu.ts",
+      minSpeedup: 1.05,
+    };
+    const verdicts = deriveProfile([drifted, steady], flags);
+    const line =
+      "掃引 drifted.json: linear-m1024 は既定の再測定比 ×1.160 が範囲外のため比の材料から外した（出力の一致と失敗は見る）";
+    assert(verdictLines(verdicts).includes(`  - ${line}`), verdictLines(verdicts).join("\n"));
+    assertStringIncludes(
+      renderProfileSource(flags, [drifted, steady], verdicts),
+      ` *   - ${line}\n`,
+    );
+  });
+});
+
+describe("parseSweepReport: 既定の再測定（cases[]）", () => {
+  const rows = caseRows(linearCase(1024), BIG, []);
+  const meta = { path: "sweep.json", sha256: "0" };
+
+  it("cases が無い記録は落とす（黙って全ケースを外さない）", () => {
+    const { cases: _, ...withoutCases } = report(rows);
+    assertThrows(() => parseSweepReport(withoutCases, meta), Error, "cases が配列でない");
+  });
+
+  it("同じケースの記録が 2 本あれば落とす", () => {
+    const entry = { caseId: "linear-m1024", defaultRepeat: { perDispatch: 1, driftRatio: 1 } };
+    assertThrows(
+      () => parseSweepReport({ ...report(rows), cases: [entry, entry] }, meta),
+      Error,
+      "linear-m1024 が 2 本",
+    );
+  });
+});
+
+describe("deriveProfile: description で adapter の機種まで揃える", () => {
+  const rows = caseRows(linearCase(1024), BIG, [[A, { speedup: 1.2 }]]);
+
+  it("description を指定したら、adapter の description が違う掃引は落ちる", () => {
+    assertThrows(
+      () =>
+        deriveProfile([source(rows, "m5.json", { ...ADAPTER, description: "Apple M5" })], {
+          ...OPTIONS,
+          description: "Test GPU",
+        }),
+      Error,
+      "合わない",
+    );
+    deriveProfile([source(rows)], { ...OPTIONS, description: "Test GPU" });
+  });
+
+  it("description は architecture と組でだけ・空文字は落ちる（runtime の門と同じ条件）", () => {
+    assertThrows(
+      () =>
+        deriveProfile([source(rows)], {
+          vendor: "apple",
+          description: "Test GPU",
+          minSpeedup: 1.05,
+        }),
+      Error,
+      "architecture の両方と組",
+    );
+    assertThrows(
+      () => deriveProfile([source(rows)], { ...OPTIONS, description: "" }),
+      Error,
+      "空文字",
+    );
+  });
+
+  it("掃引どうしは description まで揃える（--opt-in・--description 省略でも別機種を混ぜない）", () => {
+    const m2 = source(rows, "m2.json", { ...ADAPTER, description: "Apple M2" });
+    const m5 = source(rows, "m5.json", { ...ADAPTER, description: "Apple M5" });
+    const blank = source(rows, "blank.json", { ...ADAPTER, description: "" });
+    for (const target of [{ optIn: true } as const, OPTIONS]) {
+      assertThrows(
+        () => deriveProfile([m2, m5], { ...target, minSpeedup: 1.05 }),
+        Error,
+        "と違う",
+      );
+      assertThrows(
+        () => deriveProfile([m2, blank], { ...target, minSpeedup: 1.05 }),
+        Error,
+        "と違う",
+      );
+    }
+    deriveProfile([blank, source(rows, "blank2.json", { ...ADAPTER, description: "" })], OPTIONS);
+  });
+
+  it("--opt-in は vendor / architecture を照合しない（掃引どうしの adapter は揃える）", () => {
+    deriveProfile([source(rows)], { optIn: true, minSpeedup: 1.05 });
+    assertThrows(
+      () =>
+        deriveProfile([
+          source(rows, "m2.json"),
+          source(rows, "other.json", { ...ADAPTER, architecture: "metal-2" }),
+        ], { optIn: true, minSpeedup: 1.05 }),
+      Error,
+      "と違う",
+    );
+  });
+});
+
 describe("deriveProfile: runtime の既定プロファイルとの整合", () => {
   it("行数の境界と、ケースが無いクラスに書く既定は DEFAULT_GEOMETRY_PROFILE と同じ", () => {
     const profile = DEFAULT_GEOMETRY_PROFILE;
@@ -513,6 +751,39 @@ describe("parseProfileFlags", () => {
         ]),
       Error,
       "1 以上",
+    );
+  });
+
+  it("--description は match に足し、--opt-in は vendor 無しの注入専用の指定になる", () => {
+    const base = ["--from", "a.json", "--id", "x", "--out", "x.ts"];
+    const described = parseProfileFlags([
+      ...base,
+      "--vendor",
+      "apple",
+      "--architecture",
+      "metal-3",
+      "--description",
+      "Apple M2",
+    ]);
+    assert(described.optIn !== true);
+    assertEquals(described.description, "Apple M2");
+    const optIn = parseProfileFlags([...base, "--opt-in"]);
+    assertEquals(optIn.optIn, true);
+    assertEquals(optIn.vendor, undefined);
+  });
+
+  it("--opt-in と --vendor / --architecture / --description の同時指定は落ちる", () => {
+    const base = ["--from", "a.json", "--id", "x", "--out", "x.ts", "--opt-in"];
+    for (const extra of [["--vendor", "v"], ["--architecture", "a"], ["--description", "d"]]) {
+      assertThrows(() => parseProfileFlags([...base, ...extra]), Error, "同時に指定しない");
+    }
+  });
+
+  it("--vendor も --opt-in も無ければ落ちる（注入専用を黙って作らない）", () => {
+    assertThrows(
+      () => parseProfileFlags(["--from", "a.json", "--id", "x", "--out", "x.ts"]),
+      Error,
+      "--opt-in",
     );
   });
 });
