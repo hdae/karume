@@ -338,14 +338,14 @@ export type GeometryProfile = {
 
 ### 検収（追記分）
 
-| 項目                                                                                            | 結果                                            |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| 掃引に linear M 16 / 32 / 128 / 256・matmul 3・bmm 5 を足し、B570 で失敗 0・出力不一致 0        | ✅（2026-09-29・65 行）                         |
-| matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認） |
-| 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                            |
-| `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                |
-| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | ✅（2026-09-29・追記決定 3）                    |
-| RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | 未計測（利用者作業）                            |
+| 項目                                                                                            | 結果                                                                                      |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 掃引に linear M 16 / 32 / 128 / 256・matmul 3・bmm 5 を足し、B570 で失敗 0・出力不一致 0        | ✅（2026-09-29・65 行）                                                                   |
+| matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認）                                           |
+| 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                                                                      |
+| `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                                                          |
+| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | ✅（2026-09-29・追記決定 3）                                                              |
+| RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | id は ✅（2026-09-29・4 段とも — 追記 5）。前後の sha 一致は登録前の RTX 記録が無く未確認 |
 
 ### 追記決定 3: M2 の full 再走（linear / matmul / bmm）で `apple-metal-3` を 3 本から再生成した（2026-09-29）
 
@@ -395,3 +395,21 @@ export type GeometryProfile = {
 - M2 では **既定 quant（a8）が f16 quant より 1.58 倍遅い**（71.1 s 対 45.1 s）。09-27 の「a8 の利得ゼロ」は、幾何の直った
   f32 経路が伸びたぶん「a8 が損」に変わった。これは「既定の quant 席を量子化にするか opt-in にするか」の再検討の材料
   （backlog now・`.claude/reviews/2026-09-29_quant-default-recon/`）で、本 ADR では動かさない。
+
+### 追記 5: RTX 5070 Ti の実走で `nvidia-blackwell` が選ばれることを確認した（2026-09-29）
+
+- 計測 = 利用者の RTX 5070 Ti（Windows・Chrome 153・`nvidia` / `blackwell`）・確認ページをポート転送で開く・512²・seed 42・
+  DiT 常駐（2 回目以降の値）・checkout `9fd39823`。記録 = `outputs/bench-browser/anima-residency-browser-f16-2026-09-29T18-11-14.451Z.json`。
+  4 段（text_encoder / text_conditioner / transformer / vae_decoder）とも診断 `geometryProfile` は `nvidia-blackwell`。
+
+  | 席（512²）        | DiT 段（壁時計） | DiT 段（GPU） | 内訳 linear                       | PNG sha256     |
+  | ----------------- | ---------------: | ------------: | --------------------------------- | -------------- |
+  | `f16`             |           2.86 s |        2.79 s | `reg128x128r8x8w16`（既定）2.31 s | `c3cef8d6bc64` |
+  | 既定（i8a8・s16） |           1.21 s |        1.14 s | `tile128x64r8x4w16x16k16` 0.74 s  | `3b07b912c4d4` |
+
+  text 段の 12.8 s はポート転送越しの重み取得（research K-70 §3.1 と同じ経路の問題）で、幾何とは無関係。
+- 検収の「登録前後の PNG sha256 一致」は、登録前（既定幾何）の RTX のパイプライン記録が無いので未確認。幾何がビットを
+  動かさないことの RTX での根拠は、RTX の full 掃引で採用幾何の全ケースが既定と出力一致だったこと（追記決定 2）と、
+  B570 の per-profile GPU テスト（`nvidia-blackwell` の幾何と既定が Uint32 一致）。前後一致を取るなら、登録前のコミット
+  （`cd11cdc8`）の確認ページを別ポートで立てて同じ生成を 1 回回す。
+- 3 機の同条件比較（512²・DiT 常駐 2 回目以降・DiT 段の GPU 時間）: research K-70 §12。

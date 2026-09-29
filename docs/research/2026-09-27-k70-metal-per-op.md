@@ -365,6 +365,26 @@ nvidia-blackwell プロファイルの生成（perf-ledger K-67）と i8a8 ①QK
 - text_encoder の linear は当時の ≤ 64 の規則 `reg64x64r4x4w16` で走っている（ADR 0115 追記決定 3 で既定へ戻った）。
   text 段 1.9 s のうち linear は 0.13 s で、DiT 段の比較には影響しない。
 
+## 12. 3 機の f16 / 既定 quant 比較（2026-09-29 追記・時点スナップショット）
+
+512²・seed 42・DiT 常駐の 2 回目以降・「既定」= `f16+dit8-a8-attn8-s16`（i8 重み + a8 整数内積 + s16）。B570 は §3 の
+2026-09-27 の値（Deno・既定プロファイル）、M2 は §11、RTX 5070 Ti は
+`outputs/bench-browser/anima-residency-browser-f16-2026-09-29T18-11-14.451Z.json`（Chrome・`nvidia-blackwell`・ADR 0115 追記 5）。
+
+| 機（実行系・プロファイル）                       | f16: DiT 壁 / GPU | 既定: DiT 壁 / GPU |    既定 ÷ f16（GPU） | DiT の linear f32 / i8a8 |                       全体の壁 f16 / 既定 |
+| ------------------------------------------------ | ----------------: | -----------------: | -------------------: | -----------------------: | ----------------------------------------: |
+| Intel Arc B570（Deno・既定幾何・09-27）          |     8.63 / 8.00 s |      4.19 / 3.45 s |           ×2.32 速い |              6.2 / 2.6 s |                            11.67 / 6.93 s |
+| Apple M2（Chrome・`apple-metal-3`・09-29）       |     45.1 / 44.2 s |      71.1 / 69.9 s | ×0.63（1.58 倍遅い） |            37.1 / 59.1 s |                             50.4 / 76.5 s |
+| RTX 5070 Ti（Chrome・`nvidia-blackwell`・09-29） |     2.86 / 2.79 s |      1.21 / 1.14 s |           ×2.45 速い |            2.31 / 0.74 s | 19.4 / 17.9 s（text 12.8 s はポート転送） |
+
+- 整数内積（a8・`dot4I8Packed`）が効く機では既定 quant が f16 の 2.3〜2.5 倍速い（B570 = Xe2 の DP4A・RTX = Blackwell）。
+  カーネル単位の f32 / i8a8 比は B570 2.4〜4.1・RTX 2.7〜3.1（幾何掃引の同形状比較 — .claude/reviews/2026-09-29_quant-default-recon §3.2）。
+- M2（Chrome / Dawn / Metal）は Tint が `dot4I8Packed` を展開するので整数内積の利得が無く、幾何の直った f32 経路（×1.78）に
+  抜かれて既定 quant が 1.58 倍遅い。
+- 「i8 が強い」のは重みが i8 だからではなく a8 の整数内積の効き。i8 重み × f32 計算（`f16+dit8`）は DL と重み VRAM を減らす
+  だけで、計算時間は f16 と同じはず（M2 / RTX とも未計測 — §7 (b)）。
+- B570 の GPU 時間は Deno の raw tick（1 tick = 52.08 ns）を換算した値（§3）。
+
 ## 参照
 
 - M2 の JSON: `outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-09-27T14-24-06.310Z.json`
