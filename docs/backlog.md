@@ -41,8 +41,9 @@
   観察 = ≤ 64 の中で最良幾何が M 16 / 32 / 64 で割れる（境界の細分化は別起票候補）。M2 の anima 再測も済（2026-09-29・512² の DiT 段 f16 quant ×1.78・既定 ×1.15・PNG sha 一致 → **K-71 採用で確定**・ADR 0115 追記決定 4）。
   同じ再測で Metal では既定 quant（a8）が f16 より 1.58 倍遅い — 量子化 opt-in の再検討の材料。
   ② `nvidia-blackwell` は生成・登録済（B570 の per-profile GPU テスト緑）。残り = RTX 5070 Ti（Chrome）で anima の登録前後の PNG sha 一致と診断 `geometryProfile` の確認（利用者）。
-  ③ **裁定待ち**: 小さい bmm 3 ケース（1 dispatch 15〜40 µs）が反復の上限 1024（`tools/opbench` と共有の `MAX_REPS`）で pass が目標 80 ms に届かず、既定の再測定比が 0.7〜1.55 と揺れる（B570）。
-  対処の候補 = 掃引だけ上限を上げる / 生成器が再測定比の範囲外のケースを落とす / 許容して README に明記。
+  ③ 小さい bmm ケースの反復上限は済（裁定 2026-09-29 = 掃引専用の `SWEEP_MAX_REPS` 16384 に分けた・B570 の bmm 5 ケースは再測定比 0.9995〜1.0049）。
+  確認ページの `geometryProfile` 表示も済（同日）。残り = RTX 5070 Ti（Chrome・ポート転送で確認ページ）で anima の PNG sha 一致と id = `nvidia-blackwell` の確認（利用者）。
+  起票候補（未起票）: 行数バケットの境界（64 / 512）の細分化 — M2 では ≤ 64 の中で M 16 / 32 / 64 の最良幾何が別々（×1.2〜2.25）。境界は runtime の既定表（`GEMM_ROWS_BUCKETS`・ADR 0022）と共有なので別 ADR。
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
