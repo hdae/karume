@@ -341,14 +341,14 @@ export type GeometryProfile = {
 
 ### 検収（追記分）
 
-| 項目                                                                                            | 結果                                                                                      |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| 掃引に linear M 16 / 32 / 128 / 256・matmul 3・bmm 5 を足し、B570 で失敗 0・出力不一致 0        | ✅（2026-09-29・65 行）                                                                   |
-| matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認）                                           |
-| 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                                                                      |
-| `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                                                          |
-| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | ✅（2026-09-29・追記決定 3）                                                              |
-| RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | id は ✅（2026-09-29・4 段とも — 追記 5）。前後の sha 一致は登録前の RTX 記録が無く未確認 |
+| 項目                                                                                            | 結果                                                                                                                                              |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 掃引に linear M 16 / 32 / 128 / 256・matmul 3・bmm 5 を足し、B570 で失敗 0・出力不一致 0        | ✅（2026-09-29・65 行）                                                                                                                           |
+| matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認）                                                                                                   |
+| 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                                                                                                                              |
+| `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                                                                                                                  |
+| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | ✅（2026-09-29・追記決定 3）                                                                                                                      |
+| RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | ✅（2026-09-29 夜・gpu-lab で `default` を注入した走行と表の走行で f16 / 既定 quant とも sha 一致・既定 quant の DiT GPU 1.36 → 1.14 s — 追記 9） |
 
 ### 追記決定 3: M2 の full 再走（linear / matmul / bmm）で `apple-metal-3` を 3 本から再生成した（2026-09-29）
 
@@ -477,3 +477,23 @@ export type GeometryProfile = {
   バケット全体を ×1.05 以上にできない）。runtime の `gemmRowsGeometry` は狭義昇順なら任意の段数の規則を受けるので、細分化は
   生成器（3 段固定）と決定 4「境界は掃引から作らない」の改定で足りる — 別起票（要判断）。
 - 裁定待ち: (a) 生成器が再測定比の範囲外のケースをその掃引の材料から外す（決定 4 の改定）、(b) 行数バケットの細分化。
+
+### 追記 9: gpu-lab の実機確認（RTX の前後一致・M5 の観察）と裁定 3 の承認（2026-09-29 夜〜30）
+
+- **RTX 5070 Ti の登録前後**: gpu-lab で `default` を注入した走行と、掃引から生成した表（値は登録済みと同じ）を注入した走行を
+  512²・seed 42 で比べた。PNG sha256 は f16 quant（`c3cef8d6bc64`）・既定 quant（`3b07b912c4d4`）とも一致。既定 quant の DiT 段 GPU 時間は
+  1.34〜1.38 s → 1.13〜1.16 s（×1.19 — 掃引の i8a8 ×1.19〜1.22 と一致）。f16 quant は同じ幾何（既定）なので同じ時間。
+  記録 = `outputs/bench-browser/anima-residency-browser-*_2026-09-29T21-21-11.708Z_tuned.json` / `…T21-32-20.323Z_default.json`
+  （JSON の `geometryProfileRequested` / `geometryProfileInjected` で見分ける）。
+- **Apple M5 の観察**（quick+・冷却あり・`geometry-sweep-browser-2026-09-29T21-37-17.817Z.json`・再測定比は 44 / 45 ケースが範囲内）:
+  Chrome は M5 も M2 と同じ `apple` / `metal-3` を名乗るので、`apple-metal-3` が自動で当たる。ところが M5 では M2 で勝った幾何が負ける:
+  linear M > 512 の `reg128x32r8x4w8` は ×0.89〜0.99（M2 ×1.71〜1.76）、attention ①QK ×0.96〜1.06、③PV ×0.85〜1.11、conv2d
+  `igemm128x64` ×0.82〜1.21、i8a8 ×1.02〜1.06。M5 の既定幾何の 1 dispatch は M2 の 1 / 4.3〜4.5（大 GEMM）で、M5 では既定
+  （128×128 タイル）がほぼ最良 — M5 単独の掃引から作る表は conv2d rows32 以外すべて既定になる。
+  つまり **同じ adapter の綴りの中に、最良幾何が逆の GPU が 2 つある**。決定 2（(vendor, architecture) の完全一致）だけでは分けられない。
+  M5 で `apple-metal-3` が当たったときの損は DiT 段で約 5%（linear ×0.94 前後）、VAE の conv2d で最大 18%。
+- **裁定 3（行数バケットの細分化）は a で承認**（2026-09-29）: 掃引ケースの M（16 / 32 / 64 / 128 / 256 / 512 / ∞）を境界にした表を
+  プロファイルごとに作れるようにする。runtime の表引きは任意段数を受けるので、生成器の 3 段固定と決定 4「境界は掃引から作らない」の
+  改定で足りる。既定の表は 3 段のまま。着手は裁定 2 の後・別 ADR。
+- 裁定待ち: (2) 生成器が再測定比の範囲外のケースを外す（追記 8）、(4) Apple M2 と M5 の分け方（`description` を照合キーに足す /
+  `apple-metal-3` を自動適用から外す / 現状維持 + limitations に記録）。
