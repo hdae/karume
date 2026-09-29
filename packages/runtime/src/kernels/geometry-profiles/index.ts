@@ -10,5 +10,9 @@
 
 import type { GeometryProfile } from "../geometry-profile.ts";
 import { APPLE_METAL_3 } from "./apple-metal-3.ts";
+import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
 
-export const BUILTIN_GEOMETRY_PROFILES: readonly GeometryProfile[] = [APPLE_METAL_3];
+export const BUILTIN_GEOMETRY_PROFILES: readonly GeometryProfile[] = [
+  APPLE_METAL_3,
+  NVIDIA_BLACKWELL,
+];
