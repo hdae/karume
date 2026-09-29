@@ -37,7 +37,8 @@
 
 - **幾何プロファイル（K-71）まわり（起票 2026-09-27・裁定 2026-09-29 = 推奨案で全承認）**: 正本は ADR [0115 追記 2026-09-29](decisions/0115-geometry-profiles.md)。
   ① 掃引ケースの追加は済（linear の M = 16 / 32 / 128 / 256・matmul 3 本〈linear の鏡像 — census に rank-2 matmul は無い〉・bmm 5 本〈census〉。生成器は 3 経路のケースで `gemmRows` を決める）。
-  残り = M2（利用者の Chrome）で **full**（op = linear / matmul / bmm）を再走 → `apple-metal-3` を `--from` 3 本で再生成（quick だけでは採用幾何 `reg128x32r8x4w8` が「測っていない」で落ちる）。
+  M2 の full 再走（op = linear / matmul / bmm）と `apple-metal-3` の 3 本からの再生成も済（2026-09-29）: `gemmRows` ≤ 64 と 65〜512 は既定へ戻り、> 512 は `reg128x32r8x4w8` ×1.65 で維持（DiT の幾何は不変 — ADR 0115 追記決定 3）。
+  観察 = ≤ 64 の中で最良幾何が M 16 / 32 / 64 で割れる（境界の細分化は別起票候補）。残り = M2 で anima の DiT 再測（利用者・実行中）。
   ② `nvidia-blackwell` は生成・登録済（B570 の per-profile GPU テスト緑）。残り = RTX 5070 Ti（Chrome）で anima の登録前後の PNG sha 一致と診断 `geometryProfile` の確認（利用者）。
   ③ **裁定待ち**: 小さい bmm 3 ケース（1 dispatch 15〜40 µs）が反復の上限 1024（`tools/opbench` と共有の `MAX_REPS`）で pass が目標 80 ms に届かず、既定の再測定比が 0.7〜1.55 と揺れる（B570）。
   対処の候補 = 掃引だけ上限を上げる / 生成器が再測定比の範囲外のケースを落とす / 許容して README に明記。

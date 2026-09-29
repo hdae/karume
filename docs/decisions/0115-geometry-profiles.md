@@ -226,7 +226,9 @@ export type GeometryProfile = {
 - **M2 の DiT の見込み約 1.5 倍は推定**。research §9 の見積もり（f16 quant の DiT 段で linear が GPU 時間の約 85%、
   それが 1.6 倍 + attention）で、DiT 段の実測で確定するまでは推定として扱う。VAE（conv2d）の効果も同じく未計測。
   合成後の採用比は linear の大 M で ×1.74・attention で ×1.49〜1.73（下の表）。
-- **`apple-metal-3` を生成し、`BUILTIN_GEOMETRY_PROFILES` に登録した**。入力は M2（Chrome 153）の掃引 2 本:
+- **`apple-metal-3` を生成し、`BUILTIN_GEOMETRY_PROFILES` に登録した**（下の表は 2026-09-27 時点。2026-09-29 に
+  linear / matmul / bmm の full を 3 本目として足して再生成し、`gemmRows` ≤ 64 と 65〜512 は既定へ戻った — 現行の表は
+  追記決定 3）。入力は M2（Chrome 153）の掃引 2 本:
   quick（2026-09-27T16-28・33 ケース・177 行・i8a8 を含む）と full（2026-09-27T18-31・linear / attention / conv2d の
   格子全体・19 ケース・927 行・出力不一致 0・失敗 0）。欄ごとの採否と退けた幾何の理由は生成物の冒頭コメントが正本:
 
@@ -341,5 +343,30 @@ export type GeometryProfile = {
 | matmul / bmm の掃引経路が本番の recipe-builders と束縛・params・dispatch で一致（CPU 参照突合） | ✅（`harness_test` 実 GPU・故障注入で赤を確認） |
 | 生成器が matmul / bmm の観測を `gemmRows` の全ケース門に数える                                  | ✅（`profile_test`）                            |
 | `nvidia-blackwell` を登録し、B570 の per-profile GPU テストが緑                                 | ✅（2026-09-29）                                |
-| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | 未実施（利用者作業）                            |
+| M2（Chrome）で full（linear / matmul / bmm）を再走し `apple-metal-3` を 3 本から再生成          | ✅（2026-09-29・追記決定 3）                    |
 | RTX 5070 Ti（Chrome）で登録前後の PNG sha256 一致・診断 `geometryProfile` = `nvidia-blackwell`  | 未計測（利用者作業）                            |
+
+### 追記決定 3: M2 の full 再走（linear / matmul / bmm）で `apple-metal-3` を 3 本から再生成した（2026-09-29）
+
+- 入力 = 2026-09-27 の quick + full に、2026-09-29 の full（op = linear / matmul / bmm・20 ケース・1,080 行・失敗 0・
+  出力不一致 0・既定の再測定比は全ケース範囲内・checkout `cb87ab93`）を 3 本目として足した。`--from` の順は生成物の冒頭。
+
+  | 欄                                | 2026-09-27（linear だけ） | 2026-09-29（linear / matmul / bmm）      | ケース |
+  | --------------------------------- | ------------------------- | ---------------------------------------- | ------ |
+  | `gemmRows` ≤ 64                   | `reg64x64r4x4w16` ×2.261  | **既定のまま**                           | 6      |
+  | `gemmRows` 65〜512                | `reg128x32r8x4w8` ×1.102  | **既定のまま**                           | 7      |
+  | `gemmRows` > 512                  | `reg128x32r8x4w8` ×1.740  | `reg128x32r8x4w8` ×1.647（1.171〜1.766） | 7      |
+  | attention / conv2d / i8a8 の 7 欄 | 不変                      | 不変                                     | —      |
+
+- ≤ 64 が既定へ戻った理由: linear M = 16 で全候補が既定に負ける（旧採用 `reg64x64r4x4w16` は M = 16 で ×0.648・M = 32 で
+  ×1.148・M = 64 で ×2.252）。バケット ≤ 64 の中で最良の幾何が M ごとに違い（M = 16 は `reg16x32r2x4w8` ×1.21、M = 32 は
+  `reg32x64r4x4w16` ×1.75、M = 64 は `reg64x64r4x4w16` ×2.25）、1 本の幾何では全ケースを ×1.05 以上にできない。
+  65〜512 が戻った理由: 旧採用 `reg128x32r8x4w8` が bmm M = 512 / N 64 / K 512 で ×0.976（他のケースでは ×1.05〜1.10）。
+- 効果の範囲: DiT の linear（M = 1024 / 4096）・attention・conv2d・i8a8 は幾何が不変で、K-71 の狙い（DiT 段）には影響しない。
+  戻った 2 欄が効くのは text_encoder の linear（M = 64）・cross-attention の k / v 射影（M = 512）・text 段の bmm で、
+  M2 ではこれらは既定の幾何に戻る（速度は 2026-09-27 以前と同じ）。
+- 観察（別起票の材料・本 ADR では動かさない）: 行数バケットの境界（64 / 512 / ∞）は決定 4 のとおり掃引から作らない。
+  M2 では ≤ 64 の中で最良が M = 16 / 32 / 64 で割れるので、境界を細かくすれば ×1.2〜2.25 が取れる余地がある。
+  境界は runtime の既定の表（`GEMM_ROWS_BUCKETS`・ADR 0022）と共有なので、変えるなら既定プロファイルの門と一緒に別 ADR で。
+- M2 でも bmm の M = 64 の 2 ケースは反復の上限 1024 に当たった（追記決定 1 の末尾・再測定比は範囲内）。
+- 検収: 追記分の表の「M2（Chrome）で full を再走し 3 本から再生成」は ✅（2026-09-29）。B570 の per-profile GPU テストは緑。
