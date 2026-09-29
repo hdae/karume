@@ -497,3 +497,53 @@ export type GeometryProfile = {
   改定で足りる。既定の表は 3 段のまま。着手は裁定 2 の後・別 ADR。
 - 裁定待ち: (2) 生成器が再測定比の範囲外のケースを外す（追記 8）、(4) Apple M2 と M5 の分け方（`description` を照合キーに足す /
   `apple-metal-3` を自動適用から外す / 現状維持 + limitations に記録）。
+
+### 追記決定 7: 照合キーに `description` を足し、`match` を省略した表は注入専用にする・埋め込みの表を値として公開する（裁定 4 = a・2026-09-30）
+
+- 動機（追記 9）: Chrome は Apple M2 も M5 も `apple` / `metal-3` を名乗るので、(vendor, architecture) だけでは M2 で測った表が M5 に当たり
+  M5 が遅くなる。利用者が Chrome Beta のゲストモードで確かめたところ `description` は空だった（開発者向けフラグを立てると `"Apple M2"` が出る）。
+- `match` に `description`（`GPUAdapterInfo.description` との完全一致・空文字は「無い」）を足す。選択順は (vendor, architecture, description) の
+  完全一致 → (vendor, architecture) → vendor → 既定。同順位に 2 本当たる一覧は従来どおり fail loudly。`description` を持つ規則は vendor と
+  architecture も必須。
+- `match` を省略した表は自動選択の対象外（注入専用 = オプトイン）。埋め込みの一覧（`BUILTIN_GEOMETRY_PROFILES`）は 1 本のままで、
+  自動選択される表もされない表も同じ一覧に置く。判定関数やフラグではなくデータで持つ理由: 表が純データのままなので、ページが作る JSON でも
+  運べ、生成器が掃引の adapter から書け、テストが一覧を回して検査できる。名前の近さで選ぶ形（採らなかった案）へ滑らない。
+- `BUILTIN_GEOMETRY_PROFILES` を公開面（`@karume/runtime`）に値として出す。アプリは id で引いて `acquireGpu({ geometryProfile })` に渡す
+  （M2 なら `description` が取れて `"Apple M2"` を含むときだけ渡す、が想定の使い方）。選択関数と既定の表は出さない。
+- `apple-metal-3` は `match: { vendor: "apple", architecture: "metal-3", description: "Apple M2" }` に変える。結果: フラグ無しの Chrome では
+  Apple は全て既定（M5 が損しない・M2 は注入で ×1.75）、フラグ有りの Chrome と Deno（description に機種名）では M2 だけ自動で当たる。
+  `nvidia-blackwell` は architecture が十分に狭いので `description` を持たない。
+- 生成器: `--description <文字列>`（明示のみ）と `--opt-in`（`match` 省略）。ページは「description でも照合する」「注入専用」のチェック。
+
+### 追記決定 8: 生成器は既定の再測定比が範囲外のケースをその掃引の材料から外す（裁定 2 = a・2026-09-30・決定 4 の改定）
+
+- 動機（追記 8）: M2 の full 掃引で、熱により候補が遅く測られた matmul M 4096（再測定比 1.160）が、> 512 の欄全体を既定へ戻した。記録は
+  揺れを `defaultRepeat.driftRatio` で捕まえているのに、生成器は見ていなかった。
+- 規則: 掃引 1 本の中で、既定の再測定比が 0.9〜1.1 の外か、再測定が失敗 / 無いケースは、その掃引の材料から外す。他の掃引に同じケースが
+  あればそちらで判定し、無ければ「測っていない」扱いで欄は既定（安全側）。外したケースと理由は生成物の冒頭コメントに残す。
+  除外を無効にする口は作らない（規則は 1 つ）。
+- `apple-metal-3` を 4 本（09-27 quick・09-27 full・09-29 13:08 full・09-29 21:04 full）から再生成する。除外されるのは 21:04 の
+  matmul M 4096・bmm M 64 N 128・bmm M 512 N 512。期待 = > 512 は `reg128x32r8x4w8` ×1.65 前後で維持、attention / conv2d は不変、
+  i8a8 の 3 欄は full 格子で見つかった幾何に更新（結果は下の検収）。
+
+#### 追記決定 7 / 8 の検収（2026-09-30）
+
+- `apple-metal-3` を 4 本（09-27 quick・09-27 full・09-29 13:08 full・09-29 21:04 full）から `--description "Apple M2"` で再生成した。
+  比の材料から外れたケースは、21:04 の matmul M 4096（再測定比 1.160）・bmm M 64 N 128（0.800）・bmm M 512 N 512（1.176）に加え、
+  09-27 18:31 の attention ③PV self M 1024（1.228）と cross M 1024（1.126）— 後者 2 件は Consequences の表で「揺れを含む」と書いていたもの。
+
+  | 欄               | 3 本（09-29 昼）                    | 4 本 + 除外（09-30）                                                                                          |
+  | ---------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+  | `gemmRows` > 512 | `reg128x32r8x4w8` ×1.647            | 同じ幾何 ×1.647（除外しないと既定へ戻る）                                                                     |
+  | `attention.qk`   | `reg128x32r8x4w8` ×1.734            | 同じ幾何 ×1.754                                                                                               |
+  | `attention.pv`   | `reg64x64r8x4w16` ×1.494            | `reg32x64r4x8w8` ×1.635（2 位 `reg64x64r8x4w16` ×1.632）                                                      |
+  | `conv2d` 2 欄    | `igemm128x64:wg16x16`               | 同じ                                                                                                          |
+  | `i8a8` 3 欄      | `tile64x64r8x4w16x8k16` ×1.10〜1.13 | `tile64x64r4x8w8x16k16` ×1.128 / `tile32x64r4x8w8x8k16` ×1.156 / `tile16x128r4x8w16x4k16` ×1.133（full 格子） |
+
+  `attention.pv` の入れ替わりは 18:31 の 2 件の除外によるもので、1 位と 2 位の差は 0.2%（規則どおり幾何平均の大きい方）。
+- `nvidia-blackwell` は生成物の形式（除外の記録欄）が変わったので再生成し、値は不変（i8a8 3 欄のみ）。両方 `--check` バイト同一。
+- 自動選択: `apple-metal-3` は adapter の `description` が `"Apple M2"` のときだけ当たる。フラグ無しの Chrome（description 空）では Apple は既定。
+  M5 が `apple-metal-3` を受けて遅くなる形は無くなった（追記 9 の損は解消）。M2 でフラグ無しに ×1.75 を得るには注入する
+  （公開面の `BUILTIN_GEOMETRY_PROFILES` から id で引く）。
+- 検収: 選択順・門・公開面（+1 値）・per-profile の GPU テスト（B570・Uint32 一致）・生成器の除外規則（故障注入で赤）・独立レビュー
+  （中 2 件 = 除外は比だけに効かせる・掃引間の adapter 一致検査に description、を反映）。

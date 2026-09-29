@@ -83,6 +83,9 @@ measurements in `docs/research/`.
   `@karume/models` and `@karume/models/anima`.
 - `SessionDiagnostics.geometryProfile`: the id of the tile-geometry profile the session selected
   (`"default"` on adapters without a profile). The name is a diagnostic label outside semver.
+- `BUILTIN_GEOMETRY_PROFILES` (`@karume/runtime`): the built-in tile-geometry profiles as values, so an
+  application can pick one by id and inject it with `acquireGpu({ geometryProfile })` — for
+  example `apple-metal-3` on an Apple M2 that Chrome reports without a description.
 - `acquireGpu({ geometryProfile })`: inject one static tile-geometry profile for the device (ADR
   0115), for adapters without a built-in profile — typically the table `tools/geometry-sweep`
   generates from a sweep on that machine. When given, the adapter's vendor and architecture are
@@ -126,7 +129,11 @@ measurements in `docs/research/`.
   once at session construction from the adapter's vendor and architecture; nothing is measured at
   run time. Adapters without a profile get byte-identical shaders and pipeline keys as before.
   Apple `metal-3` under Chrome gets a profile measured on an M2, covering linear / matmul / bmm,
-  fused attention, conv2d and the i8a8 linear and attention kernels. NVIDIA `blackwell` under
+  fused attention, conv2d and the i8a8 linear and attention kernels; it is selected automatically
+  only when the adapter also reports the description `Apple M2` (Chrome does so with
+  `chrome://flags/#enable-webgpu-developer-features`; Deno always does). Without it, Apple adapters
+  keep the default geometry, which is the best on an Apple M5, and the table can still be injected
+  with `acquireGpu`. NVIDIA `blackwell` under
   Chrome gets a profile measured on an RTX 5070 Ti that changes only the i8a8 linear and attention
   tiles (the 512² DiT stage of the default quant took 1.14 s of GPU time instead of 1.36 s); its
   f32 kernels keep the default. Outputs stay
