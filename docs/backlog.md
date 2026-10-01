@@ -45,6 +45,8 @@
   確認ページの `geometryProfile` 表示も済（同日）。RTX 5070 Ti の実走も済（2026-09-29・4 段とも `nvidia-blackwell`・DiT 段 既定 1.21 s / f16 2.86 s — ADR 0115 追記 5・3 機比較は research K-70 §12）。登録前後の sha 一致だけは登録前の RTX 記録が無く未確認（任意: `cd11cdc8` の確認ページで 1 回）。
   **次の波（承認済み 2026-09-29・裁定 3 = a）**: 行数バケットの細分化 — 掃引ケースの M（16 / 32 / 64 / 128 / 256 / 512 / ∞）を境界にした表をプロファイルごとに作れるようにする（runtime は任意段数 OK・生成器の 3 段固定と ADR 0115 決定 4 の改定・既定表は 3 段のまま・別 ADR）。M2 も RTX もバケット内で最良が M ごとに割れる（RTX: M 64 ×1.38・M 512 ×1.48）。
   **済（裁定 2026-09-30）**: (2) 生成器は既定の再測定比が範囲外のケースをその掃引の比の材料から外す（出力不一致と失敗は見る・ADR 0115 追記決定 8）。(4) 照合キーに `description` を足し、`match` を省いた表は注入専用・`BUILTIN_GEOMETRY_PROFILES` を公開（追記決定 7）。`apple-metal-3` は `"Apple M2"` のときだけ自動で当たり、4 本 + 除外で再生成（> 512 ×1.647 維持・③PV `reg32x64r4x8w8` ×1.635）。
+  **M5 full の確認（2026-10-01）**: M5 の full（45 ケース・失敗 0・不一致 0・再測定比の範囲外 3）でも既定がほぼ最良で、`apple-metal-3` の採用幾何は M5 で ×0.77〜1.10・M5 単独の表は ≤ 64 と conv2d rows32 以外既定・i8a8 は M5 でも f32 計算より 1.14〜1.51 倍遅い（[research K-70](research/2026-09-27-k70-metal-per-op.md) §14）。
+  **起票（2026-10-01・利用者）: アプリへの組み込み（掃引 → 表の生成 → 保存 → 注入を利用者アプリ内で回す）** — 状態 = 調査中（読み取り調査を 2026-10-01 に開始）。現状ある物: `acquireGpu({ geometryProfile })` の注入口・型と `BUILTIN_GEOMETRY_PROFILES` の公開・表の JSON 直列化（末尾の `maxRows` の Infinity は `1e999`）・`tools/gpu-lab` での実証。設計論点: ① 掃引ハーネスと生成器が runtime の内部 `src/` を直接 import していて JSR パッケージとして配れない（`tools/geometry-sweep/harness.ts:49〜115`）② 生成器は timestamp-query かつ非量子化の記録しか受けない（`tools/geometry-sweep/derive.ts:270〜285`）ので、一般利用者の Chrome（フラグ無し・100 µs 量子化）では成立しない ③ 注入は `match` を照合しないので、保存キー（adapter 情報 + runtime 版 + ケース集合の版）を利用者側で持つ必要がある ④ 掃引の所要時間が記録に無い（JSON の `date` は終了時刻）。
 
 - **Karume 専用コンテナ形式の波（起票 2026-09-22）**: 配布形を safetensors 方言から専用コンテナ
   （`krm` = モデル / `krg` = グラフ）へ移す。正本は [ADR 0108](decisions/0108-container-format.md)（accepted）と
