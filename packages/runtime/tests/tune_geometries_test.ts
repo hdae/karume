@@ -9,15 +9,15 @@ import {
   gemmThreads,
   gemmTileM,
   gemmTileN,
-} from "../../packages/runtime/src/kernels/gemm-geometry.ts";
+} from "../src/kernels/gemm-geometry.ts";
 import {
   assertI8a8Geometry,
   defaultI8a8Geometry,
   i8a8GeometryKeyPart,
-} from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import { gemmMTileGeometry } from "../../packages/runtime/src/kernels/gemm.ts";
-import { conv2dIgemmKey } from "../../packages/runtime/src/kernels/conv2d.ts";
-import { BUILTIN_GEOMETRY_PROFILES } from "../../packages/runtime/src/kernels/geometry-profiles/index.ts";
+} from "../src/kernels/i8a8-geometry.ts";
+import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
+import { conv2dIgemmKey } from "../src/kernels/conv2d.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import {
   conv2dCandidate,
   conv2dCandidates,
@@ -34,7 +34,7 @@ import {
   quickPlusConv2dCandidates,
   quickPlusGemmCandidates,
   quickPlusI8a8Candidates,
-} from "./geometries.ts";
+} from "../src/tune/geometries.ts";
 
 const names = (items: readonly { readonly name: string }[]): string[] =>
   items.map((item) => item.name);

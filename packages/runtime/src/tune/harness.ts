@@ -1,12 +1,13 @@
 /**
- * タイル幾何の掃引の計測核（perf-ledger K-70 — Deno の `main.ts` とブラウザのページ `tools/gpu-lab` の
- * 掃引タブが共有する。使うのは WebGPU 標準 API と runtime の src だけ）。
+ * タイル幾何の掃引の計測核（perf-ledger K-70 — 掃引の入口 `runGeometrySweep`〈sweep.ts〉が使い、Deno の
+ * CLI・ブラウザのページ `tools/gpu-lab` の掃引タブ・利用者アプリがその入口を共有する。使うのは WebGPU
+ * 標準 API と runtime の src だけ）。
  *
  * 同じ shape・同じ入力のまま**幾何だけ**を変えて 1 dispatch の時間を測る。WGSL とキーは runtime の
  * 生成入口に明示の幾何を渡して作る（`linearWgsl(…, geometry)` 等 — Session の経路は通らない）ので、
  * 測っているカーネルは本番のカーネルと同じ生成器の出力そのもの。
  *
- * ## 計測の規約（tools/opbench/bench.ts を写す）
+ * ## 計測の規約（measurement.ts — tools/opbench と共有する）
  *
  * 1. 1 compute pass に同じ dispatch を `reps` 本積み、pass の `timestampWrites`（beginning / end）の
  *    差 ÷ `reps` を 1 dispatch の時間とする。`reps` は 1 pass ≈ {@link TARGET_PASS_MS} になる本数
@@ -34,7 +35,7 @@
  * 渡している `binds` の並び（binding 1 から順）を写した表。表は PipelineCache が WGSL から採る
  * storage の役割（`roles` — src/gpu/pipeline-cache.ts `parseStorageRoles`）と突き合わせ、束縛の本数と
  * 書き込み先の位置が食い違えば行を失敗にする（{@link assertBindingRoles}）。役割の同じ束縛どうしの
- * 入れ替わりは役割では見えない — linear / matmul / bmm は CPU 参照の突合テスト（harness_test.ts）が検出器。寸法の
+ * 入れ替わりは役割では見えない — linear / matmul / bmm は CPU 参照の突合テスト（tests/tune_harness_test.ts）が検出器。寸法の
  * 式は各 recipe-builder の確保と params 関数から写す（{@link casePlan} の各枝に `file:line`）。
  *
  * ## ビット同一の確認
@@ -43,45 +44,37 @@
  * f32 は ADR 0022 決定 3（K 縮約順は幾何に依らない）で、i8a8 は整数縮約の厳密性で一致が期待される。
  * 一致しない幾何は、速くても採用条件を満たさない。
  */
-import type { GpuContext } from "../../packages/runtime/mod.ts";
 // WHY: 公開面（mod.ts）には errorScope のロック・device lost の競走・パイプラインキャッシュが無い。
 // 本番と同じキャッシュ（キー衝突の検出込み）とスコープ規律で測るため、内部面に意図して結合する。
-import { RUNTIME_INTERNAL } from "../../packages/runtime/src/gpu/context.ts";
-import type { StorageRoles } from "../../packages/runtime/src/gpu/pipeline-cache.ts";
-import {
-  discardFailureScopes,
-  popFailureScopes,
-  pushFailureScopes,
-} from "../../packages/runtime/src/gpu/error-scope.ts";
-import { BUFFER_USAGE, MAP_MODE } from "../../packages/runtime/src/gpu/webgpu-constants.ts";
-import {
-  gridStrideWorkgroups,
-  tiledWorkgroups,
-} from "../../packages/runtime/src/codegen/dispatch.ts";
-import { gemmMTileGeometry, gemmUsesVec4 } from "../../packages/runtime/src/kernels/gemm.ts";
+import { type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
+import type { StorageRoles } from "../gpu/pipeline-cache.ts";
+import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
+import { BUFFER_USAGE, MAP_MODE } from "../gpu/webgpu-constants.ts";
+import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
+import { gemmMTileGeometry, gemmUsesVec4 } from "../kernels/gemm.ts";
 import {
   defaultGemmGeometry,
   type GemmGeometry,
   gemmGeometryForRows,
   gemmTileM,
   gemmTileN,
-} from "../../packages/runtime/src/kernels/gemm-geometry.ts";
+} from "../kernels/gemm-geometry.ts";
 import {
   defaultI8a8Geometry,
   type I8a8Geometry,
   i8a8TileM,
   i8a8TileN,
-} from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import { linearKey, linearParams, linearWgsl } from "../../packages/runtime/src/kernels/linear.ts";
-import { matmulKey, matmulParams, matmulWgsl } from "../../packages/runtime/src/kernels/matmul.ts";
-import { bmmKey, bmmParams, bmmWgsl } from "../../packages/runtime/src/kernels/bmm.ts";
+} from "../kernels/i8a8-geometry.ts";
+import { linearKey, linearParams, linearWgsl } from "../kernels/linear.ts";
+import { matmulKey, matmulParams, matmulWgsl } from "../kernels/matmul.ts";
+import { bmmKey, bmmParams, bmmWgsl } from "../kernels/bmm.ts";
 import {
   dp4aAvailable,
   linearI8a8Key,
   linearI8a8Params,
   linearI8a8UsesVec4,
   linearI8a8Wgsl,
-} from "../../packages/runtime/src/kernels/linear-i8a8.ts";
+} from "../kernels/linear-i8a8.ts";
 import {
   ATTENTION_STATS_STRIDE,
   attentionPvKey,
@@ -93,7 +86,7 @@ import {
   attentionStatsKey,
   attentionStatsParams,
   attentionStatsWgsl,
-} from "../../packages/runtime/src/kernels/attention.ts";
+} from "../kernels/attention.ts";
 import {
   attentionPvI8a8Key,
   attentionPvI8a8Params,
@@ -103,7 +96,7 @@ import {
   attentionQkI8a8Params,
   attentionQkI8a8UsesVec4,
   attentionQkI8a8Wgsl,
-} from "../../packages/runtime/src/kernels/attention-i8a8.ts";
+} from "../kernels/attention-i8a8.ts";
 import {
   type Conv2dDims,
   conv2dIgemmKey,
@@ -111,15 +104,9 @@ import {
   conv2dIgemmParams,
   conv2dIgemmWgsl,
   conv2dUsesVec4,
-} from "../../packages/runtime/src/kernels/conv2d.ts";
-import { scoreStorageBytes } from "../../packages/runtime/src/kernels/score-storage.ts";
-import {
-  calibrateReps,
-  ROUNDS,
-  TARGET_PASS_MS,
-  WARMUP_MIN_RUNS,
-  WARMUP_NS,
-} from "../opbench/bench.ts";
+} from "../kernels/conv2d.ts";
+import { scoreStorageBytes } from "../kernels/score-storage.ts";
+import { calibrateReps, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import {
   type AttentionCase,
   type BmmCase,
@@ -148,8 +135,6 @@ import {
   type TimingUnit,
 } from "./report.ts";
 
-export { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS };
-
 /**
  * 掃引の `reps` の上限（計測の規約 1）。opbench の `MAX_REPS`（1024）は出力の readback とメモリが
  * 反復に比例して増えるので打ち切る上限だが、掃引は同じバッファに重ね打ちするので反復を増やしても
@@ -175,7 +160,7 @@ export const DIGEST_CHUNK_BYTES = 64 * 1024 * 1024;
 const FILL_CHUNK_BYTES = 16 * 1024 * 1024;
 
 export type SweepSettings = {
-  /** 計測 round の数（既定 {@link ROUNDS}）。 */
+  /** 計測 round の数（既定は measurement.ts の `ROUNDS`）。 */
   readonly rounds: number;
   /** 候補集合（geometries.ts の {@link CandidateSet}）。 */
   readonly candidateSet: CandidateSet;

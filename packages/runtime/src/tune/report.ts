@@ -1,12 +1,12 @@
 /**
  * 掃引の記録（`karume-geometry-sweep/2`）の形と、行を既定幾何と突き合わせる純関数。
  *
- * Deno の CLI（`main.ts`）とブラウザのページ（`tools/gpu-lab` の掃引タブ）が同じ型で JSON を書く —
- * 2 本が別々に組むと、M2 / Chrome と B570 / Deno の JSON を並べる段で形が黙ってずれる。
+ * 記録を組むのは掃引の入口 `runGeometrySweep`（`sweep.ts`）1 本で、Deno の CLI（`tools/geometry-sweep`）・
+ * ブラウザのページ（`tools/gpu-lab` の掃引タブ）・利用者アプリが同じ形の JSON を得る — 別々に組むと、
+ * M2 / Chrome と B570 / Deno の JSON を並べる段で形が黙ってずれる。
  */
-import type { GemmGeometry } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
-import type { I8a8Geometry } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import { looksQuantized } from "../anima-residency/timing.ts";
+import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
+import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import type { SweepOp } from "./cases.ts";
 import type { CandidateSet } from "./geometries.ts";
 
@@ -98,6 +98,7 @@ export type CaseSummary = {
   readonly defaultRepeatError?: string;
 };
 
+/** 掃引した adapter（`GPUAdapterInfo` の 4 欄 — 空文字も値のまま）。 */
 export type ReportAdapter = {
   readonly vendor: string;
   readonly architecture: string;
@@ -105,6 +106,7 @@ export type ReportAdapter = {
   readonly description: string;
 };
 
+/** 掃引の記録（`karume-geometry-sweep/2` — 生成器 `derive.ts` の入力・JSON に書く形）。 */
 export type Report = {
   readonly format: typeof REPORT_FORMAT;
   readonly date: string;
@@ -139,7 +141,7 @@ export type Report = {
      * opbench と共有の 1024 — どの上限で取られた掃引かをこの欄で見分ける。
      */
     readonly maxReps: number;
-    /** 幾何ごとの空回しの下限（累計時間 ns — tools/opbench/bench.ts の `WARMUP_NS`）。 */
+    /** 幾何ごとの空回しの下限（累計時間 ns — measurement.ts の `WARMUP_NS`）。 */
     readonly warmupNs: number;
     /** 幾何ごとの空回しの回数下限（同 `WARMUP_MIN_RUNS`）。 */
     readonly warmupMinRuns: number;
@@ -175,19 +177,38 @@ export const compareToDefault = (row: SweepRow, reference: DefaultReference): Sw
   };
 };
 
+/** Chrome が timestamp を丸める刻み（WebGPU Developer Features を切っているとき）。 */
+export const CHROME_TIMESTAMP_QUANTUM_NS = 100_000;
+
+/**
+ * {@link looksQuantized} が読む GPU 時間の集計（`tools/anima-residency` の段の集計 `StageGpuTiming`
+ * もこの形を満たす — 判定が読む欄だけを要求する）。
+ */
+export type QuantizationSample = {
+  readonly totalNs: number;
+  readonly entries: readonly { readonly ns: number }[];
+};
+
+/**
+ * 全キーの `ns` が 100 µs の倍数なら、Chrome の timestamp 量子化が効いている疑いが濃い。
+ *
+ * WHY: 量子化下では 1 dispatch = 1 pass の各差分が 0 か 100 µs の倍数になり、和も倍数のまま残る。
+ * 短い dispatch が大半を占める DiT では内訳の読みが荒れるので、表示で気づけるようにする
+ * （判定は表示だけ — 数値は触らない）。掃引と GPU lab の Anima の段の集計が共有する（ADR 0117 決定 1 で
+ * `tools/anima-residency/timing.ts` からここへ移した）。
+ */
+export const looksQuantized = (gpu: QuantizationSample): boolean =>
+  gpu.totalNs > 0 && gpu.entries.every((entry) => entry.ns % CHROME_TIMESTAMP_QUANTUM_NS === 0);
+
 /**
  * Chrome の 100 µs 量子化の疑い（{@link looksQuantized} を pass 単位の値へ流用する）。単位が ns の
  * ときだけ判定する — raw tick と壁時計は量子化の刻みを持たない。
  */
 export const roundsLookQuantized = (rows: readonly SweepRow[], unit: TimingUnit): boolean => {
   if (unit !== "ns") return false;
-  const entries = rows.flatMap((row) =>
-    (row.rounds ?? []).map((ns) => ({ key: row.caseId, ns, dispatchCount: row.reps ?? 0 }))
-  );
+  const entries = rows.flatMap((row) => (row.rounds ?? []).map((ns) => ({ ns })));
   return looksQuantized({
     totalNs: entries.reduce((sum, entry) => sum + entry.ns, 0),
-    runs: entries.length,
-    clampedNegativeSamples: 0,
     entries,
   });
 };

@@ -17,22 +17,20 @@
  */
 
 import type { RunInputs, Session } from "../../packages/runtime/mod.ts";
+// 目標長・空回しの下限・round 数・反復数の見積りは掃引（runtime の `./tune`）と共有する規約で、
+// 定義は runtime 側の 1 本（ADR 0117 決定 1）。opbench の消費者はここから引き続き import する。
+import {
+  calibrateReps as calibrateRepsWithin,
+  ROUNDS,
+  TARGET_PASS_MS,
+  WARMUP_MIN_RUNS,
+  WARMUP_NS,
+} from "../../packages/runtime/src/tune/measurement.ts";
 
-/** 1 タイムドパスの目標長（ms）。研究 §5-1 の実測値をそのまま既定にする。 */
-export const TARGET_PASS_MS = 80;
+export { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS };
 
 /** 反復の上限。出力の readback / メモリを線形に増やすので、目標長に届かなくても打ち切る。 */
 export const MAX_REPS = 1024;
-
-/**
- * 計測前にクロックを張り付かせる空回しの下限（GPU 実時間の累計 ns）。研究 §5-2 の
- * 「対の前にメモリクロックが張り付くまで空回し」を、nvidia-smi に依らず時間で置き換えたもの。
- * アイドルから 1 パス ≈80ms では張り付かない（同一変種が 2 倍揺れた実測）。
- */
-export const WARMUP_NS = 500e6;
-
-/** 空回しの回数下限（累計時間が先に満ちても、パイプライン生成直後の 1 回だけでは終えない）。 */
-export const WARMUP_MIN_RUNS = 3;
 
 /**
  * クロックを張り付かせる filler。`run()` は重い dispatch 列を 1 回流して壁時計 ms を返す
@@ -63,22 +61,16 @@ export const pinClocks = async (heater: Heater): Promise<{ runs: number; ms: num
   return { runs, ms: total };
 };
 
-/** 代表値を取る回数（min を採るので偶奇や対は要らない — 同一ケースの反復）。 */
-export const ROUNDS = 5;
-
 /**
- * 1 dispatch の推定 ns から、目標長に足りる反復数を決める（1 以上・上限で打ち切り）。
- * 推定が 0 / 非有限のときは上限（測れないほど速い = 積めるだけ積む）。
+ * 1 dispatch の推定 ns から、目標長に足りる反復数を決める（規則の本体は runtime の
+ * `calibrateReps` — ここは opbench の既定〈目標長 {@link TARGET_PASS_MS}・上限 {@link MAX_REPS}〉を
+ * 与えるだけ）。
  */
 export const calibrateReps = (
   nsPerDispatch: number,
   targetMs: number = TARGET_PASS_MS,
   maxReps: number = MAX_REPS,
-): number => {
-  if (!Number.isFinite(nsPerDispatch) || nsPerDispatch <= 0) return maxReps;
-  const reps = Math.ceil((targetMs * 1e6) / nsPerDispatch);
-  return Math.max(1, Math.min(maxReps, reps));
-};
+): number => calibrateRepsWithin(nsPerDispatch, targetMs, maxReps);
 
 /** 1 回の timing 計測（1 run = 反復ぶんの dispatch を積んだグラフ）。 */
 export type TimingSample = {

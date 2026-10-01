@@ -2,7 +2,9 @@
  * タイル幾何の掃引を Deno で回す CLI（ブラウザのページ `tools/gpu-lab` の掃引タブの双子 — perf-ledger K-70）。
  *
  * 同じ shape・同じ入力のまま幾何だけを変えて 1 dispatch の時間と出力 digest を採り、既定幾何に対する
- * 速さの比の表を標準出力へ、全行を JSON（`karume-geometry-sweep/2` — `report.ts`）へ書く。
+ * 速さの比の表を標準出力へ、全行を JSON（`karume-geometry-sweep/2`）へ書く。掃引そのもの（専用の
+ * device の取り直し・計測・記録の組み立て）は runtime の `runGeometrySweep`（`@karume/runtime/tune` —
+ * ADR 0117 決定 2）で、ここは引数・表示・ファイルの書き出し・終了コードだけを持つ殻。
  * 失敗（`error`）の行が 1 つでもあれば終了コード 1（出力の不一致は測定の失敗ではないので終了コードに
  * 含めず、表と要約で赤く出す）。
  *
@@ -11,12 +13,14 @@
  *   deno run -A tools/geometry-sweep/main.ts --set quick --op linear --op i8a8-linear
  *
  * フラグ: `--op <族>`（複数可・既定は全族 — linear / matmul / bmm / i8a8-linear / attention /
- * i8a8-attention / conv2d）`--case <id>`（複数可・cases.ts の id で絞る）`--set <quick|quick+|full>`
- * （候補集合・既定 quick+ — geometries.ts）`--quick`（`--set quick` の別名）`--rounds N`（既定 5）
+ * i8a8-attention / conv2d）`--case <id>`（複数可・runtime の `src/tune/cases.ts` の id で絞る）
+ * `--set <quick|quick+|full>`（候補集合・既定 quick+ — `src/tune/geometries.ts`）`--quick`
+ * （`--set quick` の別名）`--rounds N`（既定 5）
  * `--out <json>`（既定 outputs/bench/karume/<日付>_geometry-sweep/geometry-sweep-<adapter>-<時刻>.json）。
  *
- * アダプタが `timestamp-query` を列挙すれば `acquireGpu({ gpuTiming: true })` で取り、単位は
- * `deno-raw-tick`（Deno は timestamp を ns に換算しない）。列挙しなければ壁時計（`wall`）で回す。
+ * アダプタが `timestamp-query` を列挙すれば timestamp で測り、単位は `deno-raw-tick`（Deno は
+ * timestamp を ns に換算しない）。列挙しなければ壁時計（`wall`）で回す（どちらも `runGeometrySweep` が決める）。
+ * 記録の `userAgent` は `{ deno: <版> }` に書き換え、`checkout` / `checkoutDirty` を足す。
  *
  * サブコマンド `profile`（GPU を使わない — `profile.ts`）は掃引の JSON から adapter 1 種の幾何
  * プロファイルの生成物を書く（perf-ledger K-71）:
@@ -25,39 +29,25 @@
  *     (--vendor <v> [--architecture <a> [--description <d>]] | --opt-in) \
  *     --out packages/runtime/src/kernels/geometry-profiles/<id>.ts [--min-speedup 1.05] [--check]
  */
-import { acquireGpu } from "../../packages/runtime/mod.ts";
-import { readCheckout } from "../shared/checkout.ts";
-import { SWEEP_CASES, SWEEP_OPS, type SweepCase, type SweepOp } from "./cases.ts";
+import {
+  type GeometrySweepAdapter,
+  type GeometrySweepCaseSummary,
+  type GeometrySweepReport,
+  type GeometrySweepRow,
+  type GeometrySweepTimingUnit,
+  runGeometrySweep,
+} from "../../packages/runtime/tune.ts";
+import { SWEEP_CASES, SWEEP_OPS, type SweepOp } from "../../packages/runtime/src/tune/cases.ts";
 import {
   CANDIDATE_SETS,
   type CandidateSet,
   DEFAULT_CANDIDATE_SET,
   isCandidateSet,
-} from "./geometries.ts";
+} from "../../packages/runtime/src/tune/geometries.ts";
+import { ROUNDS } from "../../packages/runtime/src/tune/measurement.ts";
+import { DEFAULT_DRIFT_RANGE, driftOutOfRange } from "../../packages/runtime/src/tune/report.ts";
+import { readCheckout } from "../shared/checkout.ts";
 import { runProfileCommand } from "./profile.ts";
-import {
-  createSweepContext,
-  destroySweepContext,
-  ROUNDS,
-  runSweep,
-  SWEEP_MAX_REPS,
-  TARGET_PASS_MS,
-  WARMUP_MIN_RUNS,
-  WARMUP_NS,
-} from "./harness.ts";
-import {
-  type CaseSummary,
-  DEFAULT_DRIFT_RANGE,
-  driftOutOfRange,
-  type Report,
-  REPORT_FORMAT,
-  roundsLookQuantized,
-  type SweepRow,
-  type TimingUnit,
-  WALL_TIMING_NOTE,
-} from "./report.ts";
-
-const TIMESTAMP_QUERY = "timestamp-query";
 
 type Flags = {
   readonly ops: readonly SweepOp[];
@@ -107,7 +97,7 @@ export const parseFlags = (argv: readonly string[]): Flags => {
         break;
       case "--case":
         if (!SWEEP_CASES.some((sweepCase) => sweepCase.id === value)) {
-          throw new Error(`--case ${value} が cases.ts に無い`);
+          throw new Error(`--case ${value} が形状表（src/tune/cases.ts）に無い`);
         }
         cases.push(value);
         break;
@@ -139,25 +129,11 @@ export const parseFlags = (argv: readonly string[]): Flags => {
   };
 };
 
-/** `--op` と `--case` の両方に合うケース（`--case` 無しなら op の全ケース）。 */
-export const selectCases = (flags: Pick<Flags, "ops" | "cases">): SweepCase[] => {
-  const selected = SWEEP_CASES.filter((sweepCase) =>
-    flags.ops.includes(sweepCase.op) &&
-    (flags.cases.length === 0 || flags.cases.includes(sweepCase.id))
-  );
-  if (selected.length === 0) {
-    throw new Error(
-      `--op [${flags.ops.join(", ")}] と --case [${flags.cases.join(", ")}] に合うケースが無い`,
-    );
-  }
-  return selected;
-};
-
 /**
  * ファイル名に載せるアダプタの名前（tools/anima-residency/profile.ts と同じ規則 — architecture が
  * 空なら description を使う。Deno は vendor を PCI ID の 10 進で返し architecture を空にする）。
  */
-const adapterSlug = (info: GPUAdapterInfo): string => {
+const adapterSlug = (info: GeometrySweepAdapter): string => {
   const parts = info.architecture === ""
     ? [info.description === "" ? info.vendor : info.description]
     : [info.vendor, info.architecture];
@@ -171,7 +147,7 @@ const localDate = (): string => {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 };
 
-const unitLabel = (unit: TimingUnit): string =>
+const unitLabel = (unit: GeometrySweepTimingUnit): string =>
   unit === "ns" ? "µs" : unit === "deno-raw-tick" ? "kTick" : "µs(wall)";
 
 /** 赤で 1 行（Deno の console は `%c` の CSS color を端末の色へ写す）。 */
@@ -181,7 +157,7 @@ const printLine = (text: string, red = false): void => {
 };
 
 /** 表の 1 行（幾何・1 dispatch・既定比・TFLOPS・digest の一致）。 */
-const formatRow = (row: SweepRow): string => {
+const formatRow = (row: GeometrySweepRow): string => {
   const mark = row.isDefault ? "*" : " ";
   if (row.error !== undefined) return `  ${mark} ${row.geometry.padEnd(24)} 失敗: ${row.error}`;
   const time = ((row.perDispatch ?? 0) / 1e3).toFixed(1).padStart(10);
@@ -203,7 +179,9 @@ const formatRow = (row: SweepRow): string => {
 };
 
 /** ケースの末尾の 1 行（既定幾何の再測定と、範囲外なら測り直しの警告）。 */
-const formatCase = (summary: CaseSummary): { readonly text: string; readonly red: boolean } => {
+const formatCase = (
+  summary: GeometrySweepCaseSummary,
+): { readonly text: string; readonly red: boolean } => {
   if (summary.defaultRepeatError !== undefined) {
     return { text: `    既定の再測定 失敗: ${summary.defaultRepeatError}`, red: true };
   }
@@ -224,100 +202,66 @@ const formatCase = (summary: CaseSummary): { readonly text: string; readonly red
 
 const main = async (): Promise<void> => {
   const flags = parseFlags(Deno.args);
-  const selected = selectCases(flags);
-  const adapter = await navigator.gpu.requestAdapter();
-  if (adapter === null) throw new Error("WebGPU アダプタが無い");
-  const timestampFeature = adapter.features.has(TIMESTAMP_QUERY);
-  let deviceLost: Report["deviceLost"] = null;
-  const gpu = await acquireGpu({
-    ...(timestampFeature ? { gpuTiming: true } : {}),
-    onDeviceLost: (info) => {
-      deviceLost = { reason: info.reason, message: info.message };
+  let label = "";
+  let current: string | undefined;
+  const swept = await runGeometrySweep({
+    candidateSet: flags.candidateSet,
+    ops: flags.ops,
+    ...(flags.cases.length === 0 ? {} : { cases: flags.cases }),
+    rounds: flags.rounds,
+    onProgress: (progress) => {
+      switch (progress.kind) {
+        case "started":
+          label = unitLabel(progress.unit);
+          console.log(
+            `[geometry-sweep] ${
+              progress.adapter.description || progress.adapter.vendor
+            } · 単位 ${progress.unit} · ${flags.candidateSet} · rounds ${flags.rounds} · dp4a ${progress.dp4a} · ${progress.caseCount} ケース`,
+          );
+          break;
+        case "status":
+          console.error(`  … ${progress.message}`);
+          break;
+        case "row": {
+          const { row } = progress;
+          if (row.caseId !== current) {
+            current = row.caseId;
+            console.log(
+              `\n${row.caseId}（${row.shape} · census ${row.censusCount} 本）\n    ${
+                "geometry".padEnd(24)
+              }${`${label}/disp`.padStart(10)}${"vs既定".padStart(7)}${"TFLOPS".padStart(7)}`,
+            );
+          }
+          printLine(formatRow(row), row.error !== undefined || row.identicalToDefault === false);
+          break;
+        }
+        case "case": {
+          const { text, red } = formatCase(progress.summary);
+          printLine(text, red);
+          break;
+        }
+        case "deviceLost":
+          break;
+      }
     },
   });
-  const rows: SweepRow[] = [];
-  const cases: CaseSummary[] = [];
-  const context = await createSweepContext(gpu, "deno-raw-tick");
-  const label = unitLabel(context.unit);
-  console.log(
-    `[geometry-sweep] ${
-      gpu.adapterInfo.description || gpu.adapterInfo.vendor
-    } · 単位 ${context.unit} · ${flags.candidateSet} · rounds ${flags.rounds} · dp4a ${context.dp4a} · ${selected.length} ケース`,
-  );
-  let current: string | undefined;
-  try {
-    await runSweep(context, selected, {
-      rounds: flags.rounds,
-      candidateSet: flags.candidateSet,
-      timestampUnit: "deno-raw-tick",
-    }, {
-      onProgress: (message) => console.error(`  … ${message}`),
-      onRow: (row) => {
-        if (row.caseId !== current) {
-          current = row.caseId;
-          console.log(
-            `\n${row.caseId}（${row.shape} · census ${row.censusCount} 本）\n    ${
-              "geometry".padEnd(24)
-            }${`${label}/disp`.padStart(10)}${"vs既定".padStart(7)}${"TFLOPS".padStart(7)}`,
-          );
-        }
-        rows.push(row);
-        printLine(formatRow(row), row.error !== undefined || row.identicalToDefault === false);
-      },
-      onCase: (summary) => {
-        cases.push(summary);
-        const { text, red } = formatCase(summary);
-        printLine(text, red);
-      },
-    });
-  } finally {
-    destroySweepContext(context);
-    const info = gpu.adapterInfo;
-    const report: Report = {
-      format: REPORT_FORMAT,
-      date: new Date().toISOString(),
-      userAgent: { deno: Deno.version.deno },
-      adapter: {
-        vendor: info.vendor,
-        architecture: info.architecture,
-        device: info.device,
-        description: info.description,
-      },
-      ...await readCheckout().then(
-        ({ revision, dirty }) => ({ checkout: revision, checkoutDirty: dirty }),
-      ),
-      gpuTiming: {
-        feature: gpu.gpuTimingEnabled,
-        unit: context.unit,
-        quantized: roundsLookQuantized(rows, context.unit),
-      },
-      dp4a: context.dp4a,
-      settings: {
-        candidateSet: flags.candidateSet,
-        quick: flags.candidateSet === "quick",
-        ops: flags.ops,
-        ...(flags.cases.length === 0 ? {} : { cases: flags.cases }),
-        rounds: flags.rounds,
-        targetPassMs: TARGET_PASS_MS,
-        maxReps: SWEEP_MAX_REPS,
-        warmupNs: WARMUP_NS,
-        warmupMinRuns: WARMUP_MIN_RUNS,
-        wallTimingNote: WALL_TIMING_NOTE,
-      },
-      deviceLost,
-      cases,
-      rows,
-    };
-    gpu.destroy();
-    const stamp = report.date.replaceAll(":", "-");
-    const path = flags.out ??
-      `outputs/bench/karume/${localDate()}_geometry-sweep/geometry-sweep-${
-        adapterSlug(info)
-      }-${stamp}.json`;
-    await Deno.mkdir(path.slice(0, Math.max(0, path.lastIndexOf("/"))) || ".", { recursive: true });
-    await Deno.writeTextFile(path, `${JSON.stringify(report, null, 2)}\n`);
-    console.log(`\n[geometry-sweep] ${path}`);
-  }
+  // CLI の記録の `userAgent` は Deno の版（`navigator.userAgent` の綴りではなく）— 既存の記録と同じ形
+  const { revision, dirty } = await readCheckout();
+  const report: GeometrySweepReport = {
+    ...swept,
+    userAgent: { deno: Deno.version.deno },
+    checkout: revision,
+    checkoutDirty: dirty,
+  };
+  const { rows, cases } = report;
+  const stamp = report.date.replaceAll(":", "-");
+  const path = flags.out ??
+    `outputs/bench/karume/${localDate()}_geometry-sweep/geometry-sweep-${
+      adapterSlug(report.adapter)
+    }-${stamp}.json`;
+  await Deno.mkdir(path.slice(0, Math.max(0, path.lastIndexOf("/"))) || ".", { recursive: true });
+  await Deno.writeTextFile(path, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(`\n[geometry-sweep] ${path}`);
   const failed = rows.filter((row) => row.error !== undefined).length;
   const mismatched = rows.filter((row) => row.identicalToDefault === false).length;
   const drifted = cases.filter((summary) =>

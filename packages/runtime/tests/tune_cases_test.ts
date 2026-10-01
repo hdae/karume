@@ -1,11 +1,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { gemmUsesVec4 } from "../../packages/runtime/src/kernels/gemm.ts";
-import { GEMM_ROWS_BUCKETS } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
-import { LINEAR_I8A8_MAX_K } from "../../packages/runtime/src/kernels/linear-i8a8.ts";
-import { attentionScoreUsesF16 } from "../../packages/runtime/src/kernels/score-storage.ts";
-import { conv2dIgemmMTile, conv2dUsesVec4 } from "../../packages/runtime/src/kernels/conv2d.ts";
-import { caseFlops, PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS } from "./cases.ts";
+import { gemmUsesVec4 } from "../src/kernels/gemm.ts";
+import { GEMM_ROWS_BUCKETS } from "../src/kernels/gemm-geometry.ts";
+import { LINEAR_I8A8_MAX_K } from "../src/kernels/linear-i8a8.ts";
+import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
+import { conv2dIgemmMTile, conv2dUsesVec4 } from "../src/kernels/conv2d.ts";
+import { caseFlops, PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, SWEEP_OPS } from "../src/tune/cases.ts";
 
 /** M が入るプロファイルの段の添字（`rows <= maxRows` で最初に当たる段 — runtime の表引きと同じ）。 */
 const profileSegmentOf = (rows: number): number =>

@@ -4,7 +4,8 @@
  * 渡して注入できるようにする。
  *
  * 材料は掃引タブの直近の結果（メモリ上の記録）と、読み込んだ / 貼り付けた掃引の JSON（複数可）。規則は
- * CLI（`tools/geometry-sweep/main.ts profile`）と同じ純関数（`tools/geometry-sweep/derive.ts`）で、
+ * CLI（`tools/geometry-sweep/main.ts profile`）と同じ runtime の生成器（`packages/runtime/src/tune/derive.ts` —
+ * 公開面 `@karume/runtime/tune` の `deriveGeometryProfile` と同じ 1 本）で、
  * 入力の門（GPU の timestamp で測った掃引だけ・adapter を混ぜない・既定の行が今の runtime の既定）も
  * 同じ — 拒まれたらその理由を状態行へそのまま出す（fail loudly）。
  *
@@ -12,12 +13,14 @@
  * description を `match` に足す — 同じ vendor / architecture を名乗る別の機種に当てない）と「注入専用」
  * （`match` を省く — 自動選択されず、id で引いて注入する表）を選べる。CLI の `--description` / `--opt-in`。
  *
- * 出すもの: 欄ごとの採否と退けた理由・比の材料から外したケースの表・TS の生成物（整形前 — 整形は CLI の `deno fmt`）・アプリ用の
+ * 出すもの: 欄ごとの採否と退けた理由・比の材料から外したケースの表・TS の生成物（`tools/geometry-sweep/render.ts`・
+ * 整形前 — 整形は CLI の `deno fmt`）・アプリ用の
  * TS（`@karume/runtime` の型で書いた定数 — アプリが `acquireGpu({ geometryProfile })` へ渡す）・注入に
  * 使う JSON（`acquireGpu({ geometryProfile })` の値）・リポへ登録するコマンド（CLI の `profile` —
  * 生成物を整形して書き、`geometry-profiles/index.ts` へ足す行を案内する）。
  */
 import type { GeometryProfile } from "../../../packages/runtime/mod.ts";
+import { geometryProfileJson, type GeometrySweepReport } from "../../../packages/runtime/tune.ts";
 import {
   buildGeometryProfile,
   DEFAULT_MIN_SPEEDUP,
@@ -26,16 +29,16 @@ import {
   formatRatio,
   type GeneratedProfile,
   parseSweepReport,
+  type SlotVerdict,
+  type SweepSource,
+} from "../../../packages/runtime/src/tune/derive.ts";
+import {
   PROFILE_ID,
-  profileJson,
   type ProfileSpec,
   regenerateCommand,
   renderAppProfileSource,
   renderProfileSource,
-  type SlotVerdict,
-  type SweepSource,
-} from "../../geometry-sweep/derive.ts";
-import type { Report } from "../../geometry-sweep/report.ts";
+} from "../../geometry-sweep/render.ts";
 import {
   adapterSummary,
   copyFromTextarea,
@@ -63,7 +66,7 @@ const DECODER = new TextDecoder();
 export type ProfileTabDeps = {
   readonly adapterInfo: GPUAdapterInfo;
   /** 掃引タブの直近の結果。 */
-  readonly latestSweep: () => Report | undefined;
+  readonly latestSweep: () => GeometrySweepReport | undefined;
   /** 生成した表を GPU 設定の選択肢に足す（前に生成した表の選択肢は残る）。 */
   readonly offerGenerated: (profile: GeometryProfile) => void;
   /** 生成した表（{@link offerGenerated} に渡したもの）を GPU 設定で選んで適用する。 */
@@ -137,13 +140,13 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     nextKey: number;
     generated?: Generated;
     /** 直近の結果の表示に使った記録（新しい掃引が来たら既定でチェックを入れ直す）。 */
-    shownLatest?: Report;
+    shownLatest?: GeometrySweepReport;
   } = { loaded: [], nextKey: 1 };
 
   const status = (text: string): void => setStatus(ui.status, text);
 
   /**
-   * バイト列を掃引の記録として読む（門で拒まれたら投げる — 理由は derive.ts の文言のまま）。sha256 は
+   * バイト列を掃引の記録として読む（門で拒まれたら投げる — 理由は生成器の文言のまま）。sha256 は
    * 渡したバイト列そのもので取る（ファイルは読んだ bytes — CLI と同じ値）。
    */
   const sourceFromBytes = async (
@@ -367,7 +370,7 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
       outputs: {
         ts: renderProfileSource(spec, sources, verdicts),
         app: renderAppProfileSource(profile),
-        json: profileJson(profile),
+        json: geometryProfileJson(profile),
         command: registrationText(spec),
       },
     };

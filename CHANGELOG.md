@@ -34,6 +34,14 @@ measurements in `docs/research/`.
   guarantees not to lose the device), destroys it and waits for the release before answering
   `true` or `false`. The answer is a point-in-time fact, not a reservation; validation errors and
   device loss are thrown.
+- `@karume/runtime/tune`: a second entry point of `@karume/runtime` for tuning the GEMM tile
+  geometry inside an application. `runGeometrySweep(options)` acquires a dedicated GPU device, sweeps
+  the candidate geometries (`quick`, `quick+` or `full`, optionally narrowed by op or case, with
+  progress callbacks and an `AbortSignal`) and returns the sweep record
+  (`karume-geometry-sweep/2`); `deriveGeometryProfile(reports, options)` derives a `GeometryProfile`
+  and the per-field verdicts from one or more records with the same rules as the repository's
+  profile generator; `geometryProfileJson(profile)` serializes a profile (`Infinity` as `1e999`) for
+  storage and `acquireGpu({ geometryProfile })`. The main entry (`@karume/runtime`) is unchanged.
 
 - Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
   sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,

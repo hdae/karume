@@ -8,6 +8,10 @@
  */
 import type { SessionDiagnostics } from "../../packages/runtime/mod.ts";
 
+// 100 µs 量子化の判定は掃引（runtime の `./tune`）と共有する 1 本（ADR 0117 決定 1）。段の集計の
+// 表示（GPU lab の Anima タブ）はここから引き続き import する — `StageGpuTiming` はその引数の形を満たす。
+export { looksQuantized } from "../../packages/runtime/src/tune/report.ts";
+
 /** パイプラインキー 1 本ぶんの GPU 時間（`ns` は計測の単位そのまま — 下の NOTE）。 */
 export type TimingEntry = {
   readonly key: string;
@@ -136,16 +140,3 @@ export const topEntries = (
     ...entry,
     share: gpu.totalNs === 0 ? 0 : entry.ns / gpu.totalNs,
   }));
-
-/** Chrome が timestamp を丸める刻み（WebGPU Developer Features を切っているとき）。 */
-export const CHROME_TIMESTAMP_QUANTUM_NS = 100_000;
-
-/**
- * 全キーの `ns` が 100 µs の倍数なら、Chrome の timestamp 量子化が効いている疑いが濃い。
- *
- * WHY: 量子化下では 1 dispatch = 1 pass の各差分が 0 か 100 µs の倍数になり、和も倍数のまま残る。
- * 短い dispatch が大半を占める DiT では内訳の読みが荒れるので、表示で気づけるようにする
- * （判定は表示だけ — 数値は触らない）。
- */
-export const looksQuantized = (gpu: StageGpuTiming): boolean =>
-  gpu.totalNs > 0 && gpu.entries.every((entry) => entry.ns % CHROME_TIMESTAMP_QUANTUM_NS === 0);

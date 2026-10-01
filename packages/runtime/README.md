@@ -92,6 +92,19 @@ const session = await prepared.createContainerSession(gpu);
 For weights built on the host rather than read from a file, `openMemoryContainer` returns the same
 kind of opened container without writing one.
 
+## In-app geometry tuning (`@karume/runtime/tune`)
+
+The `./tune` entry lets an application measure the GEMM tile geometries on the user's own GPU:
+`runGeometrySweep()` acquires a dedicated device, sweeps the candidate geometries and returns a
+record; `deriveGeometryProfile()` turns one or more records into a geometry profile;
+`geometryProfileJson()` serializes it for storage; the next `acquireGpu({ geometryProfile })` uses it.
+Nothing is measured on the `acquireGpu` / `Session` path, and a sweep must not run while inference
+uses the same GPU. A profile only adopts a geometry whose output matched the default bit for bit,
+and was at least ×1.05 faster, on every sweep case of its field (the cases come from one image
+model's op census). A sweep takes minutes (`quick+`) to an hour (`full`). Profiles are derived only
+from sweeps timed with unquantized GPU timestamps, and the runtime does not check an injected
+profile against the adapter.
+
 ## Requirements
 
 - A WebGPU device. Deno 2 (tested on 2.9.6) exposes WebGPU without a flag; in the browser, any

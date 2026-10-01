@@ -1,11 +1,11 @@
 import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
-import { acquireGpu } from "../../packages/runtime/mod.ts";
-import { parseStorageRoles } from "../../packages/runtime/src/gpu/pipeline-cache.ts";
-import { gemmMTileGeometry } from "../../packages/runtime/src/kernels/gemm.ts";
-import { defaultGemmGeometry } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
-import { defaultI8a8Geometry } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import { linearWgsl } from "../../packages/runtime/src/kernels/linear.ts";
-import { calibrateReps } from "../opbench/bench.ts";
+import { acquireGpu } from "../mod.ts";
+import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
+import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
+import { defaultGemmGeometry } from "../src/kernels/gemm-geometry.ts";
+import { defaultI8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
+import { linearWgsl } from "../src/kernels/linear.ts";
+import { calibrateReps, TARGET_PASS_MS } from "../src/tune/measurement.ts";
 import {
   type AttentionCase,
   type BmmCase,
@@ -14,13 +14,13 @@ import {
   type MatmulCase,
   SWEEP_CASES,
   type SweepCase,
-} from "./cases.ts";
+} from "../src/tune/cases.ts";
 import {
   conv2dCandidate,
   gemmCandidate,
   type GeometryCandidate,
   i8a8Candidate,
-} from "./geometries.ts";
+} from "../src/tune/geometries.ts";
 import {
   assertBindingRoles,
   casePlan,
@@ -31,8 +31,7 @@ import {
   resourceWordStream,
   SWEEP_MAX_REPS,
   sweepCase,
-  TARGET_PASS_MS,
-} from "./harness.ts";
+} from "../src/tune/harness.ts";
 
 // 形状表の DiT 形は 1 本 数 ms 〜 数百 ms なので、GPU テストは同じ経路の小さい形で回す
 // （M ≥ 513 で既定幾何 128×128 のバケットに入る最小の丸い形）。

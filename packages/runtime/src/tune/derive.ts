@@ -1,14 +1,17 @@
 /**
  * 掃引の記録（`karume-geometry-sweep/2` — `report.ts`）から、adapter 1 種ぶんの**幾何プロファイル**
  * （runtime の `src/kernels/geometry-profile.ts` の `GeometryProfile`）を導く純関数（perf-ledger K-71）。
- * Deno の API に依らない — CLI（`profile.ts` = `main.ts profile`）とブラウザのページ（`tools/gpu-lab` の
- * プロファイルタブ）が同じ規則で表を作る（2 本が別々に持つと、ページで作った表と CLI の生成物が黙ってずれる）。
+ * Deno の API に依らない — 公開面 `@karume/runtime/tune` の {@link deriveGeometryProfile}（利用者アプリ）・
+ * CLI（`tools/geometry-sweep` の `main.ts profile`）・ブラウザのページ（`tools/gpu-lab` のプロファイルタブ）が
+ * 同じ規則で表を作る（別々に持つと、ページやアプリで作った表と CLI の生成物が黙ってずれる）。リポへ登録する
+ * 生成物の TS の描画は道具側（`tools/geometry-sweep/render.ts`）に置く（ADR 0117 決定 1）。
  *
  * 幾何の選択は runtime では「shape × adapter の静的な表」で、実行時オートチューンは禁止のまま
- * （ADR 0022 決定 3 の MUST）。この道具は**明示のチューニング（掃引）で測った結果をソースへ焼き込む
- * 側**で、runtime は生成物を adapter の (vendor, architecture, description) で 1 本選ぶだけ — 実行時には
- * 測らない。`match` を省いた表（`--opt-in`）は自動選択されない注入専用の表になる。利用者が自分の掃引から
- * 作った表は `acquireGpu({ geometryProfile })` で注入もできる（{@link profileJson}）。
+ * （ADR 0022 決定 3 の MUST）。この生成器は**明示のチューニング（掃引）で測った結果を表にする側**で、
+ * runtime は埋め込みの表を adapter の (vendor, architecture, description) で 1 本選ぶか、注入された表を
+ * 使うだけ — acquire / Session の経路では測らない（ADR 0117 決定 9）。`match` を省いた表（`--opt-in`）は
+ * 自動選択されない注入専用の表になる。利用者が自分の掃引から作った表は `acquireGpu({ geometryProfile })`
+ * で注入できる（{@link geometryProfileJson}）。
  *
  * ## 規則の導出
  *
@@ -45,28 +48,20 @@
  * 段の幾何（{@link profileRowsSegments}）。
  */
 import {
-  assertGemmGeometry,
   defaultGemmGeometry,
   GEMM_ROWS_BUCKETS,
   type GemmGeometry,
   gemmTileM,
-} from "../../packages/runtime/src/kernels/gemm-geometry.ts";
-import { gemmMTileGeometry } from "../../packages/runtime/src/kernels/gemm.ts";
-import type { GeometryProfile } from "../../packages/runtime/src/kernels/geometry-profile.ts";
-import {
-  assertI8a8Geometry,
-  defaultI8a8Geometry,
-  type I8a8Geometry,
-} from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
+} from "../kernels/gemm-geometry.ts";
+import { gemmMTileGeometry } from "../kernels/gemm.ts";
+import type { GeometryProfile } from "../kernels/geometry-profile.ts";
+import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
-import { DEFAULT_DRIFT_RANGE, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
+import { driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
 /** `--min-speedup` の既定（既定比がこれ未満の勝ちは測定の揺れと区別しない）。 */
 export const DEFAULT_MIN_SPEEDUP = 1.05;
-
-/** プロファイル id（ファイル名 `<id>.ts` と export 名 `<ID を大文字 snake>` の元）。 */
-export const PROFILE_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
 /**
  * 表を当てる adapter（生成物の `match`）。`vendor` / `architecture` / `description` は runtime の選択と
@@ -87,18 +82,6 @@ export type ProfileTarget =
     readonly architecture?: undefined;
     readonly description?: undefined;
   };
-
-/**
- * 生成の入力のうち掃引の記録以外（CLI の `--from` / `--id` / `--vendor` / `--architecture` /
- * `--description` / `--opt-in` / `--out` / `--min-speedup`）。`from` と `out` は生成物のコメントの
- * 再生成コマンドに載る path。
- */
-export type ProfileSpec = ProfileTarget & {
-  readonly from: readonly string[];
-  readonly id: string;
-  readonly out: string;
-  readonly minSpeedup: number;
-};
 
 type Geometry = GemmGeometry | I8a8Geometry;
 
@@ -368,7 +351,7 @@ export type RowsSegment = {
 };
 
 /** 段 `index` の行数の範囲の綴り（`≤ 16`・`17〜32`・`> 512`）。境界は検査済みの列（正整数・狭義昇順・末尾 Infinity）。 */
-const rowsRange = (bounds: readonly number[], index: number): string => {
+export const rowsRange = (bounds: readonly number[], index: number): string => {
   const maxRows = bounds[index];
   if (index === 0) return `≤ ${maxRows}`;
   const previous = bounds[index - 1];
@@ -385,9 +368,9 @@ const rowsRange = (bounds: readonly number[], index: number): string => {
  * 段の既定は、その段の範囲を覆う既定の段の幾何（細分なので段の全行数が同じ既定の段に入る）。
  *
  * NOTE: 既定は `gemm-geometry.ts` から取る（生成物の値を既定の正本にしない）。ただし生成器は
- * 生成物へ依存している — 候補集合 `quick+`（geometries.ts が `geometry-profiles/index.ts` を読む）と
- * runtime の mod.ts（report.ts → anima-residency/timing.ts）を通じて。登録済みの生成物が構文的に壊れると
- * 生成器自体が読めなくなるので、その場合は index.ts の登録を外してから再生成する。
+ * 生成物へ依存している — 候補集合 `quick+`（geometries.ts が `geometry-profiles/index.ts` を読む）を
+ * 通じて。登録済みの生成物が構文的に壊れると生成器自体が読めなくなるので、その場合は index.ts の登録を
+ * 外してから再生成する。
  */
 export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSegment[] => {
   const where = `gemmRows の段の境界 [${bounds.join(", ")}]`;
@@ -584,7 +567,7 @@ export const excludedCaseLine = (excluded: ExcludedCase): string =>
 /**
  * ケースをその掃引の比の材料から外す理由（外さないなら undefined）。
  *
- * 既定の再測定比（ケースの末尾で既定をもう 1 度測った値 ÷ 初回）が {@link DEFAULT_DRIFT_RANGE} の外なら、
+ * 既定の再測定比（ケースの末尾で既定をもう 1 度測った値 ÷ 初回）が report.ts の `DEFAULT_DRIFT_RANGE` の外なら、
  * 熱・クロックがケースの途中で動いた疑いがあり、比の土台（既定の値）ごと揺れている — そのケースの既定比は
  * どの幾何についても信用できない。再測定が失敗した・無いケースは揺れを確かめられないので同じ扱い。
  */
@@ -780,7 +763,7 @@ const judgeSlot = (
 };
 
 /** 表の相手の表示（`vendor / architecture / description` — 指定した欄だけ）。 */
-const targetLabel = (target: ProfileTarget): string =>
+export const targetLabel = (target: ProfileTarget): string =>
   target.optIn === true
     ? "（注入専用 — match なし）"
     : [target.vendor, target.architecture, target.description]
@@ -882,9 +865,6 @@ export const deriveProfile = (
   );
 };
 
-/** `apple-metal-3` → `APPLE_METAL_3`。 */
-export const profileConstName = (id: string): string => id.toUpperCase().replaceAll("-", "_");
-
 /** 採否の一覧（生成物の冒頭コメントと標準出力で同じ行）。 */
 export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
   verdicts.flatMap((verdict) => {
@@ -902,175 +882,11 @@ export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
     ];
   });
 
-/** シェルにそのまま貼れる形（空白・記号を含む語だけ単引用符で包む）。 */
-const shellWord = (word: string): string =>
-  /^[A-Za-z0-9_./:=@%+-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
-
-/** 表の相手を指す CLI の引数（`--opt-in` か `--vendor` [`--architecture`] [`--description`]）。 */
-const targetFlags = (target: ProfileTarget): string[] =>
-  target.optIn === true ? ["--opt-in"] : [
-    "--vendor",
-    shellWord(target.vendor),
-    ...(target.architecture === undefined
-      ? []
-      : ["--architecture", shellWord(target.architecture)]),
-    ...(target.description === undefined ? [] : ["--description", shellWord(target.description)]),
-  ];
-
-/** 再生成コマンド（`--check` 抜き・行継続つきの複数行）。 */
-export const regenerateCommand = (flags: ProfileSpec): string[] => [
-  "deno run -A tools/geometry-sweep/main.ts profile \\",
-  ...flags.from.map((path) => `  --from ${shellWord(path)} \\`),
-  `  --id ${shellWord(flags.id)} ${targetFlags(flags).join(" ")} \\`,
-  `  --out ${shellWord(flags.out)} --min-speedup ${flags.minSpeedup}`,
-];
-
-const renderGeometry = (geometry: Geometry, slot: ProfileSlot): string => {
-  if ("tileK" in geometry) {
-    assertI8a8Geometry(geometry, slot);
-    return `{ regM: ${geometry.regM}, regN: ${geometry.regN}, wgX: ${geometry.wgX}, wgY: ${geometry.wgY}, tileK: ${geometry.tileK} }`;
-  }
-  assertGemmGeometry(geometry, slot);
-  return `{ regM: ${geometry.regM}, regN: ${geometry.regN}, wgX: ${geometry.wgX}, wgY: ${geometry.wgY} }`;
-};
-
 /** adapter の表示（空の欄は落とす — Deno は architecture を空で返す）。 */
 const adapterLabel = (sources: readonly SweepSource[]): string => {
   const { vendor, architecture } = sources[0].adapter;
   const descriptions = [...new Set(sources.map((source) => source.adapter.description))];
   return [vendor, architecture, ...descriptions].filter((part) => part !== "").join(" / ");
-};
-
-/**
- * 生成物の TS（整形前）。同じ入力からは常に同じ文字列（時刻・環境を読まない — 日付は掃引の記録の
- * `date`）。整形は {@link formatTypeScript} が担う。
- */
-export const renderProfileSource = (
-  flags: ProfileSpec,
-  sources: readonly SweepSource[],
-  verdicts: readonly SlotVerdict[],
-): string => {
-  // 値は注入の表（{@link buildGeometryProfile}）から書く — TS の生成物と注入の JSON を 1 本の経路で作る
-  const profile = buildGeometryProfile(flags, sources, verdicts);
-  const adapter = profile.provenance.adapter;
-  // 行には掃引の記録由来の文字列（失敗の error 文）が入るので、コメントを閉じる綴りと改行を潰す
-  const comment = (lines: readonly string[]): string[] =>
-    lines.map((line) =>
-      line === "" ? " *" : ` * ${line.replaceAll("*/", "* /").replaceAll(/\r?\n/g, " ")}`
-    );
-  return [
-    "/**",
-    ...comment([
-      `幾何プロファイル \`${flags.id}\`（**生成物 — 手で編集しない**）。`,
-      "",
-      ...(flags.optIn === true
-        ? [
-          "tools/geometry-sweep の `profile` が掃引の記録から書いた、タイル幾何の静的な表（perf-ledger K-71）。",
-          "**注入専用**（`match` を省いた表）: runtime は自動では選ばない — アプリが `BUILTIN_GEOMETRY_PROFILES`",
-          "から id で引いて `acquireGpu({ geometryProfile })` に渡す（ADR 0115 追記決定 7）。",
-        ]
-        : [
-          `tools/geometry-sweep の \`profile\` が掃引の記録から書いた、adapter \`${
-            targetLabel(flags)
-          }\` 用のタイル幾何の`,
-          "静的な表（perf-ledger K-71）。runtime は adapter の `match`（vendor / architecture / description の",
-          "完全一致）でこの表を選ぶだけ。",
-        ]),
-      "実行時には測らない（オートチューン禁止 — ADR 0022 決定 3）。値を変えるときは掃引を取り直して",
-      "下のコマンドで再生成する。",
-      "",
-      "再生成（リポ直下から・`--check` を足すと再生成とバイト同一かだけを見る）:",
-      "",
-      ...regenerateCommand(flags).map((line) => `  ${line}`),
-      "",
-      `掃引（adapter ${adapter}）:`,
-      "",
-      ...sources.map((source) => `- ${source.path}（sha256 ${source.sha256}・${source.date}）`),
-      "",
-      "採否の基準: クラスの全ケースで出力が既定と一致し、既定比が " +
-      `${formatRatio(flags.minSpeedup)} 以上の幾何のうち、`,
-      "ケース間の幾何平均が最大のもの。無ければ既定（掃引の既定の行の幾何）。同じケースを複数の掃引が",
-      "測っていれば、比はその観測の幾何平均。gemmRows は掃引にある linear / matmul / bmm のケースで決め、3 経路に同じ表が効く。",
-      `材料の門: 掃引ごとに、既定の再測定比（cases[].defaultRepeat.driftRatio）が ${DEFAULT_DRIFT_RANGE.min}〜${DEFAULT_DRIFT_RANGE.max} の外か、`,
-      "再測定が失敗 / 無いケースはその掃引の比の材料から外す（出力の一致と失敗は見る — 外した掃引で不一致 /",
-      "失敗の幾何は採らない。比は同じケースを他の掃引が測っていればそちらで判定し、どの掃引にも残らなければ",
-      "測っていない扱い）。外したケースは採否の欄ごとに「掃引 …」の行で示す。",
-      "",
-      "採否:",
-      "",
-      ...verdictLines(verdicts),
-    ]),
-    " */",
-    'import type { GeometryProfile } from "../geometry-profile.ts";',
-    "",
-    ...profileDeclaration(profile),
-    "",
-  ].join("\n");
-};
-
-/**
- * 表の値の宣言（`export const <ID>: GeometryProfile = { … };` の行 — 整形前）。リポへ登録する生成物
- * （{@link renderProfileSource}）とアプリ用の TS（{@link renderAppProfileSource}）が同じ行を書く。
- */
-const profileDeclaration = (profile: GeneratedProfile): string[] => {
-  const { provenance, match } = profile;
-  // match を省いた表（注入専用）は欄ごと書かない — `match: {}` は runtime の門が落とす別物
-  const matchLine = match === undefined ? [] : [
-    `match: { ${
-      (["vendor", "architecture", "description"] as const)
-        .flatMap((key) => match[key] === undefined ? [] : [`${key}: ${JSON.stringify(match[key])}`])
-        .join(", ")
-    } },`,
-  ];
-  const maxRows = (value: number): string =>
-    value === Number.POSITIVE_INFINITY ? "Number.POSITIVE_INFINITY" : String(value);
-  // 検査の綴りは欄名と同じ範囲（表自身の maxRows から導く）
-  const bounds = profile.gemmRows.map((rule) => rule.maxRows);
-  const gemmRows = profile.gemmRows.map((rule, index) =>
-    `{ maxRows: ${maxRows(rule.maxRows)}, geometry: ${
-      renderGeometry(rule.geometry, `gemmRows ${rowsRange(bounds, index)}`)
-    } },`
-  );
-  return [
-    `export const ${profileConstName(profile.id)}: GeometryProfile = {`,
-    `id: ${JSON.stringify(profile.id)},`,
-    ...matchLine,
-    "gemmRows: [",
-    ...gemmRows,
-    "],",
-    `attention: { qk: ${renderGeometry(profile.attention.qk, "attention.qk")}, pv: ${
-      renderGeometry(profile.attention.pv, "attention.pv")
-    } },`,
-    `conv2d: { rows64: ${renderGeometry(profile.conv2d.rows64, "conv2d.rows64")}, rows32: ${
-      renderGeometry(profile.conv2d.rows32, "conv2d.rows32")
-    } },`,
-    `i8a8: { linear: ${renderGeometry(profile.i8a8.linear, "i8a8.linear")}, attentionQk: ${
-      renderGeometry(profile.i8a8.attentionQk, "i8a8.attentionQk")
-    }, attentionPv: ${renderGeometry(profile.i8a8.attentionPv, "i8a8.attentionPv")} },`,
-    `provenance: { sweep: ${JSON.stringify(provenance.sweep)}, sha256: ${
-      JSON.stringify(provenance.sha256)
-    }, date: ${JSON.stringify(provenance.date)}, adapter: ${JSON.stringify(provenance.adapter)} },`,
-    "};",
-  ];
-};
-
-/**
- * アプリに置く TS（整形前）: 公開 API の型（`@karume/runtime` の `GeometryProfile`）で表の値を
- * 定数として書く。アプリはこの定数を `acquireGpu({ geometryProfile })` へ渡して注入する（リポへ
- * 登録しない使い方 — ADR 0115 追記決定 6）。末尾の `maxRows` は `Number.POSITIVE_INFINITY`。
- */
-export const renderAppProfileSource = (profile: GeneratedProfile): string => {
-  const constName = profileConstName(profile.id);
-  return [
-    "/**",
-    ` * 幾何プロファイル \`${profile.id}\`（GPU lab のプロファイルタブが掃引から作った表）。`,
-    ` * acquireGpu({ geometryProfile: ${constName} }) に渡す。`,
-    " */",
-    'import type { GeometryProfile } from "@karume/runtime";',
-    "",
-    ...profileDeclaration(profile),
-    "",
-  ].join("\n");
 };
 
 /** 掃引から作った表（{@link buildGeometryProfile} — `provenance` を必ず持つ）。 */
@@ -1097,8 +913,8 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
 };
 
 /**
- * 採否から表の値を組む（{@link renderProfileSource} の値と、`acquireGpu({ geometryProfile })` に
- * 注入する値の両方の正本）。`provenance` は掃引の path / sha256 / 日付を渡した順に `", "` で連結する。
+ * 採否から表の値を組む（リポへ登録する生成物の TS〈`tools/geometry-sweep/render.ts`〉の値と、
+ * `acquireGpu({ geometryProfile })` に注入する値の両方の正本）。`provenance` は掃引の path / sha256 / 日付を渡した順に `", "` で連結する。
  */
 export const buildGeometryProfile = (
   spec: { readonly id: string } & ProfileTarget,
@@ -1144,7 +960,63 @@ export const buildGeometryProfile = (
   };
 };
 
-/** {@link profileJson} が Infinity の位置に一時的に置く印（表の文字列に NUL は現れない）。 */
+/**
+ * 公開の生成器（{@link deriveGeometryProfile}）の入力 1 本 — 掃引の記録と、表の `provenance` に載せる識別。
+ * `report` は unknown 境界（保存した JSON を `JSON.parse` した値でも `runGeometrySweep` の戻りでもよい —
+ * 生成が読む欄を {@link parseSweepReport} で検査する）。
+ */
+export type GeometrySweepInput = {
+  readonly report: unknown;
+  /** 記録の名前（ファイルの path など — `provenance.sweep` に載る）。 */
+  readonly path: string;
+  /** 記録のバイト列の SHA-256（16 進 — `provenance.sha256` に載る。同じ値の記録を 2 本渡すと落ちる）。 */
+  readonly sha256: string;
+};
+
+/** {@link deriveGeometryProfile} の options（表の id・表を当てる adapter・採用の閾値）。 */
+export type DeriveGeometryProfileOptions = ProfileTarget & {
+  readonly id: string;
+  /** 既定比の採用の閾値（既定 {@link DEFAULT_MIN_SPEEDUP}・1 以上 — CLI の `--min-speedup`）。 */
+  readonly minSpeedup?: number;
+};
+
+/** {@link deriveGeometryProfile} の戻り（表と採否の行）。 */
+export type GeometryProfileDerivation = {
+  /** 生成した表（`provenance` 付き — {@link geometryProfileJson} で保存し、`acquireGpu` に注入する）。 */
+  readonly profile: GeometryProfile;
+  /**
+   * 欄ごとの採否・退けた幾何と理由・比の材料から外したケース（{@link verdictLines} — リポの生成物の
+   * 冒頭コメントと CLI の標準出力と同じ行）。
+   */
+  readonly verdicts: readonly string[];
+};
+
+/**
+ * 掃引の記録 1 本以上から表を作る（公開面 `@karume/runtime/tune` の生成器 — ADR 0117 決定 2）。規則は
+ * {@link deriveProfile}（ADR 0115 決定 4・ADR 0116）、表の値は {@link buildGeometryProfile} の 1 本で、
+ * CLI と GPU lab が作る表と同じ値になる。門に落ちた入力は理由つきで投げる（fail loudly）。
+ */
+export const deriveGeometryProfile = (
+  reports: readonly GeometrySweepInput[],
+  options: DeriveGeometryProfileOptions,
+): GeometryProfileDerivation => {
+  const minSpeedup = options.minSpeedup ?? DEFAULT_MIN_SPEEDUP;
+  // 1 未満を許すと既定より遅い幾何を採りうる（比の門の意味が消える — CLI の --min-speedup と同じ条件）
+  if (!Number.isFinite(minSpeedup) || minSpeedup < 1) {
+    throw new Error(`minSpeedup は 1 以上の数（${minSpeedup}）`);
+  }
+  const sources = reports.map(({ report, path, sha256 }) =>
+    parseSweepReport(report, { path, sha256 })
+  );
+  const spec = { ...options, minSpeedup };
+  const verdicts = deriveProfile(sources, spec);
+  return {
+    profile: buildGeometryProfile(spec, sources, verdicts),
+    verdicts: verdictLines(verdicts),
+  };
+};
+
+/** {@link geometryProfileJson} が Infinity の位置に一時的に置く印（表の文字列に NUL は現れない）。 */
 const INFINITY_MARK = "\u0000karume-infinity\u0000";
 
 /**
@@ -1154,10 +1026,10 @@ const INFINITY_MARK = "\u0000karume-infinity\u0000";
  * 範囲外の数を Infinity に読む。素の `JSON.stringify` は Infinity を null にし、null の表は runtime の門
  * （最後の規則は Infinity）で落ちる。
  */
-export const profileJson = (profile: GeometryProfile): string => infinityJson(profile);
+export const geometryProfileJson = (profile: GeometryProfile): string => infinityJson(profile);
 
 /**
- * `JSON.stringify(value, null, 2)` と同じ形で、`Infinity` だけを `1e999` と書く（{@link profileJson}
+ * `JSON.stringify(value, null, 2)` と同じ形で、`Infinity` だけを `1e999` と書く（{@link geometryProfileJson}
  * と同じ綴り — 注入した表を載せる記録〈GPU lab の Anima の JSON〉も表の値を null に落とさない）。
  */
 export const infinityJson = (value: unknown): string => {

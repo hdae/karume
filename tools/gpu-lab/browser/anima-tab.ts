@@ -39,7 +39,7 @@ import {
 } from "../../../packages/models/anima.ts";
 import { encodePng } from "../../../packages/models/mod.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../../packages/runtime/src/kernels/geometry-profile.ts";
-import { infinityJson } from "../../geometry-sweep/derive.ts";
+import { infinityJson } from "../../../packages/runtime/src/tune/derive.ts";
 import {
   createGenerateRecorder,
   DEFAULT_PROMPT,

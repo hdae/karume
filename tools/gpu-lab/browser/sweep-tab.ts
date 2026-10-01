@@ -3,36 +3,27 @@
  * 掃引のタブ — タイル幾何の掃引（perf-ledger K-70）を Chrome で回す（旧 `tools/geometry-sweep` の
  * ブラウザのページの移植・測り方・表の列・JSON の欄・保存名は同じ）。
  *
- * Deno の CLI（`tools/geometry-sweep/main.ts`）と同じ計測核（`harness.ts`）と同じ記録の形
- * （`report.ts`）で、「開始」ごとに GPU を取り直して選んだ op のケースを掃引し、行を表に積む。
- * 「JSON を保存」は直近の掃引を `karume-geometry-sweep/2` で書き出す。失敗は表の行に出す（alert しない）。
+ * 掃引そのもの（「開始」ごとの GPU の取り直し・計測・記録の組み立て）は runtime の `runGeometrySweep`
+ * （`@karume/runtime/tune` — ADR 0117 決定 2・Deno の CLI `tools/geometry-sweep/main.ts` と同じ 1 本）で、
+ * ここは選んだ op のケースを渡し、進捗の通知で行を表に積む殻。「JSON を保存」は直近の掃引を
+ * `karume-geometry-sweep/2` で書き出す（ページの checkout と bundle の sha256 を足す）。失敗は表の行に
+ * 出す（alert しない）。
  *
  * 掃引は各幾何を**明示して**測るので、GPU 設定の幾何プロファイル（注入）は結果に効かない —
  * 掃引の GPU には注入しない。GPU 設定の timestamp の要求は効く。
  */
-import { acquireGpu, type GpuContext } from "../../../packages/runtime/mod.ts";
-import { SWEEP_CASES, SWEEP_OPS, type SweepOp } from "../../geometry-sweep/cases.ts";
-import { DEFAULT_CANDIDATE_SET, isCandidateSet } from "../../geometry-sweep/geometries.ts";
 import {
-  createSweepContext,
-  destroySweepContext,
-  runSweep,
-  SWEEP_MAX_REPS,
-  type SweepContext,
-  TARGET_PASS_MS,
-  WARMUP_MIN_RUNS,
-  WARMUP_NS,
-} from "../../geometry-sweep/harness.ts";
+  type GeometrySweepCaseSummary,
+  type GeometrySweepReport,
+  type GeometrySweepRow,
+  runGeometrySweep,
+} from "../../../packages/runtime/tune.ts";
+import { SWEEP_OPS, type SweepOp } from "../../../packages/runtime/src/tune/cases.ts";
 import {
-  type CaseSummary,
-  DEFAULT_DRIFT_RANGE,
-  driftOutOfRange,
-  type Report,
-  REPORT_FORMAT,
-  roundsLookQuantized,
-  type SweepRow,
-  WALL_TIMING_NOTE,
-} from "../../geometry-sweep/report.ts";
+  DEFAULT_CANDIDATE_SET,
+  isCandidateSet,
+} from "../../../packages/runtime/src/tune/geometries.ts";
+import { DEFAULT_DRIFT_RANGE, driftOutOfRange } from "../../../packages/runtime/src/tune/report.ts";
 import {
   adapterSummary,
   checkoutLabel,
@@ -45,15 +36,15 @@ import {
 } from "./common.ts";
 
 /** 「JSON を保存」の保存名（プロファイルのタブが記録の path の既定にも使う）。 */
-export const sweepFileName = (report: Report): string =>
+export const sweepFileName = (report: GeometrySweepReport): string =>
   `geometry-sweep-browser-${report.date.replaceAll(":", "-")}.json`;
 
 /** 「JSON を保存」と同じバイト列（プロファイルのタブが sha256 をこのバイト列で取る）。 */
-export const sweepJson = (report: Report): string => JSON.stringify(report, null, 2);
+export const sweepJson = (report: GeometrySweepReport): string => JSON.stringify(report, null, 2);
 
 export type SweepTab = {
   /** 直近の掃引（まだ無ければ undefined — 中断した掃引も測れた行までを持つ）。 */
-  readonly latestReport: () => Report | undefined;
+  readonly latestReport: () => GeometrySweepReport | undefined;
 };
 
 /**
@@ -80,7 +71,7 @@ export const mountSweepTab = (
     rows: element(root, "rows", HTMLTableSectionElement),
   };
 
-  const state: { report?: Report; abort?: AbortController } = {};
+  const state: { report?: GeometrySweepReport; abort?: AbortController } = {};
 
   const status = (text: string): void => setStatus(ui.status, text);
 
@@ -102,7 +93,7 @@ export const mountSweepTab = (
   };
 
   /** ケースの見出し行（id・形状・census 上の本数）。 */
-  const appendCaseHeader = (row: SweepRow): void => {
+  const appendCaseHeader = (row: GeometrySweepRow): void => {
     const tr = document.createElement("tr");
     tr.className = "case";
     const th = document.createElement("th");
@@ -112,7 +103,7 @@ export const mountSweepTab = (
     ui.rows.append(tr);
   };
 
-  const appendRow = (row: SweepRow): void => {
+  const appendRow = (row: GeometrySweepRow): void => {
     const tr = document.createElement("tr");
     if (row.isDefault) tr.className = "default";
     const identical = row.identicalToDefault === undefined
@@ -136,7 +127,7 @@ export const mountSweepTab = (
   };
 
   /** ケースの末尾の行（既定幾何の再測定と、範囲外なら測り直しの警告）。 */
-  const appendCaseSummary = (summary: CaseSummary): void => {
+  const appendCaseSummary = (summary: GeometrySweepCaseSummary): void => {
     const tr = document.createElement("tr");
     tr.className = "repeat";
     const td = document.createElement("td");
@@ -171,42 +162,6 @@ export const mountSweepTab = (
     ui.rounds.disabled = running;
   };
 
-  const buildReport = (
-    gpu: GpuContext,
-    unit: Report["gpuTiming"]["unit"],
-    dp4a: boolean,
-    settings: Report["settings"],
-    deviceLost: Report["deviceLost"],
-    cases: readonly CaseSummary[],
-    rows: readonly SweepRow[],
-  ): Report => {
-    const info = gpu.adapterInfo;
-    return {
-      format: REPORT_FORMAT,
-      date: new Date().toISOString(),
-      userAgent: navigator.userAgent,
-      adapter: {
-        vendor: info.vendor,
-        architecture: info.architecture,
-        device: info.device,
-        description: info.description,
-      },
-      checkout: lab.config.revision,
-      checkoutDirty: lab.config.dirty,
-      bundleSha256: lab.config.bundleSha256,
-      gpuTiming: {
-        feature: gpu.gpuTimingEnabled,
-        unit,
-        quantized: roundsLookQuantized(rows, unit),
-      },
-      dp4a,
-      settings,
-      deviceLost,
-      cases,
-      rows,
-    };
-  };
-
   const runOnce = async (): Promise<void> => {
     const ops = selectedOps();
     if (ops.length === 0) throw Error("op を 1 つ以上選んでください");
@@ -216,74 +171,58 @@ export const mountSweepTab = (
     }
     const candidateSet = ui.set.value;
     if (!isCandidateSet(candidateSet)) throw Error(`候補集合 ${candidateSet} を知らない`);
-    const selected = SWEEP_CASES.filter((sweepCase) => ops.includes(sweepCase.op));
-    let deviceLost: Report["deviceLost"] = null;
-    const gpu = await acquireGpu({
-      ...(lab.timestampFeature && lab.settings().timestamps ? { gpuTiming: true } : {}),
-      onDeviceLost: (info) => {
-        deviceLost = { reason: info.reason, message: info.message };
-        status(`GPU device lost（${info.reason}）: ${info.message}`);
-      },
-    });
     const abort = new AbortController();
-    const rows: SweepRow[] = [];
-    const cases: CaseSummary[] = [];
     let current: string | undefined;
-    const settings: Report["settings"] = {
-      candidateSet,
-      quick: candidateSet === "quick",
-      ops,
-      rounds,
-      targetPassMs: TARGET_PASS_MS,
-      maxReps: SWEEP_MAX_REPS,
-      warmupNs: WARMUP_NS,
-      warmupMinRuns: WARMUP_MIN_RUNS,
-      wallTimingNote: WALL_TIMING_NOTE,
-    };
-    // MUST: 文脈の生成も try の内側（生成が失敗しても device を返す — 開始のたびに取り直すので、
-    // 返し漏れは押すたびに device を 1 つずつ溜める）
-    let context: SweepContext | undefined;
+    // device の取り直しと後始末（中断・失敗でも捨てる）は runGeometrySweep が持つ
+    state.abort = abort;
+    let swept: GeometrySweepReport;
     try {
-      context = await createSweepContext(gpu, "ns");
-      state.abort = abort;
-      ui.rows.replaceChildren();
-      ui.info.textContent = `${
-        adapterSummary(gpu.adapterInfo)
-      } · 単位 ${context.unit} · dp4a ${context.dp4a} · 候補 ${candidateSet} · ${
-        checkoutLabel(lab.config)
-      }`;
-      await runSweep(context, selected, { rounds, candidateSet, timestampUnit: "ns" }, {
+      swept = await runGeometrySweep({
+        candidateSet,
+        ops,
+        rounds,
+        timestamps: lab.settings().timestamps,
         signal: abort.signal,
-        onProgress: status,
-        onRow: (row) => {
-          if (row.caseId !== current) {
-            current = row.caseId;
-            appendCaseHeader(row);
+        onProgress: (progress) => {
+          switch (progress.kind) {
+            case "started":
+              ui.rows.replaceChildren();
+              ui.info.textContent = `${
+                adapterSummary(progress.adapter)
+              } · 単位 ${progress.unit} · dp4a ${progress.dp4a} · 候補 ${candidateSet} · ${
+                checkoutLabel(lab.config)
+              }`;
+              break;
+            case "status":
+              status(progress.message);
+              break;
+            case "row":
+              if (progress.row.caseId !== current) {
+                current = progress.row.caseId;
+                appendCaseHeader(progress.row);
+              }
+              appendRow(progress.row);
+              break;
+            case "case":
+              appendCaseSummary(progress.summary);
+              break;
+            case "deviceLost":
+              status(`GPU device lost（${progress.reason}）: ${progress.message}`);
+              break;
           }
-          rows.push(row);
-          appendRow(row);
-        },
-        onCase: (summary) => {
-          cases.push(summary);
-          appendCaseSummary(summary);
         },
       });
     } finally {
       state.abort = undefined;
-      if (context !== undefined) {
-        destroySweepContext(context);
-        state.report = buildReport(
-          gpu,
-          context.unit,
-          context.dp4a,
-          settings,
-          deviceLost,
-          cases,
-          rows,
-        );
-      }
-      gpu.destroy();
     }
+    const report: GeometrySweepReport = {
+      ...swept,
+      checkout: lab.config.revision,
+      checkoutDirty: lab.config.dirty,
+      bundleSha256: lab.config.bundleSha256,
+    };
+    state.report = report;
+    const { rows, cases } = report;
     const failed = rows.filter((row) => row.error !== undefined).length;
     const mismatched = rows.filter((row) => row.identicalToDefault === false).length;
     const drifted = cases.filter((summary) =>
@@ -294,9 +233,7 @@ export const mountSweepTab = (
       `${
         abort.signal.aborted ? "中断しました" : "完了"
       } — ${rows.length} 行（失敗 ${failed} · 不一致 ${mismatched} · 既定の再測定が範囲外 / 失敗 ${drifted} ケース）${
-        state.report?.gpuTiming.quantized === true
-          ? " · timestamp が 100 µs に丸められている疑い"
-          : ""
+        report.gpuTiming.quantized ? " · timestamp が 100 µs に丸められている疑い" : ""
       }。「JSON を保存」で書き出せます。プロファイルのタブで表を作れます。`,
     );
   };

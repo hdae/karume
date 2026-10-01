@@ -2,20 +2,18 @@
  * `main.ts profile` の CLI の殻 — 掃引の記録（`karume-geometry-sweep/2`）を読み、adapter 1 種ぶんの
  * **幾何プロファイル**の生成物（TS）を書く / `--check` で再生成とのバイト同一を見る（perf-ledger K-71）。
  *
- * 規則の導出と生成物の文字列は Deno に依らない純関数（`derive.ts` — ブラウザのページと共有）。ここは
- * 引数・ファイルの読み書き・`deno fmt` による整形・終了コードだけを持つ。
+ * 規則の導出は runtime の生成器（`packages/runtime/src/tune/derive.ts` — 公開面 `@karume/runtime/tune` の
+ * `deriveGeometryProfile` と同じ 1 本）、生成物の文字列は `render.ts`（どちらも Deno に依らない純関数 —
+ * ブラウザのページと共有）。ここは引数・ファイルの読み書き・`deno fmt` による整形・終了コードだけを持つ。
  */
 import {
   DEFAULT_MIN_SPEEDUP,
   deriveProfile,
   parseSweepReport,
-  PROFILE_ID,
-  profileConstName,
-  type ProfileSpec,
-  renderProfileSource,
   type SweepSource,
   verdictLines,
-} from "./derive.ts";
+} from "../../packages/runtime/src/tune/derive.ts";
+import { PROFILE_ID, profileConstName, type ProfileSpec, renderProfileSource } from "./render.ts";
 
 /** 整形に使う設定（cwd に依らず `deno fmt --check` と同じ lineWidth で整形する）。 */
 const REPO_CONFIG = new URL("../../deno.json", import.meta.url);

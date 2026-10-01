@@ -9,7 +9,7 @@
  */
 import type { GeometryProfile } from "../../../packages/runtime/mod.ts";
 import { assertGeometryProfile } from "../../../packages/runtime/src/kernels/geometry-profile.ts";
-import { infinityJson } from "../../geometry-sweep/derive.ts";
+import { infinityJson } from "../../../packages/runtime/src/tune/derive.ts";
 
 /** 保存の置き場（版つき — 形を変えたら版を上げ、古い値は門で落として消す）。 */
 export const LAST_GENERATED_KEY = "karume-gpu-lab/last-generated-profile/1";

@@ -106,8 +106,10 @@ at once would make both timings meaningless.
 
 ## 1. 掃引 (sweep)
 
-The same sweep as `tools/geometry-sweep` (what is measured, the candidate grids, and the output
-format are described in [../geometry-sweep/README.md](../geometry-sweep/README.md)).
+The same sweep as `tools/geometry-sweep`: both call `runGeometrySweep` of `@karume/runtime/tune`
+(`packages/runtime/src/tune/`), which acquires the dedicated device, measures, and builds the
+record (what is measured, the candidate grids, and the output format are described in
+[../geometry-sweep/README.md](../geometry-sweep/README.md)).
 
 - **op** — the kernel families to sweep (all checked by default).
 - **候補** (candidate set) — `quick+` (default), `quick`, or `full`. `quick+` is `quick` plus every
@@ -133,8 +135,10 @@ The JSON `settings` has `candidateSet` (`quick`, `quick+`, or `full`) and, for c
 
 ## 2. プロファイル (profile)
 
-Builds a geometry profile from sweep results with the same pure functions as the CLI
-(`tools/geometry-sweep/derive.ts`, used by `main.ts profile`).
+Builds a geometry profile from sweep results with the same pure functions as the CLI (the
+generator in `packages/runtime/src/tune/derive.ts` — the same rules as `deriveGeometryProfile` of
+`@karume/runtime/tune` — and the TypeScript rendering in `tools/geometry-sweep/render.ts`, both used
+by `main.ts profile`).
 
 - **Inputs** — **掃引タブの直近の結果を使う** takes the last sweep of the sweep tab from memory
   (checked whenever a new sweep is available; the label is updated when a sweep ends, even while

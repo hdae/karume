@@ -12,6 +12,13 @@ rows — see "What is measured") it runs the production kernel
 generator with an explicit geometry for each candidate, times one dispatch, and checks that the
 output is bit-identical to the one produced by the default geometry.
 
+The measurement core and the profile generator live in the runtime package
+(`packages/runtime/src/tune/`: `harness.ts`, `cases.ts`, `geometries.ts`, `derive.ts`, `report.ts`,
+`measurement.ts`), published as `@karume/runtime/tune` (`runGeometrySweep`, `deriveGeometryProfile`,
+`geometryProfileJson` — ADR 0117) so that an application can sweep and derive a profile on the user's
+device. This directory holds the CLI shell (`main.ts`, `profile.ts`) and the TypeScript rendering of
+generated profiles (`render.ts`, shared with the GPU lab page).
+
 ## Running
 
 With Deno (any machine with WebGPU; run from the repository root):
@@ -24,7 +31,7 @@ Flags:
 
 - `--op <family>` (repeatable; default: all) — `linear`, `matmul`, `bmm`, `i8a8-linear`,
   `attention`, `i8a8-attention`, `conv2d`.
-- `--case <id>` (repeatable) — only these cases (ids are listed in `cases.ts` and printed in the
+- `--case <id>` (repeatable) — only these cases (ids are listed in `packages/runtime/src/tune/cases.ts` and printed in the
   table).
 - `--set <quick|quick+|full>` — the candidate set (see "What is measured"). `quick` is the
   defaults plus 4–5 geometries; `quick+` adds every geometry that a registered profile uses;
@@ -45,7 +52,7 @@ case. Failed rows and mismatched outputs are also red. The CLI exits with status
 failed (`error`); a mismatched output does not change the exit status.
 
 With Chrome, use the **掃引** tab of the GPU lab page ([../gpu-lab/README.md](../gpu-lab/README.md)),
-which runs the same measurement core and writes the same JSON:
+which calls the same `runGeometrySweep` and writes the same JSON:
 
 ```sh
 deno task bench:gpu-lab
@@ -117,7 +124,7 @@ Each field of the profile is one class of cases:
 | `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv`                                                                                 | `i8a8-linear`, and `i8a8-attention` QK and PV                                                                                                                  |
 
 The `gemmRows` segments are named by their range of M, not by index. Their bounds are
-`PROFILE_GEMM_ROWS_BOUNDS` in `cases.ts`, which must refine the runtime's default table (64, 512,
+`PROFILE_GEMM_ROWS_BOUNDS` in `packages/runtime/src/tune/cases.ts`, which must refine the runtime's default table (64, 512,
 and above): if a default bound is missing, the command fails (ADR 0116). A segment with no cases or
 no winner gets the geometry of the default segment that covers its range (M ≤ 16, 17–32, and 33–64
 get the default for M ≤ 64, and so on), and its sweep rows must have been measured against it.
@@ -173,7 +180,7 @@ that regenerates each file is at the top of the file.
 
 ## What is measured
 
-The cases (`cases.ts`) are copied from the Anima op census
+The cases (`packages/runtime/src/tune/cases.ts`) are copied from the Anima op census
 (`outputs/bench/karume-anima/2026-09-04_op-census/summary.json`, 1024px, S = 4096); the 512px rows
 replace M = 4096 with 1024. The `linear` rows with M = 16 and 32 replace M = 64 of the text encoder
 row, and those with M = 128 and 256 replace M = 512 of the cross-attention k / v projection. These
@@ -195,7 +202,7 @@ segment (the same M, N, and K, with B read as `[K,N]`); they have `censusCount` 
 | `i8a8-attention` | int8 QK and PV, f16 scores (s16)       | the attention shapes above                                                                                                                                                                                   |
 | `conv2d`         | implicit GEMM, f16 weights             | the top 3 VAE layers (Cout 96 at 512², 192 at 256², 384 at 128²)                                                                                                                                             |
 
-The candidates (`geometries.ts`) are grids filtered by the runtime's own geometry checks: f32
+The candidates (`packages/runtime/src/tune/geometries.ts`) are grids filtered by the runtime's own geometry checks: f32
 `regM ∈ {1,2,4,8}`, `regN ∈ {4,8}`, `wgX, wgY ∈ {4,8,16}` with at most 256 threads and tile sides
 up to 128; int8 `regM, regN ∈ {4,8}`, `wgX ∈ {8,16}`, `wgY ∈ {4,8,16}`, `tileK ∈ {16,32}`; conv2d
 uses the f32 grid restricted to n-tiles of 64 and 128. The geometry that the production code picks
@@ -223,7 +230,8 @@ keep a field that an earlier sweep adopted. A geometry listed twice is measured 
 Inputs are deterministic pseudo-random data; PV cases first run QK and the row statistics once
 with the default geometry to get realistic scores.
 
-Timing follows `tools/opbench/bench.ts`: one compute pass holds the same dispatch repeated until
+Timing follows the micro-benchmark conventions shared with `tools/opbench`
+(`packages/runtime/src/tune/measurement.ts`): one compute pass holds the same dispatch repeated until
 the pass takes about 80 ms, the pass is timed with `timestampWrites`, and the representative value
 is the minimum over the rounds. Before the timed rounds of every geometry, passes are repeated
 until they add up to at least `WARMUP_NS` (500 ms) and `WARMUP_MIN_RUNS` (3) passes, capped at 64
@@ -286,9 +294,10 @@ the case.
   different variant from production.
 - The f16-compute variants (`:c16` in the pipeline keys) are not among the candidates: every case
   runs the f32-compute kernel.
-- The tool imports runtime internals (`RUNTIME_INTERNAL`: the error-scope lock, the device-lost
-  race, and the pipeline cache) to measure with the production pipeline cache and scope
-  discipline. A change to those internals can break the tool without breaking the public API.
+- The measurement core uses runtime internals (`RUNTIME_INTERNAL`: the error-scope lock, the
+  device-lost race, and the pipeline cache) to measure with the production pipeline cache and scope
+  discipline. It lives in the same package (`packages/runtime/src/tune/`), so the sweep and the
+  production kernels always come from the same version; none of these internals is exported.
 - f32 self attention at M = N = 4096 has a 1 GiB score buffer S (16 · 4096 · 4096 · 4 B). On a
   device whose `maxStorageBufferBindingSize` is smaller, those rows fail; the production row-block
   variants (`:rwa` / `:rwc`) that handle this case are not measured.

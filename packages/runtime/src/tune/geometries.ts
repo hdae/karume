@@ -21,15 +21,15 @@ import {
   gemmThreads,
   gemmTileM,
   gemmTileN,
-} from "../../packages/runtime/src/kernels/gemm-geometry.ts";
+} from "../kernels/gemm-geometry.ts";
 import {
   assertI8a8Geometry,
   defaultI8a8Geometry,
   type I8a8Geometry,
   i8a8GeometryKeyPart,
-} from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import { CodegenError } from "../../packages/runtime/src/codegen/errors.ts";
-import { BUILTIN_GEOMETRY_PROFILES } from "../../packages/runtime/src/kernels/geometry-profiles/index.ts";
+} from "../kernels/i8a8-geometry.ts";
+import { CodegenError } from "../codegen/errors.ts";
+import { BUILTIN_GEOMETRY_PROFILES } from "../kernels/geometry-profiles/index.ts";
 
 /** f32 骨格（linear / 融合 attention / conv2d の implicit GEMM）の候補 1 つ。 */
 export type GemmCandidate = {
@@ -234,6 +234,7 @@ export const quickPlusI8a8Candidates = (): I8a8Candidate[] =>
 /** 候補集合の語彙（CLI の `--set`・ページの select・JSON の `settings.candidateSet`）。 */
 export const CANDIDATE_SETS = ["quick+", "quick", "full"] as const;
 
+/** 候補集合（`quick` / `quick+` / `full` — {@link CANDIDATE_SETS}）。 */
 export type CandidateSet = typeof CANDIDATE_SETS[number];
 
 /** 集合を指定しないときの既定（`quick+` — 登録済みの表の幾何まで quick の時間で測る）。 */

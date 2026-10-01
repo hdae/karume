@@ -1,6 +1,11 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { compareToDefault, driftOutOfRange, roundsLookQuantized, type SweepRow } from "./report.ts";
+import {
+  compareToDefault,
+  driftOutOfRange,
+  roundsLookQuantized,
+  type SweepRow,
+} from "../src/tune/report.ts";
 
 const ROW: SweepRow = {
   caseId: "c",

@@ -414,6 +414,72 @@
         "name": "sessionOptionsViolation",
         "kind": "function"
       }
+    ],
+    "./tune": [
+      {
+        "name": "DeriveGeometryProfileOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometryProfileDerivation",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometryProfileTarget",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepAdapter",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepCandidateSet",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepCaseSummary",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepInput",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepOp",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepProgress",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepReport",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepRow",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "GeometrySweepTimingUnit",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "deriveGeometryProfile",
+        "kind": "function"
+      },
+      {
+        "name": "geometryProfileJson",
+        "kind": "function"
+      },
+      {
+        "name": "runGeometrySweep",
+        "kind": "function"
+      }
     ]
   }
 }
