@@ -546,6 +546,23 @@ M5 の 2 件（matmul M 16 N 3072 K 1024 の 1.169・conv2d Cout 192 256² の 1
 - text_encoder の約 50 s は 4 走とも同じで、ポート転送越しの重み取得（§「text 44 s」と同じ帰属）。
 - `f16` の既定幾何の走行は DiT の途中で device が落ちた（推測: 8 GB 級 Android の VRAM 圧 — known-issues「Pixel（8GB 級 Android Chrome）」と同じ系統）。表ありの `f16` は完走した。
 
+### M2 / RTX 5070 Ti の自己 A/B — 7 段の表（既定 quant・2026-10-01・checkout `c017044a`）
+
+gpu-lab の Anima タブの「A/B（既定 vs 表）」で、既定 quant（`f16+dit8-a8-attn8-s16`）・512²・seed 42・N = 3 を、`default` を注入した
+区間 A と `自動`（M2 = `apple-metal-3`・RTX = `nvidia-blackwell`）の区間 B で回した記録（`outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-10-01T18-47-27.991Z.json` = M2・
+`…T18-29-32.207Z.json` = RTX）。時間は各区間の 2 回目以降（常駐 2 回目以降）。
+
+| 機          | PNG sha256（先頭）           | DiT 段 壁時計 A → B     | DiT 段 GPU A → B             | VAE 段 GPU A → B | text_encoder 壁時計    |
+| ----------- | ---------------------------- | ----------------------- | ---------------------------- | ---------------- | ---------------------- |
+| Apple M2    | `0a5695470e4a`（6 / 6 一致） | 78.1 → 72.5 s（×0.928） | 76.85 → 71.08 s（×0.925）    | 2.92 → 2.40 s    | 45〜48 s（ポート転送） |
+| RTX 5070 Ti | `3b07b912c4d4`（6 / 6 一致） | 1.40 → 1.22 s（×0.87）  | 1.32 → 1.12〜1.17 s（×0.87） | 0.12 → 0.12 s    | 12.8 s                 |
+
+- PNG は 2 機とも区間内・区間間で一致し、2026-09-29 の記録（§11 / §12）の既定 quant の sha とも同じ — 7 段の表でもビット同一は保たれた。
+- 既定 quant の DiT は i8a8 の linear / attention で走るので、この席で効くのは i8a8 の 3 欄（7 段化で不変）。M2 の ③PV の変更
+  （`reg64x64r4x8w8`）と RTX の M 129〜512 の 2 段は f32 経路（`f16` 席の DiT・text 段の k / v 射影）に効くので、**`f16` 席の A/B が
+  7 段の変更の検収**になる（未取得 — ADR 0116 検収 段 5 の残り）。既定 quant の数字は「変更前と同じ比が出ている・退行なし」の確認。
+- text_encoder の 45 s（M2）/ 12.8 s（RTX）は取得経路（ポート転送 / ネットワーク）の時間で、GPU 時間は 0.04〜0.13 s。
+
 ## 参照
 
 - M2 の JSON: `outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-09-27T14-24-06.310Z.json`

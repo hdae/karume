@@ -169,6 +169,12 @@ later の「decode 速度の残り」。
   M2 の再掃引は済（既定 16384 が最良）で、残るのは内蔵 GPU の掃引。差し替え口は静的な Session オプション
   `linearGemvRowsThreadTarget` ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
   +85 ms）③Metal の u32 門は行ブロック 13 形も未実測（known-issues）。
+- **Anima: 常駐の値に `text+transformer` を足す（起票 2026-10-01・利用者）**: 今の `transformer` は DiT の Session だけを generate を跨いで持ち、
+  text_encoder / text_conditioner（重み 1,396 MiB）は毎回「読む → 上げる → Session を組む → 畳む」をやり直す（既定の VRAM の前提が「最大の段 1 本ぶん」—
+  ADR [0112](decisions/0112-anima-transformer-residency.md)）。PyTorch / ONNX Runtime のデファクトは「載せたら明示的に消すまで常駐」で、
+  利用者の方針は「API の形は明示解放・既定は VRAM が許す限り常駐・入らなければ自動で格下げ」。text の 2 Session を既存の退避の
+  状態機械（次の段の試し確保 → 入らなければ退避 → やり直し）に乗せる。既定は据え置き。効き代は環境次第（M2 ローカル配信では
+  text 経路の読み直し ≈ 1.7 s / 枚・取得が遅い環境ほど効く）。着手前に B570 / M2 / Pixel で常駐ぶんを足した VRAM のピークを測る。
 - **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
   現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
   timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。

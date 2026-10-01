@@ -297,6 +297,18 @@ ADR [0108](decisions/0108-container-format.md) 追記 5）。anima の HF 配布
 上げ直し済み（0.13.0 の再アップロード・2026-09-24）。残タスク = 実機再観測のみ（[backlog](backlog.md) now の
 「ユーザー実機」の Pixel 項）。
 
+## Pixel（Mali-G715・Android Chrome 154）で Anima の段ごとの GPU 時間が壁時計を超える — timestamp の読みが壊れている疑い（2026-10-01 観測・記録のみ）
+
+利用者の Pixel 10a（adapter `arm` / `valhall` / `Mali-G715`・gpu-lab の Anima タブ・512²・`residency: transformer`）の記録
+`outputs/bench-browser/anima-residency-browser-f16-2026-10-01T10-43-00.425Z.json` で、段の `gpu.totalNs` が壁時計を大きく超える:
+text_encoder 186.7 s 対 49.8 s（3.7 倍）・transformer 94,533 s 対 234 s（400 倍）・vae_decoder 1,295 s 対 20 s（64 倍）。
+内訳では strided / elementwise の 1 dispatch が 4〜5 秒と出る（ありえない）。同じ端末の幾何掃引（1 pass = 1 dispatch の反復・
+`…geometry-sweep-browser-2026-10-01T09-37-40.824Z.json`）では GPU 時間と壁時計が一致する（例: 89.8 ms 対 92.6 ms）ので、
+掃引の経路は正しく、多数の timestamp query を 1 run にまとめる Anima の診断の経路でだけ壊れる。`clampedNegativeSamples` は 0。
+**この端末の段ごとの GPU 時間（`lastRunTiming` / gpu-lab の GPU 列）は信用できず、壁時計だけを見る。**
+推定（切り分け未了）: Mali の timestamp の桁あふれか、query の数が多いときの Dawn / ドライバ側の解決の誤り。切り分けには
+同じ端末で query 本数を変えた最小再現が要る（M2 / RTX / B570 では出ない）。
+
 ## hub: `evictCachedAssets` で weights を `drafter` だけに絞っても共通 assets（tokenizer）が消える
 
 `evictCachedAssets(loaded, { model, quant, weights: ["drafter"] })` は「本体は残して drafter だけ
