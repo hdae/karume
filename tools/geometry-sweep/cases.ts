@@ -9,11 +9,12 @@
  * `censusCount` は census の `count`（そのグラフ 1 本 = 各コンポーネント 1 回の forward の中の
  * ノード本数）。M = 1024（512²）の行は census に無い — 1024px の行の M（S = 4096）を 512px の
  * S = 1024 に置き換えたもので、ノード本数は解像度に依らないので同じ count を載せる。linear の
- * M = 16 / 32 / 128 / 256 も同じく census の行の M を置き換えた形で、行数バケット（≤ 64 / 65〜512）の
- * 中を 1 点で決めない（ADR 0115 決定 6）ための対照。
+ * M = 16 / 32 / 128 / 256 と bmm の M = 16 / 32 / 128 / 256 も同じく census の行の M を置き換えた
+ * 派生（census に無い M）で、幾何プロファイルの `gemmRows` の各段（{@link PROFILE_GEMM_ROWS_BOUNDS}）の
+ * 上端を linear / matmul / bmm の 3 経路で測るための対照（ADR 0116 決定 1 / 4）。
  *
  * rank-2 の matmul は census に無い（anima を含む全系列の census に行が無い）。matmul のケースは
- * linear の各バケット 1 本の**鏡像**（同じ M / N / K・B 側は `[K,N]`）で、census 由来でないことを
+ * linear の各段 1 本の**鏡像**（同じ M / N / K・B 側は `[K,N]`）で、census 由来でないことを
  * `censusCount: 0` と `mirrorOf`（鏡像元の linear のケース id）で表す。
  */
 
@@ -125,6 +126,22 @@ export type Conv2dCase = {
 
 export type SweepCase = LinearCase | MatmulCase | BmmCase | AttentionCase | Conv2dCase;
 
+/**
+ * 幾何プロファイルの `gemmRows` の段の境界（`maxRows` の列・ADR 0116 決定 1）。生成器が段を切る
+ * 唯一の定数で、末尾以外は linear / matmul / bmm の掃引ケースの M（≤ 512）の集合と一致すること
+ * MUST（cases_test が縛る — 段の上端を測っていない段を作らないため）。既定の表の境界 64 / 512 を
+ * 含む細分であること MUST（ADR 0116 決定 3 — 段の中で掃引の既定の行の幾何が割れないため）。
+ */
+export const PROFILE_GEMM_ROWS_BOUNDS: readonly number[] = [
+  16,
+  32,
+  64,
+  128,
+  256,
+  512,
+  Number.POSITIVE_INFINITY,
+];
+
 /** census の attention の `attrs.scale`（DiT の self / cross 共通 — `128^-0.25`）。 */
 const DIT_ATTENTION_SCALE = 0.2973017692565918;
 
@@ -173,7 +190,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
     source: "transformer [1,512,1024] × [2048,1024]",
   },
   ...[128, 256].map((m): LinearCase => ({
-    // 65〜512 のバケットの中の対照（上の M 512 の行の M を置換）
+    // 段 65〜128 / 129〜256 の上端の対照（上の M 512 の行の M を置換）
     id: linearId("linear", m, 2048, 1024),
     op: "linear",
     m,
@@ -193,7 +210,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
     source: "text_encoder [1,64,1024] × [3072,1024]",
   },
   ...[16, 32].map((m): LinearCase => ({
-    // ≤ 64 のバケットの中の対照（上の M 64 の行の M を置換）
+    // 段 ≤ 16 / 17〜32 の上端の対照（上の M 64 の行の M を置換）
     id: linearId("linear", m, 3072, 1024),
     op: "linear",
     m,
@@ -206,14 +223,19 @@ const LINEAR_CASES: readonly LinearCase[] = [
 ];
 
 /**
- * matmul の鏡像 3 本（linear の行数バケット ≤ 64 / 65〜512 / > 512 から 1 本ずつ — 同じ M / N / K）。
+ * matmul の鏡像 7 本（linear の、幾何プロファイルの `gemmRows` の 7 段から 1 本ずつ — 同じ M / N / K）。
  * census に matmul の行が無いので、表（gemmRows）が matmul にも効く以上、その骨格で遅い幾何を
- * 採らないための観測として置く。
+ * 採らないための観測として置く。M 16 / 32 / 128 / 256 の 4 本は鏡像元の linear が census の M を
+ * 置き換えた派生（ADR 0116 決定 4）。
  */
 const MATMUL_CASES: readonly MatmulCase[] = [
   { m: 64, n: 3072, k: 1024 },
   { m: 512, n: 2048, k: 1024 },
   { m: 4096, n: 2048, k: 2048 },
+  { m: 16, n: 3072, k: 1024 },
+  { m: 32, n: 3072, k: 1024 },
+  { m: 128, n: 2048, k: 1024 },
+  { m: 256, n: 2048, k: 1024 },
 ].map(({ m, n, k }) => {
   const mirrorOf = linearId("linear", m, n, k);
   return {
@@ -248,6 +270,30 @@ const BMM_CASES: readonly BmmCase[] = [
   censusCount: count,
   source: `${component} bmm [${batch},${m},${k}] × [${batch},${k},${n}]`,
 }));
+
+/**
+ * bmm の派生 8 本（ADR 0116 決定 4）: M 16 / 32 / 128 / 256 の各段に、census の行の M を置き換えた
+ * N 64 の 2 形ずつ。`K 64` は text_conditioner `[16,512,64] × [16,64,64]`、`K 128` は text_encoder
+ * `[16,64,128] × [16,128,64]` の M を置換したもの（census に無い M）。N 64 の形を選んだのは、
+ * linear と bmm の両方を測った M 64 / 512 で linear 単独の勝者を止めたのが N 64 の形だったため。
+ * count は置換元の行の count を載せる（linear の派生と同じ扱い）。
+ */
+const BMM_DERIVED_CASES: readonly BmmCase[] = [16, 32, 128, 256].flatMap((m) =>
+  [
+    { component: "text_conditioner", origin: 512, k: 64, count: 12 },
+    { component: "text_encoder", origin: 64, k: 128, count: 28 },
+  ].map(({ component, origin, k, count }) => ({
+    id: `bmm-b16-m${m}-n64-k${k}`,
+    op: "bmm" as const,
+    batch: 16,
+    m,
+    n: 64,
+    k,
+    censusCount: count,
+    source:
+      `${component} bmm [16,${m},${k}] × [16,${k},64]（census の M ${origin} を ${m} に置換）`,
+  }))
+);
 
 /** DiT の attention 4 形（census: transformer の self `[1,16,4096,128]`²・cross N = 512・各 count 28）。 */
 const DIT_ATTENTION: readonly { readonly kind: string; readonly m: number; readonly n: number }[] =
@@ -306,6 +352,7 @@ export const SWEEP_CASES: readonly SweepCase[] = [
   ...LINEAR_CASES.filter((c) => c.op === "linear"),
   ...MATMUL_CASES,
   ...BMM_CASES,
+  ...BMM_DERIVED_CASES,
   ...LINEAR_CASES.filter((c) => c.op === "i8a8-linear"),
   ...ATTENTION_CASES.filter((c) => c.op === "attention"),
   ...ATTENTION_CASES.filter((c) => c.op === "i8a8-attention"),

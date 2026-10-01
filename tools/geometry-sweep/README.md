@@ -170,20 +170,24 @@ that regenerates each file is at the top of the file.
 The cases (`cases.ts`) are copied from the Anima op census
 (`outputs/bench/karume-anima/2026-09-04_op-census/summary.json`, 1024px, S = 4096); the 512px rows
 replace M = 4096 with 1024. The `linear` rows with M = 16 and 32 replace M = 64 of the text encoder
-row, and those with M = 128 and 256 replace M = 512 of the cross-attention k / v projection, so
-that each row bucket is measured at more than one point. `bmm` rows are the census rows as they
-are. No census has a rank-2 `matmul` row, so the `matmul` cases **mirror** one `linear` case per
-row bucket (the same M, N, and K, with B read as `[K,N]`); they have `censusCount` 0.
+row, and those with M = 128 and 256 replace M = 512 of the cross-attention k / v projection. These
+M values are the bounds of a profile's `gemmRows` segments (`PROFILE_GEMM_ROWS_BOUNDS` in
+`cases.ts`: 16, 32, 64, 128, 256, 512, and above; ADR 0116), so every segment is measured at its
+upper end. The first five `bmm` rows are the census rows as they are; the other eight replace M of
+two census rows with N = 64 (the text conditioner's K 64 and the text encoder's K 128) by 16, 32,
+128, and 256, so that `linear`, `matmul`, and `bmm` are all measured in every segment up to 512.
+No census has a rank-2 `matmul` row, so the `matmul` cases **mirror** one `linear` case per
+segment (the same M, N, and K, with B read as `[K,N]`); they have `censusCount` 0.
 
-| family           | kernel                                 | shapes                                                                                                                                        |
-| ---------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `linear`         | f32 GEMM, f16 weights                  | DiT M ∈ {1024, 4096} × (N, K) ∈ {(2048, 2048), (8192, 2048), (2048, 8192)}; M ∈ {128, 256, 512} K 1024 N 2048; M ∈ {16, 32, 64} K 1024 N 3072 |
-| `matmul`         | f32 GEMM, f32 × f32                    | mirrors of `linear`: M 64 K 1024 N 3072; M 512 K 1024 N 2048; M 4096 K 2048 N 2048                                                            |
-| `bmm`            | f32 batched GEMM (batch on the z axis) | B 16: text encoder (M, K, N) ∈ {(64, 64, 128), (64, 128, 64)}; text conditioner (M, K, N) ∈ {(512, 64, 64), (512, 64, 512), (512, 512, 64)}   |
-| `i8a8-linear`    | int8 × int8 dot product                | the DiT shapes above                                                                                                                          |
-| `attention`      | fused attention QK and PV, f32 scores  | B·H 16, D 128: self M = N ∈ {1024, 4096}; cross M ∈ {1024, 4096}, N 512                                                                       |
-| `i8a8-attention` | int8 QK and PV, f16 scores (s16)       | the attention shapes above                                                                                                                    |
-| `conv2d`         | implicit GEMM, f16 weights             | the top 3 VAE layers (Cout 96 at 512², 192 at 256², 384 at 128²)                                                                              |
+| family           | kernel                                 | shapes                                                                                                                                                                                                       |
+| ---------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `linear`         | f32 GEMM, f16 weights                  | DiT M ∈ {1024, 4096} × (N, K) ∈ {(2048, 2048), (8192, 2048), (2048, 8192)}; M ∈ {128, 256, 512} K 1024 N 2048; M ∈ {16, 32, 64} K 1024 N 3072                                                                |
+| `matmul`         | f32 GEMM, f32 × f32                    | mirrors of `linear`: M ∈ {16, 32, 64} K 1024 N 3072; M ∈ {128, 256, 512} K 1024 N 2048; M 4096 K 2048 N 2048                                                                                                 |
+| `bmm`            | f32 batched GEMM (batch on the z axis) | B 16: text encoder (M, K, N) ∈ {(64, 64, 128), (64, 128, 64)}; text conditioner (M, K, N) ∈ {(512, 64, 64), (512, 64, 512), (512, 512, 64)}; derived M ∈ {16, 32, 128, 256} × (K, N) ∈ {(64, 64), (128, 64)} |
+| `i8a8-linear`    | int8 × int8 dot product                | the DiT shapes above                                                                                                                                                                                         |
+| `attention`      | fused attention QK and PV, f32 scores  | B·H 16, D 128: self M = N ∈ {1024, 4096}; cross M ∈ {1024, 4096}, N 512                                                                                                                                      |
+| `i8a8-attention` | int8 QK and PV, f16 scores (s16)       | the attention shapes above                                                                                                                                                                                   |
+| `conv2d`         | implicit GEMM, f16 weights             | the top 3 VAE layers (Cout 96 at 512², 192 at 256², 384 at 128²)                                                                                                                                             |
 
 The candidates (`geometries.ts`) are grids filtered by the runtime's own geometry checks: f32
 `regM ∈ {1,2,4,8}`, `regN ∈ {4,8}`, `wgX, wgY ∈ {4,8,16}` with at most 256 threads and tile sides
