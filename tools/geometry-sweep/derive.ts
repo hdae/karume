@@ -37,10 +37,12 @@
  * `deno-raw-tick`、かつ `gpuTiming.quantized` が false）だけを受ける。壁時計と 100 µs 丸めは
  * 幾何どうしの比を 1 へ縮めるので、勝ち負けの判定に使えない。
  *
- * クラスの境界は runtime の既定の表と同じ: linear / matmul / bmm の行数 ≤ 64 / ≤ 512 / それ以上
- * （`GEMM_ROWS_BUCKETS`）、融合 attention の ①QK / ③PV、conv2d の m タイル 64 / 32 行
+ * クラスの境界: linear / matmul / bmm は行数 M の段（境界は掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` =
+ * ≤ 16 / 17〜32 / 33〜64 / 65〜128 / 129〜256 / 257〜512 / > 512 — 既定の表 `GEMM_ROWS_BUCKETS` の
+ * 64 / 512 / ∞ を細分した 7 段・ADR 0116）、融合 attention の ①QK / ③PV、conv2d の m タイル 64 / 32 行
  * （既定の行の tileM）、i8a8 の linear / ①QK / ③PV。掃引にケースが無いクラスは runtime の既定を
- * そのまま書く（理由を生成物のコメントに残す）。
+ * そのまま書く（理由を生成物のコメントに残す）。gemmRows の段の既定は、その段の範囲を覆う既定の表の
+ * 段の幾何（{@link profileRowsSegments}）。
  */
 import {
   assertGemmGeometry,
@@ -56,7 +58,7 @@ import {
   defaultI8a8Geometry,
   type I8a8Geometry,
 } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import { SWEEP_OPS, type SweepOp } from "./cases.ts";
+import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
 import { DEFAULT_DRIFT_RANGE, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
@@ -323,11 +325,16 @@ export const parseSweepReport = (
   };
 };
 
+/**
+ * gemmRows の段の欄名。段を行数の範囲で綴る（`gemmRows ≤ 16`・`gemmRows 17〜32`・`gemmRows > 512` —
+ * {@link profileRowsSegments}）。添字（`gemmRows[1]`）で綴らないのは、3 段時代の `gemmRows[1]`（65〜512）と
+ * 7 段の 2 番目（17〜32）が同じ綴りで別の範囲を指すから（ADR 0116 決定 6）。
+ */
+export type GemmRowsSlot = `gemmRows ${string}`;
+
 /** プロファイルの欄（= クラス）。生成物のコメントでもこの綴りで欄を指す。 */
 export type ProfileSlot =
-  | "gemmRows[0]"
-  | "gemmRows[1]"
-  | "gemmRows[2]"
+  | GemmRowsSlot
   | "attention.qk"
   | "attention.pv"
   | "conv2d.rows64"
@@ -347,44 +354,82 @@ type SlotSpec = {
   readonly fallback: () => { readonly name: string; readonly geometry: Geometry };
 };
 
+/** gemmRows の段 1 つ（{@link profileRowsSegments}）。 */
+export type RowsSegment = {
+  readonly slot: GemmRowsSlot;
+  /** 欄が効く範囲（コメント用）。 */
+  readonly scope: string;
+  readonly maxRows: number;
+  /**
+   * 段の範囲を覆う既定の表（`GEMM_ROWS_BUCKETS`）の段の幾何。採用が無い・掃引にケースが無い段に書く値で、
+   * 掃引の既定の行（掃引は既定の表 `gemmGeometryForRows(m)` で組む）と突き合わせる比の土台でもある。
+   */
+  readonly fallback: GemmGeometry;
+};
+
+/** 段 `index` の行数の範囲の綴り（`≤ 16`・`17〜32`・`> 512`）。境界は検査済みの列（正整数・狭義昇順・末尾 Infinity）。 */
+const rowsRange = (bounds: readonly number[], index: number): string => {
+  const maxRows = bounds[index];
+  if (index === 0) return `≤ ${maxRows}`;
+  const previous = bounds[index - 1];
+  return maxRows === Number.POSITIVE_INFINITY ? `> ${previous}` : `${previous + 1}〜${maxRows}`;
+};
+
 /**
- * 行数バケットの上限（runtime の `GEMM_ROWS_BUCKETS`〈src/kernels/gemm-geometry.ts〉の `maxRows` —
- * 末尾は上限なし）。書き写さずに導くのは、境界がずれると、あるクラスの実測で選んだ幾何が別の
- * 行数帯へ効くから（既定プロファイルとの一致は profile_test.ts が見る）。
- * NOTE: 境界と既定は `gemm-geometry.ts` から取る（生成物の値を境界・既定の正本にしない）。ただし生成器は
+ * gemmRows の段の境界（`maxRows` の列）を検査して段の一覧にする純関数（ADR 0116 決定 3）。生成器は
+ * 掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` を渡す（境界の定数は 1 か所 — ここに複製しない）。
+ *
+ * MUST: 境界は末尾が Infinity・末尾以外は正整数で狭義昇順・既定の表（`GEMM_ROWS_BUCKETS`）の `maxRows` を
+ * 全て含む細分であること。満たさなければ生成を止める（fail loudly）。細分でない段は、掃引の既定の行の幾何が
+ * 段の中で 2 種類に割れ（比の土台が 2 つになる）、段の既定（fallback）も 1 つに決まらないから。
+ * 段の既定は、その段の範囲を覆う既定の段の幾何（細分なので段の全行数が同じ既定の段に入る）。
+ *
+ * NOTE: 既定は `gemm-geometry.ts` から取る（生成物の値を既定の正本にしない）。ただし生成器は
  * 生成物へ依存している — 候補集合 `quick+`（geometries.ts が `geometry-profiles/index.ts` を読む）と
  * runtime の mod.ts（report.ts → anima-residency/timing.ts）を通じて。登録済みの生成物が構文的に壊れると
  * 生成器自体が読めなくなるので、その場合は index.ts の登録を外してから再生成する。
  */
-export const ROWS_BUCKETS: readonly number[] = GEMM_ROWS_BUCKETS.map((rule) => rule.maxRows);
-
-/** {@link ROWS_BUCKETS} と同じ順の欄。 */
-const ROWS_SLOTS = ["gemmRows[0]", "gemmRows[1]", "gemmRows[2]"] as const;
-
-/** runtime の行数バケットの `index` 段の既定の幾何（段が足りなければ落とす）。 */
-const rowsBucketGeometry = (index: number): GemmGeometry => {
-  const rule = GEMM_ROWS_BUCKETS[index];
-  if (rule === undefined) throw new Error(`runtime の行数バケットに ${index} 段目が無い`);
-  return rule.geometry;
+export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSegment[] => {
+  const where = `gemmRows の段の境界 [${bounds.join(", ")}]`;
+  if (bounds.at(-1) !== Number.POSITIVE_INFINITY) {
+    throw new Error(`${where}: 末尾が Infinity でない（それより大きい M に当たる段が無い）`);
+  }
+  bounds.slice(0, -1).forEach((maxRows, index) => {
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1) {
+      throw new Error(`${where}: 末尾以外の境界は正整数（${maxRows}）`);
+    }
+    if (!(maxRows < bounds[index + 1])) {
+      throw new Error(
+        `${where}: 狭義昇順でない（${maxRows} → ${
+          bounds[index + 1]
+        } — 後ろの段に当たる行数が無くなる）`,
+      );
+    }
+  });
+  const missing = GEMM_ROWS_BUCKETS
+    .map((rule) => rule.maxRows)
+    .filter((maxRows) => !bounds.includes(maxRows));
+  if (missing.length > 0) {
+    throw new Error(
+      `${where}: 既定の表の境界 ${missing.join(" / ")} を含まない（既定の細分でない）— ` +
+        "既定の境界をまたぐ段は、段の中で掃引の既定の行の幾何が割れ、段の既定も 1 つに決まらない",
+    );
+  }
+  return bounds.map((maxRows, index) => {
+    const range = rowsRange(bounds, index);
+    const covering = GEMM_ROWS_BUCKETS.find((rule) => maxRows <= rule.maxRows) ??
+      GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
+    return {
+      slot: `gemmRows ${range}`,
+      scope: `linear / matmul / bmm の行数 ${range}`,
+      maxRows,
+      fallback: covering.geometry,
+    };
+  });
 };
 
-/** 欄の一覧（生成物の欄の順・コメントの採否の順）。 */
-const SLOTS: readonly SlotSpec[] = [
-  {
-    slot: "gemmRows[0]",
-    scope: "linear / matmul / bmm の行数 ≤ 64",
-    fallback: () => gemmCandidate(rowsBucketGeometry(0)),
-  },
-  {
-    slot: "gemmRows[1]",
-    scope: "linear / matmul / bmm の行数 65〜512",
-    fallback: () => gemmCandidate(rowsBucketGeometry(1)),
-  },
-  {
-    slot: "gemmRows[2]",
-    scope: "linear / matmul / bmm の行数 > 512",
-    fallback: () => gemmCandidate(rowsBucketGeometry(2)),
-  },
+/** gemmRows 以外の欄（生成物の欄の順・コメントの採否の順で、gemmRows の段の後ろに並ぶ）。 */
+const FIXED_SLOTS: readonly SlotSpec[] = [
   {
     slot: "attention.qk",
     scope: "融合 attention f32 ①QK",
@@ -422,6 +467,16 @@ const SLOTS: readonly SlotSpec[] = [
   },
 ];
 
+/** 欄の一覧（生成物の欄の順・コメントの採否の順 — gemmRows の段 → それ以外）。 */
+const profileSlots = (segments: readonly RowsSegment[]): readonly SlotSpec[] => [
+  ...segments.map((segment) => ({
+    slot: segment.slot,
+    scope: segment.scope,
+    fallback: () => gemmCandidate(segment.fallback),
+  })),
+  ...FIXED_SLOTS,
+];
+
 /** linear / matmul の行数（`caseShape` の `M{m} N{n} K{k}`）。 */
 const LINEAR_SHAPE = /^M(\d+) N\d+ K\d+$/;
 /** bmm の行列 1 枚の行数（`caseShape` の `B{batch} M{m} N{n} K{k}` — バッチは z 軸でバケットに効かない）。 */
@@ -438,12 +493,13 @@ const attentionStage = (row: SweepObservation, where: string): "qk" | "pv" => {
 };
 
 /**
- * 行の欄。linear / matmul / bmm は shape の M（本番の 3 経路が同じ gemmRows の表を M で引く —
- * src/runtime/recipe-builders/linear.ts）・attention は shape の段・conv2d は**そのケースの既定の行の tileM**
+ * 行の欄。linear / matmul / bmm は shape の M が `rows <= maxRows` で最初に当たる段（本番の 3 経路が同じ gemmRows の
+ * 表を M で引く規則と同じ — src/runtime/recipe-builders/linear.ts・geometry-profile.ts の gemmRowsGeometry）・attention は shape の段・conv2d は**そのケースの既定の行の tileM**
  * （本番の m タイルの選択 `conv2dIgemmMTile` が選んだ側 — 掃引が既定として測った幾何が正本）。
  */
 const slotOf = (
   row: SweepObservation,
+  segments: readonly RowsSegment[],
   conv2dDefaultTileM: ReadonlyMap<string, number>,
   where: string,
 ): ProfileSlot => {
@@ -456,7 +512,9 @@ const slotOf = (
         throw new Error(`${where}: ${row.caseId} の shape を読めない（${row.shape}）`);
       }
       const rows = Number(matched[1]);
-      return ROWS_SLOTS[ROWS_BUCKETS.findIndex((maxRows) => rows <= maxRows)];
+      // 段の列は末尾が Infinity（profileRowsSegments の検査済み）なので必ずどれかに当たる
+      return (segments.find((segment) => rows <= segment.maxRows) ??
+        segments[segments.length - 1]).slot;
     }
     case "attention":
       return attentionStage(row, where) === "qk" ? "attention.qk" : "attention.pv";
@@ -742,12 +800,8 @@ export const deriveProfile = (
   options: ProfileTarget & { readonly minSpeedup: number },
 ): readonly SlotVerdict[] => {
   if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い");
-  // 生成物の gemmRows は 3 段の欄で書く — runtime の段数が変われば欄と境界の対応が崩れる
-  if (ROWS_BUCKETS.length !== ROWS_SLOTS.length) {
-    throw new Error(
-      `runtime の行数バケットが ${ROWS_BUCKETS.length} 段（生成器の欄は ${ROWS_SLOTS.length} 段）`,
-    );
-  }
+  // 段の境界が既定の表の細分でなければここで止める（段の中で比の土台が割れる — profileRowsSegments）
+  const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
   // runtime の門（assertGeometryProfile）と同じ条件 — 生成してから注入・登録の段で落ちる前に止める。
   // description は機種の名前で、vendor / architecture の内側を分けるためだけの欄
   if (options.description === "") throw new Error("description は空文字にしない（未指定は省く）");
@@ -804,7 +858,7 @@ export const deriveProfile = (
     const repeats = new Map(source.cases.map((repeat) => [repeat.caseId, repeat] as const));
     const excludedHere = new Map<string, { readonly slot: ProfileSlot; readonly reason: string }>();
     for (const row of source.rows) {
-      const slot = slotOf(row, conv2dDefaultTileM, source.path);
+      const slot = slotOf(row, segments, conv2dDefaultTileM, source.path);
       const reason = exclusionReason(repeats.get(row.caseId));
       if (reason !== undefined) excludedHere.set(row.caseId, { slot, reason });
       bySlot.set(slot, [...(bySlot.get(slot) ?? []), { row, included: reason === undefined }]);
@@ -818,7 +872,7 @@ export const deriveProfile = (
       ]);
     }
   }
-  return SLOTS.map((spec) =>
+  return profileSlots(segments).map((spec) =>
     judgeSlot(
       spec,
       bySlot.get(spec.slot) ?? [],
@@ -970,9 +1024,11 @@ const profileDeclaration = (profile: GeneratedProfile): string[] => {
   ];
   const maxRows = (value: number): string =>
     value === Number.POSITIVE_INFINITY ? "Number.POSITIVE_INFINITY" : String(value);
+  // 検査の綴りは欄名と同じ範囲（表自身の maxRows から導く）
+  const bounds = profile.gemmRows.map((rule) => rule.maxRows);
   const gemmRows = profile.gemmRows.map((rule, index) =>
     `{ maxRows: ${maxRows(rule.maxRows)}, geometry: ${
-      renderGeometry(rule.geometry, ROWS_SLOTS[index])
+      renderGeometry(rule.geometry, `gemmRows ${rowsRange(bounds, index)}`)
     } },`
   );
   return [
@@ -1049,11 +1105,9 @@ export const buildGeometryProfile = (
   sources: readonly SweepSource[],
   verdicts: readonly SlotVerdict[],
 ): GeneratedProfile => {
-  const lastRows = ROWS_BUCKETS[ROWS_BUCKETS.length - 1];
-  // MUST: 末尾の規則は全行数に当たること（runtime の門と同じ条件 — 生成時に先に落とす）
-  if (lastRows !== Number.POSITIVE_INFINITY) {
-    throw new Error(`runtime の行数バケットの末尾が Infinity でない（${lastRows}）`);
-  }
+  // MUST: 末尾の規則は全行数に当たること（runtime の門と同じ条件 — 生成時に先に落とす）。
+  // 末尾 Infinity と既定の細分は profileRowsSegments が検査する
+  const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
   const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
   return {
     id: spec.id,
@@ -1064,9 +1118,9 @@ export const buildGeometryProfile = (
         ...(spec.description === undefined ? {} : { description: spec.description }),
       },
     }),
-    gemmRows: ROWS_SLOTS.map((slot, index) => ({
-      maxRows: ROWS_BUCKETS[index],
-      geometry: gemmSlot(verdicts, slot),
+    gemmRows: segments.map((segment) => ({
+      maxRows: segment.maxRows,
+      geometry: gemmSlot(verdicts, segment.slot),
     })),
     attention: {
       qk: gemmSlot(verdicts, "attention.qk"),

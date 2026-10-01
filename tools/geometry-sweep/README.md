@@ -109,12 +109,18 @@ Flags:
 
 Each field of the profile is one class of cases:
 
-| field                                                 | cases                                                                                                               |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `gemmRows[0]`, `gemmRows[1]`, `gemmRows[2]`           | `linear`, `matmul`, and `bmm` with M ≤ 64, 65–512, and above 512 (the runtime's bucket; for `bmm`, M of one matrix) |
-| `attention.qk`, `attention.pv`                        | `attention`, QK and PV                                                                                              |
-| `conv2d.rows64`, `conv2d.rows32`                      | `conv2d`, by the m-tile (64 or 32 rows) of the case's default row                                                   |
-| `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv` | `i8a8-linear`, and `i8a8-attention` QK and PV                                                                       |
+| field                                                                                                                                 | cases                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gemmRows ≤ 16`, `gemmRows 17〜32`, `gemmRows 33〜64`, `gemmRows 65〜128`, `gemmRows 129〜256`, `gemmRows 257〜512`, `gemmRows > 512` | `linear`, `matmul`, and `bmm` whose M falls in the range (the first segment with M ≤ its bound, as the runtime looks the table up; for `bmm`, M of one matrix) |
+| `attention.qk`, `attention.pv`                                                                                                        | `attention`, QK and PV                                                                                                                                         |
+| `conv2d.rows64`, `conv2d.rows32`                                                                                                      | `conv2d`, by the m-tile (64 or 32 rows) of the case's default row                                                                                              |
+| `i8a8.linear`, `i8a8.attentionQk`, `i8a8.attentionPv`                                                                                 | `i8a8-linear`, and `i8a8-attention` QK and PV                                                                                                                  |
+
+The `gemmRows` segments are named by their range of M, not by index. Their bounds are
+`PROFILE_GEMM_ROWS_BOUNDS` in `cases.ts`, which must refine the runtime's default table (64, 512,
+and above): if a default bound is missing, the command fails (ADR 0116). A segment with no cases or
+no winner gets the geometry of the default segment that covers its range (M ≤ 16, 17–32, and 33–64
+get the default for M ≤ 64, and so on), and its sweep rows must have been measured against it.
 
 Before the rule, each sweep drops the speed-ups of the cases whose default re-measurement is
 unreliable: the `driftRatio` in `cases[]` (repeat / first) is outside 0.9–1.1, the repeat failed,

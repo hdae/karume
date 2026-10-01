@@ -10,19 +10,20 @@ import { gemmMTileGeometry } from "../../packages/runtime/src/kernels/gemm.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../packages/runtime/src/kernels/geometry-profile.ts";
 import {
   defaultGemmGeometry,
+  GEMM_ROWS_BUCKETS,
   type GemmGeometry,
 } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
 import {
   defaultI8a8Geometry,
   type I8a8Geometry,
 } from "../../packages/runtime/src/kernels/i8a8-geometry.ts";
-import type { SweepOp } from "./cases.ts";
+import { PROFILE_GEMM_ROWS_BOUNDS, type SweepOp } from "./cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
 import {
   deriveProfile,
   parseSweepReport,
+  profileRowsSegments,
   renderProfileSource,
-  ROWS_BUCKETS,
   type SlotVerdict,
   type SweepSource,
   verdictLines,
@@ -36,6 +37,19 @@ const DECODER = new TextDecoder();
 const BIG = defaultGemmGeometry();
 const A: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 const B: GemmGeometry = { regM: 8, regN: 4, wgX: 16, wgY: 8 };
+/** 既定の表の ≤ 64 の段の幾何（A は 65〜512・BIG は > 512 の段の幾何）。 */
+const SMALL: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
+
+/** 7 段の欄名（生成器の綴りの期待値 — 手で書いたもの）。 */
+const ROWS_SLOT_NAMES = [
+  "gemmRows ≤ 16",
+  "gemmRows 17〜32",
+  "gemmRows 33〜64",
+  "gemmRows 65〜128",
+  "gemmRows 129〜256",
+  "gemmRows 257〜512",
+  "gemmRows > 512",
+] as const;
 
 type CaseRef = { readonly caseId: string; readonly op: SweepOp; readonly shape: string };
 
@@ -144,7 +158,7 @@ describe("deriveProfile: 規則の抽出", () => {
         ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.3 }]]),
       ]),
     ], OPTIONS);
-    const verdict = verdictOf(verdicts, "gemmRows[2]");
+    const verdict = verdictOf(verdicts, "gemmRows > 512");
     assertEquals(verdict.outcome.kind, "default");
     assertEquals(verdict.outcome.geometry, BIG);
     assertStringIncludes(rejectionOf(verdict, A), "linear-m1024 で ×1.040 < ×1.050");
@@ -158,7 +172,7 @@ describe("deriveProfile: 規則の抽出", () => {
           [B, { speedup: 1.3 }],
         ])),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "adopted");
     assertEquals(verdict.outcome.geometry, B);
@@ -173,7 +187,7 @@ describe("deriveProfile: 規則の抽出", () => {
           ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.01 }], [B, { speedup: 1.2 }]]),
         ]),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assertEquals(verdict.outcome.geometry, B);
     assertStringIncludes(rejectionOf(verdict, A), "linear-m4096 で ×1.010");
@@ -187,7 +201,7 @@ describe("deriveProfile: 規則の抽出", () => {
           ...caseRows(linearCase(4096), BIG, [[B, { speedup: 1.5, error: "device lost" }]]),
         ]),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "default");
     assertStringIncludes(rejectionOf(verdict, A), "linear-m4096 で測っていない");
@@ -203,15 +217,30 @@ describe("deriveProfile: 規則の抽出", () => {
           ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.06 }], [B, { speedup: 1.31 }]]),
         ]),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "adopted");
     assertEquals(verdict.outcome.geometry, B);
     assertStringIncludes(rejectionOf(verdict, A), "幾何平均 ×1.302（採用 ×1.310 に届かない）");
   });
 
-  it("行数 64 / 512 を境にクラスを分け、conv2d は既定の行の tileM で分ける", () => {
-    const small: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
+  it("行数は段の境界 ±1 で正しい段に入り（rows <= maxRows で最初に当たる段）、conv2d は既定の行の tileM で分ける", () => {
+    // 既定の行は M を覆う既定の段の幾何（掃引は既定の 3 段の表で組む）— 段の既定がずれると生成が止まる
+    const defaultFor = (m: number): GemmGeometry => m <= 64 ? SMALL : m <= 512 ? A : BIG;
+    const expected: readonly (readonly [number, string])[] = [
+      [16, "gemmRows ≤ 16"],
+      [17, "gemmRows 17〜32"],
+      [32, "gemmRows 17〜32"],
+      [33, "gemmRows 33〜64"],
+      [64, "gemmRows 33〜64"],
+      [65, "gemmRows 65〜128"],
+      [128, "gemmRows 65〜128"],
+      [129, "gemmRows 129〜256"],
+      [256, "gemmRows 129〜256"],
+      [257, "gemmRows 257〜512"],
+      [512, "gemmRows 257〜512"],
+      [513, "gemmRows > 512"],
+    ];
     const conv = (channels: number, mTile: number): CaseRef => ({
       caseId: `conv2d-c${channels}-m${mTile}`,
       op: "conv2d",
@@ -223,36 +252,45 @@ describe("deriveProfile: 規則の抽出", () => {
     ];
     const verdicts = deriveProfile([
       source([
-        ...caseRows(linearCase(64), small, [[B, { speedup: 1.2 }]]),
-        ...caseRows(linearCase(65), A, []),
-        ...caseRows(linearCase(512), A, []),
-        ...caseRows(linearCase(513), BIG, []),
+        ...expected.flatMap(([m]) =>
+          caseRows(
+            linearCase(m),
+            defaultFor(m),
+            m === 33 || m === 64 ? [[B, { speedup: 1.2 }]] : [],
+          )
+        ),
         ...conv2dRows(conv(96, 32), 32),
         ...conv2dRows(conv(192, 64), 64),
       ]),
     ], OPTIONS);
-    assertEquals(verdictOf(verdicts, "gemmRows[0]").cases, ["linear-m64"]);
-    assertEquals(verdictOf(verdicts, "gemmRows[0]").outcome.geometry, B);
-    assertEquals(verdictOf(verdicts, "gemmRows[1]").cases, ["linear-m512", "linear-m65"]);
-    assertEquals(verdictOf(verdicts, "gemmRows[2]").cases, ["linear-m513"]);
+    for (const slot of ROWS_SLOT_NAMES) {
+      const cases = expected.filter(([, name]) => name === slot).map(([m]) => `linear-m${m}`);
+      assertEquals(verdictOf(verdicts, slot).cases, cases.sort(), slot);
+    }
+    assertEquals(verdictOf(verdicts, "gemmRows 33〜64").outcome.geometry, B);
     assertEquals(verdictOf(verdicts, "conv2d.rows32").cases, ["conv2d-c96-m32"]);
     assertEquals(verdictOf(verdicts, "conv2d.rows64").cases, ["conv2d-c192-m64"]);
   });
 
   it("matmul / bmm の行は shape の M で gemmRows の欄に入る（bmm はバッチ数に依らず行列 1 枚の M）", () => {
-    const small: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
     const verdicts = deriveProfile([
       source([
-        ...caseRows(matmulCase(64), small, []),
-        ...caseRows(bmmCase(600, 64), small, []),
+        ...caseRows(matmulCase(16), SMALL, []),
+        ...caseRows(bmmCase(600, 17), SMALL, []),
+        ...caseRows(matmulCase(64), SMALL, []),
+        ...caseRows(bmmCase(600, 64), SMALL, []),
         ...caseRows(matmulCase(65), A, []),
         ...caseRows(bmmCase(16, 512), A, []),
+        ...caseRows(matmulCase(512), A, []),
         ...caseRows(matmulCase(4096), BIG, []),
       ]),
     ], OPTIONS);
-    assertEquals(verdictOf(verdicts, "gemmRows[0]").cases, ["bmm-b600-m64", "matmul-m64"]);
-    assertEquals(verdictOf(verdicts, "gemmRows[1]").cases, ["bmm-b16-m512", "matmul-m65"]);
-    assertEquals(verdictOf(verdicts, "gemmRows[2]").cases, ["matmul-m4096"]);
+    assertEquals(verdictOf(verdicts, "gemmRows ≤ 16").cases, ["matmul-m16"]);
+    assertEquals(verdictOf(verdicts, "gemmRows 17〜32").cases, ["bmm-b600-m17"]);
+    assertEquals(verdictOf(verdicts, "gemmRows 33〜64").cases, ["bmm-b600-m64", "matmul-m64"]);
+    assertEquals(verdictOf(verdicts, "gemmRows 65〜128").cases, ["matmul-m65"]);
+    assertEquals(verdictOf(verdicts, "gemmRows 257〜512").cases, ["bmm-b16-m512", "matmul-m512"]);
+    assertEquals(verdictOf(verdicts, "gemmRows > 512").cases, ["matmul-m4096"]);
   });
 
   it("matmul / bmm の観測も欄の全ケースに数える（そこで ×1.05 未満なら linear で速くても採らない）", () => {
@@ -264,12 +302,12 @@ describe("deriveProfile: 規則の抽出", () => {
         ...caseRows(bmmCase(16, 512), A, [[B, { speedup: 1.04 }]]),
       ]),
     ], OPTIONS);
-    const large = verdictOf(verdicts, "gemmRows[2]");
+    const large = verdictOf(verdicts, "gemmRows > 512");
     assertEquals(large.cases, ["linear-m1024", "matmul-m4096"]);
     assertEquals(large.outcome.kind, "adopted");
     assertEquals(large.outcome.geometry, B);
     assertStringIncludes(rejectionOf(large, A), "matmul-m4096 で ×1.020 < ×1.050");
-    const middle = verdictOf(verdicts, "gemmRows[1]");
+    const middle = verdictOf(verdicts, "gemmRows 257〜512");
     assertEquals(middle.outcome.kind, "default");
     assertEquals(middle.outcome.geometry, A);
     assertStringIncludes(rejectionOf(middle, B), "bmm-b16-m512 で ×1.040 < ×1.050");
@@ -297,7 +335,7 @@ describe("deriveProfile: 規則の抽出", () => {
           "full.json",
         ),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assert(verdict.outcome.kind === "adopted");
     assertEquals(verdict.outcome.geometry, A);
@@ -347,7 +385,7 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
       [ref.caseId]: drift(ref.caseId, 1.2),
     });
     const steady = source(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "steady.json");
-    const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows[2]");
+    const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows > 512");
     assert(verdict.outcome.kind === "adopted");
     assertEquals(verdict.outcome.geometry, A);
     assertEquals(verdict.outcome.geomean, 1.3);
@@ -371,7 +409,7 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
       caseRows(ref, BIG, [[A, { speedup: 1.3 }], [B, { speedup: 1.3 }]]),
       "steady.json",
     );
-    const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows[2]");
+    const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows > 512");
     assertEquals(verdict.outcome.kind, "default");
     assertEquals(verdict.outcome.geometry, BIG);
     assertEquals(rejectionOf(verdict, A), `${ref.caseId} で出力が既定と不一致`);
@@ -388,7 +426,7 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
         sweepWith(rows, "first.json", { [wide.caseId]: drift(wide.caseId, 1.15) }),
         sweepWith(rows, "second.json", { [wide.caseId]: drift(wide.caseId, 0.8) }),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assertEquals(verdict.cases, [ref.caseId, wide.caseId]);
     assertEquals(verdict.outcome.kind, "default");
@@ -410,11 +448,31 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
           [ref.caseId]: drift(ref.caseId, 1.5),
         }),
       ], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assert(verdict.outcome.kind === "default");
     assertEquals(verdict.outcome.geometry, BIG);
     assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+  });
+
+  it("ケースが 1 本の段でそれを全掃引で外したら、速い幾何があっても段の既定のまま", () => {
+    const only = linearCase(128);
+    const rows = caseRows(only, A, [[B, { speedup: 1.5 }]]);
+    const verdict = verdictOf(
+      deriveProfile([
+        sweepWith(rows, "first.json", { [only.caseId]: drift(only.caseId, 1.15) }),
+        sweepWith(rows, "second.json", { [only.caseId]: drift(only.caseId, 0.8) }),
+      ], OPTIONS),
+      "gemmRows 65〜128",
+    );
+    assertEquals(verdict.cases, [only.caseId]);
+    assert(verdict.outcome.kind === "default");
+    assertEquals(verdict.outcome.geometry, A);
+    assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+    assertEquals(
+      rejectionOf(verdict, B),
+      `${only.caseId} で測っていない（全掃引で比の材料から外した）`,
+    );
   });
 
   it("範囲の両端（×0.9 / ×1.1）は外さず、再測定の失敗・欄なし・ケースの記録なしは外す", () => {
@@ -437,7 +495,7 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     };
     const verdict = verdictOf(
       deriveProfile([parseSweepReport(truncated, { path: "sweep.json", sha256: "0" })], OPTIONS),
-      "gemmRows[2]",
+      "gemmRows > 512",
     );
     assertEquals(verdict.excluded.map(({ caseId, reason }) => [caseId, reason]), [
       [cases[2].caseId, "既定の再測定が失敗（device lost）"],
@@ -557,13 +615,19 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
 });
 
 describe("deriveProfile: runtime の既定プロファイルとの整合", () => {
-  it("行数の境界と、ケースが無いクラスに書く既定は DEFAULT_GEOMETRY_PROFILE と同じ", () => {
+  it("ケースが無いクラスに書く既定: gemmRows の段はその範囲を覆う既定の段の幾何、他の欄は DEFAULT_GEOMETRY_PROFILE と同じ（14 欄・この順）", () => {
     const profile = DEFAULT_GEOMETRY_PROFILE;
-    assertEquals([...ROWS_BUCKETS], profile.gemmRows.map((rule) => rule.maxRows));
-    const expected: Record<SlotVerdict["slot"], GemmGeometry | I8a8Geometry> = {
-      "gemmRows[0]": profile.gemmRows[0].geometry,
-      "gemmRows[1]": profile.gemmRows[1].geometry,
-      "gemmRows[2]": profile.gemmRows[2].geometry,
+    // 既定の表は 3 段のまま（≤ 64 / 65〜512 / > 512 — ADR 0116 決定 3）
+    assertEquals(profile.gemmRows.map((rule) => rule.maxRows), [64, 512, Infinity]);
+    const [small, middle, large] = profile.gemmRows.map((rule) => rule.geometry);
+    const expected: Readonly<Record<string, GemmGeometry | I8a8Geometry>> = {
+      "gemmRows ≤ 16": small,
+      "gemmRows 17〜32": small,
+      "gemmRows 33〜64": small,
+      "gemmRows 65〜128": middle,
+      "gemmRows 129〜256": middle,
+      "gemmRows 257〜512": middle,
+      "gemmRows > 512": large,
       "attention.qk": profile.attention.qk,
       "attention.pv": profile.attention.pv,
       "conv2d.rows64": profile.conv2d.rows64,
@@ -572,9 +636,118 @@ describe("deriveProfile: runtime の既定プロファイルとの整合", () =>
       "i8a8.attentionQk": profile.i8a8.attentionQk,
       "i8a8.attentionPv": profile.i8a8.attentionPv,
     };
-    for (const verdict of deriveProfile([source([])], OPTIONS)) {
+    const verdicts = deriveProfile([source([])], OPTIONS);
+    assertEquals(verdicts.map((verdict) => verdict.slot), Object.keys(expected));
+    for (const verdict of verdicts) {
       assertEquals(verdict.outcome.geometry, expected[verdict.slot], verdict.slot);
     }
+  });
+});
+
+describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
+  it("生成器の境界（PROFILE_GEMM_ROWS_BOUNDS）は 7 段で、欄名と効く範囲を行数の範囲で綴る（添字で綴らない）", () => {
+    const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
+    assertEquals(segments.map((segment) => segment.maxRows), [16, 32, 64, 128, 256, 512, Infinity]);
+    assertEquals(segments.map((segment) => segment.slot), [...ROWS_SLOT_NAMES]);
+    assertEquals(segments[1].scope, "linear / matmul / bmm の行数 17〜32");
+    assertEquals(segments[6].scope, "linear / matmul / bmm の行数 > 512");
+  });
+
+  it("段の既定はその段の範囲を覆う既定の段の幾何（≤ 64 の 3 段 → ≤ 64・65〜512 の 3 段 → 65〜512・> 512 → > 512）", () => {
+    const [small, middle, large] = GEMM_ROWS_BUCKETS.map((rule) => rule.geometry);
+    assertEquals(
+      profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS).map((segment) => segment.fallback),
+      [small, small, small, middle, middle, middle, large],
+    );
+  });
+
+  it("綴りと段の既定は渡した境界から導く（既定の境界そのものなら既定の表と同じ 3 段）", () => {
+    assertEquals(
+      profileRowsSegments([64, 512, Infinity]).map((
+        segment,
+      ) => [segment.maxRows, segment.fallback]),
+      GEMM_ROWS_BUCKETS.map((rule) => [rule.maxRows, rule.geometry]),
+    );
+    assertEquals(
+      profileRowsSegments([64, 100, 512, Infinity]).map((segment) => segment.slot),
+      ["gemmRows ≤ 64", "gemmRows 65〜100", "gemmRows 101〜512", "gemmRows > 512"],
+    );
+  });
+
+  it("既定の境界（64 / 512）を含まない境界の集合は生成を止める（段が既定の境界をまたぐ）", () => {
+    assertThrows(
+      () => profileRowsSegments([32, 128, Infinity]),
+      Error,
+      "既定の表の境界 64 / 512 を含まない",
+    );
+    assertThrows(
+      () => profileRowsSegments([16, 32, 64, 128, 256, Infinity]),
+      Error,
+      "既定の表の境界 512 を含まない",
+    );
+  });
+
+  it("狭義昇順でない・末尾が Infinity でない・正整数でない境界の集合は生成を止める", () => {
+    for (const bounds of [[64, 32, 512, Infinity], [64, 64, 512, Infinity]]) {
+      assertThrows(() => profileRowsSegments(bounds), Error, "狭義昇順でない");
+    }
+    for (const bounds of [[64, 512], []]) {
+      assertThrows(() => profileRowsSegments(bounds), Error, "末尾が Infinity でない");
+    }
+    for (const bounds of [[0, 64, 512, Infinity], [16.5, 64, 512, Infinity]]) {
+      assertThrows(() => profileRowsSegments(bounds), Error, "正整数");
+    }
+  });
+});
+
+describe("deriveProfile: ケースが 1 本の段", () => {
+  it("段の 1 ケースで ×1.05 以上の幾何を採り、未満なら段の既定のまま", () => {
+    const verdicts = deriveProfile([
+      source([
+        ...caseRows(linearCase(16), SMALL, [[A, { speedup: 1.05 }], [B, { speedup: 1.04 }]]),
+        ...caseRows(linearCase(32), SMALL, [[A, { speedup: 1.049 }]]),
+      ]),
+    ], OPTIONS);
+    const adopted = verdictOf(verdicts, "gemmRows ≤ 16");
+    assertEquals(adopted.cases, ["linear-m16"]);
+    assert(adopted.outcome.kind === "adopted");
+    assertEquals(adopted.outcome.geometry, A);
+    assertEquals(adopted.outcome.geomean, 1.05);
+    assertStringIncludes(rejectionOf(adopted, B), "linear-m16 で ×1.040 < ×1.050");
+    const kept = verdictOf(verdicts, "gemmRows 17〜32");
+    assertEquals(kept.cases, ["linear-m32"]);
+    assertEquals(kept.outcome.kind, "default");
+    assertEquals(kept.outcome.geometry, SMALL);
+    assertStringIncludes(rejectionOf(kept, A), "linear-m32 で ×1.049 < ×1.050");
+  });
+
+  it("採否の行と生成物は段を範囲で綴り、添字（gemmRows[n]）を含まない", () => {
+    const flags = {
+      from: ["sweep.json"],
+      id: "test-gpu",
+      vendor: "apple",
+      architecture: "metal-3",
+      out: "profiles/test-gpu.ts",
+      minSpeedup: 1.05,
+    };
+    const sources = [
+      source(caseRows(linearCase(32), SMALL, [[A, { speedup: 1.2 }], [B, { speedup: 1.01 }]])),
+    ];
+    const verdicts = deriveProfile(sources, flags);
+    const lines = verdictLines(verdicts);
+    assert(
+      lines.includes(
+        "- gemmRows 17〜32（linear / matmul / bmm の行数 17〜32・1 ケース）: 採用 " +
+          `${gemmCandidate(A).name} ×1.200（×1.200〜×1.200）`,
+      ),
+      lines.join("\n"),
+    );
+    for (const slot of ROWS_SLOT_NAMES) {
+      assert(lines.some((line) => line.startsWith(`- ${slot}（`)), slot);
+    }
+    const rendered = renderProfileSource(flags, sources, verdicts);
+    assert(!lines.join("\n").includes("gemmRows["), lines.join("\n"));
+    assert(!rendered.includes("gemmRows["), rendered);
   });
 });
 
@@ -584,7 +757,8 @@ describe("deriveProfile: 掃引の既定の行は今の runtime の既定であ�
     readonly slot: SlotVerdict["slot"];
     readonly rows: readonly Record<string, unknown>[];
   }[] = [
-    { slot: "gemmRows[1]", rows: caseRows(linearCase(512), BIG, [[A, { speedup: 1.2 }]]) },
+    { slot: "gemmRows ≤ 16", rows: caseRows(linearCase(16), A, [[B, { speedup: 1.2 }]]) },
+    { slot: "gemmRows 257〜512", rows: caseRows(linearCase(512), BIG, [[A, { speedup: 1.2 }]]) },
     {
       slot: "attention.qk",
       rows: [

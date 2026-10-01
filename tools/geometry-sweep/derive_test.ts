@@ -6,6 +6,7 @@ import { describe, it } from "@std/testing/bdd";
 import {
   defaultGemmGeometry,
   type GemmGeometry,
+  gemmGeometryForRows,
 } from "../../packages/runtime/src/kernels/gemm-geometry.ts";
 import {
   assertGeometryProfile,
@@ -71,6 +72,17 @@ const SPEC = {
 
 const SOURCES = [sweep("a.json", "sha-a"), sweep("b.json", "sha-b")];
 
+/** 段の上端 → 範囲の綴り（7 段の期待値を手で書いたもの — 生成器の綴りの正本ではない）。 */
+const RANGES: Readonly<Record<number, string>> = {
+  16: "≤ 16",
+  32: "17〜32",
+  64: "33〜64",
+  128: "65〜128",
+  256: "129〜256",
+  512: "257〜512",
+};
+const rangeOf = (maxRows: number): string => RANGES[maxRows] ?? "> 512";
+
 const verdictOf = (verdicts: readonly SlotVerdict[], slot: SlotVerdict["slot"]): SlotVerdict => {
   const found = verdicts.find((verdict) => verdict.slot === slot);
   if (found === undefined) throw new Error(`${slot} が無い`);
@@ -82,9 +94,16 @@ describe("buildGeometryProfile", () => {
     const verdicts = deriveProfile(SOURCES, SPEC);
     const profile = buildGeometryProfile(SPEC, SOURCES, verdicts);
     assertGeometryProfile(profile);
-    assertEquals(verdictOf(verdicts, "gemmRows[2]").outcome.kind, "adopted");
-    assertEquals(profile.gemmRows[2].geometry, FAST);
-    assertEquals(profile.gemmRows.map((rule) => rule.maxRows), [64, 512, Infinity]);
+    assertEquals(verdictOf(verdicts, "gemmRows > 512").outcome.kind, "adopted");
+    assertEquals(profile.gemmRows.at(-1)?.geometry, FAST);
+    assertEquals(
+      profile.gemmRows.map((rule) => rule.maxRows),
+      [16, 32, 64, 128, 256, 512, Infinity],
+    );
+    for (const rule of profile.gemmRows) {
+      const slot = verdictOf(verdicts, `gemmRows ${rangeOf(rule.maxRows)}`);
+      assertEquals(rule.geometry, slot.outcome.geometry, slot.slot);
+    }
     const slots = [
       ["attention.qk", profile.attention.qk],
       ["attention.pv", profile.attention.pv],
@@ -99,9 +118,12 @@ describe("buildGeometryProfile", () => {
     }
   });
 
-  it("掃引にケースが無い欄は既定の表（DEFAULT_GEOMETRY_PROFILE）と同じ値になる", () => {
+  it("掃引にケースが無い欄は既定の表（DEFAULT_GEOMETRY_PROFILE）と同じ値になる（gemmRows の段は範囲を覆う既定の段）", () => {
     const profile = buildGeometryProfile(SPEC, SOURCES, deriveProfile(SOURCES, SPEC));
-    assertEquals(profile.gemmRows.slice(0, 2), DEFAULT_GEOMETRY_PROFILE.gemmRows.slice(0, 2));
+    // 段の上端の M を runtime の既定の表で引いた幾何 = 段の範囲を覆う既定の段の幾何（段は既定の細分）
+    for (const rule of profile.gemmRows.slice(0, -1)) {
+      assertEquals(rule.geometry, gemmGeometryForRows(rule.maxRows), String(rule.maxRows));
+    }
     assertEquals(profile.attention, DEFAULT_GEOMETRY_PROFILE.attention);
     assertEquals(profile.conv2d, DEFAULT_GEOMETRY_PROFILE.conv2d);
     assertEquals(profile.i8a8, DEFAULT_GEOMETRY_PROFILE.i8a8);
@@ -122,9 +144,18 @@ describe("buildGeometryProfile", () => {
     assertEquals(buildGeometryProfile(vendorOnly, SOURCES, verdicts).match, { vendor: "apple" });
   });
 
-  it("TS の生成物は注入の表と同じ値を書く（採用した幾何と末尾の Infinity）", () => {
+  it("TS の生成物は注入の表と同じ値を書く（7 規則・段の既定・採用した幾何と末尾の Infinity）", () => {
     const verdicts = deriveProfile(SOURCES, SPEC);
     const source = renderProfileSource(SPEC, SOURCES, verdicts);
+    assertEquals(source.match(/\{ maxRows: /g)?.length, 7);
+    assertStringIncludes(
+      source,
+      "{ maxRows: 16, geometry: { regM: 1, regN: 4, wgX: 4, wgY: 16 } },",
+    );
+    assertStringIncludes(
+      source,
+      "{ maxRows: 128, geometry: { regM: 4, regN: 4, wgX: 8, wgY: 16 } },",
+    );
     assertStringIncludes(
       source,
       "{ maxRows: Number.POSITIVE_INFINITY, geometry: { regM: 4, regN: 4, wgX: 8, wgY: 16 } },",
