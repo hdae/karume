@@ -31,6 +31,7 @@ import { acquireGpu, GpuContext } from "../src/gpu/device.ts";
 import {
   DEFAULT_GEOMETRY_PROFILE,
   gemmRowsGeometry,
+  type GemmRowsRule,
   type GeometryProfile,
   selectGeometryProfile,
 } from "../src/kernels/geometry-profile.ts";
@@ -94,6 +95,36 @@ const linearCase = (m: number): ProfileCase => {
     expected: rowsKey("linear:", m),
   };
 };
+
+/**
+ * `gemmRows` の各規則の代表 M（DECIDED: ADR 0116 決定 7）。有限の規則はその上端（= `maxRows` — 段の
+ * 上端は掃引で測った点）、末尾（Infinity）の規則は直前の境界 + 512。表から導くので、段数が変わっても
+ * ケースが規則の数だけ追随する。
+ */
+const representativeRows = (rules: readonly GemmRowsRule[]): readonly number[] =>
+  rules.map((rule, index) =>
+    rule.maxRows === Number.POSITIVE_INFINITY
+      ? (rules[index - 1]?.maxRows ?? 0) + 512
+      : rule.maxRows
+  );
+
+/**
+ * 表の `gemmRows` の規則ごとに 1 ケース（代表 M の linear）。期待する判別子は `gemmRowsGeometry` で
+ * 引き直さず**その規則の幾何**から取る — 代表 M が隣の規則に落ちる導出の誤りもキーの不一致で赤になる。
+ * 既定と同じ幾何の規則では、判別子が既定の幾何のものになることを見ている（違う幾何なら違うキーの裏返し）。
+ */
+const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =>
+  representativeRows(rules).map((m, index) => {
+    const { maxRows, geometry } = rules[index];
+    const range = maxRows === Number.POSITIVE_INFINITY
+      ? `> ${rules[index - 1]?.maxRows ?? 0}`
+      : `≤ ${maxRows}`;
+    return {
+      ...linearCase(m),
+      name: `linear M=${m}（gemmRows ${range}）`,
+      expected: () => [{ prefix: "linear:", parts: [gemmGeometryTileKeyPart(geometry)] }],
+    };
+  });
 
 /** conv2d の implicit GEMM キーは幾何を `igemm{tileM}x{tileN}` と `:wg{x}x{y}` で名乗る。 */
 const conv2dParts = (geometry: GemmGeometry): readonly string[] => [
@@ -224,11 +255,8 @@ const linearI8a8Case = (): ProfileCase => {
   };
 };
 
-const CASES: readonly ProfileCase[] = [
-  // 行数バケットの 3 段（≤ 64 / 65〜512 / 513〜）を 1 本ずつ
-  linearCase(40),
-  linearCase(300),
-  linearCase(1024),
+/** linear の行数バケット以外のケース（per-profile 検査は linear を表の規則から作る — `gemmRowsCases`）。 */
+const OTHER_CASES: readonly ProfileCase[] = [
   {
     name: "matmul M=700",
     model: async () =>
@@ -251,6 +279,14 @@ const CASES: readonly ProfileCase[] = [
   conv2dCase(96, "rows32"),
   conv2dCase(128, "rows64"),
   linearI8a8Case(),
+];
+
+const CASES: readonly ProfileCase[] = [
+  // 行数バケットの 3 段（≤ 64 / 65〜512 / 513〜）を 1 本ずつ
+  linearCase(40),
+  linearCase(300),
+  linearCase(1024),
+  ...OTHER_CASES,
 ];
 
 /**
@@ -336,6 +372,28 @@ const assertRunsWithProfile = async (
   assertEquals(actual.y, expected.y, `${testCase.name}: 既定プロファイルとビット不一致`);
 };
 
+describe("gemmRows の代表 M", () => {
+  const rulesOf = (bounds: readonly number[]): GemmRowsRule[] =>
+    bounds.map((maxRows) => ({ maxRows, geometry: DEFAULT_GEOMETRY_PROFILE.gemmRows[0].geometry }));
+
+  it("3 段の表（既定の 64 / 512 / ∞）では各段の上端と、末尾は直前の境界 + 512 になる", () => {
+    assertEquals(representativeRows(DEFAULT_GEOMETRY_PROFILE.gemmRows), [64, 512, 1024]);
+  });
+
+  it("7 段の表（16 / 32 / 64 / 128 / 256 / 512 / ∞）では規則の数だけ代表 M が出る", () => {
+    const rules = rulesOf([16, 32, 64, 128, 256, 512, Number.POSITIVE_INFINITY]);
+    assertEquals(representativeRows(rules), [16, 32, 64, 128, 256, 512, 1024]);
+  });
+
+  it("規則ごとのケースは、その規則の幾何の判別子を期待する", () => {
+    const cases = gemmRowsCases(DEFAULT_GEOMETRY_PROFILE.gemmRows);
+    assertEquals(
+      cases.map((testCase) => testCase.expected(DEFAULT_GEOMETRY_PROFILE)[0].parts),
+      DEFAULT_GEOMETRY_PROFILE.gemmRows.map((rule) => [gemmGeometryTileKeyPart(rule.geometry)]),
+    );
+  });
+});
+
 describe({
   name: "幾何プロファイルの診断（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -375,7 +433,9 @@ describe({
               profile.match.architecture ?? "",
               profile.match.description ?? "",
             );
-          for (const testCase of CASES) {
+          const rowCases = gemmRowsCases(profile.gemmRows);
+          assertEquals(rowCases.length, profile.gemmRows.length, "gemmRows の規則を取りこぼした");
+          for (const testCase of [...rowCases, ...OTHER_CASES]) {
             await assertRunsWithProfile(baseline, subject, profile, testCase);
           }
         } finally {
