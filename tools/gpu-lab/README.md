@@ -77,9 +77,19 @@ text stage on the download; compare stage times only after the weights are cache
     says `（注入 — <description> 用）` for a table that matches a description, `（注入 — <vendor> /
     <architecture> 用）` otherwise, and `（注入専用）` for a table without `match`: the runtime never
     selects such a table by itself, so this list is the way to use it.
-  - `生成した表: <id>` — inject the table made in the profile tab (appears after the first one).
-    When the profile tab starts deriving a new table, the option is removed until the new table
-    is ready, unless it is the applied table, which stays and is marked `（適用中）`.
+  - `生成した表 #<n>: <id>（注入）` — inject a table made in the profile tab. Every table derived
+    successfully stays as its own option for the life of the page, numbered from 1 in the order
+    they were made (deriving again adds an option and never removes one; a failed derivation adds
+    none). The applied one is marked `（適用中）`; a table derived again with the same id is a
+    different option, so the mark tells which values are applied.
+  - `保存した表: <id>（<saved at>・<adapter>）（注入）` — the last table derived on an earlier
+    visit. Each successful derivation also saves that table to `localStorage`
+    (`karume-gpu-lab/last-generated-profile/1`, overwriting the previous one, with the adapter
+    description or vendor/architecture and the checkout revision), and the page offers it again when
+    it opens, because Chrome sometimes has to be reloaded and the derived table would otherwise be
+    lost. A saved value that cannot be read or does not pass the runtime's profile check is deleted,
+    and the GPU settings status line says so. The applied settings themselves are not saved. Both
+    kinds are recorded as `generated:<id>`.
 
   **適用** disposes the Anima pipeline, its dummy buffers, and its GPU device; if the Anima tab held a
   device, it acquires a new one with the new settings at once, and the Anima status line says
@@ -162,9 +172,9 @@ Builds a geometry profile from sweep results with the same pure functions as the
     `deno run -A tools/geometry-sweep/main.ts profile …` command that writes the formatted file to
     `packages/runtime/src/kernels/geometry-profiles/<id>.ts` and prints the lines to add to
     `geometry-profiles/index.ts`.
-- **この表を適用** selects `生成した表: <id>` in the GPU settings and applies it. If another GPU
-  operation is running, the selection is left as it was; if applying fails, the selection returns
-  to the applied setting.
+- **この表を適用** selects that table's `生成した表 #<n>: <id>` option in the GPU settings and
+  applies it. If another GPU operation is running, the selection is left as it was; if applying
+  fails, the selection returns to the applied setting.
 
 ## 3. Anima
 

@@ -31,6 +31,17 @@ import {
   setStatus,
   TIMESTAMP_QUERY,
 } from "./common.ts";
+import {
+  GENERATED_PREFIX,
+  type InjectableTables,
+  readLastGenerated,
+  SAVED_VALUE,
+  type SavedProfile,
+  tableForValue,
+  tableOptions,
+  valueForTable,
+  writeLastGenerated,
+} from "./injectable-tables.ts";
 import { mountProfileTab, type ProfileTab } from "./profile-tab.ts";
 import { mountSweepTab } from "./sweep-tab.ts";
 
@@ -41,7 +52,6 @@ const isTab = (value: string): value is Tab => (TABS as readonly string[]).inclu
 
 /** select の値（`builtin:` を前置するのは、埋め込みの id が `auto` などの綴りと重ならないように）。 */
 const BUILTIN_PREFIX = "builtin:";
-const GENERATED = "generated";
 
 const header = element(document, "header", HTMLElement);
 const ui = {
@@ -80,38 +90,36 @@ const initialize = async (): Promise<void> => {
   const state: {
     /** 適用中の GPU 設定。 */
     settings: GpuSettings;
-    /** プロファイルのタブが直近に作った表（作り直しを始めたら消す）。 */
-    generated?: GeometryProfile;
+    /** 保存した表と、このページで生成した表の全て（生成した表は消さない）。 */
+    tables: { saved?: SavedProfile; generated: { serial: number; profile: GeometryProfile }[] };
     /** 実行中の GPU 操作（{@link Lab.lock}）。 */
     activity?: string;
     tab: Tab;
-  } = { settings: { choice: { kind: "auto" }, timestamps: timestampFeature }, tab: "sweep" };
-
-  /**
-   * 「生成した表」の選択肢が指す表: 直近に作った表、無ければ適用中の生成した表（使用中なので、作り直しが
-   * 失敗しても選択肢から消さない）。
-   */
-  const generatedOption = (): GeometryProfile | undefined => {
-    const applied = state.settings.choice;
-    return state.generated ?? (applied.kind === "generated" ? applied.profile : undefined);
+  } = {
+    settings: { choice: { kind: "auto" }, timestamps: timestampFeature },
+    tables: { generated: [] },
+    tab: "sweep",
   };
 
+  const tables = (): InjectableTables => state.tables;
+
   /** 選び方 → select の値。 */
-  const selectValue = (choice: ProfileChoice): string =>
-    choice.kind === "builtin"
-      ? `${BUILTIN_PREFIX}${choice.profile.id}`
-      : choice.kind === "generated"
-      ? GENERATED
-      : choice.kind;
+  const selectValue = (choice: ProfileChoice): string => {
+    if (choice.kind === "builtin") return `${BUILTIN_PREFIX}${choice.profile.id}`;
+    if (choice.kind !== "generated") return choice.kind;
+    const value = valueForTable(tables(), choice.profile);
+    if (value === undefined) throw Error(`生成した表 ${choice.profile.id} が選択肢に無い`);
+    return value;
+  };
 
   /** select の値 → 選び方。 */
   const readChoice = (): ProfileChoice => {
     const value = ui.profile.value;
     if (value === "auto") return { kind: "auto" };
     if (value === "default") return { kind: "default", profile: DEFAULT_GEOMETRY_PROFILE };
-    if (value === GENERATED) {
-      const profile = generatedOption();
-      if (profile === undefined) throw Error("生成した表がまだ無い");
+    if (value === SAVED_VALUE || value.startsWith(GENERATED_PREFIX)) {
+      const profile = tableForValue(tables(), value);
+      if (profile === undefined) throw Error(`生成した表の選択 ${value} を知らない`);
       return { kind: "generated", profile };
     }
     const id = value.slice(BUILTIN_PREFIX.length);
@@ -169,29 +177,30 @@ const initialize = async (): Promise<void> => {
   const sweep = mountSweepTab(tabRoot("sweep"), lab, () => profile.refresh());
   const anima = mountAnimaTab(tabRoot("anima"), lab);
 
+  const createOption = (value: string, text: string): HTMLOptionElement => {
+    const created = document.createElement("option");
+    created.value = value;
+    created.textContent = text;
+    return created;
+  };
+
   /**
-   * 「生成した表」の選択肢を今の状態に合わせる: 指す表が無ければ消し（選んでいたなら選択を適用中の値へ
-   * 戻す）、適用中の表なら文言に「（適用中）」を付ける。
+   * 保存した表・生成した表の選択肢を今の状態に合わせて作り直す（適用中の表の文言に「（適用中）」を
+   * 付ける）。選択は保つ — 選択肢は消えないので、選んでいた値は作り直した後もある。
    */
-  const renderGeneratedOption = (): void => {
-    const profile = generatedOption();
-    let option = ui.profile.querySelector<HTMLOptionElement>(`option[value="${GENERATED}"]`);
-    if (profile === undefined) {
-      if (option === null) return;
-      const selected = ui.profile.value === GENERATED;
-      option.remove();
-      if (selected) ui.profile.value = selectValue(state.settings.choice);
-      return;
-    }
-    if (option === null) {
-      option = document.createElement("option");
-      option.value = GENERATED;
-      ui.profile.append(option);
+  const renderTableOptions = (): void => {
+    const selected = ui.profile.value;
+    for (const option of [...ui.profile.options]) {
+      if (option.value === SAVED_VALUE || option.value.startsWith(GENERATED_PREFIX)) {
+        option.remove();
+      }
     }
     const applied = state.settings.choice;
-    option.textContent = `生成した表: ${profile.id}（注入）${
-      applied.kind === "generated" && applied.profile === profile ? "（適用中）" : ""
-    }`;
+    ui.profile.append(
+      ...tableOptions(tables(), applied.kind === "generated" ? applied.profile : undefined)
+        .map(({ value, text }) => createOption(value, text)),
+    );
+    ui.profile.value = selected;
   };
 
   /**
@@ -216,7 +225,7 @@ const initialize = async (): Promise<void> => {
       gpuStatus("適用中 …");
       const held = await anima.reset();
       state.settings = next;
-      renderGeneratedOption();
+      renderTableOptions();
       renderEnvironment();
       if (held) {
         try {
@@ -224,7 +233,7 @@ const initialize = async (): Promise<void> => {
         } catch (error) {
           // 取れなかった設定を適用中として残すと、以後の Anima の操作が同じ理由で落ち続ける
           state.settings = previous;
-          renderGeneratedOption();
+          renderTableOptions();
           renderEnvironment();
           throw error;
         }
@@ -246,24 +255,40 @@ const initialize = async (): Promise<void> => {
     }
   };
 
+  /** 生成した表を選択肢に足し、最後に生成した表として localStorage に保存する（上書き）。 */
   const offerGenerated = (profile: GeometryProfile): void => {
-    state.generated = profile;
-    renderGeneratedOption();
+    state.tables.generated.push({ serial: state.tables.generated.length + 1, profile });
+    renderTableOptions();
     renderEnvironment();
+    try {
+      writeLastGenerated(localStorage, {
+        savedAt: new Date().toISOString(),
+        adapter: {
+          vendor: adapterInfo.vendor,
+          architecture: adapterInfo.architecture,
+          description: adapterInfo.description,
+        },
+        checkout: { revision: config.revision, dirty: config.dirty },
+        profile,
+      });
+    } catch (error) {
+      gpuStatus(
+        `生成した表を localStorage に保存できない（reload すると失われる） — ${errorText(error)}`,
+      );
+    }
   };
 
-  const withdrawGenerated = (): void => {
-    state.generated = undefined;
-    renderGeneratedOption();
-    renderEnvironment();
+  const applyGenerated = async (profile: GeometryProfile): Promise<void> => {
+    const value = valueForTable(tables(), profile);
+    if (value === undefined) throw Error(`生成した表 ${profile.id} が選択肢に無い`);
+    await apply(value);
   };
 
   const profile: ProfileTab = mountProfileTab(tabRoot("profile"), {
     adapterInfo,
     latestSweep: sweep.latestReport,
     offerGenerated,
-    withdrawGenerated,
-    applyGenerated: () => apply(GENERATED),
+    applyGenerated,
   });
 
   const showTab = (tab: Tab): void => {
@@ -278,18 +303,12 @@ const initialize = async (): Promise<void> => {
   };
 
   const fillProfileOptions = (): void => {
-    const option = (value: string, text: string): HTMLOptionElement => {
-      const created = document.createElement("option");
-      created.value = value;
-      created.textContent = text;
-      return created;
-    };
     ui.profile.replaceChildren(
-      option("auto", `自動 — adapter で選ぶ（→ ${selectGeometryProfile(adapterInfo).id}）`),
-      option("default", "default（既定の表を注入）"),
+      createOption("auto", `自動 — adapter で選ぶ（→ ${selectGeometryProfile(adapterInfo).id}）`),
+      createOption("default", "default（既定の表を注入）"),
       // 埋め込みの全表（match を省いた注入専用の表も — 自動では選ばれないので、ここが使う入口）
       ...BUILTIN_GEOMETRY_PROFILES.map(({ id, match }) =>
-        option(
+        createOption(
           `${BUILTIN_PREFIX}${id}`,
           match === undefined
             ? `${id}（注入専用）`
@@ -304,6 +323,18 @@ const initialize = async (): Promise<void> => {
     ui.profile.value = "auto";
   };
 
+  /** 前のページで最後に生成した表を読む（読めなければキーを消して状態行に出す — 起動は止めない）。 */
+  const restoreSaved = (): void => {
+    try {
+      const saved = readLastGenerated(localStorage);
+      if (saved === undefined) return;
+      state.tables.saved = saved;
+      renderTableOptions();
+    } catch (error) {
+      gpuStatus(`保存した表を復元できない — ${errorText(error)}`);
+    }
+  };
+
   fillProfileOptions();
   ui.timestamps.checked = timestampFeature;
   ui.timestamps.disabled = !timestampFeature;
@@ -312,6 +343,7 @@ const initialize = async (): Promise<void> => {
       ? "準備完了。GPU 設定は「適用」で確定します（今は自動・GPU 時間を採る）。"
       : `このアダプタは ${TIMESTAMP_QUERY} を持たないので、掃引は壁時計で測り、Anima の GPU 時間は採れません。`,
   );
+  restoreSaved();
   ui.profile.addEventListener("change", renderEnvironment);
   ui.timestamps.addEventListener("change", renderEnvironment);
   // 失敗は apply が GPU 設定の状態行に出している（ここで重ねて出さない）

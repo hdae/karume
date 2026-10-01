@@ -64,12 +64,10 @@ export type ProfileTabDeps = {
   readonly adapterInfo: GPUAdapterInfo;
   /** 掃引タブの直近の結果。 */
   readonly latestSweep: () => Report | undefined;
-  /** 生成した表を GPU 設定の選択肢に出す。 */
+  /** 生成した表を GPU 設定の選択肢に足す（前に生成した表の選択肢は残る）。 */
   readonly offerGenerated: (profile: GeometryProfile) => void;
-  /** 生成をやり直す前に、GPU 設定の選択肢から直前の表を下げる（適用中なら残す）。 */
-  readonly withdrawGenerated: () => void;
-  /** 生成した表を GPU 設定で選んで適用する。 */
-  readonly applyGenerated: () => Promise<void>;
+  /** 生成した表（{@link offerGenerated} に渡したもの）を GPU 設定で選んで適用する。 */
+  readonly applyGenerated: (profile: GeometryProfile) => Promise<void>;
 };
 
 export type ProfileTab = {
@@ -357,8 +355,6 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
 
   const generate = async (): Promise<void> => {
     state.generated = undefined;
-    // 失敗したときに前の表を「生成した表」として残さない（残すとヘッダとタブで食い違う）
-    deps.withdrawGenerated();
     ui.verdicts.replaceChildren();
     renderOutput();
     const sources = await collectSources();
@@ -465,7 +461,14 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
   ui.useLatest.addEventListener("change", renderPlaceholders);
   ui.optIn.addEventListener("change", syncTargetControls);
   ui.generate.addEventListener("click", guarded(generate));
-  ui.apply.addEventListener("click", guarded(deps.applyGenerated));
+  ui.apply.addEventListener(
+    "click",
+    guarded(async () => {
+      const generated = state.generated;
+      if (generated === undefined) throw Error("表がまだ無い（「表を作る」で作る）");
+      await deps.applyGenerated(generated.profile);
+    }),
+  );
   ui.outputKind.addEventListener("change", renderOutput);
   ui.copyOutput.addEventListener(
     "click",
