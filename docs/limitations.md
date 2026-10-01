@@ -231,16 +231,18 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 絞りだが、沈黙誤値ではなく例外で止まる。**この閾値は既定 GEMM 幾何から導かれる**（n の辺 =
 `gemmTileN` = regN·wgX）ので、既定を動かすと一緒に動く — 現行値は M128N128 になった `d0afc22`
 （2026-08-10）以降のもので、ADR 0024 が書いた「2048² で上限を 1 超える」は辺 64 前提の旧値。
-Chrome は開発者向けフラグ（`chrome://flags/#enable-webgpu-developer-features`）無しでは adapter の `description` を空にするので、
-`apple-metal-3`（`description: "Apple M2"` で照合）は自動では当たらず Apple は既定の幾何になる（M2 の DiT は ×1.75 を失う・M5 は既定が最良）。
-アプリは `BUILTIN_GEOMETRY_PROFILES` から引いて `acquireGpu({ geometryProfile })` で注入できる（[decisions/0115](decisions/0115-geometry-profiles.md) 追記決定 7）。
-
 上の値は既定プロファイルのもので、上限は Session が選んだ幾何プロファイルの tileN に依る
 （[decisions/0115](decisions/0115-geometry-profiles.md)）。`apple-metal-3`（Chrome の M2）の conv2d は tileN 64 なので、
 上限は **Hout·Wout ≤ 4,194,240**（約 2047×2048）になる。
 解消は動的解像度 recon の「固定タイル VAE」（研究記録
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
+
+## 幾何プロファイル: フラグ無しの Chrome では `description` で照合する表が自動では当たらない（外部制約）
+
+Chrome は開発者向けフラグ（`chrome://flags/#enable-webgpu-developer-features`）無しでは adapter の `description` を空にするので、
+`apple-metal-3`（`description: "Apple M2"` で照合）は自動では当たらず Apple は既定の幾何になる（M2 の DiT は ×1.75 を失う・M5 は既定が最良）。
+アプリは `BUILTIN_GEOMETRY_PROFILES` から引いて `acquireGpu({ geometryProfile })` で注入できる（[decisions/0115](decisions/0115-geometry-profiles.md) 追記決定 7）。
 
 ## BiRefNet 系の配布形は 1024² と 2048² の 2 モデル（モデル名 = 解像度・既定 1024²）
 
