@@ -2,7 +2,13 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import type { AnimaRunComponent } from "../../../packages/models/anima.ts";
 import type { Row, StageRecord } from "../../anima-residency/record.ts";
-import { AB_STAGES, abStatusLine, abTableRows, summarizeAb } from "./ab-summary.ts";
+import {
+  AB_STAGES,
+  abQuantPlan,
+  abQuantsStatusLine,
+  abTableRows,
+  summarizeAb,
+} from "./ab-summary.ts";
 
 const SHA_X = "a".repeat(64);
 const SHA_Y = "b".repeat(64);
@@ -204,8 +210,8 @@ describe("summarizeAb", () => {
         "—",
       ]]);
       assertEquals(
-        abStatusLine(summary),
-        "A/B 未完 — 区間 A: 失敗 — GpuOutOfMemoryError · 区間 B: 回していない",
+        abQuantsStatusLine([{ quant: "f16", summary }]),
+        "A/B 未完 — f16: 区間 A: 失敗 — GpuOutOfMemoryError · 区間 B: 回していない",
       );
     });
 
@@ -224,15 +230,68 @@ describe("summarizeAb", () => {
   });
 });
 
-describe("abStatusLine", () => {
-  it("sha の判定と、全体と transformer の B ÷ A を 1 行に並べる", () => {
-    const summary = summarizeAb(
-      [row({ wallMs: 4000, stages: { transformer: { wall: 2000, gpuNs: 2e9 } } })],
-      [row({ wallMs: 3000, stages: { transformer: { wall: 1000, gpuNs: 1.5e9 } } })],
-    );
-    assertEquals(
-      abStatusLine(summary),
-      "A/B 完了 — sha: 区間 A 一致 · 区間 B 一致 · A と B 一致 · B ÷ A: 全体 ×0.750 · transformer 壁時計 ×0.500 / GPU ×0.750",
-    );
+describe("abQuantPlan", () => {
+  const options = ["i8a8", "f16", "w4"];
+
+  it("全 quant なら選択肢の全部を select の並び順で返す（選ばれている quant を先頭に寄せない）", () => {
+    assertEquals(abQuantPlan(options, "f16", true), ["i8a8", "f16", "w4"]);
+  });
+
+  it("全 quant でなければ選ばれている quant 1 つだけを返す", () => {
+    assertEquals(abQuantPlan(options, "w4", false), ["w4"]);
+  });
+
+  it("選ばれている quant が選択肢に無ければ投げる（manifest に無い quant で GPU を取りに行かない）", () => {
+    assertThrows(() => abQuantPlan(options, "", true), Error, "選択肢に無い");
+  });
+});
+
+describe("abQuantsStatusLine", () => {
+  const ditRows = (wall: number, gpuNs: number, sha = SHA_X): Row[] => [
+    row({ wallMs: wall * 2, sha, stages: { transformer: { wall, gpuNs } } }),
+  ];
+
+  describe("quant が 2 つ以上のとき", () => {
+    it("quant ごとに sha の判定と transformer の B ÷ A だけを 1 句ずつ / で並べる", () => {
+      const line = abQuantsStatusLine([
+        { quant: "f16", summary: summarizeAb(ditRows(2000, 2e9), ditRows(1000, 1.5e9)) },
+        {
+          quant: "i8a8",
+          summary: summarizeAb(ditRows(1000, 1e9, SHA_Y), ditRows(1000, 1e9, SHA_Y)),
+        },
+      ]);
+      assertEquals(
+        line,
+        "A/B 完了 — f16: sha: 区間 A 一致 · 区間 B 一致 · A と B 一致 · B ÷ A: transformer 壁時計 ×0.500 / GPU ×0.750 / i8a8: sha: 区間 A 一致 · 区間 B 一致 · A と B 一致 · B ÷ A: transformer 壁時計 ×1.000 / GPU ×1.000",
+      );
+    });
+
+    it("1 つの quant でも比べられなければ未完とし、その quant は区間ごとの結末を書く（他の quant は比べる）", () => {
+      const line = abQuantsStatusLine([
+        {
+          quant: "f16",
+          summary: summarizeAb([row({ wallMs: 1, error: "GpuOutOfMemoryError" })], []),
+        },
+        { quant: "i8a8", summary: summarizeAb(ditRows(2000, 2e9), ditRows(1000, 1e9)) },
+      ]);
+      assertEquals(
+        line,
+        "A/B 未完 — f16: 区間 A: 失敗 — GpuOutOfMemoryError · 区間 B: 回していない / i8a8: sha: 区間 A 一致 · 区間 B 一致 · A と B 一致 · B ÷ A: transformer 壁時計 ×0.500 / GPU ×0.500",
+      );
+    });
+  });
+
+  describe("quant が 1 つのとき", () => {
+    it("sha の判定・全体と transformer の B ÷ A を 1 句にして quant 名を添える", () => {
+      const summary = summarizeAb(ditRows(2000, 2e9), ditRows(1500, 1.5e9));
+      assertEquals(
+        abQuantsStatusLine([{ quant: "f16", summary }]),
+        "A/B 完了 — f16: sha: 区間 A 一致 · 区間 B 一致 · A と B 一致 · B ÷ A: 全体 ×0.750 · transformer 壁時計 ×0.750 / GPU ×0.750",
+      );
+    });
+  });
+
+  it("quant の要約が無ければ投げる", () => {
+    assertThrows(() => abQuantsStatusLine([]), Error, "quant の要約が無い");
   });
 });

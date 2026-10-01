@@ -209,18 +209,57 @@ export const abTableRows = (summary: AbSummary): AbTableRow[] => {
   ];
 };
 
-/** 状態行の 1 行（sha の判定と、全体と DiT の B ÷ A）。 */
-export const abStatusLine = (summary: AbSummary): string => {
-  const { a, b, comparison } = summary;
-  if (comparison === undefined) {
-    return `A/B 未完 — 区間 A: ${intervalCell(a)} · 区間 B: ${intervalCell(b)}`;
-  }
-  const transformer = comparison.stages.find((stage) => stage.component === "transformer");
-  return `A/B 完了 — sha: 区間 A ${a.kind === "ok" && a.sha.match ? "一致" : "不一致"} · 区間 B ${
+/** sha の判定（区間 A の中・区間 B の中・A と B の間）。 */
+const shaVerdicts = (summary: AbSummary, comparison: AbComparison): string => {
+  const { a, b } = summary;
+  return `sha: 区間 A ${a.kind === "ok" && a.sha.match ? "一致" : "不一致"} · 区間 B ${
     b.kind === "ok" && b.sha.match ? "一致" : "不一致"
-  } · A と B ${comparison.shaMatch ? "一致" : "不一致"} · B ÷ A: 全体 ${
-    formatRatio(comparison.wallMs.ratio)
-  } · transformer 壁時計 ${formatRatio(transformer?.wallMs.ratio)} / GPU ${
+  } · A と B ${comparison.shaMatch ? "一致" : "不一致"}`;
+};
+
+const transformerRatios = (comparison: AbComparison): string => {
+  const transformer = comparison.stages.find((stage) => stage.component === "transformer");
+  return `transformer 壁時計 ${formatRatio(transformer?.wallMs.ratio)} / GPU ${
     formatRatio(transformer?.gpuNs.ratio)
   }`;
+};
+
+/** 比べられなかった A/B の句（どの区間がどうなったか）。 */
+const incompletePhrase = ({ a, b }: AbSummary): string =>
+  `区間 A: ${intervalCell(a)} · 区間 B: ${intervalCell(b)}`;
+
+/** quant 1 つ分の A/B の要約。 */
+export type AbQuantSummary = { readonly quant: string; readonly summary: AbSummary };
+
+/**
+ * A/B で回す quant の並び。`all` なら選択肢の全部（select の並び順 — 既定の quant を先頭に寄せない）、
+ * そうでなければ選ばれている 1 つ。
+ */
+export const abQuantPlan = (
+  options: readonly string[],
+  selected: string,
+  all: boolean,
+): readonly string[] => {
+  // 選択肢に無い quant を回すと manifest に無い quant で GPU を取りに行く — 押した時点で止める
+  if (!options.includes(selected)) throw Error(`A/B: quant ${selected} が選択肢に無い`);
+  return all ? options : [selected];
+};
+
+/**
+ * quant ごとの A/B を状態行の 1 行に並べる（`<quant>: <句> / <quant>: <句>`）。全ての quant で比べられたら
+ * 「完了」、1 つでも比べられなければ「未完」。quant が 1 つなら全体の B ÷ A も含め、2 つ以上なら行が長くなるので
+ * sha の判定と transformer の B ÷ A だけ。
+ */
+export const abQuantsStatusLine = (results: readonly AbQuantSummary[]): string => {
+  if (results.length === 0) throw Error("A/B の状態行: quant の要約が無い");
+  const complete = results.every(({ summary }) => summary.comparison !== undefined);
+  const phrases = results.map(({ quant, summary }) => {
+    const { comparison } = summary;
+    if (comparison === undefined) return `${quant}: ${incompletePhrase(summary)}`;
+    const overall = results.length === 1 ? `全体 ${formatRatio(comparison.wallMs.ratio)} · ` : "";
+    return `${quant}: ${shaVerdicts(summary, comparison)} · B ÷ A: ${overall}${
+      transformerRatios(comparison)
+    }`;
+  });
+  return `A/B ${complete ? "完了" : "未完"} — ${phrases.join(" / ")}`;
 };

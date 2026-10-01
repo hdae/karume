@@ -205,18 +205,23 @@ distribution; without one (see [Running](#running)) every control is disabled.
   of the PNG's SHA-256, and the error. A failed generate stops the batch. The latest image is shown
   next to the table.
 - **A/B（既定 vs 表）** runs a self A/B of the applied geometry profile with the current settings
-  (quant, resolution, seed, prompt, steps, guidance scale, residency, and N): interval A injects
+  (resolution, seed, prompt, steps, guidance scale, residency, and N): interval A injects
   `default` and runs N generates, then interval B uses the applied profile choice (`自動`,
-  `builtin:<id>`, or a derived or saved table) and runs N generates. A table is fixed per device, so
-  before each interval the pipeline and the device are disposed and acquired again with that
-  interval's choice (the resident DiT is not carried over). Interval A's `default` is internal to
-  the tab: the header selection and the applied settings do not change, and when the run ends the
-  tab holds a device with the applied settings (if interval A fails, its device is disposed and the
-  next action acquires one with the applied settings). The rows go into the same table
-  (`geometryProfileRequested` tells the intervals apart); progress reads
-  `A/B 区間 A（default）generate 2/2`. A failed row stops the run, and a failure in interval A skips
-  interval B. When it ends, the status line and a summary table below the rows show whether the PNG
-  SHA-256 agrees within interval A, within interval B, and between them (with the first 12 hex
+  `builtin:<id>`, or a derived or saved table) and runs N generates. With **全 quant** checked (the
+  default), it runs this A/B once per quant in the quant list's order (quant outer, interval inner),
+  so N = 3 with two quants gives 12 rows; unchecked, it runs only the selected quant. A table is
+  fixed per device, and so is the quant, so before each interval the pipeline and the device are
+  disposed and acquired again with that interval's choice and quant (the resident DiT is not
+  carried over). Interval A's `default` and the quant being run are internal to the tab: the header
+  selection, the applied settings, and the quant select do not change, and when the run ends the
+  tab holds a device with the applied settings and the selected quant (otherwise its device is
+  disposed and the next action acquires one with them). The rows go into the same table
+  (`quant` and `geometryProfileRequested` tell the runs apart); progress reads
+  `A/B f16・区間 A（default）generate 2/3`. A failed row stops that quant's A/B, and a failure in
+  interval A skips that quant's interval B; the next quant still runs. When it ends, the status line
+  (one phrase per quant: `A/B 完了 — <quant>: <sha verdicts> · B ÷ A: <transformer ratios> / …`,
+  with the whole-generate ratio too when only one quant ran) and one summary table per quant below
+  the rows (its caption names the quant) show whether the PNG SHA-256 agrees within interval A, within interval B, and between them (with the first 12 hex
   digits when it does not), and, for the whole generate (`wallMs`) and for each stage
   (`text_encoder`, `text_conditioner`, `transformer`, `vae_decoder`), the wall time and GPU time
   (`stages[].gpu.totalNs`; `—` without GPU time) of each interval and B ÷ A (below 1 means
@@ -278,8 +283,10 @@ comparable to wall times with it off.
    geometry does not change the result bits — ADR 0115), and the DiT stage time shows the effect
    of the table.
    **A/B（既定 vs 表）** does the same comparison against `default` in one press: with the table
-   applied and N = 2, the summary shows `一致` within interval A, within interval B, and
-   `A と B が一致`, and the `transformer` rows give the DiT stage's B ÷ A.
+   applied, N = 3, and **全 quant** checked on a distribution with two quants, the table gains 12
+   rows (3 × 2 intervals × 2 quants), and one summary per quant shows `一致` within interval A,
+   within interval B, and `A と B が一致`, with the `transformer` rows giving the DiT stage's
+   B ÷ A. The quant select and the header still show what they showed before the press.
 5. **Built-in tables can be injected on any GPU.** Apply `apple-metal-3` or `nvidia-blackwell` on a
    machine they do not match. The Anima rows report that id, and the PNG SHA-256 is still the same.
 6. **Automatic selection picks the expected table.** With `自動`, the Anima rows report

@@ -55,7 +55,14 @@ import {
   type StageRecord,
 } from "../../anima-residency/record.ts";
 import { looksQuantized, type StageGpuTiming, topEntries } from "../../anima-residency/timing.ts";
-import { abStatusLine, type AbSummary, abTableRows, summarizeAb } from "./ab-summary.ts";
+import {
+  abQuantPlan,
+  abQuantsStatusLine,
+  type AbQuantSummary,
+  type AbSummary,
+  abTableRows,
+  summarizeAb,
+} from "./ab-summary.ts";
 import {
   adapterSummary,
   checkoutLabel,
@@ -112,6 +119,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     count: element(root, "count", HTMLInputElement),
     run: element(root, "run", HTMLButtonElement),
     ab: element(root, "ab", HTMLButtonElement),
+    abAllQuants: element(root, "ab-all-quants", HTMLInputElement),
     holdGib: element(root, "hold-gib", HTMLInputElement),
     hold: element(root, "hold", HTMLButtonElement),
     release: element(root, "release", HTMLButtonElement),
@@ -138,6 +146,11 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
      * `default`）。ヘッダの適用状態は動かさない — 区間 A は A/B の内部の一時的な取り直しだから。
      */
     choiceOverride?: ProfileChoice;
+    /**
+     * A/B の quant ごとの区間の間だけ、select の代わりに GPU を取る quant。`choiceOverride` と同じく select の
+     * 表示は動かさない — quant の巡回は A/B の内部の一時的な取り直しだから。
+     */
+    quantOverride?: string;
     /** {@link BuildChoice}（`gpu` と同じ寿命）。 */
     build?: BuildChoice;
     pipeline?: AnimaPipeline;
@@ -168,6 +181,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       const control of [
         ui.run,
         ui.ab,
+        ui.abAllQuants,
         ui.hold,
         ui.release,
         ui.dispose,
@@ -221,7 +235,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     const timestamps = settings.timestamps;
     const geometryProfile = injectedProfile(choice);
     return {
-      quant: ui.quant.value,
+      quant: state.quantOverride ?? ui.quant.value,
       gpuTiming: lab.timestampFeature && timestamps,
       geometryProfileRequested: requestedLabel(choice),
       ...(geometryProfile === undefined ? {} : { geometryProfile }),
@@ -577,13 +591,8 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     );
   };
 
-  /** A/B の要約の表（状態行が次の操作で上書きされても読めるように、行の表の下に残す）。 */
-  const renderAbSummary = (summary: AbSummary, labelB: string): void => {
-    const caption = document.createElement("p");
-    caption.className = "muted";
-    caption.textContent = `A/B の要約（${
-      new Date().toLocaleTimeString()
-    }）— 時間は各区間の 2 回目以降の中央値（N = 1 なら 1 回目）。B ÷ A が 1 未満なら区間 B が速い。`;
+  /** A/B の要約の表 1 つ（quant 1 つ分）。 */
+  const abSummaryTable = (summary: AbSummary, labelB: string): HTMLTableElement => {
     const table = document.createElement("table");
     const head = document.createElement("tr");
     for (
@@ -613,7 +622,22 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       tbody.append(tr);
     }
     table.append(thead, tbody);
-    ui.abSummary.replaceChildren(caption, table);
+    return table;
+  };
+
+  /**
+   * A/B の要約の表を quant ごとに縦に並べる（状態行が次の操作で上書きされても読めるように、行の表の下に
+   * 残す）。
+   */
+  const renderAbSummary = (results: readonly AbQuantSummary[], labelB: string): void => {
+    const time = new Date().toLocaleTimeString();
+    ui.abSummary.replaceChildren(...results.flatMap(({ quant, summary }) => {
+      const caption = document.createElement("p");
+      caption.className = "muted";
+      caption.textContent =
+        `A/B の要約 — quant ${quant}（${time}）— 時間は各区間の 2 回目以降の中央値（N = 1 なら 1 回目）。B ÷ A が 1 未満なら区間 B が速い。`;
+      return [caption, abSummaryTable(summary, labelB)];
+    }));
     ui.abSummary.hidden = false;
   };
 
@@ -622,6 +646,8 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
    * device 単位で固定（ADR 0115 追記決定 6）なので、各区間の前に pipeline・GPU を畳んでその区間の選択で
    * 取り直す（常駐 DiT も区間をまたがない）。取り直しは「適用」と同じ手順（`disposeAll` → 次の generate の
    * `ensurePipeline`）で、区間 A の選択はタブの中だけで差し替える — ヘッダの適用状態と select は動かさない。
+   * 「全 quant」なら quant を外側のループにして quant ごとに独立した A/B を回す（quant も GPU を取った時点で
+   * 確定する — {@link BuildChoice} — ので、区間の前の取り直しでそのまま切り替わる）。
    */
   const runAb = async (): Promise<void> => {
     const applied = lab.settings().choice;
@@ -639,32 +665,55 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       return;
     }
     const count = readCount();
+    const selectedQuant = ui.quant.value;
+    const quants = abQuantPlan(
+      Array.from(ui.quant.options, (option) => option.value),
+      selectedQuant,
+      ui.abAllQuants.checked,
+    );
     const appliedLabel = requestedLabel(applied);
     const intervals: readonly { readonly name: string; readonly choice: ProfileChoice }[] = [
       { name: "A", choice: AB_BASELINE },
       { name: "B", choice: applied },
     ];
-    const rowsByInterval: Row[][] = [];
+    const results: AbQuantSummary[] = [];
     ui.abSummary.hidden = true;
     try {
-      for (const { name, choice } of intervals) {
-        state.choiceOverride = choice;
-        await disposeAll();
-        const rows = await generateBatch(count, `A/B 区間 ${name}（${requestedLabel(choice)}）`);
-        rowsByInterval.push(rows);
-        // 区間 A で失敗したら区間 B は回さない（「N 回生成」と同じく失敗で止める）
-        if (rows.some((row) => row.error !== undefined)) break;
+      for (const quant of quants) {
+        state.quantOverride = quant;
+        const rowsByInterval: Row[][] = [];
+        for (const { name, choice } of intervals) {
+          state.choiceOverride = choice;
+          await disposeAll();
+          const rows = await generateBatch(
+            count,
+            `A/B ${quant}・区間 ${name}（${requestedLabel(choice)}）`,
+          );
+          rowsByInterval.push(rows);
+          // 区間 A で失敗したらその quant の区間 B は回さない（「N 回生成」と同じく失敗で止める）。次の quant へは
+          // 進む — quant ごとの A/B は GPU を取り直すので互いに独立
+          if (rows.some((row) => row.error !== undefined)) break;
+        }
+        results.push({
+          quant,
+          summary: summarizeAb(rowsByInterval[0] ?? [], rowsByInterval[1] ?? []),
+        });
       }
     } finally {
       state.choiceOverride = undefined;
-      // 区間 A の GPU（default を注入）を持ったまま終えない — 以後の操作は適用中の設定の GPU で回る
-      if (state.build !== undefined && state.build.geometryProfileRequested !== appliedLabel) {
+      state.quantOverride = undefined;
+      // A/B の途中の GPU（default を注入・select と違う quant）を持ったまま終えない — 以後の操作は適用中の
+      // 設定と選ばれている quant の GPU で回る
+      if (
+        state.build !== undefined &&
+        (state.build.geometryProfileRequested !== appliedLabel ||
+          state.build.quant !== selectedQuant)
+      ) {
         await disposeAll();
       }
     }
-    const summary = summarizeAb(rowsByInterval[0] ?? [], rowsByInterval[1] ?? []);
-    renderAbSummary(summary, appliedLabel);
-    status(abStatusLine(summary));
+    renderAbSummary(results, appliedLabel);
+    status(abQuantsStatusLine(results));
   };
 
   const holdVram = async (): Promise<void> => {
