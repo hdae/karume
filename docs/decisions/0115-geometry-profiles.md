@@ -125,6 +125,8 @@ export type GeometryProfile = {
 - **入力の門**: GPU timestamp で測った掃引だけを受ける（`gpuTiming.unit` が `ns` または `deno-raw-tick`、かつ
   `quantized` が false）。`gpuTiming` が欠けた掃引と壁時計（`wall`）の掃引は拒む。壁時計や 100 µs 丸めの掃引は
   比が 1 へ縮むので、生成を止める（fail loudly）。
+  > 2026-10-01 改定（ADR [0117](0117-app-geometry-tuning.md)）: 量子化フラグでの一律拒否をやめ、観測ごとの丸め誤差の上界（比で 1% 以下）で
+  > 判定する。超えた観測はその掃引の比の材料から外す。壁時計だけの記録と `gpuTiming` の無い記録は引き続き拒む。
 - **合成**: 全ての掃引の adapter が同じであること（違えば落とす）。同じ sha256 の JSON を 2 度渡しても落とす。
   同じ (ケース, 幾何) を複数の掃引が測っていれば、比はその観測の幾何平均にする。出力の一致と失敗は全観測で見る。
 - **既定の行の突合**: 掃引の既定の行（`isDefault`）の幾何が、今の runtime の既定（欄ごとの fallback — 決定 5 の表）と
@@ -555,3 +557,19 @@ export type GeometryProfile = {
   （公開面の `BUILTIN_GEOMETRY_PROFILES` から id で引く）。
 - 検収: 選択順・門・公開面（+1 値）・per-profile の GPU テスト（B570・Uint32 一致）・生成器の除外規則（故障注入で赤）・独立レビュー
   （中 2 件 = 除外は比だけに効かせる・掃引間の adapter 一致検査に description、を反映）。
+
+### 追記決定 9: 利用者アプリの中で掃引 → 生成 → 保存 → 注入を回す（ADR 0117・利用者裁定 2026-10-01）
+
+- 利用者ストーリーを足す: 利用者アプリが自分の端末で掃引し、表を作って保存し、次の `acquireGpu` に注入する。開発者が実機を持たない端末の
+  利用者も、自分の端末向けの表を得られる。入口は `@karume/runtime` のサブパス `./tune`（ADR [0117](0117-app-geometry-tuning.md) 決定 1 / 2）。
+- 決定 4 の「入力の門」を改定する: 量子化フラグ（`gpuTiming.quantized`）での一律拒否をやめ、観測ごとの丸め誤差の上界（比で 1% 以下）で
+  判定する。超えた観測はその掃引の比の材料から外す（追記決定 8 と同じ流儀）。壁時計だけの記録は引き続き拒む（ADR 0117 決定 3）。
+- `provenance` を構造化する（adapter の 4 欄・カーネルの指紋・ケース集合の版・候補集合 — ADR 0117 決定 4）。照合は純関数
+  `geometryProfileMismatch` でアプリが行い、runtime は注入時に照合しない（追記決定 6 のまま）。注入口に
+  `(adapterInfo) => GeometryProfile | undefined` の同期コールバック形を足す（ADR 0117 決定 6）。
+- 据え置く不変条件: acquire / Session の経路で測らない（決定 8・ADR 0022 追記の MUST。`./tune` の掃引は利用者が明示的に呼ぶ入口なので、
+  主語を「runtime」から「acquire / Session の経路」へ言い直す）・表は device の寿命の間は不変で、次の `acquireGpu` から効く・掃引は
+  専用の device で行い、推論と並走させない。
+- 責任の分界は ADR 0117 決定 9。runtime が保証するのは、注入された表を変えないこと・acquire / Session の経路で測らないこと・注入時の
+  構造検査だけ。アプリ内で作った表の出力一致の証拠は掃引の門（ケース集合の範囲）だけで、E2E の sha 門は掛からない。どの表で走ったかの
+  記録はアプリの責任。
