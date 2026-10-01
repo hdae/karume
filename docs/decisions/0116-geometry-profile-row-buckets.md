@@ -7,7 +7,8 @@
   [0106](0106-device-keyed-references.md)（sha256 参照値を環境キーごとの行で持つ）/ perf-ledger K-70・K-71。
   読み取り調査（file:line の引用・数値シミュレーション・論点 1〜9）は `.claude/reviews/2026-10-01_rows-buckets-recon/SUMMARY.md`
   （git 追跡外）。シミュレーションのスクリプトも同じ場所。実測の正本は [research K-70](../research/2026-09-27-k70-metal-per-op.md) §13 / §14。
-  実装 = `tools/geometry-sweep/cases.ts`（境界の定数 `PROFILE_GEMM_ROWS_BOUNDS` と掃引ケース）・`tools/geometry-sweep/derive.ts`（生成器）。
+  実装 = `packages/runtime/src/tune/cases.ts`（境界の定数 `PROFILE_GEMM_ROWS_BOUNDS` と掃引ケース）・`packages/runtime/src/tune/derive.ts`（生成器）
+  — 2026-10-01 に ADR 0117 段 2 で `tools/geometry-sweep/` から移した。
 
 ## Context
 
