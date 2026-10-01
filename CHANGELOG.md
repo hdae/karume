@@ -137,7 +137,10 @@ measurements in `docs/research/`.
   Chrome gets a profile measured on an RTX 5070 Ti that changes only the i8a8 linear and attention
   tiles (the 512² DiT stage of the default quant took 1.14 s of GPU time instead of 1.36 s); its
   f32 kernels keep the default. Outputs stay
-  bit-identical across geometries. On an M2 under Chrome, the 512² DiT stage of Anima's `f16`
+  bit-identical across geometries. Both built-in profiles now carry seven `gemmRows` rules
+  (M ≤ 16 / 32 / 64 / 128 / 256 / 512 / > 512, ADR 0116) instead of the default table's three,
+  each measured with linear, matmul and bmm cases; the default table is unchanged. On an M2
+  under Chrome, the 512² DiT stage of Anima's `f16`
   quant took 45 s instead of 80 s (GPU time 44 s instead of 77 s) and the default quant 71 s
   instead of 82 s; the PNG bytes are unchanged.
 
