@@ -38,6 +38,7 @@ import {
   parseResolution,
 } from "../../../packages/models/anima.ts";
 import { encodePng } from "../../../packages/models/mod.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../../../packages/runtime/src/kernels/geometry-profile.ts";
 import { infinityJson } from "../../geometry-sweep/derive.ts";
 import {
   createGenerateRecorder,
@@ -54,6 +55,7 @@ import {
   type StageRecord,
 } from "../../anima-residency/record.ts";
 import { looksQuantized, type StageGpuTiming, topEntries } from "../../anima-residency/timing.ts";
+import { abStatusLine, type AbSummary, abTableRows, summarizeAb } from "./ab-summary.ts";
 import {
   adapterSummary,
   checkoutLabel,
@@ -62,6 +64,7 @@ import {
   element,
   injectedProfile,
   type Lab,
+  type ProfileChoice,
   requestedLabel,
   setStatus,
   sha256Hex,
@@ -70,6 +73,9 @@ import {
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
+
+/** A/B の区間 A の選択（既定の表を注入 — 「表を入れなかったら」の基準）。 */
+const AB_BASELINE: ProfileChoice = { kind: "default", profile: DEFAULT_GEOMETRY_PROFILE };
 
 /**
  * GPU を取った時点で確定する構成（変えるには「pipeline を破棄」— GPU ごと畳む。幾何プロファイルと
@@ -105,6 +111,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     quant: element(root, "quant", HTMLSelectElement),
     count: element(root, "count", HTMLInputElement),
     run: element(root, "run", HTMLButtonElement),
+    ab: element(root, "ab", HTMLButtonElement),
     holdGib: element(root, "hold-gib", HTMLInputElement),
     hold: element(root, "hold", HTMLButtonElement),
     release: element(root, "release", HTMLButtonElement),
@@ -114,6 +121,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     info: element(root, "info", HTMLElement),
     dummies: element(root, "dummies", HTMLElement),
     rows: element(root, "rows", HTMLTableSectionElement),
+    abSummary: element(root, "ab-summary", HTMLElement),
     image: element(root, "image", HTMLImageElement),
   };
 
@@ -125,6 +133,11 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     /** GPU を取ったときに書いた情報行（直近の generate の幾何プロファイルを足す土台）。 */
     info?: string;
     gpu?: GpuContext;
+    /**
+     * A/B の区間の間だけ、ページの GPU 設定の代わりに GPU を取る幾何プロファイルの選び方（区間 A の
+     * `default`）。ヘッダの適用状態は動かさない — 区間 A は A/B の内部の一時的な取り直しだから。
+     */
+    choiceOverride?: ProfileChoice;
     /** {@link BuildChoice}（`gpu` と同じ寿命）。 */
     build?: BuildChoice;
     pipeline?: AnimaPipeline;
@@ -154,6 +167,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     for (
       const control of [
         ui.run,
+        ui.ab,
         ui.hold,
         ui.release,
         ui.dispose,
@@ -195,14 +209,16 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
 
   const setBusy = (busy: boolean): void => {
     state.busy = busy;
-    for (const button of [ui.run, ui.hold, ui.release, ui.dispose]) button.disabled = busy;
+    for (const button of [ui.run, ui.ab, ui.hold, ui.release, ui.dispose]) button.disabled = busy;
     ui.exportJson.disabled = busy || (state.rows.length === 0 && state.holds.length === 0);
     renderBuildControls();
   };
 
   /** いま選ばれている構成（GPU を取るときに {@link BuildChoice} として確定させる）。 */
   const selectedChoice = (): BuildChoice => {
-    const { choice, timestamps } = lab.settings();
+    const settings = lab.settings();
+    const choice = state.choiceOverride ?? settings.choice;
+    const timestamps = settings.timestamps;
     const geometryProfile = injectedProfile(choice);
     return {
       quant: ui.quant.value,
@@ -521,20 +537,37 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     }
   };
 
-  const runGenerates = async (): Promise<void> => {
+  const readCount = (): number => {
     const count = Number(ui.count.value);
     if (!Number.isInteger(count) || count < 1) {
       throw Error(`生成回数 ${ui.count.value} が正の整数でない`);
     }
+    return count;
+  };
+
+  /**
+   * N 回の generate を表に積み、この回で積んだ行を返す（失敗した行で止める）。`label` は進捗の前置
+   * （A/B の区間名）。
+   */
+  const generateBatch = async (count: number, label: string): Promise<Row[]> => {
+    const rows: Row[] = [];
     for (let i = 0; i < count; i++) {
-      const row = await generateOnce(`generate ${i + 1}/${count}`);
+      const row = await generateOnce(`${label}generate ${i + 1}/${count}`);
       state.rows.push(row);
       appendRow(row);
       showGeometryProfiles(row);
-      if (row.error !== undefined) {
-        status(`generate ${i + 1}/${count} が失敗したので止めました（表の行を参照）`);
-        return;
-      }
+      rows.push(row);
+      if (row.error !== undefined) break;
+    }
+    return rows;
+  };
+
+  const runGenerates = async (): Promise<void> => {
+    const count = readCount();
+    const rows = await generateBatch(count, "");
+    if (rows.at(-1)?.error !== undefined) {
+      status(`generate ${rows.length}/${count} が失敗したので止めました（表の行を参照）`);
+      return;
     }
     const last = state.rows.at(-1);
     status(
@@ -542,6 +575,96 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
         last?.pngSha256?.slice(0, 12)
       }`,
     );
+  };
+
+  /** A/B の要約の表（状態行が次の操作で上書きされても読めるように、行の表の下に残す）。 */
+  const renderAbSummary = (summary: AbSummary, labelB: string): void => {
+    const caption = document.createElement("p");
+    caption.className = "muted";
+    caption.textContent = `A/B の要約（${
+      new Date().toLocaleTimeString()
+    }）— 時間は各区間の 2 回目以降の中央値（N = 1 なら 1 回目）。B ÷ A が 1 未満なら区間 B が速い。`;
+    const table = document.createElement("table");
+    const head = document.createElement("tr");
+    for (
+      const title of [
+        "",
+        `区間 A（${requestedLabel(AB_BASELINE)}）`,
+        `区間 B（${labelB}）`,
+        "B ÷ A",
+      ]
+    ) {
+      const th = document.createElement("th");
+      th.textContent = title;
+      head.append(th);
+    }
+    const thead = document.createElement("thead");
+    thead.append(head);
+    const tbody = document.createElement("tbody");
+    for (const cells of abTableRows(summary)) {
+      const tr = document.createElement("tr");
+      for (const value of cells) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        if (value.startsWith("失敗")) td.className = "error";
+        else if (value.includes("不一致")) td.className = "bad";
+        tr.append(td);
+      }
+      tbody.append(tr);
+    }
+    table.append(thead, tbody);
+    ui.abSummary.replaceChildren(caption, table);
+    ui.abSummary.hidden = false;
+  };
+
+  /**
+   * 同じ設定のまま、区間 A（`default` を注入）→ 区間 B（適用中の選択）を N 回ずつ回して要約する。表は
+   * device 単位で固定（ADR 0115 追記決定 6）なので、各区間の前に pipeline・GPU を畳んでその区間の選択で
+   * 取り直す（常駐 DiT も区間をまたがない）。取り直しは「適用」と同じ手順（`disposeAll` → 次の generate の
+   * `ensurePipeline`）で、区間 A の選択はタブの中だけで差し替える — ヘッダの適用状態と select は動かさない。
+   */
+  const runAb = async (): Promise<void> => {
+    const applied = lab.settings().choice;
+    if (applied.kind === "default") {
+      status(
+        "適用中の幾何プロファイルが default なので A/B にならない（区間 B が区間 A と同じ）— ヘッダで別の選択を適用してから",
+      );
+      return;
+    }
+    if (state.dummies.length > 0) {
+      // 取り直すとダミーも畳まれる — 区間 A だけダミー有りの GPU で回る形を作らない
+      status(
+        "ダミーを確保中なので A/B を回さない（区間ごとに GPU を取り直すとダミーも畳まれ、押す前と条件が変わる）— 「ダミーを解放」してから",
+      );
+      return;
+    }
+    const count = readCount();
+    const appliedLabel = requestedLabel(applied);
+    const intervals: readonly { readonly name: string; readonly choice: ProfileChoice }[] = [
+      { name: "A", choice: AB_BASELINE },
+      { name: "B", choice: applied },
+    ];
+    const rowsByInterval: Row[][] = [];
+    ui.abSummary.hidden = true;
+    try {
+      for (const { name, choice } of intervals) {
+        state.choiceOverride = choice;
+        await disposeAll();
+        const rows = await generateBatch(count, `A/B 区間 ${name}（${requestedLabel(choice)}）`);
+        rowsByInterval.push(rows);
+        // 区間 A で失敗したら区間 B は回さない（「N 回生成」と同じく失敗で止める）
+        if (rows.some((row) => row.error !== undefined)) break;
+      }
+    } finally {
+      state.choiceOverride = undefined;
+      // 区間 A の GPU（default を注入）を持ったまま終えない — 以後の操作は適用中の設定の GPU で回る
+      if (state.build !== undefined && state.build.geometryProfileRequested !== appliedLabel) {
+        await disposeAll();
+      }
+    }
+    const summary = summarizeAb(rowsByInterval[0] ?? [], rowsByInterval[1] ?? []);
+    renderAbSummary(summary, appliedLabel);
+    status(abStatusLine(summary));
   };
 
   const holdVram = async (): Promise<void> => {
@@ -706,6 +829,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
   };
 
   ui.run.addEventListener("click", exclusive(runGenerates));
+  ui.ab.addEventListener("click", exclusive(runAb));
   ui.hold.addEventListener("click", exclusive(holdVram));
   ui.release.addEventListener("click", exclusive(releaseDummies));
   ui.dispose.addEventListener("click", exclusive(disposeAll));

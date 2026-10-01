@@ -200,6 +200,28 @@ distribution; without one (see [Running](#running)) every control is disabled.
   stages agree, otherwise `component id` per stage), the residency events, the first 12 hex digits
   of the PNG's SHA-256, and the error. A failed generate stops the batch. The latest image is shown
   next to the table.
+- **A/B（既定 vs 表）** runs a self A/B of the applied geometry profile with the current settings
+  (quant, resolution, seed, prompt, steps, guidance scale, residency, and N): interval A injects
+  `default` and runs N generates, then interval B uses the applied profile choice (`自動`,
+  `builtin:<id>`, or a derived or saved table) and runs N generates. A table is fixed per device, so
+  before each interval the pipeline and the device are disposed and acquired again with that
+  interval's choice (the resident DiT is not carried over). Interval A's `default` is internal to
+  the tab: the header selection and the applied settings do not change, and when the run ends the
+  tab holds a device with the applied settings (if interval A fails, its device is disposed and the
+  next action acquires one with the applied settings). The rows go into the same table
+  (`geometryProfileRequested` tells the intervals apart); progress reads
+  `A/B 区間 A（default）generate 2/2`. A failed row stops the run, and a failure in interval A skips
+  interval B. When it ends, the status line and a summary table below the rows show whether the PNG
+  SHA-256 agrees within interval A, within interval B, and between them (with the first 12 hex
+  digits when it does not), and, for the whole generate (`wallMs`) and for each stage
+  (`text_encoder`, `text_conditioner`, `transformer`, `vae_decoder`), the wall time and GPU time
+  (`stages[].gpu.totalNs`; `—` without GPU time) of each interval and B ÷ A (below 1 means
+  interval B is faster). Each interval's time is the median of its 2nd and later generates, because
+  the 1st loads the DiT (with N = 1, the only generate). A failed interval shows `失敗 — <error name>`
+  and no times. The button does nothing but explain on the status line when the applied profile is
+  `default` (interval B would equal interval A) or dummy buffers are held (acquiring again would
+  drop them in the middle of the comparison). The summary is not written to the JSON; the rows
+  carry everything it is computed from.
 - The line above the status shows the adapter, distribution, quant, GPU time, the requested profile
   (`幾何プロファイルの要求`), and after a generate the reported profile id(s).
 - **JSON を保存** downloads `anima-residency-browser-<quant>-<timestamp>.json`.
@@ -251,6 +273,9 @@ comparable to wall times with it off.
    and resolution, and compare: the PNG SHA-256 is the same as with the injected table (tile
    geometry does not change the result bits — ADR 0115), and the DiT stage time shows the effect
    of the table.
+   **A/B（既定 vs 表）** does the same comparison against `default` in one press: with the table
+   applied and N = 2, the summary shows `一致` within interval A, within interval B, and
+   `A と B が一致`, and the `transformer` rows give the DiT stage's B ÷ A.
 5. **Built-in tables can be injected on any GPU.** Apply `apple-metal-3` or `nvidia-blackwell` on a
    machine they do not match. The Anima rows report that id, and the PNG SHA-256 is still the same.
 6. **Automatic selection picks the expected table.** With `自動`, the Anima rows report
