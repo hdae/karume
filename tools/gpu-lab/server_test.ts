@@ -1,6 +1,11 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { createHandler, type ServerConfig } from "./server.ts";
+import {
+  createHandler,
+  MissingDistributionError,
+  resolveDistribution,
+  type ServerConfig,
+} from "./server.ts";
 
 const CONFIG: ServerConfig = {
   revision: "test-revision",
@@ -111,6 +116,75 @@ describe("gpu lab server", () => {
         assertEquals(response.status, 404, path);
         await response.body?.cancel();
       }
+    });
+  });
+});
+
+describe("gpu lab distribution resolution", () => {
+  /** console.warn に出た行を集める（本物の warn には流さない）。 */
+  const capturingWarnings = async (
+    body: (warnings: unknown[][]) => Promise<void>,
+  ): Promise<void> => {
+    const original = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => void warnings.push(args);
+    try {
+      await body(warnings);
+    } finally {
+      console.warn = original;
+    }
+  };
+
+  const withDirectory = async (body: (dir: string) => Promise<void>): Promise<void> => {
+    const dir = await Deno.makeTempDir();
+    try {
+      await body(dir);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  };
+
+  it("refuses to start when --source is given but has no karume.json", async () => {
+    await withDirectory(async (dir) => {
+      await capturingWarnings(async (warnings) => {
+        const error = await assertRejects(
+          () => resolveDistribution({ path: dir, explicit: true }),
+          MissingDistributionError,
+        );
+        assertEquals(error.message.startsWith(`--source ${dir} has no karume.json`), true);
+        assertEquals(warnings.length, 0);
+      });
+    });
+  });
+
+  it("refuses to start when --source names a directory that does not exist", async () => {
+    await withDirectory(async (dir) => {
+      await assertRejects(
+        () => resolveDistribution({ path: `${dir}/absent`, explicit: true }),
+        MissingDistributionError,
+      );
+    });
+  });
+
+  it("warns and starts without the distribution when the default location has none", async () => {
+    await withDirectory(async (dir) => {
+      await capturingWarnings(async (warnings) => {
+        assertEquals(
+          await resolveDistribution({ path: `${dir}/absent`, explicit: false }),
+          undefined,
+        );
+        assertEquals(warnings.length, 1);
+        assertEquals(String(warnings[0][0]).includes("has no karume.json"), true);
+      });
+    });
+  });
+
+  it("serves the directory holding karume.json, given explicitly or by default", async () => {
+    await withDirectory(async (dir) => {
+      await Deno.writeTextFile(`${dir}/karume.json`, "{}");
+      const real = await Deno.realPath(dir);
+      assertEquals(await resolveDistribution({ path: dir, explicit: true }), real);
+      assertEquals(await resolveDistribution({ path: dir, explicit: false }), real);
     });
   });
 });

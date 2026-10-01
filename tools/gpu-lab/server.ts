@@ -7,9 +7,10 @@
  * 区間配信と根の閉じ込めはそちらの実装をそのまま使う（同じ規則を二重に持たない）。配るのはページ
  * （`browser/index.html`）・bundle（`/main.js`）・`/config.json`・Anima の配布形（`/models/anima/…`）だけ。
  *
- * 配布形（`karume.json` を持つディレクトリ）が無くても起動する — 掃引とプロファイルのタブはモデルを
- * 使わない。そのときは `/config.json` の `source` が null、`/models/anima/…` は 404 で、Anima のタブは
- * 操作を無効にする。
+ * 既定の置き場に配布形（`karume.json` を持つディレクトリ）が無くても起動する — 掃引とプロファイルの
+ * タブはモデルを使わない。そのときは `/config.json` の `source` が null、`/models/anima/…` は 404 で、
+ * Anima のタブは操作を無効にする。`--source` を明示したのに配布形が無いときは起動しない（指定の誤りを
+ * 黙って Anima 無しの起動にしない）。
  */
 import { containedPath, fileResponse } from "../llm-speed/browser/server.ts";
 import { readCheckout } from "../shared/checkout.ts";
@@ -87,6 +88,31 @@ const findDistribution = async (sourceRoot: string): Promise<string | undefined>
   }
 };
 
+/** `--source` で明示した置き場に配布形が無い（起動を止める）。 */
+export class MissingDistributionError extends Error {
+  override name = "MissingDistributionError";
+}
+
+/**
+ * 配布形の実 path を決める。`explicit`（`--source` を渡した）なのに無ければ
+ * {@link MissingDistributionError} を投げ、既定の置き場に無いだけなら警告して undefined（Anima 無しで起動）。
+ */
+export const resolveDistribution = async (
+  source: { readonly path: string; readonly explicit: boolean },
+): Promise<string | undefined> => {
+  const realSource = await findDistribution(source.path);
+  if (realSource !== undefined) return realSource;
+  if (source.explicit) {
+    throw new MissingDistributionError(
+      `--source ${source.path} has no karume.json (pass the distribution directory, or omit --source to start without the Anima tab)`,
+    );
+  }
+  console.warn(
+    `${source.path} has no karume.json — serving without the Anima distribution (the Anima tab is disabled; pass --source to enable it)`,
+  );
+  return undefined;
+};
+
 const main = async (): Promise<void> => {
   if (Deno.args.includes("--help")) {
     console.log(
@@ -105,12 +131,16 @@ const main = async (): Promise<void> => {
   }
   const port = Number(args.get("--port") ?? DEFAULT_PORT);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw Error("Invalid port");
-  const sourceRoot = args.get("--source") ?? DEFAULT_SOURCE;
-  const realSource = await findDistribution(sourceRoot);
-  if (realSource === undefined) {
-    console.warn(
-      `${sourceRoot} has no karume.json — serving without the Anima distribution (the Anima tab is disabled; pass --source to enable it)`,
-    );
+  let realSource: string | undefined;
+  try {
+    realSource = await resolveDistribution({
+      path: args.get("--source") ?? DEFAULT_SOURCE,
+      explicit: args.has("--source"),
+    });
+  } catch (error) {
+    if (!(error instanceof MissingDistributionError)) throw error;
+    console.error(error.message);
+    Deno.exit(1);
   }
   const build = await Deno.makeTempDir({ prefix: "karume-gpu-lab-" });
   try {

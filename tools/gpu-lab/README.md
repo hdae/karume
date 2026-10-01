@@ -31,10 +31,12 @@ deno task bench:gpu-lab --port 8790 --source /path/to/karume-anima
 The server bundles the local karume modules into a temporary directory at startup and serves only
 the page, the bundle (`/main.js`), `/config.json` (the checkout revision, dirty flag, bundle hash,
 and distribution name), and the distribution in `models/karume-anima` (the directory containing
-`karume.json`) read-only, with byte ranges. Without `karume.json` in the `--source` directory (or
-without the directory), it prints a warning and still starts: the sweep and profile tabs do not
-need a model, `/config.json` has `source: null`, `/models/anima/…` answers 404, and the Anima tab
-is disabled with `配布形が無い（--source で指定）` on its status line. It listens
+`karume.json`) read-only, with byte ranges. When `--source` is given and that directory has no
+`karume.json` (or does not exist), the server stops with `--source <path> has no karume.json` and
+exit code 1. When `--source` is omitted and `models/karume-anima` has no `karume.json`, it prints a
+warning and still starts: the sweep and profile tabs do not need a model, `/config.json` has
+`source: null`, `/models/anima/…` answers 404, and the Anima tab is disabled with
+`配布形が無い（--source で指定）` on its status line. It listens
 only on the loopback interface and sends the cross-origin isolation headers (COOP / COEP / CORP).
 The page uses the distribution's default model. Only a single distribution directory is served, so
 the cross-repository layout of `karume-anima-extra` is not supported.
