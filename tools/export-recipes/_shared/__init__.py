@@ -5,8 +5,8 @@
 （{@link _shared.decode_series}）・i4 系列の校正条件の判定（{@link _shared.calib_provenance}）・
 据えたコンテナの格納のままの読み戻し（{@link _shared.container_read}）・上流 checkpoint の
 出所の導出と突合（{@link _shared.upstream}）・Gemma 系 SPM-BPE
-トークナイザの compile（{@link _shared.gemma_tokenizer}）・配布リポへ同梱するライセンス原文
-（{@link _shared.licenses}）。
+トークナイザの compile（{@link _shared.gemma_tokenizer}）・VAE decoder の rank 4 書き直しの末端の
+純関数（{@link _shared.vae_rank4}）・配布リポへ同梱するライセンス原文（{@link _shared.licenses}）。
 core へ昇格できる（= repo topology にもモデル台本の運用にも依存しない）と分かったものは
 `karume` 側へ出す。
 """

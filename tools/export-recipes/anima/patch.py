@@ -48,10 +48,8 @@ import torch
 from torch import nn
 from torch.nn import functional
 
+from _shared.vae_rank4 import l2_normalize, nearest_exact_2x
 from karume.rope import assert_rope_lifted
-
-#: nearest-exact アップサンプルの倍率。**整数倍のときだけ** reshape/expand と厳密一致する。
-UPSAMPLE_SCALE = 2
 
 #: VAE パッチ適用済みフラグ。プロセス全域差し替えの副作用を可視化するためだけに持つ
 #: （パッチ後に「パッチ前の参照」を採ると同値検証が恒真化する — ADR 0013 / 0016）。
@@ -114,22 +112,6 @@ def _causal_conv3d_to_conv2d(conv: nn.Conv3d) -> nn.Conv2d:
     return flat
 
 
-def _l2_normalize_channels(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-    """`F.normalize(x, dim=1)` の同値実装（チャネル軸をその場で縮約する）。
-
-    `sum` が縮約軸を attrs で持つようになったので、チャネル方向の L2 を **permute 無し**で
-    書ける（`linalg_vector_norm` は語彙に入れない — ADR 0017）。以前はここで
-    `permute(0,2,3,1)` → 最終次元 sum → `permute(0,3,1,2)` と往復しており、その 2 本が
-    VAE decoder の非コアレス strided トラフィックの 99% を占めていた
-    （docs/research/2026-08-04-vae-axis-reduce-recon.md §2）。
-
-    MUST: `clamp_min(eps) → 除算` の順序は原実装のまま。`+eps` に置き換えると数値意味論が
-    変わる（ゼロ入力で 0 を返す性質が消える）。
-    """
-    norm = torch.sqrt(torch.sum(x * x, dim=1)).clamp(min=eps).unsqueeze(1)
-    return x / norm
-
-
 def _rms_norm_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
     """`QwenImageRMS_norm` の rank4 版。gamma はパッチ時に `(1,C,1,1)` へ整形済み。
 
@@ -141,7 +123,7 @@ def _rms_norm_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("学習された bias 付きの RMS_norm は rank4 パッチの対象外")
     if not self.channel_first:
         raise NotImplementedError("channel_first=False の RMS_norm は rank4 パッチの対象外")
-    return _l2_normalize_channels(x) * self.scale * self.gamma
+    return l2_normalize(x, dim=1) * self.scale * self.gamma
 
 
 def _resample_forward(self: nn.Module, x: torch.Tensor, feat_cache=None, feat_idx=None):
@@ -158,31 +140,9 @@ def _resample_forward(self: nn.Module, x: torch.Tensor, feat_cache=None, feat_id
 
 
 def _upsample_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """nearest-exact ×2 を reshape / expand で表す（データ移動のみなのでビット一致）。
-
-    nearest-exact は出力添字 o を `floor((o+0.5)/scale)` へ写す。scale が整数 2 なら各入力要素の
-    2 連複製と厳密に一致する（非整数倍は写像が一致しないので fail loudly）。
-
-    MUST: `mode` も見る。この置き換えが一致するのは nearest-exact だけで、`nearest` は
-    出力添字を `floor(o/scale)` へ写す別の写像、bilinear 等は補間そのものが違う。
-    """
-    if self.mode != "nearest-exact":
-        raise NotImplementedError(f"nearest-exact 以外のアップサンプルは未対応: {self.mode}")
-    raw = self.scale_factor
-    scale = (
-        (float(raw), float(raw))
-        if isinstance(raw, (int, float))
-        else tuple(float(value) for value in raw)
-    )
-    if scale != (float(UPSAMPLE_SCALE), float(UPSAMPLE_SCALE)):
-        raise NotImplementedError(f"×{UPSAMPLE_SCALE} 以外の nearest-exact は未対応: {scale}")
-    batch, channels, height, width = x.shape
-    wide = x.reshape(batch * channels * height, width, 1)
-    wide = wide.expand(batch * channels * height, width, UPSAMPLE_SCALE)
-    wide = wide.reshape(batch * channels, height, UPSAMPLE_SCALE * width)
-    tall = wide.reshape(batch * channels, height, 1, UPSAMPLE_SCALE * width)
-    tall = tall.expand(batch * channels, height, UPSAMPLE_SCALE, UPSAMPLE_SCALE * width)
-    return tall.reshape(batch, channels, UPSAMPLE_SCALE * height, UPSAMPLE_SCALE * width)
+    """`QwenImageUpsample` の nearest-exact ×2 を reshape / expand で表す（ビット一致 — 正本は
+    {@link _shared.vae_rank4.nearest_exact_2x}・wan の chunk グラフと共有）。"""
+    return nearest_exact_2x(self, x)
 
 
 def _attention_block_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:

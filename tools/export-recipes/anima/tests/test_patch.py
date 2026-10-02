@@ -18,6 +18,7 @@ from torch.nn import functional
 
 qwenimage = pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_qwenimage")
 
+from _shared.vae_rank4 import l2_normalize  # noqa: E402
 from anima import patch as patch_anima  # noqa: E402
 
 
@@ -118,7 +119,7 @@ class TestChannelL2:
         torch.manual_seed(0)
         x = torch.randn(1, 6, 4, 5, dtype=torch.float64)
 
-        got = patch_anima._l2_normalize_channels(x)
+        got = l2_normalize(x, dim=1)
 
         assert float((got - functional.normalize(x, dim=1)).abs().max()) < 1e-14
 
@@ -126,7 +127,7 @@ class TestChannelL2:
         """ゼロ入力でも 0/0 にならない（`clamp_min` が効いている）ことを故障注入で確認する。"""
         zeros = torch.zeros(1, 3, 2, 2)
 
-        got = patch_anima._l2_normalize_channels(zeros)
+        got = l2_normalize(zeros, dim=1)
 
         assert torch.isfinite(got).all()
         assert torch.equal(got, zeros)

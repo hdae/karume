@@ -39,13 +39,14 @@ silent rather than red — the recipe tests guard every upstream package with `p
 `skipif`, so `uv run pytest` still passes green while none of the model cases actually run. Whenever
 the environment has been rebuilt, re-run the `--all-groups` command above from this directory.
 
-The family dependency groups (`anima` / `sbv2` / `siglip2` / `siglip2-preprocess` / `birefnet` /
-`depth-anything` / `depth-anything-preprocess` / `gemma4-qat`) are declared in this directory's
-[`pyproject.toml`](pyproject.toml) and are deliberately **not** part of a bare `uv sync` — the base
-dependencies alone must keep the core tests and the tiny goldens running. Upstream packages that
-would otherwise pin the whole environment are taken temporarily with `uv run --with …` instead of a
-group. Inside a group, the package whose modeling code a patch layer replaces is pinned with `==`
-(a minor update silently changes the graph shape); packages with nothing to replace stay on `>=`.
+The family dependency groups (`anima` / `wan` / `sbv2` / `siglip2` / `siglip2-preprocess` /
+`birefnet` / `depth-anything` / `depth-anything-preprocess` / `gemma4-qat`) are declared in this
+directory's [`pyproject.toml`](pyproject.toml) and are deliberately **not** part of a bare `uv sync`
+— the base dependencies alone must keep the core tests and the tiny goldens running. Upstream
+packages that would otherwise pin the whole environment are taken temporarily with `uv run --with …`
+instead of a group. Inside a group, the package whose modeling code a patch layer replaces is pinned
+with `==` (a minor update silently changes the graph shape); packages with nothing to replace stay on
+`>=`.
 The reasoning is written per group in [`pyproject.toml`](pyproject.toml).
 
 Scripts are started as **modules from this directory**, never by path:
@@ -122,6 +123,7 @@ release gate, and this reorganization only creates its precondition.
 | `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                                                        | [minicpm5/README.md](minicpm5/README.md)             |
 | `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B as 3 series (1-shot / states-form decode / token-only exit) — the mixed i8 × i4 fixture, plus the `karume-gemma4` distribution          | [gemma4/README.md](gemma4/README.md)                 |
 | `gemma4-qat` (causal LM, mobile QAT)  | the official Gemma 4 E2B / E4B mobile QAT text decoders with their fixed INT2/INT4/INT8 payloads and PLE, plus the `karume-gemma4-qat` distribution | [gemma4_qat/README.md](gemma4_qat/README.md)         |
+| `wan` (text-to-video)                 | Wan2.1 T2V 1.3B: the DiT as one S-form graph and the video VAE decoder as two chunk graphs, with golden fixtures — series only, no distribution yet | [wan/README.md](wan/README.md)                       |
 
 ## Patch layers
 
