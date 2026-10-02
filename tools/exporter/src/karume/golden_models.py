@@ -925,7 +925,7 @@ class BilinearResize(nn.Module):
 
 
 class Int8Weights(nn.Module):
-    """i8 格納（per-channel scale）で **`WEIGHT_SLOTS` の 6 op のうち conv3d を除く 5 op** を踏む golden
+    """i8 格納（per-channel scale）で `WEIGHT_SLOTS` の 6 op のうち conv3d を除く 5 op を踏む golden
     （ADR 0019・conv3d の i8 はランタイムの GPU テストが持つ）。
 
     MUST: 重みの**行長も総要素数も 4 の倍数にしない**。i8 は 4 要素を 1 u32 へ詰めるので、
