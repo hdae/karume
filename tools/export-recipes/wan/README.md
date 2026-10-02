@@ -114,6 +114,46 @@ Measured on 2026-10-02 (tile 32):
 The GPU check is `packages/models/tests/e2e_wan_vae_chunks_test.ts` (one tile = one batch, only the
 frames are read back; fault injections must leave the tolerance).
 
+### Tiled decode (stage 5)
+
+The chunk graphs take a fixed `t×t` latent tile, so the host tiles the full frame: tiles outside,
+chunks inside (the cache is zeroed again at every tile, like the upstream `tiled_decode`).
+`wan/vae_tiling.py` is the Python side of the geometry and writes the references; the TypeScript
+side is `packages/models/src/wan/vae-tiles.ts`.
+
+- **Geometry.** Rounded equal spacing with the last tile snapped to `extent − tile` (the Anima rule,
+  ADR 0033), using the fewest tiles whose neighbours overlap by at least 8 latents (64 px — the
+  upstream default blend, 256 − 192). The upstream `range(0, H, stride)` walk leaves a short last
+  tile, which a fixed-shape graph cannot take. 832×480 (latent 60×104) is 3 × 4 = 12 tiles: rows
+  start at 0 / 14 / 28 and columns at 0 / 24 / 48 / 72 (overlaps of 144 px and 64 px; 1.97× the
+  untiled area). The tile side and the scale are read from the asset's declared shapes.
+- **Blend and paste.** `blend_v` / `blend_h` are copied verbatim from `AutoencoderKLWan` (vertical
+  first, in place, over every frame). Tile `i` pastes the region `[starts[i], starts[i+1])`, the
+  last one up to the edge. `clamp(-1, 1)` comes after the paste.
+- **Frozen plan.** The tile starts are pinned as literal tables on both sides (`MIRRORED_STARTS` in
+  `wan/tests/test_vae_tiling.py`, `AXIS_STARTS` in `packages/models/tests/wan_vae_tiles_test.ts`),
+  and the reference fixtures carry the plan in their metadata for the GPU test to compare.
+
+```bash
+uv run --group wan --inexact python -m wan.vae_tiling   # vae_tiles.{band,accept}.safetensors (CPU, about 30 minutes)
+```
+
+`band` is a seeded latent `[16,9,60,104]` (832×480, 33 frames) with the tiled reference and the
+upstream untiled `_decode` chunk loop, both before the clamp. `accept` is another seed in portrait,
+`[16,3,104,60]` (480×832, 9 frames), where a row / column mix-up shows in the values.
+
+Measured on 2026-10-02 (B570, Deno 2.9.6):
+
+| Check                                                      | Result                                            |
+| ---------------------------------------------------------- | ------------------------------------------------- |
+| one 32×32 tile (GPU) vs the untiled chunk loop             | bit-exact (Uint32)                                |
+| GPU tiled decode vs the tiled reference, `band`            | max abs 3.87e-6 (ratio 2.65e-6), tolerance 2e-5   |
+| GPU tiled decode vs the tiled reference, `accept`          | max abs 4.16e-6 (ratio 3.15e-6)                   |
+| 832×480, 33 frames, wall time                              | 128–129 s (12 tiles × 9 chunks)                   |
+| VRAM during the decode (DRM fdinfo, 10 ms samples)         | vram0 2.870 GiB before, 2.876 GiB peak; gtt 0.063 |
+| tiled vs untiled upstream decode (observation, not a gate) | max abs 0.120, mean 2.26e-3 (ratio 8.17e-2)       |
+| CPU reference (`band`): tiled / untiled                    | 836 s / 491 s, peak RSS 9.2 GiB                   |
+
 ## Tests
 
 ```bash
@@ -121,10 +161,10 @@ uv run --group wan --inexact pytest wan   # from tools/export-recipes/
 deno task test:models:wan                 # from the repository root (packages/models/tests/*wan*_test.ts)
 ```
 
-The Deno lane runs the host-function tests and the real-GPU parity gates for the DiT and the VAE
-chunk graphs. The GPU gates read the series under `outputs/series/` written by `wan.export_dit` and
-`wan.export_vae`, and skip explicitly (with the generating command) when those assets or a GPU
-adapter are missing.
+The Deno lane runs the host-function tests and the real-GPU parity gates for the DiT, the VAE chunk
+graphs and the tiled decode. The GPU gates read the series under `outputs/series/` written by
+`wan.export_dit`, `wan.export_vae` and `wan.vae_tiling`, and skip explicitly (with the generating
+command) when those assets or a GPU adapter are missing.
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
 when the pinned snapshot is not in the HF cache.
