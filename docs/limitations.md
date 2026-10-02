@@ -232,8 +232,9 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 `gemmTileN` = regN·wgX）ので、既定を動かすと一緒に動く — 現行値は M128N128 になった `d0afc22`
 （2026-08-10）以降のもので、ADR 0024 が書いた「2048² で上限を 1 超える」は辺 64 前提の旧値。
 上の値は既定プロファイルのもので、上限は Session が選んだ幾何プロファイルの tileN に依る
-（[decisions/0115](decisions/0115-geometry-profiles.md)）。`apple-metal-3`（Chrome の M2）の conv2d は tileN 64 なので、
-上限は **Hout·Wout ≤ 4,194,240**（約 2047×2048）になる。
+（[decisions/0115](decisions/0115-geometry-profiles.md)）。`apple-metal-3`（M2 — フラグ有りの Chrome で自動・無しなら
+`acquireGpu({ geometryProfile })` で注入したとき〈追記決定 7〉）の conv2d は tileN 64 なので、上限は
+**Hout·Wout ≤ 4,194,240**（約 2047×2048）になる。
 解消は動的解像度 recon の「固定タイル VAE」（研究記録
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
