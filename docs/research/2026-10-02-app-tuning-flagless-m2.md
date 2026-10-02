@@ -85,6 +85,28 @@ f16 × default / auto × 3）を回した記録。段 7 の「保存した表（
   （512²・常駐 2 回目以降の中央値）— **M5 でも f16 が既定 quant（a8）より 1.29 倍速い**（M2 は 1.58 倍・research K-70 §12 の
   「Metal では a8 が損」の第 2 の実例）。VAE 段 GPU 0.87 s・text_encoder の壁時計 17〜19 s はネットワーク越しの重み取得。
 
+## 8. 追記: 段 7 の本体 — フラグ無し M2 で「保存した表（照合して注入）」が通った（2026-10-02）
+
+`outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-10-02T12-14-04.178Z.json`（M2・Chrome 154・フラグ無し・
+checkout `de0c24a8`・2 行 = 既定 quant と f16 を 1 枚ずつ）。
+
+| 項目                                   | 値                                                                                                         |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `geometryProfileRequested`             | `saved:apple-metal-3`（利用者がプロファイルタブで付けた id — 埋め込み表と同名・下の注意）                  |
+| `geometryProfileInjected`              | あり（provenance.sweep = §2 の quick+ 掃引・candidateSet quick+・adapter 4 欄は空の device / description） |
+| 各段の `geometryProfile`               | `apple-metal-3`（注入された表で走った）                                                                    |
+| 今の runtime での照合（Deno で再計算） | caseSet `c1060d8829f3b9de` = ・kernels `cb8b4a773580567c` = ・`geometryProfileMismatch` → 一致             |
+| PNG sha256                             | f16 `041027e63559`・既定 quant `0a5695470e4a` — **フラグ有りで埋め込み表を当てた K-70 §15 の記録と同一**   |
+| DiT 段 GPU                             | f16 42.10 s・既定 quant 68.25 s（§15 のフラグ有り + 埋め込み表の 42.02 / 68.42 s と同じ）                  |
+
+- アプリの流れ（掃引 → 生成 → 保存 → 再読み込み → 照合 → コールバックで注入）は、description が空のフラグ無し Chrome でも通った。
+  描画結果は埋め込み表（full 5 本）と**ビット同一**で、quick+ 1 本の表（conv2d.rows64 / i8a8.linear が違う）でも DiT が使う欄は同じ
+  幾何なので時間も同じ。
+- 注意（隣接・未修正）: 生成した表の id を利用者が `apple-metal-3` と付けたので、行の `geometryProfile` 列だけでは埋め込み表と
+  見分けられない（provenance で分かる）。gpu-lab の id の既定値が埋め込み表の id と衝突しない形（例 `<vendor>-<arch>-generated`）に
+  するのが筋 — backlog に起票。
+- ADR 0117 検収 段 7 の残り = フル verify（段 3 の収束後に回す）。
+
 ## 6. 参照
 
 - ADR 0117 検収表 段 7・追記（2026-10-02・独立レビュー）
