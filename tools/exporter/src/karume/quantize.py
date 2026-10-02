@@ -99,13 +99,14 @@ QUANT_CHANNEL_AXES: Mapping[type[nn.Module], int] = MappingProxyType(
         nn.Linear: 0,
         nn.Conv1d: 0,
         nn.Conv2d: 0,
+        nn.Conv3d: 0,
         nn.ConvTranspose1d: 1,
         nn.Embedding: 0,
     }
 )
 
 #: 量子化対象にできるモジュール型の一覧（{@link QUANT_CHANNEL_AXES} の鍵から導出）。
-#: `op_types` へ「i8 と同じ 5 種」を渡すときの綴り — 表を写した別リストにはしない
+#: `op_types` へ「i8 と同じ 6 種」を渡すときの綴り — 表を写した別リストにはしない
 #: （独立に動くと「軸を引ける型」と「対象にできる型」が黙って割れる）。
 QUANT_MODULE_TYPES: tuple[type[nn.Module], ...] = tuple(QUANT_CHANNEL_AXES)
 
@@ -443,8 +444,8 @@ def fake_quant_int4(
 
     既定の対象が **`nn.Linear` の `weight` だけ**なのは、i4 の実行経路が linear の重み
     スロット限定で始まるから（ADR 0069 決定 5）。`op_types` は**明示 opt-in の口**で、i8 の
-    {@link QUANT_MODULE_TYPES}（全 5 種）まで広げられる — ただし出荷で広げてよいのは
-    `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）まで（conv2d / `ConvTranspose1d` は
+    {@link QUANT_MODULE_TYPES}（全 6 種）まで広げられる — ただし出荷で広げてよいのは
+    `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）まで（conv2d / conv3d / `ConvTranspose1d` は
     品質測定専用）。bias も norm 系 weight も触らないのは全対象で同じ。
 
     MUST: **emit へ渡せるのは `emit.I4_WEIGHT_OPS`（linear / embedding / conv1d）分の scale

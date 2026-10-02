@@ -87,6 +87,7 @@ import {
 import {
   buildConv1d,
   buildConv2d,
+  buildConv3d,
   buildConvTranspose1d,
   buildDeformConv2d,
   buildGruScan,
@@ -603,6 +604,9 @@ export class RecipeBuilder {
         break;
       case "conv2d":
         await buildConv2d(this.#face, step, binds, outs, builder);
+        break;
+      case "conv3d":
+        await buildConv3d(this.#face, step, binds, outs, builder);
         break;
       case "convTranspose1d":
         await buildConvTranspose1d(this.#face, step, binds, outs, builder);

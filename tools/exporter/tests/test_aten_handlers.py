@@ -1548,6 +1548,112 @@ class TestConv2d:
         assert graph.values[node.outs[0]].shape == [1, 2, 8, 4]
 
 
+class TestConv3d:
+    """ADR 0118 決定 1 — unbatched の rank 4 入力だけ・空間 attrs は T/H/W の 3 成分・
+    4 つとも宣言必須・重みは [Cout,Cin/g,Kt,Kh,Kw]。"""
+
+    def test_an_unbatched_conv3d_is_preserved_as_one_node_with_triples(self, convert_module):
+        """MUST: `aten.conv3d` の分解を止めて 1 ノードで残す（汎用 `aten.convolution` へ散らない）。
+
+        Kt≠Kh≠Kw・stride / padding の 3 軸非対称・Cin≠Cout をまとめて踏む形。x は unbatched の
+        `[Cin, T, H, W]` で、出力も `[Cout, Tout, Hout, Wout]` の rank 4（バッチ軸を足さない）。
+        """
+
+        class Wide(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv3d(
+                    4, 6, kernel_size=(3, 2, 1), stride=(1, 2, 1), padding=(0, 1, 0)
+                )
+
+            def forward(self, x):
+                return self.conv(x)
+
+        graph, _ = convert_module(Wide(), (torch.randn(4, 5, 6, 5),))
+
+        assert node_ops(graph) == ["conv3d"]
+        node = only_node(graph, "conv3d")
+        assert node.attrs == {
+            "stride": [1, 2, 1],
+            "padding": [0, 1, 0],
+            "dilation": [1, 1, 1],
+            "groups": 1,
+        }
+        assert graph.inputs[0].shape == [4, 5, 6, 5]
+        assert graph.values[node.ins[1]].shape == [6, 4, 3, 2, 1]
+        assert graph.values[node.outs[0]].shape == [6, 3, 4, 5]
+
+    def test_a_scalar_spatial_argument_is_normalized_to_three_components(self, convert_module):
+        """`F.conv3d(..., stride=2, padding=1)` はスカラのまま aten へ来る — 吸収は境界の側。"""
+
+        class Functional(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(3, 2, 3, 3, 3))
+                self.bias = nn.Parameter(torch.randn(3))
+
+            def forward(self, x):
+                return nn.functional.conv3d(x, self.weight, self.bias, stride=2, padding=1)
+
+        graph, _ = convert_module(Functional(), (torch.randn(2, 5, 6, 7),))
+
+        node = only_node(graph, "conv3d")
+        assert node.attrs["stride"] == [2, 2, 2]
+        assert node.attrs["padding"] == [1, 1, 1]
+        assert node.attrs["dilation"] == [1, 1, 1]
+        assert graph.values[node.outs[0]].shape == [3, 3, 3, 4]
+
+    def test_a_bias_free_conv3d_gets_a_synthesized_zero_bias(self, convert_module):
+        class NoBias(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv3d(6, 3, kernel_size=(1, 1, 3), padding=(0, 0, 1), bias=False)
+
+            def forward(self, x):
+                return self.conv(x)
+
+        graph, tensors = convert_module(NoBias(), (torch.randn(6, 2, 4, 4),))
+
+        node = only_node(graph, "conv3d")
+        assert len(node.ins) == 3
+        assert torch.equal(tensors[graph.initializers[node.ins[2]].tensor], torch.zeros(3))
+
+    def test_dilation_and_groups_are_carried(self, convert_module):
+        """意味論は groups 一般（GPU の subset 外でも IR には正しく載る — 門は計画時）。"""
+
+        class Dilated(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv3d(
+                    4, 2, kernel_size=(2, 2, 2), padding=(1, 2, 1), dilation=(1, 2, 1), groups=2
+                )
+
+            def forward(self, x):
+                return self.conv(x)
+
+        graph, _ = convert_module(Dilated(), (torch.randn(4, 3, 4, 5),))
+
+        node = only_node(graph, "conv3d")
+        assert node.attrs["dilation"] == [1, 2, 1]
+        assert node.attrs["groups"] == 2
+        assert graph.values[node.ins[1]].shape == [2, 2, 2, 2, 2]
+        assert graph.values[node.outs[0]].shape == [2, 4, 6, 6]
+
+    def test_a_batched_rank5_input_fails_loudly(self, convert_module):
+        """MUST: batched の rank 5 は契約外 — recipe 側で B = 1 を落とす書き方を名指して落ちる。"""
+
+        class Batched(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv3d(2, 3, kernel_size=3, padding=1)
+
+            def forward(self, x):
+                return self.conv(x)
+
+        with pytest.raises(NotImplementedError, match="batched の rank 5"):
+            convert_module(Batched(), (torch.randn(1, 2, 3, 4, 4),))
+
+
 class TestUpsampleBilinear2d:
     """第 1 層 — align_corners=True 専業。受理は実測形（size 指定・rank 4・f32）だけ。"""
 

@@ -4,12 +4,15 @@ import { OpContractError } from "../src/ops.ts";
 import {
   bindSymbols,
   countUses,
+  eligibleCompressedInitializers,
   ExecutionError,
   i2EligibleInitializers,
+  i4EligibleInitializers,
   planGraph,
   resolveShape,
   statesOnlySymbols,
   validateGraphContracts,
+  weightChannelAxes,
 } from "../src/runtime/plan.ts";
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
@@ -623,4 +626,52 @@ Deno.test("i2 の適格集合は linear / embedding だけに食われる重み�
     ],
   };
   assertEquals([...i2EligibleInitializers(parse(source))].sort(), ["we", "wl"]);
+});
+
+/** unbatched conv3d 1 ノード（x[3,4,6,6] * w[6,3/groups,3,3,3] → y[6,2,6,6] — ADR 0118 決定 1）。 */
+const conv3dGraph = (groups: number): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["conv3d"] },
+  symbols: [],
+  inputs: [{ name: "x", dtype: "f32", shape: [3, 4, 6, 6] }],
+  outputs: ["y"],
+  initializers: { w: {}, b: {} },
+  values: {
+    w: { dtype: "f32", shape: [6, 3 / groups, 3, 3, 3] },
+    b: { dtype: "f32", shape: [6] },
+    y: { dtype: "f32", shape: [6, 2, 6, 6] },
+  },
+  nodes: [{
+    op: "conv3d",
+    ins: ["x", "w", "b"],
+    outs: ["y"],
+    attrs: { stride: [1, 1, 1], padding: [0, 1, 1], dilation: [1, 1, 1], groups },
+  }],
+});
+
+// 意味論（契約・CPU 参照）は groups 一般を受けるが、GPU の実装済み subset は groups == 1 だけ
+// （ADR 0118 決定 1）。MUST: Session の構築時（= 計画時）に落とす — 契約検査を通したまま初回 run の
+// 導出相まで持ち越さない。
+Deno.test("conv3d の groups > 1 は計画時に fail loudly（意味論は通る・GPU の subset で落ちる）", () => {
+  const grouped = parse(conv3dGraph(3));
+  // 契約と shape（意味論）は groups 一般を受ける
+  assertEquals(planGraph(grouped, {}).nodes[0].outputs[0].shape, [6, 2, 6, 6]);
+  assertThrows(
+    () => validateGraphContracts(grouped),
+    ExecutionError,
+    "conv3d の groups 3 は GPU で実行できない",
+  );
+  // groups == 1 は通る
+  validateGraphContracts(parse(conv3dGraph(1)));
+});
+
+// conv3d の重みは f16 / i8 の適格（重みスロット 1・チャネル軸 0 — 出力チャネル）で、bias は適格外。
+// i4 の展開経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。
+Deno.test("conv3d の重み [Cout,Cin,Kt,Kh,Kw] は圧縮格納の適格・軸 0 で、i4 / i2 の適格には入らない", () => {
+  const graph = parse(conv3dGraph(1));
+  assertEquals([...eligibleCompressedInitializers(graph)], ["w"]);
+  assertEquals(weightChannelAxes(graph).get("w"), 0);
+  assertEquals([...i4EligibleInitializers(graph)], []);
+  assertEquals([...i2EligibleInitializers(graph)], []);
 });

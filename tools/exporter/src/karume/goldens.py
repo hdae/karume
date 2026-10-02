@@ -45,6 +45,7 @@ from karume.golden_models import (
     BilinearResize,
     BroadcastBinary,
     Conv2dBlock,
+    Conv3dBlock,
     ConvBlock,
     ConvTransposeStack,
     CouplingSplit,
@@ -399,6 +400,12 @@ GOLDEN_SPECS: tuple[GoldenSpec, ...] = (
             _uniform(g, 1, 4, 6, 5, low=-1.5, high=1.5),
             _zeroed_column(g, 1, 4, 3, 5, at=(1, 2)),
         ),
+    ),
+    GoldenSpec(
+        name="conv3d_block",
+        build=Conv3dBlock,
+        # x は unbatched の [Cin, T, H, W] = [4, 5, 6, 5]（T≠H≠W — 軸の取り違えを値に出す）
+        example_inputs=lambda g: (_uniform(g, 4, 5, 6, 5, low=-1.5, high=1.5),),
     ),
     GoldenSpec(
         name="deform_conv2d_block",

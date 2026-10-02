@@ -184,6 +184,13 @@ CONV1D_OP = "conv1d"
 #: 2 次元畳み込み（ADR 0017）。重みは **[Cout, Cin/groups, Kh, Kw]** で、attrs の
 #: stride / padding / dilation は **H/W の 2 成分**（groups はスカラ）。4 つとも宣言必須。
 CONV2D_OP = "conv2d"
+#: 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。**unbatched**: x は rank 4 の [Cin, T, H, W]、
+#: 重みは **[Cout, Cin/groups, Kt, Kh, Kw]**、出力は [Cout, Tout, Hout, Wout]。attrs の
+#: stride / padding / dilation は **[T, H, W] の 3 成分**（groups はスカラ）で 4 つとも宣言必須。
+#: batched の rank 5 は契約に入れない（周りの cat / slice が strided 族の rank 上限 4 に当たる）。
+#: 意味論は groups 一般だが、ランタイムの GPU 実装済み subset は groups == 1 だけ（計画時に
+#: fail loudly — packages/runtime/src/runtime/plan.ts）。
+CONV3D_OP = "conv3d"
 #: 転置畳み込み（ADR 0015）。重みは **[Cin, Cout, K]**（conv1d の [Cout, Cin/groups, K] と転置）。
 #: attrs は stride / padding のみで、受理するのは出力長が L*stride になる形だけ。
 CONV_TRANSPOSE1D_OP = "conv_transpose1d"
@@ -238,6 +245,7 @@ WEIGHT_SLOTS: Mapping[str, int] = MappingProxyType(
         LINEAR_OP: 1,
         CONV1D_OP: 1,
         CONV2D_OP: 1,
+        CONV3D_OP: 1,
         CONV_TRANSPOSE1D_OP: 1,
         EMBEDDING_OP: 0,
     }
@@ -249,7 +257,8 @@ WEIGHT_SLOTS: Mapping[str, int] = MappingProxyType(
 #: 突き合わせて落とす。
 #:
 #: 出力チャネルの軸。linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d `[Cout,Cin/g,Kh,Kw]` /
-#: embedding `[V,H]` は 0 で、**conv_transpose1d だけ `[Cin,Cout,K]` の転置レイアウトで 1**。
+#: conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]` は 0 で、**conv_transpose1d だけ
+#: `[Cin,Cout,K]` の転置レイアウトで 1**。
 #:
 #: MUST: キー集合は WEIGHT_SLOTS と一致させる（新しい重みスロットが軸 0 として黙って
 #: 量子化されるのを防ぐ）。`quantize.QUANT_CHANNEL_AXES`（モジュール型で引く同じ表）とも
@@ -259,6 +268,7 @@ WEIGHT_CHANNEL_AXES: Mapping[str, int] = MappingProxyType(
         LINEAR_OP: 0,
         CONV1D_OP: 0,
         CONV2D_OP: 0,
+        CONV3D_OP: 0,
         CONV_TRANSPOSE1D_OP: 1,
         EMBEDDING_OP: 0,
     }
@@ -325,6 +335,7 @@ OpKind = Literal[
     "masked_fill",
     "conv1d",
     "conv2d",
+    "conv3d",
     "conv_transpose1d",
     "deform_conv2d",
     "upsample_bilinear2d",
@@ -759,6 +770,33 @@ CONV2D_ATTRS: AttrSchema = {
     "groups": lambda value, where: _assert_integer_attr(value, where, 1),
 }
 
+
+def _assert_int_triple(value: Any, where: str, minimum: int, what: str) -> tuple[int, int, int]:
+    """conv3d の空間 attr（`[T, H, W]` の 3 成分 — ADR 0118 決定 1）。
+
+    MUST: **長さちょうど 3 のリスト**のみ受理する（{@link _assert_int_pair} と同じ規律）。スカラ
+    表記や 2 成分を併せて許すと、同じ畳み込みに複数の IR ができるうえ、時間軸を落とした 2 成分が
+    「[H, W] のつもり」なのか「[T, H] の書き損じ」なのかを区別できない。
+    """
+    if not isinstance(value, list) or len(value) != 3:
+        raise OpContractError(f"{where}: {what} は [T, H, W] の長さ 3 のリストでない: {value!r}")
+    return (
+        _assert_integer_attr(value[0], f"{where}[0]", minimum),
+        _assert_integer_attr(value[1], f"{where}[1]", minimum),
+        _assert_integer_attr(value[2], f"{where}[2]", minimum),
+    )
+
+
+#: conv3d の attrs（ADR 0118 決定 1）。空間 3 つは T/H/W の 3 成分、groups はスカラ。
+#:
+#: MUST: 4 つとも**宣言必須・既定値補完なし**（conv1d / conv2d と同じ規律 — ADR 0015）。
+CONV3D_ATTRS: AttrSchema = {
+    "stride": lambda value, where: _assert_int_triple(value, where, 1, "conv3d の stride"),
+    "padding": lambda value, where: _assert_int_triple(value, where, 0, "conv3d の padding"),
+    "dilation": lambda value, where: _assert_int_triple(value, where, 1, "conv3d の dilation"),
+    "groups": lambda value, where: _assert_integer_attr(value, where, 1),
+}
+
 #: conv_transpose1d の attrs（ADR 0015）。
 #:
 #: MUST: stride >= 1（stride 0 はカーネルのゼロ除算・GPU ハング —
@@ -882,6 +920,22 @@ def conv2d_attrs(
         _assert_int_pair(attrs.get("padding"), f"{where} の attrs.padding", 0, "conv2d の padding"),
         _assert_int_pair(
             attrs.get("dilation"), f"{where} の attrs.dilation", 1, "conv2d の dilation"
+        ),
+        _assert_integer_attr(attrs.get("groups"), f"{where} の attrs.groups", 1),
+    )
+
+
+def conv3d_attrs(
+    attrs: Mapping[str, Any], where: str
+) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int], int]:
+    """conv3d ノードの (stride, padding, dilation, groups)。空間 3 つは (T, H, W) の組。"""
+    return (
+        _assert_int_triple(attrs.get("stride"), f"{where} の attrs.stride", 1, "conv3d の stride"),
+        _assert_int_triple(
+            attrs.get("padding"), f"{where} の attrs.padding", 0, "conv3d の padding"
+        ),
+        _assert_int_triple(
+            attrs.get("dilation"), f"{where} の attrs.dilation", 1, "conv3d の dilation"
         ),
         _assert_integer_attr(attrs.get("groups"), f"{where} の attrs.groups", 1),
     )
@@ -1264,6 +1318,8 @@ OP_CONTRACTS: dict[str, OpContract] = {
     ),
     CONV1D_OP: _contract(CONV1D_OP, "conv1d", 3, CONV1D_ATTRS),
     CONV2D_OP: _contract(CONV2D_OP, "conv2d", 3, CONV2D_ATTRS),
+    # unbatched（x は rank 4）の 3 次元畳み込み（ADR 0118 決定 1）。3 スロットとも f32 で同型。
+    CONV3D_OP: _contract(CONV3D_OP, "conv3d", 3, CONV3D_ATTRS),
     # bias 無し conv はエクスポータのゼロ bias 合成でアリティ 3 に正規化される（ADR 0015）—
     # カーネルにも契約にも arity 分岐を持ち込まない。
     CONV_TRANSPOSE1D_OP: _contract(

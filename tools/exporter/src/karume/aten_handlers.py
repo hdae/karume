@@ -1085,6 +1085,81 @@ def _h_conv2d(node: Node) -> Emitted:
     )
 
 
+def _triple_spatial(node: Node, value: Any, what: str) -> list[int]:
+    """conv3d の空間パラメータを `[T, H, W]` の 3 成分へ正規化する（ADR 0118 決定 1）。
+
+    torch は `1` / `[1]` / `[1,1,1]` の 3 表記を同じ意味で受ける（`nn.Conv3d(kernel_size=3,
+    padding=1)` は aten へ `[1, 1, 1]` で落ちるが、`F.conv3d(x, w, stride=2)` はスカラのまま
+    来る）。**IR の attrs は常に 3 成分**なので、表記の吸収は境界のここで済ませる
+    （{@link _pair_spatial} の 3D 版 — ランタイム側に「スカラなら全軸へ配る」規則を持ち込まない）。
+    """
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        _expect(len(items) in (1, 3), node, f"{what}={value!r} は未対応（conv3d の空間軸は 3 本）")
+        if len(items) == 1:
+            items = [items[0], items[0], items[0]]
+    else:
+        items = [value, value, value]
+    for item in items:
+        _expect(
+            isinstance(item, int) and not isinstance(item, bool),
+            node,
+            f"{what}={value!r} が整数でない",
+        )
+    return [int(item) for item in items]
+
+
+def _h_conv3d(node: Node) -> Emitted:
+    """aten.conv3d → conv3d（attrs `stride` / `padding` / `dilation` / `groups` — ADR 0118）。
+
+    MUST: 受けるのは **unbatched の rank 4 入力**（`[Cin, T, H, W]`）と rank 5 の重みだけ。
+    batched の rank 5 入力は契約に無い（周りの cat / slice が strided 族の rank 上限 4 に
+    当たる）ので、recipe 側の書き方を名指して fail loudly にする。
+    MUST: 4 つとも attrs に**明示**する（既定値補完に頼らない — ADR 0012 / 0015）。空間 3 つは
+    T/H/W の 3 成分で、`groups` だけスカラ。groups の割り切りと重み
+    `[Cout, Cin/groups, Kt, Kh, Kw]` の整合は shape 層（shapes.py）が見る。
+    """
+    extra = sorted(set(node.kwargs) - {"bias", "stride", "padding", "dilation", "groups"})
+    _expect(not extra, node, f"kwargs {extra} を伴う conv3d は未対応")
+    src = node.args[0].meta["val"]
+    _expect(
+        src.dim() != 5,
+        node,
+        "batched の rank 5 入力 [B,Cin,T,H,W] の conv3d は未対応 — recipe 側で B = 1 を落とし、"
+        "unbatched の [Cin,T,H,W] で F.conv3d を呼ぶ（ADR 0118 決定 1）",
+    )
+    _expect(
+        src.dim() == 4,
+        node,
+        f"rank {src.dim()} の conv3d は未対応（unbatched の [Cin,T,H,W] のみ）",
+    )
+    weight = node.args[1].meta["val"]
+    _expect(weight.dim() == 5, node, f"rank {weight.dim()} の conv3d 重みは未対応")
+    stride = _triple_spatial(node, _arg_or_kwarg(node, 3, "stride", 1), "stride")
+    padding = _triple_spatial(node, _arg_or_kwarg(node, 4, "padding", 0), "padding")
+    dilation = _triple_spatial(node, _arg_or_kwarg(node, 5, "dilation", 1), "dilation")
+    groups = _arg_or_kwarg(node, 6, "groups", 1)
+    _expect(
+        isinstance(groups, int) and not isinstance(groups, bool),
+        node,
+        f"groups={groups!r} が整数でない",
+    )
+    _expect(all(value >= 1 for value in stride), node, f"stride={stride} は未対応（正整数のみ）")
+    _expect(all(value >= 0 for value in padding), node, f"padding={padding} は未対応（非負のみ）")
+    _expect(
+        all(value >= 1 for value in dilation), node, f"dilation={dilation} は未対応（正整数のみ）"
+    )
+    _expect(groups >= 1, node, f"groups={groups} は未対応（正整数のみ）")
+    return Emitted(
+        "conv3d",
+        3,
+        {"stride": stride, "padding": padding, "dilation": dilation, "groups": int(groups)},
+        synth_consts=_conv_bias(
+            node, _static_size_or_fail(node, weight.shape[0], "conv3d の出力チャネル"), "conv3d"
+        ),
+    )
+
+
 def _h_deform_conv2d(node: Node) -> Emitted:
     """torchvision.deform_conv2d → deform_conv2d（attrs `padding` のみ — ADR 0055）。
 
@@ -1405,6 +1480,9 @@ ATEN_HANDLERS = {
     # 既存の reshape 正規化が受けるので、ここには足さない（出たら 1 行で足す）。
     aten.rms_norm.default: _h_rms_norm,
     aten.conv2d.default: _h_conv2d,
+    # 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。unbatched の `F.conv3d` は rank 4 入力のまま
+    # `.default` で残る（torch 2.13.0 で実測）。文字列 padding の `.padding` overload は実測に無い。
+    aten.conv3d.default: _h_conv3d,
     # 双線形 resample（第 1 層 — BiRefNet 一族 / Depth Anything V2 の共通前提）。
     # `F.interpolate(size=…, mode="bilinear")` が落ちるのは `.vec` overload だけで、
     # `.default`（scales_h / scales_w を個別に取る形）は実測に現れない（出たら 1 行で足す）。

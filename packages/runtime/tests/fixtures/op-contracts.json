@@ -349,6 +349,14 @@
       "channel_axis": 0
     },
     {
+      "op": "conv3d",
+      "arity": 3,
+      "dtypes": { "kind": "uniform", "accept": ["f32"] },
+      "attrs": ["dilation", "groups", "padding", "stride"],
+      "weight_slot": 1,
+      "channel_axis": 0
+    },
+    {
       "op": "conv_transpose1d",
       "arity": 3,
       "dtypes": { "kind": "uniform", "accept": ["f32"] },
@@ -727,6 +735,67 @@
       "why": "正整数のスカラ（空間軸を持たない唯一の conv2d attr）",
       "accept": [1, 2, 128],
       "reject": [0, -1, 1.5, "1", null, true, [1, 1]]
+    },
+    {
+      "op": "conv3d",
+      "attr": "stride",
+      "why": "[T, H, W] の 3 成分・各成分は正整数（スカラ表記と 2 成分は境界で正規化する規約 — ADR 0118 決定 1）",
+      "accept": [[1, 1, 1], [1, 2, 2], [2, 1, 3]],
+      "reject": [
+        [0, 1, 1],
+        [1, 0, 1],
+        [1, 1, 0],
+        [-1, 1, 1],
+        [1, 1],
+        [1, 1, 1, 1],
+        [1.5, 1, 1],
+        ["1", 1, 1],
+        [true, 1, 1],
+        1,
+        null,
+        []
+      ]
+    },
+    {
+      "op": "conv3d",
+      "attr": "padding",
+      "why": "[T, H, W] の 3 成分・各成分は非負整数（軸ごとの対称ゼロ — 因果パディングは語彙に無い）",
+      "accept": [[0, 0, 0], [0, 1, 1], [2, 0, 3]],
+      "reject": [
+        [-1, 0, 0],
+        [0, 0, -1],
+        [0, 0],
+        [0, 0, 0, 0],
+        [0.5, 0, 0],
+        ["0", 0, 0],
+        [true, 0, 0],
+        0,
+        null
+      ]
+    },
+    {
+      "op": "conv3d",
+      "attr": "dilation",
+      "why": "[T, H, W] の 3 成分・各成分は正整数",
+      "accept": [[1, 1, 1], [2, 3, 1]],
+      "reject": [
+        [0, 1, 1],
+        [1, 1, 0],
+        [-1, 1, 1],
+        [1, 1],
+        [1.5, 1, 1],
+        ["1", 1, 1],
+        [true, 1, 1],
+        1,
+        null
+      ]
+    },
+    {
+      "op": "conv3d",
+      "attr": "groups",
+      "why": "正整数のスカラ（意味論は groups 一般 — GPU の実装済み subset は 1 だけで、それは計画時の門）",
+      "accept": [1, 3, 96],
+      "reject": [0, -1, 1.5, "1", null, true, [1, 1, 1]]
     },
     {
       "op": "conv_transpose1d",
@@ -2437,6 +2506,221 @@
       },
       "throws": true,
       "why": "rank 4 / 4 / 1 以外は受理しない（rank3 は conv1d の担当）"
+    },
+
+    {
+      "op": "conv3d",
+      "ins": [[16, 3, 6, 8], [24, 16, 3, 3, 3], [24]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [0, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "outs": [[24, 1, 6, 8]],
+      "why": "chunk グラフの conv_in 形（cache 2 + 1 フレーム = T 3・時間 padding 0・空間 same — ADR 0118 決定 2）。x は unbatched の rank 4"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[8, 3, 4, 5], [16, 8, 3, 1, 1], [16]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [0, 0, 0],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "outs": [[16, 1, 4, 5]],
+      "why": "time_conv 形（カーネル (3,1,1)・Cout = 2·Cin）。H ≠ W"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[2, 5, 6, 7], [3, 2, 1, 3, 2], [3]],
+      "attrs": {
+        "stride": [1, 2, 3],
+        "padding": [0, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "outs": [[3, 5, 3, 3]],
+      "why": "Kt≠Kh≠Kw・stride / padding が 3 軸で非対称（T: 5 / H: (6+2−2−1)/2+1=3 / W: (7+2−1−1)/3+1=3）。カーネル軸の順を取り違えると出力形が変わる"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[1, 7, 8, 9], [2, 1, 2, 3, 2], [2]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [0, 0, 0],
+        "dilation": [3, 2, 4],
+        "groups": 1
+      },
+      "outs": [[2, 4, 4, 5]],
+      "why": "dilation も 3 軸で非対称（T: 7−3·1=4 / H: 8−2·2=4 / W: 9−4·1=5）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[6, 3, 5, 4], [6, 1, 3, 3, 3], [6]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 6
+      },
+      "outs": [[6, 3, 5, 4]],
+      "why": "depthwise（groups = Cin = Cout → 重みの第 2 軸は 1）— 意味論は groups 一般"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[6, 3, 5, 4], [9, 2, 1, 3, 1], [9]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [0, 1, 0],
+        "dilation": [1, 1, 1],
+        "groups": 3
+      },
+      "outs": [[9, 3, 5, 4]],
+      "why": "中間の groups（Cin/groups = 2 が重みの第 2 軸・Cin ≠ Cout）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[4, "T", 6, 6], [8, 4, 3, 3, 3], [8]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "bindings": { "T": 5 },
+      "outs": [[8, "T", 6, 6]],
+      "why": "記号の T は stride 1 / same padding で長さが保たれる（conv1d / conv2d と同じ一次式規則）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
+      "attrs": { "stride": [1, 1, 1], "padding": [1, 1, 1], "dilation": [1, 1, 1] },
+      "throws": true,
+      "why": "groups の欠落（4 つとも宣言必須・既定値補完なし）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
+      "attrs": { "stride": 1, "padding": [1, 1, 1], "dilation": [1, 1, 1], "groups": 1 },
+      "throws": true,
+      "why": "スカラ表記の stride は受理しない（[T, H, W] へ正規化するのは境界の仕事）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
+      "attrs": { "stride": [1, 1, 1], "padding": [1, 1], "dilation": [1, 1, 1], "groups": 1 },
+      "throws": true,
+      "why": "2 成分の padding は受理しない（時間軸の書き落としと [H, W] の区別がつかない）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [3, 5, 3, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "重みを [Cin/groups, Cout, Kt, Kh, Kw] と読む取り違え（非対称チャネルでのみ赤くなる）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[6, 3, 5, 4], [6, 6, 3, 3, 3], [6]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 6
+      },
+      "throws": true,
+      "why": "depthwise なのに重みの第 2 軸が Cin のまま（Cin/groups = 1 のはず）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[6, 3, 5, 4], [9, 2, 3, 3, 3], [9]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 4
+      },
+      "throws": true,
+      "why": "groups が Cin を割り切らない"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [5, 3, 3, 3, 3], [3]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "bias 長が出力チャネルと違う"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[1, 3, 4, 6, 6], [5, 3, 3, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "batched の rank 5 入力は受理しない（unbatched の rank 4 だけ — ADR 0118 決定 1）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [5, 3, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "rank 4 の重みは受理しない（[Cout, Cin/groups, Kt, Kh, Kw] の rank 5 のみ）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[3, 4, 6, 6], [5, 3, 0, 3, 3], [5]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [1, 1, 1],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "K = 0（Kt）— dilation·(K−1) が負に転んで出力が入力より長くなる形を出力長式へ入れない"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[1, 2, 8, 8], [1, 1, 3, 1, 1], [1]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [0, 0, 0],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "T だけカーネル長に足りない（軸ごとに独立に見ていないと素通りする）"
+    },
+    {
+      "op": "conv3d",
+      "ins": [[1, 4, 8, 2], [1, 1, 1, 1, 3], [1]],
+      "attrs": {
+        "stride": [1, 1, 1],
+        "padding": [0, 0, 0],
+        "dilation": [1, 1, 1],
+        "groups": 1
+      },
+      "throws": true,
+      "why": "W だけカーネル長に足りない（T 側と対称に固定する）"
     },
 
     {

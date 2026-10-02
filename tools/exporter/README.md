@@ -235,10 +235,11 @@ Current models and coverage:
 | `static_quantize_block`    | fixed        | static_quantize ×3 (ties-to-even, a non-power-of-two fixed scale, and scale=0 identity)                                                                                |
 | `rms_norm_block`           | `T`          | rms_norm ×3 (hand-written `x·rsqrt(mean(x²)+eps)·w` folded into one node + `nn.RMSNorm` with and without affine), layer_norm(no affine), linear(no bias)               |
 | `conv2d_block`             | none         | conv2d ×3 (Kh≠Kw / asymmetric stride, padding and dilation / groups 3 / one branch with no bias), sum(channel axis), sqrt, clamp_min, div, mul, reshape                |
+| `conv3d_block`             | none         | conv3d ×3 (unbatched `[Cin,T,H,W]` input / Kt≠Kh≠Kw / stride, padding and dilation asymmetric over T, H and W / one branch with no bias; groups 1 only)                |
 | `deform_conv2d_block`      | none         | deform_conv2d (DCNv2 — offsets reaching outside the input plane, modulator in [0,2], k=3×2 with asymmetric padding and a k=1 branch with no bias)                      |
 | `gru_scan_block`           | `T`          | gru_scan / gru_scan_reverse (both directions over a symbolic time axis; the forward branch starts from a folded zero `h0`, the reverse one from a graph input), linear |
 | `bilinear_resize`          | none         | upsample_bilinear2d (non-integer upscale 4×5→7×9, shrink 4×5→2×3, and a height-1 input whose H scale is 0)                                                             |
-| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (all 5 `WEIGHT_SLOTS` ops), tanh                                                                |
+| `i8_weights`               | `T`          | **i8 storage** for linear, conv1d, conv2d, conv_transpose1d, embedding (5 of the 6 `WEIGHT_SLOTS` ops; conv3d's i8 is in the runtime GPU parity test), tanh            |
 
 The second output of `attention_block` is a **softmax over large negative values (−205..−180)**, the
 regime where a naive form (a softmax that does not subtract amax) has `exp` collapse to 0 in f32 and
@@ -319,9 +320,10 @@ per-model measurements these rules were derived against stay with the recipes (f
 **Eligibility is the AND of 2 conditions** (`src/karume/emit.py`):
 
 1. That initializer is consumed **only** by `WEIGHT_SLOTS` (the weights of `linear` / `conv1d` /
-   `conv2d` / `conv_transpose1d` = slot 1, `embedding` = slot 0). This mirrors the runtime side
-   `packages/runtime/src/runtime/plan.ts`, and any divergence is caught from both TS and Python by
-   the conformance table (`weight_slot` in `packages/runtime/tests/fixtures/op-contracts.json`).
+   `conv2d` / `conv3d` / `conv_transpose1d` = slot 1, `embedding` = slot 0). This mirrors the
+   runtime side `packages/runtime/src/runtime/plan.ts`, and any divergence is caught from both TS
+   and Python by the conformance table (`weight_slot` in
+   `packages/runtime/tests/fixtures/op-contracts.json`).
    **Bias is never included** — the root-cause fix for the prototype's f16 demotion bug (an f32 bias
    constant dragging the weight along with it, leaving 0MB eligible).
 2. The f32 → f16 → f32 round trip is **bit-identical**. Anything eligible that does not match fails
@@ -376,11 +378,12 @@ writing.
 must be consumed **only by the weight slots of `linear` / `embedding` / `conv1d`**
 (`emit.I4_WEIGHT_OPS`, `i4_eligible_initializers`), and its stored row length must be divisible by
 its group length. Those three are the only ops with an i4 expansion path, and `conv1d` has one only
-when `groups == 1`; a weight also consumed by another weight slot (`conv2d` / `conv_transpose1d` /
-a grouped `conv1d`) cannot be stored as i4. With the **default** `weight_dtype="i4"` such a weight
-silently stays f32 — the same landing pad as an i8-ineligible weight, and the counterpart of the
-runtime's `eligible ∩ i4Eligible`; without it a graph that mixes convolutions in could not be
-exported at all. An **explicit** i4 on an ineligible weight fails loudly instead (see below).
+when `groups == 1`; a weight also consumed by another weight slot (`conv2d` / `conv3d` /
+`conv_transpose1d` / a grouped `conv1d`) cannot be stored as i4. With the **default**
+`weight_dtype="i4"` such a weight silently stays f32 — the same landing pad as an i8-ineligible
+weight, and the counterpart of the runtime's `eligible ∩ i4Eligible`; without it a graph that
+mixes convolutions in could not be exported at all. An **explicit** i4 on an ineligible weight
+fails loudly instead (see below).
 
 **Definition of the quantization** (`src/karume/quantize.py`, `fake_quant_int4`): symmetric int4
 along the K (input) axis, per group of `group_size` elements — `scale = clamp(amax_group / 7, f32
@@ -517,14 +520,15 @@ conformance table is the correct one.
   row-range pieces, and rejects simultaneous automatic quantization options or real f32 values. The
   model recipe remains responsible for validating the upstream quantization and activation rounding
   (ADR 0097).
-- The IR vocabulary has **61** ops, of which the exporter can emit **59**: `topk` and `state_append`
+- The IR vocabulary has **62** ops, of which the exporter can emit **60**: `topk` and `state_append`
   are in the vocabulary but no `torch.export` graph produces them (`topk` waits on the multi-output
   getitem wiring, and `state_append` is the effect op the decode-graph script emits — ADR 0067
-  decision 5). The list below is those 59 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
+  decision 5). The list below is those 60 (ADR 0017 added `rms_norm` / `conv2d` / `clamp_min`,
   ADR 0023 added `attention`, `gelu_tanh` was added for EmbeddingGemma, `sin` for the Snake
   activation, `safe_softmax` for runtime attention masks — ADR 0044 — `upsample_bilinear2d` for
   the segmentation / depth family, `deform_conv2d` for the BiRefNet family — ADR 0055 — and
-  `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056):
+  `gru_scan` / `gru_scan_reverse` for recurrent models — ADR 0056 — and `conv3d` for the causal 3D
+  VAE of video models — ADR 0118):
   - unary `neg abs exp log log1p sqrt sin tanh sigmoid relu gelu gelu_tanh` (f32) / `bitwise_not`
     (bool) / unary with attrs `clamp` / `clamp_min` / `leaky_relu` (f32). `sin` is the **only**
     trigonometric op: constant tables (RoPE) are still folded away at export time, so only the
@@ -545,6 +549,14 @@ conformance table is the correct one.
     **`conv2d`** / `conv_transpose1d`. `safe_softmax` is `softmax` plus “a row whose max is −inf
     is written as all zeros”, i.e. the semantics of the safe-softmax guard that torch's SDPA
     decomposition wraps around `softmax` (ADR 0044)
+  - 3-D convolution (an extension molecule, ADR 0118): **`conv3d`** — **unbatched**
+    `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`, arity 3, attrs
+    `stride` / `padding` / `dilation` as **3 components `[T, H, W]`** plus a scalar `groups`
+    (all mandatory). Padding is symmetric zero per axis — causal (one-sided) time padding is not
+    in the vocabulary; a recipe expresses it by concatenating the previous chunk's cache in front of
+    the time axis. A batched rank-5 input fails loudly at the exporter boundary (drop B = 1 in the
+    recipe). The semantics cover any `groups`, but the runtime's GPU path implements `groups == 1`
+    only and rejects the rest when the session is built
   - spatial resample (a layer-1 atom): **`upsample_bilinear2d`** — `x[B,C,H,W] →
     [B,C,Hout,Wout]`, arity 1, attrs `output_size` only. **`align_corners=True` only**: there is no
     field for `align_corners` / `mode` / `scale_factor`, so half-pixel alignment, nearest / bicubic /
@@ -572,8 +584,9 @@ conformance table is the correct one.
     does not accept a symbolic axis. There is no field for stacking, bidirectionality,
     `has_biases=False`, `batch_first` or `dropout` (layers and directions are expressed by placing
     several nodes), the op returns `y` only (no `h_n`), and the hidden width is capped at 256
-- **29 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
+- **30 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
   `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `conv2d.{stride,padding,dilation,groups}` /
+  `conv3d.{stride,padding,dilation,groups}` /
   `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
   `cumsum.dim` / `cast.to` / `permute.dims` / `slice.{dim,start,end}` / `cat.dim` /
   `pad.{left,right}` / `flip.dim` / `sym_prefix_slice.{sym,slices}` /
@@ -588,14 +601,16 @@ conformance table is the correct one.
   (ADR 0015). `gelu(approximate="tanh")` has no field to record it either, so it is carried by its
   own op (`gelu_tanh`) rather than by an attr (never silently approximating with a different
   formula).
-- The default set of decomposition stops (preserved) is **11 ops** (`PRESERVED_OP_PREFIXES` — the 9
-  ops of ADR 0007 plus `leaky_relu` from ADR 0015 and `rms_norm` from ADR 0017): linear / layer_norm
-  / rms_norm / softmax / gelu / leaky_relu / conv1d / conv2d / conv_transpose1d / embedding /
-  masked_fill.
-  - **The 12th, `scaled_dot_product_attention`, is not in the default set** (ADR 0023). SDPA can
-    express mask / causal / GQA through its arguments, and adding it to the default would make
-    Anima's text_encoder (a causal mask with −inf folded in) hit the fail loudly of `_h_attention`
-    and become **unexportable**. Enabling it is a **per-target opt-in** via
+- The default set of decomposition stops (preserved) is **12 ops** (`PRESERVED_OP_PREFIXES` — the
+  9 ops of ADR 0007 plus `leaky_relu` from ADR 0015, `rms_norm` from ADR 0017 and `conv3d` from
+  ADR 0118): linear / layer_norm / rms_norm / softmax / gelu / leaky_relu / conv1d / conv2d /
+  conv3d / conv_transpose1d / embedding / masked_fill. An unbatched `F.conv3d` stays
+  `aten.conv3d.default` with its rank-4 input in the trace (measured on torch 2.13.0), so no
+  normalization pass is needed.
+  - **`scaled_dot_product_attention` (the 12th fused op of ADR 0007) is not in the default set**
+    (ADR 0023). SDPA can express mask / causal / GQA through its arguments, and adding it to the
+    default would make Anima's text_encoder (a causal mask with −inf folded in) hit the fail loudly
+    of `_h_attention` and become **unexportable**. Enabling it is a **per-target opt-in** via
     `export_module(…, preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION)`
     (`anima.export.TARGET_PRESERVED` in the recipes — currently only transformer and vae_decoder).
   - **`rms_norm` arrives through 2 routes** (ADR 0017): the `aten.rms_norm` coming from diffusers'
@@ -607,7 +622,8 @@ conformance table is the correct one.
   `masked_fill` fill value, a clamp with only an upper bound (`clamp_max` is not in the vocabulary),
   a conv_transpose1d whose `output_padding` / `groups` / `dilation` are not the defaults, and a
   conv_transpose1d with `2·padding ≠ K − stride` (a form whose output length is not `L·stride`).
-  - `groups` / `dilation` on `conv1d` / `conv2d` **are accepted** (ADR 0015 / 0017).
+  - `groups` / `dilation` on `conv1d` / `conv2d` / `conv3d` **are accepted** (ADR 0015 / 0017 /
+    0118).
   - **Optional slots are synthesized to fix the arity** (`Emitted.synth_consts`) — a conv / linear
     without bias gets a zero bias, a layer_norm without affine gets ones/zeros, and an rms_norm
     without weight gets ones. This keeps arity branching out of the kernels and the contracts (`+0`

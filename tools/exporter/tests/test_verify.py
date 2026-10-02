@@ -1151,11 +1151,11 @@ class TestRuntimeSupport:
         """語彙にすら無い op は**まとめて**列挙されて落ちる（1 件ずつ落とさない）。
 
         NOTE: 代表として使う op は語彙の拡張のたびに入れ替わる — conv_transpose1d は
-        ADR 0015 で、conv2d は ADR 0017 で契約表に入った。ここは 3d 系（conv3d /
-        conv_transpose2d）で**複数件の列挙**を固定する。
+        ADR 0015 で、conv2d は ADR 0017 で、conv3d は ADR 0118 で契約表に入った。ここは
+        転置畳み込みの多次元版（conv_transpose2d / conv_transpose3d）で**複数件の列挙**を固定する。
         """
         graph = parse(
-            requires={"ops": ["conv3d", "conv_transpose2d"]},
+            requires={"ops": ["conv_transpose2d", "conv_transpose3d"]},
             outputs=["z"],
             values={
                 "w": {"dtype": "f32", "shape": [4]},
@@ -1163,7 +1163,7 @@ class TestRuntimeSupport:
                 "z": {"dtype": "f32", "shape": ["T", 4]},
             },
             nodes=[
-                {"op": "conv3d", "ins": ["x"], "outs": ["y"], "attrs": {}},
+                {"op": "conv_transpose3d", "ins": ["x"], "outs": ["y"], "attrs": {}},
                 {"op": "conv_transpose2d", "ins": ["y", "w"], "outs": ["z"], "attrs": {}},
             ],
         )
@@ -1173,7 +1173,41 @@ class TestRuntimeSupport:
 
         message = str(err.value)
         assert "非対応 op" in message
-        assert "conv3d" in message and "conv_transpose2d" in message
+        assert "conv_transpose3d" in message and "conv_transpose2d" in message
+
+    def test_an_unbatched_conv3d_graph_is_executable(self):
+        """conv3d（ADR 0118 決定 1）は語彙に入った — unbatched の rank 4 入力・rank 5 の重み・
+        [T, H, W] の 3 成分 attrs の形が対応表と契約の両方を通る（旧版はここで拒否していた）。"""
+        graph = parse(
+            requires={"ops": ["conv3d"]},
+            symbols=[],
+            inputs=[{"name": "x", "dtype": "f32", "shape": [3, 4, 6, 6]}],
+            initializers={
+                "w": {"tensor": "conv.weight", "storage": {"dtype": "f32"}},
+                "b": {"tensor": "conv.bias", "storage": {"dtype": "f32"}},
+            },
+            values={
+                "w": {"dtype": "f32", "shape": [5, 3, 3, 3, 3]},
+                "b": {"dtype": "f32", "shape": [5]},
+                "y": {"dtype": "f32", "shape": [5, 2, 6, 6]},
+            },
+            nodes=[
+                {
+                    "op": "conv3d",
+                    "ins": ["x", "w", "b"],
+                    "outs": ["y"],
+                    "attrs": {
+                        "stride": [1, 1, 1],
+                        "padding": [0, 1, 1],
+                        "dilation": [1, 1, 1],
+                        "groups": 1,
+                    },
+                }
+            ],
+        )
+
+        assert assert_runtime_support(graph) is None
+        assert_op_contracts(graph)
 
     def test_every_semantic_dtype_can_be_transferred(self):
         """転送層の軸は意味論 dtype 全語彙を受理する（ADR 0009 で i32 / bool を解禁）。

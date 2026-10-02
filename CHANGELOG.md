@@ -148,6 +148,14 @@ measurements in `docs/research/`.
   is frozen, including the empty-valued record used when the adapter has no `info`. The types
   `GeometryProfile`, `GemmRowsRule`, `GemmGeometry` and `I8a8Geometry` are exported for it; the
   built-in tables themselves are not.
+- IR op `conv3d` (ADR 0118): an **unbatched** 3-D convolution
+  `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]` with `stride` /
+  `padding` / `dilation` as `[T, H, W]` triples and a scalar `groups`, all four mandatory. The
+  runtime runs it on the GPU as an implicit GEMM with `groups == 1` and f32 / f16 / i8 weight
+  storage; a graph with `groups > 1` is rejected when the session is built. The exporter keeps
+  `aten.conv3d` as one node for an unbatched input (normalizing scalar spatial arguments to
+  triples and synthesizing a zero bias when there is none) and fails loudly on a batched rank-5
+  input.
 
 ### Changed
 

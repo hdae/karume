@@ -1,5 +1,5 @@
 /**
- * 族別導出 — 畳み込みの族（conv1d / conv2d とその igemm 変種・conv_transpose1d・
+ * 族別導出 — 畳み込みの族（conv1d / conv2d とその igemm 変種・conv3d・conv_transpose1d・
  * deform_conv2d）と gru_scan。
  *
  * 入口は {@link "../recipe-builder.ts"} の `RecipeBuilder` で、共有サービス（Session の状態・
@@ -33,6 +33,15 @@ import {
   conv2dWgsl,
 } from "../../kernels/conv2d.ts";
 import {
+  CONV3D_SCALE_BINDING,
+  type Conv3dDims,
+  conv3dIgemmKey,
+  conv3dIgemmParams,
+  conv3dIgemmWgsl,
+  conv3dIgemmWorkgroups,
+  conv3dUsesVec4,
+} from "../../kernels/conv3d.ts";
+import {
   CONV_TRANSPOSE1D_SCALE_BINDING,
   CONV_TRANSPOSE1D_WORKGROUP_SIZE,
   convTranspose1dKey,
@@ -50,6 +59,7 @@ import type { WeightStorage } from "../../kernels/weight-storage.ts";
 import {
   conv1dAttrs,
   conv2dAttrs,
+  conv3dAttrs,
   convTranspose1dAttrs,
   deformConv2dAttrs,
   numel,
@@ -397,6 +407,92 @@ const buildConv2dIgemm = async (
       tiledWorkgroups(m, gemmTileM(geometry), limit, where),
       tiledWorkgroups(dims.batch, 1, limit, where),
     ],
+  });
+};
+
+/**
+ * conv3d（unbatched・implicit GEMM のみ — ADR 0118 決定 1）。
+ *
+ * 時間軸は N に畳むので dispatch は `[ceil(N/tileN), ceil(M/tileM), 1]`（unbatched — z は 1）。
+ * m タイルの述語は conv1d / conv2d と**同じ 1 本**（{@link conv2dIgemmMTile}）で、幾何は
+ * プロファイルを引かず既定（`gemmMTileGeometry`）— conv1d と同じ扱い（ADR 0118 決定 1）。
+ *
+ * MUST: GEMM 骨格と同じ「1 workgroup = 1 出力タイル」なので、dispatch 上限超過は fail loudly
+ * （grid-stride で縮退させるとタイルが欠落し、full-write が黙って壊れる）。
+ * MUST: Kt / Kh / Kw は**重みの第 3 / 4 / 5 軸**をこの順で読む（立方カーネルでは入れ替えても
+ * 数値が一致するので、テストは Kt ≠ Kh ≠ Kw で固定する）。
+ * NOTE: groups > 1 は Session の構築時（plan.ts の `validateGraphContracts`）に落ちているので
+ * ここへは届かない。届いた場合も params 層（{@link conv3dIgemmParams}）が落とす。
+ */
+export const buildConv3d = async (
+  face: RecipeBuildFace,
+  step: NodePlan,
+  binds: readonly BindingSource[],
+  outs: readonly BindingSource[],
+  builder: StepRecipeBuilder,
+): Promise<void> => {
+  const [x, weight] = step.inputShapes;
+  const outShape = step.outputs[0].shape;
+  const { stride, padding, dilation, groups } = conv3dAttrs(
+    step.node.attrs,
+    `nodes (${step.node.op})`,
+  );
+  const dims: Conv3dDims = {
+    channelsIn: x[0],
+    channelsOut: outShape[0],
+    timeIn: x[1],
+    heightIn: x[2],
+    widthIn: x[3],
+    timeOut: outShape[1],
+    heightOut: outShape[2],
+    widthOut: outShape[3],
+    kernelT: weight[2],
+    kernelH: weight[3],
+    kernelW: weight[4],
+    strideT: stride[0],
+    strideH: stride[1],
+    strideW: stride[2],
+    paddingT: padding[0],
+    paddingH: padding[1],
+    paddingW: padding[2],
+    dilationT: dilation[0],
+    dilationH: dilation[1],
+    dilationW: dilation[2],
+    groups,
+  };
+  const weightStorage = face.weightStorage(step);
+  const kFlat = dims.channelsIn * dims.kernelT * dims.kernelH * dims.kernelW;
+  const v4 = conv3dUsesVec4(kFlat, dims.widthOut, dims.strideW);
+  const mTile = conv2dIgemmMTile(dims.channelsOut);
+  const key = conv3dIgemmKey(weightStorage, v4, mTile);
+  // params を先に組む: groups > 1 などの契約外の形はパイプラインを引く前に落とす。
+  const paramsData = conv3dIgemmParams(dims);
+  const { pipeline, layout, roles } = await face.state.cache.get(
+    key,
+    conv3dIgemmWgsl(weightStorage, v4, mTile),
+  );
+  const params = face.writeParams(paramsData, PARAMS_UNIFORM_USAGE);
+  const where = `conv3d [${step.inputShapes[0].join(",")}] * [${step.inputShapes[1].join(",")}]`;
+  // dispatch の辺は生成・キーと同じ解決点（`gemmMTileGeometry(mTile)`）から導く 1 箇所
+  // （src/kernels/conv3d.ts — 単体の GPU 門も同じ関数を通る）。
+  const workgroups = conv3dIgemmWorkgroups(
+    dims,
+    mTile,
+    face.state.gpu.limits.maxComputeWorkgroupsPerDimension,
+    where,
+  );
+  builder.dispatch({
+    key,
+    pipeline,
+    layout,
+    roles,
+    params,
+    bindings: [
+      ...binds.map((source, index) => ({ binding: index + 1, source })),
+      { binding: 4, source: outs[0] },
+      ...face.weightScaleBindings(step, CONV3D_SCALE_BINDING),
+    ],
+    workgroups,
   });
 };
 

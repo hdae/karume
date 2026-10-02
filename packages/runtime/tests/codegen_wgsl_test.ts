@@ -106,6 +106,13 @@ import {
   conv2dWgsl,
 } from "../src/kernels/conv2d.ts";
 import {
+  CONV3D_SCALE_BINDING,
+  conv3dIgemmKey,
+  conv3dIgemmParams,
+  conv3dIgemmWgsl,
+  conv3dUsesVec4,
+} from "../src/kernels/conv3d.ts";
+import {
   convTranspose1dKey,
   convTranspose1dParams,
   convTranspose1dWgsl,
@@ -305,6 +312,11 @@ const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, tr
         `conv2d igemm ${weight}${v4 ? " v4" : ""}`,
         conv2dIgemmKey(weight, v4),
         conv2dIgemmWgsl(weight, v4),
+      ] as const,
+      [
+        `conv3d igemm ${weight}${v4 ? " v4" : ""}`,
+        conv3dIgemmKey(weight, v4),
+        conv3dIgemmWgsl(weight, v4),
       ] as const,
     ]),
     // i4 は **linear / embedding 限定**（ADR 0069 決定 5 + embedding 追補）— conv 系の直積には
@@ -644,6 +656,22 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
     ["conv1d_igemm_wi4_v4.wgsl", conv1dIgemmWgsl("i4", true, undefined, 32)],
     ["conv1d_igemm_m32_wi4.wgsl", conv1dIgemmWgsl("i4", false, GEMM_MTILE_SMALL, 32)],
     ["conv1d_igemm_m32_wi4_v4.wgsl", conv1dIgemmWgsl("i4", true, GEMM_MTILE_SMALL, 32)],
+    // conv3d の implicit GEMM（ADR 0118 決定 1 — unbatched・ADR 0024 の 3D 版）も conv1d / conv2d と
+    // 同じ粒度の 12 変種（格納 3 × v4 × m タイル 64 / 32）。**conv1d_igemm* / conv2d_igemm* と対で
+    // 並べる**のが条件で、3D の断片（DIMS_EXTRA / xcol / kDecode / B 充填）を共有骨格へ足したことで
+    // 既存 2 族のバイト列が動くのが最大の事故（その検出器は上の 24 本）。
+    ["conv3d_igemm.wgsl", conv3dIgemmWgsl("f32", false)],
+    ["conv3d_igemm_v4.wgsl", conv3dIgemmWgsl("f32", true)],
+    ["conv3d_igemm_wf16.wgsl", conv3dIgemmWgsl("f16", false)],
+    ["conv3d_igemm_wf16_v4.wgsl", conv3dIgemmWgsl("f16", true)],
+    ["conv3d_igemm_wi8.wgsl", conv3dIgemmWgsl("i8", false)],
+    ["conv3d_igemm_wi8_v4.wgsl", conv3dIgemmWgsl("i8", true)],
+    ["conv3d_igemm_m32.wgsl", conv3dIgemmWgsl("f32", false, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_v4.wgsl", conv3dIgemmWgsl("f32", true, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_wf16.wgsl", conv3dIgemmWgsl("f16", false, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_wf16_v4.wgsl", conv3dIgemmWgsl("f16", true, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_wi8.wgsl", conv3dIgemmWgsl("i8", false, GEMM_MTILE_SMALL)],
+    ["conv3d_igemm_m32_wi8_v4.wgsl", conv3dIgemmWgsl("i8", true, GEMM_MTILE_SMALL)],
     // w8a8（活性 i8 化 + 整数内積）。**dp4a 版とエミュ版の両方**を置くのが条件で、
     // 「数値は同じで速度だけ違う」という主張は生成物が 2 つ別々に存在することが前提になる。
     ["quantize_rows.wgsl", QUANTIZE_ROWS_WGSL],
@@ -1064,6 +1092,7 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
       [false, true].flatMap((v4) => [
         conv2dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
         conv1dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
+        conv3dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
       ])
     ),
     // i4 は **group 長ごとに別キー**（shift を WGSL に焼く — ADR 0069）。g 部がキーに
@@ -2782,7 +2811,7 @@ Deno.test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を f
  * 生成物に埋まった辺と幾何を同じテストで突き合わせる（executor は dispatch の辺を
  * `gemmTileM` / `gemmTileN` で幾何から導くので、両者がずれるのは生成側の事故だけ）。
  */
-Deno.test("GEMM 骨格 7 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
+Deno.test("GEMM 骨格 8 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
   // conv の m タイルヒューリスティックの基準値（実タイル辺ではない — gemm-geometry.ts の MUST）
   assertEquals(GEMM_TILE, 64);
   // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
@@ -2810,7 +2839,7 @@ Deno.test("GEMM 骨格 7 op のタイル辺・キー・TS 定数が既定幾何�
     assertEquals(key.includes(conv ? "wg16x8" : "r8x8w16"), true, where);
     // 端チャネル読出しの保護で conv と i8 linear の世代を更新する。
     // WGSL を変えていない格納形式と attention / matmul / bmm の世代は維持する。
-    const version = where.startsWith("attention")
+    const version = where.startsWith("attention") || where.startsWith("conv3d")
       ? ":v1:"
       : where.startsWith("conv1d")
       ? ":v4:"
@@ -5023,4 +5052,157 @@ Deno.test("BSHD RoPE は head 数で位置表を引き、異なるキーと unif
   assertThrows(() => ropeParams(768, 3, 127, "bshd"), CodegenError, "headDim");
   assertThrows(() => ropeParams(769, 3, 128, "bshd"), CodegenError, "整数行");
   assertThrows(() => ropeParams(0, 0x80000000, 128, "bshd"), CodegenError, "u32");
+});
+
+/**
+ * conv3d の implicit GEMM（ADR 0118 決定 1 — unbatched・ADR 0024 の 3D 版）の**構造**の門。
+ * 数値（CPU 参照との照合・恒等門）は実 GPU が見る（tests/gpu_conv3d_parity_test.ts）ので、ここは
+ * キー・uniform・断片の並びと生成の門をアダプタ無しで固定する。
+ */
+Deno.test("conv3d の implicit GEMM は unbatched の 3D gather を共有骨格に差す（キー・uniform・断片）", () => {
+  // キーは新系統 v1。m タイル 64 / 32 の辺と workgroup 形は幾何から（conv1d / conv2d と同じ規律）
+  assertEquals(conv3dIgemmKey("f32", true), "conv3d:v1:f32:igemm64x128v4:wg16x8");
+  assertEquals(conv3dIgemmKey("f16", false), "conv3d:v1:f32:igemm64x128:wg16x8:wf16");
+  assertEquals(
+    conv3dIgemmKey("i8", false, GEMM_MTILE_SMALL),
+    "conv3d:v1:f32:igemm32x128:wg16x4:wi8",
+  );
+  // i8 の scale 束縛は linear / conv1d / conv2d の implicit GEMM と同じ番号（束縛配置が同じ）
+  assertEquals(CONV3D_SCALE_BINDING, CONV2D_SCALE_BINDING);
+  for (const weight of WEIGHT_STORAGES) {
+    for (const v4 of [false, true]) {
+      for (const mTile of [GEMM_TILE, GEMM_MTILE_SMALL]) {
+        const wgsl = conv3dIgemmWgsl(weight, v4, mTile);
+        const where = `conv3d igemm ${weight} v4=${v4} m${mTile}`;
+        // MUST: unbatched — バッチ base（dispatch の z 軸）を一切読まない。conv2d の
+        // `xbase = wid.z * …` を写すと z = 1 の dispatch では無害なまま「バッチ対応」に見える
+        // 死んだ算術が残る。
+        assertEquals(wgsl.includes("wid.z"), false, `${where}: z 軸のバッチ base が残っている`);
+        // uniform は {m,n,k} + 幾何 18 語 = 21 欄（time_out は n から導けるので載せない）
+        const struct = wgsl.slice(wgsl.indexOf("struct Dims {"), wgsl.indexOf("}\n@group"));
+        assertEquals(struct.split(": u32,").length - 1, 21, `${where}: uniform の語数`);
+        assertEquals(struct.includes("time_out"), false, `${where}: time_out は死んだ欄`);
+        // bias-first（ADR 0024 決定 3 — store 側で足すとビット同一が崩れる）
+        assertEquals(wgsl.includes(`let bias0 = wid.y * ${mTile}u + lid.y * 8u;`), true, where);
+        assertEquals(wgsl.includes("+ biasv"), false, `${where}: bias が store 側にある`);
+        // 平坦 k → (ic, kt, kh, kw) の四重昇順（重み [Cout, Cin, Kt, Kh, Kw] の行優先）
+        assertEquals(wgsl.includes("let ic = brow0 / kthw;"), true, where);
+        assertEquals(
+          wgsl.includes("let kt = i32((kr / khw) * dims.dilation_t) - i32(dims.padding_t);"),
+          true,
+          where,
+        );
+        assertEquals(
+          wgsl.includes(
+            "let ky = i32((ks / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);",
+          ),
+          true,
+          where,
+        );
+        // n → (ot, oy, ox) は Hout·Wout で時間を・Wout で行を割る
+        assertEquals(wgsl.includes("let plane = dims.height_out * dims.width_out;"), true, where);
+        assertEquals(
+          wgsl.includes("let iy = i32((pixel / dims.width_out) * dims.stride_h) + ky;"),
+          true,
+          where,
+        );
+        // 範囲外は 0（クランプ読みにしない — ADR 0024 の MUST ③）
+        assertEquals(wgsl.includes("    return 0.0;"), true, where);
+        // v4 の速い経路だけが quad の先頭 n を割る刻みを持つ（スカラ経路に死んだ let を残さない）
+        assertEquals(wgsl.includes("let hw_out ="), v4, where);
+      }
+    }
+  }
+  // i4 / i2 の実行経路は無い（A 側の展開器は 1D / 2D / 3D で共有なので生成の入口で落とす）
+  assertThrows(() => conv3dIgemmWgsl("i4", false), CodegenError, "i4");
+  assertThrows(() => conv3dIgemmWgsl("i2", true), CodegenError, "i2");
+});
+
+Deno.test("conv3dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る", () => {
+  assertEquals(conv3dUsesVec4(16 * 27, 32, 1), true, "chunk グラフ conv_in（16→384 k3・潜在 32）");
+  // MUST: Wout%4 は Hout·Wout%4 で代用できない（Hout=2・Wout=2 は N%4==0 だが quad が行をまたぐ）
+  assertEquals(conv3dUsesVec4(8, 2, 1), false, "Wout=2");
+  assertEquals(conv3dUsesVec4(27, 8, 1), false, "kFlat=27（Cin=1 の 3×3×3）");
+  assertEquals(conv3dUsesVec4(24, 8, 2), false, "stride_w=2（4 列の x が連続しない）");
+  assertEquals(conv3dUsesVec4(4, 4, 1), true);
+});
+
+Deno.test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、契約外を fail loudly にする", () => {
+  const base = {
+    channelsIn: 3,
+    channelsOut: 7,
+    timeIn: 6,
+    heightIn: 9,
+    widthIn: 11,
+    timeOut: 2,
+    heightOut: 4,
+    widthOut: 5,
+    kernelT: 3,
+    kernelH: 2,
+    kernelW: 4,
+    strideT: 2,
+    strideH: 2,
+    strideW: 2,
+    paddingT: 0,
+    paddingH: 1,
+    paddingW: 0,
+    dilationT: 1,
+    dilationH: 3,
+    dilationW: 1,
+    groups: 1,
+  };
+  const params = conv3dIgemmParams(base);
+  // 21 語は 16 バイト整列の 24 語（96 バイト）に詰める（uniform の struct 整列 MUST）
+  assertEquals(params.length, 24);
+  assertEquals([...params.slice(0, 21)], [
+    7, // m = Cout
+    2 * 4 * 5, // n = Tout·Hout·Wout（時間軸は N に畳む）
+    3 * 3 * 2 * 4, // k = Cin·Kt·Kh·Kw
+    3, // channels_in
+    6, // time_in
+    9, // height_in
+    11, // width_in
+    4, // height_out
+    5, // width_out
+    3, // kernel_t
+    2, // kernel_h
+    4, // kernel_w
+    2, // stride_t
+    2, // stride_h
+    2, // stride_w
+    0, // padding_t
+    1, // padding_h
+    0, // padding_w
+    1, // dilation_t
+    3, // dilation_h
+    1, // dilation_w
+  ]);
+  assertEquals([...params.slice(21)], [0, 0, 0], "詰め物はゼロ");
+  // MUST: 軸ごとに独立に見る（片側だけ 0 の形が素通りすると GPU ハング / bias 一色になる）
+  for (
+    const key of [
+      "strideT",
+      "strideH",
+      "strideW",
+      "dilationT",
+      "dilationH",
+      "dilationW",
+      "kernelT",
+      "kernelH",
+      "kernelW",
+      "timeIn",
+      "timeOut",
+      "channelsIn",
+    ] as const
+  ) {
+    assertThrows(() => conv3dIgemmParams({ ...base, [key]: 0 }), CodegenError, "正整数");
+  }
+  assertThrows(() => conv3dIgemmParams({ ...base, paddingT: -1 }), CodegenError);
+  // MUST: groups > 1 は GPU の実装済み subset の外（ADR 0118 決定 1）
+  assertThrows(() => conv3dIgemmParams({ ...base, groups: 3 }), CodegenError, "groups");
+  // u32 の外は params の門で落ちる（添字と uniform は u32 — ADR 0118 決定 1）
+  assertThrows(
+    () => conv3dIgemmParams({ ...base, timeOut: 0x10000, heightOut: 0x10000 }),
+    CodegenError,
+  );
 });

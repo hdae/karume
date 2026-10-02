@@ -1,6 +1,6 @@
 /**
  * GEMM 族（matmul / bmm / linear + 融合 attention の QK / PV + states 形 attention の ①ₜ / ③ₜ +
- * conv1d / conv2d の implicit GEMM — ADR 0022 / 0023 / 0024 / 0067）が共有する
+ * conv1d / conv2d / conv3d の implicit GEMM — ADR 0022 / 0023 / 0024 / 0067 / 0118）が共有する
  * **レジスタブロッキング + vec4** の骨格。
  *
  * 1 スレッドが {@link GemmGeometry} の `regM`×`regN` の出力を持ち（`acc{行}_{列 quad}` の
@@ -359,9 +359,9 @@ type GemmSpec =
   | (
     & {
       /**
-       * 1D / 2D の implicit GEMM。**A タイル（重み）・bias-first・store は完全に共通**で、
-       * 違うのは B タイル（x の暗黙 gather）が平坦 k を `(ic, k)` に割るか `(ic, kh, kw)` に
-       * 割るか、と uniform の幾何欄だけ。
+       * 1D / 2D / 3D の implicit GEMM。**A タイル（重み）・bias-first・store は完全に共通**で、
+       * 違うのは B タイル（x の暗黙 gather）が平坦 k を `(ic, k)` / `(ic, kh, kw)` /
+       * `(ic, kt, kh, kw)` のどれに割るか、と uniform の幾何欄だけ。
        */
       readonly v4: boolean;
       readonly weight: WeightStorage;
@@ -377,6 +377,9 @@ type GemmSpec =
     }
     & (
       | { readonly op: "conv1d" }
+      // unbatched（ADR 0118 決定 1）なのでバッチ軸を持たず {@link BATCHED_OPS} に入らない。
+      // 幾何プロファイルは引かない（conv1d と同じく既定の幾何 — 明示の欄を持たない）。
+      | { readonly op: "conv3d" }
       | {
         readonly op: "conv2d";
         /** 明示の幾何（省略時は op 別の解決 — {@link resolveGeometry}。渡すと `mTile` より優先）。 */
@@ -2259,7 +2262,192 @@ ${fillBConv1d(geometry, v4)}`,
   );
 
 /**
- * op 別の解決（conv1d / conv2d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。
+ * conv3d の implicit GEMM が uniform に足す幾何 18 語（`{m,n,k}` の後ろ — ADR 0118 決定 1）。
+ *
+ * `m = Cout` / `n = Tout·Hout·Wout`（**時間軸は N に畳む** — unbatched なので出力
+ * `[Cout][Tout·Hout·Wout]` の行優先がそのまま出力テンソル）/ `k = Cin·Kt·Kh·Kw`（groups == 1）。
+ * MUST: 並びは src/kernels/conv3d.ts の `conv3dIgemmParams` と対。
+ * NOTE: `time_out` は載せない（`n / (height_out·width_out)` で導けるうえ WGSL が一度も読まない —
+ * conv2d が `height_out` を落としたのと同じ規律）。3D では n から `(ot, oy, ox)` を戻すのに
+ * `height_out·width_out` と `width_out` の 2 つが要るので、`height_out` は残る。
+ */
+const CONV3D_DIMS_EXTRA = `  channels_in: u32,
+  time_in: u32,
+  height_in: u32,
+  width_in: u32,
+  height_out: u32,
+  width_out: u32,
+  kernel_t: u32,
+  kernel_h: u32,
+  kernel_w: u32,
+  stride_t: u32,
+  stride_h: u32,
+  stride_w: u32,
+  padding_t: u32,
+  padding_h: u32,
+  padding_w: u32,
+  dilation_t: u32,
+  dilation_h: u32,
+  dilation_w: u32,
+`;
+
+/**
+ * `Xcol[k][n]` の 1 要素（x の暗黙 gather — im2col を実体化しない）の 3D 版。
+ *
+ * MUST: 範囲外は **0 を返す**（ADR 0024 の MUST ③）。クランプした添字で読むと実在する別
+ * ボクセルが混ざり、例外の出ない誤値になる。
+ * MUST: n の分解は `plane = height_out·width_out` で時間を、`width_out` で行を割る。取り違えると
+ * 1 フレームしか無い形（Tout = 1）では一致してしまうので、テストは Tout ≥ 2 で固定する。
+ */
+const CONV3D_XCOL_WGSL = `
+// Xcol[k][n] = x[ic, ot·st − pt + kt·dt, oy·sh − ph + kh·dh, ox·sw − pw + kw·dw]（範囲外は 0）。
+// n = (ot·Hout + oy)·Wout + ox。unbatched なのでバッチの base は無い
+fn xcol(ic: u32, kt: i32, ky: i32, kx: i32, n: u32) -> f32 {
+  let plane = dims.height_out * dims.width_out;
+  let pixel = n % plane;
+  let it = i32((n / plane) * dims.stride_t) + kt;
+  let iy = i32((pixel / dims.width_out) * dims.stride_h) + ky;
+  let ix = i32((pixel % dims.width_out) * dims.stride_w) + kx;
+  if (it < 0 || u32(it) >= dims.time_in || iy < 0 || u32(iy) >= dims.height_in ||
+      ix < 0 || u32(ix) >= dims.width_in) {
+    return 0.0;
+  }
+  return x[((ic * dims.time_in + u32(it)) * dims.height_in + u32(iy)) * dims.width_in + u32(ix)];
+}
+`;
+
+/**
+ * conv3d の B タイル（`Xcol[k,n]` の暗黙 gather）の担当。割り当ては dense と同じ。
+ *
+ * unbatched なので `xbase` / `cbase` を持たない（conv1d / conv2d の z 軸のバッチ base が無い形）。
+ */
+const prologueBConv3d = (geometry: GemmGeometry, v4: boolean): string => {
+  const stride = gemmQuadFillStride(geometry);
+  const nQuads = gemmColumnQuads(geometry);
+  const rows = slots(gemmQuadSlots(geometry)).slice(1)
+    .map((slot) => `\n  let bk${slot} = bk0 + ${slot * stride}u;`).join("");
+  return `  // B タイルの担当（K ${GEMM_TILE_K} 行 × 列 quad ${nQuads} を ${
+    gemmThreads(geometry)
+  } スレッドで ${gemmQuadSlots(geometry)} 巡）
+  let bk0 = tid / ${nQuads}u;
+  let bcq = tid % ${nQuads}u;
+  ${
+    v4
+      ? `let bc4 = wid.x * ${nQuads}u + bcq;`
+      : `let bcol = wid.x * ${gemmTileN(geometry)}u + bcq * ${GEMM_QUAD}u;`
+  }${rows}
+  // K タイルループ不変（平坦 k を (ic, kt, kh, kw) へ割るための刻み${
+    v4 ? "と、quad の先頭 n を (ot, 画素) へ割る刻み" : ""
+  }）
+  let khw = dims.kernel_h * dims.kernel_w;
+  let kthw = dims.kernel_t * khw;${v4 ? "\n  let hw_out = dims.height_out * dims.width_out;" : ""}`;
+};
+
+/**
+ * 平坦 k → `(ic, kt, kh, kw)` の分解と入力座標のオフセット。
+ *
+ * MUST: 平坦 k の昇順が `(ic, kt, kh, kw)` の四重昇順（重み `[Cout, Cin, Kt, Kh, Kw]` の行優先）と
+ * 一致することが、K タイル 16 昇順 → ビット同一の土台（ADR 0024 決定 3 を 3D へ継ぐ — ADR 0118
+ * 決定 1）。Kt = 1 の形でこの並びは conv2d の `(ic, kh, kw)` と同じ列になる（恒等門 ①）。
+ */
+const conv3dKDecode = (slot: number): string =>
+  `      let ic = brow${slot} / kthw;
+      let kr = brow${slot} % kthw;
+      let kt = i32((kr / khw) * dims.dilation_t) - i32(dims.padding_t);
+      let ks = kr % khw;
+      let ky = i32((ks / dims.kernel_w) * dims.dilation_h) - i32(dims.padding_h);
+      let kx = i32((ks % dims.kernel_w) * dims.dilation_w) - i32(dims.padding_w);`;
+
+/**
+ * conv3d の B タイル充填（2D 版 {@link fillBConv2d} の 3 軸版）。
+ *
+ * MUST: x を読むのは `bc4 < n4`（v4）/ `bcol + j < n`（スカラ）の門の**内側**だけ。
+ * MUST: v4 の連続 4 列読みが成立する条件は `Wout % 4 == 0 && stride_w == 1`（判定は
+ * `conv3dUsesVec4` — src/kernels/conv3d.ts の 1 箇所）。`Wout % 4 == 0` なら quad の 4 列は
+ * 同じフレームの同じ出力行に収まる（`N % 4 == 0` では不十分 — conv2d と同じ理由）。
+ */
+const fillBConv3d = (geometry: GemmGeometry, v4: boolean): string =>
+  slots(gemmQuadSlots(geometry)).map((slot) =>
+    `    let brow${slot} = t * ${GEMM_TILE_K}u + bk${slot};
+    var bv4_${slot} = vec4<f32>(0.0);
+${
+      v4
+        ? `    if (brow${slot} < dims.k && bc4 < n4) {
+${conv3dKDecode(slot)}
+      // quad の 4 列は同じフレーム・同じ出力行の連続 ox（v4 の条件）なので x 側も連続に読める
+      let n0 = bc4 * ${GEMM_QUAD}u;
+      let pixel0 = n0 % hw_out;
+      let it = i32((n0 / hw_out) * dims.stride_t) + kt;
+      let iy = i32((pixel0 / dims.width_out) * dims.stride_h) + ky;
+      let ix0 = i32((pixel0 % dims.width_out) * dims.stride_w) + kx;
+      if (it >= 0 && u32(it) < dims.time_in && iy >= 0 && u32(iy) < dims.height_in &&
+          ix0 >= 0 && u32(ix0) + 3u < dims.width_in) {
+        let base = ((ic * dims.time_in + u32(it)) * dims.height_in + u32(iy)) * dims.width_in +
+          u32(ix0);
+        bv4_${slot} = vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]);
+      } else {
+        // 時間端・画像端と padding 域だけがここに来る（範囲外は 0 — xcol の MUST）
+        bv4_${slot} = vec4<f32>(
+          xcol(ic, kt, ky, kx, n0),
+          xcol(ic, kt, ky, kx, n0 + 1u),
+          xcol(ic, kt, ky, kx, n0 + 2u),
+          xcol(ic, kt, ky, kx, n0 + 3u),
+        );
+      }
+    }`
+        : `    if (brow${slot} < dims.k) {
+${conv3dKDecode(slot)}
+      if (bcol < dims.n) {
+        bv4_${slot}.x = xcol(ic, kt, ky, kx, bcol);
+      }
+      if (bcol + 1u < dims.n) {
+        bv4_${slot}.y = xcol(ic, kt, ky, kx, bcol + 1u);
+      }
+      if (bcol + 2u < dims.n) {
+        bv4_${slot}.z = xcol(ic, kt, ky, kx, bcol + 2u);
+      }
+      if (bcol + 3u < dims.n) {
+        bv4_${slot}.w = xcol(ic, kt, ky, kx, bcol + 3u);
+      }
+    }`
+    }
+    sb[bk${slot} * ${gemmColumnQuads(geometry)}u + bcq] = bv4_${slot};`
+  ).join("\n");
+
+/**
+ * conv3d の implicit GEMM（ADR 0118 決定 1 — ADR 0024 の 3D 版）— `C[Cout, N] = W[Cout, K] × Xcol[K, N]`。
+ *
+ * A タイル（重み）・bias-first・store は 1D / 2D 版と**同じ断片**で、違うのは B タイルの k 分解
+ * （`(ic, kt, kh, kw)` の 4 段）・n の分解（`(ot, oy, ox)`）・uniform の幾何欄だけ。store は
+ * unbatched の `[Cout][Tout·Hout·Wout]` 行優先 = 出力テンソルそのもので、バッチ base を持たない
+ * （{@link BATCHED_OPS} に入らない — dispatch の z は 1）。
+ */
+const conv3dIgemmWgsl = (
+  geometry: GemmGeometry,
+  weight: WeightStorage,
+  v4: boolean,
+): string =>
+  skeleton(
+    geometry,
+    `// karume conv3d (x[Cin,T,H,W] * W[Cout,Cin,Kt,Kh,Kw] + b[Cout], f32${
+      weightNote(weight)
+    }, implicit GEMM ${gemmGeometryNote(geometry)}${v4 ? " + vec4" : ""})`,
+    `@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<${weightArrayType(weight, v4)}>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<${v4 ? "vec4<f32>" : "f32"}>;`,
+    `${weightLoaderWgsl("w", weight, LINEAR_SCALE_BINDING, v4)}${CONV3D_XCOL_WGSL}`,
+    `${v4 ? `  let n4 = dims.n / ${GEMM_QUAD}u;\n` : ""}${prologueAConv(geometry, weight)}
+${prologueBConv3d(geometry, v4)}`,
+    `${fillAConv(geometry, "w", weight, v4)}
+${fillBConv3d(geometry, v4)}`,
+    store(geometry, "out", "conv3d", v4, false),
+    CONV3D_DIMS_EXTRA,
+    convAccInit(geometry),
+  );
+
+/**
+ * op 別の解決（conv1d / conv2d / conv3d = m タイル / 融合 attention = 既定固定 / 残り 3 op = 行数バケット）。
  * 明示の幾何（{@link GemmSpec} の `geometry` — matmul / bmm / linear / attention_qk / attention_pv /
  * conv2d だけが取る）があれば、その 6 op ではそれを先に採る。
  */
@@ -2268,6 +2456,7 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
   // 同じ優先順で解くので、片方だけ明示を読み落とすとキーと生成物の幾何が食い違う。
   switch (spec.op) {
     case "conv1d":
+    case "conv3d":
       return gemmMTileGeometry(spec.mTile);
     case "conv2d":
       return spec.geometry ?? gemmMTileGeometry(spec.mTile);
@@ -2288,7 +2477,7 @@ const resolveGeometry = (spec: GemmSpec): GemmGeometry => {
 /**
  * 生成入力 1 つから WGSL 1 本。同じ入力からは常にバイト単位で同じ文字列が出る。
  *
- * タイル幾何を解決する**唯一の点**（conv1d / conv2d は {@link gemmMTileGeometry}・matmul / bmm / linear は
+ * タイル幾何を解決する**唯一の点**（conv1d / conv2d / conv3d は {@link gemmMTileGeometry}・matmul / bmm / linear は
  * 行数バケット {@link rowsGeometry}・融合 attention は {@link defaultGemmGeometry}）で、門
  * （{@link assertGemmGeometry}）もここ 1 箇所。断片は幾何を受け取って流すだけなので、既定を
  * 差し替えたときの影響がこの関数に閉じる。
@@ -2333,6 +2522,18 @@ export const gemmWgsl = (spec: GemmSpec): string => {
         );
       }
       return conv2dIgemmWgsl(geometry, spec.weight, spec.v4);
+    case "conv3d":
+      if (spec.weight === "i2") {
+        throw new CodegenError("conv3d: 重み i2 格納は未対応（ADR 0097）");
+      }
+      // MUST: conv3d に i4 の実行経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。A 側の展開器は
+      // 1D / 2D / 3D で共有なので生成が通ってしまう — conv2d と同じく生成の入口でも落とす。
+      if (spec.weight === "i4" || spec.weightGroupShift !== undefined) {
+        throw new CodegenError(
+          "conv3d: 重み i4 格納は未実装 — i4 の実行経路は linear / embedding / conv1d(groups==1) だけ（ADR 0069 決定 5）",
+        );
+      }
+      return conv3dIgemmWgsl(geometry, spec.weight, spec.v4);
     case "attention_qk":
       return attentionQkWgsl(
         geometry,

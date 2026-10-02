@@ -47,6 +47,7 @@ from karume.ops import (
     axis_dim,
     conv1d_attrs,
     conv2d_attrs,
+    conv3d_attrs,
     conv_transpose1d_attrs,
     cumsum_dim,
     deform_conv2d_attrs,
@@ -353,6 +354,8 @@ def _compute(
         return _sole(_conv1d(ins, where, attrs))
     if kind == "conv2d":
         return _sole(_conv2d(ins, where, attrs))
+    if kind == "conv3d":
+        return _sole(_conv3d(ins, where, attrs))
     if kind == "conv_transpose1d":
         return _sole(_conv_transpose1d(ins, where, attrs))
     if kind == "deform_conv2d":
@@ -1145,6 +1148,76 @@ def _conv2d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> li
     ]
 
 
+def _conv3d(ins: list[list[Extent]], where: str, attrs: Mapping[str, Any]) -> list[Extent]:
+    """conv3d の出力 shape（ADR 0118 決定 1 — **unbatched**）。
+
+    MUST: x は rank 4 の [Cin, T, H, W] だけ。batched の rank 5 を受けると先頭軸を Cin と読む
+    取り違えが要素数の合う形で素通りしうる（契約に batched 形は無い）。
+    MUST: 重みは **[Cout, Cin/groups, Kt, Kh, Kw]** で、Kt・Kh・Kw の**順**も契約。適合表は
+    Cin ≠ Cout・Kt ≠ Kh ≠ Kw の非対称形を持つ（取り違えると出力形が変わる形）。
+    MUST: カーネル長 0 は出力長式より前に落とす（`dilation·(K−1)` が負に転んで出力が入力より
+    長くなる — ランタイムの params 層は正整数として落とすので、ここが抜けると受理集合が割れる）。
+    MUST: 3 軸は同じ一般形を**独立に**適用する（{@link _conv_length} を軸ごとに呼ぶ）。
+    """
+    x, weight, bias = ins
+    stride, padding, dilation, groups = conv3d_attrs(attrs, where)
+    if len(x) != 4 or len(weight) != 5 or len(bias) != 1:
+        raise OpContractError(
+            f"{where}: conv3d は x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]"
+            f"（rank 4 / 5 / 1 — x は unbatched）:"
+            f" [{_show(x)}] / [{_show(weight)}] / [{_show(bias)}]"
+        )
+    channels_in = x[0]
+    channels_out, weight_in, *kernels = weight
+    # MUST: チャネル軸は静的（記号 Cin/Cout は実測に無く、groups の割り切りを判定できない）。
+    if not channels_in.is_const or not channels_out.is_const:
+        raise OpContractError(
+            f"{where}: conv3d のチャネル軸 {channels_in.to_dim()} / {channels_out.to_dim()} が"
+            " 記号（groups の割り切りを判定できない）"
+        )
+    if channels_in.offset % groups != 0 or channels_out.offset % groups != 0:
+        raise OpContractError(
+            f"{where}: conv3d の groups {groups} が Cin {channels_in.offset} /"
+            f" Cout {channels_out.offset} を割り切らない"
+        )
+    if not weight_in.is_value(channels_in.offset // groups):
+        raise OpContractError(
+            f"{where}: conv3d の重みは [Cout, Cin/groups, Kt, Kh, Kw]"
+            f"（Cin/groups = {channels_in.offset // groups}）のはずが [{_show(weight)}]"
+            f"（x は [{_show(x)}] / groups {groups}）"
+        )
+    if bias[0] != channels_out:
+        raise OpContractError(
+            f"{where}: conv3d の bias 長 {bias[0].to_dim()} が"
+            f" 出力チャネル {channels_out.to_dim()} と違う"
+        )
+    for name, kernel in zip(("Kt", "Kh", "Kw"), kernels, strict=True):
+        if not kernel.is_const:
+            raise OpContractError(
+                f"{where}: conv3d のカーネル長 {name} {kernel.to_dim()} が記号"
+                "（出力長を決められない）"
+            )
+        if kernel.offset < 1:
+            raise OpContractError(
+                f"{where}: conv3d のカーネル長 {name} は正整数（重み [{_show(weight)}]）"
+            )
+    return [
+        channels_out,
+        *(
+            _conv_length(
+                f"conv3d の {label}",
+                x[1 + axis],
+                kernels[axis].offset,
+                stride[axis],
+                padding[axis],
+                dilation[axis],
+                where,
+            )
+            for axis, label in enumerate(("T", "H", "W"))
+        ),
+    ]
+
+
 def _conv_length(
     label: str,
     length: Extent,
@@ -1156,7 +1229,7 @@ def _conv_length(
 ) -> Extent:
     """出力長 `floor((L + 2P - D*(K-1) - 1) / S) + 1`（ADR 0015 の dilation 一般形）。
 
-    conv1d と conv2d の空間 2 軸が**同じ規則**なので 1 本に共有する（`label` は診断の主語）。
+    conv1d / conv2d / conv3d の各軸が**同じ規則**なので 1 本に共有する（`label` は診断の主語）。
     記号長のときは一次式のまま割る: `L = c·s + o` で `c % S == 0` なら
     `floor((c·s + o') / S) = (c/S)·s + floor(o'/S)` が厳密に成立する（c·s は S の倍数）。
     割り切れない形は正準文法（1 次元 1 シンボルの一次式）に載らない — 黙って近似せず落とす

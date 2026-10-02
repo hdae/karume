@@ -27,6 +27,7 @@ import {
   computeOutputShape,
   conv1dAttrs,
   conv2dAttrs,
+  conv3dAttrs,
   convTranspose1dAttrs,
   deformConv2dAttrs,
   describeArity,
@@ -1290,6 +1291,75 @@ export const referenceConv2d = (
 };
 
 /**
+ * conv3d `out[oc, ot, oy, ox] = Σ_{ic,kt,kh,kw}
+ *   x[ic, ot·st + kt·dt − pt, oy·sh + kh·dh − ph, ox·sw + kw·dw − pw] · w[oc, ic − g·Cin/groups, kt, kh, kw]
+ *   + b[oc]`（**unbatched** — `g` は `oc` が属するグループ・ADR 0118 決定 1）。
+ *
+ * 意味論の全体（groups 一般・stride / dilation / padding 一般）を持つ。GPU の実装済み subset
+ * （groups == 1 の implicit GEMM）より広いのは、このオラクルが groups > 1 の資産を CPU で
+ * 検算できる唯一の経路だから（ADR 0064 軸 A — 意味論と subset を分けて持つ）。
+ *
+ * MUST: 重みは `[Cout, Cin/groups, Kt, Kh, Kw]` で、**Kt・Kh・Kw の順**も契約。立方カーネルでは
+ * 入れ替えても値が一致するので、テストは Kt ≠ Kh ≠ Kw で固定する。
+ * MUST: padding 域は**読み飛ばす**（0 を足す形にしない — conv1d / conv2d と同じ理由）。
+ * MUST: 添字は T / H / W を独立に組む（平坦化を先に済ませると軸を取り違えた stride が
+ * 立方入力で一致してしまう）。
+ */
+export const referenceConv3d = (
+  x: RefTensor,
+  weight: RefTensor,
+  bias: RefTensor,
+  attrs: Readonly<Record<string, unknown>>,
+): RefTensor => {
+  const contract = resolveOpContract("conv3d");
+  for (const input of [x, weight, bias]) assertDtype(contract, input.dtype, "reference");
+  const shape = computeOutputShape(contract, [x.shape, weight.shape, bias.shape], "reference", {
+    attrs,
+  })[0];
+  const { stride, padding, dilation, groups } = conv3dAttrs(attrs, "reference");
+  const [channelsOut, timeOut, heightOut, widthOut] = shape;
+  const [channelsIn, timeIn, heightIn, widthIn] = x.shape;
+  const [, , kernelT, kernelH, kernelW] = weight.shape;
+  // 契約検査（computeOutputShape）で割り切れは済んでいる。
+  const inPerGroup = channelsIn / groups;
+  const outPerGroup = channelsOut / groups;
+  const out = new Float32Array(numel(shape));
+  for (let oc = 0; oc < channelsOut; oc += 1) {
+    // 重みの第 2 軸は Cin/groups — 入力チャネルはグループの帯だけを走る
+    const icBase = Math.floor(oc / outPerGroup) * inPerGroup;
+    for (let ot = 0; ot < timeOut; ot += 1) {
+      for (let oy = 0; oy < heightOut; oy += 1) {
+        for (let ox = 0; ox < widthOut; ox += 1) {
+          let acc = bias.data[oc];
+          for (let icRel = 0; icRel < inPerGroup; icRel += 1) {
+            const volume = (icBase + icRel) * timeIn;
+            const weightVolume = (oc * inPerGroup + icRel) * kernelT;
+            for (let kt = 0; kt < kernelT; kt += 1) {
+              const it = ot * stride[0] + kt * dilation[0] - padding[0];
+              if (it < 0 || it >= timeIn) continue;
+              const plane = (volume + it) * heightIn;
+              const weightPlane = (weightVolume + kt) * kernelH;
+              for (let kh = 0; kh < kernelH; kh += 1) {
+                const iy = oy * stride[1] + kh * dilation[1] - padding[1];
+                if (iy < 0 || iy >= heightIn) continue;
+                for (let kw = 0; kw < kernelW; kw += 1) {
+                  const ix = ox * stride[2] + kw * dilation[2] - padding[2];
+                  if (ix < 0 || ix >= widthIn) continue;
+                  acc += x.data[(plane + iy) * widthIn + ix] *
+                    weight.data[(weightPlane + kh) * kernelW + kw];
+                }
+              }
+            }
+          }
+          out[((oc * timeOut + ot) * heightOut + oy) * widthOut + ox] = Math.fround(acc);
+        }
+      }
+    }
+  }
+  return { dtype: "f32", shape, data: out };
+};
+
+/**
  * conv_transpose1d `out[b, oc, ox] = Σ_{ic,k} x[b, ic, (ox + p − k)/s] · w[ic, oc, k] + b[oc]`
  * （`(ox + p − k)` が `s` で割り切れ、商が `[0, L)` に入る `(ic, k)` のみ — ADR 0015）。
  *
@@ -1693,6 +1763,8 @@ export const applyReferenceOpOutputs = (
       return sole(referenceConv1d(inputs[0], inputs[1], inputs[2], attrs));
     case "conv2d":
       return sole(referenceConv2d(inputs[0], inputs[1], inputs[2], attrs));
+    case "conv3d":
+      return sole(referenceConv3d(inputs[0], inputs[1], inputs[2], attrs));
     case "convTranspose1d":
       return sole(referenceConvTranspose1d(inputs[0], inputs[1], inputs[2], attrs));
     case "deformConv2d":

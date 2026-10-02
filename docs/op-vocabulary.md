@@ -77,7 +77,8 @@ M1-P2 以降に解消する。
   1.5〜2 倍に膨らむ。`rms_norm` は ADR 0017 で 10 → 11 — こちらは**保存だけでは足りず**、
   手書き分解形を拾う畳み込みパスと 2 系統で供給する。`scaled_dot_product_attention` は
   ADR 0023 で 11 → 12）。
-  **12 本目だけは既定の保存リストに載らない**（`PRESERVED_OP_PREFIXES` は 11 本のまま）—
+  **SDPA（12 本目）だけは既定の保存リストに載らない**（`PRESERVED_OP_PREFIXES` の中身は、上の 11 本から SDPA を除いた
+  10 本 + `leaky_relu` 等を含む従来の 11 本に、拡張分子層の `conv3d`〈ADR 0118〉を足した 12 本 — 本数が同じ 12 でも集合は別）—
   SDPA は mask / causal を引数で表せてしまい、グローバルに保存すると契約外の形
   （kwargs 渡しの bool mask・`[B,1,M,N]` 等）が `_h_attention` の fail loudly に当たって
   export できなくなる。加算型 f32 `[1,1,M,N]` の mask だけは 2026-08-11 の改訂（ADR 0023
@@ -348,6 +349,27 @@ NOTE: 2026-09-11 `static_quantize` を固定活性量子化の拡張分子とし
 QAT mobile の固定 scale と f32 中間丸めを保存するため、単純な除算・丸め・乗算の分解には落とさない。
 GPU 除算の許容誤差が整数丸めの境界を越すことを実測し、整数の境界表と出力表で再現した。
 供給は `karume::static_quantize` → 同名 IR op。既存グラフへの自動挿入は行わない。
+
+NOTE: 2026-10-02 `conv3d` を**拡張分子層**（Core ATen 外 — `torch.Tag.core` 実測）に追加。ADR
+[0118](decisions/0118-wan21-video-generation.md) 決定 1 が正本（本 ADR がこの門の ADR を兼ねる）。
+根拠 = Wan2.1 の causal 3D VAE（時間カーネル 3 の CausalConv3d）。手順 2 の合成（時間軸を
+conv2d のバッチへ置いた `Σ_kt conv2d`）は**書けるが**、出力サイズの中間が kt = 3 倍になり slice の
+実体化コピーと add も増える — 前例ガイドの「1.5〜2 倍で保存側の前例」を超える（入場条件 ②
+中間実体化）。kt ごとの部分和は縮約順が平坦 K と変わるので、後から op を足しても同じビットに
+ならない。需要側（③再出現率）は Wan2.2 の VAE と他の動画モデルの causal 3D VAE（推測）。
+**意味論の射程と実装済み subset**（0064 軸 A）: 契約は **unbatched** `x[Cin,T,H,W]`・重み
+`[Cout,Cin/groups,Kt,Kh,Kw]`・attrs `stride` / `padding` / `dilation` は `[T,H,W]` の 3 成分・
+`groups` スカラ（4 つとも宣言必須）・アリティ 3 固定・padding は軸ごとの対称ゼロ。CPU 参照は
+意味論の全体（groups 一般）を持ち、GPU は **groups == 1 の implicit GEMM**（ADR 0024 の骨格を
+共有 — 平坦 K 昇順・K タイル 16・bias-first・範囲外 0 のビット同一の土台を継ぐ）だけで、
+groups > 1 は計画時（Session の構築時）に fail loudly。一般化の条件: batched の rank 5 は
+strided 族の rank 上限を上げるか B > 1 の需要が出たら rank で判別して足す / groups > 1 は
+depthwise 等の需要が出たら直接カーネルか骨格の拡張を足す / 因果（非対称）padding は語彙に
+入れない（recipe が前 chunk の cache を時間軸の先頭へ cat して表す）。重み格納は f32 / f16 / i8
+（A タイルの充填が conv1d / conv2d と共有なので i8 も実行経路を持つ — 適格の席は recipe の quant
+席が決める）、i4 / i2 は生成の入口で落とす。幾何プロファイルは引かない（conv1d と同じ既定幾何）。
+**軸 B**（0064）: 単一出力・静的形状・full-write・4 バイト格納・常駐の全域書きのどれも壊さない
+（rank 5 の initializer は初出だが、strided 族の rank 上限は値に掛かり initializer には掛からない）。
 
 ## 数値危険クラスの門（op 追加時の必須チェック — 2026-08-31 規約化）
 

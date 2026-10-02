@@ -9,6 +9,7 @@ from torch import nn
 from karume.ops import (
     CONV1D_OP,
     CONV2D_OP,
+    CONV3D_OP,
     CONV_TRANSPOSE1D_OP,
     EMBEDDING_OP,
     LINEAR_OP,
@@ -136,13 +137,15 @@ class TestOverflow:
 
 
 class Weighted(nn.Module):
-    """`WEIGHT_SLOTS` の全 5 op 相当のモジュール（i8 の per-channel 軸を全種類踏む）。"""
+    """`WEIGHT_SLOTS` の全 6 op 相当のモジュール（i8 の per-channel 軸を全種類踏む）。"""
 
     def __init__(self) -> None:
         super().__init__()
         self.dense = nn.Linear(5, 3)
         self.conv = nn.Conv1d(3, 5, kernel_size=3)
         self.image = nn.Conv2d(2, 3, kernel_size=(3, 1))
+        # conv3d（ADR 0118 決定 1）— 重み [Cout, Cin, Kt, Kh, Kw] の rank 5 で軸 0
+        self.volume = nn.Conv3d(2, 4, kernel_size=(2, 1, 3))
         self.up = nn.ConvTranspose1d(5, 2, kernel_size=3, stride=3)
         self.table = nn.Embedding(7, 5)
         # norm 系 weight と生 Parameter は量子化の対象外（bias も同様 — ADR 0006）
@@ -164,6 +167,7 @@ class TestInt8ChannelAxes:
             nn.Linear: LINEAR_OP,
             nn.Conv1d: CONV1D_OP,
             nn.Conv2d: CONV2D_OP,
+            nn.Conv3d: CONV3D_OP,
             nn.ConvTranspose1d: CONV_TRANSPOSE1D_OP,
             nn.Embedding: EMBEDDING_OP,
         }
@@ -184,6 +188,7 @@ class TestInt8ChannelAxes:
         assert list(report.scales["dense.weight"].shape) == [3, 1]
         assert list(report.scales["conv.weight"].shape) == [5, 1, 1]
         assert list(report.scales["image.weight"].shape) == [3, 1, 1, 1]
+        assert list(report.scales["volume.weight"].shape) == [4, 1, 1, 1, 1]
         assert list(report.scales["up.weight"].shape) == [1, 2, 1]
         assert list(report.scales["table.weight"].shape) == [7, 1]
 
@@ -211,6 +216,7 @@ class TestInt8Quantization:
             ("dense", model.dense),
             ("conv", model.conv),
             ("image", model.image),
+            ("volume", model.volume),
             ("up", model.up),
             ("table", model.table),
         ]:
@@ -291,8 +297,10 @@ class TestInt8Quantization:
 
         report = fake_quant_int8(model)
 
-        assert report.modules == 5
-        assert report.elements == 3 * 5 + 5 * 3 * 3 + 3 * 2 * 3 * 1 + 5 * 2 * 3 + 7 * 5
+        assert report.modules == 6
+        assert report.elements == (
+            3 * 5 + 5 * 3 * 3 + 3 * 2 * 3 * 1 + 4 * 2 * 2 * 1 * 3 + 5 * 2 * 3 + 7 * 5
+        )
 
 
 class Grouped(nn.Module):

@@ -17,6 +17,7 @@ import {
   referenceCat,
   referenceConv1d,
   referenceConv2d,
+  referenceConv3d,
   referenceConvTranspose1d,
   referenceCumsum,
   referenceDeformConv2d,
@@ -1091,6 +1092,166 @@ Deno.test("conv2d の groups は入力チャネル帯を絞る（depthwise と�
     { ...CONV2D, groups: 3 },
   );
   assertEquals([...depthwise.data], [2, 3, 4]);
+});
+
+/** conv3d の既定 attrs（各ケースは必要な軸だけ差し替える — ADR 0118 決定 1）。 */
+const CONV3D = {
+  stride: [1, 1, 1],
+  padding: [0, 0, 0],
+  dilation: [1, 1, 1],
+  groups: 1,
+} as const;
+
+// MUST: 重みは [Cout, Cin/groups, Kt, Kh, Kw]。軸を入れ替えて読む実装は**同じ長さの軸どうしでは
+// 値まで一致する**ので、手計算ケースは Kt ≠ Kh ≠ Kw かつ重みが非対称なものにする。x は
+// unbatched の rank 4（[Cin, T, H, W]）。
+Deno.test("conv3d は [Cout,Cin/g,Kt,Kh,Kw] の重みで畳み込む（手計算・Kt≠Kh≠Kw・unbatched）", () => {
+  // x[t][h] = 1..6（T=2・H=3・W=1）× w[kt][kh] = 1..6（Kt=2・Kh=3・Kw=1）→ 出力 1 点
+  // Σ = 1·1 + 2·2 + … + 6·6 = 91。Kt と Kh を入れ替えて読むと
+  // 1·1 + 2·3 + 3·5 + 4·2 + 5·4 + 6·6 = 86 になり必ず食い違う。
+  const exact = referenceConv3d(
+    t([1, 2, 3, 1], [1, 2, 3, 4, 5, 6]),
+    t([1, 1, 2, 3, 1], [1, 2, 3, 4, 5, 6]),
+    t([1], [0]),
+    CONV3D,
+  );
+  assertEquals(exact.shape, [1, 1, 1, 1]);
+  assertEquals([...exact.data], [91]);
+  // bias は出力チャネルごとに 1 度だけ足す
+  const biased = referenceConv3d(
+    t([1, 2, 3, 1], [1, 2, 3, 4, 5, 6]),
+    t([1, 1, 2, 3, 1], [1, 2, 3, 4, 5, 6]),
+    t([1], [9]),
+    CONV3D,
+  );
+  assertEquals([...biased.data], [100]);
+});
+
+// MUST: 3 軸は独立に効く。2 軸で同じ値を使うケースだけだと、軸を取り違えた stride / padding /
+// dilation が数値でも赤くならない（各ケースは 1 軸だけを動かし、出力形も軸ごとに変わる形）。
+Deno.test("conv3d の stride / padding / dilation は T / H / W で独立に効く", () => {
+  // stride T = 2: Tout = (4−1−1)/2 + 1 = 2。out[ot] = x[2ot]·1 + x[2ot+1]·10
+  const strided = referenceConv3d(
+    t([1, 4, 1, 1], [1, 2, 3, 4]),
+    t([1, 1, 2, 1, 1], [1, 10]),
+    t([1], [0]),
+    { ...CONV3D, stride: [2, 1, 1] },
+  );
+  assertEquals(strided.shape, [1, 2, 1, 1]);
+  assertEquals([...strided.data], [21, 43]);
+
+  // dilation T = 2: x[t][h] = 3t + h + 1（T=3・H=3）× w[kt][kh] = [[1,10],[100,1000]] →
+  // Tout = 3 − 2·1 = 1・Hout = 3 − 1 = 2。out[oy] = Σ x[2kt][oy+kh]·w[kt][kh]
+  // oy=0: 1 + 2·10 + 7·100 + 8·1000 = 8721 / oy=1: 2 + 3·10 + 8·100 + 9·1000 = 9832
+  const dilated = referenceConv3d(
+    t([1, 3, 3, 1], [1, 2, 3, 4, 5, 6, 7, 8, 9]),
+    t([1, 1, 2, 2, 1], [1, 10, 100, 1000]),
+    t([1], [0]),
+    { ...CONV3D, dilation: [2, 1, 1] },
+  );
+  assertEquals(dilated.shape, [1, 1, 2, 1]);
+  assertEquals([...dilated.data], [8721, 9832]);
+
+  // padding T = 2（Kt=3・T=1）: padding 域は 0 詰めで**読み飛ばす** — どの出力も実在の 1 フレームを
+  // 別のタップで 1 度だけ読む（out[0] は w[2]・out[1] は w[1]・out[2] は w[0]）
+  const padded = referenceConv3d(
+    t([1, 1, 1, 1], [7]),
+    t([1, 1, 3, 1, 1], [1, 3, 5]),
+    t([1], [0]),
+    { ...CONV3D, padding: [2, 0, 0] },
+  );
+  assertEquals(padded.shape, [1, 3, 1, 1]);
+  assertEquals([...padded.data], [35, 21, 7]);
+
+  // stride W = 2・padding H = 1: Hout = 2 + 2 − 1 = 4・Wout = (5−1−1)/2 + 1 = 2。行 −1 と 2 は padding
+  const mixed = referenceConv3d(
+    t([1, 1, 2, 5], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+    t([1, 1, 1, 1, 2], [1, 10]),
+    t([1], [0]),
+    { ...CONV3D, stride: [1, 1, 2], padding: [0, 1, 0] },
+  );
+  assertEquals(mixed.shape, [1, 1, 4, 2]);
+  assertEquals([...mixed.data], [0, 0, 21, 43, 76, 98, 0, 0]);
+});
+
+// MUST: Cin / Cout はどちらも 2 以上で互いに違う値を持つケースを用意する（片方が 1 だと
+// グループの帯オフセットを落とす誤りが偶然一致する — conv2d と同じ教訓）。
+Deno.test("conv3d の groups は入力チャネル帯を絞る（意味論は groups 一般 — 中間 groups と depthwise）", () => {
+  // Cin 4 / Cout 6 / groups 2 → oc 0..2 は ic 0,1 を、oc 3..5 は ic 2,3 だけを見る（T=1・H=1・W=2）
+  const grouped = referenceConv3d(
+    t([4, 1, 1, 2], [1, 2, 3, 4, 5, 6, 7, 8]),
+    t([6, 2, 1, 1, 1], [1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1]),
+    t([6], [0, 0, 0, 0, 0, 0]),
+    { ...CONV3D, groups: 2 },
+  );
+  assertEquals(grouped.shape, [6, 1, 1, 2]);
+  // 帯オフセットを落とすと oc 3..5 が [1,2] / [3,4] / [4,6] に化ける
+  assertEquals([...grouped.data], [1, 2, 3, 4, 4, 6, 5, 6, 7, 8, 12, 14]);
+
+  // depthwise（groups = Cin = Cout = 3 → 重みの第 2 軸は 1）。時間カーネル 2 で帯ごとに 2 フレームを読む
+  const depthwise = referenceConv3d(
+    t([3, 2, 1, 1], [1, 2, 3, 4, 5, 6]),
+    t([3, 1, 2, 1, 1], [1, 10, 2, 20, 3, 30]),
+    t([3], [0, 0, 0]),
+    { ...CONV3D, groups: 3 },
+  );
+  assertEquals(depthwise.shape, [3, 1, 1, 1]);
+  assertEquals([...depthwise.data], [1 + 20, 6 + 80, 15 + 180]);
+});
+
+// Kt = 1 の conv3d は「フレームを conv2d のバッチに置いた conv2d」と縮約の並び（ic, kh, kw）まで
+// 同じなので、**独立に実装した** referenceConv2d と厳密に一致する（GPU 側の恒等門 ① の CPU 版）。
+Deno.test("conv3d（Kt = 1）は フレームごとの conv2d と厳密に一致する（独立実装どうしの突合）", () => {
+  const [cin, time, height, width, cout] = [3, 4, 5, 6, 2];
+  const x = t(
+    [cin, time, height, width],
+    Array.from({ length: cin * time * height * width }, (_, i) => ((i * 7) % 23) / 8 - 1.25),
+  );
+  const w = t(
+    [cout, cin, 1, 3, 2],
+    Array.from({ length: cout * cin * 3 * 2 }, (_, i) => ((i * 11) % 19) / 16 - 0.5),
+  );
+  const b = t([cout], [0.375, -0.625]);
+  const out3d = referenceConv3d(x, w, b, {
+    stride: [1, 2, 1],
+    padding: [0, 1, 0],
+    dilation: [1, 1, 2],
+    groups: 1,
+  });
+  // x [Cin,T,H,W] → [T,Cin,H,W]（フレームをバッチへ）・重みは Kt を落とした [Cout,Cin,Kh,Kw]
+  const frames = new Float32Array(x.data.length);
+  for (let c = 0; c < cin; c += 1) {
+    for (let f = 0; f < time; f += 1) {
+      for (let i = 0; i < height * width; i += 1) {
+        frames[(f * cin + c) * height * width + i] = x.data[(c * time + f) * height * width + i];
+      }
+    }
+  }
+  const out2d = referenceConv2d(
+    t([time, cin, height, width], [...frames]),
+    t([cout, cin, 3, 2], [...w.data]),
+    b,
+    {
+      stride: [2, 1],
+      padding: [1, 0],
+      dilation: [1, 2],
+      groups: 1,
+    },
+  );
+  const [, tOut, hOut, wOut] = out3d.shape;
+  assertEquals(out2d.shape, [time, cout, hOut, wOut]);
+  assertEquals(tOut, time);
+  for (let oc = 0; oc < cout; oc += 1) {
+    for (let f = 0; f < time; f += 1) {
+      for (let i = 0; i < hOut * wOut; i += 1) {
+        assertEquals(
+          out3d.data[(oc * time + f) * hOut * wOut + i],
+          out2d.data[(f * cout + oc) * hOut * wOut + i],
+          `oc ${oc} / frame ${f} / pixel ${i}`,
+        );
+      }
+    }
+  }
 });
 
 Deno.test("conv_transpose1d は [Cin,Cout,K] の重みで入力を stride 倍に伸ばす", () => {

@@ -14,6 +14,7 @@ import {
   computeOutputShape,
   CONV1D_OP,
   conv1dAttrs,
+  conv3dAttrs,
   EMBEDDING_OP,
   flipDim,
   IO_DTYPES,
@@ -132,6 +133,7 @@ export const validateGraphContracts = (graph: IrGraph): void => {
       assertStaticLayoutAxis(graph, node, contract.kind, where);
     }
     if (contract.kind === "cat") assertCatAxis(graph, node, where);
+    if (contract.kind === "conv3d") assertConv3dSubset(node, where);
   });
   assertStateOwnership(graph);
   assertStateOrder(graph);
@@ -143,6 +145,25 @@ export const validateGraphContracts = (graph: IrGraph): void => {
         } のみ）`,
       );
     }
+  }
+};
+
+/**
+ * conv3d の **GPU 実装済み subset**（ADR 0118 決定 1 — ADR 0064 軸 A）の門: `groups == 1` だけ。
+ *
+ * 意味論（契約・CPU 参照）は groups 一般を受けるが、GPU は implicit GEMM（groups == 1）しか
+ * 持たない。MUST: Session の構築時（= 計画時）に落とす — 導出相まで持ち越すと、1 度も走らない
+ * まま構築に成功した Session が初回 run で初めて落ちる（どの op のどの attrs が原因かは同じでも、
+ * 資産を開いた時点で分かる事実を遅らせる理由が無い）。
+ * MUST: `groups` は既定値で補完しない（`conv3dAttrs` が欠落を落とす — ADR 0015）。
+ */
+const assertConv3dSubset = (node: IrNode, where: string): void => {
+  const { groups } = conv3dAttrs(node.attrs, where);
+  if (groups !== 1) {
+    throw new ExecutionError(
+      `${where}: conv3d の groups ${groups} は GPU で実行できない（実装済み subset は groups == 1 の` +
+        " implicit GEMM だけ — ADR 0118 決定 1。意味論は CPU 参照が持つ）",
+    );
   }
 };
 

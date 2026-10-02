@@ -270,7 +270,7 @@ SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
 #:   結線は sampling の実需まで先送り（ADR 0068 追記）なので受けられない。ここは保存が事実上必須。
 #: - `softmax` — `aten._softmax` になるだけで得が無い。safe-softmax の 1 カーネルを保つ。
 #: - `gelu` — erf / tanh 近似の合成に散る（M0 から保存）。
-#: - `conv1d` / `conv2d` / `conv_transpose1d` — 汎用 `aten.convolution` 形になる。
+#: - `conv1d` / `conv2d` / `conv3d` / `conv_transpose1d` — 汎用 `aten.convolution` 形になる。
 #: - `embedding` — core 分解では元々分解されないが、保存リストに載せて意図を明示する。
 #: - `masked_fill` — where + scalar_tensor に散る。埋め値を attrs に載せる形を保つ。
 #: - `leaky_relu` — ADR 0015 で追加（9 op → 10 op）。分解形は `gt_scalar + mul + where` で
@@ -281,10 +281,13 @@ SYMBOL_EXTENT_ARGS: dict[Any, frozenset[str]] = {
 #:   `normalize._fold_rms_norm` が受け持つ（供給ルート 2 系統 — ADR 0017）。
 #:
 #: NOTE: conv_transpose1d は ADR 0015 で、conv2d は ADR 0017 でカーネル・契約表・ハンドラが
-#: 揃った（それぞれ dec の ups 5 本 / Anima VAE decoder の 37 本）。
+#: 揃った（それぞれ dec の ups 5 本 / Anima VAE decoder の 37 本）。conv3d は ADR 0118 決定 1
+#: （拡張分子層・Core ATen 外 — 動画 VAE の causal conv）で、unbatched の `F.conv3d` は
+#: `aten.conv3d.default` のまま rank 4 入力で trace に残る（torch 2.13.0 で実測 — 正規化パス不要）。
 PRESERVED_OP_PREFIXES = (
     "aten.conv1d.",
     "aten.conv2d.",
+    "aten.conv3d.",
     "aten.conv_transpose1d.",
     "aten.embedding.",
     "aten.gelu.",

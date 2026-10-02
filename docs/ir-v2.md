@@ -94,6 +94,12 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   [container-v1](container-v1.md) §6.1）④**正準直列化**の規則を定める（下の節 — `krg` の
   同一性を内容ハッシュで判定する条件）。`version` は `2`。v1 との両読みは作らない（旧資産の
   移行は container-v1 §12 の CLI）。
+- 動画生成（2026-10-02）: `conv3d` を**拡張分子層**として追加（ADR
+  [0118](decisions/0118-wan21-video-generation.md) 決定 1 — Core ATen 外・要求元は Wan2.1 の
+  causal 3D VAE）。**unbatched**（x は rank 4 の `[Cin,T,H,W]`）で、attrs に **`[T, H, W]` の
+  3 成分**（`stride` / `padding` / `dilation`）という新しい値の形が入る。重みの initializer に
+  **rank 5** が初めて現れる（strided 族の rank 上限 4 は値に掛かり、initializer には掛からない）。
+  既存 IR への影響はゼロ。
 
 ## コンテナ
 
@@ -200,8 +206,8 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   [0019](decisions/0019-i8-weight-execution.md) / [0069](decisions/0069-packed-w4-storage.md)）:
   意味論はあくまで f32（「格納のみ量子化・計算は f32」— ADR 0006）で、圧縮格納の initializer は
   **適格判定**で経路が 2 つに分かれる。
-  - **適格**（その initializer の消費が `linear` / `conv1d` / `conv2d` / `conv_transpose1d` /
-    `embedding` の**重みスロットだけ**）: 圧縮 payload のまま GPU 常駐し、dequant はカーネル内。
+  - **適格**（その initializer の消費が `linear` / `conv1d` / `conv2d` / `conv3d` /
+    `conv_transpose1d` / `embedding` の**重みスロットだけ**）: 圧縮 payload のまま GPU 常駐し、dequant はカーネル内。
     codec ごとの適格 op は台帳の `executableOps`（container-v1 §6.3）が正本 — `int4-sym-g` は
     linear / embedding / conv1d（`groups == 1`）、`int2-off` / `ternary` は linear / embedding。
   - **適格外**（bias / norm 系の weight / その他の op / 重みスロットと他スロットの混在消費 /
@@ -558,12 +564,13 @@ state スロットを読み書きするノードの契約（ADR
   [0015](decisions/0015-conv-family-extension.md) / ADR
   [0017](decisions/0017-rms-norm-conv2d-clamp-min.md)）— エクスポータが分解を止めて 1 ノードの
   まま運ぶ高位 op。ADR [0007](decisions/0007-op-vocabulary.md) の保存 op は M1-P3 で
-  `leaky_relu`、M1-P4 で `conv2d` / `rms_norm` を足して **11 本**（ADR 0017）で、いずれも
+  `leaky_relu`、M1-P4 で `conv2d` / `rms_norm` を足して **11 本**（ADR 0017）、拡張分子層の `conv3d`（ADR 0118）で
+  **12 本**になり、いずれも
   **カーネルを持つ**（`conv2d` は Anima の VAE decoder で実測に出た）。`rms_norm` だけは
   **供給ルートが 2 系統**ある: ①diffusers `nn.RMSNorm` 由来の `aten.rms_norm` は保存リスト
   経由でそのまま 1 ノードになる ②Qwen3 / DiT の手書き分解形は保存では畳めないので、
   エクスポータの畳み込みパス（`_fold_rms_norm`）が 1 ノードへ合成する（ADR 0016 / 0017）。
-  **融合 `attention`（perf-a）は既定の 11 本に入らない**: SDPA の保存はグローバルに掛けると
+  **融合 `attention`（perf-a）は既定の保存リスト（12 本）に入らない**: SDPA の保存はグローバルに掛けると
   契約外のマスクを持つ形まで拾って export できなくなるため、**ターゲット別の opt-in**にして
   ある（ADR 0023 追記）:
   - `linear`（f32、attrs 無し、**アリティ 3 固定**）— `x[…,in] × W[out,in] + b[out]`。
@@ -637,6 +644,22 @@ state スロットを読み書きするノードの契約（ADR
 
   bias 無しの conv（実測は dec の `conv_post` 1 本）は**エクスポータがゼロ bias initializer を
   合成**してアリティ 3 へ正規化する — IR にも契約にもカーネルにも arity 分岐は無い。
+
+- **3 次元畳み込み**（拡張分子層 — ADR [0118](decisions/0118-wan21-video-generation.md) 決定 1。
+  Core ATen 外の `aten.conv3d` をエクスポータが保存する）:
+  - `conv3d`（f32、attrs `stride` / `padding` / `dilation` / `groups`、**アリティ 3 固定**）—
+    `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`。x は
+    **unbatched の rank 4 だけ**（batched の rank 5 は契約に無い — 周りの cat / slice が strided 族の
+    rank 上限 4 に当たる。エクスポータ境界で fail loudly）。**空間 3 つの attrs は `[T, H, W]` の
+    長さ 3 の配列**（スカラ表記・2 成分は受理しない — conv2d の `[H, W]` と同じ規律）で、
+    `groups` だけがスカラ。4 つとも宣言必須で既定値補完をしない。出力長は T / H / W それぞれ
+    `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`（K = 0 と窓が入力に届かない形は
+    fail loudly）。padding は軸ごとの**対称ゼロ**で、因果（片側）の時間 padding は語彙に無い
+    （recipe が前の chunk の cache を時間軸の先頭へ cat して表す）。`groups` が `Cin` / `Cout` の
+    両方を割り切ること・重みの第 2 軸が `Cin/groups` であること・**`Kt, Kh, Kw` の順**が契約。
+    意味論は groups 一般（CPU 参照が全体を持つ）だが、**GPU の実装済み subset は groups == 1**
+    （implicit GEMM）で、groups > 1 は Session の構築時に fail loudly（ADR 0064 軸 A）。重みは
+    f16 / i8 の適格（重みスロット 1・per-channel scale の軸 0）
 
 - **変形畳み込み**（拡張原子層〈旧第 1' 層〉の原子 — `torchvision::deform_conv2d`。ADR
   [0055](decisions/0055-deform-conv2d.md)・門の定義は

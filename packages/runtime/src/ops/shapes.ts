@@ -5,6 +5,7 @@ import {
   catDim,
   conv1dAttrs,
   conv2dAttrs,
+  conv3dAttrs,
   convTranspose1dAttrs,
   cumsumDim,
   deformConv2dAttrs,
@@ -726,6 +727,66 @@ export const computeOutputShape = (
         return Math.floor(span / stride[axis]) + 1;
       };
       return sole([x[0], channelsOut, spatial(0, "H"), spatial(1, "W")]);
+    }
+    case "conv3d": {
+      const [x, weight, bias] = inputShapes;
+      const { stride, padding, dilation, groups } = conv3dAttrs(context.attrs ?? {}, where);
+      // MUST: x は unbatched の rank 4 だけ（ADR 0118 決定 1）。rank 5 の batched を受けると
+      // 先頭軸を Cin と読む取り違えが要素数の合う形で素通りしうる。
+      if (x.length !== 4 || weight.length !== 5 || bias.length !== 1) {
+        throw new OpContractError(
+          `${where}: conv3d は x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]（rank 4 / 5 / 1 — x は unbatched）: [${
+            x.join(",")
+          }] / [${weight.join(",")}] / [${bias.join(",")}]`,
+        );
+      }
+      const [channelsIn] = x;
+      const [channelsOut, weightIn] = weight;
+      // MUST: conv1d / conv2d と同じ規律 — 割り切れない形は `Cin/groups` が切り捨てになり、
+      // 読む入力チャネル帯が黙ってずれる。
+      if (channelsIn % groups !== 0 || channelsOut % groups !== 0) {
+        throw new OpContractError(
+          `${where}: conv3d の groups ${groups} が Cin ${channelsIn} / Cout ${channelsOut} を割り切らない`,
+        );
+      }
+      // MUST: 重みは **[Cout, Cin/groups, Kt, Kh, Kw]**。要素数が合う取り違えは shape 検査を
+      // 素通りしうるので、テストは Cin ≠ Cout・Kt ≠ Kh ≠ Kw の非対称形で固定する。
+      if (weightIn !== channelsIn / groups) {
+        throw new OpContractError(
+          `${where}: conv3d の重みは [Cout, Cin/groups, Kt, Kh, Kw]（Cin/groups = ${
+            channelsIn / groups
+          }）のはずが [${weight.join(",")}]（x は [${x.join(",")}] / groups ${groups}）`,
+        );
+      }
+      if (bias[0] !== channelsOut) {
+        throw new OpContractError(
+          `${where}: conv3d の bias 長 ${bias[0]} が出力チャネル ${channelsOut} と違う`,
+        );
+      }
+      // 3 軸（T / H / W）は独立に同じ一般形を適用する（axis は attrs の成分番号・name は診断の主語）。
+      const axisLength = (axis: 0 | 1 | 2, name: string): number => {
+        const length = x[1 + axis];
+        const kernel = weight[2 + axis];
+        // MUST: conv1d / conv2d と同じ理由で K = 0 は出力長式より前に落とす（`dilation·(K−1)` が
+        // 負に転んで出力が入力より長くなる — params 側は正整数として落とす）。
+        if (kernel < 1) {
+          throw new OpContractError(
+            `${where}: conv3d のカーネル長 K${name.toLowerCase()} は正整数（重み [${
+              weight.join(",")
+            }]）`,
+          );
+        }
+        const span = length + 2 * padding[axis] - dilation[axis] * (kernel - 1) - 1;
+        if (span < 0) {
+          throw new OpContractError(
+            `${where}: conv3d の入力 ${name} ${length}（padding ${padding[axis]}）が dilation ${
+              dilation[axis]
+            } 込みのカーネル張り ${dilation[axis] * (kernel - 1) + 1} に足りない`,
+          );
+        }
+        return Math.floor(span / stride[axis]) + 1;
+      };
+      return sole([channelsOut, axisLength(0, "T"), axisLength(1, "H"), axisLength(2, "W")]);
     }
     // safe_softmax は shape 規則も attrs も softmax と同一（違いは空行の値だけ — ADR 0044）。
     case "softmax":

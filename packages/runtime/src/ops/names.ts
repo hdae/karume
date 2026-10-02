@@ -280,6 +280,24 @@ export const EMBEDDING_OP = "embedding";
 export const MASKED_FILL_OP = "masked_fill";
 export const CONV1D_OP = "conv1d";
 export const CONV2D_OP = "conv2d";
+/**
+ * 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。**unbatched**:
+ * `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]`。
+ *
+ * - attrs `stride` / `padding` / `dilation` は **`[T, H, W]` の 3 成分**・`groups` はスカラ。
+ *   4 つとも宣言必須で既定値補完をしない（conv2d の `[H, W]` と同じ規律 — ADR 0015）。
+ * - **アリティ 3 固定**（bias 無しの conv はエクスポータのゼロ bias 合成で正規化 — conv 族と同じ）。
+ * - 出力長は軸ごとに `floor((L + 2·padding − dilation·(K−1) − 1) / stride) + 1`。padding は
+ *   軸ごとに**対称**のゼロ。因果パディング（時間の片側だけ）は語彙に入れない — recipe が前の
+ *   chunk の cache を時間軸の先頭へ cat して表す（ADR 0118 決定 2）。
+ *
+ * MUST: x は **rank 4（unbatched）だけ**。batched の rank 5 は周りの cat / slice が strided 族の
+ * rank 上限 4 に当たるので契約に入れない（需要が出たら rank で判別して足す — ADR 0118 決定 1 の
+ * 一般化の条件）。
+ * NOTE: 意味論は groups 一般だが、GPU の実装済み subset は `groups == 1`（implicit GEMM）だけ。
+ * `groups > 1` は Session の構築時に fail loudly（src/runtime/plan.ts の `validateGraphContracts`）。
+ */
+export const CONV3D_OP = "conv3d";
 export const CONV_TRANSPOSE1D_OP = "conv_transpose1d";
 
 /**
@@ -350,9 +368,10 @@ export type GruScanOpName = (typeof GRU_SCAN_OPS)[number];
 /**
  * 低精度格納が**適格**になる重みスロット（op 名 → 入力スロット番号 — ADR 0018）。
  *
- * 実測でサイズが支配的な 5 スロットだけを載せる。ここに無い消費（bias / norm 系の weight /
- * その他の op）が 1 つでもあれば、その initializer は適格外としてロード時に CPU で f32 展開
- * される。
+ * 実測でサイズが支配的な 6 スロットだけを載せる（conv3d は ADR 0118 決定 1 で追加 — 重みの
+ * 平坦化が implicit GEMM の A タイルそのものなので、展開経路は conv1d / conv2d と共有）。
+ * ここに無い消費（bias / norm 系の weight / その他の op）が 1 つでもあれば、その initializer は
+ * 適格外としてロード時に CPU で f32 展開される。
  *
  * MUST: bias を含めない。プロトタイプは bias の f32 定数が weight を道連れに降格させて
  * f16 の適格を 0MB にした（ADR 0006 が名指しした根治対象）— 「bias は常に f32」は
@@ -362,6 +381,7 @@ export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
   [LINEAR_OP, 1],
   [CONV1D_OP, 1],
   [CONV2D_OP, 1],
+  [CONV3D_OP, 1],
   [CONV_TRANSPOSE1D_OP, 1],
   [EMBEDDING_OP, 0],
 ]);
@@ -370,7 +390,7 @@ export const WEIGHT_SLOTS: ReadonlyMap<string, number> = new Map([
  * per-channel scale の**チャネル軸**（op 名 → 重みテンソルの軸番号 — ADR 0019）。
  *
  * 出力チャネルの軸で、linear `[out,in]` / conv1d `[Cout,Cin/g,K]` / conv2d `[Cout,Cin/g,Kh,Kw]` /
- * embedding `[V,H]` は 0、**conv_transpose1d だけ `[Cin,Cout,K]` の転置レイアウトで 1**。
+ * conv3d `[Cout,Cin/g,Kt,Kh,Kw]` / embedding `[V,H]` は 0、**conv_transpose1d だけ `[Cin,Cout,K]` の転置レイアウトで 1**。
  *
  * MUST: キー集合は {@link WEIGHT_SLOTS} と一致させる（tests/ops_contract_test.ts が固定）。
  * 片方だけ増えると、新しい重みスロットの i8 が「軸 0 の scale」として黙って実行される。
@@ -379,6 +399,7 @@ export const WEIGHT_CHANNEL_AXES: ReadonlyMap<string, number> = new Map([
   [LINEAR_OP, 0],
   [CONV1D_OP, 0],
   [CONV2D_OP, 0],
+  [CONV3D_OP, 0],
   [CONV_TRANSPOSE1D_OP, 1],
   [EMBEDDING_OP, 0],
 ]);

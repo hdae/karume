@@ -748,6 +748,84 @@ export const conv2dAttrs = (
 });
 
 /**
+ * conv3d の空間 attr（`[T, H, W]` の 3 成分 — ADR 0118 決定 1）。
+ *
+ * MUST: **長さちょうど 3 の配列**のみ受理する（conv2d の {@link assertIntPair} と同じ規律）。
+ * スカラ表記や 2 成分を併せて許すと、同じ畳み込みに複数の IR ができるうえ、時間軸を落とした
+ * 2 成分が「[H, W] のつもり」なのか「[T, H] の書き損じ」なのかを区別できない。
+ */
+const assertIntTriple = (
+  value: unknown,
+  where: string,
+  min: number,
+  what: string,
+): readonly [number, number, number] => {
+  if (!Array.isArray(value) || value.length !== 3) {
+    throw new OpContractError(
+      `${where}: ${what} は [T, H, W] の長さ 3 の配列でない: ${JSON.stringify(value)}`,
+    );
+  }
+  return [
+    assertIntegerAttr(value[0], `${where}[0]`, min),
+    assertIntegerAttr(value[1], `${where}[1]`, min),
+    assertIntegerAttr(value[2], `${where}[2]`, min),
+  ];
+};
+
+/**
+ * conv3d の attrs（ADR 0118 決定 1）。空間 3 つは T/H/W の 3 成分、`groups` はスカラ。
+ *
+ * MUST: 4 つとも**宣言必須・既定値補完なし**（conv1d / conv2d と同じ規律 — ADR 0015）。
+ */
+export const CONV3D_ATTRS: AttrSchema = {
+  dilation: (value, where) => {
+    assertIntTriple(value, where, 1, "conv3d の dilation");
+  },
+  groups: (value, where) => {
+    assertIntegerAttr(value, where, 1);
+  },
+  padding: (value, where) => {
+    assertIntTriple(value, where, 0, "conv3d の padding");
+  },
+  stride: (value, where) => {
+    assertIntTriple(value, where, 1, "conv3d の stride");
+  },
+};
+
+/** conv3d ノードの stride / padding / dilation（T/H/W の組）と groups。 */
+export type Conv3dAttrs = {
+  readonly stride: readonly [number, number, number];
+  readonly padding: readonly [number, number, number];
+  readonly dilation: readonly [number, number, number];
+  readonly groups: number;
+};
+
+export const conv3dAttrs = (
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): Conv3dAttrs => ({
+  stride: assertIntTriple(
+    attrValue(attrs, "stride"),
+    `${where} の attrs.stride`,
+    1,
+    "conv3d の stride",
+  ),
+  padding: assertIntTriple(
+    attrValue(attrs, "padding"),
+    `${where} の attrs.padding`,
+    0,
+    "conv3d の padding",
+  ),
+  dilation: assertIntTriple(
+    attrValue(attrs, "dilation"),
+    `${where} の attrs.dilation`,
+    1,
+    "conv3d の dilation",
+  ),
+  groups: assertIntegerAttr(attrValue(attrs, "groups"), `${where} の attrs.groups`, 1),
+});
+
+/**
  * deform_conv2d の attrs（第 1' 層・ADR 0055）。**`padding`（`[H, W]`）の 1 キーだけ**。
  *
  * MUST: `stride` / `dilation` / `groups` / `offset_groups` のキーを**足さない**。実測が

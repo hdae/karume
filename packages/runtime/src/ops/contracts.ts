@@ -12,6 +12,7 @@ import {
   CLAMP_MIN_ATTRS,
   CONV1D_ATTRS,
   CONV2D_ATTRS,
+  CONV3D_ATTRS,
   CONV_TRANSPOSE1D_ATTRS,
   CUMSUM_ATTRS,
   DEFORM_CONV2D_ATTRS,
@@ -45,6 +46,7 @@ import {
   CAT_OP,
   CONV1D_OP,
   CONV2D_OP,
+  CONV3D_OP,
   CONV_TRANSPOSE1D_OP,
   CUMSUM_OP,
   DEFORM_CONV2D_OP,
@@ -320,6 +322,12 @@ export type OpContract =
   | (ContractBase & {
     readonly kind: "conv2d";
     readonly name: typeof CONV2D_OP;
+    readonly arity: 3;
+  })
+  // unbatched の 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。x / weight / bias の 3 本固定。
+  | (ContractBase & {
+    readonly kind: "conv3d";
+    readonly name: typeof CONV3D_OP;
     readonly arity: 3;
   })
   | (ContractBase & {
@@ -661,6 +669,13 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
     ...contract(CONV2D_OP, CONV2D_ATTRS),
     kind: "conv2d",
     name: CONV2D_OP,
+    arity: 3,
+  }],
+  // unbatched（x は rank 4）の 3 次元畳み込み（ADR 0118 決定 1）。3 スロットとも f32 で同型。
+  [CONV3D_OP, {
+    ...contract(CONV3D_OP, CONV3D_ATTRS),
+    kind: "conv3d",
+    name: CONV3D_OP,
     arity: 3,
   }],
   // bias 無し conv はエクスポータのゼロ bias 合成でアリティ 3 に正規化される（ADR 0015）—

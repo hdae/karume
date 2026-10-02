@@ -774,6 +774,38 @@ class Conv2dBlock(nn.Module):
         return hidden, channels / norm
 
 
+class Conv3dBlock(nn.Module):
+    """unbatched の conv3d（拡張分子層 — ADR 0118 決定 1）の torch 突合。
+
+    MUST（重みレイアウト取り違えは要素数が合って shape 検査を素通りする）: **Kt≠Kh≠Kw /
+    stride・padding・dilation の 3 軸非対称 / Cin・Cout とも 2 以上で互いに異なる**を全て踏む。
+    bias 無し（ゼロ bias 合成）も 1 本持つ。入力も T≠H≠W にして軸の取り違えを値に出す。
+
+    MUST: 入力は **unbatched の rank 4 `[Cin, T, H, W]`**（`nn.Conv3d` の unbatched 形 — trace に
+    `aten.conv3d.default` が rank 4 入力のまま残る）。batched の rank 5 は契約外。
+    MUST: groups は 1 だけ。golden は実 GPU で突合され、GPU の実装済み subset は groups == 1
+    （groups > 1 は計画時に fail loudly — 意味論の groups 一般は CPU 参照と適合表が持つ）。
+    """
+
+    def __init__(self, generator: torch.Generator) -> None:
+        super().__init__()
+        # Kt≠Kh≠Kw (3,2,1) / stride (1,2,1) / padding (0,1,0) / Cin 4 → Cout 6
+        self.wide = nn.Conv3d(4, 6, kernel_size=(3, 2, 1), stride=(1, 2, 1), padding=(0, 1, 0))
+        # bias 無し → ゼロ bias 合成（W だけのカーネル 3・W だけの padding 1）
+        self.plain = nn.Conv3d(6, 3, kernel_size=(1, 1, 3), padding=(0, 0, 1), bias=False)
+        # dilation の 3 軸非対称 (1,2,1)・時間 stride 2・padding (1,2,1)
+        self.dilated = nn.Conv3d(
+            3, 2, kernel_size=(2, 2, 2), stride=(2, 1, 1), padding=(1, 2, 1), dilation=(1, 2, 1)
+        )
+        for conv in (self.wide, self.dilated):
+            _fill_param(generator, conv.weight, 0.4)
+            _fill_param(generator, conv.bias, 0.1)
+        _fill_param(generator, self.plain.weight, 0.4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dilated(self.plain(self.wide(x)))
+
+
 class DeformConvBlock(nn.Module):
     """deform_conv2d（DCNv2・第 1' 層 — ADR 0055）の torch 突合。
 
@@ -893,7 +925,8 @@ class BilinearResize(nn.Module):
 
 
 class Int8Weights(nn.Module):
-    """i8 格納（per-channel scale）で **`WEIGHT_SLOTS` の全 5 op** を踏む golden（ADR 0019）。
+    """i8 格納（per-channel scale）で **`WEIGHT_SLOTS` の 6 op のうち conv3d を除く 5 op** を踏む golden
+    （ADR 0019・conv3d の i8 はランタイムの GPU テストが持つ）。
 
     MUST: 重みの**行長も総要素数も 4 の倍数にしない**。i8 は 4 要素を 1 u32 へ詰めるので、
     「語とレーンを行内相対添字から割り出す」誤りは**行長が 4 の倍数のときだけ偶然一致する**

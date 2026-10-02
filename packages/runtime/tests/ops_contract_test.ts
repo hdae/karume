@@ -14,6 +14,7 @@ import {
   computeOutputShape,
   conv1dAttrs,
   conv2dAttrs,
+  conv3dAttrs,
   convTranspose1dAttrs,
   cumsumDim,
   describeArity,
@@ -55,12 +56,12 @@ const node = (
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v2.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v2.md）。
-Deno.test("契約表の op 集合が期待値リテラル 61 本と一致する", () => {
+Deno.test("契約表の op 集合が期待値リテラル 62 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
   assertEquals(REDUCE_OPS.length, 3);
-  assertEquals(OP_CONTRACTS.size, 61);
+  assertEquals(OP_CONTRACTS.size, 62);
   assertEquals([...OP_CONTRACTS.keys()].sort(), [
     "abs",
     "add",
@@ -77,6 +78,7 @@ Deno.test("契約表の op 集合が期待値リテラル 61 本と一致する"
     "clamp_min",
     "conv1d",
     "conv2d",
+    "conv3d",
     "conv_transpose1d",
     "cumsum",
     "deform_conv2d",
@@ -135,6 +137,7 @@ Deno.test("WEIGHT_CHANNEL_AXES は WEIGHT_SLOTS と同じ op を覆う", () => {
   assertEquals([...WEIGHT_CHANNEL_AXES].sort(), [
     ["conv1d", 0],
     ["conv2d", 0],
+    ["conv3d", 0],
     ["conv_transpose1d", 1],
     ["embedding", 0],
     ["linear", 0],
@@ -260,6 +263,7 @@ Deno.test("dtype の解禁は op ごとで、実測に出ない組み合わせ�
       "safe_softmax",
       "conv1d",
       "conv2d",
+      "conv3d",
       "conv_transpose1d",
     ]
   ) {
@@ -322,7 +326,7 @@ Deno.test("スロット別契約の出力はスロット 0 と同型で、混合
 });
 
 // attrs を持つ op は 31 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
-Deno.test("attrs を持つ op は契約表が列挙する 31 本だけで、他は attrs 空", () => {
+Deno.test("attrs を持つ op は契約表が列挙する 32 本だけで、他は attrs 空", () => {
   const withAttrs = [...OP_CONTRACTS]
     .filter(([, contract]) => attrKeysOf(contract).length > 0)
     .map(([name]) => name)
@@ -337,6 +341,7 @@ Deno.test("attrs を持つ op は契約表が列挙する 31 本だけで、他�
     "clamp_min",
     "conv1d",
     "conv2d",
+    "conv3d",
     "conv_transpose1d",
     "cumsum",
     "deform_conv2d",
@@ -1111,6 +1116,36 @@ Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
   reject("conv2d", ["x", "w", "b"], { stride: [1, 1], padding: [0, 0], dilation: [1, 1] });
   reject("conv2d", ["x", "w", "b"], { stride: [1, 1], padding: [0, 0], groups: 1 });
   reject("conv2d", ["x", "w", "b"], { ...conv2Attrs, output_padding: [0, 0] });
+
+  // conv3d — 空間 3 つは [T, H, W] の 3 成分（スカラ表記・2 成分は受理しない — ADR 0118 決定 1）
+  const conv3Attrs = {
+    stride: [1, 1, 1],
+    padding: [0, 0, 0],
+    dilation: [1, 1, 1],
+    groups: 1,
+  };
+  assertEquals(accept("conv3d", ["x", "w", "b"], conv3Attrs).kind, "conv3d");
+  assertEquals(
+    conv3dAttrs({ stride: [1, 2, 3], padding: [0, 1, 2], dilation: [2, 1, 3], groups: 4 }, "t"),
+    { stride: [1, 2, 3], padding: [0, 1, 2], dilation: [2, 1, 3], groups: 4 },
+  );
+  // MUST: 3 軸を独立に見る（どの 1 成分だけが 0 でも落ちる — stride 0 はカーネルのハング）
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, stride: [0, 1, 1] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, stride: [1, 0, 1] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, stride: [1, 1, 0] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, dilation: [1, 1, 0] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, padding: [0, -1, 0] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, groups: 0 });
+  // 長さ 3 以外・スカラ表記は受理しない（[H, W] の 2 成分は時間軸の書き落としと区別できない）
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, stride: 1 });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, padding: [1, 1] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, dilation: [1, 1, 1, 1] });
+  reject("conv3d", ["x", "w", "b"], { ...conv3Attrs, groups: [1, 1, 1] });
+  // 宣言済み attrs の既定値補完はしない（4 つとも必須）
+  reject("conv3d", ["x", "w", "b"], { stride: [1, 1, 1], padding: [0, 0, 0], dilation: [1, 1, 1] });
+  reject("conv3d", ["x", "w", "b"], { stride: [1, 1, 1], padding: [0, 0, 0], groups: 1 });
+  // アリティ 3 固定（bias 無しはエクスポータのゼロ bias 合成で正規化 — conv 族と同じ）
+  reject("conv3d", ["x", "w"], conv3Attrs);
 
   // conv_transpose1d — attrs は stride / padding のみ（output_padding / dilation / groups の
   // 欄を作らないことが「実測外の値を黙って既定値で実行する」経路を潰している）
