@@ -68,6 +68,23 @@ N = 1 → JSON と状態行の文言。照合は adapter 4 欄（空文字も値
 `a0ff1702` 以降のコミット（`b9245574`・`f483f612` 等）はカーネルの指紋と caseSet を変えていない（2 表の `--check` と
 `tune_fingerprint_test` が緑）ので、サーバを再起動して最新の bundle で続けてよい。
 
+## 7. 追記: フラグ無しの M5（2026-10-02・quick+ 掃引と Anima の A/B）
+
+利用者が M5（macOS・Chrome 154・フラグ無し）で quick+ の掃引（`geometry-sweep-browser-2026-10-02T11-02-17.340Z.json`・checkout
+`de0c24a8`）と Anima タブの A/B ボタン（`anima-residency-browser-f16+dit8-a8-attn8-s16-2026-10-02T11-34-41.119Z.json`・既定 quant +
+f16 × default / auto × 3）を回した記録。段 7 の「保存した表（照合して注入）」の経路はまだ通していない（A/B ボタンは別の経路）。
+
+- 掃引: 57 ケース・521 行・677 s・失敗 0・不一致 0・**timestamp は非量子化**（2,605 round 中 100 µs の倍数 0 — M2 と同じ）。
+  `candidateKernels` が載っている（bundle が `b9245574` 以降）。既定の再測定比は 5 ケースが 0.9〜1.1 の外（0.874〜1.179）で、
+  生成器がその掃引の比の材料から外した（M5 は熱の揺れが大きい — research K-70 §14 と同じ観察）。
+- この 1 本から作った表（opt-in・登録しない）: **conv2d.rows32 だけ採用**（`igemm128x128:wg16x16` ×1.116）で他の 13 欄は既定。
+  full 2 本からの試走（research K-70 §15: 17〜32 ×1.246・33〜64 ×1.538・conv2d rows32 ×1.097 以外は既定）より採用が少ないのは、
+  quick+ 1 本で揺れが大きいため（推測）。「M5 は既定が最良」（ADR 0115 追記決定 7）と整合。
+- A/B（自動 = 既定・表は当たらない — M5 に登録表は無く、フラグ無しでは description も空）: 区間 A と B は同じ既定で走り、PNG sha は
+  quant ごとに 6 / 6 一致（既定 quant `0df85f770e9a`・f16 `dbad691e97ac`）。DiT 段 GPU は既定 quant 22.10 s・f16 17.17 s
+  （512²・常駐 2 回目以降の中央値）— **M5 でも f16 が既定 quant（a8）より 1.29 倍速い**（M2 は 1.58 倍・research K-70 §12 の
+  「Metal では a8 が損」の第 2 の実例）。VAE 段 GPU 0.87 s・text_encoder の壁時計 17〜19 s はネットワーク越しの重み取得。
+
 ## 6. 参照
 
 - ADR 0117 検収表 段 7・追記（2026-10-02・独立レビュー）
