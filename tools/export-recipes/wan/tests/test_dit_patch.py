@@ -387,9 +387,88 @@ class TestExport:
 
         names = [spec.name((1, 2, 2)) for spec in CASES]
         assert len(set(names)) == len(names)
-        assert {spec.role for spec in CASES} == {"band", "accept", "growth"}
+        assert {spec.role for spec in CASES} == {
+            "band",
+            "accept",
+            "growth",
+            "full-band",
+            "full-accept",
+        }
         # 例示入力（先頭）は小さい方（`torch.export` はトレースで 1 回 forward を回す）。
         assert names[0].startswith("band-s00192")
+
+    def test_full_size_cases_have_their_own_seeds(self) -> None:
+        """実寸（ADR 0118 段 3）のケースは 832×480・33 フレームの S = 14,040 で、帯を S = 192 から
+        独立に導くため seed が段 2 のどのケースとも違う（決定用と受入れの間でも違う）。"""
+        from wan.export_dit import CASES
+
+        full = [spec for spec in CASES if spec.full_size]
+        assert [spec.name((1, 2, 2)) for spec in full] == [
+            "full-band-s14040-t0999",
+            "full-band-s14040-t0999-2",
+            "full-band-s14040-t0750",
+            "full-band-s14040-t0500",
+            "full-band-s14040-t0250",
+            "full-band-s14040-t0113",
+            "full-accept-s14040-t0999",
+            "full-accept-s14040-t0600",
+        ]
+        others = {spec.seed for spec in CASES if not spec.full_size}
+        assert len({spec.seed for spec in full}) == len(full)
+        assert not others & {spec.seed for spec in full}
+
+    def test_only_two_full_size_cases_keep_block_outputs(self) -> None:
+        """実寸の各ブロックの出力（1 ケース 2.6 GB）は決定用 1 本と受入れ 1 本（どちらも
+        t = 999）だけが持つ。S = 192 / 768 は全ケースが持つ（層ごとの記録の相手）。"""
+        from wan.export_dit import CASES
+
+        assert [spec.name((1, 2, 2)) for spec in CASES if spec.full_size and spec.blocks] == [
+            "full-band-s14040-t0999",
+            "full-accept-s14040-t0999",
+        ]
+        assert all(spec.blocks for spec in CASES if not spec.full_size)
+
+
+class TestFloat64Reference:
+    """実寸の f64 の参照（`dit_patch.float64_forward`）— 活性が全部 f64 で回ること。"""
+
+    def _rounded_f64(self) -> nn.Module:
+        from wan.export_dit import round_to_f16
+
+        model = _tiny_dit()
+        round_to_f16(model, dit_patch.WanDitTokens(model))
+        return model.double()
+
+    def test_the_f64_forward_stays_in_f64_and_restores_tensor_float(self) -> None:
+        """出力は f64・f32 の参照とは丸めの差だけ違い、抜けた後の `Tensor.float()` は元の
+        f32 化。"""
+        model = self._rounded_f64()
+        latents, timestep, embeds = _tiny_inputs(model)
+        with torch.no_grad():
+            got = dit_patch.reference_dit_f64(model, latents, timestep, embeds)
+            expected = dit_patch.reference_dit(model.float(), latents, timestep, embeds)
+
+        assert got.dtype == torch.float64
+        assert 0 < float((got - expected.double()).abs().max()) < 1e-5 * float(got.abs().max())
+        assert torch.ones(2, dtype=torch.float64).float().dtype == torch.float32
+        assert "float" not in vars(torch.Tensor)
+
+    def test_upstream_f32_casts_left_in_place_are_caught(self, monkeypatch) -> None:
+        """`.float()` の素通しを外すと（上流の FP32LayerNorm と残差の f32 化がそのまま走ると）
+        止まる。"""
+        from contextlib import nullcontext
+
+        model = self._rounded_f64()
+        latents, timestep, embeds = _tiny_inputs(model)
+        monkeypatch.setattr(dit_patch, "_float_keeps_float64", nullcontext)
+        with torch.no_grad(), pytest.raises(AssertionError, match="f64 でない値"):
+            dit_patch.reference_dit_f64(model, latents, timestep, embeds)
+
+    def test_a_model_left_in_f32_is_rejected(self) -> None:
+        model = _tiny_dit()
+        latents, timestep, embeds = _tiny_inputs(model)
+        with torch.no_grad(), pytest.raises(AssertionError, match="float32"):
+            dit_patch.reference_dit_f64(model, latents, timestep, embeds)
 
 
 # ---- 実重み（pin した revision — 無い機では SKIP） ----------------------------------

@@ -17,7 +17,10 @@
                                   （`output.0`）
     reference.<case>.safetensors  上流の素の diffusers（CPU f32・同じ f16 丸めの重み）の
                                   `latents` / `timestep`（i32）/ `output`（`[1,16,F,H,W]`）/
-                                  `block.NN`（各ブロックの出力 `[1,S,1536]`）
+                                  `block.NN`（各ブロックの出力 `[1,S,1536]` —
+                                  `CaseSpec.blocks` のケースだけ）。実寸のケースは加えて
+                                  `output.f64`（活性も f64 で回した上流の出力を f32 へ丸めた値
+                                  — `dit_patch.reference_dit_f64`）
 
 `--layers` は層別の出口を足した計測用のグラフ（{@link wan.dit_patch.WanDitTokensLayers}）を
 `…-f16-dyn-probe/transformer/` へ書く。golden は書かない（入力は製品の系列の `io.*`、期待値は同じ
@@ -38,6 +41,14 @@
 | `accept` | `[1,16,2,24,16]` | 192 | 400 | 70 | 777003 |
 | `growth`（S に対する伸び） | `[1,16,3,32,32]` | 768 | 999 | 24 | `SEED` + 2 |
 | `growth` | `[1,16,3,32,32]` | 768 | 500 | 37 | `SEED` + 7 |
+| `full-band`（実寸の帯の決定） | `[1,16,9,60,104]` | 14,040 | 999 | 40 | `SEED` + 10 |
+| `full-band`（名前の接尾辞 `-2`） | `[1,16,9,60,104]` | 14,040 | 999 | 112 | `SEED` + 11 |
+| `full-band` | `[1,16,9,60,104]` | 14,040 | 750 | 23 | `SEED` + 12 |
+| `full-band` | `[1,16,9,60,104]` | 14,040 | 500 | 64 | `SEED` + 9 |
+| `full-band` | `[1,16,9,60,104]` | 14,040 | 250 | 91 | `SEED` + 13 |
+| `full-band` | `[1,16,9,60,104]` | 14,040 | 113 | 7 | `SEED` + 14 |
+| `full-accept`（実寸の受入れ） | `[1,16,9,60,104]` | 14,040 | 999 | 28 | 777006 |
+| `full-accept` | `[1,16,9,60,104]` | 14,040 | 600 | 77 | 777007 |
 
 帯の指標は「最大絶対差 ÷ 参照の最大絶対値」（決定 8 の目安の形）で、帯 = `band` の 6 ケースの
 最悪の比 × 5（TS 側 `e2e_wan_dit_test.ts` の `DIT_RATIO_BAND`）。`accept` の 3 ケースは `band` と
@@ -46,6 +57,26 @@ seed が違い、timestep も 1 本（600）を除いて違う（600 の 1 本�
 
 MUST: `accept` の結果を見て `band` のケースを足し引きしない（帯の決定と受入れの独立が崩れる）。
 受入れが帯を外れたら、帯を広げずに原因を調べる。
+
+`full-band` / `full-accept` は実寸（832×480・33 フレーム — ADR 0118 段 3）の帯を、
+S = 192 の帯とは**独立に**導くためのケース（決定 8 の外挿の規律）。帯 = `full-band` 6 ケースの
+最悪の正規化した比 × 5（TS 側の `DIT_FULL_NORMALIZED_BAND`）で、`full-accept` 2 ケースで受け
+入れる。決定用は timestep を 999（生成の最初のステップ — seed 2 本）/ 750 / 500 / 250 / 113 に
+散らす。受入れは 999 と 600 で、seed（777006 / 777007）は段 2 のどのケースとも、決定用とも別。
+受入れの seed は指標を正規化した比に変えたときに新しくした（旧 777004 / 777005 は指標を決める
+前に結果を見ていたので、受入れの独立が崩れていた）。
+MUST: `full-accept` の結果を見て `full-band` のケースも指標も変えない。
+
+実寸の参照は 2 本: **f64 の参照**（`output.f64` — 活性も f64・重みは同じ f16 丸め）を正とし、CPU
+f32 の参照（`output`）は正規化の分母に使う。指標は「GPU の f64 に対する比 ÷ CPU f32 の参照の f64
+に対する比」（GPU の誤差が CPU f32 の何倍か）。比そのものは入力で 240 倍動く（丸めを増幅する入力
+では CPU f32 の参照も同じだけ f64 から離れる）ので、CPU f32 の誤差で割って入力による増幅を打ち
+消す。所要は f64 が f32 の約 2.7 倍（`[case]` 行に出す — 実寸 1 ケースで f64 約 370 s・f32 約
+136 s）。
+
+各ブロックの出力（`block.NN` — 実寸 1 ケースで 2.6 GB）は S = 192 / 768 の全ケースと、実寸では
+決定用 `full-band-s14040-t0999` と受入れ `full-accept-s14040-t0999` の 2 本だけが持つ
+（`CaseSpec.blocks` — 層ごとの記録はこの 2 本で足り、残りは最終出力だけで判定できる）。
 
 決定用を 1 ケースにしないのは、誤差が入力で 1 桁近く動くため（実測: t = 999 の 1 ケースで決めた帯を
 t = 500 の未見ケースが 1.6 倍超えた。中ほどの timestep は CPU の eager でも入力の 1e-5 級の揺れを
@@ -108,6 +139,8 @@ ROPE_BASE_ROLE = "rope-base"
 
 IO_PREFIX = "io."
 REFERENCE_PREFIX = "reference."
+#: 実寸のケースの `reference.<case>` に入れる f64 の参照のキー（TS 側の `REFERENCE_F64_KEY`）。
+REFERENCE_F64_KEY = "output.f64"
 CASE_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
@@ -135,17 +168,27 @@ class CaseSpec:
     timestep: int
     text_length: int
     seed: int
+    #: 役割・S・timestep が同じケースを名前で分ける接尾辞（実寸の t = 999 の 2 本目）。
+    variant: str = ""
+    #: 各ブロックの出力（`block.NN`）を golden に持つか（層ごとの記録の相手 — 実寸は 2 本だけ）。
+    blocks: bool = True
 
     def name(self, patch_size: tuple[int, int, int]) -> str:
         frames, height, width = self.latent_shape
         tokens = (frames // patch_size[0]) * (height // patch_size[1]) * (width // patch_size[2])
-        return f"{self.role}-s{tokens:05d}-t{self.timestep:04d}"
+        suffix = f"-{self.variant}" if self.variant else ""
+        return f"{self.role}-s{tokens:05d}-t{self.timestep:04d}{suffix}"
+
+    @property
+    def full_size(self) -> bool:
+        """実寸（ADR 0118 段 3）のケース — f32 に加えて f64 の参照も採る。"""
+        return self.role.startswith("full-")
 
 
 #: ケースの表（モジュール docstring の表と同じ）。先頭が export の例示入力（小さい方 —
 #: `torch.export` はトレースで 1 回 forward を回す）。
 #: MUST: `band`（帯の決定）と `accept`（受入れ）は固定する — `accept` の結果を見て `band` を
-#: 変えない（モジュール docstring）。
+#: 変えない（モジュール docstring）。実寸の `full-band` / `full-accept` も同じ。
 CASES: tuple[CaseSpec, ...] = (
     CaseSpec("band", (3, 16, 16), 999, 24, SEED + 0),
     CaseSpec("band", (2, 16, 24), 750, 50, SEED + 3),
@@ -158,6 +201,14 @@ CASES: tuple[CaseSpec, ...] = (
     CaseSpec("accept", (2, 24, 16), 400, 70, 777003),
     CaseSpec("growth", (3, 32, 32), 999, 24, SEED + 2),
     CaseSpec("growth", (3, 32, 32), 500, 37, SEED + 7),
+    CaseSpec("full-band", (9, 60, 104), 999, 40, SEED + 10),
+    CaseSpec("full-band", (9, 60, 104), 999, 112, SEED + 11, variant="2", blocks=False),
+    CaseSpec("full-band", (9, 60, 104), 750, 23, SEED + 12, blocks=False),
+    CaseSpec("full-band", (9, 60, 104), 500, 64, SEED + 9, blocks=False),
+    CaseSpec("full-band", (9, 60, 104), 250, 91, SEED + 13, blocks=False),
+    CaseSpec("full-band", (9, 60, 104), 113, 7, SEED + 14, blocks=False),
+    CaseSpec("full-accept", (9, 60, 104), 999, 28, 777006),
+    CaseSpec("full-accept", (9, 60, 104), 600, 77, 777007, blocks=False),
 )
 
 
@@ -171,7 +222,10 @@ class Case:
     latents: torch.Tensor
     timestep: torch.Tensor
     reference: torch.Tensor
+    #: 各ブロックの出力（`spec.blocks` でないケースは空）。
     reference_blocks: list[torch.Tensor]
+    #: 上流の素の forward（参照）の所要（秒・CPU f32 — 実寸のケースの所要の記録）。
+    reference_seconds: float
 
 
 def _generator(seed: int) -> torch.Generator:
@@ -217,19 +271,37 @@ def round_to_f16(model: nn.Module, wrapper: nn.Module) -> str:
     return report.describe()
 
 
-def build_case(model: nn.Module, spec: CaseSpec) -> Case:
-    """1 ケースの入力を作り、上流の素の forward で参照（最終出力と各ブロックの出力）を採る。"""
-    patch_size = tuple(int(size) for size in model.config.patch_size)
+def case_inputs(
+    model: nn.Module, spec: CaseSpec
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """1 ケースの上流の入力（潜在 `[1,16,F,H,W]`・timestep・テキスト文脈 `[1,512,4096]`）。
+
+    f32 と f64 の参照が同じ値を受けるよう、乱数はここ 1 か所で引く。
+    """
     generator = _generator(spec.seed)
     latents = torch.randn(1, model.config.in_channels, *spec.latent_shape, generator=generator)
     text = torch.randn(spec.text_length, TEXT_DIM, generator=generator)
-    encoder_hidden_states = pad_text_embeds(text)
     # 上流のパイプラインは scheduler の int64 の timestep を `expand(batch)` して渡す。
     timestep = torch.tensor([spec.timestep], dtype=torch.int64)
+    return latents, timestep, pad_text_embeds(text)
+
+
+def build_case(model: nn.Module, spec: CaseSpec) -> Case:
+    """1 ケースの入力を作り、上流の素の forward で参照（最終出力と、`spec.blocks` なら各ブロックの
+    出力）を採る。"""
+    patch_size = tuple(int(size) for size in model.config.patch_size)
+    latents, timestep, encoder_hidden_states = case_inputs(model, spec)
     with torch.no_grad():
-        reference, blocks = dit_patch.reference_dit_layers(
-            model, latents, timestep, encoder_hidden_states
-        )
+        started = time.perf_counter()
+        if spec.blocks:
+            reference, blocks = dit_patch.reference_dit_layers(
+                model, latents, timestep, encoder_hidden_states
+            )
+        else:
+            reference = dit_patch.reference_dit(model, latents, timestep, encoder_hidden_states)
+            blocks = []
+        reference_seconds = time.perf_counter() - started
+        print(f"[case] {spec.name(patch_size)}: 上流の参照 {reference_seconds:.1f} s", flush=True)
         rope_cos, rope_sin = dit_patch.dit_rope_tables(model.rope, spec.latent_shape)
         inputs = (
             dit_patch.dit_patchify(latents, patch_size),
@@ -246,7 +318,45 @@ def build_case(model: nn.Module, spec: CaseSpec) -> Case:
         timestep=timestep,
         reference=reference,
         reference_blocks=blocks,
+        reference_seconds=reference_seconds,
     )
+
+
+@dataclass(frozen=True)
+class Float64Reference:
+    """実寸の 1 ケースの f64 の参照（最終出力 `[1,16,F,H,W]` は f64 のまま — 書くときに丸める）。"""
+
+    output: torch.Tensor
+    #: 所要（秒・CPU f64）。
+    seconds: float
+
+
+def float64_references(model_name: str, specs: Sequence[CaseSpec]) -> dict[str, Float64Reference]:
+    """実寸のケースの f64 の参照（上流の素の forward を活性も f64 で —
+    `dit_patch.reference_dit_f64`）。
+
+    重みは f32 の参照と同じ f16 丸めの値をそのまま f64 へ広げ、入力も {@link case_inputs} の同じ値を
+    広げる。f64 のモデル（約 10.4 GB）は f32 のモデル（約 5.2 GB）と同時に持たない — ここで読んで
+    回して捨ててから、呼び手が f32 のモデルを読む。
+    """
+    full = [spec for spec in specs if spec.full_size]
+    if not full:
+        return {}
+    model = load_transformer(model_name)
+    round_to_f16(model, dit_patch.WanDitTokens(model))
+    model.double()
+    patch_size = tuple(int(size) for size in model.config.patch_size)
+    references: dict[str, Float64Reference] = {}
+    for spec in full:
+        latents, timestep, encoder_hidden_states = case_inputs(model, spec)
+        started = time.perf_counter()
+        with torch.no_grad():
+            output = dit_patch.reference_dit_f64(model, latents, timestep, encoder_hidden_states)
+        seconds = time.perf_counter() - started
+        name = spec.name(patch_size)
+        print(f"[case] {name}: 上流の f64 参照 {seconds:.1f} s", flush=True)
+        references[name] = Float64Reference(output=output, seconds=seconds)
+    return references
 
 
 def dynamic_shapes() -> tuple[Any, ...]:
@@ -270,42 +380,66 @@ def rope_base_asset(model: nn.Module) -> dict[str, AssetInput]:
     return {ROPE_BASE_ASSET: AssetInput(ROPE_BASE_ROLE, len(payload), payload)}
 
 
-def eager_report(wrapper: dit_patch.WanDitTokens, model: nn.Module, case: Case) -> dict[str, Any]:
-    """パッチ後の eager（ホストの unpatchify まで）と上流の素の出力の差（ケース 1 本）。
+def eager_report(
+    wrapper: dit_patch.WanDitTokens, model: nn.Module, case: Case
+) -> tuple[dict[str, Any], torch.Tensor]:
+    """パッチ後の eager（ホストの unpatchify まで）と上流の素の出力の差（ケース 1 本）と、パッチ後の
+    グラフ出力 `[1,S,pt·ph·pw·C]`（golden の `output.0` — 書き手が回し直さずに使う）。
 
     `trunk` は patch 埋め込みを上流の conv3d の出力に差し替えた経路（RoPE の書き換えを含む本体だけの
     比較 — ビット一致が主張）、`full` は Linear 化した patch 埋め込みを含む製品の経路
     （差を記録する）。
+
+    patch 埋め込みの出力が上流の conv3d とビット一致するなら、trunk は full と同じ入力で同じ計算を
+    する（`forward` は `forward_hidden(patch_embedding(tokens), …)`）ので回し直さない
+    （`trunk_from_full`）。実寸（S = 14,040）では 1 forward が CPU で分単位なので、ケースあたりの
+    forward をこの 1 本に絞る。
     """
     patch_size = wrapper.patch_size
     with torch.no_grad():
-        tokens_out = wrapper(*case.inputs)
-        full = dit_patch.dit_unpatchify(tokens_out, case.spec.latent_shape, patch_size)
         hidden = model.patch_embedding(case.latents).flatten(2).transpose(1, 2)
-        trunk = dit_patch.dit_unpatchify(
-            wrapper.forward_hidden(hidden, *case.inputs[1:]), case.spec.latent_shape, patch_size
-        )
         embedded = wrapper.patch_embedding(case.inputs[0])
-    return {
+        started = time.perf_counter()
+        tokens_out = wrapper(*case.inputs)
+        patched_seconds = time.perf_counter() - started
+        full = dit_patch.dit_unpatchify(tokens_out, case.spec.latent_shape, patch_size)
+        trunk_from_full = torch.equal(embedded, hidden)
+        trunk = (
+            full
+            if trunk_from_full
+            else dit_patch.dit_unpatchify(
+                wrapper.forward_hidden(hidden, *case.inputs[1:]),
+                case.spec.latent_shape,
+                patch_size,
+            )
+        )
+    report = {
         "case": case.name,
         "reference_max_abs": float(case.reference.abs().max()),
         "trunk_bit_exact": torch.equal(trunk, case.reference),
         "trunk_max_abs_diff": float((trunk - case.reference).abs().max()),
+        "trunk_from_full": trunk_from_full,
         "patch_embedding_max_abs_diff": float((embedded - hidden).abs().max()),
         "patch_embedding_max_abs": float(hidden.abs().max()),
         "full_bit_exact": torch.equal(full, case.reference),
         "full_max_abs_diff": float((full - case.reference).abs().max()),
+        "reference_seconds": round(case.reference_seconds, 1),
+        "patched_seconds": round(patched_seconds, 1),
     }
+    return report, tokens_out
+
+
+def _ratio(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    """帯の指標（最大絶対差 ÷ 参照の最大絶対値 — TS 側の `ratioOf` と同じ形）を f64 で。"""
+    expected = expected.double()
+    return float((actual.double() - expected).abs().max() / expected.abs().max())
 
 
 def _write_case_files(
-    wrapper: nn.Module, graph_inputs: list[str], case: Case, out_dir: Path
+    case: Case, output: torch.Tensor, reference_f64: Float64Reference | None, out_dir: Path
 ) -> list[str]:
-    """`io.<case>`（グラフ入力 + パッチ後の eager 出力）と `reference.<case>`（上流の値）を書く。"""
-    if graph_inputs != list(INPUT_NAMES):
-        raise AssertionError(f"グラフ入力名が宣言と不一致: {graph_inputs} vs {list(INPUT_NAMES)}")
-    with torch.no_grad():
-        output = wrapper(*case.inputs)
+    """`io.<case>`（グラフ入力 + パッチ後の eager 出力 `output`）と `reference.<case>`（上流の値）を
+    書く。実寸のケースは `reference.<case>` に f64 の参照 `output.f64` も入れる。"""
     io = {
         f"{INPUT_PREFIX}{key}": normalize_boundary_tensor(value, f"{case.name} の入力 '{key}'")
         for key, value in zip(INPUT_NAMES, case.inputs, strict=True)
@@ -322,6 +456,11 @@ def _write_case_files(
             for index, block in enumerate(case.reference_blocks)
         },
     }
+    if reference_f64 is not None:
+        # 格納は f32 へ丸めた値（TS の safetensors は F64 を読まない）。丸めの差は要素ごとに
+        # 2⁻²⁴·|x| 以下で、比にして 6e-8 以下 — 正規化の分母（CPU f32 の参照の f64 に対する比・
+        # 実測 3.7e-6 以上）を 2% 未満しか動かさず、帯（最悪 × 5）の判定には効かない。
+        reference[REFERENCE_F64_KEY] = reference_f64.output.to(torch.float32).contiguous()
     io_name = f"{IO_PREFIX}{case.name}{CASE_SUFFIX}"
     reference_name = f"{REFERENCE_PREFIX}{case.name}{CASE_SUFFIX}"
     save_file(io, str(out_dir / io_name))
@@ -330,26 +469,46 @@ def _write_case_files(
 
 
 def emit(args: argparse.Namespace) -> dict[str, Any]:
-    """製品のグラフ（または `--layers` の計測用グラフ）を書き、要約を返す。"""
+    """製品のグラフ（または `--layers` の計測用グラフ）を書き、要約を返す。
+
+    ケースは 1 本ずつ組んで書いて捨てる（実寸のケースは各ブロックの出力を持つものだけで
+    2.6 GB あり、全ケースを同時に持つとメモリに載らない）。グラフの export は全ケースの eager の後
+    （例示入力は先頭）。
+    """
     started = time.perf_counter()
+    # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
+    specs = CASES[:1] if args.layers else CASES
+    references_f64 = float64_references(args.model, specs)
     model = load_transformer(args.model)
     wrapper_class = dit_patch.WanDitTokensLayers if args.layers else dit_patch.WanDitTokens
     wrapper = wrapper_class(model)
     rounded = round_to_f16(model, wrapper)
     print(f"[fake-quant] {TARGET}: f16 表現可能値へ丸めた — {rounded}", flush=True)
-    # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
-    cases = [build_case(model, spec) for spec in (CASES[:1] if args.layers else CASES)]
-    eager = [eager_report(wrapper, model, case) for case in cases] if not args.layers else []
-    for line in eager:
-        print(f"[eager] {json.dumps(line, ensure_ascii=False)}", flush=True)
+    first = build_case(model, specs[0])
+    eager: list[dict[str, Any]] = []
+    written: list[str] = []
 
     out_dir = (PROBE_SERIES if args.layers else SERIES) / TARGET
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
         staged.mkdir()
+        if not args.layers:
+            for spec in specs:
+                case = first if spec is specs[0] else build_case(model, spec)
+                report, output = eager_report(wrapper, model, case)
+                reference_f64 = references_f64.get(case.name)
+                if reference_f64 is not None:
+                    report["reference_f64_seconds"] = round(reference_f64.seconds, 1)
+                    report["reference_f32_vs_f64_ratio"] = _ratio(
+                        case.reference, reference_f64.output
+                    )
+                print(f"[eager] {json.dumps(report, ensure_ascii=False)}", flush=True)
+                eager.append(report)
+                written += _write_case_files(case, output, reference_f64, staged)
+                del case, output
         graph = export_to_file(
             wrapper,
-            cases[0].inputs,
+            first.inputs,
             staged / MODEL_FILE,
             provenance=provenance(args.model),
             graph_name=TARGET,
@@ -359,11 +518,9 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
             weight_dtype="f16",
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
-        written: list[str] = []
-        if not args.layers:
-            declared = [entry.name for entry in graph.inputs]
-            for case in cases:
-                written += _write_case_files(wrapper, declared, case, staged)
+        declared = [entry.name for entry in graph.inputs]
+        if not args.layers and declared != list(INPUT_NAMES):
+            raise AssertionError(f"グラフ入力名が宣言と不一致: {declared} vs {list(INPUT_NAMES)}")
     breakdown = storage_breakdown(graph)
     return {
         "target": TARGET,
@@ -393,7 +550,7 @@ def verify(args: argparse.Namespace) -> list[dict[str, Any]]:
     wrapper = dit_patch.WanDitTokens(model)
     if not args.no_f16:
         round_to_f16(model, wrapper)
-    return [eager_report(wrapper, model, build_case(model, spec)) for spec in CASES]
+    return [eager_report(wrapper, model, build_case(model, spec))[0] for spec in CASES]
 
 
 def main(argv: Sequence[str] | None = None) -> int:

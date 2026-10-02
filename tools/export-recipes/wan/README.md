@@ -61,8 +61,36 @@ inputs and the patched torch output) and `reference.<case>` (the input latent, t
 unpatched upstream output and each block's output from the plain diffusers forward).
 
 The real-GPU comparison is `packages/models/tests/e2e_wan_dit_test.ts`: the band is about 5× the
-worst of four decision cases spread over the sampling schedule, and two separate acceptance cases
-and three fault injections (RoPE h/w swap, unpatchify order, flipped timestep halves) check it.
+worst of six decision cases spread over the sampling schedule, and three separate acceptance cases
+and four fault injections (RoPE h/w swap, unpatchify order, flipped timestep halves, timestep off by
+one) check it.
+
+Stage 3 adds eight real-size cases (832×480, 33 frames: latent `[16,9,60,104]`, S = 14,040). Six
+`full-band` cases spread over the schedule (t = 999 with two seeds, 750, 500, 250, 113) set a
+separate band, and two `full-accept` cases (t = 999 and 600, seeds 777006 / 777007, generated after
+the band was fixed) are checked against it. Each real-size case has two references: a float64 one
+(`dit_patch.reference_dit_f64` runs the same plain upstream forward with the activations in float64
+and the same f16-rounded weights; stored as `output.f64` in `reference.<case>`, rounded to f32)
+and the CPU f32 one (`output`). The metric is a normalized ratio,
+r = (max|GPU − f64| / max|f64|) / (max|CPU f32 − f64| / max|f64|): how many times the CPU f32
+reference's own error the GPU error is. The plain ratio moves 240× with the input, because inputs
+that amplify rounding pull the CPU f32 reference away from float64 just as much; dividing by the CPU
+f32 error cancels that, and r stays between 1.6 and 15 on the decision cases. The band is 75 (5×
+the worst decision r, 14.9). r above 1 is a precision difference, not a porting bug: the GEMM kernel
+reduces K in one f32 accumulator in ascending order. The four fault injections must land outside
+the band, and the off-by-one timestep at least 2× the band (observed 4.4× to 80×; the fault itself
+moves about 3× with the input).
+
+Only `full-band-s14040-t0999` and `full-accept-s14040-t0999` keep the 30 block outputs (2.6 GB
+each) for the per-layer record; the other real-size cases hold the final outputs only. On a 6-core
+desktop CPU (2026-10-02) one real-size case takes about 370 s for the float64 forward and 140 s
+each for the f32 and the patched ones, so the whole command takes about 88 minutes and writes about
+6.2 GB of golden files (plus the container).
+
+As of 2026-10-02 both acceptance cases are inside the real-size band (r = 2.93 and 4.60) and all
+four fault injections are outside it, but the off-by-one timestep at t = 600 lands at r = 332, only
+4.4× the band, so the real-size comparison is red until that is resolved (the NOTE on
+`DIT_FULL_NORMALIZED_BAND` in the e2e test has the numbers).
 
 ## VAE (stage 4)
 

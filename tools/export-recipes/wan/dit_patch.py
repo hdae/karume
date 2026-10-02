@@ -37,11 +37,15 @@ MUST: diffusers は関数の中で import する（`wan` グループは既定�
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import cache
 from typing import Any, NamedTuple
 
 import torch
 from torch import nn
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils._pytree import tree_leaves
 
 #: ホストの軸別素表のテンソルキー（`t → h → w` のブロック順）。Anima の資産 `rope_base` と同じ綴り・
 #: 同じ意味（軸 × 位置 × 周波数の cos / sin。値は上流の表そのもの）。
@@ -592,3 +596,95 @@ def reference_dit_layers(
             f"ブロックの出力を {len(collected)} 本拾った（{len(model.blocks)} 本のはず）"
         )
     return output, collected
+
+
+class _NarrowFloatWatch(TorchDispatchMode):
+    """f64 の forward の中で、f64 でない浮動小数の値（要素数が `limit` を超えるもの）を記録する。"""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+        self.found: list[str] = []
+
+    def __torch_dispatch__(
+        self,
+        func: Any,
+        types: Any,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        result = func(*args, **(kwargs or {}))
+        for leaf in tree_leaves(result):
+            if (
+                isinstance(leaf, torch.Tensor)
+                and leaf.is_floating_point()
+                and leaf.dtype != torch.float64
+                and leaf.numel() > self.limit
+            ):
+                self.found.append(f"{func}: {leaf.dtype} {tuple(leaf.shape)}")
+        return result
+
+
+@contextmanager
+def _float_keeps_float64() -> Iterator[None]:
+    """この間だけ `Tensor.float()` を f64 のテンソルでは素通しにする（f64 以外は元のまま）。
+
+    WHY: 上流は FP32LayerNorm と block の変調・残差を `.float()` で f32 へ寄せる（bf16 / f16 で
+    回すときに norm を f32 で計算するための寄せ）。f32 のモデルではどれも恒等で計算の意味に含まれ
+    ないが、f64 のモデルでそのまま通すと norm と残差だけが f32 に落ち、「活性を f64 で回した参照」に
+    ならない。
+    """
+    original = vars(torch.Tensor).get("float")
+    narrow = torch.Tensor.float
+
+    def keep_float64(tensor: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        if tensor.dtype == torch.float64:
+            return tensor
+        return narrow(tensor, *args, **kwargs)
+
+    torch.Tensor.float = keep_float64  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        if original is None:
+            del torch.Tensor.float
+        else:
+            torch.Tensor.float = original  # type: ignore[method-assign]
+
+
+@contextmanager
+def float64_forward(model: nn.Module) -> Iterator[None]:
+    """この間の上流の forward を**活性も f64** で回す（ADR 0118 段 3 の誤差の帰属・実寸の参照）。
+
+    `model` は呼び手が `double()` しておく（重みは f16 へ丸めた値をそのまま f64 に広げる — GPU と
+    同じ重み）。入力（f32 の潜在・テキスト文脈）も呼び手が値を変えずに f64 へ広げる。上流の素の
+    forward を回すのは f32 の参照と同じで、違いは次の 2 点だけ:
+
+    - 上流の `.float()` の寄せを f64 では素通しにする（{@link _float_keeps_float64}）。
+    - f64 でない浮動小数の値が作られたら抜けるときに止める。例外は時刻の sinusoid（上流の
+      `Timesteps` が f32 で組む `[1,freq_dim]` — GPU にも同じ f32 の値が `timesteps_proj` として
+      入り、`time_embedder` の入口で f64 へ広がる）だけで、要素数 `freq_dim` 以下として許す。
+    """
+    narrow = sorted(
+        {str(tensor.dtype) for tensor in (*model.parameters(), *model.buffers())}
+        - {str(torch.float64)}
+    )
+    if narrow:
+        raise AssertionError(f"f64 の参照なのにモデルに {narrow} の重み / バッファが残っている")
+    watch = _NarrowFloatWatch(int(model.config.freq_dim))
+    with _float_keeps_float64(), watch:
+        yield
+    if watch.found:
+        raise AssertionError(f"f64 の参照の中で f64 でない値が作られた: {watch.found[:5]}")
+
+
+def reference_dit_f64(
+    model: nn.Module,
+    latents: torch.Tensor,
+    timestep: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """{@link reference_dit} を {@link float64_forward} の下で回した出力 `[1,C,F,H,W]`（f64 のまま —
+    丸めるかどうかは格納する側が決める）。"""
+    with float64_forward(model):
+        return reference_dit(model, latents.double(), timestep, encoder_hidden_states.double())
