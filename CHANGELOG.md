@@ -150,7 +150,11 @@ measurements in `docs/research/`.
   each measured with linear, matmul and bmm cases; the default table is unchanged. On an M2
   under Chrome, the 512² DiT stage of Anima's `f16`
   quant took 45 s instead of 80 s (GPU time 44 s instead of 77 s) and the default quant 71 s
-  instead of 82 s; the PNG bytes are unchanged.
+  instead of 82 s; the PNG bytes are unchanged. Measured again under Chrome 154 with the
+  seven-rule table, the same stage took 43 s instead of 52 s (GPU time 42 s instead of 51 s):
+  the default f32 linear and QK geometries on the M2 ran faster under Chrome 154 than under
+  Chrome 153 (same WGSL), so the table's gain is smaller there; the PNG bytes are still
+  unchanged.
 
 ### Fixed
 
