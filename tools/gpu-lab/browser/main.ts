@@ -8,6 +8,8 @@
  * `sweep-tab.ts`・`profile-tab.ts`・`anima-tab.ts`。
  *
  * GPU 設定の効き方: Anima のタブの GPU は適用中の設定で取る（注入があれば adapter を見ずにその表を使う）。
+ * 「保存した表（照合して注入）」だけはアプリの流れ（ADR 0117 検収 段 7）: 適用時に localStorage の保存物の
+ * 文字列を取り、Anima のタブが GPU を取るときにコールバック形で adapter と照合して、一致したときだけ注入する。
  * 掃引のタブは各幾何を明示して測るので注入は効かない（timestamp の要求だけが効く）。適用は Anima の
  * pipeline・ダミー・GPU を畳み、GPU を持っていたなら新しい設定で取り直す。
  */
@@ -34,9 +36,12 @@ import {
 import {
   GENERATED_PREFIX,
   type InjectableTables,
+  LAST_GENERATED_KEY,
   readLastGenerated,
+  SAVED_MATCHED_VALUE,
   SAVED_VALUE,
   type SavedProfile,
+  savedProfileId,
   tableForValue,
   tableOptions,
   valueForTable,
@@ -103,9 +108,19 @@ const initialize = async (): Promise<void> => {
 
   const tables = (): InjectableTables => state.tables;
 
+  /** 保存物の文字列（無い・localStorage が使えなければ undefined）。 */
+  const storedText = (): string | undefined => {
+    try {
+      return localStorage.getItem(LAST_GENERATED_KEY) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   /** 選び方 → select の値。 */
   const selectValue = (choice: ProfileChoice): string => {
     if (choice.kind === "builtin") return `${BUILTIN_PREFIX}${choice.profile.id}`;
+    if (choice.kind === "saved-matched") return SAVED_MATCHED_VALUE;
     if (choice.kind !== "generated") return choice.kind;
     const value = valueForTable(tables(), choice.profile);
     if (value === undefined) throw Error(`生成した表 ${choice.profile.id} が選択肢に無い`);
@@ -117,6 +132,15 @@ const initialize = async (): Promise<void> => {
     const value = ui.profile.value;
     if (value === "auto") return { kind: "auto" };
     if (value === "default") return { kind: "default", profile: DEFAULT_GEOMETRY_PROFILE };
+    if (value === SAVED_MATCHED_VALUE) {
+      // 保存物は適用の時点で読む（GPU を取るときのコールバックは I/O を待たない — ADR 0117 決定 6）
+      const stored = storedText();
+      if (stored === undefined) {
+        throw Error("照合して注入する保存した表が無い（プロファイルのタブで生成すると保存される）");
+      }
+      const id = savedProfileId(stored);
+      return { kind: "saved-matched", stored, ...(id === undefined ? {} : { id }) };
+    }
     if (value === SAVED_VALUE || value.startsWith(GENERATED_PREFIX)) {
       const profile = tableForValue(tables(), value);
       if (profile === undefined) throw Error(`生成した表の選択 ${value} を知らない`);
@@ -130,14 +154,22 @@ const initialize = async (): Promise<void> => {
     return { kind: "builtin", profile };
   };
 
-  /** 選択が適用中と違うか（生成した表は作り直すと中身が変わるので、同じ id でも表そのもので比べる）。 */
+  /**
+   * 選択が適用中と違うか（生成した表は作り直すと中身が変わるので、同じ id でも表そのもので比べる。照合して
+   * 注入は保存物の文字列で比べる — 適用の後に表を生成し直したら適用し直しが要る）。
+   */
   const pending = (): boolean => {
     const applied = state.settings;
     if (ui.timestamps.checked !== applied.timestamps) return true;
+    if (ui.profile.value === SAVED_MATCHED_VALUE) {
+      return applied.choice.kind !== "saved-matched" || applied.choice.stored !== storedText();
+    }
     const choice = readChoice();
-    return choice.kind !== applied.choice.kind ||
-      (choice.kind !== "auto" && applied.choice.kind !== "auto" &&
-        choice.profile !== applied.choice.profile);
+    if (choice.kind === "auto" || applied.choice.kind === "auto") {
+      return choice.kind !== applied.choice.kind;
+    }
+    if (choice.kind === "saved-matched" || applied.choice.kind === "saved-matched") return true;
+    return choice.kind !== applied.choice.kind || choice.profile !== applied.choice.profile;
   };
 
   const renderEnvironment = (): void => {
@@ -145,6 +177,10 @@ const initialize = async (): Promise<void> => {
     // adapterInfo は description ごと渡す（description で照合する表の選択は runtime と同じ）
     const profile = choice.kind === "auto"
       ? `自動 → ${selectGeometryProfile(adapterInfo).id}`
+      : choice.kind === "saved-matched"
+      ? `${
+        requestedLabel(choice)
+      }（GPU を取るときに adapter と照合 — 一致なら注入・不一致なら自動）`
       : `${requestedLabel(choice)}（注入）`;
     ui.environment.textContent = `${adapterSummary(adapterInfo)} · GPU 時間 ${
       timestamps ? "採る" : "採らない"
@@ -200,6 +236,11 @@ const initialize = async (): Promise<void> => {
       ...tableOptions(tables(), applied.kind === "generated" ? applied.profile : undefined)
         .map(({ value, text }) => createOption(value, text)),
     );
+    // 照合して注入は localStorage に保存物があるときだけ選べる（保存の正本は localStorage — 読み直して決める）
+    const matched = ui.profile.querySelector<HTMLOptionElement>(
+      `option[value="${SAVED_MATCHED_VALUE}"]`,
+    );
+    if (matched !== null) matched.disabled = storedText() === undefined;
     ui.profile.value = selected;
   };
 
@@ -258,8 +299,6 @@ const initialize = async (): Promise<void> => {
   /** 生成した表を選択肢に足し、最後に生成した表として localStorage に保存する（上書き）。 */
   const offerGenerated = (profile: GeometryProfile): void => {
     state.tables.generated.push({ serial: state.tables.generated.length + 1, profile });
-    renderTableOptions();
-    renderEnvironment();
     try {
       writeLastGenerated(localStorage, {
         savedAt: new Date().toISOString(),
@@ -271,6 +310,9 @@ const initialize = async (): Promise<void> => {
         `生成した表を localStorage に保存できない（reload すると失われる） — ${errorText(error)}`,
       );
     }
+    // 保存の後に描く（照合して注入の選択肢は localStorage の保存物の有無で有効になる）
+    renderTableOptions();
+    renderEnvironment();
   };
 
   const applyGenerated = async (profile: GeometryProfile): Promise<void> => {
@@ -314,6 +356,11 @@ const initialize = async (): Promise<void> => {
             } 用）`,
         )
       ),
+      // アプリの流れ（保存 → 再起動 → 照合 → コールバックで注入）。選べるかは renderTableOptions が決める
+      createOption(
+        SAVED_MATCHED_VALUE,
+        "保存した表（照合して注入 — 一致しなければ自動）",
+      ),
     );
     ui.profile.value = "auto";
   };
@@ -339,6 +386,8 @@ const initialize = async (): Promise<void> => {
       : `このアダプタは ${TIMESTAMP_QUERY} を持たないので、掃引は壁時計で測り、Anima の GPU 時間は採れません。`,
   );
   restoreSaved();
+  // 照合して注入の選択肢の有効 / 無効を、復元の後の localStorage に合わせる（読めない保存物は復元が消している）
+  renderTableOptions();
   ui.profile.addEventListener("change", renderEnvironment);
   ui.timestamps.addEventListener("change", renderEnvironment);
   // 失敗は apply が GPU 設定の状態行に出している（ここで重ねて出さない）

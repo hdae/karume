@@ -93,6 +93,14 @@ export type GeometryProfile = {
     readonly date: string;
     /** 同上の候補集合（`quick` / `quick+` / `full`）。 */
     readonly candidateSet: string;
+    /**
+     * 同上の掃引を走らせたブラウザ（記録の `userAgent` — Deno の CLI の記録は `Deno/<版>`）を、現れた順に
+     * 重複を除いて並べたもの（全て同じなら 1 要素）。連結しないのは、ブラウザの userAgent 自体が `", "` を含み
+     * （`(KHTML, like Gecko)`）連結すると値ごとに分けられないから。照合（`geometryProfileMismatch`）には使わない
+     * 参考の欄で、アプリが今のブラウザと比べて再掃引を勧める材料（DECIDED: ADR 0117 追記 2026-10-02）。
+     * `userAgent` の無い記録が混ざると書かない（空の配列も書かない）。
+     */
+    readonly userAgent?: readonly string[];
     /** 掃引した adapter（`GPUAdapterInfo` の 4 欄 — 空文字も値のまま。全ての記録で一致する）。 */
     readonly adapter: {
       readonly vendor: string;

@@ -94,6 +94,11 @@ export type SweepRow = {
  */
 export type CaseSummary = {
   readonly caseId: string;
+  /**
+   * ケースの壁時計（ms — 計画・入力の用意・全幾何の計測・既定の再測定まで）。どのケースが所要を食うかを
+   * 記録から読むための欄（ADR 0117 決定 8）で、生成器は読まない。この欄より前の JSON には無い。
+   */
+  readonly elapsedMs: number;
   readonly defaultRepeat?: { readonly perDispatch: number; readonly driftRatio: number };
   readonly defaultRepeatError?: string;
 };
@@ -109,7 +114,30 @@ export type ReportAdapter = {
 /** 掃引の記録（`karume-geometry-sweep/2` — 生成器 `derive.ts` の入力・JSON に書く形）。 */
 export type Report = {
   readonly format: typeof REPORT_FORMAT;
+  /** 記録を組んだ時刻（ISO 8601 — 掃引の終了時刻）。 */
   readonly date: string;
+  /**
+   * 掃引の開始時刻（ISO 8601 — device を取る前）。`date` との差が所要（ADR 0117 決定 8）。この欄より前の
+   * JSON には無い。
+   */
+  readonly startedAt: string;
+  /**
+   * 中断（`signal`）で、計画したケース・幾何・既定の再測定を測り終える前に止まったか。op やケースを絞った
+   * 掃引（`settings.ops` / `settings.cases`）と記録だけで区別するための欄で、生成器の判定には使わない
+   * （途中で切れたケースは既定の再測定が無いので、再測定比の門で比の材料から外れる）。device lost で
+   * 止まった掃引は `deviceLost` が持つ。この欄より前の JSON には無い。
+   */
+  readonly aborted: boolean;
+  /**
+   * 測ったケース集合の版（`sweepCaseSetId()` — ADR 0117 決定 4 / 8）。生成器は今の runtime の値と違う記録を
+   * 拒む。この欄より前の JSON には無い（無ければ照合しない）。
+   */
+  readonly caseSet: string;
+  /**
+   * 比の土台にした既定の表（`DEFAULT_GEOMETRY_PROFILE`）のカーネルの指紋（ADR 0117 決定 4 / 8）。生成器は
+   * 今の runtime の値と違う記録を拒む（土台が別物の記録で表を作らない）。この欄より前の JSON には無い。
+   */
+  readonly defaultKernels: string;
   /** ブラウザは `navigator.userAgent`、Deno の CLI は `{ deno: Deno.version.deno }`。 */
   readonly userAgent: string | { readonly deno: string };
   readonly adapter: ReportAdapter;

@@ -66,6 +66,16 @@ const readRecord = (
 const readString = (value: unknown, path: string): string =>
   typeof value === "string" ? value : fail(path, `が文字列でない（${show(value)}）`);
 
+/**
+ * `provenance.userAgent`（文字列の配列 — 現れた順・重複除去は書き手の担当）。空の配列は書き手が書かない形なので拒む。
+ */
+const readUserAgents = (value: unknown, path: string): string[] => {
+  if (!Array.isArray(value)) return fail(path, `が配列でない（${show(value)}）`);
+  const agents: readonly unknown[] = value;
+  if (agents.length === 0) return fail(path, "が空の配列（userAgent の無い表は欄ごと書かない）");
+  return agents.map((agent, index) => readString(agent, `${path}[${index}]`));
+};
+
 const readInteger = (value: unknown, path: string): number =>
   typeof value === "number" && Number.isSafeInteger(value)
     ? value
@@ -142,6 +152,7 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
 };
 
 const readProvenance = (value: unknown, path: string): Provenance => {
+  // userAgent は参考の任意欄（照合に使わない — ADR 0117 追記 2026-10-02）。未知の欄の拒否は保つ
   const fields = readRecord(value, path, [
     "sweep",
     "sha256",
@@ -150,7 +161,7 @@ const readProvenance = (value: unknown, path: string): Provenance => {
     "adapter",
     "kernels",
     "caseSet",
-  ]);
+  ], ["userAgent"]);
   const adapterPath = child(path, "adapter");
   const adapter = readRecord(fields.adapter, adapterPath, [
     "vendor",
@@ -163,6 +174,9 @@ const readProvenance = (value: unknown, path: string): Provenance => {
     sha256: readString(fields.sha256, child(path, "sha256")),
     date: readString(fields.date, child(path, "date")),
     candidateSet: readString(fields.candidateSet, child(path, "candidateSet")),
+    ...(fields.userAgent === undefined
+      ? {}
+      : { userAgent: readUserAgents(fields.userAgent, child(path, "userAgent")) }),
     adapter: {
       vendor: readString(adapter.vendor, child(adapterPath, "vendor")),
       architecture: readString(adapter.architecture, child(adapterPath, "architecture")),

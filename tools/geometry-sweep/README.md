@@ -253,7 +253,18 @@ the case.
 
 ## Output (`karume-geometry-sweep/2`)
 
-- `userAgent` (`navigator.userAgent`, or `{ deno }` for the CLI), `adapter` (vendor,
+- `date` (when the record was built, i.e. the end of the sweep) and `startedAt` (when the sweep
+  started, before the device was acquired); the difference is the sweep's duration.
+- `aborted` — true when the sweep was stopped (**中断** on the page, or an `AbortSignal`) before it
+  measured every planned case, geometry and default repeat; a sweep narrowed with `--op` / `--case`
+  is not aborted. The profile generator does not read it.
+- `caseSet` (`sweepCaseSetId()`) and `defaultKernels` (the kernel fingerprint of the default
+  profile, the base of every ratio): the generator refuses a record whose values differ from the
+  current runtime's, naming both values. Files written before these fields were added have none of
+  them and are accepted as before.
+- `userAgent` (`navigator.userAgent`, or `{ deno }` for the CLI; a profile generated from the
+  records lists their distinct values in `provenance.userAgent`, an array of strings, writing
+  `{ deno }` as `Deno/<version>`), `adapter` (vendor,
   architecture, device, description), `checkout`, `checkoutDirty`, `bundleSha256` (page only).
 - `gpuTiming: { feature, unit, quantized }` — `unit` is `ns` (Chrome), `deno-raw-tick` (Deno
   returns raw GPU ticks; 1 tick = 52.08 ns on the Arc B570), or `wall` (no `timestamp-query`).
@@ -264,7 +275,8 @@ the case.
   was added), `quick` (kept for compatibility: true only when `candidateSet` is `quick`), `ops`,
   `cases`, `rounds`, `targetPassMs`, `maxReps`, `warmupNs`,
   `warmupMinRuns`, and `wallTimingNote` (the wall-clock caveat below, in words).
-- `cases[]`, one per case: `caseId` and `defaultRepeat: { perDispatch, driftRatio }` (the default
+- `cases[]`, one per case: `caseId`, `elapsedMs` (the case's wall clock, from planning to the
+  default repeat), and `defaultRepeat: { perDispatch, driftRatio }` (the default
   geometry measured again at the end of the case; `driftRatio` = repeat / first, outside 0.9–1.1
   suggests re-running the case), or `defaultRepeatError` when the repeat failed. A case whose
   first default measurement failed has neither.

@@ -206,7 +206,11 @@ const profileDeclaration = (profile: GeneratedProfile): string[] => {
       JSON.stringify(provenance.sha256)
     }, date: ${JSON.stringify(provenance.date)}, candidateSet: ${
       JSON.stringify(provenance.candidateSet)
-    }, adapter: { ${
+    }, ${
+      // 任意の欄（userAgent の無い記録が混ざると生成器が書かない）は値が無ければ欄ごと書かない。値は文字列の配列
+      provenance.userAgent === undefined
+        ? ""
+        : `userAgent: ${JSON.stringify(provenance.userAgent)}, `}adapter: { ${
       (["vendor", "architecture", "device", "description"] as const)
         .map((key) => `${key}: ${JSON.stringify(provenance.adapter[key])}`)
         .join(", ")

@@ -10,6 +10,7 @@
  * オートチューン禁止・ADR 0117 決定 9）。測るのは利用者が明示的に呼んだときだけ。
  */
 import { acquireGpu } from "../gpu/device.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../kernels/geometry-profile.ts";
 import { SWEEP_CASES, SWEEP_OPS, type SweepCase, type SweepOp } from "./cases.ts";
 import {
   CANDIDATE_SETS,
@@ -17,6 +18,7 @@ import {
   DEFAULT_CANDIDATE_SET,
   isCandidateSet,
 } from "./geometries.ts";
+import { geometryProfileKernelsId, sweepCaseSetId } from "./fingerprint.ts";
 import { createSweepContext, destroySweepContext, runSweep, SWEEP_MAX_REPS } from "./harness.ts";
 import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import {
@@ -141,6 +143,8 @@ export const runGeometrySweep = async (
   options: GeometrySweepOptions = {},
 ): Promise<Report> => {
   const plan = planSweep(options);
+  // 開始時刻は device を取る前（`date` は記録を組む時点 = 終了時刻 — 差が所要・ADR 0117 決定 8）
+  const startedAt = new Date().toISOString();
   const notify = options.onProgress;
   // timestamp-query は adapter が列挙すれば要求する（決定 2）。acquireGpu の gpuTiming は「必須」か
   // 「要求しない」で「あれば使う」を持たないので、列挙を見るためだけに adapter を 1 度取って捨てる。
@@ -173,6 +177,7 @@ export const runGeometrySweep = async (
     };
     let rows: readonly SweepRow[];
     let cases: readonly CaseSummary[];
+    let aborted: boolean;
     try {
       notify?.({
         kind: "started",
@@ -181,7 +186,7 @@ export const runGeometrySweep = async (
         dp4a: context.dp4a,
         caseCount: plan.cases.length,
       });
-      ({ rows, cases } = await runSweep(context, plan.cases, {
+      ({ rows, cases, aborted } = await runSweep(context, plan.cases, {
         rounds: plan.rounds,
         candidateSet: plan.candidateSet,
         timestampUnit,
@@ -197,6 +202,12 @@ export const runGeometrySweep = async (
     return {
       format: REPORT_FORMAT,
       date: new Date().toISOString(),
+      startedAt,
+      aborted,
+      // 比の土台とケースの版を記録に焼く（生成器が今の runtime と照合する — ADR 0117 決定 8）。どちらも
+      // GPU を読まない純関数で、掃引に比べて無視できる所要（指紋は約 13 ms）
+      caseSet: sweepCaseSetId(),
+      defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
       userAgent: navigator.userAgent,
       adapter,
       gpuTiming: {

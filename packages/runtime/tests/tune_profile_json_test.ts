@@ -158,6 +158,26 @@ describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
       "provenance.kernels が文字列でない",
     ],
     [
+      "provenance.userAgent が { deno } のまま（文字列化していない）",
+      { ...BASE, provenance: { ...provenance, userAgent: { deno: "2.9.6" } } },
+      'provenance.userAgent が配列でない（{"deno":"2.9.6"}）',
+    ],
+    [
+      "provenance.userAgent が連結した文字列（配列でない）",
+      { ...BASE, provenance: { ...provenance, userAgent: "Chrome/153, Chrome/154" } },
+      'provenance.userAgent が配列でない（"Chrome/153, Chrome/154"）',
+    ],
+    [
+      "provenance.userAgent の要素が文字列でない",
+      { ...BASE, provenance: { ...provenance, userAgent: ["Chrome/154", { deno: "2.9.6" }] } },
+      'provenance.userAgent[1] が文字列でない（{"deno":"2.9.6"}）',
+    ],
+    [
+      "provenance.userAgent が空の配列",
+      { ...BASE, provenance: { ...provenance, userAgent: [] } },
+      "provenance.userAgent が空の配列",
+    ],
+    [
       "provenance.adapter.device が null",
       { ...BASE, provenance: { ...provenance, adapter: { ...provenance.adapter, device: null } } },
       "provenance.adapter.device が文字列でない（null）",

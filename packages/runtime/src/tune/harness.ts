@@ -1200,13 +1200,15 @@ const measureGeometry = async (
 export type CaseResult = {
   readonly rows: readonly SweepRow[];
   readonly summary: CaseSummary;
+  /** 中断（`signal`）で、候補の幾何か既定の再測定を測り終える前に止まったか。 */
+  readonly aborted: boolean;
 };
 
 /**
  * 1 ケースを候補の全幾何で測る（既定幾何を先頭に置き、残りは候補の順）。測り終えたら既定幾何を
  * もう 1 度測って初回との比をケース単位の記録に残す（計測の規約 4）。計画・資源の確保・前段が
  * 失敗したら全幾何を失敗の行にする。device を失ったら残りを失敗の行にし、中断されたら残りは
- * 行を作らない（再測定もしない）。
+ * 行を作らない（再測定もしない）。ケースの壁時計（`elapsedMs`）は計画から再測定までの全段を含む。
  */
 export const sweepCase = async (
   context: SweepContext,
@@ -1216,14 +1218,17 @@ export const sweepCase = async (
   hooks: SweepHooks = {},
 ): Promise<CaseResult> => {
   const { gpu } = context;
+  const started = performance.now();
   const rows: SweepRow[] = [];
+  let aborted = false;
   const emit = (row: SweepRow): void => {
     rows.push(row);
     hooks.onRow?.(row);
   };
-  const finish = (summary: CaseSummary): CaseResult => {
-    hooks.onCase?.(summary);
-    return { rows, summary };
+  const finish = (summary: Omit<CaseSummary, "elapsedMs">): CaseResult => {
+    const timed: CaseSummary = { ...summary, elapsedMs: performance.now() - started };
+    hooks.onCase?.(timed);
+    return { rows, summary: timed, aborted };
   };
   let plan: CasePlan;
   try {
@@ -1261,7 +1266,10 @@ export const sweepCase = async (
     }
     let reference: DefaultReference = {};
     for (const [index, candidate] of ordered.entries()) {
-      if (hooks.signal?.aborted === true) break;
+      if (hooks.signal?.aborted === true) {
+        aborted = true;
+        break;
+      }
       const isDefault = index === 0;
       if (gpu.lost !== undefined) {
         emit(errorRow(target, candidate, isDefault, new Error(`device lost: ${gpu.lost.message}`)));
@@ -1288,7 +1296,10 @@ export const sweepCase = async (
       emit(compareToDefault(row, reference));
     }
     const initial = reference.perDispatch;
-    if (initial === undefined || hooks.signal?.aborted === true || gpu.lost !== undefined) {
+    // 既定の初回が失敗・device lost のケースは中断でなくても再測定しない（比の土台が無い）
+    if (initial === undefined || gpu.lost !== undefined) return finish({ caseId: target.id });
+    if (hooks.signal?.aborted === true) {
+      aborted = true;
       return finish({ caseId: target.id });
     }
     hooks.onProgress?.(`${target.id}: 既定幾何の再測定`);
@@ -1320,6 +1331,11 @@ export const sweepCase = async (
 export type SweepResult = {
   readonly rows: readonly SweepRow[];
   readonly cases: readonly CaseSummary[];
+  /**
+   * 中断（`signal`）で、計画したケース・幾何・既定の再測定を測り終える前に止まったか。全てを測り終えた
+   * 後に届いた中断は数えない（記録は欠けていない）。
+   */
+  readonly aborted: boolean;
 };
 
 /** ケースの列を順に掃引する（device を失ったか中断されたら、残りのケースは回さない）。 */
@@ -1331,8 +1347,13 @@ export const runSweep = async (
 ): Promise<SweepResult> => {
   const rows: SweepRow[] = [];
   const summaries: CaseSummary[] = [];
+  let aborted = false;
   for (const target of cases) {
-    if (context.gpu.lost !== undefined || hooks.signal?.aborted === true) break;
+    if (context.gpu.lost !== undefined) break;
+    if (hooks.signal?.aborted === true) {
+      aborted = true;
+      break;
+    }
     const result = await sweepCase(
       context,
       target,
@@ -1342,6 +1363,10 @@ export const runSweep = async (
     );
     rows.push(...result.rows);
     summaries.push(result.summary);
+    if (result.aborted) {
+      aborted = true;
+      break;
+    }
   }
-  return { rows, cases: summaries };
+  return { rows, cases: summaries, aborted };
 };

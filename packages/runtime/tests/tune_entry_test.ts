@@ -7,8 +7,10 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import {
   deriveGeometryProfile,
+  type GeometrySweepCaseSummary,
   type GeometrySweepOptions,
   type GeometrySweepProgress,
+  type GeometrySweepReport,
   type GeometrySweepRow,
   runGeometrySweep,
 } from "../tune.ts";
@@ -19,10 +21,29 @@ import {
   verdictLines,
 } from "../src/tune/derive.ts";
 import { timestampUnitFor } from "../src/tune/sweep.ts";
+import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
+import { geometryProfileKernelsId, sweepCaseSetId } from "../src/tune/fingerprint.ts";
 import { A, B, BIG, caseRows, linearCase, report } from "./helpers/sweep-records.ts";
 
 const adapter = navigator.gpu === undefined ? null : await navigator.gpu.requestAdapter();
 const timestampQuery = adapter !== null && adapter.features.has("timestamp-query");
+
+/**
+ * 記録に足した欄（ADR 0117 決定 8）のうち掃引の中身に依らない検査: 開始時刻が ISO 8601 で終了（`date`）以前・
+ * ケース集合の版と既定の表のカーネルの指紋が今の runtime の値・ケースごとの壁時計が有限の非負。
+ */
+const assertRecordFields = (swept: GeometrySweepReport): void => {
+  assertEquals(new Date(swept.startedAt).toISOString(), swept.startedAt);
+  assert(swept.startedAt <= swept.date, `startedAt ${swept.startedAt} > date ${swept.date}`);
+  assertEquals(swept.caseSet, sweepCaseSetId());
+  assertEquals(swept.defaultKernels, geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE));
+  for (const summary of swept.cases) {
+    assert(
+      Number.isFinite(summary.elapsedMs) && summary.elapsedMs >= 0,
+      `${summary.caseId}: elapsedMs ${summary.elapsedMs}`,
+    );
+  }
+};
 
 describe("deriveGeometryProfile", () => {
   const inputs = [{
@@ -139,6 +160,8 @@ describe("runGeometrySweep: 実 GPU", () => {
       });
       assertEquals(swept.format, "karume-geometry-sweep/2");
       assertEquals(kinds, ["started"]);
+      assertEquals(swept.aborted, true);
+      assertRecordFields(swept);
       assertEquals(swept.rows, []);
       assertEquals(swept.cases, []);
       assertEquals(swept.deviceLost, null);
@@ -160,6 +183,7 @@ describe("runGeometrySweep: 実 GPU", () => {
       const id = "linear-m16-n3072-k1024";
       const kinds: GeometrySweepProgress["kind"][] = [];
       const notified: GeometrySweepRow[] = [];
+      const summaries: GeometrySweepCaseSummary[] = [];
       const swept = await runGeometrySweep({
         candidateSet: "quick",
         cases: [id],
@@ -167,6 +191,7 @@ describe("runGeometrySweep: 実 GPU", () => {
         onProgress: (progress) => {
           if (progress.kind !== "status") kinds.push(progress.kind);
           if (progress.kind === "row") notified.push(progress.row);
+          if (progress.kind === "case") summaries.push(progress.summary);
         },
       });
       assertEquals(swept.settings.cases, [id]);
@@ -184,6 +209,60 @@ describe("runGeometrySweep: 実 GPU", () => {
       assertEquals(kinds, ["started", ...swept.rows.map(() => "row" as const), "case"]);
       assertEquals(swept.cases.map((summary) => summary.caseId), [id]);
       assert((swept.cases[0].defaultRepeat?.driftRatio ?? 0) > 0);
+      assertEquals(swept.aborted, false);
+      assertRecordFields(swept);
+      // 通知の case と記録の cases[] は同じ値（elapsedMs を含む）
+      assertEquals(summaries, swept.cases);
+    },
+  });
+});
+
+describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
+  const id = "linear-m16-n3072-k1024";
+
+  it({
+    name:
+      "ケースの途中（既定の行の直後）で中断すると aborted が true で、そのケースは再測定を持たず elapsedMs を持つ",
+    ignore: adapter === null,
+    fn: async () => {
+      const abort = new AbortController();
+      const swept = await runGeometrySweep({
+        candidateSet: "quick",
+        cases: [id],
+        rounds: 1,
+        signal: abort.signal,
+        onProgress: (progress) => {
+          if (progress.kind === "row") abort.abort();
+        },
+      });
+      assertEquals(swept.aborted, true);
+      assertEquals(swept.rows.length, 1);
+      assertEquals(swept.rows[0].isDefault, true);
+      assertEquals(swept.cases.map((summary) => summary.caseId), [id]);
+      assertEquals(swept.cases[0].defaultRepeat, undefined);
+      assertRecordFields(swept);
+    },
+  });
+
+  it({
+    name:
+      "全て測り終えた後（最後のケースの通知）に届いた中断は数えない（aborted が false — 記録は欠けていない）",
+    ignore: adapter === null,
+    fn: async () => {
+      const abort = new AbortController();
+      const swept = await runGeometrySweep({
+        candidateSet: "quick",
+        cases: [id],
+        rounds: 1,
+        signal: abort.signal,
+        onProgress: (progress) => {
+          if (progress.kind === "case") abort.abort();
+        },
+      });
+      assert(abort.signal.aborted);
+      assertEquals(swept.aborted, false);
+      assert(swept.cases[0].defaultRepeat !== undefined, "再測定まで測り終えていない");
+      assertRecordFields(swept);
     },
   });
 });

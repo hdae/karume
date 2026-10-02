@@ -56,7 +56,10 @@ export type ResidencyRecord = {
 /**
  * どの幾何プロファイルを `acquireGpu` に頼んだか（ADR 0115 追記決定 6 の注入口）: `auto` = 注入なし
  * （adapter の (vendor, architecture, description) で埋め込みの表が選ばれる）・`default` = 既定の表を注入・
- * `builtin:<id>` = 埋め込みの表 `<id>` を注入・`generated:<id>` = ページで掃引から作った表を注入。
+ * `builtin:<id>` = 埋め込みの表 `<id>` を注入・`generated:<id>` = ページで掃引から作った表を注入・
+ * `saved:<id>` = 保存した表 `<id>` を GPU を取るときに adapter と照合し、一致なら注入・不一致なら注入なし
+ * （`auto` と同じ選択 — どちらになったかは `geometryProfileInjected` の有無と段の `geometryProfile` が示す。
+ * 保存物が読めなければ `<id>` は `(読めない)`）。
  * 段ごとの `geometryProfile`（診断）は使われた表の id だけで注入か埋め込みかを区別しないので、この欄で
  * 補う。CLI は注入しないので常に `auto`。
  */
@@ -64,7 +67,8 @@ export type GeometryProfileRequested =
   | "auto"
   | "default"
   | `builtin:${string}`
-  | `generated:${string}`;
+  | `generated:${string}`
+  | `saved:${string}`;
 
 export type Row = {
   readonly index: number;

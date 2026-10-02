@@ -738,6 +738,10 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
       "084cd0efd7ea7780dfcdab5b53ee4be8177638c7d8984920096a4851b767aa90, 1ae3a8f6d9a1270d8e3b3ad41aa7fe13757c976a323de7d2b0b99139800cb2e5, 0e57d4efcb14efe0e01767066fce05e1784ca43660a4f8a78c5a1a2c48d1ae87",
     date: "2026-09-27T18:37:27.914Z, 2026-09-29T20:42:08.545Z, 2026-10-01T16:46:50.379Z",
     candidateSet: "full, full, full",
+    userAgent: [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    ],
     adapter: {
       vendor: "nvidia",
       architecture: "blackwell",

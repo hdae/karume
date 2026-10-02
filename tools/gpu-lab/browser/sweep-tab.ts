@@ -229,9 +229,10 @@ export const mountSweepTab = (
       summary.defaultRepeatError !== undefined ||
       (summary.defaultRepeat !== undefined && driftOutOfRange(summary.defaultRepeat.driftRatio))
     ).length;
+    // 表示は記録の aborted に揃える（全部測り終えた後に押した中断は「完了」— JSON と画面の食い違いを作らない）
     status(
       `${
-        abort.signal.aborted ? "中断しました" : "完了"
+        report.aborted ? "中断しました" : "完了"
       } — ${rows.length} 行（失敗 ${failed} · 不一致 ${mismatched} · 既定の再測定が範囲外 / 失敗 ${drifted} ケース）${
         report.gpuTiming.quantized ? " · timestamp が 100 µs に丸められている疑い" : ""
       }。「JSON を保存」で書き出せます。プロファイルのタブで表を作れます。`,

@@ -98,6 +98,10 @@ The `./tune` entry lets an application measure the GEMM tile geometries on the u
 `runGeometrySweep()` acquires a dedicated device, sweeps the candidate geometries and returns a
 record; `deriveGeometryProfile()` turns one or more records into a geometry profile;
 `geometryProfileJson()` serializes it for storage; the next `acquireGpu({ geometryProfile })` uses it.
+`geometryProfile` may also be a synchronous callback that receives the adapter information the
+runtime actually got and returns a profile (or `undefined` for automatic selection), so a stored
+profile can be checked with `geometryProfileMismatch()` against that adapter; read the stored
+profile before calling `acquireGpu`, since the callback must not wait.
 Nothing is measured on the `acquireGpu` / `Session` path, and a sweep must not run while inference
 uses the same GPU. A profile only adopts a geometry whose output matched the default bit for bit,
 and was at least ×1.05 faster, on every sweep case of its field (the cases come from one image

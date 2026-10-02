@@ -6,9 +6,17 @@
  * 決める純関数）。生成した表はページの寿命の間すべて残す — 表 A を適用中に表 B を作っても A を
  * 選び直せるように。最後に生成した 1 本だけを localStorage に残すのは、Chrome の reload が要る場面で
  * 生成した表を失わないため。
+ *
+ * 「保存した表（照合して注入）」はアプリの流れ（ADR 0117 検収 段 7: 保存 → 再起動 → 照合 → コールバックで注入）を
+ * そのまま通す選択肢: 保存物の文字列を `acquireGpu` の前に取り、コールバックの中で {@link resolveSavedProfile} が
+ * parse と `geometryProfileMismatch` を回す。
  */
 import type { GeometryProfile } from "../../../packages/runtime/mod.ts";
-import { geometryProfileJson, parseGeometryProfileJson } from "../../../packages/runtime/tune.ts";
+import {
+  geometryProfileJson,
+  geometryProfileMismatch,
+  parseGeometryProfileJson,
+} from "../../../packages/runtime/tune.ts";
 
 /**
  * 保存の置き場（版つき — 形を変えたら版を上げる。古い版のキーは読まない: 未リリースの道具なので移行を
@@ -20,6 +28,11 @@ export const LAST_GENERATED_KEY = "karume-gpu-lab/last-generated-profile/2";
 
 /** select の値: 保存した表。 */
 export const SAVED_VALUE = "saved";
+/**
+ * select の値: 保存した表を照合して注入（適用時に保存物の文字列を取り、GPU を取るときのコールバックで照合する —
+ * {@link resolveSavedProfile}）。
+ */
+export const SAVED_MATCHED_VALUE = "saved-matched";
 /** select の値の前置: 生成した表（`generated:<連番>`）。 */
 export const GENERATED_PREFIX = "generated:";
 
@@ -169,4 +182,57 @@ export const readLastGenerated = (storage: ProfileStorage): SavedProfile | undef
       { cause },
     );
   }
+};
+
+/**
+ * 保存物の文字列から表の id を引く（表示と記録の `saved:<id>` 用）。読めなければ undefined — 読めない理由は
+ * GPU を取るときの {@link resolveSavedProfile} が返す。
+ */
+export const savedProfileId = (stored: string): string | undefined => {
+  try {
+    return parseSaved(stored).profile.id;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * 「保存した表（照合して注入）」の解決（{@link resolveSavedProfile} の戻り）。`matched` だけが注入する表を持ち、
+ * 残りは注入しない（`acquireGpu` のコールバックは undefined を返して自動選択になる）理由を持つ。`broken` の
+ * 保存物は捨てる（読めない値を次の起動でも読み続けない — ADR 0117 決定 10。捨てるのは呼び手）。
+ */
+export type SavedResolution =
+  | { readonly kind: "matched"; readonly id: string; readonly profile: SavedProfile["profile"] }
+  | { readonly kind: "mismatched"; readonly id: string; readonly reason: string }
+  | { readonly kind: "missing"; readonly reason: string }
+  | { readonly kind: "broken"; readonly reason: string };
+
+/**
+ * `acquireGpu({ geometryProfile })` のコールバックの中身（純関数・同期・投げない）: 保存物の文字列を parse し、
+ * runtime が渡す adapter の情報と `geometryProfileMismatch` で照合する。保存物は `acquireGpu` の前に読んで渡す
+ * （コールバックで I/O を待たない — ADR 0117 決定 6）。
+ */
+export const resolveSavedProfile = (
+  stored: string | undefined,
+  adapterInfo: Pick<GPUAdapterInfo, "vendor" | "architecture" | "device" | "description">,
+): SavedResolution => {
+  if (stored === undefined) {
+    return { kind: "missing", reason: `${LAST_GENERATED_KEY} に保存した表が無い` };
+  }
+  let saved: SavedProfile;
+  try {
+    saved = parseSaved(stored);
+  } catch (cause) {
+    return {
+      kind: "broken",
+      reason: `${LAST_GENERATED_KEY} の保存した表を読めない（${
+        cause instanceof Error ? cause.message : String(cause)
+      }）`,
+    };
+  }
+  const { profile } = saved;
+  const mismatch = geometryProfileMismatch(profile, adapterInfo);
+  return mismatch === undefined
+    ? { kind: "matched", id: profile.id, profile }
+    : { kind: "mismatched", id: profile.id, reason: mismatch };
 };

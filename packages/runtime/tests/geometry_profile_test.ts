@@ -10,12 +10,20 @@
 //    省略時とバイト同一（= 既定の機では 1 バイトも動かない）。
 // 3. **壊れた表は Session 構築の門で落ちる**（昇順でない規則・最後が Infinity でない規則・
 //    整除の破れた幾何）。`acquireGpu({ geometryProfile })` で注入した表は **device を作る前に**
-//    落ちる（navigator.gpu を差し替えて requestDevice に届かないことを見る）。
+//    落ちる（navigator.gpu を差し替えて requestDevice に届かないことを見る）。コールバック形
+//    （ADR 0117 決定 6）は adapter の情報で 1 度だけ呼ばれ、戻りが同じ門を通り、投げた例外と Promise の
+//    戻りでも device を作らない。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { CodegenError } from "../src/codegen/errors.ts";
-import { acquireGpu, GpuFeatureError, REQUIRED_LIMIT_KEYS } from "../src/gpu/device.ts";
+import {
+  acquireGpu,
+  GpuFeatureError,
+  REQUIRED_LIMIT_KEYS,
+  RUNTIME_INTERNAL,
+} from "../src/gpu/device.ts";
+import { fakeDevice } from "./helpers/fake-gpu.ts";
 import {
   assertGeometryProfile,
   conv2dProfileGeometry,
@@ -750,5 +758,238 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
       });
       assertEquals(requests, 0, `${name}: 壊れた表で requestDevice に届いた`);
     }
+  });
+});
+
+/** 偽の adapter が返す情報（apple-metal-3 が当たる 4 欄 — 自動選択の結果が既定と見分けられる）。 */
+const FAKE_INFO: GPUAdapterInfo = {
+  vendor: "apple",
+  architecture: "metal-3",
+  device: "",
+  description: "Apple M2",
+  subgroupMinSize: 0,
+  subgroupMaxSize: 0,
+  isFallbackAdapter: false,
+};
+
+/**
+ * `navigator.gpu` を、requestDevice の呼び出し回数を数え、limits を満たす偽の device を返す偽物に
+ * 差し替えて `body` を走らせる（GPU 不要 — GpuContext は本物で組まれる）。`info` を省くと `adapter.info`
+ * の無い adapter（古い Chromium）になる。差し替えは finally で必ず外す。
+ */
+const withFakeAdapter = async (
+  info: GPUAdapterInfo | undefined,
+  body: () => Promise<void>,
+): Promise<number> => {
+  let deviceRequests = 0;
+  const limits = Object.fromEntries(REQUIRED_LIMIT_KEYS.map((key) => [key, 1 << 20]));
+  const adapter = {
+    ...(info === undefined ? {} : { info }),
+    limits,
+    features: new Set<string>(),
+    requestDevice: (): Promise<GPUDevice> => {
+      deviceRequests += 1;
+      return Promise.resolve(Object.assign(fakeDevice(), { limits }));
+    },
+  };
+  Object.defineProperty(navigator, "gpu", {
+    value: { requestAdapter: () => Promise.resolve(adapter) },
+    configurable: true,
+  });
+  try {
+    await body();
+  } finally {
+    Reflect.deleteProperty(navigator, "gpu");
+  }
+  return deviceRequests;
+};
+
+/** コールバックの戻りの型を外れて来る値（JS の呼び手・async 関数）を、型検査を経ずに渡すための口。 */
+const untypedCallback = (
+  returned: unknown,
+): (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined =>
+  // テスト専用の境界: 型が拒む戻り（Promise など）を、型の外から来る値として再現する
+  (() => returned) as unknown as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined;
+
+describe("acquireGpu の幾何プロファイル注入口（コールバック形 — ADR 0117 決定 6）", () => {
+  it("adapter の情報（GpuContext.adapterInfo と同じ値）で 1 度だけ呼ばれ、表を返すとその複製が注入される", async () => {
+    const seen: GPUAdapterInfo[] = [];
+    const requests = await withFakeAdapter(FAKE_INFO, async () => {
+      const gpu = await acquireGpu({
+        geometryProfile: (adapterInfo) => {
+          seen.push(adapterInfo);
+          return OPT_IN;
+        },
+      });
+      try {
+        assertEquals(seen.length, 1);
+        assertStrictEquals(seen[0], gpu.adapterInfo);
+        assertStrictEquals(seen[0], FAKE_INFO);
+        const injected = gpu[RUNTIME_INTERNAL].geometryProfile;
+        assertEquals(injected, OPT_IN);
+        assert(injected !== OPT_IN, "注入した表が複製されていない");
+      } finally {
+        gpu.destroy();
+      }
+    });
+    assertEquals(requests, 1);
+  });
+
+  it("undefined を返すと注入しない（Session の構築が adapter から埋め込みの表を選ぶ — 指定無しと同じ）", async () => {
+    await withFakeAdapter(FAKE_INFO, async () => {
+      let calls = 0;
+      const gpu = await acquireGpu({
+        geometryProfile: () => {
+          calls += 1;
+          return undefined;
+        },
+      });
+      try {
+        assertEquals(calls, 1);
+        assertEquals(gpu[RUNTIME_INTERNAL].geometryProfile, undefined);
+        // 自動選択の対照: この adapter には埋め込みの表が当たる（既定ではない）
+        assertEquals(selectGeometryProfile(gpu.adapterInfo).id, APPLE_METAL_3.id);
+      } finally {
+        gpu.destroy();
+      }
+    });
+  });
+
+  it("adapter.info の無い adapter では空値に正規化した情報で呼ばれる", async () => {
+    const seen: GPUAdapterInfo[] = [];
+    await withFakeAdapter(undefined, async () => {
+      const gpu = await acquireGpu({
+        geometryProfile: (adapterInfo) => {
+          seen.push(adapterInfo);
+          return undefined;
+        },
+      });
+      try {
+        assertStrictEquals(seen[0], gpu.adapterInfo);
+        assertEquals(
+          [seen[0].vendor, seen[0].architecture, seen[0].device, seen[0].description],
+          ["", "", "", ""],
+        );
+      } finally {
+        gpu.destroy();
+      }
+    });
+  });
+
+  it("壊れた表を返すと device を作る前に GpuFeatureError（直接渡した表と同じ門）", async () => {
+    const broken = profileOf("", { vendor: "test" });
+    const requests = await withFakeAdapter(FAKE_INFO, async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: () => broken }),
+        GpuFeatureError,
+        "geometryProfile（コールバックの戻り）: ",
+      );
+    });
+    assertEquals(requests, 0, "壊れた表で requestDevice に届いた");
+  });
+
+  it("コールバックが投げた例外はそのまま伝わり、device を作らない", async () => {
+    class AppError extends Error {}
+    const thrown = new AppError("保存した表が読めない");
+    const requests = await withFakeAdapter(FAKE_INFO, async () => {
+      const caught = await assertRejects(() =>
+        acquireGpu({
+          geometryProfile: () => {
+            throw thrown;
+          },
+        })
+      );
+      assertStrictEquals(caught, thrown);
+    });
+    assertEquals(requests, 0, "コールバックが投げたのに requestDevice に届いた");
+  });
+
+  it("Promise（thenable）を返すと await せずに GpuFeatureError で拒み、device を作らない", async () => {
+    let awaited = false;
+    const thenable = {
+      then: (resolve: (value: GeometryProfile) => void): void => {
+        awaited = true;
+        resolve(OPT_IN);
+      },
+    };
+    for (const returned of [Promise.resolve(OPT_IN), thenable]) {
+      const requests = await withFakeAdapter(FAKE_INFO, async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: untypedCallback(returned) }),
+          GpuFeatureError,
+          "コールバックが Promise を返した",
+        );
+      });
+      assertEquals(requests, 0, "Promise を返したのに requestDevice に届いた");
+    }
+    assertEquals(awaited, false, "thenable を await した");
+  });
+
+  it("async 関数が reject しても GpuFeatureError で拒み、その reject は unhandled rejection にならない", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: PromiseRejectionEvent): void => {
+      unhandled.push(event.reason);
+      // 捕まえた reject でテストランナーを落とさない（数えて下で assert する）
+      event.preventDefault();
+    };
+    // async 関数そのものをコールバックにする（呼ばれた時点で reject 済みの Promise が生まれる — JS の呼び手の形）。
+    // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
+    // deno-lint-ignore require-await -- await の無い async 関数の reject が検査の対象そのもの
+    const asyncCallback = (async () => {
+      throw new Error("x");
+    }) as unknown as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined;
+    globalThis.addEventListener("unhandledrejection", onUnhandled);
+    try {
+      const requests = await withFakeAdapter(FAKE_INFO, async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: asyncCallback }),
+          GpuFeatureError,
+          "コールバックが Promise を返した",
+        );
+      });
+      assertEquals(requests, 0, "Promise を返したのに requestDevice に届いた");
+      // unhandled rejection の判定はマイクロタスクを捌き切った後のタスク境界で走る — 1 タスク待ってから見る
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assertEquals(unhandled, [], "async コールバックの reject が unhandled rejection になった");
+    } finally {
+      globalThis.removeEventListener("unhandledrejection", onUnhandled);
+    }
+  });
+
+  it("adapter.info の無い adapter で渡る空値の情報は凍結されている（共有値をコールバックが書き換えられない）", async () => {
+    const seen: GPUAdapterInfo[] = [];
+    await withFakeAdapter(undefined, async () => {
+      const gpu = await acquireGpu({
+        geometryProfile: (adapterInfo) => {
+          seen.push(adapterInfo);
+          return undefined;
+        },
+      });
+      gpu.destroy();
+    });
+    assert(Object.isFrozen(seen[0]), "空値の adapter 情報が凍結されていない");
+  });
+
+  it("直接渡した表は従来どおり adapter を取る前に門を通る（コールバック形の追加で順序が動いていない）", async () => {
+    let adapterRequests = 0;
+    Object.defineProperty(navigator, "gpu", {
+      value: {
+        requestAdapter: () => {
+          adapterRequests += 1;
+          return Promise.resolve(null);
+        },
+      },
+      configurable: true,
+    });
+    try {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: profileOf("", { vendor: "test" }) }),
+        GpuFeatureError,
+        "geometryProfile: ",
+      );
+    } finally {
+      Reflect.deleteProperty(navigator, "gpu");
+    }
+    assertEquals(adapterRequests, 0);
   });
 });

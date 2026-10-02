@@ -1,13 +1,17 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../../packages/runtime/src/kernels/geometry-profile.ts";
-import { geometryProfileJson } from "../../../packages/runtime/tune.ts";
+import { geometryProfileJson, sweepCaseSetId } from "../../../packages/runtime/tune.ts";
+import { geometryProfileKernelsId } from "../../../packages/runtime/src/tune/fingerprint.ts";
+import { infinityJson } from "../../../packages/runtime/src/tune/derive.ts";
 import {
   type InjectableTables,
   LAST_GENERATED_KEY,
   type ProfileStorage,
   readLastGenerated,
+  resolveSavedProfile,
   type SavedProfile,
+  savedProfileId,
   tableForValue,
   tableOptions,
   valueForTable,
@@ -257,6 +261,104 @@ describe("gpu lab injectable tables", () => {
         DOMException,
         "setItem denied",
       );
+    });
+  });
+
+  describe("stored table, matched and injected (resolveSavedProfile — ADR 0117 stage 7)", () => {
+    const ADAPTER = { vendor: "apple", architecture: "metal-3", device: "", description: "" };
+
+    /** 今の runtime で照合が通る表（指紋とケース集合の版を今の値で焼く — 生成器が書く表と同じ材料）。 */
+    const matching = (id: string): GeneratedProfile => ({
+      ...DEFAULT_GEOMETRY_PROFILE,
+      id,
+      provenance: {
+        sweep: "sweep.json",
+        sha256: "sha",
+        date: "2026-10-02T00:00:00.000Z",
+        candidateSet: "quick+",
+        userAgent: ["Mozilla/5.0 (Macintosh) Chrome/154.0.0.0"],
+        adapter: ADAPTER,
+        kernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+        caseSet: sweepCaseSetId(),
+      },
+    });
+
+    it("injects the saved table when it matches the adapter", () => {
+      const profile = matching("gpu-saved");
+      const resolution = resolveSavedProfile(stored(saved(profile)), ADAPTER);
+      if (resolution.kind !== "matched") throw Error(`not matched: ${JSON.stringify(resolution)}`);
+      assertEquals(resolution.id, "gpu-saved");
+      assertEquals(resolution.profile, profile);
+    });
+
+    for (const field of ["vendor", "architecture", "device", "description"] as const) {
+      it(`does not inject when the adapter's ${field} differs, naming the field`, () => {
+        const resolution = resolveSavedProfile(
+          stored(saved(matching("gpu-saved"))),
+          { ...ADAPTER, [field]: "other" },
+        );
+        assertEquals(resolution.kind, "mismatched");
+        if (resolution.kind !== "mismatched") return;
+        assertEquals(resolution.id, "gpu-saved");
+        assertStringIncludes(resolution.reason, `adapter の ${field} が違う`);
+      });
+    }
+
+    it("does not inject when the kernel fingerprint differs from the current runtime's", () => {
+      const profile = matching("gpu-saved");
+      const stale = {
+        ...profile,
+        provenance: { ...profile.provenance, kernels: "0123456789abcdef" },
+      };
+      const resolution = resolveSavedProfile(stored(saved(stale)), ADAPTER);
+      assertEquals(resolution.kind, "mismatched");
+      if (resolution.kind !== "mismatched") return;
+      assertStringIncludes(resolution.reason, "カーネルの指紋が違う");
+    });
+
+    it("does not inject when nothing is saved", () => {
+      const resolution = resolveSavedProfile(undefined, ADAPTER);
+      assertEquals(resolution.kind, "missing");
+      if (resolution.kind !== "missing") return;
+      assertStringIncludes(resolution.reason, LAST_GENERATED_KEY);
+    });
+
+    for (
+      const [name, text, reason] of [
+        ["not JSON", "{", "読めない"],
+        [
+          "a table the profile parser rejects",
+          stored(saved(matching("gpu-saved")), { profileJson: '{"id":"x"}' }),
+          "幾何プロファイルの JSON",
+        ],
+        [
+          "a userAgent that is not an array of strings",
+          stored(saved(matching("gpu-saved")), {
+            // 連結した文字列（配列化の前の形）— 表の JSON と同じ書き手で欄だけ差し替える
+            profileJson: infinityJson({
+              ...matching("gpu-saved"),
+              provenance: {
+                ...matching("gpu-saved").provenance,
+                userAgent: "Mozilla/5.0 (Macintosh) Chrome/154.0.0.0",
+              },
+            }),
+          }),
+          "provenance.userAgent が配列でない",
+        ],
+      ] as const
+    ) {
+      it(`marks a broken saved value (${name}) to be discarded and does not inject, with the reason`, () => {
+        const resolution = resolveSavedProfile(text, ADAPTER);
+        assertEquals(resolution.kind, "broken");
+        if (resolution.kind !== "broken") return;
+        assertStringIncludes(resolution.reason, LAST_GENERATED_KEY);
+        assertStringIncludes(resolution.reason, reason);
+      });
+    }
+
+    it("reads the saved table's id for the record (undefined when the value is broken)", () => {
+      assertEquals(savedProfileId(stored(saved(matching("gpu-saved")))), "gpu-saved");
+      assertEquals(savedProfileId("{"), undefined);
     });
   });
 });

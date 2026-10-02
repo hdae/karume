@@ -127,6 +127,9 @@ export type {
  * `acquireGpu({ geometryProfile })` に渡すための値（ADR 0115 追記決定 7）。一覧も各表も深く凍結してある
  * （書き換えると全 Session の自動選択が黙って変わるため）— 手を加えた表を注入するなら
  * `structuredClone` してから書き換える。
+ * `geometryProfile` には表の代わりに同期のコールバック `(adapterInfo) => GeometryProfile | undefined` も渡せる
+ * （ADR 0117 決定 6）— runtime が実際に取った adapter の情報で 1 度呼ばれ、保存した表を
+ * `@karume/runtime/tune` の `geometryProfileMismatch` で照合して返す（`undefined` は自動選択）口。
  * 既定の表と選択関数は値として出さない（内部の codegen 語彙で、道具は `src/` から import する）。
  */
 export type { GemmRowsRule, GeometryProfile } from "./src/kernels/geometry-profile.ts";

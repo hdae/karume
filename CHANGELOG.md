@@ -62,6 +62,14 @@ measurements in `docs/research/`.
   `deriveGeometryProfile` requires all its records to agree on the four adapter fields. A runtime
   update that changes those kernels or the sweep's cases makes stored profiles mismatch: sweep
   again. Injection (`acquireGpu({ geometryProfile })`) still ignores `provenance`.
+- The sweep record (`karume-geometry-sweep/2`, unchanged format) gains `startedAt`, `aborted`,
+  `cases[].elapsedMs`, `caseSet` (the case-set id) and `defaultKernels` (the kernel fingerprint of
+  the default profile). `deriveGeometryProfile` refuses a record whose `caseSet` or
+  `defaultKernels` differs from the current runtime's; records without these fields are accepted
+  as before. A derived profile's `provenance.userAgent` lists the records' `userAgent` values as an
+  array of strings, distinct and in order of appearance (`{ deno }` becomes `Deno/<version>`; it is
+  left out when any record lacks `userAgent`); it is informational and not part of
+  `geometryProfileMismatch`.
 
 - Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
   sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,
@@ -119,8 +127,17 @@ measurements in `docs/research/`.
   generates from a sweep on that machine. When given, the adapter's vendor and architecture are
   not consulted, every session on the device and the dp4a canary use the table, and nothing is
   measured at run time. A malformed table throws `GpuFeatureError` before any device is created.
-  The types `GeometryProfile`, `GemmRowsRule`, `GemmGeometry` and `I8a8Geometry` are exported for
-  it; the built-in tables themselves are not.
+  `geometryProfile` also accepts a synchronous callback `(adapterInfo) => GeometryProfile |
+  undefined`, called once per `acquireGpu` after the adapter is obtained and before the device is
+  created, with the same adapter information that becomes `GpuContext.adapterInfo`: a returned
+  table goes through the same check, `undefined` means automatic selection, and an exception thrown
+  by the callback propagates without creating a device. A callback that returns a Promise is
+  rejected with `GpuFeatureError` (load stored tables before calling `acquireGpu`). The runtime
+  does not compare the returned table with the adapter; call `geometryProfileMismatch` inside the
+  callback for that. The adapter information handed to the callback (and `GpuContext.adapterInfo`)
+  is frozen, including the empty-valued record used when the adapter has no `info`. The types
+  `GeometryProfile`, `GemmRowsRule`, `GemmGeometry` and `I8a8Geometry` are exported for it; the
+  built-in tables themselves are not.
 
 ### Changed
 

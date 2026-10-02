@@ -43,6 +43,10 @@
  * {@link ROUNDING_ERROR_LIMIT} を超える観測をその掃引の比の材料から外す（{@link roundingBound}）。
  * 既定の行の e が超えるケースは全観測を外す。外した観測は採否の行に E の値つきで残す。
  *
+ * 記録の照合キー（ADR 0117 決定 8）: 記録が `caseSet`（ケース集合の版）と `defaultKernels`（既定の表のカーネルの
+ * 指紋）を持てば、今の runtime の値と違う記録を拒む（欄の無い古い記録は今までどおり受ける）。`aborted`・
+ * `startedAt`・`cases[].elapsedMs` は読まない。
+ *
  * クラスの境界: linear / matmul / bmm は行数 M の段（境界は掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` =
  * ≤ 16 / 17〜32 / 33〜64 / 65〜128 / 129〜256 / 257〜512 / > 512 — 既定の表 `GEMM_ROWS_BUCKETS` の
  * 64 / 512 / ∞ を細分した 7 段・ADR 0116）、融合 attention の ①QK / ③PV、conv2d の m タイル 64 / 32 行
@@ -57,7 +61,7 @@ import {
   gemmTileM,
 } from "../kernels/gemm-geometry.ts";
 import { gemmMTileGeometry } from "../kernels/gemm.ts";
-import type { GeometryProfile } from "../kernels/geometry-profile.ts";
+import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
 import {
@@ -152,6 +156,11 @@ export type SweepSource = {
   readonly adapter: SweepAdapter;
   /** 候補集合（`settings.candidateSet` — 欄の無い古い記録は `settings.quick` から `quick` / `full`）。 */
   readonly candidateSet: CandidateSet;
+  /**
+   * 掃引を走らせたブラウザ（記録の `userAgent` を {@link userAgentText} で文字列にしたもの — 表の
+   * `provenance.userAgent` の材料）。欄の無い記録は undefined。
+   */
+  readonly userAgent?: string;
   /**
    * timestamp の量子化の刻み q（`rounds` と同じ単位）。`gpuTiming.quantized` が true なら Chrome の 100 µs、
    * false なら 0（丸めが無い）。
@@ -299,6 +308,47 @@ const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
 };
 
 /**
+ * 記録の `userAgent` の文字列（表の `provenance.userAgent` の綴り）。ブラウザの記録は `navigator.userAgent` の
+ * 文字列のまま、Deno の CLI の記録（`{ deno: <版> }`）は `Deno/<版>` — Deno の `navigator.userAgent` と同じ綴りに
+ * そろえ、アプリが今の `navigator.userAgent` と並べて比べられるようにする。欄が無ければ undefined、それ以外の
+ * 形は落とす（黙って読み飛ばさない）。
+ */
+const userAgentText = (value: unknown, where: string): string | undefined => {
+  if (value === undefined || typeof value === "string") return value;
+  if (isRecord(value) && typeof value.deno === "string" && Object.keys(value).length === 1) {
+    return `Deno/${value.deno}`;
+  }
+  throw new Error(
+    `${where}: userAgent が文字列でも { deno: 文字列 } でもない（${JSON.stringify(value)}）`,
+  );
+};
+
+/**
+ * 記録が焼いた照合キー（`caseSet` / `defaultKernels`）を今の runtime の値と突き合わせる（ADR 0117 決定 8）。
+ * 欄の無い記録（この欄より前の記録）は照合しない。今の値は欄があるときだけ導く（指紋は約 13 ms）。
+ */
+const assertRecordedKey = (
+  record: Record<string, unknown>,
+  key: "caseSet" | "defaultKernels",
+  current: () => string,
+  meaning: string,
+  where: string,
+): void => {
+  const recorded = record[key];
+  if (recorded === undefined) return;
+  if (typeof recorded !== "string") {
+    throw new Error(`${where}: ${key} が文字列でない（${JSON.stringify(recorded)}）`);
+  }
+  const now = current();
+  if (recorded !== now) {
+    throw new Error(
+      `${where}: ${key} ${recorded} が今の runtime の ${now} と違う（${meaning}が今の runtime と別物の記録で` +
+        "表を作らない — 今の runtime で掃引し直す）",
+    );
+  }
+};
+
+/**
  * 掃引の記録を読む（unknown 境界 — 生成が読む欄だけを検査して fail loudly）。
  *
  * MUST: ケースごとに既定の行がちょうど 1 本あること。比の土台が無い・2 つあるケースは、
@@ -347,6 +397,17 @@ export const parseSweepReport = (
       `${where}: gpuTiming.quantized が true なのに単位が ${unit}（ns でだけ判定する）`,
     );
   }
+  // MUST: 比の土台（既定の表のカーネル）とケース集合が今の runtime と同じ記録だけを受ける（ADR 0117 決定 8 —
+  // 既定の行の突合〈ADR 0115 決定 4〉と同じ理由: 土台が別物なら「既定より速い」が今の runtime で成り立たない）
+  assertRecordedKey(parsed, "caseSet", sweepCaseSetId, "ケース集合", where);
+  assertRecordedKey(
+    parsed,
+    "defaultKernels",
+    () => geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+    "比の土台にした既定の表のカーネル",
+    where,
+  );
+  const userAgent = userAgentText(parsed.userAgent, where);
   // 既定の再測定（cases[]）は材料の門が読む — 無い記録は「どのケースも再測定が無い」になるので、
   // 黙って全ケースを外さずに落とす
   if (!Array.isArray(parsed.cases)) {
@@ -382,6 +443,7 @@ export const parseSweepReport = (
       description: requireString(adapter, "description", `${where} adapter`),
     },
     candidateSet: parseCandidateSet(parsed.settings, where),
+    ...(userAgent === undefined ? {} : { userAgent }),
     timestampQuantum: quantized ? CHROME_TIMESTAMP_QUANTUM_NS : 0,
     cases,
     rows,
@@ -1089,7 +1151,7 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
  * `acquireGpu({ geometryProfile })` に注入する値の両方の正本）。
  *
  * MUST: `provenance` を書くのはこの関数だけ（ADR 0117 決定 4）。掃引の path / sha256 / 日付 / 候補集合は
- * 渡した順に `", "` で連結し、adapter は 4 欄をそのまま（{@link deriveProfile} が全ての記録で一致を検査済み）、
+ * 渡した順に `", "` で連結し、userAgent は重複を除いた配列（{@link distinctUserAgents}）、adapter は 4 欄をそのまま（{@link deriveProfile} が全ての記録で一致を検査済み）、
  * カーネルの指紋とケース集合の版は今の runtime で導く（照合 `geometryProfileMismatch` が同じ関数で導き直す）。
  */
 export const buildGeometryProfile = (
@@ -1130,6 +1192,7 @@ export const buildGeometryProfile = (
     },
   };
   const { vendor, architecture, device, description } = sources[0].adapter;
+  const userAgent = distinctUserAgents(sources);
   return {
     ...table,
     provenance: {
@@ -1137,11 +1200,27 @@ export const buildGeometryProfile = (
       sha256: joined((source) => source.sha256),
       date: joined((source) => source.date),
       candidateSet: joined((source) => source.candidateSet),
+      ...(userAgent === undefined ? {} : { userAgent }),
       adapter: { vendor, architecture, device, description },
       kernels: generatedKernelsId(table),
       caseSet: sweepCaseSetId(),
     },
   };
+};
+
+/**
+ * 表の `provenance.userAgent`（ADR 0117 追記 2026-10-02）: 記録の `userAgent` を、現れた順に重複を除いた配列
+ * （全て同じなら 1 要素 — 今のブラウザとそのまま比べられる）。他の欄のように `", "` で連結しないのは、ブラウザの
+ * userAgent 自体が `", "` を含み（`(KHTML, like Gecko)`）、連結すると値ごとに分けられないから。`userAgent` の
+ * 無い記録が混ざれば書かない（一部の記録だけのブラウザを表全体の値として残さない）。
+ */
+const distinctUserAgents = (sources: readonly SweepSource[]): string[] | undefined => {
+  const agents: string[] = [];
+  for (const source of sources) {
+    if (source.userAgent === undefined) return undefined;
+    if (!agents.includes(source.userAgent)) agents.push(source.userAgent);
+  }
+  return agents.length === 0 ? undefined : agents;
 };
 
 /**

@@ -30,9 +30,28 @@
  *   update, and Chrome without developer flags reports an empty `device` and `description`, so an
  *   Apple M2 and an M5 look the same to it.
  *
- * Doing "start with the default table, sweep in the background, re-acquire with the new table"
- * automatically amounts to auto-tuning at the application level: recording which profile each run
- * used is the application's job.
+ * To apply a stored profile, pass a callback as `acquireGpu({ geometryProfile })`: the runtime calls
+ * it once, after it has obtained the adapter and before it creates the device, with that adapter's
+ * information. Inside it, parse the stored text, call {@link geometryProfileMismatch}, and return the
+ * profile, or `undefined` to fall back to automatic selection. The callback must be a synchronous
+ * pure function: read the stored text (from IndexedDB, a file, ...) before calling `acquireGpu`,
+ * because an adapter may expire while it waits, and a device requested from an expired adapter is
+ * lost from the start. A callback that returns a Promise is rejected. The runtime itself does not
+ * compare an injected profile with the adapter. An exception thrown inside the callback, including
+ * the {@link GeometryProfileParseError} of a broken stored profile, propagates as is and fails
+ * `acquireGpu`; the right move for a broken stored profile is to catch that error inside the
+ * callback, return `undefined` (the default selection), and — after `acquireGpu` has returned, so
+ * the callback itself stays pure — discard the stored text and sweep again.
+ *
+ * What stays with the application: deciding with {@link geometryProfileMismatch} whether a stored
+ * profile may still be used, never sweeping while inference runs on the same GPU, and recording
+ * which profile each run used (outputs reproduce only under the same profile). Doing "start with the
+ * default table, sweep in the background, re-acquire with the new table" automatically amounts to
+ * auto-tuning at the application level; the runtime still keeps a profile fixed for a device's
+ * lifetime and measures nothing on the `acquireGpu` / `Session` path. A profile's
+ * `provenance.userAgent` lists the browsers (or `Deno/<version>`) its sweeps ran under, one string
+ * per distinct browser; it is not part of the match, so an application can compare it with the
+ * current `navigator.userAgent` and suggest a new sweep after a browser update.
  *
  * @module
  */

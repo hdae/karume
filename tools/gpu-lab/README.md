@@ -96,15 +96,44 @@ text stage on the download; compare stage times only after the weights are cache
     deleted, and the GPU settings status line says so. A table saved under the earlier `/1` key is
     not read. The applied settings themselves are not saved. Both kinds are recorded as
     `generated:<id>`.
+  - `保存した表（照合して注入 — 一致しなければ自動）` — the application flow of
+    `@karume/runtime/tune` instead of a plain injection (see
+    [Stored table, matched and injected](#stored-table-matched-and-injected)). It is disabled while
+    `localStorage` holds no saved table. It is recorded as `saved:<id>` (`saved:(読めない)` when
+    the saved value cannot be read), whether or not the table was injected.
 
   **適用** disposes the Anima pipeline, its dummy buffers, and its GPU device; if the Anima tab held a
   device, it acquires a new one with the new settings at once, and the Anima status line says
   `GPU を取り直しました（quant <quant>・幾何プロファイル <requested>）`. The timestamp setting applies to the
   next sweep and to the Anima device.
 - **Environment line** — the adapter, whether GPU time is taken, the applied geometry profile
-  (`自動 → <id>` or `<requested>（注入）`, where `<requested>` is `default`, `builtin:<id>`, or
-  `generated:<id>`), and the checkout revision. On the sweep tab it adds that
+  (`自動 → <id>`, `<requested>（注入）` where `<requested>` is `default`, `builtin:<id>`, or
+  `generated:<id>`, or `saved:<id>（GPU を取るときに adapter と照合 — …）`), and the checkout revision. On the sweep tab it adds that
   the sweep measures explicit geometries, so the profile does not affect its results.
+
+### Stored table, matched and injected
+
+The `保存した表（照合して注入）` choice runs the flow an application uses to apply a stored profile
+(ADR 0117): sweep → derive → save → restart → match → inject through the callback form of
+`acquireGpu({ geometryProfile })`.
+
+1. **適用** reads the saved value from `localStorage` (the text the profile tab wrote; after a reload
+   this is the table saved before it). The text is read here, before any GPU is acquired, because
+   the callback must not wait for I/O.
+2. When the Anima tab acquires its device, it passes a callback. The runtime calls it with the
+   information of the adapter it actually got; the callback parses the saved text
+   (`parseGeometryProfileJson`) and calls `geometryProfileMismatch(profile, adapterInfo)`.
+3. On a match the callback returns the table and the runtime injects it: the rows report its id in
+   the geometry profile column and carry it in `geometryProfileInjected`. On a mismatch it returns
+   `undefined`, the runtime selects a profile from the adapter as with `自動`, the rows report that
+   id and have no `geometryProfileInjected`, and the status line and the line above it say
+   `保存した表を注入しない（自動で選ぶ）— <reason>` (for example
+   `表 '<id>' の adapter の description が違う（…）`). A saved value that cannot be read is
+   deleted from `localStorage` and the run uses automatic selection, with the reason shown the same
+   way. On a match they say `保存した表 <id> は adapter と一致 → 注入`.
+
+Deriving a new table after applying this choice marks the settings as pending: apply again to
+use the new saved text.
 
 Only one GPU operation runs at a time: a sweep, an Anima action (generate, fill VRAM, release,
 dispose), or applying GPU settings. Starting another while one runs is refused with a message; two
@@ -131,6 +160,8 @@ record (what is measured, the candidate grids, and the output format are describ
   **対既定** is its time divided by the row's time (above 1 is faster); **出力の一致** is red when the
   output differs from the default's. The last row of a block is the default measured again
   (`既定の再測定 ×N.NN`); outside 0.9–1.1 it is red as a hint to re-run that case.
+- The JSON records when the sweep started (`startedAt`), whether **中断** stopped it (`aborted`), and
+  each case's wall clock (`cases[].elapsedMs`).
 - **JSON を保存** downloads `geometry-sweep-browser-<timestamp>.json` (`karume-geometry-sweep/2`).
   Save it to `outputs/bench-browser/`, which is where the profile tab's registration command
   expects it (not tracked by git). **JSON を表示** / **JSON をコピー** put the same JSON into a text

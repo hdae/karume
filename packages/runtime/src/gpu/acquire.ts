@@ -369,7 +369,13 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
  */
 type AdapterInfoHost = { readonly info?: GPUAdapterInfo };
 
-const EMPTY_ADAPTER_INFO: GPUAdapterInfo = {
+/**
+ * 空値に正規化した adapter 情報（全ての {@link readAdapterInfo} が共有する 1 つのオブジェクト）。
+ * MUST: 凍結する — 利用者のコールバック（`geometryProfile` の関数形）と `GpuContext.adapterInfo` に渡る共有値で、
+ * 1 か所の書き換えが後の全 device の adapter 情報（自動選択・照合の材料）に漏れるのを防ぐ（本物の
+ * `GPUAdapterInfo` も読み取り専用の属性で、書き換えられないことは同じ）。
+ */
+const EMPTY_ADAPTER_INFO: GPUAdapterInfo = Object.freeze({
   vendor: "",
   architecture: "",
   device: "",
@@ -377,7 +383,7 @@ const EMPTY_ADAPTER_INFO: GPUAdapterInfo = {
   subgroupMinSize: 0,
   subgroupMaxSize: 0,
   isFallbackAdapter: false,
-};
+});
 
 export const readAdapterInfo = (adapter: AdapterInfoHost): GPUAdapterInfo =>
   adapter.info ?? EMPTY_ADAPTER_INFO;
@@ -534,8 +540,17 @@ export type AcquireGpuOptions = {
    * - `undefined`（既定）= adapter の (vendor, architecture, description) から埋め込みの表を 1 本選ぶ
    *   （当たらなければ既定プロファイル）。`match` を省いた埋め込みの表は自動では選ばれない（注入専用 —
    *   `BUILTIN_GEOMETRY_PROFILES` から id で引いてここへ渡す）。
-   * - 指定あり = adapter を見ずに**この表を使う**。`match` は照合に使わない（別の機の表を当てて
+   * - 表 = adapter を見ずに**この表を使う**。`match` は照合に使わない（別の機の表を当てて
    *   A/B する用途があるため）。
+   * - 関数（DECIDED: ADR 0117 決定 6）= runtime が実際に選んだ adapter の情報（`GpuContext.adapterInfo`
+   *   になるのと同じ値）で表を引く口。`acquireGpu` 1 回につき 1 度、adapter を取った後・device を作る前に
+   *   呼ぶ。戻りが表ならそれを注入し（表を直接渡したときと同じ門と複製を通る）、`undefined` なら指定無しと
+   *   同じ自動選択。投げた例外はそのまま伝え、device を作らない。runtime は戻りの表を adapter と照合
+   *   しない（照合するならコールバックの中で `@karume/runtime/tune` の `geometryProfileMismatch` を呼ぶ）。
+   *   MUST: 同期の純関数であること（保存した表の読み込みなどの I/O は `acquireGpu` の前に済ませる）。
+   *   adapter は数秒〜数分で失効してよく、失効した adapter の `requestDevice` は例外ではなく生まれた時点で
+   *   lost な device を返すので、adapter を持ったまま待つ窓を作らない。Promise（thenable）を返すと
+   *   await せずに {@link GpuFeatureError} で拒む。
    *
    * device の性質なので GPU 単位で渡す（`SessionOptions` には無い）。同じ device の全 Session と
    * i8a8 attention の dp4a カナリアが同じ表を使い、実行中に選び直すことはない（ADR 0022 追記の
@@ -546,9 +561,12 @@ export type AcquireGpuOptions = {
    * 渡した表は複製して保持する（呼び手が後から書き換えても device の寿命の間の表は変わらない）。
    * MUST: 壊れた表（id が空・`match` の形の破れ・`gemmRows` の昇順 / 末尾 Infinity の破れ・
    * 整除の破れた幾何）は **device を作る前に** {@link GpuFeatureError} で落とす（壊れた表で
-   * device を作らない — 利用者入力に起因する失敗なので公開のエラー型）。
+   * device を作らない — 利用者入力に起因する失敗なので公開のエラー型）。直接渡した表は adapter を
+   * 取る前に、コールバックの戻りは呼んだ直後に落とす。
    */
-  readonly geometryProfile?: GeometryProfile;
+  readonly geometryProfile?:
+    | GeometryProfile
+    | ((adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined);
   /** テスト専用（{@link LIMIT_CAPS}）。requiredLimits を**絞る**方向にだけ効く。 */
   readonly [LIMIT_CAPS]?: LimitCaps;
 };
@@ -586,13 +604,22 @@ const requestAdapterOrThrow = async (
  * 途中の失敗は全て例外（黙って能力を落とした device を返さない）。
  */
 export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuContext> => {
-  // 利用者が渡した表の門はアダプタにも device にも触れる前（GPU に依らない入力の検査）。
+  const source = options.geometryProfile;
+  // 直接渡した表の門はアダプタにも device にも触れる前（GPU に依らない入力の検査）。
   // 複製するのは、呼び手が後から書き換えても device の寿命の間の表が変わらないようにするため
   // （Infinity は structuredClone を通る）。
-  const geometryProfile = options.geometryProfile === undefined
+  const givenProfile = source === undefined || typeof source === "function"
     ? undefined
-    : cloneCheckedGeometryProfile(options.geometryProfile);
+    : cloneCheckedGeometryProfile(source, "geometryProfile");
   const { gpu, adapter } = await requestAdapterOrThrow(options.adapter);
+  // コールバックに渡す値と GpuContext.adapterInfo を同じ 1 回の読みにする（別々に読むと、コールバックが
+  // 引いた adapter と device の adapter の情報が食い違う形を作れてしまう）
+  const adapterInfo = readAdapterInfo(adapter);
+  // MUST: コールバックは adapter を取った後・device を作る前に 1 度だけ呼ぶ（ADR 0117 決定 6）。投げた
+  // 例外はそのまま伝え、壊れた表とともに device を作らない
+  const geometryProfile = typeof source === "function"
+    ? profileFromCallback(source(adapterInfo))
+    : givenProfile;
   const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
   // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
   const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
@@ -624,7 +651,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   }
   return new GpuContext(
     device,
-    readAdapterInfo(adapter),
+    adapterInfo,
     limits,
     languageFeatures,
     options.onDeviceLost,
@@ -637,16 +664,49 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
  * 内部の {@link CodegenError} ではなく公開の {@link GpuFeatureError} で伝える（利用者入力の失敗は
  * 公開型で捌ける — `subgroups` の検査と同じ流儀）。
  */
-const cloneCheckedGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
+const cloneCheckedGeometryProfile = (profile: GeometryProfile, label: string): GeometryProfile => {
   try {
     assertGeometryProfile(profile);
   } catch (error) {
     if (error instanceof CodegenError) {
-      throw new GpuFeatureError(`geometryProfile: ${error.message}`);
+      throw new GpuFeatureError(`${label}: ${error.message}`);
     }
     throw error;
   }
   return structuredClone(profile);
+};
+
+/** `then` を関数で持つ値（Promise と、Promise を名乗る自作の thenable）。 */
+const isThenable = (value: unknown): boolean =>
+  typeof value === "object" && value !== null && "then" in value &&
+  typeof value.then === "function";
+
+/** 拒否が誰にも捕まらない Promise を作らないための no-op（{@link profileFromCallback}）。 */
+const ignoreRejection = (): void => {};
+
+/**
+ * コールバックの戻りを、直接渡した表と同じ門と複製に通す（`undefined` = 自動選択）。
+ *
+ * MUST: Promise（thenable）は await せずに拒む。待つと adapter を持ったまま I/O の窓が開き、その間に
+ * 失効した adapter から生まれた時点で lost な device を作る静かな失敗になる（ADR 0117 決定 6）。
+ * 型（同期の関数）を外れて来る値（JS の呼び手・async 関数）の門。
+ */
+const profileFromCallback = (
+  returned: GeometryProfile | undefined,
+): GeometryProfile | undefined => {
+  if (isThenable(returned)) {
+    // async 関数の reject は、こちらが拒んだ後に誰も待たない Promise の reject として unhandled rejection に
+    // なる（Deno ではプロセスが落ちる）。本物の Promise にだけ no-op の catch を付ける — 待たない・結果は使わない。
+    // 自作の thenable の then は呼ばない（任意のコードを走らせない）
+    if (returned instanceof Promise) returned.catch(ignoreRejection);
+    throw new GpuFeatureError(
+      "geometryProfile: コールバックが Promise を返した（同期の関数であること — 保存した表の読み込みは " +
+        "acquireGpu の前に済ませ、コールバックは読み込んだ値から表を選ぶだけにする）",
+    );
+  }
+  return returned === undefined
+    ? undefined
+    : cloneCheckedGeometryProfile(returned, "geometryProfile（コールバックの戻り）");
 };
 
 /**

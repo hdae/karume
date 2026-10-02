@@ -24,6 +24,7 @@
 //    使われる（`match` も見ない）。2 と同じ 3 点（診断の名前・実走キーの幾何判別子・既定との Uint32
 //    一致）に加え、i8a8 attention の dp4a カナリアがその表の幾何で撃つことを、カナリアが
 //    コンパイルした WGSL で見る。
+//    コールバック形（ADR 0117 決定 6）で返した表も同じ 3 点で使われ、`undefined` は自動選択になる。
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
@@ -462,6 +463,35 @@ describe({
           await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
         }
       } finally {
+        injected.destroy();
+        plain.destroy();
+      }
+    });
+
+    it("コールバック形（ADR 0117 決定 6）: device の adapter 情報で 1 度呼ばれ、返した埋め込みの表で Session が走り既定と Uint32 一致する・undefined なら自動選択", async () => {
+      const plain = await acquireGpu();
+      const seen: GPUAdapterInfo[] = [];
+      const injected = await acquireGpu({
+        geometryProfile: (adapterInfo) => {
+          seen.push(adapterInfo);
+          return APPLE_METAL_3;
+        },
+      });
+      const automatic = await acquireGpu({ geometryProfile: () => undefined });
+      try {
+        assertEquals(seen.length, 1);
+        assert(
+          seen[0] === injected.adapterInfo,
+          "コールバックの adapterInfo が GpuContext のものと別物",
+        );
+        const baseline = contextAs(plain, "", "", "");
+        for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
+          await assertRunsWithProfile(baseline, injected, APPLE_METAL_3, testCase);
+        }
+        const run = await runCase(automatic, linearCase(40));
+        assertEquals(run.profile, selectGeometryProfile(automatic.adapterInfo).id);
+      } finally {
+        automatic.destroy();
         injected.destroy();
         plain.destroy();
       }

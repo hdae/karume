@@ -77,6 +77,11 @@ import {
   sha256Hex,
   TIMESTAMP_QUERY,
 } from "./common.ts";
+import {
+  LAST_GENERATED_KEY,
+  resolveSavedProfile,
+  type SavedResolution,
+} from "./injectable-tables.ts";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -91,9 +96,17 @@ const AB_BASELINE: ProfileChoice = { kind: "default", profile: DEFAULT_GEOMETRY_
 type BuildChoice = {
   readonly quant: string;
   readonly gpuTiming: boolean;
-  /** 記録に残す綴り（`auto` / `default` / `builtin:<id>` / `generated:<id>`）。 */
+  /** 記録に残す綴り（`auto` / `default` / `builtin:<id>` / `generated:<id>` / `saved:<id>`）。 */
   readonly geometryProfileRequested: GeometryProfileRequested;
+  /** 注入した表（`saved-matched` は GPU を取った後に照合が一致したときだけ入る）。 */
   readonly geometryProfile?: GeometryProfile;
+  /**
+   * `saved-matched` の保存物の文字列（GPU 設定の適用時に取ったもの）。GPU を取るときのコールバックで照合する
+   * （{@link resolveSavedProfile}）。
+   */
+  readonly savedStored?: string;
+  /** `saved-matched` の照合の結果の 1 行（GPU を取った後に入る — 情報行と状態行に出す）。 */
+  readonly savedNote?: string;
 };
 
 export type AnimaTab = {
@@ -237,8 +250,15 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       gpuTiming: lab.timestampFeature && timestamps,
       geometryProfileRequested: requestedLabel(choice),
       ...(geometryProfile === undefined ? {} : { geometryProfile }),
+      ...(choice.kind === "saved-matched" ? { savedStored: choice.stored } : {}),
     };
   };
+
+  /** 「保存した表（照合して注入）」の結果の 1 行（情報行と状態行に出す）。 */
+  const savedResolutionText = (resolution: SavedResolution): string =>
+    resolution.kind === "matched"
+      ? `保存した表 ${resolution.id} は adapter と一致 → 注入`
+      : `保存した表を注入しない（自動で選ぶ）— ${resolution.reason}`;
 
   /** 記録に残す幾何プロファイルの欄（要求の綴りと、注入していればその表の値そのもの）。 */
   const requested = (
@@ -297,14 +317,25 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     if (state.gpu !== undefined && state.build !== undefined) {
       return { gpu: state.gpu, build: state.build };
     }
-    const build = selectedChoice();
-    const quant = state.model?.quants[build.quant];
-    if (quant === undefined) throw Error(`quant ${build.quant} が manifest に無い`);
+    const selected = selectedChoice();
+    const quant = state.model?.quants[selected.quant];
+    if (quant === undefined) throw Error(`quant ${selected.quant} が manifest に無い`);
+    // 「保存した表（照合して注入）」はアプリの流れのまま: 保存物は適用時に読んである（コールバックで I/O を
+    // 待たない）。runtime が実際に取った adapter の情報で照合し、一致した表だけを返す（不一致は undefined =
+    // 自動選択 — ADR 0117 決定 6 / 10）
+    const { savedStored } = selected;
+    let resolution: SavedResolution | undefined;
+    const geometryProfile = savedStored === undefined
+      ? selected.geometryProfile
+      : (adapterInfo: GPUAdapterInfo): GeometryProfile | undefined => {
+        resolution = resolveSavedProfile(savedStored, adapterInfo);
+        return resolution.kind === "matched" ? resolution.profile : undefined;
+      };
     // 共有 GPU には pipeline が feature を足せないので、quant の宣言（shader-f16）はここで要求する。
     const gpu = await acquireGpu({
-      ...(build.gpuTiming ? { gpuTiming: true } : {}),
+      ...(selected.gpuTiming ? { gpuTiming: true } : {}),
       ...(quant.gpuFeatures?.shaderF16 === true ? { shaderF16: true } : {}),
-      ...(build.geometryProfile === undefined ? {} : { geometryProfile: build.geometryProfile }),
+      ...(geometryProfile === undefined ? {} : { geometryProfile }),
       onDeviceLost: (info) => {
         state.deviceLost = { reason: info.reason, message: info.message };
         status(
@@ -312,6 +343,21 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
         );
       },
     });
+    // 記録の注入欄は照合の結果で決まる（一致した表だけ — 不一致は注入なしの行になる）
+    const savedNote = resolution === undefined ? undefined : savedResolutionText(resolution);
+    const build: BuildChoice = {
+      ...selected,
+      ...(resolution?.kind === "matched" ? { geometryProfile: resolution.profile } : {}),
+      ...(savedNote === undefined ? {} : { savedNote }),
+    };
+    if (resolution?.kind === "broken") {
+      // 読めない保存物は捨てる（次の起動でも読み続けない — ADR 0117 決定 10）
+      try {
+        localStorage.removeItem(LAST_GENERATED_KEY);
+      } catch {
+        // 捨てられなくても実行は既定で進む（理由は情報行に出ている）
+      }
+    }
     state.gpu = gpu;
     state.build = build;
     renderBuildControls();
@@ -319,8 +365,11 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       state.defaultModel ?? "?"
     }）· quant ${build.quant} · GPU 時間 ${
       gpu.gpuTimingEnabled ? "採る" : "採らない"
-    } · 幾何プロファイルの要求 ${build.geometryProfileRequested}`;
+    } · 幾何プロファイルの要求 ${build.geometryProfileRequested}${
+      savedNote === undefined ? "" : `（${savedNote}）`
+    }`;
     ui.info.textContent = state.info;
+    if (savedNote !== undefined) status(savedNote);
     return { gpu, build };
   };
 
@@ -906,7 +955,9 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       try {
         const { build } = await ensureGpu();
         status(
-          `GPU を取り直しました（quant ${build.quant}・幾何プロファイル ${build.geometryProfileRequested}）`,
+          `GPU を取り直しました（quant ${build.quant}・幾何プロファイル ${build.geometryProfileRequested}）${
+            build.savedNote === undefined ? "" : ` — ${build.savedNote}`
+          }`,
         );
       } finally {
         setBusy(false);

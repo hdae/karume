@@ -16,14 +16,18 @@ export type { ServerConfig };
 export const TIMESTAMP_QUERY = "timestamp-query";
 
 /**
- * GPU 設定の幾何プロファイルの選び方（ADR 0115 追記決定 6 の注入口）。`auto` だけが注入なしで、
- * 残りは `acquireGpu({ geometryProfile })` に表を渡す（adapter の vendor / architecture は照合しない）。
+ * GPU 設定の幾何プロファイルの選び方（ADR 0115 追記決定 6 の注入口）。`auto` は注入なし、`default` /
+ * `builtin` / `generated` は `acquireGpu({ geometryProfile })` に表を渡す（adapter の vendor / architecture は
+ * 照合しない）。`saved-matched` は適用時に取った保存物の文字列（`stored`）を持ち、GPU を取るときに
+ * コールバック形で照合して、一致した表だけを注入する（ADR 0117 決定 6 — `injectable-tables.ts` の
+ * `resolveSavedProfile`）。`id` は保存物の表の id（読めなければ undefined）。
  */
 export type ProfileChoice =
   | { readonly kind: "auto" }
   | { readonly kind: "default"; readonly profile: GeometryProfile }
   | { readonly kind: "builtin"; readonly profile: GeometryProfile }
-  | { readonly kind: "generated"; readonly profile: GeometryProfile };
+  | { readonly kind: "generated"; readonly profile: GeometryProfile }
+  | { readonly kind: "saved-matched"; readonly stored: string; readonly id?: string };
 
 /** 全タブ共通の GPU 設定（「適用」で確定したもの）。 */
 export type GpuSettings = {
@@ -33,7 +37,7 @@ export type GpuSettings = {
 };
 
 /**
- * 記録に残す「何を頼んだか」の綴り（`auto` / `default` / `builtin:<id>` / `generated:<id>` —
+ * 記録に残す「何を頼んだか」の綴り（`auto` / `default` / `builtin:<id>` / `generated:<id>` / `saved:<id>` —
  * tools/anima-residency/record.ts の `GeometryProfileRequested`）。
  */
 export const requestedLabel = (choice: ProfileChoice): GeometryProfileRequested => {
@@ -46,12 +50,17 @@ export const requestedLabel = (choice: ProfileChoice): GeometryProfileRequested 
       return `builtin:${choice.profile.id}`;
     case "generated":
       return `generated:${choice.profile.id}`;
+    case "saved-matched":
+      return `saved:${choice.id ?? "(読めない)"}`;
   }
 };
 
-/** `acquireGpu` に渡す表（`auto` は渡さない）。 */
+/**
+ * `acquireGpu` に表そのものとして渡す表（`auto` は渡さない・`saved-matched` は GPU を取るときにコールバックで
+ * 決まるのでここでは渡さない）。
+ */
 export const injectedProfile = (choice: ProfileChoice): GeometryProfile | undefined =>
-  choice.kind === "auto" ? undefined : choice.profile;
+  choice.kind === "auto" || choice.kind === "saved-matched" ? undefined : choice.profile;
 
 /** `main.ts` がタブへ渡す共有の面。 */
 export type Lab = {

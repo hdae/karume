@@ -153,6 +153,22 @@ describe("geometryProfileMismatch", () => {
     );
   });
 
+  it("provenance.userAgent（掃引したブラウザの参考の欄）は照合しない — 違っても欄が無くても一致", () => {
+    for (
+      const overrides of [
+        { userAgent: ["Mozilla/5.0 (Macintosh) Chrome/153.0.0.0"] },
+        { userAgent: ["Deno/2.9.6"] },
+        {},
+      ]
+    ) {
+      assertEquals(
+        geometryProfileMismatch(stored(DEFAULT_GEOMETRY_PROFILE, overrides), ADAPTER),
+        undefined,
+        JSON.stringify(overrides),
+      );
+    }
+  });
+
   it("投げない: 表の幾何から掃引の shape のカーネルを組めない表（dispatch 数が 65535 を超える）は理由を返す", () => {
     // 門（assertGeometryProfile）は通るが、tileN 4 で conv2d 512² の N = 262144 が 65536 workgroup になる
     const narrow: GeometryProfile = {
