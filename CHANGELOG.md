@@ -156,6 +156,12 @@ measurements in `docs/research/`.
   `aten.conv3d` as one node for an unbatched input (normalizing scalar spatial arguments to
   triples and synthesizing a zero bias when there is none) and fails loudly on a batched rank-5
   input.
+- `ChunkBudgetStats.submitGpuTime` (`SessionDiagnostics.submit.chunkBudget`): on a device with
+  `gpuTiming`, the GPU-side span of every submit is measured from its own timestamps, and the
+  session keeps the count, the largest span, the same two for the submits made before the
+  adaptive budget had a measurement, and the heaviest single dispatch with its pipeline key. It
+  adds no wait and is undefined without `gpuTiming`; values are in timestamp units like
+  `GpuTimingEntry.ns`.
 
 ### Changed
 

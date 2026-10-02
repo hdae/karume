@@ -189,10 +189,12 @@ export type SubmitStats = {
  * パイプラインの実測では超過は無く、安全率 {@link CHUNK_TIME_SAFETY} の枠内に収まっていた）。
  * ここはその**着手条件を判定するための観測点**であって、予算則そのものではない。
  *
- * MUST: チャンク単位の実時間帰属をここに持ち込まない（ADR 0004 不変条件④ — 重なった submit の
+ * MUST: チャンク単位の**壁時計**の帰属をここに持ち込まない（ADR 0004 不変条件④ — 重なった submit の
  * 完了通知は先頭 1 本に集中し、チャンクごとの壁時計は意味を持たない）。載せているのは
  * ① 推定側の分布（切る側が予算をどう見積もっていたか）と ② 窓単位の平均という**帰属に
- * 依存しない**2 面だけ。
+ * 依存しない**2 面と、③ 計測が有効な device でだけ埋まる **GPU 側の時計**（timestamp-query）の
+ * チャンク単位の値（{@link ChunkBudgetStats.submitGpuTime}）。③ はチャンク自身の pass が書いた
+ * timestamp なので帰属が崩れない（完了通知を使わない）。
  */
 export type ChunkBudgetStats = {
   /**
@@ -225,6 +227,42 @@ export type ChunkBudgetStats = {
    * エンコード時間も含むため過大側（モジュール doc）。
    */
   readonly maxWindowMeanMs?: number;
+  /**
+   * 1 submit（チャンク）ごとの GPU 実行時間の全期間の観測。計測が有効な device
+   * （{@link GpuContext.gpuTimingEnabled}）でだけ埋まり、無効な device と、まだ 1 本も回収して
+   * いない間は undefined。
+   *
+   * WHY: {@link ChunkBudgetStats.maxWindowMeanMs} は下界でしかなく、重い 1 本と軽い数本が同じ窓に
+   * 入ると平均に埋もれる。OS の submit 単位のタイムアウト（Linux xe の `job_timeout_ms` など —
+   * ADR 0118 決定 6）に対して言えるのは、1 本ずつの時間の最大だけである。
+   *
+   * 測り方: 計測モードは 1 dispatch = 1 pass で pass の begin / end を書くので、チャンク 1 本の
+   * GPU 実行の幅 = そのチャンクの timestamp の最小 → 最大（pass 間の隙間も含む）。回収は既存の
+   * {@link SubmitScheduler.flush} の待ちの後に相乗りし、**新しい待ちを足さない**（submit ごとに
+   * 完了を待つと CPU エンコードと GPU 実行が直列化する — モジュール doc の MUST）。
+   *
+   * NOTE: 単位は timestamp の値そのもの（{@link GpuTimingEntry.ns} と同じ — 仕様上は ns。Deno は
+   * wgpu の raw tick を換算せずに返す実装で、B570 では 1 tick = 52.08 ns — docs/known-issues.md
+   * 「Intel Arc B570」節）。**制御には使わない**（チャンクの切れ目はこの値で変わらない）。
+   */
+  readonly submitGpuTime?: {
+    /** 回収したチャンクの累計本数（copy だけのチャンクは timestamp を持たないので数えない）。 */
+    readonly submits: number;
+    /** 1 チャンクの GPU 実行の幅の最大。 */
+    readonly maxNs: number;
+    /**
+     * そのうち実測の裏付けが付く前（`msPerWorkgroup` が undefined の間 — 上限は
+     * {@link SubmitPolicy.initialChunkSize} 本で、時間予算では切っていない）に出したチャンクの本数。
+     * 最初の run のチャンクは全部ここに入る。
+     */
+    readonly unbackedSubmits: number;
+    /** 裏付け前のチャンクの幅の最大（裏付け前のチャンクが 1 本も無ければ undefined）。 */
+    readonly maxUnbackedNs?: number;
+    /** 単発 dispatch（1 pass）の GPU 時間の最大。分割できない単位の重さの目安。 */
+    readonly maxDispatchNs: number;
+    /** その dispatch のパイプラインキー（{@link GpuTimingEntry.key} と同じ語彙）。 */
+    readonly maxDispatchKey: string;
+  };
 };
 
 /** パイプラインキー 1 本ぶんの GPU 実時間の内訳（ADR 0021）。 */
@@ -306,10 +344,22 @@ type PendingTiming = {
   readonly readBuffer: GPUBuffer;
   /** query 対（begin, end）の並びと 1:1 で対応する帰属先。 */
   readonly entries: readonly { readonly key: string; readonly work: number }[];
+  /** このチャンクを実測の裏付けが付いてから出したか（{@link ChunkBudgetStats.submitGpuTime}）。 */
+  readonly backed: boolean;
 };
 
 /** キー別の累計（{@link GpuTimingEntry} の可変版）。 */
 type TimingTotal = { ns: number; dispatchCount: number; workgroupCount: number };
+
+/** {@link ChunkBudgetStats.submitGpuTime} の可変版（全期間の累計 — run ごとにリセットしない）。 */
+type SubmitGpuTime = {
+  submits: number;
+  maxNs: number;
+  unbackedSubmits: number;
+  maxUnbackedNs: number | undefined;
+  maxDispatchNs: number;
+  maxDispatchKey: string;
+};
 
 /**
  * timestamp 資源の解放。回収の成否によらず**必ず** 1 回通す（診断のために VRAM を積み残さない）。
@@ -361,6 +411,11 @@ export class SubmitScheduler {
   /** パイプラインキー別の累計（寿命は直近 run — {@link SubmitScheduler.resetTiming}）。 */
   readonly #timingTotals = new Map<string, TimingTotal>();
   #clampedNegativeSamples = 0;
+  /**
+   * 1 submit ごとの GPU 時間の観測（診断専用・全期間 — {@link SubmitScheduler.resetTiming} では
+   * 消さない）。undefined = まだ 1 本も回収していない（計測が無効な device では常に undefined）。
+   */
+  #submitGpuTime: SubmitGpuTime | undefined;
 
   /**
    * @param now 時刻源（ms）。差分計測の規則をテストで固定できるよう注入可能にしてある。
@@ -601,6 +656,19 @@ export class SubmitScheduler {
         maxEstimatedMs: this.#maxEstimatedChunkMs,
         overBudgetChunks: this.#overBudgetChunks,
         maxWindowMeanMs: this.#maxWindowMeanMs,
+        // 読み手が可変の内部状態を掴まないよう、読むたびに写す（undefined の欄は書かない）。
+        ...(this.#submitGpuTime === undefined ? {} : {
+          submitGpuTime: {
+            submits: this.#submitGpuTime.submits,
+            maxNs: this.#submitGpuTime.maxNs,
+            unbackedSubmits: this.#submitGpuTime.unbackedSubmits,
+            ...(this.#submitGpuTime.maxUnbackedNs === undefined
+              ? {}
+              : { maxUnbackedNs: this.#submitGpuTime.maxUnbackedNs }),
+            maxDispatchNs: this.#submitGpuTime.maxDispatchNs,
+            maxDispatchKey: this.#submitGpuTime.maxDispatchKey,
+          },
+        }),
       },
     };
   }
@@ -643,7 +711,9 @@ export class SubmitScheduler {
     this.#pendingWork = 0;
     const encoder = this.#device.createCommandEncoder();
     if (this.#timingEnabled) {
-      this.#encodeTimedChunk(encoder, chunk);
+      // 裏付けの有無は切れ目を決めた時点の状態（推定が動くのは窓を閉じるときだけで、閉じる経路は
+      // 先に未 submit を出し切るので、チャンクを組んでいる間には変わらない）。
+      this.#encodeTimedChunk(encoder, chunk, this.#msPerWorkgroup !== undefined);
     } else {
       this.#encodePlainChunk(encoder, chunk);
     }
@@ -714,7 +784,11 @@ export class SubmitScheduler {
    *
    * MUST: `writeTimestamp` は使わない（標準の WebGPU に無い — pass 境界だけが移植可能な計測点）。
    */
-  #encodeTimedChunk(encoder: GPUCommandEncoder, chunk: readonly PendingCommand[]): void {
+  #encodeTimedChunk(
+    encoder: GPUCommandEncoder,
+    chunk: readonly PendingCommand[],
+    backed: boolean,
+  ): void {
     // 計測対象は dispatch だけ（copy は pass を持たないので timestamp を書く場所が無い）。
     // NOTE: 計測が有効な device では batch を開けない（GpuContext.beginBatch の門）ため、
     // copy が混じったチャンクはこの経路に来ない — それでも列の順序は保って積む。
@@ -776,6 +850,7 @@ export class SubmitScheduler {
       resolveBuffer,
       readBuffer,
       entries: dispatches.map((item) => ({ key: item.key, work: item.work })),
+      backed,
     });
   }
 
@@ -799,7 +874,9 @@ export class SubmitScheduler {
       );
       for (const item of pending) {
         // 同期区間で読み切るのでコピーは要らない（unmap まで view は有効）。
-        this.#accumulate(item.entries, new BigUint64Array(item.readBuffer.getMappedRange()));
+        const stamps = new BigUint64Array(item.readBuffer.getMappedRange());
+        this.#accumulate(item.entries, stamps);
+        this.#observeSubmitGpuTime(item, stamps);
         item.readBuffer.unmap();
       }
     } finally {
@@ -823,6 +900,47 @@ export class SubmitScheduler {
       total.dispatchCount += 1;
       total.workgroupCount += entry.work;
       this.#timingTotals.set(entry.key, total);
+    }
+  }
+
+  /**
+   * チャンク 1 本の GPU 実行の幅と単発 dispatch の最大を、全期間の観測へ足す（**観測のみ** —
+   * ここから制御へ戻る線は無い）。
+   *
+   * 幅は query の最小 → 最大。pass は積んだ順に実行されるので「最初の pass の begin → 最後の pass の
+   * end」と同じで、pass 間の隙間も含む（OS の submit 単位の上限が数えるのもその区間）。最小 / 最大で
+   * 取るのは、非単調なサンプルが混じっても負の幅を作らないため（丸めの件数は
+   * {@link SubmitScheduler.#accumulate} が数える）。
+   */
+  #observeSubmitGpuTime(timing: PendingTiming, stamps: BigUint64Array): void {
+    let first = stamps[0];
+    let last = stamps[0];
+    for (const stamp of stamps) {
+      if (stamp < first) first = stamp;
+      if (stamp > last) last = stamp;
+    }
+    const spanNs = Number(last - first);
+    const observed = this.#submitGpuTime ??= {
+      submits: 0,
+      maxNs: 0,
+      unbackedSubmits: 0,
+      maxUnbackedNs: undefined,
+      maxDispatchNs: 0,
+      maxDispatchKey: timing.entries[0].key,
+    };
+    observed.submits += 1;
+    observed.maxNs = Math.max(observed.maxNs, spanNs);
+    if (!timing.backed) {
+      observed.unbackedSubmits += 1;
+      observed.maxUnbackedNs = Math.max(observed.maxUnbackedNs ?? 0, spanNs);
+    }
+    for (const [index, entry] of timing.entries.entries()) {
+      const delta = stamps[index * 2 + 1] - stamps[index * 2];
+      const deltaNs = delta < 0n ? 0 : Number(delta);
+      if (deltaNs > observed.maxDispatchNs) {
+        observed.maxDispatchNs = deltaNs;
+        observed.maxDispatchKey = entry.key;
+      }
     }
   }
 

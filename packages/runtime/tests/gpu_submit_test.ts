@@ -538,3 +538,81 @@ Deno.test("窓平均チャンク時間は推定が見落とす予算超過を下
   assertEquals(budget.maxEstimatedMs, 1, "推定側は 1ms のまま（プロキシのずれは見えない）");
   assertEquals(budget.overBudgetChunks, 0, "推定側の席はここでは 1 件も上がらない");
 });
+
+// submitGpuTime（GPU 側の時計）: 窓平均（下界）では見えない「重い 1 本」を 1 submit ずつの幅で数える
+// （ADR 0118 決定 6 の追記 — OS の submit 単位のタイムアウトに対して言えるのは 1 本ずつの最大だけ）。
+// 幅は pass の timestamp の最小 → 最大で、pass 間の隙間も含む（dispatch の差の和ではない）。
+Deno.test("1 submit ごとの GPU 時間は timestamp の幅で数え、裏付け前のチャンクを別に数える", async () => {
+  const clock = gpuTimeClock(() => 8);
+  const gpu = createFakeGpu({
+    workDone: clock.workDone,
+    timestamps: [
+      // 裏付け前のチャンク 1（4 dispatch）: 幅 992。dispatch の差の和（982）とは pass 間の隙間 10 だけ違う。
+      [10n, 20n, 30n, 1000n, 1000n, 1001n, 1001n, 1002n],
+      // 裏付け前のチャンク 2: 幅 400。
+      [5000n, 5100n, 5100n, 5200n, 5200n, 5300n, 5300n, 5400n],
+      // 裏付け後のチャンク（重い 1 dispatch）: 幅 3000。
+      [0n, 3000n],
+    ],
+  });
+  const scheduler = new SubmitScheduler(gpu.context, adaptivePolicy, clock.now);
+  assertEquals(scheduler.stats.chunkBudget.submitGpuTime, undefined, "回収前は埋まらない");
+
+  dispatchMany(scheduler, 8);
+  assertEquals(gpu.submitted, [4, 4], "裏付けが無い間は initialChunkSize で切る");
+  await scheduler.flush();
+  assertEquals(scheduler.stats.msPerWorkgroup, 1, "8ms / 8 workgroup で裏付けが付く");
+  assertEquals(scheduler.stats.chunkBudget.submitGpuTime, {
+    submits: 2,
+    maxNs: 992,
+    unbackedSubmits: 2,
+    maxUnbackedNs: 992,
+    maxDispatchNs: 970,
+    maxDispatchKey: "test:fake",
+  });
+
+  scheduler.dispatch(fakePipeline, fakeBindGroup, [1, 1, 1], "test:heavy");
+  await scheduler.flush();
+  assertEquals(
+    scheduler.stats.chunkBudget.submitGpuTime,
+    {
+      submits: 3,
+      maxNs: 3000,
+      unbackedSubmits: 2,
+      maxUnbackedNs: 992,
+      maxDispatchNs: 3000,
+      maxDispatchKey: "test:heavy",
+    },
+    "裏付け後のチャンクは裏付け前の最大を動かさない",
+  );
+  // 回収は flush の待ちに相乗りする。submit ごとに完了を待つと CPU と GPU が直列化する
+  // （submit.ts のモジュール doc の MUST）— 待ちは flush の 2 回だけ。
+  assertEquals(gpu.calls.workDone, 2, "新しい完了待ちを足していない");
+});
+
+Deno.test("submit の GPU 時間の幅は非単調なサンプルが混じっても負にならない", async () => {
+  // dispatch 1 本目が begin > end（負）。幅は最小 50 → 最大 260、単発の最大は 2 本目の 60。
+  const gpu = createFakeGpu({ timestamps: [[100n, 50n, 200n, 260n]] });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
+
+  dispatchMany(scheduler, 2);
+  await scheduler.flush();
+
+  const observed = scheduler.stats.chunkBudget.submitGpuTime;
+  assertEquals(observed?.maxNs, 210);
+  assertEquals(observed?.maxDispatchNs, 60, "負の差は 0 として比べる");
+});
+
+Deno.test("計測が無効な device では submit の GPU 時間を持たない", async () => {
+  const gpu = createFakeGpu();
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
+
+  dispatchMany(scheduler, 4);
+  await scheduler.flush();
+
+  assertEquals(
+    "submitGpuTime" in scheduler.stats.chunkBudget,
+    false,
+    "測っていない値を 0 で埋めない",
+  );
+});
