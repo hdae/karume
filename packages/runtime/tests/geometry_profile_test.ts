@@ -13,6 +13,10 @@
 //    落ちる（navigator.gpu を差し替えて requestDevice に届かないことを見る）。コールバック形
 //    （ADR 0117 決定 6）は adapter の情報で 1 度だけ呼ばれ、戻りが同じ門を通り、投げた例外と Promise の
 //    戻りでも device を作らない。
+// 4. **門は unknown を表へ絞る型述語**で、欄の欠け・型違いを TypeError ではなく門のエラーで名指す。
+// 5. **注入の表は device の workgroup の上限で落ちる**（スレッド数・`@workgroup_size` の成分・共有メモリ —
+//    adapter の limits に対して device を作る前に）。共有メモリの導出（純関数）は codegen が書く
+//    `var<workgroup>` の宣言から数えた総量と突き合わせ、埋め込みの表と既定の表は WebGPU の既定の上限で通る。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
@@ -26,11 +30,13 @@ import {
 import { fakeDevice } from "./helpers/fake-gpu.ts";
 import {
   assertGeometryProfile,
+  assertGeometryProfileWithinLimits,
   conv2dProfileGeometry,
   DEFAULT_GEOMETRY_PROFILE,
   gemmRowsGeometry,
   type GeometryProfile,
   selectGeometryProfile,
+  type WorkgroupLimits,
 } from "../src/kernels/geometry-profile.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/index.ts";
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
@@ -40,8 +46,16 @@ import {
   type GemmGeometry,
   gemmGeometryForRows,
 } from "../src/kernels/gemm-geometry.ts";
-import { defaultI8a8Geometry } from "../src/kernels/i8a8-geometry.ts";
-import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
+import {
+  defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8WorkgroupStorageBytes,
+} from "../src/kernels/i8a8-geometry.ts";
+import {
+  type GemmCompute,
+  gemmMTileGeometry,
+  gemmWorkgroupStorageBytes,
+} from "../src/kernels/gemm.ts";
 import { matmulKey, matmulWgsl } from "../src/kernels/matmul.ts";
 import { bmmKey, bmmWgsl } from "../src/kernels/bmm.ts";
 import { linearKey, linearWgsl } from "../src/kernels/linear.ts";
@@ -660,12 +674,16 @@ class DeviceRequested extends Error {
 
 /**
  * `navigator.gpu` を、requestDevice の呼び出し回数を数えて番兵で落ちる偽物に差し替えて `body` を
- * 走らせる（GPU 不要・実機があっても device を作らない）。差し替えは finally で必ず外す。
+ * 走らせる（GPU 不要・実機があっても device を作らない）。差し替えは finally で必ず外す。adapter の limits は
+ * 全て 1 << 20 で、`limits` の欄だけ上書きする（上限の門の検査用）。
  */
-const withCountingGpu = async (body: () => Promise<void>): Promise<number> => {
+const withCountingGpu = async (
+  body: () => Promise<void>,
+  limits: Partial<WorkgroupLimits> = {},
+): Promise<number> => {
   let deviceRequests = 0;
   const adapter = {
-    limits: Object.fromEntries(REQUIRED_LIMIT_KEYS.map((key) => [key, 1 << 20])),
+    limits: { ...Object.fromEntries(REQUIRED_LIMIT_KEYS.map((key) => [key, 1 << 20])), ...limits },
     features: new Set<string>(),
     requestDevice: (): Promise<never> => {
       deviceRequests += 1;
@@ -991,5 +1009,340 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       Reflect.deleteProperty(navigator, "gpu");
     }
     assertEquals(adapterRequests, 0);
+  });
+});
+
+describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
+  it("型の無い値（unknown）も門を通れば GeometryProfile として読める", () => {
+    const value: unknown = structuredClone(APPLE_M2);
+    assertGeometryProfile(value);
+    // 型述語の絞りが効いていなければここで型検査が落ちる
+    const profile: GeometryProfile = value;
+    assertEquals(profile, APPLE_M2);
+  });
+
+  it("欄の欠け・型違いは TypeError ではなく CodegenError で欄を名指す", () => {
+    const { gemmRows: _gemmRows, ...withoutRows } = OPT_IN;
+    const cases: readonly (readonly [string, unknown, string])[] = [
+      ["null", null, "表 がオブジェクトでない"],
+      ["id が数", { ...OPT_IN, id: 5 }, "id が文字列でない"],
+      ["match.vendor が数", { ...OPT_IN, match: { vendor: 1 } }, "match.vendor が文字列でない"],
+      ["gemmRows の欠け", withoutRows, "gemmRows が配列でない"],
+      [
+        "gemmRows の規則に geometry が無い",
+        { ...OPT_IN, gemmRows: [{ maxRows: Number.POSITIVE_INFINITY }] },
+        "gemmRows[0].geometry がオブジェクトでない",
+      ],
+      [
+        "maxRows が文字列",
+        { ...OPT_IN, gemmRows: [{ maxRows: "64", geometry: M64N64 }] },
+        "gemmRows[0] の maxRows が数でない",
+      ],
+      ["attention の欠け", { ...OPT_IN, attention: undefined }, "attention がオブジェクトでない"],
+      [
+        "幾何の欄が文字列",
+        { ...OPT_IN, attention: { qk: { ...M64N64, wgX: "16" }, pv: M64N64 } },
+        "attention.qk: 幾何の wgX は正整数（16）",
+      ],
+      [
+        "i8a8 の tileK の欠け",
+        { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, linear: M64N64 } },
+        "i8a8.linear: 幾何の tileK は正整数（undefined）",
+      ],
+      [
+        "provenance の欄の欠け",
+        { ...OPT_IN, provenance: {} },
+        "provenance.sweep が文字列でない（無い）",
+      ],
+      [
+        "provenance.userAgent が文字列",
+        {
+          ...OPT_IN,
+          provenance: {
+            sweep: "s",
+            sha256: "h",
+            date: "d",
+            candidateSet: "quick",
+            kernels: "k",
+            caseSet: "c",
+            adapter: { vendor: "", architecture: "", device: "", description: "" },
+            userAgent: "Deno/2",
+          },
+        },
+        "provenance.userAgent が配列でない",
+      ],
+    ];
+    for (const [name, value, message] of cases) {
+      assertThrows(() => assertGeometryProfile(value), CodegenError, message, name);
+    }
+  });
+
+  it("acquireGpu に型の外から来た欠けた表は device を作る前に GpuFeatureError（TypeError にならない）", async () => {
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: untypedCallback({ id: "broken" }) }),
+        GpuFeatureError,
+        "geometryProfile（コールバックの戻り）: 幾何プロファイル 'broken': gemmRows が配列でない",
+      );
+    });
+    assertEquals(requests, 0, "欠けた表で requestDevice に届いた");
+  });
+});
+
+/** WebGPU の既定の上限（どの device も最低これを出す — 仕様の limits の既定値）。 */
+const WEBGPU_DEFAULT_LIMITS: WorkgroupLimits = {
+  maxComputeInvocationsPerWorkgroup: 256,
+  maxComputeWorkgroupSizeX: 256,
+  maxComputeWorkgroupSizeY: 256,
+  maxComputeWorkgroupStorageSize: 16_384,
+};
+
+/** スレッド数 512（wgX 32 × wgY 16）— 整除は満たし、共有メモリは 16,384 B ちょうど。 */
+const THREADS_512: GemmGeometry = { regM: 8, regN: 4, wgX: 32, wgY: 16 };
+/** 共有メモリ 20,480 B（M64N256 — 64 · (64 + 256)）— スレッド数は 256。 */
+const STORAGE_20K: GemmGeometry = { regM: 8, regN: 8, wgX: 32, wgY: 8 };
+/** i8a8 の共有メモリ 32,768 B（tileK 128 · (128 + 128)）— スレッド数は 256。 */
+const I8A8_STORAGE_32K: I8a8Geometry = { regM: 8, regN: 8, wgX: 16, wgY: 16, tileK: 128 };
+/** 変数ごとの 16 バイト切り上げが効く極小の i8a8 幾何（sa は 4 B → 16 B）。 */
+const I8A8_TINY: I8a8Geometry = { regM: 1, regN: 4, wgX: 1, wgY: 1, tileK: 4 };
+
+/** WGSL の要素型のバイト数（共有タイルが使う型だけ — 知らない型は数え漏れにせず落とす）。 */
+const WGSL_TYPE_BYTES: Readonly<Record<string, number>> = {
+  f32: 4,
+  f16: 2,
+  u32: 4,
+  "vec4<f32>": 16,
+  "vec4<f16>": 8,
+};
+
+/**
+ * 生成された WGSL の `var<workgroup>` 宣言から、WebGPU が上限と比べる量（変数ごとの `roundUp(16, SizeOf(T))` の
+ * 総和）を数える。読めない宣言が 1 本でもあれば落とす（数え漏れで一致したことにしない）。
+ */
+const declaredWorkgroupBytes = (wgsl: string): number => {
+  const declarations = [
+    ...wgsl.matchAll(/var<workgroup>\s+\w+\s*:\s*array<\s*(.+?)\s*,\s*(\d+)\s*>\s*;/g),
+  ];
+  assertEquals(
+    declarations.length,
+    wgsl.match(/var<workgroup>/g)?.length ?? 0,
+    "読めない var<workgroup> の宣言がある",
+  );
+  assert(declarations.length > 0, "var<workgroup> の宣言が無い");
+  return declarations.reduce((total, [, type, count]) => {
+    const bytes = WGSL_TYPE_BYTES[type];
+    assert(bytes !== undefined, `知らない要素型 ${type}`);
+    return total + Math.ceil((bytes * Number(count)) / 16) * 16;
+  }, 0);
+};
+
+/** 突き合わせる f32 / f16 GEMM の幾何（既定・埋め込みの表の全欄・上限を超える持ち込みの幾何）。 */
+const gemmGeometriesOf = (profile: GeometryProfile): GemmGeometry[] => [
+  ...profile.gemmRows.map((rule) => rule.geometry),
+  profile.attention.qk,
+  profile.attention.pv,
+  profile.conv2d.rows64,
+  profile.conv2d.rows32,
+];
+const SAMPLE_PROFILES = [DEFAULT_GEOMETRY_PROFILE, ...BUILTIN_GEOMETRY_PROFILES];
+const SAMPLE_GEMM = [...SAMPLE_PROFILES.flatMap(gemmGeometriesOf), THREADS_512, STORAGE_20K];
+const SAMPLE_I8A8 = [
+  ...SAMPLE_PROFILES.flatMap((profile) => Object.values(profile.i8a8)),
+  I8A8_STORAGE_32K,
+  I8A8_TINY,
+];
+
+const label = (geometry: GemmGeometry | I8a8Geometry): string => JSON.stringify(geometry);
+
+describe("共有メモリの導出（純関数）は codegen の var<workgroup> 宣言の総量と一致する", () => {
+  it("f32 / f16 GEMM 骨格（linear・融合 attention ①QK / ③PV・conv2d・matmul）", () => {
+    for (const geometry of SAMPLE_GEMM) {
+      const cases: readonly (readonly [string, GemmCompute, string])[] = [
+        ["matmul", "f32", matmulWgsl(true, 128, geometry)],
+        ["linear f32", "f32", linearWgsl("f32", true, "f32", 128, undefined, geometry)],
+        ["linear f16 計算", "f16", linearWgsl("f32", true, "f16", 128, undefined, geometry)],
+        [
+          "attention_qk f32",
+          "f32",
+          attentionQkWgsl(true, "f32", "f32", false, false, false, geometry),
+        ],
+        [
+          "attention_qk f16 計算",
+          "f16",
+          attentionQkWgsl(true, "f16", "f32", false, false, false, geometry),
+        ],
+        ["attention_pv f32", "f32", attentionPvWgsl(true, "f32", "f32", false, false, geometry)],
+        [
+          "attention_pv f16 計算",
+          "f16",
+          attentionPvWgsl(true, "f16", "f32", false, false, geometry),
+        ],
+        ["conv2d", "f32", conv2dIgemmWgsl("f32", true, 64, geometry)],
+      ];
+      for (const [name, compute, wgsl] of cases) {
+        assertEquals(
+          gemmWorkgroupStorageBytes(geometry, compute),
+          declaredWorkgroupBytes(wgsl),
+          `${name} ${label(geometry)}`,
+        );
+      }
+    }
+  });
+
+  it("i8a8（linear・融合 attention ①QK / ③PV — 変数ごとの 16 バイト切り上げを含む）", () => {
+    for (const geometry of SAMPLE_I8A8) {
+      for (
+        const [name, wgsl] of [
+          ["linear", linearI8a8Wgsl(true, true, geometry)],
+          ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", geometry)],
+          ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", geometry)],
+        ] as const
+      ) {
+        assertEquals(
+          i8a8WorkgroupStorageBytes(geometry),
+          declaredWorkgroupBytes(wgsl),
+          `${name} ${label(geometry)}`,
+        );
+      }
+    }
+    // 切り上げの対照: 要素数 × 4 の素朴な和（4 + 16 = 20）とは違う値になる
+    assertEquals(i8a8WorkgroupStorageBytes(I8A8_TINY), 32);
+  });
+});
+
+describe("注入の表の上限の門（device の workgroup の上限 — adapter の limits に対して device を作る前に）", () => {
+  it("既定の表と埋め込みの表は全て WebGPU の既定の上限で通る（自動選択の経路が上限の門を通らなくてよい根拠）", () => {
+    assert(BUILTIN_GEOMETRY_PROFILES.length > 0);
+    for (const profile of SAMPLE_PROFILES) {
+      assertGeometryProfileWithinLimits(profile, WEBGPU_DEFAULT_LIMITS);
+    }
+  });
+
+  it("上限ちょうど（256 スレッド・16,384 B の既定幾何）の表は requestDevice まで進む", async () => {
+    const profile = profileOf("at-limit", undefined);
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
+    }, WEBGPU_DEFAULT_LIMITS);
+    assertEquals(requests, 1);
+  });
+
+  it("スレッド数 wgX × wgY が上限超え → GpuFeatureError（欄・幾何・上限を名指す）で requestDevice 0 回", async () => {
+    const profile = profileOf("threads", undefined, {
+      attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
+    });
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: profile }),
+        GpuFeatureError,
+        "geometryProfile: 幾何プロファイル 'threads': device の上限を超える幾何（attention.qk" +
+          "（regM=8 regN=4 wgX=32 wgY=16）: スレッド数 wgX × wgY 512 が maxComputeInvocationsPerWorkgroup 256 を超える）",
+      );
+    }, WEBGPU_DEFAULT_LIMITS);
+    assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
+    // 対照: 上限は定数ではなく adapter の limits — 1024 invocation の adapter では通る
+    const allowed = await withCountingGpu(async () => {
+      await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
+    }, { ...WEBGPU_DEFAULT_LIMITS, maxComputeInvocationsPerWorkgroup: 1024 });
+    assertEquals(allowed, 1);
+  });
+
+  it("@workgroup_size の成分が上限超え（スレッド数は収まる）→ GpuFeatureError で成分の上限を名指す", async () => {
+    const profile = profileOf("size-x", undefined, {
+      attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
+    });
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: profile }),
+        GpuFeatureError,
+        "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgX 32 が maxComputeWorkgroupSizeX 16 を超える",
+      );
+    }, {
+      ...WEBGPU_DEFAULT_LIMITS,
+      maxComputeInvocationsPerWorkgroup: 1024,
+      maxComputeWorkgroupSizeX: 16,
+    });
+    assertEquals(requests, 0);
+  });
+
+  it("@workgroup_size の Y 成分だけが上限超え → GpuFeatureError で Y の上限を名指す", async () => {
+    const profile = profileOf("size-y", undefined, {
+      attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
+    });
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: profile }),
+        GpuFeatureError,
+        "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgY 16 が maxComputeWorkgroupSizeY 8 を超える",
+      );
+    }, {
+      ...WEBGPU_DEFAULT_LIMITS,
+      maxComputeInvocationsPerWorkgroup: 1024,
+      maxComputeWorkgroupSizeY: 8,
+    });
+    assertEquals(requests, 0);
+  });
+
+  it("共有メモリが上限超え → GpuFeatureError（gemmRows の段と i8a8 の欄を全て名指す）で requestDevice 0 回", async () => {
+    const profile = profileOf("storage", undefined, {
+      gemmRows: [
+        DEFAULT_GEOMETRY_PROFILE.gemmRows[0],
+        { maxRows: Number.POSITIVE_INFINITY, geometry: STORAGE_20K },
+      ],
+      i8a8: { ...DEFAULT_GEOMETRY_PROFILE.i8a8, attentionPv: I8A8_STORAGE_32K },
+    });
+    const requests = await withCountingGpu(async () => {
+      const error = await assertRejects(
+        () => acquireGpu({ geometryProfile: profile }),
+        GpuFeatureError,
+        "gemmRows[1]（regM=8 regN=8 wgX=32 wgY=8）: 共有メモリ（バイト） 20480 が maxComputeWorkgroupStorageSize 16384 を超える",
+      );
+      assert(
+        error.message.includes(
+          "i8a8.attentionPv（regM=8 regN=8 wgX=16 wgY=16 tileK=128）: 共有メモリ（バイト） 32768 が " +
+            "maxComputeWorkgroupStorageSize 16384 を超える",
+        ),
+        error.message,
+      );
+    }, WEBGPU_DEFAULT_LIMITS);
+    assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
+    const allowed = await withCountingGpu(async () => {
+      await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
+    }, { ...WEBGPU_DEFAULT_LIMITS, maxComputeWorkgroupStorageSize: 32_768 });
+    assertEquals(allowed, 1);
+  });
+
+  it("コールバックの戻りにも同じ門が効く（構造の門を通った後・device を作る前）", async () => {
+    const profile = profileOf("callback", undefined, {
+      conv2d: { rows64: STORAGE_20K, rows32: gemmMTileGeometry(32) },
+    });
+    let calls = 0;
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () =>
+          acquireGpu({
+            geometryProfile: () => {
+              calls += 1;
+              return profile;
+            },
+          }),
+        GpuFeatureError,
+        "geometryProfile（コールバックの戻り）: 幾何プロファイル 'callback': device の上限を超える幾何（conv2d.rows64",
+      );
+    }, WEBGPU_DEFAULT_LIMITS);
+    assertEquals(calls, 1);
+    assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
+  });
+
+  it("構造の門が先（壊れていて上限も超える表は構造の文言で落ちる）", async () => {
+    const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 32, wgY: 16 };
+    const profile = profileOf("order", undefined, { attention: { qk: hole, pv: THREADS_512 } });
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: profile }),
+        GpuFeatureError,
+        "geometryProfile: 幾何プロファイル 'order': attention.qk",
+      );
+    }, WEBGPU_DEFAULT_LIMITS);
+    assertEquals(requests, 0);
   });
 });

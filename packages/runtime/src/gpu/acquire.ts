@@ -16,7 +16,11 @@ import {
 } from "./context.ts";
 import { withPipelineScope } from "./error-scope.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertGeometryProfile, type GeometryProfile } from "../kernels/geometry-profile.ts";
+import {
+  assertGeometryProfile,
+  assertGeometryProfileWithinLimits,
+  type GeometryProfile,
+} from "../kernels/geometry-profile.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
 /** navigator.gpu が無い / アダプタを取得できない。 */
@@ -559,10 +563,12 @@ export type AcquireGpuOptions = {
    * 保証するものではない。選ばれた表の `id` は `Session.diagnostics().geometryProfile` で観測する。
    *
    * 渡した表は複製して保持する（呼び手が後から書き換えても device の寿命の間の表は変わらない）。
-   * MUST: 壊れた表（id が空・`match` の形の破れ・`gemmRows` の昇順 / 末尾 Infinity の破れ・
+   * MUST: 壊れた表（欄の欠け・型違い・id が空・`match` の形の破れ・`gemmRows` の昇順 / 末尾 Infinity の破れ・
    * 整除の破れた幾何）は **device を作る前に** {@link GpuFeatureError} で落とす（壊れた表で
    * device を作らない — 利用者入力に起因する失敗なので公開のエラー型）。直接渡した表は adapter を
-   * 取る前に、コールバックの戻りは呼んだ直後に落とす。
+   * 取る前に、コールバックの戻りは呼んだ直後に落とす。続けて、どちらの表も adapter の limits（計画した
+   * requiredLimits）に対して workgroup の形（スレッド数・`@workgroup_size` の成分・共有メモリ）を見て、
+   * 超える幾何があれば同じく device を作る前に {@link GpuFeatureError} で落とす（欄と幾何と上限を名指す）。
    */
   readonly geometryProfile?:
     | GeometryProfile
@@ -610,7 +616,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   // （Infinity は structuredClone を通る）。
   const givenProfile = source === undefined || typeof source === "function"
     ? undefined
-    : cloneCheckedGeometryProfile(source, "geometryProfile");
+    : cloneCheckedGeometryProfile(source, DIRECT_PROFILE_LABEL);
   const { gpu, adapter } = await requestAdapterOrThrow(options.adapter);
   // コールバックに渡す値と GpuContext.adapterInfo を同じ 1 回の読みにする（別々に読むと、コールバックが
   // 引いた adapter と device の adapter の情報が食い違う形を作れてしまう）
@@ -621,6 +627,18 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
     ? profileFromCallback(source(adapterInfo))
     : givenProfile;
   const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
+  // 門の順序は構造（上の複製の門）→ 上限。上限は adapter が要るので、直接渡した表もここで見る。見るのは
+  // 計画した limits（= device が持つ値 — 絞りの caps を含む）
+  if (geometryProfile !== undefined) {
+    try {
+      assertGeometryProfileWithinLimits(geometryProfile, limits);
+    } catch (error) {
+      throw publicProfileError(
+        typeof source === "function" ? CALLBACK_PROFILE_LABEL : DIRECT_PROFILE_LABEL,
+        error,
+      );
+    }
+  }
   // 条件付き feature の判定はここだけ（不足は例外 — 黙って能力を落とさない）。ADR 0021 / 0028。
   const timestampQuery = planTimestampFeature(adapter.features, options.gpuTiming);
   const shaderF16 = planShaderF16Feature(adapter.features, options.shaderF16);
@@ -659,19 +677,23 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   );
 };
 
+/** 注入された表の門の文言の前置（直接渡した表 / コールバックの戻り）。 */
+const DIRECT_PROFILE_LABEL = "geometryProfile";
+const CALLBACK_PROFILE_LABEL = "geometryProfile（コールバックの戻り）";
+
 /**
- * 注入された表の門（{@link assertGeometryProfile}）を通し、通った表を複製して返す。門の失敗は
- * 内部の {@link CodegenError} ではなく公開の {@link GpuFeatureError} で伝える（利用者入力の失敗は
- * 公開型で捌ける — `subgroups` の検査と同じ流儀）。
+ * 注入された表の門の失敗を、内部の {@link CodegenError} ではなく公開の {@link GpuFeatureError} に替える
+ * （利用者入力の失敗は公開型で捌ける — `subgroups` の検査と同じ流儀）。それ以外の例外はそのまま返す。
  */
-const cloneCheckedGeometryProfile = (profile: GeometryProfile, label: string): GeometryProfile => {
+const publicProfileError = (label: string, error: unknown): unknown =>
+  error instanceof CodegenError ? new GpuFeatureError(`${label}: ${error.message}`) : error;
+
+/** 注入された表の構造の門（{@link assertGeometryProfile} — unknown を表へ絞る）を通し、通った表を複製して返す。 */
+const cloneCheckedGeometryProfile = (profile: unknown, label: string): GeometryProfile => {
   try {
     assertGeometryProfile(profile);
   } catch (error) {
-    if (error instanceof CodegenError) {
-      throw new GpuFeatureError(`${label}: ${error.message}`);
-    }
-    throw error;
+    throw publicProfileError(label, error);
   }
   return structuredClone(profile);
 };
@@ -706,7 +728,7 @@ const profileFromCallback = (
   }
   return returned === undefined
     ? undefined
-    : cloneCheckedGeometryProfile(returned, "geometryProfile（コールバックの戻り）");
+    : cloneCheckedGeometryProfile(returned, CALLBACK_PROFILE_LABEL);
 };
 
 /**

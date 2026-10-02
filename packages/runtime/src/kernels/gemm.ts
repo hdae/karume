@@ -73,6 +73,7 @@ import {
   gemmTileM,
   gemmTileN,
 } from "./gemm-geometry.ts";
+import { workgroupVariableBytes } from "./workgroup-storage.ts";
 import {
   STATE_LENGTHS_STRUCT,
   STATE_PV_TILED_DIMS_EXTRA,
@@ -474,6 +475,20 @@ const tileScalarType = (compute: GemmCompute): string => compute === "f16" ? "f1
 
 const tileQuadType = (compute: GemmCompute): string =>
   compute === "f16" ? "vec4<f16>" : "vec4<f32>";
+
+/**
+ * 骨格（{@link skeleton}）の共有タイル sa（`tileM · K` スカラ）+ sb（`K · 列 quad` の vec4）が使う workgroup
+ * storage のバイト数（WebGPU が `maxComputeWorkgroupStorageSize` と比べる量 — {@link workgroupVariableBytes}）。
+ * GEMM の全経路（matmul / bmm / linear / 融合 attention ①QK・③PV / conv1d / conv2d / states 形）が同じ
+ * 骨格なので op に依らず、計算変種（f32 / f16 — 要素のバイト幅）にだけ依る。
+ * MUST: 骨格の `var<workgroup>` 宣言と同じ式であること（tests/geometry_profile_test.ts が WGSL の宣言から
+ * 数えた総量と突き合わせる）— 食い違うと上限の門（geometry-profile.ts）が上限超えの表を通す。
+ */
+export const gemmWorkgroupStorageBytes = (geometry: GemmGeometry, compute: GemmCompute): number => {
+  const scalarBytes = compute === "f16" ? 2 : 4;
+  return workgroupVariableBytes(gemmTileM(geometry) * GEMM_TILE_K * scalarBytes) +
+    workgroupVariableBytes(GEMM_TILE_K * gemmColumnQuads(geometry) * GEMM_QUAD * scalarBytes);
+};
 
 /** v4 経路が使う quad 数の束縛（スカラ経路では空）。 */
 const quadDims = (v4: boolean): string =>
@@ -1126,8 +1141,8 @@ ${loader}
 // 共有 B タイル（K ${GEMM_TILE_K} × 列 quad ${nQuads}・列方向を vec4 に束ねた形）${
     compute === "f16"
       ? `。f16 変種は共有バイトが半分
-// （${tileM * GEMM_TILE_K * 4 + GEMM_TILE_K * nQuads * 16} B → ${
-        tileM * GEMM_TILE_K * 2 + GEMM_TILE_K * nQuads * 8
+// （${gemmWorkgroupStorageBytes(geometry, "f32")} B → ${
+        gemmWorkgroupStorageBytes(geometry, "f16")
       } B / WG）— 期待利得はこの 1 機序に全て乗る`
       : ""
   }

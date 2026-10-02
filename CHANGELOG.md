@@ -126,7 +126,11 @@ measurements in `docs/research/`.
   0115), for adapters without a built-in profile — typically the table `tools/geometry-sweep`
   generates from a sweep on that machine. When given, the adapter's vendor and architecture are
   not consulted, every session on the device and the dp4a canary use the table, and nothing is
-  measured at run time. A malformed table throws `GpuFeatureError` before any device is created.
+  measured at run time. A malformed table throws `GpuFeatureError` before any device is created,
+  including a value with missing or mistyped fields (for example one read from storage without
+  `parseGeometryProfileJson`), and so does a table with a geometry that exceeds the adapter's
+  workgroup limits (`maxComputeInvocationsPerWorkgroup`, `maxComputeWorkgroupSizeX` / `Y`,
+  `maxComputeWorkgroupStorageSize`); the message names the field, the geometry and the limit.
   `geometryProfile` also accepts a synchronous callback `(adapterInfo) => GeometryProfile |
   undefined`, called once per `acquireGpu` after the adapter is obtained and before the device is
   created, with the same adapter information that becomes `GpuContext.adapterInfo`: a returned

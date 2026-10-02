@@ -32,6 +32,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { workgroupVariableBytes } from "./workgroup-storage.ts";
 
 /** i8 ペイロードの 4 詰め（u32 1 語 = 4 要素）。dp4a の粒度そのもの。 */
 export const I8A8_PACK = 4;
@@ -82,6 +83,20 @@ export const i8a8ASlots = (geometry: I8a8Geometry): number =>
 /** B（重み / k / Vᵀ）タイルを 1 スレッドが埋める本数。 */
 export const i8a8BSlots = (geometry: I8a8Geometry): number =>
   i8a8TileN(geometry) / i8a8FillStride(geometry);
+
+/** u32 1 語のバイト数（共有タイル sa / sb の要素型）。 */
+const U32_BYTES = 4;
+
+/**
+ * 共有タイル sa（`kPacks · tileM` 語）+ sb（`kPacks · tileN` 語）が使う workgroup storage のバイト数
+ * （WebGPU が `maxComputeWorkgroupStorageSize` と比べる量 — {@link workgroupVariableBytes}）。linear /
+ * 融合 attention ①QK・③PV の 3 本とも同じ 2 本の宣言なので op に依らない。
+ * MUST: 生成器の `var<workgroup>` 宣言と同じ式であること（tests/geometry_profile_test.ts が WGSL の宣言から
+ * 数えた総量と突き合わせる）— 食い違うと上限の門（geometry-profile.ts）が上限超えの表を通す。
+ */
+export const i8a8WorkgroupStorageBytes = (geometry: I8a8Geometry): number =>
+  workgroupVariableBytes(i8a8KPacks(geometry) * i8a8TileM(geometry) * U32_BYTES) +
+  workgroupVariableBytes(i8a8KPacks(geometry) * i8a8TileN(geometry) * U32_BYTES);
 
 /**
  * 幾何の整合を生成時に落とす。**割り切れない組み合わせは共有タイルの穴になる**

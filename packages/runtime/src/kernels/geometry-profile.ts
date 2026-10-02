@@ -32,8 +32,13 @@ import {
   GEMM_TILE,
   type GemmGeometry,
 } from "./gemm-geometry.ts";
-import { GEMM_MTILE_SMALL, gemmMTileGeometry } from "./gemm.ts";
-import { assertI8a8Geometry, defaultI8a8Geometry, type I8a8Geometry } from "./i8a8-geometry.ts";
+import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWorkgroupStorageBytes } from "./gemm.ts";
+import {
+  assertI8a8Geometry,
+  defaultI8a8Geometry,
+  type I8a8Geometry,
+  i8a8WorkgroupStorageBytes,
+} from "./i8a8-geometry.ts";
 import { BUILTIN_GEOMETRY_PROFILES } from "./geometry-profiles/index.ts";
 
 /**
@@ -82,7 +87,8 @@ export type GeometryProfile = {
   /**
    * 掃引から生成したプロファイルだけが持つ出どころと照合の材料（DECIDED: ADR 0117 決定 4）。書くのは
    * 生成器（`@karume/runtime/tune` の `deriveGeometryProfile`）だけで、照合は `./tune` の
-   * `geometryProfileMismatch` が行う。runtime（`assertGeometryProfile`・`acquireGpu` の注入口）は見ない。
+   * `geometryProfileMismatch` が行う。runtime（`assertGeometryProfile`・`acquireGpu` の注入口）は形（欄の型）だけを
+   * 見て、照合には使わない。
    */
   readonly provenance?: {
     /** 掃引の記録の path（生成に渡した順に `", "` で連結）。 */
@@ -170,6 +176,70 @@ const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): voi
   });
 };
 
+/** 欄を読めるオブジェクトであることの門（配列・null・プリミティブを欄の path つきで落とす）。 */
+const recordOf = (value: unknown, where: string, path: string): Record<string, unknown> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CodegenError(`${where}: ${path} がオブジェクトでない`);
+  }
+  return { ...value };
+};
+
+const stringOf = (value: unknown, where: string, path: string): string => {
+  if (typeof value === "string") return value;
+  throw new CodegenError(
+    `${where}: ${path} が文字列でない（${value === undefined ? "無い" : typeof value}）`,
+  );
+};
+
+const optionalStringOf = (value: unknown, where: string, path: string): string | undefined =>
+  value === undefined ? undefined : stringOf(value, where, path);
+
+/**
+ * 幾何の欄が数であることの門。値域（正整数）と整除条件は {@link assertGemmGeometry} /
+ * {@link assertI8a8Geometry} の担当（数でない値も同じ文言で落とす）。
+ */
+const numberOf = (value: unknown, where: string, path: string, name: string): number => {
+  if (typeof value === "number") return value;
+  throw new CodegenError(`${where}: ${path}: 幾何の ${name} は正整数（${String(value)}）`);
+};
+
+const gemmGeometryOf = (value: unknown, where: string, path: string): GemmGeometry => {
+  const { regM, regN, wgX, wgY } = recordOf(value, where, path);
+  return {
+    regM: numberOf(regM, where, path, "regM"),
+    regN: numberOf(regN, where, path, "regN"),
+    wgX: numberOf(wgX, where, path, "wgX"),
+    wgY: numberOf(wgY, where, path, "wgY"),
+  };
+};
+
+const i8a8GeometryOf = (value: unknown, where: string, path: string): I8a8Geometry => {
+  const { tileK } = recordOf(value, where, path);
+  return { ...gemmGeometryOf(value, where, path), tileK: numberOf(tileK, where, path, "tileK") };
+};
+
+/**
+ * `provenance` の形（欄の型だけ）。中身の照合は `@karume/runtime/tune` の `geometryProfileMismatch` の担当で、
+ * runtime は読まない — ここで見るのは、門を通った値を {@link GeometryProfile} と名乗らせる以上、型の宣言と
+ * 違う値を通さないため。
+ */
+const assertProvenanceShape = (value: unknown, where: string): void => {
+  const provenance = recordOf(value, where, "provenance");
+  for (const key of ["sweep", "sha256", "date", "candidateSet", "kernels", "caseSet"] as const) {
+    stringOf(provenance[key], where, `provenance.${key}`);
+  }
+  const adapter = recordOf(provenance.adapter, where, "provenance.adapter");
+  for (const key of ["vendor", "architecture", "device", "description"] as const) {
+    stringOf(adapter[key], where, `provenance.adapter.${key}`);
+  }
+  if (provenance.userAgent === undefined) return;
+  if (!Array.isArray(provenance.userAgent)) {
+    throw new CodegenError(`${where}: provenance.userAgent が配列でない`);
+  }
+  const agents: readonly unknown[] = provenance.userAgent;
+  agents.forEach((agent, index) => stringOf(agent, where, `provenance.userAgent[${index}]`));
+};
+
 /**
  * プロファイル 1 本の門（match の形・規則列・全欄の幾何の整除条件）。
  *
@@ -177,14 +247,29 @@ const assertGemmRowsRules = (rules: readonly GemmRowsRule[], where: string): voi
  * プロファイルを**その op に当たるまで**気づけない形にしないため（Session 構築で 1 度だけ見る）。
  * NOTE: w4a8 の `groupSize % tileK` は資産の group 長に依るので、ここでは見られない（生成時の
  * `assertI8a8GroupGeometry` の担当）。
+ *
+ * 受けるのは unknown で、通った値を {@link GeometryProfile} へ絞る型述語（`acquireGpu` は JS の呼び手や保存物から
+ * 組んだ値も受けるので、欄の欠けや型違いを TypeError ではなくこの門の {@link CodegenError} で落とす）。欄の型は
+ * 全て見る（`provenance` を含む）が、未知の欄は拒まない（それは保存物を読む `parseGeometryProfileJson` の担当）。
+ * device の上限は見ない（{@link assertGeometryProfileWithinLimits} の担当 — adapter が要る）。
  */
-export const assertGeometryProfile = (profile: GeometryProfile): void => {
-  const where = `幾何プロファイル '${profile.id}'`;
-  if (profile.id.length === 0) {
+export const assertGeometryProfile: (profile: unknown) => asserts profile is GeometryProfile = (
+  profile,
+) => {
+  const fields = recordOf(profile, "幾何プロファイル", "表");
+  const { id } = fields;
+  if (typeof id !== "string") {
+    throw new CodegenError(`幾何プロファイル: id が文字列でない（${typeof id}）`);
+  }
+  if (id.length === 0) {
     throw new CodegenError("幾何プロファイル: id が空（診断で選ばれた表を名指せない）");
   }
-  if (profile.match !== undefined) {
-    const { vendor, architecture, description } = profile.match;
+  const where = `幾何プロファイル '${id}'`;
+  if (fields.match !== undefined) {
+    const match = recordOf(fields.match, where, "match");
+    const vendor = optionalStringOf(match.vendor, where, "match.vendor");
+    const architecture = optionalStringOf(match.architecture, where, "match.architecture");
+    const description = optionalStringOf(match.description, where, "match.description");
     if (vendor === "" || architecture === "" || description === "") {
       throw new CodegenError(
         `${where}: match の vendor / architecture / description は空文字にしない（未指定は省く）`,
@@ -201,25 +286,128 @@ export const assertGeometryProfile = (profile: GeometryProfile): void => {
       );
     }
   }
-  assertGemmRowsRules(profile.gemmRows, where);
-  for (
-    const [name, geometry] of [
-      ["attention.qk", profile.attention.qk],
-      ["attention.pv", profile.attention.pv],
-      ["conv2d.rows64", profile.conv2d.rows64],
-      ["conv2d.rows32", profile.conv2d.rows32],
-    ] as const
-  ) {
-    assertGemmGeometry(geometry, `${where}: ${name}`);
+  if (!Array.isArray(fields.gemmRows)) {
+    throw new CodegenError(`${where}: gemmRows が配列でない`);
   }
+  const rows: readonly unknown[] = fields.gemmRows;
+  assertGemmRowsRules(
+    rows.map((entry, index): GemmRowsRule => {
+      const rule = recordOf(entry, where, `gemmRows[${index}]`);
+      if (typeof rule.maxRows !== "number") {
+        throw new CodegenError(`${where}: gemmRows[${index}] の maxRows が数でない`);
+      }
+      return {
+        maxRows: rule.maxRows,
+        geometry: gemmGeometryOf(rule.geometry, where, `gemmRows[${index}].geometry`),
+      };
+    }),
+    where,
+  );
+  const attention = recordOf(fields.attention, where, "attention");
+  const conv2d = recordOf(fields.conv2d, where, "conv2d");
   for (
     const [name, geometry] of [
-      ["i8a8.linear", profile.i8a8.linear],
-      ["i8a8.attentionQk", profile.i8a8.attentionQk],
-      ["i8a8.attentionPv", profile.i8a8.attentionPv],
+      ["attention.qk", attention.qk],
+      ["attention.pv", attention.pv],
+      ["conv2d.rows64", conv2d.rows64],
+      ["conv2d.rows32", conv2d.rows32],
     ] as const
   ) {
-    assertI8a8Geometry(geometry, `${where}: ${name}`);
+    assertGemmGeometry(gemmGeometryOf(geometry, where, name), `${where}: ${name}`);
+  }
+  const i8a8 = recordOf(fields.i8a8, where, "i8a8");
+  for (
+    const [name, geometry] of [
+      ["i8a8.linear", i8a8.linear],
+      ["i8a8.attentionQk", i8a8.attentionQk],
+      ["i8a8.attentionPv", i8a8.attentionPv],
+    ] as const
+  ) {
+    assertI8a8Geometry(i8a8GeometryOf(geometry, where, name), `${where}: ${name}`);
+  }
+  if (fields.provenance !== undefined) assertProvenanceShape(fields.provenance, where);
+};
+
+/**
+ * 上限の門が見る device の limits（`GPUSupportedLimits` のうち幾何だけで決まる 4 欄 — {@link assertGeometryProfileWithinLimits}）。
+ * `acquireGpu` の計画した requiredLimits（RequiredLimits）はそのまま渡せる。
+ */
+export type WorkgroupLimits = {
+  readonly maxComputeInvocationsPerWorkgroup: number;
+  readonly maxComputeWorkgroupSizeX: number;
+  readonly maxComputeWorkgroupSizeY: number;
+  readonly maxComputeWorkgroupStorageSize: number;
+};
+
+/** 上限超えの文言の幾何の綴り（どの幾何かを値で名指す — 欄の名前だけでは持ち込みの表を直せない）。 */
+const geometryLabel = (geometry: GemmGeometry | I8a8Geometry): string =>
+  `regM=${geometry.regM} regN=${geometry.regN} wgX=${geometry.wgX} wgY=${geometry.wgY}${
+    "tileK" in geometry ? ` tileK=${geometry.tileK}` : ""
+  }`;
+
+/**
+ * プロファイルの全欄の幾何が device の workgroup の上限に収まることの門（門を通った表だけを受ける —
+ * 順序は {@link assertGeometryProfile} → これ）。超えた欄を全て名指して {@link CodegenError} で落とす。
+ *
+ * 見る上限は WebGPU の compute パイプライン検証と同じ 4 つ: `@workgroup_size(wgX, wgY)` の成分ごと
+ * （`maxComputeWorkgroupSizeX` / `Y`）・スレッド数 wgX · wgY（`maxComputeInvocationsPerWorkgroup`）・
+ * 共有タイルの workgroup storage（`maxComputeWorkgroupStorageSize` — {@link gemmWorkgroupStorageBytes} /
+ * {@link i8a8WorkgroupStorageBytes}）。
+ * MUST: 注入された表は device を作る前にここを通す。超えた幾何のパイプラインは検証エラーになり、その op に
+ * 当たるまで（Session の構築・最初の実行）気づけない — 壊れた表で device を作らない、と同じ規律。
+ * GEMM の共有メモリは f32 変種（f16 の 2 倍）で数える: 表は計算変種を選ばずに全ての変種へ当たるので、
+ * 大きい方が収まらない表はどこかの経路で落ちる。
+ * NOTE: dispatch 数の上限（`maxComputeWorkgroupsPerDimension`）は見ない。あちらは幾何と**実行時の shape** の
+ * 組で決まり（`ceil(M / tileM)` など）、表だけでは判定できない — dispatch を組む時点の
+ * `tiledWorkgroups` が `DispatchLimitError` で落とす担当（src/codegen/dispatch.ts）。こちらは shape に依らない
+ * 1 workgroup の形だけを見る。
+ * NOTE: 埋め込みの表と既定の表は WebGPU の既定の上限（256 / 256 / 256 / 16,384 B — どの device も最低これを
+ * 出す）で通ることをテストが縛るので、自動選択の経路ではここを通さない。
+ */
+export const assertGeometryProfileWithinLimits = (
+  profile: GeometryProfile,
+  limits: WorkgroupLimits,
+): void => {
+  const violations: string[] = [];
+  const check = (
+    name: string,
+    geometry: GemmGeometry | I8a8Geometry,
+    storageBytes: number,
+  ): void => {
+    const exceeds = (what: string, value: number, limit: keyof WorkgroupLimits): void => {
+      if (value > limits[limit]) {
+        violations.push(
+          `${name}（${geometryLabel(geometry)}）: ${what} ${value} が ${limit} ${
+            limits[limit]
+          } を超える`,
+        );
+      }
+    };
+    exceeds(
+      "スレッド数 wgX × wgY",
+      geometry.wgX * geometry.wgY,
+      "maxComputeInvocationsPerWorkgroup",
+    );
+    exceeds("wgX", geometry.wgX, "maxComputeWorkgroupSizeX");
+    exceeds("wgY", geometry.wgY, "maxComputeWorkgroupSizeY");
+    exceeds("共有メモリ（バイト）", storageBytes, "maxComputeWorkgroupStorageSize");
+  };
+  const gemm = (name: string, geometry: GemmGeometry): void =>
+    check(name, geometry, gemmWorkgroupStorageBytes(geometry, "f32"));
+  const i8a8 = (name: string, geometry: I8a8Geometry): void =>
+    check(name, geometry, i8a8WorkgroupStorageBytes(geometry));
+  profile.gemmRows.forEach((rule, index) => gemm(`gemmRows[${index}]`, rule.geometry));
+  gemm("attention.qk", profile.attention.qk);
+  gemm("attention.pv", profile.attention.pv);
+  gemm("conv2d.rows64", profile.conv2d.rows64);
+  gemm("conv2d.rows32", profile.conv2d.rows32);
+  i8a8("i8a8.linear", profile.i8a8.linear);
+  i8a8("i8a8.attentionQk", profile.i8a8.attentionQk);
+  i8a8("i8a8.attentionPv", profile.i8a8.attentionPv);
+  if (violations.length > 0) {
+    throw new CodegenError(
+      `幾何プロファイル '${profile.id}': device の上限を超える幾何（${violations.join(" / ")}）`,
+    );
   }
 };
 
