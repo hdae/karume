@@ -174,7 +174,9 @@ measurements in `docs/research/`.
   seven-rule table, the same stage took 43 s instead of 52 s (GPU time 42 s instead of 51 s):
   the default f32 linear and QK geometries on the M2 ran faster under Chrome 154 than under
   Chrome 153 (same WGSL), so the table's gain is smaller there; the PNG bytes are still
-  unchanged.
+  unchanged. On an RTX 5070 Ti the same A/B leaves the `f16` DiT stage unchanged (2.88 s of GPU
+  time either way, because the NVIDIA profile changes only the i8a8 tiles and the M 129〜512 rows)
+  with identical PNG bytes.
 
 ### Fixed
 

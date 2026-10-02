@@ -634,6 +634,24 @@ WGSL は同一:
    選択（どの幾何が最速か）は 3 欄とも変わらない。ADR [0117](../decisions/0117-app-geometry-tuning.md) §10「検出できない古さ」（ブラウザ・
    ドライバ・OS の更新で性能特性が変わっても照合は一致のまま）の最初の実例。
 
+### RTX 5070 Ti の自己 A/B — `f16` 席（2026-10-02・checkout `bb6d055e`・Chrome 154）
+
+M2 と同じ手順（gpu-lab の A/B ボタン・既定 quant と `f16` の 2 席・512²・seed 42・N = 3・区間 A = `default` 注入・区間 B = `自動` =
+`nvidia-blackwell`）の記録（`outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-10-02T05-46-09.428Z.json`・
+adapter `nvidia` / `blackwell` / `0x2c05` / `"NVIDIA GeForce RTX 5070 Ti"`・12 行・失敗 0・checkoutDirty true = ADR 0117 段 4 の
+作業中の未コミット変更〈provenance / tune — codegen には触れない〉が bundle に乗っていた）。時間は各区間の 2 回目以降の中央値。
+
+| 席                | PNG sha256（先頭）           | DiT 段 GPU A → B          | 全体 壁時計 A → B         | 備考                                                                                    |
+| ----------------- | ---------------------------- | ------------------------- | ------------------------- | --------------------------------------------------------------------------------------- |
+| 既定（i8a8・s16） | `3b07b912c4d4`（6 / 6 一致） | 1.346 → 1.178 s（×0.875） | 18.19 → 18.06 s（×0.993） | 10-01 の記録（1.32 → 1.12〜1.17・×0.87）と同じ比・同じ sha                              |
+| `f16`             | `c3cef8d6bc64`（6 / 6 一致） | 2.876 → 2.875 s（×1.000） | 19.74 → 19.76 s（×1.001） | DiT の f32 linear（M > 512）は `nvidia-blackwell` では既定のまま — 変化なしが期待どおり |
+
+- `nvidia-blackwell` の 7 段化で新しく入った 257〜512 の規則（`reg64x64r8x4w16`）は、`f16` 席の DiT の中では M = 512 の linear
+  （cross-attention の k / v 射影）に当たり、その行は `reg64x32r4x4w8` 0.139 s → `reg64x64r8x4w16` 0.106 s（×0.76・掃引の ×1.33 と
+  同じ向き）。DiT 全体では他の行の揺れに埋もれて中立（2.876 → 2.875 s）。text_conditioner 段の GPU は 0.011 s で両区間同じ。
+- text_encoder の壁時計 12.8 s はネットワーク越しの重み取得（GPU 0.03〜0.04 s）。VAE 段 GPU 0.123 s は両区間同じ。
+- これで ADR 0116 検収 段 5（M2 / RTX の `f16` 席の自己 A/B・PNG sha 一致・text 段の GPU 時間の記録）は両機とも取得済み。
+
 ## 参照
 
 - M2 の JSON: `outputs/bench-browser/anima-residency-browser-f16+dit8-a8-attn8-s16-2026-09-27T14-24-06.310Z.json`
