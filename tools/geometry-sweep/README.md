@@ -86,9 +86,15 @@ Flags:
   `--opt-in` or without `--description`. Files that differ from `--vendor` / `--architecture` /
   `--description` (when given) are rejected too, and so is the same file given twice. Files without `cases[]` (the default re-measurement of
   each case) are rejected. GPU timestamps are required: only sweeps whose
-  `gpuTiming.unit` is `ns` or `deno-raw-tick` and whose `gpuTiming.quantized` is false are
-  accepted. Wall-clock sweeps (unit `wall`, or no `gpuTiming`) and quantized sweeps are rejected,
-  because both shrink the ratios between geometries toward 1. To get timestamps, run the Deno CLI
+  `gpuTiming.unit` is `ns` or `deno-raw-tick` are accepted. Wall-clock sweeps (unit `wall`, or
+  no `gpuTiming`) are rejected: the submit-to-completion floor shrinks the ratios between
+  geometries toward 1, and it varies from pass to pass, so its error cannot be bounded from the
+  record. Quantized sweeps (`gpuTiming.quantized` true — Chrome rounds timestamps to 100 µs) are
+  accepted. For each row, the rounding error bound of its speed-up is 100 µs divided by the row's
+  shortest round, plus the same for the case's default row. A row whose bound exceeds 1% is left
+  out of that sweep's speed-ups (its output match and failure still count); when the default row's
+  own bound exceeds 1%, the whole case is left out of that sweep. The rows and cases left out are
+  listed in the verdicts with their bounds. To get timestamps, run the Deno CLI
   on an adapter that lists `timestamp-query` (it then uses it automatically), or check
   **GPU の timestamp で測る** in the GPU settings of the GPU lab page with the WebGPU developer
   features enabled. The page's **プロファイル** tab runs the same rules on sweep results in the

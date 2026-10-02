@@ -56,6 +56,9 @@ export type Measured = {
   readonly speedup?: number;
   readonly identical?: boolean;
   readonly error?: string;
+  /** 計測 round ごとの pass の時間（丸め誤差の上界の材料 — 省くと行に載せない）。 */
+  readonly rounds?: readonly number[];
+  readonly reps?: number;
 };
 
 /** 掃引の 1 行（`report.ts` の `SweepRow` のうち生成が読む欄 + 数欄）。 */
@@ -74,15 +77,18 @@ export const row = (
   ...(measured.speedup === undefined ? {} : { speedupVsDefault: measured.speedup }),
   ...(measured.identical === undefined ? {} : { identicalToDefault: measured.identical }),
   ...(measured.error === undefined ? {} : { error: measured.error }),
+  ...(measured.rounds === undefined ? {} : { rounds: measured.rounds }),
+  ...(measured.reps === undefined ? {} : { reps: measured.reps }),
 });
 
-/** ケース 1 本ぶんの行（既定 + 候補ごとの測定）。 */
+/** ケース 1 本ぶんの行（既定 + 候補ごとの測定・既定の行の rounds などは `defaultMeasured`）。 */
 export const caseRows = (
   ref: CaseRef,
   defaultGeometry: GemmGeometry,
   candidates: readonly (readonly [GemmGeometry, Measured])[],
+  defaultMeasured: Measured = {},
 ): Record<string, unknown>[] => [
-  row(ref, gemmCandidate(defaultGeometry), true),
+  row(ref, gemmCandidate(defaultGeometry), true, defaultMeasured),
   ...candidates.map(([geometry, measured]) =>
     row(ref, gemmCandidate(geometry), false, { identical: true, ...measured })
   ),

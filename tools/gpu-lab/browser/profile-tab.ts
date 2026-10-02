@@ -311,7 +311,7 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
     if (verdict.excluded.length > 0) {
       rejected.append(
         disclosure(
-          `比の材料から外したケース ${verdict.excluded.length} 件`,
+          `比の材料から外したケース・観測 ${verdict.excluded.length} 件`,
           verdict.excluded.map(excludedCaseLine),
         ),
       );
@@ -385,7 +385,7 @@ export const mountProfileTab = (root: HTMLElement, deps: ProfileTabDeps): Profil
       } を作りました（採用 ${adopted} 欄 · 既定のまま ${
         verdicts.length - adopted
       } 欄 · 記録 ${sources.length} 本${
-        excluded === 0 ? "" : ` · 比の材料から外したケース ${excluded} 件`
+        excluded === 0 ? "" : ` · 比の材料から外したケース・観測 ${excluded} 件`
       }）。「この表を適用」で GPU 設定に注入します。`,
     );
   };

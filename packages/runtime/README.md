@@ -102,7 +102,8 @@ Nothing is measured on the `acquireGpu` / `Session` path, and a sweep must not r
 uses the same GPU. A profile only adopts a geometry whose output matched the default bit for bit,
 and was at least ×1.05 faster, on every sweep case of its field (the cases come from one image
 model's op census). A sweep takes minutes (`quick+`) to an hour (`full`). Profiles are derived only
-from sweeps timed with unquantized GPU timestamps, and the runtime does not check an injected
+from sweeps timed with GPU timestamps (a row whose speed-up could be off by more than 1% from
+timestamp rounding is left out), and the runtime does not check an injected
 profile against the adapter.
 
 ## Requirements

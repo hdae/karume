@@ -36,9 +36,12 @@
  * 信用できないから。外すのは比だけで、出力の不一致と失敗はそのケースでも判定に効く（出力の一致は正しさの
  * 門で熱に依らない）。外したケースは採否の行に全部残す。
  *
- * 入力の門（ADR 0115 §4）: GPU の timestamp で測った掃引（`gpuTiming.unit` が `ns` か
- * `deno-raw-tick`、かつ `gpuTiming.quantized` が false）だけを受ける。壁時計と 100 µs 丸めは
- * 幾何どうしの比を 1 へ縮めるので、勝ち負けの判定に使えない。
+ * 入力の門（ADR 0115 §4 を ADR 0117 決定 3 で改定）: GPU の timestamp で測った掃引（`gpuTiming.unit` が
+ * `ns` か `deno-raw-tick`）だけを受ける。壁時計は submit → 完了の床を含み、その誤差は pass ごとに動くので
+ * 記録だけから上界を出せない。timestamp の丸め（Chrome のフラグ無しの 100 µs）は掃引ごと拒まず、観測
+ * （掃引 1 本の中の 1 行）ごとに比の誤差の上界 E = e(行) + e(既定の行)（e = 刻み ÷ 最小の round）を出し、
+ * {@link ROUNDING_ERROR_LIMIT} を超える観測をその掃引の比の材料から外す（{@link roundingBound}）。
+ * 既定の行の e が超えるケースは全観測を外す。外した観測は採否の行に E の値つきで残す。
  *
  * クラスの境界: linear / matmul / bmm は行数 M の段（境界は掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` =
  * ≤ 16 / 17〜32 / 33〜64 / 65〜128 / 129〜256 / 257〜512 / > 512 — 既定の表 `GEMM_ROWS_BUCKETS` の
@@ -58,10 +61,17 @@ import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
 import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
-import { driftOutOfRange, REPORT_FORMAT } from "./report.ts";
+import { CHROME_TIMESTAMP_QUANTUM_NS, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
 /** `--min-speedup` の既定（既定比がこれ未満の勝ちは測定の揺れと区別しない）。 */
 export const DEFAULT_MIN_SPEEDUP = 1.05;
+
+/**
+ * 観測の比の丸め誤差の上界 E のしきい値（ADR 0117 決定 3）。採用の閾値 ×1.05 の余地（5%）の 1/5、
+ * 再測定比の許容幅（0.9〜1.1）の 1/10。80 ms の pass なら E は約 0.25% で、超えるのは reps の見積りが
+ * 外れた短い pass だけ。規則は 1 つ — 引数にも options にもしない（除外を無効にする口も作らない）。
+ */
+const ROUNDING_ERROR_LIMIT = 0.01;
 
 /**
  * 表を当てる adapter（生成物の `match`）。`vendor` / `architecture` / `description` は runtime の選択と
@@ -102,6 +112,11 @@ type SweepObservation = {
   readonly speedupVsDefault?: number;
   readonly identicalToDefault?: boolean;
   readonly error?: string;
+  /**
+   * 計測 round ごとの pass の時間（単位は `gpuTiming.unit`・負だった round は 0 に丸めて残る — report.ts）。
+   * 丸め誤差の上界（{@link roundingBound}）だけが読む。
+   */
+  readonly rounds?: readonly number[];
 };
 
 /** ケース末尾の既定の再測定（`cases[]` のうち生成が読む欄 — report.ts の `CaseSummary`）。 */
@@ -120,6 +135,11 @@ export type SweepSource = {
   readonly sha256: string;
   readonly date: string;
   readonly adapter: SweepAdapter;
+  /**
+   * timestamp の量子化の刻み q（`rounds` と同じ単位）。`gpuTiming.quantized` が true なら Chrome の 100 µs、
+   * false なら 0（丸めが無い）。
+   */
+  readonly timestampQuantum: number;
   readonly cases: readonly SweepCaseRepeat[];
   readonly rows: readonly SweepObservation[];
 };
@@ -151,6 +171,14 @@ const isPositiveNumber = (value: unknown): value is number =>
 const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 
 const isString = (value: unknown): value is string => typeof value === "string";
+
+const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+
+/** `rounds` の形（report.ts — 負だった round は 0 に丸めて残すので、負の値は記録の形として壊れている）。 */
+const isRounds = (value: unknown): value is readonly number[] =>
+  Array.isArray(value) &&
+  value.every((entry) => typeof entry === "number" && Number.isFinite(entry) && entry >= 0);
 
 const isSweepOp = (value: unknown): value is SweepOp =>
   typeof value === "string" && (SWEEP_OPS as readonly string[]).includes(value);
@@ -195,6 +223,10 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
   const speedupVsDefault = optional(value, "speedupVsDefault", isPositiveNumber, where);
   const identicalToDefault = optional(value, "identicalToDefault", isBoolean, where);
   const error = optional(value, "error", isString, where);
+  const rounds = optional(value, "rounds", isRounds, where);
+  // reps は検査だけ: 丸め誤差の上界 e = q ÷ min(round) が perDispatch（= min ÷ reps）の相対誤差の上界に
+  // なるのは、reps が整数で誤差を持たないから（ADR 0117 決定 3）。値そのものは上界に効かない
+  optional(value, "reps", isPositiveInteger, where);
   return {
     caseId: requireString(value, "caseId", where),
     op,
@@ -205,6 +237,7 @@ const parseRow = (value: unknown, where: string): SweepObservation => {
     ...(speedupVsDefault === undefined ? {} : { speedupVsDefault }),
     ...(identicalToDefault === undefined ? {} : { identicalToDefault }),
     ...(error === undefined ? {} : { error }),
+    ...(rounds === undefined ? {} : { rounds }),
   };
 };
 
@@ -242,8 +275,9 @@ export const parseSweepReport = (
   }
   const adapter = parsed.adapter;
   if (!isRecord(adapter)) throw new Error(`${where}: adapter が無い`);
-  // MUST: GPU の timestamp で測った掃引だけを受ける（ADR 0115 §4）。壁時計は submit → 完了の床を
-  // 含むので幾何どうしの比が 1 へ縮み、「既定比 ≥ --min-speedup」の門が意味を失う
+  // MUST: GPU の timestamp で測った掃引だけを受ける（ADR 0115 §4・ADR 0117 決定 3）。壁時計は
+  // submit → 完了の床を含むので幾何どうしの比が 1 へ縮み、床は pass ごとに動くので丸めのような
+  // 既知の定数で誤差を押さえられない（行ごとの上界を記録だけから出せない）
   const timingFix = "Deno の CLI は adapter が timestamp-query を列挙すれば timestamp で測る" +
     "（単位 deno-raw-tick）ので timestamp-query を持つ adapter で、Chrome のページは" +
     "「GPU の timestamp で測る」にチェックを入れて測り直す";
@@ -258,16 +292,19 @@ export const parseSweepReport = (
         `wall は壁時計で比が 1 へ縮む）— ${timingFix}`,
     );
   }
-  // Chrome の 100 µs 量子化の下では比が刻みに潰れる（README の Caveats）— 表の材料にしない
-  if (gpuTiming.quantized === true) {
+  // 量子化（Chrome の 100 µs 丸め）は掃引ごとは拒まない — 丸めの刻み q を観測ごとの誤差の上界に使う
+  // （deriveProfile・ADR 0117 決定 3）
+  const quantized = gpuTiming.quantized;
+  if (!isBoolean(quantized)) {
     throw new Error(
-      `${where}: timestamp が 100 µs に量子化されている（gpuTiming.quantized）— ` +
-        "Chrome の WebGPU developer features を有効にして測り直す",
+      `${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(quantized)}）`,
     );
   }
-  if (gpuTiming.quantized !== false) {
+  // 書き手（report.ts の roundsLookQuantized）は単位 ns でだけ量子化を判定する。raw tick に ns の刻みを
+  // 当てると上界が別物になるので、組が崩れた記録は落とす
+  if (quantized && unit !== "ns") {
     throw new Error(
-      `${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(gpuTiming.quantized)}）`,
+      `${where}: gpuTiming.quantized が true なのに単位が ${unit}（ns でだけ判定する）`,
     );
   }
   // 既定の再測定（cases[]）は材料の門が読む — 無い記録は「どのケースも再測定が無い」になるので、
@@ -303,6 +340,7 @@ export const parseSweepReport = (
       architecture: requireString(adapter, "architecture", `${where} adapter`),
       description: requireString(adapter, "description", `${where} adapter`),
     },
+    timestampQuantum: quantized ? CHROME_TIMESTAMP_QUANTUM_NS : 0,
     cases,
     rows,
   };
@@ -548,21 +586,32 @@ export type SlotVerdict = {
     };
   /** 採らなかった幾何と理由（名前の昇順）。 */
   readonly rejected: readonly { readonly name: string; readonly reason: string }[];
-  /** このクラスのケースのうち、掃引ごとに比の材料から外したもの（掃引を渡した順 → ケース id の昇順）。 */
+  /**
+   * このクラスのケース・観測のうち、掃引ごとに比の材料から外したもの（掃引を渡した順 → ケース id の昇順 →
+   * ケース単位の除外 → 幾何名の昇順）。ケース単位（再測定比の範囲外・既定の行の丸め誤差）と観測単位
+   * （丸め誤差の上界 E > 1% — `geometry` あり）がある。
+   */
   readonly excluded: readonly ExcludedCase[];
 };
 
-/** 掃引 1 本の中で比の材料から外したケース（{@link exclusionReason}）— 出力の一致と失敗は見る。 */
+/**
+ * 掃引 1 本の中で比の材料から外したケース（{@link exclusionReason}）か、ケースの 1 幾何の観測
+ * （`geometry` あり — 丸め誤差の上界が超えた行・{@link roundingBound}）— 出力の一致と失敗は見る。
+ */
 export type ExcludedCase = {
   readonly path: string;
   readonly caseId: string;
+  /** 外したのがケースの 1 幾何の観測だけのとき、その幾何の名前（無ければケースの全観測）。 */
+  readonly geometry?: string;
   /** 「既定の再測定比 ×1.160 が範囲外」など（{@link excludedCaseLine} が文にする）。 */
   readonly reason: string;
 };
 
-/** 外したケースの 1 行（生成物のコメント・標準出力・ページで同じ文）。 */
+/** 外したケース・観測の 1 行（生成物のコメント・標準出力・ページで同じ文）。 */
 export const excludedCaseLine = (excluded: ExcludedCase): string =>
-  `掃引 ${excluded.path}: ${excluded.caseId} は${excluded.reason}のため比の材料から外した（出力の一致と失敗は見る）`;
+  `掃引 ${excluded.path}: ${excluded.caseId}${
+    excluded.geometry === undefined ? "" : ` の ${excluded.geometry}`
+  } は${excluded.reason}のため比の材料から外した（出力の一致と失敗は見る）`;
 
 /**
  * ケースをその掃引の比の材料から外す理由（外さないなら undefined）。
@@ -576,6 +625,51 @@ const exclusionReason = (repeat: SweepCaseRepeat | undefined): string | undefine
   if (repeat?.driftRatio === undefined) return "既定の再測定が無い";
   return driftOutOfRange(repeat.driftRatio)
     ? `既定の再測定比 ${formatRatio(repeat.driftRatio)} が範囲外`
+    : undefined;
+};
+
+/** 丸め誤差の上界（`bound` = 相対誤差）か、上界を出せない理由。 */
+type RoundingBound = { readonly bound: number } | { readonly unknown: string };
+
+/**
+ * 行の丸め誤差の上界 e(r) = q ÷ min(rounds)（ADR 0117 決定 3）。timestamp 2 つの差の丸め誤差は 1 刻み
+ * 未満なので、e は min の round（= `perDispatch` × reps）の相対誤差の上界になる（1 次の近似）。
+ *
+ * 0 の round は min の候補にしない — 負だった round は記録に 0 で残り（report.ts）、`perDispatch` の
+ * min の候補から外れているから。負でなく丸めで 0 になった round が min なら `perDispatch` が 0 で、その行は
+ * 既定比を持たない（report.ts の比較）ので、外しても判定は変わらない。
+ */
+const roundingBound = (row: SweepObservation, quantum: number): RoundingBound => {
+  // 丸めが無ければ誤差も無い — rounds の無い古い記録もここで通る
+  if (quantum === 0) return { bound: 0 };
+  if (row.rounds === undefined) return { unknown: "rounds が無い" };
+  const kept = row.rounds.filter((round) => round > 0);
+  if (kept.length === 0) return { unknown: "正の round が無い" };
+  return { bound: quantum / Math.min(...kept) };
+};
+
+/** 百分率の表示（丸め誤差の上界 — 採否の行の綴り）。 */
+const formatPercent = (value: number): string => `${(value * 100).toFixed(2)}%`;
+
+const LIMIT_LABEL = `${ROUNDING_ERROR_LIMIT * 100}%`;
+
+/**
+ * 既定の行の丸め誤差の上界 e(d) がしきい値を超える・出せないケースは、そのケースの全観測の E が超える
+ * （E = e(r) + e(d) ≥ e(d)）ので、ケースごと外す理由（外さないなら undefined）。
+ */
+const defaultRoundingReason = (bound: RoundingBound): string | undefined => {
+  if ("unknown" in bound) return `既定の行の丸め誤差の上界が不明（${bound.unknown}）`;
+  return bound.bound > ROUNDING_ERROR_LIMIT
+    ? `既定の行の丸め誤差の上界 e ${formatPercent(bound.bound)}（> ${LIMIT_LABEL}）`
+    : undefined;
+};
+
+/** 観測の比の丸め誤差の上界 E = e(r) + e(d) がしきい値を超える・出せないとき、外す理由。 */
+const rowRoundingReason = (bound: RoundingBound, defaultBound: number): string | undefined => {
+  if ("unknown" in bound) return `丸め誤差の上界が不明（${bound.unknown}）`;
+  const total = bound.bound + defaultBound;
+  return total > ROUNDING_ERROR_LIMIT
+    ? `丸め誤差の上界 E ${formatPercent(total)}（> ${LIMIT_LABEL}）`
     : undefined;
 };
 
@@ -777,6 +871,10 @@ export const targetLabel = (target: ProfileTarget): string =>
  * 残らないケースはどの幾何も比を測っていない扱い（クラスの全ケースで勝つ規則により欄は既定のまま）。
  * 出力の不一致と失敗は外したケースでも判定に残す — 出力の一致は正しさの門で熱に依らないので、外した掃引で
  * 不一致 / 失敗の幾何は他の掃引で一致していても候補にしない。外すかどうかの選択肢は持たない（規則は 1 つ）。
+ *
+ * 丸めの門（ADR 0117 決定 3）: 既定の行の丸め誤差の上界 e(d) が 1% を超える（か出せない）ケースも同じくその掃引の
+ * 比の観測から外し（{@link defaultRoundingReason}）、それ以外の行は E = e(r) + e(d) が 1% を超える観測だけを外す
+ * （{@link rowRoundingReason}）。非量子化（q = 0）なら e = 0 で rounds を見ない。
  */
 export const deriveProfile = (
   sources: readonly SweepSource[],
@@ -839,20 +937,59 @@ export const deriveProfile = (
         .map((row) => [row.caseId, gemmTileM(row.geometryParams)] as const),
     );
     const repeats = new Map(source.cases.map((repeat) => [repeat.caseId, repeat] as const));
-    const excludedHere = new Map<string, { readonly slot: ProfileSlot; readonly reason: string }>();
+    const defaultBounds = new Map(
+      source.rows
+        .filter((row) => row.isDefault)
+        .map((row) => [row.caseId, { row, bound: roundingBound(row, source.timestampQuantum) }]),
+    );
+    const excludedHere: { readonly slot: ProfileSlot; readonly excluded: ExcludedCase }[] = [];
+    const excludedCases = new Set<string>();
     for (const row of source.rows) {
       const slot = slotOf(row, segments, conv2dDefaultTileM, source.path);
-      const reason = exclusionReason(repeats.get(row.caseId));
-      if (reason !== undefined) excludedHere.set(row.caseId, { slot, reason });
-      bySlot.set(slot, [...(bySlot.get(slot) ?? []), { row, included: reason === undefined }]);
-    }
-    const byCaseId = [...excludedHere.entries()]
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-    for (const [caseId, { slot, reason }] of byCaseId) {
-      excludedBySlot.set(slot, [
-        ...(excludedBySlot.get(slot) ?? []),
-        { path: source.path, caseId, reason },
+      const base = defaultBounds.get(row.caseId);
+      // parseSweepReport がケースごとに既定の行 1 本を検査済み
+      if (base === undefined) throw new Error(`${source.path}: ${row.caseId} の既定の行が無い`);
+      // ケースごと外す理由（再測定比 → 既定の行の丸め）。既定の行が失敗したケースは比を持たないので
+      // 丸めを見ない（比の材料が無い — 失敗は judgeCandidate が見る）
+      const caseReason = exclusionReason(repeats.get(row.caseId)) ??
+        (base.row.error === undefined ? defaultRoundingReason(base.bound) : undefined);
+      // 観測ごとに外す理由（E = e(r) + e(d)）。既定比を持たない行（失敗など）は比の材料でないので見ない
+      const rowReason = caseReason !== undefined || row.isDefault ||
+          row.speedupVsDefault === undefined || "unknown" in base.bound
+        ? undefined
+        : rowRoundingReason(roundingBound(row, source.timestampQuantum), base.bound.bound);
+      if (caseReason !== undefined && !excludedCases.has(row.caseId)) {
+        excludedCases.add(row.caseId);
+        excludedHere.push({
+          slot,
+          excluded: { path: source.path, caseId: row.caseId, reason: caseReason },
+        });
+      }
+      if (rowReason !== undefined) {
+        excludedHere.push({
+          slot,
+          excluded: {
+            path: source.path,
+            caseId: row.caseId,
+            geometry: row.geometry,
+            reason: rowReason,
+          },
+        });
+      }
+      bySlot.set(slot, [
+        ...(bySlot.get(slot) ?? []),
+        { row, included: caseReason === undefined && rowReason === undefined },
       ]);
+    }
+    // ケース id の昇順 → ケースごとの除外が先 → 幾何の名前の昇順
+    const order = (excluded: ExcludedCase): string =>
+      `${excluded.caseId}\u0000${excluded.geometry ?? ""}`;
+    const sorted = [...excludedHere].sort((left, right) => {
+      const [a, b] = [order(left.excluded), order(right.excluded)];
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    for (const { slot, excluded } of sorted) {
+      excludedBySlot.set(slot, [...(excludedBySlot.get(slot) ?? []), excluded]);
     }
   }
   return profileSlots(segments).map((spec) =>
@@ -993,7 +1130,7 @@ export type GeometryProfileDerivation = {
 
 /**
  * 掃引の記録 1 本以上から表を作る（公開面 `@karume/runtime/tune` の生成器 — ADR 0117 決定 2）。規則は
- * {@link deriveProfile}（ADR 0115 決定 4・ADR 0116）、表の値は {@link buildGeometryProfile} の 1 本で、
+ * {@link deriveProfile}（ADR 0115 決定 4・ADR 0116・ADR 0117 決定 3）、表の値は {@link buildGeometryProfile} の 1 本で、
  * CLI と GPU lab が作る表と同じ値になる。門に落ちた入力は理由つきで投げる（fail loudly）。
  */
 export const deriveGeometryProfile = (

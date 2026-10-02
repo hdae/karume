@@ -19,6 +19,7 @@ import {
   profileRowsSegments,
   type SlotVerdict,
   type SweepSource,
+  verdictLines,
 } from "../src/tune/derive.ts";
 import {
   A,
@@ -396,6 +397,184 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
   });
 });
 
+describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤差の上界で判定する", () => {
+  const ref = linearCase(1024);
+  /** 100 µs（Chrome の刻み）— rounds は全てこの倍数で書く。 */
+  const QUANTUM = 100_000;
+  /** 量子化した掃引（`gpuTiming.quantized` true・既定の再測定比は 1）。 */
+  const quantizedSource = (rows: readonly Record<string, unknown>[], name: string): SweepSource =>
+    parseSweepReport({
+      ...report(rows),
+      gpuTiming: { feature: true, unit: "ns", quantized: true },
+    }, { path: name, sha256: `sha-${name}` });
+  /** min の round が `ms` ミリ秒の rounds（e = 100 µs ÷ min）。 */
+  const roundsOf = (
+    ms: number,
+  ): readonly number[] => [ms * 10 * QUANTUM, ms * 10 * QUANTUM + QUANTUM];
+  const lines = (verdict: SlotVerdict): string[] =>
+    verdictLines([verdict]).filter((line) => line.startsWith("  - 掃引 "));
+
+  it("E ≤ 1% の観測だけなら、量子化した掃引から採否が出て何も外さない", () => {
+    // e(既定) = 0.1 / 100 = 0.1%・e(A) = 0.1 / 60 ≈ 0.17% → E ≈ 0.27%
+    const rows = caseRows(ref, BIG, [[A, { speedup: 1.3, rounds: roundsOf(60), reps: 3 }]], {
+      rounds: roundsOf(100),
+      reps: 5,
+    });
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, A);
+    assertEquals(verdict.outcome.geomean, 1.3);
+    assertEquals(verdict.excluded, []);
+  });
+
+  it("E > 1% の観測だけを外し、同じケースの他の幾何は残す（E は既定の行の e も足す）", () => {
+    // e(既定) = 0.1 / 20 = 0.5%。A: e = 0.1 / 12.5 = 0.8% で E = 1.3% → 外す（e だけなら 1% 以下）。
+    // B: e = 0.1 / 50 = 0.2% で E = 0.7% → 残す。外さなければ A（×1.5）が B（×1.2）に勝つ
+    const rows = caseRows(ref, BIG, [
+      [A, { speedup: 1.5, rounds: roundsOf(12.5) }],
+      [B, { speedup: 1.2, rounds: roundsOf(50) }],
+    ], { rounds: roundsOf(20) });
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, B);
+    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で測っていない`);
+    const name = gemmCandidate(A).name;
+    assertEquals(verdict.excluded, [
+      {
+        path: "q.json",
+        caseId: ref.caseId,
+        geometry: name,
+        reason: "丸め誤差の上界 E 1.30%（> 1%）",
+      },
+    ]);
+    assertEquals(lines(verdict), [
+      `  - 掃引 q.json: ${ref.caseId} の ${name} は丸め誤差の上界 E 1.30%（> 1%）のため比の材料から外した（出力の一致と失敗は見る）`,
+    ]);
+  });
+
+  it("E がちょうど 1% の観測は残す（門は E > 1% で外す）", () => {
+    // e(既定) = 0.1 / 20 = 0.5%・A: e = 0.1 / 20 = 0.5% で E = 1.00% → 残す
+    const rows = caseRows(ref, BIG, [
+      [A, { speedup: 1.5, rounds: roundsOf(20) }],
+    ], { rounds: roundsOf(20) });
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, A);
+    assertEquals(verdict.excluded, []);
+  });
+
+  it("外した観測の出力の不一致は、判定に効く（正しさの門は丸めに依らない）", () => {
+    const rows = caseRows(ref, BIG, [
+      [A, { speedup: 1.5, identical: false, rounds: roundsOf(2) }],
+    ], { rounds: roundsOf(100) });
+    const steady = source(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "steady.json");
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json"), steady], OPTIONS),
+      "gemmRows > 512",
+    );
+    assertEquals(verdict.outcome.kind, "default");
+    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で出力が既定と不一致`);
+    assertEquals(verdict.excluded.map((entry) => entry.geometry), [gemmCandidate(A).name]);
+  });
+
+  it("既定の行の e が 1% を超えるケースは全観測を外し、採否の行には 1 行だけ載る", () => {
+    // e(既定) = 0.1 / 5 = 2% → どの幾何も E > 1%（A・B とも e は小さい）
+    const rows = caseRows(ref, BIG, [
+      [A, { speedup: 1.5, rounds: roundsOf(80) }],
+      [B, { speedup: 1.2, rounds: roundsOf(80) }],
+    ], { rounds: roundsOf(5) });
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assert(verdict.outcome.kind === "default");
+    assertEquals(verdict.outcome.geometry, BIG);
+    assertEquals(verdict.outcome.reason, "クラスの全ケースを全掃引で比の材料から外した");
+    assertEquals(verdict.excluded, [
+      {
+        path: "q.json",
+        caseId: ref.caseId,
+        reason: "既定の行の丸め誤差の上界 e 2.00%（> 1%）",
+      },
+    ]);
+    assertEquals(lines(verdict), [
+      `  - 掃引 q.json: ${ref.caseId} は既定の行の丸め誤差の上界 e 2.00%（> 1%）のため比の材料から外した（出力の一致と失敗は見る）`,
+    ]);
+  });
+
+  it("同じ (ケース, 幾何) を他の掃引が測っていれば、そちらの比で判定する（quick と full の重ね）", () => {
+    // quick（量子化）の A は E > 1% で外す — 数えれば √(0.5 × 1.3) ≈ ×0.806 で退けられる
+    const quick = quantizedSource(
+      caseRows(ref, BIG, [[A, { speedup: 0.5, rounds: roundsOf(2) }]], { rounds: roundsOf(100) }),
+      "quick.json",
+    );
+    const full = source(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "full.json");
+    const verdict = verdictOf(deriveProfile([quick, full], OPTIONS), "gemmRows > 512");
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, A);
+    assertEquals(verdict.outcome.geomean, 1.3);
+    assertEquals(verdict.excluded.map(({ path, geometry }) => [path, geometry]), [
+      ["quick.json", gemmCandidate(A).name],
+    ]);
+  });
+
+  it("rounds が無い・正の round が無い行は上界を出せないので外す（既定の行ならケースごと）", () => {
+    const wide = linearCase(4096);
+    const rows = [
+      ...caseRows(ref, BIG, [
+        [A, { speedup: 1.3 }],
+        [B, { speedup: 1.3, rounds: [0, 0] }],
+      ], { rounds: roundsOf(100) }),
+      ...caseRows(wide, BIG, [[A, { speedup: 1.3, rounds: roundsOf(80) }]]),
+    ];
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assertEquals(
+      verdict.excluded.map(({ caseId, geometry, reason }) => [caseId, geometry, reason]),
+      [
+        [ref.caseId, gemmCandidate(A).name, "丸め誤差の上界が不明（rounds が無い）"],
+        [ref.caseId, gemmCandidate(B).name, "丸め誤差の上界が不明（正の round が無い）"],
+        [wide.caseId, undefined, "既定の行の丸め誤差の上界が不明（rounds が無い）"],
+      ],
+    );
+  });
+
+  it("失敗した行は比を持たないので上界を見ず（外さず）、失敗として退ける", () => {
+    const rows = caseRows(ref, BIG, [[A, { error: "device lost" }]], { rounds: roundsOf(100) });
+    const verdict = verdictOf(
+      deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assertEquals(verdict.excluded, []);
+    assertEquals(rejectionOf(verdict, A), `${ref.caseId} で失敗（device lost）`);
+  });
+
+  it("量子化していない掃引は rounds を見ない（rounds の無い記録も、短い pass も外さない）", () => {
+    const rows = caseRows(ref, BIG, [
+      [A, { speedup: 1.3, rounds: [1_000] }],
+      [B, { speedup: 1.2 }],
+    ]);
+    const verdict = verdictOf(
+      deriveProfile([source(rows, "plain.json")], OPTIONS),
+      "gemmRows > 512",
+    );
+    assert(verdict.outcome.kind === "adopted");
+    assertEquals(verdict.outcome.geometry, A);
+    assertEquals(verdict.excluded, []);
+  });
+});
+
 describe("parseSweepReport: 既定の再測定（cases[]）", () => {
   const rows = caseRows(linearCase(1024), BIG, []);
   const meta = { path: "sweep.json", sha256: "0" };
@@ -688,16 +867,54 @@ describe("parseSweepReport", () => {
     );
   });
 
-  it("timestamp が量子化された掃引は材料にしない", () => {
+  it("timestamp が量子化された掃引も受け、刻み 100 µs を観測ごとの上界に使う", () => {
+    const parsed = parseSweepReport({
+      ...report(caseRows(linearCase(1024), BIG, [])),
+      gpuTiming: { feature: true, unit: "ns", quantized: true },
+    }, meta);
+    assertEquals(parsed.timestampQuantum, 100_000);
+    assertEquals(
+      parseSweepReport(report(caseRows(linearCase(1024), BIG, [])), meta).timestampQuantum,
+      0,
+    );
+  });
+
+  it("gpuTiming.quantized が真偽値でない・単位 ns 以外で true の掃引は落とす", () => {
+    const rows = caseRows(linearCase(1024), BIG, []);
+    for (const quantized of [undefined, "true", 1]) {
+      assertThrows(
+        () =>
+          parseSweepReport({
+            ...report(rows),
+            gpuTiming: { feature: true, unit: "ns", quantized },
+          }, meta),
+        Error,
+        "gpuTiming.quantized が真偽値でない",
+      );
+    }
     assertThrows(
       () =>
         parseSweepReport({
-          ...report(caseRows(linearCase(1024), BIG, [])),
-          gpuTiming: { feature: true, unit: "ns", quantized: true },
+          ...report(rows),
+          gpuTiming: { feature: true, unit: "deno-raw-tick", quantized: true },
         }, meta),
       Error,
-      "量子化",
+      "単位が deno-raw-tick",
     );
+  });
+
+  it("rounds に負の値・数でない値がある行と、reps が正整数でない行は落とす", () => {
+    const ref = linearCase(1024);
+    for (
+      const measured of [{ rounds: [1, -1] }, { rounds: [Number.NaN] }, { reps: 1.5 }, { reps: 0 }]
+    ) {
+      assertThrows(
+        () =>
+          parseSweepReport(report(caseRows(ref, BIG, [[A, { speedup: 1.2, ...measured }]])), meta),
+        Error,
+        "の型が違う",
+      );
+    }
   });
 
   it("壁時計（unit wall）の掃引は材料にしない", () => {

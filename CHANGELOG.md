@@ -41,7 +41,11 @@ measurements in `docs/research/`.
   (`karume-geometry-sweep/2`); `deriveGeometryProfile(reports, options)` derives a `GeometryProfile`
   and the per-field verdicts from one or more records with the same rules as the repository's
   profile generator; `geometryProfileJson(profile)` serializes a profile (`Infinity` as `1e999`) for
-  storage and `acquireGpu({ geometryProfile })`. The main entry (`@karume/runtime`) is unchanged.
+  storage and `acquireGpu({ geometryProfile })`. `deriveGeometryProfile` also accepts sweeps
+  measured with Chrome's 100 µs-rounded timestamps (no developer flag): instead of rejecting them,
+  it bounds the rounding error of every observation and drops from the ratio material only those
+  whose bound exceeds 1% (they are listed in the verdicts); wall-clock-only sweeps are still
+  rejected. The main entry (`@karume/runtime`) is unchanged.
 
 - Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
   sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,

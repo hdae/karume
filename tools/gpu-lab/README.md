@@ -58,8 +58,10 @@ text stage on the download; compare stage times only after the weights are cache
 ## Before measuring
 
 1. Enable `chrome://flags/#enable-webgpu-developer-features` and restart Chrome. Without it, Chrome
-   rounds timestamps to 100 µs; the sweep still runs, but its JSON is marked `quantized` and the
-   profile tab rejects it.
+   rounds timestamps to 100 µs; the sweep still runs and its JSON is marked `quantized`. The
+   profile tab accepts it, but leaves out of the speed-ups every row whose rounding error bound
+   exceeds 1%, and lists those rows with the bound in the verdicts. With the flag the timestamps are
+   not rounded, so no row is left out for rounding.
 2. Close other GPU-heavy tabs.
 
 ## The header
@@ -144,8 +146,9 @@ by `main.ts profile`).
   (checked whenever a new sweep is available; the label is updated when a sweep ends, even while
   this tab is open); **掃引の JSON を読み込む** adds files; the text area
   adds pasted JSON. Several sweeps of the same adapter can be combined. Each input is checked when
-  it is added: a sweep without GPU timestamps (unit `wall` or no `gpuTiming`) or with quantized
-  timestamps is rejected, and the status line shows the generator's reason as is. The SHA-256 is
+  it is added: a sweep without GPU timestamps (unit `wall` or no `gpuTiming`) is rejected, and
+  the status line shows the generator's reason as is. A sweep with quantized timestamps is accepted;
+  rows whose rounding error bound exceeds 1% are left out of the speed-ups and listed. The SHA-256 is
   taken over the bytes given: for a file, the bytes read from it (the same value as the CLI); for
   the in-memory sweep, the bytes **JSON を保存** writes; for pasted text, its UTF-8 encoding.
 - **id / vendor / architecture** — blank fields use the first input's adapter (the placeholders show
@@ -274,8 +277,8 @@ comparable to wall times with it off.
    and **出力の一致** is `一致` everywhere. Save the JSON to `outputs/bench-browser/`.
 2. **The profile tab derives a table from it.** Press **表を作る** with the latest sweep checked. The
    table has ten fields; each adopted field shows a speed-up of at least ×1.05 in every case. With a
-   sweep taken without the developer features flag (quantized), the status line shows the rejection
-   instead.
+   sweep taken without the developer features flag (quantized), the table is still made, and each
+   row left out for its rounding error is listed under its field.
 3. **The injected table is used.** Press **この表を適用**. The environment line shows
    `generated:<id>（注入）`. On the Anima tab, run 2 generates (512x512, seed 42). The
    **幾何プロファイル** column shows `<id>` for every stage, and the saved JSON has
