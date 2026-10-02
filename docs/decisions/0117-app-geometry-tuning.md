@@ -416,7 +416,7 @@ ADR 0022 追記の原文（`0022-gemm-register-blocking.md:88-89`）:
 |  4 | 新しい純関数の単体テスト緑。2 表を再生成し、幾何の値が不変・`--check` バイト同一・`provenance.kernels` の一致テスト緑。照合 1 回の所要を記録する                                                                                 | ✅（2026-10-02: provenance 構造化・FNV-1a 64 bit の指紋〈casePlan と同じ経路・dp4a 2 変種を含む〉・caseSet〈dispatch を決める欄のみ〉・geometryProfileMismatch・parseGeometryProfileJson + GeometryProfileParseError・テスト 15 件〈指紋の感度 = 14 欄のどれを変えても変わる / params・workgroups だけでも変わる / 埋め込み 2 表の指紋と caseSet の一致 / 未知の欄 12 階層 / 末尾 null〉・故障注入 5 + 5 通りで赤・2 表再生成で幾何の値が不変〈provenance 抜きの JSON の sha256 が前後一致〉・`--check` バイト同一・照合 1 回の所要 = 埋め込み 2 表で中央値 12〜14 ms〈Deno・Ryzen 5 5600・GPU なし・1 回目 約 26 ms〉） |
 |  5 | 注入口の実 GPU テスト（B570）と偽の `navigator.gpu` のテストが緑。故障注入 2 通り（コールバックの戻りを門に通さない・device を作った後で呼ぶ）で赤                                                                               | ✅（2026-10-02: 偽の navigator.gpu のテスト 8 本〈1 回だけ呼ぶ・adapterInfo は GpuContext と同一・undefined → 自動・壊れた表 → device 作成前に GpuFeatureError・例外はそのまま・Promise / thenable は await せず拒む〈本物の Promise には no-op の catch で unhandled rejection を出さない〉・adapter.info 無しは空値で凍結〉+ 実 GPU（B570）1 本・故障注入 ①②（戻りを門に通さない / device の後で呼ぶ）で赤を実測）                                                                                                                                                                                                     |
 |  6 | 記録の欄の単体テスト緑。gpu-lab の quick+ の記録に `startedAt` / `aborted` / `cases[].elapsedMs` / `caseSet` / `defaultKernels` が載る（利用者の実機）                                                                           | ✅（2026-10-02: startedAt / aborted / cases[].elapsedMs / caseSet / defaultKernels を runGeometrySweep が書き、parseSweepReport は caseSet / defaultKernels を今の値と照合〈欄の無い記録は通す〉・provenance.userAgent は文字列の配列〈現れた順・重複除去・欠けた記録が混ざれば書かない〉・B570 の最小掃引で欄を実測〈caseSet c1060d8829f3b9de・defaultKernels ea5c10c2bfb5047d・elapsedMs 9171.3〉。利用者の実機の quick+ は段 7 で）                                                                                                                                                                                   |
-|  7 | フラグ無しの Chrome（M2 か M5）で、アプリの流れ（掃引 → 生成 → 保存 → 再起動 → 照合 → コールバックで注入）が通り、診断 `geometryProfile` が保存した表の id になる。フル verify 緑                                                | 手順を利用者に渡した（2026-10-02・gpu-lab の GPU 設定に「保存した表（照合して注入 — 一致しなければ自動）」を実装・行の geometryProfileRequested は saved:<id>）。実機の検収待ち。フル verify はその後                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|  7 | フラグ無しの Chrome（M2 か M5）で、アプリの流れ（掃引 → 生成 → 保存 → 再起動 → 照合 → コールバックで注入）が通り、診断 `geometryProfile` が保存した表の id になる。フル verify 緑                                                | 進行中（2026-10-02: 掃引の記録は受領 — フラグ無し M2・quick+ 57 ケース・872 s・失敗 0・再測定比は範囲内・**timestamp は丸められていなかった**〈quantized false・100 µs の倍数 0 / 2,605〉・表は gemmRows / attention が埋め込み表と同じ幾何・[research](../research/2026-10-02-app-tuning-flagless-m2.md)。残り = 表を作る → 再読み込み → 「保存した表（照合して注入）」→ 1 枚生成の JSON。gpu-lab の経路は実装済み〈`e4ae0ed8`〉）                                                                                                                                                                                      |
 
 ## 未解決
 
@@ -558,3 +558,12 @@ research K-70 §15 で、M2 の既定幾何 `reg128x128r8x8w16` が Chrome 153 �
   書いたが、実装は**記録の行（`error` の無い (ケース, 幾何)）を記録の dp4a 変種で組んだ dispatch** から導く。quick+ の候補集合は
   登録済みの表の幾何を含むので、今の集合から導くと表を 1 つ登録しただけでカーネル不変の quick+ の記録まで拒まれる。行から導けば
   op や case を絞った掃引・中断した掃引もそのまま照合できる。書き手と読み手は同じ 1 本の関数を使う。
+
+## 追記（2026-10-02）: フラグ無しの Chrome 154（macOS・M2）では timestamp が丸められていなかった
+
+段 7 の最初の記録（quick+・57 ケース）で、2,605 round のうち 100 µs の倍数は 0。リポの掃引記録 14 本（フラグ有り 13 本 +
+無し 1 本・Chrome 153 / 154・4 機種）はすべて `quantized: false`。Context と決定 3 が前提にした「フラグ無しの Chrome は 100 µs に
+丸める」は、少なくとも macOS の Chrome 154 では成り立たない（推測: Chrome 側の緩和か Metal バックエンドの扱い — Windows / Android の
+フラグ無しは未観測）。決定 3 の門は、丸められた記録が来ても受けられる保険として残す（規則は変えない）。gpu-lab README の
+「Before measuring」の文言は「丸められうる（記録の `quantized` が示す）」に弱めた。記録は
+[research 2026-10-02-app-tuning-flagless-m2](../research/2026-10-02-app-tuning-flagless-m2.md)。

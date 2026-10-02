@@ -58,7 +58,8 @@ text stage on the download; compare stage times only after the weights are cache
 ## Before measuring
 
 1. Enable `chrome://flags/#enable-webgpu-developer-features` and restart Chrome. Without it, Chrome
-   rounds timestamps to 100 µs; the sweep still runs and its JSON is marked `quantized`. The
+   may round timestamps to 100 µs (observed not to on macOS Chrome 154 — the record's
+   `gpuTiming.quantized` tells); when it does, the sweep still runs and its JSON is marked `quantized`. The
    profile tab accepts it, but leaves out of the speed-ups every row whose rounding error bound
    exceeds 1%, and lists those rows with the bound in the verdicts. With the flag the timestamps are
    not rounded, so no row is left out for rounding.
@@ -343,8 +344,9 @@ comparable to wall times with it off.
 
 - The sweep and Anima use separate GPU devices. A sweep does not release the Anima pipeline or its
   dummies, so on a GPU with little memory press **pipeline を破棄** before a large sweep.
-- Chrome quantizes timestamps to 100 µs unless the developer features flag is enabled; the sweep
-  JSON then has `gpuTiming.quantized: true`, and an Anima stage summary says `100 µs 量子化の疑い`.
+- Chrome may quantize timestamps to 100 µs without the developer features flag (not observed on
+  macOS Chrome 154); the sweep JSON then has `gpuTiming.quantized: true`, and an Anima stage summary
+  says `100 µs 量子化の疑い`.
 - If a device is lost with timestamps on, clear **GPU の timestamp で測る**, press **適用**, and run
   again (the sweep then uses the wall clock; Anima records stage wall times and dispatch counts
   only).
