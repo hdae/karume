@@ -319,10 +319,18 @@ later の「decode 速度の残り」。
   `windowTouchesState` MUST（ADR 0067）・FusedStep 単一出力 MUST（ADR 0068 決定 1）・atomic last-arriver merge の可搬性判定が同時に塞ぐ。
   個別候補（attention→SRQ・残差 add→SRQ・attention 1 dispatch・Q/K/V 3 出力）は全て反証で閉じたので、契約を緩めるかの設計裁定が先
   （[research](research/2026-09-19-qat-speed-recon.md) §9.1）。裁定前に速度候補として起票しない。
-- **ブラウザ動画生成の基盤**（調査 2026-09-10）: Wan2.1-T2V-1.3B を小さな DiT 単体 → 実 token 長の
-  attention / FFN → causal Conv3d VAE → scheduler と段寿命の順に検収する案。runtime 語彙と数値契約の判断が先。
-  H3 は公開重みの規模・未公開の後段・ライセンス条件から構造調査に留める。
+- **ブラウザ動画生成の基盤**（調査 2026-09-10・**利用者要望 2026-10-02: まず Wan2.1 T2V 1.3B が動くまで・最終目標は
+  MiniMax H3**）: Wan2.1-T2V-1.3B を小さな DiT 単体 → 実 token 長の attention / FFN → causal Conv3d VAE → scheduler と
+  段寿命の順に検収する案。runtime 語彙と数値契約の判断が先。
   [構成と容量試算](research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)。
+  **本調査済（2026-10-02・[research](research/2026-10-02-video-gen-recon.md)・裁定待ち 5 論点 = 同 §10）**: DiT 側は語彙が
+  ほぼ足り recipe のパッチ（complex 形 RoPE の実数化・unpatchify の rank 下げ）で済む見込み。空白 = 動画 VAE の conv3d
+  （案 A: IR に op を足す〈拡張分子層 + ADR・src 約 1,000 行規模（推測）〉/ 案 B: recipe で conv2d に分解）と feat_cache の
+  持ち越し（1 チャンク分のグラフ × 2 種類の export 案）・upsample3d の時間インターリーブ（rank 6）・umT5-XXL 5.68B の載せ方
+  （i8 / i4 / f16 / 事前計算した埋め込み / CPU）・32,760 トークンの全結合 attention（1 forward 約 283 TFLOP・50 ステップ × CFG
+  で約 28.3 PFLOP）と TDR。H3 は実在・open-weight（HF MiniMaxAI/MiniMax-H3・条文の文理では日本は許諾地域〈法的助言ではない〉）
+  だが 33B dense + Qwen3-VL-32B + VAE 2.6B で 1 タスク約 144 GB・ネイティブでも offload 前提（RTX 5090 で 112 s の実測例）・
+  ブラウザ WebGPU の事例は無い。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
   劣化機序 — いずれも「試してダメ」ではなく「試していない」）だけで、正本は
