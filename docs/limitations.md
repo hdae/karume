@@ -239,6 +239,10 @@ implicit GEMM（[decisions/0024](decisions/0024-conv2d-implicit-gemm.md)）は 1
 [2026-08-03-dynres-vae-tiling](research/2026-08-03-dynres-vae-tiling.md)）side で行う想定。
 枚数の固定は `packages/runtime/tests/codegen_dispatch_test.ts`。
 
+`conv3d`（ADR [0118](decisions/0118-wan21-video-generation.md) 決定 1）も同じ骨格で、`Tout·Hout·Wout > 8,388,480`（既定の
+tileN 128 × 65,535）で `DispatchLimitError` になる。Wan2.1 の VAE の chunk グラフ（タイル 32）の最大は 4 × 256 × 256 = 262,144 で
+届かない。
+
 ## 幾何プロファイル: フラグ無しの Chrome では `description` で照合する表が自動では当たらない（外部制約）
 
 Chrome は開発者向けフラグ（`chrome://flags/#enable-webgpu-developer-features`）無しでは adapter の `description` を空にするので、
