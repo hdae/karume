@@ -853,10 +853,55 @@ describe("deriveProfile: adapter を混ぜない", () => {
       "2 度",
     );
   });
+
+  it("掃引どうしの adapter の device が違えば、他の 3 欄が同じでも落ちる（表は 4 欄の 1 組だけを持つ）", () => {
+    const m2 = source(rows, "m2.json", { ...ADAPTER, device: "0x0000" });
+    const other = source(rows, "other.json", { ...ADAPTER, device: "0x1234" });
+    const blank = source(rows, "blank.json", { ...ADAPTER, device: "" });
+    for (const target of [{ optIn: true } as const, OPTIONS]) {
+      for (const mixed of [other, blank]) {
+        const error = assertThrows(
+          () => deriveProfile([m2, mixed], { ...target, minSpeedup: 1.05 }),
+          Error,
+          "と違う",
+        );
+        assertStringIncludes(
+          error.message,
+          `adapter の device ${JSON.stringify(mixed.adapter.device)} が m2.json の "0x0000"`,
+        );
+      }
+    }
+    deriveProfile([m2, source(rows, "m2-again.json", { ...ADAPTER, device: "0x0000" })], OPTIONS);
+  });
 });
 
 describe("parseSweepReport", () => {
   const meta = { path: "sweep.json", sha256: "0" };
+
+  it("adapter の device は必須の文字列（空文字は値として受ける）", () => {
+    const rows = caseRows(linearCase(1024), BIG, []);
+    const { device: _, ...withoutDevice } = ADAPTER;
+    assertThrows(
+      () => parseSweepReport(report(rows, withoutDevice), meta),
+      Error,
+      "adapter: device が文字列でない",
+    );
+    assertEquals(
+      parseSweepReport(report(rows, { ...ADAPTER, device: "" }), meta).adapter.device,
+      "",
+    );
+  });
+
+  it("候補集合は settings.candidateSet、欄の無い古い記録は settings.quick から読み、どちらも無ければ落ちる", () => {
+    const base = report(caseRows(linearCase(1024), BIG, []));
+    const read = (settings: unknown) => parseSweepReport({ ...base, settings }, meta).candidateSet;
+    assertEquals(read({ candidateSet: "quick+", quick: false }), "quick+");
+    assertEquals(read({ quick: true }), "quick");
+    assertEquals(read({ quick: false }), "full");
+    assertThrows(() => read({ candidateSet: "quik" }), Error, "settings.candidateSet が");
+    assertThrows(() => read({}), Error, "candidateSet も quick も無い");
+    assertThrows(() => read(undefined), Error, "settings が無い");
+  });
 
   it("既定の行が 1 本でないケースがあれば落ちる（比の土台が決まらない）", () => {
     const rows = caseRows(linearCase(1024), BIG, [[A, { speedup: 1.2 }]]);

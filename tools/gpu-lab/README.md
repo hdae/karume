@@ -86,12 +86,16 @@ text stage on the download; compare stage times only after the weights are cache
     different option, so the mark tells which values are applied.
   - `保存した表: <id>（<saved at>・<adapter>）（注入）` — the last table derived on an earlier
     visit. Each successful derivation also saves that table to `localStorage`
-    (`karume-gpu-lab/last-generated-profile/1`, overwriting the previous one, with the adapter
-    description or vendor/architecture and the checkout revision), and the page offers it again when
-    it opens, because Chrome sometimes has to be reloaded and the derived table would otherwise be
-    lost. A saved value that cannot be read or does not pass the runtime's profile check is deleted,
-    and the GPU settings status line says so. The applied settings themselves are not saved. Both
-    kinds are recorded as `generated:<id>`.
+    (`karume-gpu-lab/last-generated-profile/2`, overwriting the previous one, with the save time and
+    the checkout revision; the table itself is stored as the text of `geometryProfileJson`), and the
+    page offers it again when it opens, because Chrome sometimes has to be reloaded and the derived
+    table would otherwise be lost. `<adapter>` is the adapter description, or vendor/architecture
+    when the description is empty, read from the table's `provenance.adapter` (the adapter the
+    sweeps ran on — it is not stored a second time). A saved value that `parseGeometryProfileJson`
+    rejects (including the runtime's profile check), or whose table has no `provenance`, is
+    deleted, and the GPU settings status line says so. A table saved under the earlier `/1` key is
+    not read. The applied settings themselves are not saved. Both kinds are recorded as
+    `generated:<id>`.
 
   **適用** disposes the Anima pipeline, its dummy buffers, and its GPU device; if the Anima tab held a
   device, it acquires a new one with the new settings at once, and the Anima status line says

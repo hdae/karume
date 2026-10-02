@@ -22,6 +22,7 @@ import {
   type GeneratedProfile,
   type ProfileSlot,
   type ProfileTarget,
+  ROUNDING_ERROR_LIMIT,
   rowsRange,
   type SlotVerdict,
   type SweepSource,
@@ -30,6 +31,15 @@ import {
 } from "../../packages/runtime/src/tune/derive.ts";
 
 type Geometry = GemmGeometry | I8a8Geometry;
+
+/**
+ * 表の `provenance.adapter`（4 欄）の表示（空の欄は落とす — Deno は architecture を、フラグ無しの Chrome は
+ * device と description を空で返す）。表は 4 欄を値のまま持ち、ラベルは描画のときに導く（同じ情報を
+ * 2 か所に持たない — ADR 0117 決定 4）。
+ */
+const adapterLabel = (adapter: GeneratedProfile["provenance"]["adapter"]): string =>
+  [adapter.vendor, adapter.architecture, adapter.device, adapter.description]
+    .filter((part) => part !== "").join(" / ");
 
 /** プロファイル id（ファイル名 `<id>.ts` と export 名 `<ID を大文字 snake>` の元）。 */
 export const PROFILE_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
@@ -92,7 +102,7 @@ export const renderProfileSource = (
 ): string => {
   // 値は注入の表（{@link buildGeometryProfile}）から書く — TS の生成物と注入の JSON を 1 本の経路で作る
   const profile = buildGeometryProfile(flags, sources, verdicts);
-  const adapter = profile.provenance.adapter;
+  const adapter = adapterLabel(profile.provenance.adapter);
   // 行には掃引の記録由来の文字列（失敗の error 文）が入るので、コメントを閉じる綴りと改行を潰す
   const comment = (lines: readonly string[]): string[] =>
     lines.map((line) =>
@@ -135,6 +145,11 @@ export const renderProfileSource = (
       "再測定が失敗 / 無いケースはその掃引の比の材料から外す（出力の一致と失敗は見る — 外した掃引で不一致 /",
       "失敗の幾何は採らない。比は同じケースを他の掃引が測っていればそちらで判定し、どの掃引にも残らなければ",
       "測っていない扱い）。外したケースは採否の欄ごとに「掃引 …」の行で示す。",
+      "丸めの門: timestamp が丸められた掃引（Chrome のフラグ無しの 100 µs）では、観測（掃引 1 本の中の 1 行）",
+      "ごとに比の丸め誤差の上界 E = e(行) + e(既定の行)（e = 刻み ÷ 最小の round）を出し、E が " +
+      `${ROUNDING_ERROR_LIMIT * 100}% を超える観測を`,
+      "その掃引の比の材料から外す（出力の一致と失敗は見る）。既定の行の e が超える（か出せない）ケースは全観測を",
+      "外す。外した観測は「掃引 … の <幾何> は丸め誤差の上界 E …」の行で示す。",
       "",
       "採否:",
       "",
@@ -189,7 +204,15 @@ const profileDeclaration = (profile: GeneratedProfile): string[] => {
     }, attentionPv: ${renderGeometry(profile.i8a8.attentionPv, "i8a8.attentionPv")} },`,
     `provenance: { sweep: ${JSON.stringify(provenance.sweep)}, sha256: ${
       JSON.stringify(provenance.sha256)
-    }, date: ${JSON.stringify(provenance.date)}, adapter: ${JSON.stringify(provenance.adapter)} },`,
+    }, date: ${JSON.stringify(provenance.date)}, candidateSet: ${
+      JSON.stringify(provenance.candidateSet)
+    }, adapter: { ${
+      (["vendor", "architecture", "device", "description"] as const)
+        .map((key) => `${key}: ${JSON.stringify(provenance.adapter[key])}`)
+        .join(", ")
+    } }, kernels: ${JSON.stringify(provenance.kernels)}, caseSet: ${
+      JSON.stringify(provenance.caseSet)
+    } },`,
     "};",
   ];
 };

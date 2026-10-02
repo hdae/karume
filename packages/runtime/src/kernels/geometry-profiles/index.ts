@@ -23,7 +23,8 @@ import { NVIDIA_BLACKWELL } from "./nvidia-blackwell.ts";
  *
  * NOTE: geometry-profile.ts に置かないのは、あちらがこの一覧を値として import する（選択の既定引数）
  * 循環のため — この module が先に評価される import 順では、あちらの `const` がまだ初期化前で落ちる。
- * 幾何はどれも数だけの平たいオブジェクトなので、1 段の複製で深い。
+ * 幾何はどれも数だけの平たいオブジェクトなので、1 段の複製で深い。`provenance` は `adapter` の 1 段を
+ * 入れ子に持つので、そこも複製して凍結する。
  */
 const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
   const geometry = <T extends GemmGeometry | I8a8Geometry>(value: T): T =>
@@ -49,9 +50,12 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
       attentionQk: geometry(profile.i8a8.attentionQk),
       attentionPv: geometry(profile.i8a8.attentionPv),
     }),
-    ...(profile.provenance === undefined
-      ? {}
-      : { provenance: Object.freeze({ ...profile.provenance }) }),
+    ...(profile.provenance === undefined ? {} : {
+      provenance: Object.freeze({
+        ...profile.provenance,
+        adapter: Object.freeze({ ...profile.provenance.adapter }),
+      }),
+    }),
   });
 };
 

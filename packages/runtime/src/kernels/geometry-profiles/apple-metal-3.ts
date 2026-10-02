@@ -18,7 +18,7 @@
  *     --id apple-metal-3 --vendor apple --architecture metal-3 --description 'Apple M2' \
  *     --out packages/runtime/src/kernels/geometry-profiles/apple-metal-3.ts --min-speedup 1.05
  *
- * 掃引（adapter apple / metal-3 / Apple M2）:
+ * 掃引（adapter apple / metal-3 / 0x0000 / Apple M2）:
  *
  * - outputs/bench-browser/geometry-sweep-browser-2026-09-27T16-28-00.787Z.json（sha256 921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034・2026-09-27T16:28:00.787Z）
  * - outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-31-46.471Z.json（sha256 f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a・2026-09-27T18:31:46.471Z）
@@ -33,6 +33,10 @@
  * 再測定が失敗 / 無いケースはその掃引の比の材料から外す（出力の一致と失敗は見る — 外した掃引で不一致 /
  * 失敗の幾何は採らない。比は同じケースを他の掃引が測っていればそちらで判定し、どの掃引にも残らなければ
  * 測っていない扱い）。外したケースは採否の欄ごとに「掃引 …」の行で示す。
+ * 丸めの門: timestamp が丸められた掃引（Chrome のフラグ無しの 100 µs）では、観測（掃引 1 本の中の 1 行）
+ * ごとに比の丸め誤差の上界 E = e(行) + e(既定の行)（e = 刻み ÷ 最小の round）を出し、E が 1% を超える観測を
+ * その掃引の比の材料から外す（出力の一致と失敗は見る）。既定の行の e が超える（か出せない）ケースは全観測を
+ * 外す。外した観測は「掃引 … の <幾何> は丸め誤差の上界 E …」の行で示す。
  *
  * 採否:
  *
@@ -738,6 +742,14 @@ export const APPLE_METAL_3: GeometryProfile = {
       "921e89ba70b34ef68ec21c153c2a2c313c80bbbc98d53da720942c2919ead034, f464ca82eb61f4c8fd60efa06365815eb25cec5e1f8ed905cccd242cadacfc2a, 38d97dac5f04a7e80fb6591ab437da7dd2b3cee66b0d03e40cd1475c0f398550, d9e5e7814370c741562819474f5e0837012d05f233869688d28bb91902ac8621, 11fed6a888c91d5e5217a8cd1205dbd46b5ffa2c639dcf2f2af9d17be962eefd",
     date:
       "2026-09-27T16:28:00.787Z, 2026-09-27T18:31:46.471Z, 2026-09-29T13:08:11.329Z, 2026-09-29T21:04:14.586Z, 2026-10-01T12:28:47.052Z",
-    adapter: "apple / metal-3 / Apple M2",
+    candidateSet: "quick, full, full, full, full",
+    adapter: {
+      vendor: "apple",
+      architecture: "metal-3",
+      device: "0x0000",
+      description: "Apple M2",
+    },
+    kernels: "b44347721727b912",
+    caseSet: "c1060d8829f3b9de",
   },
 };

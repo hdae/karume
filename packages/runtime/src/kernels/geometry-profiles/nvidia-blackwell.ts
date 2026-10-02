@@ -16,7 +16,7 @@
  *     --id nvidia-blackwell --vendor nvidia --architecture blackwell \
  *     --out packages/runtime/src/kernels/geometry-profiles/nvidia-blackwell.ts --min-speedup 1.05
  *
- * 掃引（adapter nvidia / blackwell / NVIDIA GeForce RTX 5070 Ti）:
+ * 掃引（adapter nvidia / blackwell / 0x2c05 / NVIDIA GeForce RTX 5070 Ti）:
  *
  * - outputs/bench-browser/geometry-sweep-browser-2026-09-27T18-37-27.914Z.json（sha256 084cd0efd7ea7780dfcdab5b53ee4be8177638c7d8984920096a4851b767aa90・2026-09-27T18:37:27.914Z）
  * - outputs/bench-browser/geometry-sweep-browser-2026-09-29T20-42-08.545Z.json（sha256 1ae3a8f6d9a1270d8e3b3ad41aa7fe13757c976a323de7d2b0b99139800cb2e5・2026-09-29T20:42:08.545Z）
@@ -29,6 +29,10 @@
  * 再測定が失敗 / 無いケースはその掃引の比の材料から外す（出力の一致と失敗は見る — 外した掃引で不一致 /
  * 失敗の幾何は採らない。比は同じケースを他の掃引が測っていればそちらで判定し、どの掃引にも残らなければ
  * 測っていない扱い）。外したケースは採否の欄ごとに「掃引 …」の行で示す。
+ * 丸めの門: timestamp が丸められた掃引（Chrome のフラグ無しの 100 µs）では、観測（掃引 1 本の中の 1 行）
+ * ごとに比の丸め誤差の上界 E = e(行) + e(既定の行)（e = 刻み ÷ 最小の round）を出し、E が 1% を超える観測を
+ * その掃引の比の材料から外す（出力の一致と失敗は見る）。既定の行の e が超える（か出せない）ケースは全観測を
+ * 外す。外した観測は「掃引 … の <幾何> は丸め誤差の上界 E …」の行で示す。
  *
  * 採否:
  *
@@ -733,6 +737,14 @@ export const NVIDIA_BLACKWELL: GeometryProfile = {
     sha256:
       "084cd0efd7ea7780dfcdab5b53ee4be8177638c7d8984920096a4851b767aa90, 1ae3a8f6d9a1270d8e3b3ad41aa7fe13757c976a323de7d2b0b99139800cb2e5, 0e57d4efcb14efe0e01767066fce05e1784ca43660a4f8a78c5a1a2c48d1ae87",
     date: "2026-09-27T18:37:27.914Z, 2026-09-29T20:42:08.545Z, 2026-10-01T16:46:50.379Z",
-    adapter: "nvidia / blackwell / NVIDIA GeForce RTX 5070 Ti",
+    candidateSet: "full, full, full",
+    adapter: {
+      vendor: "nvidia",
+      architecture: "blackwell",
+      device: "0x2c05",
+      description: "NVIDIA GeForce RTX 5070 Ti",
+    },
+    kernels: "21c1151685b4d48a",
+    caseSet: "c1060d8829f3b9de",
   },
 };

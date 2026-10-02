@@ -2,7 +2,13 @@
 // （geometryProfileJson）の門。規則の抽出そのものは tune_profile_test.ts、生成物の TS の描画は
 // tools/geometry-sweep/render_test.ts が固定する。GPU を使わない。
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertInstanceOf,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { gemmGeometryForRows } from "../src/kernels/gemm-geometry.ts";
 import {
@@ -11,6 +17,11 @@ import {
   selectGeometryProfile,
 } from "../src/kernels/geometry-profile.ts";
 import { buildGeometryProfile, deriveProfile, geometryProfileJson } from "../src/tune/derive.ts";
+import {
+  geometryProfileKernelsId,
+  KernelsIdError,
+  sweepCaseSetId,
+} from "../src/tune/fingerprint.ts";
 import { FAST, SOURCES, SPEC, verdictOf } from "./helpers/sweep-records.ts";
 
 /** 段の上端 → 範囲の綴り（7 段の期待値を手で書いたもの — 生成器の綴りの正本ではない）。 */
@@ -64,19 +75,50 @@ describe("buildGeometryProfile", () => {
     assertEquals(profile.i8a8, DEFAULT_GEOMETRY_PROFILE.i8a8);
   });
 
-  it("match と provenance は spec と掃引の順で決まる（architecture を省けば vendor だけ）", () => {
+  it("match と provenance は spec と掃引の順で決まり、adapter は 4 欄をそのまま・指紋とケース集合の版は今の runtime の値（architecture を省けば match は vendor だけ）", () => {
     const verdicts = deriveProfile(SOURCES, SPEC);
     const profile = buildGeometryProfile(SPEC, SOURCES, verdicts);
     assertEquals(profile.id, "test-gpu");
     assertEquals(profile.match, { vendor: "apple", architecture: "metal-3" });
+    const { provenance: _provenance, ...table } = profile;
     assertEquals(profile.provenance, {
       sweep: "a.json, b.json",
       sha256: "sha-a, sha-b",
       date: "2026-09-29T00:00:00.000Z, 2026-09-29T00:00:00.000Z",
-      adapter: "apple / metal-3 / Test GPU",
+      candidateSet: "full, full",
+      adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
+      kernels: geometryProfileKernelsId(table),
+      caseSet: sweepCaseSetId(),
     });
+    // 指紋は表の幾何から導いた値（既定の表の指紋とは違う — 採用した幾何が入っている）
+    assert(profile.provenance.kernels !== geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE));
     const { architecture: _, ...vendorOnly } = SPEC;
     assertEquals(buildGeometryProfile(vendorOnly, SOURCES, verdicts).match, { vendor: "apple" });
+  });
+});
+
+describe("buildGeometryProfile: 指紋を導けない表", () => {
+  it("採った幾何で掃引の shape の dispatch が 65535 を超える表は作らず、表・ケース・欄・幾何を名指して投げる", () => {
+    // 上限の大きい device の掃引なら通りうる幾何（tileN 4 — conv2d 512² の N = 262144 が 65536 workgroup）
+    const narrow = { regM: 1, regN: 4, wgX: 1, wgY: 16 };
+    const verdicts = deriveProfile(SOURCES, SPEC).map((verdict) =>
+      verdict.slot === "conv2d.rows32"
+        ? { ...verdict, outcome: { ...verdict.outcome, geometry: narrow } }
+        : verdict
+    );
+    const error = assertThrows(() => buildGeometryProfile(SPEC, SOURCES, verdicts), Error);
+    assertInstanceOf(error.cause, KernelsIdError);
+    for (
+      const part of [
+        "生成した表 'test-gpu' の provenance.kernels（カーネルの指紋）を導けない",
+        "conv2d-c96-512x512",
+        "conv2d.rows32",
+        JSON.stringify(narrow),
+        "65535",
+      ]
+    ) {
+      assertStringIncludes(error.message, part);
+    }
   });
 });
 

@@ -8,11 +8,15 @@
  * 生成した表を失わないため。
  */
 import type { GeometryProfile } from "../../../packages/runtime/mod.ts";
-import { assertGeometryProfile } from "../../../packages/runtime/src/kernels/geometry-profile.ts";
-import { infinityJson } from "../../../packages/runtime/src/tune/derive.ts";
+import { geometryProfileJson, parseGeometryProfileJson } from "../../../packages/runtime/tune.ts";
 
-/** 保存の置き場（版つき — 形を変えたら版を上げ、古い値は門で落として消す）。 */
-export const LAST_GENERATED_KEY = "karume-gpu-lab/last-generated-profile/1";
+/**
+ * 保存の置き場（版つき — 形を変えたら版を上げる。古い版のキーは読まない: 未リリースの道具なので移行を
+ * 作らない）。/2 = 表を `geometryProfileJson` の文字列（`profileJson`）で持ち、`parseGeometryProfileJson` で
+ * 戻す形（表の `provenance` が照合の材料を持つ形 — ADR 0117 決定 4 / 7）。adapter は表の
+ * `provenance.adapter` だけに持つ（外側に同じ情報を重ねて持たない）。
+ */
+export const LAST_GENERATED_KEY = "karume-gpu-lab/last-generated-profile/2";
 
 /** select の値: 保存した表。 */
 export const SAVED_VALUE = "saved";
@@ -22,19 +26,17 @@ export const GENERATED_PREFIX = "generated:";
 /** 生成に成功した表（連番は 1 から・生成成功ごとに増える）。 */
 export type GeneratedEntry = { readonly serial: number; readonly profile: GeometryProfile };
 
+/** 生成した表の `provenance`（掃引の adapter を持つ — 保存した表の adapter の表示はここから導く）。 */
+type Provenance = NonNullable<GeometryProfile["provenance"]>;
+
 /** localStorage に置く「最後に生成した表」。 */
 export type SavedProfile = {
   /** 保存した時刻（ISO 8601）。 */
   readonly savedAt: string;
-  /** 保存したページの adapter。 */
-  readonly adapter: {
-    readonly vendor: string;
-    readonly architecture: string;
-    readonly description: string;
-  };
   /** 保存したページの checkout。 */
   readonly checkout: { readonly revision: string; readonly dirty: boolean };
-  readonly profile: GeometryProfile;
+  /** 生成した表（生成器が書く `provenance` を必ず持つ）。 */
+  readonly profile: GeometryProfile & { readonly provenance: Provenance };
 };
 
 export type InjectableTables = {
@@ -49,7 +51,7 @@ export type ProfileStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">
 const appliedMark = (profile: GeometryProfile, applied: GeometryProfile | undefined): string =>
   profile === applied ? "（適用中）" : "";
 
-const adapterLabel = ({ vendor, architecture, description }: SavedProfile["adapter"]): string =>
+const adapterLabel = ({ vendor, architecture, description }: Provenance["adapter"]): string =>
   description !== "" ? description : [vendor, architecture].filter((part) => part !== "").join("/");
 
 /**
@@ -64,7 +66,7 @@ export const tableOptions = (
     value: SAVED_VALUE,
     text: `保存した表: ${tables.saved.profile.id}（${
       new Date(tables.saved.savedAt).toLocaleString()
-    }・${adapterLabel(tables.saved.adapter)}）（注入）${
+    }・${adapterLabel(tables.saved.profile.provenance.adapter)}）（注入）${
       appliedMark(tables.saved.profile, applied)
     }`,
   }]),
@@ -96,48 +98,56 @@ export const valueForTable = (
 };
 
 /**
- * 最後に生成した表を保存する（上書き）。`Infinity`（最後の `maxRows`）は `1e999` と書く — 素の
- * `JSON.stringify` は null に落とし、復元の門で落ちる。Storage の例外はそのまま投げる。
+ * 最後に生成した表を保存する（上書き）。表は `geometryProfileJson` の文字列で持つ（`Infinity` は `1e999`
+ * — アプリが表を保存する形と同じ・ADR 0117 決定 10）。`provenance` の無い表は投げる（復元の門が拒む表を
+ * 保存しない — 生成した表は必ず持つ）。Storage の例外はそのまま投げる。
  */
-export const writeLastGenerated = (storage: ProfileStorage, saved: SavedProfile): void =>
-  storage.setItem(LAST_GENERATED_KEY, infinityJson(saved));
+export const writeLastGenerated = (
+  storage: ProfileStorage,
+  saved: Omit<SavedProfile, "profile"> & { readonly profile: GeometryProfile },
+): void => {
+  if (saved.profile.provenance === undefined) {
+    throw Error(`表 '${saved.profile.id}' に provenance が無い（生成した表ではない）`);
+  }
+  storage.setItem(
+    LAST_GENERATED_KEY,
+    JSON.stringify({
+      savedAt: saved.savedAt,
+      checkout: saved.checkout,
+      profileJson: geometryProfileJson(saved.profile),
+    }),
+  );
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-/** 復元の門（形が違えば理由つきで投げる）。表は runtime の `assertGeometryProfile` を通す。 */
+/**
+ * 復元の門（形が違えば理由つきで投げる）。表はアプリと同じ unknown 境界 `parseGeometryProfileJson`
+ * （全階層の未知の欄の拒否・runtime の `assertGeometryProfile`）で戻し、`provenance` を要求する（表示の
+ * adapter はそこから導く）。
+ */
 const parseSaved = (text: string): SavedProfile => {
   const value: unknown = JSON.parse(text);
   if (!isRecord(value)) throw Error("オブジェクトでない");
-  const { savedAt, adapter, checkout, profile } = value;
+  const { savedAt, checkout, profileJson } = value;
   if (typeof savedAt !== "string" || Number.isNaN(Date.parse(savedAt))) {
     throw Error("savedAt が日時の文字列でない");
   }
-  if (
-    !isRecord(adapter) || typeof adapter.vendor !== "string" ||
-    typeof adapter.architecture !== "string" || typeof adapter.description !== "string"
-  ) throw Error("adapter の vendor / architecture / description が文字列でない");
   if (
     !isRecord(checkout) || typeof checkout.revision !== "string" ||
     typeof checkout.dirty !== "boolean"
   ) {
     throw Error("checkout の revision / dirty の形が違う");
   }
-  if (!isRecord(profile) || typeof profile.id !== "string") {
-    throw Error("profile の id が文字列でない");
-  }
-  // 門の本体は runtime と同じ（規則列・幾何の整除条件 — 欄が欠けた表もここで落ちる）
-  const geometryProfile = profile as GeometryProfile;
-  assertGeometryProfile(geometryProfile);
+  if (typeof profileJson !== "string") throw Error("profileJson が文字列でない");
+  const profile = parseGeometryProfileJson(profileJson);
+  const { provenance } = profile;
+  if (provenance === undefined) throw Error(`表 '${profile.id}' に provenance が無い`);
   return {
     savedAt,
-    adapter: {
-      vendor: adapter.vendor,
-      architecture: adapter.architecture,
-      description: adapter.description,
-    },
     checkout: { revision: checkout.revision, dirty: checkout.dirty },
-    profile: geometryProfile,
+    profile: { ...profile, provenance },
   };
 };
 

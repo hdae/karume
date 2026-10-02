@@ -1,7 +1,7 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import type { GeometryProfile } from "../../../packages/runtime/mod.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../../../packages/runtime/src/kernels/geometry-profile.ts";
+import { geometryProfileJson } from "../../../packages/runtime/tune.ts";
 import {
   type InjectableTables,
   LAST_GENERATED_KEY,
@@ -14,17 +14,45 @@ import {
   writeLastGenerated,
 } from "./injectable-tables.ts";
 
-/** 同じ id でも別の表（作り直した表を模す — 中身の同一性は参照で区別される）。 */
-const table = (id: string): GeometryProfile => ({ ...DEFAULT_GEOMETRY_PROFILE, id });
+type GeneratedProfile = SavedProfile["profile"];
+
+/**
+ * 同じ id でも別の表（作り直した表を模す — 中身の同一性は参照で区別される）。生成した表と同じく
+ * `provenance` を持ち、adapter の description を `description` で変えられる。
+ */
+const table = (id: string, description = "Apple M2"): GeneratedProfile => ({
+  ...DEFAULT_GEOMETRY_PROFILE,
+  id,
+  provenance: {
+    sweep: "sweep.json",
+    sha256: "sha",
+    date: "2026-10-01T00:00:00.000Z",
+    candidateSet: "quick+",
+    adapter: { vendor: "apple", architecture: "metal-3", device: "", description },
+    kernels: "0123456789abcdef",
+    caseSet: "fedcba9876543210",
+  },
+});
 
 const SAVED_AT = "2026-10-01T03:04:05.000Z";
 
-const saved = (profile: GeometryProfile, description = "Apple M2"): SavedProfile => ({
+const saved = (profile: GeneratedProfile): SavedProfile => ({
   savedAt: SAVED_AT,
-  adapter: { vendor: "apple", architecture: "metal-3", description },
   checkout: { revision: "0123456789abcdef", dirty: false },
   profile,
 });
+
+/** localStorage に置く形（`profileJson` は表の `geometryProfileJson` — `overrides` で欄を差し替える）。 */
+const stored = (
+  value: SavedProfile,
+  overrides: Readonly<Record<string, unknown>> = {},
+): string =>
+  JSON.stringify({
+    savedAt: value.savedAt,
+    checkout: value.checkout,
+    profileJson: geometryProfileJson(value.profile),
+    ...overrides,
+  });
 
 /** Map を背にした Storage（`failing` に挙げた操作は投げる — 無効な localStorage を模す）。 */
 class FakeStorage implements ProfileStorage {
@@ -76,7 +104,7 @@ describe("gpu lab injectable tables", () => {
       ]);
     });
 
-    it("lists the saved table first with its save time and adapter description", () => {
+    it("lists the saved table first with its save time and the adapter description of its provenance", () => {
       const restored = table("gpu-saved");
       const tables: InjectableTables = {
         saved: saved(restored),
@@ -93,7 +121,7 @@ describe("gpu lab injectable tables", () => {
 
     it("names the adapter by vendor/architecture when its description is empty", () => {
       const options = tableOptions(
-        { saved: saved(table("gpu-saved"), ""), generated: [] },
+        { saved: saved(table("gpu-saved", "")), generated: [] },
         undefined,
       );
       assertEquals(options[0].text.includes("・apple/metal-3）"), true);
@@ -123,6 +151,8 @@ describe("gpu lab injectable tables", () => {
       writeLastGenerated(storage, written);
       const raw = storage.items.get(LAST_GENERATED_KEY) ?? "";
       assertEquals(raw.includes("1e999"), true);
+      // adapter は表の provenance にだけある（外側に重ねて持たない）
+      assertEquals(Object.keys(JSON.parse(raw)), ["savedAt", "checkout", "profileJson"]);
       const restored = readLastGenerated(storage);
       assertEquals(restored, written);
       assertEquals(restored?.profile.gemmRows.at(-1)?.maxRows, Infinity);
@@ -141,31 +171,80 @@ describe("gpu lab injectable tables", () => {
     });
 
     for (
-      const [context, value] of [
-        ["text that is not JSON", "{not json"],
+      const [context, value, reason] of [
+        ["text that is not JSON", "{not json", "JSON"],
         [
-          "a value without the adapter",
-          JSON.stringify({ ...saved(table("gpu-a")), adapter: null }),
+          "a table without its provenance",
+          stored(saved(table("gpu-a")), {
+            profileJson: geometryProfileJson({ ...DEFAULT_GEOMETRY_PROFILE, id: "gpu-a" }),
+          }),
+          "provenance が無い",
         ],
         [
           "a savedAt that is not a date",
-          JSON.stringify({ ...saved(table("gpu-a")), savedAt: "soon" }),
+          stored(saved(table("gpu-a")), { savedAt: "soon" }),
+          "savedAt",
         ],
-        // 素の JSON.stringify は Infinity を null に落とす — runtime の門が拒む
-        ["a table that the runtime gate rejects", JSON.stringify(saved(table("gpu-a")))],
+        // 素の JSON.stringify は Infinity を null に落とす — parseGeometryProfileJson が名指して拒む
+        [
+          "a table whose last maxRows lost its Infinity",
+          stored(saved(table("gpu-a")), { profileJson: JSON.stringify(table("gpu-a")) }),
+          "Infinity の欠落",
+        ],
+        [
+          "a table that the runtime gate rejects",
+          stored(saved(table("gpu-a")), {
+            profileJson: geometryProfileJson({
+              ...table("gpu-a"),
+              attention: {
+                qk: { regM: 3, regN: 4, wgX: 16, wgY: 16 },
+                pv: table("x").attention.pv,
+              },
+            }),
+          }),
+          "attention.qk",
+        ],
         [
           "a table without its fields",
-          JSON.stringify({ ...saved(table("gpu-a")), profile: { id: "x" } }),
+          stored(saved(table("gpu-a")), { profileJson: JSON.stringify({ id: "x" }) }),
+          "に欄 gemmRows, attention, conv2d, i8a8 が無い",
+        ],
+        // /1 の形（表をオブジェクトのまま持つ）は読まない
+        [
+          "a value in the earlier shape (the table as an object)",
+          JSON.stringify({ ...saved(table("gpu-a")), profileJson: undefined }),
+          "profileJson が文字列でない",
         ],
       ] as const
     ) {
       it(`removes the key and throws with the reason for ${context}`, () => {
         const storage = new FakeStorage();
         storage.items.set(LAST_GENERATED_KEY, value);
-        assertThrows(() => readLastGenerated(storage), Error, LAST_GENERATED_KEY);
+        const error = assertThrows(() => readLastGenerated(storage), Error, LAST_GENERATED_KEY);
+        assertStringIncludes(error.message, reason);
         assertEquals(storage.items.has(LAST_GENERATED_KEY), false);
       });
     }
+
+    it("does not read a table saved under the earlier /1 key", () => {
+      const storage = new FakeStorage();
+      storage.items.set("karume-gpu-lab/last-generated-profile/1", stored(saved(table("gpu-a"))));
+      assertEquals(readLastGenerated(storage), undefined);
+    });
+
+    it("refuses to save a table without its provenance, writing nothing", () => {
+      const storage = new FakeStorage();
+      assertThrows(
+        () =>
+          writeLastGenerated(storage, {
+            ...saved(table("gpu-a")),
+            profile: { ...DEFAULT_GEOMETRY_PROFILE, id: "gpu-a" },
+          }),
+        Error,
+        "provenance が無い",
+      );
+      assertEquals(storage.items.size, 0);
+    });
 
     it("lets a storage that refuses access throw, for the caller to report", () => {
       assertThrows(

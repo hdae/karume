@@ -79,12 +79,31 @@ export type GeometryProfile = {
     readonly attentionQk: I8a8Geometry;
     readonly attentionPv: I8a8Geometry;
   };
-  /** 掃引から生成したプロファイルだけが持つ出どころ（掃引 JSON の path と sha256・日付・adapter）。 */
+  /**
+   * 掃引から生成したプロファイルだけが持つ出どころと照合の材料（DECIDED: ADR 0117 決定 4）。書くのは
+   * 生成器（`@karume/runtime/tune` の `deriveGeometryProfile`）だけで、照合は `./tune` の
+   * `geometryProfileMismatch` が行う。runtime（`assertGeometryProfile`・`acquireGpu` の注入口）は見ない。
+   */
   readonly provenance?: {
+    /** 掃引の記録の path（生成に渡した順に `", "` で連結）。 */
     readonly sweep: string;
+    /** 同上の記録のバイト列の SHA-256（16 進）。 */
     readonly sha256: string;
+    /** 同上の掃引の日付。 */
     readonly date: string;
-    readonly adapter: string;
+    /** 同上の候補集合（`quick` / `quick+` / `full`）。 */
+    readonly candidateSet: string;
+    /** 掃引した adapter（`GPUAdapterInfo` の 4 欄 — 空文字も値のまま。全ての記録で一致する）。 */
+    readonly adapter: {
+      readonly vendor: string;
+      readonly architecture: string;
+      readonly device: string;
+      readonly description: string;
+    };
+    /** カーネルの指紋（表と既定の幾何が掃引の shape で組むカーネルのハッシュ — 16 進）。 */
+    readonly kernels: string;
+    /** ケース集合の版（掃引のケースと gemmRows の段の境界のハッシュ — 16 進）。 */
+    readonly caseSet: string;
   };
 };
 

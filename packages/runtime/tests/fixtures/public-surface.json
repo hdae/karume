@@ -425,6 +425,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeometryProfileParseError",
+        "kind": "class"
+      },
+      {
         "name": "GeometryProfileTarget",
         "kind": "typeAlias"
       },
@@ -477,7 +481,19 @@
         "kind": "function"
       },
       {
+        "name": "geometryProfileMismatch",
+        "kind": "function"
+      },
+      {
+        "name": "parseGeometryProfileJson",
+        "kind": "function"
+      },
+      {
         "name": "runGeometrySweep",
+        "kind": "function"
+      },
+      {
+        "name": "sweepCaseSetId",
         "kind": "function"
       }
     ]

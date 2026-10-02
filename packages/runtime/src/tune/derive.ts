@@ -60,7 +60,20 @@ import { gemmMTileGeometry } from "../kernels/gemm.ts";
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
-import { conv2dCandidate, gemmCandidate, i8a8Candidate } from "./geometries.ts";
+import {
+  geometryProfileKernelsId,
+  INFINITY_JSON,
+  KernelsIdError,
+  sweepCaseSetId,
+} from "./fingerprint.ts";
+import {
+  CANDIDATE_SETS,
+  type CandidateSet,
+  conv2dCandidate,
+  gemmCandidate,
+  i8a8Candidate,
+  isCandidateSet,
+} from "./geometries.ts";
 import { CHROME_TIMESTAMP_QUANTUM_NS, driftOutOfRange, REPORT_FORMAT } from "./report.ts";
 
 /** `--min-speedup` の既定（既定比がこれ未満の勝ちは測定の揺れと区別しない）。 */
@@ -71,7 +84,7 @@ export const DEFAULT_MIN_SPEEDUP = 1.05;
  * 再測定比の許容幅（0.9〜1.1）の 1/10。80 ms の pass なら E は約 0.25% で、超えるのは reps の見積りが
  * 外れた短い pass だけ。規則は 1 つ — 引数にも options にもしない（除外を無効にする口も作らない）。
  */
-const ROUNDING_ERROR_LIMIT = 0.01;
+export const ROUNDING_ERROR_LIMIT = 0.01;
 
 /**
  * 表を当てる adapter（生成物の `match`）。`vendor` / `architecture` / `description` は runtime の選択と
@@ -95,9 +108,11 @@ export type ProfileTarget =
 
 type Geometry = GemmGeometry | I8a8Geometry;
 
+/** 掃引した adapter（記録の `adapter` — `GPUAdapterInfo` の 4 欄・空文字も値のまま）。 */
 type SweepAdapter = {
   readonly vendor: string;
   readonly architecture: string;
+  readonly device: string;
   readonly description: string;
 };
 
@@ -135,6 +150,8 @@ export type SweepSource = {
   readonly sha256: string;
   readonly date: string;
   readonly adapter: SweepAdapter;
+  /** 候補集合（`settings.candidateSet` — 欄の無い古い記録は `settings.quick` から `quick` / `full`）。 */
+  readonly candidateSet: CandidateSet;
   /**
    * timestamp の量子化の刻み q（`rounds` と同じ単位）。`gpuTiming.quantized` が true なら Chrome の 100 µs、
    * false なら 0（丸めが無い）。
@@ -259,6 +276,29 @@ const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
 };
 
 /**
+ * 記録の候補集合（表の `provenance.candidateSet` に載る — ADR 0117 決定 4）。`settings.candidateSet` が
+ * 正本で、欄の無い古い記録（quick+ の導入前）は `settings.quick` から `quick` / `full` を読む。
+ */
+const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
+  if (!isRecord(settings)) throw new Error(`${where}: settings が無い（候補集合が読めない）`);
+  const { candidateSet, quick } = settings;
+  if (candidateSet !== undefined) {
+    if (typeof candidateSet !== "string" || !isCandidateSet(candidateSet)) {
+      throw new Error(
+        `${where}: settings.candidateSet が ${CANDIDATE_SETS.join(" / ")} のどれでもない（${
+          JSON.stringify(candidateSet)
+        }）`,
+      );
+    }
+    return candidateSet;
+  }
+  if (!isBoolean(quick)) {
+    throw new Error(`${where}: settings に candidateSet も quick も無い（候補集合が読めない）`);
+  }
+  return quick ? "quick" : "full";
+};
+
+/**
  * 掃引の記録を読む（unknown 境界 — 生成が読む欄だけを検査して fail loudly）。
  *
  * MUST: ケースごとに既定の行がちょうど 1 本あること。比の土台が無い・2 つあるケースは、
@@ -338,8 +378,10 @@ export const parseSweepReport = (
     adapter: {
       vendor: requireString(adapter, "vendor", `${where} adapter`),
       architecture: requireString(adapter, "architecture", `${where} adapter`),
+      device: requireString(adapter, "device", `${where} adapter`),
       description: requireString(adapter, "description", `${where} adapter`),
     },
+    candidateSet: parseCandidateSet(parsed.settings, where),
     timestampQuantum: quantized ? CHROME_TIMESTAMP_QUANTUM_NS : 0,
     cases,
     rows,
@@ -913,19 +955,19 @@ export const deriveProfile = (
         } と合わない`,
       );
     }
-    // MUST: 掃引どうしも description まで一致（空どうしは一致・片方だけ空は不一致）— --opt-in や
-    // --description 省略では上の門が description を見ないので、同じ vendor / architecture の別機種
-    // （M2 と M5 など）が混ざるのをここで止める
+    // MUST: 掃引どうしは adapter の 4 欄が全て一致（空どうしは一致・片方だけ空は不一致 — ADR 0117
+    // 決定 4）。表の provenance は adapter を 1 つだけ持ち、照合（geometryProfileMismatch）はその 4 欄で
+    // 見る。--opt-in や --description 省略では上の門が description を見ないので、同じ vendor /
+    // architecture の別機種（M2 と M5 など）が混ざるのもここで止める
     const first = sources[0].adapter;
-    if (
-      vendor !== first.vendor || architecture !== first.architecture ||
-      description !== first.description
-    ) {
-      throw new Error(
-        `${source.path}: adapter ${vendor} / ${architecture} / ${description} が ${
-          sources[0].path
-        } の ${first.vendor} / ${first.architecture} / ${first.description} と違う`,
-      );
+    for (const field of ["vendor", "architecture", "device", "description"] as const) {
+      if (source.adapter[field] !== first[field]) {
+        throw new Error(
+          `${source.path}: adapter の ${field} ${JSON.stringify(source.adapter[field])} が ${
+            sources[0].path
+          } の ${JSON.stringify(first[field])} と違う（4 欄の揃った掃引だけを 1 本の表に合わせる）`,
+        );
+      }
     }
   }
   const bySlot = new Map<ProfileSlot, SlotRow[]>();
@@ -1019,13 +1061,6 @@ export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
     ];
   });
 
-/** adapter の表示（空の欄は落とす — Deno は architecture を空で返す）。 */
-const adapterLabel = (sources: readonly SweepSource[]): string => {
-  const { vendor, architecture } = sources[0].adapter;
-  const descriptions = [...new Set(sources.map((source) => source.adapter.description))];
-  return [vendor, architecture, ...descriptions].filter((part) => part !== "").join(" / ");
-};
-
 /** 掃引から作った表（{@link buildGeometryProfile} — `provenance` を必ず持つ）。 */
 export type GeneratedProfile = GeometryProfile & {
   readonly provenance: NonNullable<GeometryProfile["provenance"]>;
@@ -1051,7 +1086,11 @@ const i8a8Slot = (verdicts: readonly SlotVerdict[], slot: ProfileSlot): I8a8Geom
 
 /**
  * 採否から表の値を組む（リポへ登録する生成物の TS〈`tools/geometry-sweep/render.ts`〉の値と、
- * `acquireGpu({ geometryProfile })` に注入する値の両方の正本）。`provenance` は掃引の path / sha256 / 日付を渡した順に `", "` で連結する。
+ * `acquireGpu({ geometryProfile })` に注入する値の両方の正本）。
+ *
+ * MUST: `provenance` を書くのはこの関数だけ（ADR 0117 決定 4）。掃引の path / sha256 / 日付 / 候補集合は
+ * 渡した順に `", "` で連結し、adapter は 4 欄をそのまま（{@link deriveProfile} が全ての記録で一致を検査済み）、
+ * カーネルの指紋とケース集合の版は今の runtime で導く（照合 `geometryProfileMismatch` が同じ関数で導き直す）。
  */
 export const buildGeometryProfile = (
   spec: { readonly id: string } & ProfileTarget,
@@ -1061,8 +1100,9 @@ export const buildGeometryProfile = (
   // MUST: 末尾の規則は全行数に当たること（runtime の門と同じ条件 — 生成時に先に落とす）。
   // 末尾 Infinity と既定の細分は profileRowsSegments が検査する
   const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
+  if (sources.length === 0) throw new Error("掃引の記録が 1 本も無い（provenance を書けない）");
   const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
-  return {
+  const table: GeometryProfile = {
     id: spec.id,
     ...(spec.optIn === true ? {} : {
       match: {
@@ -1088,13 +1128,39 @@ export const buildGeometryProfile = (
       attentionQk: i8a8Slot(verdicts, "i8a8.attentionQk"),
       attentionPv: i8a8Slot(verdicts, "i8a8.attentionPv"),
     },
+  };
+  const { vendor, architecture, device, description } = sources[0].adapter;
+  return {
+    ...table,
     provenance: {
       sweep: joined((source) => source.path),
       sha256: joined((source) => source.sha256),
       date: joined((source) => source.date),
-      adapter: adapterLabel(sources),
+      candidateSet: joined((source) => source.candidateSet),
+      adapter: { vendor, architecture, device, description },
+      kernels: generatedKernelsId(table),
+      caseSet: sweepCaseSetId(),
     },
   };
+};
+
+/**
+ * 生成した表のカーネルの指紋。表の幾何から掃引の shape のカーネルを組めない（codegen の門・dispatch 数の
+ * 上限 — 指紋は全 device が保証する 65535 で組むので、上限の大きい device の掃引を通った幾何でも落ちうる）
+ * ときは、表を作らずに理由（ケース・欄・幾何）を名指して投げる — 照合で必ず不一致になる表を保存させない。
+ */
+const generatedKernelsId = (table: GeometryProfile): string => {
+  try {
+    return geometryProfileKernelsId(table);
+  } catch (cause) {
+    if (cause instanceof KernelsIdError) {
+      throw new Error(
+        `生成した表 '${table.id}' の provenance.kernels（カーネルの指紋）を導けない — ${cause.message}`,
+        { cause },
+      );
+    }
+    throw cause;
+  }
 };
 
 /**
@@ -1167,7 +1233,8 @@ export const geometryProfileJson = (profile: GeometryProfile): string => infinit
 
 /**
  * `JSON.stringify(value, null, 2)` と同じ形で、`Infinity` だけを `1e999` と書く（{@link geometryProfileJson}
- * と同じ綴り — 注入した表を載せる記録〈GPU lab の Anima の JSON〉も表の値を null に落とさない）。
+ * と同じ綴り — 注入した表を載せる記録〈GPU lab の Anima の JSON〉も表の値を null に落とさない）。綴りは
+ * fingerprint.ts の `INFINITY_JSON`（照合キーの正規の JSON と 1 つ）。
  */
 export const infinityJson = (value: unknown): string => {
   const plain = JSON.stringify(value);
@@ -1178,5 +1245,5 @@ export const infinityJson = (value: unknown): string => {
     value,
     (_key, entry: unknown) => entry === Number.POSITIVE_INFINITY ? INFINITY_MARK : entry,
     2,
-  ).replaceAll(JSON.stringify(INFINITY_MARK), "1e999");
+  ).replaceAll(JSON.stringify(INFINITY_MARK), INFINITY_JSON);
 };

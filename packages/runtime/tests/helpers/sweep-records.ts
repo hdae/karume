@@ -112,6 +112,7 @@ export const report = (
   format: REPORT_FORMAT,
   date: "2026-09-27T00:00:00.000Z",
   adapter,
+  settings: { candidateSet: "full" },
   gpuTiming: { feature: true, unit: "ns", quantized: false },
   cases: [...new Set(rows.map((entry) => String(entry.caseId)))].map((caseId) =>
     repeats[caseId] ?? { caseId, defaultRepeat: { perDispatch: 1, driftRatio: 1 } }
@@ -154,6 +155,7 @@ export const sweep = (name: string, sha256: string): SweepSource =>
     format: REPORT_FORMAT,
     date: "2026-09-29T00:00:00.000Z",
     adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
+    settings: { candidateSet: "full" },
     gpuTiming: { feature: true, unit: "ns", quantized: false },
     cases: [{ caseId: "linear-m1024", defaultRepeat: { perDispatch: 1, driftRatio: 1 } }],
     rows: [

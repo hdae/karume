@@ -46,6 +46,22 @@ measurements in `docs/research/`.
   it bounds the rounding error of every observation and drops from the ratio material only those
   whose bound exceeds 1% (they are listed in the verdicts); wall-clock-only sweeps are still
   rejected. The main entry (`@karume/runtime`) is unchanged.
+- `@karume/runtime/tune` can tell whether a stored profile may still be used.
+  `parseGeometryProfileJson(text)` reads the text of `geometryProfileJson` back into a
+  `GeometryProfile`; it rejects unknown fields at every level, a last `maxRows` that lost its
+  `Infinity` (plain `JSON.stringify` writes `null`), and anything the injection check rejects, with
+  a `GeometryProfileParseError` that names the field. `geometryProfileMismatch(profile, adapterInfo)`
+  returns `undefined` when the profile matches, otherwise the first mismatch as a message: the four
+  adapter fields the profile was swept on (`vendor`, `architecture`, `device`, `description`, empty
+  strings included), the kernel fingerprint (a hash of the pipeline keys, params, WGSL and
+  workgroup counts that the profile and the default geometry give for the sweep's shapes, which the
+  function derives again from the profile without a GPU) and the case-set id (`sweepCaseSetId()`,
+  a hash of the sweep's cases and `gemmRows` bounds that leaves out the cases' descriptions). A
+  profile derived from sweeps carries these in `GeometryProfile.provenance` (`candidateSet`,
+  `adapter` as the four fields, `kernels` and `caseSet`, next to `sweep`, `sha256` and `date`), and
+  `deriveGeometryProfile` requires all its records to agree on the four adapter fields. A runtime
+  update that changes those kernels or the sweep's cases makes stored profiles mismatch: sweep
+  again. Injection (`acquireGpu({ geometryProfile })`) still ignores `provenance`.
 
 - Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
   sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,

@@ -19,7 +19,16 @@
  *   sweep's cases on that device; outputs of an in-app profile are not covered by the repository's
  *   end-to-end reference hashes.
  * - {@link geometryProfileJson} serializes a profile for storage (`Infinity` is written as `1e999`,
- *   which `JSON.parse` reads back as `Infinity`).
+ *   which `JSON.parse` reads back as `Infinity`); {@link parseGeometryProfileJson} reads it back,
+ *   rejecting unknown fields at every level and anything the injection gate would reject, with a
+ *   {@link GeometryProfileParseError} that names the field.
+ * - {@link geometryProfileMismatch} tells whether a stored profile may be used with this adapter
+ *   and this runtime: it compares the four adapter fields the profile was swept on, the kernel
+ *   fingerprint (derived again from the profile by this runtime) and the case-set id
+ *   ({@link sweepCaseSetId}), and returns the first mismatch as a message. On a mismatch, run with
+ *   the default table (or another one) and sweep again. It cannot detect a browser or driver
+ *   update, and Chrome without developer flags reports an empty `device` and `description`, so an
+ *   Apple M2 and an M5 look the same to it.
  *
  * Doing "start with the default table, sweep in the background, re-acquire with the new table"
  * automatically amounts to auto-tuning at the application level: recording which profile each run
@@ -57,3 +66,21 @@ export type {
   GeometrySweepInput,
   ProfileTarget as GeometryProfileTarget,
 } from "./src/tune/derive.ts";
+
+/**
+ * Reads a stored profile (the text of {@link geometryProfileJson}) back into a `GeometryProfile`,
+ * or throws {@link GeometryProfileParseError}.
+ */
+export { GeometryProfileParseError, parseGeometryProfileJson } from "./src/tune/profile-json.ts";
+
+/**
+ * Whether a stored profile may be used with this adapter and this runtime (`undefined` when it
+ * may, otherwise the first mismatch as a message). Never throws for a mismatch.
+ */
+export { geometryProfileMismatch } from "./src/tune/mismatch.ts";
+
+/**
+ * The id of the sweep's case set (`provenance.caseSet`), derived from this runtime without a GPU as
+ * a 16-digit hexadecimal string.
+ */
+export { sweepCaseSetId } from "./src/tune/fingerprint.ts";

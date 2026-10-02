@@ -263,11 +263,6 @@ const initialize = async (): Promise<void> => {
     try {
       writeLastGenerated(localStorage, {
         savedAt: new Date().toISOString(),
-        adapter: {
-          vendor: adapterInfo.vendor,
-          architecture: adapterInfo.architecture,
-          description: adapterInfo.description,
-        },
         checkout: { revision: config.revision, dirty: config.dirty },
         profile,
       });
