@@ -78,6 +78,8 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
         "VOWEL_DETECTOR_GRAPH_ROLE",
         "VOWEL_DETECTOR_GRAPH_ROLE",
     ),
+    ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
+    ("wan/export_vae.py", "emit_target", "target", "TARGETS"),
 )
 
 #: `minicpm5/export_decode.py` のように、値の定数が**別モジュール**に在る台本の引き先。

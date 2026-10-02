@@ -134,18 +134,18 @@ Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は�
 // 表の**中身**（キーの規則・repo 名・40 桁 hex）を見るのは `sources_test.ts` で、ここで縛るのは
 // 2 点:
 //
-// ① **subpath ⊆ barrel を 9 面すべてで**見る（`deno.json` の `exports` は `.` + 9 サブパス —
+// ① **subpath ⊆ barrel を 10 面すべてで**見る（`deno.json` の `exports` は `.` + 10 サブパス —
 //    走査する面の集合は `exports` のキーと突き合わせる）。
 //    `./gemma` 1 面だけに掛けていた頃は、他の面のどの値 export を `mod.ts` から落としても
 //    全テストが緑のままだった。
 // ② `<FAMILY>_SOURCES` の**畳み込み漏れ**（家族表を新設したのに `src/sources.ts` へ足し忘れる）
 //    を落とす。`src/sources.ts` のスプレッドは実行時に列挙できないので、代わりに
-//    「9 サブパスから集めた表のキーの和集合 === `Object.keys(KARUME_SOURCES)`」を突き合わせる。
+//    「10 サブパスから集めた表のキーの和集合 === `Object.keys(KARUME_SOURCES)`」を突き合わせる。
 //
 // 表を持たない家族（`./vowel-detector` など未配布の家族）は 1 本も出さないのが正しい状態なので、
 // 陽性対照（表が 1 本以上ある）は面ごとではなく**全体で 1 回**置く。
 
-/** `deno.json` の `exports` が持つ 9 サブパス（`.` = barrel を除く全部）。 */
+/** `deno.json` の `exports` が持つ 10 サブパス（`.` = barrel を除く全部）。 */
 const subpathSurfaces = async (): Promise<readonly { name: string; surface: string[] }[]> => [
   { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
   { name: "./birefnet", surface: Object.keys(await import("../birefnet.ts")) },
@@ -156,6 +156,7 @@ const subpathSurfaces = async (): Promise<readonly { name: string; surface: stri
   { name: "./sbv2", surface: Object.keys(await import("../sbv2.ts")) },
   { name: "./siglip2", surface: Object.keys(await import("../siglip2.ts")) },
   { name: "./vowel-detector", surface: Object.keys(await import("../vowel-detector.ts")) },
+  { name: "./wan", surface: Object.keys(await import("../wan.ts")) },
 ];
 
 /** `deno.json` の `exports` から barrel（`.`）を除いたサブパス名（昇順）。 */
@@ -173,7 +174,7 @@ Deno.test("barrel: 走査するサブパスは deno.json の exports のサブ�
   );
 });
 
-Deno.test("barrel: 9 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
+Deno.test("barrel: 10 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
   const barrel = Object.keys(models);
   const subpaths = await subpathSurfaces();
   // 陽性対照 — 空の名前空間を並べて緑になる形にしない。
@@ -236,6 +237,7 @@ Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み�
     import("../sbv2.ts"),
     import("../siglip2.ts"),
     import("../vowel-detector.ts"),
+    import("../wan.ts"),
   ]);
   const keys = new Set<string>();
   for (const namespace of namespaces) {

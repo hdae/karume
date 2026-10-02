@@ -39,6 +39,11 @@ class TestPin:
             for pattern in sources.allow_patterns()
         )
 
+    def test_the_text_embedding_process_takes_exactly_the_skipped_parts(self):
+        """`wan.text_embeds` の取得口（`text_snapshot`）が取るのは DiT / VAE 側が取らない
+        部品だけ。"""
+        assert set(sources.TEXT_COMPONENTS) == {"text_encoder", "tokenizer"}
+
 
 class TestSafetensorsHeader:
     def test_it_counts_elements_from_the_header_only(self, tmp_path: Path):

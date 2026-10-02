@@ -79,6 +79,8 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("depth_anything/export.py", "export_series"),
     ("vowel_detector/export.py", "export_series"),
     ("irodori/dacvae/export.py", "export_series"),
+    ("wan/export_dit.py", "emit"),
+    ("wan/export_vae.py", "emit_target"),
 )
 
 

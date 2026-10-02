@@ -182,6 +182,97 @@ Measured on 2026-10-02 (B570, Deno 2.9.6):
 | tiled vs untiled upstream decode (observation, not a gate) | max abs 0.120, mean 2.26e-3 (ratio 8.17e-2)       |
 | CPU reference (`band`): tiled / untiled                    | 836 s / 491 s, peak RSS 9.2 GiB                   |
 
+## Text embeddings, sampler and few-step reference (stage 6)
+
+### Text embeddings
+
+The first text stage ships precomputed umT5-XXL outputs (ADR 0118 decision 4). `wan/text_embeds.py`
+fetches the pinned `text_encoder` / `tokenizer` (about 23 GB) and runs them **in a separate process
+on the CPU in bf16** (the upstream `t5_dtype`), through the upstream
+`WanPipeline._get_t5_prompt_embeds` (`prompt_clean` with ftfy 6.3.1 → `padding="max_length"`, 512 →
+encoder). Only the valid rows `[L_valid, 4096]` are stored, in f32 (the bf16 values widen exactly).
+
+```bash
+uv run --group wan --inexact python -m wan.text_embeds --fetch   # text_encoder + tokenizer at the pinned revision
+uv run --group wan --inexact python -m wan.text_embeds           # → outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors
+```
+
+| Name             | Role     | Source                                                                     | `L_valid` |
+| ---------------- | -------- | -------------------------------------------------------------------------- | --------: |
+| `boxing-cats`    | positive | official README, t2v-1.3B example (same as `generate.py` `EXAMPLE_PROMPT`) |        28 |
+| `ferret`         | positive | Diffusers docs, Wan T2V example (multi-line string kept verbatim)          |       118 |
+| `cat-dog-baking` | positive | Diffusers `WanPipeline.__call__` example                                   |        50 |
+| `negative`       | negative | official `sample_neg_prompt` (`wan/configs/shared_config.py`, Chinese)     |       126 |
+
+One tensor per prompt (`F32 [L_valid, 4096]`). The metadata is a **single key**
+(`karume.wan.text_embeds`) holding sorted-key JSON: source repo / revision, encoder dtype, library
+versions, and per prompt the original text, the normalized text, the token count and the source URL
+(pinned to a commit). A single key keeps the file byte-identical across runs: safetensors writes the
+metadata map in a per-process order, so several keys give a different header each run. ftfy turns
+the full-width commas of the negative prompt into ASCII commas, which is why the normalized text is
+recorded.
+
+Measured on 2026-10-02 (6-core desktop CPU): about 2.2–2.5 minutes per prompt, 9–10 minutes in all,
+5,280,288 bytes, and the second run wrote the same bytes. Peak anonymous memory is 11.4 GiB; with
+a warm page cache the RSS reaches 24 GiB because the mapped fp32 shards (15.3 GiB, reclaimable)
+count toward it.
+
+### UniPC and CFG fixture
+
+`wan/scheduler_ref.py` drives the diffusers 0.39.0 `UniPCMultistepScheduler` with the pinned
+scheduler config (flow, shift 3.0, bh2, order 2) on seeded synthetic model outputs (latent
+`[1,16,3,16,16]`) and writes `packages/models/tests/fixtures/wan-scheduler/unipc.{safetensors,json}`:
+the σ (f32) and timestep (int64) columns, the trajectory after each of the 50 steps, the step
+orders, and one CFG combination (guide 5.0, the upstream expression). The JSON also holds the σ
+columns in float64 for 2 and 50 steps: they are rebuilt with the upstream numpy expression and
+checked against the scheduler's f32 σ (bit-exact) and timesteps (exact) before they are written,
+since the scheduler does not expose its float64 intermediate. σ[0] is 0.999999 (1 − 1e-6) and the
+timesteps start 999, 993, 986, 979, 971.
+
+```bash
+uv run --group wan --inexact python -m wan.scheduler_ref   # seconds; no weights
+```
+
+### Few-step reference
+
+`wan/few_step_ref.py` runs the plain diffusers `WanPipeline` on CPU f32 (f16-rounded DiT and VAE
+weights) for 2 steps with CFG (guide 5.0, shift 3.0) at 832×480, 33 frames, with the text
+embeddings from the asset and the seeded torch `randn` noise injected through `latents=`. It writes
+`pipeline_steps.<case>.safetensors` at the series root: the injected noise, each step's cond /
+uncond DiT outputs (recorded with a forward hook) and latents, and the frames from the stage-5 tiled
+decode before the clamp. Two cases set the tolerance — `band-boxing-cats` (seed 20261030) and
+`band-cat-dog-baking` (seed 20261032) — and `accept-ferret` (seed 20261033) is judged against it.
+
+```bash
+uv run --group wan --inexact python -m wan.few_step_ref   # all three cases (CPU, about 20 min each)
+```
+
+### The pipeline these feed (`@karume/models/wan`)
+
+`WanPipeline` (`packages/models/src/wan/`) reads the three series containers and the embedding asset
+with `fromAssets` (there is no distribution yet — stage 7) and runs `generate` in three stages: the
+asset lookup (only the stored prompts are accepted, by original or normalized text), the DiT with
+CFG as two batch-1 passes and the host UniPC, then the tiled VAE decode and the clamp. Measured on
+the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
+
+- From the cond / uncond DiT outputs recorded in `pipeline_steps.*`, the host CFG + UniPC reproduces
+  the reference latents bit for bit, so the GPU-vs-reference difference comes from the DiT alone.
+- GPU against the CPU f32 reference (max |diff| ÷ max |reference|): the bands are five times the
+  worse of the two band-setting cases at each point — latents after step 1 8.5e-5, after step 2
+  9.1e-4, clamped frames 8.5e-3. The acceptance case lands at 0.16 / 0.56 / 0.67 of them. This gate
+  checks the wiring (prompt order, guidance, steps, the hand-off between stages); the numerics of a
+  single DiT forward are checked in stage 3 against the f64 reference.
+- Stage times: the DiT stage (4 forwards) about 70 s and the VAE stage about 129 s. VRAM (fdinfo
+  `drm-total-vram0`) peaks at 5.7 GiB in the DiT stage and 2.9 GiB in the VAE stage, and is back
+  to 0.4 GiB right after the DiT session is disposed, so the two stages never overlap and no extra
+  wait for released memory is needed between them.
+- The 50-step run with the default settings is opt-in (`KARUME_WAN_FULL_PIPELINE=1`); it writes the 33
+  frames and a 4×8 contact sheet as PNG under `outputs/verify/<environment>/<date>_wan-pipeline-full/`.
+
+The UniPC port is checked against `wan-scheduler/unipc.*`: σ bit for bit, timesteps exactly, the
+50-step trajectory within an absolute 2e-5 (torch's float32 `log` differs from the correctly rounded
+value by one ULP at six of the σ), and the CFG combination bit for bit.
+
 ## Tests
 
 ```bash
@@ -189,10 +280,22 @@ uv run --group wan --inexact pytest wan   # from tools/export-recipes/
 deno task test:models:wan                 # from the repository root (packages/models/tests/*wan*_test.ts)
 ```
 
-The Deno lane runs the host-function tests and the real-GPU parity gates for the DiT, the VAE chunk
-graphs and the tiled decode. The GPU gates read the series under `outputs/series/` written by
-`wan.export_dit`, `wan.export_vae` and `wan.vae_tiling`, and skip explicitly (with the generating
-command) when those assets or a GPU adapter are missing.
+The stage-6 tests check the fixed prompts (commit-pinned sources, the pipeline example matching the
+pinned diffusers), the normalization (ftfy is required), the asset format (round trip, rejection of
+tensors outside the contract, byte-identical output from two processes), and, when the generated
+files exist, the asset (f32 `[L_valid, 4096]`, `L_valid` equal to the tokenizer mask length,
+normalized text equal to `prompt_clean`), the scheduler columns (first timestep 999, strictly
+decreasing, the 1e-6 correction), the scheduler fixture being current, and the few-step reference
+(shapes, schedule and tile plan in the metadata, the embeddings' sha256, the seeded noise).
+
+The Deno lane runs the host-function tests (including the UniPC / CFG fixture and the pipeline's input
+gates) and the real-GPU parity gates for the DiT, the VAE chunk graphs, the tiled decode and the
+two-step pipeline run (with its sha256 row in `packages/models/tests/fixtures/references/wan.json`,
+written with `KARUME_REFERENCE=write`). The GPU gates read the series under `outputs/series/`
+written by `wan.export_dit`, `wan.export_vae`, `wan.vae_tiling`, `wan.text_embeds` and
+`wan.few_step_ref`, and skip explicitly (with the generating command) when those assets or a GPU
+adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the 50-step run (about half an hour on the
+B570).
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
 when the pinned snapshot is not in the HF cache.

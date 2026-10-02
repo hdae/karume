@@ -162,6 +162,20 @@ measurements in `docs/research/`.
   adaptive budget had a measurement, and the heaviest single dispatch with its pipeline key. It
   adds no wait and is undefined without `gpuTiming`; values are in timestamp units like
   `GpuTimingEntry.ns`.
+- `@karume/models/wan` (also in the barrel): Wan2.1 T2V 1.3B text-to-video (ADR 0118).
+  `WanPipeline.fromAssets({ assets })` builds the pipeline from the transformer and the two VAE
+  chunk-graph containers (single `krm` or numbered parts, keys `transformer`,
+  `vae_decoder_first`, `vae_decoder_next`) plus the precomputed text-embedding asset
+  (`text_embeds`); there is no distribution or `fromPretrained` yet. `generate({ prompt,
+  negativePrompt?, seed | latents, steps = 50, guidance = 5.0, shift = 3.0, frames = 33,
+  width = 832, height = 480, onEvent? })` returns `GeneratedVideo` (`[3, F, H, W]` f32 in
+  `[-1, 1]`): the DiT runs with classifier-free guidance as two batch-1 passes, the flow-matching
+  UniPC scheduler runs on the host, and the VAE always decodes in tiles. `prompt` and
+  `negativePrompt` must be one of the prompts stored in the embedding asset (original or normalized
+  text — `WanPipeline.prompts` lists them); any other string, a size other than 832×480 / 480×832,
+  a frame count other than 4n+1 in 5–33, and out-of-range knobs throw `ModelInputError` before any
+  weight reaches the GPU. A GPU with `gpuTiming` is rejected at construction (the VAE stage needs
+  batches). `wanFrameToRgba(video, frame)` converts one frame to 8-bit RGBA for `encodePng`.
 
 ### Changed
 

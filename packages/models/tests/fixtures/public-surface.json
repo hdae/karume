@@ -263,6 +263,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "GeneratedVideo",
+        "kind": "typeAlias"
+      },
+      {
         "name": "GenerationCapacityConstraint",
         "kind": "typeAlias"
       },
@@ -475,6 +479,42 @@
         "kind": "typeAlias"
       },
       {
+        "name": "WanAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanGenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanLatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "WanPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanPrompt",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanPromptRole",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanRunComponent",
+        "kind": "typeAlias"
+      },
+      {
         "name": "animaLatents",
         "kind": "function"
       },
@@ -540,6 +580,10 @@
       },
       {
         "name": "toSbv2Utterance",
+        "kind": "function"
+      },
+      {
+        "name": "wanFrameToRgba",
         "kind": "function"
       }
     ],
@@ -1219,6 +1263,56 @@
       {
         "name": "VowelDetectorResult",
         "kind": "typeAlias"
+      }
+    ],
+    "./wan": [
+      {
+        "name": "GeneratedVideo",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
+        "name": "WanAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanGenerateEvent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanLatentSnapshot",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanPipeline",
+        "kind": "class"
+      },
+      {
+        "name": "WanPipelineOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanPrompt",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanPromptRole",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "wanFrameToRgba",
+        "kind": "function"
       }
     ]
   }

@@ -1,7 +1,7 @@
 /**
  * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./birefnet` /
  * `./depth-anything` / `./gemma` / `./gemma4-qat` / `./irodori` / `./sbv2` / `./siglip2` /
- * `./vowel-detector`）と両建て（ADR 0037）。
+ * `./vowel-detector` / `./wan`）と両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
@@ -275,6 +275,21 @@ export type {
   VowelDetectorResult,
 } from "./src/vowel-detector/pipeline.ts";
 export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
+
+export { WanPipeline } from "./src/wan/pipeline.ts";
+export type {
+  GeneratedVideo,
+  WanAssets,
+  WanGenerateEvent,
+  WanGenerateRequest,
+  WanLatentSnapshot,
+  WanPipelineOptions,
+  WanRunComponent,
+} from "./src/wan/pipeline.ts";
+/** 受理するプロンプトの 1 行と役割の語彙（`./wan` を参照 — 第 1 段は集合の外を拒む）。 */
+export type { WanPrompt, WanPromptRole } from "./src/wan/text-embeds.ts";
+/** 動画の 1 フレーム → RGBA 8bit（`./wan` を参照 — uint8 化の規則の正本）。 */
+export { wanFrameToRgba } from "./src/wan/frames.ts";
 
 /**
  * 全ファミリの取得元対応表を 1 つに畳んだ表（家族ごとの `*_SOURCES` と**同じキー・同じ値** —

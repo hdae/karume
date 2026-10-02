@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "kind": "sha256",
+  "cases": {
+    "2step-accept-ferret": {
+      "deno-intel-graphics-bmg-g21": "85e756fdbbc6dbeea22210ce56fb0dbd592e6c2300bfaf05a0f2012c4ba39f2b"
+    },
+    "2step-band-boxing-cats": {
+      "deno-intel-graphics-bmg-g21": "f1de4c72e487610d947bdb2cbdbf571802a80e5a0d0f08b636b3d59f159b1e72"
+    },
+    "2step-band-cat-dog-baking": {
+      "deno-intel-graphics-bmg-g21": "e1414441a00c92dd2d2990241e3a5f5759db0a267a4b77d2d4ca4ca91c877e6f"
+    },
+    "50step-boxing-cats-seed42": {
+      "deno-intel-graphics-bmg-g21": "349147a252448744aaa8b5aabe4dd874bd934d4ae0c4a57796bf97ca3bf5aa05"
+    }
+  }
+}

@@ -384,6 +384,9 @@ export const assembleWanVaeTiles = (
  * `latents` は逆正規化済みの `[C, F, H, W]`。計画のタイル辺・縮尺・チャネル数が開いた資産
  * （`caches.layout`）と食い違えば fail loudly。
  *
+ * `onTile` はタイル 1 枚の decode が決着するたびに await する（`tile` は 1 始まり・行優先 — パイプラインの
+ * 進捗と診断の口。投げれば残りのタイルを回さずに投げ直す）。
+ *
  * MUST: 同じ device の別の batch・run を並行に発行しない（タイルごとの batch が device の区間
  * ロックを持つ — `decodeWanVaeTile`）。
  */
@@ -393,6 +396,7 @@ export const decodeWanVaeTiles = async (
   caches: WanVaeChunkCaches,
   plan: WanVaeTilePlan,
   latents: Float32Array,
+  onTile?: (tile: number) => void | Promise<void>,
 ): Promise<Float32Array<ArrayBuffer>[]> => {
   const { layout } = caches;
   if (
@@ -413,6 +417,7 @@ export const decodeWanVaeTiles = async (
       decoded.push(
         await decodeWanVaeTile(gpu, sessions, caches, wanVaeLatentTile(plan, latents, row, col)),
       );
+      await onTile?.(decoded.length);
     }
   }
   return decoded;
@@ -420,7 +425,8 @@ export const decodeWanVaeTiles = async (
 
 /**
  * タイル decode の本体: 全タイルを decode してブレンド・貼り付けした**クランプ前**の
- * `[3, 1 + 4(F−1), H·s, W·s]`。最終フレームは {@link clampWanVaeFrames} を通す。
+ * `[3, 1 + 4(F−1), H·s, W·s]`。最終フレームは {@link clampWanVaeFrames} を通す。`onTile` は
+ * {@link decodeWanVaeTiles} と同じ。
  */
 export const decodeWanVaeTiled = async (
   gpu: GpuContext,
@@ -428,8 +434,9 @@ export const decodeWanVaeTiled = async (
   caches: WanVaeChunkCaches,
   plan: WanVaeTilePlan,
   latents: Float32Array,
+  onTile?: (tile: number) => void | Promise<void>,
 ): Promise<Float32Array<ArrayBuffer>> =>
-  assembleOwnedTiles(await decodeWanVaeTiles(gpu, sessions, caches, plan, latents), plan);
+  assembleOwnedTiles(await decodeWanVaeTiles(gpu, sessions, caches, plan, latents, onTile), plan);
 
 /**
  * フレームを `[-1, 1]` へ in-place にクランプする（上流 `torch.clamp(min=-1, max=1)` と同じ —

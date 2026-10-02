@@ -7,8 +7,9 @@ ADR 0092 決定 3（配布リポの revision を焼く流儀）を上流側に�
 
 取得するのは DiT（`transformer`）・VAE（`vae`）・scheduler の config と、ライセンスの
 front matter を持つ `README.md`・部品の索引 `model_index.json` だけ。umT5（`text_encoder`・
-f32 で約 22.7 GB）とトークナイザは取らない — 段 6 のテキスト埋め込みの別プロセスが取る
-（開発機のホスト RAM 31 GiB に umT5 と DiT を同居させない — ADR 決定 4）。
+f32 で約 22.7 GB）とトークナイザは取らない — 段 6 のテキスト埋め込みの別プロセス
+（`wan.text_embeds`）が {@link text_snapshot} で取る（開発機のホスト RAM 31 GiB に umT5 と DiT を
+同居させない — ADR 決定 4）。
 
     uv run --group wan python -m wan.sources --fetch     # 取得（HF の既定キャッシュへ）
     uv run --group wan python -m wan.sources             # 取得済みの検査（パラメータ数）
@@ -70,6 +71,9 @@ COMPONENTS: tuple[Component, ...] = (
     Component("tokenizer", fetch=False, why="umT5 のトークナイザ — 段 6 の別プロセスが取る"),
 )
 
+#: テキスト埋め込みの別プロセス（`wan.text_embeds`）だけが取る部品（`fetch=False` の部品）。
+TEXT_COMPONENTS: tuple[str, ...] = tuple(part.subfolder for part in COMPONENTS if not part.fetch)
+
 #: 部品の外で取得するリポ直下のファイル（ライセンスの front matter と部品の索引）。
 ROOT_FILES: tuple[str, ...] = ("README.md", "model_index.json")
 
@@ -128,6 +132,38 @@ def local_snapshot(model: str = DEFAULT_MODEL) -> Path:
         ) from error
     missing = [part.subfolder for part in COMPONENTS if part.fetch]
     missing = [name for name in missing if not (snapshot / name).is_dir()]
+    if missing:
+        raise WanSourceError(f"{snapshot} に部品 {missing} が無い — `--fetch` で取り直す")
+    return snapshot
+
+
+def text_snapshot(model: str = DEFAULT_MODEL, *, fetch: bool = False) -> Path:
+    """pin した revision の umT5 とトークナイザ（{@link TEXT_COMPONENTS}）の snapshot。
+
+    `fetch=False` ならネットワークに出ず、無ければ fail loudly（{@link local_snapshot} と同じ理由 —
+    約 23 GB の取得が埋め込みの生成に紛れない）。DiT / VAE の取得対象とは別の呼び口にして、
+    参照パイプラインの取得に umT5 が混ざらない形を保つ。
+    """
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    source = SOURCES[model]
+    patterns = [f"{name}/*" for name in TEXT_COMPONENTS]
+    try:
+        snapshot = Path(
+            snapshot_download(
+                source.repo,
+                revision=source.revision,
+                allow_patterns=patterns,
+                local_files_only=not fetch,
+            )
+        )
+    except LocalEntryNotFoundError as error:
+        raise WanSourceError(
+            f"{source.repo}@{source.revision} の {list(TEXT_COMPONENTS)} が HF キャッシュに無い —"
+            " 先に `uv run --group wan --inexact python -m wan.text_embeds --fetch` で取得する"
+        ) from error
+    missing = [name for name in TEXT_COMPONENTS if not (snapshot / name).is_dir()]
     if missing:
         raise WanSourceError(f"{snapshot} に部品 {missing} が無い — `--fetch` で取り直す")
     return snapshot

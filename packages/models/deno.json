@@ -12,7 +12,8 @@
     "./sbv2": "./sbv2.ts",
     "./siglip2": "./siglip2.ts",
     "./vowel-detector": "./vowel-detector.ts",
-    "./gemma4-qat": "./gemma4-qat.ts"
+    "./gemma4-qat": "./gemma4-qat.ts",
+    "./wan": "./wan.ts"
   },
   "imports": {
     "@karume/hub": "jsr:@karume/hub@^0.13.0",
