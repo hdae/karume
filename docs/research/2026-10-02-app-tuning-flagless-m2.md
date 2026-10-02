@@ -99,6 +99,10 @@ checkout `de0c24a8`・2 行 = 既定 quant と f16 を 1 枚ずつ）。
 | PNG sha256                             | f16 `041027e63559`・既定 quant `0a5695470e4a` — **フラグ有りで埋め込み表を当てた K-70 §15 の記録と同一**   |
 | DiT 段 GPU                             | f16 42.10 s・既定 quant 68.25 s（§15 のフラグ有り + 埋め込み表の 42.02 / 68.42 s と同じ）                  |
 
+- **M5 も同じ流れが通った**（`…2026-10-02T12-05-02.121Z.json`・2 行）: `saved:apple-metal-3`（利用者が M5 の表にも同じ id を付けた）・
+  provenance.sweep = §7 の M5 の quick+ 掃引・各段はその表で走り、PNG sha は f16 `dbad691e97ac`・既定 quant `0df85f770e9a` で
+  §7 の既定幾何の A/B と**同一**（M5 の表は conv2d.rows32 以外が既定なので期待どおり）・DiT 段 GPU 17.1 / 22.1 s も同じ。
+  M2 と M5 の記録は adapter の 4 欄が同じ（description 空）で見分けられず、provenance.sweep と DiT の時間で判別した。
 - アプリの流れ（掃引 → 生成 → 保存 → 再読み込み → 照合 → コールバックで注入）は、description が空のフラグ無し Chrome でも通った。
   描画結果は埋め込み表（full 5 本）と**ビット同一**で、quick+ 1 本の表（conv2d.rows64 / i8a8.linear が違う）でも DiT が使う欄は同じ
   幾何なので時間も同じ。
