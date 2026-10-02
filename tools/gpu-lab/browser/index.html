@@ -404,9 +404,7 @@
             class="field">回数 N<input data-ui="count" type="number" value="3" min="1" step="1"></label>
           <button data-ui="run">N 回生成</button>
           <button data-ui="ab"
-            title="同じ設定のまま、区間 A = default を注入して N 回 → 区間 B = 適用中の幾何プロファイルで N 回（各区間の前に GPU を取り直す）を続けて回し、PNG sha256 と段の時間の要約を出す。「全 quant」なら quant ごとに続けて回し、quant ごとに要約する">A/B（既定 vs 表）</button>
-          <label
-            title="on = quant の選択肢の全部（並び順）で A/B を回す / off = 選ばれている quant だけ"><input data-ui="ab-all-quants" type="checkbox" checked> 全 quant</label>
+            title="同じ設定のまま、区間 A = default を注入して N 回 → 区間 B = 適用中の幾何プロファイルで N 回（各区間の前に GPU を取り直す）を続けて回し、PNG sha256 と段の時間の要約を出す。quant は既定の席と f16 の 2 つを続けて回し（select の quant は見ない）、quant ごとに要約する">A/B（既定 vs 表）</button>
         </div>
         <div class="controls">
           <label

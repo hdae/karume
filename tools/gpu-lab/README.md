@@ -207,12 +207,14 @@ distribution; without one (see [Running](#running)) every control is disabled.
 - **A/B（既定 vs 表）** runs a self A/B of the applied geometry profile with the current settings
   (resolution, seed, prompt, steps, guidance scale, residency, and N): interval A injects
   `default` and runs N generates, then interval B uses the applied profile choice (`自動`,
-  `builtin:<id>`, or a derived or saved table) and runs N generates. With **全 quant** checked (the
-  default), it runs this A/B once per quant in the quant list's order (quant outer, interval inner),
-  so N = 3 with two quants gives 12 rows; unchecked, it runs only the selected quant. A table is
-  fixed per device, and so is the quant, so before each interval the pipeline and the device are
-  disposed and acquired again with that interval's choice and quant (the resident DiT is not
-  carried over). Interval A's `default` and the quant being run are internal to the tab: the header
+  `builtin:<id>`, or a derived or saved table) and runs N generates. It runs this A/B for two
+  quants (quant outer, interval inner): the distribution's default quant, then `f16` (the
+  unquantized one; just once when the default is `f16`), so N = 3 gives 12 rows. The quant select
+  is not consulted, and the press fails before acquiring a GPU when either quant is not in the
+  distribution. A table is fixed per device, and so is the quant, so before each interval the
+  pipeline and the device are disposed and acquired again with that interval's choice and quant
+  (the resident DiT is not carried over). Interval A's `default` and the quant being run are
+  internal to the tab: the header
   selection, the applied settings, and the quant select do not change, and when the run ends the
   tab holds a device with the applied settings and the selected quant (otherwise its device is
   disposed and the next action acquires one with them). The rows go into the same table
@@ -283,8 +285,8 @@ comparable to wall times with it off.
    geometry does not change the result bits — ADR 0115), and the DiT stage time shows the effect
    of the table.
    **A/B（既定 vs 表）** does the same comparison against `default` in one press: with the table
-   applied, N = 3, and **全 quant** checked on a distribution with two quants, the table gains 12
-   rows (3 × 2 intervals × 2 quants), and one summary per quant shows `一致` within interval A,
+   applied and N = 3, the table gains 12 rows (3 × 2 intervals × 2 quants: the default quant and
+   `f16`), and one summary per quant shows `一致` within interval A,
    within interval B, and `A と B が一致`, with the `transformer` rows giving the DiT stage's
    B ÷ A. The quant select and the header still show what they showed before the press.
 5. **Built-in tables can be injected on any GPU.** Apply `apple-metal-3` or `nvidia-blackwell` on a

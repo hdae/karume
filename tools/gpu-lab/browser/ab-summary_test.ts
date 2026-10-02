@@ -231,18 +231,22 @@ describe("summarizeAb", () => {
 });
 
 describe("abQuantPlan", () => {
-  const options = ["i8a8", "f16", "w4"];
+  const options = ["f16", "f16+dit8", "f16+dit8-a8", "f16-c16"];
 
-  it("全 quant なら選択肢の全部を select の並び順で返す（選ばれている quant を先頭に寄せない）", () => {
-    assertEquals(abQuantPlan(options, "f16", true), ["i8a8", "f16", "w4"]);
+  it("既定の quant → f16 の 2 つを返す（選択肢の残りは回さない）", () => {
+    assertEquals(abQuantPlan(options, "f16+dit8-a8"), ["f16+dit8-a8", "f16"]);
   });
 
-  it("全 quant でなければ選ばれている quant 1 つだけを返す", () => {
-    assertEquals(abQuantPlan(options, "w4", false), ["w4"]);
+  it("既定の quant が f16 ならその 1 つだけを返す", () => {
+    assertEquals(abQuantPlan(options, "f16"), ["f16"]);
   });
 
-  it("選ばれている quant が選択肢に無ければ投げる（manifest に無い quant で GPU を取りに行かない）", () => {
-    assertThrows(() => abQuantPlan(options, "", true), Error, "選択肢に無い");
+  it("既定の quant が選択肢に無ければ投げる（manifest に無い quant で GPU を取りに行かない）", () => {
+    assertThrows(() => abQuantPlan(options, "w4"), Error, "quant w4 が選択肢に無い");
+  });
+
+  it("選択肢に f16 が無ければ投げる", () => {
+    assertThrows(() => abQuantPlan(["i8a8", "w4"], "i8a8"), Error, "quant f16 が選択肢に無い");
   });
 });
 

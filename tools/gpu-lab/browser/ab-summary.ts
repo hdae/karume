@@ -231,18 +231,23 @@ const incompletePhrase = ({ a, b }: AbSummary): string =>
 /** quant 1 つ分の A/B の要約。 */
 export type AbQuantSummary = { readonly quant: string; readonly summary: AbSummary };
 
+/** A/B で既定の quant と対にする、量子化していない席。 */
+const AB_RAW_QUANT = "f16";
+
 /**
- * A/B で回す quant の並び。`all` なら選択肢の全部（select の並び順 — 既定の quant を先頭に寄せない）、
- * そうでなければ選ばれている 1 つ。
+ * A/B で回す quant の並び: 配布形の既定 quant → `f16`（既定が `f16` ならその 1 つ）。select の選択は見ない —
+ * 欲しいのは既定の席と量子化していない席の対だけで、選択肢の全部（6 席）を回すと無駄に長い。
  */
 export const abQuantPlan = (
   options: readonly string[],
-  selected: string,
-  all: boolean,
+  defaultQuant: string,
 ): readonly string[] => {
+  const quants = defaultQuant === AB_RAW_QUANT ? [defaultQuant] : [defaultQuant, AB_RAW_QUANT];
   // 選択肢に無い quant を回すと manifest に無い quant で GPU を取りに行く — 押した時点で止める
-  if (!options.includes(selected)) throw Error(`A/B: quant ${selected} が選択肢に無い`);
-  return all ? options : [selected];
+  for (const quant of quants) {
+    if (!options.includes(quant)) throw Error(`A/B: quant ${quant} が選択肢に無い`);
+  }
+  return quants;
 };
 
 /**

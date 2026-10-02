@@ -119,7 +119,6 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     count: element(root, "count", HTMLInputElement),
     run: element(root, "run", HTMLButtonElement),
     ab: element(root, "ab", HTMLButtonElement),
-    abAllQuants: element(root, "ab-all-quants", HTMLInputElement),
     holdGib: element(root, "hold-gib", HTMLInputElement),
     hold: element(root, "hold", HTMLButtonElement),
     release: element(root, "release", HTMLButtonElement),
@@ -181,7 +180,6 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       const control of [
         ui.run,
         ui.ab,
-        ui.abAllQuants,
         ui.hold,
         ui.release,
         ui.dispose,
@@ -646,8 +644,8 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
    * device 単位で固定（ADR 0115 追記決定 6）なので、各区間の前に pipeline・GPU を畳んでその区間の選択で
    * 取り直す（常駐 DiT も区間をまたがない）。取り直しは「適用」と同じ手順（`disposeAll` → 次の generate の
    * `ensurePipeline`）で、区間 A の選択はタブの中だけで差し替える — ヘッダの適用状態と select は動かさない。
-   * 「全 quant」なら quant を外側のループにして quant ごとに独立した A/B を回す（quant も GPU を取った時点で
-   * 確定する — {@link BuildChoice} — ので、区間の前の取り直しでそのまま切り替わる）。
+   * quant は既定の席と `f16` の 2 つ（{@link abQuantPlan}）を外側のループにして quant ごとに独立した A/B を回す
+   * （quant も GPU を取った時点で確定する — {@link BuildChoice} — ので、区間の前の取り直しでそのまま切り替わる）。
    */
   const runAb = async (): Promise<void> => {
     const applied = lab.settings().choice;
@@ -666,10 +664,10 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     }
     const count = readCount();
     const selectedQuant = ui.quant.value;
+    if (state.model === undefined) throw Error("Anima の配布形が読めていないので A/B を回せない");
     const quants = abQuantPlan(
       Array.from(ui.quant.options, (option) => option.value),
-      selectedQuant,
-      ui.abAllQuants.checked,
+      state.model.defaultQuant,
     );
     const appliedLabel = requestedLabel(applied);
     const intervals: readonly { readonly name: string; readonly choice: ProfileChoice }[] = [
