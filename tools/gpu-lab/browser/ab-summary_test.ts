@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import type { AnimaRunComponent } from "../../../packages/models/anima.ts";
 import type { Row, StageRecord } from "../../anima-residency/record.ts";
@@ -222,6 +222,43 @@ describe("summarizeAb", () => {
       assertEquals(summary.a.kind, "ok");
       assertEquals(summary.b, { kind: "failed", errorName: "GpuDeviceLostError" });
       assertEquals(summary.comparison, undefined);
+    });
+  });
+
+  describe("行の条件（quant・residency・生成要求）が揃っていないとき", () => {
+    const variants: readonly (readonly [string, (base: Row) => Row])[] = [
+      ["seed", (base) => ({ ...base, request: { ...base.request, seed: 43 } })],
+      ["residency", (base) => ({ ...base, residencyRequested: "per-stage" })],
+      ["steps", (base) => ({ ...base, request: { ...base.request, steps: 20 } })],
+      ["quant", (base) => ({ ...base, quant: "i8" })],
+    ];
+    for (const [field, change] of variants) {
+      it(`区間 B の 1 行だけ ${field} が違えば比べず、違う行を名指す`, () => {
+        const first = row({ wallMs: 9000 });
+        const changed = change(row({ wallMs: 3000 }));
+        const summary = summarizeAb([first, row({ wallMs: 4000 })], [
+          row({ wallMs: 8000 }),
+          changed,
+        ]);
+        assertEquals(summary.a.kind, "ok");
+        assertEquals(summary.b.kind, "ok");
+        assertEquals(summary.comparison, undefined);
+        const mismatch =
+          `行 ${first.index} と行 ${changed.index} で quant・residency・生成要求が違う`;
+        assertEquals(summary.conditionMismatch, mismatch);
+        assertEquals(abTableRows(summary).length, 1);
+        assertEquals(abTableRows(summary)[0][3], `条件不一致 — ${mismatch}（比べない）`);
+        assertStringIncludes(
+          abQuantsStatusLine([{ quant: "f16", summary }]),
+          `条件不一致（${mismatch}）`,
+        );
+      });
+    }
+
+    it("区間ごとの幾何プロファイルの要求の違いは条件に入れない（A/B が比べたいもの）", () => {
+      const summary = summarizeAb([row({ wallMs: 1 })], [row({ wallMs: 1, requested: "auto" })]);
+      assertEquals(summary.conditionMismatch, undefined);
+      assertEquals(summary.comparison?.shaMatch, true);
     });
   });
 

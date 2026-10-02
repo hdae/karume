@@ -1243,8 +1243,12 @@ export const sweepCase = async (
     ...candidates.filter((candidate) => candidate.name !== plan.defaultCandidate.name),
   ];
   let resources: Map<string, GPUBuffer>;
+  // MUST: 利用者のコールバック（onProgress / onRow / onCase）は計測の try の外で呼ぶ — 中で呼ぶと、利用者の
+  // コードが投げた例外が計測の失敗（失敗の行・defaultRepeatError）に化けて記録に焼き込まれ、通知も重なる。
+  // 利用者の例外は呼び手へそのまま伝える（資源は外側の finally が返す）。catch 節の中の emit / finish は
+  // 再捕捉されないのでそのままでよい
+  hooks.onProgress?.(`${target.id}: 入力を用意中`);
   try {
-    hooks.onProgress?.(`${target.id}: 入力を用意中`);
     resources = await createResources(context, plan.resources);
   } catch (cause) {
     ordered.forEach((candidate, index) => emit(errorRow(target, candidate, index === 0, cause)));
@@ -1296,13 +1300,17 @@ export const sweepCase = async (
       emit(compareToDefault(row, reference));
     }
     const initial = reference.perDispatch;
-    // 既定の初回が失敗・device lost のケースは中断でなくても再測定しない（比の土台が無い）
-    if (initial === undefined || gpu.lost !== undefined) return finish({ caseId: target.id });
+    // 既定の初回が失敗・0（timestamp が壊れて差が 0 — 比が無限大か NaN に化ける）・device lost のケースは
+    // 中断でなくても再測定しない（比の土台が無い — 生成器はそのケースを比の材料から外す）
+    if (initial === undefined || !(initial > 0) || gpu.lost !== undefined) {
+      return finish({ caseId: target.id });
+    }
     if (hooks.signal?.aborted === true) {
       aborted = true;
       return finish({ caseId: target.id });
     }
     hooks.onProgress?.(`${target.id}: 既定幾何の再測定`);
+    let repeat: Pick<CaseSummary, "defaultRepeat" | "defaultRepeatError">;
     try {
       const { timing } = await timeCandidate(
         context,
@@ -1312,16 +1320,21 @@ export const sweepCase = async (
         settings.rounds,
       );
       if (timing.perDispatch === undefined) throw new Error(ALL_ROUNDS_NEGATIVE);
-      return finish({
-        caseId: target.id,
+      // 再測定が 0 なら比も 0 で、正の比だけを受ける生成器が記録ごと拒む — 失敗として残し、ケースだけを外させる
+      if (!(timing.perDispatch > 0)) {
+        throw new Error("既定の再測定の perDispatch が 0（timestamp の差が 0 — 比を出せない）");
+      }
+      repeat = {
         defaultRepeat: {
           perDispatch: timing.perDispatch,
           driftRatio: timing.perDispatch / initial,
         },
-      });
+      };
     } catch (cause) {
-      return finish({ caseId: target.id, defaultRepeatError: describeCause(cause) });
+      repeat = { defaultRepeatError: describeCause(cause) };
     }
+    // onCase は再測定の try の外（関数の頭の MUST — 利用者の例外を再測定の失敗に化かさない・2 度通知しない）
+    return finish({ caseId: target.id, ...repeat });
   } finally {
     for (const buffer of resources.values()) buffer.destroy();
   }

@@ -7,6 +7,11 @@
  * GEMM のカーネルに触れないリリースでも表を捨てさせ、未リリースの checkout ではカーネルが変わっても同じ値の
  * ままだから。指紋は、表が指すカーネルか既定のカーネルが変わったときだけ変わる。
  *
+ * 掃引の記録の側の照合キー（ADR 0117 決定 8）も同じ流儀で導く: 比の土台の `defaultKernels`
+ * （{@link geometryProfileKernelsId} を既定の表に当てた値）と、測った候補の `candidateKernels`
+ * （{@link sweepCandidateKernelsId}）。`defaultKernels` が守るのは比の土台だけで、採用する候補の速さと出力の
+ * 一致は候補自身のカーネルから来る — 欄の無い記録で保証されるのは既定の土台まで。
+ *
  * ハッシュは FNV-1a 64 bit（{@link fnv1a64Hex}）。同期にするのは、照合の純関数と注入口のコールバック
  * （ADR 0117 決定 6）を同期に保つため（`crypto.subtle` は非同期しか無い）。偶発の衝突だけを想定し、
  * 敵対的な偽装は射程外（表は利用者自身の保存物）。
@@ -15,6 +20,8 @@
  */
 import { CodegenError, DispatchLimitError } from "../codegen/errors.ts";
 import { conv2dIgemmMTile } from "../kernels/conv2d.ts";
+import type { GemmGeometry } from "../kernels/gemm-geometry.ts";
+import type { I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import {
   conv2dProfileGeometry,
   gemmRowsGeometry,
@@ -179,6 +186,10 @@ const dp4aVariants = (sweepCase: SweepCase): readonly boolean[] =>
 /** 掃引の case plan（harness.ts の `casePlan` — テストは既定の差し替えを注入する）。 */
 export type CasePlanner = (sweepCase: SweepCase, limit: number, dp4a: boolean) => CasePlan;
 
+/** dispatch 1 本の指紋の 1 行（パイプラインキー・params・WGSL・workgroups の JSON — 改行を含まない）。 */
+const launchLine = (launch: ReturnType<CasePlan["launch"]>): string =>
+  JSON.stringify([launch.key, [...launch.params], launch.wgsl, launch.workgroups]);
+
 /**
  * カーネルの指紋の本体（{@link geometryProfileKernelsId} — ケースと case plan を注入できる形）。
  *
@@ -218,9 +229,7 @@ export const profileKernelsId = (
             } の dispatch を組めない`,
           () => plan.launch(candidate),
         );
-        lines.push(
-          JSON.stringify([launch.key, [...launch.params], launch.wgsl, launch.workgroups]),
-        );
+        lines.push(launchLine(launch));
       }
     }
   }
@@ -238,6 +247,79 @@ export const profileKernelsId = (
  */
 export const geometryProfileKernelsId = (profile: GeometryProfile): string =>
   profileKernelsId(profile, SWEEP_CASES, casePlan);
+
+/**
+ * 掃引の記録の行のうち、測った候補の指紋（{@link candidateKernelsId}）が読む欄（report.ts の `SweepRow` と
+ * 生成器が読んだ行の両方が満たす形）。
+ */
+export type MeasuredRow = {
+  readonly caseId: string;
+  readonly geometryParams: GemmGeometry | I8a8Geometry;
+  readonly error?: string;
+};
+
+/**
+ * 測った候補のカーネルの指紋の本体（{@link sweepCandidateKernelsId} — ケースと case plan を注入できる形）。
+ *
+ * 記録の行の順に、失敗していない行（`error` の無い行 — 失敗した行は採用の材料にならない）の (ケース, 幾何) を
+ * 記録の dp4a の変種で case plan から組み、{@link profileKernelsId} と同じ 1 行の JSON を改行で連結した文字列の
+ * ハッシュを取る。dispatch 数の上限も同じ {@link FINGERPRINT_WORKGROUP_LIMIT}（device から独立に保つ）。
+ *
+ * 入力を「今の候補集合」ではなく**記録の行**にするのは、照合したいのが「その記録が測ったカーネル」だから:
+ * `quick+` の候補は登録済みの表の幾何を含むので、今の集合から導くと表を 1 つ登録しただけで値が変わり、カーネルが
+ * 不変の記録まで拒む（その表を生んだ記録からの再生成も含めて）。行から導けば、ops / cases を絞った掃引・中断した
+ * 掃引もそのまま照合できる。
+ *
+ * MUST: dispatch は掃引と同じ case plan で組む（{@link profileKernelsId} の MUST と同じ理由）。書き手
+ * （sweep.ts）と読み手（derive.ts）はこの 1 本を通す — 別々に組むと同じ runtime でも値が食い違う。
+ */
+export const candidateKernelsId = (
+  rows: readonly MeasuredRow[],
+  dp4a: boolean,
+  cases: readonly SweepCase[],
+  planner: CasePlanner,
+): string => {
+  const byId = new Map(cases.map((sweepCase) => [sweepCase.id, sweepCase]));
+  const plans = new Map<string, CasePlan>();
+  const lines: string[] = [];
+  for (const row of rows) {
+    if (row.error !== undefined) continue;
+    const sweepCase = byId.get(row.caseId);
+    if (sweepCase === undefined) {
+      throw new KernelsIdError(`測った行のケース ${row.caseId} が今の runtime の形状表に無い`);
+    }
+    const plan = plans.get(sweepCase.id) ?? naming(
+      () => `ケース ${sweepCase.id} の case plan を組めない`,
+      () => planner(sweepCase, FINGERPRINT_WORKGROUP_LIMIT, dp4a),
+    );
+    plans.set(sweepCase.id, plan);
+    // 族は幾何の形（tileK の有無）とケースの op から決まる（名前は文言の名指しにだけ効く）
+    const candidate = "tileK" in row.geometryParams
+      ? i8a8Candidate(row.geometryParams)
+      : sweepCase.op === "conv2d"
+      ? conv2dCandidate(row.geometryParams)
+      : gemmCandidate(row.geometryParams);
+    const launch = naming(
+      () =>
+        `ケース ${sweepCase.id} で測った幾何 ${candidate.name} ${
+          JSON.stringify(candidate.geometry)
+        } の dispatch を組めない`,
+      () => plan.launch(candidate),
+    );
+    lines.push(launchLine(launch));
+  }
+  return fnv1a64Hex(lines.join("\n"));
+};
+
+/**
+ * 掃引が測った候補のカーネルの指紋（記録の `candidateKernels` — ADR 0117 決定 8）: 記録の失敗していない行の
+ * (ケース, 幾何) が記録の dp4a の変種で組むカーネルのハッシュ（16 進 16 桁）。GPU も時刻も読まない。書き手は
+ * 掃引の終わりに焼き、生成器は今の runtime で導き直して違えば記録を拒む — 候補の WGSL だけが変わった runtime で、
+ * 古い実測（速さの比・出力の一致）から表を作らない（表の `provenance.kernels` は生成時に今の runtime で導くので、
+ * 照合でも検出できない）。
+ */
+export const sweepCandidateKernelsId = (rows: readonly MeasuredRow[], dp4a: boolean): string =>
+  candidateKernelsId(rows, dp4a, SWEEP_CASES, casePlan);
 
 /** ケースの型のどれかが持つ欄の名前（ケースの型の和の各要素の keyof の和）。 */
 type SweepCaseField = SweepCase extends infer Case ? Case extends SweepCase ? keyof Case : never

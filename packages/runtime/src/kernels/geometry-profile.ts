@@ -195,6 +195,26 @@ const optionalStringOf = (value: unknown, where: string, path: string): string |
   value === undefined ? undefined : stringOf(value, where, path);
 
 /**
+ * 配列の欄の全要素（穴を欄の path つきで落とす）。`map` / `forEach` は疎な配列の穴を飛ばすので、穴が門を
+ * 素通りし、門の外（選択の `find` や添字の読み）で TypeError になる — JS の呼び手が組んだ表
+ * （`new Array(n)` など）を、欄の欠けとして門の {@link CodegenError} で落とす。
+ */
+const denseEntriesOf = (
+  values: readonly unknown[],
+  where: string,
+  path: string,
+): readonly unknown[] => {
+  const entries: unknown[] = [];
+  for (let index = 0; index < values.length; index += 1) {
+    if (!(index in values)) {
+      throw new CodegenError(`${where}: ${path}[${index}] が無い（疎な配列の穴）`);
+    }
+    entries.push(values[index]);
+  }
+  return entries;
+};
+
+/**
  * 幾何の欄が数であることの門。値域（正整数）と整除条件は {@link assertGemmGeometry} /
  * {@link assertI8a8Geometry} の担当（数でない値も同じ文言で落とす）。
  */
@@ -236,7 +256,7 @@ const assertProvenanceShape = (value: unknown, where: string): void => {
   if (!Array.isArray(provenance.userAgent)) {
     throw new CodegenError(`${where}: provenance.userAgent が配列でない`);
   }
-  const agents: readonly unknown[] = provenance.userAgent;
+  const agents = denseEntriesOf(provenance.userAgent, where, "provenance.userAgent");
   agents.forEach((agent, index) => stringOf(agent, where, `provenance.userAgent[${index}]`));
 };
 
@@ -289,7 +309,7 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
   if (!Array.isArray(fields.gemmRows)) {
     throw new CodegenError(`${where}: gemmRows が配列でない`);
   }
-  const rows: readonly unknown[] = fields.gemmRows;
+  const rows = denseEntriesOf(fields.gemmRows, where, "gemmRows");
   assertGemmRowsRules(
     rows.map((entry, index): GemmRowsRule => {
       const rule = recordOf(entry, where, `gemmRows[${index}]`);

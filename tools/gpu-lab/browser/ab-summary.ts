@@ -51,8 +51,13 @@ export type AbComparison = {
 export type AbSummary = {
   readonly a: IntervalSummary;
   readonly b: IntervalSummary;
-  /** 両区間とも成功したときだけ（失敗した区間の数字は比べ物にならないので出さない）。 */
+  /**
+   * 両区間とも成功し、全ての行の条件（{@link conditionMismatch}）が揃ったときだけ（失敗した区間・条件の違う行の
+   * 数字は比べ物にならないので出さない）。
+   */
   readonly comparison?: AbComparison;
+  /** 両区間とも成功したのに行の条件が揃っていない — どの行とどの行が違うか（比べない理由）。 */
+  readonly conditionMismatch?: string;
 };
 
 const SHA_PREFIX = 12;
@@ -124,6 +129,37 @@ const summarizeInterval = (rows: readonly Row[]): IntervalSummary => {
 };
 
 /**
+ * 行の生成の条件（quant・residency・生成要求の全欄）。A/B は押下時に 1 度だけ読んだ条件を全区間に渡すが
+ * （anima-tab.ts の `readCondition`）、要約の側でも揃っていることを確かめる — 条件の違う行どうしの B ÷ A は
+ * 別物の比で、residency の違いは PNG の sha にも出ない。
+ */
+const conditionOf = (row: Row): string => {
+  const { request } = row;
+  return JSON.stringify([
+    row.quant,
+    row.residencyRequested,
+    request.prompt,
+    request.negativePrompt ?? null,
+    request.resolution.width,
+    request.resolution.height,
+    request.steps ?? null,
+    request.guidanceScale ?? null,
+    request.seed,
+  ]);
+};
+
+/** 行の条件が揃っていなければ、最初の行と最初に違った行を名指す句（揃っていれば undefined）。 */
+const conditionMismatch = (rows: readonly Row[]): string | undefined => {
+  const [first] = rows;
+  if (first === undefined) return undefined;
+  const expected = conditionOf(first);
+  const differing = rows.find((row) => conditionOf(row) !== expected);
+  return differing === undefined
+    ? undefined
+    : `行 ${first.index} と行 ${differing.index} で quant・residency・生成要求が違う`;
+};
+
+/**
  * 区間 A（`default` の注入）と区間 B（適用中の選択）の行から要約を作る。区間 A の行は 1 行以上要る
  * （区間 B の空 = 回していない）。
  */
@@ -132,6 +168,8 @@ export const summarizeAb = (rowsA: readonly Row[], rowsB: readonly Row[]): AbSum
   const a = summarizeInterval(rowsA);
   const b = summarizeInterval(rowsB);
   if (a.kind !== "ok" || b.kind !== "ok") return { a, b };
+  const mismatch = conditionMismatch([...rowsA, ...rowsB]);
+  if (mismatch !== undefined) return { a, b, conditionMismatch: mismatch };
   const both = (pick: (row: Row) => number | undefined): AbMetric =>
     metric(medianOf(rowsA, pick), medianOf(rowsB, pick));
   return {
@@ -185,7 +223,9 @@ export const abTableRows = (summary: AbSummary): AbTableRow[] => {
     "PNG sha256（区間の中）",
     intervalCell(summary.a),
     intervalCell(summary.b),
-    summary.comparison === undefined
+    summary.conditionMismatch !== undefined
+      ? `条件不一致 — ${summary.conditionMismatch}（比べない）`
+      : summary.comparison === undefined
       ? DASH
       : summary.comparison.shaMatch
       ? "A と B が一致"
@@ -225,8 +265,10 @@ const transformerRatios = (comparison: AbComparison): string => {
 };
 
 /** 比べられなかった A/B の句（どの区間がどうなったか）。 */
-const incompletePhrase = ({ a, b }: AbSummary): string =>
-  `区間 A: ${intervalCell(a)} · 区間 B: ${intervalCell(b)}`;
+const incompletePhrase = ({ a, b, conditionMismatch }: AbSummary): string =>
+  `区間 A: ${intervalCell(a)} · 区間 B: ${intervalCell(b)}${
+    conditionMismatch === undefined ? "" : ` · 条件不一致（${conditionMismatch}）`
+  }`;
 
 /** quant 1 つ分の A/B の要約。 */
 export type AbQuantSummary = { readonly quant: string; readonly summary: AbSummary };

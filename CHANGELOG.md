@@ -70,6 +70,12 @@ measurements in `docs/research/`.
   array of strings, distinct and in order of appearance (`{ deno }` becomes `Deno/<version>`; it is
   left out when any record lacks `userAgent`); it is informational and not part of
   `geometryProfileMismatch`.
+- The sweep record also gains `candidateKernels`, a fingerprint of the kernels behind its measured
+  rows (every row without `error`, rebuilt from its case, geometry and the record's `dp4a`).
+  `deriveGeometryProfile` derives it again from the record's rows and refuses the record when it
+  differs, so a runtime that changed only the candidate kernels (not the default ones that
+  `defaultKernels` covers) no longer builds a profile from outdated speedups and output matches;
+  records without the field are accepted as before.
 
 - Same-machine A/B gates for the practical quant seats of anima (default seat), irodori `i8-a8` and
   sbv2 `i8-a8` (ADR 0110 decision 5): the reference seat is derived from the manifest (same weights,

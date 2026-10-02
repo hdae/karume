@@ -4,7 +4,9 @@
 // 固定するのは ① 記録の `caseSet` / `defaultKernels` が今の runtime の値と違えば生成器が両方の値を名指して止まり、
 // 欄の無い記録は今までどおり受ける ② `aborted` は生成器の判定に効かない ③ `userAgent` を表の
 // `provenance.userAgent`（文字列の配列）へ写す規則（`{ deno }` は `Deno/<版>`・同じ値は 1 要素・違えば現れた順に
-// 重複を除いて並べる・欄の無い記録が混ざれば書かない）と、parse の往復・照合に使わないこと。
+// 重複を除いて並べる・欄の無い記録が混ざれば書かない）と、parse の往復・照合に使わないこと ④ 記録の
+// `candidateKernels`（測った候補のカーネルの指紋）が今の runtime で記録の行から導き直した値と違えば止まる（候補の
+// WGSL だけが変わった runtime の古い記録を拒む）⑤ 生成器は返す表を注入の門に通す（空の id の表を作らない）。
 
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
@@ -17,8 +19,23 @@ import {
   sweepCaseSetId,
 } from "../tune.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
-import { geometryProfileKernelsId } from "../src/tune/fingerprint.ts";
-import { A, ADAPTER, BIG, caseRows, linearCase, report } from "./helpers/sweep-records.ts";
+import {
+  candidateKernelsId,
+  type CasePlanner,
+  geometryProfileKernelsId,
+  sweepCandidateKernelsId,
+} from "../src/tune/fingerprint.ts";
+import { SWEEP_CASES } from "../src/tune/cases.ts";
+import { casePlan } from "../src/tune/harness.ts";
+import {
+  A,
+  ADAPTER,
+  BIG,
+  type CaseRef,
+  caseRows,
+  linearCase,
+  report,
+} from "./helpers/sweep-records.ts";
 
 const CHROME_153 =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
@@ -171,5 +188,86 @@ describe("表の provenance.userAgent（ADR 0117 追記 2026-10-02）", () => {
         : { ...profile.provenance, userAgent: [CHROME_154] },
     };
     assertEquals(geometryProfileMismatch(otherBrowser, ADAPTER), undefined);
+  });
+});
+
+describe("記録の照合キー candidateKernels（測った候補のカーネル — ADR 0117 決定 8）", () => {
+  // 指紋は記録の行を今の runtime の case plan で組み直すので、ケースは今の形状表にあるもの（合成の id では導けない）
+  const LINEAR: CaseRef = {
+    caseId: "linear-m1024-n2048-k2048",
+    op: "linear",
+    shape: "M1024 N2048 K2048",
+  };
+  const MEASURED = [
+    { caseId: LINEAR.caseId, geometryParams: BIG },
+    { caseId: LINEAR.caseId, geometryParams: A },
+  ];
+  const measuredRecord = (fields: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...report(caseRows(LINEAR, BIG, [[A, { speedup: 1.2 }]])),
+    dp4a: false,
+    ...fields,
+  });
+
+  it("今の runtime の値を持つ記録は受け、欄の無い記録と同じ表になる", () => {
+    const current = sweepCandidateKernelsId(MEASURED, false);
+    const withKey = derive(measuredRecord({ candidateKernels: current }));
+    const without = derive(measuredRecord());
+    assertEquals(withKey.profile, without.profile);
+    assertEquals(withKey.profile.gemmRows.at(-1)?.geometry, A);
+  });
+
+  it("既定を変えず候補の WGSL だけが違う runtime で焼いた記録は、両方の値を名指して止まる", () => {
+    // 記録を書いた runtime: 既定の幾何以外の dispatch の WGSL だけが今と違う（defaultKernels は同じ値のまま）
+    const candidatesOnly: CasePlanner = (sweepCase, limit, dp4a) => {
+      const plan = casePlan(sweepCase, limit, dp4a);
+      const defaultGeometry = JSON.stringify(plan.defaultCandidate.geometry);
+      return {
+        ...plan,
+        launch: (candidate) => {
+          const launch = plan.launch(candidate);
+          return JSON.stringify(candidate.geometry) === defaultGeometry
+            ? launch
+            : { ...launch, wgsl: `${launch.wgsl}\n// older` };
+        },
+      };
+    };
+    const stale = candidateKernelsId(MEASURED, false, SWEEP_CASES, candidatesOnly);
+    const current = sweepCandidateKernelsId(MEASURED, false);
+    const error = assertThrows(
+      () =>
+        derive(measuredRecord({
+          defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+          candidateKernels: stale,
+        })),
+      Error,
+      `sweep-0.json: candidateKernels ${stale} が今の runtime の ${current} と違う（測った候補のカーネル`,
+    );
+    assertStringIncludes(error.message, "掃引し直す");
+  });
+
+  it("candidateKernels が文字列でない・dp4a が真偽値でない記録は止まる（黙って照合を飛ばさない）", () => {
+    const current = sweepCandidateKernelsId(MEASURED, false);
+    assertThrows(
+      () => derive(measuredRecord({ candidateKernels: 1 })),
+      Error,
+      "sweep-0.json: candidateKernels が文字列でない（1）",
+    );
+    assertThrows(
+      () => derive(measuredRecord({ candidateKernels: current, dp4a: undefined })),
+      Error,
+      "sweep-0.json: dp4a が真偽値でない",
+    );
+  });
+});
+
+describe("deriveGeometryProfile は返す表を注入の門に通す", () => {
+  it("id が空の表は作らず、注入の門の文言で止まる（match のある表・注入専用の表とも）", () => {
+    for (const options of [{ ...OPTIONS, id: "" }, { id: "", optIn: true } as const]) {
+      assertThrows(
+        () => deriveGeometryProfile(inputs(record()), options),
+        Error,
+        "生成した表 '' が注入の門を通らない — 幾何プロファイル: id が空",
+      );
+    }
   });
 });

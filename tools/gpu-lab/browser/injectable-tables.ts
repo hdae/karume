@@ -185,6 +185,18 @@ export const readLastGenerated = (storage: ProfileStorage): SavedProfile | undef
 };
 
 /**
+ * 照合で読めなかった保存物を捨てる — ただし今の値が照合した文字列 `inspected` と同じときだけ（消したら true）。
+ * 照合した文字列は「適用」の時点で読んだもので、GPU を取るまでの間に同じページ（プロファイルのタブの生成）や
+ * 別のタブが新しい表を保存しうる — 比べずに消すと、壊れていない新しい保存物まで消える。比較と削除は同じ同期区間で
+ * 行う（同じページの書き込みとは競合しない）。Storage の例外はそのまま投げる。
+ */
+export const discardSavedIfUnchanged = (storage: ProfileStorage, inspected: string): boolean => {
+  if (storage.getItem(LAST_GENERATED_KEY) !== inspected) return false;
+  storage.removeItem(LAST_GENERATED_KEY);
+  return true;
+};
+
+/**
  * 保存物の文字列から表の id を引く（表示と記録の `saved:<id>` 用）。読めなければ undefined — 読めない理由は
  * GPU を取るときの {@link resolveSavedProfile} が返す。
  */

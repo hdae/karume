@@ -18,7 +18,11 @@ import {
   DEFAULT_CANDIDATE_SET,
   isCandidateSet,
 } from "./geometries.ts";
-import { geometryProfileKernelsId, sweepCaseSetId } from "./fingerprint.ts";
+import {
+  geometryProfileKernelsId,
+  sweepCandidateKernelsId,
+  sweepCaseSetId,
+} from "./fingerprint.ts";
 import { createSweepContext, destroySweepContext, runSweep, SWEEP_MAX_REPS } from "./harness.ts";
 import { ROUNDS, TARGET_PASS_MS, WARMUP_MIN_RUNS, WARMUP_NS } from "./measurement.ts";
 import {
@@ -204,10 +208,12 @@ export const runGeometrySweep = async (
       date: new Date().toISOString(),
       startedAt,
       aborted,
-      // 比の土台とケースの版を記録に焼く（生成器が今の runtime と照合する — ADR 0117 決定 8）。どちらも
-      // GPU を読まない純関数で、掃引に比べて無視できる所要（指紋は約 13 ms）
+      // 比の土台・測った候補のカーネルとケースの版を記録に焼く（生成器が今の runtime と照合する — ADR 0117
+      // 決定 8）。どれも GPU を読まない純関数で、掃引に比べて無視できる所要（既定の指紋は約 13 ms・候補の指紋は
+      // full の全行でも 1 秒未満）
       caseSet: sweepCaseSetId(),
       defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+      candidateKernels: sweepCandidateKernelsId(rows, context.dp4a),
       userAgent: navigator.userAgent,
       adapter,
       gpuTiming: {

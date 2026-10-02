@@ -138,6 +138,13 @@ export type Report = {
    * 今の runtime の値と違う記録を拒む（土台が別物の記録で表を作らない）。この欄より前の JSON には無い。
    */
   readonly defaultKernels: string;
+  /**
+   * 測った候補のカーネルの指紋（ADR 0117 決定 8 — fingerprint.ts の `sweepCandidateKernelsId`: 失敗していない行の
+   * (ケース, 幾何) が `dp4a` の変種で組むカーネル）。生成器は記録の行から今の runtime で導き直して違う記録を拒む
+   * （候補の WGSL だけが変わった runtime で古い実測から表を作らない — `defaultKernels` は比の土台しか守らない）。
+   * この欄より前の JSON には無い。
+   */
+  readonly candidateKernels: string;
   /** ブラウザは `navigator.userAgent`、Deno の CLI は `{ deno: Deno.version.deno }`。 */
   readonly userAgent: string | { readonly deno: string };
   readonly adapter: ReportAdapter;
@@ -189,14 +196,16 @@ export type DefaultReference = {
 
 /**
  * 行に既定幾何との比較（速さの比と digest の一致）を足す。既定の行が失敗していれば比較できない
- * ので足さない（黙って `false` にすると「幾何が値を変えた」と読める）。
+ * ので足さない（黙って `false` にすると「幾何が値を変えた」と読める）。速さの比は分子（既定）と分母（この行）の
+ * 両方が正のときだけ書く — どちらかが 0（timestamp が壊れて差が 0）なら比は 0 か無限大に化け、正の比だけを
+ * 受ける生成器が記録ごと拒む（比が無ければ、その行は比の材料にならないだけで済む）。
  */
 export const compareToDefault = (row: SweepRow, reference: DefaultReference): SweepRow => {
   if (row.error !== undefined) return row;
   return {
     ...row,
-    ...(reference.perDispatch === undefined || row.perDispatch === undefined ||
-        row.perDispatch <= 0
+    ...(reference.perDispatch === undefined || !(reference.perDispatch > 0) ||
+        row.perDispatch === undefined || !(row.perDispatch > 0)
       ? {}
       : { speedupVsDefault: reference.perDispatch / row.perDispatch }),
     ...(reference.outputSha256 === undefined || row.outputSha256 === undefined

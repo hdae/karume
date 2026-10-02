@@ -40,6 +40,20 @@ describe("compareToDefault", () => {
     assertEquals(row.speedupVsDefault, undefined);
     assertEquals(row.identicalToDefault, undefined);
   });
+
+  it("既定かこの行の perDispatch が 0（timestamp の差が 0）なら速さの比を書かない — 出力の一致は書く", () => {
+    // 比が 0 や無限大に化けると、正の比だけを受ける生成器が記録ごと拒む
+    for (
+      const [name, row, reference] of [
+        ["既定が 0", ROW, { perDispatch: 0, outputSha256: "a" }],
+        ["この行が 0", { ...ROW, perDispatch: 0 }, { perDispatch: 300_000, outputSha256: "a" }],
+      ] as const
+    ) {
+      const compared = compareToDefault(row, reference);
+      assertEquals(compared.speedupVsDefault, undefined, name);
+      assertEquals(compared.identicalToDefault, true, name);
+    }
+  });
 });
 
 describe("roundsLookQuantized", () => {

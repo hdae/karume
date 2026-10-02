@@ -22,7 +22,11 @@ import {
 } from "../src/tune/derive.ts";
 import { timestampUnitFor } from "../src/tune/sweep.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
-import { geometryProfileKernelsId, sweepCaseSetId } from "../src/tune/fingerprint.ts";
+import {
+  geometryProfileKernelsId,
+  sweepCandidateKernelsId,
+  sweepCaseSetId,
+} from "../src/tune/fingerprint.ts";
 import { A, B, BIG, caseRows, linearCase, report } from "./helpers/sweep-records.ts";
 
 const adapter = navigator.gpu === undefined ? null : await navigator.gpu.requestAdapter();
@@ -30,13 +34,15 @@ const timestampQuery = adapter !== null && adapter.features.has("timestamp-query
 
 /**
  * 記録に足した欄（ADR 0117 決定 8）のうち掃引の中身に依らない検査: 開始時刻が ISO 8601 で終了（`date`）以前・
- * ケース集合の版と既定の表のカーネルの指紋が今の runtime の値・ケースごとの壁時計が有限の非負。
+ * ケース集合の版と既定の表のカーネルの指紋が今の runtime の値・測った候補の指紋が記録の行から生成器と同じ関数で
+ * 導き直した値（書き手と読み手の往復）・ケースごとの壁時計が有限の非負。
  */
 const assertRecordFields = (swept: GeometrySweepReport): void => {
   assertEquals(new Date(swept.startedAt).toISOString(), swept.startedAt);
   assert(swept.startedAt <= swept.date, `startedAt ${swept.startedAt} > date ${swept.date}`);
   assertEquals(swept.caseSet, sweepCaseSetId());
   assertEquals(swept.defaultKernels, geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE));
+  assertEquals(swept.candidateKernels, sweepCandidateKernelsId(swept.rows, swept.dp4a));
   for (const summary of swept.cases) {
     assert(
       Number.isFinite(summary.elapsedMs) && summary.elapsedMs >= 0,

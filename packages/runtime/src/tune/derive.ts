@@ -43,8 +43,9 @@
  * {@link ROUNDING_ERROR_LIMIT} を超える観測をその掃引の比の材料から外す（{@link roundingBound}）。
  * 既定の行の e が超えるケースは全観測を外す。外した観測は採否の行に E の値つきで残す。
  *
- * 記録の照合キー（ADR 0117 決定 8）: 記録が `caseSet`（ケース集合の版）と `defaultKernels`（既定の表のカーネルの
- * 指紋）を持てば、今の runtime の値と違う記録を拒む（欄の無い古い記録は今までどおり受ける）。`aborted`・
+ * 記録の照合キー（ADR 0117 決定 8）: 記録が `caseSet`（ケース集合の版）・`defaultKernels`（既定の表のカーネルの
+ * 指紋）・`candidateKernels`（測った候補のカーネルの指紋）を持てば、今の runtime の値と違う記録を拒む（欄の無い古い
+ * 記録は今までどおり受ける）。`aborted`・
  * `startedAt`・`cases[].elapsedMs` は読まない。
  *
  * クラスの境界: linear / matmul / bmm は行数 M の段（境界は掃引の形状表の `PROFILE_GEMM_ROWS_BOUNDS` =
@@ -61,13 +62,19 @@ import {
   gemmTileM,
 } from "../kernels/gemm-geometry.ts";
 import { gemmMTileGeometry } from "../kernels/gemm.ts";
-import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../kernels/geometry-profile.ts";
+import { CodegenError } from "../codegen/errors.ts";
+import {
+  assertGeometryProfile,
+  DEFAULT_GEOMETRY_PROFILE,
+  type GeometryProfile,
+} from "../kernels/geometry-profile.ts";
 import { defaultI8a8Geometry, type I8a8Geometry } from "../kernels/i8a8-geometry.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_OPS, type SweepOp } from "./cases.ts";
 import {
   geometryProfileKernelsId,
   INFINITY_JSON,
   KernelsIdError,
+  sweepCandidateKernelsId,
   sweepCaseSetId,
 } from "./fingerprint.ts";
 import {
@@ -329,7 +336,7 @@ const userAgentText = (value: unknown, where: string): string | undefined => {
  */
 const assertRecordedKey = (
   record: Record<string, unknown>,
-  key: "caseSet" | "defaultKernels",
+  key: "caseSet" | "defaultKernels" | "candidateKernels",
   current: () => string,
   meaning: string,
   where: string,
@@ -346,6 +353,17 @@ const assertRecordedKey = (
         "表を作らない — 今の runtime で掃引し直す）",
     );
   }
+};
+
+/** 記録の `dp4a`（測った i8a8 の変種 — `candidateKernels` の導出が読む）。 */
+const recordedDp4a = (record: Record<string, unknown>, where: string): boolean => {
+  const { dp4a } = record;
+  if (!isBoolean(dp4a)) {
+    throw new Error(
+      `${where}: dp4a が真偽値でない（${JSON.stringify(dp4a)} — candidateKernels を導けない）`,
+    );
+  }
+  return dp4a;
 };
 
 /**
@@ -423,6 +441,16 @@ export const parseSweepReport = (
   }
   if (!Array.isArray(parsed.rows)) throw new Error(`${where}: rows が配列でない`);
   const rows = parsed.rows.map((row, index) => parseRow(row, `${where} rows[${index}]`));
+  // MUST: 測った候補のカーネルが今の runtime と同じ記録だけを受ける（ADR 0117 決定 8）— defaultKernels は比の土台
+  // しか守らず、採用する候補の速さと出力の一致は候補自身のカーネルから来る。今の値は記録の行から導く
+  // （fingerprint.ts の sweepCandidateKernelsId — 書き手と同じ 1 本）
+  assertRecordedKey(
+    parsed,
+    "candidateKernels",
+    () => sweepCandidateKernelsId(rows, recordedDp4a(parsed, where)),
+    "測った候補のカーネル",
+    where,
+  );
   const defaults = new Map<string, number>();
   for (const row of rows) {
     defaults.set(row.caseId, (defaults.get(row.caseId) ?? 0) + (row.isDefault ? 1 : 0));
@@ -740,8 +768,9 @@ type RoundingBound = { readonly bound: number } | { readonly unknown: string };
  * 未満なので、e は min の round（= `perDispatch` × reps）の相対誤差の上界になる（1 次の近似）。
  *
  * 0 の round は min の候補にしない — 負だった round は記録に 0 で残り（report.ts）、`perDispatch` の
- * min の候補から外れているから。負でなく丸めで 0 になった round が min なら `perDispatch` が 0 で、その行は
- * 既定比を持たない（report.ts の比較）ので、外しても判定は変わらない。
+ * min の候補から外れているから。負でなく丸めで 0 になった round が min なら `perDispatch` が 0 で、外しても
+ * 判定は変わらない: その行が候補なら既定比を持たず、既定の行なら比の土台が 0 なので、そのケースのどの行も
+ * 既定比を持たず、既定の再測定も無い（report.ts の比較・harness.ts の再測定 — どちらも 0 の側を書かない）。
  */
 const roundingBound = (row: SweepObservation, quantum: number): RoundingBound => {
   // 丸めが無ければ誤差も無い — rounds の無い古い記録もここで通る
@@ -1193,7 +1222,7 @@ export const buildGeometryProfile = (
   };
   const { vendor, architecture, device, description } = sources[0].adapter;
   const userAgent = distinctUserAgents(sources);
-  return {
+  const generated: GeneratedProfile = {
     ...table,
     provenance: {
       sweep: joined((source) => source.path),
@@ -1206,6 +1235,26 @@ export const buildGeometryProfile = (
       caseSet: sweepCaseSetId(),
     },
   };
+  assertGeneratedProfile(generated);
+  return generated;
+};
+
+/**
+ * 生成した表を注入の門（`assertGeometryProfile` — `acquireGpu` と保存物の読み戻しが通す門）に通す。門に落ちる表
+ * （空の id など — 公開の生成器は利用者の options をそのまま書く）を、注入や読み戻しの段まで持ち越さずに
+ * 生成の段で止める。条件は門の 1 本だけ（生成器側に同じ条件を複製しない）。
+ */
+const assertGeneratedProfile = (profile: GeneratedProfile): void => {
+  try {
+    assertGeometryProfile(profile);
+  } catch (cause) {
+    if (cause instanceof CodegenError) {
+      throw new Error(`生成した表 '${profile.id}' が注入の門を通らない — ${cause.message}`, {
+        cause,
+      });
+    }
+    throw cause;
+  }
 };
 
 /**

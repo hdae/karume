@@ -707,6 +707,22 @@ const isThenable = (value: unknown): boolean =>
 const ignoreRejection = (): void => {};
 
 /**
+ * 本物の Promise（realm を問わない）にだけ no-op の拒否ハンドラを付ける。自作の thenable の `then` は呼ばない。
+ *
+ * `instanceof Promise` は別 realm（iframe・`node:vm`）の Promise を見逃し、`Symbol.toStringTag` は偽装できる。
+ * この realm の組み込み `Promise.prototype.then` は、引数の内部スロットを見る brand check（仕様の IsPromise）で
+ * 本物でない値を **then も constructor も読む前に** TypeError で拒むので、realm に依らない判定と付け外しを
+ * 1 度に兼ねる。捕まえるのはその TypeError だけ（本物でない = 付けるものが無い）— それ以外は伝える。
+ */
+const ignoreRejectionIfNativePromise = (value: unknown): void => {
+  try {
+    Reflect.apply(Promise.prototype.then, value, [undefined, ignoreRejection]);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+  }
+};
+
+/**
  * コールバックの戻りを、直接渡した表と同じ門と複製に通す（`undefined` = 自動選択）。
  *
  * MUST: Promise（thenable）は await せずに拒む。待つと adapter を持ったまま I/O の窓が開き、その間に
@@ -718,9 +734,9 @@ const profileFromCallback = (
 ): GeometryProfile | undefined => {
   if (isThenable(returned)) {
     // async 関数の reject は、こちらが拒んだ後に誰も待たない Promise の reject として unhandled rejection に
-    // なる（Deno ではプロセスが落ちる）。本物の Promise にだけ no-op の catch を付ける — 待たない・結果は使わない。
-    // 自作の thenable の then は呼ばない（任意のコードを走らせない）
-    if (returned instanceof Promise) returned.catch(ignoreRejection);
+    // なる（Deno ではプロセスが落ちる）。本物の Promise（別 realm のものも）にだけ no-op の拒否ハンドラを付ける —
+    // 待たない・結果は使わない。自作の thenable の then は呼ばない（任意のコードを走らせない）
+    ignoreRejectionIfNativePromise(returned);
     throw new GpuFeatureError(
       "geometryProfile: コールバックが Promise を返した（同期の関数であること — 保存した表の読み込みは " +
         "acquireGpu の前に済ませ、コールバックは読み込んだ値から表を選ぶだけにする）",

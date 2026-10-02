@@ -7,7 +7,8 @@
 // params と workgroups に効き、id / match / provenance に効かない ③ 組めない dispatch はケース・欄・幾何を
 // 名指して投げる ④ 埋め込みの 2 表の provenance が今の runtime の値と一致する（GEMM のカーネルを変える変更は
 // 2 表の再生成を伴う）⑤ ケース集合の版はケースの増減・dispatch を決める欄・境界に効き、説明などの情報の欄と
-// キーの並びに効かない。
+// キーの並びに効かない ⑥ 記録の `candidateKernels`（測った候補の指紋）は、既定を変えず候補の WGSL だけ変えた
+// runtime で値が変わり（`defaultKernels` は変わらない）、失敗した行を数えず、記録の dp4a の変種で組む。
 
 import {
   assert,
@@ -26,13 +27,16 @@ import { BUILTIN_GEOMETRY_PROFILES } from "../src/kernels/geometry-profiles/inde
 import { APPLE_METAL_3 } from "../src/kernels/geometry-profiles/apple-metal-3.ts";
 import { PROFILE_GEMM_ROWS_BOUNDS, SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
 import {
+  candidateKernelsId,
   canonicalJson,
   type CasePlanner,
   caseSetId,
   fnv1a64Hex,
   geometryProfileKernelsId,
   KernelsIdError,
+  type MeasuredRow,
   profileKernelsId,
+  sweepCandidateKernelsId,
 } from "../src/tune/fingerprint.ts";
 import {
   type GeometryCandidate,
@@ -40,7 +44,7 @@ import {
   quickGemmCandidates,
   quickI8a8Candidates,
 } from "../src/tune/geometries.ts";
-import { type CasePlan, casePlan } from "../src/tune/harness.ts";
+import { candidatesFor, type CasePlan, casePlan } from "../src/tune/harness.ts";
 
 type Launch = ReturnType<CasePlan["launch"]>;
 
@@ -300,6 +304,105 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
       Reflect.deleteProperty(navigator, "gpu");
       performance.now = originalNow;
       Date.now = originalDateNow;
+    }
+  });
+});
+
+describe("candidateKernelsId: 測った候補のカーネルの指紋（記録の candidateKernels — ADR 0117 決定 8）", () => {
+  const caseOf = (op: SweepCase["op"]): SweepCase => {
+    const found = SWEEP_CASES.find((sweepCase) => sweepCase.op === op);
+    assert(found !== undefined, op);
+    return found;
+  };
+  /** ケースを候補の全幾何で測った行（書き手の行の形のうち指紋が読む欄）。 */
+  const rowsOf = (
+    sweepCase: SweepCase,
+    candidates: readonly GeometryCandidate[],
+  ): MeasuredRow[] =>
+    candidates.map((candidate) => ({ caseId: sweepCase.id, geometryParams: candidate.geometry }));
+  const LINEAR = caseOf("linear");
+  const I8A8 = caseOf("i8a8-linear");
+  const CONV = caseOf("conv2d");
+  const F32_ROWS = [
+    ...rowsOf(LINEAR, quickGemmCandidates()),
+    ...rowsOf(CONV, quickConv2dCandidates()),
+  ];
+  const ROWS = [...F32_ROWS, ...rowsOf(I8A8, quickI8a8Candidates())];
+
+  it("決定的で（16 進 16 桁）、書き手と読み手の入口は今の runtime の case plan で導いた値", () => {
+    const value = sweepCandidateKernelsId(ROWS, false);
+    assertMatch(value, /^[0-9a-f]{16}$/);
+    assertEquals(sweepCandidateKernelsId(structuredClone(ROWS), false), value);
+    assertEquals(candidateKernelsId(ROWS, false, SWEEP_CASES, casePlan), value);
+  });
+
+  it("既定を変えず候補の WGSL だけ変えた runtime では値が変わる（既定の指紋 defaultKernels は変わらない）", () => {
+    // 既定の幾何と違う幾何の dispatch の WGSL だけに 1 行足した case plan（候補のカーネルだけを直した runtime を模す）
+    const candidatesOnly: CasePlanner = (sweepCase, limit, dp4a) => {
+      const plan = casePlan(sweepCase, limit, dp4a);
+      const defaultGeometry = JSON.stringify(plan.defaultCandidate.geometry);
+      return {
+        ...plan,
+        launch: (candidate) => {
+          const launch = plan.launch(candidate);
+          return JSON.stringify(candidate.geometry) === defaultGeometry
+            ? launch
+            : { ...launch, wgsl: `${launch.wgsl}\n// changed` };
+        },
+      };
+    };
+    // 比の土台の指紋はこの変更を見ない（記録の照合が defaultKernels だけでは古い候補の実測が通る）
+    assertEquals(
+      profileKernelsId(DEFAULT_GEOMETRY_PROFILE, SWEEP_CASES, candidatesOnly),
+      geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+    );
+    assertNotEquals(
+      candidateKernelsId(ROWS, false, SWEEP_CASES, candidatesOnly),
+      sweepCandidateKernelsId(ROWS, false),
+    );
+  });
+
+  it("失敗した行は数えず（採用の材料にならない）、測った行が 1 本違えば値が変わる", () => {
+    const value = sweepCandidateKernelsId(ROWS, false);
+    const failed: MeasuredRow = {
+      caseId: LINEAR.id,
+      geometryParams: quickGemmCandidates()[1].geometry,
+      error: "device lost",
+    };
+    assertEquals(sweepCandidateKernelsId([...ROWS, failed], false), value);
+    assertNotEquals(sweepCandidateKernelsId(ROWS.slice(1), false), value);
+  });
+
+  it("i8a8 の行は記録の dp4a の変種で組み、f32 骨格の行は dp4a に依らない", () => {
+    const i8a8Rows = rowsOf(I8A8, quickI8a8Candidates());
+    assertNotEquals(
+      sweepCandidateKernelsId(i8a8Rows, true),
+      sweepCandidateKernelsId(i8a8Rows, false),
+    );
+    assertEquals(sweepCandidateKernelsId(F32_ROWS, true), sweepCandidateKernelsId(F32_ROWS, false));
+  });
+
+  it("今の runtime の形状表に無いケースの行は、ケースを名指して投げる", () => {
+    assertThrows(
+      () =>
+        sweepCandidateKernelsId(
+          [{ caseId: "linear-m3", geometryParams: quickGemmCandidates()[0].geometry }],
+          false,
+        ),
+      KernelsIdError,
+      "測った行のケース linear-m3 が今の runtime の形状表に無い",
+    );
+  });
+
+  it("全ケースを full の全候補で測った行からも導ける（65535 で組める — 書き手が掃引の後に投げない）", () => {
+    const rows = SWEEP_CASES.flatMap((sweepCase) =>
+      rowsOf(sweepCase, [
+        casePlan(sweepCase, 65535, false).defaultCandidate,
+        ...candidatesFor(sweepCase, "full"),
+      ])
+    );
+    for (const dp4a of [false, true]) {
+      assertMatch(sweepCandidateKernelsId(rows, dp4a), /^[0-9a-f]{16}$/);
     }
   });
 });

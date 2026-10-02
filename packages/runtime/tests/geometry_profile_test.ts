@@ -20,6 +20,8 @@
 
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
+// テスト専用: 別 realm の Promise を作る手段（runtime の本体は Web 標準 API だけ — ここは tests の依存）
+import { createContext, runInContext } from "node:vm";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
   acquireGpu,
@@ -974,6 +976,81 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     }
   });
 
+  it("別 realm（iframe・node:vm）の async 関数・reject 済みの Promise も GpuFeatureError で拒み、その reject は unhandled rejection にならない", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (event: PromiseRejectionEvent): void => {
+      unhandled.push(event.reason);
+      // 捕まえた reject でテストランナーを落とさない（数えて下で assert する）
+      event.preventDefault();
+    };
+    const realm = createContext({});
+    // 別 realm の Promise はこの realm の Promise の instance ではない（instanceof では見分けられない形）
+    const foreignAsync: unknown = runInContext(
+      "(async () => { throw new Error('foreign async'); })",
+      realm,
+    );
+    const foreignRejected: unknown = runInContext(
+      "Promise.reject(new Error('foreign rejected'))",
+      realm,
+    );
+    assert(typeof foreignAsync === "function");
+    globalThis.addEventListener("unhandledrejection", onUnhandled);
+    try {
+      for (
+        const [name, callback] of [
+          // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
+          [
+            "async 関数",
+            foreignAsync as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined,
+          ],
+          ["reject 済みの Promise", untypedCallback(foreignRejected)],
+        ] as const
+      ) {
+        const requests = await withFakeAdapter(FAKE_INFO, async () => {
+          await assertRejects(
+            () => acquireGpu({ geometryProfile: callback }),
+            GpuFeatureError,
+            "コールバックが Promise を返した",
+            name,
+          );
+        });
+        assertEquals(requests, 0, `${name}: Promise を返したのに requestDevice に届いた`);
+      }
+      // unhandled rejection の判定はマイクロタスクを捌き切った後のタスク境界で走る — 1 タスク待ってから見る
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assertEquals(unhandled, [], "別 realm の Promise の reject が unhandled rejection になった");
+    } finally {
+      globalThis.removeEventListener("unhandledrejection", onUnhandled);
+    }
+  });
+
+  it("Promise を名乗る自作の thenable（getter の then・toStringTag の偽装）も then を呼ばずに拒む", async () => {
+    let called = 0;
+    const then = (): void => {
+      called += 1;
+    };
+    const thenables: readonly (readonly [string, unknown])[] = [
+      ["getter の then", {
+        get then() {
+          return then;
+        },
+      }],
+      ["toStringTag が Promise", { [Symbol.toStringTag]: "Promise", then }],
+    ];
+    for (const [name, thenable] of thenables) {
+      const requests = await withFakeAdapter(FAKE_INFO, async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: untypedCallback(thenable) }),
+          GpuFeatureError,
+          "コールバックが Promise を返した",
+          name,
+        );
+      });
+      assertEquals(requests, 0, `${name}: Promise を返したのに requestDevice に届いた`);
+    }
+    assertEquals(called, 0, "自作の thenable の then を呼んだ");
+  });
+
   it("adapter.info の無い adapter で渡る空値の情報は凍結されている（共有値をコールバックが書き換えられない）", async () => {
     const seen: GPUAdapterInfo[] = [];
     await withFakeAdapter(undefined, async () => {
@@ -1075,6 +1152,70 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
     for (const [name, value, message] of cases) {
       assertThrows(() => assertGeometryProfile(value), CodegenError, message, name);
     }
+  });
+
+  it("疎な配列の穴（gemmRows・provenance.userAgent の先頭・途中・末尾）は TypeError ではなく CodegenError で添字を名指す", () => {
+    /** `length` の配列の `entries` の添字だけを埋めた疎な配列（JS の呼び手が `new Array(n)` で組む形）。 */
+    const sparse = (length: number, entries: Readonly<Record<number, unknown>>): unknown[] => {
+      const array: unknown[] = new Array(length);
+      for (const [index, value] of Object.entries(entries)) array[Number(index)] = value;
+      return array;
+    };
+    const [r64, r512, rest] = DEFAULT_GEOMETRY_PROFILE.gemmRows;
+    const provenance = {
+      sweep: "s",
+      sha256: "h",
+      date: "d",
+      candidateSet: "quick",
+      kernels: "k",
+      caseSet: "c",
+      adapter: { vendor: "", architecture: "", device: "", description: "" },
+    };
+    const cases: readonly (readonly [string, unknown, string])[] = [
+      ["gemmRows が new Array(1)", { ...OPT_IN, gemmRows: sparse(1, {}) }, "gemmRows[0] が無い"],
+      [
+        "gemmRows の先頭の穴",
+        { ...OPT_IN, gemmRows: sparse(4, { 1: r64, 2: r512, 3: rest }) },
+        "gemmRows[0] が無い",
+      ],
+      [
+        "gemmRows の途中の穴",
+        { ...OPT_IN, gemmRows: sparse(4, { 0: r64, 1: r512, 3: rest }) },
+        "gemmRows[2] が無い",
+      ],
+      [
+        "gemmRows の末尾の穴",
+        { ...OPT_IN, gemmRows: sparse(4, { 0: r64, 1: r512, 2: rest }) },
+        "gemmRows[3] が無い",
+      ],
+      [
+        "userAgent が new Array(1)",
+        { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(1, {}) } },
+        "provenance.userAgent[0] が無い",
+      ],
+      [
+        "userAgent の途中の穴",
+        { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(3, { 0: "a", 2: "b" }) } },
+        "provenance.userAgent[1] が無い",
+      ],
+    ];
+    for (const [name, value, message] of cases) {
+      assertThrows(() => assertGeometryProfile(value), CodegenError, message, name);
+    }
+  });
+
+  it("acquireGpu に型の外から来た疎な配列の表は device を作る前に GpuFeatureError（TypeError にならない）", async () => {
+    const holed: unknown[] = new Array(3);
+    holed[0] = DEFAULT_GEOMETRY_PROFILE.gemmRows[0];
+    holed[2] = DEFAULT_GEOMETRY_PROFILE.gemmRows[2];
+    const requests = await withCountingGpu(async () => {
+      await assertRejects(
+        () => acquireGpu({ geometryProfile: untypedCallback({ ...OPT_IN, gemmRows: holed }) }),
+        GpuFeatureError,
+        "geometryProfile（コールバックの戻り）: 幾何プロファイル 'opt-in': gemmRows[1] が無い",
+      );
+    });
+    assertEquals(requests, 0, "疎な配列の表で requestDevice に届いた");
   });
 
   it("acquireGpu に型の外から来た欠けた表は device を作る前に GpuFeatureError（TypeError にならない）", async () => {

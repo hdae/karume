@@ -78,7 +78,7 @@ import {
   TIMESTAMP_QUERY,
 } from "./common.ts";
 import {
-  LAST_GENERATED_KEY,
+  discardSavedIfUnchanged,
   resolveSavedProfile,
   type SavedResolution,
 } from "./injectable-tables.ts";
@@ -235,6 +235,21 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
   const setBusy = (busy: boolean): void => {
     state.busy = busy;
     for (const button of [ui.run, ui.ab, ui.hold, ui.release, ui.dispose]) button.disabled = busy;
+    // 生成の条件は押下時に 1 度だけ読む（{@link readCondition}）— 実行中に入力を変えても効かないので、変えられる
+    // ように見せない
+    for (
+      const input of [
+        ui.prompt,
+        ui.negative,
+        ui.resolution,
+        ui.steps,
+        ui.guidance,
+        ui.seed,
+        ui.residency,
+        ui.count,
+        ui.holdGib,
+      ]
+    ) input.disabled = busy;
     ui.exportJson.disabled = busy || (state.rows.length === 0 && state.holds.length === 0);
     renderBuildControls();
   };
@@ -259,6 +274,21 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     resolution.kind === "matched"
       ? `保存した表 ${resolution.id} は adapter と一致 → 注入`
       : `保存した表を注入しない（自動で選ぶ）— ${resolution.reason}`;
+
+  /**
+   * 読めなかった保存物を捨てた結果の句（次の起動でも読み続けない — ADR 0117 決定 10）。照合した文字列と今の値が
+   * 違えば消さない（適用から GPU を取るまでの間に保存し直された表を消さない — {@link discardSavedIfUnchanged}）。
+   */
+  const discardBrokenSaved = (inspected: string): string => {
+    try {
+      return discardSavedIfUnchanged(localStorage, inspected)
+        ? "読めない保存物を消した"
+        : "照合の後に表が保存し直されていたので、保存物は消さない";
+    } catch {
+      // 捨てられなくても実行は既定で進む（理由はこの句で情報行と状態行に出る）
+      return "読めない保存物を消せなかった";
+    }
+  };
 
   /** 記録に残す幾何プロファイルの欄（要求の綴りと、注入していればその表の値そのもの）。 */
   const requested = (
@@ -344,20 +374,19 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       },
     });
     // 記録の注入欄は照合の結果で決まる（一致した表だけ — 不一致は注入なしの行になる）
-    const savedNote = resolution === undefined ? undefined : savedResolutionText(resolution);
+    const discardNote = resolution?.kind === "broken" && savedStored !== undefined
+      ? discardBrokenSaved(savedStored)
+      : undefined;
+    const savedNote = resolution === undefined
+      ? undefined
+      : `${savedResolutionText(resolution)}${
+        discardNote === undefined ? "" : `（${discardNote}）`
+      }`;
     const build: BuildChoice = {
       ...selected,
       ...(resolution?.kind === "matched" ? { geometryProfile: resolution.profile } : {}),
       ...(savedNote === undefined ? {} : { savedNote }),
     };
-    if (resolution?.kind === "broken") {
-      // 読めない保存物は捨てる（次の起動でも読み続けない — ADR 0117 決定 10）
-      try {
-        localStorage.removeItem(LAST_GENERATED_KEY);
-      } catch {
-        // 捨てられなくても実行は既定で進む（理由は情報行に出ている）
-      }
-    }
     state.gpu = gpu;
     state.build = build;
     renderBuildControls();
@@ -424,6 +453,22 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     if (value !== "transformer" && value !== "per-stage") throw Error(`Unknown residency ${value}`);
     return value;
   };
+
+  /** 1 回の操作（「N 回生成」・A/B）の全 generate に渡す条件（生成要求と residency）。 */
+  type GenerateCondition = {
+    readonly request: Row["request"];
+    readonly residency: AnimaResidency;
+  };
+
+  /**
+   * 生成の条件を入力から 1 度だけ読む。MUST: 操作の頭（押下時）で読み、全 generate（A/B なら全 quant・全区間）へ
+   * 同じ値を渡す — generate ごとに読み直すと、長い操作の途中で変えた入力が区間の間・区間の中で条件を割り、
+   * B ÷ A が別条件どうしの比になる（residency は PNG を変えないので sha でも気づけない）。
+   */
+  const readCondition = (): GenerateCondition => ({
+    request: readRequest(),
+    residency: readResidency(),
+  });
 
   const formatStages = (stages: readonly StageRecord[]): string =>
     stages.map(({ component, startMs, endMs }) =>
@@ -540,10 +585,9 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
     ui.image.hidden = false;
   };
 
-  const generateOnce = async (label: string): Promise<Row> => {
+  const generateOnce = async (label: string, condition: GenerateCondition): Promise<Row> => {
     const index = state.rows.length + 1;
-    const residencyRequested = readResidency();
-    const request = readRequest();
+    const { request, residency: residencyRequested } = condition;
     const dummyBytesHeld = state.dummyBytes;
     const recorder = createGenerateRecorder(() => performance.now());
     const onEvent = (event: AnimaGenerateEvent): void => {
@@ -610,10 +654,14 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
    * N 回の generate を表に積み、この回で積んだ行を返す（失敗した行で止める）。`label` は進捗の前置
    * （A/B の区間名）。
    */
-  const generateBatch = async (count: number, label: string): Promise<Row[]> => {
+  const generateBatch = async (
+    count: number,
+    label: string,
+    condition: GenerateCondition,
+  ): Promise<Row[]> => {
     const rows: Row[] = [];
     for (let i = 0; i < count; i++) {
-      const row = await generateOnce(`${label}generate ${i + 1}/${count}`);
+      const row = await generateOnce(`${label}generate ${i + 1}/${count}`, condition);
       state.rows.push(row);
       appendRow(row);
       showGeometryProfiles(row);
@@ -625,7 +673,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
 
   const runGenerates = async (): Promise<void> => {
     const count = readCount();
-    const rows = await generateBatch(count, "");
+    const rows = await generateBatch(count, "", readCondition());
     if (rows.at(-1)?.error !== undefined) {
       status(`generate ${rows.length}/${count} が失敗したので止めました（表の行を参照）`);
       return;
@@ -712,6 +760,9 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
       return;
     }
     const count = readCount();
+    // 全 quant・全区間で同じ条件（readCondition の MUST）。区間の頭の disposeAll より前に読む — 壊れた入力は
+    // GPU を畳む前に止まる
+    const condition = readCondition();
     const selectedQuant = ui.quant.value;
     if (state.model === undefined) throw Error("Anima の配布形が読めていないので A/B を回せない");
     const quants = abQuantPlan(
@@ -735,6 +786,7 @@ export const mountAnimaTab = (root: HTMLElement, lab: Lab): AnimaTab => {
           const rows = await generateBatch(
             count,
             `A/B ${quant}・区間 ${name}（${requestedLabel(choice)}）`,
+            condition,
           );
           rowsByInterval.push(rows);
           // 区間 A で失敗したらその quant の区間 B は回さない（「N 回生成」と同じく失敗で止める）。次の quant へは

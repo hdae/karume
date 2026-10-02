@@ -5,6 +5,7 @@ import { geometryProfileJson, sweepCaseSetId } from "../../../packages/runtime/t
 import { geometryProfileKernelsId } from "../../../packages/runtime/src/tune/fingerprint.ts";
 import { infinityJson } from "../../../packages/runtime/src/tune/derive.ts";
 import {
+  discardSavedIfUnchanged,
   type InjectableTables,
   LAST_GENERATED_KEY,
   type ProfileStorage,
@@ -359,6 +360,30 @@ describe("gpu lab injectable tables", () => {
     it("reads the saved table's id for the record (undefined when the value is broken)", () => {
       assertEquals(savedProfileId(stored(saved(matching("gpu-saved")))), "gpu-saved");
       assertEquals(savedProfileId("{"), undefined);
+    });
+  });
+
+  describe("discarding a broken saved value (discardSavedIfUnchanged)", () => {
+    it("removes the value when it is still the string that was inspected", () => {
+      const storage = new FakeStorage();
+      storage.items.set(LAST_GENERATED_KEY, "{");
+      assertEquals(discardSavedIfUnchanged(storage, "{"), true);
+      assertEquals(storage.items.has(LAST_GENERATED_KEY), false);
+    });
+
+    it("keeps a table saved after the inspection (the broken value was replaced in the meantime)", () => {
+      const storage = new FakeStorage();
+      storage.items.set(LAST_GENERATED_KEY, "{");
+      // 照合の後に（プロファイルのタブ・別のタブが）正常な表を保存し直した
+      writeLastGenerated(storage, saved(table("gpu-new")));
+      assertEquals(discardSavedIfUnchanged(storage, "{"), false);
+      assertEquals(readLastGenerated(storage)?.profile.id, "gpu-new");
+    });
+
+    it("does nothing when the value is already gone", () => {
+      const storage = new FakeStorage();
+      assertEquals(discardSavedIfUnchanged(storage, "{"), false);
+      assertEquals(storage.items.size, 0);
     });
   });
 });
