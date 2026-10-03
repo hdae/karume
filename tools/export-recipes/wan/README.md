@@ -106,6 +106,15 @@ alone: the S = 14,040 band is not carried over (decision 8). None of them keeps 
 per-layer probe would need about 6 GB of readback staging for 30 block outputs, which does not fit
 on the B570.
 
+As of 2026-10-03 the S = 32,760 comparison is green. The band is 104 (5× the worst decision r, 20.8
+at t = 999; the other five decision cases are 3.9 to 12.2, in line with S = 14,040), both
+acceptance cases are inside it (r = 13.1 and 4.89), and all four fault injections are outside it;
+the off-by-one timestep's smallest margin is 2.65× the band (r = 276 at t = 600). One forward splits
+the self-attention into 24 row blocks, and its longest submit took about 459 ms of GPU time (the
+gate is 1 s). On the CPU one S = 32,760 case takes about 1,505 s for the float64 forward, 630 s for
+the f32 one and 546 s for the patched one; regenerating all 27 cases and the container took
+27,271 s (7.6 hours, sharing the machine with GPU generation jobs).
+
 The CPU references (f32 and float64) and the patched eager forward run with attention pinned to
 PyTorch's CPU flash kernel (`dit_patch.flash_attention_only`). At S = 32,760 a fallback to the math
 kernel would allocate the full score matrix, 51.5 GB in f32 and 103 GB in float64, and die out of
@@ -294,7 +303,9 @@ the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
   wait for released memory is needed between them.
 - The 50-step run with the default settings is opt-in (`KARUME_WAN_FULL_PIPELINE=1`); it runs the 33-frame
   and the 81-frame clip and writes every frame and a 4×8 contact sheet as PNG under
-  `outputs/verify/<environment>/<date>_wan-pipeline-full/`.
+  `outputs/verify/<environment>/<date>_wan-pipeline-full/`. The 81-frame clip (2026-10-03) took
+  7,173 s: 68.6 s per DiT pass (100 passes) and 315 s for the VAE decode, with VRAM peaks of
+  7.31 GiB in the DiT stage and 3.78 GiB in the VAE stage.
 
 The UniPC port is checked against `wan-scheduler/unipc.*`: σ bit for bit, timesteps exactly, the
 50-step trajectory within an absolute 2e-5 (torch's float32 `log` differs from the correctly rounded
@@ -361,8 +372,9 @@ written by `wan.export_dit`, `wan.export_vae` and `wan.vae_tiling`; the pipeline
 distribution `models/karume-wan2.1/` through `fromPretrained` and compares it with the references
 written by `wan.few_step_ref` — its sha256 rows were first written from the series, so the
 distribution path has to reproduce them bit for bit. The gates skip explicitly (with the generating
-command) when those assets or a GPU adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the 50-step run (about half an hour on the
-B570).
+command) when those assets or a GPU adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the
+50-step runs (on the B570, about half an hour for the 33-frame clip and about two hours for the
+81-frame clip).
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
 when the pinned snapshot is not in the HF cache.
