@@ -52,8 +52,8 @@ anima = [
 #   ftfy — `pipeline_wan.prompt_clean` は ftfy が入っているときだけ `ftfy.fix_text` を掛ける。
 #     入っているかで埋め込みが変わらないよう固定で入れる（決定 4）。
 #   accelerate — diffusers の from_pretrained は既定 low_cpu_mem_usage=True で必須。
-#   transformers — `pipeline_wan.py` が module 直下で `AutoTokenizer` / `UMT5EncoderModel` を
-#     import する（umT5 は読まないが、WanPipeline の import に要る）。
+#   transformers — `wan.text_embeds` が umT5（`UMT5EncoderModel`）とトークナイザを bf16 で読んで
+#     テキスト埋め込みを作る（`pipeline_wan.py` も module 直下で両方を import する）。
 #   huggingface-hub — `wan.sources` が pin した revision で取得する（diffusers の依存としても
 #     入るが、直接 import するものは宣言する）。
 # MUST: diffusers は `==` でピンする（anima グループと同じ版）— 決定 5 の σ[0] の 1e-6 補正と
@@ -63,7 +63,9 @@ anima = [
 # 正規化の規則が版で変わると同じプロンプトが別の埋め込みになる（決定 4 の「固定」）。
 # diffusers / ftfy の版を変えるときは配布の門の固定値（`wan.distribution.WAN_TEXT_EMBEDS_VERSIONS`
 # — 資産のメタの版と突き合わせる）も揃える（`wan/tests/test_distribution.py` が両方を見る）。
-# transformers は他グループと同じ `==`（同じ venv に同居するグループ間で版を割らない）。
+# transformers も `==` でピンする — テキスト埋め込みの値は transformers の UMT5 の実装で決まる
+# （版が変わると同じプロンプトが別の埋め込みになりうる）。版は他グループと同じ値（同じ venv に
+# 同居するグループ間で版を割らない）。
 # accelerate / huggingface-hub は差し替え対象を持たないので `>=` のまま。
 wan = [
   "accelerate>=1.0",
