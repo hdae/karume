@@ -195,6 +195,9 @@ const observeStep1 = async (
       gpu,
       model: MODEL,
       quant,
+      // A/B の対象は DiT の席 — 事前計算の埋め込みを明示する（既定の "gpu" は umT5 の段が乗り、プロンプトの
+      // 文脈も別の値になる — 段 3 / 4 で採った帯の前提が崩れる）。
+      textEncoder: "precomputed",
       onRunDiagnostics: (component, diagnostics) => {
         if (component === "transformer") passes.push(diagnostics.lastRunPipelines);
       },

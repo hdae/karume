@@ -46,6 +46,12 @@
  *   触らない）、実用席は**実用行**（実用層の退行と決定性の検出器 — 実用層の数値を意図して変えるコミットで同じコミットの
  *   `rewrite`）。CPU の参照は f16 の重みでしか採っていないので、i8 の席は帯を持たず sha256 の環境行だけで縛る
  *   （数値の門は DiT 単体の r 門と自機 A/B 門 — `e2e_wan_dit_test.ts` / `e2e_wan_ab_test.ts`）。
+ * - **テキストエンコーダの経路**（ADR 0119 決定 7）: 上の sha 行と帯のケースは全部**事前計算の埋め込み資産の経路**
+ *   （`textEncoder: "precomputed"` を明示 — 既定は `"gpu"` なので、明示しないと umT5 の経路へ黙って移り、行の値が
+ *   別の経路の sha と突き合わさる）。**GPU 経路**（umT5 i8 を GPU で回す — {@link GPU_TEXT_CASES}）は別の case id の
+ *   sha 行（固定プロンプト `boxing-cats` と自由プロンプト 1 本・2 ステップ・seed 42）で、CPU の参照は持たない（umT5 の
+ *   数値の門は `e2e_wan_umt5_test.ts`）。umT5 は別の配布リポ（`models/karume-umt5-xxl/` — Wan の manifest の
+ *   `text_encoder` が越境参照する）で、取得元の `crossRepo` の mapping で渡す。無い機ではその 2 本だけ明示 SKIP。
  *
  * ## 50 ステップの通し（env の opt-in — 既定のレーンに入れない）
  *
@@ -71,7 +77,12 @@
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { localDirectory, parseManifest, resolveSelection } from "@karume/hub";
+import {
+  type DistributionSource,
+  localDirectory,
+  parseManifest,
+  resolveSelection,
+} from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import {
   acquireGpu,
@@ -87,6 +98,7 @@ import {
   type WanGenerateEvent,
   type WanGenerateRequest,
   WanPipeline,
+  type WanPipelineOptions,
   type WanPrompt,
   type WanRunComponent,
 } from "../wan.ts";
@@ -196,6 +208,26 @@ const SEAT_QUANTS = ["f16+dit8", PRACTICAL_QUANT] as const;
 /** 席を名乗るケースの ID（席名が先頭 — 既定席の既存の行の ID は席名を持たないまま動かさない）。 */
 const seatCaseId = (quant: string, base: string): string => `${quant}-${base}`;
 
+/**
+ * GPU 経路のケース（ADR 0119 追記「段 10d の設計」の sha 行 — 2 ステップ・seed 42・既定席・既定の negative）。
+ * 固定プロンプトは資産の行の原文を渡し（同じ文字列で経路だけが違う — 資産の経路の {@link SEED_CASE} と比べられる）、
+ * 自由プロンプトは資産に無い短い英文（ID は綴りを持たず名前で呼ぶ — 文面を変えたら ID も変える）。
+ *
+ * MUST: 文面・seed・step 数を変えたら ID も変える（行の値が別の条件の sha と突き合わさる）。
+ */
+const GPU_TEXT_CASES: readonly {
+  readonly id: string;
+  readonly prompt: { readonly asset: string } | { readonly text: string };
+  readonly seed: number;
+}[] = [
+  { id: "gpu-text-2step-boxing-cats-seed42", prompt: { asset: "boxing-cats" }, seed: 42 },
+  {
+    id: "gpu-text-2step-free-fox-seed42",
+    prompt: { text: "A red fox trots through fresh snow in a quiet birch forest at sunrise." },
+    seed: 42,
+  },
+];
+
 /** 50 ステップの通しの opt-in（決定 8 — リリース前と参照値の焼き直しのときだけ回す）。 */
 const FULL_PIPELINE = Deno.env.get("KARUME_WAN_FULL_PIPELINE") === "1";
 /**
@@ -241,6 +273,12 @@ const FULL_STEPS = 50;
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline wan";
+const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
+
+/** umT5 の配布形ミラー（Wan の manifest の `text_encoder` が越境参照する先 — ADR 0119 追記「段 10d の設計」D）。 */
+const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
+/** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
+const TEXT_ENCODER = "text_encoder";
 
 const fixtureUrl = (name: string): URL =>
   new URL(`pipeline_steps.${name}.safetensors`, SERIES_ROOT);
@@ -272,6 +310,34 @@ if (!ANY_FIXTURE) {
 /** 照合を回せる（配布形と参照の両方がある — 参照が一部だけの機は下の資産の門が FAIL にする）。 */
 const ANY_PRESENT = DIST_PRESENT && ANY_FIXTURE;
 
+/**
+ * 配布形の既定の選択が持つ umT5 の容器の part 0（無ければ undefined — umT5 を持たない旧い配布形）。越境先の repo は
+ * この宣言から引く（キーを写経しない — 配布形の再生成で repo が変わっても mapping が追従する）。
+ */
+const TEXT_ENCODER_PART0 = DIST_PRESENT
+  ? resolveSelection(parseManifest(await Deno.readTextFile(new URL("karume.json", DIST_ROOT))))
+    .containers[TEXT_ENCODER]?.parts[0]
+  : undefined;
+/** umT5 の越境先の repo（自リポの容器なら undefined — mapping が要らない）。 */
+const UMT5_REPO = TEXT_ENCODER_PART0?.repo;
+const UMT5_PRESENT = fileExists(new URL("karume.json", UMT5_ROOT));
+/** GPU 経路を組める（配布形が umT5 を持ち、越境なら越境先のミラーもある）。 */
+const GPU_TEXT_PRESENT = DIST_PRESENT && TEXT_ENCODER_PART0 !== undefined &&
+  (UMT5_REPO === undefined || UMT5_PRESENT);
+if (DIST_PRESENT && !GPU_TEXT_PRESENT) {
+  console.warn(
+    TEXT_ENCODER_PART0 === undefined
+      ? `[karume] 配布形ミラー ${DIST_ROOT.pathname} が umT5（${TEXT_ENCODER}）を持たないため、Wan の GPU 経路の` +
+        `ケースと umT5 の admission の故障を SKIP する。組み直し: ${ASSEMBLE_COMMAND}`
+      : `[karume] umT5 の配布形ミラー ${UMT5_ROOT.pathname}（${UMT5_REPO} の越境先）が無いため、Wan の GPU 経路の` +
+        `ケースと umT5 の admission の故障を SKIP する。組み立て: ${ASSEMBLE_UMT5_COMMAND}`,
+  );
+}
+
+/** 越境先の mapping（umT5 の容器が自リポなら空 — 渡しても使われない）。 */
+const crossRepoOf = (umt5: DistributionSource): Record<string, DistributionSource> =>
+  UMT5_REPO === undefined ? {} : { [UMT5_REPO]: umt5 };
+
 /** 配布形の埋め込み資産（manifest の既定の選択の `assets` から引く — path を綴り直さない）。 */
 const readDistributionEmbeds = async (): Promise<Uint8Array<ArrayBuffer>> => {
   const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", DIST_ROOT)));
@@ -280,17 +346,28 @@ const readDistributionEmbeds = async (): Promise<Uint8Array<ArrayBuffer>> => {
   return await Deno.readFile(new URL(ref.path, DIST_ROOT));
 };
 
-/** 配布形を取得元ハンドルで読む（network も CacheStorage も通らない）。`quant` を省くと manifest の既定席。 */
+/**
+ * 配布形を取得元ハンドルで読む（network も CacheStorage も通らない）。`quant` を省くと manifest の既定席。
+ * 経路は呼び手が必ず名乗る（既定の `"gpu"` に黙って乗せない — モジュール doc の「テキストエンコーダの経路」）。
+ * `"gpu"` は umT5 の越境先を `crossRepo` の mapping で渡す。
+ */
 const loadPipeline = (
   gpu: GpuContext,
   diagnostics: Map<WanRunComponent, SessionDiagnostics>,
+  textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>,
   quant?: string,
 ): Promise<WanPipeline> =>
-  WanPipeline.fromPretrained(denoDirectory(DIST_ROOT), {
-    gpu,
-    ...(quant === undefined ? {} : { quant }),
-    onRunDiagnostics: (component, diagnosed) => diagnostics.set(component, diagnosed),
-  });
+  WanPipeline.fromPretrained(
+    textEncoder === "gpu"
+      ? denoDirectory(DIST_ROOT, { crossRepo: crossRepoOf(denoDirectory(UMT5_ROOT)) })
+      : denoDirectory(DIST_ROOT),
+    {
+      gpu,
+      textEncoder,
+      ...(quant === undefined ? {} : { quant }),
+      onRunDiagnostics: (component, diagnosed) => diagnostics.set(component, diagnosed),
+    },
+  );
 
 /**
  * sha 行のクラス（ADR 0110 決定 7）を、配布形の manifest の既定モデルの席の `session` から導く（空 = 参照行・非空 =
@@ -346,38 +423,51 @@ const overrideModel = (
   return { ...manifest, models: { ...manifest.models, [name]: patch(model) } };
 };
 
+/** umT5 の越境先から読んだ path の印（自リポの path と同じ綴りでも取り違えない）。 */
+const UMT5_PREFIX = "umt5:";
+
 /**
  * `karume.json` だけを `manifest` に差し替え、残りは配布形から読む取得元（読んだ path を
- * `requested` に積む — 取得の順と回数を数えるため）。
+ * `requested` に積む — 取得の順と回数を数えるため）。umT5 の越境先も同じ列へ {@link UMT5_PREFIX} を付けて積む
+ * （越境先のミラーが無い機では mapping を渡さない — 触れば hub が「越境先が無い」で落とす）。
  */
 const countingSource = (manifest: Record<string, unknown>, requested: string[]) => {
   const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  const umt5 = localDirectory({
+    readFile: async (path) => {
+      requested.push(`${UMT5_PREFIX}${path}`);
+      return await Deno.readFile(new URL(path, UMT5_ROOT));
+    },
+  }, { label: "wan-admission-fault-umt5" });
   return localDirectory({
     readFile: async (path) => {
       requested.push(path);
       if (path === "karume.json") return manifestBytes;
       return await Deno.readFile(new URL(path, DIST_ROOT));
     },
-  }, { label: "wan-admission-fault" });
+  }, { label: "wan-admission-fault", ...(UMT5_PRESENT ? { crossRepo: crossRepoOf(umt5) } : {}) });
 };
 
 Deno.test({
   name:
-    "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬と " +
-    "計測（gpuTiming）の共有 device は名指しで落ち、それまでに重みの part 1 以降と資産を 1 本も取らない",
+    "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬・" +
+    "計測（gpuTiming）の共有 device・GPU 経路のトークナイザ資産の欠落は名指しで落ち、それまでに重みの part 1 以降と" +
+    "資産を 1 本も取らない（事前計算の経路は umT5 に 1 バイトも触らない）",
   ignore: !DIST_PRESENT,
   fn: async (t) => {
     const original = await Deno.readTextFile(new URL("karume.json", DIST_ROOT));
     const parsed = parseManifest(original);
     // part 0 = descriptor は admission の入力そのもので、門より前に取る契約
     // （packages/models/src/hub/components.ts の相 1）。門の後にしか触れてはいけないのは part 1
-    // 以降と assets（埋め込み・RoPE の素表）。
+    // 以降と assets（埋め込み・トークナイザ・RoPE の素表）。
     const model = parsed.models[parsed.defaultModel];
     assert(model !== undefined, `配布形の manifest に既定モデル '${parsed.defaultModel}' が無い`);
     const heavyPaths = new Set([
       ...Object.values(model.weights).flatMap((entry) =>
         Object.values(entry).flatMap((weights) =>
-          weights.container.parts.slice(1).map((ref) => ref.path)
+          weights.container.parts.slice(1).map((ref) =>
+            ref.repo === undefined ? ref.path : `${UMT5_PREFIX}${ref.path}`
+          )
         )
       ),
       ...Object.values(model.assets).map((ref) => ref.path),
@@ -386,6 +476,8 @@ Deno.test({
     const faults: readonly {
       readonly label: string;
       readonly patch: (model: Record<string, unknown>) => Record<string, unknown>;
+      /** 経路（既存の故障は事前計算の経路 — umT5 の有無に依らずに回す）。 */
+      readonly textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>;
       /** 共有で渡す GPU（manifest ではなく構築のオプション側の齟齬）。 */
       readonly gpu?: GpuContext;
       readonly message: string;
@@ -393,6 +485,7 @@ Deno.test({
       {
         label: "pipeline の major 2",
         patch: (model) => ({ ...model, pipeline: "wan/2" }),
+        textEncoder: "precomputed",
         message: "major に未対応",
       },
       {
@@ -404,6 +497,7 @@ Deno.test({
             defaults: { steps: 50, guidance: 5 },
           },
         }),
+        textEncoder: "precomputed",
         message: "未知キー 'type'",
       },
       {
@@ -422,6 +516,7 @@ Deno.test({
             },
           };
         },
+        textEncoder: "precomputed",
         message: "session.stateAttentionReduceは未対応",
       },
       {
@@ -430,22 +525,48 @@ Deno.test({
         // device は timestamp-query だけを持つフェイク（GPU を取らない）。
         label: "計測（gpuTiming）の device を共有で渡す",
         patch: (model) => model,
+        textEncoder: "precomputed",
         gpu: fakeGpuContext(fakeDevice({ features: ["timestamp-query"] })),
         message: "gpuTiming が有効な device",
       },
+      {
+        // GPU 経路はトークナイザ資産を読む — 宣言が無ければ umT5（i8 で約 5.3 GiB）の part 1 以降を取る前に落とす。
+        // umT5 の容器の part 0（descriptor）は admission の入力なので取ってよい。
+        label: "GPU 経路で manifest に umT5 のトークナイザ資産が無い",
+        patch: (model) => {
+          const assets = model.assets;
+          assert(isRecord(assets), "配布形の manifest に assets が無い");
+          const { umt5_tokenizer: _dropped, ...rest } = assets;
+          return { ...model, assets: rest };
+        },
+        textEncoder: "gpu",
+        message: "umT5 のトークナイザ資産 'umt5_tokenizer' が無い",
+      },
     ];
-    for (const { label, patch, gpu, message } of faults) {
-      await t.step(label, async () => {
-        const requested: string[] = [];
-        const source = countingSource(overrideModel(original, patch), requested);
-        await assertRejects(
-          () => WanPipeline.fromPretrained(source, gpu === undefined ? {} : { gpu }),
-          Error,
-          message,
-        );
-        assert(requested.includes("karume.json"), `manifest を読んでいない: ${requested}`);
-        const heavy = requested.filter((path) => heavyPaths.has(path));
-        assertEquals(heavy, [], "admission の前に重みの part 1 以降・資産を取っている");
+    for (const { label, patch, textEncoder, gpu, message } of faults) {
+      await t.step({
+        name: `${label}（textEncoder: ${textEncoder}）`,
+        ignore: textEncoder === "gpu" && !GPU_TEXT_PRESENT,
+        fn: async () => {
+          const requested: string[] = [];
+          const source = countingSource(overrideModel(original, patch), requested);
+          await assertRejects(
+            () =>
+              WanPipeline.fromPretrained(source, {
+                textEncoder,
+                ...(gpu === undefined ? {} : { gpu }),
+              }),
+            Error,
+            message,
+          );
+          assert(requested.includes("karume.json"), `manifest を読んでいない: ${requested}`);
+          const heavy = requested.filter((path) => heavyPaths.has(path));
+          assertEquals(heavy, [], "admission の前に重みの part 1 以降・資産を取っている");
+          if (textEncoder === "precomputed") {
+            const umt5 = requested.filter((path) => path.startsWith(UMT5_PREFIX));
+            assertEquals(umt5, [], "事前計算の経路が umT5 の容器に触っている");
+          }
+        },
       });
     }
   },
@@ -698,7 +819,7 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      const pipeline = await loadPipeline(gpu, diagnostics);
+      const pipeline = await loadPipeline(gpu, diagnostics, "precomputed");
       const { prompts } = pipeline;
       try {
         for (const { name, role } of CASES) {
@@ -854,7 +975,7 @@ Deno.test({
           const id = seatCaseId(quant, SEED_CASE.id);
           await t.step(`${id}（${quant} の席・seed 経路・sha256 の環境行）`, async () => {
             try {
-              await using seatPipeline = await loadPipeline(gpu, diagnostics, quant);
+              await using seatPipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
               await seedPath(seatPipeline, id, quant);
             } finally {
               // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
@@ -867,6 +988,84 @@ Deno.test({
       }
     } finally {
       // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
+      await settleReleases(gpu);
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Wan 通し 2 ステップ GPU 経路（実 GPU）: umT5 の text 段を畳んでから DiT・VAE の段を張り、固定プロンプトと" +
+    "自由プロンプトが完走・非有限 0・段の所要と切り替えの VRAM・sha256 の環境行",
+  ignore: !GPU_TEXT_PRESENT || !GPU_AVAILABLE,
+  fn: async (t) => {
+    await assertRunningAdapter();
+    let deviceLost: string | undefined;
+    const gpu = await acquireGpu({
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    });
+    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    try {
+      // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
+      await using pipeline = await loadPipeline(gpu, diagnostics, "gpu");
+      for (const spec of GPU_TEXT_CASES) {
+        await t.step(spec.id, async () => {
+          const prompt = "asset" in spec.prompt
+            ? textOf(pipeline.prompts, spec.prompt.asset, "prompt")
+            : spec.prompt.text;
+          let settlement: ReferenceSettlement | undefined;
+          try {
+            await runRecordedCase(results, { id: spec.id }, async () => {
+              const observed = await observe(pipeline, diagnostics, {
+                prompt,
+                seed: spec.seed,
+                steps: STEPS,
+              });
+              assert("video" in observed, "generate が最後まで回っていない");
+              assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+              // text 段は DiT 段を張る前に畳む（段の境目の並び — VRAM の点も同じ並びで採る）。
+              assertEquals(
+                observed.drm.marks.slice(0, 3).map(({ label }) => label),
+                ["text_encoder start", "text_encoder end", "transformer start"],
+                "text 段 → DiT 段の順",
+              );
+              assert(observed.diagnostics.has("text_encoder"), "umT5 の run の診断が届いていない");
+              const { video } = observed;
+              assertEquals([video.frames, video.height, video.width], [DEFAULT_FRAMES, 480, 832]);
+              const nonFinite = video.data.reduce(
+                (count, value) => count + (Number.isFinite(value) ? 0 : 1),
+                0,
+              );
+              const notes = [
+                "textEncoder: gpu（umT5 i8・活性 f32）",
+                `プロンプト ${JSON.stringify(prompt.trim().slice(0, 80))}`,
+                `非有限 ${nonFinite}`,
+                ...formatObserved(observed),
+              ];
+              console.log(`[wan-pipeline] ${spec.id}:\n  ${notes.join("\n  ")}`);
+              assertEquals(nonFinite, 0, `${spec.id}: 非有限`);
+              assertEquals(deviceLost, undefined, "device lost");
+              const outcome = await settleOrObserve(references, results, {
+                id: spec.id,
+                artifact: `${spec.id}.rgb`,
+                bytes: rgbBytes(video),
+              });
+              settlement = outcome.settlement;
+              return { ...outcome.fields, note: notes.join(" / ") };
+            });
+          } finally {
+            // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+            await settleReleases(gpu);
+          }
+          if (settlement?.check.status === "fail") {
+            throw new Error(referenceMismatchMessage(spec.id, settlement, references));
+          }
+        });
+      }
+    } finally {
       await settleReleases(gpu);
       gpu.destroy();
     }
@@ -936,7 +1135,7 @@ Deno.test({
           const frames = spec.frames ?? DEFAULT_FRAMES;
           let settlement: ReferenceSettlement | undefined;
           try {
-            await using pipeline = await loadPipeline(gpu, diagnostics, spec.quant);
+            await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", spec.quant);
             await runRecordedCase(fullResults, { id: spec.id }, async () => {
               const observed = await observe(pipeline, diagnostics, {
                 prompt: textOf(pipeline.prompts, spec.prompt, "prompt"),
@@ -999,12 +1198,21 @@ Deno.test({
   },
 });
 
+/**
+ * 登録するケース（回せるものだけ — 事前計算の経路は配布形と少ステップの参照、GPU 経路は配布形と umT5 のミラーが要る。
+ * GPU 経路は CPU の参照を持たないので少ステップの参照に依らない）。
+ */
 const CASE_IDS = [
-  ...CASES.map(({ name }) => `2step-${name}`),
-  SEED_CASE.id,
-  ...SEAT_QUANTS.map((quant) => seatCaseId(quant, SEED_CASE.id)),
-  ...(FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
+  ...(ANY_PRESENT
+    ? [
+      ...CASES.map(({ name }) => `2step-${name}`),
+      SEED_CASE.id,
+      ...SEAT_QUANTS.map((quant) => seatCaseId(quant, SEED_CASE.id)),
+      ...(FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
+    ]
+    : []),
+  ...(GPU_TEXT_PRESENT ? GPU_TEXT_CASES.map(({ id }) => id) : []),
 ];
-const RUNNABLE = ANY_PRESENT && GPU_AVAILABLE;
+const RUNNABLE = (ANY_PRESENT || GPU_TEXT_PRESENT) && GPU_AVAILABLE;
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

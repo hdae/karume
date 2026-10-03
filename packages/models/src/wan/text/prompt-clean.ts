@@ -239,7 +239,7 @@ const rejectEntity = (label: string, found: string): PromptCleanError =>
     "entity",
     `${label}: HTML の文字参照になりうる並び ${JSON.stringify(found)} を含む — 上流（ftfy / ` +
       "html.unescape）は文字参照を解除するが、ここは解除の表を持たないので受けない。" +
-      "`&` の直後に空白を入れるか、参照を元の文字に直してから渡す",
+      "`&` の直後に空白を入れる（例 `R&D` → `R & D`）か、参照を元の文字に直してから渡す",
   );
 
 /** 1 区切りを不動点まで回す（ftfy の 1 周から、拒んで no-op にした処理を除いたもの）。 */
@@ -295,14 +295,14 @@ export const cleanPrompt = (
       throw new PromptCleanError(
         "unassigned",
         `${label}: Unicode 16.0.0 で未割り当てのコードポイント ${codePointLabel(cp)} を含む — ` +
-          "正規化（NFC）の結果が実行環境の Unicode の版で割れうるので受けない",
+          "正規化（NFC）の結果が実行環境の Unicode の版で割れうるので受けない。その文字を外して渡す",
       );
     }
     if (cp >= C1_FIRST && cp <= C1_LAST) {
       throw new PromptCleanError(
         "c1",
         `${label}: C1 制御文字 ${codePointLabel(cp)} を含む — 上流（ftfy）は文字化けの手掛かりと` +
-          "して別の文字へ読み直すが、その推定は移植していないので受けない",
+          "して別の文字へ読み直すが、その推定は移植していないので受けない。その文字を外して渡す",
       );
     }
   }

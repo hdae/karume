@@ -1,6 +1,6 @@
 /**
  * Wan2.1 の umT5 のグラフ（ADR 0119 決定 3・4）の入出力をホストで組む純関数（段 10c の骨格 —
- * パイプラインへの結線は段 10d）。
+ * パイプラインの text 段〈`pipeline.ts` の `#encode`〉が使う）。
  *
  * - 入力: トークナイザ（`../text/tokenizer.ts` の `WanPromptEncoder.encode`）の id 列 `[L]` と
  *   バケット表 `[L, L]`（`./relative-position.ts`）を、グラフ入力 token id `[1, L]` と

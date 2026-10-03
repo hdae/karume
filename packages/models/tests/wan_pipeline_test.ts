@@ -1,6 +1,7 @@
-// Wan2.1 のパイプラインの GPU 不要の部分（`src/wan/`）— 入力の門・`pipelineConfig` の門・家族 admission の
-// グラフ宣言の門・テキスト埋め込み資産の検査・潜在の逆正規化・フレームの RGBA 化・乱数・模擬 Session で回す
-// `generate`（後始末と非有限の門）。実 GPU の通しは e2e_wan_pipeline_test.ts。
+// Wan2.1 のパイプラインの GPU 不要の部分（`src/wan/`）— 入力の門（資産の経路と GPU の経路）・`pipelineConfig` の門・
+// 家族 admission のグラフ宣言の門（DiT と umT5）・構築の入口（経路の綴り・umT5 の宣言・中断）・既定の negative の
+// 出所・テキスト埋め込み資産の検査・潜在の逆正規化・フレームの RGBA 化・乱数・模擬 Session で回す `generate`
+// （text 段の順序と畳み方・後始末と非有限の門・中断）。実 GPU の通しは e2e_wan_pipeline_test.ts。
 
 import {
   assert,
@@ -9,10 +10,12 @@ import {
   assertNotEquals,
   assertRejects,
   assertStrictEquals,
+  assertStringIncludes,
   assertThrows,
 } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import type { Tensor } from "@karume/runtime";
+import { parseManifest } from "@karume/hub";
+import type { CodecName, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
   ACCEPTED_SIZES,
@@ -22,11 +25,20 @@ import {
   MAX_FRAMES,
   MIN_FRAMES,
   planWanGeneration,
+  planWanGpuGeneration,
+  umt5Contract,
+  WAN_DEFAULT_NEGATIVE_PROMPT,
   type WanGenerateRequest,
   WanPipeline,
+  type WanPipelineOptions,
 } from "../src/wan/pipeline.ts";
+import type { GraphOwner } from "../src/hub/components.ts";
+import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
+import { wanParityCase, wanParityCases, wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
+import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
+import { readFileIfPresent } from "./helpers/read-if-present.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
-import { wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
+import { WanVaeChunkError, wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import type { WanRopeBase } from "../src/wan/dit-rope.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 import {
@@ -678,8 +690,18 @@ const mockPipeline = (options: {
   readonly ditValue?: number;
   readonly vaeValue?: number;
   readonly ditDisposeError?: Error;
+  /**
+   * `"gpu"` なら text 段を模擬の umT5 で回す（プロンプト層はフィクスチャの表 — {@link wanParityEncoder}）。
+   * 出力は有効長 L の行を `umt5Value(L)` で埋める（positive と negative の取り違えが値に出る）。
+   */
+  readonly textEncoder?: "gpu";
+  readonly umt5Value?: (tokens: number) => number;
+  /** umT5 の run の中で呼ぶ（中断の注入口）。 */
+  readonly onUmt5Run?: (tokens: number) => void;
 }) => {
   const log: string[] = [];
+  /** DiT が受けた文脈（run の順 — uncond → cond）。 */
+  const ditContexts: Float32Array[] = [];
   const { first, next } = vaeChunkGraphs(32);
   const resident = (byteLength: number) => ({ byteLength, write: () => {}, dispose: () => {} });
   const vaeSession = (name: string) => ({
@@ -688,10 +710,47 @@ const mockPipeline = (options: {
       return Promise.resolve({
         enqueue: () => Promise.resolve(),
         diagnostics: () => ({}),
-        dispose: () => Promise.resolve(),
+        dispose: () => {
+          log.push(`dispose:${name}`);
+          return Promise.resolve();
+        },
       });
     },
   });
+  const gpuText = options.textEncoder === "gpu";
+  const text = gpuText
+    ? {
+      kind: "gpu",
+      encoder: wanParityEncoder(),
+      contract: { output: "umt5_out" },
+      component: {
+        createSession: (_gpu: unknown, sessionOptions: unknown) => {
+          log.push(`create:text_encoder:${JSON.stringify(sessionOptions)}`);
+          return Promise.resolve({
+            run: (inputs: Record<string, Tensor>) => {
+              const tokens = inputs.input_ids.shape[1];
+              log.push(`run:text_encoder:${tokens}`);
+              options.onUmt5Run?.(tokens);
+              return Promise.resolve({
+                umt5_out: {
+                  dtype: "f32",
+                  shape: [1, tokens, WIDTH],
+                  data: new Float32Array(tokens * WIDTH).fill(
+                    options.umt5Value?.(tokens) ?? tokens / 1000,
+                  ),
+                },
+              });
+            },
+            diagnostics: () => ({}),
+            dispose: () => {
+              log.push("dispose:text_encoder");
+              return Promise.resolve();
+            },
+          });
+        },
+      },
+    }
+    : { kind: "precomputed" };
   const state = {
     gpu: {
       createResident: (bytes: number) => Promise.resolve(resident(bytes)),
@@ -717,6 +776,9 @@ const mockPipeline = (options: {
         log.push("create:transformer");
         return Promise.resolve({
           run: (inputs: Record<string, Tensor>) => {
+            const context = inputs.encoder_hidden_states;
+            assert(context.dtype === "f32", "DiT の文脈が f32 でない");
+            ditContexts.push(context.data);
             const tokens = inputs.tokens;
             return Promise.resolve({
               out: {
@@ -746,16 +808,25 @@ const mockPipeline = (options: {
       cos: [new Float32Array(64), new Float32Array(64), new Float32Array(64)],
       sin: [new Float32Array(64), new Float32Array(64), new Float32Array(64)],
     },
-    dit: { output: "out", projWidth: 256, contextRows: 4, contextWidth: WIDTH },
+    // GPU 経路は umT5 の出力（negative は 126 行）を詰めるので、文脈は配布形と同じ 512 行。
+    dit: { output: "out", projWidth: 256, contextRows: gpuText ? 512 : 4, contextWidth: WIDTH },
     textEmbeds: EMBEDS,
+    text,
   };
   const pipeline: WanPipeline = Reflect.construct(WanPipeline, [state]);
-  /** 5 フレーム・2 step（DiT 4 回・VAE 12 タイル）の要求で回し、観測したイベントを `log` に積む。 */
-  const generate = (onEvent?: WanGenerateRequest["onEvent"]) =>
+  /**
+   * 5 フレーム・2 step（DiT 4 回・VAE 12 タイル）の要求で回し、観測したイベントを `log` に積む。プロンプトは
+   * 資産の経路が `cats`、GPU 経路がフィクスチャの固定プロンプト `boxing-cats`（28 トークン）。
+   */
+  const generate = (
+    onEvent?: WanGenerateRequest["onEvent"],
+    request: Partial<WanGenerateRequest> = {},
+  ) =>
     pipeline.generate({
-      prompt: "Two cats.",
+      prompt: gpuText ? wanParityCase("fixed-boxing-cats").text : "Two cats.",
       frames: 5,
       steps: 2,
+      ...request,
       onEvent: async (event) => {
         log.push(
           event.kind === "stage"
@@ -767,7 +838,7 @@ const mockPipeline = (options: {
         await onEvent?.(event);
       },
     });
-  return { log, generate };
+  return { log, generate, ditContexts };
 };
 
 describe("WanPipeline.generate（模擬 Session）", () => {
@@ -832,5 +903,485 @@ describe("WanPipeline.generate（模擬 Session）", () => {
       assertStrictEquals(error, disposeFailure);
       assert(!log.includes("vae_decoder:start"), `VAE の段へ進んだ: ${log}`);
     });
+  });
+});
+
+describe("planWanGpuGeneration（GPU 経路の入口の門）", () => {
+  const encoder = wanParityEncoder();
+  const BOXING_CATS = wanParityCase("fixed-boxing-cats");
+  const gpuPlan = (request: Partial<WanGenerateRequest>) =>
+    planWanGpuGeneration({ prompt: BOXING_CATS.text, ...request }, encoder, LAYOUT, CONFIG);
+
+  it("プロンプトを上流と同じ id 列にし、省いた negative は公式の sample_neg_prompt を同じ門で符号化する", () => {
+    const resolved = gpuPlan({});
+    assertEquals([...resolved.positive], BOXING_CATS.ids);
+    const negative = wanParityCase("fixed-negative");
+    assertEquals([...(resolved.negative ?? [])], negative.ids);
+    assertEquals(resolved.negative?.length, 126, "公式 negative は 126 トークン");
+    // ノブの既定は資産の経路と同じ 1 本の門（参照の設定）。
+    assertEquals(
+      [resolved.steps, resolved.guidance, resolved.shift, resolved.frames],
+      [50, 5, 3, 33],
+    );
+  });
+
+  it("資産に無い文字列も受け、明示の negative はその文字列を符号化する・guidance 1 は uncond を回さない", () => {
+    // 固定 4 本以外の受理されたケース（境界・乱択 — 資産の集合の外）。
+    const free = wanParityCases.find((entry) =>
+      entry.ids !== undefined && !entry.id.startsWith("fixed-")
+    );
+    assert(free !== undefined, "フィクスチャに受理された非固定のケースが無い");
+    assertEquals([...gpuPlan({ prompt: free.text }).positive], free.ids);
+    assertEquals([...(gpuPlan({ negativePrompt: free.text }).negative ?? [])], free.ids);
+    assertEquals(gpuPlan({ guidance: 1 }).negative, undefined);
+    assertThrows(
+      () => gpuPlan({ guidance: 1, negativePrompt: free.text }),
+      ModelInputError,
+      "効かない",
+    );
+  });
+
+  it("前処理の拒否は理由と直し方を言う（R&D → R & D・未割り当て / C1 はその文字を外す）", () => {
+    const rejected: readonly [string, string, string][] = [
+      ["R&D lab", "entity", "`R&D` → `R & D`"],
+      ["a͸b", "unassigned", "その文字を外して渡す"],
+      ["a\x85b", "c1", "その文字を外して渡す"],
+    ];
+    for (const [prompt, reason, hint] of rejected) {
+      const error = assertThrows(() => gpuPlan({ prompt }), PromptCleanError);
+      assertEquals(error.reason, reason, prompt);
+      assertStringIncludes(error.message, hint);
+      assertStringIncludes(error.message, "prompt:");
+    }
+    const negative = assertThrows(() => gpuPlan({ negativePrompt: "R&D lab" }), PromptCleanError);
+    assertStringIncludes(negative.message, "negativePrompt:");
+    // `R & D` と空白を挟めば前処理は通る（文言の直し方が実際に効く — 落ちるならトークナイザの語彙の側）。
+    assertEquals(encoder.clean("R & D lab"), "R & D lab");
+  });
+
+  it("空・空白だけ（1 トークン）は 1 語以上を求めて拒む", () => {
+    for (const prompt of ["", "   "]) {
+      assertThrows(() => gpuPlan({ prompt }), ModelInputError, "1 語以上入れる");
+    }
+  });
+
+  it("ノブの門は資産の経路と同じ 1 本（寸法・フレーム数・step 数を同じ文言で拒む）", () => {
+    for (const request of [{ frames: 34 }, { steps: 0 }, { width: 840 }] as const) {
+      const viaAsset = assertThrows(() => plan(request), ModelInputError);
+      const viaGpu = assertThrows(() => gpuPlan(request), ModelInputError);
+      assertEquals(viaGpu.message, viaAsset.message);
+    }
+  });
+});
+
+describe("既定の negative（公式の sample_neg_prompt）", () => {
+  it("recipe の固定プロンプト（prompts.py の negative — fixture の fixed-negative）の原文とビット同一", () => {
+    assertEquals(WAN_DEFAULT_NEGATIVE_PROMPT, wanParityCase("fixed-negative").text);
+  });
+});
+
+/** recipe `wan/text_embeds.py` が書く埋め込み資産（ローカル資産 — 無い機では下の 1 本だけ SKIP）。 */
+const TEXT_EMBEDS_SERIES = new URL(
+  "../../../outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors",
+  import.meta.url,
+);
+const textEmbedsSeries = await readFileIfPresent(TEXT_EMBEDS_SERIES);
+if (textEmbedsSeries === undefined) {
+  console.warn(
+    `[karume] ${TEXT_EMBEDS_SERIES.pathname} が無いため、既定の negative と資産の行の突き合わせを SKIP する` +
+      "（recipe の原文との突き合わせは fixture で回る）。生成: cd tools/export-recipes && " +
+      "uv run --group wan --inexact python -m wan.text_embeds",
+  );
+}
+
+Deno.test({
+  name:
+    "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
+  ignore: textEmbedsSeries === undefined,
+  fn: () => {
+    if (textEmbedsSeries === undefined) throw new Error("ignore の条件と食い違う");
+    const embeds = parseWanTextEmbeds(textEmbedsSeries.buffer);
+    assertEquals(
+      embeds.entries.filter((entry) => entry.role === "negative").map((entry) => entry.prompt),
+      [WAN_DEFAULT_NEGATIVE_PROMPT],
+    );
+  },
+});
+
+describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（入力名・i32・記号 L・幅・格納）", () => {
+  type Umt5Spec = {
+    readonly inputs: readonly {
+      readonly name: string;
+      readonly dtype: "i32" | "f32";
+      readonly shape: readonly StubDim[];
+    }[];
+    readonly outputs: readonly {
+      readonly name: string;
+      readonly dtype: "f32" | "i32";
+      readonly shape: readonly StubDim[];
+    }[];
+    /** initializer の格納（`shared` は格納を持たない共有の宣言）。 */
+    readonly storages: readonly (CodecName | "shared")[];
+  };
+  /** 配布形と同じ宣言（`umt5_patch.py` の入力名・記号 L・出力 `[1, L, 4096]`・i8 の重みと f32 の表）。 */
+  const VALID: Umt5Spec = {
+    inputs: [
+      { name: "input_ids", dtype: "i32", shape: [1, "L"] },
+      { name: "relative_position_buckets", dtype: "i32", shape: ["L", "L"] },
+    ],
+    outputs: [{ name: "out", dtype: "f32", shape: [1, "L", 4096] }],
+    storages: ["int8-sym", "f32"],
+  };
+  const DIT = { contextRows: 512, contextWidth: 4096 };
+  const umt5Of = (patch: Partial<Umt5Spec>): GraphOwner => {
+    const spec = { ...VALID, ...patch };
+    return {
+      graph: {
+        format: "karume-ir",
+        version: 2,
+        requires: { ops: [] },
+        symbols: ["L", "M"],
+        inputs: spec.inputs.map((input) => ({ ...input, shape: [...input.shape] })),
+        outputs: spec.outputs.map((output) => output.name),
+        initializers: Object.fromEntries(
+          spec.storages.map((
+            codec,
+            index,
+          ) => [`w${index}`, codec === "shared" ? { shared: true } : { storage: { codec } }]),
+        ),
+        values: Object.fromEntries(
+          spec.outputs.map((output) => [output.name, {
+            dtype: output.dtype,
+            shape: [...output.shape],
+          }]),
+        ),
+        states: {},
+        nodes: [],
+      },
+    };
+  };
+  const ids = VALID.inputs[0];
+  const buckets = VALID.inputs[1];
+
+  it("配布形の宣言は通り、出力の名前を宣言から引く", () => {
+    assertEquals(umt5Contract(umt5Of({}), DIT), { output: "out" });
+  });
+
+  it("入力名・幅・記号・dtype・本数・格納の食い違いは、umT5 を取る前に名指しで落ちる（素の Error）", () => {
+    const rejected: readonly [string, Partial<Umt5Spec>, string][] = [
+      [
+        "入力名違い",
+        { inputs: [{ ...ids, name: "token_ids" }, buckets] },
+        "グラフ入力 'input_ids' が無い",
+      ],
+      [
+        "幅 2048",
+        { outputs: [{ name: "out", dtype: "f32", shape: [1, "L", 2048] }] },
+        "出力 'out' の形",
+      ],
+      [
+        "出力の記号が別",
+        { outputs: [{ name: "out", dtype: "f32", shape: [1, "M", 4096] }] },
+        "出力 'out' の形",
+      ],
+      [
+        "バケット表の記号が別",
+        { inputs: [ids, { ...buckets, shape: ["L", "M"] }] },
+        "'relative_position_buckets' の形",
+      ],
+      ["id 列の L が静的", { inputs: [{ ...ids, shape: [1, 128] }, buckets] }, "記号次元でない"],
+      ["id 列が f32", { inputs: [{ ...ids, dtype: "f32" }, buckets] }, "i32 でない"],
+      [
+        "入力が 3 本",
+        { inputs: [ids, buckets, { name: "attention_mask", dtype: "i32", shape: [1, "L"] }] },
+        "3 本",
+      ],
+      [
+        "出力が 2 本",
+        { outputs: [...VALID.outputs, { name: "extra", dtype: "f32", shape: [1, "L", 4096] }] },
+        "出力が 2 本",
+      ],
+      [
+        "出力が i32",
+        { outputs: [{ name: "out", dtype: "i32", shape: [1, "L", 4096] }] },
+        "f32 でない",
+      ],
+      ["格納 f16", { storages: ["f16", "f32"] }, "格納 f16 は受けない"],
+      ["格納 i4", { storages: ["int8-sym", "int4-sym-g"] }, "格納 int4-sym-g は受けない"],
+      ["i8 が無い", { storages: ["f32"] }, "i8 の重みが 1 本も無い"],
+      ["共有の宣言", { storages: ["int8-sym", "shared"] }, "共有の宣言"],
+    ];
+    for (const [label, patch, message] of rejected) {
+      const error = assertThrows(() => umt5Contract(umt5Of(patch), DIT), Error, message, label);
+      assert(!(error instanceof ModelInputError), `資産の齟齬を入力起因にしない: ${label}`);
+    }
+  });
+
+  it("有効長の上限 512 が DiT の文脈の行数を超える組は落ちる", () => {
+    assertThrows(
+      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }),
+      Error,
+      "有効長の上限 512 が DiT の文脈の行数 256 を超える",
+    );
+  });
+});
+
+/** 構築の入口のテストが使う manifest（`models/karume-wan2.1/karume.json` の骨格 — 宣言だけ）。 */
+const wanManifest = (weightNames: readonly string[]) =>
+  parseManifest(JSON.stringify({
+    format: "karume/5",
+    generator: "karume/0.1.0",
+    defaultModel: "t2v-1.3b",
+    models: {
+      "t2v-1.3b": {
+        pipeline: "wan/1",
+        weights: Object.fromEntries(
+          weightNames.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
+        ),
+        assets: {
+          text_embeds: { path: "text_embeds.safetensors", size: 8, sha256: "e".repeat(64) },
+          umt5_tokenizer: { path: "tokenizer.json", size: 8, sha256: "f".repeat(64) },
+        },
+        quants: {
+          f16: {
+            weights: Object.fromEntries(weightNames.map((name) => [name, "f16"])),
+            session: {},
+          },
+        },
+        defaultQuant: "f16",
+        pipelineConfig: { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } },
+      },
+    },
+  }));
+const WITH_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next", "text_encoder"];
+const WITHOUT_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next"];
+
+/** TS の型を通らない値を 1 欄だけ差した構築オプション（JS の呼び手の綴り違いの再現）。 */
+const optionsWith = (key: string, value: unknown): WanPipelineOptions => {
+  const options: WanPipelineOptions = {};
+  Object.defineProperty(options, key, { value, enumerable: true });
+  return options;
+};
+
+/** 開ける容器（宣言は最小 — admission のグラフの門で落ちる器。umT5 は入れない）。 */
+const SHELL_COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};
+for (const name of WITHOUT_UMT5) {
+  Object.assign(
+    SHELL_COMPONENTS,
+    partAssets(
+      name,
+      await tensorlessContainer(name, {
+        inputs: [{ name: "x", shape: [1, 4] }],
+        output: { name: "y", shape: [1, 4] },
+      }),
+    ),
+  );
+}
+
+describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・中断 — GPU も実資産も要らない範囲）", () => {
+  it("textEncoder の未知の綴りは資産に触る前に素の Error（model / quant 名の綴り違いと同じ扱い）", async () => {
+    const error = await assertRejects(
+      () =>
+        WanPipeline.fromAssets(
+          { manifest: wanManifest(WITH_UMT5), assets: {} },
+          optionsWith("textEncoder", "cpu"),
+        ),
+      Error,
+      "textEncoder 'cpu' は 'gpu' / 'precomputed' のどちらでもない",
+    );
+    assert(!(error instanceof ModelInputError));
+  });
+
+  it("既定の gpu の経路で umT5 を宣言しない manifest は、容器を開く前に precomputed を案内して落ちる", async () => {
+    await assertRejects(
+      () => WanPipeline.fromAssets({ manifest: wanManifest(WITHOUT_UMT5), assets: {} }),
+      Error,
+      "umT5 の部品 'text_encoder' が無い（textEncoder の既定 \"gpu\" が取る",
+    );
+  });
+
+  it("precomputed は umT5 の部品を開かずに admission まで進み、gpu は umT5 の容器を要る", async () => {
+    // 同じ資産（umT5 の容器だけが無い）で、経路が開く部品の集合だけが違う。precomputed は 3 部品を開いて
+    // admission のグラフの門（VAE の chunk グラフ）で落ちる = umT5 に触っていない。
+    const manifest = wanManifest(WITH_UMT5);
+    await assertRejects(
+      () =>
+        WanPipeline.fromAssets(
+          { manifest, assets: SHELL_COMPONENTS },
+          { textEncoder: "precomputed" },
+        ),
+      WanVaeChunkError,
+    );
+    await assertRejects(
+      () => WanPipeline.fromAssets({ manifest, assets: SHELL_COMPONENTS }),
+      Error,
+      "部品 'text_encoder' の容器が無い",
+    );
+  });
+
+  it("中断済みの signal は資産へ触る前に reason そのままで reject する", async () => {
+    // signal 無しなら「部品 'transformer' の容器が無い」で落ちる形が、中断済みなら reason で落ちる。
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン");
+    controller.abort(reason);
+    const error = await assertRejects(() =>
+      WanPipeline.fromAssets(
+        { manifest: wanManifest(WITH_UMT5), assets: {} },
+        { signal: controller.signal },
+      )
+    );
+    assertStrictEquals(error, reason);
+  });
+
+  it("実行開始後に届いた中断も最初の段の境目で効く（イベントループへ譲ってから見る）", async () => {
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（実行中）");
+    setTimeout(() => controller.abort(reason), 0);
+    const error = await assertRejects(() =>
+      WanPipeline.fromAssets(
+        { manifest: wanManifest(WITH_UMT5), assets: {} },
+        { signal: controller.signal },
+      )
+    );
+    assertStrictEquals(error, reason);
+  });
+});
+
+describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", () => {
+  it("text 段は positive → negative を回して畳み、畳んだ後に DiT の段を張る（Session の実行オプションは {}）", async () => {
+    const generated = mockPipeline({ textEncoder: "gpu" });
+    await generated.generate();
+    assertEquals(generated.log.slice(0, 7), [
+      "text_encoder:start",
+      "create:text_encoder:{}",
+      "run:text_encoder:28",
+      "run:text_encoder:126",
+      "dispose:text_encoder",
+      "text_encoder:end",
+      "transformer:start",
+    ]);
+    assertEquals(generated.log.at(-1), "vae_decoder:end");
+  });
+
+  it("DiT へ渡す文脈は umT5 の出力を 512 行までゼロで詰めたもの（uncond = negative・cond = positive）", async () => {
+    const { generate, ditContexts } = mockPipeline({ textEncoder: "gpu" });
+    await generate();
+    // 2 step × (uncond, cond)。
+    assertEquals(ditContexts.length, 4);
+    const rowsOf = (context: Float32Array, value: number) => {
+      const filled = context.findIndex((entry) => entry !== Math.fround(value));
+      return filled === -1 ? context.length / WIDTH : filled / WIDTH;
+    };
+    const [uncond, cond] = ditContexts;
+    assertEquals(uncond.length, 512 * WIDTH);
+    assertEquals(rowsOf(uncond, 126 / 1000), 126, "uncond は negative（126 トークン）の出力");
+    assertEquals(rowsOf(cond, 28 / 1000), 28, "cond は positive（28 トークン）の出力");
+    assert(uncond.subarray(126 * WIDTH).every((entry) => entry === 0), "有効長の後ろがゼロでない");
+    assert(cond.subarray(28 * WIDTH).every((entry) => entry === 0), "有効長の後ろがゼロでない");
+  });
+
+  it("guidance 1 は negative を回さない（umT5 の run は 1 回）", async () => {
+    const { log, generate } = mockPipeline({ textEncoder: "gpu" });
+    await generate(undefined, { guidance: 1 });
+    assertEquals(log.filter((entry) => entry.startsWith("run:text_encoder")), [
+      "run:text_encoder:28",
+    ]);
+  });
+
+  it("umT5 の出力が非有限なら text 段で名指しで落ち、Session を畳み、DiT の段を張らない", async () => {
+    const { log, generate } = mockPipeline({
+      textEncoder: "gpu",
+      umt5Value: (tokens) => (tokens === 126 ? Number.NaN : 0.5),
+    });
+    await assertRejects(() => generate(), Error, "umT5 の出力（negativePrompt・126 トークン）");
+    assertEquals(log.at(-1), "dispose:text_encoder");
+    assert(!log.includes("text_encoder:end"), "途中で落ちた段の end を出した");
+    assert(!log.includes("create:transformer"), `DiT の段へ進んだ: ${log}`);
+  });
+
+  it("入口の門（前処理の拒否）は Session を 1 本も張らずに落ちる", async () => {
+    const { log, generate } = mockPipeline({ textEncoder: "gpu" });
+    await assertRejects(() => generate(undefined, { prompt: "R&D lab" }), PromptCleanError);
+    assertEquals(log.filter((entry) => entry.startsWith("create:")), []);
+  });
+});
+
+describe("WanPipeline.generate の中断（模擬 Session — signal.reason を包まず・Session を畳んで・次が回る）", () => {
+  it("step 1 の後の中断は step 2 の前で効き、DiT の Session を畳み、VAE の段を張らない・次の generate は回る", async () => {
+    const { log, generate } = mockPipeline({});
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン");
+    const error = await assertRejects(() =>
+      generate((event) => {
+        if (event.kind === "denoise-step" && event.step === 1) controller.abort(reason);
+      }, { signal: controller.signal })
+    );
+    assertStrictEquals(error, reason);
+    assert(!log.includes("step:2"), `中断の後に step を回した: ${log}`);
+    assertEquals(log.at(-1), "dispose:transformer");
+    assert(!log.includes("vae_decoder:start"), `VAE の段へ進んだ: ${log}`);
+    log.length = 0;
+    await generate();
+    assertEquals(log.at(-1), "vae_decoder:end", "中断の後の generate が最後まで回らない");
+  });
+
+  it("タスクで届く中断（timer）も次の境目で効く — 譲らない検査では最後まで回ってしまう形", async () => {
+    const { log, generate } = mockPipeline({});
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（timer）");
+    const error = await assertRejects(() =>
+      generate((event) => {
+        if (event.kind === "denoise-step" && event.step === 1) {
+          setTimeout(() => controller.abort(reason), 0);
+        }
+      }, { signal: controller.signal })
+    );
+    assertStrictEquals(error, reason);
+    assert(!log.includes("step:2"), `タスクで届いた中断を step 2 の前で見ていない: ${log}`);
+  });
+
+  it("text 段の中の中断は次の run の前で効き、umT5 の Session を畳んで DiT の段を張らない", async () => {
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（text 段）");
+    const { log, generate } = mockPipeline({
+      textEncoder: "gpu",
+      onUmt5Run: (tokens) => {
+        if (tokens === 28) controller.abort(reason);
+      },
+    });
+    const error = await assertRejects(() => generate(undefined, { signal: controller.signal }));
+    assertStrictEquals(error, reason);
+    assertEquals(log.filter((entry) => entry.startsWith("run:text_encoder")), [
+      "run:text_encoder:28",
+    ]);
+    assertEquals(log.at(-1), "dispose:text_encoder");
+    assert(!log.includes("create:transformer"), `DiT の段へ進んだ: ${log}`);
+  });
+
+  it("中断済みの signal は Session を 1 本も張らずに reason を投げる（どちらの経路も）", async () => {
+    for (const textEncoder of [undefined, "gpu"] as const) {
+      const { log, generate } = mockPipeline(textEncoder === undefined ? {} : { textEncoder });
+      const controller = new AbortController();
+      const reason = new Error("中止ボタン（開始前）");
+      controller.abort(reason);
+      const error = await assertRejects(() => generate(undefined, { signal: controller.signal }));
+      assertStrictEquals(error, reason);
+      assertEquals(log.filter((entry) => entry.startsWith("create:")), [], `${textEncoder}`);
+    }
+  });
+
+  it("VAE のタイルの間の中断は次のタイルの前で効き、VAE の Session を畳む", async () => {
+    const { log, generate } = mockPipeline({});
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（VAE）");
+    const error = await assertRejects(() =>
+      generate((event) => {
+        if (event.kind === "vae-tile" && event.tile === 1) controller.abort(reason);
+      }, { signal: controller.signal })
+    );
+    assertStrictEquals(error, reason);
+    assertEquals(log.filter((entry) => entry.startsWith("tile:")), ["tile:1"]);
+    assert(log.includes("dispose:vae_decoder_first") && log.includes("dispose:vae_decoder_next"));
+    assert(!log.includes("vae_decoder:end"), `中断した段の end を出した: ${log}`);
   });
 });

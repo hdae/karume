@@ -20,7 +20,8 @@
  * 受理した入力の id 列は、transformers 5.14.1 と `tokenizer.json` の 2 経路のどちらとも一致する
  * （recipe が fixture の生成時に確かめ、`wan_text_tokenizer_test.ts` が両方と突き合わせる）。
  *
- * 資産（`outputs/series/wan2.1-umt5-tokenizer/tokenizer.json` — 配布形への組み込みは段 10d）は
+ * 資産（系列 `outputs/series/wan2.1-umt5-tokenizer/tokenizer.json` — 配布形では Wan の manifest の資産
+ * `umt5_tokenizer`）は
  * 語彙・スコア・追加語彙・空白集合と前処理の表（`promptClean`）を 1 本に持つ。同じ recipe の
  * 1 回の実行で焼くので、トークナイザと前処理が別々に古びない。I/O は持たない（取得は hub の責務）。
  */

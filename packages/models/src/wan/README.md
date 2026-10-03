@@ -5,15 +5,25 @@ The `./wan` subpath of `@karume/models` (ADR
 prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]`. The public surface is
 [`wan.ts`](../../wan.ts) (also re-exported from the barrel); everything here is internal.
 
-The pipeline runs three stages, one session set at a time: the transformer session is disposed before
-the VAE sessions are opened. There is no wait for released GPU memory between the stages. Intel /
-wgpu can release `destroy()` late, but on the B570 (2026-10-02, fdinfo `drm-total-vram0`) the
-transformer stage's peak drops as soon as its session is disposed and does not overlap the VAE
-stage's peak (the NOTE at the top of `pipeline.ts` has the numbers):
+The pipeline runs three stages, one session set at a time: the text-encoder session (GPU route) is
+disposed before the transformer session is opened, and the transformer session before the VAE
+sessions (ADR [0119](../../../../docs/decisions/0119-wan-umt5-gpu-text-encoder.md) decision 11: the
+int8 umT5 at 5.30 GiB and the transformer stage do not fit the B570 together). There is no wait for
+released GPU memory between the stages. Intel / wgpu can release `destroy()` late, but on the B570
+(2026-10-02, fdinfo `drm-total-vram0`) the transformer stage's peak drops as soon as its session is
+disposed and does not overlap the VAE stage's peak (the NOTE at the top of `pipeline.ts` has the
+numbers); the same has not been measured after the text stage yet:
 
-1. **text** — looks the prompt up in the precomputed umT5 embedding asset (no GPU). Only prompts in
-   the asset are accepted, by their original or normalized text; anything else is a
-   `ModelInputError`.
+1. **text** — the route is chosen at construction (`textEncoder`, ADR 0119 decision 7):
+   - `"gpu"` (default) — runs umT5 (int8 per-channel weights, float32 activations) once for the
+     prompt and once for the negative prompt, then pads each `[1, L, 4096]` output with zero rows up
+     to the transformer's 512 context rows. Any string is accepted that passes the `prompt_clean`
+     mirror and the tokenizer (2 to 512 tokens); the rest is a `ModelInputError` whose message says
+     how to fix the prompt. The default negative prompt is the official `sample_neg_prompt`, encoded
+     on the GPU as well.
+   - `"precomputed"` — looks the prompt up in the precomputed umT5 embedding asset (no GPU, umT5 is
+     not downloaded). Only prompts in the asset are accepted, by their original or normalized text;
+     anything else is a `ModelInputError`.
 2. **transformer** — the S-shaped DiT, `steps` times; with guidance above 1 the uncond and cond
    passes run one after the other (B = 1), and the CFG combination and the UniPC update run on the
    host.
@@ -23,8 +33,15 @@ stage's peak (the NOTE at the top of `pipeline.ts` has the numbers):
 The distribution is `karume-wan2.1` (stage 7 — not published on Hugging Face yet, so there is no
 `WAN_SOURCES` table): `WanPipeline.fromPretrained` loads it through `@karume/hub` (a local mirror is
 passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest and the bytes. Both
-go through the same admission. The defaults for steps, guidance and shift come from the manifest's
-`pipelineConfig` (`config.ts`); the UniPC structure is the upstream value.
+go through the same admission. The `text_encoder` component is a cross-repository reference to the
+umT5 distribution (`karume-umt5-xxl`); a local mirror of it is passed through the source handle's
+`crossRepo` mapping. The `"precomputed"` route never opens that component. The defaults for steps,
+guidance and shift come from the manifest's `pipelineConfig` (`config.ts`); the UniPC structure is
+the upstream value.
+
+Both construction and generation take an `AbortSignal`. Generation checks it at the stage boundaries,
+before every run (the two text-encoder runs and every transformer step) and between VAE tiles; an
+abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 
 | Files            | Owner   | Contents                                                                                      |
 | ---------------- | ------- | --------------------------------------------------------------------------------------------- |
@@ -38,6 +55,8 @@ go through the same admission. The defaults for steps, guidance and shift come f
 | `pipeline.ts`    | stage 6 | `WanPipeline`: input gates, the three stages, events and diagnostics                          |
 | `config.ts`      | stage 7 | `pipelineConfig` schema (pipeline `wan/1`): default steps, guidance and shift                 |
 | `frames.ts`      | stage 6 | one frame to 8-bit RGBA (`wanFrameToRgba` — the rule the reference hashes use)                |
+| `text/*.ts`      | 10a     | the `prompt_clean` mirror and the umT5 tokenizer (prompt → token ids, with the reject rules)  |
+| `umt5/*.ts`      | 10c     | the relative-position bucket table and the umT5 session inputs / output padding               |
 
 ## Accepted requests
 
@@ -45,8 +64,9 @@ go through the same admission. The defaults for steps, guidance and shift come f
 finite in float32 (1 turns CFG off), `shift` > 0 with a `steps` × `shift` pair whose σ column is
 strictly decreasing, and either a `seed` (default 0) or the initial noise as `latents`. Only 832×480
 with 33 and 81 frames have been checked end to end on the GPU. The transformer stage is closed before
-the VAE stage opens, so the two are never resident together. A non-finite latent after any step, or a
-non-finite VAE output before the clamp, fails the generation instead of being returned.
+the VAE stage opens, so the two are never resident together. A non-finite umT5 output, a non-finite
+latent after any step, or a non-finite VAE output before the clamp fails the generation instead of
+being returned.
 
 ## Numerics
 
