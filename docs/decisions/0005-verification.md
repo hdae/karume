@@ -81,7 +81,8 @@ sha256 参照値は**環境キーごとの行**になった（ADR [0106](0106-de
 明示 FAIL」そのものの形なので、**門番の並びに参照門を加える**。
 
 - **参照門**（`registerReferenceGate` — sha256 参照値を持つ e2e 3 本の末尾に 1 本ずつ）: 現環境の行が
-  1 件も無く、かつ作るモード（`KARUME_REFERENCE`）でもないなら FAIL。opt-out は
+  1 件も無く、かつ作るモード（`KARUME_REFERENCE`）でもないなら FAIL（2026-10-03 の改定で「登録した全ケースに現環境の行があるか、
+  無い id は held」が緑の条件 — ADR 0106 追記）。opt-out は
   `KARUME_ALLOW_NO_REFERENCE=1` で、`KARUME_ALLOW_NO_SHADER_F16` などと同じ意図表明の席。
   GPU も実資産も無くて sha 門自体が走らない環境では、この門番も鳴らさない。
 - **レーンとの関係**: 門番 3 本（`gpu_gate` / `assets_gate` / `distribution_gate`）は core にしか無いので
