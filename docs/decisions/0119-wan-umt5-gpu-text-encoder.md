@@ -385,3 +385,23 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
 - **未検証**: ブラウザの NFC の一致（Chrome / Safari の ICU の版 — 段 9 で sweep のテストをブラウザでも回す）。
 - **10d への手掛かり**: hub の `readAssetJson` → `parseWanTokenizerAsset` → `new WanPromptEncoder(assets)` →
   `encode(prompt, 役割)` が `Int32Array [L]`（L は 2〜512・末尾は `</s>`）。
+
+## 追記（2026-10-03）: 段 10c の準備の結果 — 未解決 2 件を閉じる・gelu の裁定
+
+- **準備 ✅**（`17067949` / `e6ed06c5` / `246c1d50`・GPU と実重みは未使用）: 有効長ラッパ `Umt5EncoderTokens`（入力 `input_ids [1,L]` と
+  `relative_position_buckets [L,L]`・出力 `[1,L,d_model]`・マスクなし・L は 2〜512 の記号次元）で、小さな乱数 UMT5（4 層）の
+  S 形 export が exporter の verify を通り、容器と golden を書ける。相対位置のバケット表は決定 3 のとおり Python（上流の
+  `_relative_position_bucket` をそのまま呼ぶ）と TS（f64 の `Math.log`）で L = 2〜512 の全域がバイト一致（fixture は pin した
+  config から焼く）。Session の入出力の純関数（`src/wan/umt5/session-io.ts`）まで。
+- **閉じた未解決 1 — 相対位置の表の i8 化**: exporter の i8 の既定は `nn.Embedding` も丸める（`QUANT_CHANNEL_AXES`）ので、表 24 本
+  （`encoder.block.N.layer.0.SelfAttention.relative_attention_bias.weight`）は `fake_quant_int8` の `include` で外し、かつ `emit` の
+  `weight_dtype_overrides` で F32 を明示する（片方だけでは落ちる — 実測）。core の変更は要らない。
+- **閉じた未解決 2 — `gelu_new` の扱い（裁定 (a)）**: 上流の手書き式は `aten.pow.Tensor_Scalar` で export が落ちる。recipe で
+  `nn.GELU(approximate="tanh")` に差し替える（数学的に同じ関数・IR は融合済みの `gelu_tanh` 1 本）。丸めの差は要素の 0.54% が
+  違い最大 4.77e-7、小模型の出力の比で 3.9e-7（表の故障は 2.6e-2 以上で 5 桁離れる）。`pow(x,3) → x·x·x` の正規化を core に
+  足す案（上流 eager とビット一致する）は、活性が要素ごとの op 8 本に増えるので採らない。
+- **決定 4 の裏付け（小模型）**: 「有効長だけ」と「512 + マスク」は bf16 でビット一致（L = 2〜512 の 8 本）、f32 は最悪比 7.0e-7。
+  実モデルでの確認は 10c の検収のまま。
+- **決定 8 への注意（コードを読んだ事実）**: 上流の UMT5 は RMSNorm の分散と attention の softmax を f32 に落とすので、`.double()`
+  だけでは f64 の参照にならない。層逐次の f64 参照は DiT の `reference_dit_f64` と同じく精度を意識した書き下しが要る（10c）。
+- 下見の容器は配布しないので台本の CLI からは書かない（`tests/test_graph_names.py` の門 — 部品名は 10d で決める）。
