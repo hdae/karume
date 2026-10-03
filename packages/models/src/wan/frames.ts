@@ -1,10 +1,16 @@
 /**
  * 生成した動画（`[3, F, H, W]`・値域 `[-1, 1]`）の 1 フレーム → インターリーブ RGBA 8bit。
  *
- * 規則は anima の `imageToRgba`（`VaeImageProcessor.postprocess` と同一）と同じ:
- * `v = clamp(x/2 + 0.5, 0, 1)` を `round(v·255)` で 8bit にする（ADR 0118 決定 8 の「uint8 化は Anima の
- * 画像と同じ規則」）。家族をまたいで import しないので写しを持つ（片方の変更がもう片方の sha256 の行を
- * 黙って動かさないように）。
+ * 規則は anima の `imageToRgba` と同じ: `v = clamp(x/2 + 0.5, 0, 1)` と `v·255` を **f64** で計算し、
+ * `Math.round`（0.5 は切り上げ）で 8bit にする（ADR 0118 決定 8 の「uint8 化は Anima の画像と同じ
+ * 規則」）。家族をまたいで import しないので写しを持つ（片方の変更がもう片方の sha256 の行を黙って
+ * 動かさないように）。
+ *
+ * NOTE: 上流と 8bit で一致する規則ではない。diffusers の `numpy_to_pil` は f32 の
+ * `(images * 255).round()`（numpy の偶数丸め）なので、8bit の境界の近傍で ±1 割れる（例 x =
+ * −0.4941176176 は f32 で 64.5 → 64・ここでは f64 の 64.500004 → 65）。上流 Wan の既定は
+ * `output_type="np"`（uint8 にしない）で、例が使う `export_to_video` は `astype(uint8)` の**切り捨て**。
+ * 8bit の出力を上流と突き合わせるときは、この差を前提にする。
  *
  * MUST: `[0,1]` 変換の**前**に clamp を移さない（負値が 0 に潰れてから +0.5 され、暗部が中間灰に
  * 張り付く）。
