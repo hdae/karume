@@ -5206,3 +5206,69 @@ Deno.test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、
     CodegenError,
   );
 });
+
+Deno.test("conv3d igemm params は入力長 + 2·padding が i32 に収まらない軸を落とす", () => {
+  // 全軸 長さ 1・K 1・stride 1・dilation 1・padding 0 の形から、1 軸だけ長さと padding を差し替える。
+  // 出力長は shapes.ts の式どおり（K = 1・stride 1 なので 入力長 + 2·padding）に揃える。
+  const unit = {
+    channelsIn: 1,
+    channelsOut: 1,
+    timeIn: 1,
+    heightIn: 1,
+    widthIn: 1,
+    timeOut: 1,
+    heightOut: 1,
+    widthOut: 1,
+    kernelT: 1,
+    kernelH: 1,
+    kernelW: 1,
+    strideT: 1,
+    strideH: 1,
+    strideW: 1,
+    paddingT: 0,
+    paddingH: 0,
+    paddingW: 0,
+    dilationT: 1,
+    dilationH: 1,
+    dilationW: 1,
+    groups: 1,
+  };
+  const axes = [
+    ["timeIn", "paddingT", "timeOut"],
+    ["heightIn", "paddingH", "heightOut"],
+    ["widthIn", "paddingW", "widthOut"],
+  ] as const;
+  const padding = 2 ** 30 - 1;
+  for (const [lengthKey, paddingKey, outKey] of axes) {
+    const withLength = (length: number) => ({
+      ...unit,
+      [lengthKey]: length,
+      [paddingKey]: padding,
+      [outKey]: length + 2 * padding,
+    });
+    // ちょうど境界（L + 2p = 2^31 − 1）は通り、1 超えると落ちる
+    assertEquals(conv3dIgemmParams(withLength(1)).length, 24, `${lengthKey} 境界`);
+    assertThrows(
+      () => conv3dIgemmParams(withLength(2)),
+      CodegenError,
+      "i32 の上限",
+      `${lengthKey} 境界 + 1`,
+    );
+  }
+  // padding と dilation を u32 の最大にした W 長 3・K 3 の形。出力長の式は Wout = 3 で成り立つが、
+  // WGSL の i32(kw·dil) − i32(pad) は真値 ±(2^32 − 1) を ∓1 へ折り返し、範囲外 0 のはずの読みが
+  // 隣の画素を拾う（CPU 参照 [1,2,3] に対し [3,6,5] を返す形）。
+  assertThrows(
+    () =>
+      conv3dIgemmParams({
+        ...unit,
+        widthIn: 3,
+        widthOut: 3,
+        kernelW: 3,
+        paddingW: 0xffff_ffff,
+        dilationW: 0xffff_ffff,
+      }),
+    CodegenError,
+    "軸 w",
+  );
+});
