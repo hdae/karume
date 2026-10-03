@@ -333,6 +333,10 @@ flush 頻度をどう変えても天井は動かない**（判定に入るのは
   （`tools/diag/hold-vram.ts` で 256MiB 刻みに確保 → `not enough memory left`。同日 2 回の
   サンプルでこの幅が出た）。上の 7,280MiB と矛盾するのではなく、どちらもその時点の申告
   budget の 97% を映しているだけ。
+- 実測（Intel Arc B570 10,172MiB = 9.93GiB・Linux xe・Deno 2.9.6・2026-10-02 時点）: 天井 **9,600〜9,631MiB**
+  （3 系列で揺れなし）。申告予算（天井 ÷ 0.97）は 9,897〜9,930MiB で総量の 97.3〜97.6%、天井は総量の約 94.4〜94.7%。
+  RTX 3080 Ti の 61% の前例より申告がずっと高い。手順と表は
+  [research/2026-10-02-b570-vram-budget.md](research/2026-10-02-b570-vram-budget.md) §3。
 - **天井付近では OOM ではなく device 消失になる境界がある**: 97% 線は `createBuffer` の OOM、
   99% 線は submit / poll のたびに判定される **device lost**。圧が少し高いだけで症状が
   「間欠の device 消失」に化けるので、確保失敗だけを見張っても取りこぼす。
@@ -967,6 +971,39 @@ t 軸の上限で、モデルが宣言する h / w 軸の範囲（`rope.max_size
 **品質だけ**で、これは実測していない。受理集合はこの理由では狭めない（2026-09-04 裁定 — 実測なしに配布形の自由度を削らない）。
 実用上は S の上限と VRAM が先に効く。経緯は [ADR 0036](decisions/0036-freeform-resolution.md) の検出限界 2、
 コード側の記録は `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE。
+
+## Wan2.1: 受けるのは埋め込み資産のプロンプト 4 本と 832×480 / 480×832 × 4n+1 の 5〜81 フレームだけ（第 1 段 — ADR 0118）
+
+`@karume/models/wan` の `WanPipeline` の by-design の制約。入力起因の拒否は全部 `generate` の入口
+（`planWanGeneration` — GPU に触る前）で `ModelInputError` になる（ADR [0118](decisions/0118-wan21-video-generation.md)
+Consequences）。
+
+- **受理集合**: 寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81（既定 33）。steps は 1 以上の整数、guidance は
+  1 以上の有限の数（1 で CFG を回さない — 上流の `guidance_scale > 1` と同じ。guidance 1 で `negativePrompt` を渡すと
+  拒む）、shift は正の有限の数。検収したのは 832×480 の 33 / 81 フレームと 480×832 の VAE（ADR 0118 段 5 / 6 / 8）。
+  寸法とフレーム数はモデルカードと fixture が写しを持つ（`packages/models/src/wan/pipeline.ts` の `ACCEPTED_SIZES`
+  の doc）。
+- **プロンプトは事前計算した 4 本だけ**（正 3 本 + negative 1 本）: テキスト埋め込み資産の原文か正規化後の文字列に
+  完全一致するものだけを受ける（`WanPipeline.prompts` で引ける）。umT5 は GPU で回さない（第 1 段 — ADR 0118
+  決定 4）。任意の文は段 10（umT5 i8・別 ADR）で受けられるようにする予定で、API（`generate({ prompt })`）は変えずに
+  受理集合だけが広がる。
+- **計測（`gpuTiming`）の device は構築時に拒む**: runtime は計測の device で batch を開かないので、VAE の段
+  （1 タイル = 1 batch）が回らない。GPU 時間は診断に出ないので、所要・VRAM（fdinfo と診断）・submit 統計で見る。
+- **DiT 段と VAE 段は同時に常駐しない**: 段ごとに Session を張って畳み、DiT を閉じてから VAE を開く（ADR
+  [0112](decisions/0112-anima-transformer-residency.md) の既定 `"per-stage"` と同じ）。Anima の DiT 常駐のような
+  opt-in は無いので、generate のたびに DiT の重みを GPU へ上げ直す。VRAM の山は DiT 段（B570 で 33 フレーム
+  6.19 GiB / 81 フレーム 7.31 GiB — ADR 0118 段 6 / 8）。
+- **VAE は常にタイルで decode する**（潜在 32 の固定タイル — ADR 0118 裁定 1）: 公式の非タイル decode とは近似の差が
+  出る（段 5 の観測で比 8.2e-2）。
+- **seed の初期ノイズは torch の `randn` とは別の列**（Anima と同じ splitmix64 + Box–Muller — ADR 0118 決定 5）:
+  公式実装と同じ seed でも同じ動画にはならない。参照に揃えるときは `latents` で外から渡す。
+- **キャンセル（`signal`）は未対応**: 他の系列（anima / sbv2 / irodori など）は `signal` を持つが、Wan の
+  `fromPretrained`（配布形 約 2.9 GiB の取得）と `generate`（33 フレーム約 30 分・81 フレーム約 2 時間）は持たない。
+  途中で止める口は `onEvent` の中で throw することだけ（backlog の Wan の小物に起票）。
+- **sha256 の参照値は環境ごとの行**（ADR [0106](decisions/0106-device-keyed-references.md)）: 今ある行は B570
+  （`deno-intel-graphics-bmg-g21`）だけ。行が無い機では sha の照合が明示 SKIP になり、参照門が赤になる
+  （`KARUME_REFERENCE=write` で自分の機の行を作る）。50 ステップの行は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）の
+  ときだけ照合する。
 
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
