@@ -61,7 +61,7 @@ anima = [
 # 黙って変わる。
 # MUST: ftfy も `==` でピンする — テキスト埋め込みは `fix_text` の正規化後の文字列から作るので、
 # 正規化の規則が版で変わると同じプロンプトが別の埋め込みになる（決定 4 の「固定」）。
-# diffusers / ftfy の版を変えるときは配布の門の固定値（`wan.distribution.WAN_TEXT_EMBEDS_VERSIONS`
+# diffusers / ftfy / transformers の版を変えるときは配布の門の固定値（`wan.distribution.WAN_TEXT_EMBEDS_VERSIONS`
 # — 資産のメタの版と突き合わせる）も揃える（`wan/tests/test_distribution.py` が両方を見る）。
 # transformers も `==` でピンする — テキスト埋め込みの値は transformers の UMT5 の実装で決まる
 # （版が変わると同じプロンプトが別の埋め込みになりうる）。版は他グループと同じ値（同じ venv に

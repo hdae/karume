@@ -77,9 +77,15 @@ WAN_TEXT_EMBEDS_METADATA_KEY = "karume.wan.text_embeds"
 WAN_TEXT_ENCODER_DTYPE = "bfloat16"
 
 #: 埋め込みの値を決める依存の版（メタの `versions` — 決定 4 の「固定」）。diffusers は上流の
-#: `_get_t5_prompt_embeds` / `prompt_clean`、ftfy は正規化の規則を持つ。値は pyproject の `wan`
-#: グループの `==` ピンと同じ（`wan/tests/test_distribution.py` の門が両方を突き合わせる）。
-WAN_TEXT_EMBEDS_VERSIONS: Mapping[str, str] = {"diffusers": "0.39.0", "ftfy": "6.3.1"}
+#: `_get_t5_prompt_embeds` / `prompt_clean`、ftfy は正規化の規則、transformers は UMT5 の実装と
+#: トークナイザ（版で語彙外の id の扱いが変わる — research 2026-10-03 umT5）を持つ。値は
+#: pyproject の `wan` グループの `==` ピンと同じ（`wan/tests/test_distribution.py` の門が両方を
+#: 突き合わせる）。
+WAN_TEXT_EMBEDS_VERSIONS: Mapping[str, str] = {
+    "diffusers": "0.39.0",
+    "ftfy": "6.3.1",
+    "transformers": "5.14.1",
+}
 
 #: 系列の部品ディレクトリに置かれる容器の代表名（分割形は `model-0000N-of-0000M.krm`）。
 WAN_MODEL_FILE = "model.krm"
