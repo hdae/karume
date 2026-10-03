@@ -58,7 +58,8 @@ WAN_FRAMES = (5, 81)
 
 #: 実行資源（``_wan_resources``）を実測した quant 席。MUST: カードは数を**この席の数として**
 #: 名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない — BiRefNet の
-#: カードと同じ）。
+#: カードと同じ）。他の席（ADR 0120 の i8 の 2 席）は「未計測」と書く — 席ごとの数は段 3 / 4 の
+#: 実測で足す。
 WAN_RESOURCE_QUANT = "f16"
 
 
@@ -83,7 +84,7 @@ def _wan_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=WAN_PIPELINE_TAG,
         base_model=tuple(_upstream(name).repo for name in manifest["models"]),
-        # f32 の上流を f16 へ落とし直した配布形（`CardMetadata` の doc — f16 / i8 の配布形は
+        # f32 の上流を f16 / i8 へ落とし直した配布形（`CardMetadata` の doc — f16 / i8 の配布形は
         # `quantized`）。
         base_model_relation="quantized",
         license=next(iter(licenses)),
@@ -133,8 +134,11 @@ def _wan_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     lines += [
         f"- **Authors**: Wan2.1 is released by Wan-AI ([technical report](https://{WAN_PAPER})).",
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
-        "  conversion into the Karume container format; every parameter rounded to the nearest",
-        "  float16 value (weight matrices and kernels stored as float16, computation in float32);",
+        "  conversion into the Karume container format; every parameter of the float16",
+        "  transformer and the VAE rounded to the nearest float16 value (weight matrices and",
+        "  kernels stored as float16, computation in float32); a second, int8 copy of the",
+        "  transformer whose linear weights are quantized per output channel (biases and",
+        "  normalization weights kept in float32 at the source values);",
         "  the transformer graph re-expressed on patchified tokens, with the RoPE tables built on",
         "  the host from per-axis base tables and applied in a pair-swap form;",
         "  the VAE decoder re-expressed as two one-frame graphs with an explicit causal cache,",
@@ -244,11 +248,12 @@ def _wan_inputs() -> list[str]:
         "  same bytes on the same GPU and driver. Release verification pins the SHA-256 of the",
         "  8-bit frames per test environment and fails on any change — the check is never relaxed",
         "  to a tolerance.",
-        "- **Against the upstream reference**: a 2-step run with injected noise is compared with",
-        "  diffusers on CPU in float32 (the same f16-rounded weights, the same tiled decode), and",
-        "  one transformer forward at each full size (33 and 81 frames) against a float64",
-        "  reference. Differences stay within tolerances measured on separate decision cases; the",
-        "  remaining gap is float32 rounding in the GPU matrix products, not a porting difference.",
+        "- **Against the upstream reference** (the `f16` quant): a 2-step run with injected noise",
+        "  is compared with diffusers on CPU in float32 (the same f16-rounded weights, the same",
+        "  tiled decode), and one transformer forward at each full size (33 and 81 frames) against",
+        "  a float64 reference. Differences stay within tolerances measured on separate decision",
+        "  cases; the remaining gap is float32 rounding in the GPU matrix products, not a porting",
+        "  difference.",
         "- **Tiled decode**: the VAE always decodes in overlapping tiles, so the frames differ",
         "  slightly from the upstream untiled decode.",
     ]
@@ -276,6 +281,14 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"実行資源を実測した quant '{WAN_RESOURCE_QUANT}' がモデル '{name}' の席に無い"
                 f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
             )
+    # 実測していない席は数を推し量らず、未計測と名乗る（席の並びは manifest のまま）。
+    unmeasured = [
+        f"`{quant}`"
+        for quant in dict.fromkeys(
+            quant for model in manifest["models"].values() for quant in model["quants"]
+        )
+        if quant != WAN_RESOURCE_QUANT
+    ]
     return [
         "## Resources",
         "",
@@ -290,6 +303,11 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
         "| 81     | 7.31 GiB         | 3.78 GiB | 68.6 s | 315 s      | ~2 hours    |",
         "",
         "Pass is one transformer pass (batch 1); VAE decode is the tiled decode of the whole clip.",
+        *(
+            [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet."]
+            if unmeasured
+            else []
+        ),
         "",
         "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The two",
         "  stages are never resident together, so the transformer stage's peak is the peak of a",
@@ -324,9 +342,17 @@ def _wan_defaults(model: Mapping[str, Any]) -> list[str]:
 
 
 def render_wan_model_card(
-    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+    manifest: Mapping[str, Any],
+    repo: str,
+    abbreviations: Mapping[str, str],
+    host_assets: Mapping[str, int] = {},
 ) -> str:
-    """Wan2.1 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
+    """Wan2.1 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+
+    `abbreviations` は席名の部品上書きトークンの対応表（正本は `wan.distribution` の
+    `WAN_QUANT_ABBREVIATIONS` — ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず
+    引数で受ける（anima のカードと同じ形）。
+    """
     require_pipeline(manifest, WAN_SUPPORTED_PIPELINE)
     return render(
         (
@@ -345,6 +371,12 @@ def render_wan_model_card(
             _wan_inputs(),
             [""],
             _wan_resources(manifest),
-            *model_sections(manifest, (partial(quants, host_assets=host_assets), _wan_defaults)),
+            *model_sections(
+                manifest,
+                (
+                    partial(quants, abbreviations=abbreviations, host_assets=host_assets),
+                    _wan_defaults,
+                ),
+            ),
         )
     )

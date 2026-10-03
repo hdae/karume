@@ -6,13 +6,15 @@
 
 配布するのはグラフ 3 本（DiT の S 形 `transformer`・VAE の chunk グラフ `vae_decoder_first` /
 `vae_decoder_next` — 系列 `wan2.1-t2v-1.3b-f16-dyn`）と、モデル単位の資産 `text_embeds`（第 1 段の
-テキスト埋め込み — 決定 4。quant 非依存の席・ADR 0109 決定 4）。RoPE の軸別素表 `rope_base` は
-`transformer` の**容器の資産**（役割 `rope-base`）なので manifest の `assets` には載らない
-（ADR 0109 決定 4 — Anima と同じ席）。
+テキスト埋め込み — 決定 4。quant 非依存の席・ADR 0109 決定 4）。`transformer` だけは格納ラベルごとに
+容器が 2 本ある（f16 と、系列 `wan2.1-t2v-1.3b-i8-dyn` の i8 — ADR 0120 決定 1）。RoPE の軸別素表
+`rope_base` は `transformer` の**容器の資産**（役割 `rope-base`）なので manifest の `assets` には
+載らない（ADR 0109 決定 4 — Anima と同じ席）。
 
 **リポは家族 1 つ・世代は別リポ**（`karume-wan2.1` — ADR 0092 決定 1 / 2）。モデルは世代の中の
-軸で、今は `t2v-1.3b` 1 本。quant 席は `f16` だけ（DiT と VAE の重みを f16 格納・活性 f32 —
-決定 7。i8 / i4 は品質の実測の後）。
+軸で、今は `t2v-1.3b` 1 本。quant 席は 3 つ（{@link WAN_QUANTS}）: 既定の `f16`（DiT と VAE の重みを
+f16 格納・活性 f32 — ADR 0118 決定 7）と、DiT の重みを i8 にした参照席 `f16+dit8` と実用席
+`f16+dit8-a8-attn8-s16`（ADR 0120 決定 1 — 既定席は `f16` のまま・決定 6）。
 
 公開面は {@link PIPELINE} 1 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを
 core の PIPELINES へ合成する。
@@ -25,14 +27,16 @@ MUST: このモジュールは torch を import しない（`import dist` が to
 
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from _shared.container_read import ContainerReadError, read_asset_declarations
+from _shared.container_read import ContainerReadError, read_asset, read_asset_declarations
 from _shared.licenses import apache_license_2_0
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
@@ -63,6 +67,9 @@ WAN_REPO_NAME = "karume-wan2.1"
 #: DiT と VAE の系列（決定 7 — 接尾辞 `-dyn` は ADR 0077 の慣例）。書き手の綴りは
 #: `wan.export_dit.SERIES` / `wan.export_vae.SERIES_NAME`。
 WAN_SERIES = "wan2.1-t2v-1.3b-f16-dyn"
+
+#: DiT の i8 系列（ADR 0120 決定 2 — transformer だけ）。書き手の綴りは `wan.export_dit.I8_SERIES`。
+WAN_I8_SERIES = "wan2.1-t2v-1.3b-i8-dyn"
 
 #: テキスト埋め込みの系列（グラフを持たない compile 生成物の席 — docs/assets-layout.md）と
 #: その資産のファイル名・メタの唯一のキー。書き手の綴りは `wan.text_embeds` の
@@ -99,6 +106,20 @@ WAN_VAE_FIRST_ROLE = "vae_decoder_first"
 WAN_VAE_NEXT_ROLE = "vae_decoder_next"
 WAN_GRAPH_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_ROLE, WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE)
 
+#: `transformer` の容器の配置の役割（格納ラベルごとに 1 本 — ADR 0120 決定 1。anima の
+#: `transformer_f16` / `transformer_i8` と同じ綴り）。配置表と格納の要求 / 禁止表の鍵で、manifest の
+#: weights のキーは容器のグラフ名 {@link WAN_TRANSFORMER_ROLE} のまま。
+WAN_TRANSFORMER_F16_ROLE = "transformer_f16"
+WAN_TRANSFORMER_I8_ROLE = "transformer_i8"
+WAN_TRANSFORMER_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
+
+#: 容器を持つ配置の役割（transformer は格納ラベルごとに 2 本・VAE は f16 の 1 本ずつ）。
+WAN_CONTAINER_ROLES: tuple[str, ...] = (
+    *WAN_TRANSFORMER_ROLES,
+    WAN_VAE_FIRST_ROLE,
+    WAN_VAE_NEXT_ROLE,
+)
+
 #: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `pipeline.ts` の `TEXT_EMBEDS`）。
 WAN_TEXT_EMBEDS_ROLE = "text_embeds"
 
@@ -116,10 +137,12 @@ WAN_VAE_LATENT_INPUT = "latent"
 WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
 
 #: 出力の相対 path（**モデルサブツリー内**）— 配置表と manifest が共有する 1 箇所。重みの path に
-#: 格納ラベル（`f16`）を入れるのは、i8 / i4 の席を足した日に既存の path を動かさないため
-#: （Depth Anything の `model.f32.krm` と同じ綴り）。
+#: 格納ラベル（`f16` / `i8`）を入れるのは、格納の席を足した日に既存の path を動かさないため
+#: （Depth Anything の `model.f32.krm` と同じ綴り — i8 の席を足した ADR 0120 で f16 の path は
+#: 動いていない）。
 WAN_OUTPUT_PATHS: Mapping[str, str] = {
-    WAN_TRANSFORMER_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.f16.krm",
+    WAN_TRANSFORMER_F16_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.f16.krm",
+    WAN_TRANSFORMER_I8_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.i8.krm",
     WAN_VAE_FIRST_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.f16.krm",
     WAN_VAE_NEXT_ROLE: f"{WAN_VAE_NEXT_ROLE}/model.f16.krm",
     WAN_TEXT_EMBEDS_ROLE: f"{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}",
@@ -127,41 +150,92 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
 
 #: 格納 dtype の要求（素の f32 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した
 #: 実測事故 — Anima / SBV2 / Depth Anything と同じ根拠）。f16 系列は fake-quant 対象だけが f16 に
-#: なる（bias / norm は f32 のまま）ので「f16 を含む」を要求する。
-WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {role: "f16" for role in WAN_GRAPH_ROLES}
-
-#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。存在検査だけ
-#: では、f16 を含む混成の圧縮系列（i8 / i4 の系列も適格外の重みを f16 では持たないが、別 family の
-#: f16 + i8 混成系列はありうる）を f16 席へ挿す取り違えが素通りする。
-#:
-#: MUST: codec 台帳の layout（`karume.container.CODEC_LEDGER`）から f32 / f16 / i32 を除いた
-#: **全部**を名指しする — 1 つでも抜けると、抜けた格納形だけが黙って素通りする
-#: （Depth Anything と同じ規律）。
-WAN_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    role: ("bf16", "i8", "i4", "i2") for role in WAN_GRAPH_ROLES
+#: なる（bias / norm は f32 のまま）ので「f16 を含む」を、i8 系列は linear の重みだけが i8 になる
+#: （scale・bias・norm は f32）ので「i8 を含む」を要求する。
+WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    WAN_TRANSFORMER_F16_ROLE: "f16",
+    WAN_TRANSFORMER_I8_ROLE: "i8",
+    WAN_VAE_FIRST_ROLE: "f16",
+    WAN_VAE_NEXT_ROLE: "f16",
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。ラベルは格納 dtype 語彙で、
+#: codec 台帳の layout のうち圧縮格納の全部（`karume.container.CODEC_LEDGER` から f32 / i32 を
+#: 除いたもの — 台帳との一致は `wan/tests/test_distribution.py` が見る）。
+_COMPRESSED_LAYOUTS = ("bf16", "f16", "i8", "i4", "i2")
+
+#: 各役割の束縛表に**あってはならない**格納の語彙（{@link assert_storage_absent}）。存在検査だけ
+#: では、要求の格納を含む混成の系列を挿す取り違えが素通りする — 例えば i4 の混成系列（既定の
+#: 格納が i8 — anima の i4 系列の形）は「i8 を含む」を満たすので、i8 の席へ挿しても要求検査を
+#: 通る。f16 系列を i8 の席へ・i8 系列を f16 の席へ挿す取り違えは、要求の不在と禁止の両側で落ちる。
+#:
+#: MUST: 役割ごとに、圧縮格納のうち要求する 1 つを除いた**全部**を名指しする — 1 つでも抜けると、
+#: 抜けた格納形だけが黙って素通りする（Depth Anything と同じ規律）。
+WAN_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
+    role: tuple(layout for layout in _COMPRESSED_LAYOUTS if layout != required)
+    for role, required in WAN_STORAGE_REQUIREMENTS.items()
+}
+
+#: weights の宣言（容器のグラフ名 → dtype ラベル → 配置の役割）。ラベルは格納 dtype 語彙で、
 #: {@link WAN_STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。
 WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    role: {"f16": WeightFiles(role)} for role in WAN_GRAPH_ROLES
+    WAN_TRANSFORMER_ROLE: {
+        "f16": WeightFiles(WAN_TRANSFORMER_F16_ROLE),
+        "i8": WeightFiles(WAN_TRANSFORMER_I8_ROLE),
+    },
+    WAN_VAE_FIRST_ROLE: {"f16": WeightFiles(WAN_VAE_FIRST_ROLE)},
+    WAN_VAE_NEXT_ROLE: {"f16": WeightFiles(WAN_VAE_NEXT_ROLE)},
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3・決定 4）。
 WAN_ASSETS: Mapping[str, str] = {WAN_TEXT_EMBEDS_ROLE: WAN_TEXT_EMBEDS_ROLE}
 
-#: quant 表。格納ラベルが 1 つしかないので weights は書かない（{@link complete_quant_weights} が
-#: 完全写像へ埋める）。`session` は空 — TS 側の受理表（`WAN_SESSION_POLICY`）はどのノブも受けない。
-#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。
+#: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が持ち、
+#: 生成モデルカードの quant 表に対応を必ず出す**）。Wan の基底格納は `f16`（VAE は f16 固定）で、
+#: 圧縮が掛かるのは transformer だけなので席名は `f16+dit8…` になる（anima と同じ略称 — ADR 0120
+#: 決定 1）。
+WAN_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": WAN_TRANSFORMER_ROLE}
+
+#: quant 表（ADR 0118 決定 7・ADR 0120 決定 1）。VAE は格納ラベルが 1 つなので weights に
+#: 書かない（{@link complete_quant_weights} が完全写像へ埋める）。transformer は f16 / i8 の 2 つ
+#: なので席ごとに書く。`session` の 3 キーは TS 側の受理表（`WAN_SESSION_POLICY`）が受ける欄で、
+#: 実用席の宣言は anima の同名の席と同じ。
+#:
+#: - `f16+dit8` は参照席（`session` が空 — 実用席と同じ i8 の重みで、自機 A/B 門の比較相手。
+#:   ADR 0110 決定 5 ②）。
+#: - 中間の席（`f16+dit8-a8` / `f16+dit8-a8-attn8`）は作らない（決定 1 — ノブ単位の切り分けは
+#:   テストの manifest 上書きで足りる）。
+#:
+#: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。速度と
+#: 品質は書かない — a8 の席の速度・品質は未計測で（ADR 0120 段 3〜6）、Metal では a8 が速くならない
+#: （調査 §3.1）。既定であることも書かない（`defaultQuant` が指している — ADR 0075 決定 3）。
 WAN_QUANTS: Mapping[str, Any] = {
     "f16": {
-        "weights": {},
+        "weights": {WAN_TRANSFORMER_ROLE: "f16"},
         "session": {},
         "label": "Full quality (f16)",
-        "description": "Transformer and VAE weights in f16 storage with f32 compute — the only"
-        " quant in this repository.",
+        "description": "Transformer and VAE weights in f16 storage with f32 compute — the"
+        " largest download.",
+    },
+    "f16+dit8": {
+        "weights": {WAN_TRANSFORMER_ROLE: "i8"},
+        "session": {},
+        "label": "Half-size transformer (int8)",
+        "description": "Transformer weights stored as int8 (one scale per output channel) and"
+        " computed in f32; the VAE stays f16. About half the transformer download.",
+    },
+    "f16+dit8-a8-attn8-s16": {
+        "weights": {WAN_TRANSFORMER_ROLE: "i8"},
+        "session": {
+            "linearCompute": "a8",
+            "attentionCompute": "a8",
+            "attentionScoreStorage": "f16",
+        },
+        "label": "int8 transformer, int8 activations",
+        "description": "The int8 transformer with per-token int8 activations in its linear layers"
+        " and attention (integer dot products), and attention scores held in f16.",
     },
 }
+#: 既定席は `f16` のまま（ADR 0120 決定 6 — 実用席を既定にするかは段 6 の視認の後に別に裁定する）。
 WAN_DEFAULT_QUANT = "f16"
 
 #: パイプライン所有の設定（hub は素通し — ADR 0041 §2・TS 側のスキーマは
@@ -183,9 +257,11 @@ WAN_PIPELINE_CONFIG: Mapping[str, Any] = {
 
 @dataclass(frozen=True)
 class WanSources:
-    """組み立ての入力 = 系列ディレクトリ 2 本（グラフ 3 本の系列とテキスト埋め込みの系列）。"""
+    """組み立ての入力 = 系列ディレクトリ 3 本（グラフ 3 本の f16 系列・DiT の i8 系列・テキスト
+    埋め込みの系列）。"""
 
     series: Path
+    i8_series: Path
     text_embeds: Path
 
 
@@ -193,19 +269,24 @@ def wan_sources(series_dir: Path) -> WanSources:
     """系列の親ディレクトリ（`outputs/series/`）から入力を引く。"""
     return WanSources(
         series=series_dir / WAN_SERIES,
+        i8_series=series_dir / WAN_I8_SERIES,
         text_embeds=series_dir / WAN_TEXT_EMBEDS_SERIES / WAN_TEXT_EMBEDS_FILE,
     )
 
 
 def wan_placements(sources: WanSources) -> dict[str, Path]:
-    """役割名 → 出所のファイル。出力の path は {@link WAN_OUTPUT_PATHS} が持つ。
+    """配置の役割 → 出所のファイル。出力の path は {@link WAN_OUTPUT_PATHS} が持つ。
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*` / `reference.*` / `vae_*.safetensors` /
     `pipeline_steps.*` の golden はこれで落ちる）。
     """
-    placements = {role: sources.series / role / WAN_MODEL_FILE for role in WAN_GRAPH_ROLES}
-    placements[WAN_TEXT_EMBEDS_ROLE] = sources.text_embeds
-    return placements
+    return {
+        WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
+        WAN_TRANSFORMER_I8_ROLE: sources.i8_series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_FIRST_ROLE: sources.series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
+        WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
+        WAN_TEXT_EMBEDS_ROLE: sources.text_embeds,
+    }
 
 
 def wan_repo_name(_model: str) -> str:
@@ -234,6 +315,29 @@ def assert_rope_base(container: Path) -> None:
         raise DistError(
             f"{container}: 資産 '{WAN_ROPE_BASE_ASSET}' の役割が {asset[0]!r}"
             f"（期待 {WAN_ROPE_BASE_ROLE!r}）"
+        )
+
+
+def assert_shared_rope_base(containers: Sequence[Path]) -> None:
+    """`transformer` の容器（格納ラベルごと — f16 / i8）の RoPE 素表がバイト同一であることを見る。
+
+    MUST: 組み立てで落とす。素表は容器ごとに 1 本入り、TS 側は選んだ席の容器から読む。食い違ったまま
+    配ると、片方の席だけが別の幾何の RoPE で走り、ロードも実行も通って映像だけが静かに壊れる
+    （anima の `assert_shared_rope_base` と同じ理由）。i8 の容器の素表の誤りは、同じ i8 の容器
+    どうしを比べる自機 A/B 門（ADR 0120 決定 4）では掴めない。
+    """
+    digests: dict[Path, str] = {}
+    for path in containers:
+        try:
+            payload = read_asset(path, WAN_ROPE_BASE_ASSET)
+        except ContainerReadError as cause:
+            raise DistError(f"{path}: {cause}") from cause
+        digests[path] = hashlib.sha256(payload).hexdigest()
+    if len(set(digests.values())) != 1:
+        listing = "\n".join(f"  {digest}  {path}" for path, digest in digests.items())
+        raise DistError(
+            f"資産 '{WAN_ROPE_BASE_ASSET}' が transformer の容器の間でバイト同一でない — 同じ幾何で"
+            f"配れない。どちらが正かはここでは決められないので組み立てを止める:\n{listing}"
         )
 
 
@@ -421,7 +525,7 @@ def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
         )
     placements = wan_placements(sources)
     upstream = SOURCES[model]
-    for role in WAN_GRAPH_ROLES:
+    for role in WAN_CONTAINER_ROLES:
         container = placements[role]
         assert_component_present(container)
         assert_storage(role, container, WAN_STORAGE_REQUIREMENTS)
@@ -430,9 +534,12 @@ def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
         # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。
         assert_upstream_provenance(container, license=upstream.license, revision=upstream.revision)
     assert_vae_chunk_pair(placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE])
-    transformer = placements[WAN_TRANSFORMER_ROLE]
-    assert_rope_base(transformer)
-    assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], model, dit_context(transformer))
+    transformers = [placements[role] for role in WAN_TRANSFORMER_ROLES]
+    for transformer in transformers:
+        assert_rope_base(transformer)
+        # 埋め込み資産は quant 非依存の 1 本なので、どの席の DiT の文脈入力とも噛み合う必要がある。
+        assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], model, dit_context(transformer))
+    assert_shared_rope_base(transformers)
     return ModelPlan(
         name=model,
         pipeline=WAN_PIPELINE,
@@ -465,10 +572,16 @@ following changes were made:
 
 - The weights were converted into the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors).
-- **f16 storage**: every transformer and VAE decoder parameter was rounded from the source float32
-  value to the nearest float16 value. Weight matrices and convolution kernels are stored as float16;
-  the other parameters (biases, normalization weights) keep the rounded values in float32 storage.
-  Computation runs in float32.
+- **f16 storage**: every parameter of the float16 transformer and of the VAE decoder was rounded
+  from the source float32 value to the nearest float16 value. Weight matrices and convolution
+  kernels are stored as float16; the other parameters (biases, normalization weights) keep the
+  rounded values in float32 storage. Computation runs in float32.
+- **int8 transformer**: a second copy of the transformer stores the weight matrices of all its
+  linear layers (the patch-embedding projection included) as int8, quantized from the source
+  float32 values to the nearest step with one float32 scale per output channel (symmetric). Its
+  other parameters (biases, normalization weights, modulation tables) keep the source float32
+  values. The int8 weights are computed in float32, or, in the quants that declare it, multiplied
+  with activations that are quantized to int8 per token at run time.
 - The transformer graph takes patchified latent tokens and returns tokens: the patchify, the
   unpatchify and the sinusoidal timestep projection run on the host, and the patch-embedding
   convolution is applied as the equivalent linear layer. The rotary embedding keeps the upstream
@@ -493,8 +606,8 @@ PIPELINE = Pipeline(
     repo_name=wan_repo_name,
     plan=wan_dist_plan,
     # 帰属（上流リポ・ライセンス）はモデル名から一意に決まる（`wan.sources.SOURCES`）ので、
-    # 選ばせる軸にしない。
-    card_profiles={"wan": render_wan_model_card},
+    # 選ばせる軸にしない。略称の対応表は manifest に無い事実なので、ここから渡す（anima と同じ形）。
+    card_profiles={"wan": partial(render_wan_model_card, abbreviations=WAN_QUANT_ABBREVIATIONS)},
     # 上流ライセンス（Apache 2.0）の再配布条件 §4 は配布リポ 1 つに掛かるので、原文の読みも
     # 組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
     root_files={

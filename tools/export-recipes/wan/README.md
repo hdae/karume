@@ -51,6 +51,7 @@ reference functions; the host steps are mirrored in TypeScript under `packages/m
 uv run --group wan --inexact python -m wan.export_dit            # f16 graph + golden → outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/
 uv run --group wan --inexact python -m wan.export_dit --layers   # per-block outputs (measurement only) → …-f16-dyn-probe/transformer/
 uv run --group wan --inexact python -m wan.export_dit --verify   # eager equivalence of the patches only
+uv run --group wan --inexact python -m wan.export_dit --dtype i8 # int8 graph + golden → outputs/series/wan2.1-t2v-1.3b-i8-dyn/transformer/
 uv run --group wan --inexact python -m wan.dit_host_fixture      # TS host fixture → packages/models/tests/fixtures/wan-dit/
 ```
 
@@ -122,6 +123,27 @@ memory; with the pin, an input the flash kernel cannot take raises instead. PyTo
 picks the flash kernel for these shapes, so the pin changes no value: the reference and the patched
 output of `band-s00192-t0999` (all 30 block outputs included) were reproduced byte for byte against
 the existing golden.
+
+### int8 series (ADR 0120)
+
+`--dtype i8` writes the transformer series behind the int8 quants `f16+dit8` and
+`f16+dit8-a8-attn8-s16` (ADR [0120](../../../docs/decisions/0120-wan-dit-w8a8-seat.md)); the VAE
+stays in the f16 series. The weights of all 307 linear layers (the patch-embedding linear included)
+are rounded to per-channel symmetric int8 (round to nearest, one f32 scale per output channel)
+through the token-form wrapper, and stored as int8. Biases, normalization weights and the
+`scale_shift_table` keep the upstream f32 values — the f16 rounding of the f16 series is not
+applied. There is no calibration: the weights are rounded to nearest and the activations are
+quantized per token at run time.
+
+The golden cases are the S = 192 set (`band` / `accept`, including the S = 128 case) and the eight
+S = 14,040 cases of the f16 series, with the same seeds and timesteps; `growth` and S = 32,760 are
+not retaken. Every case carries a float64 reference (`output.f64`), since the normalized-ratio gate
+covers S = 192 as well. `--no-full` leaves out the S = 14,040 cases (about 1.5 hours on the CPU) for
+a staged run; a complete series comes from a run without it. The writer applies the same eager
+checks as for the f16 series, on the rounded weights that the reference shares.
+
+On the 6-core desktop CPU (2026-10-03) the S = 192 run (`--no-full`) took 104 s with a peak RSS of
+13.8 GiB, and wrote a 1,426,806,948-byte container (307 int8 weights, 700,480 scales).
 
 ## VAE (stage 4)
 
@@ -321,29 +343,32 @@ does the copying, hashing and verification; the recipe only says what goes where
 uv run python dist.py --pipeline wan   # from tools/export-recipes/ — default model t2v-1.3b, out models/karume-wan2.1
 ```
 
-| Manifest entry (`karume/5`) | Value                                                                                                                                                  |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                            |
-| `weights`                   | `transformer` / `vae_decoder_first` / `vae_decoder_next`, each with one `f16` container — the key is the container's graph name (container-v1 §2.1)    |
-| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`, model-level, quant-independent). `rope_base` stays a container asset of `transformer` (ADR 0109) |
-| `quants`                    | `f16` only (default), no session knobs                                                                                                                 |
-| `pipelineConfig`            | `scheduler.shift` 3.0, `defaults.steps` 50, `defaults.guidance` 5.0 (the reference setting, decision 5)                                                |
+| Manifest entry (`karume/5`) | Value                                                                                                                                                                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                                                                                                                     |
+| `weights`                   | `transformer` with an `f16` and an `i8` container (`model.f16.krm` / `model.i8.krm`); `vae_decoder_first` / `vae_decoder_next` with one `f16` container each — the key is the container's graph name (container-v1 §2.1)                        |
+| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`, model-level, quant-independent). `rope_base` stays a container asset of `transformer` (ADR 0109)                                                                                          |
+| `quants`                    | `f16` (default, no session knobs); `f16+dit8` (int8 transformer, no session knobs — the reference seat); `f16+dit8-a8-attn8-s16` (int8 transformer with `linearCompute` / `attentionCompute` `a8` and `attentionScoreStorage` `f16`) — ADR 0120 |
+| `pipelineConfig`            | `scheduler.shift` 3.0, `defaults.steps` 50, `defaults.guidance` 5.0 (the reference setting, decision 5)                                                                                                                                         |
 
-Before anything is placed, the plan checks that each container stores f16 weights and nothing
-compressed, names the pinned upstream revision and license in its provenance (`wan/sources.py`),
+Before anything is placed, the plan checks that each container stores the format of its seat and
+no other compressed format (f16 for the f16 transformer and the VAE graphs, int8 for the int8
+transformer), names the pinned upstream revision and license in its provenance (`wan/sources.py`),
 that the two VAE graphs belong to one set (the same latent shape, and the caches of `first` appear
-in `next` with the same names, shapes and order — the rule the TypeScript loader applies), that the
-transformer declares the `rope_base` asset, and that the embedding asset was made from the pinned
-revision with the bfloat16 encoder and the pinned diffusers / ftfy, carries exactly the prompts of
-`wan/prompts.py` with a normalized text for each that no other row claims, and fits the
-transformer's `encoder_hidden_states [1, 512, 4096]` input. The golden files of the series (`io.*`,
-`reference.*`, `vae_*`, `pipeline_steps.*`) are never copied.
+in `next` with the same names, shapes and order — the rule the TypeScript loader applies), that both
+transformers declare the same `rope_base` asset byte for byte, and that the embedding asset was made
+from the pinned revision with the bfloat16 encoder and the pinned diffusers / ftfy, carries exactly
+the prompts of `wan/prompts.py` with a normalized text for each that no other row claims, and fits
+both transformers' `encoder_hidden_states [1, 512, 4096]` input. The golden files of the series
+(`io.*`, `reference.*`, `vae_*`, `pipeline_steps.*`) are never copied.
 
 The repository root gets `LICENSE.md` (Apache 2.0, verbatim) and `NOTICE.md` (the changes: container
-format, f16 rounding, the transformer and VAE rewrites, the precomputed text embeddings instead of the
-text encoder), and `README.md` is the model card rendered from the manifest by `wan/card.py`: the
-pinned upstream, the fixed prompts with their sources, the accepted inputs, how the outputs are
-verified, the quant table and the defaults. Re-running the command writes the same bytes.
+format, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the precomputed text
+embeddings instead of the text encoder), and `README.md` is the model card rendered from the
+manifest by `wan/card.py`: the pinned upstream, the fixed prompts with their sources, the accepted
+inputs, how the outputs are verified, the quant table (with the `dit` abbreviation spelled out),
+the defaults, and the measured resources (the `f16` quant only — the int8 quants are marked as not
+measured yet). Re-running the command writes the same bytes.
 
 ## Tests
 
