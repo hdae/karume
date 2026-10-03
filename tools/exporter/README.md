@@ -584,9 +584,9 @@ conformance table is the correct one.
     does not accept a symbolic axis. There is no field for stacking, bidirectionality,
     `has_biases=False`, `batch_first` or `dropout` (layers and directions are expressed by placing
     several nodes), the op returns `y` only (no `h_n`), and the hidden width is capped at 256
-- **30 ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
-  `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `conv2d.{stride,padding,dilation,groups}` /
-  `conv3d.{stride,padding,dilation,groups}` /
+- **31 emittable ops carry attrs** (`sum.dim` / `amax.dim` / `amin.dim` / `attention.scale` /
+  `clamp.{min,max}` / `clamp_min.min` / `rms_norm.eps` / `static_quantize.scale` /
+  `conv2d.{stride,padding,dilation,groups}` / `conv3d.{stride,padding,dilation,groups}` /
   `leaky_relu.negative_slope` / `ge_scalar.value` / `le_scalar.value` / `gt_scalar.value` /
   `cumsum.dim` / `cast.to` / `permute.dims` / `slice.{dim,start,end}` / `cat.dim` /
   `pad.{left,right}` / `flip.dim` / `sym_prefix_slice.{sym,slices}` /
@@ -594,7 +594,8 @@ conformance table is the correct one.
   `embedding.padding_idx` /
   `masked_fill.value` / `conv1d.{stride,padding,dilation,groups}` /
   `conv_transpose1d.{stride,padding}` / `upsample_bilinear2d.output_size` /
-  `deform_conv2d.padding`). Every declared key is
+  `deform_conv2d.padding`; `OP_CONTRACTS` also declares `topk.k`, which the exporter never
+  emits). Every declared key is
   mandatory, and undeclared keys or
   out-of-range values fail loudly (ADR 0012). **Defaults are never filled in** — being able to omit
   `dilation` / `groups` on `conv1d` would silently turn a depthwise IR into an ordinary convolution
