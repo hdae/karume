@@ -551,8 +551,11 @@ def _write_case_files(
     }
     if reference_f64 is not None:
         # 格納は f32 へ丸めた値（TS の safetensors は F64 を読まない）。丸めの差は要素ごとに
-        # 2⁻²⁴·|x| 以下で、比にして 6e-8 以下 — 正規化の分母（CPU f32 の参照の f64 に対する比・
-        # 実測 3.7e-6 以上）を 2% 未満しか動かさず、帯（最悪 × 5）の判定には効かない。
+        # 2⁻²⁴·|x| 以下で、比にして 6e-8 以下。正規化の分母（CPU f32 の参照の f64 に対する比）を
+        # 動かす割合は分母の最小で決まる: 決定用（`full-band`）だけなら S = 14,040 の最小 3.72e-6 で
+        # 2% 未満・S = 32,760 の最小 2.07e-6 で約 2.9%、受入れを含めると最小 1.83e-6
+        # （`full-accept-s14040-t0600`）で約 3.3%。帯（最悪 × 5）の判定には効かない（実測の表は
+        # TS 側 `e2e_wan_dit_test.ts` の `REFERENCE_F64_KEY` と `DIT_FULL_NORMALIZED_BAND`）。
         reference[REFERENCE_F64_KEY] = reference_f64.output.to(torch.float32).contiguous()
     io_name = f"{IO_PREFIX}{case.name}{CASE_SUFFIX}"
     reference_name = f"{REFERENCE_PREFIX}{case.name}{CASE_SUFFIX}"
