@@ -82,7 +82,16 @@ def real_pair_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> t
     MUST: 中間を rank 5 にしない — strided カーネルの rank 上限（`ops.STRIDED_RANK` = 4）に当たる。
     head 軸を潰した `[B,S,H·D/2,2]` で入れ替えてから元形へ戻す（要素順は変わらない）。
     MUST: 長さ 2 の軸の取り出しは長さ 1 の `slice`（`select` は IR 語彙に無い — irodori と同じ）。
+    MUST: `x` と表は同じ dtype で渡す。上流は結果を `.type_as(x)` で `x` の dtype へ戻すが、ここは
+    その変換を写していない（f32 の export では恒等で、グラフにノードを足さないため）。上の「差は
+    RoPE の掛け方 1 点」は dtype が同じときだけ成り立つので、違えば fail loudly（S 形のラッパを
+    通る経路は f32 の export と eager だけで、x も表も f32 — f64 の参照は上流の素の経路を通る）。
     """
+    if cos.dtype != x.dtype or sin.dtype != x.dtype:
+        raise NotImplementedError(
+            f"RoPE の表の dtype（cos {cos.dtype}・sin {sin.dtype}）が x の {x.dtype} と違う —"
+            " 上流の `.type_as(x)` を写していないので、上流と同じ値にならない"
+        )
     pairs = x.reshape(x.shape[0], x.shape[1], -1, 2)
     swapped = torch.cat([-pairs[..., 1:2], pairs[..., 0:1]], dim=-1).reshape(x.shape)
     return x * cos + swapped * sin

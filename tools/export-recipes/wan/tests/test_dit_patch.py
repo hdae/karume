@@ -153,6 +153,16 @@ class TestRealPairRotary:
         assert torch.equal(dit_patch.real_pair_rotary(x, cos, sin), expected)
         assert not torch.allclose(dit_patch.real_pair_rotary(x, cos, -sin), expected)
 
+    def test_tables_in_another_dtype_than_x_are_rejected(self) -> None:
+        """上流は `.type_as(x)` で x の dtype へ戻すが、実数形はその変換を写していない — dtype が
+        割れた呼び出しは上流と違う dtype の値を黙って返す代わりに止まる。"""
+        x = torch.randn(1, 3, 2, 8, dtype=torch.bfloat16)
+        table = torch.ones(1, 3, 1, 8)
+
+        with pytest.raises(NotImplementedError, match="type_as"):
+            dit_patch.real_pair_rotary(x, table, table)
+        assert dit_patch.real_pair_rotary(x, table.bfloat16(), table.bfloat16()).dtype == x.dtype
+
     def test_the_upstream_path_is_untouched_after_the_swap(self) -> None:
         """差し替え後も素の tuple の表は上流の実装へ委ねる（参照を採る順序を問わない根拠）。"""
         attention, cos, sin, hidden = self._attention_and_tables(48, 2, (2, 6, 10))
