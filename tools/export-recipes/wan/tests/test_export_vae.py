@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -139,3 +141,130 @@ class TestFixtureCases:
         # 81 フレーム（ADR 0118 段 8）の受入れ: 1 + 4·20 = 81。帯は band のまま（受入れ側）。
         assert (long.name, long.role, long.chunks) == ("long", "accept", 21)
         assert long.seed not in {band.seed, accept.seed}
+
+
+class TestTheSetIsPublishedTogether:
+    """first / next / フィクスチャは一組で据わる — 途中で落ちた実走が新旧の混ざった組を残さない。
+
+    export と参照の decode は差し替えて、置き場の規律だけを見る（実重みは読まない）。
+    """
+
+    OLD = "tile32-old"
+
+    @pytest.fixture
+    def series(self, tmp_path, monkeypatch):
+        """旧世代の組が据わった系列と、書き込みを差し替えた export_vae。"""
+        root = tmp_path / "series"
+        for target in export_vae.TARGETS:
+            (root / target).mkdir(parents=True)
+            (root / target / export_vae.MODEL_FILE).write_text(self.OLD)
+        for case in export_vae.FIXTURE_CASES:
+            export_vae.fixture_path(root, case).write_text(self.OLD)
+
+        class Decoder:
+            def __init__(self, _vae, first: bool) -> None:
+                self.first = first
+
+            def eval(self):
+                return self
+
+        def export_to_file(_module, _inputs, path, *, graph_name, **_kwargs):
+            path.write_text(f"{graph_name}-new")
+            return SimpleNamespace(
+                nodes=[],
+                inputs=[],
+                outputs=["frame"],
+                initializers={},
+                values={"frame": SimpleNamespace(shape=[3, 1, 8, 8])},
+            )
+
+        def save_file(_tensors, path, metadata):
+            Path(path).write_text(f"{metadata['seed']}-new")
+
+        monkeypatch.setattr(
+            export_vae,
+            "vae_patch",
+            SimpleNamespace(
+                WanVaeChunkDecoder=Decoder,
+                reference_decode_unclamped=lambda _vae, latents: torch.zeros(1, 3, 1, 8, 8),
+            ),
+        )
+        monkeypatch.setattr(export_vae, "example_inputs", lambda _module, _tile: ())
+        monkeypatch.setattr(export_vae, "export_to_file", export_to_file)
+        monkeypatch.setattr(export_vae, "assert_chunk_graph", lambda _graph, _module, _tile: None)
+        monkeypatch.setattr(
+            export_vae,
+            "storage_breakdown",
+            lambda _graph: SimpleNamespace(
+                compressed_tensors=0, compressed_bytes=0, plain_tensors=0, plain_bytes=0
+            ),
+        )
+        monkeypatch.setattr(export_vae, "container_parts", lambda path: [path])
+        monkeypatch.setattr(
+            export_vae,
+            "fixture_latents",
+            lambda _vae, case, tile: torch.zeros(1, 16, 1, tile, tile),
+        )
+        monkeypatch.setattr(export_vae, "save_file", save_file)
+        return root
+
+    def _contents(self, root: Path) -> list[str]:
+        graphs = [
+            (root / target / export_vae.MODEL_FILE).read_text() for target in export_vae.TARGETS
+        ]
+        fixtures = [
+            export_vae.fixture_path(root, case).read_text() for case in export_vae.FIXTURE_CASES
+        ]
+        return graphs + fixtures
+
+    def _emit(self, root: Path, targets=export_vae.TARGETS) -> dict:
+        return export_vae.emit_targets(targets, None, 16, root, None, fixtures=True)
+
+    def test_a_complete_run_replaces_every_member(self, series):
+        self._emit(series)
+
+        assert self._contents(series) == [
+            *(f"{target}-new" for target in export_vae.TARGETS),
+            *(f"{case.seed}-new" for case in export_vae.FIXTURE_CASES),
+        ]
+        assert sorted(path.name for path in series.iterdir()) == sorted(
+            [*export_vae.TARGETS]
+            + [export_vae.fixture_path(series, case).name for case in export_vae.FIXTURE_CASES]
+        )
+
+    def test_a_failure_in_the_second_graph_leaves_the_first_untouched(self, series, monkeypatch):
+        """next の export で落ちると、先に書いた first も据わらない（m6 の再現の形）。"""
+        written = export_vae.export_to_file
+
+        def failing(module, inputs, path, *, graph_name, **kwargs):
+            if graph_name == export_vae.TARGET_NEXT:
+                raise RuntimeError("next の export で落ちる（故障注入）")
+            return written(module, inputs, path, graph_name=graph_name, **kwargs)
+
+        monkeypatch.setattr(export_vae, "export_to_file", failing)
+        with pytest.raises(RuntimeError, match="故障注入"):
+            self._emit(series)
+
+        assert self._contents(series) == [self.OLD] * 5
+        assert not [path for path in series.iterdir() if path.name.endswith(".staging")]
+
+    def test_a_failure_in_a_fixture_leaves_both_graphs_untouched(self, series, monkeypatch):
+        """フィクスチャの 2 本目で落ちると、検査を通ったグラフ 2 本も据わらない。"""
+        written = export_vae.save_file
+
+        def failing(tensors, path, metadata):
+            if metadata["seed"] == str(export_vae.FIXTURE_CASES[1].seed):
+                raise OSError("フィクスチャの書き込みで落ちる（故障注入）")
+            written(tensors, path, metadata)
+
+        monkeypatch.setattr(export_vae, "save_file", failing)
+        with pytest.raises(OSError, match="故障注入"):
+            self._emit(series)
+
+        assert self._contents(series) == [self.OLD] * 5
+
+    def test_a_duplicated_target_is_refused_before_anything_is_written(self, series):
+        with pytest.raises(export_vae.ChunkGraphError, match="重複"):
+            self._emit(series, (export_vae.TARGET_FIRST, export_vae.TARGET_FIRST))
+
+        assert self._contents(series) == [self.OLD] * 5

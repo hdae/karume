@@ -34,7 +34,8 @@ import json
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -229,28 +230,22 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
             )
 
 
-def emit_target(
-    target: str, vae: AutoencoderKLWan, tile: int, out_root: Path, source: Provenance
+@contextmanager
+def _staged_set(finals: Sequence[Path]) -> Iterator[list[Path]]:
+    """複数の final の作業席を `finals` の順で渡し、`with` を例外なく抜けたときにだけ全部を据える。
+
+    1 つでも書き込み・検査で落ちれば全部の作業席が消え、どの final も 1 バイトも変わらない
+    （{@link karume.artifacts.staged_publication} を席の数だけ重ねたもの）。据え替えは席ごとの
+    rename なので、途中で落ちうる窓は最後の rename の列だけになる。
+    """
+    with ExitStack() as stack:
+        yield [stack.enter_context(staged_publication(final)) for final in finals]
+
+
+def _graph_summary(
+    target: str, out_dir: Path, staged: Path, graph: IrGraph, tile: int, started: float
 ) -> dict[str, Any]:
-    """1 グラフを export し、取り決めの検査を通してから系列へ据える。要約を返す。"""
-    if target not in TARGETS:
-        raise ChunkGraphError(f"未知のターゲット '{target}'（既知: {', '.join(TARGETS)}）")
-    started = time.perf_counter()
-    module = vae_patch.WanVaeChunkDecoder(vae, first=target == TARGET_FIRST).eval()
-    out_dir = out_root / target
-    out_root.mkdir(parents=True, exist_ok=True)
-    with staged_publication(out_dir) as staged, torch.no_grad():
-        staged.mkdir()
-        graph = export_to_file(
-            module,
-            example_inputs(module, tile),
-            staged / MODEL_FILE,
-            provenance=source,
-            graph_name=target,
-            weight_dtype="f16",
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
-        assert_chunk_graph(graph, module, tile)
+    """1 グラフの要約（容器のバイト数は作業席の現物から数える — 据え替えは名前を変えるだけ）。"""
     breakdown = storage_breakdown(graph)
     return {
         "target": target,
@@ -266,9 +261,95 @@ def emit_target(
         "compressed_bytes": breakdown.compressed_bytes,
         "plain_tensors": breakdown.plain_tensors,
         "plain_bytes": breakdown.plain_bytes,
-        "model_bytes": sum(part.stat().st_size for part in container_parts(out_dir / MODEL_FILE)),
+        "model_bytes": sum(part.stat().st_size for part in container_parts(staged / MODEL_FILE)),
         "seconds": round(time.perf_counter() - started, 1),
     }
+
+
+def fixture_path(out_root: Path, case: FixtureCase) -> Path:
+    """chunk 列のフィクスチャの置き場（系列の根の `vae_chunks.<case>.safetensors`）。"""
+    return out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
+
+
+def emit_targets(
+    targets: Sequence[str],
+    vae: AutoencoderKLWan,
+    tile: int,
+    out_root: Path,
+    source: Provenance,
+    *,
+    fixtures: bool,
+) -> dict[str, Any]:
+    """グラフ（と chunk 列のフィクスチャ）を一組で作業席へ書き、全部の検査を通してから据える。
+
+    MUST: 一組で据える。グラフごと・ファイルごとに据えると、途中で落ちた実走が新旧の混ざった組
+    （first だけ新しいタイル辺で、next と fixture は旧のまま）を系列に残す。タイル辺の違う混在は
+    配布の門（`wan.distribution.assert_vae_chunk_pair`）と TS の `wanVaeChunkLayout` が拒むが、
+    同じ形で中身の世代だけが違う混在はどちらにも見分けられない（出所は revision しか持たない —
+    捕まえられるのは GPU の chunk 列の照合だけ）。
+    """
+    unknown = sorted(set(targets) - set(TARGETS))
+    if unknown or len(set(targets)) != len(targets):
+        raise ChunkGraphError(
+            f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
+        )
+    cases = FIXTURE_CASES if fixtures else ()
+    out_root.mkdir(parents=True, exist_ok=True)
+    finals = [out_root / target for target in targets]
+    finals += [fixture_path(out_root, case) for case in cases]
+    graphs: list[dict[str, Any]] = []
+    written: list[dict[str, Any]] = []
+    with _staged_set(finals) as seats:
+        for target, staged in zip(targets, seats[: len(targets)], strict=True):
+            started = time.perf_counter()
+            module = vae_patch.WanVaeChunkDecoder(vae, first=target == TARGET_FIRST).eval()
+            staged.mkdir()
+            with torch.no_grad():
+                graph = export_to_file(
+                    module,
+                    example_inputs(module, tile),
+                    staged / MODEL_FILE,
+                    provenance=source,
+                    graph_name=target,
+                    weight_dtype="f16",
+                    preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+                )
+            assert_chunk_graph(graph, module, tile)
+            graphs.append(_graph_summary(target, out_root / target, staged, graph, tile, started))
+        for case, staged in zip(cases, seats[len(targets) :], strict=True):
+            started = time.perf_counter()
+            latents = fixture_latents(vae, case, tile)
+            with torch.no_grad():
+                frames = vae_patch.reference_decode_unclamped(vae, latents)[0]
+            save_file(
+                {"latents": latents[0].contiguous(), "frames": frames.contiguous()},
+                str(staged),
+                metadata={
+                    "seed": str(case.seed),
+                    "chunks": str(case.chunks),
+                    "tile": str(tile),
+                    "role": case.role,
+                    "weights": "f16-rounded",
+                    "reference": (
+                        "diffusers AutoencoderKLWan._decode chunk loop before clamp (CPU f32)"
+                    ),
+                },
+            )
+            written.append(
+                {
+                    "case": case.name,
+                    "role": case.role,
+                    "latents": list(latents.shape[1:]),
+                    "frames": list(frames.shape),
+                    "abs_max": float(frames.abs().max()),
+                    "seconds": round(time.perf_counter() - started, 1),
+                    "path": str(fixture_path(out_root, case)),
+                }
+            )
+    summary: dict[str, Any] = {"series": str(out_root), "graphs": graphs}
+    if fixtures:
+        summary["fixtures"] = written
+    return summary
 
 
 def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torch.Tensor:
@@ -285,44 +366,6 @@ def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torc
     std = torch.tensor(vae.config.latents_std, dtype=torch.float32).view(1, channels, 1, 1, 1)
     noise = torch.randn(1, channels, case.chunks, tile, tile, generator=generator)
     return noise * std + mean
-
-
-def write_fixtures(vae: AutoencoderKLWan, tile: int, out_root: Path) -> list[dict[str, Any]]:
-    """chunk 列のフィクスチャを系列の根へ書く（潜在 + 上流のクランプ前の出力）。"""
-    out_root.mkdir(parents=True, exist_ok=True)
-    written: list[dict[str, Any]] = []
-    for case in FIXTURE_CASES:
-        started = time.perf_counter()
-        latents = fixture_latents(vae, case, tile)
-        with torch.no_grad():
-            frames = vae_patch.reference_decode_unclamped(vae, latents)[0]
-        path = out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
-        staging = path.with_name(path.name + ".staging")
-        save_file(
-            {"latents": latents[0].contiguous(), "frames": frames.contiguous()},
-            str(staging),
-            metadata={
-                "seed": str(case.seed),
-                "chunks": str(case.chunks),
-                "tile": str(tile),
-                "role": case.role,
-                "weights": "f16-rounded",
-                "reference": "diffusers AutoencoderKLWan._decode chunk loop before clamp (CPU f32)",
-            },
-        )
-        staging.replace(path)
-        written.append(
-            {
-                "case": case.name,
-                "role": case.role,
-                "latents": list(latents.shape[1:]),
-                "frames": list(frames.shape),
-                "abs_max": float(frames.abs().max()),
-                "seconds": round(time.perf_counter() - started, 1),
-                "path": str(path),
-            }
-        )
-    return written
 
 
 def verify(tile: int, chunks: int, seed: int) -> dict[str, Any]:
@@ -389,15 +432,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     source = provenance()
     vae = load_vae(round_f16=True)
-    summary: dict[str, Any] = {
-        "series": str(args.out),
-        "graphs": [
-            emit_target(target, vae, args.tile, args.out, source)
-            for target in (args.target or TARGETS)
-        ],
-    }
-    if not args.no_fixtures:
-        summary["fixtures"] = write_fixtures(vae, args.tile, args.out)
+    summary = emit_targets(
+        args.target or TARGETS,
+        vae,
+        args.tile,
+        args.out,
+        source,
+        fixtures=not args.no_fixtures,
+    )
     print(json.dumps(summary, indent=1, ensure_ascii=False))
     return 0
 

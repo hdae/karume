@@ -145,7 +145,10 @@ uv run --group wan --inexact python -m wan.export_vae            # both graphs +
 uv run --group wan --inexact python -m wan.export_vae --verify   # eager equivalence on the real weights
 ```
 
-The graphs go to `outputs/series/wan2.1-t2v-1.3b-f16-dyn/{vae_decoder_first,vae_decoder_next}/`
+The two graphs and the fixtures are written to staging seats and published together, only after
+every check has passed, so a failed run never leaves a mixed set (a new `first` next to an old
+`next`). The graphs go to
+`outputs/series/wan2.1-t2v-1.3b-f16-dyn/{vae_decoder_first,vae_decoder_next}/`
 (f16 storage; the weights are rounded to f16 before the references are taken). The series root also
 gets `vae_chunks.{band,accept,long}.safetensors`: a seeded de-normalized latent (9, 5 and 21 chunks)
 and the upstream non-tiled `_decode` chunk loop before its clamp. `band` sets the GPU tolerance and

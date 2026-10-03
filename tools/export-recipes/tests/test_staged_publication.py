@@ -27,8 +27,9 @@ import pytest
 RECIPES_ROOT = Path(__file__).resolve().parent.parent
 
 #: 作業席を開く呼びの名前（family 内のラッパ経由も認める — `sbv2._staged_target` は
-#: `staged_publication` を包んで出所記録まで同じ席へ書く）。
-STAGING_CALLS = frozenset({"staged_publication", "_staged_target"})
+#: `staged_publication` を包んで出所記録まで同じ席へ書く・`wan.export_vae._staged_set` は
+#: 席を複数まとめて開き、全部の門を通ってから一組で据える）。
+STAGING_CALLS = frozenset({"staged_publication", "_staged_target", "_staged_set"})
 
 #: 生成物を書く呼び。1 つでも席の外に出た瞬間、その台本は「門より前に final へ置く」形に戻る。
 WRITER_CALLS = frozenset(
@@ -80,7 +81,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("vowel_detector/export.py", "export_series"),
     ("irodori/dacvae/export.py", "export_series"),
     ("wan/export_dit.py", "emit"),
-    ("wan/export_vae.py", "emit_target"),
+    ("wan/export_vae.py", "emit_targets"),
 )
 
 
