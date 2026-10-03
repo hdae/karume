@@ -1,17 +1,34 @@
-// Wan2.1 のパイプラインの GPU 不要の部分（`src/wan/`）— 入力の門・`pipelineConfig` の門・テキスト埋め込み
-// 資産の検査・潜在の逆正規化・フレームの RGBA 化・乱数。実 GPU の通しは e2e_wan_pipeline_test.ts。
+// Wan2.1 のパイプラインの GPU 不要の部分（`src/wan/`）— 入力の門・`pipelineConfig` の門・家族 admission の
+// グラフ宣言の門・テキスト埋め込み資産の検査・潜在の逆正規化・フレームの RGBA 化・乱数・模擬 Session で回す
+// `generate`（後始末と非有限の門）。実 GPU の通しは e2e_wan_pipeline_test.ts。
 
-import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertInstanceOf,
+  assertNotEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
+import type { Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
   ACCEPTED_SIZES,
+  assertWanVaeTilesCoverAcceptedSizes,
+  ditContract,
   type GeneratedVideo,
   MAX_FRAMES,
   MIN_FRAMES,
   planWanGeneration,
   type WanGenerateRequest,
+  WanPipeline,
 } from "../src/wan/pipeline.ts";
+import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
+import { wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
+import type { WanRopeBase } from "../src/wan/dit-rope.ts";
+import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 import {
   findWanTextEmbedding,
   padWanTextEmbedding,
@@ -95,12 +112,12 @@ const buildAsset = (
 };
 
 const EMBEDS: WanTextEmbeds = parseWanTextEmbeds(buildAsset(ROWS));
-/** 832×480 の VAE の縮尺（chunk グラフの `8t / t`）。 */
-const GEOMETRY = { spatialScale: 8 };
+/** 配布形の VAE の chunk グラフの幾何（潜在タイル 32・縮尺 8 — `8t / t`）。 */
+const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256 };
 /** 配布形の `pipelineConfig`（recipe `wan/distribution.py` の `WAN_PIPELINE_CONFIG` — 参照の設定）。 */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
 const plan = (request: Partial<WanGenerateRequest>) =>
-  planWanGeneration({ prompt: "Two cats.", ...request }, EMBEDS, GEOMETRY, CONFIG);
+  planWanGeneration({ prompt: "Two cats.", ...request }, EMBEDS, LAYOUT, CONFIG);
 
 describe("テキスト埋め込み資産", () => {
   it("メタの並びのまま行を返し、行は [tokens, width] の f32", () => {
@@ -260,12 +277,12 @@ describe("planWanGeneration（generate の入口の門）", () => {
   it("negative の行が 1 本でない資産で negativePrompt を省くと拒む", () => {
     const embeds = parseWanTextEmbeds(buildAsset(ROWS.slice(0, 2)));
     assertThrows(
-      () => planWanGeneration({ prompt: "Two cats." }, embeds, GEOMETRY, CONFIG),
+      () => planWanGeneration({ prompt: "Two cats." }, embeds, LAYOUT, CONFIG),
       ModelInputError,
       "negative の行が 0 本",
     );
     assertEquals(
-      planWanGeneration({ prompt: "Two cats.", guidance: 1 }, embeds, GEOMETRY, CONFIG).negative,
+      planWanGeneration({ prompt: "Two cats.", guidance: 1 }, embeds, LAYOUT, CONFIG).negative,
       undefined,
     );
   });
@@ -312,16 +329,189 @@ describe("planWanGeneration（generate の入口の門）", () => {
       scheduler: { shift: 7.5 },
       defaults: { steps: 23, guidance: 4.25 },
     };
-    const resolved = planWanGeneration({ prompt: "Two cats." }, EMBEDS, GEOMETRY, config);
+    const resolved = planWanGeneration({ prompt: "Two cats." }, EMBEDS, LAYOUT, config);
     assertEquals([resolved.steps, resolved.guidance, resolved.shift], [23, 4.25, 7.5]);
     const explicit = planWanGeneration(
       { prompt: "Two cats.", steps: 2, guidance: 1, shift: 1.5 },
       EMBEDS,
-      GEOMETRY,
+      LAYOUT,
       config,
     );
     assertEquals([explicit.steps, explicit.guidance, explicit.shift], [2, 1, 1.5]);
     assertEquals(explicit.negative, undefined, "guidance 1 の明示は既定の 4.25 に勝つ");
+  });
+
+  it("guidance は f32 に丸めて有限な値だけを受ける（CFG は f32 で掛けるので、f64 で有限でも溢れる）", () => {
+    for (const guidance of [Number.MAX_VALUE, 1e39]) {
+      assertThrows(() => plan({ guidance }), ModelInputError, "f32 に収まる");
+    }
+    const f32Max = 3.4028234663852886e38;
+    assertEquals(plan({ guidance: f32Max }).guidance, f32Max, "f32 の最大値は境界の内");
+  });
+
+  it("steps × shift の組で σ 列が壊れる要求は ModelInputError（低水準の RangeError は cause に残す）", () => {
+    // 単項の門（正の有限の shift・1 以上の整数の steps）は通る組。
+    const rejected: readonly Partial<WanGenerateRequest>[] = [
+      { shift: 1e6 }, // σ[0] < σ[1]（shift が大きすぎて 1 へ張り付く）
+      { shift: 1e-320 }, // σ[0] が Infinity
+      { steps: 400_000 }, // 隣り合う σ が f32 で逆転する
+    ];
+    for (const request of rejected) {
+      const error = assertThrows(() => plan(request), ModelInputError, "σ 列が組めない");
+      assertInstanceOf(error.cause, RangeError);
+    }
+  });
+
+  it("計画は要求の steps × shift のスケジュールを持つ（denoise は組み直さずにこれを使う）", () => {
+    const explicit = plan({ steps: 3, shift: 1.5 });
+    assertEquals(
+      explicit.schedule,
+      wanUniPcSchedule(3, 1.5, WAN_UNIPC_CONFIG.numTrainTimesteps),
+    );
+    assertEquals(plan({}).schedule.timesteps.length, 50, "省いた steps は既定の 50");
+  });
+
+  it("VAE のタイル計画を denoise の前に立てる（832×480 は 3×4 枚・480×832 は 4×3 枚）", () => {
+    const landscape = plan({}).tiles;
+    assertEquals([...landscape.rows.starts], [0, 14, 28]);
+    assertEquals([...landscape.cols.starts], [0, 24, 48, 72]);
+    const portrait = plan({ width: 480, height: 832 }).tiles;
+    assertEquals([...portrait.rows.starts], [0, 24, 48, 72]);
+    assertEquals([...portrait.cols.starts], [0, 14, 28]);
+  });
+});
+
+/**
+ * VAE の chunk グラフ 2 本（first / next）の宣言だけを持つ偽物（潜在タイル `tile`・縮尺 8・cache 1 本 —
+ * `vae-chunks.ts` の取り決めの形）。
+ */
+const vaeChunkGraphs = (tile: number, scale = 8) => {
+  const graph = (frames: number) =>
+    stubModel({
+      inputs: [
+        { name: "latent", shape: [16, 1, tile, tile] },
+        { name: "cache_00", shape: [16, 2, tile, tile] },
+      ],
+      outputs: ["frame", "cache_00_out"],
+      values: {
+        frame: [3, frames, scale * tile, scale * tile],
+        cache_00_out: [16, 2, tile, tile],
+      },
+    });
+  return { first: graph(1), next: graph(4) };
+};
+
+describe("家族 admission: VAE のタイルが受理する寸法を全部覆う", () => {
+  const layoutOf = (tile: number, scale?: number) => {
+    const { first, next } = vaeChunkGraphs(tile, scale);
+    return wanVaeChunkLayout(first, next);
+  };
+
+  it("潜在タイル 32（配布形）と 60（短辺ちょうど）は 832×480 / 480×832 の両方を覆う", () => {
+    for (const tile of [32, 60]) assertWanVaeTilesCoverAcceptedSizes(layoutOf(tile));
+  });
+
+  it("chunk グラフの検査は通るがタイル decode できない資産を、寸法と理由を言って拒む", () => {
+    // 8: 重なりの下限 8 がタイル幅未満にならない。64: 潜在の短辺 60 より大きい。
+    for (const [tile, reason] of [[8, "最小の重なり"], [64, "タイル幅 64 より小さい"]] as const) {
+      const error = assertThrows(
+        () => assertWanVaeTilesCoverAcceptedSizes(layoutOf(tile)),
+        Error,
+        reason,
+      );
+      assert(error.message.includes("832×480"), error.message);
+      assert(!(error instanceof ModelInputError), "資産の齟齬を入力起因にしない");
+    }
+  });
+
+  it("縮尺で受理する寸法の潜在が整数にならない資産を拒む", () => {
+    assertThrows(
+      () => assertWanVaeTilesCoverAcceptedSizes(layoutOf(32, 7)),
+      Error,
+      "整数にならない",
+    );
+  });
+});
+
+describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（rank・batch・可変 S まで）", () => {
+  /** RoPE の素表（`ditContract` が見るのは幅 `2·(t + h + w)` = 128 だけ）。 */
+  const ROPE: WanRopeBase = {
+    rows: 1,
+    widths: [22, 21, 21],
+    cos: [new Float32Array(22), new Float32Array(21), new Float32Array(21)],
+    sin: [new Float32Array(22), new Float32Array(21), new Float32Array(21)],
+  };
+  type DitShapes = {
+    readonly tokens: readonly StubDim[];
+    readonly output: readonly StubDim[];
+    readonly ropeCos: readonly StubDim[];
+    readonly ropeSin: readonly StubDim[];
+    readonly proj: readonly StubDim[];
+    readonly context: readonly StubDim[];
+  };
+  /** 配布形と同じ宣言（`[1, S, 64]` ほか — recipe `wan/export_dit.py` の forward）。 */
+  const VALID: DitShapes = {
+    tokens: [1, "S", 64],
+    output: [1, "S", 64],
+    ropeCos: [1, "S", 1, 128],
+    ropeSin: [1, "S", 1, 128],
+    proj: [1, 256],
+    context: [1, 512, 4096],
+  };
+  const transformerOf = (patch: Partial<DitShapes>) => {
+    const shapes = { ...VALID, ...patch };
+    return stubModel({
+      symbols: ["S", "T"],
+      inputs: [
+        { name: "tokens", shape: shapes.tokens },
+        { name: "timesteps_proj", shape: shapes.proj },
+        { name: "encoder_hidden_states", shape: shapes.context },
+        { name: "rope_cos", shape: shapes.ropeCos },
+        { name: "rope_sin", shape: shapes.ropeSin },
+      ],
+      outputs: ["out"],
+      values: { out: shapes.output },
+    });
+  };
+
+  it("配布形の宣言は通り、文脈と timestep の幅を宣言から引く", () => {
+    assertEquals(ditContract(transformerOf({}), ROPE), {
+      output: "out",
+      projWidth: 256,
+      contextRows: 512,
+      contextWidth: 4096,
+    });
+  });
+
+  it("batch 2・固定の S・rank 違い・S の記号の食い違いは、Session を張る前に名指しで落ちる", () => {
+    const rejected: readonly [string, Partial<DitShapes>, string][] = [
+      ["tokens の batch 2", { tokens: [2, "S", 64] }, "'tokens' の形"],
+      ["tokens の固定 S", { tokens: [1, 192, 64] }, "記号次元でない"],
+      ["tokens の rank 2", { tokens: ["S", 64] }, "記号次元でない"],
+      ["tokens の rank 4", { tokens: [1, "S", 1, 64] }, "'tokens' の形"],
+      ["出力の batch 2", { output: [2, "S", 64] }, "transformer の出力 'out' の形"],
+      ["出力の固定 S", { output: [1, 192, 64] }, "transformer の出力 'out' の形"],
+      ["出力の別の記号", { output: [1, "T", 64] }, "transformer の出力 'out' の形"],
+      ["rope_cos の別の記号", { ropeCos: [1, "T", 1, 128] }, "'rope_cos' の形"],
+      ["rope_sin の rank 3", { ropeSin: [1, "S", 128] }, "'rope_sin' の形"],
+      ["rope_cos の batch 2", { ropeCos: [2, "S", 1, 128] }, "'rope_cos' の形"],
+      ["timesteps_proj の batch 2", { proj: [2, 256] }, "'timesteps_proj' の形"],
+      [
+        "encoder_hidden_states の batch 2",
+        { context: [2, 512, 4096] },
+        "'encoder_hidden_states' の形",
+      ],
+      [
+        "encoder_hidden_states の rank 4",
+        { context: [1, 512, 4096, 1] },
+        "'encoder_hidden_states' の形",
+      ],
+      ["tokens の最終次元", { tokens: [1, "S", 32] }, "'tokens' の形"],
+      ["rope の幅", { ropeSin: [1, "S", 1, 64] }, "'rope_sin' の形"],
+    ];
+    for (const [label, patch, message] of rejected) {
+      assertThrows(() => ditContract(transformerOf(patch), ROPE), Error, message, label);
+    }
   });
 });
 
@@ -359,6 +549,19 @@ describe("pipelineConfig（manifest の宣言の門）", () => {
       [{ ...RAW, defaults: { steps: 2.5, guidance: 5 } }, "steps"],
       [{ ...RAW, defaults: { steps: 50, guidance: 0.5 } }, "guidance"],
       [{ ...RAW, defaults: { steps: 50, guidance: "5" } }, "guidance"],
+    ];
+    for (const [raw, message] of rejected) {
+      const error = assertThrows(() => parseWanPipelineConfig(raw), Error, message);
+      assert(!(error instanceof ModelInputError), `宣言の齟齬を入力起因にしない: ${message}`);
+    }
+  });
+
+  it("要求の門と同じ値域: f32 で溢れる guidance・既定の steps × shift で σ 列が組めない宣言も素の Error", () => {
+    // 既定の組を門で通しておくことが、planWanGeneration の σ 列の失敗を入力起因と読める前提。
+    const rejected: readonly [Record<string, unknown>, string][] = [
+      [{ ...RAW, defaults: { steps: 50, guidance: Number.MAX_VALUE } }, "guidance"],
+      [{ ...RAW, scheduler: { shift: 1e6 } }, "σ 列が組めない"],
+      [{ ...RAW, defaults: { steps: 400_000, guidance: 5 } }, "σ 列が組めない"],
     ];
     for (const [raw, message] of rejected) {
       const error = assertThrows(() => parseWanPipelineConfig(raw), Error, message);
@@ -430,5 +633,204 @@ describe("初期ノイズの乱数", () => {
     const generator = new WanRandn(7);
     generator.normals(3);
     assertEquals([...generator.normals(2)], [...new WanRandn(7).normals(6)].slice(4));
+  });
+
+  it("seed → 列を値で固定する（同じ seed なら同じ clip — 公開の約束）", () => {
+    // 上の「同じ seed なら同じ列」は生成器が変わっても通る（cos / sin の入れ替え・丸めの変更など）。
+    // 列が変われば seed 付きの全 clip が黙って変わるので、先頭の値そのものを固定する。seed 0 は
+    // generate の既定・42 は example と opt-in の sha 行の seed。値は Deno（V8）で焼いた f32
+    // （ECMAScript は Math.log / cos / sin を実装依存の近似とするので、別のエンジンでは割れうる）。
+    assertEquals([...new WanRandn(0).normals(8)], [
+      -0.45275774598121643,
+      0.20776604115962982,
+      2.6506059169769287,
+      -0.4904228150844574,
+      -0.9886041283607483,
+      1.8721014261245728,
+      0.2524627149105072,
+      -1.853424310684204,
+    ]);
+    assertEquals([...new WanRandn(42).normals(8)], [
+      0.41471976041793823,
+      0.6526812314987183,
+      -0.8918862342834473,
+      1.3268336057662964,
+      1.72959303855896,
+      -1.883416771888733,
+      0.5456204414367676,
+      -1.6568357944488525,
+    ]);
+  });
+});
+
+/**
+ * 模擬 Session で回す `WanPipeline`（GPU も資産も要らない — 後始末と非有限の門を `generate` の経路で
+ * 縛る）。DiT の Session は値を `ditValue` で埋めた出力を返し、VAE は 1 タイル = 1 batch の手順
+ * （`decodeWanVaeTile`）を偽の GpuContext で回して、読み戻すフレームを `vaeValue` で埋める。
+ *
+ * NOTE: コンストラクタは TS の `private`（manifest 検査と資産の突合を迂回させない — ADR 0008）なので、
+ * `Reflect.construct` で内部状態を直接渡す（private の迂回はテストだけ）。公開の構築口（`fromAssets`）は
+ * krm コンテナのバイト列と GPU の取得を要り、CPU の単体テストでは回せない。内部状態の形
+ * （pipeline.ts の `WanState`）は export していないので、ここで組む欄は手で揃える — 欄が欠ければ
+ * generate の中の TypeError で落ち、各テストが見る文言と食い違って赤になる。
+ */
+const mockPipeline = (options: {
+  readonly ditValue?: number;
+  readonly vaeValue?: number;
+  readonly ditDisposeError?: Error;
+}) => {
+  const log: string[] = [];
+  const { first, next } = vaeChunkGraphs(32);
+  const resident = (byteLength: number) => ({ byteLength, write: () => {}, dispose: () => {} });
+  const vaeSession = (name: string) => ({
+    createSession: () => {
+      log.push(`create:${name}`);
+      return Promise.resolve({
+        enqueue: () => Promise.resolve(),
+        diagnostics: () => ({}),
+        dispose: () => Promise.resolve(),
+      });
+    },
+  });
+  const state = {
+    gpu: {
+      createResident: (bytes: number) => Promise.resolve(resident(bytes)),
+      beginBatch: () =>
+        Promise.resolve({
+          finish: () => Promise.resolve(),
+          finishAndRead: (frames: Record<string, { readonly byteLength: number }>) =>
+            Promise.resolve(
+              Object.fromEntries(
+                Object.entries(frames).map(([name, { byteLength }]) => [
+                  name,
+                  new Float32Array(byteLength / 4).fill(options.vaeValue ?? 0.5).buffer,
+                ]),
+              ),
+            ),
+        }),
+    },
+    ownsGpu: false,
+    config: CONFIG,
+    sessionOptions: {},
+    transformer: {
+      createSession: () => {
+        log.push("create:transformer");
+        return Promise.resolve({
+          run: (inputs: Record<string, Tensor>) => {
+            const tokens = inputs.tokens;
+            return Promise.resolve({
+              out: {
+                dtype: "f32",
+                shape: tokens.shape,
+                data: new Float32Array(tokens.data.length).fill(options.ditValue ?? 0.1),
+              },
+            });
+          },
+          diagnostics: () => ({}),
+          dispose: () => {
+            log.push("dispose:transformer");
+            return options.ditDisposeError === undefined
+              ? Promise.resolve()
+              : Promise.reject(options.ditDisposeError);
+          },
+        });
+      },
+    },
+    vaeFirst: vaeSession("vae_decoder_first"),
+    vaeNext: vaeSession("vae_decoder_next"),
+    layout: wanVaeChunkLayout(first, next),
+    // 行数 64 は潜在 [16, 2, 60, 104] の格子（2 × 30 × 52）を覆う。値は門と無関係。
+    ropeBase: {
+      rows: 64,
+      widths: [1, 1, 1],
+      cos: [new Float32Array(64), new Float32Array(64), new Float32Array(64)],
+      sin: [new Float32Array(64), new Float32Array(64), new Float32Array(64)],
+    },
+    dit: { output: "out", projWidth: 256, contextRows: 4, contextWidth: WIDTH },
+    textEmbeds: EMBEDS,
+  };
+  const pipeline: WanPipeline = Reflect.construct(WanPipeline, [state]);
+  /** 5 フレーム・2 step（DiT 4 回・VAE 12 タイル）の要求で回し、観測したイベントを `log` に積む。 */
+  const generate = (onEvent?: WanGenerateRequest["onEvent"]) =>
+    pipeline.generate({
+      prompt: "Two cats.",
+      frames: 5,
+      steps: 2,
+      onEvent: async (event) => {
+        log.push(
+          event.kind === "stage"
+            ? `${event.component}:${event.at}`
+            : event.kind === "denoise-step"
+            ? `step:${event.step}`
+            : `tile:${event.tile}`,
+        );
+        await onEvent?.(event);
+      },
+    });
+  return { log, generate };
+};
+
+describe("WanPipeline.generate（模擬 Session）", () => {
+  it("対照: 有限の DiT / VAE の出力なら最後まで回り、フレームを [-1, 1] へクランプして返す", async () => {
+    const { log, generate } = mockPipeline({ vaeValue: 2 });
+    const video = await generate();
+    assertEquals([video.frames, video.width, video.height], [5, 832, 480]);
+    assert(video.data.every((value) => value === 1), "クランプ前の 2 が 1 になっていない");
+    assertEquals(log.filter((entry) => entry.startsWith("step:")), ["step:1", "step:2"]);
+    assertEquals(log.filter((entry) => entry.startsWith("tile:")).length, 12);
+    assertEquals(log.at(-1), "vae_decoder:end");
+  });
+
+  describe("非有限の門", () => {
+    for (const ditValue of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      it(`DiT の出力が ${ditValue} なら step 1 の更新の後で落ち、VAE の段を張らない`, async () => {
+        const { log, generate } = mockPipeline({ ditValue });
+        await assertRejects(() => generate(), Error, "step 1/2 の更新後の潜在");
+        assert(!log.includes("step:1"), "非有限の潜在を denoise-step で見せた");
+        assert(!log.includes("vae_decoder:start"), `VAE の段へ進んだ: ${log}`);
+        assertEquals(log.at(-1), "dispose:transformer", "DiT の Session を畳んでいない");
+      });
+    }
+
+    for (const vaeValue of [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN]) {
+      it(`VAE の出力が ${vaeValue} ならクランプの前で落ちる（±Inf を ±1 に化かさない）`, async () => {
+        const { log, generate } = mockPipeline({ vaeValue });
+        await assertRejects(
+          () => generate(),
+          Error,
+          "VAE の出力（クランプ前）の channel 0・フレーム 0・画素 (x=0, y=0) が非有限",
+        );
+        assert(!log.includes("vae_decoder:end"), `VAE の段を終えた: ${log}`);
+      });
+    }
+  });
+
+  describe("DiT の段の後始末（本体の失敗を後始末の失敗で上書きしない）", () => {
+    const thrown = new Error("A: onEvent の中断");
+    const disposeFailure = new Error("B: Session.dispose の失敗");
+    const abort = (event: Parameters<NonNullable<WanGenerateRequest["onEvent"]>>[0]) => {
+      if (event.kind === "denoise-step") throw thrown;
+    };
+
+    it("本体 A と後始末 B の両方が落ちたら、A を先頭にした AggregateError で両方を運ぶ", async () => {
+      const { log, generate } = mockPipeline({ ditDisposeError: disposeFailure });
+      const error = await assertRejects(() => generate(abort), AggregateError);
+      assertEquals(error.errors, [thrown, disposeFailure]);
+      assert(log.includes("dispose:transformer"));
+      assert(!log.includes("transformer:end"), "途中で落ちた段の end を出した");
+    });
+
+    it("本体だけが落ちたら A そのものを投げる", async () => {
+      const { generate } = mockPipeline({});
+      const error = await assertRejects(() => generate(abort));
+      assertStrictEquals(error, thrown);
+    });
+
+    it("後始末だけが落ちたら B そのものを投げ、VAE の段へ進まない", async () => {
+      const { log, generate } = mockPipeline({ ditDisposeError: disposeFailure });
+      const error = await assertRejects(() => generate());
+      assertStrictEquals(error, disposeFailure);
+      assert(!log.includes("vae_decoder:start"), `VAE の段へ進んだ: ${log}`);
+    });
   });
 });

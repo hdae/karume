@@ -41,10 +41,12 @@ go through the same admission. The defaults for steps, guidance and shift come f
 
 ## Accepted requests
 
-832×480 or 480×832, 4n+1 frames from 5 to 81 (default 33), `steps` ≥ 1, `guidance` ≥ 1 (1 turns CFG
-off), `shift` > 0, and either a `seed` (default 0) or the initial noise as `latents`. Only 832×480
+832×480 or 480×832, 4n+1 frames from 5 to 81 (default 33), `steps` ≥ 1, `guidance` ≥ 1 and
+finite in float32 (1 turns CFG off), `shift` > 0 with a `steps` × `shift` pair whose σ column is
+strictly decreasing, and either a `seed` (default 0) or the initial noise as `latents`. Only 832×480
 with 33 and 81 frames have been checked end to end on the GPU. The transformer stage is closed before
-the VAE stage opens, so the two are never resident together.
+the VAE stage opens, so the two are never resident together. A non-finite latent after any step, or a
+non-finite VAE output before the clamp, fails the generation instead of being returned.
 
 ## Numerics
 
