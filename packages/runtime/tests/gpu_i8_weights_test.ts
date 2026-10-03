@@ -2,8 +2,8 @@
 // カーネル変種・診断の通し検証。
 //
 // f16（ADR 0018 / tests/gpu_f16_weights_test.ts）と同じ 2 経路を踏む:
-//   適格（消費が融合 5 op の weight スロットだけ）→ 生バイトのまま GPU 常駐し、dequant は
-//     カーネル内（`unpack4xI8` + per-channel scale）
+//   適格（消費が WEIGHT_SLOTS に載った op の weight スロットだけ）→ 生バイトのまま GPU
+//     常駐し、dequant はカーネル内（`unpack4xI8` + per-channel scale）
 //   適格外（bias / 混在消費 / その他）→ ロード時に CPU で f32 展開（VRAM 削減ゼロ）
 //
 // MUST: 数値ケースは **重み行の長さを 4 の倍数にしない**。i8 は 4 要素を 1 語に詰めるので、

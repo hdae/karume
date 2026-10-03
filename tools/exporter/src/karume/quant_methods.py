@@ -17,7 +17,8 @@ MUST: **同一入力 → ビット同一出力**。k-means の初期化まで決
 MUST: 丸めは**参照・golden の採取より前**（`quantize` モジュール docstring と同文）。
 
 対象選択は `quantize.iter_quant_targets` の**共有**で、既定は {@link
-quantize.fake_quant_int4} と同じ linear 限定・`op_types` で i8 と同じ 5 op 種まで広げられる。
+quantize.fake_quant_int4} と同じ linear 限定・`op_types` で i8 と同じ全種
+（`QUANT_MODULE_TYPES`）まで広げられる。
 写した別実装にしないのは、測った対象と出荷した対象が黙って割れるのを防ぐため。
 """
 

@@ -101,8 +101,8 @@ WEIGHT_DTYPES = ("f32", "f16", "i8", "i4")
 #: `I4_WEIGHT_OPS` の鏡像で、両者が割れると「export は緑・ロードで CPU 展開に落ちる（VRAM 削減が
 #: 黙って消える）」か、その逆に「宣言できない格納を要求して export だけが落ちる」形になる。
 #:
-#: MUST: conv2d と conv_transpose1d を入れない。conv1d に付いた i4 は igemm 経路
-#: （`groups == 1` の変種）だけが展開でき、direct カーネル（`groups > 1`）と conv2d /
+#: MUST: conv2d / conv3d / conv_transpose1d を入れない。conv1d に付いた i4 は igemm 経路
+#: （`groups == 1` の変種）だけが展開でき、direct カーネル（`groups > 1`）と conv2d / conv3d /
 #: conv_transpose1d の生成入力へ i4 を渡すと不成立 WGSL になる
 #: （`packages/runtime/src/kernels/weight-storage.ts`）。`groups == 1` の絞り込みは
 #: {@link i4_eligible_initializers} が node の attrs から見る。
@@ -147,7 +147,7 @@ def eligible_compressed_initializers(graph: IrGraph) -> set[str]:
     """圧縮格納のまま GPU 常駐**できる** initializer
     （`packages/runtime/src/runtime/plan.ts` の鏡像）。
 
-    適格 = 「その initializer の消費が融合 5 op の重みスロット（WEIGHT_SLOTS）だけ」。
+    適格 = 「その initializer の消費が WEIGHT_SLOTS に載った op の重みスロットだけ」。
     MUST: 消費が 1 つでも重みスロット以外にあれば適格外（そのカーネルは f32 として読むので、
     圧縮のまま上げるとビット列の読み替えになる）。消費ゼロも適格外（実行に使われないバイトを
     「GPU 常駐圧縮」と数えると診断が実態からずれる）。
@@ -238,7 +238,7 @@ def i4_eligible_initializers(
     割り切れる initializer（i4 の適格集合 — ADR 0069 決定 5 とその追補）。
 
     i4 の展開経路（`unpack4xU8` + group scale）を持つカーネルは linear / embedding / conv1d
-    （`groups == 1`）だけなので、それ以外の重みスロット（conv2d / conv_transpose1d /
+    （`groups == 1`）だけなので、それ以外の重みスロット（conv2d / conv3d / conv_transpose1d /
     groups > 1 の conv1d）でも消費される initializer は i4 で格納できない — そのカーネルは
     packed バイトを f32 として読む（例外は出ない）。`weight_channel_axes` と同じく**消費側の
     op** から引く（重みの shape だけでは区別できない）。
@@ -688,9 +688,9 @@ def _plan_weight_dtype(
                 )
             continue
         # i4 の適格は **{@link I4_WEIGHT_OPS} の重みスロット限定**（ADR 0069 決定 5）— 既定 i4
-        # では適格外（conv2d / conv_transpose1d / groups > 1 の conv1d / 格納行長が group 長で
-        # 割り切れない重み）を f32 のまま静かに残す。i8 の適格外が f32 で残るのと同じ設計で、
-        # ランタイム側（executor.ts の eligible ∩ i4Eligible）と対。ここで除外しないと、
+        # では適格外（conv2d / conv3d / conv_transpose1d / groups > 1 の conv1d / 格納行長が
+        # group 長で割り切れない重み）を f32 のまま静かに残す。i8 の適格外が f32 で残るのと
+        # 同じ設計で、ランタイム側（executor.ts の eligible ∩ i4Eligible）と対。ここで除外しないと、
         # conv を混ぜたグラフが「conv の重みを i4 にできない」で export 不能になる
         # （Codex 波 F 指摘 I4-ELIG-01）。明示指定の i4 × 適格外は `_plan_i4` 自身の門が
         # fail loudly で受ける。

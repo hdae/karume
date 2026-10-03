@@ -469,7 +469,7 @@ export const weightChannelAxes = (graph: IrGraph): ReadonlyMap<string, number> =
  * 圧縮格納のまま GPU 常駐**できる** initializer（ADR 0018 / 0019 の適格判定 — f16 と i8 で
  * 共用する。判定はグラフ構造だけで決まり、格納 dtype を見ないため分ける理由が無い）。
  *
- * 適格 = 「その initializer の消費が、融合 5 op の重みスロット（{@link WEIGHT_SLOTS}）**だけ**」。
+ * 適格 = 「その initializer の消費が、{@link WEIGHT_SLOTS} に載った op の重みスロット**だけ**」。
  * 束縛にも GPU にも依存しない。
  *
  * MUST: 消費が 1 つでも重みスロット以外にあれば適格外。同じテンソルを linear の重みと
@@ -506,8 +506,8 @@ export const eligibleCompressedInitializers = (graph: IrGraph): ReadonlySet<stri
  * `_has_i4_kernel` の鏡像 — **集合の中身も絞りの構造も対**（片側だけ集合へ足すと、鏡像を
  * 名乗る 2 定数が別物になり将来の追補で片側だけが更新される）。
  *
- * MUST: conv2d / conv_transpose1d を入れない（展開経路そのものが無い — 生成側でも
- * src/kernels/gemm.ts の conv2d 門と src/kernels/conv1d.ts の direct 門が落とす）。
+ * MUST: conv2d / conv3d / conv_transpose1d を入れない（展開経路そのものが無い — 生成側でも
+ * src/kernels/gemm.ts の conv2d / conv3d 門と src/kernels/conv1d.ts の direct 門が落とす）。
  */
 const I4_WEIGHT_OPS: ReadonlySet<string> = new Set([LINEAR_OP, EMBEDDING_OP, CONV1D_OP]);
 
@@ -547,7 +547,7 @@ export const i2EligibleInitializers = (graph: IrGraph): ReadonlySet<string> => {
  * 狭め — ADR 0069 決定 5。エクスポータ側 `karume/emit.py: i4_eligible_initializers` の鏡像）。
  *
  * MUST: {@link eligibleCompressedInitializers} との**積**で使う — ここは「重みスロットの中で
- * 展開経路の無い op（conv2d / conv_transpose1d / groups > 1 の conv1d）にも食われていないか」
+ * 展開経路の無い op（conv2d / conv3d / conv_transpose1d / groups > 1 の conv1d）にも食われていないか」
  * だけを見る。共有された重みを常駐させるとそちらのカーネルが packed バイトを f32 として読む
  * （例外は出ない）。
  */
