@@ -101,6 +101,10 @@ WAN_TEXT_EMBEDS_ROLE = "text_embeds"
 WAN_ROPE_BASE_ASSET = "rope_base"
 WAN_ROPE_BASE_ROLE = "rope-base"
 
+#: VAE の chunk グラフの潜在入力（先頭の入力 `[C, 1, t, t]` — 残りの入力は cache）。書き手の綴りは
+#: `wan.export_vae.LATENT_INPUT`・読み手は TS 側 `vae-chunks.ts` の `WAN_VAE_LATENT_INPUT`。
+WAN_VAE_LATENT_INPUT = "latent"
+
 #: DiT の文脈入力（`[1, rows, width]` — 埋め込み資産の行の幅と有効長の上限をここから引く）。
 #: 書き手の綴りは `wan.export_dit.INPUT_NAMES`。
 WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
@@ -242,6 +246,47 @@ def dit_context(container: Path) -> tuple[int, int]:
     return shape[1], shape[2]
 
 
+def assert_vae_chunk_pair(first: Path, following: Path) -> None:
+    """`vae_decoder_first` / `vae_decoder_next` の 2 本が同じ組の chunk グラフであることを見る。
+
+    規則は TS の `wanVaeChunkLayout`（`packages/models/src/wan/vae-chunks.ts`）と同じ: 潜在入力の
+    形が 2 本で同じ（= タイル辺が同じ）で、first の cache 入力が next の cache 入力の部分列（同じ
+    名前・同じ形・同じ順）。
+
+    MUST: 組み立てで落とす。書き手は 2 本を別の容器へ書くので、片方だけを焼き直した系列（`--target`
+    の部分更新・途中で落ちた旧版の書き手の実走）は、各容器の検査を全部通ったまま配布形に据わり、
+    利用者の `fromPretrained` が admission で初めて拒む。同じ形で中身の世代だけが違う組は形からは
+    見分けられない（GPU の chunk 列の照合だけが捕まえる）。
+    """
+    first_inputs = graph_inputs(ir_graph(first), first)
+    next_inputs = graph_inputs(ir_graph(following), following)
+    for path, inputs in ((first, first_inputs), (following, next_inputs)):
+        if next(iter(inputs), None) != WAN_VAE_LATENT_INPUT:
+            raise DistError(
+                f"{path}: 先頭のグラフ入力が '{WAN_VAE_LATENT_INPUT}' でない（{list(inputs)}）"
+            )
+    if first_inputs[WAN_VAE_LATENT_INPUT] != next_inputs[WAN_VAE_LATENT_INPUT]:
+        raise DistError(
+            f"{first} / {following}: 潜在入力の形が first {first_inputs[WAN_VAE_LATENT_INPUT]} と"
+            f" next {next_inputs[WAN_VAE_LATENT_INPUT]} で違う — 別のタイル辺で焼いた 2 本を"
+            " 組にしない（`python -m wan.export_vae` で両方を焼き直す）"
+        )
+    next_caches = [name for name in next_inputs if name != WAN_VAE_LATENT_INPUT]
+    cursor = 0
+    for name, shape in first_inputs.items():
+        if name == WAN_VAE_LATENT_INPUT:
+            continue
+        if next_inputs.get(name) != shape:
+            raise DistError(
+                f"{first}: cache 入力 '{name}' {shape} が next に同じ形で無い"
+                f"（{next_inputs.get(name)}）— 別の組の chunk グラフを組にしない"
+            )
+        position = next_caches.index(name)
+        if position < cursor:
+            raise DistError(f"{first}: cache 入力の順が next と違う（'{name}'）")
+        cursor = position + 1
+
+
 def _safetensors_header(path: Path) -> tuple[dict[str, Any], dict[str, str]]:
     """safetensors のヘッダ（テンソルの宣言・メタ）だけを読む（本体は読まない・torch 不使用）。"""
     try:
@@ -378,6 +423,7 @@ def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
         # 容器が名乗る出所を上流の pin（`wan.sources` が正本）へ突き合わせる — モデル名の表だけで
         # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。
         assert_upstream_provenance(container, license=upstream.license, revision=upstream.revision)
+    assert_vae_chunk_pair(placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE])
     transformer = placements[WAN_TRANSFORMER_ROLE]
     assert_rope_base(transformer)
     assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], model, dit_context(transformer))

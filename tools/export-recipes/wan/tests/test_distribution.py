@@ -61,6 +61,9 @@ from wan.distribution import (
     WAN_TEXT_EMBEDS_VERSIONS,
     WAN_TEXT_ENCODER_DTYPE,
     WAN_TRANSFORMER_ROLE,
+    WAN_VAE_FIRST_ROLE,
+    WAN_VAE_LATENT_INPUT,
+    WAN_VAE_NEXT_ROLE,
     WAN_WEIGHTS,
     WanSources,
     wan_plan,
@@ -119,6 +122,11 @@ def _graph_container(
         inputs=((WAN_DIT_CONTEXT_INPUT, list(context)),),
         assets=assets,
     )
+
+
+def _vae_container(role: str, inputs: Sequence[tuple[str, list[int]]]) -> list[bytes]:
+    """VAE の chunk グラフ 1 本（潜在 + cache の入力の宣言だけを実物の形にしたもの）。"""
+    return ir_container(mark=role, named=role, storage="f16", inputs=inputs)
 
 
 def _prompt_rows() -> list[dict[str, Any]]:
@@ -351,6 +359,56 @@ class TestTheRopeBaseAsset:
         )
         with pytest.raises(DistError, match="役割が 'ple-index'"):
             wan_plan(sources)
+
+
+class TestTheVaeChunkPair:
+    """first / next は同じ組の chunk グラフ（TS の wanVaeChunkLayout と同じ規則）。"""
+
+    LATENT = (WAN_VAE_LATENT_INPUT, [16, 1, 4, 4])
+
+    def _pair(self, tmp_path: Path, first, following) -> WanSources:
+        return _build_sources(
+            tmp_path,
+            containers={
+                WAN_VAE_FIRST_ROLE: _vae_container(WAN_VAE_FIRST_ROLE, first),
+                WAN_VAE_NEXT_ROLE: _vae_container(WAN_VAE_NEXT_ROLE, following),
+            },
+        )
+
+    def test_a_first_whose_caches_are_a_subsequence_of_next_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """実物と同じ形: next は first に無い cache（time_conv の 2 本）を間に持つ。"""
+        first = [self.LATENT, ("cache_00", [4, 2, 4, 4]), ("cache_02", [8, 2, 4, 4])]
+        following = [*first[:2], ("cache_01", [3, 2, 4, 4]), first[2]]
+
+        assert wan_plan(self._pair(tmp_path, first, following))
+
+    def test_it_refuses_graphs_baked_with_different_tiles(self, tmp_path: Path) -> None:
+        """片方だけ別のタイル辺で焼き直した組（--target の部分更新・途中で落ちた旧版の実走）。"""
+        first = [self.LATENT, ("cache_00", [4, 2, 4, 4])]
+        following = [(WAN_VAE_LATENT_INPUT, [16, 1, 8, 8]), ("cache_00", [4, 2, 8, 8])]
+        with pytest.raises(DistError, match="潜在入力の形"):
+            wan_plan(self._pair(tmp_path, first, following))
+
+    def test_it_refuses_a_first_cache_that_next_lacks_or_shapes_differently(
+        self, tmp_path: Path
+    ) -> None:
+        first = [self.LATENT, ("cache_00", [4, 2, 4, 4])]
+        following = [self.LATENT, ("cache_00", [5, 2, 4, 4])]
+        with pytest.raises(DistError, match=r"'cache_00' .* が next に同じ形で無い"):
+            wan_plan(self._pair(tmp_path, first, following))
+
+    def test_it_refuses_caches_in_another_order(self, tmp_path: Path) -> None:
+        first = [self.LATENT, ("cache_00", [4, 2, 4, 4]), ("cache_01", [4, 2, 4, 4])]
+        following = [self.LATENT, first[2], first[1]]
+        with pytest.raises(DistError, match="順が next と違う"):
+            wan_plan(self._pair(tmp_path, first, following))
+
+    def test_it_refuses_a_graph_whose_first_input_is_not_the_latent(self, tmp_path: Path) -> None:
+        first = [("cache_00", [4, 2, 4, 4]), self.LATENT]
+        with pytest.raises(DistError, match="先頭のグラフ入力"):
+            wan_plan(self._pair(tmp_path, first, [self.LATENT, first[0]]))
 
 
 class TestTheTextEmbeddingAsset:
@@ -590,6 +648,11 @@ class TestTheWritersSpellTheSameNames:
         assert {name: recorded[name] for name in WAN_TEXT_EMBEDS_VERSIONS} == dict(
             WAN_TEXT_EMBEDS_VERSIONS
         )
+
+    def test_the_vae_latent_input(self) -> None:
+        from wan import export_vae
+
+        assert export_vae.LATENT_INPUT == WAN_VAE_LATENT_INPUT
 
     def test_the_rope_base_asset_and_the_context_input(self) -> None:
         from wan import export_dit
