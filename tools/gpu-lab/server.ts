@@ -5,18 +5,20 @@
  * 配信の形は `tools/llm-speed/browser/server.ts` と同じ（localhost 限定・COOP / COEP / CORP・
  * 起動時に `deno bundle --platform browser`・モデルは根の中に閉じて Range 対応で配る）。
  * 区間配信と根の閉じ込めはそちらの実装をそのまま使う（同じ規則を二重に持たない）。配るのはページ
- * （`browser/index.html`）・bundle（`/main.js`）・`/config.json`・Anima の配布形（`/models/anima/…`）だけ。
+ * （`browser/index.html`）・bundle（`/main.js`）・`/config.json`・Anima の配布形（`/models/anima/…`）・
+ * Wan の配布形（`/models/wan/…` — ADR 0118 段 9）だけ。
  *
  * 既定の置き場に配布形（`karume.json` を持つディレクトリ）が無くても起動する — 掃引とプロファイルの
- * タブはモデルを使わない。そのときは `/config.json` の `source` が null、`/models/anima/…` は 404 で、
- * Anima のタブは操作を無効にする。`--source` を明示したのに配布形が無いときは起動しない（指定の誤りを
- * 黙って Anima 無しの起動にしない）。
+ * タブはモデルを使わない。そのときは `/config.json` の `source`（Anima）/ `wanSource`（Wan）が null、
+ * その配布形の経路は 404 で、そのタブは操作を無効にする。`--source` / `--wan-source` を明示したのに
+ * 配布形が無いときは起動しない（指定の誤りを黙ってそのタブ無しの起動にしない）。
  */
 import { containedPath, fileResponse } from "../llm-speed/browser/server.ts";
 import { readCheckout } from "../shared/checkout.ts";
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_SOURCE = "models/karume-anima";
+const DEFAULT_WAN_SOURCE = "models/karume-wan2.1";
 
 const headers = (): Headers =>
   new Headers({
@@ -32,15 +34,26 @@ export type ServerConfig = {
   readonly dirty: boolean;
   readonly bundleSha256: string;
   /**
-   * 配布形ディレクトリの名前（パスは出さない — 手元の構成をページへ漏らさない）。配布形が無ければ
-   * null（Anima のタブはこれを見て操作を無効にする）。
+   * Anima の配布形ディレクトリの名前（パスは出さない — 手元の構成をページへ漏らさない）。配布形が
+   * 無ければ null（Anima のタブはこれを見て操作を無効にする）。
    */
   readonly source: string | null;
+  /** Wan の配布形ディレクトリの名前（{@link ServerConfig.source} と同じ規則 — Wan のタブが見る）。 */
+  readonly wanSource: string | null;
 };
 
-/** `sourceRoot` は配布形の実 path（無ければ undefined — `/models/anima/…` は全て 404）。 */
+/** 配る配布形の実 path（無いものは undefined — その経路は全て 404）。 */
+export type Distributions = {
+  readonly anima?: string;
+  readonly wan?: string;
+};
+
+/** 配布形を配る経路の前置（`/models/<名前>/`）。 */
+const MODEL_ROUTES = ["anima", "wan"] as const;
+
+/** `distributions` は配布形の実 path（無い配布形の経路 `/models/<名前>/…` は全て 404）。 */
 export const createHandler = (
-  sourceRoot: string | undefined,
+  distributions: Distributions,
   bundle: Uint8Array<ArrayBuffer>,
   config: ServerConfig,
 ): (req: Request) => Promise<Response> => {
@@ -59,9 +72,15 @@ export const createHandler = (
         return new Response(bundle, { headers: h });
       }
       if (url.pathname === "/") return await fileResponse(req, page);
-      if (url.pathname.startsWith("/models/anima/") && sourceRoot !== undefined) {
-        const path = url.pathname.slice("/models/anima/".length);
-        return await fileResponse(req, await containedPath(sourceRoot, path));
+      for (const name of MODEL_ROUTES) {
+        const prefix = `/models/${name}/`;
+        const root = distributions[name];
+        if (url.pathname.startsWith(prefix) && root !== undefined) {
+          return await fileResponse(
+            req,
+            await containedPath(root, url.pathname.slice(prefix.length)),
+          );
+        }
       }
       return new Response(null, { status: 404, headers: h });
     } catch (error) {
@@ -88,35 +107,48 @@ const findDistribution = async (sourceRoot: string): Promise<string | undefined>
   }
 };
 
-/** `--source` で明示した置き場に配布形が無い（起動を止める）。 */
+/** `--source` / `--wan-source` で明示した置き場に配布形が無い（起動を止める）。 */
 export class MissingDistributionError extends Error {
   override name = "MissingDistributionError";
 }
 
 /**
- * 配布形の実 path を決める。`explicit`（`--source` を渡した）なのに無ければ
- * {@link MissingDistributionError} を投げ、既定の置き場に無いだけなら警告して undefined（Anima 無しで起動）。
+ * 配布形の実 path を決める。`explicit`（`option` を渡した）なのに無ければ
+ * {@link MissingDistributionError} を投げ、既定の置き場に無いだけなら警告して undefined（`tab` のタブ無しで
+ * 起動）。
  */
 export const resolveDistribution = async (
-  source: { readonly path: string; readonly explicit: boolean },
+  source: {
+    readonly path: string;
+    readonly explicit: boolean;
+    /** 置き場を指定するオプション（`--source` / `--wan-source`）。 */
+    readonly option: string;
+    /** その配布形を使うタブの名前（`Anima` / `Wan`）。 */
+    readonly tab: string;
+  },
 ): Promise<string | undefined> => {
-  const realSource = await findDistribution(source.path);
+  const { path, option, tab } = source;
+  const realSource = await findDistribution(path);
   if (realSource !== undefined) return realSource;
   if (source.explicit) {
     throw new MissingDistributionError(
-      `--source ${source.path} has no karume.json (pass the distribution directory, or omit --source to start without the Anima tab)`,
+      `${option} ${path} has no karume.json (pass the distribution directory, or omit ${option} to start without the ${tab} tab)`,
     );
   }
   console.warn(
-    `${source.path} has no karume.json — serving without the Anima distribution (the Anima tab is disabled; pass --source to enable it)`,
+    `${path} has no karume.json — serving without the ${tab} distribution (the ${tab} tab is disabled; pass ${option} to enable it)`,
   );
   return undefined;
 };
 
+/** 配布形の実 path → ページへ出す名前（パスは出さない — {@link ServerConfig.source}）。 */
+const directoryName = (realPath: string | undefined): string | null =>
+  realPath === undefined ? null : realPath.slice(realPath.lastIndexOf("/") + 1);
+
 const main = async (): Promise<void> => {
   if (Deno.args.includes("--help")) {
     console.log(
-      `deno task bench:gpu-lab [--port ${DEFAULT_PORT}] [--source ${DEFAULT_SOURCE}]`,
+      `deno task bench:gpu-lab [--port ${DEFAULT_PORT}] [--source ${DEFAULT_SOURCE}] [--wan-source ${DEFAULT_WAN_SOURCE}]`,
     );
     return;
   }
@@ -124,19 +156,30 @@ const main = async (): Promise<void> => {
   for (let i = 0; i < Deno.args.length; i += 2) {
     const key = Deno.args[i], value = Deno.args[i + 1];
     if (
-      !["--port", "--source"].includes(key) || value === undefined || value.startsWith("--") ||
+      !["--port", "--source", "--wan-source"].includes(key) || value === undefined ||
+      value.startsWith("--") ||
       args.has(key)
     ) throw Error(`Invalid option ${key}`);
     args.set(key, value);
   }
   const port = Number(args.get("--port") ?? DEFAULT_PORT);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw Error("Invalid port");
-  let realSource: string | undefined;
+  let distributions: Distributions;
   try {
-    realSource = await resolveDistribution({
-      path: args.get("--source") ?? DEFAULT_SOURCE,
-      explicit: args.has("--source"),
-    });
+    distributions = {
+      anima: await resolveDistribution({
+        path: args.get("--source") ?? DEFAULT_SOURCE,
+        explicit: args.has("--source"),
+        option: "--source",
+        tab: "Anima",
+      }),
+      wan: await resolveDistribution({
+        path: args.get("--wan-source") ?? DEFAULT_WAN_SOURCE,
+        explicit: args.has("--wan-source"),
+        option: "--wan-source",
+        tab: "Wan",
+      }),
+    };
   } catch (error) {
     if (!(error instanceof MissingDistributionError)) throw error;
     console.error(error.message);
@@ -165,7 +208,8 @@ const main = async (): Promise<void> => {
         new Uint8Array(await crypto.subtle.digest("SHA-256", bundle)),
         (v) => v.toString(16).padStart(2, "0"),
       ).join(""),
-      source: realSource === undefined ? null : realSource.slice(realSource.lastIndexOf("/") + 1),
+      source: directoryName(distributions.anima),
+      wanSource: directoryName(distributions.wan),
     };
     console.log(`Open http://localhost:${port} in Chrome. Ctrl+C stops the server.`);
     const abort = new AbortController();
@@ -174,7 +218,7 @@ const main = async (): Promise<void> => {
     try {
       await Deno.serve(
         { hostname: "127.0.0.1", port, signal: abort.signal },
-        createHandler(realSource, bundle, config),
+        createHandler(distributions, bundle, config),
       ).finished;
     } finally {
       Deno.removeSignalListener("SIGINT", stop);

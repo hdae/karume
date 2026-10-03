@@ -12,6 +12,7 @@ const CONFIG: ServerConfig = {
   dirty: true,
   bundleSha256: "0".repeat(64),
   source: "karume-anima",
+  wanSource: "karume-wan2.1",
 };
 
 const withModelRoot = async (
@@ -24,7 +25,7 @@ const withModelRoot = async (
     await Deno.writeFile(`${dir}/model/shared/part.krm`, new Uint8Array([10, 20, 30, 40, 50]));
     await Deno.symlink(`${dir}/private`, `${dir}/model/link`);
     const root = await Deno.realPath(`${dir}/model`);
-    await body(root, createHandler(root, new Uint8Array([1, 2, 3]), CONFIG));
+    await body(root, createHandler({ anima: root }, new Uint8Array([1, 2, 3]), CONFIG));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -88,17 +89,53 @@ describe("gpu lab server", () => {
   });
 
   it("starts without a distribution: the page and config are served, the model path is 404", async () => {
-    const config: ServerConfig = { ...CONFIG, source: null };
-    const handler = createHandler(undefined, new Uint8Array([1, 2, 3]), config);
+    const config: ServerConfig = { ...CONFIG, source: null, wanSource: null };
+    const handler = createHandler({}, new Uint8Array([1, 2, 3]), config);
     const page = await handler(new Request("http://localhost/"));
     assertEquals(page.status, 200);
     await page.body?.cancel();
     const served = await handler(new Request("http://localhost/config.json"));
     assertEquals(served.status, 200);
     assertEquals(await served.json(), config);
-    const manifest = await handler(new Request("http://localhost/models/anima/karume.json"));
-    assertEquals(manifest.status, 404);
-    await manifest.body?.cancel();
+    for (const name of ["anima", "wan"]) {
+      const manifest = await handler(new Request(`http://localhost/models/${name}/karume.json`));
+      assertEquals(manifest.status, 404, name);
+      await manifest.body?.cancel();
+    }
+  });
+
+  it("serves each distribution only under its own route", async () => {
+    const dir = await Deno.makeTempDir();
+    try {
+      for (const name of ["anima", "wan"]) {
+        await Deno.mkdir(`${dir}/${name}`);
+        await Deno.writeTextFile(`${dir}/${name}/karume.json`, `{"name":"${name}"}`);
+      }
+      await Deno.writeTextFile(`${dir}/wan/only-wan.krm`, "wan part");
+      const anima = await Deno.realPath(`${dir}/anima`);
+      const wan = await Deno.realPath(`${dir}/wan`);
+      const handler = createHandler({ anima, wan }, new Uint8Array([1, 2, 3]), CONFIG);
+      for (const name of ["anima", "wan"]) {
+        const manifest = await handler(new Request(`http://localhost/models/${name}/karume.json`));
+        assertEquals(manifest.status, 200, name);
+        assertEquals(await manifest.json(), { name });
+      }
+      const crossed = await handler(new Request("http://localhost/models/anima/only-wan.krm"));
+      assertEquals(crossed.status, 404);
+      await crossed.body?.cancel();
+      const escaped = await handler(
+        new Request("http://localhost/models/wan/..%2fanima%2fkarume.json"),
+      );
+      assertEquals(escaped.status, 400);
+      await escaped.body?.cancel();
+      // Wan だけ無い起動: Anima は配り、Wan の経路は 404
+      const animaOnly = createHandler({ anima }, new Uint8Array([1, 2, 3]), CONFIG);
+      const missing = await animaOnly(new Request("http://localhost/models/wan/karume.json"));
+      assertEquals(missing.status, 404);
+      await missing.body?.cancel();
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
   });
 
   it("serves no page source or repository file — only the page, bundle, config and model", async () => {
@@ -121,6 +158,9 @@ describe("gpu lab server", () => {
 });
 
 describe("gpu lab distribution resolution", () => {
+  const ANIMA = { option: "--source", tab: "Anima" } as const;
+  const WAN = { option: "--wan-source", tab: "Wan" } as const;
+
   /** console.warn に出た行を集める（本物の warn には流さない）。 */
   const capturingWarnings = async (
     body: (warnings: unknown[][]) => Promise<void>,
@@ -148,7 +188,7 @@ describe("gpu lab distribution resolution", () => {
     await withDirectory(async (dir) => {
       await capturingWarnings(async (warnings) => {
         const error = await assertRejects(
-          () => resolveDistribution({ path: dir, explicit: true }),
+          () => resolveDistribution({ path: dir, explicit: true, ...ANIMA }),
           MissingDistributionError,
         );
         assertEquals(error.message.startsWith(`--source ${dir} has no karume.json`), true);
@@ -160,9 +200,27 @@ describe("gpu lab distribution resolution", () => {
   it("refuses to start when --source names a directory that does not exist", async () => {
     await withDirectory(async (dir) => {
       await assertRejects(
-        () => resolveDistribution({ path: `${dir}/absent`, explicit: true }),
+        () => resolveDistribution({ path: `${dir}/absent`, explicit: true, ...ANIMA }),
         MissingDistributionError,
       );
+    });
+  });
+
+  it("names the option and the tab of the distribution that is missing", async () => {
+    await withDirectory(async (dir) => {
+      const error = await assertRejects(
+        () => resolveDistribution({ path: dir, explicit: true, ...WAN }),
+        MissingDistributionError,
+      );
+      assertEquals(error.message.startsWith(`--wan-source ${dir} has no karume.json`), true);
+      assertEquals(error.message.endsWith("start without the Wan tab)"), true);
+      await capturingWarnings(async (warnings) => {
+        await resolveDistribution({ path: dir, explicit: false, ...WAN });
+        assertEquals(
+          String(warnings[0][0]).includes("the Wan tab is disabled; pass --wan-source"),
+          true,
+        );
+      });
     });
   });
 
@@ -170,7 +228,7 @@ describe("gpu lab distribution resolution", () => {
     await withDirectory(async (dir) => {
       await capturingWarnings(async (warnings) => {
         assertEquals(
-          await resolveDistribution({ path: `${dir}/absent`, explicit: false }),
+          await resolveDistribution({ path: `${dir}/absent`, explicit: false, ...ANIMA }),
           undefined,
         );
         assertEquals(warnings.length, 1);
@@ -183,8 +241,8 @@ describe("gpu lab distribution resolution", () => {
     await withDirectory(async (dir) => {
       await Deno.writeTextFile(`${dir}/karume.json`, "{}");
       const real = await Deno.realPath(dir);
-      assertEquals(await resolveDistribution({ path: dir, explicit: true }), real);
-      assertEquals(await resolveDistribution({ path: dir, explicit: false }), real);
+      assertEquals(await resolveDistribution({ path: dir, explicit: true, ...ANIMA }), real);
+      assertEquals(await resolveDistribution({ path: dir, explicit: false, ...WAN }), real);
     });
   });
 });
