@@ -11,6 +11,9 @@
     "2step-band-cat-dog-baking": {
       "deno-intel-graphics-bmg-g21": "e1414441a00c92dd2d2990241e3a5f5759db0a267a4b77d2d4ca4ca91c877e6f"
     },
+    "2step-seed-boxing-cats-seed42": {
+      "deno-intel-graphics-bmg-g21": "46ea9b993d250a05b51fa0812f61a2d372b235cf0bb1febe019c5c5c514d873a"
+    },
     "50step-boxing-cats-seed42": {
       "deno-intel-graphics-bmg-g21": "349147a252448744aaa8b5aabe4dd874bd934d4ae0c4a57796bf97ca3bf5aa05"
     },
