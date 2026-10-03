@@ -260,8 +260,12 @@ export type ChunkBudgetStats = {
     readonly maxUnbackedNs?: number;
     /** 単発 dispatch（1 pass）の GPU 時間の最大。分割できない単位の重さの目安。 */
     readonly maxDispatchNs: number;
-    /** その dispatch のパイプラインキー（{@link GpuTimingEntry.key} と同じ語彙）。 */
-    readonly maxDispatchKey: string;
+    /**
+     * その dispatch のパイプラインキー（{@link GpuTimingEntry.key} と同じ語彙）。正の差分を
+     * 1 度も観測していなければ undefined（どの dispatch も「最大」を名乗れない — 最初の
+     * dispatch のキーで埋めると、最大でないものを最大と表示する）。
+     */
+    readonly maxDispatchKey?: string;
   };
 };
 
@@ -358,7 +362,7 @@ type SubmitGpuTime = {
   unbackedSubmits: number;
   maxUnbackedNs: number | undefined;
   maxDispatchNs: number;
-  maxDispatchKey: string;
+  maxDispatchKey: string | undefined;
 };
 
 /**
@@ -666,7 +670,9 @@ export class SubmitScheduler {
               ? {}
               : { maxUnbackedNs: this.#submitGpuTime.maxUnbackedNs }),
             maxDispatchNs: this.#submitGpuTime.maxDispatchNs,
-            maxDispatchKey: this.#submitGpuTime.maxDispatchKey,
+            ...(this.#submitGpuTime.maxDispatchKey === undefined
+              ? {}
+              : { maxDispatchKey: this.#submitGpuTime.maxDispatchKey }),
           },
         }),
       },
@@ -926,7 +932,7 @@ export class SubmitScheduler {
       unbackedSubmits: 0,
       maxUnbackedNs: undefined,
       maxDispatchNs: 0,
-      maxDispatchKey: timing.entries[0].key,
+      maxDispatchKey: undefined,
     };
     observed.submits += 1;
     observed.maxNs = Math.max(observed.maxNs, spanNs);

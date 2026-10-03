@@ -603,6 +603,29 @@ Deno.test("submit の GPU 時間の幅は非単調なサンプルが混じって
   assertEquals(observed?.maxDispatchNs, 60, "負の差は 0 として比べる");
 });
 
+Deno.test("単発 dispatch の差分が全て 0 の間は最大の dispatch のキーを名乗らない", async () => {
+  // チャンク 1 は 2 dispatch とも差 0（幅は pass 間の隙間だけ）。チャンク 2 で初めて正の差が来る。
+  const gpu = createFakeGpu({ timestamps: [[100n, 100n, 200n, 200n], [0n, 5n]] });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
+
+  dispatchMany(scheduler, 2);
+  await scheduler.flush();
+
+  const zeroOnly = scheduler.stats.chunkBudget.submitGpuTime;
+  assertEquals(zeroOnly?.maxDispatchNs, 0);
+  assertEquals(
+    zeroOnly !== undefined && "maxDispatchKey" in zeroOnly,
+    false,
+    "最大でない dispatch のキーで埋めない",
+  );
+
+  scheduler.dispatch(fakePipeline, fakeBindGroup, [1, 1, 1], "test:heavy");
+  await scheduler.flush();
+  const observed = scheduler.stats.chunkBudget.submitGpuTime;
+  assertEquals(observed?.maxDispatchNs, 5);
+  assertEquals(observed?.maxDispatchKey, "test:heavy", "最初の正の差分で埋まる");
+});
+
 Deno.test("計測が無効な device では submit の GPU 時間を持たない", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
