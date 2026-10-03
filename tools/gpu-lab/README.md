@@ -9,6 +9,9 @@ concept for ADR 0115 (addendum decision 6):
 3. **Run** — inject the table with `acquireGpu({ geometryProfile })` and run Anima on it (the
    **3. Anima** tab).
 
+A fourth tab, **4. Wan**, runs the Wan2.1 text-to-video pipeline in Chrome (ADR 0118 stage 9; see
+[4. Wan](#4-wan) and [Checking Wan in Chrome](#checking-wan-in-chrome)).
+
 It replaces the two earlier pages (the Chrome page of `tools/geometry-sweep` and the Anima residency
 check page). Each tab keeps what its page did: the same measurements, table columns, JSON fields, and
 file names. The Deno CLIs stay where they were (see [Deno twins](#deno-twins)).
@@ -40,6 +43,16 @@ warning and still starts: the sweep and profile tabs do not need a model, `/conf
 only on the loopback interface and sends the cross-origin isolation headers (COOP / COEP / CORP).
 The page uses the distribution's default model. Only a single distribution directory is served, so
 the cross-repository layout of `karume-anima-extra` is not supported.
+
+The Wan distribution is served the same way from `models/karume-wan2.1` under `/models/wan/…`
+(`/config.json` names it in `wanSource`). `--wan-source <path>` overrides the directory; the same
+rules apply: an explicit `--wan-source` without `karume.json` stops the server with
+`--wan-source <path> has no karume.json`, and a missing default only prints a warning, sets
+`wanSource: null`, and answers 404 under `/models/wan/`:
+
+```sh
+deno task bench:gpu-lab --wan-source /path/to/karume-wan2.1
+```
 
 ### Using the page through port forwarding
 
@@ -105,8 +118,9 @@ text stage on the download; compare stage times only after the weights are cache
 
   **適用** disposes the Anima pipeline, its dummy buffers, and its GPU device; if the Anima tab held a
   device, it acquires a new one with the new settings at once, and the Anima status line says
-  `GPU を取り直しました（quant <quant>・幾何プロファイル <requested>）`. The timestamp setting applies to the
-  next sweep and to the Anima device.
+  `GPU を取り直しました（quant <quant>・幾何プロファイル <requested>）`. It also disposes the Wan pipeline and
+  its device, which the Wan tab acquires again on the next **読み込む**. The timestamp setting applies
+  to the next sweep and to the Anima device (the Wan tab never asks for timestamps).
 - **Environment line** — the adapter, whether GPU time is taken, the applied geometry profile
   (`自動 → <id>`, `<requested>（注入）` where `<requested>` is `default`, `builtin:<id>`, or
   `generated:<id>`, or `saved:<id>（GPU を取るときに adapter と照合 — …）`), and the checkout revision. On the sweep tab it adds that
@@ -137,7 +151,7 @@ Deriving a new table after applying this choice marks the settings as pending: a
 use the new saved text.
 
 Only one GPU operation runs at a time: a sweep, an Anima action (generate, fill VRAM, release,
-dispose), or applying GPU settings. Starting another while one runs is refused with a message; two
+dispose), a Wan action (load, generate, dispose), or applying GPU settings. Starting another while one runs is refused with a message; two
 at once would make both timings meaningless.
 
 ## 1. 掃引 (sweep)
@@ -279,7 +293,152 @@ distribution; without one (see [Running](#running)) every control is disabled.
 GPU time splits every dispatch into its own compute pass, so wall times with GPU time on are not
 comparable to wall times with it off.
 
-## JSON formats
+## 4. Wan
+
+Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) in Chrome, to see whether a clip
+completes on a browser device and, when it does not, where it stops (binding limits, the GPU
+timeout, memory). The pipeline's rules are those of `examples/wan`: only the four prompts of the
+embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
+
+- **取得元** (source) — blank reads the distribution this server serves (`models/karume-wan2.1`); an
+  `owner/name` reads that Hugging Face repository at `main` (the distribution is not published
+  yet, so the blank default is the normal case).
+- **読み込む** (load) reads the manifest, acquires a GPU device, and builds the pipeline with
+  `WanPipeline.fromPretrained(source, { gpu })`. The device is acquired by the tab with the applied
+  geometry profile of the GPU settings and without GPU time: `WanPipeline` refuses a timing device
+  (the VAE decodes one tile per batch, and the runtime opens no batch on a timing device), so the
+  timestamp setting does not apply to this tab. `acquireGpu` requests the adapter's own limits, so
+  the device does not keep the WebGPU default of 128 MiB per storage binding. From this server, loading
+  reads only the descriptors, and every generate reads the weights from the server again as each
+  stage builds its session (about 2.6 GiB for the transformer and 0.27 GiB for the VAE); from
+  Hugging Face, loading first downloads the weight parts into the browser cache. **pipeline を破棄** disposes the pipeline and
+  the device; use it after a device loss. Applying the GPU settings also disposes them; load again
+  to use the new settings.
+- **The limits table** lists every limit `acquireGpu` requests, with the adapter's value and, once
+  loaded, the device's. Two rows are judged for the selected frame count and size (red when short):
+  `maxStorageBufferBindingSize` and `maxBufferSize` must hold the largest value the runtime cannot
+  split (see [binding limits](#1-binding-limits)). The line above the table gives the verdict and
+  the largest frame count those two limits allow at the selected size. The other rows are
+  informational. Passing the table is necessary, not sufficient: memory and submit times are
+  checked only by running.
+- **Prompt, negative, seed, frames, size, steps, guidance, shift** — leave steps, guidance, and shift
+  blank for the distribution defaults (50, 5.0, 3.0; the placeholders show them after loading). A
+  blank negative uses the asset's `negative` row. **生成** (generate) reads them once.
+- Each generate adds a row: the resolved request, the wall time, each stage's time
+  (`transformer`, `vae_decoder`), the step times and the VAE tile times (the first one includes
+  building that stage's sessions, i.e. uploading the weights; then the median and maximum of the
+  rest — a step is two transformer forwards with CFG), the session diagnostics of each component
+  (weights and slot backing allocated, geometry profile, submit count, `窓平均の最大` = the largest
+  window mean, a lower bound of the longest submit, and the count of chunks over the time budget),
+  the SHA-256 of the RGB bytes (every frame's 8-bit RGB from `wanFrameToRgba`, concatenated in frame
+  order — the bytes the e2e reference rows hash), the reference verdict, and the error. The clip is
+  drawn on the canvas next to the table: **前** / **次** step one frame, **再生** plays at 16 fps,
+  and the slider seeks.
+- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/1`).
+
+There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
+stops it. A 50-step clip takes about 30 minutes for 33 frames and about 2 hours for 81 frames on the
+Intel Arc B570 under Deno.
+
+## Checking Wan in Chrome
+
+The target of ADR 0118 stage 9 is a complete clip in Chrome on the user's machines (an RTX 5070 Ti
+first: Chrome reports it as vendor `nvidia`, architecture `blackwell`). The numbers below come
+from the B570 runs of stages 6 to 8 under Deno.
+
+### 1. Binding limits
+
+Chrome gives a device 128 MiB per storage binding unless more is requested; `acquireGpu` requests
+the adapter's value. What a clip needs is the largest value the runtime cannot split:
+
+| Value                                         | 33 frames               | 81 frames                  |
+| --------------------------------------------- | ----------------------- | -------------------------- |
+| Transformer FFN intermediate `[1,S,8960]` f32 | 503,193,600 B (480 MiB) | 1,174,118,400 B (1.09 GiB) |
+| VAE intermediate (`vae_decoder_next`) f32     | 201,326,592 B (192 MiB) | 201,326,592 B (192 MiB)    |
+
+S is the token count (14,040 at 33 frames, 32,760 at 81). So no clip runs at the 128 MiB default,
+33 frames need at least 503,193,600 B, and 81 frames at least 1,174,118,400 B, for both
+`maxStorageBufferBindingSize` and `maxBufferSize`.
+
+The self-attention scores are not such a value: the attention op splits its query rows into
+blocks that each fit the binding limit (ADR 0060). On the B570 (limit 2,147,483,644 B) that is 5
+blocks of 1,892,367,360 B at 33 frames and 24 blocks of 2,146,435,200 B at 81 frames; a smaller limit
+gives more, smaller blocks, not a failure, so an adapter below 2,146,435,200 B can still run 81
+frames. The limits table shows the block count for the selected request.
+
+### 2. GPU timeout (TDR and the watchdog)
+
+- Windows resets a GPU job that runs longer than 2 s by default (TDR); Chrome has its own GPU
+  watchdog (about 10 s, from a secondary source). The runtime cuts submits by a time budget, and the
+  longest single submit measured on the B570 was 458.6 ms at 81 frames — but that was in the timing
+  mode, which splits passes differently; the normal mode the page uses has not been measured. The
+  RTX 5070 Ti is expected to be faster per submit (an expectation, not a measurement).
+- The diagnostics column gives `窓平均の最大` per component: a lower bound of the longest submit. A
+  value near or above 2,000 ms on Windows is a warning even when the run completes.
+- A timeout shows as a device loss: the status line and the row say
+  `GPU device lost（<reason>）: <message>`, and Chrome may also print `D3D12` or device-removed
+  errors in the console. On Windows, a TDR also leaves a `Display` event 4101 in Event Viewer
+  (Windows Logs → System). Record all three, then press **pipeline を破棄** before trying again.
+
+### 3. Memory
+
+On the B570 the transformer stage peaked at 6.19 GiB (33 frames) and 7.31 GiB (81 frames), the VAE
+stage at 3.32 and 3.78 GiB, and the two stages never hold memory at the same time. A 16 GB card is
+expected to fit both, but Chrome's own allocations on top of that have not been measured. The page
+cannot read VRAM: watch it from outside (`nvidia-smi --query-gpu=memory.used --format=csv -l 1`, or
+the dedicated GPU memory graph in the Windows Task Manager) and note the peak of each stage. The
+diagnostics column gives the weights and slot backing of each session (on the B570 at 81 frames:
+2.645 + 3.517 GiB for the transformer), a lower bound that leaves out the VAE caches (about
+0.58 GiB).
+
+### 4. The single ArrayBuffer limit
+
+Chromium refuses any single ArrayBuffer above 2,145,386,496 bytes (`docs/limitations.md`). No host
+buffer of a Wan run comes near it: the largest weight part is 264,705,024 B and parts are read one at
+a time, the text embedding asset is 5,280,288 B, the f32 clip is 388,177,920 B at 81 frames, its RGB
+bytes 97,044,480 B, and the largest VAE cache 50,331,648 B. The 2 GiB attention blocks live on the
+GPU, not in an ArrayBuffer.
+
+### 5. Environment keys and reference SHA-256
+
+Reference hashes are kept per environment (ADR 0106) in
+`packages/models/tests/fixtures/references/wan.json`. The page has no `KARUME_REFERENCE=write`:
+it shows the environment key (on the line above the status), and, when the request is one of the
+reference cases, the case id and whether this environment's row matches. When there is no row, report
+the key, the case id, and the SHA-256; the row is then added to the file. The key is
+`chrome-<vendor>-<architecture>` (`chrome-nvidia-blackwell` on the RTX 5070 Ti) without the
+developer features flag, and is built from the adapter description with the flag, so the same
+machine has two keys; keep the flag setting the same across runs. Rows of another key are never
+compared (bit equality across machines is not guaranteed).
+
+The reference cases are the e2e cases: `boxing-cats`, seed 42, the default negative, the default
+guidance and shift, 832x480, and
+
+- `2step-seed-boxing-cats-seed42` — steps 2, 33 frames (a quick run),
+- `50step-boxing-cats-seed42` — steps 50, 33 frames,
+- `50step-boxing-cats-seed42-81f` — steps 50, 81 frames.
+
+### 6. What to record
+
+1. The adapter line (vendor, architecture, description), the environment key, and the user agent.
+2. The limits table (adapter and device values) and its verdict line.
+3. For each run: the row (stage, step, and tile times; diagnostics; SHA-256; reference verdict).
+4. The VRAM peak of each stage, if you can watch it.
+5. On a failure: the status line, the row's error, the console errors (copy them), and on Windows
+   the Event Viewer entry.
+6. **JSON を保存** after the last run (it holds all of the above that the page sees).
+
+### Steps
+
+1. Start the server on the machine with the GPU, with the checkout and `models/karume-wan2.1`
+   (through port forwarding every generate reads the 2.9 GiB of weights through the tunnel again).
+2. Open **http://localhost:8790/#wan** in Chrome and note whether the developer features flag is on.
+3. Before loading, read the limits table at 33 and at 81 frames.
+4. Press **読み込む**. The device column fills in; it should equal the adapter column.
+5. Run the quick reference case: `boxing-cats`, seed 42, 33 frames, 832x480, steps 2, guidance and
+   shift blank. Check that the clip plays and note the SHA-256.
+6. Run `50step-boxing-cats-seed42` (steps blank), then, if it completes, 81 frames.
+7. Save the JSON and report it with the records above.
 
 - **Sweep** — `karume-geometry-sweep/2`, as described in
   [../geometry-sweep/README.md](../geometry-sweep/README.md#output-karume-geometry-sweep2), with

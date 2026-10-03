@@ -70,3 +70,13 @@ the same rule the reference hashes use.
 
 The default run takes about half an hour on the B570: two transformer forwards per step (about 17 s
 each at 832×480 × 33 frames) and about two minutes of tiled VAE decoding.
+
+## In Chrome
+
+The same pipeline runs in Chrome on the **4. Wan** tab of the GPU lab (`deno task bench:gpu-lab`;
+see [tools/gpu-lab/README.md](../../tools/gpu-lab/README.md#4-wan)). The tab reads
+`models/karume-wan2.1` from the lab's server, checks the adapter's limits against the selected frame
+count before loading, plays the clip, and shows the SHA-256 of the frames for the reference cases.
+A clip needs a storage binding of at least 503,193,600 bytes at 33 frames and 1,174,118,400 bytes
+at 81 frames (the transformer's FFN intermediate), far above the WebGPU default of 128 MiB;
+`acquireGpu` requests the adapter's own limits. A complete run in Chrome has not been confirmed yet.
