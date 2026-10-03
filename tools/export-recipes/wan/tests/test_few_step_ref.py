@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from _shared.paths import SERIES_ROOT
-from wan import export_vae, few_step_ref, prompts, text_embeds, vae_tiling
+from wan import export_vae, few_step_ref, pipeline_ref, prompts, text_embeds, vae_tiling
 
 SERIES = SERIES_ROOT / export_vae.SERIES_NAME
 EMBEDS = SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
@@ -126,3 +126,84 @@ class TestWrittenReference:
         expected = torch.randn(1, *few_step_ref.LATENT_SHAPE, generator=generator)[0]
 
         assert torch.equal(tensors["latents_init"], expected)
+
+
+class TestRunCase:
+    """`run_case` の記録の振り分けと attention の固定（DiT・decode・scheduler は差し替え — 重みは
+    読まない）。
+
+    差し替えた DiT は「受けた文脈の先頭の値」を出力に書くので、記録の行き先が値で分かる。
+    """
+
+    CASE = few_step_ref.FIXTURE_CASES[0]
+    COND, UNCOND = 1.0, 2.0
+
+    class _Dit(torch.nn.Module):
+        def forward(self, *, hidden_states, timestep, encoder_hidden_states, return_dict):
+            return (torch.full_like(hidden_states, float(encoder_hidden_states[0, 0, 0])),)
+
+    @pytest.fixture
+    def pipeline(self, monkeypatch):
+        monkeypatch.setattr(few_step_ref, "LATENT_SHAPE", (16, 1, 2, 2))
+        monkeypatch.setattr(few_step_ref, "denormalize_latents", lambda _pipeline, latents: latents)
+        monkeypatch.setattr(few_step_ref.vae_tiling, "plan_tiles", lambda *_args: None)
+        monkeypatch.setattr(
+            few_step_ref.vae_tiling,
+            "tiled_decode_unclamped",
+            lambda _vae, _latents, _plan: torch.zeros(1, 3, 1, 16, 16),
+        )
+        return SimpleNamespace(
+            transformer=self._Dit(),
+            scheduler=SimpleNamespace(
+                timesteps=torch.tensor([999, 750]), sigmas=torch.tensor([1.0, 0.5, 0.0])
+            ),
+            vae=None,
+        )
+
+    def _embeds(self) -> dict[str, torch.Tensor]:
+        return {
+            self.CASE.prompt: torch.full((3, pipeline_ref.TEXT_DIM), self.COND),
+            "negative": torch.full((4, pipeline_ref.TEXT_DIM), self.UNCOND),
+        }
+
+    def _upstream(self, monkeypatch, order) -> None:
+        """上流の denoise ループの代役（`order` が 1 ステップの中の文脈の呼び順を決める）。"""
+
+        def run(pipeline, *, prompt_embeds, negative_prompt_embeds, latents, **kwargs):
+            contexts = {
+                "cond": pipeline_ref.pad_text_embeds(prompt_embeds),
+                "uncond": pipeline_ref.pad_text_embeds(negative_prompt_embeds),
+                "other": torch.zeros(1, pipeline_ref.MAX_SEQUENCE_LENGTH, pipeline_ref.TEXT_DIM),
+            }
+            for index, timestep in enumerate(pipeline.scheduler.timesteps):
+                for label in order:
+                    pipeline.transformer(
+                        hidden_states=latents,
+                        timestep=timestep.expand(1),
+                        encoder_hidden_states=contexts[label],
+                        return_dict=False,
+                    )
+                latents = latents + 1
+                kwargs["callback_on_step_end"](pipeline, index, timestep, {"latents": latents})
+            return latents
+
+        monkeypatch.setattr(pipeline_ref, "run", run)
+
+    @pytest.mark.parametrize(
+        "order", [("cond", "uncond"), ("uncond", "cond")], ids=["upstream", "swapped"]
+    )
+    def test_the_outputs_are_labelled_by_their_text_context(self, pipeline, monkeypatch, order):
+        """上流の呼び順（cond → uncond）が入れ替わっても、cond の出力は cond の欄へ入る。"""
+        self._upstream(monkeypatch, order)
+
+        tensors, _ = few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)
+
+        for index in range(few_step_ref.STEPS):
+            assert bool((tensors[f"noise_cond.{index}"] == self.COND).all()), index
+            assert bool((tensors[f"noise_uncond.{index}"] == self.UNCOND).all()), index
+
+    def test_a_context_that_is_neither_embedding_is_refused(self, pipeline, monkeypatch):
+        self._upstream(monkeypatch, ("cond", "other"))
+
+        with pytest.raises(AssertionError, match="振り分けを決められない"):
+            few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)

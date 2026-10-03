@@ -18,8 +18,10 @@ CPU f32 で素のまま回して作る（`wan/pipeline_ref.py` の上に乗る�
 ## 出力（系列の根の `pipeline_steps.<case>.safetensors`）
 
 - `latents_init` `[16,9,60,104]`: 注入した初期ノイズ。
-- `noise_cond.<i>` / `noise_uncond.<i>`: ステップ `i` の DiT の出力（cond / uncond の順 — forward の
-  hook で記録。上流の計算には触らない）。GPU との差を DiT とホストの UniPC / CFG に帰属させる用。
+- `noise_cond.<i>` / `noise_uncond.<i>`: ステップ `i` の DiT の出力（forward の hook で記録。上流の
+  計算には触らない）。cond / uncond の振り分けは呼び出しの順ではなく、hook が受けたテキスト文脈の
+  値（正 / negative の埋め込みのどちらと一致するか）で決める — 上流の呼び順が変わっても入れ替わった
+  まま書かない。GPU との差を DiT とホストの UniPC / CFG に帰属させる用。
 - `latents.<i>`: ステップ `i` の後の潜在（`callback_on_step_end` で記録）。最後が VAE の入力。
 - `frames` `[3,33,480,832]`: 最終の潜在を上流と同じ逆正規化（`pipeline_wan.py` の
   `latents / latents_std + latents_mean` の逐語）→ 段 5 のタイル decode の参照
@@ -147,11 +149,24 @@ def run_case(
     generator = torch.Generator().manual_seed(case.seed)
     latents_init = torch.randn(1, *LATENT_SHAPE, generator=generator)
 
-    forwards: list[tuple[int, torch.Tensor]] = []
+    # 上流へ渡す文脈と同じ値（`pipeline_ref.run` が同じ関数で埋める）— hook はこれと値で
+    # 突き合わせる。
+    contexts = {
+        "cond": pipeline_ref.pad_text_embeds(embeds[case.prompt]),
+        "uncond": pipeline_ref.pad_text_embeds(embeds["negative"]),
+    }
+    forwards: list[tuple[int, str, torch.Tensor]] = []
 
     def record_forward(_module: Any, _args: Any, kwargs: dict[str, Any], output: Any) -> None:
         # 上流は `return_dict=False` でタプルを返す。timestep は `t.expand(1)`（int64）。
-        forwards.append((int(kwargs["timestep"][0]), output[0].detach().clone()))
+        context = kwargs["encoder_hidden_states"]
+        labels = [label for label, value in contexts.items() if torch.equal(context, value)]
+        if len(labels) != 1:
+            raise AssertionError(
+                f"{case.name}: DiT の文脈が cond / uncond の埋め込みの {len(labels)} 本と一致する"
+                "（1 本のはず）— 振り分けを決められない"
+            )
+        forwards.append((int(kwargs["timestep"][0]), labels[0], output[0].detach().clone()))
 
     steps: list[torch.Tensor] = []
 
@@ -181,9 +196,17 @@ def run_case(
         raise AssertionError(
             f"forward {len(forwards)} 回・step {len(steps)} 回（CFG あり 2 ステップ）"
         )
-    if [t for t, _ in forwards] != [t for t in timesteps for _ in range(2)]:
+    if [t for t, _, _ in forwards] != [t for t in timesteps for _ in range(2)]:
         raise AssertionError(
-            f"forward の timestep {[t for t, _ in forwards]} が {timesteps} と合わない"
+            f"forward の timestep {[t for t, _, _ in forwards]} が {timesteps} と合わない"
+        )
+    outputs: dict[tuple[int, str], torch.Tensor] = {}
+    for index, (_, label, output) in enumerate(forwards):
+        outputs[(index // 2, label)] = output
+    if sorted(outputs) != [(step, label) for step in range(STEPS) for label in sorted(contexts)]:
+        raise AssertionError(
+            "ステップごとの cond / uncond が 1 本ずつでない"
+            f"（{[label for _, label, _ in forwards]}）"
         )
     if not torch.equal(final, steps[-1]):
         raise AssertionError("最終の潜在が最後の step の記録と違う")
@@ -198,8 +221,8 @@ def run_case(
 
     tensors: dict[str, torch.Tensor] = {"latents_init": latents_init[0]}
     for index in range(STEPS):
-        tensors[f"noise_cond.{index}"] = forwards[2 * index][1][0]
-        tensors[f"noise_uncond.{index}"] = forwards[2 * index + 1][1][0]
+        tensors[f"noise_cond.{index}"] = outputs[(index, "cond")][0]
+        tensors[f"noise_uncond.{index}"] = outputs[(index, "uncond")][0]
         tensors[f"latents.{index}"] = steps[index][0]
     tensors["frames"] = frames
     for name, tensor in tensors.items():
