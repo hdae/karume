@@ -46,7 +46,8 @@ const ALLOW_NO_DISTRIBUTION = Deno.env.get("KARUME_ALLOW_NO_DISTRIBUTION") === "
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
- * 門番が要求する配布形ミラー = 公開済みの 10 リポ + `karume-gemma4-qat` + `karume-wan2.1`。
+ * 門番が要求する配布形ミラー = 公開済みの 10 リポ + `karume-gemma4-qat` + `karume-wan2.1` + `karume-umt5-xxl`
+ * （Wan の GPU 経路の e2e がこのミラーを越境参照の根にする — ADR 0119 段 10d・無いと欠如が無音の SKIP になる）。
  *
  * `karume-gemma4-qat` は未公開だが、QAT の公開入口 e2e と融合ヒット数の門が根にするので、
  * 射程を広げる前から門番に載っていた（外すと既存の門を緩めることになる）。`karume-wan2.1` も未公開
@@ -65,6 +66,7 @@ const DISTRIBUTIONS = [
   "karume-sbv2-jvnv",
   "karume-siglip2",
   "karume-wan2.1",
+  "karume-umt5-xxl",
 ] as const;
 
 /** この版の読み手が受け付ける配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
