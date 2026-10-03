@@ -2,15 +2,16 @@
 
 TS が持つのは S 形グラフの外の 4 段（patchify / unpatchify / RoPE の表の並べ替え /
 `timesteps_proj`）で、ここはその入力と**上流の値**を小さな格子で焼く（ADR 0118 決定 3・検収 段 2）。
-追跡対象の fixture なので、大きさは格子 1 つ（潜在 `[16,2,6,10]` → F'·H'·W' = 2·3·5 = 30 トークン）
-と timestep 50 本に絞る。
+追跡対象の fixture なので、大きさは格子 1 つ（潜在 `[16,21,6,10]` → F'·H'·W' = 21·3·5 = 315
+トークン）と timestep 50 本に絞る。時間軸は 81 フレームの潜在の T' = 21 そのもの（ADR 0118 段 8 —
+RoPE の t 軸の位置 0〜20 を全部、上流の表と突き合わせる）。
 
     uv run --group wan --inexact python -m wan.dit_host_fixture
 
 出力（既定 `packages/models/tests/fixtures/wan-dit/`）:
 
     host.safetensors       patchify / unpatchify / RoPE の表 / timesteps_proj の入力と期待値
-    rope_base.safetensors  資産 `rope_base` と同じ形式の素表（行を格子に要る 8 行へ切り詰めたもの）
+    rope_base.safetensors  資産 `rope_base` と同じ形式の素表（行を格子に要る 24 行へ切り詰めたもの）
     host.json              出所（repo / revision）・patch・格子・timestep の列
 
 期待値の作り方（どれも上流の演算を呼ぶ — 式を写さない）:
@@ -46,13 +47,13 @@ from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
 
 DEFAULT_OUT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-dit"
 
-#: fixture の潜在 `(F, H, W)`。格子 F'·H'·W' = 2·3·5 は 3 軸とも違う値（軸の取り違えが対合にならな
-#: い）。
-LATENT_SHAPE = (2, 6, 10)
+#: fixture の潜在 `(F, H, W)`。格子 F'·H'·W' = 21·3·5 は 3 軸とも違う値（軸の取り違えが対合にならな
+#: い）で、F' = 21 は 81 フレームの潜在の時間軸（ADR 0118 段 8）。
+LATENT_SHAPE = (21, 6, 10)
 
-#: 素表を切り詰める行数（格子の最大 5 を覆う。資産の 1,024 行のままだと fixture が 0.5 MiB
+#: 素表を切り詰める行数（格子の最大 F' = 21 を覆う。資産の 1,024 行のままだと fixture が 0.5 MiB
 #: になる）。
-ROPE_BASE_ROWS = 8
+ROPE_BASE_ROWS = 24
 
 #: 参照の設定の列に足す timestep（端の 0 / 1 と、TS との差の実測最悪 745）。
 EXTRA_TIMESTEPS = (0, 1, 745)

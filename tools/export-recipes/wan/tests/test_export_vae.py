@@ -130,9 +130,12 @@ class TestTheCheckItself:
 
 class TestFixtureCases:
     def test_band_and_accept_differ_in_latents_and_chunk_boundaries(self):
-        band, accept = export_vae.FIXTURE_CASES
+        band, accept, long = export_vae.FIXTURE_CASES
 
         assert (band.role, accept.role) == ("band", "accept")
         assert band.seed != accept.seed
         assert band.chunks != accept.chunks
         assert band.chunks == 9  # 33 フレーム = 最初の到達目標の 1 タイル分（ADR 0118）
+        # 81 フレーム（ADR 0118 段 8）の受入れ: 1 + 4·20 = 81。帯は band のまま（受入れ側）。
+        assert (long.name, long.role, long.chunks) == ("long", "accept", 21)
+        assert long.seed not in {band.seed, accept.seed}

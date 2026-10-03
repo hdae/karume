@@ -83,15 +83,30 @@ moves about 3× with the input).
 
 Only `full-band-s14040-t0999` and `full-accept-s14040-t0999` keep the 30 block outputs (2.6 GB
 each) for the per-layer record; the other real-size cases hold the final outputs only. On a 6-core
-desktop CPU (2026-10-02) one real-size case takes about 370 s for the float64 forward and 140 s
-each for the f32 and the patched ones, so the whole command takes about 88 minutes and writes about
-6.2 GB of golden files (plus the container).
+desktop CPU (2026-10-02) one S = 14,040 case takes about 370 s for the float64 forward and 140 s
+each for the f32 and the patched ones, so the cases up to stage 3 take about 88 minutes and write
+about 6.2 GB of golden files (plus the container).
 
 As of 2026-10-02 the real-size comparison is green: both acceptance cases are inside the band of 75
 (r = 2.93 and 4.60) and all four fault injections are outside it. The off-by-one timestep's smallest
 margin is 4.4× the band (r = 332 at t = 600), above the 2× floor (`SUBTLE_FAULT_MARGIN`). The band,
 the metric and the decision cases were not changed after the acceptance run (the NOTE on
 `DIT_FULL_NORMALIZED_BAND` in the e2e test has the numbers).
+
+Stage 8 adds eight cases at 81 frames (latent `[16,21,60,104]`, S = 32,760 — exactly the `Dim("S")`
+ceiling). They repeat the timesteps and text lengths of the S = 14,040 cases with new seeds
+(`full-band` `SEED` + 20 to 25, `full-accept` 777008 / 777009), and their band is derived from them
+alone: the S = 14,040 band is not carried over (decision 8). None of them keeps block outputs — the
+per-layer probe would need about 6 GB of readback staging for 30 block outputs, which does not fit
+on the B570.
+
+The CPU references (f32 and float64) and the patched eager forward run with attention pinned to
+PyTorch's CPU flash kernel (`dit_patch.flash_attention_only`). At S = 32,760 a fallback to the math
+kernel would allocate the full score matrix, 51.5 GB in f32 and 103 GB in float64, and die out of
+memory; with the pin, an input the flash kernel cannot take raises instead. PyTorch 2.13 already
+picks the flash kernel for these shapes, so the pin changes no value: the reference and the patched
+output of `band-s00192-t0999` (all 30 block outputs included) were reproduced byte for byte against
+the existing golden.
 
 ## VAE (stage 4)
 
@@ -126,9 +141,11 @@ uv run --group wan --inexact python -m wan.export_vae --verify   # eager equival
 
 The graphs go to `outputs/series/wan2.1-t2v-1.3b-f16-dyn/{vae_decoder_first,vae_decoder_next}/`
 (f16 storage; the weights are rounded to f16 before the references are taken). The series root also
-gets `vae_chunks.{band,accept}.safetensors`: a seeded de-normalized latent (9 and 5 chunks) and the
-upstream non-tiled `_decode` chunk loop before its clamp. `band` sets the GPU tolerance and
-`accept` (another latent, other chunk boundaries) is the one judged against it.
+gets `vae_chunks.{band,accept,long}.safetensors`: a seeded de-normalized latent (9, 5 and 21 chunks)
+and the upstream non-tiled `_decode` chunk loop before its clamp. `band` sets the GPU tolerance and
+`accept` (another latent, other chunk boundaries) is the one judged against it. `long` (stage 8: 21
+chunks = 81 frames, the cache carried over 20 times) is a second acceptance case against the same
+`band` tolerance.
 
 Measured on 2026-10-02 (tile 32):
 
@@ -266,8 +283,9 @@ the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
   `drm-total-vram0`) peaks at 5.7 GiB in the DiT stage and 2.9 GiB in the VAE stage, and is back
   to 0.4 GiB right after the DiT session is disposed, so the two stages never overlap and no extra
   wait for released memory is needed between them.
-- The 50-step run with the default settings is opt-in (`KARUME_WAN_FULL_PIPELINE=1`); it writes the 33
-  frames and a 4×8 contact sheet as PNG under `outputs/verify/<environment>/<date>_wan-pipeline-full/`.
+- The 50-step run with the default settings is opt-in (`KARUME_WAN_FULL_PIPELINE=1`); it runs the 33-frame
+  and the 81-frame clip and writes every frame and a 4×8 contact sheet as PNG under
+  `outputs/verify/<environment>/<date>_wan-pipeline-full/`.
 
 The UniPC port is checked against `wan-scheduler/unipc.*`: σ bit for bit, timesteps exactly, the
 50-step trajectory within an absolute 2e-5 (torch's float32 `log` differs from the correctly rounded

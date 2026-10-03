@@ -170,12 +170,12 @@ const WAN_PATCH: WanPatchGeometry = {
 const TEMPORAL_COMPRESSION = 4;
 
 /**
- * 受理集合（ADR 0118 決定 7 — 832×480 / 480×832 × フレーム数 4n+1）。検収したのは
- * 832×480 の 33 フレーム（段 3 / 5 / 6）と 480×832 の VAE（段 5）。
+ * 受理集合（ADR 0118 決定 7 — 832×480 / 480×832 × フレーム数 4n+1 の 5〜81）。検収したのは
+ * 832×480 の 33 フレーム（段 3 / 5 / 6）と 81 フレーム（段 8）、480×832 の VAE（段 5）。
  *
- * フレーム数の上限は今は 33（決定 7 の 81 は段 8 で解禁する）。81 フレームは DiT（約 7.6 GiB）を
- * 持ったまま VAE の段へ進む形になり、段 0 の見積りで B570 の VRAM を越える — 段 8 で段の切り替えを
- * 詰めてから上げる。MUST: 拒む文言は上限（33）だけを言う（利用者に段の番号は意味を持たない）。
+ * 81 フレームの可否は DiT 段単独の VRAM だけで決まる — 冒頭の NOTE の実測どおり DiT の Session を
+ * 畳んだ直後に確保が戻り、DiT 段と VAE 段は重ならない（切り替えの山 = DiT 段の山）。その DiT 段の
+ * 山は段 8 で B570 で測る。MUST: 拒む文言は上限（81）だけを言う（利用者に段の番号は意味を持たない）。
  *
  * MUST: 変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN_ACCEPTED_SIZES` /
  * `WAN_FRAMES`）と `tests/fixtures/wan-card-limits.json` も同じ値にする — カードは manifest に無い
@@ -187,7 +187,7 @@ export const ACCEPTED_SIZES: readonly { readonly width: number; readonly height:
   { width: 480, height: 832 },
 ];
 export const MIN_FRAMES = 5;
-export const MAX_FRAMES = 33;
+export const MAX_FRAMES = 81;
 
 /**
  * 生成の既定のうち配布形が宣言しないもの（最初の到達目標の 832×480・33 フレーム — 受理集合の側の
@@ -274,7 +274,7 @@ export type WanGenerateRequest = {
   readonly guidance?: number;
   /** flow matching の shift（正・既定は `pipelineConfig.scheduler.shift`）。 */
   readonly shift?: number;
-  /** フレーム数（4n+1 の 5〜33・既定 33）。 */
+  /** フレーム数（4n+1 の 5〜81・既定 33）。 */
   readonly frames?: number;
   /** 幅 × 高さ（832×480 か 480×832・既定 832×480）。 */
   readonly width?: number;

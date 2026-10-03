@@ -13,6 +13,9 @@
     },
     "50step-boxing-cats-seed42": {
       "deno-intel-graphics-bmg-g21": "349147a252448744aaa8b5aabe4dd874bd934d4ae0c4a57796bf97ca3bf5aa05"
+    },
+    "50step-boxing-cats-seed42-81f": {
+      "deno-intel-graphics-bmg-g21": "3cda7368e9062d53e5d708da32ae2838d2ba203203d9ca21c6c1d6709f158421"
     }
   }
 }

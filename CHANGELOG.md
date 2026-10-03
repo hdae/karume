@@ -177,7 +177,7 @@ measurements in `docs/research/`.
   passes, the flow-matching UniPC scheduler runs on the host, and the VAE always decodes in tiles.
   `prompt` and `negativePrompt` must be one of the prompts stored in the embedding asset (original
   or normalized text — `WanPipeline.prompts` lists them); any other string, a size other than
-  832×480 / 480×832, a frame count other than 4n+1 in 5–33, and out-of-range knobs throw
+  832×480 / 480×832, a frame count other than 4n+1 in 5–81, and out-of-range knobs throw
   `ModelInputError` before any weight reaches the GPU. A GPU with `gpuTiming` is rejected at construction (the VAE stage needs
   batches). `wanFrameToRgba(video, frame)` converts one frame to 8-bit RGBA for `encodePng`.
 - Exporter recipes: `dist.py --pipeline wan` assembles the Wan2.1 series into the

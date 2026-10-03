@@ -2,8 +2,8 @@
 // GPU も実重みも要らない純関数のテスト（実 GPU の通しは e2e_wan_dit_test.ts）。
 //
 // fixture は `fixtures/wan-dit/`（生成: tools/export-recipes/wan/dit_host_fixture.py — 期待値は上流の
-// 演算の出力で、式の写しではない）。格子は F'·H'·W' = 2·3·5 で 3 軸とも違う値にしてある — 軸の
-// 取り違えは正方の格子では値が一致して隠れる。
+// 演算の出力で、式の写しではない）。格子は F'·H'·W' = 21·3·5 で 3 軸とも違う値にしてある — 軸の
+// 取り違えは正方の格子では値が一致して隠れる。F' = 21 は 81 フレームの潜在の時間軸（ADR 0118 段 8）。
 //
 // - patchify / unpatchify / RoPE の表: **ビット一致**（Uint32）。どれもデータ移動だけ。
 // - `timesteps_proj`: atol（下の `TIMESTEPS_PROJ_ATOL` の doc に実測）。
@@ -229,6 +229,8 @@ Deno.test("wanRopeTables: 素表からの並べ替えが上流 model.rope の表
   assertEquals(base.widths, [22, 21, 21]);
   assertEquals(wanRopeWidth(base), 128);
   const grid = wanTokenGrid(meta.latent_shape, WAN_GEOMETRY);
+  // 81 フレームの潜在の時間軸 T' = 21 を覆う — t 軸の位置 0〜20 が全部、上流の表とビットで照合される。
+  assertEquals(grid.frames, 21);
   const tables = wanRopeTables(base, grid);
   assertEquals([...shapeOf(host, "rope.cos")], [1, grid.count, 1, 128]);
   assertEquals(firstBitMismatch(tables.cos, floats(host, "rope.cos")), -1, "cos 表が割れる");

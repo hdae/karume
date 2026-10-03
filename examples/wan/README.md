@@ -52,9 +52,8 @@ from the distribution's `pipelineConfig` (50, 5.0 and 3.0, the reference setting
 frame count default to 832×480 and 33 frames. `--seed` defaults to 42.
 
 - `--size` accepts `832x480` or `480x832`.
-- `--frames` accepts 4n+1 between 5 and 33. Only 33 frames has been verified end to end on the
-  development GPU (Intel Arc B570); longer clips (up to 81 frames) are planned once the VRAM budget
-  for holding the DiT next to the VAE is measured.
+- `--frames` accepts 4n+1 between 5 and 81. Only 33 and 81 frames have been verified end to end on
+  the development GPU (Intel Arc B570).
 - `--guidance 1` turns classifier-free guidance off; `--negative` is then rejected.
 
 Values outside these sets fail with `ModelInputError` before any weight reaches the GPU.

@@ -222,13 +222,13 @@ describe("planWanGeneration（generate の入口の門）", () => {
     assertEquals(plan({ frames: 5 }).latentShape, [16, 2, 60, 104]);
   });
 
-  it("フレーム数は 4n+1 の 5〜33 だけを受け、37 / 81 は上限 33 を言って拒む", () => {
-    assertEquals(
-      [5, 9, 13, 17, 21, 25, 29, 33].map((frames) => plan({ frames }).frames),
-      [5, 9, 13, 17, 21, 25, 29, 33],
-    );
-    for (const frames of [37, 81]) {
-      const error = assertThrows(() => plan({ frames }), ModelInputError, "4n+1 の 5〜33");
+  it("フレーム数は 4n+1 の 5〜81 だけを受け、85（上限超え）/ 34（4n+1 でない）は範囲を言って拒む", () => {
+    const accepted = Array.from({ length: 20 }, (_, index) => 5 + 4 * index);
+    assertEquals(accepted.at(-1), 81);
+    assertEquals(accepted.map((frames) => plan({ frames }).frames), accepted);
+    assertEquals(plan({ frames: 81 }).latentShape, [16, 21, 60, 104]);
+    for (const frames of [85, 34]) {
+      const error = assertThrows(() => plan({ frames }), ModelInputError, "4n+1 の 5〜81");
       assert(!error.message.includes("段"), `文言に段の番号を出さない: ${error.message}`);
     }
   });

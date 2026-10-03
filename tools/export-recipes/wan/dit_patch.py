@@ -44,6 +44,7 @@ from typing import Any, NamedTuple
 
 import torch
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_leaves
 
@@ -554,19 +555,38 @@ def _assert_rope_base(tables: dict[str, torch.Tensor], rows: int, widths: tuple[
             )
 
 
+@contextmanager
+def flash_attention_only() -> Iterator[None]:
+    """この間の SDPA を CPU の flash 経路（`aten._scaled_dot_product_flash_attention_for_cpu`）に
+    固定する（CPU の参照とパッチ後の eager — export のトレースには掛けない）。
+
+    WHY: 実寸 81 フレーム（S = 32,760）の参照が MATH backend に落ちると、スコア行列
+    `[1,12,S,S]` 1 枚で 51.5 GB（f32）/ 103 GB（f64）を確保して OOM で死ぬ（それまでの数十分の
+    計算ごと）。torch 2.13.0+cpu は既定で flash を選ぶ（`torch._fused_sdp_choice` —
+    `wan/tests/test_dit_patch.py` が見る）ので、固定しても数値は変わらない。固定しておけば、flash が
+    受けない入力（最終次元が非連続など）は MATH へ黙って落ちずに RuntimeError で止まる。
+    """
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
+        yield
+
+
 def reference_dit(
     model: nn.Module,
     latents: torch.Tensor,
     timestep: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    """**上流の素の** `WanTransformer3DModel.forward` の出力 `[1,C,F,H,W]`（参照値）。"""
-    return model(
-        hidden_states=latents,
-        timestep=timestep,
-        encoder_hidden_states=encoder_hidden_states,
-        return_dict=False,
-    )[0]
+    """**上流の素の** `WanTransformer3DModel.forward` の出力 `[1,C,F,H,W]`（参照値）。
+
+    attention は {@link flash_attention_only} の下で回す（f32 / f64 の参照とも）。
+    """
+    with flash_attention_only():
+        return model(
+            hidden_states=latents,
+            timestep=timestep,
+            encoder_hidden_states=encoder_hidden_states,
+            return_dict=False,
+        )[0]
 
 
 def reference_dit_layers(

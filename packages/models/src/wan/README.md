@@ -41,10 +41,10 @@ go through the same admission. The defaults for steps, guidance and shift come f
 
 ## Accepted requests
 
-832×480 or 480×832, 4n+1 frames from 5 to 33, `steps` ≥ 1, `guidance` ≥ 1 (1 turns CFG off),
-`shift` > 0, and either a `seed` (default 0) or the initial noise as `latents`. Only 832×480 with 33
-frames has been checked end to end on the GPU. Longer clips (up to 81 frames) are planned: holding the
-DiT while the VAE stage starts would exceed the development GPU's VRAM by the current estimate.
+832×480 or 480×832, 4n+1 frames from 5 to 81 (default 33), `steps` ≥ 1, `guidance` ≥ 1 (1 turns CFG
+off), `shift` > 0, and either a `seed` (default 0) or the initial noise as `latents`. Only 832×480
+with 33 and 81 frames have been checked end to end on the GPU. The transformer stage is closed before
+the VAE stage opens, so the two are never resident together.
 
 ## Numerics
 

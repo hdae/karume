@@ -12,6 +12,9 @@
  * - 帯は `band` ケース（潜在 9 chunk = 33 フレーム・タイル 32）の `atol = rtol = 0` の素の突合の
  *   実測最悪から決める（{@link BAND}）。
  * - 受け入れは**別の潜在・別の chunk 境界**の `accept` ケース（5 chunk = 17 フレーム）で判定する。
+ * - `long` ケース（21 chunk = 81 フレーム — ADR 0118 段 8）も受入れで、同じ帯の内であることを門にする。
+ *   81 フレームの chunk 数そのもので、cache の持ち越しで誤差が積もらないことを見る（band / accept の
+ *   9 / 5 chunk の外挿に頼らない）。帯は `band` から導いた値のまま（long の結果を見て変えない）。
  * - 故障注入（cache 更新忘れ・cache の 2 フレームの逆順・タイルの頭のゼロ化の省略・chunk 2 以降に
  *   first）が `accept` で帯の外に出ることを門にする（出なければ帯が広すぎる兆候）。故障注入は
  *   製品の経路と同じ部品で組んだこのテストのループで行い、そのループが故障なしなら製品の経路と
@@ -71,8 +74,11 @@ const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES}/`, import.meta.ur
 const FIRST_COMPONENT = "vae_decoder_first";
 const NEXT_COMPONENT = "vae_decoder_next";
 const MODEL_FILE = "model.krm";
-const CASES = ["band", "accept"] as const;
+const CASES = ["band", "accept", "long"] as const;
 type CaseName = (typeof CASES)[number];
+
+/** `long` の chunk 数（81 フレーム = 1 + 4·20 — 受理集合の上限のフレーム数の chunk 列）。 */
+const LONG_CHUNKS = 21;
 
 /** SKIP 時にそのまま貼れる生成コマンド（`tools/export-recipes/wan/export_vae.py`）。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
@@ -107,7 +113,7 @@ if (!ANY_PRESENT) {
 }
 
 Deno.test({
-  name: "Wan VAE chunk 資産: 2 グラフとフィクスチャ 2 本が揃っている",
+  name: "Wan VAE chunk 資産: 2 グラフとフィクスチャ 3 本が揃っている",
   // 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
   ignore: !ANY_PRESENT,
   fn: () => {
@@ -271,6 +277,7 @@ Deno.test({
     const fixtures = {
       band: await readFixture("band"),
       accept: await readFixture("accept"),
+      long: await readFixture("long"),
     };
 
     const gpu = await acquireGpu();
@@ -326,6 +333,7 @@ Deno.test({
               const fixture = fixtures[name];
               const chunks = wanVaeChunkCount(layout, fixture.latents);
               assertEquals(fixture.frameShape, [3, wanVaeFrameCount(chunks), 256, 256]);
+              if (name === "long") assertEquals(chunks, LONG_CHUNKS, "long の chunk 数");
               // 毒値: フレームの常駐を NaN で埋めてから回す（写し忘れのフレームは NaN のまま残る）。
               for (const resident of await liveCaches.frames(chunks)) {
                 resident.write(new Float32Array(resident.byteLength / 4).fill(Number.NaN));

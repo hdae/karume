@@ -50,11 +50,11 @@ WAN_PAPER = "arxiv.org/abs/2503.20314"
 WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
 #: TS 側が受理する寸法とフレーム数（`packages/models/src/wan/pipeline.ts` の受理集合の写し —
-#: manifest に無い事実）。81 フレームまでの解禁は ADR 0118 段 8。
+#: manifest に無い事実）。
 #: MUST: TS 側と同じ値（`packages/models/tests/fixtures/wan-card-limits.json` を挟んで両側の
 #: テストが突き合わせる — 片側だけ変えると赤）。
 WAN_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((832, 480), (480, 832))
-WAN_FRAMES = (5, 33)
+WAN_FRAMES = (5, 81)
 
 #: 実行資源（``_wan_resources``）を実測した quant 席。MUST: カードは数を**この席の数として**
 #: 名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない — BiRefNet の
@@ -177,7 +177,7 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "const video = await pipeline.generate({",
         "  prompt: prompt.prompt,",
         "  seed: 42,",
-        "  // frames: 33, // 4n+1, 5 to 33",
+        f"  // frames: 33, // 4n+1, {WAN_FRAMES[0]} to {WAN_FRAMES[1]}",
         "  // width: 832, height: 480, // or 480 × 832",
         "});",
         "",
@@ -228,8 +228,8 @@ def _wan_inputs() -> list[str]:
         "## Accepted inputs",
         "",
         f"- **size**: {sizes}.",
-        f"- **frames**: 4n+1 from {low} to {high}. Only 832 × 480 with {high} frames has been",
-        "  checked end to end on the GPU; longer clips (up to 81 frames) are planned.",
+        f"- **frames**: 4n+1 from {low} to {high}. Only 832 × 480 with 33 and {high} frames have",
+        "  been checked end to end on the GPU.",
         "- **steps** ≥ 1, **guidance** ≥ 1 (1 turns classifier-free guidance off and the negative",
         "  prompt is then rejected), **shift** > 0.",
         "- **seed** (the host noise generator — not torch's `randn`) or the initial noise as",
@@ -245,9 +245,9 @@ def _wan_inputs() -> list[str]:
         "  to a tolerance.",
         "- **Against the upstream reference**: a 2-step run with injected noise is compared with",
         "  diffusers on CPU in float32 (the same f16-rounded weights, the same tiled decode), and",
-        "  one transformer forward at full size against a float64 reference. Differences stay",
-        "  within tolerances measured on separate decision cases; the remaining gap is float32",
-        "  rounding in the GPU matrix products, not a porting difference.",
+        "  one transformer forward at each full size (33 and 81 frames) against a float64",
+        "  reference. Differences stay within tolerances measured on separate decision cases; the",
+        "  remaining gap is float32 rounding in the GPU matrix products, not a porting difference.",
         "- **Tiled decode**: the VAE always decodes in overlapping tiles, so the frames differ",
         "  slightly from the upstream untiled decode.",
     ]
@@ -257,11 +257,14 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
     """実行資源の目安（ADR 0089 決定 3 — 中間テンソルの確保と束縛の大きさは manifest の
     `requiredLimits` が数えない、**manifest に存在しない事実**。BiRefNet のカードと同じ扱い）。
 
-    数は 2026-10-02 の B570・Deno の 50 ステップの通し（ADR 0118 段 6 の検収）の実測: VRAM は
-    fdinfo の `drm-total-vram0` の段ごとの山・時間は transformer 1 パス（batch 1）と VAE の
-    タイル decode 全体。
-    1 パス × 100 + VAE ≈ 1,809 s は通しの 1,811 s と合う。中間テンソルの大きさは形からの計算
-    （FFN の `[14040, 8960]` f32 = 503,193,600 B）。
+    数は B570・Deno の 50 ステップの通しの実測 — 33 フレームは 2026-10-02（ADR 0118 段 6 の検収）、
+    81 フレームは 2026-10-03（段 8）: VRAM は fdinfo の `drm-total-vram0` の段ごとの山・時間は
+    transformer 1 パス（batch 1）と VAE のタイル decode 全体。
+    1 パス × 100 + VAE は通しと合う（33 フレーム: 16.8 × 100 + 129 ≈ 1,809 s / 1,811 s・
+    81 フレーム: 68.6 × 100 + 315 ≈ 7,175 s / 7,173 s）。中間テンソルの大きさは形からの計算
+    （FFN の `[S, 8960]` f32 は S = 14,040 で 503,193,600 B・S = 32,760 で 1,174,118,400 B。
+    self-attention のスコアの行ブロック 1 枚は 81 フレームで 2,146,435,200 B —
+    B570 の束縛上限 2,147,483,644 B の内）。
 
     MUST: 実測していない条件の数は載せない — 受理集合の別の寸法・フレーム数・別の GPU の数を推し
     量って書かない。ブラウザで動くかは未確認（ADR 0118 の後段）なので、そう書く。
@@ -275,22 +278,30 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
     return [
         "## Resources",
         "",
-        "Measured on 2026-10-02 on an Intel Arc B570 in Deno 2.9.6, with the"
-        f" `{WAN_RESOURCE_QUANT}` quant at",
-        "832 × 480, 33 frames, 50 steps and guidance 5 (classifier-free guidance runs two",
-        "transformer passes per step, so 100 passes):",
+        "Measured on an Intel Arc B570 in Deno 2.9.6, with the"
+        f" `{WAN_RESOURCE_QUANT}` quant at 832 × 480,",
+        "50 steps and guidance 5 (classifier-free guidance runs two transformer passes per step,",
+        "so 100 passes); 33 frames on 2026-10-02 and 81 frames on 2026-10-03:",
         "",
-        "- **GPU memory**: the peak of the total allocation (the driver's fdinfo) is 6.19 GiB in",
-        "  the transformer stage and 3.32 GiB in the VAE stage. The two stages are never resident",
-        "  together, so the transformer stage's peak is the peak of a clip.",
-        "- **Time**: about 30 minutes per clip — 16.8 s per transformer pass and 129 s for the",
-        "  tiled VAE decode.",
-        "- **Storage buffer size**: at this size some of the transformer's intermediate",
-        "  tensors are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
-        "  feed-forward activation `[14040, 8960]` in float32 alone is about 480 MiB. The runtime",
-        "  requests the adapter's own limits, which Deno grants on the B570; in a browser the",
-        "  environment has to grant the adapter's limits as well. Browsers have not been checked",
-        "  yet, so whether they run this model is not known.",
+        "| Frames | Transformer peak | VAE peak | Pass   | VAE decode | Clip        |",
+        "| ------ | ---------------- | -------- | ------ | ---------- | ----------- |",
+        "| 33     | 6.19 GiB         | 3.32 GiB | 16.8 s | 129 s      | ~30 minutes |",
+        "| 81     | 7.31 GiB         | 3.78 GiB | 68.6 s | 315 s      | ~2 hours    |",
+        "",
+        "Pass is one transformer pass (batch 1); VAE decode is the tiled decode of the whole clip.",
+        "",
+        "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The two",
+        "  stages are never resident together, so the transformer stage's peak is the peak of a",
+        "  clip.",
+        "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
+        "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
+        "  feed-forward activation `[S, 8960]` in float32 alone is about 480 MiB at 33 frames",
+        "  (S = 14,040) and about 1.09 GiB at 81 frames (S = 32,760), and one row block of the",
+        "  self-attention scores at 81 frames is 2.00 GiB, just under the 2 GiB binding limit the",
+        "  adapter reports.",
+        "  The runtime requests the adapter's own limits, which Deno grants on the B570; in a",
+        "  browser the environment has to grant the adapter's limits as well. Browsers have not",
+        "  been checked yet, so whether they run this model is not known.",
         "- `karume.json` does not declare these figures: its declared limits cover the resident",
         "  weights and state, not the intermediate tensors a run allocates.",
     ]

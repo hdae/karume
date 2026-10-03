@@ -10,8 +10,8 @@
   （逆正規化済み `z·std + mean`）と、上流の非タイル `_decode` の chunk ループの**クランプ前**の
   出力（{@link wan.vae_patch.reference_decode_unclamped}）。GPU の chunk 列の照合（段 4 の検収）が
   読む。ケースは帯を決める `band`（9 chunk = 33 フレーム）と、受け入れを判定する別の潜在・別の
-  chunk 境界の `accept`（5 chunk = 17 フレーム）の 2 本（ADR 0118 追記 2026-10-02 — 決定用と
-  受入れ用を分ける）。
+  chunk 境界の `accept`（5 chunk = 17 フレーム）と `long`（21 chunk = 81 フレーム — ADR 0118 段 8・
+  cache を 20 回持ち越す長さ）の 3 本（ADR 0118 追記 2026-10-02 — 決定用と受入れ用を分ける）。
 
 タイル辺 `t`（潜在）は引数（既定 32 = diffusers の `tile_sample_min` 256 px と同じ大きさ）。ホストは
 タイル辺を literal で持たず、開いた資産の入力形から導く（決定 2）。
@@ -122,10 +122,12 @@ class FixtureCase:
     role: str
 
 
-#: 帯の決定用と受入れ用で、潜在（seed）と chunk 境界（chunk 数）を両方変える。
+#: 帯の決定用と受入れ用で、潜在（seed）と chunk 境界（chunk 数）を両方変える。`long` は 81 フレーム
+#: （ADR 0118 段 8）の受入れで、帯は `band` のまま（帯を 21 chunk の結果から導き直さない）。
 FIXTURE_CASES = (
     FixtureCase("band", seed=20261002, chunks=9, role="band"),
     FixtureCase("accept", seed=20261003, chunks=5, role="accept"),
+    FixtureCase("long", seed=20261004, chunks=21, role="accept"),
 )
 
 

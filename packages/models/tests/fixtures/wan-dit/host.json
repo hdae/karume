@@ -15,11 +15,11 @@
   ],
   "latent_shape": [
     16,
-    2,
+    21,
     6,
     10
   ],
-  "rope_base_rows": 8,
+  "rope_base_rows": 24,
   "timesteps": [
     999,
     993,

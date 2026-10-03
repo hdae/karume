@@ -8,6 +8,8 @@
 - ホストの patchify / unpatchify / RoPE の素表が上流の並びとビット一致すること
 - トークン形のラッパがホストの段と合成して上流の forward に戻ること
 - S 形の export の形（記号 `S` 1 つ・入力名・op 集合・S 依存の焼き込みが無いこと）
+- CPU の参照とパッチ後の eager の attention が flash 経路に固定されていること（S = 32,760 で MATH
+  へ落ちると OOM — 黙って落ちずに止まる形）
 
 合成モデル（乱数初期化の小さな `WanTransformer3DModel`）で回すものと、実重み（フィクスチャ
 `wan_snapshot` — 無い機では SKIP）で回すものがある。合成モデルの形は **3 軸と C が全部違う値**にする
@@ -19,6 +21,8 @@ from __future__ import annotations
 import pytest
 import torch
 from torch import nn
+from torch.nn import functional
+from torch.nn.attention import SDPBackend
 
 pytest.importorskip("diffusers")
 
@@ -398,8 +402,9 @@ class TestExport:
         assert names[0].startswith("band-s00192")
 
     def test_full_size_cases_have_their_own_seeds(self) -> None:
-        """実寸（ADR 0118 段 3）のケースは 832×480・33 フレームの S = 14,040 で、帯を S = 192 から
-        独立に導くため seed が段 2 のどのケースとも違う（決定用と受入れの間でも違う）。"""
+        """実寸のケースは 832×480 の 33 フレーム（S = 14,040 — ADR 0118 段 3）と 81 フレーム
+        （S = 32,760 — 段 8）の 8 本ずつで、帯を S ごとに独立に導くため seed が段 2 のどのケースとも
+        違う（決定用と受入れの間でも、S の間でも違う）。"""
         from wan.export_dit import CASES
 
         full = [spec for spec in CASES if spec.full_size]
@@ -412,14 +417,24 @@ class TestExport:
             "full-band-s14040-t0113",
             "full-accept-s14040-t0999",
             "full-accept-s14040-t0600",
+            "full-band-s32760-t0999",
+            "full-band-s32760-t0999-2",
+            "full-band-s32760-t0750",
+            "full-band-s32760-t0500",
+            "full-band-s32760-t0250",
+            "full-band-s32760-t0113",
+            "full-accept-s32760-t0999",
+            "full-accept-s32760-t0600",
         ]
         others = {spec.seed for spec in CASES if not spec.full_size}
         assert len({spec.seed for spec in full}) == len(full)
         assert not others & {spec.seed for spec in full}
 
     def test_only_two_full_size_cases_keep_block_outputs(self) -> None:
-        """実寸の各ブロックの出力（1 ケース 2.6 GB）は決定用 1 本と受入れ 1 本（どちらも
-        t = 999）だけが持つ。S = 192 / 768 は全ケースが持つ（層ごとの記録の相手）。"""
+        """実寸の各ブロックの出力（S = 14,040 の 1 ケース 2.6 GB）は S = 14,040 の決定用 1 本と
+        受入れ 1 本（どちらも t = 999）だけが持つ。S = 32,760 は 1 本も持たない（層別の probe が
+        readback staging 約 6 GB で B570 に載らない）。S = 192 / 768 は全ケースが持つ（層ごとの
+        記録の相手）。"""
         from wan.export_dit import CASES
 
         assert [spec.name((1, 2, 2)) for spec in CASES if spec.full_size and spec.blocks] == [
@@ -427,6 +442,123 @@ class TestExport:
             "full-accept-s14040-t0999",
         ]
         assert all(spec.blocks for spec in CASES if not spec.full_size)
+
+    def test_the_largest_case_sits_exactly_on_the_declared_ceiling_of_s(self) -> None:
+        """`Dim("S")` の上限 32,760 は 81 フレームの格子 21·30·52 ちょうど。全ケースの S が
+        export の値域に入り、最大のケースが上限そのもの（受理集合の端を golden が覆う）。
+
+        値域は宣言の定数ではなく ExportedProgram の `range_constraints`（export が実際に受けた
+        制約）から読む。
+        """
+        from wan.export_dit import CASES, DIT_SYM_MAX, dynamic_shapes
+
+        model = _tiny_dit()
+        latents, timestep, embeds = _tiny_inputs(model)
+        program = torch.export.export(
+            dit_patch.WanDitTokens(model),
+            _token_inputs(model, latents, timestep, embeds),
+            dynamic_shapes=dynamic_shapes(),
+        )
+        ranges = {
+            (int(bound.lower), int(bound.upper)) for bound in program.range_constraints.values()
+        }
+        tokens = [
+            frames * (height // 2) * (width // 2)
+            for frames, height, width in (spec.latent_shape for spec in CASES)
+        ]
+
+        assert ranges == {(2, 32_760)}
+        assert DIT_SYM_MAX == 21 * 30 * 52
+        assert all(2 <= count <= 32_760 for count in tokens)
+        assert max(tokens) == 32_760
+
+
+class TestFlashAttentionOnly:
+    """CPU の参照とパッチ後の eager の attention を flash 経路に固定すること
+    （`dit_patch.flash_attention_only` — S = 32,760 で MATH へ落ちるとスコア行列 1 枚が
+    51.5 GB）。"""
+
+    @staticmethod
+    def _diffusers_layout(sequence: int, dtype: torch.dtype) -> torch.Tensor:
+        """Wan2.1 の attention の形（heads 12・head_dim 128）を diffusers の native backend と同じ
+        並び（`[B,S,H,D]` を permute した `[B,H,S,D]` — 最終次元だけが連続）で。値は選択に効かない
+        ので未初期化（実寸でもページを触らない）。"""
+        return torch.empty(1, sequence, 12, 128, dtype=dtype).permute(0, 2, 1, 3)
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["f32", "f64"])
+    @pytest.mark.parametrize("sequence", [192, 14_040, 32_760])
+    def test_the_default_choice_is_flash_for_the_wan_attention_shapes(
+        self, dtype: torch.dtype, sequence: int
+    ) -> None:
+        """固定が数値を変えない前提: 固定しなくても既定の選択は flash（self-attention `S×S` と
+        cross-attention `S×512`）。torch の更新でここが崩れたら、既存の golden は MATH の値で、固定
+        すると数値が変わる — golden の作り直しが要る。"""
+        query = self._diffusers_layout(sequence, dtype)
+        for key in (query, self._diffusers_layout(512, dtype)):
+            assert torch._fused_sdp_choice(query, key, key) == int(SDPBackend.FLASH_ATTENTION)
+
+    def test_an_input_flash_cannot_take_raises_instead_of_falling_back_to_math(self) -> None:
+        """故障注入: 最終次元が非連続の q（flash が受けない）は、既定では MATH へ黙って落ちて通り、
+        固定の下では RuntimeError で止まる。"""
+        query = torch.randn(1, 2, 24, 30).transpose(-1, -2)
+
+        assert torch._fused_sdp_choice(query, query, query) == int(SDPBackend.MATH)
+        functional.scaled_dot_product_attention(query, query, query)
+        with dit_patch.flash_attention_only(), pytest.raises(RuntimeError):
+            functional.scaled_dot_product_attention(query, query, query)
+
+    def test_the_fixation_leaves_the_reference_bit_identical(self) -> None:
+        """既定が flash の間は、固定した参照と素の forward がビット一致（合成モデル）。"""
+        model = _tiny_dit()
+        latents, timestep, embeds = _tiny_inputs(model)
+        with torch.no_grad():
+            plain = model(
+                hidden_states=latents,
+                timestep=timestep,
+                encoder_hidden_states=embeds,
+                return_dict=False,
+            )[0]
+            fixed = dit_patch.reference_dit(model, latents, timestep, embeds)
+
+        assert torch.equal(fixed, plain)
+
+    def test_every_reference_and_eager_attention_runs_with_math_disabled(self, monkeypatch) -> None:
+        """f32 の参照・f64 の参照・パッチ後の eager（`export_dit.eager_report`）の SDPA の呼び出しが
+        全部、MATH を切った状態で走る（固定を外すとここで破れる）。"""
+        from wan.export_dit import Case, CaseSpec, eager_report, round_to_f16
+
+        states: list[bool] = []
+        original = functional.scaled_dot_product_attention
+
+        def recording(*args, **kwargs):
+            states.append(torch.backends.cuda.math_sdp_enabled())
+            return original(*args, **kwargs)
+
+        model = _tiny_dit()
+        latents, timestep, embeds = _tiny_inputs(model)
+        wrapper = dit_patch.WanDitTokens(model)
+        round_to_f16(model, wrapper)
+        monkeypatch.setattr(functional, "scaled_dot_product_attention", recording)
+        with torch.no_grad():
+            reference = dit_patch.reference_dit(model, latents, timestep, embeds)
+            case = Case(
+                name="tiny",
+                spec=CaseSpec("band", TINY_LATENT, 500, 7, 0),
+                inputs=_token_inputs(model, latents, timestep, embeds),
+                latents=latents,
+                timestep=timestep,
+                reference=reference,
+                reference_blocks=[],
+                reference_seconds=0.0,
+            )
+            eager_report(wrapper, model, case)
+            dit_patch.reference_dit_f64(model.double(), latents, timestep, embeds)
+
+        # 1 forward で self / cross の 2 本 × 2 層。3 経路で 12 本以上（eager の trunk の回し直し
+        # 分だけ増える）。
+        assert len(states) >= 12
+        assert not any(states)
+        assert torch.backends.cuda.math_sdp_enabled()
 
 
 class TestFloat64Reference:

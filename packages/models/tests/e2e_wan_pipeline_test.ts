@@ -41,9 +41,11 @@
  * ## 50 ステップの通し（env の opt-in — 既定のレーンに入れない）
  *
  * `KARUME_WAN_FULL_PIPELINE=1` のときだけ、既定の設定（50 ステップ・CFG・832×480・33 フレーム・
- * `boxing-cats`・seed 42）を 1 本回し、完走・非有限 0・所要・段の切り替えの VRAM・フレームの PNG
- * （33 枚 + 4×8 の一覧図）を `outputs/verify/<環境キー>/<日付>_wan-pipeline-full/` に書く（利用者の
- * 視認 — perf-ledger K-75 の判断材料）。CPU の参照は作らない（決定 8 — sha256 と目視で受ける）。
+ * `boxing-cats`・seed 42）と、同じ設定の 81 フレーム（受理集合の上限 — ADR 0118 段 8）を 1 本ずつ回し、
+ * 完走・非有限 0・所要・段の切り替えの VRAM・フレームの PNG（全フレーム + 4×8 の一覧図）と RGB の実物を
+ * `outputs/verify/<環境キー>/<日付>_wan-pipeline-full/` に書き、sha256 の環境行は
+ * `fixtures/references/wan.json` に持つ（PNG は利用者の視認 — perf-ledger K-75 の判断材料）。CPU の参照は作らない（決定 8 — sha256 と目視で受ける。81 フレームの部品は DiT の実寸・VAE の
+ * 21 chunk の e2e が覆う）。
  * 結果の席を既定のレーン（`<日付>_wan-pipeline/`）と分けるのは、`results.json` が走行ごとに丸ごと
  * 書き直されるため — 同じ席だと、後から回した 2 ステップだけの走行が 50 ステップの記録を消す。
  *
@@ -165,8 +167,23 @@ const ACCEPT_CASE = "accept-ferret";
 
 /** 50 ステップの通しの opt-in（決定 8 — リリース前と参照値の焼き直しのときだけ回す）。 */
 const FULL_PIPELINE = Deno.env.get("KARUME_WAN_FULL_PIPELINE") === "1";
-/** 50 ステップの通しの要求（既定の設定 + 1 本目の固定プロンプト・seed 42 — 段 7 の目視の 1 本目）。 */
-const FULL_CASE = { id: "50step-boxing-cats-seed42", prompt: "boxing-cats", seed: 42 } as const;
+/**
+ * 50 ステップの通しの要求: 既定の設定 + 1 本目の固定プロンプト・seed 42（段 7 の目視の 1 本目）と、同じ要求の
+ * 81 フレーム（ADR 0118 段 8）。`frames` を省いたケースは既定（{@link DEFAULT_FRAMES}）を通す。
+ * 並びは確保が最大の 81 フレームを先に置く（前の確保の残りが後ろの大きな確保を OOM にしうる — B570 の
+ * `destroy()` の遅れ・`e2e_wan_dit_test.ts` で実寸を先に置くのと同じ理由）。
+ */
+const FULL_CASES: readonly {
+  readonly id: string;
+  readonly prompt: string;
+  readonly seed: number;
+  readonly frames?: number;
+}[] = [
+  { id: "50step-boxing-cats-seed42-81f", prompt: "boxing-cats", seed: 42, frames: 81 },
+  { id: "50step-boxing-cats-seed42", prompt: "boxing-cats", seed: 42 },
+];
+/** `frames` を省いたときのフレーム数（`src/wan/pipeline.ts` の既定）。 */
+const DEFAULT_FRAMES = 33;
 
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
@@ -738,7 +755,7 @@ const contactSheet = (
   const rgba = new Uint8ClampedArray(width * height * 4);
   const cells = rows * cols;
   for (let cell = 0; cell < cells; cell += 1) {
-    // 先頭と末尾のフレームを含めて等間隔に引く（33 枚から 32 マス）。
+    // 先頭と末尾のフレームを含めて等間隔に引く（33 / 81 枚から 32 マス）。
     const frame = Math.round((cell * (video.frames - 1)) / (cells - 1));
     const source = wanFrameToRgba(video, frame);
     const left = (cell % cols) * cellWidth;
@@ -764,10 +781,10 @@ const contactSheet = (
 
 Deno.test({
   name:
-    "Wan 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_FULL_PIPELINE=1）: 既定の設定が完走し非有限 0・" +
-    "所要と段の切り替えの VRAM・PNG 33 枚 + 一覧図",
+    "Wan 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_FULL_PIPELINE=1）: 既定の設定の 33 / 81 フレームが" +
+    "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図",
   ignore: !FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE,
-  fn: async () => {
+  fn: async (t) => {
     await assertRunningAdapter();
     let deviceLost: string | undefined;
     const gpu = await acquireGpu({
@@ -776,46 +793,60 @@ Deno.test({
       },
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
-    let settlement: ReferenceSettlement | undefined;
     try {
       const pipeline = await loadPipeline(gpu, diagnostics);
       try {
-        await runRecordedCase(fullResults, { id: FULL_CASE.id }, async () => {
-          const observed = await observe(pipeline, diagnostics, {
-            prompt: textOf(pipeline.prompts, FULL_CASE.prompt, "prompt"),
-            seed: FULL_CASE.seed,
+        for (const spec of FULL_CASES) {
+          await t.step(spec.id, async () => {
+            const frames = spec.frames ?? DEFAULT_FRAMES;
+            let settlement: ReferenceSettlement | undefined;
+            try {
+              await runRecordedCase(fullResults, { id: spec.id }, async () => {
+                const observed = await observe(pipeline, diagnostics, {
+                  prompt: textOf(pipeline.prompts, spec.prompt, "prompt"),
+                  seed: spec.seed,
+                  frames: spec.frames,
+                });
+                assert("video" in observed, "generate が最後まで回っていない");
+                const { video } = observed;
+                assertEquals([video.frames, video.height, video.width], [frames, 480, 832]);
+                const nonFinite = video.data.reduce(
+                  (count, value) => count + (Number.isFinite(value) ? 0 : 1),
+                  0,
+                );
+                const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+                console.log(`[wan-pipeline] ${spec.id}:\n  ${notes.join("\n  ")}`);
+                assertEquals(nonFinite, 0, "非有限");
+                assertEquals(deviceLost, undefined, "device lost");
+                for (let frame = 0; frame < video.frames; frame += 1) {
+                  await Deno.writeFile(
+                    fullResults.artifact(`${spec.id}-frame-${String(frame).padStart(2, "0")}.png`),
+                    await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
+                  );
+                }
+                const sheet = contactSheet(video, 4, 8, 4);
+                await Deno.writeFile(
+                  fullResults.artifact(`${spec.id}-sheet.png`),
+                  await encodePng(sheet.rgba, sheet.width, sheet.height),
+                );
+                console.log(`[wan-pipeline] PNG: ${fullResults.dir.pathname}`);
+                const outcome = await settleOrObserve(references, fullResults, {
+                  id: spec.id,
+                  artifact: `${spec.id}.rgb`,
+                  bytes: rgbBytes(video),
+                });
+                settlement = outcome.settlement;
+                return { ...outcome.fields, note: notes.join(" / ") };
+              });
+            } finally {
+              // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+              await settleReleases(gpu);
+            }
+            if (settlement?.check.status === "fail") {
+              throw new Error(referenceMismatchMessage(spec.id, settlement, references));
+            }
           });
-          assert("video" in observed, "generate が最後まで回っていない");
-          const { video } = observed;
-          assertEquals([video.frames, video.height, video.width], [33, 480, 832]);
-          const nonFinite = video.data.reduce(
-            (count, value) => count + (Number.isFinite(value) ? 0 : 1),
-            0,
-          );
-          const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
-          console.log(`[wan-pipeline] ${FULL_CASE.id}:\n  ${notes.join("\n  ")}`);
-          assertEquals(nonFinite, 0, "非有限");
-          assertEquals(deviceLost, undefined, "device lost");
-          for (let frame = 0; frame < video.frames; frame += 1) {
-            await Deno.writeFile(
-              fullResults.artifact(`${FULL_CASE.id}-frame-${String(frame).padStart(2, "0")}.png`),
-              await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
-            );
-          }
-          const sheet = contactSheet(video, 4, 8, 4);
-          await Deno.writeFile(
-            fullResults.artifact(`${FULL_CASE.id}-sheet.png`),
-            await encodePng(sheet.rgba, sheet.width, sheet.height),
-          );
-          console.log(`[wan-pipeline] PNG: ${fullResults.dir.pathname}`);
-          const outcome = await settleOrObserve(references, fullResults, {
-            id: FULL_CASE.id,
-            artifact: `${FULL_CASE.id}.rgb`,
-            bytes: rgbBytes(video),
-          });
-          settlement = outcome.settlement;
-          return { ...outcome.fields, note: notes.join(" / ") };
-        });
+        }
       } finally {
         await pipeline.dispose();
       }
@@ -823,15 +854,12 @@ Deno.test({
       await settleReleases(gpu);
       gpu.destroy();
     }
-    if (settlement?.check.status === "fail") {
-      throw new Error(referenceMismatchMessage(FULL_CASE.id, settlement, references));
-    }
   },
 });
 
 const CASE_IDS = [
   ...CASES.map(({ name }) => `2step-${name}`),
-  ...(FULL_PIPELINE ? [FULL_CASE.id] : []),
+  ...(FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
 ];
 const RUNNABLE = ANY_PRESENT && GPU_AVAILABLE;
 if (RUNNABLE) references.warnMissing(CASE_IDS);

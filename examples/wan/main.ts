@@ -11,7 +11,8 @@
  * ローカルの配布形か HF のリポ名（`owner/name`）としてそのまま読む。第 1 段の埋め込みは事前計算した
  * 固定プロンプトだけなので、`--prompt` は資産の名前（`boxing-cats` など）で選ぶ — 名前を間違えると
  * 選べる名前の一覧を出して落ちる。未指定のノブはパイプラインの既定（step 数・guidance・shift は
- * manifest の `pipelineConfig` — 50・5.0・3.0、寸法とフレーム数は 832×480・33 フレーム）。
+ * manifest の `pipelineConfig` — 50・5.0・3.0、寸法とフレーム数は 832×480・33 フレーム）。`--frames` は
+ * 4n+1 の 5〜81（受理集合の外はパイプラインが `ModelInputError` で落とす）。
  */
 
 import { encodePng } from "../../packages/models/mod.ts";

@@ -49,6 +49,14 @@
 | `full-band` | `[1,16,9,60,104]` | 14,040 | 113 | 7 | `SEED` + 14 |
 | `full-accept`（実寸の受入れ） | `[1,16,9,60,104]` | 14,040 | 999 | 28 | 777006 |
 | `full-accept` | `[1,16,9,60,104]` | 14,040 | 600 | 77 | 777007 |
+| `full-band`（81 フレームの帯の決定） | `[1,16,21,60,104]` | 32,760 | 999 | 40 | `SEED` + 20 |
+| `full-band`（名前の接尾辞 `-2`） | `[1,16,21,60,104]` | 32,760 | 999 | 112 | `SEED` + 21 |
+| `full-band` | `[1,16,21,60,104]` | 32,760 | 750 | 23 | `SEED` + 22 |
+| `full-band` | `[1,16,21,60,104]` | 32,760 | 500 | 64 | `SEED` + 23 |
+| `full-band` | `[1,16,21,60,104]` | 32,760 | 250 | 91 | `SEED` + 24 |
+| `full-band` | `[1,16,21,60,104]` | 32,760 | 113 | 7 | `SEED` + 25 |
+| `full-accept`（81 フレームの受入れ） | `[1,16,21,60,104]` | 32,760 | 999 | 28 | 777008 |
+| `full-accept` | `[1,16,21,60,104]` | 32,760 | 600 | 77 | 777009 |
 
 帯の指標は「最大絶対差 ÷ 参照の最大絶対値」（決定 8 の目安の形）で、帯 = `band` の 6 ケースの
 最悪の比 × 5（TS 側 `e2e_wan_dit_test.ts` の `DIT_RATIO_BAND`）。`accept` の 3 ケースは `band` と
@@ -58,7 +66,7 @@ seed が違い、timestep も 1 本（600）を除いて違う（600 の 1 本�
 MUST: `accept` の結果を見て `band` のケースを足し引きしない（帯の決定と受入れの独立が崩れる）。
 受入れが帯を外れたら、帯を広げずに原因を調べる。
 
-`full-band` / `full-accept` は実寸（832×480・33 フレーム — ADR 0118 段 3）の帯を、
+S = 14,040 の `full-band` / `full-accept` は実寸（832×480・33 フレーム — ADR 0118 段 3）の帯を、
 S = 192 の帯とは**独立に**導くためのケース（決定 8 の外挿の規律）。帯 = `full-band` 6 ケースの
 最悪の正規化した比 × 5（TS 側の `DIT_FULL_NORMALIZED_BAND`）で、`full-accept` 2 ケースで受け
 入れる。決定用は timestep を 999（生成の最初のステップ — seed 2 本）/ 750 / 500 / 250 / 113 に
@@ -67,16 +75,26 @@ S = 192 の帯とは**独立に**導くためのケース（決定 8 の外挿�
 前に結果を見ていたので、受入れの独立が崩れていた）。
 MUST: `full-accept` の結果を見て `full-band` のケースも指標も変えない。
 
+S = 32,760（832×480・81 フレーム = `Dim("S")` の上限ちょうど — ADR 0118 段 8）の 8 本は、帯を
+S = 14,040 の帯とも**独立に**導く（決定 8 — S ごとに帯を導き、S = 14,040 の帯を持ち込まない）。
+timestep と有効長は S = 14,040 の 8 本と同じ並びで、seed だけを新しくする（決定用 `SEED` + 20〜25・
+受入れ 777008 / 777009 — どのケースとも別）。帯の形（決定用 6 本の最悪の正規化した比 × 5・受入れ
+2 本）と上の MUST は S = 14,040 と同じ。
+
 実寸の参照は 2 本: **f64 の参照**（`output.f64` — 活性も f64・重みは同じ f16 丸め）を正とし、CPU
 f32 の参照（`output`）は正規化の分母に使う。指標は「GPU の f64 に対する比 ÷ CPU f32 の参照の f64
 に対する比」（GPU の誤差が CPU f32 の何倍か）。比そのものは入力で 240 倍動く（丸めを増幅する入力
 では CPU f32 の参照も同じだけ f64 から離れる）ので、CPU f32 の誤差で割って入力による増幅を打ち
-消す。所要は f64 が f32 の約 2.7 倍（`[case]` 行に出す — 実寸 1 ケースで f64 約 370 s・f32 約
-136 s）。
+消す。所要は f64 が f32 の約 2.7 倍（`[case]` 行に出す — S = 14,040 の 1 ケースで f64 約 370 s・
+f32 約 136 s）。参照（f32 / f64）とパッチ後の eager の attention は CPU の flash 経路に固定する
+（`dit_patch.flash_attention_only` — MATH へ落ちると S = 32,760 でスコア行列 1 枚が 51.5 GB に
+なり OOM）。
 
-各ブロックの出力（`block.NN` — 実寸 1 ケースで 2.6 GB）は S = 192 / 768 の全ケースと、実寸では
-決定用 `full-band-s14040-t0999` と受入れ `full-accept-s14040-t0999` の 2 本だけが持つ
+各ブロックの出力（`block.NN` — S = 14,040 の 1 ケースで 2.6 GB）は S = 192 / 768 の全ケースと、
+実寸では決定用 `full-band-s14040-t0999` と受入れ `full-accept-s14040-t0999` の 2 本だけが持つ
 （`CaseSpec.blocks` — 層ごとの記録はこの 2 本で足り、残りは最終出力だけで判定できる）。
+S = 32,760 のケースは 1 本も持たない: 突き合わせる相手の層別の出口（`--layers` の probe）が、
+30 ブロック分の readback staging（約 6 GB）で B570 に載らない。
 
 決定用を 1 ケースにしないのは、誤差が入力で 1 桁近く動くため（実測: t = 999 の 1 ケースで決めた帯を
 t = 500 の未見ケースが 1.6 倍超えた。中ほどの timestep は CPU の eager でも入力の 1e-5 級の揺れを
@@ -181,7 +199,8 @@ class CaseSpec:
 
     @property
     def full_size(self) -> bool:
-        """実寸（ADR 0118 段 3）のケース — f32 に加えて f64 の参照も採る。"""
+        """実寸（ADR 0118 段 3 の 33 フレーム・段 8 の 81 フレーム）のケース — f32 に加えて f64 の
+        参照も採る。"""
         return self.role.startswith("full-")
 
 
@@ -209,6 +228,14 @@ CASES: tuple[CaseSpec, ...] = (
     CaseSpec("full-band", (9, 60, 104), 113, 7, SEED + 14, blocks=False),
     CaseSpec("full-accept", (9, 60, 104), 999, 28, 777006),
     CaseSpec("full-accept", (9, 60, 104), 600, 77, 777007, blocks=False),
+    CaseSpec("full-band", (21, 60, 104), 999, 40, SEED + 20, blocks=False),
+    CaseSpec("full-band", (21, 60, 104), 999, 112, SEED + 21, variant="2", blocks=False),
+    CaseSpec("full-band", (21, 60, 104), 750, 23, SEED + 22, blocks=False),
+    CaseSpec("full-band", (21, 60, 104), 500, 64, SEED + 23, blocks=False),
+    CaseSpec("full-band", (21, 60, 104), 250, 91, SEED + 24, blocks=False),
+    CaseSpec("full-band", (21, 60, 104), 113, 7, SEED + 25, blocks=False),
+    CaseSpec("full-accept", (21, 60, 104), 999, 28, 777008, blocks=False),
+    CaseSpec("full-accept", (21, 60, 104), 600, 77, 777009, blocks=False),
 )
 
 
@@ -394,9 +421,12 @@ def eager_report(
     する（`forward` は `forward_hidden(patch_embedding(tokens), …)`）ので回し直さない
     （`trunk_from_full`）。実寸（S = 14,040）では 1 forward が CPU で分単位なので、ケースあたりの
     forward をこの 1 本に絞る。
+
+    attention は参照と同じく {@link dit_patch.flash_attention_only} の下で回す（S = 32,760 で MATH
+    へ落ちると OOM）。
     """
     patch_size = wrapper.patch_size
-    with torch.no_grad():
+    with torch.no_grad(), dit_patch.flash_attention_only():
         hidden = model.patch_embedding(case.latents).flatten(2).transpose(1, 2)
         embedded = wrapper.patch_embedding(case.inputs[0])
         started = time.perf_counter()
