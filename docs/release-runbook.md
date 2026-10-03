@@ -241,7 +241,8 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 忘れると、その門が落ちるか、表が公開面に出ないまま緑になる）:
 
 - [ ] **公開前の確認（Wan2.1）**: 50 ステップの通し（`KARUME_WAN_FULL_PIPELINE=1 deno task
-      test:models:wan` — B570 で約 30 分）が緑で、sha256 の行が一致すること（ADR 0118 決定 8 —
+      test:models:wan` — 33 フレームと 81 フレームの 2 本で、B570 で約 30 分 + 約 2 時間 = 合計約 2.5 時間）が
+      緑で、sha256 の行が一致すること（ADR 0118 決定 8 —
       既定のレーンは 2 ステップだけ）。配布形は `tools/export-recipes` で
       `uv run python dist.py --pipeline wan`（越境参照なし・`--out` は既定の `models/karume-wan2.1`）
 - [ ] `packages/models/src/wan/config.ts` に `WAN_SOURCES`（キー `"wan2.1"` → `hdae/karume-wan2.1` +
