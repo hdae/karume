@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 /**
- * GPU lab のページの共通部品（3 タブと `main.ts` が使うヘルパと、タブへ渡す `Lab` の型）。
+ * GPU lab のページの共通部品（各タブと `main.ts` が使うヘルパと、タブへ渡す `Lab` の型）。
  *
  * 置くのはヘルパ関数と型だけ — タブの基盤（登録・ライフサイクル）は作らない。タブは
  * `mount(root, …)` の形の関数で、DOM は `root` 配下の `data-ui` 属性で引く（同じ名前の要素が
@@ -66,6 +66,8 @@ export const injectedProfile = (choice: ProfileChoice): GeometryProfile | undefi
 export type Lab = {
   readonly config: ServerConfig;
   readonly adapterInfo: GPUAdapterInfo;
+  /** アダプタの limits（Wan のタブの事前判定 — device を取る前に見せる値）。 */
+  readonly adapterLimits: GPUSupportedLimits;
   /** アダプタが `timestamp-query` を列挙したか。 */
   readonly timestampFeature: boolean;
   /** 適用中の GPU 設定。 */

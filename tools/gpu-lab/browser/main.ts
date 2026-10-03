@@ -5,13 +5,16 @@
  * 「掃引（ベンチマーク）→ 幾何プロファイルの生成（最適化）→ 注入して Anima を実行」を 1 ページで回す。
  * ここが持つのはタブの切替・全タブ共通の環境行・**GPU 設定**（幾何プロファイルの注入と timestamp の
  * 要求 — 「適用」で確定）・GPU 操作の排他だけ。各タブは `mount(root, …)` の形のモジュール:
- * `sweep-tab.ts`・`profile-tab.ts`・`anima-tab.ts`。
+ * `sweep-tab.ts`・`profile-tab.ts`・`anima-tab.ts`・`wan-tab.ts`（ADR 0118 段 9 — Wan は幾何プロファイルだけが
+ * 効き、timestamp は要求しない）。
  *
  * GPU 設定の効き方: Anima のタブの GPU は適用中の設定で取る（注入があれば adapter を見ずにその表を使う）。
  * 「保存した表（照合して注入）」だけはアプリの流れ（ADR 0117 検収 段 7）: 適用時に localStorage の保存物の
  * 文字列を取り、Anima のタブが GPU を取るときにコールバック形で adapter と照合して、一致したときだけ注入する。
  * 掃引のタブは各幾何を明示して測るので注入は効かない（timestamp の要求だけが効く）。適用は Anima の
- * pipeline・ダミー・GPU を畳み、GPU を持っていたなら新しい設定で取り直す。
+ * pipeline・ダミー・GPU を畳み、GPU を持っていたなら新しい設定で取り直す。Wan の pipeline と GPU も畳む（取り直しは
+ * Wan のタブの次の「読み込む」— 読み込みは配布形の manifest と descriptor を読み直す操作なので、適用の中では
+ * 回さない）。
  */
 import type { GeometryProfile } from "../../../packages/runtime/mod.ts";
 import {
@@ -49,8 +52,9 @@ import {
 } from "./injectable-tables.ts";
 import { mountProfileTab, type ProfileTab } from "./profile-tab.ts";
 import { mountSweepTab } from "./sweep-tab.ts";
+import { mountWanTab } from "./wan-tab.ts";
 
-const TABS = ["sweep", "profile", "anima"] as const;
+const TABS = ["sweep", "profile", "anima", "wan"] as const;
 type Tab = typeof TABS[number];
 
 const isTab = (value: string): value is Tab => (TABS as readonly string[]).includes(value);
@@ -186,6 +190,8 @@ const initialize = async (): Promise<void> => {
       timestamps ? "採る" : "採らない"
     }${timestampFeature ? "" : `（${TIMESTAMP_QUERY} 無し）`} · 幾何プロファイル ${profile}${
       state.tab === "sweep" ? "（掃引は明示幾何なので掃引の結果には効かない）" : ""
+    }${
+      state.tab === "wan" ? "（Wan は GPU 時間を採らない — 計測の device を pipeline が拒む）" : ""
     } · ${checkoutLabel(config)}`;
     ui.pending.textContent = pending() ? "未適用の変更があります" : "";
   };
@@ -204,6 +210,7 @@ const initialize = async (): Promise<void> => {
   const lab: Lab = {
     config,
     adapterInfo,
+    adapterLimits: adapter.limits,
     timestampFeature,
     settings: () => state.settings,
     lock,
@@ -212,6 +219,7 @@ const initialize = async (): Promise<void> => {
   // 掃引が終わったらプロファイルのタブの「直近の結果」を今に合わせる（タブを開いたままでも）
   const sweep = mountSweepTab(tabRoot("sweep"), lab, () => profile.refresh());
   const anima = mountAnimaTab(tabRoot("anima"), lab);
+  const wan = mountWanTab(tabRoot("wan"), lab);
 
   const createOption = (value: string, text: string): HTMLOptionElement => {
     const created = document.createElement("option");
@@ -265,6 +273,7 @@ const initialize = async (): Promise<void> => {
       const previous = state.settings;
       gpuStatus("適用中 …");
       const held = await anima.reset();
+      const wanHeld = await wan.reset();
       state.settings = next;
       renderTableOptions();
       renderEnvironment();
@@ -282,7 +291,11 @@ const initialize = async (): Promise<void> => {
       gpuStatus(
         `適用しました（幾何プロファイル ${requestedLabel(next.choice)} · GPU 時間 ${
           next.timestamps ? "採る" : "採らない"
-        }${held ? " · Anima の GPU を取り直しました" : ""}）`,
+        }${held ? " · Anima の GPU を取り直しました" : ""}${
+          wanHeld
+            ? " · Wan の pipeline と GPU を畳みました（「読み込む」で新しい設定で取り直す）"
+            : ""
+        }）`,
       );
     } catch (error) {
       if (selected) {

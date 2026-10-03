@@ -233,6 +233,21 @@
       max-height: 40vh;
       overflow: auto;
     }
+    .video-pane {
+      flex: 0 0 min(45%, 560px);
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .video-pane canvas {
+      max-width: 100%;
+      border-radius: 8px;
+    }
+    .limits {
+      flex: none;
+      max-height: 30vh;
+    }
     .sources {
       max-height: 8rem;
       flex: none;
@@ -249,6 +264,7 @@
           <button role="tab" data-tab-button="profile"
             aria-selected="false">2. プロファイル</button>
           <button role="tab" data-tab-button="anima" aria-selected="false">3. Anima</button>
+          <button role="tab" data-tab-button="wan" aria-selected="false">4. Wan</button>
         </nav>
         <div class="controls">
           <label
@@ -444,6 +460,82 @@
           </div>
         </div>
         <div data-ui="ab-summary" class="ab-summary" hidden></div>
+      </section>
+      <section data-tab="wan" role="tabpanel" aria-label="Wan" hidden>
+        <p
+          class="muted">Wan2.1 T2V 1.3B（ADR 0118 段 9）。「読み込む」で GPU を取り（GPU 設定の幾何プロファイルで・timestamp は要求しない）、配布形を読みます（このサーバの配布形なら descriptor だけ — 重みは生成のたびに各段で Session を張るときに読み、段ごとに畳みます〈DiT → VAE〉）。プロンプトは埋め込み資産の 4 本だけです。判定表はアダプタ（読み込み後は取得した device）の limits と、選んだフレーム数・寸法が要る値を並べます（必要条件だけ — VRAM と submit の時間は別）。50 ステップは B570 で 33 フレーム約 30 分・81 フレーム約 2 時間かかり、途中で止める口はありません（止めるにはタブを閉じる）。</p>
+        <div class="controls">
+          <label class="field">取得元<input data-ui="source" type="text" size="36"></label>
+          <button data-ui="load">読み込む</button>
+          <button data-ui="dispose" disabled>pipeline を破棄（GPU device も）</button>
+          <button data-ui="export" disabled>JSON を保存</button>
+        </div>
+        <div class="controls">
+          <label class="field">プロンプト<select data-ui="prompt"></select></label>
+          <label
+            class="field">ネガティブ<select data-ui="negative"><option value="">既定（資産の negative の行）</option></select></label>
+          <label
+            class="field">seed<input data-ui="seed" type="number" value="42" min="0" step="1"></label>
+          <label class="field">フレーム数<select data-ui="frames"></select></label>
+          <label class="field">寸法<select data-ui="size"></select></label>
+          <label
+            class="field">steps（空欄 = 配布既定）<input data-ui="steps" type="number" min="1" step="1"></label>
+          <label
+            class="field">guidance（空欄 = 配布既定）<input data-ui="guidance" type="number" min="1" step="0.5"></label>
+          <label
+            class="field">shift（空欄 = 配布既定）<input data-ui="shift" type="number" min="0" step="0.5"></label>
+          <button data-ui="run" disabled>生成</button>
+        </div>
+        <p data-ui="info" class="muted"></p>
+        <p data-ui="status" class="status" role="status" aria-live="polite">準備中</p>
+        <p data-ui="limits-summary"></p>
+        <div class="scroll limits">
+          <table>
+            <thead>
+              <tr>
+                <th>limit</th>
+                <th>アダプタ</th>
+                <th>device</th>
+                <th>Wan が要る値</th>
+                <th>判定</th>
+                <th>備考</th>
+              </tr>
+            </thead>
+            <tbody data-ui="limits"></tbody>
+          </table>
+        </div>
+        <div class="split">
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>条件</th>
+                  <th>所要</th>
+                  <th>段</th>
+                  <th>step（DiT 2 回 / step）</th>
+                  <th>VAE タイル</th>
+                  <th>診断</th>
+                  <th>RGB sha256</th>
+                  <th>参照</th>
+                  <th>エラー</th>
+                </tr>
+              </thead>
+              <tbody data-ui="rows"></tbody>
+            </table>
+          </div>
+          <div class="video-pane">
+            <p class="muted">最新の動画</p>
+            <canvas data-ui="canvas" hidden></canvas>
+            <div class="controls">
+              <button data-ui="previous">前</button>
+              <button data-ui="play">再生</button>
+              <button data-ui="next">次</button>
+              <input data-ui="seek" type="range" min="0" max="0" value="0" step="1">
+              <span data-ui="frame-label" class="muted"></span>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
     <script type="module" src="main.js"></script>
