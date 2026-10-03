@@ -871,6 +871,13 @@ def assert_runtime_support(graph: IrGraph) -> None:
 
     MUST: op 名だけでなく**意味論 dtype と attrs まで**見る。名前だけの突合は
     「対応表にはあるのに実行時に落ちる」を作る（ADR 0005）。非対応は**全件列挙**する。
+
+    NOTE: 見る範囲は意味論の契約（OP_CONTRACTS）と capability 表（support.ts の鏡像）まで。
+    ランタイムの計画時の subset 門 — conv3d の `groups == 1`（ADR 0118 決定 1）・
+    `assertStaticLayoutAxis`・`assertCatAxis`（packages/runtime/src/runtime/plan.ts の
+    `validateGraphContracts`）— は写していない。support.ts 自身がそれらを持たないので、
+    鏡像を名乗る以上ここにも足さない。その形は verify を通り、Session 構築で runtime が
+    op と attrs を名指して fail loudly にする。
     """
     missing_ops: set[str] = set()
     # dtype 違反は宣言（値名）単位に重複除去する — 素朴に積むと件数が
