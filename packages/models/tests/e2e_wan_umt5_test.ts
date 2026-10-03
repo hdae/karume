@@ -95,8 +95,22 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
  *
  * MUST: 受入れの結果を見てこの値も決定用のケースも指標も変えない（ケースの正本は recipe
  * `wan/umt5_reference.py` の `band_cases` / `accept_cases`）。受入れが帯を外れたら、帯を広げずに原因を調べる。
+ * 導出（2026-10-03・B570・通常の device・CPU 層逐次 f64 参照）:
+ *
+ * | 決定用（L）  | r     |   | 受入れ          | r    |
+ * | ------------ | ----- | - | --------------- | ---- |
+ * | band-l0008   | 8.25  |   | boxing-cats     | 2.78 |
+ * | band-l0022   | 5.92  |   | ferret          | 8.87 |
+ * | band-l0036   | 2.20  |   | cat-dog-baking  | 4.36 |
+ * | band-l0163   | 4.93  |   | negative        | 3.74 |
+ * | band-l0327   | 0.904 |   |                 |      |
+ * | band-l0488   | 15.8  |   |                 |      |
+ *
+ * 最悪 15.8 × 5 = 79（有効数字 2 桁へ切り上げ）。故障注入: 層 0 / 1 の表の取り違え r 5.0e+5〜8.0e+5・wo.12 の scale × 2 は
+ * 5.0e+5〜9.7e+5（帯の 4 桁上）。scale × 1.0001（記録だけ）は 22.6 / 72.6 / 80.2 / 40.0 で帯の縁（r は δ に比例 — 1e-4 の
+ * scale のずれはこの門では区別できない。微妙な故障の床は持たない）。
  */
-const UMT5_NORMALIZED_BAND: number | undefined = undefined;
+const UMT5_NORMALIZED_BAND: number | undefined = 79;
 
 const SERIES_NAME = "wan2.1-umt5-i8-dyn";
 const COMPONENT = "text_encoder";
