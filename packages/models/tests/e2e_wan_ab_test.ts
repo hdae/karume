@@ -112,12 +112,16 @@ const FULL_PIPELINE = Deno.env.get("KARUME_WAN_FULL_PIPELINE") === "1";
  *
  * | ケース | 実測 relRMS | 実測 maxAbs | floor | ceiling          | 採った日・機 |
  * | ------ | ----------- | ----------- | ----- | ---------------- | ------------ |
- * | 81f    | —           | —           | —     | —（未導出）      | —            |
- * | 33f    | —           | —           | —     | —（未導出）      | —            |
+ * | 81f    | 2.0956e-1   | 5.3956e-1   | 0     | 4.2e-1（× 2 切上） | 2026-10-03・B570 |
+ * | 33f    | 1.0676e-1   | 2.8391e-1   | 0     | 2.2e-1（× 2 切上） | 2026-10-03・B570 |
+ *
+ * ノブ単位（33 フレーム・記録）: linear の a8 だけ 2.9991e-2 → + attention の a8 1.04e-1 → + s16 1.0676e-1。attention の a8 が
+ * 誤差の大半で、81 フレーム（N = 32,760）では 33 フレーム（N = 14,040）の約 2 倍（ADR 0120 リスク 1 の実測）。故障注入 ③
+ * （attention の a8 を外した席）は 3.0778e-2、⑤（別 seed）は 1.3828e+0。
  */
 const CASES: readonly { readonly frames: number; readonly band: AbBand | undefined }[] = [
-  { frames: 81, band: undefined },
-  { frames: 33, band: undefined },
+  { frames: 81, band: { floor: 0, ceiling: 4.2e-1 } },
+  { frames: 33, band: { floor: 0, ceiling: 2.2e-1 } },
 ];
 
 /** 故障注入を回すフレーム数（短い 33 — 門の空振りを示すのに長さは要らない）。 */
