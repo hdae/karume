@@ -852,3 +852,43 @@ S = 14,040（832×480・33 フレーム）の DiT 1 forward を f64 参照（活
 - 配布形の無い機では、埋め込みを配布形から読むホストの自己整合テストも SKIP になる（門番が全 SKIP を FAIL にするので無音にはならない）。
 - 範囲外（既存・別起票）: packages/models の diffusers からの移植（scheduler.ts の UniPC・vae-tiles.ts の blend）に third-party notice が無い
   のは anima の sampler 等と同じ既存の状態。
+
+## 追記（2026-10-03）: 段 8（81 フレーム）の計画と検収の形
+
+段 7 のコードとフル verify が済み、目視 12 本の生成（GPU）と並行して段 8 を起こした。読み取り調査（記録・コード・CPU の
+小プローブ）で前提を確かめ、検収の形を次のとおり決めた。
+
+- **DiT の実寸（S = 32,760・潜在 `[16,21,60,104]`）は段 3 と同じ形で検収する**: `export_dit.py` の CASES に `full-band` 6 本 +
+  `full-accept` 2 本（S = 14,040 の 8 本と timestep / text_length を揃え、seed だけ新規）を足し、f64 参照 + 正規化比 r で見る。
+  帯は決定 8 により S = 32,760 で独立に導く（`full-band` 6 本の最悪 r × 5 — 実測前は 75 を仮置き）。層別の probe（`blocks=True`）
+  は S = 32,760 では readback の staging が約 6 GB になり B570 に入らないので置かない。門は行ブロック 24 枚・1 submit の GPU 時間
+  ≤ 1 s（S = 14,040 の 270 ms から linear の比例で約 630 ms の見込み）・B570 で完走・非有限 0。VRAM と所要は記録する。
+- **指標 r の分布も記録する**（追記「段 3 の帯の床と指標 r の弱点」の宿題）: max ベースの r に加えて p99.99 ベースの r を
+  results.json に書く。門は max の r のままで、置き換えの判断は分布を見てから。
+- **VAE は 21 chunk の受入れケース `long` を既定レーンに足す**（1 タイル・seed 20261004・role accept）。GPU で検収した chunk 数の
+  最大が 9、Python の「誤差が chunk 数で伸びない」が 5 までだったので、81 フレームの chunk 数そのもので見る。タイル計画は空間
+  だけで決まり T に依存しない（Python / TS で二重に凍結済み）。
+- **通しの 81 フレームは 50 ステップの opt-in（`KARUME_WAN_FULL_PIPELINE=1`）だけ**: `50step-boxing-cats-seed42-81f`（sha 行・PNG
+  81 枚・一覧図・段ごとの DRM の山・利用者の目視）。2 ステップの CPU 参照（81 フレーム）は作らない — DiT（r の帯）・VAE（21 chunk）・
+  タイル（T 非依存）・UniPC / CFG（T 非依存）・patchify / unpatchify（DiT の e2e が T = 21 で通す）で部品は覆われ、通しの参照は
+  1 ケース約 60 分の CPU（RSS 約 10〜11 GiB）で、1 本では帯を独立に導けず（決定 8）、2 本以上は所要に見合わない。
+- **ホスト側の fixture を T' = 21 に広げる**（`dit_host_fixture.py`: 潜在 `[16,21,6,10]`・rope_base 24 行）: RoPE の t 軸 9〜20 を
+  上流表との Uint32 一致で直接見る（従来は F' = 2・8 行）。
+- **受理集合は 4n+1 の 5〜81 に解禁**（決定 7）。既定は 33 のまま（参照設定）。モデルカード・README・fixture（`wan-card-limits.json`）・
+  `card.py` の `WAN_FRAMES` を追随。コミットは GPU の検収が通ってから（未計測の数値は書かない）。
+
+### 前提の訂正と判断
+
+- **「DiT を持ったまま VAE へ進むと VRAM を越えるので 33 まで」という上限の理由は実測と合っていない**（pipeline.ts の旧コメント・
+  README・本 ADR の追記）。段 6 の実測では DiT の Session を畳んだ直後に 0.43 GiB へ戻り、DiT 段と VAE 段は重ならない。81 の可否は
+  **DiT 段単独の VRAM** で決まる（見積り 6.7〜8 GiB〈段 3 の実測比で縮めた値〜fdinfo の山からの外挿〉・天井 9,600〜9,631 MiB）。
+  backlog の「VAE 前の解放待ちの設計」は不要として閉じる。入らなければこの段で手を決める（行ブロックを VRAM の予算でも切る口、など）。
+- **CPU 参照は flash SDPA に依存する**: torch 2.13.0+cpu は f32 / f64 とも既定で `aten._scaled_dot_product_flash_attention_for_cpu`
+  を選び、S×S を実体化しない（プローブ: S 4096・12 heads で peak RSS 0.57 GiB・O(S)）。MATH に落ちるとスコア 1 枚が 51.5 GB
+  （f32）/ 103 GB（f64）で即 OOM。参照の forward を `sdpa_kernel([FLASH_ATTENTION])` の下に置いて fail loudly にする（既定で flash が
+  選ばれる限り数値は変わらない — 小ケースで既存 golden とバイト比較して確かめる）。所要の見込み（推測・S² 外挿と MAC 比の両方で
+  ほぼ同じ）: 1 forward f64 約 22〜24 分・f32 約 8〜9 分、1 ケース（f64 + f32 + パッチ後 eager）約 40 分、8 本で約 5.5 時間。RSS は
+  f64 で約 17〜18 GiB — 他の重い CPU 作業と同居させない。`export_dit.py` は系列を丸ごと書き直す（部分出力の口は作らない —
+  staged publication の原則）ので、既存 19 ケース（約 87 分）の再生成を伴い、krm の配布形とのバイト一致を再確認する。
+- **参照門の抜け**（隣接・別起票）: `referenceGatePasses` は caseIds のどれか 1 本に行があれば緑になるので、新しい case id の行を
+  書き忘れても警告付き SKIP で止まらない。段 8 では行を書くことで対処し、門の意味論は runtime の共通ヘルパなので別に起票する。
