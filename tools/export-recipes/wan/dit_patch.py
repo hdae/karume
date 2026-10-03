@@ -627,12 +627,23 @@ def reference_dit_layers(
     return output, collected
 
 
-class _NarrowFloatWatch(TorchDispatchMode):
-    """f64 の forward の中で、f64 でない浮動小数の値（要素数が `limit` を超えるもの）を記録する。"""
+def _timestep_sinusoid_shapes(freq_dim: int) -> frozenset[tuple[int, ...]]:
+    """上流の時刻の sinusoid（`Timesteps` → `get_timestep_embedding`・batch 1）が f32 で作る値の形。
 
-    def __init__(self, limit: int) -> None:
+    `timesteps[:, None].float()` の `[1, 1]`・周波数の `arange` / 除算 / `exp` の `[half]`・
+    角度と sin / cos と flip の切り出しの `[1, half]`・連結の `[1, freq_dim]`
+    （`half = freq_dim // 2`）。
+    """
+    half = freq_dim // 2
+    return frozenset({(1, 1), (half,), (1, half), (1, freq_dim)})
+
+
+class _NarrowFloatWatch(TorchDispatchMode):
+    """f64 の forward の中で、f64 でない浮動小数の値（形が `allowed` に無いもの）を記録する。"""
+
+    def __init__(self, allowed: frozenset[tuple[int, ...]]) -> None:
         super().__init__()
-        self.limit = limit
+        self.allowed = allowed
         self.found: list[str] = []
 
     def __torch_dispatch__(
@@ -648,7 +659,7 @@ class _NarrowFloatWatch(TorchDispatchMode):
                 isinstance(leaf, torch.Tensor)
                 and leaf.is_floating_point()
                 and leaf.dtype != torch.float64
-                and leaf.numel() > self.limit
+                and tuple(leaf.shape) not in self.allowed
             ):
                 self.found.append(f"{func}: {leaf.dtype} {tuple(leaf.shape)}")
         return result
@@ -692,7 +703,9 @@ def float64_forward(model: nn.Module) -> Iterator[None]:
     - 上流の `.float()` の寄せを f64 では素通しにする（{@link _float_keeps_float64}）。
     - f64 でない浮動小数の値が作られたら抜けるときに止める。例外は時刻の sinusoid（上流の
       `Timesteps` が f32 で組む `[1,freq_dim]` — GPU にも同じ f32 の値が `timesteps_proj` として
-      入り、`time_embedder` の入口で f64 へ広がる）だけで、要素数 `freq_dim` 以下として許す。
+      入り、`time_embedder` の入口で f64 へ広がる）の途中の値だけで、その形
+      （{@link _timestep_sinusoid_shapes}）として許す。要素数の大小で許すと、同じ大きさ以下の別の
+      f32 の値（head ごとのスケールなど）が素通りする。参照は batch 1 なので、形も batch 1 で縛る。
     """
     narrow = sorted(
         {str(tensor.dtype) for tensor in (*model.parameters(), *model.buffers())}
@@ -700,7 +713,7 @@ def float64_forward(model: nn.Module) -> Iterator[None]:
     )
     if narrow:
         raise AssertionError(f"f64 の参照なのにモデルに {narrow} の重み / バッファが残っている")
-    watch = _NarrowFloatWatch(int(model.config.freq_dim))
+    watch = _NarrowFloatWatch(_timestep_sinusoid_shapes(int(model.config.freq_dim)))
     with _float_keeps_float64(), watch:
         yield
     if watch.found:

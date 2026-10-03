@@ -613,6 +613,19 @@ class TestFloat64Reference:
         with torch.no_grad(), pytest.raises(AssertionError, match="f64 でない値"):
             dit_patch.reference_dit_f64(model, latents, timestep, embeds)
 
+    @pytest.mark.parametrize("shape", [(2, 3), (16,), (1, 4)], ids=["2x3", "freq_dim", "1x4"])
+    def test_a_small_f32_value_outside_the_timestep_sinusoid_is_caught(
+        self, shape: tuple[int, ...]
+    ) -> None:
+        """許すのは時刻の sinusoid の形（`[1,1]` / `[half]` / `[1,half]` / `[1,freq_dim]`）だけ。
+
+        合成モデルの freq_dim は 16 — 要素数 16 以下でも形が違えば止まる（大きさで許すと素通り
+        する）。
+        """
+        model = self._rounded_f64()
+        with pytest.raises(AssertionError, match="f64 でない値"), dit_patch.float64_forward(model):
+            torch.ones(shape)
+
     def test_a_model_left_in_f32_is_rejected(self) -> None:
         model = _tiny_dit()
         latents, timestep, embeds = _tiny_inputs(model)
