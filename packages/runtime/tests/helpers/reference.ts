@@ -19,9 +19,10 @@
  * MUST: 不一致を tolerance で吸収しない。`rewrite` は「何が変わったのかを先に言えるとき」
  * だけの操作で、**他環境の行には決して触らない**（別の機の参照値を巻き添えにしない）。
  *
- * MUST: 「参照が無いので全 SKIP」を無音の緑にしない。{@link registerReferenceGate} が
+ * MUST: 「参照が無いので SKIP」を無音の緑にしない。{@link registerReferenceGate} が
  * ADR 0005 の門番と同じ形（opt-out つき）で 1 本落とす。門が数えるのは**呼び手が登録した
- * ケース**だけである（{@link referenceGatePasses}）。
+ * ケース**だけで、その**全部**に現環境の行があるか、無いケースは明示の held 行であることを
+ * 求める（{@link referenceGatePasses}）。
  *
  * ## 呼び手の型（sha 門を持つ e2e）
  *
@@ -41,7 +42,7 @@
  * 実物が f32 テンソルなら {@link f32ArtifactBytes}（safetensors 1 本・metadata なし）で作る。
  */
 
-import { assert } from "@std/assert";
+import { fail } from "@std/assert";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
 import type { ResultEntry, Results } from "./results.ts";
 import { buildSafetensors } from "./safetensors.ts";
@@ -108,6 +109,8 @@ export const announceCheck = (caseId: string, check: ReferenceCheck, actual: str
 export type References = {
   /** この実行の参照モード。 */
   readonly mode: ReferenceMode | undefined;
+  /** 行を索く環境キー（GPU アダプタが取れていなければ `undefined` — held 行の引き当てに使う）。 */
+  readonly environmentKey: string | undefined;
   /** 現環境の行（無ければ `undefined`）。 */
   lookup(caseId: string): string | undefined;
   /** 参照値が無く、作るモードでもない（= そのケースは明示 SKIP する）。 */
@@ -253,6 +256,7 @@ export const openReferences = (
   };
   return {
     mode,
+    environmentKey: key,
     fixtureUrl,
     lookup,
     lacksReference: (caseId: string): boolean => mode === undefined && lookup(caseId) === undefined,
@@ -289,46 +293,137 @@ export const openReferences = (
 };
 
 /**
- * 参照門の緑条件（純関数 — 回帰テストはここを直に突く）。
+ * held 行: ケース ID → 環境キー → 理由（ADR 0106 追記決定 8 の `HELD_SERIES` と同じ形）。
  *
- * 数えるのは**この走行が登録したケース**だけである。fixture 全体を横断して 1 行でもあれば
- * 緑にすると、ケースの改名・削除で残った孤児行（もう誰も突き合わせない行）が、現役ケース
- * 全 SKIP を緑で隠す。
- *
- * MUST: 現役ケースの**一部**にだけ行がある状態は緑のまま（ADR 0106 の設計 — この門が言うのは
- * 「この環境の参照値が 1 件も無いのではない」ことだけで、全ケース検証済みとは言わない）。
+ * 「その機では走らせないので現環境の参照行を持たない」ケースを、参照門に明示する席。行を足せる
+ * のは決定 8 と同じく、その機で走らせると**プロセスごと落ちる**ケースだけ（数値が合わないケースは
+ * 赤のまま直す）。理由文には根拠と解除条件を書き、解消したら held 行を消す。
  */
-export const referenceGatePasses = (
-  references: Pick<References, "mode" | "lookup">,
+export type ReferenceHolds = Readonly<Record<string, Readonly<Record<string, string>>>>;
+
+/** 参照門の判定材料（{@link referenceGateFindings} — 失敗文面はこれから名指しで組む）。 */
+export type ReferenceGateFindings = {
+  /** 現環境の行も held 行も無い登録ケース（`KARUME_REFERENCE=write` で行を作る相手）。 */
+  readonly missing: readonly string[];
+  /** 現環境で held なのに行もある登録ケース（held 行が古い — 解消したなら held 行を消す）。 */
+  readonly staleHolds: readonly string[];
+};
+
+/** 現環境の held 行の理由（無ければ `undefined`）。 */
+const heldReasonOf = (
+  holds: ReferenceHolds,
+  caseId: string,
+  environmentKey: string | undefined,
+): string | undefined => {
+  if (environmentKey === undefined || !Object.hasOwn(holds, caseId)) return undefined;
+  const byEnvironment = holds[caseId];
+  return Object.hasOwn(byEnvironment, environmentKey) ? byEnvironment[environmentKey] : undefined;
+};
+
+/** 登録ケースを「行が無い」「held なのに行がある」に振り分ける（純関数）。 */
+export const referenceGateFindings = (
+  references: Pick<References, "lookup" | "environmentKey">,
   caseIds: readonly string[],
-): boolean =>
-  references.mode !== undefined ||
-  caseIds.some((caseId) => references.lookup(caseId) !== undefined);
+  holds: ReferenceHolds = {},
+): ReferenceGateFindings => {
+  const missing: string[] = [];
+  const staleHolds: string[] = [];
+  for (const caseId of caseIds) {
+    const hasRow = references.lookup(caseId) !== undefined;
+    const held = heldReasonOf(holds, caseId, references.environmentKey) !== undefined;
+    if (!hasRow && !held) missing.push(caseId);
+    if (hasRow && held) staleHolds.push(caseId);
+  }
+  return { missing, staleHolds };
+};
 
 /**
- * 参照門（各 sha ファイルに 1 本）。「この環境の参照値がまだ無い」状態を**無音の緑にしない**
- * ための門番で、ADR 0005 の GPU 門番と同じく opt-out つき。
+ * 参照門の緑条件（純関数 — 回帰テストはここを直に突く）。
+ *
+ * 数えるのは**この走行が登録したケース**だけである。fixture 全体を横断して数えると、ケースの
+ * 改名・削除で残った孤児行（もう誰も突き合わせない行）が現役ケースの SKIP を緑で隠す。opt-in の
+ * ケース（環境変数で有効になるもの）は、無効の走行では呼び手が登録に含めない。
+ *
+ * MUST: 登録ケースの**全部**に現環境の行があるか、無いケースは現環境の held 行であること。
+ * 「どれか 1 本に行があれば緑」だと、新しく足したケースの行の書き忘れが警告付きの SKIP のまま
+ * 緑で通る（行が 1 本も無いケースは検証していないのに、レーンの緑が検証済みと読まれる）。
+ * MUST: held 行と現環境の行が両方あるケースは赤（held 行が古い — 残すと呼び手がそのケースを
+ * 止めたまま、行があるのに突き合わせない）。
+ * 登録ケースが 0 件は赤（走れる門に検査対象が無いのは呼び手の登録漏れ）。作るモードは行が無くて
+ * 当然なので常に緑。
+ */
+export const referenceGatePasses = (
+  references: Pick<References, "mode" | "lookup" | "environmentKey">,
+  caseIds: readonly string[],
+  holds: ReferenceHolds = {},
+): boolean => {
+  if (references.mode !== undefined) return true;
+  if (caseIds.length === 0) return false;
+  const { missing, staleHolds } = referenceGateFindings(references, caseIds, holds);
+  return missing.length === 0 && staleHolds.length === 0;
+};
+
+/**
+ * 参照門（各 sha ファイルに 1 本）。「この環境の参照値が無いケースがある」状態を**無音の緑に
+ * しない**ための門番で、ADR 0005 の GPU 門番と同じく opt-out つき。
  *
  * `caseIds` はそのファイルが登録したケース ID 全部（`warnMissing` へ渡すものと同じ集合）。
+ * `holds` は現環境で走らせないケースの held 行（{@link ReferenceHolds}）。
  */
 export const registerReferenceGate = (
   references: References,
-  options: { readonly runnable: boolean; readonly caseIds: readonly string[] },
+  options: {
+    readonly runnable: boolean;
+    readonly caseIds: readonly string[];
+    readonly holds?: ReferenceHolds;
+  },
 ): void => {
+  const environment = references.environmentKey ?? "GPU なし";
+  const holds = options.holds ?? {};
+  // held で止めたケースは登録時に 1 度名乗る（ADR 0106 追記決定 8 — 無音の SKIP にしない）。
+  const heldHere = options.caseIds.flatMap((caseId) => {
+    const reason = heldReasonOf(holds, caseId, references.environmentKey);
+    return reason === undefined ? [] : [`${caseId}（${reason}）`];
+  });
+  if (options.runnable && heldHere.length > 0) {
+    console.warn(
+      `[karume] この環境（${environment}）では held 行で参照値を持たないケース: ` +
+        heldHere.join(" / "),
+    );
+  }
   Deno.test({
-    name: `参照門: この環境（${ENVIRONMENT.key ?? "GPU なし"}）の参照値がある`,
+    name: `参照門: この環境（${environment}）の参照値が登録した全ケースにある`,
     // GPU も資産も無い環境では sha 門自体が走らない（この門番も鳴らさない）。
     ignore: ALLOW_NO_REFERENCE || !options.runnable,
     fn: () => {
-      assert(
-        referenceGatePasses(references, options.caseIds),
-        `この環境（${ENVIRONMENT.key ?? "GPU なし"}）の参照値が、このファイルが登録した ` +
-          `${options.caseIds.length} ケースのどれにも無いため sha 門が全て SKIP された。` +
-          "ADR 0005 と同じ理由でこれは FAIL として扱う（検証していないものを " +
-          "検証済みと誤読させる）。この機の参照値を作るには KARUME_REFERENCE=write を付けて " +
-          `同じレーンを回すこと（行の置き場: ${references.fixtureUrl.pathname}）。` +
-          "参照値を持たないまま意図的に通すには KARUME_ALLOW_NO_REFERENCE=1 を設定すること。",
+      if (referenceGatePasses(references, options.caseIds, holds)) return;
+      const { missing, staleHolds } = referenceGateFindings(references, options.caseIds, holds);
+      const lines = [
+        `この環境（${environment}）の参照値の門が赤（登録 ${options.caseIds.length} ケース・` +
+        `行の置き場: ${references.fixtureUrl.pathname}）。`,
+      ];
+      if (options.caseIds.length === 0) {
+        lines.push("走れる門に登録ケースが 0 件（呼び手の登録漏れ）。");
+      }
+      if (missing.length > 0) {
+        lines.push(
+          `行が無いケース ${missing.length} 本: ${missing.join(" / ")}。` +
+            "これらの sha 門は明示 SKIP された — ADR 0005 と同じ理由で FAIL として扱う（検証して" +
+            "いないものを検証済みと誤読させる）。この機の行を作るには KARUME_REFERENCE=write を" +
+            "付けて同じレーンを回すこと（既存の行は上書きしない）。その機で走らせるとプロセスごと" +
+            "落ちるケースに限り、呼び手の held 行（ReferenceHolds）に理由と解除条件を書いて止める。",
+        );
+      }
+      if (staleHolds.length > 0) {
+        lines.push(
+          `held 行と現環境の行が両方あるケース: ${staleHolds.join(" / ")}。` +
+            "held の理由が解消したなら held 行を消すこと。",
+        );
+      }
+      lines.push(
+        "参照値を持たないまま意図的に通すには KARUME_ALLOW_NO_REFERENCE=1 を設定すること。",
       );
+      fail(lines.join("\n"));
     },
   });
 };

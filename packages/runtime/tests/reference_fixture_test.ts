@@ -16,7 +16,9 @@ import {
   openReferences,
   parseReferenceMode,
   referenceEntryFields,
+  referenceGateFindings,
   referenceGatePasses,
+  type ReferenceHolds,
   referenceMismatchMessage,
   type ReferenceSettlement,
   settleOrObserve,
@@ -152,8 +154,8 @@ Deno.test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発�
 
 // --- 参照門の緑条件（登録したケース集合で数える）---------------------------------
 //
-// 門が守るのは「この環境の参照値がまだ 1 件も無いので sha 門が全 SKIP された」を無音の緑に
-// しないこと。fixture 全体を横断して数えると、改名・削除で残った孤児行がその状態を隠す。
+// 門が守るのは「この環境の参照値が無いケースの sha 門が SKIP された」を無音の緑にしないこと。
+// fixture 全体を横断して数えると、改名・削除で残った孤児行がその状態を隠す。
 
 Deno.test("参照門: 孤児行だけが現環境の行を持つ状態は緑にしない", () => {
   // `retired` は登録されていないケース（改名・削除の跡）。現役 2 件は行を持たない。
@@ -187,14 +189,86 @@ Deno.test("参照門: 現役ケースの行が 1 件も無ければ緑にしな�
   });
 });
 
-Deno.test("参照門: 現役ケースの一部にだけ行があれば緑（ADR 0106 の設計）", () => {
+// 「どれか 1 本に行があれば緑」だと、新しく足したケースの行の書き忘れが警告付き SKIP のまま
+// 緑で通る。門は登録ケースの全部に行があるか、無いケースが明示の held 行であることを求める。
+
+Deno.test("参照門: 登録ケースの 1 本でも現環境の行が無ければ赤（無いケースを名指しする）", () => {
+  withFixture({ "case-1": { [CURRENT]: SHA_A }, "case-2": { [OTHER]: SHA_B } }, (fixtureUrl) => {
+    const references = openReferences(fixtureUrl, {
+      environment: environment(CURRENT),
+      mode: undefined,
+    });
+    const cases = ["case-1", "case-2"];
+    assertEquals(referenceGatePasses(references, cases), false, "書き忘れの行が緑で通った");
+    assertEquals(referenceGateFindings(references, cases), { missing: ["case-2"], staleHolds: [] });
+  });
+});
+
+Deno.test("参照門: 登録ケースの全部に現環境の行があれば緑", () => {
+  withFixture({ "case-1": { [CURRENT]: SHA_A }, "case-2": { [CURRENT]: SHA_B } }, (fixtureUrl) => {
+    const references = openReferences(fixtureUrl, {
+      environment: environment(CURRENT),
+      mode: undefined,
+    });
+    assertEquals(referenceGatePasses(references, ["case-1", "case-2"]), true);
+  });
+});
+
+Deno.test("参照門: 行が無いケースが現環境の held 行なら緑・他環境の held 行は数えない", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: undefined,
     });
-    // 門が言うのは「参照値が 1 件も無いのではない」ことだけで、全ケース検証済みとは言わない。
-    assertEquals(referenceGatePasses(references, ["case-1", "case-2"]), true);
+    const cases = ["case-1", "case-2"];
+    const heldHere: ReferenceHolds = { "case-2": { [CURRENT]: "この機では device lost" } };
+    assertEquals(referenceGatePasses(references, cases, heldHere), true);
+    // 別の機の held 行はこの機の欠けを免除しない（全機共通で止めると走れる機の検証まで消える）。
+    const heldElsewhere: ReferenceHolds = { "case-2": { [OTHER]: "あの機では device lost" } };
+    assertEquals(referenceGatePasses(references, cases, heldElsewhere), false);
+    assertEquals(referenceGateFindings(references, cases, heldElsewhere).missing, ["case-2"]);
+  });
+});
+
+Deno.test("参照門: held 行と現環境の行が両方あるケースは赤（古い held 行を名指しする）", () => {
+  withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
+    const references = openReferences(fixtureUrl, {
+      environment: environment(CURRENT),
+      mode: undefined,
+    });
+    const holds: ReferenceHolds = { "case-1": { [CURRENT]: "解消済みのはず" } };
+    assertEquals(referenceGatePasses(references, ["case-1"], holds), false);
+    assertEquals(referenceGateFindings(references, ["case-1"], holds), {
+      missing: [],
+      staleHolds: ["case-1"],
+    });
+  });
+});
+
+Deno.test("参照門: opt-in のケースは登録から外した走行では数えない", () => {
+  // `opt-in` は環境変数で有効になるケース（行は別の機にしか無い）。無効の走行では呼び手が登録に
+  // 含めない（e2e_wan_pipeline_test.ts の CASE_IDS の条件つき登録）— 門は fixture 全体ではなく
+  // 登録した集合だけを数える。
+  withFixture(
+    { "case-1": { [CURRENT]: SHA_A }, "opt-in": { [OTHER]: SHA_B } },
+    (fixtureUrl) => {
+      const references = openReferences(fixtureUrl, {
+        environment: environment(CURRENT),
+        mode: undefined,
+      });
+      assertEquals(referenceGatePasses(references, ["case-1"]), true, "無効の opt-in を数えた");
+      assertEquals(referenceGatePasses(references, ["case-1", "opt-in"]), false);
+    },
+  );
+});
+
+Deno.test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
+  withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
+    const references = openReferences(fixtureUrl, {
+      environment: environment(CURRENT),
+      mode: undefined,
+    });
+    assertEquals(referenceGatePasses(references, []), false);
   });
 });
 
