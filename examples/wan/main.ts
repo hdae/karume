@@ -117,6 +117,9 @@ const main = async (): Promise<void> => {
   console.log(`[wan] ${promptName}: ${prompt.trim()}`);
   const started = performance.now();
   const encoder = new TextEncoder();
+  // 実際に回した step 数（--steps 省略時は manifest の既定）。出力先の名前に入れるので、イベントが
+  // 運ぶ値を取る（既定を台本に写すと配布形の既定が変わったときに名前と中身が食い違う）。
+  let ranSteps: number | undefined;
   const video = await pipeline.generate({
     prompt,
     seed,
@@ -131,6 +134,7 @@ const main = async (): Promise<void> => {
     onEvent: (event) => {
       const elapsed = ((performance.now() - started) / 1000).toFixed(0);
       if (event.kind === "denoise-step") {
+        ranSteps = event.steps;
         Deno.stderr.writeSync(
           encoder.encode(`\r  denoise ${event.step}/${event.steps}（${elapsed}s）  `),
         );
@@ -142,8 +146,10 @@ const main = async (): Promise<void> => {
     },
   });
   Deno.stderr.writeSync(encoder.encode("\n"));
+  if (ranSteps === undefined) throw new Error("denoise-step のイベントが 1 度も来なかった");
+  // NOTE: guidance / shift / negative は名前に入らない — 変えて比べるときは --out で分ける。
   const outDir = `${outRoot}/wan-${promptName}-${video.width}x${video.height}-${video.frames}f` +
-    `-${steps ?? "default"}step-seed${seed}`;
+    `-${ranSteps}step-seed${seed}`;
   await Deno.mkdir(outDir, { recursive: true });
   for (let frame = 0; frame < video.frames; frame += 1) {
     await Deno.writeFile(

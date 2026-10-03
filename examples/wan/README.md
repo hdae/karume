@@ -62,8 +62,11 @@ Values outside these sets fail with `ModelInputError` before any weight reaches 
 
 Frames go to
 `outputs/examples/wan2.1-t2v-1.3b/wan-<prompt>-<W>x<H>-<frames>f-<steps>step-seed<seed>/frame-NN.png`
-(`--out` changes the root). The 8-bit conversion is `wanFrameToRgba`, the same rule the reference
-hashes use.
+(`--out` changes the root). `<steps>` is the step count the run used, so a run without
+`--steps` is named after the distribution's default. Guidance, flow shift and the negative prompt
+are not part of the name: runs that differ only in those write to the same directory and overwrite
+each other's frames, so give each one its own `--out`. The 8-bit conversion is `wanFrameToRgba`,
+the same rule the reference hashes use.
 
 The default run takes about half an hour on the B570: two transformer forwards per step (about 17 s
 each at 832×480 × 33 frames) and about two minutes of tiled VAE decoding.
