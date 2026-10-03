@@ -332,6 +332,11 @@ later の「decode 速度の残り」。
   で約 28.3 PFLOP）と TDR。H3 は実在・open-weight（HF MiniMaxAI/MiniMax-H3・条文の文理では日本は許諾地域〈法的助言ではない〉）
   だが 33B dense + Qwen3-VL-32B + VAE 2.6B で 1 タスク約 144 GB・ネイティブでも offload 前提（RTX 5090 で 112 s の実測例）・
   ブラウザ WebGPU の事例は無い。
+  **レビューの消化済（2026-10-03）**: 差分レビュー 75 件 + Codex 12 件を fix 単位 37 コミットで消化（ADR 0118 追記 2026-10-03）。
+  **次の波（2026-10-03 起草・proposed）**: [ADR 0119](decisions/0119-wan-umt5-gpu-text-encoder.md)（段 10 = umT5 を GPU で・自由な
+  プロンプト・AbortSignal・10a〜10e）/ [ADR 0120](decisions/0120-wan-dit-w8a8-seat.md)（w8a8 席・段 1〜7）/ 段 9 Chrome（gpu-lab の
+  Wan ページを作り、利用者が RTX 5070 Ti 機で確認）。順序: 段 9 ∥ 10a → 10b（export のホスト RAM・単独で回す）→ 0120 段 1〜2
+  （CPU）→ GPU の段は lock で直列化（10c → 0120 段 3〜5 → 10d）→ 視認 A/B（0120 段 6・10d）→ H3。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
   劣化機序 — いずれも「試してダメ」ではなく「試していない」）だけで、正本は

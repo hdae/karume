@@ -949,3 +949,46 @@ S = 14,040（832×480・33 フレーム）の DiT 1 forward を f64 参照（活
   バイトが変わったがテンソルは同一（GPU との差 maxAbs が 2026-10-02 と一致）— safetensors 0.8.0 の `__metadata__` は
   HashMap で、ヘッダのキー順がプロセスごとに変わる（3 回書いて 3 通り）。fixture の再生成をバイトで見る運用は成り立たず、
   テンソルで見る（隣接・backlog に起票）。
+
+## 追記（2026-10-03）: レビュー 2 本の消化と決定 1 / 4 / 7 の補足
+
+- 対象: 波 `b9245574..e2b14aa9`（29 コミット）への独立レビュー 2 本。差分レビュー（6 観点 × Opus → 観点ごとの敵対検証・
+  75 件: holds 72 / refuted 3〈P-6 VAE に `{}` を渡すのは取り決め・P-10 整列違反は parseSafetensors が名指しで落とす・
+  TG-07 縮退の格子は同じ関数を通る〉）と Codex（12 件: medium 8 / low 4・未検証の 9 件を検証レッグに掛けて全て holds）。
+  記録は `.claude/reviews/2026-10-03_{diff-review,codex-review}-wan/`（git 追跡外）。
+- 直したもの（fix 単位のコミット 37 本・領域ごと）:
+  - runtime / exporter: conv3d の座標演算の i32 折り返しを params で拒む（M1）・submitGpuTime の maxDispatchKey（F5）・
+    WEIGHT_SLOTS の件数と i4 の除外列挙（F2）・i4 / 方式別の丸めの Conv3d 被覆（F3）・README の attrs 列挙（F6）・verify の
+    境界と quantize の注記（F1 / F7）。
+  - models（本体）: DiT 段の後始末が本体の失敗を上書き（P-2 / M3）・guidance の f32 門と非有限値の門〈step ごとの潜在・VAE の
+    クランプ前〉（P-5 / M2）・steps × shift の σ 列の門（P-1 / L3）・admission でタイル計画の全数照合と ditContract の
+    rank / batch / S（M4）・自前 GPU の requiredLimits（L1）・VAE chunk ホスト関数の範囲検査（H-1 / H-6）・doc（H-2 / H-3 /
+    P-7 / P-6 / P-11）・example の出力名（P-8）。
+  - models（テスト）: seed → 列の値のピン + seed 経路の sha ケース（TG-01）・VAE e2e の disposeSteps（L2 / TG-17）・解放待ちと
+    VRAM 標本化の helper 化（TG-09 / TG-03）・時間換算の局所化と行ブロックの導出（TG-02）・通常 / 計測モードの Uint32 一致
+    （TG-04）・RoPE 注入の格子 assert（TG-05）・step 数（TG-08）・gpuTiming 拒否（P-9）・入れ子ブレンドの CPU テスト（H-5）。
+  - recipes: 書き手の eager 同値の門（M5）・VAE 2 グラフ + fixture の一組公開と wan_plan の組の突合（M6）・埋め込み資産の門に
+    dtype / 版〈diffusers・ftfy・transformers〉/ normalized（F1 / F2 / M7）・few_step_ref の cond / uncond を値で振り分け +
+    flash 固定（F5 / F6）・_NarrowFloatWatch の形（F4）・RoPE の dtype 一致の assert（F13）・NOTICE の RoPE の記述（F14）・
+    README / pyproject / コメント（F8 / F9 / L4 / D14）・テスト被覆（F11 / F12）。配布形の NOTICE / README を dist.py で再生成
+    （他のバイトは不変）。
+  - docs: 検収表 段 2 のセル復元（D1）・limitations の Wan 節と B570 の実測（D2 / D13）・未解決節の現況化（D3）・単位 / 置き場名 /
+    節名 / 実測の追補（D4 / D7 / D11 / F10 / TG-12）・perf-ledger K-72 / K-74 を kill（D9）・quantization / glossary /
+    release-runbook / ACTIVE_DESIGN（D8 / D12 / D5 / D15 / L4）・時間門の範囲の明示（M8）。
+- 記録のみ（直さない・理由つき）: TG-10（帯 104 は外れ値 1 本・床 2 で開示済み）・TG-13（VAE の帯は決定用 1 ケース・開示済み）・
+  H-7（cache の対応は recipe が構造で検査）・H-8（乱数の決定性はエンジン内・sha 行は環境ごと）・recipes F3（`.double()` の
+  共有切れは今の経路で実害なし）・F15（ライセンスの出所 2 系統は門が食い違いを捕まえる）・TG-11（DiT ホストテストの RSS 未計測）・
+  TG-18（note の区切り）・X-2（空入力の RangeError）・X-3（anima/image.ts の同じ文言 — 範囲外）。backlog に起票: M8 の本体
+  （通常実行の submit 構成での計測）・runtime F4（golden conv3d の v4 / m64）・conv1d / conv2d の同型の境界監査・AbortSignal。
+- **決定 1 の補足（by-design）**: conv3d の GPU 実行は軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32）。超える
+  IR は Session 構築時に CodegenError。CPU 参照の意味論は変えない（limitations に記載）。
+- **決定 7 の補足（受理集合）**: guidance は 1 以上で f32 に丸めても有限、steps × shift は UniPC の σ 列が狭義単調減少に組める組
+  だけ（外は ModelInputError）。生成中の非有限値は fail loudly（step ごとの潜在・VAE のクランプ前）。
+- **決定 4 の改訂**: 第 2 段（umT5 を GPU で）の相対位置のバケット表は `[512,512]` の定数を焼く形ではなく、ホストが `[L,L]` の
+  i32 添字表を作ってグラフ入力で渡す。第 2 段の設計全体は [ADR 0119](0119-wan-umt5-gpu-text-encoder.md) に移した（決定 3 が正本）。
+- **利用者の裁定（2026-10-03）**: Wan にも AbortSignal を足す（ADR 0119 決定 9）・w8a8 席を作る
+  （[ADR 0120](0120-wan-dit-w8a8-seat.md)）・段 9 は利用者が RTX 5070 Ti 機の Chrome で確認する・段 10 は段 9 と並列に進める。
+- 検証: ホスト専用テスト緑（models 55 / runtime 233）・exporter pytest 3,498・recipes pytest 262 + 288・ruff 緑・GPU:
+  gpu_f16_weights_test 12 passed・wan レーン（`KARUME_REFERENCE=write`・seed 経路の sha 行を作成）: 66 passed / 0 failed / 1 ignored〈50 ステップの opt-in〉・48 分 32 秒。seed 経路の sha 行
+  `2step-seed-boxing-cats-seed42` を作成。通常モードの出力は計測モードと Uint32 で一致（S = 32,760 / 14,040）。行ブロックは
+  device の束縛上限から導いた 24 / 5 枚。1 submit の GPU 時間の最大は 458.8 ms（S = 32,760）/ 270.4 ms（S = 14,040）で前回と同じ。
