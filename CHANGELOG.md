@@ -186,6 +186,14 @@ measurements in `docs/research/`.
   storage is not f16, whose container provenance names another upstream revision or license, a
   transformer without its RoPE base tables, and an embedding asset made from another revision, with
   other prompts or with a width that does not match the transformer.
+- Wan2.1 int8 transformer quants (ADR 0120): `wan.export_dit --dtype i8` writes the
+  `wan2.1-t2v-1.3b-i8-dyn` series (the 307 linear weights as per-output-channel int8; bias, norm and
+  modulation tables stay f32), and `dist.py --pipeline wan` adds two quants to `karume-wan2.1`:
+  `f16+dit8` (int8 transformer weights, f32 compute — the reference quant) and
+  `f16+dit8-a8-attn8-s16` (int8 weights with per-token int8 activations in linear and attention,
+  f16 score storage). `f16` stays the default; `WanPipeline` accepts `linearCompute`,
+  `attentionCompute` and `attentionScoreStorage` from the quant declaration. The GPU numerics gates
+  and the visual check for these quants land with ADR 0120 stages 3–6.
 
 ### Changed
 

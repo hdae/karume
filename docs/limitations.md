@@ -1009,6 +1009,8 @@ Consequences）。
   （`KARUME_REFERENCE=write` で自分の機の行を作る）。50 ステップの行は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）の
   ときだけ照合する。
 
+- DiT の i8 席（ADR [0120](decisions/0120-wan-dit-w8a8-seat.md)・2026-10-03）: 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` を配布形に足したが、GPU の数値の門（r 門・自機 A/B 門）と視認 A/B（段 3〜6）は未了。既定は `f16` のまま。実用席の a8 は Metal（M2）では速くならない（K-70 の実測 — 品質だけを払う席になる）。
+
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
 export 済みグラフ（台本 `tools/export-recipes/embeddinggemma/export.py`）は `attention_mask` を
