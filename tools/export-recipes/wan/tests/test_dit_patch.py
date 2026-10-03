@@ -14,6 +14,11 @@
 合成モデル（乱数初期化の小さな `WanTransformer3DModel`）で回すものと、実重み（フィクスチャ
 `wan_snapshot` — 無い機では SKIP）で回すものがある。合成モデルの形は **3 軸と C が全部違う値**にする
 （軸の取り違えは正方では対合になって隠れる）。
+
+`importorskip("diffusers")` は diffusers に依るテストの中（合成モデル・上流の部品を作る helper と
+fixture）で受ける — モジュール直下に置くと、ケースの表・ホストの並び・flash の固定のような
+diffusers に依らない不変条件まで既定の sync（`wan` グループ無し）で 1 本も回らない
+（`test_vae_tiling.py` と同じ判断）。
 """
 
 from __future__ import annotations
@@ -23,8 +28,6 @@ import torch
 from torch import nn
 from torch.nn import functional
 from torch.nn.attention import SDPBackend
-
-pytest.importorskip("diffusers")
 
 from wan import dit_patch
 
@@ -69,8 +72,13 @@ EXPECTED_OPS = frozenset(
 )
 
 
+def _transformer_wan():
+    """上流の `transformer_wan` モジュール（diffusers が無ければ呼んだテストを SKIP）。"""
+    return pytest.importorskip("diffusers.models.transformers.transformer_wan")
+
+
 def _tiny_dit() -> nn.Module:
-    from diffusers import WanTransformer3DModel
+    WanTransformer3DModel = _transformer_wan().WanTransformer3DModel  # noqa: N806
 
     torch.manual_seed(20261002)
     return WanTransformer3DModel(**TINY_DIT).to(torch.float32).eval()
@@ -98,11 +106,10 @@ class TestRealPairRotary:
     """interleave 形の RoPE の実数化（`real_pair_rotary` / 差し替えた processor）。"""
 
     def _attention_and_tables(self, dim: int, heads: int, latent: tuple[int, int, int]):
-        from diffusers.models.transformers.transformer_wan import (
-            WanAttention,
-            WanAttnProcessor,
-            WanRotaryPosEmbed,
-        )
+        upstream = _transformer_wan()
+        WanAttention = upstream.WanAttention  # noqa: N806
+        WanAttnProcessor = upstream.WanAttnProcessor  # noqa: N806
+        WanRotaryPosEmbed = upstream.WanRotaryPosEmbed  # noqa: N806
 
         torch.manual_seed(11)
         attention = WanAttention(dim, heads, dim // heads, 1e-6, processor=WanAttnProcessor())
@@ -240,7 +247,7 @@ class TestHostFunctions:
 
         設定は実寸（head_dim 128・位置 1024）。
         """
-        from diffusers.models.transformers.transformer_wan import WanRotaryPosEmbed
+        WanRotaryPosEmbed = _transformer_wan().WanRotaryPosEmbed  # noqa: N806
 
         rope = WanRotaryPosEmbed(128, (1, 2, 2), 1024)
         latent = (3, 10, 14)
@@ -267,7 +274,7 @@ class TestHostFunctions:
         assert torch.equal(torch.stack([row[1] for row in rows]), sin[0, :, 0])
 
     def test_the_base_tables_have_the_upstream_ceiling_and_widths(self) -> None:
-        from diffusers.models.transformers.transformer_wan import WanRotaryPosEmbed
+        WanRotaryPosEmbed = _transformer_wan().WanRotaryPosEmbed  # noqa: N806
 
         base = dit_patch.dit_rope_base_tables(WanRotaryPosEmbed(128, (1, 2, 2), 1024))
 
@@ -283,7 +290,7 @@ class TestHostFunctions:
 
     def test_a_misaligned_base_slice_is_rejected(self) -> None:
         """恒真化の門: ブロック境界をずらした切り出しは「その軸で動かない」ので落ちる。"""
-        from diffusers.models.transformers.transformer_wan import WanRotaryPosEmbed
+        WanRotaryPosEmbed = _transformer_wan().WanRotaryPosEmbed  # noqa: N806
 
         base = dit_patch.dit_rope_base_tables(WanRotaryPosEmbed(24, (1, 2, 2), 32))
         broken = dict(base)
@@ -609,6 +616,7 @@ class TestFloat64Reference:
 @pytest.fixture(scope="module")
 def wan_transformer(wan_snapshot) -> nn.Module:
     """実重みの DiT（CPU f32・素のまま）。テストの間で丸め等の書き換えをしない MUST。"""
+    pytest.importorskip("diffusers")
     from wan.export_dit import load_transformer
 
     return load_transformer()
