@@ -435,7 +435,7 @@ class TestInt4GroupQuantization:
     def test_only_linear_weights_are_quantized(self):
         """対象は `nn.Linear` の weight だけ（ADR 0069 決定 5 — 実行経路が linear 限定）。
 
-        i8 の {@link QUANT_CHANNEL_AXES} 全 5 種とは対象が違う。conv / embedding を巻き込むと
+        i8 の {@link QUANT_CHANNEL_AXES} 全種とは対象が違う。conv / embedding を巻き込むと
         「実行できない格納で書かれた重み」ができる。
         """
         model = Grouped()
@@ -538,6 +538,15 @@ def conv2d_with_groups() -> nn.Conv2d:
     return module
 
 
+def conv3d_with_groups() -> nn.Conv3d:
+    """`[Cout, Cin, Kt, Kh, Kw]` の rank 5 — 平坦化は `Cin·Kt·Kh·Kw` の行優先
+    （group は Kt 境界で割れる）。"""
+    module = nn.Conv3d(1, 2, kernel_size=(2, 1, 3))
+    with torch.no_grad():
+        module.weight.copy_(group_tensor(GROUP_VALUES).reshape(2, 1, 2, 1, 3))
+    return module
+
+
 def conv_transpose1d_with_groups() -> nn.ConvTranspose1d:
     """`[Cin, Cout, K]` の転置レイアウト — **軸 1**（Cout）ごとに `Cin·K` を平坦化する。
 
@@ -551,13 +560,15 @@ def conv_transpose1d_with_groups() -> nn.ConvTranspose1d:
 
 
 class WeightedGroups(nn.Module):
-    """5 op 種を 1 つに束ねた模型（**平坦化後の in 軸が全部 6**なので同じ group_size で通る）。"""
+    """`QUANT_MODULE_TYPES` の全種を 1 つに束ねた模型（**平坦化後の in 軸が全部 6**なので同じ
+    group_size で通る）。"""
 
     def __init__(self) -> None:
         super().__init__()
         self.dense = linear_with_groups()
         self.conv = conv1d_with_groups()
         self.image = conv2d_with_groups()
+        self.volume = conv3d_with_groups()
         self.up = conv_transpose1d_with_groups()
         self.table = embedding_with_groups()
 
@@ -571,12 +582,13 @@ class TestInt4InAxisPerOpType:
             (linear_with_groups, nn.Linear),
             (conv1d_with_groups, nn.Conv1d),
             (conv2d_with_groups, nn.Conv2d),
+            (conv3d_with_groups, nn.Conv3d),
             (conv_transpose1d_with_groups, nn.ConvTranspose1d),
             (embedding_with_groups, nn.Embedding),
         ],
     )
     def test_each_op_type_groups_along_its_own_in_axis(self, build, op_type) -> None:
-        """5 op 種とも「出力チャネルごとの受容野」を group に割る（期待値は直書き）。
+        """どの op 種も「出力チャネルごとの受容野」を group に割る（期待値は直書き）。
 
         期待値は実装と別経路（{@link GROUP_ROUNDED} の直書き）で持つ — 実装の平坦化を
         期待値側でも呼ぶと、軸を取り違えたまま両者が一致して緑になる。
@@ -619,9 +631,11 @@ class TestInt4InAxisPerOpType:
         for name, before in untouched.items():
             assert torch.equal(model.get_parameter(name), before), name
 
-    def test_widening_to_all_five_types_quantizes_all_of_them(self) -> None:
-        """`QUANT_MODULE_TYPES`（i8 と同じ 5 種）まで広げると 5 本とも同じ group で丸まる。"""
+    def test_widening_to_all_types_quantizes_all_of_them(self) -> None:
+        """`QUANT_MODULE_TYPES`（i8 と同じ全種）まで広げると全部が同じ group で丸まる。"""
         model = WeightedGroups()
+        # 模型が全種を持つこと自体を固定する（型が増えたのに模型が古いまま緑になるのを防ぐ）
+        assert {type(module) for module in model.children()} == set(QUANT_MODULE_TYPES)
 
         report = fake_quant_int4(model, group_size=3, op_types=QUANT_MODULE_TYPES)
 
@@ -629,10 +643,11 @@ class TestInt4InAxisPerOpType:
             "dense.weight",
             "conv.weight",
             "image.weight",
+            "volume.weight",
             "up.weight",
             "table.weight",
         }
-        assert report.elements == 12 * 5
+        assert report.elements == 12 * 6
         for name, module in model.named_children():
             axis = QUANT_CHANNEL_AXES[type(module)]
             assert torch.equal(report.scales[f"{name}.weight"], torch.tensor(GROUP_SCALES)), name

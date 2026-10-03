@@ -42,7 +42,8 @@ GROUP = 8
 
 
 class Layers(nn.Module):
-    """5 op 種 + 対象外（norm / 生 Parameter）— **平坦化後の in 軸が全部 8 の倍数**。"""
+    """`QUANT_MODULE_TYPES` の全種 + 対象外（norm / 生 Parameter）— **平坦化後の in 軸が全部
+    8 の倍数**。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -50,6 +51,7 @@ class Layers(nn.Module):
         self.wide = nn.Linear(32, 2)
         self.conv = nn.Conv1d(2, 3, kernel_size=8)
         self.image = nn.Conv2d(2, 2, kernel_size=(2, 4))
+        self.volume = nn.Conv3d(2, 2, kernel_size=(2, 1, 4))
         self.up = nn.ConvTranspose1d(2, 3, kernel_size=8)
         self.table = nn.Embedding(5, 16)
         self.norm = nn.LayerNorm(3)
@@ -222,9 +224,9 @@ class TestFixedTableMethods:
 
     @pytest.mark.parametrize(("method", "levels", "power_of_two"), FIXED_TABLE_METHODS)
     def test_the_target_set_is_shared_with_the_storage_path(self, method, levels, power_of_two):
-        """対象選択は `quantize.iter_quant_targets` の共有 — 既定 linear のみ・5 種まで広がる。"""
+        """対象選択は `quantize.iter_quant_targets` の共有 — 既定 linear のみ・全種まで広がる。"""
         assert method(layers(), group_size=GROUP).modules == 2
-        assert method(layers(), group_size=GROUP, op_types=QUANT_MODULE_TYPES).modules == 6
+        assert method(layers(), group_size=GROUP, op_types=QUANT_MODULE_TYPES).modules == 7
 
 
 class TestMxfp4Scale:
@@ -330,7 +332,7 @@ class TestKMeansCodebook:
             fake_quant_kmeans(
                 layers(), granularity, group_size=GROUP, op_types=QUANT_MODULE_TYPES
             ).modules
-            == 6
+            == 7
         )
 
     def test_an_axis_the_group_size_does_not_divide_fails_loudly_for_the_shared_table(self):
