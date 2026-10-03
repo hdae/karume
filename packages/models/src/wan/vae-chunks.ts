@@ -5,8 +5,8 @@
  *
  * ## グラフの取り決め（recipe `tools/export-recipes/wan/vae_patch.py` が書く形）
  *
- * - 入力: 潜在 1 フレーム `latent [C,1,t,t]`（逆正規化 `z·std + mean` はホスト）と cache
- *   `cache_NN [Cin,2,h,w]`（NN は上流の `feat_idx` の順）。
+ * - 入力: 潜在 1 フレーム `latent [C,1,t,t]`（逆正規化 `z / (1/std) + mean` はホスト —
+ *   `latents.ts`）と cache `cache_NN [Cin,2,h,w]`（NN は上流の `feat_idx` の順）。
  * - 出力: クランプ前のフレーム（first は `[3,1,8t,8t]`・next は `[3,4,8t,8t]`）と、更新後の cache
  *   （**入力と同じ順** — 出力 1+k が cache 入力 k の更新後）。
  * - first は upsample3d の `time_conv` の cache を持たない（最初の chunk では走らない — 上流の
@@ -129,6 +129,10 @@ const chunkGraph = (
     throw new WanVaeChunkError(
       `${where}: 出力 ${outputs.length} 本が入力 ${inputs.length} 本と違う（フレーム + cache）`,
     );
+  }
+  if (cacheSpecs.length === 0) {
+    // chunk 間の状態は因果キャッシュだけが運ぶ（cache 0 本では chunk を繋げない）。
+    throw new WanVaeChunkError(`${where}: cache の入力が 0 本（cache_NN で chunk を繋ぐ取り決め）`);
   }
   const [frameOutput, ...cacheOutputs] = outputs;
   const frameShape = valueShape(owner, frameOutput, `${where} のフレーム出力`);
@@ -330,6 +334,10 @@ export const wanVaeLatentChunk = (
   index: number,
 ): Tensor => {
   const chunks = wanVaeChunkCount(layout, latents);
+  // 範囲外を通すと隣のチャネルの平面か末尾の外（空の subarray）を読み、ゼロ混じりの値を黙って返す。
+  if (!Number.isInteger(index) || index < 0 || index >= chunks) {
+    throw new RangeError(`chunk ${index} が [0, ${chunks}) の外`);
+  }
   const area = layout.tile * layout.tile;
   const data = new Float32Array(layout.latentChannels * area);
   for (let channel = 0; channel < layout.latentChannels; channel += 1) {
