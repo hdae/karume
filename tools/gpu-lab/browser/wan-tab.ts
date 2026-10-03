@@ -9,10 +9,17 @@
  *    （`wan-plan.ts` の `judgeWanLimits` — 足りない項目は赤）。
  * 2. **読み込み**: GPU を取り（ページの GPU 設定の幾何プロファイル・`onDeviceLost`）、配布形を
  *    `WanPipeline.fromPretrained` で読む。取得元は既定でこのサーバが配る `models/karume-wan2.1`
- *    （`/models/wan/…` — HF の公開リポはまだ無い）、HF の `owner/name` も入れられる。
- * 3. **生成**: プロンプト（埋め込み資産の名前）・seed・フレーム数・寸法・steps・guidance・shift で
- *    `generate` → 全フレームを canvas に描いて再生 → 所要（段・step・VAE タイル）・Session の診断・
- *    RGB の sha256（参照ケースなら環境行との照合）を表に積む。
+ *    （`/models/wan/…` — HF の公開リポはまだ無い）、HF の `owner/name` も入れられる。テキストエンコーダの
+ *    経路（ADR 0119 決定 7）はタブの既定が `precomputed`（埋め込み資産 — 段 9 の確認の既定のまま。パイプライン
+ *    の既定は `gpu` なので、ここでは必ず明示して渡す）。`gpu` を選ぶと umT5 の越境先（Wan の manifest の
+ *    `text_encoder` が宣言する repo）を、このサーバが配る `models/karume-umt5-xxl`（`/models/umt5/…`）へ取得元の
+ *    `crossRepo` で結ぶ（HF の取得元なら宣言どおり HF から取る）。
+ * 3. **生成**: プロンプト（埋め込み資産の名前 — `gpu` なら自由プロンプトの欄の文字列が優先）・seed・フレーム数・
+ *    寸法・steps・guidance・shift で `generate` → 全フレームを canvas に描いて再生 → 所要（段・step・VAE タイル・
+ *    `gpu` なら text 段）・Session の診断・RGB の sha256（事前計算の経路の参照ケースなら環境行との照合）を表に積む。
+ *
+ * 経路の選択と自由プロンプトの欄はページの HTML ではなくここで足す（`index.html` の Wan の節は事前計算の経路の
+ * 欄だけを持つ）。
  *
  * GPU は自前で取って pipeline に渡す（共有 GPU）: device lost を `onDeviceLost` で表に残し、幾何プロファイルの
  * 注入をページの GPU 設定に揃えるため。`acquireGpu` は requiredLimits にアダプタ値を要求する（Chrome の既定
@@ -34,12 +41,14 @@ import {
   type HubRepoRef,
   loadManifest,
   localDirectory,
+  resolveSelection,
 } from "../../../packages/hub/mod.ts";
 import {
   type GeneratedVideo,
   wanFrameToRgba,
   type WanGenerateEvent,
   WanPipeline,
+  type WanPipelineOptions,
   type WanPrompt,
   type WanRunComponent,
 } from "../../../packages/models/wan.ts";
@@ -90,8 +99,21 @@ import {
   type WanTimelineMark,
 } from "./wan-plan.ts";
 
-/** 書き出す JSON の版。 */
-const WAN_REPORT_FORMAT = "karume-wan-browser/1";
+/** 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ）。 */
+const WAN_REPORT_FORMAT = "karume-wan-browser/2";
+
+/** テキストエンコーダの経路（`WanPipelineOptions.textEncoder`）。 */
+type WanTextEncoder = NonNullable<WanPipelineOptions["textEncoder"]>;
+
+/** 経路の選択肢（先頭がタブの既定 — 段 9 の確認の既定の挙動〈事前計算の埋め込み〉を変えない）。 */
+const TEXT_ENCODER_CHOICES: readonly { readonly value: WanTextEncoder; readonly label: string }[] =
+  [
+    { value: "precomputed", label: "precomputed（埋め込み資産の 4 本 — umT5 を取らない）" },
+    { value: "gpu", label: "gpu（umT5 i8 を GPU で回す — 任意のプロンプト）" },
+  ];
+
+/** Wan の manifest の部品名（umT5 — 越境参照の宣言を引く）。 */
+const TEXT_ENCODER = "text_encoder";
 
 /** 再生のフレームレート（上流の例の `export_to_video(fps=16)`）。 */
 const PLAYBACK_FPS = 16;
@@ -101,6 +123,11 @@ type WanRow = {
   readonly index: number;
   readonly at: string;
   readonly request: WanResolvedRequest;
+  readonly textEncoder: WanTextEncoder;
+  /** `gpu` の経路で渡した自由プロンプト（無ければ `request.prompt` の資産の原文を渡した）。 */
+  readonly freePrompt?: string;
+  /** `gpu` の経路の text 段の所要（`stage` の start → end — 完走した段だけ）。 */
+  readonly textEncoderMs?: number;
   /** 参照ケースの id（sha256 の環境行のキー — 条件が e2e のケースと同じときだけ）。 */
   readonly caseId?: string;
   readonly wallMs: number;
@@ -115,6 +142,7 @@ type WanRow = {
 type Loaded = {
   readonly gpu: GpuContext;
   readonly pipeline: WanPipeline;
+  readonly textEncoder: WanTextEncoder;
   /** 取得元の表示（`karume-wan2.1（このサーバ）` / HF の `owner/name`）。 */
   readonly source: string;
   readonly repo?: string;
@@ -162,7 +190,33 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     next: element(root, "next", HTMLButtonElement),
     seek: element(root, "seek", HTMLInputElement),
     frameLabel: element(root, "frame-label", HTMLElement),
+    textEncoder: document.createElement("select"),
+    freePrompt: document.createElement("input"),
   };
+
+  // 経路の選択（取得元の欄の隣）と自由プロンプトの欄（プロンプトの選択の隣）— 冒頭の doc のとおりここで足す。
+  const field = (label: string, control: HTMLElement): HTMLLabelElement => {
+    const wrapper = document.createElement("label");
+    wrapper.className = "field";
+    wrapper.append(label, control);
+    return wrapper;
+  };
+  const after = (anchor: HTMLElement, added: HTMLElement): void => {
+    const label = anchor.closest("label");
+    if (label === null) throw Error("Wan のタブの欄が label の中に無い");
+    label.after(added);
+  };
+  ui.textEncoder.replaceChildren(...TEXT_ENCODER_CHOICES.map(({ value, label }) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }));
+  ui.freePrompt.type = "text";
+  ui.freePrompt.size = 48;
+  ui.freePrompt.placeholder = "gpu の経路だけ — 空欄 = 選んだプロンプトの原文";
+  after(ui.source, field("テキストエンコーダ", ui.textEncoder));
+  after(ui.prompt, field("自由プロンプト", ui.freePrompt));
 
   const state: {
     busy: boolean;
@@ -199,6 +253,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
           lab.config.wanSource ?? "無し（HF のリポ名を入れるか --wan-source で指定）"
         }（未読み込み）`
         : `配布形 ${loaded.source}`,
+      `テキストエンコーダ ${loaded?.textEncoder ?? `${ui.textEncoder.value}（未読み込み）`}`,
       loaded === undefined
         ? `幾何プロファイル ${requestedLabel(lab.settings().choice)}（読み込み時に確定）`
         : `幾何プロファイルの要求 ${loaded.geometryProfileRequested}${
@@ -260,6 +315,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     const loaded = state.loaded !== undefined;
     ui.load.disabled = busy || loaded;
     ui.source.disabled = busy || loaded;
+    ui.textEncoder.disabled = busy || loaded;
     ui.dispose.disabled = busy || !loaded;
     ui.run.disabled = busy || !loaded;
     for (
@@ -276,6 +332,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ) input.disabled = busy;
     ui.prompt.disabled ||= !loaded;
     ui.negative.disabled ||= !loaded;
+    ui.freePrompt.disabled = busy || state.loaded?.textEncoder !== "gpu";
     ui.exportJson.disabled = busy || (state.rows.length === 0 && state.loads.length === 0);
   };
 
@@ -300,23 +357,31 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     }
   };
 
-  /** このサーバの配布形（相対 path — 同じページと bundle を静的な置き場に載せても読める）。 */
-  const serverSource = (): DistributionSource =>
+  /**
+   * このサーバの配布形（相対 path — 同じページと bundle を静的な置き場に載せても読める）。`route` は配る経路の
+   * 名前（`wan` / `umt5` — `server.ts` の `/models/<名前>/`）、`crossRepo` は越境先の mapping。
+   */
+  const serverSource = (
+    route: "wan" | "umt5",
+    crossRepo: Readonly<Record<string, DistributionSource>> = {},
+  ): DistributionSource =>
     localDirectory({
       readFile: async (path, options) => {
-        const response = await fetch(`models/wan/${path}`, options);
-        if (!response.ok) throw Error(`Model HTTP ${response.status}: ${path}`);
+        const response = await fetch(`models/${route}/${path}`, options);
+        if (!response.ok) throw Error(`Model HTTP ${response.status}: ${route}/${path}`);
         return new Uint8Array(await response.arrayBuffer());
       },
       readFileRange: async (path, offset, length, options) => {
-        const response = await fetch(`models/wan/${path}`, {
+        const response = await fetch(`models/${route}/${path}`, {
           ...options,
           headers: { Range: `bytes=${offset}-${offset + length - 1}` },
         });
-        if (response.status !== 206) throw Error(`Model range HTTP ${response.status}: ${path}`);
+        if (response.status !== 206) {
+          throw Error(`Model range HTTP ${response.status}: ${route}/${path}`);
+        }
         return new Uint8Array(await response.arrayBuffer());
       },
-    }, { label: "browser-wan" });
+    }, { label: `browser-${route}`, crossRepo });
 
   const fillPrompts = (prompts: readonly WanPrompt[]): void => {
     const option = (value: string, text: string): HTMLOptionElement => {
@@ -349,10 +414,43 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         "このサーバは Wan の配布形を配っていない（--wan-source で指定するか、HF のリポ名を入れる）",
       );
     }
-    return { ref: serverSource(), label: `${lab.config.wanSource}（このサーバ）`, local: true };
+    return {
+      ref: serverSource("wan"),
+      label: `${lab.config.wanSource}（このサーバ）`,
+      local: true,
+    };
+  };
+
+  /** 経路の選択（未知の値は選択肢の取り違え — 素の Error）。 */
+  const readTextEncoder = (): WanTextEncoder => {
+    const found = TEXT_ENCODER_CHOICES.find(({ value }) => value === ui.textEncoder.value);
+    if (found === undefined) {
+      throw Error(`テキストエンコーダ '${ui.textEncoder.value}' は選択肢に無い`);
+    }
+    return found.value;
+  };
+
+  /**
+   * `gpu` の経路でこのサーバの配布形を読む取得元。umT5 が越境参照なら、その repo（manifest の宣言から引く —
+   * 名前を写経しない）を `/models/umt5/` の取得元へ結ぶ。umT5 を配っていなければ取得の前に名指しで落とす。
+   */
+  const gpuServerSource = async (
+    manifest: Parameters<typeof resolveSelection>[0],
+  ): Promise<DistributionSource> => {
+    const repo = resolveSelection(manifest).containers[TEXT_ENCODER]?.parts[0]?.repo;
+    if (repo === undefined) return serverSource("wan");
+    const probe = await fetch("models/umt5/karume.json", { method: "HEAD" });
+    if (!probe.ok) {
+      throw Error(
+        `このサーバは umT5 の配布形（${repo} の越境先）を配っていない（HTTP ${probe.status}）— ` +
+          "--umt5-source で指定して起動し直すか、テキストエンコーダを precomputed にする",
+      );
+    }
+    return serverSource("wan", { [repo]: serverSource("umt5") });
   };
 
   const load = async (): Promise<void> => {
+    const textEncoder = readTextEncoder();
     const { ref, label, local } = readSource();
     const started = performance.now();
     status(`manifest を読み込み中（${label}）`);
@@ -385,6 +483,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         return undefined;
       }
       : injected;
+    // `gpu` でこのサーバの配布形を読むなら越境先を結んだ取得元へ差し替える（HF の取得元は宣言どおり取る）。
+    const source = textEncoder === "gpu" && local ? await gpuServerSource(manifest.manifest) : ref;
     status("GPU を取得中");
     const gpu = await acquireGpu({
       ...(geometryProfile === undefined ? {} : { geometryProfile }),
@@ -397,8 +497,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     });
     let pipeline: WanPipeline;
     try {
-      pipeline = await WanPipeline.fromPretrained(ref, {
+      pipeline = await WanPipeline.fromPretrained(source, {
         gpu,
+        // MUST: 経路は必ず明示する（パイプラインの既定は "gpu" — タブの既定の precomputed と食い違う）。
+        textEncoder,
         onRunDiagnostics: (component, diagnostics) => {
           if (state.diagnostics === undefined) {
             throw Error(`${component} の run が generate の外で終わった`);
@@ -422,6 +524,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     state.loaded = {
       gpu,
       pipeline,
+      textEncoder,
       source: label,
       ...(manifest.repo === undefined ? {} : { repo: manifest.repo }),
       ...(manifest.revisionSha === undefined ? {} : { revisionSha: manifest.revisionSha }),
@@ -481,8 +584,13 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     showFrame(0);
   };
 
-  const formatRequest = (request: WanResolvedRequest): string =>
-    `${request.prompt} · seed ${request.seed} · ${request.frames} フレーム · ${request.width}x${request.height} · ${request.steps} step · guidance ${request.guidance} · shift ${request.shift}${
+  const formatRequest = (row: WanRow): string =>
+    `${row.textEncoder} · ${
+      row.freePrompt === undefined ? row.request.prompt : JSON.stringify(row.freePrompt)
+    } · ${formatKnobs(row.request)}`;
+
+  const formatKnobs = (request: WanResolvedRequest): string =>
+    `seed ${request.seed} · ${request.frames} フレーム · ${request.width}x${request.height} · ${request.steps} step · guidance ${request.guidance} · shift ${request.shift}${
       request.negative === undefined ? "" : ` · negative ${request.negative}`
     }`;
 
@@ -491,14 +599,16 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     const timeline = row.timeline;
     const cells = [
       String(row.index),
-      formatRequest(row.request),
+      formatRequest(row),
       `${(row.wallMs / 1000).toFixed(1)} s`,
-      timeline === undefined
-        ? "—"
-        : Object.entries(timeline.stageMs).map(([stage, ms]) =>
+      timeline === undefined ? "—" : [
+        ...(row.textEncoderMs === undefined
+          ? []
+          : [`text_encoder ${(row.textEncoderMs / 1000).toFixed(1)} s`]),
+        ...Object.entries(timeline.stageMs).map(([stage, ms]) =>
           `${stage} ${(ms / 1000).toFixed(1)} s`
-        )
-          .join("\n"),
+        ),
+      ].join("\n"),
       timeline === undefined ? "—" : formatSpans(timeline.stepMs),
       timeline === undefined ? "—" : formatSpans(timeline.tileMs),
       Object.entries(row.diagnostics).map(([component, summary]) =>
@@ -537,9 +647,19 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       loaded.prompts,
       loaded.config,
     );
-    const caseId = wanReferenceCaseId(resolved, loaded.config, loaded.defaultNegative);
+    const freeText = ui.freePrompt.value;
+    const freePrompt = loaded.textEncoder === "gpu" && freeText.trim() !== ""
+      ? freeText
+      : undefined;
+    // 参照ケースの照合は事前計算の経路だけ（`wanReferenceCaseId` の id は事前計算の経路の sha 行 — GPU 経路の
+    // 動画は同じ条件でも値が違う）。
+    const caseId = loaded.textEncoder === "precomputed"
+      ? wanReferenceCaseId(resolved, loaded.config, loaded.defaultNegative)
+      : undefined;
     const index = state.rows.length + 1;
     const marks: WanTimelineMark[] = [];
+    /** text 段の start / end（`WanTimelineMark` は DiT と VAE の段だけを持つので別に採る）。 */
+    const textStage: { start?: number; end?: number } = {};
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     state.diagnostics = diagnostics;
     const started = performance.now();
@@ -547,8 +667,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const ms = performance.now();
       const elapsed = `${((ms - started) / 1000).toFixed(0)} s`;
       if (event.kind === "stage") {
-        marks.push({ kind: "stage", component: event.component, at: event.at, ms });
-        status(`${event.component} ${event.at}（${elapsed}）`);
+        const { component } = event;
+        if (component === "text_encoder") textStage[event.at] = ms;
+        else marks.push({ kind: "stage", component, at: event.at, ms });
+        status(`${component} ${event.at}（${elapsed}）`);
       } else if (event.kind === "denoise-step") {
         marks.push({ kind: "step", step: event.step, ms });
         status(`transformer step ${event.step}/${event.steps}（${elapsed}）`);
@@ -561,15 +683,25 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       Object.fromEntries(
         [...diagnostics].map(([component, value]) => [component, summarizeWanDiagnostics(value)]),
       );
+    const textEncoderMs = (): { textEncoderMs?: number } =>
+      textStage.start === undefined || textStage.end === undefined
+        ? {}
+        : { textEncoderMs: textStage.end - textStage.start };
     const base = {
       index,
       at: new Date().toISOString(),
       request: resolved,
+      textEncoder: loaded.textEncoder,
+      ...(freePrompt === undefined ? {} : { freePrompt }),
       ...(caseId === undefined ? {} : { caseId }),
     };
     let row: WanRow;
     try {
-      const video = await loaded.pipeline.generate({ ...request, onEvent });
+      const video = await loaded.pipeline.generate({
+        ...request,
+        ...(freePrompt === undefined ? {} : { prompt: freePrompt }),
+        onEvent,
+      });
       const wallMs = performance.now() - started;
       status("フレームを画素にして sha256 を計算中");
       const frames = Array.from(
@@ -583,6 +715,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       showVideo(video, frames);
       row = {
         ...base,
+        ...textEncoderMs(),
         wallMs,
         timeline,
         diagnostics: summaries(),
@@ -604,6 +737,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       }
       row = {
         ...base,
+        ...textEncoderMs(),
         wallMs: performance.now() - started,
         ...(timeline === undefined ? {} : { timeline }),
         diagnostics: summaries(),
@@ -660,6 +794,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       bundleSha256: lab.config.bundleSha256,
       ...(loaded === undefined ? {} : {
         source: loaded.source,
+        textEncoder: loaded.textEncoder,
         ...(loaded.repo === undefined ? {} : { repo: loaded.repo }),
         ...(loaded.revisionSha === undefined ? {} : { revisionSha: loaded.revisionSha }),
         ...(loaded.manifestSha256 === undefined ? {} : { manifestSha256: loaded.manifestSha256 }),
@@ -704,6 +839,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   ui.run.addEventListener("click", exclusive("Wan の生成", generate));
   ui.dispose.addEventListener("click", exclusive("Wan の破棄", dispose));
   ui.exportJson.addEventListener("click", exportJson);
+  ui.textEncoder.addEventListener("change", renderInfo);
   ui.frames.addEventListener("change", renderLimits);
   ui.size.addEventListener("change", renderLimits);
   ui.prompt.addEventListener("change", () => {
@@ -734,7 +870,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   renderLimits();
   setBusy(false);
   status(
-    "「読み込む」で GPU を取り、配布形を読みます。判定表は選んだフレーム数・寸法で更新されます。",
+    "「読み込む」で GPU を取り、配布形を読みます（テキストエンコーダの経路は読み込み時に決まる）。" +
+      "判定表は選んだフレーム数・寸法で更新されます。",
   );
 
   return {

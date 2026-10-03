@@ -6,12 +6,16 @@
  * 起動時に `deno bundle --platform browser`・モデルは根の中に閉じて Range 対応で配る）。
  * 区間配信と根の閉じ込めはそちらの実装をそのまま使う（同じ規則を二重に持たない）。配るのはページ
  * （`browser/index.html`）・bundle（`/main.js`）・`/config.json`・Anima の配布形（`/models/anima/…`）・
- * Wan の配布形（`/models/wan/…` — ADR 0118 段 9）だけ。
+ * Wan の配布形（`/models/wan/…` — ADR 0118 段 9）・umT5 の配布形（`/models/umt5/…` — Wan の manifest の
+ * `text_encoder` が越境参照する先。Wan のタブの GPU 経路が取得元の `crossRepo` で結ぶ — ADR 0119 追記
+ * 「段 10d の設計」）だけ。
  *
  * 既定の置き場に配布形（`karume.json` を持つディレクトリ）が無くても起動する — 掃引とプロファイルの
  * タブはモデルを使わない。そのときは `/config.json` の `source`（Anima）/ `wanSource`（Wan）が null、
- * その配布形の経路は 404 で、そのタブは操作を無効にする。`--source` / `--wan-source` を明示したのに
- * 配布形が無いときは起動しない（指定の誤りを黙ってそのタブ無しの起動にしない）。
+ * その配布形の経路は 404 で、そのタブは操作を無効にする。umT5 の配布形が無いときは `/models/umt5/…` が
+ * 404 で、Wan のタブは事前計算の経路だけで回る（GPU 経路の読み込みが越境先の欠落を名指しで落ちる）。
+ * `--source` / `--wan-source` / `--umt5-source` を明示したのに配布形が無いときは起動しない（指定の誤りを
+ * 黙ってそのタブ・その経路無しの起動にしない）。
  */
 import { containedPath, fileResponse } from "../llm-speed/browser/server.ts";
 import { readCheckout } from "../shared/checkout.ts";
@@ -19,6 +23,7 @@ import { readCheckout } from "../shared/checkout.ts";
 const DEFAULT_PORT = 8790;
 const DEFAULT_SOURCE = "models/karume-anima";
 const DEFAULT_WAN_SOURCE = "models/karume-wan2.1";
+const DEFAULT_UMT5_SOURCE = "models/karume-umt5-xxl";
 
 const headers = (): Headers =>
   new Headers({
@@ -46,10 +51,15 @@ export type ServerConfig = {
 export type Distributions = {
   readonly anima?: string;
   readonly wan?: string;
+  /**
+   * umT5 の配布形（Wan の GPU 経路の越境先）。`/config.json` には載せない — ページは Wan の manifest の越境の
+   * 宣言を見て `/models/umt5/` を引き、無ければ 404 を名指しで出す（設定の欄を 2 か所に持たない）。
+   */
+  readonly umt5?: string;
 };
 
 /** 配布形を配る経路の前置（`/models/<名前>/`）。 */
-const MODEL_ROUTES = ["anima", "wan"] as const;
+const MODEL_ROUTES = ["anima", "wan", "umt5"] as const;
 
 /** `distributions` は配布形の実 path（無い配布形の経路 `/models/<名前>/…` は全て 404）。 */
 export const createHandler = (
@@ -123,7 +133,7 @@ export const resolveDistribution = async (
     readonly explicit: boolean;
     /** 置き場を指定するオプション（`--source` / `--wan-source`）。 */
     readonly option: string;
-    /** その配布形を使うタブの名前（`Anima` / `Wan`）。 */
+    /** その配布形を使うタブの名前（`Anima` / `Wan` / `Wan GPU text encoder`）。 */
     readonly tab: string;
   },
 ): Promise<string | undefined> => {
@@ -148,7 +158,7 @@ const directoryName = (realPath: string | undefined): string | null =>
 const main = async (): Promise<void> => {
   if (Deno.args.includes("--help")) {
     console.log(
-      `deno task bench:gpu-lab [--port ${DEFAULT_PORT}] [--source ${DEFAULT_SOURCE}] [--wan-source ${DEFAULT_WAN_SOURCE}]`,
+      `deno task bench:gpu-lab [--port ${DEFAULT_PORT}] [--source ${DEFAULT_SOURCE}] [--wan-source ${DEFAULT_WAN_SOURCE}] [--umt5-source ${DEFAULT_UMT5_SOURCE}]`,
     );
     return;
   }
@@ -156,7 +166,8 @@ const main = async (): Promise<void> => {
   for (let i = 0; i < Deno.args.length; i += 2) {
     const key = Deno.args[i], value = Deno.args[i + 1];
     if (
-      !["--port", "--source", "--wan-source"].includes(key) || value === undefined ||
+      !["--port", "--source", "--wan-source", "--umt5-source"].includes(key) ||
+      value === undefined ||
       value.startsWith("--") ||
       args.has(key)
     ) throw Error(`Invalid option ${key}`);
@@ -178,6 +189,12 @@ const main = async (): Promise<void> => {
         explicit: args.has("--wan-source"),
         option: "--wan-source",
         tab: "Wan",
+      }),
+      umt5: await resolveDistribution({
+        path: args.get("--umt5-source") ?? DEFAULT_UMT5_SOURCE,
+        explicit: args.has("--umt5-source"),
+        option: "--umt5-source",
+        tab: "Wan GPU text encoder",
       }),
     };
   } catch (error) {
