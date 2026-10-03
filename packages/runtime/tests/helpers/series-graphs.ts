@@ -61,6 +61,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
     vae_decoder_next: "vae_decoder_next",
   },
   "wan2.1-t2v-1.3b-f16-dyn-probe": { transformer: "transformer" },
+  "wan2.1-t2v-1.3b-i8-dyn": { transformer: "transformer" },
 };
 
 /**
