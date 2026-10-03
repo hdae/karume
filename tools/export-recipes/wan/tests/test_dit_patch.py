@@ -23,13 +23,19 @@ diffusers に依らない不変条件まで既定の sync（`wan` グループ�
 
 from __future__ import annotations
 
+import argparse
+import re
+from pathlib import Path
+
 import pytest
 import torch
+from safetensors.torch import load_file
 from torch import nn
 from torch.nn import functional
 from torch.nn.attention import SDPBackend
 
-from wan import dit_patch
+from _shared.paths import REPO_ROOT
+from wan import dit_patch, export_dit
 
 #: 合成 DiT の形（head_dim 24 → RoPE の t / h / w は 8 / 8 / 8 次元）。
 TINY_DIT = {
@@ -631,6 +637,106 @@ class TestFloat64Reference:
         latents, timestep, embeds = _tiny_inputs(model)
         with torch.no_grad(), pytest.raises(AssertionError, match="float32"):
             dit_patch.reference_dit_f64(model, latents, timestep, embeds)
+
+
+#: 合成モデルで回す書き手のケース（役割ごとの書き分けを 1 本ずつ — 実寸の役割は f64 の参照を持つ）。
+_TINY_CASES = (
+    export_dit.CaseSpec("band", TINY_LATENT, 500, 7, 1),
+    export_dit.CaseSpec("full-band", TINY_LATENT, 999, 5, 2, blocks=False),
+    export_dit.CaseSpec("full-accept", TINY_LATENT, 600, 3, 3),
+)
+_TINY_NAMES = [spec.name((1, 2, 2)) for spec in _TINY_CASES]
+
+
+def _tiny_writer(monkeypatch: pytest.MonkeyPatch, series: Path) -> None:
+    """`export_dit` の emit / verify を合成モデルで回せるように差し替える（重みを読まない）。
+
+    差し替えるのは入力の大きさ（テキストの幅 4096・512 行）と取得元・置き場とケースの表だけで、
+    参照・eager・書き出し・export は本物を通す。
+    """
+    monkeypatch.setattr(export_dit, "CASES", _TINY_CASES)
+    monkeypatch.setattr(export_dit, "load_transformer", lambda _name: _tiny_dit())
+    monkeypatch.setattr(export_dit, "SERIES", series)
+    monkeypatch.setattr(export_dit, "PROBE_SERIES", series.with_name("probe"))
+    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+
+
+@pytest.fixture(scope="module")
+def emitted(tmp_path_factory) -> tuple[Path, dict]:
+    """合成モデルで emit を 1 周回した系列の部品ディレクトリと要約。"""
+    series = tmp_path_factory.mktemp("emit") / "series"
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _tiny_writer(monkeypatch, series)
+        summary = export_dit.emit(argparse.Namespace(model=export_dit.DEFAULT_MODEL, layers=False))
+    return series / export_dit.TARGET, summary
+
+
+class TestTheCaseWriters:
+    """書き手（`_write_case_files` / `float64_references` / `emit`）が役割どおりに golden を書く。
+
+    実寸の生成（数時間）の後の GPU の e2e で初めて割れる退行（f64 の参照の書き漏らし・f64 のまま
+    の格納・`blocks=False` のケースへの `block.NN`）を、合成モデルの 1 周で先に落とす。
+    """
+
+    def test_every_case_gets_an_io_and_a_reference_file(self, emitted) -> None:
+        out_dir, summary = emitted
+
+        expected = [
+            f"{prefix}{name}{export_dit.CASE_SUFFIX}"
+            for name in _TINY_NAMES
+            for prefix in (export_dit.IO_PREFIX, export_dit.REFERENCE_PREFIX)
+        ]
+        assert summary["io"] == expected
+        assert all((out_dir / name).is_file() for name in expected)
+        assert [report["case"] for report in summary["eager"]] == _TINY_NAMES
+
+    def test_the_io_file_holds_the_graph_inputs_and_the_patched_output(self, emitted) -> None:
+        out_dir, _ = emitted
+        for name in _TINY_NAMES:
+            io = load_file(out_dir / f"{export_dit.IO_PREFIX}{name}{export_dit.CASE_SUFFIX}")
+
+            assert set(io) == {
+                *(f"{export_dit.INPUT_PREFIX}{key}" for key in export_dit.INPUT_NAMES),
+                f"{export_dit.OUTPUT_PREFIX}0",
+            }, name
+
+    def test_block_outputs_and_the_f64_reference_follow_the_case_role(self, emitted) -> None:
+        """`block.NN` は `blocks` のケースだけ・`output.f64` は実寸の役割のケースだけ。"""
+        out_dir, _ = emitted
+        layers = TINY_DIT["num_layers"]
+        for spec, name in zip(_TINY_CASES, _TINY_NAMES, strict=True):
+            reference = load_file(
+                out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+            )
+            blocks = {f"block.{index:02d}" for index in range(layers)} if spec.blocks else set()
+            f64 = {export_dit.REFERENCE_F64_KEY} if spec.full_size else set()
+
+            assert set(reference) == {"latents", "timestep", "output", *blocks, *f64}, name
+
+    def test_the_f64_reference_is_stored_as_f32_and_differs_from_the_f32_reference(
+        self, emitted
+    ) -> None:
+        """TS の safetensors は F64 を読まない — f32 へ丸めて書く。中身は活性も f64 の forward で、
+        CPU f32 の参照の写しではない（丸めの差の分だけ離れる）。"""
+        out_dir, _ = emitted
+        for spec, name in zip(_TINY_CASES, _TINY_NAMES, strict=True):
+            if not spec.full_size:
+                continue
+            reference = load_file(
+                out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+            )
+            f64, f32 = reference[export_dit.REFERENCE_F64_KEY], reference["output"]
+            distance = float((f64 - f32).abs().max())
+
+            assert f64.dtype == torch.float32, name
+            assert 0 < distance < 1e-5 * float(f64.abs().max()), name
+
+    def test_the_f64_key_is_spelled_like_the_typescript_reader(self) -> None:
+        source = (REPO_ROOT / "packages/models/tests/e2e_wan_dit_test.ts").read_text()
+        declared = re.findall(r'^const REFERENCE_F64_KEY = "([^"]+)";$', source, re.MULTILINE)
+
+        assert declared == [export_dit.REFERENCE_F64_KEY]
 
 
 # ---- 実重み（pin した revision — 無い機では SKIP） ----------------------------------
