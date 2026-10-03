@@ -361,3 +361,27 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
 - **Chrome の上限**: 語彙埋め込み 1,002 MiB の 1 バッファ・スコア 64 MiB（L = 512）がブラウザの束縛上限と単一 ArrayBuffer の上限に
   どう当たるか（段 9 の実測 → 10e）。
 - **段 9 との重なり**: 10d が `pipeline.ts` を触る順序と、exporter core を触る作業（w8a8 の席）との調整。
+
+## 追記（2026-10-03）: 段 10a の結果と決定 1 / 2 の改訂
+
+- **段 10a ✅**（コミット `b5a4592f` / `d601c488` / `5e95f587`）: T5 トークナイザを共通層（`packages/models/src/text/t5-tokenizer.ts`・
+  家族で割れる 3 点は `T5Policy`）へ一般化し、anima のパリティは不変。umT5 の資産は recipe（`wan/umt5_tokenizer.py`）が
+  transformers 5.14.1 の backend から `outputs/series/wan2.1-umt5-tokenizer/tokenizer.json`（語彙 256,300・追加語彙 304・空白集合・
+  promptClean の表を 1 本に）へ焼く。TS は `packages/models/src/wan/text/{tokenizer,prompt-clean}.ts`（公開面には未結線 — 10d）。
+- **検収の結果**: fixture は固定 4 本 + 境界 30 本 + 乱択 200 本（受理したケースは transformers 5.14.1 と tokenizer.json の 2 経路の
+  id 列が一致・生成時に assert）。前処理の fuzz は安全な池 200,000 本・全池 50,000 本・entity の池 20,000 本で上流 `prompt_clean` と
+  不一致 0。`BADNESS_RE` の JS 翻訳は全池と Unicode 依存の構文 6 文脈 × 全コードポイントで `is_bad` と一致。NFC は Deno
+  （V8 = Unicode 16）と Python UCD 16.0.0 が割り当て済み 292,531 文字 × 8 文脈で不一致 0 — **表は焼かない**。故障注入
+  （表を 1 本外す・NFC を飛ばす・`</s>` を落とす・語彙外の拒否を外す・512 超を切り詰めにする）は全部赤。
+- **決定 1 の改訂（実測で前提が崩れた）**: 本文中の追加語彙（`</s>`・`<extra_id_*>` など 304 個）と空白の直後の `▁` は、
+  transformers 5 と tokenizer.json（transformers 4.x）で id 列が割れる（乱択 60,000 本で、割れた全件がこの 2 つか語彙外を含む）。
+  決定 1 の守るもの（どの版の参照とも同じ id 列）に合わせ、この 2 つも `ModelInputError` で拒む。調査 §1.4 の「2 経路の差は
+  語彙外と空白 24 文字だけ」は 1 文字の掃引による結論で不完全だった。
+- **決定 2 で確定したこと**: HTML entity の候補は正規表現（各周の先頭で ftfy の `HTML_ENTITY_RE`・`fix_text` の後で
+  `html.unescape` の `_charref` と同値の形）で判定し、名前表は持たない — `R&D` のように entity にならない並びも拒む
+  （`R & D` と空白を挟めば通る。名前表 2,231 個を焼いて正確に絞るのは要望が出てから）。UCD 16.0.0 で未割り当てのコードポイントも
+  拒む（新しいエンジンの NFC が Python と割れうるため — 語彙にある未割り当て 60 文字も拒む）。拒否の reason は
+  `PromptCleanError`（`ModelInputError` の派生・unassigned / c1 / entity / mojibake）。
+- **未検証**: ブラウザの NFC の一致（Chrome / Safari の ICU の版 — 段 9 で sweep のテストをブラウザでも回す）。
+- **10d への手掛かり**: hub の `readAssetJson` → `parseWanTokenizerAsset` → `new WanPromptEncoder(assets)` →
+  `encode(prompt, 役割)` が `Int32Array [L]`（L は 2〜512・末尾は `</s>`）。

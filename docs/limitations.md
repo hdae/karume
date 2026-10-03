@@ -1010,6 +1010,9 @@ Consequences）。
   ときだけ照合する。
 
 - DiT の i8 席（ADR [0120](decisions/0120-wan-dit-w8a8-seat.md)・2026-10-03）: 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` を配布形に足したが、GPU の数値の門（r 門・自機 A/B 門）と視認 A/B（段 3〜6）は未了。既定は `f16` のまま。実用席の a8 は Metal（M2）では速くならない（K-70 の実測 — 品質だけを払う席になる）。
+- Chrome（段 9・未検収）: 既定の束縛上限 128 MiB では VAE の最大の値 192 MiB にも足りない。`acquireGpu` はアダプタ値を要求する
+  ので実際の上限はアダプタ次第で、必要な下限は FFN 中間 503,193,600 B（33 フレーム）/ 1,174,118,400 B（81 フレーム）。環境キーは
+  WebGPU Developer Features フラグの有無で変わる（sha 行は別）。確認ページは tools/gpu-lab の Wan タブ。
 
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 

@@ -21,7 +21,7 @@
 
 - 系列出力にはコンテナ以外の**ホスト側資産**も入る（グラフを持たない compile 生成物）—
   トークナイザは `<系列名>-tokenizer/tokenizer.json`（例
-  `outputs/series/gemma4-e2b-tokenizer/`）、anima のデモ用表は `anima-demo/text/`。export 系列の
+  `outputs/series/gemma4-e2b-tokenizer/`）、umT5 は `wan2.1-umt5-tokenizer/tokenizer.json`（語彙と前処理 promptClean の表を 1 本に — ADR 0119 段 10a）、anima のデモ用表は `anima-demo/text/`。export 系列の
   ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
 - gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
   製品容器 `krm` の**資産**として part 列の中に入る（ADR

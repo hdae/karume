@@ -88,7 +88,7 @@
 ## 次と未完
 
 - M2のGPU時間の帰属、投入政策・prefillバケットの適用判断、E4B・他LLM・長文・広い品質評価は[backlog](../docs/backlog.md)に残す。
-  Wan2.1は[ADR 0118](../docs/decisions/0118-wan21-video-generation.md)の段0〜8が完了（Denoのbring-upまで・81フレームまで）。レビュー2本（差分6観点+Codex）は2026-10-03に消化済（ADR 0118 追記）。次の波は[ADR 0119](../docs/decisions/0119-wan-umt5-gpu-text-encoder.md)（段10 = umT5をGPUで・自由プロンプト・AbortSignal）と[ADR 0120](../docs/decisions/0120-wan-dit-w8a8-seat.md)（w8a8席）— いずれもproposed（利用者の裁定点は各ADRの「裁定」節）。段9（Chrome）はgpu-labのWanページを作り、利用者がRTX 5070 Ti機で確認する。
+  Wan2.1は[ADR 0118](../docs/decisions/0118-wan21-video-generation.md)の段0〜8が完了（Denoのbring-upまで・81フレームまで）。レビュー2本（差分6観点+Codex）は2026-10-03に消化済（ADR 0118 追記）。次の波は[ADR 0119](../docs/decisions/0119-wan-umt5-gpu-text-encoder.md)（段10 = umT5をGPUで・自由プロンプト・AbortSignal）と[ADR 0120](../docs/decisions/0120-wan-dit-w8a8-seat.md)（w8a8席）— いずれもproposed（利用者の裁定点は各ADRの「裁定」節）。段9（Chrome）はgpu-labのWanタブ（確認ページ）が完成し、利用者のRTX 5070 Ti機での実走待ち。10a（umT5トークナイザとprompt_cleanのTS実装）✅・ADR 0120 段1〜2（i8系列・席3つ・既定はf16のまま）✅。
   MiniMax H3は[事前調査](../docs/research/2026-09-10-codex-mtp-optimization.md#動画生成の事前調査-wan-と-minimax-h3)まで。
 - 既存MTPの作業を再開する場合は[ADR 0096](../docs/decisions/0096-speculative-decoding.md)と[実測・ゲートの履歴](../docs/research/2026-09-09-mtp-stage4.md)を読む。
   過去の「次」の記述や古いゲート既定を現行設定として使わず、最新の記録と実コードを照合する。
