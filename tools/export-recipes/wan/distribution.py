@@ -464,10 +464,11 @@ following changes were made:
   the other parameters (biases, normalization weights) keep the rounded values in float32 storage.
   Computation runs in float32.
 - The transformer graph takes patchified latent tokens and returns tokens: the patchify, the
-  unpatchify and the sinusoidal timestep projection run on the host, the patch-embedding
-  convolution is applied as the equivalent linear layer, and the complex-valued rotary embedding is
-  applied with real cos / sin tables that the host builds from per-axis base tables stored in the
-  container.
+  unpatchify and the sinusoidal timestep projection run on the host, and the patch-embedding
+  convolution is applied as the equivalent linear layer. The rotary embedding keeps the upstream
+  real-valued cos / sin tables, but the host builds them from per-axis base tables stored in the
+  container, and the graph applies them in a pair-swap form (swap each adjacent pair, then multiply
+  elementwise by the cos / sin tables).
 - The VAE decoder was re-expressed as two graphs that decode one latent frame each (the first
   frame, and every later frame), with the causal convolution cache passed in and out of the graph
   instead of kept in a Python list. The host always decodes in overlapping tiles, so the output
