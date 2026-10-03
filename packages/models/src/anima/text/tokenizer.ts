@@ -13,19 +13,18 @@
 
 import { ModelInputError } from "../../errors.ts";
 import {
-  asFiniteNumber,
   asNumber,
   asPositiveInteger,
   asRecord,
   assertCodePoint,
   assertUniqueLines,
   asString,
-  asVocabId,
   parseAddedTokens,
   setUnique,
 } from "../../text/asset-gates.ts";
 import { assertEncodableText } from "../../text/code-points.ts";
-import { parseCodeRanges } from "./code-ranges.ts";
+import { parseCodeRanges } from "../../text/code-ranges.ts";
+import { parseT5Tables } from "../../text/t5-tokenizer.ts";
 import {
   type Qwen2Assets,
   type Qwen2CaseFold,
@@ -33,7 +32,7 @@ import {
   Qwen2Tokenizer,
 } from "./qwen2-tokenizer.ts";
 import { parseSpmTables } from "./spm-normalizer.ts";
-import { type T5Assets, T5Tokenizer, type T5VocabEntry } from "./t5-tokenizer.ts";
+import { type T5Assets, T5Tokenizer } from "./t5-tokenizer.ts";
 
 /** プロンプト 1 本の符号化結果（グラフ入力は i32 — ADR 0009）。 */
 type AnimaPromptIds = {
@@ -205,36 +204,11 @@ const parseQwen2Asset = (raw: unknown, label: string = "tokenizer"): Qwen2Assets
   };
 };
 
-/** T5 の資産 JSON を資産表に変換する。 */
-const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => {
-  const obj = asRecord(raw, label);
-  const tokens = asString(obj["vocabText"], `${label}.vocabText`).split("\n");
-  const rawScores = obj["scores"];
-  if (!Array.isArray(rawScores) || rawScores.length !== tokens.length) {
-    throw new Error(`${label}: scores の長さが語彙数 ${tokens.length} と合わない`);
-  }
-  assertUniqueLines(tokens, `${label}.vocabText`);
-  const vocab = new Map<string, T5VocabEntry>();
-  let minScore = Number.POSITIVE_INFINITY;
-  let maxTokenLength = 0;
-  for (const [id, token] of tokens.entries()) {
-    const score = asFiniteNumber(rawScores[id], `${label}.scores[${id}]`);
-    vocab.set(token, { id, score });
-    minScore = Math.min(minScore, score);
-    maxTokenLength = Math.max(maxTokenLength, Array.from(token).length);
-  }
-  return {
-    vocab,
-    minScore,
-    maxTokenLength,
-    unkId: asVocabId(obj["unkId"], `${label}.unkId`, tokens.length),
-    eosId: asVocabId(obj["eosId"], `${label}.eosId`, tokens.length),
-    addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
-    space: parseCodeRanges(obj["space"], `${label}.space`),
-    normalizer: parseSpmTables(obj["normalizer"], `${label}.normalizer`),
-    maxLength: asPositiveInteger(obj["maxLength"], `${label}.maxLength`),
-  };
-};
+/** T5 の資産 JSON を資産表に変換する（共通の T5 の表 + Anima の Precompiled 正規化の表）。 */
+const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => ({
+  ...parseT5Tables(raw, label),
+  normalizer: parseSpmTables(asRecord(raw, label)["normalizer"], `${label}.normalizer`),
+});
 
 const decodeJson = (bytes: Uint8Array, label: string): unknown => {
   let text: string;

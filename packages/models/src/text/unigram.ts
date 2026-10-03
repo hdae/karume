@@ -38,15 +38,26 @@ export type UnigramModel = {
 /** Viterbi 経路のノード（開始位置とそこから始まるノードのスロット）。 */
 type Slot = { readonly pos: number; readonly slot: number };
 
+/** 1 断片の分割の 1 片。`entry` が無い片は未知の断片（連続する未知ノードを融合したもの）。 */
+export type UnigramSegment = { readonly text: string; readonly entry?: UnigramVocabEntry };
+
 /**
- * 1 断片を id 列へ。連続する未知ノードは 1 つに融合される（`fuse_unk`）。
+ * 1 断片の Viterbi 分割（連続する未知ノードは 1 片に融合済み）。
+ *
+ * id へ写す前の形を公開するのは、未知の扱いが家族で割れるため: 多くは unk / byte_fallback へ
+ * 写す（{@link unigramTokenize}）が、語彙外を受理しない家族（Wan の umT5 — ADR 0119 決定 1）は
+ * 未知の片が 1 つでもあれば拒む。未知を id から判定すると、本文中の追加語彙が同じ id
+ * （umT5 の unk_id 2 は `<s>`）を出す形と区別できない。
  *
  * NOTE: `tokenizer.json` の `fuse_unk` が `null` でも融合する（`tokenizers` の Unigram は
  * Rust 側の既定で融合する）。融合しないと日本語のように語彙に無い文字が続く入力で未知が
  * 1 文字ずつ並び、正本との突合が落ちる。
  */
-export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): number[] => {
-  const ids: number[] = [];
+export const unigramSegments = (
+  model: UnigramModel,
+  cps: readonly number[],
+): UnigramSegment[] => {
+  const out: UnigramSegment[] = [];
   // 連続する未知ノードを溜める緩衝。空でない = 直前まで未知が続いていた。
   let pending = "";
   for (const span of viterbi(model, cps)) {
@@ -60,12 +71,22 @@ export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): nu
       continue;
     }
     if (pending !== "") {
-      ids.push(...expandUnknown(model, pending));
+      out.push({ text: pending });
       pending = "";
     }
-    ids.push(entry.id);
+    out.push({ text, entry });
   }
-  if (pending !== "") ids.push(...expandUnknown(model, pending));
+  if (pending !== "") out.push({ text: pending });
+  return out;
+};
+
+/** 1 断片を id 列へ（未知の片は unk 1 個か、byte_fallback の UTF-8 バイト列へ写す）。 */
+export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): number[] => {
+  const ids: number[] = [];
+  for (const segment of unigramSegments(model, cps)) {
+    if (segment.entry === undefined) ids.push(...expandUnknown(model, segment.text));
+    else ids.push(segment.entry.id);
+  }
   return ids;
 };
 
@@ -76,7 +97,7 @@ export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): nu
  * parity fixture（`fixtures/irodori-text/parity.json` の `emoji-byte-fallback-pair` —
  * 語彙外絵文字 2 連で fuse × byte_fallback の相互作用を固定）で確定済み。将来 HF 側の挙動が
  * 変わった場合に**ここだけ**を差し替えれば済むよう、展開点を 1 関数に閉じてある
- * （{@link unigramTokenize} 側の融合ループは byte_fallback の有無に依らず同じ形）。
+ * （{@link unigramSegments} 側の融合ループは byte_fallback の有無に依らず同じ形）。
  */
 const expandUnknown = (model: UnigramModel, text: string): number[] => {
   const base = model.byteBaseId;

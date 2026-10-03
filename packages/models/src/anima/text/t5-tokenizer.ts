@@ -8,130 +8,35 @@
  *   → Unigram（Viterbi・unk_id=2・byte_fallback なし・fuse_unk）
  *   → TemplateProcessing（末尾に `</s>`）
  *
- * Unigram 本体（Viterbi・同点処理・`fuse_unk`）はファミリ非依存なので `src/text/unigram.ts`
- * が持つ。ここが持つのは Anima 固有の前段（AddedVocabulary・正規化・Metaspace）と後段
- * （切り詰めと `</s>`）だけ。
+ * 経路の本体（追加語彙・Metaspace・Unigram・`</s>`）は家族横断の `src/text/t5-tokenizer.ts` が
+ * 持つ。ここが持つのは Anima 固有の 3 点だけ: Precompiled 正規化の表を資産に含むこと、
+ * 語彙外は unk 1 個へ融合すること、512 を超えたら上流どおり切り詰めること。
  */
 
-import { splitAddedTokens } from "../../text/added-tokens.ts";
-import { toCodePoints } from "../../text/code-points.ts";
-import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
-import { type CodeRanges, inCodeRanges } from "../../text/code-ranges.ts";
+import { type T5Tables, T5UnigramTokenizer } from "../../text/t5-tokenizer.ts";
 import { normalizeSpm, type SpmTables } from "./spm-normalizer.ts";
 
-/** Metaspace の置換文字（U+2581）。 */
-const METASPACE = "▁";
-
-export type T5VocabEntry = UnigramVocabEntry;
-
-export type T5Assets = {
-  readonly vocab: ReadonlyMap<string, T5VocabEntry>;
-  /** 語彙**全体**の最小スコア。部分集合を渡す場合も全体の値を渡す（未知ノードの重み）。 */
-  readonly minScore: number;
-  /** 語彙**全体**の最長トークンのコードポイント数（前方一致の探索幅）。 */
-  readonly maxTokenLength: number;
-  readonly unkId: number;
-  readonly eosId: number;
-  readonly addedTokens: ReadonlyMap<string, number>;
-  /** WhitespaceSplit の空白集合（Qwen2 側の `\s` と同一であることは emit 時に検査済み）。 */
-  readonly space: CodeRanges;
-  readonly normalizer: SpmTables;
-  readonly maxLength: number;
-};
-
-/**
- * WhitespaceSplit → Metaspace。空白は捨て、各断片の先頭に ▁ を付ける。
- *
- * MUST: `split=true` は MergedWithNext — 区切りの ▁ は**次の**断片の先頭に付く。
- * 「前の断片の末尾」にすると分割が変わる。
- *
- * NOTE（実測）: 現在の正規化表は U+2581 を U+0020 へ写すので、`encode` の経路では正規化を
- * 生き延びた ▁ は現れず、この分割ループは踏まれない。それでも正本どおりに書いてあるのは、
- * 正規化表が**資産**（上流の tokenizer.json 由来）で、写像が変われば到達しうるため。挙動は
- * テストがこの関数を直接呼んで固定している。
- */
-export const t5PreTokenize = (text: string, space: CodeRanges): string[] => {
-  const out: string[] = [];
-  for (const word of splitOnSpace(text, space)) {
-    let piece = word.replaceAll(" ", METASPACE);
-    if (!piece.startsWith(METASPACE)) piece = METASPACE + piece;
-    let start = 0;
-    for (let idx = 1; idx < piece.length; idx++) {
-      if (piece[idx] === METASPACE) {
-        out.push(piece.slice(start, idx));
-        start = idx;
-      }
-    }
-    out.push(piece.slice(start));
-  }
-  return out.filter((piece) => piece !== "");
-};
-
-const splitOnSpace = (text: string, space: CodeRanges): string[] => {
-  const out: string[] = [];
-  let buffer = "";
-  for (const ch of text) {
-    if (inCodeRanges(space, ch.codePointAt(0) as number)) {
-      if (buffer !== "") {
-        out.push(buffer);
-        buffer = "";
-      }
-    } else {
-      buffer += ch;
-    }
-  }
-  if (buffer !== "") out.push(buffer);
-  return out;
-};
+export type T5Assets = T5Tables & { readonly normalizer: SpmTables };
 
 export class T5Tokenizer {
-  readonly #assets: T5Assets;
-  readonly #added: string[];
+  readonly #inner: T5UnigramTokenizer;
 
   constructor(assets: T5Assets) {
-    this.#assets = assets;
-    this.#added = [...assets.addedTokens.keys()];
-  }
-
-  /**
-   * 1 断片を id 列へ（Unigram 本体は共有モジュールへ委譲）。連続する未知ノードは 1 トークンに
-   * 融合される（`fuse_unk`）。
-   *
-   * NOTE: `tokenizer.json` の `fuse_unk` は `null` だが、`tokenizers` の Unigram は未指定でも
-   * 融合する（Rust 側の既定）。融合しないと日本語プロンプトで unk が 1 文字ずつ並び、正本と
-   * の突合が `japanese` ケースで落ちる。byte_fallback は false なので（= `byteBaseId` を
-   * 渡さないので）未知は unk 1 個になる。
-   */
-  #tokenize(piece: string): number[] {
-    // T5Assets は UnigramModel の面をそのまま満たす（byteBaseId を持たない = byte_fallback なし）。
-    return unigramTokenize(this.#assets satisfies UnigramModel, toCodePoints(piece));
+    // NOTE: `tokenizer.json` の `fuse_unk` は `null` だが、`tokenizers` の Unigram は未指定でも
+    // 融合する（Rust 側の既定）。融合しないと日本語プロンプトで unk が 1 文字ずつ並び、正本と
+    // の突合が `japanese` ケースで落ちる。byte_fallback は false なので未知は unk 1 個になる。
+    this.#inner = new T5UnigramTokenizer(assets, {
+      normalize: (text) => normalizeSpm(assets.normalizer, text),
+      unknown: "unk",
+      overflow: "truncate",
+    });
   }
 
   /**
    * `tokenizer([text], padding="longest", max_length=512, truncation=True)` と同じ id 列。
-   *
-   * MUST: 切り詰めは `</s>` の分を空けてから（正本の truncation は post_processor の**前**）。
-   * `slice(0, maxLength)` の後に足すと 513 個になる。結果として id 列は常に `</s>` で終わり、
-   * 長さは必ず 1 以上。
+   * 結果は常に `</s>` で終わり、長さは必ず 1 以上（切り詰めの規則は共通層の `encode`）。
    */
   encode(text: string): number[] {
-    const budget = this.#assets.maxLength - 1;
-    const ids: number[] = [];
-    // 先頭から順に積むだけなので、予算に達した後の chunk / 断片を捨てても id 列は変わらない
-    // （切り詰めの後ろを符号化する費用を入力長に比例させない）。
-    for (const chunk of splitAddedTokens(text, this.#added)) {
-      if (ids.length >= budget) break;
-      if (chunk.added) {
-        ids.push(this.#assets.addedTokens.get(chunk.text) as number);
-        continue;
-      }
-      const normalized = normalizeSpm(this.#assets.normalizer, chunk.text);
-      for (const piece of t5PreTokenize(normalized, this.#assets.space)) {
-        if (ids.length >= budget) break;
-        // 長い断片でも引数展開しない（`push(...)` は V8 の引数上限で RangeError になる）。
-        for (const id of this.#tokenize(piece)) ids.push(id);
-      }
-    }
-    return [...ids.slice(0, budget), this.#assets.eosId];
+    return this.#inner.encode(text);
   }
 }

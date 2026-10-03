@@ -15,7 +15,6 @@
 // なので models 側が正 — 2026-08-16 移設済み）。exporter 側の生成・参照も同じ path を指す。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { parseCodeRanges } from "../src/anima/text/code-ranges.ts";
 import {
   normalizeNfc,
   type Qwen2Assets,
@@ -23,12 +22,7 @@ import {
   Qwen2Tokenizer,
 } from "../src/anima/text/qwen2-tokenizer.ts";
 import { normalizeSpm, parseSpmTables } from "../src/anima/text/spm-normalizer.ts";
-import {
-  type T5Assets,
-  t5PreTokenize,
-  T5Tokenizer,
-  type T5VocabEntry,
-} from "../src/anima/text/t5-tokenizer.ts";
+import { type T5Assets, T5Tokenizer } from "../src/anima/text/t5-tokenizer.ts";
 import {
   AnimaTokenizers,
   assertPromptTokenLengths,
@@ -38,6 +32,8 @@ import {
 import { ModelInputError } from "../src/errors.ts";
 import { splitAddedTokens } from "../src/text/added-tokens.ts";
 import { toCodePoints } from "../src/text/code-points.ts";
+import { parseCodeRanges } from "../src/text/code-ranges.ts";
+import { t5PreTokenize, type T5VocabEntry } from "../src/text/t5-tokenizer.ts";
 
 type FixtureCase = {
   readonly id: string;
