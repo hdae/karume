@@ -13,7 +13,7 @@
  * 比べる相手は recipe の少ステップの参照（`tools/export-recipes/wan/few_step_ref.py`）: diffusers の
  * `WanPipeline` を CPU f32 で素のまま 2 ステップ（CFG あり・guide 5.0・shift 3.0）回した潜在と、それを
  * 段 5 のタイル decode に通したフレーム（重みは f16 へ丸めた値 — ADR 0006）。初期ノイズは参照の
- * `latents_init`（torch の `randn`）を `latents` で注入する。
+ * `latents_init`（torch の `randn`）を `latents` で注入する（seed 経路の 1 本 — {@link SEED_CASE} — を除く）。
  *
  * ## 門（既定のレーン — 決定 8「レーンの既定は少ステップ」）
  *
@@ -37,6 +37,8 @@
  *   （`fromAssets`）して書いた値で、配布形経由（`fromPretrained`）でも同じ行と一致することを
  *   ここで要求する — 配布形は系列の `krm` の独立コピーで、manifest の既定（50 / 5.0 / 3.0）も段 6 の
  *   定数と同じ値なので、1 ビットでも割れたら取得面か既定の解決の退行。
+ * - **seed 経路**（{@link SEED_CASE}）: `latents` を注入せず seed から初期ノイズを作る 2 ステップ 1 本。CPU の
+ *   参照は無いので、完走・非有限 0 と sha256 の環境行だけで縛る。
  *
  * ## 50 ステップの通し（env の opt-in — 既定のレーンに入れない）
  *
@@ -88,8 +90,10 @@ import {
   wanUniPcSchedule,
 } from "../src/wan/scheduler.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { settleReleases } from "./helpers/settle-releases.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
   openReferences,
   referenceMismatchMessage,
@@ -165,6 +169,14 @@ const CASES: readonly { readonly name: string; readonly role: "band" | "accept" 
 ];
 const ACCEPT_CASE = "accept-ferret";
 
+/**
+ * seed 経路の 2 ステップ（`latents` を注入せず、seed から初期ノイズを作る — 生成器 `WanRandn` と seed → 潜在の
+ * 並べ方を通す）。生成器の列は torch の `randn` と別なので CPU の参照は作れず、値は sha256 の環境行だけで縛る。
+ * 既定のレーンに置くのは、seed 経路の値を縛る行がほかに opt-in の 50 ステップにしか無いため（既定のレーンと
+ * フル verify が生成器の退行を素通しする）。
+ */
+const SEED_CASE = { id: "2step-seed-boxing-cats-seed42", prompt: "boxing-cats", seed: 42 } as const;
+
 /** 50 ステップの通しの opt-in（決定 8 — リリース前と参照値の焼き直しのときだけ回す）。 */
 const FULL_PIPELINE = Deno.env.get("KARUME_WAN_FULL_PIPELINE") === "1";
 /**
@@ -184,6 +196,11 @@ const FULL_CASES: readonly {
 ];
 /** `frames` を省いたときのフレーム数（`src/wan/pipeline.ts` の既定）。 */
 const DEFAULT_FRAMES = 33;
+/**
+ * 50 ステップの通しの step 数。要求では指定せず manifest の既定に任せるので、観測した denoise-step の数で縛る
+ * （既定が変わった配布形で `KARUME_REFERENCE=write` を回すと、別の step 数の出力が `50step-…` の行に書かれる）。
+ */
+const FULL_STEPS = 50;
 
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
@@ -292,8 +309,8 @@ const countingSource = (manifest: Record<string, unknown>, requested: string[]) 
 
 Deno.test({
   name:
-    "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬は " +
-    "名指しで落ち、それまでに重みの part 1 以降と資産を 1 本も取らない",
+    "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬と " +
+    "計測（gpuTiming）の共有 device は名指しで落ち、それまでに重みの part 1 以降と資産を 1 本も取らない",
   ignore: !DIST_PRESENT,
   fn: async (t) => {
     const original = await Deno.readTextFile(new URL("karume.json", DIST_ROOT));
@@ -315,6 +332,8 @@ Deno.test({
     const faults: readonly {
       readonly label: string;
       readonly patch: (model: Record<string, unknown>) => Record<string, unknown>;
+      /** 共有で渡す GPU（manifest ではなく構築のオプション側の齟齬）。 */
+      readonly gpu?: GpuContext;
       readonly message: string;
     }[] = [
       {
@@ -345,12 +364,25 @@ Deno.test({
         },
         message: "session.linearComputeは未対応",
       },
+      {
+        // VAE の段は 1 タイル = 1 batch で、runtime は計測の device で batch を開かない。DiT の段を
+        // 回し終えてから落ちる形にせず、重みを取る前に落とす（`WanPipelineOptions.gpu` の MUST）。
+        // device は timestamp-query だけを持つフェイク（GPU を取らない）。
+        label: "計測（gpuTiming）の device を共有で渡す",
+        patch: (model) => model,
+        gpu: fakeGpuContext(fakeDevice({ features: ["timestamp-query"] })),
+        message: "gpuTiming が有効な device",
+      },
     ];
-    for (const { label, patch, message } of faults) {
+    for (const { label, patch, gpu, message } of faults) {
       await t.step(label, async () => {
         const requested: string[] = [];
         const source = countingSource(overrideModel(original, patch), requested);
-        await assertRejects(() => WanPipeline.fromPretrained(source), Error, message);
+        await assertRejects(
+          () => WanPipeline.fromPretrained(source, gpu === undefined ? {} : { gpu }),
+          Error,
+          message,
+        );
         assert(requested.includes("karume.json"), `manifest を読んでいない: ${requested}`);
         const heavy = requested.filter((path) => heavyPaths.has(path));
         assertEquals(heavy, [], "admission の前に重みの part 1 以降・資産を取っている");
@@ -358,24 +390,6 @@ Deno.test({
     }
   },
 });
-
-/**
- * device を捨てる前に解放を待つ（空の `submit` → `onSubmittedWorkDone`・device 消失とは競わせる）。
- * B570 は `destroy()` の解放が次の device poll まで遅れうる（docs/known-issues.md「Intel Arc B570」節）
- * ので、後続のテストの予算を残すために捨てる前に 1 度 poll させる（段 3 の e2e の `settleReleases` と同じ）。
- */
-const settleReleases = async (gpu: GpuContext): Promise<void> => {
-  let unsubscribe: () => void = () => {};
-  const lost = new Promise<void>((resolve) => {
-    unsubscribe = gpu.onLost(() => resolve());
-  });
-  try {
-    gpu.device.queue.submit([]);
-    await Promise.race([gpu.device.queue.onSubmittedWorkDone(), lost]);
-  } finally {
-    unsubscribe();
-  }
-};
 
 /** 参照 1 本（F32 のテンソルとメタ）。 */
 type Fixture = {
@@ -385,7 +399,9 @@ type Fixture = {
 
 const readFixture = async (url: URL): Promise<Fixture> => {
   const bytes = await Deno.readFile(url);
-  const file: SafetensorsFile = parseSafetensors(bytes.buffer);
+  const file: SafetensorsFile = parseSafetensors(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  );
   return {
     tensor: (key) => {
       const view = file.tensors.get(key);
@@ -689,6 +705,40 @@ Deno.test({
           });
         }
 
+        await t.step(`${SEED_CASE.id}（seed 経路・sha256 の環境行）`, async () => {
+          const { id } = SEED_CASE;
+          let settlement: ReferenceSettlement | undefined;
+          await runRecordedCase(results, { id }, async () => {
+            const observed = await observe(pipeline, diagnostics, {
+              prompt: textOf(prompts, SEED_CASE.prompt, "prompt"),
+              seed: SEED_CASE.seed,
+              steps: STEPS,
+            });
+            assert("video" in observed, "generate が最後まで回っていない");
+            assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+            const { video } = observed;
+            assertEquals([video.frames, video.height, video.width], [DEFAULT_FRAMES, 480, 832]);
+            const nonFinite = video.data.reduce(
+              (count, value) => count + (Number.isFinite(value) ? 0 : 1),
+              0,
+            );
+            const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+            console.log(`[wan-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
+            assertEquals(nonFinite, 0, `${id}: 非有限`);
+            assertEquals(deviceLost, undefined, "device lost");
+            const outcome = await settleOrObserve(references, results, {
+              id,
+              artifact: `${id}.rgb`,
+              bytes: rgbBytes(video),
+            });
+            settlement = outcome.settlement;
+            return { ...outcome.fields, note: notes.join(" / ") };
+          });
+          if (settlement?.check.status === "fail") {
+            throw new Error(referenceMismatchMessage(id, settlement, references));
+          }
+        });
+
         // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
         const accept = await readFixture(fixtureUrl(ACCEPT_CASE));
         const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
@@ -808,6 +858,11 @@ Deno.test({
                   frames: spec.frames,
                 });
                 assert("video" in observed, "generate が最後まで回っていない");
+                assertEquals(
+                  observed.latents.length,
+                  FULL_STEPS,
+                  "denoise-step の数（manifest の既定）",
+                );
                 const { video } = observed;
                 assertEquals([video.frames, video.height, video.width], [frames, 480, 832]);
                 const nonFinite = video.data.reduce(
@@ -859,6 +914,7 @@ Deno.test({
 
 const CASE_IDS = [
   ...CASES.map(({ name }) => `2step-${name}`),
+  SEED_CASE.id,
   ...(FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
 ];
 const RUNNABLE = ANY_PRESENT && GPU_AVAILABLE;
