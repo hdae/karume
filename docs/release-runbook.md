@@ -28,8 +28,11 @@
 ### 越境参照を含むリポの公開順序（MUST）
 
 越境コンポーネント参照（ADR [0038](decisions/0038-manifest-v1.md) §7 追記）は**参照先の
-commit SHA を焼き込む**ので、参照先が先に公開されていないと焼けない。extra（追加学習系）が
-公式リポの text stack を参照する現行の組（ADR 0087 — 旧 turbo → anima の向きと同型）では:
+commit SHA を焼き込む**ので、参照先が先に公開されていないと焼けない。現行の組は 2 つ —
+extra（追加学習系）が公式リポの text stack を参照する組（ADR 0087 — 旧 turbo → anima の向きと
+同型）と、`karume-wan2.1` が `karume-umt5-xxl` の text_encoder を参照する組（ADR
+[0119](decisions/0119-wan-umt5-gpu-text-encoder.md) 追記「段 10d の設計」— 手順は下の「家族の初公開」の
+Wan2.1 の項）。anima の組では:
 
 1. **`karume-anima` を先に上げる**（§2 の断片化対策込み・公式 5 変種〈`anima-turbo-v1.1`〈既定〉/
    `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`〉— ADR 0087）
@@ -59,7 +62,17 @@ commit SHA を焼き込む**ので、参照先が先に公開されていない�
 
 参照先を後から上げ直すと SHA が変わり、extra の manifest は**古い revision を指したまま**に
 なる（バイト列は二重 pin で守られるので誤配は起きないが、2 リポの内容が別世代になる）—
-**参照先を上げ直したら extra も焼き直して上げ直す**。
+**参照先を上げ直したら extra も焼き直して上げ直す**（Wan も同じ — `karume-umt5-xxl` を上げ直したら
+`karume-wan2.1` も焼き直して上げ直す）。
+
+**仮の SHA の門**: 参照先が未公開の間の開発用ミラーは、`--ref-revision` に仮の SHA（40 桁の 0）を
+渡し `--allow-placeholder-ref` を**明示**して焼く（`tools/export-recipes/dist.py` の `PLACEHOLDER_REVISION`
+— ローカルの取得元は `crossRepo` の mapping で解き、revision を見ない）。仮の SHA は 40 桁 hex の形を
+満たすので hub の parse も `verify_dist` も通す — 公開の焼き直しでは `--allow-placeholder-ref` を
+**付けない**。付けなければドライバが 1 バイトも書く前に落ちるので、参照先の main の実 SHA を渡す
+までは焼けない。§4 の bump の後の焼き直しは必ず行う（開発用ミラーをそのまま上げない —
+上げる直前に `rg -c '"revision": "0{40}"' models/<repo>/karume.json` が何も出さないこと〈仮の SHA が
+残っていないこと〉を確かめる）。
 
 NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で退役 — 上げ直さない。
 公開済みリポの扱い（deprecation 掲示・README 差し替え等）はアップロード時にユーザー裁定。
@@ -243,8 +256,15 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 - [ ] **公開前の確認（Wan2.1）**: 50 ステップの通し（`KARUME_WAN_FULL_PIPELINE=1 deno task
       test:models:wan` — 33 フレームと 81 フレームの 2 本で、B570 で約 30 分 + 約 2 時間 = 合計約 2.5 時間）が
       緑で、sha256 の行が一致すること（ADR 0118 決定 8 —
-      既定のレーンは 2 ステップだけ）。配布形は `tools/export-recipes` で
-      `uv run python dist.py --pipeline wan`（越境参照なし・`--out` は既定の `models/karume-wan2.1`）
+      既定のレーンは 2 ステップだけ）
+- [ ] **umT5 リポを先に上げる（Wan2.1 — §0 の越境参照の順序）**: `tools/export-recipes` で
+      `uv run python dist.py --pipeline umt5`（`--out` は既定の `models/karume-umt5-xxl`）→ §2 の台本で
+      `tools/release/hf-upload.zsh upload karume-umt5-xxl` → その main の SHA を §3 と同じ取り方で確定する
+- [ ] **その実 SHA で Wan を焼き直す**: `uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl
+      --ref-revision <karume-umt5-xxl の main の SHA> --ref-dist ../../models/karume-umt5-xxl --ref-model xxl
+      --ref-role text_encoder`（`--allow-placeholder-ref` は**付けない** — 開発用ミラーの仮の SHA のまま
+      上げない。`--out` は既定の `models/karume-wan2.1`）→ `karume.json` の text_encoder の part が全部
+      その SHA を指していることを確かめてから `tools/release/hf-upload.zsh upload karume-wan2.1`
 - [ ] `packages/models/src/wan/config.ts` に `WAN_SOURCES`（キー `"wan2.1"` → `hdae/karume-wan2.1` +
       main の SHA — ADR 0118 決定 7 の名前の対応）を足し、`wan.ts` と `mod.ts` から出す
 - [ ] `packages/models/src/sources.ts` の `KARUME_SOURCES` へ畳む
