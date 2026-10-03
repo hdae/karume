@@ -341,3 +341,18 @@ ADR 0118 の段 9（Chrome）・段 10（umT5 を GPU で）とは依存しな�
 - **混成（決定 2 の退路）の要否**: 段 3 の層ごとの差と段 6 の視認で、`condition_embedder` / `patch_embedding` / `proj_out` を f16 に
   残す必要があるか。
 - **Chrome での利得**: 段 9 の M2 / RTX で、取得量と VRAM の利得と、a8 の速度の利得（M2 では無い見込み）がどう出るか。
+
+## 追記（2026-10-03）: 段 1 / 2 の結果
+
+- **段 1 ✅**（`6cb822a9`）: `--dtype i8 --no-full` で S = 192 の 9 ケース（CPU 104 s・RSS 13.8 GiB・2 回の実走でバイト一致）。
+  容器は 1,426,806,948 B（1.33 GiB・9 part・f16 比 0.502）、i8 307 本 / f32 521 本・scale 700,480。eager 同値の門は丸めた後の
+  重みで見る（f16 系列と同じ形 — 参照が丸め済みの重みで採られたことも縛れる）。growth（S = 768）は i8 の golden から外す
+  （決定 3 の S に無い）。S = 14,040 の golden は別に採取（CPU 約 1.5 時間）。観測（門ではない）: 重みだけ i8 にした CPU 参照の
+  f16 系列に対する差は S = 192 で 4.7e-2 / 1.5e-2（max abs ÷ max ref）。
+- **段 2 ✅**（`fff846a6` / `c36e543e`）: 席 3 つ（`f16` 既定 / `f16+dit8` / `f16+dit8-a8-attn8-s16`）。取得量は `f16` 3.14 GB /
+  i8 の 2 席 1.72 GB（見込みと一致・f16 比 0.549）、ミラー 4.25 GiB、`verify_dist` 緑。容器が 2 本になって生じる不変条件として
+  組み立ての門を 2 つ足した（`rope_base` のバイト同一・埋め込み資産が両方の transformer の文脈入力と噛み合う）。`f16` 席の
+  description は「the only quant」が偽になるため変えた（weights / session / label / 容器は不変）。GPU: `e2e_wan_pipeline_test.ts`
+  5 passed（admission の差し替え〈受理表に無い `stateAttentionReduce` の宣言は fail loudly〉・f16 と seed 経路の sha 行は新しい
+  ミラーで不変）。i8 の 2 席はまだどの GPU テストでもロードしていない（段 3 / 4 で初めて実測）。
+- 段 3〜5 のテストは実装中（GPU の実走と帯の確定はメインが行う）。
