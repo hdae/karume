@@ -209,3 +209,71 @@ Deno.test("clampWanVaeFrames: [-1, 1] へ in-place（NaN と -0 はそのまま 
   assert(Object.is(frames[2], -0), "-0 が保たれていない");
   assert(Number.isNaN(frames[7]), "NaN が数に化けた");
 });
+
+/**
+ * 本番の計画で「絶対位置を値に持つタイル」を貼り合わせたときの許容差（出力 − 絶対位置・絶対値）。
+ *
+ * 値は sample の px 座標（0〜831）で、f32 の 1 ulp は [512, 1024) で 2⁻¹⁴ ≈ 6.1e-5。1 回のランプ合成
+ * `f32(f32(a·w₁) + f32(b·w₂))` の誤差は、丸め 3 回（各 0.5 ulp）と、重み 2 本を f32 へ丸めたことによる
+ * 和の 1 からのずれ（|δ| ≤ 2⁻²⁴ → 値 1024 未満で 1 ulp 以下）で 2.5 ulp 以下。合成は凸結合なので入力の
+ * 誤差を増やさず、誤差は合成の連鎖の深さに比例する。タイル (r, c) は (r−1, c) の最終値との縦の合成と
+ * (r, c−1) の最終値との横の合成を経る（in-place — 入れ子ではブレンド済みの行をさらに読む）ので、深さは
+ * 高々 2r + c（3×4 枚で 7・4×3 枚で 8）→ 8 × 2.5 = 20 ulp = 1.22e-3 を上限にする。実測（2026-10-03・
+ * CPU）の最大は 3.05e-5〜1.22e-4（0.5〜2 ulp）。ブレンド幅の 1 潜在のずれ・担当領域や開始位置のずれは
+ * 1 px（= 1.0）以上の差になる。
+ */
+const ABSOLUTE_POSITION_TOLERANCE = 20 * 2 ** -14;
+
+Deno.test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶対位置のタイルが絶対位置に戻る（入れ子のブレンド）", () => {
+  // 行の重なり 18 潜在（144 px）はタイル幅の半分（16 潜在）を超える。タイル 1 の「上と縦ブレンドした
+  // 行」[0, 144) px と「下のタイルが読む行」[112, 256) px が重なり、出力の一部は 3 枚のタイルの寄与に
+  // なる（上流の既定〈ブレンド 64 px < stride 192 px〉では起きない入れ子）。既存の解析解のテストは
+  // 重なりがちょうど半分なので、この状態を通らない。値が位置の線形関数なら、重みの和が 1 で、合成する
+  // 2 行（列）が同じ絶対位置を指す限り位置に戻る — 縛るのは入れ子の配置でのブレンド幅（対ごと）・開始位置
+  // × 縮尺・担当領域の対応。重みの向きと縦 → 横の順は、隣のタイルが同じ値を持つこの形では差が出ないので
+  // 上の解析解のテスト（傾斜・角）が持つ。
+  for (const [height, width] of [[60, 104], [104, 60]] as const) {
+    const plan = planWanVaeTiles(
+      { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE },
+      height,
+      width,
+    );
+    const nested = height === 60 ? plan.rows : plan.cols;
+    assert(
+      wanVaeBlendExtentAt(nested, SCALE, 1) > (TILE * SCALE) / 2,
+      "入れ子の前提（重なり > タイル幅の半分）が崩れた",
+    );
+    const side = TILE * SCALE;
+    const plane = side * side;
+    for (const axis of ["rows", "cols"] as const) {
+      const tiles: Float32Array[] = [];
+      for (const top of plan.rows.starts) {
+        for (const left of plan.cols.starts) {
+          // [3, 1, 256, 256]・値 = 出力の絶対位置（行なら y・列なら x の px）。
+          tiles.push(
+            new Float32Array(3 * plane).map((_, index) => {
+              const offset = index % plane;
+              return axis === "rows"
+                ? top * SCALE + Math.floor(offset / side)
+                : left * SCALE + (offset % side);
+            }),
+          );
+        }
+      }
+      const out = assembleWanVaeTiles(tiles, plan);
+      const outHeight = height * SCALE;
+      const outWidth = width * SCALE;
+      assertEquals(out.length, 3 * outHeight * outWidth);
+      let worst = 0;
+      for (let index = 0; index < out.length; index += 1) {
+        const offset = index % (outHeight * outWidth);
+        const expected = axis === "rows" ? Math.floor(offset / outWidth) : offset % outWidth;
+        worst = Math.max(worst, Math.abs(out[index] - expected));
+      }
+      assert(
+        worst <= ABSOLUTE_POSITION_TOLERANCE,
+        `潜在 ${height}×${width} の ${axis}: 最大差 ${worst} が ${ABSOLUTE_POSITION_TOLERANCE} を超える`,
+      );
+    }
+  }
+});
