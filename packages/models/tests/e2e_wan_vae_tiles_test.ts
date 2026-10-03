@@ -61,7 +61,10 @@ import {
   wanVaeTileCount,
   type WanVaeTilePlan,
 } from "../src/wan/vae-tiles.ts";
+import { disposeSteps } from "../src/session/dispose-steps.ts";
+import { type DrmUsage, formatDrmUsage, sampleDrmUsage } from "./helpers/drm-usage.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { settleReleases } from "./helpers/settle-releases.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
@@ -209,54 +212,7 @@ const compare = (got: Float32Array, want: Float32Array, tolerance: Tolerance) =>
   return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
 };
 
-// ---- VRAM の標本化（診断 — Linux の DRM fdinfo）---------------------------------------------
-
-const RENDER_NODE = /^\/dev\/dri\/renderD\d+$/;
-const FDINFO_UNITS: Readonly<Record<string, number>> = { "": 1, KiB: 1024, MiB: 1024 ** 2 };
-
-/** 領域名（`vram0` / `gtt` / `system` …）→ バイト。 */
-type DrmUsage = ReadonlyMap<string, number>;
-
-/**
- * この process の DRM クライアントの `drm-total-<領域>` を領域ごとに足した値。fdinfo の無い環境
- * （Linux の DRM でない）は undefined。同じクライアントを指す fd は `drm-client-id` で 1 度だけ数える。
- */
-const sampleDrmUsage = (): DrmUsage | undefined => {
-  let fds: Deno.DirEntry[];
-  try {
-    fds = [...Deno.readDirSync("/proc/self/fd")];
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
-    throw cause;
-  }
-  const clients = new Map<string, DrmUsage>();
-  for (const { name } of fds) {
-    let info: string;
-    try {
-      if (!RENDER_NODE.test(Deno.readLinkSync(`/proc/self/fd/${name}`))) continue;
-      info = Deno.readTextFileSync(`/proc/self/fdinfo/${name}`);
-    } catch (cause) {
-      // 列挙と読みの間に閉じた fd（標本化の自分の readDir の fd など）は数えない。
-      if (cause instanceof Deno.errors.NotFound) continue;
-      throw cause;
-    }
-    const client = /^drm-client-id:\s*(\d+)/m.exec(info)?.[1];
-    if (client === undefined) continue;
-    const regions = new Map<string, number>();
-    for (
-      const [, region, value, unit] of info.matchAll(/^drm-total-(\S+):\s*(\d+)\s*(KiB|MiB)?/gm)
-    ) {
-      regions.set(region, Number(value) * FDINFO_UNITS[unit ?? ""]);
-    }
-    clients.set(client, regions);
-  }
-  if (clients.size === 0) return undefined;
-  const total = new Map<string, number>();
-  for (const regions of clients.values()) {
-    for (const [region, bytes] of regions) total.set(region, (total.get(region) ?? 0) + bytes);
-  }
-  return total;
-};
+// ---- VRAM の標本化（診断 — Linux の DRM fdinfo・helpers/drm-usage.ts）-----------------------
 
 /** `work` の間の領域ごとの最大（10 ms ごとの標本・前後も 1 回ずつ取る）。 */
 const withDrmPeak = async <T>(
@@ -280,12 +236,7 @@ const withDrmPeak = async <T>(
 };
 
 const GIB = 1024 ** 3;
-const gib = (bytes: number | undefined): string =>
-  bytes === undefined ? "n/a" : (bytes / GIB).toFixed(3);
-const gibByRegion = (usage: DrmUsage | undefined): string =>
-  usage === undefined
-    ? "n/a"
-    : [...usage].map(([region, bytes]) => `${region}=${gib(bytes)}`).join(" ");
+const gib = (bytes: number): string => (bytes / GIB).toFixed(3);
 
 /** VRAM の内訳（診断から — 生きている確保の和。staging は数えられないので別に書く）。 */
 const vramBreakdown = (
@@ -348,6 +299,7 @@ Deno.test({
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;
+    let failure: { readonly error: unknown } | undefined;
     try {
       first = await firstModel.createContainerSession(gpu);
       next = await nextModel.createContainerSession(gpu);
@@ -419,8 +371,8 @@ Deno.test({
                 `nonFinite=${report.nonFiniteCount} decodeMs=${elapsedMs.toFixed(0)}`,
             );
             console.log(
-              `[wan-vae-tiles] drm fdinfo GiB: before {${gibByRegion(before)}} peak {${
-                gibByRegion(peak)
+              `[wan-vae-tiles] drm fdinfo GiB: before {${formatDrmUsage(before)}} peak {${
+                formatDrmUsage(peak)
               }} ` +
                 `breakdown=${
                   JSON.stringify(
@@ -528,12 +480,23 @@ Deno.test({
           assert(report.maxAbsError > 1e3 * BAND, `${label}: maxAbs ${report.maxAbsError}`);
         });
       }
+    } catch (error) {
+      failure = { error };
+      throw error;
     } finally {
-      // MUST: Session → 常駐 → device の順で畳む（段 4 の e2e と同じ）。
-      await first?.dispose();
-      await next?.dispose();
-      caches?.dispose();
-      gpu.destroy();
+      // MUST: Session → 常駐 → device の順で畳む（段 4 の e2e と同じ — 1 段が落ちても残りの段を必ず通し、
+      // 本体の失敗を先頭の段に置いて上書きさせない）。
+      await disposeSteps([
+        () => {
+          if (failure !== undefined) throw failure.error;
+        },
+        () => first?.dispose(),
+        () => next?.dispose(),
+        () => caches?.dispose(),
+        // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+        () => settleReleases(gpu),
+        () => gpu.destroy(),
+      ]);
     }
   },
 });

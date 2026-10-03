@@ -44,7 +44,9 @@ import {
   wanVaeFrameCount,
   wanVaeLatentChunk,
 } from "../src/wan/vae-chunks.ts";
+import { disposeSteps } from "../src/session/dispose-steps.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { settleReleases } from "./helpers/settle-releases.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
@@ -54,16 +56,18 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
 /**
  * chunk 列の帯（絶対値 — 出力は値域 ±1.3 程度のクランプ前のフレーム）。
  *
- * 実測（B570・Deno 2.9.6・`atol = rtol = 0` の素の突合・2026-10-02）:
+ * 実測（B570・Deno 2.9.6・`atol = rtol = 0` の素の突合・band / accept は 2026-10-02・long は 2026-10-03 —
+ * 帯を決めた後に初めて回した）:
  *
  * | ケース | 役割   | chunk | フレーム | maxAbs  | 参照の max | 比（maxAbs ÷ 参照の max） |
  * | ------ | ------ | ----- | -------- | ------- | ---------- | ------------------------- |
  * | band   | 帯     | 9     | 33       | 4.65e-6 | 1.297      | 3.58e-6                   |
  * | accept | 受入れ | 5     | 17       | 3.55e-6 | 1.282      | 2.77e-6                   |
+ * | long   | 受入れ | 21    | 81       | 4.12e-6 | 1.380      | 2.98e-6                   |
  *
  * 帯 2.5e-5 は `band` の実測最悪の約 5.4 倍。比は事前の目安（1e-4 — 決定 8）の 1/28 で、eager の
  * 書き直しの差（CPU で 2.79e-6 — recipe の `--verify`）と同じ桁 — GPU の縮約順の差はそれに
- * 埋もれる程度。chunk を 9 本重ねても 5 本と同じ桁（cache の持ち越しで誤差が積もっていない）。
+ * 埋もれる程度。chunk を 9 本・21 本重ねても 5 本と同じ桁（cache の持ち越しで誤差が積もっていない）。
  * 故障注入（cache 更新忘れ 0.545・2 フレームの逆順 1.12・ゼロ化の省略 0.918）は帯の 4 桁以上外。
  */
 const BAND = 2.5e-5;
@@ -284,6 +288,7 @@ Deno.test({
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;
+    let failure: { readonly error: unknown } | undefined;
     try {
       first = await firstModel.createContainerSession(gpu);
       next = await nextModel.createContainerSession(gpu);
@@ -428,13 +433,25 @@ Deno.test({
           );
         },
       );
+    } catch (error) {
+      failure = { error };
+      throw error;
     } finally {
-      // MUST: 常駐 → Session → device の順で畳む（常駐は Session の焼き込みから参照されうるので、
-      // Session を先に畳んでから返す）。
-      await first?.dispose();
-      await next?.dispose();
-      caches?.dispose();
-      gpu.destroy();
+      // MUST: Session → 常駐 → device の順で畳む（常駐は Session の焼き込みから参照されうるので、
+      // Session を先に畳んでから返す）。1 段が落ちても残りの段（device まで）を必ず通し、畳む失敗で
+      // 本体の失敗を上書きしない（製品の `WanPipeline` の VAE の段と同じ形）。本体の失敗を先頭の段に
+      // 置くので、単独ならそのまま、後始末の失敗と重なれば AggregateError の先頭として投げ直される。
+      await disposeSteps([
+        () => {
+          if (failure !== undefined) throw failure.error;
+        },
+        () => first?.dispose(),
+        () => next?.dispose(),
+        () => caches?.dispose(),
+        // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+        () => settleReleases(gpu),
+        () => gpu.destroy(),
+      ]);
     }
   },
 });

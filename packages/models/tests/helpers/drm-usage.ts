@@ -5,9 +5,6 @@
  * xe は同じ接頭辞でエンジンのサイクル数（`drm-total-cycles-<engine>`）も出すので、それは数えない。
  * Linux の DRM でない環境（fdinfo が無い）は `undefined` を返し、呼び手は「観測なし」として扱う。
  * 10 ms ごとの標本なので短い山は取りこぼしうる（門ではなく観測に使う）。
- *
- * NOTE: 同じ標本化が `e2e_wan_vae_tiles_test.ts` にも局所にある（段 5）。段 6 の通しは段の境目ごとの
- * 区間（phase）の山が要るので、区間を持つ形でここに置いた。
  */
 
 const RENDER_NODE = /^\/dev\/dri\/renderD\d+$/;
