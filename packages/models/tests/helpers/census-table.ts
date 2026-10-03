@@ -74,6 +74,7 @@ import {
 } from "../../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../../src/siglip2/pipeline.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../../src/vowel-detector/pipeline.ts";
+import { WAN_SESSION_POLICY } from "../../src/wan/pipeline.ts";
 
 // ---------------------------------------------------------------------------
 // 鍵
@@ -95,6 +96,7 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
+  wan: WAN_SESSION_POLICY,
 };
 
 /**
