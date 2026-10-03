@@ -333,3 +333,20 @@ text_encoder 186.7 s 対 49.8 s（3.7 倍）・transformer 94,533 s 対 234 s（
 （`protect` では回避できない）。修正案 = 部分 weights の evict では共通 assets を既定で保持する
 （「絞った選択」の参照集合から assets を外す / 対象と同じ label の残りを守る側に数える、のどちらか）。
 どちらも「選択単位の削除」の粒度の定義を変えるので設計裁定が要る — ここは起票のみ。
+
+## Intel Arc B570: Wan DiT 実寸の「1 submit の GPU 時間 ≤ 1 s」の門が、長時間の連続負荷の後に 1 回だけ超えた（2026-10-03・記録のみ）
+
+ADR [0118](decisions/0118-wan21-video-generation.md) 段 8 の受け入れで `deno task test:models:wan` を回したところ、
+S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**（門 1,000 ms）が出て赤になった
+（`e2e_wan_dit_test.ts`）。超えたのは 28,410 本の submit のうち 1 本で、中身は linear の dispatch 1 本
+（`linear:v2:f32:reg128x128r8x8w16v4:wf16`）。同じ dispatch は同じ走行の他の 13 forward で 192 ms、裏付け前の
+255 本の最大は 458.6 ms と直前の走行と同じ、その forward だけ GPU 68 s → 80 s。直前（GPU 約 10 時間の連続負荷の後）
+の sysfs は `freq0/throttle/reasons = thermal` を示していた。同じテストを単独で再走すると 459.3 ms（7 passed）で、
+再走中の 5 秒ごとの記録（332 本）は act_freq 2,683〜2,750 MHz・最高温度 68 ℃・throttle 理由は `pl`（電力上限）のみ。
+
+- 帰属（推定）: 計画（chunk の切り方）の問題ではなく、GPU 側の一過性の stall（熱か電力のクロック低下・
+  コンテキスト切り替え）。計画の問題なら裏付け前の最大が動くはずで、動いていない。
+- 運用の回避 = 時間門が外れた走行は、`outputs/diag/gpu-busy.zsh`（`throttle=` 欄を 2026-10-03 に追加）で
+  スロットリング理由と温度を見て、冷めてから単独で再走する（緑ならフレーク）。レーンを連続で回すときは
+  重い GPU ジョブ（50 ステップの通し・目視の量産）の直後を避ける。
+- 門の統計量（裏付け前の最大 + 裏付け後の窓平均、など）へ替えるかは設計裁定 — ここは起票のみ。
