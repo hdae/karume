@@ -5,9 +5,11 @@
     uv run --group wan --inexact python -m wan.umt5_export check-mask --dtype bf16 --out <席>
     uv run --group wan --inexact python -m wan.umt5_export check-mask --dtype f32 --out <席>
     uv run --group wan --inexact python -m wan.umt5_export compare-mask --out <席>
+    uv run --group wan --inexact python -m wan.umt5_export reference     # 層逐次の参照 → golden
 
 どのサブコマンドも段ごとの壁時間と RSS（{@link MemoryMonitor}）を JSON で出す。数値の記録は
-research `2026-10-03-umt5-export-ram`。
+research `2026-10-03-umt5-export-ram`。`reference`（段 10c）は書いた容器から重みを読んで CPU の
+層逐次の参照を採り、golden を同じ席に書く（容器は書かない — 中身は {@link wan.umt5_reference}）。
 
 ## export の形（決定 6 — 段 10b の実測で決めた形）
 
@@ -70,7 +72,7 @@ from karume.emit import FixedQuantizedWeight
 from karume.ir import IrGraph
 from karume.pipeline import export_module
 from karume.quantize import QUANT_MODULE_TYPES, channel_scale, iter_quant_targets, quantize_to_int8
-from wan import umt5_patch
+from wan import umt5_patch, umt5_reference
 from wan.sources import DEFAULT_MODEL, SOURCES, text_snapshot
 
 #: i8 の系列（綴りは配布の規約 `<名>-<格納>-dyn` — DiT の `wan2.1-t2v-1.3b-i8-dyn` に倣う）。
@@ -633,9 +635,38 @@ def prepare_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     }
 
 
+def reference_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
+    """書いた i8 系列の容器から層逐次の CPU 参照（f64 / f32）を採り、golden を同じ席に
+    書く（段 10c — 容器は書かない）。
+
+    ケースの id 列は上流の経路（10a の fixture と同じ）で採る。受入れ（固定 4 本）は bf16 の
+    事前計算資産との差も要約に出す（記録だけ）。
+    """
+    from transformers import UMT5Config
+
+    from wan.text_embeds import ASSET_NAME, read_asset
+    from wan.text_embeds import SERIES_NAME as EMBEDS_SERIES
+
+    component = SERIES / COMPONENT_DIR
+    with MemoryMonitor() as monitor:
+        with monitor.stage("cases") as record:
+            cases = umt5_reference.reference_cases(umt5_reference.upstream_encoder(model))
+            record.details["lengths"] = {case.name: len(case.ids) for case in cases}
+        embeddings, _ = read_asset(SERIES_ROOT / EMBEDS_SERIES / ASSET_NAME)
+        result = umt5_reference.write_references(
+            container=component / MODEL_FILE,
+            out_dir=component,
+            config=UMT5Config.from_pretrained(upstream_dir(model)),
+            cases=cases,
+            stage=monitor.stage,
+            embeddings=embeddings,
+        )
+    return {**result, "stages": [record.to_dict() for record in monitor.records]}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("command", choices=("prepare", "check-mask", "compare-mask"))
+    parser.add_argument("command", choices=("prepare", "check-mask", "compare-mask", "reference"))
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
     parser.add_argument("--dtype", default="bf16", choices=sorted(MASK_DTYPES), help="check-mask")
     parser.add_argument("--out", type=Path, help="check-mask が書く / compare-mask が読む席")
@@ -645,6 +676,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary: Any = prepare_summary(args.model)
     elif args.command == "check-mask":
         summary = check_mask(args.model, args.dtype, args.out)
+    elif args.command == "reference":
+        summary = reference_summary(args.model)
     else:
         if args.out is None:
             parser.error("compare-mask は --out（check-mask を 2 回書いた席）が要る")
