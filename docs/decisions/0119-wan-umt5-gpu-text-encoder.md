@@ -467,3 +467,38 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
    回避できるなら回避策を・エラー文言が分かりやすければ一旦 OK」。→ 拒否の文言は直し方（例: `R&D` は `R & D` と空白を挟む）まで言う
    （10d で確かめる）。entity は名前表（Python の `html.entities.html5`・2,231 個）を焼いて「実際に文字列が変わるときだけ拒む」正確な門
    へ狭める回避策を backlog に積む（要望が出てから — 段 10e 相当）。
+
+## 追記（2026-10-03）: 段 10d の設計 — 別リポへの越境参照・経路の選択・signal
+
+材料は [research 2026-10-03 umt5-wiring-recon](../research/2026-10-03-umt5-wiring-recon.md)。裁定 1（別リポ）を受けて次のとおり決める。
+
+- **A. 参照の形 = (b) 越境参照**: Wan の manifest（`karume-wan2.1`）が `text_encoder` の容器を umT5 リポへ越境参照する（hub の
+  FileRef = repo + 40 桁の commit SHA の二重 pin — ADR 0109 決定 3・実装済み・前例 anima-extra → karume-anima）。利用者は source 1 つ
+  で両方を取り、Wan の revision が umT5 のバイト列を pin する（再現性）。hub の追加は要らない。費用: 全 quant 席の `requiredLimits` が
+  語彙埋め込み 1,050,148,864 B の束縛 / バッファ上限を要求する（quant の weights は完全写像で、資産の経路でも宣言は同じ — 10e のホスト
+  gather で下げられる）。
+- **B. 経路の選択 = 構築時のオプション** `textEncoder: "gpu" | "precomputed"`（既定 `"gpu"` — 決定 7）。取得する部品が経路で変わるので
+  取得の前に決める。`"precomputed"` は umT5 の部品を取らず、資産のプロンプト 4 本だけを受ける（今の挙動）。生成の要求ごとの切り替えや
+  quant 席での表現は採らない（席の weights は完全写像で umT5 を持たない席を表せない）。
+- **C. トークナイザ資産 = Wan リポの自前の資産**（`WAN_ASSETS`・8 MB・形式 `karume-wan-umt5-tokenizer/1` は Wan の前処理の表を束ねている）。
+  資産は常に全数を取るので、umT5 リポに置くと資産の経路まで越境する。汎用のトークナイザは他の消費者が出た日に umT5 リポへ。
+- **D. umT5 リポ = `karume-umt5-xxl`**（ADR 0092 決定 2 の `karume-<family>-<変種>`）・pipeline 名 `umt5-encoder/1`（読む TS の家族は
+  無く、役を名乗る）・quant 席は `i8` の 1 つ・部品名 `text_encoder`。出所は Wan-AI/Wan2.1-T2V-1.3B-Diffusers の text_encoder（umT5-XXL
+  encoder の bf16 の写しを F32 で格納したもの — google/umt5-xxl との重みの同一は未確認。カードと NOTICE にそう書く）。
+- **E. 未公開期間の SHA = 仮の SHA（40 桁の 0）+ 機械の門**: ローカルのミラーは `dist.py --ref-*` で umT5 のローカル配布形から
+  size / sha256 を採り、revision は仮の値で組む（hub のローカル取得元は crossRepo の明示 mapping で解き revision を見ない）。公開の
+  手順（HF への upload・published-smoke）は仮の SHA を**拒む**門を持つ。公開の順序は umT5 リポが先（release-runbook §0）。
+- **F. text 段の Session の寿命 = generate ごとに張って畳む**（決定 11・DiT 段 7.31 GiB と同居不可）。所要は 10d-4 で測る。
+- **G. signal**: 構築は `WanPipelineOptions.signal`（取得層と構築の境目へ — anima / irodori と同じ）、生成は `WanGenerateRequest.signal`
+  （段の境目・DiT の各 step の間・VAE のタイルの間で `settleAbort`、開いている Session を畳んでから `signal.reason` を包まず投げる —
+  `generation/sequence.ts` の形）。
+- **プロンプトの意味**: GPU 経路は任意の文字列を受け（prompt_clean の鏡像とトークナイザの門）、`pipeline.prompts` は資産の名前の一覧の
+  まま（例示と precomputed の受理集合）。negative の既定は TS の定数（公式の sample_neg_prompt）で、資産の `negative` の原文と一致する
+  ことをテストで縛る。positive も negative も GPU で作る（決定 7）。
+- **拒否の文言**: prompt_clean の拒否は直し方まで言う（`R&D` → `R & D`・未割り当て / C1 は「その文字を外す」）。
+- **sha 行**: GPU 経路は新しい case id（例 `gpu-text-2step-…`）。資産の経路の既存の行は `textEncoder: "precomputed"` を明示して守る。
+  参照門 `referenceGatePasses` の抜け（どれか 1 本で緑）は横断の変更として別に締める（10d-4 の前）。
+- **段の分割**: 10d-1 umT5 の配布 recipe（`dist.py --pipeline umt5`・LICENSE / NOTICE / カード・graph_name の登録）と Wan の配布形の
+  越境参照・トークナイザ資産・NOTICE の書き換え・仮 SHA の門・ローカルミラー 2 本の再生成（CPU）/ 10d-2 WanPipeline の結線（経路の
+  選択・admission の umT5 の契約・text 段・negative の定数・signal・examples / gpu-lab の追従・ホストテスト）（CPU）/ 10d-3 参照門の
+  締め（横断・CPU）/ 10d-4 GPU: GPU 経路の sha 行・品質の記録・text 段の所要と VRAM の山・視認（自由プロンプト）。
