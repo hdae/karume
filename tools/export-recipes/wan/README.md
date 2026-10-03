@@ -333,42 +333,98 @@ The UniPC port is checked against `wan-scheduler/unipc.*`: σ bit for bit, times
 50-step trajectory within an absolute 2e-5 (torch's float32 `log` differs from the correctly rounded
 value by one ULP at six of the σ), and the CFG combination bit for bit.
 
+## umT5 text encoder distribution (ADR 0119 stage 10d)
+
+The GPU text path runs the umT5-XXL encoder of the same checkpoint with int8 weights (ADR
+[0119](../../../docs/decisions/0119-wan-umt5-gpu-text-encoder.md)). Its container is the series
+`outputs/series/wan2.1-umt5-i8-dyn/text_encoder/` (26 parts, graph name `text_encoder`), written by
+`wan/umt5_export.py` from the pinned F32 checkpoint one row block at a time:
+
+```bash
+uv run --group wan --inexact python -m wan.umt5_export write --check   # write to a scratch seat, compare every part with the series by SHA-256
+uv run --group wan --inexact python -m wan.umt5_export write           # replace the series container (then rerun `reference` for the goldens)
+```
+
+It ships in its own repository, `models/karume-umt5-xxl/` (`wan/umt5_distribution.py`), which the
+Wan distribution references (below). There is no TypeScript family for it; the pipeline name only
+names the part:
+
+```bash
+uv run python dist.py --pipeline umt5   # default model xxl, out models/karume-umt5-xxl
+```
+
+| Manifest entry (`karume/5`) | Value                                                                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| model                       | `xxl` (pipeline `umt5-encoder/1`)                                                                                                           |
+| `weights`                   | `text_encoder` with one `i8` container (`text_encoder/model.i8.krm`)                                                                        |
+| `assets`                    | none — the tokenizer is bundled with Wan's prompt cleaning and stays in the Wan repository                                                  |
+| `quants`                    | `i8` only; the vocabulary embedding (one 1,050,148,864-byte buffer) makes the build declare `maxBufferSize` / `maxStorageBufferBindingSize` |
+| `pipelineConfig`            | `{}`                                                                                                                                        |
+
+Before anything is placed, the plan checks the container's provenance against the pinned Wan
+revision, the binding table per kind of weight (linear layers and the vocabulary embedding in int8,
+RMSNorm weights and relative-position tables in float32 — with the real series: 169 int8 and 73
+float32 weights), and the graph contract (`input_ids [1, L]` and `relative_position_buckets [L, L]`,
+both int32, one symbol `L`, one float32 output `[1, L, W]`). The repository root gets `LICENSE.md`
+(Apache 2.0) and `NOTICE.md` (int8 conversion, `gelu_new` → `GELU(approximate="tanh")`, valid
+tokens only; the upstream folder is float32 and its identity with `google/umt5-xxl` is not checked).
+
 ## Distribution (stage 7)
 
 `wan/distribution.py` assembles the series into the distribution `models/karume-wan2.1/` (ADR 0118
 decision 7 — one repository per family generation; not published on Hugging Face yet). `karume dist`
-does the copying, hashing and verification; the recipe only says what goes where:
+does the copying, hashing and verification; the recipe only says what goes where. The text encoder
+is a cross-repository reference to `karume-umt5-xxl` (ADR 0119 stage 10d, decision A), so build that
+repository first and pass the five `--ref-*` options:
 
 ```bash
-uv run python dist.py --pipeline wan   # from tools/export-recipes/ — default model t2v-1.3b, out models/karume-wan2.1
+uv run python dist.py --pipeline umt5
+uv run python dist.py --pipeline wan \
+    --ref-repo hdae/karume-umt5-xxl --ref-revision <main SHA of karume-umt5-xxl> \
+    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder
 ```
 
-| Manifest entry (`karume/5`) | Value                                                                                                                                                                                                                                           |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                                                                                                                     |
-| `weights`                   | `transformer` with an `f16` and an `i8` container (`model.f16.krm` / `model.i8.krm`); `vae_decoder_first` / `vae_decoder_next` with one `f16` container each — the key is the container's graph name (container-v1 §2.1)                        |
-| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`, model-level, quant-independent). `rope_base` stays a container asset of `transformer` (ADR 0109)                                                                                          |
-| `quants`                    | `f16` (default, no session knobs); `f16+dit8` (int8 transformer, no session knobs — the reference seat); `f16+dit8-a8-attn8-s16` (int8 transformer with `linearCompute` / `attentionCompute` `a8` and `attentionScoreStorage` `f16`) — ADR 0120 |
-| `pipelineConfig`            | `scheduler.shift` 3.0, `defaults.steps` 50, `defaults.guidance` 5.0 (the reference setting, decision 5)                                                                                                                                         |
+Until `karume-umt5-xxl` is published there is no commit SHA. The development mirror uses the
+placeholder `0000000000000000000000000000000000000000` and must say so with
+`--allow-placeholder-ref`; without that flag the driver refuses the placeholder before writing
+anything, so a publishing build has to pass the real SHA (`docs/release-runbook.md` §0). A local
+reader resolves the reference through `crossRepo` and does not look at the revision.
+
+| Manifest entry (`karume/5`) | Value                                                                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                                                                                                                                                                                                                                                                 |
+| `weights`                   | `text_encoder` with one `i8` container referenced from `karume-umt5-xxl` (`xxl/text_encoder/model.i8-*.krm`, every part pinned by repo, commit, size and SHA-256); `transformer` with an `f16` and an `i8` container (`model.f16.krm` / `model.i8.krm`); `vae_decoder_first` / `vae_decoder_next` with one `f16` container each — the key is the container's graph name (container-v1 §2.1) |
+| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`) and `umt5_tokenizer` (`umt5_tokenizer/tokenizer.json` — format `karume-wan-umt5-tokenizer/1`), model-level and quant-independent. `rope_base` stays a container asset of `transformer` (ADR 0109)                                                                                                                                     |
+| `quants`                    | `f16` (default, no session knobs); `f16+dit8` (int8 transformer, no session knobs — the reference seat); `f16+dit8-a8-attn8-s16` (int8 transformer with `linearCompute` / `attentionCompute` `a8` and `attentionScoreStorage` `f16`) — ADR 0120. Every seat selects the `i8` text encoder, so every seat declares the vocabulary embedding's 1,050,148,864 bytes as `requiredLimits`        |
+| `pipelineConfig`            | `scheduler.shift` 3.0, `defaults.steps` 50, `defaults.guidance` 5.0 (the reference setting, decision 5)                                                                                                                                                                                                                                                                                     |
 
 Before anything is placed, the plan checks that each container stores the format of its seat and
-no other compressed format (f16 for the f16 transformer and the VAE graphs, int8 for the int8
-transformer), names the pinned upstream revision and license in its provenance (`wan/sources.py`),
-that the two VAE graphs belong to one set (the same latent shape, and the caches of `first` appear
-in `next` with the same names, shapes and order — the rule the TypeScript loader applies), that both
-transformers declare the same `rope_base` asset byte for byte, and that the embedding asset was made
-from the pinned revision with the bfloat16 encoder and the pinned diffusers / ftfy, carries exactly
-the prompts of `wan/prompts.py` with a normalized text for each that no other row claims, and fits
-both transformers' `encoder_hidden_states [1, 512, 4096]` input. The golden files of the series
-(`io.*`, `reference.*`, `vae_*`, `pipeline_steps.*`) are never copied.
+no other compressed format (int8 for the text encoder, f16 for the f16 transformer and the VAE
+graphs, int8 for the int8 transformer), names the pinned upstream revision and license in its
+provenance (`wan/sources.py`), that the text encoder passes the same gates as in its own repository
+and that its output width is the transformers' context width, that the two VAE graphs belong to one
+set (the same latent shape, and the caches of `first` appear in `next` with the same names, shapes
+and order — the rule the TypeScript loader applies), that both transformers declare the same
+`rope_base` asset byte for byte, that the embedding asset was made from the pinned revision with the
+bfloat16 encoder and the pinned diffusers / ftfy, carries exactly the prompts of `wan/prompts.py`
+with a normalized text for each that no other row claims, and fits both transformers'
+`encoder_hidden_states [1, 512, 4096]` input, and that the tokenizer asset has the format the
+TypeScript reader knows, the pinned source and transformers / ftfy versions, and a `maxLength` that
+fits the context rows. The golden files of the series (`io.*`, `reference.*`, `vae_*`,
+`pipeline_steps.*`) are never copied, and with the reference the text encoder is not copied either
+(`karume dist` checks that the referenced parts are byte-identical to the series container).
 
 The repository root gets `LICENSE.md` (Apache 2.0, verbatim) and `NOTICE.md` (the changes: container
-format, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the precomputed text
-embeddings instead of the text encoder), and `README.md` is the model card rendered from the
-manifest by `wan/card.py`: the pinned upstream, the fixed prompts with their sources, the accepted
-inputs, how the outputs are verified, the quant table (with the `dit` abbreviation spelled out),
-the defaults, and the measured resources (the `f16` quant only — the int8 quants are marked as not
-measured yet). Re-running the command writes the same bytes.
+format, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the text encoder
+referenced from `karume-umt5-xxl`, the precomputed text embeddings kept for use without it, the
+tokenizer converted together with the prompt-cleaning tables), and `README.md` is the model card
+rendered from the manifest by `wan/card.py`: the pinned upstream, where the text encoder comes from,
+the `textEncoder` choice (`"gpu"` by default, `"precomputed"` for the fixed prompts only), the
+prompt rules, the fixed prompts with their sources, the accepted inputs, how the outputs are
+verified, the quant table (with the `dit` abbreviation spelled out), the defaults, the measured
+resources (the `f16` quant with the precomputed embeddings only — the int8 quants and the text
+encoder stage are marked as not measured yet) and the declared limits. Re-running the command writes
+the same bytes.
 
 ## Tests
 
@@ -378,8 +434,11 @@ deno task test:models:wan                 # from the repository root (packages/m
 ```
 
 `wan/tests/test_distribution.py` assembles the distribution once from minimal synthetic containers
-(layout, manifest, every gate above, the card) and, when the real series exist, builds the real plan
-without copying anything.
+(layout, manifest, every gate above, the card) — with the text encoder referenced from a synthetic
+`karume-umt5-xxl`, as published — checks the placeholder-SHA gate of the driver, and, when the real
+series exist, builds the real plan without copying anything. `wan/tests/test_umt5_distribution.py`
+does the same for the umT5 repository and, with the real series, pins its binding table (169 int8
+and 73 float32 weights).
 
 The stage-6 tests check the fixed prompts (commit-pinned sources, the pipeline example matching the
 pinned diffusers), the normalization (ftfy is required), the asset format (round trip, rejection of

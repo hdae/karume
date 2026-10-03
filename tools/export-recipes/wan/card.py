@@ -5,12 +5,14 @@
 pipeline のカードに何を書くか（第 1 段の固定プロンプト・受理する入力・数値の門・実行資源の実測）。
 
 MUST: **数値・ダウンロード量・quant 表・dtype ラベル・既定値は 1 つ残らず manifest から導出する**
-（`karume.modelcard` の同 MUST がそのまま掛かる）。ここが持ってよい定数は manifest に**存在しない
-事実**だけ — 上流の取得元と pin（`wan.sources.SOURCES` が正本）・固定プロンプトの表
-（`wan.prompts.FIXED_PROMPTS` が正本 — 組み立ての門 `wan.distribution.assert_text_embeds` が資産の
-メタとの一致を見るので、ここに描く本文と配る資産は食い違わない）・TS 側の受理集合（
-`packages/models/src/wan/pipeline.ts` の `ACCEPTED_SIZES` / `MIN_FRAMES` / `MAX_FRAMES`）・
-実行資源の実測（`_wan_resources` — ADR 0089 決定 3）。
+（`karume.modelcard` の同 MUST がそのまま掛かる — text_encoder の取得量・越境参照の先・宣言された
+device limit も manifest から引く）。ここが持ってよい定数は manifest に**存在しない事実**だけ —
+上流の取得元と pin（`wan.sources.SOURCES` が正本）・固定プロンプトの表（`wan.prompts.FIXED_PROMPTS`
+が正本 — 組み立ての門 `wan.distribution.assert_text_embeds` が資産のメタとの一致を見るので、ここに
+描く本文と配る資産は食い違わない）・TS 側の受理集合（`packages/models/src/wan/pipeline.ts` の
+`ACCEPTED_SIZES` / `MIN_FRAMES` / `MAX_FRAMES`・テキストの経路の選択 `textEncoder` — ADR 0119
+追記 B・プロンプトの受理規則 — ADR 0119 決定 1 / 2 / 4 と追記 10a）・実行資源の実測
+（`_wan_resources` — ADR 0089 決定 3）。
 
 MUST: torch を import しない（`import dist` が torch を読まない —
 `tests/test_dist_driver.py` の `TestImportingTheDriver`）。
@@ -36,6 +38,7 @@ from karume.modelcard import (
 )
 from wan.prompts import FIXED_PROMPTS
 from wan.sources import SOURCES
+from wan.umt5_distribution import UMT5_ROLE
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
 WAN_SUPPORTED_PIPELINE = "wan/1"
@@ -55,6 +58,19 @@ WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: テストが突き合わせる — 片側だけ変えると赤）。
 WAN_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((832, 480), (480, 832))
 WAN_FRAMES = (5, 81)
+
+#: テキストの経路を選ぶ構築時のオプション（TS 側 `WanPipeline.fromPretrained` の第 2 引数 —
+#: ADR 0119 追記 B。manifest に無い事実）。既定は GPU 経路（決定 7）。
+WAN_TEXT_ENCODER_OPTION = "textEncoder"
+WAN_TEXT_ENCODER_PATHS = ("gpu", "precomputed")
+
+#: GPU 経路が受けるプロンプトの token 数（末尾の `</s>` を含む — ADR 0119 決定 4。TS 側の
+#: 受理集合で、上限はトークナイザ資産の `maxLength`）。
+WAN_PROMPT_TOKENS = (2, 512)
+
+#: umT5 の部品名（manifest の weights のキー — `wan.distribution.WAN_TEXT_ENCODER_ROLE` と
+#: 同じ正本）。
+WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
 
 #: 実行資源（``_wan_resources``）を実測した quant 席。MUST: カードは数を**この席の数として**
 #: 名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない — BiRefNet の
@@ -92,7 +108,39 @@ def _wan_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
     )
 
 
+def _text_encoder(manifest: Mapping[str, Any]) -> tuple[int, tuple[str, str] | None]:
+    """既定モデルの既定 quant が取る text_encoder の容器の `(バイト数, 越境参照の先)`。
+
+    越境参照の先は `(repo, revision)`（容器単位で全 part が同じ — ADR 0109 決定 3）で、自リポに
+    置いた配布形なら `None`。カードは「どこから取るか」を manifest のこの事実から描く。
+    """
+    model = default_model(manifest)
+    weights = model["weights"].get(WAN_TEXT_ENCODER_COMPONENT)
+    if weights is None:
+        raise ValueError(
+            f"manifest の weights に '{WAN_TEXT_ENCODER_COMPONENT}' が無い — テキストの GPU 経路を"
+            " 描けない"
+        )
+    label = model["quants"][model["defaultQuant"]]["weights"][WAN_TEXT_ENCODER_COMPONENT]
+    parts = weights[label]["container"]["parts"]
+    borrowed = {(ref["repo"], ref["revision"]) for ref in parts if "repo" in ref}
+    if len(borrowed) > 1:
+        raise ValueError(f"text_encoder の越境参照の先が 1 つでない: {sorted(borrowed)}")
+    return sum(ref["size"] for ref in parts), next(iter(borrowed), None)
+
+
+def _gib(size: int) -> str:
+    """バイト数を GiB の 3 桁で綴る（このカードの資源の数と同じ書式）。"""
+    return f"{size / (1 << 30):.2f} GiB"
+
+
 def _wan_overview(manifest: Mapping[str, Any]) -> list[str]:
+    _, borrowed = _text_encoder(manifest)
+    where = (
+        "stored in this repository"
+        if borrowed is None
+        else f"referenced from [`{borrowed[0]}`](https://huggingface.co/{borrowed[0]})"
+    )
     return [
         "## What is this",
         "",
@@ -100,15 +148,19 @@ def _wan_overview(manifest: Mapping[str, Any]) -> list[str]:
         "inference runtime **Karume**'s container format (a `.krm` part sequence whose first part",
         "carries the graph and model descriptors).",
         "",
-        "- Three graphs: `transformer` (the diffusion transformer, on patchified latent tokens)",
-        "  and `vae_decoder_first` / `vae_decoder_next` (the video VAE decoder, one latent frame",
-        "  per call, with the causal cache passed in and out).",
-        "- The rest runs on the host in TypeScript: the prompt lookup, the patchify and RoPE",
-        "  tables, classifier-free guidance as two batch-1 passes, the flow-matching UniPC",
-        "  scheduler, and the tiled VAE decode. The output is `[3, frames, height, width]`",
-        "  float32 in `[-1, 1]`.",
-        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6). Browsers are not verified",
-        "  yet.",
+        f"- Four graphs: `{WAN_TEXT_ENCODER_COMPONENT}` (the umT5-XXL text encoder in int8,"
+        f" {where}),",
+        "  `transformer` (the diffusion transformer, on patchified latent tokens) and",
+        "  `vae_decoder_first` / `vae_decoder_next` (the video VAE decoder, one latent frame per",
+        "  call, with the causal cache passed in and out).",
+        "- The rest runs on the host in TypeScript: the prompt cleaning and the tokenizer (or,",
+        f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"`, the lookup of the',
+        "  precomputed embeddings), the relative-position buckets, the patchify and RoPE tables,",
+        "  classifier-free guidance as two batch-1 passes, the flow-matching UniPC scheduler, and",
+        "  the tiled VAE decode. The output is `[3, frames, height, width]` float32 in `[-1, 1]`.",
+        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6) with the precomputed",
+        "  embeddings; the path through the text encoder has not been run end to end on the GPU",
+        "  yet. Browsers are not verified yet.",
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{WAN_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -142,10 +194,28 @@ def _wan_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  the transformer graph re-expressed on patchified tokens, with the RoPE tables built on",
         "  the host from per-axis base tables and applied in a pair-swap form;",
         "  the VAE decoder re-expressed as two one-frame graphs with an explicit causal cache,",
-        "  always decoded in overlapping tiles. No retraining and no fine-tuning.",
-        "- **The text encoder (umT5-XXL) is not included.** The repository ships its outputs for",
-        "  a fixed set of prompts instead (see below), computed with the upstream encoder in",
-        "  bfloat16 and stored as float32.",
+        "  always decoded in overlapping tiles; the tokenizer converted into one table together",
+        "  with lookup tables for the upstream prompt cleaning. No retraining and no fine-tuning.",
+    ]
+    _, borrowed = _text_encoder(manifest)
+    if borrowed is None:
+        lines.append(
+            "- **The text encoder** (the umT5-XXL encoder of the same checkpoint, in int8) is"
+            " stored in this repository."
+        )
+    else:
+        repo, revision = borrowed
+        lines += [
+            "- **The text encoder is not stored here.** `karume.json` references the umT5-XXL",
+            "  encoder of the same checkpoint, converted to int8, at commit"
+            f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
+            "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
+            "  the changes made to it.",
+        ]
+    lines += [
+        "- **Precomputed embeddings**: the repository also ships the encoder's outputs for a",
+        "  fixed set of prompts (see below), computed with the upstream encoder in bfloat16 and",
+        "  stored as float32, for use without the text encoder.",
     ]
     return lines
 
@@ -173,15 +243,16 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
+                f'  // {WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[0]}", // default —'
+                f' "{WAN_TEXT_ENCODER_PATHS[1]}" skips the text encoder (see Prompts below)',
             ],
             disposable="await using",
         ),
         "",
-        "// Only the precomputed prompts are accepted (see Prompts below).",
-        'const prompt = pipeline.prompts.find((entry) => entry.name === "boxing-cats")!;',
         "const video = await pipeline.generate({",
-        "  prompt: prompt.prompt,",
+        '  prompt: "A cat walks on the grass, realistic style.",',
         "  seed: 42,",
+        '  // negativePrompt: "low quality, blurry", // default: the official negative prompt',
         f"  // frames: 33, // 4n+1, {WAN_FRAMES[0]} to {WAN_FRAMES[1]}",
         "  // width: 832, height: 480, // or 480 × 832",
         "});",
@@ -193,26 +264,47 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         "}",
         "```",
         "",
-        "`generate()` opens one stage at a time — the transformer session is disposed before the",
-        "VAE sessions are opened — so the transformer and the VAE are never resident together.",
-        "Concurrent calls are queued. Weights are fetched once and cached (verified against",
-        "`karume.json`'s `size` / `sha256`). GPU memory and time per clip are listed under",
-        "Resources below.",
+        "`generate()` opens one stage at a time — the text encoder session is disposed before the",
+        "transformer session is opened, and the transformer session before the VAE sessions — so",
+        "no two stages are resident together. Concurrent calls are queued. Weights are fetched",
+        "once and cached (verified against `karume.json`'s `size` / `sha256`). GPU memory and time",
+        "per clip are listed under Resources below.",
     ]
 
 
 def _wan_prompts() -> list[str]:
-    """第 1 段の受理集合（固定プロンプトの表 — 原文は逐語で出す）。"""
+    """プロンプトの受理集合（GPU 経路の規則と、precomputed の経路の固定プロンプトの表 — 原文は
+    逐語で出す）。"""
+    gpu, precomputed = WAN_TEXT_ENCODER_PATHS
+    low, high = WAN_PROMPT_TOKENS
     lines = [
         "## Prompts",
         "",
-        "The text encoder is not part of this distribution yet: the repository carries the",
-        "umT5-XXL outputs of the prompts below, and `generate()` accepts exactly these strings",
-        "(the original text or its normalized form — `pipeline.prompts` lists both). Any other",
-        "string is rejected with `ModelInputError` before anything runs on the GPU. When",
-        "`negativePrompt` is omitted, the `negative` row is used. The texts are shown here for",
-        "reading; pass the strings from `pipeline.prompts`, since the match is exact (`ferret`,",
-        "for one, starts and ends with a line break).",
+        f'With the text encoder (`{WAN_TEXT_ENCODER_OPTION}: "{gpu}"`, the default), `generate()`',
+        "accepts free text. The prompt goes through a port of the upstream prompt cleaning and",
+        "the umT5 tokenizer on the host, and these are rejected with `ModelInputError` before",
+        "anything runs on the GPU, where the upstream pipeline would silently truncate them,",
+        "repair them or map them to an unknown token instead:",
+        "",
+        f"- fewer than {low} or more than {high} tokens (the end token included) — an empty prompt,"
+        " or",
+        "  one too long;",
+        "- characters outside the tokenizer's vocabulary, and special tokens such as `</s>`",
+        "  written in the text;",
+        "- what the cleaning would treat as an HTML character reference (write `R & D`, not",
+        "  `R&D`) or as mojibake;",
+        "- C1 control characters and code points unassigned in Unicode 16.0.0.",
+        "",
+        "When `negativePrompt` is omitted, the official negative prompt (the `negative` row",
+        "below) is used, and it goes through the text encoder too.",
+        "",
+        f'With `{WAN_TEXT_ENCODER_OPTION}: "{precomputed}"`, the text encoder is not fetched: the'
+        " repository's",
+        "umT5-XXL outputs of the prompts below are used, and `generate()` accepts exactly these",
+        "strings (the original text or its normalized form — `pipeline.prompts` lists both). Any",
+        "other string is rejected with `ModelInputError`. The texts are shown here for reading;",
+        "pass the strings from `pipeline.prompts`, since the match is exact (`ferret`, for one,",
+        "starts and ends with a line break).",
         "",
         "| Name | Role | Source |",
         "| ---- | ---- | ------ |",
@@ -232,6 +324,7 @@ def _wan_inputs() -> list[str]:
     return [
         "## Accepted inputs",
         "",
+        "- **prompt** / **negativePrompt**: see Prompts above.",
         f"- **size**: {sizes}.",
         f"- **frames**: 4n+1 from {low} to {high}. Only 832 × 480 with 33 and {high} frames have",
         "  been checked end to end on the GPU.",
@@ -248,12 +341,12 @@ def _wan_inputs() -> list[str]:
         "  same bytes on the same GPU and driver. Release verification pins the SHA-256 of the",
         "  8-bit frames per test environment and fails on any change — the check is never relaxed",
         "  to a tolerance.",
-        "- **Against the upstream reference** (the `f16` quant): a 2-step run with injected noise",
-        "  is compared with diffusers on CPU in float32 (the same f16-rounded weights, the same",
-        "  tiled decode), and one transformer forward at each full size (33 and 81 frames) against",
-        "  a float64 reference. Differences stay within tolerances measured on separate decision",
-        "  cases; the remaining gap is float32 rounding in the GPU matrix products, not a porting",
-        "  difference.",
+        "- **Against the upstream reference** (the `f16` quant, with the precomputed",
+        "  embeddings): a 2-step run with injected noise is compared with diffusers on CPU in",
+        "  float32 (the same f16-rounded weights, the same tiled decode), and one transformer",
+        "  forward at each full size (33 and 81 frames) against a float64 reference. Differences",
+        "  stay within tolerances measured on separate decision cases; the remaining gap is",
+        "  float32 rounding in the GPU matrix products, not a porting difference.",
         "- **Tiled decode**: the VAE always decodes in overlapping tiles, so the frames differ",
         "  slightly from the upstream untiled decode.",
     ]
@@ -281,6 +374,8 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"実行資源を実測した quant '{WAN_RESOURCE_QUANT}' がモデル '{name}' の席に無い"
                 f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
             )
+    encoder_bytes, borrowed = _text_encoder(manifest)
+    source = "" if borrowed is None else f" from `{borrowed[0]}`"
     # 実測していない席は数を推し量らず、未計測と名乗る（席の並びは manifest のまま）。
     unmeasured = [
         f"`{quant}`"
@@ -308,10 +403,15 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
             if unmeasured
             else []
         ),
+        "These runs used the precomputed embeddings: the text encoder stage (the umT5-XXL encoder",
+        "run for the positive and the negative prompt) has not been measured yet.",
         "",
-        "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The two",
-        "  stages are never resident together, so the transformer stage's peak is the peak of a",
-        "  clip.",
+        f"- **Download**: the quant table's Download column includes the text encoder"
+        f" ({_gib(encoder_bytes)}{source});",
+        f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"` it is not fetched.',
+        "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The",
+        "  stages are never resident together, so a clip's peak is the largest stage peak; the",
+        "  text encoder stage's peak has not been measured yet.",
         "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
         "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
         "  feed-forward activation `[S, 8960]` in float32 alone is about 480 MiB at 33 frames",
@@ -323,6 +423,30 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
         "  been checked yet, so whether they run this model is not known.",
         "- `karume.json` does not declare these figures: its declared limits cover the resident",
         "  weights and state, not the intermediate tensors a run allocates.",
+        *_declared_limits(manifest),
+    ]
+
+
+def _declared_limits(manifest: Mapping[str, Any]) -> list[str]:
+    """manifest が quant ごとに宣言した device limit（`requiredLimits` — 無ければ行も無い）。
+
+    Wan の宣言は text_encoder の i8 の語彙埋め込み（1 バッファ）で決まる — どの席も同じ
+    text_encoder を選ぶ（weights は完全写像）ので、全席が同じ宣言を持つ。席ごとに違う manifest は
+    この 1 行では描けないので落とす（推し量って 1 つに畳まない）。
+    """
+    declared = [quant.get("requiredLimits") for quant in default_model(manifest)["quants"].values()]
+    if not any(declared):
+        return []
+    if any(limits != declared[0] for limits in declared):
+        raise ValueError(
+            f"席ごとに requiredLimits が違う（{declared}）— 全席に同じ宣言が掛かる形しか描かない"
+        )
+    spelled = " and ".join(f"`{key}` ≥ {value:,} bytes" for key, value in declared[0].items())
+    return [
+        f"- **Declared limits**: every quant declares {spelled} in `karume.json` — the largest",
+        "  resident weight is the text encoder's int8 vocabulary embedding, held as one buffer.",
+        "  The declaration belongs to the quant, so it applies whether or not the text encoder is",
+        "  used.",
     ]
 
 

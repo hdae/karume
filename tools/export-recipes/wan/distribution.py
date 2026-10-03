@@ -5,11 +5,18 @@
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
 配布するのはグラフ 3 本（DiT の S 形 `transformer`・VAE の chunk グラフ `vae_decoder_first` /
-`vae_decoder_next` — 系列 `wan2.1-t2v-1.3b-f16-dyn`）と、モデル単位の資産 `text_embeds`（第 1 段の
-テキスト埋め込み — 決定 4。quant 非依存の席・ADR 0109 決定 4）。`transformer` だけは格納ラベルごとに
-容器が 2 本ある（f16 と、系列 `wan2.1-t2v-1.3b-i8-dyn` の i8 — ADR 0120 決定 1）。RoPE の軸別素表
-`rope_base` は `transformer` の**容器の資産**（役割 `rope-base`）なので manifest の `assets` には
-載らない（ADR 0109 決定 4 — Anima と同じ席）。
+`vae_decoder_next` — 系列 `wan2.1-t2v-1.3b-f16-dyn`）と、モデル単位の資産 2 本（第 1 段の
+テキスト埋め込み `text_embeds` — 決定 4・umT5 のトークナイザと前処理の表 `umt5_tokenizer` — ADR 0119
+追記「段 10d の設計」C。どちらも quant 非依存の席・ADR 0109 決定 4）。`transformer` だけは格納ラベル
+ごとに容器が 2 本ある（f16 と、系列 `wan2.1-t2v-1.3b-i8-dyn` の i8 — ADR 0120 決定 1）。RoPE の
+軸別素表 `rope_base` は `transformer` の**容器の資産**（役割 `rope-base`）なので manifest の
+`assets` には載らない（ADR 0109 決定 4 — Anima と同じ席）。
+
+4 本目の部品 `text_encoder`（umT5-XXL encoder の i8 — 系列 `wan2.1-umt5-i8-dyn`）は計画には
+自分の artifact として載るが、公開する配布形では**別リポ `karume-umt5-xxl` への越境参照**として
+組む（ADR 0119 追記 A — dist の `--ref-*` 5 指定で、参照元は `--pipeline umt5` が組んだ配布形）。
+容器の門（出所・束縛表・入出力の契約）は umT5 の配布 recipe と同じ 1 本
+（`wan.umt5_distribution.assert_umt5_encoder`）を通す。
 
 **リポは家族 1 つ・世代は別リポ**（`karume-wan2.1` — ADR 0092 決定 1 / 2）。モデルは世代の中の
 軸で、今は `t2v-1.3b` 1 本。quant 席は 3 つ（{@link WAN_QUANTS}）: 既定の `f16`（DiT と VAE の重みを
@@ -53,9 +60,17 @@ from karume.dist import (
     graph_inputs,
     ir_graph,
 )
+from wan import umt5_tokenizer
 from wan.card import render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
 from wan.sources import DEFAULT_MODEL, SOURCES
+from wan.umt5_distribution import (
+    UMT5_DEFAULT_MODEL,
+    UMT5_OUTPUT_PATHS,
+    UMT5_ROLE,
+    assert_umt5_encoder,
+    umt5_container,
+)
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は `WAN_PIPELINE_NAME` /
 #: `WAN_PIPELINE_MAJOR`（`packages/models/src/wan/config.ts`）。
@@ -100,11 +115,19 @@ WAN_MODEL_FILE = "model.krm"
 #: グラフを持つ部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1 —
 #: ランタイムは `prepareContainer(opened, <weights キー>)` で名前で引く）。系列の部品
 #: ディレクトリ名も同じ綴りだが、それは規約であって導出ではない（書き手は `TARGET` /
-#: `TARGETS` を名乗る — `tests/test_graph_names.py` の門）。
+#: `TARGETS` / `GRAPH_NAME` を名乗る — `tests/test_graph_names.py` の門）。`text_encoder` は
+#: umT5 の配布形と同じキー（越境参照の先の容器のグラフ名 — 綴りの正本は
+#: `wan.umt5_distribution.UMT5_ROLE`）。並びは生成の段の順（text → DiT → VAE）。
+WAN_TEXT_ENCODER_ROLE = UMT5_ROLE
 WAN_TRANSFORMER_ROLE = "transformer"
 WAN_VAE_FIRST_ROLE = "vae_decoder_first"
 WAN_VAE_NEXT_ROLE = "vae_decoder_next"
-WAN_GRAPH_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_ROLE, WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE)
+WAN_GRAPH_ROLES: tuple[str, ...] = (
+    WAN_TEXT_ENCODER_ROLE,
+    WAN_TRANSFORMER_ROLE,
+    WAN_VAE_FIRST_ROLE,
+    WAN_VAE_NEXT_ROLE,
+)
 
 #: `transformer` の容器の配置の役割（格納ラベルごとに 1 本 — ADR 0120 決定 1。anima の
 #: `transformer_f16` / `transformer_i8` と同じ綴り）。配置表と格納の要求 / 禁止表の鍵で、manifest の
@@ -113,8 +136,10 @@ WAN_TRANSFORMER_F16_ROLE = "transformer_f16"
 WAN_TRANSFORMER_I8_ROLE = "transformer_i8"
 WAN_TRANSFORMER_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
 
-#: 容器を持つ配置の役割（transformer は格納ラベルごとに 2 本・VAE は f16 の 1 本ずつ）。
+#: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer は格納ラベルごとに 2 本・VAE は
+#: f16 の 1 本ずつ）。
 WAN_CONTAINER_ROLES: tuple[str, ...] = (
+    WAN_TEXT_ENCODER_ROLE,
     *WAN_TRANSFORMER_ROLES,
     WAN_VAE_FIRST_ROLE,
     WAN_VAE_NEXT_ROLE,
@@ -122,6 +147,21 @@ WAN_CONTAINER_ROLES: tuple[str, ...] = (
 
 #: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `pipeline.ts` の `TEXT_EMBEDS`）。
 WAN_TEXT_EMBEDS_ROLE = "text_embeds"
+
+#: umT5 のトークナイザと前処理の表の資産（manifest の `assets` のキー = 役割名 — TS 側の読み手は
+#: `parseWanTokenizerAsset`）。資産は quant にも経路にも依らず全数を取るので、umT5 のリポではなく
+#: このリポに置く（越境にすると、umT5 を取らない precomputed の経路まで umT5 のリポに触る —
+#: ADR 0119 追記 C）。
+WAN_TOKENIZER_ROLE = "umt5_tokenizer"
+
+#: トークナイザ資産が名乗る上流の部品（書き手 `wan.umt5_tokenizer.build_asset` の
+#: `source.subfolder`）。
+WAN_TOKENIZER_SUBFOLDER = "tokenizer"
+
+#: トークナイザ資産の版のうち、id 列と前処理の結果を決めるもの（`wan` グループの `==` ピン —
+#: {@link WAN_TEXT_EMBEDS_VERSIONS} と同じ値を引く。transformers は id 列の正本・ftfy は前処理の表の
+#: 出所 — ADR 0119 決定 1 / 2）。
+WAN_TOKENIZER_VERSIONS: tuple[str, ...] = ("ftfy", "transformers")
 
 #: `transformer` の容器が宣言する RoPE 素表の資産名と役割（書き手は `wan.export_dit` の
 #: `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE`・読み手は TS 側 `pipeline.ts` の `ROPE_BASE`）。
@@ -140,19 +180,27 @@ WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
 #: 格納ラベル（`f16` / `i8`）を入れるのは、格納の席を足した日に既存の path を動かさないため
 #: （Depth Anything の `model.f32.krm` と同じ綴り — i8 の席を足した ADR 0120 で f16 の path は
 #: 動いていない）。
+#:
+#: MUST: `text_encoder` は umT5 の配布形の同じ部品の path（`UMT5_OUTPUT_PATHS`）を引く — 越境参照は
+#: 参照元の `karume.json` が宣言する `<モデル名>/<この path>` の part を引き当てる
+#: （`karume.dist.external_refs`）ので、綴りが割れると組み立てが「参照元に無い」で落ちる。
 WAN_OUTPUT_PATHS: Mapping[str, str] = {
+    WAN_TEXT_ENCODER_ROLE: UMT5_OUTPUT_PATHS[UMT5_ROLE],
     WAN_TRANSFORMER_F16_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.f16.krm",
     WAN_TRANSFORMER_I8_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.i8.krm",
     WAN_VAE_FIRST_ROLE: f"{WAN_VAE_FIRST_ROLE}/model.f16.krm",
     WAN_VAE_NEXT_ROLE: f"{WAN_VAE_NEXT_ROLE}/model.f16.krm",
     WAN_TEXT_EMBEDS_ROLE: f"{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}",
+    WAN_TOKENIZER_ROLE: f"{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}",
 }
 
 #: 格納 dtype の要求（素の f32 資産が組み立て・ロード・実行を全て通って参照一致の門まで沈黙した
 #: 実測事故 — Anima / SBV2 / Depth Anything と同じ根拠）。f16 系列は fake-quant 対象だけが f16 に
 #: なる（bias / norm は f32 のまま）ので「f16 を含む」を、i8 系列は linear の重みだけが i8 になる
-#: （scale・bias・norm は f32）ので「i8 を含む」を要求する。
+#: （scale・bias・norm は f32）ので「i8 を含む」を要求する。umT5 の i8 系列の種類ごとの格納は
+#: 束縛表の門（`wan.umt5_distribution.assert_umt5_bindings`）が別に見る。
 WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    WAN_TEXT_ENCODER_ROLE: "i8",
     WAN_TRANSFORMER_F16_ROLE: "f16",
     WAN_TRANSFORMER_I8_ROLE: "i8",
     WAN_VAE_FIRST_ROLE: "f16",
@@ -176,8 +224,11 @@ WAN_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
 }
 
 #: weights の宣言（容器のグラフ名 → dtype ラベル → 配置の役割）。ラベルは格納 dtype 語彙で、
-#: {@link WAN_STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。
+#: {@link WAN_STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`text_encoder` は
+#: ラベルが i8 の 1 つなので、{@link complete_quant_weights} が全席へ埋める（席の weights は完全
+#: 写像 — umT5 を持たない席は表せない。経路の選択は構築時のオプション — ADR 0119 追記 B）。
 WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
+    WAN_TEXT_ENCODER_ROLE: {"i8": WeightFiles(WAN_TEXT_ENCODER_ROLE)},
     WAN_TRANSFORMER_ROLE: {
         "f16": WeightFiles(WAN_TRANSFORMER_F16_ROLE),
         "i8": WeightFiles(WAN_TRANSFORMER_I8_ROLE),
@@ -187,7 +238,10 @@ WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
 }
 
 #: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3・決定 4）。
-WAN_ASSETS: Mapping[str, str] = {WAN_TEXT_EMBEDS_ROLE: WAN_TEXT_EMBEDS_ROLE}
+WAN_ASSETS: Mapping[str, str] = {
+    WAN_TEXT_EMBEDS_ROLE: WAN_TEXT_EMBEDS_ROLE,
+    WAN_TOKENIZER_ROLE: WAN_TOKENIZER_ROLE,
+}
 
 #: 席名の部品上書きトークン → その weights 名（ADR 0074 決定 4 — **略称の定義は recipe が持ち、
 #: 生成モデルカードの quant 表に対応を必ず出す**）。Wan の基底格納は `f16`（VAE は f16 固定）で、
@@ -258,11 +312,16 @@ WAN_PIPELINE_CONFIG: Mapping[str, Any] = {
 @dataclass(frozen=True)
 class WanSources:
     """組み立ての入力 = 系列ディレクトリ 3 本（グラフ 3 本の f16 系列・DiT の i8 系列・テキスト
-    埋め込みの系列）。"""
+    埋め込みの系列）と、umT5 の容器（i8 系列）・トークナイザ資産。"""
 
     series: Path
     i8_series: Path
     text_embeds: Path
+    #: umT5 の容器の代表 path（系列 `wan2.1-umt5-i8-dyn` —
+    #: `wan.umt5_distribution.umt5_container`）。
+    text_encoder: Path
+    #: トークナイザ資産（系列 `wan2.1-umt5-tokenizer` — 書き手は `wan.umt5_tokenizer`）。
+    tokenizer: Path
 
 
 def wan_sources(series_dir: Path) -> WanSources:
@@ -271,6 +330,8 @@ def wan_sources(series_dir: Path) -> WanSources:
         series=series_dir / WAN_SERIES,
         i8_series=series_dir / WAN_I8_SERIES,
         text_embeds=series_dir / WAN_TEXT_EMBEDS_SERIES / WAN_TEXT_EMBEDS_FILE,
+        text_encoder=umt5_container(series_dir),
+        tokenizer=series_dir / umt5_tokenizer.SERIES_NAME / umt5_tokenizer.ASSET_FILE,
     )
 
 
@@ -281,11 +342,13 @@ def wan_placements(sources: WanSources) -> dict[str, Path]:
     `pipeline_steps.*` の golden はこれで落ちる）。
     """
     return {
+        WAN_TEXT_ENCODER_ROLE: sources.text_encoder,
         WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
         WAN_TRANSFORMER_I8_ROLE: sources.i8_series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
         WAN_VAE_FIRST_ROLE: sources.series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
         WAN_TEXT_EMBEDS_ROLE: sources.text_embeds,
+        WAN_TOKENIZER_ROLE: sources.tokenizer,
     }
 
 
@@ -515,6 +578,67 @@ def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None
             )
 
 
+def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
+    """トークナイザ資産が、TS の読む形式・上流の pin・依存の版・DiT の文脈の行数と噛み合うことを
+    見る。
+
+    MUST: 組み立てで落とす。資産は表なので `verify_dist` の容器検査には掛からず、読み手
+    （`parseWanTokenizerAsset`）が見るのは形式と形だけ — 別の revision のトークナイザ・別の版の
+    ftfy で焼いた前処理の表は、利用者の手元で「別の id 列」として沈黙する。
+
+    見るのは 4 つ: 形式の版（`wan.umt5_tokenizer.ASSET_FORMAT`）・出所（repo / revision /
+    subfolder）が {@link SOURCES} の pin と一致・版（{@link WAN_TOKENIZER_VERSIONS}）が `wan`
+    グループのピンと一致・`maxLength`（TS が受ける token 数の上限）が DiT の文脈の行数以下（GPU
+    経路の出力をその行数まで詰める — ADR 0119 決定 4）。
+    """
+    assert_component_present(path)
+    try:
+        asset = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as cause:
+        raise DistError(f"{path}: トークナイザ資産が JSON として読めない — {cause}") from cause
+    if not isinstance(asset, dict):
+        raise DistError(f"{path}: トークナイザ資産がオブジェクトでない")
+    if asset.get("format") != umt5_tokenizer.ASSET_FORMAT:
+        raise DistError(
+            f"{path}: 形式 {asset.get('format')!r} が {umt5_tokenizer.ASSET_FORMAT!r} でない"
+            " — TS の parseWanTokenizerAsset は知らない版を読まない"
+            "（`python -m wan.umt5_tokenizer`）"
+        )
+    source = SOURCES[model]
+    expected_source = {
+        "repo": source.repo,
+        "revision": source.revision,
+        "subfolder": WAN_TOKENIZER_SUBFOLDER,
+    }
+    if asset.get("source") != expected_source:
+        raise DistError(
+            f"{path}: トークナイザの出所 {asset.get('source')!r} が上流の pin {expected_source!r}"
+            " と違う — 別の checkpoint のトークナイザは配らない"
+        )
+    versions = asset.get("versions")
+    pinned = (
+        {name: versions.get(name) for name in WAN_TOKENIZER_VERSIONS}
+        if isinstance(versions, dict)
+        else None
+    )
+    expected_versions = {name: WAN_TEXT_EMBEDS_VERSIONS[name] for name in WAN_TOKENIZER_VERSIONS}
+    if pinned != expected_versions:
+        raise DistError(
+            f"{path}: トークナイザ資産を焼いた版 {pinned!r} が `wan` グループのピン"
+            f" {expected_versions!r} と違う — id 列と前処理の表が版で変わる"
+        )
+    max_length = asset.get("maxLength")
+    if (
+        not isinstance(max_length, int)
+        or isinstance(max_length, bool)
+        or not 0 < max_length <= rows
+    ):
+        raise DistError(
+            f"{path}: maxLength {max_length!r} が DiT の文脈の行数 1〜{rows} に収まらない"
+            " — GPU 経路の出力を文脈へ詰められない"
+        )
+
+
 def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
     """Wan2.1 の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる — 何も書かない）。"""
     assert_model_name(model)
@@ -534,11 +658,23 @@ def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
         # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。
         assert_upstream_provenance(container, license=upstream.license, revision=upstream.revision)
     assert_vae_chunk_pair(placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE])
+    # umT5 の容器は umT5 の配布形と同じ門を通す（越境参照の先はこの容器とバイト同一 —
+    # `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の名前。
+    encoder_width = assert_umt5_encoder(placements[WAN_TEXT_ENCODER_ROLE], UMT5_DEFAULT_MODEL)
     transformers = [placements[role] for role in WAN_TRANSFORMER_ROLES]
     for transformer in transformers:
         assert_rope_base(transformer)
-        # 埋め込み資産は quant 非依存の 1 本なので、どの席の DiT の文脈入力とも噛み合う必要がある。
-        assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], model, dit_context(transformer))
+        context = dit_context(transformer)
+        # 埋め込み資産・トークナイザ・text_encoder は quant 非依存の 1 本なので、どの席の DiT の
+        # 文脈入力とも噛み合う必要がある。
+        assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], model, context)
+        assert_umt5_tokenizer(placements[WAN_TOKENIZER_ROLE], model, context[0])
+        if encoder_width != context[1]:
+            raise DistError(
+                f"{placements[WAN_TEXT_ENCODER_ROLE]}: umT5 の出力の幅 {encoder_width} が"
+                f" {transformer} の文脈入力の幅 {context[1]} と違う — text 段の出力を DiT へ"
+                " 渡せない"
+            )
     assert_shared_rope_base(transformers)
     return ModelPlan(
         name=model,
@@ -592,9 +728,17 @@ following changes were made:
   frame, and every later frame), with the causal convolution cache passed in and out of the graph
   instead of kept in a Python list. The host always decodes in overlapping tiles, so the output
   differs slightly from the upstream untiled decode.
-- **The text encoder is not distributed.** Instead, the umT5-XXL outputs of a fixed set of prompts
-  (computed with the upstream encoder in bfloat16 and stored as float32) are included as a
-  precomputed asset.
+- **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
+  encoder of the same checkpoint, converted to int8, from the separate repository
+  `karume-umt5-xxl` at a pinned commit (with the size and the SHA-256 of every part); the changes
+  made to it are listed in that repository's own `NOTICE.md`.
+- The umT5-XXL outputs of a fixed set of prompts (computed with the upstream encoder in bfloat16
+  and stored as float32) are included as a precomputed asset, for use without the text encoder.
+- The tokenizer of the checkpoint was converted into one JSON table (vocabulary, scores, added
+  tokens and the whitespace set), together with lookup tables for the upstream prompt cleaning
+  (evaluated from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database,
+  including a translation of ftfy's mojibake-detection pattern) that the host uses to reproduce
+  the cleaning or to reject a prompt.
 
 No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
 """

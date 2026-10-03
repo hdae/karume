@@ -15,9 +15,12 @@ questions it has to answer.
 ## Upstream sources
 
 - **Weights** — [Wan-AI/Wan2.1-T2V-1.3B-Diffusers](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers),
-  pinned in `sources.py` (`SOURCES`). Only `transformer`, `vae` and `scheduler` are converted and
-  redistributed; the umT5-XXL `text_encoder` is run locally to produce the precomputed text
-  embeddings (`text_embeds.py`) and is not redistributed.
+  pinned in `sources.py` (`SOURCES`). `transformer` and `vae` (with the `scheduler` config) are
+  converted and redistributed in `karume-wan2.1`. The umT5-XXL `text_encoder` is converted to int8
+  (`umt5_export.py`) and redistributed in the separate repository `karume-umt5-xxl`
+  (`umt5_distribution.py`), which `karume-wan2.1` references; it is also run locally to produce the
+  precomputed text embeddings (`text_embeds.py`). The `tokenizer` is converted into one JSON table
+  (`umt5_tokenizer.py`) and redistributed in `karume-wan2.1`.
 - **Model implementation** — the `diffusers` package (`WanTransformer3DModel`, `AutoencoderKLWan`,
   `WanPipeline`, `UniPCMultistepScheduler`), pinned `diffusers==0.39.0`. `dit_patch.py`,
   `vae_patch.py`, `vae_tiling.py` and `few_step_ref.py` carry functions adapted from it, each under
@@ -25,8 +28,10 @@ questions it has to answer.
   line.
 - **Text encoder and tokenizer** — `UMT5EncoderModel` / `AutoTokenizer` from `transformers`
   (pinned `transformers==5.14.1`), imported only.
-- **Prompt normalization** — `ftfy` (pinned `ftfy==6.3.1`), imported only, through diffusers'
-  `prompt_clean`.
+- **Prompt normalization** — `ftfy` (pinned `ftfy==6.3.1`), imported through diffusers'
+  `prompt_clean`. `prompt_clean.py` evaluates ftfy's character tables and translates its
+  `BADNESS_RE` pattern into JavaScript; the results are part of the tokenizer asset that
+  `karume-wan2.1` ships.
 - **Fixed prompts** — `prompts.py` quotes four prompt texts verbatim from the official Wan2.1
   repository (the t2v-1.3B example in `README.md` and `sample_neg_prompt` in
   `wan/configs/shared_config.py`) and from the Diffusers documentation and source (the Wan
@@ -41,14 +46,25 @@ published.
 
 ### Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 
-| Item                     | Value                                                                                                                                                                                                                                                                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers>                                                                                                                                                                                                                                   |
-| Revision used            | `0fad780a534b6463e45facd96134c9f345acfa5b` (`sources.py`; the containers' `provenance.upstreamRevision` carries the same value and `distribution.py` checks it)                                                                                                                             |
-| Form of copy             | Loaded, not copied. Re-distributed in converted storage form (f16-rounded weights; the transformer additionally as per-output-channel int8 weights — ADR 0120). The text encoder is not re-distributed; its outputs for the fixed prompts are.                                              |
-| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                          |
-| Weights license          | `apache-2.0` — `sources.py` records it from the model card front matter (HF API, 2026-10-02), and `export_vae.py` reads it from the downloaded snapshot's `README.md`. Unverified by a human review against the revision used.                                                              |
-| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — container re-expression, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the precomputed text embeddings). |
+| Item                     | Value                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Upstream repository      | <https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers>                                                                                                                                                                                                                                                                                                                |
+| Revision used            | `0fad780a534b6463e45facd96134c9f345acfa5b` (`sources.py`; the containers' `provenance.upstreamRevision` carries the same value and `distribution.py` checks it)                                                                                                                                                                                                          |
+| Form of copy             | Loaded, not copied. Re-distributed in converted storage form (f16-rounded weights; the transformer additionally as per-output-channel int8 weights — ADR 0120). The text encoder is re-distributed as int8 in `karume-umt5-xxl` (see the next block); its outputs for the fixed prompts are re-distributed too, and so is the tokenizer, converted into one JSON table.  |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                                                                       |
+| Weights license          | `apache-2.0` — `sources.py` records it from the model card front matter (HF API, 2026-10-02), and `export_vae.py` reads it from the downloaded snapshot's `README.md`. Unverified by a human review against the revision used.                                                                                                                                           |
+| Attribution requirements | Apache 2.0 §4: the distribution bundles `LICENSE.md` (verbatim `../_shared/licenses/apache_license_2_0.txt`) and `NOTICE.md` (§4(b) statement of changes — container re-expression, f16 rounding, the int8 transformer, the transformer and VAE rewrites, the text encoder referenced from `karume-umt5-xxl`, the precomputed text embeddings, the converted tokenizer). |
+
+### umT5-XXL text encoder (the `text_encoder` folder of the same checkpoint) — `karume-umt5-xxl`
+
+| Item                     | Value                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers>, folder `text_encoder` (float32, 5 shards). Its `config.json` names `google/umt5-xxl`; whether the weights are identical to the encoder of <https://huggingface.co/google/umt5-xxl> is not checked.                                                                    |
+| Revision used            | `0fad780a534b6463e45facd96134c9f345acfa5b` (the same pin as above — the container's `provenance.upstreamRevision`, checked by `umt5_distribution.py`)                                                                                                                                                                            |
+| Form of copy             | Re-distributed in converted storage form in its own repository: linear and vocabulary-embedding weights as per-output-channel (per-row) int8, RMSNorm weights and relative-position tables at the source float32 values. `karume-wan2.1` references it by repository, commit, size and SHA-256 instead of storing a second copy. |
+| Code license             | n/a (weights only)                                                                                                                                                                                                                                                                                                               |
+| Weights license          | `apache-2.0` — the license of the Wan-AI repository above (the umT5 tokenizer of `google/umt5-xxl` is also `apache-2.0` in its card data — ADR 0119). Unverified by a human review against the revision used.                                                                                                                    |
+| Attribution requirements | Apache 2.0 §4: `karume-umt5-xxl` bundles `LICENSE.md` (verbatim) and `NOTICE.md` (§4(b) — container re-expression, int8 weights, `gelu_new` replaced by the equivalent `GELU(approximate="tanh")`, the valid-token graph with the bucket indices as an input).                                                                   |
 
 ### diffusers (model implementation)
 
@@ -63,14 +79,14 @@ published.
 
 ### transformers / ftfy (imported only)
 
-| Item                     | Value                                                                                                                                                     |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upstream repository      | <https://github.com/huggingface/transformers> / <https://github.com/rspeer/python-ftfy>                                                                   |
-| Revision used            | `transformers==5.14.1` / `ftfy==6.3.1` (pinned in `pyproject.toml`, group `wan`)                                                                          |
-| Form of copy             | Import-time dependencies; nothing is copied.                                                                                                              |
-| Code license             | Apache-2.0 for both — the installed wheels' metadata (checked 2026-10-03). Unverified against the repositories' `LICENSE` files.                          |
-| Weights license          | n/a                                                                                                                                                       |
-| Attribution requirements | None for this directory (no copy). Nothing from either package enters the published distribution; the normalized prompt strings are data, not their code. |
+| Item                     | Value                                                                                                                                                                                                                                                                             |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Upstream repository      | <https://github.com/huggingface/transformers> / <https://github.com/rspeer/python-ftfy>                                                                                                                                                                                           |
+| Revision used            | `transformers==5.14.1` / `ftfy==6.3.1` (pinned in `pyproject.toml`, group `wan`)                                                                                                                                                                                                  |
+| Form of copy             | Import-time dependencies. No code is copied; the tokenizer asset carries ftfy-derived data — character tables evaluated from ftfy 6.3.1 and a JavaScript translation of its `BADNESS_RE` pattern (`prompt_clean.py`).                                                             |
+| Code license             | Apache-2.0 for both — the installed wheels' metadata (checked 2026-10-03). Unverified against the repositories' `LICENSE` files.                                                                                                                                                  |
+| Weights license          | n/a                                                                                                                                                                                                                                                                               |
+| Attribution requirements | None for this directory (no code copy). The ftfy-derived tables and pattern in the tokenizer asset of `karume-wan2.1` are listed in its `NOTICE.md`; whether they also need ftfy's own notice is part of the release review. Nothing from `transformers` enters the distribution. |
 
 ### Fixed prompt texts
 

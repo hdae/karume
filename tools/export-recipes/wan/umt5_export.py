@@ -2,6 +2,8 @@
 決定 5 / 6。段 10c で育てる）。
 
     uv run --group wan --inexact python -m wan.umt5_export prepare       # 材料まで（書かない）
+    uv run --group wan --inexact python -m wan.umt5_export write --check # 書いて系列と照合
+    uv run --group wan --inexact python -m wan.umt5_export write         # 系列の容器を書き直す
     uv run --group wan --inexact python -m wan.umt5_export check-mask --dtype bf16 --out <席>
     uv run --group wan --inexact python -m wan.umt5_export check-mask --dtype f32 --out <席>
     uv run --group wan --inexact python -m wan.umt5_export compare-mask --out <席>
@@ -33,15 +35,17 @@ research `2026-10-03-umt5-export-ram`。`reference`（段 10c）は書いた容�
 容器のバイトは素直な形（f32 で `fake_quant_i8` → `weight_dtype="i8"` + 表の F32 明示）と一致する
 （pytest が小模型で、容器の全 part のバイト一致で縛る）。exporter core の変更は要らない。
 
-## 容器を書く口がここに無い理由
+## 容器を書く口
 
-容器は `publish_model(..., graph_name=<部品名>)` で書くが、recipe の台本が `graph_name=` を名乗ると
-全 family 横断の門（`tests/test_graph_names.py`）が配布形の部品名（`wan.distribution.WAN_WEIGHTS`
-のキー）との一致を求める。umT5 の部品名と配布の構成は段 10d（ADR 0119 裁定 1）なので、名乗る
-綴りがまだ無い。段 10b の容器は recipe の外の driver が {@link prepare} の戻りを
-`publish_model(..., fixed_weights=..., graph_name="text_encoder")` へ渡して書いた（置き場は
-{@link SERIES} / {@link COMPONENT_DIR} — 部品名は下見と同じ仮置き）。部品名が決まった段で、書く
-関数をここへ足し、門の表（`ENTRIES`）と `WAN_WEIGHTS` に行を足す。
+容器は {@link write_container} が `publish_model(..., graph_name=GRAPH_NAME)` で書く。部品名
+{@link GRAPH_NAME} は umT5 の配布形（`wan.umt5_distribution.UMT5_WEIGHTS`）と Wan の配布形
+（`wan.distribution.WAN_WEIGHTS` — 越境参照）の weights のキーで、全 family 横断の門
+（`tests/test_graph_names.py`）が両方との一致を見る（ADR 0119 追記「段 10d の設計」D）。
+
+今の系列の容器（段 10b）は recipe の外の driver が同じ引数で書いた。`write --check` は
+{@link write_container} の書いた容器を作業席に置き、系列の容器と全 part の sha256 で突き合わせる
+（{@link assert_same_container} — 系列は置き換えない）。golden（`reference.*`）のメタは part 0 の
+sha256 を持つので、`write` で容器を書き直したら `reference` で golden も書き直す。
 
 MUST: transformers は関数の中で import する（`wan` グループは既定の sync に入らない —
 `tests/test_optional_group_imports.py`）。
@@ -50,9 +54,11 @@ MUST: transformers は関数の中で import する（`wan` グループは既�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import resource
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -68,22 +74,28 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 from _shared.paths import SERIES_ROOT
-from karume.container import Provenance
+from karume.artifacts import staged_publication
+from karume.container import Provenance, container_parts
 from karume.dist import NOTICE_FILENAME
 from karume.emit import FixedQuantizedWeight
 from karume.ir import IrGraph
-from karume.pipeline import export_module
+from karume.pipeline import export_module, publish_model
 from karume.quantize import QUANT_MODULE_TYPES, channel_scale, iter_quant_targets, quantize_to_int8
 from wan import umt5_patch, umt5_reference
 from wan.sources import DEFAULT_MODEL, SOURCES, text_snapshot
+from wan.umt5_distribution import storage_kind
 
 #: i8 の系列（綴りは配布の規約 `<名>-<格納>-dyn` — DiT の `wan2.1-t2v-1.3b-i8-dyn` に倣う）。
 SERIES_NAME = "wan2.1-umt5-i8-dyn"
 SERIES = SERIES_ROOT / SERIES_NAME
 
-#: 系列の中の置き場（下見と同じ仮置き — 配布形の部品名は段 10d の裁定）。
+#: 系列の中の置き場（綴りは部品名 {@link GRAPH_NAME} と同じ — 規約であって導出ではない）。
 COMPONENT_DIR = "text_encoder"
 MODEL_FILE = "model.krm"
+
+#: 容器のグラフ名 = 配布形の部品名 = weights のキー（container-v1 §2.1 — 配布側の綴りは
+#: `wan.umt5_distribution.UMT5_ROLE`。一致は `tests/test_graph_names.py` の門）。
+GRAPH_NAME = "text_encoder"
 
 #: 上流の部品のディレクトリ（snapshot の下）。
 UPSTREAM_SUBFOLDER = "text_encoder"
@@ -505,17 +517,80 @@ def provenance(model: str = DEFAULT_MODEL) -> Provenance:
     )
 
 
-def storage_kind(key: str) -> str:
-    """テンソルキーの種類（相対位置の表・語彙埋め込み・norm・linear・定数）— 検収の表の行。"""
-    if key.endswith(f".{umt5_patch.RELATIVE_BIAS_ATTRIBUTE}.weight"):
-        return umt5_patch.RELATIVE_BIAS_ATTRIBUTE
-    if key == "encoder.embed_tokens.weight":
-        return "embed_tokens"
-    if key.endswith("layer_norm.weight"):
-        return "norm"
-    if key.endswith(".weight"):
-        return "linear"
-    return "constant"
+def write_container(export: Umt5Export, path: Path, model: str = DEFAULT_MODEL) -> IrGraph:
+    """材料（{@link prepare} の戻り）を容器に書く（`path` は代表 path — 分割形の part 列になる）。
+
+    格納は材料のまま（量子化の対象は `fixed` の packed + scale・残りは checkpoint の f32）で、
+    グラフ名は部品名 {@link GRAPH_NAME}。戻りは格納宣言を commit したグラフ（検収の表の入力 —
+    {@link storage_by_kind}）。
+    """
+    return publish_model(
+        path,
+        export.graph,
+        dict(export.tensors),
+        provenance=provenance(model),
+        graph_name=GRAPH_NAME,
+        fixed_weights=export.fixed,
+    )
+
+
+def part_digests(path: Path) -> list[str]:
+    """容器（代表 path）の part 列の sha256（part 0 から添字順）。"""
+    digests = []
+    for part in container_parts(path):
+        with part.open("rb") as stream:
+            digests.append(hashlib.file_digest(stream, "sha256").hexdigest())
+    return digests
+
+
+def assert_same_container(written: Path, existing: Path) -> None:
+    """書いた容器が既存の容器と part 列ごとバイト同一であることを sha256 で見る。
+
+    MUST: 違えば fail loudly（どの part が違うかを名指しする）。系列の容器は golden（part 0 の
+    sha256 をメタに持つ）と配布形の両方の根なので、書き手が黙って別のバイト列を作る形を
+    「同じ容器のつもり」で据えない。
+    """
+    actual = part_digests(written)
+    expected = part_digests(existing)
+    if len(actual) != len(expected):
+        raise Umt5ExportError(
+            f"part の本数が違う（書いた {len(actual)} 本 / 既存 {len(expected)} 本 — {existing}）"
+        )
+    differing = [index for index, (a, b) in enumerate(zip(actual, expected, strict=True)) if a != b]
+    if differing:
+        raise Umt5ExportError(
+            f"part {differing} の sha256 が既存の容器と違う（{existing}）— 書き手か材料が"
+            " 段 10b の容器と別のバイト列を作っている"
+        )
+
+
+def write_series(model: str = DEFAULT_MODEL, *, check: bool) -> dict[str, Any]:
+    """系列の容器を書く（`check` なら作業席に書いて既存と照合するだけで、系列は置き換えない）。
+
+    書き直す回は系列の部品ディレクトリを丸ごと差し替える（`staged_publication` — golden の
+    `reference.*` も消えるので、続けて `reference` で書き直す）。
+    """
+    target = SERIES / COMPONENT_DIR
+    with MemoryMonitor() as monitor:
+        export = prepare(upstream_dir(model), monitor=monitor)
+        with monitor.stage("write"):
+            if check:
+                with tempfile.TemporaryDirectory(dir=SERIES, prefix=".check-") as scratch:
+                    written = Path(scratch) / MODEL_FILE
+                    graph = write_container(export, written, model)
+                    assert_same_container(written, target / MODEL_FILE)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with staged_publication(target) as staged:
+                    staged.mkdir()
+                    graph = write_container(export, staged / MODEL_FILE, model)
+    return {
+        "check": check,
+        "container": str(target / MODEL_FILE),
+        "parts": len(container_parts(target / MODEL_FILE)),
+        "storage_by_kind": storage_by_kind(graph),
+        "stages": [record.to_dict() for record in monitor.records],
+    }
 
 
 def storage_by_kind(graph: IrGraph) -> dict[str, dict[str, int]]:
@@ -685,14 +760,25 @@ def reference_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("command", choices=("prepare", "check-mask", "compare-mask", "reference"))
+    parser.add_argument(
+        "command", choices=("prepare", "write", "check-mask", "compare-mask", "reference")
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="write: 作業席に書いて系列の容器と sha256 で照合する（系列は置き換えない）",
+    )
     parser.add_argument("--dtype", default="bf16", choices=sorted(MASK_DTYPES), help="check-mask")
     parser.add_argument("--out", type=Path, help="check-mask が書く / compare-mask が読む席")
     args = parser.parse_args(argv)
+    if args.check and args.command != "write":
+        parser.error("--check は write にだけ掛かる")
     started = time.perf_counter()
     if args.command == "prepare":
         summary: Any = prepare_summary(args.model)
+    elif args.command == "write":
+        summary = write_series(args.model, check=args.check)
     elif args.command == "check-mask":
         summary = check_mask(args.model, args.dtype, args.out)
     elif args.command == "reference":

@@ -9,6 +9,8 @@
   行の途中に来ない・tied な語彙埋め込みを `shared.weight` から読む・表を丸めない、の全部をここで縛る
 - 格納の内訳: linear と語彙埋め込みは i8、相対位置の表と RMSNorm は f32
 - checkpoint のキーが決まらない・F32 でない、は fail loudly
+- 正式な書き口（{@link wan.umt5_export.write_container}）が上の素直な形と同じバイトを書き、既存の
+  容器との照合（{@link wan.umt5_export.assert_same_container}）が 1 バイトの違いも part で名指しする
 
 乱数初期化の小さな umT5（`wan.umt5_probe.TINY_CONFIG`）を `save_pretrained` した checkpoint で回す —
 実重みは読まない。
@@ -36,9 +38,6 @@ LINEARS_PER_LAYER = 7
 #: 塊の行数（語彙 384・d_ff 160・d_model 64 のどれも割り切らない — 半端な塊を必ず踏む）。
 CHUNK_ROWS = 7
 
-#: 書き出す部品名（pytest の作業席だけで名乗る — `wan/umt5_export.py` のモジュール doc）。
-GRAPH_NAME = "text_encoder"
-
 
 @pytest.fixture(scope="module")
 def model() -> Any:
@@ -60,15 +59,20 @@ def prepared(checkpoint_dir: Path) -> ue.Umt5Export:
 
 
 def write(path: Path, graph: Any, tensors: Any, **storage: Any) -> list[bytes]:
-    """容器を書いて全 part のバイトを返す（出所は両側で同じ — 差はバイトの中身だけに出る）。"""
+    """容器を書いて全 part のバイトを返す（出所とグラフ名は正式な書き口と同じ — 差はバイトの
+    中身だけに出る）。"""
     publish_model(
         path / ue.MODEL_FILE,
         graph,
         dict(tensors),
         provenance=ue.provenance(),
-        graph_name=GRAPH_NAME,
+        graph_name=ue.GRAPH_NAME,
         **storage,
     )
+    return read_parts(path)
+
+
+def read_parts(path: Path) -> list[bytes]:
     return [part.read_bytes() for part in sorted(path.glob("*.krm"))]
 
 
@@ -130,7 +134,8 @@ class TestStorage:
     def test_the_container_matches_the_whole_tensor_path_byte_for_byte(
         self, prepared, model, tmp_path
     ):
-        """素直な形（f32 で丸め → i8 + 表の F32 明示）と、全 part のバイトが一致する。"""
+        """正式な書き口（行の塊ごとの i8）が、素直な形（f32 で丸め → i8 + 表の F32 明示）と
+        全 part のバイトで一致する。"""
         whole = probe.export_probe(model)
 
         expected = write(
@@ -141,9 +146,9 @@ class TestStorage:
             weight_scales=whole.scales,
             weight_dtype_overrides=whole.overrides,
         )
-        actual = write(
-            tmp_path / "rows", prepared.graph, prepared.tensors, fixed_weights=prepared.fixed
-        )
+        (tmp_path / "rows").mkdir()
+        ue.write_container(prepared, tmp_path / "rows" / ue.MODEL_FILE)
+        actual = read_parts(tmp_path / "rows")
 
         assert len(actual) == len(expected) > 0
         assert actual == expected
@@ -160,6 +165,46 @@ class TestStorage:
 
         assert torch.equal(restored, weight)
         assert not torch.equal(shifted, weight)
+
+
+class TestTheSeriesCheck:
+    """`write --check` の照合（書いた容器と既存の容器を part 列の sha256 で突き合わせる）。"""
+
+    @pytest.fixture
+    def pair(self, prepared, tmp_path) -> tuple[Path, Path]:
+        written, existing = tmp_path / "written", tmp_path / "existing"
+        for place in (written, existing):
+            place.mkdir()
+            ue.write_container(prepared, place / ue.MODEL_FILE)
+        return written / ue.MODEL_FILE, existing / ue.MODEL_FILE
+
+    def test_the_same_material_writes_the_same_container(self, pair):
+        written, existing = pair
+
+        ue.assert_same_container(written, existing)
+        assert len(ue.part_digests(written)) > 1
+
+    def test_one_flipped_byte_is_named_by_its_part(self, pair):
+        """故障注入: 既存の最後の part の 1 バイトを反転すると、その添字で落ちる。"""
+        written, existing = pair
+        parts = sorted(existing.parent.glob("*.krm"))
+        last = bytearray(parts[-1].read_bytes())
+        last[-1] ^= 0xFF
+        parts[-1].write_bytes(bytes(last))
+
+        with pytest.raises(ue.Umt5ExportError, match=rf"part \[{len(parts) - 1}\]"):
+            ue.assert_same_container(written, existing)
+
+    def test_another_part_count_is_refused(self, pair, tmp_path):
+        """part の本数が違えば、中身を比べる前に落ちる（別の分割で書いた容器）。"""
+        written, _ = pair
+        single = tmp_path / "single"
+        single.mkdir()
+        (single / "model-00001-of-00002.krm").write_bytes(b"0")
+        (single / "model-00002-of-00002.krm").write_bytes(b"1")
+
+        with pytest.raises(ue.Umt5ExportError, match="part の本数"):
+            ue.assert_same_container(written, single / ue.MODEL_FILE)
 
 
 class TestQuantizeRows:

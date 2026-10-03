@@ -35,6 +35,7 @@ from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
 from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
 from wan.distribution import PIPELINE as WAN_PIPELINE
+from wan.umt5_distribution import PIPELINE as UMT5_PIPELINE
 
 #: 配布 recipe を持つ family の全量（名前 → その family が公開する `PIPELINE`）。
 #: **ここが受理集合の期待値**で、`dist.PIPELINES` の載せ忘れも余剰も 1 つの表で検出する。
@@ -52,6 +53,7 @@ RECIPE_PIPELINES = {
     "gemma4": GEMMA4_PIPELINE,
     "gemma4-qat": GEMMA4_QAT_PIPELINE,
     "wan": WAN_PIPELINE,
+    "umt5": UMT5_PIPELINE,
 }
 
 
@@ -145,6 +147,7 @@ class TestRegistry:
             "lucida",
             "depth-anything",
             "wan",
+            "umt5",
         }
         carried = {
             name

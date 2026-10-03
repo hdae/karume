@@ -62,7 +62,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
 
 `karume dist` assembles a distribution directory but holds no family knowledge — the pipeline
 registry is injected, and the registry inside the wheel is empty. `dist.py` in this directory is
-that injection: it composes 13 pipeline seats across 10 families with the core engine and passes
+that injection: it composes 14 pipeline seats across 10 families with the core engine and passes
 the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`models/`).
 
 ```sh
@@ -70,13 +70,16 @@ cd tools/export-recipes
 uv run python dist.py                                   # default = anima
 uv run python dist.py --pipeline irodori
 uv run python dist.py --pipeline sbv2-fn                # FN voices (not published)
-uv run python dist.py --pipeline wan                    # Wan2.1 T2V 1.3B (not published yet)
+uv run python dist.py --pipeline umt5                   # umT5-XXL encoder referenced by Wan2.1 (not published yet)
+uv run python dist.py --pipeline wan \
+    --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA> --ref-dist ../../models/karume-umt5-xxl \
+    --ref-model xxl --ref-role text_encoder             # Wan2.1 T2V 1.3B (not published yet)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `siglip2` / `birefnet` /
-`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `wan`. What the flags mean — `--model` for
+`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `wan` / `umt5`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md).

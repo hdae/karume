@@ -80,6 +80,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
     ("wan/export_vae.py", "emit_targets", "target", "TARGETS"),
+    ("wan/umt5_export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
 )
 
 #: `minicpm5/export_decode.py` のように、値の定数が**別モジュール**に在る台本の引き先。
@@ -254,6 +255,18 @@ class TestTheNamesAreTheWeightsKeys:
 
         assert self._named("deberta") == {SBV2_TEXT_ENCODER_COMPONENT}
         assert SBV2_TEXT_ENCODER_COMPONENT in SBV2_WEIGHTS
+
+    def test_umt5_names_the_seat_both_repositories_declare(self) -> None:
+        """umT5 の容器は 2 つの配布形の同じ席に据わる — umT5 のリポ（自前）と Wan のリポ（越境
+        参照 — ADR 0119 追記 A / D）。`wan` 家族の突合（上の parametrize）は Wan の weights だけを
+        見るので、umT5 のリポの weights とも名指しで突き合わせる。"""
+        from wan.distribution import WAN_WEIGHTS
+        from wan.umt5_distribution import UMT5_WEIGHTS
+
+        named = _declared_values("wan/umt5_export.py", "GRAPH_NAME")
+
+        assert named == set(UMT5_WEIGHTS)
+        assert named <= set(WAN_WEIGHTS)
 
     def test_gemma4_qat_names_the_seat_its_own_plan_declares(self) -> None:
         """QAT は別 family の配布計画を持つが、部品名は通常 Gemma と同じ 1 語を共有する。"""
