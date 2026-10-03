@@ -353,16 +353,22 @@ Deno.test({
         message: "未知キー 'type'",
       },
       {
-        label: "quant が実行ノブを宣言",
+        // 受理表（WAN_SESSION_POLICY）が受けるのは linear / attention の実行形 3 欄だけ
+        // （ADR 0120 決定 7）。manifest 語彙としては正しいが Wan が受けないノブ（states 形 attention の
+        // 縮約 — decoder の decode 向け）の宣言は、重みを取る前に名指しで落ちる。
+        label: "quant が受理表に無い実行ノブを宣言",
         patch: (model) => {
           const quants = model.quants;
           assert(isRecord(quants) && isRecord(quants.f16), "配布形に f16 の quant が無い");
           return {
             ...model,
-            quants: { ...quants, f16: { ...quants.f16, session: { linearCompute: "a8" } } },
+            quants: {
+              ...quants,
+              f16: { ...quants.f16, session: { stateAttentionReduce: "parallel" } },
+            },
           };
         },
-        message: "session.linearComputeは未対応",
+        message: "session.stateAttentionReduceは未対応",
       },
       {
         // VAE の段は 1 タイル = 1 batch で、runtime は計測の device で batch を開かない。DiT の段を

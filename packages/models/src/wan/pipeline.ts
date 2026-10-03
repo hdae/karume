@@ -696,16 +696,21 @@ const firstNonFinite = (values: Float32Array): number =>
 /**
  * この家族が manifest の `session` と明示指定で受けるキー（受理表 — `session/options.ts`）。
  *
- * どのキーも受けない: 配布形の quant 席は `f16` だけで実行ノブを宣言しない（ADR 0118 決定 7）。
- * 宣言したノブは重みを取る前に fail loudly（黙って既定で走らせない）。
+ * linear / 融合 attention の実行形 3 欄を受ける: 配布形の実用席 `f16+dit8-a8-attn8-s16` がこの 3 つを
+ * 宣言する（ADR 0120 決定 1 / 7 — anima の同名の席と同じ宣言）。並列 GEMV と融合の 4 欄は受けない —
+ * Wan の DiT のグラフでは効く席も数値も確かめていない組合せだから。受けないキーの宣言は重みを取る
+ * 前に fail loudly（黙って既定で走らせない）。
+ *
+ * 席の選択は既存の `quant` だけで、利用者の明示指定の口は公開面に足さない（ADR 0120 決定 7 —
+ * `resolveSessionOptions` の第 3 引数は空のまま。受理表は同じ 1 本なので、要求が出たら後から足せる）。
  *
  * NOTE: `export` は全家族の受理表の網羅を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
 export const WAN_SESSION_POLICY: FamilySessionPolicy = {
-  linearCompute: false,
-  attentionCompute: false,
-  attentionScoreStorage: false,
+  linearCompute: true,
+  attentionCompute: true,
+  attentionScoreStorage: true,
   linearGemvReduce: false,
   stateAttentionReduce: false,
   fuseRmsNormAdd: false,

@@ -210,6 +210,8 @@ type FamilyAxes = {
   readonly irodori: { readonly dit: "step"; readonly "dit-context": "run" };
   readonly anima: { readonly transformer: "step" };
   readonly sbv2: { readonly front: "run"; readonly voice: "run" };
+  /** 相 `pass` は DiT の 1 forward（CFG の 1 ステップは条件つき / 条件なしの 2 パス）。 */
+  readonly wan: { readonly transformer: "pass" };
 };
 
 /** gemma の部品（製品グラフ = target・投機の drafter）と相（`GenerationRunPhase["kind"]`）。 */
@@ -319,6 +321,11 @@ const ANIMA_MODELS = [
   "anima-copycat-20260610",
 ] as const;
 const SBV2_MODELS = ["F1", "F2", "M1", "M2"] as const;
+/**
+ * Wan2.1 T2V 1.3B の DiT: linear 307 本（k ∈ {64, 256, 1536, 4096, 8960} — 全て i8 × k % 4 == 0。
+ * M = 1 の時刻 MLP と `time_proj` も含む — ADR 0120 決定 2・調査 §2.2）。
+ */
+const WAN_DIT_LINEARS = { variant: 307, reference: 0 } as const;
 
 /**
  * 束の census 表。
@@ -636,6 +643,15 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       front: { run: { linearCompute: { variant: 2, reference: 0 } } },
       voice: { run: { linearCompute: { variant: 4, reference: 0 } } },
     },
+  },
+  // --- wan（quant の session は DiT = transformer にだけ渡る）-----------------
+  {
+    // 配布ミラーの実用席 `f16+dit8-a8-attn8-s16`（ADR 0120 決定 4）。
+    // attentionCompute / attentionScoreStorage は未導出（ファイル冒頭）。
+    family: "wan",
+    models: ["t2v-1.3b"],
+    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
+    census: { transformer: { pass: { linearCompute: WAN_DIT_LINEARS } } },
   },
 ];
 
