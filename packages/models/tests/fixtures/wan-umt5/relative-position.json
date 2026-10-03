@@ -1,0 +1,35 @@
+{
+  "_doc": [
+    "Wan2.1 の umT5 の相対位置のバケット表（packages/models/src/wan/umt5/relative-position.ts）の突き合わせ用 fixture。",
+    "生成: tools/export-recipes/wan/umt5_host_fixture.py（期待値は上流の UMT5Attention._relative_position_bucket の出力 — 同ファイルの doc）。",
+    "表の向きは上流の compute_bias と同じ table[i][j] = bucket(j − i)（キーの位置 − クエリの位置）。",
+    "digest は有効長ごとの表（i32 LE・行優先）の SHA-256 を昇順に連ねたものの SHA-256。"
+  ],
+  "source": {
+    "repo": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "revision": "0fad780a534b6463e45facd96134c9f345acfa5b",
+    "config": "text_encoder/config.json",
+    "transformers": "5.14.1"
+  },
+  "num_buckets": 32,
+  "max_distance": 128,
+  "bidirectional": true,
+  "min_length": 2,
+  "max_length": 512,
+  "input_names": [
+    "input_ids",
+    "relative_position_buckets"
+  ],
+  "distance_offset": -511,
+  "representative_lengths": [
+    2,
+    8,
+    9,
+    17,
+    28,
+    50,
+    92,
+    126
+  ],
+  "digest": "974a652044512217d5d3c971d5430becfb60c02c8728b5a8262ac9c065479445"
+}
