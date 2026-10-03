@@ -428,3 +428,31 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
   重みは packed × scale（行ごと）で容器から 1 本ずつ作れる。fake-quant 後の f32 で全体を 1 回 forward すると匿名メモリ約 21 GiB
   なので、参照は層逐次（決定 8 ①）。bf16 の読み込み（text_embeds と同じ呼び方）は zram swap を一時に使い切る観測があり、他の重い
   処理と重ねない。
+
+## 追記（2026-10-03）: 段 10c の結果（CPU 側）— 層逐次の参照・golden・品質の記録の基準
+
+- **参照の書き手 ✅**（`8ff54f06` / `6e325a0e`）: umT5 encoder の forward を f64 で書き下し（埋め込み → 24 × 〈RMSNorm → 相対バイアス
+  つき自己 attention〈スケール無し〉→ 残差 → RMSNorm → gated GELU〈tanh〉FFN → 残差〉→ 最後の RMSNorm・マスク無し・有効長だけ）、
+  層逐次で回す（1 層ぶんの重みだけを持つ — RSS の山 3.5 GiB）。重みは i8 系列の容器から 1 本ずつ読む（packed × 行の scale =
+  fake-quant と同じ値・block の sha256 を検証）。上流は RMSNorm の分散と softmax を f32 に落とすので `.double()` では f64 にならず、
+  書き下しは「f64 の経路で f64 以外の浮動小数を作らない」ことを `TorchDispatchMode` で縛る。小模型で f32 の書き下しは上流の eager
+  （gelu 差し替え・fake-quant 済み）と L = 2〜512 でビット一致。実モデルの f32 の参照を上流の eager と直に突き合わせてはいない
+  （全重みの f32 で約 18 GiB の RSS が要る）。
+- **ケースと golden**: 決定用 6 本 = `parity.json` の受理した乱択から seed 20261003 で選んだ単体 3 本（L = 8 / 22 / 36）と、乱択を
+  空白で連ねた合成 3 本（L = 163 / 327 / 488 — 乱択に 512 付近が無いため）。受入れ 4 本 = 固定プロンプト（L = 28 / 118 / 50 / 126）。
+  golden は `reference.<case>.safetensors`（入力 `input_ids` [L]・`relative_position_buckets` [L,L]・`output.f64`〈f32 に丸めて格納
+  — TS は F64 を読まない・丸めの比 3〜5e-8〉・`output.f32`・受入れだけ `output.unquantized.{f64,f32}`・メタに容器の part 0 の sha256）。
+  10 本で 46 MB・i8 の参照 123 s + 量子化なし 41 s。容器を書き直したら `python -m wan.umt5_export reference` で golden も書き直す
+  （ホストのテストが part 0 の sha256 の食い違いを赤で知らせる）。
+- **正規化の分母（CPU f32 の参照の f64 に対する比）**: 4.1e-7〜3.6e-6（DiT の S = 14,040 と同じ桁）。TS が格納値で採る分母と真の
+  分母の差は最大 2.1%。
+- **決定 8 ② の基準（改訂）**: 品質の記録の基準は**量子化なしの CPU f32**（基準自身の f64 に対する誤差は 7e-7〜2.3e-6）。i8 の丸めの
+  影響と bf16 の影響を分けて並べる（CPU の値・行ごとのコサインの最小 / 相対フロベニウス）: i8 = boxing-cats 0.982 / 5.0e-2・ferret
+  0.573 / 7.7e-2・cat-dog-baking 0.993 / 3.4e-2・negative 0.998 / 2.3e-2。bf16 資産 = 0.997 / 3.1e-2・**0.168** / 7.2e-2・0.768 / 1.3e-1・
+  0.987 / 2.6e-2。i8 の丸めは小さくないが bf16 資産と同じ桁で、最終判断は視認 A/B（②）。
+- **故障注入**: 相対位置の表の 1 ずらし・1 トークンの置き換え・層 0 / 1 の表の取り違え（CPU の見積りはどれも r 5e5〜9e5）に、i8 固有の
+  層 12 の `wo` の per-channel scale × 2（帯の外を判定）と × 1.0001（r を記録 — CPU の見積りでは r は δ に比例し 21〜86。q / k は
+  softmax の温度として非線形に効くので避けた）。帯が決まったら DiT の SUBTLE_FAULT_MARGIN に当たる床を umT5 でも持つかを決める。
+- **GPU の門**（`10614a32` / `3ba0174a`・`e2e_wan_umt5_test.ts`）: TS のトークナイザとバケット表が golden の入力とビット一致（GPU 不要）・
+  正規化比 r の帯（`UMT5_NORMALIZED_BAND` は未導出 = undefined で実走が候補を出す）・品質の記録・資源の記録・計測モードの GPU 時間
+  （換算表は `helpers/timestamp-unit.ts` に移した）。**GPU の実走は視認素材の生成の後**（結果は次の追記）。
