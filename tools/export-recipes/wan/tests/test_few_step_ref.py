@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from _shared.paths import SERIES_ROOT
-from wan import export_vae, few_step_ref, text_embeds, vae_tiling
+from wan import export_vae, few_step_ref, prompts, text_embeds, vae_tiling
 
 SERIES = SERIES_ROOT / export_vae.SERIES_NAME
 EMBEDS = SERIES_ROOT / text_embeds.SERIES_NAME / text_embeds.ASSET_NAME
@@ -38,7 +38,7 @@ class TestCases:
 
     def test_every_case_uses_a_positive_fixed_prompt(self):
         for case in few_step_ref.FIXTURE_CASES:
-            assert text_embeds.prompt_by_name(case.prompt).role == text_embeds.POSITIVE
+            assert text_embeds.prompt_by_name(case.prompt).role == prompts.POSITIVE
 
 
 class TestDenormalize:

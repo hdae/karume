@@ -280,6 +280,7 @@ export { WanPipeline } from "./src/wan/pipeline.ts";
 export type {
   GeneratedVideo,
   WanAssets,
+  WanFromPretrainedOptions,
   WanGenerateEvent,
   WanGenerateRequest,
   WanLatentSnapshot,

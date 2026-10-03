@@ -57,7 +57,7 @@ from safetensors.torch import save_file
 
 from _shared.paths import SERIES_ROOT
 from karume.quantize import round_weights_to_f16
-from wan import dit_patch, export_vae, pipeline_ref, text_embeds, vae_tiling
+from wan import dit_patch, export_vae, pipeline_ref, prompts, text_embeds, vae_tiling
 from wan.export_dit import round_to_f16
 from wan.sources import DEFAULT_MODEL, SOURCES
 
@@ -83,7 +83,7 @@ class FixtureCase:
     #: `band` = 帯を決めるケース・`accept` = 受け入れを判定するケース。
     role: str
     seed: int
-    #: 埋め込み資産の正のプロンプトの名前（{@link text_embeds.FIXED_PROMPTS}）。
+    #: 埋め込み資産の正のプロンプトの名前（{@link wan.prompts.FIXED_PROMPTS}）。
     prompt: str
 
 
@@ -142,7 +142,7 @@ def run_case(
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     """1 ケースを回し、テンソルと要約を返す。"""
     prompt = text_embeds.prompt_by_name(case.prompt)
-    if prompt.role != text_embeds.POSITIVE:
+    if prompt.role != prompts.POSITIVE:
         raise ValueError(f"{case.name}: {case.prompt} は正のプロンプトでない")
     generator = torch.Generator().manual_seed(case.seed)
     latents_init = torch.randn(1, *LATENT_SHAPE, generator=generator)

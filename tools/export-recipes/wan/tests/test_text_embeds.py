@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from _shared.paths import SERIES_ROOT
-from wan import text_embeds
+from wan import prompts, text_embeds
 from wan.pipeline_ref import MAX_SEQUENCE_LENGTH, TEXT_DIM
 from wan.sources import DEFAULT_MODEL, SOURCES
 
@@ -49,8 +49,8 @@ class TestFixedPrompts:
         roles = [prompt.role for prompt in text_embeds.FIXED_PROMPTS]
         names = [prompt.name for prompt in text_embeds.FIXED_PROMPTS]
 
-        assert roles.count(text_embeds.POSITIVE) == 3
-        assert roles.count(text_embeds.NEGATIVE) == 1
+        assert roles.count(prompts.POSITIVE) == 3
+        assert roles.count(prompts.NEGATIVE) == 1
         assert len(set(names)) == len(names)
 
     def test_every_source_url_pins_a_commit(self):

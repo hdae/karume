@@ -1,0 +1,8 @@
+{
+  "acceptedSizes": [
+    { "width": 832, "height": 480 },
+    { "width": 480, "height": 832 }
+  ],
+  "minFrames": 5,
+  "maxFrames": 33
+}

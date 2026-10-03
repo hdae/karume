@@ -5,20 +5,25 @@
  *     deno task demo:wan --prompt boxing-cats --seed 42
  *     deno task demo:wan --prompt ferret --steps 20 --frames 17 --size 480x832
  *
- * 配布形（`models/karume-wan2.1`）はまだ無い（ADR 0118 段 7）ので、系列（`outputs/series/`）の krm と
- * 埋め込み資産を直接読む（`--series` / `--embeds`）。第 1 段の埋め込みは事前計算した固定プロンプトだけ
- * なので、`--prompt` は資産の名前（`boxing-cats` など）で選ぶ — 名前を間違えると選べる名前の一覧を
- * 出して落ちる。未指定のノブはパイプラインの既定（50 ステップ・guide 5.0・shift 3.0・832×480・
- * 33 フレーム）。
+ * 配布形は `fromPretrained` で読む（ADR 0118 段 7）。`--source` 未指定なら手元の配布形ミラー
+ * `models/karume-wan2.1`（`dist.py --pipeline wan` が組む）を取得元ハンドル（`denoDirectory`）で読む —
+ * HF の公開リポはまだ無いので、ミラーが無ければ組み立てのコマンドを出して落ちる。明示した `--source` は
+ * ローカルの配布形か HF のリポ名（`owner/name`）としてそのまま読む。第 1 段の埋め込みは事前計算した
+ * 固定プロンプトだけなので、`--prompt` は資産の名前（`boxing-cats` など）で選ぶ — 名前を間違えると
+ * 選べる名前の一覧を出して落ちる。未指定のノブはパイプラインの既定（step 数・guidance・shift は
+ * manifest の `pipelineConfig` — 50・5.0・3.0、寸法とフレーム数は 832×480・33 フレーム）。
  */
 
 import { encodePng } from "../../packages/models/mod.ts";
 import { wanFrameToRgba, WanPipeline } from "../../packages/models/wan.ts";
 import { runMain } from "../shared/run-main.ts";
+import { distributionSource } from "../shared/local-source.ts";
+import { isLocalDist } from "../shared/local-assets.ts";
 
-const USAGE = "--prompt <名前> --negative <名前> --seed <整数> --steps <整数> --frames <整数>" +
-  " --guidance <数> --shift <数> --size <WxH> --series <dir> --embeds <file> --out <dir>";
+const USAGE = "--source <パス|HF repo> --prompt <名前> --negative <名前> --seed <整数>" +
+  " --steps <整数> --frames <整数> --guidance <数> --shift <数> --size <WxH> --out <dir>";
 const KNOWN = new Set([
+  "source",
   "prompt",
   "negative",
   "seed",
@@ -27,8 +32,6 @@ const KNOWN = new Set([
   "guidance",
   "shift",
   "size",
-  "series",
-  "embeds",
   "out",
 ]);
 
@@ -67,50 +70,26 @@ const shift = number("shift");
 const size = args.get("size");
 const sizeMatch = size === undefined ? undefined : /^(\d+)x(\d+)$/.exec(size);
 if (sizeMatch === null) throw new Error(`--size ${size} が WxH の形でない`);
-const series = args.get("series") ?? "outputs/series/wan2.1-t2v-1.3b-f16-dyn";
-const embeds = args.get("embeds") ??
-  "outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors";
 const outRoot = args.get("out") ?? "outputs/examples/wan2.1-t2v-1.3b";
 
-/** 部品（系列のグラフ名 = ディレクトリ名）。 */
-const COMPONENTS = ["transformer", "vae_decoder_first", "vae_decoder_next"] as const;
-const PART = /^model-(\d{5})-of-(\d{5})\.krm$/;
+/** 既定の取得元（手元の配布形ミラー — HF の公開リポはまだ無い）。 */
+const DEFAULT_SOURCE = "models/karume-wan2.1";
+const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline wan";
 
 /**
- * 部品 1 本の krm を `<部品>[i]` のキーで読む（part 連番 `model-0000N-of-0000M.krm` か単一形
- * `model.krm`）。MUST: 番号の欠け・総数の食い違い・単一形との同居は落とす（どのバイト列を読むかが
- * 一意に決まらない）。
+ * `--source` を `fromPretrained` の取得元へ写す。未指定は既定のミラーで、無ければ落とす（公開リポが
+ * 無いので、他所へ黙って取りに行く先が無い）。
  */
-const readComponent = async (
-  assets: Record<string, Uint8Array<ArrayBuffer>>,
-  component: string,
-): Promise<void> => {
-  const dir = `${series}/${component}`;
-  const parts = new Map<number, string>();
-  const totals = new Set<number>();
-  let single = false;
-  for await (const entry of Deno.readDir(dir)) {
-    if (!entry.isFile) continue;
-    if (entry.name === "model.krm") single = true;
-    const match = PART.exec(entry.name);
-    if (match === null) continue;
-    parts.set(Number(match[1]), entry.name);
-    totals.add(Number(match[2]));
+const resolveSource = async () => {
+  const source = args.get("source");
+  if (source !== undefined) return { from: await distributionSource(source), label: source };
+  if (!await isLocalDist(DEFAULT_SOURCE)) {
+    throw new Error(
+      `配布形ミラー ${DEFAULT_SOURCE} に karume.json が無い — ${ASSEMBLE_COMMAND} で組むか、` +
+        `--source で配布形を指す（使い方: ${USAGE}）`,
+    );
   }
-  if (single) {
-    if (parts.size > 0) throw new Error(`${dir}: 単一形と part 連番が同居している`);
-    assets[component] = await Deno.readFile(`${dir}/model.krm`);
-    return;
-  }
-  const [total] = totals;
-  if (totals.size !== 1 || parts.size !== total) {
-    throw new Error(`${dir}: part 連番が揃っていない（${parts.size} 本・総数 [${[...totals]}]）`);
-  }
-  for (let index = 1; index <= total; index += 1) {
-    const name = parts.get(index);
-    if (name === undefined) throw new Error(`${dir}: part ${index} が無い`);
-    assets[`${component}[${index - 1}]`] = await Deno.readFile(`${dir}/${name}`);
-  }
+  return { from: await distributionSource(DEFAULT_SOURCE), label: DEFAULT_SOURCE };
 };
 
 /**
@@ -118,10 +97,9 @@ const readComponent = async (
  * `SuppressedError` を展開するため）。
  */
 const main = async (): Promise<void> => {
-  const assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const component of COMPONENTS) await readComponent(assets, component);
-  assets.text_embeds = await Deno.readFile(embeds);
-  await using pipeline = await WanPipeline.fromAssets({ assets });
+  const { from, label } = await resolveSource();
+  console.log(`[wan] source: ${label}`);
+  await using pipeline = await WanPipeline.fromPretrained(from);
 
   const textOf = (name: string): string => {
     const entry = pipeline.prompts.find((candidate) => candidate.name === name);

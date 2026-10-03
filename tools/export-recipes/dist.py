@@ -13,6 +13,7 @@
     uv run python dist.py --pipeline siglip2 \\
         --model base --model so400m --out ../../models/karume-siglip2
     uv run python dist.py --pipeline lucida                # BiRefNet_HR の派生（別リポ）
+    uv run python dist.py --pipeline wan                   # Wan2.1 T2V 1.3B（HF 公開は未）
 
 置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
 repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
@@ -39,6 +40,7 @@ from karume.dist import main as dist_main
 from sbv2 import distribution as sbv2_distribution
 from siglip2 import distribution as siglip2_distribution
 from vowel_detector import distribution as vowel_detector_distribution
+from wan import distribution as wan_distribution
 
 #: 受理集合の全量。並びは `--help` の並びでもあるので、既定を先頭に置く。
 PIPELINES: Mapping[str, Pipeline] = {
@@ -56,6 +58,7 @@ PIPELINES: Mapping[str, Pipeline] = {
     "vowel-detector": vowel_detector_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,
     "gemma4-qat": gemma4_qat_distribution.PIPELINE,
+    "wan": wan_distribution.PIPELINE,
     **CORE_PIPELINES,
 }
 

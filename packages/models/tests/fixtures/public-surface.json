@@ -483,6 +483,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "WanFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
         "name": "WanGenerateEvent",
         "kind": "typeAlias"
       },
@@ -1276,6 +1280,10 @@
       },
       {
         "name": "WanAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanFromPretrainedOptions",
         "kind": "typeAlias"
       },
       {

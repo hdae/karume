@@ -34,6 +34,7 @@ from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
 from siglip2.distribution import PIPELINE as SIGLIP2_PIPELINE
 from vowel_detector.distribution import PIPELINE as VOWEL_DETECTOR_PIPELINE
+from wan.distribution import PIPELINE as WAN_PIPELINE
 
 #: 配布 recipe を持つ family の全量（名前 → その family が公開する `PIPELINE`）。
 #: **ここが受理集合の期待値**で、`dist.PIPELINES` の載せ忘れも余剰も 1 つの表で検出する。
@@ -50,6 +51,7 @@ RECIPE_PIPELINES = {
     "vowel-detector": VOWEL_DETECTOR_PIPELINE,
     "gemma4": GEMMA4_PIPELINE,
     "gemma4-qat": GEMMA4_QAT_PIPELINE,
+    "wan": WAN_PIPELINE,
 }
 
 
@@ -142,6 +144,7 @@ class TestRegistry:
             "birefnet",
             "lucida",
             "depth-anything",
+            "wan",
         }
         carried = {
             name
@@ -251,7 +254,7 @@ class TestReleaseRepositories:
 
 
 #: README の受理集合を綴る 1 文（`--pipeline` の引数として叩ける名前がバッククォートで並ぶ）。
-#: 同じ節の「10 pipeline seats across 8 families」は**家族数**を語る別の文なので拾わない。
+#: 同じ節の「13 pipeline seats across 10 families」は**家族数**を語る別の文なので拾わない。
 README_ACCEPTED_SET = re.compile(r"The accepted set is (?P<names>[^.]+)\.")
 
 

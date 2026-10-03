@@ -87,9 +87,10 @@ desktop CPU (2026-10-02) one real-size case takes about 370 s for the float64 fo
 each for the f32 and the patched ones, so the whole command takes about 88 minutes and writes about
 6.2 GB of golden files (plus the container).
 
-As of 2026-10-02 both acceptance cases are inside the real-size band (r = 2.93 and 4.60) and all
-four fault injections are outside it, but the off-by-one timestep at t = 600 lands at r = 332, only
-4.4× the band, so the real-size comparison is red until that is resolved (the NOTE on
+As of 2026-10-02 the real-size comparison is green: both acceptance cases are inside the band of 75
+(r = 2.93 and 4.60) and all four fault injections are outside it. The off-by-one timestep's smallest
+margin is 4.4× the band (r = 332 at t = 600), above the 2× floor (`SUBTLE_FAULT_MARGIN`). The band,
+the metric and the decision cases were not changed after the acceptance run (the NOTE on
 `DIT_FULL_NORMALIZED_BAND` in the e2e test has the numbers).
 
 ## VAE (stage 4)
@@ -249,9 +250,8 @@ uv run --group wan --inexact python -m wan.few_step_ref   # all three cases (CPU
 
 ### The pipeline these feed (`@karume/models/wan`)
 
-`WanPipeline` (`packages/models/src/wan/`) reads the three series containers and the embedding asset
-with `fromAssets` (there is no distribution yet — stage 7) and runs `generate` in three stages: the
-asset lookup (only the stored prompts are accepted, by original or normalized text), the DiT with
+`WanPipeline` (`packages/models/src/wan/`) loads the three containers and the embedding asset from
+the distribution (stage 7 below) and runs `generate` in three stages: the asset lookup (only the stored prompts are accepted, by original or normalized text), the DiT with
 CFG as two batch-1 passes and the host UniPC, then the tiled VAE decode and the clamp. Measured on
 the B570 (2026-10-02, 832×480, 33 frames, 2 steps):
 
@@ -273,12 +273,47 @@ The UniPC port is checked against `wan-scheduler/unipc.*`: σ bit for bit, times
 50-step trajectory within an absolute 2e-5 (torch's float32 `log` differs from the correctly rounded
 value by one ULP at six of the σ), and the CFG combination bit for bit.
 
+## Distribution (stage 7)
+
+`wan/distribution.py` assembles the series into the distribution `models/karume-wan2.1/` (ADR 0118
+decision 7 — one repository per family generation; not published on Hugging Face yet). `karume dist`
+does the copying, hashing and verification; the recipe only says what goes where:
+
+```bash
+uv run python dist.py --pipeline wan   # from tools/export-recipes/ — default model t2v-1.3b, out models/karume-wan2.1
+```
+
+| Manifest entry (`karume/5`) | Value                                                                                                                                                  |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| model                       | `t2v-1.3b` (the only one; pipeline `wan/1`)                                                                                                            |
+| `weights`                   | `transformer` / `vae_decoder_first` / `vae_decoder_next`, each with one `f16` container — the key is the container's graph name (container-v1 §2.1)    |
+| `assets`                    | `text_embeds` (`text_embeds/text_embeds.safetensors`, model-level, quant-independent). `rope_base` stays a container asset of `transformer` (ADR 0109) |
+| `quants`                    | `f16` only (default), no session knobs                                                                                                                 |
+| `pipelineConfig`            | `scheduler.shift` 3.0, `defaults.steps` 50, `defaults.guidance` 5.0 (the reference setting, decision 5)                                                |
+
+Before anything is placed, the plan checks that each container stores f16 weights and nothing
+compressed, names the pinned upstream revision and license in its provenance (`wan/sources.py`),
+that the transformer declares the `rope_base` asset, and that the embedding asset was made from the
+pinned revision, carries exactly the prompts of `wan/prompts.py`, and fits the transformer's
+`encoder_hidden_states [1, 512, 4096]` input. The golden files of the series (`io.*`, `reference.*`,
+`vae_*`, `pipeline_steps.*`) are never copied.
+
+The repository root gets `LICENSE.md` (Apache 2.0, verbatim) and `NOTICE.md` (the changes: container
+format, f16 rounding, the transformer and VAE rewrites, the precomputed text embeddings instead of the
+text encoder), and `README.md` is the model card rendered from the manifest by `wan/card.py`: the
+pinned upstream, the fixed prompts with their sources, the accepted inputs, how the outputs are
+verified, the quant table and the defaults. Re-running the command writes the same bytes.
+
 ## Tests
 
 ```bash
 uv run --group wan --inexact pytest wan   # from tools/export-recipes/
 deno task test:models:wan                 # from the repository root (packages/models/tests/*wan*_test.ts)
 ```
+
+`wan/tests/test_distribution.py` assembles the distribution once from minimal synthetic containers
+(layout, manifest, every gate above, the card) and, when the real series exist, builds the real plan
+without copying anything.
 
 The stage-6 tests check the fixed prompts (commit-pinned sources, the pipeline example matching the
 pinned diffusers), the normalization (ftfy is required), the asset format (round trip, rejection of
@@ -291,10 +326,12 @@ decreasing, the 1e-6 correction), the scheduler fixture being current, and the f
 The Deno lane runs the host-function tests (including the UniPC / CFG fixture and the pipeline's input
 gates) and the real-GPU parity gates for the DiT, the VAE chunk graphs, the tiled decode and the
 two-step pipeline run (with its sha256 row in `packages/models/tests/fixtures/references/wan.json`,
-written with `KARUME_REFERENCE=write`). The GPU gates read the series under `outputs/series/`
-written by `wan.export_dit`, `wan.export_vae`, `wan.vae_tiling`, `wan.text_embeds` and
-`wan.few_step_ref`, and skip explicitly (with the generating command) when those assets or a GPU
-adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the 50-step run (about half an hour on the
+written with `KARUME_REFERENCE=write`). The DiT and VAE gates read the series under `outputs/series/`
+written by `wan.export_dit`, `wan.export_vae` and `wan.vae_tiling`; the pipeline run loads the
+distribution `models/karume-wan2.1/` through `fromPretrained` and compares it with the references
+written by `wan.few_step_ref` — its sha256 rows were first written from the series, so the
+distribution path has to reproduce them bit for bit. The gates skip explicitly (with the generating
+command) when those assets or a GPU adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the 50-step run (about half an hour on the
 B570).
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip

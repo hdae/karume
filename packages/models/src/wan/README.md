@@ -5,8 +5,11 @@ The `./wan` subpath of `@karume/models` (ADR
 prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]`. The public surface is
 [`wan.ts`](../../wan.ts) (also re-exported from the barrel); everything here is internal.
 
-The pipeline runs three stages, one session set at a time, and waits for the released GPU memory to
-settle after each stage (`destroy()` is released late on Intel / wgpu):
+The pipeline runs three stages, one session set at a time: the transformer session is disposed before
+the VAE sessions are opened. There is no wait for released GPU memory between the stages. Intel /
+wgpu can release `destroy()` late, but on the B570 (2026-10-02, fdinfo `drm-total-vram0`) the
+transformer stage's peak drops as soon as its session is disposed and does not overlap the VAE
+stage's peak (the NOTE at the top of `pipeline.ts` has the numbers):
 
 1. **text** — looks the prompt up in the precomputed umT5 embedding asset (no GPU). Only prompts in
    the asset are accepted, by their original or normalized text; anything else is a
@@ -17,8 +20,11 @@ settle after each stage (`destroy()` is released late on Intel / wgpu):
 3. **vae_decoder** — the two chunk graphs with the resident causal cache, always tiled, then the clamp
    to `[-1, 1]`.
 
-There is no distribution yet (stage 7): `WanPipeline.fromAssets` takes the series containers and the
-embedding asset as bytes, and the scheduler config is the upstream value.
+The distribution is `karume-wan2.1` (stage 7 — not published on Hugging Face yet, so there is no
+`WAN_SOURCES` table): `WanPipeline.fromPretrained` loads it through `@karume/hub` (a local mirror is
+passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest and the bytes. Both
+go through the same admission. The defaults for steps, guidance and shift come from the manifest's
+`pipelineConfig` (`config.ts`); the UniPC structure is the upstream value.
 
 | Files            | Owner   | Contents                                                                                      |
 | ---------------- | ------- | --------------------------------------------------------------------------------------------- |
@@ -30,6 +36,7 @@ embedding asset as bytes, and the scheduler config is the upstream value.
 | `latents.ts`     | stage 6 | the VAE's per-channel latent mean / std and the de-normalization before decoding              |
 | `random.ts`      | stage 6 | the seeded initial noise (splitmix64 + Box–Muller — not torch's `randn`)                      |
 | `pipeline.ts`    | stage 6 | `WanPipeline`: input gates, the three stages, events and diagnostics                          |
+| `config.ts`      | stage 7 | `pipelineConfig` schema (pipeline `wan/1`): default steps, guidance and shift                 |
 | `frames.ts`      | stage 6 | one frame to 8-bit RGBA (`wanFrameToRgba` — the rule the reference hashes use)                |
 
 ## Accepted requests

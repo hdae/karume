@@ -224,7 +224,7 @@ class TestTheNamesAreTheWeightsKeys:
         return set(table)
 
     @pytest.mark.parametrize(
-        "family", ["anima", "irodori", "gemma4", "siglip2", "birefnet", "depth_anything"]
+        "family", ["anima", "irodori", "gemma4", "siglip2", "birefnet", "depth_anything", "wan"]
     )
     def test_the_scripts_cover_exactly_the_weights_keys(self, family: str) -> None:
         assert self._named(family) == self._weights(family)

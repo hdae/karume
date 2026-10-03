@@ -163,19 +163,29 @@ measurements in `docs/research/`.
   adds no wait and is undefined without `gpuTiming`; values are in timestamp units like
   `GpuTimingEntry.ns`.
 - `@karume/models/wan` (also in the barrel): Wan2.1 T2V 1.3B text-to-video (ADR 0118).
-  `WanPipeline.fromAssets({ assets })` builds the pipeline from the transformer and the two VAE
-  chunk-graph containers (single `krm` or numbered parts, keys `transformer`,
-  `vae_decoder_first`, `vae_decoder_next`) plus the precomputed text-embedding asset
-  (`text_embeds`); there is no distribution or `fromPretrained` yet. `generate({ prompt,
-  negativePrompt?, seed | latents, steps = 50, guidance = 5.0, shift = 3.0, frames = 33,
-  width = 832, height = 480, onEvent? })` returns `GeneratedVideo` (`[3, F, H, W]` f32 in
-  `[-1, 1]`): the DiT runs with classifier-free guidance as two batch-1 passes, the flow-matching
-  UniPC scheduler runs on the host, and the VAE always decodes in tiles. `prompt` and
-  `negativePrompt` must be one of the prompts stored in the embedding asset (original or normalized
-  text — `WanPipeline.prompts` lists them); any other string, a size other than 832×480 / 480×832,
-  a frame count other than 4n+1 in 5–33, and out-of-range knobs throw `ModelInputError` before any
-  weight reaches the GPU. A GPU with `gpuTiming` is rejected at construction (the VAE stage needs
+  `WanPipeline.fromPretrained(source, { model?, quant?, gpu?, onRunDiagnostics?, … })` loads a
+  `karume/5` distribution with pipeline `wan/1` (the `karume-wan2.1` layout: model `t2v-1.3b`,
+  quant `f16`, the transformer and the two VAE chunk-graph containers `vae_decoder_first` /
+  `vae_decoder_next`, and the precomputed text-embedding asset `text_embeds`); the distribution is
+  not published on Hugging Face yet, so there is no `WAN_SOURCES` table and a local copy is passed
+  as a directory source handle. `WanPipeline.fromAssets({ manifest, assets })` builds the same
+  pipeline from bytes already held. The manifest's `pipelineConfig` declares the defaults for
+  `steps`, `guidance` and `shift`, and a quant that declares any session knob is rejected before
+  weights are fetched. `generate({ prompt, negativePrompt?, seed | latents, steps?, guidance?,
+  shift?, frames = 33, width = 832, height = 480, onEvent? })` returns `GeneratedVideo`
+  (`[3, F, H, W]` f32 in `[-1, 1]`): the DiT runs with classifier-free guidance as two batch-1
+  passes, the flow-matching UniPC scheduler runs on the host, and the VAE always decodes in tiles.
+  `prompt` and `negativePrompt` must be one of the prompts stored in the embedding asset (original
+  or normalized text — `WanPipeline.prompts` lists them); any other string, a size other than
+  832×480 / 480×832, a frame count other than 4n+1 in 5–33, and out-of-range knobs throw
+  `ModelInputError` before any weight reaches the GPU. A GPU with `gpuTiming` is rejected at construction (the VAE stage needs
   batches). `wanFrameToRgba(video, frame)` converts one frame to 8-bit RGBA for `encodePng`.
+- Exporter recipes: `dist.py --pipeline wan` assembles the Wan2.1 series into the
+  `karume-wan2.1` distribution (Apache-2.0 `LICENSE.md` and the change `NOTICE.md` at the root, a
+  model card listing the pinned upstream revision and the fixed prompts). It refuses series whose
+  storage is not f16, whose container provenance names another upstream revision or license, a
+  transformer without its RoPE base tables, and an embedding asset made from another revision, with
+  other prompts or with a width that does not match the transformer.
 
 ### Changed
 

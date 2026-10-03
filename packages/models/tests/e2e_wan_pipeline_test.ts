@@ -1,9 +1,14 @@
 /**
- * Wan2.1 のパイプライン（`WanPipeline` — ADR 0118 段 6 の結線）の通しの照合（実 GPU）。
+ * Wan2.1 のパイプライン（`WanPipeline` — ADR 0118 段 6 の結線・段 7 の配布形）の通しの照合（実 GPU）。
  *
- * 系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` の `krm` 3 本（DiT・VAE の chunk グラフ 2 本）と
- * テキスト埋め込み資産（`outputs/series/wan2.1-t2v-1.3b-text-embeds/`）を `WanPipeline.fromAssets` で
- * 組み、`generate` を通す。配布形（`models/karume-wan2.1`）は段 7 なので、系列を直接読む。
+ * 配布形ミラー `models/karume-wan2.1/`（`dist.py --pipeline wan` が組む — `krm` 3 本とテキスト埋め込み
+ * 資産）を `denoDirectory` で `WanPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の
+ * 取得面 — manifest の解決・家族 admission・part の逐次読み）。参照（`pipeline_steps.*`）は配布しない
+ * golden なので系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` から読む。
+ *
+ * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP に
+ * なるのを FAIL にするのは門番 `packages/runtime/tests/distribution_gate_test.ts`（意図して通すなら
+ * `KARUME_ALLOW_NO_DISTRIBUTION=1` — anima / gemma4 の e2e と同じ分担）。
  *
  * 比べる相手は recipe の少ステップの参照（`tools/export-recipes/wan/few_step_ref.py`）: diffusers の
  * `WanPipeline` を CPU f32 で素のまま 2 ステップ（CFG あり・guide 5.0・shift 3.0）回した潜在と、それを
@@ -28,7 +33,10 @@
  *   （床 {@link FAULT_MARGIN} 倍）。
  * - **sha256 の環境行**（ADR 0106）: 出力フレーム（uint8 の RGB を全フレーム連結したバイト列 —
  *   `wanFrameToRgba` の規則）を `fixtures/references/wan.json` の環境キーの行と突き合わせる。
- *   行は `KARUME_REFERENCE=write` で作る。
+ *   行は `KARUME_REFERENCE=write` で作る。B570 の行（2026-10-02）は段 6 で**系列を直読み**
+ *   （`fromAssets`）して書いた値で、配布形経由（`fromPretrained`）でも同じ行と一致することを
+ *   ここで要求する — 配布形は系列の `krm` の独立コピーで、manifest の既定（50 / 5.0 / 3.0）も段 6 の
+ *   定数と同じ値なので、1 ビットでも割れたら取得面か既定の解決の退行。
  *
  * ## 50 ステップの通し（env の opt-in — 既定のレーンに入れない）
  *
@@ -45,12 +53,14 @@
  * `drm-total-*` — `helpers/drm-usage.ts`）。DiT の段の `end`（Session を畳んだ直後・VAE の段を張る前）の
  * 値で、B570 の `destroy()` の遅れが DiT と VAE の確保を重ねていないかを見る（2026-10-02 の実測では
  * 段の前の値へ戻っていた — 解放待ちを入れなかった根拠。`src/wan/pipeline.ts` のモジュール doc）。
- * GPU 時間は採らない — 計測の device では VAE の batch を開けない（`WanPipeline.fromAssets` が拒む）。
+ * GPU 時間は採らない — 計測の device では VAE の batch を開けない（`WanPipeline` の構築が拒む）。
  *
- * 資産が 1 つも無い環境は明示 SKIP、一部だけある環境は FAIL（段 4 / 5 の e2e と同じ規律）。
+ * 配布形か参照が無い環境は明示 SKIP、参照が一部だけある環境は FAIL（段 4 / 5 の e2e と同じ規律）。
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { localDirectory, parseManifest, resolveSelection } from "@karume/hub";
+import { denoDirectory } from "@karume/hub/deno";
 import {
   acquireGpu,
   type GpuContext,
@@ -65,9 +75,10 @@ import {
   type WanGenerateEvent,
   type WanGenerateRequest,
   WanPipeline,
+  type WanPrompt,
   type WanRunComponent,
 } from "../wan.ts";
-import { parseWanTextEmbeds, type WanTextEmbeds } from "../src/wan/text-embeds.ts";
+import { parseWanTextEmbeds } from "../src/wan/text-embeds.ts";
 import {
   WAN_UNIPC_CONFIG,
   wanClassifierFreeGuidance,
@@ -76,8 +87,6 @@ import {
 } from "../src/wan/scheduler.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { modelPresent, resolveParts } from "../../runtime/tests/helpers/container-files.ts";
-import { seriesComponents } from "../../runtime/tests/helpers/series-graphs.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import {
   openReferences,
@@ -135,13 +144,12 @@ const FRAME_RATIO_BAND = 8.5e-3;
  */
 const FAULT_MARGIN = 2;
 
-const SERIES = "wan2.1-t2v-1.3b-f16-dyn";
-const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES}/`, import.meta.url);
-const EMBEDS_URL = new URL(
-  "../../../outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors",
-  import.meta.url,
-);
-const MODEL_FILE = "model.krm";
+/** 参照（配布しない golden）の置き場。 */
+const SERIES_ROOT = new URL("../../../outputs/series/wan2.1-t2v-1.3b-f16-dyn/", import.meta.url);
+/** 配布形ミラー（`dist.py --pipeline wan` の既定の出力先）。 */
+const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
+/** manifest の `assets` の埋め込み資産のキー（recipe `wan/distribution.py` の `WAN_TEXT_EMBEDS_ROLE`）。 */
+const TEXT_EMBEDS = "text_embeds";
 const STEPS = 2;
 
 /**
@@ -162,6 +170,7 @@ const FULL_CASE = { id: "50step-boxing-cats-seed42", prompt: "boxing-cats", seed
 
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
+const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline wan";
 
 const fixtureUrl = (name: string): URL =>
   new URL(`pipeline_steps.${name}.safetensors`, SERIES_ROOT);
@@ -175,21 +184,41 @@ const fileExists = (url: URL): boolean => {
   }
 };
 
-const COMPONENTS = seriesComponents(SERIES);
-const PRESENT = [
-  ...Object.keys(COMPONENTS).map((dir) =>
-    modelPresent(new URL(`${dir}/${MODEL_FILE}`, SERIES_ROOT))
-  ),
-  fileExists(EMBEDS_URL),
-  ...CASES.map(({ name }) => fileExists(fixtureUrl(name))),
-];
-const ANY_PRESENT = PRESENT.some(Boolean);
-if (!ANY_PRESENT) {
+const DIST_PRESENT = fileExists(new URL("karume.json", DIST_ROOT));
+if (!DIST_PRESENT) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に Wan の通しの資産と参照が無いため Wan のパイプラインの照合を SKIP ` +
-      `する。生成: ${GENERATE_COMMAND}（krm は wan.export_dit / wan.export_vae）`,
+    `[karume] 配布形ミラー ${DIST_ROOT.pathname} が無いため Wan のパイプラインの照合を SKIP する。` +
+      `組み立て: ${ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
   );
 }
+const FIXTURES_PRESENT = CASES.map(({ name }) => fileExists(fixtureUrl(name)));
+const ANY_FIXTURE = FIXTURES_PRESENT.some(Boolean);
+if (!ANY_FIXTURE) {
+  console.warn(
+    `[karume] ${SERIES_ROOT.pathname} に少ステップの参照が無いため Wan のパイプラインの照合を SKIP ` +
+      `する。生成: ${GENERATE_COMMAND}`,
+  );
+}
+/** 照合を回せる（配布形と参照の両方がある — 参照が一部だけの機は下の資産の門が FAIL にする）。 */
+const ANY_PRESENT = DIST_PRESENT && ANY_FIXTURE;
+
+/** 配布形の埋め込み資産（manifest の既定の選択の `assets` から引く — path を綴り直さない）。 */
+const readDistributionEmbeds = async (): Promise<Uint8Array<ArrayBuffer>> => {
+  const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", DIST_ROOT)));
+  const ref = resolveSelection(manifest).assets[TEXT_EMBEDS];
+  assert(ref !== undefined, `配布形の manifest の assets に '${TEXT_EMBEDS}' が無い`);
+  return await Deno.readFile(new URL(ref.path, DIST_ROOT));
+};
+
+/** 配布形を取得元ハンドルで読む（network も CacheStorage も通らない）。 */
+const loadPipeline = (
+  gpu: GpuContext,
+  diagnostics: Map<WanRunComponent, SessionDiagnostics>,
+): Promise<WanPipeline> =>
+  WanPipeline.fromPretrained(denoDirectory(DIST_ROOT), {
+    gpu,
+    onRunDiagnostics: (component, diagnosed) => diagnostics.set(component, diagnosed),
+  });
 
 const references = openReferences(new URL("fixtures/references/wan.json", import.meta.url));
 const results = openResults("wan-pipeline");
@@ -197,10 +226,119 @@ const results = openResults("wan-pipeline");
 const fullResults = openResults("wan-pipeline-full");
 
 Deno.test({
-  name: "Wan 通しの資産: krm 3 本・埋め込み資産・少ステップの参照 3 本が揃っている",
-  ignore: !ANY_PRESENT,
+  name: "Wan 通しの参照: 少ステップの参照 3 本が揃っている",
+  ignore: !ANY_FIXTURE,
   fn: () => {
-    assertEquals(PRESENT, PRESENT.map(() => true), `${SERIES_ROOT.pathname} の欠け`);
+    assertEquals(
+      FIXTURES_PRESENT,
+      FIXTURES_PRESENT.map(() => true),
+      `${SERIES_ROOT.pathname} の欠け`,
+    );
+  },
+});
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * 配布形の manifest の既定モデルを書き換えた写し（`karume.json` だけを差し替える故障注入 — 重みは
+ * 1 バイトも書き換えない）。故障は manifest の型の外の値も入れるので、`parseManifest` を通さず
+ * unknown のまま型述語で降りる。
+ */
+const overrideModel = (
+  original: string,
+  patch: (model: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown> => {
+  const manifest: unknown = JSON.parse(original);
+  assert(isRecord(manifest) && isRecord(manifest.models), "配布形の manifest に models が無い");
+  const name = manifest.defaultModel;
+  assert(typeof name === "string", "配布形の manifest に defaultModel が無い");
+  const model = manifest.models[name];
+  assert(isRecord(model), `配布形の manifest に既定モデル '${name}' が無い`);
+  return { ...manifest, models: { ...manifest.models, [name]: patch(model) } };
+};
+
+/**
+ * `karume.json` だけを `manifest` に差し替え、残りは配布形から読む取得元（読んだ path を
+ * `requested` に積む — 取得の順と回数を数えるため）。
+ */
+const countingSource = (manifest: Record<string, unknown>, requested: string[]) => {
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  return localDirectory({
+    readFile: async (path) => {
+      requested.push(path);
+      if (path === "karume.json") return manifestBytes;
+      return await Deno.readFile(new URL(path, DIST_ROOT));
+    },
+  }, { label: "wan-admission-fault" });
+};
+
+Deno.test({
+  name:
+    "Wan 配布形の家族 admission（GPU 不要）: pipeline の major・pipelineConfig・quant の session の齟齬は " +
+    "名指しで落ち、それまでに重みの part 1 以降と資産を 1 本も取らない",
+  ignore: !DIST_PRESENT,
+  fn: async (t) => {
+    const original = await Deno.readTextFile(new URL("karume.json", DIST_ROOT));
+    const parsed = parseManifest(original);
+    // part 0 = descriptor は admission の入力そのもので、門より前に取る契約
+    // （packages/models/src/hub/components.ts の相 1）。門の後にしか触れてはいけないのは part 1
+    // 以降と assets（埋め込み・RoPE の素表）。
+    const model = parsed.models[parsed.defaultModel];
+    assert(model !== undefined, `配布形の manifest に既定モデル '${parsed.defaultModel}' が無い`);
+    const heavyPaths = new Set([
+      ...Object.values(model.weights).flatMap((entry) =>
+        Object.values(entry).flatMap((weights) =>
+          weights.container.parts.slice(1).map((ref) => ref.path)
+        )
+      ),
+      ...Object.values(model.assets).map((ref) => ref.path),
+    ]);
+    assert(heavyPaths.size > 0);
+    const faults: readonly {
+      readonly label: string;
+      readonly patch: (model: Record<string, unknown>) => Record<string, unknown>;
+      readonly message: string;
+    }[] = [
+      {
+        label: "pipeline の major 2",
+        patch: (model) => ({ ...model, pipeline: "wan/2" }),
+        message: "major に未対応",
+      },
+      {
+        label: "pipelineConfig の未知キー",
+        patch: (model) => ({
+          ...model,
+          pipelineConfig: {
+            scheduler: { shift: 3, type: "unipc" },
+            defaults: { steps: 50, guidance: 5 },
+          },
+        }),
+        message: "未知キー 'type'",
+      },
+      {
+        label: "quant が実行ノブを宣言",
+        patch: (model) => {
+          const quants = model.quants;
+          assert(isRecord(quants) && isRecord(quants.f16), "配布形に f16 の quant が無い");
+          return {
+            ...model,
+            quants: { ...quants, f16: { ...quants.f16, session: { linearCompute: "a8" } } },
+          };
+        },
+        message: "session.linearComputeは未対応",
+      },
+    ];
+    for (const { label, patch, message } of faults) {
+      await t.step(label, async () => {
+        const requested: string[] = [];
+        const source = countingSource(overrideModel(original, patch), requested);
+        await assertRejects(() => WanPipeline.fromPretrained(source), Error, message);
+        assert(requested.includes("karume.json"), `manifest を読んでいない: ${requested}`);
+        const heavy = requested.filter((path) => heavyPaths.has(path));
+        assertEquals(heavy, [], "admission の前に重みの part 1 以降・資産を取っている");
+      });
+    }
   },
 });
 
@@ -243,19 +381,6 @@ const readFixture = async (url: URL): Promise<Fixture> => {
       return value;
     },
   };
-};
-
-/** 系列の krm（part 列）と埋め込み資産を `WanPipeline.fromAssets` の形に読む（全量 — 約 3.1 GB）。 */
-const loadAssets = async (): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
-  const assets: Record<string, Uint8Array<ArrayBuffer>> = {};
-  for (const [dir, graph] of Object.entries(COMPONENTS)) {
-    const parts = resolveParts(new URL(`${dir}/${MODEL_FILE}`, SERIES_ROOT));
-    for (const [index, part] of parts.entries()) {
-      assets[`${graph}[${index}]`] = await Deno.readFile(part);
-    }
-  }
-  assets.text_embeds = await Deno.readFile(EMBEDS_URL);
-  return assets;
 };
 
 /** 差の要約（比 = 最大絶対差 ÷ 参照の最大絶対値 — 決定 8 の指標）。 */
@@ -392,19 +517,23 @@ const formatObserved = (observed: Observed): string[] => {
   return lines;
 };
 
-const textOf = (embeds: WanTextEmbeds, name: string, form: "prompt" | "normalized"): string => {
-  const entry = embeds.entries.find((candidate) => candidate.name === name);
+const textOf = (
+  prompts: readonly WanPrompt[],
+  name: string,
+  form: "prompt" | "normalized",
+): string => {
+  const entry = prompts.find((candidate) => candidate.name === name);
   assert(entry !== undefined, `埋め込み資産に '${name}' が無い`);
   return entry[form];
 };
 
 Deno.test({
   name:
-    "Wan 通し（ホスト・GPU 不要）: 埋め込み資産と σ / timestep が参照のメタと一致し、参照の DiT 出力から " +
-    "CFG + UniPC が参照の潜在をビット一致で再現する",
+    "Wan 通し（ホスト・GPU 不要）: 配布形の埋め込み資産と σ / timestep が参照のメタと一致し、参照の DiT " +
+    "出力から CFG + UniPC が参照の潜在をビット一致で再現する",
   ignore: !ANY_PRESENT,
   fn: async () => {
-    const embedsBytes = await Deno.readFile(EMBEDS_URL);
+    const embedsBytes = await readDistributionEmbeds();
     const embeds = parseWanTextEmbeds(embedsBytes.buffer);
     assertEquals(
       embeds.entries.map(({ name, role, tokens }) => [name, role, tokens]),
@@ -417,8 +546,8 @@ Deno.test({
     );
     assertEquals(embeds.width, 4096);
     // ftfy は全角の読点を ASCII の「,」へ正規化する（決定 4 — 正規化後の文字列もメタに持つ）。
-    assert(!textOf(embeds, "negative", "normalized").includes("，"));
-    assert(textOf(embeds, "negative", "prompt").includes("，"));
+    assert(!textOf(embeds.entries, "negative", "normalized").includes("，"));
+    assert(textOf(embeds.entries, "negative", "prompt").includes("，"));
     const embedsSha = await sha256Hex(embedsBytes);
     const schedule = wanUniPcSchedule(STEPS, 3, WAN_UNIPC_CONFIG.numTrainTimesteps);
     for (const { name } of CASES) {
@@ -433,8 +562,10 @@ Deno.test({
         [String(STEPS), "5.0", "3.0"],
       );
       assertEquals(fixture.meta("negative"), "negative");
-      assertEquals(JSON.parse(fixture.meta("timesteps")), schedule.timesteps);
-      assertEquals(JSON.parse(fixture.meta("sigmas")), [...schedule.sigmas]);
+      const timesteps: unknown = JSON.parse(fixture.meta("timesteps"));
+      const sigmas: unknown = JSON.parse(fixture.meta("sigmas"));
+      assertEquals(timesteps, schedule.timesteps);
+      assertEquals(sigmas, [...schedule.sigmas]);
       // 参照が記録した DiT の出力（forward の hook）から、ホストの CFG + UniPC で参照の潜在を作り直す。
       const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
       let latents: Float32Array = fixture.tensor("latents_init");
@@ -466,8 +597,6 @@ Deno.test({
   ignore: !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     await assertRunningAdapter();
-    const assets = await loadAssets();
-    const embeds = parseWanTextEmbeds(assets.text_embeds.buffer);
     let deviceLost: string | undefined;
     const gpu = await acquireGpu({
       onDeviceLost: (info) => {
@@ -476,17 +605,15 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      const pipeline = await WanPipeline.fromAssets({ assets }, {
-        gpu,
-        onRunDiagnostics: (component, diagnosed) => diagnostics.set(component, diagnosed),
-      });
+      const pipeline = await loadPipeline(gpu, diagnostics);
+      const { prompts } = pipeline;
       try {
         for (const { name, role } of CASES) {
           await t.step(`${name}（${role}）`, async () => {
             const fixture = await readFixture(fixtureUrl(name));
             const promptName = fixture.meta("prompt");
             // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す）。
-            const prompt = textOf(embeds, promptName, role === "band" ? "prompt" : "normalized");
+            const prompt = textOf(prompts, promptName, role === "band" ? "prompt" : "normalized");
             const id = `2step-${name}`;
             let settlement: ReferenceSettlement | undefined;
             await runRecordedCase(results, { id }, async ({ measurements }) => {
@@ -547,8 +674,8 @@ Deno.test({
 
         // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
         const accept = await readFixture(fixtureUrl(ACCEPT_CASE));
-        const ferret = textOf(embeds, accept.meta("prompt"), "prompt");
-        const negative = textOf(embeds, accept.meta("negative"), "prompt");
+        const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
+        const negative = textOf(prompts, accept.meta("negative"), "prompt");
         const faults: readonly {
           readonly label: string;
           readonly request: Omit<WanGenerateRequest, "onEvent" | "latents" | "steps">;
@@ -642,8 +769,6 @@ Deno.test({
   ignore: !FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
     await assertRunningAdapter();
-    const assets = await loadAssets();
-    const embeds = parseWanTextEmbeds(assets.text_embeds.buffer);
     let deviceLost: string | undefined;
     const gpu = await acquireGpu({
       onDeviceLost: (info) => {
@@ -653,14 +778,11 @@ Deno.test({
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     let settlement: ReferenceSettlement | undefined;
     try {
-      const pipeline = await WanPipeline.fromAssets({ assets }, {
-        gpu,
-        onRunDiagnostics: (component, diagnosed) => diagnostics.set(component, diagnosed),
-      });
+      const pipeline = await loadPipeline(gpu, diagnostics);
       try {
         await runRecordedCase(fullResults, { id: FULL_CASE.id }, async () => {
           const observed = await observe(pipeline, diagnostics, {
-            prompt: textOf(embeds, FULL_CASE.prompt, "prompt"),
+            prompt: textOf(pipeline.prompts, FULL_CASE.prompt, "prompt"),
             seed: FULL_CASE.seed,
           });
           assert("video" in observed, "generate が最後まで回っていない");

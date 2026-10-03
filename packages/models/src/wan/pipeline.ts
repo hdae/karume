@@ -15,7 +15,8 @@
  *
  * ## MUST: 段ごとに Session を張って畳む・DiT を閉じてから VAE を開く
  *
- * 構築（{@link WanPipeline.fromAssets}）では Session を 1 本も張らない（コンテナを開くまで）。
+ * 構築（{@link WanPipeline.fromPretrained} / {@link WanPipeline.fromAssets}）では Session を 1 本も
+ * 張らない（コンテナを開くまで）。
  * `generate` の中で DiT の Session を張り、閉じてから VAE の 2 Session を張る（決定 7 — anima の
  * 既定 `"per-stage"` と同じ）。DiT 段（33 フレームで約 5.7 GiB）と VAE 段（約 2.9 GiB）を同時に
  * 持たない。
@@ -32,11 +33,16 @@
  * MUST: 段の切り替えは公開 API 側でも守る — `generate` は直列化鎖に載せ（並行呼び出しは待たされて
  * 順に走る）、`dispose` はその完了を待ってから GPU を破棄する。
  *
- * ## 配布形はまだ無い（段 7）
+ * ## 配布形（`karume-wan2.1` — ADR 0118 段 7）
  *
- * manifest（`karume.json`）・`fromPretrained`・取得元の表は段 7 で足す。今の入口は取得済みの
- * バイト列（系列の `krm` と埋め込み資産）から組む {@link WanPipeline.fromAssets} だけで、scheduler の
- * config は上流の値（`WAN_UNIPC_CONFIG`）を持つ。
+ * 入口は配布形から取得する {@link WanPipeline.fromPretrained} と、取得済みのバイト列（manifest +
+ * 資産）から組む {@link WanPipeline.fromAssets} の 2 つで、どちらも同じ家族 admission
+ * （{@link WanPipeline.#admit}）と組み立て（{@link WanPipeline.#build}）を通る。生成の既定（step 数・
+ * guidance・shift）は manifest の `pipelineConfig`（`config.ts`）が持ち、UniPC の構造は上流の値
+ * （`WAN_UNIPC_CONFIG`）のまま。
+ *
+ * NOTE: 公開配布リポの対応表（`WAN_SOURCES`）はまだ無い — 公開リポを持たない家族は表を持たない
+ * （ADR 0073 決定 1・vowel-detector と同じ）。HF 公開の pin 焼き込みの回に足す（docs/release-runbook.md）。
  *
  * ## MUST: 出力の「正しさ」はここでは担保されない
  *
@@ -50,15 +56,52 @@ import {
   type GpuContext,
   type Session,
   type SessionDiagnostics,
+  type SessionOptions,
   type Tensor,
 } from "@karume/runtime";
+import {
+  type DistributionSource,
+  type GpuFeaturesSpec,
+  type HubRepoRef,
+  loadManifest,
+  type Manifest,
+  type ModelEntry,
+  type Quant,
+  resolveSelection,
+} from "@karume/hub";
 
 import { ModelInputError } from "../errors.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
+import {
+  assertGpuFeaturesGranted,
+  assertRequiredLimitsBeforeDownload,
+  assertRequiredLimitsSatisfied,
+  sessionGpuFeatures,
+  toAcquireGpuOptions,
+} from "../session/gpu-features.ts";
 import { readAssetBuffer, readWholeAsset } from "../hub/asset-readers.ts";
-import { assetComponentOpener, type GraphOwner, type ModelComponent } from "../hub/components.ts";
+import {
+  assetComponentOpener,
+  type ComponentOpener,
+  type GraphOwner,
+  loadContainerComponents,
+  type ModelComponent,
+} from "../hub/components.ts";
+import { toManifestSource } from "../hub/repo-ref.ts";
+import {
+  type FromPretrainedComponentOptions,
+  type FromPretrainedHubOptions,
+  hubLoadOptions,
+} from "../hub/load-options.ts";
+import {
+  parseWanPipelineConfig,
+  WAN_PIPELINE_MAJOR,
+  WAN_PIPELINE_NAME,
+  type WanPipelineConfig,
+} from "./config.ts";
 import {
   patchifyLatents,
   unpatchifyTokens,
@@ -133,19 +176,24 @@ const TEMPORAL_COMPRESSION = 4;
  * フレーム数の上限は今は 33（決定 7 の 81 は段 8 で解禁する）。81 フレームは DiT（約 7.6 GiB）を
  * 持ったまま VAE の段へ進む形になり、段 0 の見積りで B570 の VRAM を越える — 段 8 で段の切り替えを
  * 詰めてから上げる。MUST: 拒む文言は上限（33）だけを言う（利用者に段の番号は意味を持たない）。
+ *
+ * MUST: 変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN_ACCEPTED_SIZES` /
+ * `WAN_FRAMES`）と `tests/fixtures/wan-card-limits.json` も同じ値にする — カードは manifest に無い
+ * この事実を写しで持つので、fixture を挟んだ両側のテスト（wan_pipeline_test.ts と recipe の
+ * test_distribution.py）が片側だけの更新を赤にする。
  */
-const ACCEPTED_SIZES: readonly { readonly width: number; readonly height: number }[] = [
+export const ACCEPTED_SIZES: readonly { readonly width: number; readonly height: number }[] = [
   { width: 832, height: 480 },
   { width: 480, height: 832 },
 ];
-const MIN_FRAMES = 5;
-const MAX_FRAMES = 33;
+export const MIN_FRAMES = 5;
+export const MAX_FRAMES = 33;
 
-/** 生成の既定（参照の設定 — 決定 5: 50 ステップ・guide 5.0・shift 3.0。最初の到達目標の 832×480・33）。 */
+/**
+ * 生成の既定のうち配布形が宣言しないもの（最初の到達目標の 832×480・33 フレーム — 受理集合の側の
+ * 事実）。step 数・guidance・shift の既定は manifest の `pipelineConfig`（{@link WanPipelineConfig}）。
+ */
 const DEFAULTS = {
-  steps: 50,
-  guidance: 5,
-  shift: 3,
   frames: 33,
   width: 832,
   height: 480,
@@ -193,7 +241,10 @@ export type WanGenerateEvent =
   /** VAE のタイル 1 枚の decode の完了（`tile` は 1 始まり）。 */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
 
-/** 1 回の生成要求。省いた欄は参照の設定（50 ステップ・guide 5.0・shift 3.0・832×480・33 フレーム）。 */
+/**
+ * 1 回の生成要求。省いた step 数・guidance・shift は manifest の `pipelineConfig` の既定（配布形の値は
+ * 参照の設定 — 50 ステップ・guide 5.0・shift 3.0）、寸法とフレーム数は 832×480・33 フレーム。
+ */
 export type WanGenerateRequest = {
   /**
    * プロンプト。**テキスト埋め込み資産の集合にある文字列だけ**を受ける（原文か正規化後の文字列の
@@ -214,14 +265,14 @@ export type WanGenerateRequest = {
    * torch の `randn` の列を注入する口（seed の生成器は torch とは別の列 — `random.ts`）。書き換えない。
    */
   readonly latents?: Float32Array;
-  /** denoise の step 数（1 以上・既定 50）。 */
+  /** denoise の step 数（1 以上・既定は `pipelineConfig.defaults.steps`）。 */
   readonly steps?: number;
   /**
-   * CFG の強さ（1 以上・既定 5.0）。1 なら uncond 側を回さない（上流の `guidance_scale > 1` の判定と
-   * 同じ）。1 未満は上流が CFG ごと切って値が効かないので `ModelInputError`。
+   * CFG の強さ（1 以上・既定は `pipelineConfig.defaults.guidance`）。1 なら uncond 側を回さない（上流の
+   * `guidance_scale > 1` の判定と同じ）。1 未満は上流が CFG ごと切って値が効かないので `ModelInputError`。
    */
   readonly guidance?: number;
-  /** flow matching の shift（正・既定 3.0 — Diffusers 版の配布設定）。 */
+  /** flow matching の shift（正・既定は `pipelineConfig.scheduler.shift`）。 */
   readonly shift?: number;
   /** フレーム数（4n+1 の 5〜33・既定 33）。 */
   readonly frames?: number;
@@ -238,8 +289,12 @@ export type WanGenerateRequest = {
   readonly onEvent?: (event: WanGenerateEvent) => void | Promise<void>;
 };
 
-/** 構築オプション。 */
+/** 構築オプション（{@link WanPipeline.fromAssets} / {@link WanPipeline.fromPretrained} 共通）。 */
 export type WanPipelineOptions = {
+  /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
+  readonly model?: string;
+  /** 実行構成（そのモデルの quants のキー）。省略時は `defaultQuant`。 */
+  readonly quant?: string;
   /**
    * 既存の GPU を共有する（渡した側が所有権を持つ — {@link WanPipeline.dispose} は破棄しない）。
    * 省くとパイプラインが `acquireGpu` し、`dispose` で破棄する。
@@ -261,11 +316,24 @@ export type WanPipelineOptions = {
 };
 
 /**
- * 取得済みのバイト列（キー → バイト列）。部品は単一形 `krm` のキー（`transformer`）か part 列
- * （`transformer[0]` / `transformer[1]` / … — part 0 から添字順）で、`transformer` /
- * `vae_decoder_first` / `vae_decoder_next` の 3 本。加えて `text_embeds`（埋め込み資産の safetensors）。
+ * {@link WanPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
+ *
+ * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、欄ごとの
+ * 説明は {@link FromPretrainedHubOptions} に 1 本化してある。
+ */
+export type WanFromPretrainedOptions =
+  & WanPipelineOptions
+  & FromPretrainedHubOptions
+  & FromPretrainedComponentOptions;
+
+/**
+ * 取得済みの manifest + 資産（hub の `fetchAssets` の返り値をそのまま渡せる形）。`assets` の部品は
+ * 単一形 `krm` のキー（`transformer`）か part 列（`transformer[0]` / `transformer[1]` / … — part 0 から
+ * 添字順）で、`transformer` / `vae_decoder_first` / `vae_decoder_next` の 3 本。加えて manifest の
+ * `assets` の `text_embeds`（埋め込み資産の safetensors）。
  */
 export type WanAssets = {
+  readonly manifest: Manifest;
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
@@ -294,7 +362,8 @@ export type WanGenerationPlan = {
 type PlanGeometry = { readonly spatialScale: number };
 
 /**
- * 生成の要求を検査して計画にする（`generate` の入口・GPU に触る前の純粋な門）。
+ * 生成の要求を検査して計画にする（`generate` の入口・GPU に触る前の純粋な門）。省いた step 数・
+ * guidance・shift は `config`（manifest の `pipelineConfig`）の既定で埋める。
  *
  * MUST: 入力起因の失敗（集合の外のプロンプト・受理集合の外の寸法・値域外のノブ）は全部ここで
  * `ModelInputError` にする。DiT の重みを上げてから落ちる形にしない。
@@ -305,6 +374,7 @@ export const planWanGeneration = (
   request: WanGenerateRequest,
   embeds: WanTextEmbeds,
   geometry: PlanGeometry,
+  config: WanPipelineConfig,
 ): WanGenerationPlan => {
   const lookup = (text: string, what: string): WanTextEmbedding => {
     if (typeof text !== "string") throw new ModelInputError(`${what} が文字列でない`);
@@ -321,17 +391,17 @@ export const planWanGeneration = (
   };
   const positive = lookup(request.prompt, "prompt");
 
-  const steps = request.steps ?? DEFAULTS.steps;
+  const steps = request.steps ?? config.defaults.steps;
   if (!Number.isInteger(steps) || steps < 1) {
     throw new ModelInputError(`steps ${steps} が 1 以上の整数でない`);
   }
-  const guidance = request.guidance ?? DEFAULTS.guidance;
+  const guidance = request.guidance ?? config.defaults.guidance;
   if (!Number.isFinite(guidance) || guidance < 1) {
     throw new ModelInputError(
       `guidance ${guidance} が 1 以上の有限の数でない（上流は 1 以下で CFG を回さないので、1 未満は効かない）`,
     );
   }
-  const shift = request.shift ?? DEFAULTS.shift;
+  const shift = request.shift ?? config.scheduler.shift;
   if (!Number.isFinite(shift) || shift <= 0) {
     throw new ModelInputError(`shift ${shift} が正の有限の数でない`);
   }
@@ -455,16 +525,14 @@ type DitContract = {
 };
 
 /**
- * DiT のグラフ宣言を、ホストが組む入力（patch・RoPE・埋め込み資産）と突き合わせる。
+ * DiT のグラフ宣言を、ホストが組む入力（patch・RoPE の素表）と突き合わせる。
  *
  * MUST: 構築時に落とす。ホストの前処理は自分の定数で組むので、グラフが別の寸法で焼かれていても
- * ホスト側は最後まで通り、落ちるのは DiT の重みを上げた後の Session の shape 検査になる。
+ * ホスト側は最後まで通り、落ちるのは DiT の重みを上げた後の Session の shape 検査になる。取得面では
+ * 家族 admission（重みの part を取る前）で呼ぶ — 埋め込み資産との突合（{@link assertEmbedsFitContext}）は
+ * 資産のバイト列が届いてから。
  */
-const ditContract = (
-  transformer: GraphOwner,
-  ropeBase: WanRopeBase,
-  embeds: WanTextEmbeds,
-): DitContract => {
+const ditContract = (transformer: GraphOwner, ropeBase: WanRopeBase): DitContract => {
   const tokenWidth = wanTokenWidth(WAN_PATCH);
   const tokens = inputShape(transformer, DIT_TOKENS);
   if (staticDim(tokens, -1, DIT_TOKENS) !== tokenWidth) {
@@ -486,25 +554,27 @@ const ditContract = (
     }
   }
   const context = inputShape(transformer, DIT_CONTEXT);
-  const contextRows = staticDim(context, 1, DIT_CONTEXT);
-  const contextWidth = staticDim(context, 2, DIT_CONTEXT);
-  if (contextWidth !== embeds.width) {
-    throw new Error(
-      `WanPipeline: '${DIT_CONTEXT}' の幅 ${contextWidth} が埋め込み資産の幅 ${embeds.width} と違う`,
-    );
-  }
-  const longest = Math.max(...embeds.entries.map((entry) => entry.tokens));
-  if (longest > contextRows) {
-    throw new Error(
-      `WanPipeline: 埋め込みの有効長 ${longest} が文脈の行数 ${contextRows} を超える`,
-    );
-  }
   return {
     output,
     projWidth: staticDim(inputShape(transformer, DIT_TIMESTEPS_PROJ), 1, DIT_TIMESTEPS_PROJ),
-    contextRows,
-    contextWidth,
+    contextRows: staticDim(context, 1, DIT_CONTEXT),
+    contextWidth: staticDim(context, 2, DIT_CONTEXT),
   };
+};
+
+/** 埋め込み資産の幅と有効長が DiT の文脈入力 `[1, rows, width]` に収まることを見る。 */
+const assertEmbedsFitContext = (dit: DitContract, embeds: WanTextEmbeds): void => {
+  if (dit.contextWidth !== embeds.width) {
+    throw new Error(
+      `WanPipeline: '${DIT_CONTEXT}' の幅 ${dit.contextWidth} が埋め込み資産の幅 ${embeds.width} と違う`,
+    );
+  }
+  const longest = Math.max(...embeds.entries.map((entry) => entry.tokens));
+  if (longest > dit.contextRows) {
+    throw new Error(
+      `WanPipeline: 埋め込みの有効長 ${longest} が文脈の行数 ${dit.contextRows} を超える`,
+    );
+  }
 };
 
 const asF32 = (tensor: Tensor, where: string): Float32Array => {
@@ -512,10 +582,45 @@ const asF32 = (tensor: Tensor, where: string): Float32Array => {
   return tensor.data;
 };
 
+/**
+ * この家族が manifest の `session` と明示指定で受けるキー（受理表 — `session/options.ts`）。
+ *
+ * どのキーも受けない: 配布形の quant 席は `f16` だけで実行ノブを宣言しない（ADR 0118 決定 7）。
+ * 宣言したノブは重みを取る前に fail loudly（黙って既定で走らせない）。
+ *
+ * NOTE: `export` は全家族の受理表の網羅を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const WAN_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: false,
+  attentionCompute: false,
+  attentionScoreStorage: false,
+  linearGemvReduce: false,
+  stateAttentionReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
+/** 家族 admission（`WanPipeline.#admit`）が確定させる材料。 */
+type WanAdmission = {
+  readonly config: WanPipelineConfig;
+  readonly quantName: string;
+  readonly quant: Quant;
+  /** quant 宣言を受理表で通した実効設定（{@link WAN_SESSION_POLICY} — DiT の Session へ渡す）。 */
+  readonly sessionOptions: SessionOptions;
+  readonly gpuFeatures: GpuFeaturesSpec | undefined;
+  readonly layout: WanVaeChunkLayout;
+  readonly ropeBase: WanRopeBase;
+  readonly dit: DitContract;
+};
+
 /** {@link WanPipeline} の内部状態。 */
 type WanState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
+  readonly config: WanPipelineConfig;
+  readonly sessionOptions: SessionOptions;
   readonly transformer: ModelComponent;
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
@@ -532,8 +637,9 @@ type WanState = {
 /**
  * Wan2.1 のテキスト → 動画パイプライン。
  *
- * 構築は {@link WanPipeline.fromAssets} だけを入口にする（コンストラクタは private — 資産の突合を
- * 迂回した半端な状態を作らせない。ADR 0008）。
+ * 構築は {@link WanPipeline.fromPretrained}（配布形から取得）か {@link WanPipeline.fromAssets}（取得済み
+ * バイト列）だけを入口にする（コンストラクタは private — manifest 検査と資産の突合を迂回した半端な
+ * 状態を作らせない。ADR 0008）。
  */
 export class WanPipeline {
   readonly #state: WanState;
@@ -547,54 +653,214 @@ export class WanPipeline {
   }
 
   /**
-   * 取得済みのバイト列から組む（{@link WanAssets}）。容器を開いてグラフ宣言・RoPE の素表・埋め込み
-   * 資産・VAE の chunk グラフの取り決めを突き合わせ、GPU を取る（共有 GPU なら取らない）。
+   * 配布形から取得して組む（`loadManifest` → `resolveSelection` → **各部品の descriptor（part 0）
+   * だけ**を取って admission → 重みの part を温める → 埋め込み資産の `fetchAssets` → 構築）。block は
+   * Session を組むその瞬間に part 順で読まれる（ADR 0109 — `src/hub/components.ts`）。部品を別リポの
+   * 同じ役割で差し替えるときは {@link FromPretrainedComponentOptions.components}（`transformer` /
+   * `vae_decoder_first` / `vae_decoder_next`）。
    *
-   * MUST: 資産の解析と突合は **GPU を取りに行く前**（壊れた資産の真因を GPU 無し環境の別の例外で
-   * 消さない — 他の家族と同じ順序）。Session は 1 本も張らない。
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。この家族は公開配布リポを
+   * まだ持たないので pin 定数も無い）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の
+   * 配布形（`models/karume-wan2.1`）は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
+   * `denoDirectory`）— HF の `owner/name` の綴りの門は通らず、network も CacheStorage も通らない
+   * （{@link WanFromPretrainedOptions} の HTTP 専用ノブは効かない）。
+   */
+  static async fromPretrained(
+    ref: string | HubRepoRef | DistributionSource,
+    options: WanFromPretrainedOptions = {},
+  ): Promise<WanPipeline> {
+    const source = toManifestSource(ref, "WanPipeline.fromPretrained");
+    const hubOptions = hubLoadOptions(options);
+    const loaded = await loadManifest(source, hubOptions);
+    const choice = {
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.quant === undefined ? {} : { quant: options.quant }),
+    };
+    const selection = resolveSelection(loaded.manifest, choice);
+    const buildOptions: WanPipelineOptions = {
+      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+      ...choice,
+      ...(options.onRunDiagnostics === undefined
+        ? {}
+        : { onRunDiagnostics: options.onRunDiagnostics }),
+    };
+    // 家族の門は admission 席で通す（重みの part を取る前 — `src/hub/components.ts`）。
+    const { admitted, assets, open } = await loadContainerComponents(
+      "WanPipeline.fromPretrained",
+      loaded,
+      selection,
+      COMPONENT_KEYS,
+      async (open) => {
+        const admitted = await WanPipeline.#admit(loaded.manifest, open, buildOptions);
+        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
+        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+        await assertRequiredLimitsBeforeDownload(
+          admitted.quant.requiredLimits,
+          buildOptions.gpu,
+          `WanPipeline: quant '${admitted.quantName}'`,
+        );
+        return admitted;
+      },
+      {
+        ...hubOptions,
+        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+        ...(options.components === undefined ? {} : { components: options.components }),
+      },
+    );
+    return await WanPipeline.#build(admitted, assets, open, buildOptions);
+  }
+
+  /**
+   * 取得済みの manifest + 資産から組む（{@link WanAssets}）。容器を開いて、取得面と同じ家族 admission
+   * （{@link WanPipeline.#admit}）と組み立て（{@link WanPipeline.#build}）を通す — 2 面の違いは部品の
+   * 供給口だけ。
    */
   static async fromAssets(
     input: WanAssets,
     options: WanPipelineOptions = {},
   ): Promise<WanPipeline> {
-    const { assets } = input;
     const buffer = (key: string): ArrayBuffer =>
-      readAssetBuffer("WanPipeline", "weights / assets", assets, key);
-    const open = await assetComponentOpener("WanPipeline", assets, buffer, COMPONENT_KEYS);
-    const transformer = open(TRANSFORMER);
-    const vaeFirst = open(VAE_DECODER_FIRST);
-    const vaeNext = open(VAE_DECODER_NEXT);
-    const textEmbeds = parseWanTextEmbeds(buffer(TEXT_EMBEDS));
-    const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
-    const layout = wanVaeChunkLayout(vaeFirst, vaeNext);
-    if (layout.latentChannels !== WAN_PATCH.channels) {
+      readAssetBuffer("WanPipeline", "weights / assets", input.assets, key);
+    const open = await assetComponentOpener("WanPipeline", input.assets, buffer, COMPONENT_KEYS);
+    const admitted = await WanPipeline.#admit(input.manifest, open, options);
+    return await WanPipeline.#build(admitted, input.assets, open, options);
+  }
+
+  /**
+   * この manifest と部品のグラフ宣言を Wan2.1 として実行できるかを見る（家族 admission — 取得面では
+   * **重みの part を 1 バイトも取る前**に呼ばれる）。
+   *
+   * MUST: 家族の門はこの 1 本に集める（pipeline 名 / major・`pipelineConfig`・quant の `session`・
+   * 共有 GPU の能力・計測の device・グラフ宣言 × ホストの取り決め）。後段へ散らすと、取得面では GB 級の
+   * 重みを落とした**後**にしか落ちない（ADR 0070 決定 5）。
+   * MUST: manifest の契約違反は **GPU を取りに行く前**に落とす（他の家族と同じ順序）。
+   *
+   * NOTE: RoPE の素表（`transformer` の容器の資産）はここで読む — 重み block と part を共有しない資産は
+   * admission の席でも読める（`src/hub/components.ts`）。埋め込み資産（manifest の `assets`）はまだ
+   * 届いていないので、その突合は {@link WanPipeline.#build}。
+   */
+  static async #admit(
+    manifest: Manifest,
+    open: ComponentOpener,
+    options: WanPipelineOptions,
+  ): Promise<WanAdmission> {
+    const modelName = options.model ?? manifest.defaultModel;
+    if (!Object.hasOwn(manifest.models, modelName)) {
       throw new Error(
-        `WanPipeline: VAE の潜在 ${layout.latentChannels} チャネルが DiT の ${WAN_PATCH.channels} と違う`,
+        `WanPipeline: model '${modelName}' は manifest に無い` +
+          `（利用可能: ${manifest.available.models.join(" / ")}）`,
       );
     }
-    const dit = ditContract(transformer, ropeBase, textEmbeds);
+    const entry: ModelEntry = manifest.models[modelName];
+    const { name, major } = entry.pipeline;
+    if (name !== WAN_PIPELINE_NAME) {
+      throw new Error(
+        `WanPipeline: manifest の pipeline が '${name}/${major}'` +
+          `（'${WAN_PIPELINE_NAME}/${WAN_PIPELINE_MAJOR}' が必要）`,
+      );
+    }
+    if (major !== WAN_PIPELINE_MAJOR) {
+      // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門（ADR 0038 §6）。
+      throw new Error(
+        `WanPipeline: pipeline '${name}/${major}' の major に未対応` +
+          `（この実装が読めるのは ${WAN_PIPELINE_NAME}/${WAN_PIPELINE_MAJOR}）`,
+      );
+    }
+    const config = parseWanPipelineConfig(entry.pipelineConfig);
+
+    const quantName = options.quant ?? entry.defaultQuant;
+    if (!Object.hasOwn(entry.quants, quantName)) {
+      throw new Error(
+        `WanPipeline: quant '${quantName}' は manifest に無い` +
+          `（利用可能: ${entry.available.quants.join(" / ")}）`,
+      );
+    }
+    const quant = entry.quants[quantName];
+    // 未対応の宣言は重みの part を取る前に落とす（全家族共通の 1 本）。
+    const sessionOptions = resolveSessionOptions(
+      WAN_SESSION_POLICY,
+      quant.session,
+      {},
+      `WanPipeline: quant '${quantName}'`,
+    );
+    const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
+
     if (options.gpu?.gpuTimingEnabled === true) {
       throw new Error(
         "WanPipeline: gpuTiming が有効な device では VAE の段（1 タイル = 1 batch）を回せない" +
           "（runtime は計測の device で batch を開かない）— 計測なしの device を渡す",
       );
     }
+    // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 重みを落とす前に判る
+    // 唯一の家族門（後段の検査も同じ関数を呼ぶ）。
+    if (options.gpu !== undefined) {
+      assertGpuFeaturesGranted(gpuFeatures, options.gpu, `WanPipeline: quant '${quantName}'`);
+      assertRequiredLimitsSatisfied(
+        quant.requiredLimits,
+        options.gpu.limits,
+        `WanPipeline: quant '${quantName}'`,
+      );
+    }
 
-    const gpu = options.gpu ?? await acquireGpu();
-    return new WanPipeline({
-      gpu,
-      ownsGpu: options.gpu === undefined,
-      transformer,
-      vaeFirst,
-      vaeNext,
-      layout,
-      ropeBase,
-      dit,
-      textEmbeds,
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-    });
+    const transformer = open(TRANSFORMER);
+    const layout = wanVaeChunkLayout(open(VAE_DECODER_FIRST), open(VAE_DECODER_NEXT));
+    if (layout.latentChannels !== WAN_PATCH.channels) {
+      throw new Error(
+        `WanPipeline: VAE の潜在 ${layout.latentChannels} チャネルが DiT の ${WAN_PATCH.channels} と違う`,
+      );
+    }
+    const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
+    const dit = ditContract(transformer, ropeBase);
+    return { config, quantName, quant, sessionOptions, gpuFeatures, layout, ropeBase, dit };
+  }
+
+  /**
+   * admission を通った材料 + 資産から組む（{@link WanPipeline.fromAssets} と `fromPretrained` が共有する
+   * 1 本）。埋め込み資産を解析して DiT の文脈入力と突き合わせ、GPU を取る（共有 GPU なら取らない）。
+   *
+   * MUST: 資産の解析と突合は **GPU を取りに行く前**（壊れた資産の真因を GPU 無し環境の別の例外で
+   * 消さない — 他の家族と同じ順序）。Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
+   */
+  static async #build(
+    admitted: WanAdmission,
+    assets: WanAssets["assets"],
+    open: ComponentOpener,
+    options: WanPipelineOptions,
+  ): Promise<WanPipeline> {
+    const { config, quantName, sessionOptions, gpuFeatures, layout, ropeBase, dit } = admitted;
+    const textEmbeds = parseWanTextEmbeds(
+      readAssetBuffer("WanPipeline", "weights / assets", assets, TEXT_EMBEDS),
+    );
+    assertEmbedsFitContext(dit, textEmbeds);
+
+    const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+    const ownsGpu = options.gpu === undefined;
+    try {
+      // 宣言された feature は device 作成時にしか要求できない（ADR 0028）— 自前で取った device は
+      // ここが唯一の門（共有 GPU は {@link WanPipeline.#admit} が同じ 1 本で見ている）。
+      assertGpuFeaturesGranted(gpuFeatures, gpu, `WanPipeline: quant '${quantName}'`);
+      return new WanPipeline({
+        gpu,
+        ownsGpu,
+        config,
+        sessionOptions,
+        // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
+        transformer: open(TRANSFORMER),
+        vaeFirst: open(VAE_DECODER_FIRST),
+        vaeNext: open(VAE_DECODER_NEXT),
+        layout,
+        ropeBase,
+        dit,
+        textEmbeds,
+        ...(options.onRunDiagnostics === undefined
+          ? {}
+          : { onRunDiagnostics: options.onRunDiagnostics }),
+      });
+    } catch (error) {
+      // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
+      if (ownsGpu) gpu.destroy();
+      throw error;
+    }
   }
 
   /**
@@ -621,9 +887,12 @@ export class WanPipeline {
 
   async #generate(request: WanGenerateRequest): Promise<GeneratedVideo> {
     const state = this.#state;
-    const plan = planWanGeneration(request, state.textEmbeds, {
-      spatialScale: state.layout.sampleTile / state.layout.tile,
-    });
+    const plan = planWanGeneration(
+      request,
+      state.textEmbeds,
+      { spatialScale: state.layout.sampleTile / state.layout.tile },
+      state.config,
+    );
     const { onEvent } = request;
     const emit = onEvent === undefined
       ? () => Promise.resolve()
@@ -661,7 +930,7 @@ export class WanPipeline {
     const observe = state.onRunDiagnostics;
 
     await emit({ kind: "stage", component: "transformer", at: "start" });
-    const session = await state.transformer.createSession(state.gpu, {});
+    const session = await state.transformer.createSession(state.gpu, state.sessionOptions);
     try {
       const predict = async (
         tokens: Float32Array<ArrayBuffer>,

@@ -62,7 +62,7 @@ uv run --with 'transformers==5.14.1' python -m deberta.export --layers 2
 
 `karume dist` assembles a distribution directory but holds no family knowledge — the pipeline
 registry is injected, and the registry inside the wheel is empty. `dist.py` in this directory is
-that injection: it composes 12 pipeline seats across 9 families with the core engine and passes
+that injection: it composes 13 pipeline seats across 10 families with the core engine and passes
 the repository's own spellings for `--series` (`outputs/series/`) and `--out` (`models/`).
 
 ```sh
@@ -70,12 +70,13 @@ cd tools/export-recipes
 uv run python dist.py                                   # default = anima
 uv run python dist.py --pipeline irodori
 uv run python dist.py --pipeline sbv2-fn                # FN voices (not published)
+uv run python dist.py --pipeline wan                    # Wan2.1 T2V 1.3B (not published yet)
 uv run python dist.py --pipeline sbv2 \
     --model F1 --model F2 --out ../../models/karume-sbv2-jvnv
 ```
 
 The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `siglip2` / `birefnet` /
-`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat`. What the flags mean — `--model` for
+`lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `wan`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
 [`../exporter/README.md`](../exporter/README.md).
@@ -109,21 +110,21 @@ release gate, and this reorganization only creates its precondition.
 
 ## Families
 
-| Family                                | What it emits                                                                                                                                       | README                                               |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `anima` (text-to-image)               | 4 graphs (text_encoder / text_conditioner / transformer / vae_decoder) + host reference fixtures, tokenizer assets                                  | [anima/README.md](anima/README.md)                   |
-| `sbv2` (text-to-speech)               | 5 graphs (dp / front / flow / dec / voice) + demo assets and the torch reference for the voice demo                                                 | [sbv2/README.md](sbv2/README.md)                     |
-| `deberta` (text encoder)              | the real-weight DeBERTa-v2 series — shipped as the `text_encoder` seat of the SBV2 distribution, no dist recipe here                                | [deberta/README.md](deberta/README.md)               |
-| `irodori` (text-to-speech)            | 6 text-side graphs + the 2 DACVAE codec graphs, tokenizer asset and full-loop reference fixtures                                                    | [irodori/README.md](irodori/README.md)               |
-| `siglip2` (image feature extraction)  | the vision tower's `pooler_output` as one graph + the preprocessing parity fixture                                                                  | [siglip2/README.md](siglip2/README.md)               |
-| `birefnet` (image segmentation)       | matte logits as one graph per model × resolution (BiRefNet_HR / Lucida)                                                                             | [birefnet/README.md](birefnet/README.md)             |
-| `depth-anything` (depth estimation)   | relative depth as one graph at the pretrained 518² point (Small is the only distributable license)                                                  | [depth_anything/README.md](depth_anything/README.md) |
-| `embeddinggemma` (sentence embedding) | one graph covering all 5 SentenceTransformer modules — series only, no distribution                                                                 | [embeddinggemma/README.md](embeddinggemma/README.md) |
-| `vowel-detector` (lip-sync vowels)    | the CRNN as one graph with a symbolic length                                                                                                        | [vowel_detector/README.md](vowel_detector/README.md) |
-| `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                                                        | [minicpm5/README.md](minicpm5/README.md)             |
-| `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B as 3 series (1-shot / states-form decode / token-only exit) — the mixed i8 × i4 fixture, plus the `karume-gemma4` distribution          | [gemma4/README.md](gemma4/README.md)                 |
-| `gemma4-qat` (causal LM, mobile QAT)  | the official Gemma 4 E2B / E4B mobile QAT text decoders with their fixed INT2/INT4/INT8 payloads and PLE, plus the `karume-gemma4-qat` distribution | [gemma4_qat/README.md](gemma4_qat/README.md)         |
-| `wan` (text-to-video)                 | Wan2.1 T2V 1.3B: the DiT as one S-form graph and the video VAE decoder as two chunk graphs, with golden fixtures — series only, no distribution yet | [wan/README.md](wan/README.md)                       |
+| Family                                | What it emits                                                                                                                                           | README                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `anima` (text-to-image)               | 4 graphs (text_encoder / text_conditioner / transformer / vae_decoder) + host reference fixtures, tokenizer assets                                      | [anima/README.md](anima/README.md)                   |
+| `sbv2` (text-to-speech)               | 5 graphs (dp / front / flow / dec / voice) + demo assets and the torch reference for the voice demo                                                     | [sbv2/README.md](sbv2/README.md)                     |
+| `deberta` (text encoder)              | the real-weight DeBERTa-v2 series — shipped as the `text_encoder` seat of the SBV2 distribution, no dist recipe here                                    | [deberta/README.md](deberta/README.md)               |
+| `irodori` (text-to-speech)            | 6 text-side graphs + the 2 DACVAE codec graphs, tokenizer asset and full-loop reference fixtures                                                        | [irodori/README.md](irodori/README.md)               |
+| `siglip2` (image feature extraction)  | the vision tower's `pooler_output` as one graph + the preprocessing parity fixture                                                                      | [siglip2/README.md](siglip2/README.md)               |
+| `birefnet` (image segmentation)       | matte logits as one graph per model × resolution (BiRefNet_HR / Lucida)                                                                                 | [birefnet/README.md](birefnet/README.md)             |
+| `depth-anything` (depth estimation)   | relative depth as one graph at the pretrained 518² point (Small is the only distributable license)                                                      | [depth_anything/README.md](depth_anything/README.md) |
+| `embeddinggemma` (sentence embedding) | one graph covering all 5 SentenceTransformer modules — series only, no distribution                                                                     | [embeddinggemma/README.md](embeddinggemma/README.md) |
+| `vowel-detector` (lip-sync vowels)    | the CRNN as one graph with a symbolic length                                                                                                            | [vowel_detector/README.md](vowel_detector/README.md) |
+| `minicpm5` (causal LM, 1-shot)        | MiniCPM5-1B as one prefill-shaped graph — the GQA acceptance fixture (ADR 0067), series only                                                            | [minicpm5/README.md](minicpm5/README.md)             |
+| `gemma4` (causal LM, 1-shot + decode) | Gemma 4 E2B as 3 series (1-shot / states-form decode / token-only exit) — the mixed i8 × i4 fixture, plus the `karume-gemma4` distribution              | [gemma4/README.md](gemma4/README.md)                 |
+| `gemma4-qat` (causal LM, mobile QAT)  | the official Gemma 4 E2B / E4B mobile QAT text decoders with their fixed INT2/INT4/INT8 payloads and PLE, plus the `karume-gemma4-qat` distribution     | [gemma4_qat/README.md](gemma4_qat/README.md)         |
+| `wan` (text-to-video)                 | Wan2.1 T2V 1.3B: the DiT as one S-form graph and the video VAE decoder as two chunk graphs, with golden fixtures, plus the `karume-wan2.1` distribution | [wan/README.md](wan/README.md)                       |
 
 ## Patch layers
 

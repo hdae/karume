@@ -1,11 +1,14 @@
-// Wan2.1 のパイプラインの GPU 不要の部分（`src/wan/`）— 入力の門・テキスト埋め込み資産の検査・潜在の逆正規化・
-// フレームの RGBA 化・乱数。実 GPU の通しは e2e_wan_pipeline_test.ts。
+// Wan2.1 のパイプラインの GPU 不要の部分（`src/wan/`）— 入力の門・`pipelineConfig` の門・テキスト埋め込み
+// 資産の検査・潜在の逆正規化・フレームの RGBA 化・乱数。実 GPU の通しは e2e_wan_pipeline_test.ts。
 
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { ModelInputError } from "../src/errors.ts";
 import {
+  ACCEPTED_SIZES,
   type GeneratedVideo,
+  MAX_FRAMES,
+  MIN_FRAMES,
   planWanGeneration,
   type WanGenerateRequest,
 } from "../src/wan/pipeline.ts";
@@ -20,6 +23,7 @@ import {
 import { denormalizeWanLatents, WAN_LATENTS_MEAN, WAN_LATENTS_STD } from "../src/wan/latents.ts";
 import { wanFrameToRgba } from "../src/wan/frames.ts";
 import { WanRandn } from "../src/wan/random.ts";
+import { parseWanPipelineConfig, type WanPipelineConfig } from "../src/wan/config.ts";
 
 /** 埋め込み資産の 1 行（テスト用の小さい幅）。 */
 type Row = {
@@ -93,8 +97,10 @@ const buildAsset = (
 const EMBEDS: WanTextEmbeds = parseWanTextEmbeds(buildAsset(ROWS));
 /** 832×480 の VAE の縮尺（chunk グラフの `8t / t`）。 */
 const GEOMETRY = { spatialScale: 8 };
+/** 配布形の `pipelineConfig`（recipe `wan/distribution.py` の `WAN_PIPELINE_CONFIG` — 参照の設定）。 */
+const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
 const plan = (request: Partial<WanGenerateRequest>) =>
-  planWanGeneration({ prompt: "Two cats.", ...request }, EMBEDS, GEOMETRY);
+  planWanGeneration({ prompt: "Two cats.", ...request }, EMBEDS, GEOMETRY, CONFIG);
 
 describe("テキスト埋め込み資産", () => {
   it("メタの並びのまま行を返し、行は [tokens, width] の f32", () => {
@@ -254,12 +260,12 @@ describe("planWanGeneration（generate の入口の門）", () => {
   it("negative の行が 1 本でない資産で negativePrompt を省くと拒む", () => {
     const embeds = parseWanTextEmbeds(buildAsset(ROWS.slice(0, 2)));
     assertThrows(
-      () => planWanGeneration({ prompt: "Two cats." }, embeds, GEOMETRY),
+      () => planWanGeneration({ prompt: "Two cats." }, embeds, GEOMETRY, CONFIG),
       ModelInputError,
       "negative の行が 0 本",
     );
     assertEquals(
-      planWanGeneration({ prompt: "Two cats.", guidance: 1 }, embeds, GEOMETRY).negative,
+      planWanGeneration({ prompt: "Two cats.", guidance: 1 }, embeds, GEOMETRY, CONFIG).negative,
       undefined,
     );
   });
@@ -298,6 +304,66 @@ describe("planWanGeneration（generate の入口の門）", () => {
     assertThrows(() => plan({ frames: 5, latents }), ModelInputError, "非有限");
     assertThrows(() => plan({ seed: -1 }), ModelInputError, "seed");
     assertEquals(plan({ seed: 42 }).initial, { kind: "seed", seed: 42 });
+  });
+
+  it("省いた steps / guidance / shift は manifest の pipelineConfig の値で埋め、明示した値はそれに勝つ", () => {
+    // 参照の設定と重ならない値（既定を焼き込んでいれば 50 / 5 / 3 が出る）。
+    const config: WanPipelineConfig = {
+      scheduler: { shift: 7.5 },
+      defaults: { steps: 23, guidance: 4.25 },
+    };
+    const resolved = planWanGeneration({ prompt: "Two cats." }, EMBEDS, GEOMETRY, config);
+    assertEquals([resolved.steps, resolved.guidance, resolved.shift], [23, 4.25, 7.5]);
+    const explicit = planWanGeneration(
+      { prompt: "Two cats.", steps: 2, guidance: 1, shift: 1.5 },
+      EMBEDS,
+      GEOMETRY,
+      config,
+    );
+    assertEquals([explicit.steps, explicit.guidance, explicit.shift], [2, 1, 1.5]);
+    assertEquals(explicit.negative, undefined, "guidance 1 の明示は既定の 4.25 に勝つ");
+  });
+});
+
+describe("モデルカードの受理集合（fixture を挟んだ突き合わせ）", () => {
+  // 反対側は recipe の `wan/tests/test_distribution.py`（card.py の表を同じ fixture と比べる）。
+  it("受理する寸法とフレーム数の範囲は fixture wan-card-limits.json と同じ", async () => {
+    const fixture: unknown = JSON.parse(
+      await Deno.readTextFile(new URL("./fixtures/wan-card-limits.json", import.meta.url)),
+    );
+    assertEquals(
+      fixture,
+      { acceptedSizes: ACCEPTED_SIZES, minFrames: MIN_FRAMES, maxFrames: MAX_FRAMES },
+      "pipeline.ts の受理集合を変えたら fixture と card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES も揃える",
+    );
+  });
+});
+
+describe("pipelineConfig（manifest の宣言の門）", () => {
+  const RAW = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
+
+  it("配布形の宣言をそのまま読む", () => {
+    assertEquals(parseWanPipelineConfig(RAW), CONFIG);
+  });
+
+  it("未知キー・欠落・値域の外は素の Error（資産の齟齬 — 入力起因ではない）", () => {
+    const rejected: readonly [Record<string, unknown>, string][] = [
+      [{ ...RAW, steps: 50 }, "未知キー 'steps'"],
+      [{ ...RAW, scheduler: { shift: 3, type: "unipc" } }, "未知キー 'type'"],
+      [{ ...RAW, defaults: { steps: 50, guidanceScale: 5 } }, "未知キー 'guidanceScale'"],
+      [{ defaults: RAW.defaults }, "pipelineConfig.scheduler: 無い"],
+      [{ scheduler: RAW.scheduler }, "pipelineConfig.defaults: 無い"],
+      [{ ...RAW, scheduler: {} }, "pipelineConfig.scheduler.shift: 無い"],
+      [{ ...RAW, scheduler: { shift: 0 } }, "shift"],
+      [{ ...RAW, defaults: { steps: 0, guidance: 5 } }, "steps"],
+      [{ ...RAW, defaults: { steps: 2.5, guidance: 5 } }, "steps"],
+      [{ ...RAW, defaults: { steps: 50, guidance: 0.5 } }, "guidance"],
+      [{ ...RAW, defaults: { steps: 50, guidance: "5" } }, "guidance"],
+    ];
+    for (const [raw, message] of rejected) {
+      const error = assertThrows(() => parseWanPipelineConfig(raw), Error, message);
+      assert(!(error instanceof ModelInputError), `宣言の齟齬を入力起因にしない: ${message}`);
+    }
   });
 });
 

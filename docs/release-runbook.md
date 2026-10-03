@@ -234,6 +234,30 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       食い違った 2026-08-24 / 08-29 の再発防止）
 - [ ] `deno task verify` → コミット
 
+### 家族の初公開（対応表そのものの新設 — 現行の該当: Wan2.1 = `karume-wan2.1`）
+
+公開リポを持たない家族は対応表を持たない（ADR 0073 決定 1 — `vowel-detector` と同じ）。表を
+新設する回は、上の「1 エントリ足す」に加えて、表の網羅を縛る門を同じコミットで揃える（どれかを
+忘れると、その門が落ちるか、表が公開面に出ないまま緑になる）:
+
+- [ ] **公開前の確認（Wan2.1）**: 50 ステップの通し（`KARUME_WAN_FULL_PIPELINE=1 deno task
+      test:models:wan` — B570 で約 30 分）が緑で、sha256 の行が一致すること（ADR 0118 決定 8 —
+      既定のレーンは 2 ステップだけ）。配布形は `tools/export-recipes` で
+      `uv run python dist.py --pipeline wan`（越境参照なし・`--out` は既定の `models/karume-wan2.1`）
+- [ ] `packages/models/src/wan/config.ts` に `WAN_SOURCES`（キー `"wan2.1"` → `hdae/karume-wan2.1` +
+      main の SHA — ADR 0118 決定 7 の名前の対応）を足し、`wan.ts` と `mod.ts` から出す
+- [ ] `packages/models/src/sources.ts` の `KARUME_SOURCES` へ畳む
+- [ ] `packages/models/tests/sources_test.ts` の `FAMILIES` に 1 行・家族数とリポ数の名指しを更新
+- [ ] `packages/models/tests/models_barrel_surface_test.ts` の家族表の名指し（`*_SOURCES` の列挙）へ足す
+- [ ] `tools/export-recipes/tests/test_dist_driver.py` の `RELEASE_REPOSITORIES` へ
+      `("wan", ["t2v-1.3b"], None, "karume-wan2.1")` を足す（TS 側の表と同じリポ集合を要求する門）
+- [ ] `WanPipeline.fromPretrained` の ref 省略時の案内（`toManifestSource` の第 3 引数）に
+      `WAN_SOURCES["wan2.1"]（@karume/models/wan）` を渡し、doc の「pin 定数も無い」を改める
+- [ ] `packages/runtime/tests/distribution_gate_test.ts` の `DISTRIBUTIONS` の注記を「公開済み」へ
+      移す（ミラーそのものは公開前から門番に載っている）
+- [ ] 公開面のスナップショット（`KARUME_SURFACE=write`）を書き直し、差分が `WAN_SOURCES` の 1 行
+      ずつ（barrel と `./wan`）であることを確かめる
+
 ## 4. JSR publish
 
 機構: **GitHub Release を published にすると `publish.yml` が発火**し、workspace ルートの

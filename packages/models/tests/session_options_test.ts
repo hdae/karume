@@ -23,6 +23,7 @@ import {
 } from "../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
+import { WAN_SESSION_POLICY } from "../src/wan/pipeline.ts";
 
 Deno.test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
   assertEquals(toSessionOptions({}), {});
@@ -299,7 +300,7 @@ describe("assertSessionOverrides", () => {
 });
 
 describe("家族の受理表", () => {
-  it("8 家族の表が SessionSpec の全キーを持つ（型の網羅の実行時の対）", () => {
+  it("9 家族の表が SessionSpec の全キーを持つ（型の網羅の実行時の対）", () => {
     // 表の型は `Required<SessionSpec>` の網羅なのでキーが増えれば型検査で落ちる。ここは型を
     // 緩めた改変（`Partial` 化など）が型検査を通ってしまう場合の対。
     const policies = {
@@ -311,6 +312,7 @@ describe("家族の受理表", () => {
       sbv2: SBV2_SESSION_POLICY,
       siglip2: SIGLIP2_SESSION_POLICY,
       "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
+      wan: WAN_SESSION_POLICY,
     };
     for (const [family, policy] of Object.entries(policies)) {
       assertEquals(Object.keys(policy).sort(), Object.keys(FULL).sort(), family);

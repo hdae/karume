@@ -1,7 +1,7 @@
 # Wan2.1 text-to-video demo
 
 A one-shot command line for the Wan2.1 T2V 1.3B pipeline: one prompt in, one clip out as numbered
-PNG frames. It is the worked example for `WanPipeline.fromAssets`, `prompts`, `generate` and
+PNG frames. It is the worked example for `WanPipeline.fromPretrained`, `prompts`, `generate` and
 `wanFrameToRgba`.
 
 ```
@@ -14,18 +14,21 @@ output directory are relative paths.
 
 ## Where the model comes from
 
-There is no distribution for this family yet (no `karume.json`, no `fromPretrained`, no pinned
-source table — that is stage 7 of ADR 0118). The script reads the export series directly:
+The script loads the `karume-wan2.1` distribution with `WanPipeline.fromPretrained`. The
+distribution is not published on Hugging Face yet, so there is no pinned source table
+(`WAN_SOURCES`) and the default is the local mirror:
 
-- `--series <dir>` (default `outputs/series/wan2.1-t2v-1.3b-f16-dyn`) holds the three containers
-  `transformer/`, `vae_decoder_first/` and `vae_decoder_next/`, each as `model.krm` or as the
-  numbered parts `model-0000N-of-0000M.krm`. They come from the Wan recipe
-  (`python -m wan.export_dit` and `python -m wan.export_vae` under `tools/export-recipes`).
-- `--embeds <file>` (default
-  `outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors`) is the precomputed
-  text-embedding asset (`python -m wan.text_embeds`).
+- Without `--source`, the script reads `models/karume-wan2.1` through a directory source handle
+  (`denoDirectory`): nothing goes over the network or into the cache. Build the mirror first from
+  the export series with `uv run python dist.py --pipeline wan` under `tools/export-recipes` (the
+  series come from `python -m wan.export_dit`, `python -m wan.export_vae` and
+  `python -m wan.text_embeds`). If the mirror is missing, the script stops and prints that command.
+- `--source <path>` points at another local distribution (a directory with `karume.json`), and
+  `--source <owner/name>` reads a Hugging Face repository (its `main` revision).
 
-All parts are read into host memory (about 3.1 GB) before the pipeline is built.
+The distribution holds the transformer, the two VAE chunk graphs and the precomputed text-embedding
+asset (about 2.9 GiB). Parts are read one at a time while the sessions are built, not loaded into
+host memory up front.
 
 ## Prompts
 
@@ -44,8 +47,9 @@ in the asset's metadata and in `pipeline.prompts`.
 
 ## Knobs
 
-Every flag that is left out falls back to the pipeline default, which is the reference setting:
-50 steps, guidance 5.0, flow shift 3.0, 832×480, 33 frames. `--seed` defaults to 42.
+Every flag that is left out falls back to the pipeline default. Steps, guidance and flow shift come
+from the distribution's `pipelineConfig` (50, 5.0 and 3.0, the reference setting); the size and
+frame count default to 832×480 and 33 frames. `--seed` defaults to 42.
 
 - `--size` accepts `832x480` or `480x832`.
 - `--frames` accepts 4n+1 between 5 and 33. Only 33 frames has been verified end to end on the

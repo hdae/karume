@@ -23,7 +23,8 @@ safetensors に書く。DiT の入力 `[1, 512, 4096]`（有効長の後ろを�
 
 ## 資産の形式（`text_embeds.safetensors`）
 
-- テンソルはプロンプトごとに 1 本（名前 = {@link FixedPrompt.name}・`F32`・`[L_valid, 4096]`）。
+- テンソルはプロンプトごとに 1 本（名前 = {@link wan.prompts.FixedPrompt.name}・`F32`・
+  `[L_valid, 4096]`）。
 - メタは**キー 1 つ**（{@link METADATA_KEY}）に JSON（キー整列・区切りの空白なし）を入れる。
   MUST: キーを複数にしない — safetensors（Rust）はメタを HashMap で書き、プロセスごとにキーの
   並びが変わる（2026-10-02 実測: 同じ入力の 3 回の書き出しで sha256 が 2 通り）。キー 1 つなら
@@ -32,6 +33,8 @@ safetensors に書く。DiT の入力 `[1, 512, 4096]`（有効長の後ろを�
   生成物 — docs/assets-layout.md）。配布形ではモデル単位の `assets`（quant 非依存 — 決定 4）。
 
 ## 固定プロンプト（利用者裁定 2026-10-02: 公式 README / Diffusers ドキュメントの例文から取る）
+
+表の正本は {@link wan.prompts.FIXED_PROMPTS}（カードと組み立ての門も同じ表を引く）。
 
 - `boxing-cats`（positive）: 公式 README の t2v-1.3B の例（`generate.py` の `EXAMPLE_PROMPT` と
   同文）。
@@ -58,7 +61,6 @@ import resource
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +70,7 @@ from safetensors.torch import save_file
 
 from _shared.paths import SERIES_ROOT
 from wan.pipeline_ref import MAX_SEQUENCE_LENGTH, TEXT_DIM
+from wan.prompts import FIXED_PROMPTS, FixedPrompt
 from wan.sources import DEFAULT_MODEL, SOURCES, text_snapshot
 
 #: 系列の席（決定 4・決定 7）。
@@ -81,96 +84,6 @@ METADATA_KEY = "karume.wan.text_embeds"
 
 #: umT5 の dtype（上流と同じ — 公式 `t5_dtype`）。
 TEXT_ENCODER_DTYPE = torch.bfloat16
-
-#: 役割の語彙。
-POSITIVE = "positive"
-NEGATIVE = "negative"
-
-#: 出所の commit（URL の版を固定するため — ブランチ名の URL は先頭が動くと別の文面を指しうる）。
-#: 公式リポは 2026-10-02 時点の main の先頭（2026-03-05 の commit）、Diffusers は v0.39.0 の
-#: タグが指す commit。
-_WAN_COMMIT = "9737cba9c1c3c4d04b33fcad41c111989865d315"
-_DIFFUSERS_COMMIT = "a3608b512ed7248499a44c61d954965ed9bdae4d"
-
-
-@dataclass(frozen=True)
-class FixedPrompt:
-    """固定プロンプト 1 本（資産のテンソル名・役割・原文・出所）。"""
-
-    name: str
-    role: str
-    #: 出所の原文（改行や全角の約物を含めて逐語 — 正規化は生成時に上流の関数で掛ける）。
-    text: str
-    #: 出所の URL（commit を固定した版）。
-    url: str
-    #: URL の中の位置（読み手が原文を探せる粒度）。
-    locator: str
-
-
-FIXED_PROMPTS: tuple[FixedPrompt, ...] = (
-    FixedPrompt(
-        name="boxing-cats",
-        role=POSITIVE,
-        text=(
-            "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a"
-            " spotlighted stage."
-        ),
-        url=f"https://github.com/Wan-Video/Wan2.1/blob/{_WAN_COMMIT}/README.md",
-        locator=(
-            "README の t2v-1.3B の実行例の --prompt"
-            "（generate.py の EXAMPLE_PROMPT['t2v-1.3B'] と同文）"
-        ),
-    ),
-    FixedPrompt(
-        name="ferret",
-        role=POSITIVE,
-        text=(
-            "\nThe camera rushes from far to near in a low-angle shot,\n"
-            "revealing a white ferret on a log. It plays, leaps into the water, and emerges, as the"
-            " camera zooms in\n"
-            "for a close-up. Water splashes berry bushes nearby, while moss, snow, and leaves"
-            " blanket the ground.\n"
-            "Birch trees and a light blue sky frame the scene, with ferns in the foreground. Side"
-            " lighting casts dynamic\n"
-            "shadows and warm highlights. Medium composition, front view, low angle, with depth of"
-            " field.\n"
-        ),
-        url=(
-            f"https://github.com/huggingface/diffusers/blob/{_DIFFUSERS_COMMIT}"
-            "/docs/source/en/api/pipelines/wan.md"
-        ),
-        locator='Text-to-Video の例（T2V memory / T2V inference speed のタブ）の prompt = """…"""',
-    ),
-    FixedPrompt(
-        name="cat-dog-baking",
-        role=POSITIVE,
-        text=(
-            "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring"
-            " flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy,"
-            " with sunlight streaming through the window."
-        ),
-        url=(
-            f"https://github.com/huggingface/diffusers/blob/{_DIFFUSERS_COMMIT}"
-            "/src/diffusers/pipelines/wan/pipeline_wan.py"
-        ),
-        locator=(
-            "EXAMPLE_DOC_STRING の prompt（WanPipeline.__call__ の例 — ドキュメントの API"
-            " リファレンスに出る）"
-        ),
-    ),
-    FixedPrompt(
-        name="negative",
-        role=NEGATIVE,
-        text=(
-            "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
-            "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
-            "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，"
-            "三条腿，背景人很多，倒着走"
-        ),
-        url=f"https://github.com/Wan-Video/Wan2.1/blob/{_WAN_COMMIT}/wan/configs/shared_config.py",
-        locator="wan_shared_cfg.sample_neg_prompt",
-    ),
-)
 
 
 class TextEmbedsError(ValueError):

@@ -1,0 +1,521 @@
+"""Wan2.1 の配布 recipe（`wan.distribution`）とカード（`wan.card`）— 組み立て 1 周ぶんの単体テスト。
+
+組み立てへ届く入力は数 KB の**正当な最小コンテナ**（`ir_fixtures`）と、書き手
+（`wan.text_embeds`）と同じ形の合成の埋め込み資産で作る。門に落とされることを見るケースも
+同じ器で作り、**宣言だけを実物とずらす**。
+
+実物の系列（`outputs/series/`）がある機では、実物で計画を 1 周組む門も回す（無ければ SKIP）。
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+from container_series import placed_paths, write_component
+from ir_fixtures import ir_container
+from safetensors.numpy import save
+from upstream_fixture import OTHER_REVISION, stamp_fixture_provenance
+
+from _shared.licenses import APACHE_LICENSE_2_0_PATH
+from _shared.paths import REPO_ROOT, SERIES_ROOT
+from karume.container import CODEC_LEDGER, AssetInput, Provenance
+from karume.dist import (
+    MANIFEST_FILENAME,
+    MODEL_CARD_FILENAME,
+    NOTICE_FILENAME,
+    DistError,
+    assemble_family,
+    resolve_card_renderer,
+    verify_dist,
+)
+from wan.card import (
+    WAN_ACCEPTED_SIZES,
+    WAN_FRAMES,
+    WAN_RESOURCE_QUANT,
+    WAN_SUPPORTED_PIPELINE,
+    render_wan_model_card,
+)
+from wan.distribution import (
+    PIPELINE,
+    WAN_DIT_CONTEXT_INPUT,
+    WAN_GRAPH_ROLES,
+    WAN_MODEL_FILE,
+    WAN_OUTPUT_PATHS,
+    WAN_PIPELINE,
+    WAN_PIPELINE_CONFIG,
+    WAN_REPO_NAME,
+    WAN_ROPE_BASE_ASSET,
+    WAN_ROPE_BASE_ROLE,
+    WAN_SERIES,
+    WAN_STORAGE_FORBIDDEN,
+    WAN_TEXT_EMBEDS_FILE,
+    WAN_TEXT_EMBEDS_METADATA_KEY,
+    WAN_TEXT_EMBEDS_ROLE,
+    WAN_TEXT_EMBEDS_SERIES,
+    WAN_TRANSFORMER_ROLE,
+    WAN_WEIGHTS,
+    WanSources,
+    wan_plan,
+    wan_sources,
+)
+from wan.prompts import FIXED_PROMPTS
+from wan.sources import DEFAULT_MODEL, SOURCES
+
+#: 合成の DiT の文脈入力 `[1, rows, width]`（実物の 512 × 4096 と**違う**数 — 幅を焼き込んでいれば
+#: 落ちる）。
+_ROWS = 6
+_WIDTH = 8
+
+#: 合成の RoPE 素表（資産の中身は組み立てが読まない — 宣言だけを見る）。
+_ROPE_BASE = b"rope-base-table!"
+
+#: 書き手（`wan.export_dit` / `wan.export_vae`）が焼く出所の正常形。
+_PINNED = Provenance(
+    license=SOURCES[DEFAULT_MODEL].license,
+    notice=NOTICE_FILENAME,
+    upstream_revision=SOURCES[DEFAULT_MODEL].revision,
+)
+
+#: `pipelineConfig` の欄（TS 側 `packages/models/src/wan/config.ts` の `ROOT_KEYS` /
+#: `SCHEDULER_KEYS` / `DEFAULTS_KEYS` の写し）。ロード側は未知キーも欠落も parse 時に落とすので、
+#: 焼く側とロード側の欄名は完全一致が要る。
+_CONFIG_KEYS = {"scheduler": ("shift",), "defaults": ("steps", "guidance")}
+
+#: TS 側の受理集合の写し（`packages/models/tests/wan_pipeline_test.ts` が `pipeline.ts` の値と
+#: 同じことを見る）。カードの表とこの fixture を比べるので、カードと TS のどちらか片方だけの
+#: 更新は赤になる。
+_CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-card-limits.json"
+
+
+@pytest.fixture(autouse=True)
+def _pinned_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """フィクスチャ容器に「台本が pin した revision から焼いた」出所を名乗らせる。"""
+    stamp_fixture_provenance(monkeypatch, _PINNED)
+
+
+def _graph_container(
+    role: str,
+    *,
+    storage: str = "f16",
+    context: Sequence[int] = (1, _ROWS, _WIDTH),
+    rope: tuple[str, str] | None = (WAN_ROPE_BASE_ASSET, WAN_ROPE_BASE_ROLE),
+) -> list[bytes]:
+    """系列に置く部品 1 本（part 列）。transformer だけが文脈入力と RoPE 素表の資産を持つ。"""
+    if role != WAN_TRANSFORMER_ROLE:
+        return ir_container(mark=role, named=role, storage=storage, inputs=(("latent", [1, 2]),))
+    assets = {} if rope is None else {rope[0]: AssetInput(rope[1], len(_ROPE_BASE), _ROPE_BASE)}
+    return ir_container(
+        mark=role,
+        named=role,
+        storage=storage,
+        inputs=((WAN_DIT_CONTEXT_INPUT, list(context)),),
+        assets=assets,
+    )
+
+
+def _prompt_rows() -> list[dict[str, Any]]:
+    """書き手（`wan.text_embeds.asset_metadata`）と同じ形のメタの prompts（トークン数は合成）。"""
+    return [
+        {
+            "name": prompt.name,
+            "role": prompt.role,
+            "prompt": prompt.text,
+            "normalized": prompt.text.strip(),
+            "tokens": index + 1,
+            "source": {"url": prompt.url, "locator": prompt.locator},
+        }
+        for index, prompt in enumerate(FIXED_PROMPTS)
+    ]
+
+
+def _text_embeds(
+    *,
+    source: Mapping[str, str] | None = None,
+    prompts: list[dict[str, Any]] | None = None,
+    width: int = _WIDTH,
+    extra_metadata: Mapping[str, str] = {},
+    shapes: Mapping[str, Sequence[int]] = {},
+) -> bytes:
+    """合成の埋め込み資産（`F32 [tokens, width]` + メタのキー 1 つ — 書き手と同じ形）。"""
+    upstream = SOURCES[DEFAULT_MODEL]
+    rows = _prompt_rows() if prompts is None else prompts
+    meta = {
+        "source": dict(source)
+        if source is not None
+        else {"repo": upstream.repo, "revision": upstream.revision},
+        "prompts": rows,
+    }
+    tensors = {
+        row["name"]: np.zeros(shapes.get(row["name"], (row["tokens"], width)), dtype=np.float32)
+        for row in rows
+    }
+    payload = json.dumps(meta, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return save(tensors, metadata={WAN_TEXT_EMBEDS_METADATA_KEY: payload, **extra_metadata})
+
+
+def _build_sources(
+    root: Path,
+    *,
+    containers: Mapping[str, list[bytes]] = {},
+    embeds: bytes | None = None,
+) -> WanSources:
+    """系列 2 本を偽資産で再現する（配布しない golden の混入込み）。"""
+    sources = wan_sources(root / "outputs" / "series")
+    for role in WAN_GRAPH_ROLES:
+        write_component(
+            sources.series / role / WAN_MODEL_FILE, containers.get(role) or _graph_container(role)
+        )
+    # 配布に入ってはいけない golden（系列には実際にこれらが並んでいる）。
+    (sources.series / WAN_TRANSFORMER_ROLE / "io.band-s00192-t0999.safetensors").write_bytes(b"io")
+    (sources.series / "pipeline_steps.band-boxing-cats.safetensors").write_bytes(b"steps")
+    sources.text_embeds.parent.mkdir(parents=True, exist_ok=True)
+    sources.text_embeds.write_bytes(_text_embeds() if embeds is None else embeds)
+    return sources
+
+
+@pytest.fixture
+def assembled(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    sources = _build_sources(tmp_path)
+    out_dir = tmp_path / "models" / WAN_REPO_NAME
+    manifest = assemble_family(
+        [wan_plan(sources)],
+        out_dir,
+        DEFAULT_MODEL,
+        render_card=lambda manifest, host_assets: render_wan_model_card(
+            manifest, f"hdae/{WAN_REPO_NAME}", host_assets
+        ),
+        root_files=PIPELINE.root_files,
+    )
+    return out_dir, manifest
+
+
+def _model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
+    return manifest["models"][DEFAULT_MODEL]
+
+
+def _present(out_dir: Path) -> list[str]:
+    return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
+
+
+class TestLayout:
+    def test_it_places_three_graphs_and_the_embedding_asset_under_the_model_subtree(
+        self, assembled
+    ) -> None:
+        out_dir, _ = assembled
+        expected = [
+            f"{DEFAULT_MODEL}/{rel}"
+            for rel in placed_paths(
+                WAN_OUTPUT_PATHS,
+                WAN_WEIGHTS,
+                # transformer の容器は資産 `rope_base` の専用 part が 1 本増える。
+                {WAN_TRANSFORMER_ROLE: 4},
+            )
+        ]
+        assert _present(out_dir) == sorted(
+            [*expected, MANIFEST_FILENAME, MODEL_CARD_FILENAME, "LICENSE.md", NOTICE_FILENAME]
+        )
+
+    def test_it_never_carries_the_series_goldens(self, assembled) -> None:
+        out_dir, _ = assembled
+        assert list(out_dir.rglob("io.*")) == []
+        assert list(out_dir.rglob("pipeline_steps.*")) == []
+
+    def test_the_manifest_declares_the_f16_seat_and_the_model_asset(self, assembled) -> None:
+        """quant 席は f16 だけ・資産はモデル単位の `text_embeds`（quant 非依存 — 決定 4）。"""
+        _, manifest = assembled
+        model = _model(manifest)
+        assert manifest["defaultModel"] == DEFAULT_MODEL
+        assert model["pipeline"] == WAN_PIPELINE
+        assert list(model["weights"]) == list(WAN_GRAPH_ROLES)
+        assert list(model["assets"]) == [WAN_TEXT_EMBEDS_ROLE]
+        assert model["assets"][WAN_TEXT_EMBEDS_ROLE]["path"] == (
+            f"{DEFAULT_MODEL}/{WAN_TEXT_EMBEDS_ROLE}/{WAN_TEXT_EMBEDS_FILE}"
+        )
+        assert list(model["quants"]) == ["f16"]
+        assert model["defaultQuant"] == "f16"
+        assert model["quants"]["f16"]["weights"] == dict.fromkeys(WAN_GRAPH_ROLES, "f16")
+        assert model["quants"]["f16"]["session"] == {}
+
+    def test_the_pipeline_config_has_exactly_the_fields_the_loader_accepts(self, assembled) -> None:
+        _, manifest = assembled
+        config = _model(manifest)["pipelineConfig"]
+        assert {key: tuple(value) for key, value in config.items()} == _CONFIG_KEYS
+        assert config == WAN_PIPELINE_CONFIG
+
+    def test_it_reassembles_to_the_same_bytes(self, tmp_path: Path) -> None:
+        """同じ系列から 2 度組むと、manifest も全ファイルも同じバイトになる（決定的）。"""
+        sources = _build_sources(tmp_path)
+        out_dir = tmp_path / "models" / WAN_REPO_NAME
+
+        def digest() -> dict[str, bytes]:
+            return {path: (out_dir / path).read_bytes() for path in _present(out_dir)}
+
+        first = assemble_family([wan_plan(sources)], out_dir, DEFAULT_MODEL)
+        before = digest()
+        assert first == assemble_family([wan_plan(sources)], out_dir, DEFAULT_MODEL)
+        assert digest() == before
+        assert verify_dist(out_dir)
+
+    def test_the_repository_ships_the_apache_license_and_the_change_notice(self, assembled) -> None:
+        out_dir, _ = assembled
+        assert (out_dir / "LICENSE.md").read_bytes() == APACHE_LICENSE_2_0_PATH.read_bytes()
+        notice = (out_dir / NOTICE_FILENAME).read_text(encoding="utf-8")
+        assert "Apache License, Version 2.0" in notice
+        assert "text encoder is not distributed" in notice
+
+
+class TestTheStorageGates:
+    @pytest.mark.parametrize("storage", ["f32", "i8"])
+    def test_it_refuses_a_series_without_f16_storage(self, tmp_path: Path, storage: str) -> None:
+        """f16 系列のつもりで素の f32 / 別格納の系列を指した取り違え。"""
+        sources = _build_sources(
+            tmp_path,
+            containers={"vae_decoder_next": _graph_container("vae_decoder_next", storage=storage)},
+        )
+        with pytest.raises(DistError, match=r"vae_decoder_next: .* f16 が無い"):
+            wan_plan(sources)
+
+    def test_the_forbidden_table_names_every_other_compressed_layout(self) -> None:
+        """禁止表は codec 台帳の layout から f32 / f16 / i32 を除いた**全部**を持つ。"""
+        compressed = {entry.layout for entry in CODEC_LEDGER.values()} - {"f32", "f16", "i32"}
+        for role in WAN_GRAPH_ROLES:
+            assert set(WAN_STORAGE_FORBIDDEN[role]) == compressed, role
+
+
+class TestTheContainerProvenance:
+    """容器が名乗る出所を上流の pin（`wan.sources.SOURCES`）へ突き合わせる。"""
+
+    def test_it_refuses_a_container_baked_from_another_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamp_fixture_provenance(
+            monkeypatch,
+            Provenance(
+                license=_PINNED.license, notice=NOTICE_FILENAME, upstream_revision=OTHER_REVISION
+            ),
+        )
+        with pytest.raises(DistError, match="別の revision"):
+            wan_plan(_build_sources(tmp_path))
+
+    def test_it_refuses_a_container_that_names_another_license(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamp_fixture_provenance(
+            monkeypatch,
+            Provenance(
+                license="cc-by-nc-4.0",
+                notice=NOTICE_FILENAME,
+                upstream_revision=_PINNED.upstream_revision,
+            ),
+        )
+        with pytest.raises(DistError, match=r"provenance\.license が 'cc-by-nc-4.0'"):
+            wan_plan(_build_sources(tmp_path))
+
+    def test_it_refuses_a_model_missing_from_the_source_table(self, tmp_path: Path) -> None:
+        with pytest.raises(DistError, match="知らない"):
+            wan_plan(_build_sources(tmp_path), "t2v-14b")
+
+
+class TestTheRopeBaseAsset:
+    def test_it_refuses_a_transformer_without_the_rope_base_tables(self, tmp_path: Path) -> None:
+        """素表を持たない DiT は、利用者の fromPretrained が重みを落とした後で落ちる形になる。"""
+        sources = _build_sources(
+            tmp_path, containers={WAN_TRANSFORMER_ROLE: _graph_container("transformer", rope=None)}
+        )
+        with pytest.raises(DistError, match=r"資産 'rope_base' が無い"):
+            wan_plan(sources)
+
+    def test_it_refuses_a_rope_base_asset_with_another_role(self, tmp_path: Path) -> None:
+        sources = _build_sources(
+            tmp_path,
+            containers={
+                WAN_TRANSFORMER_ROLE: _graph_container(
+                    "transformer", rope=(WAN_ROPE_BASE_ASSET, "ple-index")
+                )
+            },
+        )
+        with pytest.raises(DistError, match="役割が 'ple-index'"):
+            wan_plan(sources)
+
+
+class TestTheTextEmbeddingAsset:
+    def test_it_refuses_a_second_metadata_key(self, tmp_path: Path) -> None:
+        sources = _build_sources(tmp_path, embeds=_text_embeds(extra_metadata={"other": "1"}))
+        with pytest.raises(DistError, match="メタのキー"):
+            wan_plan(sources)
+
+    def test_it_refuses_embeddings_made_from_another_revision(self, tmp_path: Path) -> None:
+        upstream = SOURCES[DEFAULT_MODEL]
+        sources = _build_sources(
+            tmp_path,
+            embeds=_text_embeds(source={"repo": upstream.repo, "revision": OTHER_REVISION}),
+        )
+        with pytest.raises(DistError, match="上流の pin"):
+            wan_plan(sources)
+
+    def test_it_refuses_prompts_that_differ_from_the_fixed_table(self, tmp_path: Path) -> None:
+        """カードは固定プロンプトの表から本文を描くので、資産のメタが違えば配らない。"""
+        rows = _prompt_rows()
+        rows[0] = {**rows[0], "prompt": rows[0]["prompt"] + " Extra."}
+        sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
+        with pytest.raises(DistError, match="固定プロンプトの表"):
+            wan_plan(sources)
+
+    def test_it_refuses_a_width_that_differs_from_the_dit_context(self, tmp_path: Path) -> None:
+        sources = _build_sources(tmp_path, embeds=_text_embeds(width=_WIDTH + 1))
+        with pytest.raises(DistError, match="DiT の文脈入力"):
+            wan_plan(sources)
+
+    def test_it_refuses_more_valid_rows_than_the_dit_context_holds(self, tmp_path: Path) -> None:
+        rows = _prompt_rows()
+        rows[1] = {**rows[1], "tokens": _ROWS + 1}
+        sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
+        with pytest.raises(DistError, match=f"有効長 1〜{_ROWS}"):
+            wan_plan(sources)
+
+    def test_it_refuses_a_tensor_whose_rows_differ_from_the_token_count(
+        self, tmp_path: Path
+    ) -> None:
+        name = FIXED_PROMPTS[2].name
+        sources = _build_sources(tmp_path, embeds=_text_embeds(shapes={name: (5, _WIDTH)}))
+        with pytest.raises(DistError, match=f"'{name}' が F32"):
+            wan_plan(sources)
+
+    def test_it_refuses_a_missing_asset(self, tmp_path: Path) -> None:
+        sources = _build_sources(tmp_path)
+        sources.text_embeds.unlink()
+        with pytest.raises(DistError):
+            wan_plan(sources)
+
+
+class TestTheModelCard:
+    def test_it_is_the_only_profile_and_is_resolved_without_a_choice(self) -> None:
+        assert resolve_card_renderer(PIPELINE, None) is render_wan_model_card
+
+    def test_it_refuses_a_pipeline_it_does_not_describe(self, assembled) -> None:
+        _, manifest = assembled
+        foreign = json.loads(json.dumps(manifest))
+        foreign["models"][DEFAULT_MODEL]["pipeline"] = "siglip2/1"
+        with pytest.raises(ValueError, match=WAN_SUPPORTED_PIPELINE):
+            render_wan_model_card(foreign, "hdae/x")
+
+    def test_it_attributes_the_pinned_upstream_revision(self, assembled) -> None:
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        upstream = SOURCES[DEFAULT_MODEL]
+        assert f"base_model: {upstream.repo}" in card
+        assert f"license: {upstream.license}" in card
+        assert f"at commit `{upstream.revision}`" in card
+
+    def test_it_lists_every_fixed_prompt_with_its_role(self, assembled) -> None:
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        for prompt in FIXED_PROMPTS:
+            assert f"| `{prompt.name}` | {prompt.role} |" in card
+            assert prompt.text.strip("\n") in card
+
+    def test_the_usage_names_the_declared_repository(self, assembled) -> None:
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert f'repo: "hdae/{WAN_REPO_NAME}"' in card
+        assert "WanPipeline.fromPretrained(" in card
+        assert "fromAssets" not in card
+
+    def test_the_defaults_come_from_the_manifest(self, assembled) -> None:
+        """既定値は焼き込まず pipelineConfig から描く（実物と違う値で組むと違う値が出る）。"""
+        _, manifest = assembled
+        changed = json.loads(json.dumps(manifest))
+        changed["models"][DEFAULT_MODEL]["pipelineConfig"] = {
+            "scheduler": {"shift": 7.5},
+            "defaults": {"steps": 23, "guidance": 4.25},
+        }
+        card = render_wan_model_card(changed, "hdae/x")
+        assert "- **steps**: 23" in card
+        assert "- **guidance**: 4.25" in card
+        assert "- **shift** (flow-matching shift): 7.5" in card
+
+    def test_it_renders_the_same_bytes_for_the_same_manifest(self, assembled) -> None:
+        _, manifest = assembled
+        assert render_wan_model_card(manifest, "hdae/x") == render_wan_model_card(
+            manifest, "hdae/x"
+        )
+
+    def test_the_accepted_inputs_match_the_typescript_side(self) -> None:
+        """カードの受理集合は TS の受理集合と同じ（反対側は wan_pipeline_test.ts）。"""
+        fixture = json.loads(_CARD_LIMITS_FIXTURE.read_text(encoding="utf-8"))
+        assert fixture == {
+            "acceptedSizes": [
+                {"width": width, "height": height} for width, height in WAN_ACCEPTED_SIZES
+            ],
+            "minFrames": WAN_FRAMES[0],
+            "maxFrames": WAN_FRAMES[1],
+        }, "card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES を変えたら fixture と pipeline.ts も揃える"
+
+    def test_it_names_the_measured_resources_with_their_conditions(self, assembled) -> None:
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert "## Resources" in card
+        assert f"with the `{WAN_RESOURCE_QUANT}` quant" in card
+        assert "6.19 GiB" in card
+        assert "3.32 GiB" in card
+        assert "`maxStorageBufferBindingSize` (128 MiB)" in card
+
+    def test_it_refuses_a_manifest_without_the_measured_quant(self, assembled) -> None:
+        """実測した席が無い配布形では資源の数を名乗らない（推し量った数を出さない）。"""
+        _, manifest = assembled
+        changed = json.loads(json.dumps(manifest))
+        quants = changed["models"][DEFAULT_MODEL]["quants"]
+        quants["i8"] = quants.pop(WAN_RESOURCE_QUANT)
+        changed["models"][DEFAULT_MODEL]["defaultQuant"] = "i8"
+        with pytest.raises(ValueError, match=f"quant '{WAN_RESOURCE_QUANT}'"):
+            render_wan_model_card(changed, "hdae/x")
+
+
+class TestTheWritersSpellTheSameNames:
+    """配布 recipe は torch を読まないので綴りを自前で持つ — 書き手（torch を読む）と一致する。"""
+
+    def test_the_series_names(self) -> None:
+        from wan import export_dit, export_vae, text_embeds
+
+        assert export_dit.SERIES.name == WAN_SERIES
+        assert export_vae.SERIES_NAME == WAN_SERIES
+        assert text_embeds.SERIES_NAME == WAN_TEXT_EMBEDS_SERIES
+
+    def test_the_embedding_asset_format(self) -> None:
+        from wan import text_embeds
+
+        assert text_embeds.ASSET_NAME == WAN_TEXT_EMBEDS_FILE
+        assert text_embeds.METADATA_KEY == WAN_TEXT_EMBEDS_METADATA_KEY
+
+    def test_the_rope_base_asset_and_the_context_input(self) -> None:
+        from wan import export_dit
+
+        assert (export_dit.ROPE_BASE_ASSET, export_dit.ROPE_BASE_ROLE) == (
+            WAN_ROPE_BASE_ASSET,
+            WAN_ROPE_BASE_ROLE,
+        )
+        assert export_dit.MODEL_FILE == WAN_MODEL_FILE
+        assert WAN_DIT_CONTEXT_INPUT in export_dit.INPUT_NAMES
+
+
+_REAL = wan_sources(SERIES_ROOT)
+_REAL_PRESENT = (_REAL.series / WAN_TRANSFORMER_ROLE).is_dir() and _REAL.text_embeds.is_file()
+
+
+@pytest.mark.skipif(not _REAL_PRESENT, reason=f"実物の系列が無い: {_REAL.series}")
+class TestTheRealSeries:
+    """実物の系列（`wan.export_dit` / `wan.export_vae` / `wan.text_embeds` の出力）で計画が組める。
+
+    読むのは容器の 2 文書・束縛表・資産の宣言と埋め込み資産のヘッダだけ（重みの payload は
+    読まない）。
+    """
+
+    def test_the_plan_passes_every_gate(self) -> None:
+        plan = wan_plan(_REAL)
+        assert plan.pipeline == WAN_PIPELINE
+        assert set(plan.artifacts) == {*WAN_GRAPH_ROLES, WAN_TEXT_EMBEDS_ROLE}

@@ -2,15 +2,16 @@
 // tests/assets_gate_test.ts・GPU 版は tests/gpu_gate_test.ts）。
 //
 // 配布形ミラー（`models/karume-<family>/`）を根にする検査 — anima / sbv2 / irodori / gemma4 /
-// QAT の実資産 e2e（packages/models/tests/e2e_*_test.ts と helpers/irodori-assets.ts）・融合ヒット数の
-// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat — tests/assets_fusion_counts_test.ts）
+// QAT / wan の実資産 e2e（packages/models/tests/e2e_*_test.ts と helpers/irodori-assets.ts）・融合ヒット数の
+// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat / wan — tests/assets_fusion_counts_test.ts）
 // — は、いずれも `karume.json` の有無で `ignore` し `console.warn` だけを残して緑になる。
 // `outputs/series/` だけ持つ機（新しい作業機・worktree を別ホストへ持ち出した場合）では
 // assets_gate_test.ts が緑のまま実資産検査が丸ごと消えるので、ここで 1 本落とす。
 //
 // 射程は**公開済みの全ミラー**（2026-09-25 裁定）。e2e がまだ読まないミラー（siglip2 など）も
 // 載せる — 門番の射程を「今 e2e が読むもの」に合わせると、e2e を足した日に門番の更新を忘れて
-// 無音 SKIP が戻る。未公開の vowel-detector は載せない（配布形を作ってから載せる）。
+// 無音 SKIP が戻る。未公開の vowel-detector は載せない（配布形を作ってから載せる）。未公開でも
+// e2e と融合ヒット数の門が根にするミラー（gemma4-qat / wan2.1）は載せる。
 //
 // 見るのは**有無だけではない**（ADR 0108 段 3 検収②）。`karume.json` はあるが中身が旧 major の
 // まま、あるいは宣言された part が 1 本足りない・長さが宣言と違う、という形は上の e2e を
@@ -45,10 +46,11 @@ const ALLOW_NO_DISTRIBUTION = Deno.env.get("KARUME_ALLOW_NO_DISTRIBUTION") === "
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
- * 門番が要求する配布形ミラー = 公開済みの 10 リポ + `karume-gemma4-qat`。
+ * 門番が要求する配布形ミラー = 公開済みの 10 リポ + `karume-gemma4-qat` + `karume-wan2.1`。
  *
  * `karume-gemma4-qat` は未公開だが、QAT の公開入口 e2e と融合ヒット数の門が根にするので、
- * 射程を広げる前から門番に載っていた（外すと既存の門を緩めることになる）。
+ * 射程を広げる前から門番に載っていた（外すと既存の門を緩めることになる）。`karume-wan2.1` も未公開
+ * だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と融合ヒット数の門が根にする（ADR 0118 段 7）。
  */
 const DISTRIBUTIONS = [
   "karume-anima",
@@ -62,6 +64,7 @@ const DISTRIBUTIONS = [
   "karume-lucida",
   "karume-sbv2-jvnv",
   "karume-siglip2",
+  "karume-wan2.1",
 ] as const;
 
 /** この版の読み手が受け付ける配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
