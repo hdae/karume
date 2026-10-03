@@ -10,6 +10,8 @@
 - S 形の export の形（記号 `S` 1 つ・入力名・op 集合・S 依存の焼き込みが無いこと）
 - CPU の参照とパッチ後の eager の attention が flash 経路に固定されていること（S = 32,760 で MATH
   へ落ちると OOM — 黙って落ちずに止まる形）
+- i8 系列（ADR 0120 決定 2 / 3）: 丸めが上流の重みスロット全部に届き、bias / norm は上流の f32 の
+  値のまま・束縛表に i8 があり f16 が無い・ケースの組と全ケースの f64 の参照
 
 合成モデル（乱数初期化の小さな `WanTransformer3DModel`）で回すものと、実重み（フィクスチャ
 `wan_snapshot` — 無い機では SKIP）で回すものがある。合成モデルの形は **3 軸と C が全部違う値**にする
@@ -721,8 +723,18 @@ def _tiny_writer(monkeypatch: pytest.MonkeyPatch, series: Path) -> None:
     monkeypatch.setattr(export_dit, "load_transformer", lambda _name: _tiny_dit())
     monkeypatch.setattr(export_dit, "SERIES", series)
     monkeypatch.setattr(export_dit, "PROBE_SERIES", series.with_name("probe"))
+    monkeypatch.setattr(export_dit, "I8_SERIES", series.with_name("i8"))
+    # i8 系列の実寸の格子（実物は 33 フレーム）を合成の格子へ — 実寸の役割の書き分けも 1 周で踏む。
+    monkeypatch.setattr(export_dit, "I8_FULL_LATENTS", (TINY_LATENT,))
     monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
     monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+
+
+def _emit_args(dtype: str = "f16", *, no_full: bool = False) -> argparse.Namespace:
+    """`emit` の引数（CLI の `main` が組むのと同じ欄）。"""
+    return argparse.Namespace(
+        model=export_dit.DEFAULT_MODEL, dtype=dtype, layers=False, no_full=no_full
+    )
 
 
 def _break_the_rope(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -742,7 +754,7 @@ def emitted(tmp_path_factory) -> tuple[Path, dict]:
     series = tmp_path_factory.mktemp("emit") / "series"
     with pytest.MonkeyPatch.context() as monkeypatch:
         _tiny_writer(monkeypatch, series)
-        summary = export_dit.emit(argparse.Namespace(model=export_dit.DEFAULT_MODEL, layers=False))
+        summary = export_dit.emit(_emit_args())
     return series / export_dit.TARGET, summary
 
 
@@ -831,7 +843,7 @@ class TestTheWriterStopsBeforePublication:
         _break_the_rope(monkeypatch)
 
         with pytest.raises(export_dit.EagerEquivalenceError, match="ビット一致しない"):
-            export_dit.emit(argparse.Namespace(model=export_dit.DEFAULT_MODEL, layers=False))
+            export_dit.emit(_emit_args())
 
         assert sorted(path.name for path in series.iterdir()) == [export_dit.TARGET]
         assert [path.name for path in (series / export_dit.TARGET).iterdir()] == ["previous.krm"]
@@ -845,6 +857,199 @@ class TestTheWriterStopsBeforePublication:
             _break_the_rope(monkeypatch)
 
         assert export_dit.main(["--verify"]) == (1 if broken else 0)
+
+
+# ---- i8 系列（ADR 0120 決定 2 / 3） ---------------------------------------------------
+
+
+def _weight_slots(model: nn.Module) -> dict[str, torch.Tensor]:
+    """上流の重みスロット（Linear と patch 埋め込みの Conv3d の `weight`）を FQN で。"""
+    return {
+        f"{name}.weight": module.weight
+        for name, module in model.named_modules()
+        if isinstance(module, (nn.Linear, nn.Conv3d))
+    }
+
+
+class TestTheI8Rounding:
+    """`export_dit.fake_quant_i8` — 丸めは上流の重みスロット全部に届き、それ以外は上流の f32 の
+    値のまま（決定 2 — f16 の丸めを混ぜない）。"""
+
+    def test_it_reaches_every_weight_slot_and_leaves_everything_else_at_the_source_value(
+        self,
+    ) -> None:
+        from karume.quantize import channel_scale, quantize_to_int8
+
+        model = _tiny_dit()
+        before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
+        report = export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+
+        slots = _weight_slots(model)
+        assert report.modules == len(slots)
+        for name, weight in slots.items():
+            scale = channel_scale(weight, 0)
+            requantized = quantize_to_int8(weight, scale).to(torch.float32) * scale
+            assert torch.equal(requantized, weight), name
+            assert not torch.equal(weight, before[name]), name
+        untouched = {name for name in before if name not in slots}
+        # bias・norm の weight・scale_shift_table・RoPE の表（rope のバッファ）。
+        assert any(name.endswith(".bias") for name in untouched)
+        assert "scale_shift_table" in untouched
+        for name, tensor in model.state_dict().items():
+            if name in untouched:
+                assert torch.equal(tensor, before[name]), name
+
+    def test_a_patch_embedding_copied_instead_of_viewed_is_caught(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """故障注入: ラッパの patch 埋め込みが conv の重みの複製だと、参照（上流の conv）だけが
+        丸めの外に残る。"""
+        original = dit_patch.patch_embedding_linear
+
+        def copied(conv: nn.Conv3d) -> nn.Linear:
+            linear = original(conv)
+            linear.weight = nn.Parameter(linear.weight.detach().clone(), requires_grad=False)
+            return linear
+
+        monkeypatch.setattr(dit_patch, "patch_embedding_linear", copied)
+        model = _tiny_dit()
+        with pytest.raises(AssertionError, match=r"patch_embedding\.weight"):
+            export_dit.fake_quant_i8(model, dit_patch.WanDitTokens(model))
+
+
+class TestTheI8Cases:
+    def test_the_i8_series_retakes_the_s192_and_s14040_cases_of_the_f16_series(self) -> None:
+        """決定 3: S = 192 の組（S = 128 の受入れ 1 本を含む）と S = 14,040 の 8 本を同じ行のまま。
+        `growth`（S = 768）と S = 32,760 は採らない。"""
+        names = [spec.name((1, 2, 2)) for spec in export_dit.series_cases("i8")]
+
+        assert names == [
+            "band-s00192-t0999",
+            "band-s00192-t0750",
+            "band-s00192-t0500",
+            "band-s00192-t0250",
+            "band-s00192-t0600",
+            "band-s00192-t0113",
+            "accept-s00192-t0600",
+            "accept-s00128-t0030",
+            "accept-s00192-t0400",
+            "full-band-s14040-t0999",
+            "full-band-s14040-t0999-2",
+            "full-band-s14040-t0750",
+            "full-band-s14040-t0500",
+            "full-band-s14040-t0250",
+            "full-band-s14040-t0113",
+            "full-accept-s14040-t0999",
+            "full-accept-s14040-t0600",
+        ]
+        assert set(export_dit.series_cases("i8")) <= set(export_dit.CASES)
+
+    def test_every_i8_case_has_a_float64_reference_but_only_full_size_f16_cases_do(self) -> None:
+        assert all(export_dit.wants_float64("i8", spec) for spec in export_dit.series_cases("i8"))
+        assert [spec for spec in export_dit.CASES if export_dit.wants_float64("f16", spec)] == [
+            spec for spec in export_dit.CASES if spec.full_size
+        ]
+
+    def test_no_full_keeps_the_s192_cases_only(self) -> None:
+        small = export_dit.series_cases("i8", full=False)
+
+        assert small == export_dit.series_cases("i8")[:9]
+        assert not any(spec.full_size for spec in small)
+        assert export_dit.series_cases("f16") == export_dit.CASES
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--no-full"],
+            ["--dtype", "i8", "--layers"],
+            ["--dtype", "i8", "--verify", "--no-f16"],
+            ["--no-f16"],
+        ],
+        ids=["no-full-on-f16", "i8-layers", "i8-no-f16", "no-f16-without-verify"],
+    )
+    def test_the_cli_refuses_flags_outside_their_series(self, argv: list[str]) -> None:
+        """`--no-full` は f16 系列の揃った golden を欠けた組で据え替える口になるので i8 だけ。"""
+        with pytest.raises(SystemExit):
+            export_dit.main(argv)
+
+
+@pytest.fixture(scope="module")
+def emitted_i8(tmp_path_factory) -> tuple[Path, dict]:
+    """合成モデルで i8 系列の emit を 1 周回した系列の部品ディレクトリと要約。"""
+    series = tmp_path_factory.mktemp("emit-i8") / "series"
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _tiny_writer(monkeypatch, series)
+        summary = export_dit.emit(_emit_args("i8"))
+    return series.with_name("i8") / export_dit.TARGET, summary
+
+
+class TestTheI8Writer:
+    """i8 系列の書き手（`emit --dtype i8`）— 置き場・格納・golden の形。"""
+
+    def test_it_writes_its_own_series_and_leaves_the_f16_series_alone(self, emitted_i8) -> None:
+        out_dir, summary = emitted_i8
+
+        assert summary["dtype"] == "i8"
+        assert summary["dir"] == str(out_dir)
+        assert not (out_dir.parent.with_name("series")).exists()
+
+    def test_the_linear_weights_are_stored_as_i8_and_nothing_as_f16(self, emitted_i8) -> None:
+        """束縛表に i8 があり f16 / i4 が無い。i8 の本数は linear の本数（scale は companion）。"""
+        from _shared.container_read import read_layouts
+
+        out_dir, summary = emitted_i8
+        layouts = read_layouts(out_dir / export_dit.MODEL_FILE)
+        wrapper = dit_patch.WanDitTokens(_tiny_dit())
+        linears = sum(isinstance(module, nn.Linear) for module in wrapper.modules())
+
+        assert set(layouts.values()) == {"f32", "i8"}
+        assert sum(layout == "i8" for layout in layouts.values()) == linears
+        assert summary["compressed_tensors"] == linears
+
+    def test_biases_keep_the_source_float32_values(self, emitted_i8) -> None:
+        """決定 2: i8 系列は f16 の丸めを掛けない — bias は上流の f32 の値がビットのまま入る。"""
+        from _shared.container_read import read_stored
+
+        out_dir, _ = emitted_i8
+        stored = read_stored(out_dir / export_dit.MODEL_FILE)
+        source = _tiny_dit().state_dict()
+        name = "blocks.0.attn1.to_q.bias"
+        value = torch.frombuffer(bytearray(stored[name].payload), dtype=torch.float32)
+
+        assert stored[name].layout == "f32"
+        assert torch.equal(value, source[name])
+        assert not torch.equal(value, source[name].half().float())
+
+    def test_every_case_carries_the_float64_reference(self, emitted_i8) -> None:
+        out_dir, summary = emitted_i8
+        for name in _TINY_NAMES:
+            reference = load_file(
+                out_dir / f"{export_dit.REFERENCE_PREFIX}{name}{export_dit.CASE_SUFFIX}"
+            )
+
+            assert export_dit.REFERENCE_F64_KEY in reference, name
+        assert all("reference_f32_vs_f64_ratio" in report for report in summary["eager"])
+        assert all(export_dit.eager_failures(report) == [] for report in summary["eager"])
+
+    def test_no_full_writes_the_small_cases_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _tiny_writer(monkeypatch, tmp_path / "series")
+
+        summary = export_dit.emit(_emit_args("i8", no_full=True))
+
+        small = [spec.name((1, 2, 2)) for spec in _TINY_CASES if not spec.full_size]
+        assert [report["case"] for report in summary["eager"]] == small
+
+    @pytest.mark.parametrize("broken", [False, True], ids=["intact", "broken-rope"])
+    def test_verify_applies_the_same_gate_to_the_i8_weights(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bool
+    ) -> None:
+        _tiny_writer(monkeypatch, tmp_path / "series")
+        if broken:
+            _break_the_rope(monkeypatch)
+
+        assert export_dit.main(["--verify", "--dtype", "i8"]) == (1 if broken else 0)
 
 
 # ---- 実重み（pin した revision — 無い機では SKIP） ----------------------------------
@@ -886,3 +1091,19 @@ class TestRealWeights:
 
         assert torch.equal(dit_patch.dit_unpatchify(trunk, (2, 16, 24), (1, 2, 2)), expected)
         assert bool(((embedded - hidden).abs() <= bound).all())
+
+    def test_the_i8_series_quantizes_the_307_linear_weights(self, wan_transformer) -> None:
+        """i8 の対象（ラッパの重みスロット）は linear 307 本・出力チャネル 700,480。
+
+        数は ADR 0120 決定 2・調査 §2.2 / §2.3（上流のヘッダ）。patch 埋め込みは conv の重みの
+        view の Linear 1 本で、Conv3d はラッパに無い（二重に数えない）。数えるだけで重みは
+        書き換えない（fixture の MUST）。
+        """
+        from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
+
+        wrapper = dit_patch.WanDitTokens(wan_transformer)
+        targets = list(iter_quant_targets(wrapper, op_types=QUANT_MODULE_TYPES))
+
+        assert len(targets) == 307
+        assert sum(int(weight.shape[axis]) for _, weight, axis in targets) == 700_480
+        assert not any(isinstance(module, nn.Conv3d) for module in wrapper.modules())

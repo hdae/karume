@@ -9,8 +9,11 @@
     uv run --group wan --inexact python -m wan.export_dit            # 製品のグラフ + golden
     uv run --group wan --inexact python -m wan.export_dit --layers   # 計測用（層別の出口）
     uv run --group wan --inexact python -m wan.export_dit --verify   # パッチ前後の eager 同値だけ
+    uv run --group wan --inexact python -m wan.export_dit --dtype i8            # i8 系列（下の節）
+    uv run --group wan --inexact python -m wan.export_dit --dtype i8 --no-full  # 同・実寸を除く
 
-出力（既定 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`）:
+出力（既定 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`・`--dtype i8` は
+`outputs/series/wan2.1-t2v-1.3b-i8-dyn/transformer/`）:
 
     model-NNNNN-of-NNNNN.krm      重み・定数 + 2 文書の記述 + 資産 `rope_base`
     io.<case>.safetensors         グラフの入力（`input.*`）とパッチ後の torch CPU の出力
@@ -110,9 +113,39 @@ t = 500 の未見ケースが 1.6 倍超えた。中ほどの timestep は CPU �
 MUST: 参照は**上流の素の forward**（`dit_patch.reference_dit_layers`）で採る。attn1 の processor の
 差し替えは素の経路を変えない（`dit_patch` のモジュール docstring）ので、参照を採る順序の門は要らな
 い。
-MUST: f16 の丸めは参照より**前**（ADR 0006）。丸めは S 形のラッパに掛け、共有している上流の部品にも
-同じ値が届く（patch 埋め込みは conv の重みの view — `dit_patch.patch_embedding_linear`）。RoPE の表
-（`model.rope` のバッファ）は丸めない — 製品は f32 の素表を焼き、参照もその値で回す。
+MUST: 重みの丸め（f16 系列の f16 丸め・i8 系列の fake-quant）は参照より**前**（ADR 0006 / 0019）。
+丸めは S 形のラッパに掛け、共有している上流の部品にも同じ値が届く（patch 埋め込みは conv の重みの
+view — `dit_patch.patch_embedding_linear`）。RoPE の表（`model.rope` のバッファ）は丸めない — 製品は
+f32 の素表を焼き、参照もその値で回す。
+MUST: 書き手の eager 同値の門（{@link eager_failures}）は**丸めた後**の重みで見る。参照とパッチ後の
+eager は同じ丸め済みの重みを共有して回る。パッチの同値（trunk のビット一致・patch 埋め込みの
+上界）は重みの値に依らない主張（RoPE の書き換えは重みを読まない）なので、丸めた後に見ても門の
+意味は変わらない。加えて、参照が丸め済みの重みで採られたことも同じ門が縛る — 丸めが参照側へ
+届いていなければ trunk がビット一致しない。丸める前（素の f32 の重み）の同値は
+`--verify --no-f16` と pytest の実重みのテスト（`wan/tests/test_dit_patch.py` の
+`TestRealWeights`）が見る。
+
+## i8 系列（ADR 0120 決定 2 / 3）
+
+`--dtype i8` は参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16` の重みの系列を書く。対象は
+transformer だけで、VAE は f16 系列のまま（決定 2）。
+
+- 重み: linear 307 本（patch 埋め込みの Linear を含む）の `weight` を per-channel symmetric i8 の
+  RTN（最近接丸め）で丸める（`karume.quantize.fake_quant_int8` を S 形のラッパへ —
+  {@link fake_quant_i8}）。格納は i8 + 出力チャネルごとの f32 scale。校正は無い（重みは RTN で、
+  活性は実行時の per-token の動的量子化）。
+- bias・norm の weight・`scale_shift_table` は**上流の f32 の値のまま**。f16 系列の
+  {@link round_to_f16} は掛けない（決定 2 — i8 の席に f16 の丸めを混ぜない。計算と格納の形は同じで
+  値だけが違い、混ぜると配布の改変告知が増える）。
+- ケース: f16 系列の S = 192 の組（`band` / `accept` — S = 128 の 1 本を含む）と S = 14,040 の組
+  （`full-band` / `full-accept`）を、同じ seed・timestep のまま i8 の重みで採り直す
+  （{@link I8_CASE_ROLES} / {@link I8_FULL_LATENTS}）。`growth`（S = 768）と S = 32,760 は採らない
+  （決定 3 — S = 32,760 での伸びは f16 系列の門が見ている）。
+- 参照: 正規化比 r の門を S = 192 でも持つので、**全ケースが f64 の参照**（`output.f64`）を持つ
+  （f16 系列は実寸のケースだけ — {@link wants_float64}）。
+- `--no-full` は S = 14,040 の 8 本を除いて書く（段の分割用 — S = 14,040 は CPU で約 1.5 時間）。
+  系列は作業席ごと据え替わるので、揃った系列は `--no-full` 無しの実走で書き直す（ケースの乱数は
+  seed から派生するので、S = 192 の golden は同じ値で書き直される）。
 """
 
 from __future__ import annotations
@@ -139,7 +172,15 @@ from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_bound
 from karume.dist import NOTICE_FILENAME
 from karume.emit import storage_breakdown
 from karume.pipeline import export_to_file
-from karume.quantize import round_weights_to_f16
+from karume.quantize import (
+    QUANT_MODULE_TYPES,
+    Int8Report,
+    channel_scale,
+    fake_quant_int8,
+    iter_quant_targets,
+    quantize_to_int8,
+    round_weights_to_f16,
+)
 from wan import dit_patch
 from wan.pipeline_ref import TEXT_DIM, assert_no_mps, pad_text_embeds
 from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
@@ -147,6 +188,11 @@ from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
 #: 系列（ADR 0118 決定 7 — 接尾辞 `-dyn` は ADR 0077 の慣例）と、計測用の層別出口の系列。
 SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-f16-dyn"
 PROBE_SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-f16-dyn-probe"
+#: i8 系列（ADR 0120 決定 2 — transformer だけ。綴りは anima の `<model>-i8-dyn` に倣う）。
+I8_SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-i8-dyn"
+
+#: 書き出せる格納 dtype（= `export_to_file` の `weight_dtype`）。
+DTYPES = ("f16", "i8")
 
 #: 部品名（= 容器のグラフ名 = 配布 manifest の weights のキー — container-v1 §2.1）。
 TARGET = "transformer"
@@ -239,6 +285,44 @@ CASES: tuple[CaseSpec, ...] = (
     CaseSpec("full-accept", (21, 60, 104), 600, 77, 777009, blocks=False),
 )
 
+#: i8 系列が採るケース（ADR 0120 決定 3 — 参照席 `f16+dit8` の r 門は S = 192 と S = 14,040）:
+#: 実寸でない役割のうち S = 192 の組（`band` / `accept`）と、実寸のうち 33 フレームの格子
+#: （S = 14,040）。{@link CASES} の行をそのまま使う（seed・timestep・有効長を f16 系列と揃える）。
+I8_CASE_ROLES = ("band", "accept")
+I8_FULL_LATENTS: tuple[tuple[int, int, int], ...] = ((9, 60, 104),)
+
+
+def series_dir(dtype: str) -> Path:
+    """格納 dtype → 系列のディレクトリ。"""
+    return {"f16": SERIES, "i8": I8_SERIES}[dtype]
+
+
+def series_cases(dtype: str, *, full: bool = True) -> tuple[CaseSpec, ...]:
+    """格納 dtype の系列が採るケース（先頭は {@link CASES} と同じ例示入力）。`full=False` は実寸の
+    ケースを除く（`--no-full`）。"""
+    if dtype == "f16":
+        cases = CASES
+    else:
+        cases = tuple(
+            spec
+            for spec in CASES
+            if (
+                spec.latent_shape in I8_FULL_LATENTS
+                if spec.full_size
+                else spec.role in I8_CASE_ROLES
+            )
+        )
+    return cases if full else tuple(spec for spec in cases if not spec.full_size)
+
+
+def wants_float64(dtype: str, spec: CaseSpec) -> bool:
+    """そのケースが f64 の参照（`output.f64`）を持つか。
+
+    f16 系列は実寸のケースだけ（S = 192 の帯は最大絶対差の比 — ADR 0118 決定 8）、i8 系列は
+    全ケース（r 門を S = 192 でも持つ — ADR 0120 決定 3）。
+    """
+    return dtype == "i8" or spec.full_size
+
 
 @dataclass(frozen=True)
 class Case:
@@ -297,6 +381,51 @@ def round_to_f16(model: nn.Module, wrapper: nn.Module) -> str:
     if moved:
         raise AssertionError(f"RoPE の表（rope のバッファ）が丸められた: {moved}")
     return report.describe()
+
+
+def fake_quant_i8(model: nn.Module, wrapper: nn.Module) -> Int8Report:
+    """S 形のラッパ経由で linear の重みを per-channel symmetric i8 の表現可能値へ丸め（RTN —
+    ADR 0019）、上流の重みスロット全部に届いたことを確かめる（ADR 0120 決定 2 の i8 系列）。
+
+    ラッパの linear は上流の Linear そのものと、conv の重みの view の patch 埋め込みだけ。だから
+    丸めは上流の全 Linear と patch 埋め込みの Conv3d に届く。bias・norm の weight・
+    `scale_shift_table`・`rope` のバッファは `fake_quant_int8` が触らない（上流の f32 の値のまま —
+    決定 2）。
+    MUST: 上流側に届いたことを確かめる — 届かない重みが 1 本でもあると「参照だけ別の重み」になり、
+    差に量子化誤差が混ざって帯の意味が消える（{@link round_to_f16} と同じ理由）。確かめ方は冪等性:
+    i8 の表現可能値は per-channel の量子化の不動点（`karume.quantize.INT8_MAX` の注記）なので、
+    もう 1 度丸めてビット不変なら届いている。本数も上流の重みスロットの本数と一致させる。
+    """
+    report = fake_quant_int8(wrapper)
+    upstream = list(iter_quant_targets(model, op_types=QUANT_MODULE_TYPES))
+    with torch.no_grad():
+        missed = []
+        for name, weight, axis in upstream:
+            scale = channel_scale(weight, axis)
+            if not torch.equal(quantize_to_int8(weight, scale).to(torch.float32) * scale, weight):
+                missed.append(name)
+    if missed:
+        raise AssertionError(f"i8 の丸めが上流の重みに届いていない: {missed[:5]}")
+    if len(upstream) != report.modules:
+        raise AssertionError(
+            f"ラッパで丸めた重み {report.modules} 本が上流の重みスロット {len(upstream)} 本と違う"
+        )
+    return report
+
+
+def fake_quant(
+    dtype: str, model: nn.Module, wrapper: nn.Module
+) -> tuple[str, Mapping[str, torch.Tensor] | None]:
+    """系列の格納 dtype の表現可能値へ重みを丸める（参照の採取より前 MUST — ADR 0006）。
+
+    戻りは要約の 1 行と、i8 の scale 台帳（emit へそのまま渡す — f16 は None）。
+    """
+    if dtype == "i8":
+        report = fake_quant_i8(model, wrapper)
+        return f"i8 per-channel へ丸めた — {report.describe()}", report.scales
+    if dtype == "f16":
+        return f"f16 表現可能値へ丸めた — {round_to_f16(model, wrapper)}", None
+    raise ValueError(f"格納 dtype {dtype!r} の系列は書けない（{' / '.join(DTYPES)}）")
 
 
 def case_inputs(
@@ -359,23 +488,26 @@ class Float64Reference:
     seconds: float
 
 
-def float64_references(model_name: str, specs: Sequence[CaseSpec]) -> dict[str, Float64Reference]:
-    """実寸のケースの f64 の参照（上流の素の forward を活性も f64 で —
-    `dit_patch.reference_dit_f64`）。
+def float64_references(
+    model_name: str, specs: Sequence[CaseSpec], dtype: str
+) -> dict[str, Float64Reference]:
+    """f64 の参照を持つケース（{@link wants_float64}）の f64 の参照（上流の素の forward を活性も
+    f64 で — `dit_patch.reference_dit_f64`）。
 
-    重みは f32 の参照と同じ f16 丸めの値をそのまま f64 へ広げ、入力も {@link case_inputs} の同じ値を
-    広げる。f64 のモデル（約 10.4 GB）は f32 のモデル（約 5.2 GB）と同時に持たない — ここで読んで
-    回して捨ててから、呼び手が f32 のモデルを読む。
+    重みは f32 の参照と同じ丸め（系列の格納 dtype の {@link fake_quant}）の値をそのまま f64 へ
+    広げ、入力も {@link case_inputs} の同じ値を広げる。丸めは f32 のうちに掛ける（f64 で丸めると
+    scale と丸めの値が f32 の参照と食い違う）。f64 のモデル（約 10.4 GB）は f32 のモデル
+    （約 5.2 GB）と同時に持たない — ここで読んで回して捨ててから、呼び手が f32 のモデルを読む。
     """
-    full = [spec for spec in specs if spec.full_size]
-    if not full:
+    chosen = [spec for spec in specs if wants_float64(dtype, spec)]
+    if not chosen:
         return {}
     model = load_transformer(model_name)
-    round_to_f16(model, dit_patch.WanDitTokens(model))
+    fake_quant(dtype, model, dit_patch.WanDitTokens(model))
     model.double()
     patch_size = tuple(int(size) for size in model.config.patch_size)
     references: dict[str, Float64Reference] = {}
-    for spec in full:
+    for spec in chosen:
         latents, timestep, encoder_hidden_states = case_inputs(model, spec)
         started = time.perf_counter()
         with torch.no_grad():
@@ -577,18 +709,18 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     """
     started = time.perf_counter()
     # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
-    specs = CASES[:1] if args.layers else CASES
-    references_f64 = float64_references(args.model, specs)
+    specs = CASES[:1] if args.layers else series_cases(args.dtype, full=not args.no_full)
+    references_f64 = float64_references(args.model, specs, args.dtype)
     model = load_transformer(args.model)
     wrapper_class = dit_patch.WanDitTokensLayers if args.layers else dit_patch.WanDitTokens
     wrapper = wrapper_class(model)
-    rounded = round_to_f16(model, wrapper)
-    print(f"[fake-quant] {TARGET}: f16 表現可能値へ丸めた — {rounded}", flush=True)
+    rounded, scales = fake_quant(args.dtype, model, wrapper)
+    print(f"[fake-quant] {TARGET}: {rounded}", flush=True)
     first = build_case(model, specs[0])
     eager: list[dict[str, Any]] = []
     written: list[str] = []
 
-    out_dir = (PROBE_SERIES if args.layers else SERIES) / TARGET
+    out_dir = (PROBE_SERIES if args.layers else series_dir(args.dtype)) / TARGET
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     with staged_publication(out_dir) as staged:
         staged.mkdir()
@@ -618,7 +750,8 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
             assets=rope_base_asset(model),
             dynamic_shapes=dynamic_shapes(),
             symbol_names=("S",),
-            weight_dtype="f16",
+            weight_dtype=args.dtype,
+            weight_scales=scales,
             preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
         )
         declared = [entry.name for entry in graph.inputs]
@@ -627,6 +760,7 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     breakdown = storage_breakdown(graph)
     return {
         "target": TARGET,
+        "dtype": args.dtype,
         "dir": str(out_dir),
         "layers": args.layers,
         "nodes": len(graph.nodes),
@@ -653,13 +787,22 @@ def verify(args: argparse.Namespace) -> list[dict[str, Any]]:
     model = load_transformer(args.model)
     wrapper = dit_patch.WanDitTokens(model)
     if not args.no_f16:
-        round_to_f16(model, wrapper)
-    return [eager_report(wrapper, model, build_case(model, spec))[0] for spec in CASES]
+        fake_quant(args.dtype, model, wrapper)
+    return [
+        eager_report(wrapper, model, build_case(model, spec))[0]
+        for spec in series_cases(args.dtype, full=not args.no_full)
+    ]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument(
+        "--dtype",
+        default="f16",
+        choices=DTYPES,
+        help="系列の格納（i8 は transformer だけの …-i8-dyn/ — ADR 0120 決定 2）",
+    )
     parser.add_argument(
         "--layers",
         action="store_true",
@@ -673,9 +816,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="--verify で f16 の丸めを掛けない（素の f32 の重みで測る）",
     )
+    parser.add_argument(
+        "--no-full",
+        action="store_true",
+        help="i8 系列の実寸（S = 14,040）のケースを採らない（段の分割用 — 後で無しで書き直す）",
+    )
     args = parser.parse_args(argv)
-    if args.no_f16 and not args.verify:
-        parser.error("--no-f16 は --verify とだけ使う（書き出す系列は f16 席だけ）")
+    if args.no_f16 and (not args.verify or args.dtype != "f16"):
+        parser.error("--no-f16 は f16 の --verify とだけ使う（素の f32 の重みで同値だけを測る口）")
+    if args.no_full and args.dtype != "i8":
+        # f16 系列は 27 ケースの揃った golden を据えている（ADR 0118 段 3 / 8）。欠けた golden で
+        # 据え替える口を作らない。
+        parser.error("--no-full は --dtype i8 とだけ使う")
+    if args.layers and args.dtype != "f16":
+        parser.error("--layers は f16 系列だけ（計測用の層別出口 …-f16-dyn-probe/）")
     if args.verify and args.layers:
         parser.error("--verify と --layers は併用しない")
     if args.verify:
