@@ -181,6 +181,9 @@ def fake_quant_int8(model: nn.Module, include: Callable[[str], bool] | None = No
     （例: embedding は i8・linear は i4）で対象を割るための口。MUST: 混成では i8 / i4 の対象を
     **排他に**割る — tied 重み（lm_head = embed_tokens）を両方に通すと二重丸めになり、後に
     走った側の丸めだけが値に残って先の scale 台帳が実値と食い違う。
+    既定（include=None）の対象には `nn.Conv3d` も入る（ADR 0118 決定 1）。Conv3d を conv3d
+    以外の op へ下ろすモデル（重みをホスト側で使う等）に i8 を掛けるときは、include で対象を
+    絞る — 絞らないと conv3d の重みスロットに来ない重みまで丸まる。
 
     MUST: 呼ぶ順序は「実効重みが確定した後・参照/golden の採取より前」（モジュール docstring）。
 
