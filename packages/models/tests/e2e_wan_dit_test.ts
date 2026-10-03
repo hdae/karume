@@ -103,6 +103,7 @@ import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
+import { timestampUnitNs } from "./helpers/timestamp-unit.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
@@ -472,15 +473,6 @@ const expectedRowBlocks = (tokens: number, bindingLimit: number): number =>
 
 /** B570 の `maxStorageBufferBindingSize`（ADR 0118 決定 6 の表の前提）。 */
 const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
-
-/**
- * timestamp の 1 単位の ns（環境キー別）。Deno は wgpu の raw tick を換算せずに返す（docs/known-issues.md
- * 「Intel Arc B570」節 — B570 で 1 tick = 52.0833 ns）。表に無い環境では換算を推測せず fail loudly にする。
- * 落ちるのは時間門のステップだけで、r の照合と故障注入は換算を要らないので表に無い環境でも走る。
- */
-const TIMESTAMP_UNIT_NS: Readonly<Record<string, number>> = {
-  "deno-intel-graphics-bmg-g21": 52.0833,
-};
 
 /**
  * この IR で計画時に掛かる融合（実測 — `lastRunFusions`）。MUST: 値が動いたら赤にする（融合は
@@ -868,18 +860,6 @@ Deno.test({
  * 飛ばした回（`--filter` など）は通常モードに比べる相手が無いので、比較を黙って省かず落とす。
  */
 const measuredTokens = new Map<string, Float32Array>();
-
-/** この環境の timestamp の 1 単位の ns（{@link TIMESTAMP_UNIT_NS}）。表に無ければ fail loudly。 */
-const timestampUnitNs = (): number => {
-  const key = ENVIRONMENT.key;
-  if (key === undefined || !Object.hasOwn(TIMESTAMP_UNIT_NS, key)) {
-    throw new Error(
-      `環境キー '${key}' の timestamp の 1 単位の ns が TIMESTAMP_UNIT_NS に無い` +
-        "（推測で換算しない — docs/known-issues.md を見て行を足す）",
-    );
-  }
-  return TIMESTAMP_UNIT_NS[key];
-};
 
 const gib = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(2)} GiB`;
 
@@ -1320,7 +1300,7 @@ const normalizedRatioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]
             { id: `${idPrefix}full-s${full.tokens}/submit`, failureNote: () => note },
             () => {
               // 換算の表はこのステップでだけ引く（表に無い環境で落ちるのは時間門だけ）。
-              const unitNs = timestampUnitNs();
+              const unitNs = timestampUnitNs(ENVIRONMENT.key);
               const submit = submitGpuNote(session.diagnostics(), unitNs);
               note = [
                 submit.note,
@@ -1722,7 +1702,7 @@ Deno.test({
                   graphInputs(golden, prepared.graph.inputs, name),
                   prepared.graph.outputs[0],
                 );
-                const unitNs = timestampUnitNs();
+                const unitNs = timestampUnitNs(ENVIRONMENT.key);
                 const submit = submitGpuNote(session.diagnostics(), unitNs);
                 note = [
                   submit.note,

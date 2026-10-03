@@ -13,6 +13,8 @@
  *   transformers 5.14.1・上流のバケットの式）の入力
  * - `output.f64` F32 `[1,L,4096]` — 活性も f64 で回した参照を f32 へ丸めた値（誤差の基準）
  * - `output.f32` F32 `[1,L,4096]` — CPU f32 の参照（上流の eager とビット一致する書き下し — 正規化の分母）
+ * - `output.unquantized.f64` / `output.unquantized.f32` F32 `[1,L,4096]`（**受入れだけ**）— 量子化しない重み（pin した
+ *   checkpoint の F32 をそのまま）で回した同じ書き下し（品質の記録の基準 — 門には使わない）
  * - メタ（キー 1 つの JSON）— プロンプトの原文・L・役割・容器の part 0 の sha256
  *
  * ## 門
@@ -24,16 +26,23 @@
  *    実寸の門と同じ指標 — `e2e_wan_dit_test.ts` の `DIT_FULL_NORMALIZED_BAND`）。帯は決定用 6 本の最悪 r × 5 を
  *    有効数字 2 桁へ切り上げた値で、受入れ 4 本は別に判定する（{@link UMT5_NORMALIZED_BAND}）。
  * 3. **故障注入**（受入れの 4 本で・帯の外へ出ること）: 相対位置の表を 1 ずらす・id 列の 1 トークンを別の id に・
- *    層 0 / 1 の相対位置の表の取り違え（容器の供給面で block を入れ替える — 別の Session）。
+ *    層 0 / 1 の相対位置の表の取り違え（容器の供給面で block を入れ替える — 別の Session）・i8 に固有の 1 件
+ *    （中ほどの層の linear 1 本の per-channel scale を 2 倍 — {@link scaledScaleContainer}・別の Session）。同じ linear の
+ *    scale を {@link SUBTLE_SCALE_FACTOR} 倍にした微妙な故障は r を記録だけする（帯との距離 — DiT の
+ *    `SUBTLE_FAULT_MARGIN` に当たる床を決める材料）。
  *
  * ## 記録（門ではない）
  *
- * - **品質の記録**（決定 8 ②）: 受入れ 4 本で GPU i8・CPU f32 の参照（`output.f32`）・bf16 の事前計算資産
- *   （`outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors`）の 3 点を、行ごとのコサイン類似度の最小・
- *   相対フロベニウス誤差・最大絶対差で比べて results.json の note へ（f32 の参照を基準にする — ADR 0119 追記
- *   「10b の結果」）。
+ * - **品質の記録**（決定 8 ②）: 受入れ 4 本で GPU i8・bf16 の事前計算資産
+ *   （`outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors`）を、**量子化なしの CPU f32 の参照**
+ *   （`output.unquantized.f32` — ADR 0119 追記「10b の結果」の「f32 参照を基準にする」）を基準に、行ごとのコサイン
+ *   類似度の最小・相対フロベニウス誤差・最大絶対差で比べて results.json の note へ。「i8 の丸めの影響」（GPU i8 vs
+ *   量子化なし f32）と「bf16 の影響」（bf16 資産 vs 量子化なし f32）を分けて出す。i8 の CPU f32 の参照（`output.f32`）
+ *   との比較も並べる（GPU 自身の誤差）。
  * - **資源**: 構築と 1 forward ごとの壁時間・確保（重み・アリーナ・常駐）・fdinfo の VRAM の山（区間ごと）を、
- *   ADR 0119 の容量の見立て（重み i8 5.30 GiB）と並べる。
+ *   ADR 0119 の容量の見立て（重み i8 5.30 GiB）と並べる。計測モード（`gpuTiming` — 通常モードとは別の device）で
+ *   1 forward の GPU 時間と 1 submit の GPU 時間の最大（ADR 0118 決定 6 の 1 s を目安）も記録する。timestamp の
+ *   換算表（`helpers/timestamp-unit.ts`）に無い環境では換算を飛ばし、そう note に書く（r の門は換算に依らない）。
  *
  * 資産が無い環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。資産が**一部だけ**ある環境は
  * SKIP ではなく FAIL にする（完全性テスト）。
@@ -63,13 +72,17 @@ import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
+import { lookupTimestampUnitNs } from "./helpers/timestamp-unit.ts";
 import {
   modelPresent,
   openSeriesContainer,
   resolveParts,
 } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
+import {
+  assertAdapterMatchesEnvironment,
+  ENVIRONMENT,
+} from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
 /**
@@ -119,8 +132,11 @@ const INPUT_IDS_KEY = "input_ids";
 const BUCKETS_KEY = "relative_position_buckets";
 const OUTPUT_F64_KEY = "output.f64";
 const OUTPUT_F32_KEY = "output.f32";
+const OUTPUT_UNQUANTIZED_F64_KEY = "output.unquantized.f64";
+const OUTPUT_UNQUANTIZED_F32_KEY = "output.unquantized.f32";
 const METADATA_KEY = "karume.wan.umt5_reference";
-const REFERENCE_FORMAT = "karume-wan-umt5-reference/1";
+/** /2 = 受入れに量子化なしの参照を足した形（受入れでは {@link OUTPUT_UNQUANTIZED_F32_KEY} などが必須）。 */
+const REFERENCE_FORMAT = "karume-wan-umt5-reference/2";
 
 /**
  * 故障注入で取り違える 2 層の相対位置の表（層の添字の 1 ずれ — 先頭の 2 層）。容器の initializer 名は recipe の
@@ -129,6 +145,28 @@ const REFERENCE_FORMAT = "karume-wan-umt5-reference/1";
 const relativeBiasTable = (layer: number): string =>
   `encoder.block.${layer}.layer.0.SelfAttention.relative_attention_bias.weight`;
 const SWAPPED_TABLES: readonly [string, string] = [relativeBiasTable(0), relativeBiasTable(1)];
+
+/**
+ * i8 に固有の故障注入で per-channel scale を倍にする linear（{@link scaledScaleContainer}）。24 層の中ほど（層 12）の
+ * FFN の出口 `wo` を選ぶ: 出力は残差へ線形に足されるので、倍率 (1 + δ) はその層の FFN の寄与を δ だけずらす形で出て、
+ * δ と r の関係が読める。q / k は避けた — umT5 は q / k の直後に norm もスケールも無く（上流
+ * `UMT5Attention.forward` — `scores = q·kᵀ` に相対位置のバイアスを足して softmax）倍率は打ち消されないが、softmax の
+ * 温度として非線形に効くので、微妙な水準で δ と r の関係が読みにくい（DiT が V を選んだ理由 — q / k の直後の
+ * RMS norm — とは事情が違う）。
+ */
+const I8_SCALE_FAULT_WEIGHT = "encoder.block.12.layer.1.DenseReluDense.wo.weight";
+/** 帯の外を門にする倍率（i8 の scale の取り違え — 軸・値・束縛 — の大きさ）。 */
+const GROSS_SCALE_FACTOR = 2;
+/**
+ * r を記録だけする微妙な倍率（帯との距離を見る — DiT の `SUBTLE_FAULT_MARGIN` に当たる床を、帯を決めた後に
+ * ここの観測から決める材料）。
+ *
+ * 値は CPU の見積りで帯の桁に寄せた（2026-10-03・GPU 不使用 — i8 の CPU f32 の層逐次でこの linear の重みを倍にし、
+ * 受入れ 4 本の r を採った）: r は δ にほぼ比例し、×1.01 で 2.17e3〜1.04e4・×1.001 で 217〜897・×1.0001 で 20.9〜86.4
+ * （×2 は 5.04e5〜9.70e5）。帯は未導出だが、決定用の最悪 r × 5 は DiT の前例（帯 30〜104）と同じ桁と見込み、帯に近い
+ * ×1.0001 を採る。GPU の r は GPU 自身の誤差（DiT の i8 では r にして 2〜11）が乗る分だけこの見積りからずれうる。
+ */
+const SUBTLE_SCALE_FACTOR = 1.0001;
 
 /** ADR 0119 の容量の見立て（i8 の重み 5,686,617,600 B = 5.30 GiB — 調査 §1.2・§5）。 */
 const ESTIMATED_WEIGHT_BYTES = 5_686_617_600;
@@ -248,6 +286,12 @@ const parseMeta = (file: SafetensorsFile, where: string): GoldenMeta => {
   return { role, prompt, length, part0Sha256 };
 };
 
+/** 量子化なしの参照（受入れだけ — 品質の記録の基準）。 */
+type UnquantizedReference = {
+  readonly expected: Float32Array<ArrayBuffer>;
+  readonly reference: Float32Array<ArrayBuffer>;
+};
+
 /** 1 ケースぶんの golden。 */
 type Golden = {
   readonly meta: GoldenMeta;
@@ -256,6 +300,8 @@ type Golden = {
   readonly expected: Float32Array<ArrayBuffer>;
   readonly reference: Float32Array<ArrayBuffer>;
   readonly outputShape: readonly number[];
+  /** 受入れだけが持つ（決定用で在れば・受入れで欠ければ fail loudly — recipe の `_check_unquantized` の鏡）。 */
+  readonly unquantized?: UnquantizedReference;
 };
 
 const loadGolden = async (name: string): Promise<Golden> => {
@@ -263,6 +309,12 @@ const loadGolden = async (name: string): Promise<Golden> => {
   const meta = parseMeta(file, name);
   const ids = intsOf(file, INPUT_IDS_KEY, name);
   assertEquals(meta.length, ids.length, `${name}: メタの L と input_ids の長さ`);
+  const accept = meta.role === "accept";
+  assertEquals(
+    file.tensors.has(OUTPUT_UNQUANTIZED_F32_KEY),
+    accept,
+    `${name}: 量子化なしの参照は受入れだけが持つ（役割 ${meta.role}）`,
+  );
   return {
     meta,
     ids,
@@ -270,6 +322,14 @@ const loadGolden = async (name: string): Promise<Golden> => {
     expected: floatsOf(file, OUTPUT_F64_KEY, name),
     reference: floatsOf(file, OUTPUT_F32_KEY, name),
     outputShape: viewOf(file, OUTPUT_F64_KEY, name).shape,
+    ...(accept
+      ? {
+        unquantized: {
+          expected: floatsOf(file, OUTPUT_UNQUANTIZED_F64_KEY, name),
+          reference: floatsOf(file, OUTPUT_UNQUANTIZED_F32_KEY, name),
+        },
+      }
+      : {}),
   };
 };
 
@@ -439,6 +499,38 @@ const swappedTablesContainer = (
   };
 };
 
+/**
+ * linear 1 本（`weight`）の per-channel scale を `factor` 倍にした供給面（i8 に固有の故障注入 —
+ * {@link I8_SCALE_FAULT_WEIGHT}・DiT の `scaledScaleContainer` に倍率の引数を足した形）。容器のファイルは書き換えない:
+ * 取得した block（sha256 の検証の後）の**写し**を倍にして返す（`BoundContainer.readBlock` の MUST — 返された器は書き換え
+ * ない）。scale の payload は block の先頭からの f32 の列（Session 構築が `subarray(0, payloadBytes)` で読む形）。
+ */
+const scaledScaleContainer = (
+  opened: OpenedContainer,
+  graph: string,
+  weight: string,
+  factor: number,
+): BoundContainer => {
+  const bound = Object.hasOwn(opened.graphs, graph) ? opened.graphs[graph] : undefined;
+  const scale = bound?.supplies.get(weight)?.scale;
+  if (scale === undefined) {
+    throw new Error(
+      `グラフ '${graph}' の '${weight}' に companion scale が無い（i8 の linear でない）`,
+    );
+  }
+  return {
+    graphs: opened.graphs,
+    readBlock: async (id) => {
+      const bytes = await opened.readBlock(id);
+      if (id !== scale.id) return bytes;
+      const scaled = bytes.slice();
+      const values = new Float32Array(scaled.buffer, 0, scale.payloadBytes / 4);
+      for (let index = 0; index < values.length; index += 1) values[index] *= factor;
+      return scaled;
+    },
+  };
+};
+
 const gib = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(2)} GiB`;
 
 /** 1 forward の観測（壁時間と、run の直後に生きている確保）。 */
@@ -576,8 +668,9 @@ const judgeBand = (
 
 Deno.test({
   name:
-    "Wan umT5 移植の門（実 GPU / CPU 層逐次 f64）: TS の入力で回した 1 forward の正規化比 r が帯の内・故障注入 3 件は" +
-    "帯の外・品質の記録（GPU i8 / CPU f32 / bf16 資産）と資源（壁時間・確保・fdinfo の VRAM の山）を残す",
+    "Wan umT5 移植の門（実 GPU / CPU 層逐次 f64）: TS の入力で回した 1 forward の正規化比 r が帯の内・故障注入 4 件は" +
+    "帯の外（scale の微妙な倍率は r を記録）・品質の記録（基準 量子化なし CPU f32 — GPU i8 / i8 の CPU f32 / bf16 資産）と" +
+    "資源（壁時間・確保・fdinfo の VRAM の山）を残す",
   ignore: !ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE,
   fn: async (t) => {
     const band = UMT5_NORMALIZED_BAND;
@@ -676,13 +769,44 @@ Deno.test({
               const faults: { label: string; ratio: number }[] = [];
               if (role === "accept") {
                 const width = golden.outputShape[golden.outputShape.length - 1];
+                const unquantized = golden.unquantized;
+                if (unquantized === undefined) {
+                  throw new Error(`${name}: 受入れなのに量子化なしの参照が無い`);
+                }
+                const unquantizedDiff = difference(output.data, unquantized.reference);
+                measurements.push({
+                  output: "output@unquantized-f32-reference",
+                  maxAbs: unquantizedDiff.maxAbs,
+                  maxRel: unquantizedDiff.maxRel,
+                  tolerance: unbounded,
+                  stage: "karume",
+                });
+                const asset = embeds !== undefined && embedding !== undefined
+                  ? floatsOf(embeds, embedding, `text_embeds の ${embedding}`)
+                  : undefined;
+                // 基準（量子化なし f32）自身の誤差 — 下の差がこれより桁で大きいことを読むための床。
+                notes.push(
+                  `量子化なし CPU f32 参照 / 量子化なし f64 参照: 比 ${
+                    ratioOf(difference(unquantized.reference, unquantized.expected))
+                      .toExponential(3)
+                  }`,
+                  `品質 i8 の丸めの影響（GPU i8 / 基準 量子化なし CPU f32）: ${
+                    rowQuality(output.data, unquantized.reference, width)
+                  }`,
+                );
+                if (asset !== undefined) {
+                  notes.push(
+                    `品質 bf16 の影響（bf16 資産 / 基準 量子化なし CPU f32）: ${
+                      rowQuality(asset, unquantized.reference, width)
+                    }`,
+                  );
+                }
                 notes.push(
                   `品質（基準 CPU f32 参照）GPU i8: ${
                     rowQuality(output.data, golden.reference, width)
                   }`,
                 );
-                if (embeds !== undefined && embedding !== undefined) {
-                  const asset = floatsOf(embeds, embedding, `text_embeds の ${embedding}`);
+                if (asset !== undefined) {
                   notes.push(
                     `品質（基準 CPU f32 参照）bf16 資産: ${
                       rowQuality(asset, golden.reference, width)
@@ -783,6 +907,52 @@ Deno.test({
         await settleReleases(gpu);
       }
 
+      // i8 に固有の故障注入（scale の倍率 2 水準）。倍率ごとに別の Session を、前の Session を畳んでから張る
+      // （表の取り違えと同じ理由 — 2 本を同時に載せない）。
+      for (const factor of [GROSS_SCALE_FACTOR, SUBTLE_SCALE_FACTOR]) {
+        const gated = factor === GROSS_SCALE_FACTOR;
+        const label = `${I8_SCALE_FAULT_WEIGHT} の scale を ${factor} 倍`;
+        const scaled = prepareContainer(
+          scaledScaleContainer(opened, graph, I8_SCALE_FAULT_WEIGHT, factor),
+          graph,
+        );
+        const scaledSession = await scaled.createContainerSession(gpu);
+        try {
+          for (const { name } of CASES.filter(({ role }) => role === "accept")) {
+            const id = `${name}/${gated ? "scale-fault" : "scale-subtle"}`;
+            const purpose = gated ? "帯の外" : "r を記録だけ — 帯との距離";
+            await t.step(`${id}（故障注入 ${label} → ${purpose}）`, async () => {
+              let note = "";
+              await runRecordedCase(results, { id, failureNote: () => note }, async () => {
+                const golden = await loadGolden(name);
+                const { inputs } = hostInputs(encoder, golden, name);
+                const referenceRatio = referenceRatioOf(golden, name);
+                const { output } = await forward(scaledSession, scaled, gpu, inputs, id);
+                const faultDiff = difference(output.data, golden.expected);
+                const ratio = ratioOf(faultDiff) / referenceRatio;
+                note = `故障注入 ${formatRatio(label, faultDiff, referenceRatio)}（${
+                  band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toPrecision(3)} 倍`
+                }）`;
+                console.log(`[wan-umt5] ${id}: ${note}`);
+                assertEquals(deviceLost, undefined, "device lost");
+                if (!gated) return { status: "pass", note };
+                if (band === undefined) {
+                  throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
+                }
+                assert(
+                  ratio > band,
+                  `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`,
+                );
+                return { status: "pass", note };
+              });
+            });
+          }
+        } finally {
+          await scaledSession.dispose();
+          await settleReleases(gpu);
+        }
+      }
+
       if (band === undefined) {
         await t.step("帯の候補（未導出）", () => {
           throw new Error(`帯が未導出 — ${bandCandidate(ratios)}`);
@@ -790,6 +960,95 @@ Deno.test({
       }
     } finally {
       monitor.stop();
+      await settleReleases(gpu);
+      gpu.destroy();
+    }
+  },
+});
+
+/** 1 submit の GPU 実行の幅の目安（ADR 0118 決定 6 の 1 s — ここは記録だけで門にしない）。 */
+const SUBMIT_GPU_GUIDE_MS = 1000;
+
+Deno.test({
+  name:
+    "Wan umT5 資源の記録（実 GPU・計測モード）: 1 forward の GPU 時間と 1 submit の GPU 時間の最大（目安 ≤ 1 s）を" +
+    "残す（門ではない — timestamp の換算表に無い環境は換算を飛ばす）",
+  ignore: !ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE,
+  fn: async () => {
+    const encoder = tokenizerEncoder();
+    const graph = graphName();
+    const prepared = prepareContainer(
+      await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)),
+      graph,
+    );
+    let deviceLost: string | undefined;
+    // 計測モード（timestamp-query）の device は通常モードと別に取る（DiT の前例 — 2 つの device を同時に載せない。
+    // 移植の門のテストは device を破棄して終わる）。submit ごとの GPU 時間は既存の回収に相乗りして測る（runtime の
+    // `ChunkBudgetStats.submitGpuTime`）。
+    const gpu = await acquireGpu({
+      gpuTiming: true,
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    });
+    try {
+      assertAdapterMatchesEnvironment(gpu);
+      const unitNs = lookupTimestampUnitNs(ENVIRONMENT.key);
+      const lines: string[] = unitNs === undefined
+        ? [
+          `環境キー '${ENVIRONMENT.key}' は timestamp の換算表（helpers/timestamp-unit.ts）に無い — ` +
+          "GPU 時間は記録しない（推測で換算しない）",
+        ]
+        : [];
+      const session = await prepared.createContainerSession(gpu);
+      try {
+        for (const { name } of CASES) {
+          const golden = await loadGolden(name);
+          const { ids, inputs } = hostInputs(encoder, golden, name);
+          const { run } = await forward(session, prepared, gpu, inputs, name);
+          const ticks = session.diagnostics().lastRunTiming?.totalNs;
+          if (ticks === undefined) {
+            throw new Error(`${name}: 計測モードなのに run の GPU 時間が無い`);
+          }
+          lines.push(
+            `${name}（L ${ids.length}）: 壁 ${(run.wallMs / 1000).toFixed(2)} s` +
+              (unitNs === undefined ? "" : `・GPU ${(ticks * unitNs / 1e9).toFixed(3)} s`),
+          );
+        }
+        const submit = session.diagnostics().submit;
+        const observed = submit.chunkBudget.submitGpuTime;
+        if (observed === undefined) throw new Error("計測モードなのに submit の GPU 時間が無い");
+        if (unitNs !== undefined) {
+          const ms = (ns: number): string => `${(ns * unitNs / 1e6).toFixed(1)} ms`;
+          const maxMs = observed.maxNs * unitNs / 1e6;
+          lines.push(
+            `1 submit の GPU 時間の最大 ${
+              ms(observed.maxNs)
+            }（${observed.submits} 本・目安 ${SUBMIT_GPU_GUIDE_MS} ms ${
+              maxMs <= SUBMIT_GPU_GUIDE_MS ? "以内" : "を越えた"
+            }）`,
+            `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
+              observed.maxUnbackedNs === undefined ? "—" : ms(observed.maxUnbackedNs)
+            }`,
+            `単発 dispatch の最大 ${ms(observed.maxDispatchNs)}（${
+              observed.maxDispatchKey ?? "—"
+            }）`,
+          );
+        }
+        lines.push(`submit ${submit.submitCount} 本・dispatch ${submit.dispatchCount} 本`);
+      } finally {
+        await session.dispose();
+        await settleReleases(gpu);
+      }
+      assertEquals(deviceLost, undefined, "device lost");
+      const note = lines.join(" / ");
+      console.log(`[wan-umt5] 資源（計測モード）: ${note}`);
+      await runRecordedCase(
+        results,
+        { id: "umt5/resources/gpu-timing" },
+        () => Promise.resolve({ status: "pass", note }),
+      );
+    } finally {
       await settleReleases(gpu);
       gpu.destroy();
     }
