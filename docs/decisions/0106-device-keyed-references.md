@@ -339,3 +339,16 @@ depth-anything の実画像 = 判別、vowel-detector の全鎖 = `.lab` の完�
   decoder 末尾の `deform_conv2d` 1 dispatch がドライバの compute ジョブ上限 5 s を超えて device lost になり、Deno が
   プロセスごと panic する。解除条件は `deform_conv2d` の分割か高速化で 1 dispatch を上限内に収めること
   （[perf-ledger](../perf-ledger.md) K-63・[limitations](../limitations.md)「BiRefNet 系」節）。
+
+## 追記（2026-10-03）: 決定 4 の改定 — 参照門は「登録した全ケースに現環境の行があるか、無い id は held」で緑
+
+決定 4 の「登録したケースの一部にだけ行がある状態は緑」は、新しい case id の行の書き忘れが警告付き SKIP で通る抜けになっていた
+（backlog の隣接の小物 2026-10-03・ADR 0119 決定 8 の前提）。`7dc17309` で次に改める。
+
+- 緑の条件: 登録した全 caseIds に現環境の行がある、または行の無い id が現環境の **held**（呼び手が `registerReferenceGate` に渡す
+  `ReferenceHolds` — 追記決定 8 の `HELD_SERIES` と同じ形・プロセスごと落ちるケースだけ）。held と行が両方ある id は赤（古い held を
+  名指し）。登録 0 件は従来どおり赤。作るモード（`KARUME_REFERENCE=write`）は常に緑。
+- 比較モードで行が無いケースの step の挙動（明示 SKIP + 実物の書き出し）は変えない。失敗の文面は行の無い id と write の手順を名指しする。
+- opt-in のケース（環境変数で有効になる id）は無効時に登録しない（Wan の `CASE_IDS` の条件つき登録が前例）。
+- 棚卸し（2026-10-03・全 12 家族）: B570 で行が無いのは Wan の `gpu-text-*` 2 本（10d-4 で write）だけ。RTX 3080 Ti では anima の
+  extra 2 本が新たに赤になる（行の無い機は赤 — 本 ADR の思想どおり）。行を 1 本も持たない機は前後で変わらない。

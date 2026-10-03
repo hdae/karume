@@ -1459,8 +1459,9 @@ e2e の PNG / WAV 参照 sha256（`e2e_anima_test` / `e2e_sbv2_wav_test` / `e2e_
 **その環境で焼いた値**で、`packages/models/tests/fixtures/references/<系列>.json` に環境キー
 （`<ランタイム>-<アダプタ名 slug>`・例 `deno-intel-graphics-bmg-g21`）ごとの行として入っている。
 **行を持たない環境では突き合わせずに明示 SKIP する**（Metal 等）— これは仕様であり、門は
-「**その機**での移植・退行検出器」として機能する。SKIP が無音の緑にならないよう、その環境の行が
-1 件も無ければ**系列ごとの参照門が赤**になる（`KARUME_ALLOW_NO_REFERENCE` で opt-out）。
+「**その機**での移植・退行検出器」として機能する。SKIP が無音の緑にならないよう、登録した
+ケースの 1 本でもその環境の行が無ければ**系列ごとの参照門が赤**になる（行の無い id は呼び手の held で明示できる — ADR 0106 追記
+2026-10-03・`KARUME_ALLOW_NO_REFERENCE` で opt-out）。
 **同じ Linux / Vulkan でもベンダが違えば一致しない**（2026-09-20・Intel Arc
 B570 / Mesa ANV でフル verify: 当時の定数 1 本に対して 16 本すべて不一致・出力の PNG は目視で正常 =
 数値の微小差）。この実測が環境別の行へ移した直接の動機で、B570 の行

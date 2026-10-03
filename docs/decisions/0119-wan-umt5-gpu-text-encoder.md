@@ -208,7 +208,7 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
 - **「GPU i8 vs bf16 資産」を門にしない**。bf16 自身の誤差（値 1〜2 で 1 ulp が 7.8e-3 で、出力の丸めだけでその半分を持つ。
   24 層を bf16 で回した累積は未測 — 調査 §6.1）が床になり、帯を決める根拠が無い。
 - **sha 行**: GPU 経路の動画は新しい case id の行として足す（`KARUME_REFERENCE=write` — ADR 0106）。資産の経路の既存の行は残す。
-- **前提**: 参照門 `referenceGatePasses`（`packages/runtime/tests/helpers/reference.ts`）は登録した case id のどれか 1 本に行があれば緑で、
+- **前提（2026-10-03 に締めた — `7dc17309`・ADR 0106 追記）**: 参照門 `referenceGatePasses`（`packages/runtime/tests/helpers/reference.ts`）は登録した case id のどれか 1 本に行があれば緑で、
   新しい case id の書き忘れが警告付きの SKIP で通る（ADR 0106 決定 4 の字義・backlog の Wan 行の隣接の小物 2026-10-03）。
   新しい case id を足す前に、「全 case id に行があるか、無い id は明示の held」へ締める。
 
