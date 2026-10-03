@@ -3,8 +3,9 @@
  *
  * export した IR（f16 席・`outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`）を karume runtime で
  * 回し、ホストの unpatchify（`src/wan/dit-tokens.ts`）を通した潜在を、上流の**素の** diffusers
- * `WanTransformer3DModel`（CPU f32・同じ f16 丸めの重み）の 1 forward と突き合わせる。配布形の manifest は
- * まだ無いので、容器（`krm`）を直接開く。
+ * `WanTransformer3DModel`（CPU f32・同じ f16 丸めの重み）の 1 forward と突き合わせる。配布形（段 7）を
+ * 通す検証は `WanPipeline` の e2e（`e2e_wan_pipeline_test.ts`）が持ち、ここは DiT 単体の forward を実寸まで
+ * 検証するので、系列の容器（`krm`）を直接開く（計測用の層別グラフも系列にしか無い）。
  *
  * 生成は `cd tools/export-recipes && uv run --group wan --inexact python -m wan.export_dit`（golden の
  * 中身とケースの表は同ファイルの docstring）。golden は 2 本ずつ:
@@ -37,9 +38,9 @@
  * 受け入れる（決定 8 の外挿）。誤差の基準は**活性も f64 で回した上流**（`reference.<case>` の `output.f64` —
  * 重みは同じ f16 丸め）。
  *
- * - 計測モード（`gpuTiming`）の照合: S ごとに Session を張り直し、行ブロックの枚数（{@link FULL_ROW_BLOCKS} の
- *   S の行）と、1 submit ごとの GPU 時間の最大 ≤ {@link SUBMIT_GPU_LIMIT_MS}（最初の run の裏付け前のチャンクを
- *   含む — runtime の `ChunkBudgetStats.submitGpuTime`）を門にし、受入れケースで故障注入 4 件が帯の外へ出ること
+ * - 計測モード（`gpuTiming`）の照合: S ごとに Session を張り直し、行ブロックの枚数（device の束縛上限から導いた
+ *   期待値 — {@link expectedRowBlocks}）と、1 submit ごとの GPU 時間の最大 ≤ {@link SUBMIT_GPU_LIMIT_MS}（最初の
+ *   run の裏付け前のチャンクを含む — runtime の `ChunkBudgetStats.submitGpuTime`）を門にし、受入れケースで故障注入 4 件が帯の外へ出ること
  *   （timestep の 1 ずれは帯の {@link SUBTLE_FAULT_MARGIN} 倍以上）も見る。帯の門は max ベースの r で、
  *   p99.99 ベースの r（{@link quantileRatio}）は記録だけ（指標 r の弱点 — 最大は裾の 1 要素で決まる — を
  *   分布で見るため。ADR 0118 追記 2026-10-02「段 3 の結果 — 帯の床と指標 r の弱点」）。
@@ -48,7 +49,8 @@
  *   （{@link FULL_CASES} の `blocks` — どちらも S = 14,040）だけで回す。S = 32,760 は出口 31 本の readback
  *   staging が約 6 GB になり B570 に入らないので置かない。
  * - 通常モード（計測なし）: S ごとに所要（壁時計）を記録する。計測モードは 1 dispatch = 1 pass で所要が
- *   変わりうる。
+ *   変わりうる。出力は計測モードの同じケースの出力と Uint32 で一致することを門にする（チャンクの切れ目は
+ *   値を動かさない — {@link measuredTokens}）。
  *
  * 資産が無い環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。資産が**一部だけ**ある
  * 環境は SKIP ではなく FAIL にする（下の完全性テスト）。
@@ -58,7 +60,6 @@ import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
   type FusionCounts,
-  type GpuContext,
   type OpenedContainer,
   parseSafetensors,
   prepareContainer,
@@ -76,6 +77,7 @@ import {
 import { parseWanRopeBase, type WanRopeBase, wanRopeTables } from "../src/wan/dit-rope.ts";
 import { timestepsProj } from "../src/wan/dit-timestep.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { settleReleases } from "./helpers/settle-releases.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
@@ -232,15 +234,28 @@ const FULL_CASES: readonly {
   { name: "full-accept-s14040-t0600", tokens: 14040, role: "full-accept", blocks: false },
 ];
 
-/** S ごとのケース（{@link FULL_TOKENS_ORDER} の順）。 */
-const FULL_CASES_BY_TOKENS = FULL_TOKENS_ORDER.map((tokens) => ({
-  tokens,
-  cases: FULL_CASES.filter((spec) => spec.tokens === tokens),
-}));
+/**
+ * S ごとのケース（{@link FULL_TOKENS_ORDER} の順）。`normalModeCase` は通常モードで回す 1 本（S ごとの先頭）。
+ */
+const FULL_CASES_BY_TOKENS = FULL_TOKENS_ORDER.map((tokens) => {
+  const cases = FULL_CASES.filter((spec) => spec.tokens === tokens);
+  return { tokens, cases, normalModeCase: cases[0].name };
+});
 
 /**
  * 実寸のケースの `reference.<case>` が持つ f64 の参照（上流の素の forward を活性も f64 で回した出力を f32 へ
- * 丸めた値 — `wan/export_dit.py` の `REFERENCE_F64_KEY`・丸めの差は比にして 6e-8 以下）。
+ * 丸めた値 — `wan/export_dit.py` の `REFERENCE_F64_KEY`）。
+ *
+ * f32 へ丸めた差は要素ごとに 2⁻²⁴·|x| 以下で、比にして 6e-8 以下。これが正規化の分母（CPU f32 の参照の f64 に
+ * 対する比 — {@link referenceErrorOf}）を動かす割合は分母の最小で決まる（実測は
+ * {@link DIT_FULL_NORMALIZED_BAND} の表と results.json）:
+ *
+ * - 決定用（`full-band`）だけ: S = 14,040 の最小 3.72e-6（`t0250`）で 2% 未満・S = 32,760 の最小 2.07e-6
+ *   （`t0999-2`）で約 2.9%
+ * - 受入れを含めると: 最小 1.83e-6（`full-accept-s14040-t0600`）で約 3.3%
+ *
+ * r が数 % 動いても判定の向きは変わらない（判定が帯と最も近いのは S = 32,760 の t0600 の timestep の 1 ずれで
+ * 帯の 2.65 倍。そのケースの分母は 6.77e-6 なので、動きは 1% 未満）。
  */
 const REFERENCE_F64_KEY = "output.f64";
 
@@ -331,15 +346,31 @@ const SUBTLE_FAULT_MARGIN = 2;
  */
 const SUBMIT_GPU_LIMIT_MS = 1000;
 
+/** Wan2.1 T2V 1.3B の attention の head 数（transformer の config `num_attention_heads`）。 */
+const WAN_HEADS = 12;
+/** スコア行列 S の 1 要素の格納幅（既定の f32 格納）。 */
+const SCORE_BYTES = 4;
+
 /**
- * 実寸の self-attention の行ブロック枚数（S ごと — ADR 0118 決定 6 の表。B570 の束縛上限 2,147,483,644 B に対し、
- * S 1 行 = 12 heads × S × 4 B なので、S = 14,040 は 5 枚 × 2,808 行・S = 32,760 は 24 枚 × 1,365 行）。
+ * 実寸の self-attention の行ブロック枚数の期待値（ADR 0118 決定 6）。行ブロック（ADR 0060）はクエリ行を
+ * 「1 枚のスコア S が束縛上限に収まる最小枚数」へ等分するので、device の束縛上限
+ * （`maxStorageBufferBindingSize`）だけから runtime と独立に導ける:
+ *
+ *   1 枚の行数 = ⌊上限 ÷ (heads × S × 4 B)⌋・枚数 = ⌈S ÷ 1 枚の行数⌉
+ *
+ * B570（束縛上限 {@link B570_STORAGE_BINDING_LIMIT}）では S = 14,040 が 5 枚（等分で 2,808 行）・S = 32,760 が
+ * 24 枚 × 1,365 行（決定 6 の表 — 下の GPU 不要のテストがこの式で再現する）。
  */
-const FULL_ROW_BLOCKS: Readonly<Record<FullTokens, number>> = { 14040: 5, 32760: 24 };
+const expectedRowBlocks = (tokens: number, bindingLimit: number): number =>
+  Math.ceil(tokens / Math.floor(bindingLimit / (WAN_HEADS * tokens * SCORE_BYTES)));
+
+/** B570 の `maxStorageBufferBindingSize`（ADR 0118 決定 6 の表の前提）。 */
+const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
 
 /**
  * timestamp の 1 単位の ns（環境キー別）。Deno は wgpu の raw tick を換算せずに返す（docs/known-issues.md
  * 「Intel Arc B570」節 — B570 で 1 tick = 52.0833 ns）。表に無い環境では換算を推測せず fail loudly にする。
+ * 落ちるのは時間門のステップだけで、r の照合と故障注入は換算を要らないので表に無い環境でも走る。
  */
 const TIMESTAMP_UNIT_NS: Readonly<Record<string, number>> = {
   "deno-intel-graphics-bmg-g21": 52.0833,
@@ -612,6 +643,16 @@ Deno.test({
   },
 });
 
+Deno.test(
+  "Wan DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限で ADR 0118 決定 6 の表（24 枚 / 5 枚）を再現する",
+  () => {
+    assertEquals(
+      FULL_TOKENS_ORDER.map((tokens) => expectedRowBlocks(tokens, B570_STORAGE_BINDING_LIMIT)),
+      [24, 5],
+    );
+  },
+);
+
 Deno.test({
   name: "Wan DiT ホスト: patchify と資産 rope_base からの RoPE 表が golden の入力とビット一致する",
   ignore: !ASSETS_AVAILABLE,
@@ -646,26 +687,16 @@ Deno.test({
 });
 
 /**
- * 破棄したバッファの解放を待つ（空の `submit` → `onSubmittedWorkDone`・device 消失とは競わせる）。
+ * 計測モードの照合が出した出力（通常モードで回すケースだけ — ケース名 → unpatchify 前のトークン）。
  *
- * WHY: B570（Linux xe / wgpu）は `destroy()` の解放が次の device poll まで遅れる（docs/known-issues.md
- * 「Intel Arc B570」節）。実寸の 1 run は中間だけで数 GiB あるので、run の間・Session の間・device を
- * 捨てる前に待つ。2026-10-02 の実測（素の WebGPU）: 7 GiB を破棄して同じ device で取り直すと OOM で、
- * この待ちの後なら通る。待たずに device を捨てると別の device から 7 GiB が OOM（解放されないまま
- * 予算を食い続ける）、待ってから捨てると通る — device を捨てる前にも通すのは後続のテストの予算を残すため。
+ * 通常モードのテストがこれと Uint32 で突き合わせる。計測モードは 1 dispatch = 1 pass で、裏付け後のチャンクの
+ * 切れ目も通常の実行と変わりうる。それでも値が 1 ビットも動かないこと（チャンクの切れ目は値を動かさない）を
+ * 直接縛る。2 つのモードは device が違う（計測の feature の有無）ので、同時に載せず別のテストで順に回す。
+ *
+ * MUST: 計測モードの照合を通常モードより前に登録する（Deno は同じファイルのテストを登録順に回す）。計測モードを
+ * 飛ばした回（`--filter` など）は通常モードに比べる相手が無いので、比較を黙って省かず落とす。
  */
-const settleReleases = async (gpu: GpuContext): Promise<void> => {
-  let unsubscribe: () => void = () => {};
-  const lost = new Promise<void>((resolve) => {
-    unsubscribe = gpu.onLost(() => resolve());
-  });
-  try {
-    gpu.device.queue.submit([]);
-    await Promise.race([gpu.device.queue.onSubmittedWorkDone(), lost]);
-  } finally {
-    unsubscribe();
-  }
-};
+const measuredTokens = new Map<string, Float32Array>();
 
 /** この環境の timestamp の 1 単位の ns（{@link TIMESTAMP_UNIT_NS}）。表に無ければ fail loudly。 */
 const timestampUnitNs = (): number => {
@@ -685,8 +716,11 @@ const gib = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(2)} GiB`;
 type FullRun = {
   readonly label: string;
   readonly wallMs: number;
-  /** dispatch の pass の GPU 時間の合計（ns に換算）。計測が無効な device では undefined。 */
-  readonly gpuMs: number | undefined;
+  /**
+   * dispatch の pass の GPU 時間の合計（timestamp の生の単位 — ns への換算は {@link formatRun} が
+   * {@link TIMESTAMP_UNIT_NS} で行う）。計測が無効な device では undefined。
+   */
+  readonly gpuTicks: number | undefined;
   /**
    * run の直後に生きている確保 = 重み + その run のアリーナ（中間・入力・readback staging）+ 保持中の
    * slot backing（中間と入力）。readback staging（`MAP_READ`）も含む — B570 では VRAM の予算に数えられない
@@ -703,23 +737,23 @@ const observeRun = (
   label: string,
   diagnostics: SessionDiagnostics,
   wallMs: number,
-  unitNs: number | undefined,
   stagingBytes: number,
 ): FullRun => ({
   label,
   wallMs,
-  gpuMs: diagnostics.lastRunTiming === undefined || unitNs === undefined
-    ? undefined
-    : diagnostics.lastRunTiming.totalNs * unitNs / 1e6,
+  gpuTicks: diagnostics.lastRunTiming?.totalNs,
   liveBytes: diagnostics.weights.allocatedBytes + (diagnostics.lastRun?.allocatedBytes ?? 0) +
     diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes,
   weightBytes: diagnostics.weights.allocatedBytes,
   stagingBytes,
 });
 
-const formatRun = (run: FullRun): string =>
+/** `unitNs` は timestamp の 1 単位の ns（省くと GPU 時間を出さない — 計測なしの run）。 */
+const formatRun = (run: FullRun, unitNs?: number): string =>
   `${run.label}: 壁 ${(run.wallMs / 1000).toFixed(2)} s` +
-  (run.gpuMs === undefined ? "" : `・GPU ${(run.gpuMs / 1000).toFixed(2)} s`) +
+  (run.gpuTicks === undefined || unitNs === undefined
+    ? ""
+    : `・GPU ${(run.gpuTicks * unitNs / 1e9).toFixed(2)} s`) +
   `・確保 ${gib(run.liveBytes)}（うち重み ${gib(run.weightBytes)}・readback staging ${
     gib(run.stagingBytes)
   }）`;
@@ -755,7 +789,7 @@ const submitGpuNote = (
     `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
       observed.maxUnbackedNs === undefined ? "—" : ms(observed.maxUnbackedNs)
     }`,
-    `単発 dispatch の最大 ${ms(observed.maxDispatchNs)}（${observed.maxDispatchKey}）`,
+    `単発 dispatch の最大 ${ms(observed.maxDispatchNs)}（${observed.maxDispatchKey ?? "—"}）`,
     `窓平均の最大 ${budget.maxWindowMeanMs?.toFixed(1) ?? "—"} ms・推定の最大 ${
       budget.maxEstimatedMs?.toFixed(1) ?? "—"
     } ms・予算超過 ${budget.overBudgetChunks} 本`,
@@ -840,7 +874,6 @@ Deno.test({
               "層別",
               session.diagnostics(),
               performance.now() - started,
-              undefined,
               outputBytes(produced),
             );
             // 出口 31 本（2.4 GiB）の中間を持つ run なので、次の run の確保の前に解放を待つ。
@@ -865,7 +898,6 @@ Deno.test({
     "実寸の帯の内・故障注入は帯の外・行ブロックは S ごとの枚数・1 submit の GPU 時間 ≤ 1 s",
   ignore: !ASSETS_AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    const unitNs = timestampUnitNs();
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
     const prepared = prepareContainer(opened, GRAPH);
     assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
@@ -884,7 +916,9 @@ Deno.test({
     });
     try {
       assertAdapterMatchesEnvironment(gpu);
-      for (const { tokens: fullTokens, cases } of FULL_CASES_BY_TOKENS) {
+      // 期待値の元は device が実際に許した束縛上限（runtime の行ブロックが見るのと同じ値）。
+      const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
+      for (const { tokens: fullTokens, cases, normalModeCase } of FULL_CASES_BY_TOKENS) {
         const fullBand = DIT_FULL_NORMALIZED_BAND[fullTokens];
         const built = performance.now();
         const session = await prepared.createContainerSession(gpu);
@@ -900,9 +934,7 @@ Deno.test({
             const wallMs = performance.now() - started;
             const tensor = outputs[prepared.graph.outputs[0]];
             if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-            runs.push(
-              observeRun(label, session.diagnostics(), wallMs, unitNs, outputBytes(outputs)),
-            );
+            runs.push(observeRun(label, session.diagnostics(), wallMs, outputBytes(outputs)));
             // 次の run の確保（2 本目は slot backing の構築）の前に、この run の中間の解放を待つ。
             await settleReleases(gpu);
             return tensor.data;
@@ -932,6 +964,8 @@ Deno.test({
                 const band = (diff: Difference) =>
                   recordedTolerance(diff, fullBand * referenceRatio);
                 const tokens = await run(inputs, `${name} io`);
+                // 判定の前に残す（帯の外へ出た回も、通常モードのビット一致の門は走る）。
+                if (name === normalModeCase) measuredTokens.set(name, tokens);
                 const latents = unpatchifyTokens(tokens, golden.latentShape, WAN_GEOMETRY);
                 const diff = difference(latents, expected);
                 const diffF32 = difference(latents, reference);
@@ -966,8 +1000,8 @@ Deno.test({
                 assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
                 assertEquals(
                   rowBlocks,
-                  FULL_ROW_BLOCKS[fullTokens],
-                  `${name}: self-attention の行ブロック枚数`,
+                  expectedRowBlocks(fullTokens, bindingLimit),
+                  `${name}: self-attention の行ブロック枚数（束縛上限 ${bindingLimit} B）`,
                 );
                 assertEquals(
                   { ...diagnostics.lastRunFusions, ...EXPECTED_FUSIONS },
@@ -1067,11 +1101,13 @@ Deno.test({
               results,
               { id: `full-s${fullTokens}/submit`, failureNote: () => note },
               () => {
+                // 換算の表はこのステップでだけ引く（表に無い環境で落ちるのは時間門だけ）。
+                const unitNs = timestampUnitNs();
                 const submit = submitGpuNote(session.diagnostics(), unitNs);
                 note = [
                   submit.note,
                   `構築 ${(buildMs / 1000).toFixed(1)} s`,
-                  ...runs.map(formatRun),
+                  ...runs.map((observed) => formatRun(observed, unitNs)),
                 ].join(" / ");
                 console.log(`[wan-dit] 実寸 S = ${fullTokens} の計測モード: ${note}`);
                 assert(
@@ -1121,14 +1157,13 @@ Deno.test({
     try {
       assertAdapterMatchesEnvironment(gpu);
       // S ごとに Session を張り直す（理由は計測モードの照合と同じ — 2 つの S の backing を同時に載せない）。
-      for (const { tokens: fullTokens, cases } of FULL_CASES_BY_TOKENS) {
+      for (const { tokens: fullTokens, normalModeCase: name } of FULL_CASES_BY_TOKENS) {
         await t.step(`S = ${fullTokens}`, async () => {
           const fullBand = DIT_FULL_NORMALIZED_BAND[fullTokens];
           const built = performance.now();
           const session = await prepared.createContainerSession(gpu);
           const buildMs = performance.now() - built;
           try {
-            const { name } = cases[0];
             await runRecordedCase(
               results,
               { id: `${name}/normal-mode` },
@@ -1138,7 +1173,7 @@ Deno.test({
                 const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
                 const referenceRatio = ratioOf(referenceErrorOf(golden, name));
                 const runs: FullRun[] = [];
-                let tokens = new Float32Array();
+                const produced: Float32Array[] = [];
                 // 1 本目は最初の run（パイプラインの生成と、裏付け前の initialChunkSize のチャンク）、2 本目は
                 // 2 回目以降の形（slot backing・時間予算で切ったチャンク）。生成の 1 ステップに近いのは 2 本目。
                 for (const label of ["1 本目", "2 本目"]) {
@@ -1147,18 +1182,13 @@ Deno.test({
                   const wallMs = performance.now() - started;
                   const tensor = outputs[prepared.graph.outputs[0]];
                   if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-                  tokens = tensor.data;
+                  produced.push(tensor.data);
                   runs.push(
-                    observeRun(
-                      label,
-                      session.diagnostics(),
-                      wallMs,
-                      undefined,
-                      outputBytes(outputs),
-                    ),
+                    observeRun(label, session.diagnostics(), wallMs, outputBytes(outputs)),
                   );
                   await settleReleases(gpu);
                 }
+                const tokens = produced[produced.length - 1];
                 const diff = difference(
                   unpatchifyTokens(tokens, golden.latentShape, WAN_GEOMETRY),
                   expected,
@@ -1187,6 +1217,22 @@ Deno.test({
                     normalizedRatio(diff, referenceRatio).toPrecision(3)
                   } が実寸の帯 ${fullBand} の外`,
                 );
+                const measured = measuredTokens.get(name);
+                if (measured === undefined) {
+                  throw new Error(
+                    `${name}: 計測モードの照合の出力が無い（同じ回で計測モードの照合を先に回す — ` +
+                      "measuredTokens の MUST）",
+                  );
+                }
+                for (const [index, data] of produced.entries()) {
+                  const { label } = runs[index];
+                  assertEquals(
+                    firstBitMismatch(data, measured),
+                    -1,
+                    `${name}: 通常モードの ${label}が計測モードの出力と Uint32 で一致しない` +
+                      "（値は最初に割れる要素の添字）",
+                  );
+                }
                 assertEquals(deviceLost, undefined, "device lost");
                 return { status: "pass", note };
               },
@@ -1304,6 +1350,8 @@ Deno.test({
         await session.dispose();
       }
     } finally {
+      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+      await settleReleases(gpu);
       gpu.destroy();
     }
   },
@@ -1319,7 +1367,8 @@ const TIMESTEP_OFF_BY_ONE = "timestep の 1 ずれ";
  * 受入れケースの故障注入 4 件（追記 2026-10-02 — 帯が広すぎないことの裏取り）。どれも帯の外へ出ることを
  * 門にする（赤にならない注入があれば帯の決め方を見直す）。
  *
- * - RoPE の h / w の取り違え（非正方の格子で表を組み違える — 正方では値が一致して見えない）
+ * - RoPE の h / w の取り違え（非正方の格子で表を組み違える — 正方では値が一致して見えない。なので受入れの格子は
+ *   非正方であることを要求し、正方なら注入を黙って飛ばさず落とす — 4 件が 3 件に減ったまま緑にしない）
  * - unpatchify の並びの取り違え（出口を入口の並び `(c,pt,ph,pw)` で読む）
  * - timestep の cos / sin の前後反転
  * - **timestep の 1 ずれ**（`timesteps_proj` を t + 1 で組む — TS の `timestepsProj`）。上の 3 件は O(1) の差で
@@ -1349,20 +1398,23 @@ const faultInjections = async (
     });
   };
 
-  if (grid.rows !== grid.cols) {
-    const swapped = wanRopeTables(base, { ...grid, rows: grid.cols, cols: grid.rows });
-    const shape = inputs.rope_cos.shape;
-    measure(
-      "RoPE の h / w 取り違え",
-      unpatchify(
-        await run({
-          ...inputs,
-          rope_cos: { dtype: "f32", shape, data: swapped.cos },
-          rope_sin: { dtype: "f32", shape, data: swapped.sin },
-        }),
-      ),
-    );
-  }
+  assert(
+    grid.rows !== grid.cols,
+    `受入れケースの格子 ${grid.frames}·${grid.rows}·${grid.cols} が正方 — RoPE の h / w の取り違えが値に出ない` +
+      "（受入れには非正方の格子を選ぶ）",
+  );
+  const swapped = wanRopeTables(base, { ...grid, rows: grid.cols, cols: grid.rows });
+  const shape = inputs.rope_cos.shape;
+  measure(
+    "RoPE の h / w 取り違え",
+    unpatchify(
+      await run({
+        ...inputs,
+        rope_cos: { dtype: "f32", shape, data: swapped.cos },
+        rope_sin: { dtype: "f32", shape, data: swapped.sin },
+      }),
+    ),
+  );
   measure("unpatchify の並び", unpatchify(transposeTokenAxes(tokens, WAN_GEOMETRY)));
   const proj = inputs.timesteps_proj;
   if (proj.dtype !== "f32") throw new Error(`timesteps_proj が ${proj.dtype}`);
@@ -1419,6 +1471,8 @@ Deno.test({
         await session.dispose();
       }
     } finally {
+      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+      await settleReleases(gpu);
       gpu.destroy();
     }
   },
