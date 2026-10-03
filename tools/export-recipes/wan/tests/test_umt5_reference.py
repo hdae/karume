@@ -10,7 +10,9 @@
   RMSNorm と softmax で f32 に落ちるので同じ検査に掛かる（対）
 - f64 の参照で見ると、上流の bf16 と f32 の不一致はほぼ全部が bf16 の誤差（f32 自身の誤差は
   その 1% 未満 — 品質の記録で f32 を基準にしてよい根拠の小模型での裏付け）
-- golden の形（キー・dtype・形・メタ）と、決定用のケースの選び方
+- 量子化しない重みの読み口（checkpoint の F32）が上流の parameter とビット一致し、同じ書き下しが
+  量子化しない上流の eager とビット一致する — i8 の参照とは割れる（対）
+- golden の形（キー・dtype・形・メタ）・量子化なしの参照は受入れだけ、と決定用のケースの選び方
 
 乱数初期化の小さな umT5（`wan.umt5_probe.TINY_CONFIG`）を `umt5_export.prepare` で容器にして
 回す — 実重みは読まない。
@@ -59,12 +61,18 @@ def model() -> Any:
 
 
 @pytest.fixture(scope="module")
-def container(model: Any, tmp_path_factory: pytest.TempPathFactory) -> Path:
+def checkpoint(model: Any, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """小模型の checkpoint（`save_pretrained` — F32 の safetensors）。"""
+    directory = tmp_path_factory.mktemp("umt5-reference") / "checkpoint"
+    model.save_pretrained(directory)
+    return directory
+
+
+@pytest.fixture(scope="module")
+def container(checkpoint: Path) -> Path:
     """`umt5_export.prepare`（行の塊ごとの i8）で書いた小模型の容器（代表 path）。"""
-    directory = tmp_path_factory.mktemp("umt5-reference")
-    model.save_pretrained(directory / "checkpoint")
-    prepared = ue.prepare(directory / "checkpoint", chunk_rows=7)
-    path = directory / "container" / ue.MODEL_FILE
+    prepared = ue.prepare(checkpoint, chunk_rows=7)
+    path = checkpoint.parent / "container" / ue.MODEL_FILE
     path.parent.mkdir()
     publish_model(
         path,
@@ -80,6 +88,12 @@ def container(model: Any, tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="module")
 def weights(container: Path) -> ur.ContainerWeights:
     return ur.ContainerWeights(container)
+
+
+@pytest.fixture(scope="module")
+def plain(checkpoint: Path) -> ur.CheckpointWeights:
+    """量子化しない重みの読み口（`umt5_export.checkpoint_weights` — 実モデルと同じ組み方）。"""
+    return ue.checkpoint_weights(checkpoint)
 
 
 @pytest.fixture(scope="module")
@@ -194,6 +208,56 @@ class TestContainerWeights:
             weights.rows(ur.EMBED_KEY, torch.tensor([5, 3]))
 
 
+class TestCheckpointWeights:
+    def test_every_weight_is_the_checkpoint_value(self, plain, model):
+        """量子化しない読み口の重み = 上流の parameter（ビット一致・tied な語彙埋め込みも）。"""
+        expected = dict(up.Umt5EncoderTokens(model).named_parameters())
+
+        mismatched = [
+            key for key, value in expected.items() if not torch.equal(plain.tensor(key), value)
+        ]
+
+        assert len(expected) == 10 * LAYERS + 2
+        assert mismatched == []
+
+    def test_rows_are_the_rows_of_the_whole_table(self, plain):
+        """連続する区間と飛び飛びの行が混ざっても、表の同じ行を同じ並びで返す。"""
+        indices = torch.tensor([0, 1, 2, 17, 18, 200, 383])
+
+        rows = plain.rows(ur.EMBED_KEY, indices)
+
+        assert torch.equal(rows, plain.tensor(ur.EMBED_KEY)[indices])
+
+    def test_rows_past_the_table_fail_loudly(self, plain):
+        size = plain.tensor(ur.EMBED_KEY).shape[0]
+
+        with pytest.raises(ur.Umt5ReferenceError, match="表の外"):
+            plain.rows(ur.EMBED_KEY, torch.tensor([0, size]))
+
+    def test_an_unmapped_key_fails_loudly(self, plain):
+        with pytest.raises(ur.Umt5ReferenceError, match="checkpoint のキーが無い"):
+            plain.tensor("encoder.block.0.unknown.weight")
+
+
+class TestUnquantizedReference:
+    def test_f32_is_the_unquantized_upstream_eager_bit_for_bit(self, plain, model):
+        """量子化なしの f32 = 量子化しない上流の eager（tanh 近似）— 有効長 2〜512 の全部で。"""
+        upstream = upstream_tanh(model)
+
+        actual = run(plain, model, torch.float32)
+
+        for length, output in zip(LENGTHS, actual, strict=True):
+            expected = up.valid_output(upstream, probe.tiny_ids(length))
+            assert torch.equal(output, expected), f"L = {length}: {up.compare(output, expected)}"
+
+    def test_it_differs_from_the_i8_reference(self, plain, weights, model):
+        """対（非恒真）: 量子化なしの参照は i8 の参照と割れる（読み口が容器へ落ちていない）。"""
+        (unquantized,) = run(plain, model, torch.float32, lengths=(28,))
+        (i8,) = run(weights, model, torch.float32, lengths=(28,))
+
+        assert not torch.equal(unquantized, i8)
+
+
 class TestFloat32Reference:
     def test_it_is_the_upstream_eager_bit_for_bit(self, weights, quantized, model):
         """f32 の書き下し = 上流の eager（tanh 近似・fake-quant 済み）— 有効長 2〜512 の全部で。"""
@@ -298,6 +362,58 @@ class TestGolden:
         assert torch.equal(tensors[ur.BUCKETS_KEY], buckets.to(torch.int32))
         assert torch.equal(tensors[ur.OUTPUT_F64_KEY], f64.float())
         assert meta["ratios"]["f32VsF64"] == up.max_ratio(f32, f64)
+        assert "unquantized" not in meta
+
+    def test_an_accept_case_carries_the_unquantized_reference(
+        self, weights, plain, model, tmp_path
+    ):
+        ids, buckets = case_inputs(model, 28)
+        case = ur.ReferenceCase(
+            name="accept-x",
+            role="accept",
+            prompt="原文",
+            cleaned="原文",
+            ids=tuple(int(token) for token in ids[0]),
+        )
+        f64 = run(weights, model, torch.float64, lengths=(28,))[0]
+        f32 = run(weights, model, torch.float32, lengths=(28,))[0]
+        high = run(plain, model, torch.float64, lengths=(28,))[0]
+        low = run(plain, model, torch.float32, lengths=(28,))[0]
+        path = tmp_path / f"{ur.REFERENCE_PREFIX}{case.name}{ur.CASE_SUFFIX}"
+
+        ur.write_golden(
+            path,
+            ur.golden_tensors(case, buckets, f64, f32, (high, low)),
+            ur.golden_metadata(
+                case,
+                weights,
+                ur.reference_ratios(f64, f32),
+                {"torch": "x"},
+                ur.reference_ratios(high, low),
+            ),
+        )
+
+        with safe_open(str(path), framework="pt") as handle:
+            meta = json.loads(handle.metadata()[ur.METADATA_KEY])
+            tensors = {key: handle.get_tensor(key) for key in handle.keys()}  # noqa: SIM118
+        assert torch.equal(tensors[ur.OUTPUT_F32_KEY], f32)
+        assert torch.equal(tensors[ur.OUTPUT_UNQUANTIZED_F64_KEY], high.float())
+        assert torch.equal(tensors[ur.OUTPUT_UNQUANTIZED_F32_KEY], low)
+        assert meta["unquantized"]["ratios"]["f32VsF64"] == up.max_ratio(low, high)
+
+    @pytest.mark.parametrize(
+        ("role", "with_unquantized"), [("band", True), ("accept", False)], ids=["band", "accept"]
+    )
+    def test_the_unquantized_reference_belongs_to_accept_only(self, model, role, with_unquantized):
+        ids, buckets = case_inputs(model, 2)
+        case = ur.ReferenceCase(
+            name="x", role=role, prompt="p", cleaned="p", ids=tuple(int(t) for t in ids[0])
+        )
+        output = torch.zeros(1, 2, 64)
+        pair = (output, output) if with_unquantized else None
+
+        with pytest.raises(ur.Umt5ReferenceError, match="受入れだけ"):
+            ur.golden_tensors(case, buckets, output, output, pair)
 
 
 def fake_encode(text: str) -> Mapping[str, Any]:

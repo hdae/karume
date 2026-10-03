@@ -6,6 +6,10 @@ CLI は `wan.umt5_export reference`（容器は書かない — 既に書かれ�
 
 ## 参照の形（決定 8 ① — 同じ i8 の fake-quant 重みで回した CPU の層逐次の参照）
 
+移植の門の参照（`output.f64` / `output.f32`）は i8 の重みで、品質の記録の基準（受入れだけ —
+`output.unquantized.*`）は量子化しない重み（{@link CheckpointWeights}）で採る。計算はどちらも
+同じ書き下しで、重みの読み口だけが違う。
+
 - **重み**: i8 系列の容器から 1 本ずつ読む（{@link ContainerWeights}）。i8 の重みは
   packed × scale を f32 で掛けた値で、export の fake-quant（`umt5_export.quantize_rows`
   の `rounded`）と同じ値 — GPU が回すのと同じ重み。F32 の表（相対位置の表・RMSNorm）は
@@ -37,12 +41,16 @@ CLI は `wan.umt5_export reference`（容器は書かない — 既に書かれ�
 - `output.f64`（F32 `[1, L, 4096]`）: f64 の参照を f32 へ丸めた値（TS の safetensors は
   F64 を読まない — 丸めの影響はメタの `ratios`）
 - `output.f32`（F32 `[1, L, 4096]`）: f32 の参照（正規化比 r の分母）
+- `output.unquantized.f64` / `output.unquantized.f32`（F32 `[1, L, 4096]`・**受入れだけ**）: 量子化
+  しない重み（pin した checkpoint の F32 をそのまま — {@link CheckpointWeights}）で回した同じ
+  書き下し（f64 は格納で f32 へ丸める）。品質の記録の基準（ADR 0119 追記「10b の結果」の
+  「f32 参照を基準にする」— i8 の丸めと bf16 の影響を同じ基準で分けて測る）で、門には使わない
 
 メタはキー 1 つ（{@link METADATA_KEY}）に JSON（キー整列・区切りの空白なし —
 safetensors はメタを HashMap で書くので、キーが複数だと同じ入力でバイトが割れる —
 `wan.text_embeds` と同じ理由）。中身はプロンプトの原文と前処理後・L・役割・出所・容器の
 part 0 の sha256（容器を書き直したら golden も書き直す — TS が突き合わせる）・重みと活性の
-規則・分母と丸めの影響（{@link reference_ratios}）。
+規則・分母と丸めの影響（{@link reference_ratios}）・受入れは量子化なしの参照の同じ比。
 
 TS の e2e（`packages/models/tests/e2e_wan_umt5_test.ts`）は、golden の原文を TS の
 トークナイザに通した id 列と TS のバケット表が golden の入力とビット一致することを
@@ -100,10 +108,14 @@ CASE_SUFFIX = ".safetensors"
 INPUT_IDS_KEY, BUCKETS_KEY = umt5_patch.INPUT_NAMES
 OUTPUT_F64_KEY = "output.f64"
 OUTPUT_F32_KEY = "output.f32"
+#: 量子化なしの参照（受入れだけ — 品質の記録の基準）。
+OUTPUT_UNQUANTIZED_F64_KEY = "output.unquantized.f64"
+OUTPUT_UNQUANTIZED_F32_KEY = "output.unquantized.f32"
 
 #: メタのキー（1 つだけ — モジュール doc）と形式の版。
 METADATA_KEY = "karume.wan.umt5_reference"
-REFERENCE_FORMAT = "karume-wan-umt5-reference/1"
+#: /2 = 受入れに量子化なしの参照を足した形（TS は受入れでこのキーを必須にする）。
+REFERENCE_FORMAT = "karume-wan-umt5-reference/2"
 
 #: 容器のテンソルキー（容器の initializer 名 = ラッパ `Umt5EncoderTokens` のテンソルキー）。
 EMBED_KEY = "encoder.embed_tokens.weight"
@@ -244,6 +256,57 @@ class ContainerWeights:
         if not bool(covered.all()):
             raise Umt5ReferenceError(f"'{key}': block の行範囲が要る行を覆わない")
         return gathered * scale[indices]
+
+
+class CheckpointReader(Protocol):
+    """上流の checkpoint の読み口（`umt5_export.Checkpoint` — F32 だけを返す）。"""
+
+    def read(self, key: str) -> torch.Tensor: ...
+
+    def read_rows(self, key: str, start: int, stop: int) -> torch.Tensor: ...
+
+
+class CheckpointWeights:
+    """量子化しない重み（pin した checkpoint の F32 をそのまま）を 1 本ずつ読む（品質の記録の
+    基準）。
+
+    {@link ContainerWeights} と同じ読み口で、書き下しは同じものを使う。`keys` は容器のテンソル
+    キー → checkpoint のキー（tied な語彙埋め込みは checkpoint に片方の名前でしか無い —
+    `umt5_export.checkpoint_weights` が組む）。checkpoint の safetensors は mmap で開くので、
+    全体を f32 で持たない（層逐次 — 決定 8 ①）。MUST: 対応の無いキーは fail loudly（黙って
+    容器の値に落とさない）。
+    """
+
+    def __init__(self, checkpoint: CheckpointReader, keys: Mapping[str, str]) -> None:
+        self._checkpoint = checkpoint
+        self._keys = dict(keys)
+
+    def _key(self, key: str) -> str:
+        mapped = self._keys.get(key)
+        if mapped is None:
+            raise Umt5ReferenceError(f"'{key}' の checkpoint のキーが無い")
+        return mapped
+
+    def tensor(self, key: str) -> torch.Tensor:
+        return self._checkpoint.read(self._key(key))
+
+    def rows(self, key: str, indices: torch.Tensor) -> torch.Tensor:
+        """行 `indices`（昇順・重複なし）だけ — 連続する行の区間ごとに読む。"""
+        wanted = indices.tolist()
+        if wanted != sorted(set(wanted)) or not wanted or wanted[0] < 0:
+            raise Umt5ReferenceError(f"'{key}': 行の添字は 0 以上の昇順・重複なしで渡す")
+        mapped = self._key(key)
+        runs: list[tuple[int, int]] = []
+        for row in wanted:
+            if runs and runs[-1][1] == row:
+                runs[-1] = (runs[-1][0], row + 1)
+            else:
+                runs.append((row, row + 1))
+        chunks = [self._checkpoint.read_rows(mapped, start, stop) for start, stop in runs]
+        gathered = torch.cat(chunks)
+        if gathered.shape[0] != len(wanted):
+            raise Umt5ReferenceError(f"'{key}': 行 {wanted[-1]} が表の外")
+        return gathered
 
 
 # ---------------------------------------------------------------------------
@@ -543,17 +606,38 @@ def row_quality(actual: torch.Tensor, base: torch.Tensor) -> dict[str, float]:
     }
 
 
+def _check_unquantized(case: ReferenceCase, unquantized: object | None) -> None:
+    """量子化なしの参照は受入れにだけ在る（決定用に混ぜない・受入れで欠かさない）。"""
+    if (case.role == "accept") != (unquantized is not None):
+        raise Umt5ReferenceError(
+            f"{case.name}: 量子化なしの参照は受入れだけが持つ（役割 {case.role}）"
+        )
+
+
 def golden_tensors(
-    case: ReferenceCase, buckets: torch.Tensor, f64: torch.Tensor, f32: torch.Tensor
+    case: ReferenceCase,
+    buckets: torch.Tensor,
+    f64: torch.Tensor,
+    f32: torch.Tensor,
+    unquantized: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
-    """1 ケースの golden のテンソル（境界の i64 → i32 は `normalize_boundary_tensor` で）。"""
+    """1 ケースの golden のテンソル（境界の i64 → i32 は `normalize_boundary_tensor` で）。
+
+    `unquantized` は量子化なしの参照の (f64, f32)（受入れだけ — {@link _check_unquantized}）。
+    """
+    _check_unquantized(case, unquantized)
     ids = torch.tensor(case.ids, dtype=torch.long)
-    return {
+    tensors = {
         INPUT_IDS_KEY: normalize_boundary_tensor(ids, f"{case.name} の {INPUT_IDS_KEY}"),
         BUCKETS_KEY: normalize_boundary_tensor(buckets, f"{case.name} の {BUCKETS_KEY}"),
         OUTPUT_F64_KEY: f64.to(torch.float32).contiguous(),
         OUTPUT_F32_KEY: f32.to(torch.float32).contiguous(),
     }
+    if unquantized is not None:
+        high, low = unquantized
+        tensors[OUTPUT_UNQUANTIZED_F64_KEY] = high.to(torch.float32).contiguous()
+        tensors[OUTPUT_UNQUANTIZED_F32_KEY] = low.to(torch.float32).contiguous()
+    return tensors
 
 
 def golden_metadata(
@@ -561,7 +645,23 @@ def golden_metadata(
     weights: ContainerWeights,
     ratios: Mapping[str, float],
     versions: Mapping[str, str],
+    unquantized_ratios: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
+    _check_unquantized(case, unquantized_ratios)
+    unquantized = (
+        {}
+        if unquantized_ratios is None
+        else {
+            "unquantized": {
+                "weights": (
+                    "pin した checkpoint の F32 をそのまま（量子化しない）・"
+                    "f64 はその値を広げたもの"
+                ),
+                "output": "f64 は f32 へ丸めて格納・品質の記録の基準（門ではない）",
+                "ratios": dict(unquantized_ratios),
+            }
+        }
+    )
     return {
         "format": REFERENCE_FORMAT,
         "case": case.name,
@@ -579,6 +679,7 @@ def golden_metadata(
         "outputF64": "f64 の参照を f32 へ丸めて格納（TS の safetensors は F64 を読まない）",
         "ratios": dict(ratios),
         "versions": dict(versions),
+        **unquantized,
     }
 
 
@@ -607,13 +708,18 @@ def write_references(
     config: Any,
     cases: Sequence[ReferenceCase],
     stage: Stage,
+    unquantized: WeightSource,
     embeddings: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """層逐次の f64 / f32 の参照を採り、golden を `out_dir` に書く（容器は書かない）。
 
+    i8 の参照（容器の重み）は全ケースで、量子化なしの参照（`unquantized` — {@link
+    CheckpointWeights}）は受入れだけで採る。i8 の回は全ケースを 1 回の層逐次で回す（受入れを
+    足す前と同じ呼び方 — 既存の値をバイトで変えない）。
+
     `embeddings` は bf16 の事前計算資産（固定プロンプトの名前 → `[L, 4096]`）。渡すと
-    受入れのケースの要約に f32 の参照との差を足す（記録だけ — 品質の記録の正本は TS の
-    e2e）。
+    受入れのケースの要約に量子化なしの f32 の参照との差を足す（記録だけ — 品質の記録の正本は
+    TS の e2e）。
     """
     shape = EncoderShape.of(config)
     attention = umt5_patch.bucket_attention(config)
@@ -625,16 +731,31 @@ def write_references(
         )
         for case in cases
     ]
-    layer_seconds: list[float] = []
+    accepted = [index for index, case in enumerate(cases) if case.role == "accept"]
+    layer_seconds: dict[str, list[float]] = {"i8": [], "unquantized": []}
 
-    def on_layer(index: int, seconds: float) -> None:
-        layer_seconds.append(round(seconds, 1))
-        print(f"[layer] {index + 1}/{shape.layers} {seconds:.1f} s", flush=True)
+    def on_layer(label: str) -> Callable[[int, float], None]:
+        def report(index: int, seconds: float) -> None:
+            layer_seconds[label].append(round(seconds, 1))
+            print(f"[layer] {label} {index + 1}/{shape.layers} {seconds:.1f} s", flush=True)
 
+        return report
+
+    dtypes = (torch.float64, torch.float32)
     with stage("reference"):
-        outputs = encode_layerwise(
-            weights, shape, inputs, (torch.float64, torch.float32), on_layer=on_layer
+        outputs = encode_layerwise(weights, shape, inputs, dtypes, on_layer=on_layer("i8"))
+    with stage("reference-unquantized"):
+        plain = encode_layerwise(
+            unquantized,
+            shape,
+            [inputs[index] for index in accepted],
+            dtypes,
+            on_layer=on_layer("unquantized"),
         )
+    unquantized_of = {
+        index: (plain[torch.float64][at], plain[torch.float32][at])
+        for at, index in enumerate(accepted)
+    }
     versions = _versions()
     rows: list[dict[str, Any]] = []
     with stage("write"):
@@ -642,11 +763,13 @@ def write_references(
             f64 = outputs[torch.float64][index]
             f32 = outputs[torch.float32][index]
             ratios = reference_ratios(f64, f32)
+            pair = unquantized_of.get(index)
+            plain_ratios = None if pair is None else reference_ratios(*pair)
             path = out_dir / f"{REFERENCE_PREFIX}{case.name}{CASE_SUFFIX}"
             size = write_golden(
                 path,
-                golden_tensors(case, inputs[index][1], f64, f32),
-                golden_metadata(case, weights, ratios, versions),
+                golden_tensors(case, inputs[index][1], f64, f32, pair),
+                golden_metadata(case, weights, ratios, versions, plain_ratios),
             )
             row: dict[str, Any] = {
                 "case": case.name,
@@ -655,8 +778,16 @@ def write_references(
                 "bytes": size,
                 **ratios,
             }
+            if pair is not None:
+                row["unquantizedRatios"] = plain_ratios
+                # i8 の丸めの影響（CPU — GPU の誤差を含まない）。
+                row["i8F32VsUnquantizedF32"] = row_quality(f32[0], pair[1][0])
             fixed = case.source.get("fixedPrompt")
             if embeddings is not None and fixed is not None:
+                if pair is None:
+                    raise Umt5ReferenceError(f"{case.name}: 固定プロンプトなのに受入れでない")
+                # bf16 の影響（資産の経路）と、i8 の f32 の参照との差（10c の記録の続き）。
+                row["bf16AssetVsUnquantizedF32"] = row_quality(embeddings[fixed], pair[1][0])
                 row["bf16AssetVsF32"] = row_quality(embeddings[fixed], f32[0])
             rows.append(row)
             print(f"[golden] {json.dumps(row, ensure_ascii=False)}", flush=True)

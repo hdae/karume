@@ -10,6 +10,8 @@
 どのサブコマンドも段ごとの壁時間と RSS（{@link MemoryMonitor}）を JSON で出す。数値の記録は
 research `2026-10-03-umt5-export-ram`。`reference`（段 10c）は書いた容器から重みを読んで CPU の
 層逐次の参照を採り、golden を同じ席に書く（容器は書かない — 中身は {@link wan.umt5_reference}）。
+受入れのケースは量子化なしの参照（checkpoint の F32 を 1 層ずつ — {@link checkpoint_weights}）も
+採る。
 
 ## export の形（決定 6 — 段 10b の実測で決めた形）
 
@@ -313,6 +315,21 @@ def checkpoint_keys(
             raise Umt5ExportError(f"'{key}' の checkpoint のキーが 1 つに決まらない: {candidates}")
         mapping[key] = candidates[0]
     return mapping
+
+
+def checkpoint_weights(directory: Path) -> umt5_reference.CheckpointWeights:
+    """量子化しない重みの読み口（品質の記録の基準 — 段 10c）。
+
+    容器のテンソルキー（ラッパの parameter 名）→ checkpoint のキーの対応は {@link prepare} と同じ
+    {@link checkpoint_keys} で組む（上流は meta — 重みは読まない）。
+    """
+    model = meta_text_encoder(directory)
+    wrapper = umt5_patch.Umt5EncoderTokens(model)
+    checkpoint = Checkpoint(directory)
+    keys = [name for name, _ in wrapper.named_parameters()]
+    return umt5_reference.CheckpointWeights(
+        checkpoint, checkpoint_keys(model, keys, checkpoint.names())
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +656,8 @@ def reference_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     """書いた i8 系列の容器から層逐次の CPU 参照（f64 / f32）を採り、golden を同じ席に
     書く（段 10c — 容器は書かない）。
 
-    ケースの id 列は上流の経路（10a の fixture と同じ）で採る。受入れ（固定 4 本）は bf16 の
+    ケースの id 列は上流の経路（10a の fixture と同じ）で採る。受入れ（固定 4 本）は量子化
+    しない重み（pin した checkpoint の F32 — {@link checkpoint_weights}）の参照も採り、bf16 の
     事前計算資産との差も要約に出す（記録だけ）。
     """
     from transformers import UMT5Config
@@ -659,6 +677,7 @@ def reference_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
             config=UMT5Config.from_pretrained(upstream_dir(model)),
             cases=cases,
             stage=monitor.stage,
+            unquantized=checkpoint_weights(upstream_dir(model)),
             embeddings=embeddings,
         )
     return {**result, "stages": [record.to_dict() for record in monitor.records]}
