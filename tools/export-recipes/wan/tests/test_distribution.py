@@ -42,6 +42,7 @@ from wan import umt5_tokenizer
 from wan.card import (
     WAN_ACCEPTED_SIZES,
     WAN_FRAMES,
+    WAN_QUANT_TRANSFORMER,
     WAN_RESOURCE_QUANT,
     WAN_SUPPORTED_PIPELINE,
     WAN_TEXT_ENCODER_OPTION,
@@ -983,22 +984,34 @@ class TestTheModelCard:
         assert f"with the `{WAN_RESOURCE_QUANT}` quant" in card
         assert "6.19 GiB" in card
         assert "3.32 GiB" in card
+        prose = " ".join(card.split())
+        assert "took 10.4 s and peaked at 6.30 GiB" in prose
+        assert "A 50-step run through the text encoder has not been done yet." in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
-    def test_it_says_the_other_seats_have_not_been_measured(self, assembled) -> None:
-        """実測した席（`f16`）以外は数を推し量らず未計測と名乗る（席の並びは manifest のまま）。"""
-        out_dir, manifest = assembled
+    def test_it_names_the_measured_figures_of_every_seat(self, assembled) -> None:
+        """席ごとの transformer の行は実測のまま・計測していない欄は推し量らず未計測と名乗る。"""
+        out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        assert (
-            "The other quants (`f16+dit8` / `f16+dit8-a8-attn8-s16`) have not been measured yet."
-            in card
-        )
-        only_measured = json.loads(json.dumps(manifest))
-        quants = only_measured["models"][DEFAULT_MODEL]["quants"]
-        only_measured["models"][DEFAULT_MODEL]["quants"] = {
-            WAN_RESOURCE_QUANT: quants[WAN_RESOURCE_QUANT]
-        }
-        assert "have not been measured" not in _card(only_measured)
+        assert "| `f16` | 33 | 17.1 s | 5.15 GiB | ~30 minutes |" in card
+        assert "| `f16+dit8` | 81 | not measured | not measured | not run |" in card
+        assert "| `f16+dit8-a8-attn8-s16` | 33 | 8.5 s | 4.02 GiB | 952 s (~16 minutes) |" in card
+        assert "| `f16+dit8-a8-attn8-s16` | 81 | 34.0 s | 5.46 GiB | not run |" in card
+        assert "have not been measured" not in card
+        prose = " ".join(card.split())
+        assert "a relative RMS error of 0.107 at 33 frames and 0.210 at 81 frames" in prose
+        assert "the default quant stays `f16`" in prose
+
+    def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled) -> None:
+        """表に無い席は数を推し量らず未計測と名乗る（席の並びは manifest のまま）。"""
+        _, manifest = assembled
+        changed = json.loads(json.dumps(manifest))
+        quants = changed["models"][DEFAULT_MODEL]["quants"]
+        quants["f16+other"] = quants[WAN_RESOURCE_QUANT]
+        assert "f16+other" not in WAN_QUANT_TRANSFORMER
+        card = _card(changed)
+        assert "The other quants (`f16+other`) have not been measured yet." in card
+        assert "| `f16+other` |" not in card.split("### Quants")[0]
 
     def test_it_refuses_a_manifest_without_the_measured_quant(self, assembled) -> None:
         """実測した席が無い配布形では資源の数を名乗らない（推し量った数を出さない）。"""

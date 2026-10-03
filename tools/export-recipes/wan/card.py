@@ -72,11 +72,36 @@ WAN_PROMPT_TOKENS = (2, 512)
 #: 同じ正本）。
 WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
 
-#: 実行資源（``_wan_resources``）を実測した quant 席。MUST: カードは数を**この席の数として**
-#: 名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない — BiRefNet の
-#: カードと同じ）。他の席（ADR 0120 の i8 の 2 席）は「未計測」と書く — 席ごとの数は段 3 / 4 の
-#: 実測で足す。
+#: 通しの実行資源（``_wan_resources`` の段ごとの表）を実測した quant 席。MUST: カードは数を
+#: **この席の数として**名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない —
+#: BiRefNet のカードと同じ）。
 WAN_RESOURCE_QUANT = "f16"
+
+#: 席ごとの transformer の実測（ADR 0120 追記「段 3 / 4 / 5 の結果」〈DiT 単体・通常モード・
+#: B570〉と「段 6 の素材」〈実用席の 50 ステップ・33 フレームの通し・precomputed の経路〉）。
+#: 行は `(フレーム数, 1 forward, DiT 単体の確保, 50 ステップの通し)`。`f16` の行は比べる基準で、
+#: 通しの欄は上の段ごとの表と同じ通し（ADR 0118 段 6 / 8）。参照席 `f16+dit8` の 1 forward は
+#: r 門の計測（S = 14,040）で `f16` と同じ時間 — 確保と 81 フレームは計測していない。
+#: MUST: 計測していない欄は「not measured」/「not run」と書き、推し量った数で埋めない。
+#: 表に無い席は「未計測」と名乗る（席の並びは manifest のまま）。
+WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
+    "f16": (
+        (33, "17.1 s", "5.15 GiB", "~30 minutes"),
+        (81, "68.5 s", "6.17 GiB", "~2 hours"),
+    ),
+    "f16+dit8": (
+        (33, "same as `f16`", "not measured", "not run"),
+        (81, "not measured", "not measured", "not run"),
+    ),
+    "f16+dit8-a8-attn8-s16": (
+        (33, "8.5 s", "4.02 GiB", "952 s (~16 minutes)"),
+        (81, "34.0 s", "5.46 GiB", "not run"),
+    ),
+}
+
+#: 実用席の step 1 の潜在の相対 RMS 誤差（参照席 `f16+dit8` に対して — ADR 0120 段 4 の自機
+#: A/B 門の実測）。`(席, 参照席, 33 フレーム, 81 フレーム)`。
+WAN_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.107", "0.210")
 
 
 def _upstream(name: str) -> Any:
@@ -158,9 +183,11 @@ def _wan_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  precomputed embeddings), the relative-position buckets, the patchify and RoPE tables,",
         "  classifier-free guidance as two batch-1 passes, the flow-matching UniPC scheduler, and",
         "  the tiled VAE decode. The output is `[3, frames, height, width]` float32 in `[-1, 1]`.",
-        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6) with the precomputed",
-        "  embeddings; the path through the text encoder has not been run end to end on the GPU",
-        "  yet. Browsers are not verified yet.",
+        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6): with the text encoder on the",
+        "  GPU in 2-step runs (a fixed prompt and a free prompt, 832 × 480, 33 frames, each pinned",
+        "  by the SHA-256 of its frames), and with the precomputed embeddings in full 50-step",
+        "  runs. A 50-step run through the text encoder has not been done yet. Browsers are not",
+        "  verified yet.",
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{WAN_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -326,8 +353,9 @@ def _wan_inputs() -> list[str]:
         "",
         "- **prompt** / **negativePrompt**: see Prompts above.",
         f"- **size**: {sizes}.",
-        f"- **frames**: 4n+1 from {low} to {high}. Only 832 × 480 with 33 and {high} frames have",
-        "  been checked end to end on the GPU.",
+        f"- **frames**: 4n+1 from {low} to {high}. Only 832 × 480 has been checked end to end on",
+        f"  the GPU: 33 and {high} frames with the precomputed embeddings, and 33 frames with the",
+        "  text encoder.",
         "- **steps** ≥ 1, **guidance** ≥ 1 (1 turns classifier-free guidance off and the negative",
         "  prompt is then rejected), **shift** > 0.",
         "- **seed** (the host noise generator — not torch's `randn`) or the initial noise as",
@@ -365,6 +393,10 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
     self-attention のスコアの行ブロック 1 枚は 81 フレームで 2,146,435,200 B —
     B570 の束縛上限 2,147,483,644 B の内）。
 
+    text 段（GPU 経路）の数は ADR 0119 追記「段 10c の GPU の門と段 10d-4 の結果」の実測
+    （2 ステップ・33 フレームの通し 1 回と、umT5 単体の 1 forward）。席ごとの transformer の数は
+    `WAN_QUANT_TRANSFORMER` の出所のとおり。
+
     MUST: 実測していない条件の数は載せない — 受理集合の別の寸法・フレーム数・別の GPU の数を推し
     量って書かない。ブラウザで動くかは未確認（ADR 0118 の後段）なので、そう書く。
     """
@@ -376,14 +408,13 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
             )
     encoder_bytes, borrowed = _text_encoder(manifest)
     source = "" if borrowed is None else f" from `{borrowed[0]}`"
-    # 実測していない席は数を推し量らず、未計測と名乗る（席の並びは manifest のまま）。
-    unmeasured = [
-        f"`{quant}`"
-        for quant in dict.fromkeys(
-            quant for model in manifest["models"].values() for quant in model["quants"]
-        )
-        if quant != WAN_RESOURCE_QUANT
-    ]
+    # 席の並びは manifest のまま。表に無い席は数を推し量らず、未計測と名乗る。
+    seats = dict.fromkeys(
+        quant for model in manifest["models"].values() for quant in model["quants"]
+    )
+    measured = [quant for quant in seats if quant in WAN_QUANT_TRANSFORMER]
+    unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN_QUANT_TRANSFORMER]
+    practical, reference, error_33, error_81 = WAN_PRACTICAL_QUANT_ERROR
     return [
         "## Resources",
         "",
@@ -398,20 +429,52 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
         "| 81     | 7.31 GiB         | 3.78 GiB | 68.6 s | 315 s      | ~2 hours    |",
         "",
         "Pass is one transformer pass (batch 1); VAE decode is the tiled decode of the whole clip.",
+        "These runs used the precomputed embeddings.",
+        "",
+        f'With the text encoder (`{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[0]}"`),'
+        " measured on 2026-10-03 in a 2-step run at",
+        "832 × 480 and 33 frames: the text encoder stage (the umT5-XXL encoder run for the",
+        "positive and the negative prompt, including building its session) took 10.4 s and",
+        "peaked at 6.30 GiB; after it was disposed, 0.08 GiB more than before the stage remained",
+        "allocated. In the same run the transformer stage peaked at 5.94 GiB and the VAE stage at",
+        "3.32 GiB. One forward of the text encoder alone takes 0.14 s (8 tokens) to 1.73 s",
+        "(488 tokens). A 50-step run through the text encoder has not been done yet.",
+        "",
+        "Per quant, at 832 × 480 (the 50-step clips with the precomputed embeddings and",
+        "guidance 5):",
+        "",
+        "| Quant | Frames | Pass | Transformer allocation | 50-step clip |",
+        "| ----- | ------ | ---- | ---------------------- | ------------ |",
         *(
-            [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet."]
+            f"| `{quant}` | {frames} | {forward} | {allocation} | {clip} |"
+            for quant in measured
+            for frames, forward, allocation, clip in WAN_QUANT_TRANSFORMER[quant]
+        ),
+        "",
+        "Pass and allocation here are of the transformer run alone (one pass, batch 1); the",
+        "allocation is the runtime's own count of what it allocated, not the driver's total.",
+        "",
+        *(
+            [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet.", ""]
             if unmeasured
             else []
         ),
-        "These runs used the precomputed embeddings: the text encoder stage (the umT5-XXL encoder",
-        "run for the positive and the negative prompt) has not been measured yet.",
-        "",
+        *(
+            [
+                f"- **Quality of `{practical}`**: after the first step its latent differs from",
+                f"  `{reference}`'s (the same int8 weights, computed in float32) by a relative",
+                f"  RMS error of {error_33} at 33 frames and {error_81} at 81 frames, mostly",
+                "  from the int8 attention. Whether this is visible has not been decided yet",
+                "  (a side-by-side comparison is pending), and the default quant stays `f16`.",
+            ]
+            if practical in seats and reference in seats
+            else []
+        ),
         f"- **Download**: the quant table's Download column includes the text encoder"
         f" ({_gib(encoder_bytes)}{source});",
         f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"` it is not fetched.',
         "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The",
-        "  stages are never resident together, so a clip's peak is the largest stage peak; the",
-        "  text encoder stage's peak has not been measured yet.",
+        "  stages are never resident together, so a clip's peak is the largest stage peak.",
         "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
         "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
         "  feed-forward activation `[S, 8960]` in float32 alone is about 480 MiB at 33 frames",
