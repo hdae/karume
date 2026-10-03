@@ -1,8 +1,8 @@
 // f16 格納の実行経路（ADR 0018）— 適格判定・ロード経路・カーネル変種・診断の通し検証。
 //
 // この波で入った 2 経路を両方踏む:
-//   適格（消費が融合 5 op の weight スロットだけ）→ 生バイトのまま GPU 常駐し、dequant は
-//     カーネル内（`unpack2x16float`）
+//   適格（消費が WEIGHT_SLOTS に載った op の weight スロットだけ）→ 生バイトのまま GPU
+//     常駐し、dequant はカーネル内（`unpack2x16float`）
 //   適格外（bias / 混在消費 / その他）→ ロード時に CPU で f32 展開（VRAM 削減ゼロ）
 //
 // MUST: 数値ケースは **in-features / K / Cin·Kh·Kw を奇数**にする。f16 は 2 要素を 1 語に
@@ -22,7 +22,7 @@ import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 import { applyReferenceOp, type RefTensor, refTensor } from "../src/reference/ops.ts";
-import { RUNTIME_SUPPORT } from "../src/ops.ts";
+import { RUNTIME_SUPPORT, WEIGHT_SLOTS } from "../src/ops.ts";
 import { assertRuntimeSupport, RuntimeSupportError } from "../src/ops/support.ts";
 import { eligibleCompressedInitializers } from "../src/runtime/plan.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -85,7 +85,7 @@ const linearDeclaration = (
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }, ...extra],
 });
 
-Deno.test("適格判定は融合 5 op の weight スロット消費だけを通す", () => {
+Deno.test("適格判定は WEIGHT_SLOTS の op の weight スロット消費だけを通す", () => {
   const eligible = (declaration: DeclarationJson): readonly string[] =>
     [...eligibleCompressedInitializers(mergedFor(declaration))].sort();
 
@@ -111,12 +111,13 @@ Deno.test("適格判定は融合 5 op の weight スロット消費だけを通�
   assertEquals(eligible(unused), ["w"]);
 });
 
-Deno.test("適格判定は 5 op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
+Deno.test("適格判定は WEIGHT_SLOTS の op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
   // op → (ins の並び, weight の位置)。embedding だけスロット 0（他は 1）。
   const cases: readonly (readonly [string, readonly string[], readonly string[]])[] = [
     ["linear", ["x", "w", "b"], ["w"]],
     ["conv1d", ["x", "w", "b"], ["w"]],
     ["conv2d", ["x", "w", "b"], ["w"]],
+    ["conv3d", ["x", "w", "b"], ["w"]],
     ["conv_transpose1d", ["x", "w", "b"], ["w"]],
     ["embedding", ["w", "x"], ["w"]],
     // 重みスロットを持たない op はどのスロットも適格にしない
@@ -124,6 +125,11 @@ Deno.test("適格判定は 5 op それぞれの weight スロット位置を見�
     ["rms_norm", ["x", "w"], []],
     ["masked_fill", ["w", "x"], []],
   ];
+  // 表が WEIGHT_SLOTS の全 op を覆うことを固定する（op を足したのに表が古いまま緑になるのを防ぐ）
+  assertEquals(
+    new Set(cases.filter(([, , expected]) => expected.length > 0).map(([op]) => op)),
+    new Set(WEIGHT_SLOTS.keys()),
+  );
   for (const [op, ins, expected] of cases) {
     // 適格判定はグラフの構造（op 名 × スロット位置）だけを見るので、shape / dtype 宣言の
     // 整合はここでは要らない（契約検査は別層 — plan.ts の validateGraphContracts）。
