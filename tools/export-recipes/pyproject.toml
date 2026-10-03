@@ -61,6 +61,8 @@ anima = [
 # 黙って変わる。
 # MUST: ftfy も `==` でピンする — テキスト埋め込みは `fix_text` の正規化後の文字列から作るので、
 # 正規化の規則が版で変わると同じプロンプトが別の埋め込みになる（決定 4 の「固定」）。
+# diffusers / ftfy の版を変えるときは配布の門の固定値（`wan.distribution.WAN_TEXT_EMBEDS_VERSIONS`
+# — 資産のメタの版と突き合わせる）も揃える（`wan/tests/test_distribution.py` が両方を見る）。
 # transformers は他グループと同じ `==`（同じ venv に同居するグループ間で版を割らない）。
 # accelerate / huggingface-hub は差し替え対象を持たないので `>=` のまま。
 wan = [

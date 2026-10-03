@@ -71,6 +71,16 @@ WAN_TEXT_EMBEDS_SERIES = "wan2.1-t2v-1.3b-text-embeds"
 WAN_TEXT_EMBEDS_FILE = "text_embeds.safetensors"
 WAN_TEXT_EMBEDS_METADATA_KEY = "karume.wan.text_embeds"
 
+#: 埋め込みを作った umT5 の dtype（メタの `text_encoder.dtype` — 決定 4。NOTICE とカードが
+#: 「bfloat16 の上流の encoder で作った」と名乗る根拠）。書き手の綴りは
+#: `wan.text_embeds.asset_metadata`（`TEXT_ENCODER_DTYPE` から作る）。
+WAN_TEXT_ENCODER_DTYPE = "bfloat16"
+
+#: 埋め込みの値を決める依存の版（メタの `versions` — 決定 4 の「固定」）。diffusers は上流の
+#: `_get_t5_prompt_embeds` / `prompt_clean`、ftfy は正規化の規則を持つ。値は pyproject の `wan`
+#: グループの `==` ピンと同じ（`wan/tests/test_distribution.py` の門が両方を突き合わせる）。
+WAN_TEXT_EMBEDS_VERSIONS: Mapping[str, str] = {"diffusers": "0.39.0", "ftfy": "6.3.1"}
+
 #: 系列の部品ディレクトリに置かれる容器の代表名（分割形は `model-0000N-of-0000M.krm`）。
 WAN_MODEL_FILE = "model.krm"
 
@@ -256,10 +266,15 @@ def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None
     そのまま配布形に据わる。読み手（TS の `parseWanTextEmbeds`）が見るのは形だけなので、出所の
     食い違いは利用者の手元で「別の文脈で生成された動画」として沈黙する。
 
-    見るのは 4 つ: メタのキーが 1 つ（書き手の MUST — バイト同一の前提）・出所（repo / revision）が
-    {@link SOURCES} の pin と一致・プロンプトの並び（名前・役割・原文）が {@link FIXED_PROMPTS}
-    と一致（カードが同じ表から本文を描く）・テンソルが `F32 [tokens, width]` で `tokens` はメタの
-    トークン数と一致し DiT の文脈の行数以下・`width` は文脈の幅。
+    見るのは 6 つ: メタのキーが 1 つ（書き手の MUST — バイト同一の前提）・出所（repo / revision）が
+    {@link SOURCES} の pin と一致・encoder の dtype と依存の版が決定 4 の固定値
+    （{@link WAN_TEXT_ENCODER_DTYPE} / {@link WAN_TEXT_EMBEDS_VERSIONS} — NOTICE とカードの記述の
+    根拠）・プロンプトの並び（名前・役割・原文）が {@link FIXED_PROMPTS} と一致（カードが同じ表から
+    本文を描く）・各行の正規化後の文字列 `normalized` が空でない文字列で、原文と正規化後の文字列が
+    2 つの行に当たらない（TS の `parseWanTextEmbeds` が同じ規則で拒む — 配る前に落とす）・テンソルが
+    `F32 [tokens, width]` で `tokens` はメタのトークン数と一致し DiT の文脈の行数以下・`width` は
+    文脈の幅。`normalize(prompt) == normalized` の一致は見ない（ここは ftfy を読まない — 書き手の
+    テストが見る）。
     """
     assert_component_present(path)
     tensors, metadata = _safetensors_header(path)
@@ -280,6 +295,24 @@ def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None
             f"{path}: 埋め込みの出所 {meta.get('source')!r} が上流の pin {expected_source!r} と違う"
             " — 別の checkpoint の umT5 で作った資産は配らない（`python -m wan.text_embeds`）"
         )
+    encoder = meta.get("text_encoder")
+    encoder_dtype = encoder.get("dtype") if isinstance(encoder, dict) else None
+    if encoder_dtype != WAN_TEXT_ENCODER_DTYPE:
+        raise DistError(
+            f"{path}: 埋め込みを作った umT5 の dtype {encoder_dtype!r} が決定 4 の"
+            f" {WAN_TEXT_ENCODER_DTYPE!r} でない — NOTICE とカードの記述と食い違う資産は配らない"
+        )
+    versions = meta.get("versions")
+    pinned = (
+        {name: versions.get(name) for name in WAN_TEXT_EMBEDS_VERSIONS}
+        if isinstance(versions, dict)
+        else None
+    )
+    if pinned != WAN_TEXT_EMBEDS_VERSIONS:
+        raise DistError(
+            f"{path}: 埋め込みを作った版 {pinned!r} が決定 4 の固定"
+            f" {dict(WAN_TEXT_EMBEDS_VERSIONS)!r} と違う — 正規化と埋め込みの経路が版で変わる"
+        )
     prompts = meta.get("prompts")
     if not isinstance(prompts, list) or not all(isinstance(entry, dict) for entry in prompts):
         raise DistError(f"{path}: メタの prompts が並びでない")
@@ -291,6 +324,22 @@ def assert_text_embeds(path: Path, model: str, context: tuple[int, int]) -> None
             f"（wan.prompts.FIXED_PROMPTS — {[name for name, _, _ in expected]}）と名前・役割・"
             "原文で一致しない — カードは表から本文を描くので、食い違ったまま配らない"
         )
+    owners: dict[str, str] = {}
+    for entry in prompts:
+        name, normalized = entry["name"], entry.get("normalized")
+        if not isinstance(normalized, str) or not normalized:
+            raise DistError(
+                f"{path}: '{name}' の normalized が空でない文字列でない（{normalized!r}）— TS の"
+                " parseWanTextEmbeds が利用者の手元で拒む"
+            )
+        # 同じ行の原文と正規化後の文字列が等しいのは許す（集合で 1 つに畳む — TS と同じ）。
+        for text in {entry["prompt"], normalized}:
+            owner = owners.setdefault(text, name)
+            if owner != name:
+                raise DistError(
+                    f"{path}: '{name}' の文字列が '{owner}' と同じ — どちらの埋め込みを使うかが"
+                    " 決まらない（TS の parseWanTextEmbeds が拒む）"
+                )
     rows, width = context
     if sorted(tensors) != sorted(name for name, _, _ in expected):
         raise DistError(f"{path}: テンソル {sorted(tensors)} がメタのプロンプトと対応しない")

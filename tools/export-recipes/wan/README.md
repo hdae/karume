@@ -318,9 +318,10 @@ uv run python dist.py --pipeline wan   # from tools/export-recipes/ — default 
 Before anything is placed, the plan checks that each container stores f16 weights and nothing
 compressed, names the pinned upstream revision and license in its provenance (`wan/sources.py`),
 that the transformer declares the `rope_base` asset, and that the embedding asset was made from the
-pinned revision, carries exactly the prompts of `wan/prompts.py`, and fits the transformer's
-`encoder_hidden_states [1, 512, 4096]` input. The golden files of the series (`io.*`, `reference.*`,
-`vae_*`, `pipeline_steps.*`) are never copied.
+pinned revision with the bfloat16 encoder and the pinned diffusers / ftfy, carries exactly the
+prompts of `wan/prompts.py` with a normalized text for each that no other row claims, and fits the
+transformer's `encoder_hidden_states [1, 512, 4096]` input. The golden files of the series (`io.*`,
+`reference.*`, `vae_*`, `pipeline_steps.*`) are never copied.
 
 The repository root gets `LICENSE.md` (Apache 2.0, verbatim) and `NOTICE.md` (the changes: container
 format, f16 rounding, the transformer and VAE rewrites, the precomputed text embeddings instead of the

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,8 @@ from wan.distribution import (
     WAN_TEXT_EMBEDS_METADATA_KEY,
     WAN_TEXT_EMBEDS_ROLE,
     WAN_TEXT_EMBEDS_SERIES,
+    WAN_TEXT_EMBEDS_VERSIONS,
+    WAN_TEXT_ENCODER_DTYPE,
     WAN_TRANSFORMER_ROLE,
     WAN_WEIGHTS,
     WanSources,
@@ -138,16 +141,23 @@ def _text_embeds(
     source: Mapping[str, str] | None = None,
     prompts: list[dict[str, Any]] | None = None,
     width: int = _WIDTH,
+    encoder_dtype: str = WAN_TEXT_ENCODER_DTYPE,
+    versions: Mapping[str, str] = {},
     extra_metadata: Mapping[str, str] = {},
     shapes: Mapping[str, Sequence[int]] = {},
 ) -> bytes:
-    """合成の埋め込み資産（`F32 [tokens, width]` + メタのキー 1 つ — 書き手と同じ形）。"""
+    """合成の埋め込み資産（`F32 [tokens, width]` + メタのキー 1 つ — 書き手と同じ形）。
+
+    `versions` は書き手が記録する版（固定値）へ上書きする差分。
+    """
     upstream = SOURCES[DEFAULT_MODEL]
     rows = _prompt_rows() if prompts is None else prompts
     meta = {
         "source": dict(source)
         if source is not None
         else {"repo": upstream.repo, "revision": upstream.revision},
+        "text_encoder": {"class": "UMT5EncoderModel", "dtype": encoder_dtype},
+        "versions": {**WAN_TEXT_EMBEDS_VERSIONS, "torch": "2.13.0+cpu", **versions},
         "prompts": rows,
     }
     tensors = {
@@ -392,6 +402,62 @@ class TestTheTextEmbeddingAsset:
         with pytest.raises(DistError):
             wan_plan(sources)
 
+    def test_it_refuses_embeddings_from_an_encoder_in_another_dtype(self, tmp_path: Path) -> None:
+        """NOTICE とカードは「bfloat16 の上流の encoder」と名乗る — f32 で作った資産は配らない。"""
+        sources = _build_sources(tmp_path, embeds=_text_embeds(encoder_dtype="float32"))
+        with pytest.raises(DistError, match="umT5 の dtype 'float32'"):
+            wan_plan(sources)
+
+    @pytest.mark.parametrize("package", sorted(WAN_TEXT_EMBEDS_VERSIONS))
+    def test_it_refuses_embeddings_made_with_another_pinned_version(
+        self, tmp_path: Path, package: str
+    ) -> None:
+        sources = _build_sources(tmp_path, embeds=_text_embeds(versions={package: "0.0.1"}))
+        with pytest.raises(DistError, match="決定 4 の固定"):
+            wan_plan(sources)
+
+    @pytest.mark.parametrize(
+        "normalized", [None, 123, ""], ids=["missing", "not-a-string", "empty"]
+    )
+    def test_it_refuses_a_row_without_a_normalized_text(
+        self, tmp_path: Path, normalized: object
+    ) -> None:
+        """TS の parseWanTextEmbeds は normalized の無い行を拒む。
+
+        利用者がダウンロードの後で落ちるので、配る前の門で同じ行を落とす。
+        """
+        rows = _prompt_rows()
+        if normalized is None:
+            del rows[1]["normalized"]
+        else:
+            rows[1] = {**rows[1], "normalized": normalized}
+        sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
+        with pytest.raises(DistError, match=f"'{rows[1]['name']}' の normalized"):
+            wan_plan(sources)
+
+    @pytest.mark.parametrize("field", ["normalized", "prompt"])
+    def test_it_refuses_a_normalized_text_that_another_row_owns(
+        self, tmp_path: Path, field: str
+    ) -> None:
+        """行 1 の正規化後の文字列が行 0 の文字列と同じだと、どちらの埋め込みを使うかが
+        決まらない。"""
+        rows = _prompt_rows()
+        rows[1] = {**rows[1], "normalized": rows[0][field]}
+        sources = _build_sources(tmp_path, embeds=_text_embeds(prompts=rows))
+        with pytest.raises(DistError, match=f"'{rows[1]['name']}' の文字列が '{rows[0]['name']}'"):
+            wan_plan(sources)
+
+    def test_a_row_whose_normalized_text_is_its_own_prompt_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        """原文が正規化で変わらない行（実物の boxing-cats）は通る。
+
+        同じ行の中の一致は重複でない。
+        """
+        rows = _prompt_rows()
+        rows[0] = {**rows[0], "normalized": rows[0]["prompt"]}
+        assert wan_plan(_build_sources(tmp_path, embeds=_text_embeds(prompts=rows)))
+
 
 class TestTheModelCard:
     def test_it_is_the_only_profile_and_is_resolved_without_a_choice(self) -> None:
@@ -491,6 +557,39 @@ class TestTheWritersSpellTheSameNames:
 
         assert text_embeds.ASSET_NAME == WAN_TEXT_EMBEDS_FILE
         assert text_embeds.METADATA_KEY == WAN_TEXT_EMBEDS_METADATA_KEY
+
+    def test_the_encoder_dtype_the_writer_records(self) -> None:
+        from wan import text_embeds
+
+        metadata = text_embeds.asset_metadata(
+            (), {}, {}, model=DEFAULT_MODEL, versions=WAN_TEXT_EMBEDS_VERSIONS
+        )
+        assert metadata["text_encoder"]["dtype"] == WAN_TEXT_ENCODER_DTYPE
+
+    def test_the_pinned_versions_match_the_wan_dependency_group(self) -> None:
+        """門の固定値は pyproject の `wan` グループの `==` ピンと同じ。
+
+        ピンは書き手が記録する版の出所（`uv run --group wan` が入れる版）。
+        """
+        project = tomllib.loads((REPO_ROOT / "tools/export-recipes/pyproject.toml").read_text())
+        pins = dict(
+            requirement.split("==", 1)
+            for requirement in project["dependency-groups"]["wan"]
+            if "==" in requirement
+        )
+        assert {name: pins.get(name) for name in WAN_TEXT_EMBEDS_VERSIONS} == dict(
+            WAN_TEXT_EMBEDS_VERSIONS
+        )
+
+    def test_the_versions_the_writer_records_in_this_environment(self) -> None:
+        for package in ("diffusers", "ftfy", "transformers"):
+            pytest.importorskip(package)
+        from wan import text_embeds
+
+        recorded = text_embeds._versions()
+        assert {name: recorded[name] for name in WAN_TEXT_EMBEDS_VERSIONS} == dict(
+            WAN_TEXT_EMBEDS_VERSIONS
+        )
 
     def test_the_rope_base_asset_and_the_context_input(self) -> None:
         from wan import export_dit
