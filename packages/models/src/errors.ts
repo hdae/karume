@@ -22,9 +22,10 @@
  * MUST: 型を分けるだけで**メッセージの質は落とさない**（期待と実際の両方を書く）。型は分岐の
  * ため、メッセージは人のためで、どちらも要る。
  *
- * NOTE: 派生は `Sbv2InputError`（`./sbv2/errors.ts`）と `GenerationCapacityError`
- * （`./generation/sequence.ts`）の 2 本だけ。前者は ADR 0072 決定 6 の線引きを仕様として持ち、
- * 後者は切り詰めの計算に要る実値を欄で運ぶ — どちらも `instanceof` の外に**追加の情報**が
+ * NOTE: 派生は `Sbv2InputError`（`./sbv2/errors.ts`）・`GenerationCapacityError`
+ * （`./generation/sequence.ts`）・`PromptCleanError`（`./wan/text/prompt-clean.ts`）の 3 本だけ。
+ * 1 本目は ADR 0072 決定 6 の線引きを仕様として持ち、2 本目は切り詰めの計算に要る実値を欄で
+ * 運び、3 本目は拒否の理由（reason）を欄で運ぶ — どれも `instanceof` の外に**追加の情報**が
  * あるから型が要る。情報が増えない分岐先を型で割らない。
  *
  * DECIDED: [ADR 0107](../../../docs/decisions/0107-model-input-error.md)。
