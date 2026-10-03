@@ -194,6 +194,15 @@ measurements in `docs/research/`.
   f16 score storage). `f16` stays the default; `WanPipeline` accepts `linearCompute`,
   `attentionCompute` and `attentionScoreStorage` from the quant declaration. The GPU numerics gates
   and the visual check for these quants land with ADR 0120 stages 3–6.
+- `karume-umt5-xxl` (ADR 0119): a distribution of the umT5-XXL text encoder alone (`dist.py --pipeline umt5`,
+  pipeline `umt5-encoder/1`, quant `i8`, 26 parts). `karume-wan2.1` references its `text_encoder` across
+  repositories and ships the tokenizer asset `umt5_tokenizer`.
+- `WanPipelineOptions.textEncoder: "gpu" | "precomputed"` (default `"gpu"`): the GPU route runs umT5 and
+  accepts any prompt (2–512 tokens; out-of-vocabulary characters, in-text special tokens, HTML entity
+  candidates, mojibake, C1 controls and unassigned code points are rejected with a message that says how
+  to fix the prompt); `"precomputed"` keeps the fixed-prompt embedding asset and does not fetch umT5.
+  `WanPipelineOptions.signal` and `WanGenerateRequest.signal` cancel loading and generation (the signal's
+  reason is thrown as is; the next `generate` works after a cancellation).
 
 ### Changed
 
@@ -290,6 +299,12 @@ measurements in `docs/research/`.
 - `@karume/models`: `IrodoriRunComponent`, and with it the Irodori `stage` event's stage names, gain
   `"dit-context"` (run once per generation, before the DiT loop). TypeScript code that switches
   exhaustively over the previous eight names no longer type-checks.
+- `WanPipeline` defaults to the GPU text encoder: distributions without the umT5 cross-repository
+  reference need `textEncoder: "precomputed"` (the error says so). Every Wan quant now declares
+  `requiredLimits` of 1,050,148,864 bytes for `maxBufferSize` / `maxStorageBufferBindingSize` (the
+  vocabulary embedding), also on the precomputed route. `WanGenerateEvent` stages and `WanRunComponent`
+  gain `text_encoder`. `deno task demo:wan` names its output directory by route. The gpu-lab Wan JSON is
+  `karume-wan-browser/2`.
 
 ## [0.13.0] - 2026-09-25
 

@@ -295,6 +295,11 @@ comparable to wall times with it off.
 
 ## 4. Wan
 
+The tab has a text-encoder route switch. `precomputed` (the tab default) uses the fixed-prompt embedding
+asset; `gpu` runs umT5-XXL on the GPU and accepts any prompt — it needs the `karume-umt5-xxl` mirror,
+which the server serves at `/models/umt5/` (`--umt5-source`, default `models/karume-umt5-xxl`). The saved
+JSON is `karume-wan-browser/2` and carries the route.
+
 Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) in Chrome, to see whether a clip
 completes on a browser device and, when it does not, where it stops (binding limits, the GPU
 timeout, memory). The pipeline's rules are those of `examples/wan`: only the four prompts of the

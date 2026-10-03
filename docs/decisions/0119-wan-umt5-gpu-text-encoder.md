@@ -502,3 +502,30 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
   越境参照・トークナイザ資産・NOTICE の書き換え・仮 SHA の門・ローカルミラー 2 本の再生成（CPU）/ 10d-2 WanPipeline の結線（経路の
   選択・admission の umT5 の契約・text 段・negative の定数・signal・examples / gpu-lab の追従・ホストテスト）（CPU）/ 10d-3 参照門の
   締め（横断・CPU）/ 10d-4 GPU: GPU 経路の sha 行・品質の記録・text 段の所要と VRAM の山・視認（自由プロンプト）。
+
+## 追記（2026-10-03）: 段 10d-1 / 10d-2 の結果 — 配布リポと結線（GPU の実走は次の追記）
+
+- **10d-1 ✅**（`e8c86279` / `1d52ced4` / `d992caf9`）: `dist.py --pipeline umt5` で `karume-umt5-xxl`（model `xxl`・pipeline
+  `umt5-encoder/1`・quant `i8`・`text_encoder` 26 part）。Wan の配布形は `weights.text_encoder` を越境参照（`--ref-*`・完全写像で
+  全席へ）し `assets.umt5_tokenizer` を持つ。**全席の `requiredLimits` は maxBufferSize = maxStorageBufferBindingSize =
+  1,050,148,864**（語彙埋め込み 1 バッファ・precomputed の経路でも同じ宣言 — 10e のホスト gather で下げられる）。仮の SHA の門は
+  recipe の `dist.py`（`--allow-placeholder-ref` の明示が無ければ書く前に落ちる）に置いた — hub の parse も core の組み立ても形しか
+  見ず、仮の SHA が入る口は `--ref-revision` の 1 か所だから。公開の手順は umT5 リポ先行 → 実 SHA で Wan を焼き直す。既存の席 3 つの
+  DiT / VAE / 資産と現物 31 本はバイト不変。配布形の門番に `karume-umt5-xxl` を足した。
+- **決定 D の文言の訂正**: umT5 の容器の F32 のまま格納された 73 本は bf16 で表せる値ではない（249,856 要素中 249,854 で下位 16 ビットが
+  非 0）。上流の text_encoder は F32 で、「bf16 の写し」ではない。カードと NOTICE は「上流は float32・config は google/umt5-xxl を名乗る・
+  重みの同一は未確認」とだけ書く。
+- **10d-2 ✅**（`b7d2784c` / `b935782c` / `cde8a1a0`）: `WanPipelineOptions.textEncoder: "gpu" | "precomputed"`（既定 gpu）。admission の
+  `umt5Contract`（入力 2 本の名前と形・記号 L が同じ・出力 f32 `[1,L,W]` で W = DiT の文脈の幅・有効長 512 ≤ 文脈の行数・格納 f32 / i8）
+  と、gpu 経路でトークナイザ資産の宣言を見る門。text 段（`#encode`）は positive → negative の順に run し、各 run の前に settleAbort、
+  出力の非有限は名指しで落とし、DiT の前に disposeSteps で畳む。negative の既定は TS の定数（公式 sample_neg_prompt の逐語 — recipe の
+  fixture と資産の行との一致をホストテストで縛る）。signal は構築（取得層へ・構築の境目で settleAbort）と生成（入口 → text・各 text run・
+  text → DiT・DiT の各 step・DiT → VAE・VAE の各タイル）。prompt_clean の拒否文言に直し方。ホストテスト 17 本（模擬 Session・故障注入 9 件
+  が赤を確認）。examples は `--text-encoder` / `--umt5-source`・任意のプロンプト、gpu-lab は経路の選択と自由プロンプト・`/models/umt5/`
+  （タブの既定は precomputed のまま — 段 9 を実走中の挙動を保つ）。
+- **判断**: `karume-umt5-xxl` を `*_SOURCES` / published-smoke / RELEASE_REPOSITORIES のどこに載せるか（TS の家族を持たないリポ）は
+  公開の回に決める（backlog）。越境参照なしの自己完結の焼き（8.2 GiB）は core の既定どおり許す（カードは事実どおり描く）。e2e の自由
+  プロンプト（"A red fox trots through fresh snow in a quiet birch forest at sunrise."・ID `gpu-text-2step-free-fox-seed42`）は仮置き —
+  文面を変えたら ID も変える。
+- **次（10d-4・GPU）**: 新ミラーで通し e2e（precomputed の sha 行 8 本の不変・gpu-text の 2 ケースの sha 行 write・text 段の所要と
+  切り替えの VRAM の残り）。10d-3（参照門の締め・横断）はその後。

@@ -68,6 +68,10 @@ uv run python dist.py --model anima-turbo-v1.1 --model anima-v1.0 \
 # 追加学習系（wai / copycat）は text stack を公式リポへ越境参照するため、公式リポの公開 SHA が
 # 要る = 組むのはリリース時（--ref-* 5 指定・手順は release-runbook「越境参照を含むリポ」節）
 # → models/karume-anima-extra/
+uv run python dist.py --pipeline umt5                # → models/karume-umt5-xxl/（umT5-XXL encoder・i8 — ADR 0119）
+uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA か仮の 40 桁の 0> \
+    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
+                                                     # → models/karume-wan2.1/（text_encoder は越境参照）
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
 uv run python dist.py --pipeline irodori \
     --model v4.1-small                               # → models/karume-irodori-v4.1-small/

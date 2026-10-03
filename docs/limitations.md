@@ -1001,9 +1001,9 @@ Consequences）。
   出る（段 5 の観測で比 8.2e-2）。
 - **seed の初期ノイズは torch の `randn` とは別の列**（Anima と同じ splitmix64 + Box–Muller — ADR 0118 決定 5）:
   公式実装と同じ seed でも同じ動画にはならない。参照に揃えるときは `latents` で外から渡す。
-- **キャンセル（`signal`）は未対応**: 他の系列（anima / sbv2 / irodori など）は `signal` を持つが、Wan の
-  `fromPretrained`（配布形 約 2.9 GiB の取得）と `generate`（33 フレーム約 30 分・81 フレーム約 2 時間）は持たない。
-  途中で止める口は `onEvent` の中で throw することだけ（backlog の Wan の小物に起票）。
+- 中断（`signal`）: 構築（`WanPipelineOptions.signal` — 取得層へ）と生成（`WanGenerateRequest.signal` — 段の境目・DiT の各 step・VAE の各タイルで
+  見る。開いている Session を畳んでから `signal.reason` を包まず投げる）の両方で受ける（ADR 0119 決定 9・2026-10-03）。1 段の中（1 回の run）は
+  不可分で、中断は次の境目で効く。
 - **sha256 の参照値は環境ごとの行**（ADR [0106](decisions/0106-device-keyed-references.md)）: 今ある行は B570
   （`deno-intel-graphics-bmg-g21`）だけ。行が無い機では sha の照合が明示 SKIP になり、参照門が赤になる
   （`KARUME_REFERENCE=write` で自分の機の行を作る）。50 ステップの行は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）の
@@ -1013,6 +1013,10 @@ Consequences）。
 - Chrome（段 9・未検収）: 既定の束縛上限 128 MiB では VAE の最大の値 192 MiB にも足りない。`acquireGpu` はアダプタ値を要求する
   ので実際の上限はアダプタ次第で、必要な下限は FFN 中間 503,193,600 B（33 フレーム）/ 1,174,118,400 B（81 フレーム）。環境キーは
   WebGPU Developer Features フラグの有無で変わる（sha 行は別）。確認ページは tools/gpu-lab の Wan タブ。
+- テキストエンコーダの経路（ADR 0119・2026-10-03）: 既定 `textEncoder: "gpu"` は umT5-XXL を GPU で回し任意のプロンプトを受ける（2〜512 トークン・
+  語彙外と本文中の特殊トークン・HTML entity の候補〈`R&D` → `R & D`〉・mojibake・C1・Unicode 16.0.0 で未割り当ての文字は `ModelInputError` で拒む）。
+  `"precomputed"` は埋め込み資産の 4 本だけを受け umT5 の部品を取らない。umT5 の部品は別リポ `karume-umt5-xxl` への越境参照で、ローカルでは
+  `crossRepo` の mapping が要る。全 quant 席の `requiredLimits` は語彙埋め込み 1,050,148,864 B の束縛 / バッファ上限を宣言する（precomputed でも同じ）。
 
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
