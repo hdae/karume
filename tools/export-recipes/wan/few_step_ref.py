@@ -177,7 +177,10 @@ def run_case(
     handle = pipeline.transformer.register_forward_hook(record_forward, with_kwargs=True)
     started = time.perf_counter()
     try:
-        with torch.no_grad():
+        # attention は `export_dit` の参照と同じく CPU の flash 経路に固定する — 既定の選択が
+        # torch の更新で MATH へ変わったとき、2 種の参照の前提が黙って割れないように（落ちる形で
+        # 止める）。
+        with torch.no_grad(), dit_patch.flash_attention_only():
             final = pipeline_ref.run(
                 pipeline,
                 prompt_embeds=embeds[case.prompt],

@@ -139,7 +139,12 @@ class TestRunCase:
     COND, UNCOND = 1.0, 2.0
 
     class _Dit(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.math_enabled: list[bool] = []
+
         def forward(self, *, hidden_states, timestep, encoder_hidden_states, return_dict):
+            self.math_enabled.append(torch.backends.cuda.math_sdp_enabled())
             return (torch.full_like(hidden_states, float(encoder_hidden_states[0, 0, 0])),)
 
     @pytest.fixture
@@ -207,3 +212,12 @@ class TestRunCase:
 
         with pytest.raises(AssertionError, match="振り分けを決められない"):
             few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)
+
+    def test_the_denoise_runs_with_the_math_kernel_disabled(self, pipeline, monkeypatch):
+        """`export_dit` の参照と同じく flash に固定する（MATH へ黙って落ちる経路を残さない）。"""
+        self._upstream(monkeypatch, ("cond", "uncond"))
+
+        few_step_ref.run_case(pipeline, self.CASE, self._embeds(), tile=2)
+
+        assert pipeline.transformer.math_enabled == [False] * (2 * few_step_ref.STEPS)
+        assert torch.backends.cuda.math_sdp_enabled()
