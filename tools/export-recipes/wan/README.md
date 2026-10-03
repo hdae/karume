@@ -60,6 +60,12 @@ RoPE buffers of `model.rope` stay f32. The golden for each case is two files: `i
 inputs and the patched torch output) and `reference.<case>` (the input latent, the timestep, the
 unpatched upstream output and each block's output from the plain diffusers forward).
 
+The writer checks every case before anything is published, and `--verify` applies the same checks
+and exits non-zero: the trunk (every rewrite except the patch embedding) must match the upstream
+forward bit for bit, the linear form of the patch embedding must stay within the summation-order
+bound `2·γ_{K+1}·(|x|·|W|ᵀ + |b|)` of the conv3d, and the patched output must be finite. A failing
+case stops the export before the series is touched.
+
 The real-GPU comparison is `packages/models/tests/e2e_wan_dit_test.ts`: the band is about 5× the
 worst of six decision cases spread over the sampling schedule, and three separate acceptance cases
 and four fault injections (RoPE h/w swap, unpatchify order, flipped timestep halves, timestep off by

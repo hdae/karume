@@ -119,9 +119,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -407,6 +408,64 @@ def rope_base_asset(model: nn.Module) -> dict[str, AssetInput]:
     return {ROPE_BASE_ASSET: AssetInput(ROPE_BASE_ROLE, len(payload), payload)}
 
 
+class EagerEquivalenceError(AssertionError):
+    """パッチ後の eager が ADR 0118 の主張（trunk のビット一致・Linear 化の差の上界・有限）から
+    外れた。"""
+
+
+def patch_embedding_error_bound(tokens: torch.Tensor, linear: nn.Linear) -> torch.Tensor:
+    """patch 埋め込みの Linear 化と上流の conv3d の差の、縮約順の違いだけで生じうる上界
+    （要素ごと）。
+
+    `2·γ_{K+1}·(|x|·|W|ᵀ + |b|)`（`γ_n = n·u / (1 − n·u)`・`u = 2⁻²⁴`・K = 窓の要素数で、bias の
+    加算が項を 1 つ増やす）。2 つの縮約順のどちらも真値から `γ_{K+1}·Σ|項|` 以内に収まるので、
+    差はその 2 倍以内。Linear 化はビット一致を期待しない（ADR 0118 — 差を記録する）が、並びの
+    取り違えのような実装の誤りは値そのものの大きさで出て、この上界を超える。
+    """
+    weight = linear.weight
+    magnitude = tokens.abs() @ weight.abs().T
+    terms = tokens.shape[-1]
+    if linear.bias is not None:
+        magnitude = magnitude + linear.bias.abs()
+        terms += 1
+    unit = 2.0**-24
+    return 2 * (terms * unit / (1 - terms * unit)) * magnitude
+
+
+#: 要約の数値の欄のうち、有限でなければならないもの（`reference_f32_vs_f64_ratio` は実寸の
+#: ケースだけが持つ — 下の {@link eager_failures}）。
+_FINITE_FIELDS = (
+    "reference_max_abs",
+    "trunk_max_abs_diff",
+    "patch_embedding_max_abs_diff",
+    "full_max_abs_diff",
+)
+
+
+def eager_failures(report: Mapping[str, Any]) -> list[str]:
+    """eager の要約 1 本が ADR 0118 の主張から外れた点（空なら合格）。
+
+    MUST: emit は 1 つでもあれば公開しない（{@link emit}）・`--verify` は非 0 で終わる。見るのは
+    trunk のビット一致（パッチの eager 同値 MUST）・patch 埋め込みの差が縮約順の上界の内
+    （{@link patch_embedding_error_bound}）・パッチ後の出力と数値の欄が有限であること。
+    """
+    failures = []
+    if report.get("trunk_bit_exact") is not True:
+        failures.append("trunk（patch 埋め込み以外の書き換え）が上流とビット一致しない")
+    if report.get("patch_embedding_within_bound") is not True:
+        failures.append("patch 埋め込みの Linear 化と conv3d の差が縮約順の上界を超える")
+    if report.get("output_finite") is not True:
+        failures.append("パッチ後のグラフ出力に非有限値がある")
+    fields = [*_FINITE_FIELDS]
+    if "reference_f32_vs_f64_ratio" in report:
+        fields.append("reference_f32_vs_f64_ratio")
+    for field in fields:
+        value = report.get(field)
+        if not isinstance(value, float) or not math.isfinite(value):
+            failures.append(f"{field} が有限の数でない（{value!r}）")
+    return failures
+
+
 def eager_report(
     wrapper: dit_patch.WanDitTokens, model: nn.Module, case: Case
 ) -> tuple[dict[str, Any], torch.Tensor]:
@@ -415,7 +474,8 @@ def eager_report(
 
     `trunk` は patch 埋め込みを上流の conv3d の出力に差し替えた経路（RoPE の書き換えを含む本体だけの
     比較 — ビット一致が主張）、`full` は Linear 化した patch 埋め込みを含む製品の経路
-    （差を記録する）。
+    （差を記録する — 判定は patch 埋め込みの差が {@link patch_embedding_error_bound} の内か）。
+    判定の欄の読み方は {@link eager_failures}。
 
     patch 埋め込みの出力が上流の conv3d とビット一致するなら、trunk は full と同じ入力で同じ計算を
     する（`forward` は `forward_hidden(patch_embedding(tokens), …)`）ので回し直さない
@@ -429,6 +489,7 @@ def eager_report(
     with torch.no_grad(), dit_patch.flash_attention_only():
         hidden = model.patch_embedding(case.latents).flatten(2).transpose(1, 2)
         embedded = wrapper.patch_embedding(case.inputs[0])
+        bound = patch_embedding_error_bound(case.inputs[0], wrapper.patch_embedding)
         started = time.perf_counter()
         tokens_out = wrapper(*case.inputs)
         patched_seconds = time.perf_counter() - started
@@ -451,6 +512,8 @@ def eager_report(
         "trunk_from_full": trunk_from_full,
         "patch_embedding_max_abs_diff": float((embedded - hidden).abs().max()),
         "patch_embedding_max_abs": float(hidden.abs().max()),
+        "patch_embedding_within_bound": bool(((embedded - hidden).abs() <= bound).all()),
+        "output_finite": bool(tokens_out.isfinite().all()),
         "full_bit_exact": torch.equal(full, case.reference),
         "full_max_abs_diff": float((full - case.reference).abs().max()),
         "reference_seconds": round(case.reference_seconds, 1),
@@ -504,6 +567,10 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     ケースは 1 本ずつ組んで書いて捨てる（実寸のケースは各ブロックの出力を持つものだけで
     2.6 GB あり、全ケースを同時に持つとメモリに載らない）。グラフの export は全ケースの eager の後
     （例示入力は先頭）。
+
+    MUST: eager の要約が 1 本でも {@link eager_failures} に掛かれば、作業席の中で止める — 系列の
+    既存の final は 1 バイトも変わらない。止めずに据えると、壊れたラッパの golden（`io.*` も同じ
+    ラッパから採る）が TS 側の突合に届くのは公開の後になる。
     """
     started = time.perf_counter()
     # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
@@ -533,6 +600,9 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
                         case.reference, reference_f64.output
                     )
                 print(f"[eager] {json.dumps(report, ensure_ascii=False)}", flush=True)
+                failures = eager_failures(report)
+                if failures:
+                    raise EagerEquivalenceError(f"{case.name}: {failures}")
                 eager.append(report)
                 written += _write_case_files(case, output, reference_f64, staged)
                 del case, output
@@ -575,7 +645,8 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def verify(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """パッチ前後の eager 同値だけを実重みで実測する（容器は書かない）。"""
+    """パッチ前後の eager 同値だけを実重みで実測する（容器は書かない — 判定は {@link main} が
+    {@link eager_failures} で掛ける）。"""
     model = load_transformer(args.model)
     wrapper = dit_patch.WanDitTokens(model)
     if not args.no_f16:
@@ -605,7 +676,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verify and args.layers:
         parser.error("--verify と --layers は併用しない")
     if args.verify:
-        print(json.dumps(verify(args), indent=1, ensure_ascii=False))
+        reports = verify(args)
+        print(json.dumps(reports, indent=1, ensure_ascii=False))
+        failures = {
+            report["case"]: found for report in reports if (found := eager_failures(report))
+        }
+        if failures:
+            print(
+                f"eager 同値が崩れた: {json.dumps(failures, ensure_ascii=False)}", file=sys.stderr
+            )
+            return 1
         return 0
     print(json.dumps(emit(args), indent=1, ensure_ascii=False))
     return 0

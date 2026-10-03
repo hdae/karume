@@ -639,6 +639,69 @@ class TestFloat64Reference:
             dit_patch.reference_dit_f64(model, latents, timestep, embeds)
 
 
+#: 主張を全部満たす eager の要約（`export_dit.eager_report` と同じ欄）。
+_PASSING_REPORT = {
+    "case": "tiny",
+    "reference_max_abs": 1.5,
+    "trunk_bit_exact": True,
+    "trunk_max_abs_diff": 0.0,
+    "patch_embedding_max_abs_diff": 0.0,
+    "patch_embedding_within_bound": True,
+    "output_finite": True,
+    "full_max_abs_diff": 0.0,
+}
+
+
+class TestTheEagerGate:
+    """書き手の eager 同値の門（`export_dit.eager_failures`）— 外れた要約は公開に至らない。"""
+
+    def test_a_report_that_keeps_every_claim_passes(self) -> None:
+        assert export_dit.eager_failures(_PASSING_REPORT) == []
+        assert (
+            export_dit.eager_failures({**_PASSING_REPORT, "reference_f32_vs_f64_ratio": 3e-6}) == []
+        )
+
+    @pytest.mark.parametrize(
+        ("change", "named"),
+        [
+            ({"trunk_bit_exact": False}, "ビット一致しない"),
+            ({"patch_embedding_within_bound": False}, "上界を超える"),
+            ({"output_finite": False}, "非有限値"),
+            ({"full_max_abs_diff": float("nan")}, "full_max_abs_diff"),
+            ({"reference_f32_vs_f64_ratio": float("inf")}, "reference_f32_vs_f64_ratio"),
+            ({"trunk_bit_exact": None}, "ビット一致しない"),
+        ],
+        ids=["trunk", "patch-bound", "output", "nan-diff", "inf-ratio", "missing-claim"],
+    )
+    def test_each_broken_claim_is_named(self, change: dict, named: str) -> None:
+        failures = export_dit.eager_failures({**_PASSING_REPORT, **change})
+
+        assert len(failures) == 1
+        assert named in failures[0]
+
+    def test_a_missing_numeric_field_is_a_failure(self) -> None:
+        report = {
+            key: value for key, value in _PASSING_REPORT.items() if key != "trunk_max_abs_diff"
+        }
+
+        assert export_dit.eager_failures(report) == ["trunk_max_abs_diff が有限の数でない（None）"]
+
+    def test_the_patch_embedding_bound_holds_and_a_misordered_window_breaks_it(self) -> None:
+        """Linear 化と conv3d の差は上界の内。窓の並びを取り違えた入力は上界を大きく超える。"""
+        model = _tiny_dit()
+        latents, *_ = _tiny_inputs(model)
+        linear = dit_patch.patch_embedding_linear(model.patch_embedding)
+        tokens = dit_patch.dit_patchify(latents, (1, 2, 2))
+        with torch.no_grad():
+            hidden = model.patch_embedding(latents).flatten(2).transpose(1, 2)
+            bound = export_dit.patch_embedding_error_bound(tokens, linear)
+            within = (linear(tokens) - hidden).abs() <= bound
+            misordered = (linear(tokens.flip(-1)) - hidden).abs() <= bound
+
+        assert bool(within.all())
+        assert not bool(misordered.any())
+
+
 #: 合成モデルで回す書き手のケース（役割ごとの書き分けを 1 本ずつ — 実寸の役割は f64 の参照を持つ）。
 _TINY_CASES = (
     export_dit.CaseSpec("band", TINY_LATENT, 500, 7, 1),
@@ -660,6 +723,17 @@ def _tiny_writer(monkeypatch: pytest.MonkeyPatch, series: Path) -> None:
     monkeypatch.setattr(export_dit, "PROBE_SERIES", series.with_name("probe"))
     monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
     monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+
+
+def _break_the_rope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """故障注入: 実数形 RoPE の値を 1 ULP 級ずらす（移植の誤りの代役）。
+
+    trunk のビット一致が崩れる。
+    """
+    original = dit_patch.real_pair_rotary
+    monkeypatch.setattr(
+        dit_patch, "real_pair_rotary", lambda x, cos, sin: original(x, cos, sin) * (1 + 2**-20)
+    )
 
 
 @pytest.fixture(scope="module")
@@ -738,6 +812,40 @@ class TestTheCaseWriters:
 
         assert declared == [export_dit.REFERENCE_F64_KEY]
 
+    def test_every_eager_report_passed_the_gate(self, emitted) -> None:
+        _, summary = emitted
+
+        assert all(export_dit.eager_failures(report) == [] for report in summary["eager"])
+
+
+class TestTheWriterStopsBeforePublication:
+    """eager 同値が崩れたら公開しない（emit）・非 0 で終わる（--verify）。"""
+
+    def test_a_broken_rope_leaves_the_existing_series_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = tmp_path / "series"
+        (series / export_dit.TARGET).mkdir(parents=True)
+        (series / export_dit.TARGET / "previous.krm").write_text("last known good")
+        _tiny_writer(monkeypatch, series)
+        _break_the_rope(monkeypatch)
+
+        with pytest.raises(export_dit.EagerEquivalenceError, match="ビット一致しない"):
+            export_dit.emit(argparse.Namespace(model=export_dit.DEFAULT_MODEL, layers=False))
+
+        assert sorted(path.name for path in series.iterdir()) == [export_dit.TARGET]
+        assert [path.name for path in (series / export_dit.TARGET).iterdir()] == ["previous.krm"]
+
+    @pytest.mark.parametrize("broken", [False, True], ids=["intact", "broken-rope"])
+    def test_verify_exits_non_zero_only_when_a_claim_breaks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bool
+    ) -> None:
+        _tiny_writer(monkeypatch, tmp_path / "series")
+        if broken:
+            _break_the_rope(monkeypatch)
+
+        assert export_dit.main(["--verify"]) == (1 if broken else 0)
+
 
 # ---- 実重み（pin した revision — 無い機では SKIP） ----------------------------------
 
@@ -757,7 +865,8 @@ class TestRealWeights:
 
         patch 埋め込みの Linear 化だけは縮約順が conv3d と違いうる（実測はこの機の torch CPU で差
         0）ので、差は縮約順の違いの上界 `2·γ_{K+1}·Σ|w·x|`（`γ_n = n·u / (1 − n·u)`・`u = 2⁻²⁴`・K =
-        64 と bias）で押さえる — 実装の誤り（並びの取り違え）は値そのものの大きさで出る。
+        64 と bias — 書き手の門と同じ {@link wan.export_dit.patch_embedding_error_bound}）で押さえる
+        — 実装の誤り（並びの取り違え）は値そのものの大きさで出る。
         """
         from wan.pipeline_ref import pad_text_embeds
 
@@ -773,11 +882,7 @@ class TestRealWeights:
             hidden = model.patch_embedding(latents).flatten(2).transpose(1, 2)
             trunk = wrapper.forward_hidden(hidden, *inputs[1:])
             embedded = wrapper.patch_embedding(inputs[0])
-            bound_terms = inputs[0].abs() @ wrapper.patch_embedding.weight.abs().T
-            bound_terms = bound_terms + wrapper.patch_embedding.bias.abs()
+            bound = export_dit.patch_embedding_error_bound(inputs[0], wrapper.patch_embedding)
 
         assert torch.equal(dit_patch.dit_unpatchify(trunk, (2, 16, 24), (1, 2, 2)), expected)
-        unit = 2.0**-24
-        terms = inputs[0].shape[-1] + 1
-        gamma = terms * unit / (1 - terms * unit)
-        assert bool(((embedded - hidden).abs() <= 2 * gamma * bound_terms).all())
+        assert bool(((embedded - hidden).abs() <= bound).all())
