@@ -692,6 +692,12 @@ class TestTheContainerProvenance:
         with pytest.raises(DistError, match="知らない"):
             wan_plan(_build_sources(tmp_path), "t2v-14b")
 
+    def test_it_refuses_a_wan22_model_of_the_source_table(self, tmp_path: Path) -> None:
+        """取得元の表に載った Wan2.2 のモデルでも、Wan2.1 の配布（`karume-wan2.1`）は組まない。"""
+        assert "ti2v-5b" in SOURCES
+        with pytest.raises(DistError, match=r"Wan2\.1 のモデル 'ti2v-5b' は知らない"):
+            wan_plan(_build_sources(tmp_path), "ti2v-5b")
+
 
 class TestTheRopeBaseAsset:
     @pytest.mark.parametrize(
@@ -928,6 +934,15 @@ class TestTheModelCard:
         foreign = json.loads(json.dumps(manifest))
         foreign["models"][DEFAULT_MODEL]["pipeline"] = "siglip2/1"
         with pytest.raises(ValueError, match=WAN_SUPPORTED_PIPELINE):
+            _card(foreign)
+
+    def test_it_refuses_to_attribute_a_wan22_model(self, assembled) -> None:
+        """取得元の表に有る Wan2.2 のモデルでも、Wan2.1 のカードには出所を書かない。"""
+        _, manifest = assembled
+        foreign = json.loads(json.dumps(manifest))
+        foreign["models"] = {"ti2v-5b": foreign["models"][DEFAULT_MODEL]}
+        assert "ti2v-5b" in SOURCES
+        with pytest.raises(ValueError, match=r"'ti2v-5b' は Wan2\.1 のモデル"):
             _card(foreign)
 
     def test_it_attributes_the_pinned_upstream_revision(self, assembled) -> None:

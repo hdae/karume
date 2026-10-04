@@ -51,7 +51,7 @@ from safetensors.torch import save_file
 
 from _shared.paths import REPO_ROOT
 from wan.pipeline_ref import GUIDANCE_SCALE, NUM_INFERENCE_STEPS
-from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, local_snapshot
 
 DEFAULT_OUT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-scheduler"
 
@@ -230,7 +230,7 @@ def write(out: Path, model: str = DEFAULT_MODEL) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)
     print(json.dumps(write(args.out, args.model), indent=1))

@@ -29,8 +29,9 @@ class TestPin:
 
     def test_it_fetches_dit_vae_and_scheduler_but_never_the_text_encoder(self):
         """umT5（f32 約 22.7 GB）を取得対象に入れると、31 GiB 機の参照が別プロセスに分かれない。"""
-        fetched = {part.subfolder for part in sources.COMPONENTS if part.fetch}
-        skipped = {part.subfolder for part in sources.COMPONENTS if not part.fetch}
+        parts = sources.COMPONENTS[sources.DEFAULT_MODEL]
+        fetched = {part.subfolder for part in parts if part.fetch}
+        skipped = {part.subfolder for part in parts if not part.fetch}
 
         assert fetched == {"transformer", "vae", "scheduler"}
         assert skipped == {"text_encoder", "tokenizer"}
@@ -42,7 +43,7 @@ class TestPin:
     def test_the_text_embedding_process_takes_exactly_the_skipped_parts(self):
         """`wan.text_embeds` の取得口（`text_snapshot`）が取るのは DiT / VAE 側が取らない
         部品だけ。"""
-        assert set(sources.TEXT_COMPONENTS) == {"text_encoder", "tokenizer"}
+        assert set(sources.text_components(sources.DEFAULT_MODEL)) == {"text_encoder", "tokenizer"}
 
 
 class TestSafetensorsHeader:
@@ -87,4 +88,119 @@ class TestFetchedSnapshot:
         assert vae["z_dim"] == 16
 
     def test_the_parameter_counts_match_the_research(self, wan_snapshot: Path):
-        assert sources.check_snapshot(wan_snapshot) == sources.EXPECTED_PARAMETERS
+        assert (
+            sources.check_snapshot(wan_snapshot)
+            == sources.EXPECTED_PARAMETERS[sources.DEFAULT_MODEL]
+        )
+
+
+class TestTheTi2v5bRow:
+    """Wan2.2 TI2V-5B の行（ADR 0121 決定 1）— pin・取得範囲・期待パラメータ数がモデル別の
+    表に載る。"""
+
+    MODEL = "ti2v-5b"
+
+    def test_it_pins_the_diffusers_repo_at_the_decided_commit(self):
+        source = sources.SOURCES[self.MODEL]
+
+        assert source.repo == "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+        assert source.revision == "b8fff7315c768468a5333511427288870b2e9635"
+        assert source.license == "apache-2.0"
+
+    def test_it_fetches_dit_vae_and_scheduler_and_never_the_text_parts(self):
+        """umT5 は越境参照・トークナイザ資産は Wan2.1 の系列から写す（決定 9）— どの経路でも
+        取らない。"""
+        parts = sources.COMPONENTS[self.MODEL]
+
+        assert {part.subfolder for part in parts if part.fetch} == {
+            "transformer",
+            "vae",
+            "scheduler",
+        }
+        assert {part.subfolder for part in parts if not part.fetch} == {"text_encoder", "tokenizer"}
+        assert sources.text_components(self.MODEL) == ()
+        assert sources.allow_patterns(self.MODEL) == [
+            "README.md",
+            "model_index.json",
+            "transformer/*",
+            "vae/*",
+            "scheduler/*",
+        ]
+
+    def test_asking_for_its_text_snapshot_fails_before_any_download(self):
+        pytest.importorskip("huggingface_hub")
+
+        with pytest.raises(sources.WanSourceError, match="決定 9"):
+            sources.text_snapshot(self.MODEL, fetch=True)
+
+    def test_the_expected_parameters_are_the_counts_of_the_adr(self):
+        assert sources.EXPECTED_PARAMETERS[self.MODEL] == {
+            "transformer": 4_999_787_712,
+            "vae": 704_688_668,
+        }
+
+    def test_every_model_has_a_row_in_every_table(self):
+        assert set(sources.COMPONENTS) == set(sources.SOURCES)
+        assert set(sources.EXPECTED_PARAMETERS) == set(sources.SOURCES)
+
+
+class TestTheModelKeyedCheck:
+    """`check_snapshot` は渡したモデルの行で数を突き合わせる（別のモデルの行で通らない）。"""
+
+    def _snapshot(self, tmp_path: Path) -> Path:
+        torch = pytest.importorskip("torch")
+        from safetensors.torch import save_file
+
+        for name, size in (("transformer", 6), ("vae", 4)):
+            (tmp_path / name).mkdir()
+            save_file({"w": torch.zeros(size)}, tmp_path / name / "part.safetensors")
+        return tmp_path
+
+    def test_the_row_of_the_named_model_is_used(self, tmp_path: Path, monkeypatch):
+        snapshot = self._snapshot(tmp_path)
+        monkeypatch.setattr(
+            sources,
+            "EXPECTED_PARAMETERS",
+            {"a": {"transformer": 6, "vae": 4}, "b": {"transformer": 6, "vae": 5}},
+        )
+
+        assert sources.check_snapshot(snapshot, "a") == {"transformer": 6, "vae": 4}
+        with pytest.raises(sources.WanSourceError, match="b: パラメータ数"):
+            sources.check_snapshot(snapshot, "b")
+
+    def test_an_unknown_model_fails_loudly(self, tmp_path: Path):
+        with pytest.raises(sources.WanSourceError, match="期待パラメータ数が無い"):
+            sources.check_snapshot(tmp_path, "unknown")
+        with pytest.raises(sources.WanSourceError, match="部品の表が無い"):
+            sources.allow_patterns("unknown")
+
+
+#: Wan2.1 に固定した台本（系列の置き場・ケースの表・テキスト段が Wan2.1 — `--model` の受理は
+#: `WAN21_MODELS`）と、引数の残り（必須の位置引数）。
+WAN21_SCRIPTS = (
+    ("wan.export_dit", ["--verify"]),
+    ("wan.dit_host_fixture", []),
+    ("wan.scheduler_ref", []),
+    ("wan.few_step_ref", []),
+    ("wan.text_embeds", []),
+    ("wan.umt5_export", ["prepare"]),
+    ("wan.umt5_tokenizer", []),
+    ("wan.umt5_host_fixture", []),
+    ("wan.pipeline_ref", ["--smoke"]),
+)
+
+
+@pytest.mark.parametrize(("module", "rest"), WAN21_SCRIPTS, ids=[m for m, _ in WAN21_SCRIPTS])
+def test_the_wan21_scripts_refuse_the_ti2v_5b_model(module: str, rest: list[str], capsys):
+    """表に `ti2v-5b` が載っても、Wan2.1 の系列へ書く台本は 5B を受けない（引数の段で止まる）。"""
+    pytest.importorskip("diffusers")
+    import importlib
+
+    script = importlib.import_module(module)
+
+    with pytest.raises(SystemExit) as stopped:
+        script.main(["--model", "ti2v-5b", *rest])
+
+    assert stopped.value.code == 2
+    assert "invalid choice: 'ti2v-5b'" in capsys.readouterr().err
+    assert sources.WAN21_MODELS == (sources.DEFAULT_MODEL,)

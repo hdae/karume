@@ -64,7 +64,7 @@ from karume.dist import (
 from wan import umt5_tokenizer
 from wan.card import render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import DEFAULT_MODEL, SOURCES
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_OUTPUT_PATHS,
@@ -648,10 +648,14 @@ def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
 def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
     """Wan2.1 の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる — 何も書かない）。"""
     assert_model_name(model)
-    if model not in SOURCES:
+    # 門は取得元の表（`SOURCES` — Wan2.2 の行も持つ）ではなく Wan2.1 のモデルの表で閉じる。
+    # 配布リポ名はモデルによらず `karume-wan2.1`（{@link wan_repo_name}）なので、表の全モデルを
+    # 通すと 5B の出所を名乗る配布形が Wan2.1 の配布を置き換えうる。
+    if model not in WAN21_MODELS:
         raise DistError(
-            f"Wan2.1 のモデル {model!r} は知らない（既知: {' / '.join(sorted(SOURCES))}）—"
-            " 上流の取得元の表（wan.sources.SOURCES）に載ったモデルだけを配る"
+            f"Wan2.1 のモデル {model!r} は知らない（既知: {' / '.join(WAN21_MODELS)}）—"
+            f" Wan2.1 の配布（{WAN_REPO_NAME}）は Wan2.1 のモデル（wan.sources.WAN21_MODELS）だけを"
+            " 配る"
         )
     placements = wan_placements(sources)
     upstream = SOURCES[model]

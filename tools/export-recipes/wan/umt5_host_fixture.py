@@ -43,7 +43,7 @@ from torch import nn
 from _shared.paths import REPO_ROOT
 from karume.convert import normalize_boundary_tensor
 from wan import umt5_patch
-from wan.sources import DEFAULT_MODEL, SOURCES, text_snapshot
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, text_snapshot
 from wan.umt5_tokenizer import MAX_LENGTH, MIN_TOKENS
 
 DEFAULT_OUT = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "wan-umt5"
@@ -149,7 +149,7 @@ def pinned_config(model: str = DEFAULT_MODEL) -> Any:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)
 

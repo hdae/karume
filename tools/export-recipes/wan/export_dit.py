@@ -23,7 +23,8 @@
                                   `block.NN`（各ブロックの出力 `[1,S,1536]` —
                                   `CaseSpec.blocks` のケースだけ）。実寸のケースは加えて
                                   `output.f64`（活性も f64 で回した上流の出力を f32 へ丸めた値
-                                  — `dit_patch.reference_dit_f64`）
+                                  — 1 ブロックずつ f64 にする層逐次の
+                                  `wan.dit_reference.LayerwiseDit`・ADR 0121 決定 7）
 
 `--layers` は層別の出口を足した計測用のグラフ（{@link wan.dit_patch.WanDitTokensLayers}）を
 `…-f16-dyn-probe/transformer/` へ書く。golden は書かない（入力は製品の系列の `io.*`、期待値は同じ
@@ -183,7 +184,7 @@ from karume.quantize import (
 )
 from wan import dit_patch
 from wan.pipeline_ref import TEXT_DIM, assert_no_mps, pad_text_embeds
-from wan.sources import DEFAULT_MODEL, SOURCES, local_snapshot
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, local_snapshot
 
 #: 系列（ADR 0118 決定 7 — 接尾辞 `-dyn` は ADR 0077 の慣例）と、計測用の層別出口の系列。
 SERIES = SERIES_ROOT / "wan2.1-t2v-1.3b-f16-dyn"
@@ -355,6 +356,34 @@ def load_transformer(model_name: str = DEFAULT_MODEL) -> nn.Module:
     return model.eval()
 
 
+def unrounded_weights(dtype: str, model: nn.Module) -> list[str]:
+    """系列の格納 dtype の丸めの不動点に無い上流の重みの名前（空なら丸め済み）。
+
+    - `f16`: 全パラメータが f16 の表現可能値（f16 → f32 の往復でビット不変）
+    - `i8`: 上流の重みスロット（linear と patch 埋め込み）が per-channel の i8 の表現可能値（もう
+      1 度丸めてビット不変 — `karume.quantize.INT8_MAX` の注記）
+
+    丸めの書き手（{@link round_to_f16} / {@link fake_quant_i8}）と、丸め済みのモデルを受ける側
+    （{@link float64_references}）が同じ判定を通る。
+    """
+    with torch.no_grad():
+        if dtype == "f16":
+            return [
+                name
+                for name, parameter in model.named_parameters()
+                if not torch.equal(parameter, parameter.to(torch.float16).to(torch.float32))
+            ]
+        if dtype == "i8":
+            missed = []
+            for name, weight, axis in iter_quant_targets(model, op_types=QUANT_MODULE_TYPES):
+                scale = channel_scale(weight, axis)
+                rounded = quantize_to_int8(weight, scale).to(torch.float32) * scale
+                if not torch.equal(rounded, weight):
+                    missed.append(name)
+            return missed
+    raise ValueError(f"格納 dtype {dtype!r} の丸めは知らない（{' / '.join(DTYPES)}）")
+
+
 def round_to_f16(model: nn.Module, wrapper: nn.Module) -> str:
     """S 形のラッパ経由で重みを f16 表現可能値へ丸め、上流の全パラメータに届いたことを確かめる。
 
@@ -365,12 +394,7 @@ def round_to_f16(model: nn.Module, wrapper: nn.Module) -> str:
     """
     rope_before = {name: buffer.clone() for name, buffer in model.rope.named_buffers()}
     report = round_weights_to_f16(wrapper)
-    with torch.no_grad():
-        missed = [
-            name
-            for name, parameter in model.named_parameters()
-            if not torch.equal(parameter, parameter.to(torch.float16).to(torch.float32))
-        ]
+    missed = unrounded_weights("f16", model)
     if missed:
         raise AssertionError(f"f16 の丸めが上流のパラメータに届いていない: {missed[:5]}")
     moved = [
@@ -398,12 +422,7 @@ def fake_quant_i8(model: nn.Module, wrapper: nn.Module) -> Int8Report:
     """
     report = fake_quant_int8(wrapper)
     upstream = list(iter_quant_targets(model, op_types=QUANT_MODULE_TYPES))
-    with torch.no_grad():
-        missed = []
-        for name, weight, axis in upstream:
-            scale = channel_scale(weight, axis)
-            if not torch.equal(quantize_to_int8(weight, scale).to(torch.float32) * scale, weight):
-                missed.append(name)
+    missed = unrounded_weights("i8", model)
     if missed:
         raise AssertionError(f"i8 の丸めが上流の重みに届いていない: {missed[:5]}")
     if len(upstream) != report.modules:
@@ -489,33 +508,39 @@ class Float64Reference:
 
 
 def float64_references(
-    model_name: str, specs: Sequence[CaseSpec], dtype: str
+    model: nn.Module, specs: Sequence[CaseSpec], dtype: str
 ) -> dict[str, Float64Reference]:
     """f64 の参照を持つケース（{@link wants_float64}）の f64 の参照（上流の素の forward を活性も
-    f64 で — `dit_patch.reference_dit_f64`）。
+    f64 で — 層逐次の `wan.dit_reference.LayerwiseDit`・ADR 0121 決定 7）。
 
-    重みは f32 の参照と同じ丸め（系列の格納 dtype の {@link fake_quant}）の値をそのまま f64 へ
-    広げ、入力も {@link case_inputs} の同じ値を広げる。丸めは f32 のうちに掛ける（f64 で丸めると
-    scale と丸めの値が f32 の参照と食い違う）。f64 のモデル（約 10.4 GB）は f32 のモデル
-    （約 5.2 GB）と同時に持たない — ここで読んで回して捨ててから、呼び手が f32 のモデルを読む。
+    `model` は系列の格納 dtype の丸め（{@link fake_quant}）を掛けた後の f32 のモデル。重みはその
+    f32 の値を 1 ブロックずつ f64 へ広げ、入力も {@link case_inputs} の同じ値を広げる。丸めは f32 の
+    うちに掛ける（f64 で丸めると scale と丸めの値が f32 の参照と食い違う）。モデル全体を f64 に
+    しない — 同時に持つ f64 はブロックの外と 1 ブロックだけ（5B では f64 の全量 37.25 GiB が
+    31 GiB 機に載らない。1.3B もこの 1 本の経路を通す — 全体 f64 の経路は残さない）。
+    MUST: `model` が丸め済みであることをここで確かめる（{@link unrounded_weights}）— 呼ぶ順が
+    崩れて丸める前のモデルが渡ると、丸めていない重みの f64 golden が黙って書かれる。
     """
+    from wan import dit_reference
+
     chosen = [spec for spec in specs if wants_float64(dtype, spec)]
     if not chosen:
         return {}
-    model = load_transformer(model_name)
-    fake_quant(dtype, model, dit_patch.WanDitTokens(model))
-    model.double()
-    patch_size = tuple(int(size) for size in model.config.patch_size)
+    unrounded = unrounded_weights(dtype, model)
+    if unrounded:
+        raise AssertionError(
+            f"f64 の参照に {dtype} の丸めの前の重みが渡された（fake_quant の後に呼ぶ）:"
+            f" {unrounded[:5]}"
+        )
+    writer = dit_reference.LayerwiseDit(model.config)
+    source = dit_reference.ModuleWeights(model)
     references: dict[str, Float64Reference] = {}
     for spec in chosen:
         latents, timestep, encoder_hidden_states = case_inputs(model, spec)
-        started = time.perf_counter()
-        with torch.no_grad():
-            output = dit_patch.reference_dit_f64(model, latents, timestep, encoder_hidden_states)
-        seconds = time.perf_counter() - started
-        name = spec.name(patch_size)
-        print(f"[case] {name}: 上流の f64 参照 {seconds:.1f} s", flush=True)
-        references[name] = Float64Reference(output=output, seconds=seconds)
+        result = writer.forward(source, torch.float64, latents, timestep, encoder_hidden_states)
+        name = spec.name(writer.patch_size)
+        print(f"[case] {name}: 上流の f64 参照（層逐次）{result.seconds:.1f} s", flush=True)
+        references[name] = Float64Reference(output=result.output, seconds=result.seconds)
     return references
 
 
@@ -660,6 +685,42 @@ def _ratio(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return float((actual.double() - expected).abs().max() / expected.abs().max())
 
 
+def reference_tensors(
+    name: str,
+    *,
+    latents: torch.Tensor,
+    timestep: torch.Tensor,
+    output: torch.Tensor | None,
+    blocks: Sequence[torch.Tensor],
+    output_f64: torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    """`reference.<case>` の中身（`latents` / `timestep`〈i32〉/ `output` / `block.NN` /
+    `output.f64`）。
+
+    書き手（{@link _write_case_files}）と層逐次の参照の突き合わせ（`wan.dit_reference compare` —
+    `output` を採らない `--f64-only` は `output=None`）が同じ組み方を通る — 2 か所で綴ると、
+    突き合わせが書き手と違う形を「一致」と言いうる。
+    """
+    reference = {
+        "latents": latents.contiguous(),
+        "timestep": normalize_boundary_tensor(timestep, f"{name} の timestep"),
+    }
+    if output is not None:
+        reference["output"] = output.contiguous()
+    reference.update(
+        {f"block.{index:02d}": block.contiguous() for index, block in enumerate(blocks)}
+    )
+    if output_f64 is not None:
+        # 格納は f32 へ丸めた値（TS の safetensors は F64 を読まない）。丸めの差は要素ごとに
+        # 2⁻²⁴·|x| 以下で、比にして 6e-8 以下。正規化の分母（CPU f32 の参照の f64 に対する比）を
+        # 動かす割合は分母の最小で決まる: 決定用（`full-band`）だけなら S = 14,040 の最小 3.72e-6 で
+        # 2% 未満・S = 32,760 の最小 2.07e-6 で約 2.9%、受入れを含めると最小 1.83e-6
+        # （`full-accept-s14040-t0600`）で約 3.3%。帯（最悪 × 5）の判定には効かない（実測の表は
+        # TS 側 `e2e_wan_dit_test.ts` の `REFERENCE_F64_KEY` と `DIT_FULL_NORMALIZED_BAND`）。
+        reference[REFERENCE_F64_KEY] = output_f64.to(torch.float32).contiguous()
+    return reference
+
+
 def _write_case_files(
     case: Case, output: torch.Tensor, reference_f64: Float64Reference | None, out_dir: Path
 ) -> list[str]:
@@ -672,23 +733,14 @@ def _write_case_files(
     io[f"{OUTPUT_PREFIX}0"] = normalize_boundary_tensor(
         output.detach().contiguous(), f"{case.name} の出力"
     )
-    reference = {
-        "latents": case.latents.contiguous(),
-        "timestep": normalize_boundary_tensor(case.timestep, f"{case.name} の timestep"),
-        "output": case.reference.contiguous(),
-        **{
-            f"block.{index:02d}": block.contiguous()
-            for index, block in enumerate(case.reference_blocks)
-        },
-    }
-    if reference_f64 is not None:
-        # 格納は f32 へ丸めた値（TS の safetensors は F64 を読まない）。丸めの差は要素ごとに
-        # 2⁻²⁴·|x| 以下で、比にして 6e-8 以下。正規化の分母（CPU f32 の参照の f64 に対する比）を
-        # 動かす割合は分母の最小で決まる: 決定用（`full-band`）だけなら S = 14,040 の最小 3.72e-6 で
-        # 2% 未満・S = 32,760 の最小 2.07e-6 で約 2.9%、受入れを含めると最小 1.83e-6
-        # （`full-accept-s14040-t0600`）で約 3.3%。帯（最悪 × 5）の判定には効かない（実測の表は
-        # TS 側 `e2e_wan_dit_test.ts` の `REFERENCE_F64_KEY` と `DIT_FULL_NORMALIZED_BAND`）。
-        reference[REFERENCE_F64_KEY] = reference_f64.output.to(torch.float32).contiguous()
+    reference = reference_tensors(
+        case.name,
+        latents=case.latents,
+        timestep=case.timestep,
+        output=case.reference,
+        blocks=case.reference_blocks,
+        output_f64=None if reference_f64 is None else reference_f64.output,
+    )
     io_name = f"{IO_PREFIX}{case.name}{CASE_SUFFIX}"
     reference_name = f"{REFERENCE_PREFIX}{case.name}{CASE_SUFFIX}"
     save_file(io, str(out_dir / io_name))
@@ -710,12 +762,12 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     started = time.perf_counter()
     # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
     specs = CASES[:1] if args.layers else series_cases(args.dtype, full=not args.no_full)
-    references_f64 = float64_references(args.model, specs, args.dtype)
     model = load_transformer(args.model)
     wrapper_class = dit_patch.WanDitTokensLayers if args.layers else dit_patch.WanDitTokens
     wrapper = wrapper_class(model)
     rounded, scales = fake_quant(args.dtype, model, wrapper)
     print(f"[fake-quant] {TARGET}: {rounded}", flush=True)
+    references_f64 = float64_references(model, specs, args.dtype)
     first = build_case(model, specs[0])
     eager: list[dict[str, Any]] = []
     written: list[str] = []
@@ -796,7 +848,7 @@ def verify(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument(
         "--dtype",
         default="f16",

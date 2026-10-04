@@ -71,7 +71,7 @@ from safetensors.torch import save_file
 from _shared.paths import SERIES_ROOT
 from wan.pipeline_ref import MAX_SEQUENCE_LENGTH, TEXT_DIM
 from wan.prompts import FIXED_PROMPTS, FixedPrompt
-from wan.sources import DEFAULT_MODEL, SOURCES, text_snapshot
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, text_snapshot
 
 #: 系列の席（決定 4・決定 7）。
 SERIES_NAME = "wan2.1-t2v-1.3b-text-embeds"
@@ -327,7 +327,7 @@ def generate(model: str, out: Path) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument("--out", type=Path, default=SERIES_ROOT / SERIES_NAME)
     parser.add_argument(
         "--fetch",

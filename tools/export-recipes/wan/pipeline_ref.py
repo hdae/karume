@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from wan.sources import DEFAULT_MODEL, local_snapshot
+from wan.sources import DEFAULT_MODEL, WAN21_MODELS, local_snapshot
 
 if TYPE_CHECKING:
     from diffusers import WanPipeline
@@ -192,7 +192,7 @@ def _smoke(model: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument("--smoke", action="store_true", help="読み込みと 1 ステップの疎通")
     args = parser.parse_args(argv)
     if not args.smoke:

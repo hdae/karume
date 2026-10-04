@@ -61,7 +61,7 @@ from _shared.paths import SERIES_ROOT
 from karume.quantize import round_weights_to_f16
 from wan import dit_patch, export_vae, pipeline_ref, prompts, text_embeds, vae_tiling
 from wan.export_dit import round_to_f16
-from wan.sources import DEFAULT_MODEL, SOURCES
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS
 
 if TYPE_CHECKING:
     from diffusers import WanPipeline
@@ -297,7 +297,7 @@ def write_case(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument("--tile", type=int, default=export_vae.DEFAULT_TILE)
     parser.add_argument("--out", type=Path, default=SERIES_ROOT / export_vae.SERIES_NAME)
     parser.add_argument(

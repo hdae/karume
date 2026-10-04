@@ -65,7 +65,7 @@ from typing import Any
 from _shared.paths import REPO_ROOT, SERIES_ROOT
 from wan import prompt_clean as pc
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import DEFAULT_MODEL, SOURCES, WanSourceError
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, WanSourceError
 
 #: 系列の席（`<名前>-tokenizer/tokenizer.json` — docs/assets-layout.md）。
 SERIES_NAME = "wan2.1-umt5-tokenizer"
@@ -697,7 +697,7 @@ def write_text(path: Path, text: str) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument("--assets-out", type=Path, default=SERIES_ROOT / SERIES_NAME)
     parser.add_argument("--fixtures-out", type=Path, default=FIXTURE_DIR)
     args = parser.parse_args(argv)

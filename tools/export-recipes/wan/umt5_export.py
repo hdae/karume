@@ -82,7 +82,7 @@ from karume.ir import IrGraph
 from karume.pipeline import export_module, publish_model
 from karume.quantize import QUANT_MODULE_TYPES, channel_scale, iter_quant_targets, quantize_to_int8
 from wan import umt5_patch, umt5_reference
-from wan.sources import DEFAULT_MODEL, SOURCES, text_snapshot
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, text_snapshot
 from wan.umt5_distribution import storage_kind
 
 #: i8 の系列（綴りは配布の規約 `<名>-<格納>-dyn` — DiT の `wan2.1-t2v-1.3b-i8-dyn` に倣う）。
@@ -261,21 +261,23 @@ class Checkpoint:
 
     全部を一度に載せないための口（決定 6）。MUST: 格納は F32 だけを受ける — 上流の pin した
     checkpoint は F32（`total_size` 22,723,641,344 B）で、別の dtype なら丸めの出発点が変わる。
+
+    `index` / `single` はファイル名の綴り（既定は transformers の `save_pretrained`。diffusers の
+    部品は `diffusion_pytorch_model…` — DiT の層逐次の参照 `wan.dit_reference` が渡す）。
     """
 
-    def __init__(self, directory: Path) -> None:
-        index = directory / CHECKPOINT_INDEX
-        if index.is_file():
-            weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+    def __init__(
+        self, directory: Path, *, index: str = CHECKPOINT_INDEX, single: str = CHECKPOINT_SINGLE
+    ) -> None:
+        if (directory / index).is_file():
+            weight_map = json.loads((directory / index).read_text(encoding="utf-8"))["weight_map"]
             self._files = {key: directory / name for key, name in weight_map.items()}
-        elif (directory / CHECKPOINT_SINGLE).is_file():
-            single = directory / CHECKPOINT_SINGLE
-            with safe_open(str(single), framework="pt") as handle:
-                self._files = dict.fromkeys(handle.keys(), single)
+        elif (directory / single).is_file():
+            path = directory / single
+            with safe_open(str(path), framework="pt") as handle:
+                self._files = dict.fromkeys(handle.keys(), path)
         else:
-            raise Umt5ExportError(
-                f"{directory} に {CHECKPOINT_INDEX} も {CHECKPOINT_SINGLE} も無い"
-            )
+            raise Umt5ExportError(f"{directory} に {index} も {single} も無い")
 
     def names(self) -> frozenset[str]:
         return frozenset(self._files)
@@ -763,7 +765,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "command", choices=("prepare", "write", "check-mask", "compare-mask", "reference")
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
+    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
     parser.add_argument(
         "--check",
         action="store_true",

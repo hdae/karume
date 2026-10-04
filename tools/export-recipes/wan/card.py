@@ -37,7 +37,7 @@ from karume.modelcard import (
     require_pipeline,
 )
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import SOURCES
+from wan.sources import SOURCES, WAN21_MODELS
 from wan.umt5_distribution import UMT5_ROLE
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
@@ -106,14 +106,14 @@ WAN_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.107", "0.21
 
 
 def _upstream(name: str) -> Any:
-    """モデル名 → 上流の取得元（表に無ければ描かない — 出所を名乗れないカードは出さない）。"""
-    source = SOURCES.get(name)
-    if source is None:
+    """モデル名 → 上流の取得元（Wan2.1 のモデルでなければ描かない — このカードは Wan2.1 の
+    配布の事実だけを書く。取得元の表は Wan2.2 の行も持つので、表に有ることでは通さない）。"""
+    if name not in WAN21_MODELS:
         raise ValueError(
-            f"モデル '{name}' の上流が取得元の表（wan.sources.SOURCES）に無い"
-            f"（既知: {sorted(SOURCES)}）— 出所を名乗れないカードは描かない"
+            f"モデル '{name}' は Wan2.1 のモデル（wan.sources.WAN21_MODELS）でない"
+            f"（既知: {list(WAN21_MODELS)}）— Wan2.1 のカードに別の世代の出所を書かない"
         )
-    return source
+    return SOURCES[name]
 
 
 def _wan_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
