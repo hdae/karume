@@ -499,3 +499,24 @@
 - **`.bin` の `weights_only=True` 読みの将来の挙動**（torch 2.13.0 では警告なし — 観測のみ）。
 - **公式の `models_t5_umt5-xxl-enc-bf16.pth` が本家の f32 の RNE 丸めと同じ値か**（出所調査 §7 — 読んでいない。本 ADR の判断には効かない）。
 - **0121 との順序**: 段 a を 0121 の配布形の作業より先に終える調整（決定 8）。
+
+## 追記（2026-10-04）: 段 a の結果 — 出所の切り替えは重みを 1 バイトも変えなかった
+
+- **基準線（切り替えの前・HEAD `1fb74d10`）**: `write --check` は緑（137 s）、`reference` の再実行で golden 10 本がバイト単位で再現（338 s）、
+  dist を別の出力先へ組んだ結果は今のミラーと差分 0（`outputs/bench/karume-umt5-xxl/2026-10-04_baseline/`）。golden の比較を門にできると確かめた。
+- **実装**（`c657a3dd`）: 上流の表 `UMT5_SOURCES`（`google/umt5-xxl` @ `66cb9e7e`・apache-2.0・shard 1〜3 の sha256）、pin した行だけが開ける
+  `.bin` の読み口、tied な別名の規則、軸の 2 本化（`--upstream` = umT5・`--model` = Wan の text 側）、系列名 `umt5-xxl-i8-dyn`。
+- **検収 ✅**（証拠 `outputs/bench/karume-umt5-xxl/2026-10-04_stage-a/`・独立レビューが sha256 とテンソルを自分で計算し直して再現）:
+  - part 00002〜00026（重み）は旧系列と sha256 が 25 / 25 一致。
+  - part 00001 の差は 38 バイトで、モデル記述の `provenance.upstreamRevision` の値だけ（グラフ記述の sha256 は同じ）。
+  - golden 10 本の出力テンソル（48 本）はビット一致。メタの差は `container.part0Sha256` と新しく足した `axes` の 7 欄だけ。
+  - umT5 の dist の差は `NOTICE.md`・`README.md`・`karume.json`（`parts[0].sha256` と `descriptor.model.sha256` の 2 値）・part 1 本。Wan の dist の差は
+    越境参照の同じ 2 値と README・NOTICE の文面だけ。
+- **決定 2 の補足（レビューで直した点）**: 開いた shard を握り続けると file-backed のページが RSS に乗る（量子化の山 17.62 GiB）ので、読むたびに開いて
+  閉じる形にした（山 6.14 GiB・開く費用は 1 回 10〜19 ms）。sha256 の照合は構築時に握った記述子に対して行い、読みも同じ記述子から開く
+  （照合の後に path を差し替えても、照合した内容を読む）。同じ inode をその場で書き換えられる場合は塞げない（mmap で読む限り — docstring に明記）。
+  サブコマンドに効かない引数は、明示されたら拒む。
+- **残り**: 配布形ミラーの焼き直し（umT5 → Wan の順 — Wan の越境参照は umT5 の part 1 本目の sha256 を持つ）と、GPU での確認 1 回（umT5 の e2e と GPU 経路の
+  sha 行が既存の行のまま一致すること）。どちらも GPU の直列キューの後。その後に旧系列 `outputs/series/wan2.1-umt5-i8-dyn` を片付ける。
+- **起票（範囲外）**: 本家の索引（`pytorch_model.bin.index.json`）と `config.json` は sha256 で pin していない。索引が実物と食い違うと素の `KeyError` で落ちる
+  （値がすり替わる経路は無い）。

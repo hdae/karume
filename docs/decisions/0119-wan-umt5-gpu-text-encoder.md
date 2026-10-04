@@ -550,3 +550,9 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
   text 段と DiT 段は重ならない（決定 11 の裏付け）。umT5 の Session は submit 52 本・窓平均の最大 30.9 ms。
 - **検収表の 10c / 10d の行は ✅**（10d の残り: 視認〈自由プロンプト〉は利用者の素材の選定待ち・0120 段 6 の裁定の後にまとめて）。
 - 未解決の更新: 「text → DiT の切り替えの残り VRAM」は +0.08 GiB で閉じる。「Chrome の上限」「段 9 との重なり」は段 9 の実走待ち。
+
+## 追記（2026-10-04）: umT5 の出所は本家へ移った
+
+- 追記「段 10d の設計」D と「段 10d-1 / 10d-2 の結果」が書く「出所は Wan の `text_encoder`・本家 `google/umt5-xxl` との重みの同一は未確認」は、
+  [ADR 0122](0122-umt5-upstream-and-compatible-encoders.md) 決定 1 で置き換わった。本家の encoder は Wan 同梱の umT5 と f32 で全要素ビット一致と実測し、
+  `karume-umt5-xxl` の上流は本家の commit を名乗る。系列名は `umt5-xxl-i8-dyn`。重みの part と golden のテンソルは変わっていない（ADR 0122 追記「段 a の結果」）。
