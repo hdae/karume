@@ -560,7 +560,7 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
 ## 追記（2026-10-04）: 段 10d の残り — 視認の素材 24 本
 
 - umT5 の GPU 経路 + 実用席 `f16+dit8-a8-attn8-s16`・832×480・33 フレーム・50 ステップ・seed 42〜45 で 2 組を生成した（B570・非有限 0）。
-  - **自由プロンプト 12 本**（`outputs/verify/deno-intel-graphics-bmg-g21/2026-10-04_wan-visual-gpu-text-free/`・1 本 960〜968 s）: リポに記録する例は
+  - **自由プロンプト 12 本**（`outputs/verify/deno-intel-graphics-bmg-g21/2026-10-04_wan-visual-gpu-text-free/`・1 本 959〜975 s）: リポに記録する例は
     `anime-dancer`（"Anime style. A girl with long twin tails dances on a concert stage under colorful spotlights, full body shot, smooth motion."）と
     `retriever-beach`（"A golden retriever runs along the beach at sunset, waves splashing around its legs, slow motion, cinematic lighting."）。
     残りの 1 本は利用者が挙げた題材で、記録は `outputs/` だけに置く。
