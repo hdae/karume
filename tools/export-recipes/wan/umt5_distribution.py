@@ -14,6 +14,14 @@ quant 席を必須にする）。
 公開面は {@link PIPELINE} 1 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを
 core の PIPELINES へ合成する（`--pipeline umt5`）。
 
+第三者の互換 encoder の取り込み（`wan.umt5_intake` — ADR 0122 決定 5 / 6）は、ドライバが
+`--intake` を受けたときだけ {@link intake_pipeline} で組む**手元の実験用ミラー**で、
+`karume-umt5-xxl` を名乗らない（リポ名 {@link intake_repo_name}・既定の出力先は `models/` の外）。
+出所の門は記録 `intake.json` と容器の provenance を突き合わせ、ルートのファイル（LICENSE /
+NOTICE）とカードは記録から導く — 本家向けの Apache の `LICENSE.md` と「No retraining」の NOTICE は
+付けない。ライセンス未宣言の取り込みは明示（`--allow-undeclared-license`）が無ければ計画の時点
+（1 バイトも書く前）で落ちる。
+
 MUST: このモジュールは torch を import しない（`import dist` が torch を読まない —
 `tests/test_dist_driver.py` の `TestImportingTheDriver`）。書き手（`wan.umt5_export`）は torch を
 読むので、綴り（系列名・部品名・入力名・相対位置の表の属性名）はここに置き、書き手の綴りとの一致は
@@ -24,15 +32,17 @@ MUST: このモジュールは torch を import しない（`import dist` が to
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from _shared.container_read import ContainerReadError, read_layouts
-from _shared.licenses import apache_license_2_0
+from _shared.licenses import apache_license_2_0, cc_by_sa_4_0
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
+    LICENSE_FILENAME,
+    NOTICE_FILENAME,
     Artifact,
     DistError,
     ModelPlan,
@@ -54,6 +64,12 @@ from karume.modelcard import (
     require_pipeline,
 )
 from wan.sources import UMT5_SOURCES, Umt5Source
+from wan.umt5_intake import (
+    UNDECLARED_LICENSE,
+    Umt5Intake,
+    Umt5IntakeError,
+    assert_license_intent,
+)
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。読む TS の家族は無い — 部品の役を名乗る
 #: （ADR 0119 追記 D）。Wan の読み手は越境参照の先の `karume.json` を読まないので、この名前を
@@ -253,24 +269,30 @@ def umt5_context_width(container: Path) -> int:
     return shape[2]
 
 
-def assert_umt5_encoder(container: Path, model: str) -> int:
+def assert_umt5_encoder(container: Path, model: str, intake: Umt5Intake | None = None) -> int:
     """umT5 の容器の門（出所・束縛表・入出力の契約）を全部掛け、出力の幅を返す。
 
     Wan の配布形も同じ容器を越境参照する部品として持つので、両方の計画がこの 1 本を通る（Wan の
-    計画は格納の要求表で別に i8 の席も見る）。
+    計画は格納の要求表で別に i8 の席も見る）。出所の照合先は、本家の行（`wan.sources.
+    UMT5_SOURCES`）か、取り込みの記録 `intake`（本家の行に無いモデル — ADR 0122 決定 5）。
     """
-    upstream = UMT5_SOURCES.get(model)
-    if upstream is None:
-        raise DistError(
-            f"umT5 のモデル {model!r} は知らない（既知: {' / '.join(sorted(UMT5_SOURCES))}）—"
-            " 上流の出所の表（wan.sources.UMT5_SOURCES）に載ったモデルだけを配る"
-        )
+    if intake is None:
+        upstream = UMT5_SOURCES.get(model)
+        if upstream is None:
+            raise DistError(
+                f"umT5 のモデル {model!r} は知らない（既知: {' / '.join(sorted(UMT5_SOURCES))}）—"
+                " 上流の出所の表（wan.sources.UMT5_SOURCES）に載ったモデルだけを配る（第三者の"
+                " 取り込みは --intake で手元の実験用ミラーにだけ組める）"
+            )
+        license_id, revision = upstream.source.license, upstream.source.revision
+    else:
+        if model != intake.name:
+            raise DistError(f"モデル {model!r} が取り込みの名前 {intake.name!r} と違う")
+        license_id, revision = intake.license, intake.revision
     assert_component_present(container)
-    # 容器が名乗る出所を上流の pin（`wan.sources.UMT5_SOURCES` が正本）へ突き合わせる — 束縛表と
+    # 容器が名乗る出所を上流の pin（本家の表か取り込みの記録が正本）へ突き合わせる — 束縛表と
     # 入出力の形は同じ構造の別の checkpoint でも通るので、出所でしか閉じられない。
-    assert_upstream_provenance(
-        container, license=upstream.source.license, revision=upstream.source.revision
-    )
+    assert_upstream_provenance(container, license=license_id, revision=revision)
     assert_umt5_bindings(container)
     return umt5_context_width(container)
 
@@ -289,6 +311,11 @@ def umt5_plan(container: Path, model: str = UMT5_DEFAULT_MODEL) -> ModelPlan:
     """umT5-XXL encoder の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。"""
     assert_model_name(model)
     assert_umt5_encoder(container, model)
+    return _encoder_plan(container, model)
+
+
+def _encoder_plan(container: Path, model: str) -> ModelPlan:
+    """検査を済ませた容器の計画（本家の行と取り込みで同じ席・同じ quant 表）。"""
     return ModelPlan(
         name=model,
         pipeline=UMT5_PIPELINE,
@@ -534,3 +561,301 @@ PIPELINE = Pipeline(
         "NOTICE.md": UMT5_NOTICE_MARKDOWN,
     },
 )
+
+
+# ---------------------------------------------------------------------------
+# 取り込み由来の手元の実験用ミラー（ADR 0122 決定 5 / 6）
+# ---------------------------------------------------------------------------
+
+
+def intake_series_name(name: str) -> str:
+    """取り込み由来のモデルの系列（`umt5-xxl-<名前>-i8-dyn`）。書き手
+    （`wan.umt5_export.intake_input`）と組み立て（{@link intake_container}）が同じ綴りを引く。"""
+    return f"umt5-xxl-{name}-i8-dyn"
+
+
+def intake_container(series_dir: Path, name: str) -> Path:
+    """系列の親（`outputs/series/`）から取り込み由来の容器の代表 path を引く。"""
+    return series_dir / intake_series_name(name) / UMT5_ROLE / UMT5_MODEL_FILE
+
+
+def intake_repo_name(name: str) -> str:
+    """取り込み由来のモデルのリポ名（カードの綴り — `karume-umt5-xxl` を名乗らせない）。
+
+    公開の経路は無い（ADR 0122 決定 5 — 公開するなら命名の裁定が要る）ので、`karume-` を
+    付けず、手元の実験用であることを名前に出す。
+    """
+    return f"umt5-xxl-{name}-local"
+
+
+#: 宣言済みのライセンスで `LICENSE.md` に置ける逐語の本文（識別子 → 本文）。本文の無い識別子は
+#: 組み立ての前に落とす。MIT は著作権行（権利者）が要り、記録からは導けないので載せない。
+INTAKE_LICENSE_TEXTS: Mapping[str, Callable[[], str]] = {
+    "apache-2.0": apache_license_2_0,
+    "cc-by-sa-4.0": cc_by_sa_4_0,
+}
+
+#: 取り込み由来のミラーのカードの帰属プロファイル名（1 つだけ — 選ばせない）。
+INTAKE_CARD_PROFILE = "umt5-intake"
+
+
+def _intake_terms(intake: Umt5Intake) -> str:
+    """上流の宣言（ライセンス）の 1 文（NOTICE とカードが同じ事実を書く）。"""
+    if intake.undeclared:
+        return (
+            f"That repository declares no license (recorded as `{UNDECLARED_LICENSE}`), so the"
+            " terms of redistribution are unknown: this conversion is for local experiments only"
+            " and must not be redistributed."
+        )
+    return (
+        f"That repository declares the license `{intake.license}` (as of retrieval — a verbatim"
+        " copy is in `LICENSE.md`)."
+    )
+
+
+def _intake_base(intake: Umt5Intake) -> str:
+    if intake.base_model is None:
+        return "It declares no base model."
+    return "It declares the base model " + ", ".join(f"`{m}`" for m in intake.base_model) + "."
+
+
+def _intake_precision(intake: Umt5Intake) -> str:
+    """元の dtype の 1 文（丸めの出発点を偽らない — ADR 0122 決定 5）。"""
+    if intake.dtype == "BF16":
+        return (
+            "The upstream file stores bfloat16 values. They were widened to float32 without loss"
+            " before quantization, so the int8 rounding starts from the bfloat16 values."
+        )
+    return "The upstream file stores float32 values."
+
+
+def intake_notice(intake: Umt5Intake) -> str:
+    """取り込み由来のミラーの `NOTICE.md`（記録から導く — ADR 0122 決定 5）。
+
+    MUST: 上流は記録のリポ・revision だけを名乗る。本家向けの NOTICE（{@link
+    UMT5_NOTICE_MARKDOWN}）の「No retraining」や、Wan・Google を上流と名乗る文は書かない — 追加
+    学習は第三者が行ったもので、その上流は宣言されていない。
+    """
+    return "\n".join(
+        [
+            "# NOTICE",
+            "",
+            "This directory is a local experimental conversion and is not published. It holds a",
+            f"modified form of the file `{intake.file.name}` of the Hugging Face repository",
+            f"`{intake.repo}` at commit `{intake.revision}` (SHA-256 `{intake.file.sha256}`).",
+            f"{_intake_terms(intake)} {_intake_base(intake)}",
+            "",
+            "The following changes were made:",
+            "",
+            "- The weights were converted into the Karume container format (a `.krm` part",
+            "  sequence whose first part carries the graph and model descriptors).",
+            f"- {_intake_precision(intake)}",
+            "- **int8 weights**: the weight matrices of all linear layers and the vocabulary",
+            "  embedding were quantized to the nearest step of a symmetric int8 grid, with one",
+            "  float32 scale per output channel (per row for the embedding). The relative-position",
+            "  bias tables and the RMSNorm weights keep their float32 values. Computation runs in",
+            "  float32.",
+            "- The feed-forward activation `gelu_new` (the tanh approximation written out with a",
+            '  cube) was replaced by the equivalent `GELU(approximate="tanh")`. They are the same',
+            "  function and differ only in floating-point rounding.",
+            "- The graph runs on the valid tokens only: it takes the token ids and the",
+            "  relative-position bucket indices (computed on the host) as inputs and has no",
+            "  attention mask.",
+            "",
+            "The original file is not included here.",
+            "",
+        ]
+    )
+
+
+def intake_root_files(intake: Umt5Intake) -> dict[str, str]:
+    """取り込み由来のミラーのルートのファイル（記録から導く — ADR 0122 決定 5 / 6）。
+
+    宣言済みなら `LICENSE.md` はその識別子の逐語の本文（{@link INTAKE_LICENSE_TEXTS} に無ければ
+    fail loudly）。未宣言なら `LICENSE.md` を置かない（名乗れる本文が無い）。どちらも
+    `NOTICE.md` は {@link intake_notice}。
+    """
+    files = {NOTICE_FILENAME: intake_notice(intake)}
+    if intake.undeclared:
+        return files
+    text = INTAKE_LICENSE_TEXTS.get(intake.license)
+    if text is None:
+        raise DistError(
+            f"取り込み '{intake.name}' のライセンス {intake.license!r} の本文が無い"
+            f"（置ける本文: {sorted(INTAKE_LICENSE_TEXTS)}）— LICENSE.md を組めない"
+        )
+    return {LICENSE_FILENAME: text(), **files}
+
+
+def _intake_header(intake: Umt5Intake) -> list[str]:
+    """カードの冒頭（手元の実験用であることと、上流の宣言 — ADR 0122 決定 6）。"""
+    if intake.undeclared:
+        return [
+            "> **Local experimental conversion — do not redistribute.** The upstream repository",
+            f"> declares no license (recorded as `{UNDECLARED_LICENSE}`), so the terms of",
+            "> redistribution are unknown. This directory was built only to try the encoder",
+            "> locally and carries no `LICENSE.md`.",
+        ]
+    return [
+        "> **Local experimental conversion — not published.** Publishing a third-party encoder",
+        "> is a separate decision; this directory was built only to try the encoder locally.",
+    ]
+
+
+def _intake_overview(manifest: Mapping[str, Any], intake: Umt5Intake) -> list[str]:
+    return [
+        "## What is this",
+        "",
+        f"A third-party umT5-XXL-compatible text encoder (`{intake.name}`), converted into the",
+        "WebGPU inference runtime **Karume**'s container format with int8 weights. It keeps the",
+        "layout of the umT5-XXL encoder (`shared.weight` and `encoder.*`).",
+        "",
+        f"- One graph, `{UMT5_ROLE}`: the token ids `{UMT5_IDS_INPUT}` `[1, L]` and the",
+        f"  relative-position bucket indices `{UMT5_BUCKETS_INPUT}` `[L, L]` (both int32) in,",
+        "  the encoder's last hidden states `[1, L, d_model]` in float32 out.",
+        "- The tokenizer and the bucket indices are not part of this directory.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+def _intake_attribution(intake: Umt5Intake) -> list[str]:
+    repo = intake.repo
+    license_line = (
+        f"not declared by the upstream repository (`{UNDECLARED_LICENSE}`)."
+        if intake.undeclared
+        else f"declared `{intake.license}` (as of retrieval; a verbatim copy is in `LICENSE.md`)."
+    )
+    base_line = (
+        "not declared."
+        if intake.base_model is None
+        else "declared " + ", ".join(f"`{m}`" for m in intake.base_model) + "."
+    )
+    base_link = f"[{intake.config.base_repo}](https://huggingface.co/{intake.config.base_repo})"
+    config_lines = (
+        [
+            "- **Configuration**: assumed — the upstream has no `config.json`, so the",
+            f"  configuration of {base_link} at commit `{intake.config.base_revision}` was copied.",
+            "  The relative-position bucket settings cannot be derived from the weights; if the",
+            "  upstream was trained with other settings, nothing here detects it.",
+        ]
+        if intake.config_assumed
+        else [
+            "- **Configuration**: the upstream `config.json`, checked against",
+            f"  {base_link} at commit `{intake.config.base_revision}` (the same graph fields and",
+            "  relative-position buckets).",
+        ]
+    )
+    return [
+        "## Base weights and attribution",
+        "",
+        "Converted into the container format — the original file is not included here.",
+        "",
+        f"- **Weights**: the file `{intake.file.name}` of [{repo}](https://huggingface.co/{repo})",
+        f"  at commit `{intake.revision}` (SHA-256 `{intake.file.sha256}`), retrieved"
+        f" {intake.fetched_at}.",
+        f"- **License**: {license_line}",
+        f"- **Base model**: {base_line}",
+        f"- **Source precision**: {_intake_precision(intake)}",
+        *config_lines,
+        "- **Changes made here** (listed in full in `NOTICE.md`): conversion into the Karume",
+        "  container format; the weight matrices of the linear layers and the vocabulary",
+        "  embedding quantized to int8 with one scale per output channel (per row for the",
+        "  embedding), the relative-position bias tables and the RMSNorm weights kept in float32;",
+        '  `gelu_new` replaced by the equivalent `GELU(approximate="tanh")`; the graph runs on the',
+        "  valid tokens with the bucket indices as an input.",
+    ]
+
+
+def render_intake_model_card(
+    manifest: Mapping[str, Any],
+    repo: str,
+    host_assets: Mapping[str, int] = {},
+    *,
+    intake: Umt5Intake,
+) -> str:
+    """取り込み由来のミラーの `README.md`（記録から導く — 元の dtype・出所・構成の出所を書く）。
+
+    frontmatter の `license` は記録の値（未宣言なら印 `NOASSERTION` — 容器の provenance と同じ
+    綴り）。`base_model` は宣言されたときだけ書く。`repo` は受けるだけで使わない（公開しない）。
+    """
+    require_pipeline(manifest, UMT5_SUPPORTED_PIPELINE)
+    head = frontmatter(
+        CardMetadata(
+            pipeline_tag=UMT5_PIPELINE_TAG,
+            base_model=intake.base_model or (),
+            license=intake.license,
+            tags=(UMT5_PIPELINE_TAG, "text-encoder", "umt5", "local-experiment"),
+        )
+    )
+    if intake.base_model is None:
+        # 宣言の無いベースを空の `base_model:`（YAML の null）として名乗らない — 欄ごと外す。
+        head = [line for line in head if line != "base_model:"]
+    return render(
+        (
+            head,
+            ["", f"# umT5-XXL compatible text encoder `{intake.name}` (int8) — Karume", ""],
+            _intake_header(intake),
+            [""],
+            _intake_overview(manifest, intake),
+            [""],
+            _intake_attribution(intake),
+            [""],
+            models(manifest),
+            *model_sections(
+                manifest,
+                (partial(quants, host_assets=host_assets), _umt5_limits),
+            ),
+        )
+    )
+
+
+def intake_plan(
+    container: Path, intake: Umt5Intake, model: str, *, allow_undeclared_license: bool
+) -> ModelPlan:
+    """取り込み由来のモデルの計画（検査と読み取りをここで全部済ませる — 1 バイトも書く前）。
+
+    MUST: ライセンス未宣言の取り込みは、明示（`--allow-undeclared-license`）が無ければ
+    落とす（ADR 0122 決定 6 の 1）。容器の provenance は記録のライセンス（未宣言なら印）と
+    revision へ突き合わせる（{@link assert_umt5_encoder}）ので、印の容器は印の記録とだけ組める。
+    """
+    try:
+        assert_license_intent(intake, allowed=allow_undeclared_license)
+    except Umt5IntakeError as cause:
+        raise DistError(str(cause)) from cause
+    assert_model_name(model)
+    assert_umt5_encoder(container, model, intake)
+    return _encoder_plan(container, model)
+
+
+def _intake_dist_plan(
+    series_dir: Path, model: str, *, intake: Umt5Intake, allow_undeclared_license: bool
+) -> ModelPlan:
+    return intake_plan(
+        intake_container(series_dir, intake.name),
+        intake,
+        model,
+        allow_undeclared_license=allow_undeclared_license,
+    )
+
+
+def _intake_repo(_model: str, *, intake: Umt5Intake) -> str:
+    return intake_repo_name(intake.name)
+
+
+def intake_pipeline(intake: Umt5Intake, *, allow_undeclared_license: bool) -> Pipeline:
+    """取り込み 1 つぶんの `--pipeline umt5` の行（ドライバが `--intake` を受けたときだけ組む）。
+
+    ルートのファイルは記録から導く（{@link intake_root_files} — 本文の無いライセンスはここで
+    落ちる）。既定の出力先（`models/` の外）と、出力先が `models/` の下なら落とす門はドライバが
+    持つ。
+    """
+    return Pipeline(
+        default_model=intake.name,
+        repo_name=partial(_intake_repo, intake=intake),
+        plan=partial(
+            _intake_dist_plan, intake=intake, allow_undeclared_license=allow_undeclared_license
+        ),
+        card_profiles={INTAKE_CARD_PROFILE: partial(render_intake_model_card, intake=intake)},
+        root_files=intake_root_files(intake),
+    )

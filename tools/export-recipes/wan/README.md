@@ -383,6 +383,54 @@ both int32, one symbol `L`, one float32 output `[1, L, W]`). The repository root
 `GELU(approximate="tanh")`, valid tokens only; the upstream is float32 and bit-identical to the Wan
 checkpoint's `text_encoder`).
 
+### Third-party compatible encoders (ADR 0122 stage b)
+
+A third-party umT5-XXL-compatible encoder (for example a fine-tune published on Hugging Face) can be
+converted for local experiments. `wan/umt5_intake.py` takes one safetensors file from a pinned
+commit, checks its SHA-256 against the Hub API, and places it unchanged (same name, same bytes — no
+float32 copy) under `inputs/umt5/<name>/` together with `intake.json`, a machine-written record of the
+repository, commit, file SHA-256, source dtype (`BF16` or `F32`), declared license and base model, and
+where `config.json` came from (the upstream's own, checked against `google/umt5-xxl`, or a copy of
+`google/umt5-xxl`'s — the configuration is then assumed). It accepts safetensors only (never pickle),
+the encoder key set of the Wan `text_encoder` (the tied pair `shared.weight` /
+`encoder.embed_tokens.weight` counts once; both names must then be bit-identical), and one dtype for
+every tensor; FP8, mixed dtypes, the old key spelling and a config whose graph fields or
+relative-position buckets differ from `google/umt5-xxl` all fail. It records the license but does not
+judge it: when the repository declares none, or declares a value that names no terms (`unknown`,
+empty, `other` without a `license_name`), the record says `NOASSERTION`. Keep your own review of the
+terms in `license-review.md` next to the record. The intake directory must not resolve into `models/`
+(checked on real paths before the Hub API is called), and it must hold no weight file other than the
+recorded one (no other safetensors, pickle or `*.index.json`).
+
+```bash
+uv run --group wan --inexact python -m wan.umt5_intake --repo <owner/name> --revision <40-hex commit> \
+    --file <file>.safetensors --name <name>
+uv run --group wan --inexact python -m wan.umt5_export write --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
+uv run --group wan --inexact python -m wan.umt5_export reference --intake ../../inputs/umt5/<name>
+uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
+```
+
+The writer opens only the file the record names, checks its SHA-256 through the file descriptor it
+then reads from (an index next to it is never consulted, and replacing the file after the check does
+not change what is read), reads only the dtype the record names and widens bfloat16 to float32 as it
+reads (lossless), so the container is byte-identical to one written from the same values stored as
+float32; the series is `outputs/series/umt5-xxl-<name>-i8-dyn/` (host checks read only the series they
+list, so an intake series needs no entry in any tracked table). The `--upstream` path keeps accepting float32
+only. The mirror goes to `outputs/misc/local-dist/<name>/` by default and never into `models/`
+(whatever the license; the check compares real paths, so symlinks and `..` do not get around it). It
+does not use the name `karume-umt5-xxl`, and its root files come from the record: `LICENSE.md` is the
+verbatim text of a declared license (only licenses with a bundled text), `NOTICE.md` names the upstream
+repository and commit and the changes made here, and the card states the source dtype and the
+configuration origin — never the Apache license and "no retraining" notice of `karume-umt5-xxl`.
+
+When the upstream declares no license, `write` and `dist.py` stop before writing anything unless
+`--allow-undeclared-license` is given; the container's `provenance.license` then carries
+`NOASSERTION`, the mirror has no `LICENSE.md`, and the card opens with "do not redistribute".
+`tools/release/hf-upload.zsh upload` reads `provenance.license` from part 0 of every container before
+uploading and refuses `NOASSERTION` in any letter case, `unknown` and `none`, as well as a directory
+with no container at all, so a mirror copied or linked into `models/` by hand is stopped by its
+contents. There is no publishing path for third-party encoders here.
+
 ## Distribution (stage 7)
 
 `wan/distribution.py` assembles the series into the distribution `models/karume-wan2.1/` (ADR 0118

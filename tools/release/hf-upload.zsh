@@ -2,7 +2,7 @@
 # HF 配布リポのアップロードと断片化検証（docs/release-runbook.md §2 の台本）。
 #
 #     tools/release/hf-upload.zsh upload <repo-dir-name> [hf upload の追加引数…]
-#         models/<repo-dir-name> を hdae/<repo-dir-name> へ上げ、直後に全 safetensors / krm の断片化を検証する
+#         models/<repo-dir-name> を hdae/<repo-dir-name> へ上げ（前に全容器の出所を読み、ライセンス未宣言の印なら拒む）、直後に全 safetensors / krm の断片化を検証する
 #     tools/release/hf-upload.zsh check <repo-dir-name>
 #         公開済みリポの全 safetensors / krm について reconstruction の term 数を表にする（アップロードしない）
 #
@@ -110,6 +110,17 @@ case $MODE in
     exit ${pipestatus[1]}
     ;;
   upload)
+    # MUST: 上げる前に全容器（.krm の part 0）の provenance.license を読み、ライセンス未宣言の印
+    # （NOASSERTION — 大文字小文字の違いと unknown など再配布の条件を識別しない値を含む）があれば
+    # 1 バイトも上げずに落とす（ADR 0122 決定 6 の 3 — 置き場ではなく容器の中身で閉じる。手で
+    # models/ の下へ写した実験用ミラーや symlink も止まる）。shard-cache の退避や hf の起動より前に
+    # 置く。読めない part 0 と、容器が 1 本も無いディレクトリも落とす（検証できなかったものを合格に
+    # 見せない）。
+    deno run --no-config --allow-read "${SELF:h}/container_license.ts" "models/$NAME" 2>&1 | tee -a "$LOG"
+    if (( ${pipestatus[1]} != 0 )); then
+      echo "### FAILED 公開前の門: 容器の出所を確かめられない / 未宣言の印がある（models/$NAME）— 上げない" | tee -a "$LOG"
+      exit 1
+    fi
     export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE=1000000
     export HF_XET_DEDUPLICATION_MIN_N_CHUNKS_PER_RANGE_HYSTERESIS_FACTOR=1.0
     export HF_XET_DEDUPLICATION_NRANGES_IN_STREAMING_FRAGMENTATION_ESTIMATOR=1
