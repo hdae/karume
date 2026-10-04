@@ -7,22 +7,28 @@
 **3 根とも git 追跡しない**（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは
 作り方だけ）。
 
-| 根                                         | 中身                                                               | 例                                                             |
-| ------------------------------------------ | ------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `models/`                                  | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）   | `models/karume-anima/` / `models/karume-sbv2-jvnv/`            |
-| `outputs/series/`                          | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）       | `outputs/series/sbv2-F1-f16/`                                  |
-| `outputs/examples/<model>/`                | examples 台本の既定出力先（`<model>` = `--source` の basename）    | `outputs/examples/karume-sbv2-jvnv/*.wav`                      |
-| `outputs/bench/<model>/<日付>_<目的>/`     | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継） | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
-| `outputs/verify/<環境キー>/<日付>_<系列>/` | 検証の結果と実物（**消して安全** — `results.json` + PNG / WAV）    | `outputs/verify/deno-intel-graphics-bmg-g21/2026-09-20_anima/` |
-| `outputs/misc/<名前>/`                     | ホスト資産（**消すと再取得・再エミットが要る**）                   | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`             |
-| `outputs/release/`                         | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                | `outputs/release/upload-karume-siglip2.log`                    |
-| `inputs/<family>/<name>/`                  | 手置きの実重み（ckpt・config — 生成物ではない）                    | `inputs/sbv2/F1/`                                              |
-| `inputs/anima/civitai-<versionId>/`        | Civitai 取り込み（重み + `civitai.json` — ADR 0088）               | `inputs/anima/civitai-2983680/`                                |
+| 根                                         | 中身                                                                                                                                                    | 例                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `models/`                                  | **配布形だけ**（1 ディレクトリ = 1 HF リポ・そのまま上げられる）                                                                                        | `models/karume-anima/` / `models/karume-sbv2-jvnv/`            |
+| `outputs/series/`                          | exporter の系列出力（コンテナ + golden フィクスチャ `io.*`）                                                                                            | `outputs/series/sbv2-F1-f16/`                                  |
+| `outputs/examples/<model>/`                | examples 台本の既定出力先（`<model>` = `--source` の basename）                                                                                         | `outputs/examples/karume-sbv2-jvnv/*.wav`                      |
+| `outputs/bench/<model>/<日付>_<目的>/`     | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継）                                                                                      | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
+| `outputs/verify/<環境キー>/<日付>_<系列>/` | 検証の結果と実物（**消して安全** — `results.json` + PNG / WAV）                                                                                         | `outputs/verify/deno-intel-graphics-bmg-g21/2026-09-20_anima/` |
+| `outputs/misc/<名前>/`                     | ホスト資産（**消すと再取得・再エミットが要る**）                                                                                                        | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`             |
+| `outputs/release/`                         | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                                                                                                     | `outputs/release/upload-karume-siglip2.log`                    |
+| `inputs/<family>/<name>/`                  | 手置きの実重み（ckpt・config — 生成物ではない）                                                                                                         | `inputs/sbv2/F1/`                                              |
+| `inputs/anima/civitai-<versionId>/`        | Civitai 取り込み（重み + `civitai.json` — ADR 0088）                                                                                                    | `inputs/anima/civitai-2983680/`                                |
+| `inputs/umt5/<名前>/`                      | 互換 text encoder の取り込み（上流のファイルをそのまま + `config.json`・機械専有の `intake.json`・人が書く `license-review.md` だけ — ADR 0122 決定 5） | `inputs/umt5/community-ft/`                                    |
+| `outputs/misc/local-dist/<名前>/`          | 手元の実験用ミラー（取り込み由来・配布形と同じ形だが公開しない — `models/` の下は実 path で拒む・ADR 0122 決定 5 / 6）                                  | `outputs/misc/local-dist/community-ft/`                        |
 
 - 系列出力にはコンテナ以外の**ホスト側資産**も入る（グラフを持たない compile 生成物）—
   トークナイザは `<系列名>-tokenizer/tokenizer.json`（例
   `outputs/series/gemma4-e2b-tokenizer/`）、umT5 は `wan2.1-umt5-tokenizer/tokenizer.json`（語彙と前処理 promptClean の表を 1 本に — ADR 0119 段 10a）、anima のデモ用表は `anima-demo/text/`。export 系列の
   ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
+- Wan まわりの系列名: umT5 encoder は `umt5-xxl-i8-dyn`（出所の本家 `google/umt5-xxl` に合わせた名 — ADR
+  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 4。旧系列 `wan2.1-umt5-i8-dyn` は配布形ミラーの
+  焼き直しの後に片付ける）、取り込み由来は `umt5-xxl-<名前>-i8-dyn`、Wan2.2 TI2V-5B の DiT は
+  `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）。
 - gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
   製品容器 `krm` の**資産**として part 列の中に入る（ADR
   [0109](decisions/0109-manifest-v5-container.md) 決定 4）ので、系列ディレクトリに別ファイルを
@@ -72,6 +78,8 @@ uv run python dist.py --pipeline umt5                # → models/karume-umt5-xx
 uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA か仮の 40 桁の 0> \
     --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
                                                      # → models/karume-wan2.1/（text_encoder は越境参照）
+uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<名前> [--allow-undeclared-license]
+                                                     # → outputs/misc/local-dist/<名前>/（手元の実験用ミラー・リポ名 umt5-xxl-<名前>-local — ADR 0122）
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/
 uv run python dist.py --pipeline irodori \
     --model v4.1-small                               # → models/karume-irodori-v4.1-small/

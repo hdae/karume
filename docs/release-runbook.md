@@ -156,6 +156,15 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
       失敗した時点で非 0 終了し、アップロード後に `global_dedup_query_enabled = false` と
       CAS 照会 0 回を検査して不一致なら非 0 終了する。`check` は `models/<repo>` に
       `.krm` / `.safetensors` が 1 本も無ければ非 0 で落ちる（空表を「検証したが問題なし」として出さない）
+- [ ] **公開前の門（ライセンスの印 — ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 6）**:
+      `upload` は shard-cache の退避や hf の起動より前に `tools/release/container_license.ts`（deno が要る）で
+      `models/<repo>` の全容器（`.krm` の part 0）の `provenance.license` を読み、ライセンス未宣言の印
+      （`NOASSERTION` と、`unknown` など再配布の条件を識別しない値 — 大文字小文字を問わない）・読めない part 0・
+      容器が 1 本も無いディレクトリのどれかがあれば `### FAILED 公開前の門` を出して 1 バイトも上げずに非 0 で
+      終わる。置き場ではなく容器の中身で閉じるので、手で `models/` の下へ写した手元の実験用ミラー
+      （取り込み由来 — assets-layout）も止まる。**台本を通さない `hf upload` はこの門を通らない** — 手で打つときは
+      先に `deno run --no-config --allow-read tools/release/container_license.ts models/<repo>` を回して終了コード 0 を
+      確かめる
 - [ ] アップロード: `tools/release/hf-upload.zsh upload <repo>`（中身は
       `tools/.venv/bin/hf upload hdae/<repo> models/<repo> . --repo-type model` —
       `models/` は 1 ディレクトリ = 1 HF リポ — assets-layout。追加引数はそのまま hf へ渡る）
@@ -257,6 +266,13 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       test:models:wan` — 33 フレームと 81 フレームの 2 本で、B570 で約 30 分 + 約 2 時間 = 合計約 2.5 時間）が
       緑で、sha256 の行が一致すること（ADR 0118 決定 8 —
       既定のレーンは 2 ステップだけ）
+- [ ] **umT5 の系列は出所を本家へ移したもので組む**（ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)
+      決定 1 / 4・追記「段 a の結果」）: `karume-umt5-xxl` の容器は上流に本家 `google/umt5-xxl` の commit を名乗り、系列は
+      `outputs/series/umt5-xxl-i8-dyn`。旧系列 `wan2.1-umt5-i8-dyn`（Wan の `text_encoder` を名乗る）から組んだミラーは
+      上げない。系列を書き直す機では、先に本家の shard を pin した revision で取る:
+      `uv run --group wan python -m wan.sources --umt5 xxl --fetch`（約 29.8 GB・HF の既定キャッシュへ — encoder に要る
+      shard 1〜3 は表の sha256 と読む前に照合する）。NOTE: 本家の索引（`pytorch_model.bin.index.json`）と
+      `config.json` は sha256 で pin していない（backlog の起票）
 - [ ] **umT5 リポを先に上げる（Wan2.1 — §0 の越境参照の順序）**: `tools/export-recipes` で
       `uv run python dist.py --pipeline umt5`（`--out` は既定の `models/karume-umt5-xxl`）→ §2 の台本で
       `tools/release/hf-upload.zsh upload karume-umt5-xxl` → その main の SHA を §3 と同じ取り方で確定する

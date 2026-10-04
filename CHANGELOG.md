@@ -203,6 +203,20 @@ measurements in `docs/research/`.
   to fix the prompt); `"precomputed"` keeps the fixed-prompt embedding asset and does not fetch umT5.
   `WanPipelineOptions.signal` and `WanGenerateRequest.signal` cancel loading and generation (the signal's
   reason is thrown as is; the next `generate` works after a cancellation).
+- Exporter recipes: third-party umT5-compatible text encoders can be converted for local experiments
+  (ADR 0122). `python -m wan.umt5_intake --repo <owner/name> --revision <commit> --file <name>.safetensors
+  --name <name>` fetches the weights at a pinned revision, checks their sha256 and records them under
+  `inputs/umt5/<name>/` (`intake.json`, format `karume-umt5-intake/2`); `wan.umt5_export --intake` writes
+  the `umt5-xxl-<name>-i8-dyn` series (BF16 weights are widened to F32 on read), and `dist.py --pipeline
+  umt5 --intake` assembles a local mirror (`umt5-xxl-<name>-local`, default output
+  `outputs/misc/local-dist/<name>`; paths under `models/` are refused). Weights whose license is not
+  declared are recorded as `NOASSERTION` and need `--allow-undeclared-license`; the mirror then has no
+  `LICENSE.md`.
+- Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
+  container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
+  one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when
+  a part 0 cannot be read, or when the directory has no container. A direct `hf upload` bypasses this
+  check.
 
 ### Changed
 
@@ -262,8 +276,17 @@ measurements in `docs/research/`.
 - `karume-wan2.1`: the default quant is now `f16+dit8-a8-attn8-s16` (int8 transformer with int8
   activations, ADR 0120) instead of `f16`, so `WanPipeline` without `quant` runs it; pass
   `quant: "f16"` for the f16 transformer. On an Intel Arc B570 a 50-step, 33-frame clip took 952 s
-  instead of about 30 minutes. The gpu-lab Wan tab gains a quant choice, and its JSON is
-  `karume-wan-browser/3`.
+  instead of about 30 minutes, and an 81-frame clip 3,703 s instead of about 2 hours. The gpu-lab
+  Wan tab gains a quant choice, and its JSON is `karume-wan-browser/3`. `deno task demo:wan` gains
+  `--quant` (a key of the manifest's `quants`); the output directory names the quant after the
+  family, or `default` without it.
+- `karume-umt5-xxl` (not published yet): the containers now name the original `google/umt5-xxl`
+  commit as their upstream instead of the Wan2.1 checkpoint's `text_encoder` (its encoder weights
+  are bit-identical in float32, ADR 0122), and the exporter series is renamed from
+  `wan2.1-umt5-i8-dyn` to `umt5-xxl-i8-dyn`. The weight parts are byte-identical; only the first
+  part (the model descriptor's provenance) and, in `karume-wan2.1`, the cross-repository reference
+  to it change. `wan.umt5_export` selects the umT5 upstream with `--upstream` and the Wan text
+  snapshot with `--model`, and rejects an option the subcommand does not use.
 
 ### Fixed
 

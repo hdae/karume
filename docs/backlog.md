@@ -343,23 +343,35 @@ later の「decode 速度の残り」。
   この環境キーの sha 行は足さない裁定）/ 0120 段 6 ✅ → **ADR 0120 accepted**（実用席 `f16+dit8-a8-attn8-s16` は今の束で確定・**既定席 = 実用席**・
   `f16` は明示指定の参照側の席で、既存の sha 行・帯・case id は `f16` を明示して保つ — ADR 0120 裁定 / 追記 2026-10-04）/ gpu-lab の Wan タブに
   quant の選択・`demo:wan` に `--quant`。配布形ミラー `models/karume-wan2.1` は更新済み（`karume.json` の `defaultQuant` と README だけ・容器はバイト同一・ホストの検査は緑）。
-  残り: GPU の `test:models:wan`（ADR 0120 追記 2026-10-04「残りの作業」— GPU の直列キューの後）。**走行中（GPU の直列キュー・結果は各 ADR に追記）**: ADR 0119 の視認素材（umT5 の
-  GPU 経路 + 実用席・自由プロンプト 3 本と固定 3 本 × seed 42〜45）と、ADR 0120 の 50 ステップ opt-in の実用席の sha 行 2 本。
+  ADR 0120 の 50 ステップ opt-in の実用席の sha 行 2 本 ✅（`d5b3daa4`・B570・実用席の 81 フレームは壁 3,703 s = DiT 段 3,383 s + VAE 段 319 s・
+  DiT 段の VRAM の山 6.18 GiB — ADR 0120 追記「50 ステップの実用席の sha 行 2 本」）。残り: GPU の `test:models:wan`（ADR 0120 追記 2026-10-04「残りの作業」—
+  GPU の直列キューの後）。**走行中（GPU の直列キュー・結果は ADR に追記）**: ADR 0119 の視認素材（umT5 の GPU 経路 + 実用席・自由プロンプト 3 本と
+  固定 3 本 × seed 42〜45）。
   **Wan の小物（起票 2026-10-04）**: (a) Chrome での GPU 経路（umT5 を GPU で）と実用席の実走は未（gpu-lab の Wan タブの既定の経路は
-  `precomputed` のまま — 既定を `gpu` へ移すのも同じ確認の後）(b) モデルカード生成（`tools/export-recipes/wan/card.py`）に「ブラウザは未確認」の
-  文面が残る — 直すとカードの出力が変わるので次の焼き直しと一緒に (c) `tools/gpu-lab/README.md` の「Checking Wan in Chrome」節に RTX の結果が
-  入っていない (d) anima / irodori / sbv2 の例の出力名は席を省くと `default` で、既定席が変わると同じ名前に上書きされる。
+  `precomputed` のまま — 既定を `gpu` へ移すのも同じ確認の後）(b) ✅ モデルカード生成（`tools/export-recipes/wan/card.py`）の「ブラウザは未確認」と
+  実用席の 81 フレームの「not run」を実測へ直した（2026-10-04）— 配布形ミラーへの反映は次の焼き直しで (c) ✅ `tools/gpu-lab/README.md` の
+  「Checking Wan in Chrome」節に RTX の結果を足した (d) anima / irodori / sbv2 の例の出力名は席を省くと `default` で、既定席が変わると同じ名前に上書きされる。
 - **Wan2.2 TI2V-5B の受け入れ（次の波・起票 2026-10-04・ADR [0121](decisions/0121-wan22-ti2v-5b.md) accepted）**: 参照席 `f16+dit8` /
   実用席 `f16+dit8-a8-attn8-s16` の 2 席・I2V 対応の DiT グラフ 1 本・VAE 2.2 のタイル decode・段 0〜10。MiniMax H3 はこの後。
   **裁定（2026-10-04・利用者）**: 受理する解像度とフレーム数は開発機で回せる範囲で作って試す（1280×704 を 33 フレームまで / 832×480 を 81 フレームまで
   の配分は確認中 — 段 0 / 1 は配分に依らない）・f16 席は今は作らない・I2V の縦横比はまず公式の挙動（覆う側へリサイズして中央クロップ）。
-  **進捗**: 段 0（取得口・RAM 実測・層逐次の f64 参照）を実装中。
+  **裁定 1 の確定（2026-10-04）**: 2 つの配分を両方受理して試す（832×480 系を 81 フレームまで・1280×704 系を 33 フレームまで — ADR 0121 追記）。
+  **進捗（2026-10-04）**: 段 0 ✅（取得口・5B の RAM 実測・層逐次の f64 / f32 参照 `59367d44`）/ 段 1 ✅（I2V 対応の DiT パッチ・5B の i8 系列
+  `wan2.2-ti2v-5b-i8-dyn`・S = 192 の golden 10 本・`export_dit --check` `25b6962a`。golden の文脈は実プロンプトの埋め込み — 合成の乱数は f32 と f64 の差を
+  増幅する）/ 段 2 を実装中。CPU で走行中: f32 の全量での eager 同値（`ti2v_export_dit eager-full`・約 21 GiB）・実寸 2 形の全層・段 1 のコードでの
+  1.3B の系列の照合。段 2 の GPU の実走は GPU の直列キューの後。
   **後で足す（起票 2026-10-04・利用者）**: (a) TI2V-5B の f16 席 — 開発機で動かなくても重みは用意しておきたい（材料: f16 の export は RAM の境界か
   exporter core の変更が要る・開発機では門も sha 行も持てない — ADR 0121 決定 7 / 裁定 2）(b) I2V の縦横比を選べる口（直接リサイズ — diffusers の
   挙動 — を選べるように・口の形は段 9）。
-  **関連（proposed・利用者の承認待ち）**: ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)（umT5 の出所を本家 google/umt5-xxl へ・
-  互換の text encoder を作る経路・差し替えは今の components 席のまま・段 a〜d）。調査の結論は「本家の encoder は Wan 同梱の umT5 と f32 で全要素
-  ビット一致」。段 a は `karume-umt5-xxl` の part 0 の sha256 を変えるので、0121 の配布形より先に済ませる（ADR 0122 Consequences）。
+  **関連（accepted・裁定 2026-10-04）**: ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)（umT5 の出所を本家 google/umt5-xxl へ・
+  互換の text encoder を作る経路・差し替えは今の components 席のまま・段 a〜d）。段 a ✅（`c657a3dd` — 系列 `umt5-xxl-i8-dyn`・重みの part は 25 / 25 不変・
+  golden はビット一致）/ 段 b ✅（`ca38d638`・`6cdad993` — 取り込みの口・手元の実験用ミラー・公開前の門）/ 段 c の CPU 部分 ✅（追加学習版のグラフ記述の
+  sha256 が本家と同一）。**残り（GPU の直列キューの後）**: 配布形ミラーの焼き直し（umT5 → Wan の順 — Wan の越境参照は umT5 の part 1 本目の sha256 を
+  持つ・カードの出力の変更もここで反映）→ GPU の wan レーン（umT5 の e2e と GPU 経路の sha 行が既存のまま一致すること）→ 段 c の GPU 部分 → 旧系列
+  `wan2.1-umt5-i8-dyn` の片付け。その後に段 d。
+  **umT5 / Wan2.2 の小物（起票 2026-10-04）**: (a) 本家の索引（`pytorch_model.bin.index.json`）と `config.json` を sha256 で pin していない（索引が実物と
+  食い違うと素の `KeyError` で落ちる — 値がすり替わる経路は無い・ADR 0122 追記「段 a の結果」）(b) umT5 の `write --check` が系列の中に一時ディレクトリを
+  開く（`.check-*`）— プロセスが強制終了されると残る (c) `ContainerDitWeights`（容器から DiT の重みを読む層逐次の口）の読み込みが 1 forward あたり 25 s かかる。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
   劣化機序 — いずれも「試してダメ」ではなく「試していない」）だけで、正本は
