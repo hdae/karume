@@ -17,6 +17,16 @@
  * `text_encoder` が越境参照する）なので、その手元のミラーを `--umt5-source`（既定 `models/karume-umt5-xxl`）で
  * 指し、hub の取得元の `crossRepo` の mapping で渡す（隣のディレクトリを推測しない — hub の `local.ts`）。
  *
+ * `--swap-text-encoder` は umT5 を互換の別の配布形へ差し替える（`fromPretrained` の
+ * `components: { text_encoder: { source } }` — ADR 0122 決定 7）。差し替え先は手元の配布形
+ * （`karume.json` を持つディレクトリ — 例: 取り込みから組んだ実験用ミラー）か、`owner/name@<40 桁の commit>`
+ * の HF のリポ（`{ repo, revision }` へ写す）。素のリポ名は受けない — 文字列の取得元は main 追従になり、
+ * 元の配布形の pin が消える。差し替えた席は差し替え先から読むので、元の umT5 の手元のミラー
+ * （`--umt5-source`）は要らない（渡すと効かないので落とす）。`--text-encoder precomputed` との組み合わせも
+ * 落とす（umT5 を読まない経路では差し替えが黙って効かない）。model / quant は差し替え先の manifest の既定。
+ *
+ *     deno task demo:wan --swap-text-encoder outputs/misc/local-dist/<名前> --prompt boxing-cats
+ *
  * 席は `--quant`（manifest の quants のキー — 省略時は manifest の `defaultQuant`）。そのまま `fromPretrained` へ
  * 渡し（綴りの検証は hub に任せる）、出力先の名前に入れる（省略時は `default` — 他の例の CLI と同じ流儀）。
  *
@@ -27,7 +37,13 @@
  * パイプラインが `ModelInputError` で落とす）。
  */
 
-import { parseManifest, resolveSelection } from "../../packages/hub/mod.ts";
+import {
+  type DistributionSource,
+  type HubRepoRef,
+  parseManifest,
+  resolveSelection,
+} from "../../packages/hub/mod.ts";
+import { denoDirectory } from "../../packages/hub/deno.ts";
 import { encodePng } from "../../packages/models/mod.ts";
 import { wanFrameToRgba, WanPipeline } from "../../packages/models/wan.ts";
 import { runMain } from "../shared/run-main.ts";
@@ -35,13 +51,15 @@ import { distributionSource } from "../shared/local-source.ts";
 import { isLocalDist } from "../shared/local-assets.ts";
 
 const USAGE = "--source <パス|HF repo> --umt5-source <パス> --quant <名前>" +
-  " --text-encoder <gpu|precomputed> --prompt <名前|文字列> --negative <名前|文字列>" +
+  " --text-encoder <gpu|precomputed> --swap-text-encoder <パス|owner/name@<commit>>" +
+  " --prompt <名前|文字列> --negative <名前|文字列>" +
   " --seed <整数> --steps <整数> --frames <整数> --guidance <数> --shift <数> --size <WxH> --out <dir>";
 const KNOWN = new Set([
   "source",
   "umt5-source",
   "quant",
   "text-encoder",
+  "swap-text-encoder",
   "prompt",
   "negative",
   "seed",
@@ -84,6 +102,14 @@ if (textEncoderArg !== undefined && textEncoderArg !== "gpu" && textEncoderArg !
 }
 /** 経路（未指定はパイプラインの既定と同じ `gpu` — 出力先の名前に入れるので値で持つ）。 */
 const textEncoder = textEncoderArg ?? "gpu";
+/** umT5 の差し替え先の綴り（未指定は差し替えない）。 */
+const swapArg = args.get("swap-text-encoder");
+// MUST: umT5 を読まない経路での差し替えは落とす（黙って効かないノブを残さない）。
+if (swapArg !== undefined && textEncoder === "precomputed") {
+  throw new Error(
+    `--swap-text-encoder ${swapArg} は --text-encoder precomputed では効かない（umT5 を読まない経路）`,
+  );
+}
 /** 席の指定（未指定は manifest の既定）。 */
 const quantArg = args.get("quant");
 const promptArg = args.get("prompt") ?? "boxing-cats";
@@ -137,11 +163,16 @@ const resolveSource = async () => {
     if (umt5Arg !== undefined) throw ineffective(`--source ${source} は HF リポ名`);
     return { from: await distributionSource(source), label: source };
   }
-  const repo = textEncoder === "gpu" ? await textEncoderRepo(source) : undefined;
+  // 差し替えた席は差し替え先から読み、元の越境参照を引かない — 越境先の mapping は要らない。
+  const repo = textEncoder === "gpu" && swapArg === undefined
+    ? await textEncoderRepo(source)
+    : undefined;
   if (repo === undefined) {
     if (umt5Arg !== undefined) {
       throw ineffective(
-        textEncoder === "gpu"
+        swapArg !== undefined
+          ? `--swap-text-encoder ${swapArg} が umT5 を差し替える`
+          : textEncoder === "gpu"
           ? `${source} の umT5 は越境参照でない`
           : "--text-encoder precomputed は umT5 を読まない",
       );
@@ -161,6 +192,32 @@ const resolveSource = async () => {
   };
 };
 
+/** HF の差し替え先の綴り（`owner/name@<40 桁の commit>` — revision は必須）。 */
+const PINNED_REPO = /^([^@\s]+)@([0-9a-f]{40})$/;
+
+/**
+ * `--swap-text-encoder` を差し替え先の取得元へ写す（未指定は undefined）。手元の配布形は
+ * `denoDirectory`、それ以外は `owner/name@<commit>` を `{ repo, revision }` にする。
+ *
+ * MUST: 素のリポ名（`owner/name`）は落とす — 文字列の取得元は main 追従になり（`fromPretrained` の
+ * `ref` と同じ読み）、元の配布形が越境参照で pin していた umT5 の版が差し替えで黙って動く。
+ */
+const resolveSwap = async (): Promise<
+  { readonly source: DistributionSource | HubRepoRef; readonly label: string } | undefined
+> => {
+  if (swapArg === undefined) return undefined;
+  if (await isLocalDist(swapArg)) return { source: denoDirectory(swapArg), label: swapArg };
+  const pinned = PINNED_REPO.exec(swapArg);
+  if (pinned === null) {
+    throw new Error(
+      `--swap-text-encoder ${swapArg} が karume.json を持つディレクトリでも owner/name@<40 桁の commit> でもない` +
+        `（HF のリポは commit で pin する — 素のリポ名は main 追従になり、元の配布形の pin が消える）` +
+        `（使い方: ${USAGE}）`,
+    );
+  }
+  return { source: { repo: pinned[1], revision: pinned[2] }, label: swapArg };
+};
+
 /**
  * 台本の本体。MUST: `await using` はこの中に置く（`shared/run-main.ts` — 本体と解放が両方投げたときの
  * `SuppressedError` を展開するため）。
@@ -173,15 +230,20 @@ const sha256Hex = async (text: string): Promise<string> =>
   ).join("");
 
 const main = async (): Promise<void> => {
+  // 差し替え先の綴りの誤りを先に見せる（Wan のミラーが無い機で、ミラー不在のエラーに隠さない）。
+  const swap = await resolveSwap();
   const { from, label } = await resolveSource();
+  /** 出力先の名前に入れる経路（差し替えた回は元の umT5 の回と別のディレクトリにする）。 */
+  const route = swap === undefined ? textEncoder : "gpu-swap";
   console.log(
-    `[wan] source: ${label}・quant: ${
-      quantArg ?? "（manifest の既定）"
-    }・text encoder: ${textEncoder}`,
+    `[wan] source: ${label}・quant: ${quantArg ?? "（manifest の既定）"}・text encoder: ${
+      swap === undefined ? textEncoder : `${textEncoder}（差し替え: ${swap.label}）`
+    }`,
   );
   await using pipeline = await WanPipeline.fromPretrained(from, {
     ...(quantArg === undefined ? {} : { quant: quantArg }),
     textEncoder,
+    ...(swap === undefined ? {} : { components: { text_encoder: { source: swap.source } } }),
   });
 
   // 資産の名前ならその原文、それ以外は渡した文字列そのもの（受理はパイプラインの門が決める — 経路ごと）。
@@ -225,7 +287,7 @@ const main = async (): Promise<void> => {
   Deno.stderr.writeSync(encoder.encode("\n"));
   if (ranSteps === undefined) throw new Error("denoise-step のイベントが 1 度も来なかった");
   // NOTE: guidance / shift / negative は名前に入らない — 変えて比べるときは --out で分ける。
-  const outDir = `${outRoot}/wan-${quantArg ?? "default"}-${promptLabel}-${textEncoder}` +
+  const outDir = `${outRoot}/wan-${quantArg ?? "default"}-${promptLabel}-${route}` +
     `-${video.width}x${video.height}-${video.frames}f-${ranSteps}step-seed${seed}`;
   await Deno.mkdir(outDir, { recursive: true });
   for (let frame = 0; frame < video.frames; frame += 1) {

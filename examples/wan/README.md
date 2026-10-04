@@ -72,6 +72,50 @@ any other string (passed as is; the `precomputed` route rejects it with the list
 Without `--negative` the pipeline uses the official `sample_neg_prompt` on either route. The full
 prompt texts are in the asset's metadata and in `pipeline.prompts`.
 
+## Swapping the text encoder
+
+`--swap-text-encoder` replaces umT5 with a compatible encoder from another distribution, for example
+a local experiment mirror built from a third-party fine-tune (the intake and conversion steps are in
+[tools/export-recipes/wan/README.md](../../tools/export-recipes/wan/README.md#third-party-compatible-encoders-adr-0122-stage-b)):
+
+```
+deno task demo:wan --swap-text-encoder outputs/misc/local-dist/<name> --prompt boxing-cats
+deno task demo:wan --swap-text-encoder your-name/your-umt5-encoder@<40-hex commit> --prompt boxing-cats
+```
+
+The flag takes either a local distribution (a directory with `karume.json`) or a Hugging Face
+repository with a commit, and the script passes it to `fromPretrained` as the component swap seat.
+In code it is the same one option:
+
+```ts
+const pipeline = await WanPipeline.fromPretrained(wanSource, {
+  components: {
+    text_encoder: { source: { repo: "your-name/your-umt5-encoder", revision: "<40-hex commit>" } },
+  },
+});
+```
+
+- **Pin the replacement.** A Hugging Face source must be `{ repo, revision }` with a commit. A bare
+  repository name (a string `source`) follows `main`, so the umT5 version that the Wan manifest pins
+  through its cross-repository reference would silently move with every push to the replacement.
+  The script therefore rejects `owner/name` without `@<commit>`, and also a branch name after `@`.
+- **The swap needs the GPU text encoder.** With `--text-encoder precomputed` (`textEncoder:
+  "precomputed"`) umT5 is never loaded, so a swap would have no effect; the script rejects the
+  combination instead of ignoring the flag.
+- **What is accepted.** The replacement is admitted only if its graph description has the same
+  SHA-256 as the one the Wan manifest declares for `text_encoder`, its binding table has no missing
+  or extra weights, and the Wan pipeline accepts its storage (int8 weights and float32 tables only —
+  an int4 or f16 umT5 is refused). All of this is checked before any weight is downloaded. The
+  model and quant are the replacement manifest's defaults (`model` and `quant` next to `source`
+  pick others in code).
+- **What is not swapped or checked.** The tokenizer and the prompt cleaning still come from the
+  Wan distribution, and nothing checks that the replacement was trained with the same tokenizer or
+  the same relative-position buckets, or under which license it may be used. See
+  [docs/limitations.md](../../docs/limitations.md) for what each of these means for the output.
+- **No umT5 mirror needed.** The swapped part is read from the replacement only, so a local Wan
+  distribution does not need `models/karume-umt5-xxl` or `--umt5-source` (the script rejects
+  `--umt5-source` together with a swap).
+
 ## Knobs
 
 Every flag that is left out falls back to the pipeline default. Steps, guidance and flow shift come
@@ -95,9 +139,10 @@ Frames go to
 `outputs/examples/wan2.1-t2v-1.3b/wan-<quant>-<prompt>-<route>-<W>x<H>-<frames>f-<steps>step-seed<seed>/frame-NN.png`
 (`--out` changes the root). `<quant>` is the `--quant` value, or `default` without it.
 `<prompt>` is the asset name, or `prompt-` and the first eight hex
-digits of the prompt's SHA-256 for any other string; `<route>` is `gpu` or `precomputed`. `<steps>`
-is the step count the run used, so a run without `--steps` is named after the distribution's
-default. Guidance, flow shift and the negative prompt
+digits of the prompt's SHA-256 for any other string; `<route>` is `gpu`, `precomputed`, or
+`gpu-swap` with `--swap-text-encoder` (runs with different replacements share it, so give each its
+own `--out`). `<steps>` is the step count the run used, so a run without `--steps` is named after
+the distribution's default. Guidance, flow shift and the negative prompt
 are not part of the name: runs that differ only in those write to the same directory and overwrite
 each other's frames, so give each one its own `--out`. The 8-bit conversion is `wanFrameToRgba`,
 the same rule the reference hashes use.
