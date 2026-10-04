@@ -462,3 +462,21 @@ ADR 0118 の段 9（Chrome）・段 10（umT5 を GPU で）とは依存しな�
      i8 の transformer の part を見るようになる）・融合ヒット数 `assets_fusion_counts_test.ts`（`f16` を明示しているので値は不変）。
   3. GPU のレーン: `deno task test:models:wan` で、席名を持たない既存の行が `f16` の明示で一致すること（帯・故障注入・sha 行）。
      50 ステップの opt-in（`KARUME_WAN_FULL_PIPELINE=1`）は実用席の行 2 本を作る作業（裁定 2026-10-04 の 3）と同じ走行でよい。
+
+## 追記（2026-10-04）: 50 ステップの実用席の sha 行 2 本
+
+- `KARUME_WAN_FULL_PIPELINE=1 KARUME_REFERENCE=write` で opt-in の 4 ケースを回した（B570・1 passed / 4 steps・228 分 55 秒・非有限 0・
+  device lost なし）。`f16` 席の 2 本は既存の行と一致し、実用席の行 2 本を作った（`fixtures/references/wan.json`）:
+  `f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42`（33 フレーム）と `f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42-81f`。
+- 所要と資源（壁 = DiT 段 + VAE 段）:
+
+  | ケース     |      壁 |  DiT 段 | VAE 段 | DiT 段の VRAM の山 | 1 submit の窓平均の最大 |
+  | ---------- | ------: | ------: | -----: | -----------------: | ----------------------: |
+  | `f16`・81  | 7,178 s | 6,861 s |  316 s |           6.87 GiB |                268.7 ms |
+  | 実用席・81 | 3,703 s | 3,383 s |  319 s |           6.18 GiB |                152.7 ms |
+  | `f16`・33  | 1,835 s | 1,698 s |  136 s |           5.72 GiB |                113.5 ms |
+  | 実用席・33 |   988 s |   852 s |  135 s |           4.57 GiB |                 48.4 ms |
+
+  実用席は 81 フレームでも DiT 段が `f16` の約半分（×0.49）で、VAE 段は席に依らない。予算超過のチャンクは 4 本とも 0。
+- 残り: モデルカードと README 類の「実用席の 81 フレームは未計測」の記述を、この値（約 62 分）へ直す（カードの出力が変わるので、
+  配布形ミラーの次の焼き直しと一緒に行う）。

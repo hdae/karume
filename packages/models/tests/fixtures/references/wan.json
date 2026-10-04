@@ -26,6 +26,12 @@
     "f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42": {
       "deno-intel-graphics-bmg-g21": "b34c0e92cf567e3268f7d1cfc6987e3a4bd4c5e4c3a246fd7fdf27a8cc976db2"
     },
+    "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42": {
+      "deno-intel-graphics-bmg-g21": "ba9bc354979658d3ad72b3243ffa8b25b3fe0f4da3047d1f71d57a573a388b1a"
+    },
+    "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42-81f": {
+      "deno-intel-graphics-bmg-g21": "c841c9d0825d6ca15fb1a6ac5f0cc25be78c2c2eeb354097ad752f21dd3cbd3c"
+    },
     "gpu-text-2step-boxing-cats-seed42": {
       "deno-intel-graphics-bmg-g21": "eca8ef514cf0e75b865c2f86bb351fb40452c704a8859ebc1e2253a7d4fbfa60"
     },
