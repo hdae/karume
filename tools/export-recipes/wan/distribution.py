@@ -20,9 +20,9 @@
 
 **リポは家族 1 つ・世代は別リポ**（`karume-wan2.1` — ADR 0092 決定 1 / 2）。モデルは世代の中の
 軸で、今は `t2v-1.3b` 1 本。quant 席は 3 つ（{@link WAN_QUANTS}）: `f16`（DiT と VAE の重みを
-f16 格納・活性 f32 — ADR 0118 決定 7・明示の指定で使う元の重みにいちばん近い席）と、DiT の重みを i8 に
-した参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（ADR 0120 決定 1）。既定は実用席（ADR 0120
-裁定 2026-10-04 の 4 — {@link WAN_DEFAULT_QUANT}）。
+f16 格納・活性 f32 — ADR 0118 決定 7・明示の指定で使う元の重みにいちばん近い席）と、DiT の重みを
+i8 にした参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（ADR 0120 決定 1）。既定は実用席
+（ADR 0120 裁定 2026-10-04 の 4 — {@link WAN_DEFAULT_QUANT}）。
 
 公開面は {@link PIPELINE} 1 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを
 core の PIPELINES へ合成する。
@@ -261,10 +261,11 @@ WAN_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": WAN_TRANSFORMER_ROLE}
 #:   テストの manifest 上書きで足りる）。
 #:
 #: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。速度と
-#: 品質は書かない — a8 の席の速度は B570 の実測（1 forward で −50% — ADR 0120 段 4）しか無く、Metal では
-#: a8 が速くならない（調査 §3.1）ので、GPU を問わない表示欄には書けない。品質（段 6 の視認で `f16` と比べて
-#: 明確な劣化なし — ADR 0120 裁定 2026-10-04 の 1）と席ごとの所要は、カード（`wan/card.py`）が席を名乗って
-#: 書く。既定であることも書かない（`defaultQuant` が指している — ADR 0075 決定 3）。
+#: 品質は書かない — a8 の席の速度は B570 の実測（1 forward で −50% — ADR 0120 段 4）しか無く、
+#: Metal では a8 が速くならない（調査 §3.1）ので、GPU を問わない表示欄には書けない。品質（段 6 の
+#: 視認で `f16` と比べて明確な劣化なし — ADR 0120 裁定 2026-10-04 の 1）と席ごとの所要は、カード
+#: （`wan/card.py`）が席を名乗って書く。既定であることも書かない（`defaultQuant` が指している —
+#: ADR 0075 決定 3）。
 WAN_QUANTS: Mapping[str, Any] = {
     "f16": {
         "weights": {WAN_TRANSFORMER_ROLE: "f16"},
@@ -293,7 +294,8 @@ WAN_QUANTS: Mapping[str, Any] = {
     },
 }
 #: 既定席は実用席（ADR 0120 裁定 2026-10-04 の 4 — 既定は今いちばん実用的な席: 軽く、品質の劣化が
-#: 小さい。段 6 の視認で `f16` と比べて明確な劣化は無かった）。`f16` 席は明示の指定で使う参照側の席。
+#: 小さい。段 6 の視認で `f16` と比べて明確な劣化は無かった）。`f16` 席は明示の指定で使う参照側の
+#: 席。
 WAN_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 
 #: パイプライン所有の設定（hub は素通し — ADR 0041 §2・TS 側のスキーマは

@@ -353,8 +353,9 @@ class TestLayout:
 
     def test_the_manifest_declares_the_three_seats_and_the_model_assets(self, assembled) -> None:
         """quant 席は `f16`・参照席 `f16+dit8`・実用席 `f16+dit8-a8-attn8-s16`（既定）の 3 つ
-        （ADR 0120 決定 1・裁定 2026-10-04 の 4）で、どの席も text_encoder の i8 を選ぶ（weights は完全写像 — ADR 0119
-        追記 B）。資産はモデル単位の `text_embeds` と `umt5_tokenizer`（quant 非依存 — 同 C）。"""
+        （ADR 0120 決定 1・裁定 2026-10-04 の 4）で、どの席も text_encoder の i8 を選ぶ（weights は
+        完全写像 — ADR 0119 追記 B）。資産はモデル単位の `text_embeds` と `umt5_tokenizer`
+        （quant 非依存 — 同 C）。"""
         _, manifest = assembled
         model = _model(manifest)
         assert manifest["defaultModel"] == DEFAULT_MODEL
