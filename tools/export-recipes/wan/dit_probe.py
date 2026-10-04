@@ -5,6 +5,8 @@
     uv run --group wan --inexact python -m wan.dit_probe eager       # eager 同値の門
     uv run --group wan --inexact python -m wan.dit_probe reference   # 層逐次の参照（S = 192）
     uv run --group wan --inexact python -m wan.dit_probe reference --latent 21,30,52  # 8,190
+    uv run --group wan --inexact python -m wan.dit_probe reference --latent 21,30,52 \
+        --text boxing-cats --timestep 500 --growth   # f32 と f64 の差の切り分け（段 1）
 
 どのサブコマンドも段ごとの壁時間と RSS（`wan.umt5_export.MemoryMonitor` — `/proc` の 1 秒ごとの
 標本と段ごとの VmHWM）を JSON で出し、同じものを `--out`（既定 {@link default_out} —
@@ -12,10 +14,11 @@
 （`outputs/series/`）には何も書かない。`reference` は同じ置き場の `eager` の結果と
 突き合わせるので、日をまたぐときは両方に同じ `--out` を渡す。
 
-段 0 の時点の DiT のパッチは Wan2.1 と同じ形（時刻入力 1 本 — `dit_patch.WanDitTokens`）で、5B の
-構成はその前提の門（`image_dim` / `added_kv_proj_dim` が None）を通る。I2V 対応のグラフ（時刻入力
-2 本・条件マスク — ADR 0121 決定 3）は段 1 で、グラフは linear のノードが 3 本増えるだけの見込み
-なので、RAM の形はここで測った値で読める。
+`prepare` / `eager` の DiT のパッチは段 0 のまま Wan2.1 と同じ形（時刻入力 1 本 —
+`dit_patch.WanDitTokens`）で、5B の構成はその前提の門（`image_dim` / `added_kv_proj_dim` が None）を
+通る。製品の I2V 対応のグラフ（時刻入力 2 本・条件マスク — ADR 0121 決定 3）は段 1 の
+`wan.ti2v_export_dit` が `prepare` に自前の trace（`tracer=`）を渡して書く。グラフは linear の
+ノードが 3 本増えるだけ（段 1 の IR の検査で 310）なので、RAM の形はここで測った値で読める。
 
 ## prepare（meta trace + 行の塊ごとの i8 + `fixed_weights` — ADR 0119 段 10b の形）
 
@@ -52,6 +55,25 @@ checkpoint から 1 本ずつ読んで i8 の fake-quant を掛ける読み口
 同じずれの番地で回す（`dit_reference.upstream_alignment`）。`eager` の結果が `--out` にあれば、
 f32 は上流の f32 の参照と、f64 は eager の層逐次の f64 とビットで比べる（同じケースのときだけ）。
 
+### CPU f32 と f64 の差の切り分け（ADR 0121 段 0 の要調査 → 段 1）
+
+S = 8,190 の合成の入力で f32 と f64 の出力の比が 1.2e-1 だった（S = 192 は 5.3e-4）。原因を
+切り分ける口:
+
+- `--text <名前>`: text の入力を合成の乱数 `[有効長, 4096]` から、Wan2.1 の事前計算の埋め込み
+  資産（同じ umT5 の出力 — `wan.text_embeds`）の 1 本に替える。潜在は同じ seed の同じ乱数（乱数は
+  潜在を先に引く）なので、差は text だけ。
+- `--timestep <t>`: t = 999 以外。
+- `--growth`: ブロックごとの f32 と f64 の差（最大絶対差・比・relRMS・最大差のトークン）。f32 の
+  回でブロックの出力を `--out` の下へ 1 本ずつ書き（S = 8,190 で 1 本 100 MB）、f64 の回で 1 本
+  ずつ読んで比べて消す（両方を RAM に持たない）。行は `growth.<case>.jsonl` に 1 ブロック 1 行で
+  足していく（途中で止めても済んだブロックは読める）。
+- `--blocks <N>`: 先頭の N ブロックだけを回す（S = 8,190 の f64 は 1 ブロック 30 s 級 — 全 30 層を
+  回せない時間の枠で、伸びの始まる層を見る）。出力は N ブロック目の後に head を掛けた値（参照では
+  ない）。
+- `--case F,H,W:t:text[:N]`（繰り返し可）: 上の 4 つの組を 1 回の実行で順に回す（重みの読み口と
+  プロセスの起動を 1 回で済ませる — 要約はケースごとの `reference.<case>.json`）。
+
 MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
 `tests/test_optional_group_imports.py`）。
 """
@@ -64,7 +86,7 @@ import math
 import sys
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -75,7 +97,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch.export import Dim
 
-from _shared.paths import BENCH_ROOT
+from _shared.paths import BENCH_ROOT, SERIES_ROOT
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.emit import FixedQuantizedWeight, storage_breakdown, stored_model
 from karume.ir import IrGraph
@@ -83,6 +105,7 @@ from karume.pipeline import export_module
 from karume.quantize import QUANT_MODULE_TYPES, iter_quant_targets
 from karume.verify import assert_op_contracts, assert_runtime_support
 from wan import dit_patch, dit_reference, export_dit
+from wan.pipeline_ref import pad_text_embeds
 from wan.sources import SOURCES, local_snapshot
 from wan.umt5_export import CHUNK_ROWS, Checkpoint, MemoryMonitor, quantize_rows
 
@@ -247,6 +270,10 @@ class DitExport:
     plain: tuple[str, ...]
 
 
+#: trace の口（config・S の上限 → グラフ・格納テンソル・量子化の対象）。
+Tracer = Callable[[Mapping[str, Any], int], tuple[IrGraph, dict[str, torch.Tensor], dict[str, int]]]
+
+
 def prepare(
     directory: Path,
     *,
@@ -254,11 +281,16 @@ def prepare(
     sym_max: int = SYM_MAX,
     chunk_rows: int = CHUNK_ROWS,
     trace_only: bool = False,
+    tracer: Tracer | None = None,
 ) -> tuple[DitExport, dict[str, Any]]:
-    """trace → plain → quantize（`trace_only` なら trace まで）。戻りは材料と要約の欄。"""
+    """trace → plain → quantize（`trace_only` なら trace まで）。戻りは材料と要約の欄。
+
+    `tracer` は trace の差し替え（既定は 2.1 形の {@link trace}。I2V 対応のグラフは
+    `wan.ti2v_export_dit.trace` — 材料作りの残り〈plain / quantize〉は同じ 1 本を通す）。
+    """
     config = dit_reference.load_config(directory)
     with stage("trace") as record:
-        graph, tensors, targets = trace(config, sym_max)
+        graph, tensors, targets = (trace if tracer is None else tracer)(config, sym_max)
         record.details["nodes"] = len(graph.nodes)
     weights = sorted(key for key, value in tensors.items() if value.is_meta)
     unknown = sorted(set(targets) - set(weights))
@@ -332,13 +364,19 @@ def run_prepare(model: str, *, trace_only: bool, sym_max: int) -> dict[str, Any]
     return {**summary, "stages": [record.to_dict() for record in monitor.records]}
 
 
-def _probe_spec(latent: tuple[int, int, int] | None) -> export_dit.CaseSpec:
-    """測るケース（既定は {@link PROBE_CASE}・`latent` を渡すと同じ timestep / 有効長 / seed の
-    別の格子）。"""
-    if latent is None:
+def _probe_spec(
+    latent: tuple[int, int, int] | None, timestep: int | None = None
+) -> export_dit.CaseSpec:
+    """測るケース（既定は {@link PROBE_CASE}・`latent` / `timestep` を渡すと同じ有効長 / seed の
+    別の格子・別の時刻）。"""
+    if latent is None and timestep is None:
         return PROBE_CASE
     return export_dit.CaseSpec(
-        "probe", latent, PROBE_CASE.timestep, PROBE_CASE.text_length, PROBE_CASE.seed
+        "probe",
+        PROBE_CASE.latent_shape if latent is None else latent,
+        PROBE_CASE.timestep if timestep is None else timestep,
+        PROBE_CASE.text_length,
+        PROBE_CASE.seed,
     )
 
 
@@ -393,12 +431,118 @@ def run_eager(model: str, out: Path) -> dict[str, Any]:
     }
 
 
-def run_reference(model: str, out: Path, latent: tuple[int, int, int] | None) -> dict[str, Any]:
-    """checkpoint から 1 本ずつ i8 の fake-quant を掛けて読む層逐次の f32 / f64 の RAM と所要。"""
+#: text の入力の既定（合成の乱数 — `export_dit.case_inputs`）。ほかの値は埋め込み資産のテンソル名。
+SYNTHETIC_TEXT = "synthetic"
+
+#: Wan2.1 の事前計算の埋め込み資産（同じ umT5 の出力 — `wan.text_embeds` の席）。
+TEXT_EMBEDS_ASSET = SERIES_ROOT / "wan2.1-t2v-1.3b-text-embeds" / "text_embeds.safetensors"
+
+#: ブロックごとの差の行のファイルの綴り（`growth.<case>.jsonl`）と、f32 のブロック出力の一時置き場。
+GROWTH_PREFIX = "growth."
+GROWTH_SPILL = "growth-spill"
+
+
+def probe_inputs(
+    model: Any, spec: export_dit.CaseSpec, text: str = SYNTHETIC_TEXT
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """下見の入力（潜在・timestep・文脈 `[1,512,4096]`）。
+
+    `text` が合成なら `export_dit.case_inputs` そのもの。埋め込み資産の名前なら、潜在は同じ seed の
+    同じ乱数（`case_inputs` は潜在を先に引く）で、文脈だけをその埋め込みにする — 差は text だけ。
+    """
+    latents, timestep, synthetic = export_dit.case_inputs(model, spec)
+    if text == SYNTHETIC_TEXT:
+        return latents, timestep, synthetic
+    from wan.text_embeds import read_asset
+
+    tensors, _ = read_asset(TEXT_EMBEDS_ASSET)
+    if text not in tensors:
+        raise DitProbeError(f"埋め込み資産に '{text}' が無い（{sorted(tensors)}）")
+    return latents, timestep, pad_text_embeds(tensors[text])
+
+
+def _difference(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, Any]:
+    """f32 と f64 の差の要約（比 = 最大絶対差 ÷ 参照の最大絶対値・relRMS・最大差のトークン）。
+
+    `expected` は f64。トークンは `[1,S,dim]` の S 軸（出力 `[1,C,F,H,W]` は平坦の位置）。
+    """
+    reference = expected.double()
+    difference = (actual.double() - reference).abs()
+    worst = int(difference.flatten().argmax())
+    token = worst // int(reference.shape[-1]) if reference.dim() == 3 else worst
+    return {
+        "max_abs_ref": float(reference.abs().max()),
+        "rms_ref": float(reference.square().mean().sqrt()),
+        "max_abs_diff": float(difference.max()),
+        "ratio": float(difference.max() / reference.abs().max()),
+        "rel_rms": float(difference.square().mean().sqrt() / reference.square().mean().sqrt()),
+        "worst_position": token,
+    }
+
+
+class _GrowthRecorder:
+    """ブロックごとの f32 と f64 の差（モジュール doc「切り分け」）。
+
+    f32 の回の {@link spill} がブロックの出力を 1 本ずつ書き、f64 の回の {@link compare} が 1 本
+    ずつ読んで比べて消し、行を `rows_path` へ足す。
+    """
+
+    def __init__(self, spill: Path, rows_path: Path) -> None:
+        self.spill_dir = spill
+        self.rows_path = rows_path
+        self.rows: list[dict[str, Any]] = []
+        spill.mkdir(parents=True, exist_ok=True)
+        rows_path.write_text("", encoding="utf-8")
+
+    def _path(self, index: int) -> Path:
+        return self.spill_dir / f"f32.block.{index:02d}.safetensors"
+
+    def spill(self, index: int, output: torch.Tensor) -> None:
+        save_file({"h": output.contiguous()}, str(self._path(index)))
+
+    def compare(self, index: int, output: torch.Tensor) -> None:
+        path = self._path(index)
+        with safe_open(str(path), framework="pt") as handle:
+            mine = handle.get_tensor("h")
+        row = {"block": index, **_difference(mine, output)}
+        path.unlink()
+        self.rows.append(row)
+        with self.rows_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row) + "\n")
+
+    def close(self) -> None:
+        """比べ終えた一時置き場（ケースのディレクトリと、空になった親）を消す。"""
+        for directory in (self.spill_dir, self.spill_dir.parent):
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
+
+
+def run_reference(
+    model: str,
+    out: Path,
+    latent: tuple[int, int, int] | None,
+    *,
+    timestep: int | None = None,
+    text: str = SYNTHETIC_TEXT,
+    growth: bool = False,
+    blocks: int | None = None,
+) -> dict[str, Any]:
+    """checkpoint から 1 本ずつ i8 の fake-quant を掛けて読む層逐次の f32 / f64 の RAM と所要
+    （`text` / `timestep` / `growth` / `blocks` は切り分けの口 — モジュール doc）。"""
     directory = transformer_dir(model)
     config = dit_reference.load_config(directory)
-    spec = _probe_spec(latent)
+    spec = _probe_spec(latent, timestep)
     name = _case_name(spec, config)
+    if text != SYNTHETIC_TEXT:
+        name = f"{name}-{text}"
+    if blocks is not None:
+        name = f"{name}-b{blocks:02d}"
+    out.mkdir(parents=True, exist_ok=True)
+    recorder = (
+        _GrowthRecorder(out / GROWTH_SPILL / name, out / f"{GROWTH_PREFIX}{name}.jsonl")
+        if growth
+        else None
+    )
     with MemoryMonitor() as monitor:
         with monitor.stage("setup") as record:
             writer = dit_reference.LayerwiseDit(
@@ -407,21 +551,25 @@ def run_reference(model: str, out: Path, latent: tuple[int, int, int] | None) ->
             source = dit_reference.CheckpointDitWeights(
                 directory, "i8", dit_reference.quant_keys(config)
             )
-            latents, timestep, text = export_dit.case_inputs(writer, spec)
+            latents, timesteps, embeds = probe_inputs(writer, spec, text)
             record.details["tokens"] = int(latents[0, 0].numel() // math.prod(writer.patch_size))
         results: dict[str, dit_reference.DitReference] = {}
         for label, dtype in (("f32", torch.float32), ("f64", torch.float64)):
+            on_output = None
+            if recorder is not None:
+                on_output = recorder.spill if label == "f32" else recorder.compare
             with monitor.stage(f"layerwise-{label}") as record:
                 results[label] = writer.forward(
                     source,
                     dtype,
                     latents,
-                    timestep,
-                    text,
-                    on_block=_progress(name, label, writer.layers),
+                    timesteps,
+                    embeds,
+                    on_block=_progress(name, label, writer.layers if blocks is None else blocks),
+                    on_output=on_output,
+                    blocks=blocks,
                 )
                 record.details["seconds"] = round(results[label].seconds, 1)
-    out.mkdir(parents=True, exist_ok=True)
     save_file(
         {
             LAYERWISE_F32_KEY: results["f32"].output.contiguous(),
@@ -431,9 +579,18 @@ def run_reference(model: str, out: Path, latent: tuple[int, int, int] | None) ->
     )
     summary: dict[str, Any] = {
         "case": name,
+        "latent": list(spec.latent_shape),
+        "timestep": spec.timestep,
+        "text": text,
+        "blocks": writer.layers if blocks is None else blocks,
+        "text_rows": int((embeds[0].abs().sum(dim=-1) != 0).sum()),
         "f32_vs_f64": export_dit._ratio(results["f32"].output, results["f64"].output),
+        "output": _difference(results["f32"].output, results["f64"].output),
         "stages": [record.to_dict() for record in monitor.records],
     }
+    if recorder is not None:
+        recorder.close()
+        summary["growth"] = recorder.rows
     eager = out / f"{EAGER_PREFIX}{name}.safetensors"
     # 突き合わせの相手の有無を要約に出す（無いと比較の欄が出ない — 「比べていない」を見える形に）。
     summary["eager_result"] = str(eager) if eager.is_file() else None
@@ -462,6 +619,29 @@ def _latent(text: str) -> tuple[int, int, int]:
     return parts[0], parts[1], parts[2]
 
 
+@dataclass(frozen=True)
+class ProbeRun:
+    """`reference` の 1 ケースの指定（`--case` の 1 本 — 格子・時刻・text・回すブロックの数）。"""
+
+    latent: tuple[int, int, int] | None
+    timestep: int | None
+    text: str
+    blocks: int | None
+
+
+def _probe_run(text: str) -> ProbeRun:
+    """`--case F,H,W:t:text[:N]`（例 `4,30,52:999:boxing-cats`・`9,44,80:999:synthetic:6`）。"""
+    parts = text.split(":")
+    if len(parts) not in (3, 4):
+        raise argparse.ArgumentTypeError("--case は F,H,W:timestep:text[:blocks]")
+    return ProbeRun(
+        latent=_latent(parts[0]),
+        timestep=int(parts[1]),
+        text=parts[2],
+        blocks=int(parts[3]) if len(parts) == 4 else None,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("command", choices=("prepare", "eager", "reference"))
@@ -472,20 +652,87 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--trace-only", action="store_true", help="prepare: trace だけ")
     parser.add_argument("--sym-max", type=int, default=SYM_MAX, help="prepare: S の記号の上限")
     parser.add_argument("--latent", type=_latent, help="reference: 潜在の格子 F,H,W")
+    parser.add_argument("--timestep", type=int, help="reference: timestep（既定 999）")
+    parser.add_argument(
+        "--text",
+        default=SYNTHETIC_TEXT,
+        help="reference: text の入力（synthetic = 合成の乱数・ほかは埋め込み資産のプロンプト名）",
+    )
+    parser.add_argument(
+        "--growth", action="store_true", help="reference: ブロックごとの f32 と f64 の差を記録する"
+    )
+    parser.add_argument(
+        "--blocks", type=int, help="reference: 先頭の N ブロックだけ回す（誤差の伸びの切り詰め）"
+    )
+    parser.add_argument(
+        "--case",
+        type=_probe_run,
+        action="append",
+        default=[],
+        help="reference: F,H,W:timestep:text[:blocks] を 1 回の実行で順に回す（繰り返し可）",
+    )
     args = parser.parse_args(argv)
     if args.trace_only and args.command != "prepare":
         parser.error("--trace-only は prepare にだけ掛かる")
-    if args.latent is not None and args.command != "reference":
-        parser.error("--latent は reference にだけ掛かる")
+    reference_only = (
+        args.latent is not None
+        or args.timestep is not None
+        or args.text != SYNTHETIC_TEXT
+        or args.growth
+        or args.blocks is not None
+    )
+    if (reference_only or args.case) and args.command != "reference":
+        parser.error(
+            "--latent / --timestep / --text / --growth / --blocks / --case は reference に"
+            "だけ掛かる"
+        )
+    if args.case and _single_flags(args):
+        parser.error("--case と --latent / --timestep / --text / --blocks は併用しない")
     if args.out is None:
         args.out = default_out(args.model)
+    if args.command == "reference":
+        runs = args.case or [ProbeRun(args.latent, args.timestep, args.text, args.blocks)]
+        failed = False
+        for run in runs:
+            failed = _write_document(args, _reference(args, run)) or failed
+        return 1 if failed else 0
+    return 1 if _write_document(args, _summary(args)) else 0
+
+
+def _single_flags(args: argparse.Namespace) -> bool:
+    """1 ケースの指定（`--latent` / `--timestep` / `--text` / `--blocks`）が 1 つでもあるか。"""
+    return (
+        args.latent is not None
+        or args.timestep is not None
+        or args.text != SYNTHETIC_TEXT
+        or args.blocks is not None
+    )
+
+
+def _reference(args: argparse.Namespace, run: ProbeRun) -> tuple[dict[str, Any], float]:
+    started = time.perf_counter()
+    summary = run_reference(
+        args.model,
+        args.out,
+        run.latent,
+        timestep=run.timestep,
+        text=run.text,
+        growth=args.growth,
+        blocks=run.blocks,
+    )
+    return summary, started
+
+
+def _summary(args: argparse.Namespace) -> tuple[dict[str, Any], float]:
     started = time.perf_counter()
     if args.command == "prepare":
-        summary = run_prepare(args.model, trace_only=args.trace_only, sym_max=args.sym_max)
-    elif args.command == "eager":
-        summary = run_eager(args.model, args.out)
-    else:
-        summary = run_reference(args.model, args.out, args.latent)
+        return run_prepare(args.model, trace_only=args.trace_only, sym_max=args.sym_max), started
+    return run_eager(args.model, args.out), started
+
+
+def _write_document(args: argparse.Namespace, result: tuple[dict[str, Any], float]) -> bool:
+    """要約を `--out` の `<command>.json`（reference はケースごと）へ書き、失敗の判定を返す。"""
+    summary, started = result
     document = {
         "command": args.command,
         "model": args.model,
@@ -494,7 +741,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "torch_threads": torch.get_num_threads(),
     }
     args.out.mkdir(parents=True, exist_ok=True)
+    # reference はケースごとに書く（格子・時刻・text を替えた実行どうしで上書きしない）。
     suffix = "-trace" if args.trace_only else ""
+    if args.command == "reference":
+        suffix = f".{summary['case']}"
     (args.out / f"{args.command}{suffix}.json").write_text(
         json.dumps(document, ensure_ascii=False, indent=1), encoding="utf-8"
     )
@@ -506,7 +756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         summary.get("f32_equals_eager_upstream"),
         summary.get("f64_equals_eager_layerwise"),
     )
-    return 1 if failed else 0
+    return failed
 
 
 if __name__ == "__main__":

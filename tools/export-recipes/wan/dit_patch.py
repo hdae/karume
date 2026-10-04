@@ -33,11 +33,19 @@ MUST: 上流の素の経路を変えない。attn1 の processor を差し替え
 
 MUST: diffusers は関数の中で import する（`wan` グループは既定の sync に入らない —
 `tests/test_optional_group_imports.py`）。
+
+## Wan2.2 TI2V（ADR 0121 決定 3 / 4）
+
+同じクラスの 5B は {@link WanDitTokensTi2v}（I2V 対応の 1 本 — 時刻入力 2 本・条件マスク・変調の
+`where`）で書き出す。2.1 の {@link WanDitTokens} の forward は変えない（1.3B の容器と golden の
+バイト不変 — 決定 10）。上流との照合の相手は時刻の表し方ごとに 2 つ: T2V は上流の 1 次元 timestep の
+forward（{@link reference_dit}）、I2V は時刻の MLP を値ごとに M = 1 で回してトークンごとの表を上流の
+ブロックへ渡す参照ラッパ（{@link reference_dit} の `condition` — {@link _TokenwiseTimeEmbedder}）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from functools import cache
 from typing import Any, NamedTuple
@@ -183,7 +191,7 @@ def _real_pair_processor_class() -> type:
     return type("WanRealPairAttnProcessor", (base,), {"__call__": _real_pair_call})
 
 
-def install_real_pair_processors(blocks: nn.ModuleList) -> None:
+def install_real_pair_processors(blocks: Iterable[nn.Module]) -> None:
     """各ブロックの attn1（self-attention）の processor を実数形 RoPE の版へ差し替える（冪等）。
 
     差し替えはインスタンス単位（クラス属性には触らない）。差し替え後も上流の素の forward
@@ -280,9 +288,19 @@ class WanDitTokens(nn.Module):
     を初期値として運ばない。
 
     `blocks` を渡すと、その部分列だけを回す（層数に対する誤差の伸びを測る切り詰め用。既定は全層）。
+
+    `install_processors=False` は attn1 の processor の差し替えを呼び手に任せる（層逐次の CPU 参照
+    `wan.dit_reference.LayerwiseDit` — 列を回すと重みを読むので、組む時点では回さず、開いた
+    ブロックごとに {@link install_real_pair_processors} を掛ける）。
     """
 
-    def __init__(self, model: nn.Module, blocks: nn.ModuleList | None = None) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        blocks: nn.ModuleList | None = None,
+        *,
+        install_processors: bool = True,
+    ) -> None:
         super().__init__()
         _assert_supported_config(model)
         self.patch_size = tuple(int(size) for size in model.config.patch_size)
@@ -292,7 +310,8 @@ class WanDitTokens(nn.Module):
         self.norm_out = model.norm_out
         self.proj_out = model.proj_out
         self.scale_shift_table = model.scale_shift_table
-        install_real_pair_processors(self.blocks)
+        if install_processors:
+            install_real_pair_processors(self.blocks)
 
     def forward(
         self,
@@ -397,6 +416,205 @@ class WanDitTokensLayers(WanDitTokens):
         return (*collected, output)
 
 
+def _time_embedding(
+    embedder: nn.Module, timesteps_proj: torch.Tensor, like: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """時刻の MLP（`time_embedder` → SiLU → `time_proj`）を 1 行で回す（`temb [1,dim]` と
+    `timestep_proj [1,6·dim]`）。
+
+    上流 `WanTimeTextImageEmbedding.forward` の時刻の段の逐語（sinusoidal はホスト）。
+    {@link WanDitTokens._trunk} の同じ 5 行と同じ式で、2.1 のラッパのグラフを 1 バイトも動かさない
+    ために向こうはこの関数を通さない（ADR 0121 決定 10 — 2.1 と共有する recipe の変更は 1.3B の
+    容器のバイト不変で確かめる）。
+    """
+    time_embedder_dtype = next(iter(embedder.time_embedder.parameters())).dtype
+    if timesteps_proj.dtype != time_embedder_dtype and time_embedder_dtype != torch.int8:
+        timesteps_proj = timesteps_proj.to(time_embedder_dtype)
+    temb = embedder.time_embedder(timesteps_proj).type_as(like)
+    return temb, embedder.time_proj(embedder.act_fn(temb))
+
+
+def _two_time_embeddings(
+    embedder: nn.Module, generation: torch.Tensor, condition: torch.Tensor, like: torch.Tensor
+) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    """生成側と条件側の時刻の MLP を **M = 1 で 2 回**回す（ADR 0121 決定 3 — 戻りは
+    `(temb, timestep_proj)` の組を生成側・条件側の順に）。
+
+    MUST: 2 行を連結して M = 2 の 1 回にしない。torch CPU の linear は M = 1 と M ≥ 2 で最終ビットを
+    割る（差分調査 §6.1）— まとめると T2V の生成側の行が 2.1 と同じ形の計算でなくなる。IR では同じ
+    重みの linear のノードが 3 本増える（`wan.ti2v_export_dit.inspect_structure` が本数で縛る）。
+    """
+    return (
+        _time_embedding(embedder, generation, like),
+        _time_embedding(embedder, condition, like),
+    )
+
+
+# Third-party code notice. `_ti2v_block` below is adapted from `WanTransformerBlock.forward` in
+# huggingface/diffusers (`src/diffusers/models/transformers/transformer_wan.py`,
+# `diffusers==0.39.0`). The self-attention, cross-attention and feed-forward lines are verbatim;
+# the modulation is computed per time value (generation / condition) and selected per token with
+# `torch.where` right before each use instead of being read from a per-token table. License: Apache
+# License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice,
+# copied verbatim from the header of that file:
+#
+#   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
+def _ti2v_block(
+    block: nn.Module,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    generation: torch.Tensor,
+    condition: torch.Tensor,
+    condition_mask: torch.Tensor,
+    rotary_emb: RealPairRope,
+) -> torch.Tensor:
+    """上流のブロック 1 枚を、変調を 2 つの時刻の値から**トークンごとに選んで**回す
+    （ADR 0121 決定 3）。
+
+    `generation` / `condition` は時刻の MLP の出力 `[1,6,dim]`（生成側の t と条件側の t = 0）。
+    6 成分は時刻の値ごとに `[1,1,dim]` で作り（上流の 1 次元 timestep の分岐と同じ
+    `scale_shift_table + timestep_proj` の和）、`where(condition_mask, 条件側, 生成側)` で
+    `[1,S,dim]` に選ぶ。
+
+    MUST: 各成分の `where` はその成分の消費（self-attention の前の変調・その残差のゲート・FFN の
+    前の変調・FFN のゲート）の**直前**に書く。上流の順（ブロックの先頭で 6 成分をまとめて作る）に
+    倣うと、torch.export はその順を保つので、最大 6 本の `[1,S,dim]` が attention をまたいで生きる
+    （S = 27,280 で 1 本 f32 0.31 GiB — 決定 3 の「where の置き場所」）。Python の評価順
+    （`a * (1 + where(…)) + where(…)` は左から）がそのまま IR のノードの順になる
+    （`wan.ti2v_export_dit.where_placement` が IR で縛る）。
+
+    値の同値: `where` は選択なので値を変えない。T2V（マスクが全て偽）では上流の 1 次元 timestep の
+    分岐（`[1,1,dim]` の broadcast）と、I2V では上流の `temb.ndim == 4` の分岐（トークンごとの
+    表 — 決定 4 の参照ラッパ）と、要素ごとに同じ演算になる（**ビット一致**が主張 —
+    `wan/tests/test_dit_patch_ti2v.py` の `TestTheTi2vGraphForm`）。
+    """
+    table = block.scale_shift_table
+    shift_g, scale_g, gate_g, c_shift_g, c_scale_g, c_gate_g = (table + generation.float()).chunk(
+        6, dim=1
+    )
+    shift_c, scale_c, gate_c, c_shift_c, c_scale_c, c_gate_c = (table + condition.float()).chunk(
+        6, dim=1
+    )
+
+    # 1. Self-attention
+    norm_hidden_states = (
+        block.norm1(hidden_states.float()) * (1 + torch.where(condition_mask, scale_c, scale_g))
+        + torch.where(condition_mask, shift_c, shift_g)
+    ).type_as(hidden_states)
+    attn_output = block.attn1(norm_hidden_states, None, None, rotary_emb)
+    hidden_states = (
+        hidden_states.float() + attn_output * torch.where(condition_mask, gate_c, gate_g)
+    ).type_as(hidden_states)
+
+    # 2. Cross-attention
+    norm_hidden_states = block.norm2(hidden_states.float()).type_as(hidden_states)
+    attn_output = block.attn2(norm_hidden_states, encoder_hidden_states, None, None)
+    hidden_states = hidden_states + attn_output
+
+    # 3. Feed-forward
+    norm_hidden_states = (
+        block.norm3(hidden_states.float()) * (1 + torch.where(condition_mask, c_scale_c, c_scale_g))
+        + torch.where(condition_mask, c_shift_c, c_shift_g)
+    ).type_as(hidden_states)
+    ff_output = block.ffn(norm_hidden_states)
+    hidden_states = (
+        hidden_states.float() + ff_output.float() * torch.where(condition_mask, c_gate_c, c_gate_g)
+    ).type_as(hidden_states)
+
+    return hidden_states
+
+
+# Third-party code notice. `WanDitTokensTi2v.forward_hidden` below is adapted from
+# `WanTransformer3DModel.forward` and `WanTimeTextImageEmbedding.forward` in huggingface/diffusers
+# (`src/diffusers/models/transformers/transformer_wan.py`, `diffusers==0.39.0`). The text embedding
+# and the output norm / projection are verbatim; the time MLP runs once per time value and the
+# per-token modulation is selected with `torch.where` (see `_ti2v_block`). License: Apache License,
+# Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice, copied
+# verbatim from the header of that file:
+#
+#   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
+class WanDitTokensTi2v(WanDitTokens):
+    """Wan2.2 TI2V の I2V 対応の S 形グラフ（ADR 0121 決定 3 — T2V と I2V を 1 本で）。
+
+    {@link WanDitTokens} の入力 5 本の後ろに 2 本を足す（先頭 5 本の位置は 2.1 と同じ）:
+
+    - `timesteps_proj_condition [1,freq_dim]`: 条件側の時刻の sinusoidal（I2V は t = 0・T2V は
+      生成側と同じ値 — ホスト {@link dit_timesteps_proj}）
+    - `condition_mask [1,S,1]`（bool）: トークンが条件フレーム（先頭の潜在フレーム）のものか
+      （I2V は先頭 P = H'·W' トークンが真・T2V は全て偽 — ホスト {@link dit_condition_mask}）
+
+    時刻の MLP は **M = 1 で 2 回**回す（同じ重みの linear のノードが 3 本増える — 決定 2 の
+    dispatch 310 本）。M = 2 の 1 回にしないのは、torch CPU の linear が M = 1 と M ≥ 2 で最終ビット
+    を割るため（T2V の生成側の行を 2.1 と同じ形の計算に保つ — 決定 3 の「なぜ」）。変調はブロック
+    ごとに {@link _ti2v_block} が、出力の変調はここが、消費の直前の `where` で選ぶ。
+
+    MUST: `WanDitTokens.forward`（2.1 の 5 入力）は使わない — このラッパの入力は 7 本。
+    """
+
+    def forward(  # type: ignore[override]
+        self,
+        tokens: torch.Tensor,
+        timesteps_proj: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        timesteps_proj_condition: torch.Tensor,
+        condition_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.forward_hidden(
+            self.patch_embedding(tokens),
+            timesteps_proj,
+            encoder_hidden_states,
+            rope_cos,
+            rope_sin,
+            timesteps_proj_condition,
+            condition_mask,
+        )
+
+    def forward_hidden(  # type: ignore[override]
+        self,
+        hidden_states: torch.Tensor,
+        timesteps_proj: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        timesteps_proj_condition: torch.Tensor,
+        condition_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """patch 埋め込みの**後**から（{@link WanDitTokens.forward_hidden} の TI2V 版）。"""
+        embedder = self.condition_embedder
+        (temb_g, proj_g), (temb_c, proj_c) = _two_time_embeddings(
+            embedder, timesteps_proj, timesteps_proj_condition, encoder_hidden_states
+        )
+        encoder_hidden_states = embedder.text_embedder(encoder_hidden_states)
+
+        # batch_size, 6, inner_dim
+        proj_g = proj_g.unflatten(1, (6, -1))
+        proj_c = proj_c.unflatten(1, (6, -1))
+
+        rotary_emb = RealPairRope(rope_cos, rope_sin)
+        for block in self.blocks:
+            hidden_states = _ti2v_block(
+                block,
+                hidden_states,
+                encoder_hidden_states,
+                proj_g,
+                proj_c,
+                condition_mask,
+                rotary_emb,
+            )
+
+        # batch_size, inner_dim
+        shift_g, scale_g = (self.scale_shift_table + temb_g.unsqueeze(1)).chunk(2, dim=1)
+        shift_c, scale_c = (self.scale_shift_table + temb_c.unsqueeze(1)).chunk(2, dim=1)
+        hidden_states = (
+            self.norm_out(hidden_states.float())
+            * (1 + torch.where(condition_mask, scale_c, scale_g))
+            + torch.where(condition_mask, shift_c, shift_g)
+        ).type_as(hidden_states)
+        return self.proj_out(hidden_states)
+
+
 # ---- ホストへ出した段の Python 側の正本（TS の鏡像の突き合わせ相手） ----------------
 
 
@@ -459,6 +677,30 @@ def dit_timesteps_proj(model: nn.Module, timestep: torch.Tensor) -> torch.Tensor
     を呼ぶ（`Timesteps(freq_dim, flip_sin_to_cos=True, downscale_freq_shift=0)` — cos 先・sin 後）。
     """
     return model.condition_embedder.timesteps_proj(timestep)
+
+
+def dit_condition_mask(
+    latent_shape: tuple[int, int, int], patch_size: tuple[int, int, int], *, conditioned: bool
+) -> torch.Tensor:
+    """グラフ入力 `condition_mask [1,S,1]`（bool — ADR 0121 決定 3）。
+
+    I2V（`conditioned`）は先頭の潜在フレームの P = H'·W' トークンが真、T2V は全て偽。トークン
+    添字は `(f·H' + h)·W' + w`（{@link dit_patchify}）なので、先頭の潜在フレームのトークンは先頭に
+    連続して並ぶ。上流の diffusers の I2V（`WanImageToVideoPipeline` の `expand_timesteps` の分岐）
+    は、先頭の潜在フレームを 0 にした `[1,1,F,H,W]` のマスクを `[:, ::2, ::2]` で間引いて平坦化し、
+    t に掛ける — 同じトークンが t = 0 になる。
+
+    MUST: 時間方向の patch が 1 のときだけ（先頭の潜在フレーム = 先頭のトークンフレーム）。
+    """
+    patch_t, patch_h, patch_w = patch_size
+    if patch_t != 1:
+        raise NotImplementedError(f"時間方向の patch {patch_t} の条件マスクは未対応（1 だけ）")
+    frames, height, width = latent_shape
+    per_frame = (height // patch_h) * (width // patch_w)
+    mask = torch.zeros(1, frames * per_frame, 1, dtype=torch.bool)
+    if conditioned:
+        mask[:, :per_frame] = True
+    return mask
 
 
 def dit_rope_tables(
@@ -579,23 +821,108 @@ def flash_attention_only() -> Iterator[None]:
         yield
 
 
+class TimestepCondition(NamedTuple):
+    """I2V の条件側の時刻（決定 4 の参照ラッパの入力）。
+
+    `timestep` は条件フレームのトークンの整数の timestep（`[1]`・int64 — I2V は 0）、`mask` は
+    トークンごとの条件マスク `[1,S]`（bool — グラフ入力 `condition_mask [1,S,1]` の最終軸を落とした
+    形・{@link dit_condition_mask}）。
+    """
+
+    timestep: torch.Tensor
+    mask: torch.Tensor
+
+
+class _TokenwiseTimeEmbedder(nn.Module):
+    """上流の `condition_embedder` を時刻の値ごとに **M = 1 で 2 回**呼び、トークンごとの
+    `temb [1,S,dim]` / `timestep_proj [1,S,6·dim]` を組む差し替え（ADR 0121 決定 4 の参照ラッパ）。
+
+    上流の forward は 2 次元の timestep `[1,S]` を受けると、平坦化した `[S]` と `timestep_seq_len`
+    をここへ渡し、戻りの `timestep_proj` を `[1,S,6,dim]` へ割ってブロックの `temb.ndim == 4` の
+    分岐と head の `ndim == 3` の分岐へ流す。ブロックと head は上流のコードがそのまま走る — ここが
+    変えるのは時刻の MLP の回し方（M = S → 値ごとに M = 1）だけで、グラフ
+    （{@link WanDitTokensTi2v}）と同じ意味論になる。
+
+    MUST: 渡された平坦の timestep が `where(mask, 条件側, 生成側)` と一致しなければ fail loudly
+    （上流の平坦化の順が変わったら、トークンと変調の対応が黙ってずれる）。
+    """
+
+    def __init__(
+        self, embedder: nn.Module, generation: torch.Tensor, condition: TimestepCondition
+    ) -> None:
+        super().__init__()
+        self.embedder = embedder
+        self.generation = generation
+        self.condition = condition
+
+    def forward(
+        self,
+        timestep: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        encoder_hidden_states_image: torch.Tensor | None = None,
+        timestep_seq_len: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        mask = self.condition.mask
+        expected = torch.where(mask, self.condition.timestep, self.generation).flatten()
+        if timestep_seq_len != mask.shape[1] or not torch.equal(timestep, expected):
+            raise AssertionError(
+                "上流が渡したトークンごとの timestep が条件マスクと一致しない"
+                f"（seq_len {timestep_seq_len}・マスク {list(mask.shape)}）"
+            )
+        # 2 回とも上流の condition_embedder をそのまま呼ぶ（text の射影は 2 回走るが同じ値 —
+        # 使うのは 1 回目の戻り）。
+        temb_g, proj_g, projected, image = self.embedder(
+            self.generation, encoder_hidden_states, encoder_hidden_states_image
+        )
+        temb_c, proj_c, _, _ = self.embedder(
+            self.condition.timestep, encoder_hidden_states, encoder_hidden_states_image
+        )
+        select = mask.unsqueeze(-1)
+        temb = torch.where(select, temb_c.unsqueeze(1), temb_g.unsqueeze(1))
+        proj = torch.where(select, proj_c.unsqueeze(1), proj_g.unsqueeze(1))
+        return temb, proj, projected, image
+
+
 def reference_dit(
     model: nn.Module,
     latents: torch.Tensor,
     timestep: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
+    condition: TimestepCondition | None = None,
 ) -> torch.Tensor:
     """**上流の素の** `WanTransformer3DModel.forward` の出力 `[1,C,F,H,W]`（参照値）。
 
     attention は {@link flash_attention_only} の下で回す（f32 / f64 の参照とも）。
+
+    `condition` を渡すと、上流の forward に 2 次元の timestep `[1,S]` を渡し、`condition_embedder`
+    を呼び出しの間だけ {@link _TokenwiseTimeEmbedder} に差し替える（ADR 0121 決定 4 の I2V の
+    参照ラッパ — 時刻の MLP は値ごとに M = 1）。渡さないと上流の forward そのもの（1 次元の
+    timestep なら 2.1 と同じ経路・2 次元なら diffusers の M = S の経路）。
     """
     with flash_attention_only():
-        return model(
-            hidden_states=latents,
-            timestep=timestep,
-            encoder_hidden_states=encoder_hidden_states,
-            return_dict=False,
-        )[0]
+        if condition is None:
+            return model(
+                hidden_states=latents,
+                timestep=timestep,
+                encoder_hidden_states=encoder_hidden_states,
+                return_dict=False,
+            )[0]
+        if timestep.shape != (1,) or condition.timestep.shape != (1,):
+            raise ValueError(
+                f"参照ラッパの timestep は生成側・条件側とも [1]（{list(timestep.shape)} /"
+                f" {list(condition.timestep.shape)}）"
+            )
+        original = model.condition_embedder
+        model.condition_embedder = _TokenwiseTimeEmbedder(original, timestep, condition)
+        try:
+            return model(
+                hidden_states=latents,
+                timestep=torch.where(condition.mask, condition.timestep, timestep),
+                encoder_hidden_states=encoder_hidden_states,
+                return_dict=False,
+            )[0]
+        finally:
+            model.condition_embedder = original
 
 
 def reference_dit_layers(
@@ -603,6 +930,7 @@ def reference_dit_layers(
     latents: torch.Tensor,
     timestep: torch.Tensor,
     encoder_hidden_states: torch.Tensor,
+    condition: TimestepCondition | None = None,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """{@link reference_dit} の出力と、上流の各ブロックの出力 `[1,S,dim]`（forward hook で採る）。
 
@@ -616,7 +944,7 @@ def reference_dit_layers(
 
     handles = [block.register_forward_hook(capture) for block in model.blocks]
     try:
-        output = reference_dit(model, latents, timestep, encoder_hidden_states)
+        output = reference_dit(model, latents, timestep, encoder_hidden_states, condition)
     finally:
         for handle in handles:
             handle.remove()

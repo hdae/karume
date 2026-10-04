@@ -11,6 +11,7 @@
     uv run --group wan --inexact python -m wan.export_dit --verify   # パッチ前後の eager 同値だけ
     uv run --group wan --inexact python -m wan.export_dit --dtype i8            # i8 系列（下の節）
     uv run --group wan --inexact python -m wan.export_dit --dtype i8 --no-full  # 同・実寸を除く
+    uv run --group wan --inexact python -m wan.export_dit --dtype i8 --check    # 書き直して照合
 
 出力（既定 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/transformer/`・`--dtype i8` は
 `outputs/series/wan2.1-t2v-1.3b-i8-dyn/transformer/`）:
@@ -147,16 +148,37 @@ transformer だけで、VAE は f16 系列のまま（決定 2）。
 - `--no-full` は S = 14,040 の 8 本を除いて書く（段の分割用 — S = 14,040 は CPU で約 1.5 時間）。
   系列は作業席ごと据え替わるので、揃った系列は `--no-full` 無しの実走で書き直す（ケースの乱数は
   seed から派生するので、S = 192 の golden は同じ値で書き直される）。
+
+## 既存の系列との照合（`--check` — ADR 0121 決定 10）
+
+`--check` は同じ書き手で部品ディレクトリを**系列の中の一時ディレクトリ**（`<系列>/.check-*/` —
+umT5 の `write --check` と同じ置き方）へ書き直し、既存の部品ディレクトリと**全ファイルの sha256**
+（容器の全 part と `io.*` / `reference.*`）で突き合わせる（{@link series_mismatches}）。系列は
+置き換えない。違えば違うファイルを名指しして非 0 で終わる（一時ディレクトリは消える）。
+
+守るもの: Wan2.1 と共有する書き手（`dit_patch` / `dit_reference` / この台本）を Wan2.2 のために
+変えたとき、1.3B の容器と golden が 1 バイトも動いていないこと。書き手の門（eager 同値）は書き直した
+側の内部の整合しか見ないので、既存の系列との突き合わせが別に要る。
+
+- `--dtype i8 --no-full --check` は実寸（S = 14,040）の 8 ケースを書かず、既存のそのファイルは
+  照合から外す（{@link check_absent} — 外したケースのファイルが既存に無ければそれも名指す）。容器は
+  全 part を見る。
+- `--layers --check` は計測用の系列（容器だけ）を照合する。
+- 実寸の golden の値の再現は `wan.dit_reference compare`（層逐次の参照で採り直してテンソルごとに
+  比べる）が別に見る。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
+import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -210,6 +232,8 @@ REFERENCE_F64_KEY = "output.f64"
 CASE_SUFFIX = ".safetensors"
 INPUT_PREFIX = "input."
 OUTPUT_PREFIX = "output."
+#: `--check` の一時ディレクトリの接頭辞（系列の中 — umT5 の `write --check` と同じ綴り）。
+CHECK_PREFIX = ".check-"
 
 #: グラフ入力の名前（ラッパの forward の引数名がそのまま IR の入力名になる）。
 INPUT_NAMES = ("tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin")
@@ -721,6 +745,14 @@ def reference_tensors(
     return reference
 
 
+def case_file_names(name: str) -> tuple[str, str]:
+    """ケース 1 本の golden のファイル名（`io.<case>` と `reference.<case>`）。
+
+    書き手（{@link _write_case_files}）と照合の除外（{@link check_absent}）が同じ綴りを通る。
+    """
+    return f"{IO_PREFIX}{name}{CASE_SUFFIX}", f"{REFERENCE_PREFIX}{name}{CASE_SUFFIX}"
+
+
 def _write_case_files(
     case: Case, output: torch.Tensor, reference_f64: Float64Reference | None, out_dir: Path
 ) -> list[str]:
@@ -741,11 +773,82 @@ def _write_case_files(
         blocks=case.reference_blocks,
         output_f64=None if reference_f64 is None else reference_f64.output,
     )
-    io_name = f"{IO_PREFIX}{case.name}{CASE_SUFFIX}"
-    reference_name = f"{REFERENCE_PREFIX}{case.name}{CASE_SUFFIX}"
+    io_name, reference_name = case_file_names(case.name)
     save_file(io, str(out_dir / io_name))
     save_file(reference, str(out_dir / reference_name))
     return [io_name, reference_name]
+
+
+class SeriesMismatchError(AssertionError):
+    """`--check` で書き直した部品ディレクトリが既存の系列とバイトで違った（または照合の相手が
+    無い）。"""
+
+
+def file_digests(directory: Path) -> dict[str, str]:
+    """部品ディレクトリ直下のファイル名 → sha256（ファイルでない項目は fail loudly — 照合が
+    見ないものを残さない）。"""
+    digests: dict[str, str] = {}
+    for path in sorted(directory.iterdir()):
+        if not path.is_file():
+            raise SeriesMismatchError(f"部品ディレクトリにファイルでない項目がある: {path}")
+        with path.open("rb") as stream:
+            digests[path.name] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return digests
+
+
+def series_mismatches(
+    written: Path, existing: Path, *, absent: Collection[str] = ()
+) -> dict[str, str]:
+    """書き直した部品ディレクトリと既存の部品ディレクトリの食い違い（ファイル名 → 理由。空なら
+    全ファイルがバイト一致）。
+
+    `absent` は今回は書かない既存のファイル（`--no-full` が除く実寸のケース —
+    {@link check_absent}）。書いていれば・既存に無ければ、それも食い違いとして名指す
+    （除外が黙って空振りしない）。
+    """
+    actual = file_digests(written)
+    expected = file_digests(existing)
+    mismatches: dict[str, str] = {}
+    for name in sorted(actual.keys() | expected.keys() | set(absent)):
+        if name in absent:
+            if name in actual:
+                mismatches[name] = "照合から外したケースのファイルを書いた"
+            elif name not in expected:
+                mismatches[name] = "照合から外したケースのファイルが既存に無い"
+        elif name not in expected:
+            mismatches[name] = "既存に無い"
+        elif name not in actual:
+            mismatches[name] = "書いた側に無い"
+        elif actual[name] != expected[name]:
+            mismatches[name] = "sha256 が違う"
+    return mismatches
+
+
+def check_absent(
+    dtype: str, patch_size: tuple[int, int, int], *, full: bool, layers: bool
+) -> frozenset[str]:
+    """`--check` で照合から外す既存のファイル（`--no-full` が書かない実寸のケースの golden）。
+
+    計測用の系列（`--layers`）は golden を持たないので外すものは無い。
+    """
+    if full or layers:
+        return frozenset()
+    dropped = [spec for spec in series_cases(dtype) if spec.full_size]
+    return frozenset(name for spec in dropped for name in case_file_names(spec.name(patch_size)))
+
+
+@contextmanager
+def _write_root(series: Path, *, check: bool) -> Iterator[Path]:
+    """部品ディレクトリの親（`check` なら系列の中の一時ディレクトリ — 抜けるときに消える）。
+
+    作業席（`staged_publication`）はこの下に開くので、`check` の回の書き込みは系列の部品
+    ディレクトリに 1 バイトも届かない。
+    """
+    if not check:
+        yield series
+        return
+    with tempfile.TemporaryDirectory(dir=series, prefix=CHECK_PREFIX) as scratch:
+        yield Path(scratch)
 
 
 def emit(args: argparse.Namespace) -> dict[str, Any]:
@@ -758,8 +861,16 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     MUST: eager の要約が 1 本でも {@link eager_failures} に掛かれば、作業席の中で止める — 系列の
     既存の final は 1 バイトも変わらない。止めずに据えると、壊れたラッパの golden（`io.*` も同じ
     ラッパから採る）が TS 側の突合に届くのは公開の後になる。
+
+    MUST: `args.check` の回は部品ディレクトリを系列の中の一時ディレクトリへ書き、既存の部品
+    ディレクトリと全ファイルの sha256 で突き合わせるだけ（{@link series_mismatches} — 系列は置き換え
+    ない）。照合の相手が無ければ、上流を読む前に止める。
     """
     started = time.perf_counter()
+    series = PROBE_SERIES if args.layers else series_dir(args.dtype)
+    existing = series / TARGET
+    if args.check and not existing.is_dir():
+        raise SeriesMismatchError(f"照合の相手の部品ディレクトリが無い（{existing}）")
     # 計測用のグラフは golden を書かないので、例示入力（先頭のケース）だけを組む。
     specs = CASES[:1] if args.layers else series_cases(args.dtype, full=not args.no_full)
     model = load_transformer(args.model)
@@ -772,49 +883,69 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
     eager: list[dict[str, Any]] = []
     written: list[str] = []
 
-    out_dir = (PROBE_SERIES if args.layers else series_dir(args.dtype)) / TARGET
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    with staged_publication(out_dir) as staged:
-        staged.mkdir()
-        if not args.layers:
-            for spec in specs:
-                case = first if spec is specs[0] else build_case(model, spec)
-                report, output = eager_report(wrapper, model, case)
-                reference_f64 = references_f64.get(case.name)
-                if reference_f64 is not None:
-                    report["reference_f64_seconds"] = round(reference_f64.seconds, 1)
-                    report["reference_f32_vs_f64_ratio"] = _ratio(
-                        case.reference, reference_f64.output
-                    )
-                print(f"[eager] {json.dumps(report, ensure_ascii=False)}", flush=True)
-                failures = eager_failures(report)
-                if failures:
-                    raise EagerEquivalenceError(f"{case.name}: {failures}")
-                eager.append(report)
-                written += _write_case_files(case, output, reference_f64, staged)
-                del case, output
-        graph = export_to_file(
-            wrapper,
-            first.inputs,
-            staged / MODEL_FILE,
-            provenance=provenance(args.model),
-            graph_name=TARGET,
-            assets=rope_base_asset(model),
-            dynamic_shapes=dynamic_shapes(),
-            symbol_names=("S",),
-            weight_dtype=args.dtype,
-            weight_scales=scales,
-            preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
-        )
-        declared = [entry.name for entry in graph.inputs]
-        if not args.layers and declared != list(INPUT_NAMES):
-            raise AssertionError(f"グラフ入力名が宣言と不一致: {declared} vs {list(INPUT_NAMES)}")
+    with _write_root(series, check=args.check) as root:
+        out_dir = root / TARGET
+        out_dir.parent.mkdir(parents=True, exist_ok=True)
+        with staged_publication(out_dir) as staged:
+            staged.mkdir()
+            if not args.layers:
+                for spec in specs:
+                    case = first if spec is specs[0] else build_case(model, spec)
+                    report, output = eager_report(wrapper, model, case)
+                    reference_f64 = references_f64.get(case.name)
+                    if reference_f64 is not None:
+                        report["reference_f64_seconds"] = round(reference_f64.seconds, 1)
+                        report["reference_f32_vs_f64_ratio"] = _ratio(
+                            case.reference, reference_f64.output
+                        )
+                    print(f"[eager] {json.dumps(report, ensure_ascii=False)}", flush=True)
+                    failures = eager_failures(report)
+                    if failures:
+                        raise EagerEquivalenceError(f"{case.name}: {failures}")
+                    eager.append(report)
+                    written += _write_case_files(case, output, reference_f64, staged)
+                    del case, output
+            graph = export_to_file(
+                wrapper,
+                first.inputs,
+                staged / MODEL_FILE,
+                provenance=provenance(args.model),
+                graph_name=TARGET,
+                assets=rope_base_asset(model),
+                dynamic_shapes=dynamic_shapes(),
+                symbol_names=("S",),
+                weight_dtype=args.dtype,
+                weight_scales=scales,
+                preserved=PRESERVED_OP_PREFIXES_WITH_ATTENTION,
+            )
+            declared = [entry.name for entry in graph.inputs]
+            if not args.layers and declared != list(INPUT_NAMES):
+                raise AssertionError(
+                    f"グラフ入力名が宣言と不一致: {declared} vs {list(INPUT_NAMES)}"
+                )
+        model_bytes = sum(part.stat().st_size for part in container_parts(out_dir / MODEL_FILE))
+        check: dict[str, Any] | None = None
+        if args.check:
+            patch_size = tuple(int(size) for size in model.config.patch_size)
+            absent = check_absent(args.dtype, patch_size, full=not args.no_full, layers=args.layers)
+            mismatches = series_mismatches(out_dir, existing, absent=absent)
+            if mismatches:
+                raise SeriesMismatchError(
+                    f"書き直した {out_dir.name} が既存の系列（{existing}）と違う:"
+                    f" {json.dumps(mismatches, ensure_ascii=False)}"
+                )
+            check = {
+                "existing": str(existing),
+                "identical_files": sorted(file_digests(out_dir)),
+                "skipped_existing": sorted(absent),
+            }
     breakdown = storage_breakdown(graph)
     return {
         "target": TARGET,
         "dtype": args.dtype,
-        "dir": str(out_dir),
+        "dir": str(existing),
         "layers": args.layers,
+        "check": check,
         "nodes": len(graph.nodes),
         "outputs": len(graph.outputs),
         "initializers": len(graph.initializers),
@@ -822,7 +953,7 @@ def emit(args: argparse.Namespace) -> dict[str, Any]:
         "compressed_bytes": breakdown.compressed_bytes,
         "plain_tensors": breakdown.plain_tensors,
         "plain_bytes": breakdown.plain_bytes,
-        "model_bytes": sum(part.stat().st_size for part in container_parts(out_dir / MODEL_FILE)),
+        "model_bytes": model_bytes,
         "ops": sorted(graph.required_ops),
         "symbols": list(graph.symbols),
         "inputs": [[entry.name, list(entry.shape)] for entry in graph.inputs],
@@ -873,6 +1004,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="i8 系列の実寸（S = 14,040）のケースを採らない（段の分割用 — 後で無しで書き直す）",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="系列の中の一時ディレクトリへ書き直し、既存の部品ディレクトリと全ファイルの sha256 で"
+        "突き合わせるだけ（系列は置き換えない）",
+    )
     args = parser.parse_args(argv)
     if args.no_f16 and (not args.verify or args.dtype != "f16"):
         parser.error("--no-f16 は f16 の --verify とだけ使う（素の f32 の重みで同値だけを測る口）")
@@ -884,6 +1021,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--layers は f16 系列だけ（計測用の層別出口 …-f16-dyn-probe/）")
     if args.verify and args.layers:
         parser.error("--verify と --layers は併用しない")
+    if args.verify and args.check:
+        parser.error("--verify と --check は併用しない（--verify は容器を書かない）")
     if args.verify:
         reports = verify(args)
         print(json.dumps(reports, indent=1, ensure_ascii=False))

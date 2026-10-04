@@ -134,9 +134,12 @@ class TestTheFloat64Path:
         assert torch.ones(2, dtype=torch.float64).float().dtype == torch.float32
         assert "float" not in vars(torch.Tensor)
 
-    def test_a_per_token_timestep_stops_at_the_entrance_naming_stage_1(self) -> None:
-        """TI2V のトークンごとの timestep（`[1,S]`）の f64 は段 1 の仕事 — 監視の奥で落ちる前に、
-        段 1 で対応する形だと分かる文言で止まる。"""
+    def test_a_two_dimensional_timestep_stops_at_the_entrance_naming_the_reference_wrapper(
+        self,
+    ) -> None:
+        """2 次元の timestep（`[1,S]` — diffusers の M = S の経路）は観測用で f64 にしない — 監視の
+        奥で落ちる前に、トークンごとの時刻は段 1 の参照ラッパ（`condition=`）で渡すと分かる文言で
+        入口で止まる。"""
         model = _rounded("i8")
         latents, _, embeds = _inputs()
         tokens = TINY_LATENT[0] * (TINY_LATENT[1] // 2) * (TINY_LATENT[2] // 2)
@@ -617,3 +620,188 @@ def _structure(graph: Any) -> list[tuple[str, list[str], str, list[str]]]:
         for index, name in enumerate(node["outs"]):
             produced[name] = f"#{position}.{index}"
     return rows
+
+
+# ---- 層逐次のブロックごとの口と、f32 / f64 の差の切り分け（ADR 0121 段 1）----------------
+
+
+class TestTheBlockHooks:
+    def test_on_output_sees_every_block_output_without_keeping_it(self) -> None:
+        """`on_output` が受けるブロックの出力 = `collect_blocks` が集める出力（同じ順・同じ値）。"""
+        model = _rounded("i8")
+        writer = dit_reference.LayerwiseDit(model.config)
+        seen: list[tuple[int, torch.Tensor]] = []
+
+        got = writer.forward(
+            dit_reference.ModuleWeights(model),
+            torch.float32,
+            *_inputs(),
+            collect_blocks=True,
+            on_output=lambda index, output: seen.append((index, output.clone())),
+        )
+
+        assert [index for index, _ in seen] == list(range(LAYERS))
+        assert all(torch.equal(a, b) for (_, a), b in zip(seen, got.blocks, strict=True))
+
+    def test_on_output_runs_outside_the_float64_watch(self) -> None:
+        """f64 の回の受け手が f32 の値を作っても（記録との比較）、f64 の監視は止めない。"""
+        model = _rounded("i8")
+        writer = dit_reference.LayerwiseDit(model.config)
+
+        got = writer.forward(
+            dit_reference.ModuleWeights(model),
+            torch.float64,
+            *_inputs(),
+            on_output=lambda _index, output: output.float().sum(),
+        )
+
+        assert got.output.dtype == torch.float64
+
+    def test_blocks_runs_only_the_leading_blocks(self) -> None:
+        model = _rounded("i8")
+        writer = dit_reference.LayerwiseDit(model.config)
+        source = dit_reference.ModuleWeights(model)
+        full = writer.forward(source, torch.float32, *_inputs(), collect_blocks=True)
+
+        cut = writer.forward(source, torch.float32, *_inputs(), collect_blocks=True, blocks=1)
+
+        assert len(cut.blocks) == 1
+        assert torch.equal(cut.blocks[0], full.blocks[0])
+        assert not torch.equal(cut.output, full.output)
+
+    @pytest.mark.parametrize("blocks", [0, LAYERS + 1])
+    def test_blocks_outside_the_model_fail_loudly(self, blocks: int) -> None:
+        model = _rounded("i8")
+
+        with pytest.raises(dit_reference.DitReferenceError, match="回すブロックの数"):
+            dit_reference.LayerwiseDit(model.config).forward(
+                dit_reference.ModuleWeights(model), torch.float32, *_inputs(), blocks=blocks
+            )
+
+
+def _tiny_text(monkeypatch) -> None:
+    from wan import dit_probe
+
+    monkeypatch.setattr(export_dit, "TEXT_DIM", TINY_DIT["text_dim"])
+    monkeypatch.setattr(export_dit, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+    monkeypatch.setattr(dit_probe, "pad_text_embeds", lambda embeds: embeds.unsqueeze(0))
+
+
+class TestTheProbeDiagnosis:
+    """`wan.dit_probe reference` の切り分けの口（text の差し替え・ブロックごとの差・切り詰め）。"""
+
+    def test_a_named_text_keeps_the_latents_and_swaps_only_the_context(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from safetensors.torch import save_file
+
+        from wan import dit_probe
+        from wan.text_embeds import METADATA_KEY
+
+        _tiny_text(monkeypatch)
+        asset = tmp_path / "text_embeds.safetensors"
+        embeds = torch.randn(3, TINY_DIT["text_dim"])
+        save_file({"boxing-cats": embeds}, str(asset), metadata={METADATA_KEY: "{}"})
+        monkeypatch.setattr(dit_probe, "TEXT_EMBEDS_ASSET", asset)
+        writer = dit_reference.LayerwiseDit(_tiny().config)
+        spec = export_dit.CaseSpec("probe", TINY_LATENT, 999, 5, 1)
+
+        synthetic = dit_probe.probe_inputs(writer, spec)
+        named = dit_probe.probe_inputs(writer, spec, "boxing-cats")
+
+        assert all(
+            torch.equal(a, b)
+            for a, b in zip(synthetic, export_dit.case_inputs(writer, spec), strict=True)
+        )
+        assert torch.equal(named[0], synthetic[0])
+        assert torch.equal(named[1], synthetic[1])
+        assert torch.equal(named[2], embeds.unsqueeze(0))
+        with pytest.raises(dit_probe.DitProbeError, match="'ferret' が無い"):
+            dit_probe.probe_inputs(writer, spec, "ferret")
+
+    def test_growth_records_one_row_per_block_and_cleans_its_spill(
+        self, checkpoint: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        from wan import dit_probe
+
+        _tiny_text(monkeypatch)
+        monkeypatch.setattr(dit_probe, "transformer_dir", lambda _model: checkpoint)
+
+        summary = dit_probe.run_reference(
+            "ti2v-5b", tmp_path, TINY_LATENT, timestep=500, growth=True
+        )
+
+        rows = summary["growth"]
+        assert [row["block"] for row in rows] == list(range(LAYERS))
+        assert all(0 < row["ratio"] < 1e-3 and 0 < row["rel_rms"] < 1e-3 for row in rows)
+        assert summary["timestep"] == 500
+        assert summary["output"]["ratio"] == summary["f32_vs_f64"]
+        lines = (tmp_path / f"growth.{summary['case']}.jsonl").read_text().splitlines()
+        assert [json.loads(line)["block"] for line in lines] == list(range(LAYERS))
+        assert not (tmp_path / dit_probe.GROWTH_SPILL).exists()
+
+    def test_blocks_names_the_case_and_stops_early(
+        self, checkpoint: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        from wan import dit_probe
+
+        _tiny_text(monkeypatch)
+        monkeypatch.setattr(dit_probe, "transformer_dir", lambda _model: checkpoint)
+
+        summary = dit_probe.run_reference("ti2v-5b", tmp_path, TINY_LATENT, growth=True, blocks=1)
+
+        assert summary["case"].endswith("-b01")
+        assert summary["blocks"] == 1
+        assert [row["block"] for row in summary["growth"]] == [0]
+
+
+class TestTheProbeCaseFlag:
+    def test_a_case_spells_the_grid_time_text_and_optional_blocks(self) -> None:
+        from wan import dit_probe
+
+        assert dit_probe._probe_run("4,30,52:999:boxing-cats") == dit_probe.ProbeRun(
+            (4, 30, 52), 999, "boxing-cats", None
+        )
+        assert dit_probe._probe_run("9,44,80:500:synthetic:6").blocks == 6
+
+    @pytest.mark.parametrize("text", ["4,30,52:999", "4,30:999:synthetic", "a:b:c:d:e"])
+    def test_a_malformed_case_is_rejected(self, text: str) -> None:
+        import argparse
+
+        from wan import dit_probe
+
+        with pytest.raises((argparse.ArgumentTypeError, ValueError)):
+            dit_probe._probe_run(text)
+
+    def test_case_and_the_single_case_flags_do_not_mix(self) -> None:
+        from wan import dit_probe
+
+        with pytest.raises(SystemExit):
+            dit_probe.main(["reference", "--case", "4,30,52:999:synthetic", "--timestep", "500"])
+
+    def test_every_case_writes_its_own_summary(
+        self, checkpoint: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        from wan import dit_probe
+
+        _tiny_text(monkeypatch)
+        monkeypatch.setattr(dit_probe, "transformer_dir", lambda _model: checkpoint)
+
+        code = dit_probe.main(
+            [
+                "reference",
+                "--out",
+                str(tmp_path),
+                "--growth",
+                "--case",
+                "2,6,10:999:synthetic",
+                "--case",
+                "2,6,10:500:synthetic:1",
+            ]
+        )
+
+        assert code == 0
+        assert sorted(path.name for path in tmp_path.glob("reference.*.json")) == [
+            "reference.probe-s00030-t0500-b01.json",
+            "reference.probe-s00030-t0999.json",
+        ]

@@ -50,6 +50,9 @@ WRITER_CALLS = frozenset(
         # 固定 QAT のコンテナと PLE も同じ作業席の内側へ置く。
         "publish_model",
         "write_ple",
+        # Wan2.2 TI2V の DiT の台本（`wan/ti2v_export_dit.py`）の容器と golden の書き手。
+        "write_container",
+        "golden_case",
     }
 )
 
@@ -82,6 +85,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("irodori/dacvae/export.py", "export_series"),
     ("wan/export_dit.py", "emit"),
     ("wan/export_vae.py", "emit_targets"),
+    ("wan/ti2v_export_dit.py", "write_series"),
 )
 
 
@@ -176,15 +180,23 @@ class TestTheGateItselfCanFail:
 #: 走査すると「席を開くモジュール直下関数」として拾われる）。
 STAGING_WRAPPER_DEFINITIONS = frozenset({"_staged_target"})
 
+#: 走査する台本の綴り。`export*.py` に加えて、同じ family の派生モデルの台本
+#: `<派生>_export_<部品>.py`（`wan/ti2v_export_dit.py` — Wan2.2 TI2V の DiT）。
+SCANNED_SCRIPTS = ("*/**/export*.py", "*/**/*_export_*.py")
+
+
+def _scanned_scripts() -> list[Path]:
+    return sorted({path for pattern in SCANNED_SCRIPTS for path in RECIPES_ROOT.glob(pattern)})
+
 
 def _staging_functions() -> set[tuple[str, str]]:
     """作業席を開くモジュール直下関数を、ソース走査で列挙する（実在 → 表 の側）。
 
-    走査対象を `export*.py` に限るのは、テスト用の疑似 `with` を偽陽性にしないため
-    （`sbv2/tests/test_export.py` は綴りが `test_` 始まりなので拾われない）。
+    走査対象を台本の綴り（{@link SCANNED_SCRIPTS}）に限るのは、テスト用の疑似 `with` を偽陽性に
+    しないため（`sbv2/tests/test_export.py` は綴りが `test_` 始まりなので拾われない）。
     """
     found: set[tuple[str, str]] = set()
-    for path in sorted(RECIPES_ROOT.glob("*/**/export*.py")):
+    for path in _scanned_scripts():
         if "tests" in path.parts or "__pycache__" in path.parts:
             continue
         for node in ast.parse(path.read_text(encoding="utf-8")).body:
@@ -202,6 +214,19 @@ class TestEveryStagingScriptIsListed:
     def test_the_scan_finds_the_scripts(self) -> None:
         """走査が 0 本なら、この門は恒真になる。"""
         assert len(_staging_functions()) >= 19
+
+    def test_the_scan_reaches_the_derived_model_scripts(self) -> None:
+        """`<派生>_export_<部品>.py` の綴りも走査に入る（`export*.py` だけだと漏れる）。"""
+        assert ("wan/ti2v_export_dit.py", "write_series") in _staging_functions()
+
+    def test_the_ti2v_writer_has_writes_for_the_gate_to_see(self) -> None:
+        """TI2V の `write_series` の書き込み（容器と golden）が書き手の名前の表に掛かる —
+        掛からないと「書いている場所」を 1 つも見ないまま緑になる。"""
+        node = _emit_function(
+            (RECIPES_ROOT / "wan/ti2v_export_dit.py").read_text(encoding="utf-8"), "write_series"
+        )
+
+        assert {name for name, _ in _writer_calls(node.body)} == {"write_container", "golden_case"}
 
     def test_no_staging_script_is_missing_from_the_table(self) -> None:
         missing = sorted(_staging_functions() - set(EMIT_ENTRIES))

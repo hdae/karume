@@ -81,6 +81,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
     ("wan/export_vae.py", "emit_targets", "target", "TARGETS"),
     ("wan/umt5_export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
+    ("wan/ti2v_export_dit.py", "write_container", "TARGET", "TARGET"),
 )
 
 #: `minicpm5/export_decode.py` のように、値の定数が**別モジュール**に在る台本の引き先。

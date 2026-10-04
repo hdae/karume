@@ -733,7 +733,7 @@ def _tiny_writer(monkeypatch: pytest.MonkeyPatch, series: Path) -> None:
 def _emit_args(dtype: str = "f16", *, no_full: bool = False) -> argparse.Namespace:
     """`emit` の引数（CLI の `main` が組むのと同じ欄）。"""
     return argparse.Namespace(
-        model=export_dit.DEFAULT_MODEL, dtype=dtype, layers=False, no_full=no_full
+        model=export_dit.DEFAULT_MODEL, dtype=dtype, layers=False, no_full=no_full, check=False
     )
 
 

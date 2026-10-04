@@ -22,11 +22,17 @@ DiT を **1 ブロックずつ** f64 / f32 にして回す（{@link LayerwiseDit
 走る** — 書き写さないので、写し間違いを持ち込まない。RoPE の表はバッファだけの部品なので、上流の
 初期化を CPU でもう 1 度回して作る（重みではない — `model.rope` の値は config だけから決まる）。
 
-Wan2.2 の TI2V の分岐（トークンごとの timestep `[1,S]`）も上流の同じ forward が持ち、f32 はその
-まま回る。f64 は回らない: f64 の監視が許す f64 でない値は batch 1 の時刻の sinusoid の形だけ
-（`dit_patch._timestep_sinusoid_shapes`）で、`[1,S]` の timestep はその外の形を作る。f64 の対応は
-ADR 0121 段 1（I2V 対応のパッチと参照ラッパ）で行い、それまでは入口で止める
-（{@link LayerwiseDit.forward}）。
+Wan2.2 の TI2V のトークンごとの時刻は、ADR 0121 決定 4 の参照ラッパ（`condition=` —
+`dit_patch.reference_dit`）で渡す: 上流の `condition_embedder` を時刻の値ごとに M = 1 で回し、
+トークンごとの表を上流のブロックへ渡す。f32 / f64 とも回る（時刻の sinusoid は batch 1 の形のまま
+— f64 の監視が許す形）。2 次元の timestep をそのまま渡す diffusers の M = S の経路は観測用で、f32
+だけ（f64 の監視の外の `[S]` の sinusoid を作るので、入口で止める — {@link LayerwiseDit.forward}）。
+
+パッチ後のグラフの eager（`dit_patch.WanDitTokensTi2v`）も同じ層逐次の重みで回せる
+（{@link LayerwiseDit.run} に本体を渡す — 5B の f32 全量 18.63 GiB を持たずに eager 同値を見る口・
+`wan.ti2v_export_dit`）。ただしブロックごとの口（`collect_blocks` / `on_block` / `on_output`）は
+ブロックの forward hook で発火するので、ブロックの部品を直に呼ぶパッチ後の TI2V のグラフには届かない
+（渡すと fail loudly — {@link LayerwiseDit.run}）。
 
 ## 重みの読み口（{@link WeightSource} — 値はどれも f32）
 
@@ -96,7 +102,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 import torch
 from safetensors import safe_open
@@ -360,6 +366,36 @@ class DitReference:
     seconds: float
 
 
+#: {@link LayerwiseDit.run} の `body` の戻り。
+_Result = TypeVar("_Result")
+
+
+@dataclass(frozen=True)
+class _BlockHooks:
+    """層逐次のブロック 1 枚ごとに掛ける口（{@link LayerwiseDit._opener}）。"""
+
+    sink: list[torch.Tensor] | None
+    on_block: Callable[[int, float], None] | None
+    on_output: Callable[[int, torch.Tensor], None] | None
+    prepare: Callable[[nn.Module], None] | None
+    #: ブロックの forward hook が発火したブロックの添字（発火の順 — {@link watched} の検査用）。
+    fired: list[int]
+
+    @property
+    def watched(self) -> bool:
+        """ブロックの forward hook で発火する口（`sink` / `on_block` / `on_output`）があるか。"""
+        return self.sink is not None or self.on_block is not None or self.on_output is not None
+
+
+def _unreached(index: int) -> DitReferenceError:
+    """ブロックの forward を通らない `body` に、forward hook で発火する口を渡した。"""
+    return DitReferenceError(
+        f"ブロック {index} の forward が呼ばれていない — collect_blocks / on_block / on_output は"
+        " ブロックの forward hook で発火する。body がブロックの forward を通らず部品を直に呼ぶ形"
+        "（`dit_patch.WanDitTokensTi2v` の `_ti2v_block`）とは併用しない"
+    )
+
+
 class LayerwiseDit:
     """上流 `WanTransformer3DModel` を 1 ブロックずつ重みを読んで回す CPU 参照（モジュール doc）。
 
@@ -404,6 +440,17 @@ class LayerwiseDit:
     def layers(self) -> int:
         return len(self._blocks)
 
+    @property
+    def rope(self) -> nn.Module:
+        """上流の RoPE の表（config だけから CPU で組んだバッファ — ホストの表と資産 `rope_base` の
+        出どころ）。"""
+        return self._outer.rope
+
+    def timesteps_proj(self, timestep: torch.Tensor) -> torch.Tensor:
+        """ホストの時刻の sinusoidal（上流の `condition_embedder.timesteps_proj` — 重みを
+        持たない）。"""
+        return dit_patch.dit_timesteps_proj(self._outer, timestep)
+
     def weight_keys(self) -> list[str]:
         """読む重みのキー全部（上流の state dict の綴り — ブロックの外 + 全ブロック）。"""
         inner = [
@@ -419,26 +466,82 @@ class LayerwiseDit:
         timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         *,
+        condition: dit_patch.TimestepCondition | None = None,
         collect_blocks: bool = False,
         on_block: Callable[[int, float], None] | None = None,
+        on_output: Callable[[int, torch.Tensor], None] | None = None,
+        blocks: int | None = None,
     ) -> DitReference:
         """上流の素の forward を `dtype`（f32 / f64）で回す（入力の f32 の値を `dtype` へ広げる）。
 
         f32 は `dit_patch.reference_dit`、f64 は `dit_patch.reference_dit_f64` と同じ呼び方
         （attention は CPU の flash 経路に固定）で、違いは重みを 1 ブロックずつ読むことだけ。
+        `condition` は TI2V のトークンごとの時刻（ADR 0121 決定 4 の参照ラッパ — f32 / f64 とも）。
+        `on_output` はブロックの出力を 1 本ずつ受ける（持ち続けずに比べる・書き出す口 — 実寸の
+        ブロックごとの記録）。`blocks` は先頭の N ブロックだけを回す（層に対する誤差の伸びを測る
+        切り詰め — 出力は N ブロック目の後に head を掛けた値で、参照ではない）。
+        """
+        if dtype == torch.float64 and timestep.ndim != 1:
+            raise DitReferenceError(
+                f"2 次元の timestep（形 {list(timestep.shape)} — diffusers の M = S の経路）は"
+                " f64 の参照にしない（観測用・f32 だけ）。トークンごとの時刻は ADR 0121 段 1 の"
+                "参照ラッパ"
+                "（`condition=` — 決定 4）で渡す（モジュール doc）"
+            )
+        wide = (lambda tensor: tensor) if dtype == torch.float32 else torch.Tensor.double
+        output, collected, seconds = self.run(
+            source,
+            dtype,
+            lambda model: dit_patch.reference_dit(
+                model, wide(latents), timestep, wide(encoder_hidden_states), condition
+            ),
+            collect_blocks=collect_blocks,
+            on_block=on_block,
+            on_output=on_output,
+            blocks=blocks,
+        )
+        return DitReference(output=output, blocks=collected, seconds=seconds)
+
+    def run(
+        self,
+        source: WeightSource,
+        dtype: torch.dtype,
+        body: Callable[[nn.Module], _Result],
+        *,
+        collect_blocks: bool = False,
+        on_block: Callable[[int, float], None] | None = None,
+        on_output: Callable[[int, torch.Tensor], None] | None = None,
+        prepare_block: Callable[[nn.Module], None] | None = None,
+        blocks: int | None = None,
+    ) -> tuple[_Result, list[torch.Tensor], float]:
+        """ブロックの外を `dtype` で実体化した上流のモデル（`blocks` は層逐次の列）を `body` に
+        渡して回す（戻りは `body` の戻り・集めたブロックの出力・所要の秒）。
+
+        {@link forward} は `body` に上流の素の forward を渡す。パッチ後のグラフの eager は
+        `body` で S 形のラッパを組んで回す（ラッパは `install_processors=False` で組み、
+        `prepare_block` に `dit_patch.install_real_pair_processors` を渡す — 列を回すと重みを
+        読むので、組む時点では回さない）。f64 は `.float()` の素通しと f64 の監視の下で回る。
+
+        `collect_blocks` はブロックの出力を全部集める（`body` が列を 1 回だけ回すときに限る —
+        本数が回したブロックの数と違えば fail loudly）。`blocks` は列を先頭の N ブロックに切り詰める
+        （{@link forward} の doc）。
+
+        MUST: `collect_blocks` / `on_block` / `on_output` はブロックの **forward hook** で発火する。
+        `body` がブロックの forward を通らず部品を直に呼ぶ形（パッチ後の TI2V のグラフ —
+        `dit_patch.WanDitTokensTi2v` の `_ti2v_block`）では届かないので、渡されたら fail loudly
+        （次のブロックを求められた時点で、前のブロックの forward が呼ばれていなければ止まる・
+        終わりに最後のブロックも見る）。黙って空の記録を返さない。
         """
         if dtype not in (torch.float32, torch.float64):
             raise DitReferenceError(f"参照の dtype は f32 / f64 だけ（{dtype}）")
-        if dtype == torch.float64 and timestep.ndim != 1:
-            raise DitReferenceError(
-                f"f64 の層逐次の参照はトークンごとの timestep（形 {list(timestep.shape)}）にまだ"
-                " 対応していない — ADR 0121 段 1（I2V 対応のパッチと参照ラッパ）で対応する"
-                "（今は 1 次元の timestep だけ — モジュール doc）"
-            )
+        count = self.layers if blocks is None else blocks
+        if not 0 < count <= self.layers:
+            raise DitReferenceError(f"回すブロックの数 {count} が 1〜{self.layers} の外")
         started = time.perf_counter()
         collected: list[torch.Tensor] = []
         with torch.no_grad():
             model = copy.deepcopy(self._outer)
+            model.blocks.count = count
             state = {
                 key: self._read(source, key, shape, dtype)
                 for key, shape in self.outer_shapes.items()
@@ -452,43 +555,45 @@ class LayerwiseDit:
             )
             if narrow:
                 raise DitReferenceError(f"ブロックの外に {narrow} の重み / バッファが残っている")
-            sink = collected if collect_blocks else None
+            hooks = _BlockHooks(
+                sink=collected if collect_blocks else None,
+                on_block=on_block,
+                on_output=on_output,
+                prepare=prepare_block,
+                fired=[],
+            )
             if dtype == torch.float32:
-                model.blocks.opener = self._opener(source, dtype, sink, on_block, None)
-                output = dit_patch.reference_dit(model, latents, timestep, encoder_hidden_states)
+                model.blocks.opener = self._opener(source, dtype, hooks, None)
+                result = body(model)
             else:
                 watch = _PausableWatch(
                     dit_patch._timestep_sinusoid_shapes(int(self.config.freq_dim))
                 )
-                model.blocks.opener = self._opener(source, dtype, sink, on_block, watch)
+                model.blocks.opener = self._opener(source, dtype, hooks, watch)
                 with dit_patch._float_keeps_float64(), watch:
-                    output = dit_patch.reference_dit(
-                        model, latents.double(), timestep, encoder_hidden_states.double()
-                    )
+                    result = body(model)
                 if watch.found:
                     raise DitReferenceError(
                         f"f64 の参照の中で f64 でない値が作られた: {watch.found[:5]}"
                     )
-        if collect_blocks and len(collected) != self.layers:
-            raise DitReferenceError(f"ブロックの出力を {len(collected)} 本拾った（{self.layers}）")
-        return DitReference(
-            output=output,
-            blocks=collected if collect_blocks else [],
-            seconds=time.perf_counter() - started,
-        )
+        if hooks.watched and hooks.fired[-1:] != [count - 1]:
+            raise _unreached(count - 1)
+        if collect_blocks and len(collected) != count:
+            raise DitReferenceError(f"ブロックの出力を {len(collected)} 本拾った（{count}）")
+        return result, collected, time.perf_counter() - started
 
     def _opener(
         self,
         source: WeightSource,
         dtype: torch.dtype,
-        sink: list[torch.Tensor] | None,
-        on_block: Callable[[int, float], None] | None,
+        hooks: _BlockHooks,
         watch: _PausableWatch | None,
     ) -> Callable[[int], nn.Module]:
         """ブロック `index` を実体化する関数（重みの読み込みは f64 の監視の外）。
 
-        ブロックの出力は `sink` があるときだけ写す（S = 32,760 で 30 本持つと f32 で約 6 GB）。
-        `on_block` には読み込みを含むブロック 1 枚の所要を渡す（進捗の 1 行用）。
+        ブロックの出力は `hooks.sink` があるときだけ写す（S = 32,760 で 30 本持つと f32 で約
+        6 GB）・`hooks.on_output` へは写さずに渡す。`hooks.on_block` には読み込みを含むブロック
+        1 枚の所要を渡す（進捗の 1 行用）。`hooks.prepare` は実体化したブロックに 1 回掛ける。
 
         MUST: 前のブロックの重みを手放してから次を読む。上流の `for block in self.blocks` の
         ループ変数は前のブロックを握ったまま次を求めるので、手放さないと 2 ブロックが同時に生きる
@@ -498,6 +603,8 @@ class LayerwiseDit:
         opened: list[nn.Module] = []
 
         def open_block(index: int) -> nn.Module:
+            if hooks.watched and index > 0 and hooks.fired[-1:] != [index - 1]:
+                raise _unreached(index - 1)
             started = time.perf_counter()
             with watch.paused() if watch is not None else nullcontext():
                 while opened:
@@ -512,12 +619,19 @@ class LayerwiseDit:
             wrong = sorted({str(p.dtype) for p in block.parameters()} - {str(dtype)})
             if wrong:
                 raise DitReferenceError(f"ブロック {index} に {wrong} の重みが残っている")
+            if hooks.prepare is not None:
+                hooks.prepare(block)
 
             def after(_module: nn.Module, _inputs: Any, output: torch.Tensor) -> None:
-                if sink is not None:
-                    sink.append(output.detach().clone())
-                if on_block is not None:
-                    on_block(index, time.perf_counter() - started)
+                hooks.fired.append(index)
+                if hooks.sink is not None:
+                    hooks.sink.append(output.detach().clone())
+                if hooks.on_output is not None:
+                    # 受け手の計算（f32 の記録との比較など）は f64 の経路の外 — 監視を止める。
+                    with watch.paused() if watch is not None else nullcontext():
+                        hooks.on_output(index, output.detach())
+                if hooks.on_block is not None:
+                    hooks.on_block(index, time.perf_counter() - started)
 
             block.register_forward_hook(after)
             opened.append(block)

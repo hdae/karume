@@ -63,6 +63,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   },
   "wan2.1-t2v-1.3b-f16-dyn-probe": { transformer: "transformer" },
   "wan2.1-t2v-1.3b-i8-dyn": { transformer: "transformer" },
+  "wan2.2-ti2v-5b-i8-dyn": { transformer: "transformer" },
 };
 
 /**
