@@ -542,3 +542,35 @@
 - **残り**: 段 c の GPU 部分（Wan2.1 の `text_encoder` に差し替えて通す・出力差の記録・視認の素材）と段 d。
 - **起票（範囲外）**: 宣言済みの第三者のミラーを `models/` に置いた場合を機械で止める 2 枚目は無い（第三者の公開は裁定が要る）。`config.json` の照合は
   入口で 1 回で、実行中の書き換えは防げない。
+
+## 追記（2026-10-04）: 段 d の結果 — 越境参照の席の差し替えに `crossRepo` mapping は要らない
+
+- **未解決を閉じる（越境の席の差し替え）**: 事実として成立する。手元の配布形（`localDirectory`）の Wan に `crossRepo` を 1 本も渡さず
+  `text_encoder` を差すと、admission・重みの取得・資産の取得を通る。差さなければ同じ取得元は、umT5 の part 0 の取得で「越境先が無い」
+  （hub の `local.ts` の案内）を cause に持つ失敗で落ちる。機序: 差し替えた席は差し替え先の manifest を出所に持ち
+  （`packages/models/src/hub/components.ts:438`）、元の席の越境参照は 1 本も引かれない。越境先の取得元は ref ごとに引くときにだけ解決する
+  （`packages/hub/src/source.ts:274-277` の `sourceForRef` → `originFor`）。差し替え先が手元のディレクトリなら構築の前に読まれるのは
+  part 0 だけで、重みは Session の構築で読まれる（ホストテストでは観測しない）。差し替え先が HTTP なら全 part の取得まで観測した。
+- **着地したもの**:
+  - ホストテスト `packages/models/tests/wan_components_test.ts`（wan のレーン・GPU 不要・疑似 HF とメモリ上のディレクトリ）:
+    差した `text_encoder` だけが差し替え先から来て元の越境先は 0 バイト（対照: 差さなければ越境先から取る）・越境の席の差し替えが
+    mapping なしで通る（対照: 差さなければ mapping 不在で落ちる・差し替え先は手元と HTTP の 2 通り）・i4 の差し替え先は
+    `umt5Contract` が重みの part を取る前に落とす・故障注入（差し替え先のグラフ記述の sha256 を 1 文字変える）で admission が拒み
+    容器を 1 本も取らない。正の経路は `WanPipeline.fromPretrained` の入口から通し、埋め込み資産を読めないバイト列にして資産の
+    解析で止める（= admission と重みの取得を通り終えた — `irodori_admission_test.ts` と同じ観測の形）。
+  - `examples/wan`: `--swap-text-encoder <手元の配布形 | owner/name@<40 桁の commit>>`（`components: { text_encoder: { source } }`）。
+    素のリポ名・commit でない ref・`--text-encoder precomputed` との組み合わせ・`--umt5-source` との組み合わせは拒む。出力先の経路名は
+    `gpu-swap`。README に pin の規則と precomputed の規則。
+  - `tools/export-recipes/wan/README.md`: 取り込みから差し替えまでの手順（取り込み → `license-review.md` → `--intake` の書き手 →
+    実験用ミラー → 差し替え → 公開前の門の手動の確認）。
+  - `karume-umt5-xxl` のカードの Usage に差し替えの段落（`wan/umt5_distribution.py` の `_umt5_usage`・pytest 1 本）。配布形ミラーの
+    `models/karume-umt5-xxl/README.md` はこの段落の分だけ古い（焼き直しは配布形ミラーの次の組み直しで — カードとミラーを比べる門は無い）。
+  - `docs/limitations.md` に決定 7 の 4 の 3 項目・`docs/known-issues.md` に決定 7 の 5 の 1 項目・`docs/glossary.md` に 2 行（バケットの
+    構成・差し替えのフラグ）。`docs/assets-layout.md` の行（`inputs/umt5/`・実験用ミラーの席）は段 b で入っている。
+- **残り**: 影響ファイルの表の「差し替えの e2e」（実験用ミラーの path は環境変数で受ける）は未着手で、段 c の GPU 部分と一緒に
+  GPU が空いてから入れる。差し替え先が手元のディレクトリのとき重みの block を差し替え先から読むこと（Session の構築時の区間読み）は、
+  ホストテストでは観測せず、この e2e で押さえる。
+- **決定 7 の 5 の補足**: 「Wan の umT5 は i8 / f32 しか受けないので今は影響しない」は網羅的でない。`umt5Contract` が求めるのは
+  「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、元の席の
+  `requiredLimits` の事前判定を通ったまま重みを取った後に落ちうる。recipe の書き手は語彙埋め込みを i8 で書くので、recipe で作った部品では
+  起きない（known-issues の項目にこの形で書いた）。

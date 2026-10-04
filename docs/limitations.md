@@ -1016,7 +1016,33 @@ Consequences）。
 - テキストエンコーダの経路（ADR 0119・2026-10-03）: 既定 `textEncoder: "gpu"` は umT5-XXL を GPU で回し任意のプロンプトを受ける（2〜512 トークン・
   語彙外と本文中の特殊トークン・HTML entity の候補〈`R&D` → `R & D`〉・mojibake・C1・Unicode 16.0.0 で未割り当ての文字は `ModelInputError` で拒む）。
   `"precomputed"` は埋め込み資産の 4 本だけを受け umT5 の部品を取らない。umT5 の部品は別リポ `karume-umt5-xxl` への越境参照で、ローカルでは
-  `crossRepo` の mapping が要る。全 quant 席の `requiredLimits` は語彙埋め込み 1,050,148,864 B の束縛 / バッファ上限を宣言する（precomputed でも同じ）。
+  `crossRepo` の mapping が要る（`text_encoder` を差し替えた構築では要らない — ADR
+  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 追記「段 d の結果」）。全 quant 席の `requiredLimits` は語彙埋め込み
+  1,050,148,864 B の束縛 / バッファ上限を宣言する（precomputed でも同じ）。
+
+## Wan2.1: umT5 の差し替え（`components: { text_encoder }`）が検査しないもの（ADR 0122 決定 7）
+
+互換の umT5 へ差し替える席（部品差し替え席 — ADR [0108](decisions/0108-container-format.md) 決定 19・
+[0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 7）の受理の条件は、どれも 2 つの manifest と容器の宣言から
+機械で決まるものに限る: 差し替え先の manifest に役割と quant があること・グラフ記述の sha256 が元の manifest の宣言と同じこと・
+容器の capability と束縛表の不足 / 余剰 0（`packages/models/src/hub/components.ts:422-470`）・Wan の家族の門（グラフの入出力の
+取り決めと、i8 の重みと f32 の表だけの格納 — `umt5Contract`、`packages/models/src/wan/pipeline.ts:940-1010`）。互換の判定を
+内容ハッシュ 1 つに保つための by-design で、次の 3 つは検査しない（案 B / C とバケットの構成をグラフへ焼く案を採らなかった
+理由と復活の条件は ADR 0122「採らなかった案」）。
+
+- **プロンプトが黙って誤読される**: 語彙数が同じで別のトークナイザで学習した部品を差すと、エラーなく受理され、プロンプトが
+  誤った id 列に区切られたまま生成が進む。仕組み: 差し替えで取るのは容器だけで、トークナイザ資産は元の manifest のまま
+  （`packages/models/src/hub/components.ts:486-489`）。部品とトークナイザの組み合わせは誰も検査しない（実例はまだ無い）。
+- **出力が黙って劣化する**: 相対位置のバケットの構成が違う umT5 を差しても、エラーなく受理され、本来と違う位置関係で encode
+  される。仕組み: バケット表の構成（`numBuckets` 32・`maxDistance` 128 — `packages/models/src/wan/umt5/relative-position.ts:39`）と
+  有効長 512（同 `:45`）はホストの定数でグラフ記述に入らず、構成の違う umT5 でも容器がバイト同一になりうる（ADR 0122 の
+  独立検証の実測）。`config.json` を持たない上流を取り込むと本家の config を写すので、取り込みの照合も空になる
+  （`intake.json` が「構成は推定」と記録する — ADR 0122 決定 5 手順 5）。
+- **ライセンス不明の重みが警告なく動く**: 差し替え先の出所とライセンスは実行時に検査も記録もしない
+  （`packages/models/src/hub/components.ts:416-438` が見るのは manifest とグラフ記述の sha256 だけ）。生成物からも、どの重みを
+  使ったかは分からない。runtime は出所を知らない（ADR 0108 決定 19）。ライセンス未宣言の重みは取り込み・変換・実験用ミラーの
+  側で止める（明示の引数 `--allow-undeclared-license`・`models/` の外・公開前の門 — ADR 0122 決定 6）が、手元に組んだミラーを
+  差すこと自体は止めない。
 
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 

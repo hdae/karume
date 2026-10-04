@@ -350,3 +350,23 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
   スロットリング理由と温度を見て、冷めてから単独で再走する（緑ならフレーク）。レーンを連続で回すときは
   重い GPU ジョブ（50 ステップの通し・目視の量産）の直後を避ける。
 - 門の統計量（裏付け前の最大 + 裏付け後の窓平均、など）へ替えるかは設計裁定 — ここは起票のみ。
+
+## 部品差し替え: 大きい部品へ差し替えると、`fromPretrained` は成功し最初の `generate()` で落ちる（ADR 0122 決定 7 の 5・起票のみ）
+
+差し替え先が元より大きいバッファを要すると、**`fromPretrained` は数 GiB の重みを取り終えて成功し、最初の `generate()`
+（Wan なら text 段の Session の構築）で落ちる**（推測・実例はまだ無い）。`fromPretrained` の `components` で部品を差し替えると、
+差し替え先の quant 席の `session` / `gpuFeatures` / `requiredLimits` は使われず、**元の manifest の席の値で事前判定する**ので、
+重みを取る前の判定（`requiredLimits` の照合）を通ってしまう。構築は Session を 1 本も張らず
+（`packages/models/src/wan/pipeline.ts:1349`）、text 段は generate ごとに Session を張る（同 `:1086`）ので、落ちるのは構築の後に
+なる。ADR [0108](decisions/0108-container-format.md) 決定 19 が admission に求める「quant 席と実行設定の整合」の検査が
+無い状態で、by-design ではない。
+
+- 機序: 差し替え席は差し替え先の manifest から容器だけを引く（`packages/models/src/hub/components.ts:422-427` — `resolveSelection`
+  の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/pipeline.ts:1276-1283`）、
+  その `requiredLimits` で取得前の判定をする（同 `:1189-1194`）。
+- 今の影響: recipe の書き手（`umt5_export` — `--intake` を含む）は語彙埋め込みを i8 で書くので、recipe で作った互換の
+  umT5 への差し替えでは起きない（グラフ記述が同じならバッファの大きさも同じ）。ただし `umt5Contract`
+  （`packages/models/src/wan/pipeline.ts:986-1008`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを
+  f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、この形で落ちうる。
+- 直し方の候補（裁定が要る）: 差し替え先の席の `requiredLimits` / `gpuFeatures` を元の席と合わせて判定する（大きい方を取る）か、
+  席が食い違う差し替えを admission で拒む。
