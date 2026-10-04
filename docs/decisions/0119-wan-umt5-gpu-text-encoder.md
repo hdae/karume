@@ -556,3 +556,16 @@ export のホスト RAM の実測が最初の作業、の 4 点。本 ADR はこ
 - 追記「段 10d の設計」D と「段 10d-1 / 10d-2 の結果」が書く「出所は Wan の `text_encoder`・本家 `google/umt5-xxl` との重みの同一は未確認」は、
   [ADR 0122](0122-umt5-upstream-and-compatible-encoders.md) 決定 1 で置き換わった。本家の encoder は Wan 同梱の umT5 と f32 で全要素ビット一致と実測し、
   `karume-umt5-xxl` の上流は本家の commit を名乗る。系列名は `umt5-xxl-i8-dyn`。重みの part と golden のテンソルは変わっていない（ADR 0122 追記「段 a の結果」）。
+
+## 追記（2026-10-04）: 段 10d の残り — 視認の素材 24 本
+
+- umT5 の GPU 経路 + 実用席 `f16+dit8-a8-attn8-s16`・832×480・33 フレーム・50 ステップ・seed 42〜45 で 2 組を生成した（B570・非有限 0）。
+  - **自由プロンプト 12 本**（`outputs/verify/deno-intel-graphics-bmg-g21/2026-10-04_wan-visual-gpu-text-free/`・1 本 960〜968 s）: リポに記録する例は
+    `anime-dancer`（"Anime style. A girl with long twin tails dances on a concert stage under colorful spotlights, full body shot, smooth motion."）と
+    `retriever-beach`（"A golden retriever runs along the beach at sunset, waves splashing around its legs, slow motion, cinematic lighting."）。
+    残りの 1 本は利用者が挙げた題材で、記録は `outputs/` だけに置く。
+  - **固定プロンプト 12 本**（`…/2026-10-04_wan-visual-gpu-text/`・boxing-cats / ferret / cat-dog-baking・1 本 962〜999 s）: 資産の経路 + 同じ席の
+    12 本（`2026-10-03_wan-visual-i8/`）と seed もプロンプトも同じ対で、違うのは text の経路（GPU の i8 の umT5 と、bf16 の umT5 で事前計算した埋め込み）だけ。
+- 利用者の所見（自由プロンプトの 8 本を見て）: 素材は良さそうだが、指示の効きが弱い気がする。原因が学習内容か umT5 の側かは不明。題材は認識できる
+  程度に出ているので可。→ 切り分けの材料は、上の固定プロンプトの対（text の経路だけが違う）と、Wan2.2 TI2V-5B で同じプロンプトを回した比較
+  （[ADR 0121](0121-wan22-ti2v-5b.md)）。固定プロンプトの対の視認は利用者へ送付済みで、所見待ち。
