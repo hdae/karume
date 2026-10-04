@@ -997,3 +997,24 @@ S = 14,040（832×480・33 フレーム）の DiT 1 forward を f64 参照（活
   gpu_f16_weights_test 12 passed・wan レーン（`KARUME_REFERENCE=write`・seed 経路の sha 行を作成）: 66 passed / 0 failed / 1 ignored〈50 ステップの opt-in〉・48 分 32 秒。seed 経路の sha 行
   `2step-seed-boxing-cats-seed42` を作成。通常モードの出力は計測モードと Uint32 で一致（S = 32,760 / 14,040）。行ブロックは
   device の束縛上限から導いた 24 / 5 枚。1 submit の GPU 時間の最大は 458.8 ms（S = 32,760）/ 270.4 ms（S = 14,040）で前回と同じ。
+
+## 追記（2026-10-04）: 段 9 の結果 — RTX 5070 Ti の Chrome で 81 フレーム 50 ステップが完走
+
+- **段 9 ✅**（利用者の実走・記録 `outputs/bench-browser/wan-browser-2026-10-03T21-46-58.503Z.json`・checkout `b4f6df74`・Windows の
+  Chrome 154・adapter `nvidia` / `blackwell`・環境キー `chrome-nvidia-geforce-rtx-5070-ti`・幾何プロファイル `nvidia-blackwell`）。
+  資産の経路（`textEncoder: "precomputed"`）・既定席 `f16`・`boxing-cats`・seed 42・832×480・81 フレーム・50 ステップ。
+  device lost なし。
+- **上限**: `maxBufferSize` 2,147,483,648 B・`maxStorageBufferBindingSize` 2,147,483,644 B（adapter と device が同値 — `acquireGpu` が
+  アダプタ値を要求している）。81 フレームの FFN 中間 1,174,118,400 B は束縛上限に収まり、linear の行分割の口は要らない。
+- **所要**: 壁 2,767.9 s（46.1 分）= DiT 段 2,686.2 s + VAE 段 81.4 s。DiT は 1 ステップ目 83.9 s・以降 52.5〜55.5 s（B570 の
+  Deno は同じ設定で約 2 時間 — 段 8）。VAE はタイル 12 枚で、1 枚目 10.1 s・以降 6.35〜6.37 s。
+- **資源**: DiT の重み 2,840,521,640 B・backing 3,776,775,424 B。VRAM の山は約 8 GB（利用者の目視 — 記録には無い）。
+- **GPU ウォッチドッグ**: 踏んでいない。チャンクの窓平均の最大は DiT 102.3 ms・VAE の first 231.1 ms・next 45.1 ms（調査 §7.4 の
+  約 10 秒に対して 40 倍以上の余裕）。VAE の first は `overBudgetChunks` 154 本（単独で予算を超える dispatch — 切りようが無い側）で、
+  DiT と VAE の next は 0 本（観測のみ）。
+- **sha256**: RGB は `ac09a3e6b8677ee270778abe07ccdb879364b4b062eca59e7d252e1d6ca1de8a`（case id
+  `50step-boxing-cats-seed42-81f`）。この環境キーの行は `fixtures/references/wan.json` に**足さない**（利用者の裁定 2026-10-04 —
+  46 分の再走が前提の行は回帰の検出に使えない。sha の突き合わせは B570 の Deno の行で持つ。Chrome の行が要るときは 2 ステップの
+  短いケースで作る）。
+- **未実走**: Chrome での GPU 経路（umT5 を GPU で — ADR 0119）と実用席（ADR 0120）。gpu-lab の Wan タブの既定の経路は
+  `precomputed` のまま（backlog）。
