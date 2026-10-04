@@ -47,15 +47,20 @@ const DIT_ROPE_COS = "rope_cos";
 const DIT_ROPE_SIN = "rope_sin";
 
 /**
- * DiT の patch（上流 transformer の config `patch_size [1, 2, 2]`・`in_channels 16` — アーキ定数）。
- * グラフの `tokens` の最終次元（`16·1·2·2 = 64`）と構築時に突き合わせる。
+ * DiT の patch（刻みは上流 transformer の config `patch_size [1, 2, 2]` — アーキ定数）。チャネル数は
+ * VAE の chunk グラフの宣言（`latent` の軸 0 — `WanVaeChunkLayout.latentChannels`）から受ける
+ * （Wan2.1 は 16）。グラフの `tokens` の最終次元（`C·1·2·2` — Wan2.1 は 64）は {@link ditContract} が
+ * 構築時に突き合わせる。
+ *
+ * NOTE: `export` は家族 admission と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
  */
-export const WAN_PATCH: WanPatchGeometry = {
-  channels: 16,
+export const wanDitPatch = (latentChannels: number): WanPatchGeometry => ({
+  channels: latentChannels,
   patchFrames: 1,
   patchHeight: 2,
   patchWidth: 2,
-};
+});
 
 /** グラフ入力の形（無ければ fail loudly）。 */
 const inputShape = (
@@ -82,17 +87,24 @@ const staticDim = (
 
 /** 構築時に確かめた DiT のグラフの取り決め。 */
 export type DitContract = {
-  /** グラフ出力の名前（`[1, S, 64]`）。 */
+  /** グラフ出力の名前（`[1, S, C·1·2·2]`）。 */
   readonly output: string;
   /** `timesteps_proj [1, W]` の W。 */
   readonly projWidth: number;
   /** `encoder_hidden_states [1, rows, width]` の rows（ゼロで埋める先の行数）。 */
   readonly contextRows: number;
   readonly contextWidth: number;
+  /**
+   * 宣言との照合に使った patch（{@link runWanDenoise} はこれで patchify / unpatchify する — 同じ値を
+   * 照合とループの 2 経路で導かない）。
+   */
+  readonly patch: WanPatchGeometry;
 };
 
 /**
- * DiT のグラフ宣言を、ホストが組む入力（patch・RoPE の素表）と突き合わせる。
+ * DiT のグラフ宣言を、ホストが組む入力（`patch`・RoPE の素表）と突き合わせる。`patch` のチャネル数は
+ * VAE の宣言から来る（{@link wanDitPatch}）ので、VAE の潜在と DiT の `tokens` のチャネルの食い違いも
+ * ここで落ちる。
  *
  * MUST: 構築時に落とす。ホストの前処理は自分の定数で組むので、グラフが別の寸法で焼かれていても
  * ホスト側は最後まで通り、落ちるのは DiT の重みを上げた後の Session の shape 検査になる。取得面では
@@ -100,10 +112,10 @@ export type DitContract = {
  * `assertEmbedsFitContext`）は資産のバイト列が届いてから。
  *
  * MUST: 最終次元だけでなく rank・batch（B = 1 — 決定 5）・可変の S まで照合する。ホストは
- * `tokens [1, S, 64]`・`rope_cos / rope_sin [1, S, 1, w]` を組み、出力を `[1, S, 64]` として読む
- * （{@link runWanDenoise}）ので、batch 2・固定の S・rank 違いの宣言も Session の shape 検査まで
- * 通ってしまう。S は寸法とフレーム数ごとに変わるので記号次元で、4 本とも**同じ記号**であること
- * （IR の記号は上下限を持たないので、上限の突合は要らない）。
+ * `tokens [1, S, C·1·2·2]`・`rope_cos / rope_sin [1, S, 1, w]` を組み、出力を
+ * `[1, S, C·1·2·2]` として読む（{@link runWanDenoise}）ので、batch 2・固定の S・rank 違いの宣言も
+ * Session の shape 検査まで通ってしまう。S は寸法とフレーム数ごとに変わるので記号次元で、4 本とも
+ * **同じ記号**であること（IR の記号は上下限を持たないので、上限の突合は要らない）。
  *
  * NOTE: `export` は家族 admission と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
  * 出さない — ADR 0008）。
@@ -111,9 +123,10 @@ export type DitContract = {
 export const ditContract = (
   transformer: GraphOwner,
   ropeBase: WanRopeBase,
+  patch: WanPatchGeometry,
   owner: string,
 ): DitContract => {
-  const tokenWidth = wanTokenWidth(WAN_PATCH);
+  const tokenWidth = wanTokenWidth(patch);
   const tokens = inputShape(owner, transformer, DIT_TOKENS);
   const sequence = tokens.at(1);
   if (typeof sequence !== "string") {
@@ -151,7 +164,7 @@ export const ditContract = (
   const contextRows = staticDim(owner, context, 1, DIT_CONTEXT);
   const contextWidth = staticDim(owner, context, 2, DIT_CONTEXT);
   assertDims(owner, context, [1, contextRows, contextWidth], `'${DIT_CONTEXT}'`);
-  return { output, projWidth, contextRows, contextWidth };
+  return { output, projWidth, contextRows, contextWidth, patch };
 };
 
 /** DiT の文脈入力の中身（`[rows, width]` へ詰めた positive と、CFG の uncond 側）。 */
@@ -216,10 +229,11 @@ export const runWanDenoise = async (
   owner: string,
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { dit } = state;
+  const { patch } = dit;
   const { latentShape, schedule } = plan;
-  const grid = wanTokenGrid(latentShape, WAN_PATCH);
+  const grid = wanTokenGrid(latentShape, patch);
   const rope = wanRopeTables(state.ropeBase, grid);
-  const tokenShape = [1, grid.count, wanTokenWidth(WAN_PATCH)];
+  const tokenShape = [1, grid.count, wanTokenWidth(patch)];
   const ropeShape = [1, grid.count, 1, wanRopeWidth(state.ropeBase)];
   const contextShape = [1, dit.contextRows, dit.contextWidth];
   const projShape = [1, dit.projWidth];
@@ -243,7 +257,7 @@ export const runWanDenoise = async (
         ditInputs({ tokens, tokenShape, proj, projShape, context, contextShape, rope, ropeShape }),
       );
       observe?.("transformer", session.diagnostics());
-      return unpatchifyTokens(asF32(outputs[dit.output], "DiT の出力"), latentShape, WAN_PATCH);
+      return unpatchifyTokens(asF32(outputs[dit.output], "DiT の出力"), latentShape, patch);
     };
     const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
     for (let index = 0; index < plan.steps; index += 1) {
@@ -253,7 +267,7 @@ export const runWanDenoise = async (
       const proj = timestepsProj(timestep, dit.projWidth);
       // CFG は uncond → cond の逐次 2 回（B = 1 — 決定 5）。同じ潜在なので patchify は 1 回。
       // 合成はホストで。
-      const tokens = patchifyLatents(current, latentShape, WAN_PATCH);
+      const tokens = patchifyLatents(current, latentShape, patch);
       const uncond = negative === undefined ? undefined : await predict(tokens, proj, negative);
       const cond = await predict(tokens, proj, positive);
       const velocity = uncond === undefined

@@ -5,9 +5,7 @@
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { WAN21_GENERATION, type WanGenerationDescriptor } from "../src/wan/descriptor.ts";
-
-/** VAE の時間圧縮（最初の chunk は 1 フレーム・以降は 4 フレーム — フレーム数は 4n+1）。 */
-const TEMPORAL_COMPRESSION = 4;
+import { TEMPORAL_COMPRESSION } from "../src/wan/plan.ts";
 
 /** VAE の時間圧縮に合うフレーム数（4n+1）か。 */
 const isFrameCount = (frames: number): boolean =>

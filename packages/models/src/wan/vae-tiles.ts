@@ -11,8 +11,9 @@
  * 上流（diffusers `AutoencoderKLWan.tiled_decode`）は `range(0, H, stride)` で走査するので最後の
  * タイルが短くなり、固定形の chunk グラフでは食えない。開始位置は 0 と `extent − tile` の間を
  * **丸めて等分**する（Anima と同じ規則 — ADR 0033 追記 P-3）。本数は「隣り合う対の重なりが
- * {@link WAN_VAE_MIN_TILE_OVERLAP} 以上」を満たす最小（{@link planWanVaeTileAxis}）。832×480 は
- * 行 0 / 14 / 28 × 列 0 / 24 / 48 / 72 の 12 枚。タイル辺と縮尺は資産の宣言から引く
+ * 下限以上」を満たす最小（{@link planWanVaeTileAxis}）。下限の正本は出力の 64 px で、潜在へは
+ * 空間の圧縮で割って導く（{@link wanVaeMinTileOverlap} — ADR 0121 決定 6）。Wan2.1 は 64 ÷ 8 = 8 で、
+ * 832×480 は行 0 / 14 / 28 × 列 0 / 24 / 48 / 72 の 12 枚。タイル辺と縮尺は資産の宣言から引く
  * （{@link planWanVaeTiles} — タイル辺の差し替えを配布物だけで済ませる。決定 2）。
  *
  * ## ブレンドは上流の線形ランプと同型・貼り付けは領域割り当て
@@ -46,16 +47,49 @@ import { decodeWanVaeTile, type WanVaeChunkCaches, type WanVaeChunkLayout } from
 
 const f32 = Math.fround;
 
-/** RGB の 3 チャネル。 */
-const SAMPLE_CHANNELS = 3;
+/**
+ * 隣り合うタイルの出力画素での最小の重なり。上流の既定のブレンド幅
+ * `tile_sample_min − tile_sample_stride`（256 − 192 = 64 px）と同じ。Python 側
+ * `vae_tiling.MIN_OVERLAP_PX` と同じ値（潜在の重なりはここから {@link wanVaeMinTileOverlap} で導く —
+ * 世代ごとに潜在の値を持たない）。
+ */
+const MIN_OVERLAP_PX = 64;
 
 /**
- * 隣り合うタイルが潜在で重なる最小幅（= 64 px）。
+ * 空間の圧縮（潜在 1 あたりの最終出力の画素数）= グラフの入出力の空間比 `scale` × ホストの
+ * unpatchify の倍率 `patchSize`（ADR 0121 決定 6）。グラフの比は chunk グラフの宣言
+ * （`sampleTile / tile`）、unpatchify の倍率は世代の記述子（`vaePatchSize`）から来る。
  *
- * 上流の既定のブレンド幅 `tile_sample_min − tile_sample_stride`（256 − 192 = 64 px）と同じ。
- * Python 側 `vae_tiling.MIN_OVERLAP_LATENT` と同じ値（タイル計画の凍結表が両側で割れる）。
+ * MUST: 潜在の大きさ・タイルで覆えるかの門・重なりの式は、この 1 本から圧縮を取る（`tile-decode.ts`
+ * の `wanSpatialCompression` と {@link wanVaeMinTileOverlap}）。圧縮をグラフの比だけで取ると、
+ * unpatchify のある世代で潜在が倍の大きさになり、重なりも倍になる。
  */
-export const WAN_VAE_MIN_TILE_OVERLAP = 8;
+export const wanVaeSpatialCompression = (scale: number, patchSize: number): number => {
+  if (!Number.isInteger(scale) || scale < 1 || !Number.isInteger(patchSize) || patchSize < 1) {
+    throw new Error(
+      `空間の圧縮の因子が正の整数でない（グラフの比 ${scale}・unpatchify ${patchSize}）`,
+    );
+  }
+  return scale * patchSize;
+};
+
+/**
+ * 隣り合うタイルが潜在で重なる最小幅 = {@link MIN_OVERLAP_PX} ÷ 空間の圧縮
+ * （{@link wanVaeSpatialCompression}）。Python 側 `vae_tiling.min_overlap_latent` と同じ式・同じ文言
+ * （タイル計画の凍結表が両側で割れる）。
+ *
+ * MUST: 割り切れない圧縮は丸めずに落とす（丸めると重なりが 64 px から黙ってずれる）。
+ */
+export const wanVaeMinTileOverlap = (scale: number, patchSize: number): number => {
+  const compression = wanVaeSpatialCompression(scale, patchSize);
+  if (MIN_OVERLAP_PX % compression !== 0) {
+    throw new Error(
+      `重なり ${MIN_OVERLAP_PX} px が空間の圧縮 ${compression}` +
+        `（グラフの比 ${scale} × unpatchify ${patchSize}）で割り切れない`,
+    );
+  }
+  return MIN_OVERLAP_PX / compression;
+};
 
 /** 潜在の 1 軸ぶんのタイル配置。 */
 export type WanVaeTileAxis = {
@@ -76,6 +110,11 @@ export type WanVaeTileAxis = {
 export type WanVaeTilePlan = {
   /** 潜在のチャネル数（切り出しの平面数を決める）。 */
   readonly latentChannels: number;
+  /**
+   * chunk グラフの出口のチャネル数（貼り合わせでは、タイルの平面の数がこれの倍数であることの検査に
+   * 使う — ブレンドと貼り付けは平面ごとに回すので、チャネルとフレームを分けない）。
+   */
+  readonly sampleChannels: number;
   /** 潜在 1 あたりの sample 画素数。 */
   readonly scale: number;
   /** 高さ軸。 */
@@ -91,11 +130,14 @@ export type WanVaeTilePlan = {
  * （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`（`Math.round` = 0.5 は
  * 切り上げ — Python 側は同じ向きの整数式）。丸めの誤差が ±0.5 に収まるので間隔は 2 値にしか
  * ならない。
+ *
+ * `minOverlap` は潜在の単位で必須（既定値を置かない — 世代ごとの値は {@link wanVaeMinTileOverlap}
+ * で導き、渡し忘れを Wan2.1 の値で黙って計画しない）。
  */
 export const planWanVaeTileAxis = (
   extent: number,
   tile: number,
-  minOverlap: number = WAN_VAE_MIN_TILE_OVERLAP,
+  minOverlap: number,
 ): WanVaeTileAxis => {
   if (!Number.isInteger(extent) || !Number.isInteger(tile) || !Number.isInteger(minOverlap)) {
     throw new Error(`タイル配置は整数で組む（extent=${extent} tile=${tile} 重なり=${minOverlap}）`);
@@ -154,14 +196,16 @@ const regionOf = (axis: WanVaeTileAxis, index: number): number =>
   (index + 1 < axis.starts.length ? axis.starts[index + 1] : axis.extent) - axis.starts[index];
 
 /**
- * 潜在の空間 `height × width` のタイル計画。タイル辺と縮尺は chunk グラフの宣言から引く
+ * 潜在の空間 `height × width` のタイル計画。タイル辺・縮尺・チャネル数は chunk グラフの宣言から引く
  * （`layout.tile` と `layout.sampleTile / layout.tile` — 呼び手に 32 や 8 を literal で置かない）。
+ * `minOverlap` は {@link planWanVaeTileAxis} と同じく潜在の単位で必須（生成要求の計画は
+ * `tile-decode.ts` の `planWanGenerationTiles` を通す）。
  */
 export const planWanVaeTiles = (
-  layout: Pick<WanVaeChunkLayout, "latentChannels" | "tile" | "sampleTile">,
+  layout: Pick<WanVaeChunkLayout, "latentChannels" | "tile" | "sampleTile" | "sampleChannels">,
   height: number,
   width: number,
-  minOverlap: number = WAN_VAE_MIN_TILE_OVERLAP,
+  minOverlap: number,
 ): WanVaeTilePlan => {
   const scale = layout.sampleTile / layout.tile;
   if (!Number.isInteger(scale) || scale < 1) {
@@ -169,6 +213,7 @@ export const planWanVaeTiles = (
   }
   return {
     latentChannels: layout.latentChannels,
+    sampleChannels: layout.sampleChannels,
     scale,
     rows: planWanVaeTileAxis(height, layout.tile, minOverlap),
     cols: planWanVaeTileAxis(width, layout.tile, minOverlap),
@@ -278,7 +323,8 @@ const blendHorizontal = (
 
 /**
  * 貼り合わせの本体（**渡された配列の上で in-place にブレンドする** — 呼び手がその配列を所有して
- * いることが前提）。戻りは `[3, F', H·s, W·s]`（F' はタイルのフレーム数）。
+ * いることが前提）。戻りは `[Cs, F', H·s, W·s]`（Cs は計画の `sampleChannels`・F' はタイルの
+ * フレーム数）。
  */
 const assembleOwnedTiles = (
   working: readonly Float32Array[],
@@ -294,9 +340,11 @@ const assembleOwnedTiles = (
   const tileWidth = cols.tile * scale;
   const tilePlane = tileHeight * tileWidth;
   const planes = working[0].length / tilePlane;
-  if (!Number.isInteger(planes) || planes < 1 || planes % SAMPLE_CHANNELS !== 0) {
+  if (!Number.isInteger(planes) || planes < 1 || planes % plan.sampleChannels !== 0) {
     throw new Error(
-      `タイルの要素数 ${working[0].length} が [3,F,${tileHeight},${tileWidth}] でない`,
+      `タイルの要素数 ${
+        working[0].length
+      } が [${plan.sampleChannels},F,${tileHeight},${tileWidth}] でない`,
     );
   }
   for (const [index, tile] of working.entries()) {
@@ -364,8 +412,8 @@ const assembleOwnedTiles = (
 };
 
 /**
- * decode 済みのタイル（行優先・各 `[3, F', s, s]`）をブレンドして `[3, F', H·s, W·s]` に貼り
- * 合わせる（クランプ前のまま）。
+ * decode 済みのタイル（行優先・各 `[Cs, F', s, s]`）をブレンドして `[Cs, F', H·s, W·s]` に貼り
+ * 合わせる（クランプ前のまま・Cs は計画の `sampleChannels`）。
  *
  * MUST: 渡された配列を破壊しない（ブレンドは in-place なので写しの上で行う）。配列を自分で所有
  * する {@link decodeWanVaeTiled} は写さずに本体を呼ぶ。
@@ -379,10 +427,10 @@ export const assembleWanVaeTiles = (
 /**
  * 全タイルを行優先で decode する（**タイルが外・chunk が内** — タイルごとに
  * {@link decodeWanVaeTile} が cache をゼロから回す）。戻りは各タイルのクランプ前の
- * `[3, 1 + 4(F−1), s, s]`（呼び手が所有する新しい配列）。
+ * `[Cs, 1 + 4(F−1), s, s]`（呼び手が所有する新しい配列）。
  *
- * `latents` は逆正規化済みの `[C, F, H, W]`。計画のタイル辺・縮尺・チャネル数が開いた資産
- * （`caches.layout`）と食い違えば fail loudly。
+ * `latents` は逆正規化済みの `[C, F, H, W]`。計画のタイル辺・縮尺・チャネル数（潜在と出口）が開いた
+ * 資産（`caches.layout`）と食い違えば fail loudly。
  *
  * `onTile` はタイル 1 枚の decode が決着するたびに await する（`tile` は 1 始まり・行優先 — パイプラインの
  * 進捗と診断の口。投げれば残りのタイルを回さずに投げ直す）。
@@ -401,11 +449,13 @@ export const decodeWanVaeTiles = async (
   const { layout } = caches;
   if (
     plan.latentChannels !== layout.latentChannels || plan.rows.tile !== layout.tile ||
-    plan.cols.tile !== layout.tile || plan.scale * layout.tile !== layout.sampleTile
+    plan.cols.tile !== layout.tile || plan.scale * layout.tile !== layout.sampleTile ||
+    plan.sampleChannels !== layout.sampleChannels
   ) {
     throw new Error(
-      `タイル計画（C ${plan.latentChannels}・タイル ${plan.rows.tile}×${plan.cols.tile}・縮尺 ${plan.scale}）` +
-        `が資産（C ${layout.latentChannels}・タイル ${layout.tile}・sample ${layout.sampleTile}）と違う`,
+      `タイル計画（C ${plan.latentChannels}・タイル ${plan.rows.tile}×${plan.cols.tile}・縮尺 ${plan.scale}` +
+        `・出口 ${plan.sampleChannels} チャネル）が資産（C ${layout.latentChannels}・タイル ${layout.tile}` +
+        `・sample ${layout.sampleTile}・出口 ${layout.sampleChannels} チャネル）と違う`,
     );
   }
   // 潜在の長さは GPU を回す前に見る（タイルごとの切り出しでも落ちるが、それだと前のタイルの
@@ -425,7 +475,7 @@ export const decodeWanVaeTiles = async (
 
 /**
  * タイル decode の本体: 全タイルを decode してブレンド・貼り付けした**クランプ前**の
- * `[3, 1 + 4(F−1), H·s, W·s]`。最終フレームは {@link clampWanVaeFrames} を通す。`onTile` は
+ * `[Cs, 1 + 4(F−1), H·s, W·s]`。最終フレームは {@link clampWanVaeFrames} を通す。`onTile` は
  * {@link decodeWanVaeTiles} と同じ。
  */
 export const decodeWanVaeTiled = async (

@@ -7,8 +7,9 @@
  *
  * - 入力: 潜在 1 フレーム `latent [C,1,t,t]`（逆正規化 `z / (1/std) + mean` はホスト —
  *   `latents.ts`）と cache `cache_NN [Cin,2,h,w]`（NN は上流の `feat_idx` の順）。
- * - 出力: クランプ前のフレーム（first は `[3,1,8t,8t]`・next は `[3,4,8t,8t]`）と、更新後の cache
- *   （**入力と同じ順** — 出力 1+k が cache 入力 k の更新後）。
+ * - 出力: クランプ前のフレーム（first は `[Cs,1,8t,8t]`・next は `[Cs,4,8t,8t]` — Cs は出口の
+ *   チャネル数で、宣言から読む〈{@link WanVaeChunkLayout.sampleChannels}・Wan2.1 は RGB の 3〉）と、
+ *   更新後の cache（**入力と同じ順** — 出力 1+k が cache 入力 k の更新後）。
  * - first は upsample3d の `time_conv` の cache を持たない（最初の chunk では走らない — 上流の
  *   `'Rep'`）。その cache はタイルの頭のゼロのまま next の 1 回目が読む。
  *
@@ -51,9 +52,6 @@ const CACHE_FRAMES = 2;
 const FIRST_FRAMES = 1;
 const NEXT_FRAMES = 4;
 
-/** RGB の 3 チャネル。 */
-const SAMPLE_CHANNELS = 3;
-
 /** 要素あたりのバイト数（意味論 dtype は全て 4 バイト — ADR 0009）。 */
 const BYTES_PER_ELEMENT = 4;
 
@@ -70,7 +68,7 @@ export type WanVaeChunkGraph = {
   readonly frameOutput: string;
   /** 更新後の cache の出力名（`caches[k]` の更新後が `cacheOutputs[k]`）。 */
   readonly cacheOutputs: readonly string[];
-  /** フレームの形 `[3, T, 8t, 8t]`（T は first 1・next 4）。 */
+  /** フレームの形 `[Cs, T, 8t, 8t]`（T は first 1・next 4）。 */
   readonly frameShape: readonly number[];
 };
 
@@ -82,6 +80,12 @@ export type WanVaeChunkLayout = {
   readonly tile: number;
   /** 出力フレームの辺（`8t`）。 */
   readonly sampleTile: number;
+  /**
+   * 出口のチャネル数（フレーム出力の軸 0 — first と next で同じ）。unpatchify の無い世代は RGB の 3、
+   * patchify 空間を出す世代は `3·p²`（記述子との照合は `tile-decode.ts` の
+   * `assertWanVaeMatchesGeneration`）。
+   */
+  readonly sampleChannels: number;
   /** cache の全体（next の入力の順・名前 → 形）。 */
   readonly cacheShapes: ReadonlyMap<string, readonly number[]>;
   readonly first: WanVaeChunkGraph;
@@ -136,10 +140,13 @@ const chunkGraph = (
   }
   const [frameOutput, ...cacheOutputs] = outputs;
   const frameShape = valueShape(owner, frameOutput, `${where} のフレーム出力`);
-  const side = frameShape[2];
-  if (!sameShape(frameShape, [SAMPLE_CHANNELS, frames, side, side]) || side % rows !== 0) {
+  const [sampleChannels, , side] = frameShape;
+  if (
+    !sameShape(frameShape, [sampleChannels, frames, side, side]) || sampleChannels < 1 ||
+    side % rows !== 0
+  ) {
     throw new WanVaeChunkError(
-      `${where}: フレームの形 [${frameShape.join(",")}] が [3,${frames},8t,8t] でない`,
+      `${where}: フレームの形 [${frameShape.join(",")}] が [C,${frames},8t,8t] でない`,
     );
   }
   cacheSpecs.forEach((spec, index) => {
@@ -183,9 +190,16 @@ export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeCh
       }]）`,
     );
   }
-  const sampleTile = nextGraph.graph.frameShape[2];
+  const [sampleChannels, , sampleTile] = nextGraph.graph.frameShape;
   if (firstGraph.graph.frameShape[2] !== sampleTile) {
     throw new WanVaeChunkError("フレームの辺が first と next で違う");
+  }
+  if (firstGraph.graph.frameShape[0] !== sampleChannels) {
+    throw new WanVaeChunkError(
+      `フレームのチャネル数が first と next で違う（first ${
+        firstGraph.graph.frameShape[0]
+      }・next ${sampleChannels}）`,
+    );
   }
   const cacheShapes = new Map<string, readonly number[]>(
     next.graph.inputs.slice(1).map((spec) => [spec.name, staticShape(spec.shape, spec.name)]),
@@ -211,6 +225,7 @@ export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeCh
     latentChannels,
     tile,
     sampleTile,
+    sampleChannels,
     cacheShapes,
     first: firstGraph.graph,
     next: nextGraph.graph,
@@ -366,23 +381,25 @@ export const enqueueWanVaeChunk = (
   );
 
 /**
- * chunk のフレーム（`[3,T_k,s,s]` を chunk 順に）を時間軸で連結し `[3, 1 + 4(F−1), s, s]` にする。
+ * chunk のフレーム（`[Cs,T_k,s,s]` を chunk 順に）を時間軸で連結し `[Cs, 1 + 4(F−1), s, s]` にする
+ * （Cs は {@link WanVaeChunkLayout.sampleChannels}）。
  */
 export const concatWanVaeFrames = (
   layout: WanVaeChunkLayout,
   chunks: readonly ArrayBuffer[],
 ): Float32Array<ArrayBuffer> => {
+  const { sampleChannels } = layout;
   const plane = layout.sampleTile * layout.sampleTile;
   const total = wanVaeFrameCount(chunks.length);
-  const out = new Float32Array(SAMPLE_CHANNELS * total * plane);
+  const out = new Float32Array(sampleChannels * total * plane);
   let offset = 0;
   chunks.forEach((buffer, index) => {
     const frames = index === 0 ? FIRST_FRAMES : NEXT_FRAMES;
     const values = new Float32Array(buffer);
-    if (values.length !== SAMPLE_CHANNELS * frames * plane) {
+    if (values.length !== sampleChannels * frames * plane) {
       throw new WanVaeChunkError(`chunk ${index} のフレームの要素数 ${values.length} が合わない`);
     }
-    for (let channel = 0; channel < SAMPLE_CHANNELS; channel += 1) {
+    for (let channel = 0; channel < sampleChannels; channel += 1) {
       const from = channel * frames * plane;
       out.set(values.subarray(from, from + frames * plane), (channel * total + offset) * plane);
     }
@@ -394,7 +411,7 @@ export const concatWanVaeFrames = (
 /**
  * タイル 1 枚の chunk 列を回す（1 タイル = 1 batch・フレームだけを読み戻す — モジュールの doc）。
  *
- * `latents` は逆正規化済みの `[C,F,t,t]`。戻りは**クランプ前**の `[3, 1 + 4(F−1), 8t, 8t]`。
+ * `latents` は逆正規化済みの `[C,F,t,t]`。戻りは**クランプ前**の `[Cs, 1 + 4(F−1), 8t, 8t]`。
  * タイルの頭で cache をゼロに書く（{@link WanVaeChunkCaches.zero}）。
  *
  * MUST: 同じ device の別の batch・run を並行に発行しない（batch は device の区間ロックを持つ）。

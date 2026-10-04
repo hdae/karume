@@ -9,17 +9,21 @@ import {
   clampWanVaeFrames,
   planWanVaeTileAxis,
   planWanVaeTiles,
-  WAN_VAE_MIN_TILE_OVERLAP,
   wanVaeBlendExtentAt,
   wanVaeLatentTile,
+  wanVaeMinTileOverlap,
+  wanVaeSpatialCompression,
   wanVaeTileCount,
   type WanVaeTilePlan,
 } from "../src/wan/vae-tiles.ts";
+import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
 
 /** 実寸のタイル辺（潜在 — chunk グラフの既定の入力形）と縮尺。 */
 const TILE = 32;
 const SCALE = 8;
-const LAYOUT = { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE };
+const LAYOUT = { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE, sampleChannels: 3 };
+/** Wan2.1 の重なりの下限（潜在）= 64 px ÷ 空間の圧縮 8（縮尺 8 × unpatchify 1）。 */
+const MIN_OVERLAP = wanVaeMinTileOverlap(SCALE, WAN21_GENERATION.vaePatchSize);
 
 /**
  * タイル辺 32・重なりの下限 8 の開始位置（潜在の全長 → 開始位置）。Python 側
@@ -40,12 +44,16 @@ const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
 
 Deno.test("planWanVaeTileAxis: 開始位置を値で凍結する（Python 側と同じ表）", () => {
   for (const [extent, starts] of AXIS_STARTS) {
-    assertEquals([...planWanVaeTileAxis(extent, TILE).starts], [...starts], `潜在 ${extent}`);
+    assertEquals(
+      [...planWanVaeTileAxis(extent, TILE, MIN_OVERLAP).starts],
+      [...starts],
+      `潜在 ${extent}`,
+    );
   }
 });
 
 Deno.test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブレンド 144 / 64 px", () => {
-  const plan = planWanVaeTiles(LAYOUT, 60, 104);
+  const plan = planWanVaeTiles(LAYOUT, 60, 104, MIN_OVERLAP);
   assertEquals(plan.scale, SCALE);
   assertEquals(wanVaeTileCount(plan), 12);
   assertEquals([...plan.rows.starts], [0, 14, 28]);
@@ -56,14 +64,14 @@ Deno.test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブ�
     [64, 64, 64],
   );
   // 480×832 は転置（軸ごとに独立）。
-  const portrait = planWanVaeTiles(LAYOUT, 104, 60);
+  const portrait = planWanVaeTiles(LAYOUT, 104, 60, MIN_OVERLAP);
   assertEquals([...portrait.rows.starts], [0, 24, 48, 72]);
   assertEquals([...portrait.cols.starts], [0, 14, 28]);
 });
 
 Deno.test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り立つ", () => {
   for (const extent of [32, 33, 40, 56, 57, 60, 64, 80, 104, 128, 135, 256]) {
-    const axis = planWanVaeTileAxis(extent, TILE);
+    const axis = planWanVaeTileAxis(extent, TILE, MIN_OVERLAP);
     const where = `extent=${extent}`;
     const span = extent - TILE;
     assertEquals(axis.starts[0], 0, where);
@@ -72,12 +80,12 @@ Deno.test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り�
     // 本数は重なりの下限だけを制約にした最小（安全側に倒した実装はタイル数が跳ねる）。
     assertEquals(
       axis.starts.length,
-      span === 0 ? 1 : Math.ceil(span / (TILE - WAN_VAE_MIN_TILE_OVERLAP)) + 1,
+      span === 0 ? 1 : Math.ceil(span / (TILE - MIN_OVERLAP)) + 1,
       `${where}: 本数`,
     );
     const gaps = axis.starts.slice(1).map((start, index) => start - axis.starts[index]);
     for (const [index, gap] of gaps.entries()) {
-      assert(TILE - gap >= WAN_VAE_MIN_TILE_OVERLAP, `${where}: 対 ${index} の重なり`);
+      assert(TILE - gap >= MIN_OVERLAP, `${where}: 対 ${index} の重なり`);
       assertEquals(wanVaeBlendExtentAt(axis, SCALE, index + 1), (TILE - gap) * SCALE, where);
     }
     // 丸め等間隔の実体 = 間隔の差は高々 1 潜在。
@@ -86,20 +94,58 @@ Deno.test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り�
 });
 
 Deno.test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", () => {
-  assertThrows(() => planWanVaeTileAxis(31, TILE), Error, "タイル幅");
+  assertThrows(() => planWanVaeTileAxis(31, TILE, MIN_OVERLAP), Error, "タイル幅");
   assertThrows(() => planWanVaeTileAxis(60, TILE, TILE), Error, "重なり");
-  assertThrows(() => wanVaeBlendExtentAt(planWanVaeTileAxis(32, TILE), SCALE, 1), RangeError);
+  assertThrows(
+    () => wanVaeBlendExtentAt(planWanVaeTileAxis(32, TILE, MIN_OVERLAP), SCALE, 1),
+    RangeError,
+  );
   // 縮尺は資産の宣言（sampleTile / tile）から — 割り切れない宣言は fail loudly。
   assertThrows(
-    () => planWanVaeTiles({ latentChannels: 16, tile: 32, sampleTile: 250 }, 60, 104),
+    () =>
+      planWanVaeTiles(
+        { latentChannels: 16, tile: 32, sampleTile: 250, sampleChannels: 3 },
+        60,
+        104,
+        MIN_OVERLAP,
+      ),
     Error,
     "縮尺",
   );
 });
 
-/** 小さな計画（タイル 8・重なりの下限 2・縮尺 `scale`）。 */
+Deno.test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラフの比 × unpatchify — Python 側と同じ式）", () => {
+  // 2 点で式を縛る（Python 側 test_vae_tiling.py と同じ行）。unpatchify の倍率を無視する退行は
+  // (8, 2) で割れる（グラフの比だけなら 8）。
+  for (const [scale, patchSize, expected] of [[8, 1, 8], [8, 2, 4]] as const) {
+    assertEquals(wanVaeMinTileOverlap(scale, patchSize), expected, `(${scale}, ${patchSize})`);
+  }
+  assertEquals(wanVaeSpatialCompression(8, 2), 16);
+});
+
+Deno.test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数でない因子は丸めずに落とす", () => {
+  assertThrows(
+    () => wanVaeMinTileOverlap(8, 3),
+    Error,
+    "重なり 64 px が空間の圧縮 24（グラフの比 8 × unpatchify 3）で割り切れない",
+  );
+  for (const [scale, patchSize] of [[7.8125, 1], [8, 1.5], [0, 1], [8, 0], [-8, 1]] as const) {
+    assertThrows(
+      () => wanVaeMinTileOverlap(scale, patchSize),
+      Error,
+      `空間の圧縮の因子が正の整数でない（グラフの比 ${scale}・unpatchify ${patchSize}）`,
+    );
+  }
+});
+
+/** 小さな計画（タイル 8・重なりの下限 2・縮尺 `scale`・出口 3 チャネル）。 */
 const smallPlan = (height: number, width: number, scale: number, channels = 2): WanVaeTilePlan =>
-  planWanVaeTiles({ latentChannels: channels, tile: 8, sampleTile: 8 * scale }, height, width, 2);
+  planWanVaeTiles(
+    { latentChannels: channels, tile: 8, sampleTile: 8 * scale, sampleChannels: 3 },
+    height,
+    width,
+    2,
+  );
 
 Deno.test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り出す（軸とフレームの取り違え検出）", () => {
   // [2,3,10,12]・値は `平面*1000 + y*12 + x`（平面 = c*3 + f）で全要素が識別できる。
@@ -169,7 +215,12 @@ Deno.test("assembleWanVaeTiles: 角は縦 → 横の順で畳む（上流と同�
   // 右上は左と横ブレンド済みで行 3 = [1, 1.5, 2, 2]。右下は縦が先で行 1 = 0.5·右上の行 3 + 0.5·d
   // = [2.5, 2.75, 3, 3] → 横で列 0 = 2・列 1 = 0.5·2 + 0.5·2.75 = 2.375。出力の行 3 は
   // 左下の担当 [2, 2] + 右下の担当 [2, 2.375, 3, 3]（横 → 縦なら [2, 2, 1.5, 2.25, 3, 3]）。
-  const plan = planWanVaeTiles({ latentChannels: 1, tile: 4, sampleTile: 4 }, 6, 6, 2);
+  const plan = planWanVaeTiles(
+    { latentChannels: 1, tile: 4, sampleTile: 4, sampleChannels: 3 },
+    6,
+    6,
+    2,
+  );
   assertEquals([...plan.rows.starts], [0, 2]);
   const tiles = [1, 2, 3, 4].map((value) => new Float32Array(3 * 16).fill(value));
   const out = assembleWanVaeTiles(tiles, plan);
@@ -200,6 +251,20 @@ Deno.test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落
     "1 枚目",
   );
   assertThrows(() => assembleWanVaeTiles(Array(9).fill(new Float32Array(64)), plan), Error, "3,F");
+});
+
+Deno.test("assembleWanVaeTiles: 平面はグラフの出口のチャネル数（計画の sampleChannels）で割る — 3 を仮定しない", () => {
+  // 出口 12 チャネルの計画（合成の値 — 縮退の 1 枚なので貼り付けは素の写し）。12 × 1 フレームは
+  // そのまま通り、3 × 1 フレーム（RGB 1 枚ぶん）は出口の形に合わないので落ちる。
+  const plan = planWanVaeTiles(
+    { latentChannels: 2, tile: 8, sampleTile: 8, sampleChannels: 12 },
+    8,
+    8,
+    2,
+  );
+  const tile = new Float32Array(12 * 64).map((_, index) => index);
+  assertEquals(bits(assembleWanVaeTiles([tile], plan)), bits(tile));
+  assertThrows(() => assembleWanVaeTiles([new Float32Array(3 * 64)], plan), Error, "[12,F,8,8]");
 });
 
 Deno.test("clampWanVaeFrames: [-1, 1] へ in-place（NaN と -0 はそのまま — torch.clamp と同じ）", () => {
@@ -234,9 +299,10 @@ Deno.test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で
   // 上の解析解のテスト（傾斜・角）が持つ。
   for (const [height, width] of [[60, 104], [104, 60]] as const) {
     const plan = planWanVaeTiles(
-      { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE },
+      { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE, sampleChannels: 3 },
       height,
       width,
+      MIN_OVERLAP,
     );
     const nested = height === 60 ? plan.rows : plan.cols;
     assert(

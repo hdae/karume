@@ -56,11 +56,12 @@ import {
   clampWanVaeFrames,
   decodeWanVaeTiled,
   decodeWanVaeTiles,
-  planWanVaeTiles,
   wanVaeBlendExtentAt,
   wanVaeTileCount,
   type WanVaeTilePlan,
 } from "../src/wan/vae-tiles.ts";
+import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
+import { planWanGenerationTiles } from "../src/wan/tile-decode.ts";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
 import { type DrmUsage, formatDrmUsage, sampleDrmUsage } from "./helpers/drm-usage.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -271,10 +272,13 @@ const poisonFrames = async (caches: WanVaeChunkCaches, chunks: number): Promise<
 
 const results = openResults("wan-vae-tiles");
 
-/** 潜在 `[C,F,H,W]` のフィクスチャから計画を立てる（タイル辺と縮尺は資産の宣言から）。 */
+/**
+ * 潜在 `[C,F,H,W]` のフィクスチャから計画を立てる（タイル辺と縮尺は資産の宣言から・重なりは本番と
+ * 同じ導出 — `planWanGenerationTiles` を通すので、フィクスチャのメタとの突き合わせが本番の計画を縛る）。
+ */
 const planFor = (layout: WanVaeChunkLayout, latentShape: readonly number[]): WanVaeTilePlan => {
   assertEquals(latentShape.length, 4, `潜在の形 [${latentShape}]`);
-  return planWanVaeTiles(layout, latentShape[2], latentShape[3]);
+  return planWanGenerationTiles(layout, latentShape[2], latentShape[3], WAN21_GENERATION);
 };
 
 Deno.test({

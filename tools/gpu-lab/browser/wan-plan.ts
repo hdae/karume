@@ -20,13 +20,11 @@ import { planRowBlocks } from "../../../packages/runtime/src/runtime/fusion.ts";
 import type { WanGenerateRequest, WanPrompt } from "../../../packages/models/wan.ts";
 import type { WanPipelineConfig } from "../../../packages/models/src/wan/config.ts";
 import { WAN21_GENERATION } from "../../../packages/models/src/wan/descriptor.ts";
+import { TEMPORAL_COMPRESSION } from "../../../packages/models/src/wan/plan.ts";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const F32_BYTES = 4;
-
-/** VAE の時間圧縮（潜在 1 フレーム = 4 フレーム・先頭だけ 1 フレーム — フレーム数は 4n+1）。 */
-const TEMPORAL_COMPRESSION = 4;
 
 /** 画素 → DiT のトークンの縮尺（VAE の空間 8 × patch 2）。 */
 const PIXELS_PER_TOKEN = 16;

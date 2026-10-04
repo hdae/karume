@@ -12,15 +12,20 @@ import { ModelInputError } from "../errors.ts";
 import { assertAcceptableSeed } from "../request-gates.ts";
 import type { WanPipelineConfig } from "./config.ts";
 import type { WanGenerationDescriptor } from "./descriptor.ts";
-import { WAN_PATCH } from "./dit-loop.ts";
 import type { WanGenerateRequest } from "./pipeline.ts";
 import { WAN_UNIPC_CONFIG, type WanUniPcSchedule, wanUniPcSchedule } from "./scheduler.ts";
 import type { WanTextEmbedding } from "./text-embeds.ts";
+import { planWanGenerationTiles, wanSpatialCompression } from "./tile-decode.ts";
 import type { WanVaeChunkLayout } from "./vae-chunks.ts";
-import { planWanVaeTiles, type WanVaeTilePlan } from "./vae-tiles.ts";
+import type { WanVaeTilePlan } from "./vae-tiles.ts";
 
-/** VAE の時間圧縮（最初の chunk は 1 フレーム・以降は 4 フレーム — `vae-chunks.ts` の取り決め）。 */
-const TEMPORAL_COMPRESSION = 4;
+/**
+ * VAE の時間圧縮（最初の chunk は 1 フレーム・以降は 4 フレーム — `vae-chunks.ts` の取り決め）。
+ *
+ * NOTE: `export` は記述子の整合のテストと gpu-lab が同じ値を引くため（`mod.ts` / サブパス面には
+ * 出さない — ADR 0008）。
+ */
+export const TEMPORAL_COMPRESSION = 4;
 
 /**
  * 初期ノイズの seed の既定（世代に依らない）。寸法とフレーム数の既定は世代の記述子
@@ -52,17 +57,23 @@ export type WanGenerationKnobs = {
   readonly frames: number;
   readonly width: number;
   readonly height: number;
-  /** 潜在の形 `[16, F', H/8, W/8]`。 */
+  /**
+   * 潜在の形 `[C, F', H/s, W/s]`（C は VAE のグラフ宣言の潜在のチャネル数・s は空間の圧縮
+   * `wanSpatialCompression` — Wan2.1 は `[16, F', H/8, W/8]`）。
+   */
   readonly latentShape: readonly [number, number, number, number];
   readonly initial: InitialNoise;
   /** `steps` × `shift` の UniPC の σ 列と timestep 列（denoise はこれを使い、組み直さない）。 */
   readonly schedule: WanUniPcSchedule;
-  /** VAE のタイル計画（潜在 `H/8 × W/8` — denoise の前に立てる）。 */
+  /** VAE のタイル計画（潜在 `H/s × W/s` — denoise の前に立てる）。 */
   readonly tiles: WanVaeTilePlan;
 };
 
 /** 計画に要る VAE の chunk グラフの幾何（資産の宣言から — `wanVaeChunkLayout`）。 */
-export type PlanLayout = Pick<WanVaeChunkLayout, "latentChannels" | "tile" | "sampleTile">;
+export type PlanLayout = Pick<
+  WanVaeChunkLayout,
+  "latentChannels" | "tile" | "sampleTile" | "sampleChannels"
+>;
 
 /** 経路ごとのプロンプトの門（{@link planWanRequest} が 1 本の検査の順で呼ぶ）。 */
 export type PromptGate<Text> = {
@@ -176,17 +187,17 @@ export const planWanRequest = <Text>(
       }）に無い`,
     );
   }
-  const spatialScale = layout.sampleTile / layout.tile;
+  const compression = wanSpatialCompression(layout, generation);
   const latentShape: [number, number, number, number] = [
-    WAN_PATCH.channels,
+    layout.latentChannels,
     (frames - 1) / TEMPORAL_COMPRESSION + 1,
-    height / spatialScale,
-    width / spatialScale,
+    height / compression,
+    width / compression,
   ];
   if (!latentShape.every(Number.isInteger)) {
-    // 受理集合は資産の縮尺で割り切れる寸法だけ — 割れるなら資産の取り違え（入力起因ではない）。
+    // 受理集合は空間の圧縮で割り切れる寸法だけ — 割れるなら資産の取り違え（入力起因ではない）。
     throw new Error(
-      `潜在の形 [${latentShape}] が整数でない（VAE の縮尺 ${spatialScale}）`,
+      `潜在の形 [${latentShape}] が整数でない（空間の圧縮 ${compression}）`,
     );
   }
 
@@ -210,7 +221,8 @@ export const planWanRequest = <Text>(
     initial = { kind: "seed", seed };
   }
 
-  const tiles = planWanVaeTiles(layout, latentShape[2], latentShape[3]);
+  // 重なりの式（64 px ÷ 空間の圧縮）は潜在の整数の検査の後で求める（`assertWanVaeTilesCover` と同じ順）。
+  const tiles = planWanGenerationTiles(layout, latentShape[2], latentShape[3], generation);
   return {
     positive,
     negative,

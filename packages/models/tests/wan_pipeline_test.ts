@@ -25,13 +25,26 @@ import {
   WanPipeline,
   type WanPipelineOptions,
 } from "../src/wan/pipeline.ts";
-import { ditContract } from "../src/wan/dit-loop.ts";
+import { ditContract, wanDitPatch } from "../src/wan/dit-loop.ts";
 import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
-import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
+import { WAN21_GENERATION, type WanGenerationDescriptor } from "../src/wan/descriptor.ts";
+import { planWanRequest, type PromptGate } from "../src/wan/plan.ts";
+import {
+  assertWanVaeMatchesGeneration,
+  assertWanVaeTilesCover,
+  planWanGenerationTiles,
+  wanSpatialCompression,
+} from "../src/wan/tile-decode.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
 import { wanParityCase, wanParityCases, wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
-import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
+import {
+  declaredContainer,
+  parseIrDeclarationValue,
+  partAssets,
+  tensorlessContainer,
+  writeContainer,
+} from "./helpers/container-fixture.ts";
 import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
@@ -121,8 +134,8 @@ const buildAsset = (
 };
 
 const EMBEDS: WanTextEmbeds = parseWanTextEmbeds(buildAsset(ROWS));
-/** 配布形の VAE の chunk グラフの幾何（潜在タイル 32・縮尺 8 — `8t / t`）。 */
-const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256 };
+/** 配布形の VAE の chunk グラフの幾何（潜在タイル 32・縮尺 8 — `8t / t`・出口は RGB の 3）。 */
+const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256, sampleChannels: 3 };
 /** 配布形の `pipelineConfig`（recipe `wan/distribution.py` の `WAN_PIPELINE_CONFIG` — 参照の設定）。 */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
 const plan = (request: Partial<WanGenerateRequest>) =>
@@ -392,18 +405,22 @@ describe("planWanGeneration（generate の入口の門）", () => {
 
 /**
  * VAE の chunk グラフ 2 本（first / next）の宣言だけを持つ偽物（潜在タイル `tile`・縮尺 8・cache 1 本 —
- * `vae-chunks.ts` の取り決めの形）。
+ * `vae-chunks.ts` の取り決めの形）。チャネル数は既定で配布形（潜在 16・出口 RGB の 3）。
  */
-const vaeChunkGraphs = (tile: number, scale = 8) => {
+const vaeChunkGraphs = (
+  tile: number,
+  scale = 8,
+  channels: { readonly latent: number; readonly sample: number } = { latent: 16, sample: 3 },
+) => {
   const graph = (frames: number) =>
     stubModel({
       inputs: [
-        { name: "latent", shape: [16, 1, tile, tile] },
+        { name: "latent", shape: [channels.latent, 1, tile, tile] },
         { name: "cache_00", shape: [16, 2, tile, tile] },
       ],
       outputs: ["frame", "cache_00_out"],
       values: {
-        frame: [3, frames, scale * tile, scale * tile],
+        frame: [channels.sample, frames, scale * tile, scale * tile],
         cache_00_out: [16, 2, tile, tile],
       },
     });
@@ -442,6 +459,113 @@ describe("家族 admission: VAE のタイルが受理する寸法を全部覆う
   });
 });
 
+describe("家族 admission: VAE のグラフ宣言 × 世代の記述子（統計の本数・出口のチャネル数）", () => {
+  const layoutOf = (channels: { readonly latent: number; readonly sample: number }) => {
+    const { first, next } = vaeChunkGraphs(32, 8, channels);
+    return wanVaeChunkLayout(first, next);
+  };
+
+  it("配布形の宣言（潜在 16・出口 3）は Wan2.1 の記述子（統計 16 本・unpatchify 1）と合う", () => {
+    assertWanVaeMatchesGeneration(
+      layoutOf({ latent: 16, sample: 3 }),
+      WAN21_GENERATION,
+      "WanPipeline",
+    );
+  });
+
+  it("統計の本数が潜在のチャネル数と違う資産を拒む（要素数が割り切れて逆正規化が黙って通る形）", () => {
+    const error = assertThrows(
+      () =>
+        assertWanVaeMatchesGeneration(
+          layoutOf({ latent: 8, sample: 3 }),
+          WAN21_GENERATION,
+          "WanPipeline",
+        ),
+      Error,
+      "WanPipeline: 逆正規化の統計（mean 16 本・std 16 本）が VAE の潜在 8 チャネルと違う",
+    );
+    assert(!(error instanceof ModelInputError), "資産の齟齬を入力起因にしない");
+  });
+
+  it("std の本数だけが潜在のチャネル数と違う記述子も拒む（mean と std を別々に見る）", () => {
+    // 合成の記述子（mean は 16 本で潜在と合い、std だけが 8 本）。
+    const stdOnly: WanGenerationDescriptor = {
+      ...WAN21_GENERATION,
+      latents: { mean: WAN21_GENERATION.latents.mean, std: Array<number>(8).fill(1) },
+    };
+    assertThrows(
+      () =>
+        assertWanVaeMatchesGeneration(layoutOf({ latent: 16, sample: 3 }), stdOnly, "WanPipeline"),
+      Error,
+      "WanPipeline: 逆正規化の統計（mean 16 本・std 8 本）が VAE の潜在 16 チャネルと違う",
+    );
+  });
+
+  it("出口のチャネル数が RGB × unpatchify² と違う資産を拒む", () => {
+    assertThrows(
+      () =>
+        assertWanVaeMatchesGeneration(
+          layoutOf({ latent: 16, sample: 12 }),
+          WAN21_GENERATION,
+          "WanPipeline",
+        ),
+      Error,
+      "WanPipeline: VAE の出口 12 チャネルが RGB 3 × unpatchify 1² = 3 と違う",
+    );
+  });
+});
+
+describe("空間の圧縮（グラフの比 × unpatchify）: 潜在の大きさ・覆えるかの門・重なりが同じ 1 本を使う", () => {
+  // 合成の世代と資産（値は門を縛るためのもので、src には置かない）: 潜在タイル 16 → 出力 128（グラフの比
+  // 8）・unpatchify 2 → 空間の圧縮 16・出口 12 = RGB 3 × 2²。グラフの比だけで割ると潜在も重なりも倍になる。
+  const SYNTHETIC: WanGenerationDescriptor = {
+    ...WAN21_GENERATION,
+    latents: { mean: [0, 0, 0, 0], std: [1, 1, 1, 1] },
+    vaePatchSize: 2,
+  };
+  const graphs = vaeChunkGraphs(16, 8, { latent: 4, sample: 12 });
+  const layout = wanVaeChunkLayout(graphs.first, graphs.next);
+  const gate: PromptGate<string> = { resolve: (text) => text, defaultNegative: () => "negative" };
+  const planOf = (generation: WanGenerationDescriptor) =>
+    planWanRequest({ prompt: "p" }, gate, layout, CONFIG, generation);
+
+  it("合成の宣言は記述子との照合を通り、空間の圧縮は 8 × 2 = 16", () => {
+    assertWanVaeMatchesGeneration(layout, SYNTHETIC, "WanPipeline");
+    assertEquals(wanSpatialCompression(layout, SYNTHETIC), 16);
+  });
+
+  it("832×480 の潜在は 30×52 で、計画の潜在の形・タイル計画・重なり（64 px ÷ 16 = 4）が揃う", () => {
+    const plan = planOf(SYNTHETIC);
+    assertEquals(plan.latentShape, [4, 9, 30, 52]);
+    // 計画のタイルは本番の入口（planWanGenerationTiles）を通った計画で、潜在の大きさと同じ軸を覆う
+    // （入口自身の重なりの式は、この行ではなく下の本数で縛る）。
+    assertEquals(plan.tiles, planWanGenerationTiles(layout, 30, 52, SYNTHETIC));
+    assertEquals([plan.tiles.rows.extent, plan.tiles.cols.extent], [30, 52]);
+    // 本数は「重なり 4 以上」を満たす最小（重なりを 8 と取ると列が増える）— 式の性質で縛る。
+    const overlap = 64 / 16;
+    for (const axis of [plan.tiles.rows, plan.tiles.cols]) {
+      const span = axis.extent - axis.tile;
+      assertEquals(axis.starts.length, Math.ceil(span / (axis.tile - overlap)) + 1);
+    }
+    // 覆えるかの門も同じ大きさで計画して通る。
+    assertWanVaeTilesCover(layout, SYNTHETIC, "WanPipeline");
+  });
+
+  it("圧縮 16 で割れない寸法（840×480 — グラフの比 8 だけなら割れる）は、門も計画も同じく拒む", () => {
+    const wide: WanGenerationDescriptor = {
+      ...SYNTHETIC,
+      acceptedSizes: [{ width: 840, height: 480 }],
+      defaults: { ...SYNTHETIC.defaults, width: 840 },
+    };
+    assertThrows(
+      () => assertWanVaeTilesCover(layout, wide, "WanPipeline"),
+      Error,
+      "空間の圧縮 16（VAE の縮尺 128 / 16 × unpatchify 2）では 840×480 の潜在が整数にならない",
+    );
+    assertThrows(() => planOf(wide), Error, "潜在の形 [4,9,30,52.5] が整数でない（空間の圧縮 16）");
+  });
+});
+
 describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（rank・batch・可変 S まで）", () => {
   /** RoPE の素表（`ditContract` が見るのは幅 `2·(t + h + w)` = 128 だけ）。 */
   const ROPE: WanRopeBase = {
@@ -467,6 +591,8 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
     proj: [1, 256],
     context: [1, 512, 4096],
   };
+  /** 配布形の VAE の潜在（16 チャネル）で組んだ DiT の patch。 */
+  const DIT_PATCH = wanDitPatch(16);
   const transformerOf = (patch: Partial<DitShapes>) => {
     const shapes = { ...VALID, ...patch };
     return stubModel({
@@ -484,12 +610,25 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
   };
 
   it("配布形の宣言は通り、文脈と timestep の幅を宣言から引く", () => {
-    assertEquals(ditContract(transformerOf({}), ROPE, "WanPipeline"), {
+    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "WanPipeline"), {
       output: "out",
       projWidth: 256,
       contextRows: 512,
       contextWidth: 4096,
+      patch: DIT_PATCH,
     });
+  });
+
+  it("patch の刻みは上流の (1, 2, 2)・チャネル数は VAE の宣言から（16 なら tokens の幅 64）", () => {
+    assertEquals(wanDitPatch(16), { channels: 16, patchFrames: 1, patchHeight: 2, patchWidth: 2 });
+  });
+
+  it("VAE の潜在のチャネル数が DiT の tokens の幅と合わなければ落ちる（patch は VAE の宣言から組む）", () => {
+    assertThrows(
+      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "WanPipeline"),
+      Error,
+      "'tokens' の形",
+    );
   });
 
   it("batch 2・固定の S・rank 違い・S の記号の食い違いは、Session を張る前に名指しで落ちる", () => {
@@ -520,7 +659,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
     ];
     for (const [label, patch, message] of rejected) {
       assertThrows(
-        () => ditContract(transformerOf(patch), ROPE, "WanPipeline"),
+        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "WanPipeline"),
         Error,
         message,
         label,
@@ -826,7 +965,13 @@ const mockPipeline = (options: {
       sin: [new Float32Array(64), new Float32Array(64), new Float32Array(64)],
     },
     // GPU 経路は umT5 の出力（negative は 126 行）を詰めるので、文脈は配布形と同じ 512 行。
-    dit: { output: "out", projWidth: 256, contextRows: gpuText ? 512 : 4, contextWidth: WIDTH },
+    dit: {
+      output: "out",
+      projWidth: 256,
+      contextRows: gpuText ? 512 : 4,
+      contextWidth: WIDTH,
+      patch: wanDitPatch(16),
+    },
     textEmbeds: EMBEDS,
     text,
   };
@@ -1244,6 +1389,70 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
       Error,
       "部品 'text_encoder' の容器が無い",
     );
+  });
+
+  it("admission は VAE の宣言を記述子と照合する（潜在・出口のチャネル数の食い違いは RoPE の素表を読む前に落ちる）", async () => {
+    // chunk グラフの取り決めを満たす宣言だけの VAE（潜在タイル 32・縮尺 8・cache 1 本）。DiT は器のまま
+    // なので、照合を通り抜けた資産は RoPE の素表の読み出しで別の文言で落ちる（照合の配線を縛る対照）。
+    const vae = async (name: string, frames: number, latent: number, sample: number) =>
+      partAssets(
+        name,
+        await writeContainer({
+          graphs: {
+            [name]: parseIrDeclarationValue({
+              format: "karume-ir",
+              version: 2,
+              requires: { ops: ["mul"] },
+              symbols: [],
+              inputs: [
+                { name: "latent", dtype: "f32", shape: [latent, 1, 32, 32] },
+                { name: "cache_00", dtype: "f32", shape: [16, 2, 32, 32] },
+              ],
+              outputs: ["frame", "cache_00_out"],
+              initializers: {},
+              values: {
+                frame: { dtype: "f32", shape: [sample, frames, 256, 256] },
+                cache_00_out: { dtype: "f32", shape: [16, 2, 32, 32] },
+              },
+              states: {},
+              nodes: [
+                { op: "mul", ins: ["latent", "latent"], outs: ["frame"], attrs: {} },
+                { op: "mul", ins: ["cache_00", "cache_00"], outs: ["cache_00_out"], attrs: {} },
+              ],
+            }),
+          },
+          consts: [],
+          weights: [],
+          assets: [],
+          provenance: { license: "test" },
+        }),
+      );
+    const build = async (latent: number, sample: number) =>
+      WanPipeline.fromAssets(
+        {
+          manifest: wanManifest(WITHOUT_UMT5),
+          assets: {
+            ...SHELL_COMPONENTS,
+            ...await vae("vae_decoder_first", 1, latent, sample),
+            ...await vae("vae_decoder_next", 4, latent, sample),
+          },
+        },
+        { textEncoder: "precomputed" },
+      );
+    const rejected: readonly [string, number, number, string][] = [
+      ["出口 12", 16, 12, "WanPipeline: VAE の出口 12 チャネルが RGB 3 × unpatchify 1² = 3 と違う"],
+      [
+        "潜在 8",
+        8,
+        3,
+        "WanPipeline: 逆正規化の統計（mean 16 本・std 16 本）が VAE の潜在 8 チャネルと違う",
+      ],
+    ];
+    for (const [label, latent, sample, message] of rejected) {
+      await assertRejects(() => build(latent, sample), Error, message, label);
+    }
+    // 対照: 配布形の宣言（潜在 16・出口 3）は照合とタイルの門を通り、器の DiT の RoPE の素表で落ちる。
+    await assertRejects(() => build(16, 3), Error, "'rope_base'");
   });
 
   it("中断済みの signal は資産へ触る前に reason そのままで reject する", async () => {

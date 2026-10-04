@@ -106,6 +106,28 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
     assertEquals(layout.next.frameShape, [3, 4, SIDE, SIDE]);
   });
 
+  it("出口のチャネル数はフレーム出力の軸 0 から引く（RGB の 3 を仮定しない）", () => {
+    assertEquals(layoutOf().sampleChannels, 3);
+    // 出口 12 チャネルの合成の宣言（first / next の両方のフレーム出力だけを差し替える）。
+    const wide = layoutOf(
+      patched(FIRST, { outputs: { 0: { name: "frame", shape: [12, 1, SIDE, SIDE] } } }),
+      patched(NEXT, { outputs: { 0: { name: "frame", shape: [12, 4, SIDE, SIDE] } } }),
+    );
+    assertEquals(wide.sampleChannels, 12);
+  });
+
+  it("出口のチャネル数が first と next で違えば WanVaeChunkError", () => {
+    assertThrows(
+      () =>
+        layoutOf(
+          patched(FIRST, { outputs: { 0: { name: "frame", shape: [12, 1, SIDE, SIDE] } } }),
+          NEXT,
+        ),
+      WanVaeChunkError,
+      "フレームのチャネル数が first と next で違う（first 12・next 3）",
+    );
+  });
+
   it("1 本の宣言が取り決めから外れたら、どちらのグラフの何かを言って WanVaeChunkError", () => {
     const latent = (shape: readonly StubDim[]) => ({ name: "latent", shape });
     const rejected: readonly [string, ChunkSpec, ChunkSpec, string][] = [
@@ -279,5 +301,25 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
       WanVaeChunkError,
       "chunk 1 のフレームの要素数",
     );
+  });
+
+  it("連結のチャネル数は宣言の出口のチャネル数（12 の宣言なら 12 チャネルを写す）", () => {
+    const channels = 12;
+    const wide = layoutOf(
+      patched(FIRST, { outputs: { 0: { name: "frame", shape: [channels, 1, SIDE, SIDE] } } }),
+      patched(NEXT, { outputs: { 0: { name: "frame", shape: [channels, 4, SIDE, SIDE] } } }),
+    );
+    const plane = SIDE * SIDE;
+    // chunk k の値 = `k·100 + c`（3 を仮定した連結は c ≥ 3 の平面を写さず、長さも合わない）。
+    const chunk = (index: number, frames: number) =>
+      new Float32Array(channels * frames * plane).map((_, at) =>
+        index * 100 + Math.floor(at / (frames * plane))
+      ).buffer;
+    const out = concatWanVaeFrames(wide, [chunk(0, 1), chunk(1, 4)]);
+    assertEquals(out.length, channels * 5 * plane);
+    for (let channel = 0; channel < channels; channel += 1) {
+      const frames = Array.from({ length: 5 }, (_, frame) => out[(channel * 5 + frame) * plane]);
+      assertEquals(frames, [0, 100, 100, 100, 100].map((value) => value + channel));
+    }
   });
 });

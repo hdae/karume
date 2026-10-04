@@ -28,8 +28,10 @@ export type WanGenerationDescriptor = {
   /** 出力のフレームレート（上流の世代の事実で、ノブではない — manifest に入れない・ADR 0121 決定 8）。 */
   readonly fps: number;
   /**
-   * 上流の VAE の `patch_size`（ホストの unpatchify の倍率・無しは 1 — ADR 0121 決定 6）。出口が RGB
-   * である前提なら VAE の出口のチャネル数（3·p²）からも導けるが、上流の事実として持つ。
+   * 上流の VAE の `patch_size`（ホストの unpatchify の倍率・無しは 1 — ADR 0121 決定 6）。空間の圧縮
+   * （グラフの入出力の空間比 × この倍率）の因子。出口が RGB である前提なら VAE の出口のチャネル数
+   * （3·p²）からも導けるが、上流の事実として持ち、admission で宣言との照合に使う
+   * （`tile-decode.ts` の `assertWanVaeMatchesGeneration`）。
    */
   readonly vaePatchSize: number;
 };

@@ -126,8 +126,8 @@ import {
   ROPE_BASE,
   runWanDenoise,
   TRANSFORMER,
-  WAN_PATCH,
   type WanContexts,
+  wanDitPatch,
 } from "./dit-loop.ts";
 import {
   type PlanLayout,
@@ -153,6 +153,7 @@ import {
 import type { WanPrompt, WanTextEmbedding, WanTextEmbeds } from "./text-embeds.ts";
 import type { WanPromptEncoder } from "./text/tokenizer.ts";
 import {
+  assertWanVaeMatchesGeneration,
   assertWanVaeTilesCover,
   decodeWanVaeStage,
   VAE_DECODER_FIRST,
@@ -673,14 +674,12 @@ export class WanPipeline {
 
     const transformer = open(TRANSFORMER);
     const layout = wanVaeChunkLayout(open(VAE_DECODER_FIRST), open(VAE_DECODER_NEXT));
-    if (layout.latentChannels !== WAN_PATCH.channels) {
-      throw new Error(
-        `WanPipeline: VAE の潜在 ${layout.latentChannels} チャネルが DiT の ${WAN_PATCH.channels} と違う`,
-      );
-    }
+    // 潜在のチャネル数は VAE の宣言から読み、記述子（統計の本数・unpatchify の倍率）と照合する。DiT の
+    // `tokens` の幅との照合は、同じチャネル数で組んだ patch を ditContract が見る。
+    assertWanVaeMatchesGeneration(layout, WAN21_GENERATION, OWNER);
     assertWanVaeTilesCoverAcceptedSizes(layout);
     const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
-    const dit = ditContract(transformer, ropeBase, OWNER);
+    const dit = ditContract(transformer, ropeBase, wanDitPatch(layout.latentChannels), OWNER);
     const textEncoder = admitWanText(route, open, dit, OWNER);
     return {
       config,
