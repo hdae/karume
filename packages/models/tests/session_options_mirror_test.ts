@@ -31,6 +31,7 @@ import {
 import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../src/wan/pipeline.ts";
+import { UMT5_ENCODER_SESSION_POLICY } from "./helpers/census-table.ts";
 
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
@@ -49,6 +50,7 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   irodori: IRODORI_SESSION_POLICY,
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
+  "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
   wan: WAN_SESSION_POLICY,
 };

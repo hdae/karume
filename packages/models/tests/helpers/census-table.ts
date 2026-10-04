@@ -81,6 +81,23 @@ import { WAN_SESSION_POLICY } from "../../src/wan/pipeline.ts";
 // ---------------------------------------------------------------------------
 
 /**
+ * umT5 の encoder（配布形 `karume-umt5-xxl` — pipeline `umt5-encoder`）の受理表。単体の公開クラスは無く、
+ * Wan の text 段が Session を `{}` で張る（`src/wan` の text 段 — quant 席の `session` を読まない）。だから
+ * 受けるキーは 1 つも無い: 配布形が `session` に何かを宣言したら、実行時に黙って無視される宣言として
+ * ここで落とす。
+ */
+export const UMT5_ENCODER_SESSION_POLICY: FamilySessionPolicy = {
+  linearCompute: false,
+  attentionCompute: false,
+  attentionScoreStorage: false,
+  linearGemvReduce: false,
+  stateAttentionReduce: false,
+  fuseRmsNormAdd: false,
+  fuseLinearStaticQuantize: false,
+  packedStaticQuantize: false,
+};
+
+/**
  * manifest の pipeline 名 → 家族の受理表（実効 SessionOptions の合成に使う）。
  *
  * MUST: 未知の pipeline 名は {@link effectiveSessionOptions} が落とす — 新しい家族のミラーを
@@ -95,6 +112,7 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   irodori: IRODORI_SESSION_POLICY,
   sbv2: SBV2_SESSION_POLICY,
   siglip2: SIGLIP2_SESSION_POLICY,
+  "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
   wan: WAN_SESSION_POLICY,
 };
