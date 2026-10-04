@@ -98,7 +98,10 @@ class TestWrittenReference:
         name, _, metadata = written
         case = next(case for case in few_step_ref.FIXTURE_CASES if case.name == name)
         plan = vae_tiling.plan_tiles(
-            few_step_ref.LATENT_SHAPE[2], few_step_ref.LATENT_SHAPE[3], export_vae.DEFAULT_TILE
+            few_step_ref.LATENT_SHAPE[2],
+            few_step_ref.LATENT_SHAPE[3],
+            export_vae.DEFAULT_TILE,
+            vae_tiling.WAN21_MIN_OVERLAP_LATENT,
         )
 
         assert json.loads(metadata["timesteps"]) == [999, 750]

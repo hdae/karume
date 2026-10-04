@@ -12,9 +12,10 @@ TS 側は `packages/models/src/wan/vae-tiles.ts`。
 上流 `AutoencoderKLWan.tiled_decode` は `range(0, H, stride)` で走査するので最後のタイルが
 短くなり、固定形の chunk グラフでは食えない。開始位置は 0 と `extent − tile` の間を**丸めて
 等分**する（Anima と同じ規則 — ADR 0033 追記 P-3・`anima/tiling.py` の `plan_tile_axis`）。
-本数は「隣り合う対の重なりが {@link MIN_OVERLAP_LATENT} 以上」を満たす最小。832×480
-（潜在 60×104・タイル 32）は行 0 / 14 / 28 × 列 0 / 24 / 48 / 72 の 12 枚（重なりは行 18 潜在・
-列 8 潜在）。
+本数は「隣り合う対の重なりが下限以上」を満たす最小。下限の正本は出力の {@link MIN_OVERLAP_PX}
+で、潜在へは空間の圧縮（グラフの比 × unpatchify の倍率）で割って導く（{@link min_overlap_latent}
+— ADR 0121 決定 6）。Wan2.1 は {@link WAN21_MIN_OVERLAP_LATENT} = 8。832×480（潜在 60×104・
+タイル 32）は行 0 / 14 / 28 × 列 0 / 24 / 48 / 72 の 12 枚（重なりは行 18 潜在・列 8 潜在）。
 
 ## ブレンド・貼り付け・クランプ
 
@@ -76,10 +77,47 @@ from wan import export_vae, vae_patch
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
 
-#: 隣り合うタイルが潜在で重なる最小幅（= 64 px）。上流の既定のブレンド幅
-#: `tile_sample_min − tile_sample_stride` = 256 − 192 = 64 px と同じ（TS 側
-#: `WAN_VAE_MIN_TILE_OVERLAP`）。
-MIN_OVERLAP_LATENT = 8
+#: 隣り合うタイルの出力画素での最小の重なり。上流の既定のブレンド幅
+#: `tile_sample_min − tile_sample_stride` = 256 − 192 = 64 px と同じ。潜在の重なりはここから
+#: {@link min_overlap_latent} で導く（世代ごとに潜在の値を持たない — ADR 0121 決定 6）。
+MIN_OVERLAP_PX = 64
+#: Wan2.1 の VAE の unpatchify の倍率（上流 `config.patch_size` は None = 1 — {@link decode_tiles}
+#: と `vae_patch` が None 以外を拒む）。
+WAN21_VAE_PATCH_SIZE = 1
+
+
+def _is_positive_int(value: object) -> bool:
+    # bool は int の部分型だが、TS 側の `Number.isInteger` は真偽値を整数と見ない — 揃えて拒む。
+    # 型として int を要求するので TS より厳しい（TS は 8.0 を通すが、ここで通すと float が流れる）。
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def min_overlap_latent(scale: int, patch_size: int) -> int:
+    """潜在の重なりの下限 = {@link MIN_OVERLAP_PX} ÷ 空間の圧縮（ADR 0121 決定 6）。
+
+    空間の圧縮 = グラフの入出力の空間比 `scale` × ホストの unpatchify の倍率 `patch_size`。
+    圧縮をグラフの比だけで取ると、unpatchify のある世代で重なりが倍になる（2.2 の 8 × 2 = 16 が
+    8 になり潜在 8 = 128 px）ので、2 つを別の引数で受ける。
+
+    MUST: 割り切れない圧縮は丸めずに落とす（丸めると重なりが 64 px から黙ってずれる）。
+    """
+    if not (_is_positive_int(scale) and _is_positive_int(patch_size)):
+        raise ValueError(
+            f"空間の圧縮の因子が正の整数でない（グラフの比 {scale!r}・unpatchify {patch_size!r}）"
+        )
+    compression = scale * patch_size
+    if MIN_OVERLAP_PX % compression:
+        raise ValueError(
+            f"重なり {MIN_OVERLAP_PX} px が空間の圧縮 {compression}"
+            f"（グラフの比 {scale} × unpatchify {patch_size}）で割り切れない"
+        )
+    return MIN_OVERLAP_PX // compression
+
+
+#: Wan2.1 の重なり（潜在）= 64 ÷ (`export_vae.SPATIAL_SCALE` 8 × 1) = 8。Python 側には開いた
+#: グラフが無いので、グラフの比は recipe の宣言値（export する chunk グラフのフレームの辺
+#: `tile * SPATIAL_SCALE` と同じ値）を使う。
+WAN21_MIN_OVERLAP_LATENT = min_overlap_latent(export_vae.SPATIAL_SCALE, WAN21_VAE_PATCH_SIZE)
 
 #: 参照フィクスチャのファイル名（系列の根に置く — `vae_tiles.<case>.safetensors`）。
 FIXTURE_PREFIX = "vae_tiles."
@@ -145,11 +183,14 @@ class TilePlan:
         }
 
 
-def plan_tile_axis(extent: int, tile: int, min_overlap: int = MIN_OVERLAP_LATENT) -> TileAxis:
+def plan_tile_axis(extent: int, tile: int, min_overlap: int) -> TileAxis:
     """1 軸ぶんの丸め等間隔スナップ配置（TS 側 `planWanVaeTileAxis` と同じ規則）。
 
     本数は「重なりが `min_overlap` 以上」を満たす最小値 `ceil(span / (tile − min_overlap)) + 1`
     （`span = extent − tile`）、開始位置は `round(i · span / (本数 − 1))`（0.5 は切り上げ）。
+
+    MUST: `min_overlap` に既定値を置かない — 世代で値が違う（{@link min_overlap_latent}）ので、
+    渡し忘れが 2.1 の値で黙って通ると別の世代の計画が静かにずれる。
     """
     if tile < 1:
         raise ValueError(f"タイル幅 {tile} が 1 未満")
@@ -182,10 +223,10 @@ def plan_tiles(
     height: int,
     width: int,
     tile: int,
+    min_overlap: int,
     scale: int = export_vae.SPATIAL_SCALE,
-    min_overlap: int = MIN_OVERLAP_LATENT,
 ) -> TilePlan:
-    """潜在の空間 `height × width` に対するタイル計画（軸ごとに独立）。"""
+    """潜在の空間 `height × width` に対するタイル計画（軸ごとに独立・`min_overlap` は潜在）。"""
     return TilePlan(
         scale=scale,
         rows=plan_tile_axis(height, tile, min_overlap),
@@ -369,7 +410,7 @@ def write_fixture(
     vae: AutoencoderKLWan, case: FixtureCase, tile: int, out_root: Path
 ) -> dict[str, Any]:
     """1 ケースを書く（潜在 + タイル参照・band は非タイル参照も）。要約を返す。"""
-    plan = plan_tiles(case.height, case.width, tile)
+    plan = plan_tiles(case.height, case.width, tile, WAN21_MIN_OVERLAP_LATENT)
     latents = seeded_latents(vae, case)
     started = time.perf_counter()
     with torch.no_grad():

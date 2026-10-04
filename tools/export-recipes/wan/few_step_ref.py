@@ -214,7 +214,9 @@ def run_case(
     if not torch.equal(final, steps[-1]):
         raise AssertionError("最終の潜在が最後の step の記録と違う")
 
-    plan = vae_tiling.plan_tiles(LATENT_SHAPE[2], LATENT_SHAPE[3], tile)
+    plan = vae_tiling.plan_tiles(
+        LATENT_SHAPE[2], LATENT_SHAPE[3], tile, vae_tiling.WAN21_MIN_OVERLAP_LATENT
+    )
     started = time.perf_counter()
     with torch.no_grad():
         frames = vae_tiling.tiled_decode_unclamped(
@@ -259,7 +261,9 @@ def write_case(
 ) -> dict[str, Any]:
     """1 ケースを回して書く（staging → 置換）。要約を返す。"""
     tensors, summary = run_case(pipeline, case, embeds, tile=tile)
-    plan = vae_tiling.plan_tiles(LATENT_SHAPE[2], LATENT_SHAPE[3], tile)
+    plan = vae_tiling.plan_tiles(
+        LATENT_SHAPE[2], LATENT_SHAPE[3], tile, vae_tiling.WAN21_MIN_OVERLAP_LATENT
+    )
     source = SOURCES[model]
     metadata = {
         "role": case.role,

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import torch
 
@@ -21,6 +23,9 @@ from wan import vae_patch, vae_tiling
 
 #: 実寸のタイル辺（潜在 — chunk グラフの既定の入力形）。
 TILE = 32
+
+#: Wan2.1 の重なりの下限（潜在）— 出力 64 px から式で導いた値（{@link TestMinOverlapLatent}）。
+OVERLAP = vae_tiling.WAN21_MIN_OVERLAP_LATENT
 
 #: タイル辺 32・重なりの下限 8 の開始位置（潜在の全長 → 開始位置列）。TS 側
 #: （`packages/models/tests/wan_vae_tiles_test.ts` の `AXIS_STARTS`）と**同じ値**で凍結する
@@ -41,14 +46,60 @@ MIRRORED_STARTS = {
 }
 
 
+class TestMinOverlapLatent:
+    """重なりの下限は出力 64 px ÷ 空間の圧縮（グラフの比 × unpatchify の倍率 — ADR 0121 決定 6）。
+
+    2.1 の値（8）だけでは式が unpatchify の倍率を無視しても赤にならないので、倍率 2 の行も置いて
+    式を 2 点で縛る（2.2 の計画表ではなく式の検証）。
+    """
+
+    @pytest.mark.parametrize(("scale", "patch_size", "expected"), [(8, 1, 8), (8, 2, 4)])
+    def test_the_overlap_is_64_px_over_the_spatial_compression(
+        self, scale: int, patch_size: int, expected: int
+    ):
+        assert vae_tiling.min_overlap_latent(scale, patch_size) == expected
+
+    def test_wan21_overlap_is_eight_latents(self):
+        """2.1 の計画表（{@link MIRRORED_STARTS}）を作った値と同じ。"""
+        assert vae_tiling.WAN21_MIN_OVERLAP_LATENT == 8
+        assert type(vae_tiling.WAN21_MIN_OVERLAP_LATENT) is int
+
+    def test_a_compression_that_does_not_divide_64_px_is_rejected(self):
+        """丸めない — 丸めると重なりが 64 px から黙ってずれる。"""
+        with pytest.raises(ValueError, match=r"空間の圧縮 24（グラフの比 8 × unpatchify 3）"):
+            vae_tiling.min_overlap_latent(8, 3)
+
+    @pytest.mark.parametrize(
+        ("scale", "patch_size"), [(8.0, 1), (8, 1.0), (True, 1), (8, True), (0, 1), (8, 0), (-8, 1)]
+    )
+    def test_a_factor_that_is_not_a_positive_int_is_rejected(
+        self, scale: object, patch_size: object
+    ):
+        """TS 側（`Number.isInteger`）と同じく真偽値・0 以下を拒み、さらに型として int を要求する。
+
+        TS は 8.0 を整数と見る（JS に float と int の区別が無い）が、Python 側は 8.0 を通すと
+        float が流れるので TS より厳しく拒む。文言は内訳（グラフの比・unpatchify の倍率）を名指す。
+        """
+        expected = rf"正の整数でない（グラフの比 {re.escape(repr(scale))}・unpatchify "
+        with pytest.raises(ValueError, match=expected):
+            vae_tiling.min_overlap_latent(scale, patch_size)
+
+    def test_the_tile_planners_require_the_overlap(self):
+        """渡し忘れは TypeError — 2.1 の値で黙って計画しない。"""
+        with pytest.raises(TypeError):
+            vae_tiling.plan_tile_axis(60, TILE)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            vae_tiling.plan_tiles(60, 104, TILE)  # type: ignore[call-arg]
+
+
 class TestPlanTileAxis:
     @pytest.mark.parametrize("extent", sorted(MIRRORED_STARTS))
     def test_starts_match_the_ts_side(self, extent: int):
-        assert vae_tiling.plan_tile_axis(extent, TILE).starts == MIRRORED_STARTS[extent]
+        assert vae_tiling.plan_tile_axis(extent, TILE, OVERLAP).starts == MIRRORED_STARTS[extent]
 
     def test_832x480_is_twelve_tiles(self):
         """832×480（潜在 60×104）は 3 × 4 = 12 枚・面積は非タイルの 1.97 倍（ADR 0118 決定 2）。"""
-        plan = vae_tiling.plan_tiles(60, 104, TILE)
+        plan = vae_tiling.plan_tiles(60, 104, TILE, OVERLAP)
 
         assert plan.tiles == 12
         assert plan.scale == 8
@@ -61,7 +112,7 @@ class TestPlanTileAxis:
         assert round(plan.tiles * TILE * TILE / (60 * 104), 2) == 1.97
 
     def test_480x832_is_the_transpose(self):
-        plan = vae_tiling.plan_tiles(104, 60, TILE)
+        plan = vae_tiling.plan_tiles(104, 60, TILE, OVERLAP)
 
         assert plan.rows.starts == MIRRORED_STARTS[104]
         assert plan.cols.starts == MIRRORED_STARTS[60]
@@ -69,13 +120,13 @@ class TestPlanTileAxis:
     @pytest.mark.parametrize("extent", [32, 33, 40, 56, 57, 60, 64, 80, 104, 128, 135, 256])
     def test_invariants_hold_for_every_extent(self, extent: int):
         """固定形の chunk グラフが食える配置であることの不変条件（丸め等間隔配置の帰結）。"""
-        axis = vae_tiling.plan_tile_axis(extent, TILE)
+        axis = vae_tiling.plan_tile_axis(extent, TILE, OVERLAP)
         span = extent - TILE
         gaps = [second - first for first, second in zip(axis.starts, axis.starts[1:], strict=False)]
 
         assert axis.starts[0] == 0
         assert axis.starts[-1] == span, "最後のタイルは末端へスナップする"
-        assert all(TILE - gap >= vae_tiling.MIN_OVERLAP_LATENT for gap in gaps)
+        assert all(TILE - gap >= OVERLAP for gap in gaps)
         assert sum(axis.region(i) for i in range(len(axis.starts))) == extent
         # 丸め等間隔の実体 = 間隔の差は高々 1 潜在（「固定 stride + 末尾だけスナップ」への退行で
         # 最後の対だけ大きく開いて割れる）。
@@ -86,14 +137,14 @@ class TestPlanTileAxis:
         """本数は重なりの下限だけを制約にした最小（安全側に倒した実装はタイル数が跳ねる）。"""
         span = extent - TILE
 
-        assert len(vae_tiling.plan_tile_axis(extent, TILE).starts) == (
-            -(-span // (TILE - vae_tiling.MIN_OVERLAP_LATENT)) + 1
+        assert len(vae_tiling.plan_tile_axis(extent, TILE, OVERLAP).starts) == (
+            -(-span // (TILE - OVERLAP)) + 1
         )
 
     def test_extent_shorter_than_the_tile_is_rejected(self):
         """固定形のグラフは短い入力を食えない — 黙ってゼロ埋めしない。"""
         with pytest.raises(ValueError, match="タイル幅"):
-            vae_tiling.plan_tile_axis(31, TILE)
+            vae_tiling.plan_tile_axis(31, TILE, OVERLAP)
 
     def test_overlap_at_or_above_the_tile_width_is_rejected(self):
         with pytest.raises(ValueError, match="最小の重なり"):
@@ -101,11 +152,11 @@ class TestPlanTileAxis:
 
     def test_a_pair_outside_the_axis_is_rejected(self):
         with pytest.raises(ValueError, match="ブレンド対"):
-            vae_tiling.plan_tile_axis(TILE, TILE).blend_at(8, 1)
+            vae_tiling.plan_tile_axis(TILE, TILE, OVERLAP).blend_at(8, 1)
 
     def test_meta_carries_the_geometry(self):
         """フィクスチャのメタ（TS の計画と突き合わせる欄）。"""
-        assert vae_tiling.plan_tiles(60, 104, TILE).meta() == {
+        assert vae_tiling.plan_tiles(60, 104, TILE, OVERLAP).meta() == {
             "tile": "32",
             "scale": "8",
             "rows_starts": "0,14,28",
