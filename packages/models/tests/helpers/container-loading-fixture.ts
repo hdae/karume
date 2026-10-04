@@ -147,7 +147,8 @@ export const serveContainer = async (
   };
 };
 
-const manifestBytes = (models: unknown): Uint8Array<ArrayBuffer> =>
+/** 配布形（`karume.json`）のバイト列（疑似 HF のリポとメモリ上のディレクトリが共有する 1 本）。 */
+export const manifestBytes = (models: unknown): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(
     JSON.stringify({
       format: "karume/5",
