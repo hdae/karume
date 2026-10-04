@@ -370,3 +370,20 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
   f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、この形で落ちうる。
 - 直し方の候補（裁定が要る）: 差し替え先の席の `requiredLimits` / `gpuFeatures` を元の席と合わせて判定する（大きい方を取る）か、
   席が食い違う差し替えを admission で拒む。
+
+## Intel Arc B570: Wan DiT 実用席 S = 32,760 の通常モードが、レーンの中で 1 回だけ GPU のメモリ不足で落ちた（2026-10-04・記録のみ）
+
+`deno task test:models:wan` の中で、`e2e_wan_dit_test.ts` の「実用席 `f16+dit8-a8-attn8-s16`・通常モード・S = 32,760」の step が
+**`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`** で落ちた（385 passed・1 failed・82 分の走行の 1 件）。
+同じファイルを `--filter 実用席` で単独で回すと、同じ順（計測モード → 通常モード）で緑になる（2 passed・203 s）。単独の走行の
+この step は、Session を張る前のこの process の確保が 1.73 GiB、山が 7.69 GiB（確保 5.46 GiB）で、B570 の上限（約 9.4〜9.6 GiB）まで
+約 1.8 GiB しか余裕が無い。
+
+- 原因は未特定。候補（推測）は 2 つ: ① 同じ process の前のテストの確保が解放されないまま残っていた（B570 は `destroy()` の解放が
+  次の device poll まで遅れる — テストは組の間で `settleReleases` を待つが、レーンの中の残りは測っていない）② 学習と共有している
+  GPU を別の process がその瞬間に使っていた。落ちた step は VRAM の記録（`start` の値）を出さないので、どちらかを今の記録からは
+  決められない。この日の変更は runtime / models の `src` に触れていない（配布形ミラー・テスト・recipe だけ）。
+- 運用の回避 = この step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独で再走する（緑ならレーンの中の
+  残りか他の process）。
+- 再発したら: 落ちた step でも VRAM の記録を出す形にしてから（今は成功した step だけが `start` / 山を出す）、レーンの中の `start` の
+  値を単独の 1.73 GiB と比べて ① と ② を分ける。
