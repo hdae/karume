@@ -240,6 +240,24 @@ Measured on 2026-10-02 (B570, Deno 2.9.6):
 | tiled vs untiled upstream decode (observation, not a gate) | max abs 0.120, mean 2.26e-3 (ratio 8.17e-2)       |
 | CPU reference (`band`): tiled / untiled                    | 836 s / 491 s, peak RSS 9.2 GiB                   |
 
+To show that a recipe change leaves the series unchanged, run the writers into an empty scratch
+directory (`--out` on both — without it they overwrite the series itself) and compare only the named
+items with `wan.series_check`; a copy of the series would match too, so the check means something
+only for a fresh run:
+
+```bash
+uv run --group wan --inexact python -m wan.series_check --written <scratch> \
+  --existing ../../outputs/series/wan2.1-t2v-1.3b-f16-dyn \
+  --require vae_decoder_first --require vae_decoder_next --require vae_chunks.band.safetensors
+```
+
+Safetensors files are compared tensor by tensor (names, dtype, shape and raw bits) plus their
+metadata as a dictionary, because safetensors 0.8.0 writes the metadata keys in an order that varies
+between processes; every other file is compared by size and SHA-256. It prints one JSON summary and
+exits 1 on any mismatch, including an item or file missing on either side, a required directory with
+no file in it and a symlink inside the compared items, which it never follows (2 is a usage error, 3
+an unreadable file).
+
 ## Text embeddings, sampler and few-step reference (stage 6)
 
 ### Text embeddings
