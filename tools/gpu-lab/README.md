@@ -345,8 +345,9 @@ embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
 - **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/3`).
 
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
-stops it. A 50-step clip takes about 30 minutes for 33 frames and about 2 hours for 81 frames on the
-Intel Arc B570 under Deno.
+stops it. On the Intel Arc B570 under Deno, a 50-step clip with the `f16` quant takes about 30
+minutes for 33 frames and about 2 hours for 81 frames; with `f16+dit8-a8-attn8-s16` it takes about
+16 minutes for 33 frames (81 frames not measured yet).
 
 ## Checking Wan in Chrome
 

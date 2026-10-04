@@ -457,8 +457,10 @@ distribution `models/karume-wan2.1/` through `fromPretrained` and compares it wi
 written by `wan.few_step_ref` — its sha256 rows were first written from the series, so the
 distribution path has to reproduce them bit for bit. The gates skip explicitly (with the generating
 command) when those assets or a GPU adapter are missing. `KARUME_WAN_FULL_PIPELINE=1` adds the
-50-step runs (on the B570, about half an hour for the 33-frame clip and about two hours for the
-81-frame clip).
+50-step runs: the 33-frame and the 81-frame clip, each with the `f16` quant and with
+`f16+dit8-a8-attn8-s16` (four runs). On the B570, the `f16` quant takes about half an hour for the
+33-frame clip and about two hours for the 81-frame clip; `f16+dit8-a8-attn8-s16` takes about 16
+minutes for the 33-frame clip (its 81-frame clip has not been measured yet).
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
 when the pinned snapshot is not in the HF cache.
