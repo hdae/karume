@@ -5,7 +5,10 @@
   なら印）を名乗る。sha256・キー集合・別名の対の値・FP8・混在・`.bin`・旧い綴り・構成の欄の
   不一致は fail loudly。対の両方を持つ形と片方だけの形は受ける。`unknown` など再配布の条件を
   識別しないライセンスの値は未宣言の印になる。取り込み先が `models/` の下なら API を引く前に、
-  取り込み先に記録の外の重みのファイル（索引を含む）があれば記録を書く前に落ちる。
+  取り込み先に置いてよいファイル（記録のファイル・config・記録・確認の記録）の外のもの（索引・
+  大文字の拡張子・`.pkl`・書きかけの `.part` を含む）があれば記録を書く前に落ちる。記録は置いた
+  config の sha256 を持ち、取り込みの後に config を書き換えると読み口（書き手・参照・組み立て）が
+  読む前に落ちる。
 - 読み口: 記録が名指すファイルだけを、sha256 を照合した記述子越しに読む（索引を置いても、照合の
   後に path を差し替えても、読むのは照合した内容）。
 - 書き手（`wan.umt5_export --intake`）: BF16 の取り込みから書いた容器が、同じ値を F32 へ広げた
@@ -227,7 +230,9 @@ class TestTheIntake:
         assert intake.license == ui.UNDECLARED_LICENSE == "NOASSERTION"
         assert intake.undeclared
         assert intake.base_model is None
-        assert intake.config == ui.ConfigOrigin("base-copy", BASE.repo, BASE.revision)
+        assert intake.config == ui.ConfigOrigin(
+            "base-copy", BASE.repo, BASE.revision, _sha256(tiny_dir / UMT5_CONFIG)
+        )
         assert intake.config_assumed
         assert (intake.directory / UMT5_CONFIG).read_bytes() == (
             tiny_dir / UMT5_CONFIG
@@ -255,6 +260,7 @@ class TestTheIntake:
         assert intake.config.source == "upstream"
         assert not intake.config_assumed
         assert (intake.directory / UMT5_CONFIG).read_bytes() == config.read_bytes()
+        assert intake.config.sha256 == _sha256(config)
 
     def test_rerunning_the_same_intake_is_safe(self, tmp_path, tiny_dir, bf16_tensors):
         first = _intake(tmp_path, tiny_dir, bf16_tensors)
@@ -473,6 +479,59 @@ class TestTheConfigGate:
         with pytest.raises(ui.Umt5IntakeError, match="構成の"):
             _intake(tmp_path, tiny_dir, bf16_tensors, config=config)
 
+    @staticmethod
+    def _rewrite_config(intake: ui.Umt5Intake, **changes: Any) -> None:
+        """取り込みの後に config を手で書き換える（故障注入）。"""
+        path = intake.directory / UMT5_CONFIG
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document.update(changes)
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+    @pytest.mark.parametrize("config_source", ["base-copy", "upstream"])
+    def test_a_config_rewritten_after_the_intake_is_refused(
+        self, tmp_path, tiny_dir, bf16_tensors, config_source
+    ):
+        """記録が置いたバイト列の sha256 を持ち、読むたびに照合する（グラフに効かないバケットの
+        構成の書き換えも、本家と照合していない構成として拒む）。"""
+        config = None if config_source == "base-copy" else _config(tmp_path, tiny_dir)
+        intake = _intake(tmp_path, tiny_dir, bf16_tensors, config=config)
+        assert intake.config.source == config_source
+        self._rewrite_config(intake, relative_attention_max_distance=64)
+
+        with pytest.raises(ui.Umt5IntakeError, match=r"記録の .* と違う"):
+            ui.load_intake(intake.directory)
+
+    def test_a_missing_config_is_refused(self, tmp_path, tiny_dir, bf16_tensors):
+        intake = _intake(tmp_path, tiny_dir, bf16_tensors)
+        (intake.directory / UMT5_CONFIG).unlink()
+
+        with pytest.raises(ui.Umt5IntakeError, match="が無い"):
+            ui.load_intake(intake.directory)
+
+    @pytest.mark.parametrize(
+        ("command", "entry"),
+        [
+            (["write", ui.ALLOW_UNDECLARED_LICENSE_FLAG], "prepare"),
+            (["prepare"], "prepare"),
+            (["reference"], "reference_encoder"),
+        ],
+    )
+    def test_the_writer_and_the_reference_refuse_a_rewritten_config_before_reading(
+        self, tmp_path, tiny_dir, bf16_tensors, monkeypatch, command, entry
+    ):
+        intake = _intake(tmp_path, tiny_dir, bf16_tensors)
+        self._rewrite_config(intake, relative_attention_max_distance=64)
+        monkeypatch.setattr(ue, "SERIES_ROOT", tmp_path / "series")
+
+        def unreachable(*_: Any, **__: Any) -> Any:
+            raise AssertionError("書き換えた config で読んだ")
+
+        monkeypatch.setattr(ue, entry, unreachable)
+
+        with pytest.raises(ui.Umt5IntakeError, match=r"記録の .* と違う"):
+            ue.main([command[0], "--intake", str(intake.directory), *command[1:]])
+        assert not (tmp_path / "series").exists()
+
 
 class TestTheRecord:
     def _document(self, tmp_path, tiny_dir, bf16_tensors) -> tuple[Path, dict[str, Any]]:
@@ -485,6 +544,16 @@ class TestTheRecord:
         [
             ({"dtype": "F16"}, "dtype"),
             ({"format": "karume-umt5-intake/0"}, "format"),
+            ({"format": "karume-umt5-intake/1"}, "やり直す"),
+            (
+                {
+                    "config": {
+                        "source": "base-copy",
+                        "base": {"repo": BASE.repo, "revision": BASE.revision},
+                    }
+                },
+                "sha256} でない",
+            ),
             ({"extra": 1}, "余剰"),
             ({"revision": "main"}, "40 桁"),
             ({"license": ""}, "license が空"),
@@ -603,13 +672,27 @@ class TestTheWriter:
         (intake.directory / ue.CHECKPOINT_INDEX).write_text(
             json.dumps({"weight_map": dict.fromkeys(evil, "evil.safetensors")}), encoding="utf-8"
         )
-        monkeypatch.setattr(ue, "assert_only_recorded_weights", lambda *_: None)
+        monkeypatch.setattr(ue, "assert_only_intake_files", lambda *_: None)
 
         checkpoint = ue.intake_checkpoint(intake)
 
         assert torch.equal(checkpoint.read(SHARED), bf16_tensors[SHARED].float())
 
-    @pytest.mark.parametrize("foreign", [ue.CHECKPOINT_INDEX, "evil.safetensors", "sub/x.bin"])
+    @pytest.mark.parametrize(
+        "foreign",
+        [
+            ue.CHECKPOINT_INDEX,
+            "evil.safetensors",
+            "sub/x.bin",
+            # 許可の一覧で閉じる（拡張子の一覧では見落とす形）。
+            "EVIL.SAFETENSORS",
+            "weights.pkl",
+            "weights.npz",
+            f"{FILE}.part",
+            "Config.json",
+            "notes.txt",
+        ],
+    )
     def test_a_foreign_weight_file_next_to_the_record_fails(
         self, tmp_path, tiny_dir, bf16_tensors, foreign
     ):
@@ -619,6 +702,23 @@ class TestTheWriter:
 
         with pytest.raises(ue.Umt5ExportError, match="記録の外の重みのファイル"):
             ue.intake_checkpoint(intake)
+
+    def test_a_symlink_under_an_allowed_name_fails(self, tmp_path, tiny_dir, bf16_tensors):
+        """許可の名前でも symlink は外のもの: 確認の記録の名前で、記録の外の重みを指せてしまう。"""
+        intake = _intake(tmp_path, tiny_dir, bf16_tensors)
+        outside = tmp_path / "outside.safetensors"
+        outside.write_bytes(b"{}")
+        (intake.directory / ui.LICENSE_REVIEW_FILE).symlink_to(outside)
+
+        with pytest.raises(ue.Umt5ExportError, match="記録の外の重みのファイル"):
+            ue.intake_checkpoint(intake)
+
+    def test_the_review_note_is_allowed_next_to_the_record(self, tmp_path, tiny_dir, bf16_tensors):
+        """対: 置いてよいファイル（記録のファイル・config・記録・確認の記録）だけなら読める。"""
+        intake = _intake(tmp_path, tiny_dir, bf16_tensors)
+        (intake.directory / ui.LICENSE_REVIEW_FILE).write_text("reviewed\n", encoding="utf-8")
+
+        assert ue.intake_checkpoint(intake).names()
 
     def test_a_file_swapped_after_the_check_is_not_read(self, tmp_path, tiny_dir, bf16_tensors):
         """照合と読みが同じ内容: 照合の後に path の先を別のファイルへ差し替えても（rename）、
@@ -715,8 +815,10 @@ def _record(
     config_source: str = "base-copy",
     base_model: list[str] | None = None,
 ) -> Path:
-    """組み立てが読む記録だけを置く（組み立ては重みのファイルを読まない）。"""
+    """組み立てが読む記録と、記録が pin する config だけを置く（組み立ては重みのファイルを
+    読まない）。"""
     directory.mkdir(parents=True, exist_ok=True)
+    (directory / UMT5_CONFIG).write_text("{}\n", encoding="utf-8")
     (directory / ui.INTAKE_FILE).write_text(
         json.dumps(
             {
@@ -731,6 +833,7 @@ def _record(
                 "config": {
                     "source": config_source,
                     "base": {"repo": BASE.repo, "revision": BASE.revision},
+                    "sha256": _sha256(directory / UMT5_CONFIG),
                 },
                 "fetched_at": "2026-10-04T00:00:00+00:00",
             }

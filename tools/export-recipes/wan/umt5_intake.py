@@ -12,7 +12,8 @@
    相対位置のバケットの構成）を本家の pin の config と突き合わせ、違えば fail loudly（TS が
    バケットの構成を固定しているため）。持たなければ本家の pin の config を写し、「構成は推定
    （本家の写し）」と記録する（その場合の照合は空 — `relative_attention_max_distance` は重みの
-   形から導けない）。
+   形から導けない）。置いたバイト列の sha256 を記録し、{@link load_intake} が読むたびに照合する
+   （取り込みの後の書き換えを、本家と照合していない構成として拒む）。
 3. 指定の 1 本を pin した revision で取り、sha256 を API の値と突き合わせる（`.part` → 一致で
    rename）。受けるのは safetensors だけ（pickle の `.bin` を開くのは本家の pin の行だけ —
    決定 2）。取ったファイルは**名前も中身もそのまま** `inputs/umt5/<名前>/` に置く（F32 の写しは
@@ -22,7 +23,8 @@
    {@link assert_outside_distribution_root}）。
 4. ヘッダを読み、dtype（全テンソルが同じ BF16 か F32 — FP8・混在は拒む）・キー集合（Wan の
    `text_encoder` と同じ形 — tied な別名の対は 1 本と数え、両方を持つなら決定 2 の規則）・形を
-   見る（`wan.umt5_export.inspect_intake_checkpoint`）。
+   見る（`wan.umt5_export.inspect_intake_checkpoint`）。取り込み先に置いてよいファイル（{@link
+   assert_only_intake_files} の許可の一覧）の外のものがあれば、記録を書く前に落とす。
 5. 出所の記録 {@link INTAKE_FILE}（機械専有 — 人は追記しない）を書く。
 
 **ライセンスの判定はしない**（ADR 0088 決定 5）。宣言されたライセンスを写すだけで、宣言が無いか、
@@ -47,7 +49,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -66,7 +67,12 @@ INTAKE_ROOT = INPUTS_ROOT / "umt5"
 INTAKE_FILE = "intake.json"
 
 #: 記録の形式の綴り（形を変えたら版を上げる — 読み口は知らない版を fail loudly で拒む）。
-INTAKE_FORMAT = "karume-umt5-intake/1"
+#: `/2` で `config.sha256` を足した。古い版の記録は移行せずに拒む（未公開の道具 — 取り込みを同じ
+#: 引数でやり直せば今の版で書き直る）。
+INTAKE_FORMAT = "karume-umt5-intake/2"
+
+#: 取り込みを行う人・エージェントの確認の記録（このコマンドは書かない — モジュール doc）。
+LICENSE_REVIEW_FILE = "license-review.md"
 
 #: ライセンス未宣言の印（SPDX の `NOASSERTION` — ADR 0122 決定 6・未解決「未宣言の印の綴り」の
 #: 決定）。記録の `license`・容器の `provenance.license`・実験用ミラーのカードの frontmatter で
@@ -85,22 +91,6 @@ UNIDENTIFIED_LICENSES = frozenset({"", "noassertion", "unknown", "none"})
 
 #: HF の `license: other`（識別子は `license_name` が持つ — 素の `other` は条件を名指さない）。
 _OTHER_LICENSE = "other"
-
-#: 重みとして読まれうるファイルの綴り（{@link assert_only_recorded_weights} — 取り込み先に記録の
-#: 外のものがあれば落とす）。索引（`*.index.json`）も含める — 索引の `weight_map` は別のファイルを
-#: 指せる。
-_WEIGHT_SUFFIXES: tuple[str, ...] = (
-    ".safetensors",
-    ".index.json",
-    ".bin",
-    ".pt",
-    ".pth",
-    ".ckpt",
-    ".gguf",
-    ".h5",
-    ".msgpack",
-    ".onnx",
-)
 
 #: 未宣言の印を焼いた容器と実験用ミラーを作ることの明示（書き手と dist ドライバが同じ綴りで
 #: 受ける）。
@@ -181,11 +171,13 @@ class IntakeFile:
 
 @dataclass(frozen=True)
 class ConfigOrigin:
-    """`config.json` の出所（{@link CONFIG_SOURCES}）と、照合した / 写した本家の pin。"""
+    """`config.json` の出所（{@link CONFIG_SOURCES}）と、照合した / 写した本家の pin、置いた
+    バイト列の sha256（{@link load_intake} が読むたびに照合する）。"""
 
     source: str
     base_repo: str
     base_revision: str
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -239,6 +231,7 @@ class Umt5Intake:
             "config": {
                 "source": self.config.source,
                 "base": {"repo": self.config.base_repo, "revision": self.config.base_revision},
+                "sha256": self.config.sha256,
             },
             "fetched_at": self.fetched_at,
         }
@@ -268,23 +261,50 @@ def assert_outside_distribution_root(path: Path, *, root: Path) -> None:
         )
 
 
-def assert_only_recorded_weights(directory: Path, file: str) -> None:
-    """取り込み先 `directory` に、記録が名指すファイル `file` の外の重みのファイル
-    （{@link _WEIGHT_SUFFIXES} — 索引を含む）が無いことを見る（下の階層も見る）。
+def assert_only_intake_files(directory: Path, file: str) -> None:
+    """取り込み先 `directory` の直下に、置いてよいファイル（記録が名指すファイル `file`・
+    `config.json`・{@link INTAKE_FILE}・{@link LICENSE_REVIEW_FILE}）の外のものが無いことを見る
+    （サブディレクトリも外のものとして数える）。
 
     MUST: 在れば fail loudly — 読み口は記録のファイルだけを開くが、記録の外の重みが同じ席に
     居ると、どれが照合したものかを人も道具も取り違える（索引があれば `weight_map` の先を読む
     読み口に渡った時点で、照合していないファイルが黙って読まれる）。
+    MUST: 許可の一覧で閉じる（名前どおりに比べる — 大文字小文字も区別する）— 重みの拡張子の
+    一覧で開くと、大文字の拡張子・一覧に無い形式（`.pkl`・`.npz` など）・書きかけの `.part` が
+    素通りする。
+    MUST: symlink は許可の名前でも拒む — `is_file()` は symlink を辿るので、許可の名前の symlink で
+    記録の外の重みを同じ席に置ける。
     """
+    allowed = {file, UMT5_CONFIG, INTAKE_FILE, LICENSE_REVIEW_FILE}
     foreign = sorted(
-        str(path.relative_to(directory))
-        for path in directory.rglob("*")
-        if path.name.endswith(_WEIGHT_SUFFIXES) and path != directory / file
+        path.name + ("/" if path.is_dir() else "")
+        for path in directory.iterdir()
+        if path.name not in allowed or path.is_symlink() or not path.is_file()
     )
     if foreign:
         raise Umt5IntakeError(
-            f"{directory} に記録の外の重みのファイルがある: {foreign}（intake.json が名指すのは"
-            f" {file} だけ — 取り込み先には置かない）"
+            f"{directory} に記録の外のファイルがある: {foreign} — 置いてよいのは"
+            f" {sorted(allowed)} だけ（記録の外の重みのファイルを取り違えないよう、種類によらず"
+            "取り込み先には置かない）"
+        )
+
+
+def _assert_config_pinned(directory: Path, sha256: str, where: str) -> None:
+    """取り込み先の `config.json` が記録の sha256（取り込みの時点に置いたバイト列）と同じか。
+
+    MUST: 違えば・無ければ fail loudly — 書き手と参照はグラフとバケットの構成をこのファイルから
+    読み直すので、取り込みの後に書き換えると（例 `relative_attention_max_distance`）本家との照合を
+    経ていない構成で容器と golden ができる。
+    """
+    path = directory / UMT5_CONFIG
+    if not path.is_file():
+        raise Umt5IntakeError(f"{where}: {path} が無い — 取り込みをやり直す")
+    actual = _sha256(path)
+    if actual != sha256:
+        raise Umt5IntakeError(
+            f"{where}: {path} の sha256 {actual} が記録の {sha256} と違う — 取り込みの後に"
+            " config を書き換えた（構成は本家と照合した取り込みの時点の値だけを受ける。直すなら"
+            "取り込みをやり直す）"
         )
 
 
@@ -344,7 +364,8 @@ def load_intake(directory: Path) -> Umt5Intake:
         raise Umt5IntakeError(f"{where}: JSON の object でない")
     if document.get("format") != INTAKE_FORMAT:
         raise Umt5IntakeError(
-            f"{where}: format {document.get('format')!r} が {INTAKE_FORMAT} でない"
+            f"{where}: format {document.get('format')!r} が {INTAKE_FORMAT} でない（古い版の記録は"
+            " 移行しない — `python -m wan.umt5_intake` を同じ引数でやり直す）"
         )
     if set(document) != _RECORD_KEYS:
         raise Umt5IntakeError(
@@ -396,14 +417,20 @@ def load_intake(directory: Path) -> Umt5Intake:
     base = _require(config, "base", dict, f"{where} config")
     source = _require(config, "source", str, f"{where} config")
     if (
-        set(config) != {"source", "base"}
+        set(config) != {"source", "base", "sha256"}
         or set(base) != {"repo", "revision"}
         or source not in CONFIG_SOURCES
     ):
         raise Umt5IntakeError(
             f"{where}: config が {{source: {list(CONFIG_SOURCES)},"
-            " base: {repo, revision}} でない"
+            " base: {repo, revision}, sha256} でない"
         )
+    config_sha256 = _require(config, "sha256", str, f"{where} config")
+    if _SHA256.fullmatch(config_sha256) is None:
+        raise Umt5IntakeError(
+            f"{where}: config.sha256 {config_sha256!r} が小文字 16 進 64 桁でない"
+        )
+    _assert_config_pinned(directory, config_sha256, where)
     return Umt5Intake(
         directory=directory,
         name=name,
@@ -419,6 +446,7 @@ def load_intake(directory: Path) -> Umt5Intake:
             source=source,
             base_repo=_require(base, "repo", str, f"{where} config.base"),
             base_revision=_require(base, "revision", str, f"{where} config.base"),
+            sha256=config_sha256,
         ),
         fetched_at=_require(document, "fetched_at", str, where),
     )
@@ -582,29 +610,37 @@ def _place_checkpoint(source: Path, dest: Path, expected: HubFile) -> None:
 def _place_config(
     hub: Hub, info: HubRevision, repo: str, revision: str, dest: Path
 ) -> ConfigOrigin:
-    """`config.json` を置き、その出所を返す（モジュール doc の手順 2）。"""
+    """`config.json` を置き、その出所を返す（モジュール doc の手順 2）。
+
+    記録する sha256 は照合した（写した）バイト列そのものから取る — 置いた後に読み直して取ると、
+    その間の書き換えを記録が追認する。
+    """
     base = UMT5_SOURCES[BASE_UPSTREAM].source
-    base_path = hub.download(base.repo, base.revision, UMT5_CONFIG)
-    origin = ConfigOrigin(source="upstream", base_repo=base.repo, base_revision=base.revision)
+    base_bytes = hub.download(base.repo, base.revision, UMT5_CONFIG).read_bytes()
     if UMT5_CONFIG not in info.files:
-        shutil.copyfile(base_path, dest / UMT5_CONFIG)
-        return ConfigOrigin(source="base-copy", base_repo=base.repo, base_revision=base.revision)
-    upstream_path = hub.download(repo, revision, UMT5_CONFIG)
-    upstream = json.loads(upstream_path.read_text(encoding="utf-8"))
-    reference = json.loads(base_path.read_text(encoding="utf-8"))
-    differing = {
-        key: (upstream.get(key), reference.get(key))
-        for key in CONFIG_FIELDS
-        if upstream.get(key) != reference.get(key)
-    }
-    if differing:
-        raise Umt5IntakeError(
-            f"{repo}@{revision} の {UMT5_CONFIG} が本家 {base.repo}@{base.revision} と構成の"
-            f"欄で違う（上流, 本家）: {differing} — グラフかバケットの構成が違う umT5 は互換の"
-            " encoder でない"
-        )
-    shutil.copyfile(upstream_path, dest / UMT5_CONFIG)
-    return origin
+        source, placed = "base-copy", base_bytes
+    else:
+        source, placed = "upstream", hub.download(repo, revision, UMT5_CONFIG).read_bytes()
+        upstream = json.loads(placed.decode("utf-8"))
+        reference = json.loads(base_bytes.decode("utf-8"))
+        differing = {
+            key: (upstream.get(key), reference.get(key))
+            for key in CONFIG_FIELDS
+            if upstream.get(key) != reference.get(key)
+        }
+        if differing:
+            raise Umt5IntakeError(
+                f"{repo}@{revision} の {UMT5_CONFIG} が本家 {base.repo}@{base.revision} と構成の"
+                f"欄で違う（上流, 本家）: {differing} — グラフかバケットの構成が違う umT5 は互換の"
+                " encoder でない"
+            )
+    (dest / UMT5_CONFIG).write_bytes(placed)
+    return ConfigOrigin(
+        source=source,
+        base_repo=base.repo,
+        base_revision=base.revision,
+        sha256=hashlib.sha256(placed).hexdigest(),
+    )
 
 
 def intake(
@@ -711,7 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"[umt5-intake] 上流はライセンスを宣言していない（{UNDECLARED_LICENSE}）— 書き手と"
             f"組み立ては {ALLOW_UNDECLARED_LICENSE_FLAG} を明示したときだけ手元の実験用に作れる。"
             "確認した内容は"
-            f" {record.directory / 'license-review.md'} に残す",
+            f" {record.directory / LICENSE_REVIEW_FILE} に残す",
             flush=True,
         )
     print(

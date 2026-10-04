@@ -391,7 +391,12 @@ commit, checks its SHA-256 against the Hub API, and places it unchanged (same na
 float32 copy) under `inputs/umt5/<name>/` together with `intake.json`, a machine-written record of the
 repository, commit, file SHA-256, source dtype (`BF16` or `F32`), declared license and base model, and
 where `config.json` came from (the upstream's own, checked against `google/umt5-xxl`, or a copy of
-`google/umt5-xxl`'s — the configuration is then assumed). It accepts safetensors only (never pickle),
+`google/umt5-xxl`'s — the configuration is then assumed) with the SHA-256 of the bytes placed. Every
+reader of the record (`write`, `prepare`, `reference` and the mirror) checks `config.json` against that
+SHA-256 first, so a configuration edited after the intake (for example
+`relative_attention_max_distance`) fails instead of producing a container or golden from a
+configuration never checked against `google/umt5-xxl`; records of an older format are refused — run
+the intake again with the same arguments. It accepts safetensors only (never pickle),
 the encoder key set of the Wan `text_encoder` (the tied pair `shared.weight` /
 `encoder.embed_tokens.weight` counts once; both names must then be bit-identical), and one dtype for
 every tensor; FP8, mixed dtypes, the old key spelling and a config whose graph fields or
@@ -399,8 +404,10 @@ relative-position buckets differ from `google/umt5-xxl` all fail. It records the
 judge it: when the repository declares none, or declares a value that names no terms (`unknown`,
 empty, `other` without a `license_name`), the record says `NOASSERTION`. Keep your own review of the
 terms in `license-review.md` next to the record. The intake directory must not resolve into `models/`
-(checked on real paths before the Hub API is called), and it must hold no weight file other than the
-recorded one (no other safetensors, pickle or `*.index.json`).
+(checked on real paths before the Hub API is called), and it may hold only the recorded file,
+`config.json`, `intake.json` and `license-review.md` (names compared exactly; anything else — another
+weight file in any format or letter case, an index, a partial `.part` download, a subdirectory —
+fails).
 
 ```bash
 uv run --group wan --inexact python -m wan.umt5_intake --repo <owner/name> --revision <40-hex commit> \

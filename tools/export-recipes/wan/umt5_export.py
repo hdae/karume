@@ -118,7 +118,7 @@ from wan.umt5_intake import (
     Umt5Intake,
     Umt5IntakeError,
     assert_license_intent,
-    assert_only_recorded_weights,
+    assert_only_intake_files,
     load_intake,
 )
 
@@ -662,10 +662,10 @@ def assert_encoder_keys(model: nn.Module, names: frozenset[str]) -> None:
 
 
 def _pinned_intake_file(directory: Path, file: str, sha256: str) -> PinnedSafetensors:
-    """取り込み先 `directory` の記録のファイル `file` を握って照合した読み口（記録の外の重みの
-    ファイルが同じ席に在れば、開く前に落とす — `wan.umt5_intake.assert_only_recorded_weights`）。"""
+    """取り込み先 `directory` の記録のファイル `file` を握って照合した読み口（置いてよいファイルの
+    外のものが同じ席に在れば、開く前に落とす — `wan.umt5_intake.assert_only_intake_files`）。"""
     try:
-        assert_only_recorded_weights(directory, file)
+        assert_only_intake_files(directory, file)
     except Umt5IntakeError as cause:
         raise Umt5ExportError(str(cause)) from cause
     return PinnedSafetensors(directory / file, sha256)
