@@ -19,7 +19,7 @@
 import type { GeneratedVideo } from "./pipeline.ts";
 
 export const wanFrameToRgba = (
-  video: GeneratedVideo,
+  video: Pick<GeneratedVideo, "frames" | "width" | "height" | "data">,
   frame: number,
 ): Uint8ClampedArray<ArrayBuffer> => {
   const { frames, width, height, data } = video;

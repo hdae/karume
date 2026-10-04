@@ -9,10 +9,10 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベル・既定値
 device limit も manifest から引く）。ここが持ってよい定数は manifest に**存在しない事実**だけ —
 上流の取得元と pin（`wan.sources.SOURCES` が正本）・固定プロンプトの表（`wan.prompts.FIXED_PROMPTS`
 が正本 — 組み立ての門 `wan.distribution.assert_text_embeds` が資産のメタとの一致を見るので、ここに
-描く本文と配る資産は食い違わない）・TS 側の受理集合（`packages/models/src/wan/pipeline.ts` の
-`ACCEPTED_SIZES` / `MIN_FRAMES` / `MAX_FRAMES`・テキストの経路の選択 `textEncoder` — ADR 0119
-追記 B・プロンプトの受理規則 — ADR 0119 決定 1 / 2 / 4 と追記 10a）・実行資源の実測
-（`_wan_resources` — ADR 0089 決定 3）。
+描く本文と配る資産は食い違わない）・TS 側の受理集合（`packages/models/src/wan/descriptor.ts` の
+`WAN21_GENERATION` の `acceptedSizes` / `minFrames` / `maxFrames`・テキストの経路の選択
+`textEncoder` — ADR 0119 追記 B・プロンプトの受理規則 — ADR 0119 決定 1 / 2 / 4 と追記 10a）・
+実行資源の実測（`_wan_resources` — ADR 0089 決定 3）。
 
 MUST: torch を import しない（`import dist` が torch を読まない —
 `tests/test_dist_driver.py` の `TestImportingTheDriver`）。
@@ -52,7 +52,7 @@ WAN_PAPER = "arxiv.org/abs/2503.20314"
 #: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
 WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: TS 側が受理する寸法とフレーム数（`packages/models/src/wan/pipeline.ts` の受理集合の写し —
+#: TS 側が受理する寸法とフレーム数（`packages/models/src/wan/descriptor.ts` の受理集合の写し —
 #: manifest に無い事実）。
 #: MUST: TS 側と同じ値（`packages/models/tests/fixtures/wan-card-limits.json` を挟んで両側の
 #: テストが突き合わせる — 片側だけ変えると赤）。

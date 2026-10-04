@@ -59,7 +59,7 @@ import {
   parseWanPipelineConfig,
   type WanPipelineConfig,
 } from "../../../packages/models/src/wan/config.ts";
-import { ACCEPTED_SIZES } from "../../../packages/models/src/wan/pipeline.ts";
+import { WAN21_GENERATION } from "../../../packages/models/src/wan/descriptor.ts";
 import references from "../../../packages/models/tests/fixtures/references/wan.json" with {
   type: "json",
 };
@@ -841,7 +841,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     );
   };
 
-  // 選択肢（受理集合は pipeline.ts が正本 — フレーム数は 4n+1 の 5〜81・寸法は 2 通り）
+  // 選択肢（受理集合は世代の記述子 descriptor.ts が正本 — フレーム数は 4n+1 の 5〜81・寸法は 2 通り）
   ui.frames.replaceChildren(
     ...wanFrameChoices().map((frames) => {
       const option = document.createElement("option");
@@ -851,7 +851,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       return option;
     }),
   );
-  ui.size.replaceChildren(...ACCEPTED_SIZES.map((size) => {
+  ui.size.replaceChildren(...WAN21_GENERATION.acceptedSizes.map((size) => {
     const option = document.createElement("option");
     option.value = wanSizeLabel(size);
     option.textContent = wanSizeLabel(size);

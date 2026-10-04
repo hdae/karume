@@ -127,7 +127,7 @@ _UMT5_PINNED = Provenance(
 #: 焼く側とロード側の欄名は完全一致が要る。
 _CONFIG_KEYS = {"scheduler": ("shift",), "defaults": ("steps", "guidance")}
 
-#: TS 側の受理集合の写し（`packages/models/tests/wan_pipeline_test.ts` が `pipeline.ts` の値と
+#: TS 側の受理集合の写し（`packages/models/tests/wan_pipeline_test.ts` が `descriptor.ts` の値と
 #: 同じことを見る）。カードの表とこの fixture を比べるので、カードと TS のどちらか片方だけの
 #: 更新は赤になる。
 _CARD_LIMITS_FIXTURE = REPO_ROOT / "packages/models/tests/fixtures/wan-card-limits.json"
@@ -1002,7 +1002,7 @@ class TestTheModelCard:
             ],
             "minFrames": WAN_FRAMES[0],
             "maxFrames": WAN_FRAMES[1],
-        }, "card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES を変えたら fixture と pipeline.ts も揃える"
+        }, "card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES を変えたら fixture と descriptor.ts も揃える"
 
     def test_it_names_the_measured_resources_with_their_conditions(self, assembled) -> None:
         out_dir, _ = assembled

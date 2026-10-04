@@ -18,12 +18,8 @@ import { parseManifest } from "@karume/hub";
 import type { CodecName, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
-  ACCEPTED_SIZES,
   assertWanVaeTilesCoverAcceptedSizes,
   ditContract,
-  type GeneratedVideo,
-  MAX_FRAMES,
-  MIN_FRAMES,
   planWanGeneration,
   planWanGpuGeneration,
   umt5Contract,
@@ -32,6 +28,7 @@ import {
   WanPipeline,
   type WanPipelineOptions,
 } from "../src/wan/pipeline.ts";
+import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
 import { wanParityCase, wanParityCases, wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
@@ -534,10 +531,11 @@ describe("モデルカードの受理集合（fixture を挟んだ突き合わ�
     const fixture: unknown = JSON.parse(
       await Deno.readTextFile(new URL("./fixtures/wan-card-limits.json", import.meta.url)),
     );
+    const { acceptedSizes, minFrames, maxFrames } = WAN21_GENERATION;
     assertEquals(
       fixture,
-      { acceptedSizes: ACCEPTED_SIZES, minFrames: MIN_FRAMES, maxFrames: MAX_FRAMES },
-      "pipeline.ts の受理集合を変えたら fixture と card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES も揃える",
+      { acceptedSizes, minFrames, maxFrames },
+      "descriptor.ts の受理集合を変えたら fixture と card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES も揃える",
     );
   });
 });
@@ -597,7 +595,7 @@ describe("潜在の逆正規化", () => {
     const latents = new Float32Array(16 * perChannel).map((_, index) =>
       Math.fround(Math.sin(index) * 3)
     );
-    const got = denormalizeWanLatents(latents);
+    const got = denormalizeWanLatents(latents, WAN21_GENERATION.latents);
     let differsFromProduct = 0;
     for (let channel = 0; channel < 16; channel += 1) {
       const inverse = Math.fround(1 / WAN_LATENTS_STD[channel]);
@@ -614,12 +612,26 @@ describe("潜在の逆正規化", () => {
       }
     }
     assert(differsFromProduct > 0, "掛け算の順でも一致した（順の取り違えを縛れていない）");
-    assertThrows(() => denormalizeWanLatents(new Float32Array(17)), Error, "割り切れない");
+    assertThrows(
+      () => denormalizeWanLatents(new Float32Array(17), WAN21_GENERATION.latents),
+      Error,
+      "割り切れない",
+    );
+  });
+
+  it("mean と std の本数が違う統計は fail loudly（チャネル数を片方から黙って決めない）", () => {
+    const { mean, std } = WAN21_GENERATION.latents;
+    assertThrows(
+      () => denormalizeWanLatents(new Float32Array(16), { mean, std: std.slice(1) }),
+      Error,
+      "mean 16 本と std 15 本の数が違う",
+    );
   });
 });
 
 describe("フレームの RGBA 化", () => {
-  const video: GeneratedVideo = {
+  // fps を持たない手組みの動画（wanFrameToRgba は fps を読まないので要求しない — 型検査が縛る）。
+  const video = {
     frames: 2,
     width: 2,
     height: 1,
@@ -851,6 +863,11 @@ describe("WanPipeline.generate（模擬 Session）", () => {
     assertEquals(log.filter((entry) => entry.startsWith("step:")), ["step:1", "step:2"]);
     assertEquals(log.filter((entry) => entry.startsWith("tile:")).length, 12);
     assertEquals(log.at(-1), "vae_decoder:end");
+  });
+
+  it("生成結果は Wan2.1 の fps 16 を持つ（上流の世代の事実 — 要求のノブではない）", async () => {
+    const { generate } = mockPipeline({});
+    assertEquals((await generate()).fps, 16);
   });
 
   describe("非有限の門", () => {

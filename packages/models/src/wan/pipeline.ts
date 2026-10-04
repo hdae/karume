@@ -16,8 +16,8 @@
  * 3. **vae_decoder** — chunk グラフ 2 本（first / next）の**常時タイル** decode（決定 2 —
  *    `vae-tiles.ts`）→ `[-1, 1]` へクランプ
  *
- * 返すのはフレーム `[3, F, H, W]` の f32（値域 `[-1, 1]`）。PNG への書き出しは呼び手
- * （`wanFrameToRgba` + `encodePng`）。
+ * 返すのはフレーム `[3, F, H, W]` の f32（値域 `[-1, 1]`）と fps（{@link GeneratedVideo}）。PNG への
+ * 書き出しは呼び手（`wanFrameToRgba` + `encodePng`）。
  *
  * ## MUST: 段ごとに Session を張って畳む・text → DiT → VAE の順に 1 段ずつ
  *
@@ -130,6 +130,7 @@ import {
 } from "./dit-tokens.ts";
 import { parseWanRopeBase, type WanRopeBase, wanRopeTables, wanRopeWidth } from "./dit-rope.ts";
 import { timestepsProj } from "./dit-timestep.ts";
+import { WAN21_GENERATION } from "./descriptor.ts";
 import { denormalizeWanLatents } from "./latents.ts";
 import { WanRandn } from "./random.ts";
 import {
@@ -282,46 +283,22 @@ const WAN_PATCH: WanPatchGeometry = {
 const TEMPORAL_COMPRESSION = 4;
 
 /**
- * 受理集合（ADR 0118 決定 7 — 832×480 / 480×832 × フレーム数 4n+1 の 5〜81）。検収したのは
- * 832×480 の 33 フレーム（段 3 / 5 / 6）と 81 フレーム（段 8）、480×832 の VAE（段 5）。
- *
- * 81 フレームの可否は DiT 段単独の VRAM だけで決まる — 冒頭の NOTE の実測どおり DiT の Session を
- * 畳んだ直後に確保が戻り、DiT 段と VAE 段は重ならない（切り替えの山 = DiT 段の山）。段 8 の実測
- * （B570・81 フレーム 50 ステップの通し・fdinfo）で DiT 段の山は 7.31 GiB・VAE 段の山は 3.78 GiB
- * （ADR 0118「段 8 の結果」）。MUST: 拒む文言は上限（81）だけを言う（利用者に段の番号は意味を
- * 持たない）。
- *
- * MUST: 変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN_ACCEPTED_SIZES` /
- * `WAN_FRAMES`）と `tests/fixtures/wan-card-limits.json` も同じ値にする — カードは manifest に無い
- * この事実を写しで持つので、fixture を挟んだ両側のテスト（wan_pipeline_test.ts と recipe の
- * test_distribution.py）が片側だけの更新を赤にする。
- *
- * NOTE: 3 つの `export` は fixture との突き合わせのテストのため（`mod.ts` / サブパス面には出さない —
- * ADR 0008）。
+ * 初期ノイズの seed の既定（世代に依らない）。寸法とフレーム数の既定は世代の記述子
+ * （{@link WAN21_GENERATION}）、step 数・guidance・shift の既定は manifest の `pipelineConfig`
+ * （{@link WanPipelineConfig}）。
  */
-export const ACCEPTED_SIZES: readonly { readonly width: number; readonly height: number }[] = [
-  { width: 832, height: 480 },
-  { width: 480, height: 832 },
-];
-export const MIN_FRAMES = 5;
-export const MAX_FRAMES = 81;
-
-/**
- * 生成の既定のうち配布形が宣言しないもの（最初の到達目標の 832×480・33 フレーム — 受理集合の側の
- * 事実）。step 数・guidance・shift の既定は manifest の `pipelineConfig`（{@link WanPipelineConfig}）。
- */
-const DEFAULTS = {
-  frames: 33,
-  width: 832,
-  height: 480,
-  seed: 0,
-} as const;
+const DEFAULT_SEED = 0;
 
 /** 生成結果。`data` は `[3, frames, height, width]` の f32（値域 `[-1, 1]` — クランプ済み）。 */
 export type GeneratedVideo = {
   readonly frames: number;
   readonly width: number;
   readonly height: number;
+  /**
+   * 出力のフレームレート（上流の世代の事実 — Wan2.1 は 16。manifest の宣言ではなくノブでもない —
+   * ADR 0121 決定 8）。
+   */
+  readonly fps: number;
   readonly data: Float32Array<ArrayBuffer>;
 };
 
@@ -686,21 +663,23 @@ const planWith = <Text>(
     );
   }
 
-  const frames = request.frames ?? DEFAULTS.frames;
+  const frames = request.frames ?? WAN21_GENERATION.defaults.frames;
   if (
-    !Number.isInteger(frames) || frames < MIN_FRAMES || frames > MAX_FRAMES ||
-    (frames - 1) % TEMPORAL_COMPRESSION !== 0
+    !Number.isInteger(frames) || frames < WAN21_GENERATION.minFrames ||
+    frames > WAN21_GENERATION.maxFrames || (frames - 1) % TEMPORAL_COMPRESSION !== 0
   ) {
     throw new ModelInputError(
-      `frames ${frames} が受理集合（4n+1 の ${MIN_FRAMES}〜${MAX_FRAMES}）に無い`,
+      `frames ${frames} が受理集合（4n+1 の ${WAN21_GENERATION.minFrames}〜${WAN21_GENERATION.maxFrames}）に無い`,
     );
   }
-  const width = request.width ?? DEFAULTS.width;
-  const height = request.height ?? DEFAULTS.height;
-  if (!ACCEPTED_SIZES.some((size) => size.width === width && size.height === height)) {
+  const width = request.width ?? WAN21_GENERATION.defaults.width;
+  const height = request.height ?? WAN21_GENERATION.defaults.height;
+  if (
+    !WAN21_GENERATION.acceptedSizes.some((size) => size.width === width && size.height === height)
+  ) {
     throw new ModelInputError(
       `${width}×${height} が受理集合（${
-        ACCEPTED_SIZES.map((size) => `${size.width}×${size.height}`).join(" / ")
+        WAN21_GENERATION.acceptedSizes.map((size) => `${size.width}×${size.height}`).join(" / ")
       }）に無い`,
     );
   }
@@ -733,7 +712,7 @@ const planWith = <Text>(
     if (!latents.every(Number.isFinite)) throw new ModelInputError("latents に非有限値がある");
     initial = { kind: "latents", data: latents };
   } else {
-    const seed = request.seed ?? DEFAULTS.seed;
+    const seed = request.seed ?? DEFAULT_SEED;
     assertAcceptableSeed(seed);
     initial = { kind: "seed", seed };
   }
@@ -756,8 +735,8 @@ const planWith = <Text>(
 };
 
 /**
- * VAE の chunk グラフの幾何で、受理する寸法（{@link ACCEPTED_SIZES}）が全部タイルで覆えることを
- * 見る（家族 admission の門 — 寸法は有限で 2 通りなので全数を計画する）。
+ * VAE の chunk グラフの幾何で、受理する寸法（{@link WAN21_GENERATION} の `acceptedSizes`）が全部
+ * タイルで覆えることを見る（家族 admission の門 — 寸法は有限で 2 通りなので全数を計画する）。
  *
  * MUST: admission で呼ぶ。タイル辺は配布物だけで差し替えられる（ADR 0118 決定 2）ので、潜在の短辺
  * より大きいタイル（例 64 > 60）や重なりの下限を満たせないタイル（例 8）の資産も chunk グラフの
@@ -768,7 +747,7 @@ const planWith = <Text>(
  */
 export const assertWanVaeTilesCoverAcceptedSizes = (layout: PlanLayout): void => {
   const scale = layout.sampleTile / layout.tile;
-  for (const { width, height } of ACCEPTED_SIZES) {
+  for (const { width, height } of WAN21_GENERATION.acceptedSizes) {
     const latentHeight = height / scale;
     const latentWidth = width / scale;
     if (!Number.isInteger(latentHeight) || !Number.isInteger(latentWidth)) {
@@ -1505,7 +1484,13 @@ export class WanPipeline {
     // 段の境目（DiT → VAE）。
     await settleAbort(signal);
     const data = await this.#decode(knobs, latents, emit, signal);
-    return { frames: knobs.frames, width: knobs.width, height: knobs.height, data };
+    return {
+      frames: knobs.frames,
+      width: knobs.width,
+      height: knobs.height,
+      fps: WAN21_GENERATION.fps,
+      data,
+    };
   }
 
   /**
@@ -1696,7 +1681,7 @@ export class WanPipeline {
     const { layout } = state;
     const tilePlan = plan.tiles;
     const tiles = wanVaeTileCount(tilePlan);
-    const denormalized = denormalizeWanLatents(latents);
+    const denormalized = denormalizeWanLatents(latents, WAN21_GENERATION.latents);
     const observe = state.onRunDiagnostics;
 
     await emit({ kind: "stage", component: "vae_decoder", at: "start" });

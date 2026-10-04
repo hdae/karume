@@ -19,11 +19,7 @@ import { MAX_SINGLE_CONTAINER_BYTES } from "../../../packages/runtime/src/format
 import { planRowBlocks } from "../../../packages/runtime/src/runtime/fusion.ts";
 import type { WanGenerateRequest, WanPrompt } from "../../../packages/models/wan.ts";
 import type { WanPipelineConfig } from "../../../packages/models/src/wan/config.ts";
-import {
-  ACCEPTED_SIZES,
-  MAX_FRAMES,
-  MIN_FRAMES,
-} from "../../../packages/models/src/wan/pipeline.ts";
+import { WAN21_GENERATION } from "../../../packages/models/src/wan/descriptor.ts";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -66,10 +62,11 @@ export const CHROMIUM_ARRAY_BUFFER_MAX = MAX_SINGLE_CONTAINER_BYTES;
 
 export type WanSize = { readonly width: number; readonly height: number };
 
-/** 受理集合のフレーム数（4n+1 の 5〜81 — `pipeline.ts` の受理集合を正本にする）。 */
+/** 受理集合のフレーム数（4n+1 の 5〜81 — 世代の記述子 `descriptor.ts` の受理集合を正本にする）。 */
 export const wanFrameChoices = (): number[] => {
+  const { minFrames, maxFrames } = WAN21_GENERATION;
   const choices: number[] = [];
-  for (let frames = MIN_FRAMES; frames <= MAX_FRAMES; frames += TEMPORAL_COMPRESSION) {
+  for (let frames = minFrames; frames <= maxFrames; frames += TEMPORAL_COMPRESSION) {
     choices.push(frames);
   }
   return choices;
@@ -89,15 +86,16 @@ export const wanSizeLabel = (size: WanSize): string => `${size.width}x${size.hei
  * 要求についてだけ意味を持つ（外の要求は `generate` が `ModelInputError` で拒む）。
  */
 export const wanTokenCount = (frames: number, size: WanSize): number => {
+  const { minFrames, maxFrames, acceptedSizes } = WAN21_GENERATION;
   if (
-    !Number.isInteger(frames) || frames < MIN_FRAMES || frames > MAX_FRAMES ||
+    !Number.isInteger(frames) || frames < minFrames || frames > maxFrames ||
     (frames - 1) % TEMPORAL_COMPRESSION !== 0
   ) {
     throw new RangeError(
-      `フレーム数 ${frames} が受理集合（4n+1 の ${MIN_FRAMES}〜${MAX_FRAMES}）に無い`,
+      `フレーム数 ${frames} が受理集合（4n+1 の ${minFrames}〜${maxFrames}）に無い`,
     );
   }
-  if (!ACCEPTED_SIZES.some(({ width, height }) => width === size.width && height === size.height)) {
+  if (!acceptedSizes.some(({ width, height }) => width === size.width && height === size.height)) {
     throw new RangeError(`寸法 ${wanSizeLabel(size)} が受理集合に無い`);
   }
   const latentFrames = (frames - 1) / TEMPORAL_COMPRESSION + 1;
