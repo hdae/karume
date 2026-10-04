@@ -261,8 +261,10 @@ WAN_QUANT_ABBREVIATIONS: Mapping[str, str] = {"dit": WAN_TRANSFORMER_ROLE}
 #:   テストの manifest 上書きで足りる）。
 #:
 #: `label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語・64 / 200 字上限）。速度と
-#: 品質は書かない — a8 の席の速度・品質は未計測で（ADR 0120 段 3〜6）、Metal では a8 が速くならない
-#: （調査 §3.1）。既定であることも書かない（`defaultQuant` が指している — ADR 0075 決定 3）。
+#: 品質は書かない — a8 の席の速度は B570 の実測（1 forward で −50% — ADR 0120 段 4）しか無く、Metal では
+#: a8 が速くならない（調査 §3.1）ので、GPU を問わない表示欄には書けない。品質（段 6 の視認で `f16` と比べて
+#: 明確な劣化なし — ADR 0120 裁定 2026-10-04 の 1）と席ごとの所要は、カード（`wan/card.py`）が席を名乗って
+#: 書く。既定であることも書かない（`defaultQuant` が指している — ADR 0075 決定 3）。
 WAN_QUANTS: Mapping[str, Any] = {
     "f16": {
         "weights": {WAN_TRANSFORMER_ROLE: "f16"},

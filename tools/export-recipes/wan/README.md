@@ -422,9 +422,9 @@ rendered from the manifest by `wan/card.py`: the pinned upstream, where the text
 the `textEncoder` choice (`"gpu"` by default, `"precomputed"` for the fixed prompts only), the
 prompt rules, the fixed prompts with their sources, the accepted inputs, how the outputs are
 verified, the quant table (with the `dit` abbreviation spelled out), the defaults, the measured
-resources (the `f16` quant with the precomputed embeddings only — the int8 quants and the text
-encoder stage are marked as not measured yet) and the declared limits. Re-running the command writes
-the same bytes.
+resources (each stage with the `f16` quant and the precomputed embeddings, the text encoder stage
+from a 2-step run, and the transformer of each quant, with the cells not measured marked as such)
+and the declared limits. Re-running the command writes the same bytes.
 
 ## Tests
 

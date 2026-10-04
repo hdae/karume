@@ -101,8 +101,8 @@ int8 activations — ADR 0120). With the precomputed embeddings, the default run
 on the B570 (952 s): two transformer forwards per step (about 8.5 s each at 832×480 × 33 frames) and
 about two minutes of tiled VAE decoding. The `f16` quant takes about half an hour (about 17 s per
 forward). The GPU text encoder adds a
-umT5 stage per run (loading the 5.3 GiB of int8 weights and two forwards); its duration has not been
-measured yet.
+umT5 stage per run (loading the 5.3 GiB of int8 weights and two forwards); on the B570 it took
+10.4 s, including building its session (measured in a 2-step run at 33 frames).
 
 ## In Chrome
 
@@ -114,4 +114,6 @@ The tab starts on the precomputed route; its GPU route also needs `models/karume
 lab's server serves next to the Wan distribution (`--umt5-source`).
 A clip needs a storage binding of at least 503,193,600 bytes at 33 frames and 1,174,118,400 bytes
 at 81 frames (the transformer's FFN intermediate), far above the WebGPU default of 128 MiB;
-`acquireGpu` requests the adapter's own limits. A complete run in Chrome has not been confirmed yet.
+`acquireGpu` requests the adapter's own limits. On an RTX 5070 Ti, a 50-step clip of 81 frames with
+the `f16` quant and the precomputed embeddings completed in Chrome in 46.1 minutes. The GPU text
+encoder and the int8 quants have not been run in Chrome yet.
