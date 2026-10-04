@@ -129,16 +129,20 @@ import {
 /**
  * S = 192 の組（決定用 6 本・受入れ 4 本）の r の帯（参照席 `f16+dit8`）。`undefined` = 未導出（モジュール doc「指標と帯」）。
  *
+ * 導出（2026-10-04・B570）: 決定用 6 本の最悪 r 3.29（`band-t2v-s00192-t0999`）× 5 = 16.4 → 有効数字 2 桁へ切り上げ 17。
+ *
  * MUST: 受入れの結果を見てこの値も決定用のケースも変えない。
  */
-const SMALL_BAND: number | undefined = undefined;
+const SMALL_BAND: number | undefined = 17;
 
 /**
  * 実寸の組（S = 8,190 / 7,920 の 2 つの形・決定用 6 本・受入れ 8 本）の r の帯（参照席 `f16+dit8`）。`undefined` = 未導出。
  *
+ * 導出（2026-10-04・B570）: 決定用 6 本の最悪 r 9.00（`full-band-t2v-s08190-t0113`）× 5 = 45.0 → 45。
+ *
  * MUST: 受入れの結果を見てこの値も決定用のケースも変えない。
  */
-const FULL_BAND: number | undefined = undefined;
+const FULL_BAND: number | undefined = 45;
 
 /**
  * 微妙な故障（timestep +1）が帯から離れているべき倍率（ADR 0121 検収の段 2「帯の床（2.1 は 2）以上」— 2.1 の
