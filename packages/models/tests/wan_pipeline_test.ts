@@ -36,7 +36,8 @@ import type { GraphOwner } from "../src/hub/components.ts";
 import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
 import { wanParityCase, wanParityCases, wanParityEncoder } from "./helpers/wan-parity-encoder.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
-import { readFileIfPresent } from "./helpers/read-if-present.ts";
+import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
 import { WanVaeChunkError, wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import type { WanRopeBase } from "../src/wan/dit-rope.ts";
@@ -1245,6 +1246,39 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
     );
     assertStrictEquals(error, reason);
   });
+});
+
+/** 配布形ミラーの manifest（`dist.py --pipeline wan` が書く — 無い機では下の 1 本だけ SKIP）。 */
+const DIST_MANIFEST = new URL("../../../models/karume-wan2.1/karume.json", import.meta.url);
+const distManifestText = await readTextIfPresent(DIST_MANIFEST);
+if (distManifestText === undefined) {
+  console.warn(
+    `[karume] ${DIST_MANIFEST.pathname} が無いため、quant を省いた構築が実用席へ解決する検査を SKIP する。` +
+      "組み立て: cd tools/export-recipes && uv run python dist.py --pipeline wan",
+  );
+}
+
+/** 既定席（ADR 0120 裁定 2026-10-04 の 4 — 今いちばん実用的な席。正本は recipe の `WAN_DEFAULT_QUANT`）。 */
+const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
+
+Deno.test({
+  name:
+    "配布形の既定席: quant を省いた構築は実用席へ解決する（manifest の karume.json だけを読む）",
+  ignore: distManifestText === undefined,
+  fn: async () => {
+    assert(distManifestText !== undefined);
+    // 席の解決は家族 admission（重みを読む前）で決まる。limits が全部 0 の共有 GPU を渡すと、どの席も宣言する
+    // requiredLimits（umT5 の語彙埋め込み）で落ち、その文言が解決した席を名指す — 重みも GPU も使わずに席を観測する。
+    await assertRejects(
+      () =>
+        WanPipeline.fromAssets(
+          { manifest: parseManifest(distManifestText), assets: SHELL_COMPONENTS },
+          { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()) },
+        ),
+      Error,
+      `WanPipeline: quant '${PRACTICAL_QUANT}' が要求する device limit`,
+    );
+  },
 });
 
 describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", () => {

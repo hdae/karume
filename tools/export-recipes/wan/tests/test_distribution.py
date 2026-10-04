@@ -352,8 +352,8 @@ class TestLayout:
         assert list(out_dir.rglob("reference.*")) == []
 
     def test_the_manifest_declares_the_three_seats_and_the_model_assets(self, assembled) -> None:
-        """quant 席は `f16`（既定）・参照席 `f16+dit8`・実用席 `f16+dit8-a8-attn8-s16` の 3 つ
-        （ADR 0120 決定 1 / 6）で、どの席も text_encoder の i8 を選ぶ（weights は完全写像 — ADR 0119
+        """quant 席は `f16`・参照席 `f16+dit8`・実用席 `f16+dit8-a8-attn8-s16`（既定）の 3 つ
+        （ADR 0120 決定 1・裁定 2026-10-04 の 4）で、どの席も text_encoder の i8 を選ぶ（weights は完全写像 — ADR 0119
         追記 B）。資産はモデル単位の `text_embeds` と `umt5_tokenizer`（quant 非依存 — 同 C）。"""
         _, manifest = assembled
         model = _model(manifest)
@@ -370,7 +370,7 @@ class TestLayout:
             f"{DEFAULT_MODEL}/{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}"
         )
         assert list(model["quants"]) == ["f16", "f16+dit8", "f16+dit8-a8-attn8-s16"]
-        assert model["defaultQuant"] == "f16"
+        assert model["defaultQuant"] == "f16+dit8-a8-attn8-s16"
         vae = {WAN_VAE_FIRST_ROLE: "f16", WAN_VAE_NEXT_ROLE: "f16"}
         text = {WAN_TEXT_ENCODER_ROLE: "i8"}
         quants = model["quants"]
@@ -917,8 +917,10 @@ class TestTheModelCard:
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         assert "In a quant name, `dit` is the `transformer` component." in card
-        assert "| `f16+dit8-a8-attn8-s16` |" in card
-        assert "| `f16` (default) |" in card
+        quants = card.split("### Quants")[1]
+        assert "| `f16+dit8-a8-attn8-s16` (default) |" in quants
+        assert "| `f16` |" in quants
+        assert "(default)" not in quants.replace("| `f16+dit8-a8-attn8-s16` (default) |", "")
 
     def test_it_refuses_a_pipeline_it_does_not_describe(self, assembled) -> None:
         _, manifest = assembled
@@ -1000,7 +1002,8 @@ class TestTheModelCard:
         assert "have not been measured" not in card
         prose = " ".join(card.split())
         assert "a relative RMS error of 0.107 at 33 frames and 0.210 at 81 frames" in prose
-        assert "the default quant stays `f16`" in prose
+        assert "no clear degradation was seen" in prose
+        assert "the default quant stays" not in prose
 
     def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled) -> None:
         """表に無い席は数を推し量らず未計測と名乗る（席の並びは manifest のまま）。"""

@@ -96,8 +96,11 @@ are not part of the name: runs that differ only in those write to the same direc
 each other's frames, so give each one its own `--out`. The 8-bit conversion is `wanFrameToRgba`,
 the same rule the reference hashes use.
 
-The default run takes about half an hour on the B570: two transformer forwards per step (about 17 s
-each at 832×480 × 33 frames) and about two minutes of tiled VAE decoding. The GPU text encoder adds a
+The script runs the distribution's default quant, `f16+dit8-a8-attn8-s16` (an int8 transformer with
+int8 activations — ADR 0120). With the precomputed embeddings, the default run took about 16 minutes
+on the B570 (952 s): two transformer forwards per step (about 8.5 s each at 832×480 × 33 frames) and
+about two minutes of tiled VAE decoding. The `f16` quant takes about half an hour (about 17 s per
+forward). The GPU text encoder adds a
 umT5 stage per run (loading the 5.3 GiB of int8 weights and two forwards); its duration has not been
 measured yet.
 

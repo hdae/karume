@@ -1,6 +1,7 @@
 # 0120: Wan2.1 DiT に w8a8 の quant 席を足す — 参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`
 
-- Status: proposed — 利用者の裁定待ち（「裁定」節の 2 点）
+- Status: accepted（利用者裁定 2026-10-03〈「裁定」節の 2 点・attention a8 は視認で確認〉と 2026-10-04〈実用席の品質 = 問題なし・
+  既定席 = 実用席〉）
 - Date: 2026-10-03
 - 関連: research [2026-10-03-wan-w8a8-recon](../research/2026-10-03-wan-w8a8-recon.md)（以下「調査 §n」— 事実と数値の
   出典）/ ADR [0118](0118-wan21-video-generation.md)（Wan2.1 の受け入れ — 決定 7 の「i8 / i4 は品質の実測の後」と
@@ -428,3 +429,36 @@ ADR 0118 の段 9（Chrome）・段 10（umT5 を GPU で）とは依存しな�
 4. **既定席 = 実用席 `f16+dit8-a8-attn8-s16`**（同日・決定 6 の裁定）。利用者の方針: 既定は「今いちばん実用的な席」（軽く、品質の
    劣化が小さい席）にする。将来の方針転換で「元の重みにいちばん近い席」を既定にする可能性は残す（その場合はこの裁定を改める）。
    `f16` 席は明示の指定で使う参照側の席として残り、既存の sha 行・帯・case id は `f16` の指定を明示して値を保つ。
+
+## 追記（2026-10-04）: 既定席の切り替え
+
+裁定 2026-10-04 の 4 を反映した。決定 6 の本文は当時の判断として残す。
+
+- **宣言**: recipe の `WAN_DEFAULT_QUANT` を実用席 `f16+dit8-a8-attn8-s16` にした（`wan/distribution.py`）。カードの quant 表の
+  `(default)` と Usage の `quant` は manifest から導くので、焼き直しで自動で移る。カードの品質の行は「視認は未了・既定は `f16` の
+  まま」から段 6 の視認の結果（12 対で明確な劣化なし）へ書き換えた。資源の表は従来どおり `f16` 席の実測だと名乗る。
+- **models のテスト — 席は全ケースで明示する**: `e2e_wan_pipeline_test.ts` に `F16_QUANT` を足し、`loadPipeline` /
+  `rowClassOf` / `FULL_CASES` の席を必須にした（省略を型で止める）。席名を持たない既存のケース（帯の 3 本・seed 経路・
+  50 ステップの 33 / 81 フレーム・GPU 経路の 2 本）は `quant: "f16"` で回る。家族 admission の故障注入（GPU 不要）も
+  `f16` 席の宣言を書き換えるので、`quant: "f16"` を明示した。ほかの Wan の e2e（DiT 単体・自機 A/B・umT5・VAE）は元から
+  席を明示するか、manifest の席に依らない。
+- **保った値**: `fixtures/references/wan.json` の sha 行・case id・帯（`LATENT_RATIO_BANDS` / `FRAME_RATIO_BAND`）・故障の床は
+  1 文字も変えていない。
+- **ホストの検査 1 本**（`wan_pipeline_test.ts`）: 配布形ミラーの `karume.json` で `quant` を省いた構築が実用席へ解決すること。
+  limits が全部 0 のフェイク GPU を渡すと、家族 admission がどの席も宣言する `requiredLimits` で落ち、その文言が解決した席を
+  名指す（重みも GPU も使わない）。ミラーを焼き直すまでは赤（ミラーの `defaultQuant` が `f16` のまま）。
+- **gpu-lab の Wan タブ**: quant の選択を足した（先頭の「既定」は読み込み時に manifest の `defaultQuant` へ解決する）。解決した
+  名前を `fromPretrained` へ明示して渡し、参照ケースの id もその名前から決める（`f16` 席は席名を持たない id・i8 の席は e2e が行を
+  持つ組だけ席名を先頭に置いた id）。JSON は `karume-wan-browser/3`（読み込みと行が席を持つ）。
+- **文書**: `examples/wan/README.md`（既定の所要）・recipe の README（manifest の表）・`docs/quantization.md`（★）・
+  `docs/limitations.md`・`CHANGELOG.md`（Changed）。
+- **残りの作業**:
+  1. 配布形ミラー `models/karume-wan2.1` の焼き直し（GPU のジョブがミラーを読み終えてから）:
+     `cd tools/export-recipes && uv run python dist.py --pipeline wan --ref-revision 0000000000000000000000000000000000000000
+     --allow-placeholder-ref --ref-repo hdae/karume-umt5-xxl --ref-dist ../../models/karume-umt5-xxl --ref-model xxl
+     --ref-role text_encoder`（今のミラーと同じ仮の SHA）。変わる見込みは `karume.json`（`defaultQuant`）と `README.md`（カード）
+     だけで、容器と資産は同じバイト（推測 — 焼き直しの後に差分で確かめる）。
+  2. 焼き直しの後のホストの検査: `wan_pipeline_test.ts`（上の 1 本が緑になる）・配布門番 `distribution_gate_test.ts`（既定の選択が
+     i8 の transformer の part を見るようになる）・融合ヒット数 `assets_fusion_counts_test.ts`（`f16` を明示しているので値は不変）。
+  3. GPU のレーン: `deno task test:models:wan` で、席名を持たない既存の行が `f16` の明示で一致すること（帯・故障注入・sha 行）。
+     50 ステップの opt-in（`KARUME_WAN_FULL_PIPELINE=1`）は実用席の行 2 本を作る作業（裁定 2026-10-04 の 3）と同じ走行でよい。

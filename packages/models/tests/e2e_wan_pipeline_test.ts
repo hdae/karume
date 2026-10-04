@@ -37,6 +37,10 @@
  *   （`fromAssets`）して書いた値で、配布形経由（`fromPretrained`）でも同じ行と一致することを
  *   ここで要求する — 配布形は系列の `krm` の独立コピーで、manifest の既定（50 / 5.0 / 3.0）も段 6 の
  *   定数と同じ値なので、1 ビットでも割れたら取得面か既定の解決の退行。
+ * - **席は全ケースで明示する**（{@link F16_QUANT} / i8 の 2 席）: 既定席は manifest の `defaultQuant` が決め、
+ *   2026-10-04 に `f16` から実用席へ移った（ADR 0120 裁定 2026-10-04 の 4）。席名を持たない既存の ID の行・帯・
+ *   CPU の参照は `f16` 席の値なので、`quant` を省くと同じ ID が別の席の値で回る（{@link loadPipeline} は席を
+ *   必須にして、省略を型で止める）。
  * - **seed 経路**（{@link SEED_CASE}）: `latents` を注入せず seed から初期ノイズを作る 2 ステップ 1 本。CPU の
  *   参照は無いので、完走・非有限 0 と sha256 の環境行だけで縛る。
  * - **i8 の 2 席の sha 行**（ADR 0120 決定 4 / 段 5 — {@link SEAT_QUANTS}）: seed 経路と同じ要求を参照席 `f16+dit8` と
@@ -56,7 +60,7 @@
  * ## 50 ステップの通し（env の opt-in — 既定のレーンに入れない）
  *
  * `KARUME_WAN_FULL_PIPELINE=1` のときだけ、既定の設定（50 ステップ・CFG・832×480・33 フレーム・
- * `boxing-cats`・seed 42）と、同じ設定の 81 フレーム（受理集合の上限 — ADR 0118 段 8）を、既定席と実用席
+ * `boxing-cats`・seed 42）と、同じ設定の 81 フレーム（受理集合の上限 — ADR 0118 段 8）を、`f16` 席と実用席
  * `f16+dit8-a8-attn8-s16`（ADR 0120 段 5 — 81 フレームの実用行と段 6 の視認の素材）で 1 本ずつ回し、
  * 完走・非有限 0・所要・段の切り替えの VRAM・フレームの PNG（全フレーム + 4×8 の一覧図）と RGB の実物を
  * `outputs/verify/<環境キー>/<日付>_wan-pipeline-full/` に書き、sha256 の環境行は
@@ -197,19 +201,24 @@ const ACCEPT_CASE = "accept-ferret";
  */
 const SEED_CASE = { id: "2step-seed-boxing-cats-seed42", prompt: "boxing-cats", seed: 42 } as const;
 
-/** 実用席（ADR 0120 決定 1）。 */
+/**
+ * `f16` 席（参照側 — 元の重みにいちばん近い席。CPU の参照〈f16 へ丸めた重み〉と帯を持つのはこの席だけ）。席名を
+ * 持たない既存の ID の行はこの席の値（ADR 0120 裁定 2026-10-04 の 4 — 既定席が実用席へ移っても値を保つため明示する）。
+ */
+const F16_QUANT = "f16";
+/** 実用席（ADR 0120 決定 1 — 2026-10-04 から manifest の既定席）。 */
 const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
 /**
- * 2 ステップの seed 経路を既定席に加えて回す i8 の 2 席（ADR 0120 決定 4 / 段 5）: 参照席（参照行）と実用席（実用行）。
+ * 2 ステップの seed 経路を `f16` 席に加えて回す i8 の 2 席（ADR 0120 決定 4 / 段 5）: 参照席（参照行）と実用席（実用行）。
  * 行のクラスは {@link rowClassOf} が manifest から導く — この並びはクラスを主張しない。
  */
 const SEAT_QUANTS = ["f16+dit8", PRACTICAL_QUANT] as const;
 
-/** 席を名乗るケースの ID（席名が先頭 — 既定席の既存の行の ID は席名を持たないまま動かさない）。 */
+/** 席を名乗るケースの ID（席名が先頭 — `f16` 席の既存の行の ID は席名を持たないまま動かさない）。 */
 const seatCaseId = (quant: string, base: string): string => `${quant}-${base}`;
 
 /**
- * GPU 経路のケース（ADR 0119 追記「段 10d の設計」の sha 行 — 2 ステップ・seed 42・既定席・既定の negative）。
+ * GPU 経路のケース（ADR 0119 追記「段 10d の設計」の sha 行 — 2 ステップ・seed 42・`f16` 席・既定の negative）。
  * 固定プロンプトは資産の行の原文を渡し（同じ文字列で経路だけが違う — 資産の経路の {@link SEED_CASE} と比べられる）、
  * 自由プロンプトは資産に無い短い英文（ID は綴りを持たず名前で呼ぶ — 文面を変えたら ID も変える）。
  *
@@ -232,9 +241,9 @@ const GPU_TEXT_CASES: readonly {
 const FULL_PIPELINE = Deno.env.get("KARUME_WAN_FULL_PIPELINE") === "1";
 /**
  * 50 ステップの通しの要求: 既定の設定 + 1 本目の固定プロンプト・seed 42（段 7 の目視の 1 本目）と、同じ要求の
- * 81 フレーム（ADR 0118 段 8）を、既定席（`quant` 省略）と実用席（ADR 0120 段 5 — 81 フレームの実用行と段 6 の
+ * 81 フレーム（ADR 0118 段 8）を、`f16` 席と実用席（ADR 0120 段 5 — 81 フレームの実用行と段 6 の
  * 視認の素材）で。`frames` を省いたケースは既定（{@link DEFAULT_FRAMES}）を通す。
- * 並びは確保の大きい順（既定席の 81 → 実用席の 81 → 既定席の 33 → 実用席の 33 — DiT 段の VRAM の山は実用席が
+ * 並びは確保の大きい順（`f16` 席の 81 → 実用席の 81 → `f16` 席の 33 → 実用席の 33 — DiT 段の VRAM の山は実用席が
  * 約 1 GiB 小さい見込み・ADR 0120 期待値の表）。前の確保の残りが後ろの大きな確保を OOM にしうる — B570 の
  * `destroy()` の遅れ・`e2e_wan_dit_test.ts` で実寸を先に置くのと同じ理由。
  */
@@ -243,10 +252,16 @@ const FULL_CASES: readonly {
   readonly prompt: string;
   readonly seed: number;
   readonly frames?: number;
-  /** 席（省略 = manifest の `defaultQuant`）。 */
-  readonly quant?: string;
+  /** 席（必須 — 省略すると manifest の `defaultQuant` へ黙って移る）。 */
+  readonly quant: string;
 }[] = [
-  { id: "50step-boxing-cats-seed42-81f", prompt: "boxing-cats", seed: 42, frames: 81 },
+  {
+    id: "50step-boxing-cats-seed42-81f",
+    prompt: "boxing-cats",
+    seed: 42,
+    frames: 81,
+    quant: F16_QUANT,
+  },
   {
     id: seatCaseId(PRACTICAL_QUANT, "50step-boxing-cats-seed42-81f"),
     prompt: "boxing-cats",
@@ -254,7 +269,7 @@ const FULL_CASES: readonly {
     frames: 81,
     quant: PRACTICAL_QUANT,
   },
-  { id: "50step-boxing-cats-seed42", prompt: "boxing-cats", seed: 42 },
+  { id: "50step-boxing-cats-seed42", prompt: "boxing-cats", seed: 42, quant: F16_QUANT },
   {
     id: seatCaseId(PRACTICAL_QUANT, "50step-boxing-cats-seed42"),
     prompt: "boxing-cats",
@@ -347,15 +362,16 @@ const readDistributionEmbeds = async (): Promise<Uint8Array<ArrayBuffer>> => {
 };
 
 /**
- * 配布形を取得元ハンドルで読む（network も CacheStorage も通らない）。`quant` を省くと manifest の既定席。
- * 経路は呼び手が必ず名乗る（既定の `"gpu"` に黙って乗せない — モジュール doc の「テキストエンコーダの経路」）。
+ * 配布形を取得元ハンドルで読む（network も CacheStorage も通らない）。経路と席は呼び手が必ず名乗る（既定の
+ * `"gpu"` にも manifest の既定席にも黙って乗せない — モジュール doc の「テキストエンコーダの経路」と「席は全ケースで
+ * 明示する」）。
  * `"gpu"` は umT5 の越境先を `crossRepo` の mapping で渡す。
  */
 const loadPipeline = (
   gpu: GpuContext,
   diagnostics: Map<WanRunComponent, SessionDiagnostics>,
   textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>,
-  quant?: string,
+  quant: string,
 ): Promise<WanPipeline> =>
   WanPipeline.fromPretrained(
     textEncoder === "gpu"
@@ -364,25 +380,24 @@ const loadPipeline = (
     {
       gpu,
       textEncoder,
-      ...(quant === undefined ? {} : { quant }),
+      quant,
       onRunDiagnostics: (component, diagnosed) => diagnostics.set(component, diagnosed),
     },
   );
 
 /**
  * sha 行のクラス（ADR 0110 決定 7）を、配布形の manifest の既定モデルの席の `session` から導く（空 = 参照行・非空 =
- * 実用行）。別表に持たない — 席の宣言が変われば表示も変わる。`quant` を省くと既定席。
+ * 実用行）。別表に持たない — 席の宣言が変われば表示も変わる。
  */
-const rowClassOf = async (quant?: string): Promise<string> => {
+const rowClassOf = async (quant: string): Promise<string> => {
   const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", DIST_ROOT)));
   const model = manifest.models[manifest.defaultModel];
   assert(model !== undefined, `配布形の manifest に既定モデル '${manifest.defaultModel}' が無い`);
-  const name = quant ?? model.defaultQuant;
-  const seat = Object.hasOwn(model.quants, name) ? model.quants[name] : undefined;
-  assert(seat !== undefined, `配布形の manifest に席 '${name}' が無い`);
+  const seat = Object.hasOwn(model.quants, quant) ? model.quants[quant] : undefined;
+  assert(seat !== undefined, `配布形の manifest に席 '${quant}' が無い`);
   return Object.keys(seat.session).length === 0
-    ? `${name}: 参照行（session 空 — 凍結）`
-    : `${name}: 実用行（session 非空 — 実用層の退行と決定性の検出器）`;
+    ? `${quant}: 参照行（session 空 — 凍結）`
+    : `${quant}: 実用行（session 非空 — 実用層の退行と決定性の検出器）`;
 };
 
 const references = openReferences(new URL("fixtures/references/wan.json", import.meta.url));
@@ -554,6 +569,8 @@ Deno.test({
             () =>
               WanPipeline.fromPretrained(source, {
                 textEncoder,
+                // 故障の 1 本は `f16` 席の宣言を書き換える — 席を名乗らないと既定席へ移って故障に触れない。
+                quant: F16_QUANT,
                 ...(gpu === undefined ? {} : { gpu }),
               }),
             Error,
@@ -807,7 +824,7 @@ Deno.test({
 Deno.test({
   name:
     "Wan 通し 2 ステップ（実 GPU）: 832×480・33 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
-    "sha256 の環境行（既定席と i8 の 2 席〈参照行 / 実用行〉）",
+    "sha256 の環境行（`f16` 席と i8 の 2 席〈参照行 / 実用行〉）",
   ignore: !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     await assertRunningAdapter();
@@ -819,7 +836,7 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      const pipeline = await loadPipeline(gpu, diagnostics, "precomputed");
+      const pipeline = await loadPipeline(gpu, diagnostics, "precomputed", F16_QUANT);
       const { prompts } = pipeline;
       try {
         for (const { name, role } of CASES) {
@@ -887,10 +904,10 @@ Deno.test({
         }
 
         /**
-         * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。既定席と i8 の 2 席が同じこの 1 本を通る
+         * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。`f16` 席と i8 の 2 席が同じこの 1 本を通る
          * （席ごとに違うのは pipeline と ID と行のクラスの表示だけ）。
          */
-        const seedPath = async (target: WanPipeline, id: string, quant?: string): Promise<void> => {
+        const seedPath = async (target: WanPipeline, id: string, quant: string): Promise<void> => {
           let settlement: ReferenceSettlement | undefined;
           await runRecordedCase(results, { id }, async () => {
             const observed = await observe(target, diagnostics, {
@@ -928,7 +945,7 @@ Deno.test({
         };
 
         await t.step(`${SEED_CASE.id}（seed 経路・sha256 の環境行）`, async () => {
-          await seedPath(pipeline, SEED_CASE.id);
+          await seedPath(pipeline, SEED_CASE.id, F16_QUANT);
         });
 
         // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
@@ -970,7 +987,7 @@ Deno.test({
         }
 
         // i8 の 2 席（ADR 0120 段 5 — 参照行 / 実用行）。席ごとに pipeline を同じ device の上に張る（構築では Session を
-        // 張らないので、既定席の pipeline と並べても DiT / VAE の確保は重ならない — 段の Session は generate の中だけ）。
+        // 張らないので、`f16` 席の pipeline と並べても DiT / VAE の確保は重ならない — 段の Session は generate の中だけ）。
         for (const quant of SEAT_QUANTS) {
           const id = seatCaseId(quant, SEED_CASE.id);
           await t.step(`${id}（${quant} の席・seed 経路・sha256 の環境行）`, async () => {
@@ -1010,7 +1027,7 @@ Deno.test({
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
       // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
-      await using pipeline = await loadPipeline(gpu, diagnostics, "gpu");
+      await using pipeline = await loadPipeline(gpu, diagnostics, "gpu", F16_QUANT);
       for (const spec of GPU_TEXT_CASES) {
         await t.step(spec.id, async () => {
           const prompt = "asset" in spec.prompt
@@ -1116,7 +1133,7 @@ const contactSheet = (
 
 Deno.test({
   name:
-    "Wan 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_FULL_PIPELINE=1）: 既定の設定の 33 / 81 フレーム（既定席と実用席）が" +
+    "Wan 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_FULL_PIPELINE=1）: 既定の設定の 33 / 81 フレーム（`f16` 席と実用席）が" +
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図",
   ignore: !FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
@@ -1129,7 +1146,7 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      // ケースごとに席の pipeline を張る（構築では Session を張らない — 既定席と実用席を確保の大きい順に交互に回す）。
+      // ケースごとに席の pipeline を張る（構築では Session を張らない — `f16` 席と実用席を確保の大きい順に交互に回す）。
       for (const spec of FULL_CASES) {
         await t.step(spec.id, async () => {
           const frames = spec.frames ?? DEFAULT_FRAMES;

@@ -100,7 +100,8 @@ WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
 }
 
 #: 実用席の step 1 の潜在の相対 RMS 誤差（参照席 `f16+dit8` に対して — ADR 0120 段 4 の自機
-#: A/B 門の実測）。`(席, 参照席, 33 フレーム, 81 フレーム)`。
+#: A/B 門の実測）。`(席, 参照席, 33 フレーム, 81 フレーム)`。カードが併記する視認の結果は ADR 0120
+#: 裁定 2026-10-04 の 1（段 6 の 12 対 — `f16` と実用席・50 ステップ・33 フレーム）。
 WAN_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.107", "0.210")
 
 
@@ -464,8 +465,9 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"- **Quality of `{practical}`**: after the first step its latent differs from",
                 f"  `{reference}`'s (the same int8 weights, computed in float32) by a relative",
                 f"  RMS error of {error_33} at 33 frames and {error_81} at 81 frames, mostly",
-                "  from the int8 attention. Whether this is visible has not been decided yet",
-                "  (a side-by-side comparison is pending), and the default quant stays `f16`.",
+                "  from the int8 attention. Side by side with `f16` on twelve 50-step clips at",
+                "  33 frames (seeds 42 to 45 with the three fixed prompts), no clear degradation",
+                "  was seen.",
             ]
             if practical in seats and reference in seats
             else []

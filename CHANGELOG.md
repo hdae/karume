@@ -259,6 +259,11 @@ measurements in `docs/research/`.
   unchanged. On an RTX 5070 Ti the same A/B leaves the `f16` DiT stage unchanged (2.88 s of GPU
   time either way, because the NVIDIA profile changes only the i8a8 tiles and the M 129〜512 rows)
   with identical PNG bytes.
+- `karume-wan2.1`: the default quant is now `f16+dit8-a8-attn8-s16` (int8 transformer with int8
+  activations, ADR 0120) instead of `f16`, so `WanPipeline` without `quant` runs it; pass
+  `quant: "f16"` for the f16 transformer. On an Intel Arc B570 a 50-step, 33-frame clip took 952 s
+  instead of about 30 minutes. The gpu-lab Wan tab gains a quant choice, and its JSON is
+  `karume-wan-browser/3`.
 
 ### Fixed
 
