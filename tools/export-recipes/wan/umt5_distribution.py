@@ -485,7 +485,11 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 
 
 def _umt5_usage() -> list[str]:
-    """Usage: 単体の公開クラスは無い — Wan の配布形が越境参照で取る（ADR 0119 追記 A）。"""
+    """Usage: 単体の公開クラスは無い — Wan の配布形が越境参照で取る（ADR 0119 追記 A）。
+
+    差し替えの段落（ADR 0122 決定 7 の 2）は、この encoder の代わりに互換の encoder を差す使い方で、
+    pin の規則（文字列の取得元は main 追従）と precomputed の経路では効かないことを書く。
+    """
     return [
         "## Usage",
         "",
@@ -494,6 +498,17 @@ def _umt5_usage() -> list[str]:
         "`karume.json` at a pinned commit of this repository (the size and the SHA-256 of every",
         "part are declared there too), so `WanPipeline.fromPretrained` on that repository fetches",
         "it from here — you do not pass this repository yourself.",
+        "",
+        "To run Wan with a compatible umT5-XXL encoder instead of this one (for example a",
+        "fine-tune converted with the Karume export recipe), pass it through the component swap",
+        "seat: `components: { text_encoder: { source: { repo, revision } } }` in the options of",
+        "`WanPipeline.fromPretrained`. Pin the replacement with a commit — a bare repository name",
+        "follows `main`, so the encoder would move with every push while the Wan manifest pins",
+        'this one. The swap needs the GPU text encoder: `textEncoder: "precomputed"` never loads',
+        "umT5, so a swap has no effect there. The replacement is admitted only if its graph",
+        "description has the same SHA-256 as the `text_encoder` declared by the Wan manifest and",
+        "its weights are int8 with float32 tables; the tokenizer still comes from the Wan",
+        "distribution and is not checked against the replacement.",
     ]
 
 

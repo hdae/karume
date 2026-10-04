@@ -311,6 +311,16 @@ class TestTheModelCard:
         assert f"[`hdae/{UMT5_CONSUMER_REPO_NAME}`]" in card
         assert ".fromPretrained({" not in card
 
+    def test_the_usage_explains_swapping_in_a_compatible_encoder(self, assembled) -> None:
+        """差し替えの段落は席の綴り・pin の規則・precomputed では効かないこと・受理の条件を書く
+        （ADR 0122 決定 7 の 2）。"""
+        out_dir, _ = assembled
+        card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
+        assert "`components: { text_encoder: { source: { repo, revision } } }`" in card
+        assert "a bare repository name follows `main`" in card
+        assert '`textEncoder: "precomputed"` never loads umT5, so a swap has no effect' in card
+        assert "graph description has the same SHA-256" in card
+
     def test_the_inputs_and_the_token_range_are_named(self, assembled) -> None:
         out_dir, _ = assembled
         card = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())

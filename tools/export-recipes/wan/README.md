@@ -409,11 +409,25 @@ terms in `license-review.md` next to the record. The intake directory must not r
 weight file in any format or letter case, an index, a partial `.part` download, a subdirectory —
 fails).
 
+The whole path, run from `tools/export-recipes` (placeholders in angle brackets; `<name>` is your
+own short name for the encoder, used for the intake directory, the series and the mirror):
+
 ```bash
+# 1. Intake: one safetensors file at a pinned commit -> ../../inputs/umt5/<name>/ (+ intake.json).
 uv run --group wan --inexact python -m wan.umt5_intake --repo <owner/name> --revision <40-hex commit> \
     --file <file>.safetensors --name <name>
+
+# 2. License review (by hand): record what the repository declares (license, base model, training
+#    data) and your conclusion in ../../inputs/umt5/<name>/license-review.md. The intake never
+#    writes this file and never judges the license; intake.json says NOASSERTION when none is declared.
+
+# 3. Convert: the int8 series ../../outputs/series/umt5-xxl-<name>-i8-dyn/ (bfloat16 is widened to
+#    float32 as it is read). Add --allow-undeclared-license only when intake.json records NOASSERTION.
 uv run --group wan --inexact python -m wan.umt5_export write --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
-uv run --group wan --inexact python -m wan.umt5_export reference --intake ../../inputs/umt5/<name>
+uv run --group wan --inexact python -m wan.umt5_export reference --intake ../../inputs/umt5/<name>   # optional: goldens
+
+# 4. Local experiment mirror: ../../outputs/misc/local-dist/<name>/ (model <name>, quant i8). An --out
+#    under models/ is refused, whatever the license.
 uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<name> [--allow-undeclared-license]
 ```
 
@@ -437,6 +451,33 @@ When the upstream declares no license, `write` and `dist.py` stop before writing
 uploading and refuses `NOASSERTION` in any letter case, `unknown` and `none`, as well as a directory
 with no container at all, so a mirror copied or linked into `models/` by hand is stopped by its
 contents. There is no publishing path for third-party encoders here.
+
+#### Swapping the mirror into Wan (ADR 0122 stage d)
+
+After step 4 above, swap the mirror into Wan. Run this from the repository root; the
+[swap section](../../examples/wan/README.md#swapping-the-text-encoder) of the `examples/wan` README
+explains the rules:
+
+```bash
+deno task demo:wan --swap-text-encoder outputs/misc/local-dist/<name> --prompt boxing-cats
+```
+
+The swap is admitted only if the mirror's `text_encoder` has the same graph description SHA-256 as
+the one the Wan manifest declares (the `descriptor.graph.sha256` of `text_encoder` in both
+`karume.json` files). The writer traces a meta model built from `config.json`, so an encoder whose
+configuration matches `google/umt5-xxl` gets the same graph; a mismatch (for example a different
+exporter, torch or transformers version) fails at construction before any weight is downloaded,
+with `グラフ記述が manifest の宣言と違う` and both hashes. Matching graphs do not prove a matching
+tokenizer or relative-position buckets — see `docs/limitations.md`.
+
+The mirror stays local. Before any upload, `tools/release/hf-upload.zsh upload <repo-dir-name>` runs
+the pre-publish gate on `models/<repo-dir-name>`; the same check can be run by hand on any
+directory, and exits 1 on a `NOASSERTION` container (run from `tools/export-recipes`, like the steps
+above):
+
+```bash
+deno run --no-config --allow-read ../release/container_license.ts ../../outputs/misc/local-dist/<name>
+```
 
 ## Distribution (stage 7)
 
