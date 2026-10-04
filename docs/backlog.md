@@ -34,6 +34,8 @@
   それが正当かを見直す。「Metal では既定 quant の a8 を外す」判断（perf-ledger K-70・ADR 0115 Consequences）は保留にしてここに合流した。
   **材料集めは済（2026-09-29）**: `.claude/reviews/2026-09-29_quant-default-recon/SUMMARY.md`（git 追跡外）— 席の決まり方（recipe の定数・hub の解決・利用者の口）・
   系列 × 席 33 行の表（格納型・session 宣言・DL サイズ・契約クラス）・席別の実測（B570 / M2 / RTX・未計測を明示）・既定を量子化にした過去の根拠の引用・論点 3 案が守るもの。次 = 利用者と議論。
+  **材料の追加（2026-10-04・利用者の方針 — Wan の既定席の裁定で）**: 既定の quant 席は「今いちばん実用的な席」（軽く、品質の劣化が小さい席）にする。
+  将来「元の重みにいちばん近い席」を既定へ転換する余地は残す（ADR 0120 裁定 2026-10-04 の 4）。Wan2.1 はこの方針で既定 = 実用席へ切り替えた。
 
 - **幾何プロファイル（K-71）まわり（起票 2026-09-27・裁定 2026-09-29 = 推奨案で全承認）**: 正本は ADR [0115 追記 2026-09-29](decisions/0115-geometry-profiles.md)。
   ① 掃引ケースの追加は済（linear の M = 16 / 32 / 128 / 256・matmul 3 本〈linear の鏡像 — census に rank-2 matmul は無い〉・bmm 5 本〈census〉。生成器は 3 経路のケースで `gemmRows` を決める）。
@@ -333,10 +335,31 @@ later の「decode 速度の残り」。
   だが 33B dense + Qwen3-VL-32B + VAE 2.6B で 1 タスク約 144 GB・ネイティブでも offload 前提（RTX 5090 で 112 s の実測例）・
   ブラウザ WebGPU の事例は無い。
   **レビューの消化済（2026-10-03）**: 差分レビュー 75 件 + Codex 12 件を fix 単位 37 コミットで消化（ADR 0118 追記 2026-10-03）。
-  **次の波（2026-10-03 起草・proposed）**: [ADR 0119](decisions/0119-wan-umt5-gpu-text-encoder.md)（段 10 = umT5 を GPU で・自由な
+  **Wan2.1 の後続（2026-10-03 起草・0119 は proposed / 0120 は accepted）**: [ADR 0119](decisions/0119-wan-umt5-gpu-text-encoder.md)（段 10 = umT5 を GPU で・自由な
   プロンプト・AbortSignal・10a〜10e）/ [ADR 0120](decisions/0120-wan-dit-w8a8-seat.md)（w8a8 席・段 1〜7）/ 段 9 Chrome（gpu-lab の
   Wan ページを作り、利用者が RTX 5070 Ti 機で確認）。順序: 段 9 ∥ 10a → 10b（export のホスト RAM・単独で回す）→ 0120 段 1〜2
   （CPU）→ GPU の段は lock で直列化（10c → 0120 段 3〜5 → 10d）→ 視認 A/B（0120 段 6・10d）→ H3。**進捗（2026-10-03 夕）**: 段 9 = ページ完成・利用者の RTX 機での実走待ち / 10a ✅ / 0120 段 1〜2 ✅（i8 系列・席 3 つ）/ 0120 段 3〜5 ✅〈帯は B570 の実測で確定・実用席は f16 の約半分の時間・step 1 relRMS は 33f 1.07e-1 / 81f 2.10e-1 で attention a8 が大半 → 段 6 の視認で裁定〉/ 10c の準備 ✅〈バケット表の parity・小模型で export 被覆・gelu は tanh 差し替え〉/ S=14,040 の i8 golden 採取中 → 10b ✅〈meta trace + 行の塊ごとの i8 + fixed_weights・core 変更なし・山 6.79 GiB・容器 5.69 GB〉→ 10c の CPU 側 ✅〈層逐次 f64 / f32 参照・golden 10 本・e2e は帯未導出〉→ 10d-1 ✅〈karume-umt5-xxl・Wan の越境参照・仮 SHA の門・ミラー 2 本〉・10d-2 ✅〈textEncoder の経路選択・text 段・signal・examples / gpu-lab〉→ 10d-3 ✅〈参照門の締め `7dc17309`〉→ 10c の門 ✅〈帯 79〉・10d-4 ✅〈gpu-text の sha 行 2 本・text 段 10.4 s・VRAM の山 6.30 GiB・残り +0.08 GiB〉→ 次は 10e〈任意〉 → 0120 段 6 の視認 A/B〈素材 12 本 ✅ 2026-10-03・利用者へ送付済・裁定待ち〉。
+  **進捗（2026-10-04）**: 段 9 ✅（RTX 5070 Ti の Chrome で 81 フレーム 50 ステップが完走・`f16` 席・precomputed の経路 — ADR 0118 追記 2026-10-04。
+  この環境キーの sha 行は足さない裁定）/ 0120 段 6 ✅ → **ADR 0120 accepted**（実用席 `f16+dit8-a8-attn8-s16` は今の束で確定・**既定席 = 実用席**・
+  `f16` は明示指定の参照側の席で、既存の sha 行・帯・case id は `f16` を明示して保つ — ADR 0120 裁定 / 追記 2026-10-04）/ gpu-lab の Wan タブに
+  quant の選択・`demo:wan` に `--quant`。配布形ミラー `models/karume-wan2.1` は更新済み（`karume.json` の `defaultQuant` と README だけ・容器はバイト同一・ホストの検査は緑）。
+  残り: GPU の `test:models:wan`（ADR 0120 追記 2026-10-04「残りの作業」— GPU の直列キューの後）。**走行中（GPU の直列キュー・結果は各 ADR に追記）**: ADR 0119 の視認素材（umT5 の
+  GPU 経路 + 実用席・自由プロンプト 3 本と固定 3 本 × seed 42〜45）と、ADR 0120 の 50 ステップ opt-in の実用席の sha 行 2 本。
+  **Wan の小物（起票 2026-10-04）**: (a) Chrome での GPU 経路（umT5 を GPU で）と実用席の実走は未（gpu-lab の Wan タブの既定の経路は
+  `precomputed` のまま — 既定を `gpu` へ移すのも同じ確認の後）(b) モデルカード生成（`tools/export-recipes/wan/card.py`）に「ブラウザは未確認」の
+  文面が残る — 直すとカードの出力が変わるので次の焼き直しと一緒に (c) `tools/gpu-lab/README.md` の「Checking Wan in Chrome」節に RTX の結果が
+  入っていない (d) anima / irodori / sbv2 の例の出力名は席を省くと `default` で、既定席が変わると同じ名前に上書きされる。
+- **Wan2.2 TI2V-5B の受け入れ（次の波・起票 2026-10-04・ADR [0121](decisions/0121-wan22-ti2v-5b.md) accepted）**: 参照席 `f16+dit8` /
+  実用席 `f16+dit8-a8-attn8-s16` の 2 席・I2V 対応の DiT グラフ 1 本・VAE 2.2 のタイル decode・段 0〜10。MiniMax H3 はこの後。
+  **裁定（2026-10-04・利用者）**: 受理する解像度とフレーム数は開発機で回せる範囲で作って試す（1280×704 を 33 フレームまで / 832×480 を 81 フレームまで
+  の配分は確認中 — 段 0 / 1 は配分に依らない）・f16 席は今は作らない・I2V の縦横比はまず公式の挙動（覆う側へリサイズして中央クロップ）。
+  **進捗**: 段 0（取得口・RAM 実測・層逐次の f64 参照）を実装中。
+  **後で足す（起票 2026-10-04・利用者）**: (a) TI2V-5B の f16 席 — 開発機で動かなくても重みは用意しておきたい（材料: f16 の export は RAM の境界か
+  exporter core の変更が要る・開発機では門も sha 行も持てない — ADR 0121 決定 7 / 裁定 2）(b) I2V の縦横比を選べる口（直接リサイズ — diffusers の
+  挙動 — を選べるように・口の形は段 9）。
+  **関連（proposed・利用者の承認待ち）**: ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)（umT5 の出所を本家 google/umt5-xxl へ・
+  互換の text encoder を作る経路・差し替えは今の components 席のまま・段 a〜d）。調査の結論は「本家の encoder は Wan 同梱の umT5 と f32 で全要素
+  ビット一致」。段 a は `karume-umt5-xxl` の part 0 の sha256 を変えるので、0121 の配布形より先に済ませる（ADR 0122 Consequences）。
 - **anima 素版 i4 の品質改善（起票 2026-08-24 — 配布スキップ裁定の復活レバー）**: 残るのは
   turbo 側の i4 席で**未検証のまま残した可能性の一覧**（専用幾何・g16・校正量・もう 1 つの
   劣化機序 — いずれも「試してダメ」ではなく「試していない」）だけで、正本は
