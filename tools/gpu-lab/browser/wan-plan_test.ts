@@ -358,15 +358,50 @@ describe("wan reference cases", () => {
   };
 
   it("names the e2e cases the sha256 rows are kept for", () => {
-    assertEquals(wanReferenceCaseId(BASE, CONFIG, "negative"), "2step-seed-boxing-cats-seed42");
     assertEquals(
-      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative"),
+      wanReferenceCaseId(BASE, CONFIG, "negative", "f16"),
+      "2step-seed-boxing-cats-seed42",
+    );
+    assertEquals(
+      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative", "f16"),
       "50step-boxing-cats-seed42",
     );
     assertEquals(
-      wanReferenceCaseId({ ...BASE, steps: 50, frames: 81 }, CONFIG, "negative"),
+      wanReferenceCaseId({ ...BASE, steps: 50, frames: 81 }, CONFIG, "negative", "f16"),
       "50step-boxing-cats-seed42-81f",
     );
+  });
+
+  it("puts the quant that ran in front of the id for the int8 quants the e2e keeps rows for", () => {
+    assertEquals(
+      wanReferenceCaseId(BASE, CONFIG, "negative", "f16+dit8"),
+      "f16+dit8-2step-seed-boxing-cats-seed42",
+    );
+    assertEquals(
+      wanReferenceCaseId(BASE, CONFIG, "negative", "f16+dit8-a8-attn8-s16"),
+      "f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42",
+    );
+    assertEquals(
+      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative", "f16+dit8-a8-attn8-s16"),
+      "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42",
+    );
+    assertEquals(
+      wanReferenceCaseId(
+        { ...BASE, steps: 50, frames: 81 },
+        CONFIG,
+        "negative",
+        "f16+dit8-a8-attn8-s16",
+      ),
+      "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42-81f",
+    );
+  });
+
+  it("names no case for a quant the e2e keeps no row for", () => {
+    assertEquals(
+      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative", "f16+dit8"),
+      undefined,
+    );
+    assertEquals(wanReferenceCaseId(BASE, CONFIG, "negative", "f16+other"), undefined);
   });
 
   it("names no case when any condition differs from the e2e case", () => {
@@ -383,7 +418,7 @@ describe("wan reference cases", () => {
       ]
     ) {
       assertEquals(
-        wanReferenceCaseId({ ...BASE, ...changed }, CONFIG, "negative"),
+        wanReferenceCaseId({ ...BASE, ...changed }, CONFIG, "negative", "f16"),
         undefined,
         JSON.stringify(changed),
       );

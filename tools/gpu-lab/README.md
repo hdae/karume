@@ -297,8 +297,11 @@ comparable to wall times with it off.
 
 The tab has a text-encoder route switch. `precomputed` (the tab default) uses the fixed-prompt embedding
 asset; `gpu` runs umT5-XXL on the GPU and accepts any prompt — it needs the `karume-umt5-xxl` mirror,
-which the server serves at `/models/umt5/` (`--umt5-source`, default `models/karume-umt5-xxl`). The saved
-JSON is `karume-wan-browser/2` and carries the route.
+which the server serves at `/models/umt5/` (`--umt5-source`, default `models/karume-umt5-xxl`). A quant
+switch next to it lists the quants of the distribution this server serves; its first entry, `既定`,
+resolves to the manifest's `defaultQuant` at load (`f16+dit8-a8-attn8-s16` since 2026-10-04 — ADR 0120),
+and the resolved name is passed to the pipeline and recorded. The saved JSON is `karume-wan-browser/3` and
+carries the route and the quant.
 
 Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) in Chrome, to see whether a clip
 completes on a browser device and, when it does not, where it stops (binding limits, the GPU
@@ -309,13 +312,13 @@ embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
   `owner/name` reads that Hugging Face repository at `main` (the distribution is not published
   yet, so the blank default is the normal case).
 - **読み込む** (load) reads the manifest, acquires a GPU device, and builds the pipeline with
-  `WanPipeline.fromPretrained(source, { gpu })`. The device is acquired by the tab with the applied
+  `WanPipeline.fromPretrained(source, { gpu, quant, textEncoder })`. The device is acquired by the tab with the applied
   geometry profile of the GPU settings and without GPU time: `WanPipeline` refuses a timing device
   (the VAE decodes one tile per batch, and the runtime opens no batch on a timing device), so the
   timestamp setting does not apply to this tab. `acquireGpu` requests the adapter's own limits, so
   the device does not keep the WebGPU default of 128 MiB per storage binding. From this server, loading
   reads only the descriptors, and every generate reads the weights from the server again as each
-  stage builds its session (about 2.6 GiB for the transformer and 0.27 GiB for the VAE); from
+  stage builds its session (about 2.6 GiB for the `f16` transformer and 0.27 GiB for the VAE); from
   Hugging Face, loading first downloads the weight parts into the browser cache. **pipeline を破棄** disposes the pipeline and
   the device; use it after a device loss. Applying the GPU settings also disposes them; load again
   to use the new settings.
@@ -339,7 +342,7 @@ embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
   order — the bytes the e2e reference rows hash), the reference verdict, and the error. The clip is
   drawn on the canvas next to the table: **前** / **次** step one frame, **再生** plays at 16 fps,
   and the slider seeks.
-- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/1`).
+- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/3`).
 
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
 stops it. A 50-step clip takes about 30 minutes for 33 frames and about 2 hours for 81 frames on the
@@ -423,6 +426,11 @@ guidance and shift, 832x480, and
 - `50step-boxing-cats-seed42` — steps 50, 33 frames,
 - `50step-boxing-cats-seed42-81f` — steps 50, 81 frames.
 
+These ids are the `f16` quant's. The id also depends on the quant that ran: the int8 quants put their
+name in front (`f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42`), for the quants the e2e keeps rows
+for — `f16+dit8` and `f16+dit8-a8-attn8-s16` at 2 steps, and `f16+dit8-a8-attn8-s16` at 50 steps.
+Any other quant is not a reference case.
+
 ### 6. What to record
 
 1. The adapter line (vendor, architecture, description), the environment key, and the user agent.
@@ -441,7 +449,8 @@ guidance and shift, 832x480, and
 3. Before loading, read the limits table at 33 and at 81 frames.
 4. Press **読み込む**. The device column fills in; it should equal the adapter column.
 5. Run the quick reference case: `boxing-cats`, seed 42, 33 frames, 832x480, steps 2, guidance and
-   shift blank. Check that the clip plays and note the SHA-256.
+   shift blank. Check that the clip plays and note the SHA-256. The quant is the one chosen before
+   loading (`既定` = the manifest's `defaultQuant`); to compare with the `f16` rows, choose `f16`.
 6. Run `50step-boxing-cats-seed42` (steps blank), then, if it completes, 81 frames.
 7. Save the JSON and report it with the records above.
 

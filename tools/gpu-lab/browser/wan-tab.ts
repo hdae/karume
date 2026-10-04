@@ -13,7 +13,9 @@
  *    経路（ADR 0119 決定 7）はタブの既定が `precomputed`（埋め込み資産 — 段 9 の確認の既定のまま。パイプライン
  *    の既定は `gpu` なので、ここでは必ず明示して渡す）。`gpu` を選ぶと umT5 の越境先（Wan の manifest の
  *    `text_encoder` が宣言する repo）を、このサーバが配る `models/karume-umt5-xxl`（`/models/umt5/…`）へ取得元の
- *    `crossRepo` で結ぶ（HF の取得元なら宣言どおり HF から取る）。
+ *    `crossRepo` で結ぶ（HF の取得元なら宣言どおり HF から取る）。quant の席はタブの選択肢（このサーバの配布形の
+ *    manifest から埋める）か、既定なら読み込み時に manifest の `defaultQuant` へ解決し、解決した名前を必ず明示して
+ *    渡す（参照ケースの id は回した席で決まる — `f16` 席は席名を持たない id・i8 の席は席名を先頭に置いた id）。
  * 3. **生成**: プロンプト（埋め込み資産の名前 — `gpu` なら自由プロンプトの欄の文字列が優先）・seed・フレーム数・
  *    寸法・steps・guidance・shift で `generate` → 全フレームを canvas に描いて再生 → 所要（段・step・VAE タイル・
  *    `gpu` なら text 段）・Session の診断・RGB の sha256（事前計算の経路の参照ケースなら環境行との照合）を表に積む。
@@ -41,6 +43,7 @@ import {
   type HubRepoRef,
   loadManifest,
   localDirectory,
+  parseManifest,
   resolveSelection,
 } from "../../../packages/hub/mod.ts";
 import {
@@ -99,8 +102,8 @@ import {
   type WanTimelineMark,
 } from "./wan-plan.ts";
 
-/** 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ）。 */
-const WAN_REPORT_FORMAT = "karume-wan-browser/2";
+/** 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ・/3 = 読み込みと行が quant の席を持つ）。 */
+const WAN_REPORT_FORMAT = "karume-wan-browser/3";
 
 /** テキストエンコーダの経路（`WanPipelineOptions.textEncoder`）。 */
 type WanTextEncoder = NonNullable<WanPipelineOptions["textEncoder"]>;
@@ -123,6 +126,8 @@ type WanRow = {
   readonly index: number;
   readonly at: string;
   readonly request: WanResolvedRequest;
+  /** 回した quant の席（manifest の既定へ解決した後の名前）。 */
+  readonly quant: string;
   readonly textEncoder: WanTextEncoder;
   /** `gpu` の経路で渡した自由プロンプト（無ければ `request.prompt` の資産の原文を渡した）。 */
   readonly freePrompt?: string;
@@ -142,6 +147,8 @@ type WanRow = {
 type Loaded = {
   readonly gpu: GpuContext;
   readonly pipeline: WanPipeline;
+  /** 組んだ quant の席（「既定」を選んだときは manifest の `defaultQuant` へ解決した名前）。 */
+  readonly quant: string;
   readonly textEncoder: WanTextEncoder;
   /** 取得元の表示（`karume-wan2.1（このサーバ）` / HF の `owner/name`）。 */
   readonly source: string;
@@ -191,6 +198,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     seek: element(root, "seek", HTMLInputElement),
     frameLabel: element(root, "frame-label", HTMLElement),
     textEncoder: document.createElement("select"),
+    quant: document.createElement("select"),
     freePrompt: document.createElement("input"),
   };
 
@@ -215,7 +223,14 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   ui.freePrompt.type = "text";
   ui.freePrompt.size = 48;
   ui.freePrompt.placeholder = "gpu の経路だけ — 空欄 = 選んだプロンプトの原文";
+  // 先頭の「既定」は読み込み時に manifest の `defaultQuant` へ解決する（HF の取得元でも選べる）。席の名前は
+  // このサーバの配布形の manifest から足す（{@link fillQuants}）。
+  const defaultQuantOption = document.createElement("option");
+  defaultQuantOption.value = "";
+  defaultQuantOption.textContent = "既定（manifest の defaultQuant）";
+  ui.quant.replaceChildren(defaultQuantOption);
   after(ui.source, field("テキストエンコーダ", ui.textEncoder));
+  after(ui.textEncoder, field("quant", ui.quant));
   after(ui.prompt, field("自由プロンプト", ui.freePrompt));
 
   const state: {
@@ -254,6 +269,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         }（未読み込み）`
         : `配布形 ${loaded.source}`,
       `テキストエンコーダ ${loaded?.textEncoder ?? `${ui.textEncoder.value}（未読み込み）`}`,
+      `quant ${
+        loaded?.quant ??
+          `${ui.quant.value === "" ? "manifest の既定" : ui.quant.value}（未読み込み）`
+      }`,
       loaded === undefined
         ? `幾何プロファイル ${requestedLabel(lab.settings().choice)}（読み込み時に確定）`
         : `幾何プロファイルの要求 ${loaded.geometryProfileRequested}${
@@ -316,6 +335,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ui.load.disabled = busy || loaded;
     ui.source.disabled = busy || loaded;
     ui.textEncoder.disabled = busy || loaded;
+    ui.quant.disabled = busy || loaded;
     ui.dispose.disabled = busy || !loaded;
     ui.run.disabled = busy || !loaded;
     for (
@@ -460,6 +480,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       throw Error(`defaultModel ${manifest.manifest.defaultModel} が models に無い`);
     }
     const config = parseWanPipelineConfig(model.pipelineConfig);
+    // 回す席を名前で確定する（参照ケースの id はこの名前で決まる — 既定席が変わった配布形でも取り違えない）。
+    const quant = ui.quant.value === "" ? model.defaultQuant : ui.quant.value;
     let manifestSha256: string | undefined;
     if (local) {
       const response = await fetch("models/wan/karume.json");
@@ -501,6 +523,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         gpu,
         // MUST: 経路は必ず明示する（パイプラインの既定は "gpu" — タブの既定の precomputed と食い違う）。
         textEncoder,
+        // MUST: 席も解決した名前で明示する（参照ケースの id と回した席を 1 つの値から決める）。
+        quant,
         onRunDiagnostics: (component, diagnostics) => {
           if (state.diagnostics === undefined) {
             throw Error(`${component} の run が generate の外で終わった`);
@@ -524,6 +548,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     state.loaded = {
       gpu,
       pipeline,
+      quant,
       textEncoder,
       source: label,
       ...(manifest.repo === undefined ? {} : { repo: manifest.repo }),
@@ -585,7 +610,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   };
 
   const formatRequest = (row: WanRow): string =>
-    `${row.textEncoder} · ${
+    `${row.quant} · ${row.textEncoder} · ${
       row.freePrompt === undefined ? row.request.prompt : JSON.stringify(row.freePrompt)
     } · ${formatKnobs(row.request)}`;
 
@@ -654,7 +679,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     // 参照ケースの照合は事前計算の経路だけ（`wanReferenceCaseId` の id は事前計算の経路の sha 行 — GPU 経路の
     // 動画は同じ条件でも値が違う）。
     const caseId = loaded.textEncoder === "precomputed"
-      ? wanReferenceCaseId(resolved, loaded.config, loaded.defaultNegative)
+      ? wanReferenceCaseId(resolved, loaded.config, loaded.defaultNegative, loaded.quant)
       : undefined;
     const index = state.rows.length + 1;
     const marks: WanTimelineMark[] = [];
@@ -691,6 +716,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       index,
       at: new Date().toISOString(),
       request: resolved,
+      quant: loaded.quant,
       textEncoder: loaded.textEncoder,
       ...(freePrompt === undefined ? {} : { freePrompt }),
       ...(caseId === undefined ? {} : { caseId }),
@@ -794,6 +820,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       bundleSha256: lab.config.bundleSha256,
       ...(loaded === undefined ? {} : {
         source: loaded.source,
+        quant: loaded.quant,
         textEncoder: loaded.textEncoder,
         ...(loaded.repo === undefined ? {} : { repo: loaded.repo }),
         ...(loaded.revisionSha === undefined ? {} : { revisionSha: loaded.revisionSha }),
@@ -840,6 +867,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   ui.dispose.addEventListener("click", exclusive("Wan の破棄", dispose));
   ui.exportJson.addEventListener("click", exportJson);
   ui.textEncoder.addEventListener("change", renderInfo);
+  ui.quant.addEventListener("change", renderInfo);
   ui.frames.addEventListener("change", renderLimits);
   ui.size.addEventListener("change", renderLimits);
   ui.prompt.addEventListener("change", () => {
@@ -866,13 +894,41 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ui.play.textContent = "停止";
   });
 
+  /**
+   * quant の選択肢をこのサーバの配布形の manifest の既定モデルの欄から足す（`defaultQuant` に「（既定）」）。
+   * 配っていなければ足さない（先頭の「既定」だけ — 読み込み時に取得元の manifest で解決する）。
+   */
+  const fillQuants = async (): Promise<void> => {
+    if (lab.config.wanSource === null) return;
+    const response = await fetch("models/wan/karume.json");
+    if (!response.ok) throw Error(`karume.json HTTP ${response.status}`);
+    const manifest = parseManifest(await response.text());
+    const model = manifest.models[manifest.defaultModel];
+    if (model === undefined) {
+      throw Error(`defaultModel ${manifest.defaultModel} が models に無い`);
+    }
+    ui.quant.append(
+      ...Object.entries(model.quants).map(([name, quant]) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = `${name}${name === model.defaultQuant ? "（既定）" : ""}${
+          quant.label === undefined ? "" : ` — ${quant.label}`
+        }`;
+        return option;
+      }),
+    );
+  };
+
   renderInfo();
   renderLimits();
   setBusy(false);
   status(
-    "「読み込む」で GPU を取り、配布形を読みます（テキストエンコーダの経路は読み込み時に決まる）。" +
+    "「読み込む」で GPU を取り、配布形を読みます（テキストエンコーダの経路と quant の席は読み込み時に決まる）。" +
       "判定表は選んだフレーム数・寸法で更新されます。",
   );
+  fillQuants().catch((error: unknown) => {
+    status(`quant の選択肢を読めない（「既定」だけ選べる）— ${errorText(error)}`);
+  });
 
   return {
     reset: async () => {

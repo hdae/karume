@@ -472,10 +472,27 @@ export const wanRgbBytes = (
 };
 
 /**
- * 参照ケースの id（sha256 の環境行のキー — `fixtures/references/wan.json`）。要求が e2e の参照ケースと
+ * 席名を持たない参照ケースの id の席（`e2e_wan_pipeline_test.ts` の `F16_QUANT` — 既定席が実用席へ移っても
+ * 既存の行はこの席の値・ADR 0120 裁定 2026-10-04 の 4）。
+ */
+const UNSEATED_QUANT = "f16";
+
+/**
+ * 席を名乗る行を持つ席（id は `<席>-<席名を持たない id>` — e2e の `seatCaseId`）。e2e の `SEAT_QUANTS`
+ * 〈2 ステップ〉と `FULL_CASES` の実用席〈50 ステップ〉の写し。ここに無い席の組は参照ケースではない。
+ */
+const SEATED_CASES: Readonly<Record<string, readonly string[]>> = {
+  "2step-seed-boxing-cats-seed42": ["f16+dit8", "f16+dit8-a8-attn8-s16"],
+  "50step-boxing-cats-seed42": ["f16+dit8-a8-attn8-s16"],
+  "50step-boxing-cats-seed42-81f": ["f16+dit8-a8-attn8-s16"],
+};
+
+/**
+ * 参照ケースの id（sha256 の環境行のキー — `fixtures/references/wan.json`）。要求と席が e2e の参照ケースと
  * 同じ条件のときだけ返す（`e2e_wan_pipeline_test.ts` の `SEED_CASE`〈2 ステップ〉と `FULL_CASES`〈50
  * ステップ・33 / 81 フレーム〉: `boxing-cats`・seed 42・既定の negative・guidance と shift は manifest の
- * 既定・832×480）。
+ * 既定・832×480）。`quant` は実際に回した席（manifest の既定へ解決した後の名前）— `f16` 席は席名を持たない
+ * id、i8 の席は席名を先頭に置いた id。
  *
  * MUST: e2e のケースの定義を変えたらここも変える（行の値が別の条件の sha と突き合わさる）。
  */
@@ -483,16 +500,23 @@ export const wanReferenceCaseId = (
   resolved: WanResolvedRequest,
   config: WanPipelineConfig,
   defaultNegative: string | undefined,
+  quant: string,
 ): string | undefined => {
   const common = resolved.prompt === "boxing-cats" && resolved.seed === 42 &&
     resolved.negative === defaultNegative && defaultNegative !== undefined &&
     resolved.guidance === config.defaults.guidance && resolved.shift === config.scheduler.shift &&
     resolved.width === 832 && resolved.height === 480;
   if (!common) return undefined;
-  if (resolved.steps === 2 && resolved.frames === 33) return "2step-seed-boxing-cats-seed42";
-  if (resolved.steps === 50 && resolved.frames === 33) return "50step-boxing-cats-seed42";
-  if (resolved.steps === 50 && resolved.frames === 81) return "50step-boxing-cats-seed42-81f";
-  return undefined;
+  const base = resolved.steps === 2 && resolved.frames === 33
+    ? "2step-seed-boxing-cats-seed42"
+    : resolved.steps === 50 && resolved.frames === 33
+    ? "50step-boxing-cats-seed42"
+    : resolved.steps === 50 && resolved.frames === 81
+    ? "50step-boxing-cats-seed42-81f"
+    : undefined;
+  if (base === undefined) return undefined;
+  if (quant === UNSEATED_QUANT) return base;
+  return SEATED_CASES[base].includes(quant) ? `${quant}-${base}` : undefined;
 };
 
 /** sha256 の環境行の表（`fixtures/references/wan.json` の形 — ADR 0106）。 */
