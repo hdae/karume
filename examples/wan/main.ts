@@ -4,6 +4,7 @@
  *     deno task demo:wan --prompt boxing-cats --seed 42
  *     deno task demo:wan --prompt "A red fox trots through fresh snow at sunrise." --steps 20
  *     deno task demo:wan --text-encoder precomputed --prompt ferret --frames 17 --size 480x832
+ *     deno task demo:wan --quant f16 --prompt boxing-cats --seed 42
  *
  * 配布形は `fromPretrained` で読む（ADR 0118 段 7）。`--source` 未指定なら手元の配布形ミラー
  * `models/karume-wan2.1`（`dist.py --pipeline wan` が組む）を取得元ハンドル（`denoDirectory`）で読む —
@@ -15,6 +16,9 @@
  * 固定プロンプトだけを受ける。`gpu` でローカルの配布形を読むとき、umT5 は別の配布リポ（Wan の manifest の
  * `text_encoder` が越境参照する）なので、その手元のミラーを `--umt5-source`（既定 `models/karume-umt5-xxl`）で
  * 指し、hub の取得元の `crossRepo` の mapping で渡す（隣のディレクトリを推測しない — hub の `local.ts`）。
+ *
+ * 席は `--quant`（manifest の quants のキー — 省略時は manifest の `defaultQuant`）。そのまま `fromPretrained` へ
+ * 渡し（綴りの検証は hub に任せる）、出力先の名前に入れる（省略時は `default` — 他の例の CLI と同じ流儀）。
  *
  * `--prompt` / `--negative` は埋め込み資産の名前（`boxing-cats` など — その原文を渡す）か、それ以外の任意の
  * 文字列（そのまま渡す — `precomputed` では資産の集合の外なので選べる名前の一覧つきで落ちる）。未指定のノブは
@@ -30,12 +34,13 @@ import { runMain } from "../shared/run-main.ts";
 import { distributionSource } from "../shared/local-source.ts";
 import { isLocalDist } from "../shared/local-assets.ts";
 
-const USAGE = "--source <パス|HF repo> --umt5-source <パス> --text-encoder <gpu|precomputed>" +
-  " --prompt <名前|文字列> --negative <名前|文字列> --seed <整数> --steps <整数> --frames <整数>" +
-  " --guidance <数> --shift <数> --size <WxH> --out <dir>";
+const USAGE = "--source <パス|HF repo> --umt5-source <パス> --quant <名前>" +
+  " --text-encoder <gpu|precomputed> --prompt <名前|文字列> --negative <名前|文字列>" +
+  " --seed <整数> --steps <整数> --frames <整数> --guidance <数> --shift <数> --size <WxH> --out <dir>";
 const KNOWN = new Set([
   "source",
   "umt5-source",
+  "quant",
   "text-encoder",
   "prompt",
   "negative",
@@ -79,6 +84,8 @@ if (textEncoderArg !== undefined && textEncoderArg !== "gpu" && textEncoderArg !
 }
 /** 経路（未指定はパイプラインの既定と同じ `gpu` — 出力先の名前に入れるので値で持つ）。 */
 const textEncoder = textEncoderArg ?? "gpu";
+/** 席の指定（未指定は manifest の既定）。 */
+const quantArg = args.get("quant");
 const promptArg = args.get("prompt") ?? "boxing-cats";
 const negativeArg = args.get("negative");
 const seed = integer("seed") ?? 42;
@@ -167,8 +174,15 @@ const sha256Hex = async (text: string): Promise<string> =>
 
 const main = async (): Promise<void> => {
   const { from, label } = await resolveSource();
-  console.log(`[wan] source: ${label}・text encoder: ${textEncoder}`);
-  await using pipeline = await WanPipeline.fromPretrained(from, { textEncoder });
+  console.log(
+    `[wan] source: ${label}・quant: ${
+      quantArg ?? "（manifest の既定）"
+    }・text encoder: ${textEncoder}`,
+  );
+  await using pipeline = await WanPipeline.fromPretrained(from, {
+    ...(quantArg === undefined ? {} : { quant: quantArg }),
+    textEncoder,
+  });
 
   // 資産の名前ならその原文、それ以外は渡した文字列そのもの（受理はパイプラインの門が決める — 経路ごと）。
   const textOf = (value: string): string =>
@@ -211,8 +225,8 @@ const main = async (): Promise<void> => {
   Deno.stderr.writeSync(encoder.encode("\n"));
   if (ranSteps === undefined) throw new Error("denoise-step のイベントが 1 度も来なかった");
   // NOTE: guidance / shift / negative は名前に入らない — 変えて比べるときは --out で分ける。
-  const outDir = `${outRoot}/wan-${promptLabel}-${textEncoder}-${video.width}x${video.height}` +
-    `-${video.frames}f-${ranSteps}step-seed${seed}`;
+  const outDir = `${outRoot}/wan-${quantArg ?? "default"}-${promptLabel}-${textEncoder}` +
+    `-${video.width}x${video.height}-${video.frames}f-${ranSteps}step-seed${seed}`;
   await Deno.mkdir(outDir, { recursive: true });
   for (let frame = 0; frame < video.frames; frame += 1) {
     await Deno.writeFile(

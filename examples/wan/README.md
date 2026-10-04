@@ -8,6 +8,7 @@ PNG frames. It is the worked example for `WanPipeline.fromPretrained`, `prompts`
 deno task demo:wan
 deno task demo:wan --prompt "A red fox trots through fresh snow at sunrise." --steps 20
 deno task demo:wan --text-encoder precomputed --prompt ferret --seed 7 --frames 17 --size 480x832
+deno task demo:wan --quant f16 --prompt boxing-cats --seed 42
 ```
 
 The script needs a WebGPU adapter. Run it from the repository root: the default inputs and the
@@ -77,6 +78,10 @@ Every flag that is left out falls back to the pipeline default. Steps, guidance 
 from the distribution's `pipelineConfig` (50, 5.0 and 3.0, the reference setting); the size and
 frame count default to 832×480 and 33 frames. `--seed` defaults to 42.
 
+- `--quant` picks the quant, a key of the manifest's `quants` (`f16`, `f16+dit8` or
+  `f16+dit8-a8-attn8-s16`). Without it the run uses the manifest's `defaultQuant`. The name
+  is passed to `fromPretrained` as is; an unknown name fails with the list of available quants
+  before any weight is read.
 - `--size` accepts `832x480` or `480x832`.
 - `--frames` accepts 4n+1 between 5 and 81. Only 33 and 81 frames have been verified end to end on
   the development GPU (Intel Arc B570).
@@ -87,8 +92,9 @@ Values outside these sets fail with `ModelInputError` before any weight reaches 
 ## Output
 
 Frames go to
-`outputs/examples/wan2.1-t2v-1.3b/wan-<prompt>-<route>-<W>x<H>-<frames>f-<steps>step-seed<seed>/frame-NN.png`
-(`--out` changes the root). `<prompt>` is the asset name, or `prompt-` and the first eight hex
+`outputs/examples/wan2.1-t2v-1.3b/wan-<quant>-<prompt>-<route>-<W>x<H>-<frames>f-<steps>step-seed<seed>/frame-NN.png`
+(`--out` changes the root). `<quant>` is the `--quant` value, or `default` without it.
+`<prompt>` is the asset name, or `prompt-` and the first eight hex
 digits of the prompt's SHA-256 for any other string; `<route>` is `gpu` or `precomputed`. `<steps>`
 is the step count the run used, so a run without `--steps` is named after the distribution's
 default. Guidance, flow shift and the negative prompt
@@ -96,7 +102,8 @@ are not part of the name: runs that differ only in those write to the same direc
 each other's frames, so give each one its own `--out`. The 8-bit conversion is `wanFrameToRgba`,
 the same rule the reference hashes use.
 
-The script runs the distribution's default quant, `f16+dit8-a8-attn8-s16` (an int8 transformer with
+Without `--quant`, the script runs the distribution's default quant, `f16+dit8-a8-attn8-s16` (an
+int8 transformer with
 int8 activations — ADR 0120). With the precomputed embeddings, the default run took about 16 minutes
 on the B570 (952 s): two transformer forwards per step (about 8.5 s each at 832×480 × 33 frames) and
 about two minutes of tiled VAE decoding. The `f16` quant takes about half an hour (about 17 s per
