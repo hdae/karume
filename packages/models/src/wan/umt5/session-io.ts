@@ -1,6 +1,6 @@
 /**
  * Wan2.1 の umT5 のグラフ（ADR 0119 決定 3・4）の入出力をホストで組む純関数（段 10c の骨格 —
- * パイプラインの text 段〈`pipeline.ts` の `#encode`〉が使う）。
+ * パイプラインの text 段〈`text-stage.ts` の `encodeWanPrompts`〉が使う）。
  *
  * - 入力: トークナイザ（`../text/tokenizer.ts` の `WanPromptEncoder.encode`）の id 列 `[L]` と
  *   バケット表 `[L, L]`（`./relative-position.ts`）を、グラフ入力 token id `[1, L]` と
@@ -65,7 +65,7 @@ export const umt5SessionInputs = (
  *
  * `tokens` は入力に渡した id 列の長さ（出力の行数がそれと一致することを見る — positive と negative の
  * 出力の取り違えを形で拾う）。`rows` / `width` は DiT のグラフの `encoder_hidden_states` の宣言から
- * 取る（`pipeline.ts` と同じ — 512 / 4,096 を写経しない）。
+ * 取る（`text-stage.ts` と同じ — 512 / 4,096 を写経しない）。
  */
 export const padUmt5Context = (
   output: Tensor,

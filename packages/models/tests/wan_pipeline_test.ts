@@ -19,15 +19,14 @@ import type { CodecName, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
   assertWanVaeTilesCoverAcceptedSizes,
-  ditContract,
   planWanGeneration,
   planWanGpuGeneration,
-  umt5Contract,
-  WAN_DEFAULT_NEGATIVE_PROMPT,
   type WanGenerateRequest,
   WanPipeline,
   type WanPipelineOptions,
 } from "../src/wan/pipeline.ts";
+import { ditContract } from "../src/wan/dit-loop.ts";
+import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
 import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import { PromptCleanError } from "../src/wan/text/prompt-clean.ts";
@@ -485,7 +484,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
   };
 
   it("配布形の宣言は通り、文脈と timestep の幅を宣言から引く", () => {
-    assertEquals(ditContract(transformerOf({}), ROPE), {
+    assertEquals(ditContract(transformerOf({}), ROPE, "WanPipeline"), {
       output: "out",
       projWidth: 256,
       contextRows: 512,
@@ -520,7 +519,12 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
       ["rope の幅", { ropeSin: [1, "S", 1, 64] }, "'rope_sin' の形"],
     ];
     for (const [label, patch, message] of rejected) {
-      assertThrows(() => ditContract(transformerOf(patch), ROPE), Error, message, label);
+      assertThrows(
+        () => ditContract(transformerOf(patch), ROPE, "WanPipeline"),
+        Error,
+        message,
+        label,
+      );
     }
   });
 });
@@ -1082,7 +1086,7 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
   const buckets = VALID.inputs[1];
 
   it("配布形の宣言は通り、出力の名前を宣言から引く", () => {
-    assertEquals(umt5Contract(umt5Of({}), DIT), { output: "out" });
+    assertEquals(umt5Contract(umt5Of({}), DIT, "WanPipeline"), { output: "out" });
   });
 
   it("入力名・幅・記号・dtype・本数・格納の食い違いは、umT5 を取る前に名指しで落ちる（素の Error）", () => {
@@ -1130,14 +1134,19 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
       ["共有の宣言", { storages: ["int8-sym", "shared"] }, "共有の宣言"],
     ];
     for (const [label, patch, message] of rejected) {
-      const error = assertThrows(() => umt5Contract(umt5Of(patch), DIT), Error, message, label);
+      const error = assertThrows(
+        () => umt5Contract(umt5Of(patch), DIT, "WanPipeline"),
+        Error,
+        message,
+        label,
+      );
       assert(!(error instanceof ModelInputError), `資産の齟齬を入力起因にしない: ${label}`);
     }
   });
 
   it("有効長の上限 512 が DiT の文脈の行数を超える組は落ちる", () => {
     assertThrows(
-      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }),
+      () => umt5Contract(umt5Of({}), { contextRows: 256, contextWidth: 4096 }, "WanPipeline"),
       Error,
       "有効長の上限 512 が DiT の文脈の行数 256 を超える",
     );

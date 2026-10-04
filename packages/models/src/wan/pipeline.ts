@@ -19,6 +19,10 @@
  * 返すのはフレーム `[3, F, H, W]` の f32（値域 `[-1, 1]`）と fps（{@link GeneratedVideo}）。PNG への
  * 書き出しは呼び手（`wanFrameToRgba` + `encodePng`）。
  *
+ * 段の本体は Wan2.1 / 2.2 の class が共有するモジュールにある（ADR 0121 決定 10 — 入口の門は
+ * `plan.ts`・text 段は `text-stage.ts`・DiT 段は `dit-loop.ts`・VAE 段は `tile-decode.ts`）。ここは
+ * Wan2.1 の class（家族 admission・構築・段の順序）と、世代の値（`descriptor.ts`）を束ねる入口を持つ。
+ *
  * ## MUST: 段ごとに Session を張って畳む・text → DiT → VAE の順に 1 段ずつ
  *
  * 構築（{@link WanPipeline.fromPretrained} / {@link WanPipeline.fromAssets}）では Session を 1 本も
@@ -70,12 +74,9 @@
 
 import {
   acquireGpu,
-  codecLayout,
   type GpuContext,
-  type Session,
   type SessionDiagnostics,
   type SessionOptions,
-  type Tensor,
 } from "@karume/runtime";
 import {
   type DistributionSource,
@@ -88,11 +89,8 @@ import {
   resolveSelection,
 } from "@karume/hub";
 
-import { ModelInputError } from "../errors.ts";
-import { assertAcceptableSeed } from "../request-gates.ts";
 import { settleAbort } from "../concurrency/abort.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
-import { disposeSteps } from "../session/dispose-steps.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import {
   assertGpuFeaturesGranted,
@@ -101,11 +99,10 @@ import {
   sessionGpuFeatures,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
-import { readAssetBuffer, readAssetJson, readWholeAsset } from "../hub/asset-readers.ts";
+import { readAssetBuffer, readWholeAsset } from "../hub/asset-readers.ts";
 import {
   assetComponentOpener,
   type ComponentOpener,
-  type GraphOwner,
   loadContainerComponents,
   type ModelComponent,
 } from "../hub/components.ts";
@@ -121,65 +118,47 @@ import {
   WAN_PIPELINE_NAME,
   type WanPipelineConfig,
 } from "./config.ts";
-import {
-  patchifyLatents,
-  unpatchifyTokens,
-  type WanPatchGeometry,
-  wanTokenGrid,
-  wanTokenWidth,
-} from "./dit-tokens.ts";
-import { parseWanRopeBase, type WanRopeBase, wanRopeTables, wanRopeWidth } from "./dit-rope.ts";
-import { timestepsProj } from "./dit-timestep.ts";
+import { parseWanRopeBase, type WanRopeBase } from "./dit-rope.ts";
 import { WAN21_GENERATION } from "./descriptor.ts";
-import { denormalizeWanLatents } from "./latents.ts";
-import { WanRandn } from "./random.ts";
 import {
-  WAN_UNIPC_CONFIG,
-  wanClassifierFreeGuidance,
-  WanUniPcSampler,
-  type WanUniPcSchedule,
-  wanUniPcSchedule,
-} from "./scheduler.ts";
+  type DitContract,
+  ditContract,
+  ROPE_BASE,
+  runWanDenoise,
+  TRANSFORMER,
+  WAN_PATCH,
+  type WanContexts,
+} from "./dit-loop.ts";
 import {
-  findWanTextEmbedding,
-  padWanTextEmbedding,
-  parseWanTextEmbeds,
-  type WanPrompt,
-  type WanTextEmbedding,
-  type WanTextEmbeds,
-} from "./text-embeds.ts";
-import { parseWanTokenizerAsset, WanPromptEncoder } from "./text/tokenizer.ts";
-import { buildUmt5RelativePositionBuckets, WAN_UMT5_MAX_LENGTH } from "./umt5/relative-position.ts";
+  type PlanLayout,
+  planWanRequest,
+  type WanGenerationKnobs,
+  type WanGenerationPlan,
+} from "./plan.ts";
 import {
-  padUmt5Context,
-  umt5SessionInputs,
-  WAN_UMT5_INPUT_IDS,
-  WAN_UMT5_RELATIVE_POSITION_BUCKETS,
-} from "./umt5/session-io.ts";
-import { WanVaeChunkCaches, type WanVaeChunkLayout, wanVaeChunkLayout } from "./vae-chunks.ts";
+  admitWanText,
+  assertTextEncoderDeclared,
+  assertTokenizerDeclared,
+  encodeWanPrompts,
+  gpuPromptGate,
+  loadWanTextStage,
+  precomputedContexts,
+  precomputedPromptGate,
+  TEXT_ENCODER,
+  textEncoderRouteOf,
+  type WanTextAdmission,
+  type WanTextEncoderRoute,
+  type WanTextStage,
+} from "./text-stage.ts";
+import type { WanPrompt, WanTextEmbedding, WanTextEmbeds } from "./text-embeds.ts";
+import type { WanPromptEncoder } from "./text/tokenizer.ts";
 import {
-  clampWanVaeFrames,
-  decodeWanVaeTiled,
-  planWanVaeTiles,
-  wanVaeTileCount,
-  type WanVaeTilePlan,
-} from "./vae-tiles.ts";
-
-/** 部品のキー（系列のグラフ名 = 段 7 の manifest の weights 名）。 */
-const TRANSFORMER = "transformer";
-const VAE_DECODER_FIRST = "vae_decoder_first";
-const VAE_DECODER_NEXT = "vae_decoder_next";
-/**
- * umT5 の部品（ADR 0119 追記「段 10d の設計」D — manifest では umT5 の配布リポへの越境参照）。取るのは
- * `"gpu"` の経路だけ。
- */
-const TEXT_ENCODER = "text_encoder";
-
-/** テキストエンコーダの経路（{@link WanPipelineOptions.textEncoder}）。 */
-type WanTextEncoderRoute = NonNullable<WanPipelineOptions["textEncoder"]>;
-
-/** 既定の経路（ADR 0119 決定 7 — 同じ文字列で経路が黙って変わらないよう、自動の切り替えは持たない）。 */
-const DEFAULT_TEXT_ENCODER: WanTextEncoderRoute = "gpu";
+  assertWanVaeTilesCover,
+  decodeWanVaeStage,
+  VAE_DECODER_FIRST,
+  VAE_DECODER_NEXT,
+} from "./tile-decode.ts";
+import { type WanVaeChunkLayout, wanVaeChunkLayout } from "./vae-chunks.ts";
 
 /**
  * 経路ごとに取る部品（取得面の `componentKeys`・全量面の開く部品）。MUST: `"precomputed"` は umT5 の
@@ -191,103 +170,8 @@ const COMPONENT_KEYS: Readonly<Record<WanTextEncoderRoute, readonly string[]>> =
   precomputed: [TRANSFORMER, VAE_DECODER_FIRST, VAE_DECODER_NEXT],
 };
 
-/**
- * 構築オプションの経路の綴りを読む（省略は既定 `"gpu"`）。未知の綴りは素の `Error`（model / quant 名の
- * 綴り違いと同じ扱い — ADR 0107 決定 3）。MUST: 取得の前に呼ぶ — 経路で取る部品が変わる。
- */
-const textEncoderRouteOf = (options: WanPipelineOptions): WanTextEncoderRoute => {
-  const route: unknown = options.textEncoder ?? DEFAULT_TEXT_ENCODER;
-  if (route !== "gpu" && route !== "precomputed") {
-    throw new Error(
-      `WanPipeline: textEncoder '${String(route)}' は 'gpu' / 'precomputed' のどちらでもない`,
-    );
-  }
-  return route;
-};
-
-/**
- * `"gpu"` の経路で、選んだモデルが umT5 の部品を宣言しているかを見る（取得・容器を開く前）。
- *
- * WHY: 宣言が無いと、取得面・全量面の汎用の文言（「部品 'text_encoder' の容器が無い」）で落ち、
- * 既定が `"gpu"` であることも、umT5 を持たない配布形は `"precomputed"` で読めることも伝わらない。
- * 未知の model はここでは見ない（admission が利用可能な一覧つきで落とす）。
- */
-const assertTextEncoderDeclared = (
-  manifest: Manifest,
-  options: WanPipelineOptions,
-  route: WanTextEncoderRoute,
-): void => {
-  if (route !== "gpu") return;
-  const modelName = options.model ?? manifest.defaultModel;
-  if (!Object.hasOwn(manifest.models, modelName)) return;
-  if (!Object.hasOwn(manifest.models[modelName].weights, TEXT_ENCODER)) {
-    throw new Error(
-      `WanPipeline: model '${modelName}' の weights に umT5 の部品 '${TEXT_ENCODER}' が無い` +
-        '（textEncoder の既定 "gpu" が取る。umT5 を持たない配布形を事前計算の埋め込みで回すなら ' +
-        'textEncoder: "precomputed"）',
-    );
-  }
-};
-
-/**
- * テキスト埋め込み資産のキー（段 7 の manifest のモデル単位の `assets` — 決定 4）。両方の経路で読む —
- * `"precomputed"` の受理集合で、`"gpu"` でも {@link WanPipeline.prompts}（例示の一覧）の出所。
- */
-const TEXT_EMBEDS = "text_embeds";
-
-/**
- * umT5 のトークナイザ資産のキー（manifest のモデル単位の `assets` — ADR 0119 追記「段 10d の設計」C・
- * 形式 `karume-wan-umt5-tokenizer/1`）。読むのは `"gpu"` の経路だけ。
- */
-const UMT5_TOKENIZER = "umt5_tokenizer";
-
-/**
- * negative を省いたときの既定（公式 Wan2.1 の `wan_shared_cfg.sample_neg_prompt` の原文 — 全角の読点を
- * 含めて逐語。前処理が `,` へ畳む）。`"gpu"` の経路はこの文字列を GPU で符号化する（ADR 0119 追記
- * 「段 10d の設計」— 資産の行は使わない: 決定 7 の「positive も negative も GPU で作る」）。
- *
- * MUST: テキスト埋め込み資産の `negative` の行の原文とビット同一（`"precomputed"` の既定と同じ文字列を
- * 指す）。`wan_pipeline_test.ts` が recipe の固定プロンプト（`tools/export-recipes/wan/prompts.py` —
- * fixture `wan-text/parity.json` の `fixed-negative`）と資産の行の両方と突き合わせる。
- *
- * NOTE: `export` はその突き合わせのテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
- */
-export const WAN_DEFAULT_NEGATIVE_PROMPT: string =
-  "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，" +
-  "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，" +
-  "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，" +
-  "三条腿，背景人很多，倒着走";
-
-/** `transformer` の容器が宣言する RoPE の素表の資産名（役割 `rope-base`）。 */
-const ROPE_BASE = "rope_base";
-
-/** DiT の S 形グラフの入力名（recipe `wan/export_dit.py` の forward の引数名）。 */
-const DIT_TOKENS = "tokens";
-const DIT_TIMESTEPS_PROJ = "timesteps_proj";
-const DIT_CONTEXT = "encoder_hidden_states";
-const DIT_ROPE_COS = "rope_cos";
-const DIT_ROPE_SIN = "rope_sin";
-
-/**
- * DiT の patch（上流 transformer の config `patch_size [1, 2, 2]`・`in_channels 16` — アーキ定数）。
- * グラフの `tokens` の最終次元（`16·1·2·2 = 64`）と構築時に突き合わせる。
- */
-const WAN_PATCH: WanPatchGeometry = {
-  channels: 16,
-  patchFrames: 1,
-  patchHeight: 2,
-  patchWidth: 2,
-};
-
-/** VAE の時間圧縮（最初の chunk は 1 フレーム・以降は 4 フレーム — `vae-chunks.ts` の取り決め）。 */
-const TEMPORAL_COMPRESSION = 4;
-
-/**
- * 初期ノイズの seed の既定（世代に依らない）。寸法とフレーム数の既定は世代の記述子
- * （{@link WAN21_GENERATION}）、step 数・guidance・shift の既定は manifest の `pipelineConfig`
- * （{@link WanPipelineConfig}）。
- */
-const DEFAULT_SEED = 0;
+/** 共有の段（`text-stage.ts` / `dit-loop.ts` / `tile-decode.ts` / `graph-io.ts`）へ渡す文言の接頭辞。 */
+const OWNER = "WanPipeline";
 
 /** 生成結果。`data` は `[3, frames, height, width]` の f32（値域 `[-1, 1]` — クランプ済み）。 */
 export type GeneratedVideo = {
@@ -488,62 +372,10 @@ export type WanAssets = {
   readonly assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>;
 };
 
-/** 初期ノイズの出所（{@link planWanGeneration}）。 */
-type InitialNoise =
-  | { readonly kind: "seed"; readonly seed: number }
-  | { readonly kind: "latents"; readonly data: Float32Array<ArrayBuffer> };
-
 /**
- * 入口の門を通った生成の要求（{@link planWanGeneration} / {@link planWanGpuGeneration} の戻り）。
- * `Text` はプロンプト 1 本の形（`"precomputed"` = 資産の埋め込みの行・`"gpu"` = umT5 の id 列）。
- */
-export type WanGenerationPlan<Text = WanTextEmbedding> = WanGenerationKnobs & {
-  readonly positive: Text;
-  /** CFG の uncond 側（`guidance` が 1 なら undefined — uncond を回さない）。 */
-  readonly negative: Text | undefined;
-};
-
-/** 計画のうちプロンプト以外（DiT と VAE の段が使う — 経路に依らない）。 */
-type WanGenerationKnobs = {
-  readonly steps: number;
-  readonly guidance: number;
-  readonly shift: number;
-  readonly frames: number;
-  readonly width: number;
-  readonly height: number;
-  /** 潜在の形 `[16, F', H/8, W/8]`。 */
-  readonly latentShape: readonly [number, number, number, number];
-  readonly initial: InitialNoise;
-  /** `steps` × `shift` の UniPC の σ 列と timestep 列（denoise はこれを使い、組み直さない）。 */
-  readonly schedule: WanUniPcSchedule;
-  /** VAE のタイル計画（潜在 `H/8 × W/8` — denoise の前に立てる）。 */
-  readonly tiles: WanVaeTilePlan;
-};
-
-/** 計画に要る VAE の chunk グラフの幾何（資産の宣言から — {@link wanVaeChunkLayout}）。 */
-type PlanLayout = Pick<WanVaeChunkLayout, "latentChannels" | "tile" | "sampleTile">;
-
-/** 経路ごとのプロンプトの門（{@link planWith} が 1 本の検査の順で呼ぶ）。 */
-type PromptGate<Text> = {
-  /** 渡された文字列（型は検査済み）を受理集合で引く / 符号化する。拒否は `ModelInputError`。 */
-  readonly resolve: (text: string, what: "prompt" | "negativePrompt") => Text;
-  /** `negativePrompt` を省いたときの既定（`guidance` > 1 のときだけ呼ぶ）。 */
-  readonly defaultNegative: () => Text;
-};
-
-/**
- * 生成の要求を検査して計画にする（`generate` の入口・GPU に触る前の純粋な門）。省いた step 数・
- * guidance・shift は `config`（manifest の `pipelineConfig`）の既定で埋める。`"precomputed"` の経路の
- * 入口で、プロンプトはテキスト埋め込み資産の集合で引く。
- *
- * MUST: 入力起因の失敗（集合の外のプロンプト・受理集合の外の寸法・値域外のノブ・σ 列が壊れる
- * steps × shift の組）は全部ここで `ModelInputError` にする。DiT の重みを上げてから落ちる形にしない。
- * 既定だけの組は manifest の門（`parseWanPipelineConfig`）が σ 列まで見ているので、ここで σ 列が
- * 壊れるのは要求が値を渡したときだけ（= 入力起因）。
- *
- * MUST: VAE のタイル計画もここで立てる — denoise の後に立てると、資産だけで判る不整合が全 step を
- * 払った後に落ちる。受理する寸法は家族 admission（{@link assertWanVaeTilesCoverAcceptedSizes}）が
- * 全数を通しているので、ここで落ちるのは admission を経ない呼び出しだけ（資産の齟齬 — 素の `Error`）。
+ * 生成の要求を検査して計画にする（`generate` の入口・GPU に触る前の純粋な門 — 検査の本体と MUST は
+ * {@link planWanRequest}）。`"precomputed"` の経路の入口で、プロンプトはテキスト埋め込み資産の集合で
+ * 引く（{@link precomputedPromptGate}）。寸法とフレーム数の受理集合と既定は {@link WAN21_GENERATION}。
  *
  * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
@@ -553,40 +385,14 @@ export const planWanGeneration = (
   layout: PlanLayout,
   config: WanPipelineConfig,
 ): WanGenerationPlan<WanTextEmbedding> =>
-  planWith(
-    request,
-    {
-      resolve: (text, what) => {
-        const entry = findWanTextEmbedding(embeds, text);
-        if (entry === undefined) {
-          throw new ModelInputError(
-            `${what} がテキスト埋め込み資産の集合に無い（事前計算の経路〈textEncoder: "precomputed"〉は ` +
-              `${embeds.entries.length} 本だけを受ける: ${
-                embeds.entries.map((entry) => entry.name).join(" / ")
-              } — 原文か正規化後の文字列に完全一致させる。WanPipeline.prompts で引ける）`,
-          );
-        }
-        return entry;
-      },
-      defaultNegative: () => {
-        const defaults = embeds.entries.filter((entry) => entry.role === "negative");
-        if (defaults.length !== 1) {
-          throw new ModelInputError(
-            `negativePrompt を省いたが、資産に negative の行が ${defaults.length} 本ある（1 本のときだけ既定にする）`,
-          );
-        }
-        return defaults[0];
-      },
-    },
-    layout,
-    config,
-  );
+  planWanRequest(request, precomputedPromptGate(embeds, OWNER), layout, config, WAN21_GENERATION);
 
 /**
  * `"gpu"` の経路の入口（{@link planWanGeneration} と同じ検査の順・同じノブの門）。プロンプトは umT5 の
- * プロンプト層（`prompt_clean` の鏡像 → トークナイザ — {@link WanPromptEncoder.encode}）で id 列に
- * する。拒否は `ModelInputError`（前処理の拒否は派生の `PromptCleanError`）で、文言は直し方まで言う。
- * `negativePrompt` を省くと {@link WAN_DEFAULT_NEGATIVE_PROMPT} を同じ門で符号化する。
+ * プロンプト層（`prompt_clean` の鏡像 → トークナイザ — {@link gpuPromptGate}）で id 列にする。拒否は
+ * `ModelInputError`（前処理の拒否は派生の `PromptCleanError`）で、文言は直し方まで言う。
+ * `negativePrompt` を省くと既定の negative（`text-stage.ts` の `WAN_DEFAULT_NEGATIVE_PROMPT`）を同じ門で
+ * 符号化する。
  *
  * MUST: 符号化はここで済ませる — umT5 の重み（i8 で約 5.3 GiB）を上げてから語彙外で落ちる形にしない。
  *
@@ -598,419 +404,16 @@ export const planWanGpuGeneration = (
   layout: PlanLayout,
   config: WanPipelineConfig,
 ): WanGenerationPlan<Int32Array<ArrayBuffer>> =>
-  planWith(
-    request,
-    {
-      resolve: (text, what) => encoder.encode(text, what),
-      defaultNegative: () => encoder.encode(WAN_DEFAULT_NEGATIVE_PROMPT, "negativePrompt（既定）"),
-    },
-    layout,
-    config,
-  );
-
-/** 2 つの経路の入口が共有する検査の本体（プロンプトの引き方だけを `gate` から受ける）。 */
-const planWith = <Text>(
-  request: WanGenerateRequest,
-  gate: PromptGate<Text>,
-  layout: PlanLayout,
-  config: WanPipelineConfig,
-): WanGenerationPlan<Text> => {
-  const resolve = (text: unknown, what: "prompt" | "negativePrompt"): Text => {
-    if (typeof text !== "string") throw new ModelInputError(`${what} が文字列でない`);
-    return gate.resolve(text, what);
-  };
-  const positive = resolve(request.prompt, "prompt");
-
-  const steps = request.steps ?? config.defaults.steps;
-  if (!Number.isInteger(steps) || steps < 1) {
-    throw new ModelInputError(`steps ${steps} が 1 以上の整数でない`);
-  }
-  const guidance = request.guidance ?? config.defaults.guidance;
-  // f32 で見る: CFG は `f32(guidance)` で掛ける（`wanClassifierFreeGuidance`）ので、f64 で有限でも
-  // f32 で Infinity になる値（`Number.MAX_VALUE` など）は合成を NaN にする。
-  if (!Number.isFinite(Math.fround(guidance)) || guidance < 1) {
-    throw new ModelInputError(
-      `guidance ${guidance} が 1 以上で f32 に収まる有限の数でない` +
-        "（上流は 1 以下で CFG を回さないので、1 未満は効かない・CFG は f32 で掛ける）",
-    );
-  }
-  const shift = request.shift ?? config.scheduler.shift;
-  if (!Number.isFinite(shift) || shift <= 0) {
-    throw new ModelInputError(`shift ${shift} が正の有限の数でない`);
-  }
-  let schedule: WanUniPcSchedule;
-  try {
-    schedule = wanUniPcSchedule(steps, shift, WAN_UNIPC_CONFIG.numTrainTimesteps);
-  } catch (error) {
-    // 単項の門を通った steps / shift の組で σ 列が壊れる（低水準の RangeError — scheduler.ts の
-    // MUST）。既定の組は manifest の門が通しているので、ここに来るのは要求が渡した値のとき。
-    if (!(error instanceof RangeError)) throw error;
-    throw new ModelInputError(
-      `steps ${steps} と shift ${shift} の組では UniPC の σ 列が組めない（${error.message}）`,
-      { cause: error },
-    );
-  }
-
-  // CFG の uncond 側（上流の `do_classifier_free_guidance = guidance_scale > 1`）。
-  let negative: Text | undefined;
-  if (guidance > 1) {
-    negative = request.negativePrompt !== undefined
-      ? resolve(request.negativePrompt, "negativePrompt")
-      : gate.defaultNegative();
-  } else if (request.negativePrompt !== undefined) {
-    throw new ModelInputError(
-      "guidance 1 では uncond 側を回さないので negativePrompt は効かない（効かせるなら guidance を 1 より大きくする）",
-    );
-  }
-
-  const frames = request.frames ?? WAN21_GENERATION.defaults.frames;
-  if (
-    !Number.isInteger(frames) || frames < WAN21_GENERATION.minFrames ||
-    frames > WAN21_GENERATION.maxFrames || (frames - 1) % TEMPORAL_COMPRESSION !== 0
-  ) {
-    throw new ModelInputError(
-      `frames ${frames} が受理集合（4n+1 の ${WAN21_GENERATION.minFrames}〜${WAN21_GENERATION.maxFrames}）に無い`,
-    );
-  }
-  const width = request.width ?? WAN21_GENERATION.defaults.width;
-  const height = request.height ?? WAN21_GENERATION.defaults.height;
-  if (
-    !WAN21_GENERATION.acceptedSizes.some((size) => size.width === width && size.height === height)
-  ) {
-    throw new ModelInputError(
-      `${width}×${height} が受理集合（${
-        WAN21_GENERATION.acceptedSizes.map((size) => `${size.width}×${size.height}`).join(" / ")
-      }）に無い`,
-    );
-  }
-  const spatialScale = layout.sampleTile / layout.tile;
-  const latentShape: [number, number, number, number] = [
-    WAN_PATCH.channels,
-    (frames - 1) / TEMPORAL_COMPRESSION + 1,
-    height / spatialScale,
-    width / spatialScale,
-  ];
-  if (!latentShape.every(Number.isInteger)) {
-    // 受理集合は資産の縮尺で割り切れる寸法だけ — 割れるなら資産の取り違え（入力起因ではない）。
-    throw new Error(
-      `潜在の形 [${latentShape}] が整数でない（VAE の縮尺 ${spatialScale}）`,
-    );
-  }
-
-  if (request.seed !== undefined && request.latents !== undefined) {
-    throw new ModelInputError("seed と latents は排他（初期ノイズの出所はどちらか 1 つ）");
-  }
-  let initial: InitialNoise;
-  if (request.latents !== undefined) {
-    const { latents } = request;
-    const count = latentShape.reduce((product, dim) => product * dim, 1);
-    if (!(latents instanceof Float32Array) || latents.length !== count) {
-      throw new ModelInputError(
-        `latents が Float32Array [${latentShape.join(", ")}]（${count} 要素）でない`,
-      );
-    }
-    if (!latents.every(Number.isFinite)) throw new ModelInputError("latents に非有限値がある");
-    initial = { kind: "latents", data: latents };
-  } else {
-    const seed = request.seed ?? DEFAULT_SEED;
-    assertAcceptableSeed(seed);
-    initial = { kind: "seed", seed };
-  }
-
-  const tiles = planWanVaeTiles(layout, latentShape[2], latentShape[3]);
-  return {
-    positive,
-    negative,
-    steps,
-    guidance,
-    shift,
-    frames,
-    width,
-    height,
-    latentShape,
-    initial,
-    schedule,
-    tiles,
-  };
-};
+  planWanRequest(request, gpuPromptGate(encoder), layout, config, WAN21_GENERATION);
 
 /**
  * VAE の chunk グラフの幾何で、受理する寸法（{@link WAN21_GENERATION} の `acceptedSizes`）が全部
- * タイルで覆えることを見る（家族 admission の門 — 寸法は有限で 2 通りなので全数を計画する）。
- *
- * MUST: admission で呼ぶ。タイル辺は配布物だけで差し替えられる（ADR 0118 決定 2）ので、潜在の短辺
- * より大きいタイル（例 64 > 60）や重なりの下限を満たせないタイル（例 8）の資産も chunk グラフの
- * 検査（{@link wanVaeChunkLayout}）は通る。ここで落とさないと、DiT の段を全部払った後の VAE の段で
- * 初めて落ちる。
+ * タイルで覆えることを見る（家族 admission の門 — 本体と MUST は {@link assertWanVaeTilesCover}）。
  *
  * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
-export const assertWanVaeTilesCoverAcceptedSizes = (layout: PlanLayout): void => {
-  const scale = layout.sampleTile / layout.tile;
-  for (const { width, height } of WAN21_GENERATION.acceptedSizes) {
-    const latentHeight = height / scale;
-    const latentWidth = width / scale;
-    if (!Number.isInteger(latentHeight) || !Number.isInteger(latentWidth)) {
-      throw new Error(
-        `WanPipeline: VAE の縮尺 ${layout.sampleTile} / ${layout.tile} では ${width}×${height} の潜在が` +
-          "整数にならない",
-      );
-    }
-    try {
-      planWanVaeTiles(layout, latentHeight, latentWidth);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `WanPipeline: VAE のタイル（潜在 ${layout.tile}）では ${width}×${height}` +
-          `（潜在 ${latentHeight}×${latentWidth}）をタイル decode できない — ${reason}`,
-        { cause: error },
-      );
-    }
-  }
-};
-
-/** グラフの値の宣言（宣言の無い名前は fail loudly）。 */
-const valueOf = (
-  owner: GraphOwner,
-  name: string,
-): GraphOwner["graph"]["values"][string] => {
-  if (!Object.hasOwn(owner.graph.values, name)) {
-    throw new Error(`WanPipeline: グラフの値 '${name}' の宣言が無い`);
-  }
-  return owner.graph.values[name];
-};
-
-/** グラフの値の形（宣言の無い名前は fail loudly）。 */
-const valueShape = (owner: GraphOwner, name: string): readonly (number | string)[] =>
-  valueOf(owner, name).shape;
-
-/** グラフ入力の形（無ければ fail loudly）。 */
-const inputShape = (owner: GraphOwner, name: string): readonly (number | string)[] => {
-  const spec = owner.graph.inputs.find((input) => input.name === name);
-  if (spec === undefined) throw new Error(`WanPipeline: transformer のグラフ入力 '${name}' が無い`);
-  return spec.shape;
-};
-
-/** 静的次元（記号次元なら fail loudly）。 */
-const staticDim = (dims: readonly (number | string)[], axis: number, where: string): number => {
-  const dim = dims.at(axis);
-  if (typeof dim !== "number") throw new Error(`WanPipeline: ${where} の軸 ${axis} が静的でない`);
-  return dim;
-};
-
-/**
- * 宣言の形を rank と全軸で照合する（数は静的次元・文字列は記号次元の名前）。`expected` はホストが
- * 組む形そのもの。
- */
-const assertDims = (
-  dims: readonly (number | string)[],
-  expected: readonly (number | string)[],
-  where: string,
-): void => {
-  if (dims.length !== expected.length || dims.some((dim, axis) => dim !== expected[axis])) {
-    const declared = dims.join(", ");
-    const host = expected.join(", ");
-    throw new Error(`WanPipeline: ${where} の形 [${declared}] がホストの組む [${host}] と違う`);
-  }
-};
-
-/** 構築時に確かめた DiT のグラフの取り決め。 */
-type DitContract = {
-  /** グラフ出力の名前（`[1, S, 64]`）。 */
-  readonly output: string;
-  /** `timesteps_proj [1, W]` の W。 */
-  readonly projWidth: number;
-  /** `encoder_hidden_states [1, rows, width]` の rows（ゼロで埋める先の行数）。 */
-  readonly contextRows: number;
-  readonly contextWidth: number;
-};
-
-/**
- * DiT のグラフ宣言を、ホストが組む入力（patch・RoPE の素表）と突き合わせる。
- *
- * MUST: 構築時に落とす。ホストの前処理は自分の定数で組むので、グラフが別の寸法で焼かれていても
- * ホスト側は最後まで通り、落ちるのは DiT の重みを上げた後の Session の shape 検査になる。取得面では
- * 家族 admission（重みの part を取る前）で呼ぶ — 埋め込み資産との突合（{@link assertEmbedsFitContext}）は
- * 資産のバイト列が届いてから。
- *
- * MUST: 最終次元だけでなく rank・batch（B = 1 — 決定 5）・可変の S まで照合する。ホストは
- * `tokens [1, S, 64]`・`rope_cos / rope_sin [1, S, 1, w]` を組み、出力を `[1, S, 64]` として読む
- * （{@link WanPipeline.#denoise}）ので、batch 2・固定の S・rank 違いの宣言も Session の shape 検査まで
- * 通ってしまう。S は寸法とフレーム数ごとに変わるので記号次元で、4 本とも**同じ記号**であること
- * （IR の記号は上下限を持たないので、上限の突合は要らない）。
- *
- * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
- */
-export const ditContract = (transformer: GraphOwner, ropeBase: WanRopeBase): DitContract => {
-  const tokenWidth = wanTokenWidth(WAN_PATCH);
-  const tokens = inputShape(transformer, DIT_TOKENS);
-  const sequence = tokens.at(1);
-  if (typeof sequence !== "string") {
-    throw new Error(
-      `WanPipeline: '${DIT_TOKENS}' の軸 1 が記号次元でない（${String(sequence)}）— ` +
-        "ホストは S を寸法とフレーム数ごとに変えて渡す",
-    );
-  }
-  assertDims(tokens, [1, sequence, tokenWidth], `'${DIT_TOKENS}'`);
-  const [output] = transformer.graph.outputs;
-  if (transformer.graph.outputs.length !== 1) {
-    throw new Error(
-      `WanPipeline: transformer の出力が ${transformer.graph.outputs.length} 本（1 本の S 形）`,
-    );
-  }
-  assertDims(
-    valueShape(transformer, output),
-    [1, sequence, tokenWidth],
-    `transformer の出力 '${output}'`,
-  );
-  const ropeWidth = wanRopeWidth(ropeBase);
-  for (const name of [DIT_ROPE_COS, DIT_ROPE_SIN]) {
-    assertDims(inputShape(transformer, name), [1, sequence, 1, ropeWidth], `'${name}'`);
-  }
-  const proj = inputShape(transformer, DIT_TIMESTEPS_PROJ);
-  const projWidth = staticDim(proj, 1, DIT_TIMESTEPS_PROJ);
-  assertDims(proj, [1, projWidth], `'${DIT_TIMESTEPS_PROJ}'`);
-  const context = inputShape(transformer, DIT_CONTEXT);
-  const contextRows = staticDim(context, 1, DIT_CONTEXT);
-  const contextWidth = staticDim(context, 2, DIT_CONTEXT);
-  assertDims(context, [1, contextRows, contextWidth], `'${DIT_CONTEXT}'`);
-  return { output, projWidth, contextRows, contextWidth };
-};
-
-/** 構築時に確かめた umT5 のグラフの取り決め（`"gpu"` の経路）。 */
-type Umt5Contract = {
-  /** グラフ出力の名前（`[1, L, width]` — width は DiT の文脈の幅）。 */
-  readonly output: string;
-};
-
-/** umT5 のグラフ入力の宣言（無ければ fail loudly）。 */
-const umt5Input = (
-  textEncoder: GraphOwner,
-  name: string,
-): GraphOwner["graph"]["inputs"][number] => {
-  const spec = textEncoder.graph.inputs.find((input) => input.name === name);
-  if (spec === undefined) {
-    const declared = textEncoder.graph.inputs.map((input) => input.name).join(" / ");
-    throw new Error(
-      `WanPipeline: text_encoder のグラフ入力 '${name}' が無い（宣言: ${declared}）`,
-    );
-  }
-  return spec;
-};
-
-/**
- * umT5 のグラフ宣言を、ホストが組む入力（id 列 `[1, L]` とバケット表 `[L, L]` の i32 — `umt5/session-io.ts`）
- * と DiT の文脈入力に突き合わせる（ADR 0119 決定 3・4・5）。
- *
- * MUST: 家族 admission（重みの part を取る前）で呼ぶ。ホストは自分の定数で入力を組み、出力を
- * `[1, L, contextWidth]` として DiT へ詰める（{@link padUmt5Context}）ので、宣言が違っていても落ちるのは
- * umT5 の重み（i8 で約 5.3 GiB）を上げた後の Session の shape 検査か、詰めの検査になる。
- *
- * - 入力はちょうど 2 本（`input_ids` `[1, L]`・`relative_position_buckets` `[L, L]`・どちらも i32）で、
- *   L は**同じ 1 つの記号次元**（有効長ごとに形を変えて渡す — 決定 4）。
- * - 出力は 1 本の f32 `[1, L, W]` で、L は入力と同じ記号・W は DiT の `encoder_hidden_states` の幅。
- * - 有効長の上限（{@link WAN_UMT5_MAX_LENGTH}）が DiT の文脈の行数に収まる。
- * - 格納は i8（`int8-sym` = per-channel）の重みと f32 の表だけ（決定 5 — GPU の移植の門で検証した
- *   組み合わせ。text 段の Session は quant の宣言を受けない〈`{}`〉ので、格納が実行の形を決める）。
- *   i8 を 1 本も持たない容器（全部 f32 など）も受けない。
- *
- * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
- */
-export const umt5Contract = (
-  textEncoder: GraphOwner,
-  dit: Pick<DitContract, "contextRows" | "contextWidth">,
-): Umt5Contract => {
-  const { graph } = textEncoder;
-  const ids = umt5Input(textEncoder, WAN_UMT5_INPUT_IDS);
-  const buckets = umt5Input(textEncoder, WAN_UMT5_RELATIVE_POSITION_BUCKETS);
-  if (graph.inputs.length !== 2) {
-    throw new Error(
-      `WanPipeline: text_encoder のグラフ入力が ${graph.inputs.length} 本（` +
-        `'${WAN_UMT5_INPUT_IDS}' と '${WAN_UMT5_RELATIVE_POSITION_BUCKETS}' の 2 本だけを組む）`,
-    );
-  }
-  const length = ids.shape.at(1);
-  if (typeof length !== "string") {
-    throw new Error(
-      `WanPipeline: text_encoder の '${WAN_UMT5_INPUT_IDS}' の軸 1 が記号次元でない` +
-        `（${String(length)}）— ホストは有効長 L ごとに形を変えて渡す`,
-    );
-  }
-  for (const [spec, expected] of [[ids, [1, length]], [buckets, [length, length]]] as const) {
-    if (spec.dtype !== "i32") {
-      throw new Error(
-        `WanPipeline: text_encoder の '${spec.name}' の dtype ${spec.dtype} が i32 でない`,
-      );
-    }
-    assertDims(spec.shape, expected, `text_encoder の '${spec.name}'`);
-  }
-  if (graph.outputs.length !== 1) {
-    throw new Error(
-      `WanPipeline: text_encoder の出力が ${graph.outputs.length} 本（1 本の [1, L, W]）`,
-    );
-  }
-  const [output] = graph.outputs;
-  const value = valueOf(textEncoder, output);
-  if (value.dtype !== "f32") {
-    throw new Error(
-      `WanPipeline: text_encoder の出力 '${output}' の dtype ${value.dtype} が f32 でない`,
-    );
-  }
-  assertDims(value.shape, [1, length, dit.contextWidth], `text_encoder の出力 '${output}'`);
-  if (WAN_UMT5_MAX_LENGTH > dit.contextRows) {
-    throw new Error(
-      `WanPipeline: umT5 の有効長の上限 ${WAN_UMT5_MAX_LENGTH} が DiT の文脈の行数 ${dit.contextRows} を超える`,
-    );
-  }
-  let quantized = 0;
-  for (const [name, initializer] of Object.entries(graph.initializers)) {
-    if (initializer.storage === undefined) {
-      // 共有の宣言（貸し手の Session の重みを借りる — 格納を持たない）。text 段に貸し手は居ない。
-      throw new Error(
-        `WanPipeline: text_encoder の initializer '${name}' が共有の宣言（text 段は重みを借りない）`,
-      );
-    }
-    const layout = codecLayout(initializer.storage.codec);
-    if (layout === "i8") quantized += 1;
-    else if (layout !== "f32") {
-      throw new Error(
-        `WanPipeline: text_encoder の initializer '${name}' の格納 ${initializer.storage.codec} は受けない` +
-          "（受けるのは i8 per-channel の重みと f32 の表だけ — ADR 0119 決定 5）",
-      );
-    }
-  }
-  if (quantized === 0) {
-    throw new Error(
-      "WanPipeline: text_encoder に i8 の重みが 1 本も無い（受けるのは i8 per-channel の重みと f32 の表 — " +
-        "ADR 0119 決定 5）",
-    );
-  }
-  return { output };
-};
-
-/** 埋め込み資産の幅と有効長が DiT の文脈入力 `[1, rows, width]` に収まることを見る。 */
-const assertEmbedsFitContext = (dit: DitContract, embeds: WanTextEmbeds): void => {
-  if (dit.contextWidth !== embeds.width) {
-    throw new Error(
-      `WanPipeline: '${DIT_CONTEXT}' の幅 ${dit.contextWidth} が埋め込み資産の幅 ${embeds.width} と違う`,
-    );
-  }
-  const longest = Math.max(...embeds.entries.map((entry) => entry.tokens));
-  if (longest > dit.contextRows) {
-    throw new Error(
-      `WanPipeline: 埋め込みの有効長 ${longest} が文脈の行数 ${dit.contextRows} を超える`,
-    );
-  }
-};
-
-const asF32 = (tensor: Tensor, where: string): Float32Array => {
-  if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
-  return tensor.data;
-};
-
-/** 最初の非有限値の添字（無ければ -1）。 */
-const firstNonFinite = (values: Float32Array): number =>
-  values.findIndex((value) => !Number.isFinite(value));
+export const assertWanVaeTilesCoverAcceptedSizes = (layout: PlanLayout): void =>
+  assertWanVaeTilesCover(layout, WAN21_GENERATION, OWNER);
 
 /**
  * この家族が manifest の `session` と明示指定で受けるキー（受理表 — `session/options.ts`）。
@@ -1049,23 +452,8 @@ type WanAdmission = {
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
   /** 経路（`"gpu"` は umT5 のグラフの取り決めを伴う）。 */
-  readonly textEncoder:
-    | { readonly route: "precomputed" }
-    | { readonly route: "gpu"; readonly contract: Umt5Contract };
+  readonly textEncoder: WanTextAdmission;
 };
-
-/** text 段の材料（経路ごと）。 */
-type WanTextStage =
-  /** 資産の埋め込みを引く（{@link WanState.textEmbeds} — Session を張らない）。 */
-  | { readonly kind: "precomputed" }
-  | {
-    readonly kind: "gpu";
-    /** プロンプト層（前処理 → トークナイザ — 入口の門）。 */
-    readonly encoder: WanPromptEncoder;
-    /** umT5 の部品（generate ごとに Session を張って畳む — 決定 11）。 */
-    readonly component: ModelComponent;
-    readonly contract: Umt5Contract;
-  };
 
 /** {@link WanPipeline} の内部状態。 */
 type WanState = {
@@ -1086,12 +474,6 @@ type WanState = {
     component: WanRunComponent,
     diagnostics: SessionDiagnostics,
   ) => void;
-};
-
-/** DiT の文脈入力の中身（`[rows, width]` へ詰めた positive と、CFG の uncond 側）。 */
-type WanContexts = {
-  readonly positive: Float32Array<ArrayBuffer>;
-  readonly negative: Float32Array<ArrayBuffer> | undefined;
 };
 
 /**
@@ -1135,13 +517,13 @@ export class WanPipeline {
     options: WanFromPretrainedOptions = {},
   ): Promise<WanPipeline> {
     // 経路は取得の前に決める（取る部品が変わる）— 綴り違いは 1 バイトも取らずに落とす。
-    const route = textEncoderRouteOf(options);
+    const route = textEncoderRouteOf(options, OWNER);
     const source = toManifestSource(ref, "WanPipeline.fromPretrained");
     // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない —
     // `hubLoadOptions` が写す・anima / irodori と同じ形）。
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
-    assertTextEncoderDeclared(loaded.manifest, options, route);
+    assertTextEncoderDeclared(loaded.manifest, options, route, OWNER);
     const choice = {
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.quant === undefined ? {} : { quant: options.quant }),
@@ -1191,10 +573,10 @@ export class WanPipeline {
     input: WanAssets,
     options: WanPipelineOptions = {},
   ): Promise<WanPipeline> {
-    const route = textEncoderRouteOf(options);
+    const route = textEncoderRouteOf(options, OWNER);
     // 入口の検査（中断済みなら容器を 1 本も開かない — 開くのは GB 級の part 列の検証を含む）。
     await settleAbort(options.signal);
-    assertTextEncoderDeclared(input.manifest, options, route);
+    assertTextEncoderDeclared(input.manifest, options, route, OWNER);
     const buffer = (key: string): ArrayBuffer =>
       readAssetBuffer("WanPipeline", "weights / assets", input.assets, key);
     const open = await assetComponentOpener(
@@ -1227,7 +609,7 @@ export class WanPipeline {
   ): Promise<WanAdmission> {
     // 段の境目（容器を開いた後・重みの part を取る前）。
     await settleAbort(options.signal);
-    const route = textEncoderRouteOf(options);
+    const route = textEncoderRouteOf(options, OWNER);
     const modelName = options.model ?? manifest.defaultModel;
     if (!Object.hasOwn(manifest.models, modelName)) {
       throw new Error(
@@ -1262,12 +644,7 @@ export class WanPipeline {
     const quant = entry.quants[quantName];
     // `"gpu"` の経路はトークナイザ資産を読む — 宣言が無ければ umT5（約 5.3 GiB）を取る前に落とす
     // （中身は届いてから {@link WanPipeline.#build} が見る）。
-    if (route === "gpu" && !Object.hasOwn(entry.assets, UMT5_TOKENIZER)) {
-      throw new Error(
-        `WanPipeline: manifest の assets に umT5 のトークナイザ資産 '${UMT5_TOKENIZER}' が無い` +
-          '（textEncoder: "gpu" の経路が読む。事前計算の埋め込みだけで回すなら textEncoder: "precomputed"）',
-      );
-    }
+    assertTokenizerDeclared(entry, route, OWNER);
     // 未対応の宣言は重みの part を取る前に落とす（全家族共通の 1 本）。
     const sessionOptions = resolveSessionOptions(
       WAN_SESSION_POLICY,
@@ -1303,10 +680,8 @@ export class WanPipeline {
     }
     assertWanVaeTilesCoverAcceptedSizes(layout);
     const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
-    const dit = ditContract(transformer, ropeBase);
-    const textEncoder = route === "gpu"
-      ? { route, contract: umt5Contract(open(TEXT_ENCODER), dit) }
-      : { route };
+    const dit = ditContract(transformer, ropeBase, OWNER);
+    const textEncoder = admitWanText(route, open, dit, OWNER);
     return {
       config,
       quantName,
@@ -1336,45 +711,14 @@ export class WanPipeline {
     const { config, quantName, sessionOptions, gpuFeatures, layout, ropeBase, dit } = admitted;
     // 段の境目（資産が届いた後・解析の前）。
     await settleAbort(options.signal);
-    const textEmbeds = parseWanTextEmbeds(
-      readAssetBuffer("WanPipeline", "weights / assets", assets, TEXT_EMBEDS),
+    const { textEmbeds, text } = await loadWanTextStage(
+      admitted.textEncoder,
+      assets,
+      open,
+      dit,
+      options.signal,
+      OWNER,
     );
-    assertEmbedsFitContext(dit, textEmbeds);
-    let text: WanTextStage = { kind: "precomputed" };
-    if (admitted.textEncoder.route === "gpu") {
-      await settleAbort(options.signal);
-      const encoder = new WanPromptEncoder(
-        parseWanTokenizerAsset(
-          readAssetJson("WanPipeline", "weights / assets", assets, UMT5_TOKENIZER),
-          UMT5_TOKENIZER,
-        ),
-      );
-      // トークナイザの上限はグラフの記号次元の上限・バケット表の生成器の上限と同じ値（決定 4）。
-      // 違うと、上限の間のプロンプトがトークナイザを通ってからバケット表の生成で落ちる（大きい側）か、
-      // 上流が受ける長さを黙って拒む（小さい側）。
-      if (encoder.maxLength !== WAN_UMT5_MAX_LENGTH) {
-        throw new Error(
-          `WanPipeline: トークナイザ資産の maxLength ${encoder.maxLength} が umT5 の有効長の上限 ` +
-            `${WAN_UMT5_MAX_LENGTH} と違う`,
-        );
-      }
-      // 既定の negative はこの資産の門を通る MUST — 通らなければ資産の齟齬で、negativePrompt を省いた
-      // 生成の入口で入力起因（`ModelInputError`）として落とすのは取り違え（呼び手の入力ではない）。
-      try {
-        encoder.encode(WAN_DEFAULT_NEGATIVE_PROMPT, "既定の negative");
-      } catch (cause) {
-        throw new Error(
-          "WanPipeline: 既定の negative（公式の sample_neg_prompt）がトークナイザ資産の門を通らない",
-          { cause },
-        );
-      }
-      text = {
-        kind: "gpu",
-        encoder,
-        component: open(TEXT_ENCODER),
-        contract: admitted.textEncoder.contract,
-      };
-    }
 
     await settleAbort(options.signal);
     const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
@@ -1467,23 +811,26 @@ export class WanPipeline {
       knobs = plan;
       // 段の境目（入口 → text）。直列化鎖の順番待ちの間に届いた中断もここで効く。
       await settleAbort(signal);
-      contexts = await this.#encode(state.text, plan, emit, signal);
+      contexts = await encodeWanPrompts(state, state.text, plan, emit, signal, OWNER);
     } else {
       const plan = planWanGeneration(request, state.textEmbeds, state.layout, state.config);
       knobs = plan;
-      contexts = {
-        positive: padWanTextEmbedding(plan.positive, dit.contextRows, dit.contextWidth),
-        negative: plan.negative === undefined
-          ? undefined
-          : padWanTextEmbedding(plan.negative, dit.contextRows, dit.contextWidth),
-      };
+      contexts = precomputedContexts(plan, dit);
     }
     // 段の境目（text → DiT）。
     await settleAbort(signal);
-    const latents = await this.#denoise(knobs, contexts, emit, signal);
+    const latents = await runWanDenoise(state, knobs, contexts, emit, signal, OWNER);
     // 段の境目（DiT → VAE）。
     await settleAbort(signal);
-    const data = await this.#decode(knobs, latents, emit, signal);
+    const data = await decodeWanVaeStage(
+      state,
+      knobs,
+      latents,
+      WAN21_GENERATION,
+      emit,
+      signal,
+      OWNER,
+    );
     return {
       frames: knobs.frames,
       width: knobs.width,
@@ -1491,261 +838,6 @@ export class WanPipeline {
       fps: WAN21_GENERATION.fps,
       data,
     };
-  }
-
-  /**
-   * text の段（`"gpu"` の経路 — umT5 の Session を張り、positive → negative を 1 回ずつ回して畳む・`end` は
-   * 畳んだ後）。出力 `[1, L, width]` を DiT の文脈の行数までゼロで詰めて返す（{@link padUmt5Context}）。
-   *
-   * MUST: DiT の段を張る前に畳む（ADR 0119 決定 11 — umT5 i8 5.30 GiB と DiT 段は B570 の天井に同居
-   * できない）。畳む失敗で本体の失敗（run の失敗・中断・非有限の門）を上書きしない（DiT の段と同じ形）。
-   * Session の実行オプションは `{}`（quant の `session` は DiT の Session だけが受ける — i8 の重みの実行は
-   * 格納が決める・ADR 0119 決定 5）。
-   *
-   * MUST: 出力の有限性を見る（O(L·width)）。非有限の文脈を DiT へ渡すと、落ちるのは step 1 の潜在の門で、
-   * 文言が DiT を指す（真因の段を取り違える）。
-   */
-  async #encode(
-    text: Extract<WanTextStage, { readonly kind: "gpu" }>,
-    plan: WanGenerationPlan<Int32Array<ArrayBuffer>>,
-    emit: (event: WanGenerateEvent) => Promise<void>,
-    signal: AbortSignal | undefined,
-  ): Promise<WanContexts> {
-    const state = this.#state;
-    const { dit } = state;
-    const observe = state.onRunDiagnostics;
-    const prompts: readonly { readonly ids: Int32Array<ArrayBuffer>; readonly label: string }[] = [
-      { ids: plan.positive, label: "prompt" },
-      ...(plan.negative === undefined ? [] : [{ ids: plan.negative, label: "negativePrompt" }]),
-    ];
-
-    await emit({ kind: "stage", component: "text_encoder", at: "start" });
-    const session = await text.component.createSession(state.gpu, {});
-    const contexts: Float32Array<ArrayBuffer>[] = [];
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      for (const { ids, label } of prompts) {
-        // 各 run の前（1 回の run は不可分 — 中断は次の run の前で効く）。
-        await settleAbort(signal);
-        const outputs = await session.run(
-          umt5SessionInputs(ids, buildUmt5RelativePositionBuckets(ids.length)),
-        );
-        observe?.("text_encoder", session.diagnostics());
-        if (!Object.hasOwn(outputs, text.contract.output)) {
-          throw new Error(`WanPipeline: umT5 の出力 '${text.contract.output}' が無い`);
-        }
-        const context = padUmt5Context(
-          outputs[text.contract.output],
-          ids.length,
-          dit.contextRows,
-          dit.contextWidth,
-        );
-        const broken = firstNonFinite(context);
-        if (broken !== -1) {
-          throw new Error(
-            `WanPipeline: umT5 の出力（${label}・${ids.length} トークン）の行 ` +
-              `${Math.floor(broken / dit.contextWidth)}・列 ${broken % dit.contextWidth} が非有限` +
-              `（${context[broken]}）— DiT の段へは渡さない`,
-          );
-        }
-        contexts.push(context);
-      }
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        () => session.dispose(),
-      ]);
-    }
-    await emit({ kind: "stage", component: "text_encoder", at: "end" });
-    return { positive: contexts[0], negative: contexts.at(1) };
-  }
-
-  /**
-   * DiT の段（Session を張り、steps 回まわして畳む — `end` は畳んだ後）。
-   *
-   * MUST: 各 step の更新後の潜在の有限性を見る（O(N) のホスト走査 — 81 フレームで 1 step 約 210 万
-   * 要素）。非有限の潜在を黙って次の step と VAE の段へ渡すと、VAE の後のクランプが ±Inf を ±1 に
-   * 変えて検出できなくなる。
-   */
-  async #denoise(
-    plan: WanGenerationKnobs,
-    contexts: WanContexts,
-    emit: (event: WanGenerateEvent) => Promise<void>,
-    signal: AbortSignal | undefined,
-  ): Promise<Float32Array<ArrayBuffer>> {
-    const state = this.#state;
-    const { dit } = state;
-    const { latentShape, schedule } = plan;
-    const grid = wanTokenGrid(latentShape, WAN_PATCH);
-    const rope = wanRopeTables(state.ropeBase, grid);
-    const tokenShape = [1, grid.count, wanTokenWidth(WAN_PATCH)];
-    const ropeShape = [1, grid.count, 1, wanRopeWidth(state.ropeBase)];
-    const contextShape = [1, dit.contextRows, dit.contextWidth];
-    const { positive, negative } = contexts;
-    const elements = latentShape.reduce((product, dim) => product * dim, 1);
-    let current: Float32Array<ArrayBuffer> = plan.initial.kind === "latents"
-      ? Float32Array.from(plan.initial.data)
-      : new WanRandn(plan.initial.seed).normals(elements);
-    const observe = state.onRunDiagnostics;
-
-    await emit({ kind: "stage", component: "transformer", at: "start" });
-    const session = await state.transformer.createSession(state.gpu, state.sessionOptions);
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      const predict = async (
-        tokens: Float32Array<ArrayBuffer>,
-        proj: Tensor,
-        context: Float32Array<ArrayBuffer>,
-      ): Promise<Float32Array<ArrayBuffer>> => {
-        const outputs = await session.run({
-          [DIT_TOKENS]: { dtype: "f32", shape: tokenShape, data: tokens },
-          [DIT_TIMESTEPS_PROJ]: proj,
-          [DIT_CONTEXT]: { dtype: "f32", shape: contextShape, data: context },
-          [DIT_ROPE_COS]: { dtype: "f32", shape: ropeShape, data: rope.cos },
-          [DIT_ROPE_SIN]: { dtype: "f32", shape: ropeShape, data: rope.sin },
-        });
-        observe?.("transformer", session.diagnostics());
-        return unpatchifyTokens(asF32(outputs[dit.output], "DiT の出力"), latentShape, WAN_PATCH);
-      };
-      const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
-      for (let index = 0; index < plan.steps; index += 1) {
-        // 各 step の前（step の 2 回の forward は不可分 — 中断は次の step の前で効く）。
-        await settleAbort(signal);
-        const timestep = schedule.timesteps[index];
-        const proj: Tensor = {
-          dtype: "f32",
-          shape: [1, dit.projWidth],
-          data: timestepsProj(timestep, dit.projWidth),
-        };
-        // CFG は uncond → cond の逐次 2 回（B = 1 — 決定 5）。同じ潜在なので patchify は 1 回。
-        // 合成はホストで。
-        const tokens = patchifyLatents(current, latentShape, WAN_PATCH);
-        const uncond = negative === undefined ? undefined : await predict(tokens, proj, negative);
-        const cond = await predict(tokens, proj, positive);
-        const velocity = uncond === undefined
-          ? cond
-          : wanClassifierFreeGuidance(cond, uncond, plan.guidance);
-        current = sampler.step(velocity, current);
-        const broken = firstNonFinite(current);
-        if (broken !== -1) {
-          throw new Error(
-            `WanPipeline: step ${index + 1}/${plan.steps} の更新後の潜在の要素 ${broken} が非有限` +
-              `（${current[broken]}）— DiT の出力・CFG の合成・UniPC の更新のどこかが溢れた` +
-              "（VAE の段へは渡さない）",
-          );
-        }
-        const snapshot = current;
-        await emit({
-          kind: "denoise-step",
-          step: index + 1,
-          steps: plan.steps,
-          timestep,
-          copyLatents: () => ({ data: Float32Array.from(snapshot), shape: [...latentShape] }),
-        });
-      }
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      // MUST: 畳む失敗で本体の失敗（run の失敗・`onEvent` の throw・非有限の門）を上書きしない —
-      // VAE の段と同じ形（`disposeSteps` の doc）。両方が落ちたら本体を先頭にした AggregateError。
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        () => session.dispose(),
-      ]);
-    }
-    await emit({ kind: "stage", component: "transformer", at: "end" });
-    return current;
-  }
-
-  /**
-   * VAE の段（chunk グラフ 2 本の Session と常駐の cache を張り、タイル decode して畳む）。
-   *
-   * MUST: クランプの**前**に有限性を見る。上流と同じクランプ（{@link clampWanVaeFrames}）は ±Inf を
-   * ±1 に変えるので、後では検出できない（クランプ自体は上流の写しなので変えない）。
-   */
-  async #decode(
-    plan: WanGenerationKnobs,
-    latents: Float32Array,
-    emit: (event: WanGenerateEvent) => Promise<void>,
-    signal: AbortSignal | undefined,
-  ): Promise<Float32Array<ArrayBuffer>> {
-    const state = this.#state;
-    const { layout } = state;
-    const tilePlan = plan.tiles;
-    const tiles = wanVaeTileCount(tilePlan);
-    const denormalized = denormalizeWanLatents(latents, WAN21_GENERATION.latents);
-    const observe = state.onRunDiagnostics;
-
-    await emit({ kind: "stage", component: "vae_decoder", at: "start" });
-    let first: Session | undefined;
-    let next: Session | undefined;
-    let caches: WanVaeChunkCaches | undefined;
-    let frames: Float32Array<ArrayBuffer>;
-    let failure: { readonly error: unknown } | undefined;
-    try {
-      // VAE は quant の session を受けない（`{}` — anima の `withStage` と同じ取り決め。
-      // `sessionOptions` は DiT の Session へ渡す実効設定 — {@link WanAdmission.sessionOptions}）。
-      first = await state.vaeFirst.createSession(state.gpu, {});
-      next = await state.vaeNext.createSession(state.gpu, {});
-      caches = await WanVaeChunkCaches.create(state.gpu, layout);
-      const sessions = { first, next };
-      frames = await decodeWanVaeTiled(
-        state.gpu,
-        sessions,
-        caches,
-        tilePlan,
-        denormalized,
-        async (tile) => {
-          observe?.("vae_decoder_first", sessions.first.diagnostics());
-          observe?.("vae_decoder_next", sessions.next.diagnostics());
-          await emit({ kind: "vae-tile", tile, tiles });
-          // タイルの間（1 タイル = 1 batch で不可分 — 中断は次のタイルの前で効く）。
-          await settleAbort(signal);
-        },
-      );
-    } catch (error) {
-      failure = { error };
-      throw error;
-    } finally {
-      // MUST: Session → 常駐の順で畳む（段 4 / 5 の e2e と同じ）。畳む失敗で本体の失敗を上書きしない。
-      const opened = { first, next, caches };
-      await disposeSteps([
-        () => {
-          if (failure !== undefined) throw failure.error;
-        },
-        () => opened.first?.dispose(),
-        () => opened.next?.dispose(),
-        () => opened.caches?.dispose(),
-      ]);
-    }
-    const expected = 3 * plan.frames * plan.height * plan.width;
-    if (frames.length !== expected) {
-      throw new Error(
-        `WanPipeline: VAE の出力 ${frames.length} 要素が [3, ${plan.frames}, ${plan.height}, ${plan.width}] と違う`,
-      );
-    }
-    const broken = firstNonFinite(frames);
-    if (broken !== -1) {
-      const plane = plan.height * plan.width;
-      const pixel = broken % plane;
-      const sheet = Math.floor(broken / plane);
-      throw new Error(
-        `WanPipeline: VAE の出力（クランプ前）の channel ${Math.floor(sheet / plan.frames)}・` +
-          `フレーム ${sheet % plan.frames}・画素 (x=${pixel % plan.width}, ` +
-          `y=${Math.floor(pixel / plan.width)}) が非有限（${frames[broken]}）`,
-      );
-    }
-    clampWanVaeFrames(frames);
-    await emit({ kind: "stage", component: "vae_decoder", at: "end" });
-    return frames;
   }
 
   /**
