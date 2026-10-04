@@ -335,12 +335,25 @@ value by one ULP at six of the σ), and the CFG combination bit for bit.
 
 ## umT5 text encoder distribution (ADR 0119 stage 10d)
 
-The GPU text path runs the umT5-XXL encoder of the same checkpoint with int8 weights (ADR
-[0119](../../../docs/decisions/0119-wan-umt5-gpu-text-encoder.md)). Its container is the series
-`outputs/series/wan2.1-umt5-i8-dyn/text_encoder/` (26 parts, graph name `text_encoder`), written by
-`wan/umt5_export.py` from the pinned F32 checkpoint one row block at a time:
+The GPU text path runs the umT5-XXL encoder with int8 weights (ADR
+[0119](../../../docs/decisions/0119-wan-umt5-gpu-text-encoder.md)). Its upstream is the encoder of
+[`google/umt5-xxl`](https://huggingface.co/google/umt5-xxl) at a pinned commit (`UMT5_SOURCES` in
+`wan/sources.py` — ADR [0122](../../../docs/decisions/0122-umt5-upstream-and-compatible-encoders.md)),
+whose float32 weights are bit-identical to the checkpoint's `text_encoder` folder. The container is
+the series `outputs/series/umt5-xxl-i8-dyn/text_encoder/` (26 parts, graph name `text_encoder`),
+written by `wan/umt5_export.py` from the pinned F32 checkpoint one row block at a time.
+
+`google/umt5-xxl` ships pickle `.bin` shards only. The fetch derives the shards that hold the encoder
+(`shared.weight` and `encoder.*`) from the index and takes just those (3 of 6, about 29.8 GB); the
+writer checks each shard's SHA-256 against the table before it unpickles anything, and then opens it
+with `torch.load(mmap=True, weights_only=True)`. A directory that merely contains
+`pytorch_model.bin.index.json` is never unpickled — only the pinned row of the table opens `.bin`
+files. The tokenizer asset, `check-mask`, the precomputed embeddings and the ids of the golden cases
+still come from the Wan snapshot (`--model`, as in the sibling Wan scripts); the umT5 upstream is
+`--upstream` (default `xxl`), and `reference` records both axes in the golden metadata.
 
 ```bash
+uv run --group wan --inexact python -m wan.sources --umt5 xxl --fetch     # the encoder shards of google/umt5-xxl into the HF cache
 uv run --group wan --inexact python -m wan.umt5_export write --check   # write to a scratch seat, compare every part with the series by SHA-256
 uv run --group wan --inexact python -m wan.umt5_export write           # replace the series container (then rerun `reference` for the goldens)
 ```
@@ -361,13 +374,14 @@ uv run python dist.py --pipeline umt5   # default model xxl, out models/karume-u
 | `quants`                    | `i8` only; the vocabulary embedding (one 1,050,148,864-byte buffer) makes the build declare `maxBufferSize` / `maxStorageBufferBindingSize` |
 | `pipelineConfig`            | `{}`                                                                                                                                        |
 
-Before anything is placed, the plan checks the container's provenance against the pinned Wan
-revision, the binding table per kind of weight (linear layers and the vocabulary embedding in int8,
-RMSNorm weights and relative-position tables in float32 — with the real series: 169 int8 and 73
-float32 weights), and the graph contract (`input_ids [1, L]` and `relative_position_buckets [L, L]`,
+Before anything is placed, the plan checks the container's provenance against the pinned
+`google/umt5-xxl` revision, the binding table per kind of weight (linear layers and the vocabulary
+embedding in int8, RMSNorm weights and relative-position tables in float32 — with the real series:
+169 int8 and 73 float32 weights), and the graph contract (`input_ids [1, L]` and `relative_position_buckets [L, L]`,
 both int32, one symbol `L`, one float32 output `[1, L, W]`). The repository root gets `LICENSE.md`
-(Apache 2.0) and `NOTICE.md` (int8 conversion, `gelu_new` → `GELU(approximate="tanh")`, valid
-tokens only; the upstream folder is float32 and its identity with `google/umt5-xxl` is not checked).
+(Apache 2.0) and `NOTICE.md` (the encoder only, int8 conversion, `gelu_new` →
+`GELU(approximate="tanh")`, valid tokens only; the upstream is float32 and bit-identical to the Wan
+checkpoint's `text_encoder`).
 
 ## Distribution (stage 7)
 

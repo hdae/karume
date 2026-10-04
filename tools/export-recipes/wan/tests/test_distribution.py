@@ -16,7 +16,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import ir_fixtures
 import numpy as np
 import pytest
 from container_series import part_paths, placed_paths, read_component, write_component
@@ -89,7 +88,7 @@ from wan.distribution import (
     wan_sources,
 )
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import DEFAULT_MODEL, SOURCES
+from wan.sources import DEFAULT_MODEL, SOURCES, UMT5_SOURCES
 from wan.tests.umt5_fixture import umt5_container
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
@@ -113,6 +112,14 @@ _PINNED = Provenance(
     license=SOURCES[DEFAULT_MODEL].license,
     notice=NOTICE_FILENAME,
     upstream_revision=SOURCES[DEFAULT_MODEL].revision,
+)
+
+#: umT5 の書き手（`wan.umt5_export`）が焼く出所の正常形 — umT5 の上流は本家 `google/umt5-xxl` の
+#: pin で、DiT / VAE の Wan の pin とは別の行（ADR 0122 決定 1）。
+_UMT5_PINNED = Provenance(
+    license=UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.license,
+    notice=NOTICE_FILENAME,
+    upstream_revision=UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.revision,
 )
 
 #: `pipelineConfig` の欄（TS 側 `packages/models/src/wan/config.ts` の `ROOT_KEYS` /
@@ -234,9 +241,11 @@ def _tokenizer_asset(**overrides: Any) -> bytes:
 
 def _default_container(role: str) -> list[bytes]:
     """配置の役割ごとの正常形（transformer は格納ラベルごと — f16 系列 / i8 系列・text_encoder は
-    umT5 の i8 系列）。出所は `ir_fixtures` が焼く値（テストの間だけ差し替わる）に揃える。"""
+    umT5 の i8 系列）。出所は、transformer と VAE が `ir_fixtures` の焼く値（テストの間だけ Wan の
+    pin `_PINNED` に差し替わる）・text_encoder が umT5 の書き手の焼く本家の pin
+    （`_UMT5_PINNED`）。"""
     if role == WAN_TEXT_ENCODER_ROLE:
-        return umt5_container(provenance=ir_fixtures.FIXTURE_PROVENANCE, width=_WIDTH)
+        return umt5_container(provenance=_UMT5_PINNED, width=_WIDTH)
     if role == WAN_TRANSFORMER_F16_ROLE:
         return _graph_container(WAN_TRANSFORMER_ROLE)
     if role == WAN_TRANSFORMER_I8_ROLE:
@@ -465,9 +474,7 @@ class TestTheTextEncoderReference:
         other = _build_sources(
             tmp_path / "other",
             containers={
-                WAN_TEXT_ENCODER_ROLE: umt5_container(
-                    provenance=ir_fixtures.FIXTURE_PROVENANCE, width=_WIDTH + 1
-                )
+                WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, width=_WIDTH + 1)
             },
         )
         umt5_dir = _assemble_umt5(tmp_path / "other", other)
@@ -541,9 +548,7 @@ class TestTheStorageGates:
         sources = _build_sources(
             tmp_path,
             containers={
-                WAN_TEXT_ENCODER_ROLE: umt5_container(
-                    provenance=ir_fixtures.FIXTURE_PROVENANCE, table_layout="i8"
-                )
+                WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, table_layout="i8")
             },
         )
         with pytest.raises(DistError, match="種類ごとの要求と違う"):
@@ -568,9 +573,7 @@ class TestTheTextEncoderContract:
         sources = _build_sources(
             tmp_path,
             containers={
-                WAN_TEXT_ENCODER_ROLE: umt5_container(
-                    provenance=ir_fixtures.FIXTURE_PROVENANCE, width=_WIDTH + 1
-                )
+                WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, width=_WIDTH + 1)
             },
         )
         with pytest.raises(DistError, match=f"出力の幅 {_WIDTH + 1}"):
@@ -584,9 +587,7 @@ class TestTheTextEncoderContract:
         sources = _build_sources(
             tmp_path,
             containers={
-                WAN_TEXT_ENCODER_ROLE: umt5_container(
-                    provenance=ir_fixtures.FIXTURE_PROVENANCE, inputs=renamed
-                )
+                WAN_TEXT_ENCODER_ROLE: umt5_container(provenance=_UMT5_PINNED, inputs=renamed)
             },
         )
         with pytest.raises(DistError, match="グラフ入力"):
@@ -691,6 +692,14 @@ class TestTheContainerProvenance:
     def test_it_refuses_a_model_missing_from_the_source_table(self, tmp_path: Path) -> None:
         with pytest.raises(DistError, match="知らない"):
             wan_plan(_build_sources(tmp_path), "t2v-14b")
+
+    def test_it_refuses_a_text_encoder_that_names_the_wan_checkpoint(self, tmp_path: Path) -> None:
+        """umT5 の容器は本家 `google/umt5-xxl` の pin を名乗る（ADR 0122 決定 1）— Wan の pin を
+        名乗る容器（出所を切り替える前の形）は、Wan の計画の中でも umT5 の門が落とす。"""
+        encoder = umt5_container(provenance=_PINNED, width=_WIDTH)
+        sources = _build_sources(tmp_path, containers={WAN_TEXT_ENCODER_ROLE: encoder})
+        with pytest.raises(DistError, match="別の revision"):
+            wan_plan(sources)
 
     def test_it_refuses_a_wan22_model_of_the_source_table(self, tmp_path: Path) -> None:
         """取得元の表に載った Wan2.2 のモデルでも、Wan2.1 の配布（`karume-wan2.1`）は組まない。"""

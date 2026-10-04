@@ -16,9 +16,16 @@ ADR 0092 決定 3（配布リポの revision を焼く流儀）を上流側に�
 - Wan2.2（`ti2v-5b`）: `text_encoder` と `tokenizer` はどの経路でも取らない（ADR 0121 決定 9 —
   umT5 は `karume-umt5-xxl` を越境参照し、トークナイザ資産は Wan2.1 の系列から写す）。
 
+umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（{@link UMT5_SOURCES} — ADR 0122 決定 1）。
+本家は pickle の `.bin` 分割形だけを持つので、取得口（{@link umt5_snapshot}）は索引から encoder に
+要る shard を導き、表の shard（sha256 の pin つき）と突き合わせてからその分だけを取る（決定 2）。
+Wan の snapshot（{@link text_snapshot}）はトークナイザ資産・check-mask・事前計算・golden の id 列の
+ために残る（決定 3）。
+
     uv run --group wan python -m wan.sources --fetch     # 取得（HF の既定キャッシュへ）
     uv run --group wan python -m wan.sources             # 取得済みの検査（パラメータ数）
     uv run --group wan python -m wan.sources --model ti2v-5b --fetch   # TI2V-5B（約 22.8 GB）
+    uv run --group wan python -m wan.sources --umt5 xxl --fetch        # 本家 umT5（約 29.8 GB）
 
 MUST: `huggingface_hub` は関数の中で import する（`wan` グループは既定の sync に入らない —
 `tests/test_optional_group_imports.py`）。
@@ -30,6 +37,7 @@ import argparse
 import json
 import struct
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,6 +136,54 @@ COMPONENTS: dict[str, tuple[Component, ...]] = {
 
 #: 部品の外で取得するリポ直下のファイル（ライセンスの front matter と部品の索引）。
 ROOT_FILES: tuple[str, ...] = ("README.md", "model_index.json")
+
+
+@dataclass(frozen=True)
+class Umt5Source:
+    """umT5 の上流 1 本（pin した HF リポと、encoder に要る pickle の shard の sha256 —
+    ADR 0122 決定 1 / 2）。encoder はリポ直下にある（subfolder を持たない）。"""
+
+    source: UpstreamSource
+    #: encoder に要る shard（ファイル名 → HF API の LFS の sha256・64 桁の小文字 16 進）。
+    #: 取得口と読み口は、索引から導いた shard の集合がこの表と同じことを見る（上流の索引が
+    #: 動いた・表が古い、を黙って通さない）。読み口は unpickle の前に各 shard の sha256 を照合する
+    #: — pickle は読むと任意コードが走りうるので、1 枚目の防御は内容の pin（2 枚目が
+    #: `weights_only=True`）。
+    shards: Mapping[str, str]
+
+
+#: umT5 の上流の表（キーは umT5 の配布形のモデル名 — `wan.umt5_distribution.UMT5_DEFAULT_MODEL`）。
+#: 本家の main の commit（tags なし）・ライセンスは API の `cardData` と README の front matter・
+#: shard の sha256 は `/api/models/google/umt5-xxl/revision/<commit>?blobs=true` の LFS の値
+#: （2026-10-04 に確認 — research `2026-10-04-umt5-upstream-provenance` §1）。
+UMT5_SOURCES: dict[str, Umt5Source] = {
+    "xxl": Umt5Source(
+        source=UpstreamSource(
+            repo="google/umt5-xxl",
+            revision="66cb9e7e85526fe440a945569e42c72fb6cbc0ad",
+            license="apache-2.0",
+        ),
+        shards={
+            "pytorch_model-00001-of-00006.bin": (
+                "382094214dfe74d782769f61ad95cfe32fdd297ae51f16f9208afa180b355e61"
+            ),
+            "pytorch_model-00002-of-00006.bin": (
+                "b49efce006c907ea93eb38658577d5c8d4e85b4bab398a0c6ba25141927529d4"
+            ),
+            "pytorch_model-00003-of-00006.bin": (
+                "da3d39fffe6464247531c20696715860ccaabdaaad3d5a2979dc2e2fbb7789fc"
+            ),
+        },
+    ),
+}
+
+#: 本家の pickle 分割形の索引と config（transformers の `save_pretrained` の綴り）。
+UMT5_BIN_INDEX = "pytorch_model.bin.index.json"
+UMT5_CONFIG = "config.json"
+
+#: encoder が使う重みのキーの接頭辞（語彙埋め込み `shared.weight` と `encoder.*` — decoder と
+#: `lm_head` は取らない）。
+UMT5_ENCODER_PREFIXES: tuple[str, ...] = ("shared.", "encoder.")
 
 #: 取得済みの checkpoint が持つべきパラメータ数（モデル名 → 部品名 → safetensors のヘッダの
 #: 要素数の和）。VAE は encoder を含む。
@@ -252,6 +308,78 @@ def text_snapshot(model: str = DEFAULT_MODEL, *, fetch: bool = False) -> Path:
     return snapshot
 
 
+def umt5_encoder_shards(weight_map: Mapping[str, str]) -> frozenset[str]:
+    """索引の `weight_map`（キー → shard のファイル名）から、encoder の重み
+    （{@link UMT5_ENCODER_PREFIXES}）が載る shard を導く。"""
+    return frozenset(
+        shard for key, shard in weight_map.items() if key.startswith(UMT5_ENCODER_PREFIXES)
+    )
+
+
+def pinned_umt5_shards(index: Path, pinned: Mapping[str, str]) -> dict[str, str]:
+    """索引から導いた shard の集合が表（`pinned`）と同じことを見て、索引の `weight_map` のうち
+    表の shard に載るキーを返す（キー → shard のファイル名）。
+
+    MUST: 集合が違えば fail loudly — 上流の索引が動いたか表が古い。どちらでも、表の sha256 が
+    覆わない shard を読むか、要る shard を取りこぼす。
+    """
+    weight_map: dict[str, str] = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+    derived = umt5_encoder_shards(weight_map)
+    if derived != frozenset(pinned):
+        raise WanSourceError(
+            f"{index}: 索引から導いた encoder の shard {sorted(derived)} が表の shard"
+            f" {sorted(pinned)} と違う — 上流の索引が動いたか表（wan.sources.UMT5_SOURCES）が古い"
+        )
+    return {key: shard for key, shard in weight_map.items() if shard in pinned}
+
+
+def umt5_snapshot(model: str, *, fetch: bool = False) -> Path:
+    """umT5 の上流の pin（{@link UMT5_SOURCES}）の snapshot（config・索引・encoder の shard）。
+
+    先に config と索引だけを取り、索引から導いた shard（{@link pinned_umt5_shards} — 表と
+    違えば落ちる）を取る。decoder だけの shard は取らない（本家は 6 本・約 51.9 GB のうち encoder に
+    要るのは約 29.8 GB）。`fetch=False` ならネットワークに出ず、無ければ fail loudly
+    （{@link local_snapshot} と同じ理由）。shard の sha256 の照合は読み口
+    （`wan.umt5_export.Checkpoint`）が unpickle の前に掛ける — 取得の記録ではなく読む実物で閉じる。
+    """
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    row = UMT5_SOURCES.get(model)
+    if row is None:
+        raise WanSourceError(
+            f"umT5 のモデル {model!r} は上流の表に無い（既知: {sorted(UMT5_SOURCES)}）"
+        )
+    source = row.source
+
+    def download(patterns: list[str]) -> Path:
+        try:
+            return Path(
+                snapshot_download(
+                    source.repo,
+                    revision=source.revision,
+                    allow_patterns=patterns,
+                    local_files_only=not fetch,
+                )
+            )
+        except LocalEntryNotFoundError as error:
+            raise WanSourceError(
+                f"{source.repo}@{source.revision} の {patterns} が HF キャッシュに無い — 先に"
+                f" `uv run --group wan python -m wan.sources --umt5 {model} --fetch` で取得する"
+            ) from error
+
+    snapshot = download([UMT5_CONFIG, UMT5_BIN_INDEX])
+    index = snapshot / UMT5_BIN_INDEX
+    if not index.is_file() or not (snapshot / UMT5_CONFIG).is_file():
+        raise WanSourceError(f"{snapshot} に {UMT5_CONFIG} / {UMT5_BIN_INDEX} が無い — `--fetch`")
+    shards = sorted(set(pinned_umt5_shards(index, row.shards).values()))
+    snapshot = download(shards)
+    missing = [name for name in shards if not (snapshot / name).is_file()]
+    if missing:
+        raise WanSourceError(f"{snapshot} に shard {missing} が無い — `--fetch` で取り直す")
+    return snapshot
+
+
 def read_safetensors_header(path: Path) -> dict[str, dict[str, object]]:
     """safetensors のヘッダ（先頭 8 バイトの長さ + JSON）だけを読む（本体は読まない）。"""
     with path.open("rb") as stream:
@@ -309,8 +437,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(SOURCES))
     parser.add_argument("--fetch", action="store_true", help="pin した revision で取得する")
+    parser.add_argument(
+        "--umt5",
+        choices=sorted(UMT5_SOURCES),
+        help="Wan ではなく umT5 の上流（本家の encoder の shard）を取得 / 検査する",
+    )
     args = parser.parse_args(argv)
 
+    if args.umt5 is not None:
+        snapshot = umt5_snapshot(args.umt5, fetch=args.fetch)
+        print(f"snapshot: {snapshot}")
+        for name in sorted(UMT5_SOURCES[args.umt5].shards):
+            print(f"{name}: {(snapshot / name).stat().st_size:,} bytes")
+        return 0
     snapshot = fetch(args.model) if args.fetch else local_snapshot(args.model)
     counts = check_snapshot(snapshot, args.model)
     print(f"snapshot: {snapshot}")

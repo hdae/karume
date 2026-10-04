@@ -1,6 +1,11 @@
-"""Wan2.1 の umT5（`UMT5EncoderModel`）を i8 の S 形容器の材料にする書き手の骨格（ADR 0119 段 10b —
-決定 5 / 6。段 10c で育てる）。
+"""Wan2.1 が使う umT5-XXL の encoder（`UMT5EncoderModel`）を i8 の S 形容器の材料にする書き手
+（ADR 0119 段 10b — 決定 5 / 6。段 10c で育てる）。
 
+上流は本家 `google/umt5-xxl` の pin（`wan.sources.UMT5_SOURCES` — pickle の分割形を sha256 の照合の
+後に読む・ADR 0122 決定 1 / 2）。軸は 2 本（決定 3）: `--upstream`（umT5 の上流 — 重み・config・
+出所）と `--model`（Wan の text 側の snapshot — `reference` のケースの id 列と `check-mask`）。
+
+    uv run --group wan --inexact python -m wan.sources --umt5 xxl --fetch  # 本家の encoder の shard
     uv run --group wan --inexact python -m wan.umt5_export prepare       # 材料まで（書かない）
     uv run --group wan --inexact python -m wan.umt5_export write --check # 書いて系列と照合
     uv run --group wan --inexact python -m wan.umt5_export write         # 系列の容器を書き直す
@@ -42,7 +47,7 @@ research `2026-10-03-umt5-export-ram`。`reference`（段 10c）は書いた容�
 （`wan.distribution.WAN_WEIGHTS` — 越境参照）の weights のキーで、全 family 横断の門
 （`tests/test_graph_names.py`）が両方との一致を見る（ADR 0119 追記「段 10d の設計」D）。
 
-今の系列の容器（段 10b）は recipe の外の driver が同じ引数で書いた。`write --check` は
+`write --check` は
 {@link write_container} の書いた容器を作業席に置き、系列の容器と全 part の sha256 で突き合わせる
 （{@link assert_same_container} — 系列は置き換えない）。golden（`reference.*`）のメタは part 0 の
 sha256 を持つので、`write` で容器を書き直したら `reference` で golden も書き直す。
@@ -56,11 +61,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import resource
 import sys
 import tempfile
 import threading
 import time
+import weakref
+import zipfile
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -82,11 +90,22 @@ from karume.ir import IrGraph
 from karume.pipeline import export_module, publish_model
 from karume.quantize import QUANT_MODULE_TYPES, channel_scale, iter_quant_targets, quantize_to_int8
 from wan import umt5_patch, umt5_reference
-from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS, text_snapshot
-from wan.umt5_distribution import storage_kind
+from wan.sources import (
+    DEFAULT_MODEL,
+    SOURCES,
+    UMT5_BIN_INDEX,
+    UMT5_SOURCES,
+    WAN21_MODELS,
+    WanSourceError,
+    pinned_umt5_shards,
+    text_snapshot,
+    umt5_snapshot,
+)
+from wan.umt5_distribution import UMT5_DEFAULT_MODEL, storage_kind
 
-#: i8 の系列（綴りは配布の規約 `<名>-<格納>-dyn` — DiT の `wan2.1-t2v-1.3b-i8-dyn` に倣う）。
-SERIES_NAME = "wan2.1-umt5-i8-dyn"
+#: i8 の系列（綴りは配布の規約 `<名>-<格納>-dyn`。名は出所 — 本家 `google/umt5-xxl` の encoder・
+#: ADR 0122 決定 4）。
+SERIES_NAME = "umt5-xxl-i8-dyn"
 SERIES = SERIES_ROOT / SERIES_NAME
 
 #: 系列の中の置き場（綴りは部品名 {@link GRAPH_NAME} と同じ — 規約であって導出ではない）。
@@ -97,8 +116,9 @@ MODEL_FILE = "model.krm"
 #: `wan.umt5_distribution.UMT5_ROLE`。一致は `tests/test_graph_names.py` の門）。
 GRAPH_NAME = "text_encoder"
 
-#: 上流の部品のディレクトリ（snapshot の下）。
-UPSTREAM_SUBFOLDER = "text_encoder"
+#: Wan の snapshot の中の umT5 のディレクトリ（`check-mask` だけが読む — 事前計算資産の経路を
+#: 再現する対照で、容器の上流ではない — ADR 0122 決定 3）。
+WAN_TEXT_ENCODER_SUBFOLDER = "text_encoder"
 
 #: trace の例示入力の有効長（下見の `umt5_probe.EXPORT_LENGTHS[0]` と同じ — L は記号次元なので
 #: 値は形の特殊化を踏まない数なら何でもよい: 0 / 1 と heads 64・d_kv 64・バケット 32 を避ける）。
@@ -256,20 +276,119 @@ class MemoryMonitor:
 # ---------------------------------------------------------------------------
 
 
+def _close_descriptors(descriptors: dict[Path, int]) -> None:
+    for descriptor in descriptors.values():
+        os.close(descriptor)
+    descriptors.clear()
+
+
+class PinnedBinShards:
+    """pin した本家の pickle 分割形（`pytorch_model-0000N-of-0000M.bin` + 索引）の読み口
+    （ADR 0122 決定 2）。
+
+    組み立ての時点で、索引から導いた encoder の shard の集合を表と突き合わせ（`wan.sources.
+    pinned_umt5_shards`）、表の各 shard を開いて記述子を握り、握った記述子から sha256 を照合する —
+    1 本でも違えば 1 本も unpickle せずに落ちる。
+
+    MUST: 読むときも握った記述子を `/proc/self/fd/<n>` で `torch.load` に渡す（path を開き直さ
+    ない）。`/proc/self/fd/<n>` を開くと記述子の指す inode そのものが開くので、照合の後に path の
+    先が差し替わっても（HF のキャッシュは別名に書いて rename する）、読むのは照合した内容になる。
+    照合のたびに 10 GB 級の shard を読み直す形（開き直すなら再照合）は採らない。届かないのは、
+    同じ inode をその場で書き換える者（書き込み権を持つ者）だけ — mmap で読む限り塞げない
+    （塞ぐには全体を anon に写すことになり、RSS の山を戻す）。
+
+    shard は読むたびに `torch.load(mmap=True, weights_only=True)` で開き、state はその場で捨てる
+    （mmap は返した view が生きている間だけ残る）。state を握り続けると、触ったページが
+    file-backed の RSS に乗ったまま残る（全 shard を握った形の実測: quantize の山 17.62 GiB のうち
+    file が 11.6 GiB）。開く費用は 1 回 10〜20 ms（unpickle は shard の中の pickle だけ — 重みの
+    ページは触らない）。
+    """
+
+    def __init__(self, directory: Path, shards: Mapping[str, str]) -> None:
+        try:
+            self.files = {
+                key: directory / shard
+                for key, shard in pinned_umt5_shards(directory / UMT5_BIN_INDEX, shards).items()
+            }
+        except (OSError, WanSourceError) as cause:
+            raise Umt5ExportError(f"{directory}: {cause}") from cause
+        self._descriptors: dict[Path, int] = {}
+        # 記述子は持ち主が消えたときに閉じる（参照が切れた時点で決まって走る — 呼び手に close を
+        # 求めない）。
+        self._release = weakref.finalize(self, _close_descriptors, self._descriptors)
+        try:
+            for name, expected in sorted(shards.items()):
+                path = directory / name
+                if not path.is_file():
+                    raise Umt5ExportError(f"{path} が無い（表の shard — 開く前に落とす）")
+                self._descriptors[path] = os.open(path, os.O_RDONLY)
+                with open(self._descriptors[path], "rb", closefd=False) as stream:
+                    actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                if actual != expected:
+                    raise Umt5ExportError(
+                        f"{path} の sha256 {actual} が表の {expected} と違う — unpickle の前に"
+                        "落とす（wan.sources.UMT5_SOURCES）"
+                    )
+        except BaseException:
+            self._release()
+            raise
+
+    def tensors(self, keys: Sequence[str]) -> list[torch.Tensor]:
+        """`keys` のテンソル（mmap の上の view・並びは `keys` と同じ — 呼び手は写してから捨てる）。
+
+        shard ごとに 1 回だけ開くので、同じ shard の tied な別名は同じ storage を共有したまま返る
+        （{@link Checkpoint.identical} の storage の照合）。
+        """
+        states: dict[Path, Mapping[str, torch.Tensor]] = {}
+        for key in keys:
+            path = self.files[key]
+            if path not in states:
+                states[path] = self._load(path)
+        return [states[self.files[key]][key] for key in keys]
+
+    def _load(self, path: Path) -> Mapping[str, torch.Tensor]:
+        handle = f"/proc/self/fd/{self._descriptors[path]}"
+        try:
+            return torch.load(handle, map_location="cpu", mmap=True, weights_only=True)
+        except RuntimeError as cause:
+            # zip 形式でない（旧い torch.save の）pickle は mmap で開けない。zip 形式で落ちた
+            # 例外は包まずにそのまま上げる（別の原因を名指しし損ねない）。
+            if zipfile.is_zipfile(handle):
+                raise
+            raise Umt5ExportError(
+                f"{path} が zip 形式の torch.save でない（mmap で開けない）"
+            ) from cause
+
+
 class Checkpoint:
-    """上流の safetensors（分割形か単一形）からテンソルを 1 本ずつ・行の塊ごとに読む。
+    """上流の checkpoint からテンソルを 1 本ずつ・行の塊ごとに読む。
 
     全部を一度に載せないための口（決定 6）。MUST: 格納は F32 だけを受ける — 上流の pin した
     checkpoint は F32（`total_size` 22,723,641,344 B）で、別の dtype なら丸めの出発点が変わる。
 
-    `index` / `single` はファイル名の綴り（既定は transformers の `save_pretrained`。diffusers の
-    部品は `diffusion_pytorch_model…` — DiT の層逐次の参照 `wan.dit_reference` が渡す）。
+    既定は safetensors（分割形か単一形）。`index` / `single` はファイル名の綴り（既定は
+    transformers の `save_pretrained`。diffusers の部品は `diffusion_pytorch_model…` — DiT の
+    層逐次の参照 `wan.dit_reference` が渡す）。
+
+    `shards`（ファイル名 → sha256）を渡したときだけ、pickle の分割形を {@link PinnedBinShards} で
+    読む（ADR 0122 決定 2）。MUST: 渡すのは上流の表の行（`wan.sources.UMT5_SOURCES`）だけ —
+    ディレクトリに `pytorch_model.bin.index.json` があるだけでは開かない（索引の有無で読み口を
+    選ぶと、pin していない pickle も unpickle する口になる）。
     """
 
     def __init__(
-        self, directory: Path, *, index: str = CHECKPOINT_INDEX, single: str = CHECKPOINT_SINGLE
+        self,
+        directory: Path,
+        *,
+        index: str = CHECKPOINT_INDEX,
+        single: str = CHECKPOINT_SINGLE,
+        shards: Mapping[str, str] | None = None,
     ) -> None:
-        if (directory / index).is_file():
+        self._bin: PinnedBinShards | None = None
+        if shards is not None:
+            self._bin = PinnedBinShards(directory, shards)
+            self._files = self._bin.files
+        elif (directory / index).is_file():
             weight_map = json.loads((directory / index).read_text(encoding="utf-8"))["weight_map"]
             self._files = {key: directory / name for key, name in weight_map.items()}
         elif (directory / single).is_file():
@@ -282,7 +401,30 @@ class Checkpoint:
     def names(self) -> frozenset[str]:
         return frozenset(self._files)
 
+    def _pinned(self, *keys: str) -> list[torch.Tensor]:
+        """pickle の分割形のテンソル（F32 を見てから — mmap の上の view。MUST: 呼び手は写すか
+        形を見るだけにして、view を返さない — 握ると shard の mmap が閉じない）。"""
+        assert self._bin is not None
+        tensors = self._bin.tensors(keys)
+        for key, tensor in zip(keys, tensors, strict=True):
+            self._assert_f32(key, str(tensor.dtype))
+        return tensors
+
+    def _same_storage(self, keys: Sequence[str]) -> bool:
+        """pickle の分割形で `keys` が全部同じ storage（data pointer・offset・形・stride）か。"""
+        first, *others = self._pinned(*keys)
+        return all(
+            tensor.untyped_storage().data_ptr() == first.untyped_storage().data_ptr()
+            and tensor.storage_offset() == first.storage_offset()
+            and tensor.shape == first.shape
+            and tensor.stride() == first.stride()
+            for tensor in others
+        )
+
     def shape(self, key: str) -> list[int]:
+        if self._bin is not None:
+            (tensor,) = self._pinned(key)
+            return list(tensor.shape)
         with safe_open(str(self._files[key]), framework="pt") as handle:
             view = handle.get_slice(key)
             self._assert_f32(key, view.get_dtype())
@@ -290,6 +432,10 @@ class Checkpoint:
 
     def read(self, key: str) -> torch.Tensor:
         """1 本を丸ごと（小さい重み — RMSNorm と相対位置の表）。"""
+        if self._bin is not None:
+            # 写す — mmap の上の view を返すと、容器や参照が shard の mmap を握り続ける。
+            (tensor,) = self._pinned(key)
+            return tensor.clone(memory_format=torch.contiguous_format)
         with safe_open(str(self._files[key]), framework="pt") as handle:
             tensor = handle.get_tensor(key)
         self._assert_f32(key, str(tensor.dtype))
@@ -297,10 +443,35 @@ class Checkpoint:
 
     def read_rows(self, key: str, start: int, stop: int) -> torch.Tensor:
         """行 `[start, stop)` だけ（先頭の軸の切り出し — 残りの軸は丸ごと）。"""
+        if self._bin is not None:
+            (tensor,) = self._pinned(key)
+            return tensor[start:stop].clone(memory_format=torch.contiguous_format)
         with safe_open(str(self._files[key]), framework="pt") as handle:
             view = handle.get_slice(key)
             self._assert_f32(key, view.get_dtype())
             return view[start:stop]
+
+    def identical(self, keys: Sequence[str], chunk_rows: int = CHUNK_ROWS) -> bool:
+        """`keys` のテンソルが全部同じ値か（tied な別名の照合 — {@link checkpoint_keys}）。
+
+        pickle の分割形で全部が同じ storage（data pointer・offset・形・stride）なら読まずに真。
+        それ以外は形を見てから、行の塊ごとに F32 のビット列を比べる（`-0.0` と `0.0`・NaN の
+        取り違えも拾う — 値の `==` ではなくビット）。
+        """
+        if self._bin is not None and self._same_storage(keys):
+            return True
+        shapes = [self.shape(key) for key in keys]
+        if any(shape != shapes[0] for shape in shapes[1:]):
+            return False
+        for start in range(0, shapes[0][0], chunk_rows):
+            stop = min(start + chunk_rows, shapes[0][0])
+            first_rows = self.read_rows(keys[0], start, stop).view(torch.int32)
+            for other in keys[1:]:
+                if not torch.equal(
+                    first_rows, self.read_rows(other, start, stop).view(torch.int32)
+                ):
+                    return False
+        return True
 
     @staticmethod
     def _assert_f32(key: str, dtype: str) -> None:
@@ -309,41 +480,66 @@ class Checkpoint:
 
 
 def checkpoint_keys(
-    model: nn.Module, wrapper_keys: Sequence[str], available: frozenset[str]
+    model: nn.Module, wrapper_keys: Sequence[str], checkpoint: Checkpoint
 ) -> dict[str, str]:
     """ラッパのテンソルキー → checkpoint のキー。
 
     ラッパの `encoder` は上流の `encoder` そのものなので名前は同じ空間にある。tied な重み
-    （`encoder.embed_tokens.weight` = `shared.weight`）は checkpoint に片方の名前でしか無いので、
-    同じ Parameter を指す別名の中から checkpoint に在る 1 つを選ぶ。MUST: 候補が 0 本・2 本以上なら
-    fail loudly（黙って別の重みを読まない）。
+    （`encoder.embed_tokens.weight` = `shared.weight`）は、同じ Parameter を指す別名の中から
+    checkpoint に在るものを選ぶ。Wan の `save_pretrained` の形は片方の名前しか持たず、本家の索引は
+    両方を持つ（ADR 0122 決定 2）。
+
+    - 候補が 1 本: それを使う。
+    - 候補が 2 本以上: 全候補が同じ値（{@link Checkpoint.identical} — 同じ storage かビット一致）
+      なら、transformers の tied の宣言の先（`_tied_weights_keys` の値 — UMT5 では `shared.weight`）
+      を選ぶ。
+
+    MUST: 候補が 0 本・宣言の先が 1 つに決まらない・別名の値が 1 要素でも違う、は fail loudly
+    （黙って別の重みを読まない）。
     """
     aliases: dict[int, list[str]] = {}
     for name, parameter in model.named_parameters(remove_duplicate=False):
         aliases.setdefault(id(parameter), []).append(name)
     by_name = {name: names for names in aliases.values() for name in names}
+    tied = getattr(model, "_tied_weights_keys", None)
+    targets = set(tied.values()) if isinstance(tied, Mapping) else set()
+    available = checkpoint.names()
     mapping: dict[str, str] = {}
     for key in wrapper_keys:
         candidates = sorted(set(by_name.get(key, [key])) & available)
+        if len(candidates) > 1:
+            chosen = [name for name in candidates if name in targets]
+            if len(chosen) != 1:
+                raise Umt5ExportError(
+                    f"'{key}' の checkpoint のキーが 1 つに決まらない: {candidates}（tied の宣言の"
+                    f"先 {sorted(targets)} が候補に 1 つだけ在る形でない）"
+                )
+            if not checkpoint.identical(candidates):
+                raise Umt5ExportError(
+                    f"'{key}' の tied な別名 {candidates} の値が checkpoint の中で違う"
+                    " — どちらを読んでも別の重みになる"
+                )
+            candidates = chosen
         if len(candidates) != 1:
             raise Umt5ExportError(f"'{key}' の checkpoint のキーが 1 つに決まらない: {candidates}")
         mapping[key] = candidates[0]
     return mapping
 
 
-def checkpoint_weights(directory: Path) -> umt5_reference.CheckpointWeights:
+def checkpoint_weights(
+    directory: Path, shards: Mapping[str, str] | None = None
+) -> umt5_reference.CheckpointWeights:
     """量子化しない重みの読み口（品質の記録の基準 — 段 10c）。
 
     容器のテンソルキー（ラッパの parameter 名）→ checkpoint のキーの対応は {@link prepare} と同じ
-    {@link checkpoint_keys} で組む（上流は meta — 重みは読まない）。
+    {@link checkpoint_keys} で組む（上流は meta — 重みは読まない）。`shards` は {@link Checkpoint}
+    と同じ（上流の表の行から組むときだけ渡す）。
     """
     model = meta_text_encoder(directory)
     wrapper = umt5_patch.Umt5EncoderTokens(model)
-    checkpoint = Checkpoint(directory)
+    checkpoint = Checkpoint(directory, shards=shards)
     keys = [name for name, _ in wrapper.named_parameters()]
-    return umt5_reference.CheckpointWeights(
-        checkpoint, checkpoint_keys(model, keys, checkpoint.names())
-    )
+    return umt5_reference.CheckpointWeights(checkpoint, checkpoint_keys(model, keys, checkpoint))
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +547,15 @@ def checkpoint_weights(directory: Path) -> umt5_reference.CheckpointWeights:
 # ---------------------------------------------------------------------------
 
 
-def upstream_dir(model: str = DEFAULT_MODEL) -> Path:
-    """pin した revision の umT5 の置き場（取得済みでなければ `text_snapshot` が fail loudly）。"""
-    return text_snapshot(model) / UPSTREAM_SUBFOLDER
+def upstream_dir(upstream: str = UMT5_DEFAULT_MODEL) -> Path:
+    """umT5 の上流の pin（`wan.sources.UMT5_SOURCES`）の置き場 — 本家はリポ直下に encoder を置く
+    （取得済みでなければ `umt5_snapshot` が fail loudly）。"""
+    return umt5_snapshot(upstream)
+
+
+def upstream_shards(upstream: str = UMT5_DEFAULT_MODEL) -> Mapping[str, str]:
+    """上流の表の行の shard の pin（{@link Checkpoint} の `shards` — pickle を開く唯一の口）。"""
+    return UMT5_SOURCES[upstream].shards
 
 
 def meta_text_encoder(directory: Path) -> nn.Module:
@@ -465,10 +667,15 @@ def quant_targets(wrapper: umt5_patch.Umt5EncoderTokens) -> dict[str, int]:
 def prepare(
     directory: Path,
     *,
+    shards: Mapping[str, str] | None = None,
     monitor: MemoryMonitor | None = None,
     chunk_rows: int = CHUNK_ROWS,
 ) -> Umt5Export:
-    """trace → 量子化しない重みの読み込み → 量子化の対象の i8 化（段ごとに `monitor` で測る）。"""
+    """trace → 量子化しない重みの読み込み → 量子化の対象の i8 化（段ごとに `monitor` で測る）。
+
+    `shards` は {@link Checkpoint} と同じ（上流の表の行から組むときだけ —
+    {@link upstream_shards}）。
+    """
     stage = monitor.stage if monitor is not None else _unmeasured
     with stage("trace") as record:
         model = meta_text_encoder(directory)
@@ -476,9 +683,9 @@ def prepare(
         graph, tensors = trace(wrapper)
         targets = quant_targets(wrapper)
         record.details["nodes"] = len(graph.nodes)
-    checkpoint = Checkpoint(directory)
+    checkpoint = Checkpoint(directory, shards=shards)
     weights = sorted(key for key, value in tensors.items() if value.is_meta)
-    mapping = checkpoint_keys(model, weights, checkpoint.names())
+    mapping = checkpoint_keys(model, weights, checkpoint)
     unknown = sorted(set(targets) - set(weights))
     if unknown:
         raise Umt5ExportError(f"量子化の対象がグラフの重みに無い: {unknown}")
@@ -511,15 +718,16 @@ def _unmeasured(name: str) -> Iterator[StageRecord]:
     yield StageRecord(name)
 
 
-def provenance(model: str = DEFAULT_MODEL) -> Provenance:
-    """容器へ焼く出所（上流のライセンス識別子と pin した revision — `wan.sources` が正本）。"""
-    source = SOURCES[model]
+def provenance(upstream: str = UMT5_DEFAULT_MODEL) -> Provenance:
+    """容器へ焼く出所（umT5 の上流のライセンス識別子と pin した revision —
+    `wan.sources.UMT5_SOURCES` が正本）。"""
+    source = UMT5_SOURCES[upstream].source
     return Provenance(
         license=source.license, notice=NOTICE_FILENAME, upstream_revision=source.revision
     )
 
 
-def write_container(export: Umt5Export, path: Path, model: str = DEFAULT_MODEL) -> IrGraph:
+def write_container(export: Umt5Export, path: Path, upstream: str = UMT5_DEFAULT_MODEL) -> IrGraph:
     """材料（{@link prepare} の戻り）を容器に書く（`path` は代表 path — 分割形の part 列になる）。
 
     格納は材料のまま（量子化の対象は `fixed` の packed + scale・残りは checkpoint の f32）で、
@@ -530,7 +738,7 @@ def write_container(export: Umt5Export, path: Path, model: str = DEFAULT_MODEL) 
         path,
         export.graph,
         dict(export.tensors),
-        provenance=provenance(model),
+        provenance=provenance(upstream),
         graph_name=GRAPH_NAME,
         fixed_weights=export.fixed,
     )
@@ -566,7 +774,7 @@ def assert_same_container(written: Path, existing: Path) -> None:
         )
 
 
-def write_series(model: str = DEFAULT_MODEL, *, check: bool) -> dict[str, Any]:
+def write_series(upstream: str = UMT5_DEFAULT_MODEL, *, check: bool) -> dict[str, Any]:
     """系列の容器を書く（`check` なら作業席に書いて既存と照合するだけで、系列は置き換えない）。
 
     書き直す回は系列の部品ディレクトリを丸ごと差し替える（`staged_publication` — golden の
@@ -574,18 +782,18 @@ def write_series(model: str = DEFAULT_MODEL, *, check: bool) -> dict[str, Any]:
     """
     target = SERIES / COMPONENT_DIR
     with MemoryMonitor() as monitor:
-        export = prepare(upstream_dir(model), monitor=monitor)
+        export = prepare(upstream_dir(upstream), shards=upstream_shards(upstream), monitor=monitor)
         with monitor.stage("write"):
             if check:
                 with tempfile.TemporaryDirectory(dir=SERIES, prefix=".check-") as scratch:
                     written = Path(scratch) / MODEL_FILE
-                    graph = write_container(export, written, model)
+                    graph = write_container(export, written, upstream)
                     assert_same_container(written, target / MODEL_FILE)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with staged_publication(target) as staged:
                     staged.mkdir()
-                    graph = write_container(export, staged / MODEL_FILE, model)
+                    graph = write_container(export, staged / MODEL_FILE, upstream)
     return {
         "check": check,
         "container": str(target / MODEL_FILE),
@@ -618,7 +826,8 @@ MASK_FORMS = ("valid", "padded")
 
 
 def load_upstream(model: str, dtype: torch.dtype) -> tuple[Any, Any]:
-    """pin した revision のトークナイザと上流の umT5（`dtype`・CPU・eval）。
+    """Wan の pin した revision のトークナイザと umT5（`dtype`・CPU・eval — Wan の text 側の
+    snapshot の軸・ADR 0122 決定 3）。
 
     資産の経路（`wan.text_embeds.load_text_encoder` — bf16）と同じ呼び方で、dtype だけを選ぶ。
     f32 は素直な形の第 1 段（全重みを f32 で読む）そのもので、その RSS が research の起点になる。
@@ -628,7 +837,7 @@ def load_upstream(model: str, dtype: torch.dtype) -> tuple[Any, Any]:
     snapshot = text_snapshot(model)
     tokenizer = AutoTokenizer.from_pretrained(snapshot, subfolder="tokenizer")
     encoder = UMT5EncoderModel.from_pretrained(
-        snapshot, subfolder=UPSTREAM_SUBFOLDER, dtype=dtype
+        snapshot, subfolder=WAN_TEXT_ENCODER_SUBFOLDER, dtype=dtype
     ).eval()
     if encoder.dtype != dtype:
         raise Umt5ExportError(f"umT5 が {encoder.dtype} で読まれた（{dtype} を指定）")
@@ -716,10 +925,10 @@ def compare_mask(directory: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def prepare_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
+def prepare_summary(upstream: str = UMT5_DEFAULT_MODEL) -> dict[str, Any]:
     """{@link prepare} を測り、材料の要約を返す（容器は書かない — モジュール doc）。"""
     with MemoryMonitor() as monitor:
-        export = prepare(upstream_dir(model), monitor=monitor)
+        export = prepare(upstream_dir(upstream), shards=upstream_shards(upstream), monitor=monitor)
     return {
         "nodes": len(export.graph.nodes),
         "fixed": len(export.fixed),
@@ -729,13 +938,37 @@ def prepare_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     }
 
 
-def reference_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
+def reference_axes(upstream: str, wan_model: str) -> dict[str, dict[str, str]]:
+    """golden のメタに残す 2 本の軸（ADR 0122 決定 3 — `reference` は両方を混ぜて使う唯一の
+    サブコマンド）。
+
+    - `encoder`: umT5 の上流（config と量子化しない重み — `wan.sources.UMT5_SOURCES`）
+    - `cases`: ケースの id 列を採った Wan の text 側の snapshot（トークナイザ —
+      `wan.sources.SOURCES`）
+    """
+    encoder = UMT5_SOURCES[upstream].source
+    cases = SOURCES[wan_model]
+    return {
+        "encoder": {"model": upstream, "repo": encoder.repo, "revision": encoder.revision},
+        "cases": {
+            "model": wan_model,
+            "repo": cases.repo,
+            "revision": cases.revision,
+            "subfolder": "tokenizer",
+        },
+    }
+
+
+def reference_summary(
+    upstream: str = UMT5_DEFAULT_MODEL, wan_model: str = DEFAULT_MODEL
+) -> dict[str, Any]:
     """書いた i8 系列の容器から層逐次の CPU 参照（f64 / f32）を採り、golden を同じ席に
     書く（段 10c — 容器は書かない）。
 
-    ケースの id 列は上流の経路（10a の fixture と同じ）で採る。受入れ（固定 4 本）は量子化
-    しない重み（pin した checkpoint の F32 — {@link checkpoint_weights}）の参照も採り、bf16 の
-    事前計算資産との差も要約に出す（記録だけ）。
+    ケースの id 列は Wan のトークナイザの経路（10a の fixture と同じ — 軸 `wan_model`）で採る。
+    config と、受入れ（固定 4 本）の量子化しない重み（pin した checkpoint の F32 —
+    {@link checkpoint_weights}）は umT5 の上流（軸 `upstream`）から読む。bf16 の事前計算資産との
+    差も要約に出す（記録だけ）。どちらの軸の値を使ったかは golden のメタ（{@link reference_axes}）。
     """
     from transformers import UMT5Config
 
@@ -743,48 +976,81 @@ def reference_summary(model: str = DEFAULT_MODEL) -> dict[str, Any]:
     from wan.text_embeds import SERIES_NAME as EMBEDS_SERIES
 
     component = SERIES / COMPONENT_DIR
+    directory = upstream_dir(upstream)
     with MemoryMonitor() as monitor:
         with monitor.stage("cases") as record:
-            cases = umt5_reference.reference_cases(umt5_reference.upstream_encoder(model))
+            cases = umt5_reference.reference_cases(umt5_reference.upstream_encoder(wan_model))
             record.details["lengths"] = {case.name: len(case.ids) for case in cases}
         embeddings, _ = read_asset(SERIES_ROOT / EMBEDS_SERIES / ASSET_NAME)
         result = umt5_reference.write_references(
             container=component / MODEL_FILE,
             out_dir=component,
-            config=UMT5Config.from_pretrained(upstream_dir(model)),
+            config=UMT5Config.from_pretrained(directory),
             cases=cases,
             stage=monitor.stage,
-            unquantized=checkpoint_weights(upstream_dir(model)),
+            unquantized=checkpoint_weights(directory, upstream_shards(upstream)),
+            axes=reference_axes(upstream, wan_model),
             embeddings=embeddings,
         )
     return {**result, "stages": [record.to_dict() for record in monitor.records]}
 
 
+#: サブコマンドごとに効く引数（argparse の dest）。MUST: これ以外の引数を明示したら拒む — 黙って
+#: 無視すると、効かない軸（例 `write --model`）を指定したつもりの回が別の入力で走る。
+COMMAND_ARGUMENTS: Mapping[str, frozenset[str]] = {
+    "prepare": frozenset({"upstream"}),
+    "write": frozenset({"upstream", "check"}),
+    "check-mask": frozenset({"model", "dtype", "out"}),
+    "compare-mask": frozenset({"out"}),
+    "reference": frozenset({"upstream", "model"}),
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("command", choices=tuple(COMMAND_ARGUMENTS))
+    # 選択引数の既定は None（明示と省略を見分けて、効かない引数の明示を拒むため）— 実の既定値は
+    # 下で埋める。
     parser.add_argument(
-        "command", choices=("prepare", "write", "check-mask", "compare-mask", "reference")
+        "--upstream",
+        choices=sorted(UMT5_SOURCES),
+        help=f"umT5 の上流（prepare / write の重み・config・出所、reference の config と"
+        f"量子化しない重み — 既定 {UMT5_DEFAULT_MODEL}）",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=WAN21_MODELS)
+    parser.add_argument(
+        "--model",
+        choices=WAN21_MODELS,
+        help="Wan の text 側の snapshot（reference のケースの id 列・check-mask — 兄弟の台本"
+        f" text_embeds / umt5_tokenizer / umt5_host_fixture の --model と同じ軸 — 既定"
+        f" {DEFAULT_MODEL}）",
+    )
     parser.add_argument(
         "--check",
         action="store_true",
+        default=None,
         help="write: 作業席に書いて系列の容器と sha256 で照合する（系列は置き換えない）",
     )
-    parser.add_argument("--dtype", default="bf16", choices=sorted(MASK_DTYPES), help="check-mask")
+    parser.add_argument("--dtype", choices=sorted(MASK_DTYPES), help="check-mask（既定 bf16）")
     parser.add_argument("--out", type=Path, help="check-mask が書く / compare-mask が読む席")
     args = parser.parse_args(argv)
-    if args.check and args.command != "write":
-        parser.error("--check は write にだけ掛かる")
+    accepted = COMMAND_ARGUMENTS[args.command]
+    for name in sorted(frozenset().union(*COMMAND_ARGUMENTS.values())):
+        if getattr(args, name) is not None and name not in accepted:
+            parser.error(
+                f"--{name} は {args.command} に効かない（効くのは"
+                f" {', '.join(f'--{other}' for other in sorted(accepted))}）"
+            )
+    upstream = args.upstream if args.upstream is not None else UMT5_DEFAULT_MODEL
+    model = args.model if args.model is not None else DEFAULT_MODEL
     started = time.perf_counter()
     if args.command == "prepare":
-        summary: Any = prepare_summary(args.model)
+        summary: Any = prepare_summary(upstream)
     elif args.command == "write":
-        summary = write_series(args.model, check=args.check)
+        summary = write_series(upstream, check=args.check is True)
     elif args.command == "check-mask":
-        summary = check_mask(args.model, args.dtype, args.out)
+        summary = check_mask(model, args.dtype if args.dtype is not None else "bf16", args.out)
     elif args.command == "reference":
-        summary = reference_summary(args.model)
+        summary = reference_summary(upstream, model)
     else:
         if args.out is None:
             parser.error("compare-mask は --out（check-mask を 2 回書いた席）が要る")

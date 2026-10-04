@@ -37,8 +37,8 @@ from karume.modelcard import (
     require_pipeline,
 )
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import SOURCES, WAN21_MODELS
-from wan.umt5_distribution import UMT5_ROLE
+from wan.sources import SOURCES, UMT5_SOURCES, WAN21_MODELS
+from wan.umt5_distribution import UMT5_DEFAULT_MODEL, UMT5_ROLE
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
 WAN_SUPPORTED_PIPELINE = "wan/1"
@@ -71,6 +71,10 @@ WAN_PROMPT_TOKENS = (2, 512)
 #: umT5 の部品名（manifest の weights のキー — `wan.distribution.WAN_TEXT_ENCODER_ROLE` と
 #: 同じ正本）。
 WAN_TEXT_ENCODER_COMPONENT = UMT5_ROLE
+
+#: text encoder の上流（本家の encoder — ADR 0122 決定 1 / 3。この checkpoint の `text_encoder` とは
+#: f32 でビット一致するが、出所は本家を名乗る — umT5 の配布形のカードと食い違わせない）。
+WAN_TEXT_ENCODER_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
 
 #: 通しの実行資源（``_wan_resources`` の段ごとの表）を実測した quant 席。MUST: カードは数を
 #: **この席の数として**名乗る — 席に無い配布形では描かない（実測していない席の数は名乗らない —
@@ -228,14 +232,16 @@ def _wan_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     _, borrowed = _text_encoder(manifest)
     if borrowed is None:
         lines.append(
-            "- **The text encoder** (the umT5-XXL encoder of the same checkpoint, in int8) is"
-            " stored in this repository."
+            f"- **The text encoder** (the encoder of `{WAN_TEXT_ENCODER_UPSTREAM}`, bit-identical"
+            " in float32 to this checkpoint's `text_encoder`, in int8) is stored in this"
+            " repository."
         )
     else:
         repo, revision = borrowed
         lines += [
-            "- **The text encoder is not stored here.** `karume.json` references the umT5-XXL",
-            "  encoder of the same checkpoint, converted to int8, at commit"
+            "- **The text encoder is not stored here.** `karume.json` references the encoder of",
+            f"  `{WAN_TEXT_ENCODER_UPSTREAM}` (bit-identical in float32 to this checkpoint's",
+            "  `text_encoder`), converted to int8, at commit"
             f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
             "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
             "  the changes made to it.",

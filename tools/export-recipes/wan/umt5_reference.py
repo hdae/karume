@@ -48,9 +48,10 @@ CLI は `wan.umt5_export reference`（容器は書かない — 既に書かれ�
 
 メタはキー 1 つ（{@link METADATA_KEY}）に JSON（キー整列・区切りの空白なし —
 safetensors はメタを HashMap で書くので、キーが複数だと同じ入力でバイトが割れる —
-`wan.text_embeds` と同じ理由）。中身はプロンプトの原文と前処理後・L・役割・出所・容器の
-part 0 の sha256（容器を書き直したら golden も書き直す — TS が突き合わせる）・重みと活性の
-規則・分母と丸めの影響（{@link reference_ratios}）・受入れは量子化なしの参照の同じ比。
+`wan.text_embeds` と同じ理由）。中身はプロンプトの原文と前処理後・L・役割・出所・軸の記録
+（`axes` — umT5 の上流と、id 列を採った Wan のトークナイザの pin）・容器の part 0 の sha256
+（容器を書き直したら golden も書き直す — TS が突き合わせる）・重みと活性の規則・分母と丸めの
+影響（{@link reference_ratios}）・受入れは量子化なしの参照の同じ比。
 
 TS の e2e（`packages/models/tests/e2e_wan_umt5_test.ts`）は、golden の原文を TS の
 トークナイザに通した id 列と TS のバケット表が golden の入力とビット一致することを
@@ -646,7 +647,11 @@ def golden_metadata(
     ratios: Mapping[str, float],
     versions: Mapping[str, str],
     unquantized_ratios: Mapping[str, float] | None = None,
+    *,
+    axes: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """1 ケースの golden のメタ。`axes` はどの上流の値を使ったか（umT5 の上流と、ケースの id 列を
+    採った Wan の text 側の snapshot — `wan.umt5_export.reference_axes`・ADR 0122 決定 3）。"""
     _check_unquantized(case, unquantized_ratios)
     unquantized = (
         {}
@@ -670,6 +675,7 @@ def golden_metadata(
         "cleaned": case.cleaned,
         "length": len(case.ids),
         "source": dict(case.source),
+        "axes": {name: dict(axis) for name, axis in axes.items()},
         "container": {"part0Sha256": weights.part0_sha256, "parts": weights.parts},
         "weights": (
             "i8 は packed × 行ごとの scale を f32 で掛けた値（fake-quant と同じ）・"
@@ -709,9 +715,12 @@ def write_references(
     cases: Sequence[ReferenceCase],
     stage: Stage,
     unquantized: WeightSource,
+    axes: Mapping[str, Any],
     embeddings: Mapping[str, torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """層逐次の f64 / f32 の参照を採り、golden を `out_dir` に書く（容器は書かない）。
+
+    `axes` は golden のメタに残す軸の記録（{@link golden_metadata}）。
 
     i8 の参照（容器の重み）は全ケースで、量子化なしの参照（`unquantized` — {@link
     CheckpointWeights}）は受入れだけで採る。i8 の回は全ケースを 1 回の層逐次で回す（受入れを
@@ -769,7 +778,7 @@ def write_references(
             size = write_golden(
                 path,
                 golden_tensors(case, inputs[index][1], f64, f32, pair),
-                golden_metadata(case, weights, ratios, versions, plain_ratios),
+                golden_metadata(case, weights, ratios, versions, plain_ratios, axes=axes),
             )
             row: dict[str, Any] = {
                 "case": case.name,

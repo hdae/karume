@@ -54,6 +54,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "sbv2-F1-i8": { dp: "dp", front: "front", flow: "flow", dec: "dec", voice: "voice" },
   "siglip2-base-patch16-224": { "": "vision" },
   "siglip2-so400m-patch14-384": { "": "vision" },
+  "umt5-xxl-i8-dyn": { text_encoder: "text_encoder" },
   "vowel-detector-crnn-epoch3": { "": "crnn" },
   "wan2.1-t2v-1.3b-f16-dyn": {
     transformer: "transformer",
@@ -62,7 +63,6 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   },
   "wan2.1-t2v-1.3b-f16-dyn-probe": { transformer: "transformer" },
   "wan2.1-t2v-1.3b-i8-dyn": { transformer: "transformer" },
-  "wan2.1-umt5-i8-dyn": { text_encoder: "text_encoder" },
 };
 
 /**

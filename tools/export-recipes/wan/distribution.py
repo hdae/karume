@@ -12,7 +12,7 @@
 軸別素表 `rope_base` は `transformer` の**容器の資産**（役割 `rope-base`）なので manifest の
 `assets` には載らない（ADR 0109 決定 4 — Anima と同じ席）。
 
-4 本目の部品 `text_encoder`（umT5-XXL encoder の i8 — 系列 `wan2.1-umt5-i8-dyn`）は計画には
+4 本目の部品 `text_encoder`（umT5-XXL encoder の i8 — 系列 `umt5-xxl-i8-dyn`）は計画には
 自分の artifact として載るが、公開する配布形では**別リポ `karume-umt5-xxl` への越境参照**として
 組む（ADR 0119 追記 A — dist の `--ref-*` 5 指定で、参照元は `--pipeline umt5` が組んだ配布形）。
 容器の門（出所・束縛表・入出力の契約）は umT5 の配布 recipe と同じ 1 本
@@ -323,7 +323,7 @@ class WanSources:
     series: Path
     i8_series: Path
     text_embeds: Path
-    #: umT5 の容器の代表 path（系列 `wan2.1-umt5-i8-dyn` —
+    #: umT5 の容器の代表 path（系列 `umt5-xxl-i8-dyn` —
     #: `wan.umt5_distribution.umt5_container`）。
     text_encoder: Path
     #: トークナイザ資産（系列 `wan2.1-umt5-tokenizer` — 書き手は `wan.umt5_tokenizer`）。
@@ -664,12 +664,17 @@ def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
         assert_component_present(container)
         assert_storage(role, container, WAN_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, container, WAN_STORAGE_FORBIDDEN)
+        if role == WAN_TEXT_ENCODER_ROLE:
+            # umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（ADR 0122 決定 1）— 出所は
+            # 下の umT5 の門（`wan.sources.UMT5_SOURCES` の行）が突き合わせる。
+            continue
         # 容器が名乗る出所を上流の pin（`wan.sources` が正本）へ突き合わせる — モデル名の表だけで
         # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。
         assert_upstream_provenance(container, license=upstream.license, revision=upstream.revision)
     assert_vae_chunk_pair(placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE])
-    # umT5 の容器は umT5 の配布形と同じ門を通す（越境参照の先はこの容器とバイト同一 —
-    # `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の名前。
+    # umT5 の容器は umT5 の配布形と同じ門（出所・束縛表・入出力の契約）を通す（越境参照の先は
+    # この容器とバイト同一 — `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の
+    # 名前。
     encoder_width = assert_umt5_encoder(placements[WAN_TEXT_ENCODER_ROLE], UMT5_DEFAULT_MODEL)
     transformers = [placements[role] for role in WAN_TRANSFORMER_ROLES]
     for transformer in transformers:
@@ -739,9 +744,10 @@ following changes were made:
   instead of kept in a Python list. The host always decodes in overlapping tiles, so the output
   differs slightly from the upstream untiled decode.
 - **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
-  encoder of the same checkpoint, converted to int8, from the separate repository
-  `karume-umt5-xxl` at a pinned commit (with the size and the SHA-256 of every part); the changes
-  made to it are listed in that repository's own `NOTICE.md`.
+  encoder of `google/umt5-xxl` (bit-identical in float32 to the `text_encoder` folder of this
+  checkpoint), converted to int8, from the separate repository `karume-umt5-xxl` at a pinned commit
+  (with the size and the SHA-256 of every part); the changes made to it are listed in that
+  repository's own `NOTICE.md`.
 - The umT5-XXL outputs of a fixed set of prompts (computed with the upstream encoder in bfloat16
   and stored as float32) are included as a precomputed asset, for use without the text encoder.
 - The tokenizer of the checkpoint was converted into one JSON table (vocabulary, scores, added

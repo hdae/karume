@@ -2,7 +2,7 @@
 組み立て。
 
 入力は実物と同じ綴り・同じ種類ごとの格納の合成容器（`umt5_fixture`）。門に落とされることを見る
-ケースも同じ器で作り、**宣言だけを実物とずらす**。実物の系列（`outputs/series/wan2.1-umt5-i8-dyn`）が
+ケースも同じ器で作り、**宣言だけを実物とずらす**。実物の系列（`outputs/series/umt5-xxl-i8-dyn`）が
 ある機では、実物の束縛表の本数（i8 169 本・f32 73 本）まで固定する（無ければ SKIP）。
 """
 
@@ -30,7 +30,7 @@ from karume.dist import (
     assemble_family,
     resolve_card_renderer,
 )
-from wan.sources import DEFAULT_MODEL, SOURCES
+from wan.sources import UMT5_SOURCES
 from wan.tests import umt5_fixture
 from wan.umt5_distribution import (
     PIPELINE,
@@ -47,7 +47,6 @@ from wan.umt5_distribution import (
     UMT5_SERIES,
     UMT5_SUPPORTED_PIPELINE,
     UMT5_TOKENS,
-    UMT5_UPSTREAM,
     render_umt5_model_card,
     storage_kind,
     umt5_bindings,
@@ -55,11 +54,14 @@ from wan.umt5_distribution import (
     umt5_plan,
 )
 
-#: 書き手（`wan.umt5_export.provenance`）が焼く出所の正常形 — Wan の pin した revision。
+#: umT5 の上流の表の行（本家 `google/umt5-xxl` の pin — ADR 0122 決定 1）。
+_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source
+
+#: 書き手（`wan.umt5_export.provenance`）が焼く出所の正常形 — umT5 の上流の pin した revision。
 _PINNED = Provenance(
-    license=SOURCES[DEFAULT_MODEL].license,
+    license=_UPSTREAM.license,
     notice=NOTICE_FILENAME,
-    upstream_revision=SOURCES[DEFAULT_MODEL].revision,
+    upstream_revision=_UPSTREAM.revision,
 )
 
 
@@ -144,10 +146,16 @@ class TestLayout:
         assert "**int8 weights**" in prose
         assert "keep the source float32 values" in prose
         assert 'GELU(approximate="tanh")' in prose
-        # 上流の格納は F32（bf16 の写しではない — 調査の実測）。google/umt5-xxl との同一は未確認。
+        # 上流の格納は F32（bf16 の写しではない — 調査の実測）。
         assert "holds the encoder in float32" in prose
         assert "bfloat16" not in prose
-        assert "has not been checked" in prose
+        # 上流は本家の encoder で、Wan2.1 の text_encoder とのビット一致は確かめた（ADR 0122
+        # 決定 1 — 「同一は未確認」から事実が変わった）。decoder と lm_head は含めない。
+        assert "has not been checked" not in prose
+        assert "the encoder of the umT5-XXL checkpoint `google/umt5-xxl`" in prose
+        assert "that repository has no NOTICE file" in prose
+        assert "bit-identical to the float32 `text_encoder` folder" in prose
+        assert "the decoder and `lm_head` are not included" in prose
 
 
 class TestTheBindingGate:
@@ -241,10 +249,18 @@ class TestTheProvenance:
         with pytest.raises(DistError, match="知らない"):
             umt5_plan(_series(tmp_path), "base")
 
-    def test_the_upstream_is_the_text_encoder_of_the_pinned_wan_checkpoint(self) -> None:
-        upstream = UMT5_UPSTREAM[UMT5_DEFAULT_MODEL]
-        assert upstream.source == SOURCES[DEFAULT_MODEL]
-        assert upstream.subfolder == "text_encoder"
+    def test_the_upstream_is_the_pinned_commit_of_google_umt5_xxl(self) -> None:
+        """本家の main の commit を 40 桁で pin し、encoder に要る shard 3 本の sha256（64 桁）を
+        持つ。"""
+        row = UMT5_SOURCES[UMT5_DEFAULT_MODEL]
+        assert row.source.repo == "google/umt5-xxl"
+        assert row.source.revision == "66cb9e7e85526fe440a945569e42c72fb6cbc0ad"
+        assert row.source.license == "apache-2.0"
+        assert sorted(row.shards) == [f"pytorch_model-0000{n}-of-00006.bin" for n in (1, 2, 3)]
+        assert all(
+            len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+            for digest in row.shards.values()
+        )
 
 
 class TestTheDriver:
@@ -267,16 +283,25 @@ class TestTheModelCard:
         with pytest.raises(ValueError, match=UMT5_SUPPORTED_PIPELINE):
             render_umt5_model_card(foreign, "hdae/x")
 
-    def test_it_attributes_the_pinned_upstream_and_not_google(self, assembled) -> None:
+    def test_it_attributes_the_encoder_of_google_umt5_xxl(self, assembled) -> None:
+        """帰属は本家の commit の encoder（decoder と lm_head は含めない）・Relation は Wan の
+        2 つの checkpoint との確かめた関係（ADR 0122 決定 1）。本家の encoder はリポ直下にあるので、
+        帰属の文面に空の subfolder を流さない。"""
         out_dir, _ = assembled
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
-        upstream = SOURCES[DEFAULT_MODEL]
-        assert f"base_model: {upstream.repo}" in card
+        prose = " ".join(card.split())
+        assert "base_model: google/umt5-xxl" in card
         assert "base_model_relation: quantized" in card
-        assert f"license: {upstream.license}" in card
-        assert f"at commit `{upstream.revision}`" in card
-        assert "base_model: google/umt5-xxl" not in card
-        assert "has not been checked" in " ".join(card.split())
+        assert f"license: {_UPSTREAM.license}" in card
+        assert f"at commit `{_UPSTREAM.revision}`" in card
+        assert "the encoder weights (`shared.weight` and `encoder.*`) of [google/umt5-xxl]" in prose
+        assert "The decoder and `lm_head` are not included." in prose
+        assert "folder of [" not in prose
+        assert "the `` folder" not in prose
+        assert "every tensor is bit-identical to the float32 `text_encoder` folder" in prose
+        assert "round-to-nearest-even rounding (checked on 2026-10-04)" in prose
+        assert "base_model: Wan-AI/" not in card
+        assert "has not been checked" not in prose
 
     def test_the_usage_points_at_the_wan_distribution(self, assembled) -> None:
         """単体の公開クラスは無い — Usage は参照元の Wan のリポを名指しする（ADR 0119 追記 D）。"""
@@ -317,7 +342,12 @@ class TestTheWritersSpellTheSameNames:
         assert umt5_export.MODEL_FILE == UMT5_MODEL_FILE
         assert umt5_export.COMPONENT_DIR == UMT5_ROLE
         assert umt5_export.GRAPH_NAME == UMT5_ROLE
-        assert UMT5_UPSTREAM[UMT5_DEFAULT_MODEL].subfolder == umt5_export.UPSTREAM_SUBFOLDER
+
+    def test_the_writer_bakes_the_row_the_gate_checks(self) -> None:
+        """書き手が焼く出所と配布の門が突き合わせる出所は、同じ表の同じ行。"""
+        from wan import umt5_export
+
+        assert umt5_export.provenance(UMT5_DEFAULT_MODEL) == _PINNED
 
     def test_the_graph_inputs_and_the_table_attribute(self) -> None:
         from wan import umt5_patch

@@ -1,14 +1,15 @@
 """umT5-XXL encoder の配布 recipe — 配布リポ `karume-umt5-xxl`（ADR 0119 追記「段 10d の設計」D）。
 
-配るのはグラフ 1 本（`text_encoder` — 系列 `wan2.1-umt5-i8-dyn` の i8 の S 形容器）だけで、資産は
+配るのはグラフ 1 本（`text_encoder` — 系列 `umt5-xxl-i8-dyn` の i8 の S 形容器）だけで、資産は
 持たない（トークナイザは Wan の前処理の表と束ねた形式なので Wan のリポの資産 — 同 C）。Wan の配布形
 `karume-wan2.1` はこのリポの容器を越境参照する（同 A — ADR 0109 決定 3）。読む TS の家族は無く、
 pipeline 名 {@link UMT5_PIPELINE} は部品の役を名乗るだけ（`karume/5` は model ごとに pipeline と
 quant 席を必須にする）。
 
-出所は Wan-AI/Wan2.1-T2V-1.3B-Diffusers の `text_encoder`（F32 の checkpoint — 容器が名乗る出所は
-`wan.sources` の pin）。google/umt5-xxl の encoder との重みの同一は確かめていないので、カードと
-NOTICE はそう書く。
+出所は本家 `google/umt5-xxl` の encoder（`shared.weight` と `encoder.*` — 容器が名乗る出所は
+`wan.sources.UMT5_SOURCES` の pin・ADR 0122 決定 1）。Wan2.1 Diffusers の `text_encoder` とは f32 で
+全テンソルがビット一致し、Wan2.2 TI2V-5B Diffusers の bf16 はその RNE 丸め（2026-10-04 の
+実測）なので、カードと NOTICE はそう書く。
 
 公開面は {@link PIPELINE} 1 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを
 core の PIPELINES へ合成する（`--pipeline umt5`）。
@@ -24,7 +25,6 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -53,7 +53,7 @@ from karume.modelcard import (
     render,
     require_pipeline,
 )
-from wan.sources import DEFAULT_MODEL, SOURCES, UpstreamSource
+from wan.sources import UMT5_SOURCES, Umt5Source
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。読む TS の家族は無い — 部品の役を名乗る
 #: （ADR 0119 追記 D）。Wan の読み手は越境参照の先の `karume.json` を読まないので、この名前を
@@ -70,7 +70,7 @@ UMT5_DEFAULT_MODEL = "xxl"
 
 #: 系列（書き手の綴りは `wan.umt5_export.SERIES_NAME`）と、その中の容器の代表名
 #: （`wan.umt5_export.MODEL_FILE` — 分割形は `model-0000N-of-0000M.krm`）。
-UMT5_SERIES = "wan2.1-umt5-i8-dyn"
+UMT5_SERIES = "umt5-xxl-i8-dyn"
 UMT5_MODEL_FILE = "model.krm"
 
 #: 部品名 = manifest の weights のキー = **容器のグラフ名**（container-v1 §2.1）= 系列の部品
@@ -140,22 +140,6 @@ UMT5_KIND_LAYOUTS: Mapping[str, str] = {
 
 #: 束縛表に必ず現れる重みの種類（`constant` は持ち上げの有無で変わるので要求しない）。
 UMT5_WEIGHT_KINDS: tuple[str, ...] = ("embed_tokens", "linear", "norm", UMT5_RELATIVE_BIAS)
-
-
-@dataclass(frozen=True)
-class Umt5Upstream:
-    """モデル名 → 上流の出所（Wan の checkpoint の部品 1 つ）。"""
-
-    source: UpstreamSource
-    #: 上流リポの中の部品のディレクトリ（書き手の綴りは `wan.umt5_export.UPSTREAM_SUBFOLDER`）。
-    subfolder: str
-
-
-#: 上流の表。umT5 の容器は Wan の pin した revision の `text_encoder` から焼いたもので、容器の
-#: 出所（provenance）もその revision を名乗る（`wan.umt5_export.provenance`）。
-UMT5_UPSTREAM: Mapping[str, Umt5Upstream] = {
-    UMT5_DEFAULT_MODEL: Umt5Upstream(SOURCES[DEFAULT_MODEL], "text_encoder"),
-}
 
 
 def storage_kind(key: str) -> str:
@@ -275,15 +259,15 @@ def assert_umt5_encoder(container: Path, model: str) -> int:
     Wan の配布形も同じ容器を越境参照する部品として持つので、両方の計画がこの 1 本を通る（Wan の
     計画は格納の要求表で別に i8 の席も見る）。
     """
-    upstream = UMT5_UPSTREAM.get(model)
+    upstream = UMT5_SOURCES.get(model)
     if upstream is None:
         raise DistError(
-            f"umT5 のモデル {model!r} は知らない（既知: {' / '.join(sorted(UMT5_UPSTREAM))}）—"
-            " 上流の出所の表（wan.umt5_distribution.UMT5_UPSTREAM）に載ったモデルだけを配る"
+            f"umT5 のモデル {model!r} は知らない（既知: {' / '.join(sorted(UMT5_SOURCES))}）—"
+            " 上流の出所の表（wan.sources.UMT5_SOURCES）に載ったモデルだけを配る"
         )
     assert_component_present(container)
-    # 容器が名乗る出所を上流の pin（`wan.sources` が正本）へ突き合わせる — 束縛表と入出力の形は
-    # 同じ構造の別の checkpoint でも通るので、出所でしか閉じられない。
+    # 容器が名乗る出所を上流の pin（`wan.sources.UMT5_SOURCES` が正本）へ突き合わせる — 束縛表と
+    # 入出力の形は同じ構造の別の checkpoint でも通るので、出所でしか閉じられない。
     assert_upstream_provenance(
         container, license=upstream.source.license, revision=upstream.source.revision
     )
@@ -327,15 +311,22 @@ def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
 #: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。上流の格納は F32
 #: （research 2026-10-03 umt5-export-ram — 容器の F32 のままの重みも下位 16 ビットが 0 でない）
-#: なので「bf16 の写し」とは書かない。
+#: なので「bf16 の写し」とは書かない（Wan2.2 の bf16 との関係はカードの Relation の行だけが書く）。
+#: 上流は本家の encoder（ADR 0122 決定 1）で、本家は NOTICE ファイルを持たないので、引き継ぐ NOTICE
+#: の本文は無い。Wan2.1 の checkpoint との同一は 2026-10-04 の実測（research
+#: `2026-10-04-umt5-upstream-provenance` §2.1 — 確かめた commit を書く。Wan の pin を動かしても、
+#: 確かめた事実としては変わらない）。
 UMT5_NOTICE_MARKDOWN = """# NOTICE
 
-This repository redistributes a modified form of the umT5-XXL text encoder that the Wan2.1 T2V 1.3B
-checkpoint listed in `README.md` ships as its `text_encoder` (Wan-AI, licensed under the Apache
-License, Version 2.0 — see `LICENSE.md`). That folder holds the encoder in float32, and its
-configuration names `google/umt5-xxl`; whether its weights are identical to the encoder of
-`google/umt5-xxl` has not been checked. The following changes were made:
+This repository redistributes a modified form of the encoder of the umT5-XXL checkpoint
+`google/umt5-xxl` listed in `README.md` (Google, licensed under the Apache License, Version 2.0 —
+see `LICENSE.md`; that repository has no NOTICE file). That checkpoint holds the encoder in
+float32. Its encoder weights are bit-identical to the float32 `text_encoder` folder of
+`Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit `0fad780a534b6463e45facd96134c9f345acfa5b`, checked on
+2026-10-04). The following changes were made:
 
+- Only the encoder was converted (the vocabulary embedding `shared.weight` and `encoder.*`); the
+  decoder and `lm_head` are not included.
 - The weights were converted into the Karume container format (a `.krm` part sequence whose first
   part carries the graph and model descriptors).
 - **int8 weights**: the weight matrices of all linear layers and the vocabulary embedding were
@@ -384,13 +375,13 @@ def _consumer_link() -> str:
     return f"[`{repo}`](https://huggingface.co/{repo})"
 
 
-def _umt5_upstream(name: str) -> Umt5Upstream:
+def _umt5_upstream(name: str) -> Umt5Source:
     """モデル名 → 上流の出所（表に無ければ描かない — 出所を名乗れないカードは出さない）。"""
-    upstream = UMT5_UPSTREAM.get(name)
+    upstream = UMT5_SOURCES.get(name)
     if upstream is None:
         raise ValueError(
-            f"モデル '{name}' の上流が出所の表（wan.umt5_distribution.UMT5_UPSTREAM）に無い"
-            f"（既知: {sorted(UMT5_UPSTREAM)}）— 出所を名乗れないカードは描かない"
+            f"モデル '{name}' の上流が出所の表（wan.sources.UMT5_SOURCES）に無い"
+            f"（既知: {sorted(UMT5_SOURCES)}）— 出所を名乗れないカードは描かない"
         )
     return upstream
 
@@ -440,19 +431,22 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "",
     ]
     for name in manifest["models"]:
-        upstream = _umt5_upstream(name)
-        source = upstream.source
+        source = _umt5_upstream(name).source
+        # 本家の encoder はリポ直下にある（subfolder は無い）— 読んだキーの範囲で名指しする。
         lines.append(
-            f"- **`{name}`**: the `{upstream.subfolder}` folder of"
+            f"- **`{name}`**: the encoder weights (`shared.weight` and `encoder.*`) of"
             f" [{source.repo}](https://huggingface.co/{source.repo}) at commit `{source.revision}`,"
             f" licensed **{source.license}** (as of retrieval;"
             f" [full text]({UMT5_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
+            " The decoder and `lm_head` are not included."
         )
     lines += [
-        "- **Relation to `google/umt5-xxl`**: the Wan2.1 checkpoint stores this encoder in float32",
-        "  and its configuration names `google/umt5-xxl`. Whether the weights are identical to the",
-        "  encoder of `google/umt5-xxl` has not been checked.",
+        "- **Relation to the Wan checkpoints**: every tensor is bit-identical to the float32",
+        "  `text_encoder` folder of `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit `0fad780a…`), and",
+        "  the bfloat16 `text_encoder` of `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (commit `b8fff731…`)",
+        "  is its round-to-nearest-even rounding (checked on 2026-10-04).",
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        "  only the encoder converted (no decoder, no `lm_head`);",
         "  conversion into the Karume container format; the weight matrices of the linear layers",
         "  and the vocabulary embedding quantized to int8 with one scale per output channel (per",
         "  row for the embedding), the relative-position bias tables and the RMSNorm weights kept",
@@ -531,7 +525,7 @@ PIPELINE = Pipeline(
     default_model=UMT5_DEFAULT_MODEL,
     repo_name=umt5_repo_name,
     plan=umt5_dist_plan,
-    # 帰属（上流リポ・ライセンス）はモデル名から一意に決まる（{@link UMT5_UPSTREAM}）ので、
+    # 帰属（上流リポ・ライセンス）はモデル名から一意に決まる（`wan.sources.UMT5_SOURCES`）ので、
     # 選ばせる軸にしない。
     card_profiles={"umt5": render_umt5_model_card},
     # 上流ライセンス（Apache 2.0）の再配布条件 §4 は配布リポ 1 つに掛かる（ADR 0092 決定 7）。

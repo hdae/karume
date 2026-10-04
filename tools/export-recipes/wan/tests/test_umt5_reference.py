@@ -325,6 +325,18 @@ class TestFloat64Reference:
             assert own < F32_SHARE_OF_BF16_MISMATCH * mismatch, (length, own, mismatch)
 
 
+#: golden のメタの軸の記録（形だけ — 値は `wan.umt5_export.reference_axes` が表から組む）。
+AXES = {
+    "encoder": {"model": "xxl", "repo": "owner/encoder", "revision": "0" * 40},
+    "cases": {
+        "model": "m",
+        "repo": "owner/tokenizer",
+        "revision": "1" * 40,
+        "subfolder": "tokenizer",
+    },
+}
+
+
 class TestGolden:
     def test_the_file_round_trips(self, weights, model, tmp_path):
         ids, buckets = case_inputs(model, 28)
@@ -343,7 +355,9 @@ class TestGolden:
         ur.write_golden(
             path,
             ur.golden_tensors(case, buckets, f64, f32),
-            ur.golden_metadata(case, weights, ur.reference_ratios(f64, f32), {"torch": "x"}),
+            ur.golden_metadata(
+                case, weights, ur.reference_ratios(f64, f32), {"torch": "x"}, axes=AXES
+            ),
         )
 
         with safe_open(str(path), framework="pt") as handle:
@@ -353,6 +367,9 @@ class TestGolden:
         meta = json.loads(metadata[ur.METADATA_KEY])
         assert (meta["format"], meta["length"], meta["prompt"]) == (ur.REFERENCE_FORMAT, 28, "原文")
         assert meta["container"]["part0Sha256"] == weights.part0_sha256
+        # どの上流の値を使ったか（umT5 の上流とケースの id 列の Wan のトークナイザ —
+        # ADR 0122 決定 3）。
+        assert meta["axes"] == AXES
         assert {key: (value.dtype, tuple(value.shape)) for key, value in tensors.items()} == {
             ur.INPUT_IDS_KEY: (torch.int32, (28,)),
             ur.BUCKETS_KEY: (torch.int32, (28, 28)),
@@ -390,6 +407,7 @@ class TestGolden:
                 ur.reference_ratios(f64, f32),
                 {"torch": "x"},
                 ur.reference_ratios(high, low),
+                axes=AXES,
             ),
         )
 

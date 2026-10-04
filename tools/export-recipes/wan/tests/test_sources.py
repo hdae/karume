@@ -204,3 +204,64 @@ def test_the_wan21_scripts_refuse_the_ti2v_5b_model(module: str, rest: list[str]
     assert stopped.value.code == 2
     assert "invalid choice: 'ti2v-5b'" in capsys.readouterr().err
     assert sources.WAN21_MODELS == (sources.DEFAULT_MODEL,)
+
+
+class TestTheUmt5Row:
+    """umT5 の上流の表（本家 `google/umt5-xxl` — ADR 0122 決定 1 / 2）。"""
+
+    def test_it_pins_a_full_commit_and_full_shard_digests(self):
+        for row in sources.UMT5_SOURCES.values():
+            assert re.fullmatch(r"[0-9a-f]{40}", row.source.revision), row
+            assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in row.shards.values())
+
+    def test_the_encoder_shards_are_derived_from_the_index(self):
+        weight_map = {
+            "shared.weight": "a.bin",
+            "encoder.block.0.layer.0.SelfAttention.q.weight": "b.bin",
+            "decoder.embed_tokens.weight": "a.bin",
+            "decoder.block.0.layer.0.SelfAttention.q.weight": "c.bin",
+            "lm_head.weight": "d.bin",
+        }
+
+        assert sources.umt5_encoder_shards(weight_map) == frozenset({"a.bin", "b.bin"})
+
+    def test_an_index_that_disagrees_with_the_table_fails_loudly(self, tmp_path: Path):
+        """索引が動いた（encoder の重みが表に無い shard に載る）・表が古い、を黙って通さない。"""
+        index = tmp_path / sources.UMT5_BIN_INDEX
+        index.write_text(
+            json.dumps({"weight_map": {"shared.weight": "a.bin", "encoder.final.weight": "b.bin"}}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(sources.WanSourceError, match="表の shard"):
+            sources.pinned_umt5_shards(index, {"a.bin": "0" * 64})
+        assert sources.pinned_umt5_shards(index, {"a.bin": "0" * 64, "b.bin": "1" * 64}) == {
+            "shared.weight": "a.bin",
+            "encoder.final.weight": "b.bin",
+        }
+
+    def test_an_unknown_model_fails_before_any_download(self):
+        with pytest.raises(sources.WanSourceError, match="上流の表に無い"):
+            sources.umt5_snapshot("base")
+
+
+class TestTheFetchedUmt5Snapshot:
+    def test_the_cached_snapshot_has_the_pinned_shards(self):
+        """取得済みの機だけ（無ければ SKIP）: 索引から導いた shard が表の 3 本で、config が
+        読める。"""
+        pytest.importorskip("huggingface_hub")
+        try:
+            snapshot = sources.umt5_snapshot("xxl")
+        except sources.WanSourceError as error:
+            pytest.skip(f"本家 umT5 の shard が手元に無い: {error}")
+        pinned = sources.UMT5_SOURCES["xxl"].shards
+
+        assert set(
+            sources.pinned_umt5_shards(snapshot / sources.UMT5_BIN_INDEX, pinned).values()
+        ) == set(pinned)
+        config = json.loads((snapshot / sources.UMT5_CONFIG).read_text(encoding="utf-8"))
+        assert (config["num_layers"], config["d_model"], config["vocab_size"]) == (
+            24,
+            4096,
+            256_384,
+        )

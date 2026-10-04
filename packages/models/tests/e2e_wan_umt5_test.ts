@@ -1,7 +1,7 @@
 /**
  * Wan2.1 の umT5（i8 系列のテキストエンコーダ）の**移植の門**（実 GPU・ADR 0119 段 10c — 決定 3 / 4 / 5 / 8）。
  *
- * 系列の容器（`outputs/series/wan2.1-umt5-i8-dyn/text_encoder/` — 重み i8 per-channel・活性 f32・入力は token id
+ * 系列の容器（`outputs/series/umt5-xxl-i8-dyn/text_encoder/` — 重み i8 per-channel・活性 f32・入力は token id
  * `[1,L]` とバケット表 `[L,L]`・L は 2〜512 の記号次元）を karume runtime で回し、CPU の層逐次の参照（同じ i8 の
  * fake-quant 重み — recipe `wan/umt5_reference.py`）と突き合わせる。パイプラインへの結線は段 10d で、ここは
  * text_encoder 単体の forward を見る。
@@ -112,7 +112,7 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
  */
 const UMT5_NORMALIZED_BAND: number | undefined = 79;
 
-const SERIES_NAME = "wan2.1-umt5-i8-dyn";
+const SERIES_NAME = "umt5-xxl-i8-dyn";
 const COMPONENT = "text_encoder";
 const SERIES_DIR = new URL(
   `../../../outputs/series/${SERIES_NAME}/${COMPONENT}/`,
