@@ -529,7 +529,8 @@ command) when those assets or a GPU adapter are missing. `KARUME_WAN_FULL_PIPELI
 50-step runs: the 33-frame and the 81-frame clip, each with the `f16` quant and with
 `f16+dit8-a8-attn8-s16` (four runs). On the B570, the `f16` quant takes about half an hour for the
 33-frame clip and about two hours for the 81-frame clip; `f16+dit8-a8-attn8-s16` takes about 16
-minutes for the 33-frame clip (its 81-frame clip has not been measured yet).
+minutes for the 33-frame clip and about 62 minutes for the 81-frame clip (3,703 s, of which the
+transformer stage is 3,383 s).
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
 when the pinned snapshot is not in the HF cache.

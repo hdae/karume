@@ -82,7 +82,9 @@ WAN_TEXT_ENCODER_UPSTREAM = UMT5_SOURCES[UMT5_DEFAULT_MODEL].source.repo
 WAN_RESOURCE_QUANT = "f16"
 
 #: 席ごとの transformer の実測（ADR 0120 追記「段 3 / 4 / 5 の結果」〈DiT 単体・通常モード・
-#: B570〉と「段 6 の素材」〈実用席の 50 ステップ・33 フレームの通し・precomputed の経路〉）。
+#: B570〉と「段 6 の素材」〈実用席の 50 ステップ・33 フレームの通し・precomputed の経路〉・
+#: 「50 ステップの実用席の sha 行 2 本」〈実用席の 81 フレームの通し: 壁 3,703 s = DiT 段 3,383 s
+#: + VAE 段 319 s〉）。
 #: 行は `(フレーム数, 1 forward, DiT 単体の確保, 50 ステップの通し)`。`f16` の行は比べる基準で、
 #: 通しの欄は上の段ごとの表と同じ通し（ADR 0118 段 6 / 8）。参照席 `f16+dit8` の 1 forward は
 #: r 門の計測（S = 14,040）で `f16` と同じ時間 — 確保と 81 フレームは計測していない。
@@ -99,7 +101,7 @@ WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
     ),
     "f16+dit8-a8-attn8-s16": (
         (33, "8.5 s", "4.02 GiB", "952 s (~16 minutes)"),
-        (81, "34.0 s", "5.46 GiB", "not run"),
+        (81, "34.0 s", "5.46 GiB", "3,703 s (~62 minutes)"),
     ),
 }
 
@@ -191,8 +193,10 @@ def _wan_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6): with the text encoder on the",
         "  GPU in 2-step runs (a fixed prompt and a free prompt, 832 × 480, 33 frames, each pinned",
         "  by the SHA-256 of its frames), and with the precomputed embeddings in full 50-step",
-        "  runs. A 50-step run through the text encoder has not been done yet. Browsers are not",
-        "  verified yet.",
+        "  runs. A 50-step run through the text encoder has not been done yet.",
+        "- In a browser, Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the",
+        "  `f16` quant with the precomputed embeddings, 832 × 480, 81 frames) in 46.1 minutes.",
+        "  The text encoder on the GPU and the int8 quants have not been run in a browser yet.",
         "- Not readable by diffusers (it's a different container with an embedded graph); the"
         f" reader is a pipeline that implements `{WAN_SUPPORTED_PIPELINE}`.",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
@@ -405,7 +409,8 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
     `WAN_QUANT_TRANSFORMER` の出所のとおり。
 
     MUST: 実測していない条件の数は載せない — 受理集合の別の寸法・フレーム数・別の GPU の数を推し
-    量って書かない。ブラウザで動くかは未確認（ADR 0118 の後段）なので、そう書く。
+    量って書かない。ブラウザは RTX 5070 Ti の Chrome で `f16` 席・資産の経路の 81 フレームの
+    通しだけを確かめた（ADR 0118 追記「段 9 の結果」）ので、それ以外は未確認と書く。
     """
     for name, model in manifest["models"].items():
         if WAN_RESOURCE_QUANT not in model["quants"]:
@@ -490,8 +495,9 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
         "  self-attention scores at 81 frames is 2.00 GiB, just under the 2 GiB binding limit the",
         "  adapter reports.",
         "  The runtime requests the adapter's own limits, which Deno grants on the B570; in a",
-        "  browser the environment has to grant the adapter's limits as well. Browsers have not",
-        "  been checked yet, so whether they run this model is not known.",
+        "  browser the environment has to grant the adapter's limits as well. Chrome on the",
+        "  RTX 5070 Ti granted them (2 GiB buffers) and ran the 81-frame clip above; other",
+        "  browsers and GPUs have not been checked.",
         "- `karume.json` does not declare these figures: its declared limits cover the resident",
         "  weights and state, not the intermediate tensors a run allocates.",
         *_declared_limits(manifest),

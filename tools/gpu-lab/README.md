@@ -347,13 +347,25 @@ embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
 stops it. On the Intel Arc B570 under Deno, a 50-step clip with the `f16` quant takes about 30
 minutes for 33 frames and about 2 hours for 81 frames; with `f16+dit8-a8-attn8-s16` it takes about
-16 minutes for 33 frames (81 frames not measured yet).
+16 minutes for 33 frames and about 62 minutes for 81 frames (3,703 s, of which the transformer stage
+is 3,383 s).
 
 ## Checking Wan in Chrome
 
 The target of ADR 0118 stage 9 is a complete clip in Chrome on the user's machines (an RTX 5070 Ti
 first: Chrome reports it as vendor `nvidia`, architecture `blackwell`). The numbers below come
 from the B570 runs of stages 6 to 8 under Deno.
+
+**Result on the RTX 5070 Ti (2026-10-04, Chrome 154 on Windows)**: a 50-step clip with the `f16`
+quant and the precomputed embeddings (`boxing-cats`, seed 42, 832x480, 81 frames) completed without
+a device loss in 2,767.9 s (46.1 minutes): 2,686.2 s for the transformer stage and 81.4 s for the
+VAE stage. The adapter and the device both reported a `maxStorageBufferBindingSize` of
+2,147,483,644 B, so the 81-frame FFN intermediate fit without splitting. The largest window mean was
+102.3 ms for the transformer and 231.1 ms for `vae_decoder_first`, far from the watchdog. VRAM
+peaked at about 8 GB (watched by eye — not in the record). The GPU text encoder and the int8 quants
+have not been run in Chrome yet. No reference row was added for this key: a row that needs a
+46-minute rerun cannot catch regressions, so a Chrome row, when one is needed, comes from a 2-step
+case.
 
 ### 1. Binding limits
 

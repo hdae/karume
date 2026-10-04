@@ -1016,6 +1016,20 @@ class TestTheModelCard:
         assert "A 50-step run through the text encoder has not been done yet." in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
 
+    def test_it_names_the_browser_run_and_what_has_not_run_in_a_browser(self, assembled) -> None:
+        """ブラウザは実走した条件だけを名乗り、走らせていない経路と席は未実走と書く
+        （ADR 0118 段 9）。"""
+        out_dir, _ = assembled
+        prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
+        assert "Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run" in prose
+        assert "81 frames) in 46.1 minutes" in prose
+        assert (
+            "The text encoder on the GPU and the int8 quants have not been run in a browser yet."
+            in prose
+        )
+        assert "Browsers are not verified yet" not in prose
+        assert "Browsers have not been checked yet" not in prose
+
     def test_it_names_the_measured_figures_of_every_seat(self, assembled) -> None:
         """席ごとの transformer の行は実測のまま・計測していない欄は推し量らず未計測と名乗る。"""
         out_dir, _ = assembled
@@ -1023,7 +1037,9 @@ class TestTheModelCard:
         assert "| `f16` | 33 | 17.1 s | 5.15 GiB | ~30 minutes |" in card
         assert "| `f16+dit8` | 81 | not measured | not measured | not run |" in card
         assert "| `f16+dit8-a8-attn8-s16` | 33 | 8.5 s | 4.02 GiB | 952 s (~16 minutes) |" in card
-        assert "| `f16+dit8-a8-attn8-s16` | 81 | 34.0 s | 5.46 GiB | not run |" in card
+        assert (
+            "| `f16+dit8-a8-attn8-s16` | 81 | 34.0 s | 5.46 GiB | 3,703 s (~62 minutes) |" in card
+        )
         assert "have not been measured" not in card
         prose = " ".join(card.split())
         assert "a relative RMS error of 0.107 at 33 frames and 0.210 at 81 frames" in prose
