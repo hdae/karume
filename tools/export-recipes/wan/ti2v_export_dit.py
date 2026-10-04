@@ -3,6 +3,7 @@
 
     uv run --group wan --inexact python -m wan.ti2v_export_dit inspect        # trace と構造の検査
     uv run --group wan --inexact python -m wan.ti2v_export_dit write          # 容器 + golden
+    uv run --group wan --inexact python -m wan.ti2v_export_dit write-full     # 実寸の golden を足す
     uv run --group wan --inexact python -m wan.ti2v_export_dit observe-quant  # 量子化の観測
     uv run --group wan --inexact python -m wan.ti2v_export_dit eager-full     # 全量の eager 同値
 
@@ -58,6 +59,29 @@ eager 同値の門（`export_dit.eager_failures` と同じ判定）: T2V の形�
 （下の `eager-full` が独立した重みで見る）。diffusers の 2 次元 timestep の経路（M = S の linear）
 との差は観測として決定用ケースの要約に並べる（門ではない — 決定 4）。
 
+## 実寸の golden（段 2 — `write-full`）
+
+ケースは {@link FULL_CASES}（ADR 0121 追記「裁定 1 の確定」の 2 つの形 — 潜在 `[48,21,30,52]`
+〈832×480・81 フレーム・S = 8,190〉と `[48,9,44,80]`〈1280×704・33 フレーム・S = 7,920〉）。決定用
+6 本（形ごとに 3 本・T2V 3 + I2V 3）と受入れ 8 本（形ごとに T2V 2 + I2V 2）。1 ケースの中身は
+S = 192 の golden と同じ（{@link golden_case} — f32 / f64 の参照・パッチ後の eager・eager 同値の
+門）で、重みは**据えた容器**から層逐次で読む（容器は書き直さない）。M = S の経路の観測は採らない
+（{@link OBSERVED_ROLES} は S = 192 の決定用だけ — 実寸で 1 ケース 1 forward 延びる）。
+
+- **足し方**: 1 ケースずつ、系列の直下の作業ディレクトリ（`.write-full-*` — 部品ディレクトリの外）へ
+  書いてから、2 本のファイルを部品ディレクトリへ `os.replace` で移す（同じファイルシステムの中の
+  rename — 書きかけのファイルが部品ディレクトリに現れない）。門に落ちたケースは何も移さない。
+- **再開**: 2 本とも揃ったケースは飛ばす。飛ばす前に、据わっている `input.*`（7 本）と
+  `latents` / `timestep` / `condition_timestep` を今のケースの表から組み直した値とビットで比べ、
+  違えば止める（{@link stored_case_state} — 表を変えた後の古い golden を「済み」に数えない）。
+  1 本だけあるケース（移す途中で落ちた）は書き直す。前の実行が残した作業ディレクトリは始めに消す。
+- **進捗**: ケースごとに `[write-full]` の行（済み・残り・残りの見込み — 見込みは済んだケースの
+  平均、無ければ段 0 の実測から {@link FULL_CASE_SECONDS}）と、参照の f32 / f64 のブロックごとの
+  `[block]` の行（`dit_reference.PROGRESS_TOKENS` 以上の S）を出す。RAM の山は段 0 の実測で
+  約 5 GiB（{@link FULL_PEAK_BYTES} — 書く前に MemAvailable を確かめる）。
+- MUST: `write` は部品ディレクトリを作業席ごと据え替えるので、`write` の後は実寸の golden が消える。
+  `write` を回し直したら `write-full` も回し直す。
+
 ## 独立した重みでの eager 同値（`eager-full` — 決定 4 の形）
 
 `write` の門は、パッチ後のグラフも参照も**同じ容器から読む層逐次の仕組み**で回す（RAM 8 GiB の枠に
@@ -97,8 +121,11 @@ import argparse
 import gc
 import json
 import math
+import os
+import shutil
 import statistics
 import sys
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -115,7 +142,7 @@ from torch.export import Dim
 
 from _shared.paths import BENCH_ROOT, SERIES_ROOT
 from karume.artifacts import staged_publication
-from karume.container import AssetInput
+from karume.container import AssetInput, container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION, normalize_boundary_tensor
 from karume.emit import storage_breakdown
 from karume.ir import IrGraph
@@ -232,6 +259,45 @@ CASES: tuple[Ti2vCase, ...] = (
 #: trace の例示入力の格子（先頭のケース — 値は trace に効かない・S = 192 は 0 / 1 特殊化を
 #: 踏まない）。
 TRACE_LATENT = CASES[0].latent_shape
+
+#: 実寸の 2 つの形（ADR 0121 追記「裁定 1 の確定」の受理の上限）: 832×480・81 フレーム = 潜在
+#: `[48,21,30,52]`〈S = 21·15·26 = 8,190〉と 1280×704・33 フレーム = `[48,9,44,80]`
+#: 〈S = 9·22·40 = 7,920〉。
+FULL_LATENTS: tuple[tuple[int, int, int], ...] = ((21, 30, 52), (9, 44, 80))
+
+#: 実寸の golden のケース（段 2 の r 門 — モジュール doc「実寸の golden」）。決定用（`full-band`）は
+#: 形ごとに 3 本で、T2V 3 本（t 999 / 113 / 750）と I2V 3 本（t 500 / 999 / 250）に分け、どちらの形
+#: にも T2V と I2V を混ぜる。受入れ（`full-accept`）は形ごとに T2V 2 本 + I2V 2 本で、seed はどの
+#: ケースとも別（778011〜）。文脈は固定 4 プロンプトを形と役割に散らす（{@link Ti2vCase} — 合成の
+#: 乱数は使わない）。
+#: MUST: `full-accept` の結果を見て `full-band` を足し引きしない（{@link CASES} と同じ規律）。
+FULL_CASES: tuple[Ti2vCase, ...] = (
+    Ti2vCase("full-band", "t2v", (21, 30, 52), 999, "boxing-cats", SEED + 10),
+    Ti2vCase("full-band", "i2v", (21, 30, 52), 500, "ferret", SEED + 11),
+    Ti2vCase("full-band", "t2v", (21, 30, 52), 113, "negative", SEED + 12),
+    Ti2vCase("full-band", "i2v", (9, 44, 80), 999, "cat-dog-baking", SEED + 13),
+    Ti2vCase("full-band", "t2v", (9, 44, 80), 750, "ferret", SEED + 14),
+    Ti2vCase("full-band", "i2v", (9, 44, 80), 250, "boxing-cats", SEED + 15),
+    Ti2vCase("full-accept", "t2v", (21, 30, 52), 999, "cat-dog-baking", 778011),
+    Ti2vCase("full-accept", "t2v", (21, 30, 52), 600, "boxing-cats", 778012),
+    Ti2vCase("full-accept", "i2v", (21, 30, 52), 900, "negative", 778013),
+    Ti2vCase("full-accept", "i2v", (21, 30, 52), 400, "ferret", 778014),
+    Ti2vCase("full-accept", "t2v", (9, 44, 80), 999, "negative", 778015),
+    Ti2vCase("full-accept", "t2v", (9, 44, 80), 300, "ferret", 778016),
+    Ti2vCase("full-accept", "i2v", (9, 44, 80), 800, "boxing-cats", 778017),
+    Ti2vCase("full-accept", "i2v", (9, 44, 80), 50, "cat-dog-baking", 778018),
+)
+
+#: 実寸の 1 ケースの所要の見込み（秒 — 進捗の初期値）。段 0 の実測（S = 8,190・層逐次）の
+#: f32 233 s + f64 510 s に、パッチ後の eager（f32・同じ層逐次）を f32 と同じ 233 s と見た和。
+FULL_CASE_SECONDS = 233 + 510 + 233
+
+#: 実寸の 1 ケースの RAM の山の見込み（段 0 の実測 5.04 GiB — 層逐次の参照・S = 8,190）。書く前に
+#: MemAvailable がこれ + 余白（`dit_probe.MEMORY_HEADROOM_BYTES`）に足りなければ止まる。
+FULL_PEAK_BYTES = int(5.1 * 2**30)
+
+#: `write-full` の作業ディレクトリの接頭辞（系列の直下 — 部品ディレクトリの外）。
+FULL_STAGING_PREFIX = ".write-full-"
 
 
 def default_out() -> Path:
@@ -576,13 +642,28 @@ def golden_case(
     case: Ti2vCase,
     out_dir: Path,
 ) -> dict[str, Any]:
-    """1 ケースの参照（f32 / f64）・パッチ後の eager・観測を採り、門に掛けてから golden を書く。"""
+    """1 ケースの参照（f32 / f64）・パッチ後の eager・観測を採り、門に掛けてから golden を書く。
+
+    S が `dit_reference.PROGRESS_TOKENS` 以上のケース（実寸 — 1 forward が分単位）は、参照の
+    ブロックごとの `[block]` の行と、パッチ後の eager の開始の行を出す（値は変わらない）。
+    """
     patch = writer.patch_size
     name = case.name(patch)
     inputs = case_inputs(writer, case)
     common = (inputs.latents, inputs.timestep, inputs.encoder_hidden_states)
-    reference32 = writer.forward(source, torch.float32, *common, condition=inputs.condition)
-    reference64 = writer.forward(source, torch.float64, *common, condition=inputs.condition)
+    long_case = case.tokens(patch) >= dit_reference.PROGRESS_TOKENS
+
+    def progress(label: str) -> Any:
+        return dit_reference._block_progress(name, label, writer.layers) if long_case else None
+
+    reference32 = writer.forward(
+        source, torch.float32, *common, condition=inputs.condition, on_block=progress("f32")
+    )
+    reference64 = writer.forward(
+        source, torch.float64, *common, condition=inputs.condition, on_block=progress("f64")
+    )
+    if long_case:
+        print(f"[golden] {name}: パッチ後の eager（f32・同じ層逐次の重み）", flush=True)
     report, tokens_out = patched_eager(
         writer, source, inputs, case.latent_shape, reference32.output
     )
@@ -703,6 +784,194 @@ def write_series(model: str = DEFAULT_MODEL, *, names: Sequence[str] = ()) -> di
         "eager": eager,
         "worst_reference_f32_vs_f64_ratio": max(r["reference_f32_vs_f64_ratio"] for r in eager),
         "stages": [record.to_dict() for record in monitor.records],
+        "passed": True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 実寸の golden（段 2 — 据えた容器に golden を足す）
+# ---------------------------------------------------------------------------
+
+#: 据わっている `reference.<case>` の、ケースの表から組み直せる入力のキー（再開の照合）。
+_STORED_REFERENCE_INPUTS = ("latents", "timestep", CONDITION_TIMESTEP_KEY)
+
+#: 据わっているケースのファイルが持つべき出力のキー（`io` / `reference`）。
+_STORED_IO_OUTPUT = f"{export_dit.OUTPUT_PREFIX}0"
+_STORED_REFERENCE_OUTPUTS = ("output", export_dit.REFERENCE_F64_KEY)
+
+#: {@link stored_case_state} の戻り。
+StoredState = Literal["absent", "partial", "present"]
+
+
+def stored_case_state(
+    writer: dit_reference.LayerwiseDit, case: Ti2vCase, target: Path
+) -> StoredState:
+    """部品ディレクトリにある 1 ケースの golden の状態（モジュール doc「実寸の golden」の再開）。
+
+    2 本とも揃っていれば、据わっている入力（`io` の `input.*` 7 本と `reference` の
+    {@link _STORED_REFERENCE_INPUTS}）を今のケースの表から組み直した値とビットで比べ、出力のキーが
+    揃っていることも見る。MUST: 食い違えば fail loudly — 表を変えた後の古い golden を「済み」に
+    数えると、帯の決定用と受入れが黙って別の入力になる（消すのは人の判断）。
+    """
+    name = case.name(writer.patch_size)
+    io_name, reference_name = export_dit.case_file_names(name)
+    present = [(target / file).is_file() for file in (io_name, reference_name)]
+    if not any(present):
+        return "absent"
+    if not all(present):
+        return "partial"
+    inputs = case_inputs(writer, case)
+    expected = {
+        "latents": inputs.latents,
+        "timestep": normalize_boundary_tensor(inputs.timestep, f"{name} の timestep"),
+        CONDITION_TIMESTEP_KEY: normalize_boundary_tensor(
+            inputs.condition_timestep, f"{name} の条件側の timestep"
+        ),
+    }
+    differing: list[str] = []
+    with safe_open(str(target / io_name), "pt") as handle:
+        keys = set(handle.keys())
+        for key, value in zip(INPUT_NAMES, inputs.graph_inputs, strict=True):
+            stored = f"{export_dit.INPUT_PREFIX}{key}"
+            built = normalize_boundary_tensor(value, f"{name} の入力 '{key}'")
+            if stored not in keys or not torch.equal(handle.get_tensor(stored), built):
+                differing.append(stored)
+        if _STORED_IO_OUTPUT not in keys:
+            differing.append(f"{_STORED_IO_OUTPUT}（無い）")
+    with safe_open(str(target / reference_name), "pt") as handle:
+        keys = set(handle.keys())
+        for key in _STORED_REFERENCE_INPUTS:
+            if key not in keys or not torch.equal(handle.get_tensor(key), expected[key]):
+                differing.append(f"reference.{key}")
+        differing += [
+            f"reference.{key}（無い）" for key in _STORED_REFERENCE_OUTPUTS if key not in keys
+        ]
+    if differing:
+        raise Ti2vExportError(
+            f"{target} の {name} の golden がケースの表と食い違う（{differing}）— 表を変えたなら、"
+            f"古い {io_name} / {reference_name} を消してから回し直す"
+        )
+    return "present"
+
+
+def _stored_ratio(target: Path, name: str) -> float:
+    """据わっているケースの CPU f32 の参照の f64 に対する比（要約用）。
+
+    据えた `output.f64`（f32 へ丸めた値）から採るので、TS の r 門の正規化の分母と同じ値になる
+    （`golden_case` の要約の比は丸める前の f64 が相手で、分母の小さいケースでは数 % 違う）。
+    """
+    _, reference_name = export_dit.case_file_names(name)
+    with safe_open(str(target / reference_name), "pt") as handle:
+        return export_dit._ratio(
+            handle.get_tensor("output"), handle.get_tensor(export_dit.REFERENCE_F64_KEY)
+        )
+
+
+def _append_log(log: Path, row: Mapping[str, Any]) -> None:
+    """1 ケースの結果の行を 1 回の write で改行まで書いてディスクへ落とす（記録 — 再開の目印は
+    部品ディレクトリのファイルの方）。"""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def write_full(
+    model: str = DEFAULT_MODEL, *, names: Sequence[str] = (), log: Path | None = None
+) -> dict[str, Any]:
+    """据えた系列に実寸の golden を足す（モジュール doc「実寸の golden」— 容器は書き直さない）。
+
+    `names` はケース名で絞る（絞っても書いたケースは据える — 1 ケースずつ足す形なので、長い実行を
+    分けられる）。`log` を渡すと書いたケースごとに 1 行の JSON を足す。
+    """
+    directory = transformer_dir(model)
+    target = SERIES / TARGET
+    container = target / MODEL_FILE
+    if not all(part.is_file() for part in container_parts(container)):
+        raise Ti2vExportError(f"据えた容器が無い（{container}）。先に write で系列を据える")
+    writer = dit_reference.LayerwiseDit(
+        dit_reference.load_config(directory),
+        alignment=dit_reference.upstream_alignment(directory),
+    )
+    patch = writer.patch_size
+    known = {case.name(patch) for case in FULL_CASES}
+    if set(names) - known:
+        raise Ti2vExportError(f"知らないケース名がある: {sorted(set(names) - known)}")
+    chosen = [case for case in FULL_CASES if not names or case.name(patch) in names]
+    for stale in sorted(SERIES.glob(f"{FULL_STAGING_PREFIX}*")):
+        print(f"[write-full] 前の実行の作業ディレクトリ {stale} を消す", flush=True)
+        shutil.rmtree(stale)
+    states = {case.name(patch): stored_case_state(writer, case, target) for case in chosen}
+    pending = [case for case in chosen if states[case.name(patch)] != "present"]
+    print(
+        f"[write-full] {target}: {len(chosen)} ケースのうち済み {len(chosen) - len(pending)}・"
+        f"これから {len(pending)}（1 ケースの見込み {FULL_CASE_SECONDS} s・"
+        f"環境 {json.dumps(dit_reference.numeric_environment(), ensure_ascii=False)}）",
+        flush=True,
+    )
+    if pending:
+        dit_probe.require_available("write-full", FULL_PEAK_BYTES)
+    source = dit_reference.ContainerDitWeights(container)
+    written: dict[str, dict[str, Any]] = {}
+    elapsed: list[float] = []
+    with MemoryMonitor() as monitor:
+        for position, case in enumerate(pending, start=1):
+            name = case.name(patch)
+            each = statistics.mean(elapsed) if elapsed else FULL_CASE_SECONDS
+            print(
+                f"[write-full] {position}/{len(pending)} {name}（{states[name]}）: 開始 —"
+                f" 残りの見込み {each * (len(pending) - position + 1) / 60:.0f} 分",
+                flush=True,
+            )
+            started = time.perf_counter()
+            with (
+                monitor.stage(f"golden {name}") as record,
+                tempfile.TemporaryDirectory(dir=SERIES, prefix=FULL_STAGING_PREFIX) as scratch,
+            ):
+                report = golden_case(writer, source, case, Path(scratch))
+                # 門を通ったケースだけを部品ディレクトリへ移す（同じファイルシステムの rename）。
+                for file in export_dit.case_file_names(name):
+                    os.replace(Path(scratch) / file, target / file)
+            elapsed.append(time.perf_counter() - started)
+            row = {
+                **report,
+                "role": case.role,
+                "seconds": round(elapsed[-1], 1),
+                "stage": record.to_dict(),
+            }
+            written[name] = row
+            if log is not None:
+                _append_log(log, row)
+            print(
+                f"[write-full] {position}/{len(pending)} {name}: 据えた {elapsed[-1]:.0f} s",
+                flush=True,
+            )
+    cases = []
+    for case in chosen:
+        name = case.name(patch)
+        row = written.get(name)
+        cases.append(
+            {
+                "case": name,
+                "role": case.role,
+                "form": case.form,
+                "status": "written" if row is not None else "present",
+                "reference_f32_vs_f64_ratio": _stored_ratio(target, name),
+                **({} if row is None else {"seconds": row["seconds"]}),
+            }
+        )
+    return {
+        "series": str(target),
+        "cases": cases,
+        "eager": list(written.values()),
+        "text_embeds": {
+            "path": str(dit_probe.TEXT_EMBEDS_ASSET),
+            "sha256": dit_reference.file_sha256(dit_probe.TEXT_EMBEDS_ASSET),
+        },
+        "min_reference_f32_vs_f64_ratio": min(c["reference_f32_vs_f64_ratio"] for c in cases),
+        "stages": [record.to_dict() for record in monitor.records],
+        "environment": dit_reference.numeric_environment(),
         "passed": True,
     }
 
@@ -952,20 +1221,27 @@ def observe_quant(models: Sequence[str] = OBSERVE_MODELS) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("command", choices=("inspect", "write", "observe-quant", "eager-full"))
     parser.add_argument(
-        "--case", action="append", default=[], help="write: ケース名で絞る（系列は据えない）"
+        "command", choices=("inspect", "write", "write-full", "observe-quant", "eager-full")
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        help="ケース名で絞る（write: 系列は据えない・write-full: 書いたケースは据える）",
     )
     parser.add_argument("--out", type=Path, default=None, help="要約の置き場")
     args = parser.parse_args(argv)
-    if args.case and args.command != "write":
-        parser.error("--case は write にだけ掛かる")
+    if args.case and args.command not in ("write", "write-full"):
+        parser.error("--case は write / write-full にだけ掛かる")
     out = default_out() if args.out is None else args.out
     started = time.perf_counter()
     if args.command == "inspect":
         summary = inspect_only()
     elif args.command == "write":
         summary = write_series(names=args.case)
+    elif args.command == "write-full":
+        summary = write_full(names=args.case, log=out / "write-full.jsonl")
     elif args.command == "eager-full":
         summary = eager_full()
     else:

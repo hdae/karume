@@ -11,17 +11,23 @@
 - 容器の格納: i8 = 量子化の対象ちょうど・bias / norm / `scale_shift_table` は f32
 - golden: 7 入力と eager 出力・参照（f32 / f64・条件側の timestep）・I2V の条件マスク
 - 作業席の規律: 門（IR の検査・eager 同値・本数の期待値）に落ちたら系列は 1 バイトも変わらない
+- 実寸の golden（段 2 — `write-full`）: ケースの表（2 つの形・決定用 6 本・受入れ 8 本）と、据えた
+  容器を書き直さずに 1 ケースずつ足す・再開する・古い golden で止まる・門に落ちたら何も移さない
 
 合成モデル（`test_dit_patch.TINY_DIT` を `save_pretrained` した checkpoint）だけで回す。5B の実物は
-`python -m wan.ti2v_export_dit write`（runbook）。
+`python -m wan.ti2v_export_dit write` / `write-full`（runbook）。
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
+import shutil
+from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import torch
@@ -502,6 +508,266 @@ class TestTheFullEager:
 
 def _never_load(_model: str) -> nn.Module:
     raise AssertionError("止まるべきところで上流を読んだ")
+
+
+class TestTheFullCases:
+    """実寸の golden のケースの表（段 2 — 2 つの形・決定用 6 本・受入れ 8 本）。"""
+
+    PATCH = (1, 2, 2)
+    SHAPES: ClassVar[dict[tuple[int, int, int], int]] = {(21, 30, 52): 8190, (9, 44, 80): 7920}
+
+    def _cases(self, role: str) -> list[ti2v_export_dit.Ti2vCase]:
+        return [case for case in ti2v_export_dit.FULL_CASES if case.role == role]
+
+    def test_the_two_shapes_are_the_acceptance_limits_of_both_allocations(self) -> None:
+        """832×480・81 フレーム（S = 8,190）と 1280×704・33 フレーム（S = 7,920）。"""
+        shapes = {case.latent_shape: case.tokens(self.PATCH) for case in ti2v_export_dit.FULL_CASES}
+
+        assert shapes == self.SHAPES
+        assert set(ti2v_export_dit.FULL_LATENTS) == set(self.SHAPES)
+
+    def test_each_shape_has_three_decision_cases_mixing_t2v_and_i2v(self) -> None:
+        band = self._cases("full-band")
+
+        assert Counter(case.latent_shape for case in band) == dict.fromkeys(self.SHAPES, 3)
+        assert Counter(case.form for case in band) == {"t2v": 3, "i2v": 3}
+        for shape in self.SHAPES:
+            assert {case.form for case in band if case.latent_shape == shape} == {"t2v", "i2v"}
+
+    def test_each_shape_has_two_t2v_and_two_i2v_acceptance_cases(self) -> None:
+        accept = self._cases("full-accept")
+
+        assert Counter((case.latent_shape, case.form) for case in accept) == {
+            (shape, form): 2 for shape in self.SHAPES for form in ("t2v", "i2v")
+        }
+
+    def test_the_decision_timesteps_spread_within_each_form(self) -> None:
+        """決定用の時刻は形ごとに重ならず、生成の最初のステップ（999）を両方の形で含む。"""
+        band = self._cases("full-band")
+        for form in ("t2v", "i2v"):
+            steps = [case.timestep for case in band if case.form == form]
+            assert len(set(steps)) == len(steps) == 3, form
+            assert 999 in steps, form
+            assert max(steps) - min(steps) >= 400, form
+
+    def test_names_and_seeds_are_unique_and_disjoint_from_every_other_golden(self) -> None:
+        full = ti2v_export_dit.FULL_CASES
+        every = (*ti2v_export_dit.CASES, *full)
+
+        assert len({case.name(self.PATCH) for case in every}) == len(every)
+        assert len({case.seed for case in every}) == len(every)
+        assert not {case.seed for case in full} & {spec.seed for spec in export_dit.CASES}
+        assert all(case.name(self.PATCH).startswith(case.role) for case in full)
+
+    def test_every_fixed_prompt_is_a_context_in_both_roles(self) -> None:
+        from wan.prompts import FIXED_PROMPTS
+
+        names = {prompt.name for prompt in FIXED_PROMPTS}
+        for role in ("full-band", "full-accept"):
+            assert {case.text for case in self._cases(role)} == names, role
+
+    def test_i2v_cases_keep_generated_frames(self) -> None:
+        assert all(
+            case.latent_shape[0] >= 2 for case in ti2v_export_dit.FULL_CASES if case.form == "i2v"
+        )
+
+
+#: 合成の実寸のケース（格子 3·3·5 / 2·5·3 — `TINY_DIT` の RoPE の長さ 32 の内・非正方を含む）。
+TINY_FULL_CASES = (
+    ti2v_export_dit.Ti2vCase("full-band", "t2v", (3, 6, 10), 999, "boxing-cats", 31),
+    ti2v_export_dit.Ti2vCase("full-band", "i2v", (3, 6, 10), 500, "ferret", 32),
+    ti2v_export_dit.Ti2vCase("full-accept", "i2v", (2, 10, 6), 400, "negative", 33),
+)
+
+
+def _digests(directory: Path) -> dict[str, str]:
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(directory.iterdir())
+    }
+
+
+@pytest.fixture
+def full_series(written, checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """書いた合成の系列の写し（実寸のケースは合成の格子へ・MemAvailable の検査は通す）。戻りは部品
+    ディレクトリ。"""
+    target, _ = written
+    series = tmp_path / ti2v_export_dit.SERIES_NAME
+    shutil.copytree(target.parent, series)
+    _tiny_text(monkeypatch, tmp_path)
+    _point_at_tiny(monkeypatch, checkpoint, series)
+    monkeypatch.setattr(ti2v_export_dit, "FULL_CASES", TINY_FULL_CASES)
+    monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**40)
+    return series / ti2v_export_dit.TARGET
+
+
+def _full_names() -> list[str]:
+    return [case.name((1, 2, 2)) for case in TINY_FULL_CASES]
+
+
+class TestTheFullGoldenWriter:
+    """据えた容器を書き直さずに実寸の golden を足す口（`write-full` — モジュール doc「実寸の
+    golden」）。"""
+
+    def test_every_case_is_added_next_to_the_container_which_stays_byte_identical(
+        self, full_series: Path
+    ) -> None:
+        before = _digests(full_series)
+
+        summary = ti2v_export_dit.write_full()
+
+        after = _digests(full_series)
+        assert {name: after[name] for name in before} == before
+        added = sorted(set(after) - set(before))
+        assert added == sorted(
+            file for name in _full_names() for file in export_dit.case_file_names(name)
+        )
+        assert [row["status"] for row in summary["cases"]] == ["written"] * 3
+        assert summary["passed"] is True
+        for report in summary["eager"]:
+            assert export_dit.eager_failures(report) == [], report["case"]
+            assert "per_token_timestep_vs_reference_ratio" not in report
+        assert not list(full_series.parent.glob(f"{ti2v_export_dit.FULL_STAGING_PREFIX}*"))
+
+    def test_the_added_golden_has_the_shape_of_the_small_golden(self, full_series: Path) -> None:
+        ti2v_export_dit.write_full()
+        name = _full_names()[1]
+
+        with safe_open(str(full_series / f"io.{name}.safetensors"), "pt") as handle:
+            keys = set(handle.keys())
+            mask = handle.get_tensor("input.condition_mask")
+        with safe_open(str(full_series / f"reference.{name}.safetensors"), "pt") as handle:
+            reference_keys = set(handle.keys())
+            condition = handle.get_tensor("condition_timestep").tolist()
+
+        assert keys == {f"input.{key}" for key in ti2v_export_dit.INPUT_NAMES} | {"output.0"}
+        # 潜在 (3, 6, 10) → 1 フレーム 3·5 = 15 トークンが条件フレーム。
+        assert mask.flatten().to(torch.int64).tolist() == [1] * 15 + [0] * 30
+        assert reference_keys == {
+            "latents",
+            "timestep",
+            "condition_timestep",
+            "output",
+            "output.f64",
+        }
+        assert condition == [0]
+
+    def test_a_second_run_skips_present_cases_and_rewrites_a_partial_one(
+        self, full_series: Path
+    ) -> None:
+        first = ti2v_export_dit.write_full()
+        before = _digests(full_series)
+        partial = _full_names()[1]
+        (full_series / f"reference.{partial}.safetensors").unlink()
+
+        second = ti2v_export_dit.write_full()
+
+        assert [row["status"] for row in second["cases"]] == ["present", "written", "present"]
+        assert _digests(full_series) == before
+        assert [row["reference_f32_vs_f64_ratio"] for row in second["cases"]] == [
+            row["reference_f32_vs_f64_ratio"] for row in first["cases"]
+        ]
+
+    def test_a_stored_case_that_differs_from_the_table_stops_before_writing(
+        self, full_series: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """表を変えた（同じ名前で seed が違う）後の古い golden を「済み」に数えない。"""
+        ti2v_export_dit.write_full()
+        before = _digests(full_series)
+        changed = dataclasses.replace(TINY_FULL_CASES[0], seed=99)
+        monkeypatch.setattr(ti2v_export_dit, "FULL_CASES", (changed, *TINY_FULL_CASES[1:]))
+
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="食い違う"):
+            ti2v_export_dit.write_full()
+
+        assert _digests(full_series) == before
+
+    def test_a_case_that_fails_the_eager_gate_moves_nothing(
+        self, full_series: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = _digests(full_series)
+        real = dit_patch._ti2v_block
+
+        def swapped(block, hidden, text, generation, condition, mask, rope):  # type: ignore[no-untyped-def]
+            return real(block, hidden, text, condition, generation, mask, rope)
+
+        monkeypatch.setattr(dit_patch, "_ti2v_block", swapped)
+
+        with pytest.raises(export_dit.EagerEquivalenceError):
+            ti2v_export_dit.write_full()
+
+        # T2V の先頭は変調の取り違えが効かず（両側が同じ時刻）据わり、I2V の 2 本目で止まる。
+        assert sorted(set(_digests(full_series)) - set(before)) == sorted(
+            export_dit.case_file_names(_full_names()[0])
+        )
+        assert not list(full_series.parent.glob(f"{ti2v_export_dit.FULL_STAGING_PREFIX}*"))
+
+    def test_narrowing_writes_only_the_named_cases(self, full_series: Path) -> None:
+        name = _full_names()[2]
+
+        summary = ti2v_export_dit.write_full(names=[name])
+
+        assert [row["case"] for row in summary["cases"]] == [name]
+        assert (full_series / f"io.{name}.safetensors").is_file()
+        assert not (full_series / f"io.{_full_names()[0]}.safetensors").exists()
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="知らないケース名"):
+            ti2v_export_dit.write_full(names=["full-band-t2v-s99999-t0001"])
+
+    def test_the_log_gets_one_row_per_written_case(self, full_series: Path, tmp_path: Path) -> None:
+        log = tmp_path / "log" / "write-full.jsonl"
+
+        ti2v_export_dit.write_full(log=log)
+
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert [row["case"] for row in rows] == _full_names()
+        assert all(row["seconds"] >= 0 and row["stage"]["name"] for row in rows)
+
+    def test_progress_lines_for_long_cases_do_not_change_the_values(
+        self, full_series: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        quiet = tmp_path / "quiet"
+        shutil.copytree(full_series.parent, quiet)
+        ti2v_export_dit.write_full()
+        expected = _digests(full_series)
+        monkeypatch.setattr(ti2v_export_dit, "SERIES", quiet)
+        monkeypatch.setattr(dit_reference, "PROGRESS_TOKENS", 1)
+        capsys.readouterr()
+
+        ti2v_export_dit.write_full()
+
+        output = capsys.readouterr().out
+        assert "[block] " in output and "[golden] " in output
+        assert _digests(quiet / ti2v_export_dit.TARGET) == expected
+
+    def test_a_stale_staging_directory_is_removed_first(self, full_series: Path) -> None:
+        stale = full_series.parent / f"{ti2v_export_dit.FULL_STAGING_PREFIX}left-over"
+        stale.mkdir()
+        (stale / "io.half.safetensors").write_bytes(b"partial")
+
+        ti2v_export_dit.write_full()
+
+        assert not stale.exists()
+
+    def test_it_stops_before_reading_weights_without_a_container(
+        self, full_series: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        empty = tmp_path / "empty-series"
+        (empty / ti2v_export_dit.TARGET).mkdir(parents=True)
+        monkeypatch.setattr(ti2v_export_dit, "SERIES", empty)
+
+        with pytest.raises(ti2v_export_dit.Ti2vExportError, match="据えた容器が無い"):
+            ti2v_export_dit.write_full()
+
+    def test_it_stops_before_writing_when_memory_is_short(
+        self, full_series: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        before = _digests(full_series)
+        monkeypatch.setattr(dit_probe, "mem_available", lambda: 2**30)
+
+        with pytest.raises(dit_probe.DitProbeError, match="write-full の前の MemAvailable"):
+            ti2v_export_dit.write_full()
+
+        assert _digests(full_series) == before
 
 
 class TestTheQuantObservation:

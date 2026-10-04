@@ -1,4 +1,4 @@
-// Wan2.2 TI2V-5B の DiT（i8 系列 `wan2.2-ti2v-5b-i8-dyn`）の GPU 不要の突き合わせ（ADR 0121 段 1）。
+// Wan2.2 TI2V-5B の DiT（i8 系列 `wan2.2-ti2v-5b-i8-dyn`）の GPU 不要の突き合わせ（ADR 0121 段 1 / 段 2）。
 //
 // 見るのは 2 つ:
 //
@@ -7,47 +7,48 @@
 //   `timesteps_proj` は atol）。I2V 対応の 2 入力（`timesteps_proj_condition`・`condition_mask`）は TS の
 //   実装がまだ無い（段 6）ので、ここで golden の規約を固定する: 条件側の時刻は `reference` の
 //   `condition_timestep`（I2V は 0・T2V は生成側と同じ）、条件マスクは I2V なら先頭の潜在フレームの
-//   H'·W' トークンが 1（u32）・T2V は全て 0。
+//   H'·W' トークンが 1（u32）・T2V は全て 0。テストの中のホストの条件マスク（`helpers/wan-ti2v-dit.ts` の
+//   `conditionMask` — 実 GPU の r 門の製品の経路の入力と故障注入が使う）も golden とビット一致させる。
+//   S = 192 の golden（段 1）と、実寸の 2 つの形の golden（段 2 — 潜在 `[48,21,30,52]` / `[48,9,44,80]`・
+//   P = 390 / 880）の両方で見る。
 // - **runtime から見た容器の宣言**: 入力 7 本（条件マスクは bool `[1,S,1]`）・linear のノード 310 本
 //   （時刻の MLP の 3 本を M = 1 で 2 回 — 決定 2 の dispatch の本数）・`where` 182 本（30 層 × 6 + head 2）・
 //   i8 の重み 307 本。recipe の IR の検査（`wan/ti2v_export_dit.py`）と同じ数を、runtime の読み口で数える。
 //
 // 資産が無い環境は生成コマンド付きで**明示 SKIP**（ADR 0005）。資産が**一部だけ**ある環境は SKIP ではなく
-// FAIL にする（下の完全性テスト）。GPU は使わない（実 GPU の r 門は段 2）。
+// FAIL にする（下の完全性テスト — S = 192 の組と実寸の組は別の回に書くので組ごとに見る）。GPU は使わない
+// （実 GPU の r 門は `e2e_wan_ti2v_dit_test.ts`）。
 //
 // NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`runtime/tests/helpers/series-graphs.ts` — 門番
 // `assets_gate_test.ts` と同じ正本）から引く。
 
 import { assert, assertEquals } from "@std/assert";
-import {
-  codecLayout,
-  type OpenedContainer,
-  parseSafetensors,
-  type SafetensorsFile,
-} from "@karume/runtime";
-import { patchifyLatents, type WanPatchGeometry, wanTokenGrid } from "../src/wan/dit-tokens.ts";
-import { parseWanRopeBase, type WanRopeBase, wanRopeTables } from "../src/wan/dit-rope.ts";
+import { codecLayout, type OpenedContainer } from "@karume/runtime";
+import { patchifyLatents, wanTokenGrid } from "../src/wan/dit-tokens.ts";
+import { wanRopeTables } from "../src/wan/dit-rope.ts";
 import { timestepsProj } from "../src/wan/dit-timestep.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-
-const SERIES_NAME = "wan2.2-ti2v-5b-i8-dyn";
-const COMPONENT = "transformer";
-const SERIES_DIR = new URL(`../../../outputs/series/${SERIES_NAME}/${COMPONENT}/`, import.meta.url);
-const MODEL_FILE = "model.krm";
-/** 資産の名前（`wan/export_dit.py` の `ROPE_BASE_ASSET` — 5B も同じ席）。 */
-const ROPE_BASE_ASSET = "rope_base";
-
-const GENERATE =
-  "cd tools/export-recipes && uv run --group wan --inexact python -m wan.ti2v_export_dit write";
-
-/** Wan2.2 TI2V-5B の patch（`(1,2,2)`・潜在 48 チャネル — transformer の config）。 */
-const WAN22_GEOMETRY: WanPatchGeometry = {
-  channels: 48,
-  patchFrames: 1,
-  patchHeight: 2,
-  patchWidth: 2,
-};
+import {
+  caseFiles,
+  conditionMask,
+  filePresent,
+  firstBitMismatch,
+  floatsOf,
+  loadTi2vGolden,
+  readRopeBase,
+  storedConditionMask,
+  type Ti2vCase,
+  WAN22_GEOMETRY,
+  WAN_TI2V_CASES as CASES,
+  WAN_TI2V_COMPONENT as COMPONENT,
+  WAN_TI2V_FULL_CASES as FULL_CASES,
+  WAN_TI2V_GENERATE as GENERATE,
+  WAN_TI2V_GENERATE_FULL as GENERATE_FULL,
+  WAN_TI2V_MODEL_FILE as MODEL_FILE,
+  WAN_TI2V_SERIES_DIR as SERIES_DIR,
+  WAN_TI2V_SERIES_NAME as SERIES_NAME,
+} from "./helpers/wan-ti2v-dit.ts";
 
 /**
  * `timesteps_proj` の TS 実装と上流（torch CPU f32）の許容差（絶対）。
@@ -73,40 +74,6 @@ const EXPECTED_INPUTS = [
   { name: "condition_mask", dtype: "bool", shape: [1, "S", 1] },
 ] as const;
 
-type Form = "t2v" | "i2v";
-
-/**
- * 生成されているはずのケース。**列挙結果ではなくここで固定する**（生成を一部だけ流した環境でテストが黙って
- * 消える形にしない）。正本は `wan/ti2v_export_dit.py` の `CASES`。
- */
-const CASES: readonly { readonly name: string; readonly form: Form }[] = [
-  { name: "band-t2v-s00192-t0999", form: "t2v" },
-  { name: "band-t2v-s00192-t0500", form: "t2v" },
-  { name: "band-t2v-s00192-t0250", form: "t2v" },
-  { name: "band-i2v-s00192-t0999", form: "i2v" },
-  { name: "band-i2v-s00192-t0750", form: "i2v" },
-  { name: "band-i2v-s00192-t0113", form: "i2v" },
-  { name: "accept-t2v-s00192-t0600", form: "t2v" },
-  { name: "accept-t2v-s00192-t0030", form: "t2v" },
-  { name: "accept-i2v-s00192-t0400", form: "i2v" },
-  { name: "accept-i2v-s00192-t0900", form: "i2v" },
-];
-
-/** ファイルの有無（NotFound 以外は伝播させる — 権限エラーを「資産が無い」に読み替えない）。 */
-const filePresent = (url: URL): boolean => {
-  try {
-    return Deno.statSync(url).isFile;
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
-    throw cause;
-  }
-};
-
-const caseFiles = (name: string): readonly URL[] => [
-  new URL(`io.${name}.safetensors`, SERIES_DIR),
-  new URL(`reference.${name}.safetensors`, SERIES_DIR),
-];
-
 const expectedFiles = CASES.flatMap(({ name }) => caseFiles(name));
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, SERIES_DIR));
 const ANY_PRESENT = MODEL_PRESENT || expectedFiles.some(filePresent);
@@ -119,36 +86,18 @@ if (!ASSETS_AVAILABLE) {
   );
 }
 
-const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
-  const bytes = await Deno.readFile(url);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-};
+// 実寸の golden は容器と S = 192 の golden の後に別の回（`write-full` — CPU で数時間）で足すので、組として
+// 別に見る: 1 本も無ければ「まだ足していない」として SKIP、1 本でもあれば欠けは FAIL（足す途中・中断）。
+const fullExpectedFiles = FULL_CASES.flatMap(({ name }) => caseFiles(name));
+const FULL_ANY_PRESENT = fullExpectedFiles.some(filePresent);
+const FULL_AVAILABLE = MODEL_PRESENT && fullExpectedFiles.every(filePresent);
 
-const viewOf = (file: SafetensorsFile, key: string, where: string) => {
-  const view = file.tensors.get(key);
-  if (view === undefined) throw new Error(`${where}: '${key}' が無い`);
-  return view;
-};
-
-const floatsOf = (file: SafetensorsFile, key: string, where: string): Float32Array => {
-  const view = viewOf(file, key, where);
-  if (view.dtype !== "F32") throw new Error(`${where}: '${key}' が ${view.dtype}`);
-  return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
-};
-
-const scalarOf = (file: SafetensorsFile, key: string, where: string): number => {
-  const view = viewOf(file, key, where);
-  if (view.dtype !== "I32" || view.byteLength !== 4) throw new Error(`${where}: '${key}' が想定外`);
-  return new Int32Array(file.buffer, view.byteOffset, 1)[0];
-};
-
-/** 最初にビットが割れる要素の添字（一致なら -1）。長さが違えば 0。 */
-const firstBitMismatch = (actual: Float32Array, expected: Float32Array): number => {
-  if (actual.length !== expected.length) return 0;
-  const left = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
-  const right = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
-  return left.findIndex((bits, index) => bits !== right[index]);
-};
+if (MODEL_PRESENT && !FULL_ANY_PRESENT) {
+  console.warn(
+    `[karume] ${SERIES_DIR.pathname} に Wan2.2 TI2V の実寸の golden が無いため、実寸の GPU 不要の突き合わせを` +
+      ` SKIP する。生成（CPU・数時間・途中から再開できる）: ${GENERATE_FULL}`,
+  );
+}
 
 const maxAbsDiff = (actual: Float32Array, expected: Float32Array): number => {
   assertEquals(actual.length, expected.length, "要素数");
@@ -157,15 +106,6 @@ const maxAbsDiff = (actual: Float32Array, expected: Float32Array): number => {
     worst = Math.max(worst, Math.abs(actual[index] - expected[index]));
   }
   return worst;
-};
-
-const readRopeBase = async (opened: OpenedContainer): Promise<WanRopeBase> => {
-  const reader = opened.asset(ROPE_BASE_ASSET);
-  assertEquals(reader.role, "rope-base", `資産 '${ROPE_BASE_ASSET}' の役割`);
-  const bytes = await reader.read(0, reader.length);
-  return parseWanRopeBase(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-  );
 };
 
 /**
@@ -215,67 +155,94 @@ Deno.test({
   },
 });
 
+/**
+ * ホスト関数（patchify・資産 `rope_base` からの RoPE 表・`timesteps_proj` 2 本・テストの中の条件マスク）が
+ * golden のグラフ入力を再現することを、ケースごとに見る（ファイル冒頭の 1 つ目）。
+ */
+const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
+  const base = await readRopeBase(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
+  for (const { name, form } of cases) {
+    const golden = await loadTi2vGolden(name);
+    const { io, reference, latentShape } = golden;
+    const tokens = patchifyLatents(
+      floatsOf(reference, "latents", name),
+      latentShape,
+      WAN22_GEOMETRY,
+    );
+    assertEquals(
+      firstBitMismatch(tokens, floatsOf(io, "input.tokens", name)),
+      -1,
+      `${name}: patchify`,
+    );
+    const grid = wanTokenGrid(latentShape, WAN22_GEOMETRY);
+    const tables = wanRopeTables(base, grid);
+    assertEquals(
+      firstBitMismatch(tables.cos, floatsOf(io, "input.rope_cos", name)),
+      -1,
+      `${name}: rope_cos`,
+    );
+    assertEquals(
+      firstBitMismatch(tables.sin, floatsOf(io, "input.rope_sin", name)),
+      -1,
+      `${name}: rope_sin`,
+    );
+
+    const { timestep, conditionTimestep: condition } = golden;
+    assertEquals(condition, form === "i2v" ? 0 : timestep, `${name}: 条件側の timestep`);
+    for (
+      const [key, value] of [
+        ["input.timesteps_proj", timestep],
+        ["input.timesteps_proj_condition", condition],
+      ] as const
+    ) {
+      const expected = floatsOf(io, key, name);
+      const diff = maxAbsDiff(timestepsProj(value, expected.length), expected);
+      assert(diff <= TIMESTEPS_PROJ_ATOL, `${name}: ${key} の差 ${diff}`);
+    }
+
+    // 条件マスクの格納（bool は u32 の 0 / 1）は読み口が U32 でなければ落とす。
+    const mask = storedConditionMask(golden, name);
+    const conditioned = form === "i2v" ? grid.rows * grid.cols : 0;
+    assertEquals(mask.length, grid.count, `${name}: 条件マスクの長さ`);
+    assertEquals(
+      mask.findIndex((bit, index) => bit !== (index < conditioned ? 1 : 0)),
+      -1,
+      `${name}: 条件マスク（${form === "i2v" ? "先頭の潜在フレーム" : "全て 0"}）`,
+    );
+    assertEquals(
+      firstBitMismatch(conditionMask(grid, form), mask),
+      -1,
+      `${name}: テストの中のホストの条件マスク`,
+    );
+  }
+};
+
 Deno.test({
   name:
     "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
   ignore: !ASSETS_AVAILABLE,
-  fn: async () => {
-    const base = await readRopeBase(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
-    for (const { name, form } of CASES) {
-      const [ioUrl, referenceUrl] = caseFiles(name);
-      const io = parseSafetensors(await readBuffer(ioUrl));
-      const reference = parseSafetensors(await readBuffer(referenceUrl));
-      const latents = viewOf(reference, "latents", name);
-      assertEquals(latents.shape.length, 5, `${name}: latents の rank`);
-      // ホストの潜在はバッチ軸を持たない `[C,F,H,W]`（`src/wan/dit-tokens.ts`）。
-      const latentShape = latents.shape.slice(1);
-      const tokens = patchifyLatents(
-        floatsOf(reference, "latents", name),
-        latentShape,
-        WAN22_GEOMETRY,
-      );
-      assertEquals(
-        firstBitMismatch(tokens, floatsOf(io, "input.tokens", name)),
-        -1,
-        `${name}: patchify`,
-      );
-      const grid = wanTokenGrid(latentShape, WAN22_GEOMETRY);
-      const tables = wanRopeTables(base, grid);
-      assertEquals(
-        firstBitMismatch(tables.cos, floatsOf(io, "input.rope_cos", name)),
-        -1,
-        `${name}: rope_cos`,
-      );
-      assertEquals(
-        firstBitMismatch(tables.sin, floatsOf(io, "input.rope_sin", name)),
-        -1,
-        `${name}: rope_sin`,
-      );
+  fn: () => assertHostInputs(CASES),
+});
 
-      const timestep = scalarOf(reference, "timestep", name);
-      const condition = scalarOf(reference, "condition_timestep", name);
-      assertEquals(condition, form === "i2v" ? 0 : timestep, `${name}: 条件側の timestep`);
-      for (
-        const [key, value] of [
-          ["input.timesteps_proj", timestep],
-          ["input.timesteps_proj_condition", condition],
-        ] as const
-      ) {
-        const expected = floatsOf(io, key, name);
-        const diff = maxAbsDiff(timestepsProj(value, expected.length), expected);
-        assert(diff <= TIMESTEPS_PROJ_ATOL, `${name}: ${key} の差 ${diff}`);
-      }
-
-      const maskView = viewOf(io, "input.condition_mask", name);
-      assertEquals(maskView.dtype, "U32", `${name}: 条件マスクの格納（bool は u32 の 0 / 1）`);
-      const mask = new Uint32Array(io.buffer, maskView.byteOffset, maskView.byteLength / 4);
-      const conditioned = form === "i2v" ? grid.rows * grid.cols : 0;
-      assertEquals(mask.length, grid.count, `${name}: 条件マスクの長さ`);
-      assertEquals(
-        mask.findIndex((bit, index) => bit !== (index < conditioned ? 1 : 0)),
-        -1,
-        `${name}: 条件マスク（${form === "i2v" ? "先頭の潜在フレーム" : "全て 0"}）`,
-      );
-    }
+Deno.test({
+  name:
+    "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
+  // 1 本も無ければ「まだ足していない」として SKIP。1 本でもあれば欠けは FAIL（足す途中・中断）。
+  ignore: !FULL_ANY_PRESENT,
+  fn: () => {
+    assert(MODEL_PRESENT, `${SERIES_DIR.pathname}${MODEL_FILE} が無い（実寸の golden だけがある）`);
+    assertEquals(
+      fullExpectedFiles.filter((url) => !filePresent(url)).map((url) => url.pathname),
+      [],
+      `実寸の golden の欠け（生成・途中から再開: ${GENERATE_FULL}）`,
+    );
   },
+});
+
+Deno.test({
+  name:
+    "Wan2.2 TI2V DiT 実寸のホスト（S = 8,190 / 7,920・条件フレーム P = 390 / 880）: patchify・RoPE 表・" +
+    "timesteps_proj 2 本・条件マスクが golden の入力と一致する",
+  ignore: !FULL_AVAILABLE,
+  fn: () => assertHostInputs(FULL_CASES),
 });
