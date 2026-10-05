@@ -1,9 +1,11 @@
 /**
- * `@karume/models/wan` — Wan2.1（テキスト → 動画）ファミリのサブパス面（ADR 0118 決定 7）。
+ * `@karume/models/wan` — Wan2.1 / 2.2（テキスト → 動画）ファミリのサブパス面（ADR 0118 決定 7・
+ * ADR 0121 決定 10）。
  *
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — 組む（{@link WanPipeline.fromPretrained} /
- * {@link WanPipeline.fromAssets}・テキストエンコーダの経路 `textEncoder`）/ 例示のプロンプトを引く
+ * {@link WanPipeline.fromAssets}・Wan2.2 は {@link WanTi2vPipeline} の同名の 2 つ・テキストエンコーダの
+ * 経路 `textEncoder`）/ 例示のプロンプトを引く
  * （`prompts`）/ 生成する（`generate`）/ 生成の途中経過を購読する（`onEvent` — {@link WanGenerateEvent}）/
  * 中断する（構築と生成の `signal`）/ フレームを画素にする（{@link wanFrameToRgba}）/ 解放する（`dispose`）。
  *
@@ -21,6 +23,13 @@
  */
 
 export { WanPipeline } from "./src/wan/pipeline.ts";
+/**
+ * Wan2.2 TI2V 5B のテキスト → 動画（T2V）。構築・生成・中断・解放の面と公開型（要求・結果・イベント・
+ * 構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜33 フレーム）・
+ * 潜在の形・fps は世代の値（ADR 0121 決定 10）。配布形はまだ無い — 入口は取得済みの manifest + 資産を
+ * 渡す `fromAssets`（ADR 0121 段 8 で配布形）。
+ */
+export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
 export type {
   GeneratedVideo,
   WanAssets,
@@ -33,7 +42,8 @@ export type {
 } from "./src/wan/pipeline.ts";
 
 /**
- * テキスト埋め込み資産のプロンプトの 1 行（資産のメタ — `WanPipeline.prompts` の要素）と役割の語彙。
+ * テキスト埋め込み資産のプロンプトの 1 行（資産のメタ — class の `prompts`〈`WanPipeline.prompts` /
+ * `WanTi2vPipeline.prompts`〉の要素）と役割の語彙。
  * `"precomputed"` の経路では受理集合そのもの（集合の外の文字列は `ModelInputError`）、`"gpu"` の経路では
  * 例示なので、CLI / UI が選択肢を出すにはこの型が要る。
  */

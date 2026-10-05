@@ -215,6 +215,14 @@ measurements in `docs/research/`.
   `outputs/misc/local-dist/<name>`; paths under `models/` are refused). Weights whose license is not
   declared are recorded as `NOASSERTION` and need `--allow-undeclared-license`; the mirror then has no
   `LICENSE.md`.
+- `WanTi2vPipeline` (`@karume/models/wan`, also in the barrel): Wan2.2 TI2V 5B text-to-video
+  (ADR 0121). It has the same surface as `WanPipeline` (`fromPretrained`, `fromAssets`, `prompts`,
+  `generate`, `dispose`) and shares its public types (`WanGenerateRequest`, `GeneratedVideo`,
+  `WanGenerateEvent`, `WanPipelineOptions`, …); it reads manifests with pipeline `wan-ti2v/1`, and
+  each class rejects the other's pipeline. Accepted sizes are 1280×704 and 704×1280 with 4n+1
+  frames from 5 to 33 (default 1280×704, 33 frames); the latents are `[48, F', H/16, W/16]` and
+  `fps` is 24. Image-to-video is not available yet. There is no distribution yet, so for now the
+  pipeline is built with `fromAssets` from a manifest and the exported series containers.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
   container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when

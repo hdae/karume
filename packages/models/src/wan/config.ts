@@ -30,6 +30,13 @@ import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "./scheduler.ts";
 export const WAN_PIPELINE_NAME = "wan";
 export const WAN_PIPELINE_MAJOR = 1;
 
+/**
+ * Wan2.2 TI2V の `pipeline` の契約名と major（`WanTi2vPipeline` — ADR 0121 決定 10）。`pipelineConfig` の
+ * スキーマは Wan2.1 と同じ 1 本（{@link parseWanPipelineConfig}）。
+ */
+export const WAN_TI2V_PIPELINE_NAME = "wan-ti2v";
+export const WAN_TI2V_PIPELINE_MAJOR = 1;
+
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
 const SCHEDULER_KEYS: readonly string[] = ["shift"];
 const DEFAULTS_KEYS: readonly string[] = ["steps", "guidance"];

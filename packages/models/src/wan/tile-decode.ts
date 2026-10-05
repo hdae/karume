@@ -7,7 +7,8 @@
  * 正本で、ここは VAE の段 1 本を回すだけ。Wan2.1 / 2.2 の class が共有する（ADR 0121 決定 10）。
  * 世代ごとの値（受理集合・逆正規化の統計・unpatchify の倍率）は世代の記述子（`./descriptor.ts`）から
  * 引数で受ける。潜在と出口のチャネル数・タイル辺・グラフの入出力の空間比はグラフ宣言から読む
- * （`wanVaeChunkLayout`）。`owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`）。
+ * （`wanVaeChunkLayout`）。`owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は
+ * `"WanTi2vPipeline"`）。
  *
  * NOTE: 公開型（`WanGenerateEvent` / `WanRunComponent`）は `./pipeline.ts` から `import type` で取る
  * （型だけの参照は消去されるので循環 import にならない）。

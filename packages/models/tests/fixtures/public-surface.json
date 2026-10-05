@@ -519,6 +519,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "WanTi2vPipeline",
+        "kind": "class"
+      },
+      {
         "name": "animaLatents",
         "kind": "function"
       },
@@ -1317,6 +1321,10 @@
       {
         "name": "WanRunComponent",
         "kind": "typeAlias"
+      },
+      {
+        "name": "WanTi2vPipeline",
+        "kind": "class"
       },
       {
         "name": "wanFrameToRgba",

@@ -11,8 +11,9 @@
  *      DiT の文脈の行数までゼロで詰める
  *    - `"precomputed"` — テキスト埋め込み資産からプロンプトの行を引くだけ（ADR 0118 決定 4 の第 1 段・
  *      GPU を使わない）。資産の集合に無い文字列は fail loudly
- * 2. **transformer** — S 形の DiT（`[1,S,64]` — 決定 3）を steps 回。CFG は uncond → cond の逐次 2 回
- *    （B = 1）で、合成 `uncond + g·(cond − uncond)` と UniPC の更新はホスト（決定 5 — `scheduler.ts`）
+ * 2. **transformer** — S 形の DiT（`[1,S,C·4]` — Wan2.1 は `[1,S,64]`・Wan2.2 は `[1,S,192]`・
+ *    決定 3）を steps 回。CFG は uncond → cond の逐次 2 回（B = 1）で、合成 `uncond + g·(cond − uncond)`
+ *    と UniPC の更新はホスト（決定 5 — `scheduler.ts`）
  * 3. **vae_decoder** — chunk グラフ 2 本（first / next）の**常時タイル** decode（決定 2 —
  *    `vae-tiles.ts`）→ `[-1, 1]` へクランプ
  *
@@ -22,7 +23,9 @@
  * 段の本体は Wan2.1 / 2.2 の class が共有するモジュールにある（ADR 0121 決定 10 — 入口の門は
  * `plan.ts`・text 段は `text-stage.ts`・DiT 段は `dit-loop.ts`・VAE 段は `tile-decode.ts`）。家族
  * admission・構築・段の順序の本体も共有の `family.ts`（世代の値を `WanFamilySpec` で受ける 1 本）にあり、
- * ここは公開型と Wan2.1 の class の殻（直列化鎖・`dispose`）を持ち、`WAN21_FAMILY` を渡す。
+ * ここは公開型と Wan2.1 の class の殻（直列化鎖・`dispose`）を持ち、`WAN21_FAMILY` を渡す。公開型は
+ * Wan2.2 の class（`./ti2v-pipeline.ts` の `WanTi2vPipeline`）と共有する — 受理集合・既定・潜在の形・fps の
+ * ように世代で違う値は、どの class で組んだか（その class の世代の記述子）で決まる。
  *
  * ## MUST: 段ごとに Session を張って畳む・text → DiT → VAE の順に 1 段ずつ
  *
@@ -95,14 +98,17 @@ export type GeneratedVideo = {
   readonly width: number;
   readonly height: number;
   /**
-   * 出力のフレームレート（上流の世代の事実 — Wan2.1 は 16。manifest の宣言ではなくノブでもない —
-   * ADR 0121 決定 8）。
+   * 出力のフレームレート（上流の世代の事実 — Wan2.1 は 16・Wan2.2 は 24。manifest の宣言ではなく
+   * ノブでもない — ADR 0121 決定 8）。
    */
   readonly fps: number;
   readonly data: Float32Array<ArrayBuffer>;
 };
 
-/** `denoise-step` の `copyLatents()` が返す途中の潜在の写し（`[C, F', H/8, W/8]`）。 */
+/**
+ * `denoise-step` の `copyLatents()` が返す途中の潜在の写し（形は class の世代が決める — Wan2.1:
+ * `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`）。
+ */
 export type WanLatentSnapshot = {
   readonly data: Float32Array<ArrayBuffer>;
   readonly shape: readonly number[];
@@ -144,8 +150,13 @@ export type WanGenerateEvent =
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
 
 /**
- * 1 回の生成要求。省いた step 数・guidance・shift は manifest の `pipelineConfig` の既定（配布形の値は
- * 参照の設定 — 50 ステップ・guide 5.0・shift 3.0）、寸法とフレーム数は 832×480・33 フレーム。
+ * 1 回の生成要求（Wan2.1 / 2.2 の class が共有する型）。省いた step 数・guidance・shift は manifest の
+ * `pipelineConfig` の既定（Wan2.1 の配布形の値は参照の設定 — 50 ステップ・guide 5.0・shift 3.0。Wan2.2 の
+ * 既定の shift は上流の scheduler の `flow_shift` 5.0〈公式の 720p の値〉で、配布形〈ADR 0121 段 8〉の
+ * manifest が宣言する — それまでは呼び手が組む manifest の `pipelineConfig` に書く）。寸法と
+ * フレーム数の受理集合と既定は class の世代が決める（Wan2.1 の `WanPipeline`: 832×480 / 480×832・
+ * 5〜81 フレーム・既定 832×480・33 フレーム / Wan2.2 の `WanTi2vPipeline`: 1280×704 / 704×1280・5〜33
+ * フレーム・既定 1280×704・33 フレーム）。
  */
 export type WanGenerateRequest = {
   /**
@@ -157,8 +168,8 @@ export type WanGenerateRequest = {
    *   通る）・文字化けに見える並び・本文中の特殊トークン・空白の直後の `▁`・空や空白だけ（1 トークン）・
    *   512 トークン超。拒否の文言は直し方まで言う。
    * - `"precomputed"`: **テキスト埋め込み資産の集合にある文字列だけ**（原文か正規化後の文字列の
-   *   どちらかに完全一致 — {@link WanPipeline.prompts}）。集合の外は `ModelInputError`（ADR 0118
-   *   決定 4）。
+   *   どちらかに完全一致 — class の `prompts`〈{@link WanPipeline.prompts} / `WanTi2vPipeline.prompts`〉）。
+   *   集合の外は `ModelInputError`（ADR 0118 決定 4）。
    */
   readonly prompt: string;
   /**
@@ -171,8 +182,9 @@ export type WanGenerateRequest = {
   /** 初期ノイズの seed（既定 0 — {@link WanGenerateRequest.latents} とは排他）。 */
   readonly seed?: number;
   /**
-   * 初期ノイズを外から渡す（`[16, F', H/8, W/8]` の f32・`F' = (frames − 1)/4 + 1`）。参照との照合で
-   * torch の `randn` の列を注入する口（seed の生成器は torch とは別の列 — `random.ts`）。書き換えない。
+   * 初期ノイズを外から渡す（f32・`F' = (frames − 1)/4 + 1`。形は class の世代が決める — Wan2.1:
+   * `[16, F', H/8, W/8]` / Wan2.2: `[48, F', H/16, W/16]`）。参照との照合で torch の `randn` の列を
+   * 注入する口（seed の生成器は torch とは別の列 — `random.ts`）。書き換えない。
    */
   readonly latents?: Float32Array<ArrayBuffer>;
   /**
@@ -191,9 +203,15 @@ export type WanGenerateRequest = {
    * 壊れる値（極端に大きい / 小さい shift）は `ModelInputError`。
    */
   readonly shift?: number;
-  /** フレーム数（4n+1 の 5〜81・既定 33）。 */
+  /**
+   * フレーム数（4n+1。範囲と既定は class の世代が決める — Wan2.1: 5〜81・既定 33 / Wan2.2: 5〜33・
+   * 既定 33）。
+   */
   readonly frames?: number;
-  /** 幅 × 高さ（832×480 か 480×832・既定 832×480）。 */
+  /**
+   * 幅 × 高さ（受理集合と既定は class の世代が決める — Wan2.1: 832×480 か 480×832・既定 832×480 /
+   * Wan2.2: 1280×704 か 704×1280・既定 1280×704）。
+   */
   readonly width?: number;
   readonly height?: number;
   /**
@@ -214,7 +232,10 @@ export type WanGenerateRequest = {
   readonly signal?: AbortSignal;
 };
 
-/** 構築オプション（{@link WanPipeline.fromAssets} / {@link WanPipeline.fromPretrained} 共通）。 */
+/**
+ * 構築オプション（class の `fromAssets` / `fromPretrained` 共通 — {@link WanPipeline.fromAssets} /
+ * {@link WanPipeline.fromPretrained} と `WanTi2vPipeline` の同名の 2 つ）。
+ */
 export type WanPipelineOptions = {
   /** モデル（manifest の models のキー）。省略時は `defaultModel`。 */
   readonly model?: string;
@@ -236,7 +257,7 @@ export type WanPipelineOptions = {
    */
   readonly textEncoder?: "gpu" | "precomputed";
   /**
-   * 既存の GPU を共有する（渡した側が所有権を持つ — {@link WanPipeline.dispose} は破棄しない）。
+   * 既存の GPU を共有する（渡した側が所有権を持つ — class の `dispose` は破棄しない）。
    * 省くとパイプラインが `acquireGpu` し、`dispose` で破棄する。
    *
    * MUST: 計測（`acquireGpu({ gpuTiming: true })`）の device は渡せない — VAE の段は 1 タイル = 1 batch
@@ -254,7 +275,7 @@ export type WanPipelineOptions = {
     diagnostics: SessionDiagnostics,
   ) => void;
   /**
-   * 構築の中断。{@link WanPipeline.fromPretrained} は同じ 1 本を取得層へも渡すので、取得（umT5 だけで
+   * 構築の中断。class の `fromPretrained` は同じ 1 本を取得層へも渡すので、取得（umT5 だけで
    * 約 5.3 GiB）と組み立てのどちらの最中でも効く。組み立ての段の境目（入口・容器を開いた後・資産の
    * 解析の前・GPU の取得の前後）でイベントループへ 1 度譲ってから検査する。中断の例外は
    * `signal.reason` を**そのまま**投げる（包まない — anima / irodori の構築と同じ形）。
@@ -266,7 +287,8 @@ export type WanPipelineOptions = {
 };
 
 /**
- * {@link WanPipeline.fromPretrained} が追加で受ける取得層のオプション（hub へ透過する）。
+ * class の `fromPretrained`（{@link WanPipeline.fromPretrained} / `WanTi2vPipeline.fromPretrained`）が
+ * 追加で受ける取得層のオプション（hub へ透過する）。
  *
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、欄ごとの
  * 説明は {@link FromPretrainedHubOptions} に 1 本化してある。

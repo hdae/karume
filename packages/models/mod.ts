@@ -277,6 +277,8 @@ export type {
 export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
 
 export { WanPipeline } from "./src/wan/pipeline.ts";
+/** Wan2.2 TI2V 5B のテキスト → 動画（`./wan` を参照 — 公開型は `WanPipeline` と共有）。 */
+export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
 export type {
   GeneratedVideo,
   WanAssets,

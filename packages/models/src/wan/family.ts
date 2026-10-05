@@ -1,7 +1,8 @@
 /**
  * Wan の家族 admission・構築・生成の本体（ADR 0121 決定 10 — Wan2.1 / 2.2 の class が共有する 1 本）。
  *
- * 公開 class（`./pipeline.ts` の `WanPipeline`）は薄い殻（private のコンストラクタ・直列化鎖・`dispose`）で、
+ * 公開 class（`./pipeline.ts` の `WanPipeline`・`./ti2v-pipeline.ts` の `WanTi2vPipeline`）は薄い殻
+ * （private のコンストラクタ・直列化鎖・`dispose`）で、
  * manifest の門・部品の突合・GPU の取得・段の順序（text → DiT → VAE）の本体はここにある。段の順序と
  * Session の寿命・中断の MUST は `./pipeline.ts` 冒頭の doc が正本。世代ごとに違う値は全て
  * {@link WanFamilySpec} が運ぶ（文言の接頭辞・pipeline 名と major・世代の記述子）。
@@ -52,10 +53,16 @@ import {
   parseWanPipelineConfig,
   WAN_PIPELINE_MAJOR,
   WAN_PIPELINE_NAME,
+  WAN_TI2V_PIPELINE_MAJOR,
+  WAN_TI2V_PIPELINE_NAME,
   type WanPipelineConfig,
 } from "./config.ts";
 import { parseWanRopeBase, type WanRopeBase } from "./dit-rope.ts";
-import { WAN21_GENERATION, type WanGenerationDescriptor } from "./descriptor.ts";
+import {
+  WAN21_GENERATION,
+  WAN22_TI2V_GENERATION,
+  type WanGenerationDescriptor,
+} from "./descriptor.ts";
 import {
   type DitContract,
   ditContract,
@@ -134,6 +141,13 @@ export const WAN21_FAMILY: WanFamilySpec = {
   owner: "WanPipeline",
   pipeline: { name: WAN_PIPELINE_NAME, major: WAN_PIPELINE_MAJOR },
   generation: WAN21_GENERATION,
+};
+
+/** Wan2.2 TI2V 5B（`WanTi2vPipeline` — pipeline `wan-ti2v/1`・{@link WAN22_TI2V_GENERATION}）。 */
+export const WAN22_TI2V_FAMILY: WanFamilySpec = {
+  owner: "WanTi2vPipeline",
+  pipeline: { name: WAN_TI2V_PIPELINE_NAME, major: WAN_TI2V_PIPELINE_MAJOR },
+  generation: WAN22_TI2V_GENERATION,
 };
 
 /**
