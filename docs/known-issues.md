@@ -357,33 +357,45 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
 （Wan なら text 段の Session の構築）で落ちる**（推測・実例はまだ無い）。`fromPretrained` の `components` で部品を差し替えると、
 差し替え先の quant 席の `session` / `gpuFeatures` / `requiredLimits` は使われず、**元の manifest の席の値で事前判定する**ので、
 重みを取る前の判定（`requiredLimits` の照合）を通ってしまう。構築は Session を 1 本も張らず
-（`packages/models/src/wan/pipeline.ts:1349`）、text 段は generate ごとに Session を張る（同 `:1086`）ので、落ちるのは構築の後に
+（`packages/models/src/wan/pipeline.ts:702`）、text 段は generate ごとに Session を張る（`encodeWanPrompts` の中 — `packages/models/src/wan/text-stage.ts:453`）ので、落ちるのは構築の後に
 なる。ADR [0108](decisions/0108-container-format.md) 決定 19 が admission に求める「quant 席と実行設定の整合」の検査が
 無い状態で、by-design ではない。
 
 - 機序: 差し替え席は差し替え先の manifest から容器だけを引く（`packages/models/src/hub/components.ts:422-427` — `resolveSelection`
-  の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/pipeline.ts:1276-1283`）、
-  その `requiredLimits` で取得前の判定をする（同 `:1189-1194`）。
+  の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/pipeline.ts:638-645`）、
+  その `requiredLimits` で取得前の判定をする（同 `:552-556`）。
 - 今の影響: recipe の書き手（`umt5_export` — `--intake` を含む）は語彙埋め込みを i8 で書くので、recipe で作った互換の
   umT5 への差し替えでは起きない（グラフ記述が同じならバッファの大きさも同じ）。ただし `umt5Contract`
-  （`packages/models/src/wan/pipeline.ts:986-1008`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを
+  （`packages/models/src/wan/text-stage.ts:220-242`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを
   f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、この形で落ちうる。
 - 直し方の候補（裁定が要る）: 差し替え先の席の `requiredLimits` / `gpuFeatures` を元の席と合わせて判定する（大きい方を取る）か、
   席が食い違う差し替えを admission で拒む。
 
-## Intel Arc B570: Wan DiT 実用席 S = 32,760 の通常モードが、レーンの中で 1 回だけ GPU のメモリ不足で落ちた（2026-10-04・記録のみ）
+## Deno: `GPUDevice.destroy()` が VRAM を返さず、device を作って捨てるテストの列で残りが積む — Wan のレーンで実用席 S = 32,760 が OOM（2026-10-04〜05・原因は確定・修正は未）
 
 `deno task test:models:wan` の中で、`e2e_wan_dit_test.ts` の「実用席 `f16+dit8-a8-attn8-s16`・通常モード・S = 32,760」の step が
-**`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`** で落ちた（385 passed・1 failed・82 分の走行の 1 件）。
-同じファイルを `--filter 実用席` で単独で回すと、同じ順（計測モード → 通常モード）で緑になる（2 passed・203 s）。単独の走行の
-この step は、Session を張る前のこの process の確保が 1.73 GiB、山が 7.69 GiB（確保 5.46 GiB）で、B570 の上限（約 9.4〜9.6 GiB）まで
-約 1.8 GiB しか余裕が無い。
+**`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`** で落ちる。レーンでは 2 回中 2 回（385 passed・1 failed /
+394 passed・1 failed）、同じファイルを `--filter 実用席` で単独に回すと 2 回中 2 回緑。落ちるのは所要と確保を記録するだけの step で、
+sha 行と帯の照合は全て通る。
 
-- 原因は未特定。候補（推測）は 2 つ: ① 同じ process の前のテストの確保が解放されないまま残っていた（B570 は `destroy()` の解放が
-  次の device poll まで遅れる — テストは組の間で `settleReleases` を待つが、レーンの中の残りは測っていない）② 学習と共有している
-  GPU を別の process がその瞬間に使っていた。落ちた step は VRAM の記録（`start` の値）を出さないので、どちらかを今の記録からは
-  決められない。この日の変更は runtime / models の `src` に触れていない（配布形ミラー・テスト・recipe だけ）。
-- 運用の回避 = この step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独で再走する（緑ならレーンの中の
-  残りか他の process）。
-- 再発したら: 落ちた step でも VRAM の記録を出す形にしてから（今は成功した step だけが `start` / 山を出す）、レーンの中の `start` の
-  値を単独の 1.73 GiB と比べて ① と ② を分ける。
+- **原因（上流のソースと実測で確定）**: この開発機の Deno 2.9.6（wgpu-core 29）では、`GPUDevice.destroy()` は device に無効の印を立てるだけで、
+  何も解放しない。device とその資源（アロケータが抱えたままのブロック・zero buffer・ドライバのプール・query set）が返るのは、V8 の GC が
+  device のラッパを回収したとき。テストは 1 本ごとに `acquireGpu` → `settleReleases` → `destroy()` を繰り返すので、破棄済みの device が
+  GC まで残り、同じ process の VRAM の上限（B570 で約 9.6 GiB）を食い続ける。`settleReleases` が返すのは明示的に destroy したバッファだけで、
+  device 単位の残りには効かない。
+- **実測**（`outputs/bench/2026-10-05_dead-device/`・B570）:
+  - 素の WebGPU で device を 5 回作って捨てる probe: 何もしていない破棄済みの device 1 つにつき、DRM クライアントが 1 本残り、vram0 0.192 GiB と
+    gtt 64 MiB を抱え続ける（5 回で 1.15 GiB / 384 MiB）。`gc()` を 1 回呼んでも減らず、**2 回目で全部返る**（クライアントは物理デバイスの
+    fd の 1 本だけに戻る）。破棄の前に待つ（settle）かどうかでは変わらない。
+  - `e2e_wan_dit_test.ts` の 3 本（実寸の通常モード → 実用席の計測モード → 実用席の通常モード）を、外から DRM クライアントごとに記録した走行:
+    実用席の通常モードの S = 32,760 が走っている間、**破棄済みの 2 つの device が 0.64 GiB と 1.54 GiB を抱えたまま**だった
+    （合計の山 8.34 GiB = 0.64 + 1.54 + 自分の 6.16）。この step の開始時点の確保は 2.37 GiB で、単独の走行（1.73 GiB）より多い。
+    レーンではこの前に捨てた device がさらに多く、上限を越える。
+  - 計測モードの query set は 1 本あたり約 4.1 KiB（10,000 本で 41 MiB）。`GPUQuerySet.destroy()` は Deno では何もせず、GC で返る。
+- **運用の回避（修正まで）**: この step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独に再走する。
+- **直し方（裁定待ち）**: テストの GPU の取得口（`packages/*/tests/helpers/gpu.ts`）で、新しい device を取る前に GC を促し、破棄済みの device の
+  DRM クライアントが消えたことを検査する（残っていれば名指しして落とす）案と、ファイルごとに device を 1 つだけ持つ案がある。上流（Deno）への
+  報告は別に行う。製品の側では、`GpuContext.destroy()` の後に device を作り直す使い方（device lost からの復帰など）でも同じ残りが出る。
+- **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
+  「tiny golden の取得と破棄を重ねた末尾の OOM」。
+- 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。
