@@ -26,8 +26,7 @@
   `outputs/series/gemma4-e2b-tokenizer/`）、umT5 は `wan2.1-umt5-tokenizer/tokenizer.json`（語彙と前処理 promptClean の表を 1 本に — ADR 0119 段 10a）、anima のデモ用表は `anima-demo/text/`。export 系列の
   ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
 - Wan まわりの系列名: umT5 encoder は `umt5-xxl-i8-dyn`（出所の本家 `google/umt5-xxl` に合わせた名 — ADR
-  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 4。旧系列 `wan2.1-umt5-i8-dyn` は配布形ミラーの
-  焼き直しの後に片付ける）、取り込み由来は `umt5-xxl-<名前>-i8-dyn`、Wan2.2 TI2V-5B の DiT は
+  [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 4）、取り込み由来は `umt5-xxl-<名前>-i8-dyn`、Wan2.2 TI2V-5B の DiT は
   `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）。
 - gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
   製品容器 `krm` の**資産**として part 列の中に入る（ADR

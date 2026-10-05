@@ -374,8 +374,7 @@ later の「decode 速度の残り」。
   exporter core の変更が要る・開発機では門も sha 行も持てない — ADR 0121 決定 7 / 裁定 2）(b) I2V の縦横比を選べる口（直接リサイズ — diffusers の
   挙動 — を選べるように・口の形は段 9）。
   **関連（accepted・裁定 2026-10-04）**: ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)（umT5 の出所を本家 google/umt5-xxl へ・
-  互換の text encoder を作る経路・差し替えは今の components 席のまま・段 a〜d）。段 a〜d 完了（ADR 0122 の追記 4 本）。残り = 旧系列
-  `outputs/series/wan2.1-umt5-i8-dyn` の片付け（Wan の GPU レーンが緑になってから）・ADR 0122「未解決」の 2 項目（第三者の互換部品の公開の裁定・
+  互換の text encoder を作る経路・差し替えは今の components 席のまま・段 a〜d）。段 a〜d 完了（ADR 0122 の追記 4 本）。残り = ADR 0122「未解決」の 2 項目（第三者の互換部品の公開の裁定・
   版を跨いだグラフ記述の一致 — 追加学習版の視認は 2026-10-05 に利用者が問題なしと裁定）。
   **umT5 / Wan2.2 の小物（起票 2026-10-04）**: (a) 本家の索引（`pytorch_model.bin.index.json`）と `config.json` を sha256 で pin していない（索引が実物と
   食い違うと素の `KeyError` で落ちる — 値がすり替わる経路は無い・ADR 0122 追記「段 a の結果」）(b) umT5 の `write --check` が系列の中に一時ディレクトリを
