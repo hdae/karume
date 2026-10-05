@@ -258,6 +258,83 @@ exits 1 on any mismatch, including an item or file missing on either side, a req
 no file in it and a symlink inside the compared items, which it never follows (2 is a usage error, 3
 an unreadable file).
 
+### TI2V-5B (Wan2.2, ADR 0121 stage 4)
+
+The Wan2.2 TI2V-5B decoder is exported as the same two chunk graphs, with the same cache
+normalization and the same 15 IR ops (ADR [0121](../../../docs/decisions/0121-wan22-ti2v-5b.md)
+decision 6). `wan/vae_patch.py` accepts exactly two generations and adds two things for Wan2.2:
+
+- **Residual up blocks.** Each up block that upsamples (three of the four) has a shortcut outside
+  its residual path, `DupUp3D` (channel repeat, then depth-to-space along T, H and W). `_shared/vae_rank4.dup_up_3d` writes it
+  with rank-4 values only and is bit-exact against the upstream module; the first chunk drops the
+  leading `ft − 1` frames, as upstream does.
+- **Output in patchify space.** The graphs return 12 channels (RGB folded 2×2) before the
+  unpatchify; the unpatchify and the clamp stay on the host (ADR 0121 stage 5). The latent tile is
+  16 (256 px ÷ a spatial compression of 16). The tiled decode described above is Wan2.1's; the
+  Wan2.2 tile plan is ADR 0121 stage 5 and is not written yet.
+
+| Graph               | Inputs                                | Outputs                                                                |
+| ------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| `vae_decoder_first` | `latent [48,1,16,16]` + 30 `cache_NN` | frame `[12,1,128,128]` (patchify space, before clamp) + the 30 caches  |
+| `vae_decoder_next`  | `latent [48,1,16,16]` + 32 `cache_NN` | frames `[12,4,128,128]` (patchify space, before clamp) + the 32 caches |
+
+```bash
+uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b            # both graphs + chunk fixtures (f16)
+uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b --verify   # eager equivalence, tile 16, 9 chunks (writes nothing)
+```
+
+`--model` defaults to `t2v-1.3b`; the table in `export_vae.py` (`VAE_SERIES`) picks the series, the
+tile and the fixture seeds for each model, and the writer refuses a VAE whose `patch_size` or spatial
+compression does not match it. The TI2V-5B run writes
+`outputs/series/wan2.2-ti2v-5b-f16-dyn/{vae_decoder_first,vae_decoder_next}/` and
+`vae_chunks.{band,accept,long}.safetensors` at the series root (9, 5 and 21 chunks; the reference is
+the upstream non-tiled `_decode` chunk loop before the unpatchify and the clamp). `--verify` reports
+whether the cache normalization alone is bit-exact against the upstream `_decode`, whether
+`clamp(unpatchify(reference))` equals the upstream `_decode`, and the ratio of the rewritten graphs
+to the upstream.
+
+Measured on 2026-10-05:
+
+| Check                                                     | Result                                              |
+| --------------------------------------------------------- | --------------------------------------------------- |
+| cache normalization only vs `_decode` (tile 16, 9 chunks) | bit-exact                                           |
+| rewritten chunk graphs (eager) vs upstream                | max abs 7.09e-6 / reference max 1.40 = 5.07e-6      |
+| `first` / `next` graph                                    | 481 / 491 nodes, 1,085,152,447 / 1,110,338,097 B    |
+| second export into an empty directory vs the series       | all 17 files match (`wan.series_check`)             |
+| export / `--verify` (CPU)                                 | 538 s, peak RSS 4.85 GiB / 368 s, peak RSS 5.91 GiB |
+| GPU (B570, Deno) chunk loop vs upstream, `band`           | max abs 9.48e-6 (tolerance 4.8e-5)                  |
+| GPU chunk loop vs upstream, `accept` / `long` (21 chunks) | max abs 7.42e-6 / 1.15e-5                           |
+
+The GPU check is `packages/models/tests/e2e_wan_ti2v_vae_chunks_test.ts` and the asset check
+`packages/models/tests/wan_ti2v_vae_chunks_host_test.ts`, both in `deno task test:models:wan-ti2v`.
+
+The pytest side is `wan/tests/test_dup_up_3d.py`, `wan/tests/test_vae_patch_ti2v.py` and the
+TI2V-5B classes of `wan/tests/test_export_vae.py`. With the `wan` group installed they always run on
+a synthetic Wan2.2 VAE (the
+upstream `AutoencoderKLWan` with the 5B structure and small channels — `ti2v_synthetic_vae` in
+`wan/tests/conftest.py`). The real-weight tests take the `wan22_snapshot` fixture and skip when the
+pinned TI2V-5B snapshot is not in the HF cache; they read the whole VAE in f32 (a peak RSS of about
+3.5 GiB, about 2 minutes), so leave them out with `-k 'not RealWeights'` next to another long CPU
+job.
+
+The Wan2.1 VAE writers (`export_vae.py` and `vae_tiling.py`) import `vae_patch.py` and
+`_shared/vae_rank4.py`, so a change to any of these four files can change the Wan2.1 series. After
+such a change, rewrite the Wan2.1 VAE items into a fresh directory and compare all of them with
+`wan.series_check` (see the end of the previous subsection for how it compares).
+`_shared/vae_rank4.py` is also imported by the Anima recipe (`anima/patch.py`), so run
+`anima/tests/test_patch.py` as well after touching it.
+
+```bash
+OUT=$(mktemp -d); S=../../outputs/series/wan2.1-t2v-1.3b-f16-dyn
+uv run --group wan --inexact python -m wan.export_vae --model t2v-1.3b --out $OUT
+uv run --group wan --inexact python -m wan.series_check --written $OUT --existing $S \
+  --require vae_decoder_first --require vae_decoder_next --require vae_chunks.band.safetensors \
+  --require vae_chunks.accept.safetensors --require vae_chunks.long.safetensors
+uv run --group wan --inexact python -m wan.vae_tiling --out $OUT
+uv run --group wan --inexact python -m wan.series_check --written $OUT --existing $S \
+  --require vae_tiles.band.safetensors --require vae_tiles.accept.safetensors
+```
+
 ## Text embeddings, sampler and few-step reference (stage 6)
 
 ### Text embeddings
@@ -559,6 +636,7 @@ and the declared limits. Re-running the command writes the same bytes.
 ```bash
 uv run --group wan --inexact pytest wan   # from tools/export-recipes/
 deno task test:models:wan                 # from the repository root (packages/models/tests/*wan*_test.ts)
+deno task test:models:wan-ti2v            # Wan2.2 TI2V-5B (packages/models/tests/*wan_ti2v*_test.ts)
 ```
 
 `wan/tests/test_distribution.py` assembles the distribution once from minimal synthetic containers
@@ -592,4 +670,5 @@ minutes for the 33-frame clip and about 62 minutes for the 81-frame clip (3,703 
 transformer stage is 3,383 s).
 
 Tests that need the real weights take the `wan_snapshot` fixture (`wan/tests/conftest.py`) and skip
-when the pinned snapshot is not in the HF cache.
+when the pinned snapshot is not in the HF cache. The Wan2.2 TI2V-5B tests take `wan22_snapshot` the
+same way (the VAE ones are listed in the TI2V-5B subsection of the VAE section).

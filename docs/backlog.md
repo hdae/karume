@@ -363,9 +363,17 @@ later の「decode 速度の残り」。
   `e54e6dc6` / `cf321598`・ADR 0121 追記「段 3 の結果」）。**段 3 の GPU の合格判定**: 2.1 のレーンは 394 passed・1 failed（sha 行・帯・case id は全て一致・赤は既知のレーン内の OOM）、
   `KARUME_WAN_FULL_PIPELINE=1` の 50 ステップ 4 本は既存の sha 行と一致。**残り = レーンの再走で全緑**（レーン内の OOM = Deno の `GPUDevice.destroy()` が VRAM を返さない —
   known-issues。テストの GPU の取得口で GC を促す対症療法を入れた〈利用者の裁定 2026-10-05〉・緩和つきの再走は 395 passed・0 failed〈余裕は約 0.15 GiB — known-issues〉）。**段 3 は完了**（ADR 0121 追記「段 3 を閉じる」）。1.3B の f16 系列の照合
-  （`export_dit --check`）は 69 ファイル一致。**段 4 の Python 側が着地**（`0f1ff88a` / `734077ae` / `2763651b` — 2.2 の VAE decoder の chunk グラフ・
-  `export_vae --model ti2v-5b`）。
-  **次 = 段 4**（VAE 2.2 の decoder — 設計と裁定は `.claude/reviews/2026-10-04_adr0121-stage4-*.{json,md}`〈git 追跡外〉）。
+  （`export_dit --check`）は 69 ファイル一致。**段 4 ✅**（VAE 2.2 decoder の chunk グラフ 2 種・新しい op なし・GPU の chunk 列は B570 で帯 4.8e-5 の内・
+  1.3B の VAE の生成物はバイト不変 — Python `0f1ff88a` / `734077ae` / `2763651b`・TS `3ab40a8d` / `08547483` / `b004af49` / `8166a18a`・ADR 0121 追記
+  「段 4 の結果」。`src` に触っていないので 2.1 のレーンは再走せず、helper の移動は 2.1 の VAE chunk e2e の単独実走でビット同一）。
+  **次 = 段 5**（タイル decode — patchify 空間のブレンド → 貼り合わせ → ホストの unpatchify・2.2 のタイル計画の凍結・要素数の検査を形の検査へ）。
+  共有のタイル decode（`src`）に触るので 2.1 のレーンの実走が要る。開発機の GPU の換装（B570 → RTX 3080 Ti）の後は、2.1 の条件の読み替えを裁定する（ADR 0121 追記「段 3 を閉じる」）。
+  段 4 の帯（B570 の実測）を新しい機でどう扱うかは段 4 で生じた未決の問いで、同じ機会に諮る（提案）。
+  **段 4 の隣接の小物（起票 2026-10-05・レビューで見送り）**:
+  (a) `filePresent` を中立の test helper へ移す（今は VAE の helper `wan-ti2v-vae.ts` が DiT の helper `wan-ti2v-dit.ts` から import する — VAE のテストが DiT の helper の import に依る）
+  (b) 共有 helper `wan-vae-chunk-loop.ts` の drop-cache の故障注入が、名指した cache がグラフに在ることを assert する（無い名前だと黙って故障なしになる — 2.1 と 2.2 の両レーンを回す）
+  (c) DupUp3D の閉じた形（up0 / up1 を融合 upsample2x に乗せる）— perf-ledger K-77
+  (d) 2.1 の VAE chunk e2e（`e2e_wan_vae_chunks_test.ts`）の「故障注入のループは故障なしなら製品の経路と Uint32 で一致」の step で、`decodeWithFault(none)` の前にもフレームを毒値で埋め直し、非有限 0 を assert する（2.2 の e2e は段 4 で直し済み — 直したら 2.1 の VAE chunk e2e を実走する）
   **段 3 の隣接の小物（起票 2026-10-04・提案）**:
   (a) gpu-lab の Wan タブの再生 fps 16 と既定 33 フレームを、記述子と `video.fps` から読む（今は写し — 段 8 で直す）
   (b) 実験用ミラー（umT5 の追加学習版）のモデルカードに「Wan へ差し替える使い方」の段落を足す
