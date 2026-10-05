@@ -10,6 +10,10 @@
  * forward の順で、recipe の `wan/tests/test_vae_patch_ti2v.py` の `TestCacheTableRealWeights.TABLE` が同じ値を凍結する
  * （二重凍結 — 片方だけ書き換えると、もう片方の側のテストが落ちる）。**列挙結果ではなくここで固定する**（生成を
  * 一部だけ流した環境でテストが黙って消える形にしない）。
+ *
+ * 段 5 のタイル参照 `vae_tiles.*`（書き手は `tools/export-recipes/wan/vae_tiling.py --model ti2v-5b` — ケースの正本は
+ * その `TI2V_FIXTURE_CASES`）は、chunk グラフの組とは**別の在否の組**（{@link ti2vVaeTileAssets} — 3 本とも無ければ
+ * 明示 SKIP・一部だけなら FAIL）。書き手が別の台本（`vae_tiling.py`）で、chunk の組とは別の時点に書かれるため。
  */
 
 import { modelPresent } from "../../../runtime/tests/helpers/container-files.ts";
@@ -124,3 +128,49 @@ export const ti2vVaeAssets = (): readonly {
     return { path: url.pathname, present: filePresent(url) };
   }),
 ];
+
+// ---- タイル参照（段 5 — `vae_tiles.<case>.safetensors`）------------------------------------------------
+
+/** SKIP 時にそのまま貼れるタイル参照の生成コマンド（chunk グラフの組とは別に書く）。 */
+export const WAN_TI2V_VAE_TILES_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
+  "python -m wan.vae_tiling --model ti2v-5b";
+
+/** タイル参照 1 本（帯の決定用 1 本 + 受入れ 2 本 — 2.1 のタイル参照と同じ組み立て）。 */
+export type Ti2vVaeTileCase = {
+  readonly name: "band" | "accept" | "wide";
+  readonly role: "band" | "accept";
+  readonly chunks: number;
+  /** 潜在の空間の縦（出力の画素 = × 16）。 */
+  readonly height: number;
+  /** 潜在の空間の横（出力の画素 = × 16）。 */
+  readonly width: number;
+  /** 非タイルの参照 `frames_full`（patchify 空間・クランプ前 — 観測）を持つ。 */
+  readonly full: boolean;
+  /** 上流の unpatchify → クランプを当てた RGB `frames_rgb [3, F, H, W]` を持つ（VAE 段の末尾の照合）。 */
+  readonly rgb: boolean;
+};
+
+/**
+ * - `band`: 832×480×81（潜在 30×52・21 chunk）— 帯を決める 1 本（ADR 0121 の検収表の段 5）。
+ * - `accept`: 縦長 480×832×9（潜在 52×30・3 chunk）— タイルの位置も chunk 境界も band と違う。
+ * - `wide`: 1280×704×5（潜在 44×80・2 chunk）— 対ごとにブレンド幅が違うのはこの寸法だけ。
+ */
+export const WAN_TI2V_VAE_TILE_CASES: readonly Ti2vVaeTileCase[] = [
+  { name: "band", role: "band", chunks: 21, height: 30, width: 52, full: false, rgb: false },
+  { name: "accept", role: "accept", chunks: 3, height: 52, width: 30, full: true, rgb: true },
+  { name: "wide", role: "accept", chunks: 2, height: 44, width: 80, full: false, rgb: false },
+];
+
+export const ti2vVaeTileFixtureUrl = (name: Ti2vVaeTileCase["name"]): URL =>
+  new URL(`vae_tiles.${name}.safetensors`, WAN_TI2V_VAE_ROOT);
+
+/** タイル参照 3 本の在否（chunk グラフの組とは別の組）。呼ぶたびに見る（モジュールの評価ではファイルに触らない）。 */
+export const ti2vVaeTileAssets = (): readonly {
+  readonly path: string;
+  readonly present: boolean;
+}[] =>
+  WAN_TI2V_VAE_TILE_CASES.map(({ name }) => {
+    const url = ti2vVaeTileFixtureUrl(name);
+    return { path: url.pathname, present: filePresent(url) };
+  });
