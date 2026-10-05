@@ -24,28 +24,24 @@
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
+import { ExecutionError, prepareContainer, type Session } from "@karume/runtime";
 import {
-  ExecutionError,
-  type GpuContext,
-  parseSafetensors,
-  prepareContainer,
-  type ResidentTensor,
-  type Session,
-  type SessionDiagnostics,
-} from "@karume/runtime";
-import {
-  concatWanVaeFrames,
   decodeWanVaeTile,
-  enqueueWanVaeChunk,
   WanVaeChunkCaches,
   wanVaeChunkCount,
   wanVaeChunkLayout,
   wanVaeFrameCount,
-  wanVaeLatentChunk,
 } from "../src/wan/vae-chunks.ts";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
+import {
+  bitsEqual,
+  decodeWithFault,
+  type Fault,
+  readFixture,
+  vramBreakdown,
+} from "./helpers/wan-vae-chunk-loop.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
@@ -124,146 +120,7 @@ Deno.test({
   },
 });
 
-/** chunk 列のフィクスチャ（逆正規化済みの潜在 `[16,F,t,t]` と上流のクランプ前の出力）。 */
-type Fixture = {
-  readonly latents: Float32Array<ArrayBuffer>;
-  readonly frames: Float32Array<ArrayBuffer>;
-  readonly frameShape: readonly number[];
-};
-
-const readFixture = async (name: CaseName): Promise<Fixture> => {
-  const bytes = await Deno.readFile(fixtureUrl(name));
-  const file = parseSafetensors(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-  );
-  const view = (key: string): Float32Array<ArrayBuffer> => {
-    const tensor = file.tensors.get(key);
-    assert(tensor !== undefined && tensor.dtype === "F32", `${name}: '${key}' が F32 で無い`);
-    return new Float32Array(file.buffer, tensor.byteOffset, tensor.byteLength / 4);
-  };
-  const frames = file.tensors.get("frames");
-  assert(frames !== undefined, `${name}: 'frames' が無い`);
-  return { latents: view("latents"), frames: view("frames"), frameShape: frames.shape };
-};
-
-/** 故障注入の種類（無し = 製品の経路と同じ）。 */
-type Fault =
-  | { readonly kind: "none" }
-  | { readonly kind: "skip-zero" }
-  | { readonly kind: "drop-cache"; readonly cache: string }
-  | { readonly kind: "first-for-all" }
-  | { readonly kind: "swap-cache-frames" };
-
-/**
- * 製品の経路（`decodeWanVaeTile`）と同じ部品で組んだ chunk ループ（故障注入の口）。
- *
- * `swap-cache-frames` だけは first の後で区間を閉じ、cache の 2 フレームをホストで入れ替えてから
- * 残りを別の区間で回す（区間の切れ目は値を変えない — 故障なしの一致の門は 1 区間の形で見る）。
- */
-const decodeWithFault = async (
-  gpu: GpuContext,
-  sessions: { readonly first: Session; readonly next: Session },
-  caches: WanVaeChunkCaches,
-  latents: Float32Array,
-  fault: Fault,
-): Promise<Float32Array<ArrayBuffer>> => {
-  const { layout } = caches;
-  const chunks = wanVaeChunkCount(layout, latents);
-  const frames = await caches.frames(chunks);
-  if (fault.kind !== "skip-zero") caches.zero();
-  const read: Record<string, ArrayBuffer> = {};
-  const runRange = async (from: number, to: number): Promise<void> => {
-    const batch = await gpu.beginBatch();
-    try {
-      for (let index = from; index < to; index += 1) {
-        const head = index === 0 || fault.kind === "first-for-all";
-        const graph = head ? layout.first : layout.next;
-        const session = head ? sessions.first : sessions.next;
-        const latent = wanVaeLatentChunk(layout, latents, index);
-        if (fault.kind === "drop-cache" && !head) {
-          const copyOutputs = caches.copyOutputs(graph, frames[index]);
-          const output = graph.cacheOutputs[graph.caches.indexOf(fault.cache)];
-          delete copyOutputs[output];
-          await session.enqueue(
-            { latent, ...caches.inputs(graph) },
-            { batch, copyOutputs },
-          );
-        } else {
-          await enqueueWanVaeChunk(batch, session, graph, caches, latent, frames[index]);
-        }
-      }
-    } catch (cause) {
-      await batch.finish().catch(() => undefined);
-      throw cause;
-    }
-    const range = frames.slice(from, to);
-    Object.assign(
-      read,
-      await batch.finishAndRead(
-        Object.fromEntries(range.map((resident, offset) => [`frame${from + offset}`, resident])),
-      ),
-    );
-  };
-  if (fault.kind === "swap-cache-frames") {
-    await runRange(0, 1);
-    for (const [name, resident] of Object.entries(caches.inputs(layout.next))) {
-      const shape = layout.cacheShapes.get(name);
-      assert(shape !== undefined, `cache '${name}' の形が layout に無い`);
-      await swapCacheFrames(resident, shape[2] * shape[3]);
-    }
-    await runRange(1, chunks);
-  } else {
-    await runRange(0, chunks);
-  }
-  return concatWanVaeFrames(layout, frames.map((_, index) => read[`frame${index}`]));
-};
-
-/**
- * cache `[C,2,h,w]` の 2 フレームの順をホストで入れ替える（故障注入）。行優先なのでチャネル c の
- * 2 フレームは連続した `2·plane`（plane = h·w）。
- */
-const swapCacheFrames = async (resident: ResidentTensor, plane: number): Promise<void> => {
-  const values = new Float32Array(await resident.read());
-  const swapped = new Float32Array(values.length);
-  for (let offset = 0; offset < values.length; offset += 2 * plane) {
-    swapped.set(values.subarray(offset + plane, offset + 2 * plane), offset);
-    swapped.set(values.subarray(offset, offset + plane), offset + plane);
-  }
-  resident.write(swapped);
-};
-
-/** VRAM の内訳（診断から — 生きている確保の和）。 */
-const vramBreakdown = (
-  first: SessionDiagnostics,
-  next: SessionDiagnostics,
-  caches: WanVaeChunkCaches,
-): Record<string, number> => {
-  const session = (diagnostics: SessionDiagnostics): number =>
-    diagnostics.weights.allocatedBytes + diagnostics.planBacking.residentBytes +
-    diagnostics.planBacking.inputBytes;
-  const parts = {
-    firstWeights: first.weights.allocatedBytes,
-    firstBacking: first.planBacking.residentBytes + first.planBacking.inputBytes,
-    nextWeights: next.weights.allocatedBytes,
-    nextBacking: next.planBacking.residentBytes + next.planBacking.inputBytes,
-    caches: caches.cacheBytes,
-    frames: caches.frameBytes,
-    // finishAndRead の staging（フレームの合計 — 決着の間だけ生きる）。
-    readbackStaging: caches.frameBytes,
-  };
-  return {
-    ...parts,
-    total: session(first) + session(next) + 2 * caches.frameBytes + caches.cacheBytes,
-  };
-};
-
 const results = openResults("wan-vae-chunks");
-
-const bitsEqual = (a: Float32Array, b: Float32Array): boolean => {
-  const left = new Uint32Array(a.buffer, a.byteOffset, a.length);
-  const right = new Uint32Array(b.buffer, b.byteOffset, b.length);
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-};
 
 Deno.test({
   name: "Wan VAE chunk 列: 常駐 cache の first → next が上流の _decode と帯の中で一致（実 GPU）",
@@ -278,9 +135,9 @@ Deno.test({
     const nextModel = prepareContainer(nextOpened, seriesGraph(SERIES, NEXT_COMPONENT));
     const layout = wanVaeChunkLayout(firstModel, nextModel);
     const fixtures = {
-      band: await readFixture("band"),
-      accept: await readFixture("accept"),
-      long: await readFixture("long"),
+      band: await readFixture(fixtureUrl("band")),
+      accept: await readFixture(fixtureUrl("accept")),
+      long: await readFixture(fixtureUrl("long")),
     };
 
     const gpu = await acquireTestGpu();
