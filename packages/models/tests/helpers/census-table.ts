@@ -74,7 +74,7 @@ import {
 } from "../../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../../src/siglip2/pipeline.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../../src/vowel-detector/pipeline.ts";
-import { WAN_SESSION_POLICY } from "../../src/wan/pipeline.ts";
+import { WAN_SESSION_POLICY } from "../../src/wan/family.ts";
 
 // ---------------------------------------------------------------------------
 // 鍵

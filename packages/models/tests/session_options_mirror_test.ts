@@ -30,7 +30,7 @@ import {
 } from "../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
-import { WAN_SESSION_POLICY } from "../src/wan/pipeline.ts";
+import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 import { UMT5_ENCODER_SESSION_POLICY } from "./helpers/census-table.ts";
 
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);

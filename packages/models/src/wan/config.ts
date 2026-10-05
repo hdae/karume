@@ -16,7 +16,7 @@
  * 配布側が選べてしまう。
  *
  * MUST: 未知キーは fail loudly（綴り違いが黙って既定へ縮退すると、配布者の意図した既定と実行が
- * 食い違ったまま気づけない）。値域は生成の要求の門（`pipeline.ts` の `planWanGeneration`）と同じで、
+ * 食い違ったまま気づけない）。値域は生成の要求の門（`family.ts` の `planWanGeneration`）と同じで、
  * 外れた宣言は**資産の齟齬**として素の `Error` で落とす（入力起因ではない — ADR 0107 決定 2）。
  * 既定の steps × shift の組で UniPC の σ 列が組めることもここで見る — 見ないと、要求が何も渡さない
  * `generate` が `planWanGeneration` で入力起因（`ModelInputError`）として落ちる。

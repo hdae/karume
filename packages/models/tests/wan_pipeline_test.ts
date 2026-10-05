@@ -18,13 +18,11 @@ import { parseManifest } from "@karume/hub";
 import type { CodecName, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
-  assertWanVaeTilesCoverAcceptedSizes,
-  planWanGeneration,
-  planWanGpuGeneration,
   type WanGenerateRequest,
   WanPipeline,
   type WanPipelineOptions,
 } from "../src/wan/pipeline.ts";
+import { planWanGeneration, planWanGpuGeneration, WAN21_FAMILY } from "../src/wan/family.ts";
 import { ditContract, ditInputs, wanDitPatch } from "../src/wan/dit-loop.ts";
 import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
 import {
@@ -143,7 +141,14 @@ const LAYOUT = { latentChannels: 16, tile: 32, sampleTile: 256, sampleChannels: 
 /** 配布形の `pipelineConfig`（recipe `wan/distribution.py` の `WAN_PIPELINE_CONFIG` — 参照の設定）。 */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } };
 const plan = (request: Partial<WanGenerateRequest>) =>
-  planWanGeneration({ prompt: "Two cats.", ...request }, EMBEDS, LAYOUT, CONFIG);
+  planWanGeneration(
+    { prompt: "Two cats.", ...request },
+    EMBEDS,
+    LAYOUT,
+    CONFIG,
+    WAN21_FAMILY.generation,
+    WAN21_FAMILY.owner,
+  );
 
 describe("テキスト埋め込み資産", () => {
   it("メタの並びのまま行を返し、行は [tokens, width] の f32", () => {
@@ -303,12 +308,27 @@ describe("planWanGeneration（generate の入口の門）", () => {
   it("negative の行が 1 本でない資産で negativePrompt を省くと拒む", () => {
     const embeds = parseWanTextEmbeds(buildAsset(ROWS.slice(0, 2)));
     assertThrows(
-      () => planWanGeneration({ prompt: "Two cats." }, embeds, LAYOUT, CONFIG),
+      () =>
+        planWanGeneration(
+          { prompt: "Two cats." },
+          embeds,
+          LAYOUT,
+          CONFIG,
+          WAN21_FAMILY.generation,
+          WAN21_FAMILY.owner,
+        ),
       ModelInputError,
       "negative の行が 0 本",
     );
     assertEquals(
-      planWanGeneration({ prompt: "Two cats.", guidance: 1 }, embeds, LAYOUT, CONFIG).negative,
+      planWanGeneration(
+        { prompt: "Two cats.", guidance: 1 },
+        embeds,
+        LAYOUT,
+        CONFIG,
+        WAN21_FAMILY.generation,
+        WAN21_FAMILY.owner,
+      ).negative,
       undefined,
     );
   });
@@ -355,13 +375,22 @@ describe("planWanGeneration（generate の入口の門）", () => {
       scheduler: { shift: 7.5 },
       defaults: { steps: 23, guidance: 4.25 },
     };
-    const resolved = planWanGeneration({ prompt: "Two cats." }, EMBEDS, LAYOUT, config);
+    const resolved = planWanGeneration(
+      { prompt: "Two cats." },
+      EMBEDS,
+      LAYOUT,
+      config,
+      WAN21_FAMILY.generation,
+      WAN21_FAMILY.owner,
+    );
     assertEquals([resolved.steps, resolved.guidance, resolved.shift], [23, 4.25, 7.5]);
     const explicit = planWanGeneration(
       { prompt: "Two cats.", steps: 2, guidance: 1, shift: 1.5 },
       EMBEDS,
       LAYOUT,
       config,
+      WAN21_FAMILY.generation,
+      WAN21_FAMILY.owner,
     );
     assertEquals([explicit.steps, explicit.guidance, explicit.shift], [2, 1, 1.5]);
     assertEquals(explicit.negative, undefined, "guidance 1 の明示は既定の 4.25 に勝つ");
@@ -438,14 +467,16 @@ describe("家族 admission: VAE のタイルが受理する寸法を全部覆う
   };
 
   it("潜在タイル 32（配布形）と 60（短辺ちょうど）は 832×480 / 480×832 の両方を覆う", () => {
-    for (const tile of [32, 60]) assertWanVaeTilesCoverAcceptedSizes(layoutOf(tile));
+    for (const tile of [32, 60]) {
+      assertWanVaeTilesCover(layoutOf(tile), WAN21_FAMILY.generation, WAN21_FAMILY.owner);
+    }
   });
 
   it("chunk グラフの検査は通るがタイル decode できない資産を、寸法と理由を言って拒む", () => {
     // 8: 重なりの下限 8 がタイル幅未満にならない。64: 潜在の短辺 60 より大きい。
     for (const [tile, reason] of [[8, "最小の重なり"], [64, "タイル幅 64 より小さい"]] as const) {
       const error = assertThrows(
-        () => assertWanVaeTilesCoverAcceptedSizes(layoutOf(tile)),
+        () => assertWanVaeTilesCover(layoutOf(tile), WAN21_FAMILY.generation, WAN21_FAMILY.owner),
         Error,
         reason,
       );
@@ -456,7 +487,7 @@ describe("家族 admission: VAE のタイルが受理する寸法を全部覆う
 
   it("縮尺で受理する寸法の潜在が整数にならない資産を拒む", () => {
     assertThrows(
-      () => assertWanVaeTilesCoverAcceptedSizes(layoutOf(32, 7)),
+      () => assertWanVaeTilesCover(layoutOf(32, 7), WAN21_FAMILY.generation, WAN21_FAMILY.owner),
       Error,
       "整数にならない",
     );
@@ -1091,9 +1122,9 @@ describe("初期ノイズの乱数", () => {
  *
  * NOTE: コンストラクタは TS の `private`（manifest 検査と資産の突合を迂回させない — ADR 0008）なので、
  * `Reflect.construct` で内部状態を直接渡す（private の迂回はテストだけ）。公開の構築口（`fromAssets`）は
- * krm コンテナのバイト列と GPU の取得を要り、CPU の単体テストでは回せない。内部状態の形
- * （pipeline.ts の `WanState`）は export していないので、ここで組む欄は手で揃える — 欄が欠ければ
- * generate の中の TypeError で落ち、各テストが見る文言と食い違って赤になる。
+ * krm コンテナのバイト列と GPU の取得を要り、CPU の単体テストでは回せない。内部状態の形は
+ * family.ts の `WanState` だが、`Reflect.construct` の引数は型で縛られないので、ここで組む欄は手で
+ * 揃える — 欄が欠ければ generate の中の TypeError で落ち、各テストが見る文言と食い違って赤になる。
  */
 const mockPipeline = (options: {
   readonly ditValue?: number;
@@ -1385,7 +1416,13 @@ describe("planWanGpuGeneration（GPU 経路の入口の門）", () => {
   const encoder = wanParityEncoder();
   const BOXING_CATS = wanParityCase("fixed-boxing-cats");
   const gpuPlan = (request: Partial<WanGenerateRequest>) =>
-    planWanGpuGeneration({ prompt: BOXING_CATS.text, ...request }, encoder, LAYOUT, CONFIG);
+    planWanGpuGeneration(
+      { prompt: BOXING_CATS.text, ...request },
+      encoder,
+      LAYOUT,
+      CONFIG,
+      WAN21_FAMILY.generation,
+    );
 
   it("プロンプトを上流と同じ id 列にし、省いた negative は公式の sample_neg_prompt を同じ門で符号化する", () => {
     const resolved = gpuPlan({});

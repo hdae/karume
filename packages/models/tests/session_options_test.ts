@@ -23,7 +23,7 @@ import {
 } from "../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
-import { WAN_SESSION_POLICY } from "../src/wan/pipeline.ts";
+import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 
 Deno.test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
   assertEquals(toSessionOptions({}), {});
