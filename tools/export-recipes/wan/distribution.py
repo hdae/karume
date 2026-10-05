@@ -146,7 +146,8 @@ WAN_CONTAINER_ROLES: tuple[str, ...] = (
     WAN_VAE_NEXT_ROLE,
 )
 
-#: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `pipeline.ts` の `TEXT_EMBEDS`）。
+#: モデル単位の資産（manifest の `assets` のキー = 役割名 — TS 側 `text-stage.ts` の
+#: `TEXT_EMBEDS`）。
 WAN_TEXT_EMBEDS_ROLE = "text_embeds"
 
 #: umT5 のトークナイザと前処理の表の資産（manifest の `assets` のキー = 役割名 — TS 側の読み手は
@@ -165,7 +166,7 @@ WAN_TOKENIZER_SUBFOLDER = "tokenizer"
 WAN_TOKENIZER_VERSIONS: tuple[str, ...] = ("ftfy", "transformers")
 
 #: `transformer` の容器が宣言する RoPE 素表の資産名と役割（書き手は `wan.export_dit` の
-#: `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE`・読み手は TS 側 `pipeline.ts` の `ROPE_BASE`）。
+#: `ROPE_BASE_ASSET` / `ROPE_BASE_ROLE`・読み手は TS 側 `dit-loop.ts` の `ROPE_BASE`）。
 WAN_ROPE_BASE_ASSET = "rope_base"
 WAN_ROPE_BASE_ROLE = "rope-base"
 
