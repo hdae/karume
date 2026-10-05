@@ -76,24 +76,31 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
 };
 
 /**
- * Wan2.2（TI2V 5B）の記述子（ADR 0121 段 5 — 832×480 / 480×832 × フレーム数 4n+1 の 5〜81 だけ）。
+ * Wan2.2（TI2V 5B）の記述子（1280×704 / 704×1280 × フレーム数 4n+1 の 5〜33 だけ — ADR 0121 の
+ * 「追記（2026-10-05）: 受理寸法を公式の 2 寸法へ」）。
  *
- * NOTE: 1280×704 / 704×1280（5〜33 フレーム）は今の型（フレームの範囲が全寸法で 1 本）では書けないので、
- * 寸法ごとのフレームの上限を持つ型への変更と一緒に段 6 で足す。段 5 の 1280×704 のタイル計画は
- * `planWanGenerationTiles` を直接呼んで凍結する（この関数は受理集合を見ない）。
+ * 受理寸法は公式実装の対応寸法（Wan2.2 の `SUPPORTED_SIZES` — 公式が 720P と呼ぶ 2 向き）だけ。pin した
+ * Diffusers のパイプラインの既定 832×480 は公式実装の対応寸法の外で、実際に生成して視認すると 3 本（実用席
+ * shift 3・参照席 shift 3・実用席 shift 5）とも絵が崩れた（太い輪郭線とベタ塗り）。1280×704 は実用席・shift 5
+ * （同じ seed・プロンプト）で写実に出た。よって 832×480 / 480×832 は受理しない。段 5 の 832×480 系のタイル
+ * 参照は受理寸法に依らない数値の照合として残る（タイル計画の入口 `planWanGenerationTiles` は受理集合を見ない）。
  *
- * 既定の 832×480・81 フレームは仮置き（ADR 0121 決定 8 の本文の値 — 段 7 の視認で確定する）。fps 24 と
- * `patch_size` 2 は上流の Wan2.2 の値（逆正規化の統計の表は `latents.ts`）。
+ * 上限 33 フレームは開発機（B570・Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉）で 1280×704・50 ステップの
+ * 完走を確かめた値。開発機での上限の引き上げ（49 / 57 フレーム）は実測を見て決める。公式実装の既定 121
+ * フレームは、大きい GPU で完走を確かめてから広げる。
+ *
+ * 既定の 1280×704・33 フレームは仮置き（視認で確定する）。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
+ * （逆正規化の統計の表は `latents.ts`）。
  */
 export const WAN22_TI2V_GENERATION: WanGenerationDescriptor = {
   latents: { mean: WAN22_LATENTS_MEAN, std: WAN22_LATENTS_STD },
   acceptedSizes: [
-    { width: 832, height: 480 },
-    { width: 480, height: 832 },
+    { width: 1280, height: 704 },
+    { width: 704, height: 1280 },
   ],
   minFrames: 5,
-  maxFrames: 81,
-  defaults: { frames: 81, width: 832, height: 480 },
+  maxFrames: 33,
+  defaults: { frames: 33, width: 1280, height: 704 },
   fps: 24,
   vaePatchSize: 2,
 };
