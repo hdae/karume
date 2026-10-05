@@ -117,10 +117,13 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
  * chunk 列の帯（絶対値 — 出力はクランプ前の patchify 空間のフレーム）。`undefined` = 未導出（モジュール doc
  * 「帯の決め方」）。
  *
+ * 導出（2026-10-05・B570）: 決定用 band（9 chunk）の maxAbs 9.477e-6 × 5 = 4.739e-5 → 有効数字 2 桁へ切り上げ 4.8e-5。
+ * 受入れは accept（5 chunk）7.421e-6・long（21 chunk）1.153e-5。故障注入 3 件の maxAbs は 0.66 / 1.37 / 1.30。
+ *
  * MUST: 受入れ（accept / long）の結果を見てこの値も決定用のケースも変えない。受入れが帯を外れたら、帯を広げずに
  * 原因を調べる。
  */
-const BAND: number | undefined = undefined;
+const BAND: number | undefined = 4.8e-5;
 /** 判定と記録の帯（未導出の回は無限の帯として記録し、判定は赤にする）。 */
 const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 };
 
