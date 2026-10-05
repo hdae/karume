@@ -4,11 +4,12 @@
 //
 // - **ホスト関数 × golden の入力**: 2.1 のホスト関数（`src/wan/dit-*.ts`）が潜在 48 チャネルの 5B でも
 //   golden のグラフ入力を再現すること（patchify・資産 `rope_base` からの RoPE 表はビット一致・
-//   `timesteps_proj` は atol）。I2V 対応の 2 入力（`timesteps_proj_condition`・`condition_mask`）は TS の
-//   実装がまだ無い（段 6）ので、ここで golden の規約を固定する: 条件側の時刻は `reference` の
-//   `condition_timestep`（I2V は 0・T2V は生成側と同じ）、条件マスクは I2V なら先頭の潜在フレームの
-//   H'·W' トークンが 1（u32）・T2V は全て 0。テストの中のホストの条件マスク（`helpers/wan-ti2v-dit.ts` の
-//   `conditionMask` — 実 GPU の r 門の製品の経路の入力と故障注入が使う）も golden とビット一致させる。
+//   `timesteps_proj` は atol）。I2V 対応の 2 入力（`timesteps_proj_condition`・`condition_mask`）は、T2V の
+//   形だけ `src/wan/dit-loop.ts` が組み（段 6）、I2V の形の TS の実装はまだ無い（段 9）ので、ここで golden の
+//   規約を固定する: 条件側の時刻は `reference` の `condition_timestep`（I2V は 0・T2V は生成側と
+//   同じ）、条件マスクは I2V なら先頭の潜在フレームの H'·W' トークンが 1（u32）・T2V は全て 0。
+//   テストの中のホストの条件マスク（`helpers/wan-ti2v-dit.ts` の `conditionMask` — 実 GPU の r 門の
+//   製品の経路の入力と故障注入が使う）も golden とビット一致させる。
 //   S = 192 の golden（段 1）と、実寸の 2 つの形の golden（段 2 — 潜在 `[48,21,30,52]` / `[48,9,44,80]`・
 //   P = 390 / 880）の両方で見る。
 // - **runtime から見た容器の宣言**: 入力 7 本（条件マスクは bool `[1,S,1]`）・linear のノード 310 本

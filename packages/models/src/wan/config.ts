@@ -8,7 +8,7 @@
  * 宣言するのは生成の既定だけ（ADR 0118 決定 5 — 製品の既定は manifest の `pipelineConfig.scheduler` で
  * 起こし、視認の A/B で変えるかを決める）:
  *
- * - `scheduler.shift` — flow matching の shift（参照の設定 3.0）
+ * - `scheduler.shift` — flow matching の shift（参照の設定 — Wan2.1 は 3.0・Wan2.2 は 5.0）
  * - `defaults.steps` / `defaults.guidance` — denoise の step 数と CFG の強さ（参照の設定 50 / 5.0）
  *
  * UniPC の構造（次数・bh2・`num_train_timesteps`）は宣言の席を持たない — 移植が実装している分岐は

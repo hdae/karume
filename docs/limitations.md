@@ -1043,6 +1043,26 @@ Consequences）。
   側で止める（明示の引数 `--allow-undeclared-license`・`models/` の外・公開前の門 — ADR 0122 決定 6）が、手元に組んだミラーを
   差すこと自体は止めない。
 
+## Wan2.2: 受ける寸法は 1280×704 / 704×1280、フレーム数は 4n+1 の 5〜33・T2V だけ（配布形はまだ無い — ADR 0121）
+
+`@karume/models/wan` の `WanTi2vPipeline`（Wan2.2 TI2V-5B）の by-design の制約。入力起因の拒否は Wan2.1 と同じ入口（GPU に触る前）で
+`ModelInputError` になる（受理の外は fail loudly）。
+
+- **受理集合**: 寸法は 1280×704 / 704×1280、フレーム数は 4n+1 の 5〜33（既定 1280×704・33 フレーム — 仮置き）。寸法とフレーム数は
+  `packages/models/src/wan/descriptor.ts` の `WAN22_TI2V_GENERATION`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 追記（2026-10-05）
+  「受理寸法を公式の 2 寸法へ」）。
+- **既定の shift は 5.0 と決めた**（pin の scheduler の `flow_shift` = 公式の 720P の値）。コードは shift の既定を持たず、manifest の
+  `pipelineConfig.scheduler.shift` から読む。5.0 は配布形（段 8）の `pipelineConfig` に入れる値で、それまでは `fromAssets` に渡す manifest が
+  決める。
+- **832×480 / 480×832 は受理しない**: 公式実装の対応寸法（1280×704 / 704×1280）の外。B570 で生成すると、席と shift を変えても絵が崩れた
+  （太い輪郭線とベタ塗り）。1280×704 は同じコード・同じ重みで写実に出た。上流（diffusers・CPU f32・元の重み）でも 832×480 が同じ見え方に
+  なるかは確かめていない。
+- **フレーム数の上限 33** は開発機（B570）で完走を確かめた値。49 / 57 フレームも B570 で完走したが、上限を広げるかは未決。公式実装の既定
+  121 フレームは、大きい GPU で確かめてから。
+- **T2V だけ**: 画像から動画（I2V）は ADR 0121 の段 9。今の要求の型は画像入力を持たない。
+- **配布形（`karume-wan2.2`）はまだ無い**（ADR 0121 の段 8）。それまでの入口は、系列の容器から組んだ manifest と資産を渡す
+  `WanTi2vPipeline.fromAssets`。
+
 ## EmbeddingGemma: 実行時 attention_mask（バッチ内パディング）は非対応 — 単一シーケンス前提
 
 export 済みグラフ（台本 `tools/export-recipes/embeddinggemma/export.py`）は `attention_mask` を

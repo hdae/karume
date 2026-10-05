@@ -270,8 +270,9 @@ decision 6). `wan/vae_patch.py` accepts exactly two generations and adds two thi
   leading `ft − 1` frames, as upstream does.
 - **Output in patchify space.** The graphs return 12 channels (RGB folded 2×2) before the
   unpatchify; the unpatchify and the clamp stay on the host (ADR 0121 stage 5). The latent tile is
-  16 (256 px ÷ a spatial compression of 16). The tiled decode described above is Wan2.1's; the
-  Wan2.2 tile plan is ADR 0121 stage 5 and is not written yet.
+  16 (256 px ÷ a spatial compression of 16). The tiled decode described above also covers Wan2.2
+  since ADR 0121 stage 5: `wan.vae_tiling --model ti2v-5b` blends and pastes in patchify space with
+  an overlap of 4 latents (64 px ÷ 16) and applies the unpatchify and the clamp after the paste.
 
 | Graph               | Inputs                                | Outputs                                                                |
 | ------------------- | ------------------------------------- | ---------------------------------------------------------------------- |

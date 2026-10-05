@@ -520,7 +520,11 @@ class TestTheFullCases:
         return [case for case in ti2v_export_dit.FULL_CASES if case.role == role]
 
     def test_the_two_shapes_are_the_acceptance_limits_of_both_allocations(self) -> None:
-        """832×480・81 フレーム（S = 8,190）と 1280×704・33 フレーム（S = 7,920）。"""
+        """832×480・81 フレーム（S = 8,190）と 1280×704・33 フレーム（S = 7,920）の数値の門の形。
+
+        ADR 0121 追記「裁定 1 の確定」の受理の上限から採った形（832×480 は追記（2026-10-05）で
+        受理の外になったが、受理寸法と無関係な数値の門の形として使う）。
+        """
         shapes = {case.latent_shape: case.tokens(self.PATCH) for case in ti2v_export_dit.FULL_CASES}
 
         assert shapes == self.SHAPES

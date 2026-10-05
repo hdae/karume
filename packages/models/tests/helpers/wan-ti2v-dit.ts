@@ -11,10 +11,10 @@
  *
  * ## ホスト側の条件マスク（{@link conditionMask}）
  *
- * `src/wan/` にはまだ条件マスクを組む関数が無い（2.2 のホストの実装は段 3 / 6 — この段では `src/wan/` を
- * 変えない）。規約は recipe の `dit_patch.dit_condition_mask` と同じで、I2V は先頭の潜在フレームの
- * P = H'·W' トークンが 1（bool は u32 の 0 / 1）、T2V は全て 0。golden の `input.condition_mask` との
- * ビット一致はホストテストが縛る。
+ * T2V の条件入力（全て偽の条件マスクと、生成側と同じ条件側の時刻）は `src/wan/dit-loop.ts` が組む（ADR 0121
+ * 段 6）。I2V の条件マスクを組む関数は `src/wan/` にまだ無い（段 9）ので、ここが I2V の形も持つ。規約は recipe の
+ * `dit_patch.dit_condition_mask` と同じで、I2V は先頭の潜在フレームの P = H'·W' トークンが 1（bool は u32 の
+ * 0 / 1）、T2V は全て 0。golden の `input.condition_mask` とのビット一致はホストテストが縛る。
  */
 
 import { assertEquals } from "@std/assert";

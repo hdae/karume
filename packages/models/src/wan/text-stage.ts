@@ -5,7 +5,7 @@
  *
  * 段の順序と Session の寿命（text → DiT → VAE を 1 段ずつ張って畳む）は `./pipeline.ts` 冒頭の doc が
  * 正本で、ここは text 段の部品だけを持つ。Wan2.1 / 2.2 の class が共有する（umT5 は 2.1 と同じ —
- * ADR 0121 決定 8・10）。`owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`）。
+ * ADR 0121 決定 8・10）。`owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は `"WanTi2vPipeline"`）。
  *
  * NOTE: 公開型（`WanPipelineOptions` / `WanGenerateEvent` / `WanRunComponent` / `WanAssets`）は
  * `./pipeline.ts` から `import type` で取る（型だけの参照は消去されるので循環 import にならない）。
