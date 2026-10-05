@@ -63,7 +63,6 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import type { SessionSpec } from "@karume/hub";
 import {
   type BoundContainer,
   type FusionCounts,
@@ -113,6 +112,11 @@ import {
   WAN_TI2V_SERIES_DIR,
   WAN_TI2V_SERIES_NAME,
 } from "./helpers/wan-ti2v-dit.ts";
+import {
+  WAN_TI2V_PRACTICAL_QUANT as PRACTICAL_QUANT,
+  WAN_TI2V_PRACTICAL_SESSION as PRACTICAL_SESSION,
+  WAN_TI2V_REFERENCE_QUANT as REFERENCE_QUANT,
+} from "./helpers/wan-ti2v-pipeline.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
@@ -189,23 +193,8 @@ const EXPECTED_FUSIONS: Partial<FusionCounts> = { adaln: 0, rope: 0, silu: 4 };
  */
 const SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
 
-/** 参照席（ADR 0121 決定 2 — `session` 空）と実用席。 */
-const REFERENCE_QUANT = "f16+dit8";
-const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
+/** 参照席（ADR 0121 決定 2 — `session` 空）と実用席（値は `helpers/wan-ti2v-pipeline.ts` — 通しの e2e と同じ定数）。 */
 type Seat = typeof REFERENCE_QUANT | typeof PRACTICAL_QUANT;
-
-/**
- * 実用席の束（ADR 0121 決定 2 の表 — `linearCompute: "a8"`・`attentionCompute: "a8"`・`attentionScoreStorage: "f16"`）。
- *
- * NOTE: 束の正本は配布形の manifest の quant 席（ADR 0110 決定 1）だが、2.2 の配布形は段 8 まで無い。それまでは ADR の宣言を
- * ここに書き、家族の受理表（`WAN_SESSION_POLICY` — 決定 2 の「受理表の 3 キーは ADR 0120 と同じ」）に通す。段 8 で manifest
- * から引く形に替える。
- */
-const PRACTICAL_SESSION: SessionSpec = {
-  linearCompute: "a8",
-  attentionCompute: "a8",
-  attentionScoreStorage: "f16",
-};
 
 const practicalSessionOptions = (): SessionOptions =>
   effectiveSessionOptions("wan", PRACTICAL_SESSION, {}, `wan-ti2v ti2v-5b/${PRACTICAL_QUANT}`);
