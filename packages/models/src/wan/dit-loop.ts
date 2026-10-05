@@ -19,6 +19,7 @@ import { settleAbort } from "../concurrency/abort.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
 import type { GraphOwner, ModelComponent } from "../hub/components.ts";
 import type { WanGenerateEvent, WanRunComponent } from "./pipeline.ts";
+import type { WanDitInputForm } from "./descriptor.ts";
 import type { WanGenerationKnobs } from "./plan.ts";
 import {
   patchifyLatents,
@@ -45,6 +46,26 @@ const DIT_TIMESTEPS_PROJ = "timesteps_proj";
 export const DIT_CONTEXT = "encoder_hidden_states";
 const DIT_ROPE_COS = "rope_cos";
 const DIT_ROPE_SIN = "rope_sin";
+/** TI2V の DiT の追加入力 2 本（recipe `wan/ti2v_export_dit.py` の `INPUT_NAMES` の末尾と同名）。 */
+const DIT_TIMESTEPS_PROJ_CONDITION = "timesteps_proj_condition";
+const DIT_CONDITION_MASK = "condition_mask";
+
+/** 網羅の外の形（記述子・内部状態が型の外の値を持つ — 黙って t2v として回さない）。 */
+const unknownDitInputForm = (form: never, owner: string): Error =>
+  new Error(`${owner}: DiT の入力の形 '${String(form)}' は未知（"t2v" / "ti2v"）`);
+
+/** DiT の入力の形ごとのグラフ入力名の集合（未知の形は fail loudly）。 */
+const ditInputNames = (form: WanDitInputForm, owner: string): readonly string[] => {
+  const t2v = [DIT_TOKENS, DIT_TIMESTEPS_PROJ, DIT_CONTEXT, DIT_ROPE_COS, DIT_ROPE_SIN];
+  switch (form) {
+    case "t2v":
+      return t2v;
+    case "ti2v":
+      return [...t2v, DIT_TIMESTEPS_PROJ_CONDITION, DIT_CONDITION_MASK];
+    default:
+      throw unknownDitInputForm(form, owner);
+  }
+};
 
 /**
  * DiT の patch（刻みは上流 transformer の config `patch_size [1, 2, 2]` — アーキ定数）。チャネル数は
@@ -62,15 +83,39 @@ export const wanDitPatch = (latentChannels: number): WanPatchGeometry => ({
   patchWidth: 2,
 });
 
+/** グラフ入力の宣言（無ければ fail loudly）。 */
+const graphInput = (
+  owner: string,
+  model: GraphOwner,
+  name: string,
+): GraphOwner["graph"]["inputs"][number] => {
+  const spec = model.graph.inputs.find((input) => input.name === name);
+  if (spec === undefined) throw new Error(`${owner}: transformer のグラフ入力 '${name}' が無い`);
+  return spec;
+};
+
 /** グラフ入力の形（無ければ fail loudly）。 */
 const inputShape = (
   owner: string,
   model: GraphOwner,
   name: string,
-): readonly (number | string)[] => {
-  const spec = model.graph.inputs.find((input) => input.name === name);
-  if (spec === undefined) throw new Error(`${owner}: transformer のグラフ入力 '${name}' が無い`);
-  return spec.shape;
+): readonly (number | string)[] => graphInput(owner, model, name).shape;
+
+/** グラフ入力の dtype と形（ホストが組む dtype・形と違えば fail loudly）。 */
+const assertInput = (
+  owner: string,
+  model: GraphOwner,
+  name: string,
+  dtype: GraphOwner["graph"]["inputs"][number]["dtype"],
+  expected: readonly (number | string)[],
+): void => {
+  const spec = graphInput(owner, model, name);
+  if (spec.dtype !== dtype) {
+    throw new Error(
+      `${owner}: transformer のグラフ入力 '${name}' の dtype ${spec.dtype} が ${dtype} でない`,
+    );
+  }
+  assertDims(owner, spec.shape, expected, `'${name}'`);
 };
 
 /** 静的次元（記号次元なら fail loudly）。 */
@@ -99,6 +144,8 @@ export type DitContract = {
    * 照合とループの 2 経路で導かない）。
    */
   readonly patch: WanPatchGeometry;
+  /** 宣言と照合した入力の形（{@link runWanDenoise} は条件入力をこれで組むか決める）。 */
+  readonly form: WanDitInputForm;
 };
 
 /**
@@ -117,6 +164,12 @@ export type DitContract = {
  * Session の shape 検査まで通ってしまう。S は寸法とフレーム数ごとに変わるので記号次元で、4 本とも
  * **同じ記号**であること（IR の記号は上下限を持たないので、上限の突合は要らない）。
  *
+ * MUST: グラフ入力の名前の集合は `form`（世代の記述子の `ditInputForm`）の期待とちょうど一致させる。
+ * ホストは期待の入力だけを組むので、余分な入力（2.1 の宣言の 6 本目・TI2V の DiT を 2.1 として開く）は
+ * Session の入力検査まで通ってしまう。この検査は既存の 5 本の検査の**後**に置く — 入力が欠けた資産の
+ * 文言（`'X' が無い`）を変えない。TI2V は追加の 2 本の dtype と形も見る（条件側の時刻は f32 で
+ * `timesteps_proj` と同じ `[1, W]`・条件マスクは bool の `[1, S, 1]` で S は `tokens` と同じ記号）。
+ *
  * NOTE: `export` は家族 admission と、GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
  * 出さない — ADR 0008）。
  */
@@ -124,8 +177,11 @@ export const ditContract = (
   transformer: GraphOwner,
   ropeBase: WanRopeBase,
   patch: WanPatchGeometry,
+  form: WanDitInputForm,
   owner: string,
 ): DitContract => {
+  // 未知の形は資産の中身に関係なく同じ文言で落とす（集合の照合そのものは 5 本の検査の後）。
+  const expected = ditInputNames(form, owner);
   const tokenWidth = wanTokenWidth(patch);
   const tokens = inputShape(owner, transformer, DIT_TOKENS);
   const sequence = tokens.at(1);
@@ -164,7 +220,29 @@ export const ditContract = (
   const contextRows = staticDim(owner, context, 1, DIT_CONTEXT);
   const contextWidth = staticDim(owner, context, 2, DIT_CONTEXT);
   assertDims(owner, context, [1, contextRows, contextWidth], `'${DIT_CONTEXT}'`);
-  return { output, projWidth, contextRows, contextWidth, patch };
+  const declared = transformer.graph.inputs.map((input) => input.name);
+  const sortedDeclared = [...declared].sort();
+  const sortedExpected = [...expected].sort();
+  if (
+    sortedDeclared.length !== sortedExpected.length ||
+    sortedDeclared.some((name, index) => name !== sortedExpected[index])
+  ) {
+    throw new Error(
+      `${owner}: transformer のグラフ入力が [${declared.join(", ")}]` +
+        `（期待: [${expected.join(", ")}] — 入力の形 '${form}'）`,
+    );
+  }
+  switch (form) {
+    case "t2v":
+      break;
+    case "ti2v":
+      assertInput(owner, transformer, DIT_TIMESTEPS_PROJ_CONDITION, "f32", [1, projWidth]);
+      assertInput(owner, transformer, DIT_CONDITION_MASK, "bool", [1, sequence, 1]);
+      break;
+    default:
+      throw unknownDitInputForm(form, owner);
+  }
+  return { output, projWidth, contextRows, contextWidth, patch, form };
 };
 
 /** DiT の文脈入力の中身（`[rows, width]` へ詰めた positive と、CFG の uncond 側）。 */
@@ -187,13 +265,27 @@ type WanDenoiseState = {
 };
 
 /**
- * DiT の 1 回の forward の入力（S 形グラフの入力 5 本）。ホストが組んだ配列をそのまま渡す（写さない —
- * run が settle するまで書き換えない借用）。
- *
- * MUST: DiT の入力を組むのはこの 1 か所。2.2 の追加入力（ADR 0121 決定 3）は段 6 でここへ足す
- * （決定 10 — その段で Wan2.1 のレーンを実走する）。
+ * TI2V の DiT の条件入力 2 本（ADR 0121 決定 3）。条件側の時刻の形は生成側と同じ `projShape`。
+ * T2V は条件マスクが全て偽で、条件側の時刻は生成側と同じ配列。
  */
-const ditInputs = (input: {
+type DitConditionInputs = {
+  readonly proj: Float32Array<ArrayBuffer>;
+  readonly mask: Uint32Array<ArrayBuffer>;
+  readonly maskShape: readonly number[];
+};
+
+/**
+ * DiT の 1 回の forward の入力（S 形グラフの入力 — t2v は 5 本・ti2v は `condition` の 2 本を足した
+ * 7 本）。ホストが組んだ配列をそのまま渡す（写さない — run が settle するまで書き換えない借用）。
+ * `condition` が undefined なら 5 本だけ（キーも順も配列も条件入力の追加前と同じ — Wan2.1 の
+ * Session に渡るバイト列を変えない）。
+ *
+ * MUST: DiT の入力を組むのはこの 1 か所（ADR 0121 決定 10 — 2.1 と 2.2 が共有する）。
+ *
+ * NOTE: `export` は GPU 無しで入力の組み方を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const ditInputs = (input: {
   readonly tokens: Float32Array<ArrayBuffer>;
   readonly tokenShape: readonly number[];
   readonly proj: Float32Array<ArrayBuffer>;
@@ -205,13 +297,45 @@ const ditInputs = (input: {
     readonly sin: Float32Array<ArrayBuffer>;
   };
   readonly ropeShape: readonly number[];
+  readonly condition: DitConditionInputs | undefined;
 }): RunInputs => ({
   [DIT_TOKENS]: { dtype: "f32", shape: input.tokenShape, data: input.tokens },
   [DIT_TIMESTEPS_PROJ]: { dtype: "f32", shape: input.projShape, data: input.proj },
   [DIT_CONTEXT]: { dtype: "f32", shape: input.contextShape, data: input.context },
   [DIT_ROPE_COS]: { dtype: "f32", shape: input.ropeShape, data: input.rope.cos },
   [DIT_ROPE_SIN]: { dtype: "f32", shape: input.ropeShape, data: input.rope.sin },
+  ...(input.condition === undefined ? {} : {
+    [DIT_TIMESTEPS_PROJ_CONDITION]: {
+      dtype: "f32",
+      shape: input.projShape,
+      data: input.condition.proj,
+    },
+    [DIT_CONDITION_MASK]: {
+      dtype: "bool",
+      shape: input.condition.maskShape,
+      data: input.condition.mask,
+    },
+  }),
 });
+
+/**
+ * テキストだけの要求（T2V — 入力の形 "t2v" とは別の軸）の条件マスク（ADR 0121 決定 3 — 全て偽・
+ * ループの前に 1 回だけ作る）。入力の形 "t2v" の DiT は条件入力を持たないので undefined。
+ */
+const textOnlyConditionMask = (
+  form: WanDitInputForm,
+  tokens: number,
+  owner: string,
+): Uint32Array<ArrayBuffer> | undefined => {
+  switch (form) {
+    case "t2v":
+      return undefined;
+    case "ti2v":
+      return new Uint32Array(tokens);
+    default:
+      throw unknownDitInputForm(form, owner);
+  }
+};
 
 /**
  * DiT の段（Session を張り、steps 回まわして畳む — `end` は畳んだ後）。
@@ -237,6 +361,9 @@ export const runWanDenoise = async (
   const ropeShape = [1, grid.count, 1, wanRopeWidth(state.ropeBase)];
   const contextShape = [1, dit.contextRows, dit.contextWidth];
   const projShape = [1, dit.projWidth];
+  // 未知の形はここ（Session を張る前）で落ちる。
+  const conditionMask = textOnlyConditionMask(dit.form, grid.count, owner);
+  const maskShape = [1, grid.count, 1];
   const { positive, negative } = contexts;
   const elements = latentShape.reduce((product, dim) => product * dim, 1);
   let current: Float32Array<ArrayBuffer> = plan.initial.kind === "latents"
@@ -253,8 +380,22 @@ export const runWanDenoise = async (
       proj: Float32Array<ArrayBuffer>,
       context: Float32Array<ArrayBuffer>,
     ): Promise<Float32Array<ArrayBuffer>> => {
+      // T2V の条件側の時刻は生成側と同じ配列（決定 3 — どちらも読むだけの借用）。
+      const condition = conditionMask === undefined
+        ? undefined
+        : { proj, mask: conditionMask, maskShape };
       const outputs = await session.run(
-        ditInputs({ tokens, tokenShape, proj, projShape, context, contextShape, rope, ropeShape }),
+        ditInputs({
+          tokens,
+          tokenShape,
+          proj,
+          projShape,
+          context,
+          contextShape,
+          rope,
+          ropeShape,
+          condition,
+        }),
       );
       observe?.("transformer", session.diagnostics());
       return unpatchifyTokens(asF32(outputs[dit.output], "DiT の出力"), latentShape, patch);

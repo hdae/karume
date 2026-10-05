@@ -23,7 +23,9 @@
 // `assets_gate_test.ts` と同じ正本）から引く。
 
 import { assert, assertEquals } from "@std/assert";
-import { codecLayout, type OpenedContainer } from "@karume/runtime";
+import { codecLayout, type OpenedContainer, prepareContainer } from "@karume/runtime";
+import { WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
+import { ditContract } from "../src/wan/dit-loop.ts";
 import { patchifyLatents, wanTokenGrid } from "../src/wan/dit-tokens.ts";
 import { wanRopeTables } from "../src/wan/dit-rope.ts";
 import { timestepsProj } from "../src/wan/dit-timestep.ts";
@@ -152,6 +154,24 @@ Deno.test({
       codecLayout(encoding.codec) === "i8"
     );
     assertEquals(i8.length, EXPECTED_I8_WEIGHTS, "i8 の重みの本数");
+  },
+});
+
+Deno.test({
+  name:
+    "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
+  ignore: !MODEL_PRESENT,
+  fn: async () => {
+    const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
+    const prepared = prepareContainer(opened, seriesGraph(SERIES_NAME, COMPONENT));
+    const contract = ditContract(
+      prepared,
+      await readRopeBase(opened),
+      WAN22_GEOMETRY,
+      WAN22_TI2V_GENERATION.ditInputForm,
+      "WanTi2vPipeline",
+    );
+    assertEquals(contract.form, "ti2v");
   },
 });
 

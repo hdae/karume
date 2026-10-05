@@ -13,9 +13,16 @@ import type { GraphOwner } from "../../src/hub/components.ts";
 /** 宣言できる次元（記号次元は `format/dims.ts` の正準表記の文字列）。 */
 export type StubDim = number | string;
 
+/** 宣言できる dtype（省けば f32）。 */
+type StubDtype = GraphOwner["graph"]["inputs"][number]["dtype"];
+
 export type StubGraph = {
   readonly symbols?: readonly string[];
-  readonly inputs: readonly { readonly name: string; readonly shape: readonly StubDim[] }[];
+  readonly inputs: readonly {
+    readonly name: string;
+    readonly shape: readonly StubDim[];
+    readonly dtype?: StubDtype;
+  }[];
   readonly outputs: readonly string[];
   /** 値名 → 宣言 shape（門が見るのは `outputs[0]` の 1 本だけ）。 */
   readonly values: Readonly<Record<string, readonly StubDim[]>>;
@@ -29,7 +36,7 @@ export const stubModel = (graph: StubGraph): GraphOwner => ({
     symbols: [...(graph.symbols ?? [])],
     inputs: graph.inputs.map((input) => ({
       name: input.name,
-      dtype: "f32" as const,
+      dtype: input.dtype ?? "f32",
       shape: [...input.shape],
     })),
     outputs: [...graph.outputs],

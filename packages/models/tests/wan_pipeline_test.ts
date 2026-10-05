@@ -15,7 +15,7 @@ import {
 } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { parseManifest } from "@karume/hub";
-import type { CodecName, Tensor } from "@karume/runtime";
+import type { CodecName, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
   assertWanVaeTilesCoverAcceptedSizes,
@@ -25,9 +25,13 @@ import {
   WanPipeline,
   type WanPipelineOptions,
 } from "../src/wan/pipeline.ts";
-import { ditContract, wanDitPatch } from "../src/wan/dit-loop.ts";
+import { ditContract, ditInputs, wanDitPatch } from "../src/wan/dit-loop.ts";
 import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
-import { WAN21_GENERATION, type WanGenerationDescriptor } from "../src/wan/descriptor.ts";
+import {
+  WAN21_GENERATION,
+  type WanDitInputForm,
+  type WanGenerationDescriptor,
+} from "../src/wan/descriptor.ts";
 import { planWanRequest, type PromptGate } from "../src/wan/plan.ts";
 import {
   assertWanVaeMatchesGeneration,
@@ -610,12 +614,13 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
   };
 
   it("配布形の宣言は通り、文脈と timestep の幅を宣言から引く", () => {
-    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "WanPipeline"), {
+    assertEquals(ditContract(transformerOf({}), ROPE, DIT_PATCH, "t2v", "WanPipeline"), {
       output: "out",
       projWidth: 256,
       contextRows: 512,
       contextWidth: 4096,
       patch: DIT_PATCH,
+      form: "t2v",
     });
   });
 
@@ -625,7 +630,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
 
   it("VAE の潜在のチャネル数が DiT の tokens の幅と合わなければ落ちる（patch は VAE の宣言から組む）", () => {
     assertThrows(
-      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "WanPipeline"),
+      () => ditContract(transformerOf({}), ROPE, wanDitPatch(8), "t2v", "WanPipeline"),
       Error,
       "'tokens' の形",
     );
@@ -659,12 +664,260 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
     ];
     for (const [label, patch, message] of rejected) {
       assertThrows(
-        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "WanPipeline"),
+        () => ditContract(transformerOf(patch), ROPE, DIT_PATCH, "t2v", "WanPipeline"),
         Error,
         message,
         label,
       );
     }
+  });
+
+  /** t2v の 5 本の名前（`wan/export_dit.py` の `INPUT_NAMES`）— 集合の文言の期待に使う。 */
+  const T2V_NAMES = "tokens, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin";
+  const TI2V_NAMES = `${T2V_NAMES}, timesteps_proj_condition, condition_mask`;
+
+  it("入力の名前の集合の検査は既存の 5 本の検査の後（入力が欠けた 2.1 の資産の文言は変えない）", () => {
+    const missing = stubModel({
+      symbols: ["S"],
+      inputs: [
+        { name: "tokens", shape: VALID.tokens },
+        { name: "timesteps_proj", shape: VALID.proj },
+        { name: "encoder_hidden_states", shape: VALID.context },
+        { name: "rope_cos", shape: VALID.ropeCos },
+      ],
+      outputs: ["out"],
+      values: { out: VALID.output },
+    });
+    assertThrows(
+      () => ditContract(missing, ROPE, DIT_PATCH, "t2v", "WanPipeline"),
+      Error,
+      "WanPipeline: transformer のグラフ入力 'rope_sin' が無い",
+    );
+  });
+
+  it("故障注入: 2.1 の宣言に 6 本目の入力があると、t2v の集合と一致しないので落ちる", () => {
+    const extra = stubModel({
+      symbols: ["S"],
+      inputs: [
+        { name: "tokens", shape: VALID.tokens },
+        { name: "timesteps_proj", shape: VALID.proj },
+        { name: "encoder_hidden_states", shape: VALID.context },
+        { name: "rope_cos", shape: VALID.ropeCos },
+        { name: "rope_sin", shape: VALID.ropeSin },
+        { name: "attention_mask", shape: [1, "S"] },
+      ],
+      outputs: ["out"],
+      values: { out: VALID.output },
+    });
+    assertThrows(
+      () => ditContract(extra, ROPE, DIT_PATCH, "t2v", "WanPipeline"),
+      Error,
+      `WanPipeline: transformer のグラフ入力が [${T2V_NAMES}, attention_mask]` +
+        `（期待: [${T2V_NAMES}] — 入力の形 't2v'）`,
+    );
+  });
+
+  it("未知の入力の形は黙って t2v として扱わず落ちる（型の外の値 — JS の呼び手・壊れた記述子）", () => {
+    assertThrows(
+      () =>
+        Reflect.apply(ditContract, undefined, [
+          transformerOf({}),
+          ROPE,
+          DIT_PATCH,
+          "i2v",
+          "WanPipeline",
+        ]),
+      Error,
+      `WanPipeline: DiT の入力の形 'i2v' は未知（"t2v" / "ti2v"）`,
+    );
+    // 壊れた資産（入力の欠け）と重なっても、未知の形の文言が先に出る（資産の中身に左右されない）。
+    const broken = stubModel({
+      symbols: ["S"],
+      inputs: [{ name: "tokens", shape: VALID.tokens }],
+      outputs: ["out"],
+      values: { out: VALID.output },
+    });
+    assertThrows(
+      () => Reflect.apply(ditContract, undefined, [broken, ROPE, DIT_PATCH, "i2v", "WanPipeline"]),
+      Error,
+      `WanPipeline: DiT の入力の形 'i2v' は未知（"t2v" / "ti2v"）`,
+    );
+  });
+
+  describe("入力の形 ti2v（Wan2.2 TI2V — 5 本 + 条件側の時刻・条件マスク）", () => {
+    type Ti2vInput = {
+      readonly name: string;
+      readonly shape: readonly StubDim[];
+      readonly dtype?: "f32" | "bool";
+    };
+    /** 潜在 48 チャネルの patch（`tokens` の幅 192）。 */
+    const TI2V_PATCH = wanDitPatch(48);
+    /** recipe `wan/ti2v_export_dit.py` と同じ宣言（`wan_ti2v_dit_host_test.ts` の `EXPECTED_INPUTS`）。 */
+    const TI2V_VALID: readonly Ti2vInput[] = [
+      { name: "tokens", shape: [1, "S", 192] },
+      { name: "timesteps_proj", shape: [1, 256] },
+      { name: "encoder_hidden_states", shape: [1, 512, 4096] },
+      { name: "rope_cos", shape: [1, "S", 1, 128] },
+      { name: "rope_sin", shape: [1, "S", 1, 128] },
+      { name: "timesteps_proj_condition", shape: [1, 256] },
+      { name: "condition_mask", shape: [1, "S", 1], dtype: "bool" },
+    ];
+    const ti2vOf = (inputs: readonly Ti2vInput[]) =>
+      stubModel({ symbols: ["S", "T"], inputs, outputs: ["out"], values: { out: [1, "S", 192] } });
+    /** 正常形の入力 1 本を差し替える（`replacement` を省けば外す）。 */
+    const replaced = (name: string, replacement?: Ti2vInput): readonly Ti2vInput[] =>
+      TI2V_VALID.flatMap((input) =>
+        input.name !== name ? [input] : replacement === undefined ? [] : [replacement]
+      );
+
+    it("正常形は通り、form を ti2v として返す（数値の欄は t2v と同じく宣言から引く）", () => {
+      assertEquals(ditContract(ti2vOf(TI2V_VALID), ROPE, TI2V_PATCH, "ti2v", "WanTi2vPipeline"), {
+        output: "out",
+        projWidth: 256,
+        contextRows: 512,
+        contextWidth: 4096,
+        patch: TI2V_PATCH,
+        form: "ti2v",
+      });
+    });
+
+    it("条件入力の欠け・dtype・形・記号の食い違いと、形と宣言の取り違えは名指しで落ちる", () => {
+      const rejected: readonly [string, readonly Ti2vInput[], WanDitInputForm, string][] = [
+        [
+          "condition_mask の欠け",
+          replaced("condition_mask"),
+          "ti2v",
+          `WanTi2vPipeline: transformer のグラフ入力が [${T2V_NAMES}, timesteps_proj_condition]` +
+          `（期待: [${TI2V_NAMES}] — 入力の形 'ti2v'）`,
+        ],
+        [
+          "condition_mask が f32",
+          replaced("condition_mask", { name: "condition_mask", shape: [1, "S", 1] }),
+          "ti2v",
+          "WanTi2vPipeline: transformer のグラフ入力 'condition_mask' の dtype f32 が bool でない",
+        ],
+        [
+          "condition_mask が [1, S, 2]",
+          replaced("condition_mask", { name: "condition_mask", shape: [1, "S", 2], dtype: "bool" }),
+          "ti2v",
+          "WanTi2vPipeline: 'condition_mask' の形 [1, S, 2] がホストの組む [1, S, 1] と違う",
+        ],
+        [
+          "condition_mask の記号が tokens と別",
+          replaced("condition_mask", { name: "condition_mask", shape: [1, "T", 1], dtype: "bool" }),
+          "ti2v",
+          "WanTi2vPipeline: 'condition_mask' の形 [1, T, 1] がホストの組む [1, S, 1] と違う",
+        ],
+        [
+          "条件側の時刻の幅 128",
+          replaced("timesteps_proj_condition", {
+            name: "timesteps_proj_condition",
+            shape: [1, 128],
+          }),
+          "ti2v",
+          "WanTi2vPipeline: 'timesteps_proj_condition' の形 [1, 128] がホストの組む [1, 256] と違う",
+        ],
+        [
+          "条件側の時刻が bool",
+          replaced("timesteps_proj_condition", {
+            name: "timesteps_proj_condition",
+            shape: [1, 256],
+            dtype: "bool",
+          }),
+          "ti2v",
+          "WanTi2vPipeline: transformer のグラフ入力 'timesteps_proj_condition' の dtype bool が f32 でない",
+        ],
+        [
+          "TI2V の宣言を t2v として開く（余分な 2 本）",
+          TI2V_VALID,
+          "t2v",
+          `WanTi2vPipeline: transformer のグラフ入力が [${TI2V_NAMES}]` +
+          `（期待: [${T2V_NAMES}] — 入力の形 't2v'）`,
+        ],
+        [
+          "2.1 の 5 本の宣言を ti2v として開く",
+          TI2V_VALID.slice(0, 5),
+          "ti2v",
+          `WanTi2vPipeline: transformer のグラフ入力が [${T2V_NAMES}]` +
+          `（期待: [${TI2V_NAMES}] — 入力の形 'ti2v'）`,
+        ],
+      ];
+      for (const [label, inputs, form, message] of rejected) {
+        assertThrows(
+          () => ditContract(ti2vOf(inputs), ROPE, TI2V_PATCH, form, "WanTi2vPipeline"),
+          Error,
+          message,
+          label,
+        );
+      }
+    });
+  });
+});
+
+describe("ditInputs（DiT の 1 回の forward の入力を組む 1 か所）", () => {
+  /** ホスト配列の入力（常駐入力ではない）を取り出す。 */
+  const hostTensor = (inputs: RunInputs, name: string): Tensor => {
+    assert(Object.hasOwn(inputs, name), `入力 '${name}' が無い`);
+    const input = inputs[name];
+    assert("dtype" in input, `入力 '${name}' がホスト配列でない`);
+    return input;
+  };
+  const BASE = {
+    tokens: new Float32Array(6),
+    tokenShape: [1, 3, 2],
+    proj: new Float32Array(4),
+    projShape: [1, 4],
+    context: new Float32Array(2),
+    contextShape: [1, 1, 2],
+    rope: { cos: new Float32Array(3), sin: new Float32Array(3) },
+    ropeShape: [1, 3, 1, 1],
+  };
+
+  it("condition なし（t2v）はキーが 5 本ちょうどで、順と配列の同一性を保つ（写さない）", () => {
+    const inputs = ditInputs({ ...BASE, condition: undefined });
+    assertEquals(Object.keys(inputs), [
+      "tokens",
+      "timesteps_proj",
+      "encoder_hidden_states",
+      "rope_cos",
+      "rope_sin",
+    ]);
+    const expected: readonly [string, Float32Array, readonly number[]][] = [
+      ["tokens", BASE.tokens, BASE.tokenShape],
+      ["timesteps_proj", BASE.proj, BASE.projShape],
+      ["encoder_hidden_states", BASE.context, BASE.contextShape],
+      ["rope_cos", BASE.rope.cos, BASE.ropeShape],
+      ["rope_sin", BASE.rope.sin, BASE.ropeShape],
+    ];
+    for (const [name, data, shape] of expected) {
+      const tensor = hostTensor(inputs, name);
+      assertEquals(tensor.dtype, "f32", name);
+      assertStrictEquals(tensor.data, data, name);
+      assertStrictEquals(tensor.shape, shape, name);
+    }
+  });
+
+  it("condition あり（ti2v）は 7 本で、条件側の時刻は f32・生成側と同じ形、マスクは bool（借用のまま）", () => {
+    const mask = new Uint32Array(3);
+    const maskShape = [1, 3, 1];
+    const inputs = ditInputs({ ...BASE, condition: { proj: BASE.proj, mask, maskShape } });
+    assertEquals(Object.keys(inputs), [
+      "tokens",
+      "timesteps_proj",
+      "encoder_hidden_states",
+      "rope_cos",
+      "rope_sin",
+      "timesteps_proj_condition",
+      "condition_mask",
+    ]);
+    const proj = hostTensor(inputs, "timesteps_proj_condition");
+    assertEquals(proj.dtype, "f32");
+    assertStrictEquals(proj.data, BASE.proj);
+    assertStrictEquals(proj.shape, BASE.projShape);
+    const condition = hostTensor(inputs, "condition_mask");
+    assertEquals(condition.dtype, "bool");
+    assertStrictEquals(condition.data, mask);
+    assertStrictEquals(condition.shape, maskShape);
   });
 });
 
@@ -854,10 +1107,17 @@ const mockPipeline = (options: {
   readonly umt5Value?: (tokens: number) => number;
   /** umT5 の run の中で呼ぶ（中断の注入口）。 */
   readonly onUmt5Run?: (tokens: number) => void;
+  /**
+   * 内部状態の DiT の入力の形（省けば `"t2v"`）。型の外の値も渡せる（`Reflect.construct` は型を見ない —
+   * 未知の形の門を縛る）。
+   */
+  readonly ditForm?: string;
 }) => {
   const log: string[] = [];
   /** DiT が受けた文脈（run の順 — uncond → cond）。 */
   const ditContexts: Float32Array[] = [];
+  /** DiT の run が受けた入力の全体（run の順）。 */
+  const ditRuns: Record<string, Tensor>[] = [];
   const { first, next } = vaeChunkGraphs(32);
   const resident = (byteLength: number) => ({ byteLength, write: () => {}, dispose: () => {} });
   const vaeSession = (name: string) => ({
@@ -935,6 +1195,7 @@ const mockPipeline = (options: {
             const context = inputs.encoder_hidden_states;
             assert(context.dtype === "f32", "DiT の文脈が f32 でない");
             ditContexts.push(context.data);
+            ditRuns.push(inputs);
             const tokens = inputs.tokens;
             return Promise.resolve({
               out: {
@@ -971,6 +1232,7 @@ const mockPipeline = (options: {
       contextRows: gpuText ? 512 : 4,
       contextWidth: WIDTH,
       patch: wanDitPatch(16),
+      form: options.ditForm ?? "t2v",
     },
     textEmbeds: EMBEDS,
     text,
@@ -1000,7 +1262,7 @@ const mockPipeline = (options: {
         await onEvent?.(event);
       },
     });
-  return { log, generate, ditContexts };
+  return { log, generate, ditContexts, ditRuns };
 };
 
 describe("WanPipeline.generate（模擬 Session）", () => {
@@ -1017,6 +1279,52 @@ describe("WanPipeline.generate（模擬 Session）", () => {
   it("生成結果は Wan2.1 の fps 16 を持つ（上流の世代の事実 — 要求のノブではない）", async () => {
     const { generate } = mockPipeline({});
     assertEquals((await generate()).fps, 16);
+  });
+
+  describe("DiT の入力の形（ADR 0121 決定 3）", () => {
+    const T2V_KEYS = ["tokens", "timesteps_proj", "encoder_hidden_states", "rope_cos", "rope_sin"];
+
+    it("t2v は毎回の run に 5 本ちょうどを渡す（条件入力を足さない — 2.1 の Session に渡る入力は不変）", async () => {
+      const { generate, ditRuns } = mockPipeline({});
+      await generate();
+      assertEquals(ditRuns.length, 4);
+      for (const inputs of ditRuns) assertEquals(Object.keys(inputs), T2V_KEYS);
+    });
+
+    it("ti2v（T2V）は 7 本: 条件マスクは全て 0 の u32 [1, S, 1] を 1 回だけ作り、条件側の時刻は生成側と同じ配列", async () => {
+      const { generate, ditRuns } = mockPipeline({ ditForm: "ti2v" });
+      await generate();
+      assertEquals(ditRuns.length, 4);
+      const masks = new Set<unknown>();
+      for (const inputs of ditRuns) {
+        assertEquals(Object.keys(inputs), [
+          ...T2V_KEYS,
+          "timesteps_proj_condition",
+          "condition_mask",
+        ]);
+        assertStrictEquals(inputs.timesteps_proj_condition.data, inputs.timesteps_proj.data);
+        assertEquals(inputs.timesteps_proj_condition.shape, inputs.timesteps_proj.shape);
+        const mask = inputs.condition_mask;
+        assertEquals(mask.dtype, "bool");
+        assertInstanceOf(mask.data, Uint32Array);
+        const tokens = inputs.tokens.shape[1];
+        assertEquals(mask.shape, [1, tokens, 1]);
+        assertEquals(mask.data.length, tokens);
+        assert(mask.data.every((value) => value === 0), "T2V の条件マスクに 0 でない要素がある");
+        masks.add(mask.data);
+      }
+      assertEquals(masks.size, 1, "条件マスクを run ごとに作り直した");
+    });
+
+    it("未知の形は DiT の Session を張る前に落ちる（黙って t2v として回さない）", async () => {
+      const { log, generate } = mockPipeline({ ditForm: "i2v" });
+      await assertRejects(
+        () => generate(),
+        Error,
+        `WanPipeline: DiT の入力の形 'i2v' は未知（"t2v" / "ti2v"）`,
+      );
+      assert(!log.includes("create:transformer"), `DiT の Session を張った: ${log}`);
+    });
   });
 
   describe("非有限の門", () => {

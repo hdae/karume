@@ -15,6 +15,13 @@ import {
   type WanLatentStats,
 } from "./latents.ts";
 
+/**
+ * DiT のグラフ入力の形（ADR 0121 決定 3）。`"t2v"` = Wan2.1 の 5 本（`tokens`・`timesteps_proj`・
+ * `encoder_hidden_states`・`rope_cos`・`rope_sin`）、`"ti2v"` = Wan2.2 TI2V の 7 本（5 本 +
+ * `timesteps_proj_condition`・`condition_mask`）。
+ */
+export type WanDitInputForm = "t2v" | "ti2v";
+
 export type WanGenerationDescriptor = {
   /**
    * VAE の前の逆正規化の統計（VAE の config にしか無い — IR にも配布資産にも入っていない・表は
@@ -40,6 +47,11 @@ export type WanGenerationDescriptor = {
    * （`tile-decode.ts` の `assertWanVaeMatchesGeneration`）。
    */
   readonly vaePatchSize: number;
+  /**
+   * 上流の DiT の入力の形（TI2V の DiT は条件側の時刻と条件マスクを持つ）。`vaePatchSize` と同じく上流の
+   * 事実として持ち、admission でグラフ宣言との照合に使う（`dit-loop.ts` の `ditContract`）。
+   */
+  readonly ditInputForm: WanDitInputForm;
 };
 
 /**
@@ -73,6 +85,7 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
   defaults: { frames: 33, width: 832, height: 480 },
   fps: 16,
   vaePatchSize: 1,
+  ditInputForm: "t2v",
 };
 
 /**
@@ -103,4 +116,5 @@ export const WAN22_TI2V_GENERATION: WanGenerationDescriptor = {
   defaults: { frames: 33, width: 1280, height: 704 },
   fps: 24,
   vaePatchSize: 2,
+  ditInputForm: "ti2v",
 };

@@ -679,7 +679,13 @@ export class WanPipeline {
     assertWanVaeMatchesGeneration(layout, WAN21_GENERATION, OWNER);
     assertWanVaeTilesCoverAcceptedSizes(layout);
     const ropeBase = parseWanRopeBase(await readWholeAsset(transformer.asset(ROPE_BASE)));
-    const dit = ditContract(transformer, ropeBase, wanDitPatch(layout.latentChannels), OWNER);
+    const dit = ditContract(
+      transformer,
+      ropeBase,
+      wanDitPatch(layout.latentChannels),
+      WAN21_GENERATION.ditInputForm,
+      OWNER,
+    );
     const textEncoder = admitWanText(route, open, dit, OWNER);
     return {
       config,
