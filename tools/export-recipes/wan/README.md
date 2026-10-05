@@ -400,6 +400,48 @@ decode before the clamp. Two cases set the tolerance — `band-boxing-cats` (see
 uv run --group wan --inexact python -m wan.few_step_ref   # all three cases (CPU, about 20 min each)
 ```
 
+### Few-step reference, TI2V-5B (Wan2.2, ADR 0121 stage 6)
+
+`wan/ti2v_few_step_ref.py` is the Wan2.2 counterpart; `few_step_ref.py` and `pipeline_ref.py` are
+left unchanged. It runs the plain diffusers `WanPipeline` on CPU f32 for 2 steps with CFG (guide
+5.0) at 1280×704, 17 frames (latent `[48,5,44,80]`, S = 4,400) — one of the two officially
+supported sizes. The scheduler is loaded with `flow_shift=5.0` passed explicitly and checked after
+loading (the pinned config holds the same value). The DiT is the full f32 checkpoint rounded to the
+per-channel int8 grid (RTN fake-quant, the same values as the int8 series) and the VAE is
+f16-rounded. The run has two phases in one process:
+
+1. **DiT.** `WanPipeline(expand_timesteps=False)`, so the timestep is one value per pass (the T2V
+   form of ADR 0121 decision 4). A forward hook records the cond / uncond outputs, labelled by the
+   text context they received. The two band cases also run with `expand_timesteps=True` (the
+   upstream default, timestep `[1,S]`) through a separate hook and store those latents as an
+   observation, not a gate.
+2. **VAE.** The DiT is released first (the run stops if a reference to it is left), then the
+   stage-5 tiled decode in patchify space (28 tiles), the upstream unpatchify and the clamp.
+
+It writes `pipeline_steps.<case>.safetensors` at the int8 DiT series root
+(`outputs/series/wan2.2-ti2v-5b-i8-dyn/`): the injected noise, each step's cond / uncond DiT outputs
+and latents, the clamped RGB frames `[3,17,704,1280]`, the 48 latent mean / std values, and for
+the band cases `observed_m_s.latents.<i>`. The metadata holds the seed, the prompt names, the
+schedule (timesteps, σ, `flow_shift` `"5.0"`), the tile plan, the source pin and the numeric
+environment (torch version, threads, `MKL_*` / `OMP_*` / `KMP_*`). Two cases set the tolerance —
+`band-boxing-cats` (seed 20262101) and `band-cat-dog-baking` (seed 20262102) — and
+`accept-ferret` (seed 20262103) is judged against it; all three have the same shape.
+
+```bash
+uv run --group wan --inexact python -m wan.ti2v_few_step_ref                        # all three cases
+uv run --group wan --inexact python -m wan.ti2v_few_step_ref --case accept-ferret   # one case
+```
+
+The first phase needs about 24 GiB of RAM (estimate 23.7 GiB: the f32 DiT, the measured fake-quant
+overhead, the activations at S = 4,400 and the f32 VAE). Before loading, the script stops unless
+`MemAvailable` covers the estimate plus 1 GiB of headroom; the estimate is not a guarantee, so a
+run that passes the check can still run short at the peak. Expect about three hours for the three
+cases (estimate: 20 DiT passes and 28 tiles × 5 chunks per case on the CPU). The first-phase results
+are kept in memory only: if the run stops before or during the decode, the DiT phase (about 40 min)
+has to be run again (fixtures already written stay). Do not run it next to another heavy CPU job. The pytest side
+(`wan/tests/test_ti2v_few_step_ref.py`) runs the whole two-phase script on a small synthetic Wan2.2
+DiT and VAE.
+
 ### The pipeline these feed (`@karume/models/wan`)
 
 `WanPipeline` (`packages/models/src/wan/`) loads the three containers and the embedding asset from
