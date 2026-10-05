@@ -362,7 +362,9 @@ later の「decode 速度の残り」。
   広げるかは段 6 の前に利用者の裁定）/ 段 3 = コードは着地（共有モジュールの切り出しと 2.1 の一般化 — Python `1e4d7cbb`・TS `f25907f5` /
   `e54e6dc6` / `cf321598`・ADR 0121 追記「段 3 の結果」）。**段 3 の GPU の合格判定**: 2.1 のレーンは 394 passed・1 failed（sha 行・帯・case id は全て一致・赤は既知のレーン内の OOM）、
   `KARUME_WAN_FULL_PIPELINE=1` の 50 ステップ 4 本は既存の sha 行と一致。**残り = レーンの再走で全緑**（レーン内の OOM = Deno の `GPUDevice.destroy()` が VRAM を返さない —
-  known-issues。テストの GPU の取得口で GC を促す対症療法を入れた〈利用者の裁定 2026-10-05〉・レーンの再走は未）。1.3B の f16 系列の照合（`export_dit --check`）は実行中。
+  known-issues。テストの GPU の取得口で GC を促す対症療法を入れた〈利用者の裁定 2026-10-05〉・緩和つきの再走は 395 passed・0 failed〈余裕は約 0.15 GiB — known-issues〉）。**段 3 は完了**（ADR 0121 追記「段 3 を閉じる」）。1.3B の f16 系列の照合
+  （`export_dit --check`）は 69 ファイル一致。**段 4 の Python 側が着地**（`0f1ff88a` / `734077ae` / `2763651b` — 2.2 の VAE decoder の chunk グラフ・
+  `export_vae --model ti2v-5b`）。
   **次 = 段 4**（VAE 2.2 の decoder — 設計と裁定は `.claude/reviews/2026-10-04_adr0121-stage4-*.{json,md}`〈git 追跡外〉）。
   **段 3 の隣接の小物（起票 2026-10-04・提案）**:
   (a) gpu-lab の Wan タブの再生 fps 16 と既定 33 フレームを、記述子と `video.fps` から読む（今は写し — 段 8 で直す）
