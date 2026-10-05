@@ -3,12 +3,19 @@
 // 実 GPU での参照照合と縮退門は `e2e_wan_vae_tiles_test.ts`。ここは**幾何の凍結表**（Python 側と
 // 同じ値 — ADR 0033 追記 9a の二重凍結）・配置の不変条件・貼り合わせの解析解を押さえる。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import {
   assembleWanVaeTiles,
   clampWanVaeFrames,
   planWanVaeTileAxis,
   planWanVaeTiles,
+  unpatchifyWanVaeFrames,
   wanVaeBlendExtentAt,
   wanVaeLatentTile,
   wanVaeMinTileOverlap,
@@ -17,6 +24,7 @@ import {
   type WanVaeTilePlan,
 } from "../src/wan/vae-tiles.ts";
 import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
+import { finishWanVaeFrames } from "../src/wan/tile-decode.ts";
 
 /** 実寸のタイル辺（潜在 — chunk グラフの既定の入力形）と縮尺。 */
 const TILE = 32;
@@ -342,4 +350,188 @@ Deno.test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で
       );
     }
   }
+});
+
+// ---- ホストの unpatchify と VAE 段の末尾（ADR 0121 段 5 — Wan2.2 は patchify 空間で貼り合わせてから戻す）----
+
+type Shape4 = readonly [number, number, number, number];
+
+/**
+ * unpatchify の並びの表（p = 2・`[dy][dx]` → チャネル内のずれ）。上流 diffusers `unpatchify` の
+ * `view(c, r, q, f, h, w).permute(c, f, h, q, w, r)` で、r = dx（幅方向のずれ）が上位・q = dy（高さ方向の
+ * ずれ）が下位。Python 側（`tools/export-recipes/wan/tests/test_vae_tiling_ti2v.py` の
+ * `UNPATCHIFY_SOURCE_CHANNEL`）と同じ値で凍結し、そちらが上流の関数そのものと照合する（二重凍結）。
+ */
+const UNPATCHIFY_SOURCE_CHANNEL: readonly (readonly number[])[] = [[0, 2], [1, 3]];
+
+/** 表から組んだ unpatchify（p = 2 — 出力の座標から入力を引く。実装の入れ子のループとは別の組み立て）。 */
+const unpatchifyByTable = (
+  input: Float32Array,
+  [channels, count, height, width]: Shape4,
+  table: readonly (readonly number[])[],
+): Float32Array<ArrayBuffer> => {
+  const outHeight = height * 2;
+  const outWidth = width * 2;
+  const out = new Float32Array(input.length);
+  for (let channel = 0; channel < channels / 4; channel += 1) {
+    for (let frame = 0; frame < count; frame += 1) {
+      for (let y = 0; y < outHeight; y += 1) {
+        for (let x = 0; x < outWidth; x += 1) {
+          const source = channel * 4 + table[y % 2][x % 2];
+          out[((channel * count + frame) * outHeight + y) * outWidth + x] = input[
+            ((source * count + frame) * height + Math.floor(y / 2)) * width + Math.floor(x / 2)
+          ];
+        }
+      }
+    }
+  }
+  return out;
+};
+
+const arange = (length: number): Float32Array<ArrayBuffer> =>
+  new Float32Array(length).map((_, index) => index);
+
+/** patchify 空間の `[12, 2, 3, 5]`（RGB にすると `[3, 2, 6, 10]`）。 */
+const PATCH_SHAPE: Shape4 = [12, 2, 3, 5];
+
+Deno.test("unpatchifyWanVaeFrames: p = 1 は入力の同じインスタンスを返す（写さない — unpatchify の無い世代の経路）", () => {
+  const frames = arange(3 * 2 * 3 * 5);
+  assertStrictEquals(unpatchifyWanVaeFrames(frames, [3, 2, 3, 5], 1), frames);
+});
+
+Deno.test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx と dy を入れ替えた表とは一致しない", () => {
+  const input = arange(12 * 2 * 3 * 5);
+  const got = unpatchifyWanVaeFrames(input, PATCH_SHAPE, 2);
+  assertEquals(got.length, input.length);
+  assertEquals([...got], [...unpatchifyByTable(input, PATCH_SHAPE, UNPATCHIFY_SOURCE_CHANNEL)]);
+  // 上流の式の 2 点: 出力 (c 0, f 0, y 0, x 1) = 入力チャネル 2 の (0, 0)・(y 1, x 0) = 入力チャネル 1 の (0, 0)
+  // （入力チャネル k の先頭 = k · 2·3·5）。
+  assertEquals([got[1], got[10]], [2 * 30, 1 * 30]);
+  // 対照: arange が並びの誤り（幅と高さのずれの取り違え）を区別できること。
+  assertNotEquals([...got], [...unpatchifyByTable(input, PATCH_SHAPE, [[0, 1], [2, 3]])]);
+  assertEquals([...input], [...arange(input.length)], "入力を書き換えた");
+});
+
+Deno.test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い違いは落とす（p = 1 でも）", () => {
+  const input = arange(12 * 2 * 3 * 5);
+  assertThrows(
+    () => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 0),
+    Error,
+    "倍率 0 が正の整数でない",
+  );
+  assertThrows(() => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 1.5), Error, "倍率 1.5");
+  assertThrows(
+    () => unpatchifyWanVaeFrames(input, [12, 2, 3, 0], 2),
+    Error,
+    "[12, 2, 3, 0] の次元が正の整数でない",
+  );
+  assertThrows(
+    () => unpatchifyWanVaeFrames(arange(10 * 2 * 3 * 5), [10, 2, 3, 5], 2),
+    Error,
+    "チャネル数 10 が倍率 2² = 4 で割り切れない",
+  );
+  assertThrows(
+    () => unpatchifyWanVaeFrames(arange(359), PATCH_SHAPE, 2),
+    Error,
+    "要素数 359 が [12, 2, 3, 5]（360）と違う",
+  );
+  assertThrows(() => unpatchifyWanVaeFrames(arange(89), [3, 2, 3, 5], 1), Error, "要素数 89");
+});
+
+const OWNER = "WanPipeline";
+
+/**
+ * 縮退 1 枚のタイル計画（縮尺 2・出口 `sampleChannels`）。末尾の検査が計画から読むのは出口のチャネル数と
+ * 潜在 × 縮尺だけ。
+ */
+const finishTiles = (
+  sampleChannels: number,
+  latentHeight: number,
+  latentWidth: number,
+): WanVaeTilePlan => ({
+  latentChannels: 48,
+  sampleChannels,
+  scale: 2,
+  rows: { extent: latentHeight, tile: latentHeight, starts: [0] },
+  cols: { extent: latentWidth, tile: latentWidth, starts: [0] },
+});
+
+/** RGB `[3, 2, 8, 12]` の要求（patchify 空間は p = 2 で `[12, 2, 4, 6]`）。 */
+const RGB = { frames: 2, height: 8, width: 12 } as const;
+const PATCHED = { ...RGB, tiles: finishTiles(12, 2, 3) };
+
+Deno.test("finishWanVaeFrames: unpatchify の無い世代（p = 1）は旧来の末尾（有限性 + クランプ）と同じ値・同じインスタンス", () => {
+  const assembled = new Float32Array(3 * 2 * 8 * 12).map((_, index) => Math.sin(index) * 2);
+  assembled[5] = -0;
+  const legacy = Float32Array.from(assembled);
+  clampWanVaeFrames(legacy);
+  const got = finishWanVaeFrames(
+    assembled,
+    { ...RGB, tiles: finishTiles(3, 4, 6) },
+    WAN21_GENERATION,
+    OWNER,
+  );
+  assertStrictEquals(got, assembled);
+  assertEquals(bits(got), bits(legacy));
+});
+
+Deno.test("finishWanVaeFrames: p = 2 は clamp(表で組んだ unpatchify)（ビット一致）", () => {
+  const assembled = new Float32Array(12 * 2 * 4 * 6).map((_, index) => (index - 288) / 160);
+  const expected = unpatchifyByTable(assembled, [12, 2, 4, 6], UNPATCHIFY_SOURCE_CHANNEL);
+  clampWanVaeFrames(expected);
+  const got = finishWanVaeFrames(assembled, PATCHED, { vaePatchSize: 2 }, OWNER);
+  assertEquals(bits(got), bits(expected));
+  assert(got.includes(1) && got.includes(-1), "クランプが 1 度も効いていない（入力の値域が狭い）");
+});
+
+Deno.test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標で名指す（patchify 空間の座標ではない）", () => {
+  // 入力チャネル 6 = c 1・dx 1・dy 0、フレーム 1・(y 2, x 3) → RGB の channel 1・フレーム 1・(x 7, y 4)。
+  const assembled = new Float32Array(12 * 2 * 4 * 6);
+  assembled[((6 * 2 + 1) * 4 + 2) * 6 + 3] = Number.POSITIVE_INFINITY;
+  assertThrows(
+    () => finishWanVaeFrames(assembled, PATCHED, { vaePatchSize: 2 }, OWNER),
+    Error,
+    `${OWNER}: VAE の出力（クランプ前）の channel 1・フレーム 1・画素 (x=7, y=4) が非有限（Infinity）`,
+  );
+});
+
+Deno.test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じでも unpatchify の倍率・フレーム数の食い違いを落とす）", () => {
+  const assembled = new Float32Array(12 * 2 * 4 * 6);
+  // 出口 12 ch の資産を unpatchify の無い記述子で閉じる（要素数は RGB の [3, 2, 8, 12] と同じ 576）。
+  assertThrows(
+    () => finishWanVaeFrames(assembled, PATCHED, WAN21_GENERATION, OWNER),
+    Error,
+    `${OWNER}: VAE の出力の形 [12, 2, 4, 6]（unpatchify 1 で [12, 2, 4, 6]）が [3, 2, 8, 12] と違う`,
+  );
+  // 実フレーム数は長さから導く（要求の 3 フレームに対して 2 フレームぶん）。
+  assertThrows(
+    () => finishWanVaeFrames(assembled, { ...PATCHED, frames: 3 }, { vaePatchSize: 2 }, OWNER),
+    Error,
+    `${OWNER}: VAE の出力の形 [12, 2, 4, 6]（unpatchify 2 で [3, 2, 8, 12]）が [3, 3, 8, 12] と違う`,
+  );
+  assertThrows(
+    () => finishWanVaeFrames(assembled.subarray(1), PATCHED, { vaePatchSize: 2 }, OWNER),
+    Error,
+    `${OWNER}: VAE の出力 575 要素が [12, F, 4, 6] にならない（1 フレーム 288 要素で割り切れない）`,
+  );
+});
+
+Deno.test("finishWanVaeFrames: 0 要素と、出口のチャネル数が p² で割り切れない計画は、その理由で落とす", () => {
+  assertThrows(
+    () => finishWanVaeFrames(new Float32Array(0), PATCHED, { vaePatchSize: 2 }, OWNER),
+    Error,
+    `${OWNER}: VAE の出力が 0 要素（フレームが 1 枚も無い）`,
+  );
+  // 出口 3 ch の計画を p = 2 で閉じる（形の比較に小数のチャネル数 0.75 を出さない）。
+  assertThrows(
+    () =>
+      finishWanVaeFrames(
+        new Float32Array(3 * 2 * 4 * 6),
+        { ...RGB, tiles: finishTiles(3, 2, 3) },
+        { vaePatchSize: 2 },
+        OWNER,
+      ),
+    Error,
+    `${OWNER}: VAE の出口 3 チャネルが unpatchify の倍率 2² = 4 で割り切れない`,
+  );
 });

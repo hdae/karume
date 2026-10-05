@@ -1,5 +1,5 @@
 /**
- * Wan2.1 の動画 VAE の**タイル decode**（ホスト側 — ADR 0118 決定 2・段 5）。
+ * Wan の動画 VAE の**タイル decode**（ホスト側 — ADR 0118 決定 2・段 5）。
  *
  * chunk グラフ（`vae-chunks.ts`）の空間は潜在 `t×t` の固定タイル（開いた資産の入力形）なので、
  * 全画面（832×480 = 潜在 60×104）はホストがタイルに切って chunk 列を回し、重なりをブレンドして
@@ -40,6 +40,8 @@
  *
  * {@link decodeWanVaeTiled} の戻りは**クランプ前**（照合はクランプ前で行う — 飽和した要素の差を
  * 隠さない）。最終フレームは {@link clampWanVaeFrames} を通した値（上流と同じく貼り付けの後）。
+ * unpatchify のある世代（Wan2.2）は、貼り合わせ（patchify 空間・クランプ前）→ {@link unpatchifyWanVaeFrames}
+ * → クランプの順（上流の `_decode` / `tiled_decode` と同じ — ブレンドは patchify 空間で行う）。
  */
 
 import type { GpuContext, Session } from "@karume/runtime";
@@ -487,6 +489,65 @@ export const decodeWanVaeTiled = async (
   onTile?: (tile: number) => void | Promise<void>,
 ): Promise<Float32Array<ArrayBuffer>> =>
   assembleOwnedTiles(await decodeWanVaeTiles(gpu, sessions, caches, plan, latents, onTile), plan);
+
+/**
+ * patchify 空間 `[Cs, F, h, w]` → `[Cs/p², F, h·p, w·p]`（上流 diffusers `unpatchify` と同じ並び —
+ * `view(c, r, q, f, h, w).permute(c, f, h, q, w, r)`・r = q = p）。添字の対応は
+ * `out[c, f, y·p + dy, x·p + dx] = in[c·p² + dx·p + dy, f, y, x]`（チャネル内のずれは幅方向 dx が上位・
+ * 高さ方向 dy が下位）。
+ *
+ * p = 1 は**入力をそのまま返す**（写さない — 上流の `if patch_size == 1: return x` と同じ）。p > 1 は
+ * 新しい配列への写しだけで浮動小数の演算は無い（値はビット単位で保たれる）。
+ *
+ * 形・倍率・長さの食い違いは fail loudly（p = 1 でも見る）。
+ */
+export const unpatchifyWanVaeFrames = (
+  frames: Float32Array<ArrayBuffer>,
+  shape: readonly [number, number, number, number],
+  patchSize: number,
+): Float32Array<ArrayBuffer> => {
+  if (!Number.isInteger(patchSize) || patchSize < 1) {
+    throw new Error(`unpatchify の倍率 ${patchSize} が正の整数でない`);
+  }
+  if (shape.some((dim) => !Number.isInteger(dim) || dim < 1)) {
+    throw new Error(`unpatchify の入力の形 [${shape.join(", ")}] の次元が正の整数でない`);
+  }
+  const [channels, count, height, width] = shape;
+  const area = patchSize * patchSize;
+  if (channels % area !== 0) {
+    throw new Error(
+      `unpatchify の入力のチャネル数 ${channels} が倍率 ${patchSize}² = ${area} で割り切れない`,
+    );
+  }
+  const elements = channels * count * height * width;
+  if (frames.length !== elements) {
+    throw new Error(
+      `unpatchify の入力の要素数 ${frames.length} が [${shape.join(", ")}]（${elements}）と違う`,
+    );
+  }
+  if (patchSize === 1) return frames;
+  const outChannels = channels / area;
+  const plane = height * width;
+  const out = new Float32Array(elements);
+  // 出力の行が連続になる順（c → f → y → dy → x → dx）で回すので、書き込み先は 1 ずつ進む。
+  let to = 0;
+  for (let channel = 0; channel < outChannels; channel += 1) {
+    for (let frame = 0; frame < count; frame += 1) {
+      for (let y = 0; y < height; y += 1) {
+        for (let dy = 0; dy < patchSize; dy += 1) {
+          for (let x = 0; x < width; x += 1) {
+            for (let dx = 0; dx < patchSize; dx += 1) {
+              const source = channel * area + dx * patchSize + dy;
+              out[to] = frames[(source * count + frame) * plane + y * width + x];
+              to += 1;
+            }
+          }
+        }
+      }
+    }
+  }
+  return out;
+};
 
 /**
  * フレームを `[-1, 1]` へ in-place にクランプする（上流 `torch.clamp(min=-1, max=1)` と同じ —

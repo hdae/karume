@@ -30,6 +30,7 @@ import {
   clampWanVaeFrames,
   decodeWanVaeTiled,
   planWanVaeTiles,
+  unpatchifyWanVaeFrames,
   wanVaeMinTileOverlap,
   wanVaeSpatialCompression,
   wanVaeTileCount,
@@ -96,7 +97,7 @@ export const planWanGenerationTiles = (
  *
  * MUST: admission で呼ぶ。統計の本数が潜在のチャネル数と違っても、潜在の要素数が統計の本数で
  * 割り切れれば逆正規化（`denormalizeWanLatents`）は黙って通る。出口のチャネル数が unpatchify の
- * 倍率と合わない資産は、タイル decode の後の要素数の検査まで落ちない（DiT の段を全部払った後）。
+ * 倍率と合わない資産は、タイル decode の後の形の検査（{@link finishWanVaeFrames}）まで落ちない（DiT の段を全部払った後）。
  *
  * NOTE: `vaePatchSize` は出口のチャネル数からも導けるが、上流の事実として記述子に持ち、ここで照合に
  * 使う（ADR 0121 決定 6）。`export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には
@@ -176,13 +177,83 @@ type WanVaeDecodeState = {
 };
 
 /**
- * VAE の段（chunk グラフ 2 本の Session と常駐の cache を張り、タイル decode して畳む）。
+ * 貼り合わせた patchify 空間のフレーム（クランプ前・`[Cs, F', h, w]`）を、最終フレーム `[3, F, H, W]`
+ * （クランプ済み）にする: 形の検査 → unpatchify（世代の `vaePatchSize`）→ 有限性（クランプ前・RGB の
+ * 座標で名指す）→ クランプ。順は上流の `_decode` / `tiled_decode`（unpatchify の後に clamp）と同じ。
+ *
+ * 形は次元ごとに見る: チャネル `Cs`・高さ `h`・幅 `w` はタイル計画（出口のチャネル数と潜在 × 縮尺）から、
+ * フレーム数 `F'` は長さから導く（`Cs·h·w` で割り切れなければ落とす）。unpatchify した形を
+ * `[3, plan.frames, plan.height, plan.width]` と比べる（要素数だけだと patchify 空間の
+ * `3·p²·(H/p)·(W/p)` と `3·H·W` が等しく、unpatchify の有無を見分けられない）。
  *
  * MUST: クランプの**前**に有限性を見る。上流と同じクランプ（{@link clampWanVaeFrames}）は ±Inf を
  * ±1 に変えるので、後では検出できない（クランプ自体は上流の写しなので変えない）。
  *
- * NOTE: 出力の検査は要素数だけで、VAE の unpatchify の有無は見分けない（patchify 空間の要素数
- * `3·p²·(H/p)·(W/p)` は `3·H·W` と等しい）。unpatchify を入れる段 5 で、形で見る検査に変える。
+ * NOTE: unpatchify の無い世代（`vaePatchSize` 1）は `assembled` そのものを in-place にクランプして返す
+ * （写さない）。`export` は GPU 無しで末尾を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const finishWanVaeFrames = (
+  assembled: Float32Array<ArrayBuffer>,
+  plan: Pick<WanGenerationKnobs, "frames" | "width" | "height" | "tiles">,
+  generation: Pick<WanGenerationDescriptor, "vaePatchSize">,
+  owner: string,
+): Float32Array<ArrayBuffer> => {
+  const { tiles } = plan;
+  const patchSize = generation.vaePatchSize;
+  const channels = tiles.sampleChannels;
+  const height = tiles.rows.extent * tiles.scale;
+  const width = tiles.cols.extent * tiles.scale;
+  const perFrame = channels * height * width;
+  if (assembled.length === 0) {
+    throw new Error(`${owner}: VAE の出力が 0 要素（フレームが 1 枚も無い）`);
+  }
+  const frames = assembled.length / perFrame;
+  if (!Number.isInteger(frames)) {
+    throw new Error(
+      `${owner}: VAE の出力 ${assembled.length} 要素が [${channels}, F, ${height}, ${width}] にならない` +
+        `（1 フレーム ${perFrame} 要素で割り切れない）`,
+    );
+  }
+  const area = patchSize ** 2;
+  if (channels % area !== 0) {
+    throw new Error(
+      `${owner}: VAE の出口 ${channels} チャネルが unpatchify の倍率 ${patchSize}² = ${area} で割り切れない`,
+    );
+  }
+  const patchShape = [channels, frames, height, width] as const;
+  const rgbShape = [
+    channels / area,
+    frames,
+    height * patchSize,
+    width * patchSize,
+  ];
+  const expected = [WAN_RGB_CHANNELS, plan.frames, plan.height, plan.width];
+  if (rgbShape.some((dim, axis) => dim !== expected[axis])) {
+    throw new Error(
+      `${owner}: VAE の出力の形 [${patchShape.join(", ")}]（unpatchify ${patchSize} で ` +
+        `[${rgbShape.join(", ")}]）が [${expected.join(", ")}] と違う`,
+    );
+  }
+  const video = unpatchifyWanVaeFrames(assembled, patchShape, patchSize);
+  const broken = firstNonFinite(video);
+  if (broken !== -1) {
+    const plane = plan.height * plan.width;
+    const pixel = broken % plane;
+    const sheet = Math.floor(broken / plane);
+    throw new Error(
+      `${owner}: VAE の出力（クランプ前）の channel ${Math.floor(sheet / plan.frames)}・` +
+        `フレーム ${sheet % plan.frames}・画素 (x=${pixel % plan.width}, ` +
+        `y=${Math.floor(pixel / plan.width)}) が非有限（${video[broken]}）`,
+    );
+  }
+  clampWanVaeFrames(video);
+  return video;
+};
+
+/**
+ * VAE の段（chunk グラフ 2 本の Session と常駐の cache を張り、タイル decode して畳む）。末尾の形の検査・
+ * unpatchify・有限性・クランプは {@link finishWanVaeFrames}。
  */
 export const decodeWanVaeStage = async (
   state: WanVaeDecodeState,
@@ -241,25 +312,7 @@ export const decodeWanVaeStage = async (
       () => opened.caches?.dispose(),
     ]);
   }
-  const expected = WAN_RGB_CHANNELS * plan.frames * plan.height * plan.width;
-  if (frames.length !== expected) {
-    throw new Error(
-      `${owner}: VAE の出力 ${frames.length} 要素が [${WAN_RGB_CHANNELS}, ${plan.frames}, ` +
-        `${plan.height}, ${plan.width}] と違う`,
-    );
-  }
-  const broken = firstNonFinite(frames);
-  if (broken !== -1) {
-    const plane = plan.height * plan.width;
-    const pixel = broken % plane;
-    const sheet = Math.floor(broken / plane);
-    throw new Error(
-      `${owner}: VAE の出力（クランプ前）の channel ${Math.floor(sheet / plan.frames)}・` +
-        `フレーム ${sheet % plan.frames}・画素 (x=${pixel % plan.width}, ` +
-        `y=${Math.floor(pixel / plan.width)}) が非有限（${frames[broken]}）`,
-    );
-  }
-  clampWanVaeFrames(frames);
+  const video = finishWanVaeFrames(frames, plan, generation, owner);
   await emit({ kind: "stage", component: "vae_decoder", at: "end" });
-  return frames;
+  return video;
 };

@@ -4,7 +4,11 @@
 
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { WAN21_GENERATION, type WanGenerationDescriptor } from "../src/wan/descriptor.ts";
+import {
+  WAN21_GENERATION,
+  WAN22_TI2V_GENERATION,
+  type WanGenerationDescriptor,
+} from "../src/wan/descriptor.ts";
 import { TEMPORAL_COMPRESSION } from "../src/wan/plan.ts";
 
 /** VAE の時間圧縮に合うフレーム数（4n+1）か。 */
@@ -52,6 +56,7 @@ const inconsistencies = (generation: WanGenerationDescriptor): string[] => {
 
 const GENERATIONS: readonly (readonly [string, WanGenerationDescriptor])[] = [
   ["Wan2.1", WAN21_GENERATION],
+  ["Wan2.2", WAN22_TI2V_GENERATION],
 ];
 
 describe("世代の記述子の内部整合", () => {
