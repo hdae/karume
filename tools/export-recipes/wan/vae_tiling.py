@@ -1,10 +1,12 @@
-"""Wan2.1 の動画 VAE の**タイル decode**（幾何の Python 側の正と参照フィクスチャ — ADR 0118 段 5）。
+"""Wan の動画 VAE の**タイル decode**（幾何の Python 側の正と参照フィクスチャ — ADR 0118 / 0121）。
 
-chunk グラフ（`wan/vae_patch.py`）の空間は潜在 `t×t` の固定タイル（資産の入力形・既定 32）。
+chunk グラフ（`wan/vae_patch.py`）の空間は潜在 `t×t` の固定タイル（資産の入力形・既定は系列の
+表 `export_vae.VAE_SERIES` — 2.1 は 32・2.2 は 16）。
 全画面（832×480 = 潜在 60×104）はホストがタイルに切って decode し、重なりをブレンドして
 貼り合わせる（常時タイル — ADR 0118 決定 2・ADR 0033 / 0038 §4 の動画版）。ここはその
 **幾何とブレンドの Python 側の正**と、GPU の照合
-（`packages/models/tests/e2e_wan_vae_tiles_test.ts`）が読む参照フィクスチャの台本。
+（2.1 は `packages/models/tests/e2e_wan_vae_tiles_test.ts`・2.2 は
+`packages/models/tests/e2e_wan_ti2v_vae_tiles_test.ts`）が読む参照フィクスチャの台本。
 TS 側は `packages/models/src/wan/vae-tiles.ts`。
 
 ## 幾何 = 丸め等間隔スナップ配置（上流からの意図的な逸脱）
@@ -28,6 +30,10 @@ TS 側は `packages/models/src/wan/vae-tiles.ts`。
   切り詰めると末端が欠ける）。
 - `clamp(-1, 1)` は貼り付けの後（上流と同じ位置）。参照はクランプ**前**を書く（クランプは
   飽和した要素の差を隠す — 段 4 と同じ判断）。
+- Wan2.2（上流 config の `patch_size` = 2）は、ブレンドと貼り付けを chunk グラフの出口の
+  **patchify 空間**（12 ch）で行い、unpatchify → クランプはその後（上流 `tiled_decode` と同じ順 —
+  ブレンド幅も patchify 空間の画素で、上流の 256/2 − 192/2 = 32 と単位が一致する）。参照は
+  unpatchify とクランプの前を書く（{@link unpatchify_frames} はテストと `frames_rgb` のためだけ）。
 
 ## タイルが外・chunk が内
 
@@ -38,6 +44,8 @@ TS 側は `packages/models/src/wan/vae-tiles.ts`。
 
 ## フィクスチャ（系列の根の `vae_tiles.<case>.safetensors`）
 
+Wan2.1:
+
 - `band`（帯を決める）: seed 固定の潜在 `[16,9,60,104]`（832×480・33 フレーム）のタイル参照
   `frames` と、**非タイル**の参照 `frames_full`（上流の非タイル `_decode` の chunk ループ・
   クランプ前 — タイル化の近似の差の観測用。門ではない）。
@@ -47,10 +55,18 @@ TS 側は `packages/models/src/wan/vae-tiles.ts`。
 - メタに幾何（開始位置・ブレンド幅）を書く — TS の計画と突き合わせる（ADR 0033 追記 9a の
   二重凍結の上に、フィクスチャでの突き合わせを足す）。
 
+Wan2.2（`--model ti2v-5b` — {@link TI2V_FIXTURE_CASES}・タイル 16・重なり潜在 4）は
+`band`（832×480×81）・`accept`（480×832×9・非タイルの参照つき）・`wide`（1280×704×5 — 対ごとに
+ブレンド幅が違う寸法）の 3 本。`frames` は patchify 空間・クランプ前で、メタに `patch_size` を足す。
+`accept` だけ、上流の unpatchify → クランプを当てた RGB `frames_rgb [3, F, H, W]` も書く（GPU の
+VAE 段の末尾〈ホストの unpatchify〉を上流の関数そのものと照合するため）。2.1 のフィクスチャは
+テンソルもメタも 2.2 の経路を足す前と同じ式から出る。
+
 重みは f16 表現可能値へ丸めてから参照を採る（ADR 0006 — `export_vae.load_vae(round_f16=True)`）。
 
     uv run --group wan --inexact python -m wan.vae_tiling                # band + accept
     uv run --group wan --inexact python -m wan.vae_tiling --case accept  # 1 本だけ
+    uv run --group wan --inexact python -m wan.vae_tiling --model ti2v-5b  # Wan2.2
 
 MUST: diffusers は関数の中でだけ触る（`wan` グループは既定の sync に入らない —
 `tests/test_optional_group_imports.py`）。
@@ -73,6 +89,7 @@ from safetensors.torch import save_file
 
 from _shared.paths import SERIES_ROOT
 from wan import export_vae, vae_patch
+from wan.sources import DEFAULT_MODEL
 
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
@@ -81,8 +98,7 @@ if TYPE_CHECKING:
 #: `tile_sample_min − tile_sample_stride` = 256 − 192 = 64 px と同じ。潜在の重なりはここから
 #: {@link min_overlap_latent} で導く（世代ごとに潜在の値を持たない — ADR 0121 決定 6）。
 MIN_OVERLAP_PX = 64
-#: Wan2.1 の VAE の unpatchify の倍率（上流 `config.patch_size` は None = 1 — {@link decode_tiles}
-#: と `vae_patch` が None 以外を拒む）。
+#: Wan2.1 の VAE の unpatchify の倍率（上流 `config.patch_size` は None = 1 — unpatchify しない）。
 WAN21_VAE_PATCH_SIZE = 1
 
 
@@ -242,7 +258,8 @@ def plan_tiles(
 # `blend_v` / `blend_h` are verbatim (as module functions instead of methods). `decode_tiles` keeps
 # the inner chunk loop verbatim and walks the snapped tile starts instead of
 # `range(0, H, stride)`; `assemble_tiles` keeps the blend order and replaces the stride crop and the
-# final crop by the region assignment; the clamp and the unpatchify branch are left out.
+# final crop by the region assignment; clamp and unpatchify are left to the consumer after
+# assembly.
 # License: Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream
 # copyright notice, copied verbatim from the header of that file:
 #
@@ -272,12 +289,15 @@ def decode_tiles(
 ) -> list[list[torch.Tensor]]:
     """タイルごとに chunk ループで decode する（**タイルが外・chunk が内**・クランプ前）。
 
-    `latents` は逆正規化済みの `[1, 16, F, H, W]`。戻りは行優先のタイル `[1, 3, 1 + 4(F−1), s, s]`
-    （s = タイル辺 × 縮尺）。中身は上流 `tiled_decode` の内側のループの逐語で、走査だけが
+    `latents` は逆正規化済みの潜在 `[1, z, F, H, W]`。戻りは行優先のタイル
+    `[1, C, 1 + 4(F−1), s, s]`（s = タイル辺 × 縮尺・C は出口の空間のチャネル — 2.1 は画素の 3、
+    2.2 は patchify 空間の 12）。中身は上流 `tiled_decode` の内側のループの逐語で、走査だけが
     スナップ配置（モジュール doc）。
+
+    MUST: 世代は chunk グラフの書き直しが受けるものだけ（`vae_patch.assert_supported` —
+    参照は chunk グラフと照合するためにある）。
     """
-    if vae.config.patch_size is not None:
-        raise vae_patch.UnsupportedVaeError("patch_size 付きの VAE は未対応")
+    vae_patch.assert_supported(vae)
     _, _, num_frames, height, width = latents.shape
     if (height, width) != (plan.rows.extent, plan.cols.extent):
         raise ValueError(
@@ -305,7 +325,7 @@ def decode_tiles(
 
 
 def assemble_tiles(tiles: list[list[torch.Tensor]], plan: TilePlan) -> torch.Tensor:
-    """decode 済みのタイル（行優先）をブレンドして `[1, 3, F', H·s, W·s]` に貼り合わせる。
+    """decode 済みのタイル（行優先）をブレンドして `[1, C, F', H·s, W·s]` に貼り合わせる。
 
     MUST: ブレンドは縦（上）→ 横（左）の順で、タイルを **in-place** に書き換える（上流と同じ —
     隣に効くのはブレンド済みのタイル。角の 4 枚が重なる領域で係数の順が変わる）。
@@ -353,6 +373,20 @@ def tiled_decode_unclamped(
     return assemble_tiles(decode_tiles(vae, latents, plan), plan)
 
 
+def unpatchify_frames(frames: torch.Tensor, patch_size: int | None) -> torch.Tensor:
+    """出口の空間 `[1, C·p², F, h, w]` → 画素 `[1, C, F, h·p, w·p]`（上流の `unpatchify`）。
+
+    `patch_size` が None（2.1 — unpatchify しない世代）なら `frames` をそのまま返す。それ以外は
+    上流の関数そのものを呼ぶ（自前の写しにすると、参照の素性の主張が自分との比較になる）。
+    フィクスチャの `frames` には掛けない（参照は unpatchify の前を書く — モジュール doc）。
+    """
+    if patch_size is None:
+        return frames
+    from diffusers.models.autoencoders.autoencoder_kl_wan import unpatchify
+
+    return unpatchify(frames, patch_size=patch_size)
+
+
 # ---- 参照フィクスチャ ----------------------------------------------------------------
 
 
@@ -370,6 +404,9 @@ class FixtureCase:
     role: str
     #: 非タイルの参照も採る（タイル化の近似の差の観測 — 門ではない）。
     full: bool
+    #: 上流の unpatchify → クランプを当てた RGB `frames_rgb` も書く（patchify する世代だけ —
+    #: GPU の VAE 段の末尾を上流の関数そのものと照合する）。
+    rgb: bool = False
 
 
 #: 帯の決定用と受入れ用で、潜在（seed）・chunk 境界（chunk 数）・タイルの位置（縦横）を全て変える。
@@ -378,9 +415,38 @@ FIXTURE_CASES = (
     FixtureCase("accept", seed=20261013, chunks=3, height=104, width=60, role="accept", full=False),
 )
 
+#: Wan2.2 TI2V-5B のケース（タイル 16・潜在 48 ch）。2.1 と同じ組み立てで、seed は 2.1 とも段 4 の
+#: chunk 列（`export_vae.TI2V_FIXTURE_CASES`）とも別:
+#:
+#: - `band`: 832×480×81（潜在 30×52・21 chunk）— 帯を決める 1 本（ADR 0121 の検収表の段 5）。
+#: - `accept`: 縦長 480×832×9（潜在 52×30・3 chunk）— タイルの位置も chunk 境界も band と違う。
+#:   非タイルの参照（観測）と RGB の `frames_rgb` を持つ。
+#: - `wide`: 1280×704×5（潜在 44×80・2 chunk）— 対ごとにブレンド幅が違う（行 56 / 48 / 56・
+#:   列 40 / 48 / 40 / 40 / 48 / 40）のはこの寸法だけ（832×480 は対ごとに一様）。
+TI2V_FIXTURE_CASES = (
+    FixtureCase("band", seed=20261051, chunks=21, height=30, width=52, role="band", full=False),
+    FixtureCase(
+        "accept", seed=20261052, chunks=3, height=52, width=30, role="accept", full=True, rgb=True
+    ),
+    FixtureCase("wide", seed=20261053, chunks=2, height=44, width=80, role="accept", full=False),
+)
+
+#: モデル名（`export_vae.VAE_SERIES` のキー）→ ケースの表。
+FIXTURE_CASES_BY_MODEL: dict[str, tuple[FixtureCase, ...]] = {
+    "t2v-1.3b": FIXTURE_CASES,
+    "ti2v-5b": TI2V_FIXTURE_CASES,
+}
+
+#: フィクスチャのメタ `reference`（参照の素性）。2.1 の値は 2.2 の経路を足す前と同じ文字列。
+FIXTURE_REFERENCE = "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)"
+FIXTURE_REFERENCE_IN_PATCHIFY_SPACE = (
+    "snapped-tile decode with upstream blend_v / blend_h in patchify space"
+    " before unpatchify and clamp (CPU f32)"
+)
+
 
 def seeded_latents(vae: AutoencoderKLWan, case: FixtureCase) -> torch.Tensor:
-    """固定 seed の乱数潜在を逆正規化した `[1, 16, F, H, W]`（上流 `WanPipeline` の decode 直前の
+    """固定 seed の乱数潜在を逆正規化した `[1, z, F, H, W]`（上流 `WanPipeline` の decode 直前の
     値域 — `export_vae.fixture_latents` と同じ式）。"""
     generator = torch.Generator().manual_seed(case.seed)
     channels = int(vae.config.z_dim)
@@ -407,10 +473,29 @@ def _difference(got: torch.Tensor, want: torch.Tensor) -> dict[str, float]:
 
 
 def write_fixture(
-    vae: AutoencoderKLWan, case: FixtureCase, tile: int, out_root: Path
+    vae: AutoencoderKLWan,
+    case: FixtureCase,
+    tile: int,
+    out_root: Path,
+    *,
+    min_overlap: int,
+    patch_size: int | None,
 ) -> dict[str, Any]:
-    """1 ケースを書く（潜在 + タイル参照・band は非タイル参照も）。要約を返す。"""
-    plan = plan_tiles(case.height, case.width, tile, WAN21_MIN_OVERLAP_LATENT)
+    """1 ケースを書く（潜在 + タイル参照・`full` は非タイル参照も・`rgb` は RGB も）。要約を返す。
+
+    MUST: `min_overlap`（潜在）と `patch_size` に既定値を置かない — 渡し忘れが 2.1 の値で黙って
+    通ると、別の世代のフィクスチャが静かにずれる。`patch_size` は上流 config と一致しなければ
+    落とす（メタの `patch_size` と `reference` が実物と食い違うのを防ぐ）。
+    """
+    if vae.config.patch_size != patch_size:
+        raise ValueError(
+            f"patch_size {patch_size!r} が上流 config の {vae.config.patch_size!r} と違う"
+        )
+    if case.rgb and patch_size is None:
+        raise ValueError(
+            f"ケース {case.name} の frames_rgb は patchify する世代だけ（patch_size が None）"
+        )
+    plan = plan_tiles(case.height, case.width, tile, min_overlap)
     latents = seeded_latents(vae, case)
     started = time.perf_counter()
     with torch.no_grad():
@@ -434,9 +519,19 @@ def write_fixture(
         "chunks": str(case.chunks),
         "role": case.role,
         "weights": "f16-rounded",
-        "reference": "snapped-tile decode with upstream blend_v / blend_h before clamp (CPU f32)",
+        "reference": (
+            FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_IN_PATCHIFY_SPACE
+        ),
         **plan.meta(),
     }
+    if patch_size is not None:
+        metadata["patch_size"] = str(patch_size)
+    if case.rgb:
+        # 上流 `_decode` の末尾と同じ順（unpatchify → clamp）。unpatchify は置換なので、patchify
+        # 空間の帯がそのまま使える。
+        rgb = unpatchify_frames(frames[None], patch_size)[0].clamp(-1.0, 1.0)
+        summary["frames_rgb"] = list(rgb.shape)
+        tensors["frames_rgb"] = rgb.contiguous()
     if case.full:
         started = time.perf_counter()
         with torch.no_grad():
@@ -448,7 +543,11 @@ def write_fixture(
         }
         summary["vs_full"] = observed
         tensors["frames_full"] = full.contiguous()
-        metadata["frames_full"] = "upstream non-tiled _decode chunk loop before clamp (CPU f32)"
+        metadata["frames_full"] = (
+            "upstream non-tiled _decode chunk loop before clamp (CPU f32)"
+            if patch_size is None
+            else "upstream non-tiled _decode chunk loop before unpatchify and clamp (CPU f32)"
+        )
     summary["peak_rss_gib"] = round(_peak_rss_gib(), 2)
 
     path = out_root / f"{FIXTURE_PREFIX}{case.name}{FIXTURE_SUFFIX}"
@@ -463,33 +562,63 @@ def write_fixture(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
-        "--tile",
-        type=int,
-        default=export_vae.DEFAULT_TILE,
-        help="潜在タイルの辺（既定 32 — export した chunk グラフの入力形と揃える）",
+        "--model",
+        choices=sorted(export_vae.VAE_SERIES),
+        default=DEFAULT_MODEL,
+        help=f"モデル（系列・タイル・ケースは表から — 既定 {DEFAULT_MODEL}）",
+    )
+    tiles = "・".join(
+        f"{model} は {series.tile}" for model, series in export_vae.VAE_SERIES.items()
     )
     parser.add_argument(
-        "--out",
-        type=Path,
-        default=SERIES_ROOT / export_vae.SERIES_NAME,
-        help="系列の根（既定は決定 7 の系列）",
+        "--tile",
+        type=int,
+        default=None,
+        help=f"潜在タイルの辺（既定は表 — {tiles}。export した chunk グラフの入力形と揃える）",
     )
-    names = [case.name for case in FIXTURE_CASES]
+    parser.add_argument(
+        "--out", type=Path, default=None, help="系列の根（既定はモデルの系列 — 決定 7 の表の値）"
+    )
+    # choices は全モデルの和集合（モデルごとに表が違う — `wide` は 2.2 だけ）。選んだモデルの表に
+    # 無い名前は parse の後で落とす。
+    names = list(
+        dict.fromkeys(case.name for cases in FIXTURE_CASES_BY_MODEL.values() for case in cases)
+    )
     parser.add_argument(
         "--case", action="append", choices=names, default=None, help="書くケース（既定は全部）"
     )
     args = parser.parse_args(argv)
-    if args.tile <= 0:
-        parser.error(f"--tile は正の整数（{args.tile}）")
+    series = export_vae.VAE_SERIES[args.model]
+    cases = FIXTURE_CASES_BY_MODEL[args.model]
+    unknown = sorted(set(args.case or ()) - {case.name for case in cases})
+    if unknown:
+        parser.error(
+            f"--case {unknown} は --model {args.model} の表に無い"
+            f"（{[case.name for case in cases]}）"
+        )
+    tile = series.tile if args.tile is None else args.tile
+    if tile <= 0:
+        parser.error(f"--tile は正の整数（{tile}）")
+    out = args.out if args.out is not None else SERIES_ROOT / series.series
+    min_overlap = min_overlap_latent(export_vae.SPATIAL_SCALE, series.patch_size or 1)
+    if tile <= min_overlap:
+        # 計画（`plan_tile_axis`）でも落ちるが、それは VAE を読んだ後 — 読む前に落とす。
+        parser.error(f"--tile {tile} が重なりの下限 {min_overlap}（潜在）以下")
 
-    vae = export_vae.load_vae(round_f16=True)
+    vae = export_vae.load_vae(args.model, round_f16=True)
+    export_vae.assert_series_config(vae, series)
     if vae.use_tiling:
         # MUST: 上流のタイル化は走査形が違う（モジュール doc）。参照は自前の幾何でだけ採る。
         raise SystemExit("vae.use_tiling が True — 上流のタイル化は使わない")
-    selected = [case for case in FIXTURE_CASES if args.case is None or case.name in args.case]
+    selected = [case for case in cases if args.case is None or case.name in args.case]
     summary = {
-        "series": str(args.out),
-        "fixtures": [write_fixture(vae, case, args.tile, args.out) for case in selected],
+        "series": str(out),
+        "fixtures": [
+            write_fixture(
+                vae, case, tile, out, min_overlap=min_overlap, patch_size=series.patch_size
+            )
+            for case in selected
+        ],
     }
     print(json.dumps(summary, indent=1, ensure_ascii=False))
     return 0
