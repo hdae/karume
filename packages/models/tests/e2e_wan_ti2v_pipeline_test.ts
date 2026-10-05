@@ -23,7 +23,7 @@
  * - **帯**（比 = 最大絶対差 ÷ 参照の最大絶対値 — 2.1 と同じ指標）: 観測点は各 step の後の潜在（`latents.0` / `latents.1` —
  *   `denoise-step` の `copyLatents`）とクランプ後のフレーム。帯は決定用 2 本（`band-boxing-cats` / `band-cat-dog-baking`）の
  *   観測点ごとの最悪 × 5（有効数字 2 桁へ切り上げ）で、受入れ（`accept-ferret` — seed もプロンプトも決定用と違う）が帯の内で
- *   あることを見る。**帯は未導出**（{@link LATENT_RATIO_BANDS} / {@link FRAME_RATIO_BAND} が `undefined`）: 各ケースは比を記録して
+ *   あることを見る。帯が未導出（{@link LATENT_RATIO_BANDS} / {@link FRAME_RATIO_BAND} が `undefined`）の間は、各ケースは比を記録して
  *   赤で止まり、「帯の候補」の step が決定用の最悪 × 5 を出す（通る値を仮置きして検出力の無い門を作らない — 段 2 の前例）。
  *   MUST: 受入れの結果を見て帯もケースも変えない。受入れが帯を外れたら、帯を広げずに原因を調べる。
  * - **故障注入**（受入れの初期ノイズ・`latents.1` で比べる・床は帯の {@link FAULT_MARGIN} 倍）: プロンプトの正負の取り違え・
@@ -126,12 +126,23 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
  * 導出の規則: 観測点ごとに決定用 2 本の最悪 × 5（有効数字 2 桁へ切り上げ）。最初の実走が出した候補を、実測の表（決定用 2 本・
  * 帯・受入れ）と一緒にここへ書く（2.1 の `e2e_wan_pipeline_test.ts` の同名の定数の doc と同じ形）。
  *
+ * 導出（2026-10-05・B570・参照席）:
+ *
+ * | 観測点    | band-boxing-cats | band-cat-dog-baking | 最悪 × 5 | 帯     | 受入れ accept-ferret |
+ * | --------- | ---------------: | ------------------: | -------: | -----: | -------------------: |
+ * | latents.0 |         7.185e-6 |            3.315e-6 | 3.593e-5 | 3.6e-5 |             2.968e-6 |
+ * | latents.1 |         1.035e-4 |            1.885e-4 | 9.424e-4 | 9.5e-4 |             1.199e-4 |
+ * | frames    |         2.276e-3 |            1.839e-4 | 1.138e-2 | 1.2e-2 |             1.781e-3 |
+ *
+ * 故障注入の比（latents.1・床は帯の 2 倍 = 1.9e-3）: プロンプトの正負の取り違え 1.321・guidance 5.0 → 5.05 は 8.181e-2・
+ * shift 5.0 → 3.0 は 5.512e-1。
+ *
  * MUST: 受入れ（`accept-ferret`）の結果を見てこの値も、決定用のケースも変えない（帯の決定と受入れの独立が崩れる）。
  * 受入れが帯を外れたら帯を広げずに原因を調べる。
  */
 const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [
-  undefined,
-  undefined,
+  3.6e-5,
+  9.5e-4,
 ];
 
 /**
@@ -140,7 +151,7 @@ const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [
  *
  * MUST: 受入れの結果を見てこの値を変えない（{@link LATENT_RATIO_BANDS} と同じ）。
  */
-const FRAME_RATIO_BAND: number | undefined = undefined;
+const FRAME_RATIO_BAND: number | undefined = 1.2e-2;
 
 /**
  * 故障（プロンプトの正負の取り違え・guidance の 1% のずれ・shift の取り違え）が帯から離れているべき倍率の床（2.1 と段 2 と
