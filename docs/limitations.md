@@ -976,7 +976,7 @@ t 軸の上限で、モデルが宣言する h / w 軸の範囲（`rope.max_size
 実用上は S の上限と VRAM が先に効く。経緯は [ADR 0036](decisions/0036-freeform-resolution.md) の検出限界 2、
 コード側の記録は `packages/models/src/anima/resolution.ts` の `MAX_LATENT_SIDE` の NOTE。
 
-## Wan2.1: 受けるのは埋め込み資産のプロンプト 4 本と 832×480 / 480×832 × 4n+1 の 5〜81 フレームだけ（第 1 段 — ADR 0118）
+## Wan2.1: 受ける寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81 だけ（プロンプトの受理はテキストエンコーダの経路による — ADR 0118 / 0119）
 
 `@karume/models/wan` の `WanPipeline` の by-design の制約。入力起因の拒否は全部 `generate` の入口
 （`planWanGeneration` — GPU に触る前）で `ModelInputError` になる（ADR [0118](decisions/0118-wan21-video-generation.md)
@@ -985,12 +985,11 @@ Consequences）。
 - **受理集合**: 寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81（既定 33）。steps は 1 以上の整数、guidance は
   1 以上の有限の数（1 で CFG を回さない — 上流の `guidance_scale > 1` と同じ。guidance 1 で `negativePrompt` を渡すと
   拒む）、shift は正の有限の数。検収したのは 832×480 の 33 / 81 フレームと 480×832 の VAE（ADR 0118 段 5 / 6 / 8）。
-  寸法とフレーム数はモデルカードと fixture が写しを持つ（`packages/models/src/wan/pipeline.ts` の `ACCEPTED_SIZES`
-  の doc）。
-- **プロンプトは事前計算した 4 本だけ**（正 3 本 + negative 1 本）: テキスト埋め込み資産の原文か正規化後の文字列に
-  完全一致するものだけを受ける（`WanPipeline.prompts` で引ける）。umT5 は GPU で回さない（第 1 段 — ADR 0118
-  決定 4）。任意の文は段 10（umT5 i8・別 ADR）で受けられるようにする予定で、API（`generate({ prompt })`）は変えずに
-  受理集合だけが広がる。
+  寸法とフレーム数はモデルカードと fixture が写しを持つ（`packages/models/src/wan/descriptor.ts` の
+  `WAN21_GENERATION` の doc）。
+- **プロンプトの受理は経路で決まる**: 既定の `textEncoder: "gpu"` は任意の文を受ける（umT5 を GPU で回す — 受理の条件は下の
+  「テキストエンコーダの経路」）。`"precomputed"` は事前計算した 4 本（正 3 本 + negative 1 本）だけで、テキスト埋め込み資産の
+  原文か正規化後の文字列に完全一致するものだけを受ける（`WanPipeline.prompts` で引ける）。
 - **計測（`gpuTiming`）の device は構築時に拒む**: runtime は計測の device で batch を開かないので、VAE の段
   （1 タイル = 1 batch）が回らない。GPU 時間は診断に出ないので、所要・VRAM（fdinfo と診断）・submit 統計で見る。
 - **DiT 段と VAE 段は同時に常駐しない**: 段ごとに Session を張って畳み、DiT を閉じてから VAE を開く（ADR
@@ -1026,7 +1025,7 @@ Consequences）。
 [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 7）の受理の条件は、どれも 2 つの manifest と容器の宣言から
 機械で決まるものに限る: 差し替え先の manifest に役割と quant があること・グラフ記述の sha256 が元の manifest の宣言と同じこと・
 容器の capability と束縛表の不足 / 余剰 0（`packages/models/src/hub/components.ts:422-470`）・Wan の家族の門（グラフの入出力の
-取り決めと、i8 の重みと f32 の表だけの格納 — `umt5Contract`、`packages/models/src/wan/pipeline.ts:940-1010`）。互換の判定を
+取り決めと、i8 の重みと f32 の表だけの格納 — `umt5Contract`、`packages/models/src/wan/text-stage.ts:173-244`）。互換の判定を
 内容ハッシュ 1 つに保つための by-design で、次の 3 つは検査しない（案 B / C とバケットの構成をグラフへ焼く案を採らなかった
 理由と復活の条件は ADR 0122「採らなかった案」）。
 
