@@ -1,10 +1,11 @@
-"""Wan2.1 の動画 VAE decoder を **chunk グラフ**（unbatched の rank 4）へ書き直す（ADR 0118）。
+"""Wan の動画 VAE decoder（2.1 と 2.2）を **chunk グラフ**（unbatched の rank 4）へ書き直す
+（ADR 0118・ADR 0121 決定 6）。
 
 上流 `AutoencoderKLWan`（diffusers 0.39.0 `autoencoder_kl_wan.py`）の decode は、潜在 1 フレームずつ
 decoder を回し、因果キャッシュ（feat_cache）を Python のリストと番兵 `'Rep'` で持ち回す。これを
 「潜在 1 フレーム + cache テンソル群 → フレーム + 更新後の cache」の静的なグラフ 2 種
 （最初の chunk 用 = {@link WanVaeChunkDecoder} の `first=True`・それ以降用 = `first=False`）に
-組み替える。書き直しは 5 つで、どれも **上流のモジュールの重みをそのまま読む関数**として書く:
+組み替える。書き直しは 6 つで、どれも **上流のモジュールの重みをそのまま読む関数**として書く:
 
 1. **cache の正規化 + 因果パディングの cat 化**（{@link causal_conv3d}）— cache は常に 2 フレーム・
    初期値ゼロ・更新は `cat(cache, x)` の末尾 2 フレーム。時間カーネル 3 の CausalConv3d は
@@ -18,6 +19,15 @@ decoder を回し、因果キャッシュ（feat_cache）を Python のリスト
 5. **f32 の normalize**: diffusers は fp16 / bf16 入力のとき normalize を f32 で行う
    （`autoencoder_kl_wan.py:202-210`）。karume の活性は常に f32（格納だけを圧縮 — ADR 0006）なので
    この分岐は常に「f32 のまま」側で、書き直しは要らない（{@link rms_norm} は f32 以外を拒む）。
+6. **残差の外側のショートカットの rank 4 化**（Wan2.2 の `DupUp3D` — {@link avg_shortcut} →
+   {@link _shared.vae_rank4.dup_up_3d}）— 上流の rank 8 の view / permute を、複製と軸ごとの
+   depth-to-space（各段 rank 4）で書く。最初の chunk で時間の先頭 `ft − 1` 枚を捨てる slice は
+   cache の仕組みの側（ここ）に置く。
+
+受ける世代は {@link SUPPORTED_GENERATIONS} の 2 つに閉じる: Wan2.1（`WanUpBlock`・出口は画素の
+3 ch）と Wan2.2（`WanResidualUpBlock`・出口は patchify 空間の 12 ch）。2.2 の出口は unpatchify
+せずに返す（unpatchify と clamp はホスト — ADR 0121 決定 6）。2.1 の分岐は 2.2 の部品を通らない
+（{@link WanVaeChunkDecoder.forward}）。
 
 cache の正規化が上流と値で一致する根拠（決定 2 の導出）: 上流が `F.pad` で時間の先頭に詰める
 ゼロと、ここで cache に置くゼロは同じ値なので、各 conv3d の入力テンソルは要素ごとに上流と同一に
@@ -25,7 +35,8 @@ cache の正規化が上流と値で一致する根拠（決定 2 の導出）: 
 `[0,0]` → `[0,x0]` → `[x0,x1]` と進んで同じ並び）。`time_conv` は最初の chunk で走らない
 （上流の `'Rep'`）ので、その cache はゼロのまま残り、chunk 2 が `[0,0,x1]` を読む — 上流の `'Rep'`
 の経路（ゼロ 2 枚の pad）と同じ。この同値は {@link normalized_cache_decode} が**上流のコードの
-まま** cache だけを正規化した形で実測する（`tests/test_vae_patch.py`）。
+まま** cache だけを正規化した形で実測する（2.1 は `tests/test_vae_patch.py`・2.2 は
+`tests/test_vae_patch_ti2v.py`）。
 
 テンソルは unbatched の `[C, T, H, W]`（B = 1 を落とす — 決定 2）。conv3d の重みだけが rank 5 で、
 値は全て rank 4 以下に収まる（strided コピー族の上限 — ADR 0011 / 0014 / 0016）。
@@ -48,7 +59,13 @@ import torch
 from torch import nn
 from torch.nn import functional
 
-from _shared.vae_rank4 import UPSAMPLE_SCALE, interleave_frames, l2_normalize, nearest_exact_2x
+from _shared.vae_rank4 import (
+    UPSAMPLE_SCALE,
+    dup_up_3d,
+    interleave_frames,
+    l2_normalize,
+    nearest_exact_2x,
+)
 
 if TYPE_CHECKING:
     from diffusers import AutoencoderKLWan
@@ -61,9 +78,28 @@ CACHE_FRAMES = 2
 #: 名前）。
 CACHE_INPUT = "cache"
 
+#: 書き直しが受ける世代の閉じた表: 上流 config の `(is_residual, patch_size)` → up block の型名
+#: （`diffusers.models.autoencoders.autoencoder_kl_wan` の名前 — diffusers は関数の中で
+#: import する）。
+#: Wan2.1 は `WanUpBlock`、Wan2.2 は `WanResidualUpBlock`（`avg_shortcut` の DupUp3D を持ち、
+#: upsampler は dim → dim の 1 本）。表に無い組（`(True, None)`・`(False, 2)`・patch 4 など）は、
+#: ショートカットの有無と出口の並びの前提を確かめていないので fail loudly。
+SUPPORTED_GENERATIONS: dict[tuple[bool, int | None], str] = {
+    (False, None): "WanUpBlock",
+    (True, 2): "WanResidualUpBlock",
+}
+
+#: 出口の画素のチャネル数（RGB）。patchify する世代は `× patch_size²` のチャネル（patchify 空間 —
+#: 2.2 は 12）のまま返す。
+SAMPLE_CHANNELS = 3
+
+#: upsampler の mode → 時間の倍率（upsample3d は `time_conv` の時間インターリーブで 2 倍）。
+TIME_FACTORS = {"upsample3d": 2, "upsample2d": 1}
+
 
 class UnsupportedVaeError(NotImplementedError):
-    """書き直しが前提とする構成（Wan2.1 の decoder）から外れた VAE を受け取った。"""
+    """書き直しが前提とする構成（{@link SUPPORTED_GENERATIONS} の decoder）から外れた VAE を
+    受け取った。"""
 
 
 # ---- cache の表 ------------------------------------------------------------------
@@ -101,29 +137,69 @@ class CacheSlot:
 
 
 def assert_supported(vae: AutoencoderKLWan) -> None:
-    """書き直しが前提とする Wan2.1 の decoder 構成かを確かめる（外れたら fail loudly）。
+    """書き直しが前提とする decoder の構成かを確かめる（外れたら fail loudly）。
 
-    見るのは書き直しが**構造として**仮定している点だけ: residual 版の up block（Wan2.2 の
-    `WanResidualUpBlock` — `avg_shortcut` の DupUp3D を持つ）でないこと・patchify しないこと・
-    mid の attention が 1 本であること。
+    見るのは書き直しが**構造として**仮定している点だけ: 世代が {@link SUPPORTED_GENERATIONS} の
+    表にあり、up block が全てその世代の型であること・mid の attention が 1 本であること・出口の
+    チャネル数が `3 × patch_size²` であること。Wan2.2 は加えて、各 up block のショートカットと
+    upsampler の有無が揃い、ショートカットの倍率が upsampler と同じ（空間 ×2・時間は upsample3d なら
+    ×2・upsample2d なら ×1）であること — 最初の chunk 1 枚・以降 4 枚の取り決めは、残差の経路と
+    ショートカットの時間の倍率が揃っていることに依る。
     """
-    from diffusers.models.autoencoders.autoencoder_kl_wan import WanUpBlock
+    from diffusers.models.autoencoders import autoencoder_kl_wan
 
     config = vae.config
-    if config.is_residual:
+    generation = (bool(config.is_residual), config.patch_size)
+    if generation not in SUPPORTED_GENERATIONS:
         raise UnsupportedVaeError(
-            "is_residual=True（Wan2.2 の VAE）は未対応 — avg_shortcut を書いていない"
-        )
-    if config.patch_size is not None:
-        raise UnsupportedVaeError(
-            f"patch_size={config.patch_size} は未対応（unpatchify を書いていない）"
+            f"(is_residual, patch_size) = {generation} は未対応"
+            f"（受けるのは {list(SUPPORTED_GENERATIONS)} だけ）"
         )
     decoder = vae.decoder
     if len(decoder.mid_block.attentions) != 1 or len(decoder.mid_block.resnets) != 2:
         raise UnsupportedVaeError("mid block は Res → Attention → Res の 1 層だけを書いている")
+    up_block_type = getattr(autoencoder_kl_wan, SUPPORTED_GENERATIONS[generation])
     for block in decoder.up_blocks:
-        if not isinstance(block, WanUpBlock):
-            raise UnsupportedVaeError(f"up block の型 {type(block).__name__} は未対応")
+        if not isinstance(block, up_block_type):
+            raise UnsupportedVaeError(
+                f"up block の型 {type(block).__name__} は世代 {generation} の"
+                f" {up_block_type.__name__} でない"
+            )
+        if config.is_residual:
+            _assert_shortcut_follows_the_upsampler(block)
+    channels = SAMPLE_CHANNELS * (config.patch_size or 1) ** 2
+    if decoder.conv_out.out_channels != channels:
+        raise UnsupportedVaeError(
+            f"出口のチャネル {decoder.conv_out.out_channels} が"
+            f" {SAMPLE_CHANNELS} × patch_size² = {channels} でない"
+        )
+
+
+def _assert_shortcut_follows_the_upsampler(block: nn.Module) -> None:
+    """`WanResidualUpBlock` のショートカット（DupUp3D）が upsampler と同じ倍率で同じ有無か。"""
+    shortcut, upsampler = block.avg_shortcut, block.upsampler
+    if (shortcut is None) != (upsampler is None):
+        raise UnsupportedVaeError("up block のショートカットと upsampler の有無が揃っていない")
+    if shortcut is None:
+        return
+    expected = (TIME_FACTORS.get(upsampler.mode), UPSAMPLE_SCALE)
+    if (shortcut.factor_t, shortcut.factor_s) != expected:
+        raise UnsupportedVaeError(
+            f"ショートカットの倍率 (時間 {shortcut.factor_t}, 空間 {shortcut.factor_s}) が"
+            f" upsampler（{upsampler.mode}）の {expected} と違う"
+        )
+
+
+def _upsampler_of(block: nn.Module) -> nn.Module | None:
+    """up block の upsampler（`WanResidualUpBlock` は `upsampler` 1 本・`WanUpBlock` は
+    `upsamplers[0]`・無ければ None）。"""
+    from diffusers.models.autoencoders.autoencoder_kl_wan import WanResidualUpBlock, WanUpBlock
+
+    if isinstance(block, WanResidualUpBlock):
+        return block.upsampler
+    if isinstance(block, WanUpBlock):
+        return None if block.upsamplers is None else block.upsamplers[0]
+    raise UnsupportedVaeError(f"up block の型 {type(block).__name__} は未対応")
 
 
 def cache_slots(vae: AutoencoderKLWan) -> tuple[CacheSlot, ...]:
@@ -131,7 +207,8 @@ def cache_slots(vae: AutoencoderKLWan) -> tuple[CacheSlot, ...]:
 
     実モジュールを歩いて導く（表を手で持たない）: conv_in → mid の Res ×2 → 各 up block の
     Res ×3 と upsample3d の `time_conv` → head。`shortcut` と post-quant の 1×1×1 は cache を
-    持たない（時間 padding 0 — 決定 2）。
+    持たない（時間 padding 0 — 決定 2）。Wan2.2 のショートカット（DupUp3D）もデータ移動だけで
+    cache を持たない。
     """
     assert_supported(vae)
     decoder = vae.decoder
@@ -150,8 +227,8 @@ def cache_slots(vae: AutoencoderKLWan) -> tuple[CacheSlot, ...]:
         for resnet in block.resnets:
             add(resnet.conv1)
             add(resnet.conv2)
-        if block.upsamplers is not None:
-            upsampler = block.upsamplers[0]
+        upsampler = _upsampler_of(block)
+        if upsampler is not None:
             if upsampler.mode == "upsample3d":
                 add(upsampler.time_conv, time_conv=True)
             elif upsampler.mode != "upsample2d":
@@ -364,6 +441,56 @@ def resample(module: nn.Module, x: torch.Tensor, cursor: _CacheCursor) -> torch.
     return frames.permute(1, 0, 2, 3)
 
 
+# Third-party code notice. `avg_shortcut` and `residual_up_block` below are adapted from
+# `DupUp3D.forward` and `WanResidualUpBlock.forward` in
+# huggingface/diffusers
+# (`src/diffusers/models/autoencoders/autoencoder_kl_wan.py`, `diffusers==0.39.0`).
+# The order of operations and the first-chunk slice are kept; the rank-8 view / permute is replaced
+# by the rank-4 `dup_up_3d`, the defensive `x.clone()` is left out (it does not change values) and
+# the feat_cache bookkeeping is replaced by the normalized cache (`causal_conv3d`).
+# License: Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream
+# copyright notice, copied verbatim from the header of that file:
+#
+#   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
+def avg_shortcut(module: nn.Module, x: torch.Tensor, *, first_chunk: bool) -> torch.Tensor:
+    """Wan2.2 のショートカット `DupUp3D` の rank 4 版（`x` は `[Cin, T, H, W]`）。
+
+    本体は {@link _shared.vae_rank4.dup_up_3d}。最初の chunk では時間の先頭 `ft − 1` 枚を捨てる
+    （上流の `x[:, :, ft-1:]` — 残差の経路の upsample3d が最初の chunk で `time_conv` を走らせず
+    1 枚のまま進むのに揃える）。ft = 1 の上流の slice は恒等なので書かない。
+    """
+    if int(module.in_channels) != x.shape[0]:
+        raise UnsupportedVaeError(
+            f"ショートカットの入力チャネル {module.in_channels} が入力 {tuple(x.shape)} と合わない"
+        )
+    factor_t = int(module.factor_t)
+    out = dup_up_3d(
+        x,
+        out_channels=int(module.out_channels),
+        factor_t=factor_t,
+        factor_s=int(module.factor_s),
+    )
+    return out[:, factor_t - 1 :] if first_chunk and factor_t > 1 else out
+
+
+def residual_up_block(
+    block: nn.Module, x: torch.Tensor, cursor: _CacheCursor, *, first: bool
+) -> torch.Tensor:
+    """`WanResidualUpBlock` の rank 4 版（Res ×3 → upsampler → ショートカットを加算）。
+
+    ショートカットは block の入力から作り、残差の経路の出力に足す（上流の
+    `x + avg_shortcut(x_copy, first_chunk)` と同じ順）。
+    """
+    shortcut_input = x
+    for resnet in block.resnets:
+        x = residual_block(resnet, x, cursor)
+    if block.upsampler is not None:
+        x = resample(block.upsampler, x, cursor)
+    if block.avg_shortcut is not None:
+        x = x + avg_shortcut(block.avg_shortcut, shortcut_input, first_chunk=first)
+    return x
+
+
 # Third-party code notice. `WanVaeChunkDecoder.forward` below is adapted from
 # `WanDecoder3d.forward` in
 # huggingface/diffusers
@@ -377,10 +504,11 @@ def resample(module: nn.Module, x: torch.Tensor, cursor: _CacheCursor) -> torch.
 class WanVaeChunkDecoder(nn.Module):
     """VAE decode の chunk グラフ 1 本（`first=True` が最初の chunk 用・`False` がそれ以降用）。
 
-    入力は潜在 1 フレーム `[16, 1, h, w]`（逆正規化 `z·std + mean` はホスト — 決定 2）と cache の
-    dict（キーは {@link CacheSlot.key}・順は表の順）。出力は**クランプ前**のフレーム
-    （first は `[3, 1, 8h, 8w]`・next は `[3, 4, 8h, 8w]`）と、更新後の cache（入力と同じ順）。
-    `clamp(-1, 1)` はホスト（タイルのブレンドの後 — 上流 `tiled_decode` と同じ位置）。
+    入力は潜在 1 フレーム `[z, 1, h, w]`（z は 2.1 が 16・2.2 が 48。逆正規化 `z·std + mean` は
+    ホスト — 決定 2）と cache の dict（キーは {@link CacheSlot.key}・順は表の順）。出力は
+    **クランプ前**のフレーム（first は `[C, 1, 8h, 8w]`・next は `[C, 4, 8h, 8w]` — C は 2.1 が
+    画素の 3・2.2 が patchify 空間の 12）と、更新後の cache（入力と同じ順）。`clamp(-1, 1)`（と
+    2.2 の unpatchify）はホスト（タイルのブレンドの後 — 上流 `tiled_decode` と同じ位置）。
 
     post-quant の 1×1×1 conv はグラフの中でフレームごとに掛ける（上流の非タイル decode は全フレーム
     に 1 度掛けるが、1×1×1 なのでフレームごとと同じ値 — `tiled_decode` はフレームごとに掛ける）。
@@ -392,6 +520,8 @@ class WanVaeChunkDecoder(nn.Module):
         self.post_quant_conv = vae.post_quant_conv
         self.decoder = vae.decoder
         self.first = first
+        #: Wan2.2 の up block（`WanResidualUpBlock` — {@link assert_supported} が型を揃えてある）。
+        self.residual = bool(vae.config.is_residual)
 
     @property
     def cache_slots(self) -> tuple[CacheSlot, ...]:
@@ -414,6 +544,9 @@ class WanVaeChunkDecoder(nn.Module):
         x = attention_block(mid.attentions[0], x)
         x = residual_block(mid.resnets[1], x, cursor)
         for block in decoder.up_blocks:
+            if self.residual:
+                x = residual_up_block(block, x, cursor, first=self.first)
+                continue
             for resnet in block.resnets:
                 x = residual_block(resnet, x, cursor)
             if block.upsamplers is not None:
@@ -430,21 +563,23 @@ class WanVaeChunkDecoder(nn.Module):
 # of `AutoencoderKLWan._decode` in
 # huggingface/diffusers
 # (`src/diffusers/models/autoencoders/autoencoder_kl_wan.py`, `diffusers==0.39.0`).
-# verbatim; the final clamp is left out (the unpatchify branch is refused instead of carried over).
+# verbatim; the unpatchify branch and the final clamp after it are left out.
 # License: Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream
 # copyright notice, copied verbatim from the header of that file:
 #
 #   Copyright 2025 The Wan Team and The HuggingFace Team. All rights reserved.
 def reference_decode_unclamped(vae: AutoencoderKLWan, latents: torch.Tensor) -> torch.Tensor:
-    """上流の非タイル `_decode` の chunk ループそのもの（最後の `clamp` だけを外したもの）。
+    """上流の非タイル `_decode` の chunk ループそのもの（その後の unpatchify と `clamp` を外した
+    もの）。
 
-    `latents` は `[1, 16, F, h, w]`（逆正規化済み）。戻りは `[1, 3, 1 + 4(F−1), 8h, 8w]`。上流の
-    `AutoencoderKLWan._decode`（`autoencoder_kl_wan.py:1187-1217`）を逐語で写し、`clamp` の手前で
-    止める — クランプは飽和した要素の差を隠すので、照合はクランプ前で行う（クランプ後が上流の
-    `_decode` とビット一致することはテストが固定する）。
+    `latents` は `[1, z, F, h, w]`（逆正規化済み）。戻りは `[1, C, 1 + 4(F−1), 8h, 8w]`（C は 2.1 が
+    画素の 3・2.2 が patchify 空間の 12 — chunk グラフの出口と同じ空間）。上流の
+    `AutoencoderKLWan._decode`（`autoencoder_kl_wan.py:1187-1217`）の chunk ループを逐語で写し、
+    unpatchify（2.1 には無い）と `clamp` の手前で止める — クランプは飽和した要素の差を隠すので、
+    照合はクランプ前で行う（unpatchify とクランプを当てると上流の `_decode` とビット一致することは
+    テストが固定する）。
     """
-    if vae.config.patch_size is not None:
-        raise UnsupportedVaeError("patch_size 付きの VAE は未対応")
+    assert_supported(vae)
     vae.clear_cache()
     hidden = vae.post_quant_conv(latents)
     frames: list[torch.Tensor] = []
@@ -511,9 +646,9 @@ def chunk_decode(
 ) -> torch.Tensor:
     """書き直した chunk グラフ 2 本を eager で回す（ホストのタイル 1 枚ぶんの chunk ループ）。
 
-    `latents` は unbatched の `[16, F, h, w]`。cache はタイルの頭でゼロに作り直し、first の後は
+    `latents` は unbatched の `[z, F, h, w]`。cache はタイルの頭でゼロに作り直し、first の後は
     `time_conv` の 2 本だけゼロのまま足して next へ渡す（first は触らない — 決定 2）。戻りは
-    クランプ前の `[3, 1 + 4(F−1), 8h, 8w]`。
+    クランプ前の `[C, 1 + 4(F−1), 8h, 8w]`（C は {@link WanVaeChunkDecoder} の出口と同じ）。
     """
     if not first.first or following.first:
         raise ValueError("first には first=True・following には first=False のグラフを渡す")
