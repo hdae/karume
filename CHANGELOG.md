@@ -220,7 +220,7 @@ measurements in `docs/research/`.
   `generate`, `dispose`) and shares its public types (`WanGenerateRequest`, `GeneratedVideo`,
   `WanGenerateEvent`, `WanPipelineOptions`, …); it reads manifests with pipeline `wan-ti2v/1`, and
   each class rejects the other's pipeline. Accepted sizes are 1280×704 and 704×1280 with 4n+1
-  frames from 5 to 33 (default 1280×704, 33 frames); the latents are `[48, F', H/16, W/16]` and
+  frames from 5 to 49 (default 1280×704, 33 frames); the latents are `[48, F', H/16, W/16]` and
   `fps` is 24. Image-to-video is not available yet. There is no distribution yet, so for now the
   pipeline is built with `fromAssets` from a manifest and the exported series containers.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every

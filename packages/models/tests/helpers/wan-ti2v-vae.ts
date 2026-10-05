@@ -40,7 +40,7 @@ export type Ti2vVaeCase = {
   readonly chunks: number;
 };
 
-/** `long` は 81 フレーム（1 + 4·20）= 受理集合の上限のフレーム数の chunk 列。 */
+/** `long` は 81 フレーム（1 + 4·20 — cache を 20 回持ち越す長さ）の chunk 列。 */
 export const WAN_TI2V_VAE_CASES: readonly Ti2vVaeCase[] = [
   { name: "band", role: "band", chunks: 9 },
   { name: "accept", role: "accept", chunks: 5 },

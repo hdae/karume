@@ -89,7 +89,7 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
 };
 
 /**
- * Wan2.2（TI2V 5B）の記述子（1280×704 / 704×1280 × フレーム数 4n+1 の 5〜33 だけ — ADR 0121 の
+ * Wan2.2（TI2V 5B）の記述子（1280×704 / 704×1280 × フレーム数 4n+1 の 5〜49 だけ — ADR 0121 の
  * 「追記（2026-10-05）: 受理寸法を公式の 2 寸法へ」）。
  *
  * 受理寸法は公式実装の対応寸法（Wan2.2 の `SUPPORTED_SIZES` — 公式が 720P と呼ぶ 2 向き）だけ。pin した
@@ -98,9 +98,9 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
  * （同じ seed・プロンプト）で写実に出た。よって 832×480 / 480×832 は受理しない。段 5 の 832×480 系のタイル
  * 参照は受理寸法に依らない数値の照合として残る（タイル計画の入口 `planWanGenerationTiles` は受理集合を見ない）。
  *
- * 上限 33 フレームは開発機（B570・Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉）で 1280×704・50 ステップの
- * 完走を確かめた値。開発機での上限の引き上げ（49 / 57 フレーム）は実測を見て決める。公式実装の既定 121
- * フレームは、大きい GPU で完走を確かめてから広げる。
+ * 上限 49 フレームは開発機（B570・Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉）で 1280×704・50 ステップを
+ * 2 席とも完走した値。57 フレームも完走したが、実用席で決定 8 の目安（DiT の診断の合計 ≤ 8.0 GiB）の外。公式実装の既定
+ * 121 フレームは、大きい GPU で完走を確かめてから広げる（実測の表は ADR 0121 の同じ追記の試走の表）。
  *
  * 既定の 1280×704・33 フレームは仮置き（視認で確定する）。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
  * （逆正規化の統計の表は `latents.ts`）。
@@ -112,7 +112,7 @@ export const WAN22_TI2V_GENERATION: WanGenerationDescriptor = {
     { width: 704, height: 1280 },
   ],
   minFrames: 5,
-  maxFrames: 33,
+  maxFrames: 49,
   defaults: { frames: 33, width: 1280, height: 704 },
   fps: 24,
   vaePatchSize: 2,

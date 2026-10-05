@@ -485,16 +485,22 @@ describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
     assertEquals(planned.shift, 5);
   });
 
-  it("832×480（Wan2.1 の既定）は 2.2 の受理集合の文言で、37 フレームは上限 33 の文言で ModelInputError", () => {
+  it("既定の 33 を超えて上限 49 までの 4n+1（37 / 41 / 45 / 49）は通り、潜在のフレーム数は 10 / 11 / 12 / 13", () => {
+    for (const [frames, latentFrames] of [[37, 10], [41, 11], [45, 12], [49, 13]]) {
+      assertEquals(plan({ frames }).latentShape, [48, latentFrames, 44, 80], `frames ${frames}`);
+    }
+  });
+
+  it("832×480（Wan2.1 の既定）は 2.2 の受理集合の文言で、53 フレームは上限 49 の文言で ModelInputError", () => {
     assertThrows(
       () => plan({ width: 832, height: 480 }),
       ModelInputError,
       "832×480 が受理集合（1280×704 / 704×1280）に無い",
     );
     assertThrows(
-      () => plan({ frames: 37 }),
+      () => plan({ frames: 53 }),
       ModelInputError,
-      "frames 37 が受理集合（4n+1 の 5〜33）に無い",
+      "frames 53 が受理集合（4n+1 の 5〜49）に無い",
     );
   });
 });

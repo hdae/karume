@@ -235,7 +235,7 @@ const GPU_TEXT_CASE_ID = caseIdOf(
 
 /** 50 ステップの通しの opt-in（モジュール doc）。 */
 const FULL_PIPELINE = Deno.env.get("KARUME_WAN_TI2V_FULL_PIPELINE") === "1";
-/** 50 ステップの通しのフレーム数（受理集合の上限 — 利用者の裁定 2026-10-05）。 */
+/** 50 ステップの通しのフレーム数（既定のフレーム数）。 */
 const FULL_FRAMES = 33;
 /**
  * 50 ステップの通しの step 数。要求では指定せず manifest の既定に任せるので、観測した denoise-step の数で縛る（manifest の

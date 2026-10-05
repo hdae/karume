@@ -76,7 +76,7 @@ abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 
 The sizes and frames depend on the class: `WanPipeline` (Wan2.1) accepts 832×480 or 480×832 with
 4n+1 frames from 5 to 81 (default 832×480, 33 frames); `WanTi2vPipeline` (Wan2.2) accepts 1280×704
-or 704×1280 with 4n+1 frames from 5 to 33 (default 1280×704, 33 frames). Both take `steps` ≥ 1,
+or 704×1280 with 4n+1 frames from 5 to 49 (default 1280×704, 33 frames). Both take `steps` ≥ 1,
 `guidance` ≥ 1 and finite in float32 (1 turns CFG off), `shift` > 0 with a `steps` × `shift` pair
 whose σ column is strictly decreasing, and either a `seed` (default 0) or the initial noise as
 `latents`. The sizes, the frame range and the defaults come from the generation descriptor

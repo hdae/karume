@@ -8,7 +8,7 @@
 //   記述子の受理集合に無い（公式の対応寸法の外）が、この関数は受理集合を見ないので同じ入口で凍結する（段 5 の
 //   タイル参照が受理寸法に依らない数値の照合として使う）。
 // - **要求の門**: 2.2 の記述子を `planWanRequest` に通し、受理寸法（1280×704 / 704×1280）・フレーム数の範囲
-//   （4n+1 の 5〜33）・既定（1280×704・33 フレーム）を値で縛る。
+//   （4n+1 の 5〜49）・既定（1280×704・33 フレーム）を値で縛る。
 // - **逆正規化の統計の写し**: `WAN22_LATENTS_MEAN` / `WAN22_LATENTS_STD` と fixture
 //   `fixtures/wan-latents/wan22-ti2v.json` のビット一致（反対側は recipe の `wan/tests/test_ti2v_generation_stats.py` が
 //   pin の config と照合する）。
@@ -81,7 +81,7 @@ Deno.test("Wan2.2 のタイル計画: 空間の圧縮は 16（グラフの比 8 
   assertWanVaeTilesCover(LAYOUT, WAN22_TI2V_GENERATION, OWNER);
 });
 
-Deno.test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 33 フレームまでを通し、832×480 と 37 フレームは受理集合の文言で落とす", () => {
+Deno.test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 49 フレームまでを通し、832×480 と 53 フレームは受理集合の文言で落とす", () => {
   const gate: PromptGate<string> = { resolve: (text) => text, defaultNegative: () => "negative" };
   const config: WanPipelineConfig = {
     scheduler: { shift: 5 },
@@ -97,6 +97,10 @@ Deno.test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 33 フレームま�
   assertEquals(wanVaeTileCount(byDefault.tiles), 28);
   assertEquals(planOf({ width: 704, height: 1280, frames: 33 }).latentShape, [48, 9, 80, 44]);
 
+  // 上限は 49（開発機で 2 席とも 50 ステップの完走を確かめた値）。49 は両向きで通る。
+  assertEquals(planOf({ frames: 49 }).latentShape, [48, 13, 44, 80]);
+  assertEquals(planOf({ width: 704, height: 1280, frames: 49 }).latentShape, [48, 13, 80, 44]);
+
   // 公式の対応寸法の外（832×480 / 480×832）と上限を超えるフレーム数は入力起因で落ちる。
   for (const [width, height] of [[832, 480], [480, 832]]) {
     assertThrows(
@@ -106,9 +110,9 @@ Deno.test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 33 フレームま�
     );
   }
   assertThrows(
-    () => planOf({ frames: 37 }),
+    () => planOf({ frames: 53 }),
     ModelInputError,
-    "frames 37 が受理集合（4n+1 の 5〜33）に無い",
+    "frames 53 が受理集合（4n+1 の 5〜49）に無い",
   );
 
   // 下限は 5（5 は通り、4n+1 でも 1 は落ちる）。4n+1 でない値も落ちる。
@@ -117,7 +121,7 @@ Deno.test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 33 フレームま�
     assertThrows(
       () => planOf({ frames }),
       ModelInputError,
-      `frames ${frames} が受理集合（4n+1 の 5〜33）に無い`,
+      `frames ${frames} が受理集合（4n+1 の 5〜49）に無い`,
     );
   }
 });
