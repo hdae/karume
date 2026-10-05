@@ -120,10 +120,14 @@ import {
  * タイル decode の帯（絶対値 — 出力はクランプ前の patchify 空間のフレーム）。`undefined` = 未導出（モジュール doc
  * 「帯の決め方」）。
  *
+ * 導出（2026-10-05・B570）: 決定用 band（12 枚 × 21 chunk）の maxAbs 9.805e-6 × 5 = 4.902e-5 → 有効数字 2 桁へ
+ * 切り上げ 5.0e-5。受入れは accept 7.339e-6・accept の RGB 7.339e-6・wide 6.348e-6。故障注入 2 件の maxAbs は
+ * 2.18 / 2.26。
+ *
  * MUST: 受入れ（accept / accept の RGB / wide）の結果を見てこの値も決定用のケースも変えない。受入れが帯を外れたら、
  * 帯を広げずに原因を調べる。
  */
-const BAND: number | undefined = undefined;
+const BAND: number | undefined = 5.0e-5;
 /** 判定と記録の帯（未導出の回は無限の帯として記録し、判定は赤にする）。 */
 const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 };
 
