@@ -1,20 +1,31 @@
-"""Wan2.1 の動画 VAE decoder の chunk グラフ 2 種を IR v2 へ書き出す台本（ADR 0118 決定 2 / 段 4）。
+"""Wan の動画 VAE decoder の chunk グラフ 2 種を IR v2 へ書き出す台本（ADR 0118 / 0121 の段 4）。
 
-書き出すもの（系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` — 決定 7）:
+モデル（`--model` — 既定 `t2v-1.3b`）ごとの系列・潜在タイル・フィクスチャのケースは
+{@link VAE_SERIES} の表が一括で決める（渡し忘れても 2.1 の系列を 2.1 の値で書くだけで、別の
+モデルの系列を黙って壊す経路は無い）:
 
-- `vae_decoder_first/model.krm` — 最初の chunk 用。入力 = 潜在 `[16,1,t,t]` + cache 30 本・
-  出力 = フレーム `[3,1,8t,8t]` + 更新後の cache 30 本（`time_conv` の 2 本を持たない）。
+| モデル | 系列（`outputs/series/` — 決定 7） | タイル t | 潜在 z | フレーム C |
+|---|---|---|---|---|
+| `t2v-1.3b`（Wan2.1） | `wan2.1-t2v-1.3b-f16-dyn`（ADR 0118） | 32 | 16 | 3（画素） |
+| `ti2v-5b`（Wan2.2） | `wan2.2-ti2v-5b-f16-dyn`（ADR 0121） | 16 | 48 | 12（patchify 空間） |
+
+書き出すもの:
+
+- `vae_decoder_first/model.krm` — 最初の chunk 用。入力 = 潜在 `[z,1,t,t]` + cache 30 本・
+  出力 = フレーム `[C,1,8t,8t]` + 更新後の cache 30 本（`time_conv` の 2 本を持たない）。
 - `vae_decoder_next/model.krm` — それ以降用。入力 = 潜在 + cache 32 本・出力 = フレーム
-  `[3,4,8t,8t]` + 更新後の cache 32 本。
+  `[C,4,8t,8t]` + 更新後の cache 32 本。
 - `vae_chunks.<case>.safetensors`（系列の根）— chunk 列の照合のフィクスチャ。固定 seed の乱数潜在
-  （逆正規化済み `z·std + mean`）と、上流の非タイル `_decode` の chunk ループの**クランプ前**の
-  出力（{@link wan.vae_patch.reference_decode_unclamped}）。GPU の chunk 列の照合（段 4 の検収）が
-  読む。ケースは帯を決める `band`（9 chunk = 33 フレーム）と、受け入れを判定する別の潜在・別の
-  chunk 境界の `accept`（5 chunk = 17 フレーム）と `long`（21 chunk = 81 フレーム — ADR 0118 段 8・
-  cache を 20 回持ち越す長さ）の 3 本（ADR 0118 追記 2026-10-02 — 決定用と受入れ用を分ける）。
+  （逆正規化済み `z·std + mean`）と、上流の非タイル `_decode` の chunk ループの**クランプ前**
+  （2.2 は unpatchify の前でもある）の出力（{@link wan.vae_patch.reference_decode_unclamped}）。
+  GPU の chunk 列の照合（段 4 の検収）が読む。ケースは帯を決める `band`（9 chunk = 33 フレーム）と、
+  受け入れを判定する別の潜在・別の chunk 境界の `accept`（5 chunk = 17 フレーム）と `long`
+  （21 chunk = 81 フレーム — ADR 0118 段 8・cache を 20 回持ち越す長さ）の 3 本（ADR 0118 追記
+  2026-10-02 — 決定用と受入れ用を分ける）。seed はモデルごとに別。
 
-タイル辺 `t`（潜在）は引数（既定 32 = diffusers の `tile_sample_min` 256 px と同じ大きさ）。ホストは
-タイル辺を literal で持たず、開いた資産の入力形から導く（決定 2）。
+タイル辺 `t`（潜在）は引数で上書きできる（既定は表 — 2.1 は diffusers の `tile_sample_min`
+256 px ÷ 8、2.2 は 256 px ÷ 空間の圧縮 16）。ホストはタイル辺を literal で持たず、開いた資産の
+入力形から導く（決定 2）。
 
 格納は **f16 席だけ**（決定 7）: 重みを f16 表現可能値へ丸めて（fake-quant — ADR 0006）から
 export とフィクスチャの参照を採る。丸めより前に参照を採ると、照合の差が量子化誤差と実装誤差の
@@ -22,6 +33,7 @@ export とフィクスチャの参照を採る。丸めより前に参照を採�
 
     uv run --group wan --inexact python -m wan.export_vae              # 2 グラフ + フィクスチャ
     uv run --group wan --inexact python -m wan.export_vae --verify     # eager 同値の実測（実重み）
+    uv run --group wan --inexact python -m wan.export_vae --model ti2v-5b [--verify]   # Wan2.2
 
 MUST: diffusers / huggingface_hub は関数の中で import する（`wan` グループは既定の sync に
 入らない — `tests/test_optional_group_imports.py`）。
@@ -31,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import resource
 import sys
 import time
 from collections import Counter
@@ -73,7 +86,9 @@ MODEL_FILE = "model.krm"
 #: 潜在タイルの既定の辺（決定 2 — diffusers の `tile_sample_min` 256 px ÷ 8）。
 DEFAULT_TILE = 32
 
-#: 空間の縮小率（vae の config の `scale_factor_spatial`）。
+#: chunk グラフの入出力の空間比（潜在 1 に対するフレームの辺 — 2.2 は patchify 空間の画素）。上流
+#: config の `scale_factor_spatial` はこれ × `patch_size`（2.1 は 8 × 1・2.2 は 8 × 2 = 16 —
+#: {@link assert_series_config} が見る・ADR 0121 決定 6）。
 SPATIAL_SCALE = 8
 
 #: next の chunk が出すフレーム数（時間 upsample 2 段 = 4 倍）。first は 1 枚。
@@ -82,6 +97,13 @@ NEXT_FRAMES = 4
 #: chunk 列のフィクスチャのファイル名（系列の根に置く — `vae_chunks.<case>.safetensors`）。
 FIXTURE_PREFIX = "vae_chunks."
 FIXTURE_SUFFIX = ".safetensors"
+
+#: フィクスチャのメタ `reference`（参照の素性）。patchify しない世代（2.1）と、chunk ループの
+#: 出力が unpatchify の前の patchify 空間である世代（2.2）。
+FIXTURE_REFERENCE = "diffusers AutoencoderKLWan._decode chunk loop before clamp (CPU f32)"
+FIXTURE_REFERENCE_BEFORE_UNPATCHIFY = (
+    "diffusers AutoencoderKLWan._decode chunk loop before unpatchify and clamp (CPU f32)"
+)
 
 #: グラフ入力の綴り（`WanVaeChunkDecoder.forward` の引数名がそのまま IR の入力名になる）。
 LATENT_INPUT = "latent"
@@ -131,9 +153,41 @@ FIXTURE_CASES = (
     FixtureCase("long", seed=20261004, chunks=21, role="accept"),
 )
 
+#: Wan2.2 TI2V-5B の VAE の系列（ADR 0121 決定 7 — VAE だけの系列・DiT は持たない）。
+TI2V_SERIES_NAME = "wan2.2-ti2v-5b-f16-dyn"
+
+#: Wan2.2 の潜在タイルの辺（ADR 0121 決定 6 — 出力 256 px ÷ 空間の圧縮 16）。
+TI2V_TILE = 16
+
+#: Wan2.2 のケース（2.1 と同じ組み立て・seed だけ別 — 決定用 1 本 + 受入れ 2 本）。
+TI2V_FIXTURE_CASES = (
+    FixtureCase("band", seed=20261041, chunks=9, role="band"),
+    FixtureCase("accept", seed=20261042, chunks=5, role="accept"),
+    FixtureCase("long", seed=20261043, chunks=21, role="accept"),
+)
+
+
+@dataclass(frozen=True)
+class VaeSeries:
+    """モデル 1 つの VAE の系列（置き場・潜在タイル・patchify の倍率・フィクスチャのケース）。"""
+
+    series: str
+    tile: int
+    #: 上流 config の `patch_size` の期待値（違えば fail loudly — {@link assert_series_config}）。
+    patch_size: int | None
+    cases: tuple[FixtureCase, ...]
+
+
+#: モデル名（`wan.sources.SOURCES` のキー）→ 系列。
+VAE_SERIES: dict[str, VaeSeries] = {
+    "t2v-1.3b": VaeSeries(SERIES_NAME, DEFAULT_TILE, None, FIXTURE_CASES),
+    "ti2v-5b": VaeSeries(TI2V_SERIES_NAME, TI2V_TILE, 2, TI2V_FIXTURE_CASES),
+}
+
 
 class ChunkGraphError(AssertionError):
-    """export した chunk グラフが決定 2 の取り決め（rank・op・cache の入出力）から外れた。"""
+    """export した chunk グラフが決定 2 の取り決め（rank・op・cache の入出力）から外れたか、書き手の
+    前提（出所の revision・上流 config の `patch_size` と空間の圧縮）が系列と合わない。"""
 
 
 def load_vae(model: str = DEFAULT_MODEL, *, round_f16: bool) -> AutoencoderKLWan:
@@ -164,6 +218,47 @@ def provenance(model: str = DEFAULT_MODEL) -> Provenance:
     )
 
 
+def assert_series_config(vae: AutoencoderKLWan, series: VaeSeries) -> None:
+    """上流 config が系列の前提（`patch_size` と空間の圧縮）と合うかを見る（外れたら fail loudly）。
+
+    空間の圧縮 `scale_factor_spatial` は chunk グラフの入出力の空間比 {@link SPATIAL_SCALE} ×
+    `patch_size` でなければならない — ホストの重なりの式（`vae_tiling.min_overlap_latent`）と
+    フレームの辺 `8t` がこの比に依る。
+    """
+    config = vae.config
+    if config.patch_size != series.patch_size:
+        raise ChunkGraphError(
+            f"上流の patch_size {config.patch_size} が系列 {series.series} の"
+            f" {series.patch_size} でない"
+        )
+    expected = SPATIAL_SCALE * (series.patch_size or 1)
+    if config.scale_factor_spatial != expected:
+        raise ChunkGraphError(
+            f"上流の scale_factor_spatial {config.scale_factor_spatial} が"
+            f" {SPATIAL_SCALE} × patch_size = {expected} でない"
+        )
+
+
+def weight_summary(vae: AutoencoderKLWan) -> dict[str, Any]:
+    """グラフが読む重み（decoder + post-quant）の要素数・最大絶対値・非有限の数（要約の記録用）。
+
+    f16 の丸め（`round_weights_to_f16`）は有限値が非有限へ飽和すると fail loudly なので、丸めた後の
+    非有限は 0 のはず — その実測をここで残す（ADR 0121 段 4 の検収）。
+    """
+    tensors = [*vae.decoder.parameters(), *vae.post_quant_conv.parameters()]
+    with torch.no_grad():
+        return {
+            "elements": sum(tensor.numel() for tensor in tensors),
+            "abs_max": max(float(tensor.abs().max()) for tensor in tensors),
+            "nonfinite": sum(int((~torch.isfinite(tensor)).sum()) for tensor in tensors),
+        }
+
+
+def _peak_rss_gib() -> float:
+    """このプロセスの RSS の最大（GiB — Linux の `ru_maxrss` は KiB）。"""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20)
+
+
 def example_inputs(
     module: vae_patch.WanVaeChunkDecoder, tile: int
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -180,6 +275,7 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
     - 値は rank 4 以下。rank 5 は conv3d の重み（initializer・第 2 入力）だけ（rank 6 の reshape も
       この検査で落ちる）。
     - 入力は `latent` + cache（名前・形・順が表どおり）・出力はフレーム + 更新後の cache（同じ順）。
+      潜在とフレームのチャネル数はモジュール（post-quant の入力・`conv_out` の出力）から読む。
     - 出力の cache k は「cache 入力 k を時間の先頭に cat した値の slice」から作られている
       （順を取り違えたグラフは、形が揃う cache どうしで黙って入れ替わる — 形の検査では掴めない）。
     """
@@ -199,7 +295,9 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
 
     slots = module.cache_slots
     side = tile * SPATIAL_SCALE
-    expected_inputs = [(LATENT_INPUT, [16, 1, tile, tile])]
+    latent_channels = int(module.post_quant_conv.in_channels)
+    frame_channels = int(module.decoder.conv_out.out_channels)
+    expected_inputs = [(LATENT_INPUT, [latent_channels, 1, tile, tile])]
     expected_inputs += [(slot.name, list(slot.shape(tile))) for slot in slots]
     actual_inputs = [(entry.name, [int(dim) for dim in entry.shape]) for entry in graph.inputs]
     if actual_inputs != expected_inputs:
@@ -209,8 +307,10 @@ def assert_chunk_graph(graph: IrGraph, module: vae_patch.WanVaeChunkDecoder, til
         raise ChunkGraphError(f"出力 {len(graph.outputs)} 本（期待 1 + {len(slots)}）")
     frames = 1 if module.first else NEXT_FRAMES
     frame_shape = [int(dim) for dim in graph.values[graph.outputs[0]].shape]
-    if frame_shape != [3, frames, side, side]:
-        raise ChunkGraphError(f"フレームの形 {frame_shape}（期待 [3, {frames}, {side}, {side}]）")
+    if frame_shape != [frame_channels, frames, side, side]:
+        raise ChunkGraphError(
+            f"フレームの形 {frame_shape}（期待 [{frame_channels}, {frames}, {side}, {side}]）"
+        )
     for slot, output in zip(slots, graph.outputs[1:], strict=True):
         shape = [int(dim) for dim in graph.values[output].shape]
         if shape != list(slot.shape(tile)):
@@ -245,7 +345,10 @@ def _staged_set(finals: Sequence[Path]) -> Iterator[list[Path]]:
 def _graph_summary(
     target: str, out_dir: Path, staged: Path, graph: IrGraph, tile: int, started: float
 ) -> dict[str, Any]:
-    """1 グラフの要約（容器のバイト数は作業席の現物から数える — 据え替えは名前を変えるだけ）。"""
+    """1 グラフの要約（容器のバイト数は作業席の現物から数える — 据え替えは名前を変えるだけ）。
+
+    `peak_rss_gib` はこのプロセスのここまでの RSS の最大（グラフの相の山。全体の山は要約の根の値）。
+    """
     breakdown = storage_breakdown(graph)
     return {
         "target": target,
@@ -256,6 +359,10 @@ def _graph_summary(
         "inputs": [[entry.name, [int(dim) for dim in entry.shape]] for entry in graph.inputs],
         "frame_shape": [int(dim) for dim in graph.values[graph.outputs[0]].shape],
         "caches": len(graph.outputs) - 1,
+        "cache_outputs": [
+            [output, [int(dim) for dim in graph.values[output].shape]]
+            for output in graph.outputs[1:]
+        ],
         "initializers": len(graph.initializers),
         "compressed_tensors": breakdown.compressed_tensors,
         "compressed_bytes": breakdown.compressed_bytes,
@@ -263,6 +370,7 @@ def _graph_summary(
         "plain_bytes": breakdown.plain_bytes,
         "model_bytes": sum(part.stat().st_size for part in container_parts(staged / MODEL_FILE)),
         "seconds": round(time.perf_counter() - started, 1),
+        "peak_rss_gib": round(_peak_rss_gib(), 2),
     }
 
 
@@ -278,9 +386,14 @@ def emit_targets(
     out_root: Path,
     source: Provenance,
     *,
-    fixtures: bool,
+    cases: Sequence[FixtureCase],
+    patch_size: int | None,
 ) -> dict[str, Any]:
-    """グラフ（と chunk 列のフィクスチャ）を一組で作業席へ書き、全部の検査を通してから据える。
+    """グラフと chunk 列のフィクスチャ（`cases` — 空なら書かない）を一組で作業席へ書き、全部の
+    検査を通してから据える。
+
+    `patch_size` は系列の表の値（{@link VaeSeries}）で、フィクスチャのメタ `reference` の文言だけを
+    決める（2.1 は unpatchify が無いので、文言は 2.1 の既存のフィクスチャと同じまま）。
 
     MUST: 一組で据える。グラフごと・ファイルごとに据えると、途中で落ちた実走が新旧の混ざった組
     （first だけ新しいタイル辺で、next と fixture は旧のまま）を系列に残す。タイル辺の違う混在は
@@ -293,7 +406,7 @@ def emit_targets(
         raise ChunkGraphError(
             f"ターゲット {list(targets)} に未知か重複がある（既知: {', '.join(TARGETS)}）"
         )
-    cases = FIXTURE_CASES if fixtures else ()
+    reference = FIXTURE_REFERENCE if patch_size is None else FIXTURE_REFERENCE_BEFORE_UNPATCHIFY
     out_root.mkdir(parents=True, exist_ok=True)
     finals = [out_root / target for target in targets]
     finals += [fixture_path(out_root, case) for case in cases]
@@ -330,9 +443,7 @@ def emit_targets(
                     "tile": str(tile),
                     "role": case.role,
                     "weights": "f16-rounded",
-                    "reference": (
-                        "diffusers AutoencoderKLWan._decode chunk loop before clamp (CPU f32)"
-                    ),
+                    "reference": reference,
                 },
             )
             written.append(
@@ -347,14 +458,14 @@ def emit_targets(
                 }
             )
     summary: dict[str, Any] = {"series": str(out_root), "graphs": graphs}
-    if fixtures:
+    if cases:
         summary["fixtures"] = written
     return summary
 
 
 def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torch.Tensor:
-    """固定 seed の乱数潜在を逆正規化した `[1, 16, F, t, t]`（上流 `WanPipeline` の decode 直前の
-    値）。
+    """固定 seed の乱数潜在を逆正規化した `[1, z, F, t, t]`（上流 `WanPipeline` の decode 直前の
+    値・z は上流 config の `z_dim` — 2.1 は 16・2.2 は 48）。
 
     `WanPipeline` は `latents / (1/std) + mean` で逆正規化してから `vae.decode` へ渡す。グラフの
     入力はその後の値なので、フィクスチャも実運用と同じ値域で作る（帯の根拠を実運用の値域と
@@ -368,14 +479,19 @@ def fixture_latents(vae: AutoencoderKLWan, case: FixtureCase, tile: int) -> torc
     return noise * std + mean
 
 
-def verify(tile: int, chunks: int, seed: int) -> dict[str, Any]:
+def verify(model: str, tile: int, chunks: int, seed: int) -> dict[str, Any]:
     """パッチの eager 同値を実重み（f32・丸め無し）で測る。
 
-    - `clamp(上流のクランプ前の chunk ループ) == 上流 _decode`（参照の素性 — ビット一致）
+    - `clamp(unpatchify(上流のクランプ前の chunk ループ)) == 上流 _decode`（参照の素性 — ビット
+      一致。unpatchify は patchify する世代〈2.2〉だけで、diffusers の関数そのものを当てる）
     - cache の正規化だけを当てた形（上流のコードのまま）== 上流（ビット一致 — 決定 2 の導出の実測）
     - 書き直しの最終形（{@link wan.vae_patch.chunk_decode}）と上流の差（記録）
     """
-    vae = load_vae(round_f16=False)
+    from diffusers.models.autoencoders.autoencoder_kl_wan import unpatchify
+
+    series = VAE_SERIES[model]
+    vae = load_vae(model, round_f16=False)
+    assert_series_config(vae, series)
     case = FixtureCase("verify", seed=seed, chunks=chunks, role="verify")
     latents = fixture_latents(vae, case, tile)
     with torch.no_grad():
@@ -385,33 +501,41 @@ def verify(tile: int, chunks: int, seed: int) -> dict[str, Any]:
         first = vae_patch.WanVaeChunkDecoder(vae, first=True).eval()
         following = vae_patch.WanVaeChunkDecoder(vae, first=False).eval()
         final = vae_patch.chunk_decode(first, following, latents[0])
+    restored = reference if series.patch_size is None else unpatchify(reference, series.patch_size)
     difference = (final - reference[0]).abs()
     reference_max = float(reference.abs().max())
     per_frame = [float(difference[:, index].max()) for index in range(difference.shape[1])]
     return {
+        "model": model,
         "tile": tile,
         "chunks": chunks,
         "seed": seed,
         "frames": list(reference.shape[1:]),
         "reference_abs_max": reference_max,
-        "clamped_reference_equals_decode": torch.equal(reference.clamp(-1.0, 1.0), decoded),
+        "clamped_reference_equals_decode": torch.equal(restored.clamp(-1.0, 1.0), decoded),
         "normalized_cache_bit_exact": torch.equal(normalized, reference),
         "final_bit_exact": torch.equal(final, reference[0]),
         "final_max_abs": float(difference.max()),
         "final_ratio": float(difference.max()) / reference_max,
         "final_max_abs_first_frame": per_frame[0],
         "final_max_abs_last_frame": per_frame[-1],
+        "peak_rss_gib": round(_peak_rss_gib(), 2),
     }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--tile", type=int, default=DEFAULT_TILE, help="潜在タイルの辺（既定 32）")
     parser.add_argument(
-        "--out",
-        type=Path,
-        default=SERIES_ROOT / SERIES_NAME,
-        help="系列の根（既定は決定 7 の系列）",
+        "--model",
+        choices=sorted(VAE_SERIES),
+        default=DEFAULT_MODEL,
+        help=f"モデル（系列・タイル・ケースは表から — 既定 {DEFAULT_MODEL}）",
+    )
+    parser.add_argument(
+        "--tile", type=int, default=None, help="潜在タイルの辺（既定は表 — 2.1 は 32・2.2 は 16）"
+    )
+    parser.add_argument(
+        "--out", type=Path, default=None, help="系列の根（既定はモデルの系列 — 表の値）"
     )
     parser.add_argument(
         "--target", action="append", choices=TARGETS, default=None, help="書くグラフ（既定は両方）"
@@ -423,23 +547,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--chunks", type=int, default=9, help="--verify の chunk 数（既定 9）")
     parser.add_argument("--seed", type=int, default=0, help="--verify の潜在の seed")
     args = parser.parse_args(argv)
-    if args.tile <= 0:
-        parser.error(f"--tile は正の整数（{args.tile}）")
+    series = VAE_SERIES[args.model]
+    tile = series.tile if args.tile is None else args.tile
+    if tile <= 0:
+        parser.error(f"--tile は正の整数（{tile}）")
 
     if args.verify:
-        print(json.dumps(verify(args.tile, args.chunks, args.seed), indent=1, ensure_ascii=False))
+        summary = verify(args.model, tile, args.chunks, args.seed)
+        print(json.dumps(summary, indent=1, ensure_ascii=False))
         return 0
 
-    source = provenance()
-    vae = load_vae(round_f16=True)
+    source = provenance(args.model)
+    vae = load_vae(args.model, round_f16=True)
+    assert_series_config(vae, series)
     summary = emit_targets(
         args.target or TARGETS,
         vae,
-        args.tile,
-        args.out,
+        tile,
+        args.out or SERIES_ROOT / series.series,
         source,
-        fixtures=not args.no_fixtures,
+        cases=() if args.no_fixtures else series.cases,
+        patch_size=series.patch_size,
     )
+    summary["weights"] = weight_summary(vae)
+    summary["peak_rss_gib"] = round(_peak_rss_gib(), 2)
     print(json.dumps(summary, indent=1, ensure_ascii=False))
     return 0
 
