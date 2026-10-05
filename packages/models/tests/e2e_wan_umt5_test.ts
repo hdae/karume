@@ -50,7 +50,6 @@
 
 import { assert, assertEquals } from "@std/assert";
 import {
-  acquireGpu,
   type BoundContainer,
   type GpuContext,
   type OpenedContainer,
@@ -69,7 +68,7 @@ import {
 } from "../src/wan/umt5/relative-position.ts";
 import { type Umt5SessionInputs, umt5SessionInputs } from "../src/wan/umt5/session-io.ts";
 import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { lookupTimestampUnitNs } from "./helpers/timestamp-unit.ts";
@@ -708,7 +707,7 @@ Deno.test({
     );
     assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -999,7 +998,7 @@ Deno.test({
     // 計測モード（timestamp-query）の device は通常モードと別に取る（DiT の前例 — 2 つの device を同時に載せない。
     // 移植の門のテストは device を破棄して終わる）。submit ごとの GPU 時間は既存の回収に相乗りして測る（runtime の
     // `ChunkBudgetStats.submitGpuTime`）。
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       gpuTiming: true,
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;

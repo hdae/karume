@@ -39,12 +39,7 @@ import {
   type SessionSpec,
 } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
-import {
-  acquireGpu,
-  type GpuContext,
-  type SessionDiagnostics,
-  type SessionOptions,
-} from "@karume/runtime";
+import type { GpuContext, SessionDiagnostics, SessionOptions } from "@karume/runtime";
 import { WanPipeline } from "../wan.ts";
 import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
@@ -68,7 +63,7 @@ import {
   censusRowOf,
   effectiveSessionOptions,
 } from "./helpers/census-table.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { withManifestOverride } from "./helpers/manifest-override.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
@@ -374,7 +369,7 @@ for (const { frames, band } of CASES) {
       (knobs ? "・ノブ単位の relRMS を記録" : ""),
     ignore: !RUNNABLE,
     fn: async (t) => {
-      const gpu = await acquireGpu();
+      const gpu = await acquireTestGpu();
       try {
         assertAdapterMatchesEnvironment(gpu);
         const manifest = readManifest();

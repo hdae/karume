@@ -361,8 +361,8 @@ later の「decode 速度の残り」。
   増幅する）/ 段 2 ✅（参照席の r 門が緑・両席とも容量の閾値の内・121 フレームも載る — ADR 0121 追記「段 2 の結果」。受理を 121 フレームへ
   広げるかは段 6 の前に利用者の裁定）/ 段 3 = コードは着地（共有モジュールの切り出しと 2.1 の一般化 — Python `1e4d7cbb`・TS `f25907f5` /
   `e54e6dc6` / `cf321598`・ADR 0121 追記「段 3 の結果」）。**段 3 の GPU の合格判定**: 2.1 のレーンは 394 passed・1 failed（sha 行・帯・case id は全て一致・赤は既知のレーン内の OOM）、
-  `KARUME_WAN_FULL_PIPELINE=1` の 50 ステップ 4 本は既存の sha 行と一致。**残り = レーン内の OOM の修正（Deno の `GPUDevice.destroy()` が VRAM を返さない —
-  known-issues・テストの GPU の取得口の直し方は裁定待ち）→ レーンの再走で全緑**。1.3B の f16 系列の照合（`export_dit --check`）は実行中。
+  `KARUME_WAN_FULL_PIPELINE=1` の 50 ステップ 4 本は既存の sha 行と一致。**残り = レーンの再走で全緑**（レーン内の OOM = Deno の `GPUDevice.destroy()` が VRAM を返さない —
+  known-issues。テストの GPU の取得口で GC を促す対症療法を入れた〈利用者の裁定 2026-10-05〉・レーンの再走は未）。1.3B の f16 系列の照合（`export_dit --check`）は実行中。
   **次 = 段 4**（VAE 2.2 の decoder — 設計と裁定は `.claude/reviews/2026-10-04_adr0121-stage4-*.{json,md}`〈git 追跡外〉）。
   **段 3 の隣接の小物（起票 2026-10-04・提案）**:
   (a) gpu-lab の Wan タブの再生 fps 16 と既定 33 フレームを、記述子と `video.fps` から読む（今は写し — 段 8 で直す）

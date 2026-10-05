@@ -3,7 +3,8 @@
 // `deno.json` の `test:core` と `test:models:*` は、フル verify（`deno test -A`）を分割した
 // 実行単位である。分割の唯一の危険は**被覆漏れ** —— 新しいテストを足したのにどのレーンにも
 // 入らず、レーン実行では一度も走らないまま「緑」に見える形。ここはそれを無音で通さない門で、
-// 4 つだけを見る:
+// 次の 4 つと、`deno test` の task が `--v8-flags=--expose-gc` を渡していること（テストの GPU の
+// 取得口の緩和が要る — 下の EXPOSE_GC_FLAG）を見る:
 //
 // - **被覆**: core ∪ 全レーン = リポの全 `*_test.ts`（`deno.json` の `exclude` 根を除く）。
 // - **重複なし**: core と系列レーンは互いに素（同じ重い e2e を 2 度払わない）。系列レーン
@@ -15,11 +16,11 @@
 //   から同時に消えて**被覆の門が緑のまま素通りする。母集団を広げるのではなく拒否側で止める。
 //
 // 真実源は `deno.json` の task 文字列そのもの（レーンの定義を二重に持たない）。task 文字列の
-// 解析は `deno test -A <対象…> [--ignore=<glob,…>]` という形に依存するので、その形から外れた
-// 綴りは推測せず throw する（MUST: 読めない形を「対象ゼロ」と読み替えると、この門は
-// レーンが壊れたことを緑で隠す）。
+// 解析は `deno test -A --v8-flags=--expose-gc <対象…> [--ignore=<glob,…>]` という形に依存する
+// ので、その形から外れた綴りは推測せず throw する（MUST: 読めない形を「対象ゼロ」と読み替えると、
+// この門はレーンが壊れたことを緑で隠す）。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 
 /** リポジトリ根（`deno.json` の置き場 = task 内の相対パスの基準）。 */
 const REPO_ROOT = new URL("../../../", import.meta.url);
@@ -187,7 +188,14 @@ const tokenize = (command: string): string[] => {
   return tokens;
 };
 
-/** `deno test -A <対象…> [--ignore=<glob,…>]` を対象と除外に分解する。 */
+/**
+ * `deno test` のタスクが全て渡す V8 フラグ。テストの GPU の取得口が破棄済みの device の回収を促す
+ * のに `gc` が要る（`packages/models/tests/helpers/collect-destroyed-devices.ts` — 対症療法）。
+ * 解析は受けるだけで、渡していることは下の「レーンの門: deno test を回す task は…」が見る。
+ */
+const EXPOSE_GC_FLAG = "--v8-flags=--expose-gc";
+
+/** `deno test -A --v8-flags=--expose-gc <対象…> [--ignore=<glob,…>]` を対象と除外に分解する。 */
 const parseLane = (task: string, command: string): Lane => {
   const tokens = tokenize(command);
   if (tokens[0] !== "deno" || tokens[1] !== "test") {
@@ -196,7 +204,7 @@ const parseLane = (task: string, command: string): Lane => {
   const targets: string[] = [];
   const ignores: string[] = [];
   for (const token of tokens.slice(2)) {
-    if (token === "-A") continue;
+    if (token === "-A" || token === EXPOSE_GC_FLAG) continue;
     if (token.startsWith("--ignore=")) {
       ignores.push(...token.slice("--ignore=".length).split(",").filter((glob) => glob !== ""));
       continue;
@@ -281,6 +289,36 @@ Deno.test("レーンの門: テストの綴りは *_test.ts だけ", () => {
     [],
     "Deno は収集するのにこの門の母集団に入らない綴りのテストがある（分子と分母から同時に " +
       "消えるので被覆の門は緑のまま通す）。ファイル名を <name>_test.ts へ揃えること。",
+  );
+});
+
+Deno.test("レーンの門: deno test を回す task は全て --v8-flags=--expose-gc を渡す", () => {
+  // フラグの無い走行では `gc` が生えず、取得口の緩和が黙って効かなくなる（赤にはならない）ので、
+  // レーンに限らず `&&` などで繋いだ verify の中の `deno test` も含めて見る。先頭一致にしないのは、
+  // 環境変数の前置き（`FOO=1 deno test …`）や `;` / `||` で繋いだ綴りを素通りさせないため。
+  const testCommands = Object.entries(tasks).flatMap(([name, command]) =>
+    command.split(/&&|\|\||;/).map((part) => part.trim())
+      .filter((part) => /\bdeno\s+test\b/.test(part))
+      .map((part) => ({ name, part }))
+  );
+  assert(testCommands.length > 0, "deno.json に deno test を回す task が 1 本も無い");
+  const missing = testCommands
+    .filter(({ part }) => !tokenize(part).includes(EXPOSE_GC_FLAG))
+    .map(({ name }) => name);
+  assertEquals(missing, [], `${EXPOSE_GC_FLAG} を渡していない deno test の task がある`);
+});
+
+Deno.test("レーン解析: --v8-flags は --expose-gc だけを受ける", () => {
+  const files = filesOf(
+    parseLane("synthetic", `deno test -A ${EXPOSE_GC_FLAG} packages/hub/tests`),
+  );
+  assert(files.size > 0, "--expose-gc を付けたレーンが対象を読めていない");
+  // 他の V8 フラグは推測せず落とす（未対応のフラグの扱いと同じ）。
+  assertThrows(
+    () =>
+      parseLane("synthetic", "deno test -A --v8-flags=--max-old-space-size=1 packages/hub/tests"),
+    Error,
+    "未対応のフラグ",
   );
 });
 

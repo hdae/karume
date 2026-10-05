@@ -74,7 +74,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import {
-  acquireGpu,
   type BoundContainer,
   type FusionCounts,
   type GpuContext,
@@ -100,7 +99,7 @@ import { timestepsProj } from "../src/wan/dit-timestep.ts";
 import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "./helpers/census-table.ts";
 import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { timestampUnitNs } from "./helpers/timestamp-unit.ts";
@@ -1010,7 +1009,7 @@ Deno.test({
       PROBE_GRAPH,
     );
     const outputs = prepared.graph.outputs;
-    const gpu = await acquireGpu();
+    const gpu = await acquireTestGpu();
     try {
       assertAdapterMatchesEnvironment(gpu);
       const session = await prepared.createContainerSession(gpu);
@@ -1486,7 +1485,7 @@ Deno.test({
     // = 1 pass になる分だけ窓の壁時計が変わる。チャンクの切れ目は壁時計の窓から学んだ推定で決まるので、
     // 通常の実行と同じなのは裏付け前のチャンク（initialChunkSize）だけで、裏付けが付いた後（最初の窓を
     // 閉じた後）の切れ目は変わりうる。
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       gpuTiming: true,
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
@@ -1528,7 +1527,7 @@ Deno.test({
     );
     let deviceLost: string | undefined;
     // 所要は計測を切った通常の実行で採る（ADR 0118 追記 2026-10-02 — 計測モードは 1 dispatch = 1 pass）。
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1675,7 +1674,7 @@ Deno.test({
     let deviceLost: string | undefined;
     // 計測モードの意味は f16 席の実寸の照合と同じ（1 dispatch = 1 pass — 壁時計は下の通常モードが採る）。1 submit の
     // 門は a8 で dispatch が増える分（anima で 3,087 → 3,311 / step — ADR 0030）を席ごとに測り直す（ADR 0120 リスク 8）。
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       gpuTiming: true,
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
@@ -1754,7 +1753,7 @@ Deno.test({
       i8Graph(),
     );
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1834,7 +1833,7 @@ Deno.test({
     assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
     const base = await readRopeBase(opened);
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       gpuTiming: true,
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
@@ -1878,7 +1877,7 @@ Deno.test({
     const prepared = prepareContainer(opened, graph);
     assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
     const base = await readRopeBase(opened);
-    const gpu = await acquireGpu();
+    const gpu = await acquireTestGpu();
     try {
       assertAdapterMatchesEnvironment(gpu);
       const band = I8_NORMALIZED_BAND[192];
@@ -1910,7 +1909,7 @@ Deno.test({
     const prepared = prepareContainer(opened, GRAPH);
     assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
     const base = await readRopeBase(opened);
-    const gpu = await acquireGpu();
+    const gpu = await acquireTestGpu();
     try {
       assertAdapterMatchesEnvironment(gpu);
       const session = await prepared.createContainerSession(gpu);
@@ -2106,7 +2105,7 @@ Deno.test({
       PROBE_GRAPH,
     );
     const outputs = prepared.graph.outputs;
-    const gpu = await acquireGpu();
+    const gpu = await acquireTestGpu();
     try {
       assertAdapterMatchesEnvironment(gpu);
       const session = await prepared.createContainerSession(gpu);

@@ -89,7 +89,6 @@ import {
 } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import {
-  acquireGpu,
   type GpuContext,
   parseSafetensors,
   type SafetensorsFile,
@@ -113,7 +112,7 @@ import {
   WanUniPcSampler,
   wanUniPcSchedule,
 } from "../src/wan/scheduler.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
@@ -829,7 +828,7 @@ Deno.test({
   fn: async (t) => {
     await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1019,7 +1018,7 @@ Deno.test({
   fn: async (t) => {
     await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1139,7 +1138,7 @@ Deno.test({
   fn: async (t) => {
     await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },

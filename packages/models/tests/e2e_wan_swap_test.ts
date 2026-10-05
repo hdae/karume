@@ -51,7 +51,7 @@ import {
   resolveSelection,
 } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
-import { acquireGpu, openContainer, type SessionDiagnostics } from "@karume/runtime";
+import { openContainer, type SessionDiagnostics } from "@karume/runtime";
 import {
   type GeneratedVideo,
   wanFrameToRgba,
@@ -59,7 +59,7 @@ import {
   WanPipeline,
   type WanRunComponent,
 } from "../wan.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
@@ -363,7 +363,7 @@ Deno.test({
 
     await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },

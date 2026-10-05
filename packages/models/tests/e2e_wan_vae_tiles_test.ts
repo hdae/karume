@@ -36,7 +36,6 @@
 
 import { assert, assertEquals } from "@std/assert";
 import {
-  acquireGpu,
   type GpuContext,
   parseSafetensors,
   prepareContainer,
@@ -64,7 +63,7 @@ import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
 import { planWanGenerationTiles } from "../src/wan/tile-decode.ts";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
 import { type DrmUsage, formatDrmUsage, sampleDrmUsage } from "./helpers/drm-usage.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -299,7 +298,7 @@ Deno.test({
     };
     const degenerate = (await readFixture(degenerateUrl)).tensor("latents");
 
-    const gpu: GpuContext = await acquireGpu();
+    const gpu: GpuContext = await acquireTestGpu();
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;

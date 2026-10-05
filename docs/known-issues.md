@@ -371,7 +371,7 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
 - 直し方の候補（裁定が要る）: 差し替え先の席の `requiredLimits` / `gpuFeatures` を元の席と合わせて判定する（大きい方を取る）か、
   席が食い違う差し替えを admission で拒む。
 
-## Deno: `GPUDevice.destroy()` が VRAM を返さず、device を作って捨てるテストの列で残りが積む — Wan のレーンで実用席 S = 32,760 が OOM（2026-10-04〜05・原因は確定・修正は未）
+## Deno: `GPUDevice.destroy()` が VRAM を返さず、device を作って捨てるテストの列で残りが積む — Wan のレーンで実用席 S = 32,760 が OOM（2026-10-04〜05・原因は確定・テスト側の対症療法を入れた・根本の対処は未）
 
 `deno task test:models:wan` の中で、`e2e_wan_dit_test.ts` の「実用席 `f16+dit8-a8-attn8-s16`・通常モード・S = 32,760」の step が
 **`GpuOutOfMemoryError: run のエンコードと readback: not enough memory left`** で落ちる。レーンでは 2 回中 2 回（385 passed・1 failed /
@@ -392,10 +392,23 @@ sha 行と帯の照合は全て通る。
     （合計の山 8.34 GiB = 0.64 + 1.54 + 自分の 6.16）。この step の開始時点の確保は 2.37 GiB で、単独の走行（1.73 GiB）より多い。
     レーンではこの前に捨てた device がさらに多く、上限を越える。
   - 計測モードの query set は 1 本あたり約 4.1 KiB（10,000 本で 41 MiB）。`GPUQuerySet.destroy()` は Deno では何もせず、GC で返る。
-- **運用の回避（修正まで）**: この step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独に再走する。
-- **直し方（裁定待ち）**: テストの GPU の取得口（`packages/*/tests/helpers/gpu.ts`）で、新しい device を取る前に GC を促し、破棄済みの device の
-  DRM クライアントが消えたことを検査する（残っていれば名指しして落とす）案と、ファイルごとに device を 1 つだけ持つ案がある。上流（Deno）への
-  報告は別に行う。製品の側では、`GpuContext.destroy()` の後に device を作り直す使い方（device lost からの復帰など）でも同じ残りが出る。
+- **入れた対症療法**（利用者の裁定 2026-10-05 — 対症療法で可・深い調査と上流への報告は後回し）: テストの GPU の取得口
+  `acquireTestGpu`（`packages/models/tests/helpers/gpu.ts`）が、`acquireGpu` の前に `collectDestroyedDevices`
+  （`packages/models/tests/helpers/collect-destroyed-devices.ts`）を待つ。中身は `gc()` → 100 ms → `gc()` → 100 ms で、回数と待ちは
+  上の probe の実測（2 回目の後の 100 ms で全部返った）に合わせた。`gc` が要るので、deno.json の `deno test` を回す task は全て
+  `--v8-flags=--expose-gc` を渡す（渡していない task は `packages/runtime/tests/verify_lanes_test.ts` が落とす）。通すのは Wan のレーン
+  （`test:models:wan` / `test:models:wan-ti2v`）の e2e の `acquireGpu` だけ（その中でも `assertRunningAdapter` の 1 回は通らない）。
+  回収されたかは検査しない。
+- **残っていること**:
+  - 根本の対処: 上流（Deno）への報告と、破棄済みの device の DRM クライアントが消えたことを取得の前に検査する門（残っていれば名指しして
+    落とす）は後回し。GC の時点は V8 / cppgc の実装の挙動で、仕様の保証ではない。
+  - フラグ無しで直に `deno test` を回した走行には `gc` が無く、緩和は何もしない。
+  - Wan のレーンの外のテストと、パイプラインが内部で取る device（`gpu` を渡さない読み込み）は取得口を通らない（次に取得口を通る
+    取得の前の GC では、それまでに捨てた分もまとめて回収される）。
+  - 製品の側: `GpuContext.destroy()` の後に device を作り直す使い方（device lost からの復帰など）でも同じ残りが出る。手当ては無い。
+  - レーンの再走は未（緩和が OOM を消すかはまだ確かめていない）。
+- **運用の回避**: 緩和の後もこの step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独に再走する。直に
+  `deno test` で回すときは `--v8-flags=--expose-gc` を付ける（付けないと緩和が効かない）。
 - **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
   「tiny golden の取得と破棄を重ねた末尾の OOM」。
 - 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。

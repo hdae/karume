@@ -25,7 +25,6 @@
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
-  acquireGpu,
   ExecutionError,
   type GpuContext,
   parseSafetensors,
@@ -45,7 +44,7 @@ import {
   wanVaeLatentChunk,
 } from "../src/wan/vae-chunks.ts";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -284,7 +283,7 @@ Deno.test({
       long: await readFixture("long"),
     };
 
-    const gpu = await acquireGpu();
+    const gpu = await acquireTestGpu();
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;

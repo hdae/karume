@@ -65,7 +65,6 @@
 import { assert, assertEquals } from "@std/assert";
 import type { SessionSpec } from "@karume/hub";
 import {
-  acquireGpu,
   type BoundContainer,
   type FusionCounts,
   type GpuContext,
@@ -87,7 +86,7 @@ import { type WanRopeBase, wanRopeTables } from "../src/wan/dit-rope.ts";
 import { timestepsProj } from "../src/wan/dit-timestep.ts";
 import { effectiveSessionOptions } from "./helpers/census-table.ts";
 import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { timestampUnitNs } from "./helpers/timestamp-unit.ts";
 import {
@@ -1252,7 +1251,7 @@ Deno.test({
     if (typeof width !== "number") throw new Error("timesteps_proj の幅が静的な数でない");
     const inputs = await longInputs(await readRopeBase(opened), width);
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1322,7 +1321,7 @@ Deno.test({
     assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
     let deviceLost: string | undefined;
     // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（2.1 の実寸の照合と同じ）。
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       gpuTiming: true,
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
@@ -1364,7 +1363,7 @@ Deno.test({
   fn: async (t) => {
     const prepared = prepareContainer(await openSeriesContainer(MODEL_URL), graphName());
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1456,7 +1455,7 @@ Deno.test({
     const options = practicalSessionOptions();
     const prepared = prepareContainer(await openSeriesContainer(MODEL_URL), graphName());
     let deviceLost: string | undefined;
-    const gpu = await acquireGpu({
+    const gpu = await acquireTestGpu({
       onDeviceLost: (info) => {
         deviceLost = `${info.reason}: ${info.message}`;
       },
@@ -1512,7 +1511,7 @@ Deno.test({
     const opened = await openSeriesContainer(MODEL_URL);
     const prepared = prepareContainer(opened, graph);
     assertEquals(prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-    const gpu = await acquireGpu();
+    const gpu = await acquireTestGpu();
     try {
       assertAdapterMatchesEnvironment(gpu);
       const ratios = await ratioGate({ t, gpu, prepared, cases: WAN_TI2V_CASES, band: SMALL_BAND });
