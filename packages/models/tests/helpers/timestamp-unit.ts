@@ -11,6 +11,9 @@
 /** timestamp の 1 単位の ns（環境キー → ns）。行を足すのは実測で period を確かめた環境だけ。 */
 export const TIMESTAMP_UNIT_NS: Readonly<Record<string, number>> = {
   "deno-intel-graphics-bmg-g21": 52.0833,
+  // RTX 3080 Ti（NVIDIA ドライバ 615.71）: Vulkan の timestampPeriod は 1。2026-10-06 の実測で、1 pass の raw tick が壁時計から
+  // submit の固定費（約 11 ms）を引いた値と 1% 以内で一致した（133〜153 ms の pass × 6 回・query set の使い捨てと使い回しの両方）。
+  "deno-nvidia-geforce-rtx-3080-ti": 1,
 };
 
 /** 表の行（無ければ undefined — 換算を推測しない）。 */

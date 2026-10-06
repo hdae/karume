@@ -251,6 +251,9 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   返す。WebGPU 仕様は ns）。B570 の Vulkan `timestampPeriod` は 52.0833 ns なので、Deno での
   `lastRunTiming` / `--diagnostics` の内訳は **×52 過小**（BiRefNet 1024² の GPU 総和 raw 64.8 ms
   × 52.08 ≒ 3,375 ms、壁時計の計測窓 3,452 ms と一致）。RTX は period 1 ns で表面化しなかった。
+  **2026-10-06・RTX 3080 Ti（NVIDIA ドライバ 615.71）で実測**: 1 tick = 1 ns（133〜153 ms の pass で raw tick が壁時計 − submit の固定費
+  〈約 11 ms〉と 1% 以内で一致・query set の使い捨てと使い回しの両方）→ `TIMESTAMP_UNIT_NS` に行を足した。probe =
+  `outputs/diag/timestamp-period-probe.ts`（git 追跡外）。
   Chrome（Dawn）は換算する。karume 側で補正できない（WebGPU API は period を露出しない）ので、
   Deno で GPU 内訳を読むときは period ≠ 1 の GPU に注意する。Deno への issue 起票は未。
 - **Deno 2.9.6 は device lost を例外にせず panic する**（ext/webgpu の `device_poll(...).unwrap()`

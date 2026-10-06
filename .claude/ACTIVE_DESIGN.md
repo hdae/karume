@@ -105,7 +105,7 @@
 - `results.json`の`measurements`は**判定に使わない記録**で、帯に対する比などの派生値を持たない（導くのは`tools/verify-diff`の側）。この欄を読んで帯を動かすときも、緩める根拠は仕様の該当節と実測値で書く。
 - 入力起因の失敗（渡した要求そのものが受理できない）は`ModelInputError`で投げる。綴り違い（model / quant / sampler名）・呼び出し手順の違反（dispose済み・二重生成）・資産の齟齬・内部の前提の破れは**素の`Error`のまま**で、この型に混ぜない（[ADR 0107](../docs/decisions/0107-model-input-error.md)決定2 / 3）。
 - レーンを単独で回すと門番3本（`gpu_gate` / `assets_gate` / `distribution_gate`）は走らない（coreにしか無い）。レーンの緑をフルverifyの緑と同じ意味に扱わない。参照門だけは系列のe2eに同梱される。
-- Denoはtimestamp-queryの値をnsへ換算しない（wgpuのraw tickのまま）。B570は`timestampPeriod` 52.0833 nsなので`lastRunTiming` / `--diagnostics`の内訳は×52過小になる（RTXはperiod 1 nsで表面化しなかった・Chromeは換算する — [known-issues](../docs/known-issues.md)）。
+- Denoはtimestamp-queryの値をnsへ換算しない（wgpuのraw tickのまま）。B570は`timestampPeriod` 52.0833 nsなので`lastRunTiming` / `--diagnostics`の内訳は×52過小になる（RTX 3080 Tiは2026-10-06の実測でperiod 1 ns・`TIMESTAMP_UNIT_NS`に行あり・Chromeは換算する — [known-issues](../docs/known-issues.md)）。
 - Denoでは、errorScopeで捕まえた`GPUOutOfMemoryError`の時点でdeviceが既に死んでいることがある。生き残れるOOMは`createBuffer` / `createTexture`のものだけで、`queue.writeBuffer`のstaging・submit・bind group生成のOOMはwgpuがdeviceを失わせ、`device.lost`は次の検証を通る呼び出しまで解決しない。「OOMを踏んでから解放してやり直す」設計を新しく作らない — 空きは`fitsHeadroom`で先に測る（[limitations](../docs/limitations.md)の97%節・[ADR 0112追記](../docs/decisions/0112-anima-transformer-residency.md)）。
 - CPUのf32は重みの番地の64バイト境界からのずれで最終ビットが変わる（MKLの振る舞い・f64は不変）。f32のgoldenが割れたら門を緩めず、その環境で撮り直す。合成の乱数のtext文脈はWan2.2 5Bのf32とf64の差を増幅するので、goldenと決定用の文脈は実プロンプトの埋め込みを使う（[ADR 0121 追記「段 0 の結果」「段 1 の結果」](../docs/decisions/0121-wan22-ti2v-5b.md)）。
 - 全体verifyの失敗はログと失敗ファイルの単独実行で切り分ける。VRAM圧と断定しない。
