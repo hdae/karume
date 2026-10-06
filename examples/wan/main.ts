@@ -1,13 +1,21 @@
 /**
- * Wan2.1（テキスト → 動画）の最小のデモ。プロンプトを 1 本渡して動画を生成し、フレームを PNG の連番で書く。
+ * Wan2.1 T2V 1.3B と Wan2.2 TI2V 5B（テキスト → 動画）の最小のデモ。プロンプトを 1 本渡して動画を生成し、
+ * フレームを PNG の連番で書く。
  *
  *     deno task demo:wan --prompt boxing-cats --seed 42
  *     deno task demo:wan --prompt "A red fox trots through fresh snow at sunrise." --steps 20
  *     deno task demo:wan --text-encoder precomputed --prompt ferret --frames 17 --size 480x832
  *     deno task demo:wan --quant f16 --prompt boxing-cats --seed 42
+ *     deno task demo:wan --generation wan2.2 --prompt boxing-cats --seed 42
+ *
+ * 世代は `--generation`（`wan2.1` / `wan2.2` — 既定 `wan2.1`）。世代で違うのはパイプラインの class
+ * （`WanPipeline` / `WanTi2vPipeline`）・既定の配布形ミラー・その組み立てのコマンド・既定の出力先だけで、
+ * 下の取得元・テキストエンコーダ・席・ノブの扱いは両世代で共通（2.2 の manifest の `text_encoder` も同じ
+ * umT5 の配布リポを越境参照する）。Wan2.2 は画像入力（I2V）をまだ受けない（ADR 0121 段 9）。
  *
  * 配布形は `fromPretrained` で読む（ADR 0118 段 7）。`--source` 未指定なら手元の配布形ミラー
- * `models/karume-wan2.1`（`dist.py --pipeline wan` が組む）を取得元ハンドル（`denoDirectory`）で読む —
+ * `models/karume-wan2.1`（`dist.py --pipeline wan` が組む）/ `models/karume-wan2.2`
+ * （`dist.py --pipeline wan-ti2v` が組む）を取得元ハンドル（`denoDirectory`）で読む —
  * HF の公開リポはまだ無いので、ミラーが無ければ組み立てのコマンドを出して落ちる。明示した `--source` は
  * ローカルの配布形か HF のリポ名（`owner/name`）としてそのまま読む。
  *
@@ -32,9 +40,14 @@
  *
  * `--prompt` / `--negative` は埋め込み資産の名前（`boxing-cats` など — その原文を渡す）か、それ以外の任意の
  * 文字列（そのまま渡す — `precomputed` では資産の集合の外なので選べる名前の一覧つきで落ちる）。未指定のノブは
- * パイプラインの既定（step 数・guidance・shift は manifest の `pipelineConfig` — 50・5.0・3.0、寸法とフレーム数は
- * 832×480・33 フレーム・negative は公式の `sample_neg_prompt`）。`--frames` は 4n+1 の 5〜81（受理集合の外は
+ * パイプラインの既定（以下は Wan2.1 の値 — step 数・guidance・shift は manifest の `pipelineConfig` — 50・5.0・3.0、
+ * 寸法とフレーム数は 832×480・33 フレーム・negative は公式の `sample_neg_prompt`）。`--frames` は 4n+1 の 5〜81（受理集合の外は
  * パイプラインが `ModelInputError` で落とす）。
+ *
+ * Wan2.2 の事実（`--generation wan2.2`）: step 数・guidance・shift の既定は 2.2 の manifest の `pipelineConfig` で
+ * 50・5.0・5.0。寸法は 1280×704 か 704×1280（既定 1280×704）、フレーム数は 4n+1 の 5〜49（既定 33）、24 fps。
+ * 席の既定は manifest の `defaultQuant` の `f16+dit8-a8-attn8-s16` で、もう 1 つの席は `f16+dit8`
+ * （2.2 に `f16` の席は無い）。
  */
 
 import {
@@ -45,16 +58,18 @@ import {
 } from "../../packages/hub/mod.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import { encodePng } from "../../packages/models/mod.ts";
-import { wanFrameToRgba, WanPipeline } from "../../packages/models/wan.ts";
+import { wanFrameToRgba, WanPipeline, WanTi2vPipeline } from "../../packages/models/wan.ts";
 import { runMain } from "../shared/run-main.ts";
 import { distributionSource } from "../shared/local-source.ts";
 import { isLocalDist } from "../shared/local-assets.ts";
 
-const USAGE = "--source <パス|HF repo> --umt5-source <パス> --quant <名前>" +
+const USAGE =
+  "--generation <wan2.1|wan2.2> --source <パス|HF repo> --umt5-source <パス> --quant <名前>" +
   " --text-encoder <gpu|precomputed> --swap-text-encoder <パス|owner/name@<commit>>" +
   " --prompt <名前|文字列> --negative <名前|文字列>" +
   " --seed <整数> --steps <整数> --frames <整数> --guidance <数> --shift <数> --size <WxH> --out <dir>";
 const KNOWN = new Set([
+  "generation",
   "source",
   "umt5-source",
   "quant",
@@ -96,6 +111,38 @@ const number = (key: string): number | undefined => {
   return raw === undefined ? undefined : Number(raw);
 };
 
+/**
+ * 世代ごとに違う事実だけの表（パイプラインの class・既定の配布形ミラー・ミラーが無いときに出す組み立ての
+ * コマンド・既定の出力先）。取得元の越境の mapping・経路・席・ノブ・出力先の名前は両世代で共通。
+ * 2.2 の組み立ては umT5 への越境参照の 5 つの `--ref-*` が要り、参照先が未公開の間は仮の SHA と
+ * `--allow-placeholder-ref` を付ける（ADR 0121 追記「段 8a の結果」で組んだコマンド）。
+ */
+const GENERATIONS = {
+  "wan2.1": {
+    pipeline: WanPipeline,
+    defaultSource: "models/karume-wan2.1",
+    assembleCommand: "cd tools/export-recipes && uv run python dist.py --pipeline wan",
+    defaultOutRoot: "outputs/examples/wan2.1-t2v-1.3b",
+  },
+  "wan2.2": {
+    pipeline: WanTi2vPipeline,
+    defaultSource: "models/karume-wan2.2",
+    assembleCommand: "cd tools/export-recipes && uv run python dist.py --pipeline wan-ti2v" +
+      " --ref-repo hdae/karume-umt5-xxl --ref-revision 0000000000000000000000000000000000000000" +
+      " --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder" +
+      " --allow-placeholder-ref",
+    defaultOutRoot: "outputs/examples/wan2.2-ti2v-5b",
+  },
+} as const;
+const isGeneration = (value: string): value is keyof typeof GENERATIONS =>
+  Object.hasOwn(GENERATIONS, value);
+const generation = args.get("generation") ?? "wan2.1";
+// MUST: 表に無い世代は落とす（`Object.hasOwn` — 打ち間違いが黙って既定の世代で走らない）。
+if (!isGeneration(generation)) {
+  throw new Error(`--generation ${generation} が wan2.1 / wan2.2 のどちらでもない`);
+}
+const GENERATION = GENERATIONS[generation];
+
 const textEncoderArg = args.get("text-encoder");
 if (textEncoderArg !== undefined && textEncoderArg !== "gpu" && textEncoderArg !== "precomputed") {
   throw new Error(`--text-encoder ${textEncoderArg} が gpu / precomputed のどちらでもない`);
@@ -122,11 +169,11 @@ const shift = number("shift");
 const size = args.get("size");
 const sizeMatch = size === undefined ? undefined : /^(\d+)x(\d+)$/.exec(size);
 if (sizeMatch === null) throw new Error(`--size ${size} が WxH の形でない`);
-const outRoot = args.get("out") ?? "outputs/examples/wan2.1-t2v-1.3b";
+const outRoot = args.get("out") ?? GENERATION.defaultOutRoot;
 
 /** 既定の取得元（手元の配布形ミラー — HF の公開リポはまだ無い）。 */
-const DEFAULT_SOURCE = "models/karume-wan2.1";
-const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline wan";
+const DEFAULT_SOURCE = GENERATION.defaultSource;
+const ASSEMBLE_COMMAND = GENERATION.assembleCommand;
 /** umT5 の配布形ミラーの既定（Wan の manifest の `text_encoder` が越境参照する先）。 */
 const DEFAULT_UMT5_SOURCE = "models/karume-umt5-xxl";
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
@@ -236,11 +283,13 @@ const main = async (): Promise<void> => {
   /** 出力先の名前に入れる経路（差し替えた回は元の umT5 の回と別のディレクトリにする）。 */
   const route = swap === undefined ? textEncoder : "gpu-swap";
   console.log(
-    `[wan] source: ${label}・quant: ${quantArg ?? "（manifest の既定）"}・text encoder: ${
+    `[wan] source: ${label}・generation: ${generation}・quant: ${
+      quantArg ?? "（manifest の既定）"
+    }・text encoder: ${
       swap === undefined ? textEncoder : `${textEncoder}（差し替え: ${swap.label}）`
     }`,
   );
-  await using pipeline = await WanPipeline.fromPretrained(from, {
+  await using pipeline = await GENERATION.pipeline.fromPretrained(from, {
     ...(quantArg === undefined ? {} : { quant: quantArg }),
     textEncoder,
     ...(swap === undefined ? {} : { components: { text_encoder: { source: swap.source } } }),

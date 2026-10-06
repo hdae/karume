@@ -1,18 +1,23 @@
-# Wan2.1 text-to-video demo
+# Wan text-to-video demo
 
-A one-shot command line for the Wan2.1 T2V 1.3B pipeline: one prompt in, one clip out as numbered
-PNG frames. It is the worked example for `WanPipeline.fromPretrained`, `prompts`, `generate` and
-`wanFrameToRgba`.
+A one-shot command line for two Wan pipelines: Wan2.1 T2V 1.3B (`WanPipeline`, the default) and
+Wan2.2 TI2V 5B (`WanTi2vPipeline`, `--generation wan2.2`). One prompt in, one clip out as numbered
+PNG frames. It is the worked example for `fromPretrained`, `prompts`, `generate` and
+`wanFrameToRgba`. Both generations run text-to-video only; image-to-video is not supported yet.
+Everything below describes Wan2.1 unless it says otherwise; [Wan2.2 TI2V 5B](#wan22-ti2v-5b) lists
+what differs for the second generation.
 
 ```
 deno task demo:wan
 deno task demo:wan --prompt "A red fox trots through fresh snow at sunrise." --steps 20
 deno task demo:wan --text-encoder precomputed --prompt ferret --seed 7 --frames 17 --size 480x832
 deno task demo:wan --quant f16 --prompt boxing-cats --seed 42
+deno task demo:wan --generation wan2.2
 ```
 
-The script needs a WebGPU adapter. Run it from the repository root: the default inputs and the
-output directory are relative paths.
+`--generation` takes `wan2.1` (default) or `wan2.2`; any other value is rejected. The script needs
+a WebGPU adapter. Run it from the repository root: the default inputs and the output directory are
+relative paths.
 
 ## Where the model comes from
 
@@ -168,4 +173,78 @@ A clip needs a storage binding of at least 503,193,600 bytes at 33 frames and 1,
 at 81 frames (the transformer's FFN intermediate), far above the WebGPU default of 128 MiB;
 `acquireGpu` requests the adapter's own limits. On an RTX 5070 Ti, a 50-step clip of 81 frames with
 the `f16` quant and the precomputed embeddings completed in Chrome in 46.1 minutes. The GPU text
-encoder and the int8 quants have not been run in Chrome yet.
+encoder and the int8 quants have not been run in Chrome yet for Wan2.1; for Wan2.2, see below.
+
+## Wan2.2 TI2V 5B
+
+`--generation wan2.2` runs `WanTi2vPipeline` instead of `WanPipeline`. The source, text encoder,
+swap, quant and knob flags and the output naming work as described above; only the defaults and the
+accepted values below differ. `--source` must point at a distribution of the chosen generation: the
+pipeline rejects a manifest whose pipeline does not match (`wan/1` for Wan2.1, `wan-ti2v/1` for
+Wan2.2).
+
+```
+deno task demo:wan --generation wan2.2
+deno task demo:wan --generation wan2.2 --size 704x1280 --frames 49
+deno task demo:wan --generation wan2.2 --quant f16+dit8
+```
+
+### Where the model comes from
+
+The script loads the `karume-wan2.2` distribution (model `ti2v-5b`, pipeline `wan-ti2v/1`). It is
+not published on Hugging Face yet either, so without `--source` the script reads the local mirror
+`models/karume-wan2.2`. Build it under `tools/export-recipes` after the umT5 mirror (the script
+prints this command when the mirror is missing):
+
+```
+uv run python dist.py --pipeline wan-ti2v \
+    --ref-repo hdae/karume-umt5-xxl --ref-revision 0000000000000000000000000000000000000000 \
+    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder \
+    --allow-placeholder-ref
+```
+
+The all-zero revision is a placeholder for the development mirror until `karume-umt5-xxl` is
+published; a local reader resolves the reference through the explicit mapping and does not look at
+the revision.
+
+The distribution itself holds 6.714 GiB of weights, the int8 transformer (4.67 GiB) and the two f16
+VAE graphs, plus 12 MiB of assets.
+Its text encoder is the same cross-repository reference to the shared `karume-umt5-xxl`
+distribution (5.296 GiB), so `--umt5-source` and `--text-encoder precomputed` behave as for
+Wan2.1. The precomputed text-embedding asset and the tokenizer are byte-identical to Wan2.1's, so
+the same four prompt names work.
+
+### Quants
+
+- `f16+dit8`: int8 transformer weights with float compute. This is the reference quant.
+- `f16+dit8-a8-attn8-s16` (default): also int8 activations in the linear layers and in attention,
+  with the attention scores stored in f16. It became the default after a visual check of 12 clips.
+
+There is no `f16` quant for Wan2.2.
+
+### Knobs
+
+Steps, guidance and flow shift default to 50, 5.0 and 5.0 (the distribution's `pipelineConfig`).
+`--size` accepts `1280x704` or `704x1280`, and `--frames` accepts 4n+1 between 5 and 49. The
+default clip is 1280×704 × 33 frames, played at 24 fps.
+
+### Output
+
+Frames go to
+`outputs/examples/wan2.2-ti2v-5b/wan-<quant>-<prompt>-<route>-<W>x<H>-<frames>f-<steps>step-seed<seed>/frame-NN.png`,
+with the same naming rules as for Wan2.1.
+
+On the development GPU, an NVIDIA GeForce RTX 3080 Ti, under Deno, with the default quant and the
+precomputed embeddings at 1280×704 × 33 frames and 50 steps, a clip took 753 to 792 s (transformer
+556 to 593 s, VAE 197 to 199 s). The whole GPU peaked at 7,935 to 8,047 MiB (`nvidia-smi`). These are
+12 clips measured on 2026-10-06 with `WanTi2vPipeline` reading the export series directly, not with this
+script.
+
+### In Chrome
+
+The GPU lab's Wan tab has a generation selector; the lab's server serves Wan2.2 from
+`--wan22-source` (default `models/karume-wan2.2`; see
+[tools/gpu-lab/README.md](../../tools/gpu-lab/README.md#7-wan22-ti2v-5b)). On an RTX 5070 Ti
+(Chrome 154, Windows, 2026-10-06), a 50-step clip with the default quant and the GPU text encoder at
+1280×704 and 121 frames completed in 40.3 minutes. The tab lifts the frame limit to 121 for this;
+this script and the pipeline accept up to 49 frames.
