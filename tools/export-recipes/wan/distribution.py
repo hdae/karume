@@ -1,8 +1,16 @@
-"""Wan2.1 の配布 recipe — 系列レイアウト・出力 path 表・quant 表・カードの選択（ADR 0118 決定 7）。
+"""Wan の配布 recipe（Wan2.1 / Wan2.2）— 系列レイアウト・出力 path 表・quant 表・カードの選択
+（ADR 0118 決定 7・ADR 0121 決定 2 / 9 / 10）。
 
 汎用の組み立てエンジン（配置・共有席の畳み込み・sha256・manifest・staging/swap・検証）は
-`karume.dist` が持つ。ここが持つのは **Wan2.1 固有の事実**だけ: どの系列ディレクトリから何を
+`karume.dist` が持つ。ここが持つのは **Wan 固有の事実**だけ: どの系列ディレクトリから何を
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
+
+世代ごとに違う事実（配布リポ名・pipeline 契約・配るモデル・DiT と VAE の系列・transformer の
+格納ラベル・テキスト資産の出所の pin・quant 表と既定席・`pipelineConfig`・NOTICE・カード）は世代の表
+{@link WanGeneration}（{@link WAN21} / {@link WAN22}）に集め、計画関数は 1 本（{@link wan_plan}）で
+両方を組む。配置表・格納の要求 / 禁止表・weights の宣言は、世代が持つ transformer の格納ラベルから
+導く（Wan2.2 は i8 の 1 本だけで、f16 の DiT は無い — ADR 0121 決定 2）。以下の段落は Wan2.1 の
+配布形の説明で、Wan2.2 の違いは {@link WAN22} の doc にまとめる。
 
 配布するのはグラフ 3 本（DiT の S 形 `transformer`・VAE の chunk グラフ `vae_decoder_first` /
 `vae_decoder_next` — 系列 `wan2.1-t2v-1.3b-f16-dyn`）と、モデル単位の資産 2 本（第 1 段の
@@ -24,13 +32,15 @@ f16 格納・活性 f32 — ADR 0118 決定 7・明示の指定で使う元の�
 i8 にした参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（ADR 0120 決定 1）。既定は実用席
 （ADR 0120 裁定 2026-10-04 の 4 — {@link WAN_DEFAULT_QUANT}）。
 
-公開面は {@link PIPELINE} 1 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）がこれを
-core の PIPELINES へ合成する。
+公開面は {@link PIPELINE}（`--pipeline wan` — Wan2.1）と {@link TI2V_PIPELINE}
+（`--pipeline wan-ti2v` — Wan2.2）の 2 つ — リポの dist ドライバ（`tools/export-recipes/dist.py`）が
+これを core の PIPELINES へ合成する。
 
 MUST: このモジュールは torch を import しない（`import dist` が torch を読まない —
 `tests/test_dist_driver.py` の `TestImportingTheDriver`）。書き手（`wan.export_dit` /
-`wan.export_vae` / `wan.text_embeds`）は torch を読むので、綴り（系列名・資産名・メタのキー・
-グラフ入力名）はここに置き、書き手の綴りとの一致は `wan/tests/test_distribution.py` の門が見る。
+`wan.ti2v_export_dit` / `wan.export_vae` / `wan.text_embeds`）は torch を読むので、綴り（系列名・
+資産名・メタのキー・グラフ入力名）はここに置き、書き手の綴りとの一致は
+`wan/tests/test_distribution.py` の門が見る。
 """
 
 from __future__ import annotations
@@ -62,9 +72,9 @@ from karume.dist import (
     ir_graph,
 )
 from wan import umt5_tokenizer
-from wan.card import render_wan_model_card
+from wan.card import WAN21_CARD, WAN22_CARD, WanCard, render_wan_model_card
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import DEFAULT_MODEL, SOURCES, WAN21_MODELS
+from wan.sources import DEFAULT_MODEL, SOURCES, WAN22_TEXT_MODEL
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_OUTPUT_PATHS,
@@ -137,8 +147,17 @@ WAN_TRANSFORMER_F16_ROLE = "transformer_f16"
 WAN_TRANSFORMER_I8_ROLE = "transformer_i8"
 WAN_TRANSFORMER_ROLES: tuple[str, ...] = (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
 
+#: transformer の格納ラベル → 配置の役割（世代の表 {@link WanGeneration} の `transformer_labels`
+#: からその世代の役割を引く）。
+WAN_TRANSFORMER_LABEL_ROLES: Mapping[str, str] = {
+    "f16": WAN_TRANSFORMER_F16_ROLE,
+    "i8": WAN_TRANSFORMER_I8_ROLE,
+}
+
 #: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer は格納ラベルごとに 2 本・VAE は
-#: f16 の 1 本ずつ）。
+#: f16 の 1 本ずつ）。全世代の役割の和で、Wan2.1 の役割と同じ。各世代は自分の格納ラベルの役割だけを
+#: 使う（{@link WanGeneration.container_roles}）。以下の格納の要求 / 禁止表と weights の宣言も同じく
+#: 全世代の表で、世代はそこから自分の役割を引く。
 WAN_CONTAINER_ROLES: tuple[str, ...] = (
     WAN_TEXT_ENCODER_ROLE,
     *WAN_TRANSFORMER_ROLES,
@@ -316,10 +335,293 @@ WAN_PIPELINE_CONFIG: Mapping[str, Any] = {
 }
 
 
+#: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
+#:
+#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
+#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。
+WAN_NOTICE_MARKDOWN = """# NOTICE
+
+This repository redistributes a modified form of the Wan2.1 T2V 1.3B checkpoint listed in
+`README.md` (Wan-AI, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). The
+following changes were made:
+
+- The weights were converted into the Karume container format (a `.krm` part sequence whose first
+  part carries the graph and model descriptors).
+- **f16 storage**: every parameter of the float16 transformer and of the VAE decoder was rounded
+  from the source float32 value to the nearest float16 value. Weight matrices and convolution
+  kernels are stored as float16; the other parameters (biases, normalization weights) keep the
+  rounded values in float32 storage. Computation runs in float32.
+- **int8 transformer**: a second copy of the transformer stores the weight matrices of all its
+  linear layers (the patch-embedding projection included) as int8, quantized from the source
+  float32 values to the nearest step with one float32 scale per output channel (symmetric). Its
+  other parameters (biases, normalization weights, modulation tables) keep the source float32
+  values. The int8 weights are computed in float32, or, in the quants that declare it, multiplied
+  with activations that are quantized to int8 per token at run time.
+- The transformer graph takes patchified latent tokens and returns tokens: the patchify, the
+  unpatchify and the sinusoidal timestep projection run on the host, and the patch-embedding
+  convolution is applied as the equivalent linear layer. The rotary embedding keeps the upstream
+  real-valued cos / sin tables, but the host builds them from per-axis base tables stored in the
+  container, and the graph applies them in a pair-swap form (swap each adjacent pair, then multiply
+  elementwise by the cos / sin tables).
+- The VAE decoder was re-expressed as two graphs that decode one latent frame each (the first
+  frame, and every later frame), with the causal convolution cache passed in and out of the graph
+  instead of kept in a Python list. The host always decodes in overlapping tiles, so the output
+  differs slightly from the upstream untiled decode.
+- **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
+  encoder of `google/umt5-xxl` (bit-identical in float32 to the `text_encoder` folder of this
+  checkpoint), converted to int8, from the separate repository `karume-umt5-xxl` at a pinned commit
+  (with the size and the SHA-256 of every part); the changes made to it are listed in that
+  repository's own `NOTICE.md`.
+- The umT5-XXL outputs of a fixed set of prompts (computed with the upstream encoder in bfloat16
+  and stored as float32) are included as a precomputed asset, for use without the text encoder.
+- The tokenizer of the checkpoint was converted into one JSON table (vocabulary, scores, added
+  tokens and the whitespace set), together with lookup tables for the upstream prompt cleaning
+  (evaluated from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database,
+  including a translation of ftfy's mojibake-detection pattern) that the host uses to reproduce
+  the cleaning or to reject a prompt.
+
+No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+"""
+
+#: Wan2.2 の配布リポ名と、パイプライン契約（ADR 0121 決定 10 — TS 側の受理集合は
+#: `WAN_TI2V_PIPELINE_NAME` / `WAN_TI2V_PIPELINE_MAJOR`〈`packages/models/src/wan/config.ts`〉）。
+WAN22_REPO_NAME = "karume-wan2.2"
+WAN22_PIPELINE = "wan-ti2v/1"
+
+#: Wan2.2 の VAE の系列（f16 — VAE の chunk グラフ 2 本だけで、f16 の DiT は持たない）と DiT の
+#: i8 系列。書き手の綴りは `wan.export_vae.TI2V_SERIES_NAME`（= `VAE_SERIES["ti2v-5b"].series`）/
+#: `wan.ti2v_export_dit.SERIES_NAME`。
+WAN22_SERIES = "wan2.2-ti2v-5b-f16-dyn"
+WAN22_I8_SERIES = "wan2.2-ti2v-5b-i8-dyn"
+
+#: Wan2.2 の quant 表（ADR 0121 決定 2 — 参照席と実用席の 2 席・f16 席は作らない）。transformer は
+#: 格納ラベルが i8 の 1 つなので、weights は書かない（{@link complete_quant_weights} が完全写像へ
+#: 埋める — 書くと導出できる状態の二重化になる）。実用席の `session` / `label` / `description` は
+#: 2.1 の同名の席と同じ 1 つを引く（ADR 0121 決定 2「2.1 の実用席と同じ名前と束」）。参照席の
+#: 表示欄は 2.1 の文（「f16 席の約半分」）が 2.2 では成り立たないので、2.2 の文を持つ。
+WAN22_QUANTS: Mapping[str, Any] = {
+    "f16+dit8": {
+        "weights": {},
+        "session": {},
+        "label": "int8 transformer, f32 compute",
+        "description": "Transformer weights stored as int8 (one scale per output channel) and"
+        " computed in f32; the VAE stays f16.",
+    },
+    "f16+dit8-a8-attn8-s16": {**WAN_QUANTS["f16+dit8-a8-attn8-s16"], "weights": {}},
+}
+
+#: Wan2.2 の既定席 — **仮の既定**として参照席（ADR 0121 決定 2「段 7 までの開発用は参照席を仮の
+#: 既定」）。利用者の視認の裁定で実用席へ替わりうるので、既定席はこの 1 か所だけで持つ。
+WAN22_DEFAULT_QUANT = "f16+dit8"
+
+#: Wan2.2 の `pipelineConfig`（スキーマは 2.1 と同じ — `packages/models/src/wan/config.ts`）:
+#:
+#: - `scheduler.shift` 5.0 — pin の scheduler の `flow_shift`（公式の 720P の値 — ADR 0121 追記
+#:   「受理寸法を公式の 2 寸法へ」の決定）。
+#: - `defaults.steps` 50 / `defaults.guidance` 5.0 — 公式・Diffusers 版の README と同じ（決定 8）。
+WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
+    "scheduler": {"shift": 5.0},
+    "defaults": {"steps": 50, "guidance": 5.0},
+}
+
+#: Wan2.2 の改変告知（Apache 2.0 §4(b)）。事実の根拠は ADR 0121（決定 2 / 3 / 6 / 9・追記「段 1 の
+#: 結果」「段 4 の結果」「段 5 の結果」）と ADR 0122 決定 8（umT5 は本家の encoder と書き、この
+#: checkpoint の bf16 の `text_encoder` はその丸め）。トークナイザのファイルが 2 つの checkpoint で
+#: 同じことは、pin した 2 つの revision の `tokenizer/` の 4 ファイルの sha256 の一致で確かめた
+#: （2026-10-06）。
+#:
+#: MUST: 文面は配布形の中身と対応していること（{@link WAN_NOTICE_MARKDOWN} と同じ理由）。2.1 の文の
+#: 写しで事実が違う箇所（f16 の transformer・f16 席・1 系統の VAE の出口）を残さない。
+WAN22_NOTICE_MARKDOWN = """# NOTICE
+
+This repository redistributes a modified form of the Wan2.2 TI2V 5B checkpoint listed in
+`README.md` (Wan-AI, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). The
+following changes were made:
+
+- The weights were converted into the Karume container format (a `.krm` part sequence whose first
+  part carries the graph and model descriptors).
+- **int8 transformer**: the transformer is distributed only in this form. The weight matrices of
+  all its linear layers (the patch-embedding projection included) are stored as int8, quantized
+  from the source float32 values to the nearest step with one float32 scale per output channel
+  (symmetric). Its other parameters (biases, normalization weights, modulation tables) keep the
+  source float32 values. The int8 weights are computed in float32, or, in the quants that declare
+  it, multiplied with activations that are quantized to int8 per token at run time. No float16 or
+  float32 copy of the transformer is distributed.
+- **f16 VAE decoder**: every parameter of the VAE decoder was rounded from the source float32
+  value to the nearest float16 value. Weight matrices and convolution kernels are stored as
+  float16; the other parameters (biases, normalization weights) keep the rounded values in float32
+  storage. Computation runs in float32.
+- The transformer graph takes patchified latent tokens (48 latent channels) and returns tokens:
+  the patchify, the unpatchify and the sinusoidal timestep projection run on the host, and the
+  patch-embedding convolution is applied as the equivalent linear layer. The rotary embedding keeps
+  the upstream real-valued cos / sin tables, but the host builds them from per-axis base tables
+  stored in the container, and the graph applies them in a pair-swap form (swap each adjacent
+  pair, then multiply elementwise by the cos / sin tables).
+- The transformer graph is the one graph for both text-to-video and image-to-video: besides the
+  timestep of the generated tokens it takes a second timestep for conditioning tokens and a boolean
+  condition mask, embeds each timestep separately, and selects every modulation per token between
+  the two. In text-to-video, the only mode this distribution runs, the mask is all false and the
+  second timestep equals the first.
+- The VAE decoder (Wan2.2-VAE) was re-expressed as two graphs that decode one latent frame each
+  (the first frame, and every later frame), with the causal convolution cache passed in and out of
+  the graph instead of kept in a Python list, and its upsampling shortcuts written as copies and
+  depth-to-space reshapes. The graphs return the decoder output in the upstream patchified space
+  (`patch_size` 2, 12 channels); the host decodes in overlapping tiles of 16 latent pixels, blends
+  them in that space and then unpatchifies to RGB, so the output differs slightly from the
+  upstream untiled decode. The VAE encoder is not included.
+- **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
+  encoder of `google/umt5-xxl` (this checkpoint's `text_encoder` folder holds the same encoder
+  rounded to bfloat16), converted to int8, from the separate repository `karume-umt5-xxl` at a
+  pinned commit (with the size and the SHA-256 of every part); the changes made to it are listed in
+  that repository's own `NOTICE.md`.
+- The umT5-XXL outputs of a fixed set of prompts are included as a precomputed asset, for use
+  without the text encoder. They were computed with the umT5-XXL encoder of the Wan2.1 T2V 1.3B
+  checkpoint (the same encoder) in bfloat16 and are stored as float32.
+- The tokenizer of the Wan2.1 T2V 1.3B checkpoint (its files are identical to the `tokenizer`
+  folder of this checkpoint) was converted into one JSON table (vocabulary, scores, added tokens
+  and the whitespace set), together with lookup tables for the upstream prompt cleaning (evaluated
+  from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database, including a
+  translation of ftfy's mojibake-detection pattern) that the host uses to reproduce the cleaning or
+  to reject a prompt.
+
+No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
+"""
+
+
+@dataclass(frozen=True)
+class WanGeneration:
+    """配布の世代の表 — 世代ごとに違う事実を 1 つに集める。
+
+    計画関数 {@link wan_plan} は 1 本で、配置表・格納の要求 / 禁止表・weights の宣言はこの表の
+    transformer の格納ラベルから導く（全世代の表 {@link WAN_STORAGE_REQUIREMENTS} /
+    {@link WAN_STORAGE_FORBIDDEN} / {@link WAN_WEIGHTS} から自分の役割を引く）。
+    """
+
+    #: 配布リポ名（ADR 0092 決定 1 / 2 — 家族 1 リポ・世代は別リポ）。
+    repo_name: str
+    #: パイプライン契約（ADR 0041 §2 — モデル単位）。
+    pipeline: str
+    #: 既定のモデル（Pipeline の `default_model`・計画の `model` の省略時）。
+    default_model: str
+    #: f16 系列（VAE の chunk グラフ 2 本と、格納ラベルに f16 を持つ世代の f16 の DiT）。
+    series: str
+    #: DiT の i8 系列（どの世代も持つ — 参照席と実用席の重み）。
+    i8_series: str
+    #: transformer の格納ラベル（並びは manifest の weights の並び — {@link WAN_WEIGHTS} の順）。
+    transformer_labels: tuple[str, ...]
+    #: テキスト資産 2 本（埋め込み・トークナイザ）の出所の pin を引くモデル名（`SOURCES` のキー）。
+    #: DiT / VAE の容器の出所は計画のモデル名の pin で見る — 2 つの欄を分けるのは、Wan2.2 の資産が
+    #: Wan2.1 の checkpoint の umT5 から作ったもので、その出所を名乗ったまま門を通すため（ADR 0121
+    #: 決定 9）。
+    text_model: str
+    #: quant 表（席名 → weights / session / 表示欄 — weights は {@link complete_quant_weights} が
+    #: 完全写像へ埋める）と既定席。
+    quants: Mapping[str, Any]
+    default_quant: str
+    #: パイプライン所有の設定（hub は素通し — ADR 0041 §2）。
+    pipeline_config: Mapping[str, Any]
+    #: 改変告知（Apache 2.0 §4(b) — 配布リポ直下の `NOTICE.md`）。
+    notice: str
+    #: DiT / VAE の容器を焼き直すコマンド（共有の門 {@link assert_rope_base} /
+    #: {@link assert_vae_chunk_pair} が落ちたときの案内 — その世代の系列を書く書き手を名指しする）。
+    dit_writer: str
+    vae_writer: str
+    #: カードの世代の表（配るモデルの集合もここが持つ — カードの帰属の門と計画の門が共有する）。
+    card: WanCard
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        """この世代の配布が配るモデル（計画の門 — 取得元の表の全モデルは通さない）。"""
+        return self.card.models
+
+    @property
+    def transformer_roles(self) -> tuple[str, ...]:
+        """transformer の容器の配置の役割（格納ラベルごとに 1 本）。"""
+        return tuple(WAN_TRANSFORMER_LABEL_ROLES[label] for label in self.transformer_labels)
+
+    @property
+    def container_roles(self) -> tuple[str, ...]:
+        """容器を持つ配置の役割（並びは {@link WAN_CONTAINER_ROLES} と同じ — 生成の段の順）。"""
+        return (
+            WAN_TEXT_ENCODER_ROLE,
+            *self.transformer_roles,
+            WAN_VAE_FIRST_ROLE,
+            WAN_VAE_NEXT_ROLE,
+        )
+
+    @property
+    def storage_requirements(self) -> Mapping[str, str]:
+        """この世代の役割の格納の要求（全世代の表から引く）。"""
+        return {role: WAN_STORAGE_REQUIREMENTS[role] for role in self.container_roles}
+
+    @property
+    def storage_forbidden(self) -> Mapping[str, tuple[str, ...]]:
+        """この世代の役割の格納の禁止表（全世代の表から引く）。"""
+        return {role: WAN_STORAGE_FORBIDDEN[role] for role in self.container_roles}
+
+    @property
+    def weights(self) -> Mapping[str, Mapping[str, WeightFiles]]:
+        """weights の宣言（transformer はこの世代の格納ラベルだけ — 無いラベルを宣言すると、その
+        ラベルを選ぶ席が組めてしまう）。"""
+        return {
+            name: {
+                label: files
+                for label, files in labels.items()
+                if name != WAN_TRANSFORMER_ROLE or label in self.transformer_labels
+            }
+            for name, labels in WAN_WEIGHTS.items()
+        }
+
+
+#: Wan2.1 T2V 1.3B（`--pipeline wan` → `karume-wan2.1`）。transformer は f16 / i8 の 2 本。
+WAN21 = WanGeneration(
+    repo_name=WAN_REPO_NAME,
+    pipeline=WAN_PIPELINE,
+    default_model=DEFAULT_MODEL,
+    series=WAN_SERIES,
+    i8_series=WAN_I8_SERIES,
+    transformer_labels=("f16", "i8"),
+    text_model=DEFAULT_MODEL,
+    quants=WAN_QUANTS,
+    default_quant=WAN_DEFAULT_QUANT,
+    pipeline_config=WAN_PIPELINE_CONFIG,
+    notice=WAN_NOTICE_MARKDOWN,
+    dit_writer="python -m wan.export_dit",
+    vae_writer="python -m wan.export_vae",
+    card=WAN21_CARD,
+)
+
+#: Wan2.2 TI2V 5B（`--pipeline wan-ti2v` → `karume-wan2.2`・モデル `ti2v-5b`）。2.1 との違い:
+#:
+#: - transformer は **i8 の 1 本だけ**（f16 の DiT は無い — ADR 0121 決定 2）。DiT は I2V 対応の
+#:   グラフ 1 本（決定 3 — 入力 7 本。組み立てが見るのは文脈入力と RoPE 素表だけで、2.1 と同じ門）。
+#: - VAE は Wan2.2-VAE の chunk グラフ 2 本（決定 6 — 潜在 48 ch・出口は patchify 空間）。
+#: - テキスト資産 2 本は **2.1 の系列のファイルそのもの**で、出所は Wan2.1 の pin（決定 9 —
+#:   {@link WanGeneration.text_model}）。DiT / VAE の容器の出所は Wan2.2 の pin で見る。
+#: - umT5 は 2.1 と同じ `karume-umt5-xxl` の越境参照。
+WAN22 = WanGeneration(
+    repo_name=WAN22_REPO_NAME,
+    pipeline=WAN22_PIPELINE,
+    default_model=WAN22_CARD.models[0],
+    series=WAN22_SERIES,
+    i8_series=WAN22_I8_SERIES,
+    transformer_labels=("i8",),
+    text_model=WAN22_TEXT_MODEL,
+    quants=WAN22_QUANTS,
+    default_quant=WAN22_DEFAULT_QUANT,
+    pipeline_config=WAN22_PIPELINE_CONFIG,
+    notice=WAN22_NOTICE_MARKDOWN,
+    dit_writer="python -m wan.ti2v_export_dit write",
+    vae_writer="python -m wan.export_vae --model ti2v-5b",
+    card=WAN22_CARD,
+)
+
+
 @dataclass(frozen=True)
 class WanSources:
-    """組み立ての入力 = 系列ディレクトリ 3 本（グラフ 3 本の f16 系列・DiT の i8 系列・テキスト
-    埋め込みの系列）と、umT5 の容器（i8 系列）・トークナイザ資産。"""
+    """組み立ての入力 = 系列ディレクトリ 3 本（f16 系列〈VAE と、2.1 では f16 の DiT〉・DiT の i8
+    系列・テキスト埋め込みの系列）と、umT5 の容器（i8 系列）・トークナイザ資産。テキスト埋め込みと
+    トークナイザ資産はどの世代も Wan2.1 の系列を指す（ADR 0121 決定 9）。"""
 
     series: Path
     i8_series: Path
@@ -331,27 +633,31 @@ class WanSources:
     tokenizer: Path
 
 
-def wan_sources(series_dir: Path) -> WanSources:
-    """系列の親ディレクトリ（`outputs/series/`）から入力を引く。"""
+def wan_sources(series_dir: Path, generation: WanGeneration = WAN21) -> WanSources:
+    """系列の親ディレクトリ（`outputs/series/`）から、その世代の入力を引く。"""
     return WanSources(
-        series=series_dir / WAN_SERIES,
-        i8_series=series_dir / WAN_I8_SERIES,
+        series=series_dir / generation.series,
+        i8_series=series_dir / generation.i8_series,
         text_embeds=series_dir / WAN_TEXT_EMBEDS_SERIES / WAN_TEXT_EMBEDS_FILE,
         text_encoder=umt5_container(series_dir),
         tokenizer=series_dir / umt5_tokenizer.SERIES_NAME / umt5_tokenizer.ASSET_FILE,
     )
 
 
-def wan_placements(sources: WanSources) -> dict[str, Path]:
+def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> dict[str, Path]:
     """配置の役割 → 出所のファイル。出力の path は {@link WAN_OUTPUT_PATHS} が持つ。
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*` / `reference.*` / `vae_*.safetensors` /
-    `pipeline_steps.*` の golden はこれで落ちる）。
+    `pipeline_steps.*` の golden はこれで落ちる）。transformer はその世代の格納ラベルの容器だけ
+    （f16 は f16 系列・i8 は i8 系列）。
     """
-    return {
-        WAN_TEXT_ENCODER_ROLE: sources.text_encoder,
+    transformers = {
         WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
         WAN_TRANSFORMER_I8_ROLE: sources.i8_series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
+    }
+    return {
+        WAN_TEXT_ENCODER_ROLE: sources.text_encoder,
+        **{role: transformers[role] for role in generation.transformer_roles},
         WAN_VAE_FIRST_ROLE: sources.series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,
         WAN_VAE_NEXT_ROLE: sources.series / WAN_VAE_NEXT_ROLE / WAN_MODEL_FILE,
         WAN_TEXT_EMBEDS_ROLE: sources.text_embeds,
@@ -359,13 +665,16 @@ def wan_placements(sources: WanSources) -> dict[str, Path]:
     }
 
 
-def wan_repo_name(_model: str) -> str:
-    """配布リポ名（家族 1 リポなので、どのモデルでも同じ 1 つ — ADR 0092 決定 1）。"""
-    return WAN_REPO_NAME
+def wan_repo_name(_model: str, generation: WanGeneration = WAN21) -> str:
+    """配布リポ名（家族 1 リポ・世代は別リポなので、その世代のどのモデルでも同じ 1 つ — ADR 0092
+    決定 1 / 2）。"""
+    return generation.repo_name
 
 
-def assert_rope_base(container: Path) -> None:
+def assert_rope_base(container: Path, writer: str) -> None:
     """`transformer` の容器が RoPE 素表の資産を宣言していることを見る（payload は読まない）。
+
+    `writer` は焼き直しの案内に出すその世代の DiT の書き手（{@link WanGeneration.dit_writer}）。
 
     MUST: 組み立てで落とす。素表を持たない DiT（静的形の別 export・資産を足す前の書き手）を
     transformer 席へ挿すと、組み立ても `verify_dist` も通り、利用者の `fromPretrained` が重みを
@@ -379,7 +688,7 @@ def assert_rope_base(container: Path) -> None:
     if asset is None:
         raise DistError(
             f"{container}: 資産 '{WAN_ROPE_BASE_ASSET}' が無い（宣言: {sorted(declared)}）—"
-            " RoPE の素表を持たない DiT は配らない（`python -m wan.export_dit` で焼き直す）"
+            f" RoPE の素表を持たない DiT は配らない（`{writer}` で焼き直す）"
         )
     if asset[0] != WAN_ROPE_BASE_ROLE:
         raise DistError(
@@ -395,6 +704,11 @@ def assert_shared_rope_base(containers: Sequence[Path]) -> None:
     配ると、片方の席だけが別の幾何の RoPE で走り、ロードも実行も通って映像だけが静かに壊れる
     （anima の `assert_shared_rope_base` と同じ理由）。i8 の容器の素表の誤りは、同じ i8 の容器
     どうしを比べる自機 A/B 門（ADR 0120 決定 4）では掴めない。
+
+    容器が 1 本の世代（Wan2.2 — i8 だけ）では比べる相手が無く、必ず通る。その素表の幾何は組み立て
+    では照合せず、GPU の門が見る — ADR 0121 段 6 の 2 ステップの通しは製品の経路（容器の素表から
+    ホストが RoPE の表を組む — `packages/models/src/wan/family.ts`）で走り、CPU の上流参照と照合
+    する。
     """
     digests: dict[Path, str] = {}
     for path in containers:
@@ -426,8 +740,10 @@ def dit_context(container: Path) -> tuple[int, int]:
     return shape[1], shape[2]
 
 
-def assert_vae_chunk_pair(first: Path, following: Path) -> None:
+def assert_vae_chunk_pair(first: Path, following: Path, writer: str) -> None:
     """`vae_decoder_first` / `vae_decoder_next` の 2 本が同じ組の chunk グラフであることを見る。
+
+    `writer` は焼き直しの案内に出すその世代の VAE の書き手（{@link WanGeneration.vae_writer}）。
 
     規則は TS の `wanVaeChunkLayout`（`packages/models/src/wan/vae-chunks.ts`）と同じ: 潜在入力の
     形が 2 本で同じ（= タイル辺が同じ）で、first の cache 入力が next の cache 入力の部分列（同じ
@@ -449,7 +765,7 @@ def assert_vae_chunk_pair(first: Path, following: Path) -> None:
         raise DistError(
             f"{first} / {following}: 潜在入力の形が first {first_inputs[WAN_VAE_LATENT_INPUT]} と"
             f" next {next_inputs[WAN_VAE_LATENT_INPUT]} で違う — 別のタイル辺で焼いた 2 本を"
-            " 組にしない（`python -m wan.export_vae` で両方を焼き直す）"
+            f" 組にしない（`{writer}` で両方を焼き直す）"
         )
     next_caches = [name for name in next_inputs if name != WAN_VAE_LATENT_INPUT]
     cursor = 0
@@ -646,120 +962,92 @@ def assert_umt5_tokenizer(path: Path, model: str, rows: int) -> None:
         )
 
 
-def wan_plan(sources: WanSources, model: str = DEFAULT_MODEL) -> ModelPlan:
-    """Wan2.1 の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる — 何も書かない）。"""
+def wan_plan(
+    sources: WanSources, model: str | None = None, generation: WanGeneration = WAN21
+) -> ModelPlan:
+    """その世代の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる — 何も書かない）。
+
+    `sources` は同じ世代の {@link wan_sources} が引いたもの。`model` を省くとその世代の既定の
+    モデル。
+    """
+    model = generation.default_model if model is None else model
+    name = generation.card.generation
     assert_model_name(model)
-    # 門は取得元の表（`SOURCES` — Wan2.2 の行も持つ）ではなく Wan2.1 のモデルの表で閉じる。
-    # 配布リポ名はモデルによらず `karume-wan2.1`（{@link wan_repo_name}）なので、表の全モデルを
-    # 通すと 5B の出所を名乗る配布形が Wan2.1 の配布を置き換えうる。
-    if model not in WAN21_MODELS:
+    # 門は取得元の表（`SOURCES` — 両方の世代の行を持つ）ではなく、その世代のモデルの表で閉じる。
+    # 配布リポ名はモデルによらず世代ごとに 1 つ（{@link wan_repo_name}）なので、表の全モデルを
+    # 通すと別の世代の出所を名乗る配布形がその世代の配布を置き換えうる。
+    if model not in generation.models:
         raise DistError(
-            f"Wan2.1 のモデル {model!r} は知らない（既知: {' / '.join(WAN21_MODELS)}）—"
-            f" Wan2.1 の配布（{WAN_REPO_NAME}）は Wan2.1 のモデル（wan.sources.WAN21_MODELS）だけを"
-            " 配る"
+            f"{name} のモデル {model!r} は知らない（既知: {' / '.join(generation.models)}）—"
+            f" {name} の配布（{generation.repo_name}）は {name} のモデルだけを配る"
         )
-    placements = wan_placements(sources)
+    placements = wan_placements(sources, generation)
     upstream = SOURCES[model]
-    for role in WAN_CONTAINER_ROLES:
+    requirements = generation.storage_requirements
+    forbidden = generation.storage_forbidden
+    for role in generation.container_roles:
         container = placements[role]
         assert_component_present(container)
-        assert_storage(role, container, WAN_STORAGE_REQUIREMENTS)
-        assert_storage_absent(role, container, WAN_STORAGE_FORBIDDEN)
+        assert_storage(role, container, requirements)
+        assert_storage_absent(role, container, forbidden)
         if role == WAN_TEXT_ENCODER_ROLE:
             # umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（ADR 0122 決定 1）— 出所は
             # 下の umT5 の門（`wan.sources.UMT5_SOURCES` の行）が突き合わせる。
             continue
         # 容器が名乗る出所を上流の pin（`wan.sources` が正本）へ突き合わせる — モデル名の表だけで
-        # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。
+        # 門を閉じると、別の revision から焼いた容器が系列 path へ置かれたときに素通りする。DiT と
+        # VAE の容器はその世代の checkpoint から焼くので、計画のモデル名の pin で見る（テキスト
+        # 資産の pin {@link WanGeneration.text_model} とは別の欄 — ADR 0121 決定 9）。
         assert_upstream_provenance(container, license=upstream.license, revision=upstream.revision)
-    assert_vae_chunk_pair(placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE])
+    assert_vae_chunk_pair(
+        placements[WAN_VAE_FIRST_ROLE], placements[WAN_VAE_NEXT_ROLE], generation.vae_writer
+    )
     # umT5 の容器は umT5 の配布形と同じ門（出所・束縛表・入出力の契約）を通す（越境参照の先は
     # この容器とバイト同一 — `karume.dist.external_refs` が見る）。モデル名は umT5 のリポの側の
     # 名前。
     encoder_width = assert_umt5_encoder(placements[WAN_TEXT_ENCODER_ROLE], UMT5_DEFAULT_MODEL)
-    transformers = [placements[role] for role in WAN_TRANSFORMER_ROLES]
+    transformers = [placements[role] for role in generation.transformer_roles]
     for transformer in transformers:
-        assert_rope_base(transformer)
+        assert_rope_base(transformer, generation.dit_writer)
         context = dit_context(transformer)
         # 埋め込み資産・トークナイザ・text_encoder は quant 非依存の 1 本なので、どの席の DiT の
-        # 文脈入力とも噛み合う必要がある。
-        assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], model, context)
-        assert_umt5_tokenizer(placements[WAN_TOKENIZER_ROLE], model, context[0])
+        # 文脈入力とも噛み合う必要がある。資産 2 本の出所はテキスト資産の pin で見る（Wan2.2 でも
+        # Wan2.1 の checkpoint の umT5 から作った資産 — ADR 0121 決定 9）。
+        assert_text_embeds(placements[WAN_TEXT_EMBEDS_ROLE], generation.text_model, context)
+        assert_umt5_tokenizer(placements[WAN_TOKENIZER_ROLE], generation.text_model, context[0])
         if encoder_width != context[1]:
             raise DistError(
                 f"{placements[WAN_TEXT_ENCODER_ROLE]}: umT5 の出力の幅 {encoder_width} が"
                 f" {transformer} の文脈入力の幅 {context[1]} と違う — text 段の出力を DiT へ"
                 " 渡せない"
             )
+    # transformer の容器が 1 本の世代（Wan2.2）では 1 本の集合で通る。
     assert_shared_rope_base(transformers)
+    weights = generation.weights
     return ModelPlan(
         name=model,
-        pipeline=WAN_PIPELINE,
+        pipeline=generation.pipeline,
         artifacts={
             role: Artifact(WAN_OUTPUT_PATHS[role], source=source)
             for role, source in placements.items()
         },
-        weights=WAN_WEIGHTS,
+        weights=weights,
         assets=WAN_ASSETS,
-        quants=complete_quant_weights(WAN_WEIGHTS, WAN_QUANTS),
-        default_quant=WAN_DEFAULT_QUANT,
-        pipeline_config=WAN_PIPELINE_CONFIG,
+        quants=complete_quant_weights(weights, generation.quants),
+        default_quant=generation.default_quant,
+        pipeline_config=generation.pipeline_config,
     )
 
 
-def wan_dist_plan(series_dir: Path, model: str) -> ModelPlan:
-    """`--series` の親から Wan2.1 の 1 モデルの計画を組む（CLI のディスパッチ先）。"""
-    return wan_plan(wan_sources(series_dir), model)
+def wan_dist_plan(series_dir: Path, model: str, generation: WanGeneration = WAN21) -> ModelPlan:
+    """`--series` の親からその世代の 1 モデルの計画を組む（CLI のディスパッチ先）。"""
+    return wan_plan(wan_sources(series_dir, generation), model, generation)
 
 
-#: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
-#:
-#: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
-#: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。
-WAN_NOTICE_MARKDOWN = """# NOTICE
-
-This repository redistributes a modified form of the Wan2.1 T2V 1.3B checkpoint listed in
-`README.md` (Wan-AI, licensed under the Apache License, Version 2.0 — see `LICENSE.md`). The
-following changes were made:
-
-- The weights were converted into the Karume container format (a `.krm` part sequence whose first
-  part carries the graph and model descriptors).
-- **f16 storage**: every parameter of the float16 transformer and of the VAE decoder was rounded
-  from the source float32 value to the nearest float16 value. Weight matrices and convolution
-  kernels are stored as float16; the other parameters (biases, normalization weights) keep the
-  rounded values in float32 storage. Computation runs in float32.
-- **int8 transformer**: a second copy of the transformer stores the weight matrices of all its
-  linear layers (the patch-embedding projection included) as int8, quantized from the source
-  float32 values to the nearest step with one float32 scale per output channel (symmetric). Its
-  other parameters (biases, normalization weights, modulation tables) keep the source float32
-  values. The int8 weights are computed in float32, or, in the quants that declare it, multiplied
-  with activations that are quantized to int8 per token at run time.
-- The transformer graph takes patchified latent tokens and returns tokens: the patchify, the
-  unpatchify and the sinusoidal timestep projection run on the host, and the patch-embedding
-  convolution is applied as the equivalent linear layer. The rotary embedding keeps the upstream
-  real-valued cos / sin tables, but the host builds them from per-axis base tables stored in the
-  container, and the graph applies them in a pair-swap form (swap each adjacent pair, then multiply
-  elementwise by the cos / sin tables).
-- The VAE decoder was re-expressed as two graphs that decode one latent frame each (the first
-  frame, and every later frame), with the causal convolution cache passed in and out of the graph
-  instead of kept in a Python list. The host always decodes in overlapping tiles, so the output
-  differs slightly from the upstream untiled decode.
-- **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
-  encoder of `google/umt5-xxl` (bit-identical in float32 to the `text_encoder` folder of this
-  checkpoint), converted to int8, from the separate repository `karume-umt5-xxl` at a pinned commit
-  (with the size and the SHA-256 of every part); the changes made to it are listed in that
-  repository's own `NOTICE.md`.
-- The umT5-XXL outputs of a fixed set of prompts (computed with the upstream encoder in bfloat16
-  and stored as float32) are included as a precomputed asset, for use without the text encoder.
-- The tokenizer of the checkpoint was converted into one JSON table (vocabulary, scores, added
-  tokens and the whitespace set), together with lookup tables for the upstream prompt cleaning
-  (evaluated from ftfy 6.3.1, the `regex` package and the Unicode 16.0.0 character database,
-  including a translation of ftfy's mojibake-detection pattern) that the host uses to reproduce
-  the cleaning or to reject a prompt.
-
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here.
-"""
-
+#: 上流ライセンス（Apache 2.0）の原文。再配布条件 §4 は配布リポ 1 つに掛かり、Wan2.1 / Wan2.2 の
+#: どちらの配布リポも同じ原文を置くので、読みは組み立ての回数・世代の数によらずここで 1 回
+#: （ADR 0092 決定 7）。
+_APACHE_LICENSE = apache_license_2_0()
 
 #: `--pipeline wan` の 1 行（ドライバが core の PIPELINES へ合成する）。
 PIPELINE = Pipeline(
@@ -768,11 +1056,31 @@ PIPELINE = Pipeline(
     plan=wan_dist_plan,
     # 帰属（上流リポ・ライセンス）はモデル名から一意に決まる（`wan.sources.SOURCES`）ので、
     # 選ばせる軸にしない。略称の対応表は manifest に無い事実なので、ここから渡す（anima と同じ形）。
-    card_profiles={"wan": partial(render_wan_model_card, abbreviations=WAN_QUANT_ABBREVIATIONS)},
-    # 上流ライセンス（Apache 2.0）の再配布条件 §4 は配布リポ 1 つに掛かるので、原文の読みも
-    # 組み立ての回数によらずここで 1 回（ADR 0092 決定 7）。
+    card_profiles={
+        "wan": partial(
+            render_wan_model_card, abbreviations=WAN_QUANT_ABBREVIATIONS, card=WAN21.card
+        )
+    },
     root_files={
-        "LICENSE.md": apache_license_2_0(),
-        "NOTICE.md": WAN_NOTICE_MARKDOWN,
+        "LICENSE.md": _APACHE_LICENSE,
+        "NOTICE.md": WAN21.notice,
+    },
+)
+
+#: `--pipeline wan-ti2v` の 1 行（Wan2.2 TI2V 5B → `karume-wan2.2`）。形は {@link PIPELINE} と
+#: 同じで、世代の表 {@link WAN22} を束ねる。上流ライセンスは同じ Apache 2.0 で、NOTICE は 2.2 の
+#: 改変。
+TI2V_PIPELINE = Pipeline(
+    default_model=WAN22.default_model,
+    repo_name=partial(wan_repo_name, generation=WAN22),
+    plan=partial(wan_dist_plan, generation=WAN22),
+    card_profiles={
+        "wan-ti2v": partial(
+            render_wan_model_card, abbreviations=WAN_QUANT_ABBREVIATIONS, card=WAN22.card
+        )
+    },
+    root_files={
+        "LICENSE.md": _APACHE_LICENSE,
+        "NOTICE.md": WAN22.notice,
     },
 )

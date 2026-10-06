@@ -89,6 +89,18 @@ DEFAULT_MODEL = "t2v-1.3b"
 #: 5B を書く口が開く（ADR 0121 の段 0 で表に `ti2v-5b` を足したときに閉じた）。
 WAN21_MODELS: tuple[str, ...] = ("t2v-1.3b",)
 
+#: Wan2.2 の配布（`karume-wan2.2`）が配るモデル — 配布 recipe の計画の門
+#: （`wan.distribution.WAN22`）とカードの帰属の門（`wan.card.WAN22_CARD`）が共有する 1 つの集合。
+#: {@link WAN21_MODELS} と同じく、表（{@link SOURCES}）に有ることでは通さない（表は両方の世代の
+#: 行を持つ）。
+WAN22_MODELS: tuple[str, ...] = ("ti2v-5b",)
+
+#: Wan2.2 の配布が持つテキスト資産 2 本（埋め込み・トークナイザ）の出所のモデル = Wan2.1 の
+#: checkpoint（ADR 0121 決定 9 — 同じ umT5 と同じトークナイザなので、2.1 の系列のファイルそのもの
+#: を配る）。配布 recipe の出所の門（`wan.distribution.WAN22` の `text_model`）とカードの記述が
+#: 共有する。
+WAN22_TEXT_MODEL = "t2v-1.3b"
+
 #: 上流リポの部品の列挙（モデル名 → 部品）。`fetch=False` の部品は DiT / VAE の取得では落とさない。
 COMPONENTS: dict[str, tuple[Component, ...]] = {
     "t2v-1.3b": (

@@ -77,6 +77,9 @@ uv run python dist.py --pipeline umt5                # → models/karume-umt5-xx
 uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA か仮の 40 桁の 0> \
     --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
                                                      # → models/karume-wan2.1/（text_encoder は越境参照）
+uv run python dist.py --pipeline wan-ti2v --ref-repo hdae/karume-umt5-xxl --ref-revision <SHA か仮の 40 桁の 0> \
+    --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder [--allow-placeholder-ref]
+                                                     # → models/karume-wan2.2/（Wan2.2 TI2V 5B・text_encoder は越境参照 — ADR 0121）
 uv run python dist.py --pipeline umt5 --intake ../../inputs/umt5/<名前> [--allow-undeclared-license]
                                                      # → outputs/misc/local-dist/<名前>/（手元の実験用ミラー・リポ名 umt5-xxl-<名前>-local — ADR 0122）
 uv run python dist.py --pipeline irodori             # → models/karume-irodori-v4-small/

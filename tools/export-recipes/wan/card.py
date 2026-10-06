@@ -1,8 +1,14 @@
-"""Wan2.1 配布形のモデルカード（`README.md`）— manifest から機械導出する純関数。
+"""Wan の配布形のモデルカード（`README.md`）— manifest から機械導出する純関数（Wan2.1 / Wan2.2）。
 
 汎用の描画部品（frontmatter・モデル一覧・quant 表・節の組み立て）は `karume.modelcard` が持つ。
-ここが持つのは **Wan2.1 固有の事実**だけ: 帰属（出所・pin した revision・ライセンス）と、この
+ここが持つのは **Wan の世代ごとの事実**だけ: 帰属（出所・pin した revision・ライセンス）と、この
 pipeline のカードに何を書くか（第 1 段の固定プロンプト・受理する入力・数値の門・実行資源の実測）。
+
+世代で違う事実は世代の表 {@link WanCard}（{@link WAN21_CARD} / {@link WAN22_CARD}）に集め、カードの
+骨組み（節の並び・帰属の行・Usage・プロンプト・受理する入力の枠・既定値・宣言 limit）は 1 本の
+{@link render_wan_model_card} が描く。世代の表が持つのは、値として引数化できる事実（pipeline 契約・
+モデルの集合・受理集合・公開 class 名）と、散文が丸ごと違う節（概要・改変の要約・検証の範囲・実行
+資源の実測）の描き手。
 
 MUST: **数値・ダウンロード量・quant 表・dtype ラベル・既定値は 1 つ残らず manifest から導出する**
 （`karume.modelcard` の同 MUST がそのまま掛かる — text_encoder の取得量・越境参照の先・宣言された
@@ -11,8 +17,9 @@ device limit も manifest から引く）。ここが持ってよい定数は ma
 が正本 — 組み立ての門 `wan.distribution.assert_text_embeds` が資産のメタとの一致を見るので、ここに
 描く本文と配る資産は食い違わない）・TS 側の受理集合（`packages/models/src/wan/descriptor.ts` の
 `WAN21_GENERATION` の `acceptedSizes` / `minFrames` / `maxFrames`・テキストの経路の選択
-`textEncoder` — ADR 0119 追記 B・プロンプトの受理規則 — ADR 0119 決定 1 / 2 / 4 と追記 10a）・
-実行資源の実測（`_wan_resources` — ADR 0089 決定 3）。
+`textEncoder` — ADR 0119 追記 B・プロンプトの受理規則 — ADR 0119 決定 1 / 2 / 4 と追記 10a。
+Wan2.2 は `WAN22_TI2V_GENERATION`）・実行資源の実測（`_wan21_resources` / `_wan22_resources` —
+ADR 0089 決定 3）。
 
 MUST: torch を import しない（`import dist` が torch を読まない —
 `tests/test_dist_driver.py` の `TestImportingTheDriver`）。
@@ -20,7 +27,8 @@ MUST: torch を import しない（`import dist` が torch を読まない —
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -37,7 +45,7 @@ from karume.modelcard import (
     require_pipeline,
 )
 from wan.prompts import FIXED_PROMPTS
-from wan.sources import SOURCES, UMT5_SOURCES, WAN21_MODELS
+from wan.sources import SOURCES, UMT5_SOURCES, WAN21_MODELS, WAN22_MODELS, WAN22_TEXT_MODEL
 from wan.umt5_distribution import UMT5_DEFAULT_MODEL, UMT5_ROLE
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
@@ -58,6 +66,10 @@ WAN_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: テストが突き合わせる — 片側だけ変えると赤）。
 WAN_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((832, 480), (480, 832))
 WAN_FRAMES = (5, 81)
+
+#: TS 側の生成の既定（`WAN21_GENERATION.defaults` の写し — Usage のコメントが描く）。
+WAN_DEFAULT_SIZE = (832, 480)
+WAN_DEFAULT_FRAMES = 33
 
 #: テキストの経路を選ぶ構築時のオプション（TS 側 `WanPipeline.fromPretrained` の第 2 引数 —
 #: ADR 0119 追記 B。manifest に無い事実）。既定は GPU 経路（決定 7）。
@@ -110,28 +122,122 @@ WAN_QUANT_TRANSFORMER: Mapping[str, tuple[tuple[int, str, str, str], ...]] = {
 #: 裁定 2026-10-04 の 1（段 6 の 12 対 — `f16` と実用席・50 ステップ・33 フレーム）。
 WAN_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.107", "0.210")
 
+#: Wan2.2 TI2V 5B のカードが説明できるパイプライン契約（TS 側 `packages/models/src/wan/config.ts` の
+#: `WAN_TI2V_PIPELINE_NAME` / `WAN_TI2V_PIPELINE_MAJOR`）。
+WAN22_SUPPORTED_PIPELINE = "wan-ti2v/1"
 
-def _upstream(name: str) -> Any:
-    """モデル名 → 上流の取得元（Wan2.1 のモデルでなければ描かない — このカードは Wan2.1 の
-    配布の事実だけを書く。取得元の表は Wan2.2 の行も持つので、表に有ることでは通さない）。"""
-    if name not in WAN21_MODELS:
+#: TS 側が受理する寸法とフレーム数（`packages/models/src/wan/descriptor.ts` の
+#: `WAN22_TI2V_GENERATION` の写し — ADR 0121 追記「受理寸法を公式の 2 寸法へ」）。
+#: MUST: TS 側と同じ値（`packages/models/tests/fixtures/wan-ti2v-card-limits.json` を挟んで両側の
+#: テストが突き合わせる — 片側だけ変えると赤）。
+WAN22_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((1280, 704), (704, 1280))
+WAN22_FRAMES = (5, 49)
+
+#: TS 側の生成の既定（`WAN22_TI2V_GENERATION.defaults` の写し — ADR 0121 追記「受理寸法を公式の
+#: 2 寸法へ」で「仮置き — 視認で確定する」）。NOTE: fixture `wan-ti2v-card-limits.json` はまだ既定を
+#: 持たないので、TS 側との突き合わせは無い — 既定を替えるときは descriptor.ts とここを両方直す。
+WAN22_DEFAULT_SIZE = (1280, 704)
+WAN22_DEFAULT_FRAMES = 33
+
+#: Wan2.2 の席ごとの実測。行は `(フレーム数, 1 forward, DiT の段の VRAM の山, DiT の段, VAE の段,
+#: 通し)`。50 ステップの通しは全て B570・Deno 2.9.6・1280×704・shift 5・guidance 5・seed 42・
+#: 2026-10-05（VRAM の山は fdinfo の DiT の段・時間は DiT の段 / VAE の段 / 壁）。
+#:
+#: - 33 フレームの行は 2 席とも**製品の class**（`WanTi2vPipeline`）の opt-in の通し（ADR 0121 追記
+#:   「段 6 の結果」の「50 ステップの通し」— 参照席 2,142.9 / 439.2 / 2,582.5 s・7.859 GiB、実用席
+#:   959.9 / 438.5 / 1,398.8 s・7.843 GiB）。
+#: - 49 フレームの行は、製品の class ではなく同じ製品部品を呼ぶ**生成スクリプト**の通し（追記
+#:   「受理寸法を公式の 2 寸法へ」の試走の表）。同じ要求の実用席 33 フレームでは、生成スクリプトの
+#:   DiT の段の山（7.72 GiB）が製品の class（7.843 GiB）より 0.12 GiB 小さかった（出力はバイト
+#:   同一）ので、カードはその向きを注に書く。
+#: - 1 forward は追記「段 2 の結果」（2026-10-04）の所要（DiT 単体・通常モード・batch 1・
+#:   S = 7,920 = 1280×704×33）。49 フレーム（S = 11,440）の 1 forward は計測していない。
+#:
+#: MUST: 計測していない欄は「not measured」と書き、推し量った数で埋めない。表に無い席は「未計測」と
+#: 名乗る（席の並びは manifest のまま — 2.1 の {@link WAN_QUANT_TRANSFORMER} と同じ扱い）。
+WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] = {
+    "f16+dit8": (
+        (33, "21.8 s", "7.86 GiB", "2,143 s", "439 s", "43 min 3 s"),
+        (49, "not measured", "8.45 GiB", "3,360 s", "647 s", "66 min 53 s"),
+    ),
+    "f16+dit8-a8-attn8-s16": (
+        (33, "9.9 s", "7.84 GiB", "960 s", "439 s", "23 min 19 s"),
+        (49, "not measured", "8.49 GiB", "1,504 s", "655 s", "36 min 5 s"),
+    ),
+}
+
+#: Wan2.2 の Usage が呼ぶ公開 class（`@karume/models`）。資源の注も名指しする（33 フレームの通しを
+#: 回した class）。
+WAN22_PIPELINE_CLASS = "WanTi2vPipeline"
+
+#: Wan2.2 の実用席と参照席（実用席の品質の節が名指しする 2 席 — 段 7 の自機 A/B 門は未計測）。
+WAN22_PRACTICAL_QUANT = ("f16+dit8-a8-attn8-s16", "f16+dit8")
+
+
+@dataclass(frozen=True)
+class WanCard:
+    """カードの世代の表 — 世代ごとに違う事実（値）と、散文が丸ごと違う節の描き手。
+
+    骨組み（節の並び・帰属の行・Usage・プロンプト・受理する入力の枠・既定値・宣言 limit）は
+    {@link render_wan_model_card} が 1 本で描く。
+    """
+
+    #: 世代の名前（帰属の行・門の文言 — `Wan2.1` / `Wan2.2`）。
+    generation: str
+    #: カードの見出しに出す checkpoint の名前。
+    title: str
+    #: このカードが説明できるパイプライン契約（ADR 0041 §2）。
+    supported_pipeline: str
+    #: この世代の配布が配るモデル（帰属の門 — 取得元の表の全モデルは通さない）。
+    models: tuple[str, ...]
+    #: Usage が呼ぶ公開 class（`@karume/models`）。
+    pipeline_class: str
+    #: 上流の技術レポート（上流の README が引くもの — 確かめられないなら None で行を省く）。
+    paper: str | None
+    #: TS 側の受理集合の写し（寸法 `(width, height)` の並び・フレーム数の `(下限, 上限)`）。
+    accepted_sizes: tuple[tuple[int, int], ...]
+    frames: tuple[int, int]
+    #: TS 側の生成の既定（寸法 `(width, height)` とフレーム数 — `descriptor.ts` の `defaults` の
+    #: 写し）。Usage のコメントが描く。受理集合の並びの先頭からは導かない（既定は視認で替わりうる —
+    #: Wan2.2 は ADR 0121 追記「受理寸法を公式の 2 寸法へ」の「仮置き」）。
+    default_size: tuple[int, int]
+    default_frames: int
+    #: 受理するフレーム数の行に続けて書く「GPU で確かめた範囲」の行（先頭の要素は範囲と同じ行に
+    #: 続く）。
+    frames_checked: tuple[str, ...]
+    #: 「Determinism and verification」節のうち、ビット同一の項の後に続く項の行。
+    verification: tuple[str, ...]
+    #: 「What is this」節（manifest から — text_encoder の取得元を描く）。
+    overview: Callable[[Mapping[str, Any]], list[str]]
+    #: 帰属節のうち、モデルごとの出所の行の後に続く項（作者・改変の要約・text encoder・資産）。
+    attribution_notes: Callable[[Mapping[str, Any]], list[str]]
+    #: 「Resources」節（実測の表と注 — ADR 0089 決定 3）。
+    resources: Callable[[Mapping[str, Any]], list[str]]
+
+
+def _upstream(name: str, card: WanCard) -> Any:
+    """モデル名 → 上流の取得元（その世代のモデルでなければ描かない — このカードはその世代の配布の
+    事実だけを書く。取得元の表は別の世代の行も持つので、表に有ることでは通さない）。"""
+    if name not in card.models:
         raise ValueError(
-            f"モデル '{name}' は Wan2.1 のモデル（wan.sources.WAN21_MODELS）でない"
-            f"（既知: {list(WAN21_MODELS)}）— Wan2.1 のカードに別の世代の出所を書かない"
+            f"モデル '{name}' は {card.generation} のモデルでない"
+            f"（既知: {list(card.models)}）— {card.generation} のカードに別の世代の出所を書かない"
         )
     return SOURCES[name]
 
 
-def _wan_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
-    """frontmatter を manifest に並んだモデルから組む（`base_model` は再配布する上流の全部）。"""
-    licenses = {_upstream(name).license for name in manifest["models"]}
+def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
+    """frontmatter を manifest に並んだモデルから組む（`base_model` は manifest のモデルの上流 —
+    HF の「派生元のモデル」の意味。Wan2.2 のテキスト資産 2 本の出所〈Wan2.1 の checkpoint〉は
+    派生元のモデルではないので載せず、帰属の節が書く）。"""
+    licenses = {_upstream(name, card).license for name in manifest["models"]}
     if len(licenses) != 1:
         raise ValueError(
             f"モデルごとにライセンスが割れている（{sorted(licenses)}）— 1 値で書けない"
         )
     return CardMetadata(
         pipeline_tag=WAN_PIPELINE_TAG,
-        base_model=tuple(_upstream(name).repo for name in manifest["models"]),
+        base_model=tuple(_upstream(name, card).repo for name in manifest["models"]),
         # f32 の上流を f16 / i8 へ落とし直した配布形（`CardMetadata` の doc — f16 / i8 の配布形は
         # `quantized`）。
         base_model_relation="quantized",
@@ -166,13 +272,28 @@ def _gib(size: int) -> str:
     return f"{size / (1 << 30):.2f} GiB"
 
 
-def _wan_overview(manifest: Mapping[str, Any]) -> list[str]:
+def _encoder_whereabouts(manifest: Mapping[str, Any]) -> str:
+    """text_encoder の置き場の句（自リポか、越境参照の先のリポか — manifest から）。"""
     _, borrowed = _text_encoder(manifest)
-    where = (
+    return (
         "stored in this repository"
         if borrowed is None
         else f"referenced from [`{borrowed[0]}`](https://huggingface.co/{borrowed[0]})"
     )
+
+
+def _reader_lines(manifest: Mapping[str, Any], pipeline: str) -> list[str]:
+    """概要の末尾 2 項（読み手の契約と、変換に使った exporter・manifest の形式）。"""
+    return [
+        "- Not readable by diffusers (it's a different container with an embedded graph); the"
+        f" reader is a pipeline that implements `{pipeline}`.",
+        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
+        f" is `karume.json` (`{manifest['format']}`).",
+    ]
+
+
+def _wan21_overview(manifest: Mapping[str, Any]) -> list[str]:
+    where = _encoder_whereabouts(manifest)
     return [
         "## What is this",
         "",
@@ -197,14 +318,47 @@ def _wan_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- In a browser, Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the",
         "  `f16` quant with the precomputed embeddings, 832 × 480, 81 frames) in 46.1 minutes.",
         "  The text encoder on the GPU and the int8 quants have not been run in a browser yet.",
-        "- Not readable by diffusers (it's a different container with an embedded graph); the"
-        f" reader is a pipeline that implements `{WAN_SUPPORTED_PIPELINE}`.",
-        f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
-        f" is `karume.json` (`{manifest['format']}`).",
+        *_reader_lines(manifest, WAN_SUPPORTED_PIPELINE),
     ]
 
 
-def _wan_base_weights(manifest: Mapping[str, Any]) -> list[str]:
+def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
+    """Wan2.2 の概要。検証の範囲は ADR 0121 追記「段 6 の結果」（sha 行 6 本は全て参照席・
+    17 フレーム — 1280×704 と 704×1280 は precomputed、GPU のテキスト経路は 1280×704 だけ・
+    50 ステップの製品の class の通しは 2 席・1280×704・33 フレーム）。49 フレームの生成スクリプトの
+    試走は受理する入力の節（{@link _WAN22_FRAMES_CHECKED}）が書く。"""
+    where = _encoder_whereabouts(manifest)
+    return [
+        "## What is this",
+        "",
+        "A **text-to-video** distribution of Wan2.2 TI2V 5B, converted into the WebGPU",
+        "inference runtime **Karume**'s container format (a `.krm` part sequence whose first part",
+        "carries the graph and model descriptors).",
+        "",
+        f"- Four graphs: `{WAN_TEXT_ENCODER_COMPONENT}` (the umT5-XXL text encoder in int8,"
+        f" {where}),",
+        "  `transformer` (the diffusion transformer in int8, on patchified latent tokens) and",
+        "  `vae_decoder_first` / `vae_decoder_next` (the Wan2.2 video VAE decoder, one latent",
+        "  frame per call, with the causal cache passed in and out).",
+        "- Text to video only. The transformer graph already takes the image-conditioning inputs",
+        "  (a second timestep and a condition mask), but image-to-video is not available yet.",
+        "- The rest runs on the host in TypeScript: the prompt cleaning and the tokenizer (or,",
+        f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"`, the lookup of the',
+        "  precomputed embeddings), the relative-position buckets, the patchify and RoPE tables,",
+        "  classifier-free guidance as two batch-1 passes, the flow-matching UniPC scheduler, the",
+        "  tiled VAE decode and the unpatchify of its output. The output is",
+        "  `[3, frames, height, width]` float32 in `[-1, 1]`, at 24 fps.",
+        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6) with the `f16+dit8` quant in",
+        "  2-step runs of 17 frames — at 1280 × 704 and 704 × 1280 with the precomputed",
+        "  embeddings, and at 1280 × 704 with the text encoder on the GPU — each pinned by the",
+        "  SHA-256 of its frames; and in full 50-step runs of both quants at 1280 × 704 with 33",
+        "  frames (see Resources).",
+        "- Not run in a browser yet.",
+        *_reader_lines(manifest, WAN22_SUPPORTED_PIPELINE),
+    ]
+
+
+def _wan_base_weights(manifest: Mapping[str, Any], card: WanCard) -> list[str]:
     """帰属節。上流の revision は pin した 40 桁を全部出す（容器の provenance と同じ値）。"""
     lines = [
         "## Base weights and attribution",
@@ -213,14 +367,23 @@ def _wan_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "",
     ]
     for name in manifest["models"]:
-        source = _upstream(name)
+        source = _upstream(name, card)
         lines.append(
             f"- **`{name}`**: [{source.repo}](https://huggingface.co/{source.repo}) at commit"
             f" `{source.revision}`, licensed **{source.license}** (as of retrieval;"
             f" [full text]({WAN_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
         )
-    lines += [
-        f"- **Authors**: Wan2.1 is released by Wan-AI ([technical report](https://{WAN_PAPER})).",
+    if card.paper is not None:
+        lines.append(
+            f"- **Authors**: {card.generation} is released by Wan-AI"
+            f" ([technical report](https://{card.paper}))."
+        )
+    return lines + card.attribution_notes(manifest)
+
+
+def _wan21_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
+    """Wan2.1 の改変の要約・text encoder の置き場・事前計算の埋め込み。"""
+    lines = [
         "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
         "  conversion into the Karume container format; every parameter of the float16",
         "  transformer and the VAE rounded to the nearest float16 value (weight matrices and",
@@ -258,7 +421,59 @@ def _wan_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _wan_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
+    """Wan2.2 の改変の要約・text encoder の置き場・Wan2.1 の checkpoint から作った資産 2 本。
+
+    umT5 は本家の encoder と書き、この checkpoint の bf16 の `text_encoder` はその丸めと書く
+    （ADR 0122 決定 8）。資産 2 本の出所は Wan2.1 の pin（ADR 0121 決定 9 — 組み立ての門
+    `wan.distribution.assert_text_embeds` / `assert_umt5_tokenizer` がその pin で突き合わせる）。
+    トークナイザのファイルが 2 つの checkpoint で同じことは、pin した 2 つの revision の
+    `tokenizer/` の 4 ファイルの sha256 の一致で確かめた（2026-10-06）。
+    """
+    text = SOURCES[WAN22_TEXT_MODEL]
+    lines = [
+        "- **Changes made here** (listed in full in `NOTICE.md`, per Apache 2.0 §4(b)):",
+        "  conversion into the Karume container format; the transformer shipped only in int8,",
+        "  its linear weights quantized per output channel (biases and normalization weights kept",
+        "  in float32 at the source values); every parameter of the VAE decoder rounded to the",
+        "  nearest float16 value (weight matrices and kernels stored as float16, computation in",
+        "  float32); the transformer graph re-expressed on patchified tokens, with the RoPE tables",
+        "  built on the host from per-axis base tables and applied in a pair-swap form, and with",
+        "  the image-conditioning inputs that text-to-video leaves inactive; the VAE decoder",
+        "  re-expressed as two one-frame graphs with an explicit causal cache that return the",
+        "  patchified output for the host to unpatchify, always decoded in overlapping tiles; the",
+        "  tokenizer converted into one table together with lookup tables for the upstream prompt",
+        "  cleaning. No retraining and no fine-tuning.",
+    ]
+    _, borrowed = _text_encoder(manifest)
+    if borrowed is None:
+        lines.append(
+            f"- **The text encoder** (the encoder of `{WAN_TEXT_ENCODER_UPSTREAM}`, which this"
+            " checkpoint's `text_encoder` holds rounded to bfloat16, in int8) is stored in this"
+            " repository."
+        )
+    else:
+        repo, revision = borrowed
+        lines += [
+            "- **The text encoder is not stored here.** `karume.json` references the encoder of",
+            f"  `{WAN_TEXT_ENCODER_UPSTREAM}` (this checkpoint's `text_encoder` holds the same",
+            "  encoder rounded to bfloat16), converted to int8, at commit"
+            f" `{revision[:16]}…` of [`{repo}`](https://huggingface.co/{repo})",
+            "  (with the size and the SHA-256 of every part); that repository's `NOTICE.md` lists",
+            "  the changes made to it.",
+        ]
+    lines += [
+        "- **Precomputed embeddings and tokenizer**: the repository also ships the encoder's",
+        "  outputs for a fixed set of prompts (see below), computed in bfloat16 with the umT5-XXL",
+        f"  encoder of [{text.repo}](https://huggingface.co/{text.repo}) at commit"
+        f" `{text.revision}`",
+        "  and stored as float32, for use without the text encoder, and the tokenizer table",
+        "  converted from the same commit (its tokenizer files are the same as this checkpoint's).",
+    ]
+    return lines
+
+
+def _wan_usage(manifest: Mapping[str, Any], repo: str, card: WanCard) -> list[str]:
     """Usage 例: 動く最小形 + 普通に使いそうな optional はコメントアウトで併記する。
 
     NOTE: `fromAssets` は案内しない（Depth Anything のカードと同じ裁定 — HF から使う読者の入口は
@@ -269,14 +484,20 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     quant = model["defaultQuant"]
     model_names = " / ".join(manifest["models"])
     quant_names = " / ".join(model["quants"])
+    width, height = card.default_size
+    alternatives = " or ".join(
+        f"{other_width} × {other_height}"
+        for other_width, other_height in card.accepted_sizes
+        if (other_width, other_height) != card.default_size
+    )
     return [
         "## Usage",
         "",
         "```ts",
-        'import { encodePng, wanFrameToRgba, WanPipeline } from "jsr:@karume/models";',
+        f'import {{ encodePng, wanFrameToRgba, {card.pipeline_class} }} from "jsr:@karume/models";',
         "",
         *from_pretrained(
-            "WanPipeline",
+            card.pipeline_class,
             repo,
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',
@@ -291,8 +512,8 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
         '  prompt: "A cat walks on the grass, realistic style.",',
         "  seed: 42,",
         '  // negativePrompt: "low quality, blurry", // default: the official negative prompt',
-        f"  // frames: 33, // 4n+1, {WAN_FRAMES[0]} to {WAN_FRAMES[1]}",
-        "  // width: 832, height: 480, // or 480 × 832",
+        f"  // frames: {card.default_frames}, // 4n+1, {card.frames[0]} to {card.frames[1]}",
+        f"  // width: {width}, height: {height}, // or {alternatives}",
         "});",
         "",
         "for (let frame = 0; frame < video.frames; frame += 1) {",
@@ -355,18 +576,68 @@ def _wan_prompts() -> list[str]:
     return lines
 
 
-def _wan_inputs() -> list[str]:
+#: Wan2.1 の受理するフレーム数のうち GPU で通しを確かめた範囲（ADR 0118 段 6 / 8・ADR 0119
+#: 段 10c）。
+_WAN21_FRAMES_CHECKED = (
+    "Only 832 × 480 has been checked end to end on",
+    "  the GPU: 33 and 81 frames with the precomputed embeddings, and 33 frames with the",
+    "  text encoder.",
+)
+
+#: Wan2.1 の上流との照合（`f16` 席の 2 ステップの通しと、実寸の transformer 1 forward の f64 参照
+#: — ADR 0118）とタイル decode の注。
+_WAN21_VERIFICATION = (
+    "- **Against the upstream reference** (the `f16` quant, with the precomputed",
+    "  embeddings): a 2-step run with injected noise is compared with diffusers on CPU in",
+    "  float32 (the same f16-rounded weights, the same tiled decode), and one transformer",
+    "  forward at each full size (33 and 81 frames) against a float64 reference. Differences",
+    "  stay within tolerances measured on separate decision cases; the remaining gap is",
+    "  float32 rounding in the GPU matrix products, not a porting difference.",
+    "- **Tiled decode**: the VAE always decodes in overlapping tiles, so the frames differ",
+    "  slightly from the upstream untiled decode.",
+)
+
+#: Wan2.2 の受理するフレーム数のうち GPU で通しを確かめた範囲（ADR 0121 追記「段 6 の結果」の
+#: 2 ステップ・17 フレームの sha 行と 50 ステップの製品の class の通し〈33 フレーム〉、追記「受理
+#: 寸法を公式の 2 寸法へ」の生成スクリプトの 50 ステップの試走〈49 フレーム — 製品の class では
+#: 回していない。生成スクリプト ≡ 製品を示したのは実用席の 33 フレームだけ〉）。
+_WAN22_FRAMES_CHECKED = (
+    "Checked end to end on the GPU: 17 frames at",
+    "  both sizes in 2-step runs, and 33 frames at 1280 × 704 in 50-step runs. 49 frames at",
+    "  1280 × 704 ran 50 steps through the same pipeline stages, driven by a development script",
+    "  rather than the pipeline class.",
+)
+
+#: Wan2.2 の上流との照合（参照席の 2 ステップの通し — ADR 0121 追記「段 6 の結果」・実寸の
+#: transformer 1 forward の f64 参照 — 追記「段 2 の結果」の r 門〈S = 8,190 / 7,920〉）とタイル
+#: decode の注（patchify 空間でブレンドしてから unpatchify — 決定 6）。実用席は自機 A/B 門
+#: （段 7）が未計測なので、比べていないと書く。
+_WAN22_VERIFICATION = (
+    "- **Against the upstream reference** (the `f16+dit8` quant, with the precomputed",
+    "  embeddings): a 2-step run at 1280 × 704 with 17 frames and injected noise is compared",
+    "  with diffusers on CPU in float32 (the same int8 transformer weights, the same",
+    "  f16-rounded VAE weights and tiled decode), and single transformer forwards of up to",
+    "  8,190 tokens (1280 × 704 with 33 frames among them) against a float64 reference.",
+    "  Differences stay within tolerances measured on separate decision cases. The",
+    "  `f16+dit8-a8-attn8-s16` quant has not been compared yet.",
+    "- **Tiled decode**: the VAE always decodes in overlapping tiles, blended in the patchified",
+    "  space before the unpatchify, so the frames differ slightly from the upstream untiled",
+    "  decode.",
+)
+
+
+def _wan_inputs(card: WanCard) -> list[str]:
     """受理する入力と、数値の門（ビット同一・参照照合）の説明。"""
-    sizes = " or ".join(f"{width} × {height}" for width, height in WAN_ACCEPTED_SIZES)
-    low, high = WAN_FRAMES
+    sizes = " or ".join(f"{width} × {height}" for width, height in card.accepted_sizes)
+    low, high = card.frames
+    first, *rest = card.frames_checked
     return [
         "## Accepted inputs",
         "",
         "- **prompt** / **negativePrompt**: see Prompts above.",
         f"- **size**: {sizes}.",
-        f"- **frames**: 4n+1 from {low} to {high}. Only 832 × 480 has been checked end to end on",
-        f"  the GPU: 33 and {high} frames with the precomputed embeddings, and 33 frames with the",
-        "  text encoder.",
+        f"- **frames**: 4n+1 from {low} to {high}. {first}",
+        *rest,
         "- **steps** ≥ 1, **guidance** ≥ 1 (1 turns classifier-free guidance off and the negative",
         "  prompt is then rejected), **shift** > 0.",
         "- **seed** (the host noise generator — not torch's `randn`) or the initial noise as",
@@ -380,18 +651,11 @@ def _wan_inputs() -> list[str]:
         "  same bytes on the same GPU and driver. Release verification pins the SHA-256 of the",
         "  8-bit frames per test environment and fails on any change — the check is never relaxed",
         "  to a tolerance.",
-        "- **Against the upstream reference** (the `f16` quant, with the precomputed",
-        "  embeddings): a 2-step run with injected noise is compared with diffusers on CPU in",
-        "  float32 (the same f16-rounded weights, the same tiled decode), and one transformer",
-        "  forward at each full size (33 and 81 frames) against a float64 reference. Differences",
-        "  stay within tolerances measured on separate decision cases; the remaining gap is",
-        "  float32 rounding in the GPU matrix products, not a porting difference.",
-        "- **Tiled decode**: the VAE always decodes in overlapping tiles, so the frames differ",
-        "  slightly from the upstream untiled decode.",
+        *card.verification,
     ]
 
 
-def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
+def _wan21_resources(manifest: Mapping[str, Any]) -> list[str]:
     """実行資源の目安（ADR 0089 決定 3 — 中間テンソルの確保と束縛の大きさは manifest の
     `requiredLimits` が数えない、**manifest に存在しない事実**。BiRefNet のカードと同じ扱い）。
 
@@ -418,8 +682,6 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"実行資源を実測した quant '{WAN_RESOURCE_QUANT}' がモデル '{name}' の席に無い"
                 f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
             )
-    encoder_bytes, borrowed = _text_encoder(manifest)
-    source = "" if borrowed is None else f" from `{borrowed[0]}`"
     # 席の並びは manifest のまま。表に無い席は数を推し量らず、未計測と名乗る。
     seats = dict.fromkeys(
         quant for model in manifest["models"].values() for quant in model["quants"]
@@ -483,11 +745,7 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
             if practical in seats and reference in seats
             else []
         ),
-        f"- **Download**: the quant table's Download column includes the text encoder"
-        f" ({_gib(encoder_bytes)}{source});",
-        f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"` it is not fetched.',
-        "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The",
-        "  stages are never resident together, so a clip's peak is the largest stage peak.",
+        *_download_and_memory(manifest),
         "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
         "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
         "  feed-forward activation `[S, 8960]` in float32 alone is about 480 MiB at 33 frames",
@@ -498,6 +756,102 @@ def _wan_resources(manifest: Mapping[str, Any]) -> list[str]:
         "  browser the environment has to grant the adapter's limits as well. Chrome on the",
         "  RTX 5070 Ti granted them (2 GiB buffers) and ran the 81-frame clip above; other",
         "  browsers and GPUs have not been checked.",
+        *_undeclared(manifest),
+    ]
+
+
+def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
+    """Wan2.2 の実行資源の目安（ADR 0089 決定 3 — 2.1 の {@link _wan21_resources} と同じ扱い）。
+
+    数は {@link WAN22_RESOURCES} の出所のとおり。VAE の段の山は受理するフレーム数の通しの値だけを
+    書く: 33 フレームは製品の class の通しの 4.360 / 4.361 GiB（参照席 / 実用席 — 追記「段 6 の
+    結果」・記録 `outputs/bench/karume-wan2.2/2026-10-05_stage6-gpu/g1-full.log`）、49 フレームは
+    生成スクリプトの通しの 4.513 / 4.512 GiB（記録
+    `outputs/verify/deno-intel-graphics-bmg-g21/2026-10-05_wan22-visual/` の `vramPeaksGiB`）。
+    試走の表の注の範囲 4.36〜4.52 GiB は受理の外の 57 フレームの試走を含むので使わない。
+
+    中間テンソルの大きさは形からの計算（FFN の `[S, 14336]` f32 は S = 7,920 で 454,164,480 B・
+    S = 11,440 で 656,015,360 B — `ffn_dim` は pin した `transformer/config.json`）。
+
+    MUST: 実測していない条件の数は載せない（2.1 と同じ規律）。テキストエンコーダの段・ブラウザ・
+    B570 以外の GPU は、この配布形ではまだ計測していないと書く。実用席の品質（段 7 の自機 A/B 門の
+    相対 RMS 誤差）も未計測なので、数を書かない。
+    """
+    seats = dict.fromkeys(
+        quant for model in manifest["models"].values() for quant in model["quants"]
+    )
+    measured = [quant for quant in seats if quant in WAN22_RESOURCES]
+    if not measured:
+        raise ValueError(
+            f"実行資源を実測した quant（{sorted(WAN22_RESOURCES)}）が manifest の席"
+            f"（{list(seats)}）に 1 つも無い — 実測していない席の数は名乗らない"
+        )
+    unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN22_RESOURCES]
+    practical, reference = WAN22_PRACTICAL_QUANT
+    return [
+        "## Resources",
+        "",
+        "Measured on an Intel Arc B570 in Deno 2.9.6 on 2026-10-05, at 1280 × 704 with 50 steps,",
+        "shift 5 and guidance 5 (classifier-free guidance runs two transformer passes per step, so",
+        "100 passes):",
+        "",
+        "| Quant | Frames | Pass | Transformer peak | Transformer stage | VAE decode | Clip |",
+        "| ----- | ------ | ---- | ---------------- | ----------------- | ---------- | ---- |",
+        *(
+            f"| `{quant}` | {frames} | {forward} | {peak} | {stage} | {decode} | {clip} |"
+            for quant in measured
+            for frames, forward, peak, stage, decode, clip in WAN22_RESOURCES[quant]
+        ),
+        "",
+        "Pass is one transformer pass (batch 1, 7,920 tokens) timed on its own on 2026-10-04.",
+        "Transformer peak is the total allocation during the transformer stage; the stage and the",
+        "tiled decode of the whole clip are timed within the 50-step run. The 33-frame runs went",
+        f"through `{WAN22_PIPELINE_CLASS}`; the 49-frame runs drove the same pipeline stages",
+        "from a development script instead, whose transformer peak read 0.12 GiB lower than the",
+        "class's in the one run measured both ways (33 frames). The VAE stage peaked at 4.36 GiB",
+        "at 33 frames and 4.51 GiB at 49 frames with either quant.",
+        "",
+        *(
+            [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet.", ""]
+            if unmeasured
+            else []
+        ),
+        f'The text encoder stage (`{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[0]}"`) has'
+        " not been measured with this",
+        "distribution yet, and no run has been made in a browser.",
+        "",
+        *(
+            [f"- **Quality of `{practical}`**: not measured yet."]
+            if practical in seats and reference in seats
+            else []
+        ),
+        *_download_and_memory(manifest),
+        "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
+        "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
+        "  feed-forward activation `[S, 14336]` in float32 alone is about 433 MiB at 33 frames",
+        "  (S = 7,920) and about 626 MiB at 49 frames (S = 11,440). The runtime requests the",
+        "  adapter's own limits, which Deno grants on the B570; in a browser the environment has",
+        "  to grant the adapter's limits as well, which has not been checked yet.",
+        *_undeclared(manifest),
+    ]
+
+
+def _download_and_memory(manifest: Mapping[str, Any]) -> list[str]:
+    """資源の注のうち、text_encoder の取得量（manifest から）と VRAM の山の読み方の 2 項。"""
+    encoder_bytes, borrowed = _text_encoder(manifest)
+    source = "" if borrowed is None else f" from `{borrowed[0]}`"
+    return [
+        f"- **Download**: the quant table's Download column includes the text encoder"
+        f" ({_gib(encoder_bytes)}{source});",
+        f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"` it is not fetched.',
+        "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The",
+        "  stages are never resident together, so a clip's peak is the largest stage peak.",
+    ]
+
+
+def _undeclared(manifest: Mapping[str, Any]) -> list[str]:
+    """資源の注の末尾（manifest が宣言しない数であることと、宣言された limit）。"""
+    return [
         "- `karume.json` does not declare these figures: its declared limits cover the resident",
         "  weights and state, not the intermediate tensors a run allocates.",
         *_declared_limits(manifest),
@@ -542,36 +896,79 @@ def _wan_defaults(model: Mapping[str, Any]) -> list[str]:
     ]
 
 
+#: Wan2.1 T2V 1.3B（`karume-wan2.1`）のカードの世代の表。
+WAN21_CARD = WanCard(
+    generation="Wan2.1",
+    title="Wan2.1 T2V 1.3B",
+    supported_pipeline=WAN_SUPPORTED_PIPELINE,
+    models=WAN21_MODELS,
+    pipeline_class="WanPipeline",
+    paper=WAN_PAPER,
+    accepted_sizes=WAN_ACCEPTED_SIZES,
+    frames=WAN_FRAMES,
+    default_size=WAN_DEFAULT_SIZE,
+    default_frames=WAN_DEFAULT_FRAMES,
+    frames_checked=_WAN21_FRAMES_CHECKED,
+    verification=_WAN21_VERIFICATION,
+    overview=_wan21_overview,
+    attribution_notes=_wan21_attribution_notes,
+    resources=_wan21_resources,
+)
+
+#: Wan2.2 TI2V 5B（`karume-wan2.2`）のカードの世代の表。技術レポートは pin した revision の上流
+#: `README.md` が引くもの（Wan2.1 と同じ arXiv 2503.20314 — 2026-10-06 に HF キャッシュの pin の
+#: README で確かめた）。
+WAN22_CARD = WanCard(
+    generation="Wan2.2",
+    title="Wan2.2 TI2V 5B",
+    supported_pipeline=WAN22_SUPPORTED_PIPELINE,
+    models=WAN22_MODELS,
+    pipeline_class=WAN22_PIPELINE_CLASS,
+    paper=WAN_PAPER,
+    accepted_sizes=WAN22_ACCEPTED_SIZES,
+    frames=WAN22_FRAMES,
+    default_size=WAN22_DEFAULT_SIZE,
+    default_frames=WAN22_DEFAULT_FRAMES,
+    frames_checked=_WAN22_FRAMES_CHECKED,
+    verification=_WAN22_VERIFICATION,
+    overview=_wan22_overview,
+    attribution_notes=_wan22_attribution_notes,
+    resources=_wan22_resources,
+)
+
+
 def render_wan_model_card(
     manifest: Mapping[str, Any],
     repo: str,
     abbreviations: Mapping[str, str],
     host_assets: Mapping[str, int] = {},
+    card: WanCard = WAN21_CARD,
 ) -> str:
-    """Wan2.1 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
+    """Wan の配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
     `abbreviations` は席名の部品上書きトークンの対応表（正本は `wan.distribution` の
     `WAN_QUANT_ABBREVIATIONS` — ADR 0074 決定 4）。manifest に無い事実なので、定数として写さず
-    引数で受ける（anima のカードと同じ形）。
+    引数で受ける（anima のカードと同じ形）。`card` は世代の表（配布 recipe の Pipeline が
+    世代ごとに束ねて渡す — 既定は Wan2.1）。
     """
-    require_pipeline(manifest, WAN_SUPPORTED_PIPELINE)
+    require_pipeline(manifest, card.supported_pipeline)
     return render(
         (
-            frontmatter(_wan_metadata(manifest)),
-            ["", "# Wan2.1 T2V 1.3B — Karume", ""],
-            _wan_overview(manifest),
+            frontmatter(_wan_metadata(manifest, card)),
+            ["", f"# {card.title} — Karume", ""],
+            card.overview(manifest),
             [""],
-            _wan_base_weights(manifest),
+            _wan_base_weights(manifest, card),
             [""],
             models(manifest),
             [""],
-            _wan_usage(manifest, repo),
+            _wan_usage(manifest, repo, card),
             [""],
             _wan_prompts(),
             [""],
-            _wan_inputs(),
+            _wan_inputs(card),
             [""],
-            _wan_resources(manifest),
+            card.resources(manifest),
             *model_sections(
                 manifest,
                 (

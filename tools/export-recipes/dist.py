@@ -18,6 +18,10 @@
         --ref-repo hdae/karume-umt5-xxl --ref-revision <karume-umt5-xxl の main の SHA> \\
         --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder
                                                            # Wan2.1 T2V 1.3B（HF 公開は未）
+    uv run python dist.py --pipeline wan-ti2v \\
+        --ref-repo hdae/karume-umt5-xxl --ref-revision <karume-umt5-xxl の main の SHA> \\
+        --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder
+                                                           # Wan2.2 TI2V 5B（HF 公開は未）
 
 置き場の既定（`--series` / `--out`）もここが渡す — リポの `outputs/series/` と `models/` は
 repo topology で、core は綴りを持たない（ADR 0065 Consequences・`karume.dist` の同 MUST）。
@@ -94,6 +98,8 @@ PIPELINES: Mapping[str, Pipeline] = {
     "gemma4": gemma4_distribution.PIPELINE,
     "gemma4-qat": gemma4_qat_distribution.PIPELINE,
     "wan": wan_distribution.PIPELINE,
+    # Wan の世代は別リポ（ADR 0092 決定 2 — `karume-wan2.2`）なので Pipeline も別席。
+    "wan-ti2v": wan_distribution.TI2V_PIPELINE,
     # Wan の text_encoder の参照先（ADR 0119 追記 D — 部品だけの別リポ・読む TS の家族は無い）。
     "umt5": umt5_distribution.PIPELINE,
     **CORE_PIPELINES,
