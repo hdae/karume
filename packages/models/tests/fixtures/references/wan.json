@@ -3,16 +3,20 @@
   "kind": "sha256",
   "cases": {
     "2step-accept-ferret": {
-      "deno-intel-graphics-bmg-g21": "85e756fdbbc6dbeea22210ce56fb0dbd592e6c2300bfaf05a0f2012c4ba39f2b"
+      "deno-intel-graphics-bmg-g21": "85e756fdbbc6dbeea22210ce56fb0dbd592e6c2300bfaf05a0f2012c4ba39f2b",
+      "deno-nvidia-geforce-rtx-3080-ti": "29812f3660998a9aa3c96deb9ffa35de8438edd6fefc7ece9be0eee326b6c5de"
     },
     "2step-band-boxing-cats": {
-      "deno-intel-graphics-bmg-g21": "f1de4c72e487610d947bdb2cbdbf571802a80e5a0d0f08b636b3d59f159b1e72"
+      "deno-intel-graphics-bmg-g21": "f1de4c72e487610d947bdb2cbdbf571802a80e5a0d0f08b636b3d59f159b1e72",
+      "deno-nvidia-geforce-rtx-3080-ti": "8dd124a1cff4a2db35afa5e7943e3c1d804c8160d8fa614c3527d7c3c559ab1b"
     },
     "2step-band-cat-dog-baking": {
-      "deno-intel-graphics-bmg-g21": "e1414441a00c92dd2d2990241e3a5f5759db0a267a4b77d2d4ca4ca91c877e6f"
+      "deno-intel-graphics-bmg-g21": "e1414441a00c92dd2d2990241e3a5f5759db0a267a4b77d2d4ca4ca91c877e6f",
+      "deno-nvidia-geforce-rtx-3080-ti": "9496f971f442f78e1097a1804629d4feb605b54fa98788f68fb1b575abab685d"
     },
     "2step-seed-boxing-cats-seed42": {
-      "deno-intel-graphics-bmg-g21": "46ea9b993d250a05b51fa0812f61a2d372b235cf0bb1febe019c5c5c514d873a"
+      "deno-intel-graphics-bmg-g21": "46ea9b993d250a05b51fa0812f61a2d372b235cf0bb1febe019c5c5c514d873a",
+      "deno-nvidia-geforce-rtx-3080-ti": "eb836dccdf3f8d7c014e6e5e540e552457836fd60d578086d31b3a4cf60c476b"
     },
     "50step-boxing-cats-seed42": {
       "deno-intel-graphics-bmg-g21": "349147a252448744aaa8b5aabe4dd874bd934d4ae0c4a57796bf97ca3bf5aa05"
@@ -21,10 +25,12 @@
       "deno-intel-graphics-bmg-g21": "3cda7368e9062d53e5d708da32ae2838d2ba203203d9ca21c6c1d6709f158421"
     },
     "f16+dit8-2step-seed-boxing-cats-seed42": {
-      "deno-intel-graphics-bmg-g21": "cf7c80727ab8ab9edbaceec0f7cae8ea8159706e3de3caf5b41570f1ae1f91df"
+      "deno-intel-graphics-bmg-g21": "cf7c80727ab8ab9edbaceec0f7cae8ea8159706e3de3caf5b41570f1ae1f91df",
+      "deno-nvidia-geforce-rtx-3080-ti": "7e98c9879dd4ba77b11aa643b30126fcc3d08b6dec5b39d0443dd635901f5c06"
     },
     "f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42": {
-      "deno-intel-graphics-bmg-g21": "b34c0e92cf567e3268f7d1cfc6987e3a4bd4c5e4c3a246fd7fdf27a8cc976db2"
+      "deno-intel-graphics-bmg-g21": "b34c0e92cf567e3268f7d1cfc6987e3a4bd4c5e4c3a246fd7fdf27a8cc976db2",
+      "deno-nvidia-geforce-rtx-3080-ti": "89364e4e4baee3a8dc779dd3846431e8025c979848b51d0b49a4432826b874ae"
     },
     "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42": {
       "deno-intel-graphics-bmg-g21": "ba9bc354979658d3ad72b3243ffa8b25b3fe0f4da3047d1f71d57a573a388b1a"
@@ -33,10 +39,12 @@
       "deno-intel-graphics-bmg-g21": "c841c9d0825d6ca15fb1a6ac5f0cc25be78c2c2eeb354097ad752f21dd3cbd3c"
     },
     "gpu-text-2step-boxing-cats-seed42": {
-      "deno-intel-graphics-bmg-g21": "eca8ef514cf0e75b865c2f86bb351fb40452c704a8859ebc1e2253a7d4fbfa60"
+      "deno-intel-graphics-bmg-g21": "eca8ef514cf0e75b865c2f86bb351fb40452c704a8859ebc1e2253a7d4fbfa60",
+      "deno-nvidia-geforce-rtx-3080-ti": "65610d44c803eb4d8932177cec5f9b0f70b0072961f96f6552f8d47a47722b0c"
     },
     "gpu-text-2step-free-fox-seed42": {
-      "deno-intel-graphics-bmg-g21": "5c64deb0711d4d3dcccea9a227f59bb5dca958931a74eed5eda379a957a9c6fc"
+      "deno-intel-graphics-bmg-g21": "5c64deb0711d4d3dcccea9a227f59bb5dca958931a74eed5eda379a957a9c6fc",
+      "deno-nvidia-geforce-rtx-3080-ti": "362bca0e687da60ba87e6e41a79c82aebf44474dd8a41a89f53573976e37e069"
     }
   }
 }

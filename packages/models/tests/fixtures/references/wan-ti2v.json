@@ -3,22 +3,28 @@
   "kind": "sha256",
   "cases": {
     "f16+dit8-2step-accept-ferret-1280x704-17f-shift5": {
-      "deno-intel-graphics-bmg-g21": "97eadfb2317cb0f8920f24697099be00a90cbc67c75840b6f9978463670d4695"
+      "deno-intel-graphics-bmg-g21": "97eadfb2317cb0f8920f24697099be00a90cbc67c75840b6f9978463670d4695",
+      "deno-nvidia-geforce-rtx-3080-ti": "cf50cafcbb7c7a04e9e04e9e7e0890bc268b3b61125125c5b9cd3df5b11a0c15"
     },
     "f16+dit8-2step-band-boxing-cats-1280x704-17f-shift5": {
-      "deno-intel-graphics-bmg-g21": "7e4da67b59e48244bfc1de366b8ac572833ef7e1d60c4ab5fe81e8e83381868c"
+      "deno-intel-graphics-bmg-g21": "7e4da67b59e48244bfc1de366b8ac572833ef7e1d60c4ab5fe81e8e83381868c",
+      "deno-nvidia-geforce-rtx-3080-ti": "2e1c016d5a0984a641cf90770d83d54cfe1d1a3abfd31ff164fa30f000fa27eb"
     },
     "f16+dit8-2step-band-cat-dog-baking-1280x704-17f-shift5": {
-      "deno-intel-graphics-bmg-g21": "e5a537894fa810330de6e4e2800c47aa01127246f827dcfbdb1605820bb12580"
+      "deno-intel-graphics-bmg-g21": "e5a537894fa810330de6e4e2800c47aa01127246f827dcfbdb1605820bb12580",
+      "deno-nvidia-geforce-rtx-3080-ti": "b463332bedb1e17002d997e3140a7943d55fd7625e6c9194fa43dc0d39daf4ce"
     },
     "f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "deno-intel-graphics-bmg-g21": "c1da8bfebc4a0d14ced3915291512b8f4486eaa9a9ca3d37e1d36c7191a0de50"
+      "deno-intel-graphics-bmg-g21": "c1da8bfebc4a0d14ced3915291512b8f4486eaa9a9ca3d37e1d36c7191a0de50",
+      "deno-nvidia-geforce-rtx-3080-ti": "bc822ce80cd14e77f667dd5934cbd15ca88ba45210fb8c6432df5e17aad1b197"
     },
     "f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5": {
-      "deno-intel-graphics-bmg-g21": "be75de9a14a83563c7e74aeca77a3e5e8cddab82d33ea188295ee6b60a32aa1d"
+      "deno-intel-graphics-bmg-g21": "be75de9a14a83563c7e74aeca77a3e5e8cddab82d33ea188295ee6b60a32aa1d",
+      "deno-nvidia-geforce-rtx-3080-ti": "493512454fed685e429ea4d3c786055214bfc7d4d041f145bcb0af9737d9a960"
     },
     "f16+dit8-gpu-text-2step-boxing-cats-seed42-1280x704-17f-shift5": {
-      "deno-intel-graphics-bmg-g21": "12fa42ffca8fc246c7be60cef34c1f28851ec73669f7b66f12c0901bc0c3af5f"
+      "deno-intel-graphics-bmg-g21": "12fa42ffca8fc246c7be60cef34c1f28851ec73669f7b66f12c0901bc0c3af5f",
+      "deno-nvidia-geforce-rtx-3080-ti": "19565906bf01f680bd8cf039047f11e56a38b5b30ff5ea52be542350524352d8"
     }
   }
 }
