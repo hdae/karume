@@ -557,6 +557,8 @@ Any other request, quant, or route is not a reference case.
    Manager) and note the peak of each stage.
 8. Save the JSON and report it with the records of [6. What to record](#6-what-to-record).
 
+## JSON formats
+
 - **Sweep** — `karume-geometry-sweep/2`, as described in
   [../geometry-sweep/README.md](../geometry-sweep/README.md#output-karume-geometry-sweep2), with
   `settings.candidateSet`.
@@ -581,6 +583,11 @@ Any other request, quant, or route is not a reference case.
     twin never injects, so its files lack it.
 - **Profile** — the `GeometryProfile` value (`id`, `match`, `gemmRows`, `attention`, `conv2d`,
   `i8a8`, `provenance`), with `1e999` for the last `maxRows`.
+- **Wan** — `karume-wan-browser/4`, as described in [4. Wan](#4-wan): the adapter, the environment
+  key, the adapter and device limits, the loaded source / generation / quant / route, `loads[]`,
+  `deviceLost`, and `rows[]` (each with the generation, the resolved request, the wall time, the
+  stage / step / tile times, the session diagnostics, the RGB SHA-256, the reference verdict, and
+  the error).
 
 ## What to confirm
 
