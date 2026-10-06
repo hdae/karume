@@ -369,18 +369,27 @@ later の「decode 速度の残り」。
   「段 4 の結果」。`src` に触っていないので 2.1 のレーンは再走せず、helper の移動は 2.1 の VAE chunk e2e の単独実走でビット同一）。
   **段 5 ✅**（タイル decode — patchify 空間のブレンド → 貼り合わせ → ホストの unpatchify・2.2 のタイル計画の凍結・要素数の検査を形の検査へ。
   B570 の GPU のタイル e2e は帯 5.0e-5 の内・ホストの unpatchify は上流と Uint32 一致・2.1 のタイル参照は作り直してテンソルとメタが一致 —
-  Python `4436457f`・TS `567fb9f0` / `0d5fc54d` / `f91b5b39`・ADR 0121 追記「段 5 の結果」。2.1 の GPU レーンは段 6 の最終状態とまとめて 1 回）。
+  Python `4436457f`・TS `567fb9f0` / `0d5fc54d` / `f91b5b39`・ADR 0121 追記「段 5 の結果」。2.1 の GPU レーンは段 6 の最終状態とまとめて 1 回 — 1 failed で未達・残りは段 6 と同じ 3080 Ti のレーン）。
   **受理寸法の変更（2026-10-05・利用者の裁定）**: Wan2.2 の受理は 1280×704 / 704×1280 × 4n+1 の 5〜49 フレームだけ（832×480 系は B570 で生成すると
   席と shift を変えても崩れた・公式の対応寸法の外）。既定の shift は 5.0。フレーム数の上限 49 は B570 で 2 席とも 50 ステップを完走した値
   （57 も完走したが実用席で決定 8 の目安 8.0 GiB の外・既定は 33 のまま仮置き）。公式の既定 121 フレームは段 8 の gpu-lab + RTX 5070 Ti で確かめてから —
   ADR 0121 追記「受理寸法を公式の 2 寸法へ」・`59557732`。
-  **段 6 = 進行中**（`WanTi2vPipeline` の T2V）: 済み = D1 `59557732`（受理寸法を公式の 2 寸法へ）・コミット 2 `8a3a99db`（DiT の追加入力 2 本 —
-  記述子の DiT の入力の形 `ditInputForm`）・3 `0fb5c005`（家族 admission・構築・生成を `family.ts` へ）・5 `e0c50cea`（`WanTi2vPipeline` を `./wan` と
-  barrel へ）・6 `992ca738`（系列から組む helper と e2e・帯は未導出・50 ステップは opt-in）・7 `24ffd87b`（Python の 2 ステップの通しの参照
-  `ti2v_few_step_ref`）。**残り** = GPU の門（50 ステップの通し・2 ステップの帯・sha 行）・2.1 と 2.2 のレーン（`test:models:wan` /
-  `test:models:wan-ti2v` — 段 5 の分とまとめて 1 回）・ADR 0121 の段 6 の追記。生成スクリプト（git 追跡外）は、opt-in の 50 ステップの実用席がスクリプトの 2 本目（実用席・1280×704×33・shift 5・seed 42）と同じ PNG を出すこと（スクリプト ≡ 製品）を確かめてから退役する。
-  開発機の GPU の換装（B570 → RTX 3080 Ti）の後は、2.1 の条件の読み替えを裁定する（ADR 0121 追記「段 3 を閉じる」）。
-  段 4 / 段 5 の帯（B570 の実測）を新しい機でどう扱うかは段 4 で生じた未決の問いで、同じ機会に諮る（提案）。
+  **段 6 = コードと GPU の門は済み**（`WanTi2vPipeline` の T2V — D1 `59557732`・`8a3a99db`〈DiT の追加入力 2 本・`ditInputForm`〉・`0fb5c005`〈`family.ts`〉・`e0c50cea`〈class〉・
+  `992ca738`〈helper と e2e〉・`24ffd87b`〈Python の 2 ステップの参照〉・`3df18612`〈帯〉・`7173c91d`〈上限 49〉・`128b511e`〈参照席の sha 行 6 本〉・ADR 0121 追記
+  「段 6 の結果」）。2 ステップの通しは B570 で帯の内（受入れも内・故障注入 3 件は床〈帯の 2 倍〉の外）。50 ステップ × 1280×704 × 33 フレームは参照席 43 分 3 秒・
+  実用席 23 分 19 秒で完走・非有限 0。実用席の 33 枚の PNG は生成スクリプトの出力とバイト同一（スクリプト ≡ 製品）。レーン（`128b511e`）は
+  `test:models:wan-ti2v` 41 passed・0 failed、`test:models:wan` 403 passed・1 failed（既知のレーン内の OOM — 単独の再走は 2 passed・数値の門と
+  sha 行は全て通った・known-issues）。残り = 3080 Ti での 2.1 / 2.2 のレーン（行を書く走行 → 素の走行・両方 0 failed）。2.1 のレーンは B570 で
+  2 回とも同じ step が OOM（原因 = ランナーの step の保持 — known-issues）。
+  利用者の裁定（2026-10-05）: B570 では手当てせず、換装後の RTX 3080 Ti で通す。換装の後は、その時点の HEAD で新しい GPU の sha 行を
+  `KARUME_REFERENCE=write` で作り（B570 の行は残す）、以後はその行との一致を ADR の合格条件にする（B570 に戻すことを条件にしない）。段 4 以降の
+  「2.1 のレーンを B570 で実走」の条件は RTX 3080 Ti の行へ読み替える（ADR 0121 追記（2026-10-06）「開発機の換装」）。換装は 2026-10-06 に完了
+  （環境キー `deno-nvidia-geforce-rtx-3080-ti`）。
+  段 4 / 段 5 の帯（B570 の実測）を新しい機でどう扱うかは段 4 で生じた未決の問いで、未裁定のまま残す（3080 Ti でレーンを回す前に諮る — 提案）。
+  **次 = 段 8**（gpu-lab の Wan2.2 対応 — 利用者が RTX 5070 Ti で早めに確かめるため段 7 より先・公式のフレーム数 121 まで回せる形・製品の受理の
+  上限 49 は変えない）→ 3080 Ti で 2.1 / 2.2 のレーン（行を書く走行 → 素の走行・両方 0 failed が段 5 / 6 の残りの条件）→ 段 5 / 6 の完了報告 →
+  段 7（実用席の自機 A/B の門〈S の組は未決 — 832×480 の値が使えなくなった〉・利用者の視認〈参照席自身の品質の裁定を兼ねる・seed 4 本以上・
+  1280×704〉・既定席と既定の寸法 / フレーム数・50 ステップの sha 行〈参照席・実用席 — 段 6 では書いていない〉）。
   **段 5 / 段 6 の隣接の小物（起票 2026-10-05）**:
   (a) タイル参照の読み口と補助関数（`readTileFixture`・`planMeta`・`compare`・`absMax`・`poisonFrames`・`roundUpTwoDigits`）が 3 本の e2e に重複 → 共有の test helper へ
   (b) recipe の `_peak_rss_gib` などの補助が 3 か所に重複 → `_shared` へ
@@ -388,6 +397,9 @@ later の「decode 速度の残り」。
   (d) `e2e_wan_ti2v_dit_test.ts` の `bandCandidate` の有効数字 2 桁の切り上げが、浮動小数の誤差で 1 単位上へ切り上がりうる（通しの e2e `e2e_wan_ti2v_pipeline_test.ts` の `roundUpTwoDigits` は `toPrecision(12)` を挟んで直した。タイルの e2e `e2e_wan_ti2v_vae_tiles_test.ts` と段 4 の chunk の e2e `e2e_wan_ti2v_vae_chunks_test.ts` の `roundUpTwoDigits` は挟んでいない — (a) の共有の test helper へ寄せるときに一緒に直せる）
   (e) `pipelineConfig` の reader の文言に owner の接頭辞が無い（2.1 / 2.2 のどちらの class の失敗か文言で区別できない）
   (f) 2.1 と 2.2 の通しの e2e が同じ補助関数の写しを持つ（`readFixture`・`difference`・一覧画像など）
+  (g) gpu の経路の admission（`admitWanText`）を 48 ch・7 入力の DiT と組み合わせたホストテストが無い（段 6 の結果）
+  (h) `tools/export-recipes/wan/pipeline_ref.py` の `video_size` が 16 ch と圧縮 8 を固定で持つ（2.2 では使えない — 段 6 の結果）
+  (i) `planWanRequest` が注入した `latents` の要素数だけを見て、形を見ない（段 6 の結果）
   **段 4 の隣接の小物（起票 2026-10-05・レビューで見送り）**:
   (a) `filePresent` を中立の test helper へ移す（今は VAE の helper `wan-ti2v-vae.ts` が DiT の helper `wan-ti2v-dit.ts` から import する — VAE のテストが DiT の helper の import に依る）
   (b) 共有 helper `wan-vae-chunk-loop.ts` の drop-cache の故障注入が、名指した cache がグラフに在ることを assert する（無い名前だと黙って故障なしになる — 2.1 と 2.2 の両レーンを回す）

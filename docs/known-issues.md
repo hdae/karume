@@ -378,11 +378,12 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
 394 passed・1 failed）、同じファイルを `--filter 実用席` で単独に回すと 2 回中 2 回緑。落ちるのは所要と確保を記録するだけの step で、
 sha 行と帯の照合は全て通る。
 
-- **原因（上流のソースと実測で確定）**: この開発機の Deno 2.9.6（wgpu-core 29）では、`GPUDevice.destroy()` は device に無効の印を立てるだけで、
+- **原因（上流のソースと実測で確定）**: 換装前の開発機（B570）の Deno 2.9.6（wgpu-core 29）では、`GPUDevice.destroy()` は device に無効の印を立てるだけで、
   何も解放しない。device とその資源（アロケータが抱えたままのブロック・zero buffer・ドライバのプール・query set）が返るのは、V8 の GC が
   device のラッパを回収したとき。テストは 1 本ごとに `acquireGpu` → `settleReleases` → `destroy()` を繰り返すので、破棄済みの device が
   GC まで残り、同じ process の VRAM の上限（B570 で約 9.6 GiB）を食い続ける。`settleReleases` が返すのは明示的に destroy したバッファだけで、
-  device 単位の残りには効かない。
+  device 単位の残りには効かない。ファイルの中で `gc()` の後も残るのは、ランナーが step に渡した関数を保持するため（下の「残っていること」の
+  「残る理由」）。
 - **実測**（`outputs/bench/2026-10-05_dead-device/`・B570）:
   - 素の WebGPU で device を 5 回作って捨てる probe: 何もしていない破棄済みの device 1 つにつき、DRM クライアントが 1 本残り、vram0 0.192 GiB と
     gtt 64 MiB を抱え続ける（5 回で 1.15 GiB / 384 MiB）。`gc()` を 1 回呼んでも減らず、**2 回目で全部返る**（クライアントは物理デバイスの
@@ -401,7 +402,8 @@ sha 行と帯の照合は全て通る。
   回収されたかは検査しない。
 - **残っていること**:
   - 根本の対処: 上流（Deno）への報告と、破棄済みの device の DRM クライアントが消えたことを取得の前に検査する門（残っていれば名指しして
-    落とす）は後回し。GC の時点は V8 / cppgc の実装の挙動で、仕様の保証ではない。
+    落とす）は後回し。テスト側の候補 = 中継の step（下の実験 E4 で B570 で効いた・提案は保留 — 下の裁定）。GC の時点は V8 / cppgc の実装の
+    挙動で、仕様の保証ではない。
   - フラグ無しで直に `deno test` を回した走行には `gc` が無く、緩和は何もしない。
   - Wan のレーンの外のテストと、パイプラインが内部で取る device（`gpu` を渡さない読み込み）は取得口を通らない（次に取得口を通る
     取得の前の GC では、それまでに捨てた分もまとめて回収される）。
@@ -409,10 +411,31 @@ sha 行と帯の照合は全て通る。
   - 緩和つきのレーンの再走（2026-10-05・`outputs/bench/karume-wan2.1/2026-10-05_stage3-gpu-rerun/`）は 395 passed・0 failed。ただし
     **余裕は約 0.15 GiB しか無い**: 落ちていた step の開始時点の確保は 3.48 GiB、山は 9.44 GiB（上限 約 9.6 GiB）。外からの記録では、
     緩和が回収したのは前のファイルの device と、同じファイルの中の破棄済みの device 1 つだけ。計測モードの device 以降の 3 つは `gc()` の
-    後も残り（山の時点で 1.62 + 0.64 + 1.03 = 3.29 GiB）、ファイルの終わりにまとめて消えた。残る理由（どこが参照を握っているか）は
-    調べていない。
+    後も残り（山の時点で 1.62 + 0.64 + 1.03 = 3.29 GiB）、ファイルの終わりにまとめて消えた。
+  - 残る理由（素の WebGPU の probe で確定・2026-10-05）: `deno test` のランナーは `t.step` に渡した関数をファイルが終わるまで
+    保持する。その関数がテストのスコープの `gpu` を掴んでいると、破棄済みの device のラッパは `gc()` を何回呼んでも回収されず、VRAM が
+    ファイルの終わりまで残る。probe = `outputs/diag/step-retention-probe_test.ts`・ログ =
+    `outputs/bench/karume-wan2.2/2026-10-05_stage6-close/step-retention-probe2.log`（A: step 無し → `gc()` 2 回で DRM クライアントが
+    消える / B: step の closure が device を掴む → 4 回でも残る / E: 中継の step〈ランナーへは中継の関数だけ渡し、本体は step の終了時に
+    手放す〉→ 回収される）。今の対症療法（取得の前の `gc()` 2 回）が、step に渡した関数が掴む device に効かないのはこのため。
+  - **緩和つきでも再発した**（2026-10-05・ADR 0121 段 5 / 6 の最終状態 `128b511e`・`outputs/bench/karume-wan2.2/2026-10-05_stage6-close/`）:
+    `test:models:wan` は 403 passed・1 failed で、落ちたのは同じ step・同じ例外。同じ凍結コピーで `--filter 実用席` の単独の再走は 2 passed・0 failed
+    （S = 32,760 の通常モードは確保 5.46 GiB）。余裕の薄さが再確認された。同じ凍結コピーでのレーンの再走も 403 passed・1 failed・78 分 59 秒
+    （同じ step・同じ例外 — 2 回中 2 回）。`e2e_wan_dit_test.ts` だけを回しても 12 passed・1 failed（同じ step）で、B570 ではファイル単位の
+    分割では足りない。
+  - **実験**（B570・凍結コピー・同じ置き場の `oom-e2/` / `oom-e4/`）: E2（縮小版 3 本 + 今の対症療法）では破棄済みの device 2 つ（0.64 /
+    1.54 GiB）がファイルの終わりまで残った。E4（`e2e_wan_dit_test.ts` の 8 か所の `t.step` を中継の step に替えた実験用の版）では
+    ファイル全体が 13 passed・0 failed・36 分 17 秒。落ちていた step の開始時点の VRAM は 0.192 GiB（手当て前 2.38〜4.15 GiB）、山は
+    5.883 GiB（上限 9.375 GiB）で、破棄済みの device は次の取得の前に毎回消えた。
+- **利用者の裁定（2026-10-05・B570 のレーン）**: B570 の環境でレーンを通す手当てはやらない。中継の step の提案（helper + Wan の e2e 10 ファイル・72 か所の
+  置き換え + 直書きを落とす検査）は承認されていない（保留 — 却下ではない）。レーンは開発機の換装の後の RTX 3080 Ti で通し、その時点の HEAD
+  で新しい GPU の sha 行を `KARUME_REFERENCE=write` で作る（B570 の行は残す）。換装は 2026-10-06 に完了した（RTX 3080 Ti 12,288 MiB・
+  環境キー `deno-nvidia-geforce-rtx-3080-ti`）。この機ではレーンをまだ回していない。12 GiB の機なら手当て無しでレーンが通る見込みだが、
+  これは**推測**（B570 で通った走行の山は 9.44 GiB・落ちた走行は開始時点の確保が最大 4.15 GiB で山は未測。NVIDIA のドライバでの破棄済みの device の残り方も未測）。
 - **運用の回避**: 緩和の後もこの step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独に再走する。直に
-  `deno test` で回すときは `--v8-flags=--expose-gc` を付ける（付けないと緩和が効かない）。
+  `deno test` で回すときは `--v8-flags=--expose-gc` を付ける（付けないと緩和が効かない）。換装の後の機では、まず手当て無しでレーンを
+  回して結果を見る。NVIDIA のドライバは DRM fdinfo の `drm-total-*` を出さないので、テストの VRAM の観測（`helpers/drm-usage.ts`）は
+  `n/a` になる（門ではなく観測 — 赤にはならない）。VRAM は `nvidia-smi` で外から見る。
 - **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
   「tiny golden の取得と破棄を重ねた末尾の OOM」。
 - 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。

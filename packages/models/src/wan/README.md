@@ -81,7 +81,8 @@ or 704×1280 with 4n+1 frames from 5 to 49 (default 1280×704, 33 frames). Both 
 whose σ column is strictly decreasing, and either a `seed` (default 0) or the initial noise as
 `latents`. The sizes, the frame range and the defaults come from the generation descriptor
 (`descriptor.ts`). For Wan2.1, only 832×480 with 33 and 81 frames have been checked end to end on
-the GPU; Wan2.2 has not been checked end to end on the GPU yet (ADR 0121 stage 6). The transformer
+the GPU; for Wan2.2, 1280×704 and 704×1280 with 17 frames (two steps) and 1280×704 with 33 frames
+(50 steps, both quants) have been checked end to end on the GPU (ADR 0121 stage 6). The transformer
 stage is closed before the VAE stage opens, so the two are never resident together. A non-finite
 umT5 output, a non-finite latent after any step, or a non-finite VAE output before the clamp fails
 the generation instead of being returned.

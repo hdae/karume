@@ -7,8 +7,8 @@
  * `owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は `"WanTi2vPipeline"`）。
  *
  * NOTE: 公開型（`WanGenerateEvent` / `WanRunComponent`）は `./pipeline.ts` から `import type` で取る
- * （型だけの参照は消去されるので循環 import にならない）。2.2 のイベント型を足す段 6 で、共有の型を
- * 独立のモジュールへ移すかを決める。
+ * （型だけの参照は消去されるので循環 import にならない）。2.2 の T2V（段 6）は新しいイベントを足さなかった
+ * ので、共有の型を独立のモジュールへ移すかは、`vae_encoder` の段が増える段 9（I2V）で決める。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */

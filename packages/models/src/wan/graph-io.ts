@@ -1,9 +1,9 @@
 /**
  * Wan のグラフ宣言とグラフ出力を読む小道具（値の宣言・形の照合・出力の dtype・非有限値の走査）。
  *
- * 置き場がここなのは、`./pipeline.ts`（Wan2.1 の class）と共有の段（`./text-stage.ts` /
- * `./dit-loop.ts` / `./tile-decode.ts`）が同じ小道具を読むため（ADR 0121 決定 10）。`owner` は
- * 文言の接頭辞（Wan2.1 は `"WanPipeline"`）。
+ * 置き場がここなのは、共有の段（`./text-stage.ts` / `./dit-loop.ts` / `./tile-decode.ts` — Wan2.1 /
+ * 2.2 の class が `./family.ts` を通して使う）が同じ小道具を読むため（ADR 0121 決定 10）。`owner` は
+ * 文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は `"WanTi2vPipeline"`）。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
