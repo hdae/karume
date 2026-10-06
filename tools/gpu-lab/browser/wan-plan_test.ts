@@ -3,6 +3,10 @@ import { describe, it } from "@std/testing/bdd";
 import { REQUIRED_LIMIT_KEYS } from "../../../packages/runtime/src/gpu/acquire.ts";
 import type { WanPrompt } from "../../../packages/models/wan.ts";
 import type { WanPipelineConfig } from "../../../packages/models/src/wan/config.ts";
+import { WAN22_TI2V_GENERATION } from "../../../packages/models/src/wan/descriptor.ts";
+import ti2vReferences from "../../../packages/models/tests/fixtures/references/wan-ti2v.json" with {
+  type: "json",
+};
 import {
   buildWanRequest,
   checkWanReference,
@@ -12,9 +16,12 @@ import {
   judgeWanLimits,
   summarizeWanDiagnostics,
   summarizeWanTimeline,
+  WAN21_LAB,
+  WAN22_LAB,
   wanAttentionRowBlocks,
   type WanForm,
   wanFrameChoices,
+  wanFrameLabel,
   wanLargestValue,
   type WanLimits,
   wanMaxFramesWithin,
@@ -68,21 +75,21 @@ const FORM: WanForm = {
 
 describe("wan token count", () => {
   it("matches the token lengths ADR 0118 measured for 33 and 81 frames, in both orientations", () => {
-    assertEquals(wanTokenCount(33, LANDSCAPE), 14_040);
-    assertEquals(wanTokenCount(81, LANDSCAPE), 32_760);
-    assertEquals(wanTokenCount(81, PORTRAIT), 32_760);
-    assertEquals(wanTokenCount(5, LANDSCAPE), 3_120);
+    assertEquals(wanTokenCount(WAN21_LAB, 33, LANDSCAPE), 14_040);
+    assertEquals(wanTokenCount(WAN21_LAB, 81, LANDSCAPE), 32_760);
+    assertEquals(wanTokenCount(WAN21_LAB, 81, PORTRAIT), 32_760);
+    assertEquals(wanTokenCount(WAN21_LAB, 5, LANDSCAPE), 3_120);
   });
 
   it("rejects requests outside the accepted set instead of judging them", () => {
     for (const frames of [4, 34, 85, 1]) {
-      assertThrows(() => wanTokenCount(frames, LANDSCAPE), RangeError);
+      assertThrows(() => wanTokenCount(WAN21_LAB, frames, LANDSCAPE), RangeError);
     }
-    assertThrows(() => wanTokenCount(33, { width: 640, height: 480 }), RangeError);
+    assertThrows(() => wanTokenCount(WAN21_LAB, 33, { width: 640, height: 480 }), RangeError);
   });
 
   it("offers every 4n+1 frame count from 5 to 81", () => {
-    const choices = wanFrameChoices();
+    const choices = wanFrameChoices(WAN21_LAB);
     assertEquals(choices.length, 20);
     assertEquals([choices[0], choices[7], choices.at(-1)], [5, 33, 81]);
   });
@@ -90,14 +97,17 @@ describe("wan token count", () => {
 
 describe("wan largest value", () => {
   it("is the DiT FFN intermediate for long clips (480 MiB at 33 frames, 1.09 GiB at 81)", () => {
-    assertEquals(wanLargestValue(33, LANDSCAPE).bytes, 503_193_600);
-    assertEquals(wanLargestValue(81, LANDSCAPE).bytes, 1_174_118_400);
-    assertEquals(wanLargestValue(13, LANDSCAPE).what.startsWith("DiT の FFN 中間"), true);
+    assertEquals(wanLargestValue(WAN21_LAB, 33, LANDSCAPE).bytes, 503_193_600);
+    assertEquals(wanLargestValue(WAN21_LAB, 81, LANDSCAPE).bytes, 1_174_118_400);
+    assertEquals(
+      wanLargestValue(WAN21_LAB, 13, LANDSCAPE).what.startsWith("DiT の FFN 中間"),
+      true,
+    );
   });
 
   it("is the VAE intermediate for short clips, whatever the frame count", () => {
     for (const frames of [5, 9]) {
-      const largest = wanLargestValue(frames, LANDSCAPE);
+      const largest = wanLargestValue(WAN21_LAB, frames, LANDSCAPE);
       assertEquals(largest.bytes, 201_326_592, `${frames} frames`);
       assertEquals(largest.what.startsWith("VAE"), true);
     }
@@ -106,21 +116,21 @@ describe("wan largest value", () => {
 
 describe("wan attention row blocks", () => {
   it("reproduces the row blocks of ADR 0118 decision 6 on the B570 binding limit", () => {
-    const short = wanAttentionRowBlocks(33, LANDSCAPE, B570_BINDING);
+    const short = wanAttentionRowBlocks(WAN21_LAB, 33, LANDSCAPE, B570_BINDING);
     assertEquals(short.self, { bytesPerRow: 673_920, count: 5, blockBytes: 1_892_367_360 });
-    const long = wanAttentionRowBlocks(81, LANDSCAPE, B570_BINDING);
+    const long = wanAttentionRowBlocks(WAN21_LAB, 81, LANDSCAPE, B570_BINDING);
     assertEquals(long.self, { bytesPerRow: 1_572_480, count: 24, blockBytes: 2_146_435_200 });
     assertEquals(long.cross.count, 1);
   });
 
   it("splits into more blocks under a smaller limit rather than failing", () => {
-    const blocks = wanAttentionRowBlocks(33, LANDSCAPE, 1024 ** 3);
+    const blocks = wanAttentionRowBlocks(WAN21_LAB, 33, LANDSCAPE, 1024 ** 3);
     assertEquals(blocks.self.count, 9);
     assertEquals((blocks.self.blockBytes ?? Infinity) <= 1024 ** 3, true);
   });
 
   it("reports a limit below one score row as unsplittable", () => {
-    const blocks = wanAttentionRowBlocks(81, LANDSCAPE, 1_000_000);
+    const blocks = wanAttentionRowBlocks(WAN21_LAB, 81, LANDSCAPE, 1_000_000);
     assertEquals(blocks.self, { bytesPerRow: 1_572_480 });
   });
 });
@@ -130,7 +140,7 @@ describe("wan limits judgement", () => {
     Object.fromEntries(rows.map((row) => [row.key, row.verdict]));
 
   it("passes 81 frames on the B570 limits and lists every requested limit", () => {
-    const rows = judgeWanLimits(limitsWith(B570_BINDING), 81, LANDSCAPE);
+    const rows = judgeWanLimits(WAN21_LAB, limitsWith(B570_BINDING), 81, LANDSCAPE);
     assertEquals(rows.map((row) => row.key), [...REQUIRED_LIMIT_KEYS]);
     assertEquals(verdicts(rows).maxStorageBufferBindingSize, "ok");
     assertEquals(verdicts(rows).maxBufferSize, "ok");
@@ -145,29 +155,37 @@ describe("wan limits judgement", () => {
 
   it("fails every frame count at the WebGPU default 128 MiB binding (the VAE alone needs 192 MiB)", () => {
     const limits = limitsWith(128 * 1024 ** 2, 256 * 1024 ** 2);
-    for (const frames of wanFrameChoices()) {
+    for (const frames of wanFrameChoices(WAN21_LAB)) {
       assertEquals(
-        verdicts(judgeWanLimits(limits, frames, LANDSCAPE)).maxStorageBufferBindingSize,
+        verdicts(judgeWanLimits(WAN21_LAB, limits, frames, LANDSCAPE)).maxStorageBufferBindingSize,
         "short",
       );
     }
-    assertEquals(wanMaxFramesWithin(limits, LANDSCAPE), undefined);
+    assertEquals(wanMaxFramesWithin(WAN21_LAB, limits, LANDSCAPE), undefined);
   });
 
   it("allows 33 but not 81 frames at a 1 GiB binding, and names the largest frame count that fits", () => {
     const limits = limitsWith(1024 ** 3);
-    assertEquals(verdicts(judgeWanLimits(limits, 33, LANDSCAPE)).maxStorageBufferBindingSize, "ok");
     assertEquals(
-      verdicts(judgeWanLimits(limits, 81, LANDSCAPE)).maxStorageBufferBindingSize,
+      verdicts(judgeWanLimits(WAN21_LAB, limits, 33, LANDSCAPE)).maxStorageBufferBindingSize,
+      "ok",
+    );
+    assertEquals(
+      verdicts(judgeWanLimits(WAN21_LAB, limits, 81, LANDSCAPE)).maxStorageBufferBindingSize,
       "short",
     );
     // 73 フレーム: S = 19 × 1560 = 29,640 → FFN 中間 1,062,297,600 B ≤ 1 GiB。77 は 1,118,208,000 B で超える
-    assertEquals(wanMaxFramesWithin(limits, LANDSCAPE), 73);
-    assertEquals(wanMaxFramesWithin(limitsWith(B570_BINDING), LANDSCAPE), 81);
+    assertEquals(wanMaxFramesWithin(WAN21_LAB, limits, LANDSCAPE), 73);
+    assertEquals(wanMaxFramesWithin(WAN21_LAB, limitsWith(B570_BINDING), LANDSCAPE), 81);
   });
 
   it("judges maxBufferSize on its own (a large binding limit does not hide a small buffer limit)", () => {
-    const rows = judgeWanLimits(limitsWith(B570_BINDING, 512 * 1024 ** 2), 81, LANDSCAPE);
+    const rows = judgeWanLimits(
+      WAN21_LAB,
+      limitsWith(B570_BINDING, 512 * 1024 ** 2),
+      81,
+      LANDSCAPE,
+    );
     assertEquals(verdicts(rows).maxStorageBufferBindingSize, "ok");
     assertEquals(verdicts(rows).maxBufferSize, "short");
   });
@@ -359,34 +377,41 @@ describe("wan reference cases", () => {
 
   it("names the e2e cases the sha256 rows are kept for", () => {
     assertEquals(
-      wanReferenceCaseId(BASE, CONFIG, "negative", "f16"),
+      wanReferenceCaseId(WAN21_LAB, BASE, CONFIG, "negative", "f16"),
       "2step-seed-boxing-cats-seed42",
     );
     assertEquals(
-      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative", "f16"),
+      wanReferenceCaseId(WAN21_LAB, { ...BASE, steps: 50 }, CONFIG, "negative", "f16"),
       "50step-boxing-cats-seed42",
     );
     assertEquals(
-      wanReferenceCaseId({ ...BASE, steps: 50, frames: 81 }, CONFIG, "negative", "f16"),
+      wanReferenceCaseId(WAN21_LAB, { ...BASE, steps: 50, frames: 81 }, CONFIG, "negative", "f16"),
       "50step-boxing-cats-seed42-81f",
     );
   });
 
   it("puts the quant that ran in front of the id for the int8 quants the e2e keeps rows for", () => {
     assertEquals(
-      wanReferenceCaseId(BASE, CONFIG, "negative", "f16+dit8"),
+      wanReferenceCaseId(WAN21_LAB, BASE, CONFIG, "negative", "f16+dit8"),
       "f16+dit8-2step-seed-boxing-cats-seed42",
     );
     assertEquals(
-      wanReferenceCaseId(BASE, CONFIG, "negative", "f16+dit8-a8-attn8-s16"),
+      wanReferenceCaseId(WAN21_LAB, BASE, CONFIG, "negative", "f16+dit8-a8-attn8-s16"),
       "f16+dit8-a8-attn8-s16-2step-seed-boxing-cats-seed42",
     );
     assertEquals(
-      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative", "f16+dit8-a8-attn8-s16"),
+      wanReferenceCaseId(
+        WAN21_LAB,
+        { ...BASE, steps: 50 },
+        CONFIG,
+        "negative",
+        "f16+dit8-a8-attn8-s16",
+      ),
       "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42",
     );
     assertEquals(
       wanReferenceCaseId(
+        WAN21_LAB,
         { ...BASE, steps: 50, frames: 81 },
         CONFIG,
         "negative",
@@ -398,10 +423,10 @@ describe("wan reference cases", () => {
 
   it("names no case for a quant the e2e keeps no row for", () => {
     assertEquals(
-      wanReferenceCaseId({ ...BASE, steps: 50 }, CONFIG, "negative", "f16+dit8"),
+      wanReferenceCaseId(WAN21_LAB, { ...BASE, steps: 50 }, CONFIG, "negative", "f16+dit8"),
       undefined,
     );
-    assertEquals(wanReferenceCaseId(BASE, CONFIG, "negative", "f16+other"), undefined);
+    assertEquals(wanReferenceCaseId(WAN21_LAB, BASE, CONFIG, "negative", "f16+other"), undefined);
   });
 
   it("names no case when any condition differs from the e2e case", () => {
@@ -418,7 +443,7 @@ describe("wan reference cases", () => {
       ]
     ) {
       assertEquals(
-        wanReferenceCaseId({ ...BASE, ...changed }, CONFIG, "negative", "f16"),
+        wanReferenceCaseId(WAN21_LAB, { ...BASE, ...changed }, CONFIG, "negative", "f16"),
         undefined,
         JSON.stringify(changed),
       );
@@ -477,5 +502,141 @@ describe("wan diagnostics", () => {
       formatWanDiagnostics("transformer", summary),
       "transformer: 重み 2.645 GiB・backing 3.517 GiB・幾何 default・submit 184,692 本・窓平均の最大 268.3 ms・予算超過 0 本",
     );
+  });
+});
+
+describe("wan2.2 lab generation", () => {
+  const WIDE = { width: 1280, height: 704 } as const;
+  const TALL = { width: 704, height: 1280 } as const;
+
+  it("widens only the frame limit of the product descriptor, to the official 121 frames", () => {
+    assertEquals(WAN22_LAB.descriptor.maxFrames, 121);
+    assertEquals(WAN22_LAB.productMaxFrames, WAN22_TI2V_GENERATION.maxFrames);
+    assertEquals({ ...WAN22_LAB.descriptor, maxFrames: WAN22_TI2V_GENERATION.maxFrames }, {
+      ...WAN22_TI2V_GENERATION,
+    });
+  });
+
+  it("counts 7,920 tokens at 1280x704x33 and 27,280 at 121 frames (32 pixels per token)", () => {
+    assertEquals(wanTokenCount(WAN22_LAB, 33, WIDE), 7_920);
+    assertEquals(wanTokenCount(WAN22_LAB, 49, WIDE), 11_440);
+    assertEquals(wanTokenCount(WAN22_LAB, 121, WIDE), 27_280);
+    assertEquals(wanTokenCount(WAN22_LAB, 121, TALL), 27_280);
+    assertEquals(wanTokenCount(WAN22_LAB, 5, WIDE), 1_760);
+  });
+
+  it("rejects frame counts beyond 121 and the sizes Wan2.2 does not accept", () => {
+    for (const frames of [125, 4, 34]) {
+      assertThrows(() => wanTokenCount(WAN22_LAB, frames, WIDE), RangeError);
+    }
+    assertThrows(() => wanTokenCount(WAN22_LAB, 33, { width: 832, height: 480 }), RangeError);
+  });
+
+  it("offers every 4n+1 frame count from 5 to 121 and marks those past the product limit", () => {
+    const choices = wanFrameChoices(WAN22_LAB);
+    assertEquals(choices.length, 30);
+    assertEquals([choices[0], choices[7], choices[11], choices.at(-1)], [5, 33, 49, 121]);
+    assertEquals(wanFrameLabel(WAN22_LAB, 49), "49");
+    assertEquals(
+      wanFrameLabel(WAN22_LAB, 53),
+      "53（製品の受理の外 — 開発機の sha 行を持たない）",
+    );
+    assertEquals(wanFrameChoices(WAN21_LAB).map((frames) => wanFrameLabel(WAN21_LAB, frames)), [
+      ...wanFrameChoices(WAN21_LAB).map(String),
+    ]);
+  });
+
+  it("takes the FFN intermediate [1,S,14336] for long clips and the 192 MiB VAE value for short ones", () => {
+    assertEquals(wanLargestValue(WAN22_LAB, 33, WIDE).bytes, 454_164_480);
+    assertEquals(wanLargestValue(WAN22_LAB, 121, WIDE), {
+      bytes: 1_564_344_320,
+      what: "DiT の FFN 中間 [1,27280,14336] f32",
+    });
+    assertEquals(wanLargestValue(WAN22_LAB, 13, WIDE).bytes, 201_850_880);
+    for (const frames of [5, 9]) {
+      assertEquals(wanLargestValue(WAN22_LAB, frames, WIDE), {
+        bytes: 201_326_592,
+        what: "VAE（next）の中間 [512,6,128,128] f32",
+      });
+    }
+  });
+
+  it("splits the 24-head scores into the row blocks ADR 0121 stage 2 measured on the B570", () => {
+    // S = 7,920 は行ブロック 3 枚（段 2 の結果）。121 フレームは 34 枚・1 枚 1.96 GiB（決定 8 の「最大 1.96 GiB」）
+    const short = wanAttentionRowBlocks(WAN22_LAB, 33, WIDE, B570_BINDING);
+    assertEquals(short.self, { bytesPerRow: 760_320, count: 3, blockBytes: 2_007_244_800 });
+    const long = wanAttentionRowBlocks(WAN22_LAB, 121, WIDE, B570_BINDING);
+    assertEquals(long.self, { bytesPerRow: 2_618_880, count: 34, blockBytes: 2_102_960_640 });
+    assertEquals(long.cross, { bytesPerRow: 49_152, count: 1, blockBytes: 1_340_866_560 });
+  });
+
+  it("passes 121 frames on the B570 limits and stops at 81 frames under a 1 GiB binding", () => {
+    const binding = (limits: WanLimits, frames: number) =>
+      judgeWanLimits(WAN22_LAB, limits, frames, WIDE).find((row) =>
+        row.key === "maxStorageBufferBindingSize"
+      )?.verdict;
+    assertEquals(binding(limitsWith(B570_BINDING), 121), "ok");
+    assertEquals(wanMaxFramesWithin(WAN22_LAB, limitsWith(B570_BINDING), WIDE), 121);
+    // 81 フレーム: S = 18,480 → 1,059,717,120 B ≤ 1 GiB。85 は 1,110,179,840 B で超える
+    assertEquals(binding(limitsWith(1024 ** 3), 85), "short");
+    assertEquals(wanMaxFramesWithin(WAN22_LAB, limitsWith(1024 ** 3), WIDE), 81);
+  });
+});
+
+describe("wan2.2 reference cases", () => {
+  const CONFIG_22: WanPipelineConfig = {
+    scheduler: { shift: 5 },
+    defaults: { steps: 50, guidance: 5 },
+  };
+  const BASE_22: WanResolvedRequest = {
+    prompt: "boxing-cats",
+    negative: "negative",
+    seed: 42,
+    steps: 2,
+    guidance: 5,
+    shift: 5,
+    frames: 17,
+    width: 1280,
+    height: 704,
+  };
+  const caseId = (changed: Partial<WanResolvedRequest>, quant: string) =>
+    wanReferenceCaseId(WAN22_LAB, { ...BASE_22, ...changed }, CONFIG_22, "negative", quant);
+
+  it("names the 2-step seed cases of the reference quant in both sizes, as the fixture spells them", () => {
+    const ids = [caseId({}, "f16+dit8"), caseId({ width: 704, height: 1280 }, "f16+dit8")];
+    assertEquals(ids, [
+      "f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5",
+      "f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5",
+    ]);
+    for (const id of ids) assertEquals(Object.hasOwn(ti2vReferences.cases, id ?? ""), true, id);
+  });
+
+  it("names the 50-step cases of both quants at 1280x704 and 33 frames", () => {
+    assertEquals(
+      caseId({ steps: 50, frames: 33 }, "f16+dit8"),
+      "f16+dit8-50step-boxing-cats-seed42-1280x704-33f-shift5",
+    );
+    assertEquals(
+      caseId({ steps: 50, frames: 33 }, "f16+dit8-a8-attn8-s16"),
+      "f16+dit8-a8-attn8-s16-50step-boxing-cats-seed42-1280x704-33f-shift5",
+    );
+  });
+
+  it("names no case for a quant, size, or condition the e2e keeps no row for", () => {
+    for (
+      const [changed, quant] of [
+        [{}, "f16+dit8-a8-attn8-s16"],
+        [{}, "f16"],
+        [{ steps: 50, frames: 33, width: 704, height: 1280 }, "f16+dit8"],
+        [{ frames: 33 }, "f16+dit8"],
+        [{ steps: 50 }, "f16+dit8"],
+        [{ seed: 43 }, "f16+dit8"],
+        [{ guidance: 4 }, "f16+dit8"],
+        [{ shift: 3 }, "f16+dit8"],
+        [{ negative: "ferret" }, "f16+dit8"],
+      ] satisfies [Partial<WanResolvedRequest>, string][]
+    ) {
+      assertEquals(caseId(changed, quant), undefined, `${JSON.stringify(changed)} ${quant}`);
+    }
   });
 });

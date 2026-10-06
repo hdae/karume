@@ -1,8 +1,12 @@
 /**
- * GPU lab の Wan のタブ（ADR 0118 段 9 — Chrome で Wan2.1 を回す）の GPU に依らない部分。
+ * GPU lab の Wan のタブ（ADR 0118 段 9 — Chrome で Wan2.1 を回す・ADR 0121 段 8 — 世代の選択で Wan2.2 TI2V 5B
+ * も回す）の GPU に依らない部分。
  *
- * ここに置くのは純関数と型だけ（DOM も GPU も触らない — `wan-plan_test.ts` が deno test で縛る）:
+ * ここに置くのは純関数と型と世代の仕様だけ（DOM も GPU も触らない — `wan-plan_test.ts` が deno test で縛る）:
  *
+ * - **世代の仕様**（{@link WanLabGeneration} — {@link WAN21_LAB} / {@link WAN22_LAB}）: 世代で違う値（記述子・DiT の
+ *   寸法・1 token の画素数・VAE の最大の値・参照ケースの表・配布形の経路名）を 1 つに畳む。以下の関数は全て
+ *   これを第 1 引数に取る。
  * - **limits の判定表**（{@link judgeWanLimits}）: アダプタの limits と、要求（フレーム数・寸法）が要る
  *   値を並べる。束縛上限の下限は「行ブロックで割れない最大の値」で決まる — 自己 attention のスコア S は
  *   runtime が束縛上限に収まる枚数へ等分する（`planRowBlocks` — ADR 0060）ので、上限が小さければ枚数が
@@ -19,34 +23,19 @@ import { MAX_SINGLE_CONTAINER_BYTES } from "../../../packages/runtime/src/format
 import { planRowBlocks } from "../../../packages/runtime/src/runtime/fusion.ts";
 import type { WanGenerateRequest, WanPrompt } from "../../../packages/models/wan.ts";
 import type { WanPipelineConfig } from "../../../packages/models/src/wan/config.ts";
-import { WAN21_GENERATION } from "../../../packages/models/src/wan/descriptor.ts";
+import {
+  WAN21_GENERATION,
+  WAN22_TI2V_GENERATION,
+  type WanGenerationDescriptor,
+} from "../../../packages/models/src/wan/descriptor.ts";
 import { TEMPORAL_COMPRESSION } from "../../../packages/models/src/wan/plan.ts";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
 const F32_BYTES = 4;
 
-/** 画素 → DiT のトークンの縮尺（VAE の空間 8 × patch 2）。 */
-const PIXELS_PER_TOKEN = 16;
-
-/**
- * DiT の寸法（ADR 0118 Context「調査の結論」— 30 層・dim 1536・12 heads × 128・FFN 8960）。上流の
- * 1.3B の config の値で、配布形のグラフ宣言（`gelu_* [1,S,8960]`）とも一致する（2026-10-03 に読んだ）。
- */
-export const WAN_DIT_HEADS = 12;
-export const WAN_DIT_FFN_WIDTH = 8960;
-
-/** cross-attn のキーの行数（テキスト埋め込みを詰める文脈 `encoder_hidden_states [1,512,4096]`）。 */
+/** cross-attn のキーの行数（テキスト埋め込みを詰める文脈 `encoder_hidden_states [1,512,4096]` — 2 世代とも同じ）。 */
 export const WAN_TEXT_CONTEXT_ROWS = 512;
-
-/**
- * VAE の段で最大の値のバイト数（`vae_decoder_next` の `expand_5 [768,128,2,256]` / `view_17
- * [4,192,256,256]` の f32 — 2026-10-03 に配布形のグラフ宣言から読んだ値）。タイル（潜在 32）で固定なので
- * フレーム数と寸法に依らない。first のグラフの最大（75,497,472 B）はこれより小さい。
- *
- * NOTE: タイル辺は配布物だけで差し替えられる（ADR 0118 決定 2）。差し替えたら読み直す値。
- */
-export const WAN_VAE_LARGEST_VALUE_BYTES = 201_326_592;
 
 /** WebGPU の既定（requiredLimits で要求しなければ device はこの値になる）。 */
 export const WEBGPU_DEFAULT_STORAGE_BINDING = 128 * MIB;
@@ -60,15 +49,199 @@ export const CHROMIUM_ARRAY_BUFFER_MAX = MAX_SINGLE_CONTAINER_BYTES;
 
 export type WanSize = { readonly width: number; readonly height: number };
 
-/** 受理集合のフレーム数（4n+1 の 5〜81 — 世代の記述子 `descriptor.ts` の受理集合を正本にする）。 */
-export const wanFrameChoices = (): number[] => {
-  const { minFrames, maxFrames } = WAN21_GENERATION;
+/** 世代の識別子（記録の JSON の `generation` に載る綴り）。 */
+export type WanLabGenerationId = "wan2.1" | "wan2.2";
+
+/**
+ * 参照ケースの 1 組（e2e の sha 行のケース — 条件が揃った要求だけがその id を名乗る）。プロンプト・seed・
+ * negative・guidance・shift の共通条件は {@link wanReferenceCaseId} が見る。
+ */
+export type WanReferenceCase = {
+  readonly steps: number;
+  readonly frames: number;
+  readonly sizes: readonly WanSize[];
+  /** e2e が行を持つ席（ここに無い席の組は参照ケースではない）。 */
+  readonly quants: readonly string[];
+  /** sha 行のケース id（e2e の綴りの写し）。 */
+  readonly id: (quant: string, size: WanSize, shift: number) => string;
+};
+
+/** 世代の仕様（タブの世代の選択 1 つぶん — 世代で違う値はここにしか書かない）。 */
+export type WanLabGeneration = {
+  readonly id: WanLabGenerationId;
+  /** 世代の選択の表示（`Wan2.1 T2V 1.3B（karume-wan2.1）`）。 */
+  readonly label: string;
+  /** このサーバの配布形の経路名（`server.ts` の `/models/<名前>/`）と、置き場を指定するオプション。 */
+  readonly route: "wan" | "wan22";
+  readonly serverOption: "--wan-source" | "--wan22-source";
+  /**
+   * gpu-lab が受理する記述子（フレーム数の選択肢・判定表の受理の門・既定の寸法とフレーム数・fps）。2.1 は製品と
+   * 同じ・2.2 は上限だけ広げた写し（{@link WAN22_LAB_MAX_FRAMES}）。
+   */
+  readonly descriptor: WanGenerationDescriptor;
+  /** 製品の受理の上限（これを超えるフレーム数は表示で区別する — 開発機の sha 行を持たない）。 */
+  readonly productMaxFrames: number;
+  /** DiT の head 数と FFN の中間の幅（スコアの行ブロックと FFN 中間の大きさ）。 */
+  readonly ditHeads: number;
+  readonly ditFfnWidth: number;
+  /** 1 token の画素の辺（VAE の空間比 × unpatchify × DiT のパッチ）。 */
+  readonly pixelsPerToken: number;
+  /**
+   * VAE の段で最大の値（f32 のバイト数と、どの値か）。タイルで固定なのでフレーム数と寸法に依らない。
+   *
+   * NOTE: タイル辺は配布物だけで差し替えられる（ADR 0118 決定 2）。差し替えたら読み直す値。
+   */
+  readonly vaeLargestValue: { readonly bytes: number; readonly what: string };
+  /** 参照ケースの表（`fixtures/references/` の sha 行のケース）。 */
+  readonly referenceCases: readonly WanReferenceCase[];
+};
+
+/**
+ * 席名を持たない参照ケースの id の席（Wan2.1 の `e2e_wan_pipeline_test.ts` の `F16_QUANT` — 既定席が実用席へ
+ * 移っても既存の行はこの席の値・ADR 0120 裁定 2026-10-04 の 4）。
+ */
+const WAN21_UNSEATED_QUANT = "f16";
+
+/** Wan2.1 の参照ケースの id（`f16` 席は席名を持たない id・i8 の席は席名を先頭に置いた id — e2e の `seatCaseId`）。 */
+const wan21CaseId = (base: string) => (quant: string): string =>
+  quant === WAN21_UNSEATED_QUANT ? base : `${quant}-${base}`;
+
+/**
+ * Wan2.1 T2V 1.3B の仕様。
+ *
+ * DiT の寸法は ADR 0118 Context「調査の結論」（30 層・dim 1536・12 heads × 128・FFN 8960）。上流の 1.3B の config の
+ * 値で、配布形のグラフ宣言（`gelu_* [1,S,8960]`）とも一致する（2026-10-03 に読んだ）。1 token の画素の辺は 16
+ * （VAE の空間 8 × patch 2）。
+ *
+ * VAE の最大の値は `vae_decoder_next` の `expand_5 [768,128,2,256]` / `view_17 [4,192,256,256]` の f32（2026-10-03 に
+ * 配布形のグラフ宣言から読んだ値）。first のグラフの最大（75,497,472 B）はこれより小さい。
+ *
+ * 参照ケースは `e2e_wan_pipeline_test.ts` の `SEED_CASE`〈2 ステップ〉と `FULL_CASES`〈50 ステップ・33 / 81
+ * フレーム〉（832×480）。席は `f16` と、e2e の `SEAT_QUANTS`〈2 ステップ〉と `FULL_CASES` の実用席〈50 ステップ〉の写し。
+ *
+ * MUST: e2e のケースの定義を変えたらここも変える（行の値が別の条件の sha と突き合わさる）。
+ */
+export const WAN21_LAB: WanLabGeneration = {
+  id: "wan2.1",
+  label: "Wan2.1 T2V 1.3B（karume-wan2.1）",
+  route: "wan",
+  serverOption: "--wan-source",
+  descriptor: WAN21_GENERATION,
+  productMaxFrames: WAN21_GENERATION.maxFrames,
+  ditHeads: 12,
+  ditFfnWidth: 8960,
+  pixelsPerToken: 16,
+  vaeLargestValue: { bytes: 201_326_592, what: "VAE（next）の中間 [768,128,2,256] f32" },
+  referenceCases: [
+    {
+      steps: 2,
+      frames: 33,
+      sizes: [{ width: 832, height: 480 }],
+      quants: [WAN21_UNSEATED_QUANT, "f16+dit8", "f16+dit8-a8-attn8-s16"],
+      id: wan21CaseId("2step-seed-boxing-cats-seed42"),
+    },
+    {
+      steps: 50,
+      frames: 33,
+      sizes: [{ width: 832, height: 480 }],
+      quants: [WAN21_UNSEATED_QUANT, "f16+dit8-a8-attn8-s16"],
+      id: wan21CaseId("50step-boxing-cats-seed42"),
+    },
+    {
+      steps: 50,
+      frames: 81,
+      sizes: [{ width: 832, height: 480 }],
+      quants: [WAN21_UNSEATED_QUANT, "f16+dit8-a8-attn8-s16"],
+      id: wan21CaseId("50step-boxing-cats-seed42-81f"),
+    },
+  ],
+};
+
+/**
+ * gpu-lab が Wan2.2 で受理するフレーム数の上限（公式実装の既定 121 フレーム）。
+ *
+ * 製品の受理（`WAN22_TI2V_GENERATION.maxFrames` 49）は開発機で 50 ステップを完走した上限で、それを超えるフレーム数は
+ * 開発機で回らない（ADR 0121 追記「受理寸法を公式の 2 寸法へ」）。gpu-lab はその外を大きい GPU（RTX 5070 Ti）で
+ * 確かめる口で、製品の受理と公開 API は変えない（ADR 0121 決定 8 の例外「開発機の sha 行を持たない受理」・段 8）。
+ * DiT のグラフの S の記号の上限は最初から 27,280（1280×704×121 — 決定 3）なので、この上限まではグラフの宣言の内。
+ */
+export const WAN22_LAB_MAX_FRAMES = 121;
+
+/** Wan2.2 の参照ケースの id（`e2e_wan_ti2v_pipeline_test.ts` の `caseIdOf` の綴り）。 */
+const wan22CaseId =
+  (head: string, frames: number) => (quant: string, size: WanSize, shift: number): string =>
+    `${quant}-${head}-${size.width}x${size.height}-${frames}f-shift${shift}`;
+
+/**
+ * Wan2.2 TI2V 5B の仕様。
+ *
+ * DiT の寸法は ADR 0121 Context「調査の結論」（dim 3072・24 heads × 128・FFN 14336）。FFN の幅は i8 の系列
+ * （`outputs/series/wan2.2-ti2v-5b-i8-dyn/transformer/`）の graph 文書の FFN 中間 `[1,S,14336]`（60 本）とも一致する
+ * （2026-10-06 に読んだ — 他の活性は `[1,S,3072]` / `[1,S,24,128]` 以下）。1 token の画素の辺は 32（VAE のグラフの
+ * 空間比 8 × unpatchify 2 × DiT のパッチ 2 — S = 1280×704×33 で 7,920・121 フレームで 27,280）。
+ *
+ * VAE の最大の値は `vae_decoder_next` の `cat_25 [512,6,128,128]` の f32 = 201,326,592 B（2026-10-06 に f16 の系列
+ * `outputs/series/wan2.2-ti2v-5b-f16-dyn/` の graph 文書から読んだ値）。どちらのグラフでも活性に限った最大で、重みの
+ * 値はこれより小さい（宣言の最大は f32 の `decoder.mid_block.resnets.0.conv1.weight [1024,1024,3,3,3]` の 113,246,208 B・
+ * 格納は f16）。first のグラフの活性の最大は `cat_23 [512,3,128,128]` の 100,663,296 B。ADR 0121 追記「段 4 の結果」の前の調査の約 207.7 MB（`[1,512,6,130,130]` —
+ * 上流の詰め物つきの形）ではなく、配布する宣言の値を使う。
+ *
+ * 記述子は製品の記述子の上限だけを {@link WAN22_LAB_MAX_FRAMES} へ広げた写し（受理寸法・既定・fps 24 は製品のまま）。
+ *
+ * 参照ケースは `e2e_wan_ti2v_pipeline_test.ts` の `SEED_CASES`（参照席・2 ステップ・17 フレーム・2 寸法）と
+ * `FULL_CASES`（参照席と実用席・50 ステップ・33 フレーム・1280×704）。席名は e2e の helper
+ * （`tests/helpers/wan-ti2v-pipeline.ts` の `WAN_TI2V_REFERENCE_QUANT` / `WAN_TI2V_PRACTICAL_QUANT`）の写し —
+ * 2.1 の表と同じく文字列で持つ（helper は Deno の API を読むモジュールを引くので、ブラウザの bundle に入れない）。
+ *
+ * MUST: e2e のケースの定義を変えたらここも変える（行の値が別の条件の sha と突き合わさる）。
+ */
+export const WAN22_LAB: WanLabGeneration = {
+  id: "wan2.2",
+  label: "Wan2.2 TI2V 5B（karume-wan2.2）",
+  route: "wan22",
+  serverOption: "--wan22-source",
+  descriptor: { ...WAN22_TI2V_GENERATION, maxFrames: WAN22_LAB_MAX_FRAMES },
+  productMaxFrames: WAN22_TI2V_GENERATION.maxFrames,
+  ditHeads: 24,
+  ditFfnWidth: 14336,
+  pixelsPerToken: 32,
+  vaeLargestValue: { bytes: 201_326_592, what: "VAE（next）の中間 [512,6,128,128] f32" },
+  referenceCases: [
+    {
+      steps: 2,
+      frames: 17,
+      sizes: [{ width: 1280, height: 704 }, { width: 704, height: 1280 }],
+      quants: ["f16+dit8"],
+      id: wan22CaseId("2step-boxing-cats-seed42", 17),
+    },
+    {
+      steps: 50,
+      frames: 33,
+      sizes: [{ width: 1280, height: 704 }],
+      quants: ["f16+dit8", "f16+dit8-a8-attn8-s16"],
+      id: wan22CaseId("50step-boxing-cats-seed42", 33),
+    },
+  ],
+};
+
+/** 世代の選択肢（先頭がタブの既定 — Wan2.1 のタブの既定の挙動を変えない）。 */
+export const WAN_LAB_GENERATIONS: readonly WanLabGeneration[] = [WAN21_LAB, WAN22_LAB];
+
+/** 受理集合のフレーム数（4n+1 の下限〜上限 — 世代の仕様の記述子を正本にする）。 */
+export const wanFrameChoices = (generation: WanLabGeneration): number[] => {
+  const { minFrames, maxFrames } = generation.descriptor;
   const choices: number[] = [];
   for (let frames = minFrames; frames <= maxFrames; frames += TEMPORAL_COMPRESSION) {
     choices.push(frames);
   }
   return choices;
 };
+
+/** フレーム数の選択肢の表示（製品の受理の外は区別する — 開発機の sha 行を持たない）。 */
+export const wanFrameLabel = (generation: WanLabGeneration, frames: number): string =>
+  frames > generation.productMaxFrames
+    ? `${frames}（製品の受理の外 — 開発機の sha 行を持たない）`
+    : String(frames);
 
 /** `832x480` → 寸法（綴りが違えば落とす — 黙って既定の寸法で回さない）。 */
 export const parseWanSize = (text: string): WanSize => {
@@ -80,11 +253,16 @@ export const parseWanSize = (text: string): WanSize => {
 export const wanSizeLabel = (size: WanSize): string => `${size.width}x${size.height}`;
 
 /**
- * DiT のトークン数 S（潜在フレーム数 × H/16 × W/16）。受理集合の外は落とす — 判定表は受理集合の中の
- * 要求についてだけ意味を持つ（外の要求は `generate` が `ModelInputError` で拒む）。
+ * DiT のトークン数 S（潜在フレーム数 × H/p × W/p — p は世代の 1 token の画素の辺）。世代の仕様の受理集合
+ * （2.2 は gpu-lab の上限 121 フレーム）の外は落とす — 判定表は受理集合の中の要求についてだけ意味を持つ
+ * （外の要求は `generate` が `ModelInputError` で拒む）。
  */
-export const wanTokenCount = (frames: number, size: WanSize): number => {
-  const { minFrames, maxFrames, acceptedSizes } = WAN21_GENERATION;
+export const wanTokenCount = (
+  generation: WanLabGeneration,
+  frames: number,
+  size: WanSize,
+): number => {
+  const { minFrames, maxFrames, acceptedSizes } = generation.descriptor;
   if (
     !Number.isInteger(frames) || frames < minFrames || frames > maxFrames ||
     (frames - 1) % TEMPORAL_COMPRESSION !== 0
@@ -97,7 +275,8 @@ export const wanTokenCount = (frames: number, size: WanSize): number => {
     throw new RangeError(`寸法 ${wanSizeLabel(size)} が受理集合に無い`);
   }
   const latentFrames = (frames - 1) / TEMPORAL_COMPRESSION + 1;
-  return latentFrames * (size.height / PIXELS_PER_TOKEN) * (size.width / PIXELS_PER_TOKEN);
+  const { pixelsPerToken } = generation;
+  return latentFrames * (size.height / pixelsPerToken) * (size.width / pixelsPerToken);
 };
 
 /** 行ブロックで割れない最大の値（束縛上限と maxBufferSize の下限 — {@link judgeWanLimits}）。 */
@@ -107,19 +286,25 @@ export type WanLargestValue = {
 };
 
 /**
- * 要求 1 本で最大の値。DiT の FFN 中間 `[1,S,8960]` の f32（S = 14,040 で 503,193,600 B・32,760 で
- * 1,174,118,400 B — ADR 0118 段 8 の「FFN 中間 480 MiB / 1.09 GiB」）と VAE の最大の値の大きい方。
- * DiT の他の値は `[1,S,1536]` 以下なので FFN 中間より小さい。
+ * 要求 1 本で最大の値。DiT の FFN 中間 `[1,S,FFN]` の f32 と VAE の最大の値の大きい方。Wan2.1 は
+ * `[1,S,8960]`（S = 14,040 で 503,193,600 B・32,760 で 1,174,118,400 B — ADR 0118 段 8 の「FFN 中間 480 MiB /
+ * 1.09 GiB」）で DiT の他の値は `[1,S,1536]` 以下、Wan2.2 は `[1,S,14336]`（S = 27,280 で 1,564,344,320 B — ADR 0121
+ * 決定 8 の「FFN 中間 最大 1.46 GiB」）で他の値は `[1,S,3072]` 以下。どちらも FFN 中間が DiT の最大。
  *
  * NOTE: 自己 attention のスコア S は値として持たない（attention の 1 op の内側で行ブロックに割る）ので
  * ここには入らない — 下限への効き方は {@link judgeWanLimits} の行ブロックの欄。
  */
-export const wanLargestValue = (frames: number, size: WanSize): WanLargestValue => {
-  const tokens = wanTokenCount(frames, size);
-  const ffn = tokens * WAN_DIT_FFN_WIDTH * F32_BYTES;
-  return ffn >= WAN_VAE_LARGEST_VALUE_BYTES
-    ? { bytes: ffn, what: `DiT の FFN 中間 [1,${tokens},${WAN_DIT_FFN_WIDTH}] f32` }
-    : { bytes: WAN_VAE_LARGEST_VALUE_BYTES, what: "VAE（next）の中間 [768,128,2,256] f32" };
+export const wanLargestValue = (
+  generation: WanLabGeneration,
+  frames: number,
+  size: WanSize,
+): WanLargestValue => {
+  const tokens = wanTokenCount(generation, frames, size);
+  const { ditFfnWidth, vaeLargestValue } = generation;
+  const ffn = tokens * ditFfnWidth * F32_BYTES;
+  return ffn >= vaeLargestValue.bytes
+    ? { bytes: ffn, what: `DiT の FFN 中間 [1,${tokens},${ditFfnWidth}] f32` }
+    : vaeLargestValue;
 };
 
 /** 自己 attention / cross-attn のスコアの行ブロック（runtime と同じ `planRowBlocks` で数える）。 */
@@ -140,20 +325,23 @@ const rowBlocks = (rows: number, bytesPerRow: number, limit: number): WanRowBloc
 };
 
 /**
- * スコアの行ブロック（自己 attention は S × S・cross-attn は S × 512 — どちらも f32 格納・H = 12。
- * 既定で `attentionScoreStorage: "f16"` は使わない — ADR 0118 決定 6）。
+ * スコアの行ブロック（自己 attention は S × S・cross-attn は S × 512 — どちらも f32 格納・H は世代の head 数
+ * 〈2.1 は 12・2.2 は 24〉。実用席の `attentionScoreStorage: "f16"` で半分になる側は見ない — 保守側の f32 で数える・
+ * ADR 0118 決定 6）。
  */
 export const wanAttentionRowBlocks = (
+  generation: WanLabGeneration,
   frames: number,
   size: WanSize,
   maxStorageBufferBindingSize: number,
 ): { readonly self: WanRowBlocks; readonly cross: WanRowBlocks } => {
-  const tokens = wanTokenCount(frames, size);
+  const tokens = wanTokenCount(generation, frames, size);
+  const { ditHeads } = generation;
   return {
-    self: rowBlocks(tokens, WAN_DIT_HEADS * tokens * F32_BYTES, maxStorageBufferBindingSize),
+    self: rowBlocks(tokens, ditHeads * tokens * F32_BYTES, maxStorageBufferBindingSize),
     cross: rowBlocks(
       tokens,
-      WAN_DIT_HEADS * WAN_TEXT_CONTEXT_ROWS * F32_BYTES,
+      ditHeads * WAN_TEXT_CONTEXT_ROWS * F32_BYTES,
       maxStorageBufferBindingSize,
     ),
   };
@@ -193,10 +381,15 @@ const rowBlocksNote = (name: string, blocks: WanRowBlocks): string =>
  * `REQUIRED_LIMIT_KEYS` は `acquireGpu` がアダプタ値をそのまま要求する項目で、Wan 固有の下限は導いて
  * いないので `info`。
  */
-export const judgeWanLimits = (limits: WanLimits, frames: number, size: WanSize): WanLimitRow[] => {
-  const largest = wanLargestValue(frames, size);
+export const judgeWanLimits = (
+  generation: WanLabGeneration,
+  limits: WanLimits,
+  frames: number,
+  size: WanSize,
+): WanLimitRow[] => {
+  const largest = wanLargestValue(generation, frames, size);
   const binding = limits.maxStorageBufferBindingSize;
-  const attention = wanAttentionRowBlocks(frames, size, binding);
+  const attention = wanAttentionRowBlocks(generation, frames, size, binding);
   const bindingOk = binding >= largest.bytes && attention.self.count !== undefined &&
     attention.cross.count !== undefined;
   return REQUIRED_LIMIT_KEYS.map((key): WanLimitRow => {
@@ -226,9 +419,13 @@ export const judgeWanLimits = (limits: WanLimits, frames: number, size: WanSize)
 };
 
 /** この limits で判定表が全て通る最大のフレーム数（1 本も通らなければ undefined）。 */
-export const wanMaxFramesWithin = (limits: WanLimits, size: WanSize): number | undefined =>
-  wanFrameChoices().filter((frames) =>
-    judgeWanLimits(limits, frames, size).every((row) => row.verdict !== "short")
+export const wanMaxFramesWithin = (
+  generation: WanLabGeneration,
+  limits: WanLimits,
+  size: WanSize,
+): number | undefined =>
+  wanFrameChoices(generation).filter((frames) =>
+    judgeWanLimits(generation, limits, frames, size).every((row) => row.verdict !== "short")
   ).at(-1);
 
 /**
@@ -468,31 +665,16 @@ export const wanRgbBytes = (
 };
 
 /**
- * 席名を持たない参照ケースの id の席（`e2e_wan_pipeline_test.ts` の `F16_QUANT` — 既定席が実用席へ移っても
- * 既存の行はこの席の値・ADR 0120 裁定 2026-10-04 の 4）。
- */
-const UNSEATED_QUANT = "f16";
-
-/**
- * 席を名乗る行を持つ席（id は `<席>-<席名を持たない id>` — e2e の `seatCaseId`）。e2e の `SEAT_QUANTS`
- * 〈2 ステップ〉と `FULL_CASES` の実用席〈50 ステップ〉の写し。ここに無い席の組は参照ケースではない。
- */
-const SEATED_CASES: Readonly<Record<string, readonly string[]>> = {
-  "2step-seed-boxing-cats-seed42": ["f16+dit8", "f16+dit8-a8-attn8-s16"],
-  "50step-boxing-cats-seed42": ["f16+dit8-a8-attn8-s16"],
-  "50step-boxing-cats-seed42-81f": ["f16+dit8-a8-attn8-s16"],
-};
-
-/**
- * 参照ケースの id（sha256 の環境行のキー — `fixtures/references/wan.json`）。要求と席が e2e の参照ケースと
- * 同じ条件のときだけ返す（`e2e_wan_pipeline_test.ts` の `SEED_CASE`〈2 ステップ〉と `FULL_CASES`〈50
- * ステップ・33 / 81 フレーム〉: `boxing-cats`・seed 42・既定の negative・guidance と shift は manifest の
- * 既定・832×480）。`quant` は実際に回した席（manifest の既定へ解決した後の名前）— `f16` 席は席名を持たない
- * id、i8 の席は席名を先頭に置いた id。
+ * 参照ケースの id（sha256 の環境行のキー — Wan2.1 は `fixtures/references/wan.json`・Wan2.2 は
+ * `fixtures/references/wan-ti2v.json`）。要求と席が e2e の参照ケースと同じ条件のときだけ返す: 共通条件は
+ * `boxing-cats`・seed 42・既定の negative・guidance と shift は manifest の既定、step 数・フレーム数・寸法・席は
+ * 世代の参照ケースの表（{@link WanLabGeneration.referenceCases}）。`quant` は実際に回した席（manifest の既定へ
+ * 解決した後の名前）。
  *
- * MUST: e2e のケースの定義を変えたらここも変える（行の値が別の条件の sha と突き合わさる）。
+ * MUST: e2e のケースの定義を変えたら世代の参照ケースの表も変える（行の値が別の条件の sha と突き合わさる）。
  */
 export const wanReferenceCaseId = (
+  generation: WanLabGeneration,
   resolved: WanResolvedRequest,
   config: WanPipelineConfig,
   defaultNegative: string | undefined,
@@ -500,19 +682,15 @@ export const wanReferenceCaseId = (
 ): string | undefined => {
   const common = resolved.prompt === "boxing-cats" && resolved.seed === 42 &&
     resolved.negative === defaultNegative && defaultNegative !== undefined &&
-    resolved.guidance === config.defaults.guidance && resolved.shift === config.scheduler.shift &&
-    resolved.width === 832 && resolved.height === 480;
+    resolved.guidance === config.defaults.guidance && resolved.shift === config.scheduler.shift;
   if (!common) return undefined;
-  const base = resolved.steps === 2 && resolved.frames === 33
-    ? "2step-seed-boxing-cats-seed42"
-    : resolved.steps === 50 && resolved.frames === 33
-    ? "50step-boxing-cats-seed42"
-    : resolved.steps === 50 && resolved.frames === 81
-    ? "50step-boxing-cats-seed42-81f"
-    : undefined;
-  if (base === undefined) return undefined;
-  if (quant === UNSEATED_QUANT) return base;
-  return SEATED_CASES[base].includes(quant) ? `${quant}-${base}` : undefined;
+  const size = { width: resolved.width, height: resolved.height };
+  const found = generation.referenceCases.find((candidate) =>
+    candidate.steps === resolved.steps && candidate.frames === resolved.frames &&
+    candidate.sizes.some(({ width, height }) => width === size.width && height === size.height) &&
+    candidate.quants.includes(quant)
+  );
+  return found?.id(quant, size, resolved.shift);
 };
 
 /** sha256 の環境行の表（`fixtures/references/wan.json` の形 — ADR 0106）。 */

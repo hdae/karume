@@ -9,8 +9,9 @@ concept for ADR 0115 (addendum decision 6):
 3. **Run** — inject the table with `acquireGpu({ geometryProfile })` and run Anima on it (the
    **3. Anima** tab).
 
-A fourth tab, **4. Wan**, runs the Wan2.1 text-to-video pipeline in Chrome (ADR 0118 stage 9; see
-[4. Wan](#4-wan) and [Checking Wan in Chrome](#checking-wan-in-chrome)).
+A fourth tab, **4. Wan**, runs the Wan2.1 T2V 1.3B and Wan2.2 TI2V 5B text-to-video pipelines in Chrome
+(ADR 0118 stage 9, ADR 0121 stage 8; see [4. Wan](#4-wan) and
+[Checking Wan in Chrome](#checking-wan-in-chrome)).
 
 It replaces the two earlier pages (the Chrome page of `tools/geometry-sweep` and the Anima residency
 check page). Each tab keeps what its page did: the same measurements, table columns, JSON fields, and
@@ -52,6 +53,13 @@ rules apply: an explicit `--wan-source` without `karume.json` stops the server w
 
 ```sh
 deno task bench:gpu-lab --wan-source /path/to/karume-wan2.1
+```
+
+The Wan2.2 distribution follows the same rules from `models/karume-wan2.2` under `/models/wan22/…`
+(`/config.json` names it in `wan22Source`; `--wan22-source <path>` overrides the directory):
+
+```sh
+deno task bench:gpu-lab --wan22-source /path/to/karume-wan2.2
 ```
 
 ### Using the page through port forwarding
@@ -295,20 +303,34 @@ comparable to wall times with it off.
 
 ## 4. Wan
 
+Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) in Chrome, to see whether a clip
+completes on a browser device and, when it does not, where it stops (binding limits, the GPU
+timeout, memory). The pipeline's rules are those of `examples/wan`: only the four prompts of the
+embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81 (Wan2.2: the same four prompts, and the
+sizes and frame counts below).
+
+The tab has a generation switch next to the source field: `Wan2.1 T2V 1.3B（karume-wan2.1）` (the default) or
+`Wan2.2 TI2V 5B（karume-wan2.2）` (text-to-video only). It can be changed only before loading. Changing it rebuilds
+the frame and size choices, the limits table, the quant choices (from that generation's distribution on this
+server), the source placeholder, and the info line. Wan2.1 loads with `WanPipeline.fromPretrained` exactly as
+before. Wan2.2 accepts 1280x704 or 704x1280 and 4n+1 frames from 5 to 49 in the product (default 1280x704, 33
+frames), and its clips play at 24 fps. The page offers Wan2.2 up to 121 frames, the official default length: it
+calls the family's internal loader and generator (`loadWanFromPretrained` / `generateWanVideo` of
+`packages/models/src/wan/family.ts`) with a copy of the descriptor whose frame limit is 121. Frame counts above 49
+are marked `製品の受理の外 — 開発機の sha 行を持たない` in the frame select: the product rejects them, and the
+development machine keeps no reference rows for them (see [Wan2.2](#7-wan22-ti2v-5b)). The default frame count
+and size are each generation's descriptor defaults.
+
 The tab has a text-encoder route switch. `precomputed` (the tab default) uses the fixed-prompt embedding
 asset; `gpu` runs umT5-XXL on the GPU and accepts any prompt — it needs the `karume-umt5-xxl` mirror,
 which the server serves at `/models/umt5/` (`--umt5-source`, default `models/karume-umt5-xxl`). A quant
 switch next to it lists the quants of the distribution this server serves; its first entry, `既定`,
-resolves to the manifest's `defaultQuant` at load (`f16+dit8-a8-attn8-s16` since 2026-10-04 — ADR 0120),
-and the resolved name is passed to the pipeline and recorded. The saved JSON is `karume-wan-browser/3` and
-carries the route and the quant.
+resolves to the manifest's `defaultQuant` at load (for Wan2.1, `f16+dit8-a8-attn8-s16` since 2026-10-04 —
+ADR 0120), and the resolved name is passed to the pipeline and recorded. The saved JSON is
+`karume-wan-browser/4` and carries the generation (`wan2.1` / `wan2.2`), the route, and the quant.
 
-Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) in Chrome, to see whether a clip
-completes on a browser device and, when it does not, where it stops (binding limits, the GPU
-timeout, memory). The pipeline's rules are those of `examples/wan`: only the four prompts of the
-embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
-
-- **取得元** (source) — blank reads the distribution this server serves (`models/karume-wan2.1`); an
+- **取得元** (source) — blank reads the distribution this server serves for the chosen generation
+  (`models/karume-wan2.1`, or `models/karume-wan2.2` with Wan2.2); an
   `owner/name` reads that Hugging Face repository at `main` (the distribution is not published
   yet, so the blank default is the normal case).
 - **読み込む** (load) reads the manifest, acquires a GPU device, and builds the pipeline with
@@ -330,7 +352,8 @@ embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
   informational. Passing the table is necessary, not sufficient: memory and submit times are
   checked only by running.
 - **Prompt, negative, seed, frames, size, steps, guidance, shift** — leave steps, guidance, and shift
-  blank for the distribution defaults (50, 5.0, 3.0; the placeholders show them after loading). A
+  blank for the distribution defaults (50, 5.0, 3.0 for Wan2.1 and 50, 5.0, 5.0 for Wan2.2; the
+  placeholders show them after loading). A
   blank negative uses the asset's `negative` row. **生成** (generate) reads them once.
 - Each generate adds a row: the resolved request, the wall time, each stage's time
   (`transformer`, `vae_decoder`), the step times and the VAE tile times (the first one includes
@@ -340,9 +363,11 @@ embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81.
   window mean, a lower bound of the longest submit, and the count of chunks over the time budget),
   the SHA-256 of the RGB bytes (every frame's 8-bit RGB from `wanFrameToRgba`, concatenated in frame
   order — the bytes the e2e reference rows hash), the reference verdict, and the error. The clip is
-  drawn on the canvas next to the table: **前** / **次** step one frame, **再生** plays at 16 fps,
-  and the slider seeks.
-- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/3`).
+  drawn on the canvas next to the table: **前** / **次** step one frame, **再生** plays at the clip's
+  frame rate (16 fps for Wan2.1, 24 fps for Wan2.2), and the slider seeks. The condition column starts
+  with the generation.
+- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/4`; the generation is in
+  each `loads[]` entry, in each row, and next to the loaded source).
 
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
 stops it. On the Intel Arc B570 under Deno, a 50-step clip with the `f16` quant takes about 30
@@ -466,6 +491,71 @@ Any other quant is not a reference case.
    loading (`既定` = the manifest's `defaultQuant`); to compare with the `f16` rows, choose `f16`.
 6. Run `50step-boxing-cats-seed42` (steps blank), then, if it completes, 81 frames.
 7. Save the JSON and report it with the records above.
+
+### 7. Wan2.2 (TI2V 5B)
+
+Sections 1 to 6 and the steps above describe Wan2.1; this section gives what differs for Wan2.2. The
+numbers marked as measured come from the B570 under Deno (ADR 0121, "B570 の 1280×704 のフレーム数の試走" and
+stage 2); nothing has run in Chrome yet.
+
+**Binding limits.** S is 7,920 tokens at 1280x704 and 33 frames, 11,440 at 49 frames, and 27,280 at 121
+frames (32 pixels per token on each side):
+
+| Value                                          | 33 frames               | 49 frames               | 121 frames                 |
+| ---------------------------------------------- | ----------------------- | ----------------------- | -------------------------- |
+| Transformer FFN intermediate `[1,S,14336]` f32 | 454,164,480 B (433 MiB) | 656,015,360 B (626 MiB) | 1,564,344,320 B (1.46 GiB) |
+| VAE intermediate (`vae_decoder_next`) f32      | 201,326,592 B (192 MiB) | 201,326,592 B (192 MiB) | 201,326,592 B (192 MiB)    |
+
+The self-attention scores of the 24 heads split into 3 blocks at 33 frames on the B570 limit (measured
+in stage 2), and into 34 blocks of 2,102,960,640 B at 121 frames (computed).
+
+**Memory and time (measured on the B570, 1280x704, 50 steps).**
+
+| Quant                   | Frames | Transformer stage peak | Transformer diagnostics | Time (transformer / VAE)      |
+| ----------------------- | -----: | ---------------------: | ----------------------: | ----------------------------- |
+| `f16+dit8-a8-attn8-s16` |     33 |               7.72 GiB |                7.22 GiB | 23 min 40 s (967 s / 446 s)   |
+| `f16+dit8-a8-attn8-s16` |     49 |               8.49 GiB |                7.93 GiB | 36 min 5 s (1,504 s / 655 s)  |
+| `f16+dit8-a8-attn8-s16` |     57 |               8.74 GiB |                8.13 GiB | 43 min 19 s (1,834 s / 756 s) |
+| `f16+dit8`              |     33 |               7.86 GiB |                7.35 GiB | 43 min 3 s (2,143 s / 439 s)  |
+| `f16+dit8`              |     49 |               8.45 GiB |                7.64 GiB | 66 min 53 s (3,360 s / 647 s) |
+
+The VAE stage peaked at 4.36 to 4.52 GiB with the practical quant, at any frame count. 121 frames has not
+run anywhere. The ADR 0121 capacity table estimates (extrapolated from Wan2.1, before any measurement)
+transformer diagnostics of 9.16 to 9.50 GiB with `f16+dit8` and 10.18 to 11.37 GiB with
+`f16+dit8-a8-attn8-s16` at 1280x704 and 121 frames. With about 1.3 GiB on top, the practical quant is
+expected to fit the RTX 5070 Ti (16 GB) at about 11.5 to 12.7 GiB. That is an expectation, not a
+measurement. The same table estimates the transformer stage at about 78 minutes on the RTX with `f16+dit8`.
+If the practical quant halves that as it does on the B570, it takes about 40 minutes. Both are estimates.
+
+**Reference cases.** The rows are kept in `packages/models/tests/fixtures/references/wan-ti2v.json`, with
+the same environment keys as Wan2.1. The common conditions are `boxing-cats`, seed 42, the default
+negative, and the default guidance and shift (5.0 and 5.0):
+
+- `f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5` and
+  `f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5` — steps 2, 17 frames, only with `f16+dit8`;
+- `<quant>-50step-boxing-cats-seed42-1280x704-33f-shift5` — steps 50, 33 frames, 1280x704, with `f16+dit8`
+  or `f16+dit8-a8-attn8-s16`. The e2e observes these without keeping rows for now (ADR 0121 stage 7 decides
+  them), and no row is added for a Chrome key (ADR 0121 stage 10), so the page reports a missing row: report
+  the SHA-256 as a record only, unlike section 5.
+
+Any other request, quant, or route is not a reference case.
+
+**Steps for Wan2.2.**
+
+1. Start the server with the Wan2.2 distribution: `deno task bench:gpu-lab --wan22-source
+   models/karume-wan2.2` (without the flag, the default location is used when it holds `karume.json`).
+2. Open **http://localhost:8790/#wan** in Chrome and choose `Wan2.2 TI2V 5B（karume-wan2.2）` in **世代**.
+3. Choose the quant (it holds until **pipeline を破棄**). `既定` resolves to the manifest's `defaultQuant`.
+   The 2-step reference case has rows only for `f16+dit8`, so choose `f16+dit8` explicitly for it, even when
+   `既定` resolves to the practical quant. The practical quant `f16+dit8-a8-attn8-s16` takes about half the
+   transformer time of `f16+dit8` on the B570.
+4. Before loading, read the limits table at 33, 49, and 121 frames (1280x704).
+5. Press **読み込む**. Run the 2-step reference case first: `boxing-cats`, seed 42, 17 frames, 1280x704,
+   steps 2, guidance and shift blank, loaded with `f16+dit8` (step 3). Note the SHA-256.
+6. Run the 50-step clip at 33 frames (steps blank). If it completes, run 49 frames, then 121 frames.
+7. Watch VRAM from outside (`nvidia-smi --query-gpu=memory.used --format=csv -l 1`, or the Windows Task
+   Manager) and note the peak of each stage.
+8. Save the JSON and report it with the records of [6. What to record](#6-what-to-record).
 
 - **Sweep** — `karume-geometry-sweep/2`, as described in
   [../geometry-sweep/README.md](../geometry-sweep/README.md#output-karume-geometry-sweep2), with

@@ -5,8 +5,8 @@
  * 「掃引（ベンチマーク）→ 幾何プロファイルの生成（最適化）→ 注入して Anima を実行」を 1 ページで回す。
  * ここが持つのはタブの切替・全タブ共通の環境行・**GPU 設定**（幾何プロファイルの注入と timestamp の
  * 要求 — 「適用」で確定）・GPU 操作の排他だけ。各タブは `mount(root, …)` の形のモジュール:
- * `sweep-tab.ts`・`profile-tab.ts`・`anima-tab.ts`・`wan-tab.ts`（ADR 0118 段 9 — Wan は幾何プロファイルだけが
- * 効き、timestamp は要求しない）。
+ * `sweep-tab.ts`・`profile-tab.ts`・`anima-tab.ts`・`wan-tab.ts`（ADR 0118 段 9・ADR 0121 段 8 — Wan2.1 / Wan2.2 の
+ * 世代の選択を持つ。Wan は幾何プロファイルだけが効き、timestamp は要求しない）。
  *
  * GPU 設定の効き方: Anima のタブの GPU は適用中の設定で取る（注入があれば adapter を見ずにその表を使う）。
  * 「保存した表（照合して注入）」だけはアプリの流れ（ADR 0117 検収 段 7）: 適用時に localStorage の保存物の

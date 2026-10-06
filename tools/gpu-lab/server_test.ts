@@ -1,8 +1,9 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import {
   createHandler,
   MissingDistributionError,
+  parseServerArgs,
   resolveDistribution,
   type ServerConfig,
 } from "./server.ts";
@@ -13,6 +14,7 @@ const CONFIG: ServerConfig = {
   bundleSha256: "0".repeat(64),
   source: "karume-anima",
   wanSource: "karume-wan2.1",
+  wan22Source: "karume-wan2.2",
 };
 
 const withModelRoot = async (
@@ -138,6 +140,43 @@ describe("gpu lab server", () => {
     }
   });
 
+  it("serves the Wan2.2 distribution only under /models/wan22/, apart from the Wan2.1 one", async () => {
+    const dir = await Deno.makeTempDir();
+    try {
+      for (const name of ["wan", "wan22"]) {
+        await Deno.mkdir(`${dir}/${name}`);
+        await Deno.writeTextFile(`${dir}/${name}/karume.json`, `{"name":"${name}"}`);
+      }
+      await Deno.writeTextFile(`${dir}/wan22/only-wan22.krm`, "wan22 part");
+      const wan = await Deno.realPath(`${dir}/wan`);
+      const wan22 = await Deno.realPath(`${dir}/wan22`);
+      const handler = createHandler({ wan, wan22 }, new Uint8Array([1, 2, 3]), CONFIG);
+      for (const name of ["wan", "wan22"]) {
+        const manifest = await handler(new Request(`http://localhost/models/${name}/karume.json`));
+        assertEquals(manifest.status, 200, name);
+        assertEquals(await manifest.json(), { name });
+      }
+      for (const path of ["/models/wan/only-wan22.krm", "/models/umt5/only-wan22.krm"]) {
+        const crossed = await handler(new Request(`http://localhost${path}`));
+        assertEquals(crossed.status, 404, path);
+        await crossed.body?.cancel();
+      }
+      // Wan2.2 だけ無い起動: Wan2.1 は配り、/models/wan22/ は 404
+      const wanOnly = createHandler({ wan }, new Uint8Array([1, 2, 3]), {
+        ...CONFIG,
+        wan22Source: null,
+      });
+      const missing = await wanOnly(new Request("http://localhost/models/wan22/karume.json"));
+      assertEquals(missing.status, 404);
+      await missing.body?.cancel();
+      const served = await wanOnly(new Request("http://localhost/models/wan/karume.json"));
+      assertEquals(served.status, 200);
+      await served.body?.cancel();
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  });
+
   it("serves no page source or repository file — only the page, bundle, config and model", async () => {
     await withModelRoot(async (_root, handler) => {
       for (
@@ -224,6 +263,18 @@ describe("gpu lab distribution resolution", () => {
     });
   });
 
+  it("names --wan22-source and the Wan2.2 generation of the Wan tab when it is missing", async () => {
+    await withDirectory(async (dir) => {
+      const { locations } = parseServerArgs(["--wan22-source", dir]);
+      const error = await assertRejects(
+        () => resolveDistribution(locations.wan22),
+        MissingDistributionError,
+      );
+      assertEquals(error.message.startsWith(`--wan22-source ${dir} has no karume.json`), true);
+      assertEquals(error.message.endsWith("start without the Wan (Wan2.2) tab)"), true);
+    });
+  });
+
   it("warns and starts without the distribution when the default location has none", async () => {
     await withDirectory(async (dir) => {
       await capturingWarnings(async (warnings) => {
@@ -244,5 +295,57 @@ describe("gpu lab distribution resolution", () => {
       assertEquals(await resolveDistribution({ path: dir, explicit: true, ...ANIMA }), real);
       assertEquals(await resolveDistribution({ path: dir, explicit: false, ...WAN }), real);
     });
+  });
+});
+
+describe("gpu lab command line", () => {
+  it("reads every distribution from its default location when no option is given", () => {
+    const { port, locations } = parseServerArgs([]);
+    assertEquals(port, 8790);
+    assertEquals(locations, {
+      anima: { path: "models/karume-anima", explicit: false, option: "--source", tab: "Anima" },
+      wan: { path: "models/karume-wan2.1", explicit: false, option: "--wan-source", tab: "Wan" },
+      wan22: {
+        path: "models/karume-wan2.2",
+        explicit: false,
+        option: "--wan22-source",
+        tab: "Wan (Wan2.2)",
+      },
+      umt5: {
+        path: "models/karume-umt5-xxl",
+        explicit: false,
+        option: "--umt5-source",
+        tab: "Wan GPU text encoder",
+      },
+    });
+  });
+
+  it("takes --wan22-source as the explicit Wan2.2 location and leaves the others at their defaults", () => {
+    const { locations } = parseServerArgs(["--wan22-source", "/data/wan22", "--port", "8791"]);
+    assertEquals(locations.wan22.path, "/data/wan22");
+    assertEquals(locations.wan22.explicit, true);
+    assertEquals(locations.wan, {
+      path: "models/karume-wan2.1",
+      explicit: false,
+      option: "--wan-source",
+      tab: "Wan",
+    });
+    assertEquals(parseServerArgs(["--wan-source", "/data/wan21"]).locations.wan22.explicit, false);
+  });
+
+  it("refuses an unknown, repeated, or valueless option and a port out of range", () => {
+    for (
+      const argv of [
+        ["--wan23-source", "x"],
+        ["--wan22-source", "a", "--wan22-source", "b"],
+        ["--wan22-source"],
+        ["--wan22-source", "--port"],
+      ]
+    ) {
+      assertThrows(() => parseServerArgs(argv), Error, "Invalid option", argv.join(" "));
+    }
+    for (const port of ["80", "70000", "8790.5"]) {
+      assertThrows(() => parseServerArgs(["--port", port]), Error, "Invalid port", port);
+    }
   });
 });
