@@ -497,7 +497,18 @@ Any other quant is not a reference case.
 
 Sections 1 to 6 and the steps above describe Wan2.1; this section gives what differs for Wan2.2. The
 numbers marked as measured come from the B570 under Deno (ADR 0121, "B570 の 1280×704 のフレーム数の試走" and
-stage 2); nothing has run in Chrome yet.
+stage 2); the one Chrome run so far is the RTX 5070 Ti result below.
+
+**Result on the RTX 5070 Ti (2026-10-06, Chrome 154 on Windows)**: a 50-step clip with the practical quant
+`f16+dit8-a8-attn8-s16` and the GPU text encoder (`cat-dog-baking`, seed 42, 1280x704, 121 frames, past the
+product limit of 49 that the tab lifts) completed without a device loss in 2,417.5 s (40.3 minutes): 58.3 s for
+the text encoder, 1,843.3 s for the transformer stage (35.4 to 36.0 s per step after a first step of 87.1 s),
+and 515.3 s for the VAE stage. The transformer diagnostics were 9.47 GiB (4.67 GiB of weights and 4.80 GiB of
+slot backing), below the estimate further down. VRAM, watched by eye with Windows' own use included, peaked at
+about 8 GiB in the text encoder stage, 10.5 GiB in the transformer stage, and 6 GiB in the VAE stage. The
+largest window mean was 64.6 ms for the transformer and 616.2 ms for `vae_decoder_first`, which also counted
+3,645 submits over the budget, the same pattern the B570 showed in ADR 0121 stage 4 (the cause has not been
+investigated). 33 and 49 frames and the 2-step reference case were not run in Chrome.
 
 **Binding limits.** S is 7,920 tokens at 1280x704 and 33 frames, 11,440 at 49 frames, and 27,280 at 121
 frames (32 pixels per token on each side):
@@ -520,9 +531,9 @@ in stage 2), and into 34 blocks of 2,102,960,640 B at 121 frames (computed).
 | `f16+dit8`              |     33 |               7.86 GiB |                7.35 GiB | 43 min 3 s (2,143 s / 439 s)  |
 | `f16+dit8`              |     49 |               8.45 GiB |                7.64 GiB | 66 min 53 s (3,360 s / 647 s) |
 
-The VAE stage peaked at 4.36 to 4.52 GiB with the practical quant, at any frame count. 121 frames has not
-run anywhere. The ADR 0121 capacity table estimates (extrapolated from Wan2.1, before any measurement)
-transformer diagnostics of 9.16 to 9.50 GiB with `f16+dit8` and 10.18 to 11.37 GiB with
+The VAE stage peaked at 4.36 to 4.52 GiB with the practical quant, at any frame count. 121 frames has run
+only on the RTX 5070 Ti in Chrome (the result above), below the estimates that follow. The ADR 0121
+capacity table estimates (extrapolated from Wan2.1, before any measurement) transformer diagnostics of 9.16 to 9.50 GiB with `f16+dit8` and 10.18 to 11.37 GiB with
 `f16+dit8-a8-attn8-s16` at 1280x704 and 121 frames. With about 1.3 GiB on top, the practical quant is
 expected to fit the RTX 5070 Ti (16 GB) at about 11.5 to 12.7 GiB. That is an expectation, not a
 measurement. The same table estimates the transformer stage at about 78 minutes on the RTX with `f16+dit8`.
