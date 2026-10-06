@@ -1544,7 +1544,9 @@ ISA で gemm / conv の kernel を出し分けるため、計算結果の最終 
 （実測 2026-08-16: GitHub CI runner で 30 spec 中 activations / conv2d_block の 2 spec だけ
 ±1〜2 ulp）。CI では io のバイト突合を明示 SKIP し、model（グラフ + 固定 seed の重み —
 torch の CPU RNG はクロスマシンで決定的）のバイト突合だけを要求する。golden を消費する
-Deno 側の実 GPU テストはもともと tolerance 判定なので影響しない。
+Deno 側の実 GPU テストはもともと tolerance 判定なので影響しない。参照環境 = 開発機。CPU を換えたら門を
+緩めずに io を撮り直す（2026-10-06 に Ryzen 5 7600 へ換装して撮り直し — 旧参照との差は `activations` /
+`dilated_conv` の 2 spec・絶対差 ≤ 2.4e-7）。
 
 ## states 形 attention は f32 経路のみ（数値変種と組めない）・sliding rewind 全拒否
 
