@@ -53,6 +53,8 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
   wan: WAN_SESSION_POLICY,
+  // Wan2.2 TI2V は 2.1 と同じ受理表を共有する（共通の admission — `family.ts`）。
+  "wan-ti2v": WAN_SESSION_POLICY,
 };
 
 /**

@@ -115,6 +115,8 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
   wan: WAN_SESSION_POLICY,
+  // Wan2.2 TI2V は 2.1 と同じ受理表を共有する（共通の admission — `family.ts`）。
+  "wan-ti2v": WAN_SESSION_POLICY,
 };
 
 /**
@@ -230,6 +232,8 @@ type FamilyAxes = {
   readonly sbv2: { readonly front: "run"; readonly voice: "run" };
   /** 相 `pass` は DiT の 1 forward（CFG の 1 ステップは条件つき / 条件なしの 2 パス）。 */
   readonly wan: { readonly transformer: "pass" };
+  /** Wan2.2 TI2V も同じ（部品名・相は共有モジュールの DiT 段が名乗る — 2.1 と同じ綴り）。 */
+  readonly "wan-ti2v": { readonly transformer: "pass" };
 };
 
 /** gemma の部品（製品グラフ = target・投機の drafter）と相（`GenerationRunPhase["kind"]`）。 */
@@ -344,6 +348,12 @@ const SBV2_MODELS = ["F1", "F2", "M1", "M2"] as const;
  * M = 1 の時刻 MLP と `time_proj` も含む — ADR 0120 決定 2・調査 §2.2）。
  */
 const WAN_DIT_LINEARS = { variant: 307, reference: 0 } as const;
+/**
+ * Wan2.2 TI2V 5B の DiT: linear の dispatch 310 本（i8 の重みは 307 本で 2.1 と同じ構成だが、時刻の MLP〈2 本と
+ * `time_proj`〉を M = 1 で 2 回回すので同じ重みのノードが 3 本増える — ADR 0121 決定 2・段 1 の IR の検査で 310。
+ * k ∈ {192, 256, 3072, 4096, 14336} — 全て k % 4 == 0）。
+ */
+const WAN22_DIT_LINEARS = { variant: 310, reference: 0 } as const;
 
 /**
  * 束の census 表。
@@ -670,6 +680,14 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     models: ["t2v-1.3b"],
     session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { pass: { linearCompute: WAN_DIT_LINEARS } } },
+  },
+  {
+    // Wan2.2 の配布ミラーの実用席 `f16+dit8-a8-attn8-s16`（ADR 0121 段 8a — 2.1 と同じ束）。
+    // attentionCompute / attentionScoreStorage は 2.1 の行と同じく未導出（ファイル冒頭）。
+    family: "wan-ti2v",
+    models: ["ti2v-5b"],
+    session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
+    census: { transformer: { pass: { linearCompute: WAN22_DIT_LINEARS } } },
   },
 ];
 
