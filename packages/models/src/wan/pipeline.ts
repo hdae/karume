@@ -152,8 +152,8 @@ export type WanGenerateEvent =
 /**
  * 1 回の生成要求（Wan2.1 / 2.2 の class が共有する型）。省いた step 数・guidance・shift は manifest の
  * `pipelineConfig` の既定（Wan2.1 の配布形の値は参照の設定 — 50 ステップ・guide 5.0・shift 3.0。Wan2.2 の
- * 既定の shift は上流の scheduler の `flow_shift` 5.0〈公式の 720p の値〉で、配布形〈ADR 0121 段 8〉の
- * manifest が宣言する — それまでは呼び手が組む manifest の `pipelineConfig` に書く）。寸法と
+ * 既定の shift は上流の scheduler の `flow_shift` 5.0〈公式の 720p の値〉で、配布形
+ * `karume-wan2.2`〈ADR 0121 段 8〉の manifest が宣言する）。寸法と
  * フレーム数の受理集合と既定は class の世代が決める（Wan2.1 の `WanPipeline`: 832×480 / 480×832・
  * 5〜81 フレーム・既定 832×480・33 フレーム / Wan2.2 の `WanTi2vPipeline`: 1280×704 / 704×1280・5〜49
  * フレーム・既定 1280×704・33 フレーム）。

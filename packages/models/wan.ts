@@ -13,8 +13,8 @@
  * 越境参照）を GPU で回して任意のプロンプトを受け、`"precomputed"` は umT5 を取らずにテキスト埋め込み
  * 資産の固定プロンプトだけを受ける。
  *
- * NOTE: 取得元の対応表（`WAN_SOURCES`）はまだ無い — 配布形 `karume-wan2.1` は HF へ未公開で、公開
- * リポを持たない家族は表を持たない（ADR 0073 決定 1）。手元の配布形は `@karume/hub/deno` の
+ * NOTE: 取得元の対応表（`WAN_SOURCES`）はまだ無い — 配布形 `karume-wan2.1` / `karume-wan2.2` は HF へ
+ * 未公開で、公開リポを持たない家族は表を持たない（ADR 0073 決定 1）。手元の配布形は `@karume/hub/deno` の
  * `denoDirectory` で `fromPretrained` へ渡し、`"gpu"` の経路では umT5 の配布形（`karume-umt5-xxl`）を
  * その `crossRepo` の mapping で渡す。
  *
@@ -26,8 +26,8 @@ export { WanPipeline } from "./src/wan/pipeline.ts";
 /**
  * Wan2.2 TI2V 5B のテキスト → 動画（T2V）。構築・生成・中断・解放の面と公開型（要求・結果・イベント・
  * 構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜49 フレーム）・
- * 潜在の形・fps は世代の値（ADR 0121 決定 10）。配布形はまだ無い — 入口は取得済みの manifest + 資産を
- * 渡す `fromAssets`（ADR 0121 段 8 で配布形）。
+ * 潜在の形・fps は世代の値（ADR 0121 決定 10）。配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe
+ * `dist.py --pipeline wan-ti2v` が組む・HF には未公開）。
  */
 export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
 export type {

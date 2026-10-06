@@ -54,6 +54,9 @@
  *   並べて記録する。閾値を超えても赤にはしない（超えたときの手 = 受理するフレーム数の上限を下げるのは、段 6 の前に決める
  *   裁定 — ここで落としても直せない）。超えた回は警告を出し、記録に「超えた」と書く。
  * - **実用席 `f16+dit8-a8-attn8-s16` の diag**（記録だけ — 実用席の門は段 7）: 同じ 2 つの形で、同じ閾値と外挿と並べる。
+ *   席の束（`session`）は配布形の manifest（`models/karume-wan2.2/karume.json` の席の宣言 — 束の正本・ADR 0110 決定 1）から
+ *   読み、家族の受理表に通す（2.1 の DiT の e2e と同じ形）。配布形が無い機は実用席のケースだけ明示 SKIP する（参照席の門は
+ *   系列の容器だけで回る — 配布形の欠如は門番 `distribution_gate_test.ts` が FAIL にする）。
  * - **S = 12,090**（832×480・121 フレーム — 決定 8 が受理を広げるかを段 2 の実測で決める形）: 両席の diag と完走の可否を
  *   記録する。golden を持たない（入力は乱数の潜在と実プロンプトの埋め込み）ので値の門は無く、非有限 0 と device lost が
  *   無いことだけを見る。確保が最大の形なので opt-in（`KARUME_WAN_TI2V_LONG_PROBE=1`）にして、別の回で回す。
@@ -63,6 +66,7 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
+import { parseManifest } from "@karume/hub";
 import {
   type BoundContainer,
   type FusionCounts,
@@ -83,6 +87,7 @@ import {
 } from "../src/wan/dit-tokens.ts";
 import { type WanRopeBase, wanRopeTables } from "../src/wan/dit-rope.ts";
 import { timestepsProj } from "../src/wan/dit-timestep.ts";
+import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "./helpers/census-table.ts";
 import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -113,8 +118,11 @@ import {
   WAN_TI2V_SERIES_NAME,
 } from "./helpers/wan-ti2v-dit.ts";
 import {
+  readWanTi2vDistributionManifestText,
+  WAN_TI2V_ASSEMBLE_COMMAND,
+  WAN_TI2V_DIST_MODEL,
+  WAN_TI2V_DIST_ROOT,
   WAN_TI2V_PRACTICAL_QUANT as PRACTICAL_QUANT,
-  WAN_TI2V_PRACTICAL_SESSION as PRACTICAL_SESSION,
   WAN_TI2V_REFERENCE_QUANT as REFERENCE_QUANT,
 } from "./helpers/wan-ti2v-pipeline.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -193,11 +201,33 @@ const EXPECTED_FUSIONS: Partial<FusionCounts> = { adaln: 0, rope: 0, silu: 4 };
  */
 const SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
 
-/** 参照席（ADR 0121 決定 2 — `session` 空）と実用席（値は `helpers/wan-ti2v-pipeline.ts` — 通しの e2e と同じ定数）。 */
+/** 参照席（ADR 0121 決定 2 — `session` 空）と実用席（席名は `helpers/wan-ti2v-pipeline.ts` — 通しの e2e と同じ定数）。 */
 type Seat = typeof REFERENCE_QUANT | typeof PRACTICAL_QUANT;
 
-const practicalSessionOptions = (): SessionOptions =>
-  effectiveSessionOptions("wan", PRACTICAL_SESSION, {}, `wan-ti2v ti2v-5b/${PRACTICAL_QUANT}`);
+/**
+ * 配布形の manifest のテキスト（実用席の束の正本 — 無ければ実用席のケースを SKIP する）。parse は
+ * {@link practicalSessionOptions} の中で行う — 壊れた manifest が赤にするのを実用席のケースだけに留め、配布形に依らない
+ * 参照席の r 門や容量のケースをモジュールのロードで巻き込まない（2.1 の DiT の e2e と同じ置き方）。
+ */
+const distManifestText = await readWanTi2vDistributionManifestText();
+/** 実用席の束を読める（配布形の manifest がある）。 */
+const PRACTICAL_DECLARED = distManifestText !== undefined;
+
+/**
+ * 実用席の実効 SessionOptions（配布形の manifest の席の `session` を家族の受理表で通した値 — 束の正本は manifest の quant 席
+ * だけ・ADR 0110 決定 1。テストに束の値を書き写さない）。
+ */
+const practicalSessionOptions = (): SessionOptions => {
+  if (distManifestText === undefined) {
+    throw new Error(
+      `${WAN_TI2V_DIST_ROOT.pathname}karume.json が無い（ignore の条件と食い違っている）`,
+    );
+  }
+  const where = `wan-ti2v ${WAN_TI2V_DIST_MODEL}/${PRACTICAL_QUANT}`;
+  const declared =
+    quantOf(parseManifest(distManifestText), WAN_TI2V_DIST_MODEL, PRACTICAL_QUANT).session;
+  return effectiveSessionOptions("wan", declared, {}, where);
+};
 
 const GIB = 2 ** 30;
 
@@ -259,6 +289,12 @@ if (!FULL_AVAILABLE) {
 if (!LONG_PROBE) {
   console.warn(
     `[karume] S = 12,090（832×480・121 フレーム）の diag の記録は opt-in のため SKIP する（${LONG_PROBE_ENV}=1 で回す）`,
+  );
+}
+if (MODEL_PRESENT && !PRACTICAL_DECLARED) {
+  console.warn(
+    `[karume] 配布形ミラー ${WAN_TI2V_DIST_ROOT.pathname} の karume.json が無いため、実用席 ${PRACTICAL_QUANT} の diag の` +
+      `記録を SKIP する。組み立て: ${WAN_TI2V_ASSEMBLE_COMMAND}（欠如は門番 distribution_gate_test.ts が FAIL にする）`,
   );
 }
 
@@ -1249,46 +1285,52 @@ Deno.test({
       assertAdapterMatchesEnvironment(gpu);
       const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
       for (
-        const [seat, options] of [
-          [REFERENCE_QUANT, {}],
-          [PRACTICAL_QUANT, practicalSessionOptions()],
+        const [seat, optionsOf] of [
+          [REFERENCE_QUANT, (): SessionOptions => ({})],
+          [PRACTICAL_QUANT, practicalSessionOptions],
         ] as const
       ) {
-        await t.step(`${seat} S = ${LONG_TOKENS}`, async () => {
-          let note = "";
-          await runRecordedCase(
-            results,
-            {
-              id: `${seat}/s${LONG_TOKENS}/capacity`,
-              // 完走しなかった回（確保の失敗・device lost）は理由を記録に残す — 「可否」の否の側の記録。
-              failureNote: (cause) =>
-                note === ""
-                  ? `完走せず: ${cause instanceof Error ? cause.message : String(cause)}`
-                  : note,
-            },
-            async () => {
-              const observed = await twoRuns(prepared, gpu, inputs, options);
-              note = [
-                capacityNote(seat, LONG_TOKENS, observed.runs),
-                `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
-                ...observed.runs.map((run) => formatRun(run)),
-                ...observed.vram,
-                `行ブロック ${observed.rowBlocks} 枚`,
-                `非有限 ${observed.nonFinite}`,
-              ].join(" / ");
-              console.log(`[wan-ti2v-dit] ${seat} S = ${LONG_TOKENS}: ${note}`);
-              assertEquals(observed.nonFinite, 0, `${seat} S = ${LONG_TOKENS}: 非有限`);
-              if (seat === REFERENCE_QUANT) {
-                assertEquals(
-                  observed.rowBlocks,
-                  expectedRowBlocks(LONG_TOKENS, bindingLimit),
-                  `${seat}: self-attention の行ブロック枚数（束縛上限 ${bindingLimit} B）`,
-                );
-              }
-              assertEquals(deviceLost, undefined, "device lost");
-              return { status: "pass", note };
-            },
-          );
+        await t.step({
+          name: `${seat} S = ${LONG_TOKENS}`,
+          // 実用席の束は配布形の manifest から読む（無い機は実用席だけ SKIP — 参照席は回す）。
+          ignore: seat === PRACTICAL_QUANT && !PRACTICAL_DECLARED,
+          fn: async () => {
+            const options = optionsOf();
+            let note = "";
+            await runRecordedCase(
+              results,
+              {
+                id: `${seat}/s${LONG_TOKENS}/capacity`,
+                // 完走しなかった回（確保の失敗・device lost）は理由を記録に残す — 「可否」の否の側の記録。
+                failureNote: (cause) =>
+                  note === ""
+                    ? `完走せず: ${cause instanceof Error ? cause.message : String(cause)}`
+                    : note,
+              },
+              async () => {
+                const observed = await twoRuns(prepared, gpu, inputs, options);
+                note = [
+                  capacityNote(seat, LONG_TOKENS, observed.runs),
+                  `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
+                  ...observed.runs.map((run) => formatRun(run)),
+                  ...observed.vram,
+                  `行ブロック ${observed.rowBlocks} 枚`,
+                  `非有限 ${observed.nonFinite}`,
+                ].join(" / ");
+                console.log(`[wan-ti2v-dit] ${seat} S = ${LONG_TOKENS}: ${note}`);
+                assertEquals(observed.nonFinite, 0, `${seat} S = ${LONG_TOKENS}: 非有限`);
+                if (seat === REFERENCE_QUANT) {
+                  assertEquals(
+                    observed.rowBlocks,
+                    expectedRowBlocks(LONG_TOKENS, bindingLimit),
+                    `${seat}: self-attention の行ブロック枚数（束縛上限 ${bindingLimit} B）`,
+                  );
+                }
+                assertEquals(deviceLost, undefined, "device lost");
+                return { status: "pass", note };
+              },
+            );
+          },
         });
       }
     } finally {
@@ -1439,7 +1481,8 @@ Deno.test({
   name:
     `Wan2.2 TI2V DiT 実用席 ${PRACTICAL_QUANT}（実 GPU・通常モード・記録だけ）: S ごと（8,190 / 7,920）の所要と diag を記録する` +
     "（容量の閾値・外挿・I2V 対応の増分と並べる・非有限 0）",
-  ignore: !FULL_AVAILABLE || !GPU_AVAILABLE,
+  // 束は配布形の manifest から読む（無い機は明示 SKIP — 上の警告）。
+  ignore: !FULL_AVAILABLE || !GPU_AVAILABLE || !PRACTICAL_DECLARED,
   fn: async (t) => {
     const options = practicalSessionOptions();
     const prepared = prepareContainer(await openSeriesContainer(MODEL_URL), graphName());

@@ -27,6 +27,7 @@ import { ditContract, ditInputs, wanDitPatch } from "../src/wan/dit-loop.ts";
 import { umt5Contract, WAN_DEFAULT_NEGATIVE_PROMPT } from "../src/wan/text-stage.ts";
 import {
   WAN21_GENERATION,
+  WAN22_TI2V_GENERATION,
   type WanDitInputForm,
   type WanGenerationDescriptor,
 } from "../src/wan/descriptor.ts";
@@ -963,6 +964,20 @@ describe("モデルカードの受理集合（fixture を挟んだ突き合わ�
       fixture,
       { acceptedSizes, minFrames, maxFrames },
       "descriptor.ts の受理集合を変えたら fixture と card.py の WAN_ACCEPTED_SIZES / WAN_FRAMES も揃える",
+    );
+  });
+
+  // Wan2.2 TI2V-5B の配布形（`karume-wan2.2`）のカードも同じ形で縛る（ADR 0121 段 8 — 反対側は同じ recipe のテストが
+  // card.py の `WAN22_ACCEPTED_SIZES` / `WAN22_FRAMES` を同じ fixture と比べる）。
+  it("Wan2.2 TI2V の受理する寸法とフレーム数の範囲は fixture wan-ti2v-card-limits.json と同じ", async () => {
+    const fixture: unknown = JSON.parse(
+      await Deno.readTextFile(new URL("./fixtures/wan-ti2v-card-limits.json", import.meta.url)),
+    );
+    const { acceptedSizes, minFrames, maxFrames } = WAN22_TI2V_GENERATION;
+    assertEquals(
+      fixture,
+      { acceptedSizes, minFrames, maxFrames },
+      "descriptor.ts の WAN22_TI2V_GENERATION の受理集合を変えたら fixture と card.py の WAN22_ACCEPTED_SIZES / WAN22_FRAMES も揃える",
     );
   });
 });

@@ -104,6 +104,11 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
  *
  * 既定の 1280×704・33 フレームは仮置き（視認で確定する）。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
  * （逆正規化の統計の表は `latents.ts`）。
+ *
+ * MUST: 受理集合を変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN22_ACCEPTED_SIZES` /
+ * `WAN22_FRAMES`）と `tests/fixtures/wan-ti2v-card-limits.json` も同じ値にする — カードは manifest に無い
+ * この事実を写しで持つので、fixture を挟んだ両側のテスト（wan_pipeline_test.ts と recipe の
+ * test_distribution.py）が片側だけの更新を赤にする。
  */
 export const WAN22_TI2V_GENERATION: WanGenerationDescriptor = {
   latents: { mean: WAN22_LATENTS_MEAN, std: WAN22_LATENTS_STD },

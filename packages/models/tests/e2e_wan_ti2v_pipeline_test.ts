@@ -1,9 +1,13 @@
 /**
- * Wan2.2 TI2V-5B の通し（`WanTi2vPipeline` の T2V — ADR 0121 段 6）の照合（実 GPU）。
+ * Wan2.2 TI2V-5B の通し（`WanTi2vPipeline` の T2V — ADR 0121 段 6 の結線・段 8 の配布形）の照合（実 GPU）。
  *
- * 配布形（`models/karume-wan2.2/` — 段 8）はまだ無いので、系列の容器から組んだ manifest と資産の Record
- * （`helpers/wan-ti2v-pipeline.ts`）を `WanTi2vPipeline.fromAssets` へ渡して組む（2.1 の段 6 と同じ入口）。資産が無い機は
- * 生成コマンドを出して明示 SKIP する。
+ * 配布形ミラー `models/karume-wan2.2/`（`dist.py --pipeline wan-ti2v` が組む — `krm` 3 本と 2.1 の系列のテキスト資産 2 本）
+ * を `denoDirectory` で `WanTi2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
+ * 家族 admission・part の逐次読み。2.1 の段 7 と同じ入口）。参照（`pipeline_steps.*`）は配布しない golden なので系列から読む。
+ *
+ * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP になるのを FAIL にするのは
+ * 門番 `packages/runtime/tests/distribution_gate_test.ts`（意図して通すなら `KARUME_ALLOW_NO_DISTRIBUTION=1` — 2.1 の通しの
+ * e2e と同じ分担）。
  *
  * 比べる相手は recipe の 2 ステップの参照（`tools/export-recipes/wan/ti2v_few_step_ref.py` — 置き場は i8 の DiT の系列の根の
  * `pipeline_steps.<case>.safetensors`）: diffusers の `WanPipeline(expand_timesteps=False)` を CPU f32 で素のまま 2 ステップ
@@ -31,10 +35,15 @@
  *   条件マスクと条件側の時刻は原理的に値に出ない（2 本が同じ値・マスクは全て偽 — 段 2 と同じ理由）ので注入に入れない。
  * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json`。2.1 の `wan.json` には触らない）: 出力フレーム（uint8 の
  *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。参照席の 6 本 = 帯のケース 3 本・seed 経路の 1280×704 と
- *   704×1280・GPU 経路（umT5 を GPU で回す — umT5 のミラーかトークナイザ資産が無い機は明示 SKIP）。ID は席・経路・step 数・
+ *   704×1280・GPU 経路（umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP）。ID は席・経路・step 数・
  *   ケース・寸法・フレーム数・shift を全て持つ（{@link caseIdOf} — 裁定 F12）。行が無い機はそのケースの sha の突合を飛ばし
  *   （実物と実測の sha は残す）、参照門が赤になる（既存の規律）。行は帯が緑になった後に `KARUME_REFERENCE=write` をこのファイル
- *   単独で回して作る（裁定 F8）。
+ *   単独で回して作る（裁定 F8）。行は段 6 で**系列を直読み**（`fromAssets`）する版で書いた値（RTX 3080 Ti の行は凍結コピー
+ *   `128b511e` で書く — 利用者の裁定 2026-10-06）で、配布形経由（`fromPretrained`）のこの e2e が HEAD で同じ行と一致することを
+ *   要求する（ADR 0121 検収の段 8）— 配布形は系列の `krm` とテキスト資産の独立コピーで、席も
+ *   要求の値も全て明示するので、1 ビットでも割れたら取得面か席の解決の退行。
+ * - **席は全ケースで明示する**（{@link loadPipeline} は席を必須にする）: manifest の `defaultQuant` は仮の既定（参照席）で、
+ *   利用者の視認の裁定で実用席へ移りうる。既定席に乗ると、同じ ID が別の席の値で回る。
  *
  * ## 50 ステップの通し（env の opt-in `KARUME_WAN_TI2V_FULL_PIPELINE=1` — 既定のレーンに入れない）
  *
@@ -53,20 +62,21 @@
  *
  * 既定のレーンの `Deno.test` 1 本は device を 1 つだけ取り、全ケースを `t.step` で回す（ケースの間に `settleReleases`）。
  * opt-in の 50 ステップも同じく device 1 つで、`--filter "50 ステップ"` で**単独のプロセス**として回す（既定のレーンの device の
- * 残りを背負わない）。資産の Record は 1 本の `Deno.test` で 1 回だけ読み、席ごとの構築で使い回す（`fromAssets` は Record を
- * パイプラインの寿命の間ずっと持つ）。
+ * 残りを背負わない）。構築（`fromPretrained`）は配布形の part を読むだけで Session を張らない（段ごとに張って畳む）。
  *
  * ## 観測（門ではない）
  *
  * 段の所要（壁時計 — `stage` イベントの間）と、段の境目ごとの VRAM（`/proc/self/fdinfo` の `drm-total-*` —
  * `helpers/drm-usage.ts`）。GPU 時間は採らない — 計測の device では VAE の batch を開けない（構築が拒む）。
  *
- * 事前計算の経路の資産が無い環境は明示 SKIP。参照（`pipeline_steps.*`）が無い環境では帯・故障注入・ホストの自己整合だけを
- * 明示 SKIP する（seed 経路と GPU 経路は CPU の参照に依らないので回る）。参照が一部だけある環境は FAIL（2.1 の通しの e2e と
- * 同じ規律）。
+ * 配布形が無い環境は明示 SKIP（ホストの自己整合は配布形に依らないので回る）。参照（`pipeline_steps.*`）が無い環境では帯・
+ * 故障注入・ホストの自己整合だけを明示 SKIP する（seed 経路と GPU 経路は CPU の参照に依らないので回る）。参照が一部だけある
+ * 環境は FAIL（2.1 の通しの e2e と同じ規律）。
  */
 
 import { assert, assertEquals } from "@std/assert";
+import { type DistributionSource, parseManifest, resolveSelection } from "@karume/hub";
+import { denoDirectory } from "@karume/hub/deno";
 import {
   type GpuContext,
   parseSafetensors,
@@ -76,10 +86,10 @@ import {
 import { encodePng } from "../mod.ts";
 import {
   type GeneratedVideo,
-  type WanAssets,
   wanFrameToRgba,
   type WanGenerateEvent,
   type WanGenerateRequest,
+  type WanPipelineOptions,
   type WanPrompt,
   type WanRunComponent,
   WanTi2vPipeline,
@@ -94,18 +104,13 @@ import {
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { filePresent, WAN_TI2V_GENERATE, WAN_TI2V_SERIES_NAME } from "./helpers/wan-ti2v-dit.ts";
-import { WAN_TI2V_VAE_GENERATE } from "./helpers/wan-ti2v-vae.ts";
+import { filePresent, WAN_TI2V_SERIES_NAME } from "./helpers/wan-ti2v-dit.ts";
 import {
-  missingWanTi2vSeriesAssets,
-  readWanTi2vSeriesAssets,
-  readWanTi2vTextEncoderAssets,
+  readWanTi2vDistributionManifestText,
+  WAN_TI2V_ASSEMBLE_COMMAND,
+  WAN_TI2V_DIST_ROOT,
   WAN_TI2V_PRACTICAL_QUANT,
   WAN_TI2V_REFERENCE_QUANT,
-  WAN_TI2V_TEXT_EMBEDS_URL,
-  wanTi2vSeriesManifest,
-  wanTi2vSeriesPresent,
-  type WanTi2vSeriesRoute,
 } from "./helpers/wan-ti2v-pipeline.ts";
 import { contactSheet, writeWanFrames } from "./helpers/wan-video-artifacts.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
@@ -257,32 +262,69 @@ const FULL_CASES: readonly { readonly id: string; readonly quant: string }[] = [
 
 const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --group wan --inexact python -m wan.ti2v_few_step_ref";
-const TEXT_EMBEDS_COMMAND =
-  "cd tools/export-recipes && uv run --group wan --inexact python -m wan.text_embeds";
-const UMT5_COMMANDS = "cd tools/export-recipes && uv run python dist.py --pipeline umt5 && " +
-  "uv run --group wan --inexact python -m wan.umt5_tokenizer";
+const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
+
+/**
+ * 参照を作った埋め込み資産（2.1 の系列のファイル — ADR 0121 決定 9）。ホストの自己整合はこのバイトの sha を参照のメタ
+ * `text_embeds_sha256` と突き合わせる。配布形の写しではなく系列のファイルを読むのは、ホストの自己整合が見るのが参照と TS の
+ * ホストの計算（σ / timestep・統計・CFG + UniPC）であって取得面ではないから — 配布形の無い機でも GPU 無しで回る形を保つ。
+ * 配布形の写しは組み立て（`dist.py`）が同じ系列のファイルを置いたもの。この e2e の取得元（`denoDirectory`）は size だけを
+ * 照合し、sha256 は信頼する（`packages/hub/src/sources/local.ts`）。写しが参照を作った資産と違えば、GPU の帯のケース（プロンプトを
+ * 配布形の資産から引く）が帯の外へ出る。
+ */
+const TEXT_EMBEDS_URL = new URL(
+  "../../../outputs/series/wan2.1-t2v-1.3b-text-embeds/text_embeds.safetensors",
+  import.meta.url,
+);
+
+/** umT5 の配布形ミラー（Wan2.2 の manifest の `text_encoder` が越境参照する先 — 2.1 と同じミラー）。 */
+const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
+/** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
+const TEXT_ENCODER = "text_encoder";
 
 const fixtureUrl = (name: string): URL => new URL(`pipeline_steps.${name}.safetensors`, STEPS_ROOT);
 
-/** 事前計算の経路の資産（DiT・VAE 2 本・埋め込み資産）が揃っている。 */
-const SERIES_PRESENT = wanTi2vSeriesPresent("precomputed");
-if (!SERIES_PRESENT) {
+/** 配布形の manifest（無ければ `undefined` — 通しの照合を SKIP する）。 */
+const DIST_MANIFEST_TEXT = await readWanTi2vDistributionManifestText();
+const DIST_MANIFEST = DIST_MANIFEST_TEXT === undefined
+  ? undefined
+  : parseManifest(DIST_MANIFEST_TEXT);
+const DIST_PRESENT = DIST_MANIFEST !== undefined;
+if (!DIST_PRESENT) {
   console.warn(
-    `[karume] Wan2.2 の通しの資産が揃っていない（${
-      missingWanTi2vSeriesAssets("precomputed").join(" / ")
-    }）ため通しの照合を SKIP する。生成: DiT ${WAN_TI2V_GENERATE}・VAE ${WAN_TI2V_VAE_GENERATE}・` +
-      `埋め込み資産 ${TEXT_EMBEDS_COMMAND}`,
+    `[karume] 配布形ミラー ${WAN_TI2V_DIST_ROOT.pathname} が無いため Wan2.2 の通しの照合を SKIP する。` +
+      `組み立て: ${WAN_TI2V_ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
   );
 }
-/** GPU 経路の資産（上に加えて umT5 のミラーとトークナイザ資産）が揃っている。 */
-const GPU_TEXT_PRESENT = wanTi2vSeriesPresent("gpu");
-if (SERIES_PRESENT && !GPU_TEXT_PRESENT) {
+/**
+ * umT5 の越境先の repo（配布形の既定の選択の `text_encoder` の part 0 が宣言する — キーを写経しない）。配布形が umT5 を
+ * 持たない・自リポに持つ形は 2.2 の配布形の宣言の外なので、GPU 経路の構築で fail loudly にする（{@link umt5CrossRepo}）。
+ */
+const UMT5_REPO = DIST_MANIFEST === undefined
+  ? undefined
+  : resolveSelection(DIST_MANIFEST).containers[TEXT_ENCODER]?.parts[0]?.repo;
+const UMT5_PRESENT = filePresent(new URL("karume.json", UMT5_ROOT));
+/** GPU 経路を組める（配布形と umT5 のミラーがある）。 */
+const GPU_TEXT_PRESENT = DIST_PRESENT && UMT5_PRESENT;
+if (DIST_PRESENT && !GPU_TEXT_PRESENT) {
   console.warn(
-    `[karume] umT5 の資産が無い（${
-      missingWanTi2vSeriesAssets("gpu").join(" / ")
-    }）ため Wan2.2 の GPU 経路のケースを SKIP する。組み立て: ${UMT5_COMMANDS}`,
+    `[karume] umT5 の配布形ミラー ${UMT5_ROOT.pathname}（${
+      UMT5_REPO ?? TEXT_ENCODER
+    } の越境先）が無いため、` +
+      `Wan2.2 の GPU 経路のケースを SKIP する。組み立て: ${ASSEMBLE_UMT5_COMMAND}`,
   );
 }
+
+/** 越境先の mapping（umT5 の容器の repo → ローカルのミラー）。 */
+const umt5CrossRepo = (): Record<string, DistributionSource> => {
+  if (UMT5_REPO === undefined) {
+    throw new Error(
+      `配布形 ${WAN_TI2V_DIST_ROOT.pathname} の既定の選択の ${TEXT_ENCODER} が越境参照でない（2.2 の配布形は umT5 を ` +
+        `karume-umt5-xxl から越境参照する）。組み直し: ${WAN_TI2V_ASSEMBLE_COMMAND}`,
+    );
+  }
+  return { [UMT5_REPO]: denoDirectory(UMT5_ROOT) };
+};
 const FIXTURES_PRESENT = CASES.map(({ name }) => filePresent(fixtureUrl(name)));
 const ANY_FIXTURE = FIXTURES_PRESENT.some(Boolean);
 if (!ANY_FIXTURE) {
@@ -492,18 +534,20 @@ const textOf = (
 };
 
 /**
- * 系列の資産から参照席 / 実用席の pipeline を組む。経路と席は呼び手が必ず名乗る（既定の `"gpu"` にも manifest の既定席にも
- * 黙って乗せない — 2.1 の e2e と同じ規律）。`assets` は呼び手が 1 回だけ読んだ Record（`"gpu"` は umT5 の分を足したもの）。
+ * 配布形を取得元ハンドルで読んで参照席 / 実用席の pipeline を組む（network も CacheStorage も通らない）。経路と席は呼び手が
+ * 必ず名乗る（既定の `"gpu"` にも manifest の既定席にも黙って乗せない — 2.1 の e2e と同じ規律）。`"gpu"` は umT5 の越境先を
+ * `crossRepo` の mapping で渡す。
  */
 const loadPipeline = (
   gpu: GpuContext,
   diagnostics: Map<WanRunComponent, SessionDiagnostics>,
-  textEncoder: WanTi2vSeriesRoute,
+  textEncoder: NonNullable<WanPipelineOptions["textEncoder"]>,
   quant: string,
-  assets: WanAssets["assets"],
 ): Promise<WanTi2vPipeline> =>
-  WanTi2vPipeline.fromAssets(
-    { manifest: wanTi2vSeriesManifest(textEncoder), assets },
+  WanTi2vPipeline.fromPretrained(
+    textEncoder === "gpu"
+      ? denoDirectory(WAN_TI2V_DIST_ROOT, { crossRepo: umt5CrossRepo() })
+      : denoDirectory(WAN_TI2V_DIST_ROOT),
     {
       gpu,
       textEncoder,
@@ -521,7 +565,7 @@ Deno.test({
     "参照の DiT 出力から CFG + UniPC が参照の潜在をビット一致で再現する",
   ignore: !ANY_FIXTURE,
   fn: async () => {
-    const embedsSha = await sha256Hex(await Deno.readFile(WAN_TI2V_TEXT_EMBEDS_URL));
+    const embedsSha = await sha256Hex(await Deno.readFile(TEXT_EMBEDS_URL));
     const schedule = wanUniPcSchedule(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
     const mean = Float32Array.from(WAN22_LATENTS_MEAN);
     const std = Float32Array.from(WAN22_LATENTS_STD);
@@ -623,7 +667,7 @@ Deno.test({
   name:
     "Wan2.2 通し 2 ステップ（実 GPU）: 1280×704・17 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
     "sha256 の環境行（参照席の帯のケース・seed 経路の 2 寸法・GPU 経路）",
-  ignore: !SERIES_PRESENT || !GPU_AVAILABLE,
+  ignore: !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     await assertRunningAdapter();
     let deviceLost: string | undefined;
@@ -634,14 +678,11 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      // 資産の Record は 1 回だけ読む（事前計算の経路 — GPU 経路のケースは umT5 の分を足して同じ Record を使う）。
-      const assets = await readWanTi2vSeriesAssets("precomputed");
       const pipeline = await loadPipeline(
         gpu,
         diagnostics,
         "precomputed",
         WAN_TI2V_REFERENCE_QUANT,
-        assets,
       );
       try {
         const { prompts } = pipeline;
@@ -908,21 +949,19 @@ Deno.test({
         await pipeline.dispose();
       }
 
-      // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。umT5 の資産はこのケースの間だけ持つ。
+      // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。
       await t.step({
         name: `${GPU_TEXT_CASE_ID}（GPU 経路・sha256 の環境行）`,
         ignore: !GPU_TEXT_PRESENT,
         fn: async () => {
           let settlement: ReferenceSettlement | undefined;
           try {
-            const gpuAssets = { ...assets, ...await readWanTi2vTextEncoderAssets() };
             // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
             await using gpuPipeline = await loadPipeline(
               gpu,
               diagnostics,
               "gpu",
               WAN_TI2V_REFERENCE_QUANT,
-              gpuAssets,
             );
             const prompt = textOf(gpuPipeline.prompts, SEED_PROMPT, "prompt");
             await runRecordedCase(results, { id: GPU_TEXT_CASE_ID }, async () => {
@@ -984,7 +1023,7 @@ Deno.test({
   name:
     "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席と実用席）が" +
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha は観測だけ",
-  ignore: !FULL_PIPELINE || !SERIES_PRESENT || !GPU_AVAILABLE,
+  ignore: !FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     await assertRunningAdapter();
     let deviceLost: string | undefined;
@@ -995,18 +1034,10 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      // 資産の Record は 1 回だけ読み、席ごとの構築で使い回す（構築では Session を張らない）。
-      const assets = await readWanTi2vSeriesAssets("precomputed");
       for (const { id, quant } of FULL_CASES) {
         await t.step(id, async () => {
           try {
-            await using pipeline = await loadPipeline(
-              gpu,
-              diagnostics,
-              "precomputed",
-              quant,
-              assets,
-            );
+            await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
             await runRecordedCase(fullResults, { id }, async () => {
               const observed = await observe(pipeline, diagnostics, {
                 prompt: textOf(pipeline.prompts, SEED_PROMPT, "prompt"),
@@ -1065,14 +1096,14 @@ Deno.test({
 });
 
 /**
- * 参照門に登録するケース（回せるものだけ — 帯のケースは参照と事前計算の経路の資産、seed のケースは事前計算の経路の資産、
- * GPU 経路は加えて umT5 の資産が要る）。50 ステップの通しは sha を観測だけするので登録しない。
+ * 参照門に登録するケース（回せるものだけ — 帯のケースは参照と配布形、seed のケースは配布形、GPU 経路は加えて umT5 の
+ * ミラーが要る）。50 ステップの通しは sha を観測だけするので登録しない。
  */
 const CASE_IDS = [
-  ...(SERIES_PRESENT && ANY_FIXTURE ? CASES.map(({ name }) => bandCaseId(name)) : []),
-  ...(SERIES_PRESENT ? SEED_CASES.map(({ id }) => id) : []),
+  ...(DIST_PRESENT && ANY_FIXTURE ? CASES.map(({ name }) => bandCaseId(name)) : []),
+  ...(DIST_PRESENT ? SEED_CASES.map(({ id }) => id) : []),
   ...(GPU_TEXT_PRESENT ? [GPU_TEXT_CASE_ID] : []),
 ];
-const RUNNABLE = SERIES_PRESENT && GPU_AVAILABLE;
+const RUNNABLE = DIST_PRESENT && GPU_AVAILABLE;
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

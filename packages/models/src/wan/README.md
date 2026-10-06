@@ -7,8 +7,7 @@ prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]` together with its frame
 field). `WanTi2vPipeline` does the same for Wan2.2 TI2V 5B text-to-video (ADR
 [0121](../../../../docs/decisions/0121-wan22-ti2v-5b.md)): the same stages, the same shared family
 body (`family.ts`) and the same public types, with pipeline `wan-ti2v/1`, 48 latent channels, a VAE
-patch size of 2 and 24 fps. There is no Wan2.2 distribution yet (ADR 0121 stage 8), so it is built
-with `fromAssets` from a manifest and the exported series containers. The public surface is
+patch size of 2 and 24 fps. The public surface is
 [`wan.ts`](../../wan.ts) (also re-exported from the barrel); everything here is internal.
 
 The pipeline runs three stages, one session set at a time: the text-encoder session (GPU route) is
@@ -36,12 +35,15 @@ numbers); the same has not been measured after the text stage yet:
 3. **vae_decoder** — the two chunk graphs with the resident causal cache, always tiled, then the clamp
    to `[-1, 1]`.
 
-The distribution is `karume-wan2.1` (stage 7 — not published on Hugging Face yet, so there is no
-`WAN_SOURCES` table): `WanPipeline.fromPretrained` loads it through `@karume/hub` (a local mirror is
-passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest and the bytes. Both
-go through the same admission. The `text_encoder` component is a cross-repository reference to the
-umT5 distribution (`karume-umt5-xxl`); a local mirror of it is passed through the source handle's
-`crossRepo` mapping. The `"precomputed"` route never opens that component. The defaults for steps,
+The distributions are `karume-wan2.1` (ADR 0118 stage 7) and `karume-wan2.2` (ADR 0121 stage 8),
+neither published on Hugging Face yet, so there is no `WAN_SOURCES` table:
+`WanPipeline.fromPretrained` and `WanTi2vPipeline.fromPretrained` load them through `@karume/hub`
+(a local mirror is passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest
+and the bytes. Both go through the same admission. The Wan2.2 distribution reuses the Wan2.1 text
+assets byte for byte (the same umT5 embeddings and tokenizer, ADR 0121 decision 9). The
+`text_encoder` component is a cross-repository reference to the umT5 distribution
+(`karume-umt5-xxl`); a local mirror of it is passed through the source handle's `crossRepo`
+mapping. The `"precomputed"` route never opens that component. The defaults for steps,
 guidance and shift come from the manifest's `pipelineConfig` (`config.ts`); the UniPC structure is
 the upstream value.
 
