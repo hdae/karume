@@ -410,9 +410,10 @@ WAN22_QUANTS: Mapping[str, Any] = {
     "f16+dit8-a8-attn8-s16": {**WAN_QUANTS["f16+dit8-a8-attn8-s16"], "weights": {}},
 }
 
-#: Wan2.2 の既定席 — **仮の既定**として参照席（ADR 0121 決定 2「段 7 までの開発用は参照席を仮の
-#: 既定」）。利用者の視認の裁定で実用席へ替わりうるので、既定席はこの 1 か所だけで持つ。
-WAN22_DEFAULT_QUANT = "f16+dit8"
+#: Wan2.2 の既定席 — 実用席。利用者の視認の裁定（2026-10-06）: 1280×704×33・50 ステップの
+#: 12 本〈3 プロンプト × seed 42〜45〉に破綻なし — ADR 0121 追記「段 8a の結果」・方針「既定は
+#: 最も実用的な席」。品質の裁定で替わりうるので、既定席はこの 1 か所だけで持つ。
+WAN22_DEFAULT_QUANT = "f16+dit8-a8-attn8-s16"
 
 #: Wan2.2 の `pipelineConfig`（スキーマは 2.1 と同じ — `packages/models/src/wan/config.ts`）:
 #:

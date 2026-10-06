@@ -325,8 +325,9 @@ The tab has a text-encoder route switch. `precomputed` (the tab default) uses th
 asset; `gpu` runs umT5-XXL on the GPU and accepts any prompt — it needs the `karume-umt5-xxl` mirror,
 which the server serves at `/models/umt5/` (`--umt5-source`, default `models/karume-umt5-xxl`). A quant
 switch next to it lists the quants of the distribution this server serves; its first entry, `既定`,
-resolves to the manifest's `defaultQuant` at load (for Wan2.1, `f16+dit8-a8-attn8-s16` since 2026-10-04 —
-ADR 0120), and the resolved name is passed to the pipeline and recorded. The saved JSON is
+resolves to the manifest's `defaultQuant` at load (`f16+dit8-a8-attn8-s16` for both generations — Wan2.1
+since 2026-10-04, ADR 0120; Wan2.2 since 2026-10-06, ADR 0121), and the resolved name is passed to the
+pipeline and recorded. The saved JSON is
 `karume-wan-browser/4` and carries the generation (`wan2.1` / `wan2.2`), the route, and the quant.
 
 - **取得元** (source) — blank reads the distribution this server serves for the chosen generation

@@ -611,7 +611,7 @@ _WAN22_FRAMES_CHECKED = (
 #: Wan2.2 の上流との照合（参照席の 2 ステップの通し — ADR 0121 追記「段 6 の結果」・実寸の
 #: transformer 1 forward の f64 参照 — 追記「段 2 の結果」の r 門〈S = 8,190 / 7,920〉）とタイル
 #: decode の注（patchify 空間でブレンドしてから unpatchify — 決定 6）。実用席は自機 A/B 門
-#: （段 7）が未計測なので、比べていないと書く。
+#: （段 7）が未計測なので、数値では比べていないと書き、既定に採った根拠（視認 12 本）だけを書く。
 _WAN22_VERIFICATION = (
     "- **Against the upstream reference** (the `f16+dit8` quant, with the precomputed",
     "  embeddings): a 2-step run at 1280 × 704 with 17 frames and injected noise is compared",
@@ -619,7 +619,9 @@ _WAN22_VERIFICATION = (
     "  f16-rounded VAE weights and tiled decode), and single transformer forwards of up to",
     "  8,190 tokens (1280 × 704 with 33 frames among them) against a float64 reference.",
     "  Differences stay within tolerances measured on separate decision cases. The",
-    "  `f16+dit8-a8-attn8-s16` quant has not been compared yet.",
+    "  `f16+dit8-a8-attn8-s16` quant has not been compared numerically yet; it became the default",
+    "  after a visual check of 12 clips (3 prompts × seeds 42–45, 1280 × 704 with 33 frames, 50",
+    "  steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06.",
     "- **Tiled decode**: the VAE always decodes in overlapping tiles, blended in the patchified",
     "  space before the unpatchify, so the frames differ slightly from the upstream untiled",
     "  decode.",
@@ -821,7 +823,11 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         "distribution yet, and no run has been made in a browser.",
         "",
         *(
-            [f"- **Quality of `{practical}`**: not measured yet."]
+            [
+                f"- **Quality of `{practical}`**: not measured yet (no relative error against",
+                f"  `{reference}`); it is the default after a visual check of 12 clips on an",
+                "  RTX 3080 Ti (see Verification).",
+            ]
             if practical in seats and reference in seats
             else []
         ),

@@ -1458,7 +1458,8 @@ class TestTheWan22Distribution:
         assert list(out_dir.rglob("pipeline_steps.*")) == []
 
     def test_the_manifest_declares_the_two_seats(self, assembled22) -> None:
-        """席は参照席と実用席の 2 つ・f16 席は無い・既定は参照席（仮の既定 — ADR 0121 決定 2）。"""
+        """席は参照席と実用席の 2 つ・f16 席は無い・既定は実用席（視認の裁定 2026-10-06 —
+        ADR 0121 追記「段 8a の結果」）。"""
         _, manifest = assembled22
         model = manifest["models"][_TI2V]
         assert manifest["defaultModel"] == _TI2V
@@ -1476,7 +1477,7 @@ class TestTheWan22Distribution:
             f"{_TI2V}/{WAN_TOKENIZER_ROLE}/{umt5_tokenizer.ASSET_FILE}"
         )
         assert list(model["quants"]) == [_REFERENCE, _PRACTICAL]
-        assert model["defaultQuant"] == _REFERENCE
+        assert model["defaultQuant"] == _PRACTICAL
         seat = {
             WAN_TEXT_ENCODER_ROLE: "i8",
             WAN_TRANSFORMER_ROLE: "i8",
@@ -1718,7 +1719,7 @@ class TestTheWan22ModelCard:
         assert "- **size**: 1280 × 704 or 704 × 1280." in card
         assert "- **frames**: 4n+1 from 5 to 49." in card
         assert "  // width: 1280, height: 704, // or 704 × 1280" in card
-        assert f"| `{_REFERENCE}` (default) |" in card.split("### Quants")[1]
+        assert f"| `{_PRACTICAL}` (default) |" in card.split("### Quants")[1]
         assert f"implements `{WAN22_SUPPORTED_PIPELINE}`" in card
         prose = " ".join(card.split())
         assert "Text to video only." in prose
@@ -1785,7 +1786,11 @@ class TestTheWan22ModelCard:
         )
         assert set(WAN22_RESOURCES) == {_REFERENCE, _PRACTICAL}
         prose = " ".join(card.split())
-        assert "- **Quality of `f16+dit8-a8-attn8-s16`**: not measured yet." in prose
+        assert (
+            "- **Quality of `f16+dit8-a8-attn8-s16`**: not measured yet (no relative error against"
+            " `f16+dit8`); it is the default after a visual check of 12 clips on an RTX 3080 Ti"
+            " (see Verification)."
+        ) in prose
         # 1 forward は段 2（2026-10-04）・通しは 2026-10-05。49 フレームは製品の class でない。
         assert "timed on its own on 2026-10-04" in prose
         assert "on 2026-10-05, at 1280 × 704 with 50 steps" in prose
@@ -1906,7 +1911,7 @@ class TestTheRealWan22Series:
             WAN_TEXT_EMBEDS_ROLE,
             WAN_TOKENIZER_ROLE,
         }
-        assert plan.default_quant == _REFERENCE
+        assert plan.default_quant == _PRACTICAL
 
     def test_the_text_assets_are_the_wan21_series_files(self) -> None:
         assert (_REAL22.text_embeds, _REAL22.tokenizer) == (_REAL.text_embeds, _REAL.tokenizer)
