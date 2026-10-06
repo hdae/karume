@@ -442,3 +442,15 @@ sha 行と帯の照合は全て通る。
 - **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
   「tiny golden の取得と破棄を重ねた末尾の OOM」。
 - 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。
+
+## exporter の golden の決定性テスト 2 本（`activations` / `dilated_conv`）が換装後の開発機で赤 — 参照 io の最終ビットがマシン依存（2026-10-06 観測・記録のみ）
+
+`tools/exporter/tests/test_goldens.py::TestDeterminism::test_regeneration_matches_the_committed_reference_io` は、golden の io（torch CPU の f32 出力）を
+生成し直してコミット済みの参照とバイト比較する（CI では skip — テスト自身の注記「torch CPU 出力は最終 bit がマシン依存〈oneDNN の ISA 別 kernel〉・
+バイト一致は参照環境専用」）。開発機の CPU が換装（2026-10-06・Ryzen 5 7600）で変わり、`activations` は index 624・`dilated_conv` は index 392 の
+1 バイト（f32 の最終ビット）が違う。exporter のコードは未変更で、export-recipes の pytest 4,352 本と exporter の残り 3,496 本は緑。
+
+- 影響: この機で `cd tools/exporter && uv run pytest` が 2 failed になる（リリース判定の「pytest 緑」に掛かる）。TS 側の golden の門
+  （`e2e_golden_test.ts`）は環境キー別の行で、これとは別。
+- 対処の候補（利用者の裁定待ち）: (a) 参照環境を新しい機に替え、コミット済みの参照 io 2 本をこの機で撮り直す（ACTIVE_DESIGN の落とし穴「f32 の
+  golden が割れたら門を緩めず、その環境で撮り直す」）/ (b) 旧 CPU の参照を保ち、この機ではテストを skip する。どちらでも門（バイト一致）は緩めない。
