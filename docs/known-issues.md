@@ -433,8 +433,9 @@ sha 行と帯の照合は全て通る。
 - **利用者の裁定（2026-10-05・B570 のレーン）**: B570 の環境でレーンを通す手当てはやらない。中継の step の提案（helper + Wan の e2e 10 ファイル・72 か所の
   置き換え + 直書きを落とす検査）は承認されていない（保留 — 却下ではない）。レーンは開発機の換装の後の RTX 3080 Ti で通し、新しい GPU の sha 行は
   凍結コピー `128b511e` で `KARUME_REFERENCE=write` で作ってから HEAD で照合する（B570 の行は残す — 裁定 2026-10-06・ADR 0121 追記「開発機の換装」）。換装は 2026-10-06 に完了した（RTX 3080 Ti 12,288 MiB・
-  環境キー `deno-nvidia-geforce-rtx-3080-ti`）。この機ではレーンをまだ回していない。12 GiB の機なら手当て無しでレーンが通る見込みだが、
-  これは**推測**（B570 で通った走行の山は 9.44 GiB・落ちた走行は開始時点の確保が最大 4.15 GiB で山は未測。NVIDIA のドライバでの破棄済みの device の残り方も未測）。
+  環境キー `deno-nvidia-geforce-rtx-3080-ti`）。**2026-10-06 に RTX 3080 Ti で回し、手当て無しで通った**（凍結コピー `128b511e` の 2.1 = 401 passed・2.2 = 40 passed〈赤は時間門の
+  換算表の行の欠けだけ〉・HEAD `b744a9fd` のフル verify で Wan の 2 レーンは全緑 — ADR 0121 追記「RTX 3080 Ti のレーンとフル verify」）。
+  NVIDIA のドライバでの破棄済みの device の残り方は測っていない。
 - **運用の回避**: 緩和の後もこの step だけが OOM で落ちた走行は、`e2e_wan_dit_test.ts` を `--filter 実用席` で単独に再走する。直に
   `deno test` で回すときは `--v8-flags=--expose-gc` を付ける（付けないと緩和が効かない）。換装の後の機では、まず手当て無しでレーンを
   回して結果を見る。NVIDIA のドライバは DRM fdinfo の `drm-total-*` を出さないので、テストの VRAM の観測（`helpers/drm-usage.ts`）は
@@ -442,3 +443,20 @@ sha 行と帯の照合は全て通る。
 - **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
   「tiny golden の取得と破棄を重ねた末尾の OOM」。
 - 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。
+
+## RTX 3080 Ti: DeBERTa w8a8 鏡像門の case2 で 1 要素が崩壊上限の外（2026-10-06・決定的・未調査）
+
+開発機の換装（RTX 3080 Ti・NVIDIA 615.71.09）の後の初めてのフル `deno task verify`（HEAD `b744a9fd`）で、
+`packages/runtime/tests/e2e_deberta_w8a8_test.ts` の `i8/full-24layer / case2` が赤になった（ADR 0026 決定 3 の w8a8 鏡像門）。
+
+- 外れたのは `output.19`（`layer_norm_40`）の 1 要素（添字 17070）で、maxAbs 3.544・maxRel 5.5e4（output.2 以降の崩壊上限の判定）。
+  同じファイルの case0 / case1 / padded と census は緑。
+- 単独の再走 2 回も同じ要素・同じ値で赤だった。走行ごとの揺れではなく、この GPU で決まって出る差。
+- 帰属は未調査（推測の候補: i8 の量子化の境界〈round の同点〉で 1 要素の量子化値が反転し、後段の LayerNorm で増幅された形）。
+
+## RTX 3080 Ti: Wan 以外の系列に sha 参照行が無い（参照門 7 件が赤・2026-10-06）
+
+換装の後のフル verify（HEAD `b744a9fd`）で、3080 Ti の行が無いケースを持つ 7 本の参照門が赤になった: anima（登録 11 ケース）・
+birefnet（16）・depth-anything（4）・gemma4-qat（6）・gemma4（3）・runtime の gemma4 golden（3）・siglip2 golden（16）。
+行の無いケースの sha 門は明示 SKIP になる（ADR 0106）。Wan は凍結コピーで行を書いた（ADR 0121 追記「RTX 3080 Ti のレーンとフル verify」）。
+行を書く時点（HEAD か、各系列の最後に緑だったコミットの凍結コピーか）は未決。
