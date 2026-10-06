@@ -256,6 +256,14 @@ later の「decode 速度の残り」。
   動機は 2 つ: `irodori-v4-small` と `irodori-v4.1-small` の重複（83 ファイルが同一 sha256・5,605 MiB）を
   越境参照で消すには参照の宣言が要ること、`anima` → `anima-extra` の公開が参照先の SHA 待ちの直列で
   手作業なこと（[release-runbook](release-runbook.md) §0）。設計は未着手。
+
+- **manifest（`karume.json`）の構造の見直し — 最適化フラグとプリセットを扱いやすくする（ユーザー起票 2026-10-06）**: 今は実行ノブの束を
+  quant 席の `session` 1 つで持ち、席名が束の名前を兼ねる（ADR [0074](decisions/0074-quant-seat-naming.md) /
+  [0110](decisions/0110-practical-tier-numerics-contract.md) / [0111](decisions/0111-session-options-composition.md)）。
+  最適化フラグとプリセット（束）を扱いやすい形へ変えたい。何がどこに属するか（格納型・実行ノブ・束・部品ごとの宣言など）は
+  後で整理する。材料は高速パスの表し方の棚卸し（2026-10-06・`.claude/reviews/2026-10-06_fast-path-inventory/`・git 追跡外）の
+  未決 — 部品ごとの session が無い（VAE / text encoder の高速パスを宣言できない）・新しいカーネル変種のキー・束を変えるとき
+  既存の席を変えるか新しい席を作るか。**着手は後**（利用者 2026-10-06 — Wan2.2 の最適化は今の `session` の範囲で進める）。
 - **irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す（起票 2026-09-24）**: 2 リポの 83 ファイルが
   同一 sha256。0.13.0 の再アップロードでは見送り、次の breaking 波で判断する（2026-09-24 ユーザー裁定）。
   irodori 2 リポの再アップロード（release 節 — `dit_context` の追加）と同じ回に行う。
