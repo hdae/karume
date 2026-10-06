@@ -635,8 +635,8 @@ uv run python dist.py --pipeline wan \
 `--pipeline wan-ti2v` with the same five `--ref-*` options assembles Wan2.2 TI2V 5B into
 `models/karume-wan2.2/` (ADR 0121 stage 8 — model `ti2v-5b`, pipeline `wan-ti2v/1`). The recipe is
 the same plan function with the Wan2.2 table: only the int8 transformer (`wan2.2-ti2v-5b-i8-dyn`),
-the VAE graphs of `wan2.2-ti2v-5b-f16-dyn`, the quants `f16+dit8` (the default for now) and
-`f16+dit8-a8-attn8-s16`, `scheduler.shift` 5.0, and the two Wan2.1 text assets copied byte for byte —
+the VAE graphs of `wan2.2-ti2v-5b-f16-dyn`, the quants `f16+dit8` and
+`f16+dit8-a8-attn8-s16` (the default since 2026-10-06), `scheduler.shift` 5.0, and the two Wan2.1 text assets copied byte for byte —
 their provenance is checked against the Wan2.1 pin, while the transformer and VAE containers are
 checked against the Wan2.2 pin.
 
