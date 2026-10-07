@@ -14,6 +14,9 @@
       "deno-intel-graphics-bmg-g21": "e5a537894fa810330de6e4e2800c47aa01127246f827dcfbdb1605820bb12580",
       "deno-nvidia-geforce-rtx-3080-ti": "b463332bedb1e17002d997e3140a7943d55fd7625e6c9194fa43dc0d39daf4ce"
     },
+    "f16+dit8-2step-boxing-cats-seed42-1280x704-121f-shift5": {
+      "deno-nvidia-geforce-rtx-3080-ti": "d6c791db01f8d9ff0c33de13f4317d6706476f577d0d0834b38d12da62dcf638"
+    },
     "f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5": {
       "deno-intel-graphics-bmg-g21": "c1da8bfebc4a0d14ced3915291512b8f4486eaa9a9ca3d37e1d36c7191a0de50",
       "deno-nvidia-geforce-rtx-3080-ti": "bc822ce80cd14e77f667dd5934cbd15ca88ba45210fb8c6432df5e17aad1b197"
