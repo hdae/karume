@@ -55,16 +55,22 @@ export type Measurement = {
   readonly stage: "karume" | "spec";
 };
 
-/** 自機 A/B 門の帯（ADR 0110 決定 5 — 宣言であって環境キー別の行ではない）。 */
+/**
+ * 相対 RMS の帯（宣言であって環境キー別の行ではない）。自機 A/B 門（ADR 0110 決定 5）と、
+ * DeBERTa w8a8 鏡像門の崩壊上限（ADR 0026 追記 2026-10-07）が使う。
+ */
 export type ComparisonBand = {
   /** 帯を掛けた指標（今は相対 RMS だけ）。 */
   readonly metric: "relRms";
+  /** 下限。0 は床なし（鏡像門は崩壊上限だけを掛ける）。 */
   readonly floor: number;
   readonly ceiling: number;
 };
 
 /**
- * 自機 A/B 門の実測 1 本（同じ機・同じ重みで `session` が空の参照席と、実用席の同じ観測点を比べた差）。
+ * 相対 RMS で比べた実測 1 本。自機 A/B 門（同じ機・同じ重みで `session` が空の参照席と、実用席の
+ * 同じ観測点を比べた差）と、鏡像門の崩壊上限（torch 鏡像 golden と、実行した経路の同じ出力を比べた
+ * 差）が積む。
  *
  * {@link Measurement} と同じく、合格した回の差も残す（帯を導く材料は割れる前から要る）。
  *
@@ -75,9 +81,12 @@ export type ComparisonBand = {
 export type Comparison = {
   /** 観測点（`step1-latent` / グラフの出力名など）。 */
   readonly output: string;
-  /** 参照席（`session` が空の quant 名）。 */
+  /**
+   * 参照側。A/B 門なら参照席（`session` が空の quant 名）・鏡像門なら golden の系列名
+   * （`io-i8a8.<case>`）。
+   */
   readonly reference: string;
-  /** 実用席（`session` を持つ quant 名）。 */
+  /** 実行側。A/B 門なら実用席（`session` を持つ quant 名）・鏡像門なら実行した経路（`a8`）。 */
   readonly practical: string;
   /** ‖p − r‖₂ / ‖r‖₂。 */
   readonly relRms: number;
@@ -109,8 +118,8 @@ export type ResultEntry = {
    */
   readonly measurements?: readonly Measurement[];
   /**
-   * 自機 A/B 門の実測（ADR 0110 決定 5）。{@link runRecordedCase} 経由のケースは**積んだときだけ**
-   * 持つ（A/B 門でないケースの決着の形は変えない）。
+   * 相対 RMS の実測（自機 A/B 門 — ADR 0110 決定 5・鏡像門の崩壊上限 — ADR 0026 追記 2026-10-07）。
+   * {@link runRecordedCase} 経由のケースは**積んだときだけ**持つ（積まないケースの決着の形は変えない）。
    */
   readonly comparisons?: readonly Comparison[];
 };

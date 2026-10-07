@@ -24,26 +24,55 @@
 // 2. **パイプラインキーの census**（{@link EXPECTED_CENSUS}）— run が実際に i8a8 GEMM と
 //    `quantize_rows` を linear の本数ぶん回し、それ以外の linear カーネルを 1 回も回していない
 //    こと。1 が分布の話であるのに対し、こちらは実行そのものの直接観測。
-// 3. **output.2 以降の崩壊上限**（{@link COLLAPSE_TOLERANCE}）— 数値パリティではなく、NaN /
-//    発散 / 桁外れの値の検出だけを受け持つ。
+// 3. **output.2 以降の崩壊上限**（{@link COLLAPSE_CEILINGS}・判定は {@link judgeCollapse}）—
+//    数値パリティではなく、崩壊の検出だけを受け持つ。指標は出力ごとの相対 RMS 誤差
+//    ‖gpu − golden‖₂ / ‖golden‖₂ ≤ その出力の上限（output.2 の 0.020 〜 output.24 の 0.33）と、
+//    非有限 0（両側・全要素）。
+//    - 捕まえるもの（実 GPU の dump を壊して同じ判定に通した故障注入 — 4 ケース × output.2〜24
+//      の 92 出力の全てで赤）: 全要素 0（1.0）・符号反転（≈ 2.0）・1 要素だけの NaN / +Inf・
+//      全要素 × 2（1.00〜1.02）・全要素 × 1.5（0.50〜0.53）。
+//    - 捕まえないもの: 深い出力の × 1.25 の拡大（output.22〜24 の 12 出力のうち 11 が緑 — 92 出力の
+//      うち 81 が赤）、中間層の 1 要素の飛び、f32 経路への沈黙フォールバック（GPU f32 経路の dump は
+//      92 出力の全てで上限の内 — 0.016〜0.120）。これらは 1・2 と
+//      `tests/gpu_i8a8_test.ts` の atol=0 の数値契約が受け持つ（24 層は同じ形の同じパイプラインを
+//      回るので、浅い層の欠陥は 1 の output.1 にも出る）。
+//    - 上限の導き方: 出力ごとに、正当な標本（GPU a8・この機の CPU で採り直した torch 鏡像の
+//      別標本 6 本・鏡像の埋め込み出口に相対 ±2^-23 の乱数を入れた摂動アンサンブル各ケース 8 本）
+//      の最悪 × 2 を有効数字 2 桁で切り上げた値。標本の内訳と出力ごとの最悪・上限の表は ADR 0026 の
+//      追記（2026-10-07）。
+//    - maxAbs の atol 3 をやめた理由: atol 3 は ADR 0026 の**末端層（output.24）だけ**の歴史値
+//      1.46 の約 2 倍で、それを中間層まで maxAbs で掛けていた。中間層は外れ値チャネル
+//      （channel 686・\|ref\| 最大 28.8）の符号の分岐点で活性量子化の段の反転が 1 要素を大きく
+//      動かし、CPU の torch 鏡像の別標本どうしでも同じ 1 要素が 7.17 動く（RTX 3080 Ti の case2
+//      output.19 が 3.54 で赤になったのはこの形 — GPU の欠陥ではない）。
 //
-// ## 値はすべて歴史値
+// ## 値の出どころ
 //
-// 1 と 3 の数値は ADR 0026（2026-08-03・RTX 3080 Ti・torch 鏡像との素の突合）の値を起点に
-// 置いたもので、**この環境で実測から導き直していない**。この門は全出力の maxAbs を
-// `outputs/verify/` の results.json に残す（落ちた回も全出力を測り終えてから落とす）ので、
-// 導き直しはその実測を読む。
+// 1 の数値は ADR 0026（2026-08-03・RTX 3080 Ti・torch 鏡像との素の突合）の**歴史値**で、
+// この環境で導き直していない。3 の数値は 2026-10-07 にこの環境（RTX 3080 Ti・Ryzen 5 7600）で
+// 実測から導き直した値。この門は output.0 / 1 の maxAbs（`measurements`）と output.2 以降の
+// 相対 RMS 誤差・maxAbs（`comparisons`）を `outputs/verify/` の results.json に残す（落ちた回も
+// 全出力を測り終えてから落とす）ので、導き直しはその実測を読む。
+//
+// ## 鏡像 golden を採り直さない
+//
+// 鏡像 golden（`io-i8a8.<case>`）は 2026-09-05 に換装前の機の CPU で採った。1 の厳密 tolerance は
+// golden を採った CPU の第 0 層の量子化の段の丸めの向きに依存する: この機の CPU で採り直すと
+// case0 / padded の output.1 が保存版から 1.285e-3 動き（GPU は旧機の CPU と同じ側）、atol 5e-5 の
+// 1 が赤になる。採り直しは解決にならないので、別の機の CPU で鏡像 golden を作り直さない。
 //
 // ## 宣言しない variant
 //
 // `deberta-i8/sbv2-22layer` は最終層 1 本出しで、出力が飽和域（1 の判別帯の外）にしか無い —
-// 3 の崩壊上限と 2 の census しか掛けられず、しかもその歴史値が無い。`deberta-i8/dev-2layer`
-// も歴史値が無い。足すときは `atol=rtol=0` の素の突合で実測してから宣言する（値を発明しない）。
+// 3 の崩壊上限と 2 の census しか掛けられず、しかも崩壊上限は full-24layer の標本からしか
+// 導いていない。`deberta-i8/dev-2layer` も実測が無い。足すときは `atol=rtol=0` の素の突合と
+// 別標本で実測してから宣言する（値を発明しない）。
 //
 // 資産が無い環境では SKIP する（GPU アダプタの有無を見る ADR 0005 の門番とは独立）。鏡像が
 // **一部だけ**ある場合は SKIP ではなく FAIL にする（下の「資産の完全性」テスト）。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import {
   acquireGpu,
   parseSafetensors,
@@ -51,7 +80,12 @@ import {
   type SessionDiagnostics,
   type Tensor,
 } from "../mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
+import {
+  AllcloseError,
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "./helpers/environment.ts";
 import { ioTensor } from "./helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -79,15 +113,127 @@ const STRICT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 0 };
 const STRICT_OUTPUTS = 2;
 
 /**
- * output.2 以降に掛ける**崩壊上限**（**歴史値からの仮置き** — ADR 0026 の末端層の実測 maxAbs
- * 1.46 の約 2 倍）。
+ * output.2 以降に掛ける**崩壊上限**の表 = 出力名 → 相対 RMS 誤差 ‖gpu − golden‖₂ / ‖golden‖₂ の
+ * 上限（**この環境で実測から導いた宣言値** — 2026-10-07・RTX 3080 Ti / Ryzen 5 7600・ADR 0026
+ * 追記 2026-10-07）。宣言であって環境キー別の行ではない（ADR 0110 決定 4）。
  *
- * 数値パリティではない: 飽和域では f32 経路（1.33）もこの上限を通る。受け持つのは NaN / ±Inf
- * （`compareTensors` はどちらの側の非有限値も不合格にする）と、\|ref\| 上端 28.9 と同じ桁まで
- * 開く発散だけ。上限を広げて通すのではなく、先に i8a8 の scale / accumulator / 適格判定の
- * どれが動いたかを確かめる（数値契約の正本は `tests/gpu_i8a8_test.ts` の atol=0）。
+ * 導き方: 出力ごと（観測点 = output.k）に、正当な標本 60 本（4 ケース × 〈GPU a8 1 本 + この機の
+ * CPU で採り直した torch 鏡像の別標本 6 本〈AVX512 / AVX2 / DEFAULT × 1 / 6 スレッド〉+ 鏡像の
+ * 埋め込み出口に相対 ±2^-23 の乱数を入れた摂動アンサンブル 8 本〉）の最悪 × 2 を、有効数字 2 桁で
+ * 切り上げた値。この門は ADR 0110 決定 5 の A/B 門ではない（比較相手は同じ機の参照層ではなく torch
+ * 鏡像 golden）が、崩壊上限の導き方だけを決定 5-3（E2E の崩壊上限 = 観測点の実測 × 2 程度）に揃え、
+ * 決定 4 の MUST NOT（「実測の 5〜10 倍」を E2E の帯の導出に使う）を踏まない。5-3 の「量子化席なら
+ * 理論値との整合を残す」は当てはめない: 活性の丸めは不連続で、上流の 1e-5 級の差が段の ±1 飛びを
+ * 起こして数層で飽和する（ADR 0026「検出限界」）ので、output.k の相対 RMS 誤差に使える理論上界が
+ * 無い — a8 の数値の正しさは `tests/gpu_i8a8_test.ts` の atol=0 の数値契約が受け持つ。GPU f32 経路の
+ * dump は a8 の標本ではないので入れない。最悪は浅い出力ほど小さい（output.2 0.0099 → output.24 0.1620）ので、
+ * 1 つのスカラーで掛けると浅い出力の上限が桁違いに緩む — 表にするのはそのため。
+ *
+ * 材料と再現: `outputs/diag/deberta-w8a8-2026-10-07/d1-derive/`（git 追跡外）。tools/export-recipes
+ * から `HF_HUB_OFFLINE=1 uv run --with 'transformers==5.14.1' python
+ * ../../outputs/diag/deberta-w8a8-2026-10-07/d1-derive/derive.py` が `derive.json` の `ceilings` に
+ * この表を書く（標本の作り方は ADR 0026 追記の「導き直しの手順」）。故障注入は同じ置き場の
+ * `fault_inject.ts`（{@link collapseCeilingOf} と {@link judgeCollapse} をそのまま import する）。
+ *
+ * 数値パリティではない: 受け持つのは非有限（{@link judgeCollapse} が両側・全要素を見る）と、出力
+ * 全体が golden と別物になる崩壊（全要素 0 = 1.0・符号反転 ≈ 2.0・全要素 × 2 ≈ 1.0・× 1.5 ≈ 0.5）
+ * だけ。中間層の 1 要素の飛びや f32 経路への沈黙フォールバックは捕まえない — 細かな欠陥は
+ * output.0 / 1 の厳密 tolerance・census・`tests/gpu_i8a8_test.ts` の atol=0 の数値契約の受け持ち。
+ * 上限を広げて通すのではなく、先に i8a8 の scale / accumulator / 適格判定のどれが動いたかを確かめる。
  */
-const COLLAPSE_TOLERANCE: Tolerance = { atol: 3, rtol: 0 };
+const COLLAPSE_CEILINGS: Readonly<Record<string, number>> = {
+  "output.2": 0.020,
+  "output.3": 0.037,
+  "output.4": 0.051,
+  "output.5": 0.062,
+  "output.6": 0.071,
+  "output.7": 0.085,
+  "output.8": 0.095,
+  "output.9": 0.11,
+  "output.10": 0.12,
+  "output.11": 0.13,
+  "output.12": 0.14,
+  "output.13": 0.15,
+  "output.14": 0.15,
+  "output.15": 0.17,
+  "output.16": 0.17,
+  "output.17": 0.19,
+  "output.18": 0.21,
+  "output.19": 0.22,
+  "output.20": 0.24,
+  "output.21": 0.26,
+  "output.22": 0.28,
+  "output.23": 0.31,
+  "output.24": 0.33,
+};
+
+/**
+ * io の出力名（`output.<k>`）の崩壊上限。表に無い出力は投げる（上限の無い出力を黙って通さない）。
+ */
+export const collapseCeilingOf = (output: string): number => {
+  if (!Object.hasOwn(COLLAPSE_CEILINGS, output)) {
+    throw new Error(`${output} の崩壊上限が宣言されていない（COLLAPSE_CEILINGS）`);
+  }
+  return COLLAPSE_CEILINGS[output];
+};
+
+/** 崩壊上限の判定 1 出力ぶん（{@link judgeCollapse}）。 */
+export type CollapseReport = {
+  readonly pass: boolean;
+  /** ‖actual − expected‖₂ / ‖expected‖₂（f64 で積む）。非有限があれば +Inf。 */
+  readonly relRms: number;
+  /** 記録だけ — 判定には使わない。非有限があれば +Inf。 */
+  readonly maxAbs: number;
+  /** どちらかの側が NaN / ±Inf だった要素数（全要素を見る）。 */
+  readonly nonFiniteCount: number;
+};
+
+/**
+ * output.2 以降の 1 出力の判定: 非有限 0（両側・全要素）かつ相対 RMS 誤差 ≤ `ceiling`（その出力の
+ * 上限 — {@link collapseCeilingOf}）。
+ *
+ * maxAbs で判定しない理由: 中間層は外れ値チャネル（channel 686・\|ref\| 最大 28.8）の符号の
+ * 分岐点で、活性量子化の段の反転が 1 要素を大きく動かす。CPU の torch 鏡像の別標本どうしでも
+ * その 1 要素が 7.17 動く（ADR 0026 追記 2026-10-07）。
+ */
+export const judgeCollapse = (
+  actual: ArrayLike<number>,
+  expected: ArrayLike<number>,
+  ceiling: number,
+): CollapseReport => {
+  if (actual.length !== expected.length) {
+    throw new AllcloseError(`長さ不一致: actual ${actual.length} vs expected ${expected.length}`);
+  }
+  let difference = 0;
+  let norm = 0;
+  let maxAbs = 0;
+  let nonFiniteCount = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    const x = actual[index];
+    const y = expected[index];
+    // MUST: 非有限は相対 RMS の大小に任せず数えて落とす — 合否を比較の向き（NaN はどの比較も
+    // false）に依存させず、報告にも何が起きたかを出す。
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      nonFiniteCount += 1;
+      continue;
+    }
+    const delta = x - y;
+    difference += delta * delta;
+    norm += y * y;
+    maxAbs = Math.max(maxAbs, Math.abs(delta));
+  }
+  if (nonFiniteCount > 0) {
+    return {
+      pass: false,
+      relRms: Number.POSITIVE_INFINITY,
+      maxAbs: Number.POSITIVE_INFINITY,
+      nonFiniteCount,
+    };
+  }
+  const relRms = Math.sqrt(difference) / Math.sqrt(norm);
+  // ‖expected‖₂ = 0 は 0/0 = NaN か +Inf になり、`<=` が false を返して落ちる。
+  return { pass: relRms <= ceiling, relRms, maxAbs, nonFiniteCount };
+};
 
 /**
  * 1 run あたりの dispatch の内訳の期待値（**グラフと実装から導いた値** — ADR 0026 の診断キー
@@ -192,10 +338,6 @@ const readBuffer = async (file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** 出力 index に掛ける帯（{@link STRICT_OUTPUTS} 未満が厳密・以降が崩壊上限）。 */
-const toleranceOf = (index: number): Tolerance =>
-  index < STRICT_OUTPUTS ? STRICT_TOLERANCE : COLLAPSE_TOLERANCE;
-
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const FILES = mirrorFiles(ROOT);
 /**
@@ -212,6 +354,135 @@ if (!AVAILABLE) {
       `DeBERTa の w8a8 鏡像門（${VARIANT}）を SKIP する。生成: ${GENERATE}`,
   );
 }
+
+describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らない）", () => {
+  // 固定の合成データ: 1 チャネルだけ桁の大きい外れ値チャネルを持つ golden（実物の channel 686 の形）。
+  const SIZE = 1024;
+  const OUTLIER = 686;
+  const golden = Float32Array.from(
+    { length: SIZE },
+    (_, index) => index === OUTLIER ? 28.8 : Math.sin(index * 0.37 + 0.1) * (1 + (index % 7) * 0.3),
+  );
+  const normOf = (values: ArrayLike<number>): number =>
+    Math.sqrt(Array.from(values, (value) => value * value).reduce((sum, value) => sum + value, 0));
+  /** golden に、相対 RMS 誤差がちょうど `target` になる揺れ（golden と別周期）を足した別標本。 */
+  const sampleAt = (target: number): Float32Array => {
+    const noise = Array.from({ length: SIZE }, (_, index) => Math.cos(index * 1.13 + 0.7));
+    const scale = target * normOf(golden) / normOf(noise);
+    return Float32Array.from(golden, (value, index) => value + noise[index] * scale);
+  };
+  const map = (values: Float32Array, f: (value: number) => number): Float32Array =>
+    Float32Array.from(values, f);
+  const withElement = (values: Float32Array, index: number, value: number): Float32Array => {
+    const copy = values.slice();
+    copy[index] = value;
+    return copy;
+  };
+  /** 表の全出力（output.2〜24）と、その上限。 */
+  const ceilings = Object.entries(COLLAPSE_CEILINGS);
+  /**
+   * 各出力の上限の半分の相対 RMS を持つ別標本。上限は導出に使った最悪の × 2 以上なので、
+   * これは導出に使った正当な最悪以上の揺れを持つ（正当な標本の代表）。
+   */
+  const legitimateFor = (ceiling: number): Float32Array => sampleAt(ceiling / 2);
+  const deepest = collapseCeilingOf("output.24");
+  /**
+   * 上限が output.24 の正当な揺れ（上限の半分 ≈ 0.165 — 導出の最悪 0.1620 程度）より狭い最後の
+   * 出力（ADR 0026 追記 2026-10-07 の表: output.14 の上限 0.15 < 0.165 ≤ output.15 の 0.17）。
+   */
+  const LAST_TIGHTER_THAN_DEEPEST = 14;
+  const indexOf = (output: string): number => Number(output.slice("output.".length));
+
+  it("上限の表は output.2〜24 をちょうど覆い、表に無い出力は投げる", () => {
+    assertEquals(
+      ceilings.map(([output]) => output),
+      Array.from(
+        { length: GRAPH_OUTPUTS - STRICT_OUTPUTS },
+        (_, k) => `output.${k + STRICT_OUTPUTS}`,
+      ),
+    );
+    for (const output of ["output.1", `output.${GRAPH_OUTPUTS}`]) {
+      assertThrows(() => collapseCeilingOf(output), Error, output);
+    }
+  });
+
+  it("上限は出力の順に非減少（活性量子化の誤差は層を下るほど積もる — 導出の最悪も単調）", () => {
+    ceilings.slice(1).forEach(([output, ceiling], position) => {
+      const [previousOutput, previous] = ceilings[position];
+      assert(previous <= ceiling, `${previousOutput} の ${previous} > ${output} の ${ceiling}`);
+    });
+  });
+
+  it("output.24 の正当な揺れの大きさの別標本は、output.2〜14 では赤・output.15〜24 では通す（上限は出力ごと）", () => {
+    const deepLegitimate = legitimateFor(deepest);
+    for (const [output, ceiling] of ceilings) {
+      const report = judgeCollapse(deepLegitimate, golden, ceiling);
+      assertEquals(
+        report.pass,
+        indexOf(output) > LAST_TIGHTER_THAN_DEEPEST,
+        `${output}: relRms=${report.relRms} 上限 ${ceiling}`,
+      );
+    }
+  });
+
+  it("各出力で、上限の半分（導出の最悪以上）の別標本は通し、上限を 1% 超えた別標本は赤にする", () => {
+    for (const [output, ceiling] of ceilings) {
+      const inside = judgeCollapse(legitimateFor(ceiling), golden, ceiling);
+      assert(inside.pass, `${output}: relRms=${inside.relRms} 上限 ${ceiling}`);
+      const outside = judgeCollapse(sampleAt(ceiling * 1.01), golden, ceiling);
+      assertEquals(outside.pass, false, `${output}: relRms=${outside.relRms} 上限 ${ceiling}`);
+    }
+  });
+
+  it("外れ値チャネルの 1 要素が 7 動いても（maxAbs では落ちた形）全体が近ければ output.19 の上限で通す", () => {
+    const ceiling = collapseCeilingOf("output.19");
+    const report = judgeCollapse(withElement(golden, OUTLIER, 28.8 - 7.17), golden, ceiling);
+    assert(report.pass, `relRms=${report.relRms} 上限 ${ceiling}`);
+    assert(report.maxAbs > 7, `maxAbs=${report.maxAbs}`);
+  });
+
+  it("全要素 0 を全出力で赤にする（相対 RMS 1.0）", () => {
+    for (const [output, ceiling] of ceilings) {
+      const report = judgeCollapse(new Float32Array(SIZE), golden, ceiling);
+      assertEquals([report.pass, report.relRms], [false, 1], output);
+    }
+  });
+
+  it("符号反転を全出力で赤にする", () => {
+    for (const [output, ceiling] of ceilings) {
+      const flipped = map(legitimateFor(ceiling), (value) => -value);
+      assertEquals(judgeCollapse(flipped, golden, ceiling).pass, false, output);
+    }
+  });
+
+  it("全要素 × 2 と × 1.5 の拡大を全出力で赤にする（相対 RMS 1.0 / 0.5）", () => {
+    for (const factor of [2, 1.5]) {
+      const scaled = map(golden, (value) => value * factor);
+      for (const [output, ceiling] of ceilings) {
+        const report = judgeCollapse(scaled, golden, ceiling);
+        assertEquals(
+          report.pass,
+          false,
+          `× ${factor} ${output}: relRms=${report.relRms} 上限 ${ceiling}`,
+        );
+      }
+    }
+  });
+
+  it("1 要素だけの NaN / +Inf / -Inf を、実行側でも期待値側でも赤にする", () => {
+    const legitimate = legitimateFor(deepest);
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const onActual = judgeCollapse(withElement(legitimate, 3, bad), golden, deepest);
+      assertEquals([onActual.pass, onActual.nonFiniteCount], [false, 1], `actual に ${bad}`);
+      const onExpected = judgeCollapse(legitimate, withElement(golden, 3, bad), deepest);
+      assertEquals([onExpected.pass, onExpected.nonFiniteCount], [false, 1], `expected に ${bad}`);
+    }
+  });
+
+  it("長さが違えば判定せずに投げる（取り違え — 誤差の問題ではない）", () => {
+    assertThrows(() => judgeCollapse(golden.subarray(1), golden, deepest), AllcloseError);
+  });
+});
 
 Deno.test({
   name: `DeBERTa w8a8 資産（${VARIANT}）: 鏡像 io の全ケースとモデル本体が揃っている`,
@@ -262,7 +533,8 @@ for (const file of FILES) {
     name: `DeBERTa w8a8 鏡像突合: ${VARIANT} / ${caseName}（実 GPU / torch 鏡像期待値）`,
     ignore: !RUNNABLE,
     fn: async () => {
-      await runRecordedCase(results, { id: `${VARIANT}/${caseName}` }, async ({ measurements }) => {
+      await runRecordedCase(results, { id: `${VARIANT}/${caseName}` }, async (recorded) => {
+        const { measurements, comparisons } = recorded;
         const { parsed, io, inputs } = await openCase(file);
         const gpu = await acquireGpu();
         /** 帯を外れた出力（全出力を測り終えてから落とす — 導き直しに全出力の実測が要る）。 */
@@ -277,22 +549,45 @@ for (const file of FILES) {
             const outputs = await session.run(inputs);
             assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
             parsed.graph.outputs.forEach((name, index) => {
-              const view = io.tensors.get(`output.${index}`);
-              assert(view !== undefined, `output.${index} が ${file} に無い`);
-              const where = `${VARIANT}/${caseName} output.${index} ('${name}')`;
+              // MUST: io の引きと崩壊上限の引きは同じ名前で行う（鍵の取り違えで別の出力の上限を掛けない）。
+              const ioName = `output.${index}`;
+              const view = io.tensors.get(ioName);
+              assert(view !== undefined, `${ioName} が ${file} に無い`);
+              const where = `${VARIANT}/${caseName} ${ioName} ('${name}')`;
               const declared = parsed.graph.values[name].dtype;
               assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
               assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-              const tolerance = toleranceOf(index);
-              const report = compareTensors(outputs[name], ioTensor(io, view, declared), tolerance);
-              measurements.push({
+              const expected = ioTensor(io, view, declared);
+              if (index < STRICT_OUTPUTS) {
+                const report = compareTensors(outputs[name], expected, STRICT_TOLERANCE);
+                measurements.push({
+                  output: name,
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: STRICT_TOLERANCE,
+                  stage: "karume",
+                });
+                if (!report.pass) failures.push(`${where}: ${formatAllclose(report)}`);
+                return;
+              }
+              // 崩壊上限の出力は `comparisons` に積む（相対 RMS と maxAbs を 1 本で表せる既存の
+              // 形 — 参照側 = torch 鏡像 golden・実行側 = a8。床は 0 = 床なし）。
+              const ceiling = collapseCeilingOf(ioName);
+              const report = judgeCollapse(outputs[name].data, expected.data, ceiling);
+              comparisons.push({
                 output: name,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance,
-                stage: "karume",
+                reference: `${ACT_IO_PREFIX}${caseName}`,
+                practical: "a8",
+                relRms: report.relRms,
+                maxAbs: report.maxAbs,
+                band: { metric: "relRms", floor: 0, ceiling },
               });
-              if (!report.pass) failures.push(`${where}: ${formatAllclose(report)}`);
+              if (!report.pass) {
+                failures.push(
+                  `${where}: relRms=${report.relRms} (上限 ${ceiling}) ` +
+                    `nonFinite=${report.nonFiniteCount} maxAbs=${report.maxAbs}`,
+                );
+              }
             });
           } finally {
             await session.dispose();

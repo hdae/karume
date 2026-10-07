@@ -443,13 +443,3 @@ sha 行と帯の照合は全て通る。
 - **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
   「tiny golden の取得と破棄を重ねた末尾の OOM」。
 - 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。
-
-## RTX 3080 Ti: DeBERTa w8a8 鏡像門の case2 で 1 要素が崩壊上限の外（2026-10-06・決定的・未調査）
-
-開発機の換装（RTX 3080 Ti・NVIDIA 615.71.09）の後の初めてのフル `deno task verify`（HEAD `b744a9fd`）で、
-`packages/runtime/tests/e2e_deberta_w8a8_test.ts` の `i8/full-24layer / case2` が赤になった（ADR 0026 決定 3 の w8a8 鏡像門）。
-
-- 外れたのは `output.19`（`layer_norm_40`）の 1 要素（添字 17070）で、maxAbs 3.544・maxRel 5.5e4（output.2 以降の崩壊上限の判定）。
-  同じファイルの case0 / case1 / padded と census は緑。
-- 単独の再走 2 回も同じ要素・同じ値で赤だった。走行ごとの揺れではなく、この GPU で決まって出る差。
-- 帰属は未調査（推測の候補: i8 の量子化の境界〈round の同点〉で 1 要素の量子化値が反転し、後段の LayerNorm で増幅された形）。

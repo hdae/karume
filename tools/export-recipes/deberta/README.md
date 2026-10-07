@@ -123,9 +123,17 @@ measured tolerances and the storage-declaration check that catches a series-root
 `io-i8a8.<case>` mirror series is read by `packages/runtime/tests/e2e_deberta_w8a8_test.ts` (ADR 0026
 decision 3, `full-24layer` only): it runs `linearCompute: "a8"` against the mirror with a strict
 tolerance on output.0/1, a collapse ceiling on the deeper layers, and a pipeline-key census (every
-linear runs as an i8a8 GEMM plus `quantize_rows`). Its tolerances start from the historical values
-below and have not been re-derived from new measurements yet (every run records each output's
-maxAbs in `results.json` for that).
+linear runs as an i8a8 GEMM plus `quantize_rows`). The output.0/1 tolerance is a historical value;
+the collapse ceiling (a per-output relative RMS error ceiling, from 0.020 on output.2 to 0.33 on
+output.24, plus no non-finite values) was derived on 2026-10-07 as twice the worst measured error of
+each output across the legitimate samples, rounded up to two significant figures (ADR 0026, addendum
+of 2026-10-07; ADR 0110 decision 5-3). Every run records each output's error in `results.json`.
+
+Do **not** regenerate the `io-i8a8.<case>` mirror goldens on a different machine's CPU. The strict
+output.0/1 tolerance depends on which way the CPU that took the goldens rounds the layer-0
+activation quantization: regenerating them on another CPU moved output.1 of `case0` / `padded` by
+1.285e-3 from the stored files, which turns the strict check (atol 5e-5) red while the GPU still
+matches the stored files. Regenerating the mirror is not a fix for a mismatch in this gate.
 
 The `io-i8a8.<case>` files written by `--act-quant` are the **w8a8** (`linearCompute: "a8"`)
 mirror. The regular `io.<case>` MUST be taken **without the hook** (taking it with the hook still
