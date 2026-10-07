@@ -3,13 +3,16 @@
   "kind": "sha256",
   "cases": {
     "e2b/i4": {
-      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
+      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
+      "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
     },
     "e2b/i4-fast": {
-      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
+      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
+      "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
     },
     "e2b/i4-gemvpar": {
-      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
+      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
+      "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
     }
   }
 }

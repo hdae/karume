@@ -3,13 +3,16 @@
   "kind": "sha256",
   "cases": {
     "capital-en": {
-      "deno-intel-graphics-bmg-g21": "a0c3b6a9641a8d033c2dc1ee54bb5601af83990d8721214c381fec3fb62a6ead"
+      "deno-intel-graphics-bmg-g21": "a0c3b6a9641a8d033c2dc1ee54bb5601af83990d8721214c381fec3fb62a6ead",
+      "deno-nvidia-geforce-rtx-3080-ti": "3b311889780a2d33576a190acbb4ba54c2995cc985daae2f1ff31e708706548f"
     },
     "capital-ja": {
-      "deno-intel-graphics-bmg-g21": "28d17fccae77f37fcadc6148da0821acc2b54e4a1f52791a9c45b1b2f70b9756"
+      "deno-intel-graphics-bmg-g21": "28d17fccae77f37fcadc6148da0821acc2b54e4a1f52791a9c45b1b2f70b9756",
+      "deno-nvidia-geforce-rtx-3080-ti": "01e266baa2326a2943c55d62d6d9238d38be1fffaf45b6b58c5ebc22246300f3"
     },
     "context-en": {
-      "deno-intel-graphics-bmg-g21": "888e8391f4cfe26f8e72ee7aae1dd43903198b5045dfad655c4e880a1c6180f8"
+      "deno-intel-graphics-bmg-g21": "888e8391f4cfe26f8e72ee7aae1dd43903198b5045dfad655c4e880a1c6180f8",
+      "deno-nvidia-geforce-rtx-3080-ti": "d9211cc32a75182ae3fc06822841cf9564761cf33cac21de29d39c21cbbe5657"
     }
   }
 }

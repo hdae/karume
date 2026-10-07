@@ -3,52 +3,68 @@
   "kind": "sha256",
   "cases": {
     "birefnet-hr-1024-f16/photo-corridor": {
-      "deno-intel-graphics-bmg-g21": "d7136f3095b56a09750296e9d5141a4f562cb569f6f078138305ba92229be07a"
+      "deno-intel-graphics-bmg-g21": "d7136f3095b56a09750296e9d5141a4f562cb569f6f078138305ba92229be07a",
+      "deno-nvidia-geforce-rtx-3080-ti": "76454b175ceb34838689c3c7763309e508d2adde8525a0496bfc8e008f6b66bc"
     },
     "birefnet-hr-1024-f16/photo-landscape": {
-      "deno-intel-graphics-bmg-g21": "1947f21c8fb83a5d716df55cb445bd9a717e89b09cce8b8ce35ab934448be3ca"
+      "deno-intel-graphics-bmg-g21": "1947f21c8fb83a5d716df55cb445bd9a717e89b09cce8b8ce35ab934448be3ca",
+      "deno-nvidia-geforce-rtx-3080-ti": "cbe56f396b81fffc2bfcb6ff90ce74cf2254486ddeec048d05ed33d0dd02df7f"
     },
     "birefnet-hr-1024-f16/photo-portrait": {
-      "deno-intel-graphics-bmg-g21": "c56a72c6c1abed8b964abeff17b5e1c341a14d713422a6c5e4c2858b9573a911"
+      "deno-intel-graphics-bmg-g21": "c56a72c6c1abed8b964abeff17b5e1c341a14d713422a6c5e4c2858b9573a911",
+      "deno-nvidia-geforce-rtx-3080-ti": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8"
     },
     "birefnet-hr-1024-f16/photo-street": {
-      "deno-intel-graphics-bmg-g21": "ac6a80c4b43364c88048fc121a0ef591b60918dbef929b243c6a0277ecc01749"
+      "deno-intel-graphics-bmg-g21": "ac6a80c4b43364c88048fc121a0ef591b60918dbef929b243c6a0277ecc01749",
+      "deno-nvidia-geforce-rtx-3080-ti": "8e019f075fce469c5a312c542e4c16c016befc1b1e7c3537eb9b7d7396833e4f"
     },
     "birefnet-hr-1024/photo-corridor": {
-      "deno-intel-graphics-bmg-g21": "d7136f3095b56a09750296e9d5141a4f562cb569f6f078138305ba92229be07a"
+      "deno-intel-graphics-bmg-g21": "d7136f3095b56a09750296e9d5141a4f562cb569f6f078138305ba92229be07a",
+      "deno-nvidia-geforce-rtx-3080-ti": "76454b175ceb34838689c3c7763309e508d2adde8525a0496bfc8e008f6b66bc"
     },
     "birefnet-hr-1024/photo-landscape": {
-      "deno-intel-graphics-bmg-g21": "1947f21c8fb83a5d716df55cb445bd9a717e89b09cce8b8ce35ab934448be3ca"
+      "deno-intel-graphics-bmg-g21": "1947f21c8fb83a5d716df55cb445bd9a717e89b09cce8b8ce35ab934448be3ca",
+      "deno-nvidia-geforce-rtx-3080-ti": "cbe56f396b81fffc2bfcb6ff90ce74cf2254486ddeec048d05ed33d0dd02df7f"
     },
     "birefnet-hr-1024/photo-portrait": {
-      "deno-intel-graphics-bmg-g21": "c56a72c6c1abed8b964abeff17b5e1c341a14d713422a6c5e4c2858b9573a911"
+      "deno-intel-graphics-bmg-g21": "c56a72c6c1abed8b964abeff17b5e1c341a14d713422a6c5e4c2858b9573a911",
+      "deno-nvidia-geforce-rtx-3080-ti": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8"
     },
     "birefnet-hr-1024/photo-street": {
-      "deno-intel-graphics-bmg-g21": "ac6a80c4b43364c88048fc121a0ef591b60918dbef929b243c6a0277ecc01749"
+      "deno-intel-graphics-bmg-g21": "ac6a80c4b43364c88048fc121a0ef591b60918dbef929b243c6a0277ecc01749",
+      "deno-nvidia-geforce-rtx-3080-ti": "8e019f075fce469c5a312c542e4c16c016befc1b1e7c3537eb9b7d7396833e4f"
     },
     "lucida-1024-f16/photo-corridor": {
-      "deno-intel-graphics-bmg-g21": "b829785fbc619e21bd8fc5b1b9e14ca2c554c914d76057a3ad91818b9ecc12c4"
+      "deno-intel-graphics-bmg-g21": "b829785fbc619e21bd8fc5b1b9e14ca2c554c914d76057a3ad91818b9ecc12c4",
+      "deno-nvidia-geforce-rtx-3080-ti": "9664d63f352acd3684a92f4cc53d48c56a84c38652105600d0b48411bb57cabf"
     },
     "lucida-1024-f16/photo-landscape": {
-      "deno-intel-graphics-bmg-g21": "f81d34ea3e86e53465a09640d994fde0810d25b34d1bcbba9a78175da64f4b52"
+      "deno-intel-graphics-bmg-g21": "f81d34ea3e86e53465a09640d994fde0810d25b34d1bcbba9a78175da64f4b52",
+      "deno-nvidia-geforce-rtx-3080-ti": "9f9a2819baa37f549b9e801de3954be0a101a9ed4803de06c89b6f9f77fd6287"
     },
     "lucida-1024-f16/photo-portrait": {
-      "deno-intel-graphics-bmg-g21": "343b769829cab9659da83b006ed2a594282f9db8461ece9a27f5c515c7fcbfb4"
+      "deno-intel-graphics-bmg-g21": "343b769829cab9659da83b006ed2a594282f9db8461ece9a27f5c515c7fcbfb4",
+      "deno-nvidia-geforce-rtx-3080-ti": "a11db3c48ed67881ebb96e60ea06a9a3c5331dab25c97d4b095167537af0c476"
     },
     "lucida-1024-f16/photo-street": {
-      "deno-intel-graphics-bmg-g21": "110d08e55aab7739d7cb0863f257f7bd6be5aeaba3db6a76c44d07b90cb31563"
+      "deno-intel-graphics-bmg-g21": "110d08e55aab7739d7cb0863f257f7bd6be5aeaba3db6a76c44d07b90cb31563",
+      "deno-nvidia-geforce-rtx-3080-ti": "e6af5394fd3ee166b6ca1fd1e259a3a58da04104357ad002d3109c9d9ed5a04e"
     },
     "lucida-1024/photo-corridor": {
-      "deno-intel-graphics-bmg-g21": "86868bad2ca1148f1282beca172a3b870c1172b81e48040f3c0ba4d5afe7bfe4"
+      "deno-intel-graphics-bmg-g21": "86868bad2ca1148f1282beca172a3b870c1172b81e48040f3c0ba4d5afe7bfe4",
+      "deno-nvidia-geforce-rtx-3080-ti": "b0d78ea9d4711d462e5162b6de08c20e42100570283d7af09a0e8ee8226276cd"
     },
     "lucida-1024/photo-landscape": {
-      "deno-intel-graphics-bmg-g21": "b80bb62b4ff8de33e4f0b3e224a499a46d4987b1e95de370c75f57f787040d4f"
+      "deno-intel-graphics-bmg-g21": "b80bb62b4ff8de33e4f0b3e224a499a46d4987b1e95de370c75f57f787040d4f",
+      "deno-nvidia-geforce-rtx-3080-ti": "6f409de4f28e8a5266e2d5dd4c6e338dda62758a14d8ee377350f7be02bcdf21"
     },
     "lucida-1024/photo-portrait": {
-      "deno-intel-graphics-bmg-g21": "133b3e79801534b221f5f901cdd0f12704094c78552b05f77dc19cf5b02947bd"
+      "deno-intel-graphics-bmg-g21": "133b3e79801534b221f5f901cdd0f12704094c78552b05f77dc19cf5b02947bd",
+      "deno-nvidia-geforce-rtx-3080-ti": "29d6329482cba5edc0e6074dbf5b445ec80b8fb07e478613f9bf379d3f81898f"
     },
     "lucida-1024/photo-street": {
-      "deno-intel-graphics-bmg-g21": "c66c613c5e50d9631583bfb5a0d1799bd57f1a01e983c2064687738d623b4df0"
+      "deno-intel-graphics-bmg-g21": "c66c613c5e50d9631583bfb5a0d1799bd57f1a01e983c2064687738d623b4df0",
+      "deno-nvidia-geforce-rtx-3080-ti": "92fc450526b595cfe2a76dbc1dcaf10acdb2436f73687bbb7c82b42dd1ea9d9b"
     }
   }
 }

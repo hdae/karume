@@ -453,10 +453,3 @@ sha 行と帯の照合は全て通る。
   同じファイルの case0 / case1 / padded と census は緑。
 - 単独の再走 2 回も同じ要素・同じ値で赤だった。走行ごとの揺れではなく、この GPU で決まって出る差。
 - 帰属は未調査（推測の候補: i8 の量子化の境界〈round の同点〉で 1 要素の量子化値が反転し、後段の LayerNorm で増幅された形）。
-
-## RTX 3080 Ti: Wan 以外の系列に sha 参照行が無い（参照門 7 件が赤・2026-10-06）
-
-換装の後のフル verify（HEAD `b744a9fd`）で、3080 Ti の行が無いケースを持つ 7 本の参照門が赤になった: anima（登録 11 ケース）・
-birefnet（16）・depth-anything（4）・gemma4-qat（6）・gemma4（3）・runtime の gemma4 golden（3）・siglip2 golden（16）。
-行の無いケースの sha 門は明示 SKIP になる（ADR 0106）。Wan は凍結コピーで行を書いた（ADR 0121 追記「RTX 3080 Ti のレーンとフル verify」）。
-行を書く時点（HEAD か、各系列の最後に緑だったコミットの凍結コピーか）は未決。

@@ -15,10 +15,12 @@
       "deno-nvidia-geforce-rtx-3080-ti": "071929c40e90628006eab593842080246140e771a82f8a35762507f4a12e9560"
     },
     "extra-anima-copycat-20260610-cfg": {
-      "deno-intel-graphics-bmg-g21": "8dcc5e7c3a2e198796e6d29ebc6cbfa981480750f7b2995d32c9277774a35cc4"
+      "deno-intel-graphics-bmg-g21": "8dcc5e7c3a2e198796e6d29ebc6cbfa981480750f7b2995d32c9277774a35cc4",
+      "deno-nvidia-geforce-rtx-3080-ti": "e7352c5670abc802c3792d523a9260f7cbd3c0d0d75e7ad77efc9f9787eb9016"
     },
     "extra-anima-wai-v1.0-cfg": {
-      "deno-intel-graphics-bmg-g21": "747a4bdf4f04bc38bc77a35233d05564f226413ac1f5b4b524cc5389b9ea7407"
+      "deno-intel-graphics-bmg-g21": "747a4bdf4f04bc38bc77a35233d05564f226413ac1f5b4b524cc5389b9ea7407",
+      "deno-nvidia-geforce-rtx-3080-ti": "f2bf9a22745faf532393c96006d7b89b2213e7fcdf1c371c0c47f21f0f004e9f"
     },
     "f16+dit8-a8-attn8-s16-1024": {
       "deno-intel-graphics-bmg-g21": "16f7946acc335ee8a4ddffeb19cc33d98cc652ea090d9d0dcc5227782c6edaf6",

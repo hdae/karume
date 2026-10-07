@@ -3,16 +3,20 @@
   "kind": "sha256",
   "cases": {
     "photo-corridor": {
-      "deno-intel-graphics-bmg-g21": "9b542797f4e3a3b8f93922eff71254676df2b3993ed7710d5acb1ae4f1d68b66"
+      "deno-intel-graphics-bmg-g21": "9b542797f4e3a3b8f93922eff71254676df2b3993ed7710d5acb1ae4f1d68b66",
+      "deno-nvidia-geforce-rtx-3080-ti": "01f2a9fb4efa8b15ec2821af24b2dddd5291117d4ec75c6a83f9a74aae53326d"
     },
     "photo-landscape": {
-      "deno-intel-graphics-bmg-g21": "5794ad5954160bd4d0922e4725919dd4945e85a7aee2aa98b2dc5103de2ed043"
+      "deno-intel-graphics-bmg-g21": "5794ad5954160bd4d0922e4725919dd4945e85a7aee2aa98b2dc5103de2ed043",
+      "deno-nvidia-geforce-rtx-3080-ti": "938585679a6dbb3c70eeb54e843bb04119aafe095721678269711eed244608f4"
     },
     "photo-portrait": {
-      "deno-intel-graphics-bmg-g21": "8139f1a1bd5501fb8e33774cdff1f4c2121136f1e9a4413a800b41ce5287145d"
+      "deno-intel-graphics-bmg-g21": "8139f1a1bd5501fb8e33774cdff1f4c2121136f1e9a4413a800b41ce5287145d",
+      "deno-nvidia-geforce-rtx-3080-ti": "e2485076ca7a62480a38e220531ec09ff4f7e438845c45bab9b1910782a5bcf8"
     },
     "photo-street": {
-      "deno-intel-graphics-bmg-g21": "5bc0c8524056a8c496db6e481bdee940f7b1495d82edd3001b5a30e7632353bc"
+      "deno-intel-graphics-bmg-g21": "5bc0c8524056a8c496db6e481bdee940f7b1495d82edd3001b5a30e7632353bc",
+      "deno-nvidia-geforce-rtx-3080-ti": "c6566043500b7ad1e6f4e3612e138f6135a3bcf5bda3db818b71fa96cb7e9ea7"
     }
   }
 }
