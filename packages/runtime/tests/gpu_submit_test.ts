@@ -661,35 +661,56 @@ const manualWorkDone = (): {
   };
 };
 
-/** 上限を超えた状態（未完了の印が上限 + 1 本）を作る submit の数。 */
-const OVER_LIMIT_SUBMITS = IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 1);
+/**
+ * run の 1 ステップ（`executeBakedPlanPaced` の形）: dispatch を `count` 本積んでから歩調を問う。
+ * 完了印を置くのは問うたときだけ。
+ */
+const step = (scheduler: SubmitScheduler, count: number): Promise<void> | undefined => {
+  dispatchMany(scheduler, count);
+  return scheduler.backpressure();
+};
 
-Deno.test("完了印はフェンスの間の submit が 64 回に届くたびに 1 本だけ置き、フェンスで数え直す", async () => {
+Deno.test("完了印は run が歩調を問うたとき、前の印から submit が 64 回に届いていれば 1 本だけ置き、フェンスで数え直す", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1));
 
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
-  assertEquals(gpu.calls.workDone, 0, "64 回に届かないうちは置かない");
-  dispatchMany(scheduler, 1);
-  assertEquals(gpu.calls.workDone, 1, "64 回目の submit で 1 本");
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL + 30);
-  assertEquals(gpu.calls.workDone, 2, "次の 64 回で 1 本（端数の 30 回は置かない）");
-
+  // 歩調を問わない経路（enqueue）は、何本 submit しても印を置かない。
+  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 2));
+  assertEquals(gpu.calls.workDone, 0, "submit だけでは置かない");
   await scheduler.flush();
-  assertEquals(gpu.calls.workDone, 3, "flush のフェンスが 1 本");
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
-  assertEquals(gpu.calls.workDone, 3, "フェンスの前の端数を持ち越さない");
+  assertEquals(gpu.calls.workDone, 1, "flush のフェンスが 1 本");
 
-  // 単一フェンスの run / batch の決着（flush を通らないフェンス）でも同じく数え直す。
+  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  assertEquals(gpu.calls.workDone, 1, "64 回に届かないうちは置かない");
+  step(scheduler, 1);
+  assertEquals(gpu.calls.workDone, 2, "64 回に届いたステップで 1 本");
+  step(scheduler, IN_FLIGHT_MARKER_INTERVAL + 30);
+  assertEquals(gpu.calls.workDone, 3, "1 ステップで 64 回を超えても 1 本");
+  step(scheduler, 30);
+  assertEquals(gpu.calls.workDone, 3, "前の印からの 30 回では置かない");
+
+  // フェンスの後は窓のチャンク数も印の位置も 0 から数え直す（前の窓の端数を持ち越さない）。
+  await scheduler.flush();
+  assertEquals(gpu.calls.workDone, 4);
+  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  assertEquals(gpu.calls.workDone, 4, "フェンスの前の端数を持ち越さない");
+  step(scheduler, 1);
+  assertEquals(gpu.calls.workDone, 5, "印の位置もフェンスで 0 へ戻る");
+
+  // 単一フェンスの run（flush を通らないフェンス）でも同じく数え直す。
   scheduler.submitPending();
   scheduler.closeMeasurementWindowAfterFence();
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
-  assertEquals(gpu.calls.workDone, 3);
+  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  assertEquals(gpu.calls.workDone, 5);
+  step(scheduler, 1);
+  assertEquals(gpu.calls.workDone, 6);
 
-  // フェンスに届かなかった batch の窓を捨てたときも数え直す（捨てた窓の端数を次の区間へ持ち越さない）。
+  // フェンスに届かなかった窓を捨てたときも数え直す。
   scheduler.discardMeasurementWindow();
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
-  assertEquals(gpu.calls.workDone, 3);
+  step(scheduler, IN_FLIGHT_MARKER_INTERVAL - 1);
+  assertEquals(gpu.calls.workDone, 6);
+  step(scheduler, 1);
+  assertEquals(gpu.calls.workDone, 7);
 });
 
 Deno.test("未完了の印が上限までは待ちを作らず、超えたら最も古い印を待ってその完了で解ける", async () => {
@@ -698,10 +719,10 @@ Deno.test("未完了の印が上限までは待ちを作らず、超えたら最
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1));
   const baseline = gpu.context.pendingLostListeners;
 
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL * IN_FLIGHT_MAX_MARKERS);
-  assertEquals(scheduler.backpressure(), undefined, "上限ちょうどでは待たない");
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL);
-  const wait = scheduler.backpressure();
+  for (let marker = 0; marker < IN_FLIGHT_MAX_MARKERS; marker += 1) {
+    assertEquals(step(scheduler, IN_FLIGHT_MARKER_INTERVAL), undefined, "上限までは待たない");
+  }
+  const wait = step(scheduler, IN_FLIGHT_MARKER_INTERVAL);
   assert(wait !== undefined, "上限を超えたら待ちを返す");
   let released = false;
   void wait.then(() => {
@@ -718,43 +739,29 @@ Deno.test("未完了の印が上限までは待ちを作らず、超えたら最
   assertEquals(gpu.context.pendingLostListeners, baseline, "消失の購読を積み残さない");
 });
 
-Deno.test("1 回の待ちで上限の内へ戻る — 印が何本溜まっていても、未完了が上限の本数に戻る印まで待つ", async () => {
-  const done = manualWorkDone();
-  const gpu = createFakeGpu({ workDone: done.workDone });
-  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1));
-
-  // 1 ステップで印が 5 本置かれた形（その間に backpressure を問わない）。
-  const placed = IN_FLIGHT_MAX_MARKERS + 3;
-  dispatchMany(scheduler, IN_FLIGHT_MARKER_INTERVAL * placed);
-  const wait = scheduler.backpressure();
-  assert(wait !== undefined);
-  let released = false;
-  void wait.then(() => {
-    released = true;
-  });
-
-  // 完了は FIFO。上限の本数に戻すには古い方から 3 本（= placed − 上限）が済めばよい。
-  for (let index = 0; index < placed - IN_FLIGHT_MAX_MARKERS - 1; index += 1) done.complete(index);
-  await settle();
-  assertEquals(released, false, "未完了がまだ上限を超えている間は解けない");
-  done.complete(placed - IN_FLIGHT_MAX_MARKERS - 1);
-  await settle();
-  assertEquals(released, true, "未完了が上限の本数に戻った時点で解ける");
-  assertEquals(scheduler.backpressure(), undefined, "続けて問うても待たない");
-});
-
 Deno.test("待ちを返すときだけ、その前に未 submit を出し切る", () => {
   const gpu = createFakeGpu({ workDone: () => new Promise<void>(() => {}) });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
 
-  dispatchMany(scheduler, 3);
-  assertEquals(scheduler.backpressure(), undefined);
-  assertEquals(gpu.submitted, [2], "上限の内ではチャンクを切らない");
-
-  dispatchMany(scheduler, OVER_LIMIT_SUBMITS * 2 - 2);
-  assertEquals(gpu.submitted.length, OVER_LIMIT_SUBMITS, "端数の 1 本が未 submit");
-  assert(scheduler.backpressure() !== undefined);
-  assertEquals(gpu.submitted.length, OVER_LIMIT_SUBMITS + 1, "待つ前に端数を submit した");
+  // 2 dispatch = 1 submit。各ステップの後に 1 dispatch が未 submit で残る形。
+  assertEquals(step(scheduler, 3), undefined);
+  assertEquals(gpu.submitted, [2]);
+  for (let marker = 0; marker < IN_FLIGHT_MAX_MARKERS; marker += 1) {
+    const before = gpu.submitted.length;
+    assertEquals(step(scheduler, IN_FLIGHT_MARKER_INTERVAL * 2), undefined);
+    assertEquals(
+      gpu.submitted.length,
+      before + IN_FLIGHT_MARKER_INTERVAL,
+      "上限の内ではチャンクを切らない",
+    );
+  }
+  const before = gpu.submitted.length;
+  assert(step(scheduler, IN_FLIGHT_MARKER_INTERVAL * 2) !== undefined);
+  assertEquals(
+    gpu.submitted.length,
+    before + IN_FLIGHT_MARKER_INTERVAL + 1,
+    "待つ前に端数を submit した",
+  );
   assertEquals(gpu.submitted.at(-1), 1);
 });
 
@@ -767,8 +774,10 @@ Deno.test("印の待ちの間に device が失われると GpuDeviceLostError �
   });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1));
 
-  dispatchMany(scheduler, OVER_LIMIT_SUBMITS);
-  const wait = scheduler.backpressure();
+  let wait: Promise<void> | undefined;
+  for (let marker = 0; marker <= IN_FLIGHT_MAX_MARKERS; marker += 1) {
+    wait = step(scheduler, IN_FLIGHT_MARKER_INTERVAL);
+  }
   assert(wait !== undefined);
   lost.resolve({ reason: "unknown", message: "test" } as unknown as GPUDeviceLostInfo);
   await assertRejects(() => wait, GpuDeviceLostError, "送り込みの先行の上限の待ち");

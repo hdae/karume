@@ -306,12 +306,13 @@ measurements in `docs/research/`.
 
 ### Fixed
 
-- `@karume/runtime`: a long run no longer lets the host queue an unbounded number of command
-  buffers ahead of the GPU. Between fences the runtime places a completion marker every 64 submits,
-  and a `run` waits between steps once more than two markers are outstanding; `enqueue` never
-  waits, so non-awaited enqueues keep their call order (under Deno the marker itself blocks until
-  the queue drains). This fixes a device loss midway through very long runs (the Wan2.2 reference
-  quant at 1280×704×121 on an RTX 3080 Ti under Deno). Outputs are bit-identical.
+- `@karume/runtime`: a long `run` no longer lets the host queue an unbounded number of command
+  buffers ahead of the GPU. Between steps it places a completion marker every 64 submits since the
+  last fence and waits once more than two markers are outstanding (under Deno the marker itself
+  blocks until the queue drains). `enqueue` is unchanged: it neither places markers nor waits, so
+  non-awaited enqueues keep their call order. This fixes a device loss midway through very long runs
+  (the Wan2.2 reference quant at 1280×704×121 on an RTX 3080 Ti under Deno). Outputs are
+  bit-identical.
 - `@karume/runtime`: the fused-attention i8a8 ①QK shader generator produced wrong scores (whole
   columns silently zero) for tile geometries whose per-thread K-side fill count is 5 or more: a
   generated fill variable (`k4`) shadowed the K pack count. The default geometry and the Apple

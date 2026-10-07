@@ -1,12 +1,13 @@
 // 送り込みの先行の上限（ADR 0123）の実 GPU の門。
 //
-// 固定するのは ①長い run の値が変わらず、フェンスの間の submit 64 回ごとに完了印が 1 本ずつ出る
-// こと ②run は上限を超えたらステップの間で印を待つこと（区間ロックを持ったまま）③enqueue は印を待たないこと —
-// 非 await で続けた別 Session の enqueue が、常駐テンソル越しに前の enqueue の出力を読む形で呼び出し順を
+// 固定するのは ①長い run の値が変わらず、ステップの間で前の印から submit 64 回ごとに完了印が 1 本ずつ出る
+// こと ②run は上限を超えたらステップの間で印を待つこと（区間ロックを持ったまま）③enqueue は印を置かず待たない
+// こと — 非 await で続けた別 Session の enqueue が、常駐テンソル越しに前の enqueue の出力を読む形で呼び出し順を
 // 追い越さない（ADR 0123 決定 4）。
 //
 // ③ が無いと、enqueue で待つ実装へ戻しても単独の enqueue の値は正しいまま緑になる。崩れるのは
 // 「待ちの間に別 Session の本体が走り、書かれる前の常駐テンソルを読む」形だけで、例外も警告も出ない。
+// enqueue に印を置く形は、Deno では batch の生成ループを遅くする（印が GPU の完了までホストを止める）。
 
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type BatchScope, type GpuContext } from "../src/gpu/device.ts";
@@ -108,7 +109,8 @@ const session = async (
   await createSessionFromContainer(gpu, await openGraphModel(json), "model", { submitPolicy });
 
 Deno.test({
-  name: "長い run は値を変えず、フェンスの間の submit 64 回ごとに完了印を 1 本置く（実 GPU）",
+  name:
+    "長い run は値を変えず、ステップの間で前の印から submit 64 回ごとに完了印を 1 本置く（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -125,10 +127,11 @@ Deno.test({
           submits > IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 1),
           `上限を超える長さの run になっていない（submit ${submits} 回 — 門が空振りする）`,
         );
-        // run のフェンスは mapAsync の 1 本（H-1）なので、onSubmittedWorkDone は完了印だけ。
+        // run のフェンスは mapAsync の 1 本（H-1）なので、onSubmittedWorkDone は完了印だけ。印はステップの
+        // 間でだけ置くので、最後のステップの後に積む読み戻しの写し（1 本 = 1 submit）は数えない。
         assertEquals(
           fences.count() - before.fences,
-          Math.floor(submits / IN_FLIGHT_MARKER_INTERVAL),
+          Math.floor((submits - 1) / IN_FLIGHT_MARKER_INTERVAL),
           `phase ${phase}: submit ${submits} 回に対する完了印の本数`,
         );
       }
@@ -274,7 +277,8 @@ Deno.test({
 });
 
 Deno.test({
-  name: "enqueue は完了印を待たない — 印が解けなくても本体は決着する（実 GPU）",
+  name:
+    "enqueue は完了印を置かず待たない — 上限を超える長さでも onSubmittedWorkDone を呼ばずに決着する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -295,6 +299,7 @@ Deno.test({
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
       assertEquals(enqueued.settled(), true, "上限を超える長さでも enqueue は印を待たない");
+      assertEquals(gate.calls(), 0, "enqueue は完了印を置かない");
 
       gate.open();
       await enqueued.done;

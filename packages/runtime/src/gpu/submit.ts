@@ -27,8 +27,8 @@
  * `docs/research/2026-08-04-host-overhead-recon.md` §4.1）。呼ぶのは
  * {@link SubmitScheduler.flush} の 1 回だけにする — そこの待ちは flush-before-destroy の
  * ために元から要るもので、計測のための追加コストはゼロになる。
- * 例外は送り込みの先行の上限の完了印（{@link IN_FLIGHT_MARKER_INTERVAL} — ADR 0123）だけで、
- * フェンスの間に submit が 64 回積まれるたびに 1 本置く。
+ * 例外は run の送り込みの先行の上限の完了印（{@link SubmitScheduler.backpressure} — ADR 0123）だけで、
+ * run がステップの間で問うたとき、前の印からの submit が 64 回に届いていれば 1 本置く（enqueue では置かない）。
  *
  * NOTE（H-1 の追随）: 通常の run も `onSubmittedWorkDone` を張らなくなった（読み戻しの copy を
  * dispatch と同じコマンド列へ積み、**readback の `mapAsync` を唯一のフェンスにする** —
@@ -104,8 +104,8 @@ export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = {
 const CHUNK_TIME_SAFETY = 0.5;
 
 /**
- * 送り込みの先行の上限（DECIDED: ADR 0123）: 計測窓の中で submit をこの回数出すごとに、完了印
- * （`onSubmittedWorkDone`）を 1 本置く。
+ * 送り込みの先行の上限（DECIDED: ADR 0123）: run がステップの間で {@link SubmitScheduler.backpressure} を
+ * 問うたとき、計測窓の中で前の印から submit がこの回数に届いていれば完了印（`onSubmittedWorkDone`）を 1 本置く。
  *
  * NOTE: 数える単位が計測窓なのは、窓が閉じるのがフェンスの直後だから（「最後にフェンスで GPU の
  * 完了を確かめてからの submit の数」がそのまま窓のチャンク数になる）。フェンスの間の submit が
@@ -114,8 +114,8 @@ const CHUNK_TIME_SAFETY = 0.5;
 export const IN_FLIGHT_MARKER_INTERVAL = 64;
 
 /**
- * 未完了のまま持ってよい完了印の数（ADR 0123）。超えたら、未完了の印がこの本数に戻るまで待つ
- * （ふつうは最も古い印 1 本）— 先行は約 (この値 + 1) × {@link IN_FLIGHT_MARKER_INTERVAL} 回の submit までになる。
+ * 未完了のまま持ってよい完了印の数（ADR 0123）。超えたら最も古い印の完了を待つ（未完了がこの本数に戻る）
+ * — 先行は約 (この値 + 1) × {@link IN_FLIGHT_MARKER_INTERVAL} 回の submit までになる。
  */
 export const IN_FLIGHT_MAX_MARKERS = 2;
 
@@ -425,6 +425,8 @@ export class SubmitScheduler {
   #windowWork = 0;
   /** 開いている窓で submit したチャンク数（窓平均を出す分母 — {@link ChunkBudgetStats}）。 */
   #windowChunks = 0;
+  /** 開いている窓で最後に完了印を置いた時点の `#windowChunks`（窓を閉じる・捨てるときに 0 へ戻す）。 */
+  #markedChunks = 0;
   /** 置いた完了印のうち、前から捨てていないもの（{@link SubmitScheduler.backpressure}）。 */
   readonly #markers: InFlightMarker[] = [];
   /** 推定時間が最大だったチャンク（診断専用）。undefined = 裏付けの付いたチャンクがまだ無い。 */
@@ -553,28 +555,30 @@ export class SubmitScheduler {
   }
 
   /**
-   * 送り込みの先行が上限を超えていれば、未完了の完了印が上限の本数に戻るまで待つ Promise を返す
-   * （ADR 0123）。超えていなければ undefined を返し、待ちを作らない（マイクロタスクも挟まない）。
+   * run の送り込みの歩調を合わせる（ADR 0123）。前の印からの submit が {@link IN_FLIGHT_MARKER_INTERVAL}
+   * 回に届いていれば完了印を 1 本置き、未完了の印が {@link IN_FLIGHT_MAX_MARKERS} 本を超えたら最も古い印を
+   * 待つ Promise を返す。超えていなければ undefined を返し、待ちを作らない（マイクロタスクも挟まない）。
    *
-   * 待つ相手は「その印が済めば未完了が上限の本数に戻る」印（後ろから数えて上限 + 1 本目）。完了は
-   * FIFO なので、それより古い印も同時に済んでいる。1 ステップで印が何本溜まっても、1 回の待ちで上限の
-   * 内へ戻る。
+   * 印を置くのはここだけ（1 回に 1 本）。呼び手が待ちを await する限り、待つ時点の未完了は上限 + 1 本で、
+   * 最も古い印が済めば上限の本数に戻る。
    *
    * MUST: 待ちを返す前に未 submit を出し切る。待ちの間に出る `queue.writeBuffer` が未 submit の
    * dispatch を追い越さない（ADR 0004 不変条件④を待ちの間も保つ）うえ、GPU も積んだぶんを
    * 全て受け取ってから待つ。
    * MUST: 呼び手は待ちの間に**他の誰の dispatch も割り込ませない**位置で呼ぶ — 今は run の区間ロックの中の
    * ステップの間（`executeBakedPlanPaced`）だけ。enqueue は呼ばない（ADR 0123 決定 4 — 待つと別 Session の
-   * enqueue が呼び出し順を追い越す）。
+   * enqueue が呼び出し順を追い越す。印も置かない — Deno では印が GPU の完了までホストを止め、batch の生成
+   * ループを遅くする）。
    * MUST: 消失は {@link GpuDeviceLostError} にする（消失後の `onSubmittedWorkDone` が解決しない
    * 実装がありうる — flush と同じ理由）。
    */
   backpressure(): Promise<void> | undefined {
+    if (this.#windowChunks - this.#markedChunks >= IN_FLIGHT_MARKER_INTERVAL) this.#placeMarker();
     while (this.#markers[0]?.settled === true) this.#markers.shift();
-    const target = this.#markers.at(-1 - IN_FLIGHT_MAX_MARKERS);
-    if (target === undefined) return undefined;
+    const oldest = this.#markers[0];
+    if (oldest === undefined || this.#markers.length <= IN_FLIGHT_MAX_MARKERS) return undefined;
     this.#submitChunk();
-    return this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(target.work, "送り込みの先行の上限の待ち");
+    return this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(oldest.work, "送り込みの先行の上限の待ち");
   }
 
   /**
@@ -601,6 +605,7 @@ export class SubmitScheduler {
     this.#windowStartedAt = undefined;
     this.#windowWork = 0;
     this.#windowChunks = 0;
+    this.#markedChunks = 0;
   }
 
   /**
@@ -780,13 +785,11 @@ export class SubmitScheduler {
     const submittedAt = this.#now();
     this.#device.queue.submit([encoder.finish()]);
     this.#submitCount += 1;
-    // MUST NOT: submit ごとに onSubmittedWorkDone を呼ばない（モジュール doc — ホストと GPU の
-    // 直列化）。計測の起点だけを残し、閉じるのは flush 側。呼ぶのは窓の中の
-    // IN_FLIGHT_MARKER_INTERVAL 回ごとの完了印だけ（ADR 0123）。
+    // MUST NOT: ここで onSubmittedWorkDone を呼ばない（モジュール doc — ホストと GPU の
+    // 直列化）。計測の起点だけを残し、閉じるのは flush 側。
     this.#windowStartedAt ??= submittedAt;
     this.#windowWork += chunkWork;
     this.#windowChunks += 1;
-    if (this.#windowChunks % IN_FLIGHT_MARKER_INTERVAL === 0) this.#placeMarker();
     this.#observeChunkBudget(chunkWork);
   }
 
@@ -794,18 +797,15 @@ export class SubmitScheduler {
    * 完了印を 1 本置く（ADR 0123）。
    *
    * NOTE: Deno 2.9.6 の `onSubmittedWorkDone` は同期部分が「それまでに submit した全作業の完了」まで
-   * ホストを止める（research 2026-08-04 §4.1）。この実装では印を置いた時点で GPU が追いつくので、
-   * 待たない enqueue も含めて先行は IN_FLIGHT_MARKER_INTERVAL 回までになる（待ちの Promise は解決済みの
-   * ものを待つだけ）。消失がこの同期部分で起きると、Deno は例外ではなく panic する（flush と同じ —
-   * docs/known-issues.md の Deno の device lost の項）。
+   * ホストを止める（research 2026-08-04 §4.1）。この実装では印を置いた時点で GPU が追いつき、その間 GPU は
+   * 次のチャンクを待って遊ぶ（待ちの Promise は解決済みのものを待つだけ）。消失がこの同期部分で起きると、
+   * Deno は例外ではなく panic する（flush と同じ — docs/known-issues.md の Deno の device lost の項）。
    * NOTE: 拒否も決着として数えるだけで、ここでは投げない。待つ側は同じ Promise を
    * `raceDeviceLost` 越しに待つので拒否はそこへ出る。待たずに捨てた印の拒否は、その run / 区間の
    * フェンスが同じ device の状態で落とす。
    */
   #placeMarker(): void {
-    // 決着した印を前から捨てる（{@link SubmitScheduler.backpressure} を呼ばない enqueue だけの Session でも
-    // 溜まり続けない）。
-    while (this.#markers[0]?.settled === true) this.#markers.shift();
+    this.#markedChunks = this.#windowChunks;
     const marker: InFlightMarker = {
       work: this.#device.queue.onSubmittedWorkDone(),
       settled: false,
@@ -1057,6 +1057,7 @@ export class SubmitScheduler {
     this.#windowStartedAt = undefined;
     this.#windowWork = 0;
     this.#windowChunks = 0;
+    this.#markedChunks = 0;
     this.#measuredMs.push(measured);
     if (this.#measuredMs.length > MEASURED_HISTORY) {
       this.#measuredMs.shift();

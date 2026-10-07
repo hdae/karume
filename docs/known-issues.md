@@ -261,7 +261,7 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   karume の `GpuDeviceLostError` 経路に到達する前にプロセスごと消えるので、verify のフル走行中に
   device lost が起きるとそこで走行が止まる（上の「フル走行が稀にフレークする」節の症状が
   「テスト 1 本の赤」ではなく「プロセス消滅」になる環境）。送り込みの先行の上限の完了印（ADR 0123 — フェンスの間の
-  submit 64 回ごとの `onSubmittedWorkDone`）もこの経路に入るので、長い run と 64 submit 以上の batch では、消失が印の同期
+  submit 64 回ごとの `onSubmittedWorkDone` — run だけが置く）もこの経路に入るので、長い run では、消失が印の同期
   部分で表に出て panic する。
 - **device を破棄して作り直すと、次の device で確保できる総量が減る**（2026-09-26 観測のみ・原因未調査）。素の
   WebGPU の probe で、device を満杯まで埋めては destroy して 500 ms 待つのを繰り返すと、次の device で確保できた
