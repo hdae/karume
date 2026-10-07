@@ -85,9 +85,12 @@ whose σ column is strictly decreasing, and either a `seed` (default 0) or the i
 (`descriptor.ts`). For Wan2.1, only 832×480 with 33 and 81 frames have been checked end to end on
 the GPU; for Wan2.2, 1280×704 and 704×1280 with 17 frames (two steps) and 1280×704 with 33 frames
 (50 steps, both quants) have been checked end to end on the GPU (ADR 0121 stage 6), and 1280×704
-with 121 frames (50 steps, the practical quant) completed on an RTX 3080 Ti (12 GiB, Deno). The Arc
-B570 (about 9.4 GiB allocatable from Deno) is not expected to fit 121 frames (not run). The
-transformer stage is closed before the VAE stage opens, so the two are never resident together. A
+with 121 frames (50 steps, the practical quant) completed on an RTX 3080 Ti (12 GiB, Deno). On the
+Arc B570 (about 9.4 GiB allocatable from Deno), clips up to 57 frames have been checked (49 with both
+quants, 57 with the practical quant); longer clips are not supported there, as none of them was run
+there. A memory estimate (ADR 0121, not run) puts 81 frames (practical quant) and 121 frames (both
+quants) beyond that limit; the other lengths were not estimated, so whether they fit is not known.
+The transformer stage is closed before the VAE stage opens, so the two are never resident together. A
 non-finite umT5 output, a non-finite latent after any step, or a non-finite VAE output before the
 clamp fails the generation instead of being returned.
 

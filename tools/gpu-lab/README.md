@@ -536,8 +536,11 @@ the RTX 5070 Ti in Chrome (the result above) and, with the same request, on an R
 the card's 12,288 MiB (Deno's own allocation cap, set by the driver's reported budget, sits below the card's
 size and was not measured during the run, so the margin under Deno can be thinner). The RTX 5070 Ti diagnostics are below the estimates that follow, and the RTX 3080 Ti
 diagnostics fall inside them. On a GPU with about 10 GB, such as the B570
-(where Deno can allocate about 9.4 GiB in total), 121 frames are not expected to fit; this is an estimate, as
-121 frames were not run on the B570 (`docs/limitations.md`). The ADR 0121
+(where Deno can allocate about 9.4 GiB in total), clips up to 57 frames have been checked (the table above:
+49 frames with both quants, 57 with the practical quant), and longer clips are not supported, as none of
+them was run on the B570. A memory estimate in ADR 0121 puts 81 frames (practical quant) and 121 frames
+(both quants) beyond that GPU's limit; the other lengths were not estimated, so whether they fit is not
+known (`docs/limitations.md`). The ADR 0121
 capacity table estimates (extrapolated from Wan2.1, before any measurement) transformer diagnostics of 9.16 to 9.50 GiB with `f16+dit8` and 10.18 to 11.37 GiB with
 `f16+dit8-a8-attn8-s16` at 1280x704 and 121 frames. Before the runs above, these estimates put the practical
 quant on the RTX 5070 Ti (16 GB) at about 11.5 to 12.7 GiB with about 1.3 GiB on top, and its transformer stage

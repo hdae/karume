@@ -256,9 +256,13 @@ on the whole GPU, about 0.9 GiB below the card's size (2026-10-06, a development
 same pipeline stages, not this script). Under Deno the margin can be thinner: Deno's total allocation is
 capped below the card's size by the driver's reported budget, which moves over time and was not measured
 during this run. On a GPU with about 10 GB, such as the Intel Arc B570 (where Deno can allocate about
-9.4 GiB in total), 121 frames are not expected to fit. That is an estimate: 121 frames were not run
-there. The pipeline accepts the request anyway and is expected to fail with an out-of-memory error or a
-lost device partway through (not observed; see [docs/limitations.md](../../docs/limitations.md)).
+9.4 GiB in total), clips up to 57 frames have been checked (49 frames with both quants, 57 with the
+default quant); longer clips are not supported there, as none of them was run there. A memory estimate
+made before the runs (ADR 0121) puts 81 frames (with the default quant) and 121 frames (with both quants)
+beyond that GPU's limit; the other lengths were not estimated, so whether they fit is not known. The
+pipeline accepts such a request anyway, and if it does not fit, it is expected to fail with an
+out-of-memory error or a lost device partway through (not observed; see
+[docs/limitations.md](../../docs/limitations.md)).
 
 ### In Chrome
 

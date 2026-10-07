@@ -1851,13 +1851,15 @@ class TestTheWan22ModelCard:
         assert "bindings of up to 2,147,483,644 bytes" in prose
         assert "2 GiB buffers" not in prose
 
-    def test_it_says_121_frames_fit_12_gib_and_are_not_expected_to_fit_the_b570(
+    def test_it_says_121_frames_fit_12_gib_and_the_b570_is_checked_only_up_to_57_frames(
         self, assembled22
     ) -> None:
         """受理の上限 121 は開発機（RTX 3080 Ti・12 GiB）と RTX 5070 Ti の Chrome で完走した事実で
-        名乗り、山は nvidia-smi の GPU 全体で Deno の余裕はもっと薄いことがあると限る。B570 では
-        非対応（入らない見込み — 推測・回していない）で、admission ではなく実行の途中で落ちると
-        書く。"""
+        名乗り、山は nvidia-smi の GPU 全体で Deno の余裕はもっと薄いことがあると限る。B570 で
+        確かめたのは 57 フレームまでで、それより長いクリップは回していないので非対応。入らない
+        見込み（推測）は見積りのある 2 点（81・121）だけで、残りの長さは分からないと書く。121 だけを
+        非対応と書くと 61〜117 が回ると読めるので、範囲で書く。入らなければ admission ではなく
+        実行の途中で落ちると書く。"""
         out_dir, _ = assembled22
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
@@ -1878,19 +1880,29 @@ class TestTheWan22ModelCard:
         )
         assert (
             "On a GPU with about 10 GB, such as the Intel Arc B570 (where Deno can allocate about"
-            " 9.4 GiB in total), 121 frames are not supported: they are not expected to fit"
-            in prose
+            " 9.4 GiB in total), clips up to 57 frames have been checked: the longest 50-step runs"
+            " there were 49 frames with both quants and 57 frames with the"
+            " `f16+dit8-a8-attn8-s16` quant, driven by the development script (its rows under"
+            " Resources stop at 49 frames). Longer clips are not supported there, because none of"
+            " them has been run on the B570." in prose
         )
+        # 121 だけを非対応と書くと 61〜117 が 10 GB 級で回ると読める — 範囲で書く。
+        assert "121 frames are not supported" not in prose
+        # 見積りは 81 と 121 の 2 点だけ — 61〜77 / 85〜117 を「入らない見込み」とは書かない。
+        assert "not expected to fit" not in prose
         assert (
-            "This is an estimate — 121 frames have not been run on the B570 (its rows under"
-            " Resources stop at 49 frames)." in prose
+            "A memory estimate made before the runs covers only two of those lengths and puts both"
+            " beyond that ceiling: the next length after 77 frames with the"
+            " `f16+dit8-a8-attn8-s16` quant, and 121 frames with both quants (the 10.64 GiB the"
+            " transformer stage allocated at 121 frames on the RTX 3080 Ti is above it too). The"
+            " other lengths were not estimated, so whether they fit is not known." in prose
         )
         # 受理集合は機ごとではない — 10 GB 級でも ModelInputError で先に拒まれるとは読ませない。
         assert (
-            "The accepted set does not depend on the GPU, so such a request is still accepted and"
-            " fails during the run — with an out-of-memory error (`GpuOutOfMemoryError`), or a lost"
-            " device near the limit — rather than with `ModelInputError`, and the time spent on the"
-            " stages before it is lost." in prose
+            "The accepted set does not depend on the GPU, so such a request is still accepted, and"
+            " if it does not fit it fails during the run — with an out-of-memory error"
+            " (`GpuOutOfMemoryError`), or a lost device near the limit — rather than with"
+            " `ModelInputError`, and the time spent on the stages before it is lost." in prose
         )
         # ブラウザの通しは別の GPU・runtime の値と名乗り、走っていない組は未実走と書く。
         assert (

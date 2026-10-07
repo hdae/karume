@@ -221,8 +221,10 @@ measurements in `docs/research/`.
   `WanGenerateEvent`, `WanPipelineOptions`, …); it reads manifests with pipeline `wan-ti2v/1`, and
   each class rejects the other's pipeline. Accepted sizes are 1280×704 and 704×1280 with 4n+1
   frames from 5 to 121 (default 1280×704, 33 frames); the latents are `[48, F', H/16, W/16]` and
-  `fps` is 24. 121 frames at 1280×704 have completed on a 12 GiB GPU (RTX 3080 Ti, Deno); a GPU
-  with about 10 GB such as the Intel Arc B570 is not expected to fit 121 frames (not run there).
+  `fps` is 24. 121 frames at 1280×704 have completed on a 12 GiB GPU (RTX 3080 Ti, Deno). On a
+  GPU with about 10 GB such as the Intel Arc B570, clips up to 57 frames have been checked; longer
+  clips are not supported there, as none of them was run there (a memory estimate puts 81 and 121
+  frames beyond that GPU's limit; the other lengths were not estimated).
   Image-to-video is not available yet. The `karume-wan2.2` distribution is not published on
   Hugging Face yet: `dist.py --pipeline wan-ti2v` assembles a local mirror for `fromPretrained`,
   and `fromAssets` builds the pipeline from a manifest and the exported series containers.

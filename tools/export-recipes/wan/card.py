@@ -623,13 +623,19 @@ _WAN21_VERIFICATION = (
 #: 3080 Ti の山は nvidia-smi の GPU 全体の値で、0.9 GiB は物理容量との差 — Deno で先に効くのは
 #: 総確保の天井（ドライバの予算の 97%・時点ごとに動く）なので、実際の余裕はもっと薄いことがある
 #: （docs/limitations.md の Wan2.2 の節 — 推測）。天井の数は時点で動くのでカードには書かない。
-#: B570（Deno の総確保の天井 9,600 MiB）で 121 フレームが入らないのは推測（DiT の段の診断値
-#: 〈重み + backing〉が 3080 Ti で 10.64 GiB）— B570 では回していない。それでも ADR 0121 追記
-#: 「段 10 — 121 フレームの受理」の裁定どおり**非対応**と言い切り、受理集合は機ごとではないので
-#: admission では拒まれず実行の途中で落ちる（OOM の errorScope か、天井の付近では device lost）と
-#: 書く。NOTE: B570 で回した最長は試走の表の実用席 57 フレームなので「最大 49」とは書かず、
-#: 資源の表の B570 の行が 49 で止まることだけを書く。704×1280 は 2 ステップ × 17 フレームの sha 行
-#: だけ（50 ステップの通しは全て 1280×704）。
+#: B570（Deno の総確保の天井 9,600 MiB）で確かめた長さは 57 フレームまで（追記「受理寸法を
+#: 公式の 2 寸法へ」の試走の表 — 2 席とも 49・実用席だけ 57、どちらも生成スクリプト）。
+#: それより長いクリップは ADR 0121 追記「段 10 — 121 フレームの受理」の決着どおり**非対応**と
+#: 言い切る。非対応の理由は B570 で回していないことで、入るかどうかの見込みは推測: Context
+#: 「容量と時間の見積り」の表が見積ったのは 2 点だけで、81 フレーム（S = 18,480）は実用席が
+#: 入らず、121 は 2 席とも入らない（121 は DiT の段の診断値〈重み + backing〉も 3080 Ti で
+#: 10.64 GiB と天井を超える）。61〜77 と 85〜117 は見積りも無いので「分からない」と書く（入らない
+#: 見込みとは書かない）。NOTE: カードには 2.1 の既定の 81 を写さない門
+#: （`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`）があるので、81 は「77 フレームの次の
+#: 長さ」と書く（4n+1 で 77 の次が 81 — 見積りが求めた境界ではない）。受理集合は機ごとではないので
+#: admission では拒まれず、入らなければ実行の途中で落ちる（OOM の errorScope か、天井の付近では
+#: device lost）と書く。資源の表の B570 の行は 49 で止まる（57 は表に無い）ことも書く。
+#: 704×1280 は 2 ステップ × 17 フレームの sha 行だけ（50 ステップの通しは全て 1280×704）。
 _WAN22_FRAMES_CHECKED = (
     "Checked end to end on the GPU: 17 frames at",
     "  both sizes in 2-step runs, and 33 frames at 1280 × 704 in 50-step runs. 49 frames at",
@@ -645,10 +651,16 @@ _WAN22_FRAMES_CHECKED = (
     "  card's size that varies over time, and on a 12 GiB GPU shared with other programs",
     "  121 frames may not fit (an estimate — not run).",
     "  On a GPU with about 10 GB, such as the Intel Arc B570 (where Deno can allocate about",
-    "  9.4 GiB in total), 121 frames are not supported: they are not expected to fit, since",
-    "  10.64 GiB is above that ceiling. This is an estimate — 121 frames have not been run on",
-    "  the B570 (its rows under Resources stop at 49 frames). The accepted set does not depend",
-    "  on the GPU, so such a request is still accepted and fails during the run — with an",
+    "  9.4 GiB in total), clips up to 57 frames have been checked: the longest 50-step runs",
+    "  there were 49 frames with both quants and 57 frames with the `f16+dit8-a8-attn8-s16`",
+    "  quant, driven by the development script (its rows under Resources stop at 49 frames).",
+    "  Longer clips are not supported there, because none of them has been run on the B570. A",
+    "  memory estimate made before the runs covers only two of those lengths and puts both",
+    "  beyond that ceiling: the next length after 77 frames with the `f16+dit8-a8-attn8-s16`",
+    "  quant, and 121 frames with both quants (the 10.64 GiB the transformer stage allocated at",
+    "  121 frames on the RTX 3080 Ti is above it too). The other lengths were not estimated, so",
+    "  whether they fit is not known. The accepted set does not depend on the GPU, so such a",
+    "  request is still accepted, and if it does not fit it fails during the run — with an",
     "  out-of-memory error (`GpuOutOfMemoryError`), or a lost device near the limit — rather",
     "  than with `ModelInputError`, and the time spent on the stages before it is lost.",
 )
