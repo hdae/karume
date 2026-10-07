@@ -454,7 +454,9 @@ device lost を返した形）。5 回中 4 回・公開 API の `deno run` で�
   その後の submit は約 10 倍速く返る（GPU に届いていないと読める — 推測）。GPU がその位置に着いた時刻に device lost が表に出る。
 - 否定できたもの: 1 回の処理の長さ（最長の submit 0.67 s・dispatch 0.40 s）・熱（HW Thermal Slowdown の累計が不変）・VRAM（10.2 GiB）・
   wgpu のメモリ予算の判定（panic の位置が poll なので、ドライバ由来の device lost）。
-- 未確定: ドライバの Xid（kernel log が読めない）・何が 11 s の止まりを起こすか・なぜ 5 回に 1 回は起きないか。ホストが GPU より大きく先行して
+- ホストの kernel log に NVRM の Xid は 1 件も無い（利用者が root で確認）。カーネル側の回復（watchdog など）ではなく、ユーザー空間の
+  Vulkan ドライバが device lost を返した形。
+- 未確定: 何が 11 s の止まりを起こすか・なぜ 5 回に 1 回は起きないか。ホストが GPU より大きく先行して
   submit を積むこと（ホストの先行に上限が無い）が関わっていると見ている（推測 — 上限を設ければ消えるかは製品の経路で確かめていない）。
 - 実用席（既定）の 121 フレームでは落ちた例が無い。調査の記録: `.claude/reviews/2026-10-07_wan22-121f-device-lost/FINDINGS.md`（git 追跡外）・
   `outputs/diag/wan22-121f-device-lost-2026-10-07/`。
