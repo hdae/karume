@@ -84,6 +84,7 @@ import {
   type BakedGroups,
   bakeGenerationBindGroups,
   executeBakedPlan,
+  executeBakedPlanPaced,
   type GenerationEncoding,
   type GenerationLimits,
   pipelineCensus,
@@ -1541,7 +1542,7 @@ export class Session {
                 transientBytes: pinnedBytes(plan),
                 peakTransientBytes: plan.peakLiveBytes,
               });
-              executeBakedPlan(
+              const paced = executeBakedPlanPaced(
                 recipes,
                 baked.groups,
                 scheduler,
@@ -1551,12 +1552,14 @@ export class Session {
                   onStep: noteStateWrite,
                 },
               );
+              // 上限に届かない run では undefined（待ちも譲りも足さない — ADR 0123）。
+              if (paced !== undefined) await paced;
             } else {
               // slot 経路。積むコマンド列はアリーナ経路と同一で、bind 先の実体が run を跨いで
               // 固定されるだけ（前 run の残骸が残っていてよい根拠は full-write — ADR 0014）。
               // bind group は構築時に焼き込み済みなので、ここは dispatch を積むだけ
               // （generation run は context 側の束だけを run ごとに照合する — 決定 5）。
-              executeBakedPlan(
+              const paced = executeBakedPlanPaced(
                 recipes,
                 backing.groups,
                 scheduler,
@@ -1566,6 +1569,7 @@ export class Session {
                   onStep: noteStateWrite,
                 },
               );
+              if (paced !== undefined) await paced;
             }
 
             if (singleFence) {

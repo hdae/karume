@@ -15,9 +15,10 @@
  *
  * 実行相は**計画 1 本を共有する 2 経路**。ミス run は run 寿命の領域を確保して
  * {@link bakeAllBindGroups} で全 dispatch の bind group を組み、ヒット run は Session 常駐の領域
- * （backing）に {@link bakeBindGroups} で焼き込んだ group を使う。どちらも積むのは
- * {@link executeBakedPlan} の dispatch だけで、確保・参照計数・解放は実行相から消えている
- * （計画が再生済み）。束縛は `{ buffer: 領域, offset, size }` で実寸に切る（ADR 0093 決定 2）。
+ * （backing）に {@link bakeBindGroups} で焼き込んだ group を使う。どちらも積むのは焼き込み実行
+ * （run は {@link executeBakedPlanPaced}・enqueue は {@link executeBakedPlan}）の dispatch だけで、
+ * 確保・参照計数・解放は実行相から消えている（計画が再生済み）。束縛は `{ buffer: 領域, offset, size }`
+ * で実寸に切る（ADR 0093 決定 2）。
  *
  * MUST: **焼き込みの単位は束ねる相手の所有者で分ける**（ADR 0066 決定 5）。Session 所有の実体
  * （slot / 常駐入力 / 重み）だけを束ねる dispatch は {@link bakeBindGroups} が backing の構築時に
@@ -737,8 +738,9 @@ export const pipelineCensus = (
 };
 
 /**
- * 焼き込み済み bind group の実行。run が出す GPU 操作はこの dispatch だけで、確保・解放も
- * createBindGroup も出ない（ミス run は {@link bakeAllBindGroups} で組んだ group を渡す）。
+ * 焼き込み済み bind group の実行（enqueue の経路 — run は {@link executeBakedPlanPaced}）。出す GPU 操作は
+ * この dispatch だけで、確保・解放も createBindGroup も出ない（ミス run は {@link bakeAllBindGroups} で
+ * 組んだ group を渡す）。
  *
  * MUST: 前 run の残骸が領域に残っていても正しいのは full-write（ADR 0014 — 全ノードが束縛範囲の
  * 全バイトを書く）が根拠で、配り直しの安全性と同じ 1 本の不変条件。
@@ -751,25 +753,68 @@ export const executeBakedPlan = (
   scheduler: SubmitScheduler,
   generation?: BakedGeneration,
 ): void => {
-  recipes.forEach((recipe, index) => {
-    generation?.onStep(recipe);
-    const stepGroups = groups[index];
-    const contextGroups = generation?.groups[index];
-    recipe.dispatches.forEach((dispatch, id) => {
-      const bindGroup = stepGroups[id] ?? contextGroups?.[id];
-      if (bindGroup === undefined) {
-        throw new ExecutionError(
-          `dispatch '${dispatch.key}': GenerationContext 所有の実体を束ねる bind group が` +
-            "焼かれていない（ADR 0066 決定 5 の分離焼き込み — context 側の焼き込みを経ずに" +
-            "焼き込み経路へ来た）",
-        );
-      }
-      dispatchWithWork(
-        scheduler,
-        dispatch,
-        bindGroup,
-        resolveWorkgroups(dispatch, generation?.encoding),
+  recipes.forEach((recipe, index) =>
+    dispatchBakedStep(recipe, index, groups, scheduler, generation)
+  );
+};
+
+/**
+ * {@link executeBakedPlan} と同じ dispatch 列を積み、ステップの間で送り込みの先行の上限を待つ
+ * （`SubmitScheduler.backpressure` — ADR 0123）。積むコマンドの中身と順序は同じで、待つ位置だけが
+ * 足される。
+ *
+ * 戻りは待ちが要ったときだけ Promise（undefined なら全ステップを同期で積み終えている）。MUST: 上限に
+ * 届かない run には 1 マイクロタスクも足さない — async 関数にすると、待ちが無くても呼び手の await が
+ * 譲り、最後のステップの未 submit を抱えたまま他のタスクを走らせる（errorScope を張った区間の同期性も
+ * 失う）。
+ *
+ * MUST: 呼ぶのは run（errorScope 区間ロックの中）だけ。ロックが他の run と batch を締め出すので、
+ * 待ちの間に他の誰の dispatch も割り込まない。MUST NOT: enqueue からは呼ばない（同期の
+ * {@link executeBakedPlan} を使い、待たない）。同じ batch の別 Session の enqueue は区間ロックでは
+ * 直列化されないので、待つと後から呼んだ enqueue が先に queue へ載る（ADR 0123 決定 4）。
+ */
+export const executeBakedPlanPaced = (
+  recipes: readonly StepRecipe[],
+  groups: BakedGroups,
+  scheduler: SubmitScheduler,
+  generation?: BakedGeneration,
+): Promise<void> | undefined => {
+  const continueFrom = (start: number): Promise<void> | undefined => {
+    for (let index = start; index < recipes.length; index += 1) {
+      dispatchBakedStep(recipes[index], index, groups, scheduler, generation);
+      const wait = scheduler.backpressure();
+      if (wait !== undefined) return wait.then(() => continueFrom(index + 1));
+    }
+    return undefined;
+  };
+  return continueFrom(0);
+};
+
+/** 1 ステップぶんの dispatch を積む（{@link executeBakedPlan} と {@link executeBakedPlanPaced} が共有する 1 本）。 */
+const dispatchBakedStep = (
+  recipe: StepRecipe,
+  index: number,
+  groups: BakedGroups,
+  scheduler: SubmitScheduler,
+  generation: BakedGeneration | undefined,
+): void => {
+  generation?.onStep(recipe);
+  const stepGroups = groups[index];
+  const contextGroups = generation?.groups[index];
+  recipe.dispatches.forEach((dispatch, id) => {
+    const bindGroup = stepGroups[id] ?? contextGroups?.[id];
+    if (bindGroup === undefined) {
+      throw new ExecutionError(
+        `dispatch '${dispatch.key}': GenerationContext 所有の実体を束ねる bind group が` +
+          "焼かれていない（ADR 0066 決定 5 の分離焼き込み — context 側の焼き込みを経ずに" +
+          "焼き込み経路へ来た）",
       );
-    });
+    }
+    dispatchWithWork(
+      scheduler,
+      dispatch,
+      bindGroup,
+      resolveWorkgroups(dispatch, generation?.encoding),
+    );
   });
 };

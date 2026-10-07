@@ -25,6 +25,7 @@ import {
   buildTransientProgram,
   type DispatchWorkgroups,
   executeBakedPlan,
+  executeBakedPlanPaced,
   type GenerationLimits,
   planRecipes,
   type StepOutput,
@@ -470,6 +471,71 @@ Deno.test("論理長から算出した workgroup 数が 0 の軸を持つ dispat
   // 対照: 有効行があれば同じレシピが積まれる。
   executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log), generation(2, 4));
   assertEquals(log, ["state.pv [2,4,1]"]);
+});
+
+/**
+ * 積まれた dispatch のキーを記録し、`backpressure` は与えた列の順に返すスケジューラ
+ * （送り込みの先行の上限の待ち — ADR 0123）。
+ */
+const pacedScheduler = (
+  log: string[],
+  waits: readonly (Promise<void> | undefined)[],
+): SubmitScheduler => {
+  let calls = 0;
+  return ({
+    dispatch: (_pipeline: unknown, _group: unknown, _workgroups: unknown, key: string) => {
+      log.push(key);
+    },
+    backpressure: () => waits[calls++],
+  }) as unknown as SubmitScheduler;
+};
+
+Deno.test("run の焼き込み実行は送り込みの待ちの間、次のステップの dispatch を積まない", async () => {
+  const log: string[] = [];
+  const gate = Promise.withResolvers<void>();
+  const recipes = [
+    dispatchStep([runnableDispatch("a", [1, 1, 1])]),
+    dispatchStep([runnableDispatch("b", [1, 1, 1])]),
+  ];
+
+  const running = executeBakedPlanPaced(
+    recipes,
+    [[stubGroup()], [stubGroup()]],
+    pacedScheduler(log, [gate.promise]),
+  );
+  assert(running !== undefined, "待ちが要ったら Promise を返す");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(log, ["a"], "待ちが解けるまで次のステップを積まない");
+
+  gate.resolve();
+  await running;
+  assertEquals(log, ["a", "b"]);
+});
+
+Deno.test("run の焼き込み実行は上限の内なら待ちを挟まず、同期の実行と同じ列を積む", () => {
+  const recipes = [
+    dispatchStep([runnableDispatch("a", [1, 1, 1]), runnableDispatch("b", [1, 1, 1])]),
+    dispatchStep([runnableDispatch("c", [1, 1, 1])]),
+  ];
+  const groups = [[stubGroup(), stubGroup()], [stubGroup()]];
+  const paced: string[] = [];
+  const plain: string[] = [];
+
+  // 待ちが要らない run は Promise を返さない（呼び手の await が 1 マイクロタスクも譲らない）。
+  assertEquals(executeBakedPlanPaced(recipes, groups, pacedScheduler(paced, [])), undefined);
+  assertEquals(paced, ["a", "b", "c"], "呼び出しから戻った時点で積み終わっている");
+
+  // enqueue の経路（同期の実行）は送り込みの待ちを 1 度も問わない（ADR 0123 決定 4）。
+  const neverAsked = {
+    dispatch: (_pipeline: unknown, _group: unknown, _workgroups: unknown, key: string) => {
+      plain.push(key);
+    },
+    backpressure: () => {
+      throw new Error("enqueue の経路が backpressure を呼んだ");
+    },
+  } as unknown as SubmitScheduler;
+  executeBakedPlan(recipes, groups, neverAsked);
+  assertEquals(paced, plain);
 });
 
 /** bind group の実体解決だけを走らせる（GPU 資源を持たない device スタブ）。 */

@@ -903,7 +903,9 @@ type BatchInternals = {
  *   `run` で 1 本ずつ回す（run は従来どおり run 単位で帰属する）。
  * - **device 消失の検出は finish まで遅延する**。区間中の待ちが 1 本も無いのだから当然で、
  *   消失は finish の `raceDeviceLost` が例外へ変換する（enqueue 側はハングしない — 待たない
- *   から）。
+ *   から）。NOTE: 区間の中の submit が 64 回に届くと、スケジューラは送り込みの先行の上限の完了印を
+ *   置く（ADR 0123 — 待ちはしない）。Deno 2.9.6 では印の同期部分の最中に消失が表に出ると、例外では
+ *   なく panic になる（flush と同じ — docs/known-issues.md の Deno の device lost の項）。
  */
 export class BatchScope {
   /** ランタイム内部面（利用者が触る面ではない）。 */

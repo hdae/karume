@@ -27,6 +27,8 @@
  * `docs/research/2026-08-04-host-overhead-recon.md` §4.1）。呼ぶのは
  * {@link SubmitScheduler.flush} の 1 回だけにする — そこの待ちは flush-before-destroy の
  * ために元から要るもので、計測のための追加コストはゼロになる。
+ * 例外は送り込みの先行の上限の完了印（{@link IN_FLIGHT_MARKER_INTERVAL} — ADR 0123）だけで、
+ * フェンスの間に submit が 64 回積まれるたびに 1 本置く。
  *
  * NOTE（H-1 の追随）: 通常の run も `onSubmittedWorkDone` を張らなくなった（読み戻しの copy を
  * dispatch と同じコマンド列へ積み、**readback の `mapAsync` を唯一のフェンスにする** —
@@ -100,6 +102,29 @@ export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = {
  * （2 倍の偏りまで予算内に収まる）。
  */
 const CHUNK_TIME_SAFETY = 0.5;
+
+/**
+ * 送り込みの先行の上限（DECIDED: ADR 0123）: 計測窓の中で submit をこの回数出すごとに、完了印
+ * （`onSubmittedWorkDone`）を 1 本置く。
+ *
+ * NOTE: 数える単位が計測窓なのは、窓が閉じるのがフェンスの直後だから（「最後にフェンスで GPU の
+ * 完了を確かめてからの submit の数」がそのまま窓のチャンク数になる）。フェンスの間の submit が
+ * この回数に届かない run（decode のような短い run の繰り返し）は印を 1 本も置かない。
+ */
+export const IN_FLIGHT_MARKER_INTERVAL = 64;
+
+/**
+ * 未完了のまま持ってよい完了印の数（ADR 0123）。超えたら、未完了の印がこの本数に戻るまで待つ
+ * （ふつうは最も古い印 1 本）— 先行は約 (この値 + 1) × {@link IN_FLIGHT_MARKER_INTERVAL} 回の submit までになる。
+ */
+export const IN_FLIGHT_MAX_MARKERS = 2;
+
+/** 完了印 1 本（{@link IN_FLIGHT_MARKER_INTERVAL}）。 */
+type InFlightMarker = {
+  readonly work: Promise<void>;
+  /** 決着したか（拒否を含む）。完了は FIFO なので、前から順に立つ。 */
+  settled: boolean;
+};
 
 /**
  * 構築時の政策検査。
@@ -400,6 +425,8 @@ export class SubmitScheduler {
   #windowWork = 0;
   /** 開いている窓で submit したチャンク数（窓平均を出す分母 — {@link ChunkBudgetStats}）。 */
   #windowChunks = 0;
+  /** 置いた完了印のうち、前から捨てていないもの（{@link SubmitScheduler.backpressure}）。 */
+  readonly #markers: InFlightMarker[] = [];
   /** 推定時間が最大だったチャンク（診断専用）。undefined = 裏付けの付いたチャンクがまだ無い。 */
   #maxEstimatedChunkMs: number | undefined;
   /** 推定時間が予算を超えたまま出したチャンクの累計（診断専用）。 */
@@ -526,6 +553,31 @@ export class SubmitScheduler {
   }
 
   /**
+   * 送り込みの先行が上限を超えていれば、未完了の完了印が上限の本数に戻るまで待つ Promise を返す
+   * （ADR 0123）。超えていなければ undefined を返し、待ちを作らない（マイクロタスクも挟まない）。
+   *
+   * 待つ相手は「その印が済めば未完了が上限の本数に戻る」印（後ろから数えて上限 + 1 本目）。完了は
+   * FIFO なので、それより古い印も同時に済んでいる。1 ステップで印が何本溜まっても、1 回の待ちで上限の
+   * 内へ戻る。
+   *
+   * MUST: 待ちを返す前に未 submit を出し切る。待ちの間に出る `queue.writeBuffer` が未 submit の
+   * dispatch を追い越さない（ADR 0004 不変条件④を待ちの間も保つ）うえ、GPU も積んだぶんを
+   * 全て受け取ってから待つ。
+   * MUST: 呼び手は待ちの間に**他の誰の dispatch も割り込ませない**位置で呼ぶ — 今は run の区間ロックの中の
+   * ステップの間（`executeBakedPlanPaced`）だけ。enqueue は呼ばない（ADR 0123 決定 4 — 待つと別 Session の
+   * enqueue が呼び出し順を追い越す）。
+   * MUST: 消失は {@link GpuDeviceLostError} にする（消失後の `onSubmittedWorkDone` が解決しない
+   * 実装がありうる — flush と同じ理由）。
+   */
+  backpressure(): Promise<void> | undefined {
+    while (this.#markers[0]?.settled === true) this.#markers.shift();
+    const target = this.#markers.at(-1 - IN_FLIGHT_MAX_MARKERS);
+    if (target === undefined) return undefined;
+    this.#submitChunk();
+    return this.#gpu[RUNTIME_INTERNAL].raceDeviceLost(target.work, "送り込みの先行の上限の待ち");
+  }
+
+  /**
    * 計測窓を閉じる（`flush` を通らない経路 — batch の決着と、単一フェンス run の readback）。
    *
    * MUST: 呼び出しはその経路の**フェンスの後**（batch は `onSubmittedWorkDone`、単一フェンス
@@ -585,7 +637,9 @@ export class SubmitScheduler {
    * 相乗りしている無関係な dispatch まで実行されないまま、誤った値が静かに残る。失敗経路で
    * 残骸を出し切らずに済ませるのが {@link SubmitScheduler.discard}。
    *
-   * MUST: `onSubmittedWorkDone` を呼ぶのは**ここだけ**（モジュール doc の計測の帰属）。
+   * MUST: このスケジューラの中で `onSubmittedWorkDone` をフェンスとして呼ぶのは**ここだけ**（モジュール doc の
+   * 計測の帰属 — 送り込みの先行の上限の完了印は窓を閉じない。batch の決着のフェンスは `BatchScope` が張り、
+   * 窓は {@link SubmitScheduler.closeMeasurementWindowAfterFence} で閉じる）。
    * 適応制御の観測点も同じ待ちに相乗りする — 窓を閉じるのは待ちの直後で、timestamp の回収
    * （`mapAsync`）は窓の外に置く（診断の代を推定へ混ぜない）。
    */
@@ -726,12 +780,41 @@ export class SubmitScheduler {
     const submittedAt = this.#now();
     this.#device.queue.submit([encoder.finish()]);
     this.#submitCount += 1;
-    // MUST NOT: ここで onSubmittedWorkDone を呼ばない（モジュール doc — ホストと GPU の
-    // 直列化）。計測の起点だけを残し、閉じるのは flush 側。
+    // MUST NOT: submit ごとに onSubmittedWorkDone を呼ばない（モジュール doc — ホストと GPU の
+    // 直列化）。計測の起点だけを残し、閉じるのは flush 側。呼ぶのは窓の中の
+    // IN_FLIGHT_MARKER_INTERVAL 回ごとの完了印だけ（ADR 0123）。
     this.#windowStartedAt ??= submittedAt;
     this.#windowWork += chunkWork;
     this.#windowChunks += 1;
+    if (this.#windowChunks % IN_FLIGHT_MARKER_INTERVAL === 0) this.#placeMarker();
     this.#observeChunkBudget(chunkWork);
+  }
+
+  /**
+   * 完了印を 1 本置く（ADR 0123）。
+   *
+   * NOTE: Deno 2.9.6 の `onSubmittedWorkDone` は同期部分が「それまでに submit した全作業の完了」まで
+   * ホストを止める（research 2026-08-04 §4.1）。この実装では印を置いた時点で GPU が追いつくので、
+   * 待たない enqueue も含めて先行は IN_FLIGHT_MARKER_INTERVAL 回までになる（待ちの Promise は解決済みの
+   * ものを待つだけ）。消失がこの同期部分で起きると、Deno は例外ではなく panic する（flush と同じ —
+   * docs/known-issues.md の Deno の device lost の項）。
+   * NOTE: 拒否も決着として数えるだけで、ここでは投げない。待つ側は同じ Promise を
+   * `raceDeviceLost` 越しに待つので拒否はそこへ出る。待たずに捨てた印の拒否は、その run / 区間の
+   * フェンスが同じ device の状態で落とす。
+   */
+  #placeMarker(): void {
+    // 決着した印を前から捨てる（{@link SubmitScheduler.backpressure} を呼ばない enqueue だけの Session でも
+    // 溜まり続けない）。
+    while (this.#markers[0]?.settled === true) this.#markers.shift();
+    const marker: InFlightMarker = {
+      work: this.#device.queue.onSubmittedWorkDone(),
+      settled: false,
+    };
+    const settle = (): void => {
+      marker.settled = true;
+    };
+    marker.work.then(settle, settle);
+    this.#markers.push(marker);
   }
 
   /**
