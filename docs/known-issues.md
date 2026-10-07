@@ -445,3 +445,17 @@ sha 行と帯の照合は全て通る。
 - **同じ機序で説明がつく既存の項目（推測・未検証）**: 上の B570 の節の「device を破棄して作り直すと、次の device で確保できる総量が減る」と
   「tiny golden の取得と破棄を重ねた末尾の OOM」。
 - 調査の記録は `.claude/reviews/2026-10-05_wan-lane-oom-investigation.json`（git 追跡外）、実験の手順は `outputs/diag/dead-device-README.md`。
+
+## RTX 3080 Ti（Deno）: 一部の e2e の所要が 2 つの山に分かれる（2026-10-07 観測・原因未調査）
+
+ADR 0123 の速度の前後比較で見つけた。値（sha256・帯）は変わらず、所要だけが回によって 2〜3 倍に跳ぶ。
+
+- Wan2.1 の VAE タイルの e2e（`packages/models/tests/e2e_wan_vae_tiles_test.ts`）の縦長 9 フレーム（`accept`）の decode が
+  12 s 前後と 20〜37 s に分かれる。横長 33 フレーム（`band`）は分かれない。
+- Gemma 4 の sequence の e2e（`packages/models/tests/e2e_gemma4_sequence_test.ts`）の 598 トークンの prefill（`context-en`）が
+  8 s 前後と 13 s 台に分かれる（テスト全体で 34 s 対 55 s）。
+- どちらも ADR 0123 の前のコード（`b3fa0d34`）でも出る（VAE は 4 回中 1 回・Gemma は 9 回中 1 回）。ADR 0123 の完了印とは関係しない
+  （VAE の経路は enqueue で印を置かない・Gemma のテスト全体で印は 1 本・待ちは 0 回）。
+- 見立て（推測・未確認）: submit の時間予算分割の推定（計測窓の実測 ÷ workgroup 数）のぶれで、チャンクの切り方が回ごとに変わる。
+  熱制限（この GPU は冷却が弱く 93 ℃ 前後で回る）との交絡もありうる。
+- 記録: `.claude/reviews/2026-10-07_submit-inflight/ab-vae-tiles.log`・`ab-gemma.log`（git 追跡外）。

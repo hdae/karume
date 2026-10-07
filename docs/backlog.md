@@ -239,6 +239,12 @@ later の「decode 速度の残り」。
 
 ## later
 
+- **ブラウザでの enqueue の送り込みの先行の上限（起票 2026-10-07・利用者の裁定 = later）**: ADR 0123 は run にだけ上限を置いた
+  （enqueue は待つと別 Session の enqueue との呼び出し順が崩れる）。enqueue にも上限を置くなら、batch の中の enqueue の本体を受理の
+  順に 1 本ずつ流す仕組み（batch 単位の FIFO）を足してから末尾で待つ。同じ仕組みで、初回の enqueue（導出の `await` を持つ本体）が
+  後から呼んだ別 Session の enqueue に追い越されうる既存の形も閉じる。着手の目安: Chrome で長い batch（動画の VAE・生成ループ）を
+  回して、送り込みの詰まりや device lost の症状が出たとき。失敗の実例は今のところ無い（121 フレームの VAE・約 2 万 submit も完走）。
+
 - **E4B 通常（gemma4）の export（裁定 4 = b・2026-09-26）**: RAM 48 GB 以上の機で export する。recipe（`--model e4b`・
   読み込みの meta 構築 + assign）は現状のまま（31 GiB 機では OOM する）。E4B 通常の席は E2B の束を
   暫定宣言・既定 `i4`。
