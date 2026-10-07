@@ -114,6 +114,7 @@ import {
 } from "../src/wan/scheduler.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
+import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
@@ -286,7 +287,6 @@ const FULL_STEPS = 50;
 
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
-const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline wan";
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
 
 /** umT5 の配布形ミラー（Wan の manifest の `text_encoder` が越境参照する先 — ADR 0119 追記「段 10d の設計」D）。 */
@@ -310,7 +310,7 @@ const DIST_PRESENT = fileExists(new URL("karume.json", DIST_ROOT));
 if (!DIST_PRESENT) {
   console.warn(
     `[karume] 配布形ミラー ${DIST_ROOT.pathname} が無いため Wan のパイプラインの照合を SKIP する。` +
-      `組み立て: ${ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
+      `組み立て: ${WAN_ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
   );
 }
 const FIXTURES_PRESENT = CASES.map(({ name }) => fileExists(fixtureUrl(name)));
@@ -342,7 +342,7 @@ if (DIST_PRESENT && !GPU_TEXT_PRESENT) {
   console.warn(
     TEXT_ENCODER_PART0 === undefined
       ? `[karume] 配布形ミラー ${DIST_ROOT.pathname} が umT5（${TEXT_ENCODER}）を持たないため、Wan の GPU 経路の` +
-        `ケースと umT5 の admission の故障を SKIP する。組み直し: ${ASSEMBLE_COMMAND}`
+        `ケースと umT5 の admission の故障を SKIP する。組み直し: ${WAN_ASSEMBLE_COMMAND}`
       : `[karume] umT5 の配布形ミラー ${UMT5_ROOT.pathname}（${UMT5_REPO} の越境先）が無いため、Wan の GPU 経路の` +
         `ケースと umT5 の admission の故障を SKIP する。組み立て: ${ASSEMBLE_UMT5_COMMAND}`,
   );

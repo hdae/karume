@@ -103,6 +103,7 @@ import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { timestampUnitNs } from "./helpers/timestamp-unit.ts";
+import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
@@ -560,7 +561,7 @@ const PRACTICAL_RUNNABLE = ASSETS_AVAILABLE && I8_MODEL_PRESENT && distManifestT
 if (ASSETS_AVAILABLE && I8_MODEL_PRESENT && distManifestText === undefined) {
   console.warn(
     `[karume] 配布形ミラー ${DIST_ROOT.pathname} の karume.json が無いため実用席 ${PRACTICAL_QUANT} の時間と` +
-      "確保の記録を SKIP する（組み立て: cd tools/export-recipes && uv run python dist.py --pipeline wan）",
+      `確保の記録を SKIP する（組み立て: ${WAN_ASSEMBLE_COMMAND}）`,
   );
 }
 

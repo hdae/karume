@@ -61,6 +61,7 @@ import {
 } from "../wan.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
+import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { openReferences, sha256Hex } from "../../runtime/tests/helpers/reference.ts";
@@ -74,7 +75,6 @@ const SWAP_DIRECTORY = SWAP_RAW === undefined || SWAP_RAW === "" ? undefined : S
 
 /** 配布形ミラー（`dist.py --pipeline wan` の既定の出力先）。 */
 const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
-const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline wan";
 /** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
 const TEXT_ENCODER = "text_encoder";
 /**
@@ -112,7 +112,7 @@ const DIST_PRESENT = fileExists(new URL("karume.json", DIST_ROOT));
 if (!DIST_PRESENT) {
   console.warn(
     `[karume] 配布形ミラー ${DIST_ROOT.pathname} が無いため Wan の text_encoder の差し替えの e2e を SKIP する。` +
-      `組み立て: ${ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
+      `組み立て: ${WAN_ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
   );
 }
 if (SWAP_DIRECTORY === undefined) {
@@ -149,7 +149,7 @@ const wanTextEncoderParts = async (): Promise<readonly FileRef[]> => {
   assert(
     parts.length > 0 && parts.every((part) => part.repo !== undefined),
     `配布形 ${DIST_ROOT.pathname} の '${TEXT_ENCODER}' が umT5 の配布リポへの越境参照でない` +
-      `（この e2e の前提 — 組み直し: ${ASSEMBLE_COMMAND}）`,
+      `（この e2e の前提 — 組み直し: ${WAN_ASSEMBLE_COMMAND}）`,
   );
   return parts;
 };

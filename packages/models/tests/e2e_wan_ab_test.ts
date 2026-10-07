@@ -65,6 +65,7 @@ import {
 } from "./helpers/census-table.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { withManifestOverride } from "./helpers/manifest-override.ts";
+import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 
@@ -158,7 +159,7 @@ const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR))
 if (manifestText === undefined) {
   console.warn(
     `[karume] ${ASSETS_DIR.pathname} に karume.json が無いため Wan の自機 A/B 門を SKIP する` +
-      "（組み立て: cd tools/export-recipes && uv run python dist.py --pipeline wan）",
+      `（組み立て: ${WAN_ASSEMBLE_COMMAND}）`,
   );
 }
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;

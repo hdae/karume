@@ -54,6 +54,7 @@ import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "../src/wan/scheduler.ts";
 import { WanVaeChunkError, wanVaeChunkLayout } from "../src/wan/vae-chunks.ts";
 import type { WanRopeBase } from "../src/wan/dit-rope.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
+import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import {
   findWanTextEmbedding,
   padWanTextEmbedding,
@@ -1849,7 +1850,7 @@ const distManifestText = await readTextIfPresent(DIST_MANIFEST);
 if (distManifestText === undefined) {
   console.warn(
     `[karume] ${DIST_MANIFEST.pathname} が無いため、quant を省いた構築が実用席へ解決する検査を SKIP する。` +
-      "組み立て: cd tools/export-recipes && uv run python dist.py --pipeline wan",
+      `組み立て: ${WAN_ASSEMBLE_COMMAND}`,
   );
 }
 
