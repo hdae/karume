@@ -75,12 +75,10 @@ export type WanLabGeneration = {
   readonly route: "wan" | "wan22";
   readonly serverOption: "--wan-source" | "--wan22-source";
   /**
-   * gpu-lab が受理する記述子（フレーム数の選択肢・判定表の受理の門・既定の寸法とフレーム数・fps）。2.1 は製品と
-   * 同じ・2.2 は上限だけ広げた写し（{@link WAN22_LAB_MAX_FRAMES}）。
+   * 世代の記述子（フレーム数の選択肢・判定表の受理の門・既定の寸法とフレーム数・fps）。製品の記述子そのもの
+   * （gpu-lab は製品の受理の外を選ばせない）。
    */
   readonly descriptor: WanGenerationDescriptor;
-  /** 製品の受理の上限（これを超えるフレーム数は表示で区別する — 開発機の sha 行を持たない）。 */
-  readonly productMaxFrames: number;
   /** DiT の head 数と FFN の中間の幅（スコアの行ブロックと FFN 中間の大きさ）。 */
   readonly ditHeads: number;
   readonly ditFfnWidth: number;
@@ -127,7 +125,6 @@ export const WAN21_LAB: WanLabGeneration = {
   route: "wan",
   serverOption: "--wan-source",
   descriptor: WAN21_GENERATION,
-  productMaxFrames: WAN21_GENERATION.maxFrames,
   ditHeads: 12,
   ditFfnWidth: 8960,
   pixelsPerToken: 16,
@@ -157,16 +154,6 @@ export const WAN21_LAB: WanLabGeneration = {
   ],
 };
 
-/**
- * gpu-lab が Wan2.2 で受理するフレーム数の上限（公式実装の既定 121 フレーム）。
- *
- * 製品の受理（`WAN22_TI2V_GENERATION.maxFrames` 49）は開発機で 50 ステップを完走した上限で、それを超えるフレーム数は
- * 開発機で回らない（ADR 0121 追記「受理寸法を公式の 2 寸法へ」）。gpu-lab はその外を大きい GPU（RTX 5070 Ti）で
- * 確かめる口で、製品の受理と公開 API は変えない（ADR 0121 決定 8 の例外「開発機の sha 行を持たない受理」・段 8）。
- * DiT のグラフの S の記号の上限は最初から 27,280（1280×704×121 — 決定 3）なので、この上限まではグラフの宣言の内。
- */
-export const WAN22_LAB_MAX_FRAMES = 121;
-
 /** Wan2.2 の参照ケースの id（`e2e_wan_ti2v_pipeline_test.ts` の `caseIdOf` の綴り）。 */
 const wan22CaseId =
   (head: string, frames: number) => (quant: string, size: WanSize, shift: number): string =>
@@ -186,10 +173,12 @@ const wan22CaseId =
  * 格納は f16）。first のグラフの活性の最大は `cat_23 [512,3,128,128]` の 100,663,296 B。ADR 0121 追記「段 4 の結果」の前の調査の約 207.7 MB（`[1,512,6,130,130]` —
  * 上流の詰め物つきの形）ではなく、配布する宣言の値を使う。
  *
- * 記述子は製品の記述子の上限だけを {@link WAN22_LAB_MAX_FRAMES} へ広げた写し（受理寸法・既定・fps 24 は製品のまま）。
+ * 記述子は製品の記述子そのもの（受理の上限は公式の既定の 121 フレーム。DiT のグラフの S の記号の上限は 27,280〈1280×704×121
+ * — ADR 0121 決定 3〉なので、この上限まではグラフの宣言の内）。
  *
  * 参照ケースは `e2e_wan_ti2v_pipeline_test.ts` の `SEED_CASES`（参照席・2 ステップ・17 フレーム・2 寸法）と
- * `FULL_CASES`（参照席と実用席・50 ステップ・33 フレーム・1280×704）。席名は e2e の helper
+ * `FULL_CASES`（参照席と実用席・50 ステップ・33 フレーム・1280×704）と `LONG_CLIP_CASE_ID`（参照席・2 ステップ・
+ * 121 フレーム・1280×704 — e2e では opt-in）。席名は e2e の helper
  * （`tests/helpers/wan-ti2v-pipeline.ts` の `WAN_TI2V_REFERENCE_QUANT` / `WAN_TI2V_PRACTICAL_QUANT`）の写し —
  * 2.1 の表と同じく文字列で持つ（helper は Deno の API を読むモジュールを引くので、ブラウザの bundle に入れない）。
  *
@@ -200,8 +189,7 @@ export const WAN22_LAB: WanLabGeneration = {
   label: "Wan2.2 TI2V 5B（karume-wan2.2）",
   route: "wan22",
   serverOption: "--wan22-source",
-  descriptor: { ...WAN22_TI2V_GENERATION, maxFrames: WAN22_LAB_MAX_FRAMES },
-  productMaxFrames: WAN22_TI2V_GENERATION.maxFrames,
+  descriptor: WAN22_TI2V_GENERATION,
   ditHeads: 24,
   ditFfnWidth: 14336,
   pixelsPerToken: 32,
@@ -221,6 +209,13 @@ export const WAN22_LAB: WanLabGeneration = {
       quants: ["f16+dit8", "f16+dit8-a8-attn8-s16"],
       id: wan22CaseId("50step-boxing-cats-seed42", 33),
     },
+    {
+      steps: 2,
+      frames: 121,
+      sizes: [{ width: 1280, height: 704 }],
+      quants: ["f16+dit8"],
+      id: wan22CaseId("2step-boxing-cats-seed42", 121),
+    },
   ],
 };
 
@@ -237,12 +232,6 @@ export const wanFrameChoices = (generation: WanLabGeneration): number[] => {
   return choices;
 };
 
-/** フレーム数の選択肢の表示（製品の受理の外は区別する — 開発機の sha 行を持たない）。 */
-export const wanFrameLabel = (generation: WanLabGeneration, frames: number): string =>
-  frames > generation.productMaxFrames
-    ? `${frames}（製品の受理の外 — 開発機の sha 行を持たない）`
-    : String(frames);
-
 /** `832x480` → 寸法（綴りが違えば落とす — 黙って既定の寸法で回さない）。 */
 export const parseWanSize = (text: string): WanSize => {
   const match = /^(\d+)x(\d+)$/.exec(text);
@@ -254,7 +243,7 @@ export const wanSizeLabel = (size: WanSize): string => `${size.width}x${size.hei
 
 /**
  * DiT のトークン数 S（潜在フレーム数 × H/p × W/p — p は世代の 1 token の画素の辺）。世代の仕様の受理集合
- * （2.2 は gpu-lab の上限 121 フレーム）の外は落とす — 判定表は受理集合の中の要求についてだけ意味を持つ
+ * （2.2 は 4n+1 の 5〜121 フレーム — 製品の受理集合そのまま）の外は落とす — 判定表は受理集合の中の要求についてだけ意味を持つ
  * （外の要求は `generate` が `ModelInputError` で拒む）。
  */
 export const wanTokenCount = (

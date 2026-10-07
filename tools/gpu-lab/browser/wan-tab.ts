@@ -10,9 +10,8 @@
  * 1. **事前判定**: アダプタ（と取得した device）の limits を、選んだフレーム数・寸法が要る値と並べる
  *    （`wan-plan.ts` の `judgeWanLimits` — 足りない項目は赤）。
  * 2. **読み込み**: GPU を取り（ページの GPU 設定の幾何プロファイル・`onDeviceLost`）、配布形を読む。Wan2.1 は
- *    `WanPipeline.fromPretrained`、Wan2.2 は家族の内部 API（`loadWanFromPretrained` / `generateWanVideo`）を、上限を
- *    121 フレームへ広げた記述子（{@link WAN22_LAB_FAMILY}）で直接呼ぶ。2 つの口は同じ形（{@link WanRunner}）に揃え、
- *    生成・記録・照合の本体は 1 本。取得元は既定でこのサーバが配る `models/karume-wan2.1`（`/models/wan/…`）/
+ *    `WanPipeline.fromPretrained`、Wan2.2 は `WanTi2vPipeline.fromPretrained`。2 つの口は同じ形（{@link WanRunner}）に
+ *    揃え、生成・記録・照合の本体は 1 本。取得元は既定でこのサーバが配る `models/karume-wan2.1`（`/models/wan/…`）/
  *    `models/karume-wan2.2`（`/models/wan22/…`）で（HF の公開リポはまだ無い）、HF の `owner/name` も入れられる。テキストエンコーダの
  *    経路（ADR 0119 決定 7）はタブの既定が `precomputed`（埋め込み資産 — 段 9 の確認の既定のまま。パイプライン
  *    の既定は `gpu` なので、ここでは必ず明示して渡す）。`gpu` を選ぶと umT5 の越境先（Wan の manifest の
@@ -60,17 +59,12 @@ import {
   type WanPipelineOptions,
   type WanPrompt,
   type WanRunComponent,
+  WanTi2vPipeline,
 } from "../../../packages/models/wan.ts";
 import {
   parseWanPipelineConfig,
   type WanPipelineConfig,
 } from "../../../packages/models/src/wan/config.ts";
-import {
-  generateWanVideo,
-  loadWanFromPretrained,
-  WAN22_TI2V_FAMILY,
-  type WanFamilySpec,
-} from "../../../packages/models/src/wan/family.ts";
 import wan21References from "../../../packages/models/tests/fixtures/references/wan.json" with {
   type: "json",
 };
@@ -103,11 +97,9 @@ import {
   referenceVerdictText,
   summarizeWanDiagnostics,
   summarizeWanTimeline,
-  WAN22_LAB,
   WAN_LAB_GENERATIONS,
   type WanComponentDiagnostics,
   wanFrameChoices,
-  wanFrameLabel,
   type WanLabGeneration,
   type WanLabGenerationId,
   type WanLimits,
@@ -141,16 +133,6 @@ const TEXT_ENCODER_CHOICES: readonly { readonly value: WanTextEncoder; readonly 
 /** Wan の manifest の部品名（umT5 — 越境参照の宣言を引く）。 */
 const TEXT_ENCODER = "text_encoder";
 
-/**
- * gpu-lab が Wan2.2 を回す家族の仕様 — 製品の `WAN22_TI2V_FAMILY` の記述子だけを、上限を 121 フレームへ広げた
- * `WAN22_LAB.descriptor`（`wan-plan.ts` の `WAN22_LAB_MAX_FRAMES`）に差し替えた写し。
- *
- * 製品の受理（`WAN22_TI2V_GENERATION.maxFrames` 49）と公開 API（`WanTi2vPipeline` / `WanPipelineOptions`）は変えない。
- * これは開発機で回らないフレーム数を大きい GPU で確かめる口（ADR 0121 決定 8 の例外「開発機の sha 行を持たない受理」・
- * 段 8）で、公開の class を通らないので、class の直列化鎖の代わりにタブの `exclusive` が生成を 1 本ずつにする。
- */
-const WAN22_LAB_FAMILY: WanFamilySpec = { ...WAN22_TI2V_FAMILY, generation: WAN22_LAB.descriptor };
-
 /** 世代ごとの sha256 の環境行の表（`fixtures/references/` — ADR 0106）。 */
 const REFERENCES: Readonly<Record<WanLabGenerationId, WanReferences>> = {
   "wan2.1": wan21References,
@@ -166,38 +148,24 @@ type WanRunner = {
   readonly dispose: () => Promise<void>;
 };
 
-/**
- * 世代の口を組む。Wan2.1 は今までどおり `WanPipeline.fromPretrained`。Wan2.2 は家族の内部 API を
- * {@link WAN22_LAB_FAMILY} で直接呼ぶ（GPU は `options.gpu` で渡すので `WanState.ownsGpu` は false — 解放するものは
- * 無い）。
- */
+/** 公開の class 1 本を口の形にする（GPU は `options.gpu` で渡すので、`dispose` は GPU を破棄しない）。 */
+const runnerOf = (pipeline: WanPipeline | WanTi2vPipeline): WanRunner => ({
+  prompts: pipeline.prompts,
+  generate: (request) => pipeline.generate(request),
+  dispose: () => pipeline.dispose(),
+});
+
+/** 世代の口を組む（Wan2.1 は `WanPipeline`・Wan2.2 は `WanTi2vPipeline` の `fromPretrained`）。 */
 const openRunner = async (
   generation: WanLabGeneration,
   source: DistributionSource | HubRepoRef,
   options: WanFromPretrainedOptions,
 ): Promise<WanRunner> => {
   switch (generation.id) {
-    case "wan2.1": {
-      const pipeline = await WanPipeline.fromPretrained(source, options);
-      return {
-        prompts: pipeline.prompts,
-        generate: (request) => pipeline.generate(request),
-        dispose: () => pipeline.dispose(),
-      };
-    }
-    case "wan2.2": {
-      const state = await loadWanFromPretrained(WAN22_LAB_FAMILY, source, options);
-      return {
-        prompts: state.textEmbeds.entries.map(({ name, role, prompt, normalized }) => ({
-          name,
-          role,
-          prompt,
-          normalized,
-        })),
-        generate: (request) => generateWanVideo(WAN22_LAB_FAMILY, state, request),
-        dispose: () => Promise.resolve(),
-      };
-    }
+    case "wan2.1":
+      return runnerOf(await WanPipeline.fromPretrained(source, options));
+    case "wan2.2":
+      return runnerOf(await WanTi2vPipeline.fromPretrained(source, options));
   }
 };
 
@@ -370,15 +338,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     const loaded = state.loaded;
     const generation = state.generation;
     const info = loaded?.gpu.adapterInfo ?? lab.adapterInfo;
-    const { descriptor, productMaxFrames } = generation;
     ui.info.textContent = [
       adapterSummary(info),
       `環境キー ${loaded?.environmentKey ?? environmentKeyOf(info)}`,
-      `世代 ${generation.label}${
-        descriptor.maxFrames === productMaxFrames
-          ? ""
-          : `（フレーム数は ${descriptor.maxFrames} まで選べる — 製品の受理は ${productMaxFrames} まで）`
-      }`,
+      `世代 ${generation.label}`,
       loaded === undefined
         ? `配布形 ${
           servedName(generation) ??
@@ -437,12 +400,12 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     }));
     const short = judged.filter((row) => row.verdict === "short").map((row) => row.key);
     const max = wanMaxFramesWithin(generation, deviceLimits ?? adapterLimits, size);
-    ui.limitsSummary.textContent = `${wanFrameLabel(generation, frames)} フレーム · ${
-      wanSizeLabel(size)
-    } を ${deviceLimits === undefined ? "アダプタ" : "取得した device"} の limits で判定: ${
+    ui.limitsSummary.textContent = `${frames} フレーム · ${wanSizeLabel(size)} を ${
+      deviceLimits === undefined ? "アダプタ" : "取得した device"
+    } の limits で判定: ${
       short.length === 0 ? "束縛上限とバッファ上限は足りる" : `足りない — ${short.join(" / ")}`
     } · この limits で回せる最大は ${
-      max === undefined ? "無し" : `${wanFrameLabel(generation, max)} フレーム`
+      max === undefined ? "無し" : `${max} フレーム`
     }（必要条件だけ — VRAM・submit の時間は別）`;
     ui.limitsSummary.className = short.length === 0 ? "" : "bad";
   };
@@ -982,15 +945,15 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   };
 
   /**
-   * 選んだ世代の選択肢（受理集合と既定は世代の仕様の記述子が正本 — Wan2.1 は 4n+1 の 5〜81・Wan2.2 は 5〜121〈49 を
-   * 超える選択肢は製品の受理の外として区別〉・寸法は 2 通り）と取得元の placeholder。
+   * 選んだ世代の選択肢（受理集合と既定は世代の仕様の記述子が正本 — Wan2.1 は 4n+1 の 5〜81・Wan2.2 は 5〜121・寸法は
+   * 2 通り）と取得元の placeholder。
    */
   const fillChoices = (): void => {
     const generation = state.generation;
     const { acceptedSizes, defaults } = generation.descriptor;
     ui.frames.replaceChildren(
       ...wanFrameChoices(generation).map((frames) =>
-        optionOf(String(frames), wanFrameLabel(generation, frames), frames === defaults.frames)
+        optionOf(String(frames), String(frames), frames === defaults.frames)
       ),
     );
     ui.size.replaceChildren(...acceptedSizes.map((size) =>

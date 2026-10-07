@@ -34,8 +34,9 @@
  *   guidance 5.0 → 5.05・shift 5.0 → 3.0（shift の結線）。どれも DiT の段の `end` のイベントで打ち切って VAE を回さない。T2V では
  *   条件マスクと条件側の時刻は原理的に値に出ない（2 本が同じ値・マスクは全て偽 — 段 2 と同じ理由）ので注入に入れない。
  * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json`。2.1 の `wan.json` には触らない）: 出力フレーム（uint8 の
- *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。参照席の 6 本 = 帯のケース 3 本・seed 経路の 1280×704 と
- *   704×1280・GPU 経路（umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP）。ID は席・経路・step 数・
+ *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは参照席の 6 本 = 帯のケース 3 本・seed 経路の
+ *   1280×704 と 704×1280・GPU 経路（umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP）。
+ *   opt-in の 121 フレームの参照席の 1 本は下の節。ID は席・経路・step 数・
  *   ケース・寸法・フレーム数・shift を全て持つ（{@link caseIdOf} — 裁定 F12）。行が無い機はそのケースの sha の突合を飛ばし
  *   （実物と実測の sha は残す）、参照門が赤になる（既存の規律）。行は帯が緑になった後に `KARUME_REFERENCE=write` をこのファイル
  *   単独で回して作る（裁定 F8）。行は段 6 で**系列を直読み**（`fromAssets`）する版で書いた値（RTX 3080 Ti の行は凍結コピー
@@ -58,11 +59,27 @@
  * NOTE: 実用席 `f16+dit8-a8-attn8-s16` の 2.2 の DiT は、参照席との自機 A/B の門（段 7）をまだ通っていない。opt-in の実用席の
  * 映像は、数値の正しさが未確認の席の出力（裁定 F6）。
  *
+ * ## 121 フレームの参照値（env の opt-in `KARUME_WAN_TI2V_121F=1` — 既定のレーンに入れない）
+ *
+ * 受理の上限 121 フレーム（公式の既定 — 開発機 RTX 3080 Ti で 50 ステップの完走を確かめて受理を広げた・ADR 0121 段 10）の、
+ * 開発機の参照値。要求は seed 経路の 1280×704 のケースと同じ（事前計算の経路・`boxing-cats`・seed 42・2 ステップ・guidance 5.0・
+ * shift 5.0）でフレーム数だけ 121 にし、出力の形・非有限 0・device lost が無いこと・denoise-step の数・sha256 の環境行を見る
+ * （行が無い機は突合を飛ばして実物と実測の sha を残す — seed のケースと同じ扱い）。席は参照席 `f16+dit8`: 実用席の出力は段 7 の
+ * A/B の門の前に凍結しない（50 ステップの通しで行を書かないのと同じ規律）。所要は約 15〜20 分（VAE だけで約 12 分）なので、
+ * 50 ステップの通しと同じく env の opt-in でだけ回し、参照門への登録も opt-in のときだけ（既定のレーンの参照門を赤にしない）。
+ * 結果の席は `<日付>_wan-ti2v-pipeline-121f/`（既定のレーンと分ける理由は 50 ステップの通しと同じ）。行は
+ * `KARUME_REFERENCE=write` を付けて同じコマンドで作る:
+ *
+ * ```
+ * KARUME_WAN_TI2V_121F=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_pipeline_test.ts --filter "121 フレーム"
+ * ```
+ *
  * ## device の使い方（B570 の `destroy()` が VRAM を返さない件 — docs/known-issues.md）
  *
  * 既定のレーンの `Deno.test` 1 本は device を 1 つだけ取り、全ケースを `t.step` で回す（ケースの間に `settleReleases`）。
- * opt-in の 50 ステップも同じく device 1 つで、`--filter "50 ステップ"` で**単独のプロセス**として回す（既定のレーンの device の
- * 残りを背負わない）。構築（`fromPretrained`）は配布形の part を読むだけで Session を張らない（段ごとに張って畳む）。
+ * opt-in の 50 ステップと 121 フレームも同じく device 1 つで、`--filter "50 ステップ"` / `--filter "121 フレーム"` で**単独の
+ * プロセス**として回す（既定のレーンの device の残りを背負わない）。構築（`fromPretrained`）は配布形の part を読むだけで
+ * Session を張らない（段ごとに張って畳む）。
  *
  * ## 観測（門ではない）
  *
@@ -260,6 +277,21 @@ const FULL_CASES: readonly { readonly id: string; readonly quant: string }[] = [
   quant,
 }));
 
+/** 121 フレームの参照値の opt-in（モジュール doc）。 */
+const LONG_CLIP = Deno.env.get("KARUME_WAN_TI2V_121F") === "1";
+/**
+ * 121 フレームのケースのフレーム数（受理の上限 = 公式の既定）。記述子から読まずに値で持つ — ID の `121f` は sha 行のキーで、
+ * 記述子の上限が動いても同じ ID が別の要求の値で回らないようにする。
+ */
+const LONG_CLIP_FRAMES = 121;
+/** 121 フレームのケース（参照席・事前計算の経路・seed 経路の 1280×704 のケースとフレーム数だけが違う）。 */
+const LONG_CLIP_CASE_ID = caseIdOf(
+  `${WAN_TI2V_REFERENCE_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
+  WIDTH,
+  HEIGHT,
+  LONG_CLIP_FRAMES,
+);
+
 const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --group wan --inexact python -m wan.ti2v_few_step_ref";
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
@@ -338,6 +370,8 @@ const references = openReferences(new URL("fixtures/references/wan-ti2v.json", i
 const results = openResults("wan-ti2v-pipeline");
 /** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
 const fullResults = openResults("wan-ti2v-pipeline-full");
+/** 121 フレームの結果の席（同じく既定のレーンと分ける）。 */
+const longClipResults = openResults("wan-ti2v-pipeline-121f");
 
 Deno.test({
   name: "Wan2.2 通しの参照: 2 ステップの参照 3 本が揃っている",
@@ -1095,14 +1129,75 @@ Deno.test({
   },
 });
 
+// NOTE: 50 ステップの通しと同じく `--filter "121 フレーム"` で単独のプロセスとして回す（モジュール doc「device の使い方」）。
+Deno.test({
+  name:
+    "Wan2.2 通し 121 フレーム（実 GPU・opt-in KARUME_WAN_TI2V_121F=1）: 1280×704・2 ステップ（参照席・seed 経路）が完走し" +
+    "非有限 0・sha256 の環境行・所要と段の切り替えの VRAM",
+  ignore: !LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE,
+  fn: async () => {
+    await assertRunningAdapter();
+    let deviceLost: string | undefined;
+    const gpu = await acquireTestGpu({
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    });
+    const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    let settlement: ReferenceSettlement | undefined;
+    try {
+      await using pipeline = await loadPipeline(
+        gpu,
+        diagnostics,
+        "precomputed",
+        WAN_TI2V_REFERENCE_QUANT,
+      );
+      await runRecordedCase(longClipResults, { id: LONG_CLIP_CASE_ID }, async () => {
+        const observed = await observe(pipeline, diagnostics, {
+          ...TWO_STEP,
+          frames: LONG_CLIP_FRAMES,
+          prompt: textOf(pipeline.prompts, SEED_PROMPT, "prompt"),
+          seed: SEED,
+          width: WIDTH,
+          height: HEIGHT,
+        });
+        assert("video" in observed, "generate が最後まで回っていない");
+        assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+        const { video } = observed;
+        assertEquals([video.frames, video.height, video.width], [LONG_CLIP_FRAMES, HEIGHT, WIDTH]);
+        const nonFinite = countNonFinite(video.data);
+        const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+        console.log(`[wan-ti2v-pipeline] ${LONG_CLIP_CASE_ID}:\n  ${notes.join("\n  ")}`);
+        assertEquals(nonFinite, 0, `${LONG_CLIP_CASE_ID}: 非有限`);
+        assertEquals(deviceLost, undefined, "device lost");
+        const outcome = await settleOrObserve(references, longClipResults, {
+          id: LONG_CLIP_CASE_ID,
+          artifact: `${LONG_CLIP_CASE_ID}.rgb`,
+          bytes: rgbBytes(video),
+        });
+        settlement = outcome.settlement;
+        return { ...outcome.fields, note: notes.join(" / ") };
+      });
+    } finally {
+      await settleReleases(gpu);
+      gpu.destroy();
+    }
+    if (settlement?.check.status === "fail") {
+      throw new Error(referenceMismatchMessage(LONG_CLIP_CASE_ID, settlement, references));
+    }
+  },
+});
+
 /**
  * 参照門に登録するケース（回せるものだけ — 帯のケースは参照と配布形、seed のケースは配布形、GPU 経路は加えて umT5 の
- * ミラーが要る）。50 ステップの通しは sha を観測だけするので登録しない。
+ * ミラーが要る）。50 ステップの通しは sha を観測だけするので登録しない。121 フレームのケースは opt-in のときだけ登録する
+ * （既定のレーンでは回らないので、登録すると行が無い機の参照門を赤にする）。
  */
 const CASE_IDS = [
   ...(DIST_PRESENT && ANY_FIXTURE ? CASES.map(({ name }) => bandCaseId(name)) : []),
   ...(DIST_PRESENT ? SEED_CASES.map(({ id }) => id) : []),
   ...(GPU_TEXT_PRESENT ? [GPU_TEXT_CASE_ID] : []),
+  ...(DIST_PRESENT && LONG_CLIP ? [LONG_CLIP_CASE_ID] : []),
 ];
 const RUNNABLE = DIST_PRESENT && GPU_AVAILABLE;
 if (RUNNABLE) references.warnMissing(CASE_IDS);

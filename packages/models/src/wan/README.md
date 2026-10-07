@@ -78,16 +78,18 @@ abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 
 The sizes and frames depend on the class: `WanPipeline` (Wan2.1) accepts 832×480 or 480×832 with
 4n+1 frames from 5 to 81 (default 832×480, 33 frames); `WanTi2vPipeline` (Wan2.2) accepts 1280×704
-or 704×1280 with 4n+1 frames from 5 to 49 (default 1280×704, 33 frames). Both take `steps` ≥ 1,
+or 704×1280 with 4n+1 frames from 5 to 121 (default 1280×704, 33 frames). Both take `steps` ≥ 1,
 `guidance` ≥ 1 and finite in float32 (1 turns CFG off), `shift` > 0 with a `steps` × `shift` pair
 whose σ column is strictly decreasing, and either a `seed` (default 0) or the initial noise as
 `latents`. The sizes, the frame range and the defaults come from the generation descriptor
 (`descriptor.ts`). For Wan2.1, only 832×480 with 33 and 81 frames have been checked end to end on
 the GPU; for Wan2.2, 1280×704 and 704×1280 with 17 frames (two steps) and 1280×704 with 33 frames
-(50 steps, both quants) have been checked end to end on the GPU (ADR 0121 stage 6). The transformer
-stage is closed before the VAE stage opens, so the two are never resident together. A non-finite
-umT5 output, a non-finite latent after any step, or a non-finite VAE output before the clamp fails
-the generation instead of being returned.
+(50 steps, both quants) have been checked end to end on the GPU (ADR 0121 stage 6), and 1280×704
+with 121 frames (50 steps, the practical quant) completed on an RTX 3080 Ti (12 GiB, Deno). The Arc
+B570 (about 9.4 GiB allocatable from Deno) is not expected to fit 121 frames (not run). The
+transformer stage is closed before the VAE stage opens, so the two are never resident together. A
+non-finite umT5 output, a non-finite latent after any step, or a non-finite VAE output before the
+clamp fails the generation instead of being returned.
 
 ## Numerics
 

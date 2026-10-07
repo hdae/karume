@@ -89,7 +89,7 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
 };
 
 /**
- * Wan2.2（TI2V 5B）の記述子（1280×704 / 704×1280 × フレーム数 4n+1 の 5〜49 だけ — ADR 0121 の
+ * Wan2.2（TI2V 5B）の記述子（1280×704 / 704×1280 × フレーム数 4n+1 の 5〜121 だけ — ADR 0121 の
  * 「追記（2026-10-05）: 受理寸法を公式の 2 寸法へ」）。
  *
  * 受理寸法は公式実装の対応寸法（Wan2.2 の `SUPPORTED_SIZES` — 公式が 720P と呼ぶ 2 向き）だけ。pin した
@@ -98,9 +98,13 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
  * （同じ seed・プロンプト）で写実に出た。よって 832×480 / 480×832 は受理しない。段 5 の 832×480 系のタイル
  * 参照は受理寸法に依らない数値の照合として残る（タイル計画の入口 `planWanGenerationTiles` は受理集合を見ない）。
  *
- * 上限 49 フレームは開発機（B570・Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉）で 1280×704・50 ステップを
- * 2 席とも完走した値。57 フレームも完走したが、実用席で決定 8 の目安（DiT の診断の合計 ≤ 8.0 GiB）の外。公式実装の既定
- * 121 フレームは、大きい GPU で完走を確かめてから広げる（実測の表は ADR 0121 の同じ追記の試走の表）。
+ * 上限 121 フレームは公式実装（Wan2.2 の公式リポのサンプラ — ADR 0121 の上流調査 §4.1。Diffusers の `WanPipeline` の
+ * 既定 81 とは別）の既定。開発機（RTX 3080 Ti・12 GiB・Deno）で 1280×704・50 ステップが実用席で完走し
+ * （DiT の段の VRAM の山 11,361 MiB〈nvidia-smi・GPU 全体〉・物理容量との差 約 0.9 GiB）、RTX 5070 Ti の
+ * Chrome でも完走した（ADR 0121 の追記「RTX 3080 Ti のレーンとフル verify」と「RTX 5070 Ti の Chrome」）。開発機の参照値（sha 行）は 2 ステップ × 121 フレームのケース
+ * （`e2e_wan_ti2v_pipeline_test.ts` の opt-in）で取る。B570 級（Deno の総確保の天井 約 9.4 GiB〈9,600 MiB〉）では実用席の
+ * DiT の診断値 10.64 GiB（実測）が天井を超え、参照席も DiT の診断値の外挿 9.16〜9.50 GiB に DiT 以外の確保を足すと超えるので
+ * 入らない見込み（推測 — B570 で 2 席とも完走した最大は 49 フレーム〈実用席は 57 も完走〉・docs/limitations.md）。
  *
  * 既定の 1280×704・33 フレームは仮置き（視認で確定する）。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
  * （逆正規化の統計の表は `latents.ts`）。
@@ -117,7 +121,7 @@ export const WAN22_TI2V_GENERATION: WanGenerationDescriptor = {
     { width: 704, height: 1280 },
   ],
   minFrames: 5,
-  maxFrames: 49,
+  maxFrames: 121,
   defaults: { frames: 33, width: 1280, height: 704 },
   fps: 24,
   vaePatchSize: 2,

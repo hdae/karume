@@ -25,7 +25,7 @@
 export { WanPipeline } from "./src/wan/pipeline.ts";
 /**
  * Wan2.2 TI2V 5B のテキスト → 動画（T2V）。構築・生成・中断・解放の面と公開型（要求・結果・イベント・
- * 構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜49 フレーム）・
+ * 構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜121 フレーム）・
  * 潜在の形・fps は世代の値（ADR 0121 決定 10）。配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe
  * `dist.py --pipeline wan-ti2v` が組む・HF には未公開）。
  */

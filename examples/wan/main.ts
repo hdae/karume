@@ -45,7 +45,7 @@
  * パイプラインが `ModelInputError` で落とす）。
  *
  * Wan2.2 の事実（`--generation wan2.2`）: step 数・guidance・shift の既定は 2.2 の manifest の `pipelineConfig` で
- * 50・5.0・5.0。寸法は 1280×704 か 704×1280（既定 1280×704）、フレーム数は 4n+1 の 5〜49（既定 33）、24 fps。
+ * 50・5.0・5.0。寸法は 1280×704 か 704×1280（既定 1280×704）、フレーム数は 4n+1 の 5〜121（既定 33）、24 fps。
  * 席の既定は manifest の `defaultQuant` の `f16+dit8-a8-attn8-s16` で、もう 1 つの席は `f16+dit8`
  * （2.2 に `f16` の席は無い）。
  */

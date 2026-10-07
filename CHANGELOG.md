@@ -220,9 +220,12 @@ measurements in `docs/research/`.
   `generate`, `dispose`) and shares its public types (`WanGenerateRequest`, `GeneratedVideo`,
   `WanGenerateEvent`, `WanPipelineOptions`, …); it reads manifests with pipeline `wan-ti2v/1`, and
   each class rejects the other's pipeline. Accepted sizes are 1280×704 and 704×1280 with 4n+1
-  frames from 5 to 49 (default 1280×704, 33 frames); the latents are `[48, F', H/16, W/16]` and
-  `fps` is 24. Image-to-video is not available yet. There is no distribution yet, so for now the
-  pipeline is built with `fromAssets` from a manifest and the exported series containers.
+  frames from 5 to 121 (default 1280×704, 33 frames); the latents are `[48, F', H/16, W/16]` and
+  `fps` is 24. 121 frames at 1280×704 have completed on a 12 GiB GPU (RTX 3080 Ti, Deno); a GPU
+  with about 10 GB such as the Intel Arc B570 is not expected to fit 121 frames (not run there).
+  Image-to-video is not available yet. The `karume-wan2.2` distribution is not published on
+  Hugging Face yet: `dist.py --pipeline wan-ti2v` assembles a local mirror for `fromPretrained`,
+  and `fromAssets` builds the pipeline from a manifest and the exported series containers.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
   container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when

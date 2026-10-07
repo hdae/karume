@@ -313,13 +313,11 @@ The tab has a generation switch next to the source field: `Wan2.1 T2V 1.3B（kar
 `Wan2.2 TI2V 5B（karume-wan2.2）` (text-to-video only). It can be changed only before loading. Changing it rebuilds
 the frame and size choices, the limits table, the quant choices (from that generation's distribution on this
 server), the source placeholder, and the info line. Wan2.1 loads with `WanPipeline.fromPretrained` exactly as
-before. Wan2.2 accepts 1280x704 or 704x1280 and 4n+1 frames from 5 to 49 in the product (default 1280x704, 33
-frames), and its clips play at 24 fps. The page offers Wan2.2 up to 121 frames, the official default length: it
-calls the family's internal loader and generator (`loadWanFromPretrained` / `generateWanVideo` of
-`packages/models/src/wan/family.ts`) with a copy of the descriptor whose frame limit is 121. Frame counts above 49
-are marked `製品の受理の外 — 開発機の sha 行を持たない` in the frame select: the product rejects them, and the
-development machine keeps no reference rows for them (see [Wan2.2](#7-wan22-ti2v-5b)). The default frame count
-and size are each generation's descriptor defaults.
+before, and Wan2.2 loads with `WanTi2vPipeline.fromPretrained`. Wan2.2 accepts 1280x704 or 704x1280 and 4n+1
+frames from 5 to 121, the official default length (default 1280x704, 33 frames), and its clips play at 24 fps.
+The page offers exactly what the product accepts: it uses the product's descriptor as is, so every frame count
+in the select is one the pipeline accepts (see [Wan2.2](#7-wan22-ti2v-5b)). The default frame count and size are
+each generation's descriptor defaults.
 
 The tab has a text-encoder route switch. `precomputed` (the tab default) uses the fixed-prompt embedding
 asset; `gpu` runs umT5-XXL on the GPU and accepts any prompt — it needs the `karume-umt5-xxl` mirror,
@@ -497,14 +495,14 @@ Any other quant is not a reference case.
 
 Sections 1 to 6 and the steps above describe Wan2.1; this section gives what differs for Wan2.2. The
 numbers marked as measured come from the B570 under Deno (ADR 0121, "B570 の 1280×704 のフレーム数の試走" and
-stage 2); the one Chrome run so far is the RTX 5070 Ti result below.
+stage 2) unless another GPU is named; the one Chrome run so far is the RTX 5070 Ti result below.
 
 **Result on the RTX 5070 Ti (2026-10-06, Chrome 154 on Windows)**: a 50-step clip with the practical quant
 `f16+dit8-a8-attn8-s16` and the GPU text encoder (`cat-dog-baking`, seed 42, 1280x704, 121 frames, past the
-product limit of 49 that the tab lifts) completed without a device loss in 2,417.5 s (40.3 minutes): 58.3 s for
-the text encoder, 1,843.3 s for the transformer stage (35.4 to 36.0 s per step after a first step of 87.1 s),
-and 515.3 s for the VAE stage. The transformer diagnostics were 9.47 GiB (4.67 GiB of weights and 4.80 GiB of
-slot backing), below the estimate further down. VRAM, watched by eye with Windows' own use included, peaked at
+product limit of 49 at the time, which the tab then lifted) completed without a device loss in 2,417.5 s
+(40.3 minutes): 58.3 s for the text encoder, 1,843.3 s for the transformer stage (35.4 to 36.0 s per step after
+a first step of 87.1 s), and 515.3 s for the VAE stage. The transformer diagnostics were 9.47 GiB (4.67 GiB of
+weights and 4.80 GiB of slot backing), below the estimate further down. VRAM, watched by eye with Windows' own use included, peaked at
 about 8 GiB in the text encoder stage, 10.5 GiB in the transformer stage, and 6 GiB in the VAE stage. The
 largest window mean was 64.6 ms for the transformer and 616.2 ms for `vae_decoder_first`, which also counted
 3,645 submits over the budget, the same pattern the B570 showed in ADR 0121 stage 4 (the cause has not been
@@ -531,13 +529,20 @@ in stage 2), and into 34 blocks of 2,102,960,640 B at 121 frames (computed).
 | `f16+dit8`              |     33 |               7.86 GiB |                7.35 GiB | 43 min 3 s (2,143 s / 439 s)  |
 | `f16+dit8`              |     49 |               8.45 GiB |                7.64 GiB | 66 min 53 s (3,360 s / 647 s) |
 
-The VAE stage peaked at 4.36 to 4.52 GiB with the practical quant, at any frame count. 121 frames has run
-only on the RTX 5070 Ti in Chrome (the result above), below the estimates that follow. The ADR 0121
+The VAE stage peaked at 4.36 to 4.52 GiB with the practical quant, at any frame count. 121 frames has run on
+the RTX 5070 Ti in Chrome (the result above) and, with the same request, on an RTX 3080 Ti (12 GiB) in Deno
+(ADR 0121, "開発機の 1280×704×121"): 63.1 minutes including thermal throttling, transformer diagnostics of
+10.64 GiB, and a transformer stage peak of 11,361 MiB on the whole GPU (`nvidia-smi`), about 0.9 GiB below
+the card's 12,288 MiB (Deno's own allocation cap, set by the driver's reported budget, sits below the card's
+size and was not measured during the run, so the margin under Deno can be thinner). The RTX 5070 Ti diagnostics are below the estimates that follow, and the RTX 3080 Ti
+diagnostics fall inside them. On a GPU with about 10 GB, such as the B570
+(where Deno can allocate about 9.4 GiB in total), 121 frames are not expected to fit; this is an estimate, as
+121 frames were not run on the B570 (`docs/limitations.md`). The ADR 0121
 capacity table estimates (extrapolated from Wan2.1, before any measurement) transformer diagnostics of 9.16 to 9.50 GiB with `f16+dit8` and 10.18 to 11.37 GiB with
-`f16+dit8-a8-attn8-s16` at 1280x704 and 121 frames. With about 1.3 GiB on top, the practical quant is
-expected to fit the RTX 5070 Ti (16 GB) at about 11.5 to 12.7 GiB. That is an expectation, not a
-measurement. The same table estimates the transformer stage at about 78 minutes on the RTX with `f16+dit8`.
-If the practical quant halves that as it does on the B570, it takes about 40 minutes. Both are estimates.
+`f16+dit8-a8-attn8-s16` at 1280x704 and 121 frames. Before the runs above, these estimates put the practical
+quant on the RTX 5070 Ti (16 GB) at about 11.5 to 12.7 GiB with about 1.3 GiB on top, and its transformer stage
+at about 40 minutes (half of the table's 78 minutes for `f16+dit8`, as on the B570). The measured run took
+9.47 GiB of diagnostics and 1,843.3 s (30.7 minutes) for the transformer stage.
 
 **Reference cases.** The rows are kept in `packages/models/tests/fixtures/references/wan-ti2v.json`, with
 the same environment keys as Wan2.1. The common conditions are `boxing-cats`, seed 42, the default
@@ -545,6 +550,9 @@ negative, and the default guidance and shift (5.0 and 5.0):
 
 - `f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5` and
   `f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5` — steps 2, 17 frames, only with `f16+dit8`;
+- `f16+dit8-2step-boxing-cats-seed42-1280x704-121f-shift5` — steps 2, 121 frames, 1280x704, only with
+  `f16+dit8`. The e2e runs it only when `KARUME_WAN_TI2V_121F=1` is set (the VAE stage alone takes about
+  12 minutes on the RTX 3080 Ti), and its rows are written only on the development machine;
 - `<quant>-50step-boxing-cats-seed42-1280x704-33f-shift5` — steps 50, 33 frames, 1280x704, with `f16+dit8`
   or `f16+dit8-a8-attn8-s16`. The e2e observes these without keeping rows for now (ADR 0121 stage 7 decides
   them), and no row is added for a Chrome key (ADR 0121 stage 10), so the page reports a missing row: report
@@ -564,7 +572,8 @@ Any other request, quant, or route is not a reference case.
 4. Before loading, read the limits table at 33, 49, and 121 frames (1280x704).
 5. Press **読み込む**. Run the 2-step reference case first: `boxing-cats`, seed 42, 17 frames, 1280x704,
    steps 2, guidance and shift blank, loaded with `f16+dit8` (step 3). Note the SHA-256.
-6. Run the 50-step clip at 33 frames (steps blank). If it completes, run 49 frames, then 121 frames.
+6. Run the 50-step clip at 33 frames (steps blank). If it completes, run longer clips up to the product's limit
+   of 121 frames (for example 49 frames, then 121 frames).
 7. Watch VRAM from outside (`nvidia-smi --query-gpu=memory.used --format=csv -l 1`, or the Windows Task
    Manager) and note the peak of each stage.
 8. Save the JSON and report it with the records of [6. What to record](#6-what-to-record).

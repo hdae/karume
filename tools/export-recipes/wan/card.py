@@ -131,7 +131,7 @@ WAN22_SUPPORTED_PIPELINE = "wan-ti2v/1"
 #: MUST: TS 側と同じ値（`packages/models/tests/fixtures/wan-ti2v-card-limits.json` を挟んで両側の
 #: テストが突き合わせる — 片側だけ変えると赤）。
 WAN22_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((1280, 704), (704, 1280))
-WAN22_FRAMES = (5, 49)
+WAN22_FRAMES = (5, 121)
 
 #: TS 側の生成の既定（`WAN22_TI2V_GENERATION.defaults` の写し — ADR 0121 追記「受理寸法を公式の
 #: 2 寸法へ」で「仮置き — 視認で確定する」）。NOTE: fixture `wan-ti2v-card-limits.json` はまだ既定を
@@ -140,8 +140,9 @@ WAN22_DEFAULT_SIZE = (1280, 704)
 WAN22_DEFAULT_FRAMES = 33
 
 #: Wan2.2 の席ごとの実測。行は `(フレーム数, 1 forward, DiT の段の VRAM の山, DiT の段, VAE の段,
-#: 通し)`。50 ステップの通しは全て B570・Deno 2.9.6・1280×704・shift 5・guidance 5・seed 42・
-#: 2026-10-05（VRAM の山は fdinfo の DiT の段・時間は DiT の段 / VAE の段 / 壁）。
+#: 通し)`。50 ステップの通しは全て 1280×704・shift 5・guidance 5・seed 42（時間は DiT の段 /
+#: VAE の段 / 壁）。33 / 49 フレームの行は B570・Deno 2.9.6・2026-10-05・precomputed の経路
+#: （VRAM の山は fdinfo の DiT の段）。121 フレームの行だけは GPU も測り方も違う（下の項）。
 #:
 #: - 33 フレームの行は 2 席とも**製品の class**（`WanTi2vPipeline`）の opt-in の通し（ADR 0121 追記
 #:   「段 6 の結果」の「50 ステップの通し」— 参照席 2,142.9 / 439.2 / 2,582.5 s・7.859 GiB、実用席
@@ -150,8 +151,18 @@ WAN22_DEFAULT_FRAMES = 33
 #:   「受理寸法を公式の 2 寸法へ」の試走の表）。同じ要求の実用席 33 フレームでは、生成スクリプトの
 #:   DiT の段の山（7.72 GiB）が製品の class（7.843 GiB）より 0.12 GiB 小さかった（出力はバイト
 #:   同一）ので、カードはその向きを注に書く。
+#: - 121 フレームの行（実用席だけ）は ADR 0121 追記「RTX 3080 Ti のレーンとフル verify」の
+#:   開発機の通し: RTX 3080 Ti（12,288 MiB）・Deno 2.9.6・2026-10-06・**GPU の umT5 の経路**・
+#:   cat-dog-baking・生成スクリプト（`outputs/diag/wan22-121.ts` — 記述子の上限だけを 121 へ広げた
+#:   家族で内部 API を呼ぶ・配布形を読む）。壁 3,787.9 s = umT5 9.1 / DiT 3,068.2 / VAE 709.8 s。
+#:   **VRAM の山は nvidia-smi の GPU 全体**（DiT の段 11,361 MiB = 11.09 GiB — fdinfo ではない）で、
+#:   時間は熱制限込み（93 ℃・throttle `sw_thermal`）なので B570 の行と比べられない — カードの注が
+#:   その行の GPU・runtime・測り方・熱制限を名乗る。
+#:   記録 `outputs/misc/wan22-121-2026-10-06/record.json`。
+#:   参照席の 121 フレームの 50 ステップは回していないので行を持たない（推し量って埋めない）。
 #: - 1 forward は追記「段 2 の結果」（2026-10-04）の所要（DiT 単体・通常モード・batch 1・
-#:   S = 7,920 = 1280×704×33）。49 フレーム（S = 11,440）の 1 forward は計測していない。
+#:   S = 7,920 = 1280×704×33）。49 フレーム（S = 11,440）と 121 フレーム（S = 27,280）の
+#:   1 forward は計測していない。
 #:
 #: MUST: 計測していない欄は「not measured」と書き、推し量った数で埋めない。表に無い席は「未計測」と
 #: 名乗る（席の並びは manifest のまま — 2.1 の {@link WAN_QUANT_TRANSFORMER} と同じ扱い）。
@@ -163,6 +174,7 @@ WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] =
     "f16+dit8-a8-attn8-s16": (
         (33, "9.9 s", "7.84 GiB", "960 s", "439 s", "23 min 19 s"),
         (49, "not measured", "8.49 GiB", "1,504 s", "655 s", "36 min 5 s"),
+        (121, "not measured", "11.09 GiB", "3,068 s", "710 s", "63 min 8 s"),
     ),
 }
 
@@ -325,8 +337,10 @@ def _wan21_overview(manifest: Mapping[str, Any]) -> list[str]:
 def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
     """Wan2.2 の概要。検証の範囲は ADR 0121 追記「段 6 の結果」（sha 行 6 本は全て参照席・
     17 フレーム — 1280×704 と 704×1280 は precomputed、GPU のテキスト経路は 1280×704 だけ・
-    50 ステップの製品の class の通しは 2 席・1280×704・33 フレーム）。49 フレームの生成スクリプトの
-    試走は受理する入力の節（{@link _WAN22_FRAMES_CHECKED}）が書く。"""
+    50 ステップの製品の class の通しは 2 席・1280×704・33 フレーム）。49 / 121 フレームの生成
+    スクリプトの通しは受理する入力の節（{@link _WAN22_FRAMES_CHECKED}）が書く。ブラウザは
+    RTX 5070 Ti の Chrome で実用席・GPU の umT5・1280×704×121 の通し 1 本だけ（ADR 0121 追記
+    「RTX 5070 Ti の Chrome」— 壁 2,417.5 s。gpu-lab が記述子の上限を広げて内部 API で呼んだ）。"""
     where = _encoder_whereabouts(manifest)
     return [
         "## What is this",
@@ -353,7 +367,10 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  embeddings, and at 1280 × 704 with the text encoder on the GPU — each pinned by the",
         "  SHA-256 of its frames; and in full 50-step runs of both quants at 1280 × 704 with 33",
         "  frames (see Resources).",
-        "- Not run in a browser yet.",
+        "- In a browser, Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the",
+        "  `f16+dit8-a8-attn8-s16` quant with the text encoder on the GPU, 1280 × 704, 121 frames)",
+        "  in 40.3 minutes. Shorter clips, the `f16+dit8` quant and the precomputed embeddings",
+        "  have not been run in a browser yet.",
         *_reader_lines(manifest, WAN22_SUPPORTED_PIPELINE),
     ]
 
@@ -600,12 +617,40 @@ _WAN21_VERIFICATION = (
 #: Wan2.2 の受理するフレーム数のうち GPU で通しを確かめた範囲（ADR 0121 追記「段 6 の結果」の
 #: 2 ステップ・17 フレームの sha 行と 50 ステップの製品の class の通し〈33 フレーム〉、追記「受理
 #: 寸法を公式の 2 寸法へ」の生成スクリプトの 50 ステップの試走〈49 フレーム — 製品の class では
-#: 回していない。生成スクリプト ≡ 製品を示したのは実用席の 33 フレームだけ〉）。
+#: 回していない。生成スクリプト ≡ 製品を示したのは実用席の 33 フレームだけ〉）、追記「RTX 3080 Ti の
+#: レーンとフル verify」の開発機の 121 フレーム〈実用席・生成スクリプト・DiT の段の山 11,361 MiB /
+#: 12,288 MiB — 余裕 927 MiB〉と追記「RTX 5070 Ti の Chrome」の 121 フレーム〈gpu-lab〉。
+#: 3080 Ti の山は nvidia-smi の GPU 全体の値で、0.9 GiB は物理容量との差 — Deno で先に効くのは
+#: 総確保の天井（ドライバの予算の 97%・時点ごとに動く）なので、実際の余裕はもっと薄いことがある
+#: （docs/limitations.md の Wan2.2 の節 — 推測）。天井の数は時点で動くのでカードには書かない。
+#: B570（Deno の総確保の天井 9,600 MiB）で 121 フレームが入らないのは推測（DiT の段の診断値
+#: 〈重み + backing〉が 3080 Ti で 10.64 GiB）— B570 では回していない。それでも ADR 0121 追記
+#: 「段 10 — 121 フレームの受理」の裁定どおり**非対応**と言い切り、受理集合は機ごとではないので
+#: admission では拒まれず実行の途中で落ちる（OOM の errorScope か、天井の付近では device lost）と
+#: 書く。NOTE: B570 で回した最長は試走の表の実用席 57 フレームなので「最大 49」とは書かず、
+#: 資源の表の B570 の行が 49 で止まることだけを書く。704×1280 は 2 ステップ × 17 フレームの sha 行
+#: だけ（50 ステップの通しは全て 1280×704）。
 _WAN22_FRAMES_CHECKED = (
     "Checked end to end on the GPU: 17 frames at",
     "  both sizes in 2-step runs, and 33 frames at 1280 × 704 in 50-step runs. 49 frames at",
     "  1280 × 704 ran 50 steps through the same pipeline stages, driven by a development script",
     "  rather than the pipeline class.",
+    "  121 frames at 1280 × 704 (the `f16+dit8-a8-attn8-s16` quant) ran 50 steps the same way on",
+    "  an NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno, and in Chrome on an NVIDIA GeForce",
+    "  RTX 5070 Ti. 704 × 1280 has been run only in the 2-step runs at 17 frames.",
+    "  On the RTX 3080 Ti, the memory in use on the whole GPU (read with nvidia-smi) peaked at",
+    "  11.09 GiB during the transformer stage, about 0.9 GiB below the card's 12 GiB; by the",
+    "  runtime's own count, that stage allocated 10.64 GiB of weights and buffers. The headroom",
+    "  Deno actually has can be thinner, since Deno stops allocating at a ceiling below the",
+    "  card's size that varies over time, and on a 12 GiB GPU shared with other programs",
+    "  121 frames may not fit (an estimate — not run).",
+    "  On a GPU with about 10 GB, such as the Intel Arc B570 (where Deno can allocate about",
+    "  9.4 GiB in total), 121 frames are not supported: they are not expected to fit, since",
+    "  10.64 GiB is above that ceiling. This is an estimate — 121 frames have not been run on",
+    "  the B570 (its rows under Resources stop at 49 frames). The accepted set does not depend",
+    "  on the GPU, so such a request is still accepted and fails during the run — with an",
+    "  out-of-memory error (`GpuOutOfMemoryError`), or a lost device near the limit — rather",
+    "  than with `ModelInputError`, and the time spent on the stages before it is lost.",
 )
 
 #: Wan2.2 の上流との照合（参照席の 2 ステップの通し — ADR 0121 追記「段 6 の結果」・実寸の
@@ -773,11 +818,18 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     試走の表の注の範囲 4.36〜4.52 GiB は受理の外の 57 フレームの試走を含むので使わない。
 
     中間テンソルの大きさは形からの計算（FFN の `[S, 14336]` f32 は S = 7,920 で 454,164,480 B・
-    S = 11,440 で 656,015,360 B — `ffn_dim` は pin した `transformer/config.json`）。
+    S = 11,440 で 656,015,360 B・S = 27,280 で 1,564,344,320 B — `ffn_dim` は pin した
+    `transformer/config.json`）。121 フレームの束縛の最大 約 1.96 GiB（self-attention のスコアの
+    行ブロック）は ADR 0121 追記（2026-10-07）「段 10 — 121 フレームの受理」の値。
 
-    MUST: 実測していない条件の数は載せない（2.1 と同じ規律）。テキストエンコーダの段・ブラウザ・
-    B570 以外の GPU は、この配布形ではまだ計測していないと書く。実用席の品質（段 7 の自機 A/B 門の
-    相対 RMS 誤差）も未計測なので、数を書かない。
+    121 フレームの行と、テキストエンコーダの段の 9.1 s は RTX 3080 Ti の開発機の通し（{@link
+    WAN22_RESOURCES} の出所）。ブラウザの数は RTX 5070 Ti の Chrome の同じ要求の壁 2,417.5 s と、
+    adapter / device の `maxStorageBufferBindingSize` 2,147,483,644 B（ADR 0121 追記「RTX 5070 Ti の
+    Chrome」）— どちらも別の GPU・runtime の値と名乗る。
+
+    MUST: 実測していない条件の数は載せない（2.1 と同じ規律）。測っていない席・フレーム数・GPU・
+    ブラウザの組は、まだ計測していないと書く。実用席の品質（段 7 の自機 A/B 門の相対 RMS 誤差）も
+    未計測なので、数を書かない。
     """
     seats = dict.fromkeys(
         quant for model in manifest["models"].values() for quant in model["quants"]
@@ -793,9 +845,10 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     return [
         "## Resources",
         "",
-        "Measured on an Intel Arc B570 in Deno 2.9.6 on 2026-10-05, at 1280 × 704 with 50 steps,",
-        "shift 5 and guidance 5 (classifier-free guidance runs two transformer passes per step, so",
-        "100 passes):",
+        "The 33- and 49-frame rows were measured on an Intel Arc B570 in Deno 2.9.6 on 2026-10-05,",
+        "at 1280 × 704 with 50 steps, shift 5 and guidance 5 (classifier-free guidance runs two",
+        "transformer passes per step, so 100 passes); the 121-frame row at the same size, steps,",
+        "shift and guidance on an NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno 2.9.6 on 2026-10-06:",
         "",
         "| Quant | Frames | Pass | Transformer peak | Transformer stage | VAE decode | Clip |",
         "| ----- | ------ | ---- | ---------------- | ----------------- | ---------- | ---- |",
@@ -806,12 +859,21 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         ),
         "",
         "Pass is one transformer pass (batch 1, 7,920 tokens) timed on its own on 2026-10-04.",
-        "Transformer peak is the total allocation during the transformer stage; the stage and the",
-        "tiled decode of the whole clip are timed within the 50-step run. The 33-frame runs went",
+        "For the B570 rows, Transformer peak is the total allocation during the transformer stage",
+        "(the driver's fdinfo). The stage and the tiled decode of the whole clip are timed within",
+        "the 50-step run. The 33-frame runs went",
         f"through `{WAN22_PIPELINE_CLASS}`; the 49-frame runs drove the same pipeline stages",
         "from a development script instead, whose transformer peak read 0.12 GiB lower than the",
         "class's in the one run measured both ways (33 frames). The VAE stage peaked at 4.36 GiB",
         "at 33 frames and 4.51 GiB at 49 frames with either quant.",
+        "",
+        "The 121-frame row comes from a different GPU and a different reading, so it is not",
+        "comparable with the B570 rows: it was driven by the same development script with another",
+        "prompt (`cat-dog-baking`, where the B570 rows used `boxing-cats`) and the text encoder on",
+        "the GPU (that stage took 9.1 s and is included in Clip); its transformer peak is the",
+        "memory in use on the whole GPU as read by nvidia-smi, not the driver's fdinfo; and its",
+        "times include thermal throttling (the GPU reached 93 °C). The 121-frame clip has not",
+        "been run for 50 steps with the `f16+dit8` quant.",
         "",
         *(
             [f"The other quants ({' / '.join(unmeasured)}) have not been measured yet.", ""]
@@ -819,8 +881,10 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
             else []
         ),
         f'The text encoder stage (`{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[0]}"`) has'
-        " not been measured with this",
-        "distribution yet, and no run has been made in a browser.",
+        " been measured with this",
+        "distribution only in the 121-frame run above. In a browser, Chrome on an NVIDIA GeForce",
+        "RTX 5070 Ti finished the same 121-frame request in 2,417.5 s (40.3 minutes) — a different",
+        "GPU and runtime from the rows above.",
         "",
         *(
             [
@@ -831,26 +895,41 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
             if practical in seats and reference in seats
             else []
         ),
-        *_download_and_memory(manifest),
+        *_download_and_memory(
+            manifest,
+            peaks="the B570 rows' peaks are of the total allocation (the driver's fdinfo), and"
+            " the 121-frame row's is the memory in use on the whole GPU (nvidia-smi)",
+        ),
         "- **Storage buffer size**: at these sizes some of the transformer's intermediate tensors",
         "  are larger than WebGPU's default `maxStorageBufferBindingSize` (128 MiB) — the",
         "  feed-forward activation `[S, 14336]` in float32 alone is about 433 MiB at 33 frames",
-        "  (S = 7,920) and about 626 MiB at 49 frames (S = 11,440). The runtime requests the",
-        "  adapter's own limits, which Deno grants on the B570; in a browser the environment has",
-        "  to grant the adapter's limits as well, which has not been checked yet.",
+        "  (S = 7,920), about 626 MiB at 49 frames (S = 11,440) and about 1.46 GiB at 121 frames",
+        "  (S = 27,280); the largest binding at 121 frames is about 1.96 GiB (a block of rows of",
+        "  the self-attention scores). The runtime requests the adapter's own limits, which Deno",
+        "  grants on the B570 and the RTX 3080 Ti; in a browser the environment has to grant the",
+        "  adapter's limits as well. Chrome on the RTX 5070 Ti granted them (bindings of up to",
+        "  2,147,483,644 bytes) and ran the 121-frame clip above; other browsers and GPUs have not",
+        "  been checked.",
         *_undeclared(manifest),
     ]
 
 
-def _download_and_memory(manifest: Mapping[str, Any]) -> list[str]:
-    """資源の注のうち、text_encoder の取得量（manifest から）と VRAM の山の読み方の 2 項。"""
+def _download_and_memory(
+    manifest: Mapping[str, Any],
+    peaks: str = "the peaks are of the total allocation (the driver's fdinfo)",
+) -> list[str]:
+    """資源の注のうち、text_encoder の取得量（manifest から）と VRAM の山の読み方の 2 項。
+
+    `peaks` は山の測り方の文。2.1 は既定のまま（全て fdinfo）。2.2 は表に nvidia-smi の行
+    （121 フレーム）が混ざるので、行ごとの測り方を渡す。
+    """
     encoder_bytes, borrowed = _text_encoder(manifest)
     source = "" if borrowed is None else f" from `{borrowed[0]}`"
     return [
         f"- **Download**: the quant table's Download column includes the text encoder"
         f" ({_gib(encoder_bytes)}{source});",
         f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"` it is not fetched.',
-        "- **GPU memory**: the peaks are of the total allocation (the driver's fdinfo). The",
+        f"- **GPU memory**: {peaks}. The",
         "  stages are never resident together, so a clip's peak is the largest stage peak.",
     ]
 

@@ -155,7 +155,7 @@ export type WanGenerateEvent =
  * 既定の shift は上流の scheduler の `flow_shift` 5.0〈公式の 720p の値〉で、配布形
  * `karume-wan2.2`〈ADR 0121 段 8〉の manifest が宣言する）。寸法と
  * フレーム数の受理集合と既定は class の世代が決める（Wan2.1 の `WanPipeline`: 832×480 / 480×832・
- * 5〜81 フレーム・既定 832×480・33 フレーム / Wan2.2 の `WanTi2vPipeline`: 1280×704 / 704×1280・5〜49
+ * 5〜81 フレーム・既定 832×480・33 フレーム / Wan2.2 の `WanTi2vPipeline`: 1280×704 / 704×1280・5〜121
  * フレーム・既定 1280×704・33 フレーム）。
  */
 export type WanGenerateRequest = {
@@ -204,7 +204,7 @@ export type WanGenerateRequest = {
    */
   readonly shift?: number;
   /**
-   * フレーム数（4n+1。範囲と既定は class の世代が決める — Wan2.1: 5〜81・既定 33 / Wan2.2: 5〜49・
+   * フレーム数（4n+1。範囲と既定は class の世代が決める — Wan2.1: 5〜81・既定 33 / Wan2.2: 5〜121・
    * 既定 33）。
    */
   readonly frames?: number;

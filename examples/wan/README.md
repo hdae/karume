@@ -234,8 +234,8 @@ There is no `f16` quant for Wan2.2.
 ### Knobs
 
 Steps, guidance and flow shift default to 50, 5.0 and 5.0 (the distribution's `pipelineConfig`).
-`--size` accepts `1280x704` or `704x1280`, and `--frames` accepts 4n+1 between 5 and 49. The
-default clip is 1280×704 × 33 frames, played at 24 fps.
+`--size` accepts `1280x704` or `704x1280`, and `--frames` accepts 4n+1 between 5 and 121 (the
+official default length). The default clip is 1280×704 × 33 frames, played at 24 fps.
 
 ### Output
 
@@ -249,11 +249,21 @@ precomputed embeddings at 1280×704 × 33 frames and 50 steps, a clip took 753 t
 12 clips measured on 2026-10-06 with `WanTi2vPipeline` reading the export series directly, not with this
 script.
 
+121 frames have completed on a 12 GiB GPU; smaller GPUs have not been tried. On the same RTX 3080 Ti
+(12,288 MiB), a 50-step clip with the default quant and the GPU text encoder at 1280×704 × 121 frames
+took about 63 minutes, with the GPU throttling from heat, and the transformer stage peaked at 11,361 MiB
+on the whole GPU, about 0.9 GiB below the card's size (2026-10-06, a development script that calls the
+same pipeline stages, not this script). Under Deno the margin can be thinner: Deno's total allocation is
+capped below the card's size by the driver's reported budget, which moves over time and was not measured
+during this run. On a GPU with about 10 GB, such as the Intel Arc B570 (where Deno can allocate about
+9.4 GiB in total), 121 frames are not expected to fit. That is an estimate: 121 frames were not run
+there. The pipeline accepts the request anyway and is expected to fail with an out-of-memory error or a
+lost device partway through (not observed; see [docs/limitations.md](../../docs/limitations.md)).
+
 ### In Chrome
 
 The GPU lab's Wan tab has a generation selector; the lab's server serves Wan2.2 from
 `--wan22-source` (default `models/karume-wan2.2`; see
 [tools/gpu-lab/README.md](../../tools/gpu-lab/README.md#7-wan22-ti2v-5b)). On an RTX 5070 Ti
 (Chrome 154, Windows, 2026-10-06), a 50-step clip with the default quant and the GPU text encoder at
-1280×704 and 121 frames completed in 40.3 minutes. The tab lifts the frame limit to 121 for this;
-this script and the pipeline accept up to 49 frames.
+1280×704 and 121 frames completed in 40.3 minutes.

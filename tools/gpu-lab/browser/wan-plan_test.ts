@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { REQUIRED_LIMIT_KEYS } from "../../../packages/runtime/src/gpu/acquire.ts";
 import type { WanPrompt } from "../../../packages/models/wan.ts";
@@ -21,7 +21,6 @@ import {
   wanAttentionRowBlocks,
   type WanForm,
   wanFrameChoices,
-  wanFrameLabel,
   wanLargestValue,
   type WanLimits,
   wanMaxFramesWithin,
@@ -509,12 +508,9 @@ describe("wan2.2 lab generation", () => {
   const WIDE = { width: 1280, height: 704 } as const;
   const TALL = { width: 704, height: 1280 } as const;
 
-  it("widens only the frame limit of the product descriptor, to the official 121 frames", () => {
+  it("uses the product descriptor as is, up to the official 121 frames", () => {
+    assertStrictEquals(WAN22_LAB.descriptor, WAN22_TI2V_GENERATION);
     assertEquals(WAN22_LAB.descriptor.maxFrames, 121);
-    assertEquals(WAN22_LAB.productMaxFrames, WAN22_TI2V_GENERATION.maxFrames);
-    assertEquals({ ...WAN22_LAB.descriptor, maxFrames: WAN22_TI2V_GENERATION.maxFrames }, {
-      ...WAN22_TI2V_GENERATION,
-    });
   });
 
   it("counts 7,920 tokens at 1280x704x33 and 27,280 at 121 frames (32 pixels per token)", () => {
@@ -532,18 +528,10 @@ describe("wan2.2 lab generation", () => {
     assertThrows(() => wanTokenCount(WAN22_LAB, 33, { width: 832, height: 480 }), RangeError);
   });
 
-  it("offers every 4n+1 frame count from 5 to 121 and marks those past the product limit", () => {
+  it("offers every 4n+1 frame count from 5 to 121", () => {
     const choices = wanFrameChoices(WAN22_LAB);
     assertEquals(choices.length, 30);
     assertEquals([choices[0], choices[7], choices[11], choices.at(-1)], [5, 33, 49, 121]);
-    assertEquals(wanFrameLabel(WAN22_LAB, 49), "49");
-    assertEquals(
-      wanFrameLabel(WAN22_LAB, 53),
-      "53（製品の受理の外 — 開発機の sha 行を持たない）",
-    );
-    assertEquals(wanFrameChoices(WAN21_LAB).map((frames) => wanFrameLabel(WAN21_LAB, frames)), [
-      ...wanFrameChoices(WAN21_LAB).map(String),
-    ]);
   });
 
   it("takes the FFN intermediate [1,S,14336] for long clips and the 192 MiB VAE value for short ones", () => {
@@ -622,6 +610,13 @@ describe("wan2.2 reference cases", () => {
     );
   });
 
+  it("names the opt-in 2-step case of the reference quant at 1280x704 and 121 frames", () => {
+    assertEquals(
+      caseId({ frames: 121 }, "f16+dit8"),
+      "f16+dit8-2step-boxing-cats-seed42-1280x704-121f-shift5",
+    );
+  });
+
   it("names no case for a quant, size, or condition the e2e keeps no row for", () => {
     for (
       const [changed, quant] of [
@@ -629,6 +624,9 @@ describe("wan2.2 reference cases", () => {
         [{}, "f16"],
         [{ steps: 50, frames: 33, width: 704, height: 1280 }, "f16+dit8"],
         [{ frames: 33 }, "f16+dit8"],
+        [{ frames: 121 }, "f16+dit8-a8-attn8-s16"],
+        [{ frames: 121, width: 704, height: 1280 }, "f16+dit8"],
+        [{ steps: 50, frames: 121 }, "f16+dit8"],
         [{ steps: 50 }, "f16+dit8"],
         [{ seed: 43 }, "f16+dit8"],
         [{ guidance: 4 }, "f16+dit8"],

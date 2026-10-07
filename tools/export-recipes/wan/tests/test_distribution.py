@@ -1717,7 +1717,7 @@ class TestTheWan22ModelCard:
         assert "WanTi2vPipeline.fromPretrained(" in card
         assert "import { encodePng, wanFrameToRgba, WanTi2vPipeline }" in card
         assert "- **size**: 1280 × 704 or 704 × 1280." in card
-        assert "- **frames**: 4n+1 from 5 to 49." in card
+        assert "- **frames**: 4n+1 from 5 to 121." in card
         assert "  // width: 1280, height: 704, // or 704 × 1280" in card
         assert f"| `{_PRACTICAL}` (default) |" in card.split("### Quants")[1]
         assert f"implements `{WAN22_SUPPORTED_PIPELINE}`" in card
@@ -1751,7 +1751,9 @@ class TestTheWan22ModelCard:
         card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         for figure in ("832", "480", "81"):
             assert re.search(rf"\b{figure}\b", card) is None, figure
-        assert "Chrome" not in card
+        # 2.2 にも Chrome の通しはある（121 フレーム）が、2.1 のブラウザの通しの文は写さない。
+        assert "46.1 minutes" not in card
+        assert "`f16` quant with the precomputed embeddings" not in " ".join(card.split())
         assert "WanPipeline.fromPretrained(" not in card
 
     def test_it_attributes_the_text_assets_to_the_wan21_checkpoint(self, assembled22) -> None:
@@ -1800,8 +1802,106 @@ class TestTheWan22ModelCard:
         assert "4.52" not in prose
         assert "relative RMS error" not in prose
         assert "have not been measured yet" not in prose
-        assert "has not been measured with this distribution yet" in prose
+        assert "has been measured with this distribution only in the 121-frame run above" in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
+
+    def test_it_names_the_121_frame_row_with_its_own_gpu_and_reading(self, assembled22) -> None:
+        """121 フレームの行は実用席だけ・RTX 3080 Ti の開発機の通しで、B570 の行と GPU も測り方
+        （nvidia-smi の GPU 全体）も違い、熱制限込みだと名乗る。参照席の 121 は回していない。"""
+        out_dir, _ = assembled22
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert (
+            "| `f16+dit8-a8-attn8-s16` | 121 | not measured | 11.09 GiB | 3,068 s | 710 s |"
+            " 63 min 8 s |" in card
+        )
+        assert "| `f16+dit8` | 121 |" not in card
+        prose = " ".join(card.split())
+        assert (
+            "The 33- and 49-frame rows were measured on an Intel Arc B570 in Deno 2.9.6 on"
+            " 2026-10-05" in prose
+        )
+        # 121 の行は寸法・ステップ・shift・guidance だけが同じ（プロンプトと text の経路は違う）。
+        assert (
+            "the 121-frame row at the same size, steps, shift and guidance on an NVIDIA GeForce"
+            " RTX 3080 Ti (12 GiB) in Deno 2.9.6 on 2026-10-06" in prose
+        )
+        assert "same settings" not in prose
+        assert "another prompt (`cat-dog-baking`, where the B570 rows used `boxing-cats`)" in prose
+        assert "it is not comparable with the B570 rows" in prose
+        assert "the memory in use on the whole GPU as read by nvidia-smi, not the driver's" in prose
+        assert "its times include thermal throttling" in prose
+        # 2 ステップ × 121 の参照席の sha 行は別にあり得るので、50 ステップに限って名乗る。
+        assert (
+            "The 121-frame clip has not been run for 50 steps with the `f16+dit8` quant." in prose
+        )
+        # 測り方の定義文は B570 の行に限る（121 の行は nvidia-smi）。
+        assert (
+            "For the B570 rows, Transformer peak is the total allocation during the transformer"
+            " stage (the driver's fdinfo)." in prose
+        )
+        assert (
+            "- **GPU memory**: the B570 rows' peaks are of the total allocation (the driver's"
+            " fdinfo), and the 121-frame row's is the memory in use on the whole GPU (nvidia-smi)."
+            in prose
+        )
+        assert "- **GPU memory**: the peaks are of the total allocation" not in prose
+        assert "about 1.46 GiB at 121 frames (S = 27,280)" in prose
+        # 2 GiB の束縛上限に最も近い束縛（スコアの行ブロック）と、Chrome が与えた上限の実数。
+        assert "the largest binding at 121 frames is about 1.96 GiB" in prose
+        assert "bindings of up to 2,147,483,644 bytes" in prose
+        assert "2 GiB buffers" not in prose
+
+    def test_it_says_121_frames_fit_12_gib_and_are_not_expected_to_fit_the_b570(
+        self, assembled22
+    ) -> None:
+        """受理の上限 121 は開発機（RTX 3080 Ti・12 GiB）と RTX 5070 Ti の Chrome で完走した事実で
+        名乗り、山は nvidia-smi の GPU 全体で Deno の余裕はもっと薄いことがあると限る。B570 では
+        非対応（入らない見込み — 推測・回していない）で、admission ではなく実行の途中で落ちると
+        書く。"""
+        out_dir, _ = assembled22
+        prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
+        assert (
+            "121 frames at 1280 × 704 (the `f16+dit8-a8-attn8-s16` quant) ran 50 steps the same way"
+            " on an NVIDIA GeForce RTX 3080 Ti (12 GiB) in Deno, and in Chrome on an NVIDIA GeForce"
+            " RTX 5070 Ti. 704 × 1280 has been run only in the 2-step runs at 17 frames." in prose
+        )
+        assert (
+            "On the RTX 3080 Ti, the memory in use on the whole GPU (read with nvidia-smi) peaked"
+            " at 11.09 GiB during the transformer stage, about 0.9 GiB below the card's 12 GiB"
+            in prose
+        )
+        assert "to spare" not in prose
+        assert (
+            "The headroom Deno actually has can be thinner, since Deno stops allocating at a"
+            " ceiling below the card's size that varies over time, and on a 12 GiB GPU shared with"
+            " other programs 121 frames may not fit (an estimate — not run)." in prose
+        )
+        assert (
+            "On a GPU with about 10 GB, such as the Intel Arc B570 (where Deno can allocate about"
+            " 9.4 GiB in total), 121 frames are not supported: they are not expected to fit"
+            in prose
+        )
+        assert (
+            "This is an estimate — 121 frames have not been run on the B570 (its rows under"
+            " Resources stop at 49 frames)." in prose
+        )
+        # 受理集合は機ごとではない — 10 GB 級でも ModelInputError で先に拒まれるとは読ませない。
+        assert (
+            "The accepted set does not depend on the GPU, so such a request is still accepted and"
+            " fails during the run — with an out-of-memory error (`GpuOutOfMemoryError`), or a lost"
+            " device near the limit — rather than with `ModelInputError`, and the time spent on the"
+            " stages before it is lost." in prose
+        )
+        # ブラウザの通しは別の GPU・runtime の値と名乗り、走っていない組は未実走と書く。
+        assert (
+            "Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the"
+            " `f16+dit8-a8-attn8-s16` quant with the text encoder on the GPU, 1280 × 704, 121"
+            " frames) in 40.3 minutes." in prose
+        )
+        assert "the precomputed embeddings have not been run in a browser yet" in prose
+        assert "2,417.5 s (40.3 minutes) — a different GPU and runtime from the rows above" in prose
+        assert "Not run in a browser yet." not in prose
+        assert "which has not been checked yet" not in prose
 
     def test_it_says_a_seat_without_figures_has_not_been_measured(self, assembled22) -> None:
         _, manifest = assembled22
