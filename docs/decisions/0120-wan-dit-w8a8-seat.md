@@ -207,7 +207,7 @@ ADR 0110 決定 5 の自機 A/B 門を、anima（`packages/models/tests/e2e_anim
 ### 7. 公開 API は既存の `quant` オプションだけ
 
 - 席の選択は `WanPipeline` の既存の `quant` オプションで行う。
-- 受理表 `WAN_SESSION_POLICY`（`packages/models/src/wan/pipeline.ts`）の `linearCompute` / `attentionCompute` /
+- 受理表 `WAN_SESSION_POLICY`（`packages/models/src/wan/pipeline.ts` — 今は `family.ts` へ移った〈`0fb5c005`〉）の `linearCompute` / `attentionCompute` /
   `attentionScoreStorage` の 3 キーを `true` にする。manifest の `session` が宣言したこの 3 つを受けるためである。
 - 利用者の明示指定（`linearCompute` などを直接渡す口）は公開面に足さない。`resolveSessionOptions` の第 3 引数は空のまま。
   anima は明示指定も受けるが、Wan は要求が出てから足す（受理表は同じ 1 本なので後から足せる）。

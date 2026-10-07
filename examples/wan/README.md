@@ -27,9 +27,18 @@ distribution is not published on Hugging Face yet, so there is no pinned source 
 
 - Without `--source`, the script reads `models/karume-wan2.1` through a directory source handle
   (`denoDirectory`): nothing goes over the network or into the cache. Build the mirror first from
-  the export series with `uv run python dist.py --pipeline wan` under `tools/export-recipes` (the
-  series come from `python -m wan.export_dit`, `python -m wan.export_vae` and
-  `python -m wan.text_embeds`). If the mirror is missing, the script stops and prints that command.
+  the export series under `tools/export-recipes`, after the umT5 mirror (the series come from
+  `python -m wan.export_dit`, `python -m wan.export_vae` and `python -m wan.text_embeds`). If the
+  mirror is missing, the script stops and prints this command:
+
+  ```
+  uv run python dist.py --pipeline wan \
+      --ref-repo hdae/karume-umt5-xxl --ref-revision 0000000000000000000000000000000000000000 \
+      --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder \
+      --allow-placeholder-ref
+  ```
+
+  The all-zero revision is the same development placeholder as in the Wan2.2 build below.
 - `--source <path>` points at another local distribution (a directory with `karume.json`), and
   `--source <owner/name>` reads a Hugging Face repository (its `main` revision).
 
@@ -132,8 +141,8 @@ frame count default to 832×480 and 33 frames. `--seed` defaults to 42.
   is passed to `fromPretrained` as is; an unknown name fails with the list of available quants
   before any weight is read.
 - `--size` accepts `832x480` or `480x832`.
-- `--frames` accepts 4n+1 between 5 and 81. Only 33 and 81 frames have been verified end to end on
-  the development GPU (Intel Arc B570).
+- `--frames` accepts 4n+1 between 5 and 81. Only 33 and 81 frames have been verified end to end
+  (50 steps, on an Intel Arc B570).
 - `--guidance 1` turns classifier-free guidance off; `--negative` is then rejected.
 
 Values outside these sets fail with `ModelInputError` before any weight reaches the GPU.

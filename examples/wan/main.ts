@@ -114,14 +114,18 @@ const number = (key: string): number | undefined => {
 /**
  * 世代ごとに違う事実だけの表（パイプラインの class・既定の配布形ミラー・ミラーが無いときに出す組み立ての
  * コマンド・既定の出力先）。取得元の越境の mapping・経路・席・ノブ・出力先の名前は両世代で共通。
- * 2.2 の組み立ては umT5 への越境参照の 5 つの `--ref-*` が要り、参照先が未公開の間は仮の SHA と
- * `--allow-placeholder-ref` を付ける（ADR 0121 追記「段 8a の結果」で組んだコマンド）。
+ * どちらの世代の組み立ても umT5 への越境参照の 5 つの `--ref-*` が要り、参照先が未公開の間は仮の SHA と
+ * `--allow-placeholder-ref` を付ける（`tools/export-recipes/dist.py` の doc の組み立て例・ADR 0121 追記「段 8a の結果」で
+ * 組んだコマンド）。
  */
 const GENERATIONS = {
   "wan2.1": {
     pipeline: WanPipeline,
     defaultSource: "models/karume-wan2.1",
-    assembleCommand: "cd tools/export-recipes && uv run python dist.py --pipeline wan",
+    assembleCommand: "cd tools/export-recipes && uv run python dist.py --pipeline wan" +
+      " --ref-repo hdae/karume-umt5-xxl --ref-revision 0000000000000000000000000000000000000000" +
+      " --ref-dist ../../models/karume-umt5-xxl --ref-model xxl --ref-role text_encoder" +
+      " --allow-placeholder-ref",
     defaultOutRoot: "outputs/examples/wan2.1-t2v-1.3b",
   },
   "wan2.2": {
