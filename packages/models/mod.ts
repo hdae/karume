@@ -277,8 +277,14 @@ export type {
 export type { LabSegment } from "./src/vowel-detector/postprocess.ts";
 
 export { WanPipeline } from "./src/wan/pipeline.ts";
-/** Wan2.2 TI2V 5B のテキスト → 動画（`./wan` を参照 — 公開型は `WanPipeline` と共有）。 */
+/**
+ * Wan2.2 TI2V 5B のテキスト（+ 条件画像）→ 動画（`./wan` を参照 — 要求の型だけが 2.2 専用で、他の公開型は
+ * `WanPipeline` と共有）。
+ */
 export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
+export type { WanTi2vGenerateRequest } from "./src/wan/ti2v-pipeline.ts";
+/** I2V の条件画像の寸法の合わせ方の語彙（`./wan` を参照）。 */
+export type { WanI2vFit } from "./src/wan/i2v-preprocess.ts";
 export type {
   GeneratedVideo,
   WanAssets,

@@ -6,7 +6,8 @@
  * 面は利用者ストーリーに対応する — 組む（{@link WanPipeline.fromPretrained} /
  * {@link WanPipeline.fromAssets}・Wan2.2 は {@link WanTi2vPipeline} の同名の 2 つ・テキストエンコーダの
  * 経路 `textEncoder`）/ 例示のプロンプトを引く
- * （`prompts`）/ 生成する（`generate`）/ 生成の途中経過を購読する（`onEvent` — {@link WanGenerateEvent}）/
+ * （`prompts`）/ 生成する（`generate` — Wan2.2 は条件画像からも: {@link WanTi2vGenerateRequest}）/ 生成の途中経過を
+ * 購読する（`onEvent` — {@link WanGenerateEvent}）/
  * 中断する（構築と生成の `signal`）/ フレームを画素にする（{@link wanFrameToRgba}）/ 解放する（`dispose`）。
  *
  * テキストエンコーダの経路は 2 つ（ADR 0119 決定 7）: 既定の `"gpu"` は umT5（i8・umT5 の配布リポへの
@@ -24,12 +25,25 @@
 
 export { WanPipeline } from "./src/wan/pipeline.ts";
 /**
- * Wan2.2 TI2V 5B のテキスト → 動画（T2V）。構築・生成・中断・解放の面と公開型（要求・結果・イベント・
- * 構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜121 フレーム）・
- * 潜在の形・fps は世代の値（ADR 0121 決定 10）。配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe
+ * Wan2.2 TI2V 5B のテキスト（+ 条件画像）→ 動画（T2V と I2V）。構築・生成・中断・解放の面と公開型（結果・
+ * イベント・構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜121 フレーム）・
+ * 潜在の形・fps は世代の値（ADR 0121 決定 10）。要求の型だけは 2.2 専用（{@link WanTi2vGenerateRequest} — I2V の
+ * 条件画像 `image` と寸法の合わせ方 `fit`・ADR 0121 決定 11）。配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe
  * `dist.py --pipeline wan-ti2v` が組む・HF には未公開）。
  */
 export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
+export type { WanTi2vGenerateRequest } from "./src/wan/ti2v-pipeline.ts";
+/**
+ * I2V の条件画像の寸法の合わせ方の語彙（{@link WanTi2vGenerateRequest} の `fit` — `"crop"` / `"stretch"`）。CLI / UI が
+ * 選択肢を出すときに型で引けるように出す（{@link WanPromptRole} と同じ扱い）。
+ */
+export type { WanI2vFit } from "./src/wan/i2v-preprocess.ts";
+/**
+ * I2V の条件画像の形（RGB8・インターリーブ — {@link WanTi2vGenerateRequest} の `image`）。decode は呼び手（Karume は
+ * 画像の decode を持たない）なので、型をこのサブパスだけで引けるように出す（birefnet / depth-anything / siglip2 の
+ * サブパスと同じ型）。
+ */
+export type { Rgb8Image } from "./src/image/preprocess.ts";
 export type {
   GeneratedVideo,
   WanAssets,

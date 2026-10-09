@@ -495,6 +495,10 @@
         "kind": "typeAlias"
       },
       {
+        "name": "WanI2vFit",
+        "kind": "typeAlias"
+      },
+      {
         "name": "WanLatentSnapshot",
         "kind": "typeAlias"
       },
@@ -516,6 +520,10 @@
       },
       {
         "name": "WanRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanTi2vGenerateRequest",
         "kind": "typeAlias"
       },
       {
@@ -1283,6 +1291,10 @@
         "kind": "class"
       },
       {
+        "name": "Rgb8Image",
+        "kind": "typeAlias"
+      },
+      {
         "name": "WanAssets",
         "kind": "typeAlias"
       },
@@ -1296,6 +1308,10 @@
       },
       {
         "name": "WanGenerateRequest",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanI2vFit",
         "kind": "typeAlias"
       },
       {
@@ -1320,6 +1336,10 @@
       },
       {
         "name": "WanRunComponent",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "WanTi2vGenerateRequest",
         "kind": "typeAlias"
       },
       {

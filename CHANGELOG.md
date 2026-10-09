@@ -225,7 +225,15 @@ measurements in `docs/research/`.
   GPU with about 10 GB such as the Intel Arc B570, clips up to 57 frames have been checked; longer
   clips are not supported there, as none of them was run there (a memory estimate puts 81 and 121
   frames beyond that GPU's limit; the other lengths were not estimated).
-  Image-to-video is not available yet. The `karume-wan2.2` distribution is not published on
+  Image-to-video: pass `image` (an `Rgb8Image`, now also exported from `./wan`) to
+  `WanTi2vPipeline.generate` (`WanTi2vGenerateRequest`); the first latent frame is conditioned on the
+  image as in diffusers' `WanImageToVideoPipeline`. Without `width` / `height` the accepted size
+  closest to the image's aspect ratio is chosen (landscape on a tie). `fit: "crop"` (the default —
+  the official Wan2.2 preprocessing: resize to cover with LANCZOS, bit-exact with Pillow, then a
+  centre crop) or `fit: "stretch"` (diffusers' direct resize) picks how the image is fitted; with
+  only two accepted sizes, more of a square or 4:3 image is cropped than in the official
+  pipeline. `WanPipeline` (Wan2.1) rejects `image` and `fit`. The distribution now also carries the
+  VAE encoder (three f16 graphs, 108 MB), fetched for text-to-video too. The `karume-wan2.2` distribution is not published on
   Hugging Face yet: `dist.py --pipeline wan-ti2v` assembles a local mirror for `fromPretrained`,
   and `fromAssets` builds the pipeline from a manifest and the exported series containers. The
   distribution has two quants, `f16+dit8-a8-attn8-s16` (the default: int8 transformer with int8
@@ -328,6 +336,11 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/models/wan`: `WanRunComponent` gains `vae_encoder_pre` / `vae_encoder_attn` /
+  `vae_encoder_post`, and the `stage` event's `component` gains `vae_encoder` (Wan2.2 image-to-video
+  only; Wan2.1 never emits them). An exhaustive `switch` or `Record` over these unions needs the new
+  members. A local `karume-wan2.2` mirror built before the VAE encoder was added lacks those parts
+  and is rejected by `WanTi2vPipeline`; rebuild it with `dist.py --pipeline wan-ti2v`.
 - `@karume/hub`: the manifest `session` vocabulary gains `stateAttentionReduce` (`"sequential"` /
   `"parallel"` / `"parallel-fused"`), composed like the other quant knobs (explicit > quant
   declaration > runtime default). Readers of 0.13.x reject a manifest that declares it as an unknown

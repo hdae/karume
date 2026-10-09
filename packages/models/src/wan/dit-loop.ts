@@ -7,8 +7,8 @@
  * `owner` は文言の接頭辞（Wan2.1 は `"WanPipeline"`・Wan2.2 は `"WanTi2vPipeline"`）。
  *
  * NOTE: 公開型（`WanGenerateEvent` / `WanRunComponent`）は `./pipeline.ts` から `import type` で取る
- * （型だけの参照は消去されるので循環 import にならない）。2.2 の T2V（段 6）は新しいイベントを足さなかった
- * ので、共有の型を独立のモジュールへ移すかは、`vae_encoder` の段が増える段 9（I2V）で決める。
+ * （型だけの参照は消去されるので循環 import にならない）。段 9（I2V）で `vae_encoder` の段が増えても置き場は
+ * `./pipeline.ts` のまま — 型だけの参照で循環が起きないので、独立のモジュールへ移す理由が無い。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
@@ -25,6 +25,7 @@ import {
   patchifyLatents,
   unpatchifyTokens,
   type WanPatchGeometry,
+  type WanTokenGrid,
   wanTokenGrid,
   wanTokenWidth,
 } from "./dit-tokens.ts";
@@ -266,7 +267,8 @@ type WanDenoiseState = {
 
 /**
  * TI2V の DiT の条件入力 2 本（ADR 0121 決定 3）。条件側の時刻の形は生成側と同じ `projShape`。
- * T2V は条件マスクが全て偽で、条件側の時刻は生成側と同じ配列。
+ * T2V は条件マスクが全て偽で、条件側の時刻は生成側と同じ配列。I2V は先頭の潜在フレームのトークンが真で、
+ * 条件側の時刻は t = 0 の proj（{@link wanConditionMask}・{@link runWanDenoise}）。
  */
 type DitConditionInputs = {
   readonly proj: Float32Array<ArrayBuffer>;
@@ -319,26 +321,100 @@ export const ditInputs = (input: {
 });
 
 /**
- * テキストだけの要求（T2V — 入力の形 "t2v" とは別の軸）の条件マスク（ADR 0121 決定 3 — 全て偽・
- * ループの前に 1 回だけ作る）。入力の形 "t2v" の DiT は条件入力を持たないので undefined。
+ * 条件マスク（ADR 0121 決定 3 — ループの前に 1 回だけ作る）。入力の形 "t2v" の DiT は条件入力を持たないので
+ * undefined（条件の潜在を渡されたら fail loudly）。"ti2v" は、テキストだけの要求（T2V — 入力の形とは別の軸）なら
+ * 全て偽、I2V（`conditioned`）なら先頭の潜在フレームのトークン — トークン添字 `(f·H' + h)·W' + w` で先頭に連続して
+ * 並ぶ `rows·cols` 個（1280×704 で 880）— が真。
+ *
+ * MUST: I2V は時間の patch が 1 のときだけ組む — 先頭のトークンのフレームが先頭の潜在フレームと一致する前提（上流
+ * diffusers の `first_frame_mask[0][0][:, ::2, ::2]` も同じ前提）。
+ *
+ * NOTE: `export` は GPU 無しでマスクの形を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
-const textOnlyConditionMask = (
+export const wanConditionMask = (
   form: WanDitInputForm,
-  tokens: number,
+  grid: WanTokenGrid,
+  patch: WanPatchGeometry,
+  conditioned: boolean,
   owner: string,
 ): Uint32Array<ArrayBuffer> | undefined => {
   switch (form) {
     case "t2v":
+      if (conditioned) {
+        throw new Error(
+          `${owner}: 入力の形 't2v' の DiT は条件の潜在を受けない（条件マスクの入力が無い）`,
+        );
+      }
       return undefined;
-    case "ti2v":
-      return new Uint32Array(tokens);
+    case "ti2v": {
+      const mask = new Uint32Array(grid.count);
+      if (conditioned) {
+        if (patch.patchFrames !== 1) {
+          throw new Error(
+            `${owner}: 時間の patch ${patch.patchFrames} では先頭の潜在フレームがトークンのフレームに揃わない` +
+              "（I2V の条件マスクは時間の patch 1 の前提）",
+          );
+        }
+        mask.fill(1, 0, grid.rows * grid.cols);
+      }
+      return mask;
+    }
     default:
       throw unknownDitInputForm(form, owner);
   }
 };
 
 /**
+ * モデル入力の先頭の潜在フレームを条件の潜在で置き換えた写し（上流 diffusers の `expand_timesteps` 分岐の
+ * `(1 − m)·condition + m·latents` — m は先頭フレームが 0・他が 1。ADR 0121 決定 11）。`latents` は `[C, F, H, W]`、
+ * `condition` は 1 フレームの `[C, 1, H, W]` で、上流と同じく全フレームへ broadcast した式の値を要素ごとに書く。
+ *
+ * 式を逐語に計算する（先頭フレームを写すだけにしない）: m が 0 か 1 なので各項は条件・潜在・符号付きゼロのどれかで、
+ * 和は丸めを含まない — f32 の上流と符号付きゼロまで同じ値になる（写すだけだと、潜在が -0 の要素で上流の +0 と割れる）。
+ *
+ * NOTE: `export` は GPU 無しで置き換えを縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ */
+export const withWanFirstFrameCondition = (
+  latents: Float32Array,
+  condition: Float32Array,
+  latentShape: readonly [number, number, number, number],
+): Float32Array<ArrayBuffer> => {
+  const [channels, frames, height, width] = latentShape;
+  const plane = height * width;
+  if (latents.length !== channels * frames * plane || condition.length !== channels * plane) {
+    throw new Error(
+      `条件の置き換え: 潜在 ${latents.length} 要素・条件 ${condition.length} 要素が潜在の形 ` +
+        `[${latentShape.join(", ")}]（条件は 1 フレーム）と合わない`,
+    );
+  }
+  const out = new Float32Array(latents.length);
+  for (let channel = 0; channel < channels; channel += 1) {
+    const from = channel * plane;
+    for (let frame = 0; frame < frames; frame += 1) {
+      // 上流の `first_frame_mask`（先頭フレームが 0）。
+      const keep = frame === 0 ? 0 : 1;
+      const base = (channel * frames + frame) * plane;
+      for (let index = 0; index < plane; index += 1) {
+        out[base + index] = (1 - keep) * condition[from + index] + keep * latents[base + index];
+      }
+    }
+  }
+  return out;
+};
+
+/**
  * DiT の段（Session を張り、steps 回まわして畳む — `end` は畳んだ後）。
+ *
+ * `condition`（I2V の条件の潜在 `[C, 1, H, W]` — 正規化済み・有限）を渡すと、上流 diffusers の `expand_timesteps`
+ * 分岐の形で条件づける（ADR 0121 決定 11）: 各 step でモデル入力の先頭の潜在フレームだけを置き換え
+ * （{@link withWanFirstFrameCondition}）、UniPC は置き換えない潜在で進め、ループの後に 1 回置き換えてから返す。
+ * 条件マスクは先頭フレームのトークンが真（{@link wanConditionMask}）、条件側の時刻は t = 0 の proj を 1 回だけ作る。
+ * `denoise-step` の `copyLatents` が返すのはスケジューラの状態（置き換える前 — diffusers の callback と同じ値）。
+ * 公式 Wan2.2 の形（初期と各 step の後に置き換える）とは途中の潜在の先頭フレームだけが違い、最終出力は同じ値になる
+ * （UniPC は要素ごとの更新で、モデル入力は両方の形で同じ — 置き換える要素は他の要素へ流れない）。
+ *
+ * `condition` が undefined（テキストだけの要求）なら今までと同じ配列だけを回す（条件マスクは全て偽・条件側の時刻は
+ * 生成側と同じ配列・モデル入力は潜在そのもの — T2V の sha 行を変えない）。
  *
  * MUST: 各 step の更新後の潜在の有限性を見る（O(N) のホスト走査 — 81 フレームで 1 step 約 210 万
  * 要素）。非有限の潜在を黙って次の step と VAE の段へ渡すと、VAE の後のクランプが ±Inf を ±1 に
@@ -348,6 +424,7 @@ export const runWanDenoise = async (
   state: WanDenoiseState,
   plan: WanGenerationKnobs,
   contexts: WanContexts,
+  condition: Float32Array<ArrayBuffer> | undefined,
   emit: (event: WanGenerateEvent) => Promise<void>,
   signal: AbortSignal | undefined,
   owner: string,
@@ -361,9 +438,11 @@ export const runWanDenoise = async (
   const ropeShape = [1, grid.count, 1, wanRopeWidth(state.ropeBase)];
   const contextShape = [1, dit.contextRows, dit.contextWidth];
   const projShape = [1, dit.projWidth];
-  // 未知の形はここ（Session を張る前）で落ちる。
-  const conditionMask = textOnlyConditionMask(dit.form, grid.count, owner);
+  // 未知の形・条件を受けない形はここ（Session を張る前）で落ちる。
+  const conditionMask = wanConditionMask(dit.form, grid, patch, condition !== undefined, owner);
   const maskShape = [1, grid.count, 1];
+  // 条件側の時刻（上流は `first_frame_mask · t` — 先頭フレームのトークンは t = 0）。step に依らないので 1 回だけ作る。
+  const conditionProj = condition === undefined ? undefined : timestepsProj(0, dit.projWidth);
   const { positive, negative } = contexts;
   const elements = latentShape.reduce((product, dim) => product * dim, 1);
   let current: Float32Array<ArrayBuffer> = plan.initial.kind === "latents"
@@ -381,9 +460,9 @@ export const runWanDenoise = async (
       context: Float32Array<ArrayBuffer>,
     ): Promise<Float32Array<ArrayBuffer>> => {
       // T2V の条件側の時刻は生成側と同じ配列（決定 3 — どちらも読むだけの借用）。
-      const condition = conditionMask === undefined
+      const conditionInputs = conditionMask === undefined
         ? undefined
-        : { proj, mask: conditionMask, maskShape };
+        : { proj: conditionProj ?? proj, mask: conditionMask, maskShape };
       const outputs = await session.run(
         ditInputs({
           tokens,
@@ -394,7 +473,7 @@ export const runWanDenoise = async (
           contextShape,
           rope,
           ropeShape,
-          condition,
+          condition: conditionInputs,
         }),
       );
       observe?.("transformer", session.diagnostics());
@@ -407,8 +486,11 @@ export const runWanDenoise = async (
       const timestep = schedule.timesteps[index];
       const proj = timestepsProj(timestep, dit.projWidth);
       // CFG は uncond → cond の逐次 2 回（B = 1 — 決定 5）。同じ潜在なので patchify は 1 回。
-      // 合成はホストで。
-      const tokens = patchifyLatents(current, latentShape, patch);
+      // 合成はホストで。I2V はモデル入力だけ先頭フレームを置き換える（UniPC へは置き換えない `current`）。
+      const modelInput = condition === undefined
+        ? current
+        : withWanFirstFrameCondition(current, condition, latentShape);
+      const tokens = patchifyLatents(modelInput, latentShape, patch);
       const uncond = negative === undefined ? undefined : await predict(tokens, proj, negative);
       const cond = await predict(tokens, proj, positive);
       const velocity = uncond === undefined
@@ -445,6 +527,11 @@ export const runWanDenoise = async (
       () => session.dispose(),
     ]);
   }
+  // I2V はループの後に 1 回置き換えてから VAE の段へ渡す（上流 diffusers と同じ — 置き換えた要素は有限の条件と
+  // 門を通った潜在だけから作るので、有限性は保たれる）。
+  const latents = condition === undefined
+    ? current
+    : withWanFirstFrameCondition(current, condition, latentShape);
   await emit({ kind: "stage", component: "transformer", at: "end" });
-  return current;
+  return latents;
 };

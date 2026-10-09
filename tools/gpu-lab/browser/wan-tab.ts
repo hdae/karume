@@ -789,6 +789,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const elapsed = `${((ms - started) / 1000).toFixed(0)} s`;
       if (event.kind === "stage") {
         const { component } = event;
+        if (component === "vae_encoder") {
+          // このタブは条件画像を渡さない（I2V の入力をまだ持たない）ので来ない。来たら時間の帰属先が無いので落とす。
+          throw new Error("gpu-lab: vae_encoder の段（I2V）を記録する形をまだ持たない");
+        }
         if (component === "text_encoder") textStage[event.at] = ms;
         else marks.push({ kind: "stage", component, at: event.at, ms });
         status(`${component} ${event.at}（${elapsed}）`);

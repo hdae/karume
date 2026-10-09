@@ -3,13 +3,14 @@
  *
  * 公開 class（`./pipeline.ts` の `WanPipeline`・`./ti2v-pipeline.ts` の `WanTi2vPipeline`）は薄い殻
  * （private のコンストラクタ・直列化鎖・`dispose`）で、
- * manifest の門・部品の突合・GPU の取得・段の順序（text → DiT → VAE）の本体はここにある。段の順序と
+ * manifest の門・部品の突合・GPU の取得・段の順序（(encoder →) text → DiT → VAE）の本体はここにある。段の順序と
  * Session の寿命・中断の MUST は `./pipeline.ts` 冒頭の doc が正本。世代ごとに違う値は全て
- * {@link WanFamilySpec} が運ぶ（文言の接頭辞・pipeline 名と major・世代の記述子）。
+ * {@link WanFamilySpec} が運ぶ（文言の接頭辞・pipeline 名と major・世代の記述子）。I2V の encoder の部品の有無も
+ * 世代の記述子（DiT の入力の形が `"ti2v"`）から決まる。
  *
- * NOTE: 内部だけ（`mod.ts` / サブパス面には出さない — ADR 0008）。公開型は `./pipeline.ts` から
- * `import type` だけで取る（値の import を持たない — `./pipeline.ts` がここの値を使うので、値の循環
- * import を作らない）。
+ * NOTE: 内部だけ（`mod.ts` / サブパス面には出さない — ADR 0008）。公開型は `./pipeline.ts` と
+ * `./ti2v-pipeline.ts` から `import type` だけで取る（値の import を持たない — 両方ともここの値を使うので、値の
+ * 循環 import を作らない）。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
@@ -83,10 +84,10 @@ import type {
   WanAssets,
   WanFromPretrainedOptions,
   WanGenerateEvent,
-  WanGenerateRequest,
   WanPipelineOptions,
   WanRunComponent,
 } from "./pipeline.ts";
+import type { WanTi2vGenerateRequest } from "./ti2v-pipeline.ts";
 import {
   admitWanText,
   assertTextEncoderDeclared,
@@ -112,16 +113,35 @@ import {
   VAE_DECODER_NEXT,
 } from "./tile-decode.ts";
 import { type WanVaeChunkLayout, wanVaeChunkLayout } from "./vae-chunks.ts";
+import {
+  encodeWanImageStage,
+  VAE_ENCODER_ATTN,
+  VAE_ENCODER_POST,
+  VAE_ENCODER_PRE,
+  WAN_VAE_ENCODER_KEYS,
+  type WanVaeEncoder,
+  type WanVaeEncoderContract,
+  wanVaeEncoderContract,
+} from "./vae-encoder.ts";
 
 /**
- * 経路ごとに取る部品（取得面の `componentKeys`・全量面の開く部品）。MUST: `"precomputed"` は umT5 の
- * 部品を開かない — 開くと umT5 の取得（i8 で約 5.3 GiB）が軽い使い方にも乗る（決定 7 の「umT5 を取らない
- * 軽い使い方」が消える）。
+ * 世代と経路で取る部品（取得面の `componentKeys`・全量面の開く部品）。DiT の入力の形が `"ti2v"` の世代（Wan2.2）は
+ * I2V の VAE encoder の 3 部品を、画像を渡さない使い方でも取る（構築の口を増やさない — 部品は配布形が常に持つ）。
+ *
+ * MUST: `"precomputed"` は umT5 の部品を開かない — 開くと umT5 の取得（i8 で約 5.3 GiB）が軽い使い方にも乗る
+ * （決定 7 の「umT5 を取らない軽い使い方」が消える）。
+ * MUST: 入力の形 `"t2v"` の世代（Wan2.1）の部品の並びは encoder の追加の前と同じ（2.1 の取得を変えない）。
  */
-const COMPONENT_KEYS: Readonly<Record<WanTextEncoderRoute, readonly string[]>> = {
-  gpu: [TRANSFORMER, VAE_DECODER_FIRST, VAE_DECODER_NEXT, TEXT_ENCODER],
-  precomputed: [TRANSFORMER, VAE_DECODER_FIRST, VAE_DECODER_NEXT],
-};
+const wanComponentKeys = (
+  generation: WanGenerationDescriptor,
+  route: WanTextEncoderRoute,
+): readonly string[] => [
+  TRANSFORMER,
+  VAE_DECODER_FIRST,
+  VAE_DECODER_NEXT,
+  ...(generation.ditInputForm === "ti2v" ? WAN_VAE_ENCODER_KEYS : []),
+  ...(route === "gpu" ? [TEXT_ENCODER] : []),
+];
 
 /** 家族ごとに違う値（class が自分の 1 本を {@link loadWanFromPretrained} などへ渡す）。 */
 export type WanFamilySpec = {
@@ -159,7 +179,7 @@ export const WAN22_TI2V_FAMILY: WanFamilySpec = {
  * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
 export const planWanGeneration = (
-  request: WanGenerateRequest,
+  request: WanTi2vGenerateRequest,
   embeds: WanTextEmbeds,
   layout: PlanLayout,
   config: WanPipelineConfig,
@@ -180,7 +200,7 @@ export const planWanGeneration = (
  * NOTE: `export` は GPU 無しで門を縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
 export const planWanGpuGeneration = (
-  request: WanGenerateRequest,
+  request: WanTi2vGenerateRequest,
   encoder: WanPromptEncoder,
   layout: PlanLayout,
   config: WanPipelineConfig,
@@ -226,6 +246,8 @@ type WanAdmission = {
   readonly dit: DitContract;
   /** 経路（`"gpu"` は umT5 のグラフの取り決めを伴う）。 */
   readonly textEncoder: WanTextAdmission;
+  /** I2V の VAE encoder の 3 グラフの取り決め（DiT の入力の形が `"ti2v"` の世代だけ — 他は undefined）。 */
+  readonly vaeEncoder: WanVaeEncoderContract | undefined;
 };
 
 /** Wan の class の内部状態（{@link loadWanFromPretrained} / {@link loadWanFromAssets} が組む）。 */
@@ -237,6 +259,8 @@ export type WanState = {
   readonly transformer: ModelComponent;
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
+  /** I2V の VAE encoder（DiT の入力の形が `"ti2v"` の世代だけ — 他は undefined）。 */
+  readonly vaeEncoder: WanVaeEncoder | undefined;
   readonly layout: WanVaeChunkLayout;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
@@ -285,7 +309,7 @@ export const loadWanFromPretrained = async (
     `${spec.owner}.fromPretrained`,
     loaded,
     selection,
-    COMPONENT_KEYS[route],
+    wanComponentKeys(spec.generation, route),
     async (open) => {
       const admitted = await admitWan(spec, loaded.manifest, open, buildOptions);
       // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
@@ -325,7 +349,7 @@ export const loadWanFromAssets = async (
     spec.owner,
     input.assets,
     buffer,
-    COMPONENT_KEYS[route],
+    wanComponentKeys(spec.generation, route),
   );
   const admitted = await admitWan(spec, input.manifest, open, options);
   return await buildWan(spec, admitted, input.assets, open, options);
@@ -429,6 +453,20 @@ const admitWan = async (
     spec.owner,
   );
   const textEncoder = admitWanText(route, open, dit, spec.owner);
+  // I2V の encoder は decoder の潜在と空間の圧縮に照らして見る（受理寸法の被覆を含む — `wanVaeEncoderContract`）。
+  // 未知の DiT の入力の形は ditContract が先に落としている。
+  const vaeEncoder = spec.generation.ditInputForm === "ti2v"
+    ? wanVaeEncoderContract(
+      {
+        pre: open(VAE_ENCODER_PRE),
+        attn: open(VAE_ENCODER_ATTN),
+        post: open(VAE_ENCODER_POST),
+      },
+      layout,
+      spec.generation,
+      spec.owner,
+    )
+    : undefined;
   return {
     config,
     quantName,
@@ -439,6 +477,7 @@ const admitWan = async (
     ropeBase,
     dit,
     textEncoder,
+    vaeEncoder,
   };
 };
 
@@ -498,6 +537,12 @@ const buildWan = async (
       transformer: open(TRANSFORMER),
       vaeFirst: open(VAE_DECODER_FIRST),
       vaeNext: open(VAE_DECODER_NEXT),
+      vaeEncoder: admitted.vaeEncoder === undefined ? undefined : {
+        pre: open(VAE_ENCODER_PRE),
+        attn: open(VAE_ENCODER_ATTN),
+        post: open(VAE_ENCODER_POST),
+        contract: admitted.vaeEncoder,
+      },
       layout,
       ropeBase,
       dit,
@@ -515,13 +560,13 @@ const buildWan = async (
 };
 
 /**
- * プロンプトから動画を 1 本生成する（class の `generate` が直列化鎖に載せる本体 — 段の順序と Session の
- * 寿命・中断は `./pipeline.ts` 冒頭の doc）。
+ * プロンプト（と I2V の条件画像）から動画を 1 本生成する（class の `generate` が直列化鎖に載せる本体 — 段の順序と
+ * Session の寿命・中断は `./pipeline.ts` 冒頭の doc）。
  */
 export const generateWanVideo = async (
   spec: WanFamilySpec,
   state: WanState,
-  request: WanGenerateRequest,
+  request: WanTi2vGenerateRequest,
 ): Promise<GeneratedVideo> => {
   const { dit } = state;
   const { onEvent, signal } = request;
@@ -531,21 +576,24 @@ export const generateWanVideo = async (
       await onEvent(event);
     };
   // 入口の門は経路ごと（どちらも GPU に触る前の純粋な検査）。プロンプトの文脈は経路ごとに作り、
-  // DiT と VAE の段は同じ 1 本を通る。
+  // encoder・DiT・VAE の段は同じ 1 本を通る。text の段は encoder の段の後に回すので、ここでは組み方だけを決める。
   let knobs: WanGenerationKnobs;
-  let contexts: WanContexts;
+  let encodeContexts: () => Promise<WanContexts>;
   if (state.text.kind === "gpu") {
+    const text = state.text;
     const plan = planWanGpuGeneration(
       request,
-      state.text.encoder,
+      text.encoder,
       state.layout,
       state.config,
       spec.generation,
     );
     knobs = plan;
-    // 段の境目（入口 → text）。直列化鎖の順番待ちの間に届いた中断もここで効く。
-    await settleAbort(signal);
-    contexts = await encodeWanPrompts(state, state.text, plan, emit, signal, spec.owner);
+    encodeContexts = async () => {
+      // 段の境目（入口 / encoder → text）。直列化鎖の順番待ちの間に届いた中断もここで効く。
+      await settleAbort(signal);
+      return await encodeWanPrompts(state, text, plan, emit, signal, spec.owner);
+    };
   } else {
     const plan = planWanGeneration(
       request,
@@ -556,11 +604,39 @@ export const generateWanVideo = async (
       spec.owner,
     );
     knobs = plan;
-    contexts = precomputedContexts(plan, dit);
+    encodeContexts = () => Promise.resolve(precomputedContexts(plan, dit));
   }
+  // I2V の encoder の段は最初（text の段より前 — ADR 0121 決定 11）。画像の無い要求は段を持たない。
+  let condition: Float32Array<ArrayBuffer> | undefined;
+  if (knobs.conditionImage !== undefined) {
+    const { vaeEncoder } = state;
+    if (vaeEncoder === undefined) {
+      // 門（plan.ts）は入力の形 "ti2v" の世代でだけ画像を通し、その世代は構築で encoder を組むので、来たら配線の破れ。
+      throw new Error(`${spec.owner}: 条件画像を受けたが VAE encoder の部品が組まれていない`);
+    }
+    // 段の境目（入口 → encoder）。
+    await settleAbort(signal);
+    condition = await encodeWanImageStage(
+      { ...state, vaeEncoder },
+      knobs.conditionImage,
+      spec.generation,
+      emit,
+      signal,
+      spec.owner,
+    );
+  }
+  const contexts = await encodeContexts();
   // 段の境目（text → DiT）。
   await settleAbort(signal);
-  const latents = await runWanDenoise(state, knobs, contexts, emit, signal, spec.owner);
+  const latents = await runWanDenoise(
+    state,
+    knobs,
+    contexts,
+    condition,
+    emit,
+    signal,
+    spec.owner,
+  );
   // 段の境目（DiT → VAE）。
   await settleAbort(signal);
   const data = await decodeWanVaeStage(

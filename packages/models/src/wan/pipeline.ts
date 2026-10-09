@@ -3,6 +3,10 @@
  *
  * パイプライン（全段 Karume・torch 不使用）:
  *
+ * 0. **vae_encoder**（Wan2.2 の `WanTi2vPipeline` に条件画像〈`image`〉を渡した要求だけ — I2V・ADR 0121 決定 11）
+ *    — 前処理（出力寸法の選択 → crop / stretch → `[-1, 1]` → patchify — `i2v-preprocess.ts`）の後、encoder の
+ *    記号長の 3 グラフ（pre / attn / post）を 1 本の batch で回し、mu を正規化して条件の潜在にする
+ *    （`vae-encoder.ts`）。DiT の段は各 step でモデル入力の先頭の潜在フレームをこれで置き換える（`dit-loop.ts`）
  * 1. **text** — 経路は構築時に選ぶ（{@link WanPipelineOptions.textEncoder} — ADR 0119 決定 7・追記
  *    「段 10d の設計」B）:
  *    - `"gpu"`（既定）— umT5（重み i8 per-channel・活性 f32 — ADR 0119 決定 5）の Session を張り、
@@ -21,13 +25,14 @@
  * 書き出しは呼び手（`wanFrameToRgba` + `encodePng`）。
  *
  * 段の本体は Wan2.1 / 2.2 の class が共有するモジュールにある（ADR 0121 決定 10 — 入口の門は
- * `plan.ts`・text 段は `text-stage.ts`・DiT 段は `dit-loop.ts`・VAE 段は `tile-decode.ts`）。家族
+ * `plan.ts`・text 段は `text-stage.ts`・DiT 段は `dit-loop.ts`・VAE 段は `tile-decode.ts`・2.2 の encoder の段は
+ * `vae-encoder.ts`）。家族
  * admission・構築・段の順序の本体も共有の `family.ts`（世代の値を `WanFamilySpec` で受ける 1 本）にあり、
  * ここは公開型と Wan2.1 の class の殻（直列化鎖・`dispose`）を持ち、`WAN21_FAMILY` を渡す。公開型は
  * Wan2.2 の class（`./ti2v-pipeline.ts` の `WanTi2vPipeline`）と共有する — 受理集合・既定・潜在の形・fps の
  * ように世代で違う値は、どの class で組んだか（その class の世代の記述子）で決まる。
  *
- * ## MUST: 段ごとに Session を張って畳む・text → DiT → VAE の順に 1 段ずつ
+ * ## MUST: 段ごとに Session を張って畳む・（encoder →）text → DiT → VAE の順に 1 段ずつ
  *
  * 構築（{@link WanPipeline.fromPretrained} / {@link WanPipeline.fromAssets}）では Session を 1 本も
  * 張らない（コンテナを開くまで）。
@@ -37,7 +42,15 @@
  * （33 フレームで約 5.7 GiB）と VAE 段（約 2.9 GiB）も同時に持たない。text 段を畳んだ直後の確保の残り
  * （DiT の後には初回だけ見えた）は未測（ADR 0119 未解決）。
  *
- * NOTE（解放待ちは入れていない — 決定 7 の「切り替えのピークを測り、足りなければ入れる」の結果）:
+ * I2V の encoder の段（Wan2.2 だけ）は最初に回し、3 Session と受け渡しの常駐を畳んでから**解放を待って**
+ * （`session/settle-released-memory.ts`）次の段へ進む（ADR 0121 決定 11 — DiT の段の容量の余裕は 0.4〜0.8 GiB
+ * しか無く、encoder の確保〈1280×704 で計画の backing 約 0.9 GiB〉を DiT の段に残さない — encoder の段が落ちた
+ * ときも畳んでから待つので、同じ pipeline の次の生成の DiT の段にも残さない）。encoder の部品は
+ * T2V だけに使う場合も構築時に取る（2.2 の配布形が常に持つ — 構築の口を増やさない）が、Session は画像を渡した
+ * 要求でだけ張る。
+ *
+ * NOTE（text → DiT・DiT → VAE の切り替えには解放待ちを入れていない — 決定 7 の「切り替えのピークを測り、足りなければ
+ * 入れる」の結果。I2V の encoder の段の後の待ちは ADR 0121 決定 11 の指定で、B570 では測っていない）:
  * B570（Intel / wgpu）は `destroy()` の解放が次の device poll まで遅れうる（docs/known-issues.md
  * 「Intel Arc B570」節）が、2026-10-02 の実測（832×480・33 フレーム・2 ステップの通し・fdinfo の
  * `drm-total-vram0`）では、DiT 段の山 5.75 GiB が **DiT の Session を畳んだ直後**（`stage` の `end`・
@@ -116,9 +129,13 @@ export type WanLatentSnapshot = {
 
 /**
  * {@link WanPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。
- * `text_encoder` は `"gpu"` の経路の umT5（positive / negative の 1 回ずつ）。
+ * `text_encoder` は `"gpu"` の経路の umT5（positive / negative の 1 回ずつ）。`vae_encoder_*` は Wan2.2 の I2V の
+ * encoder の 3 グラフ（条件画像を渡した要求で 1 回ずつ）。
  */
 export type WanRunComponent =
+  | "vae_encoder_pre"
+  | "vae_encoder_attn"
+  | "vae_encoder_post"
   | "text_encoder"
   | "transformer"
   | "vae_decoder_first"
@@ -128,12 +145,13 @@ export type WanRunComponent =
 export type WanGenerateEvent =
   /**
    * 段の開始（`start` — Session を張る前）と終了（`end` — Session を畳んだ後）。
-   * `text_encoder` は `"gpu"` の経路の umT5 の段（`"precomputed"` では出ない）。`vae_decoder` は
-   * chunk グラフ 2 本の段。途中で落ちたら `end` は出ない。
+   * `vae_encoder` は Wan2.2 の I2V の条件画像の encode の段（`image` を渡した要求だけ・最初の段 — `end` は
+   * 3 グラフを畳んで解放を待った後）。`text_encoder` は `"gpu"` の経路の umT5 の段（`"precomputed"` では出ない）。
+   * `vae_decoder` は chunk グラフ 2 本の段。途中で落ちたら `end` は出ない。
    */
   | {
     readonly kind: "stage";
-    readonly component: "text_encoder" | "transformer" | "vae_decoder";
+    readonly component: "vae_encoder" | "text_encoder" | "transformer" | "vae_decoder";
     readonly at: "start" | "end";
   }
   | {
@@ -143,7 +161,11 @@ export type WanGenerateEvent =
     readonly steps: number;
     /** その step で DiT へ渡した timestep（整数）。 */
     readonly timestep: number;
-    /** 呼んだときだけ途中の潜在を写して返す（UniPC の更新の後の潜在）。 */
+    /**
+     * 呼んだときだけ途中の潜在を写して返す（UniPC の更新の後の潜在）。I2V（Wan2.2 に `image` を渡した要求）では
+     * スケジューラの状態そのもので、先頭の潜在フレームは条件の潜在に置き換わっていない — 置き換えは DiT の段の
+     * 最後に 1 回（上流 diffusers の `callback_on_step_end` が受ける `latents` と同じ値）。
+     */
     readonly copyLatents: () => WanLatentSnapshot;
   }
   /** VAE のタイル 1 枚の decode の完了（`tile` は 1 始まり）。 */
@@ -267,8 +289,9 @@ export type WanPipelineOptions = {
    */
   readonly gpu?: GpuContext;
   /**
-   * Session の診断の観測席（umT5 は 1 プロンプト = 1 回・DiT は 1 forward = 1 回・VAE は 1 タイル =
-   * first / next の 1 回ずつ）。例外は握らない（fail loudly）。
+   * Session の診断の観測席（I2V の VAE encoder は条件画像 1 枚 = pre / attn / post の 1 回ずつ・umT5 は
+   * 1 プロンプト = 1 回・DiT は 1 forward = 1 回・VAE は 1 タイル = first / next の 1 回ずつ）。例外は握らない
+   * （fail loudly）。
    */
   readonly onRunDiagnostics?: (
     component: WanRunComponent,
@@ -301,8 +324,9 @@ export type WanFromPretrainedOptions =
 /**
  * 取得済みの manifest + 資産（hub の `fetchAssets` の返り値をそのまま渡せる形）。`assets` の部品は
  * 単一形 `krm` のキー（`transformer`）か part 列（`transformer[0]` / `transformer[1]` / … — part 0 から
- * 添字順）で、`transformer` / `vae_decoder_first` / `vae_decoder_next` の 3 本と、`"gpu"` の経路
- * （既定）では `text_encoder`（umT5）。加えて manifest の `assets` の `text_embeds`（埋め込み資産の
+ * 添字順）で、`transformer` / `vae_decoder_first` / `vae_decoder_next` の 3 本・Wan2.2（`WanTi2vPipeline`）では
+ * I2V の VAE encoder の `vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` の 3 本（画像を渡さない使い方でも
+ * 要る）と、`"gpu"` の経路（既定）では `text_encoder`（umT5）。加えて manifest の `assets` の `text_embeds`（埋め込み資産の
  * safetensors — 両方の経路）と、`"gpu"` の経路では `umt5_tokenizer`（トークナイザ資産の JSON）。
  */
 export type WanAssets = {

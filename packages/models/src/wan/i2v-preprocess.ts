@@ -14,7 +14,8 @@
  * 出力寸法の選び方だけは公式と違う: 公式は面積の上限の下で自由な寸法（16:9 の画像なら 1248×704）を選ぶが、ここは
  * 受理集合（記述子の `acceptedSizes`）の中から公式の比較式で選ぶ（ADR 0121 の追記「受理寸法を公式の 2 寸法へ」）。
  *
- * NOTE: `export` はパイプラインの内部とテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * NOTE: `export` はパイプラインの内部とテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。例外は型の
+ * {@link WanI2vFit} だけで、公開の要求の型（`WanTi2vGenerateRequest` の `fit`）の語彙なので `./wan` と barrel から出す。
  */
 
 import { ModelInputError } from "../errors.ts";
@@ -24,6 +25,10 @@ import type { WanGenerationDescriptor } from "./descriptor.ts";
 
 /** 条件画像の寸法の合わせ方（公式の中央クロップ / diffusers の直接の伸縮 — モジュール doc）。 */
 export type WanI2vFit = "crop" | "stretch";
+
+/** 値が {@link WanI2vFit} の綴りのどれかか（要求の門 `plan.ts` が型をすり抜けた綴り違いを弾く）。 */
+export const isWanI2vFit = (value: unknown): value is WanI2vFit =>
+  value === "crop" || value === "stretch";
 
 /** 省いたときの合わせ方（公式 Wan2.2 の I2V と同じ）。 */
 const DEFAULT_FIT: WanI2vFit = "crop";
@@ -134,7 +139,7 @@ export const wanI2vCoverSize = (image: Size, target: Size): Size => {
  * 1280×704 は覆う寸法が 720,896×704 で、中間だけで 1.5 GB）。
  *
  * NOTE: fit の綴りの拒否は素の `Error`（名前の綴り違い — ADR 0107 決定 3 の sampler 名と同じ扱い）。要求の欄として
- * 受ける門（段 9b）が別の型にするなら、そちらで先に弾く。
+ * 受ける門（`plan.ts`）も同じ素の `Error` で先に弾く（{@link isWanI2vFit}）ので、ここは門を経ない呼び出しの守り。
  */
 export const fitWanI2vImage = (image: Rgb8Image, size: Size, fit: WanI2vFit): Rgb8Image => {
   if (fit === "stretch") return resizeRgb8Lanczos(image, size.width, size.height);

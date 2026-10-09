@@ -1428,6 +1428,30 @@ describe("WanPipeline.generate（模擬 Session）", () => {
   });
 });
 
+describe("WanPipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS の呼び手は型をすり抜ける）", () => {
+  /** TS の型を通らない欄を 1 つ差した生成の要求（2.1 の要求の型に `image` / `fit` は無い）。 */
+  const requestWith = (key: string, value: unknown): Partial<WanGenerateRequest> => {
+    const request: Partial<WanGenerateRequest> = {};
+    Object.defineProperty(request, key, { value, enumerable: true });
+    return request;
+  };
+  const IMAGE = { data: new Uint8Array(4 * 4 * 3), width: 4, height: 4 };
+  const MESSAGE =
+    "image / fit（画像からの生成）はこの世代では受けない（受けるのは Wan2.2 の WanTi2vPipeline）";
+
+  for (const [key, value] of [["image", IMAGE], ["fit", "crop"]] as const) {
+    it(`${key} を渡すと Session を 1 本も張らずに ModelInputError（2.2 の class を案内する）`, async () => {
+      const { log, generate } = mockPipeline({});
+      await assertRejects(
+        () => generate(undefined, requestWith(key, value)),
+        ModelInputError,
+        MESSAGE,
+      );
+      assertEquals(log.filter((entry) => entry.startsWith("create:")), []);
+    });
+  }
+});
+
 describe("planWanGpuGeneration（GPU 経路の入口の門）", () => {
   const encoder = wanParityEncoder();
   const BOXING_CATS = wanParityCase("fixed-boxing-cats");
