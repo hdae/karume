@@ -362,13 +362,13 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
 （Wan なら text 段の Session の構築）で落ちる**（推測・実例はまだ無い）。`fromPretrained` の `components` で部品を差し替えると、
 差し替え先の quant 席の `session` / `gpuFeatures` / `requiredLimits` は使われず、**元の manifest の席の値で事前判定する**ので、
 重みを取る前の判定（`requiredLimits` の照合）を通ってしまう。構築は Session を 1 本も張らず
-（`packages/models/src/wan/pipeline.ts:702`）、text 段は generate ごとに Session を張る（`encodeWanPrompts` の中 — `packages/models/src/wan/text-stage.ts:453`）ので、落ちるのは構築の後に
+（`packages/models/src/wan/family.ts:450`）、text 段は generate ごとに Session を張る（`encodeWanPrompts` の中 — `packages/models/src/wan/text-stage.ts:453`）ので、落ちるのは構築の後に
 なる。ADR [0108](decisions/0108-container-format.md) 決定 19 が admission に求める「quant 席と実行設定の整合」の検査が
 無い状態で、by-design ではない。
 
 - 機序: 差し替え席は差し替え先の manifest から容器だけを引く（`packages/models/src/hub/components.ts:422-427` — `resolveSelection`
-  の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/pipeline.ts:638-645`）、
-  その `requiredLimits` で取得前の判定をする（同 `:552-556`）。
+  の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/family.ts:380-387`）、
+  その `requiredLimits` で取得前の判定をする（同 `:293-297`）。
 - 今の影響: recipe の書き手（`umt5_export` — `--intake` を含む）は語彙埋め込みを i8 で書くので、recipe で作った互換の
   umT5 への差し替えでは起きない（グラフ記述が同じならバッファの大きさも同じ）。ただし `umt5Contract`
   （`packages/models/src/wan/text-stage.ts:220-242`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを

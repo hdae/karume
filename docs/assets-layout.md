@@ -27,7 +27,8 @@
   ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
 - Wan まわりの系列名: umT5 encoder は `umt5-xxl-i8-dyn`（出所の本家 `google/umt5-xxl` に合わせた名 — ADR
   [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 4）、取り込み由来は `umt5-xxl-<名前>-i8-dyn`、Wan2.2 TI2V-5B の DiT は
-  `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）。
+  `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）、VAE（decoder first / next）は
+  `wan2.2-ti2v-5b-f16-dyn`（DiT を持たない — ADR 0121 決定 7）。
 - gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
   製品容器 `krm` の**資産**として part 列の中に入る（ADR
   [0109](decisions/0109-manifest-v5-container.md) 決定 4）ので、系列ディレクトリに別ファイルを
@@ -104,8 +105,10 @@ uv run python dist.py --pipeline depth-anything      # → models/karume-depth-a
 uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-detector/
 ```
 
-- **初回公開前なのは `vowel-detector` だけ**（siglip2 と depth-anything は 0.9.0 で、birefnet /
-  lucida は 2026-09-05 に 1024² + 2048² の 2 モデル形で初公開済み）。
+- **初回公開前なのは `vowel-detector` と Wan の 3 リポ（`karume-umt5-xxl` / `karume-wan2.1` / `karume-wan2.2`）**
+  （siglip2 と depth-anything は 0.9.0 で、birefnet / lucida は 2026-09-05 に 1024² + 2048² の 2 モデル形で初公開済み）。
+  Wan の 2 リポは `karume-umt5-xxl` を越境参照するので、公開は umT5 が先（手順は [release-runbook](release-runbook.md)「家族の初公開」— runbook が書くのは
+  Wan2.1 の回で、Wan2.2 も同じ順序）。
   `karume-sbv2-fn` はミラーを常設しない別扱い（下の bullet）。リポ名と同居の規則は ADR
   [0092](decisions/0092-distribution-repos-and-sources.md) 決定 1 / 2 / 8 / 9 が正本。
 - 上流ライセンス（siglip2 = Apache-2.0 / birefnet 系 = MIT / depth-anything small =

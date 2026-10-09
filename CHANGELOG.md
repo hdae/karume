@@ -227,7 +227,14 @@ measurements in `docs/research/`.
   frames beyond that GPU's limit; the other lengths were not estimated).
   Image-to-video is not available yet. The `karume-wan2.2` distribution is not published on
   Hugging Face yet: `dist.py --pipeline wan-ti2v` assembles a local mirror for `fromPretrained`,
-  and `fromAssets` builds the pipeline from a manifest and the exported series containers.
+  and `fromAssets` builds the pipeline from a manifest and the exported series containers. The
+  distribution has two quants, `f16+dit8-a8-attn8-s16` (the default: int8 transformer with int8
+  activations) and `f16+dit8` (int8 transformer weights, f32 compute — the reference quant), and no
+  `f16` quant; its manifest declares 50 steps, guidance 5.0 and shift 5.0, and like `karume-wan2.1`
+  it references the `text_encoder` of `karume-umt5-xxl` across repositories.
+  `deno task demo:wan --generation wan2.2` runs it (the default generation stays `wan2.1`), and
+  the gpu-lab Wan tab gains a generation choice; its JSON is `karume-wan-browser/4` and records
+  the generation.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
   container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when

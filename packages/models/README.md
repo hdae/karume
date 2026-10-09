@@ -57,7 +57,7 @@ at once; it is side-effect free, so a bundler can still drop what you do not imp
 | `@karume/models/depth-anything` | image to relative depth map               |
 | `@karume/models/siglip2`        | image to embedding                        |
 | `@karume/models/vowel-detector` | Japanese speech to lip-sync labels        |
-| `@karume/models/wan`            | text to video                             |
+| `@karume/models/wan`            | text to video (Wan2.1 / Wan2.2)           |
 
 ## Requirements
 

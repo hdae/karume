@@ -303,11 +303,12 @@ comparable to wall times with it off.
 
 ## 4. Wan
 
-Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) in Chrome, to see whether a clip
-completes on a browser device and, when it does not, where it stops (binding limits, the GPU
-timeout, memory). The pipeline's rules are those of `examples/wan`: only the four prompts of the
-embedding asset, 832x480 or 480x832, 4n+1 frames from 5 to 81 (Wan2.2: the same four prompts, and the
-sizes and frame counts below).
+Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) or Wan2.2 TI2V 5B (`WanTi2vPipeline`,
+text-to-video only) in Chrome, to see whether a clip completes on a browser device and, when it does
+not, where it stops (binding limits, the GPU timeout, memory). The pipeline's rules are those of
+`examples/wan`: Wan2.1 accepts 832x480 or 480x832 and 4n+1 frames from 5 to 81 (Wan2.2: the sizes
+and frame counts below), and the `precomputed` text-encoder route accepts only the four prompts of
+the embedding asset (the same four for both generations).
 
 The tab has a generation switch next to the source field: `Wan2.1 T2V 1.3B（karume-wan2.1）` (the default) or
 `Wan2.2 TI2V 5B（karume-wan2.2）` (text-to-video only). It can be changed only before loading. Changing it rebuilds
@@ -333,13 +334,13 @@ pipeline and recorded. The saved JSON is
   `owner/name` reads that Hugging Face repository at `main` (the distribution is not published
   yet, so the blank default is the normal case).
 - **読み込む** (load) reads the manifest, acquires a GPU device, and builds the pipeline with
-  `WanPipeline.fromPretrained(source, { gpu, quant, textEncoder })`. The device is acquired by the tab with the applied
-  geometry profile of the GPU settings and without GPU time: `WanPipeline` refuses a timing device
+  `WanPipeline.fromPretrained(source, { gpu, quant, textEncoder })` (`WanTi2vPipeline.fromPretrained` with Wan2.2). The device is acquired by the tab with the applied
+  geometry profile of the GPU settings and without GPU time: both pipelines refuse a timing device
   (the VAE decodes one tile per batch, and the runtime opens no batch on a timing device), so the
   timestamp setting does not apply to this tab. `acquireGpu` requests the adapter's own limits, so
   the device does not keep the WebGPU default of 128 MiB per storage binding. From this server, loading
   reads only the descriptors, and every generate reads the weights from the server again as each
-  stage builds its session (about 2.6 GiB for the `f16` transformer and 0.27 GiB for the VAE); from
+  stage builds its session (Wan2.1: about 2.6 GiB for the `f16` transformer and 0.27 GiB for the VAE; Wan2.2: 6.714 GiB in all, 4.67 GiB for the int8 transformer and the rest for the two f16 VAE graphs); from
   Hugging Face, loading first downloads the weight parts into the browser cache. **pipeline を破棄** disposes the pipeline and
   the device; use it after a device loss. Applying the GPU settings also disposes them; load again
   to use the new settings.
@@ -498,8 +499,7 @@ numbers marked as measured come from the B570 under Deno (ADR 0121, "B570 の 12
 stage 2) unless another GPU is named; the one Chrome run so far is the RTX 5070 Ti result below.
 
 **Result on the RTX 5070 Ti (2026-10-06, Chrome 154 on Windows)**: a 50-step clip with the practical quant
-`f16+dit8-a8-attn8-s16` and the GPU text encoder (`cat-dog-baking`, seed 42, 1280x704, 121 frames, past the
-product limit of 49 at the time, which the tab then lifted) completed without a device loss in 2,417.5 s
+`f16+dit8-a8-attn8-s16` and the GPU text encoder (`cat-dog-baking`, seed 42, 1280x704, 121 frames) completed without a device loss in 2,417.5 s
 (40.3 minutes): 58.3 s for the text encoder, 1,843.3 s for the transformer stage (35.4 to 36.0 s per step after
 a first step of 87.1 s), and 515.3 s for the VAE stage. The transformer diagnostics were 9.47 GiB (4.67 GiB of
 weights and 4.80 GiB of slot backing), below the estimate further down. VRAM, watched by eye with Windows' own use included, peaked at

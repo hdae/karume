@@ -549,7 +549,7 @@ cache の一覧（形は潜在 32×32 のタイルのとき。各 `[Cin, 2, h, w
 - **cross-attn の K / V を別グラフに割る**（ADR [0114](0114-irodori-dit-context-split.md) の手）— 1 forward の
   0.2% しか無い。
 - **interleave 形の RoPE を q / k の出力チャネルの並べ替えで half-split に寄せ、rope 融合に乗せる** — eager 同値が
-  未確認（調査 §9.2）。速度の候補に回す。
+  未確認（調査 §9.2）。速度の候補に回す。（→ perf-ledger K-78 に起票した〈2026-10-09〉）
 - **shift 5.0（公式 CLI）/ 8〜12（README）を参照にする** — 決定 5。
 
 ## Consequences
@@ -673,14 +673,14 @@ cache の一覧（形は潜在 32×32 のタイルのとき。各 `[Cin, 2, h, w
     Session を 2 本張る（`packages/models/src/wan/pipeline.ts` の `vaeFirst` / `vaeNext` と `#decode`）。重みは
     first 0.133 GiB / next 0.137 GiB を別々に持つ（値は段 6 の `results.json` の診断。first が小さいのは
     `time_conv` 2 本を持たないため — 決定 2 の表）。段 4 / 5 の VRAM の実測（2.54 / 2.876 GiB）はこの 2 本を含む。
-    共有する口（容器をまたぐ重みの束縛）は無く、作るなら別起票。
+    共有する口（容器をまたぐ重みの束縛）は無く、作るなら別起票。（→ perf-ledger K-79 に起票した〈2026-10-09〉）
 - **同じ常駐テンソルを入力と `copyOutputs` の写し先に使う形**が runtime の検査を通るか（段 4）。
   - **閉じた（段 4）**: 通った。追記「独立レビュー」の手順（`beginBatch` → `copyOutputs` → `finishAndRead`）で
     chunk 列の照合が緑（検収 段 4）。
 - **unbatched の `F.conv3d` の trace の形**（段 1）。
   - **閉じた（段 1）**: torch 2.13.0 で `aten.conv3d.default` のまま残る。正規化パスは不要（追記「段 1 の結果」）。
 - **速度の候補**（perf-ledger に回す）: adaLN と rope の融合・cross-attn の K / V の別グラフ化・conv3d の幾何の
-  掃引・タイルの辺（潜在 60 なら 832×480 で 2 枚・面積 1.15 倍。VRAM は約 6 GiB の見込み）。
+  掃引・タイルの辺（潜在 60 なら 832×480 で 2 枚・面積 1.15 倍。VRAM は約 6 GiB の見込み）。（→ adaLN は perf-ledger K-73・rope は K-78 に起票した）
 - **81 フレームの DiT 段の VRAM**（約 7.6 GiB の見込み）と、行ブロックを VRAM の予算で決める口の要否（段 8）。
   - **閉じた（段 8）**: DiT 段の fdinfo の山 7.31 GiB で天井の内。口は作らない（段 8 の結果）。
 - **Chrome**（段 9）: 利用者の M2 / RTX でのアダプタ上限・ウォッチドッグ・メモリ予算・Chromium の単一
@@ -715,6 +715,9 @@ cache の一覧（形は潜在 32×32 のタイルのとき。各 `[Cin, 2, h, w
   帰属は未調査。
 - **MiniMax H3** は構造調査 + 部品単位の候補に留める（本 ADR の範囲外）。Wan2.2 TI2V-5B（新しい VAE が要る）も
   後の候補。
+  - **Wan2.2 TI2V-5B は [ADR 0121](0121-wan22-ti2v-5b.md) で受け入れた**: T2V は `WanTi2vPipeline`（`./wan`）が出し、
+    配布形 `karume-wan2.2`・example・gpu-lab のタブまで揃った（ADR 0121 の段 8）。I2V は同 ADR の段 9、実用席の自機 A/B 門と
+    既定の寸法・フレーム数の裁定は段 7 で残る。MiniMax H3 は範囲外のまま。
 
 ## 追記（2026-10-02）: 独立レビュー（Codex）の指摘
 
