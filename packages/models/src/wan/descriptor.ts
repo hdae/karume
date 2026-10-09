@@ -109,7 +109,8 @@ export const WAN21_GENERATION: WanGenerationDescriptor = {
  * DiT の診断値の外挿 9.16〜9.50 GiB に DiT 以外の確保を足すと超える。61〜77 と 85〜117 は見積りも無い。受理集合は機ごとでは
  * ないので、その機でも受理し、入らなければ実行の途中で落ちる。
  *
- * 既定の 1280×704・33 フレームは仮置き（視認で確定する）。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
+ * 既定の 1280×704・33 フレームは利用者の裁定（2026-10-09 — ADR 0121 追記「段 7 の結果」）。B570 級の機（57 フレームまで）でも
+ * 既定のまま動き、この開発機で 1 本 約 13 分。fps 24 と `patch_size` 2 は上流の Wan2.2 の値
  * （逆正規化の統計の表は `latents.ts`）。
  *
  * MUST: 受理集合を変えるときはモデルカード（`tools/export-recipes/wan/card.py` の `WAN22_ACCEPTED_SIZES` /
