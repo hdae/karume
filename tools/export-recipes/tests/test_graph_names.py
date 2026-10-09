@@ -80,6 +80,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("wan/export_dit.py", "emit", "TARGET", "TARGET"),
     ("wan/export_vae.py", "emit_targets", "target", "TARGETS"),
+    ("wan/export_vae_encoder.py", "emit_series", "target", "TARGETS"),
     ("wan/umt5_export.py", "write_container", "GRAPH_NAME", "GRAPH_NAME"),
     ("wan/ti2v_export_dit.py", "write_container", "TARGET", "TARGET"),
 )
@@ -168,6 +169,15 @@ FORWARDERS: frozenset[tuple[str, str]] = frozenset(
 #: 走らせる側なので、綴りの正しさは `tests/test_migrate_series.py` の family 表の門が見る。
 TABLE_DRIVEN: frozenset[tuple[str, str]] = frozenset({("migrate_series.py", "migrate_series")})
 
+#: 焼き手（台本）は居るが、配布計画の weights にまだ載せていない部品（family → 綴り）。
+#: Wan2.2 の I2V の VAE encoder の 3 グラフは段 9a（ADR 0121 決定 11）で export と GPU の門だけを
+#: 先に置き、配布形への載せ方（2.2 だけの部品にして 2.1 の manifest に漏らさない）は段 9b で決める。
+#: MUST: weights に足したらここから消す — {@link TestTheNamesAreTheWeightsKeys} が両向きに見る
+#: （ここに残ったまま weights に載ると赤・焼き手が消えても赤）。
+NOT_YET_DISTRIBUTED: Mapping[str, frozenset[str]] = {
+    "wan": frozenset({"vae_encoder_pre", "vae_encoder_attn", "vae_encoder_post"}),
+}
+
 
 @pytest.mark.parametrize(
     ("script", "function", "expression", "constant"), ENTRIES, ids=lambda value: str(value)
@@ -229,7 +239,15 @@ class TestTheNamesAreTheWeightsKeys:
         "family", ["anima", "irodori", "gemma4", "siglip2", "birefnet", "depth_anything", "wan"]
     )
     def test_the_scripts_cover_exactly_the_weights_keys(self, family: str) -> None:
-        assert self._named(family) == self._weights(family)
+        named = self._named(family)
+        weights = self._weights(family)
+        pending = NOT_YET_DISTRIBUTED.get(family, frozenset())
+
+        assert pending <= named, f"{family}: 焼き手の居ない保留 {sorted(pending - named)}"
+        assert not pending & weights, (
+            f"{family}: weights に載った {sorted(pending & weights)} を保留の表から消す"
+        )
+        assert named - pending == weights
 
     def test_vowel_detector_covers_exactly_its_weights_keys(self) -> None:
         """`VOWEL_DETECTOR_WEIGHTS` は family 名から導く綴りにならないので名指しで見る。"""

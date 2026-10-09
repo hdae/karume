@@ -1,0 +1,377 @@
+{
+  "_doc": [
+    "Pillow の LANCZOS（Image.resize(size, Image.LANCZOS)）の入出力の組（生成: tools/export-recipes/wan/lanczos_fixture.py）。",
+    "Wan2.2 の I2V の前処理（公式の crop と diffusers の stretch）の resize の正本で、TS 側は Pillow の Resample.c の 22 bit 固定小数点を逐語で写し、uint8 で完全一致させる。",
+    "画素は lanczos.safetensors の U8 テンソル `<name>.input` [height, width, 3] と `<name>.resized` [outHeight, outWidth, 3]（RGB8 の行優先）。",
+    "row-* / column-* は実運用の 1 次元の係数表（832 → 1280 / 2219 / 277・480 → 738 / 1280 / 160 / 704）を 1 行・1 列の高周波ノイズで掃く（見るのは出力の uint8 — 整数係数の ±1 は積和が 2^22 の境界をまたぐときしか出力に出ないので、係数表の一致の証拠にはならない）。",
+    "値は Pillow の版で決まる — 版を変えたら作り直す（recipe の wan/tests/test_lanczos_fixture.py が今の Pillow と突き合わせる）。"
+  ],
+  "source": {
+    "reference": "PIL.Image.Image.resize(size, PIL.Image.LANCZOS)",
+    "pillow": "12.3.0",
+    "seed": 20261009
+  },
+  "tensors": "lanczos.safetensors",
+  "cases": [
+    {
+      "name": "up-2x",
+      "why": "両軸ちょうど 2 倍の拡大",
+      "height": 7,
+      "width": 11,
+      "outHeight": 14,
+      "outWidth": 22
+    },
+    {
+      "name": "up-odd",
+      "why": "両軸とも非整数倍の拡大（13×9 → 50×31）",
+      "height": 9,
+      "width": 13,
+      "outHeight": 31,
+      "outWidth": 50
+    },
+    {
+      "name": "down-3x",
+      "why": "両軸ちょうど 1/3 の縮小（台が 3 倍に伸びる）",
+      "height": 45,
+      "width": 60,
+      "outHeight": 15,
+      "outWidth": 20
+    },
+    {
+      "name": "down-odd",
+      "why": "両軸とも非整数倍の縮小（73×41 → 29×17）",
+      "height": 41,
+      "width": 73,
+      "outHeight": 17,
+      "outWidth": 29
+    },
+    {
+      "name": "horizontal-only",
+      "why": "横だけ縮小・縦は同寸（縦のパスを飛ばす）",
+      "height": 12,
+      "width": 40,
+      "outHeight": 12,
+      "outWidth": 23
+    },
+    {
+      "name": "vertical-only",
+      "why": "縦だけ拡大・横は同寸（横のパスを飛ばす）",
+      "height": 40,
+      "width": 12,
+      "outHeight": 57,
+      "outWidth": 12
+    },
+    {
+      "name": "mixed-axes",
+      "why": "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）",
+      "height": 9,
+      "width": 50,
+      "outHeight": 27,
+      "outWidth": 18
+    },
+    {
+      "name": "identity",
+      "why": "両軸とも同寸（両パスを飛ばす — 出力 = 入力）",
+      "height": 13,
+      "width": 21,
+      "outHeight": 13,
+      "outWidth": 21
+    },
+    {
+      "name": "tiny",
+      "why": "3×2 → 7×5（両端でタップが切り詰められる）",
+      "height": 2,
+      "width": 3,
+      "outHeight": 5,
+      "outWidth": 7
+    },
+    {
+      "name": "single-pixel",
+      "why": "1×1 → 4×3（全出力が 1 タップ）",
+      "height": 1,
+      "width": 1,
+      "outHeight": 3,
+      "outWidth": 4
+    },
+    {
+      "name": "checker-ringing",
+      "why": "市松 0 / 255 の拡大（負のローブで 0 と 255 を越え、飽和で切る経路）",
+      "height": 16,
+      "width": 16,
+      "outHeight": 20,
+      "outWidth": 24
+    },
+    {
+      "name": "large-down",
+      "why": "横 120 → 7（台が 17 倍に伸びて 100 タップを超える）",
+      "height": 8,
+      "width": 120,
+      "outHeight": 8,
+      "outWidth": 7
+    },
+    {
+      "name": "cover-up",
+      "why": "832×480 → 1280×738 と同じ比の拡大を小さく（52×30 → 80×46）",
+      "height": 30,
+      "width": 52,
+      "outHeight": 46,
+      "outWidth": 80
+    },
+    {
+      "name": "cover-down",
+      "why": "832×480 → 277×160 と同じ比の縮小を小さく（99×57 → 33×19）",
+      "height": 57,
+      "width": 99,
+      "outHeight": 19,
+      "outWidth": 33
+    },
+    {
+      "name": "row-832-1280",
+      "why": "実運用の係数表: 1280×704 の crop と stretch の横",
+      "height": 1,
+      "width": 832,
+      "outHeight": 1,
+      "outWidth": 1280
+    },
+    {
+      "name": "row-832-2219",
+      "why": "実運用の係数表: 704×1280 の crop の横（2.67 倍の拡大）",
+      "height": 1,
+      "width": 832,
+      "outHeight": 1,
+      "outWidth": 2219
+    },
+    {
+      "name": "row-832-277",
+      "why": "実運用の係数表: 256×160 の crop の横（1/3 の縮小）",
+      "height": 1,
+      "width": 832,
+      "outHeight": 1,
+      "outWidth": 277
+    },
+    {
+      "name": "column-480-738",
+      "why": "実運用の係数表: 1280×704 の crop の縦",
+      "height": 480,
+      "width": 1,
+      "outHeight": 738,
+      "outWidth": 1
+    },
+    {
+      "name": "column-480-1280",
+      "why": "実運用の係数表: 704×1280 の crop の縦",
+      "height": 480,
+      "width": 1,
+      "outHeight": 1280,
+      "outWidth": 1
+    },
+    {
+      "name": "column-480-160",
+      "why": "実運用の係数表: 256×160 の crop の縦（ちょうど 1/3）",
+      "height": 480,
+      "width": 1,
+      "outHeight": 160,
+      "outWidth": 1
+    },
+    {
+      "name": "column-480-704",
+      "why": "実運用の係数表: 1280×704 の stretch の縦",
+      "height": 480,
+      "width": 1,
+      "outHeight": 704,
+      "outWidth": 1
+    },
+    {
+      "name": "sweep-00",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 1,
+      "width": 19,
+      "outHeight": 11,
+      "outWidth": 10
+    },
+    {
+      "name": "sweep-01",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 6,
+      "width": 17,
+      "outHeight": 46,
+      "outWidth": 16
+    },
+    {
+      "name": "sweep-02",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 4,
+      "width": 7,
+      "outHeight": 10,
+      "outWidth": 13
+    },
+    {
+      "name": "sweep-03",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 23,
+      "width": 27,
+      "outHeight": 41,
+      "outWidth": 24
+    },
+    {
+      "name": "sweep-04",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 28,
+      "width": 4,
+      "outHeight": 19,
+      "outWidth": 33
+    },
+    {
+      "name": "sweep-05",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 19,
+      "width": 13,
+      "outHeight": 33,
+      "outWidth": 43
+    },
+    {
+      "name": "sweep-06",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 16,
+      "width": 17,
+      "outHeight": 40,
+      "outWidth": 35
+    },
+    {
+      "name": "sweep-07",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 12,
+      "width": 7,
+      "outHeight": 11,
+      "outWidth": 12
+    },
+    {
+      "name": "sweep-08",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 19,
+      "width": 6,
+      "outHeight": 10,
+      "outWidth": 6
+    },
+    {
+      "name": "sweep-09",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 2,
+      "width": 15,
+      "outHeight": 20,
+      "outWidth": 28
+    },
+    {
+      "name": "sweep-10",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 10,
+      "width": 31,
+      "outHeight": 18,
+      "outWidth": 12
+    },
+    {
+      "name": "sweep-11",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 28,
+      "width": 10,
+      "outHeight": 43,
+      "outWidth": 34
+    },
+    {
+      "name": "sweep-12",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 28,
+      "width": 22,
+      "outHeight": 11,
+      "outWidth": 37
+    },
+    {
+      "name": "sweep-13",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 19,
+      "width": 19,
+      "outHeight": 13,
+      "outWidth": 46
+    },
+    {
+      "name": "sweep-14",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 19,
+      "width": 9,
+      "outHeight": 38,
+      "outWidth": 38
+    },
+    {
+      "name": "sweep-15",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 10,
+      "width": 16,
+      "outHeight": 4,
+      "outWidth": 21
+    },
+    {
+      "name": "sweep-16",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 11,
+      "width": 26,
+      "outHeight": 48,
+      "outWidth": 4
+    },
+    {
+      "name": "sweep-17",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 30,
+      "width": 30,
+      "outHeight": 45,
+      "outWidth": 24
+    },
+    {
+      "name": "sweep-18",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 27,
+      "width": 24,
+      "outHeight": 26,
+      "outWidth": 1
+    },
+    {
+      "name": "sweep-19",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 4,
+      "width": 15,
+      "outHeight": 4,
+      "outWidth": 12
+    },
+    {
+      "name": "sweep-20",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 24,
+      "width": 30,
+      "outHeight": 19,
+      "outWidth": 12
+    },
+    {
+      "name": "sweep-21",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 22,
+      "width": 23,
+      "outHeight": 10,
+      "outWidth": 1
+    },
+    {
+      "name": "sweep-22",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 29,
+      "width": 18,
+      "outHeight": 48,
+      "outWidth": 37
+    },
+    {
+      "name": "sweep-23",
+      "why": "乱択の幾何（seed 固定）",
+      "height": 6,
+      "width": 21,
+      "outHeight": 13,
+      "outWidth": 17
+    }
+  ]
+}

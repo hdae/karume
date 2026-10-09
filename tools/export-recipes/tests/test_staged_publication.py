@@ -85,6 +85,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("irodori/dacvae/export.py", "export_series"),
     ("wan/export_dit.py", "emit"),
     ("wan/export_vae.py", "emit_targets"),
+    ("wan/export_vae_encoder.py", "emit_series"),
     ("wan/ti2v_export_dit.py", "write_series"),
 )
 
