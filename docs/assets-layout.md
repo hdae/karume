@@ -27,8 +27,8 @@
   ディレクトリへは混ぜない（`dist` の宣言外ファイル検査が拾う）。
 - Wan まわりの系列名: umT5 encoder は `umt5-xxl-i8-dyn`（出所の本家 `google/umt5-xxl` に合わせた名 — ADR
   [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 4）、取り込み由来は `umt5-xxl-<名前>-i8-dyn`、Wan2.2 TI2V-5B の DiT は
-  `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）、VAE（decoder first / next）は
-  `wan2.2-ti2v-5b-f16-dyn`（DiT を持たない — ADR 0121 決定 7）。
+  `wan2.2-ti2v-5b-i8-dyn/transformer`（ADR [0121](decisions/0121-wan22-ti2v-5b.md) 段 1）、VAE（decoder first / next と I2V の encoder pre / attn / post）は
+  `wan2.2-ti2v-5b-f16-dyn`（DiT を持たない — ADR 0121 決定 7・encoder は段 9a — `python -m wan.export_vae_encoder`）。
 - gemma4 製品系列の PLE（索引 `ple_index` と `ple.values.<k>` / `ple.scales.<k>` の block）は
   製品容器 `krm` の**資産**として part 列の中に入る（ADR
   [0109](decisions/0109-manifest-v5-container.md) 決定 4）ので、系列ディレクトリに別ファイルを
