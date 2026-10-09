@@ -128,12 +128,28 @@ WAN_MODEL_FILE = "model.krm"
 #: ディレクトリ名も同じ綴りだが、それは規約であって導出ではない（書き手は `TARGET` /
 #: `TARGETS` / `GRAPH_NAME` を名乗る — `tests/test_graph_names.py` の門）。`text_encoder` は
 #: umT5 の配布形と同じキー（越境参照の先の容器のグラフ名 — 綴りの正本は
-#: `wan.umt5_distribution.UMT5_ROLE`）。並びは生成の段の順（text → DiT → VAE）。
+#: `wan.umt5_distribution.UMT5_ROLE`）。並びは生成の段の順（I2V の VAE encoder → text → DiT →
+#: VAE decoder）で、全世代の和（世代ごとの部品は {@link WanGeneration.weights} のキー）。
 WAN_TEXT_ENCODER_ROLE = UMT5_ROLE
 WAN_TRANSFORMER_ROLE = "transformer"
 WAN_VAE_FIRST_ROLE = "vae_decoder_first"
 WAN_VAE_NEXT_ROLE = "vae_decoder_next"
+
+#: I2V の条件画像（1 枚）を潜在へ写す VAE encoder の 3 グラフ（ADR 0121 決定 11 の改訂・段 9a —
+#: mid の attention の前後で切った記号長のグラフ: pre / attn / post）。書き手の綴りは
+#: `wan.export_vae_encoder.TARGETS`。配るのは encoder を持つ世代だけ（Wan2.2 —
+#: {@link WanGeneration.vae_encoder}）。並びは書き手と同じ実行の順。
+WAN_VAE_ENCODER_PRE_ROLE = "vae_encoder_pre"
+WAN_VAE_ENCODER_ATTN_ROLE = "vae_encoder_attn"
+WAN_VAE_ENCODER_POST_ROLE = "vae_encoder_post"
+WAN_VAE_ENCODER_ROLES: tuple[str, ...] = (
+    WAN_VAE_ENCODER_PRE_ROLE,
+    WAN_VAE_ENCODER_ATTN_ROLE,
+    WAN_VAE_ENCODER_POST_ROLE,
+)
+
 WAN_GRAPH_ROLES: tuple[str, ...] = (
+    *WAN_VAE_ENCODER_ROLES,
     WAN_TEXT_ENCODER_ROLE,
     WAN_TRANSFORMER_ROLE,
     WAN_VAE_FIRST_ROLE,
@@ -154,11 +170,13 @@ WAN_TRANSFORMER_LABEL_ROLES: Mapping[str, str] = {
     "i8": WAN_TRANSFORMER_I8_ROLE,
 }
 
-#: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer は格納ラベルごとに 2 本・VAE は
-#: f16 の 1 本ずつ）。全世代の役割の和で、Wan2.1 の役割と同じ。各世代は自分の格納ラベルの役割だけを
-#: 使う（{@link WanGeneration.container_roles}）。以下の格納の要求 / 禁止表と weights の宣言も同じく
+#: 容器を持つ配置の役割（text_encoder は i8 の 1 本・transformer は格納ラベルごとに 2 本・VAE の
+#: encoder と decoder は f16 の 1 本ずつ）。全世代の役割の和。各世代は自分の格納ラベルの役割と、
+#: encoder を持つ世代だけが encoder の役割を使う（{@link WanGeneration.container_roles} — Wan2.1 は
+#: encoder の 3 本を持たない）。以下の格納の要求 / 禁止表・出力の path・weights の宣言も同じく
 #: 全世代の表で、世代はそこから自分の役割を引く。
 WAN_CONTAINER_ROLES: tuple[str, ...] = (
+    *WAN_VAE_ENCODER_ROLES,
     WAN_TEXT_ENCODER_ROLE,
     *WAN_TRANSFORMER_ROLES,
     WAN_VAE_FIRST_ROLE,
@@ -206,6 +224,7 @@ WAN_DIT_CONTEXT_INPUT = "encoder_hidden_states"
 #: 参照元の `karume.json` が宣言する `<モデル名>/<この path>` の part を引き当てる
 #: （`karume.dist.external_refs`）ので、綴りが割れると組み立てが「参照元に無い」で落ちる。
 WAN_OUTPUT_PATHS: Mapping[str, str] = {
+    **{role: f"{role}/model.f16.krm" for role in WAN_VAE_ENCODER_ROLES},
     WAN_TEXT_ENCODER_ROLE: UMT5_OUTPUT_PATHS[UMT5_ROLE],
     WAN_TRANSFORMER_F16_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.f16.krm",
     WAN_TRANSFORMER_I8_ROLE: f"{WAN_TRANSFORMER_ROLE}/model.i8.krm",
@@ -219,8 +238,10 @@ WAN_OUTPUT_PATHS: Mapping[str, str] = {
 #: 実測事故 — Anima / SBV2 / Depth Anything と同じ根拠）。f16 系列は fake-quant 対象だけが f16 に
 #: なる（bias / norm は f32 のまま）ので「f16 を含む」を、i8 系列は linear の重みだけが i8 になる
 #: （scale・bias・norm は f32）ので「i8 を含む」を要求する。umT5 の i8 系列の種類ごとの格納は
-#: 束縛表の門（`wan.umt5_distribution.assert_umt5_bindings`）が別に見る。
+#: 束縛表の門（`wan.umt5_distribution.assert_umt5_bindings`）が別に見る。VAE の encoder は
+#: decoder と同じ f16 系列（書き手 `wan.export_vae_encoder` — f16 席だけ）。
 WAN_STORAGE_REQUIREMENTS: Mapping[str, str] = {
+    **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
     WAN_TEXT_ENCODER_ROLE: "i8",
     WAN_TRANSFORMER_F16_ROLE: "f16",
     WAN_TRANSFORMER_I8_ROLE: "i8",
@@ -247,8 +268,11 @@ WAN_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
 #: weights の宣言（容器のグラフ名 → dtype ラベル → 配置の役割）。ラベルは格納 dtype 語彙で、
 #: {@link WAN_STORAGE_REQUIREMENTS} が要求する格納形と 1:1（ADR 0041 §3）。`text_encoder` は
 #: ラベルが i8 の 1 つなので、{@link complete_quant_weights} が全席へ埋める（席の weights は完全
-#: 写像 — umT5 を持たない席は表せない。経路の選択は構築時のオプション — ADR 0119 追記 B）。
+#: 写像 — umT5 を持たない席は表せない。経路の選択は構築時のオプション — ADR 0119 追記 B）。VAE の
+#: encoder もラベルが f16 の 1 つなので全席が取る（T2V だけの利用でも取る — ADR 0121 追記「段 9 の
+#: 計画の裁定と段 9a の結果」の裁定）。
 WAN_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
+    **{role: {"f16": WeightFiles(role)} for role in WAN_VAE_ENCODER_ROLES},
     WAN_TEXT_ENCODER_ROLE: {"i8": WeightFiles(WAN_TEXT_ENCODER_ROLE)},
     WAN_TRANSFORMER_ROLE: {
         "f16": WeightFiles(WAN_TRANSFORMER_F16_ROLE),
@@ -425,11 +449,12 @@ WAN22_PIPELINE_CONFIG: Mapping[str, Any] = {
     "defaults": {"steps": 50, "guidance": 5.0},
 }
 
-#: Wan2.2 の改変告知（Apache 2.0 §4(b)）。事実の根拠は ADR 0121（決定 2 / 3 / 6 / 9・追記「段 1 の
-#: 結果」「段 4 の結果」「段 5 の結果」）と ADR 0122 決定 8（umT5 は本家の encoder と書き、この
-#: checkpoint の bf16 の `text_encoder` はその丸め）。トークナイザのファイルが 2 つの checkpoint で
-#: 同じことは、pin した 2 つの revision の `tokenizer/` の 4 ファイルの sha256 の一致で確かめた
-#: （2026-10-06）。
+#: Wan2.2 の改変告知（Apache 2.0 §4(b)）。事実の根拠は ADR 0121（決定 2 / 3 / 6 / 9 / 11・追記
+#: 「段 1 の結果」「段 4 の結果」「段 5 の結果」「段 9 の計画の裁定と段 9a の結果」〈VAE encoder の
+#: 書き直し — `wan.vae_encoder_patch` の 5 つ〉）と ADR 0122 決定 8（umT5 は本家の encoder と書き、
+#: この checkpoint の bf16 の `text_encoder` はその丸め）。トークナイザのファイルが 2 つの
+#: checkpoint で同じことは、pin した 2 つの revision の `tokenizer/` の 4 ファイルの sha256 の一致で
+#: 確かめた（2026-10-06）。
 #:
 #: MUST: 文面は配布形の中身と対応していること（{@link WAN_NOTICE_MARKDOWN} と同じ理由）。2.1 の文の
 #: 写しで事実が違う箇所（f16 の transformer・f16 席・1 系統の VAE の出口）を残さない。
@@ -469,7 +494,19 @@ following changes were made:
   depth-to-space reshapes. The graphs return the decoder output in the upstream patchified space
   (`patch_size` 2, 12 channels); the host decodes in overlapping tiles of 16 latent pixels, blends
   them in that space and then unpatchifies to RGB, so the output differs slightly from the
-  upstream untiled decode. The VAE encoder is not included.
+  upstream untiled decode.
+- **f16 VAE encoder for image-to-video**: only the part of the VAE encoder (Wan2.2-VAE) that
+  encodes one conditioning image (the first latent frame) is included, re-expressed as three graphs
+  with a symbolic latent height and width, split around its middle attention block: the layers
+  before that block, the attention on the flattened sequence of latent positions (its 1×1
+  convolutions applied as linear layers), and the layers after it up to `quant_conv`, whose output
+  is cut to its first half (the latent mean). The graphs take the image already patchified by the
+  host (`patch_size` 2, 12 channels). On one frame, each causal convolution with a temporal kernel
+  of 3 multiplies only its last temporal slice with real data, so only that slice is stored; the
+  temporal downsampling convolutions, which do not run on the first frame, are not included; the
+  averaging shortcuts are written in their closed form for one frame. Every included parameter
+  was rounded from the source float32 value to the nearest float16 value and is stored as in the
+  VAE decoder; computation runs in float32.
 - **The text encoder is referenced, not stored here.** `karume.json` references the umT5-XXL
   encoder of `google/umt5-xxl` (this checkpoint's `text_encoder` folder holds the same encoder
   rounded to bfloat16), converted to int8, from the separate repository `karume-umt5-xxl` at a
@@ -494,7 +531,7 @@ class WanGeneration:
     """配布の世代の表 — 世代ごとに違う事実を 1 つに集める。
 
     計画関数 {@link wan_plan} は 1 本で、配置表・格納の要求 / 禁止表・weights の宣言はこの表の
-    transformer の格納ラベルから導く（全世代の表 {@link WAN_STORAGE_REQUIREMENTS} /
+    transformer の格納ラベルと encoder の有無から導く（全世代の表 {@link WAN_STORAGE_REQUIREMENTS} /
     {@link WAN_STORAGE_FORBIDDEN} / {@link WAN_WEIGHTS} から自分の役割を引く）。
     """
 
@@ -504,12 +541,18 @@ class WanGeneration:
     pipeline: str
     #: 既定のモデル（Pipeline の `default_model`・計画の `model` の省略時）。
     default_model: str
-    #: f16 系列（VAE の chunk グラフ 2 本と、格納ラベルに f16 を持つ世代の f16 の DiT）。
+    #: f16 系列（VAE の decoder の chunk グラフ 2 本と、encoder を配る世代の encoder の 3 グラフ・
+    #: 格納ラベルに f16 を持つ世代の f16 の DiT）。
     series: str
     #: DiT の i8 系列（どの世代も持つ — 参照席と実用席の重み）。
     i8_series: str
     #: transformer の格納ラベル（並びは manifest の weights の並び — {@link WAN_WEIGHTS} の順）。
     transformer_labels: tuple[str, ...]
+    #: I2V の条件画像の VAE encoder（{@link WAN_VAE_ENCODER_ROLES} の 3 グラフ — f16 系列）を
+    #: 配るか。Wan2.2 だけ（ADR 0121 決定 11）。全世代の表 {@link WAN_WEIGHTS} は Wan2.1 の計画にも
+    #: 回るので、ここで絞らないと Wan2.1 の manifest に encoder の席が漏れる（2.1 は T2V だけの
+    #: checkpoint で、2.1 の配布形はバイト不変に保つ）。
+    vae_encoder: bool
     #: テキスト資産 2 本（埋め込み・トークナイザ）の出所の pin を引くモデル名（`SOURCES` のキー）。
     #: DiT / VAE の容器の出所は計画のモデル名の pin で見る — 2 つの欄を分けるのは、Wan2.2 の資産が
     #: Wan2.1 の checkpoint の umT5 から作ったもので、その出所を名乗ったまま門を通すため（ADR 0121
@@ -541,9 +584,15 @@ class WanGeneration:
         return tuple(WAN_TRANSFORMER_LABEL_ROLES[label] for label in self.transformer_labels)
 
     @property
+    def vae_encoder_roles(self) -> tuple[str, ...]:
+        """VAE の encoder の容器の配置の役割（配らない世代では空）。"""
+        return WAN_VAE_ENCODER_ROLES if self.vae_encoder else ()
+
+    @property
     def container_roles(self) -> tuple[str, ...]:
         """容器を持つ配置の役割（並びは {@link WAN_CONTAINER_ROLES} と同じ — 生成の段の順）。"""
         return (
+            *self.vae_encoder_roles,
             WAN_TEXT_ENCODER_ROLE,
             *self.transformer_roles,
             WAN_VAE_FIRST_ROLE,
@@ -562,16 +611,14 @@ class WanGeneration:
 
     @property
     def weights(self) -> Mapping[str, Mapping[str, WeightFiles]]:
-        """weights の宣言（transformer はこの世代の格納ラベルだけ — 無いラベルを宣言すると、その
-        ラベルを選ぶ席が組めてしまう）。"""
-        return {
-            name: {
-                label: files
-                for label, files in labels.items()
-                if name != WAN_TRANSFORMER_ROLE or label in self.transformer_labels
-            }
+        """weights の宣言（この世代の配置の役割を指すラベルだけ — transformer はこの世代の格納
+        ラベルだけ・encoder は配る世代だけ。無い役割を宣言すると、それを選ぶ席が組めてしまう）。"""
+        roles = set(self.container_roles)
+        declared = {
+            name: {label: files for label, files in labels.items() if files.file in roles}
             for name, labels in WAN_WEIGHTS.items()
         }
+        return {name: labels for name, labels in declared.items() if labels}
 
 
 #: Wan2.1 T2V 1.3B（`--pipeline wan` → `karume-wan2.1`）。transformer は f16 / i8 の 2 本。
@@ -582,6 +629,7 @@ WAN21 = WanGeneration(
     series=WAN_SERIES,
     i8_series=WAN_I8_SERIES,
     transformer_labels=("f16", "i8"),
+    vae_encoder=False,
     text_model=DEFAULT_MODEL,
     quants=WAN_QUANTS,
     default_quant=WAN_DEFAULT_QUANT,
@@ -597,6 +645,9 @@ WAN21 = WanGeneration(
 #: - transformer は **i8 の 1 本だけ**（f16 の DiT は無い — ADR 0121 決定 2）。DiT は I2V 対応の
 #:   グラフ 1 本（決定 3 — 入力 7 本。組み立てが見るのは文脈入力と RoPE 素表だけで、2.1 と同じ門）。
 #: - VAE は Wan2.2-VAE の chunk グラフ 2 本（決定 6 — 潜在 48 ch・出口は patchify 空間）。
+#: - I2V の条件画像の VAE encoder の 3 グラフ（決定 11・段 9a — decoder と同じ f16 系列）を配る。
+#:   どの席も f16 の 1 本を取る（T2V だけの利用でも取る — 追記「段 9 の計画の裁定と段 9a の
+#:   結果」の裁定）。
 #: - テキスト資産 2 本は **2.1 の系列のファイルそのもの**で、出所は Wan2.1 の pin（決定 9 —
 #:   {@link WanGeneration.text_model}）。DiT / VAE の容器の出所は Wan2.2 の pin で見る。
 #: - umT5 は 2.1 と同じ `karume-umt5-xxl` の越境参照。
@@ -607,6 +658,7 @@ WAN22 = WanGeneration(
     series=WAN22_SERIES,
     i8_series=WAN22_I8_SERIES,
     transformer_labels=("i8",),
+    vae_encoder=True,
     text_model=WAN22_TEXT_MODEL,
     quants=WAN22_QUANTS,
     default_quant=WAN22_DEFAULT_QUANT,
@@ -620,9 +672,10 @@ WAN22 = WanGeneration(
 
 @dataclass(frozen=True)
 class WanSources:
-    """組み立ての入力 = 系列ディレクトリ 3 本（f16 系列〈VAE と、2.1 では f16 の DiT〉・DiT の i8
-    系列・テキスト埋め込みの系列）と、umT5 の容器（i8 系列）・トークナイザ資産。テキスト埋め込みと
-    トークナイザ資産はどの世代も Wan2.1 の系列を指す（ADR 0121 決定 9）。"""
+    """組み立ての入力 = 系列ディレクトリ 3 本（f16 系列〈VAE の decoder・2.2 では VAE の encoder・
+    2.1 では f16 の DiT〉・DiT の i8 系列・テキスト埋め込みの系列）と、umT5 の容器（i8 系列）・
+    トークナイザ資産。テキスト埋め込みとトークナイザ資産はどの世代も Wan2.1 の系列を指す（ADR 0121
+    決定 9）。"""
 
     series: Path
     i8_series: Path
@@ -649,14 +702,16 @@ def wan_placements(sources: WanSources, generation: WanGeneration = WAN21) -> di
     """配置の役割 → 出所のファイル。出力の path は {@link WAN_OUTPUT_PATHS} が持つ。
 
     この表に無いものは出力へ入らない（系列に並ぶ `io.*` / `reference.*` / `vae_*.safetensors` /
-    `pipeline_steps.*` の golden はこれで落ちる）。transformer はその世代の格納ラベルの容器だけ
-    （f16 は f16 系列・i8 は i8 系列）。
+    `pipeline_steps.*` の golden はこれで落ちる — encoder の golden `vae_encoder.*` も同じ）。
+    transformer はその世代の格納ラベルの容器だけ（f16 は f16 系列・i8 は i8 系列）、VAE の
+    encoder は配る世代だけ（f16 系列）。
     """
     transformers = {
         WAN_TRANSFORMER_F16_ROLE: sources.series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
         WAN_TRANSFORMER_I8_ROLE: sources.i8_series / WAN_TRANSFORMER_ROLE / WAN_MODEL_FILE,
     }
     return {
+        **{role: sources.series / role / WAN_MODEL_FILE for role in generation.vae_encoder_roles},
         WAN_TEXT_ENCODER_ROLE: sources.text_encoder,
         **{role: transformers[role] for role in generation.transformer_roles},
         WAN_VAE_FIRST_ROLE: sources.series / WAN_VAE_FIRST_ROLE / WAN_MODEL_FILE,

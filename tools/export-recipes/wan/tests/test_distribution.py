@@ -96,6 +96,10 @@ from wan.distribution import (
     WAN_TRANSFORMER_F16_ROLE,
     WAN_TRANSFORMER_I8_ROLE,
     WAN_TRANSFORMER_ROLE,
+    WAN_VAE_ENCODER_ATTN_ROLE,
+    WAN_VAE_ENCODER_POST_ROLE,
+    WAN_VAE_ENCODER_PRE_ROLE,
+    WAN_VAE_ENCODER_ROLES,
     WAN_VAE_FIRST_ROLE,
     WAN_VAE_LATENT_INPUT,
     WAN_VAE_NEXT_ROLE,
@@ -294,6 +298,9 @@ def _build_sources(
     # pipeline_steps は主の DiT の系列の根に並ぶ（実物: 2.1 は f16 系列・2.2 は i8 系列）。
     steps_series = placements[generation.transformer_roles[0]].parent.parent
     (steps_series / "pipeline_steps.band-boxing-cats.safetensors").write_bytes(b"steps")
+    # encoder の GPU の門の golden は f16 系列の根に並ぶ（実物: 2.2 の系列だけ）。
+    if generation.vae_encoder:
+        (sources.series / "vae_encoder.boxing-cats-1280x704.safetensors").write_bytes(b"golden")
     (sources.text_encoder.parent / "reference.band-l0008.safetensors").write_bytes(b"golden")
     sources.text_embeds.parent.mkdir(parents=True, exist_ok=True)
     sources.text_embeds.write_bytes(_text_embeds() if embeds is None else embeds)
@@ -353,6 +360,16 @@ def _model(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _present(out_dir: Path) -> list[str]:
     return sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
+
+
+def _overview_names_every_graph(out_dir: Path, manifest: Mapping[str, Any]) -> None:
+    """カードの「What is this」節が、manifest の weights の部品（= 配布形のグラフ）を 1 つ残らず
+    名指しすること（部品を足した日に概要のグラフの列挙だけが古びる形を落とす）。"""
+    card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+    overview = card.split("## What is this", 1)[1].split("\n## ", 1)[0]
+    for model in manifest["models"].values():
+        missing = [name for name in model["weights"] if f"`{name}`" not in overview]
+        assert missing == [], missing
 
 
 #: Wan2.2 のモデル名と、その書き手（`wan.ti2v_export_dit` / `wan.export_vae --model ti2v-5b`）が焼く
@@ -427,15 +444,21 @@ def assembled22(tmp_path: Path, wan22_provenance: None) -> tuple[Path, dict[str,
 
 class TestLayout:
     def test_it_places_the_graphs_and_the_assets_under_the_model_subtree(self, assembled) -> None:
-        """transformer は格納ラベルごとに 2 本（`model.f16.krm` / `model.i8.krm`）・VAE は
-        1 本ずつ・資産 2 本。text_encoder は越境参照なので 1 バイトも置かない。"""
+        """transformer は格納ラベルごとに 2 本（`model.f16.krm` / `model.i8.krm`）・VAE の
+        decoder は 1 本ずつ・資産 2 本。text_encoder は越境参照なので 1 バイトも置かない。VAE の
+        encoder は Wan2.2 だけの部品なので置かない（全世代の表に在っても 2.1 の配布形は
+        変わらない）。"""
         out_dir, _ = assembled
-        own = {role: path for role, path in WAN_OUTPUT_PATHS.items() if role != UMT5_ROLE}
+        own = {
+            role: WAN_OUTPUT_PATHS[role]
+            for role in (*WAN21.container_roles, WAN_TEXT_EMBEDS_ROLE, WAN_TOKENIZER_ROLE)
+            if role != UMT5_ROLE
+        }
         expected = [
             f"{DEFAULT_MODEL}/{rel}"
             for rel in placed_paths(
                 own,
-                {name: labels for name, labels in WAN_WEIGHTS.items() if name != UMT5_ROLE},
+                {name: labels for name, labels in WAN21.weights.items() if name != UMT5_ROLE},
                 # transformer の容器は資産 `rope_base` の専用 part が 1 本増える。
                 {WAN_TRANSFORMER_F16_ROLE: 4, WAN_TRANSFORMER_I8_ROLE: 4},
             )
@@ -444,6 +467,7 @@ class TestLayout:
             [*expected, MANIFEST_FILENAME, MODEL_CARD_FILENAME, "LICENSE.md", NOTICE_FILENAME]
         )
         assert list(out_dir.rglob(f"{WAN_TEXT_ENCODER_ROLE}/*")) == []
+        assert list(out_dir.rglob("vae_encoder*")) == []
         assert WAN_OUTPUT_PATHS[WAN_TRANSFORMER_F16_ROLE] == "transformer/model.f16.krm"
         assert WAN_OUTPUT_PATHS[WAN_TRANSFORMER_I8_ROLE] == "transformer/model.i8.krm"
         assert WAN_OUTPUT_PATHS[WAN_TOKENIZER_ROLE] == "umt5_tokenizer/tokenizer.json"
@@ -454,6 +478,19 @@ class TestLayout:
         assert list(out_dir.rglob("pipeline_steps.*")) == []
         assert list(out_dir.rglob("reference.*")) == []
 
+    def test_a_vae_encoder_beside_the_wan21_vae_is_never_carried(self, tmp_path: Path) -> None:
+        """2.1 の f16 系列に encoder の容器が置かれていても、2.1 の計画は拾わない（encoder は
+        Wan2.2 だけの部品 — 全世代の weights の表が 2.1 にも回るので、世代の欄で絞れている
+        こと）。"""
+        sources = _build_sources(tmp_path)
+        for role in WAN_VAE_ENCODER_ROLES:
+            write_component(sources.series / role / WAN_MODEL_FILE, _graph_container(role))
+        plan = wan_plan(sources)
+        assert not set(WAN_VAE_ENCODER_ROLES) & set(plan.artifacts)
+        assert not set(WAN_VAE_ENCODER_ROLES) & set(plan.weights)
+        for quant in plan.quants.values():
+            assert not set(WAN_VAE_ENCODER_ROLES) & set(quant["weights"])
+
     def test_the_manifest_declares_the_three_seats_and_the_model_assets(self, assembled) -> None:
         """quant 席は `f16`・参照席 `f16+dit8`・実用席 `f16+dit8-a8-attn8-s16`（既定）の 3 つ
         （ADR 0120 決定 1・裁定 2026-10-04 の 4）で、どの席も text_encoder の i8 を選ぶ（weights は
@@ -463,7 +500,13 @@ class TestLayout:
         model = _model(manifest)
         assert manifest["defaultModel"] == DEFAULT_MODEL
         assert model["pipeline"] == WAN_PIPELINE
-        assert list(model["weights"]) == list(WAN_GRAPH_ROLES)
+        # VAE の encoder（Wan2.2 だけ）は 2.1 の weights に無い — 2.1 の manifest は不変。
+        assert list(model["weights"]) == [
+            WAN_TEXT_ENCODER_ROLE,
+            WAN_TRANSFORMER_ROLE,
+            WAN_VAE_FIRST_ROLE,
+            WAN_VAE_NEXT_ROLE,
+        ]
         assert list(model["weights"][WAN_TEXT_ENCODER_ROLE]) == ["i8"]
         assert list(model["weights"][WAN_TRANSFORMER_ROLE]) == ["f16", "i8"]
         assert list(model["assets"]) == [WAN_TEXT_EMBEDS_ROLE, WAN_TOKENIZER_ROLE]
@@ -1032,6 +1075,9 @@ class TestTheModelCard:
         assert "| `f16` |" in quants
         assert "(default)" not in quants.replace("| `f16+dit8-a8-attn8-s16` (default) |", "")
 
+    def test_the_overview_names_every_graph_of_the_manifest(self, assembled) -> None:
+        _overview_names_every_graph(*assembled)
+
     def test_it_refuses_a_pipeline_it_does_not_describe(self, assembled) -> None:
         _, manifest = assembled
         foreign = json.loads(json.dumps(manifest))
@@ -1386,17 +1432,47 @@ class TestTheWritersSpellTheSameNames:
         assert ti2v_export_dit.MODEL_FILE == WAN_MODEL_FILE
         assert WAN_DIT_CONTEXT_INPUT in ti2v_export_dit.INPUT_NAMES
 
+    def test_the_wan22_vae_encoder_graphs(self) -> None:
+        """VAE の encoder の 3 グラフ（書き手 `wan.export_vae_encoder` — decoder と同じ f16
+        系列）。"""
+        from wan import export_vae_encoder
+
+        assert export_vae_encoder.TARGETS == WAN_VAE_ENCODER_ROLES
+        assert export_vae_encoder.SERIES_NAME == WAN22_SERIES == WAN22.series
+        assert export_vae_encoder.MODEL_FILE == WAN_MODEL_FILE
+
 
 class TestTheGenerationTables:
-    """世代の表から導く配置・格納・weights の表（Wan2.1 は全世代の表と同じ — 2.1 の配布形が
-    不変）。"""
+    """世代の表から導く配置・格納・weights の表（Wan2.1 は全世代の表から Wan2.2 だけの VAE
+    encoder を除いたもの — 2.1 の配布形が不変）。"""
 
-    def test_the_wan21_tables_are_the_full_tables(self) -> None:
-        assert WAN21.container_roles == WAN_CONTAINER_ROLES
+    def test_the_wan21_tables_are_the_full_tables_without_the_vae_encoder(self) -> None:
+        encoder = set(WAN_VAE_ENCODER_ROLES)
+        assert WAN21.vae_encoder_roles == ()
+        assert WAN21.container_roles == (
+            WAN_TEXT_ENCODER_ROLE,
+            WAN_TRANSFORMER_F16_ROLE,
+            WAN_TRANSFORMER_I8_ROLE,
+            WAN_VAE_FIRST_ROLE,
+            WAN_VAE_NEXT_ROLE,
+        )
+        assert WAN21.container_roles == tuple(
+            role for role in WAN_CONTAINER_ROLES if role not in encoder
+        )
         assert WAN21.transformer_roles == (WAN_TRANSFORMER_F16_ROLE, WAN_TRANSFORMER_I8_ROLE)
-        assert WAN21.storage_requirements == WAN_STORAGE_REQUIREMENTS
-        assert WAN21.storage_forbidden == WAN_STORAGE_FORBIDDEN
-        assert WAN21.weights == WAN_WEIGHTS
+        assert WAN21.storage_requirements == {
+            role: required
+            for role, required in WAN_STORAGE_REQUIREMENTS.items()
+            if role not in encoder
+        }
+        assert WAN21.storage_forbidden == {
+            role: forbidden
+            for role, forbidden in WAN_STORAGE_FORBIDDEN.items()
+            if role not in encoder
+        }
+        assert WAN21.weights == {
+            name: labels for name, labels in WAN_WEIGHTS.items() if name not in encoder
+        }
         assert (WAN21.repo_name, WAN21.pipeline, WAN21.series, WAN21.i8_series) == (
             WAN_REPO_NAME,
             WAN_PIPELINE,
@@ -1408,6 +1484,7 @@ class TestTheGenerationTables:
 
     def test_the_wan22_tables_hold_only_the_int8_transformer(self) -> None:
         assert WAN22.container_roles == (
+            *WAN_VAE_ENCODER_ROLES,
             WAN_TEXT_ENCODER_ROLE,
             WAN_TRANSFORMER_I8_ROLE,
             WAN_VAE_FIRST_ROLE,
@@ -1419,6 +1496,28 @@ class TestTheGenerationTables:
         assert "f16" in WAN22.storage_forbidden[WAN_TRANSFORMER_I8_ROLE]
         assert "f16" not in WAN22.quants
 
+    def test_only_wan22_carries_the_vae_encoder_in_f16(self) -> None:
+        """encoder の 3 グラフは Wan2.2 だけが配り（ADR 0121 決定 11）、decoder と同じ扱い:
+        f16 系列・格納ラベル f16 の 1 本・`<部品>/model.f16.krm`・f16 を要求し他の圧縮格納を
+        禁ずる。"""
+        assert (WAN21.vae_encoder, WAN22.vae_encoder) == (False, True)
+        assert WAN_VAE_ENCODER_ROLES == (
+            WAN_VAE_ENCODER_PRE_ROLE,
+            WAN_VAE_ENCODER_ATTN_ROLE,
+            WAN_VAE_ENCODER_POST_ROLE,
+        )
+        assert WAN22.vae_encoder_roles == WAN_VAE_ENCODER_ROLES
+        for role in WAN_VAE_ENCODER_ROLES:
+            assert {label: files.file for label, files in WAN22.weights[role].items()} == {
+                "f16": role
+            }
+            assert WAN_OUTPUT_PATHS[role] == f"{role}/model.f16.krm"
+            assert WAN22.storage_requirements[role] == "f16"
+            assert WAN22.storage_forbidden[role] == WAN_STORAGE_FORBIDDEN[WAN_VAE_FIRST_ROLE]
+            assert role not in WAN21.weights
+        # 世代の weights の並びは全世代の表の並び（I2V の段の順 — encoder が先頭）。
+        assert list(WAN22.weights) == list(WAN_GRAPH_ROLES)
+
     def test_the_driver_offers_wan_ti2v_right_after_wan(self) -> None:
         names = list(dist.PIPELINES)
         assert names[names.index("wan") + 1] == "wan-ti2v"
@@ -1429,11 +1528,13 @@ class TestTheWan22Distribution:
     """`--pipeline wan-ti2v` の配布形（ADR 0121 段 8 — `karume-wan2.2`・モデル `ti2v-5b`）。"""
 
     def test_it_places_the_int8_transformer_the_vae_and_the_assets(self, assembled22) -> None:
-        """transformer は i8 の 1 本だけ・VAE は 1 本ずつ・資産 2 本。text_encoder は越境参照。"""
+        """transformer は i8 の 1 本だけ・VAE の decoder と encoder は 1 本ずつ・資産 2 本。
+        text_encoder は越境参照。encoder の golden（`vae_encoder.*`）は配らない。"""
         out_dir, _ = assembled22
         own = {
             role: WAN_OUTPUT_PATHS[role]
             for role in (
+                *WAN_VAE_ENCODER_ROLES,
                 WAN_TRANSFORMER_I8_ROLE,
                 WAN_VAE_FIRST_ROLE,
                 WAN_VAE_NEXT_ROLE,
@@ -1456,16 +1557,28 @@ class TestTheWan22Distribution:
         assert list(out_dir.rglob(f"{WAN_TEXT_ENCODER_ROLE}/*")) == []
         assert list(out_dir.rglob("io.*")) == []
         assert list(out_dir.rglob("pipeline_steps.*")) == []
+        assert list(out_dir.rglob("vae_encoder.*")) == []
 
     def test_the_manifest_declares_the_two_seats(self, assembled22) -> None:
         """席は参照席と実用席の 2 つ・f16 席は無い・既定は実用席（視認の裁定 2026-10-06 —
-        ADR 0121 追記「段 8a の結果」）。"""
+        ADR 0121 追記「段 8a の結果」）。どの席も VAE の encoder の f16 を取る（T2V だけの利用でも
+        取る — 追記「段 9 の計画の裁定と段 9a の結果」の裁定）。weights の並びは I2V の段の順。"""
         _, manifest = assembled22
         model = manifest["models"][_TI2V]
         assert manifest["defaultModel"] == _TI2V
         assert list(manifest["models"]) == [_TI2V]
         assert model["pipeline"] == "wan-ti2v/1" == WAN22_PIPELINE
-        assert list(model["weights"]) == list(WAN_GRAPH_ROLES)
+        assert list(model["weights"]) == [
+            WAN_VAE_ENCODER_PRE_ROLE,
+            WAN_VAE_ENCODER_ATTN_ROLE,
+            WAN_VAE_ENCODER_POST_ROLE,
+            WAN_TEXT_ENCODER_ROLE,
+            WAN_TRANSFORMER_ROLE,
+            WAN_VAE_FIRST_ROLE,
+            WAN_VAE_NEXT_ROLE,
+        ]
+        for role in WAN_VAE_ENCODER_ROLES:
+            assert list(model["weights"][role]) == ["f16"]
         assert list(model["weights"][WAN_TEXT_ENCODER_ROLE]) == ["i8"]
         assert list(model["weights"][WAN_TRANSFORMER_ROLE]) == ["i8"]
         assert list(model["weights"][WAN_VAE_FIRST_ROLE]) == ["f16"]
@@ -1479,6 +1592,7 @@ class TestTheWan22Distribution:
         assert list(model["quants"]) == [_REFERENCE, _PRACTICAL]
         assert model["defaultQuant"] == _PRACTICAL
         seat = {
+            **dict.fromkeys(WAN_VAE_ENCODER_ROLES, "f16"),
             WAN_TEXT_ENCODER_ROLE: "i8",
             WAN_TRANSFORMER_ROLE: "i8",
             WAN_VAE_FIRST_ROLE: "f16",
@@ -1547,6 +1661,11 @@ class TestTheWan22Distribution:
             prose
         )
         assert "(`patch_size` 2, 12 channels)" in prose
+        # VAE の encoder は配布形に載る — 改変（3 グラフ・最後の時間スライス・f16 の丸め）を告げる。
+        assert "**f16 VAE encoder for image-to-video**" in prose
+        assert "re-expressed as three graphs" in prose
+        assert "so only that slice is stored" in prose
+        assert "The VAE encoder is not included." not in prose
         assert "**The text encoder is referenced, not stored here.**" in prose
         assert f"`{UMT5_REPO_NAME}` at a pinned commit" in prose
         assert "umT5-XXL encoder of the Wan2.1 T2V 1.3B checkpoint" in prose
@@ -1581,7 +1700,8 @@ class TestTheWan22ProvenanceSplit:
             wan_plan(sources, generation=WAN22)
 
     @pytest.mark.parametrize(
-        "role", [WAN_TRANSFORMER_I8_ROLE, WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE]
+        "role",
+        [WAN_TRANSFORMER_I8_ROLE, WAN_VAE_FIRST_ROLE, WAN_VAE_NEXT_ROLE, *WAN_VAE_ENCODER_ROLES],
     )
     def test_it_refuses_a_container_baked_from_the_wan21_pin(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wan22_provenance, role: str
@@ -1648,6 +1768,31 @@ class TestTheWan22Gates:
             WAN_TOKENIZER_ROLE,
         }
         assert WAN_TRANSFORMER_F16_ROLE not in plan.artifacts
+
+    @pytest.mark.parametrize("role", WAN_VAE_ENCODER_ROLES)
+    @pytest.mark.parametrize("storage", ["f32", "i8"])
+    def test_it_refuses_a_vae_encoder_without_f16_storage(
+        self, tmp_path: Path, wan22_provenance, role: str, storage: str
+    ) -> None:
+        """encoder の席に素の f32 / 別格納の系列を挿した取り違え（decoder と同じ門）。"""
+        sources = _build_sources22(
+            tmp_path, containers={role: _graph_container(role, storage=storage)}
+        )
+        with pytest.raises(DistError, match=rf"{role}: .* f16 が無い"):
+            wan_plan(sources, generation=WAN22)
+
+    @pytest.mark.parametrize("role", WAN_VAE_ENCODER_ROLES)
+    def test_it_refuses_a_series_without_one_of_the_vae_encoder_graphs(
+        self, tmp_path: Path, wan22_provenance, role: str
+    ) -> None:
+        """encoder は T2V だけの利用でも取る部品 — 1 本でも欠けた系列からは組まない。"""
+        sources = _build_sources22(tmp_path)
+        missing = wan_placements(sources, WAN22)[role]
+        for part in missing.parent.iterdir():
+            part.unlink()
+        missing.parent.rmdir()
+        with pytest.raises(DistError, match=rf"組み立ての入力が無い: .*{role}"):
+            wan_plan(sources, generation=WAN22)
 
     def test_it_refuses_a_wan21_model(self, tmp_path: Path, wan22_provenance) -> None:
         with pytest.raises(DistError, match=r"Wan2\.2 のモデル 't2v-1\.3b' は知らない"):
@@ -1724,6 +1869,11 @@ class TestTheWan22ModelCard:
         prose = " ".join(card.split())
         assert "Text to video only." in prose
         assert "at 24 fps" in prose
+        assert "- Seven graphs:" in prose
+        assert "and the VAE encoder is included, but image-to-video is not available yet." in prose
+
+    def test_the_overview_names_every_graph_of_the_manifest(self, assembled22) -> None:
+        _overview_names_every_graph(*assembled22)
 
     def test_it_says_49_frames_did_not_run_through_the_pipeline_class(self, assembled22) -> None:
         out_dir, _ = assembled22
@@ -1988,10 +2138,11 @@ class TestTheRealSeries:
         plan = wan_plan(_REAL)
         assert plan.pipeline == WAN_PIPELINE
         assert set(plan.artifacts) == {
-            *WAN_CONTAINER_ROLES,
+            *WAN21.container_roles,
             WAN_TEXT_EMBEDS_ROLE,
             WAN_TOKENIZER_ROLE,
         }
+        assert not set(WAN_VAE_ENCODER_ROLES) & set(plan.artifacts)
 
 
 _REAL22 = wan_sources(SERIES_ROOT, WAN22)
@@ -2024,6 +2175,7 @@ class TestTheRealWan22Series:
             WAN_TEXT_EMBEDS_ROLE,
             WAN_TOKENIZER_ROLE,
         }
+        assert set(WAN_VAE_ENCODER_ROLES) <= set(plan.artifacts)
         assert plan.default_quant == _PRACTICAL
 
     def test_the_text_assets_are_the_wan21_series_files(self) -> None:
