@@ -1004,7 +1004,7 @@ Consequences）。
   見る。開いている Session を畳んでから `signal.reason` を包まず投げる）の両方で受ける（ADR 0119 決定 9・2026-10-03）。1 段の中（1 回の run）は
   不可分で、中断は次の境目で効く。
 - **sha256 の参照値は環境ごとの行**（ADR [0106](decisions/0106-device-keyed-references.md)）: 今ある行は B570
-  （`deno-intel-graphics-bmg-g21`）だけ。行が無い機では sha の照合が明示 SKIP になり、参照門が赤になる
+  （`deno-intel-graphics-bmg-g21`）と RTX 3080 Ti（`deno-nvidia-geforce-rtx-3080-ti` — ADR 0121 追記「開発機の換装」の裁定で凍結コピー `128b511e` から書いた）。行が無い機では sha の照合が明示 SKIP になり、参照門が赤になる
   （`KARUME_REFERENCE=write` で自分の機の行を作る）。50 ステップの行は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）の
   ときだけ照合する。
 

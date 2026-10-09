@@ -340,7 +340,7 @@ pipeline and recorded. The saved JSON is
   timestamp setting does not apply to this tab. `acquireGpu` requests the adapter's own limits, so
   the device does not keep the WebGPU default of 128 MiB per storage binding. From this server, loading
   reads only the descriptors, and every generate reads the weights from the server again as each
-  stage builds its session (Wan2.1: about 2.6 GiB for the `f16` transformer and 0.27 GiB for the VAE; Wan2.2: 6.714 GiB in all, 4.67 GiB for the int8 transformer and the rest for the two f16 VAE graphs); from
+  stage builds its session (Wan2.1: about 1.33 GiB for the int8 transformer of the default quant, 2.6 GiB for the `f16` transformer, and 0.27 GiB for the VAE; Wan2.2: 6.714 GiB in all, 4.67 GiB for the int8 transformer and the rest for the two f16 VAE graphs); from
   Hugging Face, loading first downloads the weight parts into the browser cache. **pipeline を破棄** disposes the pipeline and
   the device; use it after a device loss. Applying the GPU settings also disposes them; load again
   to use the new settings.
