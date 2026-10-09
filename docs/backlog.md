@@ -239,6 +239,10 @@ later の「decode 速度の残り」。
 
 ## later
 
+- **Wan2.2 の 121 フレームの自機 A/B 門を既定のレーンへ戻す — フル verify の所要の対策（起票 2026-10-09・利用者の裁定 = later）**: ADR 0121 段 7 の
+  自機 A/B 門は 33 フレーム（S = 7,920）と 121 フレーム（S = 27,280）の 2 点で持つ（Wan2.1 と同じ「既定と最長」の規則 — attention の 8 bit の誤差は
+  行の長さで増える）。121 の分は 1 回 約 6 分（推測）かかり、既定のレーンに入れると約 118 分のフル verify が延びるので、今は opt-in
+  （`KARUME_WAN_TI2V_121F=1`）。長い行での崩れは opt-in を回したときだけ捕まる。対策（所要を縮める・置き場を変える）は別に考える。
 - **ブラウザでの enqueue の送り込みの先行の上限（起票 2026-10-07・利用者の裁定 = later）**: ADR 0123 は run にだけ上限を置いた
   （enqueue は待つと別 Session の enqueue との呼び出し順が崩れる）。enqueue にも上限を置くなら、batch の中の enqueue の本体を受理の
   順に 1 本ずつ流す仕組み（batch 単位の FIFO）を足してから末尾で待つ。同じ仕組みで、初回の enqueue（導出の `await` を持つ本体）が
@@ -538,6 +542,10 @@ later の「decode 速度の残り」。
   配布形に役割 `dit_context` が増えた（breaking — 持たない配布形は新しい models で部品の欠落として落ちる）。later の
   「irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す」と同じ breaking 波の回に行う。ローカルミラーは
   v4-small が焼き直し済み・v4.1-small は焼き直し中（2026-09-27）。
+- **Wan 家族の初公開（起票 2026-10-09）**: `karume-umt5-xxl` → `karume-wan2.1` / `karume-wan2.2` の順（Wan の 2 リポは umT5 を越境参照するので、
+  umT5 の実 SHA で Wan の 2 リポを焼き直してから上げる — ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 8）。
+  `WAN_SOURCES` の表（キー `wan2.1` / `wan2.2`）と pin の焼き込み。[release-runbook](release-runbook.md) の §0 と「家族の初公開」は
+  `karume-wan2.1` だけを書いているので、`karume-wan2.2`（`dist.py --pipeline wan-ti2v --ref-*`）の手順を足す。
 - **vowel-detector の初回公開の前提（起票 2026-09-24）**: recipe は上流の `feature_config.json` を
   `inputs/vowel-detector/` 直下から読む。この開発機は上流リポを丸ごと置いた形なので、組み立ての前に
   `cp inputs/vowel-detector/assets/feature_config.json inputs/vowel-detector/` を 1 回打つ。
