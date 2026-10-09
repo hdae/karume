@@ -66,6 +66,9 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "wan2.2-ti2v-5b-f16-dyn": {
     vae_decoder_first: "vae_decoder_first",
     vae_decoder_next: "vae_decoder_next",
+    vae_encoder_pre: "vae_encoder_pre",
+    vae_encoder_attn: "vae_encoder_attn",
+    vae_encoder_post: "vae_encoder_post",
   },
   "wan2.2-ti2v-5b-i8-dyn": { transformer: "transformer" },
 };
