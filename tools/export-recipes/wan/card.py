@@ -133,8 +133,8 @@ WAN22_SUPPORTED_PIPELINE = "wan-ti2v/1"
 WAN22_ACCEPTED_SIZES: tuple[tuple[int, int], ...] = ((1280, 704), (704, 1280))
 WAN22_FRAMES = (5, 121)
 
-#: TS 側の生成の既定（`WAN22_TI2V_GENERATION.defaults` の写し — ADR 0121 追記「受理寸法を公式の
-#: 2 寸法へ」で「仮置き — 視認で確定する」）。NOTE: fixture `wan-ti2v-card-limits.json` はまだ既定を
+#: TS 側の生成の既定（`WAN22_TI2V_GENERATION.defaults` の写し — 利用者の裁定 2026-10-09・
+#: ADR 0121 追記「段 7 の結果」）。NOTE: fixture `wan-ti2v-card-limits.json` はまだ既定を
 #: 持たないので、TS 側との突き合わせは無い — 既定を替えるときは descriptor.ts とここを両方直す。
 WAN22_DEFAULT_SIZE = (1280, 704)
 WAN22_DEFAULT_FRAMES = 33
@@ -182,8 +182,11 @@ WAN22_RESOURCES: Mapping[str, tuple[tuple[int, str, str, str, str, str], ...]] =
 #: 回した class）。
 WAN22_PIPELINE_CLASS = "WanTi2vPipeline"
 
-#: Wan2.2 の実用席と参照席（実用席の品質の節が名指しする 2 席 — 段 7 の自機 A/B 門は未計測）。
-WAN22_PRACTICAL_QUANT = ("f16+dit8-a8-attn8-s16", "f16+dit8")
+#: Wan2.2 の実用席の step 1 の潜在の相対 RMS 誤差（参照席 `f16+dit8` に対して — ADR 0121 段 7 の
+#: 自機 A/B 門の実測・RTX 3080 Ti・2026-10-09）。`(席, 参照席, 33 フレーム, 121 フレーム)`。
+#: カードが併記する視認の結果は同じ追記の利用者の判定（参照席と実用席の 12 対・50 ステップ・
+#: 1280×704・33 フレーム — 劣化なし）。
+WAN22_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.044", "0.049")
 
 
 @dataclass(frozen=True)
@@ -210,8 +213,8 @@ class WanCard:
     accepted_sizes: tuple[tuple[int, int], ...]
     frames: tuple[int, int]
     #: TS 側の生成の既定（寸法 `(width, height)` とフレーム数 — `descriptor.ts` の `defaults` の
-    #: 写し）。Usage のコメントが描く。受理集合の並びの先頭からは導かない（既定は視認で替わりうる —
-    #: Wan2.2 は ADR 0121 追記「受理寸法を公式の 2 寸法へ」の「仮置き」）。
+    #: 写し）。Usage のコメントが描く。受理集合の並びの先頭からは導かない（既定は受理集合と
+    #: 別の裁定 — Wan2.2 は ADR 0121 追記「段 7 の結果」）。
     default_size: tuple[int, int]
     default_frames: int
     #: 受理するフレーム数の行に続けて書く「GPU で確かめた範囲」の行（先頭の要素は範囲と同じ行に
@@ -676,9 +679,12 @@ _WAN22_VERIFICATION = (
     "  f16-rounded VAE weights and tiled decode), and single transformer forwards of up to",
     "  8,190 tokens (1280 × 704 with 33 frames among them) against a float64 reference.",
     "  Differences stay within tolerances measured on separate decision cases. The",
-    "  `f16+dit8-a8-attn8-s16` quant has not been compared numerically yet; it became the default",
+    "  `f16+dit8-a8-attn8-s16` quant is compared with `f16+dit8` on the same GPU: the first",
+    "  step's latent at 1280 × 704 with 33 and 121 frames stays within twice the measured",
+    "  relative error, differs from `f16+dit8`, and repeats bit for bit. It became the default",
     "  after a visual check of 12 clips (3 prompts × seeds 42–45, 1280 × 704 with 33 frames, 50",
-    "  steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06.",
+    "  steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06, and the same 12 clips",
+    "  side by side with `f16+dit8` showed no clear degradation on 2026-10-09.",
     "- **Tiled decode**: the VAE always decodes in overlapping tiles, blended in the patchified",
     "  space before the unpatchify, so the frames differ slightly from the upstream untiled",
     "  decode.",
@@ -840,8 +846,8 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
     Chrome」）— どちらも別の GPU・runtime の値と名乗る。
 
     MUST: 実測していない条件の数は載せない（2.1 と同じ規律）。測っていない席・フレーム数・GPU・
-    ブラウザの組は、まだ計測していないと書く。実用席の品質（段 7 の自機 A/B 門の相対 RMS 誤差）も
-    未計測なので、数を書かない。
+    ブラウザの組は、まだ計測していないと書く。実用席の品質は段 7 の自機 A/B 門の相対 RMS 誤差
+    （{@link WAN22_PRACTICAL_QUANT_ERROR}）と視認の判定を書く。
     """
     seats = dict.fromkeys(
         quant for model in manifest["models"].values() for quant in model["quants"]
@@ -853,7 +859,7 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
             f"（{list(seats)}）に 1 つも無い — 実測していない席の数は名乗らない"
         )
     unmeasured = [f"`{quant}`" for quant in seats if quant not in WAN22_RESOURCES]
-    practical, reference = WAN22_PRACTICAL_QUANT
+    practical, reference, error_33, error_121 = WAN22_PRACTICAL_QUANT_ERROR
     return [
         "## Resources",
         "",
@@ -900,9 +906,12 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         "",
         *(
             [
-                f"- **Quality of `{practical}`**: not measured yet (no relative error against",
-                f"  `{reference}`); it is the default after a visual check of 12 clips on an",
-                "  RTX 3080 Ti (see Verification).",
+                f"- **Quality of `{practical}`**: after the first step its latent differs from",
+                f"  `{reference}`'s (the same int8 weights, computed in float32) by a relative",
+                f"  RMS error of {error_33} at 33 frames and {error_121} at 121 frames. Side",
+                f"  by side with `{reference}` on twelve 50-step clips at 1280 × 704 with 33",
+                "  frames (seeds 42 to 45 with the three fixed prompts), no clear degradation",
+                "  was seen.",
             ]
             if practical in seats and reference in seats
             else []

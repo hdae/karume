@@ -1789,9 +1789,11 @@ class TestTheWan22ModelCard:
         assert set(WAN22_RESOURCES) == {_REFERENCE, _PRACTICAL}
         prose = " ".join(card.split())
         assert (
-            "- **Quality of `f16+dit8-a8-attn8-s16`**: not measured yet (no relative error against"
-            " `f16+dit8`); it is the default after a visual check of 12 clips on an RTX 3080 Ti"
-            " (see Verification)."
+            "- **Quality of `f16+dit8-a8-attn8-s16`**: after the first step its latent differs from"
+            " `f16+dit8`'s (the same int8 weights, computed in float32) by a relative RMS error of"
+            " 0.044 at 33 frames and 0.049 at 121 frames. Side by side with `f16+dit8` on twelve"
+            " 50-step clips at 1280 × 704 with 33 frames (seeds 42 to 45 with the three fixed"
+            " prompts), no clear degradation was seen."
         ) in prose
         # 1 forward は段 2（2026-10-04）・通しは 2026-10-05。49 フレームは製品の class でない。
         assert "timed on its own on 2026-10-04" in prose
@@ -1800,7 +1802,6 @@ class TestTheWan22ModelCard:
         assert "the 49-frame runs drove the same pipeline stages from a development script" in prose
         assert "4.36 GiB at 33 frames and 4.51 GiB at 49 frames with either quant" in prose
         assert "4.52" not in prose
-        assert "relative RMS error" not in prose
         assert "have not been measured yet" not in prose
         assert "has been measured with this distribution only in the 121-frame run above" in prose
         assert "`maxStorageBufferBindingSize` (128 MiB)" in card
