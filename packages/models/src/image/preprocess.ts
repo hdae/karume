@@ -137,8 +137,11 @@ const round8 = (value: number): number => Math.min(255, Math.max(0, Math.floor(v
  * （家族 3 つの `preprocessPixelValues` は `estimate` / `segment` / `embedImage` が受けた
  * `Rgb8Image` をそのまま流す）。打つ手は「渡す画像を直す」の 1 つ = HTTP なら 400 に当たる
  * （ADR 0107 決定 2）。
+ *
+ * NOTE: `export` は Wan の I2V の前処理（`lanczos.ts` と `wan/i2v-preprocess.ts`）が同じ検査を使うため
+ * （`mod.ts` には出さない — ADR 0008）。
  */
-const assertRgb8 = (image: Rgb8Image): void => {
+export const assertRgb8 = (image: Rgb8Image): void => {
   const { data, width, height } = image;
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     throw new ModelInputError(`画像サイズ ${width}×${height} が正の整数でない`);

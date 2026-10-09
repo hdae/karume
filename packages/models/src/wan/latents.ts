@@ -169,12 +169,40 @@ export const WAN22_LATENTS_STD: readonly number[] = [
 ];
 
 /**
- * 逆正規化の per-channel の統計（世代ごとの表 — 世代の記述子 `descriptor.ts` が持つ参照）。
+ * 潜在の正規化・逆正規化の per-channel の統計（世代ごとの表 — 世代の記述子 `descriptor.ts` が持つ参照）。
  * チャネル数は表の本数（`mean` と `std` は同じ本数）。
  */
 export type WanLatentStats = {
   readonly mean: readonly number[];
   readonly std: readonly number[];
+};
+
+/**
+ * std の逆数（上流の `1.0 / torch.tensor(latents_std)` = f32 の std から f32 の割り算）。正規化と逆正規化が共有する
+ * — 上流は 2 つの向きとも同じ式で逆数を作る（`pipeline_wan.py` / `pipeline_wan_i2v.py`）。
+ *
+ * MUST: config の 10 進値から f64 で作った逆数を f32 へ丸める形にしない — 2.2 の 48 本のうち 14 本が違う値になる
+ * （段 9 の調査の実測）。
+ */
+const inverseLatentStd = (std: number): number => f32(1 / f32(std));
+
+/** 統計の本数と潜在の要素数の整合を見て、1 チャネルあたりの要素数を返す（`what` は文言の頭）。 */
+const elementsPerChannel = (
+  latents: Float32Array,
+  stats: WanLatentStats,
+  what: string,
+): number => {
+  if (stats.mean.length !== stats.std.length) {
+    throw new Error(
+      `${what}: mean ${stats.mean.length} 本と std ${stats.std.length} 本の数が違う`,
+    );
+  }
+  const channels = stats.mean.length;
+  const perChannel = latents.length / channels;
+  if (!Number.isInteger(perChannel) || perChannel < 1) {
+    throw new Error(`${what}: 要素数 ${latents.length} が ${channels} チャネルで割り切れない`);
+  }
+  return perChannel;
 };
 
 /**
@@ -188,23 +216,41 @@ export const denormalizeWanLatents = (
   latents: Float32Array,
   stats: WanLatentStats,
 ): Float32Array<ArrayBuffer> => {
-  if (stats.mean.length !== stats.std.length) {
-    throw new Error(
-      `逆正規化: mean ${stats.mean.length} 本と std ${stats.std.length} 本の数が違う`,
-    );
-  }
+  const perChannel = elementsPerChannel(latents, stats, "逆正規化");
   const channels = stats.mean.length;
-  const perChannel = latents.length / channels;
-  if (!Number.isInteger(perChannel) || perChannel < 1) {
-    throw new Error(`逆正規化: 要素数 ${latents.length} が ${channels} チャネルで割り切れない`);
-  }
   const out = new Float32Array(latents.length);
   for (let channel = 0; channel < channels; channel += 1) {
-    const inverseStd = f32(1 / f32(stats.std[channel]));
+    const inverseStd = inverseLatentStd(stats.std[channel]);
     const mean = f32(stats.mean[channel]);
     const from = channel * perChannel;
     for (let index = from; index < from + perChannel; index += 1) {
       out[index] = f32(f32(latents[index] / inverseStd) + mean);
+    }
+  }
+  return out;
+};
+
+/**
+ * 潜在 `[C, F, H, W]` の per-channel の正規化（VAE encoder の出口の mu → DiT の条件の潜在 — 上流
+ * `pipeline_wan_i2v.py` の `(latent_condition − latents_mean) * latents_std` の逐語。`latents_std` は std の逆数）。
+ * {@link denormalizeWanLatents} の逆向きで、`C` は `stats` の本数。
+ *
+ * MUST: `(x − mean) / std` に直さない — 上流は std の逆数を f32 で作ってから掛けるので、割り算に変えると
+ * 最終桁が変わる。
+ */
+export const normalizeWanLatents = (
+  latents: Float32Array,
+  stats: WanLatentStats,
+): Float32Array<ArrayBuffer> => {
+  const perChannel = elementsPerChannel(latents, stats, "正規化");
+  const channels = stats.mean.length;
+  const out = new Float32Array(latents.length);
+  for (let channel = 0; channel < channels; channel += 1) {
+    const inverseStd = inverseLatentStd(stats.std[channel]);
+    const mean = f32(stats.mean[channel]);
+    const from = channel * perChannel;
+    for (let index = from; index < from + perChannel; index += 1) {
+      out[index] = f32(f32(latents[index] - mean) * inverseStd);
     }
   }
   return out;
