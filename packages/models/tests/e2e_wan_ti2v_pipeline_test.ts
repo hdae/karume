@@ -34,15 +34,23 @@
  *   guidance 5.0 → 5.05・shift 5.0 → 3.0（shift の結線）。どれも DiT の段の `end` のイベントで打ち切って VAE を回さない。T2V では
  *   条件マスクと条件側の時刻は原理的に値に出ない（2 本が同じ値・マスクは全て偽 — 段 2 と同じ理由）ので注入に入れない。
  * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json`。2.1 の `wan.json` には触らない）: 出力フレーム（uint8 の
- *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは参照席の 6 本 = 帯のケース 3 本・seed 経路の
- *   1280×704 と 704×1280・GPU 経路（umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP）。
- *   opt-in の 121 フレームの参照席の 1 本は下の節。ID は席・経路・step 数・
+ *   RGB を全フレーム連結したバイト列 — `wanFrameToRgba` の規則）。既定のレーンは 7 本 = 参照席の 6 本（帯のケース 3 本・seed
+ *   経路の 1280×704 と 704×1280・GPU 経路〈umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP〉）
+ *   と、実用席の seed 経路の 1280×704 の 1 本（{@link PRACTICAL_SEED_CASE_ID} — 参照席の seed 経路の 1280×704 と同じ要求で席だけ
+ *   違う）。opt-in の 50 ステップと 121 フレームの行は下の節。ID は席・経路・step 数・
  *   ケース・寸法・フレーム数・shift を全て持つ（{@link caseIdOf} — 裁定 F12）。行が無い機はそのケースの sha の突合を飛ばし
  *   （実物と実測の sha は残す）、参照門が赤になる（既存の規律）。行は帯が緑になった後に `KARUME_REFERENCE=write` をこのファイル
- *   単独で回して作る（裁定 F8）。行は段 6 で**系列を直読み**（`fromAssets`）する版で書いた値（RTX 3080 Ti の行は凍結コピー
+ *   単独で回して作る（裁定 F8）。参照席の行は段 6 で**系列を直読み**（`fromAssets`）する版で書いた値（RTX 3080 Ti の行は凍結コピー
  *   `128b511e` で書く — 利用者の裁定 2026-10-06）で、配布形経由（`fromPretrained`）のこの e2e が HEAD で同じ行と一致することを
  *   要求する（ADR 0121 検収の段 8）— 配布形は系列の `krm` とテキスト資産の独立コピーで、席も
- *   要求の値も全て明示するので、1 ビットでも割れたら取得面か席の解決の退行。
+ *   要求の値も全て明示するので、1 ビットでも割れたら取得面か席の解決の退行。実用席の行（段 7 で足した）は配布形経由のこの e2e
+ *   で書く。
+ * - **行のクラス**（ADR 0110 決定 7 — manifest の席の `session` が空か否かで決まる）: 参照席 `f16+dit8` の行は**参照行**（凍結 —
+ *   実用層を変えるコミットで触らない）、実用席 `f16+dit8-a8-attn8-s16` の行は**実用行**（実用層の退行と決定性の検出器 — 実用層の
+ *   数値を意図して変えるコミットで同じコミットの `rewrite`）。CPU の参照は参照席の値でしか採っていないので、実用席は帯を持たず
+ *   sha256 の環境行だけで縛る。既定のレーンの実用行は、突合と書き込みの前に、同じ要求の参照席の実物と 1 bit 以上違うこと（床 —
+ *   ADR 0110 決定 5）を見る（席の `session` が届かない退行で、参照行と同じ sha を実用行として凍結しないように）。実用席の数値の門（参照席との比較）は自機 A/B 門 `e2e_wan_ti2v_ab_test.ts`（ADR 0121 段 7 —
+ *   1280×704 の 33 フレームと opt-in の 121 フレーム）が持つ。
  * - **席は全ケースで明示する**（{@link loadPipeline} は席を必須にする）: manifest の `defaultQuant`（実用席 — 視認の裁定 2026-10-06）は
  *   品質の裁定で動きうる値で、既定席に乗ると、同じ ID が別の席の値で回る。
  *
@@ -51,21 +59,20 @@
  * 事前計算の経路・`boxing-cats`・seed 42・shift 5.0・1280×704・33 フレーム・manifest の既定の 50 ステップを、参照席と実用席で
  * 1 本ずつ回し、全フレームの PNG・一覧図（4×8 マス・1/4 縮小）・RGB の実物・段ごとの所要・段の境目の VRAM の山を
  * `outputs/verify/<環境キー>/<日付>_wan-ti2v-pipeline-full/` に書き、非有限 0 と device lost が無いことを見る（利用者の視認の
- * 素材 — 生成スクリプトの同じ要求の PNG とバイトが一致することもここで見られる）。sha は**観測だけ**で行は書かない（50 ステップの
- * 行は参照席・実用席とも段 6 では書かず、段 7 で、実用席の A/B の門（参照席との比較）と一緒に扱う — 数値の正しさを確かめる前の出力を
- * 凍結しない・ADR 0121 追記「段 6 の結果」の「段 6 で設計・本文と違えた点」）。結果の席を既定のレーン
+ * 素材 — 生成スクリプトの同じ要求の PNG とバイトが一致することもここで見られる）。sha256 の環境行は 2 本とも持つ（参照席は参照行・
+ * 実用席は実用行 — 上の「行のクラス」。段 6 では数値の正しさを確かめる前の出力を凍結しないため観測だけにしていて、段 7 で実用席の
+ * 数値の門〈自機 A/B 門〉と一緒に行を持たせた — ADR 0121 段 7）。参照門への登録は opt-in のときだけ（既定のレーンでは回らない
+ * ので、登録すると行が無い機の参照門を赤にする — 121 フレームと同じ扱い）。行は `KARUME_REFERENCE=write` を付けて同じコマンド
+ * （`KARUME_WAN_TI2V_FULL_PIPELINE=1` と `--filter "50 ステップ"`）で作る。結果の席を既定のレーン
  * （`<日付>_wan-ti2v-pipeline/`）と分けるのは、`results.json` が走行ごとに丸ごと書き直されるため。
- *
- * NOTE: 実用席 `f16+dit8-a8-attn8-s16` の 2.2 の DiT は、参照席との自機 A/B の門（段 7）をまだ通っていない。opt-in の実用席の
- * 映像は、数値の正しさが未確認の席の出力（裁定 F6）。
  *
  * ## 121 フレームの参照値（env の opt-in `KARUME_WAN_TI2V_121F=1` — 既定のレーンに入れない）
  *
  * 受理の上限 121 フレーム（公式の既定 — 開発機 RTX 3080 Ti で 50 ステップの完走を確かめて受理を広げた・ADR 0121 段 10）の、
  * 開発機の参照値。要求は seed 経路の 1280×704 のケースと同じ（事前計算の経路・`boxing-cats`・seed 42・2 ステップ・guidance 5.0・
  * shift 5.0）でフレーム数だけ 121 にし、出力の形・非有限 0・device lost が無いこと・denoise-step の数・sha256 の環境行を見る
- * （行が無い機は突合を飛ばして実物と実測の sha を残す — seed のケースと同じ扱い）。席は参照席 `f16+dit8`: 実用席の出力は段 7 の
- * A/B の門の前に凍結しない（50 ステップの通しで行を書かないのと同じ規律）。所要は約 15〜20 分（VAE だけで約 12 分）なので、
+ * （行が無い機は突合を飛ばして実物と実測の sha を残す — seed のケースと同じ扱い）。席は参照席 `f16+dit8` だけ（実用席の 121
+ * フレームは自機 A/B 門の opt-in の点 — `e2e_wan_ti2v_ab_test.ts` — が回す）。所要は約 15〜20 分（VAE だけで約 12 分）なので、
  * 50 ステップの通しと同じく env の opt-in でだけ回し、参照門への登録も opt-in のときだけ（既定のレーンの参照門を赤にしない）。
  * 結果の席は `<日付>_wan-ti2v-pipeline-121f/`（既定のレーンと分ける理由は 50 ステップの通しと同じ）。行は
  * `KARUME_REFERENCE=write` を付けて同じコマンドで作る:
@@ -243,6 +250,17 @@ const SEED_CASES: readonly {
   width,
   height,
 }));
+
+/**
+ * 実用席の seed 経路の 2 ステップ（{@link SEED_CASES} の 1280×704 と同じ要求で、席だけ実用席 — 既定のレーンの実用行。モジュール
+ * doc「行のクラス」）。帯は持たない（実用席の数値の門は自機 A/B 門）。参照席の pipeline とは別に席の pipeline を組んで回す。
+ */
+const PRACTICAL_SEED_CASE_ID = caseIdOf(
+  `${WAN_TI2V_PRACTICAL_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
+  WIDTH,
+  HEIGHT,
+  FRAMES,
+);
 
 /**
  * GPU 経路のケース（umT5 i8 を GPU で回す — 固定プロンプトの原文・seed 42・2 ステップ・1280×704）。CPU の参照は持たない（umT5 の
@@ -700,7 +718,7 @@ const roundUpTwoDigits = (value: number): number => {
 Deno.test({
   name:
     "Wan2.2 通し 2 ステップ（実 GPU）: 1280×704・17 フレームの潜在とフレームが参照と帯の内・故障注入は帯の外・" +
-    "sha256 の環境行（参照席の帯のケース・seed 経路の 2 寸法・GPU 経路）",
+    "sha256 の環境行（参照席の帯のケース・seed 経路の 2 寸法・実用席の seed 経路・GPU 経路）",
   ignore: !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     await assertRunningAdapter();
@@ -711,6 +729,59 @@ Deno.test({
       },
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
+    /**
+     * 参照席の seed 経路の 1280×704 の実物（RGB のバイト列）— 同じ要求の実用席のケースの床（{@link runSeedCase} の
+     * `beforeSettle`）の比べる相手。
+     */
+    let referenceSeedRgb: Uint8Array<ArrayBuffer> | undefined;
+    /**
+     * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。席は `seatPipeline` を組んだ席で、参照席の 2 寸法と実用席の
+     * 1280×704 が同じ本体を通る（席ごとに検査が割れないように）。`beforeSettle` は sha の突合と行の書き込み
+     * （`settleOrObserve`）の前に実物を受ける（`KARUME_REFERENCE=write` の走行でも、行を書く前に効かせる検査の置き場）。
+     */
+    const runSeedCase = async (
+      seatPipeline: WanTi2vPipeline,
+      id: string,
+      width: number,
+      height: number,
+      beforeSettle: (bytes: Uint8Array<ArrayBuffer>) => void,
+    ): Promise<void> => {
+      let settlement: ReferenceSettlement | undefined;
+      try {
+        await runRecordedCase(results, { id }, async () => {
+          const observed = await observe(seatPipeline, diagnostics, {
+            ...TWO_STEP,
+            prompt: textOf(seatPipeline.prompts, SEED_PROMPT, "prompt"),
+            seed: SEED,
+            width,
+            height,
+          });
+          assert("video" in observed, "generate が最後まで回っていない");
+          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+          const { video } = observed;
+          assertEquals([video.frames, video.height, video.width], [FRAMES, height, width]);
+          const nonFinite = countNonFinite(video.data);
+          const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+          console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
+          assertEquals(nonFinite, 0, `${id}: 非有限`);
+          assertEquals(deviceLost, undefined, "device lost");
+          const bytes = rgbBytes(video);
+          beforeSettle(bytes);
+          const outcome = await settleOrObserve(references, results, {
+            id,
+            artifact: `${id}.rgb`,
+            bytes,
+          });
+          settlement = outcome.settlement;
+          return { ...outcome.fields, note: notes.join(" / ") };
+        });
+      } finally {
+        await settleReleases(gpu);
+      }
+      if (settlement?.check.status === "fail") {
+        throw new Error(referenceMismatchMessage(id, settlement, references));
+      }
+    };
     try {
       const pipeline = await loadPipeline(
         gpu,
@@ -943,45 +1014,44 @@ Deno.test({
 
         // seed 経路の 2 ステップ（2 寸法 — 完走・非有限 0・sha256 の環境行）。
         for (const { id, width, height } of SEED_CASES) {
-          await t.step(`${id}（seed 経路・sha256 の環境行）`, async () => {
-            let settlement: ReferenceSettlement | undefined;
-            try {
-              await runRecordedCase(results, { id }, async () => {
-                const observed = await observe(pipeline, diagnostics, {
-                  ...TWO_STEP,
-                  prompt: textOf(prompts, SEED_PROMPT, "prompt"),
-                  seed: SEED,
-                  width,
-                  height,
-                });
-                assert("video" in observed, "generate が最後まで回っていない");
-                assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-                const { video } = observed;
-                assertEquals([video.frames, video.height, video.width], [FRAMES, height, width]);
-                const nonFinite = countNonFinite(video.data);
-                const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
-                console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-                assertEquals(nonFinite, 0, `${id}: 非有限`);
-                assertEquals(deviceLost, undefined, "device lost");
-                const outcome = await settleOrObserve(references, results, {
-                  id,
-                  artifact: `${id}.rgb`,
-                  bytes: rgbBytes(video),
-                });
-                settlement = outcome.settlement;
-                return { ...outcome.fields, note: notes.join(" / ") };
-              });
-            } finally {
-              await settleReleases(gpu);
-            }
-            if (settlement?.check.status === "fail") {
-              throw new Error(referenceMismatchMessage(id, settlement, references));
-            }
-          });
+          await t.step(
+            `${id}（seed 経路・sha256 の環境行）`,
+            () =>
+              runSeedCase(pipeline, id, width, height, (bytes) => {
+                // 実用席のケースと同じ要求（1280×704）の実物だけ床の相手に残す。
+                if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
+              }),
+          );
         }
       } finally {
         await pipeline.dispose();
       }
+
+      // 実用席の seed 経路（参照席の pipeline を畳んでから席の pipeline を組む — 構築では Session を張らない）。
+      await t.step(`${PRACTICAL_SEED_CASE_ID}（実用席・seed 経路・sha256 の環境行）`, async () => {
+        await using practical = await loadPipeline(
+          gpu,
+          diagnostics,
+          "precomputed",
+          WAN_TI2V_PRACTICAL_QUANT,
+        );
+        await runSeedCase(practical, PRACTICAL_SEED_CASE_ID, WIDTH, HEIGHT, (bytes) => {
+          // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
+          // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
+          // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
+          if (referenceSeedRgb === undefined) {
+            throw new Error(
+              `${PRACTICAL_SEED_CASE_ID}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
+            );
+          }
+          const reference = referenceSeedRgb;
+          assert(
+            bytes.length !== reference.length ||
+              bytes.some((value, index) => value !== reference[index]),
+            `${PRACTICAL_SEED_CASE_ID}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+          );
+        });
+      });
 
       // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。
       await t.step({
@@ -1056,7 +1126,7 @@ Deno.test({
 Deno.test({
   name:
     "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席と実用席）が" +
-    "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha は観測だけ",
+    "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
   ignore: !FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     await assertRunningAdapter();
@@ -1070,6 +1140,7 @@ Deno.test({
     try {
       for (const { id, quant } of FULL_CASES) {
         await t.step(id, async () => {
+          let settlement: ReferenceSettlement | undefined;
           try {
             await using pipeline = await loadPipeline(gpu, diagnostics, "precomputed", quant);
             await runRecordedCase(fullResults, { id }, async () => {
@@ -1091,7 +1162,7 @@ Deno.test({
               assertEquals([video.frames, video.height, video.width], [FULL_FRAMES, HEIGHT, WIDTH]);
               const nonFinite = countNonFinite(video.data);
               const notes = [
-                `${quant}: sha は観測だけ（行は書かない — モジュール doc）`,
+                `席 ${quant}`,
                 `非有限 ${nonFinite}`,
                 ...formatObserved(observed),
               ];
@@ -1105,20 +1176,20 @@ Deno.test({
                 await encodePng(sheet.rgba, sheet.width, sheet.height),
               );
               console.log(`[wan-ti2v-pipeline] PNG: ${fullResults.dir.pathname}`);
-              // sha は参照値の fixture に触らずに観測だけする（`KARUME_REFERENCE=write` を付けた走行でも行を書かない）。
-              const bytes = rgbBytes(video);
-              const artifact = `${id}.rgb`;
-              await Deno.writeFile(fullResults.artifact(artifact), bytes);
-              return {
-                status: "pass",
-                actual: await sha256Hex(bytes),
-                artifact,
-                note: notes.join(" / "),
-              };
+              const outcome = await settleOrObserve(references, fullResults, {
+                id,
+                artifact: `${id}.rgb`,
+                bytes: rgbBytes(video),
+              });
+              settlement = outcome.settlement;
+              return { ...outcome.fields, note: notes.join(" / ") };
             });
           } finally {
             // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
             await settleReleases(gpu);
+          }
+          if (settlement?.check.status === "fail") {
+            throw new Error(referenceMismatchMessage(id, settlement, references));
           }
         });
       }
@@ -1190,13 +1261,14 @@ Deno.test({
 
 /**
  * 参照門に登録するケース（回せるものだけ — 帯のケースは参照と配布形、seed のケースは配布形、GPU 経路は加えて umT5 の
- * ミラーが要る）。50 ステップの通しは sha を観測だけするので登録しない。121 フレームのケースは opt-in のときだけ登録する
- * （既定のレーンでは回らないので、登録すると行が無い機の参照門を赤にする）。
+ * ミラーが要る）。50 ステップの通しと 121 フレームのケースは opt-in のときだけ登録する（既定のレーンでは回らないので、
+ * 登録すると行が無い機の参照門を赤にする）。
  */
 const CASE_IDS = [
   ...(DIST_PRESENT && ANY_FIXTURE ? CASES.map(({ name }) => bandCaseId(name)) : []),
-  ...(DIST_PRESENT ? SEED_CASES.map(({ id }) => id) : []),
+  ...(DIST_PRESENT ? [...SEED_CASES.map(({ id }) => id), PRACTICAL_SEED_CASE_ID] : []),
   ...(GPU_TEXT_PRESENT ? [GPU_TEXT_CASE_ID] : []),
+  ...(DIST_PRESENT && FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
   ...(DIST_PRESENT && LONG_CLIP ? [LONG_CLIP_CASE_ID] : []),
 ];
 const RUNNABLE = DIST_PRESENT && GPU_AVAILABLE;
