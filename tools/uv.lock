@@ -658,6 +658,7 @@ wan = [
     { name = "diffusers" },
     { name = "ftfy" },
     { name = "huggingface-hub" },
+    { name = "pillow" },
     { name = "transformers" },
 ]
 
@@ -704,6 +705,7 @@ wan = [
     { name = "diffusers", specifier = "==0.39.0" },
     { name = "ftfy", specifier = "==6.3.1" },
     { name = "huggingface-hub", specifier = ">=1.26.0" },
+    { name = "pillow", specifier = "==12.3.0" },
     { name = "transformers", specifier = "==5.14.1" },
 ]
 

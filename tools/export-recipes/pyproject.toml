@@ -67,11 +67,18 @@ anima = [
 # （版が変わると同じプロンプトが別の埋め込みになりうる）。版は他グループと同じ値（同じ venv に
 # 同居するグループ間で版を割らない）。
 # accelerate / huggingface-hub は差し替え対象を持たないので `>=` のまま。
+# MUST: pillow も `==` でピンする — I2V の条件画像の LANCZOS（`wan.i2v_preprocess_ref` /
+# `wan.lanczos_fixture` / `wan.export_vae_encoder`）は Pillow の `Resample.c` の値そのものが正本で、
+# git 管理の fixture と golden の rgb8 は版で決まる（TS の写しも同じ版に合わせてある）。torchvision の
+# 依存としても入るが、直接 import するものは宣言する（あちらが落としたり版を動かしたりすると黙って
+# 変わる）。版を変えるときは fixture と golden を作り直す（`wan/tests/test_lanczos_fixture.py` が
+# 今の Pillow と突き合わせる）。
 wan = [
   "accelerate>=1.0",
   "diffusers==0.39.0",
   "ftfy==6.3.1",
   "huggingface-hub>=1.26.0",
+  "pillow==12.3.0",
   "transformers==5.14.1",
 ]
 # SBV2 の実重み export 用（`uv sync --group sbv2`）。既定の sync には入れない — base deps
