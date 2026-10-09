@@ -95,6 +95,7 @@ import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { filePresent, firstBitMismatch, readBuffer, viewOf } from "./helpers/wan-ti2v-dit.ts";
 import {
+  WAN_I2V_ENCODER_BAND,
   WAN_I2V_GOLDEN_CASES,
   WAN_I2V_GOLDEN_GENERATE,
   WAN_I2V_GOLDEN_KEYS,
@@ -118,25 +119,11 @@ import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
 /**
- * 正規化後の潜在の帯（絶対値）。`undefined` = 未導出（モジュール doc「ケースと帯」）。
- *
- * 導出（2026-10-09・RTX 3080 Ti・Deno・全 9 本）: 決定用の最悪 boxing-cats 704×1280 の 1.550e-5 × 5 = 7.749e-5 →
- * 有効数字 2 桁へ切り上げ 7.8e-5。同じ日に 9 本を既定のレーンへ移した形で 2 回走らせ直し、全ケースの maxAbs が
- * 下の表と同値だった（帯を導いた走行の回数は記録が上書きされて残っていないので、確かめられる回数だけを書く）。
- *
- * | 寸法 | boxing-cats（決定用） | cat-dog-baking（決定用） | ferret（受入れ） | 参照の最大絶対値 |
- * |---|---|---|---|---|
- * | 1280×704 | 1.150e-5 | 1.264e-5 | 5.394e-6 | 2.95〜3.34 |
- * | 704×1280 | 1.550e-5 | 1.073e-5 | 6.557e-6 | 2.89〜3.68 |
- * | 256×160 | 5.186e-6 | 4.768e-6 | 4.813e-6 | 3.01〜4.04 |
- *
- * 故障注入（ferret 1280×704）の maxAbs: patchify の副添字の取り違え 2.44・std と 1/std の取り違え 2.54・post の
- * 束縛の h と w の入れ替え 1.18・logvar の 48 ch 67.3・AvgDown3D の偶奇の取り違え 2.77（どれも帯の 1.5 万倍以上）。
- *
- * MUST: 受入れ（ferret）の結果を見てこの値も決定用のケースも変えない。受入れが帯を外れたら、帯を広げずに原因を
- * 調べる。
+ * 正規化後の潜在の帯（絶対値）。値・導出・故障注入の記録は {@link WAN_I2V_ENCODER_BAND}（I2V の通しの e2e が条件の潜在の
+ * 門に同じ値を使うので helper に 1 か所で置く）。`undefined` = 未導出（モジュール doc「ケースと帯」— 導き直す回は
+ * ここを `undefined` にする）。
  */
-const BAND: number | undefined = 7.8e-5;
+const BAND: number | undefined = WAN_I2V_ENCODER_BAND;
 /** 判定と記録の帯（未導出の回は無限の帯として記録し、判定は赤にする）。 */
 const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 };
 

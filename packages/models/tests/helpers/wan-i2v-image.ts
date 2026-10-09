@@ -1,7 +1,7 @@
 /**
  * Wan2.2 TI2V の I2V の条件画像の前処理（ADR 0121 段 9a）のテストが共有するもの: 合成画像の LANCZOS の fixture の
- * 置き場と形、実画像の golden の置き場・ケースの表・キー。綴りは**ここ 1 か所**に置く（書き手の綴りが変わったら、
- * ここだけを合わせる）。
+ * 置き場と形、実画像の golden の置き場・ケースの表・キー、encoder の出口の帯（{@link WAN_I2V_ENCODER_BAND}）。綴りは
+ * **ここ 1 か所**に置く（書き手の綴りが変わったら、ここだけを合わせる）。
  *
  * ## LANCZOS の fixture（git 追跡 — 無ければ SKIP ではなく赤）
  *
@@ -82,6 +82,31 @@ export const wanI2vGoldenUrl = (testCase: WanI2vGoldenCase): URL =>
 /** SKIP 時にそのまま貼れる golden の生成コマンド（encoder の 3 グラフと一組で書く）。 */
 export const WAN_I2V_GOLDEN_GENERATE = "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.export_vae_encoder";
+
+/**
+ * VAE encoder の出口（mu の正規化の後 — DiT の条件の潜在）の帯（最大絶対差・絶対値）。encoder の GPU の門
+ * （`e2e_wan_ti2v_vae_encoder_test.ts` — golden の `latent` と比べる）と、I2V の通しの e2e の条件の潜在の門
+ * （`e2e_wan_ti2v_i2v_pipeline_test.ts` — 通しの参照の `condition_latents` と比べる。参照の作り手が 9a の golden とのビット
+ * 一致を門にしているので同じ量）が共有する。
+ *
+ * 導出（2026-10-09・RTX 3080 Ti・Deno・全 9 本 — encoder の GPU の門）: 決定用の最悪 boxing-cats 704×1280 の
+ * 1.550e-5 × 5 = 7.749e-5 → 有効数字 2 桁へ切り上げ 7.8e-5。同じ日に 9 本を既定のレーンへ移した形で 2 回走らせ直し、
+ * 全ケースの maxAbs が下の表と同値だった（帯を導いた走行の回数は記録が上書きされて残っていないので、確かめられる回数
+ * だけを書く）。
+ *
+ * | 寸法 | boxing-cats（決定用） | cat-dog-baking（決定用） | ferret（受入れ） | 参照の最大絶対値 |
+ * |---|---|---|---|---|
+ * | 1280×704 | 1.150e-5 | 1.264e-5 | 5.394e-6 | 2.95〜3.34 |
+ * | 704×1280 | 1.550e-5 | 1.073e-5 | 6.557e-6 | 2.89〜3.68 |
+ * | 256×160 | 5.186e-6 | 4.768e-6 | 4.813e-6 | 3.01〜4.04 |
+ *
+ * 故障注入（ferret 1280×704）の maxAbs: patchify の副添字の取り違え 2.44・std と 1/std の取り違え 2.54・post の
+ * 束縛の h と w の入れ替え 1.18・logvar の 48 ch 67.3・AvgDown3D の偶奇の取り違え 2.77（どれも帯の 1.5 万倍以上）。
+ *
+ * MUST: 受入れ（ferret）の結果を見てこの値も決定用のケースも変えない。受入れが帯を外れたら、帯を広げずに原因を
+ * 調べる。
+ */
+export const WAN_I2V_ENCODER_BAND = 7.8e-5;
 
 /** golden のテンソルのキー。 */
 export const WAN_I2V_GOLDEN_KEYS = {

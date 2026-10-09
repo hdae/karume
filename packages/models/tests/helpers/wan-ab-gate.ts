@@ -27,8 +27,8 @@ import type { GpuContext, SessionDiagnostics, SessionOptions } from "@karume/run
 import type {
   GeneratedVideo,
   WanFromPretrainedOptions,
-  WanGenerateRequest,
   WanPrompt,
+  WanTi2vGenerateRequest,
 } from "../../wan.ts";
 import { assertSeatsApplied, mergeCensus } from "../../../runtime/tests/helpers/pipeline-census.ts";
 import { type Results, runRecordedCase } from "../../../runtime/tests/helpers/results.ts";
@@ -58,8 +58,8 @@ import { settleReleases } from "./settle-releases.ts";
 export const WAN_AB_OBSERVATION = "step1-latent";
 
 /**
- * 入力（各世代の seed 経路の sha 行と同じプロンプトと seed・寸法 / guidance / shift は {@link WanAbSubject} の `request` —
- * 省いた世代は manifest の既定）。step 1 の σ は steps と shift で決まるので、steps は 2 に固定する（2 ステップの通しの
+ * 入力（各世代の seed 経路の sha 行と同じプロンプトと seed・寸法 / guidance / shift と I2V の条件画像は {@link WanAbSubject}
+ * の `request` — 省いた世代は manifest の既定）。step 1 の σ は steps と shift で決まるので、steps は 2 に固定する（2 ステップの通しの
  * 1 step 目）。
  */
 const PROMPT = "boxing-cats";
@@ -71,10 +71,13 @@ const STEPS = 2;
  */
 const PASSES_TO_STEP1 = 2;
 
-/** A/B に要る pipeline の面（`WanPipeline` と `WanTi2vPipeline` が構造的に満たす）。 */
+/**
+ * A/B に要る pipeline の面（`WanPipeline` と `WanTi2vPipeline` が構造的に満たす）。要求は広い方の型（2.2 の I2V の欄を
+ * 含む `WanTi2vGenerateRequest`）で受ける — 2.1 の `generate` は狭い型を受けるが、引数は反変なので面を満たす。
+ */
 export type WanAbPipeline = AsyncDisposable & {
   readonly prompts: readonly WanPrompt[];
-  generate(request: WanGenerateRequest): Promise<GeneratedVideo>;
+  generate(request: WanTi2vGenerateRequest): Promise<GeneratedVideo>;
 };
 
 /** 世代ごとの違い（門の手順と判定は {@link runWanAbCase} の 1 本）。 */
@@ -99,15 +102,24 @@ export type WanAbSubject = {
     options: WanFromPretrainedOptions,
   ) => Promise<WanAbPipeline>;
   /**
-   * 要求の固定値（寸法と、step 1 の潜在を決める guidance / shift）。省けば世代の既定（manifest の `pipelineConfig` と既定の
-   * 寸法）に乗る — 2.1 は sha 行と同じく既定に乗る。明示する世代は全部を明示する（寸法だけ明示して σ と CFG のパス数を既定に
-   * 残すと、既定が動いたときに帯の前提が黙って動く）。
+   * 要求の固定値（寸法と、step 1 の潜在を決める guidance / shift — I2V なら条件画像も）。省けば世代の既定（manifest の
+   * `pipelineConfig` と既定の寸法）に乗る — 2.1 は sha 行と同じく既定に乗る。明示する世代は全部を明示する（寸法だけ明示して
+   * σ と CFG のパス数を既定に残すと、既定が動いたときに帯の前提が黙って動く）。I2V の step 1 の潜在は `copyLatents` の
+   * スケジューラの状態（先頭の潜在フレームを条件で置き換える前 — `WanGenerateEvent` の doc）。
    */
   readonly request?: {
     readonly width: number;
     readonly height: number;
     readonly guidance: number;
     readonly shift: number;
+    /**
+     * I2V の条件画像（Wan2.2 だけ — 省けば T2V）。寸法は上の `width` / `height` で明示する（画像の縦横比での選択に
+     * 預けない — 帯の前提の寸法が画像で黙って動かないように）。2.1 の pipeline に渡すと `generate` が
+     * `ModelInputError` で拒む（fail loudly — 型は 2 世代で共有の 1 本）。
+     */
+    readonly image?: WanTi2vGenerateRequest["image"];
+    /** 条件画像の寸法の合わせ方（`image` を渡したときだけ — 省けば公式の `"crop"`）。 */
+    readonly fit?: WanTi2vGenerateRequest["fit"];
   };
 };
 
