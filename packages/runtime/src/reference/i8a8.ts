@@ -105,6 +105,18 @@ export const quantizeRowsReference = (
   rows: number,
   dim: number,
 ): QuantizedRows => {
+  // MUST: 計算の前に形と長さを突き合わせる。足りない要素は undefined → NaN として行の scale へ
+  // 伝播し、契約外の「NaN 行」を期待値として返す（テンソル中の NaN は正規の入力なので見ない）。
+  for (const [name, value] of [["rows", rows], ["dim", dim]] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new I8a8Error(`行量子化の参照: ${name}=${value} が非負の整数でない`);
+    }
+  }
+  if (x.length !== rows * dim) {
+    throw new I8a8Error(
+      `行量子化の参照: 要素数 ${x.length} が rows × dim = ${rows * dim} と合わない`,
+    );
+  }
   const q = new Int8Array(rows * dim);
   const scale = new Float32Array(rows);
   for (let row = 0; row < rows; row += 1) {

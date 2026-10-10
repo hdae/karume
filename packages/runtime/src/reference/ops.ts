@@ -77,6 +77,14 @@ export const refTensor = (
   shape: readonly number[],
   data: Float32Array<ArrayBuffer> | Int32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>,
 ): RefTensor => {
+  // MUST: 次元ごとに見る。積だけを見ると [-1,-1] が要素数 1 として通り、負の次元を持つ
+  // テンソルから意味の無い期待値を作る。
+  const bad = shape.findIndex((dim) => !Number.isSafeInteger(dim) || dim < 0);
+  if (bad >= 0) {
+    throw new ReferenceOpError(
+      `shape [${shape.join(",")}] の次元 ${bad}（${shape[bad]}）が非負の整数でない`,
+    );
+  }
   if (data.length !== numel(shape)) {
     throw new ReferenceOpError(`要素数 ${data.length} が shape [${shape.join(",")}] と合わない`);
   }

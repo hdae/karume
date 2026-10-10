@@ -672,6 +672,53 @@ Deno.test("CPU 参照: 負・非整数の pastLength / window は full 扱いや
   }
 });
 
+Deno.test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待値へ化けずに突合の前で落ちる", () => {
+  // 範囲比較だけだと NaN は全ての比較が偽で素通りし（行ループが 0 回 → 出力が全 0）、1.5 は
+  // 半端な live 列数で NaN を返す — どちらも「オラクルが黙って別の数を返す」形。
+  const probe = {
+    batch: 1,
+    heads: 1,
+    kvHeads: 1,
+    chunkRows: 2,
+    depth: 1,
+    capacity: 2,
+    window: 0,
+    past: 0,
+    query: 1,
+    q: Float32Array.from([1, 1]),
+    insK: Float32Array.from([1, 1]),
+    insV: Float32Array.from([4, 8]),
+    slotK: new Float32Array(2),
+    slotV: new Float32Array(2),
+    scale: 1,
+  };
+  const append = {
+    kvPlanes: 1,
+    chunkRows: 2,
+    depth: 1,
+    capacity: 2,
+    window: 0,
+    past: 0,
+    query: 1,
+    x: Float32Array.from([4, 8]),
+    slot: new Float32Array(2),
+  };
+  for (const query of [Number.NaN, 1.5]) {
+    assertThrows(
+      () => referenceStateAttention({ ...probe, query }),
+      ReferenceOpError,
+      "queryLength",
+      `attention query=${query}`,
+    );
+    assertThrows(
+      () => referenceStateAppend({ ...append, query }),
+      ReferenceOpError,
+      "queryLength",
+      `append query=${query}`,
+    );
+  }
+});
+
 Deno.test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
   // 席の目印（census 門がこの `:par` を見る）。幾何は `wg16x16` = TILE_X × D レーン
   assertEquals(stateQkParallelKey(false, false), "attention_state_qk:v1:f32:wg16x16:par");

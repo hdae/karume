@@ -53,6 +53,15 @@ Deno.test("i8a8 参照: 全ゼロ行の scale は f32 tiny（床が無いと 0/0
 // ② quantizeRowsReference — 非有限の伝播（行の独立性込み）
 // ---------------------------------------------------------------------------
 
+Deno.test("i8a8 参照: 入力長が rows × dim と合わない・次元が非負整数でない入力は計算に入る前に落ちる", () => {
+  // 長さを見ないと、足りない要素は undefined → NaN として行の scale へ伝播し、契約外の
+  // 「NaN 行」を期待値として返す（[1] を 1×2 で読むと scale=[NaN]）。
+  assertThrows(() => quantizeRowsReference([1], 1, 2), I8a8Error, "要素数");
+  assertThrows(() => quantizeRowsReference([1, 2, 3], 1, 2), I8a8Error, "要素数");
+  assertThrows(() => quantizeRowsReference([], -1, 0), I8a8Error, "rows");
+  assertThrows(() => quantizeRowsReference([1, 2], 1, 2.5), I8a8Error, "dim");
+});
+
 Deno.test("i8a8 参照: NaN / ±Inf は行 scale へ伝播し、隣の行を汚さない", () => {
   // 行 0 = NaN 混じり / 行 1 = +Inf / 行 2 = −Inf / 行 3 = 通常
   const x = [

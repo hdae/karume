@@ -1784,6 +1784,13 @@ Deno.test("applyReferenceOp は契約表の kind で分岐し、アリティ違�
 // 参照はテストデータの契約違反を検出できなければならない（オラクルが契約外の入力に値を返すと、
 // GPU 側が正しく拒否する組み合わせを「参照と一致しない」ではなく「参照が答えを持つ」形で書けて
 // しまう）。attrs の値・入力 dtype・rank は op 契約表の同じ検査を通す。
+Deno.test("refTensor は負・非整数の次元を拒否する（次元の積だけを見ると [-1,-1] が要素数 1 で通る）", () => {
+  assertThrows(() => refTensor([-1, -1], Float32Array.from([7])), ReferenceOpError, "次元");
+  assertThrows(() => refTensor([0.5, 2], Float32Array.from([7])), ReferenceOpError, "次元");
+  assertThrows(() => refTensor([Number.NaN], new Float32Array(0)), ReferenceOpError, "次元");
+  assertEquals(refTensor([0, 3], new Float32Array(0)).shape, [0, 3]);
+});
+
 Deno.test("applyReferenceOp は op 契約外の attrs 値・入力 dtype・rank を拒否する", () => {
   const weight = t([3, 2], [1, 2, 3, 4, 5, 6]);
   const index = i32([2], [0, 2]);

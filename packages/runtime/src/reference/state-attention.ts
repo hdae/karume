@@ -76,6 +76,18 @@ const assertPastAndWindow = (where: string, past: number, window: number): void 
   }
 };
 
+/**
+ * queryLength の値域（`1 ≤ Q ≤ M` の整数）。
+ *
+ * MUST: 範囲比較の前に整数かを見る。NaN は全ての比較が偽で範囲検査を素通りし（行ループが 0 回で
+ * 出力が全 0）、1.5 は半端な live 列数で NaN を返す — どちらも黙って別の数を返す形。
+ */
+const assertQuery = (query: number, chunkRows: number): void => {
+  if (!Number.isSafeInteger(query) || query < 1 || query > chunkRows) {
+    throw new ReferenceOpError(`queryLength ${query} が 1..${chunkRows}（= M）の整数でない`);
+  }
+};
+
 /** 形と論理長の整合（取り違えを突合の前で落とす）。 */
 const assertShape = (shape: StateAttentionRefShape): void => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = shape;
@@ -88,9 +100,7 @@ const assertShape = (shape: StateAttentionRefShape): void => {
   if (heads % kvHeads !== 0) {
     throw new ReferenceOpError(`H=${heads} が Hkv=${kvHeads} で割り切れない（ADR 0067 決定 1）`);
   }
-  if (query < 1 || query > chunkRows) {
-    throw new ReferenceOpError(`queryLength ${query} が 1..${chunkRows}（= M）に入らない`);
-  }
+  assertQuery(query, chunkRows);
   if (stateSliding(window)) {
     if (window > capacity) {
       throw new ReferenceOpError(`window ${window} が容量 ${capacity} を超える`);
@@ -236,9 +246,7 @@ export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
       `state_append の形が正でない（B·Hkv=${kvPlanes} M=${chunkRows} D=${depth} C=${capacity}）`,
     );
   }
-  if (query < 1 || query > chunkRows) {
-    throw new ReferenceOpError(`queryLength ${query} が 1..${chunkRows}（= M）に入らない`);
-  }
+  assertQuery(query, chunkRows);
   if (stateSliding(window)) {
     if (window > capacity) {
       throw new ReferenceOpError(`window ${window} が容量 ${capacity} を超える`);
