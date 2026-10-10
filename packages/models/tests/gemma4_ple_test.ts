@@ -605,6 +605,50 @@ Deno.test("Gemma4Ple.gather: 走行中の中断は段の境目で効き、読め
   assert(rig.reads.length > 0, "そもそも 1 本も読んでいない（中断の門が空振り）");
 });
 
+Deno.test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止め、開始済みの読みを待ってから落ちる", async () => {
+  // 1 block 1 行・予算 0（= 全 40 区間が行読み）。最初の読み 1 本だけを reject させる。
+  // 失敗の後も他の worker が発行を続けると、呼び手の retry と重なって同時発行の上限 16 を超える。
+  const spec: PleFixtureSpec = { tokens: 20, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
+  const rig = pleFixture(spec, { defer: true });
+  let calls = 0;
+  let inFlight = 0;
+  const openBlock = (asset: string) => {
+    const reader = rig.openBlock(asset);
+    return {
+      ...reader,
+      read: (offset: number, length: number) => {
+        calls += 1;
+        inFlight += 1;
+        const pending = calls === 1
+          ? new Promise<Uint8Array<ArrayBuffer>>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("injected read failure")), 0)
+          )
+          : reader.read(offset, length);
+        return pending.finally(() => {
+          inFlight -= 1;
+        });
+      },
+    };
+  };
+  const ple = createGemma4Ple({
+    index: rig.index,
+    openBlock,
+    vocabSize: spec.tokens,
+    maxResidentBytes: 0,
+  });
+  await assertRejects(
+    () => ple.gather(Array.from({ length: spec.tokens }, (_row, index) => index)),
+    Error,
+    "injected read failure",
+  );
+  assertEquals(inFlight, 0, "開始済みの読みが決着する前に reject した");
+  const callsAtReject = calls;
+  assert(callsAtReject < 40, `失敗後も全区間を発行している（${callsAtReject} 本）`);
+  // 失敗が届いた後に新しい読みが出ないこと（数マクロタスク待って観測する）。
+  for (let tick = 0; tick < 8; tick += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(calls, callsAtReject, "reject の後に読みが新規発行された");
+});
+
 Deno.test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fail loudly", async () => {
   const rig = fixture();
   const ple = pleOf(rig);

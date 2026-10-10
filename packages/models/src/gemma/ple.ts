@@ -236,6 +236,15 @@ type Supply<T> = {
   readonly owned: boolean;
 };
 
+/**
+ * 1 回の gather の失敗の共有口（最初の原因 1 件）。
+ *
+ * 行読みの worker と全量 block の待ち合わせが同じ 1 つを見る — 片方の失敗で以後の新規発行を
+ * 止め、開始済みの読みが全て決着してから最初の原因で reject するため（ADR 0085 の 2026-09-11
+ * 追記「両方の決着を待つ」を job 単位の構造でも守る）。
+ */
+type GatherFailure = { cause?: { readonly error: unknown } };
+
 /** 1 表ぶんの計画（全量読みへ倒した block と、行読みへ倒した id）。 */
 type TablePlan = {
   readonly table: Gemma4PleTable;
@@ -477,10 +486,13 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
 
   /**
    * 2 表ぶんの行読みを 1 本の列に畳み、{@link ROW_READ_CONCURRENCY} 本のプールで流す。
+   *
+   * 失敗は reject せず `failure` に最初の 1 件を記録する（待ち合わせは呼び手が全経路ぶん揃える）。
    */
   const gatherRows = async (
     plans: readonly TablePlan[],
     options: Gemma4PleReadOptions,
+    failure: GatherFailure,
   ): Promise<void> => {
     const jobs: { readonly plan: TablePlan; readonly id: number }[] = [];
     for (const plan of plans) {
@@ -490,12 +502,18 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     let next = 0;
     const worker = async (): Promise<void> => {
       // MUST: 取り出しと `next` の前進の間に await を挟まない（挟むと 2 本が同じ行を引く）。
-      while (next < jobs.length) {
+      // MUST: 失敗の後は新しい job を取り出さない — 取り出し続けると、失敗を受けた呼び手の
+      // retry とこの gather の残りの読みが重なり、同時発行の上限が gather 全体で守られなくなる。
+      while (failure.cause === undefined && next < jobs.length) {
         const job = jobs[next];
         next += 1;
-        // 中断は段の境目で見る（読み 1 本を途中で畳む口は `AssetReader` に無い）。
-        options.signal?.throwIfAborted();
-        await readRow(job.plan, job.id);
+        try {
+          // 中断は段の境目で見る（読み 1 本を途中で畳む口は `AssetReader` に無い）。
+          options.signal?.throwIfAborted();
+          await readRow(job.plan, job.id);
+        } catch (error) {
+          failure.cause ??= { error };
+        }
       }
     };
     await Promise.all(Array.from({ length: Math.min(ROW_READ_CONCURRENCY, jobs.length) }, worker));
@@ -528,13 +546,28 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     };
   };
 
-  /** 全量 block の待ち合わせ（block 添字 → バイト列）。 */
-  const awaitFull = async (plan: TablePlan): Promise<ReadonlyMap<number, ArrayBuffer>> =>
-    new Map(
-      await Promise.all(
-        [...plan.full].map(async ([position, data]) => [position, await data] as const),
-      ),
+  /**
+   * 全量 block の待ち合わせ（block 添字 → バイト列）。
+   *
+   * reject せず、失敗は `failure` へ記録する — 1 本の失敗で即座に抜けると、残りの block と
+   * 行読みが決着する前に呼び手へ制御が戻る。
+   */
+  const awaitFull = async (
+    plan: TablePlan,
+    failure: GatherFailure,
+  ): Promise<ReadonlyMap<number, ArrayBuffer>> => {
+    const blocks = new Map<number, ArrayBuffer>();
+    await Promise.all(
+      [...plan.full].map(async ([position, data]) => {
+        try {
+          blocks.set(position, await data);
+        } catch (error) {
+          failure.cause ??= { error };
+        }
+      }),
     );
+    return blocks;
+  };
 
   const valuesView = (buffer: ArrayBuffer): Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer> =>
     index.storage === "i8" ? new Int8Array(buffer) : new Uint8Array(buffer);
@@ -589,10 +622,17 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         decideTable(valuePlan, planned);
         decideTable(scalePlan, planned);
         // ③ 行読みを先に流す（hit 先行の延長 — 全量読みを待ってから流すと、その追い出しが
-        // この gather の行キャッシュ hit を落とす）。
-        await gatherRows([valuePlan, scalePlan], options);
-        const valueBlocks = await awaitFull(valuePlan);
-        const scaleBlocks = await awaitFull(scalePlan);
+        // この gather の行キャッシュ hit を落とす）。全量 block の失敗も行読みの新規発行を
+        // 止めるよう、待ち合わせ（= 失敗の記録口）は行読みより先に張る。
+        const failure: GatherFailure = {};
+        const valueFull = awaitFull(valuePlan, failure);
+        const scaleFull = awaitFull(scalePlan, failure);
+        await gatherRows([valuePlan, scalePlan], options, failure);
+        const valueBlocks = await valueFull;
+        const scaleBlocks = await scaleFull;
+        // MUST: reject は開始済みの読みが全て決着した後（失敗後の retry や dispose と古い読みを
+        // 重ねない）。
+        if (failure.cause !== undefined) throw failure.cause.error;
         // ④ 2 表を突き合わせて書く。
         for (const id of missing) {
           const positions = rows.get(id) as number[];
