@@ -67,14 +67,19 @@ export const assertAcceptableSteps = (steps: number): void => {
  * 崩れた別軌道を黙って走る）。受理集合を 2 箇所に書くと必ず片方が緩むので、門は梯子側の
  * この 1 本に置く。
  *
- * NOTE（先頭の門の幅 — 厳密比較にしない理由）: 上流 diffusers も同じ式を f32 で評価しており、
+ * NOTE（先頭の門は片側 — `1 − 4ulp ≤ σ₀ ≤ 1`）: 上流 diffusers も同じ式を f32 で評価しており、
  * `shift = 1.18 / 1.32 / 1.43 …`（`[1,20]` の 2 桁小数 1,901 通りのうち 111 通り）で先頭が
- * 1 から 1〜2 ulp ずれる。厳密比較はそれらの**普通の値**まで弾いて配布形の自由度を狭めるので、
- * 幅は {@link SIGMA_HEAD_TOLERANCE}（4 ulp）に取る。dpm-solver の「先頭が厳密に 1」は
- * `alphaS0 = 1 − σ₀` を 0 と見なす導出の前提で、ulp 級のずれは `alphaS0 ≈ 6e-8` として
- * 絵に効かない（弾く対象は +Inf / NaN / 1 から桁で離れる裾）。
+ * 1 から 1〜2 ulp ずれる。ずれの向きで扱いを分ける:
+ * - **下側（σ₀ < 1・例 1.18）は受理する** — 厳密比較はこれら普通の値まで弾いて配布形の自由度を
+ *   狭める。dpm-solver の「先頭が厳密に 1」は `alphaS0 = 1 − σ₀` を 0 と見なす導出の前提で、
+ *   下側のずれは `alphaS0 ≈ 6e-8` として絵に効かない。幅は {@link SIGMA_HEAD_TOLERANCE}（4 ulp）。
+ * - **上側（σ₀ > 1・例 1.32 / 1.57 …・同じ 1,901 通りのうち 55 通り）は拒否する** — DPM++ 2M は
+ *   step 0 で `log(1 − σ₀)` を取るので負数の log で NaN になり、例外を出さずに全 step を NaN で
+ *   走る（最後の RGBA 変換で真因の読めない形で落ちるか、VAE のクランプで普通の画素に化ける）。
+ *   梯子は更新則に依らない 1 本で、門もここ 1 か所に置くので、Euler（上側でも壊れない）で使う
+ *   場合も同じく拒否する — 失うのは小数 `shift` の理論上の自由度だけ。
  */
-/** 梯子の先頭が 1 から離れてよい幅（f32 の 4 ulp = 2⁻²²）。 */
+/** 梯子の先頭が 1 から**下へ**離れてよい幅（f32 の 4 ulp = 2⁻²²・上側は 0 — 片側の門）。 */
 const SIGMA_HEAD_TOLERANCE = 2 ** -22;
 
 export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayBuffer> => {
@@ -87,13 +92,13 @@ export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayB
     const sigma = f32(index === steps - 1 ? stop : index * step + start);
     sigmas[index] = f32(f32(shift * sigma) / f32(f32((shift - 1) * sigma) + 1));
   }
-  // 先頭は f32 の丸め数 ulp を許す（{@link SIGMA_HEAD_TOLERANCE}）— 弾きたいのは分母が潰れて
-  // +Inf になる / 1 から桁で離れる病的な裾で、上流 diffusers も同じ式を f32 で評価している。
+  // 先頭は 1 の下側にだけ f32 の丸め数 ulp を許す（{@link SIGMA_HEAD_TOLERANCE}）。上側は 1 ulp でも
+  // DPM++ 2M の `log(1 − σ₀)` が NaN になるので許さない（+Inf もこの上側の枝で落ちる）。
   // NaN は比較が偽になるので同じ枝で落ちる。
-  if (!(Math.abs(sigmas[0] - 1) <= SIGMA_HEAD_TOLERANCE)) {
+  if (!(sigmas[0] <= 1 && 1 - sigmas[0] <= SIGMA_HEAD_TOLERANCE)) {
     throw new RangeError(
-      `sigma 梯子の先頭が ${sigmas[0]}（1 から ${SIGMA_HEAD_TOLERANCE} を超えて離れている）— ` +
-        `shift ${shift} は梯子の成立域の外`,
+      `sigma 梯子の先頭が ${sigmas[0]}（1 を超えている / 1 から下へ ${SIGMA_HEAD_TOLERANCE} を` +
+        `超えて離れている）— shift ${shift} は梯子の成立域の外`,
     );
   }
   for (let index = 1; index < sigmas.length; index += 1) {

@@ -6,6 +6,7 @@
 // 切り出して commit してある — `anima_latents_test.ts`）。
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import { cfgEulerStep, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
 import { ModelInputError } from "../src/errors.ts";
 // `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
@@ -45,8 +46,9 @@ Deno.test("sigmaSchedule: shift は manifest の値で効く（1 なら素の li
 });
 
 Deno.test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 2M の前提）", () => {
-  // `dpm-solver-multistep.ts` は「先頭が厳密に 1」から step 0 の `alphaS0 = 0` を導く。
-  // ここが 1 ulp でもずれると例外は出ず、前提の崩れた別軌道を黙って走る。
+  // `dpm-solver-multistep.ts` は「先頭が厳密に 1」から step 0 の `alphaS0 = 0` を導き、自身は
+  // 例外を出さない。上側のずれは `sigmaSchedule` の門が拒否し、下側の ulp 級のずれは受理する
+  // （下の describe）。代表 shift のこの 4 値は先頭が厳密に 1 になることを固定する。
   for (const shift of [1, 1.5, 3, 12]) {
     assertStrictEquals(sigmaSchedule(8, shift)[0], 1, `shift=${shift} の先頭`);
   }
@@ -59,6 +61,29 @@ Deno.test("sigmaSchedule: 梯子の成立域の外は fail loudly（黙って別
   assertThrows(() => sigmaSchedule(8, 1e-7), RangeError, "梯子の成立域の外");
   // 先頭は 1 のまま、直後が f32 の刻みに潰れて同値になる域（狭義単調減少が破れる側）。
   assertThrows(() => sigmaSchedule(8, 1e7), RangeError, "狭義単調減少でない");
+});
+
+describe("sigmaSchedule: 先頭が 1 から ulp 級にずれる小数 shift", () => {
+  // DPM++ 2M は step 0 で `log(1 − σ₀)` を取るので、σ₀ が 1 を 1 ulp でも超えると負数の log で
+  // NaN になり、全 step を NaN で走った末に遅れて落ちる。σ₀ < 1 側のずれは `alphaS0 ≈ 6e-8` で無害。
+  it("σ₀ が 1 を超える shift（1.32 → 1 + 2⁻²³）は GPU に触る前に RangeError で拒否する", () => {
+    // 「梯子の成立域の外」は単調性の門も出すので、先頭の門の文言と σ₀ の値まで照合して
+    // 上側の枝で落ちたことを固定する。
+    assertThrows(
+      () => sigmaSchedule(8, 1.32),
+      RangeError,
+      `sigma 梯子の先頭が ${1 + 2 ** -23}（1 を超えている`,
+    );
+  });
+
+  it("σ₀ が 1 を下回る側にずれる shift（1.18 → 1 − 2⁻²³）は受理する", () => {
+    const sigmas = sigmaSchedule(8, 1.18);
+    assertStrictEquals(
+      sigmas[0],
+      1 - 2 ** -23,
+      "1.18 は下側に 2 ulp（f32 の 1 未満の刻み 2⁻²⁴ × 2）ずれる",
+    );
+  });
 });
 
 Deno.test("timestepsProj: 前半 cos・後半 sin（flip_sin_to_cos=true）", () => {
