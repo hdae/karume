@@ -1177,3 +1177,49 @@ class TestThePartLength:
             )
 
         assert not out.exists()
+
+
+class TestThePathsInTheOldManifest:
+    """旧 manifest の path は hub と同じ文法で読む（R7-002 — 出力先の外へ書かない・読まない）。
+
+    書き先は旧 path の親ディレクトリをそのまま `out` の下へ繋ぐので、`../` や絶対パスを
+    通すと新しいコンテナが出力先の外（旧入力のツリー内）に書かれ、manifest にも hub が拒否する
+    path が載る。symlink で入力リポの外を指す宣言も、旧入力の範囲の外を読むので落とす。
+    """
+
+    @staticmethod
+    def _redeclare(repo: Path, path: str) -> None:
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        for model in manifest["models"].values():
+            model["assets"]["tokenizer"]["path"] = path
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        ("spelling", "message"),
+        [("../outside/tokenizer.json", "先頭ドット"), ("/outside/tokenizer.json", "空セグメント")],
+        ids=["parent", "absolute"],
+    )
+    def test_a_path_outside_the_repository_is_refused_before_anything_is_written(
+        self, repo: Path, tmp_path: Path, spelling: str, message: str
+    ) -> None:
+        # 指し先の現物は在る（在るのに通さないことを見る — 無いので落ちる形と区別する）。
+        place(tmp_path, "outside/tokenizer.json", (repo / "tokenizer.json").read_bytes())
+        self._redeclare(repo, spelling)
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match=message):
+            migrated(repo, out)
+        assert not out.exists()
+
+    def test_a_symlink_that_leaves_the_repository_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        place(elsewhere, "tokenizer.json", (repo / "tokenizer.json").read_bytes())
+        (repo / "linked").symlink_to(elsewhere, target_is_directory=True)
+        self._redeclare(repo, "linked/tokenizer.json")
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match="入力リポの外"):
+            migrated(repo, out)
+        assert not out.exists()

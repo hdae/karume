@@ -72,7 +72,9 @@ from karume.container import (
 from karume.dist import (
     REPO_RE,
     REVISION_RE,
+    DistError,
     assert_manifest_limits,
+    assert_rel_path,
     file_ref,
     generator_tag,
     manifest_text,
@@ -392,6 +394,20 @@ def _text(value: Any, where: str) -> str:
     return value
 
 
+def _rel_path(value: Any, where: str) -> str:
+    """FileRef の path（hub の `assertPath` と同じ許可リスト —
+    {@link karume.dist.assert_rel_path}）。
+
+    MUST: 「空でない文字列」だけで通さない。書き先は旧 path の親ディレクトリをそのまま出力先へ
+    繋ぐ（{@link _output_location}）ので、`../` や絶対パスを通すと新しいコンテナが出力先の外に
+    書かれ、manifest にも hub が拒否する path が載る。
+    """
+    try:
+        return assert_rel_path(_text(value, where), where)
+    except DistError as cause:
+        raise MigrateError(str(cause)) from cause
+
+
 def _sha256(value: Any, where: str) -> str:
     _require(
         isinstance(value, str) and SHA256_HEX_PATTERN.match(value) is not None,
@@ -436,7 +452,7 @@ def _file_ref(value: Any, where: str) -> FileRef:
     obj = _object(value, where)
     _keys(obj, ["path", "size", "sha256"], ["repo", "revision"], where)
     ref = FileRef(
-        _text(obj["path"], f"{where}.path"),
+        _rel_path(obj["path"], f"{where}.path"),
         _count(obj["size"], f"{where}.size"),
         _sha256(obj["sha256"], f"{where}.sha256"),
         None if "repo" not in obj else _text(obj["repo"], f"{where}.repo"),
@@ -793,6 +809,11 @@ def _assert_declared_files(repo: Path, legacy: LegacyManifest) -> None:
             checked.add(ref)
             where = f"models['{model_name}']: 旧 manifest が宣言する '{ref.path}'"
             path = repo / ref.path
+            # path の文法は読み取りで済んでいる — 残るのは symlink で入力リポの外を指す形。
+            _require(
+                path.resolve().is_relative_to(repo),
+                f"{where} が symlink で入力リポの外を指す（旧入力は {repo} の中だけを読む）",
+            )
             _require(path.is_file(), f"{where} が手元に無い")
             size = path.stat().st_size
             _require(size == ref.size, f"{where} の長さ {size} が宣言 {ref.size} と違う")
