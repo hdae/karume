@@ -132,14 +132,19 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
         `テンソル '${name}' の幅 ${view.shape[1]} が他の行の ${width} と違う`,
       );
     }
-    return {
-      name,
-      role,
-      prompt,
-      normalized,
-      tokens,
-      data: new Float32Array(file.buffer, view.byteOffset, tokens * width),
-    };
+    const data = new Float32Array(file.buffer, view.byteOffset, tokens * width);
+    // MUST: 有限性は読み込み時に 1 回だけ見る（生成のたびの padding で繰り返さない）。GPU 経路は
+    // umT5 の出力の非有限を即座に拒むので、こちらで見ないと壊れた埋め込みは DiT をロード・実行
+    // してから潜在の非有限として落ち、原因の段を取り違える。
+    for (let at = 0; at < data.length; at += 1) {
+      if (!Number.isFinite(data[at])) {
+        throw new WanTextEmbedsError(
+          `テンソル '${name}' の行 ${Math.floor(at / width)}・列 ${at % width} が有限でない` +
+            `（${data[at]}）`,
+        );
+      }
+    }
+    return { name, role, prompt, normalized, tokens, data };
   });
   const extra = [...file.tensors.keys()].filter((name) => !names.has(name));
   if (extra.length > 0) {

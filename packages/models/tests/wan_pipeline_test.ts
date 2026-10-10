@@ -241,6 +241,26 @@ describe("テキスト埋め込み資産", () => {
       assertThrows(() => parseWanTextEmbeds(asset), Error, message);
     }
   });
+
+  it("非有限の値を 1 つでも含む資産は読み込み時に拒む（DiT の段まで持ち越さない）", () => {
+    // GPU 経路は umT5 の出力の非有限を即座に拒むが、事前計算の経路は形とメタしか見ていなかった。
+    // 壊れた埋め込みは DiT をロード・実行してから潜在の非有限として落ち、原因の段を取り違える。
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const asset = buildAsset(ROWS);
+      const ferret = parseWanTextEmbeds(asset).entries[1];
+      assert(
+        ferret.data.buffer === asset,
+        "行が資産のバイト列を指していない（故障注入が届かない）",
+      );
+      // 'ferret' の行 1・列 1（WIDTH = 3）。
+      ferret.data[1 * WIDTH + 1] = bad;
+      assertThrows(
+        () => parseWanTextEmbeds(asset),
+        WanTextEmbedsError,
+        "'ferret' の行 1・列 1",
+      );
+    }
+  });
 });
 
 describe("planWanGeneration（generate の入口の門）", () => {
