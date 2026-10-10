@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
+from karume.dims import parse_dim
 from karume.ir import IrDim, IrGraph, IrNode, IrState
 from karume.ops import ATTENTION_OP, STATE_APPEND_OP
 from karume.shapes import declared_shape
@@ -434,9 +435,19 @@ def _prune(
     initializers = {
         name: initializer for name, initializer in graph.initializers.items() if name in live_values
     }
+    inputs = [spec for spec in graph.inputs if spec.name not in dropped]
+    # MUST: 記号は残った束縛点（入力 shape と states shape の次元位置 — ADR 0066 追記 7）から
+    # 導き直す。落とした K / V だけが束縛していた記号を引き継ぐと、parser が「束縛が取れない」で
+    # 拒否するグラフを手術が作る。宣言順は元の並びのまま保つ。
+    bound = {
+        parse_dim(dim).sym
+        for shape in [*(spec.shape for spec in inputs), *(slot.shape for slot in slots.values())]
+        for dim in shape
+        if isinstance(dim, str)
+    }
     return IrGraph(
-        symbols=symbols,
-        inputs=[spec for spec in graph.inputs if spec.name not in dropped],
+        symbols=[symbol for symbol in symbols if symbol in bound],
+        inputs=inputs,
         outputs=list(graph.outputs),
         initializers=initializers,
         values={

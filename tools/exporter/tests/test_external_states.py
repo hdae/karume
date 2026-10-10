@@ -510,3 +510,74 @@ class TestTheContainerExcludesSharedDeclarations:
 
         with pytest.raises(EmitError, match="余剰"):
             stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
+
+
+def dynamic_kv_source() -> IrGraph:
+    """K / V の placeholder **だけ**が記号 T を束縛する借り手（q は 1 行の固定形）。
+
+    mask は Tmax 定数 + `sym_prefix_slice`（ADR 0010 の畳み込み残骸と同じ形）で、T は K / V の
+    入力 shape からしか束縛されない — 手術で K / V を落とすと T は束縛元を失う。
+    """
+    return parse_ir_graph(
+        json.dumps(
+            {
+                "format": "karume-ir",
+                "version": 1,
+                "requires": {"ops": ["attention", "sym_prefix_slice"]},
+                "symbols": ["T"],
+                "inputs": [
+                    _input("qs", Q_SLIDING),
+                    _input("sliding_k", [1, 1, "T", 256]),
+                    _input("sliding_v", [1, 1, "T", 256]),
+                ],
+                "outputs": ["as"],
+                "initializers": {
+                    "mask.table": {"tensor": "drafter.mask", "storage": {"dtype": "f32"}},
+                },
+                "values": {
+                    "mask.table": _value([1, 1, 1, 8]),
+                    "mask": _value([1, 1, 1, "T"]),
+                    "as": _value(Q_SLIDING),
+                },
+                "nodes": [
+                    {
+                        "op": "sym_prefix_slice",
+                        "ins": ["mask.table"],
+                        "outs": ["mask"],
+                        "attrs": {"sym": "T", "slices": [{"dim": 3, "coeff": 1, "offset": 0}]},
+                    },
+                    {
+                        "op": "attention",
+                        "ins": ["qs", "sliding_k", "sliding_v", "mask"],
+                        "outs": ["as"],
+                        "attrs": {"scale": 1.0},
+                    },
+                ],
+            }
+        )
+    )
+
+
+class TestTheSymbolsAfterTheSurgery:
+    """落とした K / V だけが束縛していた記号は `symbols` から消える（ADR 0066 追記 7 の束縛点）。
+
+    元の `symbols` をそのまま引き継ぐと、束縛元の無い記号が残り、Python・runtime の両方の
+    parser が「束縛が取れない」で拒否するグラフを手術が作る。
+    """
+
+    def test_a_symbol_bound_only_by_the_dropped_kv_is_removed(self):
+        graph = checked(to_external_states_form(dynamic_kv_source(), plan(SLIDING_SPEC)))
+
+        assert graph.symbols == []
+        assert [spec.name for spec in graph.inputs] == ["qs"]
+
+    def test_a_symbol_still_bound_by_a_kept_input_survives(self):
+        """q も T を持つ形（残った入力が束縛点）では T は残る（落としすぎない対照）。"""
+        source_graph = dynamic_kv_source()
+        q_shape = [1, 4, "T", 256]
+        source_graph.inputs[0] = IrInput(name="qs", dtype="f32", shape=q_shape)
+        source_graph.values["as"] = IrValue(dtype="f32", shape=q_shape)
+
+        graph = to_external_states_form(source_graph, plan(SLIDING_SPEC))
+
+        assert graph.symbols == ["T"]
