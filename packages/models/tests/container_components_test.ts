@@ -165,6 +165,37 @@ Deno.test("components: この系列が持たない役割名は差し替えられ
   assertEquals(fetchedContainers(rig.mock.paths), []);
 });
 
+Deno.test("components: 継承プロパティは差し替えに使わない（own の役割だけが席に座る）", async () => {
+  // 役割の検査は own の列挙可能キーで行うので、継承値（`Object.create` やプロトタイプ汚染）を
+  // 直接添字で読むと、検査を通っていない値が差し替えに使われる。
+  const rig = await prepareSeats({ sameGraph: true });
+  const inherited: Record<string, { readonly source: typeof rig.source }> = Object.create({
+    voice: { source: rig.source },
+  });
+
+  const { open } = await loadContainerComponents(
+    "test.fromPretrained",
+    rig.loaded,
+    rig.selection,
+    ["front", "voice"],
+    NO_FAMILY_GATE,
+    { ...rig.hubOptions, components: inherited },
+  );
+  assertEquals(open("voice").graph.outputs, ["y"]);
+  assertEquals(
+    rig.mock.requests.filter((request) => request.repo === OTHER_REPO),
+    [],
+    "継承値の差し替え先を取りに行っている",
+  );
+  for (const part of rig.parts.voice.filter((part) => part.size > 0)) {
+    assertEquals(
+      rig.mock.requests.some((request) => request.repo === REPO && request.path === part.path),
+      true,
+      `元リポの ${part.path} を取っていない`,
+    );
+  }
+});
+
 Deno.test("components: 差し替え先の part が元リポの別部品と同じ path でも進捗は 2 本として数える", async () => {
   // 差し替え先の `voice` を元リポの `front` と同じ stem で書く = 同じ path の part が 2 リポに並ぶ。
   const rig = await prepareSeats({ sameGraph: true, replacementStem: "front/model.f32" });

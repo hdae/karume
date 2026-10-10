@@ -408,7 +408,10 @@ export const loadContainerComponents = async <Admitted>(
   // 席（部品ごとの出所）— 差し替えは別リポの manifest を読んで**同じ役割**の容器を引く。
   const seats: Seat[] = [];
   for (const key of componentKeys) {
-    const base = selection.containers[key];
+    // MUST: 役割の表は own のキーでだけ引く（横断規約「シンボル束縛は `Object.hasOwn`」）— 上の
+    // 検査は `Object.keys`（own）で行っているので、直接添字で継承プロパティ（`Object.create` や
+    // プロトタイプ汚染）を読むと、検査を通っていない値が席に座る。
+    const base = Object.hasOwn(selection.containers, key) ? selection.containers[key] : undefined;
     if (base === undefined) {
       throw new Error(
         `${where}: 部品 '${key}' の容器が manifest に無い` +
@@ -417,7 +420,7 @@ export const loadContainerComponents = async <Admitted>(
           }）`,
       );
     }
-    const replacement = replacements[key];
+    const replacement = Object.hasOwn(replacements, key) ? replacements[key] : undefined;
     if (replacement === undefined) {
       seats.push({ key, loaded, container: base });
       continue;
@@ -428,12 +431,13 @@ export const loadContainerComponents = async <Admitted>(
       toManifestSource(replacement.source, seatWhere),
       manifestOptions,
     );
-    const container = resolveSelection(other.manifest, {
+    const { containers } = resolveSelection(other.manifest, {
       ...(replacement.model === undefined ? {} : { model: replacement.model }),
       ...(replacement.quant === undefined ? {} : { quant: replacement.quant }),
       // 未知の役割名は resolveSelection が `ManifestReferenceError`（利用可能な部品つき）で落とす。
       weights: [key],
-    }).containers[key];
+    });
+    const container = Object.hasOwn(containers, key) ? containers[key] : undefined;
     if (container === undefined) {
       throw new Error(`${seatWhere}: 参照先の manifest に部品 '${key}' の容器が無い`);
     }
