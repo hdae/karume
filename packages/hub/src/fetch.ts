@@ -27,6 +27,7 @@ import { HubError, ManifestFormatError, ManifestReferenceError } from "./errors.
 import {
   type FileRef,
   fileRefKey,
+  isRepoName,
   type Manifest,
   MANIFEST_FILENAME,
   parseManifest,
@@ -156,9 +157,21 @@ export const loadManifest = async (
   ref: HubRepoRef | DistributionSource,
   options: LoadManifestOptions = {},
 ): Promise<LoadedManifest> => {
-  await purgeLegacyCaches(options);
   // 取得元の判別は**同一性**で行う（`source.ts` — ブランド欄も構造判別も持たせない）。
-  const driver = driverOf(isDistributionSource(ref) ? ref : createHfSource(ref));
+  const isSource = isDistributionSource(ref);
+  // MUST: HF の repo 名は取得にも旧名前空間の回収にも触れる前に綴りを見る — repo は取得層で
+  // percent-encode されずに URL へ綴り込まれる（`/` が構造要素）ので、`?` `#` は
+  // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` や 3 セグメント以上は別の path を
+  // 指す。受理集合は越境参照の検査と同じ 1 本（{@link isRepoName}）。エラーを組み立てるのは
+  // 共通層なので、検査は取得元アダプター（`sources/hf.ts`）ではなくここに置く。
+  if (!isSource && !isRepoName(ref.repo)) {
+    throw new HubError(
+      `loadManifest: repo '${ref.repo}' が HF の 'owner/name' でない` +
+        `（2 セグメントちょうど・許可文字 [A-Za-z0-9._-]・先頭ドット禁止）`,
+    );
+  }
+  await purgeLegacyCaches(options);
+  const driver = driverOf(isSource ? ref : createHfSource(ref));
   let generation: string;
   try {
     generation = await driver.resolveGeneration(options);

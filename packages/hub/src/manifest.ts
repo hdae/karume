@@ -555,12 +555,18 @@ const assertPath = (fail: Fail, path: string, where: string): void => {
 };
 
 /**
- * 越境参照の `repo`（`owner/name`）を検査する。取得層が URL へ綴り込む生文字列なので、
- * {@link REPO_SEGMENT_RE} の許可リストを 2 セグメントちょうどに掛ける。
+ * HF の repo 名（`owner/name`）の綴りか — {@link REPO_SEGMENT_RE} の許可リストを 2 セグメント
+ * ちょうどに掛ける。取得層が URL へ綴り込む生文字列なので、越境参照の検査と HF 取得元の入口
+ * （`sources/hf.ts`）が**この 1 本**を共有する（受理集合を入口ごとに分けない）。
  */
-const assertRepo = (fail: Fail, repo: string, where: string): void => {
+export const isRepoName = (repo: string): boolean => {
   const segments = repo.split("/");
-  if (segments.length !== 2 || !segments.every((segment) => REPO_SEGMENT_RE.test(segment))) {
+  return segments.length === 2 && segments.every((segment) => REPO_SEGMENT_RE.test(segment));
+};
+
+/** 越境参照の `repo`（`owner/name`）を検査する（{@link isRepoName}）。 */
+const assertRepo = (fail: Fail, repo: string, where: string): void => {
+  if (!isRepoName(repo)) {
     throw fail.format(
       `${where}.repo: 'owner/name' の 2 セグメントでない / 許可文字 [A-Za-z0-9._-]（先頭ドット禁止）` +
         `に一致しない: '${repo}'`,

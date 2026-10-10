@@ -7,6 +7,7 @@ import {
   type DirectoryAdapter,
   fetchAssets,
   type FileRef,
+  HubError,
   HubFetchError,
   type LoadedManifest,
   loadManifest,
@@ -207,6 +208,39 @@ Deno.test("loadManifest: 可変 ref の解決失敗はオフライン不可と�
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, undefined);
   assert(error.message.includes("オフライン"), "オフライン不可であることを明示する");
+});
+
+Deno.test("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", async (t) => {
+  // repo は取得層で percent-encode されずに URL へ綴り込まれる（`/` が構造要素）ので、`?` `#` は
+  // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` と 3 セグメント以上は別の path を指す。
+  const cases: readonly [string, string][] = [
+    ["query の ?", "someone/anima?untrusted=yes"],
+    ["fragment の #", "someone/anima#frag"],
+    ["percent の %", "someone/anima%2Fother"],
+    ["親ディレクトリ ../", "../anima"],
+    ["3 セグメント", "someone/anima/extra"],
+    ["1 セグメント", "anima"],
+  ];
+  for (const [label, repo] of cases) {
+    await t.step(label, async () => {
+      for (const revision of [undefined, SHA]) {
+        const mock = createMockFetch({ sha: SHA, files: serveAll() });
+        const error = await assertRejects(
+          () =>
+            loadManifest(
+              { repo, hubUrl: HUB_URL, ...(revision === undefined ? {} : { revision }) },
+              {
+                fetch: mock.fetch,
+                caches: new MemoryCacheStorage(),
+              },
+            ),
+          HubError,
+        );
+        assert(error.message.includes(repo), `${error.message} が受け取った repo を名乗っていない`);
+        assertEquals(mock.calls, [], "不正な repo のまま取得へ出ている");
+      }
+    });
+  }
 });
 
 Deno.test("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", async (t) => {

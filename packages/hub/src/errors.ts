@@ -47,7 +47,8 @@ type HubErrorOptions = {
  * — `openAsset` が返す区間読み — の失敗は取得元の素の `Error` のまま上がり、この基底を通らない。
  *
  * 直接 throw するのは「下の 5 分類のどれでもない、利用者が分岐すべき失敗」だけ — 現状は
- * `evictCachedAssets` が取得元の能力不足（キャッシュを持たない取得元）を断る 1 箇所。
+ * `evictCachedAssets` が取得元の能力不足（キャッシュを持たない取得元）を断る箇所と、
+ * `loadManifest` が HF の `owner/name` でない repo 名を取得の前に断る箇所の 2 つ。
  */
 export class HubError extends Error {
   /** 失敗時点で判明している利用可能 model / quant / dtype ラベル。 */
