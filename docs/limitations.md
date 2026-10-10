@@ -447,6 +447,16 @@ initializer にだけ掛かり、食い違えば重みを取る前に `prepareCo
 素 fetch へ縮退する余地が構造的に無く、fail loud で落ちる（ADR
 [0070](decisions/0070-shard-loading-admission.md) 追記）。`onCacheError` 診断が届くのは相 2 のみ。
 
+## hub: 別々のロードが同じファイルを同時に温めると、両方がダウンロードする（by-design）
+
+`prefetchAssets`（相 1）は、取得層の同時取得の合流（single-flight — 同じキーへの並行取得を 1 本に
+束ねる仕組み）の対象外である。合流は「先に走った取得が受け取ったバイト列を後発へ渡す」契約で、
+バイト列を手元に持たない温めには渡すものが無い（取得層 `@hdae/fetch-cache` 0.8.0 の by-design）。
+そのため、別々のロード（別の `loadManifest` から始まる 2 本のロード）が同じファイルを同時に温めると、
+両方が network に出る。キャッシュへの格納は同じ内容の上書きなので正しさは壊れず、増えるのは帯域
+だけである。1 回のロードの中では取得計画を一意化するので重複しない。ロードを跨いで温めを共有する
+仕組みは、実需が出てから足す。
+
 ## 見積り（`PreparedModel.estimate` / `estimateGraphMemory`）の `workspaceBytes` は近似（非勘定は `unaccounted` が列挙する）
 
 `scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
@@ -1570,27 +1580,44 @@ hub が「未対応の major」として落とし（`packages/hub/src/manifest.t
 資産キャッシュのキーは内容キー（`Authorization` を含まない）で、名前空間も取得層の固定
 1 個。認証付きで取得した gated 資産の写しは、同一端末・同一 origin の無認証呼び出しにも
 ヒットする。gated 資産の運用予定が無く、credential 別の名前空間隔離は過剰防御だったため
-撤去した（ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 3 — 将来 gated 運用を
-始める場合は custom `caches` ラッパで隔離を再導入できる）。
+撤去した（ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 3）。
 
-## hub: ローカル取得元の検証は `size` だけ（sha256 は照合しない・改竄は検出しない）
+将来 gated 運用を始める場合、**custom `caches` ラッパだけでは隔離にならない**。取得層は
+プロセス内の同時取得を内容キーだけで合流させ（single-flight）、合流した後発の取得には先に走った
+取得のバイト列を渡す — 後発が渡した `caches`・認証ヘッダ・`fetch` は使われない（取得層
+`@hdae/fetch-cache` 0.8.0 の by-design）。認証付きの取得が走っている間に同じファイルを無認証で
+要求すると、キャッシュを分けていても認証付きのバイト列が届く。隔離には、合流キーを認証ごとに
+分けること（取得層の変更）か、実行環境（origin・プロセス）を分けることが要る（ADR 0080 追記
+2026-10-10）。
+
+## hub: ローカル取得元はファイル全体の sha256 を照合しない（照合するのはコンテナの descriptor と読んだ block）
 
 `localDirectory` / `denoDirectory`（`@karume/hub/deno`）で手元のディレクトリを取得元にした場合、
-読んだバイト列に掛かる門は **`karume.json` が宣言する `size` との厳密一致だけ**である。**`sha256`
-は照合しない**（記録を信頼する）ので、次の 2 つは区別できる:
+ホスト（hub）は**ファイル全体の sha256 を照合しない**（記録を信頼する）。照合の範囲は読み方で
+3 つに分かれる:
 
-- 検出する: 途中で切れたコピー・別 quant / 別モデルのファイルの取り違え・欠損（読めなければ
-  実体のパスを名乗って fail loudly）。
-- **検出しない**: バイト数が変わらない書き換え（改竄・ディスク上のサイレントなビット腐敗）。
+1. **manifest の `assets` を全量で読むファイル**（tokenizer 等 — `fetchAssets`）: 門は
+   `karume.json` が宣言する `size` との厳密一致だけ。途中で切れたコピー・別 quant / 別モデルの
+   ファイルの取り違え・欠損（読めなければ実体のパスを名乗って fail loudly）は検出し、バイト数が
+   変わらない書き換え（改竄・ディスク上のサイレントなビット腐敗）は検出しない。`openAsset` の
+   区間読みが見るのは宣言 `size` の境界だけ。
+2. **コンテナ（`krm` の part）の descriptor と、読んだ block**: ローカル取得元は未検証の取得元と
+   して扱われ（`packages/hub/src/container.ts` の `verified`）、runtime の `openContainer` が
+   descriptor の 2 文書を manifest の期待値（長さ + sha256）と照合し、block を読むたびにその
+   sha256 を照合する（`packages/runtime/src/format/container/open.ts` の `readBlock`）。読んだ
+   block の改竄はここで検出する。
+3. **照合しないもの**: コンテナの読まれなかった領域と、どのファイルについてもファイル全体の
+   ハッシュ。
 
 by-design の理由は取得物と資産の違いで、**手元の配布形は利用者の管理物**という前提に立っている
 （配布元から取得したバイト列ではない）。毎起動の全量ハッシュ（gemma4 E2B なら 3.8GiB）に見合う
 脅威が無く、ADR [0080](decisions/0080-hub-fetch-cache-050.md) 決定 1 が network 経路から消した
 コストをローカルで買い戻すことになる。`size` は読み終えた時点でタダで分かるので門として残す。
 
-**改竄検出が要る運用は HF 経路（`HubRepoRef`）を使うこと** — そちらは取得時に sha256 を検証して
-記録を焼き、記録との不一致は自動 evict + 取り直し（self-heal）になる。設計の正本は ADR
-[0086](decisions/0086-distribution-source.md) 決定 2。
+**ファイル全体の改竄検出が要る運用は HF 経路（`HubRepoRef`）を使うこと** — そちらは取得時に
+ファイル全体の sha256 を検証して記録を焼き、記録との不一致は自動 evict + 取り直し（self-heal）に
+なる（格納後のサイレントなビット腐敗は検出しない — ADR [0080](decisions/0080-hub-fetch-cache-050.md)
+決定 1）。設計の正本は ADR [0086](decisions/0086-distribution-source.md) 決定 2 とその追記。
 
 ## sha256 参照門は参照環境専用 — クロスデバイスのビット同一は保証しない
 
@@ -1826,15 +1853,24 @@ fetch-cache 0.7.0 への追従（ADR [0094](decisions/0094-hub-cache-inventory-a
 hub 自前の受信バイトの門（`fetch` ラッパ）を撤去した。HF 取得元でバイト数に掛かる門は次のとおり:
 
 - **資産**: 取得層 HF 層の `expectedBytes`（manifest の `size`）が受信の上限で、宣言を超えた時点で
-  打ち切る。全量受信後の厳密一致と sha256 の照合は従来どおり。どちらの不一致も hub からは
-  `HubFetchError`（`cause` に取得層のエラー）として上がる — `IntegrityError` を投げるのはローカル
-  取得元だけ。
+  打ち切る。全量面（`fetchAssets`）では全量受信後の厳密一致と sha256 の照合は従来どおり。どちらの
+  不一致も hub からは `HubFetchError`（`cause` に取得層のエラー）として上がる — `IntegrityError` を
+  投げるのはローカル取得元だけ。
+- **温め面（`prefetchAssets` と、`openAsset` / 容器面が在庫の無い参照に挟む温め）は不足を検出しない**:
+  取得層の prefetch は `expectedBytes` を受信の上限にしか使わない。「sha256 は正しいが宣言 `size`
+  より短い」実体（書き手側の欠陥 manifest）は温めが成功し、進捗は宣言 `size` の complete を出す。
+  キャッシュに載るのは sha256 どおりの正しいバイト列で、宣言の範囲のうち実体の外を読むと後段の
+  読み（容器の block・`openAsset` の区間）が温めとは別の文言のエラーで落ちる（黙って 0 埋めの値は
+  返らない）。同じ参照を全量面で取ると `HubFetchError` になる。温め面で不足を捕まえるには、取得層が
+  受信の終端で受信長と `expectedBytes` の一致を見る変更（超過の打ち切りと対称）が要り、取得層との
+  合意が前提。
 - **`karume.json`**: 事前の期待 sha256 も size も持てないので、1 MiB の上限は**全量受信後**に
   `parseManifest` が見る（取得層に「厳密一致なしの上限」が無い）。上限超の応答を返すミラーに対しては、
   その応答を受信し切るまでのメモリを払う。
 - **content-length の事前突合はしない**（by-design）: Fetch 仕様上 Content-Length は信頼できず、
   Content-Encoding 越しでは宣言と実受信が食い違うのが正常なので、汎用の取得層に入れると誤検知になる。
-  size の食い違いは受信で捕まる（超過は途中で・不足は全量受信後に）。
+  size の食い違いは受信で捕まる（超過はどの面でも途中で・不足は全量面だけが全量受信後に — 温め面の
+  不足は上の項）。
 
 ## Gemma 4 QAT: 実験段階の固定 mobile 形式
 

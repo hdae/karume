@@ -11,8 +11,9 @@
 // ④ 中断しなければ resolve する（門が常に投げる形へ倒れていない）。
 //
 // NOTE: 譲り先が `setTimeout` か `MessageChannel` かは③④の観測では区別できない（どちらも
-// タスク）。そこは実装側の MUST（非表示タブの timer throttling を生成速度に持ち込まない）で、
-// ブラウザ実測の話なのでここでは縛らない。ここが縛るのは「マクロタスクへ譲っている」こと。
+// タスク）。実装は timer で届く中断との順序を保つために `setTimeout(0)` に固定し、非表示タブの
+// timer throttling を受け入れている — 理由の正本は `src/concurrency/abort.ts` の NOTE。ブラウザ
+// 実測の話なのでここでは縛らない。ここが縛るのは「マクロタスクへ譲っている」こと。
 
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { settleAbort } from "../src/concurrency/abort.ts";

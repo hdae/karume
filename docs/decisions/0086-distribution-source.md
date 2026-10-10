@@ -106,6 +106,13 @@ block を読むたびにその sha256 を照合する（`packages/runtime/src/fo
 `readBlock`）。つまり容器の部分では**読んだ block の改竄を検出する**。size の厳密一致だけが門として
 残るのは、manifest `assets` の `FileRef` で直接読むファイルである。
 
+追記（2026-10-10 — manifest の上限の判定点）: 上の「HF の `MAX_MANIFEST_BYTES` は『受信を途中で
+止める』防波堤」は、取得層 0.7.0 への追従（ADR [0094](0094-hub-cache-inventory-and-eviction.md)
+決定 4）で成り立たなくなった。取得層に「厳密一致なしの上限」が無いため、HF 取得元でも 1 MiB の
+上限は**全量を受け取った後**に `parseManifest` が見る（受信を途中で止める門は無い）。ローカルと
+HF の門の性格の違いは消え、どちらも読み切ってから落とす（`docs/limitations.md` の「hub: HF
+取得元の受信上限は取得層の `expectedBytes`」）。
+
 ### 3. 越境は明示 mapping → fail loudly（暗黙の推測・暗黙の降格は禁止）
 
 越境参照（`FileRef` の `repo` + `revision` — ADR 0038 §7）の解決順は 2 段で、**どこにも推測を

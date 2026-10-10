@@ -29,7 +29,11 @@ import {
 /** manifest のファイル名（リポジトリ直下の固定名 — ADR 0041 §1）。 */
 export const MANIFEST_FILENAME = "karume.json";
 
-/** manifest 本体の上限（DoS 防波堤 — ADR 0041 §7。取得中にも同じ値で abort する）。 */
+/**
+ * manifest 本体の上限（DoS 防波堤 — ADR 0041 §7）。判定は全量を受け取った後に行う
+ * （{@link parseManifest} と、ローカル取得元の読み口）— 取得層に「厳密一致なしの上限」が無いので、
+ * HF 取得元でも受信の途中では止めない（ADR 0094 決定 4）。
+ */
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
 
 /** 規模上限（ADR 0041 §7）。 */
