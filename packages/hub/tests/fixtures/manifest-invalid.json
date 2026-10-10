@@ -1593,6 +1593,196 @@
       }
     },
     {
+      "name": "pipeline-major-overflows-to-infinity",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/5",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+            "weights": {
+              "net": {
+                "f16": {
+                  "container": {
+                    "descriptor": {
+                      "graph": {
+                        "length": 11,
+                        "sha256": "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+                      },
+                      "model": {
+                        "length": 5,
+                        "sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+                      }
+                    },
+                    "parts": [
+                      {
+                        "path": "net/f16.part0.krm",
+                        "size": 40,
+                        "sha256": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+                      },
+                      {
+                        "path": "net/model.f16.safetensors",
+                        "size": 8,
+                        "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                      }
+                    ]
+                  }
+                },
+                "i8": {
+                  "container": {
+                    "descriptor": {
+                      "graph": {
+                        "length": 11,
+                        "sha256": "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+                      },
+                      "model": {
+                        "length": 5,
+                        "sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+                      }
+                    },
+                    "parts": [
+                      {
+                        "path": "net/i8.part0.krm",
+                        "size": 40,
+                        "sha256": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+                      },
+                      {
+                        "path": "net/model.i8.safetensors",
+                        "size": 4,
+                        "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "pipeline-major-beyond-safe-integer",
+      "error": "ManifestFormatError",
+      "manifest": {
+        "format": "karume/5",
+        "generator": "karume/0.1.0",
+        "defaultModel": "m",
+        "models": {
+          "m": {
+            "pipeline": "anima/9007199254740993",
+            "weights": {
+              "net": {
+                "f16": {
+                  "container": {
+                    "descriptor": {
+                      "graph": {
+                        "length": 11,
+                        "sha256": "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+                      },
+                      "model": {
+                        "length": 5,
+                        "sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+                      }
+                    },
+                    "parts": [
+                      {
+                        "path": "net/f16.part0.krm",
+                        "size": 40,
+                        "sha256": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+                      },
+                      {
+                        "path": "net/model.f16.safetensors",
+                        "size": 8,
+                        "sha256": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+                      }
+                    ]
+                  }
+                },
+                "i8": {
+                  "container": {
+                    "descriptor": {
+                      "graph": {
+                        "length": 11,
+                        "sha256": "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+                      },
+                      "model": {
+                        "length": 5,
+                        "sha256": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+                      }
+                    },
+                    "parts": [
+                      {
+                        "path": "net/i8.part0.krm",
+                        "size": 40,
+                        "sha256": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+                      },
+                      {
+                        "path": "net/model.i8.safetensors",
+                        "size": 4,
+                        "sha256": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "assets": {
+              "tokenizer": {
+                "path": "tokenizer/tokenizer.json",
+                "size": 12,
+                "sha256": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+              }
+            },
+            "quants": {
+              "f16": {
+                "weights": {
+                  "net": "f16"
+                },
+                "session": {}
+              },
+              "w8": {
+                "weights": {
+                  "net": "i8"
+                },
+                "session": {
+                  "linearCompute": "a8"
+                }
+              }
+            },
+            "defaultQuant": "w8",
+            "pipelineConfig": {}
+          }
+        }
+      }
+    },
+    {
       "name": "weights-missing",
       "error": "ManifestFormatError",
       "manifest": {

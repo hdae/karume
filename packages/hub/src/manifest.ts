@@ -1012,7 +1012,16 @@ const parsePipeline = (fail: Fail, raw: unknown, where: string): PipelineId => {
   if (matched === null) {
     throw fail.format(`${where}.pipeline: '<name>/<major>' の形でない: '${raw}'`);
   }
-  return { name: matched[1], major: Number(matched[2]) };
+  // 正規表現は桁数を縛らないので、変換後に安全整数かを見る — 見ないと 400 桁は `Infinity`、
+  // 2^53 超は隣の整数へ丸まった major が「形は正しい」として models の裁定まで届き、エラー文に
+  // manifest に書かれていない値を名乗らせる。
+  const major = Number(matched[2]);
+  if (!Number.isSafeInteger(major)) {
+    throw fail.format(
+      `${where}.pipeline: major が安全な整数の範囲（${Number.MAX_SAFE_INTEGER} 以下）に無い: '${raw}'`,
+    );
+  }
+  return { name: matched[1], major };
 };
 
 const parseFormat = (fail: Fail, raw: unknown): string => {
