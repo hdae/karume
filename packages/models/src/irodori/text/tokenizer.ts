@@ -15,7 +15,7 @@
  * 後段（BOS 前置・切り詰め・右 pad・マスク）だけ。
  */
 
-import { splitAddedTokens } from "../../text/added-tokens.ts";
+import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
 import {
   asFiniteNumber,
   asId,
@@ -54,11 +54,11 @@ type IrodoriPaddedIds = {
 
 export class IrodoriTokenizer {
   readonly #assets: IrodoriTokenizerAssets;
-  readonly #added: string[];
+  readonly #added: AddedTokenMatcher;
 
   constructor(assets: IrodoriTokenizerAssets) {
     this.#assets = assets;
-    this.#added = [...assets.addedTokens.keys()];
+    this.#added = createAddedTokenMatcher([...assets.addedTokens.keys()]);
   }
 
   /**
@@ -73,7 +73,7 @@ export class IrodoriTokenizer {
     // 齟齬なので素の `Error` のまま残す。
     assertEncodableText(text, "irodori の本文");
     const ids: number[] = [];
-    for (const chunk of splitAddedTokens(text, this.#added)) {
+    for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
         continue;

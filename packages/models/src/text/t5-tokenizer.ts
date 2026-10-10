@@ -19,7 +19,7 @@
  */
 
 import { ModelInputError } from "../errors.ts";
-import { splitAddedTokens } from "./added-tokens.ts";
+import { type AddedTokenMatcher, createAddedTokenMatcher } from "./added-tokens.ts";
 import {
   asFiniteNumber,
   asPositiveInteger,
@@ -119,12 +119,12 @@ const describeText = (text: string): string =>
 export class T5UnigramTokenizer {
   readonly #tables: T5Tables;
   readonly #policy: T5Policy;
-  readonly #added: string[];
+  readonly #added: AddedTokenMatcher;
 
   constructor(tables: T5Tables, policy: T5Policy) {
     this.#tables = tables;
     this.#policy = policy;
-    this.#added = [...tables.addedTokens.keys()];
+    this.#added = createAddedTokenMatcher([...tables.addedTokens.keys()]);
   }
 
   /** 1 断片を id 列へ（語彙外は方針どおり unk へ融合するか拒む）。 */
@@ -175,7 +175,7 @@ export class T5UnigramTokenizer {
     };
     // 先頭から順に積むだけなので、予算に達した後の chunk / 断片を捨てても id 列は変わらない
     // （切り詰めの後ろを符号化する費用を入力長に比例させない — 拒む方針でも同じ所で止まる）。
-    for (const chunk of splitAddedTokens(text, this.#added)) {
+    for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
         if (!hasRoom()) break;
         ids.push(this.#tables.addedTokens.get(chunk.text) as number);

@@ -22,7 +22,7 @@
  * 追加語彙の並びも復号の口も、インスタンス 1 個につき 1 回だけ組む。
  */
 
-import { splitAddedTokens } from "../../text/added-tokens.ts";
+import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
 import { bpeEncode } from "../../text/bpe.ts";
 import { assertEncodableText } from "../../text/code-points.ts";
 import {
@@ -46,12 +46,12 @@ export type GemmaDecodeOptions = {
 
 export class GemmaTokenizer {
   readonly #assets: GemmaTokenizerAssets;
-  readonly #added: string[];
+  readonly #added: AddedTokenMatcher;
   readonly #tokenOfAdded: Map<number, string>;
 
   constructor(assets: GemmaTokenizerAssets) {
     this.#assets = assets;
-    this.#added = [...assets.addedTokens.keys()];
+    this.#added = createAddedTokenMatcher([...assets.addedTokens.keys()]);
     this.#tokenOfAdded = new Map(
       [...assets.addedTokens].map(([token, id]) => [id, token] as const),
     );
@@ -103,7 +103,7 @@ export class GemmaTokenizer {
   encode(text: string): number[] {
     assertEncodableText(text, "Gemma の本文");
     const ids: number[] = [];
-    for (const chunk of splitAddedTokens(text, this.#added)) {
+    for (const chunk of this.#added.split(text)) {
       if (chunk.added) {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
         continue;

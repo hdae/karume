@@ -27,7 +27,7 @@
  */
 
 import { ModelInputError } from "../../errors.ts";
-import { splitAddedTokens } from "../../text/added-tokens.ts";
+import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
 import { asRecord, asString } from "../../text/asset-gates.ts";
 import {
   METASPACE,
@@ -59,13 +59,13 @@ const SPACE_METASPACE = " " + METASPACE;
 export class WanPromptEncoder {
   readonly #promptClean: PromptCleanTables;
   readonly #t5: T5UnigramTokenizer;
-  readonly #added: string[];
+  readonly #added: AddedTokenMatcher;
   readonly #maxLength: number;
 
   constructor(assets: WanTokenizerAssets) {
     this.#promptClean = assets.promptClean;
     this.#t5 = new T5UnigramTokenizer(assets.t5, { unknown: "reject", overflow: "reject" });
-    this.#added = [...assets.t5.addedTokens.keys()];
+    this.#added = createAddedTokenMatcher([...assets.t5.addedTokens.keys()]);
     this.#maxLength = assets.t5.maxLength;
   }
 
@@ -87,7 +87,7 @@ export class WanPromptEncoder {
    */
   encode(prompt: string, label: string = "プロンプト"): Int32Array<ArrayBuffer> {
     const cleaned = this.clean(prompt, label);
-    for (const chunk of splitAddedTokens(cleaned, this.#added)) {
+    for (const chunk of this.#added.split(cleaned)) {
       if (chunk.added) {
         throw new ModelInputError(
           `${label}: 特殊トークン ${JSON.stringify(chunk.text)} を含む — 本文中の特殊トークンは` +

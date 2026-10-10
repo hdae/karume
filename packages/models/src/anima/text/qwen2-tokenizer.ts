@@ -21,7 +21,7 @@
  * （{@link normalizeNfc}）。
  */
 
-import { splitAddedTokens } from "../../text/added-tokens.ts";
+import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
 import { toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges } from "../../text/code-ranges.ts";
 
@@ -219,13 +219,13 @@ const matchesFolded = (
 
 export class Qwen2Tokenizer {
   readonly #assets: Qwen2Assets;
-  readonly #added: string[];
+  readonly #added: AddedTokenMatcher;
   readonly #byteEncoder: readonly string[];
   readonly #encoder = new TextEncoder();
 
   constructor(assets: Qwen2Assets) {
     this.#assets = assets;
-    this.#added = [...assets.addedTokens.keys()];
+    this.#added = createAddedTokenMatcher([...assets.addedTokens.keys()]);
     this.#byteEncoder = buildByteEncoder();
   }
 
@@ -256,7 +256,7 @@ export class Qwen2Tokenizer {
     const ids: number[] = [];
     // 先頭から順に積むだけなので、上限に達した後の chunk / pre-token を捨てても id 列は変わら
     // ない（O(n²) の BPE を切り詰めの後ろまで回さない）。
-    for (const chunk of splitAddedTokens(text, this.#added)) {
+    for (const chunk of this.#added.split(text)) {
       if (ids.length >= maxLength) break;
       if (chunk.added) {
         ids.push(this.#assets.addedTokens.get(chunk.text) as number);
