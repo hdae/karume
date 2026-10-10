@@ -18,7 +18,9 @@ MAX_SAFE_INT = 2**53 - 1
 
 _SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*"
 _SYMBOL_RE = re.compile(_SYMBOL_PATTERN)
-_DIM_RE = re.compile(rf"(\d+)?({_SYMBOL_PATTERN})(?:\+(\d+))?")
+# 数字は ASCII に限る（`\d` は Unicode の数字〈アラビア数字・全角〉も拾い、TS の `\d` と
+# 受理集合が割れる。`int()` も Unicode 数字を変換するので format との往復も崩れる）。
+_DIM_RE = re.compile(rf"([0-9]+)?({_SYMBOL_PATTERN})(?:\+([0-9]+))?")
 
 
 class DimError(ValueError):
