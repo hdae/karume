@@ -187,6 +187,10 @@ WAN22_PIPELINE_CLASS = "WanTi2vPipeline"
 #: カードが併記する視認の結果は同じ追記の利用者の判定（参照席と実用席の 12 対・50 ステップ・
 #: 1280×704・33 フレーム — 劣化なし）。
 WAN22_PRACTICAL_QUANT_ERROR = ("f16+dit8-a8-attn8-s16", "f16+dit8", "0.044", "0.049")
+#: I2V の実用席の自機 A/B（ADR 0121 段 9d・`e2e_wan_ti2v_ab_test.ts` の i2v-33f —
+#: 1280×704・33 フレーム・条件画像 1 枚・fit crop・opt-in）: step 1 の潜在の relRMS。帯は × 2 の
+#: 切り上げ（9.3e-2）。
+WAN22_PRACTICAL_QUANT_I2V_ERROR_33 = "0.046"
 
 
 @dataclass(frozen=True)
@@ -357,8 +361,12 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
     I2V（ADR 0121 決定 11・追記「段 9b の結果」）: 条件づけは diffusers の `expand_timesteps` の形
     （`packages/models/src/wan/dit-loop.ts` の `withWanFirstFrameCondition` / `wanConditionMask` —
     条件マスクは先頭の潜在フレームのトークンが真・条件側の時刻は t = 0）。検証は RTX 3080 Ti・
-    precomputed の経路・2 ステップ × 9 フレームの sha 行だけ（詳細は {@link _WAN22_VERIFICATION}）。
-    ブラウザでは I2V を回していない（gpu-lab の画像の入力は段 9c で別に足す）。"""
+    precomputed の経路・2 ステップ × 9 フレームと opt-in の 50 ステップ × 33 フレームの sha 行だけ
+    （詳細は {@link _WAN22_VERIFICATION}）。ブラウザは RTX 5070 Ti の Chrome（gpu-lab・
+    2026-10-10）で実用席・GPU の umT5・条件画像 896×1152 → 704×1280（crop）・20 ステップ・
+    shift 7 の 33 / 121 フレームが完走した組だけ（壁 390.0 / 1,346.5 s — 一次資料は git 追跡外の
+    `outputs/bench-browser/wan-browser-2026-10-10T14-11-07.191Z.json`）。参照ケースとは照合しない
+    （gpu-lab の仕様）ので、品質は主張しない。"""
     where = _encoder_whereabouts(manifest)
     return [
         "## What is this",
@@ -393,12 +401,15 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  pinned by the SHA-256 of its frames; and in full 50-step runs of both quants at",
         "  1280 × 704 with 33 frames (see Resources).",
         "- Image to video was verified end to end in Deno on an NVIDIA GeForce RTX 3080 Ti with",
-        "  the precomputed embeddings, in 2-step runs of 9 frames pinned by the SHA-256 of their",
-        "  frames (see Determinism and verification).",
+        "  the precomputed embeddings, in 2-step runs of 9 frames and (opt-in) 50-step runs of 33",
+        "  frames pinned by the SHA-256 of their frames (see Determinism and verification).",
         "- In a browser, Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the",
         "  `f16+dit8-a8-attn8-s16` quant with the text encoder on the GPU, 1280 × 704, 121 frames)",
-        "  in 40.3 minutes. Shorter clips, the `f16+dit8` quant and the precomputed embeddings",
-        "  have not been run in a browser yet, and neither has image to video.",
+        "  in 40.3 minutes. Shorter text-to-video clips, the `f16+dit8` quant and the precomputed",
+        "  embeddings have not been run in a browser yet. Image to video finished there with the",
+        "  same quant and the text encoder on the GPU, from an 896 × 1152 image cropped to",
+        "  704 × 1280, in 20-step runs with shift 7: 390.0 s for 33 frames and 1,346.5 s for 121",
+        "  frames. These browser runs were not compared with a reference.",
         *_reader_lines(manifest, WAN22_SUPPORTED_PIPELINE),
     ]
 
@@ -718,8 +729,11 @@ _WAN22_FRAMES_CHECKED = (
 #: T2V の帯との比は latents.1 だけを書く（latents.0 は T2V の帯 3.6e-5 と桁が違い「約 4 倍」と
 #: 一般化できない・フレームの帯は I2V の方が狭い）。sha 行は全て RTX 3080 Ti・precomputed の経路
 #: （既定のレーン = 参照席と実用席の boxing-cats・opt-in = cat-dog-baking / ferret / 704×1280）。
-#: 50 ステップの I2V は記録だけ（非有限 0 — sha 行を持たない）。実用席の品質の数（段 7 の A/B と
-#: 視認）は T2V で測ったもので、I2V の席の比べは段 9d — カードは I2V の品質を主張しない。
+#: 50 ステップの I2V（1280×704・33 フレーム）は opt-in の sha 行を参照席と実用席の 2 本持つ
+#: （実用席は参照席と 1 bit 以上違う床 — `136cee60` / `28ab44fe`・`KARUME_WAN_TI2V_I2V_FULL=1`）。
+#: 実用席の品質の数（段 7 の A/B と視認）は T2V で測ったもの。I2V の席の比べは段 9d で済
+#: （A/B 0.046・視認 12 対に破綻なし — 2026-10-10）で、同じ文の中に I2V の分も書く。カードは上流に
+#: 対する I2V の品質は主張しない。
 #: NOTE: 元画像の寸法（832×480）は書かない — 2.1 の寸法を写さない門
 #: （`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`）に掛かる。
 _WAN22_VERIFICATION = (
@@ -734,9 +748,11 @@ _WAN22_VERIFICATION = (
     "  relative error, differs from `f16+dit8`, and repeats bit for bit. It became the default",
     "  after a visual check of 12 clips (3 prompts × seeds 42–45, 1280 × 704 with 33 frames, 50",
     "  steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06, and the same 12 clips",
-    "  side by side with `f16+dit8` showed no clear degradation on 2026-10-09. These quant",
-    "  comparisons are of text to video; the two quants have not been compared on image to",
-    "  video yet.",
+    "  side by side with `f16+dit8` showed no clear degradation on 2026-10-09. On image to",
+    "  video the same first-step check holds at 1280 × 704 with 33 frames (one image, `crop`,",
+    f"  an opt-in case: relative RMS error {WAN22_PRACTICAL_QUANT_I2V_ERROR_33}, within twice the",
+    "  measured error), and 12 clips (3 images × seeds 42–45, 1280 × 704 with 33 frames, 50",
+    "  steps) side by side with `f16+dit8` showed no clear degradation on 2026-10-10 either.",
     "- **Image to video against the upstream reference** (the `f16+dit8` quant, with the",
     "  precomputed embeddings, on an NVIDIA GeForce RTX 3080 Ti): the resized image and the",
     "  encoder input match Pillow and the upstream preprocessing bit for bit. The encoded image",
@@ -769,8 +785,9 @@ _WAN22_VERIFICATION = (
     "  1280 × 704 with 9 frames (2 steps) with both quants — the `f16+dit8-a8-attn8-s16` result",
     "  is also required to differ from the `f16+dit8` one, so the quant is known to be in use —",
     "  and, in an opt-in set, for the other two images and for 704 × 1280 with the `f16+dit8`",
-    "  quant. 50-step image-to-video runs at 1280 × 704 with 33 frames finished with both",
-    "  quants without non-finite values; they are kept for visual review and are not pinned.",
+    "  quant. In the same opt-in set, 50-step image-to-video runs at 1280 × 704 with 33 frames",
+    "  are pinned with both quants on the NVIDIA GeForce RTX 3080 Ti, the",
+    "  `f16+dit8-a8-attn8-s16` result again required to differ from the `f16+dit8` one.",
     "- **Tiled decode**: the VAE always decodes in overlapping tiles, blended in the patchified",
     "  space before the unpatchify, so the frames differ slightly from the upstream untiled",
     "  decode.",
@@ -807,9 +824,11 @@ _WAN22_I2V_INPUTS = (
 #: example は fast-png / jpeg-js〈`formatAsRGBA: false` で RGB を直接受ける —
 #: `examples/wan/decode-image.ts`〉、ブラウザは createImageBitmap と canvas〈RGBA を出す〉）。
 #: 復号の段の参照との差（EXIF の向き・アルファ・JPEG の復号器の差）は `examples/wan/README.md` と
-#: `tools/gpu-lab/README.md` と同じ事実を写す。I2V は precomputed の経路でだけ回した（GPU の umT5
-#: との組は e2e でも 50 ステップの記録でも未実行 — ADR 0121 追記「段 9b の結果」・
-#: `e2e_wan_ti2v_i2v_pipeline_test.ts`）。段の順は `pipeline.ts` の「（encoder →）text → DiT →
+#: `tools/gpu-lab/README.md` と同じ事実を写す。Deno の I2V は precomputed の経路でだけ回した（GPU の
+#: umT5 との組は e2e でも 50 ステップの sha 行でも未実行 — ADR 0121 追記「段 9b の結果」・
+#: `e2e_wan_ti2v_i2v_pipeline_test.ts`）。GPU の umT5 との組は RTX 5070 Ti の Chrome（gpu-lab・
+#: 2026-10-10）でだけ完走した（{@link _wan22_overview} の docstring）。段の順は
+#: `pipeline.ts` の「（encoder →）text → DiT →
 #: VAE」（text の段は `"gpu"` の経路だけ）。
 _WAN22_I2V_USAGE = (
     "",
@@ -840,9 +859,10 @@ _WAN22_I2V_USAGE = (
     "```",
     "",
     "With an `image`, the VAE encoder stage runs first and is disposed before the next stage",
-    "(the text encoder, or the transformer with the precomputed embeddings) is opened. Image",
-    "to video has so far been run only with the precomputed embeddings; with the text encoder",
-    "on the GPU (the default in this example) it has not been run yet.",
+    "(the text encoder, or the transformer with the precomputed embeddings) is opened. In Deno,",
+    "image to video has so far been run only with the precomputed embeddings; with the text",
+    "encoder on the GPU (the default in this example) it has been run only in Chrome (see What",
+    "is this).",
 )
 
 
@@ -1094,8 +1114,10 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"  RMS error of {error_33} at 33 frames and {error_121} at 121 frames. Side",
                 f"  by side with `{reference}` on twelve 50-step clips at 1280 × 704 with 33",
                 "  frames (seeds 42 to 45 with the three fixed prompts), no clear degradation",
-                "  was seen. Both were measured with text to video; image to video has not been",
-                "  compared between the quants yet.",
+                "  was seen. Both were measured with text to video; on image to video the",
+                f"  first-step error is {WAN22_PRACTICAL_QUANT_I2V_ERROR_33} at 33 frames (one",
+                "  image, `crop`) and twelve 50-step clips (3 images × seeds 42–45) side by side",
+                "  showed no clear degradation either.",
             ]
             if practical in seats and reference in seats
             else []

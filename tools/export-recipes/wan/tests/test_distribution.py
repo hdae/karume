@@ -2227,11 +2227,11 @@ class TestTheWan22ImageToVideoCard:
             " stage (the text encoder, or the transformer with the precomputed embeddings) is"
             " opened." in prose
         )
-        # I2V は precomputed の経路でだけ回した（GPU の umT5 との組は未実行）。
+        # Deno の I2V は precomputed の経路でだけ回した（GPU の umT5 との組は Chrome でだけ完走）。
         assert (
-            "Image to video has so far been run only with the precomputed embeddings; with the"
-            " text encoder on the GPU (the default in this example) it has not been run yet."
-            in prose
+            "In Deno, image to video has so far been run only with the precomputed embeddings;"
+            " with the text encoder on the GPU (the default in this example) it has been run only"
+            " in Chrome (see What is this)." in prose
         )
         # 2 つ目のコードブロックも閉じている（``` が偶数）。
         assert usage.count("```") == 4
@@ -2256,7 +2256,14 @@ class TestTheWan22ImageToVideoCard:
         assert "that text-to-video leaves inactive" not in prose
         # 改変の要約に VAE encoder（配布形に載る部品）が入っている。
         assert "the part of the VAE encoder that encodes one conditioning image" in prose
-        assert "have not been run in a browser yet, and neither has image to video." in prose
+        # ブラウザの I2V は完走した組として書き、参照と照合していないと名乗る（品質は主張しない）。
+        assert (
+            "Image to video finished there with the same quant and the text encoder on the GPU,"
+            " from an 896 × 1152 image cropped to 704 × 1280, in 20-step runs with shift 7:"
+            " 390.0 s for 33 frames and 1,346.5 s for 121 frames. These browser runs were not"
+            " compared with a reference." in prose
+        )
+        assert "neither has image to video" not in prose
 
     def test_it_copies_the_image_to_video_verification_figures(self, assembled22) -> None:
         """数は追記「段 9a / 9b の結果」とテストの定数（`WAN_I2V_ENCODER_BAND` 7.8e-5・
@@ -2291,21 +2298,36 @@ class TestTheWan22ImageToVideoCard:
         )
         assert "for one image at 1280 × 704 with 9 frames (2 steps) with both quants" in prose
         assert "for the other two images and for 704 × 1280 with the `f16+dit8` quant" in prose
-        assert "they are kept for visual review and are not pinned" in prose
+        # I2V の 50 ステップは 2 席とも sha 行（RTX 3080 Ti・opt-in・実用席は参照席と違う床）。
+        assert (
+            "In the same opt-in set, 50-step image-to-video runs at 1280 × 704 with 33 frames are"
+            " pinned with both quants on the NVIDIA GeForce RTX 3080 Ti, the"
+            " `f16+dit8-a8-attn8-s16` result again required to differ from the `f16+dit8` one."
+            in prose
+        )
+        assert "are not pinned" not in prose
         # T2V の照合の項は T2V と名乗る。
         assert "- **Text to video against the upstream reference**" in prose
 
-    def test_the_quality_figures_are_scoped_to_text_to_video(self, assembled22) -> None:
+    def test_the_quality_figures_say_which_task_they_were_measured_on(self, assembled22) -> None:
+        """T2V の数と I2V の数（段 9d の A/B 0.046 と視認 12 対）を同じ文の中で区別して書く。"""
         out_dir, _ = assembled22
         prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
         assert (
-            "These quant comparisons are of text to video; the two quants have not been compared"
-            " on image to video yet." in prose
+            "On image to video the same first-step check holds at 1280 × 704 with 33 frames (one"
+            " image, `crop`, an opt-in case: relative RMS error 0.046, within twice the measured"
+            " error), and 12 clips (3 images × seeds 42–45, 1280 × 704 with 33 frames, 50 steps)"
+            " side by side with `f16+dit8` showed no clear degradation on 2026-10-10 either."
+            in prose
         )
         assert (
-            "no clear degradation was seen. Both were measured with text to video; image to video"
-            " has not been compared between the quants yet." in prose
+            "no clear degradation was seen. Both were measured with text to video; on image to"
+            " video the first-step error is 0.046 at 33 frames (one image, `crop`) and twelve"
+            " 50-step clips (3 images × seeds 42–45) side by side showed no clear degradation"
+            " either." in prose
         )
+        assert "have not been compared on image to video" not in prose
+        assert "has not been compared between the quants" not in prose
         assert "Text to video has been checked end to end on the GPU: 17 frames" in prose
 
     def test_the_resources_name_what_was_measured_for_image_to_video(self, assembled22) -> None:
