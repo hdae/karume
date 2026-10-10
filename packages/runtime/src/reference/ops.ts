@@ -18,7 +18,9 @@ import {
   ARGMAX_OP,
   arityFits,
   assertAttrKeys,
+  assertAttrValues,
   assertDtype,
+  assertInputDtypes,
   assertSlotDtype,
   attentionScale,
   type BinaryOpName,
@@ -1684,12 +1686,34 @@ export const applyReferenceOpOutputs = (
   // 持たない）。照合しないと、契約が拒否する attrs（states 欄の無い attention の `window` 等）を
   // 参照だけが黙って無視し、契約違反を値にする。
   assertAttrKeys(contract, attrs, false, "reference");
+  // MUST: attrs の値・入力 dtype・形（rank の上限・軸の範囲・目標形との整合）もノードの契約検査と
+  // 同じ表で見る。見ないと、契約が拒否する組み合わせ（permute の i32 入力・expand の rank 0 入力
+  // 等）に参照だけが値を返し、テストデータの契約違反を検出できない。共有するのは受理条件だけで、
+  // 添字や数値の計算は参照が独立に持つ（GPU 側と同じ誤りを抱えないため）。
+  assertAttrValues(contract, attrs, "reference");
+  assertInputDtypes(
+    contract,
+    inputs.map((input) => input.dtype),
+    (index) => `reference の入力 ${index}`,
+    "reference",
+  );
   const declared = (): readonly number[] => {
     if (outShape === undefined) {
       throw new ReferenceOpError(`op '${op}' は出力 shape が目標形（outShape が要る）`);
     }
     return outShape;
   };
+  // sym_prefix_slice の形の契約は束縛（`coeff·sym+offset`）が要り、参照は解決済みの出力 shape
+  // しか受けないので通さない（attrs と dtype は上で見ている）。state_append は下で
+  // 「CPU 参照を持たない」として落とす。
+  if (contract.kind !== "symPrefixSlice" && contract.kind !== "stateAppend") {
+    computeOutputShape(contract, inputs.map((input) => input.shape), "reference", {
+      attrs,
+      ...(contract.kind === "reshape" || contract.kind === "expand"
+        ? { declared: declared() }
+        : {}),
+    });
+  }
   switch (contract.kind) {
     case "unary":
       return sole(referenceUnary(contract.name, inputs[0], attrs));

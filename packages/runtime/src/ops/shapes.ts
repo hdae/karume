@@ -103,8 +103,9 @@ export type ShapeContext = {
  * MUST: **契約層で見る**。カーネルの params は rank {@link STRIDED_RANK} 固定で、超過は
  * codegen 層（`stridedParams`）まで落ちて初めて CodegenError になる — 利用者から見ると
  * 「契約検査は通ったのに実行段で内部エラー」で、どの op のどの入力が悪いのか出ない。
- * ここで落とせば診断が op と入力の名前つきになり、CPU 参照（同じ契約表を通る）と GPU の
- * 受理範囲も揃う。
+ * ここで落とせば診断が op と入力の名前つきになり、CPU 参照（入口の `applyReferenceOpOutputs` が
+ * {@link computeOutputShape} を通す）と GPU の受理範囲も揃う。sym_prefix_slice だけは束縛が要るので
+ * 参照の入口はこの関数を通さない（attrs と dtype は通す）。
  */
 const assertStridedRank = (rank: number, what: string, where: string): void => {
   if (rank < 1 || rank > STRIDED_RANK) {

@@ -1781,6 +1781,42 @@ Deno.test("applyReferenceOp は契約表の kind で分岐し、アリティ違�
   );
 });
 
+// 参照はテストデータの契約違反を検出できなければならない（オラクルが契約外の入力に値を返すと、
+// GPU 側が正しく拒否する組み合わせを「参照と一致しない」ではなく「参照が答えを持つ」形で書けて
+// しまう）。attrs の値・入力 dtype・rank は op 契約表の同じ検査を通す。
+Deno.test("applyReferenceOp は op 契約外の attrs 値・入力 dtype・rank を拒否する", () => {
+  const weight = t([3, 2], [1, 2, 3, 4, 5, 6]);
+  const index = i32([2], [0, 2]);
+  // embedding の入力順は weight → index（逆だと dtype で先に落ちて attrs の値を撃てない）。
+  assertEquals(applyReferenceOp("embedding", [weight, index], { padding_idx: -1 }).shape, [2, 2]);
+  assertThrows(
+    () => applyReferenceOp("embedding", [weight, index], { padding_idx: "bad" }),
+    OpContractError,
+    "padding_idx",
+  );
+  assertThrows(
+    () => applyReferenceOp("permute", [i32([2, 2], [1, 2, 3, 4])], { dims: [1, 0] }),
+    OpContractError,
+    "dtype 'i32'",
+  );
+  assertThrows(
+    () => applyReferenceOp("expand", [t([], [5])], {}, [2, 2]),
+    OpContractError,
+    "rank 0",
+  );
+  assertThrows(
+    () =>
+      applyReferenceOp(
+        "sym_prefix_slice",
+        [bools([2, 2], [1, 0, 0, 1])],
+        { sym: "T", slices: [{ dim: 0, coeff: 1, offset: 0 }] },
+        [1, 2],
+      ),
+    OpContractError,
+    "dtype 'bool'",
+  );
+});
+
 // state を触る op は CPU 参照を持たない（値ではなく context 所有バッファへの effect）。素通り
 // させて 0 本の出力列を返すと「参照と GPU が一致した」と見なす parity テストが書けてしまうので、
 // 統一入口の**両方**（複数形・単数形）でここが落ちることを縛る。

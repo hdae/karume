@@ -864,20 +864,35 @@ export const assertNodeContract = (node: IrNode, where: string): OpContract => {
     );
   }
   assertAttrKeys(found, node.attrs, stateKeys.length > 0, where);
+  assertAttrValues(found, node.attrs, where);
+  return found;
+};
+
+/**
+ * attrs の**値域**と必須キーの存在（キー集合は {@link assertAttrKeys}）。ノードの契約検査と
+ * CPU 参照の入口（`reference/ops.ts` の `applyReferenceOpOutputs`）が共有する 1 本 — 参照側に
+ * 無いと、契約が拒否する値（embedding の `padding_idx: "bad"` 等）に参照だけが値を返す。
+ *
+ * MUST: 照合は `Object.hasOwn` のみ（{@link assertNodeContract} と同じ理由）。
+ */
+export const assertAttrValues = (
+  found: OpContract,
+  attrs: Readonly<Record<string, unknown>>,
+  where: string,
+): void => {
   for (const key of attrKeysOf(found)) {
-    if (!Object.hasOwn(node.attrs, key)) {
-      throw new OpContractError(`${where}: op '${node.op}' の必須 attr '${key}' が無い`);
+    if (!Object.hasOwn(attrs, key)) {
+      throw new OpContractError(`${where}: op '${found.name}' の必須 attr '${key}' が無い`);
     }
-    found.attrs[key](node.attrs[key], `${where} の attrs.${key}`);
+    found.attrs[key](attrs[key], `${where} の attrs.${key}`);
   }
   const optional = found.optionalAttrs;
   if (optional !== undefined) {
     for (const key of Object.keys(optional)) {
-      if (!Object.hasOwn(node.attrs, key)) continue;
-      optional[key](node.attrs[key], `${where} の attrs.${key}`);
+      if (!Object.hasOwn(attrs, key)) continue;
+      optional[key](attrs[key], `${where} の attrs.${key}`);
     }
   }
-  return found;
 };
 
 /**
@@ -1068,6 +1083,32 @@ export const assertSlotDtype = (
 };
 
 /**
+ * 入力の意味論 dtype の検査（スロットごとの受理集合 + uniform 契約のスロット間の同型）。
+ * ノードの dtype 検査（{@link resolveNodeDtypes}）と CPU 参照の入口が共有する 1 本。
+ * `label` は入力 `index` の診断名。
+ */
+export const assertInputDtypes = (
+  found: OpContract,
+  inputDtypes: readonly IrDtype[],
+  label: (index: number) => string,
+  where: string,
+): void => {
+  inputDtypes.forEach((dtype, index) => {
+    assertSlotDtype(found, index, dtype, label(index));
+  });
+  // スロットごとに受理集合が違う op は、スロット間の同型を要求しない（それが perSlot の
+  // 意味）。uniform 契約だけが混在を拒否する。
+  if (found.slotDtypes.kind === "uniform") {
+    const mixed = inputDtypes.findIndex((dtype) => dtype !== inputDtypes[0]);
+    if (mixed >= 0) {
+      throw new OpContractError(
+        `${where}: op '${found.name}' の入力 dtype が混在（${inputDtypes.join(", ")}）`,
+      );
+    }
+  }
+};
+
+/**
  * ノードの意味論 dtype を検査して**出力 dtype の列を返す**（出力 slot 順）。
  *
  * MUST: 出力 dtype は宣言を鵜呑みにせず契約から導き、宣言と突き合わせる。宣言をそのまま
@@ -1084,27 +1125,10 @@ export const resolveNodeDtypes = (
   declaredOutputs: readonly IrDtype[],
   where: string,
 ): readonly IrDtype[] => {
-  inputDtypes.forEach((dtype, index) => {
-    assertSlotDtype(found, index, dtype, `${where} の入力 '${node.ins[index]}'`);
-  });
-  let expected: readonly IrDtype[];
-  if (found.kind === "cast") {
-    expected = [castTargetDtype(node.attrs, where)];
-  } else {
-    // スロットごとに受理集合が違う op は、スロット間の同型を要求しない（それが perSlot の
-    // 意味）。uniform 契約だけが混在を拒否する。
-    if (found.slotDtypes.kind === "uniform") {
-      const mixed = inputDtypes.findIndex((dtype) => dtype !== inputDtypes[0]);
-      if (mixed >= 0) {
-        throw new OpContractError(
-          `${where}: op '${found.name}' の入力 dtype が混在（${inputDtypes.join(", ")}）`,
-        );
-      }
-    }
-    expected = found.outputDtypes.map((_, slot) =>
-      outputDtypeOf(found, slot, inputDtypes[0], where)
-    );
-  }
+  assertInputDtypes(found, inputDtypes, (index) => `${where} の入力 '${node.ins[index]}'`, where);
+  const expected: readonly IrDtype[] = found.kind === "cast"
+    ? [castTargetDtype(node.attrs, where)]
+    : found.outputDtypes.map((_, slot) => outputDtypeOf(found, slot, inputDtypes[0], where));
   if (declaredOutputs.length !== expected.length) {
     throw new OpContractError(
       `${where}: op '${found.name}' の出力の宣言が ${declaredOutputs.length} 本（契約は ${expected.length} 本）`,
