@@ -120,13 +120,26 @@ export class IrodoriTokenizer {
  * `base + byte`、byte = 0..255）は `byteBaseId + 255` まで発行する。ここを見逃すと
  * 未知断片が現れた瞬間に語彙外 id が出て、embedding gather の OOB（非有限 — ADR 0061）まで
  * 表面化しない沈黙誤値になる。
+ *
+ * MUST: 256 行の綴りも照合する（`<0x00>`..`<0xFF>` が順に並ぶこと = 配布契約）。消費側は
+ * 綴りではなく連番の算術で id を求めるので、行が入れ替わった資産は HF（名前で id を引く）と
+ * 別の id を黙って出す。exporter 側（`tools/export-recipes/irodori/tokenizer_ref.py`）の
+ * 連番検査と対で、読み込み側でも同じ契約を落とす。
  */
-const asByteBaseId = (value: unknown, label: string, vocabSize: number): number => {
+const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]): number => {
   const id = asId(value, label);
-  if (id + 255 >= vocabSize) {
+  if (id + 255 >= tokens.length) {
     throw new Error(
-      `${label}: バイト 256 本（${id}..${id + 255}）が語彙の行数 ${vocabSize} に収まらない`,
+      `${label}: バイト 256 本（${id}..${id + 255}）が語彙の行数 ${tokens.length} に収まらない`,
     );
+  }
+  for (let byte = 0; byte < 256; byte += 1) {
+    const want = `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`;
+    if (tokens[id + byte] !== want) {
+      throw new Error(
+        `${label}: 行 ${id + byte} が ${want} でない（${JSON.stringify(tokens[id + byte])}）`,
+      );
+    }
   }
   return id;
 };
@@ -167,7 +180,7 @@ export const parseIrodoriTokenizerAsset = (
     minScore,
     maxTokenLength,
     unkId: asVocabId(obj["unkId"], `${label}.unkId`, tokens.length),
-    byteBaseId: asByteBaseId(obj["byteBaseId"], `${label}.byteBaseId`, tokens.length),
+    byteBaseId: asByteBaseId(obj["byteBaseId"], `${label}.byteBaseId`, tokens),
     bosId: asVocabId(obj["bosId"], `${label}.bosId`, tokens.length),
     padId: asVocabId(obj["padId"], `${label}.padId`, tokens.length),
     addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),

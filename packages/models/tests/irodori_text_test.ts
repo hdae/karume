@@ -397,6 +397,39 @@ Deno.test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語
   assertEquals(parsed.byteBaseId, 44);
 });
 
+Deno.test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の綴りが順に並ぶ", () => {
+  // 未知文字は `byteBaseId + バイト値` へ展開されるので、行が入れ替わった資産では HF（名前で
+  // id を引く）と別の id が出る（"A" = 0x41 が `<0x42>` の行の id になる）。
+  const VOCAB_SIZE = 300;
+  const base = {
+    scores: Array.from({ length: VOCAB_SIZE }, () => 0),
+    addedTokens: [],
+    bosId: 0,
+    padId: 0,
+    unkId: 0,
+    byteBaseId: 44,
+  };
+  const words = Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`);
+  const swapped = [...BYTE_TOKENS];
+  [swapped[0x41], swapped[0x42]] = [swapped[0x42], swapped[0x41]];
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, vocabText: [...words, ...swapped].join("\n") }),
+    Error,
+    `tokenizer.byteBaseId: 行 ${44 + 0x41} が <0x41> でない`,
+  );
+  // 1 つずれた位置（先頭が語彙の単語）も同じく落ちる。
+  assertThrows(
+    () =>
+      parseIrodoriTokenizerAsset({
+        ...base,
+        vocabText: [...words, ...BYTE_TOKENS].join("\n"),
+        byteBaseId: 43,
+      }),
+    Error,
+    "tokenizer.byteBaseId: 行 43 が <0x00> でない",
+  );
+});
+
 Deno.test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす（`Map` の後勝ちを禁じる）", () => {
   const VOCAB_SIZE = 300;
   const base = {
