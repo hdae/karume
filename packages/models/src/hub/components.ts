@@ -349,20 +349,29 @@ const nonEmptyParts = (parts: readonly FileRef[]): readonly FileRef[] =>
  * 席ごとに選んだ FileRef を、manifest（取得元）ごとにまとめて温める。同じ manifest の part は
  * 1 回の `prefetchAssets` に載せる — 家族ごと・部品ごとに呼び分けると取得層の同時取得が効かず、
  * 直列 DL に落ちる。
+ *
+ * MUST: 取得計画は 1 本のファイルを 1 回だけ載せる（容器ごとの part 列はそのまま、計画だけを
+ * 一意化する）— manifest は選択内の別の容器が同じ part を共有することを許すが、`prefetchAssets`
+ * は重複参照を呼び手の誤りとして拒否するので、連結のまま渡すと宣言は通るのにロードが落ちる。
+ * 同一性は進捗の分母（{@link aggregateProgress}）と同じ {@link progressKeyOf} で見る — 別の
+ * 物差しにすると、取るファイルと分母が食い違う。
  */
 const prefetchSeats = async (
   seats: readonly Seat[],
   select: (seat: Seat) => readonly FileRef[],
   options: FetchAssetsOptions,
 ): Promise<void> => {
-  const bySource = new Map<LoadedManifest, FileRef[]>();
+  const bySource = new Map<LoadedManifest, Map<string, FileRef>>();
   for (const seat of seats) {
-    const refs = bySource.get(seat.loaded) ?? [];
-    refs.push(...select(seat));
+    const refs = bySource.get(seat.loaded) ?? new Map<string, FileRef>();
+    for (const ref of select(seat)) {
+      const key = progressKeyOf(seat.loaded, ref);
+      if (!refs.has(key)) refs.set(key, ref);
+    }
     bySource.set(seat.loaded, refs);
   }
   for (const [loaded, refs] of bySource) {
-    if (refs.length > 0) await prefetchAssets(loaded, refs, options);
+    if (refs.size > 0) await prefetchAssets(loaded, [...refs.values()], options);
   }
 };
 

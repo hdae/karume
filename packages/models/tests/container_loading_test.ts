@@ -195,6 +195,76 @@ Deno.test(
 );
 
 Deno.test(
+  "loadContainerComponents: 選択内の 2 部品が part を共有しても、その part は 1 回だけ温める",
+  async () => {
+    // manifest の parse は選択内で別の容器が同じ part ファイルを共有することを許す。取得計画を
+    // 容器ごとの part 列の連結のまま渡すと、温め面の重複検査（同じ参照を 2 回渡すのは呼び手の
+    // 誤り）で、宣言は通るのにロードだけが落ちる。
+    // 重みが同じ値の 2 部品はグラフ名だけが違うので、part 1 以降（重みの block）は同じバイト列に
+    // なる — `voice` の part 1 以降を `front` のファイルへ向けて共有させる。
+    const front = await serveContainer("front/model.f32", linearComponent("front"));
+    const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
+    const sharedParts = front.parts.slice(1);
+    assertEquals(
+      voice.parts.slice(1).map((part) => part.sha256),
+      sharedParts.map((part) => part.sha256),
+      "part 1 以降が同じバイト列の 2 部品で観測していない",
+    );
+    const voiceParts = [voice.parts[0], ...sharedParts];
+    const rig = await serveRepo(
+      {
+        test: {
+          pipeline: "test/1",
+          weights: {
+            front: { f32: front.entry },
+            voice: {
+              f32: { container: { descriptor: voice.written.descriptor, parts: voiceParts } },
+            },
+          },
+          assets: {},
+          quants: { f32: { weights: { front: "f32", voice: "f32" }, session: {} } },
+          defaultQuant: "f32",
+          pipelineConfig: {},
+        },
+      },
+      new Map([...front.files, ...voice.files.filter(([path]) => path === voice.parts[0].path)]),
+      { front: front.parts, voice: voiceParts },
+    );
+
+    const events: AssetProgress[] = [];
+    const { open } = await loadContainerComponents(
+      "test.fromPretrained",
+      rig.loaded,
+      rig.selection,
+      ["front", "voice"],
+      NO_FAMILY_GATE,
+      { ...rig.hubOptions, onProgress: (progress) => events.push(progress) },
+    );
+
+    assertEquals(open("voice").graph.outputs, ["y"]);
+    const shared = fetched(sharedParts);
+    assertEquals(shared.length > 0, true, "取得される共有 part で観測していない");
+    for (const path of shared) {
+      assertEquals(
+        rig.mock.paths.filter((requested) => requested === path).length,
+        1,
+        `${path} を 2 回以上取りに行っている`,
+      );
+      assertEquals(
+        events.filter((event) => event.phase === "complete" && event.path === path).length,
+        1,
+        `${path} の complete が 1 回でない`,
+      );
+    }
+    // 進捗の分母も共有 part を 1 本と数え、最後は合計に着地する。
+    const total = [front.parts[0], voice.parts[0], ...sharedParts]
+      .reduce((sum, part) => sum + part.size, 0);
+    assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
+    assertEquals(events[events.length - 1].loaded, total);
+  },
+);
+
+Deno.test(
   "loadContainerComponents: capability 違反は descriptor だけで落ち、重みの part は取得されない",
   async () => {
     const rig = await prepareComponent({ op: "karume_test_unsupported_op" });
