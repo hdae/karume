@@ -14,6 +14,8 @@
  *      （{@link assertBitIdentical}）。赤にする故障注入: ②（2 回目だけ別 seed）。
  *    - **census**（決定 5-1 の MUST）— 実用席の transformer の run で、束の各ノブの変種が 1 本以上
  *      走っている（`assertSeatsApplied` — 期待は**元の配布形**の宣言）。本数は決着の note に残る。
+ *      attention の a8 / s16 は全 dispatch で効いたこと（`assertAttentionSeatsComplete` — {@link CASES} の
+ *      解像度は両辺が 32 px の倍数で、self のキー長が 4 の倍数 = 宣言どおりの経路を期待できる形）。
  *      赤にする故障注入: ③（`attentionCompute` だけ外した席）。
  *    - **帯**（決定 5-2 / 5-3）— relRMS が {@link CASES} の帯に入り、非有限が無く、参照席と
  *      1 bit 以上違う（{@link judgeAb}）。赤にする故障注入: ①（実用席の `session` を空にした
@@ -36,6 +38,7 @@ import type { SessionDiagnostics } from "@karume/runtime";
 import { AnimaPipeline, type ImageSize } from "../mod.ts";
 import { formatResolution } from "../anima.ts";
 import {
+  assertAttentionSeatsComplete,
   assertSeatsApplied,
   type CensusRow,
   mergeCensus,
@@ -191,6 +194,7 @@ for (const { resolution, band } of CASES) {
         );
         assertBitIdentical(first.latent, second.latent, `${id}: 実用席の 2 回`);
         assertSeatsApplied(first.census, declared, `${id}: 実用席の transformer`);
+        assertAttentionSeatsComplete(first.census, declared, `${id}: 実用席の transformer`);
         judgeAb(measured, band, id);
         return { status: "pass", note: `census ${census}` };
       });

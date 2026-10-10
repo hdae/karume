@@ -135,7 +135,11 @@ import {
   WAN_TI2V_REFERENCE_QUANT as REFERENCE_QUANT,
 } from "./helpers/wan-ti2v-pipeline.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
-import { assertSeatsApplied } from "../../runtime/tests/helpers/pipeline-census.ts";
+import {
+  assertAttentionSeatsComplete,
+  assertSeatsApplied,
+} from "../../runtime/tests/helpers/pipeline-census.ts";
+import { attentionRoute } from "../../runtime/src/runtime/attention-route.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
   assertAdapterMatchesEnvironment,
@@ -179,6 +183,11 @@ const SUBMIT_GPU_LIMIT_MS = 1000;
 
 /** Wan2.2 TI2V-5B の attention の head 数（transformer の config `num_attention_heads`）。 */
 const WAN22_HEADS = 24;
+/**
+ * Wan2.2 TI2V-5B の attention の head_dim（hidden 3072 ÷ {@link WAN22_HEADS}）。完全適格の検査を
+ * 掛ける形かの判定にだけ使う（{@link practicalSubmitGate}）。
+ */
+const WAN22_HEAD_DIM = 128;
 /** スコア行列 S の 1 要素の格納幅（参照席 = 既定の f32 格納）。 */
 const SCORE_BYTES = 4;
 
@@ -1269,6 +1278,25 @@ const practicalSubmitGate = async (
             options,
             `${PRACTICAL_QUANT}/S = ${tokens}: 実用席の束`,
           );
+          // 完全適格の検査（ADR 0058 追記 2026-10-10）は、宣言どおりの経路になる形にだけ掛ける。
+          // golden の S = 8,190（832×480 × 81 フレーム — 受理集合の外）は N % 4 != 0 で、self の ③PV と
+          // S の格納が仕様どおり f32 に落ちる（ADR 0058 決定 3）ので、掛けると正当な縮退で赤になる。
+          const seats = {
+            attentionCompute: options.attentionCompute ?? "f32",
+            attentionScoreStorage: options.attentionScoreStorage ?? "f32",
+          } as const;
+          const route = attentionRoute(seats, WAN22_HEAD_DIM, tokens);
+          const requestedStage = seats.attentionCompute === "a8" ? "i8a8" : "dense";
+          if (
+            route.qk === requestedStage && route.pv === requestedStage &&
+            route.score === seats.attentionScoreStorage
+          ) {
+            assertAttentionSeatsComplete(
+              observed.diagnostics.lastRunPipelines,
+              options,
+              `${PRACTICAL_QUANT}/S = ${tokens}: 実用席の束（完全適格）`,
+            );
+          }
           assert(
             submit.unbackedSubmits > 0,
             "最初の run の裏付け前のチャンク（initialChunkSize で据え置いた submit）を測れていない",

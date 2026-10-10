@@ -30,7 +30,11 @@ import type {
   WanPrompt,
   WanTi2vGenerateRequest,
 } from "../../wan.ts";
-import { assertSeatsApplied, mergeCensus } from "../../../runtime/tests/helpers/pipeline-census.ts";
+import {
+  assertAttentionSeatsComplete,
+  assertSeatsApplied,
+  mergeCensus,
+} from "../../../runtime/tests/helpers/pipeline-census.ts";
 import { type Results, runRecordedCase } from "../../../runtime/tests/helpers/results.ts";
 import {
   type AbBand,
@@ -225,7 +229,9 @@ const practicalRowOf = (
 
 /**
  * 実用席の census（決定 5-1）: 各パスを表の行とちょうどの本数で突き合わせ（linear）、束の各ノブの変種が 1 本以上
- * 走ったことを見る（attention — 表に書かない規約: 行ブロックの枚数が device の束縛上限で変わる）。
+ * 走ったことを見る（attention — 表に書かない規約: 行ブロックの枚数が device の束縛上限で変わる）。attention は
+ * さらに a8 / s16 が全 dispatch で効いたこと（完全適格 — 比で見るので device に依らない）を見る。census は DiT の
+ * Session の run だけ（{@link observeStep1}）なので、別の Session の f32 の attention は混ざらない。
  */
 const assertPracticalCensus = (
   row: BundleCensusRow,
@@ -240,7 +246,9 @@ const assertPracticalCensus = (
     where,
   );
   assertEquals(checked, observation.passes.length, `${where}: 表の期待と突き合わせたパスの数`);
-  assertSeatsApplied(mergeCensus(observation.passes, where), effective, where);
+  const census = mergeCensus(observation.passes, where);
+  assertSeatsApplied(census, effective, where);
+  assertAttentionSeatsComplete(census, effective, where);
 };
 
 /**
