@@ -613,8 +613,10 @@ Deno.test("外側括弧の剥がし: 正本の逐次の形と乱択の入力で�
   const alphabet = ["「", "」", "（", "）", "(", ")", "a"];
   let state = 12345;
   const nextIndex = (bound: number): number => {
-    state = (state * 1103515245 + 12345) & 0x7fffffff;
-    return state % bound;
+    // 32 bit の LCG（`Math.imul` — 素の乗算は 2^53 を超えて下位ビットが潰れる）。下位ビットは
+    // 周期が短いので上位 16 bit を使う。
+    state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+    return (state >>> 16) % bound;
   };
   let stripped = 0;
   for (let sample = 0; sample < 5_000; sample += 1) {
