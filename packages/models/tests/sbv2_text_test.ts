@@ -128,6 +128,23 @@ Deno.test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
   );
 });
 
+Deno.test("parseJpExtraRules: blankId は音素・tone・language の 3 表すべての範囲内", () => {
+  // 同じ blankId が 3 本の ID 列の blank 位置に入るので、どれか 1 表の外なら埋め込みの
+  // 範囲外 gather になる（記号表 7 件・blankId 5・numLanguages 3 だと languageIds が [5,1,5]）。
+  assertThrows(
+    () => parseJpExtraRules({ ...TEST_RULES_JSON, blankId: 5 }, "x"),
+    Error,
+    "x.blankId",
+  );
+  assertThrows(
+    () => parseJpExtraRules({ ...TEST_RULES_JSON, blankId: 4, numTones: 4 }, "x"),
+    Error,
+    "x.blankId",
+  );
+  // 3 表すべてに収まれば受ける（0 以外の blank も契約上は正当）。
+  assertEquals(parseJpExtraRules({ ...TEST_RULES_JSON, blankId: 2 }, "x").blankId, 2);
+});
+
 Deno.test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だけでは通さない）", () => {
   // 決め手は samplingRate — `Sbv2Pipeline.generate` の `sampleRate` として**そのまま公開結果
   // へ出る**唯一の欄なので、負値や 0 はどこでも例外にならず「正常に見える壊れた WAV」に

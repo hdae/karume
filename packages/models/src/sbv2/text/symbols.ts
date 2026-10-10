@@ -189,8 +189,15 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     // なる。パイプラインは add_blank 前提の 1 経路しか持たない — 黙って通すと 2 倍長い列を作る。
     throw new Error(`${where}.addBlank: true でない（add_blank 前提のパイプラインでは未対応）`);
   }
-  if (rules.blankId < 0 || rules.blankId >= symbols.length) {
-    throw new Error(`${where}.blankId: 記号表の範囲外（${rules.blankId}）`);
+  // MUST: blank は音素・tone・language の **3 本**の ID 列へ同じ値で入る（`intersperse`）ので、
+  // 3 表のどれか 1 つの外でも埋め込みの範囲外 gather になる（音素表だけでは足りない）。
+  const blankLimit = Math.min(symbols.length, rules.numTones, rules.numLanguages);
+  if (rules.blankId < 0 || rules.blankId >= blankLimit) {
+    throw new Error(
+      `${where}.blankId: 音素・tone・language の埋め込みの範囲外（${rules.blankId} / ` +
+        `0..${blankLimit - 1} — 記号表 ${symbols.length} 件・numTones ${rules.numTones}・` +
+        `numLanguages ${rules.numLanguages}）`,
+    );
   }
   if (rules.languageId < 0 || rules.languageId >= rules.numLanguages) {
     throw new Error(
