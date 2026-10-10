@@ -182,7 +182,7 @@ const wan22CaseId =
  * — ADR 0121 決定 3〉なので、この上限まではグラフの宣言の内）。
  *
  * 参照ケースは `e2e_wan_ti2v_pipeline_test.ts` の `SEED_CASES`（参照席・2 ステップ・17 フレーム・2 寸法）と
- * `FULL_CASES`（参照席と実用席・50 ステップ・33 フレーム・1280×704）と `LONG_CLIP_CASE_ID`（参照席・2 ステップ・
+ * `PRACTICAL_SEED_CASE_ID`（実用席・2 ステップ・17 フレーム・1280×704 だけ）と `FULL_CASES`（参照席と実用席・50 ステップ・33 フレーム・1280×704）と `LONG_CLIP_CASE_ID`（参照席・2 ステップ・
  * 121 フレーム・1280×704 — e2e では opt-in）。席名は e2e の helper
  * （`tests/helpers/wan-ti2v-pipeline.ts` の `WAN_TI2V_REFERENCE_QUANT` / `WAN_TI2V_PRACTICAL_QUANT`）の写し —
  * 2.1 の表と同じく文字列で持つ（helper は Deno の API を読むモジュールを引くので、ブラウザの bundle に入れない）。
@@ -205,6 +205,13 @@ export const WAN22_LAB: WanLabGeneration = {
       frames: 17,
       sizes: [{ width: 1280, height: 704 }, { width: 704, height: 1280 }],
       quants: ["f16+dit8"],
+      id: wan22CaseId("2step-boxing-cats-seed42", 17),
+    },
+    {
+      steps: 2,
+      frames: 17,
+      sizes: [{ width: 1280, height: 704 }],
+      quants: ["f16+dit8-a8-attn8-s16"],
       id: wan22CaseId("2step-boxing-cats-seed42", 17),
     },
     {

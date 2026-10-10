@@ -691,6 +691,12 @@ describe("wan2.2 reference cases", () => {
     for (const id of ids) assertEquals(Object.hasOwn(ti2vReferences.cases, id ?? ""), true, id);
   });
 
+  it("names the 2-step seed case of the practical quant at 1280x704 only, as the fixture spells it", () => {
+    const id = caseId({}, "f16+dit8-a8-attn8-s16");
+    assertEquals(id, "f16+dit8-a8-attn8-s16-2step-boxing-cats-seed42-1280x704-17f-shift5");
+    assertEquals(Object.hasOwn(ti2vReferences.cases, id ?? ""), true, id);
+  });
+
   it("names the 50-step cases of both quants at 1280x704 and 33 frames", () => {
     assertEquals(
       caseId({ steps: 50, frames: 33 }, "f16+dit8"),
@@ -712,7 +718,7 @@ describe("wan2.2 reference cases", () => {
   it("names no case for a quant, size, or condition the e2e keeps no row for", () => {
     for (
       const [changed, quant] of [
-        [{}, "f16+dit8-a8-attn8-s16"],
+        [{ width: 704, height: 1280 }, "f16+dit8-a8-attn8-s16"],
         [{}, "f16"],
         [{ steps: 50, frames: 33, width: 704, height: 1280 }, "f16+dit8"],
         [{ frames: 33 }, "f16+dit8"],
