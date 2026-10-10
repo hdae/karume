@@ -486,8 +486,9 @@ following changes were made:
 - The transformer graph is the one graph for both text-to-video and image-to-video: besides the
   timestep of the generated tokens it takes a second timestep for conditioning tokens and a boolean
   condition mask, embeds each timestep separately, and selects every modulation per token between
-  the two. In text-to-video, the only mode this distribution runs, the mask is all false and the
-  second timestep equals the first.
+  the two. In text-to-video the mask is all false and the second timestep equals the first. In
+  image-to-video the mask is true for the tokens of the first latent frame, which the host
+  replaces with the encoded conditioning image, and the second timestep is 0.
 - The VAE decoder (Wan2.2-VAE) was re-expressed as two graphs that decode one latent frame each
   (the first frame, and every later frame), with the causal convolution cache passed in and out of
   the graph instead of kept in a Python list, and its upsampling shortcuts written as copies and

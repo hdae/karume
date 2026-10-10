@@ -228,6 +228,15 @@ class WanCard:
     attribution_notes: Callable[[Mapping[str, Any]], list[str]]
     #: 「Resources」節（実測の表と注 — ADR 0089 決定 3）。
     resources: Callable[[Mapping[str, Any]], list[str]]
+    #: 以下は I2V を受ける世代（Wan2.2）だけが持つ行。既定は空 — Wan2.1 のカードはバイト不変
+    #: （2.1 の `WanPipeline` は `image` を `ModelInputError` で拒む — ADR 0121 段 9b）。
+    #: frontmatter の tags のうち pipeline tag の後に足すもの（pipeline tag は HF では 1 つなので
+    #: text-to-video のまま — I2V は tag で名乗る）。
+    extra_tags: tuple[str, ...] = ()
+    #: Usage 節の末尾に足す行（I2V の例と画像の decode の注）。
+    usage_extra: tuple[str, ...] = ()
+    #: 受理する入力の節で seed の項の後に足す項（`image` / `fit`）。
+    inputs_extra: tuple[str, ...] = ()
 
 
 def _upstream(name: str, card: WanCard) -> Any:
@@ -257,7 +266,7 @@ def _wan_metadata(manifest: Mapping[str, Any], card: WanCard) -> CardMetadata:
         # `quantized`）。
         base_model_relation="quantized",
         license=next(iter(licenses)),
-        tags=(WAN_PIPELINE_TAG, "video-generation", "wan", "webgpu"),
+        tags=(WAN_PIPELINE_TAG, *card.extra_tags, "video-generation", "wan", "webgpu"),
     )
 
 
@@ -343,14 +352,20 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
     50 ステップの製品の class の通しは 2 席・1280×704・33 フレーム）。49 / 121 フレームの生成
     スクリプトの通しは受理する入力の節（{@link _WAN22_FRAMES_CHECKED}）が書く。ブラウザは
     RTX 5070 Ti の Chrome で実用席・GPU の umT5・1280×704×121 の通し 1 本だけ（ADR 0121 追記
-    「RTX 5070 Ti の Chrome」— 壁 2,417.5 s。gpu-lab が記述子の上限を広げて内部 API で呼んだ）。"""
+    「RTX 5070 Ti の Chrome」— 壁 2,417.5 s。gpu-lab が記述子の上限を広げて内部 API で呼んだ）。
+
+    I2V（ADR 0121 決定 11・追記「段 9b の結果」）: 条件づけは diffusers の `expand_timesteps` の形
+    （`packages/models/src/wan/dit-loop.ts` の `withWanFirstFrameCondition` / `wanConditionMask` —
+    条件マスクは先頭の潜在フレームのトークンが真・条件側の時刻は t = 0）。検証は RTX 3080 Ti・
+    precomputed の経路・2 ステップ × 9 フレームの sha 行だけ（詳細は {@link _WAN22_VERIFICATION}）。
+    ブラウザでは I2V を回していない（gpu-lab の画像の入力は段 9c で別に足す）。"""
     where = _encoder_whereabouts(manifest)
     return [
         "## What is this",
         "",
-        "A **text-to-video** distribution of Wan2.2 TI2V 5B, converted into the WebGPU",
-        "inference runtime **Karume**'s container format (a `.krm` part sequence whose first part",
-        "carries the graph and model descriptors).",
+        "A **text-to-video** and **image-to-video** distribution of Wan2.2 TI2V 5B, converted into",
+        "the WebGPU inference runtime **Karume**'s container format (a `.krm` part sequence whose",
+        "first part carries the graph and model descriptors).",
         "",
         f"- Seven graphs: `{WAN_TEXT_ENCODER_COMPONENT}` (the umT5-XXL text encoder in int8,"
         f" {where}),",
@@ -359,24 +374,31 @@ def _wan22_overview(manifest: Mapping[str, Any]) -> list[str]:
         "  frame per call, with the causal cache passed in and out) and `vae_encoder_pre` /",
         "  `vae_encoder_attn` / `vae_encoder_post` (the Wan2.2 video VAE encoder for one",
         "  conditioning image, split around its middle attention).",
-        "- Text to video only. The transformer graph already takes the image-conditioning inputs",
-        "  (a second timestep and a condition mask) and the VAE encoder is included, but",
-        "  image-to-video is not available yet.",
+        "- Text to video by default; image to video when `generate()` is given an `image` (the",
+        "  first frame — see Usage and Accepted inputs). The image is fitted to the output size,",
+        "  encoded once by the VAE encoder, and at every step the first latent frame of the",
+        "  transformer's input is replaced with it (the diffusers form: the tokens of that frame",
+        "  are marked by the condition mask and take timestep 0). The first output frame is",
+        "  therefore the fitted image after a round trip through the VAE.",
         "- The rest runs on the host in TypeScript: the prompt cleaning and the tokenizer (or,",
         f'  with `{WAN_TEXT_ENCODER_OPTION}: "{WAN_TEXT_ENCODER_PATHS[1]}"`, the lookup of the',
         "  precomputed embeddings), the relative-position buckets, the patchify and RoPE tables,",
         "  classifier-free guidance as two batch-1 passes, the flow-matching UniPC scheduler, the",
-        "  tiled VAE decode and the unpatchify of its output. The output is",
-        "  `[3, frames, height, width]` float32 in `[-1, 1]`, at 24 fps.",
-        "- Verified end to end in Deno (Intel Arc B570, Deno 2.9.6) with the `f16+dit8` quant in",
-        "  2-step runs of 17 frames — at 1280 × 704 and 704 × 1280 with the precomputed",
-        "  embeddings, and at 1280 × 704 with the text encoder on the GPU — each pinned by the",
-        "  SHA-256 of its frames; and in full 50-step runs of both quants at 1280 × 704 with 33",
-        "  frames (see Resources).",
+        "  tiled VAE decode and the unpatchify of its output, and for image to video the resize,",
+        "  normalization and patchify of the image and the replacement of the first latent frame.",
+        "  The output is `[3, frames, height, width]` float32 in `[-1, 1]`, at 24 fps.",
+        "- Text to video was verified end to end in Deno (Intel Arc B570, Deno 2.9.6) with the",
+        "  `f16+dit8` quant in 2-step runs of 17 frames — at 1280 × 704 and 704 × 1280 with the",
+        "  precomputed embeddings, and at 1280 × 704 with the text encoder on the GPU — each",
+        "  pinned by the SHA-256 of its frames; and in full 50-step runs of both quants at",
+        "  1280 × 704 with 33 frames (see Resources).",
+        "- Image to video was verified end to end in Deno on an NVIDIA GeForce RTX 3080 Ti with",
+        "  the precomputed embeddings, in 2-step runs of 9 frames pinned by the SHA-256 of their",
+        "  frames (see Determinism and verification).",
         "- In a browser, Chrome on an NVIDIA GeForce RTX 5070 Ti finished one 50-step run (the",
         "  `f16+dit8-a8-attn8-s16` quant with the text encoder on the GPU, 1280 × 704, 121 frames)",
         "  in 40.3 minutes. Shorter clips, the `f16+dit8` quant and the precomputed embeddings",
-        "  have not been run in a browser yet.",
+        "  have not been run in a browser yet, and neither has image to video.",
         *_reader_lines(manifest, WAN22_SUPPORTED_PIPELINE),
     ]
 
@@ -462,11 +484,15 @@ def _wan22_attribution_notes(manifest: Mapping[str, Any]) -> list[str]:
         "  nearest float16 value (weight matrices and kernels stored as float16, computation in",
         "  float32); the transformer graph re-expressed on patchified tokens, with the RoPE tables",
         "  built on the host from per-axis base tables and applied in a pair-swap form, and with",
-        "  the image-conditioning inputs that text-to-video leaves inactive; the VAE decoder",
-        "  re-expressed as two one-frame graphs with an explicit causal cache that return the",
-        "  patchified output for the host to unpatchify, always decoded in overlapping tiles; the",
-        "  tokenizer converted into one table together with lookup tables for the upstream prompt",
-        "  cleaning. No retraining and no fine-tuning.",
+        "  the image-conditioning inputs (a condition mask and a second timestep — in image to",
+        "  video the tokens of the first latent frame are masked in and take timestep 0, in text",
+        "  to video the mask is all false); the VAE decoder re-expressed as two one-frame graphs",
+        "  with an explicit causal cache that return the patchified output for the host to",
+        "  unpatchify, always decoded in overlapping tiles; the part of the VAE encoder that",
+        "  encodes one conditioning image re-expressed as three graphs split around its middle",
+        "  attention, with its parameters rounded to float16 like the decoder's; the tokenizer",
+        "  converted into one table together with lookup tables for the upstream prompt cleaning.",
+        "  No retraining and no fine-tuning.",
     ]
     _, borrowed = _text_encoder(manifest)
     if borrowed is None:
@@ -551,6 +577,7 @@ def _wan_usage(manifest: Mapping[str, Any], repo: str, card: WanCard) -> list[st
         "no two stages are resident together. Concurrent calls are queued. Weights are fetched",
         "once and cached (verified against `karume.json`'s `size` / `sha256`). GPU memory and time",
         "per clip are listed under Resources below.",
+        *card.usage_extra,
     ]
 
 
@@ -642,9 +669,12 @@ _WAN21_VERIFICATION = (
 #: admission では拒まれず、入らなければ実行の途中で落ちる（OOM の errorScope か、天井の付近では
 #: device lost）と書く。資源の表の B570 の行は 49 で止まる（57 は表に無い）ことも書く。
 #: 704×1280 は 2 ステップ × 17 フレームの sha 行だけ（50 ステップの通しは全て 1280×704）。
+#: ここは全て T2V の事実（I2V の確かめた範囲は {@link _WAN22_I2V_INPUTS} と {@link
+#: _WAN22_VERIFICATION} が書く）。
 _WAN22_FRAMES_CHECKED = (
-    "Checked end to end on the GPU: 17 frames at",
-    "  both sizes in 2-step runs, and 33 frames at 1280 × 704 in 50-step runs. 49 frames at",
+    "Text to video has been checked end to end",
+    "  on the GPU: 17 frames at both sizes in 2-step runs, and 33 frames at 1280 × 704 in",
+    "  50-step runs. 49 frames at",
     "  1280 × 704 ran 50 steps through the same pipeline stages, driven by a development script",
     "  rather than the pipeline class.",
     "  121 frames at 1280 × 704 (the `f16+dit8-a8-attn8-s16` quant) ran 50 steps the same way on",
@@ -675,10 +705,27 @@ _WAN22_FRAMES_CHECKED = (
 #: transformer 1 forward の f64 参照 — 追記「段 2 の結果」の r 門〈S = 8,190 / 7,920〉）とタイル
 #: decode の注（patchify 空間でブレンドしてから unpatchify — 決定 6）。実用席は自機 A/B 門
 #: （段 7）が未計測なので、数値では比べていないと書き、既定に採った根拠（視認 12 本）だけを書く。
+#:
+#: I2V の項（追記「段 9a の結果」「段 9b の結果」と、テストの定数 — encoder の帯
+#: `WAN_I2V_ENCODER_BAND` 7.8e-5〈`packages/models/tests/helpers/wan-i2v-image.ts` — 決定用の最悪
+#: 1.550e-5 × 5・参照の最大絶対値 2.89〜4.04・故障注入 5 件は帯の 1.5 万倍以上〉、通しの帯
+#: `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3・`FINAL_RATIO_BAND` 3.9e-3・`FRAME_RATIO_BAND` 8.9e-3
+#: 〈`e2e_wan_ti2v_i2v_pipeline_test.ts` — 決定用 2 本の最悪 × 5・受入れ ferret は帯の内〉、故障注入
+#: 5 件は latents.1 で帯の 138〜358 倍、T2V の latents.1 の帯 9.5e-4
+#: 〈`e2e_wan_ti2v_pipeline_test.ts`〉）。
+#: 帯が T2V より広い理由は追記「段 9b の結果」の切り分け（cat-dog-baking の条件の潜在の maxAbs
+#: 1.26e-5 を DiT が条件のトークンで約 250 倍に増幅・参照の条件へ差し替えると T2V の桁に戻る）。
+#: T2V の帯との比は latents.1 だけを書く（latents.0 は T2V の帯 3.6e-5 と桁が違い「約 4 倍」と
+#: 一般化できない・フレームの帯は I2V の方が狭い）。sha 行は全て RTX 3080 Ti・precomputed の経路
+#: （既定のレーン = 参照席と実用席の boxing-cats・opt-in = cat-dog-baking / ferret / 704×1280）。
+#: 50 ステップの I2V は記録だけ（非有限 0 — sha 行を持たない）。実用席の品質の数（段 7 の A/B と
+#: 視認）は T2V で測ったもので、I2V の席の比べは段 9d — カードは I2V の品質を主張しない。
+#: NOTE: 元画像の寸法（832×480）は書かない — 2.1 の寸法を写さない門
+#: （`test_it_carries_none_of_the_wan21_sizes_or_frame_counts`）に掛かる。
 _WAN22_VERIFICATION = (
-    "- **Against the upstream reference** (the `f16+dit8` quant, with the precomputed",
-    "  embeddings): a 2-step run at 1280 × 704 with 17 frames and injected noise is compared",
-    "  with diffusers on CPU in float32 (the same int8 transformer weights, the same",
+    "- **Text to video against the upstream reference** (the `f16+dit8` quant, with the",
+    "  precomputed embeddings): a 2-step run at 1280 × 704 with 17 frames and injected noise is",
+    "  compared with diffusers on CPU in float32 (the same int8 transformer weights, the same",
     "  f16-rounded VAE weights and tiled decode), and single transformer forwards of up to",
     "  8,190 tokens (1280 × 704 with 33 frames among them) against a float64 reference.",
     "  Differences stay within tolerances measured on separate decision cases. The",
@@ -687,10 +734,115 @@ _WAN22_VERIFICATION = (
     "  relative error, differs from `f16+dit8`, and repeats bit for bit. It became the default",
     "  after a visual check of 12 clips (3 prompts × seeds 42–45, 1280 × 704 with 33 frames, 50",
     "  steps) on an NVIDIA GeForce RTX 3080 Ti in Deno on 2026-10-06, and the same 12 clips",
-    "  side by side with `f16+dit8` showed no clear degradation on 2026-10-09.",
+    "  side by side with `f16+dit8` showed no clear degradation on 2026-10-09. These quant",
+    "  comparisons are of text to video; the two quants have not been compared on image to",
+    "  video yet.",
+    "- **Image to video against the upstream reference** (the `f16+dit8` quant, with the",
+    "  precomputed embeddings, on an NVIDIA GeForce RTX 3080 Ti): the resized image and the",
+    "  encoder input match Pillow and the upstream preprocessing bit for bit. The encoded image",
+    "  is compared with the upstream untiled VAE encode (diffusers on CPU in float32) for three",
+    "  images, each at the two accepted sizes and at a small 256 × 160 size outside them: the",
+    "  largest absolute difference of the normalized latent stays within 7.8e-5, where the",
+    "  latent's values reach about 3 to 4. A 2-step run at 1280 × 704",
+    "  with 9 frames, injected noise and the same three images is compared with diffusers'",
+    "  `WanImageToVideoPipeline` on CPU in float32 (the same int8 transformer weights, the same",
+    "  f16-rounded VAE weights and tiled decode). The largest difference, relative to the",
+    "  reference's largest value, stays within 2.9e-3 for the latent after the first step,",
+    "  3.5e-3 after the second, 3.9e-3 for the latent passed to the VAE and 8.9e-3 for the",
+    "  frames, and the encoded image inside the run stays within the encoder's 7.8e-5. Each",
+    "  tolerance is five times the worst of two deciding images, and the third image is",
+    "  checked against it.",
+    "- **Why the image-to-video latent tolerances are wider** than the text-to-video ones",
+    "  (3.5e-3 against 9.5e-4 after the second step): the difference gathers in the tokens of",
+    "  the conditioning frame. On the image that sets these tolerances, the encoder's output",
+    "  differs from the reference by 1.26e-5 at most (well inside its own tolerance), and the",
+    "  transformer amplifies that about 250 times on those tokens. With the reference's encoded",
+    "  image put in its place, the difference falls back to the text-to-video size, so it does",
+    "  not come from the transformer's own precision.",
+    "- **Injected faults**: five deliberate faults in the conditioning (an all-false condition",
+    "  mask, the mask shifted by one token, the two timestep inputs swapped, the first frame",
+    "  not replaced, the encoded image not normalized) put the latent after the second step 138",
+    "  to 358 times its tolerance away, and each also fails a direct check of the input it",
+    "  breaks. Five faults in the encoder land 15,000 times its tolerance away or more.",
+    "- **Pinned image-to-video runs**: the same request with the same `image` and `fit`",
+    "  repeats bit for bit, and the SHA-256 of the frames is pinned for one image at",
+    "  1280 × 704 with 9 frames (2 steps) with both quants — the `f16+dit8-a8-attn8-s16` result",
+    "  is also required to differ from the `f16+dit8` one, so the quant is known to be in use —",
+    "  and, in an opt-in set, for the other two images and for 704 × 1280 with the `f16+dit8`",
+    "  quant. 50-step image-to-video runs at 1280 × 704 with 33 frames finished with both",
+    "  quants without non-finite values; they are kept for visual review and are not pinned.",
     "- **Tiled decode**: the VAE always decodes in overlapping tiles, blended in the patchified",
     "  space before the unpatchify, so the frames differ slightly from the upstream untiled",
     "  decode.",
+)
+
+#: Wan2.2 の受理する入力のうち I2V の項（`image` / `fit` —
+#: `packages/models/src/wan/ti2v-pipeline.ts` の `WanTi2vGenerateRequest`・門 `plan.ts` の
+#: `planWanRequest`・前処理 `i2v-preprocess.ts`）。寸法の選択は受理集合から公式の比較式
+#: `max(r / rc, rc / r)`・同点は横長（`selectWanI2vSize`）— 受理集合が 2 寸法なら「幅 ≥ 高さ →
+#: 1280×704」と同じ。明示した欄は受理集合に合う寸法でなければ `ModelInputError`。公式は受理集合の
+#: 外の寸法（16:9 で 1248×704）も選ぶ。LANCZOS は Pillow 12.3.0 の逐語の移植
+#: （`packages/models/src/image/lanczos.ts` — fixture と掃引で uint8 が全一致）。`fit` の綴り違いは
+#: 素の `Error`・`image` 無しの `fit` は `ModelInputError`（ADR 0121 追記「段 9b の結果」）。
+#: 画素はそのまま使う（色空間の変換をしない）。
+_WAN22_I2V_INPUTS = (
+    "- **image**: the first frame for image to video, as decoded RGB8 pixels",
+    "  `{ data, width, height }` (`data` a `Uint8Array` with 3 bytes per pixel, row by row; any",
+    "  size), used as given (no color-space conversion). Without `width` / `height`, the",
+    "  accepted size closest to the image's aspect ratio is used — 1280 × 704 when the image is",
+    "  at least as wide as it is tall, 704 × 1280 otherwise. A given `width` and/or `height` must",
+    "  match one accepted size, and that size is used. The official Wan2.2 code also picks",
+    "  sizes outside this set (1248 × 704 for a 16:9 image), so the same image can lose more to",
+    "  the crop here.",
+    '- **fit** (only with `image`): `"crop"` (the default, as in the official Wan2.2 code)',
+    "  scales the image to cover the output size, keeping its aspect ratio, and cuts out the",
+    '  center; `"stretch"` (as in diffusers\' `WanImageToVideoPipeline`) resizes the width and',
+    "  the height separately. Both resize with a port of Pillow's LANCZOS filter that gives the",
+    "  same bytes as Pillow 12.3.0 for the same RGB8 input. `fit` without `image` throws",
+    "  `ModelInputError`; a value other than these two throws a plain `Error` (the one",
+    "  exception to the sentence below).",
+)
+
+#: Wan2.2 の Usage に足す I2V の例（画像の decode は呼び手 — `generate()` は RGB8 を受ける。Deno の
+#: example は fast-png / jpeg-js〈`formatAsRGBA: false` で RGB を直接受ける —
+#: `examples/wan/decode-image.ts`〉、ブラウザは createImageBitmap と canvas〈RGBA を出す〉）。
+#: 復号の段の参照との差（EXIF の向き・アルファ・JPEG の復号器の差）は `examples/wan/README.md` と
+#: `tools/gpu-lab/README.md` と同じ事実を写す。I2V は precomputed の経路でだけ回した（GPU の umT5
+#: との組は e2e でも 50 ステップの記録でも未実行 — ADR 0121 追記「段 9b の結果」・
+#: `e2e_wan_ti2v_i2v_pipeline_test.ts`）。段の順は `pipeline.ts` の「（encoder →）text → DiT →
+#: VAE」（text の段は `"gpu"` の経路だけ）。
+_WAN22_I2V_USAGE = (
+    "",
+    "For image to video, pass the first frame as `image`. Decoding the image file is up to the",
+    "caller: the Deno example in the Karume repository (`examples/wan`) uses fast-png and",
+    "jpeg-js, and in a browser `createImageBitmap` and a canvas work. `generate()` takes 8-bit",
+    "RGB, so convert what the decoder gives: a canvas gives RGBA, and so does jpeg-js by",
+    "default (`formatAsRGBA: false` gives RGB, as the example uses) — drop the alpha channel.",
+    "",
+    "The bit-for-bit match with Pillow (Accepted inputs) starts from the RGB8 pixels, so the",
+    "decoding decides whether a file gives the reference's input. The official Wan2.2 code",
+    "reads the file with Pillow, drops the alpha channel without compositing it over a",
+    "background, and does not apply the EXIF orientation. `createImageBitmap` applies the",
+    "orientation by default, and a canvas can lose precision in partly transparent pixels (it",
+    "stores premultiplied alpha). For PNG, fast-png gives the same pixels as Pillow; JPEG",
+    "decoders differ slightly, so jpeg-js and a browser can give pixels a little different from",
+    "Pillow's for the same JPEG file.",
+    "",
+    "```ts",
+    "// `rgb`: the decoded image, 3 bytes (R, G, B) per pixel, row by row.",
+    "const clip = await pipeline.generate({",
+    '  prompt: "A cat walks on the grass, realistic style.",',
+    "  image: { data: rgb, width: imageWidth, height: imageHeight },",
+    "  seed: 42,",
+    '  // fit: "crop", // default — "stretch" resizes without keeping the aspect ratio',
+    "  // width / height: omitted — the accepted size closest to the image's aspect ratio",
+    "});",
+    "```",
+    "",
+    "With an `image`, the VAE encoder stage runs first and is disposed before the next stage",
+    "(the text encoder, or the transformer with the precomputed embeddings) is opened. Image",
+    "to video has so far been run only with the precomputed embeddings; with the text encoder",
+    "on the GPU (the default in this example) it has not been run yet.",
 )
 
 
@@ -710,6 +862,7 @@ def _wan_inputs(card: WanCard) -> list[str]:
         "  prompt is then rejected), **shift** > 0.",
         "- **seed** (the host noise generator — not torch's `randn`) or the initial noise as",
         "  `latents`.",
+        *card.inputs_extra,
         "",
         "Anything outside these sets throws `ModelInputError` before any weight reaches the GPU.",
         "",
@@ -850,7 +1003,16 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
 
     MUST: 実測していない条件の数は載せない（2.1 と同じ規律）。測っていない席・フレーム数・GPU・
     ブラウザの組は、まだ計測していないと書く。実用席の品質は段 7 の自機 A/B 門の相対 RMS 誤差
-    （{@link WAN22_PRACTICAL_QUANT_ERROR}）と視認の判定を書く。
+    （{@link WAN22_PRACTICAL_QUANT_ERROR}）と視認の判定を書き、どちらも T2V で測ったと範囲を名乗る
+    （I2V の席の比べは段 9d — I2V の品質は主張しない）。
+
+    I2V の資源は表に入れない（表は全て T2V）。書くのは測った範囲だけ: encoder 単独のプロセスの
+    VRAM の山 1,421 MiB（ADR 0121 追記「段 9a の結果」— nvidia-smi・RTX 3080 Ti）と、50 ステップの
+    I2V の壁（1280×704・33 フレーム・precomputed — 参照席 1,395.3 s・実用席 723.5 s・encoder の段は
+    0.5 / 0.8 s。`outputs/verify/deno-nvidia-geforce-rtx-3080-ti/` の
+    `2026-10-09_wan-ti2v-i2v-pipeline-full/results.json` の壁。ADR の 23 分 20 秒 / 12 分 8 秒は
+    同じ走行の `elapsedMs`）。その走行は
+    VRAM を読んでいない（n/a）ので、I2V の 1 本の山は未計測と書く。
     """
     seats = dict.fromkeys(
         quant for model in manifest["models"].values() for quant in model["quants"]
@@ -907,6 +1069,24 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
         "RTX 5070 Ti finished the same 121-frame request in 2,417.5 s (40.3 minutes) — a different",
         "GPU and runtime from the rows above.",
         "",
+        "All of the above is text to video. Image to video adds the VAE encoder stage, which runs",
+        "once before the others and is released before the next stage opens. Run on its own on",
+        "the RTX 3080 Ti in Deno 2.9.6, the encoder kept the whole process at a peak of 1,421 MiB",
+        "(nvidia-smi) while encoding images at 1280 × 704, 704 × 1280 and 256 × 160.",
+        *(
+            [
+                "On the same GPU on 2026-10-09, 50-step image-to-video runs at 1280 × 704 with 33",
+                "frames and the precomputed embeddings took 1,395.3 s with"
+                f" `{reference}` and 723.5 s",
+                f"with `{practical}` in all, the encoder stage under 1 s of it; the GPU memory of",
+                "those runs was not read, so an image-to-video clip's peak has not been measured.",
+            ]
+            if practical in seats and reference in seats
+            else [
+                "Image-to-video clips have not been measured for this table.",
+            ]
+        ),
+        "",
         *(
             [
                 f"- **Quality of `{practical}`**: after the first step its latent differs from",
@@ -914,7 +1094,8 @@ def _wan22_resources(manifest: Mapping[str, Any]) -> list[str]:
                 f"  RMS error of {error_33} at 33 frames and {error_121} at 121 frames. Side",
                 f"  by side with `{reference}` on twelve 50-step clips at 1280 × 704 with 33",
                 "  frames (seeds 42 to 45 with the three fixed prompts), no clear degradation",
-                "  was seen.",
+                "  was seen. Both were measured with text to video; image to video has not been",
+                "  compared between the quants yet.",
             ]
             if practical in seats and reference in seats
             else []
@@ -1043,6 +1224,9 @@ WAN22_CARD = WanCard(
     overview=_wan22_overview,
     attribution_notes=_wan22_attribution_notes,
     resources=_wan22_resources,
+    extra_tags=("image-to-video",),
+    usage_extra=_WAN22_I2V_USAGE,
+    inputs_extra=_WAN22_I2V_INPUTS,
 )
 
 

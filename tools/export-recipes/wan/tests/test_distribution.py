@@ -1657,9 +1657,19 @@ class TestTheWan22Distribution:
         assert "**int8 transformer**: the transformer is distributed only in this form." in prose
         assert "No float16 or float32 copy of the transformer is distributed." in prose
         assert "**f16 VAE decoder**" in prose
-        assert "In text-to-video, the only mode this distribution runs, the mask is all false" in (
-            prose
+        # 条件入力の 2 本は T2V と I2V の両方を説明する（ADR 0121 段 9c — I2V が使えるように
+        # なった）: I2V は先頭の潜在フレームのトークンが真で、その時刻は 0（dit-loop.ts の
+        # `wanConditionMask` / `timestepsProj(0)`）。
+        assert (
+            "In text-to-video the mask is all false and the second timestep equals the first."
+            in prose
         )
+        assert (
+            "In image-to-video the mask is true for the tokens of the first latent frame, which the"
+            " host replaces with the encoded conditioning image, and the second timestep is 0."
+            in prose
+        )
+        assert "the only mode this distribution runs" not in prose
         assert "(`patch_size` 2, 12 channels)" in prose
         # VAE の encoder は配布形に載る — 改変（3 グラフ・最後の時間スライス・f16 の丸め）を告げる。
         assert "**f16 VAE encoder for image-to-video**" in prose
@@ -1867,10 +1877,15 @@ class TestTheWan22ModelCard:
         assert f"| `{_PRACTICAL}` (default) |" in card.split("### Quants")[1]
         assert f"implements `{WAN22_SUPPORTED_PIPELINE}`" in card
         prose = " ".join(card.split())
-        assert "Text to video only." in prose
+        # T2V と I2V の両方を名乗る（ADR 0121 段 9c — I2V が公開 API に出た）。
+        assert "A **text-to-video** and **image-to-video** distribution of Wan2.2 TI2V 5B" in prose
+        assert "Text to video by default; image to video when `generate()` is given an `image`" in (
+            prose
+        )
+        assert "Text to video only." not in prose
+        assert "not available yet" not in prose
         assert "at 24 fps" in prose
         assert "- Seven graphs:" in prose
-        assert "and the VAE encoder is included, but image-to-video is not available yet." in prose
 
     def test_the_overview_names_every_graph_of_the_manifest(self, assembled22) -> None:
         _overview_names_every_graph(*assembled22)
@@ -2110,6 +2125,208 @@ class TestTheWan22ModelCard:
         _, manifest = assembled22
         with pytest.raises(ValueError, match=WAN_SUPPORTED_PIPELINE):
             _card(manifest)
+
+
+def _frontmatter(card: str) -> str:
+    """カード先頭の YAML（`---` に挟まれた部分）。"""
+    return card.split("---\n", 2)[1]
+
+
+class TestTheWan22ImageToVideoCard:
+    """Wan2.2 のカードの I2V の記述（ADR 0121 段 9c）: 入力（`image` / `fit`）・使い方・検証の
+    数値（追記「段 9a の結果」「段 9b の結果」とテストの定数の写し）・品質の数の範囲（T2V で
+    測った）。Wan2.1 のカードには I2V の行が 1 つも出ない（2.1 の `WanPipeline` は `image` を
+    拒む）。"""
+
+    def test_it_tags_image_to_video_and_keeps_the_single_pipeline_tag(self, assembled22) -> None:
+        out_dir, _ = assembled22
+        head = _frontmatter((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8"))
+        # HF の pipeline tag は 1 つ — text-to-video のまま、I2V は tags で名乗る。
+        assert "pipeline_tag: text-to-video\n" in head
+        assert "pipeline_tag: image-to-video" not in head
+        assert "tags:\n  - text-to-video\n  - image-to-video\n  - video-generation\n" in head
+
+    def test_the_wan21_card_carries_no_image_to_video_lines(self, assembled) -> None:
+        out_dir, _ = assembled
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        assert "image-to-video" not in card
+        assert "image to video" not in card
+        assert "- **image**" not in card
+        assert "- **fit**" not in card
+
+    def test_it_describes_the_image_and_fit_inputs(self, assembled22) -> None:
+        out_dir, _ = assembled22
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        inputs = card.split("## Accepted inputs", 1)[1].split("\n## ", 1)[0]
+        prose = " ".join(inputs.split())
+        assert (
+            "- **image**: the first frame for image to video, as decoded RGB8 pixels"
+            " `{ data, width, height }` (`data` a `Uint8Array` with 3 bytes per pixel" in prose
+        )
+        assert "used as given (no color-space conversion)" in prose
+        # 寸法の選択（`selectWanI2vSize` — 2 寸法では「幅 ≥ 高さ → 1280×704」）。
+        assert (
+            "Without `width` / `height`, the accepted size closest to the image's aspect ratio is"
+            " used — 1280 × 704 when the image is at least as wide as it is tall, 704 × 1280"
+            " otherwise." in prose
+        )
+        assert '- **fit** (only with `image`): `"crop"` (the default' in prose
+        assert (
+            "scales the image to cover the output size, keeping its aspect ratio, and cuts out"
+            in prose
+        )
+        assert (
+            '`"stretch"` (as in diffusers\' `WanImageToVideoPipeline`) resizes the width and'
+            in prose
+        )
+        assert "a port of Pillow's LANCZOS filter that gives the same bytes as Pillow 12.3.0" in (
+            prose
+        )
+        # 綴り違いは素の Error・image 無しの fit は ModelInputError（plan.ts の門）。
+        assert "`fit` without `image` throws `ModelInputError`" in prose
+        assert "a value other than these two throws a plain `Error`" in prose
+        # 綴り違いの素の Error は、直後の結びの文（受理集合の外は ModelInputError）の例外と名乗る。
+        assert "(the one exception to the sentence below)" in prose
+        # I2V の項は seed の項の後・拒否の文の前（受理する入力の列挙の内）。
+        assert (
+            inputs.index("- **seed**")
+            < inputs.index("- **image**")
+            < inputs.index("Anything outside these sets")
+        )
+
+    def test_the_usage_shows_an_image_to_video_call(self, assembled22) -> None:
+        out_dir, _ = assembled22
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        usage = card.split("## Usage", 1)[1].split("\n## ", 1)[0]
+        assert "  image: { data: rgb, width: imageWidth, height: imageHeight }," in usage
+        assert '  // fit: "crop", // default' in usage
+        prose = " ".join(usage.split())
+        # 画像の decode は呼び手の仕事（Deno は fast-png / jpeg-js・ブラウザは createImageBitmap と
+        # canvas）。
+        assert "Decoding the image file is up to the caller" in prose
+        assert "uses fast-png and jpeg-js" in prose
+        assert "`createImageBitmap` and a canvas" in prose
+        # jpeg-js の既定は RGBA・example は `formatAsRGBA: false` で RGB を直接受ける
+        # （`examples/wan/decode-image.ts`）。
+        assert (
+            "a canvas gives RGBA, and so does jpeg-js by default (`formatAsRGBA: false` gives RGB,"
+            " as the example uses) — drop the alpha channel." in prose
+        )
+        # 復号の段の参照との差（EXIF の向き・アルファ・JPEG の復号器）— example / gpu-lab の
+        # README と同じ事実。
+        assert "does not apply the EXIF orientation" in prose
+        assert "`createImageBitmap` applies the orientation by default" in prose
+        assert "drops the alpha channel without compositing it over a background" in prose
+        assert (
+            "For PNG, fast-png gives the same pixels as Pillow; JPEG decoders differ slightly"
+            in prose
+        )
+        # precomputed の経路では text の段が無い — encoder の次は transformer。
+        assert (
+            "With an `image`, the VAE encoder stage runs first and is disposed before the next"
+            " stage (the text encoder, or the transformer with the precomputed embeddings) is"
+            " opened." in prose
+        )
+        # I2V は precomputed の経路でだけ回した（GPU の umT5 との組は未実行）。
+        assert (
+            "Image to video has so far been run only with the precomputed embeddings; with the"
+            " text encoder on the GPU (the default in this example) it has not been run yet."
+            in prose
+        )
+        # 2 つ目のコードブロックも閉じている（``` が偶数）。
+        assert usage.count("```") == 4
+
+    def test_it_explains_the_conditioning_in_the_overview_and_the_attribution(
+        self, assembled22
+    ) -> None:
+        out_dir, _ = assembled22
+        prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
+        assert (
+            "at every step the first latent frame of the transformer's input is replaced with it"
+            " (the diffusers form: the tokens of that frame are marked by the condition mask and"
+            " take timestep 0)." in prose
+        )
+        assert "for image to video the resize, normalization and patchify of the image and the" in (
+            prose
+        )
+        assert (
+            "in image to video the tokens of the first latent frame are masked in and take"
+            " timestep 0, in text to video the mask is all false" in prose
+        )
+        assert "that text-to-video leaves inactive" not in prose
+        # 改変の要約に VAE encoder（配布形に載る部品）が入っている。
+        assert "the part of the VAE encoder that encodes one conditioning image" in prose
+        assert "have not been run in a browser yet, and neither has image to video." in prose
+
+    def test_it_copies_the_image_to_video_verification_figures(self, assembled22) -> None:
+        """数は追記「段 9a / 9b の結果」とテストの定数（`WAN_I2V_ENCODER_BAND` 7.8e-5・
+        `LATENT_RATIO_BANDS` 2.9e-3 / 3.5e-3・`FINAL_RATIO_BAND` 3.9e-3・`FRAME_RATIO_BAND` 8.9e-3・
+        T2V の latents.1 の帯 9.5e-4・故障注入 138〜358 倍）の写し。"""
+        out_dir, _ = assembled22
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        section = card.split("## Determinism and verification", 1)[1].split("\n## ", 1)[0]
+        prose = " ".join(section.split())
+        assert "- **Image to video against the upstream reference** (the `f16+dit8` quant" in prose
+        assert "the largest absolute difference of the normalized latent stays within 7.8e-5" in (
+            prose
+        )
+        # encoder の照合の 3 つ目の寸法（256×160）は受理集合の外と名乗る。
+        assert (
+            "for three images, each at the two accepted sizes and at a small 256 × 160 size"
+            " outside them" in prose
+        )
+        assert (
+            "stays within 2.9e-3 for the latent after the first step, 3.5e-3 after the second,"
+            " 3.9e-3 for the latent passed to the VAE and 8.9e-3 for the frames" in prose
+        )
+        # 帯が広い理由（encoder の出口の差を DiT が条件のトークンで増幅する）。
+        assert "(3.5e-3 against 9.5e-4 after the second step)" in prose
+        assert "the transformer amplifies that about 250 times on those tokens" in prose
+        assert "the difference falls back to the text-to-video size" in prose
+        assert "138 to 358 times its tolerance away" in prose
+        assert "Five faults in the encoder land 15,000 times its tolerance away or more." in prose
+        assert (
+            "- **Pinned image-to-video runs**: the same request with the same `image` and `fit`"
+            " repeats bit for bit" in prose
+        )
+        assert "for one image at 1280 × 704 with 9 frames (2 steps) with both quants" in prose
+        assert "for the other two images and for 704 × 1280 with the `f16+dit8` quant" in prose
+        assert "they are kept for visual review and are not pinned" in prose
+        # T2V の照合の項は T2V と名乗る。
+        assert "- **Text to video against the upstream reference**" in prose
+
+    def test_the_quality_figures_are_scoped_to_text_to_video(self, assembled22) -> None:
+        out_dir, _ = assembled22
+        prose = " ".join((out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").split())
+        assert (
+            "These quant comparisons are of text to video; the two quants have not been compared"
+            " on image to video yet." in prose
+        )
+        assert (
+            "no clear degradation was seen. Both were measured with text to video; image to video"
+            " has not been compared between the quants yet." in prose
+        )
+        assert "Text to video has been checked end to end on the GPU: 17 frames" in prose
+
+    def test_the_resources_name_what_was_measured_for_image_to_video(self, assembled22) -> None:
+        """表は全て T2V。I2V は encoder 単独の山（追記「段 9a の結果」）と 50 ステップの壁（段 9b の
+        通しの結果ファイル）だけを書き、1 本の VRAM の山は未計測と名乗る。"""
+        out_dir, _ = assembled22
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
+        section = card.split("## Resources", 1)[1].split("\n## ", 1)[0]
+        prose = " ".join(section.split())
+        assert "All of the above is text to video. Image to video adds the VAE encoder stage" in (
+            prose
+        )
+        assert "the encoder kept the whole process at a peak of 1,421 MiB (nvidia-smi)" in prose
+        assert (
+            "took 1,395.3 s with `f16+dit8` and 723.5 s with `f16+dit8-a8-attn8-s16` in all,"
+            " the encoder stage under 1 s of it" in prose
+        )
+        assert "an image-to-video clip's peak has not been measured" in prose
+        # I2V の行は表に入らない（表の行は T2V の実測だけ）。
+        table = [line for line in section.splitlines() if line.startswith("| `")]
+        assert table and all("image" not in line for line in table)
 
 
 _REAL = wan_sources(SERIES_ROOT)
