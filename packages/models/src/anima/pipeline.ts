@@ -111,6 +111,7 @@ import {
 } from "../session/gpu-features.ts";
 import { type FamilySessionPolicy, resolveSessionOptions } from "../session/options.ts";
 import { disposeSteps } from "../session/dispose-steps.ts";
+import { settleReleasedMemory } from "../session/settle-released-memory.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
 import {
   type FromPretrainedComponentOptions,
@@ -695,47 +696,6 @@ const stageRun = (
 };
 
 /**
- * 常駐 DiT を退避（OOM / 空き不足）した後、解放が device に届くのを待つ。
- *
- * Intel / wgpu は `destroy()` の解放が次の device poll まで遅れ、全 `destroy()` の直後に確保し直すと
- * 同じ OOM を踏む（docs/known-issues.md「Intel Arc B570」節）。素の WebGPU の probe（B570・2026-09-26・
- * 1 GiB を destroy → `onSubmittedWorkDone` → 1 GiB を確保し直して 256 MiB を書く）では、この待ちだけで
- * 確保も書き込みも通った（docs/research/2026-09-26-anima-residency-bench.md）。固定の sleep は足さない。
- * NOTE: 同じ機で pipeline の退避 → やり直し（evict-probe・ダミー 6 GiB）が device lost になったのは、
- * 段の OOM が `queue.writeBuffer` の staging 側で、その時点で device が無効化されていたため
- * （docs/research/2026-09-27-h35-oom-device-lost.md）— 解放待ちでは直らない。主線は先回りの退避
- * （`residency.ts` の「退避の 2 本の線」）。
- *
- * 待ちの前に空の `queue.submit([])` を 1 本出す。WHY: 致命的な OOM で無効化された device は、次の
- * **有効性を検査する呼び出し**まで消失を見せない — Deno は wgpu の lost コールバックを登録しないので
- * `device.lost` はその呼び出しで初めて解決し、`onSubmittedWorkDone` は有効性を検査しない（無効な device
- * でも解決しうる）。空の submit がその呼び出しで、ついでに wgpu の保留中の destroy も流す。これで
- * 死んだ device は退避の時点で消失を表面化させ、やり直しの段が遠くの別の症状で落ちない。
- * submit がここで安全なのは、退避が走るのは使用量が確保の線（予算の 97%）以下のとき（先回りの試し確保は
- * 解放まで待って返る・反応の退避は OOM で確保が拒まれた直後）か、device が既に死んでいるときだけ
- * だから — wgpu の submit 後の 99% 線の判定（超えると device を失う）を踏まない。
- *
- * MUST: device 消失と競わせる — 消失後の `onSubmittedWorkDone` が解決しない実装がありうる
- * （runtime の `raceDeviceLost` の doc）。消失したら待たずに戻り、やり直しの段が消失の例外で
- * fail loudly になる。
- *
- * NOTE: `export` は GPU 無しで「device 消失で解決する」を縛るテストのため（`mod.ts` / サブパス面には
- * 出さない — ADR 0008）。
- */
-export const settleReleasedMemory = async (gpu: GpuContext): Promise<void> => {
-  let unsubscribe: () => void = () => {};
-  const lost = new Promise<void>((resolve) => {
-    unsubscribe = gpu.onLost(() => resolve());
-  });
-  try {
-    gpu.device.queue.submit([]);
-    await Promise.race([gpu.device.queue.onSubmittedWorkDone(), lost]);
-  } finally {
-    unsubscribe();
-  }
-};
-
-/**
  * pipeline の `dispose` の本体: 常駐 DiT を畳んでから GPU を破棄する（`destroyGpu` は内部で取った
  * GPU のときだけ渡す — 共有 GPU は呼び出し側の所有物）。
  *
@@ -854,6 +814,14 @@ export class AnimaPipeline {
     this.#state = state;
     this.#residency = new TransformerResidency<Session>({
       dispose: (session) => session.dispose(),
+      // 退避（OOM / 空き不足）の後、解放が device に届くのを待つ（理由は settle-released-memory.ts の doc）。
+      // 空の submit がここで安全なのは、退避が走るのは使用量が確保の線（予算の 97%）以下のとき（先回りの
+      // 試し確保は解放まで待って返る・反応の退避は OOM で確保が拒まれた直後）か、device が既に死んでいる
+      // ときだけだから — wgpu の submit 後の 99% 線の判定（超えると device を失う）を踏まない。
+      // NOTE: B570 で pipeline の退避 → やり直し（evict-probe・ダミー 6 GiB）が device lost になったのは、
+      // 段の OOM が `queue.writeBuffer` の staging 側で、その時点で device が無効化されていたため
+      // （docs/research/2026-09-27-h35-oom-device-lost.md）— 解放待ちでは直らない。主線は先回りの退避
+      // （`residency.ts` の「退避の 2 本の線」）。
       settleRelease: () => settleReleasedMemory(state.gpu),
     });
   }

@@ -8,8 +8,9 @@
 //
 // NOTE: `AnimaPipeline.generate` そのものは偽の GPU では回せない — 段の Session は実容器の
 // グラフを device へ上げて組むので、`fake-gpu.ts` の device では構築が通らない。pipeline 側の
-// 結線（段の順序・イベントへの写し）は e2e が見る。pipeline.ts の GPU 側の小物（解放待ちの
-// `settleReleasedMemory` と dispose の順序 `disposeResidencyThenGpu`）は偽の GpuContext で直接縛る。
+// 結線（段の順序・イベントへの写し）は e2e が見る。GPU 側の小物（解放待ちの `settleReleasedMemory`
+// 〈session/settle-released-memory.ts〉と dispose の順序 `disposeResidencyThenGpu`〈pipeline.ts〉）は
+// 偽の GpuContext で直接縛る。
 
 import {
   assert,
@@ -34,7 +35,8 @@ import {
   TransformerResidency,
   transformerSource,
 } from "../src/anima/residency.ts";
-import { disposeResidencyThenGpu, settleReleasedMemory } from "../src/anima/pipeline.ts";
+import { disposeResidencyThenGpu } from "../src/anima/pipeline.ts";
+import { settleReleasedMemory } from "../src/session/settle-released-memory.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { losableGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
@@ -942,7 +944,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
 
 describe("settleReleasedMemory（退避の後の解放待ち）", () => {
   it("空の submit を出してから onSubmittedWorkDone を待ち、消失の購読を残さない", async () => {
-    // 空の submit が「無効化された device の消失を表面化させる呼び出し」（pipeline.ts の doc）。
+    // 空の submit が「無効化された device の消失を表面化させる呼び出し」（settle-released-memory.ts の doc）。
     const calls: string[] = [];
     const { gpu } = losableGpuContext(undefined, {
       submit: (commandBuffers) => void calls.push(`submit:${commandBuffers.length}`),

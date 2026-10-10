@@ -19,9 +19,6 @@ import type { GpuContext } from "@karume/runtime";
  *
  * MUST: device 消失と競わせる — 消失後の `onSubmittedWorkDone` が解決しない実装がありうる（runtime の
  * `raceDeviceLost` の doc）。消失したら待たずに戻り、次の段が消失の例外で fail loudly になる。
- *
- * NOTE: `anima/pipeline.ts` の `settleReleasedMemory`（常駐 DiT の退避の後の待ち）と同じ本体。あちらは
- * 家族の中に置かれたままで、ここへ寄せるのは別の変更に回している（家族をまたいで import しない）。
  */
 export const settleReleasedMemory = async (gpu: GpuContext): Promise<void> => {
   let unsubscribe: () => void = () => {};
