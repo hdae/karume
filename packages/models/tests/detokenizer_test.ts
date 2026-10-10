@@ -31,3 +31,33 @@ Deno.test("createStopStringFilter: 受理できない停止文字列は入力起
     createStopStringFilter(["END", "\n\n"]);
   });
 });
+
+Deno.test("createStopStringFilter: 型を外した指定は暗黙変換せずに入力起因で落ちる", async (t) => {
+  /** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
+  const untyped = (value: unknown): readonly string[] => value as readonly string[];
+
+  await t.step("文字列そのもの（文字の配列に展開して最初の 1 文字で止めない）", () => {
+    // "END" を展開すると "E" / "N" / "D" の 3 本になり、"SENTENCE" を最初の E で止める。
+    assertThrows(() => createStopStringFilter(untyped("END")), ModelInputError, "stopStrings");
+  });
+
+  await t.step("配列でない iterable（Set）", () => {
+    assertThrows(
+      () => createStopStringFilter(untyped(new Set(["END"]))),
+      ModelInputError,
+      "stopStrings",
+    );
+  });
+
+  await t.step("文字列でない要素（indexOf の暗黙変換で別の位置に止めない）", () => {
+    // 123 は "123" として扱われ、"x123y" を "x" で止める。
+    for (const element of [123, null, undefined]) {
+      assertThrows(
+        () => createStopStringFilter(untyped(["END", element])),
+        ModelInputError,
+        "stopStrings[1]",
+        String(element),
+      );
+    }
+  });
+});

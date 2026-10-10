@@ -151,17 +151,29 @@ const partialTail = (buffer: string, stopStrings: readonly string[]): number => 
  *
  * MUST: 空文字列と重複は fail loudly。空文字列は「常に一致する」= 1 文字も出せない指定で、
  * 重複は同じ条件を 2 度書いた以上の意味を持てない（どちらも呼び手の取り違えの徴候）。
+ *
+ * MUST: 配列であることと各要素が文字列であることも見る（型を外した JS / JSON 入力が届く）。
+ * 文字列そのものは文字の配列へ展開されて最初の 1 文字で止まり、number の要素は `indexOf` の
+ * 暗黙変換で別の位置に止まる — どちらも例外にならず、止まる位置だけが変わる。
  */
 export const createStopStringFilter = (stopStrings: readonly string[]): StopStringFilter => {
+  if (!Array.isArray(stopStrings)) {
+    throw new ModelInputError("stopStrings が文字列の配列でない");
+  }
   // MUST: 発行時に写す（走行中に配列を書き換えられると停止条件が途中で変わる）。
-  const stops = [...stopStrings];
+  const elements: readonly unknown[] = stopStrings;
+  const stops: string[] = [];
   const declared = new Set<string>();
-  stops.forEach((stop, index) => {
+  elements.forEach((stop, index) => {
+    if (typeof stop !== "string") {
+      throw new ModelInputError(`stopStrings[${index}] ${String(stop)} が文字列でない`);
+    }
     if (stop === "") throw new ModelInputError(`stopStrings[${index}] が空文字列`);
     if (declared.has(stop)) {
       throw new ModelInputError(`stopStrings に ${JSON.stringify(stop)} が 2 度出る`);
     }
     declared.add(stop);
+    stops.push(stop);
   });
 
   let held = "";
