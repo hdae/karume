@@ -230,7 +230,7 @@ measurements in `docs/research/`.
   image as in diffusers' `WanImageToVideoPipeline`. Without `width` / `height` the accepted size
   closest to the image's aspect ratio is chosen (landscape on a tie). `fit: "crop"` (the default —
   the official Wan2.2 preprocessing: resize to cover with LANCZOS, bit-exact with Pillow, then a
-  centre crop) or `fit: "stretch"` (diffusers' direct resize) picks how the image is fitted; with
+  center crop) or `fit: "stretch"` (diffusers' direct resize) picks how the image is fitted; with
   only two accepted sizes, more of a square or 4:3 image is cropped than in the official
   pipeline. `WanPipeline` (Wan2.1) rejects `image` and `fit`. The distribution now also carries the
   VAE encoder (three f16 graphs, 108 MB), fetched for text-to-video too. The `karume-wan2.2` distribution is not published on
@@ -241,8 +241,12 @@ measurements in `docs/research/`.
   `f16` quant; its manifest declares 50 steps, guidance 5.0 and shift 5.0, and like `karume-wan2.1`
   it references the `text_encoder` of `karume-umt5-xxl` across repositories.
   `deno task demo:wan --generation wan2.2` runs it (the default generation stays `wan2.1`), and
-  the gpu-lab Wan tab gains a generation choice; its JSON is `karume-wan-browser/4` and records
-  the generation.
+  `--image <PNG|JPEG>` with an optional `--fit <crop|stretch>` runs image-to-video; the example
+  decodes the file with fast-png and jpeg-js, which are dependencies of the examples only (PNG gives
+  Pillow's pixels exactly, JPEG differs slightly; the EXIF orientation is not applied, as in the
+  official `generate.py`). The gpu-lab Wan tab gains a generation choice and, for Wan2.2, a
+  condition image decoded by the browser (`createImageBitmap`); its JSON is `karume-wan-browser/5`
+  and records the generation and the condition image of an image-to-video row.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
   container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when

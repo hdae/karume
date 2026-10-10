@@ -1043,7 +1043,7 @@ Consequences）。
   側で止める（明示の引数 `--allow-undeclared-license`・`models/` の外・公開前の門 — ADR 0122 決定 6）が、手元に組んだミラーを
   差すこと自体は止めない。
 
-## Wan2.2: 受ける寸法は 1280×704 / 704×1280、フレーム数は 4n+1 の 5〜121・T2V だけ・121 フレームは 12 GiB 級で完走を確認（10 GB 級で確かめたのは 57 フレームまで — ADR 0121）
+## Wan2.2: 受ける寸法は 1280×704 / 704×1280、フレーム数は 4n+1 の 5〜121・I2V も同じ 2 寸法・121 フレームは 12 GiB 級で完走を確認（10 GB 級で確かめたのは 57 フレームまで — ADR 0121）
 
 `@karume/models/wan` の `WanTi2vPipeline`（Wan2.2 TI2V-5B）の by-design の制約。入力起因の拒否は Wan2.1 と同じ入口（GPU に触る前）で
 `ModelInputError` になる（受理の外は fail loudly）。
@@ -1094,7 +1094,9 @@ Consequences）。
 - **sha256 の参照値は環境ごとの行**（ADR [0106](decisions/0106-device-keyed-references.md)）: 2 ステップの通しの 6 ケース（参照席・
   1280×704 / 704×1280・17 フレーム）は B570（`deno-intel-graphics-bmg-g21`）と RTX 3080 Ti（`deno-nvidia-geforce-rtx-3080-ti`）の行を
   持つ。実用席の同じ要求の 1 本（1280×704）は RTX 3080 Ti の行だけ。2 ステップ × 121 フレームのケースは opt-in（`KARUME_WAN_TI2V_121F=1`）で、行は RTX 3080 Ti だけ。50 ステップの通し（opt-in
-  `KARUME_WAN_TI2V_FULL_PIPELINE=1`・1280×704・33 フレーム）は 2 席とも行を持ち、行は RTX 3080 Ti だけ。
+  `KARUME_WAN_TI2V_FULL_PIPELINE=1`・1280×704・33 フレーム）は 2 席とも行を持ち、行は RTX 3080 Ti だけ。I2V の 2 ステップ × 9 フレームの
+  通しは RTX 3080 Ti の行だけ: 既定のレーン = 2 席の boxing-cats（1280×704）・opt-in（`KARUME_WAN_TI2V_I2V_FULL=1`）= 参照席の
+  cat-dog-baking / ferret と 704×1280。
 - **VAE は常にタイルで decode する**（潜在 16 のタイル・重なり 潜在 4・patchify 空間でブレンドしてから unpatchify — ADR 0121 決定 6。
   1280×704 は 28 枚）: 公式の非タイル decode とは近似の差が出る（段 5 の照合ケース 480×832×9 の観測で比 1.2e-1）。
 - **Wan2.1 と同じもの**: 計測（`gpuTiming`）の device を構築時に拒むこと・DiT 段と VAE 段を同時に常駐させないこと・seed の初期ノイズが
@@ -1102,7 +1104,17 @@ Consequences）。
   埋め込み資産は 2.1 の系列とバイト同一・`"gpu"` の umT5 は `karume-umt5-xxl` への越境参照）・umT5 の差し替え（`components: { text_encoder }`）と
   それが検査しない 3 つは上の Wan2.1 の節のとおり（構築と生成の本体は
   `packages/models/src/wan/family.ts` を 2.1 と共有する）。
-- **T2V だけ**: 画像から動画（I2V）は ADR 0121 の段 9。今の要求の型は画像入力を持たない。
+- **I2V（`image` / `fit` — ADR 0121 決定 11・段 9）の制約**:
+  - 寸法は T2V と同じ受理集合の 2 寸法だけ。`width` / `height` を省くと画像の縦横比に近い方（幅 ≥ 高さなら 1280×704）を選ぶ。公式は
+    面積の上限の内で自由な寸法を選ぶ（16:9 の画像なら 1248×704）ので、同じ画像でもここの方が `fit: "crop"` で切られる量が多いことがある。
+  - 画像ファイルのデコードはしない（ランタイム依存ゼロ）。受けるのはデコード済みの RGB8 で、色空間の変換もしない。前処理（LANCZOS の縮小と
+    切り出し）は Pillow 12.3.0 とビット一致だが、ファイルから RGB8 を作る段は呼び手のもので、参照と同じ入力になるかはそこで決まる
+    （`examples/wan` は PNG を Pillow と画素一致で読み、JPEG は復号器の差で少しずれる・EXIF の向きは適用しない — `examples/wan/README.md`）。
+  - 確かめた範囲は事前計算の経路（`textEncoder: "precomputed"`）だけ: 2 ステップ × 9 フレーム（1280×704 で 3 画像・704×1280 で 1 画像）と、
+    50 ステップ × 1280×704×33（2 席とも完走・非有限 0）。GPU の umT5 の経路との組・ブラウザ・RTX 3080 Ti 以外の GPU では回していない。
+  - 上流（diffusers の CPU f32）との帯は T2V より広い（step 2 の潜在で 3.5e-3 — T2V は 9.5e-4）。encoder の出口の小さな差を DiT が
+    条件のトークンで約 250 倍に増幅するため（参照の条件の潜在に差し替えると T2V の桁に戻る — ADR 0121 追記「段 9b の結果」）。
+  - 実用席の品質（上の A/B 門と視認）は T2V で測った値。I2V で 2 席を比べるのは段 9d。
 - **配布形（`karume-wan2.2`）は Hugging Face に未公開**（ADR 0121 の段 8a でローカルミラー `models/karume-wan2.2` を組む recipe ができた —
   `dist.py --pipeline wan-ti2v`）。入口は `WanTi2vPipeline.fromPretrained`（ミラーを渡す）と、系列の容器から組んだ manifest と資産を渡す
   `WanTi2vPipeline.fromAssets`。
