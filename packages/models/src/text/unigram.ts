@@ -84,8 +84,11 @@ export const unigramSegments = (
 export const unigramTokenize = (model: UnigramModel, cps: readonly number[]): number[] => {
   const ids: number[] = [];
   for (const segment of unigramSegments(model, cps)) {
-    if (segment.entry === undefined) ids.push(...expandUnknown(model, segment.text));
-    else ids.push(segment.entry.id);
+    if (segment.entry === undefined) {
+      // 未知の 1 片は byte 展開で長くなりうる — 引数展開（`push(...)`）は V8 の引数上限
+      // （約 13 万）で RangeError になるので 1 要素ずつ積む。
+      for (const id of expandUnknown(model, segment.text)) ids.push(id);
+    } else ids.push(segment.entry.id);
   }
   return ids;
 };

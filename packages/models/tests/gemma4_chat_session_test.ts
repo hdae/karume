@@ -1064,3 +1064,18 @@ Deno.test("ChatSession token 通知: callback の失敗を伝え、次の会話�
   assertEquals(await assertRejects(() => stream.done), failure);
   assertEquals(await session.send("Another color.").text(), "Red.");
 });
+
+Deno.test("ChatSession 溢れ: 引数展開の上限を超える長さの発話も容量エラーで返る", async () => {
+  // 15 万文字の 1 断片（added token で割れない本文）。BPE の結果を可変長引数で積むと、容量の
+  // 判定より前に tokenizer が素の RangeError で落ち、呼び手には内部障害に見える。
+  const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
+  const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
+  const error = await assertRejects(
+    () => session.send("\u0001".repeat(150_000)).text(),
+    GenerationCapacityError,
+    "会話が入り切らない",
+  );
+  // 位置表（4096）も容量も超える長さなので、どちらの上限で落ちるかは問わない。
+  assert(error.requestedNewTokens === MAX_NEW_TOKENS);
+  assertEquals(host.created(), 0);
+});

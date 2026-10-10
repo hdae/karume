@@ -104,7 +104,11 @@ export class GemmaTokenizer {
         continue;
       }
       // normalizer は `Replace(" " → "▁")` 1 本きり（Unicode 分類にも NFC にも触らない）。
-      ids.push(...bpeEncode(this.#assets.model, chunk.text.replaceAll(" ", METASPACE)));
+      // 1 要素ずつ積む — 本文は丸ごと 1 断片なので、引数展開（`push(...)`）は約 13 万 token で
+      // V8 の引数上限の RangeError になり、呼び手の容量判定へ届く前に落ちる。
+      for (const id of bpeEncode(this.#assets.model, chunk.text.replaceAll(" ", METASPACE))) {
+        ids.push(id);
+      }
     }
     return ids;
   }

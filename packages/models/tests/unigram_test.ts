@@ -100,3 +100,13 @@ Deno.test("縮退: 空入力と空語彙", async (t) => {
     assertEquals(tokenize(buildModel([], { byteBaseId: BYTE_BASE }), "abc"), [197, 198, 199]);
   });
 });
+
+Deno.test("長い未知断片: 引数展開の上限を超える byte 列でも id 列になる", () => {
+  // 「あ」× 50,000 = 150,000 byte の未知断片 1 片。展開を可変長引数（`push(...ids)`）で渡すと
+  // V8 の引数上限（約 13 万）で素の RangeError になり、入力の長さとは無関係な形で落ちる。
+  const model = buildModel([["a", 4, -1]], { byteBaseId: BYTE_BASE });
+  const ids = tokenize(model, "a" + "あ".repeat(50_000) + "a");
+  assertEquals(ids.length, 150_002);
+  assertEquals(ids.slice(0, 4), [4, 327, 229, 230]);
+  assertEquals(ids.slice(-4), [327, 229, 230, 4]);
+});
