@@ -9,8 +9,8 @@ concept for ADR 0115 (addendum decision 6):
 3. **Run** — inject the table with `acquireGpu({ geometryProfile })` and run Anima on it (the
    **3. Anima** tab).
 
-A fourth tab, **4. Wan**, runs the Wan2.1 T2V 1.3B and Wan2.2 TI2V 5B text-to-video pipelines in Chrome
-(ADR 0118 stage 9, ADR 0121 stage 8; see [4. Wan](#4-wan) and
+A fourth tab, **4. Wan**, runs the Wan2.1 T2V 1.3B text-to-video and Wan2.2 TI2V 5B text-to-video and
+image-to-video pipelines in Chrome (ADR 0118 stage 9, ADR 0121 stages 8 and 9; see [4. Wan](#4-wan) and
 [Checking Wan in Chrome](#checking-wan-in-chrome)).
 
 It replaces the two earlier pages (the Chrome page of `tools/geometry-sweep` and the Anima residency
@@ -304,14 +304,14 @@ comparable to wall times with it off.
 ## 4. Wan
 
 Runs Wan2.1 T2V 1.3B (`WanPipeline` of `@karume/models/wan`) or Wan2.2 TI2V 5B (`WanTi2vPipeline`,
-text-to-video only) in Chrome, to see whether a clip completes on a browser device and, when it does
+text-to-video, or image-to-video from a condition image) in Chrome, to see whether a clip completes on a browser device and, when it does
 not, where it stops (binding limits, the GPU timeout, memory). The pipeline's rules are those of
 `examples/wan`: Wan2.1 accepts 832x480 or 480x832 and 4n+1 frames from 5 to 81 (Wan2.2: the sizes
 and frame counts below), and the `precomputed` text-encoder route accepts only the four prompts of
 the embedding asset (the same four for both generations).
 
 The tab has a generation switch next to the source field: `Wan2.1 T2V 1.3B（karume-wan2.1）` (the default) or
-`Wan2.2 TI2V 5B（karume-wan2.2）` (text-to-video only). It can be changed only before loading. Changing it rebuilds
+`Wan2.2 TI2V 5B（karume-wan2.2）` (text-to-video, and image-to-video with **条件画像**). It can be changed only before loading. Changing it rebuilds
 the frame and size choices, the limits table, the quant choices (from that generation's distribution on this
 server), the source placeholder, and the info line. Wan2.1 loads with `WanPipeline.fromPretrained` exactly as
 before, and Wan2.2 loads with `WanTi2vPipeline.fromPretrained`. Wan2.2 accepts 1280x704 or 704x1280 and 4n+1
@@ -327,7 +327,8 @@ switch next to it lists the quants of the distribution this server serves; its f
 resolves to the manifest's `defaultQuant` at load (`f16+dit8-a8-attn8-s16` for both generations — Wan2.1
 since 2026-10-04, ADR 0120; Wan2.2 since 2026-10-06, ADR 0121), and the resolved name is passed to the
 pipeline and recorded. The saved JSON is
-`karume-wan-browser/4` and carries the generation (`wan2.1` / `wan2.2`), the route, and the quant.
+`karume-wan-browser/5` and carries the generation (`wan2.1` / `wan2.2`), the route, the quant, and, for
+image-to-video rows, the condition image.
 
 - **取得元** (source) — blank reads the distribution this server serves for the chosen generation
   (`models/karume-wan2.1`, or `models/karume-wan2.2` with Wan2.2); an
@@ -340,8 +341,8 @@ pipeline and recorded. The saved JSON is
   timestamp setting does not apply to this tab. `acquireGpu` requests the adapter's own limits, so
   the device does not keep the WebGPU default of 128 MiB per storage binding. From this server, loading
   reads only the descriptors, and every generate reads the weights from the server again as each
-  stage builds its session (Wan2.1: about 1.33 GiB for the int8 transformer of the default quant, 2.6 GiB for the `f16` transformer, and 0.27 GiB for the VAE; Wan2.2: 6.714 GiB in all, 4.67 GiB for the int8 transformer and the rest for the two f16 VAE graphs); from
-  Hugging Face, loading first downloads the weight parts into the browser cache. **pipeline を破棄** disposes the pipeline and
+  stage builds its session (Wan2.1: about 1.33 GiB for the int8 transformer of the default quant, 2.6 GiB for the `f16` transformer, and 0.27 GiB for the VAE; Wan2.2: 6.814 GiB in all: 4.67 GiB for the int8 transformer, 2.04 GiB for the two f16 VAE decoder graphs, and 0.10 GiB for the three f16 VAE encoder graphs of image-to-video, which a generate reads only when it is given an image); from
+  Hugging Face, loading first downloads the weight parts into the browser cache (for Wan2.2 always with the VAE encoder graphs, even if no image is used). **pipeline を破棄** disposes the pipeline and
   the device; use it after a device loss. Applying the GPU settings also disposes them; load again
   to use the new settings.
 - **The limits table** lists every limit `acquireGpu` requests, with the adapter's value and, once
@@ -355,8 +356,19 @@ pipeline and recorded. The saved JSON is
   blank for the distribution defaults (50, 5.0, 3.0 for Wan2.1 and 50, 5.0, 5.0 for Wan2.2; the
   placeholders show them after loading). A
   blank negative uses the asset's `negative` row. **生成** (generate) reads them once.
+- **条件画像（Wan2.2 の I2V）, fit, 画像を外す** (condition image, fit, remove image) — Wan2.2 only; with
+  Wan2.1 they are disabled (its pipeline refuses an image), and switching to Wan2.1 removes the image.
+  Choose a PNG or JPEG file to turn the next generates into image-to-video: the page decodes it in the
+  browser (see [image-to-video](#7-wan22-ti2v-5b) for how) and passes it as `image` with the chosen
+  `fit` — `crop` (the default, as the official Wan2.2: scale to cover the output size, keeping the
+  aspect ratio, and cut out the center) or `stretch` (as diffusers: resize straight to the output size).
+  Choosing an image adds **画像から自動（WxH）** at the top of the size select and selects it: the request
+  then leaves out the width and height, and the pipeline picks the accepted size closest to the image's
+  aspect ratio (1280x704 when the image is at least as wide as it is tall, 704x1280 otherwise); the label
+  shows that size, and the limits table and the row use it. Choosing 1280x704 or 704x1280 instead fits the
+  image to that size. **画像を外す** goes back to text-to-video.
 - Each generate adds a row: the resolved request, the wall time, each stage's time
-  (`transformer`, `vae_decoder`), the step times and the VAE tile times (the first one includes
+  (`vae_encoder` with an image, `text_encoder` with the `gpu` route, `transformer`, `vae_decoder`), the step times and the VAE tile times (the first one includes
   building that stage's sessions, i.e. uploading the weights; then the median and maximum of the
   rest — a step is two transformer forwards with CFG), the session diagnostics of each component
   (weights and slot backing allocated, geometry profile, submit count, `窓平均の最大` = the largest
@@ -365,9 +377,11 @@ pipeline and recorded. The saved JSON is
   order — the bytes the e2e reference rows hash), the reference verdict, and the error. The clip is
   drawn on the canvas next to the table: **前** / **次** step one frame, **再生** plays at the clip's
   frame rate (16 fps for Wan2.1, 24 fps for Wan2.2), and the slider seeks. The condition column starts
-  with the generation.
-- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/4`; the generation is in
-  each `loads[]` entry, in each row, and next to the loaded source).
+  with the generation; an image-to-video row then shows `I2V <file>（<width>x<height>・fit <fit>）` (the
+  decoded image's size, and `・寸法は画像から自動` when the size came from the image).
+- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/5`; the generation is in
+  each `loads[]` entry, in each row, and next to the loaded source; an image-to-video row has `image`:
+  `file`, `width`, `height`, `fit`, and `sizeFromImage`, without the pixels).
 
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
 stops it. On the Intel Arc B570 under Deno, a 50-step clip with the `f16` quant takes about 30
@@ -517,7 +531,9 @@ frames (32 pixels per token on each side):
 | VAE intermediate (`vae_decoder_next`) f32      | 201,326,592 B (192 MiB) | 201,326,592 B (192 MiB) | 201,326,592 B (192 MiB)    |
 
 The self-attention scores of the 24 heads split into 3 blocks at 33 frames on the B570 limit (measured
-in stage 2), and into 34 blocks of 2,102,960,640 B at 121 frames (computed).
+in stage 2), and into 34 blocks of 2,102,960,640 B at 121 frames (computed). With an image, the VAE
+encoder runs first; its largest value is 144,814,720 B (`vae_encoder_pre`, f32, at either size), below
+the VAE value above, so an image does not change the table.
 
 **Memory and time (measured on the B570, 1280x704, 50 steps).**
 
@@ -561,7 +577,34 @@ negative, and the default guidance and shift (5.0 and 5.0):
   them), and no row is added for a Chrome key (ADR 0121 stage 10), so the page reports a missing row: report
   the SHA-256 as a record only, unlike section 5.
 
-Any other request, quant, or route is not a reference case.
+Any other request, quant, or route is not a reference case, and neither is any image-to-video request: the
+e2e rows for image-to-video belong to its own input images, so the page does not compare an
+image-to-video row with them.
+
+**Image-to-video.** Choose a PNG or JPEG in **条件画像（Wan2.2 の I2V）** (see [4. Wan](#4-wan)). The page
+decodes the file with the browser's own API, without any decoder package: `createImageBitmap` with
+`imageOrientation: "from-image"`, `colorSpaceConversion: "none"`, and `premultiplyAlpha: "none"`,
+then `getImageData` on an `OffscreenCanvas`, and the alpha channel is dropped. So:
+
+- The page applies the EXIF orientation (it asks for it explicitly with `imageOrientation`), so a photo
+  stored on its side is used upright. The Deno example and the reference (Pillow without
+  `ImageOps.exif_transpose`, as in the official `generate.py`) ignore the orientation, so for such a
+  file (typically a JPEG from a camera or a phone) they use the image turned.
+- JPEG decoders differ slightly, so the pixels of a JPEG here can differ a little from those of the Deno
+  example (`examples/wan`, which decodes with jpeg-js) and of the reference (Pillow), and the clip then
+  differs too. An opaque 8-bit PNG without a color profile and without an EXIF orientation decodes to
+  exactly the same pixels in all three.
+- Transparency does not survive the canvas: Chrome's 2D canvas stores premultiplied alpha, so a fully
+  transparent pixel comes back with RGB 0 (black) and a partly transparent one loses precision. The Deno
+  example and the reference keep the stored RGB of such pixels, so a PNG with transparency (RGBA,
+  gray with alpha, or a `tRNS` chunk) gives a different condition image here. Flatten such an image
+  first when the result should match.
+- The browser also decodes PNGs the Deno example refuses (16-bit, and gray below 8 bits); it reduces
+  them to 8 bits its own way, so there is no Deno counterpart to compare with.
+- No color conversion is applied: a color profile in the file is ignored.
+
+The encoder stage took about 0.5 s on the RTX 3080 Ti in Deno (ADR 0121 stage 9b, 1280x704); it has not
+been run in Chrome yet.
 
 **Steps for Wan2.2.**
 
@@ -607,11 +650,11 @@ Any other request, quant, or route is not a reference case.
     twin never injects, so its files lack it.
 - **Profile** — the `GeometryProfile` value (`id`, `match`, `gemmRows`, `attention`, `conv2d`,
   `i8a8`, `provenance`), with `1e999` for the last `maxRows`.
-- **Wan** — `karume-wan-browser/4`, as described in [4. Wan](#4-wan): the adapter, the environment
+- **Wan** — `karume-wan-browser/5`, as described in [4. Wan](#4-wan): the adapter, the environment
   key, the adapter and device limits, the loaded source / generation / quant / route, `loads[]`,
-  `deviceLost`, and `rows[]` (each with the generation, the resolved request, the wall time, the
-  stage / step / tile times, the session diagnostics, the RGB SHA-256, the reference verdict, and
-  the error).
+  `deviceLost`, and `rows[]` (each with the generation, the resolved request, the condition image of an
+  image-to-video row, the wall time, the stage / step / tile times, the session diagnostics, the RGB
+  SHA-256, the reference verdict, and the error).
 
 ## What to confirm
 

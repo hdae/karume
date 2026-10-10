@@ -14,10 +14,12 @@ import {
   formatSpans,
   formatWanDiagnostics,
   judgeWanLimits,
+  resolveWanFormSize,
   summarizeWanDiagnostics,
   summarizeWanTimeline,
   WAN21_LAB,
   WAN22_LAB,
+  WAN_SIZE_FROM_IMAGE,
   wanAttentionRowBlocks,
   type WanForm,
   wanFrameChoices,
@@ -254,6 +256,45 @@ describe("wan request building", () => {
       "WxH",
     );
   });
+
+  describe("with the size taken from the condition image", () => {
+    const IMAGE_SIZE = { width: 704, height: 1280 } as const;
+
+    it("leaves width and height out of the request and resolves them to the size chosen from the image", () => {
+      const { request, resolved } = buildWanRequest(
+        { ...FORM, size: WAN_SIZE_FROM_IMAGE },
+        PROMPTS,
+        CONFIG,
+        IMAGE_SIZE,
+      );
+      assertEquals(request, { prompt: "Two cats box.\n", seed: 42, frames: 33 });
+      assertEquals([resolved.width, resolved.height], [704, 1280]);
+    });
+
+    it("still sends an explicitly chosen size when an image is given", () => {
+      const { request, resolved } = buildWanRequest(FORM, PROMPTS, CONFIG, IMAGE_SIZE);
+      assertEquals([request.width, request.height], [832, 480]);
+      assertEquals([resolved.width, resolved.height], [832, 480]);
+    });
+
+    it("refuses the image size when no image has been chosen", () => {
+      assertThrows(
+        () => buildWanRequest({ ...FORM, size: WAN_SIZE_FROM_IMAGE }, PROMPTS, CONFIG),
+        Error,
+        "条件画像が要る",
+      );
+      assertThrows(
+        () => resolveWanFormSize(WAN_SIZE_FROM_IMAGE, undefined),
+        Error,
+        "条件画像が要る",
+      );
+    });
+
+    it("reads a WxH choice as is, whatever the image size", () => {
+      assertEquals(resolveWanFormSize("1280x704", IMAGE_SIZE), { width: 1280, height: 704 });
+      assertEquals(resolveWanFormSize(WAN_SIZE_FROM_IMAGE, IMAGE_SIZE), IMAGE_SIZE);
+    });
+  });
 });
 
 describe("wan timeline", () => {
@@ -273,6 +314,57 @@ describe("wan timeline", () => {
       stepMs: [1000, 500],
       tileMs: [300, 100],
     });
+  });
+
+  it("times the image-to-video encoder stage before the transformer without counting it as a step", () => {
+    const timeline = summarizeWanTimeline([
+      { kind: "stage", component: "vae_encoder", at: "start", ms: 0 },
+      { kind: "stage", component: "vae_encoder", at: "end", ms: 500 },
+      { kind: "stage", component: "transformer", at: "start", ms: 600 },
+      { kind: "step", step: 1, ms: 1600 },
+      { kind: "stage", component: "transformer", at: "end", ms: 1700 },
+      { kind: "stage", component: "vae_decoder", at: "start", ms: 1800 },
+      { kind: "tile", tile: 1, ms: 2100 },
+      { kind: "stage", component: "vae_decoder", at: "end", ms: 2150 },
+    ]);
+    assertEquals(timeline, {
+      stageMs: { vae_encoder: 500, transformer: 1100, vae_decoder: 350 },
+      stepMs: [1000],
+      tileMs: [300],
+    });
+  });
+
+  it("refuses a step or a tile inside the encoder stage", () => {
+    assertThrows(
+      () =>
+        summarizeWanTimeline([
+          { kind: "stage", component: "vae_encoder", at: "start", ms: 0 },
+          { kind: "step", step: 1, ms: 1 },
+        ]),
+      Error,
+      "段 transformer",
+    );
+    assertThrows(
+      () =>
+        summarizeWanTimeline([
+          { kind: "stage", component: "vae_encoder", at: "start", ms: 0 },
+          { kind: "tile", tile: 1, ms: 1 },
+        ]),
+      Error,
+      "段 vae_decoder",
+    );
+  });
+
+  it("refuses the transformer stage starting before the encoder stage ends", () => {
+    assertThrows(
+      () =>
+        summarizeWanTimeline([
+          { kind: "stage", component: "vae_encoder", at: "start", ms: 0 },
+          { kind: "stage", component: "transformer", at: "start", ms: 1 },
+        ]),
+      Error,
+      "閉じる前に",
+    );
   });
 
   it("leaves out the stage that never ended", () => {

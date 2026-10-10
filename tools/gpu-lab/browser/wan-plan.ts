@@ -173,6 +173,11 @@ const wan22CaseId =
  * 格納は f16）。first のグラフの活性の最大は `cat_23 [512,3,128,128]` の 100,663,296 B。ADR 0121 追記「段 4 の結果」の前の調査の約 207.7 MB（`[1,512,6,130,130]` —
  * 上流の詰め物つきの形）ではなく、配布する宣言の値を使う。
  *
+ * I2V の VAE encoder の段（3 グラフ `vae_encoder_pre` / `attn` / `post` — ADR 0121 段 9）は判定に入れない: 宣言の最大は
+ * `vae_encoder_pre` の `constant_pad_nd_1 [1,160,641,353]` の f32 = 144,814,720 B（1280×704 でも 704×1280 でも同じ値・
+ * attn は `[3520,1920]` の 27,033,600 B・post は 14,745,600 B — 2026-10-10 に f16 の系列の graph 文書から読んだ値）で、
+ * encoder は出力寸法〈受理集合の 2 寸法〉でしか回らないので、上の VAE の最大の値を越えない。
+ *
  * 記述子は製品の記述子そのもの（受理の上限は公式の既定の 121 フレーム。DiT のグラフの S の記号の上限は 27,280〈1280×704×121
  * — ADR 0121 決定 3〉なので、この上限まではグラフの宣言の内）。
  *
@@ -240,6 +245,24 @@ export const parseWanSize = (text: string): WanSize => {
 };
 
 export const wanSizeLabel = (size: WanSize): string => `${size.width}x${size.height}`;
+
+/**
+ * 寸法の選択の「画像から自動」の値（I2V — 要求に `width` / `height` を載せず、パイプラインが条件画像の縦横比で
+ * 受理集合から選ぶ）。
+ */
+export const WAN_SIZE_FROM_IMAGE = "from-image";
+
+/**
+ * 寸法の選択の値 → 寸法。{@link WAN_SIZE_FROM_IMAGE} なら `imageSize`（呼び手が条件画像から製品の規則
+ * `selectWanI2vSize` で求めた寸法 — パイプラインが選ぶのと同じ値）。画像が無いのに「画像から自動」なら落とす。
+ */
+export const resolveWanFormSize = (text: string, imageSize: WanSize | undefined): WanSize => {
+  if (text !== WAN_SIZE_FROM_IMAGE) return parseWanSize(text);
+  if (imageSize === undefined) {
+    throw Error("寸法「画像から自動」には条件画像が要る（画像を選んでいない）");
+  }
+  return imageSize;
+};
 
 /**
  * DiT のトークン数 S（潜在フレーム数 × H/p × W/p — p は世代の 1 token の画素の辺）。世代の仕様の受理集合
@@ -464,11 +487,15 @@ const optionalNumber = (text: string, what: string): number | undefined => {
  * 要求には**入力された欄だけ**を載せる（空欄の既定はパイプラインが manifest の `pipelineConfig` から
  * 埋める — 既定の正本を二重に持たない）。解決済みの値は同じ `pipelineConfig`（呼び手が manifest から
  * `parseWanPipelineConfig` で読んだもの）で埋める。範囲の検査はしない（パイプラインの門の写しを持たない）。
+ *
+ * 寸法が「画像から自動」（{@link WAN_SIZE_FROM_IMAGE}）なら要求に `width` / `height` を載せず、解決済みの寸法は
+ * `imageSize`（{@link resolveWanFormSize}）。条件画像そのもの（`image` / `fit`）は呼び手が要求に足す。
  */
 export const buildWanRequest = (
   form: WanForm,
   prompts: readonly WanPrompt[],
   config: WanPipelineConfig,
+  imageSize?: WanSize,
 ): {
   readonly request: Omit<WanGenerateRequest, "onEvent">;
   readonly resolved: WanResolvedRequest;
@@ -488,7 +515,8 @@ export const buildWanRequest = (
   if (seed === undefined) throw Error("seed が空欄（参照ケースと照合できるように明示する）");
   const frames = optionalNumber(form.frames, "フレーム数");
   if (frames === undefined) throw Error("フレーム数が空欄");
-  const size = parseWanSize(form.size);
+  const size = resolveWanFormSize(form.size, imageSize);
+  const sizeFromImage = form.size === WAN_SIZE_FROM_IMAGE;
   const steps = optionalNumber(form.steps, "steps");
   const guidance = optionalNumber(form.guidance, "guidance");
   const shift = optionalNumber(form.shift, "shift");
@@ -504,8 +532,7 @@ export const buildWanRequest = (
       ...(negative === undefined ? {} : { negativePrompt: negative.prompt }),
       seed,
       frames,
-      width: size.width,
-      height: size.height,
+      ...(sizeFromImage ? {} : { width: size.width, height: size.height }),
       ...(steps === undefined ? {} : { steps }),
       ...(guidance === undefined ? {} : { guidance }),
       ...(shift === undefined ? {} : { shift }),
@@ -524,11 +551,17 @@ export const buildWanRequest = (
   };
 };
 
+/**
+ * 所要を記録する段（`text_encoder` は呼び手が別に採る）。`vae_encoder` は Wan2.2 の I2V の条件画像の encode の段
+ * （`image` を渡した要求だけ・最初の段 — step もタイルも持たない）。
+ */
+export type WanTimelineStage = "vae_encoder" | "transformer" | "vae_decoder";
+
 /** 生成イベントの時刻（`performance.now()` の ms）。 */
 export type WanTimelineMark =
   | {
     readonly kind: "stage";
-    readonly component: "transformer" | "vae_decoder";
+    readonly component: WanTimelineStage;
     readonly at: "start" | "end";
     readonly ms: number;
   }
@@ -541,7 +574,7 @@ export type WanTimelineMark =
  * cache の構築を含む）。段が途中で落ちたら、その段の `stageMs` は欠ける。
  */
 export type WanTimeline = {
-  readonly stageMs: Readonly<Partial<Record<"transformer" | "vae_decoder", number>>>;
+  readonly stageMs: Readonly<Partial<Record<WanTimelineStage, number>>>;
   readonly stepMs: readonly number[];
   readonly tileMs: readonly number[];
 };
@@ -551,10 +584,10 @@ export type WanTimeline = {
  * 1 から順に → 段の end）から外れたら落とす — 黙って時間を別の区間へ帰属させない。
  */
 export const summarizeWanTimeline = (marks: readonly WanTimelineMark[]): WanTimeline => {
-  const stageMs: Partial<Record<"transformer" | "vae_decoder", number>> = {};
+  const stageMs: Partial<Record<WanTimelineStage, number>> = {};
   const stepMs: number[] = [];
   const tileMs: number[] = [];
-  let open: { readonly component: "transformer" | "vae_decoder"; readonly ms: number } | undefined;
+  let open: { readonly component: WanTimelineStage; readonly ms: number } | undefined;
   let last = 0;
   for (const mark of marks) {
     if (mark.kind === "stage") {
@@ -635,7 +668,7 @@ export const formatSpans = (spans: readonly number[]): string => {
 /**
  * sha256 の実物 — 全フレームの uint8 の RGB を連結したバイト列（`packages/models/tests/
  * e2e_wan_pipeline_test.ts` の `rgbBytes` と同じ並び — ADR 0118 決定 8）。`frames` は
- * `wanFrameToRgba` の RGBA（フレーム順）。
+ * `wanFrameToRgba` の RGBA（フレーム順）。1 枚の RGBA（`getImageData`）から I2V の条件画像の RGB8 を作るのにも使う。
  */
 export const wanRgbBytes = (
   frames: readonly Uint8ClampedArray[],

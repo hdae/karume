@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 /**
- * Wan のタブ — Wan2.1 T2V 1.3B（ADR 0118 段 9）と Wan2.2 TI2V 5B の T2V（ADR 0121 段 8）を Chrome で回す確認ページ。
+ * Wan のタブ — Wan2.1 T2V 1.3B（ADR 0118 段 9）と Wan2.2 TI2V 5B の T2V と I2V（ADR 0121 段 8・9）を Chrome で回す確認ページ。
  * 取得元の欄の隣の**世代の選択**で切り替える（読み込み前だけ — 選択でフレーム数・寸法の選択肢・判定表・quant の
  * 選択肢・取得元の placeholder を作り直す。世代で違う値は `wan-plan.ts` の世代の仕様）。
  *
@@ -22,9 +22,14 @@
  * 3. **生成**: プロンプト（埋め込み資産の名前 — `gpu` なら自由プロンプトの欄の文字列が優先）・seed・フレーム数・
  *    寸法・steps・guidance・shift で `generate` → 全フレームを canvas に描いて生成した動画の fps で再生 → 所要（段・step・VAE タイル・
  *    `gpu` なら text 段）・Session の診断・RGB の sha256（事前計算の経路の参照ケースなら環境行との照合）を表に積む。
+ * 4. **I2V の条件画像**（Wan2.2 だけ — 世代の記述子の DiT の入力の形が `"ti2v"` のとき）: 寸法の選択の隣で PNG / JPEG を
+ *    選ぶと、ブラウザの標準 API（`createImageBitmap` → OffscreenCanvas の `getImageData`）で RGB8 にして（アルファは捨てる）
+ *    要求の `image` と `fit`（crop / stretch）に渡す。画像を選ぶと寸法の選択に「画像から自動」（`width` / `height` を
+ *    渡さない — 製品の `selectWanI2vSize` と同じ寸法を判定表と記録に使う）が足されて既定になる。I2V の行は参照ケースと
+ *    照合しない（e2e の I2V の sha 行は特定の入力画像の画素に結びつく — このタブの復号の画素とは突き合わせない）。
  *
- * 世代と経路の選択と自由プロンプトの欄はページの HTML ではなくここで足す（`index.html` の Wan の節は事前計算の経路の
- * 欄だけを持つ）。
+ * 世代と経路の選択・自由プロンプトの欄・条件画像の操作はページの HTML ではなくここで足す（`index.html` の Wan の節は
+ * 事前計算の経路の欄だけを持つ）。
  *
  * GPU は自前で取って pipeline に渡す（共有 GPU）: device lost を `onDeviceLost` で表に残し、幾何プロファイルの
  * 注入をページの GPU 設定に揃えるため。`acquireGpu` は requiredLimits にアダプタ値を要求する（Chrome の既定
@@ -51,20 +56,23 @@ import {
 } from "../../../packages/hub/mod.ts";
 import {
   type GeneratedVideo,
+  type Rgb8Image,
   wanFrameToRgba,
   type WanFromPretrainedOptions,
   type WanGenerateEvent,
-  type WanGenerateRequest,
+  type WanI2vFit,
   WanPipeline,
   type WanPipelineOptions,
   type WanPrompt,
   type WanRunComponent,
+  type WanTi2vGenerateRequest,
   WanTi2vPipeline,
 } from "../../../packages/models/wan.ts";
 import {
   parseWanPipelineConfig,
   type WanPipelineConfig,
 } from "../../../packages/models/src/wan/config.ts";
+import { selectWanI2vSize } from "../../../packages/models/src/wan/i2v-preprocess.ts";
 import wan21References from "../../../packages/models/tests/fixtures/references/wan.json" with {
   type: "json",
 };
@@ -93,11 +101,12 @@ import {
   formatSpans,
   formatWanDiagnostics,
   judgeWanLimits,
-  parseWanSize,
   referenceVerdictText,
+  resolveWanFormSize,
   summarizeWanDiagnostics,
   summarizeWanTimeline,
   WAN_LAB_GENERATIONS,
+  WAN_SIZE_FROM_IMAGE,
   type WanComponentDiagnostics,
   wanFrameChoices,
   type WanLabGeneration,
@@ -109,6 +118,7 @@ import {
   type WanReferenceVerdict,
   type WanResolvedRequest,
   wanRgbBytes,
+  type WanSize,
   wanSizeLabel,
   type WanTimeline,
   type WanTimelineMark,
@@ -116,9 +126,10 @@ import {
 
 /**
  * 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ・/3 = 読み込みと行が quant の席を持つ・
- * /4 = 読み込み〈`loads[]` と読み込み中の配布形の欄〉と行が世代 `generation`〈`wan2.1` / `wan2.2`〉を持つ）。
+ * /4 = 読み込み〈`loads[]` と読み込み中の配布形の欄〉と行が世代 `generation`〈`wan2.1` / `wan2.2`〉を持つ・
+ * /5 = I2V の行が条件画像 `image` を持ち、段の所要 `timeline.stageMs` に `vae_encoder` が入りうる）。
  */
-const WAN_REPORT_FORMAT = "karume-wan-browser/4";
+const WAN_REPORT_FORMAT = "karume-wan-browser/5";
 
 /** テキストエンコーダの経路（`WanPipelineOptions.textEncoder`）。 */
 type WanTextEncoder = NonNullable<WanPipelineOptions["textEncoder"]>;
@@ -129,6 +140,12 @@ const TEXT_ENCODER_CHOICES: readonly { readonly value: WanTextEncoder; readonly 
     { value: "precomputed", label: "precomputed（埋め込み資産の 4 本 — umT5 を取らない）" },
     { value: "gpu", label: "gpu（umT5 i8 を GPU で回す — 任意のプロンプト）" },
   ];
+
+/** I2V の条件画像の寸法の合わせ方の選択肢（先頭がタブの既定 — パイプラインの既定と同じ crop）。 */
+const FIT_CHOICES: readonly { readonly value: WanI2vFit; readonly label: string }[] = [
+  { value: "crop", label: "crop（公式 Wan2.2 — 縦横比を保って覆い、中央を切り出す）" },
+  { value: "stretch", label: "stretch（diffusers — 出力寸法へ直接伸縮・縦横比は保たない）" },
+];
 
 /** Wan の manifest の部品名（umT5 — 越境参照の宣言を引く）。 */
 const TEXT_ENCODER = "text_encoder";
@@ -143,7 +160,8 @@ const REFERENCES: Readonly<Record<WanLabGenerationId, WanReferences>> = {
 type WanRunner = {
   /** 埋め込み資産のプロンプトの一覧（class の `prompts` と同じ写し）。 */
   readonly prompts: readonly WanPrompt[];
-  readonly generate: (request: WanGenerateRequest) => Promise<GeneratedVideo>;
+  /** 要求は Wan2.2 の形（`image` / `fit` は Wan2.2 のときだけ渡す — Wan2.1 のパイプラインは `ModelInputError` で拒む）。 */
+  readonly generate: (request: WanTi2vGenerateRequest) => Promise<GeneratedVideo>;
   /** 口が持つ資源の解放（GPU はタブの所有物 — {@link Loaded.gpu} を呼び手が破棄する）。 */
   readonly dispose: () => Promise<void>;
 };
@@ -178,6 +196,53 @@ const optionOf = (value: string, text: string, selected = false): HTMLOptionElem
   return created;
 };
 
+/** 行に載せる I2V の条件画像の記録。 */
+type WanRowImage = {
+  /** 選んだファイルの名前（`File.name`）。 */
+  readonly file: string;
+  /** 復号した画像の寸法（EXIF の向きを適用した後 — 出力寸法へ合わせる前）。 */
+  readonly width: number;
+  readonly height: number;
+  readonly fit: WanI2vFit;
+  /** 寸法が「画像から自動」だったか（`request.width` / `height` はパイプラインが画像から選んだ寸法）。 */
+  readonly sizeFromImage: boolean;
+};
+
+/** 選んだ条件画像（復号済み）。 */
+type ChosenImage = {
+  readonly file: string;
+  readonly rgb: Rgb8Image;
+  /** 「画像から自動」で使う寸法（製品の `selectWanI2vSize` — パイプラインが選ぶのと同じ値）。 */
+  readonly size: WanSize;
+};
+
+/**
+ * 画像ファイル → RGB8（ブラウザの標準 API — 依存パッケージを持ち込まない）。色空間の変換と事前乗算はしない
+ * （画素の値をそのまま使う）。アルファは捨てる。EXIF の向きは適用する（`imageOrientation: "from-image"` を明示 —
+ * 既定値はかつての仕様と版で揺れたので頼らない）。
+ */
+const decodeImage = async (file: File): Promise<Rgb8Image> => {
+  const bitmap = await createImageBitmap(file, {
+    imageOrientation: "from-image",
+    colorSpaceConversion: "none",
+    premultiplyAlpha: "none",
+  });
+  try {
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    if (context === null) throw Error("OffscreenCanvas の 2d context を取れない");
+    context.drawImage(bitmap, 0, 0);
+    const { data } = context.getImageData(0, 0, bitmap.width, bitmap.height);
+    return {
+      data: wanRgbBytes([data], bitmap.width * bitmap.height),
+      width: bitmap.width,
+      height: bitmap.height,
+    };
+  } finally {
+    bitmap.close();
+  }
+};
+
 /** 生成 1 回の記録（表の 1 行・JSON の `rows[]`）。 */
 type WanRow = {
   readonly index: number;
@@ -190,6 +255,8 @@ type WanRow = {
   readonly textEncoder: WanTextEncoder;
   /** `gpu` の経路で渡した自由プロンプト（無ければ `request.prompt` の資産の原文を渡した）。 */
   readonly freePrompt?: string;
+  /** I2V の条件画像（渡した要求だけ — 画素は記録しない）。 */
+  readonly image?: WanRowImage;
   /** `gpu` の経路の text 段の所要（`stage` の start → end — 完走した段だけ）。 */
   readonly textEncoderMs?: number;
   /** 参照ケースの id（sha256 の環境行のキー — 条件が e2e のケースと同じときだけ）。 */
@@ -261,6 +328,9 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     textEncoder: document.createElement("select"),
     quant: document.createElement("select"),
     freePrompt: document.createElement("input"),
+    image: document.createElement("input"),
+    fit: document.createElement("select"),
+    clearImage: document.createElement("button"),
   };
 
   // 世代と経路の選択（取得元の欄の隣）と自由プロンプトの欄（プロンプトの選択の隣）— 冒頭の doc のとおりここで足す。
@@ -297,11 +367,24 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   after(ui.generation, field("テキストエンコーダ", ui.textEncoder));
   after(ui.textEncoder, field("quant", ui.quant));
   after(ui.prompt, field("自由プロンプト", ui.freePrompt));
+  // 条件画像の操作（寸法の選択の隣 — I2V は Wan2.2 だけ）。
+  ui.image.type = "file";
+  ui.image.accept = "image/png,image/jpeg";
+  ui.fit.replaceChildren(...FIT_CHOICES.map(({ value, label }) => optionOf(value, label)));
+  ui.clearImage.type = "button";
+  ui.clearImage.textContent = "画像を外す";
+  after(ui.size, field("条件画像（Wan2.2 の I2V）", ui.image));
+  after(ui.image, field("fit", ui.fit));
+  after(ui.fit, ui.clearImage);
 
   const state: {
     busy: boolean;
     /** 選んでいる世代（読み込み中は読み込んだ世代 — 選択は読み込み前だけ変えられる）。 */
     generation: WanLabGeneration;
+    /** 選んだ条件画像（復号済み — 世代が画像を受けるときだけ持つ）。 */
+    image?: ChosenImage;
+    /** 条件画像の復号中（生成を止める — 選んだ画像を渡さずに T2V で回さない）。 */
+    imageDecoding: boolean;
     loaded?: Loaded;
     /** 読み込みの記録（JSON の `loads[]`）。 */
     loads: {
@@ -318,7 +401,18 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     video?: { readonly frames: readonly ImageData[]; readonly fps: number };
     frame: number;
     player?: ReturnType<typeof setInterval>;
-  } = { busy: false, generation: WAN_LAB_GENERATIONS[0], loads: [], rows: [], frame: 0 };
+  } = {
+    busy: false,
+    generation: WAN_LAB_GENERATIONS[0],
+    imageDecoding: false,
+    loads: [],
+    rows: [],
+    frame: 0,
+  };
+
+  /** 世代が I2V の条件画像を受けるか（記述子の DiT の入力の形 — Wan2.2 の `"ti2v"` だけ）。 */
+  const acceptsImage = (generation: WanLabGeneration): boolean =>
+    generation.descriptor.ditInputForm === "ti2v";
 
   /** このサーバが配るその世代の配布形の名前（配っていなければ null — `/config.json`）。 */
   const servedName = (generation: WanLabGeneration): string | null =>
@@ -369,7 +463,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     let size: { width: number; height: number };
     try {
       frames = Number(ui.frames.value);
-      size = parseWanSize(ui.size.value);
+      size = resolveWanFormSize(ui.size.value, state.image?.size);
     } catch (error) {
       ui.limitsSummary.textContent = errorText(error);
       return;
@@ -419,7 +513,12 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ui.textEncoder.disabled = busy || loaded;
     ui.quant.disabled = busy || loaded;
     ui.dispose.disabled = busy || !loaded;
-    ui.run.disabled = busy || !loaded;
+    ui.run.disabled = busy || !loaded || state.imageDecoding;
+    // Wan2.1 では画像の操作を無効にする（パイプラインが image / fit を拒む）。
+    const imageAccepted = acceptsImage(state.generation);
+    ui.image.disabled = busy || !imageAccepted;
+    ui.fit.disabled = busy || !imageAccepted;
+    ui.clearImage.disabled = busy || (state.image === undefined && !state.imageDecoding);
     for (
       const input of [
         ui.prompt,
@@ -524,6 +623,13 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     if (found === undefined) {
       throw Error(`テキストエンコーダ '${ui.textEncoder.value}' は選択肢に無い`);
     }
+    return found.value;
+  };
+
+  /** fit の選択（未知の値は選択肢の取り違え — 素の Error）。 */
+  const readFit = (): WanI2vFit => {
+    const found = FIT_CHOICES.find(({ value }) => value === ui.fit.value);
+    if (found === undefined) throw Error(`fit '${ui.fit.value}' は選択肢に無い`);
     return found.value;
   };
 
@@ -699,10 +805,17 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     showFrame(0);
   };
 
+  const formatImage = (image: WanRowImage): string =>
+    `I2V ${image.file}（${image.width}x${image.height}・fit ${image.fit}${
+      image.sizeFromImage ? "・寸法は画像から自動" : ""
+    }） · `;
+
   const formatRequest = (row: WanRow): string =>
     `${row.generation} · ${row.quant} · ${row.textEncoder} · ${
-      row.freePrompt === undefined ? row.request.prompt : JSON.stringify(row.freePrompt)
-    } · ${formatKnobs(row.request)}`;
+      row.image === undefined ? "" : formatImage(row.image)
+    }${row.freePrompt === undefined ? row.request.prompt : JSON.stringify(row.freePrompt)} · ${
+      formatKnobs(row.request)
+    }`;
 
   const formatKnobs = (request: WanResolvedRequest): string =>
     `seed ${request.seed} · ${request.frames} フレーム · ${request.width}x${request.height} · ${request.steps} step · guidance ${request.guidance} · shift ${request.shift}${
@@ -716,14 +829,15 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       String(row.index),
       formatRequest(row),
       `${(row.wallMs / 1000).toFixed(1)} s`,
-      timeline === undefined ? "—" : [
-        ...(row.textEncoderMs === undefined
-          ? []
-          : [`text_encoder ${(row.textEncoderMs / 1000).toFixed(1)} s`]),
-        ...Object.entries(timeline.stageMs).map(([stage, ms]) =>
-          `${stage} ${(ms / 1000).toFixed(1)} s`
-        ),
-      ].join("\n"),
+      // 段の順（vae_encoder → text_encoder → transformer → vae_decoder — text は別に採るので並びを明示する）
+      timeline === undefined ? "—" : ([
+        ["vae_encoder", timeline.stageMs.vae_encoder],
+        ["text_encoder", row.textEncoderMs],
+        ["transformer", timeline.stageMs.transformer],
+        ["vae_decoder", timeline.stageMs.vae_decoder],
+      ] as const).flatMap(([stage, ms]) =>
+        ms === undefined ? [] : [`${stage} ${(ms / 1000).toFixed(1)} s`]
+      ).join("\n"),
       timeline === undefined ? "—" : formatSpans(timeline.stepMs),
       timeline === undefined ? "—" : formatSpans(timeline.tileMs),
       Object.entries(row.diagnostics).map(([component, summary]) =>
@@ -748,6 +862,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     const loaded = state.loaded;
     if (loaded === undefined) throw Error("先に「読み込む」");
     // 条件は押下時に 1 度だけ読む（実行中に変えた入力は効かない — setBusy が入力を止める）
+    const chosen = state.image;
     const { request, resolved } = buildWanRequest(
       {
         prompt: ui.prompt.value,
@@ -761,14 +876,26 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       },
       loaded.prompts,
       loaded.config,
+      chosen?.size,
     );
+    const image: { readonly row: WanRowImage; readonly rgb: Rgb8Image } | undefined =
+      chosen === undefined ? undefined : {
+        row: {
+          file: chosen.file,
+          width: chosen.rgb.width,
+          height: chosen.rgb.height,
+          fit: readFit(),
+          sizeFromImage: ui.size.value === WAN_SIZE_FROM_IMAGE,
+        },
+        rgb: chosen.rgb,
+      };
     const freeText = ui.freePrompt.value;
     const freePrompt = loaded.textEncoder === "gpu" && freeText.trim() !== ""
       ? freeText
       : undefined;
-    // 参照ケースの照合は事前計算の経路だけ（`wanReferenceCaseId` の id は事前計算の経路の sha 行 — GPU 経路の
-    // 動画は同じ条件でも値が違う）。
-    const caseId = loaded.textEncoder === "precomputed"
+    // 参照ケースの照合は事前計算の経路の T2V だけ（`wanReferenceCaseId` の id は事前計算の経路の T2V の sha 行 —
+    // GPU 経路や I2V の動画は同じ条件でも値が違う）。
+    const caseId = loaded.textEncoder === "precomputed" && image === undefined
       ? wanReferenceCaseId(
         loaded.generation,
         resolved,
@@ -789,10 +916,6 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const elapsed = `${((ms - started) / 1000).toFixed(0)} s`;
       if (event.kind === "stage") {
         const { component } = event;
-        if (component === "vae_encoder") {
-          // このタブは条件画像を渡さない（I2V の入力をまだ持たない）ので来ない。来たら時間の帰属先が無いので落とす。
-          throw new Error("gpu-lab: vae_encoder の段（I2V）を記録する形をまだ持たない");
-        }
         if (component === "text_encoder") textStage[event.at] = ms;
         else marks.push({ kind: "stage", component, at: event.at, ms });
         status(`${component} ${event.at}（${elapsed}）`);
@@ -820,6 +943,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       quant: loaded.quant,
       textEncoder: loaded.textEncoder,
       ...(freePrompt === undefined ? {} : { freePrompt }),
+      ...(image === undefined ? {} : { image: image.row }),
       ...(caseId === undefined ? {} : { caseId }),
     };
     let row: WanRow;
@@ -827,9 +951,17 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const video = await loaded.runner.generate({
         ...request,
         ...(freePrompt === undefined ? {} : { prompt: freePrompt }),
+        ...(image === undefined ? {} : { image: image.rgb, fit: image.row.fit }),
         onEvent,
       });
       const wallMs = performance.now() - started;
+      // 「画像から自動」の寸法はタブが製品の規則で求めた値を記録する — パイプラインの選んだ寸法と食い違ったら、
+      // 記録の寸法（と判定表）が実物と違うので失敗の行にする。
+      if (video.width !== resolved.width || video.height !== resolved.height) {
+        throw Error(
+          `動画の寸法 ${wanSizeLabel(video)} が記録する寸法 ${wanSizeLabel(resolved)} と違う`,
+        );
+      }
       status("フレームを画素にして sha256 を計算中");
       const frames = Array.from(
         { length: video.frames },
@@ -954,27 +1086,108 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
    */
   const fillChoices = (): void => {
     const generation = state.generation;
-    const { acceptedSizes, defaults } = generation.descriptor;
+    const { defaults } = generation.descriptor;
     ui.frames.replaceChildren(
       ...wanFrameChoices(generation).map((frames) =>
         optionOf(String(frames), String(frames), frames === defaults.frames)
       ),
     );
-    ui.size.replaceChildren(...acceptedSizes.map((size) =>
-      optionOf(
-        wanSizeLabel(size),
-        wanSizeLabel(size),
-        size.width === defaults.width && size.height === defaults.height,
-      )
-    ));
+    fillSizes();
     const served = servedName(generation);
     ui.source.placeholder = served === null
       ? `owner/name（このサーバは ${generation.label} の配布形を配っていない）`
       : `空欄 = このサーバの ${served} · HF なら owner/name`;
   };
+  /**
+   * 寸法の選択肢（受理集合）。条件画像があれば先頭に「画像から自動」（画像から選ばれる寸法を添える）を足して既定にし、
+   * 無ければ記述子の既定の寸法を選ぶ。
+   */
+  const fillSizes = (): void => {
+    const { acceptedSizes, defaults } = state.generation.descriptor;
+    const image = state.image;
+    ui.size.replaceChildren(
+      ...(image === undefined
+        ? []
+        : [optionOf(WAN_SIZE_FROM_IMAGE, `画像から自動（${wanSizeLabel(image.size)}）`, true)]),
+      ...acceptedSizes.map((size) =>
+        optionOf(
+          wanSizeLabel(size),
+          wanSizeLabel(size),
+          image === undefined && size.width === defaults.width &&
+            size.height === defaults.height,
+        )
+      ),
+    );
+  };
+
+  /** 条件画像の選択と復号の世代番号（復号の途中で選び直す・外すと、前の復号の結果は捨てる）。 */
+  let imageRequest = 0;
+
+  /**
+   * 条件画像の状態だけを画像なしへ戻す（途中の復号の結果も捨てる）。描画（寸法の選択肢・判定表・操作の有効化）は
+   * 呼び手が行う — 世代の切り替えでは、判定表を新しい世代の選択肢で作る前に描画すると、旧世代のフレーム数が新しい
+   * 世代の受理集合の外で投げる。
+   */
+  const resetImage = (): void => {
+    imageRequest += 1;
+    state.image = undefined;
+    state.imageDecoding = false;
+    ui.image.value = "";
+  };
+  /** 条件画像を外す（寸法の選択肢も画像なしへ戻す）。 */
+  const clearImage = (): void => {
+    resetImage();
+    fillSizes();
+    renderLimits();
+    setBusy(state.busy);
+  };
+
+  /** 選んだ画像ファイルを復号して持つ（失敗は状態行へ — 画像なしに戻す）。 */
+  const chooseImage = async (): Promise<void> => {
+    const file = ui.image.files?.item(0) ?? null;
+    if (file === null) {
+      clearImage();
+      return;
+    }
+    const request = ++imageRequest;
+    state.image = undefined;
+    state.imageDecoding = true;
+    setBusy(state.busy);
+    status(`条件画像 ${file.name} を復号中`);
+    let chosen: ChosenImage | undefined;
+    let failure: unknown;
+    try {
+      const rgb = await decodeImage(file);
+      chosen = {
+        file: file.name,
+        rgb,
+        size: selectWanI2vSize(rgb, {}, state.generation.descriptor),
+      };
+    } catch (error) {
+      failure = error;
+    }
+    if (request !== imageRequest) return;
+    if (chosen === undefined) {
+      clearImage();
+      status(`条件画像 ${file.name} を読めない — ${errorText(failure)}`);
+      return;
+    }
+    state.image = chosen;
+    state.imageDecoding = false;
+    fillSizes();
+    renderLimits();
+    setBusy(state.busy);
+    status(
+      `条件画像 ${chosen.file}（${chosen.rgb.width}x${chosen.rgb.height}）を読みました — ` +
+        `寸法「画像から自動」は ${wanSizeLabel(chosen.size)}`,
+    );
+  };
+
   for (const control of [ui.previous, ui.play, ui.next, ui.seek]) control.disabled = true;
 
   ui.load.addEventListener("click", exclusive("Wan の読み込み", load));
+  ui.image.addEventListener("change", () => void chooseImage());
+  ui.clearImage.addEventListener("click", clearImage);
   ui.run.addEventListener("click", exclusive("Wan の生成", generate));
   ui.dispose.addEventListener("click", exclusive("Wan の破棄", dispose));
   ui.exportJson.addEventListener("click", exportJson);
@@ -985,9 +1198,13 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       return;
     }
     state.generation = found;
+    // 画像を受けない世代へ替えたら条件画像を外す（Wan2.1 のパイプラインは image を拒む）。描画は下の fillChoices 以降が
+    // 新しい世代の選択肢で 1 回だけ行う。
+    if (!acceptsImage(found)) resetImage();
     fillChoices();
     renderInfo();
     renderLimits();
+    setBusy(state.busy);
     loadQuants();
   });
   ui.textEncoder.addEventListener("change", renderInfo);
