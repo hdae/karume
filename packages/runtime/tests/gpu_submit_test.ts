@@ -514,8 +514,9 @@ Deno.test("チャンク診断は推定時間の最大と予算超過チャンク
 
 // chunkBudget（実測側）: 「workgroup 数 = 仕事量」のプロキシがずれると、推定側の席は
 // 予算内だと言い続ける（同じプロキシで見積もった値を比べているだけなので原理的に見えない）。
-// 窓平均は帰属に依存せず求まり、最大チャンク時間の**下界**になる。
-Deno.test("窓平均チャンク時間は推定が見落とす予算超過を下界として捉える", async () => {
+// 窓平均は帰属に依存せず求まるので、そのずれを拾う信号になる（ホスト時間を含むので GPU の
+// チャンク時間の下界ではない — 下の「ホストが止まった窓」のテスト）。
+Deno.test("窓平均チャンク時間は推定が見落とすプロキシのずれを信号として捉える", async () => {
   let elapsed = 1;
   const clock = gpuTimeClock(() => elapsed);
   const gpu = createFakeGpu({ workDone: clock.workDone });
@@ -535,8 +536,8 @@ Deno.test("窓平均チャンク時間は推定が見落とす予算超過を下
 
   const budget = scheduler.stats.chunkBudget;
   assertEquals(budget.maxWindowMeanMs, 150, "300ms / 2 チャンク");
-  // 150ms > 予算 50ms なので「予算を超えたチャンクが少なくとも 1 本あった」と言い切れる。
-  assertLess(budget.budgetMs, budget.maxWindowMeanMs ?? 0, "窓平均だけで超過を断定できる");
+  // 150ms > 予算 50ms。推定側が予算内と言う間も、窓平均の側は予算を超えて上がる。
+  assertLess(budget.budgetMs, budget.maxWindowMeanMs ?? 0, "窓平均は予算を超えて上がる");
   assertEquals(budget.maxEstimatedMs, 1, "推定側は 1ms のまま（プロキシのずれは見えない）");
   assertEquals(budget.overBudgetChunks, 0, "推定側の席はここでは 1 件も上がらない");
 });
@@ -566,7 +567,7 @@ Deno.test("ホストが止まった窓では、GPU の 1 本が予算内でも�
   );
 });
 
-// submitGpuTime（GPU 側の時計）: 窓平均（下界）では見えない「重い 1 本」を 1 submit ずつの幅で数える
+// submitGpuTime（GPU 側の時計）: 窓平均（ホスト時間込みの窓の平均）では見えない「重い 1 本」を 1 submit ずつの幅で数える
 // （ADR 0118 決定 6 の追記 — OS の submit 単位のタイムアウトに対して言えるのは 1 本ずつの最大だけ）。
 // 幅は pass の timestamp の最小 → 最大で、pass 間の隙間も含む（dispatch の差の和ではない）。
 Deno.test("1 submit ごとの GPU 時間は timestamp の幅で数え、裏付け前のチャンクを別に数える", async () => {
