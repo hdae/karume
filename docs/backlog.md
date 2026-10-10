@@ -239,6 +239,11 @@ later の「decode 速度の残り」。
 
 ## later
 
+- **Wan2.2 の T2V / I2V の通しの e2e の helper の重複を寄せる（起票 2026-10-10・利用者の裁定 = later）**: `e2e_wan_ti2v_pipeline_test.ts`（T2V）と
+  `e2e_wan_ti2v_i2v_pipeline_test.ts`（I2V — ADR 0121 段 9b）が同じ形の小物を別々に持つ — fixture の読み込み（`readFixture`）・差の計算と整形（`difference` /
+  `formatDifference`）・ビット一致（`bitsEqual`）・RGB の取り出し（`rgbBytes`）・非有限の数え上げ（`countNonFinite`）・プロンプトの解決（`textOf`）・帯の導出
+  （`bandOf` / `roundUpTwoDigits`）・観測の整形（`observe` / `formatObserved`）。`helpers/` へ寄せる。寄せた後も両方の帯と sha 行が不変であることを GPU で確かめる
+  （段 7 の A/B 門を `helpers/wan-ab-gate.ts` へ寄せたときと同じ手順）。
 - **Wan2.2 の 121 フレームの自機 A/B 門を既定のレーンへ戻す — フル verify の所要の対策（起票 2026-10-09・利用者の裁定 = later）**: ADR 0121 段 7 の
   自機 A/B 門は 33 フレーム（S = 7,920）と 121 フレーム（S = 27,280）の 2 点で持つ（Wan2.1 と同じ「既定と最長」の規則 — attention の 8 bit の誤差は
   行の長さで増える）。121 の分は 1 回 約 6 分（推測）かかり、既定のレーンに入れると約 118 分のフル verify が延びるので、今は opt-in
