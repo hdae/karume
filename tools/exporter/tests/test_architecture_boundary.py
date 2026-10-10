@@ -7,14 +7,18 @@ exporter は「汎用 exporter core（PyPI 配布物）」と「モデル別 rec
 
 検査は 2 本:
 
-1. core が **recipe 側モジュール**（`karume.patch_*` / `karume.paths` — どちらも今は 1 本も
-   無いが再発防止で残す門）を import しない
+1. core が **recipe 側モジュール**を import しない — recipe の現行の名前空間（`wan` /
+   `_shared` などのトップレベルパッケージ、`dist` / `migrate_series` などの直下のモジュール、
+   `container_series` / `gemma_synthetic` などの `tests/` 直下の共有テストヘルパ。
+   `tools/export-recipes/` の配置から導出）と、旧名の `karume.patch_*` / `karume.paths`
+   （どちらも今は 1 本も無いが再発防止で残す門）の両方
 2. core が **上流モデル系パッケージ**（`style_bert_vits2` / `transformers` / `diffusers` /
    `torchvision`）を import しない — core wheel に上流実装の provenance 義務を引き込まない
    ための門（ADR 0065 決定 7）
 
 走査は文字列 grep でなく `ast` — 関数内の遅延 import（`karume.cli` の
 `from karume import dist` のような形）が段階移行の逃げ道にならないようにする。
+`ast` で見るのは静的な import 文だけ（`importlib.import_module` や `__import__` は対象外）。
 """
 
 from __future__ import annotations
@@ -103,6 +107,62 @@ RECIPE_MODULE_PREFIXES = ("patch_",)
 #: core の一部になったので、**禁止側ではなく検査される側**（{@link CORE_MODULES}）にいる。
 RECIPE_MODULES = frozenset({"paths"})
 
+#: recipe 側の置き場（ADR 0065 決定 2 — wheel の外・リポ専用）。
+RECIPES_ROOT = Path(__file__).resolve().parents[2] / "export-recipes"
+
+#: recipe 側の共有テストヘルパの置き場（置き場の直下からの相対）。recipe の conftest が
+#: このディレクトリを sys.path に張るので、中身は `container_series` のようなトップレベル名で
+#: import される。
+RECIPE_TEST_HELPERS_DIR = "tests"
+
+#: 置き場の直下と {@link RECIPE_TEST_HELPERS_DIR} の直下にあるが、recipe 側の名前空間では
+#: ないもの — テストの置き場そのもの（`tests` — sys.path に張られるのは中身で、`tests` という
+#: 名前では import されない）と pytest の設定（`conftest.py` — pytest が読むもので、名前で
+#: import されない）。
+NON_RECIPE_NAMES = frozenset({"conftest", "tests"})
+
+#: pytest が収集するテストモジュールの接頭辞。収集されるもので、他から名前で import されない。
+TEST_MODULE_PREFIX = "test_"
+
+
+def recipe_packages(root: Path) -> frozenset[str]:
+    """recipe の置き場の直下から、recipe のトップレベル名（パッケージとモジュール）を導出する。
+
+    recipe は `karume.*` でなく `wan` / `_shared` のようなトップレベルパッケージとして
+    import される（`python -m <family>.<mod>`）ので、旧名の名簿だけでは今の綴りの逆流を
+    止められない。名簿を手書きにすると family を足すたびに更新漏れの穴が開くので、配置から
+    導出する。拾うのは識別子として import できる名前のうち次の 3 種:
+
+    - 直下に `.py` を持つディレクトリ — `__init__.py` を要件にしないのは、namespace package
+      として置かれた family も import は通るため
+    - 直下の `.py` モジュール（`dist` / `migrate_series` など）— 起動スクリプトだが、recipe 側の
+      テストが `import dist` / `from dist import main` とトップレベル名で import している。
+      同じ綴りを core が書けば recipe への依存になる
+    - `tests/` 直下の `.py` モジュールのうちテストモジュール（`test_*`）でないもの
+      （`container_series` / `gemma_synthetic` など）— recipe 側のテストが
+      `from container_series import write_component` とトップレベル名で import している。
+      理由は直下のモジュールと同じ
+
+    MUST: 置き場が無い環境では fail loudly にする。黙って空集合を返すと、この枝の検査が
+    恒真のまま緑になる（境界はテストが守る — ADR 0065 決定 3）。`tests/` が無いことは
+    許す — 共有ヘルパが 1 本も無ければ、それを import する綴りも無い。
+    """
+    if not root.is_dir():
+        raise FileNotFoundError(f"recipe の置き場が無い: {root}（リポの外では検査 1 を回せない）")
+    packages = (path.name for path in root.iterdir() if path.is_dir() and any(path.glob("*.py")))
+    modules = (path.stem for path in root.glob("*.py"))
+    test_helpers = (
+        path.stem
+        for path in (root / RECIPE_TEST_HELPERS_DIR).glob("*.py")
+        if not path.stem.startswith(TEST_MODULE_PREFIX)
+    )
+    return frozenset(
+        name
+        for name in (*packages, *modules, *test_helpers)
+        if name.isidentifier() and name not in NON_RECIPE_NAMES
+    )
+
+
 #: core wheel に持ち込まない上流モデル系パッケージ。
 UPSTREAM_MODEL_PACKAGES = frozenset(
     {"diffusers", "style_bert_vits2", "torchvision", "transformers"}
@@ -185,10 +245,21 @@ def _resolve_import_from_base(node: ast.ImportFrom, label: str) -> str:
 
 
 def recipe_imports(path: Path) -> list[str]:
-    """recipe 側モジュールへの import を「行:import 名」の一覧で返す（無ければ空）。"""
+    """recipe 側モジュールへの import を「行:import 名」の一覧で返す（無ければ空）。
+
+    禁止するトップレベル名はここで初めて配置から導出する — モジュールの読み込み時に導出すると、
+    置き場が無い環境で検査 1 と無関係な検査（上流パッケージ・移行経路）まで collection error で
+    道連れになる。fail loudly の範囲を検査 1 に閉じる。
+    """
+    recipe_names = recipe_packages(RECIPES_ROOT)
     violations = []
     for lineno, dotted in imported_modules(path):
         parts = dotted.split(".")
+        # 判定はトップレベル名（`parts[0]`）で行う — recipe 側の `dist.py` と同名の
+        # `karume.dist` を誤検出しない。
+        if parts[0] in recipe_names:
+            violations.append(f"{_label(path)}:{lineno} -> {dotted}")
+            continue
         if parts[0] != "karume" or len(parts) < 2:
             continue
         submodule = parts[1]
@@ -380,6 +451,97 @@ class TestTheBoundaryCheckItself:
             "karume/regressed.py:1 -> karume.patch_newmodel",
             "karume/regressed.py:1 -> karume.patch_newmodel.apply_all_patches",
         ]
+
+    def test_it_catches_a_lazy_import_of_a_recipe_family(self, tmp_path: Path) -> None:
+        """recipe の現行の名前空間（トップレベルの family パッケージ）への遅延 import も見る。
+
+        関数内の import は core 単体の pytest では ImportError にならず、wheel の利用者が
+        その関数を呼んだ時点で初めて壊れる — ここで止めないと境界違反が配布物まで届く。
+        """
+        path = self._violator(tmp_path, "familiar", "def run():\n    from wan import umt5_patch\n")
+
+        assert recipe_imports(path) == [
+            "karume/familiar.py:2 -> wan",
+            "karume/familiar.py:2 -> wan.umt5_patch",
+        ]
+
+    def test_it_catches_a_lazy_import_of_the_shared_recipe_layer(self, tmp_path: Path) -> None:
+        """`_shared`（repo topology を持つ recipe 共有層）への遅延 import も違反。"""
+        path = self._violator(
+            tmp_path, "topology", "def run():\n    from _shared.paths import REPO_ROOT\n"
+        )
+
+        assert recipe_imports(path) == [
+            "karume/topology.py:2 -> _shared.paths",
+            "karume/topology.py:2 -> _shared.paths.REPO_ROOT",
+        ]
+
+    def test_it_catches_a_lazy_import_of_a_top_level_recipe_module(self, tmp_path: Path) -> None:
+        """直下のスクリプト（`dist.py`）をトップレベル名で import する形も違反。"""
+        path = self._violator(tmp_path, "launcher", "def run():\n    import dist\n")
+
+        assert recipe_imports(path) == ["karume/launcher.py:2 -> dist"]
+
+    def test_it_catches_a_lazy_import_of_a_shared_recipe_test_helper(self, tmp_path: Path) -> None:
+        """recipe 側の共有テストヘルパ（`tests/container_series.py`）をトップレベル名で
+        import する形も違反。"""
+        path = self._violator(
+            tmp_path, "helper", "def run():\n    from container_series import write_component\n"
+        )
+
+        assert recipe_imports(path) == [
+            "karume/helper.py:2 -> container_series",
+            "karume/helper.py:2 -> container_series.write_component",
+        ]
+
+    def test_it_stays_quiet_on_a_core_module_sharing_a_recipe_script_name(
+        self, tmp_path: Path
+    ) -> None:
+        """判定はトップレベル名で行う — recipe 側の `dist.py` と同名の `karume.dist` は core。"""
+        path = self._violator(tmp_path, "assembler", "from karume.dist import PIPELINES\n")
+
+        assert recipe_imports(path) == []
+
+
+class TestTheRecipeNamespaceIsDerivedFromDisk:
+    """禁止するトップレベル名を `tools/export-recipes/` 直下の配置から導出している。
+
+    名簿を手書きにすると family を足すたびに更新漏れの穴が開く。導出が配置を読み損ねて
+    空になると、検査 1 の新しい枝が黙って恒真化する。
+    """
+
+    def test_it_includes_the_recipe_families_and_the_shared_layer(self) -> None:
+        assert {"wan", "_shared"} <= recipe_packages(RECIPES_ROOT)
+
+    def test_it_includes_the_top_level_recipe_modules(self) -> None:
+        """直下のスクリプトも禁止側 — recipe 側のテストが `import dist` の綴りで使っている。"""
+        assert {"dist", "migrate_series"} <= recipe_packages(RECIPES_ROOT)
+
+    def test_it_includes_the_shared_recipe_test_helpers(self) -> None:
+        """`tests/` 直下の共有ヘルパも禁止側 — recipe 側のテストが
+        `from container_series import write_component` の綴りで使っている。"""
+        assert {"container_series", "gemma_synthetic"} <= recipe_packages(RECIPES_ROOT)
+
+    def test_it_excludes_the_entries_that_are_not_recipe_packages(self) -> None:
+        """意図して除外した名前（recipe 側のテストと pytest の設定）は禁止集合に入らない。"""
+        assert recipe_packages(RECIPES_ROOT).isdisjoint({"tests", "conftest"})
+
+    def test_it_takes_only_the_helpers_from_the_test_directory(self, tmp_path: Path) -> None:
+        """`tests/` 直下からは共有ヘルパだけを拾い、テストモジュールと pytest の設定は拾わない。
+
+        実物の `tests/` には今 `conftest.py` が無いので、除外の両方を合成した置き場で踏む。
+        """
+        helpers = tmp_path / "export-recipes" / "tests"
+        helpers.mkdir(parents=True)
+        for name in ("shared_helper", "test_something", "conftest"):
+            (helpers / f"{name}.py").write_text("")
+
+        assert recipe_packages(tmp_path / "export-recipes") == {"shared_helper"}
+
+    def test_it_fails_loudly_without_the_recipe_root(self, tmp_path: Path) -> None:
+        """置き場が無いときに空集合を返すと、検査 1 の新しい枝が黙って恒真化する。"""
+        with pytest.raises(FileNotFoundError):
+            recipe_packages(tmp_path / "export-recipes")
 
 
 #: 旧配布形を読むだけの経路（移行 CLI）が到達してよい core モジュールの起点。
