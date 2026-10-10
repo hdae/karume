@@ -49,11 +49,8 @@ import {
   stridedParams,
   stridedWgsl,
 } from "../../codegen/strided.ts";
-import {
-  attentionScoreUsesF16,
-  type ScoreStorage,
-  scoreStorageBytes,
-} from "../../kernels/score-storage.ts";
+import { type ScoreStorage, scoreStorageBytes } from "../../kernels/score-storage.ts";
+import { attentionRoute } from "../attention-route.ts";
 import { attentionScale, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
 import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
@@ -191,7 +188,8 @@ type AttentionPvStage =
  * 3 dispatch のまま（① と ③ の GEMM が i8a8 カーネルに替わる）。**適格判定は
  * 段ごとに独立**（① は `D % 4 == 0`・③ は `N % 4 == 0`）なので、片方だけ i8a8 の**混成**が
  * 起こりうる — 満たさない段だけが f32 経路へ**沈黙で**縮退する（linear の `k % 4` と同じ
- * 流儀で、落ちたことは診断のパイプラインキーにだけ出る）。
+ * 流儀で、落ちたことは診断のパイプラインキーにだけ出る — 系列の門は完全適格の検査
+ * `assertAttentionSeatsComplete` で検出する。ADR 0058 追記 2026-10-10）。
  *
  * MUST: ① と ③ は 1 workgroup = 1 タイルなので、3 軸とも上限超過は fail loudly
  * （{@link tiledWorkgroups}）。縮退させるとタイルが欠落し、例外なしに O の一部が
@@ -231,21 +229,14 @@ export const buildAttention = async (
   const compute: GemmCompute = face.state.attentionCompute === "f16" ? "f16" : "f32";
   // i8a8 変種（設計 §7 の波 1 + 波 2）。**② 行統計は f32 のまま**（S の格納形も f32 の
   // ままなので、②③ が読む S は ① がどちらの経路で書いても同型）。
-  // MUST: 適格判定は**段ごとに独立**。① は q / k のパック方向が D・③ は P̃ / Vᵀ の
-  // パック方向が N なので、条件も別々になる（両方満たさない形・片方だけの形が実在する）。
+  // S の**格納形**（案 γ 波 1 — 計算形と直交する第 2 の軸）。
+  // 段ごとの適格判定（① は D・③ は N で独立）と S の格納形の適格判定（3 カーネル同時）は
+  // `attentionRoute`（src/runtime/attention-route.ts）が正本で、非適格は f32 経路へ**沈黙で**
+  // 縮退する（ADR 0058 決定 3 — 検出は系列の門の完全適格の検査）。
+  // MUST: 判定をここへ書き戻さない（受理集合のテストが同じ関数を通ることで判定がずれない）。
   const i8a8 = face.state.attentionCompute === "a8";
-  const qkI8a8 = i8a8 && depth % 4 === 0;
-  const pvI8a8 = i8a8 && cols % 4 === 0;
-  // S の**格納形**（案 γ 波 1 — 計算形と直交する第 2 の軸）。`pack2x16float` の 2 要素／語
-  // なので、書き手 ①QK が v4 経路を取る形（`D % 4 == 0 && N % 4 == 0`）だけが適格で、
-  // 非適格は f32 格納へ**沈黙で**縮退する（検出器はパイプラインキー）。
-  // MUST: 3 カーネルが**同時に**切り替わる — S の格納形が書き手と読み手で一致していなければ
-  // ならないので、段ごとの混成はあり得ない（i8a8 の適格判定が段ごとに独立なのとは別の話で、
-  // ①が i8a8 でも f32 でも S の格納形は 1 つに決まる）。
-  const scoreStorage: ScoreStorage =
-    face.state.attentionScoreStorage === "f16" && attentionScoreUsesF16(depth, cols)
-      ? "f16"
-      : "f32";
+  const route = attentionRoute(face.state, depth, cols);
+  const scoreStorage = route.score;
 
   // 加算 mask（省略可能な第 4 入力 — 契約は src/ops.ts）。① の epilogue だけの軸で、
   // ②③ からは「S が既に mask 済み」に見える。
@@ -253,7 +244,7 @@ export const buildAttention = async (
   // MUST: i8a8 の ①QK は別カーネル（src/kernels/attention-i8a8.ts）で epilogue を持たない。
   // 黙って f32 経路へ落とすと「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと
   // 値が壊れるので、組み合わせそのものを**一時バッファを取る前に** fail loudly にする。
-  // MUST: 判定は **要求されたモード**（`i8a8`）で見る — `qkI8a8`（D % 4 の適格判定込み）で
+  // MUST: 判定は **要求されたモード**（`i8a8`）で見る — `route.qk`（D % 4 の適格判定込み）で
   // 見ると D % 4 != 0 のときだけ拒否をすり抜け、f32 の ①QK と i8a8 の ③PV の混成で走って
   // しまう。「mask × i8a8 は無条件に fail loudly」が契約（ADR 0023 / docs/limitations.md）。
   if (mask !== undefined && i8a8) {
@@ -266,8 +257,8 @@ export const buildAttention = async (
   // DECIDED: GQA × i8a8 は fail loudly で開始する（docs/decisions/0067 決定 3）。i8a8 は
   // head 基底が 5 本（src/kernels/attention-i8a8.ts）で、K / V の量子化・確保も `B·H` 前提
   // なので、GQA 形をそのまま流すと量子化バッファの取り違えになる。
-  // MUST: 判定は **要求されたモード**（`i8a8`）で見る — 段ごとの適格判定（`qkI8a8` /
-  // `pvI8a8`）で見ると D%4 / N%4 を満たさない形だけ拒否をすり抜ける（mask と同じ規律）。
+  // MUST: 判定は **要求されたモード**（`i8a8`）で見る — 段ごとの適格判定（`route.qk` /
+  // `route.pv`）で見ると D%4 / N%4 を満たさない形だけ拒否をすり抜ける（mask と同じ規律）。
   // MUST: 黙って f32 経路へ落とさない（ADR 0058 決定 3 — 性能が静かに変わる）。
   if (gqa && i8a8) {
     throw new ExecutionError(
@@ -311,7 +302,7 @@ export const buildAttention = async (
   // `O(B·H·(M+N)·D)` で S の `O(B·H·M·N)` より 1 次低い（実測 = anima DiT の自己注意
   // S=8892 で 122.8MiB 対 S 1 枚 2,413.0MiB = +5.1%）。**上限に効くのはバッファ 1 本ごとの
   // サイズ**なので、束縛上限に対する峰は S のブロック 1 枚のまま動かない。
-  const qk: AttentionQkStage = qkI8a8
+  const qk: AttentionQkStage = route.qk === "i8a8"
     ? await prepareAttentionQkI8a8(
       face,
       builder,
@@ -331,7 +322,7 @@ export const buildAttention = async (
     };
   const pvV4 = gemmUsesVec4(cols, depth);
   const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry);
-  const pv: AttentionPvStage = pvI8a8
+  const pv: AttentionPvStage = route.pv === "i8a8"
     ? await prepareAttentionPvI8a8(
       face,
       builder,

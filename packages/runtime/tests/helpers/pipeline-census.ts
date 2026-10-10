@@ -347,3 +347,65 @@ export const assertSeatsApplied = (
     );
   }
 };
+
+/**
+ * 融合 attention の席の**完全適格**の検査 — 宣言した a8 / s16 が、census に載った融合 attention の
+ * **全** dispatch で効いたこと（ADR 0058 の追記 2026-10-10）。
+ *
+ * - `attentionCompute: "a8"`: ①QK 族・③PV 族のそれぞれで、全本数 == i8a8 変種の本数。
+ * - `attentionScoreStorage: "f16"`: ①QK・②行統計・③PV の 3 族のそれぞれで、全本数 == `:s16` 付きの本数。
+ *
+ * 全本数との一致（比）で見るので、行ブロックの枚数（device の束縛上限で変わる）は両辺に同じだけ掛かって
+ * 消える — 本数そのものを表に書かない census 表（models の census-table.ts）とも両立する。
+ * {@link assertSeatsApplied} には混ぜない: あちらは「どこかで効いた」の検査で、縮退する形を意図して
+ * 踏む runtime のテストも呼ぶ。形の適格判定による縮退（src/runtime/attention-route.ts）は仕様として
+ * 許されている（ADR 0058 決定 3）ので、これは**宣言どおりの経路を期待できる形**の census にだけ掛ける。
+ * MUST: 渡す census は a8 / s16 を宣言した Session の run だけにする — 別の Session（VAE・text
+ * encoder）の f32 の attention が混ざると、正当な f32 が縮退に見えて赤になる。
+ * MUST: 対象の族が 1 本も無い census は fail loudly（0 == 0 の恒真で緑にしない）。
+ * NOTE: 融合されずに残った分解 attention（bmm の経路）は attention 族のキーを持たないので対象外。
+ * `attentionCompute: "f16"` は形による縮退を持たないので見ない。
+ */
+export const assertAttentionSeatsComplete = (
+  rows: SessionDiagnostics["lastRunPipelines"],
+  options: SessionOptions,
+  where: string,
+): void => {
+  const census = requireCensus(rows, where);
+  const assertComplete = (
+    seat: string,
+    families: ReadonlySet<string>,
+    variant: KeyPredicate,
+    variantLabel: string,
+  ): void => {
+    for (const family of families) {
+      const inFamily: KeyPredicate = (key) => familyOf(key) === family;
+      const total = countDispatches(census, inFamily);
+      const applied = countDispatches(census, (key) => inFamily(key) && variant(key));
+      const keys = census.filter((row) => inFamily(row.key))
+        .map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
+      assert(total > 0, `${where}: ${seat} を宣言したのに ${family} の dispatch が 1 本も無い`);
+      assert(
+        applied === total,
+        `${where}: ${seat} の ${family} が ${total} 本中 ${applied} 本だけ ${variantLabel}` +
+          `（残りは f32 へ縮退 — 形の適格判定 attentionRoute）— ${keys}`,
+      );
+    }
+  };
+  if (options.attentionCompute === "a8") {
+    assertComplete(
+      'attentionCompute="a8"',
+      ATTENTION_I8A8_FAMILIES,
+      (key) => dtypeOf(key) === I8A8_DTYPE,
+      "i8a8",
+    );
+  }
+  if (options.attentionScoreStorage === "f16") {
+    assertComplete(
+      'attentionScoreStorage="f16"',
+      ATTENTION_FAMILIES,
+      (key) => hasFragment(key, S16),
+      S16,
+    );
+  }
+};

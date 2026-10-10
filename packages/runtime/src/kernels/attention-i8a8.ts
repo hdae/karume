@@ -139,6 +139,21 @@ export const ATTENTION_QK_K_SCALE_BINDING = 5;
 export const ATTENTION_PV_V_SCALE_BINDING = 5;
 
 /**
+ * ①QK を i8a8 変種で撃てる形か。q / k のパック方向は縮約軸 D なので、`D` が 4 要素 1 語で
+ * 割り切れることが条件になる。非適格の段は f32 経路へ縮退する（ADR 0030 決定 5）。
+ * 段の適格条件の定義で、経路の判定の正本は `attentionRoute`（src/runtime/attention-route.ts）。
+ * レシピ導出（`buildAttention`）と受理集合のテストはどちらもそれを通る（判定を二重に書くと
+ * 片方だけが動いて食い違う）。
+ */
+export const attentionQkI8a8Eligible = (depth: number): boolean => depth % I8A8_PACK === 0;
+
+/**
+ * ③PV を i8a8 変種で撃てる形か。P̃ / Vᵀ のパック方向は縮約軸 N（キー長）なので、`N` が
+ * 4 要素 1 語で割り切れることが条件になる（①とは軸が違うので、片方だけ適格な形が実在する）。
+ */
+export const attentionPvI8a8Eligible = (cols: number): boolean => cols % I8A8_PACK === 0;
+
+/**
  * P̃ の量子化格子の端。**quantize-rows.ts の `QUANTIZE_ROWS_ABS_MAX` を輸入しない** —
  * あちらは「行 amax から作る適応 scale の格子」で、こちらは「行内 max が構造的に 1.0 だから
  * scale が 1/127 に縮退する」という**別の事実**（設計 §2.2）。値が一致するのは偶然に近く、

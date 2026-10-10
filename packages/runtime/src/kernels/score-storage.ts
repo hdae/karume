@@ -56,7 +56,8 @@ export const scoreStorageBytes = (storage: ScoreStorage): number => storage === 
  *
  * 読み側（②行統計 / ③PV）は非適格でも安全だが（読みに RMW は無い）、書き手が f32 で書く以上
  * 意味が無い。**非適格は f32 格納へ沈黙で縮退する**（linear の `k % 4`・ADR 0030 決定 5 と
- * 同じ流儀で、落ちたことは診断のパイプラインキーにだけ出る）。
+ * 同じ流儀で、落ちたことは診断のパイプラインキーにだけ出る — 系列の門は完全適格の検査
+ * `assertAttentionSeatsComplete` で検出する。ADR 0058 追記 2026-10-10）。
  */
 export const attentionScoreUsesF16 = (depth: number, cols: number): boolean =>
   depth % 4 === 0 && cols % 4 === 0;
