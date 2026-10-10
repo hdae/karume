@@ -9,7 +9,7 @@
 
 import type { IrDtype } from "../format/ir.ts";
 
-/** 比較対象の長さ・dtype が違う（取り違え — 許容誤差の問題ではない）。 */
+/** 比較対象の長さ・dtype が違う、または許容差そのものが壊れている（取り違え — 誤差の大小の問題ではない）。 */
 export class AllcloseError extends Error {
   override readonly name = "AllcloseError";
 }
@@ -55,11 +55,12 @@ export const allclose = (
   if (actual.length !== expected.length) {
     throw new AllcloseError(`長さ不一致: actual ${actual.length} vs expected ${expected.length}`);
   }
-  // MUST: 許容誤差の NaN は比較式を常に false にして不一致を合格に化けさせ、負数は意味を持たない。
-  // +Infinity は「判定しない」（計測だけ取る）の意味で使う呼び手があるので受ける。
+  // MUST: 許容差の NaN と負を拒む。NaN だと判定の右辺が NaN になって `abs > 右辺` が常に false
+  // （どんな誤差も合格）、負だと誤差 0 でも不合格になる。+Infinity は e2e が記録専用の帯として
+  // 意図的に渡すので、有限であることまでは要求しない。
   for (const [name, value] of [["atol", tolerance.atol], ["rtol", tolerance.rtol]] as const) {
     if (Number.isNaN(value) || value < 0) {
-      throw new AllcloseError(`許容誤差 ${name}=${value} が非負の数でない`);
+      throw new AllcloseError(`許容差 ${name} が NaN か負である: ${value}`);
     }
   }
   let failCount = 0;
