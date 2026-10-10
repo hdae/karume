@@ -115,7 +115,7 @@ import type { BoundContainer } from "../../runtime/src/format/container/bind.ts"
 import type { IrNode } from "../../runtime/src/format/ir.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
 /**
@@ -557,7 +557,6 @@ Deno.test({
     "帯の中で一致し、故障注入は帯の外（実 GPU）",
   ignore: !ALL_ASSETS || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     assert(FAULT_CASE !== undefined, "故障注入のケースが表に無い");
     const opened = await openParts();
     const models = prepareParts(opened);
@@ -571,7 +570,7 @@ Deno.test({
     /** 受入れ（故障注入の入力）の正しい mu（std と 1/std の取り違えの注入に使う）。 */
     let faultMu: Float32Array<ArrayBuffer> | undefined;
 
-    const gpu = await acquireTestGpu();
+    const gpu = verifyRunningGpu(await acquireTestGpu());
     const residents = new EncoderResidents(gpu);
     /** 製品の Session 3 本（後始末で畳む — 故障注入の Session は {@link encodeWithRewritten} がその場で畳む）。 */
     const created: Session[] = [];

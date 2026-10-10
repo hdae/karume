@@ -109,7 +109,7 @@ import {
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
   openResults,
   type RecordedCase,
@@ -371,7 +371,6 @@ Deno.test({
     "一致・accept の RGB が上流の unpatchify → clamp と帯の中で一致（実 GPU）",
   ignore: !ALL_TILES || !CHUNK_ASSETS_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     const [firstOpened, nextOpened] = await Promise.all([
       openSeriesContainer(ti2vVaeModelUrl(FIRST)),
       openSeriesContainer(ti2vVaeModelUrl(NEXT)),
@@ -395,11 +394,13 @@ Deno.test({
     let bandNote: string | undefined;
 
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     let monitor: ReturnType<typeof monitorDrmUsage> | undefined;
     let timeline: DrmTimeline | undefined;
     let first: Session | undefined;

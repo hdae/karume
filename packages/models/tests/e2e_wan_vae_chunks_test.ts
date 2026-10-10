@@ -45,7 +45,7 @@ import {
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
 /**
@@ -126,7 +126,6 @@ Deno.test({
   name: "Wan VAE chunk 列: 常駐 cache の first → next が上流の _decode と帯の中で一致（実 GPU）",
   ignore: !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     const [firstOpened, nextOpened] = await Promise.all([
       openSeriesContainer(modelUrl(FIRST_COMPONENT)),
       openSeriesContainer(modelUrl(NEXT_COMPONENT)),
@@ -140,7 +139,7 @@ Deno.test({
       long: await readFixture(fixtureUrl("long")),
     };
 
-    const gpu = await acquireTestGpu();
+    const gpu = verifyRunningGpu(await acquireTestGpu());
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;

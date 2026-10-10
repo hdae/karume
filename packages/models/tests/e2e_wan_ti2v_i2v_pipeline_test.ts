@@ -192,7 +192,7 @@ import {
   WAN_TI2V_REFERENCE_QUANT,
 } from "./helpers/wan-ti2v-pipeline.ts";
 import { contactSheet, writeWanFrames } from "./helpers/wan-video-artifacts.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
   openReferences,
   referenceMismatchMessage,
@@ -1185,13 +1185,14 @@ Deno.test({
     "故障注入は帯の外・sha256 の環境行（参照席の帯のケース・実用席・opt-in の縦長）",
   ignore: !DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     const onRunDiagnostics = (component: WanRunComponent, diagnosed: SessionDiagnostics): void => {
       diagnostics.set(component, diagnosed);
@@ -1732,13 +1733,14 @@ Deno.test({
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
   ignore: !I2V_FULL || !DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
       const fixture = await readFixture(wanI2vStepsFixtureUrl(DEFAULT_CASE));

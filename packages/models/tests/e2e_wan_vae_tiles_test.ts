@@ -68,7 +68,7 @@ import { settleReleases } from "./helpers/settle-releases.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
 /**
@@ -284,7 +284,6 @@ Deno.test({
   name: "Wan VAE タイル decode: 縮退門 + 832×480・33 フレームが上流の参照と帯の中で一致（実 GPU）",
   ignore: !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     const [firstOpened, nextOpened] = await Promise.all([
       openSeriesContainer(modelUrl(FIRST_COMPONENT)),
       openSeriesContainer(modelUrl(NEXT_COMPONENT)),
@@ -298,7 +297,7 @@ Deno.test({
     };
     const degenerate = (await readFixture(degenerateUrl)).tensor("latents");
 
-    const gpu: GpuContext = await acquireTestGpu();
+    const gpu: GpuContext = verifyRunningGpu(await acquireTestGpu());
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;

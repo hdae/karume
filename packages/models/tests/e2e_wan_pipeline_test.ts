@@ -116,7 +116,7 @@ import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
   openReferences,
@@ -826,13 +826,14 @@ Deno.test({
     "sha256 の環境行（`f16` 席と i8 の 2 席〈参照行 / 実用行〉）",
   ignore: !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
       const pipeline = await loadPipeline(gpu, diagnostics, "precomputed", F16_QUANT);
@@ -1016,13 +1017,14 @@ Deno.test({
     "自由プロンプトが完走・非有限 0・段の所要と切り替えの VRAM・sha256 の環境行",
   ignore: !GPU_TEXT_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
       // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
@@ -1136,13 +1138,14 @@ Deno.test({
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図",
   ignore: !FULL_PIPELINE || !ANY_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
       // ケースごとに席の pipeline を張る（構築では Session を張らない — `f16` 席と実用席を確保の大きい順に交互に回す）。

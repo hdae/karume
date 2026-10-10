@@ -62,7 +62,7 @@ import {
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { WAN_ASSEMBLE_COMMAND } from "./helpers/wan-distribution.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { openReferences, sha256Hex } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
@@ -361,13 +361,14 @@ Deno.test({
         "（資産だけの part を持つ差し替え先はこの e2e の対象外）",
     );
 
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     try {
       await runRecordedCase(results, { id: SWAP_CASE.id }, async () => {
         let phase: Phase = "construction";

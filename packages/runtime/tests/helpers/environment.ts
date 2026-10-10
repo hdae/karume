@@ -127,10 +127,37 @@ export const assertAdapterMatchesEnvironment = (
 };
 
 /**
+ * 実走に使う GPU を {@link assertAdapterMatchesEnvironment} で照合して、そのまま返す
+ * （`const gpu = verifyRunningGpu(await acquireTestGpu(…))` の形で、取得の直後に通す）。
+ *
+ * 照合は**数値を産む GPU そのもの**に対して行う。検査用に別途取った GPU を照合しても、実走の取得が
+ * 別のアダプタを選べばその実体は照合されない（2 回の取得が同じ物理アダプタを返す保証は無い —
+ * {@link assertAdapterMatchesEnvironment} の注記）。
+ *
+ * MUST: 照合に落ちた GPU は破棄してから throw する —— 取得の直後（呼び手の try/finally の外）で
+ * 使えるようにするためで、ここで返さないと誰も破棄できない。
+ */
+export const verifyRunningGpu = <
+  Gpu extends { readonly adapterInfo: GPUAdapterInfo; destroy(): void },
+>(gpu: Gpu, environment: Environment = ENVIRONMENT): Gpu => {
+  try {
+    assertAdapterMatchesEnvironment(gpu, environment);
+  } catch (error) {
+    gpu.destroy();
+    throw error;
+  }
+  return gpu;
+};
+
+/**
  * {@link assertAdapterMatchesEnvironment} を走行に 1 度だけ実行する（参照値を書く経路の入口で呼ぶ）。
  *
- * アダプタの選択はプロセス内で変わらないので、検査用の `GpuContext` は 1 度取って捨てる。
- * 1 度きりにするのは、パイプラインが資産を抱えている最中に device を作り直さないため。
+ * 検査用の `GpuContext` を 1 度取って捨て、結果をプロセス内でキャッシュする。1 度きりにするのは、
+ * パイプラインが資産を抱えている最中に device を作り直さないため。
+ *
+ * NOTE: これが照合するのは検査用の取得であって、実走の取得ではない（実走が別のアダプタを選べば
+ * 素通りする）。実走の GPU を手に持つ経路は {@link verifyRunningGpu} を使う。これを使うのは、
+ * パイプラインが内部で GPU を取る経路だけである。
  */
 let runningAdapterCheck: Promise<void> | undefined;
 export const assertRunningAdapter = (): Promise<void> => {

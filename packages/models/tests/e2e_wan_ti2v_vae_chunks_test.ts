@@ -108,8 +108,8 @@ import { openSeriesContainer } from "../../runtime/tests/helpers/container-files
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import {
   assertAdapterMatchesEnvironment,
-  assertRunningAdapter,
   ENVIRONMENT,
+  verifyRunningGpu,
 } from "../../runtime/tests/helpers/environment.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
@@ -352,7 +352,6 @@ Deno.test({
     "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）",
   ignore: !ASSETS_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     const models = await prepareModels();
     const layout = wanVaeChunkLayout(models.first, models.next);
     const fixtures = {
@@ -363,7 +362,7 @@ Deno.test({
     /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
     const observed = new Map<CaseName, number>();
 
-    const gpu = await acquireTestGpu();
+    const gpu = verifyRunningGpu(await acquireTestGpu());
     let first: Session | undefined;
     let next: Session | undefined;
     let caches: WanVaeChunkCaches | undefined;

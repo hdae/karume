@@ -26,9 +26,7 @@ export const GPU_AVAILABLE: boolean = await detectAdapter();
  *
  * NOTE: 対症療法（{@link collectDestroyedDevices} の注記 — Deno の `destroy()` が VRAM を返さない件）。
  * 今これを通すのは Wan のレーン（`test:models:wan` / `test:models:wan-ti2v`）の e2e だけで、他のテスト
- * と、パイプラインが内部で取る device（`gpu` を渡さない読み込み）は通らない。Wan の e2e の中でも、
- * `assertRunningAdapter`（runtime のテストの helpers/environment.ts — 走行に 1 度の検査用の取得）は
- * 通らない（`gc` は process 全体に効くので、それも次にここを通る取得の前にまとめて回収される）。
+ * と、パイプラインが内部で取る device（`gpu` を渡さない読み込み）は通らない。
  */
 export const acquireTestGpu = async (options?: AcquireGpuOptions): Promise<GpuContext> => {
   await collectDestroyedDevices();

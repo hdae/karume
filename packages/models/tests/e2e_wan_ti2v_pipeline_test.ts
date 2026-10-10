@@ -139,7 +139,7 @@ import {
   WAN_TI2V_REFERENCE_QUANT,
 } from "./helpers/wan-ti2v-pipeline.ts";
 import { contactSheet, writeWanFrames } from "./helpers/wan-video-artifacts.ts";
-import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
+import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import {
   openReferences,
   referenceMismatchMessage,
@@ -723,13 +723,14 @@ Deno.test({
     "sha256 の環境行（参照席の帯のケース・seed 経路の 2 寸法・実用席の seed 経路・GPU 経路）",
   ignore: !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     /**
      * 参照席の seed 経路の 1280×704 の実物（RGB のバイト列）— 同じ要求の実用席のケースの床（{@link runSeedCase} の
@@ -1131,13 +1132,14 @@ Deno.test({
     "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
   ignore: !FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
       /** 参照席の実物（RGB のバイト列）の sha256 — 同じ要求の実用席の床の比べる相手（既定のレーンの実用行と同じ床）。 */
@@ -1228,13 +1230,14 @@ Deno.test({
     "非有限 0・sha256 の環境行・所要と段の切り替えの VRAM",
   ignore: !LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
-    await assertRunningAdapter();
     let deviceLost: string | undefined;
-    const gpu = await acquireTestGpu({
-      onDeviceLost: (info) => {
-        deviceLost = `${info.reason}: ${info.message}`;
-      },
-    });
+    const gpu = verifyRunningGpu(
+      await acquireTestGpu({
+        onDeviceLost: (info) => {
+          deviceLost = `${info.reason}: ${info.message}`;
+        },
+      }),
+    );
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     let settlement: ReferenceSettlement | undefined;
     try {
