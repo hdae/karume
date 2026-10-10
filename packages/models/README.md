@@ -46,18 +46,18 @@ at once; it is side-effect free, so a bundler can still drop what you do not imp
 
 ## Families
 
-| Subpath                         | Task                                      |
-| ------------------------------- | ----------------------------------------- |
-| `@karume/models/gemma`          | text generation and chat (Gemma 4)        |
-| `@karume/models/gemma4-qat`     | the same API on fixed mobile QAT weights  |
-| `@karume/models/anima`          | text to image                             |
-| `@karume/models/sbv2`           | text to speech                            |
-| `@karume/models/irodori`        | text to speech                            |
-| `@karume/models/birefnet`       | image to alpha matte (background removal) |
-| `@karume/models/depth-anything` | image to relative depth map               |
-| `@karume/models/siglip2`        | image to embedding                        |
-| `@karume/models/vowel-detector` | Japanese speech to lip-sync labels        |
-| `@karume/models/wan`            | text to video (Wan2.1 / Wan2.2)           |
+| Subpath                         | Task                                                     |
+| ------------------------------- | -------------------------------------------------------- |
+| `@karume/models/gemma`          | text generation and chat (Gemma 4)                       |
+| `@karume/models/gemma4-qat`     | the same API on fixed mobile QAT weights                 |
+| `@karume/models/anima`          | text to image                                            |
+| `@karume/models/sbv2`           | text to speech                                           |
+| `@karume/models/irodori`        | text to speech                                           |
+| `@karume/models/birefnet`       | image to alpha matte (background removal)                |
+| `@karume/models/depth-anything` | image to relative depth map                              |
+| `@karume/models/siglip2`        | image to embedding                                       |
+| `@karume/models/vowel-detector` | Japanese speech to lip-sync labels                       |
+| `@karume/models/wan`            | text to video (Wan2.1 / Wan2.2), image to video (Wan2.2) |
 
 ## Requirements
 

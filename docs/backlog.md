@@ -435,9 +435,14 @@ later の「decode 速度の残り」。
   **段 9 の計画 ✅（裁定 2026-10-09）・9a ✅（2026-10-09）** — encoder は mid の attention の前後の記号長の 3 グラフ（資産は解像度から独立・108 MB）・
   前処理（Pillow の LANCZOS の固定小数点の逐語移植・寸法・patchify・正規化）・GPU の門（帯 7.8e-5・3 寸法を同じ Session で）— `0b34c674`〜`b20fdba7`・
   ADR 0121 追記「段 9 の計画の裁定と段 9a の結果」。**9b ✅（2026-10-10）** — I2V の条件づけ・公開 API（`WanTi2vGenerateRequest`）・配布形の encoder・CPU 参照・通しの帯と sha 行 5 本・2.1 / 2.2 のレーン緑 —
-  `c98d4747`〜`063dea42`・ADR 0121 追記「段 9b の結果」。**次** → 9c（カード・examples・gpu-lab）→ 9d（A/B・視認・フル verify）→ 休憩。
+  `c98d4747`〜`063dea42`・ADR 0121 追記「段 9b の結果」。**9c ✅（2026-10-10）** — example の `--image` / `--fit`（`48f204ed`）・gpu-lab の条件画像（`b630417b`）・
+  カードと NOTICE（`7d729dcb`）・ホスト側の README（`dfe5ab3f`）・docs `2ac1ac62` — ADR 0121 追記「段 9c の結果」。**9d（進行中）** — I2V の自機 A/B 門
+  〈1280×704×33・relRMS 4.6146e-2・帯 9.3e-2・opt-in `KARUME_WAN_TI2V_I2V_FULL=1`〉と 50 ステップの sha 行の門 ✅（`136cee60`）・I2V の 50 ステップの
+  sha 行 2 本〈参照席と実用席・RTX 3080 Ti〉✅（`28ab44fe`）・視認 12 対〈参照席 vs 実用席〉とフル verify は進行中。**次** → 9d の残り → 休憩。
   （以下は着手前の列挙）**次** → 段 7（実用席の自機 A/B の門〈S の組は未決 — 832×480 の値が使えなくなった〉・census・決定性・利用者の視認〈参照席自身の品質の裁定を兼ねる・seed 4 本以上・
   1280×704・ADR 0119 の裁定〈2026-10-04〉が預けた自由プロンプトの比較〉・既定の寸法 / フレーム数〈今は仮置きの 1280×704・33 フレーム〉・実用席の 2 ステップの sha 行・50 ステップの sha 行〈参照席・実用席 — 段 6 では書いていない〉）→ 段 9（I2V）→ **一旦休憩**（利用者が触って使い方を見る — 2026-10-06）。
+  **段 9 の隣接の小物（起票 2026-10-10・レビュー）**:
+  (a) 配布の組み立て（`tools/export-recipes/wan/distribution.py`）が VAE encoder の 3 容器の入出力契約（入力名・記号・pre → attn → post の形の連鎖）を検査しない（decoder の 2 容器は組の門 `assert_vae_chunk_pair` を持つ — 1 本だけ焼き直した系列は組み立てを通り、利用者の `fromPretrained` の admission で初めて拒まれる・起票 2026-10-10・レビュー G4-01・修正の波の候補）
   **段 5 / 段 6 の隣接の小物（起票 2026-10-05）**:
   (a) タイル参照の読み口と補助関数（`readTileFixture`・`planMeta`・`compare`・`absMax`・`poisonFrames`・`roundUpTwoDigits`）が 3 本の e2e に重複 → 共有の test helper へ
   (b) recipe の `_peak_rss_gib` などの補助が 3 か所に重複 → `_shared` へ
@@ -460,8 +465,8 @@ later の「decode 速度の残り」。
   (d) Wan の text 段が umT5 の席の宣言した `session` を黙って無視せず検査する（known-issues の部品差し替えの項目と同根）
   (e) `e2e_wan_dit_test.ts` が、落ちた step でも VRAM の記録を出す（known-issues のレーン内の OOM を ① 残り / ② 他の process に分けるため）
   **後で足す（起票 2026-10-04・利用者）**: (a) TI2V-5B の f16 席 — 開発機で動かなくても重みは用意しておきたい（材料: f16 の export は RAM の境界か
-  exporter core の変更が要る・開発機では門も sha 行も持てない — ADR 0121 決定 7 / 裁定 2）(b) I2V の縦横比を選べる口（直接リサイズ — diffusers の
-  挙動 — を選べるように・口の形は段 9）。
+  exporter core の変更が要る・開発機では門も sha 行も持てない — ADR 0121 決定 7 / 裁定 2）(b) ✅ I2V の縦横比を選べる口（直接リサイズ — diffusers の
+  挙動 — を選べるように・口の形は段 9）— 段 9b の `fit: "stretch"`（`c98d4747`・2026-10-10）。
   **関連（accepted・裁定 2026-10-04）**: ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)（umT5 の出所を本家 google/umt5-xxl へ・
   互換の text encoder を作る経路・差し替えは今の components 席のまま・段 a〜d）。段 a〜d 完了（ADR 0122 の追記 4 本）。残り = ADR 0122「未解決」の 2 項目（第三者の互換部品の公開の裁定・
   版を跨いだグラフ記述の一致 — 追加学習版の視認は 2026-10-05 に利用者が問題なしと裁定）。

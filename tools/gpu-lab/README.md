@@ -510,7 +510,8 @@ Any other quant is not a reference case.
 
 Sections 1 to 6 and the steps above describe Wan2.1; this section gives what differs for Wan2.2. The
 numbers marked as measured come from the B570 under Deno (ADR 0121, "B570 の 1280×704 のフレーム数の試走" and
-stage 2) unless another GPU is named; the one Chrome run so far is the RTX 5070 Ti result below.
+stage 2) unless another GPU is named; the Chrome runs so far are the RTX 5070 Ti results below (text-to-video
+here, image-to-video under **Image-to-video**).
 
 **Result on the RTX 5070 Ti (2026-10-06, Chrome 154 on Windows)**: a 50-step clip with the practical quant
 `f16+dit8-a8-attn8-s16` and the GPU text encoder (`cat-dog-baking`, seed 42, 1280x704, 121 frames) completed without a device loss in 2,417.5 s
@@ -520,7 +521,7 @@ weights and 4.80 GiB of slot backing), below the estimate further down. VRAM, wa
 about 8 GiB in the text encoder stage, 10.5 GiB in the transformer stage, and 6 GiB in the VAE stage. The
 largest window mean was 64.6 ms for the transformer and 616.2 ms for `vae_decoder_first`, which also counted
 3,645 submits over the budget, the same pattern the B570 showed in ADR 0121 stage 4 (the cause has not been
-investigated). 33 and 49 frames and the 2-step reference case were not run in Chrome.
+investigated). 33 and 49 frames of text-to-video and the 2-step reference case were not run in Chrome.
 
 **Binding limits.** S is 7,920 tokens at 1280x704 and 33 frames, 11,440 at 49 frames, and 27,280 at 121
 frames (32 pixels per token on each side):
@@ -568,13 +569,16 @@ the same environment keys as Wan2.1. The common conditions are `boxing-cats`, se
 negative, and the default guidance and shift (5.0 and 5.0):
 
 - `f16+dit8-2step-boxing-cats-seed42-1280x704-17f-shift5` and
-  `f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5` — steps 2, 17 frames, only with `f16+dit8`;
+  `f16+dit8-2step-boxing-cats-seed42-704x1280-17f-shift5` — steps 2, 17 frames, with `f16+dit8`;
+- `f16+dit8-a8-attn8-s16-2step-boxing-cats-seed42-1280x704-17f-shift5` — the same request at 1280x704 with
+  the practical quant (ADR 0121 stage 7; the e2e also requires its frames to differ from the `f16+dit8`
+  ones). Its rows so far are only for the RTX 3080 Ti under Deno;
 - `f16+dit8-2step-boxing-cats-seed42-1280x704-121f-shift5` — steps 2, 121 frames, 1280x704, only with
   `f16+dit8`. The e2e runs it only when `KARUME_WAN_TI2V_121F=1` is set (the VAE stage alone takes about
   12 minutes on the RTX 3080 Ti), and its rows are written only on the development machine;
 - `<quant>-50step-boxing-cats-seed42-1280x704-33f-shift5` — steps 50, 33 frames, 1280x704, with `f16+dit8`
-  or `f16+dit8-a8-attn8-s16`. The e2e observes these without keeping rows for now (ADR 0121 stage 7 decides
-  them), and no row is added for a Chrome key (ADR 0121 stage 10), so the page reports a missing row: report
+  or `f16+dit8-a8-attn8-s16`. The e2e keeps rows for these only for the RTX 3080 Ti under Deno (ADR 0121
+  stage 7), and no row is added for a Chrome key (ADR 0121 stage 10), so the page reports a missing row: report
   the SHA-256 as a record only, unlike section 5.
 
 Any other request, quant, or route is not a reference case, and neither is any image-to-video request: the
@@ -603,8 +607,14 @@ then `getImageData` on an `OffscreenCanvas`, and the alpha channel is dropped. S
   them to 8 bits its own way, so there is no Deno counterpart to compare with.
 - No color conversion is applied: a color profile in the file is ignored.
 
-The encoder stage took about 0.5 s on the RTX 3080 Ti in Deno (ADR 0121 stage 9b, 1280x704); it has not
-been run in Chrome yet.
+The encoder stage took about 0.5 s on the RTX 3080 Ti in Deno (ADR 0121 stage 9b, 1280x704).
+
+**Result on the RTX 5070 Ti (2026-10-10, Chrome 155 on Windows)**: two image-to-video clips with the practical
+quant `f16+dit8-a8-attn8-s16` and the GPU text encoder, from an 896x1152 (portrait) image with `crop`, the size
+chosen from the image (704x1280), 20 steps, shift 7, and a free prompt, completed: 33 frames in 390.0 s (5.99 s
+per step after the first) and 121 frames in 1,346.5 s (36.05 s per step after the first). The encoder stage took 1.6 to 1.7 s. As with any
+image-to-video request, the rows were not compared with a reference case, and the clips' quality is not
+claimed here.
 
 **Steps for Wan2.2.**
 
@@ -612,8 +622,8 @@ been run in Chrome yet.
    models/karume-wan2.2` (without the flag, the default location is used when it holds `karume.json`).
 2. Open **http://localhost:8790/#wan** in Chrome and choose `Wan2.2 TI2V 5B（karume-wan2.2）` in **世代**.
 3. Choose the quant (it holds until **pipeline を破棄**). `既定` resolves to the manifest's `defaultQuant`.
-   The 2-step reference case has rows only for `f16+dit8`, so choose `f16+dit8` explicitly for it, even when
-   `既定` resolves to the practical quant. The practical quant `f16+dit8-a8-attn8-s16` takes about half the
+   The 2-step reference case has rows for `f16+dit8` at both sizes but for the practical quant only at
+   1280x704, so choose `f16+dit8` explicitly for 704x1280, even when `既定` resolves to the practical quant. The practical quant `f16+dit8-a8-attn8-s16` takes about half the
    transformer time of `f16+dit8` on the B570.
 4. Before loading, read the limits table at 33, 49, and 121 frames (1280x704).
 5. Press **読み込む**. Run the 2-step reference case first: `boxing-cats`, seed 42, 17 frames, 1280x704,

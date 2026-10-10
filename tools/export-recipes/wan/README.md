@@ -336,6 +336,67 @@ uv run --group wan --inexact python -m wan.series_check --written $OUT --existin
   --require vae_tiles.band.safetensors --require vae_tiles.accept.safetensors
 ```
 
+### TI2V-5B VAE encoder for image to video (Wan2.2, ADR 0121 stage 9a)
+
+Image to video encodes one condition image with the Wan2.2 VAE encoder (chunk 0 only).
+`wan/export_vae_encoder.py` writes it as three graphs split around the middle attention, so the
+sizes stay symbolic: the attention's sequence length h·w cannot be written as an IR dimension
+expression (one symbol, linear), so it gets a graph of its own over `S`. One container holds one
+graph (`karume/5`), so the encoder is three parts. `wan/vae_encoder_patch.py` holds the rewrites:
+the causal conv3d folded to the last time slice that sees real data in chunk 0 (an identity in
+f64), `AvgDown3D` in the closed form of chunk 0 (mean as sum × 1/4), the asymmetric `ZeroPad2d` as
+a pad of the last axis with a permute, the attention in sequence form (row L2 normalization and
+`linear`), and `post` returning the first 48 channels of `quant_conv` (the mean `mu`).
+
+| Graph (part)       | Input → output                         | Symbols | Nodes | Container    |
+| ------------------ | -------------------------------------- | ------- | ----- | ------------ |
+| `vae_encoder_pre`  | `image` `[12,1,8h,8w]` → `[640,1,h,w]` | h, w    | 266   | 88,699,409 B |
+| `vae_encoder_attn` | `tokens` `[640,S]` → `[640,S]`         | S       | 19    | 3,295,014 B  |
+| `vae_encoder_post` | `hidden` `[640,1,h,w]` → `[48,1,h,w]`  | h, w    | 36    | 15,893,533 B |
+
+The weights are f16 (107.9 MB in all) and go into the same series as the decoder,
+`outputs/series/wan2.2-ti2v-5b-f16-dyn/{vae_encoder_pre,vae_encoder_attn,vae_encoder_post}/`.
+`[640,1,h,w]` and `[640,S]` are the same bytes read two ways. The graphs accept any multiple-of-16
+size; the accepted sizes are checked by the pipeline.
+
+```bash
+uv run --group wan --inexact python -m wan.export_vae_encoder            # 3 graphs + goldens
+uv run --group wan --inexact python -m wan.export_vae_encoder --verify   # eager equivalence (writes nothing)
+```
+
+The goldens `vae_encoder.<case>.safetensors` at the series root cover three test images
+(`inputs/wan-i2v/<name>-832x480.png` — not tracked by git, pinned by SHA-256 in `IMAGES`) at
+1280×704, 704×1280 and 256×160 (outside the accepted set, a downscaling path) with `fit` `crop`;
+two images set the tolerance and the third is judged against it. One more case keeps only the
+`stretch` RGB8 at 1280×704 for the TypeScript host test. Against the upstream untiled encode
+(diffusers 0.39.0, CPU f32), the nine cases differ by 5.3e-7 to 2.1e-6 (largest absolute difference
+over the reference's largest value); the differences come only from the folded conv3d, the L2
+normalization and the attention's reduction order. The GPU gate is
+`packages/models/tests/e2e_wan_ti2v_vae_encoder_test.ts` (tolerance 7.8e-5) in
+`deno task test:models:wan-ti2v`. On a machine with the series root, the asset gate requires the
+three encoder parts as well, so a machine that has only the decoder needs the first command above.
+
+The image preprocessing has a reference of its own, `wan/i2v_preprocess_ref.py` (no command — the
+encoder goldens and the image-to-video reference below call it): `crop` as in the official Wan2.2
+code (scale to cover, Python rounding, LANCZOS, center crop) and `stretch` as in diffusers'
+`WanImageToVideoPipeline` (LANCZOS straight to the output size), then `[-1, 1]` and the upstream
+patchify. Its values depend on Pillow's LANCZOS, so the `wan` group pins `pillow==12.3.0`.
+
+`wan/lanczos_fixture.py` writes the git-tracked fixture that the TypeScript LANCZOS port must
+match byte for byte (45 cases, synthetic images only):
+
+```bash
+uv run --group wan --inexact python -m wan.lanczos_fixture
+deno fmt ../../packages/models/tests/fixtures/wan-i2v/lanczos.json   # the formatter's form is the committed form
+```
+
+It writes `packages/models/tests/fixtures/wan-i2v/lanczos.json` (cases and provenance) and
+`lanczos.safetensors` (the pixels). The pytest side is `wan/tests/test_vae_encoder_patch.py`,
+`wan/tests/test_export_vae_encoder.py`, `wan/tests/test_i2v_preprocess_ref.py` and
+`wan/tests/test_lanczos_fixture.py` (the last one rebuilds the fixture with the installed Pillow
+and fails when it no longer matches the committed one). They run on the synthetic Wan2.2 VAE and
+synthetic images; the real-weight tests and the goldens on disk skip when they are missing.
+
 ## Text embeddings, sampler and few-step reference (stage 6)
 
 ### Text embeddings
@@ -442,6 +503,43 @@ are kept in memory only: if the run stops before or during the decode, the DiT p
 has to be run again (fixtures already written stay). Do not run it next to another heavy CPU job. The pytest side
 (`wan/tests/test_ti2v_few_step_ref.py`) runs the whole two-phase script on a small synthetic Wan2.2
 DiT and VAE.
+
+### Few-step reference, TI2V-5B image to video (Wan2.2, ADR 0121 stage 9b)
+
+`wan/ti2v_i2v_few_step_ref.py` is the image-to-video counterpart and reuses the parts of
+`ti2v_few_step_ref.py` (the weight reader, the scheduler, the prompt rows, the tiled decode and the
+two phases). It builds diffusers' `WanImageToVideoPipeline` from the pinned snapshot (the
+`expand_timesteps` branch, the Wan2.2 5B image-to-video form) and runs it on CPU f32 for 2 steps
+with CFG (guidance 5.0, shift 5.0) at 1280×704 with 9 frames (latent `[48,3,44,80]`, S = 2,640, the
+first 880 tokens being the condition). The condition image is a stage-9a test image cropped by
+`i2v_preprocess_ref.crop_resize`; before writing, the script checks that the condition latent, the
+source image and the cropped image match the stage-9a encoder golden bit for bit (a missing golden
+is reported as `missing` in the summary). The timestep MLP runs once per value (M = 1: the
+generation timestep and 0 for the condition tokens — ADR 0121 decision 4); the two deciding cases
+also run the unchanged pipeline (M = S) as an observation, which differs from the reference by
+6.1e-6 to 1.9e-5.
+
+It writes `pipeline_steps_i2v.<case>.safetensors` at the int8 DiT series root
+(`outputs/series/wan2.2-ti2v-5b-i8-dyn/`): the injected noise, the condition latent, each step's
+cond / uncond outputs and latents (the scheduler's state, before the replacement), `latents_final`
+(after it), the frames `[3,9,704,1280]`, the latent mean / std, the source and the cropped RGB8, and
+for the deciding cases the M = S observations. `band-boxing-cats` and `band-cat-dog-baking` set the
+tolerance and `accept-ferret` is judged against it.
+
+```bash
+uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref                       # all three cases
+uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref --case accept-ferret  # one case
+```
+
+Measured on 2026-10-09 (Ryzen 5 7600): the three cases took 41 min 48 s with a peak RSS of
+24.07 GiB. The RAM check adds the image-to-video overhead to the text-to-video estimate and stops
+unless `MemAvailable` covers it plus 1 GiB; the first-phase results are kept in memory only, as in
+the text-to-video reference, so do not run it next to another heavy CPU job. The official Wan2.2
+form (replacing the scheduler's state after every step) and the diffusers form (replacing only the
+transformer's input) give bit-identical final outputs with the pinned UniPC.
+`wan/tests/test_ti2v_i2v_few_step_ref.py` keeps that check for 2, 8 and 50 steps on a stand-in
+model and runs the whole script on a small synthetic Wan2.2 model. The GPU side is
+`packages/models/tests/e2e_wan_ti2v_i2v_pipeline_test.ts`.
 
 ### The pipeline these feed (`@karume/models/wan`)
 
@@ -638,7 +736,11 @@ the same plan function with the Wan2.2 table: only the int8 transformer (`wan2.2
 the VAE graphs of `wan2.2-ti2v-5b-f16-dyn`, the quants `f16+dit8` and
 `f16+dit8-a8-attn8-s16` (the default since 2026-10-06), `scheduler.shift` 5.0, and the two Wan2.1 text assets copied byte for byte —
 their provenance is checked against the Wan2.1 pin, while the transformer and VAE containers are
-checked against the Wan2.2 pin.
+checked against the Wan2.2 pin. The VAE graphs include the three encoder parts for image to video
+(`vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post`, f16, 107,887,956 B in all — ADR 0121
+stage 9b), and only the Wan2.2 distribution carries them; export them with
+`python -m wan.export_vae_encoder` (see the VAE section) before assembling, as the plan needs all
+three.
 
 Until `karume-umt5-xxl` is published there is no commit SHA. The development mirror uses the
 placeholder `0000000000000000000000000000000000000000` and must say so with

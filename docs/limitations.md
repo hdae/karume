@@ -1096,7 +1096,8 @@ Consequences）。
   持つ。実用席の同じ要求の 1 本（1280×704）は RTX 3080 Ti の行だけ。2 ステップ × 121 フレームのケースは opt-in（`KARUME_WAN_TI2V_121F=1`）で、行は RTX 3080 Ti だけ。50 ステップの通し（opt-in
   `KARUME_WAN_TI2V_FULL_PIPELINE=1`・1280×704・33 フレーム）は 2 席とも行を持ち、行は RTX 3080 Ti だけ。I2V の 2 ステップ × 9 フレームの
   通しは RTX 3080 Ti の行だけ: 既定のレーン = 2 席の boxing-cats（1280×704）・opt-in（`KARUME_WAN_TI2V_I2V_FULL=1`）= 参照席の
-  cat-dog-baking / ferret と 704×1280。
+  cat-dog-baking / ferret と 704×1280。I2V の 50 ステップの通し（同じ opt-in・1280×704・33 フレーム・fit crop）は 2 席とも行を持ち
+  （実用席の行は同じ要求の参照席と 1 bit 以上違う床つき）、行は RTX 3080 Ti だけ。
 - **VAE は常にタイルで decode する**（潜在 16 のタイル・重なり 潜在 4・patchify 空間でブレンドしてから unpatchify — ADR 0121 決定 6。
   1280×704 は 28 枚）: 公式の非タイル decode とは近似の差が出る（段 5 の照合ケース 480×832×9 の観測で比 1.2e-1）。
 - **Wan2.1 と同じもの**: 計測（`gpuTiming`）の device を構築時に拒むこと・DiT 段と VAE 段を同時に常駐させないこと・seed の初期ノイズが
@@ -1110,11 +1111,18 @@ Consequences）。
   - 画像ファイルのデコードはしない（ランタイム依存ゼロ）。受けるのはデコード済みの RGB8 で、色空間の変換もしない。前処理（LANCZOS の縮小と
     切り出し）は Pillow 12.3.0 とビット一致だが、ファイルから RGB8 を作る段は呼び手のもので、参照と同じ入力になるかはそこで決まる
     （`examples/wan` は PNG を Pillow と画素一致で読み、JPEG は復号器の差で少しずれる・EXIF の向きは適用しない — `examples/wan/README.md`）。
-  - 確かめた範囲は事前計算の経路（`textEncoder: "precomputed"`）だけ: 2 ステップ × 9 フレーム（1280×704 で 3 画像・704×1280 で 1 画像）と、
-    50 ステップ × 1280×704×33（2 席とも完走・非有限 0）。GPU の umT5 の経路との組・ブラウザ・RTX 3080 Ti 以外の GPU では回していない。
+  - Deno で確かめた範囲は RTX 3080 Ti の事前計算の経路（`textEncoder: "precomputed"`）だけ: 2 ステップ × 9 フレーム（1280×704 で 3 画像・
+    704×1280 で 1 画像）と、50 ステップ × 1280×704×33（2 席とも sha 行 — 上の sha256 の項）。RTX 3080 Ti 以外の GPU の Deno では回していない。
+    GPU の umT5 の経路との組は、RTX 5070 Ti の Chrome（gpu-lab・2026-10-10）で完走した組だけ: 条件画像 896×1152（縦長）→ 704×1280・fit crop・
+    実用席・20 ステップ・shift 7・自由プロンプトで、33 フレーム（壁 390.0 s・1 ステップ 5.99 s）と 121 フレーム（壁 1,346.5 s・1 ステップ
+    36.05 s）・encoder の段 1.6〜1.7 s。gpu-lab は I2V の行を参照ケースと照合しないので、品質は主張しない。
   - 上流（diffusers の CPU f32）との帯は T2V より広い（step 2 の潜在で 3.5e-3 — T2V は 9.5e-4）。encoder の出口の小さな差を DiT が
     条件のトークンで約 250 倍に増幅するため（参照の条件の潜在に差し替えると T2V の桁に戻る — ADR 0121 追記「段 9b の結果」）。
-  - 実用席の品質（上の A/B 門と視認）は T2V で測った値。I2V で 2 席を比べるのは段 9d。
+  - 実用席の品質（上の A/B 門と視認）は T2V で測った値。I2V の自機 A/B 門（opt-in `KARUME_WAN_TI2V_I2V_FULL=1`・ケース i2v-33f = 1280×704×33・
+    S = 7,920・条件画像 boxing-cats・fit crop — `packages/models/tests/e2e_wan_ti2v_ab_test.ts`）は step 1 の潜在の relRMS 4.6146e-2
+    （2026-10-10・RTX 3080 Ti）・帯 9.3e-2（実測の × 2 を有効数字 2 桁へ切り上げ・床 = 1 bit 以上違う）で、T2V の 33 フレーム（4.39e-2 /
+    帯 8.8e-2）の 1.05 倍。maxAbs（T2V の 2.6 倍）は条件で置き換える前の潜在フレーム 0（出力に届かないフレーム）にある。I2V で 2 席を
+    視認で比べるのは段 9d。
 - **配布形（`karume-wan2.2`）は Hugging Face に未公開**（ADR 0121 の段 8a でローカルミラー `models/karume-wan2.2` を組む recipe ができた —
   `dist.py --pipeline wan-ti2v`）。入口は `WanTi2vPipeline.fromPretrained`（ミラーを渡す）と、系列の容器から組んだ manifest と資産を渡す
   `WanTi2vPipeline.fromAssets`。
