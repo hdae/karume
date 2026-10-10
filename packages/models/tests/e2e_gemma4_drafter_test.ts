@@ -739,12 +739,28 @@ Deno.test({
           report.auxiliaryBytes !== undefined && report.auxiliaryBytes > 0,
           "非投機の会話でも使える補助出力の勘定が落ちている",
         );
+        // 内側の max は公開シナリオに、sequence が流す prefill バケット形（シナリオには並ばない）を
+        // 加えた最大（ADR 0095 追記 2026-10-10 で見積りの仕様が変わった — バケット形の中間は行
+        // ブロックの枚数の境界で prefill 形を上回りうるので、公開シナリオの max だけでは式にならない）。
+        // バケット形の値は「その行数を chunk 長として見積った prefill 形」で採る（同じ束縛・同じ
+        // 計算で、物理行数だけが違う形）。
+        // NOTE: 実資産の gemma4 E2B ではバケット形がピークを支配しないので、この等式は配線を
+        // 判別しない — 配線は gemma4_estimate_test.ts（GPU 無し）が固定する。
+        const { chunkBuckets } = pipeline.program;
+        assert(chunkBuckets.length > 0, "バケットが無い（バケット形の勘定を見ない門になる）");
+        const bucketShapes = chunkBuckets.map((rows) => {
+          const prefill = pipeline.estimateSessionMemory({ chunkLength: rows }).scenarios
+            .find((one) => one.name === "prefill");
+          assert(prefill !== undefined, `バケット ${rows} 行の prefill 形が報告に無い`);
+          return prefill.ioBytes + prefill.workspaceBytes;
+        });
         assertEquals(
           report.peakAccountedBytes,
           report.resident.weights.totalBytes + report.resident.stateBytes +
             Math.max(
               report.planBackingBudgetBytes,
               ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
+              ...bucketShapes,
             ) + report.auxiliaryBytes,
           "drafter合算後も追加勘定とピークの内訳が一致する",
         );

@@ -15,6 +15,7 @@
 // 取らずに回る門だけ。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import type { IrGraph } from "../src/format/ir.ts";
 import { numel, OpContractError } from "../src/ops.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";
@@ -1439,6 +1440,90 @@ Deno.test("1 行でも上限に入らない形は fail loudly（行ブロック�
     ExecutionError,
     "既にストレージ束縛の上限を超える",
   );
+});
+
+// ---------------------------------------------------------------------------
+// prefill バケット形（`chunkBuckets`）のピーク
+// ---------------------------------------------------------------------------
+
+/**
+ * B = H = Hkv = D = 1 の full states attention + `state_append` 2 本。S の 1 行 = 容量 `C` × 4 バイト
+ * だけが動くので、行ブロックの枚数が 1 → 2 に割れる境界を容量 1 本で作れる。
+ */
+const unitStateAttentionGraph = (): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["attention", "state_append"] },
+  symbols: ["M", "C"],
+  inputs: [
+    { name: "q", dtype: "f32", shape: [1, 1, "M", 1] },
+    { name: "k", dtype: "f32", shape: [1, 1, "M", 1] },
+    { name: "v", dtype: "f32", shape: [1, 1, "M", 1] },
+  ],
+  outputs: ["o"],
+  initializers: {},
+  values: { o: { dtype: "f32", shape: [1, 1, "M", 1] } },
+  states: {
+    kslot: { dtype: "f32", shape: [1, 1, "C", 1] },
+    vslot: { dtype: "f32", shape: [1, 1, "C", 1] },
+  },
+  nodes: [
+    {
+      op: "attention",
+      ins: ["q", "k", "v"],
+      outs: ["o"],
+      attrs: { scale: 1 },
+      states: { k: "kslot", v: "vslot" },
+    },
+    { op: "state_append", ins: ["k"], outs: [], attrs: {}, states: { slot: "kslot" } },
+    { op: "state_append", ins: ["v"], outs: [], attrs: {}, states: { slot: "vslot" } },
+  ],
+});
+
+describe("chunkBuckets を渡した見積りのピーク", () => {
+  const MIB = 1024 * 1024;
+  // C = 1,048,576 → S の 1 行 = 4 MiB。束縛上限 128 MiB には 32 行まで入るので、M = 32 は 1 枚
+  // （128 MiB）、M = 33 は 17 + 16 行の 2 枚（広い枚 68 MiB）に割れる — 行数の少ない形のほうが
+  // 一時が大きい（等分の境界）。
+  const estimate = (chunkBuckets?: readonly number[]): AdmissionReport =>
+    openGraph(unitStateAttentionGraph()).estimate({
+      generation: {
+        chunkLength: 33,
+        bindings: { C: 1_048_576 },
+        ...(chunkBuckets === undefined ? {} : { chunkBuckets }),
+      },
+      maxStorageBufferBindingSize: 128 * MIB,
+      maxBufferSize: 256 * MIB,
+      // 予算 0 = ピークはシナリオ側の最大そのもの（予算の項に隠れない形）。
+      planBackingBudgetBytes: 0,
+    });
+  // k / v スロット [1,1,C,1] 各 4,194,304 + 論理長 uniform 8。
+  const STATE_BYTES = 8_388_616;
+
+  describe("バケット形が行ブロック 1 枚に収まり、prefill 形が 2 枚に割れるとき", () => {
+    it("バケット形（M = 32）の io + 中間がピークに立つ", () => {
+      const report = estimate([32]);
+      assertEquals(report.resident.stateBytes, STATE_BYTES);
+      // M = 32: io = q / k / v / o 各 128 = 512。中間 = o 128 + S 32×C×4 = 134,217,728 +
+      // 行統計 32×2×4 = 256（3 本は同じ dispatch の読み書きなので別領域）。
+      assertEquals(report.peakAccountedBytes, STATE_BYTES + 512 + 128 + 134_217_728 + 256);
+    });
+
+    it("公開のシナリオは prefill / decode の 2 本のまま（バケット形を列挙しない）", () => {
+      const { prefill, decode } = bothScenarios(estimate([32]));
+      // M = 33: io = 4×132 = 528。中間 = o 132 + 広い枚の S 17×C×4 = 71,303,168 + 行統計 17×8 = 136
+      // （狭い枚は広い枚の区間を配り直す）。
+      assertEquals(prefill.ioBytes + prefill.workspaceBytes, 528 + 132 + 71_303_168 + 136);
+      // M = 1: io = 4×4 = 16。中間 = o 4 + S C×4 = 4,194,304 + 行統計 8。
+      assertEquals(decode.ioBytes + decode.workspaceBytes, 16 + 4 + 4_194_304 + 8);
+    });
+  });
+
+  describe("バケットを宣言しないとき", () => {
+    it("ピークは prefill 形のまま（宣言していない行数を足さない）", () => {
+      assertEquals(estimate().peakAccountedBytes, STATE_BYTES + 528 + 132 + 71_303_168 + 136);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

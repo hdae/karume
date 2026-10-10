@@ -115,3 +115,22 @@ MUST: Session が backing を退役させるとき、生存中の全 context の
   しか保持しない小さなモデルでも 256 MiB の下限が載る（過大側 — 報告の `planBackingBudgetBytes` で
   引き算できる・[limitations](../limitations.md)）。
 - 予算の既定は定数で device を見ない。4 GB 級端末での増分は最大 256 MiB（見積りに載る）。
+
+## 追記（2026-10-10）— 決定 4 の改定: バケット形は見積りが計算してピークの最大に入れる
+
+決定 4 の「prefill バケット形は見積りのシナリオに列挙しないが予算の内側に入るので、予算で上から
+押さえる」を改める。
+
+- 見積り（`estimateGraphMemory`）は `generation.chunkBuckets` の各物理行数で、prefill / decode と
+  同じ計算をする。その `ioBytes + workspaceBytes` を `peakAccountedBytes` の内側の max に入れる
+  （`max(予算, 最大シナリオ, 最大バケット形)`）。
+- バケット形は `scenarios` に列挙しない。公開の列は prefill / decode と追加シナリオのまま。
+- バケット形が予算の内側で他の形と同時に保持されるぶんは、従来どおり予算の項が上から押さえる。
+- gemma4 の `estimateSessionMemory` は sequence が流すバケット（見積る `chunkLength` 未満の段）を
+  見積りへ渡す。drafter の見積りには渡さない（借り手 context は M = 1 しか流さない）。
+
+なぜ: 予算で押さえる前提は「中間は物理行数 M に単調で、ピークは最大 M の prefill 形にある」だった。
+行ブロック分割（ADR [0060](0060-row-block-attention.md) の等分 — states 形 attention の
+`planStateAttention` も同じ）は、枚数が 1 → 2 に変わる境界で行数の少ない形のほうが一時を多く使う
+ので、この前提が成り立たない。予算がそのバケット形より小さい（予算 0 を含む）と、バケット形が
+勘定から漏れる。許される物理行数を全て計算すれば、分割規則が変わっても仮定に依存しない。

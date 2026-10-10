@@ -459,9 +459,9 @@ backing は flush 後の後始末まで生きる）。**states 形 attention の
 「勘定に入れた分のピーク」= 上限保証ではない。
 
 **slot backing の予算は下限として載る**: `peakAccountedBytes` は `weights + state + max(予算, 最大シナリオ)`
-（ADR [0095](decisions/0095-plan-backing-budget.md) 決定 4）で、既定 256 MiB の予算がシナリオより大きい小さな
-モデルでは、実際に保持する量が数 MiB でも 256 MiB が勘定に載る（過大側）。報告の `planBackingBudgetBytes`
-で引き算できる・`planBackingBudgetBytes: 0` なら従来の `max(シナリオ)` に戻る。
+（ADR [0095](decisions/0095-plan-backing-budget.md) 決定 4・最大シナリオは `generation.chunkBuckets` のバケット形を
+含む — 同 追記 2026-10-10）で、既定 256 MiB の予算がシナリオより大きい小さなモデルでは、実際に保持する量が数 MiB でも
+256 MiB が勘定に載る（過大側）。報告の `planBackingBudgetBytes` で引き算できる・`planBackingBudgetBytes: 0` なら従来の `max(シナリオ)` に戻る。
 
 ## slot backing の予算つき保持: 予算に収まらない形は 1 本だけ保持する・常駐入力の破棄は保持中は拒否される
 
@@ -487,9 +487,11 @@ gemma4 の prefill は chunk ごとに「`queryLength` 以上の最小バケッ�
 - **VRAM の瞬間ピークは見積りの外側で広がる**: slot backing（run の中間バッファ束）はヒット run にしか作られないため、
   末尾 chunk のバケット run の**初回**（ミス run）は保持中の backing が載ったまま arena に一時を確保する。backing は
   バイト予算つきで複数保持する（ADR [0095](decisions/0095-plan-backing-budget.md)・既定 256 MiB）ので、勘定側は
-  `max(予算, 最大シナリオ)`（バケット形はシナリオに列挙しないが予算の内側）、非勘定側の窓は「退役（予算超過 / LRU
-  追い出し）から destroy まで」と「ミス run の arena 一時（最大でバケット形 1 本ぶん）」。見積りのシナリオ自体は
+  `max(予算, 最大シナリオ)`、非勘定側の窓は「退役（予算超過 / LRU 追い出し）から destroy まで」と「ミス run の arena 一時（最大でバケット形 1 本ぶん）」。見積りのシナリオ自体は
   prefill / decode の 2 本のまま。2 ターン目以降はバケット形も decode 形も保持されるので作り直しは起きない（予算内なら）。
+  見積りに `generation.chunkBuckets` を渡すと、バケット形は**シナリオに列挙しないままピークの最大に入る**（行ブロックの
+  等分は枚数の境界で行数の少ない形のほうが一時を多く使うので、prefill 形が最大とは限らない — ADR
+  [0095](decisions/0095-plan-backing-budget.md) 追記 2026-10-10）。gemma4 の `estimateSessionMemory` はバケットを渡す。
 - **16 未満のバケットは K-13 の tiled 経路に乗らない**: states 形 attention の ①ₜ / ③ₜ は M ≥ 16 の計画にしか
   選ばれず、それ未満は参照経路 ① / ③ に落ちる（`stateAttentionReduce: "parallel"` なら ③′・M ≤ 8 なら ①′ も —
   K-14）。値は正しいが遅く、`parallel` × M ∈ [2, 16) で実測があるのは投機の verify 形（M = 4 / 8）だけ。

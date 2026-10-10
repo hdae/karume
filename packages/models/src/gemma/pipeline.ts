@@ -43,6 +43,7 @@ import {
   acquireGpu,
   type AdmissionReport,
   estimateGraphMemory,
+  type EstimateOptions,
   type GenerationContext,
   type GpuContext,
   planWeightResidency,
@@ -486,7 +487,13 @@ export type Gemma4SequenceOptions = {
 export type Gemma4EstimateOptions = {
   /** 見積る容量（省略時はこの pipeline の既定）。 */
   readonly capacity?: number;
-  /** 見積る chunk 長（省略時はこの pipeline が使う値）。 */
+  /**
+   * 見積る chunk 長（省略時はこの pipeline が使う値）。
+   *
+   * 見積りに入るバケット形は、この pipeline の {@link Gemma4PipelineOptions.chunkBuckets} のうち
+   * この値未満の段だけである。pipeline の値より大きくしても、渡すバケットはこの pipeline の梯子の
+   * ままで、その chunk 長で pipeline を組み直したときの梯子には広げない。
+   */
   readonly chunkLength?: number;
 };
 
@@ -787,6 +794,59 @@ export const speculativeSetup = (
     k: state.speculativeK ?? GEMMA4_DRAFT_STEPS,
     policy: enabled === "always" ? "always" : "auto",
     ...(gate === undefined ? {} : { gate }),
+  };
+};
+
+/** {@link gemma4EstimateGenerations} が返す、`estimateGraphMemory` の `generation` 欄 2 本。 */
+export type Gemma4EstimateGenerations = {
+  /** 本体（貸し手）の見積りに渡す指定。 */
+  readonly target: NonNullable<EstimateOptions["generation"]>;
+  /** drafter（借り手 context）の見積りに渡す指定（drafter の無い pipeline では読まない）。 */
+  readonly borrower: NonNullable<EstimateOptions["generation"]>;
+};
+
+/**
+ * {@link Gemma4Pipeline.estimateSessionMemory} が `estimateGraphMemory` へ渡す `generation` の
+ * 指定（chunk 長・バケット・追加シナリオ）を、本体と drafter の 2 本ぶん組む。
+ *
+ * 切り出してあるのは、この配線が実資産の見積り値からは観測できないため — gemma4 E2B の既定の
+ * 構成ではバケット形がピークを支配しないので、配線の行を外しても `peakAccountedBytes` は動かない。
+ *
+ * NOTE: `export` は配線を GPU 無しで直接叩くテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const gemma4EstimateGenerations = (
+  wiring: GenerationWiring,
+  shape: {
+    readonly capacity: number;
+    readonly chunkLength: number;
+    /** 投機の verify が 1 run で流す行数 `k+1`（drafter の無い pipeline では省く）。 */
+    readonly verifyQueryLength?: number;
+  },
+): Gemma4EstimateGenerations => {
+  const bindings = { [wiring.capacitySymbol]: shape.capacity };
+  const verifyQueryLength = shape.verifyQueryLength;
+  return {
+    target: {
+      chunkLength: shape.chunkLength,
+      bindings,
+      // MUST: sequence が流すバケット形を渡す（渡さないと、枚数の境界でバケット形が prefill 形
+      // より大きいときにピークが過小になる — ADR 0095 追記 2026-10-10）。
+      chunkBuckets: wiring.chunkBuckets.filter((bucketRows) => bucketRows < shape.chunkLength),
+      // 投機の verify は `k+1` 行を 1 run で流す形（prefill / decode のどちらでもない）。
+      // R は k+1・物理行数 M は sequence が流す形と同じ（バケットへ丸めた行数 —
+      // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
+      ...(verifyQueryLength === undefined ? {} : {
+        scenarios: [{
+          name: "verify",
+          chunkLength: physicalChunkRows(verifyQueryLength, wiring),
+          bindings: { [wiring.rowSymbol]: verifyQueryLength },
+        }],
+      }),
+    },
+    // 借り手 context は `chunkLength` 1 ちょうど・容量記号は貸し手から継承する。バケットは
+    // 渡さない — 借り手は M = 1 の形しか流さず、受理集合（2 以上 `chunkLength` 未満）も空。
+    borrower: { chunkLength: 1, bindings },
   };
 };
 
@@ -1503,9 +1563,12 @@ class GemmaPipeline {
    * MUST: 返るのは**必要側のカテゴリ別合計だけ**で、空き側との比較も可否判定もしない（同 決定 5）。
    * 判定の最終門は out-of-memory errorScope のままで、この見積りは事前診断である。
    *
-   * NOTE: {@link Gemma4PipelineOptions.chunkBuckets} は見積りを動かさない（欄も持たない）—
-   * 一時領域も入出力も attention の一時も物理行数 `M` に単調で、ピークは最大 `M` = prefill 形に
-   * ある。バケットはその `M` より小さい形を足すだけである。バケット形の backing が decode 形と
+   * NOTE: {@link Gemma4PipelineOptions.chunkBuckets} の各形は `peakAccountedBytes` の最大に入る
+   * が、`scenarios` には並ばない（ADR 0095 追記 2026-10-10）。最大 `M` の prefill 形で代表させない
+   * のは、attention の行ブロック分割が枚数の境界で「行数の少ない形のほうが一時が大きい」を作り、
+   * 中間が物理行数 `M` に単調でないため。見積る `chunkLength` を pipeline の値から変えたときは、
+   * この pipeline のバケットのうちその `chunkLength` 未満の段だけを渡す（バケットの受理集合は
+   * `chunkLength` 未満 — 既定の梯子の切り詰めと同じ規則）。バケット形の backing が他の形と
    * **同時に常駐する**ぶんは、{@link Gemma4PipelineOptions.planBackingBudgetBytes} が
    * `peakAccountedBytes` の片側の項として上から押さえる（ADR 0095 決定 4）。
    *
@@ -1564,26 +1627,18 @@ class GemmaPipeline {
     // state スロット単体の上限は 2 本とも見る（実構築 `GenerationContext.create` と同じ門 —
     // 片方だけ渡すと「起動時には数字が出て最初のターンで落ちる」容量が見積りを通る）。
     const maxBufferSize = gpu.limits.maxBufferSize;
-    // verify の R は k+1・物理行数 M は sequence が流す形と同じ（バケットへ丸めた行数 —
-    // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
-    const rows = (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1;
-    const verifyRows = physicalChunkRows(rows, wiring);
+    const generations = gemma4EstimateGenerations(wiring, {
+      capacity,
+      chunkLength,
+      ...(drafter === undefined
+        ? {}
+        : { verifyQueryLength: (this.#state.speculativeK ?? GEMMA4_DRAFT_STEPS) + 1 }),
+    });
     const baseTarget = estimateGraphMemory(graph, planWeightResidency(graph), {
       // 行数記号 R は run では `last_row` の要素数が束縛する（入力 shape 由来）。見積りは入力を
       // 持たないので R = 1（通常の prefill / decode の形）を明示する。
       bindings: { [wiring.rowSymbol]: 1 },
-      generation: {
-        chunkLength,
-        bindings: { [wiring.capacitySymbol]: capacity },
-        // 投機の verify は `k+1` 行を 1 run で流す形（prefill / decode のどちらでもない）。
-        ...(drafter === undefined ? {} : {
-          scenarios: [{
-            name: "verify",
-            chunkLength: verifyRows,
-            bindings: { [wiring.rowSymbol]: rows },
-          }],
-        }),
-      },
+      generation: generations.target,
       maxStorageBufferBindingSize,
       maxBufferSize,
       ...(this.#state.stateAttentionReduce === undefined
@@ -1609,11 +1664,7 @@ class GemmaPipeline {
       drafter.graph,
       planWeightResidency(drafter.graph),
       {
-        // 借り手 context は `chunkLength` 1 ちょうど・容量記号は貸し手から継承する。
-        generation: {
-          chunkLength: 1,
-          bindings: { [wiring.capacitySymbol]: capacity },
-        },
+        generation: generations.borrower,
         maxStorageBufferBindingSize,
         maxBufferSize,
         ...budget,

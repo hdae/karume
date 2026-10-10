@@ -198,7 +198,8 @@ export type AdmissionReport = {
   readonly auxiliaryBytes?: number;
   /**
    * 常駐の総和 + **保持集合の上限** + 補助資源（= `resident.weights.totalBytes + resident.stateBytes +
-   * max(planBackingBudgetBytes, max(ioBytes + workspaceBytes)) + (auxiliaryBytes ?? 0)`）。
+   * max(planBackingBudgetBytes, max(ioBytes + workspaceBytes)) + (auxiliaryBytes ?? 0)` — 内側の
+   * max はシナリオとバケット形の全体）。
    *
    * **上限保証ではなく「勘定に入れた分のピーク」**を名乗る欄（名前の由来）。シナリオ側を和では
    * なく `max(予算, 最大シナリオ)` で足すのは、Session が抱える slot backing の保持集合が
@@ -209,12 +210,14 @@ export type AdmissionReport = {
    * LRU で残るのとは別の勘定である。
    *
    * 「最大シナリオ」は**追加シナリオも含めた** {@link AdmissionReport.scenarios} 全体の最大
-   * （追加分だけ勘定から漏れると、verify 形が最大のときにピークが過小になる）。
-   *
-   * models 側の prefill バケット形（`chunkBuckets`）は{@link AdmissionReport.scenarios}に
-   * 列挙しないが、予算の内側で同時に保持されうる形なので**予算で上から押さえる**（過大側へ
-   * 倒す — 「勘定に入れた分のピーク」の意味論はそのまま）。退役から実際の `destroy()` までの窓と、
-   * 予算は各 backing の領域 + 所有する入力バッファを勘定する（診断の `residentBytes + inputBytes`）。
+   * （追加分だけ勘定から漏れると、verify 形が最大のときにピークが過小になる）に、
+   * `generation.chunkBuckets` の各物理行数で同じ計算をした形（バケット形）を加えた最大。
+   * バケット形は {@link AdmissionReport.scenarios} に列挙しない（公開の列は prefill / decode と
+   * 追加シナリオのまま）。最大 M の prefill 形で代表させないのは、行ブロックの等分が枚数の
+   * 境界で「行数の少ない形のほうが一時が大きい」を作り、中間が M に単調でないため。
+   * バケット形が予算の内側で他の形と同時に保持されるぶんは、予算の項が上から押さえる（過大側へ
+   * 倒す — 「勘定に入れた分のピーク」の意味論はそのまま）。予算は各 backing の領域 + 所有する
+   * 入力バッファを勘定する（診断の `residentBytes + inputBytes`）。
    */
   readonly peakAccountedBytes: number;
   /** 勘定に入っていないもの（見積りが絶対保証でないことを形式が認める欄 — ADR 0070 決定 5）。 */
@@ -734,7 +737,8 @@ const transientSlotBytes = (
  *   `resident.stateBytes` は 0・シナリオは `"run"` の 1 本（states 形グラフでは省略できない —
  *   中間ピークの計画がスロットの解決済み shape を要求する）。渡すとシナリオは
  *   `"prefill"` / `"decode"` の 2 本になり、`generation.scenarios` を足すとその後ろに宣言順で
- *   並ぶ（{@link AdmissionScenarioSpec}）。
+ *   並ぶ（{@link AdmissionScenarioSpec}）。`generation.chunkBuckets` の各形はシナリオに並べず、
+ *   {@link AdmissionReport.peakAccountedBytes} の最大にだけ入る。
  * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
  *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。
  * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
@@ -800,14 +804,6 @@ export const estimateGraphMemory = (
     );
   }
   // ADR 0066 決定 4 の実行 2 形をそれぞれ独立に計算する（chunk 行だけが違う同じグラフ）。
-  // NOTE: `chunkBuckets`（追記〈バケット〉）はシナリオを増やさない。バケットが変えるのは物理
-  // chunk 行数 M だけで、一時領域・入出力・attention の S 一時はいずれも M に単調なので、
-  // ピークは必ず最大 M = chunkLength の prefill 形にある。ただし「バケット形と prefill 形が
-  // 同時に載らない」とまでは言えない — backing は予算内なら複数保持されるので、バケット形と
-  // prefill 形が同時に常駐しうる（ADR 0095 決定 1）。その同時分は `peakAccountedBytes` が
-  // シナリオの max ではなく `max(予算, 最大シナリオ)` を載せることで上から押さえてある
-  // （欄の doc）。予算超過 / LRU 追い出しで退役した実体が destroy までの窓で残る点だけが
-  // 非勘定側に残る。
   const plans: [name: string, bindings: SymbolBindings][] = chunkLength === undefined
     ? [["run", bindings]]
     : [
@@ -849,7 +845,22 @@ export const estimateGraphMemory = (
     }
   }
 
-  const scenarios = plans.map(([name, scenarioBindings]): AdmissionScenario => {
+  // `chunkBuckets`（ADR 0066 追記〈バケット〉）の各形はピークにだけ入れる内部の計画で、公開の
+  // シナリオには並べない（名前で引く呼び手の列を動かさない — ADR 0095 追記 2026-10-10）。
+  // MUST: ピークを最大 M の prefill 形だけで代表させない。行ブロックの等分（planRowBlocks）は
+  // 枚数が 1 → 2 に変わる境界で行数の少ない形のほうが一時を多く使う（例: 1 枚 32 行の
+  // 128 MiB に対し 33 行は 17 + 16 行の 2 枚で約 68 MiB）ので、中間は M に単調でない。許される
+  // 物理行数を全て計算して最大を取れば、分割規則が変わっても仮定が崩れない。
+  const buckets: [name: string, bindings: SymbolBindings][] = (generation?.chunkBuckets ?? []).map(
+    (rows) => {
+      const name = `bucket ${rows}`;
+      return [name, bindChunkRows(bindings, chunkDims, rows, name)];
+    },
+  );
+
+  const estimateScenario = (
+    [name, scenarioBindings]: [name: string, bindings: SymbolBindings],
+  ): AdmissionScenario => {
     // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
     // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。シナリオごとに解決値が変わるので
     // 照合もシナリオごと。
@@ -874,11 +885,14 @@ export const estimateGraphMemory = (
         stateAttentionReduce,
       ),
     };
-  });
+  };
+  const scenarios = plans.map(estimateScenario);
 
   const weightBytes = weights.compressed + weights.uncompressed + weights.expanded;
   const peakScenarioBytes = Math.max(
-    ...scenarios.map((scenario) => scenario.ioBytes + scenario.workspaceBytes),
+    ...[...scenarios, ...buckets.map(estimateScenario)].map((scenario) =>
+      scenario.ioBytes + scenario.workspaceBytes
+    ),
   );
   return {
     resident: {
