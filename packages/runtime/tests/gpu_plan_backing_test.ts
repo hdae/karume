@@ -14,7 +14,9 @@
 // ピークは生まれない）が崩れる。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
+import { describe, it } from "@std/testing/bdd";
 import { acquireGpu } from "../src/gpu/device.ts";
+import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
 import {
   createSessionFromContainer,
@@ -22,9 +24,11 @@ import {
   type Session,
   type Tensor,
 } from "../src/runtime/executor.ts";
+import { ExecutionError } from "../src/runtime/plan.ts";
 import type { PlanBackingStats } from "../src/runtime/session-types.ts";
 import { type DeclarationJson, f32Bytes, fill, openGraphModel } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { injectOutOfMemory } from "./helpers/oom-injection.ts";
 
 /** y = silu(x·w + b)（x: [T,3] → y: [T,2]）。末尾 2 ノードが silu 融合に掴まれる。 */
 const GRAPH: DeclarationJson = {
@@ -850,4 +854,184 @@ Deno.test({
   name: "予算超過の退役は最も古く使われた 1 本（直前に触った T=9 が残る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertLruOrder(9),
+});
+
+// batch の失敗決着（ADR 0095 決定 2 の batch 版）。非致命 OOM（`createBuffer` が無効なバッファを
+// 返すだけで例外にならない）は enqueue を成功させたまま、`finish()` の errorScope で初めて
+// 判明する。決着で退役させないと、壊れた backing が保持集合に居座り、同じ形の次の batch / run が
+// メモリが空いた後も作り直さずに再利用し続ける。
+//
+// 計画の導出は前置きの run で済ませておく（enqueue の導出が作る params も storage を使うので、
+// 同じ記録に混ざると「backing の実体がちょうど 1 回返る」の勘定が崩れる）。
+describe("batch の finish で GPU 失敗（非致命 OOM）が判明したとき（注入・実 GPU）", () => {
+  it(
+    "その batch が新規構築した backing は退役してちょうど 1 回返り、次の batch が同じ形を作り直す",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      const storage = injectStorageFault(gpu.device);
+      const oom = injectOutOfMemory(gpu.device);
+      try {
+        storage.record();
+        await session.run({ x: input(4, 0) });
+
+        const built = storage.record();
+        const failed = await gpu.beginBatch();
+        await session.enqueue({ x: input(4, 0) }, { batch: failed });
+        assertEquals(
+          session.diagnostics().planBacking.buildCount,
+          1,
+          "enqueue が backing を作っていない",
+        );
+        oom.arm();
+        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
+        assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
+        assertEquals(
+          session.diagnostics().planBacking,
+          expectStats([], 1),
+          "失敗で決着した batch の backing が保持集合に残っている",
+        );
+        // 旧 backing の VRAM は作り直しより**前**に返る（破棄は Session の直列化鎖に積まれ、
+        // 後続の enqueue の後始末に便乗しない）。鎖を 1 本だけ進めるため、束縛の解決で落ちる
+        // run を流す — 鎖の上で走るが、破棄待ちにも backing にも触れずに落ちる。
+        await assertRejects(
+          () => session.run({ x: { dtype: "f32", shape: [4, 5], data: new Float32Array(20) } }),
+          ExecutionError,
+        );
+        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assertEquals(
+          built.destroyCounts,
+          Array(built.destroyCounts.length).fill(1),
+          "失敗で決着した batch の backing を、直列化鎖の 1 本目で返していない",
+        );
+
+        storage.record();
+        const retry = await gpu.beginBatch();
+        await session.enqueue({ x: input(4, 1) }, { batch: retry });
+        await retry.finish();
+        assertEquals(
+          session.diagnostics().planBacking.buildCount,
+          2,
+          "失敗した batch の backing を作り直さずに再利用している",
+        );
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          "失敗した batch と無関係な（先行 run が登録した）計画まで捨てている",
+        );
+        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assertEquals(
+          built.destroyCounts,
+          Array(built.destroyCounts.length).fill(1),
+          "退役した backing の実体がちょうど 1 回ずつ返っていない",
+        );
+
+        // 作り直した backing の上のヒット run は、非 backed 実行とビット一致する。
+        const actual = (await session.run({ x: input(4, 2) }))["y"];
+        assertEquals(session.diagnostics().planBacking.buildCount, 2);
+        assertEquals(bits(actual), bits(await runFresh(gpu, { x: input(4, 2) })));
+      } finally {
+        oom.restore();
+        storage.restore();
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
+
+  it(
+    "既存の backing に当たっただけの batch の失敗では退役させない（再構築のスラッシングを起こさない）",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      const storage = injectStorageFault(gpu.device);
+      const oom = injectOutOfMemory(gpu.device);
+      try {
+        storage.record();
+        await session.run({ x: input(4, 0) });
+
+        const built = storage.record();
+        const first = await gpu.beginBatch();
+        await session.enqueue({ x: input(4, 0) }, { batch: first });
+        await first.finish();
+        const retained = session.diagnostics().planBacking;
+        assertEquals(retained.buildCount, 1);
+
+        storage.record();
+        const failed = await gpu.beginBatch();
+        await session.enqueue({ x: input(4, 1) }, { batch: failed });
+        oom.arm();
+        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
+        assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
+
+        const next = await gpu.beginBatch();
+        await session.enqueue({ x: input(4, 2) }, { batch: next });
+        await next.finish();
+        assertEquals(
+          session.diagnostics().planBacking,
+          retained,
+          "既存の backing を無関係な失敗で退役させている",
+        );
+        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assertEquals(
+          built.destroyCounts,
+          Array(built.destroyCounts.length).fill(0),
+          "保持中の backing の実体を破棄している",
+        );
+      } finally {
+        oom.restore();
+        storage.restore();
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
+});
+
+// 区間本体（errorScope の検査）は通り、ある enqueue のホスト側の失敗（入力の誤り）だけで決着した
+// batch。同じ区間の別の enqueue が作った backing は有効なので、決着で退役させない — 退役させると
+// 無関係な入力の誤りのたびに backing を作り直すことになる（ADR 0095 決定 2 が避けている形）。
+describe("ホスト側の失敗だけで batch が失敗に決着したとき（実 GPU）", () => {
+  it("同じ区間の別の enqueue が新規構築した backing は保持したまま残す", {
+    ignore: !GPU_AVAILABLE,
+  }, async () => {
+    const gpu = await acquireGpu();
+    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+    const storage = injectStorageFault(gpu.device);
+    try {
+      storage.record();
+      await session.run({ x: input(4, 0) });
+
+      const built = storage.record();
+      const batch = await gpu.beginBatch();
+      await session.enqueue({ x: input(4, 0) }, { batch });
+      // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる（backing の構築より前）。
+      const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
+      await assertRejects(() => session.enqueue({ x: wrongCount }, { batch }), ExecutionError);
+      await assertRejects(() => batch.finish(), ExecutionError);
+
+      const stats = session.diagnostics().planBacking;
+      assertEquals(
+        [stats.retainedCount, stats.buildCount],
+        [1, 1],
+        "ホスト側の失敗だけの決着で、別の enqueue が作った backing を退役させている",
+      );
+      assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+      assertEquals(
+        built.destroyCounts,
+        Array(built.destroyCounts.length).fill(0),
+        "保持中の backing の実体を破棄している",
+      );
+    } finally {
+      storage.restore();
+      await session.dispose();
+      gpu.destroy();
+    }
+  });
 });

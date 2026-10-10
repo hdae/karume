@@ -30,6 +30,7 @@ import { groupScaleShape } from "../format/container/codecs.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
+  type BatchFailureOrigin,
   type BatchReadSource,
   BatchScopeError,
   type GpuContext,
@@ -540,6 +541,27 @@ type ActiveBacking = {
 };
 
 /**
+ * 1 実行単位（enqueue 1 本）が Session の保持集合へ**新しく足したもの**。
+ *
+ * WebGPU の確保失敗（非致命 OOM）は例外にならず、backing は同期的に「作れた」時点で保持集合へ
+ * 載る。enqueue の GPU 側の失敗が判明するのは batch の `finish` の errorScope なので、その決着まで
+ * 「この単位が足したもの」を持ち越し、区間本体が失敗したら退役させる
+ * （{@link Session.#retireBuiltBackings} — ADR 0095 決定 2 の batch 版）。既存の backing は残す
+ * （無関係な失敗で再構築のスラッシングを起こさない）。
+ *
+ * MUST: 照合は世代番号 {@link ActiveBacking.build} で行う。キーで照合した場合と結果が分かれるのは、
+ * batch の失敗決着より先に後続の run が同じキーを作り直したとき（区間ロックの解放と finalizer の
+ * 前後が microtask の段数で決まる競合）だけで、キー照合だとその run が作った有効な別世代まで
+ * 退役させる。同じ失敗した batch の中での作り直しは、作り直した側の記録も退役させるので結果は
+ * 変わらない。つまりこれは到達しにくい競合への防御である。
+ */
+type CacheAdditions = {
+  readonly backings: { readonly key: string; readonly build: number }[];
+};
+
+const emptyAdditions = (): CacheAdditions => ({ backings: [] });
+
+/**
  * 読み戻し 1 本ぶんの staging と、ホストの {@link Tensor} へ組み直すのに要る宣言情報。
  * 積む先（run 本体のコマンド列 / readback 専用 encoder）に依らず同じ形で持つ。
  */
@@ -999,6 +1021,17 @@ export class Session {
         release: () => lease.releaseRun(),
       });
     }
+    // この enqueue が新規構築した backing（本体が埋める）。GPU 側の失敗は enqueue の
+    // 戻りではなく `finish()` の errorScope で初めて判明するので、退役は区間の失敗決着に
+    // 接続する（run の catch と同じ規律 — ADR 0095 決定 2）。
+    // MUST: 登録は lease の有無に依らず**受理の同期区間**で行う（finalizer は受理時にしか
+    // 登録できない — 本体で登録すると「未 await の enqueue → finish()」で拒否される）。
+    const additions = emptyAdditions();
+    batch.onSettled({
+      complete: () => undefined,
+      fail: (_cause, origin) => this.#rollbackSettled(additions, origin),
+      release: () => undefined,
+    });
     if (read !== undefined) {
       // MUST: 決着まで同じ Session の後続 enqueue を拒む（読む slot の上書きを塞ぐ）。解除は
       // 区間の決着（成否によらず release）— リースの finalizer と同じ時点。
@@ -1020,7 +1053,7 @@ export class Session {
       // 「undefined が投げられた」を区別するため。
       let failure: { readonly cause: unknown } | undefined;
       try {
-        finalize = await this.#enqueueOnce(captured, capturedOptions, read);
+        finalize = await this.#enqueueOnce(captured, capturedOptions, read, additions);
       } catch (cause) {
         failure = { cause };
         throw cause;
@@ -1738,6 +1771,7 @@ export class Session {
     captured: CapturedInputs,
     options: EnqueueOptions,
     read: PromiseWithResolvers<RunOutputs> | undefined,
+    additions: CacheAdditions,
   ): Promise<{ complete(): void; fail(cause: unknown): void } | undefined> {
     const { graph, scheduler } = this.#state;
     // 受け口の検査とリース取得は {@link Session.enqueue} の同期区間で済んでいる（本体で
@@ -1754,7 +1788,6 @@ export class Session {
     let stateWriteSubmits: number | undefined;
     const { residentInputs } = captured;
 
-    let builtBacking: string | undefined;
     let reads: readonly PlannedRead[] | undefined;
     try {
       let recipes: readonly StepRecipe[];
@@ -1781,7 +1814,9 @@ export class Session {
       );
       const copies = this.#planCopyOutputs(options.copyOutputs, shapes);
       const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
-      builtBacking = activated.built ? activated.backing.key : undefined;
+      if (activated.built) {
+        additions.backings.push({ key: preparedKey, build: activated.backing.build });
+      }
       // MUST: 写し元の解決（実体に依存する検査）は dispatch を 1 本も積む前に済ませる。
       const writes = this.#resolveCopyOutputs(copies, activated.backing);
       // MUST: 読み戻す出力の解決（実体に依存する検査）も dispatch を 1 本も積む前に済ませる。
@@ -1846,7 +1881,10 @@ export class Session {
       // MUST: 失敗した enqueue の残 pending は submit せずに捨てる（run と同じ規律）。
       scheduler.discard();
       this.#poisonOnStateWrite(generation, stateWriteSubmits, cause);
-      if (builtBacking !== undefined) this.#retireBacking(builtBacking);
+      // この enqueue が新規構築した backing はホスト側の失敗でもこの場で退役させる（run と同じ
+      // 規律 — discard 済みなので破棄まで進めてよい）。GPU 側の失敗は区間の失敗決着
+      // （{@link Session.#rollbackSettled}）が同じ記録から退役させる。
+      this.#retireBuiltBackings(additions);
       this.#destroyRetired();
       throw cause;
     }
@@ -2097,9 +2135,48 @@ export class Session {
   }
 
   /**
+   * 失敗した実行単位が新規構築した backing を破棄待ちへ移す（ADR 0095 決定 2）。破棄
+   * （{@link Session.#destroyRetired}）は呼び手が安全な点で行う。
+   *
+   * MUST: 世代番号が一致するときだけ退役させる（{@link CacheAdditions} の照合 — 到達しにくい
+   * 競合で同じキーに作り直された別世代を誤って退役させない）。
+   */
+  #retireBuiltBackings(additions: CacheAdditions): void {
+    for (const { key, build } of additions.backings) {
+      if (this.#backings.get(key)?.build === build) this.#retireBacking(key);
+    }
+  }
+
+  /**
+   * batch の失敗決着での退役（enqueue が受理時に登録する finalizer の `fail`）。
+   *
+   * 非致命 OOM は enqueue を成功させたまま `finish()` の errorScope で初めて判明するので、
+   * enqueue 本体の catch（ホスト側の失敗だけを見る）では退役させられない。退役させるのは区間本体が
+   * 失敗したとき（`origin === "gpu"` — {@link BatchFailureOrigin}）だけ。ホスト側の失敗だけで
+   * 決着した batch では作れた backing は有効（ホスト側で落ちた enqueue 自身が新規構築した
+   * backing は、その catch が既に退役させている）。
+   * MUST: ここで destroy しない。決着の時点では、同じ Session の後続 run が区間ロックの解放を
+   * 受けて既にエンコードを始めていてもよく（決着と後続の開始の前後は microtask の段数で決まる
+   * だけ）、その run が掴んだ backing を未 submit のまま破棄すると ADR 0004 の
+   * flush-before-destroy が崩れる。破棄は Session の直列化鎖に 1 本積む — 鎖の各本体は
+   * submit / discard を済ませて抜けるので、鎖の上の破棄は「未 submit のエンコードが無い点」に
+   * なる。破棄の担い手は従来どおり {@link Session.#destroyRetired} 1 本のまま。
+   */
+  #rollbackSettled(additions: CacheAdditions, origin: BatchFailureOrigin): void {
+    if (origin !== "gpu") return;
+    this.#retireBuiltBackings(additions);
+    if (this.#retired.length === 0) return;
+    void this.#serialize(() => {
+      this.#destroyRetired();
+      return Promise.resolve();
+    });
+  }
+
+  /**
    * ヒット run の slot backing を活性化する（保持していればそれ・無ければ予算内に収めてから構築 —
    * 別 signature は予算内なら**追加**、超過なら古い順に退役させてから確保）。
-   * `built` は「この run が新規構築したか」— 失敗時の回復規律（{@link Session.#runOnce}）が読む。
+   * `built` は「この run / enqueue が新規構築したか」— 失敗時の回復規律（run の catch・enqueue の
+   * catch と batch の失敗決着 — {@link Session.#retireBuiltBackings}）が読む。
    *
    * MUST: 呼ぶのは run の `withScopeLock` / errorScope 区間の内側か、enqueue が属する batch の
    * 区間（batch が握る区間ロック / errorScope）の内側だけ。createBuffer は上限超過で

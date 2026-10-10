@@ -814,10 +814,25 @@ export type BatchMember = {
   discardMeasurementWindow(): void;
 };
 
+/**
+ * batch の失敗の出どころ（{@link BatchFinalizer.fail} の第 2 引数）。
+ *
+ * - `"gpu"`: 区間本体（errorScope の検査・完了フェンス・読み戻し）が失敗した。errorScope が
+ *   GPU 側の失敗を報告したときのほか、検査より前に落ちて scope を検査せずに捨てたとき・device
+ *   消失を含む — どれも「区間で作った資源が有効だった」と確かめられていない。
+ * - `"host"`: 区間本体は失敗を報告せずに通り、enqueue 本体のホスト側の失敗
+ *   （{@link BatchInternals.leave}）か finalizer の失敗で決着した。区間で作った資源は有効。
+ *
+ * 分けるのは、確保が非致命 OOM で無効だった資源の巻き戻し（`Session` の
+ * `#rollbackSettled`）が `"gpu"` のときだけ要るため。ホスト側の失敗でも巻き戻すと、何度でも
+ * 同じく落ちる失敗のたびに作り直しが起きる。
+ */
+export type BatchFailureOrigin = "gpu" | "host";
+
 /** バッチの成功判定後に状態を確定し、成否によらず使用予約を返す。 */
 type BatchFinalizer = {
   complete(): void;
-  fail(cause: unknown): void;
+  fail(cause: unknown, origin: BatchFailureOrigin): void;
   release(): void;
 };
 
@@ -1319,6 +1334,9 @@ export class BatchScope {
    */
   async #resolveFinish(): Promise<void> {
     let failure: { readonly cause: unknown } | undefined;
+    // 区間本体が失敗したときだけ "gpu"（{@link BatchFailureOrigin}）。以後に決まる失敗
+    // （記録したホスト側の失敗・finalizer の失敗）は "host" のまま。
+    let origin: BatchFailureOrigin = "host";
     try {
       try {
         await this.#completion;
@@ -1327,6 +1345,7 @@ export class BatchScope {
           cause.cause = this.#failure.cause;
         }
         failure = { cause };
+        origin = "gpu";
       }
       failure ??= this.#failure;
       if (failure === undefined) {
@@ -1340,7 +1359,7 @@ export class BatchScope {
         if (failure === undefined) return;
         for (const finalizer of this.#finalizers) {
           try {
-            finalizer.fail(failure.cause);
+            finalizer.fail(failure.cause, origin);
           } catch { /* 元の失敗を保持し、残る使用予約も返す。 */ }
         }
       };

@@ -51,4 +51,4 @@ export {
   RUNTIME_INTERNAL,
   SHADER_F16_FEATURE,
 } from "./context.ts";
-export type { BatchMember, BatchReadSource, ResidentData } from "./context.ts";
+export type { BatchFailureOrigin, BatchMember, BatchReadSource, ResidentData } from "./context.ts";

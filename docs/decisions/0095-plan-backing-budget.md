@@ -134,3 +134,31 @@ MUST: Session が backing を退役させるとき、生存中の全 context の
 `planStateAttention` も同じ）は、枚数が 1 → 2 に変わる境界で行数の少ない形のほうが一時を多く使う
 ので、この前提が成り立たない。予算がそのバケット形より小さい（予算 0 を含む）と、バケット形が
 勘定から漏れる。許される物理行数を全て計算すれば、分割規則が変わっても仮定に依存しない。
+
+## 追記（2026-10-10）: batch の GPU 側の失敗でも、その enqueue が新規構築した backing を退役させる
+
+決定 2（失敗した実行が新規構築した 1 本だけを退役させる）を batch に揃える。非致命 OOM
+（`createBuffer` が無効なバッファを返すだけで例外にならない）は enqueue を成功させたまま
+`finish()` の errorScope で初めて判明するので、enqueue 本体の catch（ホスト側の失敗でその場で
+退役させる — 従来どおり）では拾えない。
+
+- enqueue は新規構築した backing をキーと世代番号 `build` で記録し、受理時に失敗決着の finalizer を
+  登録する（generation の lease の有無に依らない）。
+- 退役させるのは区間本体が失敗したとき（`BatchFailureOrigin` の `"gpu"` — errorScope が失敗を
+  報告した・scope を検査せずに捨てた・device 消失）だけ。区間本体が通り、ある enqueue のホスト側の
+  失敗だけで決着した batch では退役させない（他の enqueue が作った backing は有効。ホスト側で落ちた
+  enqueue 自身の backing はその catch が退役させている）。
+- MUST: 世代番号が一致するときだけ退役させる。キーで照合した場合と結果が分かれるのは、batch の
+  失敗決着より先に後続の run が同じキーを作り直した競合（区間ロックの解放と finalizer の前後が
+  microtask の段数で決まる）だけで、到達しにくい競合への防御である。
+- MUST: batch の失敗決着では destroy しない。退役した実体は破棄待ちへ移し、破棄は Session の
+  直列化鎖に積んだ 1 本で `#destroyRetired` が行う。決着の時点では後続 run が既にエンコードを
+  始めていてよく、鎖の各本体は submit / discard を済ませて抜けるので、鎖の上が「未 submit の
+  エンコードが無い点」になる（ADR 0004 の flush-before-destroy）。旧 backing の VRAM は鎖の
+  1 本目で返るので、`finish()` の決着を受けてから発行した後続の enqueue では、作り直すより前に
+  返る。決着を待たずに発行した後続の enqueue との前後は保証しない（区間ロックの解放と finalizer の
+  前後が microtask の段数で決まる — 上の世代番号と同じ到達しにくい競合として扱う）。
+- 門: `gpu_plan_backing_test.ts`（batch の GPU 側の失敗で新規構築の backing だけ退役し、直列化鎖の
+  1 本目でちょうど 1 回返り、次の batch で作り直す・既存 backing に当たった失敗では作り直さない・
+  ホスト側の失敗だけの決着では別の enqueue が作った backing を残す）。GPU 側の失敗は errorScope の
+  pop に OOM を注入して作る（`tests/helpers/oom-injection.ts`）。
