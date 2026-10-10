@@ -1,9 +1,10 @@
-# Wan text-to-video demo
+# Wan text- and image-to-video demo
 
 A one-shot command line for two Wan pipelines: Wan2.1 T2V 1.3B (`WanPipeline`, the default) and
-Wan2.2 TI2V 5B (`WanTi2vPipeline`, `--generation wan2.2`). One prompt in, one clip out as numbered
-PNG frames. It is the worked example for `fromPretrained`, `prompts`, `generate` and
-`wanFrameToRgba`. Both generations run text-to-video only; image-to-video is not supported yet.
+Wan2.2 TI2V 5B (`WanTi2vPipeline`, `--generation wan2.2`). One prompt in (for Wan2.2, optionally
+with an image), one clip out as numbered PNG frames. It is the worked example for `fromPretrained`,
+`prompts`, `generate` and `wanFrameToRgba`. Wan2.1 runs text-to-video only; Wan2.2 also runs
+image-to-video with `--image` (see [Image to video](#image-to-video)).
 Everything below describes Wan2.1 unless it says otherwise; [Wan2.2 TI2V 5B](#wan22-ti2v-5b) lists
 what differs for the second generation.
 
@@ -13,6 +14,7 @@ deno task demo:wan --prompt "A red fox trots through fresh snow at sunrise." --s
 deno task demo:wan --text-encoder precomputed --prompt ferret --seed 7 --frames 17 --size 480x832
 deno task demo:wan --quant f16 --prompt boxing-cats --seed 42
 deno task demo:wan --generation wan2.2
+deno task demo:wan --generation wan2.2 --image photo.png --prompt "The cat starts to dance."
 ```
 
 `--generation` takes `wan2.1` (default) or `wan2.2`; any other value is rejected. The script needs
@@ -188,14 +190,16 @@ encoder and the int8 quants have not been run in Chrome yet for Wan2.1; for Wan2
 
 `--generation wan2.2` runs `WanTi2vPipeline` instead of `WanPipeline`. The source, text encoder,
 swap, quant and knob flags and the output naming work as described above; only the defaults and the
-accepted values below differ. `--source` must point at a distribution of the chosen generation: the
-pipeline rejects a manifest whose pipeline does not match (`wan/1` for Wan2.1, `wan-ti2v/1` for
-Wan2.2).
+accepted values below differ, and `--image` and `--fit` exist only here
+([Image to video](#image-to-video)). `--source` must point at a distribution of the chosen
+generation: the pipeline rejects a manifest whose pipeline does not match (`wan/1` for Wan2.1,
+`wan-ti2v/1` for Wan2.2).
 
 ```
 deno task demo:wan --generation wan2.2
 deno task demo:wan --generation wan2.2 --size 704x1280 --frames 49
 deno task demo:wan --generation wan2.2 --quant f16+dit8
+deno task demo:wan --generation wan2.2 --image photo.jpg --fit stretch
 ```
 
 ### Where the model comes from
@@ -216,8 +220,9 @@ The all-zero revision is a placeholder for the development mirror until `karume-
 published; a local reader resolves the reference through the explicit mapping and does not look at
 the revision.
 
-The distribution itself holds 6.714 GiB of weights, the int8 transformer (4.67 GiB) and the two f16
-VAE graphs, plus 12 MiB of assets.
+The distribution itself holds 6.814 GiB of weights: the int8 transformer (4.67 GiB), the two f16
+VAE decoder graphs (2.04 GiB) and the three f16 VAE encoder graphs that image-to-video uses
+(103 MiB), plus 13 MiB of assets.
 Its text encoder is the same cross-repository reference to the shared `karume-umt5-xxl`
 distribution (5.296 GiB), so `--umt5-source` and `--text-encoder precomputed` behave as for
 Wan2.1. The precomputed text-embedding asset and the tokenizer are byte-identical to Wan2.1's, so
@@ -235,17 +240,67 @@ There is no `f16` quant for Wan2.2.
 
 Steps, guidance and flow shift default to 50, 5.0 and 5.0 (the distribution's `pipelineConfig`).
 `--size` accepts `1280x704` or `704x1280`, and `--frames` accepts 4n+1 between 5 and 121 (the
-official default length). The default clip is 1280×704 × 33 frames, played at 24 fps.
+official default length). The default clip is 1280×704 × 33 frames, played at 24 fps; with
+`--image` and no `--size`, the size follows the image (below).
+
+### Image to video
+
+`--image <path>` conditions the clip on an image, which becomes its first frame: the first output
+frame is the image, fitted to the output size (below), after a round trip through the VAE (encoded,
+then decoded), and the rest of the clip continues from it. The prompt still describes the clip. In
+code this is
+`generate({ image, fit })`; `@karume/models` takes RGB pixels (`Rgb8Image`) and does not decode
+image files, so the script decodes the file itself.
+
+```
+deno task demo:wan --generation wan2.2 --image photo.png --prompt "The cat starts to dance."
+deno task demo:wan --generation wan2.2 --image photo.jpg --fit stretch --size 704x1280
+```
+
+- **Size.** Without `--size`, the pipeline picks the accepted size closest to the image's aspect
+  ratio: 1280×704 for an image at least as wide as it is tall, 704×1280 otherwise. `--size` picks
+  one of the two explicitly. The official Wan2.2 code picks a free size under an area limit instead
+  (for example 1248×704 for a 16:9 image), so the same image can lose more to cropping here.
+- **`--fit`** says how the image is fitted to that size. `crop` (the pipeline's default, as in the
+  official Wan2.2 image-to-video) scales the image with Lanczos until it covers the size, keeping
+  its aspect ratio, and cuts out the center. `stretch` (as in Diffusers' `WanImageToVideoPipeline`)
+  scales it straight to the size, so the aspect ratio changes.
+- **Rejected combinations.** `--generation wan2.1` rejects `--image` and `--fit`, and `--fit`
+  without `--image` is rejected, before anything is loaded.
+- **Formats.** PNG with 8-bit RGB, RGBA, gray or gray with alpha; palette PNG at any index depth
+  (except interlaced palette images below 8 bits); and 8-bit JPEG (baseline, progressive, grayscale,
+  RGB-coded and Adobe CMYK). The format is detected from the file's first bytes, not from its
+  extension. 16-bit PNG, gray PNG below 8 bits, 12-bit JPEG, other formats such as GIF or WebP, and
+  damaged or truncated files fail with an error that names the accepted formats.
+- **Decoders.** The script uses two pure-JavaScript packages, [fast-png](https://www.npmjs.com/package/fast-png)
+  for PNG and [jpeg-js](https://www.npmjs.com/package/jpeg-js) for JPEG. They are dependencies of
+  the examples only; the Karume packages do not depend on them.
+- **PNG is exact, JPEG is not.** The reference (the official `generate.py`) reads the image with
+  Pillow's `Image.open(path).convert("RGB")`. For PNG, the decoded pixels are identical to Pillow's.
+  For JPEG they differ slightly: Pillow decodes with libjpeg-turbo, which interpolates the
+  half-resolution color planes of a 4:2:0 JPEG, while jpeg-js repeats the nearest sample. On an
+  832×480 test image saved at quality 90, the values differed by 1.3 levels on average and by up to
+  90 levels at sharp color edges. The same JPEG therefore does not give a bit-identical clip to the
+  reference; use PNG when the result has to match it.
+- **Alpha is dropped**, not composited over a background, as `convert("RGB")` does.
+- **The EXIF orientation is not applied**, as in the official `generate.py`, which does not call
+  `ImageOps.exif_transpose`. A photo stored sideways with an orientation tag stays sideways; rotate
+  the pixels before passing it.
 
 ### Output
 
 Frames go to
 `outputs/examples/wan2.2-ti2v-5b/wan-<quant>-<prompt>-<route>-<W>x<H>-<frames>f-<steps>step-seed<seed>/frame-NN.png`,
-with the same naming rules as for Wan2.1.
+with the same naming rules as for Wan2.1. With `--image`, `-img-<hash>` follows `<route>`: the first
+eight hex digits of the SHA-256 of the image file's bytes, followed by `-<fit>` only when `--fit` is
+given. Without `--fit` the name carries no fit, because the default is the pipeline's and the script
+does not copy it; a run with `--fit crop` and one without `--fit` therefore write to different
+directories.
 
-On the development GPU, an NVIDIA GeForce RTX 3080 Ti, under Deno, with the default quant and the
-precomputed embeddings at 1280×704 × 33 frames and 50 steps, a clip took 753 to 792 s (transformer
-556 to 593 s, VAE 197 to 199 s). The whole GPU peaked at 7,935 to 8,047 MiB (`nvidia-smi`). These are
+The figures below were measured with text to video; with this script, image to video has been run
+only at 9 frames and 2 steps. On the development GPU, an NVIDIA GeForce RTX 3080 Ti, under Deno,
+with the default quant and the precomputed embeddings at 1280×704 × 33 frames and 50 steps, a clip
+took 753 to 792 s (transformer 556 to 593 s, VAE 197 to 199 s). The whole GPU peaked at 7,935 to 8,047 MiB (`nvidia-smi`). These are
 12 clips measured on 2026-10-06 with `WanTi2vPipeline` reading the export series directly, not with this
 script.
 

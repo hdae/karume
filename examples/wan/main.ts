@@ -1,17 +1,23 @@
 /**
- * Wan2.1 T2V 1.3B と Wan2.2 TI2V 5B（テキスト → 動画）の最小のデモ。プロンプトを 1 本渡して動画を生成し、
- * フレームを PNG の連番で書く。
+ * Wan2.1 T2V 1.3B と Wan2.2 TI2V 5B（テキスト〈+ 画像〉→ 動画）の最小のデモ。プロンプトを 1 本（Wan2.2 は
+ * 条件画像も）渡して動画を生成し、フレームを PNG の連番で書く。
  *
  *     deno task demo:wan --prompt boxing-cats --seed 42
  *     deno task demo:wan --prompt "A red fox trots through fresh snow at sunrise." --steps 20
  *     deno task demo:wan --text-encoder precomputed --prompt ferret --frames 17 --size 480x832
  *     deno task demo:wan --quant f16 --prompt boxing-cats --seed 42
  *     deno task demo:wan --generation wan2.2 --prompt boxing-cats --seed 42
+ *     deno task demo:wan --generation wan2.2 --prompt boxing-cats --image inputs/wan-i2v/boxing-cats-832x480.png
  *
  * 世代は `--generation`（`wan2.1` / `wan2.2` — 既定 `wan2.1`）。世代で違うのはパイプラインの class
- * （`WanPipeline` / `WanTi2vPipeline`）・既定の配布形ミラー・その組み立てのコマンド・既定の出力先だけで、
- * 下の取得元・テキストエンコーダ・席・ノブの扱いは両世代で共通（2.2 の manifest の `text_encoder` も同じ
- * umT5 の配布リポを越境参照する）。Wan2.2 は画像入力（I2V）をまだ受けない（ADR 0121 段 9）。
+ * （`WanPipeline` / `WanTi2vPipeline`）・既定の配布形ミラー・その組み立てのコマンド・既定の出力先と、
+ * 画像入力（I2V — Wan2.2 だけ）で、下の取得元・テキストエンコーダ・席・ノブの扱いは両世代で共通（2.2 の
+ * manifest の `text_encoder` も同じ umT5 の配布リポを越境参照する）。
+ *
+ * I2V（ADR 0121 決定 11）は `--image <パス>`（PNG / JPEG — `decode-image.ts` が RGB8 にする）と `--fit <crop|stretch>`
+ * （寸法の合わせ方 — 省けばパイプラインの既定）。`--size` を省くと寸法はパイプラインが画像の縦横比から受理寸法を
+ * 選ぶ（width / height を渡さない）。Wan2.1 は画像を受けないので、`--generation wan2.1` と `--image` / `--fit` の
+ * 組み合わせと、`--image` 無しの `--fit` は読み込みの前に落とす（効かないノブを黙って受けない）。
  *
  * 配布形は `fromPretrained` で読む（ADR 0118 段 7）。`--source` 未指定なら手元の配布形ミラー
  * `models/karume-wan2.1`（`dist.py --pipeline wan` が組む）/ `models/karume-wan2.2`
@@ -58,16 +64,23 @@ import {
 } from "../../packages/hub/mod.ts";
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import { encodePng } from "../../packages/models/mod.ts";
-import { wanFrameToRgba, WanPipeline, WanTi2vPipeline } from "../../packages/models/wan.ts";
+import {
+  wanFrameToRgba,
+  type WanI2vFit,
+  WanPipeline,
+  WanTi2vPipeline,
+} from "../../packages/models/wan.ts";
 import { runMain } from "../shared/run-main.ts";
 import { distributionSource } from "../shared/local-source.ts";
 import { isLocalDist } from "../shared/local-assets.ts";
+import { decodeImage } from "./decode-image.ts";
 
 const USAGE =
   "--generation <wan2.1|wan2.2> --source <パス|HF repo> --umt5-source <パス> --quant <名前>" +
   " --text-encoder <gpu|precomputed> --swap-text-encoder <パス|owner/name@<commit>>" +
-  " --prompt <名前|文字列> --negative <名前|文字列>" +
-  " --seed <整数> --steps <整数> --frames <整数> --guidance <数> --shift <数> --size <WxH> --out <dir>";
+  " --prompt <名前|文字列> --negative <名前|文字列> --image <PNG|JPEG のパス（wan2.2）> --fit <crop|stretch>" +
+  " --seed <整数> --steps <整数> --frames <整数> --guidance <数> --shift <数> --size <WxH> --out <dir>" +
+  "（例: --generation wan2.2 --prompt boxing-cats --image inputs/wan-i2v/boxing-cats-832x480.png）";
 const KNOWN = new Set([
   "generation",
   "source",
@@ -77,6 +90,8 @@ const KNOWN = new Set([
   "swap-text-encoder",
   "prompt",
   "negative",
+  "image",
+  "fit",
   "seed",
   "steps",
   "frames",
@@ -160,6 +175,23 @@ if (swapArg !== undefined && textEncoder === "precomputed") {
   throw new Error(
     `--swap-text-encoder ${swapArg} は --text-encoder precomputed では効かない（umT5 を読まない経路）`,
   );
+}
+/** I2V の条件画像のパス（未指定は T2V）と寸法の合わせ方（未指定はパイプラインの既定）。 */
+const imagePath = args.get("image");
+const fitArg = args.get("fit");
+// MUST: 画像を受けない世代での --image / --fit と、画像無しの --fit は落とす（黙って効かないノブを残さない）。
+if (generation === "wan2.1" && (imagePath !== undefined || fitArg !== undefined)) {
+  const flag = imagePath !== undefined ? "--image" : "--fit";
+  throw new Error(`${flag} は --generation wan2.1 では効かない（I2V は wan2.2 だけ）`);
+}
+if (fitArg !== undefined && imagePath === undefined) {
+  throw new Error(
+    `--fit ${fitArg} は --image 無しでは効かない（寸法の合わせ方は条件画像にだけ掛かる）`,
+  );
+}
+const isFit = (value: string): value is WanI2vFit => value === "crop" || value === "stretch";
+if (fitArg !== undefined && !isFit(fitArg)) {
+  throw new Error(`--fit ${fitArg} が crop / stretch のどちらでもない`);
 }
 /** 席の指定（未指定は manifest の既定）。 */
 const quantArg = args.get("quant");
@@ -273,14 +305,28 @@ const resolveSwap = async (): Promise<
  * 台本の本体。MUST: `await using` はこの中に置く（`shared/run-main.ts` — 本体と解放が両方投げたときの
  * `SuppressedError` を展開するため）。
  */
-/** 文字列の sha256（小文字 16 進 — 出力先の名前に使う）。 */
-const sha256Hex = async (text: string): Promise<string> =>
+/** バイト列の sha256（小文字 16 進 — 出力先の名前に使う）。 */
+const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
     (byte) => byte.toString(16).padStart(2, "0"),
   ).join("");
 
 const main = async (): Promise<void> => {
+  // 条件画像の読み込みと復号を先に済ませる（壊れた・対応外の画像を重みの読み込みの後で知らない）。
+  const imageBytes = imagePath === undefined ? undefined : await Deno.readFile(imagePath);
+  const image = imageBytes === undefined ? undefined : decodeImage(imageBytes);
+  // 出力先の名前の画像の印: ファイルのバイト列の sha256 の先頭 8 桁（パスを名前に入れない — 同じ中身なら同じ名前）。
+  // fit は明示したときだけ足す — 省いたときの既定はパイプラインが持つので、台本に写すと既定が変わったときに名前と
+  // 中身が食い違う（下の steps と同じ理由。steps と違い fit はイベントが運ばないので、明示しない回は名前に入れない）。
+  const fitLabel = fitArg === undefined ? "" : `-${fitArg}`;
+  const imageLabel = imageBytes === undefined
+    ? ""
+    : `-img-${(await sha256Hex(imageBytes)).slice(0, 8)}${fitLabel}`;
+  if (image !== undefined) {
+    const fitShown = fitArg ?? "パイプラインの既定";
+    console.log(`[wan] image: ${imagePath}（${image.width}×${image.height}・fit: ${fitShown}）`);
+  }
   // 差し替え先の綴りの誤りを先に見せる（Wan のミラーが無い機で、ミラー不在のエラーに隠さない）。
   const swap = await resolveSwap();
   const { from, label } = await resolveSource();
@@ -305,7 +351,9 @@ const main = async (): Promise<void> => {
   const prompt = textOf(promptArg);
   const isAssetName = pipeline.prompts.some((candidate) => candidate.name === promptArg);
   // 出力先の名前: 資産の名前はそのまま、任意の文字列は sha256 の先頭 8 桁（綴りをパスに入れない）。
-  const promptLabel = isAssetName ? promptArg : `prompt-${(await sha256Hex(prompt)).slice(0, 8)}`;
+  const promptLabel = isAssetName
+    ? promptArg
+    : `prompt-${(await sha256Hex(new TextEncoder().encode(prompt))).slice(0, 8)}`;
   console.log(`[wan] ${promptLabel}: ${prompt.trim()}`);
   const started = performance.now();
   const encoder = new TextEncoder();
@@ -323,6 +371,8 @@ const main = async (): Promise<void> => {
     ...(sizeMatch === undefined
       ? {}
       : { width: Number(sizeMatch[1]), height: Number(sizeMatch[2]) }),
+    ...(image === undefined ? {} : { image }),
+    ...(fitArg === undefined ? {} : { fit: fitArg }),
     onEvent: (event) => {
       const elapsed = ((performance.now() - started) / 1000).toFixed(0);
       if (event.kind === "denoise-step") {
@@ -340,7 +390,7 @@ const main = async (): Promise<void> => {
   Deno.stderr.writeSync(encoder.encode("\n"));
   if (ranSteps === undefined) throw new Error("denoise-step のイベントが 1 度も来なかった");
   // NOTE: guidance / shift / negative は名前に入らない — 変えて比べるときは --out で分ける。
-  const outDir = `${outRoot}/wan-${quantArg ?? "default"}-${promptLabel}-${route}` +
+  const outDir = `${outRoot}/wan-${quantArg ?? "default"}-${promptLabel}-${route}${imageLabel}` +
     `-${video.width}x${video.height}-${video.frames}f-${ranSteps}step-seed${seed}`;
   await Deno.mkdir(outDir, { recursive: true });
   for (let frame = 0; frame < video.frames; frame += 1) {
