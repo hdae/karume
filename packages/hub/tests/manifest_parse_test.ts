@@ -347,6 +347,84 @@ Deno.test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエ�
   });
 });
 
+Deno.test("parseManifest: 規模上限を超える weights の診断は線形で、利用可能ラベルを打ち切る", async (t) => {
+  // 件数検査より先に走る診断用走査（エラーに「利用可能なラベル」を載せるためのもの）が件数の
+  // 2 乗で重いと、1MiB 以内の manifest 1 本で主スレッドを十数分止められる（DoS 防波堤の抜け道）。
+  /** 中身が空の weights エントリを `count` 件持つ weights 表（組み立て側も線形に保つ）。 */
+  const emptyWeights = (count: number): Record<string, unknown> =>
+    Object.fromEntries(Array.from({ length: count }, (_unused, index) => [`w${index}`, {}]));
+  /** `count` 件の weights を全て "f16" へ写す quant（weights の上限内で合法な形にするため）。 */
+  const validWeights = (count: number) => {
+    const names = Array.from({ length: count }, (_unused, index) => `w${index}`);
+    return {
+      weights: Object.fromEntries(names.map((name) => [name, { f16: { container: CONTAINER } }])),
+      quants: {
+        q: { weights: Object.fromEntries(names.map((name) => [name, "f16"])), session: {} },
+      },
+    };
+  };
+  // ADR 0041 決定 7 の規模上限（weights ≤ 32 — 実装の MAX_WEIGHTS / MAX_MODELS / MAX_QUANTS）を
+  // 写した値。診断の打ち切り値はこの上限そのもの — 上限を変えたらここも揃える（ずれれば下の
+  // 「上限ちょうど」の step が赤になる）。
+  const LABEL_LIMIT = 32;
+
+  await t.step("空の weights 20000 件は時間上限内に ManifestFormatError で落ちる", () => {
+    const text = withModel({ weights: emptyWeights(20000) });
+    assert(new TextEncoder().encode(text).length < 1024 * 1024, "1MiB 未満で組めていない");
+    const started = performance.now();
+    assertThrows(() => parseManifest(text), ManifestFormatError);
+    const elapsed = performance.now() - started;
+    // 2 乗の走査では 20000 件で 30 秒を超える。上限は線形の実測より 1 桁以上大きく取る
+    // （CI のばらつきで揺れないように）。
+    assert(elapsed < 2000, `${Math.round(elapsed)} ms かかった（上限 2000 ms）`);
+  });
+
+  await t.step(
+    "上限超過のエラーに載る dtypes はちょうど上限件数で、打ち切ったことを本文が名乗る",
+    () => {
+      const error = assertThrows(
+        () => parseManifest(withModel({ weights: emptyWeights(100) })),
+        ManifestFormatError,
+      );
+      // 「以下」では上限より少なく（0 件でも）打ち切る実装が通る — 上限件数までは載ることを縛る。
+      assertEquals(
+        Object.keys(error.available.dtypes).length,
+        LABEL_LIMIT,
+        `${Object.keys(error.available.dtypes).length} 件が載った（打ち切り値 ${LABEL_LIMIT}）`,
+      );
+      assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
+    },
+  );
+
+  await t.step("件数検査より前のエラーでも打ち切りを名乗る", () => {
+    // 未知キーの検査は weights の件数検査より先に落ちる — 本文が件数超過を語らない経路でも、
+    // 載っている一覧が一部だけであることを読み手が取り違えないようにする。
+    const error = assertThrows(
+      () => parseManifest(withModel({ weights: emptyWeights(100), unknown: true })),
+      ManifestReferenceError,
+    );
+    // 「以下」では上限より少なく（0 件でも）打ち切る実装が通る — この経路でも上限件数までは載る。
+    assertEquals(
+      Object.keys(error.available.dtypes).length,
+      LABEL_LIMIT,
+      `${Object.keys(error.available.dtypes).length} 件が載った（打ち切り値 ${LABEL_LIMIT}）`,
+    );
+    assert(error.message.includes("打ち切"), `${error.message} が打ち切りを名乗っていない`);
+  });
+
+  await t.step("上限ちょうど（weights 32 件）は全件が載り、打ち切りを名乗らない", () => {
+    // 片側だけだと「常に打ち切る」実装でも緑になる — 正常な manifest の available は欠けない。
+    const manifest = parseManifest(withModel(validWeights(LABEL_LIMIT)));
+    assertEquals(Object.keys(manifest.models["m"].available.dtypes).length, LABEL_LIMIT);
+    const error = assertThrows(
+      () => parseManifest(withModel({ ...validWeights(LABEL_LIMIT), unknown: true })),
+      ManifestReferenceError,
+    );
+    assertEquals(Object.keys(error.available.dtypes).length, LABEL_LIMIT);
+    assert(!error.message.includes("打ち切"), `${error.message} が打ち切りを誤って名乗った`);
+  });
+});
+
 Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラベルが載る", () => {
   const container = (mark: string) => ({
     descriptor: DESCRIPTOR,

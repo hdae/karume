@@ -417,11 +417,28 @@ type Fail = {
   path: (message: string, path: string) => ManifestPathError;
 };
 
-const createFail = (available: AvailableLabels): Fail => ({
-  format: (message, cause) => new ManifestFormatError(message, { available, cause }),
-  reference: (message) => new ManifestReferenceError(message, { available }),
-  path: (message, path) => new ManifestPathError(message, { available, path }),
-});
+/**
+ * 診断用走査の結果。`truncated` は規模上限を超えた表の一覧を打ち切ったか（{@link surveyLabels}）。
+ */
+type LabelSurvey = {
+  readonly available: AvailableLabels;
+  readonly truncated: boolean;
+};
+
+/**
+ * 打ち切ったときはエラー本文でそれを名乗る — 件数超過より先に別の検査（未知キー等）で落ちる
+ * 経路では本文が件数を語らないので、`available` が一部だけだと読み手が取り違えないようにする。
+ */
+const createFail = ({ available, truncated }: LabelSurvey): Fail => {
+  const note = truncated
+    ? "（利用可能ラベル〈available〉は規模上限を超えた表を上限件数で打ち切った）"
+    : "";
+  return {
+    format: (message, cause) => new ManifestFormatError(message + note, { available, cause }),
+    reference: (message) => new ManifestReferenceError(message + note, { available }),
+    path: (message, path) => new ManifestPathError(message + note, { available, path }),
+  };
+};
 
 /**
  * manifest 全域から禁止キーを一掃する（`pipelineConfig` の内側も含む）。素通し先の実装が
@@ -454,26 +471,46 @@ const assertNoForbiddenKeys = (value: unknown, where: string, depth: number): vo
  *
  * `model` を渡すとそのモデルの quant / dtype まで拾う（モデルを跨いだ混合はしない — 別モデルの
  * quant 名を勧めるのは誤誘導）。
+ *
+ * MUST: この走査は表の件数検査（{@link parseMap}）より**先**に走るので、入力の件数に比例する
+ * より重い処理を置かない — 置くと 1MiB 以内の manifest 1 本で主スレッドを止められ、規模上限
+ * （ADR 0041 §7）の DoS 防波堤が素通りになる。一覧は各表をその規模上限の件数で打ち切る。
+ * 上限は表の正当な最大件数でもあるので、検査を通る manifest の `available` は欠けない。
  */
-const surveyLabels = (root: Record<string, unknown>, model?: string): AvailableLabels => {
+const surveyLabels = (root: Record<string, unknown>, model?: string): LabelSurvey => {
   const modelsRaw = root["models"];
-  if (!isRecord(modelsRaw)) return NO_LABELS;
-  const models = Object.keys(modelsRaw);
-  if (model === undefined) return { models, quants: [], dtypes: {} };
-  const entry = modelsRaw[model];
-  if (!isRecord(entry)) return { models, quants: [], dtypes: {} };
-  const quantsRaw = entry["quants"];
-  const quants = isRecord(quantsRaw) ? Object.keys(quantsRaw) : [];
-  const weightsRaw = entry["weights"];
-  let dtypes: Readonly<Record<string, readonly string[]>> = {};
-  if (isRecord(weightsRaw)) {
-    for (const name of Object.keys(weightsRaw)) {
-      const labels = weightsRaw[name];
-      if (!isRecord(labels)) continue;
-      dtypes = { ...dtypes, [name]: Object.keys(labels) };
-    }
+  if (!isRecord(modelsRaw)) return { available: NO_LABELS, truncated: false };
+  const models = headKeys(modelsRaw, MAX_MODELS);
+  const entry = model === undefined ? undefined : modelsRaw[model];
+  if (!isRecord(entry)) {
+    return {
+      available: { models: models.keys, quants: [], dtypes: {} },
+      truncated: models.truncated,
+    };
   }
-  return { models, quants, dtypes };
+  const quantsRaw = entry["quants"];
+  const quants = headKeys(isRecord(quantsRaw) ? quantsRaw : {}, MAX_QUANTS);
+  const weightsRaw = entry["weights"];
+  const weightsRecord = isRecord(weightsRaw) ? weightsRaw : {};
+  const weights = headKeys(weightsRecord, MAX_WEIGHTS);
+  // 一度で組む — 累積オブジェクトを 1 件ごとにスプレッドで複製すると件数の 2 乗になる。
+  const dtypes = Object.fromEntries(weights.keys.flatMap((name) => {
+    const labels = weightsRecord[name];
+    return isRecord(labels) ? [[name, Object.keys(labels)]] : [];
+  }));
+  return {
+    available: { models: models.keys, quants: quants.keys, dtypes },
+    truncated: models.truncated || quants.truncated || weights.truncated,
+  };
+};
+
+/** 表のキーを先頭 `max` 件までに打ち切る（診断用走査の部品 — throw しない）。 */
+const headKeys = (
+  record: Record<string, unknown>,
+  max: number,
+): { readonly keys: readonly string[]; readonly truncated: boolean } => {
+  const keys = Object.keys(record);
+  return { keys: keys.slice(0, max), truncated: keys.length > max };
 };
 
 const assertAllowedKeys = (
@@ -1043,8 +1080,9 @@ const parseModel = (
   raw: unknown,
   seen: Map<string, FileRef>,
 ): ModelEntry => {
-  const available = surveyLabels(root, name);
-  const fail = createFail(available);
+  const survey = surveyLabels(root, name);
+  const { available } = survey;
+  const fail = createFail(survey);
   const where = `models.${name}`;
   if (!isRecord(raw)) throw fail.format(`${where}: モデルエントリがオブジェクトでない`);
   assertAllowedKeys(fail, raw, MODEL_KEYS, where);
@@ -1116,8 +1154,9 @@ export const parseManifest = (text: string): Manifest => {
   if (!isRecord(root)) throw new ManifestFormatError("manifest: 最上位がオブジェクトでない");
   assertNoForbiddenKeys(root, "manifest", 0);
 
-  const available = surveyLabels(root);
-  const fail = createFail(available);
+  const survey = surveyLabels(root);
+  const { available } = survey;
+  const fail = createFail(survey);
   // MUST: `format` を未知キー検査より**先**に見る。v1 manifest はトップレベルの綴りが丸ごと
   // 違うので、順が逆だと「未知キー 'components'」という的外れな診断が出て、本当の理由
   // （この版は karume/5 のみ読む）が隠れる（ADR 0109 決定 1）。v4 との差は dtype エントリの
