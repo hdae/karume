@@ -21,7 +21,9 @@ before the next stage opens, because the transformer stage has little headroom; 
 stages there is no such wait. Intel / wgpu can release `destroy()` late, but on the B570
 (2026-10-02, fdinfo `drm-total-vram0`) the transformer stage's peak drops as soon as its session is
 disposed and does not overlap the VAE stage's peak (the NOTE at the top of `pipeline.ts` has the
-numbers); the same has not been measured after the text stage yet:
+numbers). After the text stage, on the B570 under Deno at 33 frames, 0.08 GiB stays allocated
+(the text stage's peak 6.30 GiB drops to 0.708 GiB, against 0.633 GiB before the stage — ADR 0119,
+the addendum on the stage 10c GPU gates and the stage 10d-4 results); Chrome has not been measured:
 
 0. **vae_encoder** (image-to-video only) — the image is fitted to the output size (`fit`:
    `"crop"`, the default, scales it with Lanczos to cover the size and cuts out the center;

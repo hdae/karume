@@ -50,7 +50,7 @@ import { mirrorAvailable } from "./gemma-mirror.ts";
  */
 export const REFERENCE_PROMPT = "Explain in about five sentences why the sky is blue.";
 
-/** 生成する token 数の上限（停止 token はこの数に含まれない — `Gemma4ChatOptions.maxNewTokens`）。 */
+/** 抽選する token 数の上限（停止 token もこの数に含まれる — `Gemma4ChatOptions.maxNewTokens`）。 */
 export const REFERENCE_MAX_NEW_TOKENS = 64;
 
 /** 走行に要る pipeline の面（`Gemma4Pipeline` / `Gemma4QatPipeline` の共通部分）。 */

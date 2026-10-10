@@ -39,8 +39,9 @@
  * `generate` の中で段ごとに Session を張り、畳んでから次の段を張る（決定 7 — anima の既定
  * `"per-stage"` と同じ）。text 段（umT5 の重み i8 5.30 GiB）と DiT 段（81 フレームで 7.31 GiB）の和は
  * B570 の天井 9,600 MiB を越える（ADR 0119 決定 11）ので、text 段は DiT 段を張る前に畳む。DiT 段
- * （33 フレームで約 5.7 GiB）と VAE 段（約 2.9 GiB）も同時に持たない。text 段を畳んだ直後の確保の残り
- * （DiT の後には初回だけ見えた）は未測（ADR 0119 未解決）。
+ * （33 フレームで約 5.7 GiB）と VAE 段（約 2.9 GiB）も同時に持たない。text 段を畳んだ直後の確保の残りは
+ * B570・Deno・33 フレームで +0.08 GiB（text 段の山 6.30 GiB → 畳んだ後 0.708 GiB・段の前 0.633 GiB —
+ * ADR 0119 追記「段 10c の GPU の門と段 10d-4 の結果」）。Chrome では測っていない。
  *
  * I2V の encoder の段（Wan2.2 だけ）は最初に回し、3 Session と受け渡しの常駐を畳んでから**解放を待って**
  * （`session/settle-released-memory.ts`）次の段へ進む（ADR 0121 決定 11 — DiT の段の容量の余裕は 0.4〜0.8 GiB

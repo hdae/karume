@@ -504,7 +504,10 @@ export type Gemma4EstimateOptions = {
  * 列を汲み始めた後にこの object や `sampler` の指定を書き換えても、走行中のターンには効かない。
  */
 export type Gemma4ChatOptions = {
-  /** 生成する token 数の上限（1 以上）。停止 token はこの数に**含めない**。 */
+  /**
+   * 抽選する token 数の上限（1 以上）。停止 token もこの数に**含める**
+   * （`GenerationRequest.maxNewTokens` と同じ勘定）。
+   */
   readonly maxNewTokens: number;
   /**
    * このターンだけ効かせる追加の停止 **token**（配布形の EOS 集合との和集合 —

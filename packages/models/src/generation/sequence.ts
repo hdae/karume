@@ -385,7 +385,10 @@ export type GenerationRequest = {
    * 「続きを生成するだけ」のターンは空配列でよい。
    */
   readonly prompt: readonly number[];
-  /** 生成する token 数の上限（1 以上）。停止 token はこの数に**含めない**。 */
+  /**
+   * 抽選する token 数の上限（1 以上）。停止 token もこの数に**含める**（`token` イベントには
+   * 出ないが 1 個として数える — {@link GenerationStop} の `tokens` と同じ勘定）。
+   */
   readonly maxNewTokens: number;
   /**
    * このターンだけ効かせる**追加の**停止 token（配布形が宣言した集合との**和集合**で判定する）。
@@ -451,10 +454,10 @@ export const assertGenerationRequestValues = (
  * ことへ依存している。決着が終端より後ろへずれると、その `await` が消費側の `for await` ごと
  * 止まる。
  *
- * NOTE: 反復を**一度も始めずに** iterator の `return()` を呼ぶと本体が走らないので、`done` は
- * 決着しない（async generator の本体は最初の `next()` まで走らないため — 直列化の席も取らないので
- * 他の生成や `dispose` は妨げない）。`for await` では起きない形で、手で iterator を回す消費者
- * だけの注意である。
+ * NOTE: 反復を**一度も始めずに** iterator の `return()` を呼んでも `done` は決着する（`closed`・
+ * `tokens: 0`）。async generator の本体は最初の `next()` まで走らないので、未開始の終了は
+ * 本体の外（`concurrency/closeable-generator.ts`）が拾って通知する。run は 1 本も出ず、直列化の
+ * 席も取らないので他の生成や `dispose` は妨げない。
  */
 export type GenerationStream = AsyncIterable<GenerationEvent> & {
   readonly done: Promise<GenerationStop>;
@@ -589,9 +592,10 @@ export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   /** 投機的デコード（ADR 0096 段 3）。無ければ従来の 1 token = 1 run。 */
   readonly speculative?: GenerationSpeculativeOptions<C>;
   /**
-   * run 1 本につき 1 回、その run の出力を読み終えた**同期区間**で呼ばれる観測席（verify は commit の
-   * 直後）。診断（`Session.diagnostics()` の `lastRun*`）を「その run」の値として読めるのはこの
-   * 同期区間だけである。無ければ何も呼ばない。
+   * run 1 本につき 1 回、その run の出力を読み終えた**同期区間**で呼ばれる観測席（verify は確定した
+   * token の配送と commit の**前** — 配送の yield をまたぐと、貸し手 Session を共有する別 sequence の
+   * run が挟まりうるため）。診断（`Session.diagnostics()` の `lastRun*`）を「その run」の値として
+   * 読めるのはこの同期区間だけである。無ければ何も呼ばない。
    */
   readonly onRun?: (phase: GenerationRunPhase) => void;
   /**
