@@ -48,8 +48,6 @@ Deno.test("結果の書き出し: record のたびに全件で書き直され、
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("irodori", { root, environment: ENVIRONMENT });
-    const today = new Date().toISOString().slice(0, 10);
-    assertEquals(results.dir.href, new URL(`${KEY}/${today}_irodori/`, root).href);
 
     const artifact = results.artifact("voice-clone.wav");
     assert(artifact.href.startsWith(results.dir.href), "実物が結果の席の外を指している");
@@ -67,6 +65,11 @@ Deno.test("結果の書き出し: record のたびに全件で書き直され、
       await Deno.readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
     assertEquals(afterFirst.cases.length, 1, "1 件目が残っていない");
+    // 席の日付は、実装が走行の開始時に確定した startedAt の日付部（UTC）と同じ時刻の源で比べる。
+    // テスト側で時刻を取り直すと、開始とここの間に UTC 0 時をまたいだ回だけ偽 FAIL する。
+    assert(/^\d{4}-\d{2}-\d{2}T/.test(afterFirst.startedAt), "startedAt が ISO の日時でない");
+    const today = afterFirst.startedAt.slice(0, 10);
+    assertEquals(results.dir.href, new URL(`${KEY}/${today}_irodori/`, root).href);
 
     await results.record({ id: "no-ref", status: "written", actual: "b".repeat(64), elapsedMs: 8 });
     const document = JSON.parse(
