@@ -305,3 +305,14 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   `speculative: "always"` か `stateAttentionReduce: "sequential"` を選ぶ（両者は A/B・検収の席として残る）。
   NOTE: 門は e2e レーンを回した device だけを検証する。一般則 3 が例に挙げる実走カナリア（利用者の device で
   実行時に確かめる口）は無い。u32 の門は attention 3 変種 × GEMV 2 種 × RMS→add 融合の全 12 組（+ linear→SRQ 指定）を覆う（同日に全組へ広げ、B570 で全て相違 0）。
+
+## 追記（2026-10-10・共有 initializer の門に意味論 dtype の一致を足す — 決定 2 の補足）
+
+- **決定**: 借り手の共有 initializer の意味論 dtype（`values{}` の宣言）は、貸し手の宣言と一致 MUST。
+  `Session.exportWeight` が貸し手の意味論 dtype を `SharedWeight` の内部面に載せ、借り手の構築
+  （`resolveSharedWeights`）が宣言 shape の照合の直後で比べる。破れは借り手の重みを 1 バイトも上げる前に
+  `ExecutionError`。
+- **理由**: f32 / i32 の重みは常駐形式がどちらも `raw` なので、席の照合では区別できない。通すと同じ
+  4 バイトが別の型として読まれる（f32 の 1.0 が i32 の 1065353216 になる）。通常の initializer は合流層
+  （`format/container/bind.ts`）が意味論 dtype と格納 codec を突き合わせるが、共有 initializer は格納を
+  持たないのでそこを通らない。比べるのは格納 codec ではなく意味論 dtype — 圧縮常駐の重みも展開すれば f32。

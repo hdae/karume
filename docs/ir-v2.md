@@ -260,8 +260,9 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   - `values{}` の dtype / shape 宣言は従来どおり**必須**。格納（codec / scale / group）は
     **書かない** — 貸し手の常駐重みが正本で、写すと同じ事実が 2 箇所に生える。
   - 束縛表の突合集合から**外れる**（束縛表に載らない — container-v1 §5）。実体の
-    素性はロード側の門が見る（同一 device・宣言 shape・消費席・チャネル軸 — 貸し手の codec が
-    借り手の消費 op で実行できること）。
+    素性はロード側の門が見る（同一 device・宣言 shape・意味論 dtype・消費席・チャネル軸 — 貸し手の
+    codec が借り手の消費 op で実行できること）。意味論 dtype は貸し手の宣言と一致 MUST（f32 / i32 は
+    常駐形式が同じで、席では区別できない）。
 - **宣言完全性**: 全ての値（inputs・initializers・全ノード出力）はちょうど 1 箇所で宣言される
   — inputs は `inputs[]` で、**initializer と中間値・出力は `values{}` で**。実行時に毎ノード、
   宣言 shape/dtype と照合する。

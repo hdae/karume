@@ -1153,6 +1153,7 @@ export class Session {
       rowAxis: seat.seat === "i8" || seat.seat === "i2" ? seat.rowAxis : undefined,
       codec: lenderCodec,
       shape: graph.values[initializerName].shape.map(Number),
+      dtype: graph.values[initializerName].dtype,
       retain: (): void => {
         if (this.#disposal !== undefined) {
           throw new ExecutionError("dispose 済みの Session の重みは借りられない");

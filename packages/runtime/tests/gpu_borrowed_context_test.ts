@@ -10,15 +10,24 @@
 //   ④ 計画鍵: 容量の違う貸し手を束ねた 2 本の借り手 context は**別鍵**（external スロットの容量が
 //      鍵に載っていることの検出器）
 //   ⑤ 共有重み: 貸し手の i8 embedding 表を借り手が読み、値が貸し手と**ビット一致**する。
-//      shape / 席 / 行の軸の不一致は fail loudly・借り手が生きている間の貸し手 dispose も拒否
+//      shape / 意味論 dtype / 席 / 行の軸の不一致は fail loudly・借り手が生きている間の貸し手 dispose も拒否
 //
 // MUST: 参照に渡すスロットは**GPU から読み戻す**（ホスト側オラクルの再現ではない）。借り手が
 // 読むのは貸し手が実際に書いた行なので、読み戻しでしか「同じ実体を見ている」ことを示せない。
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertInstanceOf,
+  assertRejects,
+  assertThrows,
+  fail,
+} from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAttentionReadonly } from "../src/reference/state-attention.ts";
 import { decodeI8 } from "../src/format/i8.ts";
+import { openMemoryContainer } from "../src/format/container/memory.ts";
+import { type IrDeclaration, parseIrDeclarationValue } from "../src/format/ir.ts";
 import { acquireGpu, type GpuContext, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
 import type { GenerationContext } from "../src/runtime/generation-context.ts";
@@ -1050,6 +1059,187 @@ Deno.test({
     } finally {
       await lender.dispose();
       gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 共有 initializer の門: 意味論 dtype（§2.2）
+// ---------------------------------------------------------------------------
+
+/** dtype の門の材料の要素数（値は見ない — 門は宣言だけを見る）。 */
+const DTYPE_LENGTH = 4;
+
+/** 貸し手: 意味論 dtype が `dtype` の initializer `w` を 1 本持ち、f32 へ cast して返す。 */
+const dtypeLenderGraph = (dtype: "f32" | "i32"): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["cast"] },
+  symbols: [],
+  inputs: [],
+  outputs: ["y"],
+  initializers: { w: {} },
+  values: {
+    w: { dtype, shape: [DTYPE_LENGTH] },
+    y: { dtype: "f32", shape: [DTYPE_LENGTH] },
+  },
+  nodes: [{ op: "cast", ins: ["w"], outs: ["y"], attrs: { to: "f32" } }],
+});
+
+const openDtypeLenderModel = (dtype: "f32" | "i32") =>
+  openGraphModel(dtypeLenderGraph(dtype), [{
+    graph: "model",
+    initializer: "w",
+    bytes: dtype === "f32"
+      ? f32Bytes([1, 2, -3, 0.5])
+      : new Uint8Array(Int32Array.from([1, 2, -3, 5]).buffer),
+    encoding: { codec: dtype },
+  }]);
+
+/**
+ * 借り手: `w` を `shared` で借り（意味論 dtype は `dtype` と宣言）、自前の f32 initializer
+ * `bias` も 1 本持つ。`bias` は「門が重みのアップロードより後ろに在れば借り手側の GPU 確保が
+ * 必ず起きる」ことを保証する材料（確保ゼロの観測を空振りにしない）。
+ *
+ * bool は IR パーサが initializer の語彙外として落とすので、パース済みの宣言を書き換えて作る —
+ * 公開面の `openMemoryContainer` は `IrDeclaration` を型付きの値で受け取り、パーサを通らない。
+ */
+const dtypeBorrowerContainer = (dtype: "f32" | "i32" | "bool") => {
+  const parsed = parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["cast", "add"] },
+    symbols: [],
+    inputs: [],
+    outputs: ["y"],
+    initializers: { w: { shared: true }, bias: {} },
+    values: {
+      w: { dtype: dtype === "bool" ? "f32" : dtype, shape: [DTYPE_LENGTH] },
+      bias: { dtype: "f32", shape: [DTYPE_LENGTH] },
+      c: { dtype: "f32", shape: [DTYPE_LENGTH] },
+      y: { dtype: "f32", shape: [DTYPE_LENGTH] },
+    },
+    nodes: [
+      { op: "cast", ins: ["w"], outs: ["c"], attrs: { to: "f32" } },
+      { op: "add", ins: ["c", "bias"], outs: ["y"], attrs: {} },
+    ],
+  });
+  const declaration: IrDeclaration = dtype === "bool"
+    ? { ...parsed, values: { ...parsed.values, w: { ...parsed.values["w"], dtype: "bool" } } }
+    : parsed;
+  return openMemoryContainer({
+    graphs: { model: declaration },
+    tensors: {
+      model: {
+        bias: { bytes: f32Bytes(new Float32Array(DTYPE_LENGTH)), encoding: { codec: "f32" } },
+      },
+    },
+  });
+};
+
+/** `fn` の間に device が受けた `createBuffer` の回数を数え、`fn` の結果と返す（終わったら元へ戻す）。 */
+const countCreateBuffer = async <T>(
+  gpu: GpuContext,
+  fn: () => Promise<T>,
+): Promise<{ allocated: number; result: T }> => {
+  const create = gpu.device.createBuffer.bind(gpu.device);
+  let allocated = 0;
+  gpu.device.createBuffer = (descriptor): GPUBuffer => {
+    allocated += 1;
+    return create(descriptor);
+  };
+  try {
+    const result = await fn();
+    return { allocated, result };
+  } finally {
+    gpu.device.createBuffer = create;
+  }
+};
+
+Deno.test({
+  name:
+    "共有 initializer の門: 貸し手と借り手の意味論 dtype の不一致は、借り手の GPU 確保より前に fail loudly（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    // 貸し手の構築も try の内側に置き、作れたものだけをここに積んで finally で返す — 2 本目の構築が
+    // 落ちても 1 本目と device の後始末を飛ばさない。
+    const lenders: Session[] = [];
+    let disposed: PromiseSettledResult<void>[] = [];
+    try {
+      const f32Lender = await createSessionFromContainer(
+        gpu,
+        await openDtypeLenderModel("f32"),
+        "model",
+      );
+      lenders.push(f32Lender);
+      const i32Lender = await createSessionFromContainer(
+        gpu,
+        await openDtypeLenderModel("i32"),
+        "model",
+      );
+      lenders.push(i32Lender);
+      const build = (lender: Session, dtype: "f32" | "i32" | "bool"): Promise<Session> =>
+        createSessionFromContainer(gpu, dtypeBorrowerContainer(dtype), "model", {
+          sharedWeights: { w: lender.exportWeight("w") },
+        });
+      const rejectsBeforeAllocation = async (
+        lender: Session,
+        dtype: "f32" | "i32" | "bool",
+        lenderDtype: string,
+      ): Promise<void> => {
+        const { allocated, result: outcome } = await countCreateBuffer(
+          gpu,
+          () =>
+            build(lender, dtype).then(
+              (borrower) => ({ borrower }),
+              (error: unknown) => ({ error }),
+            ),
+        );
+        if ("borrower" in outcome) {
+          // 借り手を先に返す — 掴んだままだと finally の貸し手 dispose が「貸し出し中」で拒否され、
+          // 本来の失敗（門が効いていない）がその拒否に隠れる。fail を finally に置くのは、借り手の
+          // dispose 自体が拒否されても、その拒否ではなく本来の失敗の文言を表に出すため。
+          try {
+            await outcome.borrower.dispose();
+          } finally {
+            fail(
+              `借り手（${dtype}）の構築が貸し手（${lenderDtype}）の重みで通った — 意味論 dtype の門が効いていない`,
+            );
+          }
+        }
+        assertInstanceOf(outcome.error, ExecutionError);
+        const message = outcome.error.message;
+        assert(message.includes("意味論 dtype"), message);
+        assert(message.includes(`'${dtype}'`) && message.includes(`'${lenderDtype}'`), message);
+        // 仕様（借り手の重みのアップロード前）より強い条件として構築全体の確保 0 回を見ている。将来ここが
+        // 赤になったら、門より前の確保の中身（重みか、重み以外か）を見て判断する。
+        assertEquals(allocated, 0, "門は借り手の重みを 1 バイトも上げる前に落とす");
+      };
+
+      // 対照: dtype が一致すれば構築は通り、借り手は自前の `bias` を確保する（= 確保ゼロの観測は
+      // 空振りではない）。
+      const { allocated: matchedAllocations, result: matched } = await countCreateBuffer(
+        gpu,
+        () => build(f32Lender, "f32"),
+      );
+      await matched.dispose();
+      assert(matchedAllocations > 0, `一致した借り手の確保回数 ${matchedAllocations}`);
+
+      // ① 貸し手 f32・借り手 i32 — 通すと同じ 4 バイトが整数として読まれる（1.0 → 1065353216）。
+      await rejectsBeforeAllocation(f32Lender, "i32", "f32");
+      // ② 貸し手 i32・借り手 f32 — 逆向きの同じ取り違え。
+      await rejectsBeforeAllocation(i32Lender, "f32", "i32");
+      // ③ 借り手 bool — 常駐形式（raw）は同じなので席の門は区別しない。
+      await rejectsBeforeAllocation(f32Lender, "bool", "f32");
+    } finally {
+      // 片方の dispose の拒否で残りの後始末（もう 1 本の貸し手と device）を飛ばさない。
+      disposed = await Promise.allSettled(lenders.map((lender) => lender.dispose()));
+      gpu.destroy();
+    }
+    // dispose の拒否は本体が通ったときだけここで出す（finally で投げると本体の失敗を上書きする）。
+    for (const settled of disposed) {
+      if (settled.status === "rejected") throw settled.reason;
     }
   },
 });

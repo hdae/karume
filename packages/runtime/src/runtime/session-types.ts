@@ -400,9 +400,9 @@ export type SessionOptions = {
    * **共有 initializer の実体**（ADR 0096 段 2 §1.3 / §2.2 — 借り手の initializer 名 →
    * 貸し手 `Session.exportWeight()` の戻り）。
    *
-   * グラフの `shared` 宣言**全部**に対して過不足なく与える MUST。門は 5 点（同一 device・
-   * 宣言 shape・消費席（貸し手の codec から導く）・行の軸 — `resolveSharedWeights`）で、どれも破れは
-   * 例外ではなく別の値として出るため fail loudly。
+   * グラフの `shared` 宣言**全部**に対して過不足なく与える MUST。門は 6 点（同一 device・
+   * 宣言 shape・意味論 dtype・消費席（貸し手の codec から導く）・行の軸 — `resolveSharedWeights`）で、
+   * どれも破れは例外ではなく別の値として出るため fail loudly。
    *
    * 寿命: 借り手 Session が生きている間、貸し手 Session の `dispose()` は fail loudly になる
    * （借用計数 — `dispose` の冪等・非 throw 契約からの意図的な逸脱）。

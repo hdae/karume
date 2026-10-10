@@ -21,7 +21,7 @@ import {
   payloadBytes,
   scaleBytes,
 } from "../format/container/codecs.ts";
-import type { IrGraph } from "../format/ir.ts";
+import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import type { GpuContext } from "../gpu/device.ts";
 import { RUNTIME_INTERNAL } from "../gpu/device.ts";
@@ -244,6 +244,11 @@ export type SharedWeightInternals = {
   readonly codec: CodecName;
   /** 貸し手の宣言 shape。 */
   readonly shape: readonly number[];
+  /**
+   * 貸し手の**意味論** dtype（graph の宣言 — 格納 codec ではない）。圧縮常駐の重みも展開すれば
+   * f32 なので、借り手の宣言と比べるのはこちら（借り手は格納を宣言しない）。
+   */
+  readonly dtype: IrDtype;
   /** 借用を 1 本積む（借り手 Session の構築が成功したとき）。 */
   retain(): void;
   /** 借用を 1 本返す（借り手 Session の dispose / 構築の失敗）。 */
@@ -272,19 +277,23 @@ export class SharedWeight {
  * 借り手グラフの共有 initializer 宣言と、渡された {@link SharedWeight} を突き合わせる
  * （ADR 0096 段 2 §2.2 の門）。返すのは注入すべき組（宣言順）。
  *
- * 見るのは 5 点（借り手は格納を宣言しないので「格納 dtype 一致」の門は無く、代わりに 4 で期待席を導く）:
+ * 見るのは 6 点（借り手は格納を宣言しないので「格納 dtype 一致」の門は無く、代わりに 5 で期待席を導く）:
  * 1. **過不足なし** — 宣言 1 本につき 1 つ（欠けは「バイトの無い重みで走る」、余りは
  *    「渡したつもりの重みが誰にも使われない」）
  * 2. **同一 device** — 別 device のバッファを束ねる bind group は validation で落ちるが、
  *    診断は真因から遠い
  * 3. **宣言 shape 一致** — バイト数だけでは `[2,3]` と `[3,2]` の取り違えが通る
- * 4. **期待席の導出** — 借り手は格納を宣言しないので、貸し手の codec と借り手側の消費（適格判定）から
+ * 4. **意味論 dtype 一致** — f32 / i32 は常駐形式がどちらも `raw` で席の照合（5・6）では区別
+ *    できず、通すと同じ 4 バイトが別の型として読まれる（f32 の 1.0 が i32 の 1065353216 になる）。
+ *    通常の initializer は合流層（`format/container/bind.ts`）が意味論 dtype と格納 codec を
+ *    突き合わせるが、shared は格納を持たないのでそこを通らない — 代わりに貸し手の宣言と比べる
+ * 5. **期待席の導出** — 借り手は格納を宣言しないので、貸し手の codec と借り手側の消費（適格判定）から
  *    期待席を導く（`expectedSharedSeat`）。貸し手の実際の席と違えば同じバッファが別の読み方をされる
- * 5. **席の一致**（i8 は per-channel scale の軸まで） — 貸し手が i4 常駐でも借り手の消費に
+ * 6. **席の一致**（i8 は per-channel scale の軸まで） — 貸し手が i4 常駐でも借り手の消費に
  *    展開経路が無ければ席は `expanded` で、同じバッファが packed バイトと f32 の 2 通りに
  *    読まれる。i8 の軸違い（embedding と linear）も同じ機序で沈黙誤値になる
  *
- * MUST: 全て fail loudly。5 点とも破れは例外ではなく**別の値**として出る。
+ * MUST: 全て fail loudly。6 点とも破れは例外ではなく**別の値**として出る。
  */
 export const resolveSharedWeights = (
   graph: IrGraph,
@@ -325,6 +334,13 @@ export const resolveSharedWeights = (
     if (shape.length !== shared.shape.length || shape.some((d, i) => d !== shared.shape[i])) {
       throw new ExecutionError(
         `${where}: 宣言 shape [${shape.join(",")}] が貸し手の [${shared.shape.join(",")}] と違う`,
+      );
+    }
+    const dtype = graph.values[name].dtype;
+    if (dtype !== shared.dtype) {
+      throw new ExecutionError(
+        `${where}: 意味論 dtype '${dtype}' が貸し手の '${shared.dtype}' と違う` +
+          "（常駐形式が同じなので席の照合では区別できず、同じバイト列が別の型として読まれる）",
       );
     }
     const seat = residency.get(name);

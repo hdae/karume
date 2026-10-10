@@ -592,7 +592,8 @@ descriptor を取るのが 2 周目になる）。
    と一致）。§6.1 の `scaleShape` の式はこの退化形を含む。
 6. **共有 initializer の門**: 借り手は格納を宣言しないので、旧 5 点のうち「宣言 格納 dtype が貸し手と
    一致」は消え、代わりに**貸し手の codec と借り手側の消費（適格判定）から期待席を導いて**貸し手の
-   実際の席（i8 / i2 は行の軸まで）と突き合わせる。
+   実際の席（i8 / i2 は行の軸まで）と突き合わせる。意味論 dtype の一致は ADR
+   [0096](0096-speculative-decoding.md) の追記（2026-10-10）で門に足した。
 7. **段 3 までの暫定接着**（両読みではない）: 旧配布形の読み手は残るが、①旧 v1 ローダ（`parseIrGraph`）は
    読んだ時点で合流後の形へ写す（改名・codec 写像・`rowAxis` / `groupSize` の導出）②旧 shard の validator
    は供給計画と同じ `ReadyInitializer`（バイト列 + rank 2 の scale）を返す。消費側（Session 構築・

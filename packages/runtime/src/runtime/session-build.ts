@@ -719,7 +719,7 @@ export const buildSessionState = async (
   assertWeightsWithinLimits(residency, gpu.limits);
 
   // 共有 initializer（借り物の重み — ADR 0096 段 2 §1.3）の突合。**バイトを 1 つも上げる前**に
-  // 席・宣言 shape・貸し手の codec・device を見る（門の中身は `resolveSharedWeights`）。
+  // 席・宣言 shape・意味論 dtype・貸し手の codec・device を見る（門の中身は `resolveSharedWeights`）。
   const shared = resolveSharedWeights(graph, residency, gpu, options.sharedWeights);
 
   // 整数内積変種は **linear と attention で別席**（{@link SessionState}）。どちらも
