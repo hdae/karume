@@ -418,7 +418,9 @@ cache の一覧（形は潜在 32×32 のタイルのとき。各 `[Cin, 2, h, w
   収まる。
 - `attentionScoreStorage: "f16"`（ADR [0031](0031-attention-score-f16-storage.md)）は数値を変える opt-in
   （ADR [0058](0058-numerics-opt-in-contract.md)）なので、既定では使わない。
-- 計算量は S² のまま残る。online softmax にしても FLOP は減らない（容量だけの手）。
+- 計算量は S² のまま残る。online softmax にしても積和は減らないが、S の一時領域とその書き込み・読み直しは
+  消えるので、帯域の面では速度に効く余地がある。速度への効果は未測定（小さいタイルでは K / V の再読込が増える）
+  （訂正 2026-10-10 — 旧記述は「容量だけの手」）。
 
 **タイムアウト**:
 

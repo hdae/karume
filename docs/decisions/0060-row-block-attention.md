@@ -69,7 +69,10 @@
   （鎖融合でも ×1.19 < kill 1.3・S=170 は逆転）— 判断は台帳 K-5b、実測と emptyrow0 online
   意味論スケッチは
   [research/2026-08-14-attention-chain-fusion-spike.md](../research/2026-08-14-attention-chain-fusion-spike.md)〕
-- 隣接（対象外・記録）: この窓を IR op `attention`（ADR 0023）へ寄せて S 自体を非実体化する
-  案は、mask 契約（`[1,1,M,N]` vs `[1,1,1,N]`）と safe_softmax の空行契約（ADR 0044）の
-  2 点が要る別トラック。`FusedDispatch.operands` 省略時の並び規約は doc の MUST のみ
+- 隣接（対象外・記録）: この窓を IR op `attention`（ADR 0023）へ寄せる案は、mask 契約
+  （`[1,1,M,N]` vs `[1,1,1,N]`）と safe_softmax の空行契約（ADR 0044）の 2 点が要る別トラック。
+  寄せて得られるのは P（`exp(S−m)·inv`）の非実体化と dispatch の削減で、融合 attention も ①QK で
+  S を確保するので S 自体は消えない（`kernels/attention.ts` 冒頭）。S の非実体化は別の online 実装で、
+  台帳 K-5b で棄却済み（訂正 2026-10-10 — 旧記述は「寄せて S 自体を非実体化する案」）。
+  `FusedDispatch.operands` 省略時の並び規約は doc の MUST のみ
   （型で縛る案は既存 4 ルールの記述量とのトレードで見送り）。

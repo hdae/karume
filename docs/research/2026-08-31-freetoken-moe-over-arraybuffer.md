@@ -47,6 +47,11 @@ HOBBIT 2411.01433 / EdgeMoE 2308.14352 ほか）は**全て「host→device の�
 （= dense と同じ扱い・予算は active でなく総パラメータで組む）。karume の shard 分割配布は
 この路線に既に最適化されている。
 
+> 訂正注記（2026-10-10）: 上の「全 expert VRAM 常駐が唯一の成立形」は一般化しすぎ。成り立たないのは
+> FreeToken の同期無し（device 起動）の機構の直接移植で、翌日のリポ外 PoC（[backlog](../backlog.md) later
+> 「MoE page-fault」）では、ホストが router の結果を読んで不足 expert を書き込む方式が、decode が既に払う
+> 往復に相乗りして追加同期ゼロで機構として成立した（実用可否は未確定）。本文は時点の記録として残す。
+
 ## 3. 「ArrayBuffer の壁」は既に移動している
 
 | 壁                                        | karume での現状                                                                                                                                                     |

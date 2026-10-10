@@ -480,8 +480,10 @@ backing は flush 後の後始末まで生きる）。**states 形 attention の
 入っている**（行統計は `stateAttentionReduce` が要求する計画だけで、stats/PV 融合が成立する
 計画では 0 バイト）。
 `unaccounted` に載らない差がもう 1 つある: **領域境界の padding** で、見積りの配置は実構築の
-パッカーと数百バイト単位でずれる（`EstimateOptions.maxBufferSize` は state スロット単体の上限
-検査にしか使わず、どのカテゴリのバイト数も動かさない — `estimate.ts` の JSDoc）。
+パッカーと数百バイト単位でずれる。`EstimateOptions.maxBufferSize` は state スロット単体の上限検査と
+中間パッキングの領域の上限の両方に効き、`workspaceBytes` を動かしうる（first-fit の領域の割れ方が上限で
+変わる）。残る差は offset 整列で、device 値を受ける欄が無く WebGPU core 既定の 256 で詰める（`estimate.ts`
+の JSDoc）。
 可否の最終門はこれまでどおり out-of-memory errorScope で、`peakAccountedBytes` も名前どおり
 「勘定に入れた分のピーク」= 上限保証ではない。
 
@@ -690,11 +692,15 @@ by-design（2026-08-31 裁定）。MoE モデルの VRAM 予算は **active で�
 ①容器の束縛表は宣言された全 initializer の供給を要求する（`krm` では 2 文書の突合
 `validateAgainstGraph`、メモリ内容器では `openMemoryContainer` の対応検査が不足と余剰を fail loudly で
 落とす — 穴を開けると受理集合の一本化が崩れる）②重み常駐は Session 構築時
-1 回組みで退避/再ロードの席が無い ③IR に値依存の実行選択が無く（op-vocabulary の意図的
-保留・`topk` も static-k）、MoE は全 expert を計算して gate で畳む dense 展開でしか書けない。
+1 回組みで退避/再ロードの席が無い ③IR に値依存の実行選択（動的な expert の転送・スキップ）が
+無い（op-vocabulary の意図的保留・`topk` も static-k）。固定 k の選択演算そのものは既存 op
+（expand → gather → permute / reshape → bmm）で形を静的に保ったまま k 本分だけ積和できるが、
+圧縮常駐の expert を直接引く kernel は無く、gather 経由では f32 展開とコピーが要る。
 さらに外部要因として、expert キャッシュ系の先行手法（FreeToken ほか）が前提にする
-「device 起動の host メモリ転送」が WebGPU に存在しない。復活条件つきの再検討席は
-[backlog](backlog.md) parked。
+「device 起動の host メモリ転送」が WebGPU に存在しないので、その同期無しの機構は直接移植できない。
+ホスト制御の miss 処理（ホストが router の結果を読み、不足 expert を書き込む）はリポ外の PoC で
+機構が成立したが、性能と実用可否は未確定（[backlog](backlog.md) later「MoE page-fault」）。
+復活条件つきの再検討席は [backlog](backlog.md) parked。
 
 ## 付帯資産の safetensors はデータ節の被覆と要素整列を要求する（公式の `safe_open` が読めても拒否しうる）
 

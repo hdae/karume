@@ -97,7 +97,7 @@
 
 ## 現役の落とし穴
 
-- 低bit化は**速度の理由にしない**。decodeは本機で帯域律速になっていない（帯域利用率11.5 / 25.5%の実測）ので、低bit codecで削るのは律速でない側になる。効くのは**メモリ**で、実行の前提はpacked int8活性（[ADR 0105](../docs/decisions/0105-packed-static-quantize-activations.md)）。速度を主張したいならそちらの実測が先（[ADR 0108](../docs/decisions/0108-container-format.md)決定15）。
+- 低bit化は**速度の理由にしない**。decodeはRTX 3080 Ti（Chrome・2026-09-19）で帯域律速になっていない（帯域利用率11.5 / 25.5%の実測 — 表の列から再計算すると12.1 / 27.5%・開発機B570は未測。[ADR 0108](../docs/decisions/0108-container-format.md)追記 7）ので、低bit codecで削るのは律速でない側になる。効くのは**メモリ**で、実行の前提はpacked int8活性（[ADR 0105](../docs/decisions/0105-packed-static-quantize-activations.md)）。速度を主張したいならそちらの実測が先（[ADR 0108](../docs/decisions/0108-container-format.md)決定15）。
 - 実資産のi2は**三値ではない**。gemma4-qat E2BのI2テンソルで`q = −2`が5.8〜7.4%出ているので、i2資産を三値として読み替えると全要素の6%前後が別の値になる。三値は詰め方も復元式もi2と同一でruntimeの追加は0行だが、**別名のcodecとして宣言する**（資産を識別できるようにするため — [ADR 0108](../docs/decisions/0108-container-format.md)決定13）。
 - sha256参照値は**環境ごとの行**で、定数ではない（[ADR 0106](../docs/decisions/0106-device-keyed-references.md)）。行を持たない機では明示SKIP + 参照門が赤になるので、`KARUME_REFERENCE=write`で行を作る。他環境の行を焼き直さない。tolerance化は禁止。
 - Wan2.1は`quant`を省くと**実用席** `f16+dit8-a8-attn8-s16`に解決する（2026-10-04〜）。既存のsha行・帯・case idは`f16`席の値で、テストは席を全ケースで明示して保っている（省略は型で止める）。行を足すときも席を明示する（[ADR 0120 追記 2026-10-04](../docs/decisions/0120-wan-dit-w8a8-seat.md)）。

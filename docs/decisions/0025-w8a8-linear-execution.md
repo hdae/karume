@@ -65,7 +65,8 @@
    一致する**（数値契約はむしろ強くなる）。ADR 0019 は w8（f32 計算）の正本として不変。
 5. **dp4a / エミュの 2 変種は数値完全一致**: `dot4I8Packed`（WGSL 言語拡張
    `packed_4x8_integer_dot_product`）と `dot(unpack4xI8, unpack4xI8)`（core WGSL）は同じ
-   整数を返す（中間値最大 4·127² = 64,516 で巻き戻り不能）。**拡張の有無は速度のみ** —
+   整数を返す（中間値最大 4·127·128 = 65,024 で巻き戻り不能 — 重みは i8 の −128 を含みうる。訂正 2026-10-10・旧記述は
+   4·127² = 64,516）。**拡張の有無は速度のみ** —
    fail loudly も環境別 tolerance も不要（ADR 0002 と整合）。選択は
    `wgslLanguageFeatures` の列挙（数値が同一な変種の選択にだけ使う — 機能検出ではない）。
    検出器 = テスト専用の強制エミュノブ（`LINEAR_I8A8_DOT` unique symbol・packages/runtime/mod.ts 非公開）で
