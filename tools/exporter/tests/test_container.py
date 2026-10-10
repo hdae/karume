@@ -198,6 +198,43 @@ class TestIrV2Document:
         # 配列は宣言順のまま（順序が意味を持つ欄）。
         assert '"ins":["x","a.weight"]' in text
 
+    def test_digit_only_names_follow_code_point_order_like_the_ts_writer(self) -> None:
+        """数字だけの名前も code point 順（"10" < "2"）。
+
+        TS の書き手と共有する fixture とバイト単位で一致する。
+        """
+        emoji = "\U0001f600"
+        tensors = ["10", "2", emoji, "0"]
+        chain = ["x", "a1", "a2", "a3", "y"]
+        # 改名前の initializer 名（p_*）から実体の鍵へ。
+        # ノードは "0" → "2" → "10" → 絵文字の順に足す。
+        order = ["0", "2", "10", emoji]
+        graph = IrGraph(
+            symbols=[],
+            inputs=[IrInput(name="x", dtype="f32", shape=[4])],
+            outputs=["y"],
+            initializers={
+                f"p_{index}": IrInitializer(tensor=tensor, storage=IrStorage(dtype="f32"))
+                for index, tensor in enumerate(tensors)
+            },
+            values={
+                **{f"p_{index}": IrValue(dtype="f32", shape=[4]) for index in range(len(tensors))},
+                **{name: IrValue(dtype="f32", shape=[4]) for name in chain[1:]},
+            },
+            nodes=[
+                IrNode(
+                    op="add",
+                    ins=[chain[step], f"p_{tensors.index(tensor)}"],
+                    outs=[chain[step + 1]],
+                    attrs={"10": 1, "2": 2, "a": {"10": True, "9": False}} if step == 0 else {},
+                )
+                for step, tensor in enumerate(order)
+            ],
+        )
+        expected = (RUNTIME_FIXTURES / "ir" / "canonical-name-order.txt").read_text("utf-8")
+
+        assert canonical_json(ir_v2_document(graph)) == expected
+
     def test_an_empty_states_section_is_not_written(self) -> None:
         document = ir_v2_document(_minimal_graph())
 

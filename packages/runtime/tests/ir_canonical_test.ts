@@ -115,6 +115,16 @@ describe("canonicalIrJson", () => {
     assertEquals(text.includes('"attrs":{"B":0,"a":{"b":true,"y":[3,1,2]},"z":1,"é":"e"}'), true);
   });
 
+  it('数字だけの名前も code point 順（"10" < "2"）で、Python の書き手と同じバイト列になる', () => {
+    // JS のオブジェクトは整数に見えるキーを先に昇順で列挙するので、並べた順に代入して
+    // JSON.stringify へ渡すと "0","2","10" の順に戻る。期待値は Python の書き手
+    // （tools/exporter の test_container.py）と共有する fixture。
+    const expected = Deno.readTextFileSync(
+      new URL("./fixtures/ir/canonical-name-order.txt", import.meta.url),
+    );
+    assertEquals(canonicalIrJson(parseIrDeclaration(expected)), expected);
+  });
+
   it("parse → canonical → parse → canonical は不動点（冪等）", () => {
     const first = canonical(baseGraph());
     assertEquals(canonical(JSON.parse(first)), first);

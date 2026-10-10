@@ -3,7 +3,12 @@
 // 本ファイルはグラフ単体で決まる規則（宣言・SSA・トポロジカル順・語彙）だけを見る。
 
 import type { CodecName } from "./container/codecs.ts";
-import { canonicalJsonValue, sortedByCodePoints, sortedObject } from "./container/json.ts";
+import {
+  canonicalJsonText,
+  canonicalJsonValue,
+  sortedByCodePoints,
+  sortedObject,
+} from "./container/json.ts";
 import { isSymbolName, parseDim, tryParseDim } from "./dims.ts";
 
 /** 意味論 dtype。計算は常にこの型で行う（f16/bf16/i8 は格納だけの概念）。 */
@@ -574,7 +579,7 @@ export const canonicalIrDocument = (graph: IrDeclaration): Record<string, unknow
 
 /** 正準直列化したグラフ JSON 文字列。 */
 export const canonicalIrJson = (graph: IrDeclaration): string =>
-  JSON.stringify(canonicalIrDocument(graph));
+  canonicalJsonText(canonicalIrDocument(graph));
 
 /** shape に現れるシンボル名を集める（次元位置の出現のみ — 要素数からの逆算はしない）。 */
 const symbolsIn = (shape: readonly IrDim[], into: Set<string>): void => {

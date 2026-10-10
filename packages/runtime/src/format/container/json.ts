@@ -98,23 +98,36 @@ export const sortedByCodePoints = (keys: Iterable<string>): string[] =>
   [...keys].sort(compareCodePoints);
 
 /**
- * オブジェクトのキーを code point 順に並べ替えた写し（値は `map` で変換 — 既定は恒等）。
+ * 名前をキーに持つ map の正準形 — code point 順に並べたエントリ列。直列化は
+ * {@link canonicalJsonText} だけが行う。
+ *
+ * MUST: 正準順をオブジェクトの列挙順で表さない。JS のオブジェクトは整数に見えるキー（"2" / "10"）を
+ * 挿入順に関係なく先に昇順で列挙するので、並べた順に代入しても `JSON.stringify` は "2","10" と
+ * 書く（code point 順は "10","2" — Python の書き手はこちらを書く）。
+ */
+export class SortedEntries {
+  readonly entries: readonly (readonly [string, unknown])[];
+  constructor(entries: readonly (readonly [string, unknown])[]) {
+    this.entries = entries;
+  }
+}
+
+/**
+ * オブジェクトのキーを code point 順に並べたエントリ列（値は `map` で変換 — 既定は恒等）。
  *
  * MUST: キー `__proto__` は書き手の側でも拒否する（docs/container-v1.md §0）。読み手が拒否する
- * 名前を書けば、自分の出力を自分で読めない。写しの器も null プロトタイプにして、キーが
- * [[Prototype]] の設定に化けて黙って消える経路を持たない。
+ * 名前を書けば、自分の出力を自分で読めない。
  */
 export const sortedObject = <T>(
   source: Readonly<Record<string, T>>,
   map: (value: T, key: string) => unknown = (value) => value,
-): Record<string, unknown> => {
-  const out: Record<string, unknown> = Object.create(null);
-  for (const key of sortedByCodePoints(Object.keys(source))) {
-    if (key === "__proto__") throw new ContainerFormatError("キー '__proto__' は書けない");
-    out[key] = map(source[key], key);
-  }
-  return out;
-};
+): SortedEntries =>
+  new SortedEntries(
+    sortedByCodePoints(Object.keys(source)).map((key) => {
+      if (key === "__proto__") throw new ContainerFormatError("キー '__proto__' は書けない");
+      return [key, map(source[key], key)] as const;
+    }),
+  );
 
 /**
  * 自由形の JSON 値（ノードの `attrs` など）を再帰的に正準化する — オブジェクトはキーを code point
@@ -126,5 +139,34 @@ export const canonicalJsonValue = (value: unknown): unknown => {
   return value;
 };
 
+const fieldText = ([key, value]: readonly [string, unknown]): string =>
+  `${JSON.stringify(key)}:${canonicalJsonText(value)}`;
+
+/**
+ * 正準 JSON の直列化器（空白なし）。{@link SortedEntries} はエントリ列の順に、固定スキーマの
+ * オブジェクトは組み立てた欄の順に書く（固定スキーマの欄名は整数に見えないので列挙順 = 組み立て順）。
+ * 並べ替えはしない — 順は組み立て側が決める（Python の `canonical_json` と同じ分担）。
+ *
+ * `JSON.stringify` が黙って書き換える値（非有限数 → null・配列の穴と undefined → null）は
+ * fail loudly。固定スキーマの undefined の欄は書かない（`JSON.stringify` と同じ — 省略可能な欄）。
+ */
+export const canonicalJsonText = (value: unknown): string => {
+  if (value instanceof SortedEntries) return `{${value.entries.map(fieldText).join(",")}}`;
+  // Array.from は穴を undefined として渡す（map は穴を飛ばし、join が空文字に綴る）。
+  if (Array.isArray(value)) return `[${Array.from(value, canonicalJsonText).join(",")}]`;
+  if (isJsonObject(value)) {
+    const fields = Object.entries(value).filter(([, field]) => field !== undefined);
+    return `{${fields.map(fieldText).join(",")}}`;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new ContainerFormatError(`非有限数 ${value} は書けない`);
+    return JSON.stringify(value);
+  }
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  throw new ContainerFormatError(`JSON として表せない値: ${typeof value}`);
+};
+
 export const encodeJsonBytes = (value: unknown): Uint8Array<ArrayBuffer> =>
-  new TextEncoder().encode(JSON.stringify(value)) as Uint8Array<ArrayBuffer>;
+  new TextEncoder().encode(canonicalJsonText(value)) as Uint8Array<ArrayBuffer>;
