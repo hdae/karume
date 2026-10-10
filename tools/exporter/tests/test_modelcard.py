@@ -466,3 +466,73 @@ class TestRenderDeterminism:
         card = self._card(_manifest())
 
         assert card.index("## Model: zeta") < card.index("## Model: alpha")
+
+
+class TestTheSameNameFromAnotherOrigin:
+    """同じ相対 path でも出所（repo・revision）が違えば別ファイル（hub の `fileRefKey` と同じ）。
+
+    path だけで一意化すると、後から来た参照が捨てられ、Download が過小に出て借用元の注記から
+    片方が落ちる — hub は両方を別々に取得するので、カードだけが実際の取得と食い違う。
+    """
+
+    @staticmethod
+    def _borrowed(repo: str, revision: str, size: int) -> dict[str, Any]:
+        return {
+            "repo": repo,
+            "revision": revision,
+            "path": "source/front.krm",
+            "size": size,
+            "sha256": "9" * 64,
+        }
+
+    @staticmethod
+    def _with_back(back: dict[str, Any], front: dict[str, Any] | None = None) -> dict[str, Any]:
+        """alpha に 2 部品目 `back` を足し、f16 の席が両方を選ぶ形にする。"""
+        manifest = _manifest()
+        alpha = manifest["models"]["alpha"]
+        if front is not None:
+            alpha["weights"]["front"]["f16"]["container"]["parts"] = [front]
+        alpha["weights"]["back"] = {"f16": {"container": _container(back)}}
+        alpha["quants"]["f16"]["weights"]["back"] = "f16"
+        return alpha
+
+    @pytest.mark.parametrize(
+        ("front", "back", "total", "repos"),
+        [
+            # 別リポの同名 path: 512 + 256 = 768 B・借用元は 2 件。
+            (
+                ("hdae/source-a", "1" * 40, 512),
+                ("hdae/source-b", "1" * 40, 256),
+                "768 B",
+                ["hdae/source-a", "hdae/source-b"],
+            ),
+            # 同じリポの別 revision: 別ファイルとして 2 本とも落ちる。
+            (
+                ("hdae/source-a", "1" * 40, 512),
+                ("hdae/source-a", "2" * 40, 256),
+                "768 B",
+                ["hdae/source-a", "hdae/source-a"],
+            ),
+        ],
+        ids=["another-repo", "another-revision"],
+    )
+    def test_borrowed_files_with_the_same_path_are_both_counted(
+        self,
+        front: tuple[str, str, int],
+        back: tuple[str, str, int],
+        total: str,
+        repos: list[str],
+    ) -> None:
+        alpha = self._with_back(self._borrowed(*back), front=self._borrowed(*front))
+        lines = quants(alpha)
+
+        assert f"| {total} ({total} shared) |" in _row(lines, "f16")
+        notes = [line for line in lines if line.startswith("Some components are fetched from")]
+        assert [line.split("`")[1] for line in notes] == repos
+
+    def test_an_own_file_and_a_borrowed_file_with_the_same_path_are_both_counted(self) -> None:
+        """自リポの `alpha/front.krm`（512 B）と、借用元の同名 path（256 B）は別物。"""
+        borrowed = {**self._borrowed("hdae/source-a", "1" * 40, 256), "path": "alpha/front.krm"}
+        lines = quants(self._with_back(borrowed))
+
+        assert "| 768 B (256 B shared) |" in _row(lines, "f16")

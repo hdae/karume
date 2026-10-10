@@ -125,20 +125,35 @@ def _significant(value: float) -> str:
     return f"{value:.{max(0, 3 - len(str(int(value))))}f}"
 
 
+#: ファイル参照の同一性（出所の `repo` / `revision` と `path` の組 — 自リポは出所が `None`）。
+FileRefKey = tuple[str | None, str | None, str]
+
+
+def file_ref_key(ref: Mapping[str, Any]) -> FileRefKey:
+    """hub の `fileRefKey` と同じ同一性（出所と path の組）。
+
+    MUST: path だけで一意化しない — 別リポ・同じリポの別 revision・自リポ対借用の同名 path は
+    hub が別ファイルとして取得する（ADR 0038 §7）。path だけで畳むと後から来た方が捨てられ、
+    ダウンロード量が過小に出て借用元の説明から片方が落ちる。
+    """
+    return (ref.get("repo"), ref.get("revision"), ref["path"])
+
+
 def _is_shared(ref: Mapping[str, Any]) -> bool:
     """2 本目のモデルでは落とし直さない参照か（同リポの `shared/` か、別リポからの越境）。"""
     return ref["path"].startswith("shared/") or "repo" in ref
 
 
-def _collect(refs: dict[str, Mapping[str, Any]], weight_files: Mapping[str, Any]) -> None:
-    """1 つの dtype エントリのファイル（コンテナの part 列）を **path で一意化**して足す。
+def _collect(refs: dict[FileRefKey, Mapping[str, Any]], weight_files: Mapping[str, Any]) -> None:
+    """1 つの dtype エントリのファイル（コンテナの part 列）を **同一性で一意化**して足す
+    （{@link file_ref_key}）。
 
     一意化は 2 つの部品が同じコンテナを指す形（`shared/` に畳まれた席と同型）でバイトを
     二重に数えないため。`karume/4` の `extras` は退役し、実物はコンテナの資産になった
     （= part の中なので、足す先はこの 1 本だけ — ADR 0109 決定 4）。
     """
     for ref in weight_files["container"]["parts"]:
-        refs.setdefault(ref["path"], ref)
+        refs.setdefault(file_ref_key(ref), ref)
 
 
 def _quant_refs(model: Mapping[str, Any], quant: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -147,11 +162,11 @@ def _quant_refs(model: Mapping[str, Any], quant: Mapping[str, Any]) -> list[Mapp
     重みは quant が選んだ dtype のファイルだけ。assets は quant 選択に依存しない無条件
     ファイル（ADR 0041 §3）なので全部入る。
     """
-    refs: dict[str, Mapping[str, Any]] = {}
+    refs: dict[FileRefKey, Mapping[str, Any]] = {}
     for name, label in quant["weights"].items():
         _collect(refs, model["weights"][name][label])
     for ref in model["assets"].values():
-        refs.setdefault(ref["path"], ref)
+        refs.setdefault(file_ref_key(ref), ref)
     return list(refs.values())
 
 
@@ -161,12 +176,12 @@ def _model_refs(model: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     注記は quant 表 1 つに 1 度出るので、条件も**モデル単位**で見る（選んだ quant 次第で
     注記が現れたり消えたりすると、同じモデルの説明が席ごとに変わる）。
     """
-    refs: dict[str, Mapping[str, Any]] = {}
+    refs: dict[FileRefKey, Mapping[str, Any]] = {}
     for entry in model["weights"].values():
         for weight_files in entry.values():
             _collect(refs, weight_files)
     for ref in model["assets"].values():
-        refs.setdefault(ref["path"], ref)
+        refs.setdefault(file_ref_key(ref), ref)
     return list(refs.values())
 
 
@@ -289,10 +304,10 @@ def _download(
     前者だけを数えると、資産を容器へ畳んだ配布形で内訳の説明だけが黙って消える。
     """
     refs = _quant_refs(model, quant)
-    asset_paths = {ref["path"] for ref in model["assets"].values()}
+    asset_keys = {file_ref_key(ref) for ref in model["assets"].values()}
     total = sum(ref["size"] for ref in refs)
     shared = sum(ref["size"] for ref in refs if _is_shared(ref))
-    assets = sum(ref["size"] for ref in refs if ref["path"] in asset_paths)
+    assets = sum(ref["size"] for ref in refs if file_ref_key(ref) in asset_keys)
     assets += sum(host_assets.get(path, 0) for path in _container_heads(model, quant))
     notes = []
     if shared:

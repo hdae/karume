@@ -103,7 +103,7 @@ from karume.container import (
     read_descriptor_refs,
 )
 from karume.limits import LimitsError, max_state_slot_bytes, required_limits
-from karume.modelcard import HF_OWNER
+from karume.modelcard import HF_OWNER, file_ref_key
 from karume.verify import ContainerError, VerifiedContainer, assert_ir_accepted, verify_container
 
 # ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
@@ -2169,9 +2169,9 @@ def main(
             print(f"{meta.stat().st_size:>12}  {rel_path}")
     # 越境参照は手元に現物が無いので `verify_dist` の一覧には出ない — 何を他リポへ預けたかが
     # 組み立ての出力から読めるように、指し先ごと 1 行で並べる（同じ席を複数の dtype 席が
-    # 指すので path で一意化する）。
+    # 指すので、カードと同じ同一性〈出所と path の組〉で一意化する）。
     borrowed = {
-        (ref["repo"], ref["revision"], ref["path"]): ref["size"]
+        file_ref_key(ref): ref["size"]
         for _, ref in _declared_refs(manifest)
         if is_external_ref(ref)
     }
