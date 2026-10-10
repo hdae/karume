@@ -61,7 +61,9 @@
  * `outputs/verify/<環境キー>/<日付>_wan-ti2v-pipeline-full/` に書き、非有限 0 と device lost が無いことを見る（利用者の視認の
  * 素材 — 生成スクリプトの同じ要求の PNG とバイトが一致することもここで見られる）。sha256 の環境行は 2 本とも持つ（参照席は参照行・
  * 実用席は実用行 — 上の「行のクラス」。段 6 では数値の正しさを確かめる前の出力を凍結しないため観測だけにしていて、段 7 で実用席の
- * 数値の門〈自機 A/B 門〉と一緒に行を持たせた — ADR 0121 段 7）。参照門への登録は opt-in のときだけ（既定のレーンでは回らない
+ * 数値の門〈自機 A/B 門〉と一緒に行を持たせた — ADR 0121 段 7）。実用席は突合と書き込みの前に、同じ走行の参照席の実物と 1 bit
+ * 以上違うこと（床 — 既定のレーンの実用行と同じ・ADR 0110 決定 5）を見る（並びが参照席 → 実用席なのはこの床の相手を先に
+ * 作るためでもある）。参照門への登録は opt-in のときだけ（既定のレーンでは回らない
  * ので、登録すると行が無い機の参照門を赤にする — 121 フレームと同じ扱い）。行は `KARUME_REFERENCE=write` を付けて同じコマンド
  * （`KARUME_WAN_TI2V_FULL_PIPELINE=1` と `--filter "50 ステップ"`）で作る。結果の席を既定のレーン
  * （`<日付>_wan-ti2v-pipeline/`）と分けるのは、`results.json` が走行ごとに丸ごと書き直されるため。
@@ -1138,6 +1140,8 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
+      /** 参照席の実物（RGB のバイト列）の sha256 — 同じ要求の実用席の床の比べる相手（既定のレーンの実用行と同じ床）。 */
+      let referenceRgbSha: string | undefined;
       for (const { id, quant } of FULL_CASES) {
         await t.step(id, async () => {
           let settlement: ReferenceSettlement | undefined;
@@ -1176,10 +1180,27 @@ Deno.test({
                 await encodePng(sheet.rgba, sheet.width, sheet.height),
               );
               console.log(`[wan-ti2v-pipeline] PNG: ${fullResults.dir.pathname}`);
+              const bytes = rgbBytes(video);
+              const sha = await sha256Hex(bytes);
+              if (quant === WAN_TI2V_REFERENCE_QUANT) {
+                referenceRgbSha = sha;
+              } else {
+                // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 席の `session` が Session に届かない
+                // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として凍結しないよう、突合と書き込みの前に落とす。
+                if (referenceRgbSha === undefined) {
+                  throw new Error(
+                    `${id}: 同じ要求の参照席の実物が無い（参照席の 50 ステップが回っていない — 床を確かめられない）`,
+                  );
+                }
+                assert(
+                  sha !== referenceRgbSha,
+                  `${id}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+                );
+              }
               const outcome = await settleOrObserve(references, fullResults, {
                 id,
                 artifact: `${id}.rgb`,
-                bytes: rgbBytes(video),
+                bytes,
               });
               settlement = outcome.settlement;
               return { ...outcome.fields, note: notes.join(" / ") };
