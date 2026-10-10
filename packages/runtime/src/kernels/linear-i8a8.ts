@@ -39,7 +39,8 @@
  *
  * `dot4I8Packed`（WGSL 言語拡張 `packed_4x8_integer_dot_product`）と
  * `dot(unpack4xI8(a), unpack4xI8(b))`（core WGSL）は**同じ整数を返す** — 整数加算は結合的
- * かつ厳密で、中間値も最大 4·127² = 64,516 なので巻き戻りが起こりえない。したがって拡張の
+ * かつ厳密で、中間値も最大 4·127·128 = 65,024（活性は ±127・重みは i8 の −128 を含みうる — 下の K
+ * 上限の門と同じ上界）なので巻き戻りが起こりえない。したがって拡張の
  * 有無は**速度にしか効かず**、fail loudly も tolerance 分岐も要らない。選択は
  * `navigator.gpu.wgslLanguageFeatures` の列挙（{@link dp4aAvailable}）で、キーに `:dp4a` /
  * `:dp4aEmu` が載るので診断（ADR 0021）でどちらが走ったか見える。唯一の機械的検出器は
@@ -203,7 +204,7 @@ fn idot(a: u32, b: u32) -> i32 {
   return dot4I8Packed(a, b);
 }`
     : `// 整数内積のエミュレーション（core WGSL のみ）。dot4I8Packed と**同じ整数**を返す —
-// 整数加算は結合的かつ厳密で、中間値も最大 4·127² = 64,516 なので巻き戻らない
+// 整数加算は結合的かつ厳密で、中間値も最大 4·127·128 = 65,024（重みは −128 を含みうる）なので巻き戻らない
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }`;

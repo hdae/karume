@@ -13,7 +13,7 @@ struct Dims {
 @group(0) @binding(6) var<storage, read> xscale: array<f32>;
 
 // 整数内積のエミュレーション（core WGSL のみ）。dot4I8Packed と**同じ整数**を返す —
-// 整数加算は結合的かつ厳密で、中間値も最大 4·127² = 64,516 なので巻き戻らない
+// 整数加算は結合的かつ厳密で、中間値も最大 4·127·128 = 65,024（重みは −128 を含みうる）なので巻き戻らない
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }

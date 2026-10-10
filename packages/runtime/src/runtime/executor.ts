@@ -1613,9 +1613,10 @@ export class Session {
             }
 
             if (singleFence) {
-              // MUST: 読み戻しの copy は **dispatch と同じコマンド列**へ積む（FIFO）。別 encoder の
-              // 別 submit にすると submit が 2 本に割れ、mapAsync が「先行 dispatch の完了」を
-              // 含意しなくなる（含意の根拠は同一キューでの発行順）。
+              // MUST: 読み戻しの copy は **dispatch と同じコマンド列**へ積む（FIFO）。同じ列に積むと
+              // submit とフェンスが 1 本で済み、flush の完了待ちと再 flush が消える（ADR 0054 決定 6）。
+              // 正しさの根拠ではない — 同一キューの submit は発行順に実行されるので、別 submit に
+              // 割っても mapAsync の解決は先行 dispatch の完了を含意する。
               staged = this.#stageOutputs(
                 this.#runValues(backing, missValues),
                 shapes,

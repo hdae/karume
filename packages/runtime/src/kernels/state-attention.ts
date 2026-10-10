@@ -11,16 +11,22 @@
  * | ③' | `attention_state_pv:v1:f32:wg16x16:par`  | ③ の **KV 並列縮約**変種（opt-in — 下記）      |
  * | ③ₜ | `attention_state_pv:v1:f32:reg<幾何>`     | ③ の **V 行タイル共有**変種（既定 — 下記）      |
  *
- * 既存の融合 attention（src/kernels/attention.ts + GEMM 骨格）とは**別族**で、1 バイトも共有
- * しない。理由は 3 つで、どれも既存側を触らずに済ませるためではなく、意味論が違うため:
+ * 既存の融合 attention（src/kernels/attention.ts + GEMM 骨格）とは**別系統**（キー族も別）。
+ * ただし ①ₜ / ③ₜ は GEMM 骨格（src/kernels/gemm.ts）の行タイルを共有し、states の読み口の断片だけを
+ * 差す。別系統である理由は 2 つで、どれも既存側を触らずに済ませるためではなく、意味論が違うため:
  *
  * 1. **K / V の出どころが 2 つ**（論理 col < pastLength は state スロット・以降は今 step の
- *    `ins`）で、GEMM のタイル充填は「1 本の連続バッファ」を前提にしている。
- * 2. **行統計の identity が −inf**（既存 ② は `-F32_MAX` の有限 sentinel）。states 形は padding
- *    行と空 context 行が**正規に**出るため、空行 → 出力 0 を構造で保証する必要がある
- *    （ADR 0067 決定 6 — 有限 sentinel での代用は MUST NOT）。
- * 3. **走査範囲が実行時値**（論理長 uniform から読む live 列数）で、容量 `C` に比例しない
+ *    `ins`）で、既存の融合 attention のタイル充填は「1 本の連続バッファ」を前提にしている。
+ * 2. **走査範囲が実行時値**（論理長 uniform から読む live 列数）で、容量 `C` に比例しない
  *    （ADR 0066 決定 3 の仕事量合格条件）。
+ *
+ * 行統計の identity −inf と空行ガード（states 形は padding 行と空 context 行が**正規に**出るので、
+ * 空行 → 出力 0 を構造で保証する — ADR 0067 決定 6・有限 sentinel での代用は MUST NOT）は、既存 ②
+ * も v2 で同じ形に揃ったので、もう別系統の理由ではない。
+ *
+ * QK の経路は M（物理 chunk 行数）で 3 段に分かれる: M ≤ 8 で席が parallel なら ①'
+ * （{@link stateQkParallelEligible}）、M ≥ 16 は席に依らず ①ₜ（{@link stateQkTiledEligible}）、
+ * それ以外（9〜15 と、M ≤ 8 の sequential）は ①。
  *
  * MUST: **ビット同一契約（分解経路との一致）は states 形に適用されない**（ADR 0067 決定 4 は
  * 分解経路を持たない — GQA モデルは SDPA 保存が必須）。代わりに従来どおり**決定性**が掛かる:
@@ -816,7 +822,7 @@ type StateStatsShape = {
 
 /**
  * ② 行統計。1 行 = 1 workgroup(256) + 行方向 grid-stride（既存 attention_stats と同じ骨格で、
- * 違うのは **dim が実行時値**（live 列数）・**identity が −inf**・**空行ガード**の 3 点）。
+ * 違うのは **dim が実行時値**（live 列数）の 1 点。identity −inf と空行ガードは既存 ② の v2 も同じ形）。
  *
  * 束縛:
  *

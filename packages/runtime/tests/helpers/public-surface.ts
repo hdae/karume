@@ -83,8 +83,9 @@ const labelOf = (symbol: PublicSymbol): string => `${symbol.name} (${symbol.kind
 /**
  * `deno.json` の `exports` を「entry の綴り → パッケージ根からの相対パス」へ正規化する。
  *
- * 文字列 1 本の形（`"exports": "./mod.ts"` — runtime）はキーを持たないので、マップ形の既定面と
- * 同じ `"."` を綴りとして与える（fixture のキーを 2 つの形で割らない）。
+ * 今の 3 パッケージはどれもマップ形。文字列 1 本の形（`"exports": "./mod.ts"`）は JSR の仕様上
+ * ありうる形への備えで、キーを持たないので、マップ形の既定面と同じ `"."` を綴りとして与える
+ * （fixture のキーを 2 つの形で割らない）。
  */
 const exportEntries = (exports: unknown): ReadonlyMap<string, string> => {
   if (typeof exports === "string") return new Map([[".", exports]]);
