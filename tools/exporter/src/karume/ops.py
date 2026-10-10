@@ -367,6 +367,21 @@ def _assert_cast_target(value: Any, where: str) -> str:
 CAST_ATTRS: AttrSchema = {"to": lambda value, where: _assert_cast_target(value, where)}
 
 
+def integral_float_to_int(value: Any) -> Any:
+    """JSON の `1.0` / `1e0` のような整数値の float を int へ正規化する（他の値はそのまま）。
+
+    MUST: JSON から整数を読む欄は全てこれを通してから型を見る。TS 側は JSON.parse が単一の
+    number を返すので整数値の float という区別が無く（`Number.isSafeInteger(1.0)` は true）、
+    Python が float を丸ごと拒むと**ランタイムが読めるものをエクスポータの検証だけが読めない**
+    乖離になる（受理集合はどちらの向きにもずれてはいけない）。非整数値・非有限値の float は
+    `is_integer()` が False（`inf` / `nan` とも）なので呼び手の型検査でそのまま落ち、bool は
+    float でないので素通しして呼び手が拒む。safe range 超過も呼び手の int 側の検査に載る。
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def _assert_permute_dims(value: Any, where: str) -> list[int]:
     """permute の軸並べ替え表（`dims[d]` = 出力の次元 d が取る入力の次元番号）。
 
@@ -376,6 +391,7 @@ def _assert_permute_dims(value: Any, where: str) -> list[int]:
     """
     if not isinstance(value, list) or not value:
         raise OpContractError(f"{where}: permute の dims が非空のリストでない: {value!r}")
+    value = [integral_float_to_int(dim) for dim in value]
     for dim in value:
         # 上限は安全整数（TS 側の `Number.isSafeInteger` と同じ受理集合 — 任意精度の int を
         # 通すと「エクスポータは書けるがランタイムが受理しない dims」ができる）。
@@ -401,15 +417,9 @@ def _assert_integer_attr(value: Any, where: str, minimum: int) -> int:
     MUST: 安全整数の上限も見る（TS 側は `Number.isSafeInteger` で暗黙にこの上限を持つ）。
     Python の int は任意精度なので、上限を書かないと「エクスポータは書けるがランタイムが
     受理しない attr 値」が作れる — 受理集合は両側で同じでなければならない。
-    MUST: JSON の `1.0` / `1e0` は int へ正規化する（`verify._parse_shape` の次元と同族の
-    非対称）。TS 側は JSON.parse が単一の number を返すので「整数値の float」という区別が
-    無く（`Number.isSafeInteger(1.0)` は true）、Python が float を丸ごと拒むと
-    **ランタイムが読める graph をエクスポータの検証だけが読めない**乖離になる。非整数値・
-    非有限値の float は `is_integer()` が False（`inf.is_integer()` / `nan.is_integer()` とも
-    False）なので、下の共通の判定でそのまま落ちる。
+    MUST: JSON の `1.0` / `1e0` は int へ正規化する（{@link integral_float_to_int} の理由）。
     """
-    if isinstance(value, float) and value.is_integer():
-        value = int(value)
+    value = integral_float_to_int(value)
     if (
         isinstance(value, bool)
         or not isinstance(value, int)

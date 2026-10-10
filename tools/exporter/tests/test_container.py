@@ -1082,3 +1082,71 @@ class TestTheReaderRefuses:
 
         with pytest.raises(ContainerFormatError, match=message):
             read_container(written)
+
+
+def _raw_model_document(
+    written: list[Path], edit: Callable[[dict[str, Any]], None], literals: dict[str, str]
+) -> None:
+    """モデル記述を書き換え、プレースホルダ文字列を**生の数値リテラル**へ置き換えて差し込む。
+
+    `canonical_json` は `64.0` を `64` へ畳むので、整数値の float を綴りのまま届けるには
+    `json.dumps` の出力を文字列置換する（読み手は正準形との一致を要求しない）。
+    """
+    document = json.loads(read_container(written).model_descriptor_bytes)
+    edit(document)
+    text = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
+    for placeholder, literal in literals.items():
+        assert f'"{placeholder}"' in text, f"{placeholder} を差し込んでいない（空振り）"
+        text = text.replace(f'"{placeholder}"', literal)
+    rewrite_part0(written[0], model=text.encode())
+
+
+class TestTheReaderAcceptsIntegralFloats:
+    """JSON の整数欄を `64.0` / `6.4e1` と綴っても、TS と同じく整数として受理する。
+
+    TS の読み手は `Number.isSafeInteger` で判定するので `64.0` と `64` を区別しない。Python が
+    float を丸ごと拒むと、**ランタイムが開けるコンテナをエクスポータの検証だけが開けない**
+    乖離になる（`_assert_integer_attr` / `verify._parse_shape` と同じ受理集合）。
+    """
+
+    @pytest.mark.parametrize("spelling", ["{}.0", "{}e0"], ids=["fraction", "exponent"])
+    def test_an_integral_float_offset_and_length_read_as_int(
+        self, tmp_path: Path, spelling: str
+    ) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        block = read_container(written).model.blocks[1]  # type: ignore[union-attr]
+
+        _raw_model_document(
+            written,
+            lambda document: document["blocks"][1].update(
+                {"offset": "__OFFSET__", "length": "__LENGTH__"}
+            ),
+            {
+                "__OFFSET__": spelling.format(block.offset),
+                "__LENGTH__": spelling.format(block.length),
+            },
+        )
+        read = read_container(written).model
+
+        assert read is not None
+        assert read.blocks[1].offset == block.offset
+        assert read.blocks[1].length == block.length
+        # int で持つ（float のまま持つと to_document が往復で別の綴りを書く余地が残る）。
+        assert type(read.blocks[1].offset) is int
+        assert type(read.blocks[1].length) is int
+
+    @pytest.mark.parametrize("literal", ["64.5", "true"], ids=["fraction", "bool"])
+    def test_a_non_integral_float_or_a_bool_is_still_refused(
+        self, tmp_path: Path, literal: str
+    ) -> None:
+        """正規化は受理集合を広げない — 非整数値と bool は従来どおり拒否する。"""
+        written = write_synthetic(tmp_path, single=False)
+
+        _raw_model_document(
+            written,
+            lambda document: document["blocks"][1].update({"offset": "__OFFSET__"}),
+            {"__OFFSET__": literal},
+        )
+
+        with pytest.raises(ContainerFormatError, match=r"blocks\[1\]\.offset が非負の安全整数"):
+            read_container(written)

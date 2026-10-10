@@ -17,7 +17,7 @@ import re
 
 import pytest
 
-from karume.ops import OpContractError, state_window
+from karume.ops import OpContractError, permute_dims, state_window
 from karume.verify import (
     ContainerError,
     IrError,
@@ -1780,3 +1780,27 @@ class TestStridedRank:
 
         with pytest.raises(OpContractError, match="strided カーネルの上限"):
             assert_op_contracts(graph)
+
+
+class TestIntegralFloatPermuteDims:
+    """permute の `dims` も他の整数 attr と同じく整数値 float を受理する（TS と同じ受理集合）。
+
+    TS 側の検査（`ops/attrs.ts`）は `Number.isSafeInteger` なので `[0.0, 2e0, 1]` を読める。
+    Python だけが落とすと、**ランタイムが読める graph をエクスポータの検証だけが読めない**
+    乖離になる。
+    """
+
+    @pytest.mark.parametrize("dims", [[0.0, 2.0, 1.0], [0, 2e0, 1]])
+    def test_integral_float_dims_are_accepted_as_int(self, dims):
+        assert any(isinstance(dim, float) for dim in dims), "float を渡していない（空振り）"
+
+        normalized = permute_dims({"dims": dims}, "t")
+
+        assert normalized == [0, 2, 1]
+        assert all(type(dim) is int for dim in normalized), "int へ正規化されていない"
+
+    @pytest.mark.parametrize("dims", [[0, 1.5], [True, 0], [0.0, 0]])
+    def test_non_integral_bool_or_duplicate_dims_are_still_rejected(self, dims):
+        """正規化は受理集合を広げない（`0.0` と `0` の重複も重複として落ちる）。"""
+        with pytest.raises(OpContractError, match="permute の dims"):
+            permute_dims({"dims": dims}, "t")

@@ -67,6 +67,7 @@ from karume.ops import (
     assert_node_contract,
     assert_strided_rank,
     attention_readonly,
+    integral_float_to_int,
     resolve_node_dtypes,
     state_window,
     sym_prefix_slice_attrs,
@@ -215,21 +216,6 @@ def _as_storage_dtype(value: Any, where: str) -> str:
     return dtype
 
 
-def _integral_float_to_int(value: Any) -> Any:
-    """JSON の `1.0` / `1e0` のような整数値の float を int へ正規化する（他の値はそのまま）。
-
-    MUST: 整数を読む欄（次元・group 長）は全てこれを通す。TS 側は JSON.parse が単一の number を
-    返すので整数値の float という区別が無く（`Number.isSafeInteger(1.0)` は true）、Python が
-    float を丸ごと拒むと**ランタイムが読める graph をエクスポータの検証だけが読めない**
-    乖離になる（受理集合はどちらの向きにもずれてはいけない）。非整数値の float は
-    `is_integer()` が False なので呼び手の型検査で従来どおり落ち、非有限値はそもそも JSON 読みの
-    時点で弾かれる。safe range 超過は呼び手の int 側の検査に載る。
-    """
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return value
-
-
 def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
     shape: list[int | str] = []
     for index, dim in enumerate(_as_array(value, where)):
@@ -239,7 +225,7 @@ def _parse_shape(value: Any, symbols: set[str], where: str) -> list[int | str]:
             raise IrError(f"{at}: 次元が数値でも文字列でもない")
         # safe range 超過は下の int 側の検査（`> MAX_SAFE_INT`）に載る = TS の
         # `Number.isSafeInteger` と同じ受理集合になる。
-        dim = _integral_float_to_int(dim)
+        dim = integral_float_to_int(dim)
         if isinstance(dim, int):
             if dim < 0 or dim > MAX_SAFE_INT:
                 raise IrError(f"{at}: 次元 {dim} が非負整数でない")
@@ -345,7 +331,7 @@ def _parse_storage(value: Any, where: str, *, shared: bool = False) -> IrStorage
     scale = _as_nonempty_str(obj["scale"], f"{where}.scale") if has_scale else None
     group_size = None
     if has_group_size:
-        raw = _integral_float_to_int(obj["group_size"])
+        raw = integral_float_to_int(obj["group_size"])
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
             raise IrError(f"{where}.group_size: 正整数でない")
         # TS 側は JSON の数値として読むので 2^53−1 を超える値は整数として持てない
@@ -1287,7 +1273,7 @@ def _declared_tensor(
     for raw_dim in raw:
         # 容器の JSON 読みは float を int に変えない — graph の `_parse_shape` と同じ受理集合に
         # 揃える（ランタイムは `4.0` を次元 4 として読む）。
-        dim = _integral_float_to_int(raw_dim)
+        dim = integral_float_to_int(raw_dim)
         if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
             raise ContainerFormatError(
                 f"{where}: initializer の shape に記号次元は使えない（{dim!r}）"

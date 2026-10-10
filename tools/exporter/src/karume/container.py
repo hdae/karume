@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from karume.ir import IrGraph
-from karume.ops import WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS
+from karume.ops import WEIGHT_CHANNEL_AXES, WEIGHT_SLOTS, integral_float_to_int
 
 _MIB = 1024 * 1024
 
@@ -1915,6 +1915,9 @@ def _require_keys(
 
 
 def _require_index(value: Any, where: str) -> int:
+    # 整数値の float（`64.0`）は TS の `Number.isSafeInteger` と同じく受理する
+    # （理由は ops の同名関数）。
+    value = integral_float_to_int(value)
     _require(
         isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_SAFE_INTEGER,
         f"{where} が非負の安全整数でない: {value!r}",
