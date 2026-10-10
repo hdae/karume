@@ -999,7 +999,7 @@ export class AnimaPipeline {
     open: ComponentOpener,
     options: AnimaPipelineOptions,
   ): Promise<AnimaPipeline> {
-    const { config, quantName, sessionOptions, gpuFeatures, residency } = admitted;
+    const { config, quantName, quant, sessionOptions, gpuFeatures, residency } = admitted;
 
     // 資産の解析は GPU より前（docstring の順序 MUST）。3.7GiB の DiT を開くほうが device 生成
     // より重いが、壊れた配布形の真因を消さないほうを採る — GPU 無し環境では acquireGpu 自体が
@@ -1037,6 +1037,16 @@ export class AnimaPipeline {
       // 待機中に積まれたクリック由来の中断タスクはまだ実行されていない。
       await settleAbort(options.signal);
       assertGpuFeaturesGranted(gpuFeatures, gpu, `AnimaPipeline: quant '${quantName}'`);
+      // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
+      // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
+      // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は {@link AnimaPipeline.#admit} が見ている。
+      if (ownsGpu) {
+        assertRequiredLimitsSatisfied(
+          quant.requiredLimits,
+          gpu.limits,
+          `AnimaPipeline: quant '${quantName}'`,
+        );
+      }
       return new AnimaPipeline({
         gpu,
         ownsGpu,

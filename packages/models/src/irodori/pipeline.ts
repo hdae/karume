@@ -153,6 +153,7 @@ import { createOperationChain } from "../concurrency/serial.ts";
 import {
   assertGpuFeaturesGranted,
   assertRequiredLimitsBeforeDownload,
+  assertRequiredLimitsSatisfied,
   toAcquireGpuOptions,
 } from "../session/gpu-features.ts";
 import { toManifestSource } from "../hub/repo-ref.ts";
@@ -423,8 +424,15 @@ const buildIrodoriState = async (
   open: ComponentOpener,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
-  const { config, quantName, ditSymbol, ditContextOutputs, ditSessionOptions, gpuFeatures } =
-    admitted;
+  const {
+    config,
+    quantName,
+    quant,
+    ditSymbol,
+    ditContextOutputs,
+    ditSessionOptions,
+    gpuFeatures,
+  } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const backbone = open(BACKBONE);
   const textProj = open(TEXT_PROJ);
@@ -456,6 +464,16 @@ const buildIrodoriState = async (
     // 由来の中断タスクはまだ実行されていない。
     await settleAbort(options.signal);
     assertGpuFeaturesGranted(gpuFeatures, gpu, `IrodoriPipeline: quant '${quantName}'`);
+    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
+    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
+    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitIrodori` が見ている。
+    if (ownsGpu) {
+      assertRequiredLimitsSatisfied(
+        quant.requiredLimits,
+        gpu.limits,
+        `IrodoriPipeline: quant '${quantName}'`,
+      );
+    }
     return {
       gpu,
       ownsGpu,

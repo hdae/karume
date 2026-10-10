@@ -676,7 +676,7 @@ const buildSbv2State = async (
   open: ComponentOpener,
   options: Sbv2PipelineOptions = {},
 ): Promise<Sbv2State> => {
-  const { config, quantName, sessionOptions, gpuFeatures } = admitted;
+  const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const front = open(FRONT);
   const voice = open(VOICE);
@@ -704,6 +704,16 @@ const buildSbv2State = async (
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
+    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
+    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
+    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は {@link admitSbv2} が見ている。
+    if (ownsGpu) {
+      assertRequiredLimitsSatisfied(
+        quant.requiredLimits,
+        gpu.limits,
+        `Sbv2Pipeline: quant '${quantName}'`,
+      );
+    }
   } catch (error) {
     // 内部で取った GPU は、ここで投げると誰も解放できなくなるので返してから落とす。
     if (ownsGpu) gpu.destroy();
