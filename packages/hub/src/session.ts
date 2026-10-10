@@ -136,5 +136,11 @@ export const pinnedSourceOf = (
 };
 
 export type FetchAssetsOptions = LoadManifestOptions & {
+  /**
+   * 資産ごとの進捗の通知先。
+   *
+   * NOTE: このリスナーが throw しても取得は落ちない（どの段の通知でも hub が隔離して warn する —
+   * 進捗は付随情報で、正しさの要件ではない）。
+   */
   readonly onProgress?: (progress: AssetProgress) => void;
 };

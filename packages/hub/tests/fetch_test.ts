@@ -1045,6 +1045,44 @@ Deno.test("fetchAssets: abort(reason) が primitive でもそのまま伝播す�
   assertStrictEquals(error, "app:cancelled");
 });
 
+Deno.test("onProgress の例外は通知の段に依らず取得を落とさない（warn で届く）", async (t) => {
+  // downloading は取得層が隔離して warn だけで続行する。complete まで同じ扱いでないと、同じ UI 側の
+  // 例外が「受信中なら無害・終端ならロード全体の失敗」と段で意味を変える。
+  const failure = new Error("ui: 描画の不具合");
+  const throwing = (): void => {
+    throw failure;
+  };
+
+  await t.step("fetchAssets（network 取得 = downloading と complete）", async () => {
+    const caches = new MemoryCacheStorage();
+    const { mock, loaded } = await load({ files: serveAll() }, caches);
+    const files = selectionFiles(loaded.manifest);
+    let bytes: Record<string, Uint8Array> = {};
+    const warnings = await captureWarnings(async () => {
+      bytes = await fetchAssets(loaded, files, { fetch: mock.fetch, caches, onProgress: throwing });
+    });
+    assertEquals(Object.keys(bytes).sort(), Object.keys(files).sort());
+    assert(warnings.length > 0, "リスナーの例外を無言で捨てている");
+    assert(
+      warnings.some((warning) => warning.includes("onProgress") && warning.includes("complete")),
+      `complete 段の例外が warn で届いていない: ${JSON.stringify(warnings)}`,
+    );
+  });
+
+  await t.step("prefetchAssets（キャッシュヒット = complete だけ）", async () => {
+    const caches = new MemoryCacheStorage();
+    const { mock, loaded } = await load({ files: serveAll() }, caches);
+    const refs = Object.values(selectionFiles(loaded.manifest)).filter((ref, index, all) =>
+      all.findIndex((other) => other.path === ref.path) === index
+    );
+    await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
+    const warnings = await captureWarnings(async () => {
+      await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches, onProgress: throwing });
+    });
+    assertEquals(warnings.length, refs.length, "complete の 1 本ごとに warn が 1 つ届いていない");
+  });
+});
+
 Deno.test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる（取得は落とさない）", async () => {
   const caches = new MemoryCacheStorage({ failPut: true });
 

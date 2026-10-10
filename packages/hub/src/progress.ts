@@ -122,7 +122,7 @@ export const createProgressEmitter = (
       if (other !== refKey) sum += bytes;
     }
     const origin = originOf(ref);
-    onProgress({
+    const progress: AssetProgress = {
       phase,
       path: ref.path,
       ...(origin.repo === undefined ? {} : { repo: origin.repo }),
@@ -131,7 +131,20 @@ export const createProgressEmitter = (
       total,
       fileLoaded,
       fileTotal,
-    });
+    };
+    // MUST: リスナーの例外はここ 1 か所で隔離し、全段（downloading / complete）を同じ扱いにする —
+    // 進捗は付随情報で正しさの要件ではない（取得層が downloading を隔離するのと同じ方針）。隔離が
+    // 段で違うと、同じ UI 側の例外が「受信中なら無害・終端ならロード全体の失敗（他ファイルの取得も
+    // 道連れ）」と意味を変える。捨てるのは通知 1 回だけで、無言にはしない（warn で届ける）。
+    try {
+      onProgress(progress);
+    } catch (error) {
+      console.warn(
+        `@karume/hub: onProgress リスナーが throw した（${phase} ${ref.path} — この通知だけを捨てて` +
+          `取得は続行する）`,
+        error,
+      );
+    }
   };
 
   return {
