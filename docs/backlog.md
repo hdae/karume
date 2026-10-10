@@ -48,27 +48,12 @@
 - **`planBackingBudgetBytes` を共通の options へ**（起票 2026-09-07 — ADR 0095 帰結）: gemma4 以外は manifest の `session` から
   Session options を組むため予算を変える口が無い（既定 256 MiB が効く）。`onRetry` を `FromPretrainedHubOptions` へ 1 本化した形に
   倣って載せる。併せて estimate / session-build に二重にある予算の値域検査を 1 関数へ寄せる。
-- **GEMV 行ブロックの残件（起票 2026-09-07・K-21 の帰結）**: ①並列度の目標 16384 は RTX 3080 Ti の飽和点（limitations）—
-  M2 の再掃引は済（既定 16384 が最良）で、残るのは内蔵 GPU の掃引。差し替え口は静的な Session オプション
-  `linearGemvRowsThreadTarget` ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
-  +85 ms）③Metal の u32 門は行ブロック 13 形も未実測（known-issues）。
 - **Anima: 常駐の値に `text+transformer` を足す（起票 2026-10-01・利用者）**: 今の `transformer` は DiT の Session だけを generate を跨いで持ち、
   text_encoder / text_conditioner（重み 1,396 MiB）は毎回「読む → 上げる → Session を組む → 畳む」をやり直す（既定の VRAM の前提が「最大の段 1 本ぶん」—
   ADR [0112](decisions/0112-anima-transformer-residency.md)）。PyTorch / ONNX Runtime のデファクトは「載せたら明示的に消すまで常駐」で、
   利用者の方針は「API の形は明示解放・既定は VRAM が許す限り常駐・入らなければ自動で格下げ」。text の 2 Session を既存の退避の
   状態機械（次の段の試し確保 → 入らなければ退避 → やり直し）に乗せる。既定は据え置き。効き代は環境次第（M2 ローカル配信では
   text 経路の読み直し ≈ 1.7 s / 枚・取得が遅い環境ほど効く）。着手前に B570 / M2 / Pixel で常駐ぶんを足した VRAM のピークを測る。
-- **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
-  現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
-  timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。
-  `copyLatents` / onEvent / abort の応答性は公開面の契約なので削らない（数 step ごとに finish する境界も測る）。
-  **固定入力だけの常駐化は測定済み・利得なし**（2026-09-10、1024px / CFG1 / Euler8、全 step / PNG 一致）。
-  latent / scheduler を含む反復常駐と CFG>1 は未検証（[実測](research/2026-09-10-codex-mtp-optimization.md#ホスト待ちと既存融合の追加測定)）。
-- **slot backing をバケット run の前に退役させるか**（起票 2026-09-07・limitations「prefill バケット」）: 末尾 chunk の
-  バケット run（ミス run）は chunkLength 形の backing が載ったまま arena に一時を確保し、非勘定側の窓に
-  「ミス run の arena 一時（最大でバケット形 1 本ぶん）」が乗る（既定の梯子なら 768 形 + 256 形 ≈ 1.33 倍）。
-  generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
-  1 回増える。4 GB 級端末で効くかを見てから裁定。
 - **テスト被覆の残（起票 2026-09-05）**: `SubmitScheduler` の `#encodeTimedChunk` 内の copy 分岐
   （`packages/runtime/src/gpu/submit.ts`）は依然として未検証。
 - **Metal `--diagnostics` の切り分け実験**: query set の同時生存本数と `destroy()` 滞留の
@@ -82,28 +67,6 @@
 - **モデルカードのピーク VRAM 列（起票 2026-09-04）**: `karume dist` が TS 側の見積り
   （`prepareContainer(...).estimate()` 系）をカード生成時に呼び、quant 表へピーク VRAM 列を出す。現状の
   カードは格納バイトしか出さないので、読み手が自分の GPU で動くかを判断できない。
-- **ChatSession の要約型 overflow ポリシー**: `onOverflow` は差し替え可能なのでポリシー実装
-  1 本として入る。再検討条件「窓を広げた後」は ADR
-  [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)（capacity が実行時ノブ）で成立
-  — ADR [0083](decisions/0083-generation-api-surface.md) 追記の見送り記述の行き先はここ。
-- **HF CDN の同時本数の実測**: 接続ごとの上限が実測されたら、DL 並列本数の定数引き上げか末尾
-  向け part 細分化を再起票する（DL スロット改善自体は kill —
-  [research 2026-09-02](research/2026-09-02-cold-load-dl-timeline.md)）。
-- **GPTQ 掃引の再評価**: 既定は現状維持で確定・opt-in 実装は温存（正本 =
-  [research 2026-08-31](research/2026-08-31-gptq-axes-sweep.md)）。復活条件 = **多モデル ×
-  校正量 16×** での再評価（gemma4 校正 rig の新設もそこまで保留）。
-- **norm の 1/dim ホスト化は保留**（実 GPU プローブが先・費用対効果低。reduce identity の
-  params −inf 化は現状維持 = W-2/W-3 と同じ器でセット裁定）／ **tolerance B 案**（`allclose`
-  へ縮約スケール項を入れる公開 API 変更 — A 案の op 別表は実装済み。
-  [research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §8.2）。
-- **minicpm5 の `export_decode` は RoPE 表を焼いたまま**（gemma4 だけが ADR
-  [0091](decisions/0091-gemma4-host-rope-variable-capacity.md) でホスト供給へ移った非対称）。
-  ホスト供給へ揃えるかは別裁定。
-- **メモリ管理波の隣接起票**（正本 = ADR [0089](decisions/0089-memory-limits-preflight.md)
-  Consequences / ADR [0090](decisions/0090-shard-spec-v3-tensor-pieces.md)）:
-  `GpuContext.createResident` の確保は errorScope 頼みのまま（run 時 transient は計画時の
-  preflight で確保前に落ちる）/ `fromAssets` の位置づけ / large asset の
-  reference-first 一般則。
 
 **decode 速度の残り**（H-27 段 ② / 小物 K-48・K-49・K-50 / K-46）は later の同名項が正本。
 
@@ -432,6 +395,52 @@
   parked「IR への値依存実行選択」に従属。最初の 1 単位は spike の実測を
   [research](research/) へ時点スナップショットとして転記するところまで。
 - MoE の seam（fixed-k routing は静的形で表現可 — dense API に expert 非存在を焼かない）。
+
+- **GEMV 行ブロックの残件（起票 2026-09-07・K-21 の帰結）**: ①並列度の目標 16384 は RTX 3080 Ti の飽和点（limitations）—
+  M2 の再掃引は済（既定 16384 が最良）で、残るのは内蔵 GPU の掃引。差し替え口は静的な Session オプション
+  `linearGemvRowsThreadTarget` ②ブラウザ（Chrome / Tint）のシェーダ解析費は未測（Deno / naga で初回ターン
+  +85 ms）③Metal の u32 門は行ブロック 13 形も未実測（known-issues）。
+
+- **Anima: DiT stage 内だけの反復常駐**（起票 2026-09-07 — Codex 性能調査 04 §Anima）: Session を stage ごとに作って返す
+  現設計（VRAM の不変条件）を保ったまま、DiT stage の中で初期 latent の patchify を 1 度にし、RoPE / cond・uncond embedding /
+  timestep 材料を反復間で再利用し、DiT 出力 → CFG → Euler / DPM++2M 更新を同じ token layout で回し、最後だけ unpatchify する。
+  `copyLatents` / onEvent / abort の応答性は公開面の契約なので削らない（数 step ごとに finish する境界も測る）。
+  **固定入力だけの常駐化は測定済み・利得なし**（2026-09-10、1024px / CFG1 / Euler8、全 step / PNG 一致）。
+  latent / scheduler を含む反復常駐と CFG>1 は未検証（[実測](research/2026-09-10-codex-mtp-optimization.md#ホスト待ちと既存融合の追加測定)）。
+
+- **slot backing をバケット run の前に退役させるか**（起票 2026-09-07・limitations「prefill バケット」）: 末尾 chunk の
+  バケット run（ミス run）は chunkLength 形の backing が載ったまま arena に一時を確保し、非勘定側の窓に
+  「ミス run の arena 一時（最大でバケット形 1 本ぶん）」が乗る（既定の梯子なら 768 形 + 256 形 ≈ 1.33 倍）。
+  generation のミス run で活性 backing を先に退役させれば窓は消えるが、次の 768 chunk で作り直しが
+  1 回増える。4 GB 級端末で効くかを見てから裁定。
+
+- **ChatSession の要約型 overflow ポリシー**: `onOverflow` は差し替え可能なのでポリシー実装
+  1 本として入る。再検討条件「窓を広げた後」は ADR
+  [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)（capacity が実行時ノブ）で成立
+  — ADR [0083](decisions/0083-generation-api-surface.md) 追記の見送り記述の行き先はここ。
+
+- **HF CDN の同時本数の実測**: 接続ごとの上限が実測されたら、DL 並列本数の定数引き上げか末尾
+  向け part 細分化を再起票する（DL スロット改善自体は kill —
+  [research 2026-09-02](research/2026-09-02-cold-load-dl-timeline.md)）。
+
+- **GPTQ 掃引の再評価**: 既定は現状維持で確定・opt-in 実装は温存（正本 =
+  [research 2026-08-31](research/2026-08-31-gptq-axes-sweep.md)）。復活条件 = **多モデル ×
+  校正量 16×** での再評価（gemma4 校正 rig の新設もそこまで保留）。
+
+- **norm の 1/dim ホスト化は保留**（実 GPU プローブが先・費用対効果低。reduce identity の
+  params −inf 化は現状維持 = W-2/W-3 と同じ器でセット裁定）／ **tolerance B 案**（`allclose`
+  へ縮約スケール項を入れる公開 API 変更 — A 案の op 別表は実装済み。
+  [research 2026-08-31](research/2026-08-31-op-tolerance-measurement.md) §8.2）。
+
+- **minicpm5 の `export_decode` は RoPE 表を焼いたまま**（gemma4 だけが ADR
+  [0091](decisions/0091-gemma4-host-rope-variable-capacity.md) でホスト供給へ移った非対称）。
+  ホスト供給へ揃えるかは別裁定。
+
+- **メモリ管理波の隣接起票**（正本 = ADR [0089](decisions/0089-memory-limits-preflight.md)
+  Consequences / ADR [0090](decisions/0090-shard-spec-v3-tensor-pieces.md)）:
+  `GpuContext.createResident` の確保は errorScope 頼みのまま（run 時 transient は計画時の
+  preflight で確保前に落ちる）/ `fromAssets` の位置づけ / large asset の
+  reference-first 一般則。
 
 ## release — リリース準備波（しばらく先）
 
