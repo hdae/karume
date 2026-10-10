@@ -4,21 +4,31 @@ The `./wan` subpath of `@karume/models` (ADR
 [0118](../../../../docs/decisions/0118-wan21-video-generation.md) decision 7): `WanPipeline` turns a
 prompt into a clip of `[3, F, H, W]` frames in `[-1, 1]` together with its frame rate (`fps` on
 `GeneratedVideo` — 16 for Wan2.1, a fact of the upstream model rather than a knob or a manifest
-field). `WanTi2vPipeline` does the same for Wan2.2 TI2V 5B text-to-video (ADR
+field). `WanTi2vPipeline` does the same for Wan2.2 TI2V 5B (ADR
 [0121](../../../../docs/decisions/0121-wan22-ti2v-5b.md)): the same stages, the same shared family
 body (`family.ts`) and the same public types, with pipeline `wan-ti2v/1`, 48 latent channels, a VAE
-patch size of 2 and 24 fps. The public surface is
+patch size of 2 and 24 fps. It also runs image-to-video: a request with an `image` (decoded RGB8)
+and an optional `fit` gets the image as its first frame (ADR 0121 decision 11). The public surface is
 [`wan.ts`](../../wan.ts) (also re-exported from the barrel); everything here is internal.
 
-The pipeline runs three stages, one session set at a time: the text-encoder session (GPU route) is
-disposed before the transformer session is opened, and the transformer session before the VAE
+The pipeline runs three stages (four with an image), one session set at a time: the VAE encoder
+sessions (image-to-video only) are disposed before the text-encoder session is opened, the
+text-encoder session (GPU route) before the transformer session is opened, and the transformer session before the VAE
 sessions (ADR [0119](../../../../docs/decisions/0119-wan-umt5-gpu-text-encoder.md) decision 11: the
-int8 umT5 at 5.30 GiB and the transformer stage do not fit the B570 together). There is no wait for
-released GPU memory between the stages. Intel / wgpu can release `destroy()` late, but on the B570
+int8 umT5 at 5.30 GiB and the transformer stage do not fit the B570 together). After the encoder
+stage the pipeline waits for its released GPU memory (an empty submit, then `onSubmittedWorkDone`)
+before the next stage opens, because the transformer stage has little headroom; between the other
+stages there is no such wait. Intel / wgpu can release `destroy()` late, but on the B570
 (2026-10-02, fdinfo `drm-total-vram0`) the transformer stage's peak drops as soon as its session is
 disposed and does not overlap the VAE stage's peak (the NOTE at the top of `pipeline.ts` has the
 numbers); the same has not been measured after the text stage yet:
 
+0. **vae_encoder** (image-to-video only) — the image is fitted to the output size (`fit`:
+   `"crop"`, the default, scales it with Lanczos to cover the size and cuts out the center;
+   `"stretch"` scales it straight to the size), normalized to `[-1, 1]` and patchified on the host,
+   then the three encoder graphs (`vae_encoder_pre` / `attn` / `post`, split around the middle
+   attention) run in one batch and hand their tensors over on the GPU. The latent mean is read back
+   once and normalized with the latent statistics.
 1. **text** — the route is chosen at construction (`textEncoder`, ADR 0119 decision 7):
    - `"gpu"` (default) — runs umT5 (int8 per-channel weights, float32 activations) once for the
      prompt and once for the negative prompt, then pads each `[1, L, 4096]` output with zero rows up
@@ -31,7 +41,10 @@ numbers); the same has not been measured after the text stage yet:
      anything else is a `ModelInputError`.
 2. **transformer** — the S-shaped DiT, `steps` times; with guidance above 1 the uncond and cond
    passes run one after the other (B = 1), and the CFG combination and the UniPC update run on the
-   host.
+   host. With an image, every step replaces the first latent frame of the transformer input with the
+   encoded image (the diffusers form: the condition mask marks that frame's tokens, which take
+   timestep 0); the scheduler advances the unreplaced latents, and the replacement is applied once
+   more after the last step.
 3. **vae_decoder** — the two chunk graphs with the resident causal cache, always tiled, then the clamp
    to `[-1, 1]`.
 
@@ -48,31 +61,33 @@ guidance and shift come from the manifest's `pipelineConfig` (`config.ts`); the 
 the upstream value.
 
 Both construction and generation take an `AbortSignal`. Generation checks it at the stage boundaries,
-before every run (the two text-encoder runs and every transformer step) and between VAE tiles; an
+before every run (the encoder batch, the two text-encoder runs and every transformer step) and between VAE tiles; an
 abort disposes the open sessions and rethrows `signal.reason` unwrapped.
 
-| Files                           | Owner        | Contents                                                                                                                                                                                                                                                                                                 |
-| ------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dit-{rope,timestep,tokens}.ts` | stage 2      | patchify / unpatchify, RoPE base-table reordering, `timesteps_proj`                                                                                                                                                                                                                                      |
-| `vae-chunks.ts`                 | stage 4      | chunked decode of one tile with the resident causal cache; latent and output channel counts read from the graph declarations                                                                                                                                                                             |
-| `vae-tiles.ts`                  | stage 5      | tiled decode over the full frame: tile plan from the asset's input shape, blend, paste, clamp; the spatial compression (graph ratio × VAE patch size) and the minimum tile overlap (64 output px ÷ compression)                                                                                          |
-| `scheduler.ts`                  | stage 6      | flow-matching UniPC (σ / timestep columns, predictor and corrector) and the CFG combination                                                                                                                                                                                                              |
-| `text-embeds.ts`                | stage 6      | reading and checking the text-embedding asset, prompt lookup, zero padding to 512 rows                                                                                                                                                                                                                   |
-| `latents.ts`                    | stage 6      | the VAE's per-channel latent mean / std and the de-normalization before decoding                                                                                                                                                                                                                         |
-| `random.ts`                     | stage 6      | the seeded initial noise (splitmix64 + Box–Muller — not torch's `randn`)                                                                                                                                                                                                                                 |
-| `descriptor.ts`                 | 0121 stage 3 | the generation descriptors `WAN21_GENERATION` and `WAN22_TI2V_GENERATION`: the per-generation values a graph declaration cannot give (accepted sizes, frame range, defaults, `fps`, the VAE patch size, the latent statistics, the DiT input form `ditInputForm` — `"t2v"` five inputs / `"ti2v"` seven) |
-| `graph-io.ts`                   | 0121 stage 3 | small readers for graph declarations and outputs (value lookup, shape check, output dtype, non-finite scan)                                                                                                                                                                                              |
-| `plan.ts`                       | 0121 stage 3 | the request gate that turns a request into a plan (sizes, frames, knobs, seed or latents; the latent shape and the tile plan)                                                                                                                                                                            |
-| `text-stage.ts`                 | 0121 stage 3 | the text stage: route admission, the umT5 graph contract, loading, the prompt gates, encoding or looking up the contexts                                                                                                                                                                                 |
-| `dit-loop.ts`                   | 0121 stage 3 | the transformer stage: the DiT graph contract (including the patch it checked) and the denoise loop                                                                                                                                                                                                      |
-| `tile-decode.ts`                | 0121 stage 3 | the VAE stage: the tiled decode, and the admission checks of the VAE declaration against the descriptor                                                                                                                                                                                                  |
-| `pipeline.ts`                   | stage 6      | `WanPipeline` (the Wan2.1 class): the public types, and a thin shell (private constructor, serialization chain, `prompts`, `dispose`) passing `WAN21_FAMILY` to `family.ts`                                                                                                                              |
-| `family.ts`                     | 0121 stage 6 | the shared family body: admission, construction, stage order, session lifetimes, the generate gates and the session policy; per-family values come in a `WanFamilySpec`                                                                                                                                  |
-| `ti2v-pipeline.ts`              | 0121 stage 6 | `WanTi2vPipeline` (the Wan2.2 TI2V class): the same thin shell as `WanPipeline`, passing `WAN22_TI2V_FAMILY` to `family.ts`                                                                                                                                                                              |
-| `config.ts`                     | stage 7      | `pipelineConfig` schema (pipelines `wan/1` and `wan-ti2v/1` share it): default steps, guidance and shift                                                                                                                                                                                                 |
-| `frames.ts`                     | stage 6      | one frame to 8-bit RGBA (`wanFrameToRgba` — the rule the reference hashes use)                                                                                                                                                                                                                           |
-| `text/*.ts`                     | 10a          | the `prompt_clean` mirror and the umT5 tokenizer (prompt → token ids, with the reject rules)                                                                                                                                                                                                             |
-| `umt5/*.ts`                     | 10c          | the relative-position bucket table and the umT5 session inputs / output padding                                                                                                                                                                                                                          |
+| Files                           | Owner         | Contents                                                                                                                                                                                                                                                                                                 |
+| ------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dit-{rope,timestep,tokens}.ts` | stage 2       | patchify / unpatchify, RoPE base-table reordering, `timesteps_proj`                                                                                                                                                                                                                                      |
+| `vae-chunks.ts`                 | stage 4       | chunked decode of one tile with the resident causal cache; latent and output channel counts read from the graph declarations                                                                                                                                                                             |
+| `vae-tiles.ts`                  | stage 5       | tiled decode over the full frame: tile plan from the asset's input shape, blend, paste, clamp; the spatial compression (graph ratio × VAE patch size) and the minimum tile overlap (64 output px ÷ compression)                                                                                          |
+| `scheduler.ts`                  | stage 6       | flow-matching UniPC (σ / timestep columns, predictor and corrector) and the CFG combination                                                                                                                                                                                                              |
+| `text-embeds.ts`                | stage 6       | reading and checking the text-embedding asset, prompt lookup, zero padding to 512 rows                                                                                                                                                                                                                   |
+| `latents.ts`                    | stage 6       | the VAE's per-channel latent mean / std, the normalization of the encoded image and the de-normalization before decoding                                                                                                                                                                                 |
+| `random.ts`                     | stage 6       | the seeded initial noise (splitmix64 + Box–Muller — not torch's `randn`)                                                                                                                                                                                                                                 |
+| `descriptor.ts`                 | 0121 stage 3  | the generation descriptors `WAN21_GENERATION` and `WAN22_TI2V_GENERATION`: the per-generation values a graph declaration cannot give (accepted sizes, frame range, defaults, `fps`, the VAE patch size, the latent statistics, the DiT input form `ditInputForm` — `"t2v"` five inputs / `"ti2v"` seven) |
+| `graph-io.ts`                   | 0121 stage 3  | small readers for graph declarations and outputs (value lookup, shape check, output dtype, non-finite scan)                                                                                                                                                                                              |
+| `plan.ts`                       | 0121 stage 3  | the request gate that turns a request into a plan (sizes, frames, knobs, seed or latents, the image and `fit`; the latent shape and the tile plan)                                                                                                                                                       |
+| `text-stage.ts`                 | 0121 stage 3  | the text stage: route admission, the umT5 graph contract, loading, the prompt gates, encoding or looking up the contexts                                                                                                                                                                                 |
+| `dit-loop.ts`                   | 0121 stage 3  | the transformer stage: the DiT graph contract (including the patch it checked) and the denoise loop, with the condition mask and the first-frame replacement for image-to-video                                                                                                                          |
+| `tile-decode.ts`                | 0121 stage 3  | the VAE stage: the tiled decode, and the admission checks of the VAE declaration against the descriptor                                                                                                                                                                                                  |
+| `i2v-preprocess.ts`             | 0121 stage 9a | the image preprocessing for image-to-video: the size choice, the `fit` (Lanczos resize from `../image/lanczos.ts`, center crop or stretch), `[-1, 1]` and the patchify                                                                                                                                   |
+| `vae-encoder.ts`                | 0121 stage 9b | the encoder stage: the three encoder graph contracts, one batched run with tensors handed over on the GPU, the read-back of the latent mean, and the wait for released memory                                                                                                                            |
+| `pipeline.ts`                   | stage 6       | `WanPipeline` (the Wan2.1 class): the public types, and a thin shell (private constructor, serialization chain, `prompts`, `dispose`) passing `WAN21_FAMILY` to `family.ts`                                                                                                                              |
+| `family.ts`                     | 0121 stage 6  | the shared family body: admission, construction, stage order, session lifetimes, the generate gates and the session policy; per-family values come in a `WanFamilySpec`                                                                                                                                  |
+| `ti2v-pipeline.ts`              | 0121 stage 6  | `WanTi2vPipeline` (the Wan2.2 TI2V class): the same thin shell as `WanPipeline`, passing `WAN22_TI2V_FAMILY` to `family.ts`                                                                                                                                                                              |
+| `config.ts`                     | stage 7       | `pipelineConfig` schema (pipelines `wan/1` and `wan-ti2v/1` share it): default steps, guidance and shift                                                                                                                                                                                                 |
+| `frames.ts`                     | stage 6       | one frame to 8-bit RGBA (`wanFrameToRgba` — the rule the reference hashes use)                                                                                                                                                                                                                           |
+| `text/*.ts`                     | 10a           | the `prompt_clean` mirror and the umT5 tokenizer (prompt → token ids, with the reject rules)                                                                                                                                                                                                             |
+| `umt5/*.ts`                     | 10c           | the relative-position bucket table and the umT5 session inputs / output padding                                                                                                                                                                                                                          |
 
 ## Accepted requests
 
@@ -93,6 +108,14 @@ quants) beyond that limit; the other lengths were not estimated, so whether they
 The transformer stage is closed before the VAE stage opens, so the two are never resident together. A
 non-finite umT5 output, a non-finite latent after any step, or a non-finite VAE output before the
 clamp fails the generation instead of being returned.
+
+Only `WanTi2vPipeline` takes `image` (RGB8 `{ data, width, height }`, any size) and `fit`
+(`"crop"`, the default, or `"stretch"`); `WanPipeline` rejects both with a `ModelInputError`, as
+does `fit` without `image`, while a misspelled `fit` is a plain `Error`. Without `width` / `height`,
+the accepted size closest to the image's aspect ratio is used (1280×704 for an image at least as
+wide as it is tall, 704×1280 otherwise); given ones must be an accepted size. Image-to-video has been
+checked end to end on the GPU at 1280×704 with 9 frames (two steps) and 33 frames (50 steps, both
+quants), and at 704×1280 with 9 frames, all with the precomputed embeddings (ADR 0121 stage 9b).
 
 ## Numerics
 
