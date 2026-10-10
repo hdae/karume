@@ -188,8 +188,11 @@ QUANT_PRESENTATION_LIMITS: Mapping[str, int] = {
 #: pin にならない（{@link ExternalComponents}）。
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
-#: 同・参照先リポの綴り（`<owner>/<name>` — hub の path 検査と同じ文字集合）。
-REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+#: 同・参照先リポの綴り（`<owner>/<name>` — 各セグメントは hub の `REPO_SEGMENT_RE` と同じ
+#: 許可リスト）。MUST: 先頭ドットのセグメント（`.` / `..` を含む）を拒否する — hub は repo の
+#: `/` を percent-encode しないので traversal を拒否しており、通すと hub が開けない
+#: manifest になる。
+REPO_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
 #: 越境参照のファイル参照が持つ欄（3 点セット + 出所 2 席）。
 EXTERNAL_REF_KEYS = frozenset({"repo", "revision", "path", "size", "sha256"})

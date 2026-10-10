@@ -2627,3 +2627,22 @@ class TestTheHubConstantReader:
     def test_anything_but_a_product_of_literals_fails_loudly(self, expression: str) -> None:
         with pytest.raises(ValueError):
             _evaluate_product(expression)
+
+
+class TestTheRepositorySpelling:
+    """`<owner>/<name>` の各セグメントは hub の `REPO_SEGMENT_RE` と同じ許可リスト。
+
+    hub は**先頭ドット**のセグメント（`.` / `..` そのものを含む）を拒否する — repo の `/` は
+    取得層で構造要素として扱われ percent-encode されないので、通すと SHA ピン外への traversal に
+    なる。Python 側が通すと、組み立ては緑なのに hub が manifest を開けない配布形が作れる。
+    """
+
+    @pytest.mark.parametrize("repo", [".hidden/name", "owner/.name", "../name", "owner/.."])
+    def test_a_segment_with_a_leading_dot_is_refused(self, repo: str) -> None:
+        with pytest.raises(DistError, match="<owner>/<name>"):
+            resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], repo)
+
+    @pytest.mark.parametrize("repo", ["hdae/karume.voices", "hdae/karume-voices_2", "_o/n"])
+    def test_a_dot_after_the_first_character_is_accepted(self, repo: str) -> None:
+        """対照 — 先頭以外のドットは hub も受理する（拒否しすぎない）。"""
+        assert resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], repo) == repo
