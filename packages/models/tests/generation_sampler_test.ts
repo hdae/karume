@@ -488,6 +488,33 @@ Deno.test("sampler: 受理できない指定は構築時に落ちる", () => {
 /** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
 const untypedSpec = (value: unknown): SamplerSpec => value as SamplerSpec;
 
+Deno.test("sampler: 未知のキーは黙って無視せず、許可キーを並べて落ちる", () => {
+  // `minP: 1` で最大確率の候補だけに絞ったつもりでも、無視されれば全分布から抽選される。
+  // 綴り違い（`top_p`）も同じく「効いていないノブ」として静かに残る。
+  for (const spec of [{ temperature: 1, minP: 1, seed: 1 }, { top_p: 0.9 }]) {
+    const error = assertThrows(
+      () => createSampler(untypedSpec(spec)),
+      ModelInputError,
+      "未知キー",
+      JSON.stringify(spec),
+    );
+    for (const key of ["temperature", "topK", "topP", "repetitionPenalty", "logitBias", "seed"]) {
+      assert(error.message.includes(key), `許可キー ${key} が文言に無い: ${error.message}`);
+    }
+  }
+  // 発行時の写しも同じ門を通る（上層は抽選器を作る前に写す）。
+  assertThrows(() => snapshotSpec(untypedSpec({ minP: 1 })), ModelInputError, "minP");
+  // 既知のキーだけなら全部並べても通る（seed を許可集合に入れ忘れていない）。
+  createSampler({
+    temperature: 1,
+    topK: 2,
+    topP: 0.5,
+    repetitionPenalty: 1.1,
+    logitBias: [[0, 1]],
+    seed: 3,
+  });
+});
+
 Deno.test("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", async (t) => {
   await t.step("文字列の bias は文字列連結にならない（temperature 0 の選択を変えない）", () => {
     // `1 + "0"` は `"10"` — f32 へ 10 として書かれ、bias なしなら選ばれる token 1 が 0 に化ける。

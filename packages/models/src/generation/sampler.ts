@@ -109,12 +109,36 @@ const assertFiniteAtLeast = (value: number, minimum: number, where: string): voi
 };
 
 /**
+ * {@link SamplerSpec} の欄の許可集合。`Record` で持つのは、型に欄を足したときにここへの
+ * 書き足し漏れを型検査で落とすため。
+ */
+const SAMPLER_SPEC_KEYS: Readonly<Record<keyof SamplerSpec, true>> = {
+  temperature: true,
+  topK: true,
+  topP: true,
+  repetitionPenalty: true,
+  logitBias: true,
+  seed: true,
+};
+
+/**
  * 指定の受理集合（fail loudly の唯一の位置）。
  *
  * MUST: 黙って丸めない。`temperature: -1` や `topP: 0` を既定へ畳むと「効いていないノブ」が
  * 静かに残り、出力の違いからしか気づけない。
+ *
+ * MUST: 未知キーも落とす。JS / 保存設定の復元経路から来る `minP` や綴り違いの `top_p` は TS の
+ * 余剰プロパティ検査に掛からず、無視すればそのノブだけが黙って効かない（同じ層の Gemma の
+ * 設定や hub の manifest と同じ扱い）。
  */
 const assertSpec = (spec: SamplerSpec): void => {
+  for (const key of Object.keys(spec)) {
+    if (!Object.hasOwn(SAMPLER_SPEC_KEYS, key)) {
+      throw new ModelInputError(
+        `sampler 指定の未知キー '${key}'（許可: ${Object.keys(SAMPLER_SPEC_KEYS).join(" / ")}）`,
+      );
+    }
+  }
   if (spec.temperature !== undefined) assertFiniteAtLeast(spec.temperature, 0, "temperature");
   if (spec.topK !== undefined && (!Number.isSafeInteger(spec.topK) || spec.topK < 1)) {
     throw new ModelInputError(`topK ${spec.topK} が 1 以上の整数でない`);
