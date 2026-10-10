@@ -218,6 +218,39 @@ Deno.test("資産 JSON の門: 信用できない外部入力として扱う", a
     );
   });
 
+  await t.step("追加語彙の id 重複は落ちる（綴り→id と id→綴りが食い違う）", () => {
+    // 同じ id を 2 つの綴りが指すと、encode は両方をその id にし、decode は片方しか返せない。
+    assertThrows(
+      () =>
+        parseAsset({
+          ...minimalAsset(),
+          addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["ZZ", 2]],
+        }),
+      Error,
+      "id 2",
+    );
+  });
+
+  await t.step("語彙内の id を綴りの違う追加語彙が使えば落ちる", () => {
+    // `["ZZ", 259]`（語彙では "a"）を受けると encode("a") が 259 を返し、decode(259) が "ZZ" になる。
+    assertThrows(
+      () =>
+        parseAsset({
+          ...minimalAsset(),
+          addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["ZZ", 259]],
+        }),
+      Error,
+      "id 259",
+    );
+  });
+
+  await t.step("語彙の外への採番は従来どおり受ける（EmbeddingGemma の形）", () => {
+    parseAsset({
+      ...minimalAsset(),
+      addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["<image_soft_token>", 261]],
+    });
+  });
+
   await t.step("`<bos>` / `<eos>` / `<unk>` が語彙の外なら落ちる", () => {
     assertThrows(() => parseAsset({ ...minimalAsset(), bosId: 9999 }), Error, "語彙に無い");
   });

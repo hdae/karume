@@ -217,7 +217,24 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
     readField(asset, "addedTokens", "tokenizer"),
     "tokenizer.addedTokens",
   );
-  const addedIds = new Set(addedTokens.values());
+  // MUST: 追加語彙は「綴り→id」と「id→綴り」の両向きで整合させる。綴りの重複は
+  // `parseAddedTokens` が落とすが、id の重複と、語彙内の id を別の綴りで使う形は例外に
+  // ならない — encode はその id を返し、decode は追加語彙側の綴りを返すので、資産の破損が
+  // 推論時に別の token へ化ける。語彙の外への採番（EmbeddingGemma）は従来どおり受ける。
+  const addedIds = new Set<number>();
+  for (const [token, id] of addedTokens) {
+    if (addedIds.has(id)) {
+      throw new Error(`tokenizer.addedTokens: id ${id} が 2 つの綴りに割り当てられている`);
+    }
+    addedIds.add(id);
+    const base = model.tokenOf.get(id);
+    if (base !== undefined && base !== token) {
+      throw new Error(
+        `tokenizer.addedTokens: id ${id} の綴り ${JSON.stringify(token)} が語彙の` +
+          ` ${JSON.stringify(base)} と違う`,
+      );
+    }
+  }
   const specialIds = new Set<number>();
   for (
     const [index, id] of asArray(
