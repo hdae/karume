@@ -55,6 +55,13 @@ export const allclose = (
   if (actual.length !== expected.length) {
     throw new AllcloseError(`長さ不一致: actual ${actual.length} vs expected ${expected.length}`);
   }
+  // MUST: 許容誤差の NaN は比較式を常に false にして不一致を合格に化けさせ、負数は意味を持たない。
+  // +Infinity は「判定しない」（計測だけ取る）の意味で使う呼び手があるので受ける。
+  for (const [name, value] of [["atol", tolerance.atol], ["rtol", tolerance.rtol]] as const) {
+    if (Number.isNaN(value) || value < 0) {
+      throw new AllcloseError(`許容誤差 ${name}=${value} が非負の数でない`);
+    }
+  }
   let failCount = 0;
   let maxAbsError = 0;
   let maxRelError = 0;

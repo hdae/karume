@@ -1837,6 +1837,26 @@ Deno.test("allclose は NaN / Inf をどちらの側でも不合格にする", (
   assertThrows(() => allclose(expected, Float32Array.from([1])), AllcloseError);
 });
 
+Deno.test("allclose は NaN と負の許容誤差を拒否し、+Infinity は「判定しない」として受ける", () => {
+  // NaN の許容誤差は比較式 abs > NaN を常に false にするので、差が 99 でも合格に化ける。
+  const actual = Float32Array.from([100]);
+  const expected = Float32Array.from([1]);
+  for (
+    const tolerance of [
+      { atol: Number.NaN, rtol: 0 },
+      { atol: 0, rtol: Number.NaN },
+      { atol: -1, rtol: 0 },
+      { atol: 0, rtol: -1e-3 },
+    ]
+  ) {
+    const label = JSON.stringify(tolerance);
+    assertThrows(() => allclose(actual, expected, tolerance), AllcloseError, "許容誤差", label);
+    // 空配列でも不正な許容誤差は拒否する（要素が無いことは許容誤差の正しさを保証しない）。
+    assertThrows(() => allclose([], [], tolerance), AllcloseError, "許容誤差", label);
+  }
+  assertEquals(allclose(actual, expected, { atol: Number.POSITIVE_INFINITY, rtol: 0 }).pass, true);
+});
+
 // 報告欄の**意味**を縛る（pass だけを見ると、worstIndex / maxRelError が何を指すかは誰も
 // 固定していない）。非有限が「後から」現れる形と、参照 0 の相対誤差の床が対象。
 Deno.test("allclose の報告欄は非有限を優先し、参照 0 の相対誤差に床を置く", () => {
