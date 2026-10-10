@@ -56,9 +56,10 @@ fn main(
   let in_depth = d < params.depth;
   let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
   // pad 行（row ≥ Q）は live を走査せず厳密 0（③ と同じ契約）。局所行は workgroup 一様なので
-  // barrier の手前で返してよい
+  // barrier の手前で返してよい。KV_LANES 本が同じ out[at] を指すので、通常行と同じく lane 0
+  // だけが書く（同値でも同期なしの同一要素書き込みは WGSL のデータ競合）
   if (local_row >= effective_rows(lengths.query)) {
-    if (in_depth) {
+    if (lane == 0u && in_depth) {
       out[at] = 0.0;
     }
     return;

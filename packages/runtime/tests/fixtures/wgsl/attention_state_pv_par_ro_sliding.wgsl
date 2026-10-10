@@ -55,7 +55,7 @@ fn main(
   let in_depth = d < params.depth;
   let at = (z * params.chunk_rows + params.row_offset + local_row) * params.depth + d;
   if (local_row >= effective_rows(lengths.query)) {
-    if (in_depth) {
+    if (lane == 0u && in_depth) {
       out[at] = 0.0;
     }
     return;

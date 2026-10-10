@@ -22,6 +22,8 @@ import {
   statePvKey,
   statePvParallelKey,
   statePvParallelReadonlyKey,
+  statePvParallelReadonlyWgsl,
+  statePvParallelWgsl,
   statePvTiledEligible,
   statePvTiledKey,
   statePvTiledParams,
@@ -48,7 +50,7 @@ import {
   stateStatsWgsl,
   stateStatsWorkgroups,
 } from "../src/kernels/state-attention.ts";
-import { stateStatsPvKey } from "../src/kernels/state-attention-stats-pv.ts";
+import { stateStatsPvKey, stateStatsPvWgsl } from "../src/kernels/state-attention-stats-pv.ts";
 import { statePvTiledWgsl, stateQkTiledWgsl } from "../src/kernels/gemm.ts";
 import {
   STATE_APPEND_WORKGROUP_SIZE,
@@ -211,6 +213,36 @@ Deno.test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行
   }
   // ③PV は pad 行を **0 で書いて返す**（full-write を保ったまま live を走査しない）
   assertEquals(statePvWgsl(false, false).includes("out[at] = 0.0;"), true);
+});
+
+Deno.test("KV 並列縮約の PV 3 変種は pad 行の 0 を lane 0 だけが書く（同じ要素への同期なし書き込みを拒む）", () => {
+  // 1 workgroup の KV_LANES 本は同じ `out[at]` を指す。lane のガード無しで全レーンが 0 を書くと、
+  // 値が同じでも WGSL のメモリモデルではデータ競合になる — 出力の値比較では検出できないので
+  // 生成文字列の pad 分岐の中身で縛る（通常行の書き込みと同じガードに揃っていること）。
+  const padBranch = (wgsl: string): string => {
+    const start = wgsl.indexOf("if (local_row >= effective_rows(lengths.query)) {");
+    assertNotEquals(start, -1, "pad 分岐が見つからない");
+    return wgsl.slice(start, wgsl.indexOf("return;", start));
+  };
+  for (const [sliding, gqa] of VARIANTS) {
+    for (
+      const [name, wgsl] of [
+        ["③'", statePvParallelWgsl(sliding, gqa)],
+        ["③' readonly", statePvParallelReadonlyWgsl(sliding, gqa)],
+        ["②③ 融合", stateStatsPvWgsl(sliding, gqa)],
+      ] as const
+    ) {
+      const where = `${name} sliding=${sliding} gqa=${gqa}`;
+      const branch = padBranch(wgsl);
+      assertEquals(branch.includes("out[at] = 0.0;"), true, `${where}: pad 行の 0 書き`);
+      assertEquals(
+        branch.includes("if (lane == 0u && in_depth) {"),
+        true,
+        `${where}: lane 0 ガード`,
+      );
+      assertEquals(branch.includes("if (in_depth) {"), false, `${where}: lane 無しのガード`);
+    }
+  }
 });
 
 const GEOMETRY = {
