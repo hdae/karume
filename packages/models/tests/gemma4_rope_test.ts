@@ -91,7 +91,8 @@ const passesParity = (
   positions.forEach((position, row) => {
     const diff = Math.max(cosDiff[row], sinDiff[row]);
     worst = Math.max(worst, diff);
-    if (diff > toleranceAt(position)) pass = false;
+    // MUST: 「帯の内側でなければ失敗」の形で書く。`diff > tol` だと NaN の差が false で素通りする。
+    if (!(diff <= toleranceAt(position))) pass = false;
   });
   return { pass, worst };
 };
@@ -144,6 +145,36 @@ Deno.test("故障注入 — 位置ずらし / 層種入れ替え / theta / rotar
   ];
   for (const [label, run] of cases) {
     assertEquals(run(), false, `${label}: 変異が帯を通ってしまった`);
+  }
+});
+
+Deno.test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行は parity で落ちる", async () => {
+  // `diff > tolerance` で失敗を判定すると NaN の差は false になって合格し、同じ行の大きな有限誤差も
+  // Math.max の NaN 伝播に巻き込まれて隠れる。fixture 側の 1 行を壊して、帯が非有限値を通さないことを見る。
+  const fixture = await loadFixture();
+  const full = fixture.spec.full_attention;
+  const row = fixture.positions.length - 1;
+  const corrupt = (edit: (cos: Float32Array<ArrayBuffer>, at: number) => void) => {
+    const cos = decodeF32(fixture.tables.full_attention.cos).slice();
+    edit(cos, row * full.headDim);
+    return { cos, sin: decodeF32(fixture.tables.full_attention.sin) };
+  };
+  const cases: readonly [string, { cos: Float32Array; sin: Float32Array }][] = [
+    ["cos の 1 要素が NaN", corrupt((cos, at) => (cos[at] = Number.NaN))],
+    [
+      "NaN と大誤差（+999）が同じ行に同居",
+      corrupt((cos, at) => {
+        cos[at] = Number.NaN;
+        cos[at + 1] += 999;
+      }),
+    ],
+  ];
+  for (const [label, expected] of cases) {
+    assertEquals(
+      passesParity(full, fixture.positions, expected).pass,
+      false,
+      `${label}: 非有限値が帯を通ってしまった`,
+    );
   }
 });
 
