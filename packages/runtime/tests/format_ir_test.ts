@@ -1,5 +1,10 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { type IrDeclaration, IrError, parseIrDeclaration } from "../src/format/ir.ts";
+import {
+  type IrDeclaration,
+  IrError,
+  parseIrDeclaration,
+  parseIrDeclarationValue,
+} from "../src/format/ir.ts";
 import {
   baseDeclaration,
   type DeclarationJson,
@@ -249,6 +254,36 @@ Deno.test("parseIrDeclaration: shape 要素", () => {
   });
   const boolDim = JSON.stringify(baseDeclaration()).replace('"shape":[3]', '"shape":[true]');
   assertThrows(() => parseIrDeclaration(boolDim), IrError, "数値でも文字列でもない");
+});
+
+Deno.test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否する", () => {
+  // JSON.parse は穴を作らないが、ホストが組む宣言（new Array(n) や delete）は作れる。map / some /
+  // reduce は穴を飛ばすので、次元の欠けた宣言が検査を素通りして先で undefined の次元になる。
+  const holeAt = (index: number, length: number): number[] => {
+    const shape = new Array<number>(length);
+    for (let i = 0; i < length; i += 1) if (i !== index) shape[i] = 4;
+    return shape;
+  };
+  for (const [hint, index] of [["先頭", 0], ["途中", 1], ["末尾", 2]] as const) {
+    const graph = baseDeclaration();
+    graph.values["w"].shape = holeAt(index, 3);
+    assertThrows(
+      () => parseIrDeclarationValue(graph),
+      IrError,
+      `graph.values['w'].shape[${index}] が無い（疎な配列の穴）`,
+      hint,
+    );
+  }
+  const graph = baseDeclaration();
+  const ins = new Array<string>(3);
+  ins[0] = "x";
+  ins[2] = "w";
+  graph.nodes[0].ins = ins;
+  assertThrows(
+    () => parseIrDeclarationValue(graph),
+    IrError,
+    "graph.nodes[0].ins[1] が無い（疎な配列の穴）",
+  );
 });
 
 Deno.test("parseIrDeclaration: ノードの構造", () => {

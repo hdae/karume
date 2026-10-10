@@ -195,9 +195,17 @@ const asPlainObject = (value: unknown, where: string): Record<string, unknown> =
   return value;
 };
 
+/**
+ * 配列の欄の全要素。ホストが組む宣言（{@link parseIrDeclarationValue}）は疎な配列を持ちうるが、
+ * `map` / `some` / `reduce` は穴を飛ばすので、穴が検査を素通りして先で undefined の次元や名前に
+ * なる。ここで穴を欄の path つきで落とす（JSON.parse 経由では穴はできない）。
+ */
 const asArray = (value: unknown, where: string): readonly unknown[] => {
   if (!Array.isArray(value)) throw new IrError(`${where}: 配列でない`);
   const list: readonly unknown[] = value;
+  for (let index = 0; index < list.length; index += 1) {
+    if (!Object.hasOwn(list, index)) throw new IrError(`${where}[${index}] が無い（疎な配列の穴）`);
+  }
   return list;
 };
 
