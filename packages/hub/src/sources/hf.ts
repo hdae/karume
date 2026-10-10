@@ -288,6 +288,16 @@ export const createHfSource = (ref: HubRepoRef): DistributionSource => {
         init: requestInit(options.headers, options.signal),
         ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
+      // MUST: 応答を commit SHA（越境参照の `revision` と同じ 40 桁小文字 hex の規則）として検査する
+      // — 取得層は非空文字列しか見ないので、非準拠ミラー・カスタム fetch が `main` や短縮形を返すと、
+      // それが「固定済みの世代」として以後の全取得で解決し直され、1 つの commit に固定する契約が
+      // 黙って崩れる。素の Error は共通層が世代解決の失敗として文脈付きで包む。
+      if (!isCommitSha(revisionSha)) {
+        throw new Error(
+          `@karume/hub: revision '${requested}' の解決応答が 40 桁小文字 hex の commit SHA でない` +
+            `（応答 '${revisionSha}' — 非準拠のミラーか fetch の差し替えを疑う）`,
+        );
+      }
       // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
       // 失敗そのものが報告されるべきだから（fail loudly が先）。
       if (revision === undefined) warnImplicitMain(repo, revisionSha);

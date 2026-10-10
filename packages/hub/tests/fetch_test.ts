@@ -209,6 +209,36 @@ Deno.test("loadManifest: 可変 ref の解決失敗はオフライン不可と�
   assert(error.message.includes("オフライン"), "オフライン不可であることを明示する");
 });
 
+Deno.test("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", async (t) => {
+  // 非準拠ミラー・カスタム fetch が可変 ref や短縮形を返すと、それを「固定済みの世代」として
+  // 以後の全取得が解決し直す形になり、1 つの commit に固定する契約が成り立たない。
+  const cases: readonly [string, string][] = [
+    ["ブランチ名", "main"],
+    ["短縮 SHA", SHA.slice(0, 7)],
+    ["40 桁に満たない 16 進", SHA.slice(0, 39)],
+    ["大文字の 16 進", SHA.toUpperCase()],
+  ];
+  for (const [label, sha] of cases) {
+    await t.step(label, async () => {
+      const mock = createMockFetch({ sha, files: serveAll() });
+      const error = await assertRejects(
+        () =>
+          loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: "main" }, {
+            fetch: mock.fetch,
+            caches: new MemoryCacheStorage(),
+          }),
+        HubFetchError,
+      );
+      assertEquals(error.repo, REPO);
+      assert(
+        error.cause instanceof Error && error.cause.message.includes(sha),
+        "受け取った応答の値を診断に載せていない",
+      );
+      assertEquals(mock.calls, [revisionUrl("main")], "固定できていない世代で取得へ進んでいる");
+    });
+  }
+});
+
 Deno.test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾く（判定は全量受信後）", async () => {
   const oversized = new TextEncoder().encode(" ".repeat(2 * 1024 * 1024));
   const mock = createMockFetch({
