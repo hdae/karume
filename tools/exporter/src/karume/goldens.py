@@ -28,6 +28,7 @@ from safetensors.torch import save_file
 from torch import nn
 from torch.export import Dim
 
+from karume.artifacts import staged_publication
 from karume.container import Provenance
 from karume.convert import (
     PRESERVED_OP_PREFIXES,
@@ -471,51 +472,57 @@ def _assert_not_trivial(where: str, tensor: torch.Tensor) -> None:
 
 
 def generate_golden(spec: GoldenSpec, root: Path) -> IrGraph:
-    """1 モデル分のコンテナ（`model.krm` の part 列）と io.safetensors を書き、グラフを返す。"""
+    """1 モデル分のコンテナ（`model.krm` の part 列）と io.safetensors を書き、グラフを返す。
+
+    MUST: モデルと io の生成・検算は**作業席の中**で完結させ、通った回だけ置き場ごと据え替える
+    （{@link karume.artifacts.staged_publication}）。最終の置き場へ直接書くと、モデルを据えた
+    後の検算の失敗や part の据え替えの失敗で「新しいモデル + 古い io」が残る。
+    """
     generator = _rng()
     module = spec.build(generator).eval()
     args = spec.example_inputs(generator)
     # MUST: fake-quant は export と**下の参照採取の両方より前**（ADR 0006）。後ろへ動かすと
     # 期待値だけが元の重みで計算され、E2E の差が量子化誤差と実装誤差の合成になる。
     scales = fake_quant_int8(module).scales if spec.weight_dtype == "i8" else None
-    out_dir = root / spec.name
-    graph = export_to_file(
-        module,
-        args,
-        out_dir / MODEL_FILE,
-        provenance=GOLDEN_PROVENANCE,
-        # グラフ名は**部品名**（= 置き場のディレクトリ名 = TS 側が引く名前）。既定は無い
-        # （`pipeline._assert_graph_name` の MUST）ので、ここで綴る。
-        graph_name=spec.name,
-        dynamic_shapes=spec.dynamic_shapes,
-        symbol_names=spec.symbol_names,
-        weight_dtype=spec.weight_dtype,
-        weight_scales=scales,
-        preserved=spec.preserved,
-    )
+    with staged_publication(root / spec.name) as out_dir:
+        out_dir.mkdir(parents=True)
+        graph = export_to_file(
+            module,
+            args,
+            out_dir / MODEL_FILE,
+            provenance=GOLDEN_PROVENANCE,
+            # グラフ名は**部品名**（= 置き場のディレクトリ名 = TS 側が引く名前）。既定は無い
+            # （`pipeline._assert_graph_name` の MUST）ので、ここで綴る。
+            graph_name=spec.name,
+            dynamic_shapes=spec.dynamic_shapes,
+            symbol_names=spec.symbol_names,
+            weight_dtype=spec.weight_dtype,
+            weight_scales=scales,
+            preserved=spec.preserved,
+        )
 
-    with torch.no_grad():
-        result = module(*args)
-    outputs = result if isinstance(result, tuple) else (result,)
-    if len(outputs) != len(graph.outputs):
-        raise AssertionError(
-            f"{spec.name}: torch 出力 {len(outputs)} 本 ≠ IR 出力 {len(graph.outputs)} 本"
-        )
-    for index, tensor in enumerate(outputs):
-        _assert_not_trivial(f"{spec.name} の出力 {index}", tensor)
-    # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → I32 / bool → U32 の 0/1）。
-    # ランタイムが受け取る形と揃っていないと、Deno 側 E2E が golden を読めない。
-    io_tensors = {
-        f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
-            tensor.detach(), f"{spec.name} の入力 '{declared.name}'"
-        )
-        for declared, tensor in zip(graph.inputs, args, strict=True)
-    }
-    for index, tensor in enumerate(outputs):
-        io_tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
-            tensor.detach(), f"{spec.name} の出力 {index}"
-        )
-    save_file(io_tensors, str(out_dir / IO_FILE))
+        with torch.no_grad():
+            result = module(*args)
+        outputs = result if isinstance(result, tuple) else (result,)
+        if len(outputs) != len(graph.outputs):
+            raise AssertionError(
+                f"{spec.name}: torch 出力 {len(outputs)} 本 ≠ IR 出力 {len(graph.outputs)} 本"
+            )
+        for index, tensor in enumerate(outputs):
+            _assert_not_trivial(f"{spec.name} の出力 {index}", tensor)
+        # MUST: io も IR の意味論 dtype の実表現へ落とす（i64 → I32 / bool → U32 の 0/1）。
+        # ランタイムが受け取る形と揃っていないと、Deno 側 E2E が golden を読めない。
+        io_tensors = {
+            f"{INPUT_PREFIX}{declared.name}": normalize_boundary_tensor(
+                tensor.detach(), f"{spec.name} の入力 '{declared.name}'"
+            )
+            for declared, tensor in zip(graph.inputs, args, strict=True)
+        }
+        for index, tensor in enumerate(outputs):
+            io_tensors[f"{OUTPUT_PREFIX}{index}"] = normalize_boundary_tensor(
+                tensor.detach(), f"{spec.name} の出力 {index}"
+            )
+        save_file(io_tensors, str(out_dir / IO_FILE))
     return graph
 
 

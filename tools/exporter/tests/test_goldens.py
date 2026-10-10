@@ -15,6 +15,7 @@ import pytest
 import torch
 from safetensors import safe_open
 
+from karume import goldens, publish
 from karume.container import container_parts
 from karume.dims import eval_dim, parse_dim
 from karume.goldens import (
@@ -370,3 +371,63 @@ class TestDeterminism:
         committed = GOLDEN_ROOT / spec.name / IO_FILE
         assert committed.is_file(), f"生成物が未コミット: {committed}"
         assert committed.read_bytes() == (root / spec.name / IO_FILE).read_bytes()
+
+
+def _tree_bytes(directory: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+class TestAFailedRegenerationKeepsTheOldFixture:
+    """1 モデル分の生成が途中で落ちても、前回の fixture は 1 バイトも変わらない。
+
+    モデルを最終の置き場へ直接書いてから検算すると、検算の失敗で「新しいモデル + 古い io」が
+    残る（`publish_container` の MUST — 作業席の外で呼ぶと前回の成果物が消えうる）。
+    前回の中身は再生成と同じバイトにならないよう番兵へ差し替えておく（決定的な生成で同じ
+    バイトが書き戻されると、上書きされても検出できない）。
+    """
+
+    SPEC = GOLDEN_SPECS[0]
+
+    @pytest.fixture
+    def previous(self, tmp_path):
+        generate_golden(self.SPEC, tmp_path)
+        directory = tmp_path / self.SPEC.name
+        for index, path in enumerate(sorted(directory.iterdir())):
+            path.write_bytes(f"previous-{index}".encode())
+        return tmp_path, _tree_bytes(directory)
+
+    def test_a_failed_check_after_publication_leaves_it_untouched(self, previous, monkeypatch):
+        root, before = previous
+
+        def refuse(where, tensor):
+            raise AssertionError(f"{where}: 検算で落ちた回")
+
+        monkeypatch.setattr(goldens, "_assert_not_trivial", refuse)
+        with pytest.raises(AssertionError, match="検算で落ちた回"):
+            generate_golden(self.SPEC, root)
+
+        assert _tree_bytes(root / self.SPEC.name) == before
+        assert sorted(path.name for path in root.iterdir()) == [self.SPEC.name]
+
+    def test_a_failed_part_replacement_leaves_it_untouched(self, previous, monkeypatch):
+        root, before = previous
+        real = os.replace
+        seen = 0
+
+        def flaky(source, target):
+            nonlocal seen
+            seen += 1
+            if seen == 2:
+                raise OSError("据え替えの途中で落ちた回")
+            real(source, target)
+
+        monkeypatch.setattr(publish.os, "replace", flaky)
+        with pytest.raises(OSError, match="据え替えの途中"):
+            generate_golden(self.SPEC, root)
+
+        assert _tree_bytes(root / self.SPEC.name) == before
+        assert sorted(path.name for path in root.iterdir()) == [self.SPEC.name]
