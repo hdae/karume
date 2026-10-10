@@ -136,12 +136,21 @@ export const popFailureScopes = async (
 /**
  * 失敗経路の後始末。{@link pushFailureScopes} の 2 本を pop して結果を捨てる。
  *
+ * 戻り値は「GPU 側の失敗を否定できないか」— どちらかの scope が失敗を捕捉したか、pop 自体が
+ * 落ちたとき true。本体の例外は呼び手がそのまま投げるので、捕捉した失敗は例外にしない。真偽を
+ * 返すのは、区間で作った資源（確保が非致命 OOM なら無効）を残すか捨てるかを、ホスト側で落ちた
+ * 失敗経路でも決められるようにするため（`Session` の run の catch が読む）。
+ *
  * MUST: 本体が例外で抜けてもスコープは必ず 2 本とも pop する。積み残すと以後の検証結果が
  * 誤ったスコープに吸われ、エラーが恒久的に見えなくなる。pop 自体の失敗も握り潰す
  * （後始末で本体の例外を上書きしない）。
+ * MUST: 2 本の pop は同一同期区間で発行する（{@link popFailureScopes} と同じ規律）。
  */
-export const discardFailureScopes = async (device: GPUDevice): Promise<void> => {
-  const validation = device.popErrorScope().catch(() => null);
-  const outOfMemory = device.popErrorScope().catch(() => null);
-  await Promise.all([validation, outOfMemory]);
+export const discardFailureScopes = async (device: GPUDevice): Promise<boolean> => {
+  const settle = (pop: Promise<GPUError | null>): Promise<boolean> =>
+    pop.then((error) => error !== null, () => true);
+  const validation = settle(device.popErrorScope());
+  const outOfMemory = settle(device.popErrorScope());
+  const [validationFailed, outOfMemoryFailed] = await Promise.all([validation, outOfMemory]);
+  return validationFailed || outOfMemoryFailed;
 };

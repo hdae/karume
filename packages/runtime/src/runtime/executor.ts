@@ -94,7 +94,7 @@ import {
   type ValueBinding,
 } from "./recipe.ts";
 import type { TransientPlan } from "./transient-plan.ts";
-import { RecipeBuilder } from "./recipe-builder.ts";
+import { type AddedParams, RecipeBuilder } from "./recipe-builder.ts";
 import { planWeightResidency, SharedWeight, type WeightResidency } from "./weight-residency.ts";
 import {
   buildSessionState,
@@ -541,25 +541,34 @@ type ActiveBacking = {
 };
 
 /**
- * 1 実行単位（enqueue 1 本）が Session の保持集合へ**新しく足したもの**。
+ * 1 実行単位（run 1 本 / enqueue 1 本）が Session のキャッシュと保持集合へ**新しく足したもの**。
  *
- * WebGPU の確保失敗（非致命 OOM）は例外にならず、backing は同期的に「作れた」時点で保持集合へ
- * 載る。enqueue の GPU 側の失敗が判明するのは batch の `finish` の errorScope なので、その決着まで
- * 「この単位が足したもの」を持ち越し、区間本体が失敗したら退役させる
- * （{@link Session.#retireBuiltBackings} — ADR 0095 決定 2 の batch 版）。既存の backing は残す
- * （無関係な失敗で再構築のスラッシングを起こさない）。
+ * WebGPU の確保失敗（非致命 OOM）は例外にならず、params・計画・backing は同期的に「作れた」
+ * 時点で公開される。失敗が判明するのは後の errorScope（run は自分の pop、enqueue は batch の
+ * `finish`）なので、その決着まで「この単位が足したもの」を持ち越す。巻き戻す範囲は種類で違う:
+ * - backing は実行単位の失敗で退役させる（{@link Session.#retireBuiltBackings} — ADR 0095
+ *   決定 2 の従来の規律。batch の GPU 側の失敗は `finish` まで分からないので、そちらは区間の
+ *   決着で退役させる）。
+ * - params と計画は GPU 側の失敗が判明したときだけ外す（{@link Session.#forgetDerived}）。
+ *   ホスト側の失敗では作れたものは有効で、外すと何度でも同じく落ちる失敗（入力の誤り等）の
+ *   たびに params を新しく確保し、forget だけして `Session.dispose` まで積もる。
+ * 巻き戻すのはここに載ったものだけで、既存の正常なエントリは残す（無関係な失敗で再構築の
+ * スラッシングを起こさない）。
  *
- * MUST: 照合は世代番号 {@link ActiveBacking.build} で行う。キーで照合した場合と結果が分かれるのは、
- * batch の失敗決着より先に後続の run が同じキーを作り直したとき（区間ロックの解放と finalizer の
- * 前後が microtask の段数で決まる競合）だけで、キー照合だとその run が作った有効な別世代まで
- * 退役させる。同じ失敗した batch の中での作り直しは、作り直した側の記録も退役させるので結果は
- * 変わらない。つまりこれは到達しにくい競合への防御である。
+ * MUST: 照合は同一性で行う（params は実体・計画はオブジェクト・backing は世代番号
+ * {@link ActiveBacking.build}）。キーで照合した場合と結果が分かれるのは、batch の失敗決着より
+ * 先に後続の run が同じキーを作り直した・登録し直したとき（区間ロックの解放と finalizer の前後が
+ * microtask の段数で決まる競合）だけで、キー照合だとその run が作った有効な別世代まで巻き戻す。
+ * 同じ失敗した batch の中での作り直しは、作り直した側の記録も巻き戻すので結果は変わらない。
+ * つまりこれは到達しにくい競合への防御である。
  */
 type CacheAdditions = {
+  readonly params: AddedParams[];
+  readonly prepared: { readonly key: string; readonly plan: PreparedPlan }[];
   readonly backings: { readonly key: string; readonly build: number }[];
 };
 
-const emptyAdditions = (): CacheAdditions => ({ backings: [] });
+const emptyAdditions = (): CacheAdditions => ({ params: [], prepared: [], backings: [] });
 
 /**
  * 読み戻し 1 本ぶんの staging と、ホストの {@link Tensor} へ組み直すのに要る宣言情報。
@@ -1021,8 +1030,8 @@ export class Session {
         release: () => lease.releaseRun(),
       });
     }
-    // この enqueue が新規構築した backing（本体が埋める）。GPU 側の失敗は enqueue の
-    // 戻りではなく `finish()` の errorScope で初めて判明するので、退役は区間の失敗決着に
+    // この enqueue が足した params・計画・backing（本体が埋める）。GPU 側の失敗は enqueue の
+    // 戻りではなく `finish()` の errorScope で初めて判明するので、巻き戻しは区間の失敗決着に
     // 接続する（run の catch と同じ規律 — ADR 0095 決定 2）。
     // MUST: 登録は lease の有無に依らず**受理の同期区間**で行う（finalizer は受理時にしか
     // 登録できない — 本体で登録すると「未 await の enqueue → finish()」で拒否される）。
@@ -1467,8 +1476,12 @@ export class Session {
         let backing: ActiveBacking | undefined;
         // ミス run の値名 → 束縛先（読み戻し先）。backing run は backing.outputs を使う。
         let missValues: ReadonlyMap<string, ValueBinding> | undefined;
-        // この run が backing を新規構築したか（失敗時の回復規律 — 下の catch が読む）。
-        let builtBacking: string | undefined;
+        // この run が足した params・計画・backing（失敗時の回復規律 — 下の catch が読む）。
+        const additions = emptyAdditions();
+        // run の errorScope が失敗を報告したか、pop 自体が落ちたか（= 確保が非致命 OOM で無効
+        // だった可能性を否定できない）。下の catch が params と計画を外すかをこれで決める
+        // （{@link CacheAdditions}）。
+        let scopeFailed = false;
         // 単一フェンス経路で run 本体のコマンド列へ積んだ読み戻し（undefined = 二段待ち経路）。
         let staged: readonly StagedOutput[] | undefined;
         try {
@@ -1505,7 +1518,9 @@ export class Session {
                 residentInputs,
               );
               backing = activated.backing;
-              builtBacking = activated.built ? activated.backing.key : undefined;
+              if (activated.built) {
+                additions.backings.push({ key: preparedKey, build: activated.backing.build });
+              }
               graph.inputs.forEach((spec, index) => {
                 // 常駐入力は writeBuffer を出さない（実体がそのまま焼き込まれている）。
                 const values = data[index];
@@ -1513,18 +1528,9 @@ export class Session {
               });
             } else {
               this.#bindInputs(captured, shapes, arena, env, boundResidents);
-              const built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
-              recipes = built.recipes;
-              limits = built.generation;
-              // MUST: 登録は `RecipeBuilder.buildRecipes` が**完走して戻った後**だけ。途中で throw した run の
-              // 部分レシピを載せると、次の同一 bindings の run が欠けたステップ列を実行し、
-              // 例外なしで誤った値を返す。
-              this.#registerPrepared(preparedKey, {
-                shapes,
-                recipes,
-                fusions: derived.fusions,
-                generation: limits,
-              });
+              const plan = await this.#derivePrepared(preparedKey, derived, stateShapes, additions);
+              recipes = plan.recipes;
+              limits = plan.generation;
             }
             // MUST: `#lastRunPrepared` と同じ位置で埋める（2 席が同じ run の同じ決着点を語る —
             // enqueue も同じ）。
@@ -1630,15 +1636,24 @@ export class Session {
               singleFence ? "run のエンコードと readback" : "run のエンコード",
             );
             popped = true;
-            const failure = await pending;
-            if (failure !== undefined) throw failure;
+            const failure = await pending.catch((cause: unknown) => {
+              scopeFailed = true;
+              throw cause;
+            });
+            if (failure !== undefined) {
+              scopeFailed = true;
+              throw failure;
+            }
           } catch (cause) {
             // MUST: 失敗した run の残 pending dispatch は submit せずに捨てる（エンコード途中の
             // throw で先行ノードのぶんが残る）。実行する理由が無いうえ、後始末の
             // arena.destroy() → flush で出すと、破棄されるバッファを参照したまま submit する
             // ことになる。discard は同期なので、捨てるまでの間に submit の隙が生まれない。
             scheduler.discard();
-            if (!popped) await discardFailureScopes(device);
+            // pop より前に落ちた run（ホスト側の失敗が主）も scope の中身は見る — 捨てるだけで
+            // 外す側に倒すと、何度でも同じく落ちるホスト側の失敗（ミス run の
+            // assertGenerationRun 等）のたびに params を新しく確保して dispose まで積もる。
+            if (!popped) scopeFailed = await discardFailureScopes(device);
             throw cause;
           }
 
@@ -1657,7 +1672,18 @@ export class Session {
           // backing が後続 run に居座らない。既存 backing での失敗 run は退役させない — 無関係な
           // 失敗のたびに ~GiB 規模の再構築を強いるスラッシングになる（そちらの回復手段は
           // signature 切替と LRU 追い出し）。
-          if (builtBacking !== undefined) this.#retireBacking(builtBacking);
+          this.#retireBuiltBackings(additions);
+          // MUST: この run が足した params と計画を外すのは、GPU 側の失敗を否定できないときだけ —
+          // errorScope が失敗を報告した（pop の前に落ちて捨てた scope の中身も含む）・pop 自体が
+          // 落ちた・device が失われた（消失後の popErrorScope は null で resolve するので、検査の
+          // 結果が証拠にならない）。単一フェンス経路の staging の確保と copy は run の scope に
+          // 相乗りするので、その失敗はここで外す側に入る。ホスト側の失敗（導出や run 前検査の
+          // throw）と、run の scope を失敗なしで通った後の読み戻しの失敗（mapAsync・二段待ち経路の
+          // `#readOutputs` が自前の scope で報告する失敗）では、作れた params と計画は有効 —
+          // 外すと同じ失敗のたびに params を新しく確保し、forget だけして dispose まで積もる。
+          if (scopeFailed || gpu.destroyRequested || gpu.lost !== undefined) {
+            this.#forgetDerived(additions);
+          }
           // MUST: 破棄待ちの slot は arena.destroy（= flush / discard 済み）の**後**に返す。
           this.#destroyRetired();
           throw cause;
@@ -1796,16 +1822,9 @@ export class Session {
         recipes = derived.recipes;
         limits = derived.generation;
       } else {
-        const built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
-        recipes = built.recipes;
-        limits = built.generation;
-        // MUST: 登録は `RecipeBuilder.buildRecipes` が完走して戻った後だけ（run と同じ理由）。
-        this.#registerPrepared(preparedKey, {
-          shapes,
-          recipes,
-          fusions: derived.fusions,
-          generation: built.generation,
-        });
+        const plan = await this.#derivePrepared(preparedKey, derived, stateShapes, additions);
+        recipes = plan.recipes;
+        limits = plan.generation;
       }
       // MUST: 入力と写し先の検査（値依存）は backing 構築より前。ここで落ちる enqueue に
       // slot の構築を払わせない。
@@ -1882,8 +1901,9 @@ export class Session {
       scheduler.discard();
       this.#poisonOnStateWrite(generation, stateWriteSubmits, cause);
       // この enqueue が新規構築した backing はホスト側の失敗でもこの場で退役させる（run と同じ
-      // 規律 — discard 済みなので破棄まで進めてよい）。GPU 側の失敗は区間の失敗決着
-      // （{@link Session.#rollbackSettled}）が同じ記録から退役させる。
+      // 規律 — discard 済みなので破棄まで進めてよい）。params と計画はここでは外さない（ホスト側の
+      // 失敗では有効 — {@link CacheAdditions}）。同じ区間で GPU 側の失敗も判明したら、区間の
+      // 失敗決着（{@link Session.#rollbackSettled}）が同じ記録から外す。
       this.#retireBuiltBackings(additions);
       this.#destroyRetired();
       throw cause;
@@ -2135,6 +2155,39 @@ export class Session {
   }
 
   /**
+   * ミス経路の導出と登録（run / enqueue 共通の 1 本）。足した計画と params を `additions` へ
+   * 記録する（GPU 側の失敗が判明したら {@link Session.#forgetDerived} が外す）。
+   *
+   * MUST: 登録は `RecipeBuilder.buildRecipes` が**完走して戻った後**だけ。途中で throw した実行の
+   * 部分レシピを載せると、次の同一 bindings の実行が欠けたステップ列を実行し、例外なしで誤った
+   * 値を返す。
+   * MUST: params の記録は導出が途中で落ちても行う（finally）。落ちるまでに載せた params も、
+   * 確保が非致命 OOM なら無効なまま次の導出に当たり続ける。
+   */
+  async #derivePrepared(
+    key: string,
+    derived: PlannedSteps,
+    stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
+    additions: CacheAdditions,
+  ): Promise<PreparedPlan> {
+    let built: Awaited<ReturnType<RecipeBuilder["buildRecipes"]>>;
+    try {
+      built = await this.#recipeBuilder.buildRecipes(derived.steps, stateShapes);
+    } finally {
+      additions.params.push(...this.#recipeBuilder.addedParams);
+    }
+    const plan: PreparedPlan = {
+      shapes: derived.shapes,
+      recipes: built.recipes,
+      fusions: derived.fusions,
+      generation: built.generation,
+    };
+    this.#registerPrepared(key, plan);
+    additions.prepared.push({ key, plan });
+    return plan;
+  }
+
+  /**
    * 失敗した実行単位が新規構築した backing を破棄待ちへ移す（ADR 0095 決定 2）。破棄
    * （{@link Session.#destroyRetired}）は呼び手が安全な点で行う。
    *
@@ -2148,23 +2201,53 @@ export class Session {
   }
 
   /**
-   * batch の失敗決着での退役（enqueue が受理時に登録する finalizer の `fail`）。
+   * GPU 側の失敗が判明した実行単位が足した params と計画を外す（params はキャッシュから外す
+   * だけで destroy しない — 所有は weights アリーナ）。ホスト側の失敗では呼ばない
+   * （{@link CacheAdditions}）。
+   *
+   * MUST: 照合は同一性（{@link CacheAdditions}）。
+   * MUST: 計画を外すときはそのキーの backing も退役させる（追い出しと同じ規律）。backing はその
+   * 計画のレシピ（= 外す params の実体）を焼き込んでいるので、計画より長生きさせると、再導出した
+   * 計画のヒットが古い束を再利用して同じ失敗を繰り返す。
+   * NOTE: 通常の経路では、外す計画のキーに backing があれば、同じ失敗した実行単位が作ったもので
+   * {@link Session.#retireBuiltBackings} が既に退役させている（run はミス run でしか導出せず、
+   * ミス run は backing を作らない。enqueue は導出と構築を同じ単位で行う）。ここでの退役が効くのは、
+   * batch の失敗決着より先に後続の run がその計画に当たって backing を作った競合のときだけで、
+   * 到達しにくい競合への防御である。
+   */
+  #forgetDerived(additions: CacheAdditions): void {
+    this.#recipeBuilder.forgetParams(additions.params);
+    for (const { key, plan } of additions.prepared) {
+      if (this.#state.prepared.get(key) !== plan) continue;
+      this.#state.prepared.delete(key);
+      this.#retireBacking(key);
+    }
+  }
+
+  /**
+   * batch の失敗決着での巻き戻し（enqueue が受理時に登録する finalizer の `fail`）。
    *
    * 非致命 OOM は enqueue を成功させたまま `finish()` の errorScope で初めて判明するので、
-   * enqueue 本体の catch（ホスト側の失敗だけを見る）では退役させられない。退役させるのは区間本体が
+   * enqueue 本体の catch（ホスト側の失敗だけを見る）では巻き戻せない。巻き戻すのは区間本体が
    * 失敗したとき（`origin === "gpu"` — {@link BatchFailureOrigin}）だけ。ホスト側の失敗だけで
-   * 決着した batch では作れた backing は有効（ホスト側で落ちた enqueue 自身が新規構築した
-   * backing は、その catch が既に退役させている）。
+   * 決着した batch では作れた backing・params・計画は有効（ホスト側で落ちた enqueue 自身が
+   * 新規構築した backing は、その catch が既に退役させている）。
    * MUST: ここで destroy しない。決着の時点では、同じ Session の後続 run が区間ロックの解放を
    * 受けて既にエンコードを始めていてもよく（決着と後続の開始の前後は microtask の段数で決まる
    * だけ）、その run が掴んだ backing を未 submit のまま破棄すると ADR 0004 の
    * flush-before-destroy が崩れる。破棄は Session の直列化鎖に 1 本積む — 鎖の各本体は
    * submit / discard を済ませて抜けるので、鎖の上の破棄は「未 submit のエンコードが無い点」に
    * なる。破棄の担い手は従来どおり {@link Session.#destroyRetired} 1 本のまま。
+   * NOTE: batch の決着と後続 run の開始が競合したとき、計画の無いキーに backing が残りうるが
+   * 無害。後続 run が外す前の計画を掴んで backing を作ると、その backing は外した params を焼き込む。
+   * それが無効なら、その run 自身が errorScope で落ちて自分の作った backing を退役させる。有効なら、
+   * 実体は weights アリーナが dispose まで持ち内容も同じなので、再導出の後のヒットが再利用しても
+   * 値は正しい。
    */
   #rollbackSettled(additions: CacheAdditions, origin: BatchFailureOrigin): void {
     if (origin !== "gpu") return;
     this.#retireBuiltBackings(additions);
+    this.#forgetDerived(additions);
     if (this.#retired.length === 0) return;
     void this.#serialize(() => {
       this.#destroyRetired();

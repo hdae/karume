@@ -208,6 +208,12 @@ export type RecipeBuildFace = {
 };
 
 /**
+ * params キャッシュへ新しく載せた 1 件（{@link RecipeBuilder.addedParams} — 失敗の決着で
+ * {@link RecipeBuilder.forgetParams} が巻き戻す単位）。
+ */
+export type AddedParams = { readonly key: string; readonly buffer: GPUBuffer };
+
+/**
  * 導出相の本体。Session は 1 個だけ持ち、run / enqueue のミス経路から
  * {@link RecipeBuilder.buildRecipes} を呼ぶ。
  */
@@ -215,8 +221,13 @@ export class RecipeBuilder {
   readonly #state: RecipeBuilderContext;
   /** 族別導出へ渡す面（private helper を閉じ込めた 1 個。構築はコンストラクタの 1 度きり）。 */
   readonly #face: RecipeBuildFace;
-  /** 進行中 run の params 実績（run の頭でリセットし、決着時に Session の診断へ移す）。 */
-  #paramsAllocCount = 0;
+  /**
+   * 進行中 run の params 実績（run の頭でリセットし、決着時に Session の診断へ移す）。
+   * 新規生成は件数ではなく**載せた実体の列**で持つ — 失敗した実行の巻き戻し
+   * （{@link RecipeBuilder.forgetParams}）が要るのはこの列で、件数（`allocCount`）はその長さから
+   * 導出する（独立に数えると、片方だけ通る経路で 2 つがずれる）。
+   */
+  #paramsAdded: AddedParams[] = [];
   #paramsReuseCount = 0;
 
   constructor(state: RecipeBuilderContext) {
@@ -232,13 +243,35 @@ export class RecipeBuilder {
 
   /** params 実績を run の頭でリセットする（Session が run / enqueue の入口で 1 度だけ呼ぶ）。 */
   resetParamsStats(): void {
-    this.#paramsAllocCount = 0;
+    this.#paramsAdded = [];
     this.#paramsReuseCount = 0;
   }
 
   /** リセット以降に積んだ params 実績（Session の `lastRunParams` はこの値そのもの）。 */
   get paramsStats(): ParamsCacheStats {
-    return { allocCount: this.#paramsAllocCount, reuseCount: this.#paramsReuseCount };
+    return { allocCount: this.#paramsAdded.length, reuseCount: this.#paramsReuseCount };
+  }
+
+  /** リセット以降に params キャッシュへ新しく載せたもの（写し — 失敗の決着まで持ち越せる）。 */
+  get addedParams(): readonly AddedParams[] {
+    return [...this.#paramsAdded];
+  }
+
+  /**
+   * 失敗で決着した実行が載せた params をキャッシュから外す。
+   *
+   * 非致命 OOM の確保は例外にならず無効なバッファを返し、失敗は後の errorScope で初めて判明する。
+   * 外さないと、メモリが空いた後の再導出も同じ内容キーで無効なバッファに当たり続ける。
+   * MUST: 外すのはキーが**同じ実体**を指しているときだけ。キーで消すと、巻き戻しより先に
+   * 同じ内容で載せ直された別の実体まで外す。
+   * MUST: destroy しない。所有は weights アリーナで、破棄は `Session.dispose` に相乗りする
+   * （{@link RecipeBuilder.#writeParams} の MUST — 破棄の担い手を増やさない）。外した実体は
+   * どの計画からも参照されないまま dispose まで残る（1 本は数十バイト規模）。
+   */
+  forgetParams(added: readonly AddedParams[]): void {
+    for (const { key, buffer } of added) {
+      if (this.#state.paramsCache.get(key) === buffer) this.#state.paramsCache.delete(key);
+    }
   }
 
   /**
@@ -712,8 +745,10 @@ export class RecipeBuilder {
    * MUST: 破棄は weights アリーナの dispose に相乗りする（`Session.dispose` →
    * `RunArena.destroy` の flush-before-destroy）。キャッシュ専用の破棄経路を新設すると
    * flush の担い手が 2 つになり、どちらが先に走るかで破棄済みバッファ参照の submit が生まれる。
-   * NOTE: 失敗 run（`scheduler.discard` 経路）の後もキャッシュは有効。バッファの内容は不変で、
-   * discard が捨てるのは未 submit のエンコードだけなので、params の値は影響を受けない。
+   * NOTE: 失敗 run（`scheduler.discard` 経路）の後も、**既にあった**エントリは有効。バッファの
+   * 内容は不変で、discard が捨てるのは未 submit のエンコードだけなので、params の値は影響を
+   * 受けない。失敗した実行が**新しく載せた**エントリだけは Session が
+   * {@link RecipeBuilder.forgetParams} で外す（確保自体が非致命 OOM で無効だった可能性がある）。
    * NOTE: **このキャッシュは Session 寿命で無界**（by-design — `docs/limitations.md`）。
    * 同範囲の他キャッシュ（`SubmitScheduler.MEASURED_HISTORY` /
    * `PREPARED_PLAN_CAPACITY`）が上限を持つのに対し、ここは追い出しを持たない —— params を
@@ -733,7 +768,7 @@ export class RecipeBuilder {
     const buffer = this.#state.weights.allocHostWritten(params.byteLength, usage);
     this.#state.gpu.device.queue.writeBuffer(buffer, 0, params);
     this.#state.paramsCache.set(key, buffer);
-    this.#paramsAllocCount += 1;
+    this.#paramsAdded.push({ key, buffer });
     return buffer;
   }
 }

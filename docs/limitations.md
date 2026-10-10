@@ -151,6 +151,11 @@ params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeP
   参照計数という別の簿記が要る（実需が出るまで作らない）。
 - 回避策: 可変 shape を長時間回す用途では `diagnostics().weights.allocCount` の伸びを見て
   Session を切り直すこと。
+- GPU 側の失敗で決着した run / batch が新しく載せた params はキャッシュから外れる（確保が非致命
+  OOM で無効だった可能性があるため — ADR [0095](decisions/0095-plan-backing-budget.md) 追記
+  2026-10-10）が、実体は破棄されず `Session.dispose()` まで残る。再試行はその内容を新しく確保する
+  ので、そうした失敗を繰り返すたびに失敗した実行ぶんの小バッファが積もる。ホスト側の失敗（入力の
+  誤り・run 前検査の失敗等 — run / enqueue とも）では外さないので積もらない。
 - 無界であること自体は `packages/runtime/tests/gpu_params_cache_test.ts` が門にしている
   （追い出しを入れるとこの門が赤くなる）。
 

@@ -50,6 +50,7 @@ import { ExecutionError } from "../src/runtime/plan.ts";
 import { type DeclarationJson, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { injectOutOfMemory } from "./helpers/oom-injection.ts";
 import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./helpers/pipeline-census.ts";
 
 /**
@@ -1288,6 +1289,117 @@ Deno.test({
       }
       assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
     } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * run 前検査（`assertGenerationRun`）は導出相の後に居るので、ミス run はそこで落ちるまでに計画と
+ * params を載せている。これはホスト側の失敗で、errorScope は何も捕捉していない — 作れた計画と
+ * params は有効なので外さない。外すと同じ失敗のたびに再導出して params を新しく確保し、キャッシュ
+ * から外すだけで `dispose` まで積もる（ADR 0095 追記 2026-10-10「GPU 側の失敗で、その実行単位が
+ * 足した params と計画を巻き戻す」）。errorScope の pop より前に落ちる run なので、「捨てる scope の
+ * 中身を見ずに外す側へ倒す」形もこの門で赤くなる。
+ */
+Deno.test({
+  name:
+    "ミス run が run 前検査で落ちても計画と params は残り、繰り返しても params を新しく確保しない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 2 });
+    // decode 形（M=1）に queryLength 2 — 導出の後の run 前検査で「物理 chunk 行数」を超えて落ちる。
+    const failOnce = async (): Promise<void> => {
+      const error = await assertRejects(
+        () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
+        ExecutionError,
+      );
+      assert(error.message.includes("物理 chunk 行数"), error.message);
+    };
+    try {
+      const initial = session.diagnostics().weights.allocCount;
+      await failOnce();
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        false,
+        "1 回目の run が導出していない（門が空振る）",
+      );
+      const derived = session.diagnostics().weights.allocCount;
+      assert(derived > initial, "1 回目の run が params を載せていない（門が空振る）");
+
+      await failOnce();
+      await failOnce();
+      assertEquals(
+        session.diagnostics().weights.allocCount,
+        derived,
+        "同じホスト側の失敗のたびに params を新しく確保している",
+      );
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        true,
+        "ホスト側の失敗で、作れた計画を捨てている",
+      );
+      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 上の門の対。pop より前に落ちる run でも、捨てる errorScope が GPU 側の失敗（params の確保の
+ * 非致命 OOM）を捕捉していれば、その run が足した計画と params は外す。残すと、次の run が
+ * 無効なバッファを直参照する計画に当たり続ける。本体の例外はホスト側の失敗のままで、捕捉した
+ * OOM には差し替わらない。注入は out-of-memory スコープの pop だけを差し替える
+ * （`helpers/oom-injection.ts`）ので、run 前検査で落ちた run の後始末の pop に当たる。
+ */
+Deno.test({
+  name:
+    "ミス run が run 前検査で落ちても、捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す（注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, FULL);
+    const context = await session.createGenerationContext({ chunkLength: 2 });
+    const oom = injectOutOfMemory(gpu.device);
+    // decode 形（M=1）に queryLength 2 — 導出の後の run 前検査で「物理 chunk 行数」を超えて落ちる。
+    const failOnce = async (): Promise<void> => {
+      const error = await assertRejects(
+        () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
+        ExecutionError,
+      );
+      assert(error.message.includes("物理 chunk 行数"), error.message);
+    };
+    try {
+      oom.arm();
+      await failOnce();
+      assertEquals(oom.fired(), 1, "注入が run の後始末の pop に当たっていない（門が空振る）");
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        false,
+        "1 回目の run が導出していない（門が空振る）",
+      );
+      const derived = session.diagnostics().weights.allocCount;
+
+      await failOnce();
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        false,
+        "捨てた errorScope が OOM を捕捉した run の計画が残っている",
+      );
+      assert(
+        session.diagnostics().weights.allocCount > derived,
+        "捨てた errorScope が OOM を捕捉した run の params をキャッシュから再利用している",
+      );
+      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+    } finally {
+      oom.restore();
       await context.dispose();
       await session.dispose();
       gpu.destroy();

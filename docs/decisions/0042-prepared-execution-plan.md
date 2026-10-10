@@ -44,7 +44,12 @@ MUST: レシピは GPUBindGroup と run 寿命バッファを持たない。持�
 - 器は SessionState（モジュールスコープ禁止 — 副作用ゼロ不変条件）。持つのは後段が実際に
   読む 3 欄のみ（shapes / recipes / fusions）。
 - **登録は導出相の完走後のみ**。途中 throw した run の部分レシピは載せない（載せると次の
-  同一 bindings run が欠けたステップ列を沈黙実行する）。
+  同一 bindings run が欠けたステップ列を沈黙実行する）。完走して登録した計画も、その実行で
+  GPU 側の失敗が判明したら（run は errorScope が失敗を報告したとき・pop 自体が落ちたとき・
+  device 消失、enqueue は batch の `finish()` で区間本体が失敗したとき）登録を外し、その実行が新しく
+  載せた params もキャッシュから外す（非致命 OOM の無効バッファを直参照したまま残さない）。
+  ホスト側の失敗では外さない（作れた計画と params は有効）— ADR [0095](0095-plan-backing-budget.md)
+  追記 2026-10-10「GPU 側の失敗で、その実行単位が足した params と計画を巻き戻す」。
 - ヒット run は planGraph / planFusions / レシピ導出を丸ごと飛ばす。**bindSymbols
   （入力 shape 検証）は毎 run 走らせる**。契約検査を飛ばせる根拠は「キーが解決済み bindings の
   完全一致なら、同じ入力に対する同じ検査の再実行を省くだけ」— fail loudly は緩まない。

@@ -162,3 +162,38 @@ MUST: Session が backing を退役させるとき、生存中の全 context の
   1 本目でちょうど 1 回返り、次の batch で作り直す・既存 backing に当たった失敗では作り直さない・
   ホスト側の失敗だけの決着では別の enqueue が作った backing を残す）。GPU 側の失敗は errorScope の
   pop に OOM を注入して作る（`tests/helpers/oom-injection.ts`）。
+
+## 追記（2026-10-10）: GPU 側の失敗で、その実行単位が足した params と計画を巻き戻す
+
+params（カーネル定数のバッファ）と導出済み計画も、確保が非致命 OOM なら無効なバッファを直参照した
+まま登録される。巻き戻さないと、メモリが空いた後の再試行も同じ無効バッファに当たり続ける。
+
+- 実行単位（run 1 本 / enqueue 1 本）ごとに、新しく載せた params（キャッシュのエントリ）と登録した
+  計画を記録し、GPU 側の失敗が判明したときだけ外す（params はキャッシュから外すだけで破棄しない —
+  weights アリーナが `Session.dispose` で回収する）。既存の正常なエントリは残す。
+- GPU 側の失敗の判定: run は errorScope が失敗を報告したとき（pop の前に落ちた run も、捨てる
+  scope の中身を見る — `discardFailureScopes` が捕捉の有無を返す）・pop 自体が落ちたとき・device
+  消失（消失後の pop は null で resolve するので、検査の結果が証拠にならない）。enqueue は batch の
+  `finish()` で区間本体が失敗したとき（上の追記の `"gpu"`）。
+- ホスト側の失敗では外さない（run / enqueue とも）。導出の throw・入力の検査・`copyOutputs` の
+  検査・読み戻しの上限の検査・generation の検査（ミス run の `assertGenerationRun` 等）が該当する。
+  作れた params と計画は有効で、外すと何度でも同じく落ちる失敗（入力の誤り等）のたびに params を
+  新しく確保し、dispose まで積もる。
+- run の読み戻しの失敗は経路で扱いが分かれる。単一フェンス経路では staging の確保と copy が run 本体の
+  errorScope に相乗りするので、その失敗は GPU 側として外す。run 本体の scope を失敗なしで通った
+  後の失敗は外さない — 読み戻しの完了待ち（`mapAsync`）の失敗と、二段待ち経路の `#readOutputs` が
+  自前の scope で報告する失敗（staging の確保・copy）が該当する（device 消失なら上の判定で外す）。
+- backing は従来どおり（決定 2 と上の追記 — 失敗した実行単位が新規構築したものを退役させる）。
+- MUST: 照合は同一性で行う（計画はオブジェクト・params は実体）。上の追記の世代番号と同じく、
+  到達しにくい競合への防御である。
+- MUST: 計画を外すときはそのキーの backing も退役させる（LRU 追い出しと同じ — backing は計画の
+  レシピ〈= 外す params〉を焼き込んでいる）。通常の経路では、そのキーの backing は同じ失敗した
+  実行単位が作ったもので既に退役している。効くのは batch の決着より先に後続の run がその計画に
+  当たって backing を作った競合のときだけで、これも到達しにくい競合への防御である。その競合では
+  計画の無いキーに backing が残りうるが無害（焼き込んだ params が無効ならその run 自身が落ちて
+  自分の backing を退役させ、有効なら実体は dispose まで生きていて内容も同じ）。
+- 門: `gpu_params_cache_test.ts`（GPU 側の失敗の run / batch が足した params と計画だけを外し、
+  既存の計画は残す・入力の誤りで落ちる enqueue を繰り返しても params の確保数
+  〈`diagnostics().weights.allocCount`〉が増えず、計画も残る）・`gpu_state_execution_test.ts`
+  （ミス run が `assertGenerationRun` で落ちる run を繰り返しても params の確保数が増えない・同じ
+  run で捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す）。
