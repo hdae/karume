@@ -20,7 +20,11 @@ sym_size の合成で T が「値」として部分木に入りうる）ため�
 
 1. シンボルの消費位置を見る — extent（長さ・形状）位置だけを {@link SYMBOL_EXTENT_ARGS} で
    許し、値位置へ届いた部分木は foldable から外す（symbol-as-data の拒否）。外れた op は
-   通常の lowering へ落ち、語彙外なら未対応 op として export ごと拒否される。
+   通常の lowering へ落ち、語彙外なら未対応 op として export ごと拒否される。記号軸上の
+   位置を参照する形（記号軸を添字テンソルで引く index — 負かどうかは問わない・負の start の
+   slice・記号軸の cat / repeat / 縮約）と、bool / uint8 マスクの index も同じく構造で外す
+   （{@link _references_symbolic_position}）。マスクの index は沈黙誤値を塞ぐ除外ではなく、
+   従来も unbacked な出力長で明示的に落ちていた形を、語彙外の op として落ちる経路に揃える。
 2. 畳み込みのたびに Tmax と別の点で**2 点評価して prefix 一致を実測する**
    （_check_prefix_commutes）。
 
@@ -164,7 +168,8 @@ MIN_PROBE_VALUE = 2
 #: - `full` / `scalar_tensor` / `clone` / `_to_copy` は値そのものに触らない
 #:
 #: 可換でない使われ方のうち「シンボルを値として消費する形」は {@link SYMBOL_EXTENT_ARGS} が
-#: foldable から外し、shape 依存 view は構造で除外する。_check_prefix_commutes の 2 点評価は
+#: foldable から外し、shape 依存 view と記号軸上の位置参照（{@link _references_symbolic_position}）
+#: は構造で除外する。_check_prefix_commutes の 2 点評価は
 #: 追加の反例検査であり、任意の op の可換性証明にはならない。ほかの除外理由は 3 つ:
 #: ① 実体化が爆発する op（expand。frontier で止める —
 #: ただし no-op expand だけは例外で `_classify_foldable` が通す）② 非決定な op（RNG）
@@ -349,6 +354,93 @@ def _uses_symbol_as_data(node: Node) -> bool:
     names = [argument.name for argument in node.target._schema.arguments]
     named = [*zip(names, node.args, strict=False), *node.kwargs.items()]
     return any(name not in allowed and _carries_symbol(value) for name, value in named)
+
+
+def _schema_args(node: Node) -> dict[str, Any]:
+    """op スキーマの引数名 → 値（位置引数・kwargs・既定値のどれで来ても同じ表にする）。"""
+    arguments = node.target._schema.arguments
+    bound = {
+        argument.name: argument.default_value
+        for argument in arguments
+        if argument.has_default_value()
+    }
+    bound.update(zip([argument.name for argument in arguments], node.args, strict=False))
+    bound.update(node.kwargs)
+    return bound
+
+
+#: {@link _references_symbolic_position} が形を検査する op（いずれも {@link FOLDABLE_OPS} の内）。
+_POSITION_SENSITIVE_OPS = frozenset(
+    {
+        aten.index.Tensor,
+        aten.slice.Tensor,
+        aten.cat.default,
+        aten.repeat.default,
+        aten.bmm.default,
+    }
+)
+
+
+#: torch がマスクとして解釈する添字の dtype（uint8 は非推奨だが bool と同じくマスク扱い）。
+_MASK_INDEX_DTYPES = frozenset({torch.bool, torch.uint8})
+
+
+def _references_symbolic_position(node: Node) -> bool:
+    """記号軸上の**位置**を参照する形か（prefix と可換でないことが構造で決まる形）。
+
+    MUST: 記号が値位置へ届かなくても（{@link _uses_symbol_as_data} を通っても）、記号長の
+    軸を「末尾から数える」「全長を畳む」形は長さ T を要素の値へ変える。`arange(T)[[-1]]` は
+    T−1、`arange(T)[-2:]` は `[T−2, T−1]` になり、後段の比較が Tmax と Tmax−1 の 2 点で
+    偶然一致すると 2 点評価をすり抜けて沈黙誤値になる。値の偶然に頼らないよう、次の形は
+    添字の値を見ずに畳み込みから外す（ADR 0010 の 2026-10-10 追記）:
+
+    - `index` — 記号軸を添字テンソルで引く（負の添字は長さで折り返す。添字が非負かは値の
+      性質で、構造からは決まらない）。bool / uint8 のマスク添字は記号軸の有無を問わず外す —
+      rank 2 以上のマスクは複数の軸を占めるので「添字 k ↔ 入力の軸 k」の対応が崩れ、記号軸が
+      マスクの 2 軸目以降に隠れる（保守的な側に倒す）。ただしマスク添字の出力長はマスクの
+      値で決まる unbacked な記号になり、この除外が無くても焼いた結果の shape で明示的に
+      落ちていた（{@link Converter._sym_parts} の「入力 shape に現れないシンボル」）。
+      沈黙誤値を塞ぐ規則ではなく、失敗の出方を語彙外の op（未対応 op の全件列挙）へ揃える
+    - `slice` — 記号軸を負の start で切る（末尾から数える）。非負の start は先頭からの位置
+      なので prefix と可換のまま畳む
+    - `cat` — 記号軸に沿って連結する（後ろの入力の位置が前の入力の長さ T でずれる）
+    - `repeat` — 記号軸を 2 回以上繰り返す（cat と同じ — 2 周目の位置が T でずれる）
+    - `bmm` — 記号軸で縮約する（T 個ぶんの和で、全長に依存する）
+    """
+    target = node.target
+    if target not in _POSITION_SENSITIVE_OPS:
+        return False
+    args = _schema_args(node)
+    if target is aten.cat.default:
+        out = node.meta["val"]
+        return _has_free_symbols(out.shape[args["dim"] % out.dim()])
+    source = args["self"].meta["val"]
+    if target is aten.index.Tensor:
+        indices = args["indices"]
+        if any(
+            index is not None and index.meta["val"].dtype in _MASK_INDEX_DTYPES for index in indices
+        ):
+            return True
+        return any(
+            index is not None and _has_free_symbols(source.shape[axis])
+            for axis, index in enumerate(indices)
+        )
+    if target is aten.slice.Tensor:
+        start = args["start"]
+        return (
+            _has_free_symbols(source.shape[args["dim"] % source.dim()])
+            and isinstance(start, int)
+            and start < 0
+        )
+    if target is aten.repeat.default:
+        # repeats は右詰めで入力の軸に対応する（先頭の余りは新しい軸）。
+        counts = args["repeats"][len(args["repeats"]) - source.dim() :]
+        return any(
+            _has_free_symbols(extent) and not (isinstance(count, int) and count == 1)
+            for extent, count in zip(source.shape, counts, strict=True)
+        )
+    # bmm: [b, n, k] × [b, k, m] の縮約軸 k。
+    return _has_free_symbols(source.shape[2])
 
 
 def _bitwise_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
@@ -559,7 +651,8 @@ class Converter:
         MUST: 記号依存を許すのは「Tmax で焼いて prefix スライスで切り出す」表現が入った
         から（ADR 0010）。ただし記号を**値**として消費した部分木は焼いた定数が Tmax でしか
         正しくないので、{@link SYMBOL_EXTENT_ARGS} の extent 位置以外に記号が届いたノードは
-        ここで落とす（下流は依存の連鎖で自然に外れる）。残る可換性は
+        ここで落とす（下流は依存の連鎖で自然に外れる）。記号軸上の位置を参照する形
+        （{@link _references_symbolic_position}）も同じく構造で落とす。残る可換性は
         _check_prefix_commutes の 2 点実測が受け止める。
         """
         foldable: set[str] = set()
@@ -602,6 +695,10 @@ class Converter:
             if _uses_symbol_as_data(node):
                 # 記号がテンソルデータへ昇格した部分木（`scalar_tensor(T)` 等）。焼くと Tmax
                 # でだけ正しい定数になり、2 点評価は偶然一致しうる（module docstring の反例）。
+                continue
+            if _references_symbolic_position(node):
+                # 記号軸上の位置を参照する形とマスク添字の index（対象と理由は
+                # _references_symbolic_position）。
                 continue
             if all(dep.name in foldable for dep in node.all_input_nodes):
                 foldable.add(node.name)

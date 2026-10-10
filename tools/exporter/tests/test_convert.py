@@ -203,6 +203,63 @@ class TestConstantFolding:
             convert_module(Masked(), (torch.randn(3, 4),))
 
 
+class _LastPositionByTensorIndex(nn.Module):
+    """`arange(T)[[-1]] >= Tmax−2` — Tmax と Tmax−1 では真、T=5 では偽。"""
+
+    def forward(self, x):
+        positions = torch.arange(x.shape[0])
+        return x + (positions[torch.tensor([-1])] >= SYM_MAX - 2).to(torch.float32)
+
+
+class _LastPositionBySymbolicIndex(nn.Module):
+    """添字テンソルが記号長でも同じ穴 — `full((T,), -1)` で引けば全要素が T−1 になる。"""
+
+    def forward(self, x):
+        positions = torch.arange(x.shape[0])
+        last = torch.full((x.shape[0],), -1)
+        return x + (positions[last] >= SYM_MAX - 2).to(torch.float32)
+
+
+class _LastPositionsByNegativeSlice(nn.Module):
+    """`arange(T)[-2:] >= Tmax−3` — Tmax と Tmax−1 では両要素とも真、T=5 では偽。"""
+
+    def forward(self, x):
+        positions = torch.arange(x.shape[0])
+        return x + (positions[-2:] >= SYM_MAX - 3).to(torch.float32)
+
+
+class _PositionAcrossConcatenation(nn.Module):
+    """`cat([r, r, r, r])[7:8] >= 5` — 位置 7 は T=15・16 なら 1 本目の 7、T=5 なら 2 本目の 2。
+
+    4 本つなぐのは、T の下限 2 でも全長 4T >= 8 になり `[7:8]` が静的な 1 要素に決まるため
+    （記号長の slice 出力にすると、焼く前に shape の側で落ちて反例にならない）。
+    """
+
+    def forward(self, x):
+        positions = torch.arange(x.shape[0])
+        return x + (torch.cat([positions] * 4)[7:8] >= 5).to(torch.float32)
+
+
+class _PositionAcrossRepetition(nn.Module):
+    """`r.repeat(4)[7:8] >= 5` — 値は cat の 4 本つなぎと同じ（2 周目の位置が T でずれる）。"""
+
+    def forward(self, x):
+        positions = torch.arange(x.shape[0])
+        return x + (positions.repeat(4)[7:8] >= 5).to(torch.float32)
+
+
+def _assert_slips_past_two_point_evaluation(module: nn.Module, trailing: tuple[int, ...]) -> None:
+    """反例の前提: 2 つの評価点（Tmax と Tmax−1）では一致し、その外の T=5 では食い違う。
+
+    = 2 点評価では止まらない形。前提が崩れたら、反例を使うテストは何も守っていない。
+    """
+    assert torch.equal(module(torch.zeros(SYM_MAX, *trailing)), torch.ones(SYM_MAX, *trailing))
+    assert torch.equal(
+        module(torch.zeros(SYM_MAX - 1, *trailing)), torch.ones(SYM_MAX - 1, *trailing)
+    )
+    assert torch.equal(module(torch.zeros(5, *trailing)), torch.zeros(5, *trailing))
+
+
 class TestSymbolicConstantFolding:
     """記号依存の部分木は Tmax で焼き、実行時は sym_prefix_slice で切り出す（ADR 0010）。"""
 
@@ -324,6 +381,107 @@ class TestSymbolicConstantFolding:
             convert_module(SymbolAsData(), (torch.randn(6),), ({0: dyn_t},))
 
         assert "aten.scalar_tensor.default" in err.value.ops
+
+    @pytest.mark.parametrize(
+        ("module", "shape", "error", "match"),
+        [
+            # `r[tensor([-1])]` は index.Tensor — 記号軸を添字テンソルで引く形。
+            (_LastPositionByTensorIndex(), (6,), UnsupportedAtenOpsError, "aten.index.Tensor"),
+            # 添字の形ではなく、記号軸を添字テンソルで引くこと自体を外す（負かは値の性質）。
+            (_LastPositionBySymbolicIndex(), (6,), UnsupportedAtenOpsError, "aten.index.Tensor"),
+            # `r[-2:]` は負の start の slice — 外れた slice は記号軸を受けない対応表で落ちる。
+            (_LastPositionsByNegativeSlice(), (6, 2), NotImplementedError, "記号次元"),
+            # 記号軸に沿った cat — 位置 7 がどの入力に落ちるかが T で決まる。cat が外れると、
+            # 後ろの slice も記号軸を受けない対応表で落ちる。
+            (_PositionAcrossConcatenation(), (6,), NotImplementedError, "記号次元"),
+            # 記号軸を繰り返す repeat — cat と同じ理由で外れ、repeat は語彙外として落ちる。
+            (_PositionAcrossRepetition(), (6,), UnsupportedAtenOpsError, "aten.repeat.default"),
+        ],
+        ids=["tensor-index", "symbolic-tensor-index", "negative-slice", "cat", "repeat"],
+    )
+    def test_a_position_that_depends_on_the_symbolic_length_is_not_folded(
+        self, convert_module, dyn_t, module, shape, error, match
+    ):
+        """記号軸上の位置が長さ T で決まる形は畳まない（2 点評価の穴 — ADR 0010 の追記）。
+
+        `arange(T)` を末尾から数えて引く・記号軸に沿ってつなぐ / 繰り返すと、長さ T が値
+        （T−1 や「どの周回に落ちるか」）に化ける。記号は値位置へ届かないので消費位置の検査を
+        通り、後段の比較が Tmax と Tmax−1 の両方で真になると 2 点評価も通る — 焼けば T=5 で
+        0 のはずの値が黙って 1 になる。添字の値を見ずに構造で外すため、部分木は通常の
+        lowering へ落ちて明示的に失敗する。
+        """
+        _assert_slips_past_two_point_evaluation(module, shape[1:])
+
+        with pytest.raises(error, match=match):
+            convert_module(module, (torch.randn(*shape),), ({0: dyn_t},))
+
+    def test_a_concatenation_along_the_symbolic_axis_runs_at_runtime(self, convert_module, dyn_t):
+        """記号軸に沿った cat は畳まない — 2 本目の位置が 1 本目の長さ T でずれる。"""
+
+        class Doubled(nn.Module):
+            def forward(self, x):
+                positions = torch.arange(x.shape[0], dtype=torch.float32)
+                return torch.cat([x, x]) + torch.cat([positions, positions])
+
+        graph, _ = convert_module(Doubled(), (torch.randn(6),), ({0: dyn_t},))
+
+        assert node_ops(graph).count("cat") == 2
+
+    def test_a_contraction_over_the_symbolic_axis_runs_at_runtime(self, convert_module, dyn_t):
+        """記号軸で縮約する bmm は畳まない — 結果が T 個ぶんの和で全長に依存する。
+
+        `sum(arange(T)) >= (Tmax−1)(Tmax−2)/2` は Tmax と Tmax−1 で真、T=5 で偽 — 焼けば
+        2 点評価を通って黙って 1 になる形。外れた bmm は実行時の op として lowering される。
+        """
+
+        class SumOfPositions(nn.Module):
+            def forward(self, x):
+                positions = torch.arange(x.shape[0], dtype=torch.float32)
+                ones = torch.ones(x.shape[0])
+                total = torch.bmm(positions.view(1, 1, -1), ones.view(1, -1, 1))
+                threshold = (SYM_MAX - 1) * (SYM_MAX - 2) // 2
+                return x + (total.view(1) >= threshold).to(torch.float32)
+
+        _assert_slips_past_two_point_evaluation(SumOfPositions(), ())
+
+        graph, _ = convert_module(SumOfPositions(), (torch.randn(6),), ({0: dyn_t},))
+
+        assert "bmm" in node_ops(graph)
+
+    def test_a_boolean_mask_index_is_not_folded(self, convert_module, dyn_t):
+        """bool マスクの index は記号軸の有無を問わず畳まない（保守的な側）。
+
+        rank 2 のマスクは 1 本の添字で入力の 2 軸を占めるので、記号軸（2 軸目）が「添字 k ↔
+        入力の軸 k」の対応の外に隠れる。
+        この除外が無くても、マスク添字の出力長は値で決まる unbacked な記号になり、焼いた
+        結果の shape で明示的に落ちていた（沈黙誤値ではない）。このテストが固定するのは
+        失敗の出方 — 外れた index が語彙外の op として未対応 op の全件列挙に載って落ちる経路。
+        """
+
+        class Masked(nn.Module):
+            def forward(self, x):
+                grid = torch.arange(x.shape[0]).view(1, -1) + torch.zeros(2, 1, dtype=torch.long)
+                return torch.cat([x, grid[grid >= 0].to(torch.float32)])
+
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(Masked(), (torch.randn(6),), ({0: dyn_t},))
+
+        assert "aten.index.Tensor" in err.value.ops
+
+    def test_a_non_negative_slice_start_on_the_symbolic_axis_still_folds(
+        self, convert_module, dyn_t
+    ):
+        """先頭から数える slice は prefix と可換 — 外すのは負の start だけ。"""
+
+        class Shifted(nn.Module):
+            def forward(self, x):
+                return x + torch.arange(x.shape[0] + 1, dtype=torch.float32)[1:]
+
+        graph, tensors = convert_module(Shifted(), (torch.randn(6),), ({0: dyn_t},))
+
+        sliced = only_node(graph, "sym_prefix_slice")
+        baked = tensors[graph.initializers[sliced.ins[0]].tensor]
+        assert torch.equal(baked, torch.arange(1, SYM_MAX + 1, dtype=torch.float32))
 
     def test_a_symbol_free_fill_value_still_folds_under_a_symbolic_extent(
         self, convert_module, dyn_t
