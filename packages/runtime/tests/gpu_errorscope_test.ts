@@ -131,28 +131,43 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    // run のスコープ区間は device 単位ロックで直列化される。ロック内から呼ばれる層
-    // （PipelineCache 等）がロックを再取得すると自己デッドロックになるため、並行 run が
-    // ハングせず完走すること自体が回帰の対象になる。
-    const sessions = await Promise.all(
-      (["relu", "neg"] as const).map(async (op) =>
-        await createSessionFromContainer(
-          gpu,
-          await openGraphModel(singleOpDeclaration(op, [[8, 8]], [[8, 8]])),
-          "model",
-        )
-      ),
-    );
+    // 後始末は取得の直後から保証する。構築と dispose は allSettled で全部の決着を待ってから回収し、
+    // 片方の失敗で成功した側の Session や device を破棄し損ねない（失敗系のテストが後続の GPU
+    // テストへ資源を持ち越さないため）。
     try {
-      const x = fill([8, 8], (i) => (i % 13) - 6);
+      // run のスコープ区間は device 単位ロックで直列化される。ロック内から呼ばれる層
+      // （PipelineCache 等）がロックを再取得すると自己デッドロックになるため、並行 run が
+      // ハングせず完走すること自体が回帰の対象になる。
+      const built = await Promise.allSettled(
+        (["relu", "neg"] as const).map(async (op) =>
+          await createSessionFromContainer(
+            gpu,
+            await openGraphModel(singleOpDeclaration(op, [[8, 8]], [[8, 8]])),
+            "model",
+          )
+        ),
+      );
+      const sessions = built.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : []
+      );
+      let failure: { readonly error: unknown } | undefined;
+      try {
+        for (const result of built) if (result.status === "rejected") throw result.reason;
+        const x = fill([8, 8], (i) => (i % 13) - 6);
 
-      // await を挟まずに発行する（Session 間で区間が重なる形）
-      const [relu, neg] = await Promise.all(sessions.map((session) => session.run({ x0: x })));
+        // await を挟まずに発行する（Session 間で区間が重なる形）
+        const [relu, neg] = await Promise.all(sessions.map((session) => session.run({ x0: x })));
 
-      assertEquals([...relu.y.data], [...applyReferenceOp("relu", [x]).data]);
-      assertEquals([...neg.y.data], [...applyReferenceOp("neg", [x]).data]);
+        assertEquals([...relu.y.data], [...applyReferenceOp("relu", [x]).data]);
+        assertEquals([...neg.y.data], [...applyReferenceOp("neg", [x]).data]);
+      } catch (error) {
+        failure = { error };
+      }
+      // 本体の失敗を優先して投げる（dispose の失敗で原因を上書きしない）。
+      const disposed = await Promise.allSettled(sessions.map((session) => session.dispose()));
+      if (failure !== undefined) throw failure.error;
+      for (const result of disposed) if (result.status === "rejected") throw result.reason;
     } finally {
-      await Promise.all(sessions.map((session) => session.dispose()));
       gpu.destroy();
     }
   },
