@@ -223,6 +223,35 @@ Deno.test("prefetchAssets: 全ファイルがキャッシュ済みでも中断�
   );
 });
 
+Deno.test("prefetchAssets: 中断の後には complete を 1 つも出さない（全量面と同じ終わり方）", async () => {
+  // 上のテストは「舐め切らない」だけを見るので、中断の前に飛び込み済みのファイル（最大 4 本）が
+  // 中断の後に complete を出す形を通してしまう。全量面 fetchAssets は取得を抜けた直後に中断を
+  // 見るので 0 件 — 2 つの面で通知の終わり方を揃える。
+  const caches = new MemoryCacheStorage();
+  const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
+  await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
+
+  const controller = new AbortController();
+  const reason = new Error("app: ユーザーがロードを取り消した");
+  const afterAbort: string[] = [];
+
+  const error = await assertRejects(() =>
+    prefetchAssets(loaded, refs, {
+      fetch: createMockFetch({ files: serveAll() }).fetch,
+      caches,
+      signal: controller.signal,
+      onProgress: (progress) => {
+        if (controller.signal.aborted) afterAbort.push(`${progress.phase} ${progress.path}`);
+        else controller.abort(reason);
+      },
+    })
+  );
+
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assert(refs.length > 4, `同時本数より多い列で試していない（refs ${refs.length}）`);
+  assertEquals(afterAbort, [], "中断の後にも通知が届いている");
+});
+
 Deno.test("prefetchAssets: 取得中の中断は HubFetchError に包まれず素通しする", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll(), delayMs: 5 }, caches);

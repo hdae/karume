@@ -416,6 +416,10 @@ const runPrefetchPhase = async (
       if (prefetchSignal.aborted) throw prefetchSignal.reason;
       throw context.fetchFailure(ref, "事前取得", error);
     }
+    // 温めを抜けた直後にも見る（全量面 fetchOne と同じ前後の確認）— 前段だけだと、中断の前に
+    // 飛び込み済みのファイル（最大 {@link CONCURRENCY} 本）が中断の後に complete を出し、取り消した
+    // ロードの進捗が進んで見える。
+    prefetchSignal.throwIfAborted();
     // この面が `complete` の発行者（終端はここしかない — `AssetPhase` の契約）。
     progress.complete(ref);
   };
