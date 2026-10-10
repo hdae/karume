@@ -363,6 +363,50 @@ Deno.test("loadManifest: 完全キャッシュ済みでも中断済み signal �
   );
 });
 
+Deno.test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", async (t) => {
+  // 呼び出し側の値を読み直す実装だと、表示用の `loaded.repo` は旧値のまま、取得は旧 SHA で
+  // 新しい repo・ホストへ出る（名乗りと取得先が食い違う）。
+  const OTHER_HUB = "https://another.test";
+  const OTHER_REPO = "another/model";
+  const assertPinnedCalls = (calls: readonly string[]): void => {
+    for (const call of calls) {
+      assert(call.startsWith(`${HUB_URL}/`), `${call} が書き換え後のホストへ出ている`);
+      assert(!call.includes(OTHER_REPO), `${call} が書き換え後の repo を取りに行っている`);
+    }
+  };
+
+  await t.step("ロードの後の書き換え", async () => {
+    const mock = createMockFetch({ files: serveAll() });
+    const caches = new MemoryCacheStorage();
+    const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
+    const loaded = await loadManifest(ref, { fetch: mock.fetch, caches });
+    ref.repo = OTHER_REPO;
+    ref.hubUrl = OTHER_HUB;
+
+    await fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches });
+    assertPinnedCalls(mock.calls);
+    assertEquals(loaded.repo, REPO);
+  });
+
+  await t.step("revision 解決を待っている最中の書き換え", async () => {
+    const mock = createMockFetch({ sha: SHA, files: serveAll() });
+    const caches = new MemoryCacheStorage();
+    const ref = { repo: REPO, hubUrl: HUB_URL, revision: "main" };
+    // 解決要求が出た瞬間に書き換える（解決が返る前 = pin の前）。
+    const mutating: typeof globalThis.fetch = (input, init) => {
+      ref.repo = OTHER_REPO;
+      ref.hubUrl = OTHER_HUB;
+      ref.revision = "other-branch";
+      return mock.fetch(input, init);
+    };
+    const loaded = await loadManifest(ref, { fetch: mutating, caches });
+    assertEquals(loaded.repo, REPO);
+    assertEquals(loaded.revisionSha, SHA);
+    await fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches });
+    assertPinnedCalls(mock.calls);
+  });
+});
+
 Deno.test("loadManifest: 旧名前空間（karume/1 系）を入口で回収する", async () => {
   const caches = new MemoryCacheStorage();
   // 取得層 0.4 以前が残した写し。新コードは二度と読まないので容量を占めるだけ。

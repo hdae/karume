@@ -271,26 +271,30 @@ const pinnedHfSource = (
  * 持つのは「どこから取るか」（repo / 要求 ref / ミラー）だけ。
  */
 export const createHfSource = (ref: HubRepoRef): DistributionSource => {
-  const requested = ref.revision ?? "main";
+  // MUST: 入力オブジェクトの値は入口で 1 度だけ写し、以後は読み直さない — 読み直すと、呼び出し側が
+  // ロード後（や revision 解決の待ちの間）に同じオブジェクトを書き換えたとき、名乗り
+  // （`loaded.repo`）は旧値のまま取得だけが固定済み SHA で別の repo・ホストへ出る。
+  const { repo, hubUrl, revision } = ref;
+  const requested = revision ?? "main";
   const driver: SourceDriver = {
     // 世代解決前の名乗り。解決に失敗したときの診断はこれ 1 つで「どこの何を引きに行ったか」を
     // 言えなければならないので、要求した ref（可変 ref のまま）まで載せる。
-    origin: { label: `repo ${ref.repo} @ ${requested}`, integrity: "network", repo: ref.repo },
+    origin: { label: `repo ${repo} @ ${requested}`, integrity: "network", repo },
 
     resolveGeneration: async (options) => {
       if (isCommitSha(requested)) return requested;
-      const revisionSha = await resolveHfRevision(hfTarget(ref.repo, requested, ref.hubUrl), {
+      const revisionSha = await resolveHfRevision(hfTarget(repo, requested, hubUrl), {
         ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
         init: requestInit(options.headers, options.signal),
         ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
       });
       // 解決の**後**に出す — 印字する SHA が確定するのがここで、解決に失敗した場合は警告ではなく
       // 失敗そのものが報告されるべきだから（fail loudly が先）。
-      if (ref.revision === undefined) warnImplicitMain(ref.repo, revisionSha);
+      if (revision === undefined) warnImplicitMain(repo, revisionSha);
       return revisionSha;
     },
 
-    pin: (generation, options) => pinnedHfSource(ref.repo, generation, ref.hubUrl, options),
+    pin: (generation, options) => pinnedHfSource(repo, generation, hubUrl, options),
   };
   return new DistributionSource(driver);
 };
