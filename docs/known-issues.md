@@ -3,6 +3,16 @@
 > 置き場の規約: 未解決のバグ（意図した設計制約は [limitations.md](limitations.md)）。
 > 解決したら該当節を削除し、修正コミットへのポインタを残さない（履歴は git が持つ）。
 
+## 行数 0 の i4 重みを合流層は受理し、CPU 展開は拒否する（扱いは未決）
+
+shape `[0, 16]` の i4 重みを渡すと、メモリ内容器の合流層は受理するが、CPU 展開 `decodeI4` は
+「group_size 16 が量子化軸（行長）NaN を割り切らない」で拒否する。合流層の行長
+（`format/container/codecs.ts` の `quantizedRowLength`）は行数 0 を行長 0 と扱うのに対し、
+`decodeI4`（`format/i4.ts`）だけが自前の `numel / shape[0]`（0 / 0）を使うためである。
+行数 0 の量子化重みは実モデルにはほぼ現れない。直し方は空の量子化重みを受理するか拒否するかの
+決定に従う（受理なら `decodeI4` を `quantizedRowLength` に寄せて空配列を返し、拒否なら合流層で
+拒否する）。空の initializer をファイル形式でどう表すかと同時に決める。
+
 ## 疑似HFサーバーの固定revisionで古いmanifestが再利用される
 
 HTTP疎通テスト用の`examples/shared/local-dist-server.ts`はrepoとrevisionを固定している。

@@ -108,6 +108,8 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   同じコンテナの block にあり、グラフとの対応は束縛表（§5）が持つ。
 - JSON に NaN / Infinity リテラルを含めてはならない（エクスポータは `allow_nan=False`
   相当で書く。パーサは検出したら fail loudly）。
+- 同じオブジェクト内の重複キーは**後勝ちで受理**する（[container-v1](container-v1.md) §0 と同じ —
+  重複を書かないのは書き手の責務）。
 
 ## グラフ JSON
 
@@ -591,9 +593,10 @@ state スロットを読み書きするノードの契約（ADR
     1 度だけ掛ける形へ変えると丸め列が変わり、分解経路とのビット同一が失われる）。
     省略可能な第 4 入力は**加算 mask**（f32・rank-4・shape はちょうど `[1,1,M,N]`）で、
     B·H の全バッチへ broadcast する。`[B,1,M,N]` / `[1,H,M,N]` / bool / rank≠4 は受理せず、
-    causal / dropout は語彙に無い。行が全て −inf になるマスクは**契約違反**（NaN 汚染 —
-    検査は入れない。その形が正規なのは `safe_softmax` を使う分解経路だけ。ADR
-    [0044](decisions/0044-runtime-attention-mask.md) 決定 3）。
+    causal / dropout は語彙に無い。行が全て −inf になるマスクは**出力 0 の正規入力**（ADR
+    [0044](decisions/0044-runtime-attention-mask.md) 追記 2026-08-31 — 決定 3 のうち融合
+    attention 側を撤回した）。全 −inf 行が契約違反（NaN 汚染）になるのは分解経路の plain
+    `softmax` だけ。
     省略可能な **`states` 欄**を持つと autoregressive の states 形になる（上の
     「state 参照ノード」節 — 同一 op 名の契約拡張で、欄の有無が形を判別する）。
     states 形がさらに省略可能 attrs **`readonly`** を宣言すると **アリティ 1**（q だけの
