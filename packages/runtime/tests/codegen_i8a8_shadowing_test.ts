@@ -42,13 +42,29 @@ const candidateGeometries = (): I8a8Geometry[] => {
 };
 
 /**
+ * `open` の位置の `(` に対応する `)` の位置。括弧の深さを数える —— 最初の `)` で打ち切ると、
+ * 引数の属性 `@builtin(...)` の閉じ括弧で引数リストが終わったことになる。
+ */
+const matchingParen = (text: string, open: number): number => {
+  assertEquals(text[open], "(", "引数リストの開き括弧の位置");
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === "(") depth += 1;
+    if (text[at] !== ")") continue;
+    depth -= 1;
+    if (depth === 0) return at;
+  }
+  throw new Error("fn main の引数リストが閉じていない");
+};
+
+/**
  * `fn main` 本体で、外側スコープ（引数・囲むブロック）に既にある名前を `let` / `var` で宣言している
  * 箇所を返す（`名前@深さ`）。`for (var i …)` のヘッダ変数は続くブロックのスコープに入れる。
  */
 export const shadowedDeclarations = (wgsl: string): string[] => {
   const start = wgsl.indexOf("fn main(");
   assert(start >= 0, "fn main が無い");
-  const paramsEnd = wgsl.indexOf(")", start);
+  const paramsEnd = matchingParen(wgsl, start + "fn main".length);
   const params = [...wgsl.slice(start, paramsEnd).matchAll(/(\w+)\s*:/g)].map((m) => m[1]);
   const body = wgsl.slice(paramsEnd);
   const loopVars = new Set(
@@ -94,6 +110,22 @@ Deno.test("shadowedDeclarations は覆い隠しを見つけ、兄弟ブロック
 }`;
   assertEquals(shadowedDeclarations(siblings), []);
   assertEquals(shadowedDeclarations(`fn main(a: u32) { var a = 1u; }`), ["a@1"]);
+});
+
+Deno.test("shadowedDeclarations は属性付きの引数（実カーネルと同じ形）も外側スコープに入れる", () => {
+  // 実カーネルの `fn main` は `@builtin(workgroup_id) wid` で始まる。引数リストの終端を最初の `)` で
+  // 決めると属性の閉じ括弧で打ち切られ、引数名が 1 つも記録されない（引数の覆い隠しを丸ごと見逃す）。
+  const attributed = (body: string): string =>
+    `fn main(
+  @builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
+) { ${body} }`;
+  assertEquals(shadowedDeclarations(attributed("let lid = 1u;")), ["lid@1"]);
+  assertEquals(
+    shadowedDeclarations(attributed("let wid = 0u; { var lid = 2u; }")),
+    ["wid@1", "lid@2"],
+  );
+  // 対照: 引数と別名の宣言は何も報告しない。
+  assertEquals(shadowedDeclarations(attributed("let tile = wid.x + lid.y;")), []);
 });
 
 Deno.test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコープの名前を宣言し直さない", () => {
