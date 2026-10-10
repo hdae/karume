@@ -2376,8 +2376,17 @@ def _validate_model_descriptor(descriptor: ModelDescriptor, codecs: Any) -> None
                 else [block for block, _ in supply.pieces or ()]
             )
             first = claim(ids[0], "weight", entry_where).part
+            previous = first
             for block_id in ids[1:]:
-                claim(block_id, "weight", entry_where)
+                part = claim(block_id, "weight", entry_where).part
+                # 規則④: piece の part は添字順に非減少 MUST。構築側は piece 1 が最初の part に
+                # ある前提で簿記する（TS は `bindGraphs` で拒否 — 受理集合を揃える）。
+                _require(
+                    part >= previous,
+                    f"{entry_where}: part {part} が直前の piece の part {previous} より前にある"
+                    "（piece の part は添字順に非減少 MUST — 規則④）",
+                )
+                previous = part
             if supply.encoding.scale_block is not None:
                 # 規則③: companion scale は実体（piece 列なら piece 1）と同一 part。
                 scale_part = claim(

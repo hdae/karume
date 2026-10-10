@@ -1232,3 +1232,62 @@ class TestTheReaderMatchesTheRuntimeRefusals:
 
         with pytest.raises(ContainerFormatError, match=r"block 件数（const .* \+ 重み .*）が上限"):
             read_container(written)
+
+
+def _write_pieced_f16(tmp_path: Path) -> list[Path]:
+    """scale を持たない f16 の重み 1 本を 4 piece（part 2, 2, 3, 3）に割って書く。
+
+    scale の無い codec を使うのは、規則③（scale は piece 1 と同一 part）に化けずに piece の
+    part 順だけを踏むため。同じ part の piece が続く形（非減少の等号側）も同時に作れる。
+    """
+    graph = IrGraph(
+        symbols=["T"],
+        inputs=[IrInput(name="x", dtype="f32", shape=["T", 32])],
+        outputs=["y"],
+        initializers={"p_w": IrInitializer(tensor="w.weight", storage=IrStorage(dtype="f16"))},
+        values={
+            "p_w": IrValue(dtype="f32", shape=[32, 16]),
+            "y": IrValue(dtype="f32", shape=["T", 16]),
+        },
+        nodes=[IrNode(op="matmul", ins=["x", "p_w"], outs=["y"], attrs={})],
+    )
+    return write_model_container(
+        tmp_path / "pieced.krm",
+        graph,
+        {"w.weight": pattern_bytes(1024, 3)},
+        {"w.weight": Encoding("f16")},
+        graph_name="pieced",
+        provenance=Provenance(license="mit"),
+        part_bytes=512,
+        block_bytes=256,
+        single=False,
+    )
+
+
+def _piece_parts(document: dict[str, Any]) -> list[int]:
+    parts = {block["id"]: block["part"] for block in document["blocks"]}
+    return [parts[piece["block"]] for piece in document["binding"]["pieced"]["w.weight"]["pieces"]]
+
+
+class TestThePieceOrder:
+    """規則④: piece の part は添字順に非減少（container-v1 §5・TS は `bindGraphs` で拒否）。"""
+
+    def test_pieces_that_stay_in_the_same_part_are_accepted(self, tmp_path: Path) -> None:
+        written = _write_pieced_f16(tmp_path)
+        document = json.loads(read_container(written).model_descriptor_bytes)
+
+        assert _piece_parts(document) == [2, 2, 3, 3]
+
+    def test_pieces_whose_parts_go_backwards_are_refused(self, tmp_path: Path) -> None:
+        """piece 2 と 3 の block 参照を入れ替えて part 2, 3, 2, 3 にする（長さは同じ 256）。"""
+        written = _write_pieced_f16(tmp_path)
+
+        def edit(document: dict[str, Any]) -> None:
+            pieces = document["binding"]["pieced"]["w.weight"]["pieces"]
+            pieces[1]["block"], pieces[2]["block"] = pieces[2]["block"], pieces[1]["block"]
+            assert _piece_parts(document) == [2, 3, 2, 3]
+
+        edit_model_document(written, edit)
+
+        with pytest.raises(ContainerFormatError, match="part 2 が直前の piece の part 3 より前"):
+            read_container(written)
