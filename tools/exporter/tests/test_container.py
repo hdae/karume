@@ -37,6 +37,7 @@ from container_fixture import (
     write_synthetic_container,
 )
 
+import karume.container as container_module
 from karume.container import (
     BLOCK_MAX_BYTES,
     BLOCK_START_ALIGN,
@@ -1149,4 +1150,85 @@ class TestTheReaderAcceptsIntegralFloats:
         )
 
         with pytest.raises(ContainerFormatError, match=r"blocks\[1\]\.offset が非負の安全整数"):
+            read_container(written)
+
+
+class TestTheReaderMatchesTheRuntimeRefusals:
+    """TS の読み手が拒否する宣言を、Python の読み手も同じく拒否する（ADR 0108 追記1 §13・§0）。
+
+    Python の bool は int の派生で `True == 1` が真なので、`==` やタプル比較だけで版や packing を
+    見ると `true` が `1` として通る。TS は `!== 1` で別物として落とす — 外部の `.krm` を
+    `karume verify` で検証したとき「Python は緑・ブラウザは赤」になる非対称を塞ぐ。
+    """
+
+    @pytest.mark.parametrize("document", ["graph", "model"])
+    def test_a_bool_version_is_refused(self, tmp_path: Path, document: str) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        read = read_container(written)
+        raw = read.graph_descriptor_bytes if document == "graph" else read.model_descriptor_bytes
+        edited = json.loads(raw)
+        edited["version"] = True
+        rewrite_part0(written[0], **{document: canonical_json(edited).encode()})
+
+        with pytest.raises(ContainerFormatError, match=r"Descriptor\.version"):
+            read_container(written)
+
+    def test_a_bool_packing_value_is_refused(self, tmp_path: Path) -> None:
+        written = write_synthetic(tmp_path, single=False)
+
+        def edit(document: dict[str, Any]) -> None:
+            supplies = document["binding"][GRAPH_NAME]
+            f16 = [s for s in supplies.values() if s["encoding"]["codec"] == "f16"]
+            assert f16, "被験体に blockElements = 1 の codec が無い（空振り）"
+            f16[0]["encoding"]["packing"]["blockElements"] = True
+
+        edit_model_document(written, edit)
+
+        with pytest.raises(ContainerFormatError, match=r"packing\.blockElements"):
+            read_container(written)
+
+    def test_a_proto_key_is_refused_wherever_it_appears(self, tmp_path: Path) -> None:
+        """名前を自由に置ける map（ここは資産名）でも `__proto__` は読みの時点で落ちる。"""
+        written = write_split_container(tmp_path)
+
+        def edit(document: dict[str, Any]) -> None:
+            document["assets"]["__proto__"] = document["assets"].pop("rope_base")
+
+        _raw_model_document(written, edit, {})
+
+        with pytest.raises(ContainerFormatError, match="キー '__proto__' は受理しない"):
+            read_container(written)
+
+    def test_an_empty_asset_name_is_refused(self, tmp_path: Path) -> None:
+        written = write_split_container(tmp_path)
+        edit_model_document(
+            written,
+            lambda document: document["assets"].update({"": document["assets"].pop("rope_base")}),
+        )
+
+        with pytest.raises(ContainerFormatError, match=r"assets のキー が非空文字列でない"):
+            read_container(written)
+
+    def test_too_many_model_blocks_are_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        model_blocks = len(read_container(written).model.blocks)  # type: ignore[union-attr]
+        monkeypatch.setattr(container_module, "MAX_BLOCKS", model_blocks - 1)
+
+        with pytest.raises(ContainerFormatError, match=r"modelDescriptor\.blocks の件数が上限"):
+            read_container(written)
+
+    def test_too_many_blocks_across_both_documents_are_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """各文書は上限内でも、const と重みの合計が上限を超えれば落ちる（TS と同じ合計の上限）。"""
+        written = write_synthetic(tmp_path, single=False)
+        read = read_container(written)
+        const_blocks = len(read.graph.const_blocks)
+        model_blocks = len(read.model.blocks)  # type: ignore[union-attr]
+        assert const_blocks > 0, "被験体に const block が無い（合計の上限が空振りする）"
+        monkeypatch.setattr(container_module, "MAX_BLOCKS", const_blocks + model_blocks - 1)
+
+        with pytest.raises(ContainerFormatError, match=r"block 件数（const .* \+ 重み .*）が上限"):
             read_container(written)

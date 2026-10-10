@@ -1925,6 +1925,19 @@ def _require_index(value: Any, where: str) -> int:
     return value
 
 
+def _require_version(value: Any, expected: int, where: str) -> None:
+    """版の欄を整数として比べる。
+
+    MUST: bool を先に拒否する。Python の `True == 1` は真なので `==` だけでは `"version": true` が
+    版 1 として通るが、TS の読み手は `!== 1` で落とす（ADR 0108 追記1 §13 の受理集合の一致）。
+    """
+    normalized = integral_float_to_int(value)
+    _require(
+        type(normalized) is int and normalized == expected,
+        f"{where} が {expected} でない: {value!r}",
+    )
+
+
 def _require_string(value: Any, where: str) -> str:
     _require(isinstance(value, str) and value != "", f"{where} が非空文字列でない")
     return value
@@ -1980,6 +1993,10 @@ def _assert_finite(value: Any, where: str, depth: int) -> None:
         return
     if isinstance(value, dict):
         for key, item in value.items():
+            # MUST: `__proto__` は書き手と読み手の両方で拒否する（§0）。TS の読み手は素の `{}` への
+            # 代入が [[Prototype]] 設定に化けるのでこの名前を受理しない — 読みの入口で JSON 全体を
+            # 一度に塞ぎ、名前を自由に置ける map（資産名・束縛表）にも漏らさない。
+            _require(key != "__proto__", f"{where}: キー '__proto__' は受理しない")
             _assert_finite(item, f"{where}.{key}", depth + 1)
 
 
@@ -1990,7 +2007,11 @@ def _parse_encoding(value: Any, where: str) -> BlockEncoding:
     entry = codec_entry(codec)
     packing = _require_object(obj["packing"], f"{where}.packing")
     _require_keys(packing, ["blockElements", "blockBytes", "alignBytes"], [], f"{where}.packing")
-    declared = (packing["blockElements"], packing["blockBytes"], packing["alignBytes"])
+    # 整数として読んでから比べる（bool の `True` がタプル比較で 1 として通るのを塞ぐ）。
+    declared = tuple(
+        _require_index(packing[key], f"{where}.packing.{key}")
+        for key in ("blockElements", "blockBytes", "alignBytes")
+    )
     expected = (entry.packing.block_elements, entry.packing.block_bytes, entry.packing.align_bytes)
     _require(
         declared == expected,
@@ -2051,7 +2072,7 @@ def _parse_graph_descriptor(raw: bytes) -> GraphDescriptor:
     root = _require_object(_parse_json_document(raw, where), where)
     _require_keys(root, ["format", "version", "capabilities", "graphs", "const"], [], where)
     _require(root["format"] == "karume-container", f"{where}.format が 'karume-container' でない")
-    _require(root["version"] == CONTAINER_VERSION, f"{where}.version が {CONTAINER_VERSION} でない")
+    _require_version(root["version"], CONTAINER_VERSION, f"{where}.version")
 
     capabilities = _require_object(root["capabilities"], f"{where}.capabilities")
     _require_keys(capabilities, ["ops", "features"], [], f"{where}.capabilities")
@@ -2119,7 +2140,7 @@ def _parse_graph_descriptor(raw: bytes) -> GraphDescriptor:
 def _graph_required_ops(declaration: Any, where: str) -> list[str]:
     obj = _require_object(declaration, where)
     _require(obj.get("format") == IR_V2_FORMAT, f"{where}.format が '{IR_V2_FORMAT}' でない")
-    _require(obj.get("version") == IR_V2_VERSION, f"{where}.version が {IR_V2_VERSION} でない")
+    _require_version(obj.get("version"), IR_V2_VERSION, f"{where}.version")
     requires = _require_object(obj.get("requires"), f"{where}.requires")
     # TS の読み手（`format/ir.ts` の `checkKeys(requires, ["ops"], [])`）と同じ受理集合。
     _require_keys(requires, ["ops"], [], f"{where}.requires")
@@ -2227,7 +2248,7 @@ def _parse_model_descriptor(raw: bytes) -> ModelDescriptor:
         where,
     )
     _require(root["format"] == "karume-model", f"{where}.format が 'karume-model' でない")
-    _require(root["version"] == CONTAINER_VERSION, f"{where}.version が {CONTAINER_VERSION} でない")
+    _require_version(root["version"], CONTAINER_VERSION, f"{where}.version")
 
     parts: list[PartRecord] = []
     for index, raw_part in enumerate(root["parts"]):
@@ -2292,6 +2313,7 @@ def _parse_model_descriptor(raw: bytes) -> ModelDescriptor:
     assets: dict[str, AssetRecord] = {}
     for name, raw_asset in _require_object(root["assets"], f"{where}.assets").items():
         asset_where = f"{where}.assets['{name}']"
+        _require_string(name, f"{where}.assets のキー")
         obj = _require_object(raw_asset, asset_where)
         _require_keys(obj, ["block", "role", "length"], [], asset_where)
         assets[name] = AssetRecord(
@@ -2323,6 +2345,10 @@ def _parse_model_descriptor(raw: bytes) -> ModelDescriptor:
 
 def _validate_model_descriptor(descriptor: ModelDescriptor, codecs: Any) -> None:
     where = "modelDescriptor"
+    _require(
+        len(descriptor.blocks) <= MAX_BLOCKS,
+        f"{where}.blocks の件数が上限 {MAX_BLOCKS} を超える",
+    )
     by_id = {block.id: block for block in descriptor.blocks}
     _require(len(by_id) == len(descriptor.blocks), f"{where}.blocks: block id が重複")
     referenced: set[str] = set()
@@ -2386,6 +2412,12 @@ def _validate_model_descriptor(descriptor: ModelDescriptor, codecs: Any) -> None
 
 def _validate_against_graph(model: ModelDescriptor, graph: GraphDescriptor) -> None:
     """2 文書のあいだの突合（§2 / §5 の規則⑤）。"""
+    # block 件数の上限は容器全体に掛かる（各文書が上限内でも合計で超えうる — TS と同じ位置）。
+    _require(
+        len(graph.const_blocks) + len(model.blocks) <= MAX_BLOCKS,
+        f"block 件数（const {len(graph.const_blocks)} + 重み {len(model.blocks)}）が上限"
+        f" {MAX_BLOCKS} を超える",
+    )
     _require(
         model.parts[0].length == graph.const_length,
         f"part 1 の長さ {model.parts[0].length} が const.length {graph.const_length} と違う",
