@@ -542,3 +542,88 @@ Deno.test("Metaspace: 先頭に ▁ を足さない（prepend_scheme=never）", 
   const head = [...assets.vocab.entries()].find(([, entry]) => entry.id === first);
   assert(head !== undefined && !head[0].startsWith("▁"), `先頭トークン ${head?.[0]} に ▁ が付いた`);
 });
+
+// ---- 外側括弧の剥がし（③）の意味論と計算量 ------------------------------------
+
+Deno.test("外側括弧の剥がし: 混在・途中で閉じる括弧の意味論", () => {
+  // パリティのフィクスチャ（brackets-*）に無い形を、Python 正本 `strip_outer_brackets` と同じ
+  // 規則（全体を囲む同種の対だけを剥がし、剥がせたら先頭から試し直す）で固定する。
+  // NFKC は剥がしの後に掛かるので、残った全角括弧は ASCII になる。
+  const cases: readonly (readonly [string, string])[] = [
+    ["「「あ」」", "あ"],
+    ["（「（あ）」）", "あ"],
+    ["「「あ」と「い」」", "「あ」と「い」"],
+    ["「あ」「い」", "「あ」「い」"],
+    ["「（あ」）", "「(あ」)"],
+    ["((a)", "((a)"],
+    ["(a))", "(a))"],
+    ["(「a)」", "(「a)」"],
+    ["「」", ""],
+    ["「「」」", ""],
+    ["「", "「"],
+    ["「😀」", "😀"],
+    ["『（あ）い』", "(あ)い"],
+  ];
+  for (const [raw, normalized] of cases) assertEquals(normalizeText(raw), normalized, raw);
+});
+
+Deno.test("外側括弧の剥がし: 深い入れ子でも入力長に線形の時間で剥がす", () => {
+  // 1 段剥がすたびに残り全体を走査して切り出す形は入れ子 n 段で二次時間になり、
+  // n = 32,000（約 64 KB）で数秒メインスレッドを占有する。token 数の切り詰めは正規化の後なので、
+  // 長い入力がそのまま届く。
+  const depth = 32_000;
+  const started = performance.now();
+  const normalized = normalizeText("「".repeat(depth) + "a" + "」".repeat(depth));
+  const elapsed = performance.now() - started;
+  assertEquals(normalized, "a");
+  assert(elapsed < 1_000, `入れ子 ${depth} 段の剥がしに ${elapsed.toFixed(0)} ms かかった`);
+});
+
+Deno.test("外側括弧の剥がし: 正本の逐次の形と乱択の入力で一致する", () => {
+  // 期待側は正本 `strip_outer_brackets` の形をそのまま写したもの（1 段ずつ全体を走査して
+  // 剥がす — 二次時間だが短い入力なら問題ない）。実装は対応表で線形に求めるので、2 つの形が
+  // 括弧の混在・途中で閉じる・閉じない入力で割れないことを乱択で見る。
+  const pairs: readonly (readonly [string, string])[] = [
+    ["「", "」"],
+    ["『", "』"],
+    ["（", "）"],
+    ["【", "】"],
+    ["(", ")"],
+  ];
+  const reference = (text: string): string => {
+    let cps = [...text];
+    while (cps.length >= 2) {
+      const pair = pairs.find(([open]) => open === cps[0]);
+      if (pair === undefined || cps[cps.length - 1] !== pair[1]) break;
+      let depth = 0;
+      let enclosing = true;
+      for (const [index, ch] of cps.entries()) {
+        if (ch === pair[0]) depth += 1;
+        else if (ch === pair[1]) depth -= 1;
+        if (depth === 0 && index < cps.length - 1) {
+          enclosing = false;
+          break;
+        }
+      }
+      if (!enclosing || depth !== 0) break;
+      cps = cps.slice(1, -1);
+    }
+    return cps.join("");
+  };
+  const alphabet = ["「", "」", "（", "）", "(", ")", "a"];
+  let state = 12345;
+  const nextIndex = (bound: number): number => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state % bound;
+  };
+  let stripped = 0;
+  for (let sample = 0; sample < 5_000; sample += 1) {
+    const length = nextIndex(13);
+    const raw = Array.from({ length }, () => alphabet[nextIndex(alphabet.length)]).join("");
+    const expected = reference(raw);
+    if (expected !== raw) stripped += 1;
+    assertEquals(normalizeText(raw), expected.normalize("NFKC"), JSON.stringify(raw));
+  }
+  // 乱択が剥がす側を実際に踏んでいること（全部が素通しだと比較が恒真になる）。
+  assert(stripped >= 50, `剥がれる入力が ${stripped} 件しかない`);
+});

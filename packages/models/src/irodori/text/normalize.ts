@@ -66,29 +66,42 @@ const BRACKET_PAIRS: readonly (readonly [string, string])[] = [
  *
  * MUST: 走査はコードポイント単位（正本は Python の str = コードポイント列）。UTF-16 単位で
  * 数えると、BMP 外の文字を含む入力で長さと添字がずれる。
+ *
+ * MUST: 入力長に線形の時間で求める。正本の形（1 段剥がすたびに残り全体を走査して切り出す）を
+ * そのまま写すと入れ子 n 段で二次時間になり、token 数の切り詰めは正規化の後なので病的な長さの
+ * 入力がそのまま届く。そこで「同種の括弧だけを数えた対応」を種類ごとのスタックで 1 回だけ
+ * 求める: 正本の「外側の開き括弧から数えた深さが末尾より前で 0 に戻らず、末尾でちょうど 0」は、
+ * 開き括弧 `k` の対応相手がちょうど末尾 `n−1−k` であることと同値（`k` より前の開き括弧は
+ * スタックで下にあるので、窓の外の文字は `k` の対応を変えない）。各段の判定は自分の窓にしか
+ * 依らないので、外側から順に判定して最初に外れた段で止め、最後に 1 回だけ切り出す。
  */
 const stripOuterBrackets = (text: string): string => {
-  let cps = [...text];
-  for (;;) {
-    if (cps.length < 2) break;
-    const pair = BRACKET_PAIRS.find(([open]) => open === cps[0]);
-    if (pair === undefined || cps[cps.length - 1] !== pair[1]) break;
-    const [open, close] = pair;
-    let depth = 0;
-    let enclosingAll = true;
-    for (const [index, ch] of cps.entries()) {
-      if (ch === open) depth += 1;
-      else if (ch === close) depth -= 1;
-      // 途中で対応が閉じたら、外側の 1 対は全体を囲んでいない（`「あ」と「い」`）。
-      if (depth === 0 && index < cps.length - 1) {
-        enclosingAll = false;
-        break;
+  const cps = [...text];
+  const n = cps.length;
+  // 開き括弧の位置 → 同種の括弧だけで数えた対応する閉じ括弧の位置。
+  const matchOf = new Map<number, number>();
+  const stacks = BRACKET_PAIRS.map(() => [] as number[]);
+  for (const [index, ch] of cps.entries()) {
+    for (const [kind, [open, close]] of BRACKET_PAIRS.entries()) {
+      if (ch === open) {
+        stacks[kind].push(index);
+      } else if (ch === close) {
+        const opened = stacks[kind].pop();
+        if (opened !== undefined) matchOf.set(opened, index);
       }
     }
-    if (!enclosingAll || depth !== 0) break;
-    cps = cps.slice(1, -1);
   }
-  return cps.join("");
+  let layer = 0;
+  // 残りが 2 文字以上の間だけ試す（正本の `len(text) >= 2`）。
+  while (n - 2 * layer >= 2) {
+    const last = n - 1 - layer;
+    const pair = BRACKET_PAIRS.find(([open]) => open === cps[layer]);
+    // 途中で対応が閉じる（`「あ」と「い」`）か閉じない（`((a)`）なら、外側の 1 対は全体を
+    // 囲んでいない。
+    if (pair === undefined || cps[last] !== pair[1] || matchOf.get(layer) !== last) break;
+    layer += 1;
+  }
+  return cps.slice(layer, n - layer).join("");
 };
 
 /** 生テキスト → 正規化済みテキスト（正本 `normalize_text` と同値）。 */
