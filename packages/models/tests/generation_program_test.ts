@@ -206,6 +206,30 @@ Deno.test("createGenerationProgram: 入力名 / dtype / 形が違えば fail lou
   }
 });
 
+Deno.test("createGenerationProgram: 入力長と選択行数に同じ記号を使う誤配線は構築時に落ちる", () => {
+  // `input_ids:[1,M]`・`last_row:[M]` は個別の形検査をどちらも通るが、prefill（物理行 4・
+  // 選択行 1）の最初の run で M が 4 と 1 に二重束縛されて runtime に拒否される。decode（行数 1）
+  // は偶然通るので、検出が GPU 構築後の最初の prefill まで遅れる。
+  const graph: GenerationGraph = {
+    symbols: ["C", "M"],
+    inputs: [
+      { name: IDS, dtype: "i32", shape: [1, "M"] },
+      { name: DERIVED, dtype: "f32", shape: [1, "M", 2, 3] },
+      { name: LAST_ROW, dtype: "i32", shape: ["M"] },
+    ],
+    outputs: [LOGITS, HIDDEN],
+    values: {
+      [LOGITS]: { dtype: "f32", shape: [1, "M", VOCAB] },
+      [HIDDEN]: { dtype: "f32", shape: [1, "M", HIDDEN_SIZE] },
+    },
+  };
+  assertThrows(
+    () => createGenerationProgram(specOf({ graph })),
+    Error,
+    "同じ記号 M",
+  );
+});
+
 Deno.test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る", () => {
   assertThrows(
     () => createGenerationProgram(specOf({ logits: "scores" })),

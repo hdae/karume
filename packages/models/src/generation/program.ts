@@ -317,15 +317,17 @@ const assertRowInput = (
   graph: GenerationGraph,
   name: string,
   role: string,
-): void => {
+): string => {
   const spec = findInput(graph, name, role);
   assertDtype(spec.dtype, "i32", `${role} '${name}'`);
-  if (spec.shape.length !== 2 || spec.shape[0] !== 1 || typeof spec.shape[1] !== "string") {
+  const lengthSymbol = spec.shape[1];
+  if (spec.shape.length !== 2 || spec.shape[0] !== 1 || typeof lengthSymbol !== "string") {
     throw new Error(
       `${role} '${name}' の shape ${showShape(spec.shape)} が [1,<記号>] でない` +
         `（prefill 形と decode 形を同じグラフで回せない）`,
     );
   }
+  return lengthSymbol;
 };
 
 /**
@@ -503,8 +505,17 @@ export const createGenerationProgram = (spec: GenerationProgramSpec): Generation
     }
   });
 
-  assertRowInput(graph, spec.inputIds, "token id 入力");
+  const lengthSymbol = assertRowInput(graph, spec.inputIds, "token id 入力");
   const rowSymbol = assertLastRowInput(graph, spec.lastRow);
+  // MUST: 入力長（物理行数）と選択行数は別の記号。同じ記号だと個別の形検査は通るが、prefill
+  // （物理行 chunk・選択行 1）の最初の run で 1 つの記号が 2 つの値に束縛されて拒否される —
+  // decode（どちらも 1）は偶然通るので、誤配線の検出が GPU 構築後まで遅れる。
+  if (lengthSymbol === rowSymbol) {
+    throw new Error(
+      `token id 入力 '${spec.inputIds}' の長さと last_row 入力 '${spec.lastRow}' の行数が` +
+        `同じ記号 ${rowSymbol} を使っている（入力長と選択行数は run ごとに別の値をとる）`,
+    );
+  }
   // 同じ名前を 2 本の出口に結線した形は、V = H のときだけ両方の形検査を通ってしまう
   // （drafter が logits を hidden として食う = 例外の出ない取り違え）。
   if (spec.logits === spec.hidden) {
