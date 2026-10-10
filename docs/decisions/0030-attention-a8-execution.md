@@ -115,3 +115,8 @@ PV NG 時は案 A 縮退）。
 - 画像は f32 / w8a8 と別物（軌道分岐）だが、**目視ゲートはユーザー受理**（2026-08-04
   「変化は誤差レベル」— 512px / 1024px の before/after 4 枚で裁定）。w8a8 の「別の絵」
   （ADR 0025）より知覚差が小さい、という Q0 の相対劣化測定（latent 倍率 ≤1.1×）と整合。
+
+## 追記（2026-10-10）— 決定 5 の検出器
+
+決定 5 の適格判定は純関数 `attentionRoute`（`packages/runtime/src/runtime/attention-route.ts`）が正本になり、
+系列の門は完全適格を比で検査する（[ADR 0058](0058-numerics-opt-in-contract.md) の追記 2026-10-10）。

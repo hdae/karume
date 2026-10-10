@@ -197,6 +197,28 @@ attention 重みは消える（f32 経路は保持する）。落ちた質量は
 （[decisions/0044](decisions/0044-runtime-attention-mask.md) の契約系・opt-in 席）。CPU 参照も
 同一格子なので突合はこの打ち切りを検出しない — 精度影響の裁定は E2E の実測 tolerance が担う。
 
+## 融合 attention の a8 / s16 は、キー長 N が 4 の倍数でない形で ③PV と S の格納が f32 になる（Anima では辺が 32 px の倍数でない解像度）
+
+`attentionCompute: "a8"` と `attentionScoreStorage: "f16"`（S の半精度格納）は、形の条件を満たす段で
+だけ宣言どおりに走る。条件は ①QK の i8a8 が `D % 4 == 0`・③PV の i8a8 が `N % 4 == 0`・S の f16 格納が
+`D % 4 == 0 && N % 4 == 0`。満たさない段は f32 経路へ落ちる — 例外も警告も出ない
+（[ADR 0058](decisions/0058-numerics-opt-in-contract.md) 決定 3 が許す縮退）。落ちた段は宣言どおりの
+経路ではない: ③PV は整数内積を使わず、VRAM 上の S は f32 幅になる。判定の正本は 1 本の純関数
+（`packages/runtime/src/runtime/attention-route.ts` の `attentionRoute`）。
+
+- **Anima**: 既定席 `f16+dit8-a8-attn8-s16`（と `f16+dit4-attn8-s16`）では、self-attention の
+  N = (W/16)·(H/16) が 4 の倍数でない解像度で、self の ③PV と S の格納が f32 になる。受理する
+  9,409 形のうち 4,608 形（例 528×528 = N 1,089）が該当し、**両辺が 32 px の倍数なら起きない**。
+  `f16+dit8-a8-attn8` 席では ③PV だけが落ちる。cross-attention（N = 512）と ①QK（D = 128）は常に
+  宣言どおり。受理集合は狭めない。
+- **Wan2.1 / Wan2.2**: 受理する全形（寸法 × フレーム数）で self / cross とも宣言どおり。
+- **検出**: 系列の A/B 門が census に完全適格の検査（`assertAttentionSeatsComplete` — 融合 attention の
+  全 dispatch が i8a8 / `:s16` の変種であること。比で見るので device に依らない）を掛ける。受理集合の
+  全形はホストテスト（`packages/models/tests/anima_attention_route_test.ts` /
+  `wan_attention_route_test.ts`）が `attentionRoute` に通して固定する。runtime を直接使う場合は、
+  診断のパイプラインキーに dense の `attention_pv:v1:f32` などが混ざるかで見分ける。
+- 端数を宣言どおりの経路で扱う変更は backlog の later 節にある。
+
 ## w8a8（`linearCompute: "a8"`）では非有限値の伝播粒度は同じだが Inf の符号が f32 経路と一致しない
 
 活性 per-token i8 の実行経路（opt-in — 設計は

@@ -442,6 +442,15 @@
   preflight で確保前に落ちる）/ `fromAssets` の位置づけ / large asset の
   reference-first 一般則。
 
+- **融合 attention の a8 / s16 で N % 4 の端数を宣言どおりの経路で扱う（起票 2026-10-10）**: 今はキー長 N が
+  4 の倍数でない形で ③PV と S の格納が f32 へ落ちる（docs/limitations.md・判定は `attentionRoute`）。要点:
+  ③PV の i8a8 は A タイル充填の端数（n ≥ N を 0）と、`quantize_rows` に行幅を 4 の倍数へゼロ埋めする変種が要る。
+  S の f16 格納は、行をまたぐ u32 語への書き込み競合を構造で消す必要があり、S の行幅を N と別の uniform として
+  ①②③（dense / i8a8 の両方）へ通す。どちらも linear と共有のカーネル（`quantize_rows`・GEMM の骨格）に触るので、
+  N % 4 == 0 の既存キーの生成物はバイト不変に保つ（スナップショットが検出器）。着手の条件: Anima の 32 px の倍数で
+  ない解像度を実用したい要望が出たとき、または N % 4 != 0 の形を受理する系列が a8 / s16 の席を持つとき。
+  kill 基準: その形での VRAM と速度の実測で、f32 へ落ちた今の経路に対して差が出ないこと。
+
 ## release — リリース準備波（しばらく先）
 
 - **gemma4 / gemma4-qat の HF 再アップロード + pin 更新（裁定 8 = a・2026-09-26）**: manifest 語彙

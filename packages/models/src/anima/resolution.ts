@@ -102,6 +102,10 @@ const tokensOf = (size: ImageSize): number =>
 /**
  * 受理集合の検査（4 条件）。呼び出し側の綴りに依らず**同じ順**で見る — 複数破っている形で
  * 診断が run ごとに変わると、直した先でまた別の条件に当たったのかが分からない。
+ *
+ * NOTE: 辺が 32 px の倍数でない解像度も受理するが、`S` が 4 の倍数でない形では既定席（a8 + s16）の
+ * self-attention の ③PV と S の格納が f32 で走る（docs/limitations.md の融合 attention の a8 / s16 の節）。
+ * 受理集合はこの理由では狭めない。
  */
 export const assertAcceptableResolution = (size: ImageSize): void => {
   const label = `${size.width}×${size.height}`;
