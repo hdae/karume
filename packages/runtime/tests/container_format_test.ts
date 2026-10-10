@@ -22,6 +22,7 @@ import {
   BLOCK_START_ALIGN,
   HEADER_BYTES,
   MAX_DESCRIPTOR_BYTES,
+  PART_MAX_BYTES,
 } from "../src/format/container/limits.ts";
 import { type BlockSource, openContainer } from "../src/format/container/open.ts";
 import { type IrDeclaration, parseIrDeclaration } from "../src/format/ir.ts";
@@ -627,6 +628,41 @@ describe("container round trip", () => {
       ContainerFormatError,
       "単一形の長さ",
     );
+  });
+
+  it("krg の const.length が part 長の天井を超えるなら、part 1 を読む前に開く時点で落ちる", async () => {
+    // krg の part 1 の寸法はグラフ記述の const.length しか持たない（§2.1）。天井（§10 — part 0 / 1
+    // を含む全 part）を記述の検査で掛けないと、読み口が同じ長さを申告すれば巨大な一括読みに届く。
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const huge = PART_MAX_BYTES + 1;
+    const graphBytes = mutateJson(written.graphDescriptorBytes, (doc) => {
+      anyOf(doc).const.length = huge;
+    });
+    const header = writeHeader({
+      kind: "graph",
+      version: 1,
+      graphDescriptorLength: graphBytes.byteLength,
+      modelDescriptorLength: 0,
+    });
+    const part0 = new Uint8Array(new ArrayBuffer(HEADER_BYTES + graphBytes.byteLength));
+    part0.set(header, 0);
+    part0.set(graphBytes, HEADER_BYTES);
+    const reads: number[] = [];
+    const source: BlockSource = {
+      partCount: 2,
+      verified: false,
+      partLength: (index) => (index === 0 ? part0.byteLength : huge),
+      read: (part, offset, length) => {
+        reads.push(part);
+        return Promise.resolve(part0.slice(offset, offset + length));
+      },
+    };
+    await assertRejects(
+      () => openContainer({ kind: "source", source }),
+      ContainerFormatError,
+      "part 長の天井",
+    );
+    assertEquals(reads.includes(1), false);
   });
 });
 

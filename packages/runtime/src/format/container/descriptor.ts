@@ -512,6 +512,12 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
 export const validateGraphDescriptor = (descriptor: GraphDescriptor): void => {
   const path = "graphDescriptor.const";
   const region = descriptor.const;
+  // §10 の天井は part 1 にも掛かる。krg では part 1 の寸法を持つのがこの欄だけなので、記述の
+  // 検査で止めないと読み口の長さ照合を通って巨大な一括読みに届く（krm はモデル記述の parts 側でも
+  // 見るが、重複は無害）。
+  if (region.length > PART_MAX_BYTES) {
+    fail(`${path}.length ${region.length} が part 長の天井 ${PART_MAX_BYTES} を超える`);
+  }
   if (region.blocks.length > MAX_BLOCKS) fail(`${path}.blocks の件数が上限 ${MAX_BLOCKS} を超える`);
   const ids = new Set<string>();
   let previousOffset = -1;
