@@ -491,6 +491,37 @@ describe("container round trip", () => {
     await assertRejects(() => again.extractGraph(), ContainerFormatError, "const 領域の sha256");
   });
 
+  it("krg 抽出は krm からだけ — krg 入力は const 領域の完全性を照合できないので抽出しない", async () => {
+    // krg には const 領域全体の hash を持つ文書が無い（モデル記述の parts[0] は krm だけ — §9）。
+    // 改ざんした krg を抽出できてしまうと、壊れたバイト列が正規の krg の顔で出ていく。
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const tampered = written.graphContainer.slice();
+    tampered[tampered.byteLength - 1] ^= 0x01;
+    const opened = await openContainer({ kind: "bytes", bytes: tampered });
+    assertEquals(opened.header.kind, "graph");
+    await assertRejects(() => opened.extractGraph(), ContainerFormatError, "krm からだけ");
+  });
+
+  it("krg 抽出は取得元が const 領域を短く返したら落ちる（hash より先に長さを照合する）", async () => {
+    const written = await writeModelContainer(syntheticModel(), OPTIONS);
+    const parts = written.parts;
+    const source: BlockSource = {
+      partCount: parts.length,
+      verified: false,
+      partLength: (index) => parts[index].byteLength,
+      read: (part, offset, length) => {
+        const bytes = parts[part].subarray(offset, offset + length);
+        return Promise.resolve(part === 1 ? bytes.subarray(0, bytes.byteLength - 4) : bytes);
+      },
+    };
+    const opened = await openContainer({ kind: "source", source });
+    await assertRejects(
+      () => opened.extractGraph(),
+      ContainerFormatError,
+      `取得長 ${written.graph.const.length - 4}`,
+    );
+  });
+
   it("検証済みを名乗る取得元では block の sha256 を掛けず、名乗らない取得元では掛ける", async () => {
     // 取得層がファイル全体を検証した経路（hub の HF 取得元）は cold の 2 重 digest と warm の digest を
     // 避けるために verified を名乗る（ADR 0109 決定 7）。観測は「改ざんが素通りするか」で行う —

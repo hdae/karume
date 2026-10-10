@@ -120,6 +120,7 @@ export type OpenedContainer = {
   asset(name: string): AssetReader;
   /**
    * `[ヘッダ'][グラフ記述][詰め物][const 領域]` を組み立てて返す（`krg` のバイトコピー抽出 — §9）。
+   * 抽出元は `krm` だけで、`krg` を開いた容器では fail loudly（const 領域全体の hash が無い）。
    *
    * NOTE: この口はグラフ記述のバイト列を開いた容器の寿命いっぱい握る。取得元が器の view を返す形
    * （hub の scan 経路）では part 0 の器ごと握るが、part 0 はヘッダと 2 文書ちょうどなので、増える
@@ -374,18 +375,27 @@ export const openContainer = async (
   };
 
   const extractGraph = async (): Promise<Uint8Array<ArrayBuffer>> => {
+    // §9 が定義する抽出元は krm だけ。krg には const 領域全体の hash を持つ文書が無く、抜き出す
+    // バイト列の完全性を照合できない（block ごとの hash は readBlock が見るが、block の外の詰め物は
+    // 誰も見ない）。
+    if (model === undefined) {
+      throw new ContainerFormatError("krg 抽出は krm からだけ（krg 入力は抽出元にならない — §9）");
+    }
     const regionLength = graph.const.length;
     const region = regionLength === 0
       ? new Uint8Array(new ArrayBuffer(0))
       : await source.read(1, 0, regionLength);
-    if (model !== undefined) {
-      // part 1 の完全性はモデル記述の parts[0] が持つ。抜き出す前に検証する。
-      const actual = await sha256Hex(region);
-      if (actual !== model.parts[0].sha256) {
-        throw new ContainerFormatError(
-          `const 領域の sha256 が宣言と違う（宣言 ${model.parts[0].sha256} / 実物 ${actual}）`,
-        );
-      }
+    if (region.byteLength !== regionLength) {
+      throw new ContainerFormatError(
+        `const 領域: 取得長 ${region.byteLength} が宣言 ${regionLength} と違う`,
+      );
+    }
+    // part 1 の完全性はモデル記述の parts[0] が持つ。抜き出す前に検証する。
+    const actual = await sha256Hex(region);
+    if (actual !== model.parts[0].sha256) {
+      throw new ContainerFormatError(
+        `const 領域の sha256 が宣言と違う（宣言 ${model.parts[0].sha256} / 実物 ${actual}）`,
+      );
     }
     return assembleGraphContainer(graphBytes.slice(), region.slice());
   };
