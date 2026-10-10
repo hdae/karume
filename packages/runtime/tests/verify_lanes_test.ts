@@ -195,6 +195,21 @@ const tokenize = (command: string): string[] => {
  */
 const EXPOSE_GC_FLAG = "--v8-flags=--expose-gc";
 
+/**
+ * レーンの対象・除外のパスを、走査側が返す綴り（リポ相対・`./` 無し）へ揃える。
+ *
+ * Deno は `./packages/hub/tests` を `packages/hub/tests` と同じ場所として扱うので、`./` は剥がす。
+ * MUST: `..` の区間と絶対パスは剥がさず throw する —— REPO_ROOT 相対の走査結果と突き合わせられず、
+ * 一致しない除外を「除外ゼロ」と読み替えると Deno 側では走らないテストを被覆済みと数える。
+ */
+const normalizeLanePath = (task: string, path: string): string => {
+  const relative = path.replace(/^(?:\.\/)+/, "");
+  if (relative === "" || relative.startsWith("/") || relative.split("/").includes("..")) {
+    throw new Error(`レーン解析: ${task} のパスがリポ相対の形でない: ${path}`);
+  }
+  return relative;
+};
+
 /** `deno test -A --v8-flags=--expose-gc <対象…> [--ignore=<glob,…>]` を対象と除外に分解する。 */
 const parseLane = (task: string, command: string): Lane => {
   const tokens = tokenize(command);
@@ -206,13 +221,16 @@ const parseLane = (task: string, command: string): Lane => {
   for (const token of tokens.slice(2)) {
     if (token === "-A" || token === EXPOSE_GC_FLAG) continue;
     if (token.startsWith("--ignore=")) {
-      ignores.push(...token.slice("--ignore=".length).split(",").filter((glob) => glob !== ""));
+      ignores.push(
+        ...token.slice("--ignore=".length).split(",").filter((glob) => glob !== "")
+          .map((glob) => normalizeLanePath(task, glob)),
+      );
       continue;
     }
     if (token.startsWith("-")) {
       throw new Error(`レーン解析: ${task} が未対応のフラグを持つ: ${token}`);
     }
-    targets.push(token);
+    targets.push(normalizeLanePath(task, token));
   }
   if (targets.length === 0) throw new Error(`レーン解析: ${task} に対象が無い: ${command}`);
   return { task, targets, ignores };
@@ -334,4 +352,36 @@ Deno.test("レーン解析: ディレクトリ指定の --ignore は配下すべ
   assertEquals(underHub(ignored), [], "ディレクトリ指定の --ignore が配下を落としていない");
   // 除外の効き先はそのディレクトリだけ（他の対象は残る）。
   assert(ignored.size > 0, "ディレクトリ指定の --ignore が対象を丸ごと落とした");
+});
+
+Deno.test("レーン解析: ./ 付きの対象と除外はリポ相対へ正規化する", () => {
+  // Deno は `./packages/hub/tests` を `packages/hub/tests` と同じ場所として除外する。門が `./` を
+  // 剥がさないと、走査側の `packages/hub/tests/...` と前方一致せず、Deno 側では走らない hub の
+  // テストを「被覆済み」と数える。
+  const command = "deno test -A packages/runtime/tests ./packages/hub/tests";
+  const withHub = filesOf(parseLane("synthetic", command));
+  const underHub = (files: Iterable<string>): string[] =>
+    [...files].filter((file) => file.startsWith("packages/hub/tests/"));
+  assert(underHub(withHub).length > 0, "./ 付きの対象がリポ相対のパスへ揃っていない");
+  for (const ignore of ["./packages/hub/tests", "./packages/hub/tests/*_test.ts"]) {
+    const ignored = filesOf(parseLane("synthetic", `${command} --ignore=${ignore}`));
+    assertEquals(underHub(ignored), [], `./ 付きの --ignore が効いていない: ${ignore}`);
+    assert(ignored.size > 0, `./ 付きの --ignore が対象を丸ごと落とした: ${ignore}`);
+  }
+});
+
+Deno.test("レーン解析: リポの外を指しうるパスは推測せず落とす", () => {
+  // `..` と絶対パスは REPO_ROOT 相対の走査結果と突き合わせられない（読めない形を対象ゼロや
+  // 除外ゼロと読み替えると、この門はレーンの壊れを緑で隠す）。
+  for (
+    const command of [
+      "deno test -A ../packages/hub/tests",
+      "deno test -A packages/runtime/../hub/tests",
+      "deno test -A /packages/hub/tests",
+      "deno test -A packages/hub/tests --ignore=../hub/tests",
+      "deno test -A packages/hub/tests --ignore=/packages/hub/tests",
+    ]
+  ) {
+    assertThrows(() => parseLane("synthetic", command), Error, "リポ相対", command);
+  }
 });
