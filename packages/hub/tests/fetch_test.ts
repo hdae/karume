@@ -18,6 +18,7 @@ import {
   prefetchAssets,
   type RetryDiagnostic,
 } from "../mod.ts";
+import { fetchAssetsWithBudget } from "../src/fetch.ts";
 import {
   FETCH_MANIFEST_BYTES,
   fetchManifest,
@@ -728,6 +729,57 @@ Deno.test("fetchAssets: 送出順は選択の宣言順（予算待ちを後続�
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
   // calls[0] は load() が出した manifest 取得。
   assertEquals(mock.calls.slice(1), expected);
+});
+
+// 上の 2 本は fixture の全量が予算（1.5GiB）に届かないので、待つ場面が生まれない — 本番の律速
+// （admission）を外しても、追い越しを許しても緑のまま通る。ここは内部口で予算を数十バイトへ絞り、
+// 「先行の未完了要求・予算待ちの大きな要求・後続の小さな要求」の 3 本で本番の結線を踏む。
+Deno.test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に追い越させず、in-flight は予算に収まる", async () => {
+  const caches = new MemoryCacheStorage();
+  const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
+  const unique = new Map<string, FileRef>();
+  for (const ref of Object.values(selectionFiles(loaded.manifest))) {
+    if (ref.size > 0) unique.set(ref.path, ref);
+  }
+  const bySize = [...unique.values()].sort((x, y) => x.size - y.size);
+  const small = bySize[0];
+  const first = bySize[1];
+  const big = bySize[bySize.length - 1];
+  // 先行（first）と小（small）は同時に収まり、先行と大（big）は収まらない予算。
+  const budget = first.size + small.size;
+  assert(big.size > first.size && big.size > small.size, "大きな要求が最大になっていない");
+  assert(big.size <= budget, "大きな要求が単独でも予算を超える（予算内の検査が成り立たない）");
+
+  // 受信中のバイト数を数える（応答の本体を読み切った時点で外す — 予算の席を返すのはその後なので、
+  // 正しい律速ならこの値は予算を超えない）。
+  const sizeByUrl = new Map([small, first, big].map((ref) => [resolveUrl(ref.path), ref.size]));
+  let inFlightBytes = 0;
+  let peakBytes = 0;
+  const tracked: typeof globalThis.fetch = async (input, init) => {
+    const response = await mock.fetch(input, init);
+    const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const size = sizeByUrl.get(href);
+    if (size === undefined || response.body === null) return response;
+    inFlightBytes += size;
+    peakBytes = Math.max(peakBytes, inFlightBytes);
+    const body = response.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        flush: () => {
+          inFlightBytes -= size;
+        },
+      }),
+    );
+    return new Response(body, { status: response.status, headers: response.headers });
+  };
+
+  const files = { first, big, small };
+  const assets = await fetchAssetsWithBudget(loaded, files, { fetch: tracked, caches }, budget);
+  assertEquals(Object.keys(assets), ["first", "big", "small"]);
+  // calls[0] は load() が出した manifest 取得。小さな要求は先行と同時に収まるが、予算待ちの大きな
+  // 要求を追い越さない（宣言順の head-of-line blocking）。
+  assertEquals(mock.calls.slice(1), [first, big, small].map((ref) => resolveUrl(ref.path)));
+  assert(peakBytes <= budget, `in-flight が予算を超えた（最大 ${peakBytes}B / 予算 ${budget}B）`);
+  assertEquals(mock.peakConcurrency(), 1, "収まらない要求が先行と同時に走った");
 });
 
 /** 取得対象の path を送出順（= 表の順の path 一意化）に並べる。 */

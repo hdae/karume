@@ -220,10 +220,25 @@ export const loadManifest = async (
  * との文字列比較だけで済み（全量ハッシュ 0 回）、記録が食い違う・記録が無いのに実ハッシュが
  * 合わないエントリは evict → 取り直し（self-heal）になる。
  */
-export const fetchAssets = async (
+export const fetchAssets = (
   loaded: LoadedManifest,
   files: Readonly<Record<string, FileRef>>,
   options: FetchAssetsOptions = {},
+): Promise<Record<string, Uint8Array<ArrayBuffer>>> =>
+  fetchAssetsWithBudget(loaded, files, options, BYTE_BUDGET);
+
+/**
+ * {@link fetchAssets} の本体。in-flight のバイト予算だけを引数で受ける。
+ *
+ * MUST: barrel（`mod.ts`）には出さない — 予算は公開ノブにしない（{@link BYTE_BUDGET} の注記）。
+ * この口があるのは、律速の結線（予算待ち・追い越し禁止）を GB 級のデータ無しに数十バイトの予算で
+ * 踏むテストのためだけである。
+ */
+export const fetchAssetsWithBudget = async (
+  loaded: LoadedManifest,
+  files: Readonly<Record<string, FileRef>>,
+  options: FetchAssetsOptions,
+  byteBudget: number,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const source = pinnedSourceOf(loaded, options);
   const context = createFetchContext(loaded, source.origin);
@@ -273,7 +288,7 @@ export const fetchAssets = async (
   // 待つのはこのループ 1 本だけなので、`targets`（= 渡された表の順）の head-of-line
   // blocking がそのまま送出順になる — 後続の小さいファイルに追い越させないので、同じ
   // manifest なら同じ順に出る。
-  const admission = createByteAdmission(BYTE_BUDGET);
+  const admission = createByteAdmission(byteBudget);
   const running: Promise<void>[] = [];
   const run = async (ref: FileRef): Promise<void> => {
     try {
