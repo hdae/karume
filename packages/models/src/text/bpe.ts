@@ -16,8 +16,8 @@
  *
  * MUST: **最初から merge queue で書く**（ADR 0084 決定 3）。「全隣接ペアを走査 → 最小 rank を
  * splice」の O(n²) を写してはならない — Gemma の pre_tokenizer は正規化後の文字列を 1 つも
- * 切らないので、**1 断片が入力全長になる**（`qwen2-tokenizer.ts` の `#bpe` が実害を出さないのは
- * あちらの pre_tokenizer が細かく切るからで、前提が違う）。
+ * 切らないので、**1 断片が入力全長になる**。Qwen2 も区切りの無い英字列・句読点の無い日本語は
+ * 1 断片になるので、併合（{@link mergeSymbols}）は同じ 1 本を使う（ADR 0084 追記 2026-10-10）。
  */
 
 import { setUnique } from "./asset-gates.ts";
@@ -142,7 +142,7 @@ type QueuedMerge = {
   readonly merge: BpeMerge;
 };
 
-/** 二分ヒープ（最小取り出し）。単一用途なので {@link bpeEncode} の中だけで使う。 */
+/** 二分ヒープ（最小取り出し）。単一用途なので {@link mergeSymbols} の中だけで使う。 */
 const isBefore = (a: QueuedMerge, b: QueuedMerge): boolean =>
   a.rank !== b.rank ? a.rank < b.rank : a.pos < b.pos;
 
@@ -184,8 +184,24 @@ const heapPop = (heap: QueuedMerge[]): QueuedMerge | undefined => {
  * 対にならないサロゲートは {@link toCodePoints} が落とす — 正本（Rust の `str`）に載らない
  * 値で、黙って U+FFFD へ潰すと id 列が静かに変わるため。
  */
-export const bpeEncode = (model: BpeModel, piece: string): number[] => {
-  const symbols = initialSymbols(model, piece);
+export const bpeEncode = (model: BpeModel, piece: string): number[] =>
+  mergeSymbols(
+    initialSymbols(model, piece),
+    (left, right) => model.merges.get(pairKey(model, left, right)),
+  );
+
+/**
+ * 記号 id の列を併合しきる（正本の `Word::merge_all` — rank の最小 → 位置の小さい方の優先度つき
+ * キューと隣接リスト）。記号列の作り方（byte_fallback / byte-level）は系列側に残し、併合だけを
+ * 共有する。
+ *
+ * MUST: `mergeOf` は同じ対に**同じ実体**を返す（取り出した項目の照合は同一性で行う — 下の MUST）。
+ * 渡した配列は書き換える（呼び手は作ったばかりの記号列を渡す）。
+ */
+export const mergeSymbols = (
+  symbols: number[],
+  mergeOf: (left: number, right: number) => BpeMerge | undefined,
+): number[] => {
   const count = symbols.length;
   if (count < 2) return symbols;
 
@@ -199,7 +215,7 @@ export const bpeEncode = (model: BpeModel, piece: string): number[] => {
 
   const heap: QueuedMerge[] = [];
   const enqueue = (pos: number, right: number): void => {
-    const merge = model.merges.get(pairKey(model, symbols[pos], symbols[right]));
+    const merge = mergeOf(symbols[pos], symbols[right]);
     if (merge !== undefined) heapPush(heap, { pos, rank: merge.rank, merge });
   };
   for (let index = 0; index + 1 < count; index++) enqueue(index, index + 1);
@@ -212,7 +228,7 @@ export const bpeEncode = (model: BpeModel, piece: string): number[] => {
     if (right === -1) continue;
     // MUST: **同一性で**照合する。位置の記号は他の併合で入れ替わりうるので、rank だけの
     // 比較では「別の対がたまたま同じ rank」を通してしまう（正本は `new_id` で見ている）。
-    if (model.merges.get(pairKey(model, symbols[top.pos], symbols[right])) !== top.merge) continue;
+    if (mergeOf(symbols[top.pos], symbols[right]) !== top.merge) continue;
 
     symbols[top.pos] = top.merge.newId;
     alive[right] = 0;

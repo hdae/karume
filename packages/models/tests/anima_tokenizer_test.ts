@@ -714,3 +714,36 @@ Deno.test("正規化表: 重複鍵・域外コードポイント・tuple 長違�
     "表.multi: [cp, cp, 文字列] でない",
   );
 });
+
+/** BPE の規則だけを見る最小の Qwen2 資産（文字クラス等は実物のフィクスチャを借りる）。 */
+const tinyQwen = (
+  vocab: Record<string, number>,
+  merges: readonly (readonly [string, string, number])[],
+): Qwen2Tokenizer =>
+  new Qwen2Tokenizer({
+    ...qwenAssets,
+    vocab: new Map(Object.entries(vocab)),
+    merges: new Map(merges.map(([left, right, rank]) => [`${left} ${right}`, rank])),
+    addedTokens: new Map(),
+  });
+
+Deno.test("Qwen2 BPE: rank の小さい対が先・同じ rank なら左の対が先に併合される", () => {
+  const vocab = { a: 0, aa: 1, b: 2, c: 3, bc: 4, ab: 5 };
+  // 同率（同じ対が並ぶ）なら左から: aaa → aa + a（a + aa ではない）。
+  assertEquals(tinyQwen(vocab, [["a", "a", 0]]).encode("aaa"), [1, 0]);
+  // rank は位置より優先: b c（rank 0）が a b（rank 1）より先に併合される。
+  assertEquals(tinyQwen(vocab, [["b", "c", 0], ["a", "b", 1]]).encode("abc"), [0, 4]);
+  assertEquals(tinyQwen(vocab, [["b", "c", 1], ["a", "b", 0]]).encode("abc"), [5, 3]);
+});
+
+Deno.test("Qwen2 BPE: 区切りの無い長い 1 片でも併合は二次時間にならない", () => {
+  // 切り詰め（512）は片単位でしか効かないので、1 片の BPE は最後まで回る。区切りの無い英字列や
+  // 句読点の無い日本語は文字クラス上 1 片になる。全隣接の走査と splice を併合のたびに繰り返す形は
+  // 8,000 文字で 1 秒を超える。
+  const qwen2 = tinyQwen({ a: 0, aa: 1 }, [["a", "a", 0]]);
+  const started = performance.now();
+  const ids = qwen2.encode("a".repeat(8_000));
+  const elapsed = performance.now() - started;
+  assertEquals(ids, Array.from({ length: 512 }, () => 1));
+  assert(elapsed < 300, `8,000 文字の 1 片の BPE に ${elapsed.toFixed(0)} ms かかった`);
+});

@@ -22,6 +22,7 @@
  */
 
 import { type AddedTokenMatcher, createAddedTokenMatcher } from "../../text/added-tokens.ts";
+import { type BpeMerge, mergeSymbols } from "../../text/bpe.ts";
 import { toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges } from "../../text/code-ranges.ts";
 
@@ -229,22 +230,56 @@ export class Qwen2Tokenizer {
     this.#byteEncoder = buildByteEncoder();
   }
 
-  /** 1 つの pre-token（byte-level 符号化済み）を BPE で分割する。 */
-  #bpe(piece: string): string[] {
-    const symbols = Array.from(piece);
-    for (;;) {
-      let bestRank = Number.POSITIVE_INFINITY;
-      let bestAt = -1;
-      for (let idx = 0; idx + 1 < symbols.length; idx++) {
-        const rank = this.#assets.merges.get(`${symbols[idx]} ${symbols[idx + 1]}`);
-        if (rank !== undefined && rank < bestRank) {
-          bestRank = rank;
-          bestAt = idx;
-        }
+  /**
+   * 1 つの pre-token（byte-level 符号化済み）を BPE で分割する（併合は Gemma と共通の 1 本）。
+   *
+   * MUST: 二次時間の「全隣接ペアを走査 → 最小 rank を splice」に戻さない — 切り詰めは片単位で
+   * しか効かず、区切りの無い英字列や句読点の無い日本語は 1 片が入力全長になる（ADR 0084 追記
+   * 2026-10-10）。
+   *
+   * 記号は**この片の中だけの番号**（綴りの初出順）で持ち、併合規則は綴りの対で引く。語彙の id で
+   * 持たないのは、併合の途中の綴りが語彙に要らないため（語彙に要るのは最後に残った綴りだけ —
+   * 全隣接走査の形と同じ受理集合）。対の結果は片の中で保持する: 共通の併合は同じ対に同じ実体を
+   * 求め（取り出した項目を同一性で照合する）、保持を片の寿命に閉じれば入力を重ねても膨らまない。
+   */
+  #bpe(piece: string): number[] {
+    const spellings: string[] = [];
+    const numberOf = new Map<string, number>();
+    const intern = (spelling: string): number => {
+      let symbol = numberOf.get(spelling);
+      if (symbol === undefined) {
+        symbol = spellings.length;
+        spellings.push(spelling);
+        numberOf.set(spelling, symbol);
       }
-      if (bestAt < 0) return symbols;
-      symbols.splice(bestAt, 2, symbols[bestAt] + symbols[bestAt + 1]);
-    }
+      return symbol;
+    };
+    const resolved = new Map<number, Map<number, BpeMerge | null>>();
+    const mergeOf = (left: number, right: number): BpeMerge | undefined => {
+      let row = resolved.get(left);
+      if (row === undefined) {
+        row = new Map();
+        resolved.set(left, row);
+      }
+      let merge = row.get(right);
+      if (merge === undefined) {
+        const rank = this.#assets.merges.get(`${spellings[left]} ${spellings[right]}`);
+        merge = rank === undefined
+          ? null
+          : { rank, newId: intern(spellings[left] + spellings[right]) };
+        row.set(right, merge);
+      }
+      return merge ?? undefined;
+    };
+    const merged = mergeSymbols(Array.from(piece, intern), mergeOf);
+    return merged.map((symbol) => {
+      const id = this.#assets.vocab.get(spellings[symbol]);
+      // byte-level なので語彙に無いトークンは原理的に出ない。出たら表が壊れている。
+      if (id === undefined) {
+        throw new Error(`Qwen2 語彙に無いトークン ${JSON.stringify(spellings[symbol])}`);
+      }
+      return id;
+    });
   }
 
   /**
@@ -255,7 +290,7 @@ export class Qwen2Tokenizer {
     const maxLength = this.#assets.maxLength;
     const ids: number[] = [];
     // 先頭から順に積むだけなので、上限に達した後の chunk / pre-token を捨てても id 列は変わら
-    // ない（O(n²) の BPE を切り詰めの後ろまで回さない）。
+    // ない（BPE を切り詰めの後ろまで回さない）。
     for (const chunk of this.#added.split(text)) {
       if (ids.length >= maxLength) break;
       if (chunk.added) {
@@ -268,14 +303,7 @@ export class Qwen2Tokenizer {
         // ByteLevel（add_prefix_space=false）— **先頭スペースを足さない**。
         let encoded = "";
         for (const byte of this.#encoder.encode(piece)) encoded += this.#byteEncoder[byte];
-        for (const token of this.#bpe(encoded)) {
-          const id = this.#assets.vocab.get(token);
-          // byte-level なので語彙に無いトークンは原理的に出ない。出たら表が壊れている。
-          if (id === undefined) {
-            throw new Error(`Qwen2 語彙に無いトークン ${JSON.stringify(token)}`);
-          }
-          ids.push(id);
-        }
+        for (const id of this.#bpe(encoded)) ids.push(id);
       }
     }
     return ids.slice(0, maxLength);

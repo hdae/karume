@@ -222,3 +222,16 @@ Gemma通常/QAT・MiniCPM5・Qwen3のデモは、開始から最初の非停止 
 本文を再tokenizeせず、復号前の配送を数える。0 tokenのTTFT、0〜1 tokenまたは時間0の速度は未測定。
 従来のターン全体時間と停止込みtoken数は残す。JSON出力はelapsedMsを維持し、
 `generatedTokens`・`ttftMs`・`decodeTokensPerSecond`を追加する（未測定はnull）。
+
+## 追記（2026-10-10）— Qwen2 の BPE も同じ merge queue を使う
+
+決定 3 の「Qwen2 は pre_tokenizer が細かく切るので O(n²) でも実害が出ない」は誤りだった。
+区切りの無い英字列と句読点の無い日本語は、Qwen2 の文字クラスでも 1 pre-token になる。
+byte-level では日本語 1 文字が 3 記号に膨らみ、512 token の切り詰めは pre-token 単位でしか効かない。
+（Codex 深掘りレビュー 2026-10-04 の R5-006。）
+
+- 併合は `src/text/bpe.ts` の `mergeSymbols`（rank → 位置の優先度つきキュー・古い項目の無効化）を
+  Gemma と Qwen2 で共有する。byte-level の変換と綴りでの規則の引き方だけを Qwen2 側に残す。
+- Qwen2 は記号を pre-token の中だけの番号で持つ。語彙に要るのは最後に残った綴りだけで、受理集合は
+  従来の全隣接走査の形と同じ。
+- 実資産の語彙で、従来の形と id 列が一致することを確かめた（2,036 入力・不一致 0）。
