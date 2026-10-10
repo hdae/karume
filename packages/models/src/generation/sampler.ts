@@ -129,8 +129,17 @@ const assertSpec = (spec: SamplerSpec): void => {
       throw new ModelInputError(`repetitionPenalty ${spec.repetitionPenalty} が正の有限数でない`);
     }
   }
+  // MUST: 形と型まで見る（型を外した JS / JSON 入力が届く）。`Map` や object を反復の形の違いで
+  // 黙って受けたり、文字列の bias を `+=` で文字列連結（`1 + "0"` = `"10"`）させたりしない。
+  if (spec.logitBias !== undefined && !Array.isArray(spec.logitBias)) {
+    throw new ModelInputError("logitBias が [token, bias] の組の配列でない");
+  }
   const biased = new Set<number>();
-  for (const [token, bias] of spec.logitBias ?? []) {
+  for (const [position, entry] of (spec.logitBias ?? []).entries()) {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new ModelInputError(`logitBias[${position}] が [token, bias] の 2 要素の組でない`);
+    }
+    const [token, bias] = entry;
     if (!Number.isSafeInteger(token) || token < 0) {
       throw new ModelInputError(`logitBias の token ${token} が 0 以上の整数でない`);
     }
@@ -139,8 +148,12 @@ const assertSpec = (spec: SamplerSpec): void => {
     }
     biased.add(token);
     // `-Infinity` は「その token を禁止する」慣用（HF の `SequenceBias` と同じ）。`+Infinity` と
-    // `NaN` は softmax を NaN にするだけなので受けない。
-    if (Number.isNaN(bias) || bias === Number.POSITIVE_INFINITY) {
+    // `NaN` は softmax を NaN にするだけなので受けない。number 以外（文字列・null・boolean）は
+    // 加算で暗黙変換されて別の値になるので受けない。
+    if (
+      typeof bias !== "number" ||
+      !(Number.isFinite(bias) || bias === Number.NEGATIVE_INFINITY)
+    ) {
       throw new ModelInputError(`logitBias[${token}] ${bias} が有限数でも -Infinity でもない`);
     }
   }
@@ -518,8 +531,11 @@ export const samplerDistribution = (
  * {@link createSampler}（= 最初の `next()`）まで遅れると、その間の書き換えが黙って効く。
  * 写し口をここ 1 本に保つための export で、`mod.ts` / サブパス面には出さない（ADR 0008）。
  */
-export const snapshotSpec = (spec: SamplerSpec): SamplerSpec =>
-  Object.freeze({
+export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
+  // MUST: 写す前に受理集合を通す（検査と写しの入口を 1 つに保つ）。写しは要素の形を前提に
+  // するので、検査より先に走ると形の誤りが入力の誤りではなく TypeError として出る。
+  assertSpec(spec);
+  return Object.freeze({
     ...spec,
     ...(spec.logitBias === undefined ? {} : {
       logitBias: Object.freeze(
@@ -527,6 +543,7 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec =>
       ),
     }),
   });
+};
 
 /**
  * 抽選器を組む（RNG 状態を持つので、1 本の生成では**同じ実体を使い回す**）。
@@ -534,8 +551,8 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec =>
  * 指定を省略すると greedy（温度 0）— この層が既定を持たないことの表現である（ADR 0083 決定 7）。
  */
 export const createSampler = (spec: SamplerSpec = {}): Sampler => {
-  assertSpec(spec);
-  // 検査を通った指定を**写して**持つ（{@link snapshotSpec} — 検査した値と抽選が読む値を同じに保つ）。
+  // 検査を通した指定を**写して**持つ（{@link snapshotSpec} が検査してから写す — 検査した値と
+  // 抽選が読む値を同じに保つ）。
   const frozen = snapshotSpec(spec);
   // seed の受理集合検査もここで済ませる（抽選が走るのは decode の途中なので、生成器を作るのを
   // 遅らせると不正な seed が GB 級のロードの末に落ちる — `request-gates.ts` の

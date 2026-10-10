@@ -17,6 +17,7 @@ import {
   isStopToken,
   samplerDistribution,
   type SamplerSpec,
+  snapshotSpec,
 } from "../src/generation/sampler.ts";
 
 const f32 = (values: readonly number[]): Float32Array<ArrayBuffer> => {
@@ -482,6 +483,56 @@ Deno.test("sampler: 受理できない指定は構築時に落ちる", () => {
       JSON.stringify(Object.keys(spec)),
     );
   }
+});
+
+/** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
+const untypedSpec = (value: unknown): SamplerSpec => value as SamplerSpec;
+
+Deno.test("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", async (t) => {
+  await t.step("文字列の bias は文字列連結にならない（temperature 0 の選択を変えない）", () => {
+    // `1 + "0"` は `"10"` — f32 へ 10 として書かれ、bias なしなら選ばれる token 1 が 0 に化ける。
+    assertThrows(
+      () => createSampler(untypedSpec({ temperature: 0, logitBias: [[0, "0"]] })),
+      ModelInputError,
+      "logitBias[0]",
+    );
+  });
+
+  await t.step("null / boolean の bias を 0 / 1 として黙って受けない", () => {
+    for (const bias of [null, true, false, undefined]) {
+      assertThrows(
+        () => createSampler(untypedSpec({ logitBias: [[0, bias]] })),
+        ModelInputError,
+        "logitBias[0]",
+        String(bias),
+      );
+    }
+  });
+
+  await t.step("配列でない logitBias・2 要素でない組は形の誤り", () => {
+    for (const logitBias of [new Map([[0, 1]]), { 0: 1 }, [[0]], [[0, 1, 2]], [0]]) {
+      assertThrows(
+        () => createSampler(untypedSpec({ logitBias })),
+        ModelInputError,
+        "logitBias",
+        JSON.stringify(logitBias),
+      );
+    }
+  });
+
+  await t.step("発行時の写し（snapshotSpec）も同じ門を先に通す", () => {
+    // 上層（chat / ChatSession）は抽選器を作る前に写すので、写しが形の誤りを TypeError に
+    // 化かすと入力の誤りに見えない。
+    assertThrows(
+      () => snapshotSpec(untypedSpec({ logitBias: new Map([[0, 1]]) })),
+      ModelInputError,
+      "logitBias",
+    );
+  });
+
+  await t.step("-Infinity（禁止）と有限数は従来どおり受ける", () => {
+    createSampler({ logitBias: [[0, Number.NEGATIVE_INFINITY], [1, -2.5]] });
+  });
 });
 
 // ---------------------------------------------------------------------------
