@@ -522,6 +522,11 @@ export const openAsset = async (
   const reader = await openFile(ref, {
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
+  // MUST: 開いた直後にも見る — 温め済みの口は network に出ない＝取得元の signal 監視が効かない
+  // 区間なので、見ないと開いている最中の中断が観測されず、取り消したはずの読み口が返る
+  // （loadManifest / prefetchAssets と同じ前後の確認）。open 時の signal を読み口へ持ち越さない
+  // 設計（`source.ts` ⑧の MUST NOT）はそのまま — ここで見るのは開く 1 回の決着だけ。
+  options.signal?.throwIfAborted();
   // tight view の検査も共通層の作法（`source.ts` の MUST）— 取得元ごとに置くと、取得元が
   // 増えるたびに同じ不変条件を書き直すことになる。
   return {

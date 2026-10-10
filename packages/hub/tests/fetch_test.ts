@@ -1533,6 +1533,24 @@ Deno.test("openAsset: 越境参照は宣言された (repo, revision) の口で�
   assertEquals(await reader.read(0, ref.size), foreignBytes, "自リポのバイト列が読めている");
 });
 
+Deno.test("openAsset: 温め済みの口を開いている最中の中断でも読み口を返さない", async () => {
+  // warm cache のヒットは network に出ない＝取得元の signal 監視が効かない区間なので、開いた後に
+  // 中断を見ないと「取り消したのに読み口が返る」（loadManifest / prefetchAssets と不揃い）。
+  const { mock, caches, loaded, ref } = await openable();
+  const access = { fetch: mock.fetch, caches };
+  await prefetchAssets(loaded, [ref], access);
+  const controller = new AbortController();
+  const reason = new Error("app: 開いている最中に取り消した");
+  hubCache(caches).onMatch = () => controller.abort(reason);
+  const calls = mock.calls.length;
+
+  const error = await assertRejects(() =>
+    openAsset(loaded, ref, { ...access, signal: controller.signal })
+  );
+  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
+});
+
 Deno.test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
   const mock = createMockFetch({ files: serveAll() });
   const remote = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
