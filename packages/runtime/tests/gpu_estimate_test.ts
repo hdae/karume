@@ -1,16 +1,19 @@
 // メモリ必要量 estimator（ADR 0070 決定 5）の実 GPU 突合（GPU に依らない門は estimate_test.ts）。
 //
-// 厳密一致を主張できるのは診断が実測している 2 カテゴリ（圧縮常駐・展開）と state 容量、および
-// 融合が 1 本も掛からない states 形 attention の slot 表。中間ピークは**近似**なので突合しない
-// （融合が中間を消し、行ブロック分割が一時を足す — どちらも estimator の unaccounted 欄が
-// 認めている差）。アダプタ無しは明示 SKIP。
+// 厳密一致を主張できるのは診断が実測している 2 カテゴリ（圧縮常駐・展開）と state 容量、
+// 融合が 1 本も掛からない states 形 attention の slot 表、および行ブロック attention の窓だけの
+// slot 表。行ブロック attention の窓は見積りが融合後の形で数えるので突合できる（ADR 0093 追記
+// 2026-10-10）。それ以外の中間ピークは**近似**なので突合しない（他の融合が中間を消す — estimator
+// の unaccounted 欄が認めている差）。アダプタ無しは明示 SKIP。
 
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import type { PreparedModel } from "../src/runtime/executor.ts";
+import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
 import {
   bothScenarios,
+  decomposedAttentionGraph,
   f16Zeros,
   openGraph,
   stateAttentionGraph,
@@ -170,6 +173,91 @@ Deno.test({
     }),
 });
 
+/**
+ * 分解 attention の次元。スコアの 1 行 = `heads·keys·4` = 512B・全幅 = 32KiB で、q / kᵀ / v / y は
+ * 各 4096B（下の絞りの全てで束縛上限に収まる — 割れるのはスコアの行ブロックだけ）。
+ */
+const DECOMPOSED = { heads: 2, queries: 64, keys: 64, headDim: 8 } as const;
+
+/**
+ * 行ブロック attention（ADR 0060）の窓の中間総量が実行計画の slot 表と厳密一致することの
+ * 実測門（ADR 0093 追記 2026-10-10）。
+ *
+ * 見積りは実行相と同じ融合計画（`planFusions`）を呼び、窓を融合後の確保プログラムへ置き換えて
+ * 同じパッカーへ渡す。確保プログラムは recipe-builder の簿記の写し（出力の確保・一時の寿命・
+ * WGSL の storage 宣言から採る読み書き・外部入力の解放）なので、写しが実行相とずれれば、ここが
+ * 例外なしで割れる。グラフ出力 `y` 以外の値は全て窓の内側なので、slot 表は融合ステップ 1 つで
+ * 決まる（窓の外の近似が混ざらない）。
+ *
+ * `limitCap` で束縛上限を絞り、行ブロックを 1 枚 / 複数枚 / 不揃いの枚数へ割る（1 枚ではブロック
+ * 跨ぎの配り直しが、不揃いでは幅の違う一時のサイズクラス 2 種が踏まれない）。
+ * MUST: 枚数は `expectedBlocks` で先に固定する（想定と違う枚数で緑になると、見たい形を見たことに
+ * ならない）。
+ */
+const assertRowBlockAttentionMatchesEstimate = async (
+  variant: { readonly limitCap?: number; readonly expectedBlocks: number },
+): Promise<void> => {
+  const { heads, queries, keys, headDim } = DECOMPOSED;
+  const gpu = await acquireGpu(
+    variant.limitCap === undefined
+      ? {}
+      : { [LIMIT_CAPS]: { maxStorageBufferBindingSize: variant.limitCap } },
+  );
+  try {
+    const limit = gpu.limits.maxStorageBufferBindingSize;
+    if (variant.limitCap !== undefined) {
+      assertEquals(limit, variant.limitCap, "requiredLimits が絞られていない（門が空振りする）");
+    }
+    // 実行と見積りが共有する純関数そのもので枚数を固定する（前提の可視化）。
+    assertEquals(
+      planRowBlocks(queries, heads * keys * 4, limit).length,
+      variant.expectedBlocks,
+      "行ブロックの枚数",
+    );
+    const model = openGraph(decomposedAttentionGraph(DECOMPOSED));
+    const { scenarios } = model.estimate({ maxStorageBufferBindingSize: limit });
+    assertEquals(scenarios.map((scenario) => scenario.name), ["run"]);
+    const session = await model.createContainerSession(gpu);
+    try {
+      // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+      for (let step = 0; step < 2; step += 1) {
+        await session.run({
+          q: fill([heads, queries, headDim], (i) => ((i % 5) - 2) / 4),
+          kt: fill([heads, headDim, keys], (i) => ((i % 3) - 1) / 4),
+          mask: fill([1, 1, 1, keys], (i) => (i % 4 === 3 ? -1 : 0)),
+          v: fill([1, heads, keys, headDim], (i) => ((i % 7) - 3) / 4),
+        });
+      }
+      assertEquals(session.diagnostics().planBacking.residentBytes, scenarios[0].workspaceBytes);
+    } finally {
+      await session.dispose();
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
+Deno.test({
+  name: "行ブロック attention の中間総量が 1 枚の形で slot 表と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 絞らない（device の上限は全幅 32KiB を優に超える）— 分割が起きなくても窓は融合後の形で数える。
+  fn: () => assertRowBlockAttentionMatchesEstimate({ expectedBlocks: 1 }),
+});
+
+Deno.test({
+  name: "行ブロック attention の中間総量が複数枚でも slot 表と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 8192 ÷ 512 = 16 行／枚 → M = 64 は 16 行 × 4 枚。
+  fn: () => assertRowBlockAttentionMatchesEstimate({ limitCap: 8192, expectedBlocks: 4 }),
+});
+
+Deno.test({
+  name: "行ブロック attention の中間総量が不揃いの枚数でも slot 表と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // 6144 ÷ 512 = 12 行／枚 → ceil(64 / 12) = 6 枚を等分すると 11 行 × 4 枚 + 10 行 × 2 枚。
+  fn: () => assertRowBlockAttentionMatchesEstimate({ limitCap: 6144, expectedBlocks: 6 }),
+});
+
 // ---------------------------------------------------------------------------
 // 実 GPU 突合
 // ---------------------------------------------------------------------------
@@ -257,8 +345,8 @@ Deno.test({
       } finally {
         await stateSession.dispose();
       }
-      // workspaceBytes は突合しない — 融合が中間を消し、行ブロック分割が一時を足すので
-      // 実測（planBacking.residentBytes / lastRun.peakTransientBytes）とは原理的にずれる
+      // workspaceBytes は突合しない — 行ブロック attention 以外の融合が中間を消し、その融合の
+      // 一時は勘定に入らないので、実測（planBacking.residentBytes / lastRun.peakTransientBytes）とは原理的にずれる
       // （estimator の unaccounted 欄が認めている差そのもの）。
     } finally {
       gpu.destroy();

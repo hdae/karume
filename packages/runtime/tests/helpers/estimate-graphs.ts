@@ -115,6 +115,67 @@ export const stateAttentionGraph = (window?: number, heads = 4): DeclarationJson
   };
 };
 
+/**
+ * エクスポータが出す分解 attention の 9 ノード窓（irodori DiT の綴り — 行ブロック attention に
+ * 融合される形・ADR 0060）。全値 f32・`y` だけがグラフ出力。スコアは `heads·queries·keys·4` バイト。
+ *
+ * `interpose` は bmm と reshape の間に 0 バイトの別名を 1 本挟むだけで、窓の隣接条件だけを外す
+ * （融合が成立しない同じ計算）。
+ */
+export const decomposedAttentionGraph = (
+  dims: {
+    readonly heads: number;
+    readonly queries: number;
+    readonly keys: number;
+    readonly headDim: number;
+  },
+  interpose = false,
+): DeclarationJson => {
+  const { heads, queries, keys, headDim } = dims;
+  const scores3 = [heads, queries, keys];
+  const scores4 = [1, heads, queries, keys];
+  const qkOut = interpose ? "s3_alias" : "s3";
+  const nodes: DeclarationJson["nodes"] = [
+    { op: "bmm", ins: ["q", "kt"], outs: [qkOut], attrs: {} },
+    ...(interpose ? [{ op: "reshape", ins: [qkOut], outs: ["s3"], attrs: {} }] : []),
+    { op: "reshape", ins: ["s3"], outs: ["s4"], attrs: {} },
+    { op: "add", ins: ["s4", "mask"], outs: ["masked"], attrs: {} },
+    { op: "safe_softmax", ins: ["masked"], outs: ["p4"], attrs: { dim: 3 } },
+    { op: "expand", ins: ["p4"], outs: ["pe"], attrs: {} },
+    { op: "reshape", ins: ["pe"], outs: ["p3"], attrs: {} },
+    { op: "expand", ins: ["v"], outs: ["ve"], attrs: {} },
+    { op: "reshape", ins: ["ve"], outs: ["v3"], attrs: {} },
+    { op: "bmm", ins: ["p3", "v3"], outs: ["y"], attrs: {} },
+  ];
+  return {
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [...new Set(nodes.map((node) => node.op))] },
+    symbols: [],
+    inputs: [
+      { name: "q", dtype: "f32", shape: [heads, queries, headDim] },
+      { name: "kt", dtype: "f32", shape: [heads, headDim, keys] },
+      { name: "mask", dtype: "f32", shape: [1, 1, 1, keys] },
+      { name: "v", dtype: "f32", shape: [1, heads, keys, headDim] },
+    ],
+    outputs: ["y"],
+    initializers: {},
+    values: {
+      ...(interpose ? { s3_alias: { dtype: "f32", shape: scores3 } } : {}),
+      s3: { dtype: "f32", shape: scores3 },
+      s4: { dtype: "f32", shape: scores4 },
+      masked: { dtype: "f32", shape: scores4 },
+      p4: { dtype: "f32", shape: scores4 },
+      pe: { dtype: "f32", shape: scores4 },
+      p3: { dtype: "f32", shape: scores3 },
+      ve: { dtype: "f32", shape: [1, heads, keys, headDim] },
+      v3: { dtype: "f32", shape: [heads, keys, headDim] },
+      y: { dtype: "f32", shape: [heads, queries, headDim] },
+    },
+    nodes,
+  };
+};
+
 /** prefill / decode の 2 本を名前つきで引く（並びの前提もここで一緒に押さえる）。 */
 export const bothScenarios = (
   report: AdmissionReport,

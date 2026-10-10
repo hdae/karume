@@ -40,9 +40,10 @@
 import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
+import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
 import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
-import { planAliases } from "./fusion.ts";
+import { type FusedStep, planAliases, planFusions } from "./fusion.ts";
 import {
   assertChunkBuckets,
   assertChunkLength,
@@ -138,8 +139,11 @@ export type AdmissionScenario = {
    * 消費回数は `countUses`・グラフ出力は pinned で解放しない・別名化できる出力は
    * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。**states 形 attention の
    * ノード内一時（スコア S と行統計）はここに入る** — 融合の成立に依存せず必ず出て、capacity
-   * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。それ以外の
-   * ノード内一時と、融合が畳んで消す中間は勘定に入らない（{@link AdmissionReport.unaccounted}）。
+   * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。
+   * **行ブロック attention（ADR 0060）の窓は融合後の形で入る** — 実行相と同じ融合計画が掴んだ
+   * 窓は、スコア・mask 加算後・softmax 後の全幅ではなく、行ブロック 1 枚ぶんの一時と出力で数える
+   * （ADR 0093 追記 2026-10-10）。それ以外のノード内一時と、他の融合が畳んで消す中間は勘定に
+   * 入らない（{@link AdmissionReport.unaccounted}）。
    */
   readonly workspaceBytes: number;
 };
@@ -292,7 +296,7 @@ export type EstimateOptions = {
  * ように読まれる（ADR 0070 決定 5 が unaccounted 欄を要求した理由そのもの）。
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
-  "融合が畳んで消す中間と、融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値は勘定に入っている）",
+  "行ブロック attention 以外の融合が畳んで消す中間と、その融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値と、行ブロック attention の一時は勘定に入っている）",
   "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と、stateAttentionReduce に応じて必要な行統計は勘定に入っている",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
@@ -607,19 +611,156 @@ const stateAttentionTemps = (
 };
 
 /**
+ * 融合計画（実行相と同じ {@link planFusions}）のうち、見積りが**融合後の形**で数えるステップを
+ * 「窓の先頭ノードの添字 → ステップ」で引く（ADR 0093 追記 2026-10-10）。
+ *
+ * 対象は行ブロック attention だけ。融合前の列で数えると、融合で実体化されないスコア・mask 加算後・
+ * softmax 後の全幅に束縛上限が当たり、実行できる形の見積りだけが例外になるため（ADR 0060 の需要形）。
+ * 他のルールは従来どおり融合前の列で数える（`unaccounted` の側）。
+ *
+ * MUST: 束縛上限は確保プログラムの上限検査と同じ値を渡す（行ブロックの枚数はこの値だけで決まる —
+ * 別の値で割ると、見積りだけが実行と違う枚数の一時を数える）。行ブロック枚数の強制
+ * （`rowBlockSplit` — テスト専用）は渡さない（{@link stateAttentionTemps} と同じ理由）。
+ * NOTE: `maxComputeWorkgroupsPerDimension` は dispatch 数の上限検査にしか効かず、バイト数を動かさない。
+ * 見積りは素のノードでも dispatch 数を検査しない（受ける欄も無い）ので、ここも検査しない値を渡す。
+ */
+const rowBlockAttentionSteps = (
+  nodes: readonly NodePlan[],
+  uses: ReadonlyMap<string, number>,
+  outputNames: ReadonlySet<string>,
+  bindingLimit: number,
+): ReadonlyMap<number, FusedStep> => {
+  const { steps } = planFusions(nodes, {
+    useCounts: uses,
+    outputNames,
+    limits: {
+      maxStorageBufferBindingSize: bindingLimit,
+      maxComputeWorkgroupsPerDimension: Number.MAX_SAFE_INTEGER,
+    },
+  });
+  const found = new Map<number, FusedStep>();
+  // 走査は窓ごとに「passthrough のノード → 融合ステップ」を並べて窓幅ぶん進むので、ステップ列の
+  // ノード数の累計は常に次の窓の先頭を指す。行ブロック attention の窓は passthrough を持たない
+  // （窓 = 鎖）ので、この累計がそのまま融合前の列での先頭になる。
+  let index = 0;
+  for (const step of steps) {
+    if (step.kind === "node") {
+      index += 1;
+      continue;
+    }
+    if (step.rule === "rowBlockAttention") {
+      // MUST: 鎖の末尾が融合ステップの出力と一致しなければ簿記の破れ（黙って別のノードを
+      // 置き換えると、見積りが実行と違う列を数える）。
+      if (nodes[index + step.nodeCount - 1]?.outputs[0]?.name !== step.outputName) {
+        throw new ExecutionError(
+          `見積り: 行ブロック attention '${step.outputName}' の窓が融合前の列 ${index} に一致しない`,
+        );
+      }
+      found.set(index, step);
+    }
+    index += step.nodeCount;
+  }
+  return found;
+};
+
+/**
+ * 行ブロック attention の融合ステップ 1 つの確保プログラム（recipe-builder の `#buildStep` /
+ * `#buildFused` の簿記面の写し）。
+ *
+ * 出力は単一出力の実体（`numel × 4`）、一時はルールが宣言した寿命のまま、解放は外部入力の延べ列
+ * （{@link FusedStep.ins}）。dispatch の読み書きは実行相と同じく**WGSL の storage 宣言**から採る
+ * （{@link parseStorageRoles} — 手書きの表を持たない）。
+ *
+ * MUST: 行ブロック attention 専用。写しているのはこのルールが使う形（全 dispatch が operands を
+ * 宣言する・常駐 scale を束ねない）だけで、他のルールの形（operands 省略時の既定の並び・
+ * `weightScale`）は写していない。他のルールを渡すと、見積りが実行と違う確保プログラムを
+ * 黙って数えるので、ルール名と形の両方で fail loudly にする。他のルールへ広げるときは、
+ * 写す形をここに足してから呼び手の対象を広げる。
+ */
+const fusedTransientStep = (
+  step: FusedStep,
+  uses: ReadonlyMap<string, number>,
+  outputNames: ReadonlySet<string>,
+): TransientStepSpec => {
+  const where = `見積り: 融合ルール '${step.rule}'（出力 '${step.outputName}'）`;
+  if (step.rule !== "rowBlockAttention") {
+    throw new ExecutionError(`${where} は融合後の形で数えられない（行ブロック attention 専用）`);
+  }
+  const output: TransientRef = { kind: "value", name: step.outputName };
+  const bindRef = (index: number): TransientRef => {
+    const name = step.binds[index];
+    // MUST: 範囲外の添字は fail loudly（実行相 recipe-builder の同じ門と揃える — 黙って名前の
+    // 無い参照を作ると、見積りだけが実行相の落ちる形を数として返す）。
+    if (name === undefined) {
+      throw new ExecutionError(`${where}: bind 添字 ${index} が宣言 ${step.binds.length} 本の外`);
+    }
+    return { kind: "value", name };
+  };
+  const dispatches = step.dispatches.map((dispatch): TransientDispatchSpec => {
+    if (dispatch.operands === undefined) {
+      throw new ExecutionError(
+        `${where} の dispatch '${dispatch.key}' が operands を宣言していない`,
+      );
+    }
+    const roles = parseStorageRoles(dispatch.wgsl());
+    const reads: TransientRef[] = [];
+    const writes: TransientRef[] = [];
+    dispatch.operands.forEach((operand, slot) => {
+      if (operand.kind === "weightScale") {
+        throw new ExecutionError(
+          `${where} の dispatch '${dispatch.key}' が常駐 scale を束ねている`,
+        );
+      }
+      const ref: TransientRef = operand.kind === "temp"
+        ? { kind: "temp", id: operand.id }
+        : operand.kind === "output"
+        ? output
+        : bindRef(operand.index);
+      // binding 0 は params なので、オペランドは binding 1 から並ぶ。
+      const binding = slot + 1;
+      if (roles.writes.has(binding)) writes.push(ref);
+      else if (roles.reads.has(binding)) reads.push(ref);
+      else {
+        throw new ExecutionError(
+          `${where} の dispatch '${dispatch.key}' の束縛 ${binding} に WGSL の` +
+            " storage 宣言が無い（読み / 読み書きの役割が採れない）",
+        );
+      }
+    });
+    return { reads, writes };
+  });
+  return {
+    outputs: [{
+      name: step.outputName,
+      kind: "alloc",
+      byteLength: numel(step.outputShape) * 4,
+      uses: uses.get(step.outputName) ?? 0,
+      pinned: outputNames.has(step.outputName),
+    }],
+    temps: step.temps,
+    dispatches,
+    releases: step.ins,
+  };
+};
+
+/**
  * 中間バッファ（ノード出力と融合ルールの一時）の GPU バイト数を、実行と**同じ計画関数**で数える
  * （ADR 0093 決定 4 — {@link planTransients} の共有。ADR 0070 決定 5「実行と同じ規則」を関数共有で
  * 満たす）。返るのは領域の総和（`totalBytes`）。
  *
- * MUST: 確保プログラムは融合前ノード列から組む（実行相はレシピ列から組む — 融合が畳む中間と
- * 融合ルールの一時は `unaccounted` の側）。dispatch は 1 ノード 1 本の近似（読み = `ins`・書き =
- * `outs`）で、usage scope の別領域規則が効く相手を実行相と同じ向きで与える。states 形 attention
- * だけは実行相の 3 dispatch（①qk が scores を書く → ②stats が scores を読み行統計を書く → ③pv が
- * 両方を読み出力を書く）を行ブロックごとに写す — 一時同士の重なりと領域の分かれ方が総和に効くため。
+ * MUST: 確保プログラムは融合前ノード列から組み、行ブロック attention の窓だけを実行相と同じ
+ * 融合ステップに置き換える（ADR 0093 追記 2026-10-10 — {@link rowBlockAttentionSteps}）。他の融合が
+ * 畳む中間と融合ルールの一時は `unaccounted` の側。素のノードの dispatch は 1 ノード 1 本の近似
+ * （読み = `ins`・書き = `outs`）で、usage scope の別領域規則が効く相手を実行相と同じ向きで与える。
+ * states 形 attention だけは実行相の 3 dispatch（①qk が scores を書く → ②stats が scores を読み
+ * 行統計を書く → ③pv が両方を読み出力を書く）を行ブロックごとに写す — 一時同士の重なりと領域の
+ * 分かれ方が総和に効くため。
  * MUST: 上限超過（slot 実寸 > 束縛上限）は計画関数が**全件列挙して**落とす（ADR 0093 決定 5）。
  * 見積りの入口でも同じ検査が走るので、「この device では中間が束ねられない」形は数を返さず
- * fail loudly になる。上限は `limit`（`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら
- * WebGPU core 既定）で、領域の上限は `maxBufferSize`（`EstimateOptions.maxBufferSize`）。後者が
+ * fail loudly になる。検査が当たるのは融合後に実際に束縛するバッファ（行ブロック attention では
+ * 1 枚ぶんの一時）で、融合で実体化されない中間には当てない。上限は `limit`
+ * （`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら WebGPU core 既定）で、領域の上限は
+ * `maxBufferSize`（`EstimateOptions.maxBufferSize`）。後者が
  * 無指定のときだけ束縛上限と core 既定の大きいほうで埋める（束縛上限 ≤ `maxBufferSize` は仕様の
  * 不変条件）。渡された granted 値を使うのは、first-fit の領域の割れ方が上限で変わり、実行相
  * （granted 値で計画する）と総和が食い違うため（ADR 0093 決定 4）。
@@ -636,7 +777,8 @@ const transientSlotBytes = (
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
   const aliases = planAliases(nodes);
-  const program: TransientStepSpec[] = nodes.map((node) => {
+  const bindingLimit = limit ?? CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
+  const nodeStep = (node: NodePlan): TransientStepSpec => {
     const isAlias = aliases.has(node);
     const outputs: TransientOutputSpec[] = node.outputs.map((out) => ({
       name: out.name,
@@ -697,8 +839,19 @@ const transientSlotBytes = (
     }
     // 別名も入力を消費する（`uses` に数えられている）ので、解放は全ノードで入力の延べ列。
     return { outputs, temps, dispatches, releases: node.node.ins };
-  });
-  const bindingLimit = limit ?? CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
+  };
+  const fused = rowBlockAttentionSteps(nodes, uses, outputNames, bindingLimit);
+  const program: TransientStepSpec[] = [];
+  for (let index = 0; index < nodes.length;) {
+    const step = fused.get(index);
+    if (step === undefined) {
+      program.push(nodeStep(nodes[index]));
+      index += 1;
+      continue;
+    }
+    program.push(fusedTransientStep(step, uses, outputNames));
+    index += step.nodeCount;
+  }
   return planTransients(program, {
     maxBufferSize: maxBufferSize ?? Math.max(CORE_TRANSIENT_LIMITS.maxBufferSize, bindingLimit),
     maxStorageBufferBindingSize: bindingLimit,

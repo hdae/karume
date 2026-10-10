@@ -445,8 +445,11 @@ initializer にだけ掛かり、食い違えば重みを取る前に `prepareCo
 ## 見積り（`PreparedModel.estimate` / `estimateGraphMemory`）の `workspaceBytes` は近似（非勘定は `unaccounted` が列挙する）
 
 `scenarios[].workspaceBytes` は融合**前**のノード列に対する生存区間シミュレーションで、実構築が
-畳む / 割る形は勘定に入らない。非勘定は `unaccounted` 欄が逐語で列挙する — ①融合が畳んで消す
-中間と融合ルールが宣言するノード内一時 ②states 形**でない** attention のノード内一時（スコアの
+畳む / 割る形は勘定に入らない。例外は**行ブロック attention**（分解 attention の 9 ノード窓 — ADR
+[0060](decisions/0060-row-block-attention.md)）で、実行相と同じ融合計画が掴んだ窓は融合後の形（行ブロック 1 枚ぶんの
+一時と出力）で数え、束縛上限の検査もそのバッファにだけ当たる（ADR [0093](decisions/0093-transient-liveness-packing.md)
+追記 2026-10-10）。非勘定は `unaccounted` 欄が逐語で列挙する — ①行ブロック attention 以外の融合が畳んで消す
+中間とその融合ルールが宣言するノード内一時 ②states 形**でない** attention のノード内一時（スコアの
 行ブロックと i8a8 の量子化中間）と linear i8a8 の量子化中間 ③params バッファ
 ④`queue.writeBuffer` の実装 staging ⑤退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot
 backing は flush 後の後始末まで生きる）。**states 形 attention のスコア S と行統計は勘定に

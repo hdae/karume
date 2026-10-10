@@ -33,6 +33,7 @@ import { planWeightBuffers, planWeightResidency } from "../src/runtime/weight-re
 import { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "../src/runtime/session-types.ts";
 import {
   bothScenarios,
+  decomposedAttentionGraph,
   f16Zeros,
   openGraph,
   stateAttentionGraph,
@@ -1227,6 +1228,37 @@ Deno.test("融合が掛からない形では estimator の中間総量と実行�
     runScenario(model.estimate()).workspaceBytes,
     transientPlan.totalBytes,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 分解 attention（行ブロック attention の融合 — ADR 0060）
+// ---------------------------------------------------------------------------
+
+// スコア 1 本 = 4×2048×4200×4 = 137,625,600B > 束縛上限 128 MiB（WebGPU core 既定）。
+const LARGE_SCORES = { heads: 4, queries: 2048, keys: 4200, headDim: 8 } as const;
+
+describe("分解 attention の中間（融合後に束縛するバッファで数える）", () => {
+  describe("融合前のスコアが束縛上限を超え、行ブロック attention に融合される形", () => {
+    it("例外を投げず、行ブロック 1 枚ぶんの一時と出力で中間を数える", () => {
+      const scenario = runScenario(openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate());
+      // 1 行 = 4×4200×4 = 67,200B → 上限に 1,997 行入るので 2 枚（1024 + 1024 行）に等分。
+      // 一時 S / mask 加算後 / P は各 4×1024×4200×4 = 68,812,800B で、同時生存は 2 本まで
+      // （読む側と書く側は同じ dispatch なので別領域 — 2 枚目は 1 枚目の区間を配り直す）。
+      // 出力 y = 4×2048×8×4 = 262,144B は P と同じ dispatch で書かれるので P と別領域
+      // （mask 加算後の領域の 256B 整列した後ろ）。
+      assertEquals(scenario.workspaceBytes, 68_812_800 * 2 + 262_144);
+    });
+  });
+
+  describe("融合が成立しない形で中間が束縛上限を超えるとき", () => {
+    it("従来どおり上限超過を全件列挙して fail loudly（警告に落とさない）", () => {
+      assertThrows(
+        () => openGraph(decomposedAttentionGraph(LARGE_SCORES, true)).estimate(),
+        ExecutionError,
+        "'s3_alias' 137625600B / 'masked' 137625600B / 'p4' 137625600B",
+      );
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
