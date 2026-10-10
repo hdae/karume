@@ -137,6 +137,15 @@ barrel（`@karume/models`）はさらに全家族を畳んだ `KARUME_SOURCES` �
 自分で見て `break` する（会話は「成功した run のぶんだけ」進み、最後の token は未 commit の
 frontier に残る = `chat` の停止文字列と同じ状態になる）。
 
+## sampler: top-k は同率の境界で HF と候補集合が違う（by-design）
+
+`SamplerSpec.topK`（`packages/models/src/generation/sampler.ts`）は、同率なら id の小さい側を残して
+**厳密に k 件**へ絞る。HF の `TopKLogitsWarper` は k 番目と同じ値の候補を全て残すので、k 番目の
+境界に同率が並ぶ logits では候補集合と確率が違う。id の小さい側を残すのは greedy（`argmax` の
+先勝ち）と同じ tie-break で、`topK: 1` が温度に依らず greedy と一致する側を採るため。HF の
+sampling とは RNG が別物で token 列の parity をそもそも取らない（ADR
+[0083](decisions/0083-generation-api-surface.md) 決定 7）ので、HF に合わせる変更はしない。
+
 ## params キャッシュは Session 寿命で無界（by-design）
 
 params バッファの内容アドレスキャッシュ（`RecipeBuilder.#writeParams`）には追い出しが無く、
@@ -1305,8 +1314,10 @@ DiT ループは既定で GPU 常駐（[ADR 0054](decisions/0054-resident-loop-a
 - **seed は上流と互換でない**（torch generator のビット再現は非目標 — ADR 0048 決定 5）。
   同 seed → 同波形の自己決定論のみ保証し、torch との突合は `initialNoise` 注入口で行う。
 - 前処理の `strip` は JS の `String.prototype.trim` で、Python `str.strip` とは空白集合の
-  端（U+001C〜1F・U+0085 は Python のみ / U+FEFF は JS のみ）が違う。実用のテキスト入力では
-  発生しない差として受容する（golden の normalize 33 ケースはこの領域を含まない）。
+  端（U+001C〜1F・U+0085 は Python のみ / U+FEFF は JS のみ）が違う。caption がこれらの文字だけの
+  ときは、caption の有無（caption 条件と CFG の分岐）まで上流と反転する（U+0085 だけなら上流は
+  「なし」・karume は「あり」、U+FEFF だけならその逆）。実用のテキスト入力では発生しない差として
+  受容する（golden の normalize 33 ケースはこの領域を含まない）。
 - WAV の読み（/32768）と書き（×32767）は非対称のまま固定（それぞれ外部との一致が正 —
   `src/audio/wav.ts` の MUST。往復は 1LSB 級でずれる）。
 - **要求ノブ（`codecTileFrames` / `seed` / `durationSeconds`）は呼び出し時点で検査する**（段の
@@ -1775,6 +1786,11 @@ ADR [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)）— を超え
   `AbortSignal` のいずれも）。token を 1 つも受け取っていない中断（= prefill の途中）は prompt が
   途中まで会話へ入った状態で、`prefill` イベントの `chunk` が commit 済み chunk 数を表す。続きを
   送るか sequence を捨てるかは呼び手が決める。
+  - **最終 prefill の後に届いた中断でも token が 1 個届く**（中断は run を発行する前の段の境目でだけ
+    見る — ADR 0083 決定 5）。最終 prefill の run は既に logits を返しているので、その `prefill`
+    イベントの後に中断しても、最初の token は計算済みの logits から抽選されて届き、新しい run は
+    走らない。`maxNewTokens: 1` ならそのまま `max-tokens` で正常に完了し、残りがあれば次の
+    decode の run の前で `aborted` になる（`generation_sequence_test.ts` が固定）。
 - **要求は発行時のスナップショットで走る**（`generate` / `Gemma4Pipeline.chat` — ADR 0083 追記
   2026-09-02）。`prompt` 配列・`maxNewTokens` / `signal`・sampler の指定（`logitBias` の中身まで）は
   発行の同期部分で写されるので、返った列を汲み始めた後に要求 object を書き換えても**走行中の

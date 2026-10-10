@@ -461,6 +461,53 @@ Deno.test("GenerationSequence: 発行済みの signal は 1 本も run を出さ
   assertEquals(await stream.done, { reason: "aborted", tokens: 0 });
 });
 
+Deno.test("GenerationSequence: 最終 prefill の後に届いた中断でも、計算済みの logits から token が 1 個届く", async (t) => {
+  // 中断は run を発行する前（段の境目）にだけ見る（ADR 0083 決定 5）。最終 prefill の run は
+  // 既に logits を返しているので、その後に届いた中断でも最初の token は抽選されて届き、新しい
+  // run は走らない（by-design — docs/limitations.md「生成 sequence」節）。
+  for (
+    const [name, maxNewTokens, done] of [
+      // 残りが無ければ中断を観測する境目が来ないので、正常完了で閉じる。
+      ["maxNewTokens 1", 1, { reason: "max-tokens", tokens: 1 }],
+      // 残りがあれば次の decode の run の前で中断が効く。
+      ["maxNewTokens 3", 3, { reason: "aborted", tokens: 1 }],
+    ] as const
+  ) {
+    await t.step(name, async () => {
+      const fake = fakeSession({ tokens: [5, 6, 7] });
+      const sequence = await createGenerationSequence({
+        session: fake.session,
+        program: programOf(fake),
+      });
+      const controller = new AbortController();
+      const reason = new Error("最終 prefill の後に止めた");
+      const stream = sequence.generate({
+        prompt: [1, 2],
+        maxNewTokens,
+        signal: controller.signal,
+      });
+      const events: GenerationEvent[] = [];
+      let caught: unknown;
+      try {
+        for await (const event of stream) {
+          events.push(event);
+          if (event.kind === "prefill" && event.chunk === event.chunks) controller.abort(reason);
+        }
+      } catch (error) {
+        caught = error;
+      }
+      assertEquals(tokenIds(events), [5]);
+      assertEquals(await stream.done, done);
+      assert(
+        done.reason === "aborted" ? caught === reason : caught === undefined,
+        `${name}: 例外の運び方が違う（${String(caught)}）`,
+      );
+      // 中断の後に run は 1 本も出ていない（最終 prefill の 1 本だけ）。
+      assertEquals(fake.calls.length, 1);
+    });
+  }
+});
+
 Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本も出さずに閉じる", async () => {
   // 待っている間に abort されたリクエストは、順番が回ってきても**何も判定せずに**閉じる。
   // 予算超過を先に返すと「止めたのに容量エラーが出た」になり、呼び手は自分の中断を識別できない。
