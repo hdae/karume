@@ -531,7 +531,20 @@ export const openAsset = async (
   // 増えるたびに同じ不変条件を書き直すことになる。
   return {
     cost: reader.cost,
-    read: async (offset, length, readOptions) =>
-      assertTightView(await reader.read(offset, length, readOptions), ref.path),
+    read: async (offset, length, readOptions) => {
+      // MUST: 宣言 size の境界もここで見る（この面の約束 — 上の doc）。取得元に任せると、HF の
+      // 取得層は宣言 size を読み出しの境界に使わないので、同じ sha256 に短い size を宣言した参照が
+      // warm エントリを開いたとき宣言の外（実体の残り）が読め、宣言で拒否するローカルと割れる。
+      if (
+        !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 ||
+        offset + length > ref.size
+      ) {
+        throw new Error(
+          `hub: ${ref.path} の区間 [${offset}, ${offset + length}) が不正` +
+            `（宣言 size ${ref.size} — 非負整数で size に収まる区間だけを読める）`,
+        );
+      }
+      return assertTightView(await reader.read(offset, length, readOptions), ref.path);
+    },
   };
 };

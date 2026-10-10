@@ -1533,6 +1533,69 @@ Deno.test("openAsset: 越境参照は宣言された (repo, revision) の口で�
   assertEquals(await reader.read(0, ref.size), foreignBytes, "自リポのバイト列が読めている");
 });
 
+Deno.test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読めない", async (t) => {
+  // 区間読み口が見る境界は**宣言 size**（`openAsset` の doc）。HF の取得層は宣言 size を読み出しの
+  // 境界に使わないので、同じ sha256 に短い size を宣言した参照が warm エントリを開くと、宣言の外
+  // （実体の残り）が読めてしまう — ローカルは宣言 size で拒否するので取得元で挙動が割れる。
+  const served = serveAll();
+  const lookup = (path: string): Uint8Array<ArrayBuffer> => {
+    const bytes = served.get(path);
+    if (bytes === undefined) throw new Error(`test-directory: ${path} を読めない`);
+    return bytes;
+  };
+  const adapter: DirectoryAdapter = {
+    readFile: (path) => Promise.resolve(new Uint8Array(lookup(path))),
+    readFileRange: (path, offset, length) =>
+      Promise.resolve(new Uint8Array(lookup(path).subarray(offset, offset + length))),
+  };
+  /** 宣言の外へ出る区間（宣言 size ちょうどから 1 バイト・負の offset・整数でない length）。 */
+  const outside = (size: number): readonly (readonly [number, number])[] => [
+    [size, 1],
+    [size - 1, 2],
+    [-1, 1],
+    [0, 0.5],
+  ];
+
+  for (const warm of [false, true]) {
+    await t.step(`HF・${warm ? "warm" : "cold"}・宣言どおりの参照`, async () => {
+      const { mock, caches, loaded, ref } = await openable();
+      const access = { fetch: mock.fetch, caches };
+      if (warm) await prefetchAssets(loaded, [ref], access);
+      const reader = await openAsset(loaded, ref, access);
+      assert(reader !== undefined);
+      for (const [offset, length] of outside(ref.size)) {
+        await assertRejects(() => reader.read(offset, length), Error, "宣言 size");
+      }
+    });
+  }
+
+  await t.step("HF・warm・同じ sha256 に短い size を宣言した参照", async () => {
+    const { mock, caches, loaded, ref } = await openable();
+    const access = { fetch: mock.fetch, caches };
+    await prefetchAssets(loaded, [ref], access);
+    const shorter: FileRef = { ...ref, size: ref.size - 1 };
+    const reader = await openAsset(loaded, shorter, access);
+    assert(reader !== undefined);
+    await assertRejects(() => reader.read(shorter.size, 1), Error, "宣言 size");
+  });
+
+  for (const shrink of [0, 1]) {
+    await t.step(
+      `ローカル・${shrink === 0 ? "宣言どおり" : "短い size を宣言"}の参照`,
+      async () => {
+        const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }));
+        const ref = selectionFiles(local.manifest)["tokenizer"];
+        const declared: FileRef = { ...ref, size: ref.size - shrink };
+        const reader = await openAsset(local, declared);
+        assert(reader !== undefined);
+        for (const [offset, length] of outside(declared.size)) {
+          await assertRejects(() => reader.read(offset, length), Error, "宣言 size");
+        }
+      },
+    );
+  }
+});
+
 Deno.test("openAsset: 温め済みの口を開いている最中の中断でも読み口を返さない", async () => {
   // warm cache のヒットは network に出ない＝取得元の signal 監視が効かない区間なので、開いた後に
   // 中断を見ないと「取り消したのに読み口が返る」（loadManifest / prefetchAssets と不揃い）。
