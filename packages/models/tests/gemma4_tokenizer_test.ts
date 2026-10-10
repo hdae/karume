@@ -19,6 +19,7 @@
 // 見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。GPU は使わない。
 
 import { assertEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { GemmaTokenizer } from "../src/gemma/text/tokenizer.ts";
@@ -294,6 +295,15 @@ for (
     assertEquals(fixture.spec.preTokenizer, "split-space-merged-with-previous");
     assertEquals(fixture.spec.decoder, "metaspace-byte-fallback-fuse");
     assertEquals(tokenizer.postProcessor, fixture.spec.postProcessor);
+  });
+
+  Deno.test(`${family} 本文の門: 対にならないサロゲートは入力の誤り（ModelInputError）`, () => {
+    // 呼び手が本文を直せば解消する誤りなので、内部障害（素の Error）に見せない（ADR 0107）。
+    // chat の描画も encode を通るので、ここ 1 箇所で chat まで覆う。
+    for (const text of ["\uD800", "a\uDC00b"]) {
+      assertThrows(() => tokenizer.encode(text), ModelInputError, "サロゲート");
+      assertThrows(() => tokenizer.encodeWithSpecialTokens(text), ModelInputError, "サロゲート");
+    }
   });
 
   const seriesBytes = await readSeriesAsset(series);

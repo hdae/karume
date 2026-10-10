@@ -24,6 +24,7 @@
 
 import { splitAddedTokens } from "../../text/added-tokens.ts";
 import { bpeEncode } from "../../text/bpe.ts";
+import { assertEncodableText } from "../../text/code-points.ts";
 import {
   detokenize,
   type DetokenizerSource,
@@ -95,8 +96,12 @@ export class GemmaTokenizer {
    * `tokenizer.encode(text, add_special_tokens=False)` と同じ id 列。
    *
    * post_processor は通さない — `<bos>` の所有者は chat 関数（ADR 0084 決定 5）。
+   *
+   * 対にならないサロゲートは `ModelInputError`（呼び手が本文を直せば解消する — ADR 0107 決定 2）。
+   * 受けるのは呼び手の本文（chat の描画を含む）だけなので、入口のここで送出型を上げる。
    */
   encode(text: string): number[] {
+    assertEncodableText(text, "Gemma の本文");
     const ids: number[] = [];
     for (const chunk of splitAddedTokens(text, this.#added)) {
       if (chunk.added) {
