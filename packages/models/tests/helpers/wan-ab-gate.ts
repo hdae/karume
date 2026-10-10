@@ -20,7 +20,7 @@
  * 書き換えない。
  */
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, parseManifest, type SessionSpec } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import type { GpuContext, SessionDiagnostics, SessionOptions } from "@karume/runtime";
@@ -115,7 +115,8 @@ export type WanAbSubject = {
     /**
      * I2V の条件画像（Wan2.2 だけ — 省けば T2V）。寸法は上の `width` / `height` で明示する（画像の縦横比での選択に
      * 預けない — 帯の前提の寸法が画像で黙って動かないように）。2.1 の pipeline に渡すと `generate` が
-     * `ModelInputError` で拒む（fail loudly — 型は 2 世代で共有の 1 本）。
+     * `ModelInputError` で拒む（fail loudly — 型は 2 世代で共有の 1 本）。渡すと各観測で encoder の 3 グラフの run が
+     * 届いたことを見る（画像が黙って落ちて T2V で回る退行を、帯と census の外で掴む）。
      */
     readonly image?: WanTi2vGenerateRequest["image"];
     /** 条件画像の寸法の合わせ方（`image` を渡したときだけ — 省けば公式の `"crop"`）。 */
@@ -147,6 +148,8 @@ const observeStep1 = async (
 ): Promise<WanStep1Observation> => {
   const where = `${quant} / ${frames} フレーム / seed ${seed}`;
   const passes: SessionDiagnostics["lastRunPipelines"][] = [];
+  /** 診断が届いた run の component（I2V の条件画像が encoder の段まで届いたことの検査）。 */
+  const ran = new Set<string>();
   try {
     await using pipeline = await subject.fromPretrained(source, {
       gpu,
@@ -156,6 +159,7 @@ const observeStep1 = async (
       // 文脈も別の値になる — 帯を採った前提が崩れる）。
       textEncoder: "precomputed",
       onRunDiagnostics: (component, diagnostics) => {
+        ran.add(component);
         if (component === "transformer") passes.push(diagnostics.lastRunPipelines);
       },
     });
@@ -178,6 +182,16 @@ const observeStep1 = async (
         }),
     );
     assertEquals(passes.length, PASSES_TO_STEP1, `${where}: step 1 までの DiT のパス数`);
+    if (subject.request?.image !== undefined) {
+      // 条件画像が要求から落ちて T2V の経路で回る退行では、両席とも T2V の潜在になって帯（relRMS）は T2V の値で緑のまま
+      // 通り、census も DiT しか見ないので掴めない。encoder の 3 グラフの run が届いたことで、I2V の経路を通ったことを縛る。
+      for (const component of ["vae_encoder_pre", "vae_encoder_attn", "vae_encoder_post"]) {
+        assert(
+          ran.has(component),
+          `${where}: 条件画像を渡したのに ${component} の run が届いていない`,
+        );
+      }
+    }
     return { latent, passes };
   } finally {
     // 次の観測の pipeline の確保の前に、この観測の確保の解放を待つ（B570 — settleReleases）。

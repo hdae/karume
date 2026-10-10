@@ -55,10 +55,13 @@
  *   どちらも参照席の行を持つ。
  * - 縦長 704×1280（参照席・`boxing-cats` の横長の元画像を明示の縦長へ crop・seed 42・CPU の参照は無い — 完走・非有限 0・
  *   sha256 の環境行）。
- * - 50 ステップの通し（別の `Deno.test` — 下の節）。
+ * - 50 ステップの通し（別の `Deno.test` — 下の節・参照席と実用席の sha256 の環境行）。
  *
  * opt-in の行は opt-in のときだけ参照門に登録する（既定のレーンでは回らないので、登録すると行が無い機の参照門を赤にする — T2V の
- * 121 フレーム・50 ステップと同じ扱い）。2 ステップの opt-in を回すコマンド（50 ステップを同じプロセスに載せない）:
+ * 121 フレーム・50 ステップと同じ扱い）。opt-in の変数は 2 ステップの残りと 50 ステップで 1 つ（T2V は 50 ステップに別の変数
+ * `KARUME_WAN_TI2V_FULL_PIPELINE` を持つ — 形が違う）なので、2 ステップの opt-in だけを回すときも 50 ステップの 2 行が登録される:
+ * その行が無い機では読み込み時の警告が 50 ステップの 2 ID を名指しし、参照門は 2 ステップの行が揃っていても赤になる（50 ステップの
+ * 行を作るまでの既知の振る舞い）。2 ステップの opt-in を回すコマンド（50 ステップを同じプロセスに載せない）:
  *
  * ```
  * KARUME_WAN_TI2V_I2V_FULL=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_i2v_pipeline_test.ts --filter "I2V 通し 2 ステップ"
@@ -69,8 +72,17 @@
  * 事前計算の経路・`boxing-cats` の画像とプロンプト・seed 42・shift 5.0・1280×704（画像の縦横比で選ぶ）・33 フレーム・manifest の
  * 既定の 50 ステップを、参照席と実用席で 1 本ずつ回し、全フレームの PNG・一覧図・RGB の実物・段ごとの所要・段の境目の VRAM を
  * `outputs/verify/<環境キー>/<日付>_wan-ti2v-i2v-pipeline-full/` に書き、非有限 0 と device lost が無いことを見る（利用者の視認の
- * 素材）。先頭フレームと条件画像の差は記録だけ（門ではない）。sha256 の環境行は持たない（段 9b で決めた sha 行の列挙に
- * 入っていない — 実物の RGB とその sha256 は結果の席に残す）。
+ * 素材）。先頭フレームと条件画像の差は記録だけ（門ではない）。sha256 の環境行は 2 本とも持つ（参照席は参照行・実用席は
+ * 実用行 — T2V の 50 ステップと同じ扱い。段 9b では記録だけにしていて、段 9d で実用席の数値の門〈自機 A/B 門の I2V の
+ * ケース — `e2e_wan_ti2v_ab_test.ts`〉と一緒に行を持たせた — ADR 0121 段 9d）。実用席は突合と書き込みの前に、同じ走行の参照席の
+ * 実物と 1 bit 以上違うこと（床 — 2 ステップの実用行と同じ・ADR 0110 決定 5）を見る（T2V の 50 ステップはこの床を持たない）。
+ * 参照門への登録は opt-in のときだけ（上の「opt-in」の節）。行が無い機は、このテストはそのケースの sha の突合を飛ばして
+ * （実物と実測の sha は残す）緑で終わり、赤になるのは参照門のテスト（`参照門: …` — 下のコマンドの `--filter` では回らない。
+ * `--filter "参照門"` を同じ env で回すか、フィルタなしの走行）。行は `KARUME_REFERENCE=write` を付けて同じコマンドで作る:
+ *
+ * ```
+ * KARUME_WAN_TI2V_I2V_FULL=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_i2v_pipeline_test.ts --filter "50 ステップ"
+ * ```
  *
  * ## 観測と故障注入の口（製品のコードに口を足さない）
  *
@@ -164,7 +176,13 @@ import { WAN_VAE_LATENT_INPUT } from "../src/wan/vae-chunks.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
-import { filePresent, WAN_TI2V_SERIES_NAME } from "./helpers/wan-ti2v-dit.ts";
+import { filePresent } from "./helpers/wan-ti2v-dit.ts";
+import {
+  WAN_I2V_SOURCE_SHAPE,
+  WAN_I2V_STEPS_GENERATE,
+  WAN_I2V_STEPS_ROOT,
+  wanI2vStepsFixtureUrl,
+} from "./helpers/wan-i2v-fixture.ts";
 import { WAN_I2V_ENCODER_BAND, WAN_I2V_IMAGE_SHA256 } from "./helpers/wan-i2v-image.ts";
 import {
   readWanTi2vDistributionManifestText,
@@ -258,13 +276,8 @@ const LATENT_SHAPE: readonly [number, number, number, number] = [48, 3, 44, 80];
 const CONDITION_SHAPE: readonly number[] = [48, 1, 44, 80];
 /** 条件のトークン数（先頭の潜在フレームのトークン `(44/2)·(80/2)` — 参照のメタ `condition_tokens`）。 */
 const CONDITION_TOKENS = 880;
-/** 参照に埋め込まれた元画像の形（`inputs/wan-i2v/<名前>-832x480.png` の画素 — HWC）。 */
-const SOURCE_SHAPE: readonly number[] = [480, 832, 3];
 /** 参照の寸法の合わせ方（公式 — 要求では省いて製品の既定に乗せ、ID には綴る）。 */
 const FIT = "crop";
-
-/** 参照（配布しない golden）の置き場 — i8 の DiT の系列の根（T2V の参照と同じ根・接頭辞が別）。 */
-const STEPS_ROOT = new URL(`../../../outputs/series/${WAN_TI2V_SERIES_NAME}/`, import.meta.url);
 
 /** opt-in（モジュール doc「opt-in」— 2 ステップの残りの参照ケース・縦長・50 ステップ）。 */
 const I2V_FULL = Deno.env.get("KARUME_WAN_TI2V_I2V_FULL") === "1";
@@ -346,9 +359,6 @@ const FULL_CASES: readonly { readonly id: string; readonly quant: string }[] = [
   quant,
 }));
 
-const GENERATE_COMMAND =
-  "cd tools/export-recipes && uv run --group wan --inexact python -m wan.ti2v_i2v_few_step_ref";
-
 /**
  * 参照を作った埋め込み資産（2.1 の系列のファイル — ADR 0121 決定 9）。ホストの自己整合はこのバイトの sha を参照のメタ
  * `text_embeds_sha256` と突き合わせる（T2V の通しの e2e と同じ扱い — 配布形の写しは同じ系列のファイル）。
@@ -358,9 +368,6 @@ const TEXT_EMBEDS_URL = new URL(
   import.meta.url,
 );
 
-const fixtureUrl = (name: string): URL =>
-  new URL(`pipeline_steps_i2v.${name}.safetensors`, STEPS_ROOT);
-
 /** 配布形の manifest（無ければ通しの照合を SKIP する — 中身はこの e2e では読まない）。 */
 const DIST_PRESENT = (await readWanTi2vDistributionManifestText()) !== undefined;
 if (!DIST_PRESENT) {
@@ -369,12 +376,12 @@ if (!DIST_PRESENT) {
       `組み立て: ${WAN_TI2V_ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
   );
 }
-const FIXTURES_PRESENT = CASES.map(({ name }) => filePresent(fixtureUrl(name)));
+const FIXTURES_PRESENT = CASES.map(({ name }) => filePresent(wanI2vStepsFixtureUrl(name)));
 const ANY_FIXTURE = FIXTURES_PRESENT.some(Boolean);
 if (!ANY_FIXTURE) {
   console.warn(
-    `[karume] ${STEPS_ROOT.pathname} に I2V の 2 ステップの参照（pipeline_steps_i2v.*）が無いため Wan2.2 の I2V の通し` +
-      `（条件画像も参照から読む）とホストの自己整合を SKIP する。生成（CPU で約 42 分・RAM の山 約 24 GiB）: ${GENERATE_COMMAND}`,
+    `[karume] ${WAN_I2V_STEPS_ROOT.pathname} に I2V の 2 ステップの参照（pipeline_steps_i2v.*）が無いため Wan2.2 の I2V の通し` +
+      `（条件画像も参照から読む）とホストの自己整合を SKIP する。生成（CPU で約 42 分・RAM の山 約 24 GiB）: ${WAN_I2V_STEPS_GENERATE}`,
   );
 }
 
@@ -390,7 +397,7 @@ Deno.test({
     assertEquals(
       FIXTURES_PRESENT,
       FIXTURES_PRESENT.map(() => true),
-      `${STEPS_ROOT.pathname} の欠け`,
+      `${WAN_I2V_STEPS_ROOT.pathname} の欠け`,
     );
   },
 });
@@ -440,8 +447,12 @@ const readFixture = async (url: URL): Promise<Fixture> => {
 
 /** 参照に埋め込まれた元画像（RGB8・HWC — 製品の `image` に渡す形）。 */
 const sourceImageOf = (fixture: Fixture): Rgb8Image => {
-  assertEquals(fixture.shape("source"), SOURCE_SHAPE, "元画像の形");
-  return { width: SOURCE_SHAPE[1], height: SOURCE_SHAPE[0], data: fixture.bytes("source") };
+  assertEquals(fixture.shape("source"), WAN_I2V_SOURCE_SHAPE, "元画像の形");
+  return {
+    width: WAN_I2V_SOURCE_SHAPE[1],
+    height: WAN_I2V_SOURCE_SHAPE[0],
+    data: fixture.bytes("source"),
+  };
 };
 
 /** 差の要約（比 = 最大絶対差 ÷ 参照の最大絶対値）。 */
@@ -1016,7 +1027,7 @@ Deno.test({
       "製品の条件マスク",
     );
     for (const { name, role } of CASES) {
-      const fixture = await readFixture(fixtureUrl(name));
+      const fixture = await readFixture(wanI2vStepsFixtureUrl(name));
       assertEquals(fixture.meta("role"), role, `${name}: 役割`);
       assertEquals(
         fixture.meta("text_embeds_sha256"),
@@ -1190,7 +1201,7 @@ Deno.test({
     /** 既定のケースの参照（故障注入と実用席・縦長が読む）。 */
     let defaultFixture: Fixture | undefined;
     const defaultFixtureOf = async (): Promise<Fixture> =>
-      defaultFixture ??= await readFixture(fixtureUrl(DEFAULT_CASE));
+      defaultFixture ??= await readFixture(wanI2vStepsFixtureUrl(DEFAULT_CASE));
     /** 既定のケースの要求（実用席も同じ要求 — 席だけが違う）。 */
     const defaultRequest = async (
       prompts: readonly WanPrompt[],
@@ -1234,7 +1245,7 @@ Deno.test({
           name: `${id}（${role}${optIn ? "・opt-in" : ""}）`,
           ignore: optIn && !I2V_FULL,
           fn: async () => {
-            const fixture = await readFixture(fixtureUrl(name));
+            const fixture = await readFixture(wanI2vStepsFixtureUrl(name));
             assertEquals(fixture.meta("role"), role, `${name}: 役割`);
             // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す — T2V と同じ）。
             const prompt = textOf(
@@ -1718,7 +1729,7 @@ Deno.test({
 Deno.test({
   name:
     "Wan2.2 I2V 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_I2V_FULL=1）: 1280×704・33 フレーム（参照席と実用席）が" +
-    "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図",
+    "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
   ignore: !I2V_FULL || !DIST_PRESENT || !GPU_AVAILABLE || !ANY_FIXTURE,
   fn: async (t) => {
     await assertRunningAdapter();
@@ -1730,9 +1741,12 @@ Deno.test({
     });
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     try {
-      const fixture = await readFixture(fixtureUrl(DEFAULT_CASE));
+      const fixture = await readFixture(wanI2vStepsFixtureUrl(DEFAULT_CASE));
+      /** 参照席の実物（RGB のバイト列）の sha256 — 同じ要求の実用席の床の比べる相手（2 ステップの実用行と同じ床）。 */
+      let referenceRgbSha: string | undefined;
       for (const { id, quant } of FULL_CASES) {
         await t.step(id, async () => {
+          let settlement: ReferenceSettlement | undefined;
           try {
             await using pipeline = await WanTi2vPipeline.fromPretrained(
               denoDirectory(WAN_TI2V_DIST_ROOT),
@@ -1776,19 +1790,38 @@ Deno.test({
                 fullResults.artifact(`${id}-sheet.png`),
                 await encodePng(sheet.rgba, sheet.width, sheet.height),
               );
-              const bytes = rgbBytes(video);
-              await Deno.writeFile(fullResults.artifact(`${id}.rgb`), bytes);
               console.log(`[wan-ti2v-i2v-pipeline] PNG: ${fullResults.dir.pathname}`);
-              return {
-                status: "pass",
-                actual: await sha256Hex(bytes),
+              const bytes = rgbBytes(video);
+              const sha = await sha256Hex(bytes);
+              if (quant === WAN_TI2V_REFERENCE_QUANT) {
+                referenceRgbSha = sha;
+              } else {
+                // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 席の `session` が Session に届かない
+                // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として凍結しないよう、突合と書き込みの前に落とす。
+                if (referenceRgbSha === undefined) {
+                  throw new Error(
+                    `${id}: 同じ要求の参照席の実物が無い（参照席の 50 ステップが回っていない — 床を確かめられない）`,
+                  );
+                }
+                assert(
+                  sha !== referenceRgbSha,
+                  `${id}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+                );
+              }
+              const outcome = await settleOrObserve(references, fullResults, {
+                id,
                 artifact: `${id}.rgb`,
-                note: notes.join(" / "),
-              };
+                bytes,
+              });
+              settlement = outcome.settlement;
+              return { ...outcome.fields, note: notes.join(" / ") };
             });
           } finally {
             // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
             await settleReleases(gpu);
+          }
+          if (settlement?.check.status === "fail") {
+            throw new Error(referenceMismatchMessage(id, settlement, references));
           }
         });
       }
@@ -1800,14 +1833,15 @@ Deno.test({
 });
 
 /**
- * 参照門に登録するケース（回せるものだけ — 全ケースが参照〈条件画像も参照から読む〉と配布形を要る）。opt-in のケースは
- * opt-in のときだけ登録する（既定のレーンでは回らないので、登録すると行が無い機の参照門を赤にする）。
+ * 参照門に登録するケース（回せるものだけ — 全ケースが参照〈条件画像も参照から読む〉と配布形を要る）。opt-in のケース
+ * （2 ステップの残り・縦長・50 ステップの 2 席）は opt-in のときだけ登録する（既定のレーンでは回らないので、登録すると行が
+ * 無い機の参照門を赤にする）。
  */
 const CASE_IDS = DIST_PRESENT && ANY_FIXTURE
   ? [
     ...CASES.filter(({ optIn }) => !optIn || I2V_FULL).map(({ name }) => bandCaseId(name)),
     PRACTICAL_CASE_ID,
-    ...(I2V_FULL ? [PORTRAIT_CASE_ID] : []),
+    ...(I2V_FULL ? [PORTRAIT_CASE_ID, ...FULL_CASES.map(({ id }) => id)] : []),
   ]
   : [];
 const RUNNABLE = DIST_PRESENT && GPU_AVAILABLE && ANY_FIXTURE;
