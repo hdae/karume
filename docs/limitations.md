@@ -1955,6 +1955,14 @@ Deno 2.9.6では必要機能が未提供。Chromeでの実走とM2の追試は�
 
 subgroup 変種の WGSL や選択条件を変えたときは、この 2 つを回すまで実走は未検証として扱う。
 
+## 公開面のスナップショット門は export の増減だけを見る — シグネチャの互換は保証しない
+
+`packages/<pkg>/tests/public_surface_test.ts` は、`deno doc --json` の各宣言から `{ name, kind }` の集合だけを採って
+fixture と比べる（実体は `packages/runtime/tests/helpers/public-surface.ts`）。overload は 1 組に畳まれる。
+引数・戻り値・型の中身の変更は、名前と種類が同じなら通る。この門の役割は「export の増減の検出」で
+（ADR [0008](decisions/0008-public-api.md) の 2026-09-20 追記）、シグネチャの互換は門の対象外である。
+`deno task check` が型検査する examples / tools が使っている範囲だけは、壊れると間接に落ちる。
+
 ## states attention の行統計/PV融合（2026-09-15）
 
 `stateAttentionReduce: "parallel-fused"` は[ADR 0102](decisions/0102-state-attention-stats-pv-fusion.md)の任意指定。

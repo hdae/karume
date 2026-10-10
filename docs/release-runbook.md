@@ -93,6 +93,10 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
       「作るモードなら行が 0 件でも緑」（`packages/runtime/tests/helpers/reference.ts`）なので、
       リリース判定機に `KARUME_REFERENCE` を残すと **sha 門が 1 本も突き合わせないまま全て
       `written` で緑になる**。両方とも未設定で回した緑だけをリリース判定に使う
+- [ ] subgroup 変種（`rmsNormReduce: "subgroup32"` / `linearGemvReduce: "parallel-subgroup32"`）の WGSL か
+      選択条件を変えたリリースでは、Chrome の `/check.html`（GEMV）と RMS の往復比較を回す。
+      `deno task verify` ではこの実走検査は常に SKIP で、SKIP を赤にする門も無い（limitations の
+      「subgroup 変種の実走検査は自動では走らない」節 — 手順は `tools/llm-speed/browser/README.md`）
 - [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
       `uv run --no-sync ruff format --check` を
       **tools/exporter と tools/export-recipes の両方**で緑（CI は lint と format を

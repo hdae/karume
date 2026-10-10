@@ -413,7 +413,7 @@ sha 行と帯の照合は全て通る。
   （`packages/models/tests/helpers/collect-destroyed-devices.ts`）を待つ。中身は `gc()` → 100 ms → `gc()` → 100 ms で、回数と待ちは
   上の probe の実測（2 回目の後の 100 ms で全部返った）に合わせた。`gc` が要るので、deno.json の `deno test` を回す task は全て
   `--v8-flags=--expose-gc` を渡す（渡していない task は `packages/runtime/tests/verify_lanes_test.ts` が落とす）。通すのは Wan のレーン
-  （`test:models:wan` / `test:models:wan-ti2v`）の e2e の `acquireGpu` だけ（その中でも `assertRunningAdapter` の 1 回は通らない）。
+  （`test:models:wan` / `test:models:wan-ti2v`）の e2e の `acquireGpu` だけ。
   回収されたかは検査しない。
 - **残っていること**:
   - 根本の対処: 上流（Deno）への報告と、破棄済みの device の DRM クライアントが消えたことを取得の前に検査する門（残っていれば名指しして
@@ -469,3 +469,18 @@ ADR 0123 の速度の前後比較で見つけた。値（sha256・帯）は変�
 - 見立て（推測・未確認）: submit の時間予算分割の推定（計測窓の実測 ÷ workgroup 数）のぶれで、チャンクの切り方が回ごとに変わる。
   熱制限（この GPU は冷却が弱く 93 ℃ 前後で回る）との交絡もありうる。
 - 記録: `.claude/reviews/2026-10-07_submit-inflight/ab-vae-tiles.log`・`ab-gemma.log`（git 追跡外）。
+
+## 参照値のアダプタ照合: パイプラインが内部で GPU を取る 4 系列は、実走の GPU を照合していない（複数 GPU の機に限る・起票のみ）
+
+sha256 の参照値は環境キー（アダプタ名）ごとの行で持つ（ADR [0106](decisions/0106-device-keyed-references.md)）。
+gemma4 / anima / sbv2 / irodori の e2e は、パイプラインが内部で device を取るので、照合に
+`assertRunningAdapter`（`packages/runtime/tests/helpers/environment.ts`）を使う。これは検査用に別の GPU を 1 度取って照合し、
+結果をプロセス内でキャッシュする。実走の取得は照合されない。
+
+- 2 回の `requestAdapter` が同じ物理アダプタを返す保証は無い（[limitations.md](limitations.md) の「DL 前の GPU 適合チェック」節）。
+  複数 GPU の機で実走だけが別のアダプタを選ぶと、そのアダプタの出力を照合済みのキーの行と突き合わせる（偽の不一致）か、
+  `KARUME_REFERENCE` の書き込みでその行へ別のアダプタの出力を記録しうる。単一 GPU の機では起きない。
+- GPU を自分で取ってパイプラインへ渡す e2e（Wan の全て・runtime 側の e2e）は、実走の GPU そのものを照合している
+  （`verifyRunningGpu` / `assertAdapterMatchesEnvironment`）。
+- 直し方は未決: テストから GPU を注入する（パイプラインが自前で要求するのと同じ feature で取る必要がある）か、
+  パイプラインが実際に使ったアダプタの情報を読めるようにする（公開面の変更）。
