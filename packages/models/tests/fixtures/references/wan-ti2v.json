@@ -37,6 +37,9 @@
     "f16+dit8-a8-attn8-s16-i2v-crop-2step-band-boxing-cats-1280x704-9f-shift5": {
       "deno-nvidia-geforce-rtx-3080-ti": "b0c94f4391284e197fa91416079e4dc8e06faf31bc0d611d0b23221c74d25b3d"
     },
+    "f16+dit8-a8-attn8-s16-i2v-crop-50step-boxing-cats-seed42-1280x704-33f-shift5": {
+      "deno-nvidia-geforce-rtx-3080-ti": "00ddfac147a45ef7721ace02e2200d405f6692006bf61a6dfba5a95a47472c94"
+    },
     "f16+dit8-gpu-text-2step-boxing-cats-seed42-1280x704-17f-shift5": {
       "deno-intel-graphics-bmg-g21": "12fa42ffca8fc246c7be60cef34c1f28851ec73669f7b66f12c0901bc0c3af5f",
       "deno-nvidia-geforce-rtx-3080-ti": "19565906bf01f680bd8cf039047f11e56a38b5b30ff5ea52be542350524352d8"
@@ -52,6 +55,9 @@
     },
     "f16+dit8-i2v-crop-2step-boxing-cats-seed42-704x1280-9f-shift5": {
       "deno-nvidia-geforce-rtx-3080-ti": "afcdd68a87403479aead685d9430918ad6e8c2696cc3e7e5d064d1978a5e0c12"
+    },
+    "f16+dit8-i2v-crop-50step-boxing-cats-seed42-1280x704-33f-shift5": {
+      "deno-nvidia-geforce-rtx-3080-ti": "edc7109949ce2a1d4baac805ec167c8ea42440ee4336030ba5c12e71eae77689"
     }
   }
 }
