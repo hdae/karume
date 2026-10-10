@@ -217,6 +217,27 @@ Deno.test("結果の書き出し: ディレクトリ区切りを含む実物の�
   }
 });
 
+Deno.test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ / . / .. / %）は throw する", () => {
+  // file: URL ではバックスラッシュも区切りとして解決され、`..` や `%2e%2e` は親ディレクトリを指す。
+  // `/` だけを拒む形だと、これらが結果の席の外（または席そのもの）へ書き込む。
+  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  try {
+    const results = openResults("anima", {
+      root: new URL(`file://${temporary}/`),
+      environment: ENVIRONMENT,
+    });
+    for (const name of ["..\\outside.wav", "..", ".", "%2e%2e", "%2E%2E\\x.wav", ""]) {
+      assertThrows(() => results.artifact(name), Error, "実物の名前", JSON.stringify(name));
+    }
+    // 対照: 普通の名前（点を含む拡張子や連番）は席の直下へ解決される。
+    for (const name of ["F1.i8.wav", "frame-0001.png"]) {
+      assertEquals(results.artifact(name).href, new URL(name, results.dir).href);
+    }
+  } finally {
+    Deno.removeSync(temporary, { recursive: true });
+  }
+});
+
 // runRecordedCase（実重み golden の各ケースを包む枠）。書き出しの実体は上で見ているので、ここは
 // 記録の口を fake にして「どの経路でも決着が同じ形で 1 件積まれる」ことだけを見る。
 

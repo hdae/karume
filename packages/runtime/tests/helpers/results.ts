@@ -225,10 +225,22 @@ export const openResults = (
       return directory();
     },
     artifact: (name: string): URL => {
-      if (name.includes("/")) {
+      // file: URL ではバックスラッシュも区切りとして解決されるので `/` と同じに拒む。
+      if (/[/\\]/.test(name)) {
         throw new Error(`実物の名前にディレクトリ区切りを含められない: '${name}'`);
       }
-      return new URL(name, ensureDir());
+      // `%` は解決時に復号される（`%2e%2e` は親ディレクトリ）ので、記録する名前と書く先がずれる。
+      if (name === "" || name === "." || name === ".." || name.includes("%")) {
+        throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
+      }
+      const dir = ensureDir();
+      const resolved = new URL(name, dir);
+      // MUST: 解決の結果で確かめる（名前の綴りの検査は URL 解決の規則の写しで、漏れがありうる）。
+      const rest = resolved.href.startsWith(dir.href) ? resolved.href.slice(dir.href.length) : "";
+      if (rest === "" || rest.includes("/")) {
+        throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
+      }
+      return resolved;
     },
     record: async (entry: ResultEntry): Promise<void> => {
       const dir = ensureDir();
