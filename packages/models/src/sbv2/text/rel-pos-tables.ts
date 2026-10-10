@@ -32,6 +32,31 @@ type RelPosTables = {
 };
 
 /**
+ * 対数バケットの式が成立する `(bucketSize, maxPosition)` の組かを見る。
+ *
+ * MUST: `mid = ⌊bucketSize / 2⌋ ≥ 2` かつ `maxPosition − 1 > mid`。前者を割ると遠方の係数
+ * `mid − 1` が 0、後者を割ると対数の分母 `log((maxPosition − 1) / mid)` が 0 以下になり、
+ * `(2, 2)` では `Infinity × 0 = NaN` が出る。NaN は clamp の比較をすり抜けて Int32Array で 0 に
+ * なるので、形の合った誤った gather 添字になる（例外にならない沈黙誤値）。上流 transformers は
+ * 同じ式を検査なしで使うので、これは資産の入口検査として足す性格のもの。
+ *
+ * 資産の parser（`symbols.ts` の `bertRelPos`）と {@link buildRelPosTables} の両方がこの 1 本を通す。
+ */
+export const assertLogBucketDomain = (
+  bucketSize: number,
+  maxPosition: number,
+  where: string,
+): void => {
+  const mid = Math.floor(bucketSize / 2);
+  if (mid < 2 || maxPosition - 1 <= mid) {
+    throw new RangeError(
+      `${where}: bucketSize ${bucketSize} / maxPosition ${maxPosition} では対数バケットの式が` +
+        `成立しない（bucketSize ≥ 4 かつ maxPosition − 1 > ⌊bucketSize / 2⌋ が要る）`,
+    );
+  }
+};
+
+/**
  * `make_log_bucket_position`（transformers）と同じ式で `rel` をバケット化する。
  *
  * 近傍（`|rel| < mid`）は線形のまま、遠方は対数で圧縮する。`abs_pos <= mid` の分岐が
@@ -71,12 +96,17 @@ export const buildRelPosTables = (
   if (!Number.isInteger(maxPosition) || maxPosition < 2) {
     throw new RangeError(`maxPosition ${maxPosition} が 2 以上の整数でない`);
   }
+  assertLogBucketDomain(bucketSize, maxPosition, "相対位置表");
   const span = bucketSize;
   const upper = 2 * span - 1;
   // 対角 d = i − j ∈ [−(length−1), length−1] の値（表は d にしか依存しない）。
   const diagonal = new Int32Array(2 * length - 1);
   for (let d = -(length - 1); d <= length - 1; d += 1) {
     const shifted = logBucketPosition(d, bucketSize, maxPosition) + span;
+    // MUST: i32 へ書く前に有限性を見る（NaN は下の clamp をすり抜けて 0 に化ける）。
+    if (!Number.isFinite(shifted)) {
+      throw new Error(`相対位置 ${d} のバケットが有限でない（${shifted}）`);
+    }
     diagonal[d + length - 1] = shifted < 0 ? 0 : shifted > upper ? upper : shifted;
   }
   const c2p = new Int32Array(length * length);

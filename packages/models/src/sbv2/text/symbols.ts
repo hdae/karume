@@ -18,6 +18,7 @@
  */
 
 import { asPositiveInteger } from "../../text/asset-gates.ts";
+import { assertLogBucketDomain } from "./rel-pos-tables.ts";
 import { Sbv2InputError } from "../errors.ts";
 
 /**
@@ -139,6 +140,9 @@ const parseBertRelPos = (raw: unknown, where: string): Sbv2BertRelPos => {
   if (maxPosition < 2) {
     throw new Error(`${where}.maxPosition: 2 以上でない（${maxPosition}）`);
   }
+  // 下限を満たしても組によっては NaN を作る（{@link assertLogBucketDomain}）— 生成のたびの
+  // 表の構築まで待たず、資産の読み込み時に落とす。
+  assertLogBucketDomain(positionBuckets, maxPosition, where);
   return { positionBuckets, maxPosition };
 };
 

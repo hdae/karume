@@ -145,6 +145,27 @@ Deno.test("parseJpExtraRules: blankId は音素・tone・language の 3 表す�
   assertEquals(parseJpExtraRules({ ...TEST_RULES_JSON, blankId: 2 }, "x").blankId, 2);
 });
 
+Deno.test("parseJpExtraRules: bertRelPos は対数バケットの式が成立する組だけを受ける", () => {
+  // (2, 2) は対数の分母も係数も 0 で NaN を作り、i32 化で 0 の添字に化ける（資産の入口で落とす）。
+  for (
+    const bertRelPos of [{ positionBuckets: 2, maxPosition: 2 }, {
+      positionBuckets: 4,
+      maxPosition: 3,
+    }]
+  ) {
+    assertThrows(
+      () => parseJpExtraRules({ ...TEST_RULES_JSON, bertRelPos }, "x"),
+      Error,
+      "x.bertRelPos",
+      JSON.stringify(bertRelPos),
+    );
+  }
+  assertEquals(
+    parseJpExtraRules(TEST_RULES_JSON, "x").bertRelPos,
+    { positionBuckets: 256, maxPosition: 512 },
+  );
+});
+
 Deno.test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だけでは通さない）", () => {
   // 決め手は samplingRate — `Sbv2Pipeline.generate` の `sampleRate` として**そのまま公開結果
   // へ出る**唯一の欄なので、負値や 0 はどこでも例外にならず「正常に見える壊れた WAV」に

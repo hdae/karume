@@ -173,6 +173,28 @@ Deno.test("buildRelPosTables: 引数の受理集合（式が成立する下限�
   assertThrows(() => buildRelPosTables(4, 256, 1), RangeError, "maxPosition 1 が 2 以上");
 });
 
+Deno.test("buildRelPosTables: 対数バケットの式が成立しない組は NaN 経由の誤った添字を作らずに落ちる", () => {
+  // (bucket 2, maxPosition 2): mid = 1 で対数の分母 log(1) = 0、係数 mid − 1 = 0 →
+  // `Infinity × 0 = NaN`。NaN は clamp の比較をすり抜け、Int32Array で 0 になって形の合った
+  // 誤った gather 添字になる（|d| = 2 の位置が 0 に化ける）。
+  assertThrows(() => buildRelPosTables(4, 2, 2), RangeError, "対数バケット");
+  // mid ≥ 2 でも maxPosition − 1 ≤ mid なら分母が 0 以下で、遠方の向きが壊れる。
+  assertThrows(() => buildRelPosTables(4, 4, 3), RangeError, "対数バケット");
+  assertThrows(() => buildRelPosTables(4, 3, 512), RangeError, "対数バケット");
+});
+
+Deno.test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のまま d + 256", () => {
+  // |d| < mid = 128 は対数で圧縮しない（`make_log_bucket_position` の近傍分岐）。入口の
+  // 検査を足しても配布値の表が 1 要素も変わらないことの対。
+  const length = 7;
+  const { c2pPos } = buildRelPosTables(length, 256, 512);
+  for (let i = 0; i < length; i += 1) {
+    for (let j = 0; j < length; j += 1) {
+      assertEquals(c2pPos.data[i * length + j], i - j + 256, `c2p[${i}][${j}]`);
+    }
+  }
+});
+
 Deno.test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関数であることの帰結）", () => {
   const length = 7;
   const { c2pPos, p2cPos } = buildRelPosTables(length, 256, 512);
