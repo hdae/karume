@@ -187,7 +187,9 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     }
   }
 
-  const binding: Record<string, Record<string, WeightSupply>> = {};
+  // 名前マップは null prototype MUST（ブラウザでは名前 `__proto__` の代入が prototype の差し替えに
+  // なり、供給が黙って消える — 読み手の descriptor.ts / ir.ts と同じ作法）。
+  const binding: Record<string, Record<string, WeightSupply>> = Object.create(null);
   // part の払い出し（{@link WHOLE_PART} の doc）。丸ごと供給は `wholePart` に積み上げ、
   // `pieces` は 1 本 1 part を `nextPart` から取る。
   let wholePart = WHOLE_PART;
@@ -220,7 +222,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         }] / 余剰 [${surplus.join(", ")}]（shared 宣言は供給しない）`,
       );
     }
-    const supplies: Record<string, WeightSupply> = {};
+    const supplies: Record<string, WeightSupply> = Object.create(null);
     for (const name of expected) {
       const tensor = supplied[name];
       const where = `graph '${graphName}' initializer '${name}'`;

@@ -622,3 +622,63 @@ describe("BoundContainer: krm 経路とメモリ経路の A/B", () => {
     );
   });
 });
+
+/**
+ * `Object.prototype.__proto__` を仕様どおりの accessor（代入で prototype を差し替える — ブラウザの
+ * 既定）に一時的に定義し直して `body` を走らせ、元の記述子へ必ず戻す。Deno の既定の setter は
+ * own property を作るので、素の Deno では「名前 `__proto__` の代入が prototype の差し替えになる」
+ * 形の不具合が見えない。
+ */
+const withBrowserProtoAccessor = <T>(body: () => T): T => {
+  const original = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__");
+  Object.defineProperty(Object.prototype, "__proto__", {
+    configurable: true,
+    enumerable: false,
+    get(this: object) {
+      return Object.getPrototypeOf(this);
+    },
+    set(this: object, value: unknown) {
+      if (typeof value === "object" || value === null) Object.setPrototypeOf(this, value);
+    },
+  });
+  try {
+    return body();
+  } finally {
+    if (original === undefined) {
+      delete (Object.prototype as { __proto__?: unknown }).__proto__;
+    } else {
+      Object.defineProperty(Object.prototype, "__proto__", original);
+    }
+  }
+};
+
+describe("openMemoryContainer: 名前 '__proto__'", () => {
+  it("ブラウザの __proto__ accessor の下でも、グラフ名と initializer 名を own property で保全する", () => {
+    // 宣言の own key は JSON.parse で作る MUST（オブジェクトリテラルの `"__proto__":` は
+    // [[Prototype]] 指定になる）。
+    const declaration = declarationOf(JSON.parse(`{
+      "format": "karume-ir",
+      "version": 2,
+      "requires": { "ops": ["matmul"] },
+      "symbols": [],
+      "inputs": [{ "name": "x", "dtype": "f32", "shape": [2, 4] }],
+      "outputs": ["y"],
+      "initializers": { "__proto__": {} },
+      "values": {
+        "__proto__": { "dtype": "f32", "shape": [4, 3] },
+        "y": { "dtype": "f32", "shape": [2, 3] }
+      },
+      "nodes": [{ "op": "matmul", "ins": ["x", "__proto__"], "outs": ["y"], "attrs": {} }]
+    }`));
+    const tensors: Record<string, MemoryTensor> = JSON.parse('{"__proto__":null}');
+    tensors["__proto__"] = { bytes: f32Bytes(new Array(12).fill(1)), encoding: { codec: "f32" } };
+    const opened = withBrowserProtoAccessor(() =>
+      openMemoryContainer({
+        graphs: { ["__proto__"]: declaration },
+        tensors: { ["__proto__"]: tensors },
+      })
+    );
+    assertEquals(Object.hasOwn(opened.graphs, "__proto__"), true);
+    assertEquals(opened.graphs["__proto__"].supplies.has("__proto__"), true);
+  });
+});

@@ -425,7 +425,8 @@ export const bindDeclarations = (input: {
     constSupply.set(`${entry.graph}/${entry.initializer}`, entry);
   }
 
-  const out: Record<string, BoundGraph> = {};
+  // null prototype MUST: グラフ名 `__proto__` の代入をブラウザで prototype の差し替えにしない。
+  const out: Record<string, BoundGraph> = Object.create(null);
   for (const [graphName, declaration] of Object.entries(graphs)) {
     const supplies = new Map<string, InitializerSupply>();
     for (const [name, init] of Object.entries(declaration.initializers)) {
