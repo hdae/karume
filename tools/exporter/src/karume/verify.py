@@ -34,6 +34,7 @@ from karume.container import (
     GraphDescriptor,
     ModelDescriptor,
     ReadContainer,
+    assert_row_axis,
     codec_entry,
     container_parts,
     group_count,
@@ -1379,6 +1380,7 @@ def _plan_supply(
             f"{where}: codec '{encoding.codec}' は量子化なので rowAxis / groupSize / scale が要る"
         )
     row_axis, group_size = encoding.row_axis, encoding.group_size
+    assert_row_axis(encoding.codec, row_axis, where)
     if not shape or len(shape) <= row_axis:
         raise ContainerFormatError(
             f"{where}: rowAxis {row_axis} に対して宣言 shape"

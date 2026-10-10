@@ -289,10 +289,13 @@ class CodecEntry:
     scale: Literal["required", "forbidden"]
     #: `"channel"` = per-channel（`groupSize` は行長）・`"group"` = 2 冪 ≥ 16 の group 長。
     grouping: Literal["channel", "group"] | None
+    #: 書ける `rowAxis` の集合（非量子化は空）。`1`（conv_transpose1d 形）を持つのは int8-sym
+    #: だけ — i4 / i2 / ternary の展開経路は行方向の量子化しか持たない（§6.3）。
+    row_axes: tuple[int, ...]
 
 
 def _raw(layout: Literal["f32", "f16", "bf16", "i32"], block_bytes: int) -> CodecEntry:
-    return CodecEntry(layout, CodecPacking(1, block_bytes, 4), "forbidden", None)
+    return CodecEntry(layout, CodecPacking(1, block_bytes, 4), "forbidden", None, ())
 
 
 #: 初版の台帳（§6.3）。登録名は**資産に焼かれる**ので、既存エントリの値は動かさない。
@@ -305,10 +308,10 @@ CODEC_LEDGER: Mapping[str, CodecEntry] = {
     "f16": _raw("f16", 2),
     "bf16": _raw("bf16", 2),
     "i32": _raw("i32", 4),
-    "int8-sym": CodecEntry("i8", CodecPacking(1, 1, 4), "required", "channel"),
-    "int4-sym-g": CodecEntry("i4", CodecPacking(8, 4, 4), "required", "group"),
-    "int2-off": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel"),
-    "ternary": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel"),
+    "int8-sym": CodecEntry("i8", CodecPacking(1, 1, 4), "required", "channel", (0, 1)),
+    "int4-sym-g": CodecEntry("i4", CodecPacking(8, 4, 4), "required", "group", (0,)),
+    "int2-off": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel", (0,)),
+    "ternary": CodecEntry("i2", CodecPacking(16, 4, 4), "required", "channel", (0,)),
 }
 
 #: group 量子化の group 長の下限（ADR 0069 決定 2）。
@@ -339,6 +342,20 @@ def codec_entry(codec: str) -> CodecEntry:
             f"codec 台帳に '{codec}' が無い（台帳: {' / '.join(sorted(CODEC_LEDGER))}）"
         )
     return entry
+
+
+def assert_row_axis(codec: str, row_axis: int, where: str) -> None:
+    """`rowAxis` が codec の台帳が許す軸か（書き手と合流層が同じ 1 本を通る）。
+
+    MUST: 一般の「0 か 1」では足りない — 正方 shape の i4 に `rowAxis: 1` を書けてしまい、
+    runtime の `bindGraphs` だけが拒否する容器ができる（TS 台帳の `rowAxes` と同じ受理集合）。
+    """
+    allowed = codec_entry(codec).row_axes
+    if row_axis not in allowed:
+        raise ContainerFormatError(
+            f"{where}: codec '{codec}' の rowAxis は {' / '.join(map(str, allowed))} だけ"
+            f"（宣言は {row_axis} — container-v1 §6.3）"
+        )
 
 
 def per_channel_group_size(row_length: int) -> int:
@@ -1270,6 +1287,7 @@ def _plan_tensor(
     row_axis = encoding.row_axis or 0
     if row_axis not in (0, 1):
         raise ContainerFormatError(f"{where}: rowAxis は 0 か 1（宣言は {row_axis}）")
+    assert_row_axis(encoding.codec, row_axis, where)
     if len(shape) <= row_axis:
         raise ContainerFormatError(
             f"{where}: rowAxis {row_axis} に対して宣言 shape {list(shape)} の rank が足りない"

@@ -1291,3 +1291,63 @@ class TestThePieceOrder:
 
         with pytest.raises(ContainerFormatError, match="part 2 が直前の piece の part 3 より前"):
             read_container(written)
+
+
+class TestTheWriterRowAxes:
+    """書き手も codec ごとの `rowAxis` の受理集合で止まる（書けたのに読めない容器を作らない）。"""
+
+    @pytest.mark.parametrize(
+        ("codec", "storage", "payload"),
+        [("int4-sym-g", "i4", 128), ("int2-off", "i2", 64), ("ternary", "i2", 64)],
+    )
+    def test_row_axis_1_is_refused_for_a_codec_without_it(
+        self, tmp_path: Path, codec: str, storage: str, payload: int
+    ) -> None:
+        graph = _minimal_graph()
+        graph.initializers["p_w"] = IrInitializer(
+            tensor="b.weight", storage=IrStorage(dtype=storage, scale="b.scale", group_size=16)
+        )
+        graph.values["p_w"] = IrValue(dtype="f32", shape=[16, 16])
+
+        with pytest.raises(ContainerFormatError, match=f"codec '{codec}' の rowAxis は 0 だけ"):
+            write_model_container(
+                tmp_path / "m.krm",
+                graph,
+                {
+                    "a.weight": pattern_bytes(64, 5),
+                    "b.weight": pattern_bytes(payload, 6),
+                    "b.scale": pattern_bytes(64, 7),
+                },
+                {
+                    "a.weight": Encoding("f32"),
+                    "b.weight": Encoding(codec, group_size=16, row_axis=1, scale_key="b.scale"),
+                },
+                graph_name="minimal",
+                provenance=Provenance(license="mit"),
+            )
+
+
+def _parse_ts_row_axes(source: str) -> dict[str, tuple[int, ...]]:
+    """TS の `CODEC_LEDGER` の `rowAxes`（RAW ヘルパの既定と各エントリの明示値）を読む。"""
+    raw = re.search(r"const RAW = \(.*?rowAxes: \[([\d, ]*)\]", source, re.S)
+    assert raw is not None, "RAW ヘルパの rowAxes を読めない"
+
+    def axes(text: str) -> tuple[int, ...]:
+        return tuple(int(axis) for axis in re.findall(r"\d+", text))
+
+    entries = {
+        name: axes(raw.group(1))
+        for name in re.findall(r'\["([\w-]+)", RAW\("[\w-]+", \d+\)\]', source)
+    }
+    for name, body in re.findall(r'\["([\w-]+)", \{(.*?)\n  \}\]', source, re.S):
+        found = re.search(r"rowAxes: \[([\d, ]*)\]", body)
+        assert found is not None, f"{name}: rowAxes を読めない"
+        entries[name] = axes(found.group(1))
+    return entries
+
+
+class TestTheSharedRowAxes:
+    def test_the_codec_row_axes_match_the_runtime_ones(self) -> None:
+        ours = {name: entry.row_axes for name, entry in CODEC_LEDGER.items()}
+
+        assert _parse_ts_row_axes(CODECS_TS.read_text(encoding="utf-8")) == ours

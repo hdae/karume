@@ -512,3 +512,26 @@ class TestTheTernaryPayload:
             match=r"initializer 'w': ternary の payload にコード 0.*（バイト 5）",
         ):
             verify_container(paths, blocks=True)
+
+
+class TestTheCodecRowAxes:
+    """codec ごとに許す `rowAxis`（TS 台帳の `rowAxes` — container-v1 §6.3・ADR 0108 追記1 §4）。
+
+    i4 / i2 / ternary は行方向（`rowAxis: 0`）の量子化しか持たない。一般の「0 か 1」だけを見ると
+    正方 shape の `rowAxis: 1` が Python の検証を通り、ブラウザの `bindGraphs` だけが落とす。
+    """
+
+    @pytest.mark.parametrize(
+        ("codec", "group_size", "payload"),
+        [("int4-sym-g", 16, 128), ("int2-off", 16, 64), ("ternary", 16, 64)],
+    )
+    def test_row_axis_1_is_refused_for_a_codec_without_it(
+        self, codec: str, group_size: int, payload: int
+    ) -> None:
+        supply = WeightSupply(quantized(codec, group_size, row_axis=1), block="w1")
+        blocks = [("w1", payload, "weight"), ("s1", 64, "scale")]
+        # 対照: 同じ宣言の rowAxis 0 は合流まで通る（下の赤は軸の規則のもの）。
+        bind([16, 16], replace(supply, encoding=quantized(codec, group_size)), blocks)
+
+        with pytest.raises(ContainerFormatError, match=f"codec '{codec}' の rowAxis は 0 だけ"):
+            bind([16, 16], supply, blocks)
