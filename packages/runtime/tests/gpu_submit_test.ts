@@ -541,6 +541,31 @@ Deno.test("窓平均チャンク時間は推定が見落とす予算超過を下
   assertEquals(budget.overBudgetChunks, 0, "推定側の席はここでは 1 件も上がらない");
 });
 
+// 窓平均は「最初の submit → flush 後」の壁時計なので、ホスト側の停止・エンコード・待ちを含む。
+// GPU が速くてもホストが止まれば予算を超えるので、窓平均は GPU のチャンク時間の下界ではない
+// — GPU 側の超過の判定は 1 submit ごとの GPU 時間（submitGpuTime）で行う。
+Deno.test("ホストが止まった窓では、GPU の 1 本が予算内でも窓平均が予算を超える", async () => {
+  const clock = gpuTimeClock(() => 1);
+  // GPU の 1 チャンクの幅 = 1,000,000 ns = 1 ms。
+  const gpu = createFakeGpu({ workDone: clock.workDone, timestamps: [[0n, 1_000_000n]] });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1), clock.now);
+
+  dispatchMany(scheduler, 1);
+  // 窓が開いた後にホストが 200 ms 止まる（GC・別タスク・タブの裏など）。
+  clock.advance(200);
+  await scheduler.flush();
+
+  const budget = scheduler.stats.chunkBudget;
+  assertEquals(budget.maxWindowMeanMs, 201, "ホストの停止 200 ms + GPU 1 ms");
+  assertLess(budget.budgetMs, budget.maxWindowMeanMs ?? 0, "窓平均は予算を超える");
+  assertEquals(budget.submitGpuTime?.maxNs, 1_000_000, "GPU の 1 本は 1 ms");
+  assertLess(
+    (budget.submitGpuTime?.maxNs ?? Infinity) / 1_000_000,
+    budget.budgetMs,
+    "GPU 側に予算超過のチャンクは無い（窓平均だけでは超過を断定できない）",
+  );
+});
+
 // submitGpuTime（GPU 側の時計）: 窓平均（下界）では見えない「重い 1 本」を 1 submit ずつの幅で数える
 // （ADR 0118 決定 6 の追記 — OS の submit 単位のタイムアウトに対して言えるのは 1 本ずつの最大だけ）。
 // 幅は pass の timestamp の最小 → 最大で、pass 間の隙間も含む（dispatch の差の和ではない）。

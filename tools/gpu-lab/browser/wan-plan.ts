@@ -781,7 +781,10 @@ export type WanComponentDiagnostics = {
   readonly geometryProfile: string;
   readonly submitCount: number;
   readonly dispatchCount: number;
-  /** 窓平均の最大（1 submit の最大時間の下界 — 計測なしの device で読める唯一の submit の時間）。 */
+  /**
+   * 窓平均の最大（計測なしの device で読める唯一の submit の時間の信号）。ホスト時間を含む窓の
+   * 平均なので、1 submit の GPU 時間の上界にも下界にもならない（`ChunkBudgetStats` の doc）。
+   */
   readonly maxWindowMeanMs?: number;
   readonly overBudgetChunks: number;
 };

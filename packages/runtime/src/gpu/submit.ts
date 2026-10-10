@@ -246,10 +246,12 @@ export type ChunkBudgetStats = {
    *
    * WHY: 推定側だけを見ると、**仕事量プロキシ自体がずれている**故障が原理的に見えない
    * （同じプロキシで見積もった値を同じ予算と比べているだけになる）。窓平均は帰属に依存せず
-   * 求まり、しかも「最大チャンク時間 ≥ 窓平均」なので、これが
-   * {@link ChunkBudgetStats.budgetMs} を超えたなら**予算超過チャンクが確実に 1 本はあった**と
-   * 言い切れる（下界としてだけ読む席 — 超えていないことは何も保証しない）。窓はホスト側の
-   * エンコード時間も含むため過大側（モジュール doc）。
+   * 求まるので、そのずれを拾う**保守的な信号**として置く。
+   *
+   * NOTE: 窓は「最初の submit → flush 後」の壁時計で、ホスト側のエンコード・停止・待ちを含む
+   * （モジュール doc）。ホストが止まれば GPU が速くても上がるので、GPU のチャンク時間の下界では
+   * なく、{@link ChunkBudgetStats.budgetMs} を超えても GPU 側の予算超過は断定できない。GPU 側の
+   * 超過は 1 submit ごとの GPU 時間（{@link ChunkBudgetStats.submitGpuTime}）で判定する。
    */
   readonly maxWindowMeanMs?: number;
   /**
@@ -257,8 +259,8 @@ export type ChunkBudgetStats = {
    * （{@link GpuContext.gpuTimingEnabled}）でだけ埋まり、無効な device と、まだ 1 本も回収して
    * いない間は undefined。
    *
-   * WHY: {@link ChunkBudgetStats.maxWindowMeanMs} は下界でしかなく、重い 1 本と軽い数本が同じ窓に
-   * 入ると平均に埋もれる。OS の submit 単位のタイムアウト（Linux xe の `job_timeout_ms` など —
+   * WHY: {@link ChunkBudgetStats.maxWindowMeanMs} はホスト時間を含む窓の平均で、重い 1 本と軽い
+   * 数本が同じ窓に入ると平均に埋もれ、逆にホストの停止だけでも上がる。OS の submit 単位のタイムアウト（Linux xe の `job_timeout_ms` など —
    * ADR 0118 決定 6）に対して言えるのは、1 本ずつの時間の最大だけである。
    *
    * 測り方: 計測モードは 1 dispatch = 1 pass で pass の begin / end を書くので、チャンク 1 本の

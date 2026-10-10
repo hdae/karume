@@ -372,8 +372,9 @@ image-to-video rows, the condition image.
   building that stage's sessions, i.e. uploading the weights; then the median and maximum of the
   rest — a step is two transformer forwards with CFG), the session diagnostics of each component
   (weights and slot backing allocated, geometry profile, submit count, `窓平均の最大` = the largest
-  window mean, a lower bound of the longest submit, and the count of chunks over the time budget),
-  the SHA-256 of the RGB bytes (every frame's 8-bit RGB from `wanFrameToRgba`, concatenated in frame
+  window mean, a host-inclusive signal that bounds no single submit, and the count of chunks over
+  the time budget), the SHA-256 of the RGB bytes (every frame's 8-bit RGB from `wanFrameToRgba`,
+  concatenated in frame
   order — the bytes the e2e reference rows hash), the reference verdict, and the error. The clip is
   drawn on the canvas next to the table: **前** / **次** step one frame, **再生** plays at the clip's
   frame rate (16 fps for Wan2.1, 24 fps for Wan2.2), and the slider seeks. The condition column starts
@@ -433,8 +434,10 @@ frames. The limits table shows the block count for the selected request.
   longest single submit measured on the B570 was 458.6 ms at 81 frames — but that was in the timing
   mode, which splits passes differently; the normal mode the page uses has not been measured. The
   RTX 5070 Ti is expected to be faster per submit (an expectation, not a measurement).
-- The diagnostics column gives `窓平均の最大` per component: a lower bound of the longest submit. A
-  value near or above 2,000 ms on Windows is a warning even when the run completes.
+- The diagnostics column gives `窓平均の最大` per component: the wall time from a window's first
+  submit to the flush, divided by the chunks in it. It includes host-side time and averages the
+  chunks, so it bounds no single submit's GPU time in either direction. A value near or above
+  2,000 ms on Windows is a warning even when the run completes.
 - A timeout shows as a device loss: the status line and the row say
   `GPU device lost（<reason>）: <message>`, and Chrome may also print `D3D12` or device-removed
   errors in the console. On Windows, a TDR also leaves a `Display` event 4101 in Event Viewer
