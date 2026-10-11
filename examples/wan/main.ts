@@ -74,6 +74,7 @@ import { runMain } from "../shared/run-main.ts";
 import { distributionSource } from "../shared/local-source.ts";
 import { isLocalDist } from "../shared/local-assets.ts";
 import { decodeImage } from "./decode-image.ts";
+import { outputImageLabel, sha256Hex } from "./output-label.ts";
 
 const USAGE =
   "--generation <wan2.1|wan2.2> --source <パス|HF repo> --umt5-source <パス> --quant <名前>" +
@@ -305,24 +306,12 @@ const resolveSwap = async (): Promise<
  * 台本の本体。MUST: `await using` はこの中に置く（`shared/run-main.ts` — 本体と解放が両方投げたときの
  * `SuppressedError` を展開するため）。
  */
-/** バイト列の sha256（小文字 16 進 — 出力先の名前に使う）。 */
-const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
-  Array.from(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-    (byte) => byte.toString(16).padStart(2, "0"),
-  ).join("");
-
 const main = async (): Promise<void> => {
   // 条件画像の読み込みと復号を先に済ませる（壊れた・対応外の画像を重みの読み込みの後で知らない）。
   const imageBytes = imagePath === undefined ? undefined : await Deno.readFile(imagePath);
   const image = imageBytes === undefined ? undefined : decodeImage(imageBytes);
-  // 出力先の名前の画像の印: ファイルのバイト列の sha256 の先頭 8 桁（パスを名前に入れない — 同じ中身なら同じ名前）。
-  // fit は明示したときだけ足す — 省いたときの既定はパイプラインが持つので、台本に写すと既定が変わったときに名前と
-  // 中身が食い違う（下の steps と同じ理由。steps と違い fit はイベントが運ばないので、明示しない回は名前に入れない）。
-  const fitLabel = fitArg === undefined ? "" : `-${fitArg}`;
-  const imageLabel = imageBytes === undefined
-    ? ""
-    : `-img-${(await sha256Hex(imageBytes)).slice(0, 8)}${fitLabel}`;
+  // 出力先の名前の画像の印（`output-label.ts` — fit は明示したときだけ入る）。
+  const imageLabel = imageBytes === undefined ? "" : await outputImageLabel(imageBytes, fitArg);
   if (image !== undefined) {
     const fitShown = fitArg ?? "パイプラインの既定";
     console.log(`[wan] image: ${imagePath}（${image.width}×${image.height}・fit: ${fitShown}）`);
