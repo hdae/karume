@@ -546,7 +546,9 @@ rowLength  = numel / shape[rowAxis]
 ```
 
 正本は `packages/runtime/src/format/container/codecs.ts` の `CODEC_LEDGER` で、Python の鏡像は
-`tools/exporter/src/karume/container.py` の `CODEC_LEDGER`（両側の一致はテストで突合する）。scale の dtype の
+`tools/exporter/src/karume/container.py` の `CODEC_LEDGER`（両側の一致はテストで突合する — 突合するのは
+`zeroPoint` 以外の欄。Python の `CodecEntry` は `zeroPoint` の欄を持たず、Python の読み手は `encoding.zeroPoint` を
+codec に関わらず拒否する）。scale の dtype の
 受理集合（初版は `f32` のみ）は codec ごとの欄ではなく台帳共通の定数 `SCALE_DTYPES` が持つ。
 値の集合・詰め順・復元式（§6.3 の表）は codec の仕様で、台帳の欄ではない — 実装は CPU 展開と WGSL が持つ。
 
