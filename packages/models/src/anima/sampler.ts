@@ -188,9 +188,9 @@ export const timestepsProj = (
  * （`generation/dpm-solver-multistep.ts`）は呼び手が増えうるので事情が違う。
  */
 export const cfgEulerStep = (
-  previous: Float32Array,
-  cond: Float32Array,
-  uncond: Float32Array | undefined,
+  previous: Float32Array<ArrayBuffer>,
+  cond: Float32Array<ArrayBuffer>,
+  uncond: Float32Array<ArrayBuffer> | undefined,
   sigmaDelta: number,
   guidance: number,
 ): Float32Array<ArrayBuffer> => {

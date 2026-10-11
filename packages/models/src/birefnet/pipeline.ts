@@ -296,7 +296,7 @@ export const preprocessPixelValues = (
  * NOTE: `export` はテストのため（{@link preprocessPixelValues} と同じ理由）。
  */
 export const matteFromLogits = (
-  logits: Float32Array,
+  logits: Float32Array<ArrayBuffer>,
   sourceWidth: number,
   sourceHeight: number,
   width: number,

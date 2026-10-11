@@ -48,7 +48,7 @@ export type TiledBert = {
  * @param word2ph add_blank 後の word2ph（長さ === tokenCount が必須）。
  */
 export const tileBertToPhoneLevel = (
-  hidden: Float32Array,
+  hidden: Float32Array<ArrayBuffer>,
   tokenCount: number,
   word2ph: readonly number[],
 ): TiledBert => {

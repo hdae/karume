@@ -81,7 +81,7 @@ export const decodeWithFault = async (
   gpu: GpuContext,
   sessions: { readonly first: Session; readonly next: Session },
   caches: WanVaeChunkCaches,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   fault: Fault,
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { layout } = caches;

@@ -713,7 +713,7 @@ const faultInjections = async (
   grid: WanTokenGrid,
   form: Ti2vForm,
   expected: Float32Array,
-  run: (inputs: Record<string, Tensor>, label: string) => Promise<Float32Array>,
+  run: (inputs: Record<string, Tensor>, label: string) => Promise<Float32Array<ArrayBuffer>>,
 ): Promise<FaultResult[]> => {
   const faults: FaultResult[] = [];
   const measure = async (label: string, faulty: Record<string, Tensor>): Promise<void> => {
@@ -797,7 +797,10 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
   const buildMs = performance.now() - built;
   const runs: Run[] = [];
   try {
-    const run = async (inputs: Record<string, Tensor>, label: string): Promise<Float32Array> => {
+    const run = async (
+      inputs: Record<string, Tensor>,
+      label: string,
+    ): Promise<Float32Array<ArrayBuffer>> => {
       const started = performance.now();
       const outputs = await session.run(inputs);
       const wallMs = performance.now() - started;
@@ -828,7 +831,7 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
             const referenceError = referenceErrorOf(golden, name);
             const referenceRatio = ratioOf(referenceError);
             const referenceQuantile = absErrorQuantile(reference, expected, RECORDED_QUANTILE);
-            const unpatchify = (tokens: Float32Array) =>
+            const unpatchify = (tokens: Float32Array<ArrayBuffer>) =>
               unpatchifyTokens(tokens, golden.latentShape, WAN22_GEOMETRY);
             const tokens = await run(inputs, `${name} io`);
             // 判定の前に残す（帯の外へ出た回も、通常モードのビット一致の門は走る）。
@@ -1162,7 +1165,7 @@ const twoRuns = async (
   options: SessionOptions = {},
 ): Promise<{
   readonly runs: readonly Run[];
-  readonly produced: readonly Float32Array[];
+  readonly produced: readonly Float32Array<ArrayBuffer>[];
   readonly nonFinite: number;
   readonly buildMs: number;
   readonly vram: readonly string[];
@@ -1171,7 +1174,7 @@ const twoRuns = async (
 }> => {
   const monitor = monitorDrmUsage();
   const runs: Run[] = [];
-  const produced: Float32Array[] = [];
+  const produced: Float32Array<ArrayBuffer>[] = [];
   let nonFinite = 0;
   let buildMs = 0;
   let rowBlocks = 0;

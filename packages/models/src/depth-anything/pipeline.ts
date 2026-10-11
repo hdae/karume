@@ -338,7 +338,7 @@ export const preprocessPixelValues = (
  * NOTE: `export` はテストのため（{@link preprocessPixelValues} と同じ理由）。
  */
 export const resampleDepth = (
-  depth: Float32Array,
+  depth: Float32Array<ArrayBuffer>,
   sourceWidth: number,
   sourceHeight: number,
   width: number,

@@ -23,7 +23,8 @@ import { writeSafetensors } from "./helpers/safetensors-write.ts";
  * MUST: `w` に整数を渡さない。`exp(fround(log(n)))` は n の直上・直下どちらにも落ちうるので
  * `ceil` が n か n+1 かで揺れる（ceil 境界の性質そのものであって実装の欠陥ではない）。
  */
-const logwFor = (frames: readonly number[]): Float32Array => Float32Array.from(frames, Math.log);
+const logwFor = (frames: readonly number[]): Float32Array<ArrayBuffer> =>
+  Float32Array.from(frames, Math.log);
 
 /** 上限を主題にしないテストで渡す上限（実配布形の `maxFrames` と同じ 4096）。 */
 const AMPLE_FRAMES = 4096;

@@ -122,7 +122,7 @@ export const planCodecTiles = (
 type CodecTileRunner = (
   latent: Float32Array<ArrayBuffer>,
   frames: number,
-) => Promise<Float32Array>;
+) => Promise<Float32Array<ArrayBuffer>>;
 
 /** {@link decodeTiles} が要る幾何（`pipelineConfig` の 2 欄 + 計画）。 */
 type CodecDecodeOptions = {

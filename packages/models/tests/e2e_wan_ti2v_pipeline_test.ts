@@ -663,7 +663,7 @@ Deno.test({
       );
       // 参照が記録した DiT の出力（forward の hook）から、ホストの CFG + UniPC で参照の潜在を作り直す。
       const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
-      let latents: Float32Array = fixture.tensor("latents_init");
+      let latents: Float32Array<ArrayBuffer> = fixture.tensor("latents_init");
       for (let step = 0; step < STEPS; step += 1) {
         assertEquals(
           fixture.shape(`latents.${step}`),

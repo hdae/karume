@@ -750,7 +750,10 @@ const quantileRatio = (
 };
 
 /** 出口の最終次元を `(pt,ph,pw,c)` → `(c,pt,ph,pw)` と読み替える（unpatchify の並びの故障注入）。 */
-const transposeTokenAxes = (tokens: Float32Array, geometry: WanPatchGeometry): Float32Array => {
+const transposeTokenAxes = (
+  tokens: Float32Array,
+  geometry: WanPatchGeometry,
+): Float32Array<ArrayBuffer> => {
   const channels = geometry.channels;
   const width = wanTokenWidth(geometry);
   const volume = width / channels;
@@ -1105,7 +1108,7 @@ const normalizedRatioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]
     const run = async (
       inputs: Record<string, Tensor>,
       label = "故障注入",
-    ): Promise<Float32Array> => {
+    ): Promise<Float32Array<ArrayBuffer>> => {
       const started = performance.now();
       const outputs = await session.run(inputs);
       const wallMs = performance.now() - started;
@@ -1552,7 +1555,7 @@ Deno.test({
                 const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
                 const referenceRatio = ratioOf(referenceErrorOf(golden, name));
                 const runs: FullRun[] = [];
-                const produced: Float32Array[] = [];
+                const produced: Float32Array<ArrayBuffer>[] = [];
                 // 1 本目は最初の run（パイプラインの生成と、裏付け前の initialChunkSize のチャンク）、2 本目は
                 // 2 回目以降の形（slot backing・時間予算で切ったチャンク）。生成の 1 ステップに近いのは 2 本目。
                 for (const label of ["1 本目", "2 本目"]) {
@@ -1915,7 +1918,7 @@ Deno.test({
       assertAdapterMatchesEnvironment(gpu);
       const session = await prepared.createContainerSession(gpu);
       try {
-        const run = async (inputs: Record<string, Tensor>): Promise<Float32Array> => {
+        const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
           const outputs = await session.run(inputs);
           const tensor = outputs[prepared.graph.outputs[0]];
           if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
@@ -2031,11 +2034,11 @@ const faultInjections = async (
   inputs: Record<string, Tensor>,
   tokens: Float32Array,
   expected: Float32Array,
-  run: (inputs: Record<string, Tensor>) => Promise<Float32Array>,
+  run: (inputs: Record<string, Tensor>) => Promise<Float32Array<ArrayBuffer>>,
   base: WanRopeBase,
 ): Promise<FaultResult[]> => {
   const grid = wanTokenGrid(golden.latentShape, WAN_GEOMETRY);
-  const unpatchify = (data: Float32Array) =>
+  const unpatchify = (data: Float32Array<ArrayBuffer>) =>
     unpatchifyTokens(data, golden.latentShape, WAN_GEOMETRY);
   const results: FaultResult[] = [];
   const measure = (label: string, actual: Float32Array) => {

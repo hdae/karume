@@ -24,7 +24,7 @@
  */
 
 /** サイズ `size` のビット反転表（DIT の入力並べ替え用）。 */
-const bitReverseTable = (size: number): Uint32Array => {
+const bitReverseTable = (size: number): Uint32Array<ArrayBuffer> => {
   const bits = Math.log2(size);
   const table = new Uint32Array(size);
   for (let index = 0; index < size; index += 1) {
@@ -45,12 +45,12 @@ const bitReverseTable = (size: number): Uint32Array => {
  */
 export class Fft {
   readonly size: number;
-  readonly #reversed: Uint32Array;
-  readonly #cos: Float64Array;
-  readonly #sin: Float64Array;
-  readonly #re: Float64Array;
-  readonly #im: Float64Array;
-  readonly #scratch: Float64Array;
+  readonly #reversed: Uint32Array<ArrayBuffer>;
+  readonly #cos: Float64Array<ArrayBuffer>;
+  readonly #sin: Float64Array<ArrayBuffer>;
+  readonly #re: Float64Array<ArrayBuffer>;
+  readonly #im: Float64Array<ArrayBuffer>;
+  readonly #scratch: Float64Array<ArrayBuffer>;
 
   constructor(size: number) {
     if (!Number.isInteger(size) || size < 2 || (size & (size - 1)) !== 0) {
@@ -73,7 +73,7 @@ export class Fft {
    * 実信号（長さ ≤ `size`・不足は**末尾**ゼロ詰め）のパワースペクトル `|X[k]|²` を
    * `out[0..size/2]` へ書く（`np.abs(np.fft.rfft(x, n=size))**2` と同じ並び）。
    */
-  powerSpectrum(input: Float32Array, out: Float64Array): void {
+  powerSpectrum(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
     const bins = this.size / 2 + 1;
     if (input.length > this.size) {
       throw new RangeError(`Fft: 入力 ${input.length} 点が変換長 ${this.size} を超えている`);
@@ -99,7 +99,7 @@ export class Fft {
    * パワースペクトルは実かつ偶対称なので、逆変換は同じバタフライを掛けて `size` で割れば
    * 得られる（`np.fft.irfft(S·conj(S))` と同値）。
    */
-  autocorrelation(input: Float32Array, out: Float64Array): void {
+  autocorrelation(input: Float32Array<ArrayBuffer>, out: Float64Array<ArrayBuffer>): void {
     if (input.length * 2 > this.size) {
       throw new RangeError(
         `Fft: 自己相関には信号長 ${input.length} の 2 倍以上の変換長が要る（${this.size} しかない）`,

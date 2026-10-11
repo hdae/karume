@@ -23,11 +23,11 @@
  * 測る波形突合の実測 maxAbs 5.16e-5 に対して 3 桁下で、ceil のような離散化も挟まらない。
  */
 export const buildZp = (
-  mP: Float32Array,
-  logsP: Float32Array,
-  expandIdx: Int32Array,
+  mP: Float32Array<ArrayBuffer>,
+  logsP: Float32Array<ArrayBuffer>,
+  expandIdx: Int32Array<ArrayBuffer>,
   channels: number,
-  noise: Float32Array,
+  noise: Float32Array<ArrayBuffer>,
   noiseScale: number,
 ): Float32Array<ArrayBuffer> => {
   if (!Number.isInteger(channels) || channels <= 0) {

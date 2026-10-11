@@ -39,7 +39,7 @@ const U32_MAX = 0xffff_ffff;
  * 「渡す波形 / 周波数を直す」の 1 つ = HTTP なら 400 に当たる（ADR 0107 決定 2・決定 5）。
  */
 export const encodeWav = (
-  samples: Float32Array,
+  samples: Float32Array<ArrayBufferLike>,
   sampleRate: number,
 ): Uint8Array<ArrayBuffer> => {
   if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
@@ -208,7 +208,7 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
  * barrel から出るだけで、パイプラインの内側からは呼ばれない）で、資産の齟齬ではない — 打つ手は
  * 「渡す WAV を直す」の 1 つ = HTTP なら 400 に当たる（ADR 0107 決定 2）。
  */
-export const decodeWav = (bytes: Uint8Array): DecodedWav => {
+export const decodeWav = (bytes: Uint8Array<ArrayBufferLike>): DecodedWav => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const { fmt, data } = findChunks(view);
   if (fmt.length < 16) {

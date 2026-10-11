@@ -37,13 +37,21 @@ export type WanRopeBase = {
   /** 軸ごとの周波数の本数（`2 × (t + h + w)` が head_dim）。 */
   readonly widths: readonly [number, number, number];
   /** `[t, h, w]` の順に並べた cos 素表（行優先 `[rows, widths[axis]]`）。 */
-  readonly cos: readonly [Float32Array, Float32Array, Float32Array];
+  readonly cos: readonly [
+    Float32Array<ArrayBuffer>,
+    Float32Array<ArrayBuffer>,
+    Float32Array<ArrayBuffer>,
+  ];
   /** 同 sin。 */
-  readonly sin: readonly [Float32Array, Float32Array, Float32Array];
+  readonly sin: readonly [
+    Float32Array<ArrayBuffer>,
+    Float32Array<ArrayBuffer>,
+    Float32Array<ArrayBuffer>,
+  ];
 };
 
 type RawTable = {
-  readonly data: Float32Array;
+  readonly data: Float32Array<ArrayBuffer>;
   readonly shape: readonly [number, number];
 };
 

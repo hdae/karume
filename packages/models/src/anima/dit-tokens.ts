@@ -103,7 +103,7 @@ export const tokenCount = (
  * ここを latent の写しにすると shape も長さも合ったまま値だけが変わる。
  */
 export const patchifyLatents = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   latentShape: readonly number[],
   geometry: DitPatchGeometry,
 ): Float32Array<ArrayBuffer> => {
@@ -143,7 +143,7 @@ export const patchifyLatents = (
  * shape は合ったまま画素が散る。
  */
 export const unpatchifyTokens = (
-  tokens: Float32Array,
+  tokens: Float32Array<ArrayBuffer>,
   latentShape: readonly number[],
   geometry: DitPatchGeometry,
 ): Float32Array<ArrayBuffer> => {

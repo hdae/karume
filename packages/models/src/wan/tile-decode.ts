@@ -259,7 +259,7 @@ export const finishWanVaeFrames = (
 export const decodeWanVaeStage = async (
   state: WanVaeDecodeState,
   plan: WanGenerationKnobs,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   generation: WanGenerationDescriptor,
   emit: (event: WanGenerateEvent) => Promise<void>,
   signal: AbortSignal | undefined,

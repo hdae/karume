@@ -62,7 +62,12 @@ export const parseSbv2Table = (buffer: ArrayBuffer, name: string): Sbv2Table => 
   };
 };
 
-const assertRow = (rows: number, cols: number, index: number, data: Float32Array): void => {
+const assertRow = (
+  rows: number,
+  cols: number,
+  index: number,
+  data: Float32Array<ArrayBuffer>,
+): void => {
   if (data.length !== rows * cols) {
     throw new Error(`表の要素数 ${data.length} が ${rows}×${cols} と違う`);
   }
@@ -91,7 +96,7 @@ export const assertFiniteStyleWeight = (weight: number): void => {
  * 平均を列ごとに計算し直す実装にすると、weight ≠ 1 のときだけ静かに別のベクトルになる。
  */
 export const styleVector = (
-  table: Float32Array,
+  table: Float32Array<ArrayBuffer>,
   rows: number,
   cols: number,
   index: number,
@@ -113,7 +118,7 @@ export const styleVector = (
  * （末尾の 1 は時間軸 — conv1d の broadcast 相手）。
  */
 export const speakerEmbedding = (
-  table: Float32Array,
+  table: Float32Array<ArrayBuffer>,
   rows: number,
   cols: number,
   index: number,

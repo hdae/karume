@@ -1057,7 +1057,10 @@ const conditionOf = (mu: number): Float32Array<ArrayBuffer> =>
  * 先頭の潜在フレームを条件の潜在で**写して**置き換えたモデル入力（置き換えの式とは独立に組む — 先頭フレーム以外の
  * 潜在と条件が ±0 でなければ式と同じ値）。
  */
-const copyFirstFrame = (latents: Float32Array, condition: Float32Array): Float32Array => {
+const copyFirstFrame = (
+  latents: Float32Array,
+  condition: Float32Array,
+): Float32Array<ArrayBuffer> => {
   const out = Float32Array.from(latents);
   const [channels, frames] = I2V_SHAPE;
   for (let channel = 0; channel < channels; channel += 1) {
@@ -1443,7 +1446,7 @@ describe("WanTi2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session
       Math.fround(Math.sin(index * 1.3) * 0.8 + 0.05)
     );
     // 要素をまたぐ擬似 DiT（全要素の平均と離れた要素を混ぜる — 置き換えた要素が他の要素の速度に効く）。
-    const model = (input: Float32Array): Float32Array => {
+    const model = (input: Float32Array): Float32Array<ArrayBuffer> => {
       const mean = input.reduce((total, value) => total + value, 0) / input.length;
       return input.map((value, index) =>
         Math.fround(0.3 * value - 0.2 * input[(index + 5) % input.length] + 0.1 * mean)
@@ -1451,16 +1454,16 @@ describe("WanTi2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session
     };
     for (const steps of [2, 10, 50]) {
       const schedule = wanUniPcSchedule(steps, 5, WAN_UNIPC_CONFIG.numTrainTimesteps);
-      const replace = (latents: Float32Array) =>
+      const replace = (latents: Float32Array<ArrayBuffer>) =>
         withWanFirstFrameCondition(latents, condition, shape);
       const diffusers = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
-      let current: Float32Array = initial;
+      let current: Float32Array<ArrayBuffer> = initial;
       for (let step = 0; step < steps; step += 1) {
         current = diffusers.step(model(replace(current)), current);
       }
       const diffusersFinal = replace(current);
       const official = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
-      let replaced: Float32Array = replace(initial);
+      let replaced: Float32Array<ArrayBuffer> = replace(initial);
       for (let step = 0; step < steps; step += 1) {
         replaced = replace(official.step(model(replaced), replaced));
       }

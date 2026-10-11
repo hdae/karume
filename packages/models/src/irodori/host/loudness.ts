@@ -130,7 +130,10 @@ const applyBiquad = (
  * ゲートを 1 ブロックも通らなかったときは −70 を返す（上流は `nan_to_num` → `log10(0)` →
  * `-inf` → `maximum(-70)` の順で同じ値に落ちる）。
  */
-export const integratedLoudness = (samples: Float32Array, sampleRate: number): number => {
+export const integratedLoudness = (
+  samples: Float32Array<ArrayBuffer>,
+  sampleRate: number,
+): number => {
   if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
     throw new RangeError(`integratedLoudness: サンプリング周波数 ${sampleRate} が正の整数でない`);
   }

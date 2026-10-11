@@ -74,7 +74,7 @@ const viewOf = (file: SafetensorsFile, key: string) => {
   return view;
 };
 
-const floats = (file: SafetensorsFile, key: string): Float32Array => {
+const floats = (file: SafetensorsFile, key: string): Float32Array<ArrayBuffer> => {
   const view = viewOf(file, key);
   if (view.dtype !== "F32") throw new Error(`fixture '${key}' が ${view.dtype}`);
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);

@@ -191,17 +191,17 @@ type Interval = {
  * 生成 1 本ごとに作り直す（上流の `set_timesteps` が状態を初期化するのと同じ）。
  */
 export class WanUniPcSampler {
-  readonly #sigmas: Float32Array;
+  readonly #sigmas: Float32Array<ArrayBuffer>;
   readonly #steps: number;
   readonly #config: WanUniPcConfig;
   #index = 0;
   #lowerOrderNums = 0;
   #thisOrder = 0;
-  #lastSample: Float32Array | undefined;
+  #lastSample: Float32Array<ArrayBuffer> | undefined;
   /** 直近の x0 の予測（古い順・長さは `solverOrder` まで）。 */
-  #history: Float32Array[] = [];
+  #history: Float32Array<ArrayBuffer>[] = [];
 
-  constructor(schedule: { readonly sigmas: Float32Array }, config: WanUniPcConfig) {
+  constructor(schedule: { readonly sigmas: Float32Array<ArrayBuffer> }, config: WanUniPcConfig) {
     if (schedule.sigmas.length < 2) {
       throw new RangeError(`σ 列の長さ ${schedule.sigmas.length} が 2 未満（steps ≥ 1 が要る）`);
     }
@@ -219,7 +219,10 @@ export class WanUniPcSampler {
    * 1 step 進める: `modelOutput`（flow の速度場 — CFG 合成済み）と現在の潜在 `sample` から次の
    * 潜在を返す。どちらも書き換えない。
    */
-  step(modelOutput: Float32Array, sample: Float32Array): Float32Array<ArrayBuffer> {
+  step(
+    modelOutput: Float32Array<ArrayBuffer>,
+    sample: Float32Array<ArrayBuffer>,
+  ): Float32Array<ArrayBuffer> {
     const index = this.#index;
     if (index >= this.#steps) {
       throw new RangeError(`step ${index + 1} 回目は σ 列（${this.#steps} step）の外`);
@@ -281,7 +284,7 @@ export class WanUniPcSampler {
   }
 
   /** 予測子（上流 `multistep_uni_p_bh_update` — 区間 `[σ[k] → σ[k+1]]`）。 */
-  #predict(sample: Float32Array, order: number): Float32Array<ArrayBuffer> {
+  #predict(sample: Float32Array<ArrayBuffer>, order: number): Float32Array<ArrayBuffer> {
     const index = this.#index;
     const interval = this.#interval(index + 1, index);
     const m0 = this.#history[this.#history.length - 1];
@@ -315,7 +318,11 @@ export class WanUniPcSampler {
    * x0・`lastSample` は前の step の修正後の潜在・`order` は前の step の次数。履歴（m0 = 前の step の
    * x0）は追加の**前**に読む。
    */
-  #correct(modelT: Float32Array, lastSample: Float32Array, order: number): Float32Array {
+  #correct(
+    modelT: Float32Array<ArrayBuffer>,
+    lastSample: Float32Array<ArrayBuffer>,
+    order: number,
+  ): Float32Array<ArrayBuffer> {
     const index = this.#index;
     const interval = this.#interval(index, index - 1);
     const m0 = this.#history[this.#history.length - 1];
@@ -364,8 +371,8 @@ export class WanUniPcSampler {
  * `g` は torch の Python スカラと同じく f32 へ落としてから掛ける）。
  */
 export const wanClassifierFreeGuidance = (
-  cond: Float32Array,
-  uncond: Float32Array,
+  cond: Float32Array<ArrayBuffer>,
+  uncond: Float32Array<ArrayBuffer>,
   guidance: number,
 ): Float32Array<ArrayBuffer> => {
   if (cond.length !== uncond.length) {

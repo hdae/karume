@@ -44,9 +44,9 @@ type DurationPlan = {
  * すら確保できない大きさになりうる — 確保してから見ると原因の遠い OOM になる。
  */
 export const durationsToFrames = (
-  logwSdp: Float32Array,
-  logwDp: Float32Array,
-  xMask: Float32Array,
+  logwSdp: Float32Array<ArrayBuffer>,
+  logwDp: Float32Array<ArrayBuffer>,
+  xMask: Float32Array<ArrayBuffer>,
   sdpRatio: number,
   lengthScale: number,
   maxFrames: number,

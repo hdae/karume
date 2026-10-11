@@ -93,7 +93,7 @@ Deno.test({
         const run = async (
           slice: Float32Array<ArrayBuffer>,
           tileFrames: number,
-        ): Promise<Float32Array> => {
+        ): Promise<Float32Array<ArrayBuffer>> => {
           const input: Tensor = {
             dtype: "f32",
             shape: [1, tileFrames, LATENT_DIM],

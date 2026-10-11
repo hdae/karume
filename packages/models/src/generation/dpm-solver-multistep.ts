@@ -38,19 +38,19 @@ export const needsUncond = (guidance: number): boolean => guidance !== 1;
 /** {@link dpmSolverMultistepStep} の入力。 */
 export type DpmSolverMultistepInput = {
   /** 現在の x（step 0 では初期ノイズ、以降は前 step の {@link DpmSolverMultistepUpdate.sample}）。 */
-  readonly sample: Float32Array;
+  readonly sample: Float32Array<ArrayBuffer>;
   /** cond 側のモデル出力（flow の速度場）。 */
-  readonly cond: Float32Array;
+  readonly cond: Float32Array<ArrayBuffer>;
   /** uncond 側のモデル出力。有無を {@link needsUncond} とちょうど一致させる。 */
-  readonly uncond: Float32Array | undefined;
+  readonly uncond: Float32Array<ArrayBuffer> | undefined;
   /** CFG scale。 */
   readonly guidance: number;
   /** sigma 梯子。長さ `steps + 1`・**末尾は厳密に 0**（`final_sigmas_type="zero"` と対）。 */
-  readonly sigmas: Float32Array;
+  readonly sigmas: Float32Array<ArrayBuffer>;
   /** これから踏む step の添字（`0 ≤ index < steps`）。 */
   readonly index: number;
   /** 直前 step の {@link DpmSolverMultistepUpdate.x0}。`index === 0` でのみ `undefined`。 */
-  readonly previousX0: Float32Array | undefined;
+  readonly previousX0: Float32Array<ArrayBuffer> | undefined;
 };
 
 /** {@link dpmSolverMultistepStep} の出力。`x0` は次 step の `previousX0` にそのまま渡す。 */

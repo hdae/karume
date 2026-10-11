@@ -94,7 +94,7 @@ const rotateRight = (value: number, bits: number): number =>
   (value >>> bits) | (value << (32 - bits));
 
 /** バイト列の SHA-256 を小文字 16 進 64 文字で返す。 */
-export const sha256HexSync = (bytes: Uint8Array): string => {
+export const sha256HexSync = (bytes: Uint8Array<ArrayBuffer>): string => {
   // パディング: 0x80 → 0 埋め → 末尾 8 バイトにビット長（ビッグエンディアン）。
   const blocks = Math.ceil((bytes.length + 9) / BLOCK_BYTES);
   const padded = new Uint8Array(blocks * BLOCK_BYTES);

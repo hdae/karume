@@ -227,7 +227,7 @@ export const wanVaeTileCount = (plan: WanVaeTilePlan): number =>
   plan.rows.starts.length * plan.cols.starts.length;
 
 /** 潜在 `[C, F, H, W]` のフレーム数 F（長さが計画と合わなければ fail loudly）。 */
-const latentFrames = (plan: WanVaeTilePlan, latents: Float32Array): number => {
+const latentFrames = (plan: WanVaeTilePlan, latents: Float32Array<ArrayBuffer>): number => {
   const plane = plan.latentChannels * plan.rows.extent * plan.cols.extent;
   const frames = latents.length / plane;
   if (!Number.isInteger(frames) || frames < 1) {
@@ -244,7 +244,7 @@ const latentFrames = (plan: WanVaeTilePlan, latents: Float32Array): number => {
  */
 export const wanVaeLatentTile = (
   plan: WanVaeTilePlan,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   row: number,
   col: number,
 ): Float32Array<ArrayBuffer> => {
@@ -281,8 +281,8 @@ export const wanVaeLatentTile = (
  * 動かすと参照と最終桁で割れる。
  */
 const blendVertical = (
-  above: Float32Array,
-  current: Float32Array,
+  above: Float32Array<ArrayBuffer>,
+  current: Float32Array<ArrayBuffer>,
   planes: number,
   height: number,
   width: number,
@@ -306,8 +306,8 @@ const blendVertical = (
 
 /** 左のタイルとの線形ランプ合成（上流 `blend_h` と同型・**in-place**）。 */
 const blendHorizontal = (
-  left: Float32Array,
-  current: Float32Array,
+  left: Float32Array<ArrayBuffer>,
+  current: Float32Array<ArrayBuffer>,
   planes: number,
   height: number,
   width: number,
@@ -333,7 +333,7 @@ const blendHorizontal = (
  * フレーム数）。
  */
 const assembleOwnedTiles = (
-  working: readonly Float32Array[],
+  working: readonly Float32Array<ArrayBuffer>[],
   plan: WanVaeTilePlan,
 ): Float32Array<ArrayBuffer> => {
   const { rows, cols, scale } = plan;
@@ -425,7 +425,7 @@ const assembleOwnedTiles = (
  * する {@link decodeWanVaeTiled} は写さずに本体を呼ぶ。
  */
 export const assembleWanVaeTiles = (
-  tiles: readonly Float32Array[],
+  tiles: readonly Float32Array<ArrayBuffer>[],
   plan: WanVaeTilePlan,
 ): Float32Array<ArrayBuffer> =>
   assembleOwnedTiles(tiles.map((tile) => Float32Array.from(tile)), plan);
@@ -449,7 +449,7 @@ export const decodeWanVaeTiles = async (
   sessions: { readonly first: Session; readonly next: Session },
   caches: WanVaeChunkCaches,
   plan: WanVaeTilePlan,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   onTile?: (tile: number) => void | Promise<void>,
 ): Promise<Float32Array<ArrayBuffer>[]> => {
   const { layout } = caches;
@@ -489,7 +489,7 @@ export const decodeWanVaeTiled = async (
   sessions: { readonly first: Session; readonly next: Session },
   caches: WanVaeChunkCaches,
   plan: WanVaeTilePlan,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   onTile?: (tile: number) => void | Promise<void>,
 ): Promise<Float32Array<ArrayBuffer>> =>
   assembleOwnedTiles(await decodeWanVaeTiles(gpu, sessions, caches, plan, latents, onTile), plan);
@@ -557,7 +557,7 @@ export const unpatchifyWanVaeFrames = (
  * フレームを `[-1, 1]` へ in-place にクランプする（上流 `torch.clamp(min=-1, max=1)` と同じ —
  * NaN は NaN のまま・`-0` は `-0` のまま）。
  */
-export const clampWanVaeFrames = (frames: Float32Array): void => {
+export const clampWanVaeFrames = (frames: Float32Array<ArrayBuffer>): void => {
   for (let index = 0; index < frames.length; index += 1) {
     const value = frames[index];
     if (value > 1) frames[index] = 1;

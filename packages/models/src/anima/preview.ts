@@ -74,7 +74,7 @@ const LATENT_RGB_BIAS: readonly [number, number, number] = [-0.1835, -0.0868, -0
  * なる（長さは合っているので黙って通る）。`denormalizeLatents` と同じ流儀。
  */
 export const approximatePreview = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBufferLike>,
   shape: readonly number[],
 ): {
   readonly width: number;

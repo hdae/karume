@@ -138,7 +138,10 @@ const loadLocalAssets = async (
  * 特徴抽出と後処理はパイプラインと同じホスト実装を呼ぶ — ここで別実装を書くと、
  * 比べているものが「配布形経路 vs 直接経路」ではなく「実装 A vs 実装 B」になる。
  */
-const directLab = async (audio: Float32Array, melBasis: Float32Array): Promise<string> => {
+const directLab = async (
+  audio: Float32Array,
+  melBasis: Float32Array<ArrayBuffer>,
+): Promise<string> => {
   const features = extractFeatures(audio, melBasis);
   const usable = features.frames - (features.frames % TIME_STRIDE);
   const prepared = prepareContainer(await openSeriesContainer(SERIES_MODEL), SERIES_GRAPH);

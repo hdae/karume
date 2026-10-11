@@ -206,7 +206,7 @@ Deno.test("assembleWanVaeTiles: 1 枚（縮退）はタイルの素の写し（�
 });
 
 /** タイル内の位置（行 / 列番号）を値に持つ `[3, 2, 8, 8]`（重なりの値が隣のタイルと**違う**）。 */
-const rampTile = (axis: "rows" | "cols"): Float32Array =>
+const rampTile = (axis: "rows" | "cols"): Float32Array<ArrayBuffer> =>
   new Float32Array(3 * 2 * 64).map((_, index) => {
     const offset = index % 64;
     return axis === "rows" ? Math.floor(offset / 8) : offset % 8;
@@ -335,7 +335,7 @@ Deno.test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で
     const side = TILE * SCALE;
     const plane = side * side;
     for (const axis of ["rows", "cols"] as const) {
-      const tiles: Float32Array[] = [];
+      const tiles: Float32Array<ArrayBuffer>[] = [];
       for (const top of plan.rows.starts) {
         for (const left of plan.cols.starts) {
           // [3, 1, 256, 256]・値 = 出力の絶対位置（行なら y・列なら x の px）。

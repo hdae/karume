@@ -463,7 +463,8 @@ Deno.test("AnimaTokenizers: 対にならないサロゲートは両トークナ�
 Deno.test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）から組む", () => {
   // 実資産の JSON 形は「行区切りの語彙 + 件数」なので、**件数の食い違いを落とす**ところまでが
   // 入口の契約（merges が欠けても BPE は落ちず、id 列だけが静かに別物になる）。
-  const encode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+  const encode = (value: unknown): Uint8Array<ArrayBuffer> =>
+    new TextEncoder().encode(JSON.stringify(value));
   const qwen2Json = {
     vocabText: "a\nb\nab",
     vocabCount: 3,
@@ -564,14 +565,19 @@ const gateT5Json = {
   maxLength: 8,
 };
 
-const gateEncode = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value));
+const gateEncode = (value: unknown): Uint8Array<ArrayBuffer> =>
+  new TextEncoder().encode(JSON.stringify(value));
 
 /** 片方だけ壊した資産対（もう片方は必ず正しい形 — 落ちた側が特定できる）。 */
-const brokenQwen2 = (patch: Record<string, unknown>): [Uint8Array, Uint8Array] => [
+const brokenQwen2 = (
+  patch: Record<string, unknown>,
+): [Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>] => [
   gateEncode({ ...gateQwen2Json, ...patch }),
   gateEncode(gateT5Json),
 ];
-const brokenT5 = (patch: Record<string, unknown>): [Uint8Array, Uint8Array] => [
+const brokenT5 = (
+  patch: Record<string, unknown>,
+): [Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>] => [
   gateEncode(gateQwen2Json),
   gateEncode({ ...gateT5Json, ...patch }),
 ];

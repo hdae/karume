@@ -93,10 +93,10 @@ export const animaLatents = (): {
  * mean/std が当たった**沈黙誤値**になる（長さは割り切れるので黙って通る）。
  */
 export const denormalizeLatents = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBufferLike>,
   shape: readonly number[],
-  mean: Float32Array,
-  std: Float32Array,
+  mean: Float32Array<ArrayBufferLike>,
+  std: Float32Array<ArrayBufferLike>,
 ): Float32Array<ArrayBuffer> => {
   if (shape[0] !== 1) {
     throw new Error(`逆正規化は batch=1 前提（B=${shape[0]} はチャネル区間が崩れる）`);

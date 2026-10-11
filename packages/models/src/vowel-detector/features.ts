@@ -89,7 +89,7 @@ type VowelFeatures = {
 };
 
 /** periodic hann 窓（`np.hanning(length + 1)[:-1]` と同値）。値は f32 へ丸める。 */
-const hannWindow = (length: number): Float32Array => {
+const hannWindow = (length: number): Float32Array<ArrayBuffer> => {
   const window = new Float32Array(length);
   for (let index = 0; index < length; index += 1) {
     window[index] = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / length);
@@ -133,7 +133,10 @@ export const featureFrameCount = (samples: number): number =>
  * 1 フレームも取れない長さは fail loudly（Python は空配列を返し、後段の `mean()` が NaN を
  * 撒く — 黙って NaN の特徴を作るより落とす）。
  */
-export const extractFeatures = (audio: Float32Array, melBasis: Float32Array): VowelFeatures => {
+export const extractFeatures = (
+  audio: Float32Array<ArrayBufferLike>,
+  melBasis: Float32Array<ArrayBuffer>,
+): VowelFeatures => {
   if (melBasis.length !== N_MELS * MEL_BINS) {
     throw new Error(
       `extractFeatures: mel 基底が ${melBasis.length} 要素（${N_MELS}×${MEL_BINS} = ${

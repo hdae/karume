@@ -88,7 +88,7 @@ export const wanTokenGrid = (
  * （`V = pt·ph·pw`・`token = (f·H' + h)·W' + w`）。
  */
 export const patchifyLatents = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   latentShape: readonly number[],
   geometry: WanPatchGeometry,
 ): Float32Array<ArrayBuffer> => {
@@ -131,7 +131,7 @@ export const patchifyLatents = (
  * MUST: patchify の逆順ではない（モジュール doc）。
  */
 export const unpatchifyTokens = (
-  tokens: Float32Array,
+  tokens: Float32Array<ArrayBuffer>,
   latentShape: readonly number[],
   geometry: WanPatchGeometry,
 ): Float32Array<ArrayBuffer> => {

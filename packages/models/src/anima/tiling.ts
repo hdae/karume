@@ -199,7 +199,7 @@ export const tileCount = (geometry: TileGeometry): number =>
  * latent `[1,C,H,W]` から `(row, col)` のタイル `[1,C,th,tw]` を切り出す（平面ごとのコピー）。
  */
 export const latentTile = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   geometry: TileGeometry,
   row: number,
   col: number,
@@ -241,8 +241,8 @@ export const latentTile = (
  * 位置を動かすと参照と最終桁で割れる。
  */
 const blendVertical = (
-  above: Float32Array,
-  current: Float32Array,
+  above: Float32Array<ArrayBuffer>,
+  current: Float32Array<ArrayBuffer>,
   planes: number,
   height: number,
   width: number,
@@ -266,8 +266,8 @@ const blendVertical = (
 
 /** 左のタイルとの線形ランプ合成（上流 `blend_h` と同型・**in-place**）。 */
 const blendHorizontal = (
-  left: Float32Array,
-  current: Float32Array,
+  left: Float32Array<ArrayBuffer>,
+  current: Float32Array<ArrayBuffer>,
   planes: number,
   height: number,
   width: number,
@@ -293,7 +293,7 @@ const blendHorizontal = (
  * {@link assembleTiles} と、配列を所有する内部経路 {@link decodeTiled} が同じ検査を通る。
  */
 const assembleOwnedTiles = (
-  working: Float32Array[],
+  working: Float32Array<ArrayBuffer>[],
   geometry: TileGeometry,
 ): Float32Array<ArrayBuffer> => {
   const { rows, cols, scale } = geometry;
@@ -392,7 +392,7 @@ const assembleOwnedTiles = (
  * は写さずに本体を直接呼ぶ。
  */
 export const assembleTiles = (
-  decoded: readonly Float32Array[],
+  decoded: readonly Float32Array<ArrayBuffer>[],
   geometry: TileGeometry,
 ): Float32Array<ArrayBuffer> =>
   assembleOwnedTiles(decoded.map((tile) => Float32Array.from(tile)), geometry);
@@ -412,11 +412,15 @@ export const assembleTiles = (
  * そのままこの契約を満たしている。
  */
 export const decodeTiled = async (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   geometry: TileGeometry,
-  decode: (tile: Float32Array<ArrayBuffer>, row: number, col: number) => Promise<Float32Array>,
+  decode: (
+    tile: Float32Array<ArrayBuffer>,
+    row: number,
+    col: number,
+  ) => Promise<Float32Array<ArrayBuffer>>,
 ): Promise<Float32Array<ArrayBuffer>> => {
-  const decoded: Float32Array[] = [];
+  const decoded: Float32Array<ArrayBuffer>[] = [];
   for (let row = 0; row < geometry.rows.starts.length; row += 1) {
     for (let col = 0; col < geometry.cols.starts.length; col += 1) {
       decoded.push(await decode(latentTile(latents, geometry, row, col), row, col));

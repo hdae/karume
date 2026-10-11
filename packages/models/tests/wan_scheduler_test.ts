@@ -92,7 +92,7 @@ const fixture: SafetensorsFile = await (async () => {
   );
 })();
 
-const floats = (key: string): Float32Array => {
+const floats = (key: string): Float32Array<ArrayBuffer> => {
   const view = fixture.tensors.get(key);
   if (view === undefined || view.dtype !== "F32") throw new Error(`fixture '${key}' が F32 で無い`);
   return new Float32Array(fixture.buffer, view.byteOffset, view.byteLength / 4);
@@ -107,13 +107,13 @@ const ELEMENTS = meta.latent_shape.reduce((count, dim) => count * dim, 1);
 
 /** 上流の軌跡のループ（`for t in timesteps: latents = step(out[i], t, latents)`）を TS で回す。 */
 const runTrajectory = (
-  sigmas: Float32Array,
+  sigmas: Float32Array<ArrayBuffer>,
   config: WanUniPcConfig = WAN_UNIPC_CONFIG,
   order: readonly number[] = [...Array(STEPS).keys()],
 ): Float32Array[] => {
   const outputs = floats("model_outputs");
   const sampler = new WanUniPcSampler({ sigmas }, config);
-  let latents: Float32Array = floats("latents_init").slice();
+  let latents: Float32Array<ArrayBuffer> = floats("latents_init").slice();
   const states: Float32Array[] = [];
   for (const step of order) {
     latents = sampler.step(outputs.subarray(step * ELEMENTS, (step + 1) * ELEMENTS), latents);
@@ -226,18 +226,19 @@ Deno.test("UniPC 故障注入（σ 列の門）: σ[0] の補正を落とす・�
     ...flowShiftedSigmas(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps),
     0,
   ]);
-  const faults: readonly { readonly label: string; readonly sigmas: Float32Array }[] = [
-    { label: "σ[0] の 1e-6 の補正を落とす", sigmas: noEpsilon },
-    {
-      label: "σ 列を 1 つずらす（51 step の列の 2 本目から）",
-      sigmas: wanUniPcSchedule(STEPS + 1, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas
-        .slice(1),
-    },
-    {
-      label: "shift 5.0",
-      sigmas: wanUniPcSchedule(STEPS, 5, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas,
-    },
-  ];
+  const faults: readonly { readonly label: string; readonly sigmas: Float32Array<ArrayBuffer> }[] =
+    [
+      { label: "σ[0] の 1e-6 の補正を落とす", sigmas: noEpsilon },
+      {
+        label: "σ 列を 1 つずらす（51 step の列の 2 本目から）",
+        sigmas: wanUniPcSchedule(STEPS + 1, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas
+          .slice(1),
+      },
+      {
+        label: "shift 5.0",
+        sigmas: wanUniPcSchedule(STEPS, 5, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas,
+      },
+    ];
   for (const { label, sigmas } of faults) {
     assertEquals(sigmas.length, want.length, label);
     const mismatched = [...bitsOf(sigmas)].filter((bits, index) => bits !== want[index]).length;

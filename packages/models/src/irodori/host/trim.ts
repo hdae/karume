@@ -34,7 +34,7 @@ const MEAN_THRESHOLD = 0.1;
  * しきい値 0.05 の判定がフレーム単位でずれる。
  */
 export const findFlatteningPoint = (
-  latent: Float32Array,
+  latent: Float32Array<ArrayBuffer>,
   frames: number,
   latentDim: number,
 ): number => {

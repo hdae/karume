@@ -259,7 +259,7 @@ Deno.test("Viterbi: 非有限の log 事後確率は座標を添えて落とす"
 const logitsFor = (
   sequence: readonly (typeof LIPSYNC_CLASSES[number])[],
   overrides: Readonly<Record<number, Readonly<Record<string, number>>>> = {},
-): Float32Array => {
+): Float32Array<ArrayBuffer> => {
   const classes = LIPSYNC_CLASSES.length;
   const logits = new Float32Array(sequence.length * classes);
   for (let frame = 0; frame < sequence.length; frame += 1) {

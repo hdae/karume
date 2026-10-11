@@ -188,7 +188,7 @@ const inverseLatentStd = (std: number): number => f32(1 / f32(std));
 
 /** 統計の本数と潜在の要素数の整合を見て、1 チャネルあたりの要素数を返す（`what` は文言の頭）。 */
 const elementsPerChannel = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   stats: WanLatentStats,
   what: string,
 ): number => {
@@ -213,7 +213,7 @@ const elementsPerChannel = (
  * 最終桁が変わる。
  */
 export const denormalizeWanLatents = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   stats: WanLatentStats,
 ): Float32Array<ArrayBuffer> => {
   const perChannel = elementsPerChannel(latents, stats, "逆正規化");
@@ -239,7 +239,7 @@ export const denormalizeWanLatents = (
  * 最終桁が変わる。
  */
 export const normalizeWanLatents = (
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   stats: WanLatentStats,
 ): Float32Array<ArrayBuffer> => {
   const perChannel = elementsPerChannel(latents, stats, "正規化");

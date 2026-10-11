@@ -192,7 +192,7 @@ export const wanI2vPixels = (image: Rgb8Image): Float32Array<ArrayBuffer> => {
  * 写しだけで浮動小数の演算は無い（値はビット単位で保たれる）。形・倍率・長さの食い違いは fail loudly。
  */
 export const patchifyWanImage = (
-  pixels: Float32Array,
+  pixels: Float32Array<ArrayBuffer>,
   shape: readonly [number, number, number],
   patchSize: number,
 ): Float32Array<ArrayBuffer> => {

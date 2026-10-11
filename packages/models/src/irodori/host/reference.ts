@@ -49,7 +49,7 @@ type NormalizedReference = {
  * `_decomposition_evidence` が上流の出力とのビット一致を毎回実測している）。
  */
 export const normalizeReference = (
-  samples: Float32Array,
+  samples: Float32Array<ArrayBuffer>,
   sampleRate: number,
 ): NormalizedReference => {
   // MUST: 空波形はこの入口で落とす。この先の `integratedLoudness` は窓の本数が 0 になって

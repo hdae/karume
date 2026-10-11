@@ -40,7 +40,7 @@ import { ModelInputError } from "../errors.ts";
 
 /** RGB8 の画素列（行優先・画素あたり 3 バイト）と、その寸法。 */
 export type Rgb8Image = {
-  readonly data: Uint8Array;
+  readonly data: Uint8Array<ArrayBufferLike>;
   readonly width: number;
   readonly height: number;
 };
@@ -85,7 +85,7 @@ const KERNELS: Readonly<Record<ResampleFilter, Kernel>> = {
 /** 出力 1 点ぶんの入力範囲と重み。 */
 type Tap = {
   readonly start: number;
-  readonly weights: Float64Array;
+  readonly weights: Float64Array<ArrayBuffer>;
 };
 
 /**
@@ -248,7 +248,7 @@ export const resizeRgb8 = (
  * つまりここは**内部ヘルパの事前条件**であり、ADR 0107 決定 3 が適用範囲から外した側にある。
  */
 export const resizePlaneF32 = (
-  plane: Float32Array,
+  plane: Float32Array<ArrayBuffer>,
   sourceWidth: number,
   sourceHeight: number,
   width: number,

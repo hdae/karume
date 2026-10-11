@@ -48,11 +48,11 @@ export const assertDims = (
   }
 };
 
-export const asF32 = (tensor: Tensor, where: string): Float32Array => {
+export const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
   if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
   return tensor.data;
 };
 
 /** 最初の非有限値の添字（無ければ -1）。 */
-export const firstNonFinite = (values: Float32Array): number =>
+export const firstNonFinite = (values: Float32Array<ArrayBuffer>): number =>
   values.findIndex((value) => !Number.isFinite(value));

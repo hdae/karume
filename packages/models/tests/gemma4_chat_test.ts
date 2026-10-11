@@ -786,7 +786,9 @@ Deno.test({
   name: "gemma4 chat 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）",
   ignore: seriesBytes === undefined,
   fn: () => {
-    const full = new GemmaTokenizer(parseGemmaTokenizerAsset(seriesBytes as Uint8Array));
+    const full = new GemmaTokenizer(
+      parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>),
+    );
     for (const testCase of fixture.chat) {
       assertEquals(gemma4ChatPrompt(full, testCase.messages), testCase.ids, testCase.name);
     }

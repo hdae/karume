@@ -308,7 +308,7 @@ const AUDIO_COMMAND = "deno task demo:eval-audio --source <Irodori 配布形の�
 /** mel 基底のフィクスチャ（`melBasis` 以外の欄はこの門では使わない）。 */
 type Fixture = { readonly melBasis: number[][] };
 
-const melBasis: Float32Array = Float32Array.from(
+const melBasis: Float32Array<ArrayBuffer> = Float32Array.from(
   (JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture).melBasis.flat(),
 );
 

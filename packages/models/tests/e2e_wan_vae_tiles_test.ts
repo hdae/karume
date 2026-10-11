@@ -411,7 +411,7 @@ Deno.test({
       const acceptLatents = accept.tensor("latents");
       const acceptWant = accept.tensor("frames").data;
       const acceptPlan = planFor(layout, acceptLatents.shape);
-      let acceptTiles: Float32Array[] = [];
+      let acceptTiles: Float32Array<ArrayBuffer>[] = [];
 
       await t.step(
         "accept: 480×832・9 フレーム（別の潜在・chunk 境界・縦長）が帯の中",

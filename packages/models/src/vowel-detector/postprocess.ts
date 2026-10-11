@@ -57,7 +57,7 @@ type ClassRun = readonly [classId: number, start: number, end: number];
  * @param where エラー文言の接頭辞（関数名 + 何の格子か）。
  */
 const assertFiniteGrid = (
-  values: Float32Array | Float64Array,
+  values: Float32Array<ArrayBuffer> | Float64Array<ArrayBuffer>,
   frames: number,
   where: string,
 ): void => {
@@ -89,7 +89,10 @@ export type LabSegment = {
  * 門から名指しできるように出してある（漸化式の綴りが 1 箇所ずれても `.lab` は
  * 「それらしい別の区間割り」になるだけで、末端の文字列比較まで異常が見えない）。
  */
-export const viterbiSmooth = (logProbabilities: Float64Array, frames: number): Int32Array => {
+export const viterbiSmooth = (
+  logProbabilities: Float64Array<ArrayBuffer>,
+  frames: number,
+): Int32Array<ArrayBuffer> => {
   if (logProbabilities.length !== frames * CLASS_COUNT) {
     throw new Error(
       `viterbiSmooth: log 事後確率が ${logProbabilities.length} 要素` +
@@ -135,7 +138,7 @@ export const viterbiSmooth = (logProbabilities: Float64Array, frames: number): I
 };
 
 /** クラス列 → 連続区間（`frameSec` を掛けた尺度で返す）。 */
-const toRuns = (path: Int32Array, frameSec: number): ClassRun[] => {
+const toRuns = (path: Int32Array<ArrayBuffer>, frameSec: number): ClassRun[] => {
   const runs: ClassRun[] = [];
   let start = 0;
   for (let frame = 1; frame <= path.length; frame += 1) {
@@ -153,7 +156,10 @@ const toRuns = (path: Int32Array, frameSec: number): ClassRun[] => {
  * 1 箇所塗るたびに走査をやり直す（塗り替えで run の構造そのものが変わるため）。収束するまで
  * 繰り返す。`pau` は短くても残す。
  */
-const mergeShortRuns = (path: Int32Array, logProbabilities: Float64Array): Int32Array => {
+const mergeShortRuns = (
+  path: Int32Array<ArrayBuffer>,
+  logProbabilities: Float64Array<ArrayBuffer>,
+): Int32Array<ArrayBuffer> => {
   const merged = path.slice();
   let changed = true;
   while (changed) {
@@ -231,7 +237,10 @@ const absorbConsonants = (runs: readonly ClassRun[]): LabSegment[] => {
  * 避けるこの形と log 事後確率としては同値 — 差は f64 の丸めぶんだけで、段 2 以降は
  * すべて**差**しか見ない）。
  */
-export const logitsToSegments = (logits: Float32Array, frames: number): LabSegment[] => {
+export const logitsToSegments = (
+  logits: Float32Array<ArrayBuffer>,
+  frames: number,
+): LabSegment[] => {
   if (logits.length !== frames * CLASS_COUNT) {
     throw new Error(
       `logitsToSegments: ロジットが ${logits.length} 要素（${frames}×${CLASS_COUNT} が要る）`,

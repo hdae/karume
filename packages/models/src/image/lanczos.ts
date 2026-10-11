@@ -73,7 +73,7 @@ const lanczos = (x: number): number => (-SUPPORT <= x && x < SUPPORT ? sinc(x) *
 /** 出力 1 点ぶんの入力範囲と固定小数点の係数。 */
 type FixedTap = {
   readonly start: number;
-  readonly coefficients: Int32Array;
+  readonly coefficients: Int32Array<ArrayBuffer>;
 };
 
 /** 1 軸の出力の窓（伸縮後の添字 `offset` から `length` 個）。 */

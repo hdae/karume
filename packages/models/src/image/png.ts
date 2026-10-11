@@ -44,7 +44,7 @@ const FILTER_NONE = 0;
  * 呼び出しごとに組み直すが、PNG 1 枚あたりの呼び出しは 3 チャンクだけで、表の構築は
  * 2,048 回の整数演算 = 数 MB の IDAT に掛かる CRC 本体に対して無視できる。
  */
-const buildCrcTable = (): Uint32Array => {
+const buildCrcTable = (): Uint32Array<ArrayBuffer> => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n += 1) {
     let c = n;
@@ -57,7 +57,7 @@ const buildCrcTable = (): Uint32Array => {
 };
 
 /** PNG チャンクの CRC-32（ISO 3309 / ITU-T V.42 — 反転初期値・反転出力）。 */
-export const crc32 = (bytes: Uint8Array): number => {
+export const crc32 = (bytes: Uint8Array<ArrayBuffer>): number => {
   const table = buildCrcTable();
   let crc = 0xffffffff;
   for (let index = 0; index < bytes.length; index += 1) {
@@ -67,7 +67,7 @@ export const crc32 = (bytes: Uint8Array): number => {
 };
 
 /** 1 チャンク（長さ 4 + 型 4 + データ + CRC 4）。CRC は**型を含む**範囲に掛かる。 */
-const chunk = (type: string, data: Uint8Array): Uint8Array<ArrayBuffer> => {
+const chunk = (type: string, data: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
   const out = new Uint8Array(12 + data.length);
   const view = new DataView(out.buffer);
   view.setUint32(0, data.length);
@@ -101,7 +101,7 @@ const deflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<Array
  * MUST: 落とす前に 255 であることを検査する（半透明を黙って不透明化しない）。
  */
 export const encodePng = async (
-  rgba: Uint8ClampedArray | Uint8Array,
+  rgba: Uint8ClampedArray<ArrayBufferLike> | Uint8Array<ArrayBufferLike>,
   width: number,
   height: number,
 ): Promise<Uint8Array<ArrayBuffer>> => {

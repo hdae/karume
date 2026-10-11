@@ -141,7 +141,7 @@ Deno.test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値�
 /** 軸ごとに違う幅・違う値を持つ素表（ブロック順と読み出し位置の取り違えが必ず露見する形）。 */
 const syntheticRopeBase = (rows: number): RopeBase => {
   const widths: readonly [number, number, number] = [1, 2, 3];
-  const make = (axis: number, kind: number): Float32Array =>
+  const make = (axis: number, kind: number): Float32Array<ArrayBuffer> =>
     Float32Array.from(
       { length: rows * widths[axis] },
       (_, i) =>

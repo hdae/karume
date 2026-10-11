@@ -38,7 +38,7 @@ export type WanPrompt = {
 export type WanTextEmbedding = WanPrompt & {
   /** 有効長 `L_valid`（トークナイザのマスクが 1 の長さ）。 */
   readonly tokens: number;
-  readonly data: Float32Array;
+  readonly data: Float32Array<ArrayBuffer>;
 };
 
 /** 埋め込み資産の全体（検査済み）。 */

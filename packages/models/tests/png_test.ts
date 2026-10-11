@@ -21,7 +21,7 @@ Deno.test("crc32: 既知ベクタ（CRC-32/ISO-HDLC の check 値と IEND チャ
 
 /** PNG のチャンクを頭から辿る（長さ・型・CRC を全部見る）。 */
 const walkChunks = (
-  png: Uint8Array,
+  png: Uint8Array<ArrayBuffer>,
 ): readonly { type: string; data: Uint8Array; crcOk: boolean }[] => {
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
   const chunks: { type: string; data: Uint8Array; crcOk: boolean }[] = [];

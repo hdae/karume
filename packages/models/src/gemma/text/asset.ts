@@ -268,7 +268,7 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
 };
 
 /** 取得済みバイト列（manifest の `tokenizer`）から資産表を組む。 */
-export const parseGemmaTokenizerAsset = (bytes: Uint8Array): GemmaTokenizerAssets => {
+export const parseGemmaTokenizerAsset = (bytes: Uint8Array<ArrayBuffer>): GemmaTokenizerAssets => {
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);

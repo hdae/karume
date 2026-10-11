@@ -493,7 +493,7 @@ const featureWidth = (dims: readonly (number | string)[], where: string): number
   return last;
 };
 
-const asF32 = (tensor: Tensor, where: string): Float32Array => {
+const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
   if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);
   return tensor.data;
 };
@@ -1304,7 +1304,7 @@ export class AnimaPipeline {
             current: Float32Array<ArrayBuffer>,
             proj: Tensor,
             embed: Float32Array<ArrayBuffer>,
-          ): Promise<Float32Array> => {
+          ): Promise<Float32Array<ArrayBuffer>> => {
             const output = await run({
               tokens: {
                 dtype: "f32",
@@ -1337,7 +1337,7 @@ export class AnimaPipeline {
                 state.config.scheduler.numTrainTimesteps,
               ),
             };
-            const predictions: Float32Array[] = [];
+            const predictions: Float32Array<ArrayBuffer>[] = [];
             for (const embed of padded) predictions.push(await predict(current, proj, embed));
             const update = denoiseStep(sampler, {
               sample: current,

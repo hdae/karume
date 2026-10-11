@@ -58,7 +58,7 @@ type FixtureMeta = {
 
 type Fixture = {
   readonly meta: FixtureMeta;
-  readonly f32: (name: string) => { data: Float32Array; shape: readonly number[] };
+  readonly f32: (name: string) => { data: Float32Array<ArrayBuffer>; shape: readonly number[] };
   readonly has: (name: string) => boolean;
   /** dtype を問わない shape（id 列 = I32 の行数を読むため）。 */
   readonly shape: (name: string) => readonly number[];

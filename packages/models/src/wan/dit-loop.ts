@@ -375,8 +375,8 @@ export const wanConditionMask = (
  * NOTE: `export` は GPU 無しで置き換えを縛るテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
 export const withWanFirstFrameCondition = (
-  latents: Float32Array,
-  condition: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
+  condition: Float32Array<ArrayBuffer>,
   latentShape: readonly [number, number, number, number],
 ): Float32Array<ArrayBuffer> => {
   const [channels, frames, height, width] = latentShape;

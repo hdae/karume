@@ -91,7 +91,7 @@ const declaration = (
   });
 
 /** チャネル軸（dim 1）の総和。GPU 側は `sum` の縮約順なので、比較は許容差つきで行う。 */
-const channelSum = (pixelValues: Float32Array): Float32Array => {
+const channelSum = (pixelValues: Float32Array): Float32Array<ArrayBuffer> => {
   const out = new Float32Array(PLANE);
   for (let index = 0; index < PLANE; index += 1) {
     let sum = 0;

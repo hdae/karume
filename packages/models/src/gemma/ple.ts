@@ -375,7 +375,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
    * f64 のまま 1 度に丸めると subnormal 域で 2 段丸めと結果が割れうる（ADR 0085 決定 4）。
    */
   const writeRow = (
-    data: Float32Array,
+    data: Float32Array<ArrayBuffer>,
     target: number,
     values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>,
     valuesFrom: number,
@@ -411,7 +411,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
    * 再計算ではなく複写なので、2 段丸めの結果とビット同一であることが構造で保証される。
    */
   const copyDuplicates = (
-    data: Float32Array,
+    data: Float32Array<ArrayBuffer>,
     positions: readonly number[],
     first: number,
   ): void => {

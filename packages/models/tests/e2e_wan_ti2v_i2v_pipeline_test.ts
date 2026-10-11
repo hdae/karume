@@ -805,7 +805,7 @@ const assertDitWiring = (
  */
 const assertVaeReceivesLatents = (
   record: Pick<SessionRecord, "vaeFirstLatents" | "vaeNextLatents">,
-  condition: Float32Array,
+  condition: Float32Array<ArrayBuffer>,
   schedulerLatents: Float32Array,
   fixture: Fixture,
   where: string,
@@ -1106,7 +1106,7 @@ Deno.test({
       );
       // 参照が記録した DiT の出力から、ホストの CFG + UniPC（置き換え無し）で参照の潜在を作り直す。
       const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
-      let latents: Float32Array = fixture.tensor("latents_init");
+      let latents: Float32Array<ArrayBuffer> = fixture.tensor("latents_init");
       for (let step = 0; step < STEPS; step += 1) {
         assertEquals(
           fixture.shape(`latents.${step}`),
@@ -1465,7 +1465,7 @@ Deno.test({
       const faults: readonly {
         readonly label: string;
         /** DiT の run の入力の改変（`current` は今の step のスケジューラの状態 — 置き換える前）。 */
-        readonly alter?: (inputs: RunInputs, current: Float32Array) => RunInputs;
+        readonly alter?: (inputs: RunInputs, current: Float32Array<ArrayBuffer>) => RunInputs;
         /** 家族の値（省けば製品の値）。 */
         readonly spec?: WanFamilySpec;
         /**
@@ -1530,7 +1530,7 @@ Deno.test({
             try {
               const fixture = await defaultFixtureOf();
               const record = emptyRecord();
-              let current: Float32Array = fixture.tensor("latents_init");
+              let current: Float32Array<ArrayBuffer> = fixture.tensor("latents_init");
               const altered = alter === undefined
                 ? undefined
                 : (inputs: RunInputs): RunInputs => alter(inputs, current);

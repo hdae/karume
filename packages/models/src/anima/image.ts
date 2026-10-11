@@ -19,7 +19,7 @@
  * `putImageData` にも PNG 書き出しにも渡せる。
  */
 export const imageToRgba = (
-  image: Float32Array,
+  image: Float32Array<ArrayBuffer>,
   width: number,
   height: number,
 ): Uint8ClampedArray<ArrayBuffer> => {

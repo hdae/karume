@@ -34,13 +34,13 @@ export type RopeBase = {
   /** 軸ごとのブロック幅（`t + h + w` の 2 倍が head_dim）。 */
   readonly widths: readonly [number, number, number];
   /** `[t, h, w]` の順に並べた cos 素表。 */
-  readonly cos: readonly Float32Array[];
+  readonly cos: readonly Float32Array<ArrayBuffer>[];
   /** 同 sin。 */
-  readonly sin: readonly Float32Array[];
+  readonly sin: readonly Float32Array<ArrayBuffer>[];
 };
 
 type RawTable = {
-  readonly data: Float32Array;
+  readonly data: Float32Array<ArrayBuffer>;
   readonly shape: readonly [number, number];
 };
 
@@ -76,8 +76,8 @@ export const parseRopeBase = (buffer: ArrayBuffer): RopeBase => {
   for (const name of file.tensors.keys()) {
     if (!expectedKeys.has(name)) throw new Error(`rope 素表に想定外のテンソル '${name}' がある`);
   }
-  const cos: Float32Array[] = [];
-  const sin: Float32Array[] = [];
+  const cos: Float32Array<ArrayBuffer>[] = [];
+  const sin: Float32Array<ArrayBuffer>[] = [];
   const widths: number[] = [];
   let rows: number | undefined;
   for (const axis of ROPE_AXES) {

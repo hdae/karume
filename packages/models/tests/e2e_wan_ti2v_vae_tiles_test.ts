@@ -609,7 +609,7 @@ Deno.test({
       const acceptWant = accept.tensor("frames").data;
       const acceptPlan = planFor(layout, acceptLatents.shape);
       const acceptChunks = acceptLatents.shape[1];
-      let acceptTiles: Float32Array[] = [];
+      let acceptTiles: Float32Array<ArrayBuffer>[] = [];
       let acceptAssembled: Float32Array<ArrayBuffer> | undefined;
 
       await t.step(

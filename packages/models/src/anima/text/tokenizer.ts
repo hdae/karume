@@ -210,7 +210,7 @@ const parseT5Asset = (raw: unknown, label: string = "tokenizer_2"): T5Assets => 
   normalizer: parseSpmTables(asRecord(raw, label)["normalizer"], `${label}.normalizer`),
 });
 
-const decodeJson = (bytes: Uint8Array, label: string): unknown => {
+const decodeJson = (bytes: Uint8Array<ArrayBuffer>, label: string): unknown => {
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -229,8 +229,8 @@ const decodeJson = (bytes: Uint8Array, label: string): unknown => {
  * I/O を持たない — 取得は hub の責務。
  */
 export const createTokenizers = (
-  qwen2Bytes: Uint8Array,
-  t5Bytes: Uint8Array,
+  qwen2Bytes: Uint8Array<ArrayBuffer>,
+  t5Bytes: Uint8Array<ArrayBuffer>,
 ): AnimaTokenizers =>
   new AnimaTokenizers(
     parseQwen2Asset(decodeJson(qwen2Bytes, "tokenizer")),

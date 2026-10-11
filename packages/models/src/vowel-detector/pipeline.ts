@@ -570,7 +570,7 @@ const runGraph = (
   state: VowelDetectorState,
   features: Tensor,
   rows: number,
-): Promise<Float32Array> => {
+): Promise<Float32Array<ArrayBuffer>> => {
   const model = state.graph;
   return withSession(
     state.gpu,
@@ -601,7 +601,7 @@ const runGraph = (
  */
 const detectAudio = async (
   state: VowelDetectorState,
-  audio: Float32Array,
+  audio: Float32Array<ArrayBufferLike>,
 ): Promise<VowelDetectorResult> => {
   const { config } = state;
   // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落とす（**切り捨てであって pad ではない**
@@ -751,7 +751,7 @@ export class VowelDetectorPipeline {
    *
    * 並行に呼ばれた場合は**待たされて順に**走る（GPU の破棄と in-flight の run を交差させない）。
    */
-  async detect(audio: Float32Array): Promise<VowelDetectorResult> {
+  async detect(audio: Float32Array<ArrayBufferLike>): Promise<VowelDetectorResult> {
     // dispose 済みの判定は呼び出し時点で行う（鎖の中で見ると、dispose より前に受けた検出まで
     // 巻き添えで落ちる）。
     if (this.#disposal !== undefined) {

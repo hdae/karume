@@ -83,7 +83,7 @@ const readFixture = async (name: string): Promise<Fixture> =>
   ) as Fixture;
 
 /** 系列側の実資産（無ければ undefined = compile していない）。 */
-const readSeriesAsset = async (series: string): Promise<Uint8Array | undefined> =>
+const readSeriesAsset = async (series: string): Promise<Uint8Array<ArrayBuffer> | undefined> =>
   await readFileIfPresent(
     new URL(`../../../outputs/series/${series}/tokenizer.json`, import.meta.url),
   );
@@ -345,7 +345,9 @@ for (
   // 実資産 1 本の解釈は 0.6 秒級（併合 514,906 本の組み立て）。門ごとに組み直さない。
   let fullTokenizer: GemmaTokenizer | undefined;
   const full = (): GemmaTokenizer =>
-    fullTokenizer ??= new GemmaTokenizer(parseGemmaTokenizerAsset(seriesBytes as Uint8Array));
+    fullTokenizer ??= new GemmaTokenizer(
+      parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>),
+    );
 
   if (seriesBytes === undefined) {
     console.warn(

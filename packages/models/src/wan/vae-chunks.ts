@@ -351,7 +351,10 @@ export class WanVaeChunkCaches {
 }
 
 /** 潜在 `[C,F,t,t]` の chunk 数 F（長さが合わなければ fail loudly）。 */
-export const wanVaeChunkCount = (layout: WanVaeChunkLayout, latents: Float32Array): number => {
+export const wanVaeChunkCount = (
+  layout: WanVaeChunkLayout,
+  latents: Float32Array<ArrayBuffer>,
+): number => {
   const plane = layout.latentChannels * layout.tile * layout.tile;
   const chunks = latents.length / plane;
   if (!Number.isInteger(chunks) || chunks < 1) {
@@ -365,7 +368,7 @@ export const wanVaeChunkCount = (layout: WanVaeChunkLayout, latents: Float32Arra
 /** 潜在 `[C,F,t,t]` から chunk `index` の 1 フレーム `[C,1,t,t]` を切り出す（写しを返す）。 */
 export const wanVaeLatentChunk = (
   layout: WanVaeChunkLayout,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
   index: number,
 ): Tensor => {
   const chunks = wanVaeChunkCount(layout, latents);
@@ -440,7 +443,7 @@ export const decodeWanVaeTile = async (
   gpu: GpuContext,
   sessions: { readonly first: Session; readonly next: Session },
   caches: WanVaeChunkCaches,
-  latents: Float32Array,
+  latents: Float32Array<ArrayBuffer>,
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { layout } = caches;
   const chunks = wanVaeChunkCount(layout, latents);
