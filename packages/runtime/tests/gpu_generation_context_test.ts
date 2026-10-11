@@ -2022,11 +2022,51 @@ Deno.test({
 });
 
 Deno.test({
+  name:
+    "実 Session の fork も同期区間で複製する — 同じ区間の後続の書き込みは複製に入らない（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 上の門は host を自作するので、`Session.#adopt`（判定 → `allocate` を同期に呼ぶ）の側に
+    // await が入る退行は捕まらない。ここは同じ形を実 Session の登録経路で縛る。退行の再現は
+    // `#adopt` の `allocate()` の前に `await Promise.resolve()` を 1 段挟む形（`allocate` が
+    // 後続の writeBuffer の後に走るので、複製は `later` を読む）。
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu);
+    const earlier = new Uint32Array(SLOT_BYTES / 4).fill(0x3f800000);
+    const later = new Uint32Array(SLOT_BYTES / 4).fill(0x40000000);
+    const source = await session.createGenerationContext({ chunkLength: 1 });
+    let forked: GenerationContext | undefined;
+    try {
+      const slot = internals(source).slots.get("k");
+      assert(slot !== undefined, "スロット k が引けない");
+      gpu.device.queue.writeBuffer(slot.buffer, 0, earlier);
+      const pending = source.fork();
+      gpu.device.queue.writeBuffer(slot.buffer, 0, later);
+      forked = await pending;
+      const copied = internals(forked).slots.get("k");
+      assert(copied !== undefined, "複製のスロット k が引けない");
+      assertEquals(
+        await readWords(gpu, copied.buffer, copied.byteLength),
+        [...earlier],
+        "複製が fork() を呼んだ後の書き込みを写した（登録経路に await が入った）",
+      );
+    } finally {
+      await forked?.dispose();
+      await source.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
   name: "fork の所要時間を記録する（スロット 2 本 × 64 MiB・記録のみ・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 複製は scheduler の外の自前 submit なので、巨大な複製の所要は他に観測点が無い。値の門は
     // 置かない（device と負荷で動く）— 弱い GPU で TDR 域に近づくかを読む材料として残す。
+    // MUST: 区間の末尾で queue の完了を待つ。fork が待つ popErrorScope の解決はコピーの実行
+    // 完了を待たない（128 MiB で 0.1 ms という観測）ので、それだけでは複製の所要を測れない。
     const rows = 64 * 1024 * 1024 / (2 * 4 * 4);
     const gpu = await acquireGpu();
     const session = await stateSession(
@@ -2040,13 +2080,14 @@ Deno.test({
     try {
       const started = performance.now();
       const forked = await source.fork();
+      await gpu.device.queue.onSubmittedWorkDone();
       const elapsed = performance.now() - started;
       try {
         assertEquals(internals(forked).bytes, internals(source).bytes);
         console.log(
           `[gpu] GenerationContext.fork: ${
             (internals(source).bytes / (1024 * 1024)).toFixed(0)
-          } MiB を ${elapsed.toFixed(1)} ms（確保 + 複製の submit + pop の待ち）`,
+          } MiB を ${elapsed.toFixed(1)} ms（確保 + 複製の実行完了まで）`,
         );
       } finally {
         await forked.dispose();
