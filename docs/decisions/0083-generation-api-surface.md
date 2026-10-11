@@ -117,7 +117,11 @@ MUST: sequence は「generate 1 回ぶん」を `createOperationChain`
 これが決定 3（context を隠す）を成立させる要でもある。
 
 MUST: `rewind` は使わない — sliding スロットを含む context は**全拒否**（ADR 0066 追記 2）。
-編集・分岐は「新しい context + token transcript の replay」が正。
+編集・分岐は「新しい context + token transcript の replay」が正。\
+**追記 2026-10-11（裁定 8）: 分岐は `GenerationSequence.fork()` / `Gemma4ChatSession.fork()` に
+なった**（末尾の「追記（2026-10-11）— 会話の分岐（fork・裁定 8）」と ADR
+[0066](0066-generation-context-state-slots.md) の同日の追記）。編集（途中の発話の書き換え）と
+容量の変更は従来どおり新しい context への replay。
 
 ### 5. cancel は `AbortSignal` が正（`onEvent` の throw を中断手段にしない）
 
@@ -450,3 +454,32 @@ RNG・温度処理・top-k 指定時の有界 heap は変更しない。作業�
   温度ありのCLI既定設定がこの最適化で速くなったとは報告しない。
 
 [実測と検収](../research/2026-09-10-codex-mtp-optimization.md#gemmaの温度0decodeの小出力化2026-09-12)を参照。
+
+## 追記（2026-10-11）— 会話の分岐（fork・裁定 8）
+
+決定 4 の「分岐は新しい context + replay」を、同じ容量の丸ごと複製へ置き換えた。複製の契約
+（範囲・同期区間・拒否・決定性）は ADR [0066](0066-generation-context-state-slots.md) の同日の
+追記が正本で、ここはその上の 2 層（sequence と chat session）の決定だけを書く。
+
+- **`GenerationSequence.fork(): Promise<GenerationSequence>`**: 同じ会話の続きを持つ独立の
+  sequence を返す。写すのは context（runtime の fork）・`pendingToken`（未 commit frontier）・
+  自己採算ゲートの観測状態。投機の drafter の面は複製した context に対して開き直す（借り手は
+  context ごと — 元の借り手を共有しない）。RNG は写さない（`generate` ごとに seed から作る）。
+  - 本体は sequence の直列化鎖に積む: 走行中の `generate` の後に走り、その時点の
+    `pendingToken` と context を写す。dispose 済みの sequence では同期に throw する
+    （`generate` と同じ規律）。
+  - drafter の開き直しに失敗したら、複製した context を畳んでから投げ直す（元は無傷）。
+  - 分岐は呼び手が所有する独立の sequence で、dispose は各自で行う。
+- **自己採算ゲートは観測状態を写す**（`SpeculationGate.fork()` — 非公開の型）。ゲートの寿命を
+  sequence にする理由（同じ会話・同じ host で測り直さない）は分岐にもそのまま当てはまる。写した後の
+  2 つのゲートは独立で、片方への観測はもう片方を動かさない。
+- **`Gemma4ChatSession.fork(): Promise<Gemma4ChatSession>`**: 同じ設定・同じ履歴の独立の
+  セッションを返す。dispose 済みと走行中のターンがある（busy）ときは同期に throw する（`send` と
+  同じ規律）。履歴と「KV に入っている件数」の写しと `sequence.fork()` の呼び出しは、`fork()` を
+  呼んだ同期区間で行う（直後の `send` が先に履歴を積む形を塞ぐ）。KV が空の会話（直前のターンが
+  EOS で閉じていない・まだ送っていない）は GPU の複製を出さず、履歴だけを写す。
+- **再生成は fork の使い方として書く**（`regenerate` は作らない）。基点のセッションを進めずに置き、
+  押されるたびに `fork()` して `send` する。KV は基点 + 分岐 1 本でほぼ 2 倍になり、これは
+  replay で作り直す形と変わらない（公開面の大きさだけが違う）。
+- 公開面: 既存の型（`GenerationSequence` / `Gemma4ChatSession`）にメソッドが 1 つずつ増えるだけで、
+  新しい export は無い（ADR 0008）。

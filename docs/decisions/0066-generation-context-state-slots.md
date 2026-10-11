@@ -135,6 +135,10 @@ batch > 1・複数シーケンス・paged / block table 間接参照（KV は連
 multi-output（ADR ④）・packed 格納（ADR ②）・shard ロードと admission（ADR ③）・
 sampling / RNG（ホスト維持 — op-vocabulary 裁定済み）。
 
+注記（2026-10-11）: このうち「同じ Session・同じ容量の context を丸ごと複製する」1 点だけは、
+末尾の「追記（2026-10-11）— 会話状態の分岐（fork・裁定 8）」で範囲に入れた。prefix cache
+（内容アドレスでの再利用）と他の項目は範囲外のまま。
+
 ## Consequences
 
 - 既存の 1-shot 面（Session.run / enqueue・全既存モデル・全 sha 門）は**無風** — 本 ADR は
@@ -315,3 +319,108 @@ accepted 直後の第 3 巡（Codex 独立レビュー・5 本セット照合）
 長いchunk・複数容量での計画LRU不足は解消していないため、モデル・runtime・CLIの既定バケットとcache上限には適用しない。
 画面では標準も選べ、URL/APIで指定を省略したときの動作も維持する。
 次の最適化の基準として両E2B・Karume・並列加算を選択済みにする。参照経路と全組み合わせも明示的に選べる。
+
+## 追記（2026-10-11）— 会話状態の分岐（fork・裁定 8）
+
+裁定 8（2026-10-10・a）と裁定 36（2026-10-11・a）で、決定 6 の寿命操作に
+`GenerationContext.fork(): Promise<GenerationContext>` を足した。用途は「同じ会話の途中から
+別の続きを試す」こと（チャットの再生成など）で、従来は新しい context へ token transcript を
+replay するしかなかった。
+
+### 範囲
+
+- 範囲に入れるのは 1 点だけ: **同じ Session・同じ容量の context の丸ごと複製**。写すのは
+  全スロットの全バイト（sliding の ring の余裕行も含む）・`pastLength`・不変の値
+  （`chunkLength` / `chunkBuckets` / 容量の束縛 / sliding の窓）。
+- 写さないもの: context 側で焼いた bind group（元のスロットを束ねているので、複製は最初の run で
+  焼き直す）・論理長 uniform の中身（毎 run の encode 前に全体を書き直す）・借り手の集合と
+  deferred の保留（下の拒否により、複製の時点で空）。
+- 範囲外のまま残すもの: 永続化（決定 7 の dump / restore）・内容アドレスでの再利用
+  （prefix cache）・別の容量への移し替え・batch > 1・paged。
+- 分岐は呼び手が所有する独立の context である。親子の依存は持たず、元を先に dispose してよい。
+
+### 「借用中」の読み替え（裁定 36 = a）
+
+裁定 8 の「借用中の分岐は拒否」は、**借り手の run が走っている間**（= 貸し手の使用予約が
+立っている間）と読む。生きている借り手を持つこと自体は拒否しない。根拠は 3 つ:
+
+- 借り手（drafter の readonly attention）は論理長を動かさず、KV に 1 行も書かない（ADR 0096
+  段 2 §2.1）。
+- 借り手の run は貸し手の使用予約も取る。そのため走っている間の fork は、下の (d) で拒否される。
+- 投機つきの sequence は借り手を寿命の間ずっと持つ。借り手を持つこと自体を拒否すると、既定の
+  投機設定では fork が使えなくなる。
+
+fork の後も、元の借り手は元のスロットを束ねたまま残る。複製には借り手がいない。この束縛は
+GPU テスト（`gpu_borrowed_context_test.ts`）で固定する。
+
+### 同期区間の契約
+
+- MUST: 拒否の検査・`pastLength` の捕捉・Session の dispose の検査・確保・複製のエンコード・
+  `queue.submit`・errorScope の pop の発行までを、**`fork()` を呼んだ同期区間で await なしに**
+  行う。待つのは pop の結果だけ。形は `GenerationContext.create` と `ResidentTensor.read` と
+  同じ（GpuContext の errorScope 区間の不変条件の 3 つ目 — 同期区間で完結するスコープはロック
+  不要）。
+- 元には使用予約を立てない。元が静止している（進行中の run も deferred の保留も無い）なら、
+  元のスロットへの未 submit の書き込みは無い（run の予約は本体の finally で返り、その時点で
+  GPU の操作は全部 submit 済み）。複製を呼んだ時点で submit するので、queue の順序が
+  「先行の書き込みの後・後続の書き込みの前」を保証する。したがって `fork()` を await せずに
+  元へ発行した run / `rewind` / `dispose` / 2 本目の `fork` は、どれも安全に通る。
+- 複製は Session の直列化鎖にも `SubmitScheduler` の pending にも載せない（自前の encoder と
+  submit）。`createGenerationContext` を鎖の外に置く理由（batch 区間との待ち合わせの閉路を
+  作らない — executor.ts の `Session.#createGenerationContext` の NOTE）と同じ側に立つ。代償と
+  して、複製の GPU 時間は scheduler の統計に載らない。
+- 確保の後の登録（dispose の再検査 → 生存集合 → `contextCount`）は `createGenerationContext` と
+  共有の 1 経路（`Session.#adopt`）を通る。
+- 確保の失敗（out-of-memory errorScope）は fail loudly で、元は無傷のまま残り、確保した分は
+  返す。
+
+### 拒否
+
+`fork()` は次の場合に、呼んだ同期区間で判定して戻り Promise を reject する（run / dispose と
+同じ形）。(b) は `GpuDeviceLostError`、他は `ExecutionError`。
+
+- (a) dispose 要求の後
+- (b) device 消失の後
+- (c) 汚染（追記 3）の後
+- (d) 決着していない run がある（借り手の run が貸し手の予約を取っている間を含む）
+- (e) batch の使用予約中（区間の最終決着まで）
+- (f) deferred commit の確定待ち（`pendingCommit`）
+- (g) 借り手 context（借り物のスロットは複製の対象にしない）
+- (h) Session が dispose 済み（呼んだ時点と、確保の後の 2 回）
+
+拒否しないもの: 生きている借り手を持つ貸し手・sliding スロットを含む context（追記 2 の
+`rewind` 全拒否とは独立 — 複製は物理配置ごと写すので論理範囲とずれない）。
+
+### 診断と VRAM
+
+- 複製 1 本ごとに `stateBacking.residentBytes` が元の常駐バイト数だけ増え、`contextCount` が
+  1 増える。`rebindCount` は複製の最初の run で、使った backing 1 本につき 1 増える（焼き直しは
+  (context, backing) の組ごと）。元の続きの run では増えない。
+- 見積り（ADR 0089）は変えない。同時に生かす context の本数 × state のバイト数が呼び手の
+  勘定になる（limitations）。
+
+### 決定性
+
+複製はスロットのバイトを丸ごと写すので、分岐した直後の状態は元とビット同一である。分岐ごとの
+token 列が「fork を使わない同じ操作列」と一致するかは、数値経路の決定性に従う: 投機なしと
+`speculative: "always"` は一致する。自己採算ゲートつきの投機は、ゲートの観測状態を分岐へ
+写しても（ADR 0083 の追記〈2026-10-11〉）壁時計は分岐ごとに揺れるので、投機⑤の門が緑の device
+でだけ一致する（門が赤の device の扱いは limitations の投機の節と同じ）。
+
+### 他の決定との関係
+
+- 決定 7 の dump / restore（ホスト側へ state のバイトを出す）とは別物で、それを先取りしない。
+  fork は GPU の中だけで閉じ、同じ device・同じ Session の外へは出ない。
+- ADR 0008 の薄い公開面: 新しい export 型は作らない。既存の型にメソッドを 3 つ足すだけ
+  （`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork`）。
+
+### 採らなかった案
+
+- A: 複製を Session の直列化鎖に積み、使用予約 `"fork"` を取る。複製が run と同じ scheduler の
+  FIFO に入り統計にも載るが、鎖の外に置いた生成の経路を鎖へ載せることになり、使用予約が 3 値に
+  なって拒否の判定が広がる。同じ Session の別 context の長い run の後ろに fork が並ぶ。
+- B: `createGenerationContext({ fork: source })`。入口は 1 本のままだが、見積りと共有している
+  `GenerationContextSpec` に fork の欄を足すことになり、必須欄の `chunkLength` が意味を失う。
+  寿命操作を context の面に並べる決定 6 の配置からも外れる。
+- C: スナップショットと復元（基点を別バッファへ保存して巻き戻す）。新しい公開型が要り、基点の
+  保存ぶんの VRAM が分岐とは別に要り、裁定 8 が範囲外に残した永続化の側に寄る。
