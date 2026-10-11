@@ -567,7 +567,8 @@ Deno.test("ホストが止まった窓では、GPU の 1 本が予算内でも�
   );
 });
 
-// submitGpuTime（GPU 側の時計）: 窓平均（ホスト時間込みの窓の平均）では見えない「重い 1 本」を 1 submit ずつの幅で数える
+// submitGpuTime（GPU 側の時計）: 窓平均（ホスト時間込みの窓の平均）では見えない「重い 1 本」を
+// 1 submit ずつの幅で数える
 // （ADR 0118 決定 6 の追記 — OS の submit 単位のタイムアウトに対して言えるのは 1 本ずつの最大だけ）。
 // 幅は pass の timestamp の最小 → 最大で、pass 間の隙間も含む（dispatch の差の和ではない）。
 Deno.test("1 submit ごとの GPU 時間は timestamp の幅で数え、裏付け前のチャンクを別に数える", async () => {

@@ -260,8 +260,9 @@ export type ChunkBudgetStats = {
    * いない間は undefined。
    *
    * WHY: {@link ChunkBudgetStats.maxWindowMeanMs} はホスト時間を含む窓の平均で、重い 1 本と軽い
-   * 数本が同じ窓に入ると平均に埋もれ、逆にホストの停止だけでも上がる。OS の submit 単位のタイムアウト（Linux xe の `job_timeout_ms` など —
-   * ADR 0118 決定 6）に対して言えるのは、1 本ずつの時間の最大だけである。
+   * 数本が同じ窓に入ると平均に埋もれ、逆にホストの停止だけでも上がる。OS の submit 単位の
+   * タイムアウト（Linux xe の `job_timeout_ms` など — ADR 0118 決定 6）に対して言えるのは、
+   * 1 本ずつの時間の最大だけである。
    *
    * 測り方: 計測モードは 1 dispatch = 1 pass で pass の begin / end を書くので、チャンク 1 本の
    * GPU 実行の幅 = そのチャンクの timestamp の最小 → 最大（pass 間の隙間も含む）。回収は既存の
