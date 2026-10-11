@@ -371,7 +371,8 @@ const readTiffOrientation = (
  * PNG の IDAT より前の最初の eXIf チャンクの本体（TIFF）。Chrome は 2024-02 から PNG の eXIf の向きを適用する
  * （Chromium の commit 694d9d3a「Add PNG eXIf chunk support」）が、実装者の説明（W3C の PNG の ML・2024-02-06）
  * どおり IDAT より前の eXIf だけを読むので、ここも IDAT で探すのを止める。Pillow は IDAT の後の eXIf も読んで
- * `exif_transpose` で適用するが、基準は gpu-lab（Chrome）と同じ向きにすること。復号（CRC の検査つき）が通った
+ * `exif_transpose` で適用するが、基準は gpu-lab（Chrome）と同じ向きにすること（XMP の `tiff:Orientation` だけに向きが
+ * ある画像も同じで、Pillow は XMP から補って回すが、Chrome とここは読まない）。復号（CRC の検査つき）が通った
  * 後に呼ぶので、チャンクの並びは壊れていない。
  */
 const findPngExif = (bytes: Uint8Array): Uint8Array<ArrayBufferLike> | undefined => {
