@@ -502,7 +502,7 @@ describe("container round trip", () => {
     await assertRejects(() => opened.extractGraph(), ContainerFormatError, "krm からだけ");
   });
 
-  it("krg 抽出は取得元が const 領域を短く返したら落ちる（hash より先に長さを照合する）", async () => {
+  it("krm からの krg 抽出は取得元が const 領域を短く返したら落ちる（hash より先に長さを照合する）", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts;
     const source: BlockSource = {
