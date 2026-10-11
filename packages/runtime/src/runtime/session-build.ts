@@ -613,10 +613,12 @@ export type SessionState = {
    */
   readonly linearI8a8Dot: I8a8Dot;
   /**
-   * **融合 attention の** i8a8 整数内積変種（①QK / ③PV）。linear と席を分けてあるのは、
-   * 「両変種はビット同一」が attention だけ実機で反証されている（Metal / Apple M2 —
-   * docs/known-issues.md）ため。既定は device 単位の実走カナリア
-   * （src/gpu/attention-dp4a-canary.ts）が決め、テストは {@link I8A8_DOT} で強制できる。
+   * **融合 attention の** i8a8 整数内積変種（①QK / ③PV）。既定は device 単位の実走カナリア
+   * （src/gpu/attention-dp4a-canary.ts — 一次判定は既知解との突合）が決め、テストは
+   * {@link I8A8_DOT} で強制できる。linear と席を分けたのは、当初「両変種はビット同一」が
+   * attention だけ Apple M2 で崩れると推論したためで、この推論は 2026-08-29 に撤回した（M2 でも
+   * 両変種はビット同一 — 外れていたのは共有 f32 エピローグの 1 ULP・docs/known-issues.md）。
+   * 席とカナリアは残す（根拠はカナリアの冒頭 doc）。
    */
   readonly attentionI8a8Dot: I8a8Dot;
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
@@ -1084,8 +1086,10 @@ export const buildSessionState = async (
       // 書き換わっても GPU に載る値は変わらない。したがって item は上げた反復で手放し、
       // フェンスまで握らない（ADR 0070 決定 3 / ADR 0108 決定 9 の 2026-09-24 追記・
       // 実機の固定は tests/gpu_write_buffer_copy_test.ts）。
-      // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと submit を出さずに
-      // 即 return するため、staging は溜まったまま残る。
+      // MUST NOT: scheduler.flush() で代用しない。pending dispatch が空だと flush は submit を
+      // 出さない（早期 return するのは submit の部分だけで、完了待ち・計測窓の締め・timestamp の
+      // 回収は行う）。submit の無い完了待ちでは staging が解放されない（research 2026-08-08 §4 の
+      // 実測）ので、明示の submit([]) の代わりにならない。
       // NOTE: submit ごとの onSubmittedWorkDone を禁じているのは run のホットパス（submit.ts の
       // 「計測の帰属」）で、ここは batch ごと 1 回・窓の外なので推定にも壁時計にも乗らない。
       // NOTE: errorScope で囲まないのは、空の submit が確保も検証も伴わないため（両建てで囲む
@@ -1162,8 +1166,8 @@ export const buildSessionState = async (
     // linear の拡張の有無は**速度にしか効かない**（両変種は同じ整数を返す）ので、機能検出では
     // なく経路選択としてここで 1 度だけ決める（src/kernels/linear-i8a8.ts の docstring）。
     linearI8a8Dot: options[I8A8_DOT] ?? (dp4a ? "dp4a" : "emu"),
-    // attention は同じ主張が実機で反証されている（Metal / Apple M2）ので、列挙ではなく
-    // **実走カナリアの判定**（上の `attentionI8a8Dot`）で決める。
+    // attention は列挙ではなく**実走カナリアの判定**（上の `attentionI8a8Dot` — 既知解との突合）で
+    // 決める（当初の根拠だった M2 での変種間の不一致は撤回済み — SessionState.attentionI8a8Dot の doc）。
     attentionI8a8Dot,
     rowBlockSplit: options[ROW_BLOCK_SPLIT],
     geometryProfile,

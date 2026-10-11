@@ -1613,10 +1613,14 @@ export class Session {
             }
 
             if (singleFence) {
-              // MUST: 読み戻しの copy は **dispatch と同じコマンド列**へ積む（FIFO）。同じ列に積むと
-              // submit とフェンスが 1 本で済み、flush の完了待ちと再 flush が消える（ADR 0054 決定 6）。
-              // 正しさの根拠ではない — 同一キューの submit は発行順に実行されるので、別 submit に
-              // 割っても mapAsync の解決は先行 dispatch の完了を含意する。
+              // MUST: 読み戻しの copy は **dispatch と同じコマンド列**（scheduler）へ積む（FIFO）。
+              // 正しさの根拠は積む順序 — この時点の scheduler には未 submit の dispatch が残って
+              // いるので、別 encoder の copy を先に submit すると、まだ書かれていない出力を読む
+              // （SubmitScheduler.copyBuffer の MUST と同じ）。submit の本数は根拠ではない — 同一
+              // キューの submit は発行順に実行されるので、dispatch を出し切った後の別 submit に
+              // 割っても mapAsync の解決は先行 dispatch の完了を含意する。同じ列に積むと submit と
+              // フェンスが 1 本で済み、flush の完了待ちと再 flush が消える（ADR 0054 決定 6 —
+              // 副次の利点）。
               staged = this.#stageOutputs(
                 this.#runValues(backing, missValues),
                 shapes,
@@ -2301,7 +2305,9 @@ export class Session {
     );
     const inputBytes = [...ownedInputSizes.values()].reduce((total, size) => total + size, 0);
     // MUST: 確保の**前**に予算へ収める（退役は destroy せず破棄待ちへ積むだけ — この run の
-    // flush 後にだけ返す）。確保の後に退役すると、予算に収まる形でも一時的に予算 + 新規が載る。
+    // flush 後にだけ返す）。確保前の退役が保証するのは保持集合の勘定の上限（保持分 + 新規 ≤ 予算）
+    // だけ — 退役した旧 backing は flush 後まで VRAM に残るので、新規を確保する時点では物理的に
+    // 新旧が重なる（この重複窓は勘定外 — ADR 0095 決定 4）。
     this.#evictBackingsFor(plan.totalBytes + inputBytes);
     // 所有権が確立する（`#backings` への登録）までの確保物と retain 済み常駐入力。
     // 途中で同期例外が出たら catch がここから回収する。

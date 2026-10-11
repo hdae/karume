@@ -1,10 +1,10 @@
 // 融合 attention の i8a8 内積変種を**実走で決める**カナリア（src/gpu/attention-dp4a-canary.ts）。
 //
-// 背景 = docs/known-issues.md「Metal（Apple GPU）で attention i8a8 と conv2d の 2 経路一致が
-// 崩れる」。「dot4I8Packed 版とエミュ版は同じ整数を返す」という主張（src/kernels/
-// linear-i8a8.ts）は linear では実機で保たれているのに **融合 attention だけ** Apple M2 で
-// 崩れる。アダプタ能力から数値を変える経路を自動選択しない（ADR 0058 決定 2）を保つには、
-// 列挙ではなく**既知解との突合**で変種を決めるほかない。
+// 背景 = docs/known-issues.md の Metal（Apple GPU）節。当初は「dot4I8Packed 版とエミュ版は同じ
+// 整数を返す」という主張（src/kernels/linear-i8a8.ts）が **融合 attention だけ** Apple M2 で崩れると
+// 推論していたが、2026-08-29 に撤回した（M2 でも両変種はビット同一で、外れていたのは共有 f32
+// エピローグの 1 ULP）。アダプタ能力から数値を変える経路を自動選択しない（ADR 0058 決定 2）を
+// 保つには、列挙ではなく**既知解との突合**で変種を決めるほかない。
 //
 // ## このファイルが固定する契約（判定則 v2）
 //
@@ -130,7 +130,7 @@ const NUDGE_BOTH = nudgePv("1.0000001");
 /** 帯**外**の摂動（両腕・同一）。相対 1e-4 は帯の 1 桁上 — M2 の故障注入実測 9.5e-5 と同水準。 */
 const SKEW_BOTH = nudgePv("1.0001");
 
-/** 片腕（emu）だけが帯内に残る形 = M2 で dp4a が本当に壊れている device の姿。 */
+/** 片腕（emu）だけが帯内に残る形 = dp4a が本当に壊れている device の姿。 */
 const NUDGE_BOTH_BREAK_DP4A: CanaryWgslPatch = (wgsl) => BREAK_DP4A(NUDGE_BOTH(wgsl));
 
 // ---------------------------------------------------------------------------

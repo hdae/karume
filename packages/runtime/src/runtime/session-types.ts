@@ -540,8 +540,10 @@ export type PreparedPlanStats = {
  * ヒットした run は中間バッファをここから配るので、run ごとの領域確保・createBuffer / destroy が
  * ゼロになる。
  *
- * MUST: 常設診断として出す。**signature が交互に切り替わる形では毎 run 作り直しになり**、値は
- * 正しいまま run ごとに数百 MiB の createBuffer / destroy が復活する（例外も警告も出ない）。
+ * MUST: 常設診断として出す。予算（{@link SessionOptions.planBackingBudgetBytes}）に収まる形は
+ * signature を往復しても両方の backing を保持して再利用する（ADR 0095 決定 1）が、**予算に収まらず
+ * 退役が起きる形では切替のたびに作り直しになり**（予算 0 では signature が変わるたびに作り直す）、
+ * 値は正しいまま run ごとに数百 MiB の createBuffer / destroy が復活する（例外も警告も出ない）。
  * `buildCount` が run 数に比例して伸びていないことが、その沈黙劣化の唯一の観測点。
  */
 export type PlanBackingStats = {
