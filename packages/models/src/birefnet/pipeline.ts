@@ -273,8 +273,13 @@ export const preprocessPixelValues = (
     config.imageStd,
   );
 
-/** {@link BirefnetPipeline} の内部状態（公開面には出さない）。 */
-type BirefnetState = {
+/**
+ * {@link BirefnetPipeline} の内部状態（公開面には出さない）。
+ *
+ * NOTE: `export` は A/B の道具（`tools/birefnet-ab/`）が {@link loadBirefnetState} /
+ * {@link matteLogits} を使うため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ */
+export type BirefnetState = {
   readonly gpu: GpuContext;
   readonly ownsGpu: boolean;
   readonly config: BirefnetPipelineConfig;
@@ -458,8 +463,17 @@ const openBirefnetState = async (
   }
 };
 
-/** 画像 1 枚を通す（前処理 → `matte` 1 回 → sigmoid → 元解像度の 8bit α）。 */
-const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<AlphaMatte> => {
+/**
+ * 画像 1 枚の logit の地図（前処理 → `matte` 1 回 — `imageWidth × imageHeight` を行優先に平らに
+ * した f32）。
+ *
+ * NOTE: `export` は A/B の道具（`tools/birefnet-ab/` — 1 回の実行の logit に後処理の手順を全部
+ * 当て、手順ごとにグラフを回し直さない）のため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ */
+export const matteLogits = async (
+  state: BirefnetState,
+  image: Rgb8Image,
+): Promise<Float32Array<ArrayBuffer>> => {
   const { config } = state;
   const pixelValues: Tensor = {
     dtype: "f32",
@@ -479,13 +493,73 @@ const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<Alp
         `${config.imageWidth}×${config.imageHeight} と違う`,
     );
   }
-  return matteFromLogits(
-    logits,
-    config.imageWidth,
-    config.imageHeight,
+  return logits;
+};
+
+/** 画像 1 枚を通す（前処理 → `matte` 1 回 → sigmoid → 元解像度の 8bit α）。 */
+const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<AlphaMatte> =>
+  matteFromLogits(
+    await matteLogits(state, image),
+    state.config.imageWidth,
+    state.config.imageHeight,
     image.width,
     image.height,
   );
+
+/**
+ * 配布形から取得して実行状態を組む（{@link BirefnetPipeline.fromPretrained} の本体 — 段取りの説明は
+ * あちらの doc）。
+ *
+ * NOTE: `export` は A/B の道具（`tools/birefnet-ab/`）がパイプラインと同じ門と同じグラフで logit を
+ * 採るため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ */
+export const loadBirefnetState = async (
+  ref: string | HubRepoRef | DistributionSource,
+  options: BirefnetFromPretrainedOptions = {},
+): Promise<BirefnetState> => {
+  const source = toManifestSource(
+    ref,
+    "BirefnetPipeline.fromPretrained",
+    'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）',
+  );
+  const hubOptions = hubLoadOptions(options);
+  const loaded = await loadManifest(source, hubOptions);
+  const choice = {
+    ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.quant === undefined ? {} : { quant: options.quant }),
+  };
+  const selection = resolveSelection(loaded.manifest, choice);
+  const buildOptions: BirefnetPipelineOptions = {
+    ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
+    ...choice,
+    ...(options.onRunDiagnostics === undefined
+      ? {}
+      : { onRunDiagnostics: options.onRunDiagnostics }),
+  };
+  // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
+  const { admitted, open } = await loadContainerComponents(
+    "BirefnetPipeline.fromPretrained",
+    loaded,
+    selection,
+    COMPONENT_KEYS,
+    async (open) => {
+      const admitted = admitBirefnet(loaded.manifest, open, buildOptions);
+      // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
+      // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
+      await assertRequiredLimitsBeforeDownload(
+        admitted.quant.requiredLimits,
+        buildOptions.gpu,
+        `BirefnetPipeline: quant '${admitted.quantName}'`,
+      );
+      return admitted;
+    },
+    {
+      ...hubOptions,
+      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+      ...(options.components === undefined ? {} : { components: options.components }),
+    },
+  );
+  return await openBirefnetState(admitted, open, buildOptions);
 };
 
 /**
@@ -529,49 +603,7 @@ export class BirefnetPipeline {
     ref: string | HubRepoRef | DistributionSource,
     options: BirefnetFromPretrainedOptions = {},
   ): Promise<BirefnetPipeline> {
-    const source = toManifestSource(
-      ref,
-      "BirefnetPipeline.fromPretrained",
-      'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）',
-    );
-    const hubOptions = hubLoadOptions(options);
-    const loaded = await loadManifest(source, hubOptions);
-    const choice = {
-      ...(options.model === undefined ? {} : { model: options.model }),
-      ...(options.quant === undefined ? {} : { quant: options.quant }),
-    };
-    const selection = resolveSelection(loaded.manifest, choice);
-    const buildOptions: BirefnetPipelineOptions = {
-      ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
-      ...choice,
-      ...(options.onRunDiagnostics === undefined
-        ? {}
-        : { onRunDiagnostics: options.onRunDiagnostics }),
-    };
-    // 家族の門は admission 席で通す（重みの part を取る前 — `hub/components.ts`）。
-    const { admitted, open } = await loadContainerComponents(
-      "BirefnetPipeline.fromPretrained",
-      loaded,
-      selection,
-      COMPONENT_KEYS,
-      async (open) => {
-        const admitted = admitBirefnet(loaded.manifest, open, buildOptions);
-        // 配布形が宣言した `requiredLimits` は**重みの part を取る前**にここで見る
-        // （ADR 0089 決定 5 — 共有 GPU ならその limits、自前で取る経路はアダプタ実測値）。
-        await assertRequiredLimitsBeforeDownload(
-          admitted.quant.requiredLimits,
-          buildOptions.gpu,
-          `BirefnetPipeline: quant '${admitted.quantName}'`,
-        );
-        return admitted;
-      },
-      {
-        ...hubOptions,
-        ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
-        ...(options.components === undefined ? {} : { components: options.components }),
-      },
-    );
-    return new BirefnetPipeline(await openBirefnetState(admitted, open, buildOptions));
+    return new BirefnetPipeline(await loadBirefnetState(ref, options));
   }
 
   /**
