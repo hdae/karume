@@ -5,9 +5,12 @@
  * 見る点:
  *
  * 1. **報告する** — packages の本体で、型の位置の TypedArray が型引数を省いた形（引数・戻り型・
- *    型引数・配列・型エイリアス・欄・`satisfies`）と、12 種の名前の全て
+ *    型引数・配列・型エイリアス・欄・`satisfies`・修飾名 `globalThis.X`・interface の `extends`・
+ *    class の `implements`）と、12 種の名前の全て
  * 2. **報告しない** — `<ArrayBuffer>` / `<ArrayBufferLike>` を書いた型と、値の位置
- *    （`new` / `from` / `instanceof` / `typeof` の型クエリ）・コメント・文字列
+ *    （`new` / `from` / `instanceof` / `typeof` の型クエリ）・コメント・文字列。加えて、取りこぼすと
+ *    ADR 0002 に明記した形（`InstanceType<typeof X>` / `ReturnType<typeof X.from>`）が今も
+ *    取りこぼされること（明記と現物の食い違いを落とす）
  * 3. **対象の外** — `packages/<pkg>/tests/`・`tools/`・`examples/` は型引数が無くても報告しない
  *
  * NOTE: リポの慣習に合わせて `Deno.test`（文脈）+ `t.step`（振る舞い）で書く。
@@ -46,6 +49,23 @@ Deno.test("型の位置で型引数を省いた TypedArray を報告する", asy
     ]);
   });
 
+  await t.step("修飾名 globalThis.X は右端の名前で拾う", () => {
+    const source = [
+      "export type A = globalThis.Float32Array;",
+      "export const f = (bytes: globalThis.Uint8Array): number => bytes.length;",
+    ].join("\n");
+    assertEquals(reported(source), ["globalThis.Float32Array", "globalThis.Uint8Array"]);
+  });
+
+  await t.step("interface の extends と class の implements でも拾う", () => {
+    const source = [
+      "export interface Samples extends Float32Array {}",
+      "export interface Bytes extends globalThis.Uint8Array {}",
+      "export abstract class Lanes implements Int16Array {}",
+    ].join("\n");
+    assertEquals(reported(source), ["Float32Array", "globalThis.Uint8Array", "Int16Array"]);
+  });
+
   await t.step("12 種の TypedArray の名前を全て対象にする", () => {
     const names = [
       "Int8Array",
@@ -80,6 +100,9 @@ Deno.test("型引数を書いた型と、値の位置は報告しない", async 
       "  new Uint8Array(a.length);",
       "export const g = (bytes: Uint8Array<ArrayBufferLike>): number => bytes.length;",
       "export type Holder = { readonly data: Int32Array<ArrayBuffer>[] };",
+      "export type Qualified = globalThis.Float32Array<ArrayBuffer>;",
+      "export interface Samples extends Float32Array<ArrayBuffer> {}",
+      "export abstract class Lanes implements Int16Array<ArrayBufferLike> {}",
     ].join("\n");
     assertEquals(reported(source), []);
   });
@@ -96,6 +119,19 @@ Deno.test("型引数を書いた型と、値の位置は報告しない", async 
     ].join("\n");
     assertEquals(reported(source), []);
   });
+
+  await t.step(
+    "TypedArray の名前を型参照に書かない typeof 経由の形は取りこぼす（ADR 0002 に明記）",
+    () => {
+      // 構文だけでは型の中身（既定の ArrayBufferLike になること）が分からない。拾えるように
+      // なったら ADR 0002 の「取りこぼす形」とこのケースを一緒に直す。
+      const source = [
+        "export type I = InstanceType<typeof Float32Array>;",
+        "export type R = ReturnType<typeof Uint8Array.from>;",
+      ].join("\n");
+      assertEquals(reported(source), []);
+    },
+  );
 });
 
 Deno.test("対象は packages/<pkg>/src/ の下だけ", async (t) => {

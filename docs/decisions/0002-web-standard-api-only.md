@@ -45,9 +45,15 @@
   規則 `karume/typed-array-buffer` で検査する。走るのは `deno lint`（= `deno task verify` の lint 段）で、
   規則自体の検証は `tools/lint/plugin_test.ts`（`test:core` のレーン）。
   - **判定**: `packages/<pkg>/src/` の下で、型の位置（型注釈・型引数・戻り型・型エイリアス・欄・
-    `satisfies`）に書いた TypedArray 12 種の型参照が型引数を持たないものを報告する。値の位置
+    `satisfies`・interface の `extends`・class の `implements`）に書いた TypedArray 12 種の参照が
+    型引数を持たないものを報告する。修飾名（`globalThis.Float32Array`）は右端の名前で判定する。値の位置
     （`new Float32Array(n)`・`instanceof`・`typeof` の型クエリ）は構文上型参照ではないので拾わない。
     tests / tools / examples は対象外。
+  - **取りこぼす形**: TypedArray の名前を型参照として書かずに既定の `ArrayBufferLike` を作る形
+    （`InstanceType<typeof Float32Array>`・`ReturnType<typeof Uint8Array.from>` など）は拾わない。
+    判定は構文だけで、型の中身を解かないため。本体には 2026-10-11 時点で 0 件。
+    `tools/lint/plugin_test.ts` がこの 2 形を「拾わない」と固定しているので、拾えるようにしたら
+    この項とテストを一緒に直す。
   - **理由**: 型引数を省くと TS 5.7 以降は既定の `ArrayBufferLike`（`SharedArrayBuffer` を含む）になり、
     `GPUQueue.writeBuffer` や `CompressionStream` へ渡す値の型が黙って緩む。導入時点で本体に 148 か所
     あった（hub 6・models 139・runtime 3）。
