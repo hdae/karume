@@ -419,6 +419,11 @@ export const withWanFirstFrameCondition = (
  * MUST: 各 step の更新後の潜在の有限性を見る（O(N) のホスト走査 — 81 フレームで 1 step 約 210 万
  * 要素）。非有限の潜在を黙って次の step と VAE の段へ渡すと、VAE の後のクランプが ±Inf を ±1 に
  * 変えて検出できなくなる。
+ *
+ * MUST（呼び手の事前条件）: `plan.initial` が latents なら、`plan.initial.data` は呼び手が入口の門の
+ * 直後に写した、呼び手だけが所有する配列であること — この関数は写さずに使い、UniPC は step 0 の潜在を
+ * 参照のまま持つ。写すのは呼び手（`family.ts` の `generateWanVideo`）の責任で、型でも計画でも強制されない。
+ * 外の利用者の配列を直に渡すと、実行中の書き換え（門を通っていない NaN を含む）が補正子へ届く。
  */
 export const runWanDenoise = async (
   state: WanDenoiseState,
