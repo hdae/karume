@@ -1,7 +1,9 @@
 """examples/wan の画像デコーダ（decode-image.ts）のテストの fixture と期待値を書き出す。
 
-実行時には不要。期待値は「Pillow で開いて convert("RGB") した RGB8」— 上流 Wan2.2 の generate.py
-が条件画像を読む形（`Image.open(...).convert("RGB")`）と同じ。画像は奇数寸法で、画素ごと・
+実行時には不要。期待値は「Pillow で開いて ImageOps.exif_transpose で EXIF の向きを適用し、
+convert("RGB") した RGB8」— 上流 Wan2.2 の generate.py が条件画像を読む形
+（`Image.open(...).convert("RGB")`）に、向きの適用だけを足したもの（ADR 0121 の追記
+2026-10-11 — 向きは意図して上流と違えて適用する）。画像は奇数寸法で、画素ごと・
 チャネルごとに値が違う（チャネルの取り違え・アルファの捨て忘れ・行の詰め方の誤りでテストが
 落ちるように）。expected.json の orientations は EXIF の向きの純関数の正本で、rgb.png と同じ
 画素に向き 1〜8 を付けて Pillow の ImageOps.exif_transpose を通した RGB8。
@@ -352,11 +354,16 @@ def build() -> dict[str, tuple[bytes, str]]:
         "gray.jpg": (encode(jpeg_source().convert("L"), "JPEG", quality=90), "jpeg"),
         # Pillow は CMYK を Adobe の APP14 付き（反転）で書く。
         "cmyk.jpg": (encode(cmyk_source(), "JPEG", quality=90), "jpeg"),
-        # EXIF の向き = 6（90° 回転して見せる指定）。デコーダは向きを適用しない（寸法が
-        # 入れ替わらない）。
+        # EXIF の向き = 6（90° 回転して見せる指定・TIFF は big-endian〈MM〉— Pillow の既定）。
+        # デコーダは向きを適用する（寸法が入れ替わる）。
         "exif-orientation-6.jpg": (
             encode(jpeg_source(), "JPEG", quality=90, exif=exif_orientation(6)),
             "jpeg",
+        ),
+        # PNG の eXIf（IDAT より前）の向き = 5・TIFF は little-endian（II）— 画素単位で一致。
+        "exif-orientation-5.png": (
+            encode(pixel_image("RGB"), "PNG", exif=exif_orientation(5, endian="<")),
+            "exact",
         ),
         **{name: (data, "jpeg") for name, data in rgb_jpeg_variants().items()},
         "gif.gif": (encode(pixel_image("RGB"), "GIF"), "reject"),
@@ -392,6 +399,13 @@ def build() -> dict[str, tuple[bytes, str]]:
             )
     with Image.open(io.BytesIO(fixtures["exif-orientation-6.jpg"][0])) as opened:
         assert opened.getexif().get(0x0112) == 6, "EXIF の向きが書けていない"
+    # PNG の eXIf: 向き 5・II・IDAT より前（Chrome は IDAT より前の eXIf だけを読む）。
+    png_exif = fixtures["exif-orientation-5.png"][0]
+    chunks = png_chunk_types(png_exif)
+    assert chunks.index(b"eXIf") < chunks.index(b"IDAT"), f"eXIf が IDAT より前に無い: {chunks}"
+    with Image.open(io.BytesIO(png_exif)) as opened:
+        assert opened.getexif().get(0x0112) == 5, "PNG の EXIF の向きが書けていない"
+        assert opened.info["exif"][6:8] == b"II", "PNG の EXIF が little-endian でない"
     with Image.open(io.BytesIO(fixtures["cmyk.jpg"][0])) as opened:
         assert opened.mode == "CMYK" and opened.info.get("adobe") is not None, (
             "CMYK（Adobe）の JPEG になっていない"
@@ -422,10 +436,24 @@ def build() -> dict[str, tuple[bytes, str]]:
     return fixtures
 
 
-def exif_orientation(value: int) -> bytes:
+def exif_orientation(value: int, endian: str = ">") -> bytes:
+    """向き value だけを持つ EXIF（endian は TIFF のバイト順 — ">" = MM・"<" = II）。"""
     exif = Image.Exif()
+    exif.endian = endian
     exif[0x0112] = value
     return exif.tobytes()
+
+
+def png_chunk_types(data: bytes) -> list[bytes]:
+    """PNG のチャンクの型の並び。"""
+    assert data[:8] == PNG_SIGNATURE
+    types = []
+    at = 8
+    while at < len(data):
+        length = struct.unpack(">I", data[at : at + 4])[0]
+        types.append(data[at + 4 : at + 8])
+        at += 12 + length
+    return types
 
 
 def orientation_results() -> dict[str, dict[str, object]]:
@@ -470,8 +498,9 @@ def main() -> None:
         case: dict[str, object] = {"kind": kind}
         if kind != "reject":
             # 期待値は書き出したファイルを開き直して取る（JPEG はファイルの復号が正本）。
+            # EXIF の向きは適用する（向きを持たない fixture では exif_transpose は複製を返すだけ）。
             with Image.open(path) as opened:
-                rgb = opened.convert("RGB")
+                rgb = ImageOps.exif_transpose(opened).convert("RGB")
             case |= {"width": rgb.width, "height": rgb.height, "rgb": rgb.tobytes().hex()}
         cases[name] = case
     expected = {

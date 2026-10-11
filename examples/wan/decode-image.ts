@@ -5,13 +5,17 @@
  * JPEG = jpeg-js）を examples だけの依存として使う。MUST: `packages/` からこのモジュールや 2 つの依存を
  * import しない（パッケージのランタイム依存ゼロの不変条件 — CLAUDE.md）。
  *
- * 目標は Pillow の `Image.open(path).convert("RGB")` と同じ RGB8（上流 Wan2.2 の `generate.py` が条件画像を読む形
- * — commit 1ea34ff4 の 376 行目 `Image.open(args.image).convert("RGB")`）:
+ * 目標は Pillow の `ImageOps.exif_transpose(Image.open(path)).convert("RGB")` と同じ RGB8。上流 Wan2.2 の
+ * `generate.py` が条件画像を読む形（commit 1ea34ff4 の 376 行目 `Image.open(args.image).convert("RGB")`）に、
+ * EXIF の向きの適用だけを足したもの:
  *
  * - 形式は拡張子ではなく先頭のマジックバイトで決める。PNG / JPEG 以外は対応形式を名指しして落とす。
  * - アルファは合成せずに捨てる（`convert("RGB")` と同じ — 背景色を決めない）。
- * - EXIF の向き（orientation）は適用しない。上流の `generate.py` も `ImageOps.exif_transpose` を呼ばずに
- *   `convert("RGB")` だけで読む（上の行）ので、同じファイルから同じ向きの画素になる。
+ * - EXIF の向き（orientation）は適用する（ADR 0121 の追記 2026-10-11）。上流の `generate.py` は適用しない
+ *   （`exif_transpose` を呼ばない）が、向きのタグで縦に見せるスマホの写真が横倒しのまま生成に使われる方が
+ *   困るので、意図して上流と違える。gpu-lab（Chrome の `createImageBitmap`）も適用するので、同じファイルから
+ *   同じ向きの画素・同じ「画像から自動」の寸法になる。読む場所と壊れた EXIF の扱いは Chrome に揃える
+ *   （`readTiffOrientation` と `findPngExif` の doc）。
  * - PNG は 8 bit の RGB / RGBA / Gray / Gray+Alpha と、パレット（索引の深度 1 / 2 / 4 / 8 bit）を受けて Pillow と
  *   画素単位で一致する。16 bit・パレット以外の 8 bit 未満・インターレース（Adam7）の 8 bit 未満のパレットは落とす
  *   （黙って近似しない — 16 bit を 8 bit へ丸める規則は Pillow と合わせる根拠がまだ無い）。
@@ -25,6 +29,12 @@
 import { convertIndexedToRgb, decode as decodePngRaw } from "fast-png";
 import { decode as decodeJpegRaw } from "jpeg-js";
 import type { Rgb8Image } from "../../packages/models/wan.ts";
+
+/** 復号した画素と、向きを読む元の EXIF（TIFF の本体 — 無ければ undefined）。 */
+type Decoded = {
+  readonly image: Rgb8Image;
+  readonly exif: Uint8Array<ArrayBufferLike> | undefined;
+};
 
 /** 対応形式の名指し（拒否の文言に入れる）。 */
 const SUPPORTED =
@@ -147,6 +157,8 @@ type JpegHeader = {
   readonly jfif: boolean;
   /** Adobe の APP14 の transform（無ければ undefined）。 */
   readonly adobeTransform?: number;
+  /** 最初の Exif の APP1 の TIFF の本体（`Exif\0\0` の後 — 無ければ undefined）。 */
+  readonly exif?: Uint8Array<ArrayBufferLike>;
 };
 
 const ascii = (bytes: Uint8Array, length: number): string =>
@@ -165,6 +177,7 @@ const readJpegHeader = (bytes: Uint8Array): JpegHeader => {
     new Error(`JPEG を復号できない（${why} — 壊れているか途中で切れている — ${SUPPORTED}）`);
   let jfif = false;
   let adobeTransform: number | undefined;
+  let exif: Uint8Array<ArrayBufferLike> | undefined;
   let frame: { readonly precision: number; readonly componentIds: number[] } | undefined;
   // SOI（FF D8 の 2 バイト）の直後から。
   let at = 2;
@@ -187,6 +200,14 @@ const readJpegHeader = (bytes: Uint8Array): JpegHeader => {
     if (marker === 0xee && segment.length >= 12 && ascii(segment, 5) === "Adobe") {
       adobeTransform = segment[11];
     }
+    // 向きは最初の Exif の APP1 から読む。Pillow は 2 つ目以降を 1 つ目の後ろへ連結する（TIFF の頭と IFD0 は
+    // 1 つ目のもの）ので、向きは 1 つ目で決まる。Chrome（Skia）が複数のときにどれを選ぶかは確かめていない。
+    if (
+      marker === 0xe1 && exif === undefined && segment.length >= 6 &&
+      ascii(segment, 6) === "Exif\0\0"
+    ) {
+      exif = segment.subarray(6);
+    }
     if (isStartOfFrame(marker)) {
       const count = segment[5];
       if (segment.length < 6 + count * 3) throw broken("SOF が切れている");
@@ -198,7 +219,12 @@ const readJpegHeader = (bytes: Uint8Array): JpegHeader => {
     at += length;
   }
   if (frame === undefined) throw broken("SOS の前に SOF が無い");
-  return { ...frame, jfif, ...(adobeTransform === undefined ? {} : { adobeTransform }) };
+  return {
+    ...frame,
+    jfif,
+    ...(adobeTransform === undefined ? {} : { adobeTransform }),
+    ...(exif === undefined ? {} : { exif }),
+  };
 };
 
 /**
@@ -215,7 +241,7 @@ const isYCbCr = (header: JpegHeader): boolean => {
   return !(r === 0x52 && g === 0x47 && b === 0x42);
 };
 
-const decodeJpeg = (bytes: Uint8Array): Rgb8Image => {
+const decodeJpeg = (bytes: Uint8Array): Decoded => {
   const header = readJpegHeader(bytes);
   // jpeg-js は精度を読むが、出力は常に 8 bit へ clamp する（12 bit の値域を縮めない）ので、黙って白飛びさせない。
   if (header.precision !== 8) {
@@ -235,7 +261,7 @@ const decodeJpeg = (bytes: Uint8Array): Rgb8Image => {
       formatAsRGBA: false,
       ...colorSpace,
     });
-    return { data, width, height };
+    return { image: { data, width, height }, exif: header.exif };
   } catch (cause) {
     throw new Error(
       `JPEG を復号できない（壊れているか途中で切れているか、対応外の JPEG — ${SUPPORTED}）: ${
@@ -294,12 +320,86 @@ export const applyExifOrientation = (
   return { data: rgb, width: outWidth, height: outHeight };
 };
 
+const isExifOrientation = (value: number): value is ExifOrientation =>
+  Number.isInteger(value) && value >= 1 && value <= 8;
+
+/** TIFF の Orientation タグと、その値の型（SHORT）。 */
+const ORIENTATION_TAG = 0x0112;
+const TIFF_SHORT = 3;
+
 /**
- * 画像ファイルのバイト列 → RGB8（モジュール doc の規則）。形式は先頭のマジックバイトで決め、対応外・壊れた
- * データは対応形式を名指しする `Error` で落とす。
+ * EXIF（TIFF の本体 — `II` / `MM` の頭から）の IFD0 の Orientation を読む。型が SHORT で個数 1 のエントリの
+ * 1〜8 の値だけを使う。EXIF が無い・TIFF の頭や IFD0 が壊れている・値が範囲外のときは向き 1（格納のまま）とする。
+ *
+ * 壊れた EXIF を fail loudly にしないのは Chrome に揃えるため: Chrome は Skia の `SkExif::Parse` で読み、TIFF の
+ * 頭が読めなければ何もせず、値は `0 < value <= 8` のときだけ採る（範囲外は無視）— 向きが決まらなければ
+ * `ImageDecoder::ApplyExifMetadata` が top-left（向き 1）とする。画素の本体は読めていて Chrome が同じファイルを
+ * 黙って格納のまま表示する以上、ここだけ落とすと gpu-lab と食い違う。Pillow の `exif_transpose` も 2〜8 以外は
+ * 何もしない。
  */
-export const decodeImage = (bytes: Uint8Array): Rgb8Image => {
-  if (startsWith(bytes, PNG_SIGNATURE)) return decodePng(bytes);
+const readTiffOrientation = (
+  tiff: Uint8Array<ArrayBufferLike> | undefined,
+): ExifOrientation => {
+  if (tiff === undefined || tiff.length < 8) return 1;
+  const order = ascii(tiff, 2);
+  if (order !== "II" && order !== "MM") return 1;
+  const little = order === "II";
+  const view = new DataView(tiff.buffer, tiff.byteOffset, tiff.byteLength);
+  if (view.getUint16(2, little) !== 42) return 1;
+  const ifd = view.getUint32(4, little);
+  if (ifd + 2 > tiff.length) return 1;
+  const count = view.getUint16(ifd, little);
+  // 1 エントリ 12 バイト（タグ 2・型 2・個数 4・値 4）。IFD0 が途中で切れていれば読まない。
+  if (ifd + 2 + count * 12 > tiff.length) return 1;
+  for (let index = 0; index < count; index += 1) {
+    const entry = ifd + 2 + index * 12;
+    if (
+      view.getUint16(entry, little) !== ORIENTATION_TAG ||
+      view.getUint16(entry + 2, little) !== TIFF_SHORT ||
+      view.getUint32(entry + 4, little) !== 1
+    ) {
+      continue;
+    }
+    // SHORT 1 個は値の欄の先頭 2 バイトに入る（TIFF 6.0 — 4 バイトに収まる値は欄に直接置く）。
+    const value = view.getUint16(entry + 8, little);
+    if (isExifOrientation(value)) return value;
+  }
+  return 1;
+};
+
+/**
+ * PNG の IDAT より前の最初の eXIf チャンクの本体（TIFF）。Chrome は 2024-02 から PNG の eXIf の向きを適用する
+ * （Chromium の commit 694d9d3a「Add PNG eXIf chunk support」）が、実装者の説明（W3C の PNG の ML・2024-02-06）
+ * どおり IDAT より前の eXIf だけを読むので、ここも IDAT で探すのを止める。Pillow は IDAT の後の eXIf も読んで
+ * `exif_transpose` で適用するが、基準は gpu-lab（Chrome）と同じ向きにすること。復号（CRC の検査つき）が通った
+ * 後に呼ぶので、チャンクの並びは壊れていない。
+ */
+const findPngExif = (bytes: Uint8Array): Uint8Array<ArrayBufferLike> | undefined => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // 署名 8 バイトの後から。チャンク = 長さ 4 + 型 4 + 本体 + CRC 4。
+  for (let at = 8; at + 8 <= bytes.length;) {
+    const length = view.getUint32(at);
+    const type = ascii(bytes.subarray(at + 4), 4);
+    if (type === "IDAT") return undefined;
+    if (type === "eXIf") return bytes.subarray(at + 8, at + 8 + length);
+    at += 12 + length;
+  }
+  return undefined;
+};
+
+const decodeWithExif = (bytes: Uint8Array): Decoded => {
+  if (startsWith(bytes, PNG_SIGNATURE)) {
+    return { image: decodePng(bytes), exif: findPngExif(bytes) };
+  }
   if (startsWith(bytes, JPEG_SIGNATURE)) return decodeJpeg(bytes);
   throw new Error(`画像の先頭のバイト列が PNG でも JPEG でもない（${SUPPORTED}）`);
+};
+
+/**
+ * 画像ファイルのバイト列 → RGB8（モジュール doc の規則）。形式は先頭のマジックバイトで決め、対応外・壊れた
+ * データは対応形式を名指しする `Error` で落とす。EXIF の向きを適用した後の画素を返す（向き 5〜8 は縦横が入れ替わる）。
+ */
+export const decodeImage = (bytes: Uint8Array): Rgb8Image => {
+  const { image, exif } = decodeWithExif(bytes);
+  return applyExifOrientation(image, readTiffOrientation(exif));
 };

@@ -1,5 +1,6 @@
-// examples/wan の条件画像のデコーダ（`decode-image.ts`）の振る舞い。期待値は Pillow の `Image.open(...).convert("RGB")`
-// の RGB8（上流 Wan2.2 の generate.py が条件画像を読む形）で、fixture と一緒に `emit-image-fixtures.py` が書き出す
+// examples/wan の条件画像のデコーダ（`decode-image.ts`）の振る舞い。期待値は Pillow の
+// `ImageOps.exif_transpose(Image.open(...)).convert("RGB")` の RGB8（上流 Wan2.2 の generate.py が条件画像を読む形に
+// EXIF の向きの適用を足したもの — ADR 0121 の追記 2026-10-11）で、fixture と一緒に `emit-image-fixtures.py` が書き出す
 // （Pillow 12.3.0・`fixtures/expected.json`）。PNG は画素単位で一致、JPEG はデコーダの実装差（IDCT・4:2:0 の色差の
 // 補間）があるので最大絶対差の上限で縛る。GPU も実資産も要らない。
 
@@ -169,8 +170,10 @@ const flatJpeg = (components: number): Uint8Array => {
  * 画素単位で Pillow と一致する PNG（8 bit の 4 種・パレット 8 bit〈tRNS 付き〉/ 4 / 2 / 1 bit・Adam7 の 8 bit の
  * RGB / RGBA / Gray+Alpha / パレット）。1 / 2 bit は 1 バイトから 8 / 4 個の索引を取り、奇数幅 7 で行末がバイトの
  * 途中で切れる。Adam7 は fast-png が 1 画素のバイト数をチャネル数から数える経路を色の種類ごとに通す。
+ * `exif-orientation-5.png` は IDAT より前の eXIf（向き 5・TIFF は little-endian）を持ち、期待値は向きを適用した 5×7。
  */
 const EXACT_PNG = [
+  "exif-orientation-5.png",
   "rgb.png",
   "rgba.png",
   "l.png",
@@ -206,7 +209,7 @@ const JPEG_BOUNDS: Readonly<Record<string, number>> = {
 
 describe("decodeImage — PNG", () => {
   for (const name of EXACT_PNG) {
-    it(`${name} を Pillow の convert("RGB") と画素単位で同じ RGB8 にする`, () => {
+    it(`${name} を Pillow（exif_transpose + convert("RGB")）と画素単位で同じ RGB8 にする`, () => {
       const decoded = decodeImage(read(name));
       const expected = expectedOf(name);
       assertEquals([decoded.width, decoded.height], [expected.width, expected.height]);
@@ -279,9 +282,9 @@ describe("decodeImage — JPEG", () => {
     });
   }
 
-  it("EXIF の向き（orientation = 6）を適用しない（縦横が入れ替わらない）", () => {
+  it("EXIF の向き（orientation = 6）を適用する（格納 37×21 の縦横が入れ替わる）", () => {
     const decoded = decodeImage(read("exif-orientation-6.jpg"));
-    assertEquals([decoded.width, decoded.height], [37, 21]);
+    assertEquals([decoded.width, decoded.height], [21, 37]);
   });
 
   it("標本の精度が 8 bit でない JPEG（SOF の精度 12）を対応形式を名指しして拒む", () => {
@@ -347,6 +350,156 @@ describe("applyExifOrientation", () => {
       assertEquals(source.data, before);
     });
   }
+});
+
+type TiffOrder = "II" | "MM";
+
+/** EXIF の本体（TIFF）を組む: 頭 8 バイト + IFD0（エントリ 1 つ・次の IFD は無し）。 */
+const tiffWithEntry = (
+  order: TiffOrder,
+  entry: {
+    readonly tag?: number;
+    readonly type?: number;
+    readonly count?: number;
+    readonly value: number;
+  },
+): number[] => {
+  const little = order === "II";
+  const u16 = (value: number): number[] =>
+    little ? [value & 0xff, value >> 8] : [value >> 8, value & 0xff];
+  const u32 = (value: number): number[] => {
+    const big = [value >>> 24, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff];
+    return little ? big.reverse() : big;
+  };
+  return [
+    ...[...order].map((char) => char.charCodeAt(0)),
+    ...u16(42),
+    ...u32(8),
+    ...u16(1),
+    ...u16(entry.tag ?? 0x0112),
+    ...u16(entry.type ?? 3),
+    ...u32(entry.count ?? 1),
+    // SHORT 1 個は値の欄の先頭 2 バイト・残り 2 バイトは詰め物。
+    ...u16(entry.value),
+    0,
+    0,
+    ...u32(0),
+  ];
+};
+
+const asciiBytes = (text: string): number[] => [...text].map((char) => char.charCodeAt(0));
+
+/** APP1 の区画（マーカー + 長さ + 本体）。 */
+const app1 = (body: readonly number[]): number[] => [
+  0xff,
+  0xe1,
+  (body.length + 2) >> 8,
+  (body.length + 2) & 0xff,
+  ...body,
+];
+
+const exifApp1 = (tiff: readonly number[]): number[] => app1([...asciiBytes("Exif\0\0"), ...tiff]);
+
+/** JPEG の SOI の直後に区画を差し込む（画素の符号列は変えない）。 */
+const withSegments = (jpeg: Uint8Array, ...segments: readonly number[][]): Uint8Array =>
+  Uint8Array.from([...jpeg.subarray(0, 2), ...segments.flat(), ...jpeg.subarray(2)]);
+
+describe("decodeImage — EXIF の向きの読み取り", () => {
+  // 向きを持たない JPEG に APP1 を差し込み、向き 1 の復号に純関数を当てたものと比べる（復号の画素は差し込みで
+  // 変わらないので、差は向きの読み取りだけから来る）。
+  const base = read("baseline-420.jpg");
+  const plain = decodeImage(base);
+  const assertOriented = (bytes: Uint8Array, orientation: ExifOrientation) => {
+    const decoded = decodeImage(bytes);
+    const expected = applyExifOrientation(plain, orientation);
+    assertEquals([decoded.width, decoded.height], [expected.width, expected.height]);
+    assertEquals(decoded.data, expected.data);
+  };
+
+  for (const order of ["II", "MM"] as const) {
+    it(`TIFF のバイト順 ${order} の IFD0 から向き 1〜8 を読んで適用する`, () => {
+      for (const orientation of ORIENTATIONS) {
+        assertOriented(
+          withSegments(base, exifApp1(tiffWithEntry(order, { value: orientation }))),
+          orientation,
+        );
+      }
+    });
+  }
+
+  it("範囲外の向き（0・9・65535）を向き 1（格納のまま）として扱う — Chrome（Skia）と同じ", () => {
+    for (const value of [0, 9, 65535]) {
+      assertOriented(withSegments(base, exifApp1(tiffWithEntry("MM", { value }))), 1);
+    }
+  });
+
+  it("型が SHORT でない・個数が 1 でない・別のタグのエントリから向きを読まない", () => {
+    for (
+      const entry of [
+        { type: 4, value: 6 },
+        { count: 2, value: 6 },
+        { tag: 0x0110, value: 6 },
+      ]
+    ) {
+      assertOriented(withSegments(base, exifApp1(tiffWithEntry("II", entry))), 1);
+    }
+  });
+
+  it("壊れた EXIF（TIFF の頭・IFD0 の位置・途中で切れた IFD0・空）を向き 1 として扱い、画素は読む", () => {
+    const valid = tiffWithEntry("MM", { value: 6 });
+    const brokenMagic = valid.slice();
+    brokenMagic[3] = 43;
+    const farIfd = valid.slice();
+    farIfd.splice(4, 4, 0, 0, 0x10, 0);
+    const brokenOrder = valid.slice();
+    brokenOrder.splice(0, 2, ...asciiBytes("XX"));
+    for (const tiff of [brokenMagic, farIfd, brokenOrder, valid.slice(0, 20), []]) {
+      assertOriented(withSegments(base, exifApp1(tiff)), 1);
+    }
+  });
+
+  it("Exif で始まらない APP1（XMP）から向きを読まない", () => {
+    const xmp = app1([
+      ...asciiBytes("http://ns.adobe.com/xap/1.0/\0"),
+      ...tiffWithEntry("MM", { value: 6 }),
+    ]);
+    assertOriented(withSegments(base, xmp), 1);
+  });
+
+  it("Exif の APP1 が 2 つあれば最初の向きを使う", () => {
+    const first = exifApp1(tiffWithEntry("MM", { value: 6 }));
+    const second = exifApp1(tiffWithEntry("MM", { value: 8 }));
+    assertOriented(withSegments(base, first, second), 6);
+  });
+
+  it("PNG の IDAT の後の eXIf は読まない（Chrome は IDAT より前の eXIf だけを読む）", () => {
+    const bytes = read("exif-orientation-5.png");
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    // チャンク = 長さ 4 + 型 4 + 本体 + CRC 4。eXIf をそのまま（CRC ごと）IEND の前へ動かす。
+    const chunks: { readonly type: string; readonly bytes: Uint8Array }[] = [];
+    for (let at = 8; at < bytes.length;) {
+      const end = at + 12 + view.getUint32(at);
+      chunks.push({
+        type: String.fromCharCode(...bytes.subarray(at + 4, at + 8)),
+        bytes: bytes.subarray(at, end),
+      });
+      at = end;
+    }
+    const types = chunks.map((chunk) => chunk.type);
+    assert(types.indexOf("eXIf") < types.indexOf("IDAT"), `前提: eXIf が IDAT より前（${types}）`);
+    const exif = chunks.filter((chunk) => chunk.type === "eXIf");
+    const rest = chunks.filter((chunk) => chunk.type !== "eXIf");
+    const moved = Uint8Array.from([
+      ...bytes.subarray(0, 8),
+      ...rest.slice(0, -1).flatMap((chunk) => [...chunk.bytes]),
+      ...exif.flatMap((chunk) => [...chunk.bytes]),
+      ...rest[rest.length - 1].bytes,
+    ]);
+    const decoded = decodeImage(moved);
+    const unrotated = decodeImage(read("rgb.png"));
+    assertEquals([decoded.width, decoded.height], [unrotated.width, unrotated.height]);
+    assertEquals(decoded.data, unrotated.data);
+  });
 });
 
 describe("decodeImage — 対応外の形式", () => {
