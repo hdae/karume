@@ -340,7 +340,7 @@ class TestTheGraphWideGate:
         [
             ("_duplicate_output", "重複"),
             ("_unbound_symbol", "束縛が取れない"),
-            ("_forward_reference", "定義より前|未定義|前方"),
+            ("_forward_reference", "が未定義（前方参照または未宣言）"),
         ],
         ids=["duplicate-output", "unbound-symbol", "forward-reference"],
     )
