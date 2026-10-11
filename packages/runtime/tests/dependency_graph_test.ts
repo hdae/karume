@@ -183,6 +183,8 @@ const resolvedOf = (value: unknown, from: string, written: string, what: string)
  * 型だけの辺（`.js` の `// @ts-self-types="…"`・リモートの `X-TypeScript-Types`）は `dependencies[]`
  * でなくモジュール直下の `typesDependency` に出るので、それも辺として読む —— 読まないと
  * `@ts-self-types="npm:…"` やメンバーの外の型ファイルが、違反とも throw ともならず素通りする。
+ * NOTE: 2.9.6 で実測したのは `@ts-self-types` だけで、`X-TypeScript-Types` が同じ欄に出ることは
+ * 実測していない。
  * 型だけの辺は実行時のグラフには効かないが、利用者の `deno check` はその先を解決しに行く。
  */
 const edgesOf = (info: unknown): Edge[] => {
@@ -461,6 +463,30 @@ describe("依存グラフの門の判定", () => {
         () => edgesOf(infoWithTypes({ error: 'Import "x" not a dependency' })),
         Error,
         "解決できない",
+      );
+    });
+
+    it("どのメンバーにも属さない型ファイルを指していれば落とす", () => {
+      // `@ts-self-types="../outside/types.d.ts"` がメンバーの外を指す形（書かれた指定子は判定に効か
+      // ないので模型の固定値のまま）。
+      const edges = edgesOf(infoWithTypes({ specifier: "file:///repo/outside/types.d.ts" }));
+      const { violations } = judgeEdges(edges, ownerOf);
+      assertEquals(violations.length, 1);
+      assert(violations[0].includes("どのメンバーにも属さない"), violations[0]);
+    });
+
+    it("解決先（dependency）が欠けていれば推測せず throw する", () => {
+      assertThrows(
+        () =>
+          edgesOf({
+            version: INFO_VERSION,
+            modules: [{
+              specifier: "file:///repo/packages/example/src/impl.js",
+              typesDependency: { specifier: "./x.d.ts" },
+            }],
+          }),
+        Error,
+        "typesDependency.dependency がオブジェクトでない",
       );
     });
   });
