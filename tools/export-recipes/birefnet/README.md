@@ -86,3 +86,25 @@ foreground-ratio ordering check.
 
 `transformers` is pinned with `==` (the patch layer replaces class attributes of the module the
 `trust_remote_code` loader produced); the group is declared in [`../pyproject.toml`](../pyproject.toml).
+
+## Alpha-matte post-processing golden
+
+`birefnet/matte_fixture.py` writes the git-tracked fixture that the TypeScript post-processing
+(`packages/models/src/birefnet/matte.ts`, logit → 8-bit alpha at the input image's size) is checked
+against (ADR [0125](../../../docs/decisions/0125-birefnet-matte-postprocess.md)). It calls each
+series' upstream functions as they are and replaces only the quantization (truncation → round half
+up): BiRefNet_HR is the f64 sigmoid → 8-bit → Pillow's `Image.resize` (BICUBIC by default), Lucida
+is the f32 sigmoid → `torchvision.transforms.functional.resize` (antialiased bilinear) → `× 255`.
+
+```sh
+uv run --group birefnet python -m birefnet.matte_fixture \
+    --logits-dir ../../outputs/verify/<environment key>/<date>_birefnet   # re-cut the real-logit inputs
+uv run --group birefnet python -m birefnet.matte_fixture                 # rebuild from the committed inputs
+deno fmt ../../packages/models/tests/fixtures/birefnet-matte/matte.json  # the formatter's form is the committed form
+```
+
+The inputs are crops of the real matte logits that `e2e_birefnet_real_test.ts` writes (with their
+provenance) plus synthetic boundary cases; the target sizes are never the graph's 1024².
+`birefnet/tests/test_matte_fixture.py` rebuilds the fixture from the committed inputs with the
+installed torch / torchvision / Pillow / numpy and fails when it no longer matches, which is why the
+group pins `pillow==12.3.0` (the same version as the `wan` group).

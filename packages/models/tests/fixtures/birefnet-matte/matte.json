@@ -1,0 +1,529 @@
+{
+  "_doc": [
+    "BiRefNet の α マットの後処理の上流の手順の golden（生成: tools/export-recipes/birefnet/matte_fixture.py — ADR 0125）。",
+    "上流の関数をそのまま呼び、量子化だけを四捨五入（floor(x + 0.5)）へ差し替えたもの。",
+    "hr: numpy の f64 の σ → floor(255σ + 0.5) の uint8 → PIL.Image.fromarray(q)（L）.resize((W, H))（resample 省略 = BICUBIC）。TS の u8-pil-bicubic と 0 不一致が契約（生成器は 255σ が k + 0.5 から tieMargin 未満の標本を拒む）。",
+    "lucida: torch の f32 の sigmoid → torchvision.transforms.functional.resize(preds[0], (H, W))（bilinear・antialias 既定）→ × 255（f32）。最終 α は floor(x + 0.5)。TS の float-bilinear は一致するか、golden の 255α が k + 0.5 から epsilon 以内のときだけ 1 段ずれてよい。",
+    "テンソルは matte.safetensors の `<input>.logits`（F32 [h, w]）・`<case>.hr`（U8 [H, W]）・`<case>.lucida`（F32 [H, W] — 丸める前の 255α）。",
+    "値は torch / torchvision / Pillow / numpy の版で決まる — 版を変えたら作り直す（recipe の birefnet/tests/test_matte_fixture.py が今の版と突き合わせる）。"
+  ],
+  "source": {
+    "hr": "PIL.Image.Image.resize((W, H)) on PIL.Image.fromarray(floor(255σ_f64 + 0.5))",
+    "lucida": "torchvision.transforms.functional.resize(sigmoid_f32(x)[1, h, w], (H, W)) * 255",
+    "versions": {
+      "torch": "2.13.0+cpu",
+      "torchvision": "0.28.0+cpu",
+      "pillow": "12.3.0",
+      "numpy": "2.5.2"
+    }
+  },
+  "tieMargin": 1e-09,
+  "lucida": {
+    "epsilon": 0.01,
+    "measuredMaxDelta": 0.004202127456665039
+  },
+  "tensors": "matte.safetensors",
+  "inputs": [
+    {
+      "name": "real-birefnet-hr-portrait",
+      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-portrait）の輪郭付近の窓",
+      "width": 40,
+      "height": 32,
+      "provenance": {
+        "kind": "crop",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-portrait-matte.safetensors",
+        "sha256": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8",
+        "tensor": "add_214",
+        "x": 728,
+        "y": 564,
+        "width": 40,
+        "height": 32
+      }
+    },
+    {
+      "name": "real-birefnet-hr-portrait-row",
+      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-portrait）の窓の中心を通る 1 行",
+      "width": 1024,
+      "height": 1,
+      "provenance": {
+        "kind": "row",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-portrait-matte.safetensors",
+        "sha256": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8",
+        "tensor": "add_214",
+        "x": 0,
+        "y": 580,
+        "width": 1024,
+        "height": 1
+      }
+    },
+    {
+      "name": "real-birefnet-hr-portrait-column",
+      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-portrait）の窓の中心を通る幅 2 の列",
+      "width": 2,
+      "height": 1024,
+      "provenance": {
+        "kind": "column",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-portrait-matte.safetensors",
+        "sha256": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8",
+        "tensor": "add_214",
+        "x": 748,
+        "y": 0,
+        "width": 2,
+        "height": 1024
+      }
+    },
+    {
+      "name": "real-birefnet-hr-street",
+      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-street）の輪郭付近の窓",
+      "width": 40,
+      "height": 32,
+      "provenance": {
+        "kind": "crop",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-street-matte.safetensors",
+        "sha256": "8e019f075fce469c5a312c542e4c16c016befc1b1e7c3537eb9b7d7396833e4f",
+        "tensor": "add_214",
+        "x": 568,
+        "y": 660,
+        "width": 40,
+        "height": 32
+      }
+    },
+    {
+      "name": "real-lucida-portrait",
+      "why": "実画像の logit（lucida-1024 の f32 席・photo-portrait）の輪郭付近の窓",
+      "width": 40,
+      "height": 32,
+      "provenance": {
+        "kind": "crop",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/lucida-1024-photo-portrait-matte.safetensors",
+        "sha256": "29d6329482cba5edc0e6074dbf5b445ec80b8fb07e478613f9bf379d3f81898f",
+        "tensor": "add_214",
+        "x": 468,
+        "y": 20,
+        "width": 40,
+        "height": 32
+      }
+    },
+    {
+      "name": "real-lucida-portrait-row",
+      "why": "実画像の logit（lucida-1024 の f32 席・photo-portrait）の窓の中心を通る 1 行",
+      "width": 1024,
+      "height": 1,
+      "provenance": {
+        "kind": "row",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/lucida-1024-photo-portrait-matte.safetensors",
+        "sha256": "29d6329482cba5edc0e6074dbf5b445ec80b8fb07e478613f9bf379d3f81898f",
+        "tensor": "add_214",
+        "x": 0,
+        "y": 36,
+        "width": 1024,
+        "height": 1
+      }
+    },
+    {
+      "name": "real-lucida-portrait-column",
+      "why": "実画像の logit（lucida-1024 の f32 席・photo-portrait）の窓の中心を通る幅 2 の列",
+      "width": 2,
+      "height": 1024,
+      "provenance": {
+        "kind": "column",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/lucida-1024-photo-portrait-matte.safetensors",
+        "sha256": "29d6329482cba5edc0e6074dbf5b445ec80b8fb07e478613f9bf379d3f81898f",
+        "tensor": "add_214",
+        "x": 488,
+        "y": 0,
+        "width": 2,
+        "height": 1024
+      }
+    },
+    {
+      "name": "real-lucida-street",
+      "why": "実画像の logit（lucida-1024 の f32 席・photo-street）の輪郭付近の窓",
+      "width": 40,
+      "height": 32,
+      "provenance": {
+        "kind": "crop",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/lucida-1024-photo-street-matte.safetensors",
+        "sha256": "92fc450526b595cfe2a76dbc1dcaf10acdb2436f73687bbb7c82b42dd1ea9d9b",
+        "tensor": "add_214",
+        "x": 576,
+        "y": 644,
+        "width": 40,
+        "height": 32
+      }
+    },
+    {
+      "name": "step",
+      "why": "段差 0 / 255 の 4 → 8（R6B-001 の実測の 1 例）",
+      "width": 4,
+      "height": 1,
+      "provenance": null
+    },
+    {
+      "name": "ramp",
+      "why": "滑らかな斜面の 8 → 21（R6B-001 の実測の 1 例）",
+      "width": 8,
+      "height": 1,
+      "provenance": null
+    },
+    {
+      "name": "thin",
+      "why": "細い前景の 6 → 15（R6B-001 の実測の 1 例 — 差が最も大きい）",
+      "width": 6,
+      "height": 1,
+      "provenance": null
+    },
+    {
+      "name": "saturation",
+      "why": "飽和の帯（logit 5.5〜18 — 255 になる境目を跨ぐ）",
+      "width": 12,
+      "height": 4,
+      "provenance": null
+    },
+    {
+      "name": "checker",
+      "why": "市松 ±12（bicubic の overshoot を 0 / 255 で切る経路）",
+      "width": 8,
+      "height": 8,
+      "provenance": null
+    },
+    {
+      "name": "disc",
+      "why": "柔らかい輪郭の円盤",
+      "width": 33,
+      "height": 29,
+      "provenance": null
+    },
+    {
+      "name": "wide",
+      "why": "横 120 の段差のある斜面",
+      "width": 120,
+      "height": 2,
+      "provenance": null
+    },
+    {
+      "name": "tiny",
+      "why": "3×2（両端でタップが切り詰められる）",
+      "width": 3,
+      "height": 2,
+      "provenance": null
+    },
+    {
+      "name": "single",
+      "why": "1×1（全出力が 1 タップ）",
+      "width": 1,
+      "height": 1,
+      "provenance": null
+    }
+  ],
+  "cases": [
+    {
+      "name": "real-birefnet-hr-portrait.up",
+      "why": "両軸とも非整数倍の拡大",
+      "input": "real-birefnet-hr-portrait",
+      "outWidth": 97,
+      "outHeight": 83
+    },
+    {
+      "name": "real-birefnet-hr-portrait.down",
+      "why": "両軸とも非整数倍の縮小（台が伸びる）",
+      "input": "real-birefnet-hr-portrait",
+      "outWidth": 17,
+      "outHeight": 13
+    },
+    {
+      "name": "real-birefnet-hr-portrait.mixed",
+      "why": "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）",
+      "input": "real-birefnet-hr-portrait",
+      "outWidth": 25,
+      "outHeight": 61
+    },
+    {
+      "name": "real-birefnet-hr-portrait.horizontal-only",
+      "why": "横だけ拡大・縦は同寸（縦のパスを飛ばす）",
+      "input": "real-birefnet-hr-portrait",
+      "outWidth": 87,
+      "outHeight": 32
+    },
+    {
+      "name": "real-birefnet-hr-portrait.vertical-only",
+      "why": "縦だけ縮小・横は同寸（横のパスを飛ばす）",
+      "input": "real-birefnet-hr-portrait",
+      "outWidth": 40,
+      "outHeight": 15
+    },
+    {
+      "name": "real-birefnet-hr-portrait.identity",
+      "why": "両軸とも同寸（resize は写し — 量子化だけが残る）",
+      "input": "real-birefnet-hr-portrait",
+      "outWidth": 40,
+      "outHeight": 32
+    },
+    {
+      "name": "real-birefnet-hr-portrait-row.down-832",
+      "why": "実運用の係数表: 1024 → 832（832×480 の横）",
+      "input": "real-birefnet-hr-portrait-row",
+      "outWidth": 832,
+      "outHeight": 1
+    },
+    {
+      "name": "real-birefnet-hr-portrait-row.up-2048",
+      "why": "実運用の係数表: 1024 → 2048（2048² の横）",
+      "input": "real-birefnet-hr-portrait-row",
+      "outWidth": 2048,
+      "outHeight": 1
+    },
+    {
+      "name": "real-birefnet-hr-portrait-column.down-480",
+      "why": "実運用の係数表: 1024 → 480（832×480 の縦）",
+      "input": "real-birefnet-hr-portrait-column",
+      "outWidth": 2,
+      "outHeight": 480
+    },
+    {
+      "name": "real-birefnet-hr-portrait-column.up-2048",
+      "why": "実運用の係数表: 1024 → 2048（2048² の縦）",
+      "input": "real-birefnet-hr-portrait-column",
+      "outWidth": 2,
+      "outHeight": 2048
+    },
+    {
+      "name": "real-birefnet-hr-street.up",
+      "why": "両軸とも非整数倍の拡大",
+      "input": "real-birefnet-hr-street",
+      "outWidth": 97,
+      "outHeight": 83
+    },
+    {
+      "name": "real-birefnet-hr-street.down",
+      "why": "両軸とも非整数倍の縮小（台が伸びる）",
+      "input": "real-birefnet-hr-street",
+      "outWidth": 17,
+      "outHeight": 13
+    },
+    {
+      "name": "real-birefnet-hr-street.mixed",
+      "why": "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）",
+      "input": "real-birefnet-hr-street",
+      "outWidth": 25,
+      "outHeight": 61
+    },
+    {
+      "name": "real-birefnet-hr-street.horizontal-only",
+      "why": "横だけ拡大・縦は同寸（縦のパスを飛ばす）",
+      "input": "real-birefnet-hr-street",
+      "outWidth": 87,
+      "outHeight": 32
+    },
+    {
+      "name": "real-birefnet-hr-street.vertical-only",
+      "why": "縦だけ縮小・横は同寸（横のパスを飛ばす）",
+      "input": "real-birefnet-hr-street",
+      "outWidth": 40,
+      "outHeight": 15
+    },
+    {
+      "name": "real-birefnet-hr-street.identity",
+      "why": "両軸とも同寸（resize は写し — 量子化だけが残る）",
+      "input": "real-birefnet-hr-street",
+      "outWidth": 40,
+      "outHeight": 32
+    },
+    {
+      "name": "real-lucida-portrait.up",
+      "why": "両軸とも非整数倍の拡大",
+      "input": "real-lucida-portrait",
+      "outWidth": 97,
+      "outHeight": 83
+    },
+    {
+      "name": "real-lucida-portrait.down",
+      "why": "両軸とも非整数倍の縮小（台が伸びる）",
+      "input": "real-lucida-portrait",
+      "outWidth": 17,
+      "outHeight": 13
+    },
+    {
+      "name": "real-lucida-portrait.mixed",
+      "why": "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）",
+      "input": "real-lucida-portrait",
+      "outWidth": 25,
+      "outHeight": 61
+    },
+    {
+      "name": "real-lucida-portrait.horizontal-only",
+      "why": "横だけ拡大・縦は同寸（縦のパスを飛ばす）",
+      "input": "real-lucida-portrait",
+      "outWidth": 87,
+      "outHeight": 32
+    },
+    {
+      "name": "real-lucida-portrait.vertical-only",
+      "why": "縦だけ縮小・横は同寸（横のパスを飛ばす）",
+      "input": "real-lucida-portrait",
+      "outWidth": 40,
+      "outHeight": 15
+    },
+    {
+      "name": "real-lucida-portrait.identity",
+      "why": "両軸とも同寸（resize は写し — 量子化だけが残る）",
+      "input": "real-lucida-portrait",
+      "outWidth": 40,
+      "outHeight": 32
+    },
+    {
+      "name": "real-lucida-portrait-row.down-832",
+      "why": "実運用の係数表: 1024 → 832（832×480 の横）",
+      "input": "real-lucida-portrait-row",
+      "outWidth": 832,
+      "outHeight": 1
+    },
+    {
+      "name": "real-lucida-portrait-row.up-2048",
+      "why": "実運用の係数表: 1024 → 2048（2048² の横）",
+      "input": "real-lucida-portrait-row",
+      "outWidth": 2048,
+      "outHeight": 1
+    },
+    {
+      "name": "real-lucida-portrait-column.down-480",
+      "why": "実運用の係数表: 1024 → 480（832×480 の縦）",
+      "input": "real-lucida-portrait-column",
+      "outWidth": 2,
+      "outHeight": 480
+    },
+    {
+      "name": "real-lucida-portrait-column.up-2048",
+      "why": "実運用の係数表: 1024 → 2048（2048² の縦）",
+      "input": "real-lucida-portrait-column",
+      "outWidth": 2,
+      "outHeight": 2048
+    },
+    {
+      "name": "real-lucida-street.up",
+      "why": "両軸とも非整数倍の拡大",
+      "input": "real-lucida-street",
+      "outWidth": 97,
+      "outHeight": 83
+    },
+    {
+      "name": "real-lucida-street.down",
+      "why": "両軸とも非整数倍の縮小（台が伸びる）",
+      "input": "real-lucida-street",
+      "outWidth": 17,
+      "outHeight": 13
+    },
+    {
+      "name": "real-lucida-street.mixed",
+      "why": "横は縮小・縦は拡大（2 パスの軸の取り違えを掴む）",
+      "input": "real-lucida-street",
+      "outWidth": 25,
+      "outHeight": 61
+    },
+    {
+      "name": "real-lucida-street.horizontal-only",
+      "why": "横だけ拡大・縦は同寸（縦のパスを飛ばす）",
+      "input": "real-lucida-street",
+      "outWidth": 87,
+      "outHeight": 32
+    },
+    {
+      "name": "real-lucida-street.vertical-only",
+      "why": "縦だけ縮小・横は同寸（横のパスを飛ばす）",
+      "input": "real-lucida-street",
+      "outWidth": 40,
+      "outHeight": 15
+    },
+    {
+      "name": "real-lucida-street.identity",
+      "why": "両軸とも同寸（resize は写し — 量子化だけが残る）",
+      "input": "real-lucida-street",
+      "outWidth": 40,
+      "outHeight": 32
+    },
+    {
+      "name": "step.up",
+      "why": "4 → 8 の拡大（bicubic の負のローブが 0 と 255 を越えて飽和で切る）",
+      "input": "step",
+      "outWidth": 8,
+      "outHeight": 1
+    },
+    {
+      "name": "ramp.up",
+      "why": "8 → 21 の拡大",
+      "input": "ramp",
+      "outWidth": 21,
+      "outHeight": 1
+    },
+    {
+      "name": "thin.up",
+      "why": "6 → 15 の拡大",
+      "input": "thin",
+      "outWidth": 15,
+      "outHeight": 1
+    },
+    {
+      "name": "saturation.up",
+      "why": "拡大",
+      "input": "saturation",
+      "outWidth": 29,
+      "outHeight": 9
+    },
+    {
+      "name": "saturation.down",
+      "why": "縮小",
+      "input": "saturation",
+      "outWidth": 5,
+      "outHeight": 3
+    },
+    {
+      "name": "saturation.identity",
+      "why": "恒等（量子化の境目だけ）",
+      "input": "saturation",
+      "outWidth": 12,
+      "outHeight": 4
+    },
+    {
+      "name": "checker.up",
+      "why": "拡大",
+      "input": "checker",
+      "outWidth": 19,
+      "outHeight": 20
+    },
+    {
+      "name": "disc.down",
+      "why": "縮小（台が 4〜5 倍に伸びる）",
+      "input": "disc",
+      "outWidth": 7,
+      "outHeight": 6
+    },
+    {
+      "name": "disc.up",
+      "why": "拡大",
+      "input": "disc",
+      "outWidth": 50,
+      "outHeight": 44
+    },
+    {
+      "name": "wide.down",
+      "why": "横 120 → 7（台が 17 倍に伸びる・縦は同寸）",
+      "input": "wide",
+      "outWidth": 7,
+      "outHeight": 2
+    },
+    {
+      "name": "tiny.up",
+      "why": "3×2 → 7×5",
+      "input": "tiny",
+      "outWidth": 7,
+      "outHeight": 5
+    },
+    {
+      "name": "single.up",
+      "why": "1×1 → 4×3",
+      "input": "single",
+      "outWidth": 4,
+      "outHeight": 3
+    }
+  ]
+}
