@@ -172,7 +172,8 @@ type GpuContextInternals = {
 };
 
 /**
- * device が使える状態かの同期判定（常駐テンソル経路の受付門 — ADR 0054）。
+ * device が使える状態かの同期判定（常駐テンソル経路の受付門 — ADR 0054）。Session の構築
+ * （`runtime/session-build.ts`）も同じ判定を借りる（runtime の内部向け — mod.ts には出さない）。
  *
  * MUST: `lost` だけでなく `destroyRequested` も見る。`destroy()` はフラグを同期に立てるのに
  * `device.lost` の reaction が走るのは以後のタスクなので、`lost` だけだとその窓で操作が通る。
@@ -185,7 +186,7 @@ type GpuContextInternals = {
  * と同じ規律 — lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、意図的な破棄と予期しない
  * 消失で復旧手段は変わらないので型は分けない）。
  */
-const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
+export const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
   if (gpu.destroyRequested || gpu.lost !== undefined) {
     throw new GpuDeviceLostError(
       `${where}: device が失われた（device を取り直して作り直すこと）` +

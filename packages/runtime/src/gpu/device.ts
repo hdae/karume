@@ -41,6 +41,7 @@ export {
 } from "./acquire.ts";
 export type { AcquireGpuOptions, DeviceLostHandler, RequiredLimits } from "./acquire.ts";
 export {
+  assertDeviceUsable,
   BatchScope,
   BatchScopeError,
   describeDeviceLoss,

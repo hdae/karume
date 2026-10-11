@@ -20,7 +20,7 @@ import {
   decideAttentionI8a8Dot,
   formatAttentionI8a8Decision,
 } from "../gpu/attention-dp4a-canary.ts";
-import { type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
+import { assertDeviceUsable, type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { SessionPipelines } from "../gpu/pipeline-cache.ts";
 import { SubmitScheduler } from "../gpu/submit.ts";
@@ -651,6 +651,10 @@ export const buildSessionState = async (
   batches: AsyncIterable<WeightBatch>,
   options: SessionOptions,
 ): Promise<SessionState> => {
+  // MUST: device の生存は入口と決着の直前（下の try の末尾）の 2 回、構築自身が見る。重みの
+  // アップロードの完了待ちは消失を例外へ変えるが、重みを 1 本も上げないグラフ（initializer 無し・
+  // 全て shared）はその待ちに一度も届かず、消失済み device に結び付いた Session が成功で返る。
+  assertDeviceUsable(gpu, "Session の構築");
   // MUST: GPU の能力に依らない検査（型・綴り・組合せ・値域）は全て {@link sessionOptionsViolation}
   // の 1 本で先に見る。models 側の合成（明示 > 宣言 > 既定）が重み取得前に同じ判定を借りるので、
   // ここで条件を書き足すと 2 つの入口の受理集合が割れる。
@@ -1062,6 +1066,9 @@ export const buildSessionState = async (
       uploadFenceMs += performance.now() - fenceStart;
       supplyBoundary = performance.now();
     }
+    // 決着の直前の判定（入口の MUST）。try の内側に置くのは、落ちたときに下の catch で所有した
+    // 重みを破棄し、積んだ借用を返すため。
+    assertDeviceUsable(gpu, "Session の構築");
   } catch (cause) {
     // transaction 境界（ADR 0108 決定 9）: 途中の batch で失敗したら（宣言違反・入力列の例外・
     // GPU エラーのいずれでも）、アップロード済みの重みごと weights アリーナを破棄して

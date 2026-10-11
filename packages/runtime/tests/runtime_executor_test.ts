@@ -6,9 +6,15 @@ import { ContainerFormatError, writeHeader } from "../src/format/container/heade
 import { HEADER_BYTES } from "../src/format/container/limits.ts";
 import { openContainer } from "../src/format/container/open.ts";
 import { type IrGraph, parseIrDeclarationValue } from "../src/format/ir.ts";
-import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
+import {
+  GpuContext,
+  GpuDeviceLostError,
+  readAdapterInfo,
+  type RequiredLimits,
+} from "../src/gpu/device.ts";
 import { type GenerationRun, Session, type SessionOptions } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
+import { SharedWeight, type WeightResidency } from "../src/runtime/weight-residency.ts";
 import { chainGraph, chainTensors } from "./helpers/chain-graph.ts";
 import { fakeDevice } from "./helpers/fake-gpu.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
@@ -226,4 +232,122 @@ Deno.test("sharedWeights に SharedWeight でない値を渡すと、内部面�
       "SharedWeight でない値",
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// 構築と device の生存 — 構築は重みの完了待ちのほかに device を見ていなかったので、重みを 1 本も
+// 上げないグラフ（initializer 無し・全て shared）は消失済み device の上でも成功していた。
+// ---------------------------------------------------------------------------
+
+/** 消失を後から起こせる {@link fakeGpu}。 */
+const losableFakeGpu = (): { readonly gpu: GpuContext; readonly lose: () => void } => {
+  const lost = Promise.withResolvers<GPUDeviceLostInfo>();
+  return {
+    gpu: new GpuContext(
+      Object.assign(fakeDevice({ lost: lost.promise }), {
+        limits: { minStorageBufferOffsetAlignment: 256 },
+      }),
+      readAdapterInfo({}),
+      LIMITS,
+      new Set(),
+    ),
+    lose: (): void => lost.resolve({ reason: "destroyed", message: "テストによる消失" }),
+  };
+};
+
+/** 重みが全て借り物（shared 1 本）のグラフと、その常駐分類。 */
+const allSharedGraph = (): IrGraph =>
+  mergeGraph({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: [] },
+    symbols: [],
+    inputs: [],
+    outputs: ["w"],
+    initializers: { w: { shared: true } },
+    values: { w: { dtype: "f32", shape: [2] } },
+    nodes: [],
+  });
+const ALL_SHARED_RESIDENCY: ReadonlyMap<string, WeightResidency> = new Map([
+  ["w", { seat: "shared", eligible: false, i4Eligible: false, i2Eligible: false }],
+]);
+
+/** 借用の積み下ろしを数える貸し手の重み（実体は構築の照合を通る最小の形）。 */
+const countedSharedWeight = (
+  gpu: GpuContext,
+): { readonly weight: SharedWeight; readonly borrowed: () => number } => {
+  let borrowed = 0;
+  const weight = new SharedWeight({
+    initializer: "w",
+    gpu,
+    buffer: {} as unknown as GPUBuffer,
+    resident: undefined,
+    seat: "raw",
+    rowAxis: undefined,
+    codec: "f32",
+    shape: [2],
+    dtype: "f32",
+    retain: (): void => {
+      borrowed += 1;
+    },
+    release: (): void => {
+      borrowed -= 1;
+    },
+  });
+  return { weight, borrowed: () => borrowed };
+};
+
+Deno.test("消失済み・破棄要求済みの device では、重みを上げないグラフでも Session の構築が GpuDeviceLostError で reject する", async () => {
+  const destroyed = fakeGpu();
+  destroyed.destroy();
+  await assertRejects(
+    () => buildSession(destroyed, emptyGraph(), {}),
+    GpuDeviceLostError,
+    "Session の構築",
+  );
+
+  const { gpu, lose } = losableFakeGpu();
+  lose();
+  await gpu.device.lost;
+  await assertRejects(
+    () => buildSession(gpu, emptyGraph(), {}),
+    GpuDeviceLostError,
+    "Session の構築",
+  );
+  const { weight, borrowed } = countedSharedWeight(gpu);
+  async function* noShards(): AsyncGenerator<never> {}
+  await assertRejects(
+    () =>
+      Session.build(gpu, allSharedGraph(), ALL_SHARED_RESIDENCY, noShards(), {
+        sharedWeights: { w: weight },
+      }),
+    GpuDeviceLostError,
+    "Session の構築",
+  );
+  assertEquals(borrowed(), 0, "落ちた構築が借用を積んだまま");
+});
+
+Deno.test("構築の途中（重みの供給待ち）で device が失われたら、構築は成功で返らず借用を返す", async () => {
+  const { gpu, lose } = losableFakeGpu();
+  const { weight, borrowed } = countedSharedWeight(gpu);
+  const gate = Promise.withResolvers<void>();
+  // 供給は 1 本も出さずに終わるが、終わりを gate まで待たせる。
+  const stalledShards: AsyncIterable<never> = {
+    [Symbol.asyncIterator]: () => ({
+      next: async (): Promise<IteratorResult<never>> => {
+        await gate.promise;
+        return { done: true, value: undefined };
+      },
+    }),
+  };
+  const building = Session.build(gpu, allSharedGraph(), ALL_SHARED_RESIDENCY, stalledShards, {
+    sharedWeights: { w: weight },
+  });
+  // 借用は供給を待つ前に積む（構築中に貸し手が dispose される窓を塞ぐ）。
+  while (borrowed() === 0) await Promise.resolve();
+  lose();
+  await gpu.device.lost;
+  gate.resolve();
+  await assertRejects(() => building, GpuDeviceLostError, "Session の構築");
+  assertEquals(borrowed(), 0, "落ちた構築が借用を返していない");
 });
