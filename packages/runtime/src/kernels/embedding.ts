@@ -133,6 +133,10 @@ export const embeddingParams = (
   groupSize?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("embedding params", { count, hidden, vocab });
+  // MUST: 重みの論理要素数 `vocab·hidden ≤ 2^32 − 1`。WGSL は `u32(pick) * dims.hidden + col` を
+  // u32 の平坦添字として作り、packed のローダ（i2 / i4）が語位置へ変える。積が折り返すと
+  // 最後の行が先頭行の整数コードを読み、例外の出ない誤値になる（i2 は約 1 GiB の格納で届く）。
+  assertU32Params("embedding params", { "vocab * hidden": vocab * hidden });
   if (hidden === 0 && count !== 0) {
     // 0 除算になる組み合わせ（要素数 > 0 なのに hidden が無い）は shape 契約上ありえない。
     throw new CodegenError(`embedding params: hidden 0 で要素数 ${count} の組み合わせは無い`);

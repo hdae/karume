@@ -14,6 +14,7 @@
  *   要素ごとに掛かる（MAC ごとでも縮約の外でもない — ADR 0019）。
  */
 
+import { assertU32Params } from "../codegen/params.ts";
 import { type GemmCompute, gemmComputeKeyPart, gemmKeyPart, gemmParams, gemmWgsl } from "./gemm.ts";
 import type { GemmGeometry } from "./gemm-geometry.ts";
 import {
@@ -69,5 +70,17 @@ export const linearWgsl = (
     geometry,
   });
 
-export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> =>
-  gemmParams("linear", m, n, k);
+/**
+ * uniform の Dims（m / n / k の u32 域は {@link gemmParams} が見る）。
+ *
+ * MUST: 重みの論理要素数 `n·k ≤ 2^32 − 1`。GEMM 経路は行頭を論理要素番号 `wcol·dims.k` として
+ * u32 で先に作り、ローダが語位置へ変える（i2 は `>> 4`・i4 は `>> 3`）。積が先に折り返すと
+ * 上位ビットは戻らず、別の出力チャネルの重みを例外なしに読む。i2 では格納が約 1 GiB で届くので
+ * binding 上限や常駐計画の圧縮後バイト数の検査では止まらない（格納形を問わず添字は同じ式なので、
+ * 検査も格納形で分けない）。
+ */
+export const linearParams = (m: number, n: number, k: number): Uint32Array<ArrayBuffer> => {
+  const params = gemmParams("linear", m, n, k);
+  assertU32Params("linear params", { "n * k": n * k });
+  return params;
+};

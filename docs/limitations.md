@@ -726,6 +726,11 @@ packed int4 / int2（ADR [0069](decisions/0069-packed-w4-storage.md) /
 INT2 の実行は行ごとの scale で、linear / embedding の packed 実行に対応し、`linearCompute` は f32 に限る
 （[ADR 0097](decisions/0097-gemma4-qat-integration.md) 追記 1）。
 
+linear の重み `[N, K]` と embedding の重み `[V, H]` は、論理要素数（N·K・V·H）が 2^32 − 1 を超える形を Session 構築時に
+`CodegenError` で拒否する（格納形を問わない）。GPU は重みを論理要素の u32 平坦添字で引き、packed のローダが語位置へ
+変えるので、積が折り返すと別の行の重みを例外なしに読む。i2 では格納が約 1 GiB で届くため、binding 上限の検査では
+止まらない。
+
 - 公式 safetensors 仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
   目指す方向が違うため、配布形は専用コンテナ（ADR [0108](decisions/0108-container-format.md)）へ移った。
 
