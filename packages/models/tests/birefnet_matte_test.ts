@@ -274,11 +274,29 @@ describe("手順の共通の約束", () => {
   });
 
   it("非有限の logit はどの手順でも画素座標つきで落ちる（NaN が透明画素に化けない）", () => {
+    // `Uint8Array` 代入は NaN を 0 = 完全に透明な画素へ黙って丸めるので、検査が無いと
+    // 「正常に見えるマット」が返る。±Inf は σ を通れば 0/1 に落ちるが、そこまで来ている時点で
+    // グラフが壊れているので同じく落とす（他 3 家族の量子化出口と同じ綴り）。両手順とも同じ検査点を通る。
     for (const procedure of MATTE_PROCEDURES) {
       assertThrows(
         () => matteFromLogits(Float32Array.of(0, 0, NaN, 0), 2, 2, 3, 3, procedure),
         Error,
         "マットの logit (x=0, y=1) が非有限値",
+      );
+      assertThrows(
+        () => matteFromLogits(Float32Array.of(0, NaN, 0, 0), 2, 2, 2, 2, procedure),
+        Error,
+        "マットの logit (x=1, y=0) が非有限値",
+      );
+      assertThrows(
+        () => matteFromLogits(Float32Array.of(0, 0, 0, Infinity), 2, 2, 2, 2, procedure),
+        Error,
+        "マットの logit (x=1, y=1) が非有限値",
+      );
+      assertThrows(
+        () => matteFromLogits(Float32Array.of(-Infinity, 0, 0, 0), 2, 2, 2, 2, procedure),
+        Error,
+        "マットの logit (x=0, y=0) が非有限値",
       );
     }
   });
