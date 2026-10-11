@@ -14,10 +14,12 @@ manifest からの導出（表・数・使い方）は `birefnet/tests/test_dist
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 import pytest
 
+from _shared.paths import REPO_ROOT
 from birefnet.card import (
     BIREFNET_CHECKPOINTS,
     BIREFNET_MATTE_WEIGHTS,
@@ -44,10 +46,29 @@ MODEL = "1024"
 #: 両向きで見る。ここが要るのは「自分の契約以外を拒む」という 1 方向だけ。
 FOREIGN_PIPELINE = "siglip2/1"
 
-#: TS 側 `packages/models/src/birefnet/matte.ts` の `MATTE_PROCEDURES` の写し（ロード側が受理する
-#: 後処理の手順の閉じた集合）。カードが説明を持たない手順も、ロード側が読めない手順を説明する
-#: カードも作らない。
-TS_MATTE_PROCEDURES = ("float-bilinear", "u8-pil-bicubic")
+#: ロード側が受理する後処理の手順の閉じた集合の宣言（TS の `MATTE_PROCEDURES`）。
+MATTE_SOURCE = REPO_ROOT / "packages/models/src/birefnet/matte.ts"
+
+#: `MATTE_PROCEDURES` の宣言の 1 行（`export const MATTE_PROCEDURES = [...] as const;`）。
+MATTE_PROCEDURES_DECLARATION = re.compile(
+    r"^export const MATTE_PROCEDURES = \[(?P<body>[^\]]*)\] as const;$", re.MULTILINE
+)
+
+
+def _ts_matte_procedures(source: str) -> tuple[str, ...]:
+    """TS の宣言から手順の名前を読む（宣言の形が動いたら黙って空にせず落とす）。"""
+    declarations = MATTE_PROCEDURES_DECLARATION.findall(source)
+    assert len(declarations) == 1, f"{MATTE_SOURCE} の MATTE_PROCEDURES の宣言が読めない"
+    (body,) = declarations
+    names = tuple(re.findall(r'"([^"]+)"', body))
+    rest = re.sub(r'"[^"]+"|,|\s', "", body)
+    assert names and rest == "", f"MATTE_PROCEDURES に文字列の名前以外の要素がある: {body!r}"
+    return names
+
+
+#: TS 側の宣言を読んだ値（手書きの写しにすると、片側だけ動いても緑のままになる）。カードが説明を
+#: 持たない手順も、ロード側が読めない手順を説明するカードも作らない。
+TS_MATTE_PROCEDURES = _ts_matte_procedures(MATTE_SOURCE.read_text(encoding="utf-8"))
 
 
 def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
@@ -103,7 +124,13 @@ class TestBirefnetPostprocess:
     """後処理の手順（`pipelineConfig.postprocess`）の説明 — 手順の名前はモデルの宣言から引く。"""
 
     def test_it_describes_exactly_the_procedures_the_loader_accepts(self) -> None:
-        assert tuple(sorted(BIREFNET_POSTPROCESS_DESCRIPTIONS)) == TS_MATTE_PROCEDURES
+        assert sorted(BIREFNET_POSTPROCESS_DESCRIPTIONS) == sorted(TS_MATTE_PROCEDURES)
+
+    def test_every_checkpoint_declares_a_procedure_the_loader_accepts(self) -> None:
+        """組み立て段が書く手順は、ロード側の閉じた集合の中（外なら配布形が読めない）。"""
+        from birefnet.distribution import BIREFNET_POSTPROCESS
+
+        assert set(BIREFNET_POSTPROCESS.values()) <= set(TS_MATTE_PROCEDURES)
 
     @pytest.mark.parametrize("procedure", TS_MATTE_PROCEDURES)
     def test_it_describes_the_declared_procedure_only(self, procedure: str) -> None:
