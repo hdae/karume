@@ -3,7 +3,7 @@
 // （Pillow 12.3.0・`fixtures/expected.json`）。PNG は画素単位で一致、JPEG はデコーダの実装差（IDCT・4:2:0 の色差の
 // 補間）があるので最大絶対差の上限で縛る。GPU も実資産も要らない。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { decodeImage } from "./decode-image.ts";
 
@@ -84,8 +84,60 @@ const swapRedBlue = (rgb: Uint8Array): Uint8Array => {
 
 const SUPPORTED = "対応形式は PNG";
 
-/** 画素単位で Pillow と一致する PNG（8 bit の 4 種・パレット 8 bit〈tRNS 付き〉/ 4 bit・Adam7 の 8 bit RGB）。 */
-const EXACT_PNG = ["rgb.png", "rgba.png", "l.png", "la.png", "p8.png", "p4.png", "adam7-rgb.png"];
+/**
+ * 8×8・全成分が平坦（DC も AC も 0）の baseline JPEG を `components` 成分で組む（各成分 1×1 の標本化・量子化表は
+ * 全て 1・Huffman 表は DC / AC とも長さ 1 の符号 1 つ）。Pillow は 2 成分の JPEG を書けないので、成分数だけが違う
+ * 正しい符号列をここで組む（JPEG には CRC が無い）。
+ */
+const flatJpeg = (components: number): Uint8Array => {
+  const segment = (marker: number, body: readonly number[]): number[] => [
+    0xff,
+    marker,
+    (body.length + 2) >> 8,
+    (body.length + 2) & 0xff,
+    ...body,
+  ];
+  const ids = Array.from({ length: components }, (_, index) => index + 1);
+  // 符号長 1 の符号 1 つ（"0"）だけを持つ表 — DC は差分の大きさ 0・AC は EOB。
+  const table = (tableClass: number): number[] => [tableClass, 1, ...new Array(15).fill(0), 0x00];
+  // 1 ブロック = DC の "0" + EOB の "0"。MCU は成分ごとに 1 ブロックで、末尾を 1 で埋める。
+  const bits = "00".repeat(components).padEnd(Math.ceil((components * 2) / 8) * 8, "1");
+  const scan = Array.from(
+    { length: bits.length / 8 },
+    (_, at) => parseInt(bits.slice(at * 8, at * 8 + 8), 2),
+  );
+  return Uint8Array.from([
+    0xff,
+    0xd8,
+    ...segment(0xdb, [0, ...new Array(64).fill(1)]),
+    ...segment(0xc0, [8, 0, 8, 0, 8, components, ...ids.flatMap((id) => [id, 0x11, 0])]),
+    ...segment(0xc4, [...table(0x00), ...table(0x10)]),
+    ...segment(0xda, [components, ...ids.flatMap((id) => [id, 0x00]), 0, 63, 0]),
+    ...scan,
+    0xff,
+    0xd9,
+  ]);
+};
+
+/**
+ * 画素単位で Pillow と一致する PNG（8 bit の 4 種・パレット 8 bit〈tRNS 付き〉/ 4 / 2 / 1 bit・Adam7 の 8 bit の
+ * RGB / RGBA / Gray+Alpha / パレット）。1 / 2 bit は 1 バイトから 8 / 4 個の索引を取り、奇数幅 7 で行末がバイトの
+ * 途中で切れる。Adam7 は fast-png が 1 画素のバイト数をチャネル数から数える経路を色の種類ごとに通す。
+ */
+const EXACT_PNG = [
+  "rgb.png",
+  "rgba.png",
+  "l.png",
+  "la.png",
+  "p8.png",
+  "p4.png",
+  "p2.png",
+  "p1.png",
+  "adam7-rgb.png",
+  "adam7-rgba.png",
+  "adam7-la.png",
+  "adam7-p8.png",
+];
 
 /**
  * JPEG の最大絶対差の上限 = この機（2026-10-10・jpeg-js 0.4.4 対 Pillow 12.3.0〈libjpeg-turbo〉）で測った最悪値 × 2。
@@ -115,6 +167,23 @@ describe("decodeImage — PNG", () => {
       assertEquals(decoded.data, expected.data);
     });
   }
+
+  it("知らない色の種類（IHDR の色の種類 5）を対応形式を名指しして拒む", () => {
+    const bytes = read("rgb.png").slice();
+    // IHDR の本体の 10 バイト目（署名 8 + 長さ 4 + 型 4 + 幅 4 + 高さ 4 + 深度 1 の後）が色の種類。
+    assertEquals(bytes[25], 2);
+    bytes[25] = 5;
+    const error = assertThrows(() => decodeImage(bytes), Error, "PNG の色の種類 5 を知らない");
+    assertStringIncludes(error.message, SUPPORTED);
+  });
+
+  it("パレットの展開が 1 画素 3 / 4 バイトにならない PNG（tRNS が 2 本）を壊れたデータとして拒む", () => {
+    assertThrows(
+      () => decodeImage(read("p8-double-trns.png")),
+      Error,
+      "パレットの展開の長さ 175 が 35 画素の 3 / 4 倍でない",
+    );
+  });
 
   it("16 bit を対応形式を名指しして拒む（8 bit へ黙って丸めない）", () => {
     assertThrows(() => decodeImage(read("l16.png")), Error, "16 bit は受けない");
@@ -178,6 +247,37 @@ describe("decodeImage — JPEG", () => {
     assertThrows(() => decodeImage(bytes), Error, "精度 12 bit は受けない");
   });
 
+  it("2 成分の JPEG を対応形式を名指しして拒む（jpeg-js の色の変換に 2 成分の枝が無い）", () => {
+    // 対照: 同じ組み方の 1 成分は復号できる（拒否が組み方の誤りではなく成分数から来ること）。
+    const gray = decodeImage(flatJpeg(1));
+    assertEquals([gray.width, gray.height], [8, 8]);
+    const error = assertThrows(() => decodeImage(flatJpeg(2)), Error, SUPPORTED);
+    // 拒否の経路の確かめ: 復号は通り、RGB への変換（jpeg-js の `copyToImageData`）で落ちている。
+    assertStringIncludes(String(error.cause), "Unsupported color mode");
+  });
+
+  it("Adobe の APP14 が無い 4 成分の JPEG を対応形式を名指しして拒む（CMYK か YCCK か決められない）", () => {
+    const bytes = read("cmyk.jpg");
+    const app14 = bytes.findIndex((byte, at) => byte === 0xff && bytes[at + 1] === 0xee);
+    assert(app14 > 0, "前提: cmyk.jpg は Adobe の APP14 を持つ");
+    const length = (bytes[app14 + 2] << 8) | bytes[app14 + 3];
+    const stripped = new Uint8Array([
+      ...bytes.subarray(0, app14),
+      ...bytes.subarray(app14 + 2 + length),
+    ]);
+    const error = assertThrows(() => decodeImage(stripped), Error, SUPPORTED);
+    assertStringIncludes(String(error.cause), "4 components");
+  });
+
+  for (const [label, marker] of [["SOF3（可逆）", 0xc3], ["SOF9（算術符号）", 0xc9]] as const) {
+    it(`jpeg-js が知らない ${label} の JPEG を対応形式を名指しして拒む`, () => {
+      const bytes = read("baseline-420.jpg").slice();
+      const sof = bytes.findIndex((byte, at) => byte === 0xff && bytes[at + 1] === 0xc0);
+      bytes[sof + 1] = marker;
+      assertThrows(() => decodeImage(bytes), Error, SUPPORTED);
+    });
+  }
+
   it("途中で切れた JPEG を部分的な画像にせず拒む", () => {
     for (const name of ["baseline-420.jpg", "progressive.jpg"]) {
       const bytes = read(name);
@@ -202,7 +302,19 @@ describe("decodeImage — 対応外の形式", () => {
 
 describe("fixture の検出力（上のテストが落ちうること）", () => {
   it("色の PNG の期待値は R と B を入れ替えると変わる（チャネルの取り違えを見逃さない）", () => {
-    for (const name of ["rgb.png", "rgba.png", "p8.png", "p4.png", "adam7-rgb.png"]) {
+    for (
+      const name of [
+        "rgb.png",
+        "rgba.png",
+        "p8.png",
+        "p4.png",
+        "p2.png",
+        "p1.png",
+        "adam7-rgb.png",
+        "adam7-rgba.png",
+        "adam7-p8.png",
+      ]
+    ) {
       const { data } = expectedOf(name);
       assert(maxAbsDiff(swapRedBlue(data), data) > 0, `${name} の R と B が同じ値`);
     }

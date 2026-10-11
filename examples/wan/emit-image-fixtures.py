@@ -156,10 +156,13 @@ def adam7_png(
     )
 
 
-def palette_png(palette_colors: int, indices: list[int], with_palette: bool = True) -> bytes:
+def palette_png(
+    palette_colors: int, indices: list[int], with_palette: bool = True, trns_chunks: int = 0
+) -> bytes:
     """8 bit のパレットの PNG を手で組む（CRC は正しい — 壊れ方は中身だけ）。
 
-    Pillow の書き出しはパレットの外の索引も PLTE 無しのパレット画像も書かないので手で組む。
+    Pillow の書き出しはパレットの外の索引も PLTE 無しのパレット画像も tRNS を重ねた画像も
+    書かないので手で組む。trns_chunks は PLTE の後に置く tRNS（全色にアルファ）の本数。
     """
     width, height = PNG_SIZE
     raw = b"".join(b"\x00" + bytes(indices[y * width : (y + 1) * width]) for y in range(height))
@@ -171,6 +174,7 @@ def palette_png(palette_colors: int, indices: list[int], with_palette: bool = Tr
         PNG_SIGNATURE
         + png_chunk(b"IHDR", header)
         + (png_chunk(b"PLTE", palette) if with_palette else b"")
+        + b"".join(png_chunk(b"tRNS", bytes([128] * palette_colors)) for _ in range(trns_chunks))
         + png_chunk(b"IDAT", zlib.compress(raw))
         + png_chunk(b"IEND", b"")
     )
@@ -213,6 +217,15 @@ def pack_rgb8(values) -> bytes:
     return bytes(channel for value in values for channel in value)
 
 
+def pack_channels8(values) -> bytes:
+    """8 bit のチャネルの組（RGBA / Gray+Alpha）の列を詰める。"""
+    return bytes(channel for value in values for channel in value)
+
+
+def pack_index8(values) -> bytes:
+    return bytes(values)
+
+
 def pack_index4(values) -> bytes:
     padded = [*values, 0] if len(values) % 2 else values
     return bytes((padded[at] << 4) | padded[at + 1] for at in range(0, len(padded), 2))
@@ -244,6 +257,10 @@ def build() -> dict[str, tuple[bytes, str]]:
             "exact",
         ),
         "p4.png": (encode(palette_image(16), "PNG"), "exact"),
+        # 1 / 2 bit のパレット（1 バイトに 8 / 4 個の索引 — 奇数幅 7 で行末がバイトの途中で
+        # 切れる）。
+        "p2.png": (encode(palette_image(4), "PNG"), "exact"),
+        "p1.png": (encode(palette_image(2), "PNG"), "exact"),
         "adam7-rgb.png": (
             adam7_png(
                 width,
@@ -253,6 +270,48 @@ def build() -> dict[str, tuple[bytes, str]]:
                 lambda x, y: channel_values(y * width + x)[:3],
                 pack_rgb8,
                 None,
+            ),
+            "exact",
+        ),
+        # Adam7 の他の色の種類（fast-png の Adam7 の経路は 1 画素のバイト数をチャネル数から
+        # 数える）。
+        "adam7-rgba.png": (
+            adam7_png(
+                width,
+                height,
+                8,
+                6,
+                lambda x, y: channel_values(y * width + x),
+                pack_channels8,
+                None,
+            ),
+            "exact",
+        ),
+        "adam7-la.png": (
+            adam7_png(
+                width,
+                height,
+                8,
+                4,
+                lambda x, y: channel_values(y * width + x)[::3],
+                pack_channels8,
+                None,
+            ),
+            "exact",
+        ),
+        "adam7-p8.png": (
+            adam7_png(
+                width,
+                height,
+                8,
+                3,
+                lambda x, y: ((y * width + x) * 11 + 3) % (width * height),
+                pack_index8,
+                bytes(
+                    channel
+                    for index in range(width * height)
+                    for channel in channel_values(index)[:3]
+                ),
             ),
             "exact",
         ),
@@ -282,6 +341,11 @@ def build() -> dict[str, tuple[bytes, str]]:
             palette_png(2, [index % 2 for index in range(width * height)], with_palette=False),
             "reject",
         ),
+        # tRNS が 2 本（fast-png は本数ぶん全色にアルファを足す — 展開が 1 画素 5 バイトになる）。
+        "p8-double-trns.png": (
+            palette_png(2, [index % 2 for index in range(width * height)], trns_chunks=2),
+            "reject",
+        ),
         "baseline-420.jpg": (encode(jpeg_source(), "JPEG", quality=90, subsampling=2), "jpeg"),
         "progressive.jpg": (encode(jpeg_source(), "JPEG", quality=90, progressive=True), "jpeg"),
         "gray.jpg": (encode(jpeg_source().convert("L"), "JPEG", quality=90), "jpeg"),
@@ -303,6 +367,11 @@ def build() -> dict[str, tuple[bytes, str]]:
     checks = {
         "p8.png": (8, 3, 0),
         "p4.png": (4, 3, 0),
+        "p2.png": (2, 3, 0),
+        "p1.png": (1, 3, 0),
+        "adam7-rgba.png": (8, 6, 1),
+        "adam7-la.png": (8, 4, 1),
+        "adam7-p8.png": (8, 3, 1),
         "adam7-rgb.png": (8, 2, 1),
         "adam7-p4.png": (4, 3, 1),
         "l16.png": (16, 0, 0),

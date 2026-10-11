@@ -38,11 +38,41 @@
       "height": 5,
       "rgb": "1659bb63e8fa40a7691d66d86af51747b4862473f50132644ec1a32b8012083f8155cec0328d2f0f4c9e5cdbdd399a4c1659bb63e8fa40a7691d66d86af51747b4862473f50132644ec1a32b8012083f8155cec0328d2f0f4c9e5cdbdd399a4c1659bb63e8fa40a769"
     },
+    "p2.png": {
+      "kind": "exact",
+      "width": 7,
+      "height": 5,
+      "rgb": "1659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f810132641659bb0f4c9e083f81"
+    },
+    "p1.png": {
+      "kind": "exact",
+      "width": 7,
+      "height": 5,
+      "rgb": "083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81013264083f81"
+    },
     "adam7-rgb.png": {
       "kind": "exact",
       "width": 7,
       "height": 5,
       "rgb": "013264083f810f4c9e1659bb1d66d82473f52b8012328d2f399a4c40a76947b4864ec1a355cec05cdbdd63e8fa6af517710234780f517f1c6e86298b8d36a89443c59b50e2a25dffa96a1cb07739b78456be9173c59e90ccabadd3b8cadac5e7e1d204e8df21efec3e"
+    },
+    "adam7-rgba.png": {
+      "kind": "exact",
+      "width": 7,
+      "height": 5,
+      "rgb": "013264083f810f4c9e1659bb1d66d82473f52b8012328d2f399a4c40a76947b4864ec1a355cec05cdbdd63e8fa6af517710234780f517f1c6e86298b8d36a89443c59b50e2a25dffa96a1cb07739b78456be9173c59e90ccabadd3b8cadac5e7e1d204e8df21efec3e"
+    },
+    "adam7-la.png": {
+      "kind": "exact",
+      "width": 7,
+      "height": 5,
+      "rgb": "0101010808080f0f0f1616161d1d1d2424242b2b2b3232323939394040404747474e4e4e5555555c5c5c6363636a6a6a7171717878787f7f7f8686868d8d8d9494949b9b9ba2a2a2a9a9a9b0b0b0b7b7b7bebebec5c5c5ccccccd3d3d3dadadae1e1e1e8e8e8efefef"
+    },
+    "adam7-p8.png": {
+      "kind": "exact",
+      "width": 7,
+      "height": 5,
+      "rgb": "1659bb63e8fab07739083f8155cec0a25dffefec3e47b4869443c5e1d204399a4c86298bd3b8ca2b8012780f51c59e901d66d86af517b784560f4c9e5cdbdda96a1c0132644ec1a39b50e2e8df2140a7698d36a8dac5e7328d2f7f1c6eccabad2473f5710234be9173"
     },
     "adam7-p4.png": {
       "kind": "reject"
@@ -57,6 +87,9 @@
       "kind": "reject"
     },
     "p8-no-plte.png": {
+      "kind": "reject"
+    },
+    "p8-double-trns.png": {
       "kind": "reject"
     },
     "baseline-420.jpg": {
