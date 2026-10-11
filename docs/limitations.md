@@ -544,8 +544,9 @@ core 既定以下の形）だけを数え、それ以外は上限を名指して
   だけ dispatch が増える。小さい形では分割で遅くなった実測があり、分割の方が速かった例もある（ADR 0124 Context）。Wan2.2 の
   DiT の実用席・121 フレーム（開発機の RTX 3080 Ti・Deno）では、計測モードの GPU 時間の合計が予算 1 GiB / 512 MiB で予算なしと
   揺れの内、256 MiB で +24.9% だった（実測 2026-10-11・[research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)）。
-- **models の pipeline には口が無い**: runtime の `SessionOptions` だけの欄で、`WanTi2vPipeline` などからは渡せない
-  （口を出すかは段 4b の実測の後で決める）。
+- **models の pipeline と gpu-lab には口が無い**: runtime の `SessionOptions` だけの欄で、`WanTi2vPipeline` などや gpu-lab の
+  Wan タブからは渡せない。Wan の既定にも入れない（裁定 39 = a・利用者 2026-10-11 — ADR 0124 の段 4b の結果の節）。解決すべき問題が
+  出たら口を足す（ADR 0005 の追記 2026-10-11 の方針）。runtime を直に使う呼び手は `SessionOptions.attentionRowBlockMaxBytes` を使える。
 
 ## slot backing の予算つき保持: 予算に収まらない形は 1 本だけ保持する・常駐入力の破棄は保持中は拒否される
 
