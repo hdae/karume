@@ -9,9 +9,9 @@
 // - 計画の門が 2.2 の受理集合で効く・模擬 Session の生成で patch 2 の記述子が VAE の段の末尾（unpatchify）まで届く
 // - 文言の接頭辞が `WanTi2vPipeline:`（2.1 の文言で取り違えない）
 // - I2V（ADR 0121 決定 11）: encoder の部品の admission・段の順と解放（encoder → 畳む → 解放待ち → text → DiT）・
-//   encoder の受け渡し（常駐と bindings）・条件の潜在の非有限の門・DiT の条件づけ（先頭 P トークンのマスク・条件側の
-//   時刻 0・モデル入力だけの置き換え・UniPC へは置き換えない潜在・最後の 1 回の置き換え）・要求の門（fit / 寸法 / RGB8）・
-//   公式の置き換えの形との最終の一致（UniPC は要素ごと）
+//   encoder の段の中断と構築途中の失敗の後片付け・encoder の受け渡し（常駐と bindings）・条件の潜在の非有限の門・
+//   DiT の条件づけ（先頭 P トークンのマスク・条件側の時刻 0・モデル入力だけの置き換え・UniPC へは置き換えない潜在・
+//   最後の 1 回の置き換え）・要求の門（fit / 寸法 / RGB8）・公式の置き換えの形との最終の一致（UniPC は要素ごと）
 //
 // 実 GPU の通しは e2e（系列から組む helper — ADR 0121 段 6 のコミット 6）。
 
@@ -621,6 +621,12 @@ type EncoderEnqueue = {
 /** encoder の enqueue に注入する失敗（{@link mockTi2v} の `failEnqueue`）。 */
 const ENQUEUE_FAILURE = new Error("模擬: encoder の enqueue の失敗");
 
+/** encoder の Session の構築に注入する失敗（{@link mockTi2v} の `failCreate`）。 */
+const CREATE_FAILURE = new Error("模擬: encoder の Session の構築の失敗");
+
+/** encoder の mu の読み戻しに注入する失敗（{@link mockTi2v} の `failRead`）。 */
+const READ_FAILURE = new Error("模擬: encoder の mu の読み戻しの失敗");
+
 /** encoder のグラフ 1 本の宣言だけを持つ {@link GraphOwner}（出口の名前は `out`）。 */
 const encoderStub = (graph: EncoderGraph): GraphOwner =>
   stubModel({
@@ -659,6 +665,12 @@ const mockTi2v = (options: {
   readonly mu?: (index: number) => number;
   /** この部品（`vae_encoder_*`）の enqueue で {@link ENQUEUE_FAILURE} を投げる。 */
   readonly failEnqueue?: string;
+  /** encoder の `createSession` の中で部品名を渡して呼ぶ（中断の注入口 — 構築の途中で `abort` する）。 */
+  readonly onEncoderCreate?: (part: string) => void;
+  /** この部品（`vae_encoder_*`）の `createSession` を {@link CREATE_FAILURE} で reject する。 */
+  readonly failCreate?: string;
+  /** encoder の mu の読み戻し（`finishAndRead`）を {@link READ_FAILURE} で reject する。 */
+  readonly failRead?: boolean;
 } = {}) => {
   const log: string[] = [];
   const ditRuns: Record<string, Tensor>[] = [];
@@ -695,6 +707,8 @@ const mockTi2v = (options: {
   const encoderSession = (part: string) => ({
     createSession: (_gpu: unknown, sessionOptions: unknown) => {
       log.push(`create:${part}:${JSON.stringify(sessionOptions)}`);
+      options.onEncoderCreate?.(part);
+      if (options.failCreate === part) return Promise.reject(CREATE_FAILURE);
       return Promise.resolve({
         enqueue: (inputs: EncoderEnqueue["inputs"], enqueueOptions: EncoderEnqueue["options"]) => {
           log.push(`enqueue:${part}`);
@@ -793,6 +807,9 @@ const mockTi2v = (options: {
           // 平面を patchValue(s) で埋める。
           finishAndRead: (outputs: Record<string, { readonly byteLength: number }>) => {
             log.push("batch:read");
+            if (options.failRead === true && Object.hasOwn(outputs, "mu")) {
+              return Promise.reject(READ_FAILURE);
+            }
             return Promise.resolve(
               Object.fromEntries(
                 Object.entries(outputs).map(([name, { byteLength }]) => {
@@ -1140,6 +1157,77 @@ describe("WanTi2vPipeline.generate の I2V: 段の順と解放（模擬 Session�
       "settle:submit",
       "settle:done",
     ]);
+  });
+});
+
+/** encoder の段の後片付けの列（3 Session → 常駐 3 本 → 解放待ち — 畳む順と解放待ちの MUST）。 */
+const ENCODER_TEARDOWN = [
+  "dispose:vae_encoder_pre",
+  "dispose:vae_encoder_attn",
+  "dispose:vae_encoder_post",
+  "release:wan vae_encoder_pre",
+  "release:wan vae_encoder_attn",
+  "release:wan vae_encoder_post",
+  "settle:submit",
+  "settle:done",
+];
+
+describe("WanTi2vPipeline.generate の I2V: encoder の段の中断と構築途中の失敗（模擬 Session）", () => {
+  it("中断済みの signal は encoder の Session を 1 本も張らずに reason を投げる（入口 → encoder の境目）", async () => {
+    const { log, generate } = mockTi2v();
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（入口）");
+    controller.abort(reason);
+    const error = await assertRejects(() =>
+      generate({ image: LANDSCAPE, signal: controller.signal })
+    );
+    assertStrictEquals(error, reason);
+    assertEquals(log.filter((entry) => entry.includes("vae_encoder")), []);
+    assertEquals(log.filter((entry) => entry.startsWith("settle:")), []);
+  });
+
+  it("構築の途中の中断は batch の前で効き、張った 3 Session と常駐を畳んで解放を待ち、reason をそのまま投げる・次の generate は回る", async () => {
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（encoder の段）");
+    const { log, encoderEnqueues, generate } = mockTi2v({
+      onEncoderCreate: (part) => {
+        if (part === "vae_encoder_pre") controller.abort(reason);
+      },
+    });
+    const error = await assertRejects(() =>
+      generate({ image: LANDSCAPE, signal: controller.signal })
+    );
+    assertStrictEquals(error, reason);
+    // 3 グラフの batch は不可分 — 中断は区間を開く前に効き、enqueue を 1 本も出さない。
+    assertEquals(encoderEnqueues, []);
+    assert(!log.includes("batch:begin"), `中断の後に batch を開いた: ${log}`);
+    assertEquals(log.slice(log.indexOf("resident:wan vae_encoder_post") + 1), ENCODER_TEARDOWN);
+    assert(!log.includes("vae_encoder:end"), `中断した段が end を出した: ${log}`);
+    log.length = 0;
+    await generate({ image: LANDSCAPE });
+    assertEquals(log.at(-1), "vae_decoder:end", "中断の後の generate が最後まで回らない");
+  });
+
+  it("attn の Session の構築が落ちたら、張った pre だけを畳んで解放を待ち、本体の失敗をそのまま投げる（常駐は張らない）", async () => {
+    const { log, generate } = mockTi2v({ failCreate: "vae_encoder_attn" });
+    const error = await assertRejects(() => generate({ image: LANDSCAPE }));
+    assertStrictEquals(error, CREATE_FAILURE);
+    assertEquals(log.slice(log.indexOf("vae_encoder:start")), [
+      "vae_encoder:start",
+      "create:vae_encoder_pre:{}",
+      "create:vae_encoder_attn:{}",
+      "dispose:vae_encoder_pre",
+      "settle:submit",
+      "settle:done",
+    ]);
+  });
+
+  it("mu の読み戻しが落ちたら、3 Session → 常駐の順に畳んで解放を待ち、本体の失敗をそのまま投げる（区間は読み戻しが閉じる）", async () => {
+    const { log, generate } = mockTi2v({ failRead: true });
+    const error = await assertRejects(() => generate({ image: LANDSCAPE }));
+    assertStrictEquals(error, READ_FAILURE);
+    assertEquals(log.slice(log.indexOf("batch:read") + 1), ENCODER_TEARDOWN);
+    assert(!log.includes("batch:finish"), `読み戻しの失敗の後に区間を閉じ直した: ${log}`);
   });
 });
 
