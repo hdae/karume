@@ -34,7 +34,20 @@
  * 書いておけば、中断がどの yield で起きても値は正しい。
  *
  * MUST: `rewind` は使わない — sliding スロットを含む context は全拒否（ADR 0066 追記 2）。
- * 編集・分岐は「新しい context + token transcript の replay」が正。
+ * 編集（途中の発話の書き換え）と容量の変更は「新しい context + token transcript の replay」が正。
+ * 分岐は {@link GenerationSequence.fork}（下の節）。
+ *
+ * ## 分岐（fork — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）
+ *
+ * `fork()` は同じ会話の続きを持つ独立の sequence を返す。写すのは進行の可変状態の全部 —
+ * context（runtime の `GenerationContext.fork` = 全スロットの全バイトと論理長の複製）と
+ * `pendingToken` — と、自己採算ゲートの観測状態（{@link SpeculationGate.fork}）。drafter の面は
+ * 複製した context に対して `speculative.open` で開き直す（借り手は context ごと — 元の借り手を
+ * 共有すると、分岐の draft が元の KV を読む）。RNG は写さない（`generate` ごとに seed から作る）。
+ * `frontierRows` は `generate` の外では 0 なので写す必要が無い。
+ *
+ * MUST: 写す 3 つ（frontier・ゲート・context）は直列化鎖の席の中の**同じ時点**で捕捉する。席は
+ * 走行中の `generate` の後に取れるので、その時点は「直近に完了した生成までの確定値」になる。
  *
  * ## 中断は「完了した run のぶんだけ進んだ状態」で閉じる
  *
@@ -501,6 +514,22 @@ export type GenerationSequence = {
    * どれも例外にならない）。
    */
   generate(request: GenerationRequest): GenerationStream;
+  /**
+   * 同じ会話の続きを持つ**独立の** sequence を返す（会話の分岐 — 再生成や別案の試行）。
+   *
+   * 返った sequence は呼び手が所有し、`dispose()` も各自で行う（元との親子の依存は無く、元を先に
+   * dispose してよい）。KV は同じ容量のまま丸ごと複製されるので、分岐 1 本ごとに state のバイト数
+   * （容量 × 1 token あたりのバイト数）が増える。
+   *
+   * dispose 済みの sequence では**同期に** throw する（`generate` と同じ）。本体は `generate` /
+   * `dispose` と同じ鎖に積むので、走行中の生成の後に走る — 汲んでいる途中の stream があるなら、
+   * 汲み切るか `break` で閉じてから await すること（閉じないと fork は返らない）。
+   *
+   * 分岐した後の token 列が「fork を使わない同じ操作列」と一致するかは数値経路の決定性に従う
+   * （投機なしと `"always"` は一致・自己採算ゲートつきは device の門が緑のときだけ — ADR 0066
+   * 追記 2026-10-11 の決定性の節）。
+   */
+  fork(): Promise<GenerationSequence>;
   /** context を返す（`generate` と同じ鎖に積むので、走行中の生成の後に走る）。 */
   dispose(): Promise<void>;
 };
@@ -521,6 +550,19 @@ export type GenerationContextFace = {
   /** 保留中の deferred run の先頭 `rows` 行を確定させる（`0 ≤ rows ≤ queryLength`・同期）。 */
   commit(rows: number): void;
   dispose(): Promise<void>;
+};
+
+/**
+ * 分岐できる context の面（{@link GenerationContextFace} + 自分と同じ型を返す `fork`）。
+ *
+ * `fork` の戻りを型引数 `C` で縛る（F-bound）のは、複製した context を同じ Session の `run` へ
+ * 渡すため — `GenerationContextFace` に潰すと、別の型の context を実 Session へ渡す形が型検査を
+ * 通ってしまう（{@link GenerationSession} が型引数で context を通すのと同じ理由）。TS の型
+ * リテラルでは `this` 型が使えない（TS2526）ので、自己参照は型引数で書く。
+ */
+export type ForkableContextFace<C> = GenerationContextFace & {
+  /** 全スロットの全バイトと論理長を写した独立の context（runtime の `GenerationContext.fork`）。 */
+  fork(): Promise<C>;
 };
 
 /**
@@ -839,8 +881,11 @@ const copyRow = (row: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
  *
  * MUST: `GenerationContext` を外へ出さない（ADR 0083 決定 3）— 「最大 1 token の未 commit
  * frontier」を消費者から見せないことが決定 4 を成立させる要である。
+ *
+ * 確保（容量の検査と context の生成）はここ、組み立て（drafter とゲートと生成ループ）は
+ * {@link assembleSequence} — 組み立ては分岐（{@link GenerationSequence.fork}）と共有する。
  */
-export const createGenerationSequence = async <C extends GenerationContextFace>(
+export const createGenerationSequence = async <C extends ForkableContextFace<C>>(
   options: GenerationSequenceOptions<C>,
 ): Promise<GenerationSequence> => {
   const { session, program } = options;
@@ -872,7 +917,34 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
     // 空配列 = 追加なしなので、宣言の無い配線でも従来どおりの 2 本になる。
     chunkBuckets: program.chunkBuckets,
   });
+  return await assembleSequence(options, capacity, context, undefined);
+};
 
+/**
+ * 分岐が新しい sequence へ引き継ぐ状態（{@link GenerationSequence.fork} が鎖の席の中で捕捉する）。
+ */
+type SequenceSeed = {
+  /** 元の未 commit frontier（無ければ undefined）。 */
+  readonly pendingToken: number | undefined;
+  /** 元のゲートを写したゲート（元にゲートが居なければ undefined）。 */
+  readonly gate: SpeculationGate | undefined;
+};
+
+/**
+ * 確保済みの context から sequence を組み立てる（{@link createGenerationSequence} と
+ * {@link GenerationSequence.fork} が共有する 1 本）。`seed` が無ければ新しい会話（ゲートを
+ * ノブから作る）、あれば分岐（frontier とゲートを引き継ぐ）。
+ *
+ * MUST: 組み立てに失敗したら context を畳んでから投げ直す（失敗した組み立ての context は
+ * 呼び手から到達できない — 漏らすと Session.dispose も気づかない）。
+ */
+const assembleSequence = async <C extends ForkableContextFace<C>>(
+  options: GenerationSequenceOptions<C>,
+  capacity: number,
+  context: C,
+  seed: SequenceSeed | undefined,
+): Promise<GenerationSequence> => {
+  const { session, program } = options;
   /** drafter の面（投機の指定があるときだけ — 借り手は context の直後に開き、先に畳む）。 */
   let face: DraftFace | undefined;
   let k = 0;
@@ -881,16 +953,19 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
    *
    * MUST: 寿命は sequence である（ターンを跨いで持つ）— 壁と受理数の移動平均はターン 1 本では
    * 収束せず、会話ごとに測り直すと「最初の数 cycle だけ投機」を毎ターン繰り返す。
+   * MUST: fork した sequence へは観測状態を写す（`seed.gate` — 分岐は同じ会話・同じ host の
+   * 続きなので、測り直さない）。
    */
-  let gate: SpeculationGate | undefined;
+  let gate: SpeculationGate | undefined = seed?.gate;
   /** 壁時計（ゲートの観測と観測席の `wallMs` が読む — 既定は `performance.now`）。 */
   const now = options.speculative?.now ?? ((): number => performance.now());
   if (options.speculative !== undefined) {
     try {
       // ノブの門は借り手を開く**前**に通す（不正なノブが GB 級のロードの後まで落ちない）。
-      if ((options.speculative.policy ?? "auto") === "auto") {
+      // 分岐（`seed` あり）は元の生成時に検査済みのノブで写したゲートを受け取るので通らない。
+      if (seed === undefined && (options.speculative.policy ?? "auto") === "auto") {
         gate = createSpeculationGate(options.speculative.gate);
-      } else if (options.speculative.gate !== undefined) {
+      } else if (seed === undefined && options.speculative.gate !== undefined) {
         // ゲートの居ない席にノブを渡すのは「効かないノブ」— 黙って通さない（横断不変条件）。
         throw new Error(
           `speculative: policy "always" にゲートのノブ ${
@@ -920,7 +995,8 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
 
   // 「generate 1 回ぶん」の直列化（ADR 0083 決定 2）— 自前ロックは作らない。
   const chain = createOperationChain();
-  let pendingToken: number | undefined;
+  // 分岐は元の未 commit frontier を引き継ぐ（次ターンの prefill 先頭へ連結される — 決定 4）。
+  let pendingToken: number | undefined = seed?.pendingToken;
   /**
    * 保留中の verify のうち frontier にした行数（= target が消費した行数・投機の配送中だけ非 0）。
    * {@link settleCommit} が保留中の verify をここまで commit する。
@@ -1419,6 +1495,24 @@ export const createGenerationSequence = async <C extends GenerationContextFace>(
       return context.pastLength + frontierRows + (pendingToken === undefined ? 0 : 1);
     },
     generate,
+    fork(): Promise<GenerationSequence> {
+      // MUST: 寿命の検査は**同期**（`generate` と同じ — context を外へ出さないので、dispose 済み
+      // であることを呼び手が確かめる術がここ以外に無い）。
+      if (disposal !== undefined) {
+        throw new Error("GenerationSequence: dispose 済みでは fork できない");
+      }
+      return chain(async () => {
+        // MUST: 写す 3 つ（frontier・ゲート・context）は鎖の席の中の同じ時点で捕捉する（席の中は
+        // generate の合間 = `frontierRows` は 0・deferred の保留も無い）。`context.fork()` は
+        // 呼んだ同期区間で論理長とバイトを捕捉するので、frontier とゲートの写しと並べて await を
+        // 挟まずに呼ぶ。
+        const inherited: SequenceSeed = { pendingToken, gate: gate?.fork() };
+        const forked = await context.fork();
+        // 組み立て（drafter の開き直し）に失敗したら、複製した context は assembleSequence が
+        // 畳んでから投げ直す（元は無傷）。
+        return await assembleSequence(options, capacity, forked, inherited);
+      });
+    },
     dispose(): Promise<void> {
       // MUST: 2 度目以降も同じ完了を返す（先に返すと呼び手が破棄前の窓を掴む）。
       // MUST: 借り手（drafter の面）→ 貸し手 context の順。失敗は集めて全段を回す（前段の

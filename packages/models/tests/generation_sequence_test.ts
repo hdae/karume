@@ -8,17 +8,20 @@
 // - 可変状態は context と `pendingToken` の 2 つだけ（位置は `context.pastLength` から都度導出）。
 //   観測口（`used` / `GenerationStop.tokens` / 容量例外の欄）も**同じ 2 つからの導出**であること。
 // - 「generate 1 回ぶん」の直列化・`AbortSignal` の素通し・容量超過の専用型。
+// - **分岐（`fork`）**: frontier と論理長を引き継いだ独立の sequence・鎖の順序・寿命（ADR 0083
+//   追記 2026-10-11 — drafter とゲートの引き継ぎは `generation_speculation_test.ts` の T18）。
 //
 // Session と context は narrow interface（`GenerationSession` / `GenerationContextFace`）で
 // 受けるので、fake は素の object 1 個で足りる。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import type { RunInputs, Session } from "@karume/runtime";
+import type { GenerationContext, RunInputs, Session } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import type { GenerationWiring } from "../src/generation/program.ts";
 import {
   assertGenerationRequestValues,
   createGenerationSequence,
+  type ForkableContextFace,
   GenerationCapacityError,
   type GenerationEvent,
   type GenerationRequest,
@@ -1285,4 +1288,126 @@ Deno.test("GenerationSequence: 未開始 return は run を発行せず done を
   assertEquals(fake.calls, []);
   assertEquals(sequence.used, 0);
   await sequence.dispose();
+});
+
+// ---- 分岐（`fork` — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）-----------------------
+//
+// 分岐は「同じ会話の続きを持つ独立の sequence」で、写すのは context（複製）と `pendingToken`。
+// 偽物の context は論理長を context ごとに持つ（`generation-fake.ts`）ので、「どの context に
+// 書いたか」と「frontier を連結したか」が呼び出し列から読める。drafter とゲートの引き継ぎは
+// `generation_speculation_test.ts` の fork の節が見る。
+
+/** 入力 token → 次の token（行の入力だけで決まる決定的な target — 分岐と元を同じ規則で回す）。 */
+const FORK_SUCCESSOR: readonly number[] = Array.from(
+  { length: VOCAB },
+  (_unused, token) => (token * 5 + 3) % VOCAB,
+);
+
+Deno.test("GenerationSequence.fork: 分岐は frontier と論理長を引き継ぎ、元と独立に続く", async () => {
+  const fake = fakeSession({ successor: FORK_SUCCESSOR });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  const first = await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 3 }));
+  const frontier = tokenIds(first.events).at(-1);
+  assert(frontier !== undefined, "前提: 1 ターン目が token を出していない");
+  // prefill 2 行 + decode 2 回 = 論理長 4、未 commit の frontier 1 個 = 会話が占める位置 5。
+  assertEquals([fake.pastLength(), sequence.used], [4, 5]);
+
+  const forked = await sequence.fork();
+  assertEquals(fake.forks.length, 1, "context を 1 回だけ複製した");
+  assertEquals(forked.capacity, sequence.capacity);
+  assertEquals(forked.used, 5, "分岐は会話が占める位置をそのまま引き継ぐ");
+
+  // 分岐のターン: 元の frontier が先頭に連結され（決定 4）、位置は元の論理長から続き、
+  // 分岐の context で走る。元の論理長は動かない。
+  const atBranch = fake.calls.length;
+  await drain(forked.generate({ prompt: [7], maxNewTokens: 2 }));
+  const branchCalls = fake.calls.slice(atBranch);
+  assertEquals(branchCalls[0].ids.slice(0, 2), [frontier, 7], "分岐が frontier を連結していない");
+  assertEquals(branchCalls[0].positions.slice(0, 2), [4, 5]);
+  assert(
+    fake.runContexts.slice(atBranch).every((context) => context === fake.forks[0]),
+    "分岐のターンが分岐の context 以外で走った",
+  );
+  assertEquals(fake.pastLength(), 4, "分岐のターンが元の論理長を動かした");
+
+  // 元のターン: 同じ frontier を自分の側でも連結し、分岐の進み具合に関係なく位置 4 から続く
+  // （frontier を「分岐へ渡した」ことにして元から落とす実装は、ここで 1 token 欠ける）。
+  const atMain = fake.calls.length;
+  await drain(sequence.generate({ prompt: [9], maxNewTokens: 2 }));
+  const mainCalls = fake.calls.slice(atMain);
+  assertEquals(mainCalls[0].ids.slice(0, 2), [frontier, 9], "元が frontier を連結していない");
+  assertEquals(mainCalls[0].positions.slice(0, 2), [4, 5]);
+  assert(
+    fake.runContexts.slice(atMain).every((context) => context === fake.context),
+    "元のターンが元の context 以外で走った",
+  );
+  assertEquals([sequence.used, forked.used], [8, 8]);
+  await forked.dispose();
+  await sequence.dispose();
+});
+
+Deno.test("GenerationSequence.fork: 本体は走行中の generate の後に走り、その時点の状態を写す", async () => {
+  const fake = fakeSession({ tokens: [5, 6, 7, 8] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 3 });
+  const iterator = stream[Symbol.asyncIterator]();
+  await iterator.next();
+
+  let settled = false;
+  const forking = sequence.fork().then((forked) => {
+    settled = true;
+    return forked;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEquals(settled, false, "走行中の生成を追い越して fork した");
+  assertEquals(fake.forks.length, 0, "走行中の生成の途中で context を複製した");
+  // 残りを汲み切ると席が空き、fork が走る（生成の後の確定値を写す）。
+  while (!(await iterator.next()).done) { /* 汲み切る */ }
+  const forked = await forking;
+  assertEquals(forked.used, 5);
+  assertEquals(forked.used, sequence.used, "分岐が生成の途中の状態を写した");
+  await forked.dispose();
+  await sequence.dispose();
+});
+
+Deno.test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の前に発行した fork は先に走る", async () => {
+  const fake = fakeSession({ tokens: [5, 6] });
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: programOf(fake),
+  });
+  await drain(sequence.generate({ prompt: [1], maxNewTokens: 2 }));
+
+  // fork → dispose の順に発行すると、同じ鎖なので fork が先に走る。dispose 発行の後は同期に落ちる。
+  const forking = sequence.fork();
+  const disposal = sequence.dispose();
+  assertThrows(() => sequence.fork(), Error, "GenerationSequence: dispose 済みでは fork できない");
+  const forked = await forking;
+  await disposal;
+  assertEquals(fake.disposals(), 1, "元の context が畳まれていない");
+  assertEquals(fake.forks.length, 1, "拒否された fork が複製を出した");
+
+  // 元を先に dispose してよい（親子の依存を持たない）— 分岐はそのまま使え、畳むのは自分の
+  // context だけ。
+  const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 1 }));
+  assertEquals(branch.stop.reason, "max-tokens");
+  assert(fake.runContexts.at(-1) === fake.forks[0], "分岐のターンが分岐の context で走っていない");
+  await forked.dispose();
+  assertEquals(fake.disposalsOf(fake.forks[0]), 1);
+  assertEquals(fake.disposals(), 1, "分岐の dispose が元の context を畳んだ");
+});
+
+Deno.test("ForkableContextFace: 実 GenerationContext は自分と同じ型を返す fork を持つ（型の門）", () => {
+  // 型検査だけの門（実行時は何もしない）。runtime 側で `fork` の綴りや戻りの型が変わると
+  // コンパイルエラーになる（`createGenerationSequence` の F-bound が実 Session で解けなくなる）。
+  const asForkable = (
+    context: GenerationContext,
+  ): ForkableContextFace<GenerationContext> => context;
+  assertEquals(typeof asForkable, "function");
 });

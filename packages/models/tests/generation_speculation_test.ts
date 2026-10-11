@@ -23,6 +23,9 @@
 // T17 は観測席が運ぶ**壁と局面**（`wallMs` / `delivered` / `gate`）の席である。run の種別と番号
 // だけを見る門（T7 / T9）は `runShape` で壁の欄を落として比べる — 非投機の sequence には偽時計を
 // 差せないので、壁の実値はそれらの門では見られない。
+//
+// T18 は分岐（`fork`）の投機側の席である — drafter は複製した context に対して開き直し、ゲートは
+// 観測状態を写す（ADR 0083 追記 2026-10-11）。
 
 import {
   assert,
@@ -2011,4 +2014,132 @@ Deno.test("空 draft の抽選は不要な履歴の読み取りをしない", ()
   assertEquals(result, { accepted: 0, confirmed: [8] });
   assertEquals(read, [0]);
   assertEquals(draws, 1);
+});
+
+// ---- T18: 分岐（`fork` — ADR 0083 追記 2026-10-11・裁定 8）--------------------------
+//
+// 分岐の drafter は**複製した context に対して開き直す**（借り手は context ごと）。drafter の
+// 取り違えは token 列に出ない（draft は受理率にしか効かない）ので、`open` が受けた context と
+// 「どの drafter が draft したか」でしか縛れない。ゲートは観測状態を写す（判断の続きから回る）。
+
+Deno.test("T18 分岐: drafter は複製した context に対して開き直し、元の drafter を共有しない", async () => {
+  const fake = fakeSession({ successor: SUCCESSOR });
+  const drafters = [oracleDrafter(), oracleDrafter()];
+  for (const drafter of drafters) drafter.watch(fake);
+  const seen: unknown[] = [];
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: specProgram(fake),
+    speculative: {
+      open: (context) => {
+        seen.push(context);
+        const drafter = drafters[seen.length - 1];
+        assert(drafter !== undefined, "open が想定より多く呼ばれた");
+        return Promise.resolve(drafter.face);
+      },
+      policy: "always",
+    },
+  });
+  await drain(sequence.generate({ prompt: PROMPT, maxNewTokens: 6 }));
+  const forked = await sequence.fork();
+  assertEquals(seen.length, 2, "分岐で drafter を開き直していない");
+  assert(seen[0] === fake.context, "元の drafter が元の context 以外で開いた");
+  assert(seen[1] === fake.forks[0], "分岐の drafter が複製した context 以外で開いた");
+
+  // 分岐のターンの draft は分岐の drafter だけが出し、verify は複製した context で走る。
+  const draftsOfMain = drafters[0].calls.length;
+  const atBranch = fake.calls.length;
+  const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 6 }));
+  assertEquals(drafters[0].calls.length, draftsOfMain, "分岐のターンで元の drafter が draft した");
+  assert(drafters[1].calls.length > 0, "分岐の drafter が 1 度も draft していない");
+  assert(
+    fake.runContexts.slice(atBranch).every((context) => context === fake.forks[0]),
+    "分岐のターンが複製した context 以外で走った",
+  );
+  // 同じ状態・同じ要求なら、元で回した列と同じ（投機は列を変えない — 分岐でも）。
+  const main = await drain(sequence.generate({ prompt: [3], maxNewTokens: 6 }));
+  assertEquals(branch.events, main.events, "分岐と元で同じ要求の列が違う");
+
+  // 寿命: 分岐の dispose は分岐の drafter → 複製した context だけを畳む。
+  await forked.dispose();
+  assertEquals([drafters[0].disposals(), drafters[1].disposals()], [0, 1]);
+  assertEquals([fake.disposals(), fake.disposalsOf(fake.forks[0])], [0, 1]);
+  await sequence.dispose();
+  assertEquals(drafters[0].disposals(), 1);
+});
+
+Deno.test("T18 分岐: drafter の開き直しに失敗したら複製した context を畳んで投げ、元は無傷", async () => {
+  const fake = fakeSession({ successor: SUCCESSOR });
+  const drafter = oracleDrafter();
+  drafter.watch(fake);
+  let opens = 0;
+  const sequence = await createGenerationSequence({
+    session: fake.session,
+    program: specProgram(fake),
+    speculative: {
+      open: () => {
+        opens += 1;
+        return opens === 1
+          ? Promise.resolve(drafter.face)
+          : Promise.reject(new Error("注入: 開き直しの失敗"));
+      },
+      policy: "always",
+    },
+  });
+  await drain(sequence.generate({ prompt: PROMPT, maxNewTokens: 4 }));
+  const used = sequence.used;
+
+  await assertRejects(() => sequence.fork(), Error, "注入: 開き直しの失敗");
+  assertEquals(fake.forks.length, 1);
+  assertEquals(fake.disposalsOf(fake.forks[0]), 1, "開けなかった分岐の context が漏れた");
+  assertEquals(drafter.disposals(), 0, "元の drafter が巻き添えで畳まれた");
+  assertEquals(fake.disposals(), 0, "元の context が巻き添えで畳まれた");
+  // 元はそのまま続けられる。
+  assertEquals(sequence.used, used);
+  const next = await drain(sequence.generate({ prompt: [3], maxNewTokens: 2 }));
+  assertEquals(next.stop.reason, "max-tokens");
+  await sequence.dispose();
+});
+
+Deno.test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の cycle は元のゲートのモードで決まる）", async () => {
+  // T16 と同じ壁（投機が 2.5 倍遅い）で元のゲートを plain へ倒してから分岐する。
+  const drafter = oracleDrafter();
+  const opened = await openSpeculative({
+    drafter,
+    policy: "auto",
+    gate: FAST_GATE,
+    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+  });
+  const first = await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
+  assertEquals(first.stop.speculation?.switches, 1, "前提: 元のゲートが plain へ倒れていない");
+
+  const forked = await opened.sequence.fork();
+  const mark = opened.phases.length;
+  const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 4 }));
+  /** cycle を名乗る通知（draft は verify の前に届く補助の通知なので除く）。 */
+  const isCycle = (phase: GenerationRunPhase): boolean =>
+    phase.kind === "verify" || phase.kind === "decode";
+  const cycles = opened.phases.slice(mark).filter(isCycle);
+  // 分岐の最初の cycle は元のゲートの定常モード（plain）で決まる = decode 形。測り直す実装は
+  // 新しいゲートの初手（speculate = verify）になる。
+  const head = cycles[0];
+  assert(head?.kind === "decode", `分岐の最初の cycle が decode 形でない: ${JSON.stringify(head)}`);
+  assertEquals(head.gate?.mode, "plain");
+  assertEquals(branch.stop.speculation?.switches, 0, "分岐のターンで切替が起きた");
+
+  // 陽性対照: 観測の無いゲート（新しい sequence）の最初の cycle は投機（verify）。
+  const fresh = await openSpeculative({
+    drafter: oracleDrafter(),
+    policy: "auto",
+    gate: FAST_GATE,
+  });
+  await drain(fresh.sequence.generate({ prompt: PROMPT, maxNewTokens: 4 }));
+  assertEquals(
+    fresh.phases.filter(isCycle)[0]?.kind,
+    "verify",
+    "観測の無いゲートの初手が投機でない（上の門が空振りする）",
+  );
+  await forked.dispose();
+  await fresh.sequence.dispose();
+  await opened.sequence.dispose();
 });

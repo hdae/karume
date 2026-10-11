@@ -1533,19 +1533,30 @@ class GemmaPipeline {
       ...(speculative === undefined ? {} : { speculative }),
       ...(onRun === undefined ? {} : { onRun }),
     });
-    // MUST: `await` 明けにもう一度見る。`dispose` の鎖本体は `#handed` を走査してから畳むので、
-    // 確保の途中で dispose された実体は**どちらの経路からも畳まれない**（この再検査だけが
-    // 塞げる窓 — runtime 側 `executor.ts` の `#createGenerationContext` と同型）。
+    return await this.#hand(inner);
+  }
+
+  /**
+   * sequence を追跡つきの薄い包みで渡す（{@link Gemma4Pipeline.sequence} と、その分岐
+   * 〈`GenerationSequence.fork`〉が共有する 1 本）。
+   *
+   * 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
+   * 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。包みが持つのは**この
+   * 追跡だけ**である（観測席は `onRun` hook として sequence の中へ降りたので、`generate` は
+   * 素通しで足りる）。分岐も同じ包みで渡すので、`dispose` は分岐も巻き取る。
+   *
+   * MUST: `await` 明けにもう一度見る（確保〈分岐なら複製〉の途中で dispose された実体は、`dispose`
+   * の鎖本体が `#handed` を走査済みなので**どちらの経路からも畳まれない** — この再検査だけが
+   * 塞げる窓。runtime 側 `executor.ts` の `#adopt` と同型）。
+   */
+  async #hand(inner: GenerationSequence): Promise<GenerationSequence> {
+    const state = this.#state;
     if (this.#disposal !== undefined) {
       await inner.dispose();
       throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
     }
     // 正しく返された sequence は追跡から外す（外さないと、多ターン UI が会話ごとに作って
     // 畳んでも Set が単調増加し、`dispose` が破棄済みの実体を全数もう一度 await する）。
-    // 実体そのものではなく薄い包みを渡すのは、`GenerationSequence` に pipeline を知らせる席を
-    // 作らないため（生成面は最後までパイプライン非依存 — ADR 0083）。包みが持つのは**この
-    // 追跡だけ**である（観測席は `onRun` hook として sequence の中へ降りたので、`generate` は
-    // 素通しで足りる）。
     const handed: GenerationSequence = {
       capacity: inner.capacity,
       // 導出値なので包みも getter で素通しする（値を写すと「渡した瞬間の値」で固まる）。
@@ -1553,6 +1564,14 @@ class GemmaPipeline {
         return inner.used;
       },
       generate: inner.generate,
+      fork: (): Promise<GenerationSequence> => {
+        // MUST: async にしない — dispose 済みの拒否は sequence 側が**同期に**投げる契約で、
+        // async で包むと reject に化ける。pipeline の dispose 後も同じく同期に落とす。
+        if (this.#disposal !== undefined) {
+          throw new Error(`${state.entry}: dispose 済みでは sequence を作れない`);
+        }
+        return inner.fork().then((forked) => this.#hand(forked));
+      },
       dispose: async (): Promise<void> => {
         await inner.dispose();
         // 失敗した dispose は外さない（context が返っていないので `dispose` が巻き取る側に残す）。

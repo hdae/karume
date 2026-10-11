@@ -149,6 +149,8 @@ type FakeHost = Gemma4ChatSessionHost & {
   speculativeKeys(): readonly boolean[];
   /** `generate` が受けた sampler 指定を発行順に（解決順 3 段の観測点）。 */
   samplers(): readonly (SamplerSpec | undefined)[];
+  /** `GenerationSequence.fork` が呼ばれた回数（KV の複製を出したかがここに出る）。 */
+  forks(): number;
 };
 
 /** 偽 sequence の故障注入（`sequence()` の保留と `dispose()` の拒否）。 */
@@ -163,6 +165,8 @@ type FakeFaults = {
    * は GPU の確保を挟む非同期なので、この窓は実在する。
    */
   readonly holdSequence?: (release: () => void) => void;
+  /** `GenerationSequence.fork` を拒否させる（複製の確保失敗の写し）。 */
+  readonly forkError?: unknown;
 };
 
 /** 中断の識別（本物の `sequence.ts` の `isAbortOf` と同じ分け方を偽側にも写す）。 */
@@ -189,7 +193,89 @@ const fakeHost = (
   const samplers: (SamplerSpec | undefined)[] = [];
   let created = 0;
   let disposed = 0;
+  let forks = 0;
   let turn = 0;
+  /**
+   * 偽 sequence を 1 本組む（`used` の起点だけを受ける — 分岐は元の `used` から続く）。
+   *
+   * 台本（`answers`）は host 全体で 1 本なので、分岐しても次のターンは台本の次の答えを返す。
+   */
+  const makeSequence = (capacity: number, startUsed: number): GenerationSequence => {
+    let used = startUsed;
+    let gone = false;
+    const sequence: GenerationSequence = {
+      capacity,
+      get used(): number {
+        return used;
+      },
+      generate(request: GenerationRequest): GenerationStream {
+        assert(!gone, "dispose 済みの sequence へ generate した");
+        prompts.push([...request.prompt]);
+        samplers.push(request.sampler);
+        const answer = answers[turn];
+        assert(answer !== undefined, `台本に ${turn + 1} ターン目が無い`);
+        turn += 1;
+        const ids = tokenizer.encode(answer.text);
+        used += request.prompt.length;
+        const stop: GenerationStop = answer.closes
+          ? { reason: "eos", token: END_OF_TURN, tokens: ids.length + 1 }
+          : { reason: "max-tokens", tokens: ids.length };
+
+        let settle!: (value: GenerationStop) => void;
+        const done = new Promise<GenerationStop>((resolve) => {
+          settle = resolve;
+        });
+        const events = async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
+          let emitted = 0;
+          let stopped: GenerationStop | undefined;
+          try {
+            request.signal?.throwIfAborted();
+            yield { kind: "prefill", chunk: 1, chunks: 1 };
+            for (const id of ids) {
+              // 中断は段の境目で見る（本物も run と run の間でしか観測できない）。
+              request.signal?.throwIfAborted();
+              used += 1;
+              emitted += 1;
+              yield { kind: "token", id, position: used };
+            }
+            // 停止 token は列に出さないが会話には残る（未 commit frontier）。
+            if (answer.closes) used += 1;
+            stopped = stop;
+          } catch (error) {
+            // MUST: 中断を捕えた側で `aborted` を立ててから投げ直す（本物の `sequence.ts` と
+            // 同じ形）。ここを写さないと `done` が `closed` で解決してしまい、テストが
+            // 実装ではなく偽側の写し違いを見ることになる。
+            if (isAbortOf(error, request.signal)) {
+              stopped = { reason: "aborted", tokens: emitted };
+            }
+            throw error;
+          } finally {
+            // `break` / `return()` で畳まれた場合は `closed`（本物と同じ分け方）。
+            settle(stopped ?? { reason: "closed", tokens: emitted });
+          }
+        };
+        const iterable = events();
+        return { [Symbol.asyncIterator]: () => iterable, done };
+      },
+      fork(): Promise<GenerationSequence> {
+        // 本物と同じく dispose 済みは同期に落とす。
+        if (gone) throw new Error("GenerationSequence: dispose 済みでは fork できない");
+        forks += 1;
+        if (faults.forkError !== undefined) return Promise.reject(faults.forkError);
+        // 本物の分岐と同じく、会話が占める位置（`used`）をそのまま引き継ぐ。
+        return Promise.resolve(makeSequence(capacity, used));
+      },
+      async dispose(): Promise<void> {
+        gone = true;
+        await faults.holdDispose?.();
+        disposed += 1;
+        return faults.disposeError === undefined
+          ? Promise.resolve()
+          : Promise.reject(faults.disposeError);
+      },
+    };
+    return sequence;
+  };
   return {
     tokenizer,
     program,
@@ -201,77 +287,13 @@ const fakeHost = (
     speculatives: () => speculatives,
     speculativeKeys: () => speculativeKeys,
     samplers: () => samplers,
+    forks: () => forks,
     sequence: (options = {}): Promise<GenerationSequence> => {
       created += 1;
       capacities.push(options.capacity);
       speculatives.push(options.speculative);
       speculativeKeys.push(Object.hasOwn(options, "speculative"));
-      const capacity = options.capacity ?? program.capacity;
-      let used = 0;
-      let gone = false;
-      const sequence: GenerationSequence = {
-        capacity,
-        get used(): number {
-          return used;
-        },
-        generate(request: GenerationRequest): GenerationStream {
-          assert(!gone, "dispose 済みの sequence へ generate した");
-          prompts.push([...request.prompt]);
-          samplers.push(request.sampler);
-          const answer = answers[turn];
-          assert(answer !== undefined, `台本に ${turn + 1} ターン目が無い`);
-          turn += 1;
-          const ids = tokenizer.encode(answer.text);
-          used += request.prompt.length;
-          const stop: GenerationStop = answer.closes
-            ? { reason: "eos", token: END_OF_TURN, tokens: ids.length + 1 }
-            : { reason: "max-tokens", tokens: ids.length };
-
-          let settle!: (value: GenerationStop) => void;
-          const done = new Promise<GenerationStop>((resolve) => {
-            settle = resolve;
-          });
-          const events = async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
-            let emitted = 0;
-            let stopped: GenerationStop | undefined;
-            try {
-              request.signal?.throwIfAborted();
-              yield { kind: "prefill", chunk: 1, chunks: 1 };
-              for (const id of ids) {
-                // 中断は段の境目で見る（本物も run と run の間でしか観測できない）。
-                request.signal?.throwIfAborted();
-                used += 1;
-                emitted += 1;
-                yield { kind: "token", id, position: used };
-              }
-              // 停止 token は列に出さないが会話には残る（未 commit frontier）。
-              if (answer.closes) used += 1;
-              stopped = stop;
-            } catch (error) {
-              // MUST: 中断を捕えた側で `aborted` を立ててから投げ直す（本物の `sequence.ts` と
-              // 同じ形）。ここを写さないと `done` が `closed` で解決してしまい、テストが
-              // 実装ではなく偽側の写し違いを見ることになる。
-              if (isAbortOf(error, request.signal)) {
-                stopped = { reason: "aborted", tokens: emitted };
-              }
-              throw error;
-            } finally {
-              // `break` / `return()` で畳まれた場合は `closed`（本物と同じ分け方）。
-              settle(stopped ?? { reason: "closed", tokens: emitted });
-            }
-          };
-          const iterable = events();
-          return { [Symbol.asyncIterator]: () => iterable, done };
-        },
-        async dispose(): Promise<void> {
-          gone = true;
-          await faults.holdDispose?.();
-          disposed += 1;
-          return faults.disposeError === undefined
-            ? Promise.resolve()
-            : Promise.reject(faults.disposeError);
-        },
-      };
+      const sequence = makeSequence(options.capacity ?? program.capacity, 0);
       const hold = faults.holdSequence;
       if (hold === undefined) return Promise.resolve(sequence);
       return new Promise<GenerationSequence>((resolve) => hold(() => resolve(sequence)));
