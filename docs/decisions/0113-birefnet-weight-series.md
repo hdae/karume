@@ -147,7 +147,7 @@ feature を要求しないので、席を f16 だけにしても動く機種は�
 次のリリースの回のまま。
 
 1. **席の導出規則**: quant 席は checkpoint ごとに上流 checkpoint の格納の型（`BirefnetCheckpoint.stored_dtype`）から
-   導く — **上流の格納より広い席は出さず、既定席は格納と同じ幅の席**（`birefnet.distribution` の
+   導く — **上流の格納より広い席は出さず、既定席は格納と同じ型の席**（`birefnet.distribution` の
    `birefnet_seat_dtypes` / `birefnet_default_quant`）。HR（f16）→ `f16` だけ・既定 `f16`。Lucida（f32）→
    `f32`（既定）/ `f16`。席の表を checkpoint ごとに手で持たず、系列の取得・配置・weights・quant 表・既定席・
    NOTICE・`pipelineConfig` の基準の系列はすべてこの席の集合から引く。HR の配置は f16 系列だけを要求し、
@@ -155,8 +155,9 @@ feature を要求しないので、席を f16 だけにしても動く機種は�
    組めない」（決定 6）は残る。quant 席の表示欄は（席, 上流の格納）の組で引き、HR の f16 席は並ばない f32 席との
    比較を名乗らない（`Upstream precision (f16)`）。カードと NOTICE は上流の格納より広い席の文面を持たず（その
    席を名乗る manifest は描かない）、席が 1 つなら見出しを単数で書く。
-2. **export も同じ規則**: `--model-dir` のディレクトリ名から checkpoint を引き（系列名と同じ紐づけ）、同じ関数で
-   書ける dtype と既定を決める。HR の既定は f16、HR に `--dtype f32` を渡すと argparse の error で理由つきで
+2. **export も同じ規則**: `--model-dir` の checkpoint を取得記録の revision（固定値に当たるとき）→ ディレクトリ名
+   （系列名と同じ紐づけ）の順で引き、両方が別の checkpoint を指せば落とす（`birefnet.export.model_dir_checkpoint`）。
+   同じ関数で書ける dtype と既定を決める。HR の既定は f16、HR に `--dtype f32` を渡すと argparse の error で理由つきで
    拒む。Lucida は既定 f32・f16 も可。帰属表に無い `--model-dir` は語彙の全部・既定 f32（`dist` が組まない）。
    出力先の系列名（`birefnet-hr-1024-f16` など）は変えない。`--verify` は系列を書かないので変えない。
 3. **取り違えの検査は固定 revision に置き換える**: `BIREFNET_CHECKPOINTS` の各 checkpoint が上流 revision を
@@ -169,12 +170,14 @@ feature を要求しないので、席を f16 だけにしても動く機種は�
    pytest が取得記録のある機で見る。
 4. **カードの実行資源は checkpoint ごと**（`BirefnetCheckpoint.resources` — 測った席・条件・解像度ごとの数）。
    「実測していない席の数は名乗らない」は、測った席が manifest に無いモデルのカードを描かないことで保つ。
-   HR は f16 席の実測（2026-10-11・RTX 3080 Ti）、Lucida は f32 席の実測（2026-09-05）のまま。
+   HR は f16 席の実測（2026-10-11・RTX 3080 Ti）。Lucida の f32 席も同じ日・同じ機・同じ手順で測り直した
+   （総確保 1,684 / 4,128 MiB — 前の 2026-09-05 の実測を置き換えた）。総確保は runtime の見積りの
+   `peakAccountedBytes`（重み + 中間の領域 + 入力 + 出力の readback）。
 
-   | HR f16 席 |      重み | 中間の領域 |   入力 | 総確保（1 GiB = 1,024 MiB） | 最大の binding | 1 枚         |
-   | --------- | --------: | ---------: | -----: | --------------------------: | -------------: | ------------ |
-   | 1024²     | 509.2 MiB |  749.2 MiB | 12 MiB |     1,270 MiB（約 1.2 GiB） |        320 MiB | 1.41〜1.51 s |
-   | 2048²     | 706.2 MiB |  2,948 MiB | 48 MiB |     3,702 MiB（約 3.6 GiB） |      1,280 MiB | 7.25〜7.88 s |
+   | HR f16 席 |      重み | 中間の領域 |   入力 |   出力 | 総確保（1 GiB = 1,024 MiB） | 最大の binding | 1 枚         |
+   | --------- | --------: | ---------: | -----: | -----: | --------------------------: | -------------: | ------------ |
+   | 1024²     | 509.2 MiB |  749.2 MiB | 12 MiB |  4 MiB |     1,274 MiB（約 1.2 GiB） |        320 MiB | 1.41〜1.51 s |
+   | 2048²     | 706.2 MiB |  2,948 MiB | 48 MiB | 16 MiB |     3,718 MiB（約 3.6 GiB） |      1,280 MiB | 7.25〜7.88 s |
 
    中間の領域と最大の binding（decoder の `cat_211`）は f32 席と同じ（活性値は f16 席でも f32）。
 5. **退役したもの**: HR の f32 系列 2 本（`birefnet-hr-{1024,2048}`）を読むテストの行（runtime / models の e2e の
