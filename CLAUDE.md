@@ -66,7 +66,8 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。設計の正本�
 - flush-before-destroy。バッファプールの不変条件は ADR 0004
 - ランタイム依存は Web 標準 API のみ（依存パッケージも Web 標準 API のみで構成されたものに
   限る — 例 `@hdae/fetch-cache`。ADR 0038）。相対 import は `.ts` 付き。WGSL はテンプレート
-  リテラル。TypedArray は `<ArrayBuffer>` 明示
+  リテラル。TypedArray は `<ArrayBuffer>` 明示（lint 規則 `karume/typed-array-buffer`・例外は
+  ADR 0002 の例外表）
 
 ## docs の置き場（what-goes-where）
 
