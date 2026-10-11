@@ -134,8 +134,9 @@ def snapshot_provenance(model_dir: Path, *, notice: str | None) -> Provenance:
 def assert_upstream_provenance(container: Path, *, license: str, revision: str | None) -> None:
     """配布候補の容器が名乗る出所を、帰属表の値（と取得した revision）へ突き合わせる。
 
-    `revision` は組み立て側が手元の checkpoint から導けるときだけ渡す（`None` なら「revision を
-    名乗っていること」までを見る — 系列 path しか持たない family 向け）。
+    `revision` は期待する上流 revision — 手元の checkpoint の取得記録から導いた値（siglip2・
+    depth_anything）か、帰属表に固定した値（wan・birefnet）。`None` なら「revision を名乗って
+    いること」までを見る。
 
     MUST: 容器の出所で門を閉じる。モデル名の表だけで閉じると、別の checkpoint を焼いた容器を
     系列 path へ置いたときに格納・入出力形・前処理の突合がすべて通り、別ライセンスの重みが
@@ -155,5 +156,5 @@ def assert_upstream_provenance(container: Path, *, license: str, revision: str |
     if revision is not None and provenance.upstream_revision != revision:
         raise DistError(
             f"{container} の provenance.upstreamRevision が {provenance.upstream_revision}、"
-            f"手元の checkpoint は {revision} — 別の revision から焼いた容器"
+            f"期待する revision は {revision} — 別の revision から焼いた容器"
         )
