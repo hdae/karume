@@ -313,3 +313,51 @@ class TestTheGraphNameIsNamedByTheCaller:
             published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit\n")
 
         assert list(tmp_path.iterdir()) == []
+
+
+class TestTheGraphWideGate:
+    """公開前に**グラフ全体**の構造検査（重複出力・SSA・前方参照・記号の束縛）も掛かる。
+
+    op ごとの契約検査だけでは、グラフ手術を挟んだ IR の「各ノードは正しいが全体として壊れた」
+    形を止められない。runtime の parser が拒否する `.krm` を公開しない（`karume dist` や
+    `karume verify` まで持ち越さない）。
+    """
+
+    @staticmethod
+    def _duplicate_output(graph):
+        graph.outputs = [graph.outputs[0], graph.outputs[0]]
+
+    @staticmethod
+    def _unbound_symbol(graph):
+        graph.symbols = [*graph.symbols, "U"]
+
+    @staticmethod
+    def _forward_reference(graph):
+        graph.nodes = list(reversed(graph.nodes))
+
+    @pytest.mark.parametrize(
+        ("broken", "message"),
+        [
+            ("_duplicate_output", "重複"),
+            ("_unbound_symbol", "束縛が取れない"),
+            ("_forward_reference", "定義より前|未定義|前方"),
+        ],
+        ids=["duplicate-output", "unbound-symbol", "forward-reference"],
+    )
+    def test_a_graph_broken_as_a_whole_places_nothing(
+        self, tmp_path: Path, broken: str, message: str
+    ) -> None:
+        graph, tensors = export_module(TwoWeights(), TWO_EXAMPLE)
+        assert len(graph.nodes) == 2, "前方参照を作るには 2 ノード要る（被験体の前提）"
+        getattr(self, broken)(graph)
+
+        with pytest.raises(publish.PublishError, match=message):
+            publish_model(
+                tmp_path / "model.krm",
+                graph,
+                tensors,
+                provenance=PROVENANCE,
+                graph_name="series",
+            )
+
+        assert list(tmp_path.iterdir()) == []

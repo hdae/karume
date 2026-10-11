@@ -5,8 +5,8 @@
 「一時 path をそのまま検証する」写しの側で黙って壊れた。原子性の規律も後始末もここに置く。
 
 MUST: 書き出しの直後に**読み直して**検証を通す — 「書けたが読めない」ファイルを配布物として
-残さないための門（ADR 0005 の fail loudly 規律）。検証は 4 つで、1〜3 は読み直した容器と
-呼び手が渡した材料の突合、4 は宣言の追加条件である:
+残さないための門（ADR 0005 の fail loudly 規律）。検証は 5 つで、1〜3 は読み直した容器と
+呼び手が渡した材料の突合、4・5 は宣言の追加条件である:
 
 1. **payload の一致**: initializer と companion scale の payload バイト列が、渡した実体と
    sha256 で一致する。突き合わせるのは block 全体ではなく **payload 部** — 末尾の詰め物は
@@ -16,6 +16,10 @@ MUST: 書き出しの直後に**読み直して**検証を通す — 「書け�
    `container.descriptor` が名乗る値と同じ事実 — ADR 0109 決定 3）。
 4. **`ternary` のコード**: payload の全 2 bit コードが `{1, 2, 3}`（container-v1 §6.3 —
    `karume verify` と同じ検査。TS の読み手はロード時に落とすので、据える前に落とす）。
+5. **IR の受理規則**: 宣言した全グラフがグラフ全体の構造検査（重複出力・SSA・前方参照・記号の
+   束縛）と op 語彙・op 契約を通る（`karume verify` / `karume dist` と同じ
+   `verify.assert_ir_accepted`）。呼び手ごとの部分検査だけでは、グラフ手術を挟んだ IR の
+   「各ノードは正しいが全体として壊れた」形を公開できてしまう。
 
 MUST: 門を実効にするため、書き出しと検証は**同じディレクトリの一時ファイル**（`.partial`）に
 対して行い、通ってはじめて `os.replace` で本番名へ据える（同一ディレクトリなので置換は原子的）。
@@ -50,7 +54,13 @@ from karume.container import (
     write_model_container,
 )
 from karume.ir import IrGraph
-from karume.verify import BoundGraph, _assert_ternary_payloads, bind_graphs
+from karume.verify import (
+    BoundGraph,
+    ContainerError,
+    _assert_ternary_payloads,
+    assert_ir_accepted,
+    bind_graphs,
+)
 
 
 class PublishError(ValueError):
@@ -212,6 +222,13 @@ def publish_container(
             single=single,
         )
         read_back = read_container(written)
+        # MUST: グラフ全体の構造検査（重複出力・SSA・前方参照・記号の束縛）と IR の受理規則を
+        # 読み直した宣言に 1 回掛ける。export・グラフ手術・移行の全経路が公開の境界で同じ 1 本を
+        # 通る — 呼び手ごとの部分検査だけだと、runtime の parser が拒否する容器を公開できる。
+        try:
+            assert_ir_accepted(read_back)
+        except ContainerError as cause:
+            raise PublishError(f"読み直した容器が IR の受理規則を通らない: {cause}") from cause
         bound = bind_graphs(read_back.graph, read_back.model)[graph_name]
         payloads = _assert_payloads_match(read_back, bound, bindings, tensors)
         # 宣言の追加条件（モジュール doc の検証 4）— `karume verify` と同じ 1 本を通す。
