@@ -639,8 +639,10 @@ conformance table is the correct one.
   Each op is listed with its occurrence count, whether it belongs to Core ATen (read from the
   installed torch's `torch.Tag.core`, not from a hand-kept list), and the innermost modules it came
   from (`nn_module_stack`, grouped by class with the first path). Core ATen membership decides
-  whether adding the op to the vocabulary needs an ADR; the module tells where a recipe-side rewrite
-  would go.
+  whether adding the op to the vocabulary needs an ADR, except that an addition breaking an
+  execution-model invariant (single output, static shape, …) needs one even inside Core ATen (ADR
+  0064 axis B — see the decision procedure in `docs/op-vocabulary.md`); the module tells where a
+  recipe-side rewrite would go.
 
 ### Constant folding (Tmax folding and two-point evaluation — ADR 0010)
 
