@@ -25,9 +25,11 @@
 //    引数の位置へ届いているか」だけ。非正方のケースを使うのは、`imageWidth` / `imageHeight` の
 //    取り違えが正方形では**原理的に検出できない**ため。
 //
-// ④ 後処理（`matteFromLogits`）の**段の順序と量子化**。sigmoid → resize → 8bit の順序は
-//    上流の逐語で、入れ替えても shape も値域も合ったまま通る（順序違いは α が数十の差で
-//    ずれるだけ）。順序が入れ替わったら落ちる非対称なケースを置く。
+// ④ 後処理（`matteFromLogits` — `src/birefnet/matte.ts`）の**段の順序と量子化**。sigmoid を
+//    resize より先に掛けるのは両系列の上流と同じ（補間法と量子化は独自の経路 — 裁定 4 で A/B
+//    中。両系列の上流の実際の手順は `matte.ts` のモジュール doc）。入れ替えても shape も値域も
+//    合ったまま通る（順序違いは α が数十の差でずれるだけ）。順序が入れ替わったら落ちる非対称な
+//    ケースを置く。
 
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
@@ -36,9 +38,9 @@ import {
   assertMatteShape,
   assertStaticDim,
   BirefnetPipeline,
-  matteFromLogits,
   preprocessPixelValues,
 } from "../src/birefnet/pipeline.ts";
+import { matteFromLogits } from "../src/birefnet/matte.ts";
 import { resizePlaneF32, type Rgb8Image } from "../src/image/preprocess.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
@@ -316,8 +318,8 @@ Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別
 const ALPHA_LSB = 1;
 
 Deno.test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化する", () => {
-  // logit 0 → 0.5 → 127.5 → 最近傍へ丸めて 128（切り捨てだと 127 になる — 上流の
-  // `astype("uint8")` ではなく丸めを採る決定が値に出る唯一の点）。
+  // logit 0 → 0.5 → 127.5 → 最近傍へ丸めて 128（切り捨てだと 127 になる — 両系列の上流の
+  // 切り捨て〈HR は ToPILImage・Lucida は `astype("uint8")`〉ではなく丸めを採る決定が値に出る点）。
   const matte = matteFromLogits(Float32Array.from([0, 40, -40, 1]), 2, 2, 2, 2);
   assertEquals(matte.width, 2);
   assertEquals(matte.height, 2);

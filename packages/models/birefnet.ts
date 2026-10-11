@@ -18,11 +18,11 @@
 export { BirefnetPipeline } from "./src/birefnet/pipeline.ts";
 export { BIREFNET_SOURCES } from "./src/birefnet/config.ts";
 export type {
-  AlphaMatte,
   BirefnetAssets,
   BirefnetFromPretrainedOptions,
   BirefnetPipelineOptions,
 } from "./src/birefnet/pipeline.ts";
+export type { AlphaMatte } from "./src/birefnet/matte.ts";
 export type { Rgb8Image } from "./src/image/preprocess.ts";
 
 /**

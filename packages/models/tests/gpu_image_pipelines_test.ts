@@ -35,9 +35,9 @@ import { parseManifest } from "@karume/hub";
 import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";
 import {
   BirefnetPipeline,
-  matteFromLogits,
   preprocessPixelValues as birefnetPixelValues,
 } from "../src/birefnet/pipeline.ts";
+import { matteFromLogits } from "../src/birefnet/matte.ts";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
 import {
   DepthAnythingPipeline,

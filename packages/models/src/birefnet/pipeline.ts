@@ -6,11 +6,13 @@
  * 1. ホスト: RGB8 の画素列を `pipelineConfig` の寸法へ resize（antialias 付き bilinear）
  * 2. ホスト: rescale + normalize を畳んだ形で通し、`[1, 3, S, S]` の f32 にする
  * 3. `matte` を 1 回回す → **sigmoid 前の logit** `[1, 1, S, S]`
- * 4. ホスト: `sigmoid` → **元画像の解像度へ戻す** → 8bit の α にする
+ * 4. ホスト: `sigmoid` → **元画像の解像度へ戻す** → 8bit の α にする（`./matte.ts`）
  *
- * 3 と 4 の順序（sigmoid を先に、resize を後に）は上流の逐語 — 同梱 `handler.py` と
- * モデルカードの利用例がどちらも `preds.sigmoid()` してから `resize` する。logit のまま
- * 補間すると飽和域の外挿が効いて境界の α が変わる。
+ * 段 4 で sigmoid を resize より先に掛けるのは、両系列の上流（同梱 `handler.py` と Lucida の
+ * モデルカードの利用例）がどちらも `preds.sigmoid()` してから元の解像度へ戻すため（logit のまま
+ * 補間すると飽和域の外挿が効いて境界の α が変わる）。ただし段 4 の補間法と量子化はどちらの
+ * 上流とも違う独自の経路で、上流の手順と A/B で比べている最中（裁定 4 — `./matte.ts` の
+ * モジュール doc に両系列の上流の実際の手順がある）。
  *
  * ## MUST: Session は構築時に 1 本だけ張り、`dispose` まで持つ（Anima / Irodori と非対称）
  *
@@ -84,12 +86,8 @@ import {
   type BirefnetPipelineConfig,
   parseBirefnetPipelineConfig,
 } from "./config.ts";
-import {
-  normalizeToNchw,
-  resizePlaneF32,
-  resizeRgb8,
-  type Rgb8Image,
-} from "../image/preprocess.ts";
+import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../image/preprocess.ts";
+import { type AlphaMatte, matteFromLogits } from "./matte.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
 import {
   assertGpuFeaturesGranted,
@@ -130,16 +128,6 @@ const CHANNELS = 3;
 
 /** 出力のチャネル数（マットは 1 枚）。 */
 const MATTE_CHANNELS = 1;
-
-/** 8bit の α の最大値。 */
-const ALPHA_MAX = 255;
-
-/** 入力と同じ寸法の α マット（画素あたり 1 バイト・行優先）。 */
-export type AlphaMatte = {
-  readonly data: Uint8Array<ArrayBuffer>;
-  readonly width: number;
-  readonly height: number;
-};
 
 /** 構築オプション（{@link BirefnetPipeline.fromAssets} / {@link BirefnetPipeline.fromPretrained} 共通）。 */
 export type BirefnetPipelineOptions = {
@@ -284,44 +272,6 @@ export const preprocessPixelValues = (
     config.imageMean,
     config.imageStd,
   );
-
-/**
- * グラフの出す logit の地図 → 入力と同じ寸法の 8bit α（モジュール doc の段 4）。
- *
- * 段の順序（sigmoid → resize → 量子化）は上流の逐語。8bit へ落とすのは**この配布形の出力
- * 形式の決定**であって上流との一致の主張ではない（上流の利用例は `astype("uint8")` =
- * 切り捨てだが、こちらは最近傍へ丸める — α の 1 LSB は目に見えず、切り捨ては系統的に
- * 前景を薄くする）。
- *
- * NOTE: `export` はテストのため（{@link preprocessPixelValues} と同じ理由）。
- */
-export const matteFromLogits = (
-  logits: Float32Array<ArrayBuffer>,
-  sourceWidth: number,
-  sourceHeight: number,
-  width: number,
-  height: number,
-): AlphaMatte => {
-  const alpha = new Float32Array(logits.length);
-  for (let index = 0; index < logits.length; index += 1) {
-    const raw = logits[index];
-    // MUST: 非有限値を黙って返さない。α の量子化（`Uint8Array` 代入）は NaN を 0 =
-    // 「完全に透明な画素」という**正常に見えるマット**へ変換してしまう。resize は重み付き和で
-    // NaN を伝播するだけなので、発生源に一番近いここで落とす（`anima/image.ts` と同じ検査点）。
-    if (!Number.isFinite(raw)) {
-      const x = index % sourceWidth;
-      const y = Math.floor(index / sourceWidth);
-      throw new Error(`birefnet: マットの logit (x=${x}, y=${y}) が非有限値`);
-    }
-    alpha[index] = 1 / (1 + Math.exp(-raw));
-  }
-  const scaled = resizePlaneF32(alpha, sourceWidth, sourceHeight, width, height);
-  const data = new Uint8Array(scaled.length) as Uint8Array<ArrayBuffer>;
-  for (let index = 0; index < scaled.length; index += 1) {
-    data[index] = Math.round(scaled[index] * ALPHA_MAX);
-  }
-  return { data, width, height };
-};
 
 /** {@link BirefnetPipeline} の内部状態（公開面には出さない）。 */
 type BirefnetState = {
