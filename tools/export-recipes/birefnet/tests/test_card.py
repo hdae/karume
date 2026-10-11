@@ -322,12 +322,16 @@ class TestBirefnetResourceNote:
         assert BIREFNET_CHECKPOINTS[CHECKPOINT].resources.by_resolution["2048"].total not in card
 
     def test_it_does_not_carry_another_checkpoints_measurement(self) -> None:
-        """実測は checkpoint ごと — HR のカードは Lucida の席の数も条件も名乗らない。"""
+        """実測は checkpoint ごと — HR のカードは Lucida の総確保も、それを測った席も名乗らない。
+
+        測った条件（日付と機種）は 2 つの checkpoint で同じになりうるので、区別には使わない。
+        """
         card = render_birefnet_model_card(_birefnet_manifest(MODEL), REPO, CHECKPOINT)
+        prose = " ".join(card.split())
         other = BIREFNET_CHECKPOINTS["lucida"].resources
 
         assert other.by_resolution[MODEL].total not in card
-        assert other.conditions not in card
+        assert f"allocated in total with the `{other.quant}` quant" not in prose
 
 
 def _with_seat(manifest: dict[str, Any], dtype: str, *, default: bool = False) -> dict[str, Any]:
