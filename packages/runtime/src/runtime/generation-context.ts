@@ -93,8 +93,14 @@ export type GenerationContextHost = {
    * 状態を写す（例外の出ない取り違え）。
    * MUST: 登録は確保が決着した後で、その前に dispose をもう一度見る（確保の await を跨いで
    * dispose された Session へ登録しない — 確保した context は畳んでから落とす）。
+   *
+   * @param refusal Session が dispose 済みのときに投げる `ExecutionError` の文言（呼び手の文脈を
+   *   付ける — 呼んだ時点と確保の後のどちらの検査で落ちても同じ文言）。
    */
-  adopt(allocate: () => Promise<GenerationContext>): Promise<GenerationContext>;
+  adopt(
+    allocate: () => Promise<GenerationContext>,
+    refusal: string,
+  ): Promise<GenerationContext>;
 };
 
 /**
@@ -1165,7 +1171,11 @@ export class GenerationContext {
       return Promise.reject(cause);
     }
     const host = this.#host;
-    return host.adopt(() => GenerationContext.#forkFrom(host, this, pastLength));
+    return host.adopt(
+      () => GenerationContext.#forkFrom(host, this, pastLength),
+      "fork: dispose 済みの Session では GenerationContext を複製できない" +
+        "（Session の dispose が fork より先か、複製の確保の途中に発行された）",
+    );
   }
 
   /**

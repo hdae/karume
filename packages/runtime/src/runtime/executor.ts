@@ -1107,7 +1107,10 @@ export class Session {
    * のは `queryLength` と入力の物理 chunk 行数だけで、メソッドは増やさない。
    */
   createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
-    return this.#adopt(() => GenerationContext.create(this.#generationHost(), spec));
+    return this.#adopt(
+      () => GenerationContext.create(this.#generationHost(), spec),
+      "dispose 済みの Session では GenerationContext を作れない",
+    );
   }
 
   /** context が Session から借りる面（{@link GenerationContextHost} — 必要な欄だけ）。 */
@@ -1120,7 +1123,7 @@ export class Session {
       forget: (context: GenerationContext): void => {
         this.#contexts.delete(context);
       },
-      adopt: (allocate) => this.#adopt(allocate),
+      adopt: (allocate, refusal) => this.#adopt(allocate, refusal),
     };
   }
 
@@ -1143,16 +1146,21 @@ export class Session {
    * NOTE: 確保全体を {@link Session.#serialize} へ積む形は**採らない** — `#chain` の一員に
    * なると、batch 区間の未決着 run と同型の循環（BatchScope → enqueue → run → errorScope 区間
    * ロック）に create / fork まで巻き込まれる。チェーン外であることが待ち合わせグラフ上は安全側。
+   *
+   * @param refusal dispose 済みのときの文言（呼び手の文脈 — create と fork で読み分けられるように）。
    */
-  async #adopt(allocate: () => Promise<GenerationContext>): Promise<GenerationContext> {
+  async #adopt(
+    allocate: () => Promise<GenerationContext>,
+    refusal: string,
+  ): Promise<GenerationContext> {
     if (this.#disposal !== undefined) {
-      throw new ExecutionError("dispose 済みの Session では GenerationContext を作れない");
+      throw new ExecutionError(refusal);
     }
     const context = await allocate();
     if (this.#disposal !== undefined) {
       // 確保済みぶんを先に返してから fail loudly（黙って生存集合の外へ漏らさない）。
       await context.dispose();
-      throw new ExecutionError("dispose 済みの Session では GenerationContext を作れない");
+      throw new ExecutionError(refusal);
     }
     this.#contexts.add(context);
     this.#contextCount += 1;

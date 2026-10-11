@@ -1754,10 +1754,11 @@ Deno.test({
       const pending = target.fork();
       await session.dispose();
       const crossed = await assertRejects(() => pending, ExecutionError);
-      assert(crossed.message.includes("dispose 済みの Session"), crossed.message);
+      // 文言は fork の文脈つき（create の文言と読み分ける）。
+      assert(crossed.message.includes("fork: dispose 済みの Session"), crossed.message);
       assertEquals(session.diagnostics().stateBacking, before, "確保した複製が生存集合に残った");
       // (h) 呼んだ時点で dispose 済みの Session。
-      await assertRejects(() => target.fork(), ExecutionError, "dispose 済みの Session");
+      await assertRejects(() => target.fork(), ExecutionError, "fork: dispose 済みの Session");
       assertEquals(target.pastLength, 0, "拒否された fork は元を汚さない");
     } finally {
       for (const context of contexts) await context.dispose();
