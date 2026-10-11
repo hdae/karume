@@ -387,6 +387,11 @@ measurements in `docs/research/`.
 
 ### Fixed
 
+- BiRefNet model cards (`karume-birefnet-hr` / `karume-lucida`): the GPU total had been converted at
+  1,000 MiB per GiB, so the `f32` seat read about 1.7 / 4.1 GiB at 1024² / 2048² where it is about
+  1.6 / 4.0 GiB. The figures were re-measured on 2026-10-11 (Lucida on `f32`, BiRefNet_HR on `f16`)
+  and now count weights, intermediates, input and output readback; the published cards pick them up
+  at the next release.
 - `@karume/runtime`: a long `run` no longer lets the host queue an unbounded number of command
   buffers ahead of the GPU. Between steps it places a completion marker every 64 submits since the
   last fence and waits once more than two markers are outstanding (under Deno the marker itself
