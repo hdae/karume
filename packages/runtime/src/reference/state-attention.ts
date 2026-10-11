@@ -91,13 +91,20 @@ const assertQuery = (query: number, chunkRows: number): void => {
   }
 };
 
-/** 形と論理長の整合（取り違えを突合の前で落とす）。 */
+/**
+ * 形と論理長の整合（取り違えを突合の前で落とす）。
+ *
+ * MUST: 次元は範囲比較の前に整数かを見る（{@link assertQuery} と同じ理由）。非整数は次元の積が
+ * 整数になると配列長の検査も通り、半端な shape（例 D=1.5）の出力を黙って返す。NaN は `< 1` が
+ * 偽で素通りし、後段の配列長の検査が偶然拾うだけ（文言が形の誤りを名乗らない）。
+ */
 const assertShape = (shape: StateAttentionRefShape): void => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = shape;
   assertPastAndWindow("states 形", past, window);
-  if (batch < 1 || heads < 1 || kvHeads < 1 || chunkRows < 1 || depth < 1 || capacity < 1) {
+  const dims = [batch, heads, kvHeads, chunkRows, depth, capacity];
+  if (dims.some((dim) => !Number.isSafeInteger(dim) || dim < 1)) {
     throw new ReferenceOpError(
-      `states 形の形が正でない（B=${batch} H=${heads} Hkv=${kvHeads} M=${chunkRows} D=${depth} C=${capacity}）`,
+      `states 形の形が正の整数でない（B=${batch} H=${heads} Hkv=${kvHeads} M=${chunkRows} D=${depth} C=${capacity}）`,
     );
   }
   if (heads % kvHeads !== 0) {

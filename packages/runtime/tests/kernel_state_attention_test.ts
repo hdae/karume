@@ -719,6 +719,46 @@ Deno.test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待
   }
 });
 
+Deno.test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化けずに形の誤りとして落ちる", () => {
+  // 非整数は次元の積が整数になると配列長の検査も通る（D=1.5・M=2 なら q は 3 要素）。NaN は
+  // 配列長の検査が偶然拾うが、文言が形の誤りを名乗らない — どちらも次元の検査で落とす。
+  const filled = (count: number): Float32Array<ArrayBuffer> => new Float32Array(count).fill(1);
+  const base = {
+    batch: 1,
+    heads: 1,
+    kvHeads: 1,
+    chunkRows: 2,
+    depth: 1,
+    capacity: 2,
+    window: 0,
+    past: 0,
+    query: 1,
+    scale: 1,
+  };
+  const cases = [
+    { name: "D=1.5", dims: { depth: 1.5 }, insLength: 3, slotLength: 3 },
+    { name: "C=2.5", dims: { depth: 2, capacity: 2.5 }, insLength: 4, slotLength: 5 },
+    { name: "B=NaN", dims: { batch: Number.NaN }, insLength: 2, slotLength: 2 },
+  ];
+  for (const { name, dims, insLength, slotLength } of cases) {
+    assertThrows(
+      () =>
+        referenceStateAttention({
+          ...base,
+          ...dims,
+          q: filled(insLength),
+          insK: filled(insLength),
+          insV: filled(insLength),
+          slotK: filled(slotLength),
+          slotV: filled(slotLength),
+        }),
+      ReferenceOpError,
+      "正の整数でない",
+      name,
+    );
+  }
+});
+
 Deno.test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
   // 席の目印（census 門がこの `:par` を見る）。幾何は `wg16x16` = TILE_X × D レーン
   assertEquals(stateQkParallelKey(false, false), "attention_state_qk:v1:f32:wg16x16:par");
