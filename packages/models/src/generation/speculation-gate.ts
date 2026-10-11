@@ -190,6 +190,29 @@ export type SpeculationGate = {
   readonly switches: number;
   /** 現在の定常モード（探索バーストで逆側を回している間も変わらない）。 */
   readonly mode: SpeculationDecision;
+  /**
+   * 観測状態（モード・`W1`・探索の周期と間隔・切替回数・集計中の一群・連続の負けの数）を写した
+   * **独立の**ゲートを返す（ノブは同じ検査済みの値）。会話の分岐（`GenerationSequence.fork` —
+   * ADR 0083 追記 2026-10-11）が使う: 分岐は同じ会話・同じ host の続きなので、測り直さずに
+   * 続きから判断する（ゲートの寿命を sequence にする理由と同じ）。
+   *
+   * MUST: 写した後の 2 つは状態を共有しない（片方への観測はもう片方を動かさない — 共有すると
+   * 片方の分岐の壁が他方のモードを倒す）。
+   */
+  fork(): SpeculationGate;
+};
+
+/** ゲートの観測状態（{@link SpeculationGate.fork} が写す全部 — ノブは含まない）。 */
+type GateState = {
+  readonly mode: SpeculationDecision;
+  readonly plainWall: number | undefined;
+  readonly sinceProbe: number;
+  readonly backoff: number;
+  readonly switches: number;
+  readonly batchCycles: number;
+  readonly batchWall: number;
+  readonly batchDelivered: number;
+  readonly overRuns: number;
 };
 
 /**
@@ -211,67 +234,61 @@ const assertInterval = (name: string, value: number, least: number): void => {
   }
 };
 
-export const createSpeculationGate = (
-  options: SpeculationGateOptions = {},
-): SpeculationGate => {
-  const alpha = options.alpha ?? 0.2;
-  const window = options.window ?? 16;
-  const confirm = options.confirm ?? 2;
-  const burst = options.burst ?? 8;
-  // 既定を `burst` で抑えるのは、`burst` を縮めた席（バースト 1 cycle など）で「打ち切る余地が
-  // 無い」のが正しい形であり、既定の組み合わせを門で弾く理由が無いためである。
-  const burstMin = options.burstMin ?? Math.min(4, burst);
-  const exploreBase = options.exploreBase ?? 16;
-  const exploreMax = options.exploreMax ?? 512;
-  const enter = options.enter ?? 0.97;
-  const leave = options.leave ?? 1.01;
-  // 早抜けは**未指定 = off**（値を持たないことがそのまま「倒さない」の綴りである）。
-  const earlyLeave = options.earlyLeave;
-  const burstAbort = options.burstAbort ?? 0.15;
-  assertPositive("alpha", alpha);
-  // α > 1 の EWMA は過去へ負の重みを載せる（平均ではなくなる）ので上も閉じる。
-  if (alpha > 1) throw new ModelInputError(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
-  // ブロックが 1 cycle だと「ブロック集計」が 1 サンプルの判定に戻る（種付けの欠陥そのもの）。
-  assertInterval("window", window, 2);
-  assertInterval("confirm", confirm, 1);
-  assertInterval("burst", burst, 1);
-  assertInterval("burstMin", burstMin, 1);
-  // `burstMin > burst` は「打ち切りが一度も発火しない」死んだノブなので、黙って通さない。
-  if (burstMin > burst) {
-    throw new ModelInputError(
-      `speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`,
-    );
-  }
-  assertInterval("exploreBase", exploreBase, 1);
-  assertInterval("exploreMax", exploreMax, exploreBase);
-  assertPositive("enter", enter);
-  assertPositive("leave", leave);
-  if (earlyLeave !== undefined) assertPositive("earlyLeave", earlyLeave);
-  assertPositive("burstAbort", burstAbort);
-  // 不感帯は 1 を挟む（`enter ≥ 1` だと負けている最中に戻り、`leave ≤ 1` だと勝っていても抜ける）。
-  if (!(enter < 1 && 1 < leave)) {
-    throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} でない`);
-  }
+/** 検査済みのノブ（{@link createSpeculationGate} が値域を通した後の値 — 分岐も同じ値を使う）。 */
+type GateKnobs = {
+  readonly alpha: number;
+  readonly window: number;
+  readonly confirm: number;
+  readonly burst: number;
+  readonly burstMin: number;
+  readonly exploreBase: number;
+  readonly exploreMax: number;
+  readonly enter: number;
+  readonly leave: number;
+  readonly earlyLeave: number | undefined;
+  readonly burstAbort: number;
+};
 
-  let mode: SpeculationDecision = "speculate";
+/**
+ * 検査済みのノブと観測状態からゲートを組む（{@link createSpeculationGate} と
+ * {@link SpeculationGate.fork} が共有する 1 本）。
+ *
+ * MUST: ノブの値域はここで見ない（呼び手が検査済みの値だけを渡す — 分岐は元のゲートが検査した
+ * 値をそのまま渡す）。
+ */
+const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
+  const {
+    alpha,
+    window,
+    confirm,
+    burst,
+    burstMin,
+    exploreBase,
+    exploreMax,
+    enter,
+    leave,
+    earlyLeave,
+    burstAbort,
+  } = knobs;
+  let mode: SpeculationDecision = initial.mode;
   /** plain step の壁 ms の EWMA（未観測は `undefined`）。 */
-  let plainWall: number | undefined;
+  let plainWall: number | undefined = initial.plainWall;
   /** 現モードで観測した回数（モード切替と plain 側のバースト完了で 0 へ戻る）。 */
-  let sinceProbe = 0;
+  let sinceProbe = initial.sinceProbe;
   /** plain 側の探索間隔（外れるたびに倍・当たれば `exploreBase` へ戻る）。 */
-  let backoff = exploreBase;
-  let switches = 0;
+  let backoff = initial.backoff;
+  let switches = initial.switches;
   /**
    * 集計中の一群（speculate 中は `window` 本のブロック・plain 中は `burst` 本の探索バースト）。
    *
    * 2 つを 1 組の変数で持てるのは、モードの切替が必ずここを空にするためである（ブロックと
    * バーストが同時に生きることは無い）。
    */
-  let batchCycles = 0;
-  let batchWall = 0;
-  let batchDelivered = 0;
+  let batchCycles = initial.batchCycles;
+  let batchWall = initial.batchWall;
+  let batchDelivered = initial.batchDelivered;
   /** `leave` を連続で超えたブロックの数（`confirm` に届いたら抜ける）。 */
-  let overRuns = 0;
+  let overRuns = initial.overRuns;
 
   const ewma = (value: number | undefined, sample: number): number =>
     value === undefined ? sample : value + alpha * (sample - value);
@@ -388,5 +405,87 @@ export const createSpeculationGate = (
     get mode(): SpeculationDecision {
       return mode;
     },
+    fork: (): SpeculationGate =>
+      openGate(knobs, {
+        mode,
+        plainWall,
+        sinceProbe,
+        backoff,
+        switches,
+        batchCycles,
+        batchWall,
+        batchDelivered,
+        overRuns,
+      }),
   };
+};
+
+export const createSpeculationGate = (
+  options: SpeculationGateOptions = {},
+): SpeculationGate => {
+  const alpha = options.alpha ?? 0.2;
+  const window = options.window ?? 16;
+  const confirm = options.confirm ?? 2;
+  const burst = options.burst ?? 8;
+  // 既定を `burst` で抑えるのは、`burst` を縮めた席（バースト 1 cycle など）で「打ち切る余地が
+  // 無い」のが正しい形であり、既定の組み合わせを門で弾く理由が無いためである。
+  const burstMin = options.burstMin ?? Math.min(4, burst);
+  const exploreBase = options.exploreBase ?? 16;
+  const exploreMax = options.exploreMax ?? 512;
+  const enter = options.enter ?? 0.97;
+  const leave = options.leave ?? 1.01;
+  // 早抜けは**未指定 = off**（値を持たないことがそのまま「倒さない」の綴りである）。
+  const earlyLeave = options.earlyLeave;
+  const burstAbort = options.burstAbort ?? 0.15;
+  assertPositive("alpha", alpha);
+  // α > 1 の EWMA は過去へ負の重みを載せる（平均ではなくなる）ので上も閉じる。
+  if (alpha > 1) throw new ModelInputError(`speculation gate: alpha ${alpha} が 0 < α ≤ 1 の外`);
+  // ブロックが 1 cycle だと「ブロック集計」が 1 サンプルの判定に戻る（種付けの欠陥そのもの）。
+  assertInterval("window", window, 2);
+  assertInterval("confirm", confirm, 1);
+  assertInterval("burst", burst, 1);
+  assertInterval("burstMin", burstMin, 1);
+  // `burstMin > burst` は「打ち切りが一度も発火しない」死んだノブなので、黙って通さない。
+  if (burstMin > burst) {
+    throw new ModelInputError(
+      `speculation gate: burstMin ${burstMin} が burst ${burst} を超えている`,
+    );
+  }
+  assertInterval("exploreBase", exploreBase, 1);
+  assertInterval("exploreMax", exploreMax, exploreBase);
+  assertPositive("enter", enter);
+  assertPositive("leave", leave);
+  if (earlyLeave !== undefined) assertPositive("earlyLeave", earlyLeave);
+  assertPositive("burstAbort", burstAbort);
+  // 不感帯は 1 を挟む（`enter ≥ 1` だと負けている最中に戻り、`leave ≤ 1` だと勝っていても抜ける）。
+  if (!(enter < 1 && 1 < leave)) {
+    throw new Error(`speculation gate: enter ${enter} < 1 < leave ${leave} でない`);
+  }
+
+  return openGate(
+    {
+      alpha,
+      window,
+      confirm,
+      burst,
+      burstMin,
+      exploreBase,
+      exploreMax,
+      enter,
+      leave,
+      earlyLeave,
+      burstAbort,
+    },
+    {
+      mode: "speculate",
+      plainWall: undefined,
+      sinceProbe: 0,
+      backoff: exploreBase,
+      switches: 0,
+      batchCycles: 0,
+      batchWall: 0,
+      batchDelivered: 0,
+      overRuns: 0,
+    },
+  );
 };

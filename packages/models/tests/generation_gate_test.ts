@@ -1,7 +1,7 @@
 // 投機の自己採算ゲート（ADR 0096 段 4-B ④）の挙動テスト。純関数なので GPU も時計も要らない
 // （壁は呼び手が渡す = このテストが渡す定数そのもの）。
 //
-// ここで縛るのは 3 点である:
+// ここで縛るのは 4 点である:
 //
 // 1. 「負ける文脈では decode 形へ落ち、勝てる文脈では投機のまま」— その判断が**実測の数字**
 //    （`docs/research/2026-09-09-mtp-stage4.md` §2 表 1 / §5.1）で正しい側へ倒れること（T8）。
@@ -16,6 +16,9 @@
 //    （実走では勝つ課題でも 1 ブロックが 1.16 を超える区間が混ざり、warm な会話で 7 ターン中
 //    3 ターンが誤退出した）。plain 側の打ち切り（`burstAbort`・既定 0.15）は残す — 誤発火は
 //    「誤って抜けた後のバースト」でしか起こりえず、代償は探索 1 回ぶんだからである。
+// 4. **分岐（`fork`）は観測状態を写した独立のゲート**であること（T10 — ADR 0083 追記
+//    2026-10-11）。写さないと分岐した会話が最初の数 cycle の投機を繰り返し、共有すると片方の
+//    分岐の壁がもう片方のモードを倒す。
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
@@ -729,4 +732,54 @@ Deno.test("ゲート T9 門: ノブの不受理は家族横断の ModelInputErro
       `${JSON.stringify(options)} の不受理が入力起因の型で飛んでいない`,
     );
   }
+});
+
+Deno.test("ゲート T10 分岐: fork は観測状態を写した独立のゲートを返す", async (t) => {
+  await t.step("同じ観測列を与えると、元と分岐の決定列とモードの推移が一致する", () => {
+    const gate = createSpeculationGate();
+    // 17 本で `W1` は測り済み・ブロック 1 は満ちる直前（T2 と同じ位置）。
+    run(gate, MILD, 17);
+    const forked = gate.fork();
+    assertEquals([forked.mode, forked.switches], [gate.mode, gate.switches]);
+    const fromGate = trace(gate, MILD, 18);
+    const fromFork = trace(forked, MILD, 18);
+    assertEquals(fromFork, fromGate, "分岐の決定列とモードの推移が元と違う");
+    // 写したのが観測状態であること: 続きの 18 本で倒れるのは前半 17 本の観測を引き継いだ場合だけ。
+    assertEquals([gate.mode, forked.mode], ["plain", "plain"]);
+    assertEquals([gate.switches, forked.switches], [1, 1]);
+    // 陽性対照: 観測の無いゲートは同じ 18 本では倒れない（倒れるなら上の一致は何も見ていない）。
+    const fresh = createSpeculationGate();
+    run(fresh, MILD, 18);
+    assertEquals(fresh.mode, "speculate", "観測の無いゲートが 18 本で倒れた（門が空振りする）");
+  });
+
+  await t.step("片方だけに観測を与えても、もう片方は動かない（両向き）", () => {
+    // 同じ履歴を持つ双子を基準にする（分岐しなかった場合の振る舞い）。
+    const knobs = { window: 2, confirm: 1 };
+    const gate = createSpeculationGate(knobs);
+    const twin = createSpeculationGate(knobs);
+    run(gate, WINNING, 5);
+    run(twin, WINNING, 5);
+    const forked = gate.fork();
+    const forkedTwin = createSpeculationGate(knobs);
+    run(forkedTwin, WINNING, 5);
+
+    // 分岐だけを負けさせる → 分岐は倒れ、元は双子と同じ振る舞いのまま。
+    run(forked, LOSING, 40);
+    assertEquals(forked.mode, "plain", "陽性対照: 分岐が倒れていない（観測が効いていない）");
+    assertEquals([gate.mode, gate.switches], [twin.mode, twin.switches]);
+    assertEquals(trace(gate, WINNING, 20), trace(twin, WINNING, 20), "分岐への観測が元を動かした");
+
+    // 逆向き: 元だけを負けさせても、分岐（の続き）は動かない。
+    const second = forkedTwin.fork();
+    const secondTwin = createSpeculationGate(knobs);
+    run(secondTwin, WINNING, 5);
+    run(forkedTwin, LOSING, 40);
+    assertEquals(forkedTwin.mode, "plain");
+    assertEquals(
+      trace(second, WINNING, 20),
+      trace(secondTwin, WINNING, 20),
+      "元への観測が分岐を動かした",
+    );
+  });
 });
