@@ -385,6 +385,19 @@ class TestQuantsSection:
             for line in lines
         )
 
+    def test_a_pipe_in_the_presentation_fields_does_not_split_the_table_row(self) -> None:
+        """hub は `|` を含む表示欄も受理する — 列を割らない `\\|` に逃がして 1 セルに綴る。"""
+        model = _manifest()["models"]["zeta"]
+        model["quants"]["w8"]["label"] = "Half | int8"
+        model["quants"]["w8"]["description"] = "front|tables in int8."
+
+        lines = quants(model)
+
+        assert any(
+            line.startswith("| `w8` (default) | **Half \\| int8** — front\\|tables in int8. |")
+            for line in lines
+        )
+
     @pytest.mark.parametrize("blank", ["", "   ", "\n"])
     def test_a_blank_label_reads_like_a_seat_without_one(self, blank: str) -> None:
         """空白しか無い欄は書いていない席と同じ `—`（`** **` のような崩れた強調を出さない）。"""

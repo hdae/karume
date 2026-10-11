@@ -282,10 +282,11 @@ def _presentation(quant: Mapping[str, Any]) -> str:
 
     受理集合は hub の parser が正本で、空文字・空白だけ・改行を含む値も通る（2026-10-11 裁定）。
     改行は表の 1 行を割るので、空白の連なり（改行を含む）を 1 つの空白に畳んで 1 セルに綴る。
-    空白しか無い欄は書いていない席と同じに扱う。
+    空白しか無い欄は書いていない席と同じに扱う。`|` も受理集合に入り、そのままでは表の列を
+    割るので `\\|`（GFM の表で列の区切りにならない形）に逃がす。
     """
-    label = " ".join(quant.get("label", "").split())
-    description = " ".join(quant.get("description", "").split())
+    label = " ".join(quant.get("label", "").split()).replace("|", "\\|")
+    description = " ".join(quant.get("description", "").split()).replace("|", "\\|")
     if label and description:
         return f"**{label}** — {description}"
     if label:
