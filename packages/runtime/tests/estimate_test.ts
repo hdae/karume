@@ -678,6 +678,26 @@ Deno.test("chunk 行が数値次元のグラフでは prefill と decode が同�
   assertEquals(prefill.workspaceBytes, decode.workspaceBytes);
 });
 
+Deno.test("数値で固定した chunk 行が context の許す行数に無い形は見積りも拒否する", () => {
+  // append 入力の物理 chunk 行は 4 で固定。chunkLength 8 の context が許すのは {1, 8} なので、
+  // run は最初の 1 回で必ず拒否する（assertGenerationRun）— 見積りだけが正常値を返さない。
+  assertThrows(
+    () =>
+      stateModel().estimate({
+        bindings: { T: 2 },
+        generation: { chunkLength: 8, bindings: { C: 8 } },
+      }),
+    ExecutionError,
+    "物理 chunk 行数 4 が固定 chunk 契約に合わない",
+  );
+  // 対照: 4 を明示のバケットに含めれば run も通る形なので、見積りも数を返す。
+  const report = stateModel().estimate({
+    bindings: { T: 2 },
+    generation: { chunkLength: 8, chunkBuckets: [4], bindings: { C: 8 } },
+  });
+  assertEquals(report.resident.stateBytes, 456);
+});
+
 Deno.test("generation なしの見積りはシナリオ 1 本（io / 中間の導出は従来と同じ）", () => {
   const report = plainModel().estimate({ bindings: { T: 7 } });
   // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / 中間は h と g が同時生存（どちらもグラフ出力）で
@@ -830,6 +850,23 @@ Deno.test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 �
     ExecutionError,
     "物理 chunk 行 M の記号",
   );
+});
+
+Deno.test("追加シナリオの物理 chunk 行も context の許す行数の中だけ", () => {
+  // chunkLength 4・バケット無しの context が許すのは {1, 4}。2 行の run は実行が拒否する形。
+  const at = (chunkBuckets?: readonly number[]): AdmissionReport =>
+    verifyRowsModel().estimate({
+      bindings: { R: 1 },
+      generation: {
+        chunkLength: 4,
+        chunkBuckets,
+        bindings: { C: 8 },
+        scenarios: [{ name: "verify", chunkLength: 2 }],
+      },
+    });
+  assertThrows(() => at(), ExecutionError, "物理 chunk 行数 2 が固定 chunk 契約に合わない");
+  // 対照: 2 をバケットに宣言した context なら run も通るので、見積りも 3 本を返す。
+  assertEquals(at([2]).scenarios.length, 3);
 });
 
 Deno.test("追加シナリオも peakAccountedBytes の最大に入る（予算 0）", () => {

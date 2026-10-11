@@ -45,6 +45,7 @@ import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import { type FusedStep, planAliases, planFusions } from "./fusion.ts";
 import {
+  allowedChunkRows,
   assertChunkBuckets,
   assertChunkLength,
   assertSlotWithinLimits,
@@ -85,6 +86,7 @@ import {
   argmaxSplitPartialBytes,
   topkOneSplitGroups,
 } from "../kernels/argmax.ts";
+import { assertChunkRowsAllowed } from "./recipe.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
 
@@ -110,7 +112,9 @@ export type AdmissionScenarioSpec = {
   readonly name: string;
   /**
    * この形の物理 chunk 行 `M`。`1..generation.chunkLength` の整数（外は fail loudly —
-   * `queryLength ≤ chunkLength` の契約の外にある行数を名乗らせない）。
+   * `queryLength ≤ chunkLength` の契約の外にある行数を名乗らせない）で、さらに context の許す
+   * 行数（1・`generation.chunkBuckets`・`generation.chunkLength`）のどれか（外は run が拒否する
+   * 形なので、同じく fail loudly）。
    */
   readonly chunkLength: number;
   /**
@@ -329,8 +333,9 @@ const CHUNK_ROW_AXIS = 2;
  * 判別は「states 欄が非空なノードの入力」= states 形の判別そのもの（ADR 0067 決定 4 —
  * recipe-builders/attention.ts の `buildStateAttention` / `buildStateAppend` が `states.chunkRows` へ
  * 積むのと同じノード集合）。数値次元は記号で動かない形なので拾わない — その形の decode step は
- * 物理 chunk 行を prefill と同じまま `queryLength = 1` で回る（`assertGenerationRun` は
- * `rows === chunkLength` を decode でも許す）ので、2 シナリオが同じ数字になるのが正しい。
+ * 物理 chunk 行を prefill と同じまま `queryLength = 1` で回るので、2 シナリオが同じ数字になるのが
+ * 正しい。ただし数値の `M` が context の許す集合に入っているかは別の門で、シナリオごとに
+ * {@link stateChunkRows} を照合する（`chunkLength` と一致するとは限らない）。
  */
 const chunkRowDims = (graph: IrGraph): readonly string[] => {
   const declared = new Map<string, readonly IrDim[]>();
@@ -346,6 +351,23 @@ const chunkRowDims = (graph: IrGraph): readonly string[] => {
     }
   }
   return [...dims];
+};
+
+/**
+ * 解決済み計画の state ノードが使う物理 chunk 行数（同値は畳む）。
+ *
+ * MUST: 拾うノードと軸は実行の集積（recipe-builders/attention.ts の `buildStateAttention` が
+ * `q[2]`・`buildStateAppend` が `x[2]` を `states.chunkRows` へ積む）と同じ — どちらも第 1 入力の
+ * {@link CHUNK_ROW_AXIS}。readonly states 形 attention の `q` は M = 1 を shape 層が保証するので、
+ * 拾っても許可集合（常に 1 を含む）の判定は動かない。
+ */
+const stateChunkRows = (nodes: readonly NodePlan[]): ReadonlySet<number> => {
+  const rows = new Set<number>();
+  for (const step of nodes) {
+    if (Object.keys(step.node.states).length === 0) continue;
+    rows.add(step.inputShapes[0][CHUNK_ROW_AXIS]);
+  }
+  return rows;
 };
 
 /**
@@ -1011,6 +1033,9 @@ export const estimateGraphMemory = (
     },
   );
 
+  const allowedRows = generation === undefined
+    ? undefined
+    : allowedChunkRows(generation.chunkLength, generation.chunkBuckets ?? []);
   const estimateScenario = (
     [name, scenarioBindings]: [name: string, bindings: SymbolBindings],
   ): AdmissionScenario => {
@@ -1019,6 +1044,10 @@ export const estimateGraphMemory = (
     // 照合もシナリオごと。
     if (state.bindings !== undefined) assertGenerationBindings(state.bindings, scenarioBindings);
     const plan = planGraph(graph, scenarioBindings, state.shapes);
+    // MUST: 解決した物理 chunk 行は run 前検査と同じ許可集合で照合する（同じ 1 本 —
+    // `assertChunkRowsAllowed`）。数値で固定した `M` や追加シナリオの行数が集合に無い形は、
+    // run が最初の 1 回で必ず拒否するので、見積りだけが正常値を返さない。
+    if (allowedRows !== undefined) assertChunkRowsAllowed(stateChunkRows(plan.nodes), allowedRows);
     // 入力バッファと出力 readback staging は同じ床つきの式（executor の `#bindInput` /
     // `#activateBacking` / `#stageOutputs` — `Math.max(4, numel×4)` は toSizeClass と同値）。
     let ioBytes = 0;

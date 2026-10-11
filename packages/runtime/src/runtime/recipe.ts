@@ -303,6 +303,29 @@ export type GenerationLimits = {
 };
 
 /**
+ * state ノードの物理 chunk 行数 `M` が context の許す集合（`allowedRows` — 生成は
+ * src/runtime/generation-context.ts の `allowedChunkRows`）に入っているかの照合（GPU 非依存の純関数）。
+ *
+ * MUST: run 前検査（{@link assertGenerationRun}）と見積り（estimate.ts）が同じこの 1 本を通す。
+ * 見積りが別の判定を持つと、run が最初の 1 回で必ず拒否する形（数値で固定した `M` が集合に
+ * 無い形など）に見積りだけが正常値を返す。
+ */
+export const assertChunkRowsAllowed = (
+  chunkRows: Iterable<number>,
+  allowedRows: ReadonlySet<number>,
+): void => {
+  for (const rows of chunkRows) {
+    if (allowedRows.has(rows)) continue;
+    const prefill = [...allowedRows].filter((allowed) => allowed !== 1);
+    throw new ExecutionError(
+      `state ノードの物理 chunk 行数 ${rows} が固定 chunk 契約に合わない` +
+        `（許されるのは prefill 形の {${prefill.join(", ")}} か decode 形の 1 だけ — ` +
+        "ADR 0066 決定 4 / 追記〈バケット〉）",
+    );
+  }
+};
+
+/**
  * generation run の**エンコード前**の検査（ADR 0066 決定 4 / ADR 0067 決定 4 ④）。
  *
  * MUST: dispatch を 1 本も積む前に落とす。`queryLength > M` は q / ins の宣言 shape の外を
@@ -325,15 +348,8 @@ export const assertGenerationRun = (
   pastLength: number,
   queryLength: number,
 ): void => {
+  assertChunkRowsAllowed(limits.chunkRows, allowedRows);
   for (const rows of limits.chunkRows) {
-    if (!allowedRows.has(rows)) {
-      const prefill = [...allowedRows].filter((allowed) => allowed !== 1);
-      throw new ExecutionError(
-        `state ノードの物理 chunk 行数 ${rows} が固定 chunk 契約に合わない` +
-          `（許されるのは prefill 形の {${prefill.join(", ")}} か decode 形の 1 だけ — ` +
-          "ADR 0066 決定 4 / 追記〈バケット〉）",
-      );
-    }
     if (queryLength > rows) {
       throw new ExecutionError(
         `queryLength ${queryLength} が state ノードの物理 chunk 行数 ${rows} を超える` +

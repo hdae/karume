@@ -306,6 +306,18 @@ export const assertChunkBuckets = (
 };
 
 /**
+ * context が許す物理 chunk 行数の集合 — `{1}`（decode 形）∪ `chunkBuckets` ∪ `{chunkLength}`
+ * （prefill 形）。昇順のまま入れる（`assertChunkRowsAllowed` の診断がこの反復順をそのまま列挙する）。
+ *
+ * MUST: context の構築と見積り（estimate.ts）が同じこの 1 本で集合を作る（片方だけ直されると、
+ * run が拒否する形に見積りが数を返す）。値域は {@link assertChunkBuckets} が先に見る前提。
+ */
+export const allowedChunkRows = (
+  chunkLength: number,
+  chunkBuckets: readonly number[],
+): ReadonlySet<number> => new Set([1, ...chunkBuckets, chunkLength]);
+
+/**
  * `spec.bindings` を検査して null プロトタイプの表へ写す。
  *
  * MUST: 束縛の器は null プロトタイプ（plan.ts の `bindSymbols` と同じ理由 — シンボルの文法
@@ -534,8 +546,7 @@ export class GenerationContext {
       borrowing: borrow !== undefined,
       gpu: host.gpu,
       slidingSlots,
-      // 昇順のまま入れる（`assertGenerationRun` の診断がこの反復順をそのまま列挙する）。
-      allowedRows: new Set([1, ...this.chunkBuckets, chunkLength]),
+      allowedRows: allowedChunkRows(chunkLength, this.chunkBuckets),
       lengths,
       // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
       // MUST: 借り手はスロットのバイト数を数えない（実体は貸し手 context の所有物で、
