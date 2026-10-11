@@ -27,6 +27,11 @@ type FakeGpu = {
    * 出力も統計も 1 ビットも変わらず、遅くなるだけで緑のまま通る。
    */
   readonly calls: { workDone: number };
+  /**
+   * 計測資源（querySet・バッファ）を確保順に並べた、それぞれの destroy 回数。確保の途中・
+   * エンコードの途中で落ちた経路の回収漏れと、正常経路の二重破棄をここで見る。
+   */
+  readonly destroys: number[];
 };
 
 type FakeOptions = {
@@ -38,6 +43,10 @@ type FakeOptions = {
    * 実 GPU では非単調な値も querySet 容量超過も作れないため、丸めと容量の門はここでだけ踏める。
    */
   readonly timestamps?: readonly (readonly bigint[])[];
+  /** 計測資源の確保の n 番目（1 始まり・確保順）で同期例外を投げる（故障注入）。 */
+  readonly failCreateAt?: number;
+  /** 計測付きの pass（`timestampWrites` 付き）を開くところで同期例外を投げる（故障注入）。 */
+  readonly failTimedPass?: boolean;
 };
 
 const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
@@ -46,6 +55,18 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
   const workDone = options.workDone ?? ((): Promise<void> => Promise.resolve());
   const timing = options.timestamps !== undefined;
   const stamps = [...options.timestamps ?? []];
+  const destroys: number[] = [];
+  /** 確保 1 件を台帳に載せ、その destroy を返す（故障注入の番号に当たれば載せずに投げる）。 */
+  const track = (): () => void => {
+    const index = destroys.length;
+    if (options.failCreateAt === index + 1) {
+      throw new TypeError(`故障注入: 計測資源の確保 ${index + 1} 件目の同期例外`);
+    }
+    destroys.push(0);
+    return (): void => {
+      destroys[index] += 1;
+    };
+  };
   const device = {
     lost: options.lost ?? new Promise<GPUDeviceLostInfo>(() => {}),
     features: new Set<string>(timing ? ["timestamp-query"] : []),
@@ -60,10 +81,11 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
         return workDone();
       },
     },
-    createQuerySet: () => ({ destroy: (): void => {} }),
+    createQuerySet: () => ({ destroy: track() }),
     // 計測経路は resolve 用と MAP_READ 用の 2 本を作る。timestamp を載せるのは後者だけで、
     // 回収の順（チャンク順）にこの列から 1 組ずつ配る。
     createBuffer: (descriptor: GPUBufferDescriptor) => {
+      const destroy = track();
       const mapped = (descriptor.usage & BUFFER_USAGE.MAP_READ) === 0
         ? new BigUint64Array(0)
         : BigUint64Array.from(stamps.shift() ?? []);
@@ -71,27 +93,32 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
         mapAsync: (): Promise<void> => Promise.resolve(),
         getMappedRange: (): ArrayBuffer => mapped.buffer,
         unmap: (): void => {},
-        destroy: (): void => {},
+        destroy,
       };
     },
     createCommandEncoder: () => {
       let count = 0;
       return {
-        beginComputePass: () => ({
-          setPipeline: (): void => {},
-          setBindGroup: (): void => {},
-          dispatchWorkgroups: (): void => {
-            count += 1;
-          },
-          end: (): void => {},
-        }),
+        beginComputePass: (descriptor?: GPUComputePassDescriptor) => {
+          if (options.failTimedPass === true && descriptor?.timestampWrites !== undefined) {
+            throw new TypeError("故障注入: 計測付き pass の同期例外");
+          }
+          return {
+            setPipeline: (): void => {},
+            setBindGroup: (): void => {},
+            dispatchWorkgroups: (): void => {
+              count += 1;
+            },
+            end: (): void => {},
+          };
+        },
         copyBufferToBuffer: (): void => {},
         resolveQuerySet: (): void => {},
         finish: () => ({ count }),
       };
     },
   };
-  return { context: fakeGpuContext(device as unknown as GPUDevice), submitted, calls };
+  return { context: fakeGpuContext(device as unknown as GPUDevice), submitted, calls, destroys };
 };
 
 /** copy の面だけを見るテスト用の実体（フェイク encoder は中身に触れない）。 */
@@ -340,6 +367,39 @@ Deno.test("非単調な timestamp は 0 に丸めたうえで丸めた件数を�
   assertEquals(timing?.clampedNegativeSamples, 1, "丸めた件数を黙って捨てない");
   assertEquals(timing?.dispatchCount, 2, "件数は丸めと無関係に数える");
   assertEquals(timing?.entries.length, 1, "同じキーの 2 本は 1 エントリへ畳む");
+});
+
+Deno.test("計測資源の確保の途中で同期例外が出ても、確保済みの資源は破棄される", async () => {
+  // querySet → resolve 用 → 読み戻し用の順に確保する。3 件目で落ちると、先の 2 件は回収一覧に
+  // 載る前なので discard からも届かない（GC 任せになる）。
+  const gpu = createFakeGpu({ timestamps: [], failCreateAt: 3 });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
+
+  dispatchMany(scheduler, 1);
+  await assertRejects(() => scheduler.flush(), TypeError, "故障注入");
+  scheduler.discard();
+  assertEquals(gpu.destroys, [1, 1], "確保済みの querySet と resolve 用バッファが破棄されていない");
+});
+
+Deno.test("計測付きのエンコードの途中で同期例外が出ても、discard で 3 資源とも破棄される", async () => {
+  const gpu = createFakeGpu({ timestamps: [], failTimedPass: true });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
+
+  dispatchMany(scheduler, 1);
+  await assertRejects(() => scheduler.flush(), TypeError, "故障注入");
+  scheduler.discard();
+  assertEquals(gpu.destroys, [1, 1, 1], "エンコードの途中で落ちたチャンクの計測資源が残っている");
+});
+
+Deno.test("計測資源は正常経路で 1 度だけ破棄され、後の discard で二重に破棄されない", async () => {
+  const gpu = createFakeGpu({ timestamps: [[0n, 1_000n]] });
+  const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
+
+  dispatchMany(scheduler, 1);
+  await scheduler.flush();
+  assertEquals(gpu.destroys, [1, 1, 1], "回収の後に破棄されている");
+  scheduler.discard();
+  assertEquals(gpu.destroys, [1, 1, 1], "回収済みの資源を discard が二重に破棄した");
 });
 
 Deno.test("SubmitScheduler の flush は device 消失を待ち続けずに例外にする", async () => {

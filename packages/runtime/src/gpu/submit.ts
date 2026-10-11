@@ -922,15 +922,38 @@ export class SubmitScheduler {
       );
     }
     const byteLength = count * TIMESTAMP_BYTES;
-    const querySet = this.#device.createQuerySet({ type: "timestamp", count });
-    const resolveBuffer = this.#device.createBuffer({
-      size: byteLength,
-      usage: BUFFER_USAGE.QUERY_RESOLVE | BUFFER_USAGE.COPY_SRC,
-    });
-    const readBuffer = this.#device.createBuffer({
-      size: byteLength,
-      usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
-    });
+    // MUST: 3 資源は確保し終えた直後に回収一覧（#pendingTimings）へ載せ、エンコードはその後に
+    // する。エンコードの途中の同期例外で抜けたチャンクの資源も、失敗経路の discard が同じ一覧
+    // から破棄できる（載せる前に抜けると discard からも flush からも届かない）。確保そのものが
+    // 途中で落ちたときは、一覧に載せる前なのでここで確保済みぶんを破棄する（まだどのコマンドにも
+    // 積んでいないので、その場で破棄しても submit 済み・未 submit のエンコードを壊さない）。
+    const allocated: { destroy(): void }[] = [];
+    let timing: PendingTiming;
+    try {
+      const querySet = this.#device.createQuerySet({ type: "timestamp", count });
+      allocated.push(querySet);
+      const resolveBuffer = this.#device.createBuffer({
+        size: byteLength,
+        usage: BUFFER_USAGE.QUERY_RESOLVE | BUFFER_USAGE.COPY_SRC,
+      });
+      allocated.push(resolveBuffer);
+      const readBuffer = this.#device.createBuffer({
+        size: byteLength,
+        usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
+      });
+      timing = {
+        querySet,
+        resolveBuffer,
+        readBuffer,
+        entries: dispatches.map((item) => ({ key: item.key, work: item.work })),
+        backed,
+      };
+    } catch (cause) {
+      for (const resource of allocated) resource.destroy();
+      throw cause;
+    }
+    this.#pendingTimings.push(timing);
+    const { querySet, resolveBuffer, readBuffer } = timing;
     let index = 0;
     for (const item of chunk) {
       if (item.kind === "copy") {
@@ -958,13 +981,6 @@ export class SubmitScheduler {
     }
     encoder.resolveQuerySet(querySet, 0, count, resolveBuffer, 0);
     encoder.copyBufferToBuffer(resolveBuffer, 0, readBuffer, 0, byteLength);
-    this.#pendingTimings.push({
-      querySet,
-      resolveBuffer,
-      readBuffer,
-      entries: dispatches.map((item) => ({ key: item.key, work: item.work })),
-      backed,
-    });
   }
 
   /**
