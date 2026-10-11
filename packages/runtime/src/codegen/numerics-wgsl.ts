@@ -8,9 +8,22 @@
  * 断片だけで、族に閉じた式は各族のモジュールに残す。
  */
 
-/** 整数値も必ず小数リテラルにする（WGSL の AbstractInt に落とさない）。 */
-export const f32Literal = (value: number): string =>
-  Number.isInteger(value) ? `${value}.0` : `${value}`;
+import { CodegenError } from "./errors.ts";
+
+/**
+ * 整数値も必ず小数リテラルにする（WGSL の AbstractInt に落とさない）。
+ *
+ * MUST: `.0` を足すのは `String(value)` が `.`・`e`・`E` を含まないときだけ。`1e21` のような
+ * 指数表記の整数に足すと `1e+21.0` という不正な WGSL になる（指数表記はそのままで浮動小数
+ * リテラル）。非有限値は WGSL にリテラルが無いので fail loudly。
+ */
+export const f32Literal = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    throw new CodegenError(`f32Literal: 非有限値は WGSL のリテラルにできない（${value}）`);
+  }
+  const text = String(value);
+  return /[.eE]/.test(text) ? text : `${text}.0`;
+};
 
 /**
  * MUST: 素朴な `1/(1+exp(-x))` にしない。WGSL は浮動小数のオーバーフロー結果を
