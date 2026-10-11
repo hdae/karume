@@ -5,10 +5,12 @@
 // 宣言の故障形（取り決めから外れた資産を名指しで落とす分岐）はここが唯一の門になる。宣言は
 // `helpers/stub-model.ts` の流儀で、正しい形を 1 つ書いてから 1 点だけ壊す。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import type { ResidentTensor } from "@karume/runtime";
 import { describe, it } from "@std/testing/bdd";
 import {
   concatWanVaeFrames,
+  WanVaeChunkCaches,
   wanVaeChunkCount,
   WanVaeChunkError,
   wanVaeChunkLayout,
@@ -17,6 +19,7 @@ import {
 } from "../src/wan/vae-chunks.ts";
 import type { GraphOwner } from "../src/hub/components.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /** 潜在タイルの辺・潜在のチャネル数・出力フレームの辺（`8t`）。 */
 const TILE = 4;
@@ -375,5 +378,32 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
       const frames = Array.from({ length: 5 }, (_, frame) => out[(channel * 5 + frame) * plane]);
       assertEquals(frames, [0, 100, 100, 100, 100].map((value) => value + channel));
     }
+  });
+});
+
+describe("WanVaeChunkCaches.create（常駐の確保と失敗時の後始末）", () => {
+  it("ホスト側のゼロ配列が確保できなければ、元の RangeError を投げ、確保した GPU の常駐を 1 本も残さない", async () => {
+    // cache 1 本が 2^36 要素（256 GiB 相当）の宣言。GPU 側の確保は模擬で必ず成功させ、ホストの
+    // `new Float32Array` だけが実際に失敗する形（数十 MB のホスト配列だけが落ちる現実の形の拡大）。
+    const huge = [1 << 12, 2, 1 << 12, 1 << 11];
+    const layout = layoutOf(
+      FIRST,
+      patched(NEXT, {
+        inputs: { 2: { name: "cache_01", shape: huge } },
+        outputs: { 2: { name: "cache_01_out", shape: huge } },
+      }),
+    );
+    const gpu = fakeGpuContext(fakeDevice());
+    const created: string[] = [];
+    const disposed: string[] = [];
+    // 模擬の常駐（`dispose` と `byteLength` だけを持つ — 実体は fake device に作れないのでテストの境界で cast する）。
+    gpu.createResident = (byteLength: number, label = "resident") => {
+      created.push(label);
+      return Promise.resolve(
+        { byteLength, dispose: () => disposed.push(label) } as unknown as ResidentTensor,
+      );
+    };
+    await assertRejects(() => WanVaeChunkCaches.create(gpu, layout), RangeError);
+    assertEquals(disposed.toSorted(), created.toSorted(), "確保した常駐が解放されずに残った");
   });
 });

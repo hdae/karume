@@ -268,16 +268,21 @@ export class WanVaeChunkCaches {
     gpu: GpuContext,
     layout: WanVaeChunkLayout,
     caches: ReadonlyMap<string, ResidentTensor>,
+    zeros: Float32Array<ArrayBuffer>,
   ) {
     this.#gpu = gpu;
     this.layout = layout;
     this.#caches = caches;
-    const largest = Math.max(...[...layout.cacheShapes.values()].map(elements));
-    this.#zeros = new Float32Array(largest);
+    this.#zeros = zeros;
   }
 
   /** cache の常駐を確保する（WebGPU の新しいバッファはゼロで始まる）。 */
   static async create(gpu: GpuContext, layout: WanVaeChunkLayout): Promise<WanVaeChunkCaches> {
+    // MUST: ホストのゼロ配列は GPU の常駐より先に確保する — 後にすると、常駐（約 0.58 GiB）の確保が
+    // 済んだ後にホスト配列だけが RangeError で落ちたとき、確保済みの常駐を誰も解放できない（呼び手は
+    // 戻り値を受け取っていないので畳めない）。先に置けば失敗点が GPU に触る前へ移り、後始末が要らない。
+    const largest = Math.max(...[...layout.cacheShapes.values()].map(elements));
+    const zeros = new Float32Array(largest);
     const caches = new Map<string, ResidentTensor>();
     try {
       for (const [name, shape] of layout.cacheShapes) {
@@ -287,7 +292,7 @@ export class WanVaeChunkCaches {
       for (const resident of caches.values()) resident.dispose();
       throw cause;
     }
-    return new WanVaeChunkCaches(gpu, layout, caches);
+    return new WanVaeChunkCaches(gpu, layout, caches, zeros);
   }
 
   /** cache の常駐の合計バイト数。 */
