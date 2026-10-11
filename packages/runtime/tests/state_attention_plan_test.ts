@@ -106,3 +106,18 @@ Deno.test("行統計/PV融合は中間statsだけを省き、列と行ブロッ�
     planStateAttention(outside, WIDE_LIMIT),
   );
 });
+
+Deno.test("列容量が 1 の形は行統計も上限に収まる枚数へ割る", () => {
+  // B·H = 1・M = 8・C = 1 → 1 行のスコア 4B に対し行統計は 2 語 = 8B。上限 16B でスコアだけを
+  // 見ると 4 行 × 2 枚になり、1 枚の行統計 32B が上限を超える。行統計の 8B で割ると 2 行 × 4 枚。
+  const plan = planStateAttention({ batchHeads: 1, chunkRows: 8, capacity: 1 }, 16);
+  assertEquals(plan.blocks, [
+    { offset: 0, rows: 2, scoreBytes: 8, statsBytes: 16 },
+    { offset: 2, rows: 2, scoreBytes: 8, statsBytes: 16 },
+    { offset: 4, rows: 2, scoreBytes: 8, statsBytes: 16 },
+    { offset: 6, rows: 2, scoreBytes: 8, statsBytes: 16 },
+  ]);
+  for (const block of plan.blocks) {
+    assert(block.scoreBytes <= 16 && block.statsBytes <= 16, JSON.stringify(block));
+  }
+});

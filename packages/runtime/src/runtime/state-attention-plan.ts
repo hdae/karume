@@ -64,7 +64,7 @@ export type StateAttentionPlan = {
 /**
  * states 形 attention 1 ノードの列容量と行ブロックごとの一時バイト数を出す（純関数）。
  *
- * S 1 枚 = `B·H · 行数 · colCap · 4` バイトが `limit`（device の granted
+ * S 1 枚 = `B·H · 行数 · colCap · 4` バイトと行統計 1 枚の**両方**が `limit`（device の granted
  * `maxStorageBufferBindingSize`）に収まる最小枚数の等分で、実行時オートチューンは持たない
  * （ADR 0022）。1 行でも収まらない形は {@link planRowBlocks} が fail loudly。
  *
@@ -81,11 +81,16 @@ export const planStateAttention = (
   const window = extent.window ?? 0;
   const colCap = stateSliding(window) ? window - 1 + chunkRows : capacity;
   const fusedStatsPv = extent.fuseStatsPv === true && stateStatsPvEligible(chunkRows, colCap);
-  const blocks = planRowBlocks(chunkRows, batchHeads * colCap * 4, limit, forced).map((block) => ({
+  const statsRowBytes = fusedStatsPv ? 0 : STATE_STATS_STRIDE * 4;
+  // MUST: 枚数は行に比例する一時（S と行統計）の 1 行ぶんの**大きいほう**で決める。S だけで
+  // 決めると、列容量が行統計の語数より小さい形（colCap = 1）で S は収まるのに行統計 1 枚が
+  // 上限を超え、割れば通る形を確保の段で拒否する。
+  const rowBytes = batchHeads * Math.max(colCap * 4, statsRowBytes);
+  const blocks = planRowBlocks(chunkRows, rowBytes, limit, forced).map((block) => ({
     offset: block.offset,
     rows: block.rows,
     scoreBytes: batchHeads * block.rows * colCap * 4,
-    statsBytes: fusedStatsPv ? 0 : batchHeads * block.rows * STATE_STATS_STRIDE * 4,
+    statsBytes: batchHeads * block.rows * statsRowBytes,
   }));
   return { colCap, fusedStatsPv, blocks };
 };

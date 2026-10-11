@@ -155,6 +155,56 @@ type AttentionPvStage =
     readonly vs: TempSource;
   });
 
+/** 通常 attention の行ブロック 1 枚ぶんの一時（確保順 — 解放は逆順）。 */
+export type AttentionBlock = {
+  /** ブロック先頭のクエリ行（行窓の `row_offset`）。 */
+  readonly offset: number;
+  /** ブロックの行数。 */
+  readonly rows: number;
+  /** スコア S = `B·H × 行数 × N × 格納幅` バイト。 */
+  readonly scoreBytes: number;
+  /** 行統計 = `B·H × 行数 × ATTENTION_STATS_STRIDE × 4` バイト。 */
+  readonly statsBytes: number;
+};
+
+/**
+ * 通常 attention（states 欄なし）のクエリ行ブロックと、1 枚ぶんの一時のバイト数（純関数）。
+ *
+ * S 1 枚と行統計 1 枚の**両方**が `limit`（device の granted `maxStorageBufferBindingSize`）に
+ * 収まる最小枚数の等分で、実行時オートチューンは持たない（ADR 0022）。
+ *
+ * MUST: 枚数は行に比例する一時（S と行統計）の 1 行ぶんの**大きいほう**で決める。S だけで
+ * 決めると、1 行のスコアが行統計 2 語より小さい形（f32 で N = 1・f16 で N < 4）で S は収まるのに
+ * 行統計 1 枚が上限を超え、割れば通る形を確保の段で拒否する。i8a8 の量子化の一時は
+ * ブロックループの外で確保するので、ここには入れない。
+ *
+ * @param forced 行ブロックの枚数を明示する（テスト専用 `ROW_BLOCK_SPLIT` の受け口）。
+ */
+export const planAttentionBlocks = (
+  extent: {
+    /** `B·H`（バッチと head を畳んだ軸）。 */
+    readonly batch: number;
+    /** クエリ行 `M`。 */
+    readonly rows: number;
+    /** キー列 `N`。 */
+    readonly cols: number;
+    /** S の 1 要素のバイト数。 */
+    readonly scoreBytes: number;
+  },
+  limit: number,
+  forced?: number,
+): readonly AttentionBlock[] => {
+  const { batch, rows, cols, scoreBytes } = extent;
+  const statsRowBytes = ATTENTION_STATS_STRIDE * 4;
+  const rowBytes = batch * Math.max(cols * scoreBytes, statsRowBytes);
+  return planRowBlocks(rows, rowBytes, limit, forced).map((block) => ({
+    offset: block.offset,
+    rows: block.rows,
+    scoreBytes: batch * block.rows * cols * scoreBytes,
+    statsBytes: batch * block.rows * statsRowBytes,
+  }));
+};
+
 /**
  * 融合 attention（ADR 0023）。**1 ノード = 行ブロック 1 枚あたり 3 dispatch**（`cat` と同じ
  * 「複数 dispatch で 1 ノード」の扱い。full-write は**ノードの出力 O について**成立する）:
@@ -268,14 +318,14 @@ export const buildAttention = async (
   }
 
   // クエリ行のブロック分割（ADR 0060 と同じ純関数 — states 形 attention と同じ流儀）。
-  // S 1 枚 = `B·H · block · N · 格納幅` バイトがストレージ束縛の上限に収まる最小枚数の等分で、
-  // 実行時オートチューンは持たない（ADR 0022）。1 行でも収まらない形は fail loudly。
+  // S 1 枚 = `B·H · block · N · 格納幅` バイトと行統計 1 枚がストレージ束縛の上限に収まる
+  // 最小枚数の等分で（{@link planAttentionBlocks}）、実行時オートチューンは持たない（ADR 0022）。
+  // 1 行でも収まらない形は fail loudly。
   // MUST: **n = 1 の機は分割前と完全に同一**（行窓を立てないのでキーも uniform も WGSL も
   // dispatch 列も 1 バイト動かない）。既存のスナップショットとビット同一門がその検出器。
   const scoreBytes = compute === "f16" ? 2 : scoreStorageBytes(scoreStorage);
-  const blocks = planRowBlocks(
-    rows,
-    batch * cols * scoreBytes,
+  const blocks = planAttentionBlocks(
+    { batch, rows, cols, scoreBytes },
     face.state.gpu.limits.maxStorageBufferBindingSize,
     face.state.rowBlockSplit,
   );
@@ -358,8 +408,8 @@ export const buildAttention = async (
     // （1024px の DiT で 1,073.7MB → 536.9MB）。
     // MUST: 一時は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、上限を
     // 越えない形にした意味が消える — states 形 attention と同じ規律）。
-    const scores = builder.allocTemp(batch * block.rows * cols * scoreBytes);
-    const rowStats = builder.allocTemp(batch * block.rows * ATTENTION_STATS_STRIDE * 4);
+    const scores = builder.allocTemp(block.scoreBytes);
+    const rowStats = builder.allocTemp(block.statsBytes);
     // 行窓 2 語（n = 1 では渡さない = uniform のバイト列も従来どおり）。
     const window = windowed ? { offset: block.offset, rowsFull: rows } : undefined;
 
