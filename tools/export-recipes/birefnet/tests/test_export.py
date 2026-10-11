@@ -716,8 +716,8 @@ class TestDtypeCli:
     def test_the_script_writes_exactly_the_seats_the_distribution_ships(self):
         """書く側と配る側の規則は 1 つ（配れない系列を焼かない・配る席の系列は全部焼ける）。
 
-        checkpoint は `--model-dir` の取得記録の revision、無ければディレクトリ名から引く
-        （`model_dir_checkpoint`）。
+        checkpoint は `--model-dir` の取得記録の revision が固定値に当たればそれ、当たらなければ
+        （記録が無い・読めない場合も）ディレクトリ名から引く（`model_dir_checkpoint`）。
         """
         from birefnet.card import BIREFNET_CHECKPOINTS
         from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes

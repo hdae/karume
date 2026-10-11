@@ -308,6 +308,7 @@ class TestBirefnetLayout:
         assert list(plan.quants) == ["f32", "f16"]
         assert plan.default_quant == "f32"
         assert set(plan.artifacts) == set(expected.artifacts)
+        assert plan == expected
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_birefnet_sources(tmp_path)
