@@ -26,7 +26,12 @@ import type { DeviceLostHandler, RequiredLimits } from "./acquire.ts";
 // 実体の import を作らない）。
 import type { GeometryProfile } from "../kernels/geometry-profile.ts";
 import { STORAGE_USAGE } from "./arena.ts";
-import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "./error-scope.ts";
+import {
+  discardFailureScopes,
+  GpuOutOfMemoryError,
+  popFailureScopes,
+  pushFailureScopes,
+} from "./error-scope.ts";
 import { PipelineCache } from "./pipeline-cache.ts";
 import { BUFFER_USAGE, MAP_MODE } from "./webgpu-constants.ts";
 
@@ -125,6 +130,11 @@ type GpuContextInternals = {
    * 並行構築すると、値でメモする形ではカナリアが 2 本走って device 単位 1 回の契約が崩れる。
    * 失敗（両腕とも sanity 帯を外した / device 消失）も同じ Promise のまま配る — device の性質は
    * 走らせ直しても変わらないので、再試行は同じ結論を得るためだけに 1 submit を払う。
+   * MUST: ただし {@link GpuOutOfMemoryError} で落ちた判定だけはメモから外す（決着の後の要求が
+   * 走らせ直す）。カナリアの一時バッファの確保失敗は device の性質ではなく、他の Session が VRAM を
+   * 天井付近まで埋めた瞬間の一過性の状態なので、保持すると空きが戻っても同じ GpuContext では a8 の
+   * Session を作れなくなる。外すのは保持中の Promise が落ちた本人と同じときだけ（進行中の要求の
+   * 共有は崩さない）。
    *
    * 席が持つのは変種 1 値ではなく**判定まるごと**（{@link AttentionI8a8Decision}）。「既知解と
    * 厳密一致ではなかったが帯内なので通した」という事実は判定と同じ寿命で、値に潰すと呼び手が
@@ -277,8 +287,17 @@ export class GpuContext {
       attentionI8a8Dot: (
         run: () => Promise<AttentionI8a8Decision>,
       ): Promise<AttentionI8a8Decision> => {
-        this.#attentionI8a8Dot ??= run();
-        return this.#attentionI8a8Dot;
+        if (this.#attentionI8a8Dot !== undefined) return this.#attentionI8a8Dot;
+        const decision = run();
+        this.#attentionI8a8Dot = decision;
+        // 呼び手の reaction より先に登録するので、呼び手が拒否を受け取った時点でメモは空いている。
+        // 呼び手へ返すのは decision そのものなので、拒否はそのまま呼び手に届く。
+        decision.catch((cause: unknown) => {
+          if (cause instanceof GpuOutOfMemoryError && this.#attentionI8a8Dot === decision) {
+            this.#attentionI8a8Dot = undefined;
+          }
+        });
+        return decision;
       },
       pipelines: (): PipelineCache => {
         this.#pipelines ??= new PipelineCache(this.device);

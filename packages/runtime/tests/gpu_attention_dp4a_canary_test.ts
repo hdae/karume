@@ -17,6 +17,7 @@
 //    事実を戻り値に載せる。
 // 4. **両腕とも帯を外したら fail loudly**（変種の選び方の問題ではないので縮退先が無い）。
 // 5. 判定は **device 単位に 1 度**（Promise メモ化）。a8 でない Session は 1 dispatch も払わない。
+//    一過性の確保失敗（OOM）で落ちた判定だけはメモに残さず、次の要求で走り直す。
 // 6. 判定結果は診断（パイプラインキーの `:dp4aEmu`）に現れる（ADR 0058 決定 3）。
 //
 // ## 故障注入について
@@ -26,14 +27,16 @@
 // 通して、判定の分岐そのものを実 GPU 上で踏む。MUST: 注入が効いていること自体を先に門にする
 // （置換が空振りすると「壊したのに一致した」= 恒真テストになる）。
 
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import {
   acquireGpu,
   type GpuContext,
+  GpuDeviceLostError,
   GpuFeatureError,
   RUNTIME_INTERNAL,
 } from "../src/gpu/device.ts";
+import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import {
   type AttentionI8a8Decision,
   buildPvCase,
@@ -65,6 +68,7 @@ import {
 import { createSessionFromContainer, type SessionOptions } from "../src/runtime/executor.ts";
 import type { I8a8Dot, SessionDiagnostics } from "../src/runtime/session-types.ts";
 import { fill, GRAPH_NAME, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
+import { fakeDevice, fakeGpuContext } from "./helpers/fake-gpu.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertPipelineCensus } from "./helpers/pipeline-census.ts";
 
@@ -261,6 +265,91 @@ Deno.test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言
   assert(line.includes("'dp4a'"), line);
   assert(line.includes(String(decision.maxAbsError)), line);
   assert(line.includes(String(decision.maxBandRatio)), line);
+});
+
+// ---------------------------------------------------------------------------
+// (0') device 単位のメモ（GpuContext の席 — フェイク device で GPU 不要）
+// ---------------------------------------------------------------------------
+
+/** メモの席が配る判定（中身は席の振る舞いに関係しない）。 */
+const memoDecision: AttentionI8a8Decision = {
+  dot: "dp4a",
+  exact: true,
+  branch: "dp4a-exact",
+  maxAbsError: 0,
+  maxBandRatio: 0,
+};
+
+Deno.test("メモ: 一過性の OOM で落ちた判定は保持せず、次の要求でカナリアを走らせ直す", async () => {
+  // カナリアの一時バッファは KB 級だが、他の Session で VRAM が天井付近まで埋まっていると非致命
+  // OOM になりうる。空きが戻っても同じ失敗を配り続けると、同じ GpuContext では a8 の Session を
+  // 作れなくなる（device の性質ではないので、走らせ直せば結論が変わりうる）。
+  const gpu = fakeGpuContext(fakeDevice());
+  const oom = new GpuOutOfMemoryError("カナリアの一時バッファ: out of memory");
+  await assertRejects(() => gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => Promise.reject(oom)));
+  let reruns = 0;
+  const decided = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
+    reruns += 1;
+    return Promise.resolve(memoDecision);
+  });
+  assertEquals(reruns, 1, "OOM の後の要求でカナリアが走り直していない");
+  assertStrictEquals(decided, memoDecision);
+  // 成功した判定は従来どおり device の寿命いっぱい保持する。
+  let extra = 0;
+  await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
+    extra += 1;
+    return Promise.resolve(memoDecision);
+  });
+  assertEquals(extra, 0, "成功した判定をメモから外している");
+});
+
+Deno.test("メモ: 数値の不一致と device 消失で落ちた判定は保持し、走らせ直さない", async () => {
+  // どちらも device の性質（または device 自体が使えない）なので、走らせ直しても同じ結論を得る
+  // ためだけに 1 submit を払うことになる。
+  for (
+    const failure of [
+      new GpuFeatureError("両腕とも sanity 帯を外した"),
+      new GpuDeviceLostError("カナリアの検証中に device が失われた"),
+    ]
+  ) {
+    const gpu = fakeGpuContext(fakeDevice());
+    await assertRejects(() =>
+      gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => Promise.reject(failure))
+    );
+    let reruns = 0;
+    const again = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
+      reruns += 1;
+      return Promise.resolve(memoDecision);
+    }).then(() => undefined, (cause: unknown) => cause);
+    assertEquals(reruns, 0, `${failure.name} の後にカナリアが走り直している`);
+    assertStrictEquals(again, failure, "保持した失敗と別の結果を配っている");
+  }
+});
+
+Deno.test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちたときも同じ失敗を配る", async () => {
+  const gpu = fakeGpuContext(fakeDevice());
+  const pending = Promise.withResolvers<AttentionI8a8Decision>();
+  let runs = 0;
+  const run = (): Promise<AttentionI8a8Decision> => {
+    runs += 1;
+    return pending.promise;
+  };
+  const first = gpu[RUNTIME_INTERNAL].attentionI8a8Dot(run);
+  const second = gpu[RUNTIME_INTERNAL].attentionI8a8Dot(run);
+  assertStrictEquals(first, second, "同時の要求が別の Promise を受け取っている");
+  assertEquals(runs, 1, "同時の要求でカナリアが 2 本走っている");
+  const oom = new GpuOutOfMemoryError("カナリアの一時バッファ: out of memory");
+  pending.reject(oom);
+  for (const waiter of [first, second]) {
+    assertStrictEquals(await waiter.then(() => undefined, (cause: unknown) => cause), oom);
+  }
+  // 落ちた後の要求は新しい 1 本を走らせる。
+  const retried = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
+    runs += 1;
+    return Promise.resolve(memoDecision);
+  });
+  assertEquals(runs, 2);
+  assertStrictEquals(retried, memoDecision);
 });
 
 // ---------------------------------------------------------------------------
