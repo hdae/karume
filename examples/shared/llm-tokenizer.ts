@@ -3,8 +3,7 @@ import { createAddedTokenMatcher } from "../../packages/models/src/text/added-to
 import { bpeEncode, type BpeMerge, type BpeModel } from "../../packages/models/src/text/bpe.ts";
 import { assertCodePoint, setUnique } from "../../packages/models/src/text/asset-gates.ts";
 import { toCodePoints } from "../../packages/models/src/text/code-points.ts";
-import { inCodeRanges } from "../../packages/models/src/text/code-ranges.ts";
-import { parseCodeRanges } from "../../packages/models/src/anima/text/code-ranges.ts";
+import { inCodeRanges, parseCodeRanges } from "../../packages/models/src/text/code-ranges.ts";
 import {
   normalizeNfc,
   qwen2PreTokenize,
