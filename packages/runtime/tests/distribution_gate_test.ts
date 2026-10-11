@@ -100,7 +100,8 @@ const distributionRoot = (models: URL, series: string): URL => new URL(`${series
  *
  * NOTE: 子はシンボリックリンクでもよい（stat はリンクを辿る）— 資産を別の場所に置いてリンクで
  * 見せる機がある。`models` 自体が無い機は空を返す（欠如は名簿の検査が名指しで落とす）。
- * NotFound 以外の I/O 異常は伝播させる（{@link manifestPresent} と同じ理由）。
+ * `models` の一覧での NotFound 以外の I/O 異常は伝播させる（{@link manifestPresent} と同じ理由）。
+ * 子の stat の異常は {@link isMirrorCandidate} が一覧に残し、per-mirror の test の中で名指しで落とす。
  */
 const discoverDistributions = (models: URL): readonly string[] => {
   let entries: Deno.DirEntry[];
@@ -113,8 +114,24 @@ const discoverDistributions = (models: URL): readonly string[] => {
   return entries
     .map((entry) => entry.name)
     .filter((name) => !WORK_SEAT_SUFFIXES.some((suffix) => name.endsWith(suffix)))
-    .filter((name) => Deno.statSync(new URL(name, models)).isDirectory)
+    .filter((name) => isMirrorCandidate(new URL(name, models)))
     .sort();
+};
+
+/**
+ * `models` 直下の子を manifest の検査に掛けるか（ディレクトリなら掛ける・ファイルなら掛けない）。
+ *
+ * MUST: stat が投げた子（壊れたシンボリックリンク・辿れないリンク・読めない子）は**掛ける側に
+ * 残す**。ここはモジュールのトップレベル（test の登録時）で走るので、投げればファイル全体が
+ * どのミラーとも名指しの無いまま落ち、欠如の門も一緒に消える。残せば同じ異常が per-mirror の
+ * test の中で、そのミラーの名前の付いた FAIL として出る（例外は握り潰さず、出る場所を移すだけ）。
+ */
+const isMirrorCandidate = (child: URL): boolean => {
+  try {
+    return Deno.statSync(child).isDirectory;
+  } catch {
+    return true;
+  }
 };
 
 /**
@@ -130,6 +147,21 @@ const manifestPresent = (root: URL): boolean => {
   } catch (cause) {
     if (cause instanceof Deno.errors.NotFound) return false;
     throw cause;
+  }
+};
+
+/**
+ * 登録時の `ignore` の判定用: manifest が**無いと分かっている**か。
+ *
+ * MUST: NotFound 以外の I/O 異常は「無いとは分からない」（`false`）に倒して test を走らせる —
+ * 登録時に投げるとファイル全体が名指し無しで落ちる（{@link isMirrorCandidate} と同じ理由）。
+ * 走った test の中の {@link manifestPresent} が同じ異常を、そのミラーの名前の付いた FAIL として投げる。
+ */
+const manifestKnownAbsent = (root: URL): boolean => {
+  try {
+    return !manifestPresent(root);
+  } catch {
+    return false;
   }
 };
 
@@ -222,7 +254,7 @@ for (const series of discoverDistributions(MODELS_ROOT)) {
       `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
     // 名簿にあるミラーの不在は上の 1 本が名指しで落とす（同じ壊れで 2 本赤くしても読み手の仕事は
     // 増えない）。名簿に無いものの不在はここでしか見えないので走らせる。
-    ignore: REQUIRED.has(series) && !manifestPresent(root),
+    ignore: REQUIRED.has(series) && manifestKnownAbsent(root),
     fn: () => assertDistributionIntact(root, series),
   });
 }
@@ -316,6 +348,44 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
       Deno.mkdirSync(target);
       Deno.symlinkSync(target.pathname, new URL("karume-linked", models).pathname);
       assertEquals(discoverDistributions(models), ["karume-linked"]);
+    });
+  });
+
+  it("壊れたリンクと辿れないリンクも投げずに拾う（登録時に落ちてファイルごと消えない）", async () => {
+    await withTemporaryRoot((models) => {
+      Deno.symlinkSync(
+        new URL("nowhere", models).pathname,
+        new URL("karume-broken", models).pathname,
+      );
+      Deno.symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
+      assertEquals(discoverDistributions(models), ["karume-broken", "karume-loop"]);
+    });
+  });
+
+  it("壊れたリンクのミラーは、そのディレクトリを名指しして FAIL する", async () => {
+    await withTemporaryRoot(async (models) => {
+      Deno.symlinkSync(
+        new URL("nowhere", models).pathname,
+        new URL("karume-broken", models).pathname,
+      );
+      await assertRejects(
+        () => assertDistributionIntact(distributionRoot(models, "karume-broken"), "karume-broken"),
+        AssertionError,
+        "models/karume-broken/ に karume.json が無い",
+      );
+    });
+  });
+
+  it("辿れないリンクは ignore の判定で投げずに test を走らせ、test の中でそのパスを名指しして投げる", async () => {
+    await withTemporaryRoot(async (models) => {
+      Deno.symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
+      const root = distributionRoot(models, "karume-loop");
+      assertEquals(manifestKnownAbsent(root), false);
+      await assertRejects(
+        () => assertDistributionIntact(root, "karume-loop"),
+        Deno.errors.FilesystemLoop,
+        "karume-loop/karume.json",
+      );
     });
   });
 
