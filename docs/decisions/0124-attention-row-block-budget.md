@@ -165,8 +165,14 @@ n = 1 から n ≥ 2 への切り替えは行窓の別キー・別 WGSL に替�
   0.95〜1.46 GiB になる（推測 — 下端が Chrome の点、上端が Deno の点）。Chrome の点では FFN の項が下限を決め、1 GiB でも
   512 MiB と同じだけ減る（推測）。
 - 落ちる時点が遅い（決定 5）。予算違反は Wan では重みの読み込みの後に落ちる。
-- 見積りの拡張（決定 7）で、既存の全系列の `workspaceBytes` / `peakAccountedBytes` が増える。Anima の先回りの退避（常駐 DiT を
-  畳む判断）が早まりうる（推測 — 出力のビットは変わらず、速度だけが変わりうる）。
+- 見積りの拡張（決定 7）で、融合 attention op を持つグラフの `workspaceBytes` / `peakAccountedBytes` が増えうる。既存の呼び手は
+  前後で不変だった（[research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md) の前後の表）。Anima の
+  段ごとの見積りは、text 段が融合 attention op を持たず、VAE の 1 本の一時は既存の領域の中に収まる。Gemma の attention は全て
+  states 形である。したがって Anima の先回りの退避（常駐 DiT を畳む判断）の入力は変わらない。増えるのは Wan2.2 の DiT
+  （融合 attention op 60 本）で、実用席・121 フレーム・予算なしの `workspaceBytes` は 3.54 GiB から 5.61 GiB になる。Wan の
+  pipeline は見積りを呼ばないので、実行の挙動は変わらない。
+- 束縛上限を渡さない見積りは、融合 attention op の枚数が device に依る形を拒否する（決定 7）。既存の呼び手は上限を渡すか
+  （Anima）、融合 attention op を持たない（Gemma）ので影響しない。
 
 ## 検収（門の形）
 

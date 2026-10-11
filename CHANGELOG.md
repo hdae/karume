@@ -356,9 +356,14 @@ measurements in `docs/research/`.
 - `@karume/runtime`: the memory estimate (`estimateGraphMemory` / `PreparedModel.estimate`) now
   counts the internal temporaries of the fused `attention` op — the score matrix and row statistics of
   each row block, and the int8 quantization buffers of `attentionCompute: "a8"` — with the same
-  functions the session uses, so `workspaceBytes` and `peakAccountedBytes` grow for graphs with that
-  op (for example the Wan2.2 transformer). Combinations a session rejects (an additive mask or grouped
-  query attention with `"a8"`, a non-f32 seat on the state form) are now rejected by the estimate too.
+  functions the session uses, so `workspaceBytes` and `peakAccountedBytes` can grow for graphs with
+  that op (for example the Wan2.2 transformer). Combinations a session rejects (an additive mask or
+  grouped query attention with `"a8"`, a head dimension or key length beyond the int32 accumulation
+  bound of the int8 path, a non-f32 seat on the state form) are now rejected by the estimate too.
+  Without `maxStorageBufferBindingSize`, the estimate counts the fused `attention` op only when its
+  row-block count is the same on every device — the score matrix fits one block under the WebGPU
+  core default (128 MiB), or `attentionRowBlockMaxBytes` is at most that default — and otherwise
+  rejects the graph, asking for `maxStorageBufferBindingSize`.
   The second entry of `unaccounted` now names only the linear int8 quantization buffers. The estimates
   the Anima and Gemma pipelines use are unchanged.
 
