@@ -18,8 +18,14 @@ import type { Sbv2Word } from "./utterance.ts";
 import { Sbv2InputError } from "../errors.ts";
 
 /**
- * n 個の音素を `wordLength` 文字へ均等分配する（`g2p.py __distribute_phone` の忠実移植）。
- * 左から右へ 1 ずつ、常に「最小の文字」へ足していく。
+ * n 個の音素を `wordLength` 文字へ均等分配する（`g2p.py __distribute_phone` と同じ分配）。
+ *
+ * 上流は「左から右へ 1 ずつ、常に最小の文字（同値なら最左）へ足す」反復だが、その結果は
+ * 閉形式で書ける: `q = ⌊n / W⌋`・`r = n mod W` として、先頭 `r` 文字が `q + 1`、残りが `q`。
+ * 反復は 1 周ごとに全文字を 1 ずつ上げ、最後の端数 `r` 個が左から埋まるため。
+ *
+ * MUST: 反復の写経に戻さない — O(音素数 × 文字数) で、長さの上限検査（パイプライン側）より
+ * 先に走るので、巨大な 1 語で数秒 CPU を占有する。閉形式なら O(W) で、分配は上流と同一。
  */
 export const distributePhone = (phoneCount: number, wordLength: number): number[] => {
   if (!Number.isInteger(wordLength) || wordLength <= 0) {
@@ -28,16 +34,9 @@ export const distributePhone = (phoneCount: number, wordLength: number): number[
   if (!Number.isInteger(phoneCount) || phoneCount < 0) {
     throw new Error(`分配する音素数 ${phoneCount} が 0 以上の整数でない`);
   }
-  const perWord = new Array<number>(wordLength).fill(0);
-  for (let k = 0; k < phoneCount; k += 1) {
-    // 最小値のインデックス（同値なら最左）。
-    let minIndex = 0;
-    for (let i = 1; i < wordLength; i += 1) {
-      if (perWord[i] < perWord[minIndex]) minIndex = i;
-    }
-    perWord[minIndex] += 1;
-  }
-  return perWord;
+  const quotient = Math.floor(phoneCount / wordLength);
+  const remainder = phoneCount % wordLength;
+  return Array.from({ length: wordLength }, (_, index) => quotient + (index < remainder ? 1 : 0));
 };
 
 /**

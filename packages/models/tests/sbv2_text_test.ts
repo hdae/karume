@@ -203,6 +203,43 @@ Deno.test("distributePhone: 音素を文字へ均等分配する（余りは左�
   assertThrows(() => distributePhone(3, 0), Error, "1 以上の整数でない");
 });
 
+/** 上流 `__distribute_phone` の反復をそのまま書いた期待側（閉形式の実装と突き合わせる）。 */
+const iterativeDistribute = (phoneCount: number, wordLength: number): number[] => {
+  const perWord = new Array<number>(wordLength).fill(0);
+  for (let k = 0; k < phoneCount; k += 1) {
+    let minIndex = 0;
+    for (let i = 1; i < wordLength; i += 1) {
+      if (perWord[i] < perWord[minIndex]) minIndex = i;
+    }
+    perWord[minIndex] += 1;
+  }
+  return perWord;
+};
+
+Deno.test("distributePhone: 上流の反復と全組合せで同じ分配になる（音素 0..39 × 文字 1..14）", () => {
+  for (let phones = 0; phones < 40; phones += 1) {
+    for (let chars = 1; chars < 15; chars += 1) {
+      assertEquals(
+        distributePhone(phones, chars),
+        iterativeDistribute(phones, chars),
+        `phones=${phones} chars=${chars}`,
+      );
+    }
+  }
+});
+
+Deno.test("distributePhone: 巨大な 1 語でも文字数に比例する時間で分配する", () => {
+  // 反復の写経（音素数 × 文字数）だと 20 万 × 20 万で 4×10^10 回の比較になり返ってこない。
+  const size = 200_000;
+  const started = performance.now();
+  const perWord = distributePhone(size + 3, size);
+  const elapsed = performance.now() - started;
+  assertEquals(perWord.length, size);
+  assertEquals(perWord.slice(0, 4), [2, 2, 2, 1]);
+  assertEquals(perWord.reduce((sum, count) => sum + count, 0), size + 3);
+  assert(elapsed < 500, `${size} 文字への分配に ${elapsed.toFixed(0)} ms かかった`);
+});
+
 Deno.test("buildBaseWord2ph: 語ごとの分配を並べ、両端に番兵 1 を置く", () => {
   const tokenizer = tinyTokenizer(["こ", "ん", "に", "ち", "は", "、"]);
   const words = [
