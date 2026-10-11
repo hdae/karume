@@ -471,6 +471,10 @@ const openBirefnetState = async (
  *
  * NOTE: `export` は A/B の道具（`tools/birefnet-ab/` — 1 回の実行の logit に後処理の手順を全部
  * 当て、手順ごとにグラフを回し直さない）のため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ *
+ * MUST（呼び手）: パイプラインの外から呼ぶときは直列化鎖が付かない — 同じ `state` で前の呼び出しの
+ * 完了を待ってから次を呼び、使い終えたら Session（と、自前で取らせた GPU）の解放を自分で持つ
+ * （{@link loadBirefnetState} の MUST）。
  */
 export const matteLogits = async (
   state: BirefnetState,
@@ -514,6 +518,14 @@ const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<Alp
  *
  * NOTE: `export` は A/B の道具（`tools/birefnet-ab/`）がパイプラインと同じ門と同じグラフで logit を
  * 採るため（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ *
+ * MUST（呼び手）: 返る状態には {@link BirefnetPipeline} の直列化鎖と `dispose` が付かないので、
+ * その 2 つの役目は呼び手が持つ — {@link matteLogits} は前の呼び出しの完了を待ってから次を呼ぶ
+ * （1 つの Session を 2 本の `run` で共有しない）。使い終えたら `state.session.dispose()` を
+ * 自分で呼ぶ（in-flight の実行が終わった後に — flush-before-destroy）。`options.gpu` を省いて
+ * GPU をこの関数に取らせた場合（`state.ownsGpu`）は、Session を畳んだ後の `state.gpu.destroy()`
+ * も呼び手の持ち分になる（両方を必ず通す形は {@link BirefnetPipeline.dispose} と同じ
+ * {@link disposeSteps}）。
  */
 export const loadBirefnetState = async (
   ref: string | HubRepoRef | DistributionSource,
