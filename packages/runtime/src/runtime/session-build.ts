@@ -638,6 +638,36 @@ export type SessionState = {
 };
 
 /**
+ * 構築の入口で取る {@link SessionOptions} の写し（{@link buildSessionState} の冒頭の MUST）。
+ *
+ * MUST: 欄は 1 つずつ通常のプロパティ読みで写す（spread にしない）。spread は自前の列挙可能な欄
+ * しか写さないので、非列挙の欄や prototype 由来の欄が黙って落ち、写す前は拒否していた値が既定へ
+ * 化けて通る。型を全欄必須の写像にしてあるので、SessionOptions に欄を足すとここが型エラーになる
+ * （写し忘れた欄が黙って既定になる形を作らない）。
+ * submitPolicy は中身ごと写す（scheduler の構築は await の後）。sharedWeights の実体は借りる
+ * （読むのは await より前の同期区間）。
+ */
+const snapshotSessionOptions = (
+  requested: SessionOptions,
+): { readonly [K in keyof Required<SessionOptions>]: SessionOptions[K] } => ({
+  submitPolicy: requested.submitPolicy === undefined ? undefined : { ...requested.submitPolicy },
+  linearCompute: requested.linearCompute,
+  attentionCompute: requested.attentionCompute,
+  attentionScoreStorage: requested.attentionScoreStorage,
+  stateAttentionReduce: requested.stateAttentionReduce,
+  linearGemvReduce: requested.linearGemvReduce,
+  fuseRmsNormAdd: requested.fuseRmsNormAdd,
+  fuseLinearStaticQuantize: requested.fuseLinearStaticQuantize,
+  packedStaticQuantize: requested.packedStaticQuantize,
+  rmsNormReduce: requested.rmsNormReduce,
+  linearGemvRowsThreadTarget: requested.linearGemvRowsThreadTarget,
+  planBackingBudgetBytes: requested.planBackingBudgetBytes,
+  sharedWeights: requested.sharedWeights,
+  [I8A8_DOT]: requested[I8A8_DOT],
+  [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
+});
+
+/**
  * {@link "./executor.ts"} の `Session.build` の本体（構築トランザクションそのもの）。契約と
  * MUST はファサード側 `Session.build` の doc が正本。
  *
@@ -649,8 +679,13 @@ export const buildSessionState = async (
   graph: IrGraph,
   residency: ReadonlyMap<string, WeightResidency>,
   batches: AsyncIterable<WeightBatch>,
-  options: SessionOptions,
+  requested: SessionOptions,
 ): Promise<SessionState> => {
+  // MUST: options は入口で 1 回だけ写し、以降の検査・能力検査・state 作成は全て写しから読む。
+  // 構築は await を跨ぐ（カナリア・重みの供給）ので、呼び手の object を読み直すと、待つ間の
+  // 書き換えが入口の組合せ検査（ADR 0105 決定 1）を経ずに state へ届く（写し方は
+  // {@link snapshotSessionOptions}）。
+  const options: SessionOptions = snapshotSessionOptions(requested);
   // MUST: device の生存は入口と決着の直前（下の try の末尾）の 2 回、構築自身が見る。重みの
   // アップロードの完了待ちは消失を例外へ変えるが、重みを 1 本も上げないグラフ（initializer 無し・
   // 全て shared）はその待ちに一度も届かず、消失済み device に結び付いた Session が成功で返る。

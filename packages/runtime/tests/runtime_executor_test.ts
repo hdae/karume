@@ -14,6 +14,7 @@ import {
 } from "../src/gpu/device.ts";
 import { type GenerationRun, Session, type SessionOptions } from "../src/runtime/executor.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
+import { buildSessionState } from "../src/runtime/session-build.ts";
 import { SharedWeight, type WeightResidency } from "../src/runtime/weight-residency.ts";
 import { chainGraph, chainTensors } from "./helpers/chain-graph.ts";
 import { fakeDevice } from "./helpers/fake-gpu.ts";
@@ -350,4 +351,51 @@ Deno.test("構築の途中（重みの供給待ち）で device が失われた�
   gate.resolve();
   await assertRejects(() => building, GpuDeviceLostError, "Session の構築");
   assertEquals(borrowed(), 0, "落ちた構築が借用を返していない");
+});
+
+Deno.test("構築は入口時点の options で決まり、構築中の書き換えは検査を経ない state を作らない", async () => {
+  // 組合せの検査（ADR 0105 決定 1）は入口で 1 回だけ走る。構築は await を跨ぐので、待つ前に
+  // 呼び手が options を書き換えると、検査では拒否される組合せ（sequential + packedStaticQuantize）の
+  // state ができていた。submitPolicy は中身の書き換えも同じ形で効いていた。
+  const policy = {
+    timeBudgetMs: 100,
+    initialChunkSize: 4,
+    minChunkSize: 1,
+    maxChunkSize: 1024,
+  };
+  const options: { -readonly [K in keyof SessionOptions]: SessionOptions[K] } = {
+    linearGemvReduce: "sequential",
+    submitPolicy: policy,
+  };
+  async function* noShards(): AsyncGenerator<never> {}
+  const building = buildSessionState(fakeGpu(), emptyGraph(), new Map(), noShards(), options);
+  options.packedStaticQuantize = true;
+  options.fuseRmsNormAdd = true;
+  policy.initialChunkSize = 64;
+  const state = await building;
+  assertEquals(
+    state.packedStaticQuantize,
+    false,
+    "検査の後に書き換えた packedStaticQuantize が届いた",
+  );
+  assertEquals(state.fuseRmsNormAdd, false, "検査の後に書き換えた fuseRmsNormAdd が届いた");
+  assertEquals(
+    state.scheduler.stats.currentChunkSize,
+    4,
+    "検査の後に書き換えた submitPolicy の中身が届いた",
+  );
+});
+
+Deno.test("構築の入口の写しは非列挙・prototype 由来の欄も読み、写す前と同じ値を拒否する", async () => {
+  // 写しを spread で取ると自前の列挙可能な欄しか写らず、非列挙・継承の欄が黙って既定に化けて通る。
+  const nonEnumerable: SessionOptions = {};
+  Object.defineProperty(nonEnumerable, "stateAttentionReduce", { value: "bogus" });
+  const inherited: SessionOptions = Object.create({ stateAttentionReduce: "bogus" });
+  for (const options of [nonEnumerable, inherited]) {
+    await assertRejects(
+      () => buildSession(fakeGpu(), emptyGraph(), options),
+      ExecutionError,
+      "stateAttentionReduce",
+    );
+  }
 });
