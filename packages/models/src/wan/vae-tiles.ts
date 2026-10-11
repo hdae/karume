@@ -249,7 +249,11 @@ export const wanVaeLatentTile = (
   col: number,
 ): Float32Array<ArrayBuffer> => {
   const { rows, cols } = plan;
-  if (row < 0 || row >= rows.starts.length || col < 0 || col >= cols.starts.length) {
+  // 整数も見る — 大小比較だけでは 0.5 / NaN が通り、`starts[0.5]` が undefined になってゼロのタイルを黙って返す。
+  if (
+    !Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row >= rows.starts.length ||
+    col < 0 || col >= cols.starts.length
+  ) {
     throw new RangeError(
       `タイル (${row}, ${col}) が範囲外（${rows.starts.length}×${cols.starts.length}）`,
     );

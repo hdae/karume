@@ -247,6 +247,21 @@ Deno.test("latentTile: 平面ごとに正しい矩形を切り出す（軸とチ
   assertThrows(() => latentTile(latents, geometry, 3, 0), RangeError);
 });
 
+Deno.test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
+  // 大小比較だけの範囲検査は 0.5 と NaN を通し、`starts[0.5]` が undefined → 空の subarray でゼロの
+  // タイルを黙って返す。
+  const geometry = planVaeTiling([1, 2, 4, 4], [1, 2, 2, 2], [1, 1, 2, 2], 1);
+  const latents = new Float32Array(2 * 16).fill(1);
+  for (const [row, col] of [[0.5, 0], [0, 0.5], [Number.NaN, 0], [0, Number.NaN]]) {
+    assertThrows(
+      () => latentTile(latents, geometry, row, col),
+      RangeError,
+      "範囲外",
+      `(${row}, ${col})`,
+    );
+  }
+});
+
 Deno.test("assembleTiles: 1 枚（縮退）は decode 出力の素の写し（ビット同一）", () => {
   const geometry = planVaeTiling([1, 2, 8, 8], [1, 2, 8, 8], [1, 3, 8, 8], 2);
   assertEquals(tileCount(geometry), 1);

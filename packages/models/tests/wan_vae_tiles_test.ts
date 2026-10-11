@@ -180,6 +180,21 @@ Deno.test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り�
   assertThrows(() => wanVaeLatentTile(plan, latents.subarray(1), 0, 0), Error, "要素数");
 });
 
+Deno.test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
+  // 大小比較だけの範囲検査は 0.5 と NaN を通し、`starts[0.5]` が undefined → ゼロのタイルを黙って返す
+  // （`wanVaeLatentChunk` の chunk の添字と同じ穴）。
+  const plan = smallPlan(10, 12, 1);
+  const latents = new Float32Array(2 * 3 * 10 * 12).fill(1);
+  for (const [row, col] of [[0.5, 0], [0, 0.5], [Number.NaN, 0], [0, Number.NaN]]) {
+    assertThrows(
+      () => wanVaeLatentTile(plan, latents, row, col),
+      RangeError,
+      "範囲外",
+      `(${row}, ${col})`,
+    );
+  }
+});
+
 const bits = (values: Float32Array): Uint32Array =>
   new Uint32Array(values.buffer, values.byteOffset, values.length);
 
