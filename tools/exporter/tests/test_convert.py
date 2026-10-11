@@ -16,6 +16,7 @@ from torch.export import Dim
 from karume.container import Provenance
 from karume.convert import (
     Converter,
+    ModuleOrigin,
     UnsupportedAtenOpsError,
     _bitwise_equal,
     convert,
@@ -149,6 +150,112 @@ class TestUnsupportedOps:
 
         assert [key for key in err.value.ops if "getitem" in key], err.value.ops
         assert "getitem" in str(err.value)
+
+
+class _AtanActivation(nn.Module):
+    """Core ATen 内（`torch.Tag.core` 付き）だが IR 語彙に無い op を出す葉モジュール。"""
+
+    def forward(self, x):
+        return torch.atan(x)
+
+
+class _AtanBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.act = _AtanActivation()
+
+    def forward(self, x):
+        return self.act(x) + x
+
+
+class _StackedAtanBlocks(nn.Module):
+    """同じ未対応 op が入れ子のモジュールから複数回出る形（移植先の層の繰り返しの縮図）。"""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([_AtanBlock(), _AtanBlock()])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return torch.lgamma(x)
+
+
+def _qualified_name(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+class TestUnsupportedOpDiagnostics:
+    """未対応 op のエラーは、op ごとに移植の判断材料を運ぶ（P4-006）。
+
+    判断材料は 3 つ: Core ATen 帰属（語彙へ足すときの ADR 要否を決める唯一の軸 —
+    docs/op-vocabulary.md「op 追加の判定手順」）・由来モジュール（recipe 側で書き換える場所）・
+    出現数。エラー 1 回でこの 3 つが分かれば、op ごとに調べ直さずに済む。
+    """
+
+    def test_core_aten_op_carries_its_count_and_innermost_module(self, convert_module):
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(_StackedAtanBlocks(), (torch.randn(3, 4),))
+
+        report = err.value.reports["aten.atan.default"]
+        assert report.category == "core_aten"
+        assert report.count == 2
+        assert report.origins == (
+            ModuleOrigin(
+                module_type=_qualified_name(_AtanActivation),
+                first_path="blocks.0.act",
+                count=2,
+            ),
+        )
+        assert report.untracked == 0
+        message = str(err.value)
+        assert "aten.atan.default ×2 [Core ATen]" in message
+        assert "_AtanActivation ×2 (blocks.0.act)" in message
+
+    def test_op_outside_core_aten_is_told_apart_in_the_same_error(self, convert_module):
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(_StackedAtanBlocks(), (torch.randn(3, 4),))
+
+        assert set(err.value.reports) == {"aten.atan.default", "aten.lgamma.default"}
+        report = err.value.reports["aten.lgamma.default"]
+        assert report.category == "non_core_aten"
+        assert report.count == 1
+        assert report.origins == (
+            ModuleOrigin(module_type=_qualified_name(_StackedAtanBlocks), first_path="", count=1),
+        )
+        message = str(err.value)
+        assert "aten.lgamma.default ×1 [Core ATen 外]" in message
+        assert "_StackedAtanBlocks ×1 (<root>)" in message
+
+    def test_target_outside_aten_is_not_classified_as_core_aten(self, convert_module):
+        class Topk(nn.Module):
+            def forward(self, x):
+                values, indices = torch.topk(x, 2, dim=-1)
+                return values, indices.float()
+
+        with pytest.raises(UnsupportedAtenOpsError) as err:
+            convert_module(Topk(), (torch.randn(3, 5),))
+
+        getitem_reports = [
+            report for target, report in err.value.reports.items() if "getitem" in target
+        ]
+        assert [report.category for report in getitem_reports] == ["non_aten"]
+        assert "[aten 外]" in str(err.value)
+
+    def test_node_without_module_stack_is_counted_as_untracked(self):
+        """normalize が作るノードは `nn_module_stack` を持たない — 由来を捏造せず不明と数える。"""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        atan = graph.call_function(torch.ops.aten.atan.default, (x,))
+        graph.output(atan)
+
+        error = UnsupportedAtenOpsError([atan])
+
+        report = error.reports["aten.atan.default"]
+        assert report.origins == ()
+        assert report.untracked == 1
+        assert error.ops == {"aten.atan.default": [atan.name]}
+        assert "モジュール不明 ×1" in str(error)
 
 
 class TestConstantFolding:

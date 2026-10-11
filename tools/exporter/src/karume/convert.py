@@ -43,7 +43,8 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
 import torch
 from torch.export import ExportedProgram
@@ -318,15 +319,131 @@ ATTENTION_OP_PREFIX = "aten.scaled_dot_product_attention."
 PRESERVED_OP_PREFIXES_WITH_ATTENTION = (*PRESERVED_OP_PREFIXES, ATTENTION_OP_PREFIX)
 
 
-class UnsupportedAtenOpsError(NotImplementedError):
-    """IR 語彙に対応表を持たない aten op（全件列挙）。"""
+#: 未対応 op の Core ATen 帰属。語彙へ足すときの ADR 要否はこの 1 判定で決まる
+#: （docs/op-vocabulary.md「op 追加の判定手順」— 入場券 = `torch.Tag.core in op.tags`）。
+#: `non_aten` は aten 名前空間の外（`operator.getitem`・カスタム op 等）で、判定の対象外。
+AtenCategory = Literal["core_aten", "non_core_aten", "non_aten"]
 
-    def __init__(self, ops: dict[str, list[str]]) -> None:
-        self.ops = dict(ops)
-        listed = "; ".join(
-            f"{target} (nodes: {', '.join(names)})" for target, names in sorted(ops.items())
+_CATEGORY_LABELS: dict[AtenCategory, str] = {
+    "core_aten": "Core ATen",
+    "non_core_aten": "Core ATen 外",
+    "non_aten": "aten 外",
+}
+
+
+def aten_category(target: object) -> AtenCategory:
+    """FX ノードの target の Core ATen 帰属を、使っている torch 自身のタグから判定する。
+
+    MUST: 手書きの名簿を持たない — Core ATen の集合は torch の版で動くので、名簿は黙って
+    古くなる。判定の正本は torch のスキーマに付いた `Tag.core`。
+    """
+    if isinstance(target, torch._ops.OpOverload) and target.namespace == "aten":
+        return "core_aten" if torch.Tag.core in target.tags else "non_core_aten"
+    return "non_aten"
+
+
+@dataclass(frozen=True)
+class ModuleOrigin:
+    """未対応 op を出したモジュール（`nn_module_stack` の最内側のクラス単位）。
+
+    クラス単位でまとめるのは、同じ層を繰り返すモデル（ブロックの多段積み）でパスごとに
+    並べると行数が段数に比例して読めなくなるため。書き換える場所は「どのクラスか」で
+    決まり、パスは最初の 1 つで探し当てられる。
+    """
+
+    #: クラスの完全修飾名（`nn_module_stack` の値そのまま）。
+    module_type: str
+    #: そのクラスの最初のノードのモジュールパス（`""` = ルートの forward）。
+    first_path: str
+    count: int
+
+
+@dataclass(frozen=True)
+class UnsupportedOpReport:
+    """未対応 op 1 種ぶんの判断材料（Core ATen 帰属・由来モジュール・出現数）。"""
+
+    target: str
+    category: AtenCategory
+    nodes: tuple[str, ...]
+    #: 由来モジュール（最初に出た順）。
+    origins: tuple[ModuleOrigin, ...]
+    #: `nn_module_stack` を持たないノードの数（normalize が作ったノード等 — 由来は捏造しない）。
+    untracked: int
+
+    @property
+    def count(self) -> int:
+        return len(self.nodes)
+
+
+def _innermost_module(node: Node) -> tuple[str, str] | None:
+    """ノードを出した最内側のモジュールの (パス, クラス名)。スタックが無ければ None。"""
+    stack = node.meta.get("nn_module_stack")
+    if not stack:
+        return None
+    # torch.export はスタックを外側から内側の順の dict で積む（最後が最内側）。
+    path, module_type = list(stack.values())[-1]
+    return str(path), str(module_type)
+
+
+def _report(target: str, nodes: Sequence[Node]) -> UnsupportedOpReport:
+    origins: dict[str, ModuleOrigin] = {}
+    untracked = 0
+    for node in nodes:
+        innermost = _innermost_module(node)
+        if innermost is None:
+            untracked += 1
+            continue
+        path, module_type = innermost
+        seen = origins.get(module_type)
+        origins[module_type] = (
+            ModuleOrigin(module_type=module_type, first_path=path, count=1)
+            if seen is None
+            else replace(seen, count=seen.count + 1)
         )
-        super().__init__(f"未対応 aten op {len(ops)} 種: {listed}")
+    return UnsupportedOpReport(
+        target=target,
+        category=aten_category(nodes[0].target),
+        nodes=tuple(node.name for node in nodes),
+        origins=tuple(origins.values()),
+        untracked=untracked,
+    )
+
+
+def _describe(report: UnsupportedOpReport) -> str:
+    sources = [
+        f"{origin.module_type.rsplit('.', 1)[-1]} ×{origin.count} ({origin.first_path or '<root>'})"
+        for origin in report.origins
+    ]
+    if report.untracked:
+        sources.append(f"モジュール不明 ×{report.untracked}")
+    return (
+        f"  - {report.target} ×{report.count} [{_CATEGORY_LABELS[report.category]}]"
+        f" 由来: {', '.join(sources)} / nodes: {', '.join(report.nodes)}"
+    )
+
+
+class UnsupportedAtenOpsError(NotImplementedError):
+    """IR 語彙に対応表を持たない aten op（全件列挙）。
+
+    op ごとに Core ATen 帰属・由来モジュール・出現数を添える — 語彙へ足す（ADR の要否が
+    Core ATen 帰属で分かれる）か、recipe 側でモジュールを書き換えて避けるかを、エラー 1 回で
+    決められるようにするため。
+    """
+
+    def __init__(self, nodes: Sequence[Node]) -> None:
+        grouped: dict[str, list[Node]] = {}
+        for node in nodes:
+            grouped.setdefault(str(node.target), []).append(node)
+        self.reports = {target: _report(target, grouped[target]) for target in sorted(grouped)}
+        self.ops = {target: list(report.nodes) for target, report in self.reports.items()}
+        listed = "\n".join(_describe(report) for report in self.reports.values())
+        super().__init__(
+            f"未対応 aten op {len(self.reports)} 種:\n{listed}\n"
+            "分類: [Core ATen] = torch.Tag.core 付き（語彙へ足すなら台帳 NOTE のみ）"
+            " / [Core ATen 外] = 語彙へ足すなら ADR 必須（先に分解か recipe 側の書き換えを検討）"
+            " / [aten 外] = operator.getitem・カスタム op 等（Core ATen の判定の対象外）。"
+            "判定の順序と例外は docs/op-vocabulary.md「op 追加の判定手順」"
+        )
 
 
 def _carries_symbol(value: Any) -> bool:
@@ -973,7 +1090,7 @@ class Converter:
 
     def _assert_all_ops_supported(self, foldable: set[str]) -> None:
         """未対応 aten op を全件集めてから 1 度だけ落とす（部分近似はしない）。"""
-        missing: dict[str, list[str]] = {}
+        missing: list[Node] = []
         for node in self.gm.graph.nodes:
             if node.op != "call_function" or node.name in foldable:
                 continue
@@ -982,7 +1099,7 @@ class Converter:
             if not isinstance(node.meta.get("val"), torch.Tensor):
                 # SymInt/int を運ぶだけの shape 機構（値として使われれば arity 検査が落とす）
                 continue
-            missing.setdefault(str(node.target), []).append(node.name)
+            missing.append(node)
         if missing:
             raise UnsupportedAtenOpsError(missing)
 

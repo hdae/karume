@@ -636,6 +636,11 @@ conformance table is the correct one.
     Filling the missing side with ±the largest finite value would amount to "silently executing a
     form that has no representation as a different form", so it is not adopted.
 - Unsupported aten ops are **enumerated in full** before failing (never stopping at the first one).
+  Each op is listed with its occurrence count, whether it belongs to Core ATen (read from the
+  installed torch's `torch.Tag.core`, not from a hand-kept list), and the innermost modules it came
+  from (`nn_module_stack`, grouped by class with the first path). Core ATen membership decides
+  whether adding the op to the vocabulary needs an ADR; the module tells where a recipe-side rewrite
+  would go.
 
 ### Constant folding (Tmax folding and two-point evaluation — ADR 0010)
 
