@@ -19,12 +19,7 @@
 import { evalDim, parseDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { STORAGE_USAGE } from "../gpu/arena.ts";
-import {
-  describeDeviceLoss,
-  type GpuContext,
-  GpuDeviceLostError,
-  RUNTIME_INTERNAL,
-} from "../gpu/device.ts";
+import { assertDeviceUsable, type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { numel, stateWindow } from "../ops.ts";
@@ -61,24 +56,6 @@ export const STATE_ELEMENT_BYTES: number = 4;
  * 無いまま分裂する（`writeBuffer` は値を検査しない）。
  */
 const MAX_LOGICAL_LENGTH = 0xffffffff;
-
-/**
- * device が使える状態かの同期判定（ADR 0066 決定 7 の遮断面 — 判定はここ 1 箇所）。
- *
- * MUST: `lost` だけでなく `destroyRequested` も見る。`destroy()` はフラグを同期に立てるのに
- * `device.lost` の reaction が走るのは以後のタスクなので、`lost` だけだとその窓で操作が通り、
- * 特に `writeLengths` が破棄済みバッファへの**沈黙 no-op**（警告すら出ない）になる。
- * MUST: 型は {@link GpuDeviceLostError}（lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、
- * 生成は失われる）。意図的な破棄と予期しない消失で復旧手段は変わらないので型は分けない。
- */
-const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
-  if (gpu.destroyRequested || gpu.lost !== undefined) {
-    throw new GpuDeviceLostError(
-      `${where}: device が失われた（生成は失われる — device を取り直して作り直すこと）` +
-        describeDeviceLoss(gpu.lost),
-    );
-  }
-};
 
 /** state スロット 1 本の物理実体（束縛解決済み — 実行中に再確保しない = 静的物理格納）。 */
 export type StateSlotBacking = {

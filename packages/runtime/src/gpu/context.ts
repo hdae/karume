@@ -173,18 +173,20 @@ type GpuContextInternals = {
 
 /**
  * device が使える状態かの同期判定（常駐テンソル経路の受付門 — ADR 0054）。Session の構築
- * （`runtime/session-build.ts`）も同じ判定を借りる（runtime の内部向け — mod.ts には出さない）。
+ * （`runtime/session-build.ts`）・run / enqueue の受付（`runtime/executor.ts`）・
+ * GenerationContext の遮断面（`runtime/generation-context.ts` — ADR 0066 決定 7）も同じ判定を
+ * 借りる（判定はここ 1 箇所・runtime の内部向け — mod.ts には出さない）。
  *
  * MUST: `lost` だけでなく `destroyRequested` も見る。`destroy()` はフラグを同期に立てるのに
  * `device.lost` の reaction が走るのは以後のタスクなので、`lost` だけだとその窓で操作が通る。
- * 通したときの現れ方が沈黙なのがここを置く理由 — {@link ResidentTensor.write} は破棄済み
- * バッファへの**沈黙 no-op**（警告すら出ない）になり、{@link GpuContext.createResident} は
+ * 通したときの現れ方が沈黙なのがここを置く理由 — {@link ResidentTensor.write} と
+ * GenerationContext の論理長 uniform の書き込みは破棄済みバッファへの**沈黙 no-op**（警告すら
+ * 出ない）になり、{@link GpuContext.createResident} は
  * 消失後の `popErrorScope` が null で resolve する（`docs/research/2026-08-16-device-lost-wait-settlement.md`）
- * ため**無効なバッファを掴んだまま成功として返る**。どちらも loud になるのは次のフェンスで、
+ * ため**無効なバッファを掴んだまま成功として返る**。いずれも loud になるのは次のフェンスで、
  * その間の診断は誤導的になる。
- * MUST: 型は {@link GpuDeviceLostError}（`runtime/generation-context.ts` の `assertDeviceUsable`
- * と同じ規律 — lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、意図的な破棄と予期しない
- * 消失で復旧手段は変わらないので型は分けない）。
+ * MUST: 型は {@link GpuDeviceLostError}（lost device 由来の GPU 資源は WebGPU 仕様上回復不能で、
+ * 意図的な破棄と予期しない消失で復旧手段は変わらないので型は分けない）。
  */
 export const assertDeviceUsable = (gpu: GpuContext, where: string): void => {
   if (gpu.destroyRequested || gpu.lost !== undefined) {
