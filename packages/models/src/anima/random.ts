@@ -23,8 +23,13 @@ const MASK_64 = (1n << 64n) - 1n;
 /** [0,1) の一様乱数を作るときの分母（53bit 仮数ぶん）。 */
 const DENOMINATOR = 1n << 53n;
 
-/** splitmix64 の 1 ステップ。 */
-const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bigint } => {
+/**
+ * splitmix64 の 1 ステップ。
+ *
+ * NOTE: `export` は seed と列の対応を環境に依存しない整数部で固定するテストのため（`mod.ts` /
+ * サブパス面には出さない — ADR 0008）。
+ */
+export const nextUint64 = (state: bigint): { readonly state: bigint; readonly value: bigint } => {
   const next = (state + GOLDEN_GAMMA) & MASK_64;
   let z = next;
   z = ((z ^ (z >> 30n)) * MIX_1) & MASK_64;
