@@ -6,7 +6,8 @@
  * 無いと、平面 0 の端点が平面 1 の先頭を読む（例外の出ない誤値）。torch の
  * `guard_index_and_lambda` と同じく添字を `in − 1` に留め、端点は入力の末尾になる。
  *
- * 入力は 2 平面 × 16,777,220 要素（約 134 MB）。2^24 未満の形はこの上限を一度も発動しない。
+ * 入力は 2 平面 × 16,777,220 要素（約 134 MB）。この上限は 1 軸がおよそ 2^23 を超える形でだけ
+ * 発動する（in_w 8,650,802・out_w 34 でも末尾の源座標が in_w に届く）。
  */
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
