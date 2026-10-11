@@ -108,7 +108,11 @@ const families: readonly Family[] = [
     name: "BirefnetPipeline",
     build: async () =>
       await BirefnetPipeline.fromAssets({
-        manifest: manifestOf("birefnet/1", "matte", { ...IMAGE_CONFIG, interpolation: "bilinear" }),
+        manifest: manifestOf("birefnet/2", "matte", {
+          ...IMAGE_CONFIG,
+          interpolation: "bilinear",
+          postprocess: "u8-pil-bicubic",
+        }),
         assets: await containerOf("matte", imageGraph("logits", [1, 1, SIZE, SIZE])),
       }),
   },

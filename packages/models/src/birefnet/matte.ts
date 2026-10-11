@@ -21,16 +21,18 @@
  * 選択は写さない（ADR 0125 決定 1）。写すのは系列ごとの補間のカーネルと段の順序で、写さないのは
  * 切り捨て（全手順とも四捨五入 = `Math.round(255·α)`・0.5 は切り上げ）と HR の半精度。
  *
- * - `float-bilinear`（Lucida の上流の意図 = **今の経路そのもの**・パイプラインの既定）: σ を f64 で
- *   計算して f32 に格納 → `resizePlaneF32`（antialias bilinear・f64・パスの間で丸めない）→
- *   `Math.round(255·α)`。
+ * - `float-bilinear`（Lucida の上流の意図 = 手順を宣言で選ぶ前のパイプラインの経路そのもの）:
+ *   σ を f64 で計算して f32 に格納 → `resizePlaneF32`（antialias bilinear・f64・パスの間で丸めない）
+ *   → `Math.round(255·α)`。
  * - `u8-pil-bicubic`（HR の上流の意図）: σ を f64 で計算 → `Math.round(255σ)` で 8bit の平面 →
  *   Pillow 12.3.0 の 8bit・1 バンドの BICUBIC（`src/image/pillow-resample.ts` — 22 bit の固定小数点・
  *   中間 uint8・寸法が同じ軸はパスを飛ばす）。
  *
- * どちらの系列の配布形にどちらの手順を当てるかは、HR で上流と今の経路を目視で比べる A/B（裁定 4 —
- * R6B-001）の結果で決める。それまでパイプラインは今の経路（`float-bilinear`）だけを使い、手順の
- * 引数はこのモジュールの内部の口に留める（`mod.ts` / サブパス面には出さない — ADR 0008）。
+ * どの手順を当てるかは配布形の `pipelineConfig.postprocess` が宣言する（`./config.ts` — 組み立て段が
+ * checkpoint から決める: HR → `u8-pil-bicubic`・Lucida → `float-bilinear`）。HR の 2 手順を盲検で
+ * 比べた A/B は 8 対とも「見分けがつかない」で、事前の規則どおり上流の手順を採った（ADR 0125 の
+ * 結果の節）。手順の引数は宣言の受け口で、アプリが選ぶ公開オプションではない（`mod.ts` / サブパス面
+ * には出さない — ADR 0008）。
  */
 
 import { resizePlaneF32 } from "../image/preprocess.ts";
@@ -82,7 +84,7 @@ const sigmoidAt = (
   return 1 / (1 + Math.exp(-raw));
 };
 
-/** `float-bilinear`（モジュール doc — 今の経路そのもの）。 */
+/** `float-bilinear`（モジュール doc — Lucida の上流の意図）。 */
 const floatBilinear: ProcedureBody = (logits, sourceWidth, sourceHeight, width, height) => {
   const alpha = new Float32Array(logits.length);
   for (let index = 0; index < logits.length; index += 1) {
@@ -119,8 +121,10 @@ const PROCEDURES: Readonly<Record<MatteProcedure, ProcedureBody>> = {
 /**
  * グラフの出す logit の地図 → 入力と同じ寸法の 8bit α（`pipeline.ts` のモジュール doc の段 4）。
  *
- * `procedure` を省くと今の経路（`float-bilinear`）。8bit へ落とすのは**この配布形の出力形式の
- * 決定**で、量子化はどの手順も四捨五入（ADR 0125 — 上流はどちらの系列も切り捨て）。
+ * `procedure` は配布形の宣言（`pipelineConfig.postprocess`）をそのまま渡す。既定を持たないのは、
+ * 宣言を渡し忘れた呼び手が黙って片方の系列の手順で走らないようにするため。8bit へ落とすのは
+ * **この配布形の出力形式の決定**で、量子化はどの手順も四捨五入（ADR 0125 — 上流はどちらの系列も
+ * 切り捨て）。
  *
  * NOTE: `export` はパイプライン・テスト・A/B の道具（`tools/birefnet-ab/`）のため（`mod.ts` /
  * サブパス面には出さない — ADR 0008）。
@@ -131,7 +135,7 @@ export const matteFromLogits = (
   sourceHeight: number,
   width: number,
   height: number,
-  procedure: MatteProcedure = "float-bilinear",
+  procedure: MatteProcedure,
 ): AlphaMatte => {
   // MUST: `Object.hasOwn` で引く — JS の呼び手が `"toString"` 等を渡すと Object.prototype の
   // メンバを手順として受けてしまう。名前の綴り違いなので素の `Error`（ADR 0107 決定 3）。

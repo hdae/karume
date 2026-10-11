@@ -11,7 +11,7 @@
 //   `255α`）を四捨五入した最終 α と一致するか、golden の `255α` が `k + 0.5` から ε（fixture の
 //   `lucida.epsilon`）以内のときだけ 1 段ずれてよい（torch の f32 の座標と重みの丸め — ADR 0125）。
 //
-// 加えて fixture の作り方に依らない仕様（量子化は四捨五入・既定は今の経路・未知の手順は落とす・
+// 加えて fixture の作り方に依らない仕様（量子化は四捨五入・手順の既定は無い・未知の手順は落とす・
 // 非有限の logit は画素座標つきで落ちる）を直接縛る。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -180,7 +180,7 @@ describe("u8-pil-bicubic（HR の上流の意図 — Pillow の 8bit の BICUBIC
   });
 });
 
-describe("float-bilinear（Lucida の上流の意図 = 今の経路）", () => {
+describe("float-bilinear（Lucida の上流の意図）", () => {
   it("fixture の全ケースが上流の関数の最終 α と一致し、ずれは ε の内の 1 段だけ", () => {
     const { epsilon } = fixture;
     const failures: string[] = [];
@@ -204,17 +204,6 @@ describe("float-bilinear（Lucida の上流の意図 = 今の経路）", () => {
       }
     }
     assertEquals(failures.slice(0, 8), [], `ε ${epsilon} の外の不一致が ${failures.length} 標本`);
-  });
-
-  it("手順を省くと今の経路（パイプラインの既定は float-bilinear のまま）", () => {
-    const row = fixture.cases.find((entry) => entry.outWidth > 1 && entry.outHeight > 1);
-    assert(row !== undefined, "2 次元のケースが無い");
-    const input = inputOf(row);
-    const logits = logitsOf(input);
-    assertEquals(
-      [...matteFromLogits(logits, input.width, input.height, row.outWidth, row.outHeight).data],
-      [...run(row, "float-bilinear")],
-    );
   });
 });
 
@@ -271,6 +260,16 @@ describe("手順の共通の約束", () => {
         "後処理の手順",
       );
     }
+  });
+
+  it("matteFromLogits は手順の既定を持たない（宣言を渡さない呼び手は落ちる）", () => {
+    // 手順の引数は配布形の宣言（`pipelineConfig.postprocess`）の受け口。既定があると、宣言を渡し
+    // 忘れた呼び手が片方の系列の手順で黙って走る。型の外（JS の呼び手）で引数を省いた形を模す。
+    assertThrows(
+      () => Reflect.apply(matteFromLogits, undefined, [new Float32Array(4), 2, 2, 2, 2]),
+      Error,
+      "後処理の手順 undefined は未対応",
+    );
   });
 
   it("非有限の logit はどの手順でも画素座標つきで落ちる（NaN が透明画素に化けない）", () => {

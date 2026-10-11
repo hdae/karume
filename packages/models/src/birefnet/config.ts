@@ -26,6 +26,16 @@
  * いるので、受理集合を広げるかは「その派生の上流がどの補間で学習されたか」の判断であって
  * 実装の有無ではない。
  *
+ * ## MUST: 後処理の手順も**宣言**として持ち、閉じた集合の外は fail loudly
+ *
+ * logit → 8bit の α の後処理（`./matte.ts` の {@link MatteProcedure}）は系列ごとに上流が違う
+ * （HR = 8bit へ丸めてから Pillow の BICUBIC・Lucida = 浮動小数のまま antialias bilinear → 8bit —
+ * ADR 0125）。正規化定数と同じ理由で「系列 → 手順」の表を TS に置かない（表に無い第三者の
+ * fine-tune で沈黙の取り違えになる）。組み立て段（`distribution.py`）が checkpoint から決めて
+ * `postprocess` に書き、ここは受理するだけ。欄は必須で既定を持たない — 書き忘れた配布形が、黙って
+ * 片方の系列の手順で走らないようにするため。必須の欄の追加は旧い配布形を読めなくするので、
+ * pipeline の major を 2 に上げた（ADR 0038 の繰り上げ規則）。
+ *
  * NOTE: rescale の除数（255）はここに無い。`normalizeToNchw` の入口が 8bit の画素列
  * （`Rgb8Image`）で閉じており、実行時に選べない数を宣言だけ持たせても正本が 2 つ増える
  * （`src/siglip2/config.ts` と同じ判断）。
@@ -47,10 +57,16 @@ import {
   readOnly,
 } from "../config/readers.ts";
 import { normalizationOverflow } from "../image/preprocess.ts";
+import { MATTE_PROCEDURES, type MatteProcedure } from "./matte.ts";
 
-/** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
+/**
+ * `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。
+ *
+ * major 2 = `postprocess` の欄が必須になった形（モジュール doc — ADR 0125）。major 1 の配布形は
+ * 手順を宣言していないので読まない。
+ */
 export const BIREFNET_PIPELINE_NAME = "birefnet";
-export const BIREFNET_PIPELINE_MAJOR = 1;
+export const BIREFNET_PIPELINE_MAJOR = 2;
 
 /**
  * BiRefNet 系の**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
@@ -98,6 +114,7 @@ const ROOT_KEYS: readonly string[] = [
   "imageMean",
   "imageStd",
   "interpolation",
+  "postprocess",
 ];
 
 /** この実装が受理する唯一の補間（モジュール doc の MUST）。 */
@@ -115,6 +132,29 @@ export type BirefnetPipelineConfig = {
   readonly imageStd: BirefnetChannels;
   /** ADR 0038 §1 の流儀で**宣言**として持つ（分岐用ではない — モジュール doc の MUST）。 */
   readonly interpolation: typeof INTERPOLATION;
+  /** logit → 8bit の α の手順（モジュール doc の MUST — 系列ごとの上流の手順を配布形が宣言する）。 */
+  readonly postprocess: MatteProcedure;
+};
+
+/**
+ * `postprocess` を読む（閉じた集合 {@link MATTE_PROCEDURES} の外は落とす）。
+ *
+ * 受理集合の配列と `===` で突き合わせる（表引きをしないので、`"toString"` のような
+ * Object.prototype の綴りを手順と取り違える余地が無い）。
+ */
+const readPostprocess = (raw: Readonly<Record<string, unknown>>, where: string): MatteProcedure => {
+  const key = "postprocess";
+  if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
+  const value = raw[key];
+  const procedure = MATTE_PROCEDURES.find((name) => name === value);
+  if (procedure === undefined) {
+    throw new Error(
+      `${where}.${key}: 未知の後処理の手順 ${JSON.stringify(value)}（期待 ${
+        MATTE_PROCEDURES.map((name) => `'${name}'`).join(" / ")
+      }）`,
+    );
+  }
+  return procedure;
 };
 
 /** manifest の `pipelineConfig`（hub が素通しした生の値）を検査して読む。 */
@@ -145,6 +185,7 @@ export const parseBirefnetPipelineConfig = (
       "上流 handler.py の torchvision Resize は既定の補間（= bilinear）で、" +
         "bicubic で通すと resize の値が最大 47/255 ずれる",
     ),
+    postprocess: readPostprocess(raw, where),
   };
   // 個々の欄が有限でも、組で正規化後の値が f32 で溢れる配布形は資産の不正として構築時に落とす
   // （`normalizeToNchw` まで待つと、生成のたびに入力起因の型で落ちる）。

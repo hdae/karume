@@ -10,11 +10,10 @@
  *
  * 段 4 で sigmoid を resize より先に掛けるのは、両系列の上流（同梱 `handler.py` と Lucida の
  * モデルカードの利用例）がどちらも `preds.sigmoid()` してから元の解像度へ戻すため（logit のまま
- * 補間すると飽和域の外挿が効いて境界の α が変わる）。段 4 の今の経路（`float-bilinear`）は、
- * 補間（antialias bilinear）と段の順序が Lucida の上流と同じで、量子化（四捨五入）だけが両系列の
- * 上流（切り捨て）と違う。HR の上流とは補間法（Pillow の BICUBIC）と量子化の位置（resize の前）も
- * 違い、A/B で比べている最中なのは HR だけ（ADR 0125 — 両系列の上流の実際の手順は `./matte.ts` の
- * モジュール doc）。
+ * 補間すると飽和域の外挿が効いて境界の α が変わる）。段 4 の補間と段の順序は系列ごとの上流に
+ * 合わせ、どちらを当てるかは配布形の `pipelineConfig.postprocess` の宣言で決まる（HR =
+ * `u8-pil-bicubic`・Lucida = `float-bilinear`。量子化はどちらも四捨五入で、上流の切り捨ては写さない —
+ * ADR 0125。両系列の上流の実際の手順は `./matte.ts` のモジュール doc）。
  *
  * ## MUST: Session は構築時に 1 本だけ張り、`dispose` まで持つ（Anima / Irodori と非対称）
  *
@@ -502,7 +501,12 @@ export const matteLogits = async (
   return logits;
 };
 
-/** 画像 1 枚を通す（前処理 → `matte` 1 回 → sigmoid → 元解像度の 8bit α）。 */
+/**
+ * 画像 1 枚を通す（前処理 → `matte` 1 回 → sigmoid → 元解像度の 8bit α）。
+ *
+ * MUST: 後処理の手順は配布形の宣言（`config.postprocess`）から渡す — 前処理の補間と同じく、宣言と
+ * 実効値を 1 本にする（`preprocessPixelValues` の MUST と同じ理由）。
+ */
 const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<AlphaMatte> =>
   matteFromLogits(
     await matteLogits(state, image),
@@ -510,6 +514,7 @@ const segmentImage = async (state: BirefnetState, image: Rgb8Image): Promise<Alp
     state.config.imageHeight,
     image.width,
     image.height,
+    state.config.postprocess,
   );
 
 /**

@@ -129,9 +129,10 @@ describe("画像 3 家族の構築前検査", () => {
       await assertRejects(
         async () =>
           await BirefnetPipeline.fromAssets({
-            manifest: manifestOf("birefnet/1", "matte", {
+            manifest: manifestOf("birefnet/2", "matte", {
               ...IMAGE_CONFIG,
               interpolation: "bilinear",
+              postprocess: "u8-pil-bicubic",
             }),
             assets: await assetsOf("matte", declaration("i32", "logits", [1, 1, SIZE, SIZE])),
           }),

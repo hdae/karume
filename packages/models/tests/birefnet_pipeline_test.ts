@@ -25,13 +25,13 @@
 //    引数の位置へ届いているか」だけ。非正方のケースを使うのは、`imageWidth` / `imageHeight` の
 //    取り違えが正方形では**原理的に検出できない**ため。
 //
-// ④ 後処理（`matteFromLogits` — `src/birefnet/matte.ts`）の**段の順序と量子化**。sigmoid を
-//    resize より先に掛けるのは両系列の上流と同じ。既定の経路（`float-bilinear`）は補間と段の
-//    順序が Lucida の上流と同じで、量子化（四捨五入）は両系列の上流（切り捨て）と違う。HR とは
-//    補間法と量子化の位置も違い、A/B 中なのは HR だけ（ADR 0125 — 両系列の上流の実際の手順は
-//    `matte.ts` のモジュール doc）。入れ替えても shape も値域も
-//    合ったまま通る（順序違いは α が数十の差でずれるだけ）。順序が入れ替わったら落ちる非対称な
-//    ケースを置く。
+// ④ 後処理（`matteFromLogits` — `src/birefnet/matte.ts`）の**段の順序と量子化**と、`segment` が
+//    配布形の宣言（`pipelineConfig.postprocess`）どおりの手順を当てること。sigmoid を resize より
+//    先に掛けるのは両系列の上流と同じで、2 つの手順（HR = `u8-pil-bicubic`・Lucida =
+//    `float-bilinear`）のどちらにも掛かる。量子化（四捨五入）は両系列の上流（切り捨て）と違う
+//    （ADR 0125 — 両系列の上流の実際の手順は `matte.ts` のモジュール doc）。入れ替えても shape も
+//    値域も合ったまま通る（順序違いは α が数十の差でずれるだけ）。順序が入れ替わったら落ちる
+//    非対称なケースを置く。
 
 import {
   assert,
@@ -49,7 +49,7 @@ import {
   BirefnetPipeline,
   preprocessPixelValues,
 } from "../src/birefnet/pipeline.ts";
-import { matteFromLogits, type MatteProcedure } from "../src/birefnet/matte.ts";
+import { MATTE_PROCEDURES, matteFromLogits, type MatteProcedure } from "../src/birefnet/matte.ts";
 import { resizePlaneF32, type Rgb8Image } from "../src/image/preprocess.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
@@ -64,13 +64,14 @@ const COMPONENT = partAssets(
   }),
 );
 
-/** `models/karume-birefnet-hr/karume.json` の `pipelineConfig` 実物（5 欄）。 */
+/** `models/karume-birefnet-hr/karume.json` の `pipelineConfig`（`birefnet/2` で組み直した形・6 欄）。 */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   imageWidth: 1024,
   imageHeight: 1024,
   imageMean: [0.485, 0.456, 0.406],
   imageStd: [0.229, 0.224, 0.225],
   interpolation: "bilinear",
+  postprocess: "u8-pil-bicubic",
 };
 
 /** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["hr"]` の中身を上書きする。 */
@@ -81,7 +82,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
     defaultModel: "hr",
     models: {
       hr: {
-        pipeline: "birefnet/1",
+        pipeline: "birefnet/2",
         weights: { matte: { f32: declaredContainer("hr/matte/model.f32") } },
         // 実行に要るのはグラフ 1 本だけ（tokenizer も表も無い）。
         assets: {},
@@ -115,11 +116,24 @@ Deno.test("fromAssets: pipeline の契約名が birefnet でない manifest を�
 
 Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
-  const manifest = parseManifest(manifestText({ pipeline: "birefnet/2" }));
+  const manifest = parseManifest(manifestText({ pipeline: "birefnet/3" }));
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
     Error,
     "major に未対応",
+  );
+});
+
+Deno.test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しない配布形）も落とす", async () => {
+  // major 1 の配布形は `postprocess` を持たない。major の門が無いと pipelineConfig の欠落で落ちる
+  // だけになり、「配布形を組み直せ」という直し方が文言から読めない。
+  const legacy: Record<string, unknown> = { ...PIPELINE_CONFIG };
+  delete legacy.postprocess;
+  const manifest = parseManifest(manifestText({ pipeline: "birefnet/1", pipelineConfig: legacy }));
+  await assertRejects(
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    Error,
+    "pipeline 'birefnet/1' の major に未対応（この実装が読めるのは birefnet/2）",
   );
 });
 
@@ -155,8 +169,19 @@ Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理
   );
 });
 
+Deno.test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築時に落ちる", async () => {
+  const missing: Record<string, unknown> = { ...PIPELINE_CONFIG };
+  delete missing.postprocess;
+  const manifest = parseManifest(manifestText({ pipelineConfig: missing }));
+  await assertRejects(
+    () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
+    Error,
+    "pipelineConfig.postprocess: 無い",
+  );
+});
+
 Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 上の 6 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
+  // 上の 8 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
   await assertRejects(
@@ -297,6 +322,8 @@ const configFor = (entry: ParityCase, swapped = false) =>
     imageMean: fixture.constants.imageMean,
     imageStd: fixture.constants.imageStd,
     interpolation: "bilinear",
+    // 前処理は後処理の宣言を読まない（欄は必須なので実物の HR の値を置く）。
+    postprocess: "u8-pil-bicubic",
   });
 
 Deno.test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
@@ -327,29 +354,45 @@ Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別
 /** 8bit へ落ちたあとの 1 LSB。 */
 const ALPHA_LSB = 1;
 
-Deno.test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化する", () => {
+Deno.test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化する（両手順）", () => {
   // logit 0 → 0.5 → 127.5 → 最近傍へ丸めて 128（切り捨てだと 127 になる — 両系列の上流の
   // 切り捨て〈HR は ToPILImage・Lucida は `astype("uint8")`〉ではなく丸めを採る決定が値に出る点）。
-  const matte = matteFromLogits(Float32Array.from([0, 40, -40, 1]), 2, 2, 2, 2);
-  assertEquals(matte.width, 2);
-  assertEquals(matte.height, 2);
-  assertEquals([...matte.data], [128, 255, 0, Math.round((1 / (1 + Math.E ** -1)) * 255)]);
+  // `u8-pil-bicubic` は寸法が同じ軸の resample を飛ばすので、恒等では両手順とも同じ値になる。
+  for (const procedure of MATTE_PROCEDURES) {
+    const matte = matteFromLogits(Float32Array.from([0, 40, -40, 1]), 2, 2, 2, 2, procedure);
+    assertEquals(matte.width, 2);
+    assertEquals(matte.height, 2);
+    assertEquals(
+      [...matte.data],
+      [128, 255, 0, Math.round((1 / (1 + Math.E ** -1)) * 255)],
+      procedure,
+    );
+  }
 });
 
-Deno.test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない）", () => {
-  const matte = matteFromLogits(new Float32Array(4 * 4), 4, 4, 7, 3);
-  assertEquals(matte.width, 7);
-  assertEquals(matte.height, 3);
-  assertEquals(matte.data.length, 21);
+Deno.test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない・両手順）", () => {
+  for (const procedure of MATTE_PROCEDURES) {
+    const matte = matteFromLogits(new Float32Array(4 * 4), 4, 4, 7, 3, procedure);
+    assertEquals(matte.width, 7, procedure);
+    assertEquals(matte.height, 3, procedure);
+    assertEquals(matte.data.length, 21, procedure);
+  }
 });
 
 Deno.test("後処理: sigmoid は resize の**前**に掛かる（順序を入れ替えると落ちる）", () => {
-  // 2×1 → 1×1 の縮小は台が [0.5, 0.5] に縮むので、resize は 2 点の平均そのもの。
-  //   sigmoid 先: (σ(0) + σ(10)) / 2 = (0.5 + 0.9999546) / 2 = 0.7499773 → 191
-  //   resize 先 : σ((0 + 10) / 2) = σ(5) = 0.9933 → 253
-  // 62 も離れるので、順序を取り違えたまま「それらしい」マットが出ることはない。
-  const matte = matteFromLogits(Float32Array.from([0, 10]), 2, 1, 1, 1);
-  assertEquals([...matte.data], [191]);
+  // 2×1 → 1×1 の縮小はどちらのカーネルも 2 点に等しい重みが掛かるので、resize は 2 点の平均そのもの。
+  //   sigmoid 先（float-bilinear）: (σ(0) + σ(10)) / 2 = (0.5 + 0.9999546) / 2 = 0.7499773 → 191
+  //   sigmoid 先（u8-pil-bicubic）: 8bit で (128 + 255) / 2 = 191.5 → 192（固定小数点の四捨五入）
+  //   resize 先                 : σ((0 + 10) / 2) = σ(5) = 0.9933 → 253
+  // 60 以上も離れるので、順序を取り違えたまま「それらしい」マットが出ることはない。
+  const expected: Readonly<Record<MatteProcedure, number>> = {
+    "float-bilinear": 191,
+    "u8-pil-bicubic": 192,
+  };
+  for (const procedure of MATTE_PROCEDURES) {
+    const matte = matteFromLogits(Float32Array.from([0, 10]), 2, 1, 1, 1, procedure);
+    assertEquals([...matte.data], [expected[procedure]], procedure);
+  }
 });
 
 Deno.test("resizePlaneF32: 同寸法なら値をそのまま通す（丸めも縮退も挟まない）", () => {
@@ -399,39 +442,49 @@ Deno.test("resizePlaneF32: 長さの食い違いは落とす（黙って途中�
 
 Deno.test("後処理: α は 8bit の全域を使う（飽和側が 1 LSB で潰れていない）", () => {
   // 恒真化の防止 — 上のケースが全て 128 付近でも通ってしまう形を避ける。
-  const matte = matteFromLogits(Float32Array.from([-20, -2, 2, 20]), 4, 1, 4, 1);
-  assertEquals(matte.data[0], 0);
-  assertEquals(matte.data[3], 255);
-  assert(matte.data[1] > 0 && matte.data[1] < 128 - ALPHA_LSB, "σ(−2) が中間に来ていない");
-  assert(matte.data[2] > 128 + ALPHA_LSB && matte.data[2] < 255, "σ(2) が中間に来ていない");
+  for (const procedure of MATTE_PROCEDURES) {
+    const matte = matteFromLogits(Float32Array.from([-20, -2, 2, 20]), 4, 1, 4, 1, procedure);
+    assertEquals(matte.data[0], 0, procedure);
+    assertEquals(matte.data[3], 255, procedure);
+    assert(
+      matte.data[1] > 0 && matte.data[1] < 128 - ALPHA_LSB,
+      `σ(−2) が中間に来ていない（${procedure}）`,
+    );
+    assert(
+      matte.data[2] > 128 + ALPHA_LSB && matte.data[2] < 255,
+      `σ(2) が中間に来ていない（${procedure}）`,
+    );
+  }
 });
 
 Deno.test("後処理: 非有限の logit は画素座標つきで落ちる（NaN が透明画素に化けない）", () => {
   // `Uint8Array` 代入は NaN を 0 = 完全に透明な画素へ黙って丸めるので、検査が無いと
   // 「正常に見えるマット」が返る。±Inf は σ を通れば 0/1 に落ちるが、そこまで来ている時点で
-  // グラフが壊れているので同じく落とす（他 3 家族の量子化出口と同じ綴り）。
-  assertThrows(
-    () => matteFromLogits(Float32Array.of(0, NaN, 0, 0), 2, 2, 2, 2),
-    Error,
-    "マットの logit (x=1, y=0) が非有限値",
-  );
-  assertThrows(
-    () => matteFromLogits(Float32Array.of(0, 0, 0, Infinity), 2, 2, 2, 2),
-    Error,
-    "マットの logit (x=1, y=1) が非有限値",
-  );
-  assertThrows(
-    () => matteFromLogits(Float32Array.of(-Infinity, 0, 0, 0), 2, 2, 2, 2),
-    Error,
-    "マットの logit (x=0, y=0) が非有限値",
-  );
+  // グラフが壊れているので同じく落とす（他 3 家族の量子化出口と同じ綴り）。両手順とも同じ検査点を通る。
+  for (const procedure of MATTE_PROCEDURES) {
+    assertThrows(
+      () => matteFromLogits(Float32Array.of(0, NaN, 0, 0), 2, 2, 2, 2, procedure),
+      Error,
+      "マットの logit (x=1, y=0) が非有限値",
+    );
+    assertThrows(
+      () => matteFromLogits(Float32Array.of(0, 0, 0, Infinity), 2, 2, 2, 2, procedure),
+      Error,
+      "マットの logit (x=1, y=1) が非有限値",
+    );
+    assertThrows(
+      () => matteFromLogits(Float32Array.of(-Infinity, 0, 0, 0), 2, 2, 2, 2, procedure),
+      Error,
+      "マットの logit (x=0, y=0) が非有限値",
+    );
+  }
 });
 
 // ---- segment の後処理の結線（Session を偽物にして GPU なしで通す）--------------------
 //
-// `segment` が logit に当てる手順が既定の `float-bilinear` であることを縛る（ADR 0125 決定 3 —
-// A/B の結果が出るまで今の経路を変えない）。`matteFromLogits` の既定だけを見るテストでは、
-// パイプラインが別の手順を明示して呼ぶ形へ変わっても緑のまま通る。Session も GPU も偽物で足りる
+// `segment` が logit に当てる手順が配布形の宣言（`pipelineConfig.postprocess`）どおりであることを
+// 縛る（ADR 0125 — 系列ごとの手順は配布形が宣言する）。宣言ごとに値が割れる入力で両方の宣言を回すので、
+// パイプラインが宣言を読まずに片方の手順へ固定されたら、どちらかの宣言で落ちる。Session も GPU も偽物で足りる
 // （`run` しか触らない）ので、状態を直接組んで非公開のコンストラクタへ渡す
 // （`vowel_detector_pipeline_test.ts` と同じ流儀）。
 
@@ -446,8 +499,11 @@ const fakeLogits = (): Float32Array<ArrayBuffer> =>
     (_, index) => (index % FAKE_GRAPH.width < 3 ? -9 : 9) + (index % 7) - 3,
   );
 
-/** 偽の Session（`run` は決まった logit を返す）を張ったパイプライン。 */
-const pipelineWithFakeSession = (logits: Float32Array<ArrayBuffer>): BirefnetPipeline => {
+/** 偽の Session（`run` は決まった logit を返す）を張り、`postprocess` を宣言したパイプライン。 */
+const pipelineWithFakeSession = (
+  logits: Float32Array<ArrayBuffer>,
+  postprocess: MatteProcedure,
+): BirefnetPipeline => {
   const state = {
     gpu: fakeGpuContext(fakeDevice()),
     ownsGpu: false,
@@ -455,6 +511,7 @@ const pipelineWithFakeSession = (logits: Float32Array<ArrayBuffer>): BirefnetPip
       ...PIPELINE_CONFIG,
       imageWidth: FAKE_GRAPH.width,
       imageHeight: FAKE_GRAPH.height,
+      postprocess,
     }),
     matte: { graph: { outputs: ["matte"] } },
     session: {
@@ -469,16 +526,12 @@ const pipelineWithFakeSession = (logits: Float32Array<ArrayBuffer>): BirefnetPip
   return Reflect.construct(BirefnetPipeline, [state]);
 };
 
-Deno.test("segment: logit に当てる手順は float-bilinear（matteFromLogits の明示の手順とビット一致）", async () => {
+Deno.test("segment: logit に当てる手順は配布形の宣言どおり（matteFromLogits の明示の手順とビット一致）", async () => {
   const logits = fakeLogits();
-  const pipeline = pipelineWithFakeSession(logits);
   const image: Rgb8Image = {
     data: new Uint8Array(FAKE_IMAGE.width * FAKE_IMAGE.height * 3).fill(128),
     ...FAKE_IMAGE,
   };
-
-  const matte = await pipeline.segment(image);
-
   const procedure = (name: MatteProcedure) => [
     ...matteFromLogits(
       logits,
@@ -491,6 +544,10 @@ Deno.test("segment: logit に当てる手順は float-bilinear（matteFromLogits
   ];
   // 恒真化の防止 — この入力で 2 つの手順が同じ値なら、手順の取り違えを掴めない。
   assertNotEquals(procedure("u8-pil-bicubic"), procedure("float-bilinear"));
-  assertEquals([matte.width, matte.height], [FAKE_IMAGE.width, FAKE_IMAGE.height]);
-  assertEquals([...matte.data], procedure("float-bilinear"));
+
+  for (const declared of MATTE_PROCEDURES) {
+    const matte = await pipelineWithFakeSession(logits, declared).segment(image);
+    assertEquals([matte.width, matte.height], [FAKE_IMAGE.width, FAKE_IMAGE.height], declared);
+    assertEquals([...matte.data], procedure(declared), declared);
+  }
 });

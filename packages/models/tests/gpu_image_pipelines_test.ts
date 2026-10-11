@@ -179,6 +179,7 @@ const BIREFNET_CONFIG: Record<string, unknown> = {
   imageMean: [0.485, 0.456, 0.406],
   imageStd: [0.229, 0.224, 0.225],
   interpolation: "bilinear",
+  postprocess: "u8-pil-bicubic",
 };
 
 const DEPTH_CONFIG: Record<string, unknown> = {
@@ -224,7 +225,7 @@ const birefnet: Family = {
   name: "BirefnetPipeline.segment",
   build: async (options) => {
     const pipeline = await BirefnetPipeline.fromAssets({
-      manifest: manifestOf("birefnet/1", "matte", BIREFNET_CONFIG),
+      manifest: manifestOf("birefnet/2", "matte", BIREFNET_CONFIG),
       assets: await assetsOf(
         "matte",
         declaration(["sum", "reshape"], "logits", {
@@ -245,10 +246,16 @@ const birefnet: Family = {
     };
   },
   expected: (image) => {
-    const logits = channelSum(
-      birefnetPixelValues(parseBirefnetPipelineConfig(BIREFNET_CONFIG), image),
+    const config = parseBirefnetPipelineConfig(BIREFNET_CONFIG);
+    const logits = channelSum(birefnetPixelValues(config, image));
+    const matte = matteFromLogits(
+      logits,
+      SIZE,
+      SIZE,
+      image.width,
+      image.height,
+      config.postprocess,
     );
-    const matte = matteFromLogits(logits, SIZE, SIZE, image.width, image.height);
     return { values: Array.from(matte.data), width: matte.width, height: matte.height };
   },
   // 8bit へ丸める直前の値が縮約順の差で境界をまたぐと 1 LSB ずれうる。
