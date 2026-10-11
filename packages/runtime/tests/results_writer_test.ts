@@ -220,7 +220,7 @@ Deno.test("結果の書き出し: ディレクトリ区切りを含む実物の�
   }
 });
 
-Deno.test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ / . / .. / %）は throw する", () => {
+Deno.test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ / . / .. / % / ? / #）は throw する", () => {
   // file: URL ではバックスラッシュも区切りとして解決され、`..` や `%2e%2e` は親ディレクトリを指す。
   // `/` だけを拒む形だと、これらが結果の席の外（または席そのもの）へ書き込む。
   const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
@@ -229,7 +229,19 @@ Deno.test("結果の書き出し: 席の外や親を指しうる実物の名前�
       root: new URL(`file://${temporary}/`),
       environment: ENVIRONMENT,
     });
-    for (const name of ["..\\outside.wav", "..", ".", "%2e%2e", "%2E%2E\\x.wav", ""]) {
+    // `?` / `#` の後ろはクエリ・フラグメントへ回り、記録する名前と書き込み先（`a`）がずれる。
+    for (
+      const name of [
+        "..\\outside.wav",
+        "..",
+        ".",
+        "%2e%2e",
+        "%2E%2E\\x.wav",
+        "",
+        "a?b.wav",
+        "a#b.wav",
+      ]
+    ) {
       assertThrows(() => results.artifact(name), Error, "実物の名前", JSON.stringify(name));
     }
     // 対照: 普通の名前（点を含む拡張子や連番）は席の直下へ解決される。

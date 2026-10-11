@@ -230,14 +230,17 @@ export const openResults = (
         throw new Error(`実物の名前にディレクトリ区切りを含められない: '${name}'`);
       }
       // `%` は解決時に復号される（`%2e%2e` は親ディレクトリ）ので、記録する名前と書く先がずれる。
-      if (name === "" || name === "." || name === ".." || name.includes("%")) {
+      // `?` と `#` も、その後ろがクエリ・フラグメントへ回ってパスから落ちるので同じくずれる
+      // （`a?b.wav` は `a` へ書かれる）。
+      if (name === "" || name === "." || name === ".." || /[%?#]/.test(name)) {
         throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
       }
       const dir = ensureDir();
       const resolved = new URL(name, dir);
       // MUST: 解決の結果で確かめる（名前の綴りの検査は URL 解決の規則の写しで、漏れがありうる）。
       const rest = resolved.href.startsWith(dir.href) ? resolved.href.slice(dir.href.length) : "";
-      if (rest === "" || rest.includes("/")) {
+      // href の残りに `?` / `#` があれば、パスの外（クエリ・フラグメント）に名前の一部が乗っている。
+      if (rest === "" || /[/?#]/.test(rest)) {
         throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
       }
       return resolved;
