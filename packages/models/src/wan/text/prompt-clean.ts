@@ -43,6 +43,7 @@ import { ModelInputError } from "../../errors.ts";
 import { asRecord, assertCodePoint, asString, setUnique } from "../../text/asset-gates.ts";
 import { assertEncodableText, toCodePoints } from "../../text/code-points.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges } from "../../text/code-ranges.ts";
+import { sha256HexSync } from "../../text/sha256.ts";
 
 /** 前処理が受けない入力の理由（ADR 0119 決定 2）。 */
 export type PromptCleanRejectReason = "unassigned" | "c1" | "entity" | "mojibake";
@@ -85,6 +86,17 @@ export type PromptCleanTables = {
   /** `BADNESS_RE` の JS 訳（`u` フラグ・`g` / `y` なし = 状態を持たない）。 */
   readonly badness: RegExp;
 };
+
+/**
+ * 資産の `badness`（ftfy 6.3.1 の `BADNESS_RE` の JS 訳 — recipe の `emit_js`）の UTF-8 の sha256。
+ *
+ * MUST: 式は実行する前にこの値と照合する。資産は信用できない外部入力（`fromPretrained` は任意の repo を
+ * 指せる — `src/text/asset-gates.ts`）で、構文が正しいだけの式を受けると `(a+)+$` のような式が前処理
+ * （構築時の既定の negative の検査を含む）でバックトラッキングを指数的に伸ばし、イベントループを止める。
+ * 翻訳は版に固定した 1 本（ADR 0119 決定 2）なので、任意の式を受ける理由が無い。ftfy の版や翻訳を
+ * 変えたら recipe の焼き直しと同時にこの値を更新する（パリティのフィクスチャと同じ値になる）。
+ */
+const FTFY_BADNESS_SHA256 = "7da149647fdaad8c293f44706c67b5649a6f76593cbcf9f23d9613680466312e";
 
 /** ftfy の `max_decode_length`（区切りの最大コードポイント数）。 */
 const MAX_DECODE_LENGTH = 1_000_000;
@@ -342,6 +354,13 @@ const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
 export const parsePromptCleanTables = (raw: unknown, label: string): PromptCleanTables => {
   const obj = asRecord(raw, label);
   const source = asString(obj["badness"], `${label}.badness`);
+  const digest = sha256HexSync(new TextEncoder().encode(source));
+  if (digest !== FTFY_BADNESS_SHA256) {
+    throw new Error(
+      `${label}.badness: 正規表現が ftfy 6.3.1 の BADNESS_RE の固定の翻訳と違う（sha256 ${digest}・` +
+        `期待 ${FTFY_BADNESS_SHA256}）— 資産の任意の式は実行しない`,
+    );
+  }
   let badness: RegExp;
   try {
     // `g` / `y` を付けない — `exec` / `test` が lastIndex を持たず、呼ぶたびに先頭から探す。

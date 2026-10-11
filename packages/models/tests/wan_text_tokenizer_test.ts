@@ -299,6 +299,32 @@ Deno.test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙っ
   );
 });
 
+Deno.test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻訳と違えば、式を実行せずに落とす", () => {
+  // 資産は信用できない外部入力（任意の repo を指せる）。構文が正しいだけの式を受けると、`(a+)+$` のような
+  // 式が前処理（構築時の既定の negative の検査を含む）でバックトラッキングを指数的に伸ばし、イベント
+  // ループを止める。翻訳は固定（ADR 0119 決定 2）なので、1 文字でも違う式は受けない。
+  const clean = fixture.promptClean as Record<string, unknown>;
+  const source = clean.badness;
+  assert(typeof source === "string");
+  const withBadness = (badness: string): Record<string, unknown> =>
+    minimalAsset({ promptClean: { ...clean, badness } });
+  for (
+    const [label, badness] of [
+      ["末尾の 1 文字を変えた式", `${source.slice(0, -1)}X`],
+      ["破滅的なバックトラッキングの式", "(a+)+$"],
+    ]
+  ) {
+    assertThrows(
+      () => parseWanTokenizerAsset(withBadness(badness)),
+      Error,
+      "BADNESS_RE の固定の翻訳と違う",
+      label,
+    );
+  }
+  // 対照: フィクスチャ（recipe が焼いた翻訳そのもの）は通る。
+  parseWanTokenizerAsset(withBadness(source));
+});
+
 Deno.test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（重複行・非有限スコア）", () => {
   assertThrows(
     () =>
