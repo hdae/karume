@@ -164,7 +164,10 @@ export const createStopStringFilter = (stopStrings: readonly string[]): StopStri
   const elements: readonly unknown[] = stopStrings;
   const stops: string[] = [];
   const declared = new Set<string>();
-  elements.forEach((stop, index) => {
+  // MUST: 添字で回す — forEach / for-in は疎な配列の穴を飛ばし、`[, "END"]` の穴が型検査を
+  // 通らないまま黙って捨てられる。添字で読めば穴は undefined として拒否される。
+  for (let index = 0; index < elements.length; index++) {
+    const stop = elements[index];
     if (typeof stop !== "string") {
       throw new ModelInputError(`stopStrings[${index}] ${String(stop)} が文字列でない`);
     }
@@ -174,7 +177,7 @@ export const createStopStringFilter = (stopStrings: readonly string[]): StopStri
     }
     declared.add(stop);
     stops.push(stop);
-  });
+  }
 
   let held = "";
   return {

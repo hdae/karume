@@ -60,4 +60,14 @@ Deno.test("createStopStringFilter: 型を外した指定は暗黙変換せずに
       );
     }
   });
+
+  await t.step("疎な配列の穴（forEach のように飛ばして黙って捨てない）", () => {
+    // [, "END"] の 0 番は穴。穴を飛ばすと "END" だけの指定として受理されてしまう。
+    const sparse = [, "END"];
+    assertThrows(
+      () => createStopStringFilter(untyped(sparse)),
+      ModelInputError,
+      "stopStrings[0] undefined",
+    );
+  });
 });
