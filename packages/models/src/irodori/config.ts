@@ -170,6 +170,17 @@ export type IrodoriPipelineConfig = {
 const isPositiveFinite = (value: number): boolean => Number.isFinite(value) && value > 0;
 const isNonNegativeFinite = (value: number): boolean => Number.isFinite(value) && value >= 0;
 /**
+ * t スケジュールの初期倍率の受理条件 — 正の有限数で、かつ **f32 へ丸めても有限**であること。
+ *
+ * MUST: 倍精度で有限なだけでは足りない。t 列は `f32(initScale · f32(1 − i/steps))` で作って
+ * GPU（`t_embed` と刻み幅）へ渡すので、f32 の最大値を超える値（例 1e39）は t 列の先頭側を
+ * ±Inf にして、出力の非有限検査まで（DiT を回し切ってから）表面化しない。t 列の各値は
+ * `f32(initScale)` 以下なので、ここで 1 回見れば列の全要素が有限になる（走査は要らない）。
+ * NOTE: f32 で有限でもグラフ内の演算で溢れる大きさは別問題で、ここでは縛らない。
+ */
+const isPositiveF32Finite = (value: number): boolean =>
+  isPositiveFinite(value) && Number.isFinite(Math.fround(value));
+/**
  * CFG 強さの受理条件 — 非負の有限数で、かつ **f32 で厳密に表せる**こと。
  *
  * MUST: 宣言段で f32 厳密を要求する。JS の数値は f64 で、ホスト経路の `combineCfg` は
@@ -230,7 +241,13 @@ export const parseIrodoriPipelineConfig = (
       "正の偶数でない",
     ),
     steps: readNumber(raw, "steps", where, isPositiveInteger, positive),
-    initScale: readNumber(raw, "initScale", where, isPositiveFinite, "正の有限数でない"),
+    initScale: readNumber(
+      raw,
+      "initScale",
+      where,
+      isPositiveF32Finite,
+      "正の有限数でない、または f32 で有限に収まらない",
+    ),
     cfgMinT: readNumber(raw, "cfgMinT", where, Number.isFinite, "有限の数でない"),
     cfgMaxT: readNumber(raw, "cfgMaxT", where, Number.isFinite, "有限の数でない"),
     cfgScales: parseCfgScales(Object.hasOwn(raw, "cfgScales") ? raw["cfgScales"] : undefined),

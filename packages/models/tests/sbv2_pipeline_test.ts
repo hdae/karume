@@ -17,6 +17,7 @@ import { describe, it } from "@std/testing/bdd";
 import { parseManifest } from "@karume/hub";
 import {
   assertBertWidth,
+  assertFiniteNoise,
   assertFrontOutputs,
   assertPhonemeLimit,
   assertSeed,
@@ -452,6 +453,27 @@ Deno.test("assertSeed: 受理集合は非負の安全整数（Randn と同一条
     // 型は入口が `Sbv2InputError`・生成器が親の `ModelInputError` という差だけになる。
     assertThrows(() => new Randn(bad), ModelInputError);
   }
+});
+
+Deno.test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を分けて落とす", () => {
+  // noiseScaleW は倍精度で有限なだけで通っていたので、1e39 では乱数が ±Inf のまま front へ渡った。
+  const overflowing = new Randn(0).normals(4, 1e39);
+  assert(!overflowing.every(Number.isFinite), "前提: 1e39 倍の乱数は f32 で ±Inf になる");
+  // 呼び手が渡した値なら入力起因（400）。
+  assertThrows(
+    () => assertFiniteNoise(overflowing, 1e39, true),
+    Sbv2InputError,
+    "noiseScaleW 1e+39 では z_noise が f32 で有限に収まらない",
+  );
+  // 配布形の既定値なら資産の不正（入力起因の分岐に乗せない）。
+  const fromAsset = assertThrows(
+    () => assertFiniteNoise(overflowing, 1e39, false),
+    Error,
+    "pipelineConfig.defaults の noiseScaleW 1e+39",
+  );
+  assertFalse(fromAsset instanceof ModelInputError, "資産由来が入力起因に分類された");
+  // 正常域は通る。
+  assertFiniteNoise(new Randn(0).normals(4, 0.8), 0.8, true);
 });
 
 /**

@@ -49,6 +49,7 @@ import {
   readNumber,
   readOnly,
 } from "../config/readers.ts";
+import { normalizationOverflow } from "../image/preprocess.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const DEPTH_ANYTHING_PIPELINE_NAME = "depth-anything";
@@ -121,7 +122,7 @@ export const parseDepthAnythingPipelineConfig = (
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positive = "正の整数でない";
-  return {
+  const config: DepthAnythingPipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
     // mean は負でも構わない（`(x − mean·255) / (std·255)` の平行移動）が、有限でなければ
@@ -143,4 +144,9 @@ export const parseDepthAnythingPipelineConfig = (
         "bilinear で通すと pixel_values が uint8 1 LSB の 34 倍ずれる",
     ),
   };
+  // 個々の欄が有限でも、組で正規化後の値が f32 で溢れる配布形は資産の不正として構築時に落とす
+  // （`normalizeToNchw` まで待つと、生成のたびに入力起因の型で落ちる）。
+  const overflow = normalizationOverflow(config.imageMean, config.imageStd);
+  if (overflow !== undefined) throw new Error(`${where}.imageMean / imageStd: ${overflow}`);
+  return config;
 };

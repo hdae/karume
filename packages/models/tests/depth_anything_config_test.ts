@@ -12,7 +12,8 @@
 //    配布形を通すと `pixel_values` が uint8 1 LSB の 34 倍ずれる。受理集合がファミリごとに
 //    違うことが、スキーマを共有しない理由そのものなので、両向きに固定する。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
 
 /** `models/karume-depth-anything-v2/karume.json` の `small` の `pipelineConfig` 実物（5 欄）。 */
@@ -90,6 +91,16 @@ Deno.test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作�
     Error,
     "imageStd",
   );
+});
+
+Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
+  // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
+  const error = assertThrows(
+    () => parseDepthAnythingPipelineConfig({ ...CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
+    Error,
+    "pipelineConfig.imageMean / imageStd: チャネル 0 の正規化後の値域",
+  );
+  assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
 
 Deno.test("チャネル定数は長さ 3 の数の配列だけ", () => {

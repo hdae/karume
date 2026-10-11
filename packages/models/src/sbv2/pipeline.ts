@@ -531,6 +531,29 @@ export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void =>
 };
 
 /**
+ * sdp の `z_noise`（標準正規 × `noiseScaleW`）が f32 で全て有限であることを見る門。
+ *
+ * MUST: `noiseScaleW` の検査は倍精度の有限性だけなので、f32 の最大値を超える積（例
+ * `noiseScaleW = 1e39`）は `Float32Array` へ入れた時点で ±Inf になり、front を回し切った後の
+ * 出力検査まで表面化しない（入力の誤りが無駄な GPU 実行の後に内部エラーとして出る）。乱数は
+ * 長さと seed だけで決まるので、GPU を回す前に引いた列そのものを 1 回走査する。
+ * MUST: 値の出どころで送出型を分ける — 呼び手が渡した `noiseScaleW` なら入力起因
+ * （`Sbv2InputError`）、省略して配布形の `pipelineConfig.defaults` を使ったなら資産の不正。
+ * NOTE: f32 で有限でもグラフ内で溢れる大きさ（例 1e30）は別問題で、ここでは縛らない。
+ * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
+ */
+export const assertFiniteNoise = (
+  noise: Float32Array,
+  noiseScaleW: number,
+  fromRequest: boolean,
+): void => {
+  if (noise.every(Number.isFinite)) return;
+  const problem = `noiseScaleW ${noiseScaleW} では z_noise が f32 で有限に収まらない`;
+  if (fromRequest) throw new Sbv2InputError(`Sbv2Pipeline: ${problem}（小さい値を渡す）`);
+  throw new Error(`Sbv2Pipeline: pipelineConfig.defaults の ${problem}`);
+};
+
+/**
  * tile 展開の結果を front へ渡す前に検める門。
  *
  * MUST: **書いた列数**（{@link TiledBert.columns}）を確保サイズと記号次元の両方に突き合わせる。
@@ -802,6 +825,13 @@ export const synthesizeSbv2 = async (
   assertTokenLimit(tokens, state.config.maxTokens);
   assertPhonemeLimit(phonemes, state.config.maxTokens);
 
+  // sdp の乱数は長さ（音素数）と seed だけで決まるので、GPU を回す前に引いて検める
+  // （{@link assertFiniteNoise} の MUST）。引く順は後段の z_p のノイズより前のまま（同じ seed で
+  // 同じ列）。
+  const random = new Randn(seed);
+  const zNoise = random.normals(2 * phonemes, knobs.noiseScaleW);
+  assertFiniteNoise(zNoise, knobs.noiseScaleW, options.noiseScaleW !== undefined);
+
   // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
   // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
   const hidden = await withSession(
@@ -849,9 +879,7 @@ export const synthesizeSbv2 = async (
   );
 
   // --- ⑤ front（enc_p + dp + sdp reverse・4 出力）--------------------------
-  const random = new Randn(seed);
   const xMask = ones(phonemes);
-  const zNoise = random.normals(2 * phonemes, knobs.noiseScaleW);
   const predicted = await withSession(
     state.gpu,
     state.front,

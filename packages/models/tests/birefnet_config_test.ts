@@ -10,7 +10,8 @@
 // ③ `interpolation` は分岐ではなく**宣言**で、受理集合は 1 値だけ（上流 `handler.py` の
 //    torchvision Resize が既定の補間 = bilinear で通すから — 前処理層は bicubic も持っている）。
 
-import { assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
+import { ModelInputError } from "../src/errors.ts";
 import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";
 
 /** `models/karume-birefnet-hr/karume.json` の `pipelineConfig` 実物（5 欄）。 */
@@ -72,6 +73,16 @@ Deno.test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作�
     Error,
     "imageStd",
   );
+});
+
+Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
+  // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
+  const error = assertThrows(
+    () => parseBirefnetPipelineConfig({ ...CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
+    Error,
+    "pipelineConfig.imageMean / imageStd: チャネル 0 の正規化後の値域",
+  );
+  assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
 
 Deno.test("チャネル定数は長さ 3 の数の配列だけ", () => {

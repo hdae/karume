@@ -304,6 +304,36 @@ export const resizePlaneF32 = (
 const RESCALE_DIVISOR = 255;
 
 /**
+ * 正規化後の値が f32 で有限に収まらない最初のチャネルを説明する文言（全チャネルが収まれば
+ * `undefined`）。
+ *
+ * MUST: mean / std の個々の有限性だけでは足りない。正規化は f64 で計算して `Float32Array` へ
+ * 入れるので、std が極端に小さい（例 1e-50）か mean が極端に大きいと、倍精度では有限な商が
+ * f32 の最大値を超えて ±Inf になり、平面ごと非有限のまま GPU へ渡る。
+ * 値域は {@link normalizeToNchw} と**同じ式**を画素の両端（0 と 255）に当てて求める — 式は画素に
+ * ついて単調（divisor > 0）で f32 への丸めも単調なので、両端が有限なら全画素が有限になり、
+ * 画素を走査せずに判定できる。
+ *
+ * 前提: `std` は正の有限数・`mean` は有限数（呼び手が先に見る）。
+ */
+export const normalizationOverflow = (
+  mean: readonly [number, number, number],
+  std: readonly [number, number, number],
+): string | undefined => {
+  for (let channel = 0; channel < CHANNELS; channel += 1) {
+    const offset = mean[channel] * RESCALE_DIVISOR;
+    const divisor = std[channel] * RESCALE_DIVISOR;
+    const low = (0 - offset) / divisor;
+    const high = (255 - offset) / divisor;
+    if (!Number.isFinite(Math.fround(low)) || !Number.isFinite(Math.fround(high))) {
+      return `チャネル ${channel} の正規化後の値域 [${low}, ${high}] が f32 で有限に収まらない` +
+        `（mean ${mean[channel]} / std ${std[channel]}）`;
+    }
+  }
+  return undefined;
+};
+
+/**
  * RGB8（インターリーブ）→ 正規化済み planar f32 `[3, height, width]`（batch 1 は畳む）。
  *
  * MUST: rescale と normalize を**畳んだ形**で計算する — 参照実装
@@ -332,20 +362,13 @@ export const normalizeToNchw = (
         `normalizeToNchw: std[${channel}] = ${std[channel]} が正の有限数でない`,
       );
     }
-    const offset = mean[channel] * RESCALE_DIVISOR;
-    const divisor = std[channel] * RESCALE_DIVISOR;
-    // 有限の mean / std でも裾では係数か f32 の結果が溢れる（極小の std で ±Inf・極大の mean で −Inf・
-    // mean と std の両方が極大で Inf / Inf = NaN）。式は画素について単調なので、係数の有限性と画素の
-    // 端点 0 / 255 での f32 の結果を見れば全画素を覆う（式そのものは変えない — Pillow / transformers の
-    // 参照との丸めを動かさない）。出力の確保より前に見る — 巨大な画像で、拒否する係数のために確保しない。
-    const ends = [0, 255].map((pixel) => Math.fround((pixel - offset) / divisor));
-    if (!Number.isFinite(offset) || !Number.isFinite(divisor) || !ends.every(Number.isFinite)) {
-      throw new ModelInputError(
-        `normalizeToNchw: channel ${channel} の mean ${mean[channel]}・std ${std[channel]} では` +
-          "画素 0〜255 の正規化が f32 で有限に収まらない",
-      );
-    }
   }
+  // 有限の mean / std でも正規化の結果が f32 で溢れる組（極小の std で ±Inf・極大の mean で −Inf・
+  // mean と std の両方が極大で Inf / Inf = NaN — {@link normalizationOverflow}）。出力の確保より前に
+  // 見る — 巨大な画像で、拒否する係数のために確保しない。家族の経路は config の parse が同じ判定で
+  // 先に落とすので、ここへ届くのは barrel の直叩きだけ（上と同じ分類）。
+  const overflow = normalizationOverflow(mean, std);
+  if (overflow !== undefined) throw new ModelInputError(`normalizeToNchw: ${overflow}`);
   const plane = image.width * image.height;
   const out = new Float32Array(plane * CHANNELS);
   for (let channel = 0; channel < CHANNELS; channel += 1) {

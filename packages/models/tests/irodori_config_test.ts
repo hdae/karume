@@ -133,6 +133,19 @@ Deno.test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
   );
 });
 
+Deno.test("parseIrodoriPipelineConfig: initScale は f32 へ丸めても有限な値だけを受ける", () => {
+  // 倍精度では有限でも f32 の最大値（約 3.4e38）を超えると、t 列の先頭側が ±Inf のまま GPU へ
+  // 渡り、DiT を回し切った後の出力検査まで表面化しない（t 列の各値は f32(initScale) 以下）。
+  assertThrows(
+    () => parseIrodoriPipelineConfig(withPatch({ initScale: 1e39 })),
+    Error,
+    "f32 で有限に収まらない",
+  );
+  // f32 の最大値そのものは有限なので通る（境界は「丸めた結果が有限か」）。
+  const largest = 3.4028234663852886e38;
+  assertEquals(parseIrodoriPipelineConfig(withPatch({ initScale: largest })).initScale, largest);
+});
+
 Deno.test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈黙で CFG が消える）", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgMinT: 1, cfgMaxT: 0.5 })),

@@ -29,6 +29,7 @@
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseSiglip2PipelineConfig } from "../src/siglip2/config.ts";
+import { ModelInputError } from "../src/errors.ts";
 import {
   assertOutputDim,
   assertStaticDim,
@@ -184,6 +185,16 @@ Deno.test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除�
     Error,
     "pipelineConfig.imageStd: 正の有限数でない要素がある",
   );
+});
+
+Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
+  // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
+  const error = assertThrows(
+    () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
+    Error,
+    "pipelineConfig.imageMean / imageStd: チャネル 0 の正規化後の値域",
+  );
+  assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
 
 Deno.test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ落ちる", () => {

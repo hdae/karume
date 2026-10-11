@@ -43,6 +43,7 @@ import {
   readNumber,
   readOnly,
 } from "../config/readers.ts";
+import { normalizationOverflow } from "../image/preprocess.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const SIGLIP2_PIPELINE_NAME = "siglip2";
@@ -117,7 +118,7 @@ export const parseSiglip2PipelineConfig = (
   const where = "pipelineConfig";
   assertAllowedKeys(raw, ROOT_KEYS, where);
   const positive = "正の整数でない";
-  return {
+  const config: Siglip2PipelineConfig = {
     imageWidth: readNumber(raw, "imageWidth", where, isPositiveInteger, positive),
     imageHeight: readNumber(raw, "imageHeight", where, isPositiveInteger, positive),
     // mean は負でも構わない（`(x − mean·255) / (std·255)` の平行移動）が、有限でなければ
@@ -140,4 +141,9 @@ export const parseSiglip2PipelineConfig = (
         "bicubic で通すと resize の値が最大 47/255 ずれる",
     ),
   };
+  // 個々の欄が有限でも、組で正規化後の値が f32 で溢れる配布形は資産の不正として構築時に落とす
+  // （`normalizeToNchw` まで待つと、生成のたびに入力起因の型で落ちる）。
+  const overflow = normalizationOverflow(config.imageMean, config.imageStd);
+  if (overflow !== undefined) throw new Error(`${where}.imageMean / imageStd: ${overflow}`);
+  return config;
 };

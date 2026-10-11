@@ -47,6 +47,7 @@ import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/ass
 import { describe, it } from "@std/testing/bdd";
 import { ModelInputError } from "../src/errors.ts";
 import {
+  normalizationOverflow,
   normalizeToNchw,
   resizePlaneF32,
   resizeRgb8,
@@ -351,6 +352,26 @@ Deno.test("有限でも正規化の結果が f32 で溢れる mean / std は落�
       label,
     );
   }
+});
+
+Deno.test("mean / std が個々に有限でも、正規化後の値が f32 で溢れる組は落ちる", () => {
+  // 商は f64 で有限でも Float32Array へ入れた時点で ±Inf になり、平面ごと GPU へ渡る。
+  const image: Rgb8Image = { data: new Uint8Array(12).fill(128), width: 2, height: 2 };
+  assertThrows(
+    () => normalizeToNchw(image, imageMean, [imageStd[0], 1e-50, imageStd[2]]),
+    ModelInputError,
+    "チャネル 1 の正規化後の値域",
+  );
+  assertThrows(
+    () => normalizeToNchw(image, [1e40, imageMean[1], imageMean[2]], imageStd),
+    ModelInputError,
+    "f32 で有限に収まらない",
+  );
+  // 判定は画素の両端で決まるので、画素の値に依らない（全画素 128 でも落ちる = 走査していない）。
+  assertEquals(normalizationOverflow(imageMean, imageStd), undefined);
+  // 境界: 255 / (std·255) がちょうど f32 の最大値を下回る std は通る。
+  const tiny = 1 / 3.4e38;
+  assertEquals(normalizationOverflow([0, 0, 0], [tiny, tiny, tiny]), undefined);
 });
 
 // ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
