@@ -9,6 +9,10 @@ the level of numerical intent — the same kernel and the same order of steps (A
 quantization differs (round instead of the upstream's truncation, a deliberate choice for every
 procedure).
 
+Result (2026-10-11): all eight pairs were judged indistinguishable, so by the rule fixed before the
+test BiRefNet_HR adopted the upstream procedure (`u8-pil-bicubic`) — see the results section of ADR
+0125.
+
 Each image goes through the graph **once**; both procedures of
 `packages/models/src/birefnet/matte.ts` are applied to the same logits. Loading and the family gates
 are the pipeline's own (`loadBirefnetState` / `matteLogits`).
