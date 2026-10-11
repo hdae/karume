@@ -5,7 +5,7 @@
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { decodeImage } from "./decode-image.ts";
+import { applyExifOrientation, decodeImage, type ExifOrientation } from "./decode-image.ts";
 
 const FIXTURES = new URL("./fixtures/", import.meta.url);
 
@@ -46,7 +46,51 @@ const parseCases = (text: string): Readonly<Record<string, Case>> => {
   }
   return cases;
 };
-const cases = parseCases(Deno.readTextFileSync(new URL("expected.json", FIXTURES)));
+type Rgb8Expectation = {
+  readonly width: number;
+  readonly height: number;
+  readonly data: Uint8Array;
+};
+
+const ORIENTATIONS: readonly ExifOrientation[] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+/**
+ * expected.json の orientations（rgb.png の画素に向き 1〜8 を付けて Pillow の `ImageOps.exif_transpose` を
+ * 通した RGB8）。
+ */
+const parseOrientations = (text: string): Readonly<Record<ExifOrientation, Rgb8Expectation>> => {
+  const parsed: unknown = JSON.parse(text);
+  if (
+    !isRecord(parsed) || !isRecord(parsed.orientations) ||
+    parsed.orientations.source !== "rgb.png" || !isRecord(parsed.orientations.results)
+  ) {
+    throw new Error("expected.json に orientations（source = rgb.png）が無い");
+  }
+  const { results } = parsed.orientations;
+  const entryOf = (orientation: ExifOrientation): Rgb8Expectation => {
+    const key = String(orientation);
+    const value: unknown = Object.hasOwn(results, key) ? results[key] : undefined;
+    // 欄の形は cases の画素一致の 1 件と同じ（kind を除く）なので、同じ検査に通す。
+    const entry: unknown = isRecord(value) ? { kind: "exact", ...value } : undefined;
+    if (!isCase(entry) || entry.kind === "reject") {
+      throw new Error(`expected.json の orientations の向き ${orientation} の形が違う`);
+    }
+    return { width: entry.width, height: entry.height, data: hexBytes(entry.rgb) };
+  };
+  return {
+    1: entryOf(1),
+    2: entryOf(2),
+    3: entryOf(3),
+    4: entryOf(4),
+    5: entryOf(5),
+    6: entryOf(6),
+    7: entryOf(7),
+    8: entryOf(8),
+  };
+};
+
+const expectedText = Deno.readTextFileSync(new URL("expected.json", FIXTURES));
+const cases = parseCases(expectedText);
 
 const read = (name: string): Uint8Array => Deno.readFileSync(new URL(name, FIXTURES));
 
@@ -55,6 +99,8 @@ const hexBytes = (hex: string): Uint8Array =>
     { length: hex.length / 2 },
     (_, at) => parseInt(hex.slice(at * 2, at * 2 + 2), 16),
   );
+
+const orientations = parseOrientations(expectedText);
 
 /** fixture の期待値（Pillow の RGB8）。 */
 const expectedOf = (name: string) => {
@@ -288,6 +334,21 @@ describe("decodeImage — JPEG", () => {
   });
 });
 
+describe("applyExifOrientation", () => {
+  for (const orientation of ORIENTATIONS) {
+    it(`向き ${orientation} を Pillow の exif_transpose と画素単位で同じ並びにする`, () => {
+      const source = decodeImage(read("rgb.png"));
+      const before = source.data.slice();
+      const rotated = applyExifOrientation(source, orientation);
+      const expected = orientations[orientation];
+      assertEquals([rotated.width, rotated.height], [expected.width, expected.height]);
+      assertEquals(rotated.data, expected.data);
+      // 渡した画像の画素は書き換えない。
+      assertEquals(source.data, before);
+    });
+  }
+});
+
 describe("decodeImage — 対応外の形式", () => {
   for (const name of ["gif.gif", "webp.webp"]) {
     it(`${name} をマジックバイトで見分けて対応形式を名指しして拒む`, () => {
@@ -317,6 +378,18 @@ describe("fixture の検出力（上のテストが落ちうること）", () =>
     ) {
       const { data } = expectedOf(name);
       assert(maxAbsDiff(swapRedBlue(data), data) > 0, `${name} の R と B が同じ値`);
+    }
+  });
+
+  it("向き 8 通りの期待値は互いに違う（2 つの向きの取り違えを見逃さない）", () => {
+    for (const a of ORIENTATIONS) {
+      for (const b of ORIENTATIONS.filter((other) => other > a)) {
+        const left = orientations[a];
+        const right = orientations[b];
+        const same = left.width === right.width && left.height === right.height &&
+          maxAbsDiff(left.data, right.data) === 0;
+        assert(!same, `向き ${a} と ${b} の期待値が同じ`);
+      }
     }
   });
 

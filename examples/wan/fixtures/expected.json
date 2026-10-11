@@ -146,5 +146,50 @@
     "webp.webp": {
       "kind": "reject"
     }
+  },
+  "orientations": {
+    "source": "rgb.png",
+    "results": {
+      "1": {
+        "width": 7,
+        "height": 5,
+        "rgb": "013264083f810f4c9e1659bb1d66d82473f52b8012328d2f399a4c40a76947b4864ec1a355cec05cdbdd63e8fa6af517710234780f517f1c6e86298b8d36a89443c59b50e2a25dffa96a1cb07739b78456be9173c59e90ccabadd3b8cadac5e7e1d204e8df21efec3e"
+      },
+      "2": {
+        "width": 7,
+        "height": 5,
+        "rgb": "2b80122473f51d66d81659bb0f4c9e083f810132645cdbdd55cec04ec1a347b48640a769399a4c328d2f8d36a886298b7f1c6e780f517102346af51763e8fabe9173b78456b07739a96a1ca25dff9b50e29443c5efec3ee8df21e1d204dac5e7d3b8caccabadc59e90"
+      },
+      "3": {
+        "width": 7,
+        "height": 5,
+        "rgb": "efec3ee8df21e1d204dac5e7d3b8caccabadc59e90be9173b78456b07739a96a1ca25dff9b50e29443c58d36a886298b7f1c6e780f517102346af51763e8fa5cdbdd55cec04ec1a347b48640a769399a4c328d2f2b80122473f51d66d81659bb0f4c9e083f81013264"
+      },
+      "4": {
+        "width": 7,
+        "height": 5,
+        "rgb": "c59e90ccabadd3b8cadac5e7e1d204e8df21efec3e9443c59b50e2a25dffa96a1cb07739b78456be917363e8fa6af517710234780f517f1c6e86298b8d36a8328d2f399a4c40a76947b4864ec1a355cec05cdbdd013264083f810f4c9e1659bb1d66d82473f52b8012"
+      },
+      "5": {
+        "width": 5,
+        "height": 7,
+        "rgb": "013264328d2f63e8fa9443c5c59e90083f81399a4c6af5179b50e2ccabad0f4c9e40a769710234a25dffd3b8ca1659bb47b486780f51a96a1cdac5e71d66d84ec1a37f1c6eb07739e1d2042473f555cec086298bb78456e8df212b80125cdbdd8d36a8be9173efec3e"
+      },
+      "6": {
+        "width": 5,
+        "height": 7,
+        "rgb": "c59e909443c563e8fa328d2f013264ccabad9b50e26af517399a4c083f81d3b8caa25dff71023440a7690f4c9edac5e7a96a1c780f5147b4861659bbe1d204b077397f1c6e4ec1a31d66d8e8df21b7845686298b55cec02473f5efec3ebe91738d36a85cdbdd2b8012"
+      },
+      "7": {
+        "width": 5,
+        "height": 7,
+        "rgb": "efec3ebe91738d36a85cdbdd2b8012e8df21b7845686298b55cec02473f5e1d204b077397f1c6e4ec1a31d66d8dac5e7a96a1c780f5147b4861659bbd3b8caa25dff71023440a7690f4c9eccabad9b50e26af517399a4c083f81c59e909443c563e8fa328d2f013264"
+      },
+      "8": {
+        "width": 5,
+        "height": 7,
+        "rgb": "2b80125cdbdd8d36a8be9173efec3e2473f555cec086298bb78456e8df211d66d84ec1a37f1c6eb07739e1d2041659bb47b486780f51a96a1cdac5e70f4c9e40a769710234a25dffd3b8ca083f81399a4c6af5179b50e2ccabad013264328d2f63e8fa9443c5c59e90"
+      }
+    }
   }
 }

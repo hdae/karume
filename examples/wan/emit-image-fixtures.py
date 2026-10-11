@@ -3,7 +3,8 @@
 実行時には不要。期待値は「Pillow で開いて convert("RGB") した RGB8」— 上流 Wan2.2 の generate.py
 が条件画像を読む形（`Image.open(...).convert("RGB")`）と同じ。画像は奇数寸法で、画素ごと・
 チャネルごとに値が違う（チャネルの取り違え・アルファの捨て忘れ・行の詰め方の誤りでテストが
-落ちるように）。
+落ちるように）。expected.json の orientations は EXIF の向きの純関数の正本で、rgb.png と同じ
+画素に向き 1〜8 を付けて Pillow の ImageOps.exif_transpose を通した RGB8。
 
 Pillow は tools/export-recipes の uv 環境の wan グループにある（pillow を `==` で pin —
 版を変えたら作り直す）:
@@ -24,7 +25,7 @@ import zlib
 from importlib.metadata import version
 from pathlib import Path
 
-from PIL import Image, JpegImagePlugin, features
+from PIL import Image, ImageOps, JpegImagePlugin, features
 
 #: PNG の fixture の寸法（奇数 × 奇数 — 行の端の詰め物と 4 bit の索引の半端なバイトを通す）。
 PNG_SIZE = (7, 5)
@@ -427,6 +428,28 @@ def exif_orientation(value: int) -> bytes:
     return exif.tobytes()
 
 
+def orientation_results() -> dict[str, dict[str, object]]:
+    """rgb.png と同じ画素に EXIF の向き 1〜8 を付け、Pillow の ImageOps.exif_transpose を通した RGB8。
+
+    デコーダの向きの純関数（applyExifOrientation）の正本。8 通りの結果が互いに違うことを確かめる
+    （2 つの向きの取り違えをテストが見逃さないように）。
+    """
+    results: dict[str, dict[str, object]] = {}
+    for orientation in range(1, 9):
+        data = encode(pixel_image("RGB"), "PNG", exif=exif_orientation(orientation))
+        with Image.open(io.BytesIO(data)) as opened:
+            assert opened.getexif().get(0x0112) == orientation, "EXIF の向きが書けていない"
+            rotated = ImageOps.exif_transpose(opened).convert("RGB")
+        results[str(orientation)] = {
+            "width": rotated.width,
+            "height": rotated.height,
+            "rgb": rotated.tobytes().hex(),
+        }
+    distinct = {(r["width"], r["height"], r["rgb"]) for r in results.values()}
+    assert len(distinct) == 8, "向き 8 通りの結果に同じものがある"
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -455,6 +478,7 @@ def main() -> None:
         "generator": "examples/wan/emit-image-fixtures.py",
         "pillow": version("pillow"),
         "cases": cases,
+        "orientations": {"source": "rgb.png", "results": orientation_results()},
     }
     expected_path.write_text(
         json.dumps(expected, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

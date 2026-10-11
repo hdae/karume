@@ -246,6 +246,54 @@ const decodeJpeg = (bytes: Uint8Array): Rgb8Image => {
   }
 };
 
+/** EXIF の向き（TIFF の Orientation タグ 0x0112 の値 — 1 = 格納のまま）。 */
+export type ExifOrientation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+/**
+ * 向きごとに、出力の画素 (x, y) が読む元の画素の座標。`width` / `height` は元の寸法で、向き 5〜8 は出力の縦横が
+ * 入れ替わる（x は 0〜height − 1・y は 0〜width − 1 を動く）。
+ */
+const SOURCE_OF: Readonly<
+  Record<
+    ExifOrientation,
+    (x: number, y: number, width: number, height: number) => readonly [number, number]
+  >
+> = {
+  1: (x, y) => [x, y],
+  2: (x, y, width) => [width - 1 - x, y],
+  3: (x, y, width, height) => [width - 1 - x, height - 1 - y],
+  4: (x, y, _width, height) => [x, height - 1 - y],
+  5: (x, y) => [y, x],
+  6: (x, y, _width, height) => [y, height - 1 - x],
+  7: (x, y, width, height) => [width - 1 - y, height - 1 - x],
+  8: (x, y, width) => [width - 1 - y, x],
+};
+
+/**
+ * 画素に EXIF の向きを適用する（回転・反転の 8 通り）。Pillow の `ImageOps.exif_transpose` と同じ並び — テストが
+ * 8 通りとも Pillow の出力と画素単位で縛る。向き 5〜8 は縦横が入れ替わる。向き 1 は渡した画像をそのまま返す。
+ */
+export const applyExifOrientation = (
+  image: Rgb8Image,
+  orientation: ExifOrientation,
+): Rgb8Image => {
+  if (orientation === 1) return image;
+  const { data, width, height } = image;
+  const swapped = orientation >= 5;
+  const outWidth = swapped ? height : width;
+  const outHeight = swapped ? width : height;
+  const sourceOf = SOURCE_OF[orientation];
+  const rgb = new Uint8Array(width * height * 3);
+  for (let y = 0; y < outHeight; y += 1) {
+    for (let x = 0; x < outWidth; x += 1) {
+      const [sourceX, sourceY] = sourceOf(x, y, width, height);
+      const from = (sourceY * width + sourceX) * 3;
+      rgb.set(data.subarray(from, from + 3), (y * outWidth + x) * 3);
+    }
+  }
+  return { data: rgb, width: outWidth, height: outHeight };
+};
+
 /**
  * 画像ファイルのバイト列 → RGB8（モジュール doc の規則）。形式は先頭のマジックバイトで決め、対応外・壊れた
  * データは対応形式を名指しする `Error` で落とす。
