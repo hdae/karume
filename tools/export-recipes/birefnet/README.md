@@ -54,6 +54,12 @@ cannot carry both. Within one repository the two resolutions live side by side a
 the default because it is the first `--model` on the command line. Assembling two models at once
 needs an explicit `--out`: a repository name cannot be derived from a list of model names.
 
+The pipeline seat also fixes the alpha-matte post-processing that `dist` declares in
+`pipelineConfig.postprocess` (pipeline contract `birefnet/2`): each checkpoint's own upstream order,
+`u8-pil-bicubic` for BiRefNet_HR and `float-bilinear` for Lucida (ADR
+[0125](../../../docs/decisions/0125-birefnet-matte-postprocess.md)). The TypeScript loader keeps no
+per-checkpoint table, so a distribution without the declaration is refused rather than defaulted.
+
 ## Weight storage series (f32 / f16)
 
 `--dtype f16` writes a separate series (`<model>-<resolution>-f16`, e.g. `birefnet-hr-1024-f16`);

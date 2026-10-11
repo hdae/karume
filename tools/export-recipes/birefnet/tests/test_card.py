@@ -21,6 +21,7 @@ import pytest
 from birefnet.card import (
     BIREFNET_CHECKPOINTS,
     BIREFNET_MATTE_WEIGHTS,
+    BIREFNET_POSTPROCESS_DESCRIPTIONS,
     BIREFNET_RESOURCE_MEASUREMENT,
     BIREFNET_RESOURCE_QUANT,
     BIREFNET_RESOURCES,
@@ -42,6 +43,11 @@ MODEL = "1024"
 #: 2 つの実在テンプレートが互いの manifest を拒むことは `sbv2/tests/test_card.py` が
 #: 両向きで見る。ここが要るのは「自分の契約以外を拒む」という 1 方向だけ。
 FOREIGN_PIPELINE = "siglip2/1"
+
+#: TS 側 `packages/models/src/birefnet/matte.ts` の `MATTE_PROCEDURES` の写し（ロード側が受理する
+#: 後処理の手順の閉じた集合）。カードが説明を持たない手順も、ロード側が読めない手順を説明する
+#: カードも作らない。
+TS_MATTE_PROCEDURES = ("float-bilinear", "u8-pil-bicubic")
 
 
 def _ref(path: str, size: int, digit: str) -> dict[str, Any]:
@@ -86,10 +92,34 @@ def _birefnet_manifest(model: str = MODEL) -> dict[str, Any]:
                     "imageMean": [0.1, 0.2, 0.3],
                     "imageStd": [0.4, 0.5, 0.6],
                     "interpolation": "bilinear",
+                    "postprocess": "u8-pil-bicubic",
                 },
             }
         },
     }
+
+
+class TestBirefnetPostprocess:
+    """後処理の手順（`pipelineConfig.postprocess`）の説明 — 手順の名前はモデルの宣言から引く。"""
+
+    def test_it_describes_exactly_the_procedures_the_loader_accepts(self) -> None:
+        assert tuple(sorted(BIREFNET_POSTPROCESS_DESCRIPTIONS)) == TS_MATTE_PROCEDURES
+
+    @pytest.mark.parametrize("procedure", TS_MATTE_PROCEDURES)
+    def test_it_describes_the_declared_procedure_only(self, procedure: str) -> None:
+        manifest = _birefnet_manifest()
+        manifest["models"][MODEL]["pipelineConfig"]["postprocess"] = procedure
+        card = render_birefnet_model_card(manifest, REPO, CHECKPOINT)
+        assert "\n".join(BIREFNET_POSTPROCESS_DESCRIPTIONS[procedure]) in card
+        (other,) = (name for name in TS_MATTE_PROCEDURES if name != procedure)
+        assert f"`{other}`" not in card
+
+    def test_it_refuses_a_procedure_it_cannot_describe(self) -> None:
+        """推し量った説明を載せない — 配布形の実際の後処理とカードが食い違ったまま公開される。"""
+        manifest = _birefnet_manifest()
+        manifest["models"][MODEL]["pipelineConfig"]["postprocess"] = "nearest"
+        with pytest.raises(ValueError, match="nearest"):
+            render_birefnet_model_card(manifest, REPO, CHECKPOINT)
 
 
 class TestBirefnetCardGate:

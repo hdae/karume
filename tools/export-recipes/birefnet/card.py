@@ -37,7 +37,7 @@ from karume.modelcard import (
 )
 
 #: このテンプレートが説明できるパイプライン契約（ADR 0041 §2 — モデル単位）。
-BIREFNET_SUPPORTED_PIPELINE = "birefnet/1"
+BIREFNET_SUPPORTED_PIPELINE = "birefnet/2"
 
 #: HF の pipeline tag（上流 2 リポとも同じ）。出すのは α マット 1 枚で、クラス分類も
 #: インスタンス分割も持たない。
@@ -93,6 +93,27 @@ BIREFNET_RESOURCE_MEASUREMENT = "measured 2026-09-05 on an RTX 3080 Ti"
 #: 上の表を採った quant 席。MUST: カードは総確保を**この席の数として**名乗る — f16 席の総確保は
 #: 実測していない（常駐の重みが減るぶん小さいはずだが、推し量った数は載せない — 冒頭の MUST）。
 BIREFNET_RESOURCE_QUANT = "f32"
+
+#: 後処理の手順（manifest の `pipelineConfig.postprocess` — TS 側 `MATTE_PROCEDURES` の綴り）→
+#: カードの説明（補間・段の順序・量子化）。手順の名前は manifest にあるが、その中身の説明は
+#: manifest に**存在しない事実**なので、ここが持つ（冒頭の MUST の例外ではない）。
+#:
+#: MUST: 知らない手順は描かない — 推し量った説明を載せると、配布形の実際の後処理とカードが
+#: 食い違ったまま公開される。手順の正本は ADR 0125 と `packages/models/src/birefnet/matte.ts`。
+BIREFNET_POSTPROCESS_DESCRIPTIONS: Mapping[str, tuple[str, ...]] = {
+    "u8-pil-bicubic": (
+        "- **post-processing** (`u8-pil-bicubic`, the order upstream uses for this checkpoint):",
+        "  the sigmoid of the logits is rounded to 8 bits at the graph's resolution, then resized",
+        "  back to the image's size with 8-bit bicubic resampling that matches Pillow's `BICUBIC`",
+        "  bit for bit. Rounding is half-up (the upstream code truncates).",
+    ),
+    "float-bilinear": (
+        "- **post-processing** (`float-bilinear`, the order upstream uses for this checkpoint):",
+        "  the sigmoid of the logits is resized back to the image's size in floating point with",
+        "  antialiased bilinear interpolation, then rounded to 8 bits. Rounding is half-up (the",
+        "  upstream code truncates).",
+    ),
+}
 
 #: 上流の論文（BiRefNet — 系列の共通の出典）。
 BIREFNET_PAPER = "arxiv.org/abs/2401.03407"
@@ -360,9 +381,11 @@ def _birefnet_overview(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
         "- **Pre- and post-processing are included.** The pipeline resizes to"
         f" {config['imageWidth']} × {config['imageHeight']} for the default model"
         f" `{default_name}`,",
-        "  normalizes with the constants below, then takes the sigmoid of the logits and scales",
-        "  the matte back to the original resolution. Decoding PNG / JPEG is *not* part of this —",
-        "  use `createImageBitmap` in the browser, or any decoder in Deno.",
+        "  normalizes with the constants below, then takes the sigmoid of the logits, scales the",
+        "  matte back to the original resolution and rounds it to 8 bits — in the order and with",
+        "  the interpolation upstream uses for this checkpoint (listed per model below). Decoding",
+        "  PNG / JPEG is *not* part of this — use `createImageBitmap` in the browser, or any",
+        "  decoder in Deno.",
         "- **Compositing is yours.** The pipeline returns the matte, not a cut-out: whether alpha",
         "  goes into an RGBA buffer, gets composited over a flat colour, or is fed to a colour",
         "  decontamination pass is a decision this repository should not make for you.",
@@ -457,6 +480,18 @@ def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
     ]
 
 
+def _birefnet_postprocess(config: Mapping[str, Any]) -> tuple[str, ...]:
+    """このモデルの後処理の手順の説明を引く（{@link BIREFNET_POSTPROCESS_DESCRIPTIONS}）。"""
+    procedure = config["postprocess"]
+    description = BIREFNET_POSTPROCESS_DESCRIPTIONS.get(procedure)
+    if description is None:
+        raise ValueError(
+            f"後処理の手順 {procedure!r} の説明を持たない"
+            f"（既知: {' / '.join(BIREFNET_POSTPROCESS_DESCRIPTIONS)}）— 推し量った説明は載せない"
+        )
+    return description
+
+
 def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
     """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。
 
@@ -484,6 +519,7 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
         f"- **normalization**: `(pixel / 255 - mean) / std`, mean {mean}, std {std}",
         "- **output**: one alpha byte per pixel at the size of the image you passed in (the graph",
         "  itself emits pre-sigmoid logits; the sigmoid and the resize back happen on the host).",
+        *_birefnet_postprocess(config),
         f"- **required GPU memory**: {resources.total} allocated in total with the"
         f" `{BIREFNET_RESOURCE_QUANT}` quant — its",
         f"  weights listed above, resident, plus {resources.intermediates} for the intermediate"

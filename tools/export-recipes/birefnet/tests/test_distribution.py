@@ -25,7 +25,11 @@ from ir_fixtures import Shape, ir_container
 from upstream_fixture import FIXTURE_REVISION, OTHER_REVISION, stamp_fixture_provenance
 
 from _shared.licenses import mit_license
-from birefnet.card import BIREFNET_LICENSE, BIREFNET_UPSTREAM
+from birefnet.card import (
+    BIREFNET_LICENSE,
+    BIREFNET_POSTPROCESS_DESCRIPTIONS,
+    BIREFNET_UPSTREAM,
+)
 from birefnet.distribution import (
     BIREFNET_COPYRIGHTS,
     BIREFNET_DEFAULT_MODEL,
@@ -37,6 +41,7 @@ from birefnet.distribution import (
     BIREFNET_MODELS,
     BIREFNET_OUTPUT_PATHS,
     BIREFNET_PLAIN_DTYPE,
+    BIREFNET_POSTPROCESS,
     BIREFNET_QUANT_SEATS,
     BIREFNET_ROLE,
     BIREFNET_STORAGE_FORBIDDEN,
@@ -47,6 +52,7 @@ from birefnet.distribution import (
     PIPELINE,
     BirefnetSources,
     birefnet_plan,
+    birefnet_postprocess,
     birefnet_repo_name,
     birefnet_role,
     birefnet_series_name,
@@ -113,6 +119,7 @@ _BIREFNET_CONFIG_KEYS = (
     "imageMean",
     "imageStd",
     "interpolation",
+    "postprocess",
 )
 
 
@@ -235,7 +242,7 @@ class TestBirefnetLayout:
         """実行に要るのはグラフ 1 本だけ（tokenizer も表も無い = `assets` は空）。"""
         _, manifest = birefnet_assembled
         model = _birefnet_model(manifest)
-        assert model["pipeline"] == "birefnet/1"
+        assert model["pipeline"] == "birefnet/2"
         assert list(model["weights"]) == [BIREFNET_ROLE]
         assert model["assets"] == {}
         assert list(model["quants"]) == ["f32", "f16"]
@@ -380,6 +387,31 @@ class TestBirefnetPipelineConfig:
         assert config["imageStd"] == list(BIREFNET_IMAGE_STD)
         assert config["interpolation"] == "bilinear"
 
+    def test_the_hr_repository_declares_the_upstream_postprocess(self, birefnet_assembled) -> None:
+        """HR の上流は σ → 8bit → Pillow の BICUBIC（ADR 0125 — A/B の後に上流を採った）。"""
+        _, manifest = birefnet_assembled
+        assert _birefnet_model(manifest)["pipelineConfig"]["postprocess"] == "u8-pil-bicubic"
+
+    def test_the_lucida_repository_declares_its_own_upstream_postprocess(
+        self, tmp_path: Path
+    ) -> None:
+        """Lucida の上流は σ → 浮動小数の antialias bilinear → 8bit。手順は checkpoint から決まる
+        （同じ解像度・同じ前処理でも、HR の手順を写していれば Lucida は自分の上流から外れる）。
+        """
+        sources = _build_birefnet_sources(tmp_path, checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
+        plan = birefnet_plan(sources, BIREFNET_LUCIDA_CHECKPOINT)
+        assert plan.pipeline_config["postprocess"] == "float-bilinear"
+
+    def test_every_checkpoint_has_a_postprocess_the_card_can_describe(self) -> None:
+        """手順の表は帰属表と同じ checkpoint を持ち、値はカードが説明できる手順だけ。"""
+        assert sorted(BIREFNET_POSTPROCESS) == sorted(BIREFNET_UPSTREAM)
+        assert set(BIREFNET_POSTPROCESS.values()) <= set(BIREFNET_POSTPROCESS_DESCRIPTIONS)
+
+    def test_it_refuses_a_checkpoint_without_a_postprocess(self) -> None:
+        """既定の手順で埋めない — 上流と違う後処理を宣言した配布形が黙って成立する。"""
+        with pytest.raises(DistError, match="tiny"):
+            birefnet_postprocess("tiny")
+
 
 class TestBirefnetGraphGate:
     """組み立て門 — ずれても配布形としては成立してしまう組み合わせを、配置の前に落とす。"""
@@ -471,6 +503,9 @@ class TestBirefnetModelCard:
         assert "**Compositing is yours.**" in card
         assert f"resizes to {_DEFAULT_SIDE} × {_DEFAULT_SIDE}" in card
         assert "one alpha byte per pixel" in card
+        # 後処理の手順はモデルの宣言から描く（HR = u8-pil-bicubic）。
+        assert "- **post-processing** (`u8-pil-bicubic`" in card
+        assert "`float-bilinear`" not in card
         # 単一ファイル配布形は廃止済み（ADR 0081 決定 3）— 器の説明が現物と食い違わない。
         assert "a single safetensors file" not in card
         assert "`.krm` part sequence" in card
@@ -507,6 +542,9 @@ class TestBirefnetModelCard:
         assert "ToonOut" in card
         # 前処理を焼き込んだ変種を配らないことと、その理由がカードに残る。
         assert "lucida-m35-comfy.safetensors" in card
+        # 後処理の手順も checkpoint の上流のもの（HR の手順を写さない）。
+        assert "- **post-processing** (`float-bilinear`" in card
+        assert "`u8-pil-bicubic`" not in card
 
     def test_the_default_model_card_does_not_carry_another_models_attribution(
         self, tmp_path: Path

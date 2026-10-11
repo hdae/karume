@@ -36,7 +36,7 @@ MIT の著作権行はリポごとに違う（HR は ZhengPeng の 1 行、Lucid
 （{@link render_birefnet_model_card} の `checkpoint`）— 帰属・著作権行・系列 path が
 **1 つの checkpoint 名から**決まるので、席を跨いだ取り違えは綴りとして作れない。
 
-`pipelineConfig` の数の出どころは **2 つとも独立**:
+`pipelineConfig` の値の出どころは **3 つとも独立**:
 
 - resize 先（`imageWidth` / `imageHeight`）は**焼かれたグラフの入力宣言**から導く（写経しない）。
 - 正規化定数は上流に機械可読な出どころが**無い** — SigLIP2 の `preprocessor_config.json` に
@@ -44,6 +44,9 @@ MIT の著作権行はリポごとに違う（HR は ZhengPeng の 1 行、Lucid
   モデルカードの利用例）の中にしか書かれていない。したがってここが宣言として持ち
   （{@link BIREFNET_IMAGE_MEAN}）、台本側の写し（`birefnet.export.IMAGENET_MEAN`）との一致は
   pytest が毎回突き合わせる（2 表が独立に動く形にはしない）。
+- 後処理の手順（`postprocess`）は **checkpoint** から決まる（{@link BIREFNET_POSTPROCESS}）。上流の
+  手順は系列ごとに違い（ADR 0125）、ロード側（TS）は系列の表を持たない（`config.ts` の MUST —
+  第三者の fine-tune で沈黙の取り違えになる）ので、checkpoint を知っている組み立て段が書く。
 
 公開面は {@link PIPELINE}（`--pipeline birefnet`）と {@link LUCIDA_PIPELINE}
 （`--pipeline lucida`）の 2 つ（`karume.dist.Pipeline`）— リポの dist ドライバ
@@ -77,6 +80,7 @@ from karume.dist import (
 
 from .card import (
     BIREFNET_LICENSE,
+    BIREFNET_POSTPROCESS_DESCRIPTIONS,
     BIREFNET_UPSTREAM,
     birefnet_storage_lines,
     render_birefnet_model_card,
@@ -84,7 +88,7 @@ from .card import (
 
 #: パイプライン契約（ADR 0041 §2 — モデル単位）。TS 側の受理集合は
 #: `BIREFNET_PIPELINE_NAME` / `BIREFNET_PIPELINE_MAJOR`。
-BIREFNET_PIPELINE = "birefnet/1"
+BIREFNET_PIPELINE = "birefnet/2"
 
 #: 配るモデル名の受理集合 = **入力解像度**（綴りの正本はこの 1 つ）。系列は解像度ごとに別
 #: なので、モデル名がそのまま「どの系列を配るか」を指す。
@@ -123,6 +127,21 @@ BIREFNET_MATTE_CHANNELS = 1
 #: TS 側が実装している唯一の補間。上流（`handler.py` / モデルカードの利用例）はどちらも
 #: `torchvision.transforms.Resize((S, S))` を既定の補間で通す = bilinear。
 BIREFNET_INTERPOLATION = "bilinear"
+
+#: checkpoint → 後処理の手順（`pipelineConfig.postprocess` — 綴りは TS 側 `MATTE_PROCEDURES`）。
+#: 各 checkpoint の上流の手順の補間と段の順序（ADR 0125 決定 3）:
+#:
+#: - HR: 同梱 `handler.py` とモデルカードの利用例 = σ → 8bit → Pillow の BICUBIC。
+#: - Lucida: モデルカードの利用例 = σ → torchvision の antialias bilinear（浮動小数）→ 8bit。
+#:
+#: HR の手順は盲検 A/B（8 対とも見分けがつかない）の後に、事前の規則どおり上流を採った
+#: （ADR 0125 の結果の節）。値はカードの説明表（`birefnet.card`）の鍵に含まれること（説明の
+#: 無い手順を書くと、カードが描けない配布形になる — 組み立て時は {@link birefnet_postprocess}、
+#: 表全体は pytest が見る）。
+BIREFNET_POSTPROCESS: Mapping[str, str] = {
+    BIREFNET_HR_CHECKPOINT: "u8-pil-bicubic",
+    BIREFNET_LUCIDA_CHECKPOINT: "float-bilinear",
+}
 
 #: 前処理の正規化定数（節の冒頭のとおり、上流に機械可読な出どころが無いのでここが持つ）。
 #: 正本は同梱 `handler.py` の `ImagePreprocessor` = ImageNet 統計。
@@ -339,8 +358,30 @@ def birefnet_placements(sources: BirefnetSources) -> dict[str, Path]:
     }
 
 
-def birefnet_pipeline_config(graph: Mapping[str, Any], path: Path, model: str) -> dict[str, Any]:
-    """`pipelineConfig`（TS 側スキーマの 5 欄）を焼かれたグラフと正規化定数から組む。
+def birefnet_postprocess(checkpoint: str) -> str:
+    """checkpoint → 後処理の手順（{@link BIREFNET_POSTPROCESS}）。
+
+    MUST: 表に無い checkpoint は組まない — 既定の手順で埋めると、上流の手順と違う後処理を
+    宣言した配布形が黙って成立する。
+    """
+    procedure = BIREFNET_POSTPROCESS.get(checkpoint)
+    if procedure is None:
+        raise DistError(
+            f"BiRefNet 系の checkpoint '{checkpoint}' の後処理の手順が無い"
+            f"（既知: {' / '.join(sorted(BIREFNET_POSTPROCESS))}）"
+        )
+    if procedure not in BIREFNET_POSTPROCESS_DESCRIPTIONS:
+        raise DistError(
+            f"後処理の手順 '{procedure}' はカードが説明できない"
+            f"（既知: {' / '.join(BIREFNET_POSTPROCESS_DESCRIPTIONS)}）"
+        )
+    return procedure
+
+
+def birefnet_pipeline_config(
+    graph: Mapping[str, Any], path: Path, model: str, checkpoint: str
+) -> dict[str, Any]:
+    """`pipelineConfig`（TS 側スキーマの 6 欄）を焼かれたグラフ・正規化定数・checkpoint から組む。
 
     resize 先はグラフの入力宣言そのもの — 前処理が別の寸法へ伸ばすと、値が静かに崩れたまま
     shape だけ合う。入力の名前・階数・batch・チャネル数もここで見る（後段の
@@ -381,6 +422,7 @@ def birefnet_pipeline_config(graph: Mapping[str, Any], path: Path, model: str) -
         "imageMean": list(BIREFNET_IMAGE_MEAN),
         "imageStd": list(BIREFNET_IMAGE_STD),
         "interpolation": BIREFNET_INTERPOLATION,
+        "postprocess": birefnet_postprocess(checkpoint),
     }
 
 
@@ -427,6 +469,7 @@ def birefnet_plan(
     # 帰属を名乗れない checkpoint は系列を読む前に落とす（リポ名の表と帰属表は独立に欠けうる）。
     birefnet_checkpoint(checkpoint)
     birefnet_repo_name(checkpoint)
+    birefnet_postprocess(checkpoint)
     placements = birefnet_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, BIREFNET_STORAGE_REQUIREMENTS)
@@ -440,7 +483,7 @@ def birefnet_plan(
     for dtype in BIREFNET_WEIGHT_DTYPES:
         container = placements[birefnet_role(dtype)]
         graph = ir_graph(container)
-        configs[dtype] = birefnet_pipeline_config(graph, container, model)
+        configs[dtype] = birefnet_pipeline_config(graph, container, model, checkpoint)
         assert_birefnet_graph(graph, container, configs[dtype])
         # 容器が名乗る出所を帰属表へ突き合わせる（`_shared.upstream` — depth_anything と同じ
         # 形）。revision は「名乗っていること」まで: この family の入力は系列だけで、手元の
