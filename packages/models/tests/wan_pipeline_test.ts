@@ -365,6 +365,8 @@ describe("planWanGeneration（generate の入口の門）", () => {
       [{ frames: 33.5 }, "frames"],
       [{ steps: 0 }, "steps"],
       [{ steps: 1.5 }, "steps"],
+      [{ steps: 1001 }, "steps"],
+      [{ steps: 400_000 }, "steps"],
       [{ shift: 0 }, "shift"],
       [{ shift: Number.NaN }, "shift"],
     ];
@@ -372,6 +374,25 @@ describe("planWanGeneration（generate の入口の門）", () => {
       assertThrows(() => plan(request), ModelInputError, message);
     }
     assertEquals(plan({ steps: 1 }).steps, 1);
+    assertEquals(
+      plan({ steps: 1000 }).steps,
+      1000,
+      "上限ちょうど（num_train_timesteps）は境界の内",
+    );
+  });
+
+  it("上限を超える steps は σ 列を作る前に単項の門で落ちる（低水準の RangeError を経ない）", () => {
+    // σ 列を作っていれば巨大な steps は数 GiB の同期ループになり、この 1 行が戻らない。
+    const error = assertThrows(
+      () => plan({ steps: Number.MAX_SAFE_INTEGER }),
+      ModelInputError,
+      "1000 以下",
+    );
+    assertEquals(
+      error.cause,
+      undefined,
+      "σ 列の失敗（cause に RangeError）ではなく単項の門で落ちる",
+    );
   });
 
   it("初期ノイズは seed か latents のどちらか 1 つで、latents は形と有限性を見る", () => {
@@ -427,11 +448,10 @@ describe("planWanGeneration（generate の入口の門）", () => {
   });
 
   it("steps × shift の組で σ 列が壊れる要求は ModelInputError（低水準の RangeError は cause に残す）", () => {
-    // 単項の門（正の有限の shift・1 以上の整数の steps）は通る組。
+    // 単項の門（正の有限の shift・1 以上 1000 以下の整数の steps）は通る組。
     const rejected: readonly Partial<WanGenerateRequest>[] = [
       { shift: 1e6 }, // σ[0] < σ[1]（shift が大きすぎて 1 へ張り付く）
       { shift: 1e-320 }, // σ[0] が Infinity
-      { steps: 400_000 }, // 隣り合う σ が f32 で逆転する
     ];
     for (const request of rejected) {
       const error = assertThrows(() => plan(request), ModelInputError, "σ 列が組めない");
@@ -1021,6 +1041,8 @@ describe("pipelineConfig（manifest の宣言の門）", () => {
       [{ ...RAW, scheduler: { shift: 0 } }, "shift"],
       [{ ...RAW, defaults: { steps: 0, guidance: 5 } }, "steps"],
       [{ ...RAW, defaults: { steps: 2.5, guidance: 5 } }, "steps"],
+      [{ ...RAW, defaults: { steps: 1001, guidance: 5 } }, "1000 以下"],
+      [{ ...RAW, defaults: { steps: 400_000, guidance: 5 } }, "1000 以下"],
       [{ ...RAW, defaults: { steps: 50, guidance: 0.5 } }, "guidance"],
       [{ ...RAW, defaults: { steps: 50, guidance: "5" } }, "guidance"],
     ];
@@ -1035,7 +1057,6 @@ describe("pipelineConfig（manifest の宣言の門）", () => {
     const rejected: readonly [Record<string, unknown>, string][] = [
       [{ ...RAW, defaults: { steps: 50, guidance: Number.MAX_VALUE } }, "guidance"],
       [{ ...RAW, scheduler: { shift: 1e6 } }, "σ 列が組めない"],
-      [{ ...RAW, defaults: { steps: 400_000, guidance: 5 } }, "σ 列が組めない"],
     ];
     for (const [raw, message] of rejected) {
       const error = assertThrows(() => parseWanPipelineConfig(raw), Error, message);

@@ -148,6 +148,9 @@ Deno.test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
   );
   // steps < 2 は sigma の linspace が組めない（sampler の受理集合と同じ下限）。
   assertThrows(() => parseAnimaPipelineConfig(withDefaults({ steps: 1 })), Error, "2 以上の整数");
+  // 上限も sampler の受理集合と同じ（既定が門の外だと、要求が何も渡さない generate が入力起因で落ちる）。
+  assertEquals(parseAnimaPipelineConfig(withDefaults({ steps: 1000 })).defaults.steps, 1000);
+  assertThrows(() => parseAnimaPipelineConfig(withDefaults({ steps: 1001 })), Error, "上限 1000");
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ guidanceScale: "1" })),
     Error,

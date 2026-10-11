@@ -172,8 +172,14 @@ export const planWanRequest = <Text>(
   const positive = resolve(request.prompt, "prompt");
 
   const steps = request.steps ?? config.defaults.steps;
-  if (!Number.isInteger(steps) || steps < 1) {
-    throw new ModelInputError(`steps ${steps} が 1 以上の整数でない`);
+  // 上限は σ 列を作る前に単項の門で見る（`wanUniPcSchedule` の MUST — 巨大な steps で配列を確保して
+  // 同期ループを走らせない）。値は `num_train_timesteps`（超えると整数の timestep が必ず重複する）。
+  const maxSteps = WAN_UNIPC_CONFIG.numTrainTimesteps;
+  if (!Number.isInteger(steps) || steps < 1 || steps > maxSteps) {
+    throw new ModelInputError(
+      `steps ${steps} が 1 以上 ${maxSteps} 以下の整数でない` +
+        "（上限は num_train_timesteps — 超えると整数の timestep が必ず重複する）",
+    );
   }
   const guidance = request.guidance ?? config.defaults.guidance;
   // f32 で見る: CFG は `f32(guidance)` で掛ける（`wanClassifierFreeGuidance`）ので、f64 で有限でも

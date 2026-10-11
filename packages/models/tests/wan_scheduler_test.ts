@@ -312,6 +312,16 @@ Deno.test("UniPC: σ 列の外の step と長さ違いの入力は fail loudly",
   assertThrows(() => wanUniPcSchedule(2, Number.NaN, 1000), RangeError, "shift");
 });
 
+Deno.test("UniPC: steps の上限は num_train_timesteps（ちょうどは受け、超えると σ 列を作る前に落ちる）", () => {
+  // 整数の timestep は trunc(σ·N) で 0〜N−1 の N 通りしか無いので、N を超える steps は必ず重複する。
+  const limit = WAN_UNIPC_CONFIG.numTrainTimesteps;
+  const schedule = wanUniPcSchedule(limit, SHIFT, limit);
+  assertEquals(schedule.timesteps.length, limit, "上限ちょうどは境界の内");
+  assertThrows(() => wanUniPcSchedule(limit + 1, SHIFT, limit), RangeError, "steps");
+  // 配列を確保する前に落ちる: 確保していれば数 GiB の同期ループで、この 1 行が戻らない。
+  assertThrows(() => wanUniPcSchedule(Number.MAX_SAFE_INTEGER, SHIFT, limit), RangeError, "steps");
+});
+
 Deno.test("CFG: uncond + g·(cond − uncond) は上流の式とビット一致（guide 5.0）", () => {
   assertEquals(meta.guidance_scale, 5);
   const got = wanClassifierFreeGuidance(

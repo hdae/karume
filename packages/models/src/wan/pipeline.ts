@@ -211,8 +211,9 @@ export type WanGenerateRequest = {
    */
   readonly latents?: Float32Array<ArrayBuffer>;
   /**
-   * denoise の step 数（1 以上・既定は `pipelineConfig.defaults.steps`）。`shift` との組で σ 列が
-   * 狭義単調減少にならない値（数十万 step など）は `ModelInputError`。
+   * denoise の step 数（1 以上 1000 以下の整数・既定は `pipelineConfig.defaults.steps`）。上限は
+   * `num_train_timesteps`（超えると整数の timestep が必ず重複する）。`shift` との組で σ 列が
+   * 狭義単調減少にならない値は `ModelInputError`。
    */
   readonly steps?: number;
   /**

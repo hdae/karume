@@ -16,6 +16,7 @@ import type { HubRepoRef } from "@karume/hub";
 
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { assertAcceptableResolution, type ImageSize } from "./resolution.ts";
+import { ANIMA_MAX_STEPS } from "./sampler.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const ANIMA_PIPELINE_NAME = "anima";
@@ -159,8 +160,10 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
     record,
     "steps",
     where,
-    (value) => Number.isInteger(value) && value >= 2,
-    "2 以上の整数でない",
+    // 受理集合は生成の門（`sampler.ts` の `assertAcceptableSteps`）と同じ — 既定が門の外だと、要求が
+    // 何も渡さない generate が入力起因として落ちる。
+    (value) => Number.isInteger(value) && value >= 2 && value <= ANIMA_MAX_STEPS,
+    `2 以上の整数（上限 ${ANIMA_MAX_STEPS}）でない`,
   );
   const guidanceScale = readNumber(
     record,

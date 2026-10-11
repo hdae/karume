@@ -23,7 +23,18 @@ const f32 = Math.fround;
 const MAX_PERIOD = 10000;
 
 /**
- * `steps` の受理集合（**2 以上の整数**）を見る門。**この 1 本が所有者**で、生成の入口
+ * `steps` の上限（{@link assertAcceptableSteps}）。
+ *
+ * NOTE: 値は Wan（`wan/scheduler.ts` の `wanUniPcSchedule` — `num_train_timesteps` の 1000）に揃えた
+ * 実用上の上限。Wan の「超えると整数の timestep が必ず重複する」という根拠は Anima には当てはまらない
+ * — Anima の timestep 埋め込みは σ の連続値をそのまま使う（{@link timestepsProj}）。上限の目的は、
+ * 巨大な steps で梯子の `Float32Array` を確保して同期ループ（中断も効かない）を走らせる前に入口で
+ * 止めること。`export` は manifest の既定の門（`config.ts`）が同じ値を引くため。
+ */
+export const ANIMA_MAX_STEPS = 1000;
+
+/**
+ * `steps` の受理集合（**2 以上 {@link ANIMA_MAX_STEPS} 以下の整数**）を見る門。**この 1 本が所有者**で、生成の入口
  * （`pipeline.ts` の `generate`）も {@link sigmaSchedule} 自身もここを呼ぶ。
  *
  * NOTE: 生成の入口は他のノブと並べてここを先に呼び、入力起因の誤りをプロンプト層（トークナイズ）より
@@ -40,6 +51,9 @@ export const assertAcceptableSteps = (steps: number): void => {
     throw new ModelInputError(
       `steps ${steps} が 2 以上の整数でない（sigma の linspace が組めない）`,
     );
+  }
+  if (steps > ANIMA_MAX_STEPS) {
+    throw new ModelInputError(`steps ${steps} が ${ANIMA_MAX_STEPS} 以下でない（steps の上限）`);
   }
 };
 

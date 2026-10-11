@@ -1007,6 +1007,14 @@ VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQue
 （`[1,20]` の 2 桁小数 1,901 通りのうち 55 通り）は受けない。下側へ 1〜2 ulp ずれる小数（例
 `1.18`）は受ける。実配布の shift = 3 系は先頭がちょうど 1 なので通る。
 
+## Anima: steps は 2 以上 1,000 以下の整数だけを受ける
+
+`generate` の `steps` と manifest の `pipelineConfig.defaults.steps` は、2 以上 1,000 以下の整数だけを受ける
+（門は `packages/models/src/anima/sampler.ts` の `assertAcceptableSteps` 1 本。超えると sigma 梯子を確保する前に
+`ModelInputError`）。上限は Wan（`num_train_timesteps` の 1,000）に揃えた実用上の値で、Wan の「超えると整数の
+timestep が重複する」という根拠は Anima には当てはまらない — Anima の timestep 埋め込みは σ の連続値をそのまま
+使う。上限の目的は、巨大な steps で梯子の確保と中断の効かない同期ループを走らせる前に入口で止めること。
+
 ## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
 
 `AnimaGenerateRequest.onEvent` の `denoise-step` が渡せる途中結果は **latent の写し**
@@ -1078,7 +1086,9 @@ t 軸の上限で、モデルが宣言する h / w 軸の範囲（`rope.max_size
 （`planWanGeneration` — GPU に触る前）で `ModelInputError` になる（ADR [0118](decisions/0118-wan21-video-generation.md)
 Consequences）。
 
-- **受理集合**: 寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81（既定 33）。steps は 1 以上の整数、guidance は
+- **受理集合**: 寸法は 832×480 / 480×832、フレーム数は 4n+1 の 5〜81（既定 33）。steps は 1 以上 1,000 以下の整数（上限は
+  `num_train_timesteps` — 整数の timestep は `trunc(σ·1000)` の 0〜999 しか無いので、超えると timestep が必ず重複する。
+  σ 列を作る前に拒む。manifest の `defaults.steps` も同じ値域）、guidance は
   1 以上の有限の数（1 で CFG を回さない — 上流の `guidance_scale > 1` と同じ。guidance 1 で `negativePrompt` を渡すと
   拒む）、shift は正の有限の数。検収したのは 832×480 の 33 / 81 フレームと 480×832 の VAE（ADR 0118 段 5 / 6 / 8）。
   寸法とフレーム数はモデルカードと fixture が写しを持つ（`packages/models/src/wan/descriptor.ts` の

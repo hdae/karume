@@ -77,8 +77,9 @@ export const parseWanPipelineConfig = (
     defaults,
     "steps",
     "pipelineConfig.defaults",
-    (value) => Number.isInteger(value) && value >= 1,
-    "1 以上の整数でない",
+    // 上限は要求の門と同じ `num_train_timesteps`（`scheduler.ts` の `wanUniPcSchedule` の MUST）。
+    (value) => Number.isInteger(value) && value >= 1 && value <= WAN_UNIPC_CONFIG.numTrainTimesteps,
+    `1 以上 ${WAN_UNIPC_CONFIG.numTrainTimesteps} 以下の整数でない`,
   );
   const guidance = readNumber(
     defaults,

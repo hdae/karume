@@ -101,14 +101,22 @@ export const flowShiftedSigmas = (
  *
  * MUST: 返す前に σ 列の構造を見る（正・狭義単調減少・最後が 0）。f32 へ落とした隣り合う σ が
  * 等しいと `h = 0` で更新が NaN になり、生成の途中で遠くの症状として出る。
+ *
+ * MUST: steps の上限は `numTrainTimesteps`（Wan は 1000）で、配列を確保する前に見る。整数の
+ * timestep は `trunc(σ·N)` なので 0〜N−1 の N 通りしか無く、N を超える steps は timestep が必ず
+ * 重複する。上限が無いと巨大な steps で σ 列を全部作る同期ループ（中断も効かない）を走らせてから
+ * 落ちる。
  */
 export const wanUniPcSchedule = (
   steps: number,
   shift: number,
   numTrainTimesteps: number,
 ): WanUniPcSchedule => {
-  if (!Number.isInteger(steps) || steps < 1) {
-    throw new RangeError(`steps ${steps} が 1 以上の整数でない`);
+  if (!Number.isInteger(steps) || steps < 1 || steps > numTrainTimesteps) {
+    throw new RangeError(
+      `steps ${steps} が 1 以上 ${numTrainTimesteps} 以下の整数でない` +
+        "（上限は num_train_timesteps — 超えると整数の timestep が必ず重複する）",
+    );
   }
   if (!Number.isFinite(shift) || shift <= 0) {
     throw new RangeError(`shift ${shift} が正の有限値でない`);
