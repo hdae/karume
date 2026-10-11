@@ -90,6 +90,32 @@
   テストの登録時に環境キーを同期で読み、`openResults` も同期 API である。直すなら 2 本を「環境を引数で受ける本体」と
   「既定の `ENVIRONMENT` を束ねる薄い包み」に割り、CPU のテストだけを本体へ向ける（GPU のテストの呼び手は変えない）。
   直した後は、`navigator.gpu` を未定義にした状態で 2 本のテストの import が `requestAdapter` を呼ばないことを確かめる。
+- **Codex 深掘りの修正の波の範囲外の残り（起票 2026-10-11）**: 修正の波の実装者とレビューが範囲外として記録した気づきのうち、
+  backlog / known-issues に無く、2026-10-11 の main で残っていることを確かめたもの（1 行 1 件・括弧の ID は
+  `.claude/reviews/2026-10-04_de127de1/` の指摘〈git 追跡外〉）。着手の順は未定。
+  - GEMM 族の平坦添字（R2B-009 の残り）: `packages/runtime/src/kernels/gemm.ts` の `gemmParams` は m / n / k を個別に u32 で見るだけで、matmul / bmm の `M·K`・`K·N` と linear の活性側 `m·k` が 2^32 を超える形を拒否しない（linear の重み側 `n·k` は `linearParams` が見ている）。
+  - deform_conv2d の平坦添字（R2B-009 の残り）: `packages/runtime/src/kernels/deform-conv2d.ts` の `deformConv2dParams` は出力の要素数だけを u32 で見て、入力・重み・offset・modulator の平坦添字が 2^32 を超える形を拒否しない（conv3d の `assertConvFlatExtents` に当たる門が無い）。
+  - 行カーネルの行内ループ（R2B-007 の残り）: reduce / RMS / softmax / layer_norm などの行内ループ `i = i + workgroup サイズ`（例 `packages/runtime/src/kernels/rms-norm.ts`）は `dim + workgroup サイズ` が 2^32 を超える行で折り返して終わらず、dispatch 数を通らないので `gridStrideWorkgroups` の検査では塞げない — 各行カーネルの params に `dim + workgroup サイズ ≤ 2^32` の門が要る。
+  - Wan の `latents` の写しの時点（R6A-005 / 旧 P-3 の残り）: `packages/models/src/wan/pipeline.ts` と `ti2v-pipeline.ts` の `generate` は直列化の鎖の順番待ちの後に門と写しを行うので、待ちの間に呼び手が `latents` を書き換えると書き換え後の値で生成する — 呼び出し時点の値を保証するには鎖の外（`generate` の入口）で写す。
+  - T5 系 tokenizer の追加語彙: `packages/models/src/text/t5-tokenizer.ts` は共通の `parseAddedTokens`（i32 の値域だけを見る）を使い、追加トークンの id が語彙の行数未満か・同じ綴りの語彙の行と一致するかを見ない（irodori の `parseIrodoriAddedTokens` が持つ検査が無い・anima の T5 と Wan の umT5 の両方に掛かる・配布中の資産はどちらも満たす）。
+  - SBV2 の `z_p` の f32 溢れ: `packages/models/src/sbv2/host/latent.ts` の `buildZp` は `noiseScale` が倍精度で有限でも、f32 の最大値を超える積（例 `noiseScale = 1e39`）を `Float32Array` へ入れて ±Inf にし、そのまま voice のグラフへ渡す（`z_noise` の門と同じ穴・GPU 出力の `m_p` / `logs_p` が混ざるので、送出型の切り分けの設計が要る）。
+  - BiRefNet / Depth Anything の出力 dtype（R6B-013 の出力側）: `packages/models/src/birefnet/pipeline.ts` と `depth-anything/pipeline.ts` は構築前に出力の形だけを見て dtype を見ず、f32 でないグラフは 1 回実行した後の `asF32` で初めて落ちる。
+  - GPU 取得後の検査の helper 化（R6A-006 の根）: Wan（`wan/family.ts`）/ Anima / SBV2 / Irodori / BiRefNet / Depth Anything / SigLIP2 / vowel-detector の 8 系列が、GPU 取得後の feature と `requiredLimits` の照合を同じ形でそれぞれの `pipeline.ts` に持つ — 1 本の helper へ寄せる候補（系列ごとの照合の漏れが R6A-006 を生んだ）。
+  - recipe の pytest が wan の依存グループ無しで赤になる: `tools/export-recipes/wan/tests/` の `test_dit_reference.py`（2 件）・`test_i2v_preprocess_ref.py`・`test_sources.py`・`test_vae_tiling_ti2v.py` が `pytest.importorskip` を欠き、opt-in の `wan` グループ（diffusers / huggingface_hub）が無い venv では SKIP でなく `ModuleNotFoundError` で落ちる（素の `uv run pytest` が赤になる）。
+  - hub の `parseWeightEntry` の 2 乗の複製: `packages/hub/src/manifest.ts` の `parseWeightEntry` は dtype ラベル 1 件ごとに累積オブジェクトをスプレッドで複製するので処理量がラベル数の 2 乗で増え、1 エントリのラベル数には規模上限（ADR 0041 決定 7）が無い — `Object.fromEntries` で一度に組むか、ラベル数の上限を足す。
+  - Python の整数欄の整数値 float（R7-013 の残り）: `tools/exporter/src/karume/` の `verify._as_reader_index`・`states._window`・`migrate._count`・`limits` の `pipelineConfig` の容量は整数値の float（例 `4.0`）を拒否し、TS の parser（`Number.isSafeInteger`）が受理する集合とずれる。
+  - Python の正規表現の Unicode `\d`（R7-014 の残り）: `tools/exporter/src/karume/migrate.py` の `PIPELINE_RE`・`legacy.py` の `_PIECE_PATTERN`・`container.py` の連番ファイル名の照合は `\d` が ASCII 以外の数字（例 全角の `１`）も受理する — `[0-9]` か `re.ASCII` にする（`container.py` の `_REPR_PATTERN` は repr の出力だけを読むので対象外）。
+  - models の repo 名の規則の写し: `packages/models/src/hub/repo-ref.ts` の `REPO_SEGMENT_RE` / `assertRepoSpelling` が hub の `isRepoName`（`packages/hub/src/manifest.ts`）と同じ規則を写しで持つ — 1 本にするには hub の mod.ts に述語を公開する（公開 API の追加）必要がある。
+  - hub の宣言 size の区間検査の重複: `packages/hub/src/sources/local.ts`・`container.ts`・`fetch.ts` の 3 か所が同じ形の区間検査を持つ — 内部の helper 1 本へ寄せる候補。
+  - state_append / readonly の CPU 参照の次元の検査: `packages/runtime/src/reference/state-attention.ts` の `referenceStateAppend` と `referenceStateAttentionReadonly` は次元を `< 1` の比較だけで見るので、NaN や非整数の次元が素通りする（states 形の入口 `assertShape` は整数かを先に見る形に直っている）。
+  - CPU 参照の `allclose` の長さ 0: `packages/runtime/src/reference/allclose.ts` は長さ 0 どうしを `pass: true` にする — 空を許すか例外にするかは未裁定で、`packages/runtime/tests/reference_ops_test.ts` が現状の観測値だけを縛っている（レビュー L-R3-4）。
+  - state attention の pad 行の書き込み: `packages/runtime/src/kernels/state-attention.ts` と `state-attention-stats-pv.ts` の変種ごとに同じ形のガードを別々に書いている — WGSL の共通断片 1 か所へ寄せる候補（今は静的テストが全変種の形を縛るので、食い違いの再発は検出できる）。
+  - bilinear の補間の重み: `packages/runtime/src/kernels/upsample-bilinear2d.ts` の λ は torch の `guard_index_and_lambda` と違って [0, 1] に収めないので、1 軸が 2^24 を超えて源座標が端を越える形でだけ端点が厳密な値にならない可能性がある（未再現・添字の範囲外読みは塞いである）。
+  - Wan の ftfy の badness の固定値: TS（`packages/models/src/wan/text/prompt-clean.ts`）は資産の `badness` の sha256 を `FTFY_BADNESS_SHA256` で固定するが、recipe の書き出し（`tools/export-recipes/wan/prompt_clean.py`）には同じ値の照合が無い — ftfy の版を上げて焼き直したときは TS のテストの赤で初めて気づく。
+  - exporter のテストの被験体: `tools/exporter/tests/test_emit.py` の 905 行付近と 1556 行付近は `int4_weight_graph(conv=True, conv_groups=2)` の既定の Cout 3（groups 2 で割れない — conv1d の契約違反）のグラフを使う — 公開経路を通らないので緑のまま。
+  - tokenizer のテストの乱数: `packages/models/tests/gemma4_tokenizer_test.ts` の `nextRandom` は素の乗算 `state * 1103515245` が 2^53 を超えて下位ビットが潰れ、乱択のばらつきが小さい — `Math.imul` の形にする。
+  - limitations の数の食い違い: `docs/limitations.md` の「生成 sequence」の節の導入文は「制約が 2 つある」と書くが、箇条は 3 本ある。
+  - ADR 0075 の一意化の記述: `docs/decisions/0075-quant-presentation.md` の「取得層は path で一意化してから合計する」は、ADR 0038 追記の `fileRefKey`（`repo@revision/path`）への切り替えと食い違う。
 - **Wan2.2 の T2V / I2V の通しの e2e の helper の重複を寄せる（起票 2026-10-10・利用者の裁定 = later）**: `e2e_wan_ti2v_pipeline_test.ts`（T2V）と
   `e2e_wan_ti2v_i2v_pipeline_test.ts`（I2V — ADR 0121 段 9b）が同じ形の小物を別々に持つ — fixture の読み込み（`readFixture`）・差の計算と整形（`difference` /
   `formatDifference`）・ビット一致（`bitsEqual`）・RGB の取り出し（`rgbBytes`）・非有限の数え上げ（`countNonFinite`）・プロンプトの解決（`textOf`）・帯の導出
