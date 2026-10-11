@@ -480,7 +480,8 @@ gemma4 / anima / sbv2 / irodori の e2e は、パイプラインが内部で dev
 - 2 回の `requestAdapter` が同じ物理アダプタを返す保証は無い（[limitations.md](limitations.md) の「DL 前の GPU 適合チェック」節）。
   複数 GPU の機で実走だけが別のアダプタを選ぶと、そのアダプタの出力を照合済みのキーの行と突き合わせる（偽の不一致）か、
   `KARUME_REFERENCE` の書き込みでその行へ別のアダプタの出力を記録しうる。単一 GPU の機では起きない。
-- GPU を自分で取ってパイプラインへ渡す e2e（Wan の全て・runtime 側の e2e）は、実走の GPU そのものを照合している
-  （`verifyRunningGpu` / `assertAdapterMatchesEnvironment`）。
+- sha256 の行を持つ e2e のうち GPU を自分で取るもの（Wan の pipeline / swap 系の 4 ファイル・runtime 側の実資産 e2e・
+  models 側の depth_anything / birefnet / vowel_detector の実資産 e2e）は、取得の直後に実走の GPU そのものを照合している
+  （`verifyRunningGpu` / `assertAdapterMatchesEnvironment`）。sha256 の行を持たない Wan の e2e（dit / umt5 / ab / vae 系）も同じく照合している。
 - 直し方は未決: テストから GPU を注入する（パイプラインが自前で要求するのと同じ feature で取る必要がある）か、
   パイプラインが実際に使ったアダプタの情報を読めるようにする（公開面の変更）。
