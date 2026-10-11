@@ -533,7 +533,7 @@ Deno.test("run の焼き込み実行は送り込みの待ちが reject したら
   assertEquals(log, ["a"], "待ちが落ちた後に次のステップを積んだ");
 });
 
-Deno.test("run の焼き込み実行は待ちの後のステップの throw を、同期の throw ではなく reject として返す", async () => {
+Deno.test("run の焼き込み実行は待ちの後の継続の throw を、返す Promise の reject として届け、次のステップを積まない", async () => {
   const log: string[] = [];
   const recipes = [
     dispatchStep([runnableDispatch("a", [1, 1, 1])]),
@@ -541,6 +541,9 @@ Deno.test("run の焼き込み実行は待ちの後のステップの throw を�
   ];
 
   // 2 本目のステップの bind group が無い（generation 面も無い）— 待ちの後の継続の中で throw する。
+  // 縛るのは、その throw が呼び手へ返した Promise の reject として届くこと（継続を返り値の鎖から切り離せば
+  // 未処理の reject になってここが赤）と、throw の後に何も積まないこと。継続は待ちの後に走るので、
+  // 下の catch（同期の throw）は今の形では届かない — 継続を待ちの前へ繰り上げる退行の保険でしかない。
   let running: Promise<void> | undefined;
   try {
     running = executeBakedPlanPaced(
