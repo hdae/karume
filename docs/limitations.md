@@ -192,6 +192,11 @@ NaN を落とすため、全要素 NaN の行が safe 系の空行判定に化�
 [decisions/0020](decisions/0020-nan-propagation-bitwise.md) と
 [decisions/0044](decisions/0044-runtime-attention-mask.md) 追記 2026-08-31。
 
+NOTE: states 形 attention の PV は、述語（causal・窓）の外の列で GPU と CPU 参照の扱いが違う。
+GPU は live 範囲の述語外の列にも重み 0 × V を足し、CPU 参照はその列の V を読まない（数式どおり）。
+有限の V ではどちらも述語外の寄与が 0 で値は変わらないが、述語外の V に NaN / ±Infinity があると
+GPU の行だけが NaN になる。
+
 ## 融合 attention の加算 mask は −inf を**値として**運ぶ（Finite Math Assumption 依存）
 
 exporter が焼く加算 mask 定数は帯外を literal −Infinity で表し（`masked_fill` の有限

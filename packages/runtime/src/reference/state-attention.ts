@@ -11,19 +11,26 @@
  * - 論理 col → 物理行の写像・両側述語・空行 → 0 は**意味論そのもの**なので同じ式になる。
  *   ここが同じでも突合は恒真化しない（GPU 側は 3 dispatch とバッファ跨ぎ、参照は 1 ループで、
  *   一致するのは値だけ）。
+ * - 走査範囲は GPU 側と**共有しない**。参照は論理列 `[0, P+Q)` を上端から歩き、列は述語だけで
+ *   選ぶ（窓の下限を割った所で打ち切るのは、窓の述語が col について単調だから — 述語の外の列を
+ *   読み飛ばすのと同じ集合になる）。GPU の live 範囲（`stateColumnBase` / `stateLiveColumns`）を
+ *   借りると、その範囲が列を狭く取りこぼす誤りを両側が共有して突合が恒真になる（広く誤る分は
+ *   述語が落とすので無害）。
  *
  * MUST: 空行（述語を満たす col が 1 本も無い行）と述語外の寄与は**厳密 0**（tolerance ではなく
- * 厳密比較で見る門の相手 — ADR 0067 決定 6）。述語外の寄与が 0 になるのは **V が有限である
- * 前提で**ある: live 範囲の述語外の列も重み 0 × V を足すので、V に NaN / ±Inf があると
- * 0 × NaN でその列を live に含む全ての行が NaN になる（非有限値は保証しない —
- * docs/limitations.md「非有限値（NaN / ±Infinity）は検査しない」）。
+ * 厳密比較で見る門の相手 — ADR 0067 決定 6）。参照は述語外の列の K / V を**読まずに飛ばす**
+ * （数式 `O[row] = Σ_{述語内の col} P[row,col] · V(col)` のとおり）。GPU は live 範囲の述語外の
+ * 列にも重み 0 × V を足すので、両側が一致するのは **V が有限のとき**である。有限の V では
+ * 0 × V = 0 を足しても和は変わらず、参照の値は live 範囲で 0 × V を足す形とビット同一になる。
+ * V に NaN / ±Inf があると GPU は 0 × NaN でその列を live に含む行が NaN になり、参照は
+ * ならない — 非有限値は契約外（docs/limitations.md「非有限値（NaN / ±Infinity）は検査しない」）。
  * MUST: pad 行（`row ≥ queryLength`）は**厳密 0 を書く**（出力は full-write されるが、
  * ADR 0066 追記 6 の「値が契約上無意味」を 0 で固定した — GPU 側は pad 行の live 走査を
  * 丸ごと省く形でこれを満たす。空行 ⊂ pad 行なので、空行 → 0 はこの規約が包含する）。逆に
  * `state_append` は先頭 `queryLength` 行しか書かない（スロットは full-write 対象外）。
  */
 
-import { stateColumnBase, stateLiveColumns, stateSliding } from "../kernels/state-attention.ts";
+import { stateSliding } from "../kernels/state-attention.ts";
 import { ReferenceOpError, type RefTensor } from "./ops.ts";
 
 /** states 形の形状と論理長（記号は ADR 0067 決定 4 — src/kernels/state-attention.ts の表）。 */
@@ -144,6 +151,7 @@ const slotRow = (window: number, capacity: number, col: number): number =>
  * states 形 attention。出力は `[B,H,M,D]`（pad 行を含む全 M 行）。
  *
  * 述語は**両側**（causal `col ≤ P + row` AND sliding `col ≥ max(0, P + row − W + 1)`）。
+ * 列は論理列 `[0, P+Q)` から述語だけで選び、述語外の列は K / V を読まずに飛ばす（モジュール doc）。
  * 空行は出力が厳密 0（行 max が −inf のときの構造的な 0 — ADR 0067 決定 6）。
  * pad 行（`row ≥ query`）も厳密 0（`out` の 0 初期化のまま — モジュール doc の値契約）。
  */
@@ -157,12 +165,11 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
   assertLength("slotK", input.slotK, batch * kvHeads * capacity * depth);
   assertLength("slotV", input.slotV, batch * kvHeads * capacity * depth);
   const scale = Math.fround(input.scale);
-  const base = stateColumnBase(window, past);
-  const live = stateLiveColumns(window, past, query);
+  // 論理列の全数。列番号は number（f64）で持つ — sliding の P は u32 の上端まで取りうるので、
+  // Int32 に詰めると 2^31 以上が負に巻き戻る。
+  const columns = past + query;
   const shape = [batch, heads, chunkRows, depth];
   const out = new Float32Array(batch * heads * chunkRows * depth);
-  const scores = new Float32Array(live);
-  const weights = new Float32Array(live);
   for (let plane = 0; plane < batch * heads; plane += 1) {
     // kv 平面は**整数除算**（`z / r = b·Hkv + h/r` — GPU の `wid.z / r` と同じ恒等式）
     const kvPlane = Math.floor(plane / repeat);
@@ -170,16 +177,21 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
     for (let row = 0; row < query; row += 1) {
       const qBase = (plane * chunkRows + row) * depth;
       const limit = past + row;
-      // ① S（述語外は −inf。live の全列を埋める = GPU が S へ書く範囲と同じ）
-      for (let cl = 0; cl < live; cl += 1) {
-        const col = base + cl;
+      // 述語を満たす列を論理列の上端から歩いて集める。causal の上限より上は飛ばし、窓の下限を
+      // 割ったら打ち切る — 窓の述語 `limit − col < W` は col が小さいほど偽になる単調な形なので、
+      // 一度外れた列より下は全て外れる（sliding の P は u32 の上端まで取りうるので、0 まで
+      // 歩くと参照が終わらない）。
+      const selected: number[] = [];
+      for (let col = columns - 1; col >= 0; col -= 1) {
+        if (col > limit) continue;
         // 下限は GPU 側（`in_window`）と同じ `limit − col < W` の形（u32 の巻き戻り安全形）
-        const inWindow = col <= limit &&
-          (!stateSliding(window) || limit - col < window);
-        if (!inWindow) {
-          scores[cl] = Number.NEGATIVE_INFINITY;
-          continue;
-        }
+        if (stateSliding(window) && limit - col >= window) break;
+        selected.push(col);
+      }
+      // 和は論理列の昇順で積む（集めた順は降順）。
+      selected.reverse();
+      // ① S（述語を満たす列だけ。述語外の列は K を読まない）
+      const scores = selected.map((col) => {
         const kBase = col < past
           ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
           : (kvPlane * chunkRows + (col - past)) * depth;
@@ -188,30 +200,27 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
         for (let d = 0; d < depth; d += 1) {
           acc += (input.q[qBase + d] * scale) * (source[kBase + d] * scale);
         }
-        scores[cl] = Math.fround(acc);
-      }
+        return Math.fround(acc);
+      });
       // ② safe-softmax（identity −inf・空行は全 0）
       let amax = Number.NEGATIVE_INFINITY;
-      for (let cl = 0; cl < live; cl += 1) amax = Math.max(amax, scores[cl]);
+      for (const score of scores) amax = Math.max(amax, score);
       if (amax === Number.NEGATIVE_INFINITY) {
         // 空行は出力**厳密 0**（out は 0 初期化なので書かずに次の行へ）
         continue;
       }
       let total = 0;
-      for (let cl = 0; cl < live; cl += 1) total += Math.exp(scores[cl] - amax);
-      for (let cl = 0; cl < live; cl += 1) {
-        weights[cl] = Math.fround(Math.exp(scores[cl] - amax) / total);
-      }
-      // ③ O[row, d] = Σ_col P[row,col] · V(col, d)
+      for (const score of scores) total += Math.exp(score - amax);
+      const weights = scores.map((score) => Math.fround(Math.exp(score - amax) / total));
+      // ③ O[row, d] = Σ_{述語内の col} P[row,col] · V(col, d)（述語外の V は読まない）
       for (let d = 0; d < depth; d += 1) {
         let acc = 0;
-        for (let cl = 0; cl < live; cl += 1) {
-          const col = base + cl;
+        for (const [i, col] of selected.entries()) {
           const vBase = col < past
             ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
             : (kvPlane * chunkRows + (col - past)) * depth;
           const source = col < past ? input.slotV : input.insV;
-          acc += weights[cl] * source[vBase + d];
+          acc += weights[i] * source[vBase + d];
         }
         out[qBase + d] = Math.fround(acc);
       }

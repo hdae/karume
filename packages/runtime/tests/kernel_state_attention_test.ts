@@ -563,6 +563,184 @@ Deno.test("CPU 参照: 空行（述語を満たす col が無い pad 行）の�
   assertAlmostEquals(out.data[0], 0, 1e-6);
 });
 
+Deno.test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓の下限の外に NaN を置いても値が変わらない）", () => {
+  // 数式 O[row] = Σ_{述語内の col} P · V(col) のとおり、述語外の V は和に入らない。live 範囲を
+  // 走って 0 × V を足す形だと、述語外の NaN が 0 × NaN でその行を NaN にする。
+  // 共通: K / q は全て 1（述語内の重みが一様）・V(col) = col・D=1。wrap 済みの古い物理行と
+  // 論理長より先の物理行にも NaN を置く（どの形でも読まれてはいけない）。
+  const cases = [
+    {
+      // full・P=3 / Q=2: row 0 の述語は {0..3}（平均 1.5）。col 4（ins 行 1）は上限の外
+      name: "full の causal 上限の外",
+      window: 0,
+      capacity: 8,
+      nanColumn: 4,
+      row: 0,
+      expected: 1.5,
+    },
+    {
+      // W=2・C=4・P=3 / Q=2: row 0 は {2,3}（平均 2.5）。col 4 は上限の外
+      name: "sliding の causal 上限の外",
+      window: 2,
+      capacity: 4,
+      nanColumn: 4,
+      row: 0,
+      expected: 2.5,
+    },
+    {
+      // W=2・C=4・P=3 / Q=2: row 1 は {3,4}（平均 3.5）。col 2 は窓の下限の外（row 0 は読む列）
+      name: "sliding の窓の下限の外",
+      window: 2,
+      capacity: 4,
+      nanColumn: 2,
+      row: 1,
+      expected: 3.5,
+    },
+  ];
+  const [past, query, chunkRows] = [3, 2, 2];
+  for (const { name, window, capacity, nanColumn, row, expected } of cases) {
+    const slotRowOf = (col: number) => stateSliding(window) ? col % capacity : col;
+    const slotV = new Float32Array(capacity).fill(Number.NaN);
+    const insV = new Float32Array(chunkRows);
+    for (let col = 0; col < past + query; col += 1) {
+      const value = col === nanColumn ? Number.NaN : col;
+      if (col < past) {
+        // sliding では窓の外に出た列（col < P − W + 1）の物理行を NaN のまま残す
+        if (!stateSliding(window) || col > past - window) slotV[slotRowOf(col)] = value;
+      } else {
+        insV[col - past] = value;
+      }
+    }
+    const out = referenceStateAttention({
+      batch: 1,
+      heads: 1,
+      kvHeads: 1,
+      chunkRows,
+      depth: 1,
+      capacity,
+      window,
+      past,
+      query,
+      q: new Float32Array(chunkRows).fill(1),
+      insK: new Float32Array(chunkRows).fill(1),
+      insV,
+      slotK: new Float32Array(capacity).fill(1),
+      slotV,
+      scale: 1,
+    });
+    assertEquals(out.data[row], expected, name);
+  }
+});
+
+/**
+ * GPU の走査形（live 範囲 `[stateColumnBase, +stateLiveColumns)` を走り、述語外の列にも
+ * 重み 0 × V を足す）を CPU で書き下したもの。参照は論理列を全部走って述語外を飛ばすので、
+ * 有限の V で両者がビット同一であることが「走査の形を変えても値は動かない」の根拠になる。
+ */
+const liveRangeAttention = (input: StateAttentionRefInput): Float32Array<ArrayBuffer> => {
+  const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = input;
+  const scale = Math.fround(input.scale);
+  const base = stateColumnBase(window, past);
+  const live = stateLiveColumns(window, past, query);
+  const slotRowOf = (col: number) => stateSliding(window) ? col % capacity : col;
+  const rowOf = (kvPlane: number, col: number) =>
+    col < past
+      ? { source: "slot" as const, offset: (kvPlane * capacity + slotRowOf(col)) * depth }
+      : { source: "ins" as const, offset: (kvPlane * chunkRows + (col - past)) * depth };
+  const out = new Float32Array(batch * heads * chunkRows * depth);
+  const scores = new Float32Array(live);
+  const weights = new Float32Array(live);
+  for (let plane = 0; plane < batch * heads; plane += 1) {
+    const kvPlane = Math.floor(plane / (heads / kvHeads));
+    for (let row = 0; row < query; row += 1) {
+      const qBase = (plane * chunkRows + row) * depth;
+      const limit = past + row;
+      for (let cl = 0; cl < live; cl += 1) {
+        const col = base + cl;
+        if (!(col <= limit && (!stateSliding(window) || limit - col < window))) {
+          scores[cl] = Number.NEGATIVE_INFINITY;
+          continue;
+        }
+        const { source, offset } = rowOf(kvPlane, col);
+        const k = source === "slot" ? input.slotK : input.insK;
+        let acc = 0;
+        for (let d = 0; d < depth; d += 1) {
+          acc += (input.q[qBase + d] * scale) * (k[offset + d] * scale);
+        }
+        scores[cl] = Math.fround(acc);
+      }
+      let amax = Number.NEGATIVE_INFINITY;
+      for (let cl = 0; cl < live; cl += 1) amax = Math.max(amax, scores[cl]);
+      if (amax === Number.NEGATIVE_INFINITY) continue;
+      let total = 0;
+      for (let cl = 0; cl < live; cl += 1) total += Math.exp(scores[cl] - amax);
+      for (let cl = 0; cl < live; cl += 1) {
+        weights[cl] = Math.fround(Math.exp(scores[cl] - amax) / total);
+      }
+      for (let d = 0; d < depth; d += 1) {
+        let acc = 0;
+        for (let cl = 0; cl < live; cl += 1) {
+          const { source, offset } = rowOf(kvPlane, base + cl);
+          acc += weights[cl] * (source === "slot" ? input.slotV : input.insV)[offset + d];
+        }
+        out[qBase + d] = Math.fround(acc);
+      }
+    }
+  }
+  return out;
+};
+
+Deno.test("CPU 参照: 有限の V では、live 範囲で述語外にも 0 × V を足す形とビット同一", () => {
+  // 掃引: full / sliding（容量 = 窓・窓 + 2 で wrap 済みの古い行を作る）× P × Q。全ての物理行
+  // （窓の外・論理長より先を含む）に有限の乱数を置く — 述語外の V が値に出ないことを縛る。
+  // P には u32 の上端付近も置く（論理列番号が 2^31 を超え、[0, P+Q) を 0 まで歩けない形）。
+  let seed = 0x2545f491;
+  const random = (): number => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return (seed / 2 ** 32) * 4 - 2;
+  };
+  const filled = (count: number) => Float32Array.from({ length: count }, random);
+  const [batch, heads, kvHeads, chunkRows, depth] = [1, 2, 1, 3, 3];
+  let compared = 0;
+  for (const window of [0, 1, 2, 3, 5]) {
+    const capacities = stateSliding(window) ? [window, window + 2] : [12];
+    for (const capacity of capacities) {
+      for (const past of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xfffffffe]) {
+        for (let query = 1; query <= chunkRows; query += 1) {
+          if (!stateSliding(window) && past + query > capacity) continue;
+          const input: StateAttentionRefInput = {
+            batch,
+            heads,
+            kvHeads,
+            chunkRows,
+            depth,
+            capacity,
+            window,
+            past,
+            query,
+            q: filled(batch * heads * chunkRows * depth),
+            insK: filled(batch * kvHeads * chunkRows * depth),
+            insV: filled(batch * kvHeads * chunkRows * depth),
+            slotK: filled(batch * kvHeads * capacity * depth),
+            slotV: filled(batch * kvHeads * capacity * depth),
+            scale: 0.5,
+          };
+          const actual = referenceStateAttention(input).data;
+          const expected = liveRangeAttention(input);
+          assertEquals(
+            new Uint32Array(actual.buffer),
+            new Uint32Array(expected.buffer),
+            `W=${window} C=${capacity} P=${past} Q=${query}`,
+          );
+          compared += 1;
+        }
+      }
+    }
+  }
+  // 掃引が空回りしていないこと（full は容量 12 に収まる 10 P × 3 Q・sliding は 8 容量 × 11 P × 3 Q）
+  assertEquals(compared, 30 + 264);
+});
+
 Deno.test("CPU 参照: GQA は kv 平面を ⌊z/r⌋ で写す（剰余写像だと値が変わる）", () => {
   const [batch, heads, kvHeads, chunkRows, depth, capacity] = [2, 4, 2, 1, 1, 1];
   const repeat = heads / kvHeads;
