@@ -82,6 +82,8 @@
 
 ## later
 
+- **活性 f16 の実行形（w16a16）（起票 2026-10-11・利用者「今度やる」）**: 今の runtime は重みの格納だけを f16 にでき、計算と活性は f32（attention だけ `attentionCompute: "f16"` がある — ADR 0006 は活性 f16 を不採用）。価値は中間の容量で、BiRefNet の 2048² のように中間のテンソルが VRAM の大半を占める形で効く（ADR 0113）。`shader-f16` が要る。上流の w16a16 とビット単位の一致は見込めない（カーネルが違う — ADR 0005 の追記 2026-10-11 の数値の水準で扱う）。下調べは [research 2026-08-04](research/2026-08-04-intermediate-f16-design.md)。
+
 - **テストの helper の results.ts / reference.ts を GPU の探索から切り離す（起票 2026-10-11・Codex 深掘りレビュー R8-008・利用者の裁定 = 起票のみ）**:
   `packages/runtime/tests/helpers/environment.ts` の `ENVIRONMENT` は、モジュール評価時に `requestAdapter()` を呼んで確定する。
   `helpers/results.ts` と `helpers/reference.ts` はこれを値として import する。そのため「実 GPU は要らない」と書く
@@ -94,6 +96,13 @@
 - **Codex 深掘りの修正の波の範囲外の残り（起票 2026-10-11）**: 修正の波の実装者とレビューが範囲外として記録した気づきのうち、
   backlog / known-issues に無く、2026-10-11 の main で残っていることを確かめたもの（1 行 1 件・括弧の ID は
   `.claude/reviews/2026-10-04_de127de1/` の指摘〈git 追跡外〉）。着手の順は未定。
+  - states 形の見積りの写し（裁定 6 のレビュー）: `packages/runtime/src/runtime/estimate.ts` の `transientSlotBytes` は行統計を `allocBefore = base + 1` で数えるが、実行（`buildStateAttention`）は S と行統計の両方を ①QK の前で確保する。first-fit の配置しだいで `workspaceBytes` が実際の計画と食い違いうる（試した形では一致）。
+  - 分解 attention の行ブロックの見積り（裁定 6 のレビュー）: `rowBlockAttentionSteps` の勘定は `maxStorageBufferBindingSize` が無いと今も WebGPU core の既定で割って数える。融合 attention と同じく、枚数が上限に依る形では上限を要求する規則（ADR 0124 決定 7）へ揃える。
+  - Anima の段ごとの見積り（裁定 6 のレビュー）: `packages/models/src/anima/pipeline.ts` の `stageNeed` は quant 席の `attentionCompute` / `attentionScoreStorage` を `EstimateOptions` に渡していない（VAE の融合 attention は f32 で数えられる・今の形では総和に差は無い）。
+  - Gemma の pipeline の dispose と分岐の包み（裁定 8 のレビュー）: `packages/models/src/gemma/pipeline.ts` の `#hand`（`sequence()` と `fork` が共有）は、await 明けの inner の dispose が pipeline の dispose の段（drafter Session → target Session）と順序づけられていない。今は await の数で先に積まれるだけ。
+  - safetensors の読み出しの helper: `readBuffer` / `viewOf` / `floatsOf` が Wan の DiT 用の `packages/models/tests/helpers/wan-ti2v-dit.ts` にしか無く、BiRefNet の fixture テストがそれを import している。汎用の `helpers/safetensors.ts` へ移す（利用者 6 本）。
+  - `tools/export-recipes/tests/test_optional_group_imports.py` は配布名をそのまま import 名にするので、pillow → PIL のように名前の違うパッケージの module 直下の import を掴めない（門の doc も緩む方向の取りこぼしを認めている）。
+  - Deno と Chrome の backing の差: Wan2.2 の 121 フレームの実用席で 5.97 GiB 対 4.80 GiB（ADR 0121）の原因は未調査。候補は幾何プロファイル（Deno は `default`）と `maxBufferSize`（領域の分かれ方）の 2 説（ADR 0124 のリスク・段 4b で材料を記録）。
   - GEMM 族の平坦添字（R2B-009 の残り）: `packages/runtime/src/kernels/gemm.ts` の `gemmParams` は m / n / k を個別に u32 で見るだけで、matmul / bmm の `M·K`・`K·N`、bmm のバッチを掛けた平坦添字（`batch·M·K` など）と linear の活性側 `m·k` が 2^32 を超える形を拒否しない（linear の重み側 `n·k` は `linearParams` が見ている）。
   - deform_conv2d の平坦添字（R2B-009 の残り）: `packages/runtime/src/kernels/deform-conv2d.ts` の `deformConv2dParams` は出力の要素数だけを u32 で見て、入力・重み・offset・modulator の平坦添字が 2^32 を超える形を拒否しない（conv3d の `assertConvFlatExtents` に当たる門が無い）。
   - 行カーネルの行内ループ（R2B-007 の残り）: reduce / RMS / softmax / layer_norm などの行内ループ `i = i + workgroup サイズ`（例 `packages/runtime/src/kernels/rms-norm.ts`）は `dim + workgroup サイズ` が 2^32 を超える行で折り返して終わらず、dispatch 数を通らないので `gridStrideWorkgroups` の検査では塞げない — 各行カーネルの params に `dim + workgroup サイズ ≤ 2^32` の門が要る。
@@ -322,7 +331,7 @@
   VRAM の観測〈同じ要求の DiT の段の山は I2V 7,927 / T2V 7,931 MiB — encoder の確保は残らない〉・フル verify〈HEAD `6679d123`・4,035 passed・0 failed〉・
   Opus の差分レビュー〈28 件・バグ 0・medium 2 件は `08f21894` / `6679d123`〉・カードと docs（`620a0766` / `732f507b`）・配布形の組み直し〈README.md だけ変化〉
   — ADR 0121 追記「段 9d の結果」。残る確認 1 つ: `cba99c24` の T2V の 50 ステップの実用席の床は GPU 未走（次に T2V の 50 ステップを回すとき）。
-  **段 9 ✅ → I2V を閉じた。次 = 一旦休憩**（利用者が触って使い方を見る）→ 来週の順（裁定 2026-10-10）: ② now 節の退避〈✅ 2026-10-10 — 済んだ記録を research の退避先へ〉→ ③ Codex 深掘りの修正の波〈進行中 2026-10-11 — 推奨案で直せる指摘は取り込み済み: medium 9 件・low / info 183 件のうち修正 100・docs の修正 52・Anima の int8 attention の端数縮退の見える化・テスト不足 7 件・依存グラフの門の typesDependency・ADR 0108 決定 12 の撤回・未対応 op のエラーの判定材料。残り = 判断待ち 15 件・BiRefNet の上流順の A/B（裁定 4）・行ブロック分割の予算化（裁定 6）・会話の分岐 fork（裁定 8）・gpu-lab の EXIF（裁定 18）〉
+  **段 9 ✅ → I2V を閉じた。次 = 一旦休憩**（利用者が触って使い方を見る）→ 来週の順（裁定 2026-10-10）: ② now 節の退避〈✅ 2026-10-10 — 済んだ記録を research の退避先へ〉→ ③ Codex 深掘りの修正の波〈進行中 2026-10-11 — 推奨案で直せる指摘は取り込み済み: medium 9 件・low / info 183 件のうち修正 100・docs の修正 52・Anima の int8 attention の端数縮退の見える化・テスト不足 7 件・依存グラフの門の typesDependency・ADR 0108 決定 12 の撤回・未対応 op のエラーの判定材料。判断待ちの項は裁定 20〜27 で決着し取り込み済み。裁定 4 / 6 / 8 / 18 の機能 ✅ 2026-10-11 — 裁定 4 = BiRefNet の後処理の手順を系列ごとに配布形で宣言〈HR は上流の手順 `u8-pil-bicubic`・盲検 A/B は 8 対とも見分けがつかず規則どおり上流・pipeline は `birefnet/2`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)〉・裁定 6 = attention の行ブロックの予算〈runtime の `SessionOptions.attentionRowBlockMaxBytes` だけ・出力はビット同一・121 フレームの実用席で 512 MiB なら VRAM の山 −1.46 GiB・ADR [0124](decisions/0124-attention-row-block-budget.md)〉・裁定 8 = 会話の分岐 `fork`〈ADR 0066 / 0083 の追記〉・裁定 18 = gpu-lab の EXIF〈利用者の手動確認待ち〉・gpu-lab の Wan の結果を連番 PNG の zip で保存。上流との一致の方針を ADR 0005 に追記。残り = Wan の既定に行ブロックの予算を入れるか〈利用者の判断待ち〉・HR の f32 席の退役〈次の作業〉〉
   〈+ レビューのテスト不足 7 件・依存グラフの門の typesDependency・gpu-lab の EXIF〉→ ④ H-37 の計測 → ⑤ outputs/diag と tools/shared の整理
   〈+ DeBERTa の導出台本を tools/ へ〉→ ⑥ 0.14.0 の準備〈Wan 家族の初公開・Wan2.1 を上げるかはそのとき〉。
   （以下は着手前の列挙）**次** → 段 7（実用席の自機 A/B の門〈S の組は未決 — 832×480 の値が使えなくなった〉・census・決定性・利用者の視認〈参照席自身の品質の裁定を兼ねる・seed 4 本以上・
@@ -506,6 +515,12 @@
   — f32 席は同じ値を倍の VRAM で持つだけ）。Lucida は f32 既定 + f16 任意（f16 は有損失 — α の平均絶対差 最大 7.0e-5）。
   recipe（`dist` の HR を f16 席 1 つで組める形・既定席・pytest・カードの relation）の変更と、HR の f32 系列 2 本 +
   golden / sha 参照行 / `HELD_SERIES` の f32 行の退役は配布反映の回に行う（ADR 0113 追記）。**
+  **追記 2026-10-11**: 同じ回に、配布形の pipeline を `birefnet/2`（後処理の手順の欄 `postprocess` — HR = `u8-pil-bicubic`・
+  Lucida = `float-bilinear`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)）で上げ、`BIREFNET_SOURCES` の pin を
+  更新する（裁定 28 の但し書き = マニフェストの変更は次のリリースにまとめる）。main は `birefnet/2` だけを読むので、それまで
+  公開中の revision からの `fromPretrained` は major の門で落ちる。HR の f32 席の退役は配布反映を待たずに先に進め
+  （利用者 2026-10-11）、手元のミラーの `birefnet/2` での組み直しもその作業で行う（`dist` は上流 revision を持たない
+  系列を拒むので、系列の焼き直しが先に要る — 手元の今のミラーは `birefnet/1` のまま）。
 - **irodori 2 リポ（`irodori-v4-small` / `irodori-v4.1-small`）の HF 再アップロード + pin 更新（B4 = ADR [0114](decisions/0114-irodori-dit-context-split.md)）**:
   配布形に役割 `dit_context` が増えた（breaking — 持たない配布形は新しい models で部品の欠落として落ちる）。later の
   「irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す」と同じ breaking 波の回に行う。ローカルミラーは
