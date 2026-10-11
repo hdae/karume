@@ -43,7 +43,7 @@ which are bare switches. Unknown keys are rejected rather than silently ignored.
 | `--source <dir>`                 | `models/karume-gemma4`  | Read a local distribution directory.                                                                               |
 | `--repo <owner/name[@revision]>` | —                       | Fetch from Hugging Face instead.                                                                                   |
 | `--system <text>`                | none                    | System turn placed at the head of the conversation.                                                                |
-| `--max-new-tokens <n>`           | `256`                   | Per-turn generation cap (stop tokens are not counted).                                                             |
+| `--max-new-tokens <n>`           | `256`                   | Per-turn generation cap; the stop token counts toward it.                                                          |
 | `--temperature <x>`              | asset default           | Sampling temperature; `0` is greedy.                                                                               |
 | `--top-k <n>` / `--top-p <x>`    | asset default           | Candidate truncation.                                                                                              |
 | `--seed <n>`                     | asset default           | Sampling seed.                                                                                                     |

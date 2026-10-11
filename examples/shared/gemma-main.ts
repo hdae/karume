@@ -72,7 +72,8 @@ export const runGemmaCli = async (
   const DEFAULT_SOURCE = `models/karume-${family}`;
 
   /**
-   * 1 ターンで生成する token 数の上限（停止 token は含まれない）。
+   * 1 ターンで抽選する token 数の上限。停止 token もこの数に**含める**
+   * （`Gemma4ChatOptions.maxNewTokens` と同じ勘定）。
    *
    * QAT も通常 Gemma と同じ 256（ADR 0097 追記 7 の 1 — 旧既定 64 は追記 6 の当時の値で、
    * モデルの制限ではなく台本の既定だった）。実際に伸ばせる長さは
