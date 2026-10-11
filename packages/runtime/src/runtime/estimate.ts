@@ -139,9 +139,10 @@ export type AdmissionScenario = {
   /**
    * 中間（transient）slot 表の必要バイト = prepared backing の必要側と同義（**近似**）。
    *
-   * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（exact-size LIFO 再利用・
-   * 消費回数は `countUses`・グラフ出力は pinned で解放しない・別名化できる出力は
-   * 確保せず入力の実体を別名で使う）で slot 表を再生した総バイト。**states 形 attention の
+   * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（消費回数は `countUses`・
+   * グラフ出力は pinned で解放しない・別名化できる出力は確保せず入力の実体を別名で使う）で
+   * slot の生存区間を作り、実行相と同じ配置関数（生存区間と offset による配置 — ADR 0093）が
+   * 割り当てた領域の総和。**states 形 attention の
    * ノード内一時（スコア S と行統計）はここに入る** — 融合の成立に依存せず必ず出て、capacity
    * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。
    * **行ブロック attention（ADR 0060）の窓は融合後の形で入る** — 実行相と同じ融合計画が掴んだ
@@ -254,15 +255,16 @@ export type EstimateOptions = {
   /**
    * `maxStorageBufferBindingSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
    *
-   * states 形 attention のノード内一時は**行ブロック 1 枚ぶん**しか同時生存せず、その枚数は
-   * この上限だけで決まる（{@link planStateAttention} — ADR 0022 の実行時オートチューン禁止により
-   * device の granted limit と束縛だけの純関数）。
+   * 使うのは 2 箇所。① states 形 attention のノード内一時の行ブロック枚数 — 一時は**行ブロック
+   * 1 枚ぶん**しか同時生存せず、その枚数はこの上限だけで決まる（{@link planStateAttention} —
+   * ADR 0022 の実行時オートチューン禁止により device の granted limit と束縛だけの純関数）。
+   * ② 全グラフの中間配置の束縛上限 — 行ブロック attention の枚数と、slot 実寸の上限検査に使う
+   * （実行相と同じ granted 値で詰める — ADR 0093 決定 4 / 5）。② は無指定なら WebGPU core 既定で詰める。
    *
    * MUST: states 形 attention を持つグラフでは**必須**（{@link stateAttentionTemps} が
    * fail loudly）。既定値で埋めると、どの device でも実際には出ない枚数を estimator だけが
-   * 主張する。states 形 attention を持たないグラフでは読まないが、**値域（正の安全整数）は
-   * グラフの形に依らず入口で見る**（読まない形でだけ不正値が黙って通ると、値域門の位置が
-   * 呼び手から見えない）。
+   * 主張する。**値域（正の安全整数）はグラフの形に依らず入口で見る**（① を読まない形でだけ
+   * 不正値が黙って通ると、値域門の位置が呼び手から見えない）。
    */
   readonly maxStorageBufferBindingSize?: number;
   /**
@@ -915,7 +917,8 @@ const transientSlotBytes = (
  *   並ぶ（{@link AdmissionScenarioSpec}）。`generation.chunkBuckets` の各形はシナリオに並べず、
  *   {@link AdmissionReport.peakAccountedBytes} の最大にだけ入る。
  * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
- *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。
+ *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。全グラフの中間配置の
+ *   束縛上限にも使う（無指定なら WebGPU core 既定）。
  * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
  *   {@link AdmissionReport.peakAccountedBytes} の片側の項になる。
  */

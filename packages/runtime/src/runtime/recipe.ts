@@ -688,8 +688,8 @@ const bakeGroups = (
  * bind group が指す実体は 1 つも動かない。
  *
  * MUST: context 所有の実体を束ねる dispatch は**焼かない**（ADR 0066 決定 5）。backing は
- * Session 所有・容量 1 で、どの GenerationContext と組むかは run のたびに変わるため、ここで
- * 焼くと切替後も前の context の KV を束ねたまま回る。その位置は
+ * Session 所有（予算の内側なら形ごとに複数保持する — ADR 0095）で、どの GenerationContext と
+ * 組むかは run のたびに変わるため、ここで焼くと切替後も前の context の KV を束ねたまま回る。その位置は
  * {@link bakeGenerationBindGroups} が埋める。
  * MUST: 呼ぶのは run の errorScope 区間の内側だけ（createBindGroup の validation 失敗は
  * 例外にならない）。
