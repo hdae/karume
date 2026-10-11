@@ -201,10 +201,15 @@ const EXPOSE_GC_FLAG = "--v8-flags=--expose-gc";
  * Deno は `./packages/hub/tests` を `packages/hub/tests` と同じ場所として扱うので、`./` は剥がす。
  * MUST: `..` の区間と絶対パスは剥がさず throw する —— REPO_ROOT 相対の走査結果と突き合わせられず、
  * 一致しない除外を「除外ゼロ」と読み替えると Deno 側では走らないテストを被覆済みと数える。
+ * 単独の `.` と途中の `/./` も同じ理由で throw する（先頭以外の `.` は前方一致の照合を
+ * ずらす。正規化を足すより、レーンの綴りを素直な形へ直させる方が門の読みが単純に保てる）。
  */
 const normalizeLanePath = (task: string, path: string): string => {
   const relative = path.replace(/^(?:\.\/)+/, "");
-  if (relative === "" || relative.startsWith("/") || relative.split("/").includes("..")) {
+  if (
+    relative === "" || relative.startsWith("/") ||
+    relative.split("/").some((segment) => segment === ".." || segment === ".")
+  ) {
     throw new Error(`レーン解析: ${task} のパスがリポ相対の形でない: ${path}`);
   }
   return relative;
@@ -380,6 +385,11 @@ Deno.test("レーン解析: リポの外を指しうるパスは推測せず落�
       "deno test -A /packages/hub/tests",
       "deno test -A packages/hub/tests --ignore=../hub/tests",
       "deno test -A packages/hub/tests --ignore=/packages/hub/tests",
+      // 単独の `.` と途中の `.` の区間も、走査側の綴り（`./` 無しのリポ相対）と前方一致しない。
+      "deno test -A .",
+      "deno test -A packages/./hub/tests",
+      "deno test -A packages/hub/tests/.",
+      "deno test -A packages/hub/tests --ignore=packages/./hub/tests",
     ]
   ) {
     assertThrows(() => parseLane("synthetic", command), Error, "リポ相対", command);
