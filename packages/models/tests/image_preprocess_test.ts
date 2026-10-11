@@ -326,6 +326,33 @@ Deno.test("mean / std が正規化に使えない値なら落ちる（Inf / NaN 
   }
 });
 
+Deno.test("有限でも正規化の結果が f32 で溢れる mean / std は落ちる（裾の Inf / NaN を黙って返さない）", () => {
+  const image: Rgb8Image = { data: new Uint8Array(12).fill(128), width: 2, height: 2 };
+  const max = Number.MAX_VALUE;
+  const cases: readonly [
+    string,
+    readonly [number, number, number],
+    readonly [number, number, number],
+  ][] = [
+    // (128 − mean·255) / (std·255) が +Inf（極小の std で割る）。
+    ["極小の std", imageMean, [imageStd[0], Number.MIN_VALUE, imageStd[2]]],
+    // mean·255 が f64 で Infinity（offset が非有限）。
+    ["極大の mean", [imageMean[0], max, imageMean[2]], imageStd],
+    // mean·255 / std·255 がどちらも Infinity で Inf / Inf = NaN。
+    ["極大の mean と std", [imageMean[0], max, imageMean[2]], [imageStd[0], max, imageStd[2]]],
+    // f64 では有限でも f32 へ落とすと溢れる（(255 − 0) / (std·255) = 1e39）。
+    ["f32 だけで溢れる std", [0, imageMean[1], imageMean[2]], [1e-39, imageStd[1], imageStd[2]]],
+  ];
+  for (const [label, mean, std] of cases) {
+    assertThrows(
+      () => normalizeToNchw(image, mean, std),
+      ModelInputError,
+      "f32 で有限に収まらない",
+      label,
+    );
+  }
+});
+
 // ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
 
 describe("共通 image 層の失敗をホストが 400 / 500 に振り分けるとき", () => {

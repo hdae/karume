@@ -338,6 +338,16 @@ export const normalizeToNchw = (
   for (let channel = 0; channel < CHANNELS; channel += 1) {
     const offset = mean[channel] * RESCALE_DIVISOR;
     const divisor = std[channel] * RESCALE_DIVISOR;
+    // 有限の mean / std でも裾では係数か f32 の結果が溢れる（極小の std で ±Inf・極大の mean で Inf − Inf）。
+    // 式は画素について単調なので、係数の有限性と画素の端点 0 / 255 での f32 の結果を見れば全画素を覆う
+    // （式そのものは変えない — Pillow / transformers の参照との丸めを動かさない）。
+    const ends = [0, 255].map((pixel) => Math.fround((pixel - offset) / divisor));
+    if (!Number.isFinite(offset) || !Number.isFinite(divisor) || !ends.every(Number.isFinite)) {
+      throw new ModelInputError(
+        `normalizeToNchw: channel ${channel} の mean ${mean[channel]}・std ${std[channel]} では` +
+          "画素 0〜255 の正規化が f32 で有限に収まらない",
+      );
+    }
     for (let index = 0; index < plane; index += 1) {
       out[channel * plane + index] = (image.data[index * CHANNELS + channel] - offset) / divisor;
     }
