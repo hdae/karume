@@ -380,6 +380,15 @@ image-to-video rows, the condition image.
   frame rate (16 fps for Wan2.1, 24 fps for Wan2.2), and the slider seeks. The condition column starts
   with the generation; an image-to-video row then shows `I2V <file>（<width>x<height>・fit <fit>）` (the
   decoded image's size, and `・寸法は画像から自動` when the size came from the image).
+- **連番 PNG（zip）を保存** (save frames as PNG, zipped) — next to the playback controls; enabled once a
+  generate has produced a clip and nothing else is running. It encodes every frame of the latest clip as
+  a lossless RGB PNG (the same encoder as the Anima tab) and downloads one uncompressed zip named
+  `wan-<seed>-<width>x<height>-<frames>f-<fps>fps.zip` (for example `wan-42-1280x704-121f-24fps.zip`),
+  holding only `frame-0001.png`, `frame-0002.png`, … in frame order (four digits, more only past 9,999
+  frames). The status line counts the frames while it encodes; like a generate, it holds the page's
+  lock, so it does not overlap a generate or a measurement on another tab. To make a video file, feed
+  the frames to a tool of your choice, for example
+  `ffmpeg -framerate 24 -i frame-%04d.png -c:v libx264 -pix_fmt yuv420p clip.mp4` (use the clip's fps).
 - **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/5`; the generation is in
   each `loads[]` entry, in each row, and next to the loaded source; an image-to-video row has `image`:
   `file`, `width`, `height`, `fit`, and `sizeFromImage`, without the pixels).
