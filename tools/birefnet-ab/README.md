@@ -33,6 +33,11 @@ A dry run on any PNG written by `encodePng`: `run --image <png> [--crop <left>,<
 
 ## Output (under `--out` only)
 
+`--out` must resolve to a directory below `outputs/` at the root of the repository that contains
+this `main.ts` (the checkout or worktree you run it from); a relative path is resolved against the
+current directory. Anything else is rejected before a single file is read or written, so the blind
+pairs, the key and the logits never land in a git-tracked place.
+
 - `blind/` — what the reviewer sees: `pair-<n>-{checker,black,white}.png` (A on the left, B on the
   right), `pair-<n>-zoom.png` (the 64×64 window where the two differ most, ×8, over the three
   backgrounds) and `answer-sheet.md` (A / same / B).

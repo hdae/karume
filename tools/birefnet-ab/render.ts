@@ -48,6 +48,36 @@ export type Subject = {
   readonly crop?: Window;
 };
 
+/** POSIX の絶対パスの `.` と `..` と重なった `/` を字面で畳む（リンクは辿らない）。 */
+const normalizeAbsolute = (path: string): string => {
+  if (!path.startsWith("/")) throw new Error(`birefnet-ab: '${path}' が POSIX の絶対パスでない`);
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+};
+
+/**
+ * `--out` を絶対パスに解決し、リポの根の `outputs/` の**下**であることを確かめて返す（`cwd` からの
+ * 相対も受ける）。
+ *
+ * MUST: 外なら書く前に fail loudly — 盲検の対・対応表・logit はリポの記録に載せない（画像は
+ * `outputs/` だけ — ADR 0125 決定 10）。`outputs/` の外へ書けると、git 追跡下に置いたまま
+ * コミットに紛れうる。判定は字面の正規化だけで、シンボリックリンクは辿らない（書く前なので
+ * 出力先がまだ無い）。
+ */
+export const resolveOutputDirectory = (out: string, cwd: string, repoRoot: string): string => {
+  const resolved = normalizeAbsolute(out.startsWith("/") ? out : `${cwd}/${out}`);
+  const outputs = `${normalizeAbsolute(repoRoot)}/outputs`;
+  if (!resolved.startsWith(`${outputs}/`)) {
+    throw new Error(`birefnet-ab: --out ${out}（= ${resolved}）が ${outputs}/ の下でない`);
+  }
+  return resolved;
+};
+
 /** 画像 1 枚ぶんの A/B の材料。 */
 export type Pair = {
   readonly subject: Subject;

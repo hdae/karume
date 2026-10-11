@@ -17,7 +17,7 @@
  * パイプラインと同じ 1 本（`loadBirefnetState` / `matteLogits`）。このファイルは GPU の段だけを持ち、
  * 手順の当て方と書き出しは `render.ts`（GPU に触らない）。
  *
- * 出力（`--out` の下だけに書く）:
+ * 出力（`--out` の下だけに書く。`--out` はリポの根の `outputs/` の下でなければ落とす）:
  *
  * - `blind/` — 利用者に見せる盲検の対（手順の名前を含まない）: `pair-<番号>-{checker,black,white}.png`
  *   （左 = A・右 = B の合成）と `pair-<番号>-zoom.png`（差の大きい 64×64 の窓の 8 倍 — 上から市松・黒・
@@ -42,6 +42,7 @@ import {
   alphasOf,
   logitsFile,
   type Pair,
+  resolveOutputDirectory,
   type Subject,
   writeAbOutputs,
   writeAlphas,
@@ -56,6 +57,18 @@ const DEFAULT_SOURCE = "models/karume-birefnet-hr";
 const DEFAULT_IMAGES = "outputs/examples/karume-anima";
 /** 盲検の割り付けの既定の seed（対応表の再現に使う — mapping.json に残す）。 */
 const DEFAULT_SEED = 20261011;
+
+/**
+ * リポの根（このファイルから 2 つ上）。本体の checkout でも worktree でも、走らせた `main.ts` の
+ * 属するリポを指す（`--out` の置き場の判定に使う — {@link resolveOutputDirectory}）。
+ */
+const repoRoot = (): string => {
+  const url = new URL("../../", import.meta.url);
+  if (url.protocol !== "file:") {
+    throw new Error(`birefnet-ab: ローカルのファイルとして走らせる（${import.meta.url}）`);
+  }
+  return decodeURIComponent(url.pathname);
+};
 
 const USAGE = "commands | run [--source <配布形>] [--images <dir>] [--out <dir>] [--seed <整数>]" +
   " [--image <PNG> [--crop <left>,<top>,<width>,<height>]]";
@@ -220,7 +233,12 @@ const runReference = async (
 
 const run = async (options: Map<string, string>): Promise<void> => {
   const source = options.get("source") ?? DEFAULT_SOURCE;
-  const out = options.get("out") ?? `outputs/birefnet-ab/${new Date().toISOString().slice(0, 10)}`;
+  // MUST: 置き場の判定は何かを読み書きする前（outputs/ の外へ 1 ファイルも書かない）。
+  const out = resolveOutputDirectory(
+    options.get("out") ?? `outputs/birefnet-ab/${new Date().toISOString().slice(0, 10)}`,
+    Deno.cwd(),
+    repoRoot(),
+  );
   const spelledSeed = options.get("seed");
   if (spelledSeed !== undefined && !/^\d+$/.test(spelledSeed)) {
     throw new Error(`--seed ${spelledSeed} が非負整数でない`);
