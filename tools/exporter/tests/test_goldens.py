@@ -416,12 +416,13 @@ class TestAFailedRegenerationKeepsTheOldFixture:
     def test_a_failed_part_replacement_leaves_it_untouched(self, previous, monkeypatch):
         root, before = previous
         real = os.replace
-        seen = 0
 
         def flaky(source, target):
-            nonlocal seen
-            seen += 1
-            if seen == 2:
+            # どの据え替えかは target 名で決める — `publish.os` は os モジュールそのものなので、
+            # 呼び出しの順番で数えると作業席の据え替え（`staged_publication`）も数に入り、
+            # publish 内部の順序が変わると別の段を落とすテストに化ける。2 本目の part は
+            # 1 本目が据わった後なので「part の据え替えの途中」になる。
+            if re.search(r"-00002-of-\d{5}\.krm$", os.fspath(target)):
                 raise OSError("据え替えの途中で落ちた回")
             real(source, target)
 
