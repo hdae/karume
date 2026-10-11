@@ -40,7 +40,8 @@ describe("Anima の生成要求が受理できないとき", () => {
     const direct = assertThrows(() => assertAcceptableSteps(1001), ModelInputError, "1000 以下");
     const viaSchedule = assertThrows(() => sigmaSchedule(1001, 3), ModelInputError);
     assertEquals(direct.message, viaSchedule.message, "steps の診断が 2 か所で割れている");
-    // 確保していれば数 GiB の Float32Array と同期ループで、この 1 行が戻らない。
+    // 門が配列の確保より先に効くことの証拠: 上限の無いコードでは `new Float32Array(2⁵³)` が即座に
+    // `RangeError`（Invalid typed array length）を投げるので、型が違ってこの 1 行が赤になる。
     assertThrows(() => sigmaSchedule(Number.MAX_SAFE_INTEGER, 3), ModelInputError, "1000 以下");
   });
 
