@@ -372,10 +372,10 @@ measurements in `docs/research/`.
   matches Pillow's `BICUBIC` bit for bit (`postprocess: "u8-pil-bicubic"`). It used to take the
   floating-point antialiased bilinear path that Lucida's upstream uses (`"float-bilinear"`, still
   Lucida's). Rounding stays half-up (upstream truncates). Only the contour changes, and only when the
-  image size differs from the model's resolution: on eight test images the alpha inside the contour
-  band moved by 0.3–2 steps on average and by up to 25 steps (8-bit), and the two were
-  indistinguishable in a blind A/B. At the model's own resolution the output is effectively
-  unchanged (ADR 0125).
+  image size differs from the model's resolution: on the seven of eight test images with a detected
+  foreground (the eighth had none and did not change), the alpha inside the contour band moved by
+  0.3–2 steps on average and by up to 25 steps (8-bit), and all eight pairs were indistinguishable
+  in a blind A/B. At the model's own resolution the output is effectively unchanged (ADR 0125).
 
 ### Fixed
 
@@ -439,10 +439,11 @@ measurements in `docs/research/`.
   `karume-wan-browser/2`.
 - `@karume/models/birefnet`: the pipeline contract is now `birefnet/2`, and `pipelineConfig` gains a
   required `postprocess` (`"u8-pil-bicubic"` or `"float-bilinear"`; anything else is rejected).
-  This release's `BirefnetPipeline` rejects a `birefnet/1` distribution — including the currently
-  published `karume-birefnet-hr` / `karume-lucida` revisions — as an unsupported major; rebuild a
-  local mirror with `dist.py --pipeline birefnet` / `--pipeline lucida`. The published repositories
-  and the pinned `BIREFNET_SOURCES` revisions are updated at the next release.
+  This release's `BirefnetPipeline` rejects a `birefnet/1` distribution — including the
+  `karume-birefnet-hr` / `karume-lucida` revisions published with 0.13.0 and earlier — as an
+  unsupported major; rebuild a local mirror with `dist.py --pipeline birefnet` /
+  `--pipeline lucida`. This release republishes both repositories as `birefnet/2` and pins
+  `BIREFNET_SOURCES` to the new revisions.
 
 ## [0.13.0] - 2026-09-25
 
