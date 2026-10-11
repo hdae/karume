@@ -99,10 +99,13 @@ n = 1 から n ≥ 2 への切り替えは行窓の別キー・別 WGSL に替�
 - 既存の勘定（states 形の S と行統計・分解の行ブロック attention の窓の一時）は、実行と同じ導出（決定 1）で枚数を決める。
   1 行ぶんに満たない予算は、実行の計画導出と同じ文言で落ちる。
 - **融合 attention op のノード内一時（S・行統計・i8a8 の量子化の中間）も見積りに数える**（裁定 34 = a）。実行と同じ純関数
-  （`planAttentionBlocks`・`attentionRoute`・量子化の一時の大きさ）で数える。これは予算の有無に関わらず、既存の全系列の見積りの
-  値を増やす既定の挙動の変更である。そこで、先に既存の呼び手の前後の表を
-  [research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md) に書き、勘定の変更と `unaccounted` の
-  文言の変更を別のコミットにする。
+  （`planAttentionBlocks`・`attentionRoute`・`attentionScoreElementBytes`・`attentionI8a8TempBytes`）で数える。これは予算の
+  有無に関わらず、融合 attention op を持つ全系列の見積りの値を増やしうる既定の挙動の変更である。そこで、先に既存の呼び手の
+  前後の表を [research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md) に書き、勘定の変更と
+  `unaccounted` の文言の変更を別のコミットにした（表の結果: Anima の段ごとの見積りと Gemma の見積りは前後で不変）。
+- 実行が拒否する組（mask × a8・GQA × a8・i8a8 の i32 縮約の門・states 形 × f32 以外の席）には見積りも数を返さない。判定は
+  実行と同じ純関数（`fusedAttentionViolation` / `stateAttentionVariantViolation` —
+  `packages/runtime/src/runtime/recipe-builders/attention.ts`）で、文言も同じ。
 - `EstimateOptions` は `attentionCompute` / `attentionScoreStorage` も受ける。省略は runtime の既定と同じ f32 で数える
   （`stateAttentionReduce` と同じ前例）。
 
