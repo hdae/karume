@@ -52,6 +52,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
+import { assertConvAxisExtent } from "./conv-bounds.ts";
 import { gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
@@ -278,6 +279,9 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
   for (const [name, value] of positive) {
     if (value < 1) throw new CodegenError(`conv1d params: ${name} は正整数（${value}）`);
   }
+  // MUST: `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32 — direct 版と暗黙 GEMM 版の
+  // 受理集合を揃えるため、両者が通るこの検査に置く）。
+  assertConvAxisExtent("conv1d params", "l", dims.lengthIn, dims.padding);
   // MUST: グループの割り切れは params 層でも見る（シェーダの除算が切り捨てになり、
   // 読む入力チャネル帯が黙ってずれる — 契約検査と二重だが、カーネル直呼びの経路も塞ぐ）。
   if (dims.channelsIn % dims.groups !== 0 || dims.channelsOut % dims.groups !== 0) {

@@ -33,6 +33,7 @@
 import { tiledWorkgroups } from "../codegen/dispatch.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
+import { assertConvAxisExtent } from "./conv-bounds.ts";
 import { gemmMTileGeometry, gemmWgsl, LINEAR_SCALE_BINDING } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import { weightKeyPart, type WeightStorage } from "./weight-storage.ts";
@@ -206,26 +207,10 @@ export const conv3dIgemmParams = (dims: Conv3dDims): Uint32Array<ArrayBuffer> =>
   const n = dims.timeOut * dims.heightOut * dims.widthOut;
   const k = dims.channelsIn * dims.kernelT * dims.kernelH * dims.kernelW;
   assertU32Params("conv3d igemm params", { n, k });
-  // MUST: 軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`。WGSL は入力座標を
-  // `i32(出力座標·stride) + i32(k·dilation) − i32(padding)` の 32 ビット整数で組むので、真の座標が
-  // i32 の域を出ると折り返し、範囲外 0 の門を実在する別の画素として通り抜ける（例外の出ない誤値）。
-  // 出力長の式（shapes.ts）から `(out − 1)·stride ≤ L + 2p − d(K − 1) − 1` と
-  // `k·dilation ≤ d(K − 1) ≤ L + 2p − 1` が従い、座標は `[−p, L + p − 1]` に入るので、この 1 条件で
-  // 中間値が全て i32 に収まる。CPU 参照の意味論は変えない（GPU 実行の subset — ADR 0064 軸 A）。
-  const axes: readonly (readonly [string, number, number])[] = [
-    ["t", dims.timeIn, dims.paddingT],
-    ["h", dims.heightIn, dims.paddingH],
-    ["w", dims.widthIn, dims.paddingW],
-  ];
-  for (const [axis, length, padding] of axes) {
-    const extent = length + 2 * padding;
-    if (extent > 0x7fff_ffff) {
-      throw new CodegenError(
-        `conv3d igemm params: 軸 ${axis} の入力長 + 2·padding ${extent} が i32 の上限 2^31 − 1 を超える` +
-          "（GPU の座標演算は i32 — 折り返すと範囲外 0 の門を通り抜けて誤値になる）",
-      );
-    }
-  }
+  // MUST: 軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32 — 証明は葉関数の doc）。
+  assertConvAxisExtent("conv3d igemm params", "t", dims.timeIn, dims.paddingT);
+  assertConvAxisExtent("conv3d igemm params", "h", dims.heightIn, dims.paddingH);
+  assertConvAxisExtent("conv3d igemm params", "w", dims.widthIn, dims.paddingW);
   const params = new Uint32Array(24);
   params[0] = dims.channelsOut;
   params[1] = n;
