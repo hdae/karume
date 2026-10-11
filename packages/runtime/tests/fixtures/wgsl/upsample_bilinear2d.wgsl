@@ -30,7 +30,7 @@ fn main(
     let plane = i / out_hw;
 
     let ry = params.scale_h * f32(oy);
-    let y0 = u32(ry);
+    let y0 = min(u32(ry), params.in_h - 1u);
     var y1 = y0;
     if (y0 + 1u < params.in_h) {
       y1 = y0 + 1u;
@@ -39,7 +39,7 @@ fn main(
     let ly0 = 1.0 - ly1;
 
     let rx = params.scale_w * f32(ox);
-    let x0 = u32(rx);
+    let x0 = min(u32(rx), params.in_w - 1u);
     var x1 = x0;
     if (x0 + 1u < params.in_w) {
       x1 = x0 + 1u;

@@ -1534,8 +1534,10 @@ const bilinearTaps = (
   const scale = lengthOut > 1 ? Math.fround((lengthIn - 1) / (lengthOut - 1)) : 0;
   return Array.from({ length: lengthOut }, (_unused, index) => {
     const source = Math.fround(scale * index);
-    // 源座標は非負なので floor = trunc（torch の static_cast<int64_t> と同じ結果）。
-    const low = Math.floor(source);
+    // 源座標は非負なので floor = trunc（torch の static_cast<int64_t> と同じ結果）。上限 in − 1 は
+    // torch の guard_index_and_lambda と同じ — 1 軸が 2^24 を超えると f32 の丸めで源座標が in に
+    // 届き、上限が無いと隣の平面を読む。
+    const low = Math.min(Math.floor(source), lengthIn - 1);
     return {
       low,
       // 末尾は 2 タップ目を持たない（`index1 = index0`）。

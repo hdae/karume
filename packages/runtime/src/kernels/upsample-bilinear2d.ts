@@ -10,11 +10,15 @@
  *
  * - scale = `(in − 1) / (out − 1)`、**出力長 1 の軸は 0**（`area_pixel_compute_scale`）
  * - 源座標 = `scale · 出力添字`（`align_corners` 側は 0.5 のずらしを持たない）
- * - `index0 = trunc(源座標)` / `index1 = index0 + (index0 < in − 1 ? 1 : 0)` /
- *   `λ1 = 源座標 − index0` / `λ0 = 1 − λ1`（`compute_source_index_and_lambda`）
+ * - `index0 = min(trunc(源座標), in − 1)` / `index1 = index0 + (index0 < in − 1 ? 1 : 0)` /
+ *   `λ1 = 源座標 − index0` / `λ0 = 1 − λ1`（`compute_source_index_and_lambda` と
+ *   `guard_index_and_lambda`）
  * - 式木は **H が外・W が内**の入れ子 `λy0·(λx0·v00 + λx1·v01) + λy1·(λx0·v10 + λx1·v11)`
  *   （CUDA `UpSampleBilinear2d.cu` と同形）
  *
+ * MUST: index0 の上限 `in − 1` を**整数の min** で掛ける。1 軸が 2^24 を超えると scale と源座標の
+ * f32 丸めで末尾の源座標が `in` に届き（in = 16777220・out = 2 で実例）、上限が無いと平面の端点が
+ * 隣の平面の先頭を読む（例外の出ない誤値）。2^24 未満の形では一度も発動しない。
  * MUST: 末尾タップの特例（`index1 = index0`）を**整数比較**で書く。f32 の `min` / `max` に
  * 寄せると NaN を飲む実測（ADR 0020 の根治対象と同型）を再演する。
  * MUST: scale は**ホストで割ってから params で運ぶ**。WGSL の f32 除算は 2.5 ULP まで許され
@@ -42,7 +46,7 @@ export const UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE = 256;
 
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
 export const UPSAMPLE_BILINEAR2D_KEY =
-  `upsample_bilinear2d:v1:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`;
+  `upsample_bilinear2d:v2:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`;
 
 export const UPSAMPLE_BILINEAR2D_WGSL: string =
   `// karume upsample_bilinear2d (NCHW bilinear, align_corners=true, f32, full-write)
@@ -77,7 +81,7 @@ fn main(
     let plane = i / out_hw;
 
     let ry = params.scale_h * f32(oy);
-    let y0 = u32(ry);
+    let y0 = min(u32(ry), params.in_h - 1u);
     var y1 = y0;
     if (y0 + 1u < params.in_h) {
       y1 = y0 + 1u;
@@ -86,7 +90,7 @@ fn main(
     let ly0 = 1.0 - ly1;
 
     let rx = params.scale_w * f32(ox);
-    let x0 = u32(rx);
+    let x0 = min(u32(rx), params.in_w - 1u);
     var x1 = x0;
     if (x0 + 1u < params.in_w) {
       x1 = x0 + 1u;
@@ -109,7 +113,9 @@ fn main(
  *
  * `Math.fround` は f64 除算を f32 へ丸めるが、被除数・除数がともに小さな整数なので
  * 二重丸めは起こらない（除数が 2 冪なら商は f32 で厳密・そうでなければ商は無限 2 進小数なので
- * f32 の丸め境界ちょうどにはならない）。torch の `float(in−1) / float(out−1)` と同じ値。
+ * f32 の丸め境界ちょうどにはならない）。torch の `float(in−1) / float(out−1)` と同じ値になるのは
+ * `in − 1 ≤ 2^24` の範囲だけ — それを超えると torch は被除数を先に f32 へ丸めるので二重丸めになり、
+ * 食い違う（in = 16777218・out = 6 で torch 3355443.5 に対しこちらは 3355443.25）。
  */
 const alignCornersScale = (lengthIn: number, lengthOut: number): number =>
   lengthOut > 1 ? Math.fround((lengthIn - 1) / (lengthOut - 1)) : 0;

@@ -1774,7 +1774,7 @@ Deno.test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の�
 Deno.test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タップを整数比較で決める", () => {
   assertEquals(
     UPSAMPLE_BILINEAR2D_KEY,
-    `upsample_bilinear2d:v1:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`,
+    `upsample_bilinear2d:v2:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`,
   );
   assertEquals(UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE, 256);
   // MUST: scale はホストが割って params で運ぶ（WGSL の f32 除算は 2.5 ULP まで許され、
