@@ -253,6 +253,11 @@ def _assert_stored_declarations(graph: IrGraph, sources: Mapping[str, SourceTens
         entry = sources[initializer.tensor].entry
         storage = initializer.storage.dtype
         expected = LEGACY_STORED_DTYPE.get(storage)
+        if expected is None:
+            raise MigrateError(
+                f"{where}: 格納 '{storage}' は旧書き手が書かなかった dtype"
+                f"（{' / '.join(LEGACY_STORED_DTYPE)} のみ）— 旧配布形として読めない"
+            )
         if entry.dtype != expected:
             raise MigrateError(
                 f"{where}: 旧テンソル '{initializer.tensor}' の dtype {entry.dtype} が"

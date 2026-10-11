@@ -1062,6 +1062,14 @@ class TestTheStoredDeclarationsMatchTheIr:
             migrate_component(source, out, provenance=PROVENANCE)
         assert not out.exists() or not any(out.iterdir())
 
+    def test_a_storage_the_old_writer_never_wrote_fails_loudly(self) -> None:
+        """旧書き手は bf16 を書けなかった — 宣言と現物が揃っていても旧配布形として受理しない。"""
+        graph = TestTheDerivedBindings._graph(IrStorage(dtype="bf16"), [4, 32])
+        sources = {"w": SourceTensor(StoredEntry("w", "BF16", (4, 32), 256), ())}
+
+        with pytest.raises(MigrateError, match="旧書き手が書かなかった dtype"):
+            migrate._assert_stored_declarations(graph, sources)
+
     def test_the_undoctored_form_still_migrates(self, tmp_path: Path) -> None:
         """対照 — 書き換えの足場そのものは移行を壊さない（上の赤は注入した食い違いのもの）。"""
         source = stage_doctored(tmp_path / "src", legacy_shards(mark="x", storage="i8"), "x.weight")
