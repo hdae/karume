@@ -1129,6 +1129,63 @@ Deno.test({
 });
 
 /**
+ * 予算 `attentionRowBlockMaxBytes`（ADR 0124）で割った states 形も、1 枚実行と**ビット単位で一致**する。
+ *
+ * FULL（B·H = 4・容量 8）の prefill（M = 4）は 1 行のスコア 4×8×4 = 128 B。予算 256 B は 1 枚 2 行で
+ * 2 枚になる（予算なしは束縛上限に余裕があり 1 枚）。states 形は数値変種と組めない（下のテスト）ので、
+ * f32 だけで足りる。
+ * MUST: 恒真化しないこと。①QK の dispatch 本数（= 枚数）が 2 で予算なしの 1 と違うことと、中間の
+ * ピークが厳密に小さいことを同時に見る（予算が導出相に届かないまま同じ経路を 2 回撃つ形を緑にしない）。
+ */
+Deno.test({
+  name: "予算で割った states 形は 1 枚実行とビット同一で、枚数が増えピークが縮む（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const single = await stateSession(gpu, FULL);
+    const budgeted = await stateSession(gpu, FULL, { attentionRowBlockMaxBytes: 256 });
+    const inputs = stepInputs(FULL, 4, 97);
+    try {
+      const contexts = await Promise.all([
+        single.createGenerationContext({ chunkLength: 4 }),
+        budgeted.createGenerationContext({ chunkLength: 4 }),
+      ]);
+      try {
+        const one = await runStep(single, contexts[0], FULL, inputs, 4, 4);
+        const many = await runStep(budgeted, contexts[1], FULL, inputs, 4, 4);
+        assertEquals(
+          Array.from(new Uint32Array(many.buffer, many.byteOffset, many.length)),
+          Array.from(new Uint32Array(one.buffer, one.byteOffset, one.length)),
+          "予算で 2 枚に割った実行が 1 枚実行とビット単位で一致しない",
+        );
+        assert(new Set(one).size > 1, "出力が定数（ビット一致が恒真になっている）");
+        const qkKey = stateQkKey(false, false);
+        const blocksOf = (session: Session): number =>
+          countDispatches(
+            requireCensus(session.diagnostics().lastRunPipelines, "states 形"),
+            qkKey,
+          );
+        assertEquals(blocksOf(single), 1, "予算なしの枚数");
+        assertEquals(blocksOf(budgeted), 2, "予算つきの枚数");
+        const peakOf = (session: Session): number =>
+          session.diagnostics().lastRun?.peakTransientBytes ?? 0;
+        assert(peakOf(single) > 0, "中間ピークが 0（観測点が空振りしている）");
+        assert(
+          peakOf(budgeted) < peakOf(single),
+          `中間ピーク ${peakOf(budgeted)}B が予算なしの ${peakOf(single)}B から縮んでいない`,
+        );
+      } finally {
+        for (const context of contexts) await context.dispose();
+      }
+    } finally {
+      await single.dispose();
+      await budgeted.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
  * 数値変種（`attentionCompute` / `attentionScoreStorage`）× states 形は **fail loudly**
  * （ADR 0058 決定 3 —「未実装の組は縮退でなく fail loudly」）。
  *

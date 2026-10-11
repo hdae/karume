@@ -1,6 +1,6 @@
 /**
  * 分解 attention の**行ブロック実行**（融合ルール `rowBlockAttention` — src/runtime/fusion.ts）の
- * 実 GPU の門。見るのは 2 つで、どちらも実機でしか立たない。
+ * 実 GPU の門。見るのは 3 つで、どれも実機でしか立たない。
  *
  * ① **強制分割 parity**: 同じ入力に対し、
  *    - 掴めない綴り（bmm と reshape の間に 0 dispatch の別名を 1 本挟んだだけ）の**素の 9 ノード列**
@@ -14,6 +14,9 @@
  *    device**（`LIMIT_CAPS`）で、S が 128MiB を超える合成グラフが緑になること。**同じグラフを
  *    掴めない綴りにすると同じ device で落ちること**も対で見る（落ちない形を緑にしても、
  *    行ブロックが効いている証拠にならない）。
+ *
+ * ③ **予算分割 parity**（ADR 0124）: 予算 `attentionRowBlockMaxBytes` で割った融合が、素の 9 ノード列と
+ *    Uint32 で一致すること（枚数とピークも同時に見る）。
  *
  * MUST: 恒真化しないこと。①は**別々のグラフ / 別々の Session** を回す（同じ経路を 2 回撃つ形は
  * 常に一致する）。出力が定数でないことも毎回確かめる。
@@ -36,6 +39,7 @@ import {
   openGraphModel,
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 
 /** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
 const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
@@ -129,6 +133,8 @@ const attentionInputs = (shape: Shape): Readonly<Record<string, FilledTensor>> =
 type RunResult = {
   readonly output: Tensor;
   readonly peakTransientBytes: number;
+  /** 行窓の QK（`:rwa`）の dispatch 本数 = 2 枚以上のときの枚数（1 枚では 0 — 計測に依らない census）。 */
+  readonly windowedQkDispatches: number;
 };
 
 const run = async (
@@ -136,18 +142,27 @@ const run = async (
   graph: DeclarationJson,
   inputs: Readonly<Record<string, FilledTensor>>,
   split?: number,
+  budget?: number,
 ): Promise<RunResult> => {
   const session = await createSessionFromContainer(
     gpu,
     await openGraphModel(graph),
     GRAPH_NAME,
-    split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split },
+    {
+      ...(split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split }),
+      ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
+    },
   );
   try {
     const output = (await session.run(inputs))["y"];
+    const diagnostics = session.diagnostics();
     return {
       output,
-      peakTransientBytes: session.diagnostics().lastRun?.peakTransientBytes ?? 0,
+      peakTransientBytes: diagnostics.lastRun?.peakTransientBytes ?? 0,
+      windowedQkDispatches: countDispatches(
+        requireCensus(diagnostics.lastRunPipelines, "分解 attention"),
+        (key) => key.includes(":rwa"),
+      ),
     };
   } finally {
     await session.dispose();
@@ -213,6 +228,43 @@ Deno.test({
           );
           previousPeak = fused.peakTransientBytes;
         }
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 予算分割 parity（ADR 0124）。`SessionOptions.attentionRowBlockMaxBytes` で束縛上限より細かく割った
+ * 融合が、素の 9 ノード列と Uint32 で一致すること。予算は 1 枚 ⌈M/3⌉ 行（各形とも 3 枚 — 17 行は
+ * 6 + 6 + 5・68 行は 23 + 23 + 22・64 行は 22 + 21 + 21）にする値。
+ *
+ * MUST: 恒真化しないこと。予算つきの枚数（行窓 QK の dispatch 本数）が独立に数えた 3 枚であることと、
+ * ピークが予算なしの融合（1 枚）より厳密に小さいことを同時に見る（予算が融合の文脈に届かないまま
+ * 1 枚で回った形を緑にしない）。
+ */
+Deno.test({
+  name:
+    "予算 attentionRowBlockMaxBytes で割った行ブロック実行は素の 9 ノード列と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const shape of SHAPES) {
+        const inputs = attentionInputs(shape);
+        const budget = shape.heads * shape.keys * 4 * Math.ceil(shape.queries / 3);
+        const label = `${shape.name} / 予算 ${budget}B`;
+        const reference = await run(gpu, attentionGraph(shape, true), inputs);
+        const single = await run(gpu, attentionGraph(shape), inputs);
+        assertEquals(single.windowedQkDispatches, 0, `${label}: 予算なしが 1 枚でない`);
+        const budgeted = await run(gpu, attentionGraph(shape), inputs, undefined, budget);
+        assertSameBits(budgeted.output, reference.output, label);
+        assertEquals(budgeted.windowedQkDispatches, 3, `${label}: 予算つきの枚数`);
+        assert(
+          budgeted.peakTransientBytes < single.peakTransientBytes,
+          `${label}: 中間ピーク ${budgeted.peakTransientBytes}B が予算なしの ${single.peakTransientBytes}B から縮んでいない`,
+        );
       }
     } finally {
       gpu.destroy();

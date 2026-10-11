@@ -19,9 +19,14 @@
  *    を強制すると fail loudly になる**ことも対で見る（落ちない形を緑にしても、行ブロックが
  *    効いている証拠にならない）。
  *
+ * ③ **予算分割 parity**（ADR 0124）: `SessionOptions.attentionRowBlockMaxBytes` で束縛上限より細かく
+ *    割った形が、予算なし（1 枚）と Uint32 で一致すること。f16 計算の 2 変種（`shader-f16` を要る）は
+ *    別の `Deno.test` で強制分割と予算分割の両方を回す（ADR 0124 決定 4 の変種の列挙）。
+ *
  * MUST: 恒真化しないこと。①は中間ピーク（`peakTransientBytes`）が枚数とともに**単調に縮む**
  * ことを同時に見る — 見なければ「分割が発火しないまま 2 回同じ経路を撃った」形が常に緑になる。
- * 出力が定数でないことも毎回確かめる。
+ * ③は予算つきの枚数（行窓のキーの dispatch 本数）が 2 以上で、ピークが予算なしより厳密に小さいことを
+ * 同時に見る（予算が導出に届かないまま 1 枚で回った形を緑にしない）。出力が定数でないことも毎回確かめる。
  */
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -41,7 +46,7 @@ import {
   openGraphModel,
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
+import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
@@ -86,6 +91,16 @@ const VARIANTS: readonly Variant[] = [
   { name: "s16", options: { attentionScoreStorage: "f16" }, gqa: true },
   { name: "a8", options: { attentionCompute: "a8" } },
   { name: "a8 + s16", options: { attentionCompute: "a8", attentionScoreStorage: "f16" } },
+];
+
+/**
+ * f16 計算の変種（ADR 0028 — S を `array<f16>` で受け渡す別の格納形）。`shader-f16` を要るので、
+ * `acquireGpu({ shaderF16: true })` の device を取る別の `Deno.test` で回す（{@link VARIANTS} の device は
+ * feature なしで取る）。mask と GQA とは組める。
+ */
+const F16_VARIANTS: readonly Variant[] = [
+  { name: "f16", options: { attentionCompute: "f16" }, gqa: true },
+  { name: "f16 + mask", options: { attentionCompute: "f16" }, mask: true, gqa: true },
 ];
 
 const SHAPES: readonly Shape[] = [
@@ -208,6 +223,83 @@ const assertSameBits = (actual: Tensor, expected: Tensor, label: string): void =
   assert(new Set(a).size > 1, `${label}: 出力が定数（ビット一致が恒真になっている）`);
 };
 
+/** 変種が回せる形だけを並べる（GQA 形は GQA と組める変種だけ — i8a8 × GQA は fail loudly）。 */
+const shapeVariants = (
+  variants: readonly Variant[],
+): readonly { readonly shape: Shape; readonly variant: Variant }[] =>
+  SHAPES.flatMap((shape) =>
+    variants
+      .filter((variant) => shape.h === shape.kv || variant.gqa === true)
+      .map((variant) => ({ shape, variant }))
+  );
+
+/** ① 強制分割 parity（2 / 3 / 5 枚を 1 枚実行と Uint32 で突き合わせ、ピークの単調減少も見る）。 */
+const assertForcedSplitParity = async (
+  gpu: GpuContext,
+  variants: readonly Variant[],
+): Promise<void> => {
+  for (const { shape, variant } of shapeVariants(variants)) {
+    const label = `${shape.name} / ${variant.name}`;
+    // 正本 = 分割前（上限に余裕がある実機では 1 枚 = 行窓を立てない既存の経路そのもの）。
+    const reference = await runAttention(gpu, shape, variant);
+    let previousPeak = reference.peakTransientBytes;
+    assert(previousPeak > 0, `${label}: 中間ピークが 0（観測点が空振りしている）`);
+    for (const split of SPLITS) {
+      const blocked = await runAttention(gpu, shape, variant, split);
+      assertSameBits(blocked.output, reference.output, `${label} / ${split} 枚`);
+      // 枚数を増やすほど S の実体化幅は縮む（値が同じでも**実体化幅が縮んでいる**ことの
+      // 観測点 — ここが単調でなければ一時の寿命宣言かプール再利用が壊れている）。
+      assert(
+        blocked.peakTransientBytes < previousPeak,
+        `${label} / ${split} 枚: 中間ピーク ${blocked.peakTransientBytes}B が ${previousPeak}B から縮んでいない`,
+      );
+      previousPeak = blocked.peakTransientBytes;
+    }
+  }
+};
+
+/**
+ * 予算分割に使う予算（ADR 0124）。S を 2 B で格納したときに 1 枚 ⌈M/3⌉ 行になる値 — 2 B の変種
+ * （s16 / f16）は 3 枚、4 B の変種（f32 / a8）はそれより多い枚数に割れる（どの形でも 2 枚以上）。
+ * 形の 1 行は N ≥ 4 なので行統計 8 B よりスコアが大きく、枚数は S だけで決まる。
+ */
+const budgetFor = (shape: Shape): number =>
+  shape.b * shape.h * shape.n * 2 * Math.ceil(shape.m / 3);
+
+/**
+ * ③ 予算分割 parity。予算なし（1 枚）と Uint32 で一致し、予算つきの枚数（行窓のキー ①QK / ③PV の
+ * dispatch 本数 — 計測に依らない census）が 2 以上で、ピークが予算なしより厳密に小さいこと。
+ */
+const assertBudgetSplitParity = async (
+  gpu: GpuContext,
+  variants: readonly Variant[],
+): Promise<void> => {
+  for (const { shape, variant } of shapeVariants(variants)) {
+    const budget = budgetFor(shape);
+    const label = `${shape.name} / ${variant.name} / 予算 ${budget}B`;
+    const reference = await runAttention(gpu, shape, variant);
+    assertEquals(
+      [...reference.dispatchCounts.keys()].filter((key) => key.includes(":rw")),
+      [],
+      `${label}: 予算なしで行窓のキーが立っている（正本が 1 枚でない）`,
+    );
+    const budgeted = await runAttention(gpu, shape, {
+      ...variant,
+      options: { ...variant.options, attentionRowBlockMaxBytes: budget },
+    });
+    assertSameBits(budgeted.output, reference.output, label);
+    const windowed = [...budgeted.dispatchCounts].filter(([key]) => key.includes(":rw"));
+    assertEquals(windowed.length, 2, `${label}: 行窓のキーは ①QK と ③PV の 2 本`);
+    const blocks = windowed[0][1];
+    assert(blocks >= 2, `${label}: 予算つきの枚数 ${blocks} が 2 未満（予算が導出に届いていない）`);
+    assertEquals(windowed[1][1], blocks, `${label}: ①QK と ③PV の枚数が食い違う`);
+    assert(
+      budgeted.peakTransientBytes < reference.peakTransientBytes,
+      `${label}: 中間ピーク ${budgeted.peakTransientBytes}B が予算なしの ${reference.peakTransientBytes}B から縮んでいない`,
+    );
+  }
+};
+
 Deno.test({
   name:
     "融合 attention の行ブロック実行は枚数を変えても 1 枚実行と**ビット単位で一致**する（実 GPU）",
@@ -215,28 +307,37 @@ Deno.test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (const shape of SHAPES) {
-        const gqaShape = shape.h !== shape.kv;
-        for (const variant of VARIANTS) {
-          if (gqaShape && variant.gqa !== true) continue;
-          const label = `${shape.name} / ${variant.name}`;
-          // 正本 = 分割前（上限に余裕がある実機では 1 枚 = 行窓を立てない既存の経路そのもの）。
-          const reference = await runAttention(gpu, shape, variant);
-          let previousPeak = reference.peakTransientBytes;
-          assert(previousPeak > 0, `${label}: 中間ピークが 0（観測点が空振りしている）`);
-          for (const split of SPLITS) {
-            const blocked = await runAttention(gpu, shape, variant, split);
-            assertSameBits(blocked.output, reference.output, `${label} / ${split} 枚`);
-            // 枚数を増やすほど S の実体化幅は縮む（値が同じでも**実体化幅が縮んでいる**ことの
-            // 観測点 — ここが単調でなければ一時の寿命宣言かプール再利用が壊れている）。
-            assert(
-              blocked.peakTransientBytes < previousPeak,
-              `${label} / ${split} 枚: 中間ピーク ${blocked.peakTransientBytes}B が ${previousPeak}B から縮んでいない`,
-            );
-            previousPeak = blocked.peakTransientBytes;
-          }
-        }
-      }
+      await assertForcedSplitParity(gpu, VARIANTS);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "予算 attentionRowBlockMaxBytes で割った融合 attention は 1 枚実行と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    try {
+      await assertBudgetSplitParity(gpu, VARIANTS);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "f16 計算（f16 / f16 + mask・GQA 形を含む）の行ブロック実行も、強制分割と予算分割の両方で 1 枚実行と**ビット単位で一致**する（実 GPU・shader-f16）",
+  // feature の無い機の SKIP は門番（gpu_gate_test.ts の shader-f16）が FAIL にする。
+  ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu({ shaderF16: true });
+    try {
+      await assertForcedSplitParity(gpu, F16_VARIANTS);
+      await assertBudgetSplitParity(gpu, F16_VARIANTS);
     } finally {
       gpu.destroy();
     }
