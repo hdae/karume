@@ -375,6 +375,44 @@ Deno.test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int
   );
 });
 
+Deno.test("資産パーサ: 追加トークンの id は語彙の行数未満で、同じ綴りの語彙行と一致する", () => {
+  // 追加トークンの id は encode がそのままグラフ入力へ積む。範囲外は embedding gather の OOB まで、
+  // 同綴り別 id は「別の行を指す」沈黙誤値のまま表面化しない。
+  const VOCAB_SIZE = 300;
+  const base = {
+    vocabText: ["<s>", "<pad>", ...Array.from({ length: VOCAB_SIZE - 258 }, (_, i) => `t${i}`)]
+      .concat(BYTE_TOKENS)
+      .join("\n"),
+    scores: Array.from({ length: VOCAB_SIZE }, () => 0),
+    bosId: 0,
+    padId: 1,
+    unkId: 0,
+    byteBaseId: VOCAB_SIZE - 256,
+  };
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<s>", 2147483647]] }),
+    Error,
+    'tokenizer.addedTokens: "<s>" の id 2147483647 が語彙の行数 300 以上',
+  );
+  // 境界: 行数ちょうどは 1 つ外側。
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<x>", VOCAB_SIZE]] }),
+    Error,
+    `が語彙の行数 ${VOCAB_SIZE} 以上`,
+  );
+  assertThrows(
+    () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["<s>", 1]] }),
+    Error,
+    'tokenizer.addedTokens: "<s>" の id 1 が語彙の行 0 と食い違う',
+  );
+  // 正例: 語彙と一致する綴り・語彙に無い綴りの範囲内の id はどちらも通る。
+  const parsed = parseIrodoriTokenizerAsset({
+    ...base,
+    addedTokens: [["<s>", 0], ["<pad>", 1], ["<x>", VOCAB_SIZE - 1]],
+  });
+  assertEquals([...parsed.addedTokens], [["<s>", 0], ["<pad>", 1], ["<x>", VOCAB_SIZE - 1]]);
+});
+
 Deno.test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語彙内にあることを要求する（G4-02）", () => {
   const VOCAB_SIZE = 300;
   const base = {

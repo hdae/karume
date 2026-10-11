@@ -145,6 +145,38 @@ const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]):
 };
 
 /**
+ * 追加トークン（語彙の前段で丸ごと切り出す綴り → id）を読み、語彙表と突き合わせる。
+ *
+ * MUST: id は語彙の行数未満。共通の {@link parseAddedTokens} は i32 の値域しか見ない（anima の
+ * Qwen2 が語彙表の外へ採番する形を正当に持つため — 共通側は狭めない）が、Irodori の追加
+ * トークンは全て語彙表の行で、encode は写像の値をそのままグラフ入力へ積む。範囲外の id を
+ * 通すと embedding gather の OOB（非有限 — ADR 0061）まで表面化しない。
+ * MUST: 語彙に同じ綴りの行があれば id はその行番号と一致する。食い違うと、追加トークンとして
+ * 切り出した綴りだけが語彙表と別の行を指す沈黙誤値になる（形も値域も合ったまま通る）。
+ */
+const parseIrodoriAddedTokens = (
+  raw: unknown,
+  label: string,
+  vocab: ReadonlyMap<string, UnigramVocabEntry>,
+): Map<string, number> => {
+  const added = parseAddedTokens(raw, label);
+  for (const [token, id] of added) {
+    if (id >= vocab.size) {
+      throw new Error(
+        `${label}: ${JSON.stringify(token)} の id ${id} が語彙の行数 ${vocab.size} 以上`,
+      );
+    }
+    const row = vocab.get(token)?.id;
+    if (row !== undefined && row !== id) {
+      throw new Error(
+        `${label}: ${JSON.stringify(token)} の id ${id} が語彙の行 ${row} と食い違う`,
+      );
+    }
+  }
+  return added;
+};
+
+/**
  * 資産 JSON（exporter の `tokenizer.json`）を資産表へ。外部境界なので構造を検査してから使う。
  *
  * MUST: 語彙の行数と `scores` の本数を突き合わせる。ずれたまま通すと id が総ずれするが、
@@ -153,6 +185,7 @@ const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]):
  * MUST: 単独の特殊 id は整数かつ語彙の行数未満（{@link asVocabId} — 理由は同 doc）。
  * MUST: `byteBaseId` は単独 id ではないので {@link asVocabId} では足りない —
  * 256 本連番の全体が語彙内であること（{@link asByteBaseId} — 理由は同 doc）。
+ * MUST: 追加トークンも語彙表と突き合わせる（{@link parseIrodoriAddedTokens} — 理由は同 doc）。
  */
 export const parseIrodoriTokenizerAsset = (
   raw: unknown,
@@ -183,6 +216,6 @@ export const parseIrodoriTokenizerAsset = (
     byteBaseId: asByteBaseId(obj["byteBaseId"], `${label}.byteBaseId`, tokens),
     bosId: asVocabId(obj["bosId"], `${label}.bosId`, tokens.length),
     padId: asVocabId(obj["padId"], `${label}.padId`, tokens.length),
-    addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
+    addedTokens: parseIrodoriAddedTokens(obj["addedTokens"], `${label}.addedTokens`, vocab),
   };
 };
