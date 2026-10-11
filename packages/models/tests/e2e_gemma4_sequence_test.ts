@@ -39,7 +39,7 @@
 // **明示 SKIP** する。⑥だけは drafter 入りの配布形ミラー `models/karume-gemma4/` を使う（投機の
 // 2 系統を同じ pipeline で回すため）— ミラーが無い環境では⑥だけを明示 SKIP する。
 
-import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import {
@@ -668,6 +668,27 @@ Deno.test({
           );
         });
       }
+
+      // 最後に置く（pipeline を畳む）。分岐は Gemma4Pipeline.sequence の包みが `#handed` に載せ、
+      // pipeline の dispose が巻き取る — Session の dispose は context を畳まないので、ここが
+      // 漏れると分岐の KV と drafter の借り手が pipeline の寿命の後まで残る。包みのこの性質は
+      // pipeline の構築に実 Session と GPU が要るので、GPU 無しの門を組めずここで見る。
+      await t.step("pipeline の dispose は畳んでいない分岐も巻き取る", async () => {
+        const source = await pipeline.sequence({ speculative: "always" });
+        await forkTurn(source, p0);
+        const forked = await source.fork();
+        await pipeline.dispose();
+        // 分岐の sequence が dispose 済み（= drafter の借り手 → 複製した context の順に返した）。
+        // 巻き取られていなければ、ここは同期に投げず、dispose 済みの Session への run で後から
+        // 落ちる。
+        assertThrows(
+          () => forked.generate({ prompt: [...x], maxNewTokens: 1 }),
+          Error,
+          "GenerationSequence: dispose 済みでは生成できない",
+        );
+        // pipeline の dispose 後の分岐の fork は、包みが同期に落とす。
+        assertThrows(() => forked.fork(), Error, "dispose 済みでは sequence を作れない");
+      });
     } finally {
       await pipeline.dispose();
     }
