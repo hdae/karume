@@ -107,7 +107,9 @@ components given by their representative paths (`model.f16.safetensors`, or the 
 [--single] [--graph]`. The graph name defaults to the parent directory's name; `--graph-name`
 overrides it and is accepted only when a single path is given. **Repository mode**
 (`--manifest <karume.json>`) reads a whole `karume/4` distribution, converts every component and
-writes a `karume/5` manifest. `--license` is required in both modes.
+writes a `karume/5` manifest. Its `--out` directory must be empty or not exist yet (any file
+already there fails loudly); the repository is assembled in a staging directory that is moved
+into place only when the whole run succeeds. `--license` is required in both modes.
 `--part-bytes {256,512,768,1024}` picks the part length in MiB from the writer's choice set
 (container-v1 §4.2 / ADR 0108 — default 256; any other value fails loudly). The output is written as
 `.partial` and swapped into place only after the self-check, which compares every initializer's
