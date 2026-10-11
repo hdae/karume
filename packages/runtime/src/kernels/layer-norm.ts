@@ -28,6 +28,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { f32EpsDefect } from "../codegen/f32-eps.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 export const LAYER_NORM_WORKGROUP_SIZE = 256;
@@ -143,7 +144,8 @@ ${LAYER_NORM_ROW_STATS_WGSL}
  *
  * MUST: eps の値域は **f32 として**見る（契約検査と二重だが、カーネル直呼びの経路も通る門）。
  * f64 で有限正でも `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する
- * CPU 参照（reference/ops.ts）と黙って分岐する。
+ * CPU 参照（reference/ops.ts）と黙って分岐する。非ゼロの subnormal も FTZ の GPU では 0 に潰れる
+ * ので拒否する（受理集合は契約検査と同じ — 判定は codegen/f32-eps.ts を共有）。
  */
 export const layerNormParams = (
   rows: number,
@@ -154,9 +156,12 @@ export const layerNormParams = (
   if (dim < 1) {
     throw new CodegenError(`layer_norm params: dim は正整数（${dim}）`);
   }
-  const eps32 = Math.fround(eps);
-  if (!Number.isFinite(eps32) || eps32 <= 0) {
-    throw new CodegenError(`layer_norm params: eps は f32 として有限の正数（${eps}）`);
+  // 判定は op 契約（ops/attrs.ts の assertEps）と共有する — 片側だけ subnormal を通さないため。
+  const defect = f32EpsDefect(eps);
+  if (defect !== undefined) {
+    throw new CodegenError(
+      `layer_norm params: eps は f32 として有限の正数で、正規数（2^-126 以上）に丸まる値（${eps}・${defect}）`,
+    );
   }
   const params = new Uint32Array(4);
   params[0] = rows;

@@ -28,6 +28,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { f32EpsDefect } from "../codegen/f32-eps.ts";
 import { assertU32Params } from "../codegen/params.ts";
 
 export const RMS_NORM_WORKGROUP_SIZE = 256;
@@ -147,6 +148,7 @@ const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
  *
  * MUST: eps の値域は **f32 として**見る（layer_norm params と同じ二重の門）。f64 で有限正でも
  * `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する CPU 参照と分岐する。
+ * 非ゼロの subnormal も FTZ の GPU では 0 に潰れるので拒否する（判定は codegen/f32-eps.ts を共有）。
  */
 export const rmsNormParams = (
   rows: number,
@@ -157,9 +159,12 @@ export const rmsNormParams = (
   if (dim < 1) {
     throw new CodegenError(`rms_norm params: dim は正整数（${dim}）`);
   }
-  const eps32 = Math.fround(eps);
-  if (!Number.isFinite(eps32) || eps32 <= 0) {
-    throw new CodegenError(`rms_norm params: eps は f32 として有限の正数（${eps}）`);
+  // 判定は op 契約（ops/attrs.ts の assertEps）と共有する — 片側だけ subnormal を通さないため。
+  const defect = f32EpsDefect(eps);
+  if (defect !== undefined) {
+    throw new CodegenError(
+      `rms_norm params: eps は f32 として有限の正数で、正規数（2^-126 以上）に丸まる値（${eps}・${defect}）`,
+    );
   }
   const params = new Uint32Array(4);
   params[0] = rows;

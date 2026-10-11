@@ -1,3 +1,4 @@
+import { f32EpsDefect } from "../codegen/f32-eps.ts";
 import { isSymbolName } from "../format/dims.ts";
 import { type IrDtype, isSemanticDtype, SEMANTIC_DTYPES } from "../format/ir.ts";
 import { OpContractError } from "./names.ts";
@@ -295,21 +296,22 @@ const assertNormalizedShape = (value: unknown, where: string): readonly number[]
  * 正規化を続ける — 下振れと同じ分岐が逆向きに起きる（どちらも例外なしの沈黙誤値）。
  */
 const assertEps = (value: unknown, where: string, what: string): number => {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+  // 判定はカーネルの params（kernels/layer-norm.ts / rms-norm.ts）と共有する — 片側だけが
+  // subnormal を通すと、カーネル直呼びの経路だけ GPU で eps = 0 になる。
+  const defect = typeof value === "number" ? f32EpsDefect(value) : "not-positive";
+  if (typeof value !== "number" || defect === "not-positive") {
     throw new OpContractError(
       `${where}: ${what} の eps は有限の正数でない: ${JSON.stringify(value)}`,
     );
   }
-  // f32 の最小正規化数（2^-126）。これ未満（0 と subnormal）は FTZ 実装で 0 に潰れうる。
-  const F32_MIN_NORMAL = 1.1754943508222875e-38;
-  if (Math.fround(value) < F32_MIN_NORMAL) {
+  if (defect === "subnormal") {
     throw new OpContractError(
       `${where}: ${what} の eps が f32 の正規化数へ丸まらない（FTZ 実装では GPU 側だけ eps=0 で走る）: ${
         JSON.stringify(value)
       }`,
     );
   }
-  if (!Number.isFinite(Math.fround(value))) {
+  if (defect === "overflow") {
     throw new OpContractError(
       `${where}: ${what} の eps が f32 へ丸めると無限大になる（GPU 側だけ eps=Inf で走る）: ${
         JSON.stringify(value)
