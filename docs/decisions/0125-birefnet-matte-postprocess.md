@@ -80,8 +80,8 @@
    - birefnet グループの Pillow は `==12.3.0`（wan グループと同じ版）に固定する。
    - この門（recipe の pytest）は既定の `uv run pytest` でも走る。Pillow は torchvision（exporter の core の依存）
      経由で既定の sync にも入り、`uv.lock` の解が上のピンで 12.3.0 に揃うため（2026-10-11 に既定のグループだけの
-     venv で 25 件が SKIP なしで通ることを確認）。テストの `importorskip("PIL")` は Pillow の無い環境での保険で、
-     今の依存の形では SKIP にならない。
+     venv で golden の 14 件〈と A/B の検算の 11 件〉が SKIP なしで通ることを確認）。テストの
+     `importorskip("PIL")` は Pillow の無い環境での保険で、今の依存の形では SKIP にならない。
 7. **Pillow の写しは 1 本**（裁定 32 = b）: Pillow の 8bit の分離型 resample の逐語の写しは
    `packages/models/src/image/pillow-resample.ts` の共通の核（フィルタとチャネル数を引数に取る）だけに置く。
    `u8-pil-bicubic`（1 バンド・BICUBIC）と Wan2.2 の I2V の `lanczos.ts`（3 チャネル・LANCZOS — ADR 0121
