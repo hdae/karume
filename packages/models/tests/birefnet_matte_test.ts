@@ -172,7 +172,7 @@ describe("u8-pil-bicubic（HR の上流の意図 — Pillow の 8bit の BICUBIC
     );
   });
 
-  it("量子化は resize の前の 8bit で、0.5 は切り上げ（上流の切り捨てではない）", () => {
+  it("量子化は 0.5 を切り上げる（上流の切り捨てではない）", () => {
     // 恒等寸法では resize が写しになり、量子化だけが残る。logit 0 → 255σ = 127.5 → 128（切り捨てなら
     // 127）、logit 7 → 254.77 → 255（切り捨てなら 254）。
     const matte = matteFromLogits(Float32Array.of(0, 7, -40, 40), 2, 2, 2, 2, "u8-pil-bicubic");
