@@ -1142,44 +1142,51 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const single = await stateSession(gpu, FULL);
-    const budgeted = await stateSession(gpu, FULL, { attentionRowBlockMaxBytes: 256 });
-    const inputs = stepInputs(FULL, 4, 97);
+    // 2 本目の構築が投げても 1 本目と gpu を破棄する（Session ごとに try を張る）。
     try {
-      const contexts = await Promise.all([
-        single.createGenerationContext({ chunkLength: 4 }),
-        budgeted.createGenerationContext({ chunkLength: 4 }),
-      ]);
+      const single = await stateSession(gpu, FULL);
       try {
-        const one = await runStep(single, contexts[0], FULL, inputs, 4, 4);
-        const many = await runStep(budgeted, contexts[1], FULL, inputs, 4, 4);
-        assertEquals(
-          Array.from(new Uint32Array(many.buffer, many.byteOffset, many.length)),
-          Array.from(new Uint32Array(one.buffer, one.byteOffset, one.length)),
-          "予算で 2 枚に割った実行が 1 枚実行とビット単位で一致しない",
-        );
-        assert(new Set(one).size > 1, "出力が定数（ビット一致が恒真になっている）");
-        const qkKey = stateQkKey(false, false);
-        const blocksOf = (session: Session): number =>
-          countDispatches(
-            requireCensus(session.diagnostics().lastRunPipelines, "states 形"),
-            qkKey,
-          );
-        assertEquals(blocksOf(single), 1, "予算なしの枚数");
-        assertEquals(blocksOf(budgeted), 2, "予算つきの枚数");
-        const peakOf = (session: Session): number =>
-          session.diagnostics().lastRun?.peakTransientBytes ?? 0;
-        assert(peakOf(single) > 0, "中間ピークが 0（観測点が空振りしている）");
-        assert(
-          peakOf(budgeted) < peakOf(single),
-          `中間ピーク ${peakOf(budgeted)}B が予算なしの ${peakOf(single)}B から縮んでいない`,
-        );
+        const budgeted = await stateSession(gpu, FULL, { attentionRowBlockMaxBytes: 256 });
+        try {
+          const inputs = stepInputs(FULL, 4, 97);
+          const contexts = await Promise.all([
+            single.createGenerationContext({ chunkLength: 4 }),
+            budgeted.createGenerationContext({ chunkLength: 4 }),
+          ]);
+          try {
+            const one = await runStep(single, contexts[0], FULL, inputs, 4, 4);
+            const many = await runStep(budgeted, contexts[1], FULL, inputs, 4, 4);
+            assertEquals(
+              Array.from(new Uint32Array(many.buffer, many.byteOffset, many.length)),
+              Array.from(new Uint32Array(one.buffer, one.byteOffset, one.length)),
+              "予算で 2 枚に割った実行が 1 枚実行とビット単位で一致しない",
+            );
+            assert(new Set(one).size > 1, "出力が定数（ビット一致が恒真になっている）");
+            const qkKey = stateQkKey(false, false);
+            const blocksOf = (session: Session): number =>
+              countDispatches(
+                requireCensus(session.diagnostics().lastRunPipelines, "states 形"),
+                qkKey,
+              );
+            assertEquals(blocksOf(single), 1, "予算なしの枚数");
+            assertEquals(blocksOf(budgeted), 2, "予算つきの枚数");
+            const peakOf = (session: Session): number =>
+              session.diagnostics().lastRun?.peakTransientBytes ?? 0;
+            assert(peakOf(single) > 0, "中間ピークが 0（観測点が空振りしている）");
+            assert(
+              peakOf(budgeted) < peakOf(single),
+              `中間ピーク ${peakOf(budgeted)}B が予算なしの ${peakOf(single)}B から縮んでいない`,
+            );
+          } finally {
+            for (const context of contexts) await context.dispose();
+          }
+        } finally {
+          await budgeted.dispose();
+        }
       } finally {
-        for (const context of contexts) await context.dispose();
+        await single.dispose();
       }
     } finally {
-      await single.dispose();
-      await budgeted.dispose();
       gpu.destroy();
     }
   },
