@@ -32,8 +32,9 @@ fixture の切り出しをそのまま入力にして、期待値だけを作り
 
 ## 入力（2 種類）
 
-- **実画像の logit の切り出し**: `e2e_birefnet_real_test.ts` が書いた f32 席のマット logits
-  （`<系列>-photo-{portrait,street}-matte.safetensors` — 1024² の karume のグラフ出力）から、輪郭の
+- **実画像の logit の切り出し**: `e2e_birefnet_real_test.ts` が書いた既定席のマット logits（HR は
+  f16 席・Lucida は f32 席 — {@link REAL_SERIES}。`<系列>-photo-{portrait,street}-matte.safetensors`
+  — 1024² の karume のグラフ出力）から、輪郭の
   画素（`|logit| < SOFT_LOGIT`）を最も多く含む `CROP_WIDTH × CROP_HEIGHT` の窓を両系列の 2 枚ずつ
   切り出す。portrait からは窓の中心を通る 1 行と幅 2 の列（長さ 1024）も採り、実運用の係数表
   （1024 → 832 / 480 / 2048）を掃く。来歴（ファイル・sha256・窓）を入力表に残す。
@@ -115,8 +116,17 @@ MIN_SIDE_PIXELS = CROP_WIDTH
 #: 窓の探索の歩幅（画素）。
 CROP_STRIDE = 4
 
-#: 実画像の切り出しの元（e2e が書く席の綴り — `e2e_birefnet_real_test.ts` の `artifactName`）。
-REAL_SERIES = ("birefnet-hr-1024", "lucida-1024")
+#: 実画像の切り出しの元 = (e2e が書く系列の綴り — `e2e_birefnet_real_test.ts` の `artifactName`,
+#: ケース名の頭, quant 席)。各 checkpoint の配布の既定席の系列（HR は f16 席だけ — ADR 0113 追記
+#: 2026-10-11。HR の f16 席の logit は退役した f32 席と sha256 まで同じ）。
+#:
+#: ケース名の頭を系列名から導かないのは、ケース名が fixture の来歴の外の名前だから — 元の系列
+#: （席）を替えても `real-birefnet-hr-*` のまま動かさず、作り直しの差分を来歴（ファイル名）に
+#: 留める。
+REAL_SERIES: tuple[tuple[str, str, str], ...] = (
+    ("birefnet-hr-1024-f16", "birefnet-hr", "f16"),
+    ("lucida-1024", "lucida", "f32"),
+)
 REAL_IMAGES = ("photo-portrait", "photo-street")
 
 #: 行と列の切り出し（実運用の係数表を掃く 1 行・1 列）を採る画像。
@@ -327,7 +337,7 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
     from safetensors.numpy import load_file
 
     inputs = []
-    for series in REAL_SERIES:
+    for series, case, seat in REAL_SERIES:
         for image in REAL_IMAGES:
             path = logits_dir / f"{series}-{image}-matte.safetensors"
             tensors = load_file(path)
@@ -345,8 +355,8 @@ def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
                 "sha256": _sha256(path),
                 "tensor": tensor_name,
             }
-            stem = f"real-{series.removesuffix('-1024')}-{image.removeprefix('photo-')}"
-            why = f"実画像の logit（{series} の f32 席・{image}）"
+            stem = f"real-{case}-{image.removeprefix('photo-')}"
+            why = f"実画像の logit（{series} の {seat} 席・{image}）"
             x, y = select_crop(logits)
             inputs.append(
                 _real_input(

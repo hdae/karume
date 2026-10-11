@@ -26,12 +26,12 @@
   "inputs": [
     {
       "name": "real-birefnet-hr-portrait",
-      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-portrait）の輪郭付近の窓",
+      "why": "実画像の logit（birefnet-hr-1024-f16 の f16 席・photo-portrait）の輪郭付近の窓",
       "width": 40,
       "height": 32,
       "provenance": {
         "kind": "crop",
-        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-portrait-matte.safetensors",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-f16-photo-portrait-matte.safetensors",
         "sha256": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8",
         "tensor": "add_214",
         "x": 728,
@@ -42,12 +42,12 @@
     },
     {
       "name": "real-birefnet-hr-portrait-row",
-      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-portrait）の窓の中心を通る 1 行",
+      "why": "実画像の logit（birefnet-hr-1024-f16 の f16 席・photo-portrait）の窓の中心を通る 1 行",
       "width": 1024,
       "height": 1,
       "provenance": {
         "kind": "row",
-        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-portrait-matte.safetensors",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-f16-photo-portrait-matte.safetensors",
         "sha256": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8",
         "tensor": "add_214",
         "x": 0,
@@ -58,12 +58,12 @@
     },
     {
       "name": "real-birefnet-hr-portrait-column",
-      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-portrait）の窓の中心を通る幅 2 の列",
+      "why": "実画像の logit（birefnet-hr-1024-f16 の f16 席・photo-portrait）の窓の中心を通る幅 2 の列",
       "width": 2,
       "height": 1024,
       "provenance": {
         "kind": "column",
-        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-portrait-matte.safetensors",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-f16-photo-portrait-matte.safetensors",
         "sha256": "3c370f7eed29a640c3743a393dc1a9195e400e884d02a7a8e2b23987ae551fa8",
         "tensor": "add_214",
         "x": 748,
@@ -74,12 +74,12 @@
     },
     {
       "name": "real-birefnet-hr-street",
-      "why": "実画像の logit（birefnet-hr-1024 の f32 席・photo-street）の輪郭付近の窓",
+      "why": "実画像の logit（birefnet-hr-1024-f16 の f16 席・photo-street）の輪郭付近の窓",
       "width": 40,
       "height": 32,
       "provenance": {
         "kind": "crop",
-        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-photo-street-matte.safetensors",
+        "file": "outputs/verify/deno-nvidia-geforce-rtx-3080-ti/2026-10-11_birefnet/birefnet-hr-1024-f16-photo-street-matte.safetensors",
         "sha256": "8e019f075fce469c5a312c542e4c16c016befc1b1e7c3537eb9b7d7396833e4f",
         "tensor": "add_214",
         "x": 568,

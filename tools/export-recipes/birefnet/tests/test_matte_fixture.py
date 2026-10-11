@@ -73,8 +73,8 @@ class TestTheCommittedFixture:
 
         crops = {row["name"] for row in real if row["provenance"]["kind"] == "crop"}
         assert crops == {
-            f"real-{series.removesuffix('-1024')}-{image.removeprefix('photo-')}"
-            for series in matte_fixture.REAL_SERIES
+            f"real-{case}-{image.removeprefix('photo-')}"
+            for _series, case, _seat in matte_fixture.REAL_SERIES
             for image in matte_fixture.REAL_IMAGES
         }
         for row in real:
