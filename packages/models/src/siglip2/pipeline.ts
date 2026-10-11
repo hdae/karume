@@ -95,7 +95,7 @@ import {
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
-import { assertGraphInputDim } from "../hub/graph-gates.ts";
+import { assertGraphInputDim, assertGraphInputDtype } from "../hub/graph-gates.ts";
 
 /** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
 const VISION = "vision";
@@ -215,6 +215,31 @@ export const assertOutputDim = (
     throw new Error(
       `siglip2: ${where} — グラフ出力 '${name}' の軸 ${axis} が ${String(dim)}、` +
         `pipelineConfig は ${expected}`,
+    );
+  }
+};
+
+/**
+ * グラフ**出力**が f32 の `[1, hiddenDim]`（rank 2・batch 軸 1）であることを見る（幅は
+ * {@link assertOutputDim} が見る）。
+ *
+ * MUST: 落とさない。後段は出力の要素数が `hiddenDim` であることを実行**後**に見るだけなので、
+ * batch 2 で焼いた別グラフ（`[2, hiddenDim]`）や f32 でない出力は構築を通り、GPU と Session を
+ * 作って 1 回実行した後に、資産の取り違えを指さない文言で落ちる。
+ *
+ * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
+ * ADR 0008）。
+ */
+export const assertPooledOutput = (model: GraphOwner, where: string): void => {
+  const name = model.graph.outputs[0];
+  const value = model.graph.values[name];
+  if (value === undefined) {
+    throw new Error(`siglip2: グラフ出力 '${name}' の宣言が無い（${where}）`);
+  }
+  if (value.dtype !== "f32" || value.shape.length !== 2 || value.shape[0] !== 1) {
+    throw new Error(
+      `siglip2: ${where} — グラフ出力 '${name}' が ${value.dtype} ` +
+        `[${value.shape.map(String).join(", ")}]、期待は f32 の [1, hiddenDim]`,
     );
   }
 };
@@ -357,10 +382,12 @@ const admitSiglip2 = (
         ` ${vision.graph.outputs.length} 本（どちらも 1 本の vision tower が必要）`,
     );
   }
+  assertGraphInputDtype("siglip2", vision, PIXEL_VALUES, "f32", "前処理の pixel_values");
   assertStaticDim(vision, PIXEL_VALUES, 0, 1, "batch は静的 1");
   assertStaticDim(vision, PIXEL_VALUES, 1, CHANNELS, "RGB の 3 チャネル");
   assertStaticDim(vision, PIXEL_VALUES, 2, config.imageHeight, "imageHeight");
   assertStaticDim(vision, PIXEL_VALUES, 3, config.imageWidth, "imageWidth");
+  assertPooledOutput(vision, "pooler_output");
   assertOutputDim(vision, 1, config.hiddenDim, "hiddenDim");
 
   // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と

@@ -38,3 +38,30 @@ export const assertGraphInputDim = (
     );
   }
 };
+
+/**
+ * グラフ入力の dtype が家族の前処理の書く dtype と一致することを見る。
+ *
+ * MUST: 落とさない。{@link assertGraphInputDim} は軸の寸法しか見ないので、同じ形で別の dtype を
+ * 受けるグラフ（例 i32 の `pixel_values`）は構築前の検査を通り、GPU と Session を作って重みを
+ * 読んだ後の実行時の入力検査で、資産の取り違えを指さない文言で落ちる。軸と同じく**要る入力
+ * だけ**を家族が名指しで見る（全入力を一律に縛らない）。
+ */
+export const assertGraphInputDtype = (
+  family: string,
+  model: GraphOwner,
+  inputName: string,
+  expected: GraphOwner["graph"]["inputs"][number]["dtype"],
+  where: string,
+): void => {
+  const spec = model.graph.inputs.find((input) => input.name === inputName);
+  if (spec === undefined) {
+    throw new Error(`${family}: グラフ入力 '${inputName}' が無い（${where}）`);
+  }
+  if (spec.dtype !== expected) {
+    throw new Error(
+      `${family}: ${where} — グラフ入力 '${inputName}' の dtype が ${spec.dtype}、` +
+        `前処理が書くのは ${expected}`,
+    );
+  }
+};

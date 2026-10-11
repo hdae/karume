@@ -139,7 +139,7 @@ import {
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
-import { assertGraphInputDim } from "../hub/graph-gates.ts";
+import { assertGraphInputDim, assertGraphInputDtype } from "../hub/graph-gates.ts";
 
 /** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
 const DEPTH = "depth";
@@ -467,6 +467,7 @@ const admitDepthAnything = (
         ` ${depth.graph.outputs.length} 本（どちらも 1 本の深度地図が必要）`,
     );
   }
+  assertGraphInputDtype("depth-anything", depth, PIXEL_VALUES, "f32", "前処理の pixel_values");
   assertStaticDim(depth, PIXEL_VALUES, 0, 1, "batch は静的 1");
   assertStaticDim(depth, PIXEL_VALUES, 1, CHANNELS, "RGB の 3 チャネル");
   assertStaticDim(depth, PIXEL_VALUES, 2, config.imageHeight, "imageHeight");

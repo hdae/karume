@@ -114,7 +114,7 @@ import {
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
-import { assertGraphInputDim } from "../hub/graph-gates.ts";
+import { assertGraphInputDim, assertGraphInputDtype } from "../hub/graph-gates.ts";
 
 /** manifest の weights 表に現れる部品名（ADR 0041 §3 の規約名）。 */
 const MATTE = "matte";
@@ -433,6 +433,7 @@ const admitBirefnet = (
         ` ${matte.graph.outputs.length} 本（どちらも 1 本のマットが必要）`,
     );
   }
+  assertGraphInputDtype("birefnet", matte, PIXEL_VALUES, "f32", "前処理の pixel_values");
   assertStaticDim(matte, PIXEL_VALUES, 0, 1, "batch は静的 1");
   assertStaticDim(matte, PIXEL_VALUES, 1, CHANNELS, "RGB の 3 チャネル");
   assertStaticDim(matte, PIXEL_VALUES, 2, config.imageHeight, "imageHeight");
