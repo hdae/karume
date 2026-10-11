@@ -24,7 +24,10 @@ measurements in `docs/research/`.
   chat session, the history (a session whose KV cache is empty copies only the history and makes
   no GPU copy). Each branch is owned and disposed by the caller and does not depend on the
   original. Regenerating a reply is written as "keep the base session, fork it each time and
-  `send` on the branch"; there is no separate `regenerate`. Every branch adds one context's state
+  `send` on the branch"; there is no separate `regenerate`. The same seed gives the same reply: the
+  sampler's random stream is rebuilt from its `seed` (default 0) on every generate and the copied
+  KV cache is bit-identical, so vary the seed per attempt (for example
+  `send(text, { sampler: { ...spec, seed: attempt } })`). Every branch adds one context's state
   bytes of VRAM. `fork()` is rejected while a run (including a drafter's run that reads the KV
   cache), a batch reservation or a deferred commit is pending, on a borrowing context, and after
   dispose; the sequence and chat-session versions throw synchronously when already disposed (the

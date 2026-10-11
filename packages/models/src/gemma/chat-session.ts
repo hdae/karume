@@ -478,11 +478,19 @@ export class Gemma4ChatSession {
    * 分岐の側で `send` する（基点は残るので何度でもやり直せる）:
    *
    * ```ts
-   * await session.send("Name a color.").text();
-   * const retry = await session.fork(); // 基点（session）はこのまま置いておく
-   * console.log(await retry.send("Another one.").text());
-   * await retry.dispose(); // 気に入らなければ捨てて、もう一度 session.fork() から
+   * const sampler = { temperature: 1, topP: 0.95 } satisfies SamplerSpec;
+   * await session.send("Name a color.", { sampler }).text();
+   * for (let attempt = 1; attempt <= 3; attempt += 1) {
+   *   const retry = await session.fork(); // 基点（session）はこのまま置いておく
+   *   // 試行ごとに seed を変える（同じ seed なら同じ答えが返る — 下の注意）。
+   *   console.log(await retry.send("Another one.", { sampler: { ...sampler, seed: attempt } }).text());
+   *   await retry.dispose(); // 気に入らなければ捨てて、次の試行は基点からもう一度 fork する
+   * }
    * ```
+   *
+   * 注意: **同じ seed なら同じ答えになる**。抽選の乱数列は `send` ごとに sampler の `seed`
+   * （既定 0）から作り直し、複製した KV は元とビット同一なので、seed を変えない再生成は毎回
+   * 同じ token 列を返す（温度 0 は seed に関わらず同じ）。
    *
    * KV を継いでいる会話は KV を同じ容量のまま丸ごと複製するので、基点 + 分岐 1 本で KV の
    * VRAM はほぼ 2 倍になる。KV が空の会話（まだ送っていない・直前のターンが配布形の EOS で

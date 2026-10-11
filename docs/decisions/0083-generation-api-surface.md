@@ -481,5 +481,9 @@ RNG・温度処理・top-k 指定時の有界 heap は変更しない。作業�
 - **再生成は fork の使い方として書く**（`regenerate` は作らない）。基点のセッションを進めずに置き、
   押されるたびに `fork()` して `send` する。KV は基点 + 分岐 1 本でほぼ 2 倍になり、これは
   replay で作り直す形と変わらない（公開面の大きさだけが違う）。
+  - **同じ seed なら同じ答えになる**: 抽選の乱数列は `generate` ごとに sampler の `seed`（既定 0）
+    から作り直し、複製した KV は元とビット同一なので、seed を変えない再生成は毎回同じ token 列を
+    返す。違う答えを引くには試行ごとに seed を変える（例 `send(text, { sampler: { ...spec, seed:
+    attempt } })` — chat session の `fork` の doc の例）。温度 0 は seed に関わらず同じ。
 - 公開面: 既存の型（`GenerationSequence` / `Gemma4ChatSession`）にメソッドが 1 つずつ増えるだけで、
   新しい export は無い（ADR 0008）。
