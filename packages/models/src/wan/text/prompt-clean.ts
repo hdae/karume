@@ -362,6 +362,9 @@ export const parsePromptCleanTables = (raw: unknown, label: string): PromptClean
     );
   }
   let badness: RegExp;
+  // 受理する式は上の sha256 の照合で固定の 1 本に絞られ、手元のエンジンでは構築が失敗しない。それでも
+  // catch を残すのは、固定の式が `\u{…}` の符号位置エスケープ（u フラグが要る）を使うので、u フラグを
+  // 解釈できないエンジンでは構築が失敗しうるから — そのとき素の SyntaxError でなく資産の文脈で落とす。
   try {
     // `g` / `y` を付けない — `exec` / `test` が lastIndex を持たず、呼ぶたびに先頭から探す。
     badness = new RegExp(source, "u");
