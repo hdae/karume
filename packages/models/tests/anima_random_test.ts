@@ -45,9 +45,9 @@ Deno.test("Randn: 奇数長の呼び出しは対の余り（sin 側）を捨て�
 });
 
 Deno.test("nextUint64: splitmix64 の既知の列（state 0 → 0xe220a8397b1dcdaf …）", () => {
-  // 正規乱数（f32）は `Math.cos/sin/log` の実装差でエンジンごとにずれうるので、seed と列の対応は
-  // 環境に依存しない整数部で固定する（資産の無い機でも seed の列の置き換えを捕まえる）。期待値は
-  // splitmix64 の公開の参照実装を Python の整数で評価した値。
+  // 正規乱数（f32）は `Math.cos/sin/log` の実装差でエンジンごとにずれうるので、環境に依存しない
+  // 整数部で splitmix64 の 1 ステップ（混合の定数と計算）を固定する。seed から内部状態への写像と
+  // 一様乱数の導出はここでは縛らない。期待値は splitmix64 の公開の参照実装を Python の整数で評価した値。
   let state = 0n;
   const values: bigint[] = [];
   for (let draw = 0; draw < 4; draw += 1) {
