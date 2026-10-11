@@ -50,6 +50,9 @@
     "bench:llm-browser": "deno run -A tools/llm-speed/browser/server.ts",
     "bench:gpu-lab": "deno run -A tools/gpu-lab/server.ts"
   },
+  "lint": {
+    "plugins": ["./tools/lint/plugin.ts"]
+  },
   "fmt": {
     "lineWidth": 100,
     "proseWrap": "preserve"
