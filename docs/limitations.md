@@ -1859,6 +1859,38 @@ ADR [0091](decisions/0091-gemma4-host-rope-variable-capacity.md)）— を超え
   2 つだけ — ADR 0083 決定 1）ので、過去 turn の token は penalty の対象にならない。会話全体へ
   掛けたい場合は、そのターンの `prompt` に効かせたい範囲を含めるのが今の唯一の手である。
 
+## 会話の分岐（`fork`）: 分岐 1 本ごとに KV が丸ごと増える・一致の保証は数値経路の門に従う
+
+`GenerationContext.fork` / `GenerationSequence.fork` / `Gemma4ChatSession.fork`（ADR
+[0066](decisions/0066-generation-context-state-slots.md) と
+[0083](decisions/0083-generation-api-surface.md) の追記 2026-10-11・裁定 8）は、同じ容量の KV を
+丸ごと複製して独立の続きを返す。意図的な制約と性質:
+
+- **VRAM は分岐 1 本ごとに state 1 本ぶん増える**（容量を縮めた複製・差分だけの複製・prefix の
+  共有は持たない — ADR 0066 決定 8 の範囲外のまま）。1 本ぶんの正確な値は見積もり
+  （`estimateSessionMemory` の `resident.stateBytes`）で、同時に生かす本数 × その値が呼び手の
+  勘定になる。見積もりも admission も分岐の本数を知らず、空き VRAM とも比べないので、足りない
+  ときは複製の確保で `GpuOutOfMemoryError` になって初めて分かる（元は無傷のまま残る）。
+  gemma4 E2B の full 層だけで 12,288 B/token なので、既定の容量 4,096 では full 層ぶんが
+  48 MiB・容量 131,072 では 1,536 MiB（掛け算で導いた値 — sliding 層のぶんは別に乗る）。
+  投機の借り手 context が分岐ごとに増やすのは論理長 uniform の 8 バイトだけ。
+- **分岐できない状態がある**: 走行中の run（借り手の run が走っている間を含む）・batch の
+  使用予約中・deferred commit の確定待ち・借り手 context・dispose / 汚染 / device 消失の後・
+  dispose 済みの Session。`GenerationSequence.fork` と `Gemma4ChatSession.fork` は dispose 済み
+  （ChatSession は走行中のターンも）を同期に throw し、sequence の分岐は走行中の生成の**後**に
+  走る（汲んでいる途中の stream を閉じずに `fork()` を await すると返らない）。
+- **分岐した後の token 列が「fork を使わない同じ操作列」と一致するかは、数値経路の決定性に従う**。
+  複製は KV のバイトを丸ごと写すので分岐の起点はビット同一だが、その後の一致を約束するのは
+  投機なしと `speculative: "always"` の場合と、自己採算ゲートつきで投機⑤の門が緑の device
+  だけである（ゲートの観測状態は分岐へ写すが、壁時計は分岐ごとに揺れる — 門が赤の device の
+  扱いは上の投機の節と同じ）。
+- **複製の GPU 時間は scheduler の統計（`submitCount`・時間予算・GPU 時間の内訳）に載らない**。
+  複製は Session の直列化鎖の外で、`fork()` を呼んだ同期区間に自前の encoder で submit する
+  （同じ Session の別 context の長い run に待たされない代わり）。巨大な容量の複製が同じ device の
+  別の run の計測窓に混ざることがある（未計測）。
+- **編集（途中の発話の書き換え）と容量の変更は分岐では表せない** — 従来どおり新しい sequence へ
+  履歴を流し直す（sliding スロットを含む context の `rewind` は全拒否のまま）。
+
 ## 実装間パリティ検証の厳しさは軌道の誤差増幅率に上限される（by-design）
 
 拡散系パイプライン（Irodori 等）の「参照実装との最終出力突合」は、反復ステップが浮動小数の

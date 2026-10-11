@@ -17,6 +17,20 @@ measurements in `docs/research/`.
 
 ### Added
 
+- Conversation forking. `GenerationContext.fork()` (`@karume/runtime`) returns an independent
+  context with the same capacity that holds a copy of every state slot and the logical length;
+  `GenerationSequence.fork()` and `Gemma4ChatSession.fork()` (`@karume/models`) build on it and
+  also carry over the pending frontier token, the speculation gate's observations and, for the
+  chat session, the history (a session whose KV cache is empty copies only the history and makes
+  no GPU copy). Each branch is owned and disposed by the caller and does not depend on the
+  original. Regenerating a reply is written as "keep the base session, fork it each time and
+  `send` on the branch"; there is no separate `regenerate`. Every branch adds one context's state
+  bytes of VRAM. `fork()` is rejected while a run (including a drafter's run that reads the KV
+  cache), a batch reservation or a deferred commit is pending, on a borrowing context, and after
+  dispose; the sequence and chat-session versions throw synchronously when already disposed (the
+  chat session also while a turn is running). Token sequences after a fork match the unforked
+  sequence of operations without speculation and with `speculative: "always"`; with the
+  self-tuning gate they match on devices where the speculation equality check passes.
 - `SessionDiagnostics.lastRunPipelines`: per-pipeline-key dispatch counts of the last run as
   planned, filled with or without `gpuTiming` and on the resident path (`enqueue`) too; the key
   spelling is a diagnostic label outside semver.
