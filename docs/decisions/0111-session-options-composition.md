@@ -7,7 +7,7 @@
   [0107](0107-model-input-error.md)（送出型の分類 — 決定 2）/ [0110](0110-practical-tier-numerics-contract.md)
   （参照層 / 実用層 — 束の正本は quant 席）/ [0038](0038-manifest-v1.md) §3（`gpuFeatures`）。
   実装 = `packages/models/src/session/options.ts`（`FamilySessionPolicy` / `resolveSessionOptions` /
-  `assertSessionOverrides`）と `packages/runtime/src/runtime/session-build.ts`（`sessionOptionsViolation`）。
+  `assertSessionOverrides`）と `packages/runtime/src/runtime/session-options-check.ts`（`sessionOptionsViolation`）。
 
 ## Context
 

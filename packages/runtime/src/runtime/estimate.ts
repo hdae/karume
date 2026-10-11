@@ -97,7 +97,7 @@ import {
   planAttentionBlocks,
   stateAttentionVariantViolation,
 } from "./recipe-builders/attention.ts";
-import { sessionOptionsViolation } from "./session-build.ts";
+import { sessionOptionsViolation } from "./session-options-check.ts";
 import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
 

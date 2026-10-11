@@ -168,7 +168,7 @@ export { DEFAULT_PLAN_BACKING_BUDGET_BYTES } from "./src/runtime/session-types.t
  * 1 本**で判定する純関数。違反の文言を返し、送出型は呼び手が決める — 配布形の宣言と明示指定を
  * 合成する上位層が、重みを取る前に構築と同じ判定で落とすための口（ADR 0058 追記 2026-09-26）。
  */
-export { sessionOptionsViolation } from "./src/runtime/session-build.ts";
+export { sessionOptionsViolation } from "./src/runtime/session-options-check.ts";
 /**
  * 重み取得前の admission の入口（ADR 0070 決定 5 / graph-first）。開いた容器のグラフ宣言だけで
  * 「実行できない」を先に落とし、必要メモリを見積り、そのまま Session にする 2 段境界:
