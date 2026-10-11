@@ -293,7 +293,11 @@ export const embeddingCase = (storage: WeightStorage): DegenerateCase => {
     uniformParams: true,
     inputs: [weight.payload, index],
     weightScale: weight.scale,
-    expected: applyReferenceOp("embedding", [weight.reference, index], {}, [rows, hidden]),
+    // padding_idx は forward に効かないが契約の必須 attr（src/ops/attrs.ts）— 未指定の番兵 −1 を渡す
+    expected: applyReferenceOp("embedding", [weight.reference, index], { padding_idx: -1 }, [
+      rows,
+      hidden,
+    ]),
     natural: Math.ceil((rows * hidden) / EMBEDDING_WORKGROUP_SIZE),
     groups: 3,
   };
