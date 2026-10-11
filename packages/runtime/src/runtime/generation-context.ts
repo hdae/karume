@@ -83,6 +83,18 @@ export type GenerationContextHost = {
   serialize<T>(body: () => Promise<T>): Promise<T>;
   /** 破棄の決着を Session の診断へ返す（`stateBacking.residentBytes` の生存集合から外す）。 */
   forget(context: GenerationContext): void;
+  /**
+   * 新しい context を確保して Session の生存集合へ登録する（実体は `Session.#adopt` —
+   * `createGenerationContext` と {@link GenerationContext.fork} が共有する登録の 1 経路）。
+   *
+   * MUST: Session の dispose を**呼んだ時点で同期に**検査し、その直後に `allocate` を**同期に**
+   * 呼ぶ（間に await を挟まない）。fork はこの区間で元のスロットの複製を submit し終える前提で
+   * 元に予約を立てないので、ここに await が 1 つ入るだけで、直後に元へ発行された run の書き込み後の
+   * 状態を写す（例外の出ない取り違え）。
+   * MUST: 登録は確保が決着した後で、その前に dispose をもう一度見る（確保の await を跨いで
+   * dispose された Session へ登録しない — 確保した context は畳んでから落とす）。
+   */
+  adopt(allocate: () => Promise<GenerationContext>): Promise<GenerationContext>;
 };
 
 /**
@@ -516,7 +528,10 @@ export class GenerationContext {
   #disposed = false;
   #disposal: Promise<void> | undefined;
 
-  /** MUST: 構築の入口は {@link GenerationContext.create} だけ（errorScope の門を迂回させない）。 */
+  /**
+   * MUST: 構築の入口は {@link GenerationContext.create} と {@link GenerationContext.fork} だけ
+   * （errorScope の門を迂回させない）。
+   */
   private constructor(
     host: GenerationContextHost,
     slots: ReadonlyMap<string, StateSlotBacking>,
@@ -876,6 +891,77 @@ export class GenerationContext {
   }
 
   /**
+   * {@link GenerationContext.fork} の本体（確保 → 複製の submit → pop の発行）。
+   *
+   * MUST: push から pop の**発行**までを await なしで行う（`create` と `ResidentTensor.read` と
+   * 同じ形 — GpuContext 冒頭「errorScope 区間の不変条件」の 3 つ目）。この同期区間で複製を
+   * submit し終えることが、元に予約を立てずに済む根拠そのもの（{@link GenerationContext.fork} の
+   * doc）。コピーは 1 encoder・1 submit にまとめ、`SubmitScheduler` の pending には載せない
+   * （別の run の失敗で discard される列に混ぜない）。
+   * MUST: 写すのは全スロットの**全バイト**（sliding の ring の余裕行も含む — 論理長より先に書かれた
+   * 行も物理配置ごと写さないと、複製の ring が元と別の配置になる）。焼いた bind group は写さない
+   * （元のスロットを束ねている — 写すと複製の run が元の KV へ書く）。
+   */
+  static async #forkFrom(
+    host: GenerationContextHost,
+    source: GenerationContext,
+    pastLength: number,
+  ): Promise<GenerationContext> {
+    const { gpu } = host;
+    pushFailureScopes(gpu.device);
+    const where = "GenerationContext の fork（state の複製）";
+    const created: GPUBuffer[] = [];
+    const slots = new Map<string, StateSlotBacking>();
+    let popped = false;
+    let context: GenerationContext | undefined;
+    try {
+      const encoder = gpu.device.createCommandEncoder({ label: "generation context fork" });
+      for (const [name, slot] of source.#slots) {
+        const buffer = gpu.device.createBuffer({
+          label: `state '${name}'`,
+          size: slot.byteLength,
+          usage: STORAGE_USAGE,
+        });
+        created.push(buffer);
+        slots.set(name, { buffer, shape: slot.shape, byteLength: slot.byteLength });
+        encoder.copyBufferToBuffer(slot.buffer, 0, buffer, 0, slot.byteLength);
+      }
+      const lengths = gpu.device.createBuffer({
+        label: "generation lengths",
+        size: LENGTHS_BYTES,
+        usage: LENGTHS_USAGE,
+      });
+      created.push(lengths);
+      gpu.device.queue.submit([encoder.finish()]);
+      const pending = popFailureScopes(gpu.device, where);
+      popped = true;
+      const failure = await gpu[RUNTIME_INTERNAL].raceDeviceLost(pending, where);
+      if (failure !== undefined) throw failure;
+      const forked = new GenerationContext(
+        host,
+        slots,
+        source.#slidingSlots,
+        lengths,
+        source.chunkLength,
+        source.chunkBuckets,
+        source[RUNTIME_INTERNAL].bindings,
+      );
+      // 論理長は fork() を呼んだ同期区間で捕捉した値（複製したバイトと同じ時点の値）。
+      forked.#pastLength = pastLength;
+      context = forked;
+      return context;
+    } finally {
+      // MUST: 後始末の規律は `create` と同じ（pop 発行前に抜けた場合だけ捨てる・返さない場合は
+      // 確保済みを 1 本残らず返す）。submit 済みのコピーが参照していても destroy は安全
+      // （実解放は完了まで実装が遅延する）。
+      if (!popped) await discardFailureScopes(gpu.device);
+      if (context === undefined) {
+        for (const buffer of created) buffer.destroy();
+      }
+    }
+  }
+
+  /**
    * 確定済み KV の論理長（ADR 0066 決定 6）。
    *
    * 進行は **run の成功でのみ**起きる（ホスト側の手動加算は API にしない — 二重簿記の禁止）。
@@ -1021,6 +1107,65 @@ export class GenerationContext {
       );
     }
     this.#pastLength = position;
+  }
+
+  /**
+   * 同じ Session・同じ容量の context を**丸ごと複製**する（ADR 0066 追記〈2026-10-11〉— 会話の
+   * 分岐）。返るのは全スロットの全バイトと `pastLength` を写した独立の context で、呼び手が所有し
+   * `dispose` も各自で行う（元との親子の依存は無く、元を先に dispose してよい）。
+   *
+   * 次の場合は呼んだ同期区間で判定し、戻り Promise を reject する: dispose 要求の後・device 消失の後
+   * （`GpuDeviceLostError`）・汚染の後・決着していない run がある（借り手の run が貸し手の予約を
+   * 取っている間を含む）・batch の使用予約中・deferred commit の確定待ち・借り手 context・
+   * Session が dispose 済み。生きている借り手を持つ貸し手と sliding を含む context は拒否しない
+   * （借り手は KV に 1 行も書かない — 元の借り手は元のスロットを束ねたまま残り、複製には借り手が
+   * いない）。
+   *
+   * MUST: 検査・`pastLength` の捕捉・確保・複製の submit を**この同期区間で await なしに**終える
+   * （`host.adopt` と `#forkFrom` の MUST）。元に予約を立てないので、
+   * 正しさの根拠は「元が静止している（進行中の run も保留も無い = 未 submit の書き込みが無い）」と
+   * 「複製をここで submit する（queue の順序が先行の書き込みの後・後続の書き込みの前を保証する）」の
+   * 2 つだけ。だから `fork()` を await せずに元へ発行した run / `rewind` / `dispose` / 2 本目の
+   * `fork` はどれも通り、複製は呼んだ時点の状態を持つ。
+   * NOTE: 複製は自前の encoder と submit で出す（Session の直列化鎖にも `SubmitScheduler` にも
+   * 載せない — `createGenerationContext` と同じく batch 区間との待ち合わせに辺を足さない）。その
+   * GPU 時間は scheduler の統計に載らない。確保の失敗は out-of-memory errorScope で fail loudly に
+   * なり、元は無傷のまま残る。
+   */
+  fork(): Promise<GenerationContext> {
+    let pastLength: number;
+    try {
+      this.#assertUsable("fork");
+      if (this.#borrow !== undefined) {
+        throw new ExecutionError(
+          "fork: 借り手 context は複製できない（スロットは貸し手の所有物 — 分岐するなら貸し手を " +
+            "fork し、借り手は複製に対して開き直す。ADR 0066 追記〈2026-10-11〉）",
+        );
+      }
+      if (this.#runKind === "batch") {
+        throw new ExecutionError(
+          "fork: GenerationContext は batch の最終決着待ち（finish 後に複製すること）",
+        );
+      }
+      if (this.#runKind !== undefined) {
+        throw new ExecutionError(
+          "fork: 進行中の generation run がある間は複製できない（借り手の run も貸し手の予約を" +
+            "取る）。run の決着を await してから呼ぶこと",
+        );
+      }
+      if (this.#pending !== undefined) {
+        throw new ExecutionError(
+          `fork: commit 待ちの generation run がある（pastLength ${this.#pending.pastLength} + ` +
+            `queryLength ${this.#pending.queryLength} まで書き込み済み）。` +
+            "context.commit(rows) で確定させてから呼ぶこと",
+        );
+      }
+      pastLength = this.#pastLength;
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+    const host = this.#host;
+    return host.adopt(() => GenerationContext.#forkFrom(host, this, pastLength));
   }
 
   /**

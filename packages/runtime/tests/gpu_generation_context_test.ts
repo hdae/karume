@@ -7,12 +7,21 @@
 // fail loudly になること ④論理長の進行と巻き戻しの境界 ⑤汚染と device 消失の拒否
 // ⑥論理長 uniform が**実際に GPU 上へ載っている**こと ⑦context が計画鍵に一切効かないこと
 // ⑧`Session.run` の第 3 引数の寿命契約（発行時 snapshot / 同一 context への並行発行の拒否）。
+// ⑨`fork`（会話状態の分岐 — ADR 0066 追記〈2026-10-11〉）: 写す中身・分岐の独立・同期区間の
+// 契約・拒否の行列・診断（節の冒頭に詳細）。
 //
 // ⑥ が無いと writeBuffer の no-op（無効バッファ・整列違反では警告すら出ない）を検出できない。
 // ⑦ が無いと、波 D で context を鍵に混ぜる実装が「値は正しいまま decode が毎 step 再導出」と
 // いう形で通ってしまう（例外も警告も出ない）。
 
-import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertRejects,
+  assertStrictEquals,
+  assertThrows,
+} from "@std/assert";
 import type { IrGraph } from "../src/format/ir.ts";
 import {
   acquireGpu,
@@ -42,6 +51,7 @@ import {
   type DeclarationJson,
   f32Bytes,
   GRAPH_NAME,
+  openGraphModel,
   openModelBytes,
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -220,13 +230,19 @@ const injectFaults = (
   return { gpu: proxied, destroyCounts };
 };
 
-/** 注入した gpu の上へ context を直に建てる面（Session を通さない — 借りるのは数欄だけ）。 */
+/**
+ * 注入した gpu の上へ context を直に建てる面（Session を通さない — 借りるのは数欄だけ）。
+ *
+ * `adopt` は登録の簿記を持たない素通し（`Session.#adopt` の MUST どおり `allocate` を同期に呼ぶ）。
+ * fork の故障注入だけが `adopt` を差し替える（{@link delayedAdoptHost}）。
+ */
 const injectedHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
   gpu,
   graph,
   flush: () => Promise.resolve(),
   serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
   forget: () => {},
+  adopt: (allocate) => allocate(),
 });
 
 Deno.test({
@@ -1367,6 +1383,677 @@ Deno.test({
     } finally {
       await context.dispose();
       await sliding.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// fork（会話状態の分岐 — ADR 0066 追記〈2026-10-11〉）
+// ---------------------------------------------------------------------------
+//
+// 縛るのは 4 つ:
+//   ①写す中身: 全スロットの全バイト（u32 で読み戻す）と pastLength・不変の値。焼いた束は写さない
+//   ②分岐の独立: 同じ入力なら元と複製の出力が u32 で一致し、複製だけを進めても元のバイトは動かない
+//   ③同期区間の契約: `fork()` を await せず同じ tick に元へ発行した run / rewind / dispose /
+//     2 本目の fork はどれも通り、複製は呼んだ時点の状態を持つ
+//   ④拒否の行列（(g) 借り手は gpu_borrowed_context_test.ts）と診断
+// ②③ の門が空振りでないことは故障注入 2 種（複製の dispatch が元のスロットを束ねる形・複製の前に
+// await を挟む host）で示す。
+
+/** fork の門のスロット容量・深さ（full attention 1 head — 値がスロットの中身に依存する最小形）。 */
+const FORK_CAPACITY = 16;
+const FORK_DEPTH = 4;
+const FORK_SLOT_BYTES = FORK_CAPACITY * FORK_DEPTH * 4;
+
+/**
+ * 書いた KV を読むグラフ（full attention + `state_append` 2 本）。出力 `o` が過去の KV の中身に
+ * 依存するので、「同じ入力なら同じ出力」が状態の同一性の観測になる。
+ */
+const forkGraph = (): DeclarationJson => ({
+  format: "karume-ir",
+  version: 2,
+  requires: { ops: ["attention", "state_append"] },
+  symbols: ["M"],
+  inputs: ["q", "k", "v"].map((name) => ({
+    name,
+    dtype: "f32",
+    shape: [1, 1, "M", FORK_DEPTH],
+  })),
+  outputs: ["o"],
+  initializers: {},
+  values: { o: { dtype: "f32", shape: [1, 1, "M", FORK_DEPTH] } },
+  states: {
+    kslot: { dtype: "f32", shape: [1, 1, FORK_CAPACITY, FORK_DEPTH] },
+    vslot: { dtype: "f32", shape: [1, 1, FORK_CAPACITY, FORK_DEPTH] },
+  },
+  nodes: [
+    {
+      op: "attention",
+      ins: ["q", "k", "v"],
+      outs: ["o"],
+      attrs: { scale: 0.5 },
+      states: { k: "kslot", v: "vslot" },
+    },
+    ...[["k", "kslot"], ["v", "vslot"]].map(([name, slot]) => ({
+      op: "state_append",
+      ins: [name],
+      outs: [],
+      attrs: {},
+      states: { slot },
+    })),
+  ],
+});
+
+const forkSession = async (gpu: GpuContext): Promise<Session> =>
+  await createSessionFromContainer(gpu, await openGraphModel(forkGraph()), GRAPH_NAME);
+
+/** `salt` で中身の変わる決定的な入力（`rows` 行 — pad 行は作らない = 有効行 = 物理行）。 */
+const forkInputs = (rows: number, salt: number): Record<string, Tensor> =>
+  Object.fromEntries(
+    ["q", "k", "v"].map((name, n) => [
+      name,
+      {
+        dtype: "f32",
+        shape: [1, 1, rows, FORK_DEPTH],
+        data: Float32Array.from(
+          { length: rows * FORK_DEPTH },
+          (_, i) => (((i * 7 + n * 3 + salt * 5) % 17) - 8) * 0.13,
+        ),
+      } satisfies Tensor,
+    ]),
+  );
+
+/**
+ * 1 step（`rows` 行を全部有効行として流す）。
+ *
+ * MUST: async にしない — `session.run` を**呼んだ同期区間**で発行させる（同じ tick に並べる門が
+ * この性質に依る）。
+ */
+const forkStep = (
+  session: Session,
+  context: GenerationContext,
+  rows: number,
+  salt: number,
+): Promise<Record<string, Tensor>> =>
+  session.run(forkInputs(rows, salt), {}, { context, queryLength: rows });
+
+/** 出力のビット列（u32 で比べる — 値の近さではなく同一性を見る）。 */
+const outputWords = (outputs: Record<string, Tensor>): number[] => {
+  const data = outputs["o"].data;
+  return Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
+};
+
+/** GPU バッファ全域を u32 列として読み戻す。 */
+const readWords = async (
+  gpu: GpuContext,
+  buffer: GPUBuffer,
+  byteLength: number,
+): Promise<number[]> => {
+  const staging = gpu.device.createBuffer({
+    size: byteLength,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  try {
+    const encoder = gpu.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
+    gpu.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const words = Array.from(new Uint32Array(staging.getMappedRange().slice(0)));
+    staging.unmap();
+    return words;
+  } finally {
+    staging.destroy();
+  }
+};
+
+/** context の全スロットを読み戻す（スロット名 → 全バイトの u32 列）。 */
+const readSlotWords = async (
+  gpu: GpuContext,
+  context: GenerationContext,
+): Promise<Record<string, number[]>> => {
+  const words: Record<string, number[]> = {};
+  for (const [name, slot] of internals(context).slots) {
+    words[name] = await readWords(gpu, slot.buffer, slot.byteLength);
+  }
+  return words;
+};
+
+Deno.test({
+  name: "fork は全スロットの全バイトと論理長を写し、分岐は独立に進む（u32・診断つき・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await forkSession(gpu);
+    const source = await session.createGenerationContext({ chunkLength: 4, chunkBuckets: [2] });
+    let forked: GenerationContext | undefined;
+    try {
+      // prefill 1 本 + decode 2 本。2 本目の decode は導出済み計画に当たって backing を作るので、
+      // 元の context は decode 形の backing に対して 1 回焼いている（焼き直しの勘定の起点）。
+      await forkStep(session, source, 4, 0);
+      await forkStep(session, source, 1, 1);
+      await forkStep(session, source, 1, 2);
+      assertEquals(source.pastLength, 6);
+      const before = session.diagnostics().stateBacking;
+      const words = await readSlotWords(gpu, source);
+      // 期待値が自明でないこと（書いた行が 0 のままだと、写し漏れも一致してしまう）。
+      for (const [name, slot] of Object.entries(words)) {
+        assert(slot.some((word) => word !== 0), `${name}: 元のスロットが全 0（門が空振りする）`);
+      }
+
+      forked = await source.fork();
+      // ① 写す中身: 論理長と不変の値、全スロットの全バイト。実体は別のバッファ。
+      assertEquals(forked.pastLength, 6);
+      assertEquals(forked.chunkLength, 4);
+      assertEquals(forked.chunkBuckets, [2]);
+      assertEquals([...internals(forked).allowedRows], [1, 2, 4]);
+      assertEquals(forked.slidingSlack, undefined);
+      assertEquals(forked.pendingCommit, undefined);
+      for (const [name, slot] of internals(forked).slots) {
+        assert(
+          slot.buffer !== internals(source).slots.get(name)?.buffer,
+          `${name}: 複製が元のバッファを共有している`,
+        );
+      }
+      assertEquals(await readSlotWords(gpu, forked), words, "全スロットの全バイトが一致する");
+      // 診断: 常駐は元の 1 本ぶん増え、累計は 1 増える。複製そのものは焼かない。
+      assertEquals(
+        session.diagnostics().stateBacking,
+        {
+          residentBytes: before.residentBytes + FORK_SLOT_BYTES * 2 + LENGTHS_BYTES,
+          contextCount: before.contextCount + 1,
+          rebindCount: before.rebindCount,
+        },
+        "複製はスロット 2 本 + 論理長 uniform ぶんを常駐させ、焼き直しは run まで起きない",
+      );
+
+      // ② 同じ decode の入力で両方を進めると、出力は u32 で一致する。焼き直しは複製の最初の
+      // run だけ（使った backing 1 本につき 1 回）で、元の続きの run では増えない。
+      const fromSource = await forkStep(session, source, 1, 3);
+      assertEquals(
+        session.diagnostics().stateBacking.rebindCount,
+        before.rebindCount,
+        "元の続きの run が焼き直した（元の束を捨てている）",
+      );
+      const fromFork = await forkStep(session, forked, 1, 3);
+      assertEquals(
+        session.diagnostics().stateBacking.rebindCount,
+        before.rebindCount + 1,
+        "複製の最初の run は使った backing 1 本につき 1 回だけ焼く",
+      );
+      assertEquals(outputWords(fromFork), outputWords(fromSource), "同じ入力の出力が u32 で一致");
+      const sourceWords = await readSlotWords(gpu, source);
+      assertEquals(
+        await readSlotWords(gpu, forked),
+        sourceWords,
+        "同じ入力で進めた 2 本は同じバイト",
+      );
+
+      // 複製だけを進めても元のバイトは動かない（陽性対照: 複製の run は自分のスロットへ書いた）。
+      await forkStep(session, forked, 1, 9);
+      assertEquals(session.diagnostics().stateBacking.rebindCount, before.rebindCount + 1);
+      assertEquals(
+        await readSlotWords(gpu, source),
+        sourceWords,
+        "複製の run が元のスロットへ書いた",
+      );
+      assertNotEquals(await readSlotWords(gpu, forked), sourceWords, "複製の run が書いていない");
+      assertEquals([source.pastLength, forked.pastLength], [7, 8]);
+
+      // 元を先に dispose してよい（親子の依存を持たない）。
+      await source.dispose();
+      await forkStep(session, forked, 1, 10);
+      assertEquals(forked.pastLength, 9);
+      assertEquals(
+        session.diagnostics().stateBacking.residentBytes,
+        FORK_SLOT_BYTES * 2 + LENGTHS_BYTES,
+        "元を返した後に残るのは複製のぶんだけ",
+      );
+    } finally {
+      await forked?.dispose();
+      await source.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "fork() を await せず同じ tick に元へ run を発行しても、複製は呼んだ時点の状態を持つ（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await forkSession(gpu);
+    const source = await session.createGenerationContext({ chunkLength: 4 });
+    let forked: GenerationContext | undefined;
+    try {
+      await forkStep(session, source, 4, 0);
+      const words = await readSlotWords(gpu, source);
+      // 同じ同期区間で fork → run の順に発行する。fork は元に予約を立てないので run は拒否されず、
+      // 複製は fork を呼んだ時点（run の書き込みより前）の内容を持つ。
+      const forking = source.fork();
+      const running = forkStep(session, source, 1, 5);
+      [forked] = await Promise.all([forking, running]);
+      assertEquals(await readSlotWords(gpu, forked), words, "複製が後続の run の書き込みを写した");
+      assertEquals(forked.pastLength, 4);
+      assertEquals(source.pastLength, 5);
+      // 陽性対照: 同じ tick の run は確かに元のスロットへ書いている（書いていなければ上の一致は
+      // 順序を何も見ていない）。
+      assertNotEquals(await readSlotWords(gpu, source), words, "同じ tick の run が書いていない");
+    } finally {
+      await forked?.dispose();
+      await source.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "fork() の直後（await 前）の rewind / 2 本目の fork / dispose は通る（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await forkSession(gpu);
+    const source = await session.createGenerationContext({ chunkLength: 4 });
+    const forks: GenerationContext[] = [];
+    try {
+      await forkStep(session, source, 4, 0);
+      const words = await readSlotWords(gpu, source);
+      // どれも同じ同期区間で発行する（fork は予約を取らないので、元の後続の操作を塞がない）。
+      const first = source.fork();
+      source.rewind(2);
+      const second = source.fork();
+      const disposal = source.dispose();
+      // dispose 要求の後の fork は拒否される（拒否の (a)）。
+      const late = assertRejects(() => source.fork(), ExecutionError, "dispose 済み");
+      forks.push(...await Promise.all([first, second]));
+      await disposal;
+      await late;
+
+      const [atFour, atTwo] = forks;
+      assertEquals([atFour.pastLength, atTwo.pastLength], [4, 2], "論理長は呼んだ時点の値");
+      // rewind は論理長だけを動かすので、2 本ともバイトは元の prefill 後の内容。
+      assertEquals(await readSlotWords(gpu, atFour), words);
+      assertEquals(await readSlotWords(gpu, atTwo), words);
+      // 元を返した後も、複製はどちらも独立に進む。
+      await forkStep(session, atFour, 1, 6);
+      await forkStep(session, atTwo, 1, 6);
+      assertEquals([atFour.pastLength, atTwo.pastLength], [5, 3]);
+      assertEquals(session.diagnostics().stateBacking.contextCount, 3);
+    } finally {
+      for (const forked of forks) await forked.dispose();
+      await source.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "fork の拒否: 汚染・進行中 run・batch の予約中・commit 待ち・dispose 済み Session（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await forkSession(gpu);
+    const sink = await gpu.createResident(FORK_DEPTH * 4);
+    const contexts: GenerationContext[] = [];
+    const fresh = async (): Promise<GenerationContext> => {
+      const context = await session.createGenerationContext({ chunkLength: 4 });
+      contexts.push(context);
+      return context;
+    };
+    try {
+      // (c) 汚染の後（背後の物理 state が失われた context を写させない）。
+      const poisoned = await fresh();
+      internals(poisoned).poison("テストの故障注入");
+      await assertRejects(() => poisoned.fork(), ExecutionError, "汚染された");
+
+      // (d) 決着していない run（予約は発行の同期区間で立つので、await しない並びで踏める）。
+      const busy = await fresh();
+      const running = forkStep(session, busy, 1, 0);
+      await assertRejects(() => busy.fork(), ExecutionError, "進行中の generation run");
+      await running;
+      contexts.push(await busy.fork());
+
+      // (e) batch の使用予約中（enqueue の Promise は返っても、区間の決着までは予約が残る）。
+      const batched = await fresh();
+      const batch = await gpu.beginBatch();
+      try {
+        await session.enqueue(forkInputs(1, 0), {
+          batch,
+          generation: { context: batched, queryLength: 1 },
+          copyOutputs: { o: sink },
+        });
+        await assertRejects(() => batched.fork(), ExecutionError, "batch の最終決着待ち");
+      } finally {
+        await batch.finish();
+      }
+      contexts.push(await batched.fork());
+
+      // (f) deferred commit の確定待ち（物理 ring に書いた行のどこまでが確定か決まっていない）。
+      const deferred = await fresh();
+      await session.run(forkInputs(1, 0), {}, {
+        context: deferred,
+        queryLength: 1,
+        commit: "deferred",
+      });
+      await assertRejects(() => deferred.fork(), ExecutionError, "commit 待ち");
+      deferred.commit(1);
+      contexts.push(await deferred.fork());
+
+      // 拒否された fork は 1 本も確保していない（累計は作った 4 本 + 通った fork 3 本だけ）。
+      assertEquals(session.diagnostics().stateBacking.contextCount, 7);
+
+      // (h) Session の dispose が確保の await を跨いだ場合: 確保した分は返し、生存集合にも累計にも
+      // 載せない（元は残る）。
+      const target = await fresh();
+      const before = session.diagnostics().stateBacking;
+      const pending = target.fork();
+      await session.dispose();
+      const crossed = await assertRejects(() => pending, ExecutionError);
+      assert(crossed.message.includes("dispose 済みの Session"), crossed.message);
+      assertEquals(session.diagnostics().stateBacking, before, "確保した複製が生存集合に残った");
+      // (h) 呼んだ時点で dispose 済みの Session。
+      await assertRejects(() => target.fork(), ExecutionError, "dispose 済みの Session");
+      assertEquals(target.pastLength, 0, "拒否された fork は元を汚さない");
+    } finally {
+      for (const context of contexts) await context.dispose();
+      await session.dispose();
+      sink.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "device 消失後の fork は GpuDeviceLostError（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // この case は device を壊すので専用の GpuContext を取る。
+    const gpu = await acquireGpu();
+    const session = await forkSession(gpu);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    gpu.destroy();
+    // destroy 直後（lost の反応前）から拒否する — 失われた device 上の確保は無効なバッファを
+    // 返すだけなので、通すと空の KV を持つ複製ができる。
+    await assertRejects(() => context.fork(), GpuDeviceLostError, "device が失われた");
+    await session.dispose().catch(() => undefined);
+  },
+});
+
+/**
+ * fork の故障注入用の device（確保の N 本目の同期 throw・pop の reject を**後から**仕掛ける）。
+ *
+ * {@link injectFaults} と違い、返すバッファは**素の GPUBuffer**（`destroy` だけを自身の
+ * プロパティで包む）。fork は確保したバッファを `copyBufferToBuffer` へ渡すので、Proxy を
+ * WebGPU の実装へ渡す形を避ける。仕掛けは元の context を作った後に `arm` で入れる（元の確保を
+ * 巻き込まない）。
+ */
+const armableFaults = (
+  gpu: GpuContext,
+): {
+  readonly gpu: GpuContext;
+  readonly destroyCounts: number[];
+  arm(fault: Omit<Fault, "hangPop">): void;
+} => {
+  const destroyCounts: number[] = [];
+  let creations = 0;
+  let fault: Omit<Fault, "hangPop"> = {};
+  const device = new Proxy(gpu.device, {
+    get(target, prop): unknown {
+      if (prop === "createBuffer") {
+        return (descriptor: GPUBufferDescriptor): GPUBuffer => {
+          creations += 1;
+          if (creations === fault.failCreateAt) {
+            throw new Error(`注入: ${creations} 本目の createBuffer が同期 throw`);
+          }
+          const buffer = target.createBuffer(descriptor);
+          const index = destroyCounts.push(0) - 1;
+          const destroy = buffer.destroy.bind(buffer);
+          Object.defineProperty(buffer, "destroy", {
+            value: (): void => {
+              destroyCounts[index] += 1;
+              destroy();
+            },
+          });
+          return buffer;
+        };
+      }
+      if (prop === "popErrorScope" && fault.popError !== undefined) {
+        const error = fault.popError;
+        return (): Promise<GPUError | null> => {
+          // MUST: 実 pop は必ず発行する（{@link injectFaults} と同じ理由 — LIFO を崩さない）。
+          void target.popErrorScope().catch(() => null);
+          return Promise.reject(error);
+        };
+      }
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const proxied = new Proxy(gpu, {
+    get(target, prop): unknown {
+      if (prop === "device") return device;
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    gpu: proxied,
+    destroyCounts,
+    arm: (next): void => {
+      fault = next;
+      creations = 0;
+    },
+  };
+};
+
+Deno.test({
+  name: "fork の確保途中の失敗は確保物をちょうど 1 回ずつ返し、元は無傷（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const graph = prepareContainer(
+      await openStateModel(stateGraph(NUMERIC_STATES)),
+      GRAPH_NAME,
+    ).graph;
+    const injected = armableFaults(gpu);
+    try {
+      const source = await GenerationContext.create(injectedHost(injected.gpu, graph), {
+        chunkLength: 1,
+      });
+      internals(source).advance(0, 1);
+      assertEquals(injected.destroyCounts, [0, 0, 0], "元はスロット 2 本 + 論理長 uniform");
+
+      // ① 途中の同期 throw: 複製の 2 本目で落ちても 1 本目がちょうど 1 回返る。
+      injected.arm({ failCreateAt: 2 });
+      await assertRejects(() => source.fork(), Error, "注入: 2 本目の createBuffer");
+      assertEquals(injected.destroyCounts, [0, 0, 0, 1], "確保済みの 1 本が漏れない");
+
+      // ② pop の reject: 複製の全確保物（スロット 2 本 + 論理長 uniform）がちょうど 1 回返る。
+      injected.arm({ popError: new Error("注入: popErrorScope の reject") });
+      await assertRejects(() => source.fork(), Error, "注入: popErrorScope の reject");
+      assertEquals(injected.destroyCounts, [0, 0, 0, 1, 1, 1, 1]);
+
+      // 元は無傷: 論理長も読め、仕掛けを外せば fork も通る。
+      injected.arm({});
+      assertEquals(source.pastLength, 1);
+      const forked = await source.fork();
+      assertEquals(forked.pastLength, 1);
+      await forked.dispose();
+      await source.dispose();
+      assertEquals(injected.destroyCounts, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "分岐の独立の門は空振りでない — 複製の dispatch が元のスロットを束ねると元が動く（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const session = await forkSession(gpu);
+    const source = await session.createGenerationContext({ chunkLength: 4 });
+    let forked: GenerationContext | undefined;
+    try {
+      // 元が decode 形の backing に対して焼いた束を持つところまで進める。
+      await forkStep(session, source, 4, 0);
+      await forkStep(session, source, 1, 1);
+      await forkStep(session, source, 1, 2);
+      forked = await source.fork();
+      const sourceWords = await readSlotWords(gpu, source);
+      const forkedWords = await readSlotWords(gpu, forked);
+
+      // 注入: 元が焼いた束を複製へ写す（`#baked` を写す実装の再現。バッファを共有する実装も
+      // 「複製の dispatch が元のスロットを束ねる」点で同じ観測になる）。backing の世代は
+      // 1 始まりの単調増加（`planBacking.buildCount` が最大値）。
+      let injected = 0;
+      for (let build = 1; build <= session.diagnostics().planBacking.buildCount; build += 1) {
+        const groups = internals(source).bakedGroups(build);
+        if (groups === undefined) continue;
+        internals(forked).setBakedGroups(build, groups);
+        injected += 1;
+      }
+      assert(injected > 0, "写す束が無い（故障注入が空振りする）");
+      const rebinds = session.diagnostics().stateBacking.rebindCount;
+      await forkStep(session, forked, 1, 9);
+
+      // 独立の門の 3 つの観測がどれも赤になる: 元のバイトが動き、複製のバイトは動かず、
+      // 複製の最初の run が焼き直さない。
+      assertNotEquals(
+        await readSlotWords(gpu, source),
+        sourceWords,
+        "注入しても元のバイトが動かない（独立の門が空振りする）",
+      );
+      assertEquals(await readSlotWords(gpu, forked), forkedWords);
+      assertEquals(session.diagnostics().stateBacking.rebindCount, rebinds);
+    } finally {
+      await forked?.dispose();
+      await source.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * `adopt` に await を挟む host（同期区間の契約を破る将来の改修の再現 — 故障注入）。
+ * `allocate` は待ちの後で呼ぶので、複製は待ちの間に積まれた書き込みの後の状態を写す。
+ */
+const delayedAdoptHost = (
+  gpu: GpuContext,
+  graph: IrGraph,
+  delay: () => Promise<void>,
+): GenerationContextHost => ({
+  ...injectedHost(gpu, graph),
+  adopt: async (allocate) => {
+    await delay();
+    return await allocate();
+  },
+});
+
+Deno.test({
+  name:
+    "同期区間の門は空振りでない — 複製の前に await を挟む host では後続の書き込みを写す（故障注入・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const gpu = await acquireGpu();
+    const graph = prepareContainer(
+      await openStateModel(stateGraph(NUMERIC_STATES)),
+      GRAPH_NAME,
+    ).graph;
+    const earlier = new Uint32Array(SLOT_BYTES / 4).fill(0x3f800000);
+    const later = new Uint32Array(SLOT_BYTES / 4).fill(0x40000000);
+    /**
+     * 元の `k` を `earlier` で埋め、`fork()` を呼んだ**同じ同期区間**で `later` に上書きしてから、
+     * 複製の `k` を読む（queue の順序は writeBuffer と submit の発行順）。
+     */
+    const forkThenOverwrite = async (host: GenerationContextHost): Promise<number[]> => {
+      const source = await GenerationContext.create(host, { chunkLength: 1 });
+      try {
+        const slot = internals(source).slots.get("k");
+        assert(slot !== undefined, "スロット k が引けない");
+        gpu.device.queue.writeBuffer(slot.buffer, 0, earlier);
+        const pending = source.fork();
+        gpu.device.queue.writeBuffer(slot.buffer, 0, later);
+        const forked = await pending;
+        try {
+          const copied = internals(forked).slots.get("k");
+          assert(copied !== undefined, "複製のスロット k が引けない");
+          return await readWords(gpu, copied.buffer, copied.byteLength);
+        } finally {
+          await forked.dispose();
+        }
+      } finally {
+        await source.dispose();
+      }
+    };
+    try {
+      assertEquals(
+        await forkThenOverwrite(injectedHost(gpu, graph)),
+        [...earlier],
+        "契約どおりの host: 複製は fork() を呼んだ時点の内容",
+      );
+      // 待ちを挟むと、同じ同期区間の後続の書き込みが複製に入る（= 上の門が赤になる）。microtask
+      // 1 段でもここは捕まる（書き込みが同期区間の中にあるため）。run 経由の書き込みは本体が
+      // マイクロタスクの先で積まれるので、そちらで microtask のずれを捕まえる保証は無い（推測）。
+      for (
+        const [label, delay] of [
+          ["microtask", () => Promise.resolve()],
+          ["macrotask", () => new Promise<void>((resolve) => setTimeout(resolve, 0))],
+        ] as const
+      ) {
+        assertEquals(
+          await forkThenOverwrite(delayedAdoptHost(gpu, graph, delay)),
+          [...later],
+          `${label} の await を挟んでも呼んだ時点の内容が残る（門が空振りする）`,
+        );
+      }
+    } finally {
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name: "fork の所要時間を記録する（スロット 2 本 × 64 MiB・記録のみ・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    // 複製は scheduler の外の自前 submit なので、巨大な複製の所要は他に観測点が無い。値の門は
+    // 置かない（device と負荷で動く）— 弱い GPU で TDR 域に近づくかを読む材料として残す。
+    const rows = 64 * 1024 * 1024 / (2 * 4 * 4);
+    const gpu = await acquireGpu();
+    const session = await stateSession(
+      gpu,
+      stateGraph({
+        k: { dtype: "f32", shape: [1, 2, rows, 4] },
+        v: { dtype: "f32", shape: [1, 2, rows, 4] },
+      }),
+    );
+    const source = await session.createGenerationContext({ chunkLength: 1 });
+    try {
+      const started = performance.now();
+      const forked = await source.fork();
+      const elapsed = performance.now() - started;
+      try {
+        assertEquals(internals(forked).bytes, internals(source).bytes);
+        console.log(
+          `[gpu] GenerationContext.fork: ${
+            (internals(source).bytes / (1024 * 1024)).toFixed(0)
+          } MiB を ${elapsed.toFixed(1)} ms（確保 + 複製の submit + pop の待ち）`,
+        );
+      } finally {
+        await forked.dispose();
+      }
+    } finally {
+      await source.dispose();
+      await session.dispose();
       gpu.destroy();
     }
   },

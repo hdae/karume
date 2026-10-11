@@ -11,6 +11,9 @@
 //      鍵に載っていることの検出器）
 //   ⑤ 共有重み: 貸し手の i8 embedding 表を借り手が読み、値が貸し手と**ビット一致**する。
 //      shape / 意味論 dtype / 席 / 行の軸の不一致は fail loudly・借り手が生きている間の貸し手 dispose も拒否
+//   ⑥ 分岐（fork — ADR 0066 追記〈2026-10-11〉・裁定 36）: 生きている借り手を持つ貸し手は fork
+//      できる（拒否は借り手の run が走っている間だけ）。fork の後も元の借り手は元のスロットを読み、
+//      複製には借り手がいない。借り手 context そのものは fork できない
 //
 // MUST: 参照に渡すスロットは**GPU から読み戻す**（ホスト側オラクルの再現ではない）。借り手が
 // 読むのは貸し手が実際に書いた行なので、読み戻しでしか「同じ実体を見ている」ことを示せない。
@@ -19,6 +22,7 @@ import {
   assert,
   assertEquals,
   assertInstanceOf,
+  assertNotEquals,
   assertRejects,
   assertThrows,
   fail,
@@ -545,6 +549,113 @@ Deno.test({
       // 借り手が退いた後は通る。
       await lenderContext.dispose();
     } finally {
+      await borrower.dispose();
+      await lender.dispose();
+      gpu.destroy();
+    }
+  },
+});
+
+/**
+ * 借り手の 1 回ぶんの出力（u32 — 値の近さではなく「どの実体を読んだか」を見る）。
+ *
+ * MUST: `borrower.run` は呼んだ同期区間で発行される（予約が同期に立つ — 拒否の門がこれに依る）。
+ */
+const draftWords = async (
+  borrower: Session,
+  borrowed: GenerationContext,
+  salt: number,
+): Promise<number[]> => {
+  const outputs = await borrower.run(
+    { q: tensor([1, HEADS, 1, DEPTH], seeded(HEADS * DEPTH, (i) => QUERY(i + salt))) },
+    {},
+    { context: borrowed, queryLength: 1 },
+  );
+  const data = outputs["o"].data;
+  return Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
+};
+
+Deno.test({
+  name: "fork: 借り手を持つ貸し手は複製でき、元の借り手は元のスロットを読み続ける（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: async () => {
+    const capacity = 16;
+    const gpu = await acquireGpu();
+    const lender = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(lenderGraph()),
+      "model",
+    );
+    const borrower = await createSessionFromContainer(
+      gpu,
+      await openGraphModel(borrowerGraph()),
+      "model",
+    );
+    const lenderContext = await lender.createGenerationContext({
+      chunkLength: 4,
+      bindings: { C: capacity },
+    });
+    const borrowed = await borrower.createGenerationContext({
+      chunkLength: 1,
+      borrow: lenderContext,
+    });
+    /** 後から作る context（後始末は作った順の逆）。 */
+    const extra: GenerationContext[] = [];
+    try {
+      await lenderStep(lender, lenderContext, 4, 4, 0);
+      for (let step = 0; step < 3; step += 1) {
+        await lenderStep(lender, lenderContext, 1, 1, 11 + step * 7);
+      }
+
+      // 借り手の run が走っている間は拒否（借り手の run は貸し手の予約も取る — 拒否の (d)）。
+      const drafting = draftWords(borrower, borrowed, 0);
+      await assertRejects(() => lenderContext.fork(), ExecutionError, "進行中の generation run");
+      await drafting;
+      // 借り手 context そのものは複製できない（拒否の (g) — スロットは貸し手の所有物）。
+      await assertRejects(() => borrowed.fork(), ExecutionError, "借り手 context は複製できない");
+
+      // 生きている借り手を持つ貸し手は fork できる（裁定 36 = a）。sliding を含む context も拒否しない。
+      const forked = await lenderContext.fork();
+      extra.push(forked);
+      assertEquals(forked.pastLength, lenderContext.pastLength);
+      assertEquals(forked.slidingSlack, lenderContext.slidingSlack);
+
+      // 元と複製を**別の入力**で 1 行ずつ進める（同じ論理位置に違う KV が入る）。
+      await lenderStep(lender, lenderContext, 1, 1, 101);
+      await lenderStep(lender, forked, 1, 1, 202);
+
+      // 元の借り手は元のスロットを束ねたまま: 出力は「元に新しく作った借り手」と u32 で一致し、
+      // 「複製に作った借り手」とは違う。新しいバッファを元へ付け替える（swap 型の）実装は、元の
+      // 借り手が複製側の実体を読む形になるのでここで落ちる。
+      const onLender = await borrower.createGenerationContext({
+        chunkLength: 1,
+        borrow: lenderContext,
+      });
+      extra.push(onLender);
+      const onFork = await borrower.createGenerationContext({ chunkLength: 1, borrow: forked });
+      extra.push(onFork);
+      const live = await draftWords(borrower, borrowed, 303);
+      assertEquals(
+        live,
+        await draftWords(borrower, onLender, 303),
+        "元の借り手が元のスロットを読んでいない",
+      );
+      assertNotEquals(
+        live,
+        await draftWords(borrower, onFork, 303),
+        "元の借り手が複製のスロットを読んだ（付け替え型の取り違え）",
+      );
+
+      // 寿命: 複製には元の借り手が付いていない（元の借り手が生きていても複製は返せる）。元は
+      // 借り手が居る間は従来どおり拒否する。
+      await onFork.dispose();
+      await forked.dispose();
+      const refused = await assertRejects(() => lenderContext.dispose(), ExecutionError);
+      assert(refused.message.includes("借りている context が 2 本"), refused.message);
+    } finally {
+      for (const context of extra.reverse()) await context.dispose();
+      await borrowed.dispose();
+      await lenderContext.dispose();
       await borrower.dispose();
       await lender.dispose();
       gpu.destroy();

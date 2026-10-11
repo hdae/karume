@@ -334,6 +334,7 @@ const stateHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
   flush: () => Promise.resolve(),
   serialize: <T>(body: () => Promise<T>): Promise<T> => body(),
   forget: () => {},
+  adopt: (allocate) => allocate(),
 });
 
 Deno.test("state スロットの maxBufferSize 超過も createBuffer より前に落ちる", async () => {

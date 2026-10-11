@@ -804,7 +804,7 @@ export class Session {
       // MUST: 写しの後にもう一度受け口を検査する。`captureInputs` と spread は利用者の getter を
       // 同期で走らせるので、その中で同じ Session の `dispose()` が発行できる。呼び出し時点の判定
       // をすり抜けると破棄完了後に本体が走って slot backing を再確保し、回収経路の無い GPU
-      // バッファが残る（{@link Session.#createGenerationContext} の「確保の後にもう一度」と同じ
+      // バッファが残る（{@link Session.#adopt} の「確保の後にもう一度」と同じ
       // 規律 — 最終検査は資源予約と直列化鎖への追加の直前に置く）。
       if (this.#disposal !== undefined) {
         throw new ExecutionError("dispose 済みの Session では実行できない");
@@ -1107,31 +1107,12 @@ export class Session {
    * のは `queryLength` と入力の物理 chunk 行数だけで、メソッドは増やさない。
    */
   createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
-    // dispose 済みの判定は呼び出し時点で行う（run / enqueue と同じ規律）。
-    if (this.#disposal !== undefined) {
-      return Promise.reject(
-        new ExecutionError("dispose 済みの Session では GenerationContext を作れない"),
-      );
-    }
-    return this.#createGenerationContext(spec);
+    return this.#adopt(() => GenerationContext.create(this.#generationHost(), spec));
   }
 
-  /**
-   * {@link Session.createGenerationContext} の本体（借りる面の組み立てと生存集合の登録）。
-   *
-   * MUST: 生存集合への登録は**確保が決着した後**（失敗した context を数えると、診断の常駐
-   * バイト数が実体の無いぶんを主張し続ける）。
-   * MUST: dispose 判定は確保の**後にもう一度**執行する。`#disposal` は `dispose()` の同期区間で
-   * 立つので、`GenerationContext.create` の await を跨いで dispose が発行されると呼び出し時点の
-   * 判定をすり抜け、dispose 済み Session の生存集合へ登録されてしまう（診断
-   * `stateBacking.residentBytes` が非ゼロを主張し続け、その GPU バッファは利用者が
-   * `context.dispose()` を呼ぶまで残る）。確保済みの context は自分で破棄してから落とす。
-   * NOTE: create 全体を {@link Session.#serialize} へ積む形は**採らない** — `#chain` の一員に
-   * なると、batch 区間の未決着 run と同型の循環（BatchScope → enqueue → run → errorScope 区間
-   * ロック）に create まで巻き込まれる。チェーン外であることが待ち合わせグラフ上は安全側。
-   */
-  async #createGenerationContext(spec: GenerationContextSpec): Promise<GenerationContext> {
-    const host: GenerationContextHost = {
+  /** context が Session から借りる面（{@link GenerationContextHost} — 必要な欄だけ）。 */
+  #generationHost(): GenerationContextHost {
+    return {
       gpu: this.#state.gpu,
       graph: this.#state.graph,
       flush: () => this.#state.scheduler.flush(),
@@ -1139,8 +1120,35 @@ export class Session {
       forget: (context: GenerationContext): void => {
         this.#contexts.delete(context);
       },
+      adopt: (allocate) => this.#adopt(allocate),
     };
-    const context = await GenerationContext.create(host, spec);
+  }
+
+  /**
+   * context の確保と生存集合への登録（{@link Session.createGenerationContext} と
+   * `GenerationContext.fork` が共有する**登録の 1 経路**）。
+   *
+   * MUST: dispose 済みの判定は**呼び出し時点**で行い（run / enqueue と同じ規律）、その直後に
+   * `allocate` を**同期に**呼ぶ（間に await を挟まない）。async 関数の本体は最初の await まで
+   * 同期に走るので、判定と `allocate()` の呼び出しは呼び手の同期区間の中で起きる — fork は
+   * この区間で複製を submit し終える前提で元に予約を立てない（`GenerationContextHost.adopt` の
+   * MUST）。
+   * MUST: 生存集合への登録は**確保が決着した後**（失敗した context を数えると、診断の常駐
+   * バイト数が実体の無いぶんを主張し続ける）。
+   * MUST: dispose 判定は確保の**後にもう一度**執行する。`#disposal` は `dispose()` の同期区間で
+   * 立つので、確保の await を跨いで dispose が発行されると呼び出し時点の判定をすり抜け、
+   * dispose 済み Session の生存集合へ登録されてしまう（診断 `stateBacking.residentBytes` が
+   * 非ゼロを主張し続け、その GPU バッファは利用者が `context.dispose()` を呼ぶまで残る）。
+   * 確保済みの context は自分で破棄してから落とす。
+   * NOTE: 確保全体を {@link Session.#serialize} へ積む形は**採らない** — `#chain` の一員に
+   * なると、batch 区間の未決着 run と同型の循環（BatchScope → enqueue → run → errorScope 区間
+   * ロック）に create / fork まで巻き込まれる。チェーン外であることが待ち合わせグラフ上は安全側。
+   */
+  async #adopt(allocate: () => Promise<GenerationContext>): Promise<GenerationContext> {
+    if (this.#disposal !== undefined) {
+      throw new ExecutionError("dispose 済みの Session では GenerationContext を作れない");
+    }
+    const context = await allocate();
     if (this.#disposal !== undefined) {
       // 確保済みぶんを先に返してから fail loudly（黙って生存集合の外へ漏らさない）。
       await context.dispose();

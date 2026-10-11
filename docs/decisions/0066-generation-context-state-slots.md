@@ -367,7 +367,7 @@ GPU テスト（`gpu_borrowed_context_test.ts`）で固定する。
   元へ発行した run / `rewind` / `dispose` / 2 本目の `fork` は、どれも安全に通る。
 - 複製は Session の直列化鎖にも `SubmitScheduler` の pending にも載せない（自前の encoder と
   submit）。`createGenerationContext` を鎖の外に置く理由（batch 区間との待ち合わせの閉路を
-  作らない — executor.ts の `Session.#createGenerationContext` の NOTE）と同じ側に立つ。代償と
+  作らない — executor.ts の `Session.#adopt` の NOTE）と同じ側に立つ。代償と
   して、複製の GPU 時間は scheduler の統計に載らない。
 - 確保の後の登録（dispose の再検査 → 生存集合 → `contextCount`）は `createGenerationContext` と
   共有の 1 経路（`Session.#adopt`）を通る。
