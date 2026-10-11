@@ -518,8 +518,13 @@ core 既定以下の形）だけを数え、それ以外は上限を名指して
 - **1 行ぶんに満たない予算は run の計画導出で落ちる**（fail loudly — 予算を名指す）: Session の構築時には形が記号のままで
   枚数が決まらないので、構築時に落ちるのは値域の外（0・負・非整数・NaN・数値でない値）だけ。Wan の DiT なら重みの
   読み込みの後に落ちる。事前に知る手段は見積り（`EstimateOptions.attentionRowBlockMaxBytes` に同じ値を渡す）。
-- **速度の代価は形と機に依る**: 枚数 × 3 本の dispatch が増える。小さい形では分割で遅くなった実測があり、分割の方が
-  速かった例もある（ADR 0124 Context）。Wan の規模での代価は未測定（ADR 0124 の段 4b で測る）。
+- **山は予算なしより下がりうるが、小さくするほど下がるとは限らない**: 予算で縮むのは行ブロック 1 枚ぶんの一時で、中間
+  全体の山は中間の配置の割れ方に依る（見積りの計算値で、Wan2.2 の DiT の実用席・121 フレームでは 256 MiB が 512 MiB より
+  大きい — [research 2026-10-11](research/2026-10-11-fused-attention-estimate-before-after.md)。実寸は ADR 0124 の段 4b で
+  測る）。
+- **速度の代価は形と機に依る**: 増えた枚数 × 1 枚あたりの dispatch 数（融合 attention 3・分解 attention 4・states 形 2〜3）
+  だけ dispatch が増える。小さい形では分割で遅くなった実測があり、分割の方が速かった例もある（ADR 0124 Context）。Wan の
+  規模での代価は未測定（ADR 0124 の段 4b で測る）。
 - **models の pipeline には口が無い**: runtime の `SessionOptions` だけの欄で、`WanTi2vPipeline` などからは渡せない
   （口を出すかは段 4b の実測の後で決める）。
 
