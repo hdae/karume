@@ -1583,6 +1583,143 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
       `${OWNER} vae_encoder_post の入力 'hidden' の軸 2 が記号そのものでない（2h）`,
     );
   });
+
+  /**
+   * `EncoderGraph` で書けない宣言（入力 2 本・出口の dtype）を差し込む形。`replaced` の部品だけ {@link GraphOwner} を
+   * 差し替え、残りは系列の宣言のまま。
+   */
+  const contractWith = (replaced: Partial<Record<"pre" | "attn" | "post", GraphOwner>>) =>
+    wanVaeEncoderContract(
+      { ...encoderGraphs(), ...replaced },
+      layout,
+      WAN22_TI2V_FAMILY.generation,
+      WAN22_TI2V_FAMILY.owner,
+    );
+
+  it("入出力が 1 本 → 1 本でなければ落ちる（ホストはそれだけを組んで読む）", () => {
+    const pre = ENCODER_GRAPHS.vae_encoder_pre;
+    assertThrows(
+      () =>
+        contractWith({
+          pre: stubModel({
+            symbols: pre.symbols,
+            inputs: [pre.input, { name: "extra", shape: [1] }],
+            outputs: ["out"],
+            values: { out: pre.output },
+          }),
+        }),
+      Error,
+      `${OWNER} vae_encoder_pre の入出力が 2 本 → 1 本（1 本 → 1 本だけを組む）`,
+    );
+  });
+
+  it("入力の dtype が f32 でなければ落ちる", () => {
+    const attn = ENCODER_GRAPHS.vae_encoder_attn;
+    assertThrows(
+      () =>
+        contractWith({
+          attn: stubModel({
+            symbols: attn.symbols,
+            inputs: [{ ...attn.input, dtype: "i32" }],
+            outputs: ["out"],
+            values: { out: attn.output },
+          }),
+        }),
+      Error,
+      `${OWNER} vae_encoder_attn の入力 'tokens' の dtype i32 が f32 でない`,
+    );
+  });
+
+  it("出力の dtype が f32 でなければ落ちる", () => {
+    const { graph } = encoderGraphs().post;
+    assertThrows(
+      () =>
+        contractWith({
+          post: {
+            graph: { ...graph, values: { out: { ...graph.values.out, dtype: "bool" } } },
+          },
+        }),
+      Error,
+      `${OWNER} vae_encoder_post の出力 'out' の dtype bool が f32 でない`,
+    );
+  });
+
+  it("pre の出口のチャネルが静的でなければ落ちる（C は 3 グラフで同じ静的な値として読む）", () => {
+    assertThrows(
+      () =>
+        contract({
+          vae_encoder_pre: {
+            ...ENCODER_GRAPHS.vae_encoder_pre,
+            symbols: ["C", "h", "w"],
+            output: ["C", 1, "h", "w"],
+          },
+        }),
+      Error,
+      `${OWNER} vae_encoder_pre の出力 'out' の軸 0 が静的でない（C）`,
+    );
+  });
+
+  it("pre が空間の記号 h, w のほかに記号を持てば落ちる（束縛の源はホストが渡す h, w だけ）", () => {
+    assertThrows(
+      () =>
+        contract({
+          vae_encoder_pre: { ...ENCODER_GRAPHS.vae_encoder_pre, symbols: ["h", "w", "T"] },
+        }),
+      Error,
+      `${OWNER} vae_encoder_pre の記号が [h, w, T]（期待: [h, w]）`,
+    );
+  });
+
+  it("attn の入口の C が pre の出口の 640 と違えば落ちる（3 グラフの受け渡しはバイト列の読み替え）", () => {
+    assertThrows(
+      () =>
+        contract({
+          vae_encoder_attn: {
+            ...ENCODER_GRAPHS.vae_encoder_attn,
+            input: { name: "tokens", shape: [320, "S"] },
+          },
+        }),
+      Error,
+      `${OWNER} vae_encoder_attn の入力 'tokens' の形 [320, S] がホストの組む [640, S] と違う`,
+    );
+  });
+
+  it("attn の出口の C が pre の出口の 640 と違えば落ちる", () => {
+    assertThrows(
+      () =>
+        contract({
+          vae_encoder_attn: { ...ENCODER_GRAPHS.vae_encoder_attn, output: [320, "S"] },
+        }),
+      Error,
+      `${OWNER} vae_encoder_attn の出力 'out' の形 [320, S] がホストの組む [640, S] と違う`,
+    );
+  });
+
+  it("post の入口の C が pre の出口の 640 と違えば落ちる", () => {
+    assertThrows(
+      () =>
+        contract({
+          vae_encoder_post: {
+            ...ENCODER_GRAPHS.vae_encoder_post,
+            input: { name: "hidden", shape: [320, 1, "h", "w"] },
+          },
+        }),
+      Error,
+      `${OWNER} vae_encoder_post の入力 'hidden' の形 [320, 1, h, w] がホストの組む [640, 1, h, w] と違う`,
+    );
+  });
+
+  it("受理寸法の 1 つが空間の圧縮 16 で割り切れなければ落ちる（受理寸法ごとの束縛の被覆）", () => {
+    const generation = {
+      ...WAN22_TI2V_FAMILY.generation,
+      acceptedSizes: [...WAN22_TI2V_FAMILY.generation.acceptedSizes, { width: 1288, height: 704 }],
+    };
+    assertThrows(
+      () => wanVaeEncoderContract(encoderGraphs(), layout, generation, WAN22_TI2V_FAMILY.owner),
+      Error,
+      `${OWNER} 1288×704 は VAE encoder の空間の圧縮 16 で潜在が正の整数にならない`,
+    );
+  });
 });
 
 describe("WanTi2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 admission）", () => {
