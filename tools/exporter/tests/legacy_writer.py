@@ -313,10 +313,11 @@ def legacy_ple_sidecar(
     (directory / PLE_SHARD_FILE).write_bytes(
         write_safetensors(
             [
+                # 旧書き手と旧読み手（gemma の ple.ts）の形は `[rows, layers, dim]`（論理形）。
                 Entry(
                     "values",
                     _PLE_SHARD_DTYPE[storage],
-                    (tokens, dim * layers),
+                    (tokens, layers, dim),
                     payloads["values"],
                 ),
                 Entry("scales", "F32", (tokens, layers), payloads["scales"]),
