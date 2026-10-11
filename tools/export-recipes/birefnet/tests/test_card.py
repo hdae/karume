@@ -121,6 +121,13 @@ class TestBirefnetPostprocess:
         with pytest.raises(ValueError, match="nearest"):
             render_birefnet_model_card(manifest, REPO, CHECKPOINT)
 
+    def test_it_refuses_a_model_without_a_declared_procedure(self) -> None:
+        """欄の欠けも、説明を持たない手順と同じ文言で落とす（素の `KeyError` にしない）。"""
+        manifest = _birefnet_manifest()
+        del manifest["models"][MODEL]["pipelineConfig"]["postprocess"]
+        with pytest.raises(ValueError, match="後処理の手順 None の説明を持たない"):
+            render_birefnet_model_card(manifest, REPO, CHECKPOINT)
+
 
 class TestBirefnetCardGate:
     def test_it_refuses_a_pipeline_it_does_not_describe(self) -> None:

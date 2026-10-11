@@ -481,8 +481,12 @@ def _birefnet_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
 
 
 def _birefnet_postprocess(config: Mapping[str, Any]) -> tuple[str, ...]:
-    """このモデルの後処理の手順の説明を引く（{@link BIREFNET_POSTPROCESS_DESCRIPTIONS}）。"""
-    procedure = config["postprocess"]
+    """このモデルの後処理の手順の説明を引く（{@link BIREFNET_POSTPROCESS_DESCRIPTIONS}）。
+
+    欄が無い manifest も、説明を持たない手順と同じ文言で落とす（素の `KeyError` では何が欠けたかが
+    読めない）。
+    """
+    procedure = config.get("postprocess")
     description = BIREFNET_POSTPROCESS_DESCRIPTIONS.get(procedure)
     if description is None:
         raise ValueError(
