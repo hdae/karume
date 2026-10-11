@@ -1984,18 +1984,20 @@ Deno.test("unaccounted は勘定に入っていないものを明示する（見
   assert(joined.includes("writeBuffer"), joined);
 });
 
-// states 形 attention の S / 行統計は**勘定に入った**（融合の成立に依存せず必ず出るので、
-// 融合の項の文言では覆えない大きさだった）。残る非勘定は「states 形でない attention」と
-// linear の i8a8 量子化中間で、unaccounted はそちらを名乗る。
-Deno.test("unaccounted は states 形でない attention の一時を名乗り、S / 行統計は勘定済みと書く", () => {
+// attention のノード内一時は**勘定に入った** — states 形の S / 行統計に続き、融合 attention op の S・行統計・
+// i8a8 の量子化中間も実行と同じ純関数で数える（ADR 0124 決定 7）。残る非勘定は linear の i8a8 量子化中間で、
+// unaccounted はそれを名乗り、attention の一時を非勘定と書かない（勘定済みの項を「入っていない」と
+// 名乗ると、見積りの読み手が実際より余裕を見込む）。
+Deno.test("unaccounted は linear i8a8 の量子化中間を名乗り、attention の一時（states 形・融合 op）は勘定済みと書く", () => {
   const { unaccounted } = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
   const joined = unaccounted.join("\n");
-  assert(joined.includes("states 形でない attention のノード内一時"), joined);
-  assert(joined.includes("i8a8"), joined);
-  assert(joined.includes("行統計は勘定に入っている"), joined);
+  assert(!joined.includes("states 形でない attention のノード内一時"), joined);
+  assert(joined.includes("linear i8a8 の量子化中間"), joined);
+  assert(joined.includes("attention のノード内一時は勘定に入っている"), joined);
+  assert(joined.includes("融合 attention op のスコア S・行統計・i8a8 の量子化中間"), joined);
 });
 
 // ---------------------------------------------------------------------------

@@ -341,7 +341,7 @@ export type EstimateOptions = {
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "行ブロック attention 以外の融合が畳んで消す中間と、その融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値と、行ブロック attention の一時は勘定に入っている）",
-  "states 形でない attention のノード内一時（スコアの行ブロックと i8a8 の量子化中間）と、linear i8a8 の量子化中間 — どれも数値変種と device limit に依存する。states 形 attention のスコア S と、stateAttentionReduce に応じて必要な行統計は勘定に入っている",
+  "linear i8a8 の量子化中間（数値変種と device limit に依存する）。attention のノード内一時は勘定に入っている — states 形のスコア S と stateAttentionReduce に応じて必要な行統計、融合 attention op のスコア S・行統計・i8a8 の量子化中間（attentionCompute / attentionScoreStorage を渡さなければ runtime 既定の f32 で数える）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
   "退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot backing は、次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、その run では退役分 + 新規が同時に載る）",
