@@ -220,14 +220,16 @@ Deno.test("資産 JSON の門: 信用できない外部入力として扱う", a
 
   await t.step("追加語彙の id 重複は落ちる（綴り→id と id→綴りが食い違う）", () => {
     // 同じ id を 2 つの綴りが指すと、encode は両方をその id にし、decode は片方しか返せない。
+    // 両方とも語彙の外（300）に置く — 語彙内の id だと綴り不一致の検査が先に落とし、id 重複の
+    // 検査を外しても赤にならない。
     assertThrows(
       () =>
         parseAsset({
           ...minimalAsset(),
-          addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["ZZ", 2]],
+          addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["<x>", 300], ["<y>", 300]],
         }),
       Error,
-      "id 2",
+      "tokenizer.addedTokens: id 300 が 2 つの綴りに割り当てられている",
     );
   });
 
