@@ -32,7 +32,10 @@ import {
   type SessionDiagnostics,
 } from "@karume/runtime";
 import { parseManifest } from "@karume/hub";
-import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";
+import {
+  type BirefnetPipelineConfig,
+  parseBirefnetPipelineConfig,
+} from "../src/birefnet/config.ts";
 import {
   BirefnetPipeline,
   preprocessPixelValues as birefnetPixelValues,
@@ -182,6 +185,38 @@ const BIREFNET_CONFIG: Record<string, unknown> = {
   postprocess: "u8-pil-bicubic",
 };
 
+/**
+ * GPU と CPU の logit（チャネル 3 項の和）の差の上界（導出は birefnet 行の許容差の注記 1）。
+ *
+ * 正規化後の |x| はチャネルごとに `max(mean, 1 − mean) / std` 以下（画素は [0, 1]）。
+ */
+const birefnetLogitDiffBound = (config: BirefnetPipelineConfig): number => {
+  let absSum = 0;
+  for (let channel = 0; channel < CHANNELS; channel += 1) {
+    const mean = config.imageMean[channel];
+    absSum += Math.max(mean, 1 - mean) / config.imageStd[channel];
+  }
+  return 3 * 2 ** -24 * absSum;
+};
+
+/**
+ * 許容差 0 の前提（birefnet 行の注記 4）: どの logit も、8bit の平面の丸めの境目（`255σ = k + 0.5`）
+ * から GPU と CPU の差の上界より遠い。崩れたら許容差を広げずに落とす（入力を変えたなら導出をやり直す）。
+ */
+const assertNoRoundingTie = (logits: Float32Array, config: BirefnetPipelineConfig): void => {
+  // σ' ≤ 1/4 なので、255σ の差は logit の差の 255/4 倍以下（注記 2）。
+  const bound = (255 / 4) * birefnetLogitDiffBound(config);
+  for (const [index, logit] of logits.entries()) {
+    const scaled = (1 / (1 + Math.exp(-logit))) * 255;
+    const distance = Math.abs(scaled - (Math.floor(scaled) + 0.5));
+    assert(
+      distance > bound,
+      `logit ${index} の 255σ = ${scaled} が丸めの境目から ${distance}（上界 ${bound} 以内）— ` +
+        "GPU と CPU で 8bit の平面が割れうるので許容差 0 の前提が無い",
+    );
+  }
+};
+
 const DEPTH_CONFIG: Record<string, unknown> = {
   imageWidth: SIZE,
   imageHeight: SIZE,
@@ -248,6 +283,7 @@ const birefnet: Family = {
   expected: (image) => {
     const config = parseBirefnetPipelineConfig(BIREFNET_CONFIG);
     const logits = channelSum(birefnetPixelValues(config, image));
+    assertNoRoundingTie(logits, config);
     const matte = matteFromLogits(
       logits,
       SIZE,
@@ -258,8 +294,22 @@ const birefnet: Family = {
     );
     return { values: Array.from(matte.data), width: matte.width, height: matte.height };
   },
-  // 8bit へ丸める直前の値が縮約順の差で境界をまたぐと 1 LSB ずれうる。
-  tolerance: 1,
+  // 許容差 0 の導出。このテストは配布形を読まない（2×2 の小グラフとその場の manifest）ので、
+  // 宣言する手順はここで選ぶ — HR の `u8-pil-bicubic`（8bit への丸めが resample の前にあり、丸めの
+  // 割れが bicubic の負のローブで広がりうる側）。
+  //  1. logit の差: 入力（`pixel_values` の f32）は GPU と CPU で同一。CPU は f64 で和を取って f32 へ
+  //     1 回丸め（誤差 ≤ u·|S|）、GPU は f32 の 3 項の和（順序を問わず誤差 ≤ 2u·Σ|x|）。u = 2^-24 なので
+  //     |Δlogit| ≤ 3u·Σ|x| ≤ 1.31e-6（{@link birefnetLogitDiffBound} — この定数で Σ|x| ≤ 7.32）。
+  //  2. 8bit の平面: σ' ≤ 1/4 なので |Δ(255σ)| ≤ 8.4e-5。σ は両辺とも同じホストの関数で計算する。
+  //     `Math.round(255σ)` が割れるのは 255σ が k + 0.5 からこれ以内のときだけで、割れても 1 段。
+  //  3. Pillow の BICUBIC の 2 パス（横 2 → 4・縦 2 → 3・パスの間で 8bit へ丸める）: 出力の変化は
+  //     「入力の変化 × 係数の絶対値の和」の切り上げ以下。係数の絶対値の和の最大は横 1.18
+  //     （1.088 / −0.088）・縦 1.13（1.066 / −0.066）なので、1 段 → 横で 2 段 → 縦で 3 段。前提なしの
+  //     最悪は 3 段（4 標本の ±1 の割れ 81 通りを 2 万の平面で回した実測も 3 — 2026-10-11）。
+  //  4. このテストの入力（`IMAGE` とその反転）は 8 標本とも 255σ が k + 0.5 から 0.105 以上離れていて
+  //     （2 の上界の 1,000 倍超）、平面は GPU と CPU で同一になる。resample は整数の演算なので出力も
+  //     ビット一致 → 許容差 0。前提は `expected` が毎回確かめる（{@link assertNoRoundingTie}）。
+  tolerance: 0,
   disposedMessage: "dispose 済みでは切り抜けない",
 };
 
