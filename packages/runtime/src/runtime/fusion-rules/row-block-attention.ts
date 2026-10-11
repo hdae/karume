@@ -126,7 +126,7 @@ export const planRowBlocks = (
   if (widest * bytesPerRow > cap.bytes) {
     throw new ExecutionError(
       `${where}: ${count} 枚では 1 枚 ${widest * bytesPerRow}B が` +
-        `${byBudget ? "予算 attentionRowBlockMaxBytes" : "上限"}に収まらない`,
+        `${byBudget ? "予算 attentionRowBlockMaxBytes " : "上限"}に収まらない`,
     );
   }
   const blocks: RowBlock[] = [];

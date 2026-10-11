@@ -1507,7 +1507,7 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
           attentionRowBlockMaxBytes: 67_199,
         }),
       ExecutionError,
-      "予算 attentionRowBlockMaxBytes",
+      "予算を 1 行ぶん以上にすること",
     );
   });
 

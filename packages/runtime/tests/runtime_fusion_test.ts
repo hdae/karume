@@ -1004,7 +1004,7 @@ Deno.test("予算 attentionRowBlockMaxBytes は束縛上限との小さいほう
     4,
   );
   // 1 行ぶんに満たない予算は、掴めた窓を素の列へ落とさず予算を名指して fail loudly。
-  assertThrows(() => planWith(511), ExecutionError, "予算 attentionRowBlockMaxBytes");
+  assertThrows(() => planWith(511), ExecutionError, "予算を 1 行ぶん以上にすること");
 });
 
 Deno.test("行ブロック分割は上限に収まる最小枚数を等分で返し、収まらない形は fail loudly", () => {

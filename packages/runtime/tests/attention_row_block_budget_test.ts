@@ -150,7 +150,7 @@ describe("1 行ぶんにも満たない予算", () => {
     const error = assertThrows(
       () => blocksOf(TOKENS_121F, TOKENS_121F, 2, 1 * MiB),
       ExecutionError,
-      "予算 attentionRowBlockMaxBytes",
+      "予算を 1 行ぶん以上にすること",
     );
     assertEquals(error.message.includes("ストレージ束縛の上限を超える"), false, error.message);
   });
@@ -164,7 +164,7 @@ describe("1 行ぶんにも満たない予算", () => {
           rowBlockLimit(GRANTED, 1 * MiB),
         ),
       ExecutionError,
-      "予算 attentionRowBlockMaxBytes",
+      "予算を 1 行ぶん以上にすること",
     );
   });
 });
@@ -196,7 +196,7 @@ describe("テスト専用の強制枚数（ROW_BLOCK_SPLIT）と予算の併用"
     assertThrows(
       () => planRowBlocks(10, 100, limit, 2),
       ExecutionError,
-      "2 枚では 1 枚 500B が予算 attentionRowBlockMaxBytesに収まらない",
+      "2 枚では 1 枚 500B が予算 attentionRowBlockMaxBytes に収まらない",
     );
   });
 
