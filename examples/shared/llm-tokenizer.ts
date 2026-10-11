@@ -1,5 +1,5 @@
 /** 実験 CLI 用の byte-level BPE。語彙は手元の公式 tokenizer.json、Unicode 表は検証済みデータ。 */
-import { splitAddedTokens } from "../../packages/models/src/text/added-tokens.ts";
+import { createAddedTokenMatcher } from "../../packages/models/src/text/added-tokens.ts";
 import { bpeEncode, type BpeMerge, type BpeModel } from "../../packages/models/src/text/bpe.ts";
 import { assertCodePoint, setUnique } from "../../packages/models/src/text/asset-gates.ts";
 import { toCodePoints } from "../../packages/models/src/text/code-points.ts";
@@ -202,10 +202,11 @@ export const createLlmTokenizer = (
   }
   const nfc = parseCodeRanges(unicode.nfcSegments, "nfcSegments");
   const encoder = new TextEncoder();
-  const addedNames = [...added.keys()];
+  // 照合の索引は 1 度だけ組む（encode のたびに trie を作り直さない）。
+  const addedMatcher = createAddedTokenMatcher([...added.keys()]);
   const encode = (text: string, completion = false): number[] => {
     const ids = mini && completion ? [getId("<s>")] : [];
-    for (const chunk of splitAddedTokens(text, addedNames)) {
+    for (const chunk of addedMatcher.split(text)) {
       if (chunk.added) {
         ids.push(getId(chunk.text));
         continue;
