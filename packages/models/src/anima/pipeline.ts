@@ -167,6 +167,10 @@ export type AnimaGenerateRequest = {
    * **指定すると fail loudly**（効かないノブを黙って受けない — {@link needsUncond}）。
    */
   readonly negativePrompt?: string;
+  /**
+   * denoise の step 数（2 以上 1000 以下の整数・既定は `pipelineConfig.defaults.steps`）。外れると
+   * GPU に触る前に `ModelInputError`。
+   */
   readonly steps?: number;
   readonly guidanceScale?: number;
   readonly resolution?: ImageSize;

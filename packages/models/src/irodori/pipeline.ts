@@ -213,9 +213,12 @@ export type IrodoriGeneratedAudio = {
  * - `audio` — 参照音声そのもの（モノラル f32 + サンプリング周波数）。`decodeWav` の返り値を
  *   そのまま渡せる。ホストで正規化 → `codec_encoder` を通してから `latent` と同じ経路へ合流
  *   する。**周波数は配布形の `sampleRate` と一致していなければならない**（リサンプルは
- *   持たない — 違えば fail loudly）。
+ *   持たない — 違えば fail loudly）。長さの下限は `(2 × speakerPatchSize − 1) × hopLength + 1`
+ *   サンプル（patch 後に speaker の下限 2 トークン — v4 / v4.1 small の配布形で 13,441 サンプル）で、
+ *   満たなければ入口で `ModelInputError`。
  * - `latent` — 参照音声の DACVAE latent `[frames × latentDim]`。patch → `speaker` →
- *   平均トークン前置の**正規経路**を通る。
+ *   平均トークン前置の**正規経路**を通る。フレーム数の下限は `2 × speakerPatchSize`（同 8 フレーム）
+ *   で、満たなければ入口で `ModelInputError`。
  * - `stateOverride` — 既に作ってある speaker state `[rows × speakerDim]`。`speaker` グラフも
  *   `speaker_norm` も平均トークン前置も**通さず**そのまま条件として使う（上流の
  *   `speaker_state_override` — 埋め込みを配る運用のための口）。
@@ -530,10 +533,13 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
  * `seed: 1.5` のような綴り違いが重み 1.26GB のロードと DiT 全 step を消費してから落ちていた。
  * 呼び手の綴り違いの代償を計算時間で払わせない。
  *
- * NOTE（公開面の挙動が変わる 2 点）: ①`codecTileFrames` は codec を回さない
+ * NOTE（公開面の挙動が変わる 3 点）: ①`codecTileFrames` は codec を回さない
  * {@link IrodoriPipeline.generateLatent} でも検査対象になる（使わない値でも綴り違いなら落ちる）
  * ②`initialNoise` を渡した生成でも `seed` が検査される（従来は `Randn` を通らないので不正値が
- * 黙って無視されていた）。どちらも「効かないノブを黙って受けない」側へ倒した意図的な変更。
+ * 黙って無視されていた）。①②は「効かないノブを黙って受けない」側へ倒した意図的な変更。
+ * ③`speaker` の参照（`audio` / `latent`）の検査（形の破れ・行数の超過・周波数・長さ）を段 ④ から
+ * 入口へ前倒しした — `generate` / `generateLatent` とも、text / caption の段と codec encoder を
+ * 回す前に落ちる。
  *
  * NOTE: `export` は GPU 無しで受理集合を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008・`latentSnapshot` と同じ流儀）。

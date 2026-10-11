@@ -269,7 +269,7 @@ Deno.test("patchReferenceLatent: 端数のフレームは捨てて reshape す�
   assertEquals(patched.data[15], 15, "捨てられるのは 9 フレーム目だけ");
 });
 
-Deno.test("patchReferenceLatent: 1 トークンも作れない参照は落とす", () => {
+Deno.test("patchReferenceLatent: 下限に満たない参照（0 トークン）と形の破れは落とす", () => {
   assertThrows(() => patchReferenceLatent(new Float32Array(3 * 2), 2, 4), Error, "満たない");
   assertThrows(() => patchReferenceLatent(new Float32Array(5), 2, 4), Error, "倍数でない");
   // 逆側: この関数は codec encoder の出力も受けるので、破れは内部不変条件のまま
