@@ -16,6 +16,7 @@
  * - **所要の集計**（{@link summarizeWanTimeline}）: 生成イベントの時刻 → 段・step・VAE タイルごとの時間。
  * - **sha256 の実物**（{@link wanRgbBytes}）と参照ケースの照合（{@link wanReferenceCaseId} /
  *   {@link checkWanReference}）。
+ * - **保存の名前**（{@link wanFramesZipName} / {@link wanFrameFileNames}）: 連番 PNG の zip とその中のフレームの名前。
  */
 import type { SessionDiagnostics } from "../../../packages/runtime/mod.ts";
 import { REQUIRED_LIMIT_KEYS } from "../../../packages/runtime/src/gpu/acquire.ts";
@@ -828,3 +829,31 @@ export const formatWanDiagnostics = (component: string, summary: WanComponentDia
   } 本・窓平均の最大 ${
     summary.maxWindowMeanMs?.toFixed(1) ?? "—"
   } ms・予算超過 ${summary.overBudgetChunks} 本`;
+
+/** 連番 PNG の zip の名前を決める動画の値（seed は要求の値・他は生成した動画の値）。 */
+export type WanFramesArchive = {
+  readonly seed: number;
+  readonly width: number;
+  readonly height: number;
+  readonly frames: number;
+  readonly fps: number;
+};
+
+/** 連番 PNG の zip のファイル名（`wan-<seed>-<W>x<H>-<フレーム数>f-<fps>fps.zip`）。 */
+export const wanFramesZipName = (video: WanFramesArchive): string =>
+  `wan-${video.seed}-${video.width}x${video.height}-${video.frames}f-${video.fps}fps.zip`;
+
+/**
+ * zip の中のフレームの名前（`frame-0001.png` から 1 始まり）。桁は 4 と総数の桁の大きい方で固定幅にする —
+ * 名前の辞書順がフレーム順と一致し、連番を読む道具がそのまま並べられるように。
+ */
+export const wanFrameFileNames = (frames: number): string[] => {
+  if (!Number.isInteger(frames) || frames < 1) {
+    throw RangeError(`フレーム数 ${frames} が 1 以上の整数でない`);
+  }
+  const digits = Math.max(4, String(frames).length);
+  return Array.from(
+    { length: frames },
+    (_, index) => `frame-${String(index + 1).padStart(digits, "0")}.png`,
+  );
+};

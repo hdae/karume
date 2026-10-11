@@ -22,6 +22,7 @@
  * 3. **生成**: プロンプト（埋め込み資産の名前 — `gpu` なら自由プロンプトの欄の文字列が優先）・seed・フレーム数・
  *    寸法・steps・guidance・shift で `generate` → 全フレームを canvas に描いて生成した動画の fps で再生 → 所要（段・step・VAE タイル・
  *    `gpu` なら text 段）・Session の診断・RGB の sha256（事前計算の経路の参照ケースなら環境行との照合）を表に積む。
+ *    最新の動画は「連番 PNG（zip）を保存」で全フレームを 1 つの zip として落とせる（`zip.ts`）。
  * 4. **I2V の条件画像**（Wan2.2 だけ — 世代の記述子の DiT の入力の形が `"ti2v"` のとき）: 寸法の選択の隣で PNG / JPEG を
  *    選ぶと、ブラウザの標準 API（`createImageBitmap` → OffscreenCanvas の `getImageData`）で RGB8 にして（アルファは捨てる）
  *    要求の `image` と `fit`（crop / stretch）に渡す。画像を選ぶと寸法の選択に「画像から自動」（`width` / `height` を
@@ -73,6 +74,7 @@ import {
   type WanPipelineConfig,
 } from "../../../packages/models/src/wan/config.ts";
 import { selectWanI2vSize } from "../../../packages/models/src/wan/i2v-preprocess.ts";
+import { encodePng } from "../../../packages/models/mod.ts";
 import wan21References from "../../../packages/models/tests/fixtures/references/wan.json" with {
   type: "json",
 };
@@ -83,6 +85,7 @@ import {
   adapterSummary,
   checkoutLabel,
   describeError,
+  downloadBlob,
   downloadText,
   element,
   errorText,
@@ -109,6 +112,8 @@ import {
   WAN_SIZE_FROM_IMAGE,
   type WanComponentDiagnostics,
   wanFrameChoices,
+  wanFrameFileNames,
+  wanFramesZipName,
   type WanLabGeneration,
   type WanLabGenerationId,
   type WanLimits,
@@ -123,6 +128,7 @@ import {
   type WanTimeline,
   type WanTimelineMark,
 } from "./wan-plan.ts";
+import { type ZipEntry, zipStored } from "./zip.ts";
 
 /**
  * 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ・/3 = 読み込みと行が quant の席を持つ・
@@ -330,6 +336,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     next: element(root, "next", HTMLButtonElement),
     seek: element(root, "seek", HTMLInputElement),
     frameLabel: element(root, "frame-label", HTMLElement),
+    downloadFrames: element(root, "download-frames", HTMLButtonElement),
     generation: document.createElement("select"),
     textEncoder: document.createElement("select"),
     quant: document.createElement("select"),
@@ -403,8 +410,11 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     /** 進行中の generate の診断（component → 直近の run）。 */
     diagnostics?: Map<WanRunComponent, SessionDiagnostics>;
     rows: WanRow[];
-    /** 最新の動画（`fps` は生成した動画の値 — 世代の記述子の出力のフレームレート）。 */
-    video?: { readonly frames: readonly ImageData[]; readonly fps: number };
+    /**
+     * 最新の動画（`fps` は生成した動画の値 — 世代の記述子の出力のフレームレート・`seed` は要求の値 — 連番 PNG の
+     * zip の名前に使う）。
+     */
+    video?: { readonly frames: readonly ImageData[]; readonly fps: number; readonly seed: number };
     frame: number;
     player?: ReturnType<typeof setInterval>;
   } = {
@@ -541,6 +551,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ui.negative.disabled ||= !loaded;
     ui.freePrompt.disabled = busy || state.loaded?.textEncoder !== "gpu";
     ui.exportJson.disabled = busy || (state.rows.length === 0 && state.loads.length === 0);
+    ui.downloadFrames.disabled = busy || state.video === undefined;
   };
 
   /** ボタン操作の排他（ページの他の GPU 操作とも重ねない）。失敗は状態行へ。 */
@@ -797,11 +808,13 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   const showVideo = (
     video: GeneratedVideo,
     frames: readonly Uint8ClampedArray<ArrayBuffer>[],
+    seed: number,
   ): void => {
     stopPlayback();
     state.video = {
       frames: frames.map((rgba) => new ImageData(rgba, video.width, video.height)),
       fps: video.fps,
+      seed,
     };
     ui.canvas.width = video.width;
     ui.canvas.height = video.height;
@@ -982,7 +995,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       );
       // 完走した生成のイベントの並びが崩れていたらパイプラインの取り決めの破れ — 失敗の行にする
       const timeline = summarizeWanTimeline(marks);
-      showVideo(video, frames);
+      showVideo(video, frames, resolved.seed);
       row = {
         ...base,
         ...textEncoderMs(),
@@ -1084,6 +1097,39 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       `wan-browser-${new Date().toISOString().replaceAll(":", "-")}.json`,
       "application/json",
     );
+  };
+
+  /**
+   * 最新の動画の全フレームを連番 PNG（Anima のタブと同じ `encodePng` — RGB・無損失）にして 1 つの無圧縮 zip で保存する。
+   * 押下時の動画を掴むので、保存の途中で動画が替わっても名前と中身は食い違わない。PNG の圧縮は数百 MB の
+   * 主スレッドの仕事になり、同時に回る生成や計測の時間を歪めるので、`exclusive` で GPU の操作と重ねない。
+   */
+  const saveFrames = async (): Promise<void> => {
+    const video = state.video;
+    const first = video?.frames[0];
+    if (video === undefined || first === undefined) {
+      throw Error("保存する動画が無い（先に生成する）");
+    }
+    const total = video.frames.length;
+    const names = wanFrameFileNames(total);
+    const entries: ZipEntry[] = [];
+    for (const [index, image] of video.frames.entries()) {
+      status(`連番 PNG を作成中 ${index + 1} / ${total}`);
+      entries.push({
+        name: names[index],
+        data: await encodePng(image.data, image.width, image.height),
+      });
+    }
+    const fileName = wanFramesZipName({
+      seed: video.seed,
+      width: first.width,
+      height: first.height,
+      frames: total,
+      fps: video.fps,
+    });
+    const zip = new Blob(zipStored(entries, new Date()), { type: "application/zip" });
+    downloadBlob(zip, fileName);
+    status(`${fileName} を保存しました（${total} フレーム · ${formatBytes(zip.size)}）`);
   };
 
   /**
@@ -1197,6 +1243,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   ui.run.addEventListener("click", exclusive("Wan の生成", generate));
   ui.dispose.addEventListener("click", exclusive("Wan の破棄", dispose));
   ui.exportJson.addEventListener("click", exportJson);
+  ui.downloadFrames.addEventListener("click", exclusive("Wan の連番 PNG の保存", saveFrames));
   ui.generation.addEventListener("change", () => {
     const found = WAN_LAB_GENERATIONS.find(({ id }) => id === ui.generation.value);
     if (found === undefined) {

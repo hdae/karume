@@ -23,6 +23,8 @@ import {
   wanAttentionRowBlocks,
   type WanForm,
   wanFrameChoices,
+  wanFrameFileNames,
+  wanFramesZipName,
   wanLargestValue,
   type WanLimits,
   wanMaxFramesWithin,
@@ -733,6 +735,39 @@ describe("wan2.2 reference cases", () => {
       ] satisfies [Partial<WanResolvedRequest>, string][]
     ) {
       assertEquals(caseId(changed, quant), undefined, `${JSON.stringify(changed)} ${quant}`);
+    }
+  });
+});
+
+describe("wanFramesZipName", () => {
+  it("names the zip by seed, size, frame count, and fps", () => {
+    assertEquals(
+      wanFramesZipName({ seed: 42, width: 1280, height: 704, frames: 121, fps: 24 }),
+      "wan-42-1280x704-121f-24fps.zip",
+    );
+  });
+});
+
+describe("wanFrameFileNames", () => {
+  it("numbers the frames from frame-0001.png with four digits up to 9999 frames", () => {
+    const names = wanFrameFileNames(121);
+    assertEquals(names.length, 121);
+    assertEquals([names[0], names[9], names[120]], [
+      "frame-0001.png",
+      "frame-0010.png",
+      "frame-0121.png",
+    ]);
+  });
+
+  it("widens every name to the digits of the total so that name order is frame order", () => {
+    const names = wanFrameFileNames(10_000);
+    assertEquals([names[0], names[9_999]], ["frame-00001.png", "frame-10000.png"]);
+    assertEquals(names.toSorted(), names);
+  });
+
+  it("rejects a frame count that is not a positive integer", () => {
+    for (const frames of [0, -1, 1.5, Number.NaN]) {
+      assertThrows(() => wanFrameFileNames(frames), RangeError, "フレーム数");
     }
   });
 });

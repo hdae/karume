@@ -135,15 +135,19 @@ export const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 
-/** 文字列をファイルとして落とす（ダウンロードが塞がれた置き場ではコピーの口を使う）。 */
-export const downloadText = (text: string, fileName: string, type: string): void => {
-  const url = URL.createObjectURL(new Blob([text], { type }));
+/** Blob をファイルとして落とす。 */
+export const downloadBlob = (blob: Blob, fileName: string): void => {
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = fileName;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
+
+/** 文字列をファイルとして落とす（ダウンロードが塞がれた置き場ではコピーの口を使う）。 */
+export const downloadText = (text: string, fileName: string, type: string): void =>
+  downloadBlob(new Blob([text], { type }), fileName);
 
 /**
  * textarea の中身をクリップボードへ。clipboard API が拒まれたら textarea を選択状態にして
