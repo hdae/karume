@@ -19,9 +19,7 @@
  * （退役した実験・研究記録の `-probe`）も置かれうるが、読み手がいないものは表に要らない。
  */
 export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  "birefnet-hr-1024": { "": "matte" },
   "birefnet-hr-1024-f16": { "": "matte" },
-  "birefnet-hr-2048": { "": "matte" },
   "birefnet-hr-2048-f16": { "": "matte" },
   "lucida-1024": { "": "matte" },
   "lucida-1024-f16": { "": "matte" },

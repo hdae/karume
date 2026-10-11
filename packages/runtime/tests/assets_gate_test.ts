@@ -151,12 +151,12 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
   });
 
   it("表の系列のディレクトリが在っても、容器が無ければ資産無しと判定する", () => {
-    assertFalse(judge((parent) => Deno.mkdirSync(new URL("birefnet-hr-1024/", parent))));
+    assertFalse(judge((parent) => Deno.mkdirSync(new URL("birefnet-hr-1024-f16/", parent))));
   });
 
   it("表の系列に容器の part が在れば資産ありと判定する", () => {
     assert(judge((parent) => {
-      const root = new URL("birefnet-hr-1024/", parent);
+      const root = new URL("birefnet-hr-1024-f16/", parent);
       Deno.mkdirSync(root);
       Deno.writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
     }));

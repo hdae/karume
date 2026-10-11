@@ -103,11 +103,11 @@ const EXPORT_PREFIX =
 
 /**
  * 実画像の golden を持つ系列（1024² だけ — 2048² は実画像 golden を採らない）。格納 dtype の f16 系列
- * （ADR 0113）も同じ判別と sha の参照値に掛ける。f16 系列の参照値の行は実 GPU で
- * `KARUME_REFERENCE=write` を回して作る（行が無い機ではそのケースが明示 SKIP + 参照門が赤）。
+ * （ADR 0113）も同じ判別と sha の参照値に掛ける。BiRefNet_HR は f16 系列だけ（上流の checkpoint が
+ * f16 で、f32 系列は同じ値を広げただけなので退役 — ADR 0113 追記 2026-10-11。退役前の f32 系列の
+ * sha の行は 2 環境 × 4 ケースとも f16 系列の行と完全一致していた）。
  */
 const SERIES: readonly Series[] = [
-  { name: "birefnet-hr-1024", generate: `${EXPORT_PREFIX} --real-images` },
   {
     name: "lucida-1024",
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,

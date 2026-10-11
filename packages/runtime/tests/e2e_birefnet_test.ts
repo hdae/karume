@@ -17,12 +17,13 @@
 // テストを止めている（{@link HELD_SERIES} — decoder 末尾の 1 dispatch がドライバのジョブ上限を
 // 超えてプロセスごと落ちるため）。
 //
-// **格納 dtype も系列の軸**（ADR 0113）: f32 系列に加えて `--dtype f16` の系列
-// （`<モデル>-<解像度>-f16`）を別系列として実走する。f16 系列の golden は丸めた重みで採った torch
-// 出力なので、突合に出るのはここでも**ランタイムの数値誤差だけ**（量子化誤差は export 時の
-// `quality.json` が持つ）。系列 root の取り違え（f32 の席に f16 資産・その逆）は数値では検出
-// できない（tolerance が同桁なので互いの資産を通す — ADR 0027 / 0029）ので、容器の**圧縮格納
-// dtype の集合**を系列の宣言と突き合わせる検査（GPU 不要）を別に持つ。
+// **格納 dtype も系列の軸**（ADR 0113）: 配布の席ごとに 1 系列で、`--dtype f16` の系列は
+// `<モデル>-<解像度>-f16` の別系列。BiRefNet_HR は f16 系列だけ（上流の checkpoint が f16 で、f32
+// 系列は同じ値を広げただけなので退役 — ADR 0113 追記 2026-10-11）、Lucida は f32 系列と f16 系列。
+// f16 系列の golden は丸めた重みで採った torch 出力なので、突合に出るのはここでも**ランタイムの
+// 数値誤差だけ**（量子化誤差は export 時の `quality.json` が持つ）。系列 root の取り違え（f32 の席に
+// f16 資産・その逆）は数値では検出できない（tolerance が同桁なので互いの資産を通す — ADR 0027 /
+// 0029）ので、容器の**圧縮格納 dtype の集合**を系列の宣言と突き合わせる検査（GPU 不要）を別に持つ。
 //
 // **許容誤差は系列ごとに独立して実測する**（`SERIES` の各行が自分の tolerance を持つ）。
 // 共有すると、片方を測り直したときにもう片方が黙って緩む — 2 系列は同じ構造でも logit の
@@ -41,7 +42,7 @@
 //   数値回帰の検出が鋭い。`disc` は暗い背景に明るい円を置いた顕著物体で、幾何の判別
 //   （円内 logit 平均 > 円外）を実 GPU 出力に掛ける土台にもなっている。
 // - **実画像 4 ケース**（`photo-*`）: 自然画像の分布点でのランタイム忠実度。tolerance は群
-//   ごと・系列ごとに独立に実測から導く（{@link HR_REAL_TOLERANCE}）。
+//   ごと・系列ごとに独立に実測から導く（{@link HR_F16_REAL_TOLERANCE}）。
 //
 // ## TS 前処理を含む鎖は、2 つの門の**合成**で持つ
 //
@@ -83,7 +84,17 @@ import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts"
 import { seriesGraph } from "./helpers/series-graphs.ts";
 
 /**
- * **BiRefNet_HR / 合成画像**ケース（入力が golden とビット同一）の突合に使う許容誤差。
+ * **BiRefNet_HR / 合成画像**ケース（系列 `birefnet-hr-1024-f16` — 入力が golden とビット同一）の
+ * 突合に使う許容誤差。
+ *
+ * **下の実測表（と {@link HR_F16_REAL_TOLERANCE} / {@link HR_F16_2048_SYNTHETIC_TOLERANCE} の表）は
+ * f32 系列（`birefnet-hr-{1024,2048}` — ADR 0113 追記 2026-10-11 で退役）で採ったもの**で、f16
+ * 系列にそのまま当てはまる: 上流 BiRefNet_HR の checkpoint は f16 なので f16 への丸めが恒等で、
+ * golden は f32 系列とビット一致する（export 時の品質の門が 8 ケースで強制・1024² は 2026-09-26 に
+ * 入出力とも突合済み）。実 GPU の出力も一致する — 実画像 4 ケースのマット logits の sha256 の
+ * 参照値の行（`packages/models/tests/fixtures/references/birefnet.json`）が 2 環境（RTX 3080 Ti・
+ * Arc B570）とも f32 系列の行と完全一致し、2026-10-11 の実測（RTX 3080 Ti）でも disc ケースの
+ * golden との最大絶対誤差が 2 系列で同じ値だった（1024² 1.297e-4・2048² 8.60e-4）。
  *
  * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,1024,1024]`）:
  *
@@ -103,19 +114,20 @@ import { seriesGraph } from "./helpers/series-graphs.ts";
  *
  * 誤差の出所は SigLIP2 と同じ（fma 融合・linear / conv の縮約順序が torch と違う・超越関数の
  * 実装差）だが、値域が広い（\|ref\| 上端 23.1）ぶん絶対量は 1 桁大きい。相対量で見ると
- * 2.11e-4 / 10.8 ≈ 2.0e-5 で、実画像側（1.09e-3 / 64.1 ≈ 1.7e-5 — {@link HR_REAL_TOLERANCE}）と
+ * 2.11e-4 / 10.8 ≈ 2.0e-5 で、実画像側（1.09e-3 / 64.1 ≈ 1.7e-5 — {@link HR_F16_REAL_TOLERANCE}）と
  * 同じ桁に揃う。
  *
  * 実装バグ（deform_conv2d のオフセット取り違え・窓マスクの位相ずれ・upsample の軸違い・
  * BatchNorm の per-channel 定数の並び違い）の誤差は出力の値域と同じ O(1)〜O(20) で、この
  * 閾値の 4 桁以上上に出る。
  */
-const HR_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
+const HR_F16_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
 
 /**
- * **BiRefNet_HR / 実画像**ケース（`photo-*`）の突合に使う許容誤差。
+ * **BiRefNet_HR / 実画像**ケース（`photo-*` — 系列 `birefnet-hr-1024-f16`）の突合に使う許容誤差。
  *
- * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,1024,1024]`）:
+ * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,1024,1024]` — 退役した f32 系列で
+ * 採った表。f16 系列へそのまま当てはまる根拠は {@link HR_F16_SYNTHETIC_TOLERANCE}）:
  *
  * | ケース          | TS 前処理入力の maxAbs | \|ref\| 上端 | **golden 入力の maxAbs** |
  * | --------------- | ---------------------- | ------------ | ------------------------ |
@@ -134,18 +146,19 @@ const HR_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
  * 飽和が深い）。相対量で見ると 1.09e-3 / 64.1 ≈ 1.7e-5 で、合成画像側（≈2.0e-5）と同じ桁。
  * **それでも定数を共有しない** — 片方を測り直したときにもう片方が黙って緩む。
  *
- * **rtol は 0**（理由は {@link HR_SYNTHETIC_TOLERANCE} と同じ — 0 を跨ぐ logit の地図）。
+ * **rtol は 0**（理由は {@link HR_F16_SYNTHETIC_TOLERANCE} と同じ — 0 を跨ぐ logit の地図）。
  *
  * **画像の差し替え**（生成台本を回し直して golden を採り直していない）はこの門では見えない —
  * その sha256 突合は `packages/models/tests/e2e_birefnet_real_test.ts` が名指しで持つ。
  */
-const HR_REAL_TOLERANCE: Tolerance = { atol: 5e-3, rtol: 0 };
+const HR_F16_REAL_TOLERANCE: Tolerance = { atol: 5e-3, rtol: 0 };
 
 /**
- * **BiRefNet_HR 2048² / 合成画像**ケースの突合に使う許容誤差（系列 `birefnet-hr-2048` —
- * recipe パッチ ⑨ + ADR 0093 で実行段が通るようになった 2026-09-05 に新設）。
+ * **BiRefNet_HR 2048² / 合成画像**ケースの突合に使う許容誤差（系列 `birefnet-hr-2048-f16`）。
  *
- * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,2048,2048]`・RTX 3080 Ti）:
+ * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,1,2048,2048]`・RTX 3080 Ti — 退役した
+ * f32 系列 `birefnet-hr-2048`〈recipe パッチ ⑨ + ADR 0093 で実行段が通るようになった 2026-09-05 に
+ * 新設〉で採った表。f16 系列へそのまま当てはまる根拠は {@link HR_F16_SYNTHETIC_TOLERANCE}）:
  *
  * | ケース  | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
  * | ------- | ------- | ------- | ------------ | ------------------ |
@@ -156,11 +169,11 @@ const HR_REAL_TOLERANCE: Tolerance = { atol: 5e-3, rtol: 0 };
  *
  * atol 4e-3 は実測最悪 8.60e-4（disc）の約 4.7 倍。1024² の 1e-3 より広いのは**値域**（disc の
  * \|ref\| 上端が 23.1 → 47.9 と 2 倍）で、相対量は 8.60e-4 / 47.9 ≈ 1.8e-5 と 1024² の 2.0e-5 と
- * 同じ桁。**rtol は 0**（理由は {@link HR_SYNTHETIC_TOLERANCE} と同じ）。二値マスクの不一致は
+ * 同じ桁。**rtol は 0**（理由は {@link HR_F16_SYNTHETIC_TOLERANCE} と同じ）。二値マスクの不一致は
  * 4 ケースとも 0。実画像 golden は 2048² では採らない（コーパスが 1024² で resize が恒等に
  * ならない — 実画像の門は 1024² 系列が持つ）。
  */
-const HR_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 4e-3, rtol: 0 };
+const HR_F16_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 4e-3, rtol: 0 };
 
 /**
  * **Lucida / 合成画像**ケースの突合に使う許容誤差。
@@ -175,7 +188,7 @@ const HR_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 4e-3, rtol: 0 };
  * | ramp    | 4.41e-5 | 2.89e-3 | 13.210       | 3.04e-4            |
  *
  * atol 5e-4 は実測最悪 1.11e-4（disc）の約 4.5 倍。**rtol は 0**（理由は
- * {@link HR_SYNTHETIC_TOLERANCE} と同じ — 0 を跨ぐ logit の地図）。
+ * {@link HR_F16_SYNTHETIC_TOLERANCE} と同じ — 0 を跨ぐ logit の地図）。
  *
  * BiRefNet_HR より 1 段小さいのは、合成画像に対する Lucida の応答が浅い（顕著物体を見つけ
  * られず値域が広がらない）ため。**両系列で同じ定数を使わない**のはこの非対称のためでもある。
@@ -219,28 +232,10 @@ const LUCIDA_REAL_TOLERANCE: Tolerance = { atol: 3e-2, rtol: 0 };
  * atol 1.5e-3 は実測最悪 2.86e-4（disc）の約 5.2 倍。1024² の 5e-4 より広いのは 2048² で disc の
  * 境界画素が増え、\|ref\| が 3.05e-5 まで薄く落ちるところで絶対誤差が積むため（maxRel 0.844 は
  * その境界画素 — 絶対誤差は 2.9e-4 でしかない）。**rtol は 0**（理由は
- * {@link HR_SYNTHETIC_TOLERANCE} と同じ）。二値マスクの不一致は 4 ケースとも 0。実画像 golden は
- * 2048² では採らない（{@link HR_2048_SYNTHETIC_TOLERANCE} と同じ理由）。
+ * {@link HR_F16_SYNTHETIC_TOLERANCE} と同じ）。二値マスクの不一致は 4 ケースとも 0。実画像 golden は
+ * 2048² では採らない（{@link HR_F16_2048_SYNTHETIC_TOLERANCE} と同じ理由）。
  */
 const LUCIDA_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1.5e-3, rtol: 0 };
-
-/**
- * **BiRefNet_HR の f16 系列**（`birefnet-hr-{1024,2048}-f16` — ADR 0113）の許容誤差。値は f32 系列の
- * {@link HR_SYNTHETIC_TOLERANCE} / {@link HR_REAL_TOLERANCE} / {@link HR_2048_SYNTHETIC_TOLERANCE}
- * と**同じ**。
- *
- * 根拠: 上流 BiRefNet_HR の checkpoint は f16 なので f16 への丸めが恒等で、**golden は f32 系列と
- * ビット一致**する（export 時の品質の門が 8 ケースで強制し、1024² は 2026-09-26 に f32 系列の
- * golden とも入出力のビット一致を突合済み）。GPU 側も「重みの f32 値が同一・`unpack2x16float` は
- * 厳密・縮約順は格納で分岐しない」ので f32 系列と同じ出力になる見込み（推測・未実測 — 実 GPU で
- * 2 系列の出力を突き合わせて確かめる）。
- *
- * 値が同じでも**定数は分ける**（モジュール docstring の「系列ごとに独立」— 片方を測り直したときに
- * もう片方が黙って動かないように）。
- */
-const HR_F16_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1e-3, rtol: 0 };
-const HR_F16_REAL_TOLERANCE: Tolerance = { atol: 5e-3, rtol: 0 };
-const HR_F16_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 4e-3, rtol: 0 };
 
 /**
  * **Lucida の f16 系列**（`lucida-{1024,2048}-f16` — ADR 0113）の許容誤差。
@@ -278,13 +273,14 @@ const LUCIDA_F16_2048_SYNTHETIC_TOLERANCE: Tolerance = { atol: 1.5e-3, rtol: 0 }
  * 近い」しか言わず、境界の画素（logit ≈ 0）は近いままいくらでも符号が反転しうる。逆にここ
  * だけでは値の回帰を捉えられない（飽和域の誤差は符号を変えない）ので、両方を持つ。
  *
- * 実測は **f32 の 2 系列 × 8 ケースとも 0 / 1,048,576**（合成 4 + 実画像 4）。f16 の 4 系列
- * （ADR 0113）は実測待ちで、同じ上限を仮に掛けている。0 をそのまま門に
- * しないのは、境界画素の符号が別のバックエンドやドライバで動きうるため — 1e-4 は 1024² で
- * 104 画素に相当し、マットの見た目には出ない量。実装バグ側は数万〜数十万画素が反転するので、
- * この閾値の 3 桁以上上に出る。**系列で共有する**のは、これが数値の量ではなく「マスクとしての
- * 判断が一致する」という同じ 1 つの主張だから（両系列とも実測 0 で、緩める理由が片方にも
- * 無い）。
+ * 実測は **f32 の 2 系列 × 8 ケースとも 0 / 1,048,576**（合成 4 + 実画像 4 — HR は退役した f32
+ * 系列で採った値で、出力が f32 系列と一致する f16 系列にもそのまま当てはまる — 根拠は
+ * {@link HR_F16_SYNTHETIC_TOLERANCE}）。Lucida の f16 の 2 系列（ADR 0113）は実測待ちで、同じ上限を
+ * 仮に掛けている。0 をそのまま門にしないのは、境界画素の符号が別のバックエンドやドライバで
+ * 動きうるため — 1e-4 は 1024² で 104 画素に相当し、マットの見た目には出ない量。実装バグ側は
+ * 数万〜数十万画素が反転するので、この閾値の 3 桁以上上に出る。**系列で共有する**のは、これが
+ * 数値の量ではなく「マスクとしての判断が一致する」という同じ 1 つの主張だから（両系列とも実測 0
+ * で、緩める理由が片方にも無い）。
  */
 const MASK_DISAGREEMENT_LIMIT = 1e-4;
 
@@ -323,20 +319,6 @@ const EXPORT_PREFIX =
  * 持たないので実画像ケースは SKIP になる（`realTolerance` は 1024² の値を形式上共有するが読まれない）。
  */
 const SERIES: readonly Series[] = [
-  {
-    name: "birefnet-hr-1024",
-    generate: `${EXPORT_PREFIX} --real-images`,
-    tolerance: HR_SYNTHETIC_TOLERANCE,
-    realTolerance: HR_REAL_TOLERANCE,
-    compressedStorage: [],
-  },
-  {
-    name: "birefnet-hr-2048",
-    generate: `${EXPORT_PREFIX} --resolution 2048`,
-    tolerance: HR_2048_SYNTHETIC_TOLERANCE,
-    realTolerance: HR_REAL_TOLERANCE,
-    compressedStorage: [],
-  },
   {
     name: "lucida-1024",
     generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,
@@ -407,15 +389,15 @@ const B570_JOB_TIMEOUT =
  * 場合に限り、根拠と「解消したらこの行を消す」を理由文に書く。数値が合わない系列を止める
  * 場所ではない（それは赤のまま直す）。
  *
- * - `birefnet-hr-2048` / `lucida-2048` の `deno-intel-graphics-bmg-g21`（Intel Arc B570・Linux xe
- *   ドライバ）: docs/limitations.md「BiRefNet 系」節（2026-09-20 実測・裁定 2026-09-26）。
- * - 同じ 2 系列の f16 版（`-f16`）も同じ機で止める — 落ちる dispatch は deform_conv2d で、その重みは
- *   f16 系列でも f32 格納のまま（適格外）なので、格納 dtype を変えても同じ 1 dispatch が走る。
+ * - 2048² の 3 系列（`birefnet-hr-2048-f16` / `lucida-2048` / `lucida-2048-f16`）の
+ *   `deno-intel-graphics-bmg-g21`（Intel Arc B570・Linux xe ドライバ）: docs/limitations.md
+ *   「BiRefNet 系」節（2026-09-20 実測・裁定 2026-09-26）。f16 系列も止めるのは、落ちる dispatch が
+ *   deform_conv2d で、その重みは f16 系列でも f32 格納のまま（適格外）なので、格納 dtype を変えても
+ *   同じ 1 dispatch が走るため。
  */
 const HELD_SERIES: Readonly<
   Record<string, Readonly<Record<string, { readonly reason: string }>>>
 > = {
-  "birefnet-hr-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
   "lucida-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
   "birefnet-hr-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
   "lucida-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
