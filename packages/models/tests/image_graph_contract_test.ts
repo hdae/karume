@@ -25,14 +25,17 @@ const SIZE = 2;
 
 /**
  * 入力 1 本・出力 1 本の宣言（実行しないので演算の中身は問わない）。入力 dtype を変えても IR の
- * op 契約を満たすよう、先頭で f32 へ `cast` してから出力の形へ `reshape` する。
+ * op 契約を満たすよう、先頭で f32 へ `cast` してから出力の形へ `reshape` する。出力 dtype が
+ * f32 でないときは、末尾でその dtype へ `cast` する。
  */
 const declaration = (
   inputDtype: string,
   output: string,
   outputShape: readonly number[],
-): IrDeclaration =>
-  parseIrDeclarationValue({
+  outputDtype = "f32",
+): IrDeclaration => {
+  const reshaped = outputDtype === "f32" ? output : "reshaped";
+  return parseIrDeclarationValue({
     format: "karume-ir",
     version: 2,
     requires: { ops: ["cast", "reshape"] },
@@ -42,14 +45,19 @@ const declaration = (
     initializers: {},
     values: {
       as_f32: { dtype: "f32", shape: [1, 3, SIZE, SIZE] },
-      [output]: { dtype: "f32", shape: outputShape },
+      [reshaped]: { dtype: "f32", shape: outputShape },
+      [output]: { dtype: outputDtype, shape: outputShape },
     },
     states: {},
     nodes: [
       { op: "cast", ins: ["pixel_values"], outs: ["as_f32"], attrs: { to: "f32" } },
-      { op: "reshape", ins: ["as_f32"], outs: [output], attrs: {} },
+      { op: "reshape", ins: ["as_f32"], outs: [reshaped], attrs: {} },
+      ...(outputDtype === "f32"
+        ? []
+        : [{ op: "cast", ins: [reshaped], outs: [output], attrs: { to: outputDtype } }]),
     ],
   });
+};
 
 /** 部品 1 本の容器を書いて、全量面のキー（`<部品>[i]`）へ畳む。 */
 const assetsOf = async (key: string, graph: IrDeclaration) =>
@@ -90,14 +98,21 @@ const IMAGE_CONFIG: Record<string, unknown> = {
 
 const HIDDEN = 12;
 
-const buildSiglip2 = async (inputDtype: string, outputShape: readonly number[]) =>
+const buildSiglip2 = async (
+  inputDtype: string,
+  outputShape: readonly number[],
+  outputDtype = "f32",
+) =>
   await Siglip2Pipeline.fromAssets({
     manifest: manifestOf("siglip2/1", "vision", {
       ...IMAGE_CONFIG,
       hiddenDim: HIDDEN,
       interpolation: "bilinear",
     }),
-    assets: await assetsOf("vision", declaration(inputDtype, "pooler_output", outputShape)),
+    assets: await assetsOf(
+      "vision",
+      declaration(inputDtype, "pooler_output", outputShape, outputDtype),
+    ),
   });
 
 describe("画像 3 家族の構築前検査", () => {
@@ -153,11 +168,21 @@ describe("画像 3 家族の構築前検査", () => {
       );
     });
 
+    // 軸 1 を hiddenDim に揃え、既存の軸検査（assertOutputDim）を通る形にする。こうしないと
+    // rank の検査が無くても軸検査で落ち、rank の検査を縛れない。
     it("rank 3 の出力は GPU を取る前に落とす", async () => {
       await assertRejects(
-        () => buildSiglip2("f32", [1, 1, HIDDEN]),
+        () => buildSiglip2("f32", [1, HIDDEN, 1]),
         Error,
-        "期待は f32 の [1, hiddenDim]",
+        "siglip2: pooler_output — グラフ出力 'pooler_output' が f32 [1, 12, 1]、期待は f32 の [1, hiddenDim]",
+      );
+    });
+
+    it("f32 でない出力は GPU を取る前に落とす", async () => {
+      await assertRejects(
+        () => buildSiglip2("f32", [1, HIDDEN], "i32"),
+        Error,
+        "siglip2: pooler_output — グラフ出力 'pooler_output' が i32 [1, 12]、期待は f32 の [1, hiddenDim]",
       );
     });
   });
