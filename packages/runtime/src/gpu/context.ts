@@ -423,7 +423,8 @@ export class GpuContext {
    * 出さない no-op になり、空の常駐テンソルのまま生成ループが回る。
    * MUST: `byteLength` は 4 の倍数（要素は全型 4 バイト — ADR 0009 の意味論 dtype）。
    * MUST: 消失済み device では受け付けない（{@link assertDeviceUsable} — errorScope は
-   * 消失を捕らえないので、囲んでいても無効なバッファが成功として返る）。
+   * 消失を捕らえないので、囲んでいても無効なバッファが成功として返る）。判定は入口と、pop の
+   * 決着の後の 2 回（待ちの間の消失は入口では見えない）。
    */
   async createResident(byteLength: number, label = "resident"): Promise<ResidentTensor> {
     assertDeviceUsable(this, `resident '${label}' の確保`);
@@ -446,6 +447,16 @@ export class GpuContext {
     if (failure !== undefined) {
       buffer.destroy();
       throw failure;
+    }
+    // MUST: pop を待つ間に失われた device でも成功として返さない。消失後の pop は null で決着する
+    // （docs/research/2026-08-16-device-lost-wait-settlement.md）ので、入口の判定だけでは使えない
+    // 常駐テンソルが確保の成功として出回り、失敗地点が初回の write / read へずれる
+    // （`BatchScope.finish` の pop の後の判定と同じ形）。
+    try {
+      assertDeviceUsable(this, `resident '${label}' の確保`);
+    } catch (cause) {
+      buffer.destroy();
+      throw cause;
     }
     this.#residentSeq += 1;
     return new ResidentTensor(this, this.#residentSeq, buffer, byteLength, label);

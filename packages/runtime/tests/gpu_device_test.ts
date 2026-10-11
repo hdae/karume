@@ -636,6 +636,35 @@ Deno.test("batch finish: errorScope の pop 待ちの間に消失した区間は
   await assertRejects(() => finished, GpuDeviceLostError, "batch の完了");
 });
 
+Deno.test("createResident: errorScope の pop 待ちの間に消失した device では成功で返さず、確保したバッファを破棄する", async () => {
+  // 入口の同期判定を通った後、pop を待つ間に消失すると pop は null で決着する
+  // （docs/research/2026-08-16-device-lost-wait-settlement.md）。ここで成功を返すと、使えない常駐
+  // テンソルが確保の成功として出回り、失敗地点が初回の write / read へずれる。
+  const pops: PromiseWithResolvers<GPUError | null>[] = [];
+  let destroyed = 0;
+  const { gpu, lose } = losableGpuContext(undefined, {
+    popErrorScope: () => {
+      const pop = Promise.withResolvers<GPUError | null>();
+      pops.push(pop);
+      return pop.promise;
+    },
+    createBuffer: () =>
+      ({
+        destroy: (): void => {
+          destroyed += 1;
+        },
+      }) as unknown as GPUBuffer,
+  });
+  const created = gpu.createResident(16, "racing");
+  assertEquals(pops.length, 2, "確保の後に 2 本の pop が発行されている");
+  lose();
+  // 消失の記録（`device.lost` の then）が pop の決着より先に走る形を作る。
+  for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  for (const pop of pops) pop.resolve(null);
+  await assertRejects(() => created, GpuDeviceLostError, "resident 'racing' の確保");
+  assertEquals(destroyed, 1, "確保したバッファを破棄せずに捨てている");
+});
+
 Deno.test("beginBatch は破棄要求済み・消失済みの device で開かず、区間ロックも取らない", async () => {
   // 開いてしまうと区間ロックを握ったまま enqueue を受理し続け、失敗が finish まで遅れる。
   // `destroy()` はフラグを同期に立てるので、`device.lost` の reaction を待たずに落ちる。

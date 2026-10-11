@@ -37,6 +37,8 @@ export type FakeDeviceParts = {
   readonly onSubmittedWorkDone?: () => Promise<void>;
   /** `queue.submit`（呼ばれたことを観測する検証で要る）。未指定なら何もしない。 */
   readonly submit?: (commandBuffers: readonly GPUCommandBuffer[]) => void;
+  /** `createBuffer`（確保した実体の破棄を観測する検証で要る）。未指定なら持たない。 */
+  readonly createBuffer?: (descriptor: GPUBufferDescriptor) => GPUBuffer;
 };
 
 /** DOM 型全体は再現しないため cast で渡す（テスト専用の境界）。 */
@@ -48,6 +50,7 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
     destroy: (): void => undefined,
     pushErrorScope: (): void => undefined,
     popErrorScope: parts.popErrorScope ?? ((): Promise<GPUError | null> => Promise.resolve(null)),
+    createBuffer: parts.createBuffer,
     queue: {
       onSubmittedWorkDone: parts.onSubmittedWorkDone ?? ((): Promise<void> => Promise.resolve()),
       submit: parts.submit ?? ((): void => undefined),
