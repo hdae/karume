@@ -332,15 +332,12 @@ export const normalizeToNchw = (
         `normalizeToNchw: std[${channel}] = ${std[channel]} が正の有限数でない`,
       );
     }
-  }
-  const plane = image.width * image.height;
-  const out = new Float32Array(plane * CHANNELS);
-  for (let channel = 0; channel < CHANNELS; channel += 1) {
     const offset = mean[channel] * RESCALE_DIVISOR;
     const divisor = std[channel] * RESCALE_DIVISOR;
-    // 有限の mean / std でも裾では係数か f32 の結果が溢れる（極小の std で ±Inf・極大の mean で Inf − Inf）。
-    // 式は画素について単調なので、係数の有限性と画素の端点 0 / 255 での f32 の結果を見れば全画素を覆う
-    // （式そのものは変えない — Pillow / transformers の参照との丸めを動かさない）。
+    // 有限の mean / std でも裾では係数か f32 の結果が溢れる（極小の std で ±Inf・極大の mean で −Inf・
+    // mean と std の両方が極大で Inf / Inf = NaN）。式は画素について単調なので、係数の有限性と画素の
+    // 端点 0 / 255 での f32 の結果を見れば全画素を覆う（式そのものは変えない — Pillow / transformers の
+    // 参照との丸めを動かさない）。出力の確保より前に見る — 巨大な画像で、拒否する係数のために確保しない。
     const ends = [0, 255].map((pixel) => Math.fround((pixel - offset) / divisor));
     if (!Number.isFinite(offset) || !Number.isFinite(divisor) || !ends.every(Number.isFinite)) {
       throw new ModelInputError(
@@ -348,6 +345,12 @@ export const normalizeToNchw = (
           "画素 0〜255 の正規化が f32 で有限に収まらない",
       );
     }
+  }
+  const plane = image.width * image.height;
+  const out = new Float32Array(plane * CHANNELS);
+  for (let channel = 0; channel < CHANNELS; channel += 1) {
+    const offset = mean[channel] * RESCALE_DIVISOR;
+    const divisor = std[channel] * RESCALE_DIVISOR;
     for (let index = 0; index < plane; index += 1) {
       out[channel * plane + index] = (image.data[index * CHANNELS + channel] - offset) / divisor;
     }
