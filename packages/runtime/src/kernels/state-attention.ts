@@ -1766,6 +1766,8 @@ export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
  * | 5       | `Lengths`（uniform）          |
  *
  * 縮約は ③' と同じ KV 方向の固定順の木。pad 行（`row ≥ Q`）は厳密 0（③ と同じ契約）。
+ * pad 行の 0 書きも ③' と同じく lane 0 だけ — KV_LANES 本が同じ `out[at]` を指すので、
+ * 同値でも同期なしの同一要素書き込みは WGSL のデータ競合になる。
  */
 export const statePvParallelReadonlyWgsl = (sliding: boolean, gqa: boolean): string =>
   `// karume attention_state_pv (states 形の O = P @ V, f32, KV 並列縮約, readonly = past のみ${
