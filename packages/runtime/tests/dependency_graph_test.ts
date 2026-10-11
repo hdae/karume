@@ -25,8 +25,9 @@
 // 書き写さず、各 package の `deno.json` から導く。
 //
 // 門が見るのは `deno info` の静的グラフ（リテラルの import / import type / 型参照 / リテラルの
-// 動的 import）に限る。`new Worker(new URL(...))` の先・リテラルでない動的 import・
-// `import.meta.resolve` の先はグラフに載らないので、この門の外である。
+// 動的 import / `@ts-self-types`・`X-TypeScript-Types` の型だけの辺）に限る。
+// `new Worker(new URL(...))` の先・リテラルでない動的 import・`import.meta.resolve` の先は
+// グラフに載らないので、この門の外である。
 //
 // `deno info` は `--frozen-lockfile` で回す（lockfile との食い違いは書き換えずに落とす）。外部の
 // jsr パッケージ（hub の `@hdae/fetch-cache`）は DENO_DIR のキャッシュから読む —— キャッシュが
@@ -35,7 +36,9 @@
 //
 // MUST: 読めない形は推測せず throw する —— 「読めなかった辺」を「外部の辺が無い」と読み替えると、
 // この門は違反を緑で隠す。`deno info --json` の形（2.9.6 実測）: 辺の解決先は
-// `dependencies[].code.specifier` / `.type.specifier` に入り、import map 経由の jsr は
+// `dependencies[].code.specifier` / `.type.specifier` と、モジュール直下の
+// `typesDependency.dependency.specifier`（書かれた指定子は `typesDependency.specifier`）に入り、
+// 解決の失敗はそれぞれの `error` に出る。import map 経由の jsr は
 // `jsr:@scope/name@range`（サブパスは `jsr:/@scope/name@range/sub` と先頭に `/` が付く）、npm は
 // `npm:name@range`、jsr パッケージの中身のモジュールは `https://jsr.io/@scope/name/<版>/…`。
 // トップレベルの `npmPackages` / `packages` はグラフでなく lockfile 全体の一覧なので使わない。
@@ -160,7 +163,28 @@ type Edge = {
   readonly resolved: string;
 };
 
-/** `deno info --json` の出力から辺を全て取り出す（code と type の解決先が割れれば両方）。 */
+/**
+ * 辺 1 本の解決先（`{ specifier }` か `{ error }`）を読む。`dependencies[]` の code / type と
+ * モジュール直下の `typesDependency.dependency` は同じ形なので、同じ規則で読む。
+ */
+const resolvedOf = (value: unknown, from: string, written: string, what: string): string => {
+  const target = record(value, `${from} → ${written} の ${what}`);
+  if (target.error !== undefined) {
+    throw new Error(
+      `依存グラフの門: 解決できない import がある: ${from} → ${written}: ${String(target.error)}`,
+    );
+  }
+  return text(target.specifier, `${from} → ${written} の ${what}.specifier`);
+};
+
+/**
+ * `deno info --json` の出力から辺を全て取り出す（code と type の解決先が割れれば両方）。
+ *
+ * 型だけの辺（`.js` の `// @ts-self-types="…"`・リモートの `X-TypeScript-Types`）は `dependencies[]`
+ * でなくモジュール直下の `typesDependency` に出るので、それも辺として読む —— 読まないと
+ * `@ts-self-types="npm:…"` やメンバーの外の型ファイルが、違反とも throw ともならず素通りする。
+ * 型だけの辺は実行時のグラフには効かないが、利用者の `deno check` はその先を解決しに行く。
+ */
 const edgesOf = (info: unknown): Edge[] => {
   const parsed = record(info, "deno info の出力");
   if (parsed.version !== INFO_VERSION) {
@@ -185,20 +209,19 @@ const edgesOf = (info: unknown): Edge[] => {
       const targets = new Set<string>();
       for (const side of ["code", "type"] as const) {
         if (edge[side] === undefined) continue;
-        const target = record(edge[side], `${from} → ${written} の ${side}`);
-        if (target.error !== undefined) {
-          throw new Error(
-            `依存グラフの門: 解決できない import がある: ${from} → ${written}: ${
-              String(target.error)
-            }`,
-          );
-        }
-        targets.add(text(target.specifier, `${from} → ${written} の ${side}.specifier`));
+        targets.add(resolvedOf(edge[side], from, written, side));
       }
       if (targets.size === 0) {
         throw new Error(`依存グラフの門: 解決先の無い辺である: ${from} → ${written}`);
       }
       for (const resolved of targets) edges.push({ from, written, resolved });
+    }
+    if (module.typesDependency !== undefined) {
+      const types = record(module.typesDependency, `${from} の typesDependency`);
+      const written = text(types.specifier, `${from} の typesDependency.specifier`);
+      // dependency が無い形は解決先の無い辺 —— 推測せず resolvedOf の record で throw させる。
+      const resolved = resolvedOf(types.dependency, from, written, "typesDependency.dependency");
+      edges.push({ from, written, resolved });
     }
   }
   return edges;
@@ -402,5 +425,43 @@ describe("依存グラフの門の判定", () => {
     ], () => owner);
     assertEquals(violations.length, 1);
     assert(violations[0].includes("jsr:@x/z@^1"), violations[0]);
+  });
+
+  describe("モジュール直下の typesDependency（`@ts-self-types` / `X-TypeScript-Types`）", () => {
+    // `deno info --json` は型だけの辺を `dependencies[]` でなくモジュール直下に出す（2.9.6 実測）。
+    const infoWithTypes = (dependency: Record<string, unknown>) => ({
+      version: INFO_VERSION,
+      modules: [{
+        specifier: "file:///repo/packages/example/src/impl.js",
+        typesDependency: { specifier: "./impl.d.ts", dependency },
+      }],
+    });
+
+    it("npm の型パッケージを指していれば落とす", () => {
+      const edges = edgesOf(infoWithTypes({ specifier: "npm:@types/x" }));
+      const { violations } = judgeEdges(edges, ownerOf);
+      assertEquals(violations.length, 1);
+      assert(violations[0].includes("npm:@types/x"), violations[0]);
+    });
+
+    it("同じメンバーの内側のファイルを指していれば辺として読んだうえで許す", () => {
+      const edges = edgesOf(
+        infoWithTypes({ specifier: "file:///repo/packages/example/src/impl.d.ts" }),
+      );
+      assertEquals(edges, [{
+        from: "file:///repo/packages/example/src/impl.js",
+        written: "./impl.d.ts",
+        resolved: "file:///repo/packages/example/src/impl.d.ts",
+      }]);
+      assertEquals(judgeEdges(edges, ownerOf), { violations: [], external: 0 });
+    });
+
+    it("解決できていなければ throw する", () => {
+      assertThrows(
+        () => edgesOf(infoWithTypes({ error: 'Import "x" not a dependency' })),
+        Error,
+        "解決できない",
+      );
+    });
   });
 });
