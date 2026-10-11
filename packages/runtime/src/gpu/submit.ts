@@ -638,6 +638,8 @@ export class SubmitScheduler {
    * MUST: 失敗した run の後始末はこの経路を通す。残骸を実行する理由が無いうえ、失敗経路の
    * submit は errorScope の外（呼び出し側が既にスコープを畳んだ後）で起きるため、その
    * validation エラーは device 単位 LIFO の先頭にある**他人のスコープ**に帰属する。
+   * 回収待ちの計測資源の一覧には、エンコードの途中で落ちたチャンクのぶんも載っている（確保の
+   * 直後に載せるため）ので、ここを経ずに flush すると submit されていない計測の 0 が回収される。
    * 捨てることで {@link SubmitScheduler.flush} と併せて「discard-or-flush before destroy」
    * — 破棄済みバッファを参照するエンコードが submit に残らない — も同時に満たす。
    *

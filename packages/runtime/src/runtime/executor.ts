@@ -2315,9 +2315,10 @@ export class Session {
     );
     const inputBytes = [...ownedInputSizes.values()].reduce((total, size) => total + size, 0);
     // MUST: 確保の**前**に予算へ収める（退役は destroy せず破棄待ちへ積むだけ — この run の
-    // flush 後にだけ返す）。確保前の退役が保証するのは保持集合の勘定の上限（保持分 + 新規 ≤ 予算）
-    // だけ — 退役した旧 backing は flush 後まで VRAM に残るので、新規を確保する時点では物理的に
-    // 新旧が重なる（この重複窓は勘定外 — ADR 0095 決定 4）。
+    // flush 後にだけ返す）。確保前の退役が保証するのは保持集合の勘定の上限（保持分 + 新規 ≤
+    // max(予算, 新規) — 新規 1 本だけで予算を超える形は保持中を全て退役させてその 1 本だけを
+    // 持つ。ADR 0095 決定 1）だけ — 退役した旧 backing は flush 後まで VRAM に残るので、新規を
+    // 確保する時点では物理的に新旧が重なる（この重複窓は勘定外 — ADR 0095 決定 4）。
     this.#evictBackingsFor(plan.totalBytes + inputBytes);
     // 所有権が確立する（`#backings` への登録）までの確保物と retain 済み常駐入力。
     // 途中で同期例外が出たら catch がここから回収する。
