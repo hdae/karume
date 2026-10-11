@@ -1701,6 +1701,23 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
+  it("出力が 2 本でも落ちる（入力の本数だけを比べる退行を止める — 先頭の 1 本の形は正しい）", () => {
+    const post = ENCODER_GRAPHS.vae_encoder_post;
+    assertThrows(
+      () =>
+        contractWith({
+          post: stubModel({
+            symbols: post.symbols,
+            inputs: [post.input],
+            outputs: ["out", "extra"],
+            values: { out: post.output, extra: post.output },
+          }),
+        }),
+      Error,
+      `${OWNER} vae_encoder_post の入出力が 1 本 → 2 本（1 本 → 1 本だけを組む）`,
+    );
+  });
+
   it("入力の dtype が f32 でなければ落ちる", () => {
     const attn = ENCODER_GRAPHS.vae_encoder_attn;
     assertThrows(
