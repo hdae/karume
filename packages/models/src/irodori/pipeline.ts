@@ -103,7 +103,13 @@ import {
   TEXT_PROJ,
   TOKENIZER,
 } from "./admission.ts";
-import { type ConditionState, emptyCondition, encodeSpeaker, rightPad } from "./conditioning.ts";
+import {
+  assertSpeakerReference,
+  type ConditionState,
+  emptyCondition,
+  encodeSpeaker,
+  rightPad,
+} from "./conditioning.ts";
 import {
   type DitLoop,
   type LatentStage,
@@ -516,13 +522,13 @@ const sampleBounds = (config: IrodoriPipelineConfig): SampleBounds => ({
  * 要求ノブの受理集合を**生成に入る前**に見る（`generate` / `generateLatent` の入口）。
  *
  * MUST: 受理集合そのものはここに書き写さない — 各ノブの正本（`assertCodecTileFrames` /
- * `assertAcceptableSeed` / `sequenceLengthFromSeconds`）を呼ぶだけにする。条件を写すと、
- * 片方だけ緩んだときに気づけない。
+ * `assertAcceptableSeed` / `sequenceLengthFromSeconds` / `assertSpeakerReference`）を呼ぶだけに
+ * する。条件を写すと、片方だけ緩んだときに気づけない。
  *
  * なぜ入口なのか: これらの門は本来 latent 生成の**後**（`planCodecTiles` は decode 直前・
- * `Randn` は段 ⑦・秒指定は段 ⑤）にしかなく、`codecTileFrames: 10` や `seed: 1.5` のような
- * 綴り違いが重み 1.26GB のロードと DiT 全 step を消費してから落ちていた。呼び手の綴り違いの
- * 代償を計算時間で払わせない。
+ * `Randn` は段 ⑦・秒指定は段 ⑤・参照の長さは段 ④）にしかなく、`codecTileFrames: 10` や
+ * `seed: 1.5` のような綴り違いが重み 1.26GB のロードと DiT 全 step を消費してから落ちていた。
+ * 呼び手の綴り違いの代償を計算時間で払わせない。
  *
  * NOTE（公開面の挙動が変わる 2 点）: ①`codecTileFrames` は codec を回さない
  * {@link IrodoriPipeline.generateLatent} でも検査対象になる（使わない値でも綴り違いなら落ちる）
@@ -547,6 +553,9 @@ export const assertIrodoriRequest = (
   if (request.durationSeconds !== undefined) {
     sequenceLengthFromSeconds(request.durationSeconds, sampleBounds(config));
   }
+  // 参照（音声 / latent）が speaker の下限に届くか — 段 ④ まで待つと text / caption の段と
+  // codec encoder を GPU で回してから落ちる。
+  assertSpeakerReference(request.speaker, config);
 };
 
 /** テキスト 1 本（+ caption / 参照話者）から latent を作る。 */

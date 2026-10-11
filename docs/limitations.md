@@ -1296,7 +1296,11 @@ EmbeddingGemma と同じ静的方式（B=1・呼び出し側が列を詰める�
   ホストへ配らずに済ませるため（ADR 0010 が「ホスト事前計算 + 追加入力」を却下したのと同じ理由）。
 - **S = 1 と T = 1 は表現できない**（記号次元は `Dim(min=2)`）。参照 latent は
   `speaker_patch_size` = 4 の patch 後で、実入力が 1 トークンになるのは `no_ref` の形だけ
-  （上のとおりグラフを呼ばない）。
+  （上のとおりグラフを呼ばない）。**patch 後 2 トークン（codec の 8 フレーム）に届かない参照は受けない**:
+  参照 latent なら 8 フレーム未満、参照音声なら 48kHz で 13,441 サンプル（7 × hop 1920 + 1 — 末尾は
+  reflect pad で hop の倍数へ切り上がる）未満を、生成の入口（GPU を回す前）で `ModelInputError` にする
+  （`packages/models/src/irodori/conditioning.ts` の `assertSpeakerReference`）。1 トークンへ黙って 0 pad を
+  足す対応はしない。
 - 記号次元の上限は **S ≤ 750**（`ref_max_seconds` 120s × 25Hz ÷ patch 4 — チェックポイントの
   config から導出）。超える参照長は束縛検査で fail loudly。
 

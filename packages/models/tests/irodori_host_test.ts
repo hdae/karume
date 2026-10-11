@@ -278,6 +278,20 @@ Deno.test("patchReferenceLatent: 1 トークンも作れない参照は落とす
   assert(!(shortcut instanceof ModelInputError));
 });
 
+Deno.test("patchReferenceLatent: speaker の下限 2 トークン（export の Dim(min=2)）に満たない参照は落とす", () => {
+  // patch 幅 4 で 4〜7 フレームは 1 トークン。素通しすると記号次元の下限の外の S = 1 が
+  // speaker グラフへ届く。
+  for (const frames of [4, 7]) {
+    const error = assertThrows(
+      () => patchReferenceLatent(new Float32Array(frames * 2), 2, 4),
+      Error,
+      "満たない",
+    );
+    assert(!(error instanceof ModelInputError), "codec encoder の出力の破れは内部不変条件のまま");
+  }
+  assertEquals(patchReferenceLatent(new Float32Array(8 * 2), 2, 4).tokens, 2, "下限ちょうど");
+});
+
 // ---- speaker の直接指定（ADR 0107 決定 2 の入力起因）-----------------------
 
 describe("speaker を直接指定したときの受理集合", () => {
@@ -331,6 +345,16 @@ describe("speaker を直接指定したときの受理集合", () => {
       ModelInputError,
       "speaker 条件 4 行になり、宣言長 3 を超える",
     );
+  });
+
+  it("latent の 4〜7 フレーム（patch 後 1 トークン）は speaker の下限 2 トークンの外で入力起因", () => {
+    for (const frames of [4, 7]) {
+      assertThrows(
+        () => patchRequestedLatent(new Float32Array(frames * 2), SHAPE),
+        ModelInputError,
+        "満たない",
+      );
+    }
   });
 });
 

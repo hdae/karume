@@ -10,7 +10,7 @@
  */
 
 import { ModelInputError } from "../errors.ts";
-import { patchReferenceLatent } from "./host/patch.ts";
+import { patchReferenceLatent, SPEAKER_MIN_TOKENS } from "./host/patch.ts";
 import { prependMeanToken } from "./host/pooling.ts";
 import { normalizeReference, reflectPadToHop } from "./host/reference.ts";
 import type { IrodoriSpeakerInput, IrodoriState } from "./pipeline.ts";
@@ -47,16 +47,68 @@ export const rightPad = (
   return padded;
 };
 
+/** 参照音声の門が読む配布形の宣言。 */
+type ReferenceAudioShape = {
+  readonly sampleRate: number;
+  readonly hopLength: number;
+  readonly speakerRows: number;
+  readonly speakerPatchSize: number;
+};
+
 /**
- * 参照音声 → DACVAE latent（ホスト前処理 + `codec_encoder`）。
+ * 参照音声の切り詰めの上限（サンプル数）。
  *
- * 切り詰めの上限は `speakerRows` から導く — speaker 条件は「平均トークン 1 本 + patch した
+ * 上限は `speakerRows` から導く — speaker 条件は「平均トークン 1 本 + patch した
  * 参照」なので、載る参照は `(speakerRows − 1) × speakerPatchSize` フレーム（実重み v4-small で
  * 3,000 フレーム = 120 秒）。**TS 側に秒数を定数で置かない**（config.ts の MUST — 重みを
  * 差し替えたときにホストだけ古い上限を持つ形を作らない）。
+ */
+const referenceMaxSamples = (config: ReferenceAudioShape): number =>
+  (config.speakerRows - 1) * config.speakerPatchSize * config.hopLength;
+
+/**
+ * 参照音声の受理集合（周波数と長さ）を見る門。生成の入口（{@link assertSpeakerReference}）と
+ * codec encoder の直前（{@link encodeReferenceAudio}）の両方がこの 1 本を呼ぶ。
  *
- * MUST: 切り詰めは正規化より**前**。後ろに回すと、捨てる区間の音量が LUFS に混ざる
- * （上流も `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。
+ * 長さは「codec の後の patch で speaker の下限 {@link SPEAKER_MIN_TOKENS} トークンに届くか」で見る。
+ * codec encoder は hop 1 つを 1 フレームにし（入力 `[1, frames, hopLength]`）、末尾は reflect pad で
+ * hop の倍数へ切り上げるので、フレーム数は `ceil(切り詰め後のサンプル数 / hopLength)`。届かない参照を
+ * 通すと、codec encoder を GPU で回した後に patch で落ちるか（0 トークン）、export の下限の外の
+ * S = 1 が speaker グラフへ届く（1 トークン）。
+ *
+ * どちらの破れも呼び手が渡した `IrodoriSpeakerInput.audio` の欄そのもので、打つ手は「変換して /
+ * 長い参照を渡し直す」なので入力起因（ADR 0107 決定 2）。
+ */
+const assertReferenceAudio = (
+  audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number },
+  config: ReferenceAudioShape,
+): void => {
+  if (audio.sampleRate !== config.sampleRate) {
+    // リサンプルは持たない（ADR 0048 の流儀 — 黙って近似せず、変換は呼び出し側の責務にする）。
+    throw new ModelInputError(
+      `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
+        " — リサンプルは持たないので、あらかじめ変換して渡す",
+    );
+  }
+  const samples = Math.min(audio.data.length, referenceMaxSamples(config));
+  const tokens = Math.floor(Math.ceil(samples / config.hopLength) / config.speakerPatchSize);
+  if (tokens < SPEAKER_MIN_TOKENS) {
+    const minSamples = (SPEAKER_MIN_TOKENS * config.speakerPatchSize - 1) * config.hopLength + 1;
+    throw new ModelInputError(
+      `IrodoriPipeline: 参照音声 ${audio.data.length} サンプルは speaker の ${tokens} トークンにしか` +
+        `ならない（下限 ${SPEAKER_MIN_TOKENS} トークン = ${minSamples} サンプル以上が要る）`,
+    );
+  }
+};
+
+/**
+ * 参照音声 → DACVAE latent（ホスト前処理 + `codec_encoder`）。
+ *
+ * 受理集合は codec encoder を回す前に {@link assertReferenceAudio} で見る（生成の入口でも
+ * 同じ門を通っているので、ここは低水準の経路の契約）。
+ *
+ * MUST: 切り詰め（{@link referenceMaxSamples}）は正規化より**前**。後ろに回すと、捨てる区間の
+ * 音量が LUFS に混ざる（上流も `wav[:, :int(max_ref_seconds·sr)]` を先に取る）。
  */
 const encodeReferenceAudio = async (
   state: IrodoriState,
@@ -64,16 +116,8 @@ const encodeReferenceAudio = async (
   audio: { readonly data: Float32Array<ArrayBuffer>; readonly sampleRate: number },
 ): Promise<Float32Array<ArrayBuffer>> => {
   const { config } = state;
-  if (audio.sampleRate !== config.sampleRate) {
-    // リサンプルは持たない（ADR 0048 の流儀 — 黙って近似せず、変換は呼び出し側の責務にする）。
-    // 周波数は呼び手が渡した `IrodoriSpeakerInput.audio` の欄そのもので、打つ手は「変換して
-    // 渡し直す」1 つなので入力起因（ADR 0107 決定 2）。
-    throw new ModelInputError(
-      `IrodoriPipeline: 参照音声が ${audio.sampleRate}Hz（配布形は ${config.sampleRate}Hz）` +
-        " — リサンプルは持たないので、あらかじめ変換して渡す",
-    );
-  }
-  const maxSamples = (config.speakerRows - 1) * config.speakerPatchSize * config.hopLength;
+  assertReferenceAudio(audio, config);
+  const maxSamples = referenceMaxSamples(config);
   const limited = audio.data.length > maxSamples
     ? (audio.data.slice(0, maxSamples) as Float32Array<ArrayBuffer>)
     : audio.data;
@@ -169,6 +213,26 @@ export const patchRequestedLatent = (
   // 平均トークン 1 本ぶんを足した行数が条件の長さ。speaker グラフを回す前に見る。
   assertSpeakerRows(patched.tokens + 1, config.speakerRows, "speaker.latent");
   return patched;
+};
+
+/**
+ * 参照（音声 / latent）の受理集合を、生成の入口で GPU を回す前に見る（`pipeline.ts` の
+ * `assertIrodoriRequest`）。speaker 条件は段 ④ で組むので、ここで見ないと text / caption の段
+ * （と音声なら codec encoder）を GPU で回してから入力の誤りで落ちる。
+ *
+ * MUST: 受理条件は書き写さない — 段 ④ と同じ門（{@link assertReferenceAudio} /
+ * {@link patchRequestedLatent}）を呼ぶだけにする（返り値は捨てる）。
+ */
+export const assertSpeakerReference = (
+  input: IrodoriSpeakerInput | undefined,
+  config: SpeakerShape & ReferenceAudioShape,
+): void => {
+  if (input === undefined || "stateOverride" in input) return;
+  if ("audio" in input) {
+    assertReferenceAudio(input.audio, config);
+    return;
+  }
+  patchRequestedLatent(input.latent, config);
 };
 
 /** speaker 条件を組む（参照音声 / 参照 latent / 埋め込み直接指定 / 参照なしのゼロ短絡）。 */

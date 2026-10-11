@@ -309,6 +309,46 @@ Deno.test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に�
   assertIrodoriRequest({ text }, config);
 });
 
+Deno.test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim(min=2)）に満たなければ GPU を回す前に落ちる", () => {
+  // 参照は段 ④ で patch される（hop 1920 サンプル = codec の 1 フレーム・patch 幅 4 フレーム =
+  // 1 トークン）。入口で落とさないと、text / caption の段と codec encoder を GPU で回してから
+  // 0 トークンなら素の Error、1 トークンなら下限の外の S = 1 が speaker グラフへ届く。
+  const config = parseIrodoriPipelineConfig(PIPELINE_CONFIG);
+  const text = "テスト";
+  const audio = (samples: number) => ({
+    audio: { data: new Float32Array(samples), sampleRate: 48000 },
+  });
+  // 0 サンプル・80ms（2 フレーム = 0 トークン）・7 フレームちょうど（1 トークン）。
+  for (const samples of [0, 3840, 7 * 1920]) {
+    assertThrows(
+      () => assertIrodoriRequest({ text, speaker: audio(samples) }, config),
+      ModelInputError,
+      "トークン",
+    );
+  }
+  // 末尾は reflect pad で hop の倍数へ切り上がるので、7 フレーム + 1 サンプルは 8 フレーム = 2 トークン。
+  assertIrodoriRequest({ text, speaker: audio(7 * 1920 + 1) }, config);
+  assertThrows(
+    () =>
+      assertIrodoriRequest({
+        text,
+        speaker: { audio: { data: new Float32Array(8 * 1920), sampleRate: 24000 } },
+      }, config),
+    ModelInputError,
+    "リサンプル",
+  );
+
+  const latent = (frames: number) => ({ latent: new Float32Array(frames * 32) });
+  for (const frames of [0, 4, 7]) {
+    assertThrows(
+      () => assertIrodoriRequest({ text, speaker: latent(frames) }, config),
+      ModelInputError,
+      "満たない",
+    );
+  }
+  assertIrodoriRequest({ text, speaker: latent(8) }, config);
+});
+
 Deno.test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タイルを検査する", () => {
   // 呼び手は `codecTileFrames` を渡す義務を負っていないので、「渡さなければ通る」形にすると
   // 既定タイルと `codecHaloFrames` の関係が壊れた配布形が**必ず** DiT ループ後に落ちる。
