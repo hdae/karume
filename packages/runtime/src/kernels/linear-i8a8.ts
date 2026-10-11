@@ -196,6 +196,10 @@ export const linearI8a8Key = (
  * MUST: i8a8 カーネルは全てこの 1 本を使う（融合 attention の QK も — src/kernels/
  * attention-i8a8.ts）。「エミュは数値同一」という主張は `idot` の実体が 1 箇所にあることに
  * 掛かっていて、書き写すとカーネルごとに別々にずれうる形になる。
+ *
+ * MUST NOT: 下の WGSL 内のコメントの文面を変えない。生成 WGSL はカーネルの指紋の一部で、変えると
+ * 埋め込みの幾何プロファイル表が実機の掃引での再生成を要する（ADR 0117 決定 4）。そのため WGSL 内の
+ * 上界は古い 4·127² のままにしてある — 正確な上界（4·127·128 = 65,024）は冒頭の docstring が正本。
  */
 export const i8a8IdotWgsl = (dp4a: boolean): string =>
   dp4a
@@ -204,7 +208,7 @@ fn idot(a: u32, b: u32) -> i32 {
   return dot4I8Packed(a, b);
 }`
     : `// 整数内積のエミュレーション（core WGSL のみ）。dot4I8Packed と**同じ整数**を返す —
-// 整数加算は結合的かつ厳密で、中間値も最大 4·127·128 = 65,024（重みは −128 を含みうる）なので巻き戻らない
+// 整数加算は結合的かつ厳密で、中間値も最大 4·127² = 64,516 なので巻き戻らない
 fn idot(a: u32, b: u32) -> i32 {
   return dot(unpack4xI8(a), unpack4xI8(b));
 }`;
