@@ -108,3 +108,8 @@ provenance) plus synthetic boundary cases; the target sizes are never the graph'
 `birefnet/tests/test_matte_fixture.py` rebuilds the fixture from the committed inputs with the
 installed torch / torchvision / Pillow / numpy and fails when it no longer matches, which is why the
 group pins `pillow==12.3.0` (the same version as the `wan` group).
+
+`birefnet/matte_ab_check.py` cross-checks the A/B tool (`tools/birefnet-ab/`) the same way: it reads
+the logits and the per-procedure alpha the tool wrote and recomputes them with these upstream
+functions under the same contract (`uv run --group birefnet python -m birefnet.matte_ab_check
+<tool output>/work`).
