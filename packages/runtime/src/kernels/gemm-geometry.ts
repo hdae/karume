@@ -1,9 +1,11 @@
 /**
  * f32 / f16 GEMM 骨格（src/kernels/gemm.ts が持つ matmul / bmm / linear / 融合 attention の
- * ①QK・③PV / states 形 attention の ①ₜ・③ₜ / conv1d / conv2d / conv3d の implicit GEMM）が共有する**タイル幾何のパラメタ面**。
+ * ①QK・③PV / states 形 attention の ①ₜ・③ₜ / conv1d / conv2d / conv3d の implicit GEMM）が
+ * 共有する**タイル幾何のパラメタ面**。
  *
  * ```
- * tileM = regM · wgY   （1 workgroup が持つ出力の行数 — conv1d / conv2d の implicit GEMM だけが 32 の変種を取る）
+ * tileM = regM · wgY   （1 workgroup が持つ出力の行数 — conv1d / conv2d / conv3d の
+ *                       implicit GEMM だけが 32 の変種を取る）
  * tileN = regN · wgX   （                     列数）
  * threads = wgX · wgY  （1 スレッドが regM×regN の出力を持つ）
  * ```
