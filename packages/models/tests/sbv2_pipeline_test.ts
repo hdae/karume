@@ -26,8 +26,12 @@ import {
   assertTokenLimit,
   assetJson,
   Sbv2Pipeline,
+  synthesizeSbv2,
 } from "../src/sbv2/pipeline.ts";
 import { parseTokenizerAsset } from "../src/sbv2/text/asset.ts";
+import { parseJpExtraRules } from "../src/sbv2/text/symbols.ts";
+import { DebertaTokenizer } from "../src/sbv2/text/tokenizer.ts";
+import type { ModelComponent } from "../src/hub/components.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
@@ -474,6 +478,120 @@ Deno.test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を�
   assertFalse(fromAsset instanceof ModelInputError, "資産由来が入力起因に分類された");
   // 正常域は通る。
   assertFiniteNoise(new Randn(0).normals(4, 0.8), 0.8, true);
+});
+
+/**
+ * {@link synthesizeSbv2} へ直に渡す偽物の状態。部品 3 本の `createSession` は呼ばれた部品名を
+ * 記録し、印の例外で止める（GPU には触れない — `gpu` も偽物）。text_encoder より前の検査を
+ * 通ったかどうかを、記録が空かどうかで見る。
+ *
+ * 規則・トークナイザは形だけの最小構成（本物の値ではない）。発話は記号 1 つ（"."）だけ。
+ */
+const noiseWiringState = (calls: string[], defaultNoiseScaleW: number) => {
+  const component = (key: string): ModelComponent => ({
+    ...stubModel({ inputs: [], outputs: [], values: {} }),
+    createSession: () => {
+      calls.push(key);
+      return Promise.reject(new Error(`印: ${key} の createSession`));
+    },
+    assets: {},
+    asset: () => {
+      throw new Error("未使用");
+    },
+    estimate: () => {
+      throw new Error("未使用");
+    },
+    maxPartBytes: 0,
+  });
+  const table = { data: new Float32Array(1), rows: 1, cols: 1 };
+  const state: Parameters<typeof synthesizeSbv2>[0] = {
+    gpu: fakeGpuContext(fakeDevice()),
+    ownsGpu: false,
+    config: parseSbv2PipelineConfig({
+      styles: { Neutral: 0 },
+      speakers: { FN4: 0 },
+      maxTokens: 512,
+      maxFrames: 4096,
+      defaults: {
+        speaker: "FN4",
+        style: "Neutral",
+        styleWeight: 1,
+        sdpRatio: 0.2,
+        noiseScale: 0.6,
+        noiseScaleW: defaultNoiseScaleW,
+        lengthScale: 1,
+      },
+    }),
+    rules: parseJpExtraRules({
+      symbols: ["_", "a", "."],
+      pad: "_",
+      punctuations: ["."],
+      toneStart: 6,
+      languageId: 1,
+      numTones: 12,
+      numLanguages: 3,
+      addBlank: true,
+      blankId: 0,
+      samplingRate: 44100,
+      hopLength: 512,
+      bertHiddenFromEnd: 3,
+      bertRelPos: { positionBuckets: 256, maxPosition: 512 },
+      defaults: { sdpRatio: 0.2, noiseScale: 0.6, noiseScaleW: 0.8, lengthScale: 1 },
+    }, "テスト規則"),
+    tokenizer: DebertaTokenizer.fromVocabText(
+      ["[PAD]", "[CLS]", "[SEP]", "[UNK]", "."].join("\n"),
+      { removed: [], spaced: [] },
+      { clsId: 1, sepId: 2, unkId: 3 },
+    ),
+    styles: table,
+    speakers: table,
+    textEncoder: component("text_encoder"),
+    front: component("front"),
+    voice: component("voice"),
+    sessionOptions: {},
+  };
+  return state;
+};
+
+const PUNCTUATION_ONLY = {
+  leadingPunctuations: ["."],
+  moras: [],
+  words: [{ surface: ".", phones: ["."] }],
+};
+
+describe("synthesizeSbv2: z_noise の有限性の検査の結線", () => {
+  it("呼び手の noiseScaleW が f32 で溢れるなら、text_encoder の Session を張る前に入力起因で落とす", async () => {
+    const calls: string[] = [];
+    await assertRejects(
+      () => synthesizeSbv2(noiseWiringState(calls, 0.8), PUNCTUATION_ONLY, { noiseScaleW: 1e39 }),
+      Sbv2InputError,
+      "noiseScaleW 1e+39 では z_noise が f32 で有限に収まらない",
+    );
+    assertEquals(calls, []);
+  });
+
+  it("配布形の既定値が f32 で溢れるなら、Session を張る前に資産の不正として落とす", async () => {
+    const calls: string[] = [];
+    const error = await assertRejects(
+      () => synthesizeSbv2(noiseWiringState(calls, 1e39), PUNCTUATION_ONLY),
+      Error,
+      "pipelineConfig.defaults の noiseScaleW 1e+39",
+    );
+    assertFalse(error instanceof ModelInputError, "資産由来が入力起因に分類された");
+    assertEquals(calls, []);
+  });
+
+  // 対: 同じ偽物の状態でも、溢れない値なら text_encoder の Session まで進む（上の 2 本が
+  // 偽物の組み立てそのものの失敗で落ちているのではないことの確認）。
+  it("溢れない noiseScaleW なら text_encoder の Session を張りに行く", async () => {
+    const calls: string[] = [];
+    await assertRejects(
+      () => synthesizeSbv2(noiseWiringState(calls, 0.8), PUNCTUATION_ONLY, { noiseScaleW: 0.8 }),
+      Error,
+      "印: text_encoder の createSession",
+    );
+    assertEquals(calls, ["text_encoder"]);
+  });
 });
 
 /**
