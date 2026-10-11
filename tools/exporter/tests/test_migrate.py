@@ -1001,3 +1001,71 @@ class TestTheTensorPieces:
 
         with pytest.raises(LegacyFormatError, match="丸ごとと piece の両方"):
             self._read(tmp_path, [[self.WHOLE, first], [second]])
+
+
+def stage_doctored(
+    directory: Path, shards: list[bytes], name: str, *, dtype: str | None = None, shape=None
+) -> Path:
+    """旧・単一ファイル形を置き、テンソル `name` の宣言（dtype / shape）だけを書き換える。
+
+    バイト列は 1 バイトも変えない — 旧 shard の読み手の検査（宣言長の一致・整列）は通り、
+    IR の宣言との突合だけが食い違いを捕まえられる形にする。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    metadata, tensors = source_material(shards)
+    specs: dict[str, tuple[str, tuple[int, ...]]] = {}
+    for blob in shards:
+        length = struct.unpack("<Q", blob[:8])[0]
+        for key, spec in json.loads(blob[8 : 8 + length]).items():
+            if key != "__metadata__":
+                specs[key] = (spec["dtype"], tuple(spec["shape"]))
+    assert name in specs, f"被験体に '{name}' が無い"
+    old_dtype, old_shape = specs[name]
+    specs[name] = (dtype or old_dtype, tuple(shape) if shape is not None else old_shape)
+    entries = order(
+        [
+            Entry(name=key, dtype=specs[key][0], shape=specs[key][1], payload=raw)
+            for key, raw in tensors.items()
+        ]
+    )
+    target = directory / COMPONENT
+    target.write_bytes(write_safetensors(entries, metadata))
+    return target
+
+
+class TestTheStoredDeclarationsMatchTheIr:
+    """旧 safetensors の dtype / shape を IR の宣言（旧書き手の規則）と照合してから焼く（R7-003）。
+
+    旧書き手は格納 dtype → safetensors dtype（f32 → F32 / i8 → I8 / i4 → I4 …）を 1 対 1 で
+    写し、shape は**論理形**のまま書いた。照合しないと、同じバイト長の別型（I32 の 1 を f32 と
+    して読むと約 1.4e-45）や、要素数だけ同じ別形が新しいコンテナへ黙って焼かれる。
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "override", "message"),
+        [
+            ("x.karume_fixture_seed0", {"dtype": "I32"}, r"dtype I32 が.*F32"),
+            ("x.weight", {"shape": (8, 16)}, r"shape \[8, 16\] が.*\[4, 32\]"),
+            ("karume.scale.x.weight", {"dtype": "I32"}, r"dtype I32 が.*F32"),
+        ],
+        ids=["same-bytes-other-dtype", "same-numel-other-shape", "integer-scale"],
+    )
+    def test_a_declaration_that_disagrees_with_the_ir_writes_nothing(
+        self, tmp_path: Path, name: str, override: dict, message: str
+    ) -> None:
+        source = stage_doctored(
+            tmp_path / "src", legacy_shards(mark="x", storage="i8"), name, **override
+        )
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match=message):
+            migrate_component(source, out, provenance=PROVENANCE)
+        assert not out.exists() or not any(out.iterdir())
+
+    def test_the_undoctored_form_still_migrates(self, tmp_path: Path) -> None:
+        """対照 — 書き換えの足場そのものは移行を壊さない（上の赤は注入した食い違いのもの）。"""
+        source = stage_doctored(tmp_path / "src", legacy_shards(mark="x", storage="i8"), "x.weight")
+
+        result = migrate_component(source, tmp_path / "out", provenance=PROVENANCE)
+
+        assert result.parts

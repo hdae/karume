@@ -1280,3 +1280,35 @@ class TestAFailedRepositoryMigrationLeavesNothing:
         migrated(repo, out)
 
         assert (out / "karume.json").is_file()
+
+
+class TestThePleShardDeclarations:
+    """旧 PLE shard の dtype と**全 shape** を索引と照合する（R7-003 の PLE 側）。
+
+    先頭次元とバイト長だけを見ると、要素数が同じ別形（`[rows, layers, dim]` の後ろ 2 軸の
+    入れ替え）や同じバイト長の別型（F32 の scale を I32 と宣言）が黙って畳まれる。旧書き手は
+    `values` を格納の旧綴り（i8 → I8 / i4 → I4 / i2 → I2）+ `[rows, layers, dim]`、`scales` を
+    F32 + `[rows, layers]` で書いた。
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "spec", "message"),
+        [
+            ("values", {"shape": [25, PLE_LAYERS * 2, PLE_DIM // 2]}, r"values.*shape"),
+            ("scales", {"dtype": "I32"}, r"scales.*dtype I32"),
+        ],
+        ids=["values-shape", "scales-dtype"],
+    )
+    def test_a_declaration_that_disagrees_with_the_index_fails_loudly(
+        self, gemma_repo: Path, tmp_path: Path, key: str, spec: dict[str, Any], message: str
+    ) -> None:
+        def edit(header: dict[str, Any]) -> None:
+            assert header[key]["shape"][0] == 25, "被験体の前提: shard 2 は 25 行"
+            header[key].update(spec)
+
+        doctor_ple_shard(gemma_repo, 2, edit)
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match=message):
+            migrated(gemma_repo, out)
+        assert not out.exists() or not any(out.iterdir())

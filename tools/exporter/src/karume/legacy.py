@@ -33,6 +33,25 @@ from karume.verify import assert_reader_layout
 #: 移行 CLI の `karume.legacy` / `karume.migrate` だけ）。
 IR_METADATA_KEY = "karume_ir"
 
+#: 旧書き手が格納 dtype（IR v1 の `storage.dtype`）に対して書いた safetensors dtype（1 対 1）。
+#:
+#: MUST: shape は**論理形**のまま書かれている（packed の i4 / i2 も器の形ではない — ADR 0069
+#: 決定 2）。移行はこの表と IR の宣言 shape で旧テンソルの宣言を照合してから焼く — バイト長
+#: だけを見ると、同じ長さの別型（I32 の 1 を f32 として読むと約 1.4e-45）や要素数だけ同じ
+#: 別形が新しいコンテナへ黙って焼かれる。PLE sidecar の `values` も同じ表で引く。
+LEGACY_STORED_DTYPE: Mapping[str, str] = {
+    "f32": "F32",
+    "f16": "F16",
+    "bf16": "BF16",
+    "i32": "I32",
+    "i8": "I8",
+    "i4": "I4",
+    "i2": "I2",
+}
+
+#: 旧書き手の scale（companion scale・PLE の `scales`）の safetensors dtype。
+LEGACY_SCALE_DTYPE = "F32"
+
 #: 生バイトの読み出し単位。数 GB を丸読みしないための唯一の要件で、値自体は素の I/O 単位。
 _CHUNK_BYTES = 1 << 20
 

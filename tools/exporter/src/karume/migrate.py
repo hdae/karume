@@ -84,6 +84,8 @@ from karume.dist import (
 from karume.ir import IrGraph
 from karume.legacy import (
     IR_METADATA_KEY,
+    LEGACY_SCALE_DTYPE,
+    LEGACY_STORED_DTYPE,
     SourceTensor,
     _read_metadata,
     payload_chunks,
@@ -222,6 +224,11 @@ def _assert_scale_layouts(
         source = sources.get(encoding.scale_key)
         if source is None:
             raise MigrateError(f"{where}: scale テンソル '{encoding.scale_key}' がファイルに無い")
+        if source.entry.dtype != LEGACY_SCALE_DTYPE:
+            raise MigrateError(
+                f"{where}: scale '{encoding.scale_key}' の dtype {source.entry.dtype} が"
+                f" 旧書き手の scale の綴り {LEGACY_SCALE_DTYPE} と違う"
+            )
         shape = _concrete_shape(graph, name, where)
         expected = _expected_scale_shape(shape, encoding)
         if list(source.entry.shape) != expected:
@@ -229,6 +236,33 @@ def _assert_scale_layouts(
                 f"{where}: scale '{encoding.scale_key}' の形 {list(source.entry.shape)} が"
                 f" codec '{encoding.codec}'・rowAxis {encoding.row_axis}・groupSize"
                 f" {encoding.group_size} の形 {expected} と違う"
+            )
+
+
+def _assert_stored_declarations(graph: IrGraph, sources: Mapping[str, SourceTensor]) -> None:
+    """旧テンソルの dtype / shape が IR の宣言（旧書き手の規則）と一致することを見る。
+
+    MUST: バイト長の一致だけでは足りない（書き手の payload 検査はそこまでしか見ない）— 同じ
+    バイト長の別型・要素数だけ同じ別形が通る（{@link karume.legacy.LEGACY_STORED_DTYPE}）。
+    scale の dtype と形は {@link _assert_scale_layouts} が見る。
+    """
+    for name, initializer in graph.initializers.items():
+        if initializer.is_shared or initializer.tensor is None:
+            continue
+        where = f"initializer '{name}'"
+        entry = sources[initializer.tensor].entry
+        storage = initializer.storage.dtype
+        expected = LEGACY_STORED_DTYPE.get(storage)
+        if entry.dtype != expected:
+            raise MigrateError(
+                f"{where}: 旧テンソル '{initializer.tensor}' の dtype {entry.dtype} が"
+                f" 格納 '{storage}' の旧書き手の綴り {expected} と違う"
+            )
+        shape = _concrete_shape(graph, name, where)
+        if list(entry.shape) != shape:
+            raise MigrateError(
+                f"{where}: 旧テンソル '{initializer.tensor}' の shape {list(entry.shape)} が"
+                f" 宣言 shape {shape} と違う（旧書き手は論理形のまま書く）"
             )
 
 
@@ -344,6 +378,7 @@ def _migrate_shards(
     graph = parse_ir_graph(metadata[IR_METADATA_KEY])
     bindings = _bindings(graph)
     _assert_tensor_cover(bindings, stored)
+    _assert_stored_declarations(graph, stored)
     _assert_scale_layouts(graph, bindings, stored)
     _assert_no_leftovers(final, graph_path)
     try:
@@ -1302,6 +1337,11 @@ def _fold_ple(
     except PleError as cause:
         raise MigrateError(f"{where}: {cause}") from cause
     segments: dict[str, list[tuple[Path, int, int]]] = {"values": [], "scales": []}
+    # 旧書き手の 1 行の宣言（dtype と先頭次元を除いた shape — `values` は論理形）。
+    row_declarations: dict[str, tuple[str, tuple[int, ...]]] = {
+        "values": (LEGACY_STORED_DTYPE[index["storage"]], (layers, dim)),
+        "scales": (LEGACY_SCALE_DTYPE, (layers,)),
+    }
     _require(
         len(shards) == len(index["shards"]),
         f"{where}: PLE shard が {len(shards)} 本（索引は {len(index['shards'])} 本）",
@@ -1325,6 +1365,19 @@ def _fold_ple(
             _require(
                 entry.shape[:1] == (rows,),
                 f"{where} の '{name}'.{key}: 先頭次元 {entry.shape[:1]} が索引の {rows} 行と違う",
+            )
+            # 先頭次元とバイト長だけでは、要素数が同じ別形・同じバイト長の別型が通る —
+            # 旧書き手の綴り（dtype と全 shape）まで索引から導いて照合する。
+            stored_dtype, stored_shape = row_declarations[key]
+            _require(
+                entry.dtype == stored_dtype,
+                f"{where} の '{name}'.{key}: dtype {entry.dtype} が旧書き手の綴り"
+                f" {stored_dtype} と違う",
+            )
+            _require(
+                entry.shape == (rows, *stored_shape),
+                f"{where} の '{name}'.{key}: shape {list(entry.shape)} が"
+                f" {[rows, *stored_shape]} と違う",
             )
             _require(
                 entry.nbytes == rows * expected,
