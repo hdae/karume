@@ -1,0 +1,167 @@
+{
+  "note": "quant の表示欄（label / description — ADR 0075）の受理集合。正本は hub の manifest parser（2026-10-11 裁定）で、Python の karume dist はこの表で同じ結果を出す。value が無いケースは欄そのものを書かない。長さはコードポイント数。",
+  "limits": {
+    "label": 64,
+    "description": 200
+  },
+  "cases": [
+    {
+      "name": "label-absent",
+      "field": "label",
+      "accepted": true
+    },
+    {
+      "name": "label-null",
+      "field": "label",
+      "value": null,
+      "accepted": false
+    },
+    {
+      "name": "label-empty",
+      "field": "label",
+      "value": "",
+      "accepted": true
+    },
+    {
+      "name": "label-whitespace-only",
+      "field": "label",
+      "value": "   ",
+      "accepted": true
+    },
+    {
+      "name": "label-two-lines",
+      "field": "label",
+      "value": "first\nsecond",
+      "accepted": true
+    },
+    {
+      "name": "label-number",
+      "field": "label",
+      "value": 12,
+      "accepted": false
+    },
+    {
+      "name": "label-boolean",
+      "field": "label",
+      "value": true,
+      "accepted": false
+    },
+    {
+      "name": "label-array",
+      "field": "label",
+      "value": [
+        "a label"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "label-object",
+      "field": "label",
+      "value": {},
+      "accepted": false
+    },
+    {
+      "name": "label-at-limit",
+      "field": "label",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "accepted": true
+    },
+    {
+      "name": "label-over-limit",
+      "field": "label",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "accepted": false
+    },
+    {
+      "name": "label-astral-at-limit",
+      "field": "label",
+      "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "accepted": true
+    },
+    {
+      "name": "label-astral-over-limit",
+      "field": "label",
+      "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "accepted": false
+    },
+    {
+      "name": "description-absent",
+      "field": "description",
+      "accepted": true
+    },
+    {
+      "name": "description-null",
+      "field": "description",
+      "value": null,
+      "accepted": false
+    },
+    {
+      "name": "description-empty",
+      "field": "description",
+      "value": "",
+      "accepted": true
+    },
+    {
+      "name": "description-whitespace-only",
+      "field": "description",
+      "value": "   ",
+      "accepted": true
+    },
+    {
+      "name": "description-two-lines",
+      "field": "description",
+      "value": "first\nsecond",
+      "accepted": true
+    },
+    {
+      "name": "description-number",
+      "field": "description",
+      "value": 12,
+      "accepted": false
+    },
+    {
+      "name": "description-boolean",
+      "field": "description",
+      "value": true,
+      "accepted": false
+    },
+    {
+      "name": "description-array",
+      "field": "description",
+      "value": [
+        "a label"
+      ],
+      "accepted": false
+    },
+    {
+      "name": "description-object",
+      "field": "description",
+      "value": {},
+      "accepted": false
+    },
+    {
+      "name": "description-at-limit",
+      "field": "description",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "accepted": true
+    },
+    {
+      "name": "description-over-limit",
+      "field": "description",
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "accepted": false
+    },
+    {
+      "name": "description-astral-at-limit",
+      "field": "description",
+      "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "accepted": true
+    },
+    {
+      "name": "description-astral-over-limit",
+      "field": "description",
+      "value": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "accepted": false
+    }
+  ]
+}

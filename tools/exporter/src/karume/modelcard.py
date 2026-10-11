@@ -279,9 +279,13 @@ def _presentation(quant: Mapping[str, Any]) -> str:
 
     どちらも optional なので 4 通りある。書いていない席は id をそのまま読ませる（`—`）—
     ここで id を再掲すると、表の 1 列目と同じ文字列が 2 度並ぶだけになる。
+
+    受理集合は hub の parser が正本で、空文字・空白だけ・改行を含む値も通る（2026-10-11 裁定）。
+    改行は表の 1 行を割るので、空白の連なり（改行を含む）を 1 つの空白に畳んで 1 セルに綴る。
+    空白しか無い欄は書いていない席と同じに扱う。
     """
-    label = quant.get("label")
-    description = quant.get("description")
+    label = " ".join(quant.get("label", "").split())
+    description = " ".join(quant.get("description", "").split())
     if label and description:
         return f"**{label}** — {description}"
     if label:

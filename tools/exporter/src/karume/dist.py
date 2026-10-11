@@ -940,19 +940,19 @@ def _model_entry(
 def assert_quant_presentation(where: str, quant: Mapping[str, Any]) -> None:
     """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）の形と上限を落とす。
 
-    どちらも optional（設定の無い席は呼び手が id をそのまま出す）だが、**書いたなら 1 行の
-    非空文字列で上限以内**であることを要求する。hub は同じ境界検査を持つので、緩いまま配ると
-    「焼けたのに読めない manifest」になる。改行を弾くのは `description` が 1 行の説明だから
-    （選択 UI の 1 行にも、モデルカードの表の 1 セルにも改行は入れられない）。
+    受理集合は hub の manifest parser が正本（2026-10-11 裁定）: 欄が無いか、**上限以内の
+    文字列**（長さはコードポイント数 — Python の `len` と hub の数え方が一致する）。空文字・
+    空白だけ・改行を含む値も hub は受理するので、ここでも受理する（意味は解釈しない — 決定 2）。
+    MUST: `None` は「書いていない」と読み替えずに拒否する — JSON の `null` を hub は拒否する
+    ので、読み替えると「焼けたのに読めない manifest」になる。共有表
+    `packages/hub/tests/fixtures/quant-presentation.json` が両側の一致を縛る。
     """
     for key, limit in QUANT_PRESENTATION_LIMITS.items():
-        value = quant.get(key)
-        if value is None:
+        if key not in quant:
             continue
-        if not isinstance(value, str) or not value.strip():
-            raise DistError(f"{where}.{key} が非空の文字列でない（{value!r}）")
-        if "\n" in value:
-            raise DistError(f"{where}.{key} が 1 行でない（改行を含む）: {value!r}")
+        value = quant[key]
+        if not isinstance(value, str):
+            raise DistError(f"{where}.{key} が文字列でない（{value!r}）")
         if len(value) > limit:
             raise DistError(f"{where}.{key} が {len(value)} 字で上限 {limit} を超えた")
 

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+from conftest import REPO_ROOT
 from ir_fixtures import ir_container as _ir_container
 from ir_fixtures import ir_parts, with_an_unknown_op
 
@@ -688,12 +689,46 @@ class TestPlanGates:
         assert not out_dir.exists()
 
 
-class TestQuantPresentation:
-    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）— optional・上限つき 1 行。
+#: quant の表示欄の受理集合の共有表。正本は hub の parser（2026-10-11 裁定）で、TS 側
+#: （packages/hub/tests/quant_presentation_test.ts）も**この 1 ファイル**で回す。
+QUANT_PRESENTATION_TABLE = json.loads(
+    (REPO_ROOT / "packages" / "hub" / "tests" / "fixtures" / "quant-presentation.json").read_text(
+        encoding="utf-8"
+    )
+)
 
-    hub は「manifest は外部入力」の前提で同じ境界検査を持つ（決定 2）ので、緩いまま焼くと
-    「組み上がったのに読めない配布形」ができる。
+
+class TestQuantPresentation:
+    """quant の表示欄（ADR 0075 決定 1 の `label` / `description`）— optional・上限つき。
+
+    受理集合は hub の parser が正本（2026-10-11 裁定）。hub より緩いと「組み上がったのに
+    読めない配布形」ができ、hub より厳しいと hub が読める値を焼けない — どちらの食い違いも
+    共有表が両側で赤にする。
     """
+
+    def test_the_limits_are_the_ones_of_the_shared_table(self) -> None:
+        assert QUANT_PRESENTATION_TABLE["limits"] == {
+            "label": MAX_QUANT_LABEL_CHARS,
+            "description": MAX_QUANT_DESCRIPTION_CHARS,
+        }
+
+    @pytest.mark.parametrize(
+        "case",
+        [case for case in QUANT_PRESENTATION_TABLE["cases"] if case["accepted"]],
+        ids=lambda case: case["name"],
+    )
+    def test_it_accepts_what_the_hub_accepts(self, case: Mapping[str, Any]) -> None:
+        quant = {case["field"]: case["value"]} if "value" in case else {}
+        assert_quant_presentation("m.quants.f16", {"weights": {}, "session": {}, **quant})
+
+    @pytest.mark.parametrize(
+        "case",
+        [case for case in QUANT_PRESENTATION_TABLE["cases"] if not case["accepted"]],
+        ids=lambda case: case["name"],
+    )
+    def test_it_refuses_what_the_hub_refuses(self, case: Mapping[str, Any]) -> None:
+        with pytest.raises(DistError, match=rf"m\.quants\.f16\.{case['field']}"):
+            assert_quant_presentation("m.quants.f16", {case["field"]: case["value"]})
 
     def test_a_seat_may_leave_both_fields_out(self) -> None:
         assert_quant_presentation("m.quants.f16", {"weights": {}, "session": {}})
@@ -712,16 +747,6 @@ class TestQuantPresentation:
     def test_it_refuses_one_character_beyond_the_limit(self, key: str, limit: int) -> None:
         with pytest.raises(DistError, match=f"{limit} を超えた"):
             assert_quant_presentation("m.quants.f16", {key: "x" * (limit + 1)})
-
-    @pytest.mark.parametrize("value", ["", "   ", 42, ["a label"]])
-    def test_it_refuses_a_value_that_is_not_a_non_empty_string(self, value: Any) -> None:
-        with pytest.raises(DistError, match="非空の文字列でない"):
-            assert_quant_presentation("m.quants.f16", {"label": value})
-
-    def test_it_refuses_a_description_that_spans_two_lines(self) -> None:
-        """1 行の説明 — 選択 UI の 1 行にもカードの表の 1 セルにも改行は入れられない。"""
-        with pytest.raises(DistError, match="1 行でない"):
-            assert_quant_presentation("m.quants.f16", {"description": "first\nsecond"})
 
     def test_the_plan_gate_catches_it_before_writing_anything(self, tmp_path: Path) -> None:
         """計画段の門（ADR 0041 §7 の規模上限と同じ席）— 数 GB を並べてから落とさない。"""

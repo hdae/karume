@@ -370,6 +370,29 @@ class TestQuantsSection:
 
         assert "| `f16` (default) | — | 512 B | `front` = `f16` | — |" in lines
 
+    def test_a_multi_line_description_stays_in_one_table_row(self) -> None:
+        """hub は改行を含む表示欄を受理する（2026-10-11 裁定）— 表の 1 セルに畳んで綴る。"""
+        model = _manifest()["models"]["zeta"]
+        model["quants"]["w8"]["description"] = "Both components\n  in int8 storage."
+
+        lines = quants(model)
+
+        assert all("\n" not in line for line in lines)
+        assert any(
+            line.startswith(
+                "| `w8` (default) | **Half size (int8)** — Both components in int8 storage. |"
+            )
+            for line in lines
+        )
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\n"])
+    def test_a_blank_label_reads_like_a_seat_without_one(self, blank: str) -> None:
+        """空白しか無い欄は書いていない席と同じ `—`（`** **` のような崩れた強調を出さない）。"""
+        model = _manifest()["models"]["alpha"]
+        model["quants"]["f16"]["label"] = blank
+
+        assert "| `f16` (default) | — | 512 B | `front` = `f16` | — |" in quants(model)
+
     def test_it_writes_the_abbreviation_legend_only_when_one_is_given(self) -> None:
         """略称の対応は**カードに必ず出す**（ADR 0074 決定 4）が、略称のない family には出ない。
 
