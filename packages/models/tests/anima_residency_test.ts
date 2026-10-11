@@ -8,9 +8,9 @@
 //
 // NOTE: `AnimaPipeline.generate` そのものは偽の GPU では回せない — 段の Session は実容器の
 // グラフを device へ上げて組むので、`fake-gpu.ts` の device では構築が通らない。pipeline 側の
-// 結線（段の順序・イベントへの写し）は e2e が見る。GPU 側の小物（解放待ちの `settleReleasedMemory`
-// 〈session/settle-released-memory.ts〉と dispose の順序 `disposeResidencyThenGpu`〈pipeline.ts〉）は
-// 偽の GpuContext で直接縛る。
+// 結線（段の順序・イベントへの写し）は e2e が見る。GPU 側の小物の dispose の順序
+// `disposeResidencyThenGpu`〈pipeline.ts〉は偽の GpuContext で直接縛る。解放待ちの
+// `settleReleasedMemory`（共通層）の門は `settle_released_memory_test.ts`（core のレーン）にある。
 
 import {
   assert,
@@ -36,9 +36,7 @@ import {
   transformerSource,
 } from "../src/anima/residency.ts";
 import { disposeResidencyThenGpu } from "../src/anima/pipeline.ts";
-import { settleReleasedMemory } from "../src/session/settle-released-memory.ts";
 import { ModelInputError } from "../src/errors.ts";
-import { losableGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /** 偽の DiT Session（破棄されたかと、どの構築で作られたかだけを持つ）。 */
 type FakeSession = { readonly id: number; disposed: boolean };
@@ -939,58 +937,6 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       );
       assertEquals(h.log, []);
     });
-  });
-});
-
-describe("settleReleasedMemory（退避の後の解放待ち）", () => {
-  it("空の submit を出してから onSubmittedWorkDone を待ち、消失の購読を残さない", async () => {
-    // 空の submit が「無効化された device の消失を表面化させる呼び出し」（settle-released-memory.ts の doc）。
-    const calls: string[] = [];
-    const { gpu } = losableGpuContext(undefined, {
-      submit: (commandBuffers) => void calls.push(`submit:${commandBuffers.length}`),
-      onSubmittedWorkDone: () => {
-        calls.push("onSubmittedWorkDone");
-        return Promise.resolve();
-      },
-    });
-    const baseline = gpu.pendingLostListeners;
-    await settleReleasedMemory(gpu);
-    assertEquals(calls, ["submit:0", "onSubmittedWorkDone"]);
-    assertEquals(gpu.pendingLostListeners, baseline, "消失の購読が積み残っている");
-  });
-
-  it("空の submit が消失を表面化させたら、onSubmittedWorkDone が解決しなくても待たずに戻る", async () => {
-    // Deno は無効化された device の消失を次の有効性検査（ここでは submit）で初めて解決する。
-    const { gpu, lose } = losableGpuContext(undefined, {
-      submit: () => lose(),
-      onSubmittedWorkDone: () => new Promise<void>(() => {}),
-    });
-    const baseline = gpu.pendingLostListeners;
-    await settleReleasedMemory(gpu);
-    assertEquals(gpu.pendingLostListeners, baseline);
-  });
-
-  it("onSubmittedWorkDone が解決しなくても、device が失われたら待たずに戻る", async () => {
-    // 消失後の onSubmittedWorkDone が解決しない実装への備え（MUST）。競わせないとここで固まる。
-    const { gpu, lose } = losableGpuContext(undefined, {
-      onSubmittedWorkDone: () => new Promise<void>(() => {}),
-    });
-    const baseline = gpu.pendingLostListeners;
-    const settled = settleReleasedMemory(gpu);
-    lose();
-    await settled;
-    assertEquals(gpu.pendingLostListeners, baseline);
-  });
-
-  it("既に失われた device では待たずに戻る", async () => {
-    const { gpu, lose } = losableGpuContext(undefined, {
-      onSubmittedWorkDone: () => new Promise<void>(() => {}),
-    });
-    lose();
-    // 消失の通知は device.lost の解決（マイクロタスク）越しに届く。
-    await Promise.resolve();
-    assert(gpu.lost !== undefined, "前提: 消失を観測済み");
-    await settleReleasedMemory(gpu);
   });
 });
 
