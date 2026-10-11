@@ -266,16 +266,22 @@ export type EstimateOptions = {
   /**
    * `maxStorageBufferBindingSize` の granted 値（`GPUDevice.limits` / `readAdapterLimits`）。
    *
-   * 使うのは 2 箇所。① states 形 attention のノード内一時の行ブロック枚数 — 一時は**行ブロック
+   * 使うのは 3 箇所。① states 形 attention のノード内一時の行ブロック枚数 — 一時は**行ブロック
    * 1 枚ぶん**しか同時生存せず、その枚数はこの上限だけで決まる（{@link planStateAttention} —
    * ADR 0022 の実行時オートチューン禁止により device の granted limit と束縛だけの純関数）。
    * ② 全グラフの中間配置の束縛上限 — 行ブロック attention の枚数と、slot 実寸の上限検査に使う
    * （実行相と同じ granted 値で詰める — ADR 0093 決定 4 / 5）。② は無指定なら WebGPU core 既定で詰める。
+   * ③ 融合 attention op（states 欄なし）のノード内一時の行ブロック枚数（ADR 0124 決定 7）。
+   * 無指定のときは、枚数がどの device でも同じになる形だけを数える — WebGPU core 既定（128 MiB・
+   * device の granted 値は常にこれ以上）で 1 枚に収まる形と、`attentionRowBlockMaxBytes` が
+   * core 既定以下の形（上限は全 device で予算そのもの）。それ以外は fail loudly
+   * （{@link fusedAttentionBlocks}）。
    *
    * MUST: states 形 attention を持つグラフでは**必須**（{@link stateAttentionTemps} が
-   * fail loudly）。既定値で埋めると、どの device でも実際には出ない枚数を estimator だけが
-   * 主張する。**値域（正の安全整数）はグラフの形に依らず入口で見る**（① を読まない形でだけ
-   * 不正値が黙って通ると、値域門の位置が呼び手から見えない）。
+   * fail loudly）。融合 attention op で枚数が束縛上限に依る形でも必須（③）。既定値で埋めると、
+   * どの device でも実際には出ない枚数を estimator だけが主張する。**値域（正の安全整数）は
+   * グラフの形に依らず入口で見る**（① を読まない形でだけ不正値が黙って通ると、値域門の位置が
+   * 呼び手から見えない）。
    */
   readonly maxStorageBufferBindingSize?: number;
   /**
@@ -341,7 +347,7 @@ export type EstimateOptions = {
  */
 const UNACCOUNTED: readonly string[] = Object.freeze([
   "行ブロック attention 以外の融合が畳んで消す中間と、その融合ルールが宣言するノード内一時（どちらも device limit と融合の成立に依存する。別名化した値と、行ブロック attention の一時は勘定に入っている）",
-  "linear i8a8 の量子化中間（数値変種と device limit に依存する）。attention のノード内一時は勘定に入っている — states 形のスコア S と stateAttentionReduce に応じて必要な行統計、融合 attention op のスコア S・行統計・i8a8 の量子化中間（attentionCompute / attentionScoreStorage を渡さなければ runtime 既定の f32 で数える）",
+  "linear i8a8 の量子化中間（数値変種と device limit に依存する）。attention のノード内一時は勘定に入っている — states 形のスコア S と stateAttentionReduce に応じて必要な行統計、融合 attention op のスコア S・行統計・i8a8 の量子化中間（attentionCompute / attentionScoreStorage を渡さなければ runtime 既定の f32 で数える。maxStorageBufferBindingSize を渡さなければ、枚数がどの device でも同じ形〈WebGPU core 既定で 1 枚に収まる形・attentionRowBlockMaxBytes が core 既定以下の形〉だけを数え、それ以外は数を返さない）",
   "params バッファ（カーネル定数 — Session 常駐・内容アドレスキャッシュ）",
   "queue.writeBuffer の実装 staging（submit の完了まで解放されない）",
   "退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot backing は、次の計画の確保より前に destroy されず flush 後の後始末まで生きるので、その run では退役分 + 新規が同時に載る）",
@@ -822,6 +828,38 @@ type TransientKnobs = {
 };
 
 /**
+ * 融合 attention op 1 ノードの行ブロック（実行と同じ `planAttentionBlocks` × `rowBlockLimit`）。
+ *
+ * MUST: 束縛上限（`limit` — `EstimateOptions.maxStorageBufferBindingSize`）が渡されず、枚数が実際の
+ * 束縛上限で変わりうる形は fail loudly（states 形の {@link stateAttentionTemps} と同じ理由 — core 既定で
+ * 割ると、どの device でも出ない枚数を見積りだけが名乗りうる・ADR 0124 決定 7）。device の granted な
+ * 束縛上限は WebGPU core 既定（128 MiB）以上なので、上限なしでも次の 2 つは全 device で枚数が同じで、
+ * core 既定で数えてよい: ① core 既定で 1 枚に収まる形（どの device でも 1 枚）② 予算が core 既定以下
+ * の形（上限は全 device で予算そのもの）。
+ */
+const fusedAttentionBlocks = (
+  extent: Parameters<typeof planAttentionBlocks>[0],
+  limit: number | undefined,
+  budget: number | undefined,
+  where: string,
+): ReturnType<typeof planAttentionBlocks> => {
+  if (limit !== undefined) return planAttentionBlocks(extent, rowBlockLimit(limit, budget));
+  const core = CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
+  if (budget === undefined || budget > core) {
+    // 上限で割らずに全行を 1 枚にした S と行統計（1 枚に収まるかだけを見る — 枚数は下の 1 本で引く）。
+    const whole = planAttentionBlocks(extent, Number.MAX_SAFE_INTEGER);
+    if (whole.length !== 1 || Math.max(whole[0].scoreBytes, whole[0].statsBytes) > core) {
+      throw new ExecutionError(
+        `${where}: 融合 attention の一時は WebGPU core 既定の束縛上限（${core}B）で 1 枚に収まらないので` +
+          " options.maxStorageBufferBindingSize が要る（行ブロックの枚数が device の granted limit で" +
+          "変わる — ADR 0124 決定 7 / ADR 0022）",
+      );
+    }
+  }
+  return planAttentionBlocks(extent, rowBlockLimit(core, budget));
+};
+
+/**
  * 融合 attention op（states 欄なし — ADR 0023）1 ノードのノード内一時と dispatch の読み書き（ADR 0124
  * 決定 7）。実行（recipe-builders/attention.ts の `buildAttention`）の確保と dispatch の並びを写す:
  *
@@ -833,15 +871,14 @@ type TransientKnobs = {
  * MUST: 大きさと枚数は実行と同じ純関数（`attentionRoute`・`attentionScoreElementBytes`・
  * `planAttentionBlocks`・`attentionI8a8TempBytes`・`rowBlockLimit`）だけから引く。組合せの門も同じ
  * `fusedAttentionViolation` で、実行が拒否する形には数を返さない。
- * NOTE: 束縛上限は中間の配置と同じ値（`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら
- * WebGPU core 既定）。行ブロック attention の窓と同じ扱いで、states 形のように必須にはしない（既存の
- * 呼び手が上限を渡さずに見積れる形を保つ）。
+ * NOTE: 束縛上限（`limit` — `EstimateOptions.maxStorageBufferBindingSize`）が無いときの扱いは
+ * {@link fusedAttentionBlocks}（枚数が device に依らない形だけ数える）。
  */
 const fusedAttentionProgram = (
   node: NodePlan,
   reads: readonly TransientRef[],
   outputRefs: readonly TransientRef[],
-  bindingLimit: number,
+  limit: number | undefined,
   knobs: TransientKnobs,
 ): { readonly temps: TransientTempSpec[]; readonly dispatches: TransientDispatchSpec[] } => {
   const [q, k, v] = node.inputShapes;
@@ -856,9 +893,11 @@ const fusedAttentionProgram = (
     { i8a8: seats.attentionCompute === "a8", mask: maskRef !== undefined, route },
   );
   if (violation !== undefined) throw new ExecutionError(violation);
-  const blocks = planAttentionBlocks(
+  const blocks = fusedAttentionBlocks(
     { ...shape, scoreBytes: attentionScoreElementBytes(seats.attentionCompute, route) },
-    rowBlockLimit(bindingLimit, knobs.attentionRowBlockMaxBytes),
+    limit,
+    knobs.attentionRowBlockMaxBytes,
+    where,
   );
   const qkI8a8 = route.qk === "i8a8";
   const pvI8a8 = route.pv === "i8a8";
@@ -1012,7 +1051,7 @@ const transientSlotBytes = (
       }
     } else if (node.contract.kind === "attention") {
       // 融合 attention op（states 欄なし）のノード内一時（S・行統計・i8a8 の量子化の一時）。
-      const program = fusedAttentionProgram(node, reads, outputRefs, bindingLimit, knobs);
+      const program = fusedAttentionProgram(node, reads, outputRefs, limit, knobs);
       temps.push(...program.temps);
       dispatches.push(...program.dispatches);
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
@@ -1093,8 +1132,9 @@ const transientSlotBytes = (
  *   並ぶ（{@link AdmissionScenarioSpec}）。`generation.chunkBuckets` の各形はシナリオに並べず、
  *   {@link AdmissionReport.peakAccountedBytes} の最大にだけ入る。
  * @param options.maxStorageBufferBindingSize device の granted 上限。states 形 attention を
- *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。全グラフの中間配置の
- *   束縛上限にも使う（無指定なら WebGPU core 既定）。
+ *   持つグラフでは必須（ノード内一時の行ブロック枚数がこれだけで決まる）。融合 attention op で
+ *   枚数が束縛上限に依る形（WebGPU core 既定で 1 枚に収まらず、予算も core 既定以下でない形）でも
+ *   必須。全グラフの中間配置の束縛上限にも使う（無指定なら WebGPU core 既定）。
  * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
  *   {@link AdmissionReport.peakAccountedBytes} の片側の項になる。
  * @param options.attentionRowBlockMaxBytes 行ブロックの一時 1 本ごとの予算（`SessionOptions` と同じ値 —

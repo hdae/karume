@@ -488,6 +488,10 @@ backing は flush 後の後始末まで生きる）。**attention のノード�
 [0124](decisions/0124-attention-row-block-budget.md) 決定 7）。融合 attention op の席は `EstimateOptions` の
 `attentionCompute` / `attentionScoreStorage` で渡し、省略すると runtime 既定の f32 で数える（Anima の段ごとの
 見積りは席を渡していない — 実用席の s16 では過大側・a8 では量子化の一時のぶん過小側）。
+融合 attention op の行ブロックの枚数は束縛上限で決まるので、`EstimateOptions.maxStorageBufferBindingSize` を渡さない
+見積りは、枚数がどの device でも同じ形（WebGPU core 既定 128 MiB で 1 枚に収まる形・`attentionRowBlockMaxBytes` が
+core 既定以下の形）だけを数え、それ以外は上限を名指して fail loudly（states 形と同じ理由 — core 既定で割ると、
+どの device でも出ない枚数を見積りだけが名乗りうる）。
 `unaccounted` に載らない差がもう 1 つある: **領域境界の padding** で、見積りの配置は実構築の
 パッカーと数百バイト単位でずれる。`EstimateOptions.maxBufferSize` は state スロット単体の上限検査と
 中間パッキングの領域の上限の両方に効き、`workspaceBytes` を動かしうる（first-fit の領域の割れ方が上限で

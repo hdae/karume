@@ -103,6 +103,10 @@ n = 1 から n ≥ 2 への切り替えは行窓の別キー・別 WGSL に替�
   有無に関わらず、融合 attention op を持つ全系列の見積りの値を増やしうる既定の挙動の変更である。そこで、先に既存の呼び手の
   前後の表を [research 2026-10-11](../research/2026-10-11-fused-attention-estimate-before-after.md) に書き、勘定の変更と
   `unaccounted` の文言の変更を別のコミットにした（表の結果: Anima の段ごとの見積りと Gemma の見積りは前後で不変）。
+- 融合 attention op の枚数は束縛上限で決まる。`maxStorageBufferBindingSize` を渡さない見積りは、枚数がどの device でも同じ形
+  だけを数える。WebGPU core 既定（128 MiB — device の granted 値は常にこれ以上）で 1 枚に収まる形と、予算が core 既定以下の形
+  （上限は全 device で予算そのもの）である。それ以外の形は、上限を渡すことを名指して fail loudly にする（states 形と同じ理由 —
+  core 既定で割ると、どの device でも出ない枚数を見積りだけが名乗りうる）。
 - 実行が拒否する組（mask × a8・GQA × a8・i8a8 の i32 縮約の門・states 形 × f32 以外の席）には見積りも数を返さない。判定は
   実行と同じ純関数（`fusedAttentionViolation` / `stateAttentionVariantViolation` —
   `packages/runtime/src/runtime/recipe-builders/attention.ts`）で、文言も同じ。

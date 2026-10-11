@@ -1405,6 +1405,56 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       );
     });
   });
+
+  describe("束縛上限を渡さない見積りは、枚数がどの device でも同じ形だけを数える", () => {
+    // q / k / v `[1,1,8192,4]`: S 1 枚 = 8,192 × 8,192 × 4 = 256 MiB（core 既定 128 MiB に 1 枚では
+    // 収まらない）・1 行 = 8,192 × 4 = 32,768B・出力 y = 8,192 × 4 × 4 = 131,072B・行統計 1 行 8B。
+    const wideAttention = (): PreparedModel =>
+      openGraph(
+        singleOpDeclaration(
+          "attention",
+          [[1, 1, 8192, 4], [1, 1, 8192, 4], [1, 1, 8192, 4]],
+          [[1, 1, 8192, 4]],
+          { attrs: { scale: 0.5 } },
+        ),
+      );
+    const GRANTED = 2_147_483_644;
+
+    it("core 既定で 1 枚に収まらない形は、上限を名指して fail loudly（core 既定で割った枚数を名乗らない）", () => {
+      assertThrows(
+        () => wideAttention().estimate(),
+        ExecutionError,
+        "1 枚に収まらないので options.maxStorageBufferBindingSize が要る",
+      );
+      // 予算が core 既定より大きくても、上限は device の granted 値で変わるので同じ。
+      assertThrows(
+        () => wideAttention().estimate({ attentionRowBlockMaxBytes: 512 * 1024 * 1024 }),
+        ExecutionError,
+        "1 枚に収まらないので options.maxStorageBufferBindingSize が要る",
+      );
+    });
+
+    it("上限を渡せば同じ形を数える（2 GiB 級の上限では 1 枚）", () => {
+      assertEquals(
+        runScenario(wideAttention().estimate({ maxStorageBufferBindingSize: GRANTED }))
+          .workspaceBytes,
+        131_072 + 268_435_456 + 65_536,
+      );
+    });
+
+    it("予算が core 既定以下なら上限なしでも数え、上限を渡したときと同じ値（64 MiB → 2,048 行 × 4 枚）", () => {
+      const budget = 64 * 1024 * 1024;
+      const without = runScenario(wideAttention().estimate({ attentionRowBlockMaxBytes: budget }));
+      const withLimit = runScenario(
+        wideAttention().estimate({
+          maxStorageBufferBindingSize: GRANTED,
+          attentionRowBlockMaxBytes: budget,
+        }),
+      );
+      assertEquals(without.workspaceBytes, 131_072 + 67_108_864 + 16_384);
+      assertEquals(without.workspaceBytes, withLimit.workspaceBytes);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
