@@ -6,7 +6,7 @@
 // 正規化）は縛られていない。ここで押さえるのは 3 点:
 //
 // ① **受理集合の外側**（2 冪でない変換長 / 入力が変換長超過 / 出力が rfft ビン数に不足 /
-//    自己相関の変換長不足）が全部 `RangeError` で落ちる。
+//    自己相関の変換長不足 / 自己相関の lag が信号長以上）が全部 `RangeError` で落ちる。
 // ② **素朴 DFT との一致**（rtol 1e-12）。バタフライ・ビット反転・回転因子の符号が壊れると、
 //    特徴は「それらしい別の値」になるだけで shape も値域も合ったまま最後まで通る。
 // ③ **ゼロ詰めは末尾**（先頭詰めだと位相が回り、パワースペクトルの平坦性が崩れる）。
@@ -82,6 +82,20 @@ Deno.test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ち
     RangeError,
     "2 倍以上の変換長が要る",
   );
+});
+
+Deno.test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（負の lag が回り込む添字）", () => {
+  // `[1, 2]` を変換長 4 で通すと逆変換は [5, 2, 0, 2] で、添字 3 は lag −1 の値（線形なら 0）。
+  assertThrows(
+    () => new Fft(4).autocorrelation(Float32Array.from([1, 2]), new Float64Array(3)),
+    RangeError,
+    "lag 2 が信号長 2 以上",
+  );
+  // 境界: lag が信号長 − 1 まで（out.length = 信号長）は線形自己相関として通る。
+  const out = new Float64Array(2);
+  new Fft(4).autocorrelation(Float32Array.from([1, 2]), out);
+  assertAlmostEquals(out[0], 5, 1e-12);
+  assertAlmostEquals(out[1], 2, 1e-12);
 });
 
 Deno.test("Fft.powerSpectrum: 素朴 DFT と一致する（長さ 8 の実信号）", () => {

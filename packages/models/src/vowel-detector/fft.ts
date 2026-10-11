@@ -89,9 +89,12 @@ export class Fft {
   }
 
   /**
-   * 実信号の自己相関（lag 0..`out.length − 1`）を `out` へ書く。
+   * 実信号の線形自己相関（lag 0..`out.length − 1`）を `out` へ書く。
    *
    * MUST: 変換長は信号長の **2 倍以上**（巡回相関が線形相関に化けるゼロ詰めの条件）。
+   * MUST: lag は信号長未満（`out.length ≤ input.length`）。逆変換の結果のうち信号長以上の添字は、
+   * 巡回の後半に負の lag の値が回り込んだもの（`[1, 2]` を変換長 4 で通すと添字 3 に lag −1 の
+   * 2 が出る）で、線形自己相関ではない。
    * パワースペクトルは実かつ偶対称なので、逆変換は同じバタフライを掛けて `size` で割れば
    * 得られる（`np.fft.irfft(S·conj(S))` と同値）。
    */
@@ -101,8 +104,12 @@ export class Fft {
         `Fft: 自己相関には信号長 ${input.length} の 2 倍以上の変換長が要る（${this.size} しかない）`,
       );
     }
-    if (out.length > this.size) {
-      throw new RangeError(`Fft: lag ${out.length - 1} が変換長 ${this.size} の外`);
+    if (out.length > input.length) {
+      throw new RangeError(
+        `Fft: lag ${
+          out.length - 1
+        } が信号長 ${input.length} 以上（線形自己相関の外 — 負の lag が回り込む）`,
+      );
     }
     this.#load(input);
     this.#butterflies();
