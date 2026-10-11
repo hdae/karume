@@ -357,6 +357,9 @@ measurements in `docs/research/`.
 
 ### Breaking
 
+- `@karume/models`: `GenerationSequence` gains a required `fork()` method. Code that implements the
+  type itself (for example a `Gemma4ChatSessionHost` whose `sequence()` returns its own object) no
+  longer type-checks until it provides `fork()`.
 - `@karume/models/wan`: `WanRunComponent` gains `vae_encoder_pre` / `vae_encoder_attn` /
   `vae_encoder_post`, and the `stage` event's `component` gains `vae_encoder` (Wan2.2 image-to-video
   only; Wan2.1 never emits them). An exhaustive `switch` or `Record` over these unions needs the new
