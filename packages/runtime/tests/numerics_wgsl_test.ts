@@ -20,7 +20,9 @@ describe("f32Literal", () => {
     assertEquals(f32Literal(0.25), "0.25");
   });
 
-  it("指数表記になる値（1e21・1e-7）も正しい浮動小数リテラルを返す", () => {
+  it("指数表記になる値（1e21・1e-7）も字面が WGSL の浮動小数リテラル文法に合う", () => {
+    // 見るのは字面だけ。1.5e300 は 3 桁の指数の字面を確かめる入力で、f32 の値域外なので
+    // シェーダの生成では通らない（値域は f32Literal の検査対象外）。
     for (const value of [1e21, 1e-7, 1.5e300, -2e25]) {
       assertMatch(f32Literal(value), WGSL_FLOAT_LITERAL, String(value));
     }
