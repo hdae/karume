@@ -111,11 +111,14 @@ const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
  * SharedArrayBuffer 背面はここで弾く（述語が主張する `Uint8Array<ArrayBuffer>` を型の上でも嘘に
  * しない）。
  */
-const isTightView = (bytes: Uint8Array): bytes is Uint8Array<ArrayBuffer> =>
+const isTightView = (bytes: Uint8Array<ArrayBufferLike>): bytes is Uint8Array<ArrayBuffer> =>
   bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
   bytes.byteLength === bytes.buffer.byteLength;
 
-export const assertTightView = (bytes: Uint8Array, path: string): Uint8Array<ArrayBuffer> => {
+export const assertTightView = (
+  bytes: Uint8Array<ArrayBufferLike>,
+  path: string,
+): Uint8Array<ArrayBuffer> => {
   if (!isTightView(bytes)) {
     throw new Error(
       `hub: ${path} の bytes が buffer 全体を占めていない` +
@@ -130,7 +133,10 @@ export const assertTightView = (bytes: Uint8Array, path: string): Uint8Array<Arr
  * バイト列 → `Manifest` の唯一の変換点（取得元の検証フックの内側で呼ばれる）。`ownRepo` は
  * manifest を読み込んだ repo（取得元の名乗り `SourceOrigin.repo` — 持たない取得元は `undefined`）。
  */
-const decodeManifest = (bytes: Uint8Array, ownRepo: string | undefined): Manifest => {
+const decodeManifest = (
+  bytes: Uint8Array<ArrayBufferLike>,
+  ownRepo: string | undefined,
+): Manifest => {
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -269,7 +275,7 @@ export const fetchAssetsWithBudget = async (
     // 取得の前後で明示的に中断を見る（数 GB の読出しを回している最中に取り消しが効かないのは
     // 中断の透過が壊れているのと同じ — 温め面 prefetchAssets と同型の確認）。
     signal.throwIfAborted();
-    let bytes: Uint8Array;
+    let bytes: Uint8Array<ArrayBufferLike>;
     try {
       bytes = await sourceForRef(source, ref).readFile(ref, {
         signal,

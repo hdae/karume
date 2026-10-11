@@ -130,7 +130,7 @@ export type ManifestReadOptions = {
    * 「取得物が壊れている」の意味で、取得元はそれを破損として扱ってよい。
    * MUST NOT: 中断の確認をここへ混ぜない（健全なエントリの evict を招く）。
    */
-  readonly parse: (bytes: Uint8Array) => void;
+  readonly parse: (bytes: Uint8Array<ArrayBufferLike>) => void;
 };
 
 /**
@@ -147,7 +147,10 @@ export type PinnedSource = {
    * `fetch.ts` の tight view 検査）。**何を検証できるかは取得元によって違う** — HF は
    * sha256 まで照合し、ローカル取得元は size 厳密一致だけを見る（sha256 は信頼する）。
    */
-  readonly readFile: (ref: FileRef, options: FileReadOptions) => Promise<Uint8Array>;
+  readonly readFile: (
+    ref: FileRef,
+    options: FileReadOptions,
+  ) => Promise<Uint8Array<ArrayBufferLike>>;
   /**
    * ④相 1（optional 能力）— RAM に載せずに、後続の {@link readFile} が安く済む状態にする。
    * **持たない取得元が正当**で、その場合は温め面がその ref を温めずに `complete` だけを出す
