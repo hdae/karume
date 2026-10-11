@@ -6,6 +6,8 @@
  *
  * 載っている経路:
  *
+ * - `lanczos.ts`（3 チャネル・LANCZOS・窓）: Wan2.2 の I2V の条件画像（公式実装と diffusers の
+ *   `Image.resize(..., LANCZOS)` — ADR 0121 決定 11）。
  * - {@link resizeU8PlaneBicubic}（1 バンド・BICUBIC）: BiRefNet の α マットの `u8-pil-bicubic`
  *   （`src/birefnet/matte.ts` — HR の上流の `pred_pil.resize(image.size)`）。
  *
@@ -13,7 +15,8 @@
  *
  * MUST: `resizeRgb8` の経路（f64 の重み・`/ filterScale`・`floor(v + 0.5)`）にカーネルを足すだけでは
  * Pillow と一致しない。Pillow の 8bit 経路は係数を 22 bit の固定小数点の整数へ丸め、積和を整数で
- * 取る。f64 のままだと丸め境界に載った標本が 1〜2 LSB ずれる。一方 `resizeRgb8` は torchvision の
+ * 取る。f64 のままだと丸め境界に載った標本が 1〜2 LSB ずれる（LANCZOS で、Wan2.2 の段 9 の調査の
+ * Python の写しで 0.002〜0.275%）。一方 `resizeRgb8` は torchvision の
  * antialias 経路に合わせた SigLIP2 / Depth Anything / BiRefNet の前処理で、こちらに寄せると彼らの
  * 出力が動く。よって経路を分ける（公開の `resizeRgb8` / `ResampleFilter` は広げない — ADR 0008）。
  *
@@ -34,14 +37,20 @@
  *
  * 係数は出力の添字ごとに独立し（`center = (i + 0.5)·scale`）、中間の uint8 も出力の列ごとに独立して
  * いる。よって伸縮後の画像の一部の矩形は、その矩形の出力の添字だけを計算すれば、全体を伸縮してから
- * 切り出した値と uint8 で同じになる。
+ * 切り出した値と uint8 で同じになる。Wan2.2 の I2V の crop は覆う寸法へ伸縮してから中央を切り出すので、
+ * 縦横比の極端な入力（例 4096×4 → 覆う寸法 720,896×704）でも、手間と中間の大きさを出力の窓の大きさに
+ * 抑えられる。
  *
  * NOTE: `export` は `src/` の内部の呼び手とテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
 
-/** Pillow のフィルタ（`Resample.c` の `struct filter` — 重み関数と、縮尺 1 のときの台の半径）。 */
+/**
+ * Pillow のフィルタ（`Resample.c` の `struct filter` — 重み関数と、縮尺 1 のときの台の半径）。
+ * `name` は診断の文言だけに使う。
+ */
 export type PillowFilter = {
+  readonly name: string;
   readonly support: number;
   readonly weight: (x: number) => number;
 };
@@ -62,7 +71,28 @@ const bicubic = (x: number): number => {
 };
 
 /** Pillow の BICUBIC（`Resample.c` の `BICUBIC = {bicubic_filter, 2.0}`）。 */
-export const PILLOW_BICUBIC: PillowFilter = { support: 2, weight: bicubic };
+export const PILLOW_BICUBIC: PillowFilter = { name: "BICUBIC", support: 2, weight: bicubic };
+
+const sinc = (x: number): number => {
+  if (x === 0) return 1;
+  const radians = x * Math.PI;
+  return Math.sin(radians) / radians;
+};
+
+/** Pillow の `lanczos_filter`（台の外は 0 — 右端 `x = 3` は台の外）。 */
+const lanczos = (x: number): number => (-3 <= x && x < 3 ? sinc(x) * sinc(x / 3) : 0);
+
+/**
+ * Pillow の LANCZOS（`Resample.c` の `LANCZOS = {lanczos_filter, 3.0}`）。
+ *
+ * NOTE: 係数の `sin` は V8 の `Math.sin`、Pillow は C の libm の `sin`。最終 ulp が割れると整数係数が
+ * 1 変わりうる（推測）。fixture は出力の uint8 だけを見るので、係数の ±1 はまず検出できない（ずれた
+ * 係数が出力を変えるのは積和が 2^22 の境界をまたぐときだけ — 1 標本あたりおよそ 画素値 / 2^22）。
+ * 2026-10-09 のレビューが係数表そのもの（`xmin` と整数係数の全列）を Resample.c の逐語の Python の
+ * 写し（glibc の `sin`）と 1,600 幾何で比べ、不一致は 0 だった（その場の確かめで、常設の門ではない）。
+ * BICUBIC は多項式で `sin` を使わないので、この問題を持たない。
+ */
+export const PILLOW_LANCZOS: PillowFilter = { name: "LANCZOS", support: 3, weight: lanczos };
 
 /** 係数の固定小数点の小数部のビット数（Pillow の `PRECISION_BITS` = 32 − 8 − 2）。 */
 const PRECISION_BITS = 32 - 8 - 2;
@@ -261,11 +291,12 @@ export const resampleU8Window = (
     !isPositiveInteger(channels) || image.data.length !== image.width * image.height * channels
   ) {
     throw new RangeError(
-      `8bit の入力 ${image.width}×${image.height}×${channels} と長さ ${image.data.length} が合わない`,
+      `${filter.name} の入力 ${image.width}×${image.height}×${channels} と長さ ${image.data.length} が` +
+        "合わない",
     );
   }
   if (!isPositiveInteger(width) || !isPositiveInteger(height)) {
-    throw new RangeError(`リサンプルの出力寸法 ${width}×${height} が正の整数でない`);
+    throw new RangeError(`${filter.name} の出力寸法 ${width}×${height} が正の整数でない`);
   }
   const { left, top } = window;
   if (
@@ -274,7 +305,7 @@ export const resampleU8Window = (
     left + window.width > width || top + window.height > height
   ) {
     throw new RangeError(
-      `リサンプルの窓 (${left}, ${top}) ${window.width}×${window.height} が出力 ${width}×${height}` +
+      `${filter.name} の窓 (${left}, ${top}) ${window.width}×${window.height} が出力 ${width}×${height}` +
         " の内側でない",
     );
   }
