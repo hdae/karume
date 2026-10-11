@@ -301,7 +301,8 @@ const checkConv1dDims = (dims: Conv1dDims): readonly number[] => {
 
 /**
  * 直接カーネルの uniform Dims。11 語を 16 バイト単位に切り上げて 12 語（48 バイト）確保する
- * （16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
+ * （16 バイト単位の確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の
+ * 要件ではない）。
  */
 export const conv1dParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> => {
   const values = checkConv1dDims(dims);

@@ -173,7 +173,8 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
 };
 
 /**
- * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない — WGSL の最小 binding
+ * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの
+ * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない — WGSL の最小 binding
  * サイズは struct の実サイズ〈ここでは 8 バイト〉）。
  */
 export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {

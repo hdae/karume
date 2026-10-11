@@ -195,7 +195,8 @@ type DeformConv2dDims = {
 
 /**
  * uniform Dims（13 語ぶんの内容を **16 語 = 64 バイト**確保する — 16 バイト単位の確保は
- * プロジェクトの共通形〈ADR 0040〉）。先頭は出力の全要素数・末尾の欄が {@link DEFORM_CONV2D_OOB_BITS}。
+ * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * 先頭は出力の全要素数・末尾の欄が {@link DEFORM_CONV2D_OOB_BITS}。
  *
  * MUST: カーネル直呼びの経路でも幾何を見る（契約検査 = ops/shapes.ts の同名の positive 集合と
  * 二重だが、conv_transpose1d / conv2d と同じ二重の門）。空間長 0 の入力は

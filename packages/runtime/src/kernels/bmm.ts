@@ -55,9 +55,9 @@ export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuf
 /**
  * 行窓変種の uniform（`{m,n,k}` + `{row_offset, rows_full}` の 5 語）。
  *
- * 5 語ぶんの内容を 16 バイト単位に切り上げて **32 バイト**確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
- * MUST: 並びは gemm.ts の
- * `ROW_WINDOW_DIMS_EXTRA` と対。
+ * 5 語ぶんの内容を 16 バイト単位に切り上げて **32 バイト**確保する（16 バイト単位の確保は
+ * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
+ * MUST: 並びは gemm.ts の `ROW_WINDOW_DIMS_EXTRA` と対。
  *
  * `rowsFull` は行窓側の**元の全 M**、`rowOffset` はそのうちこのブロックが担当する先頭行
  * （門は {@link assertGemmRowWindow} — 融合 attention の params と共有）。

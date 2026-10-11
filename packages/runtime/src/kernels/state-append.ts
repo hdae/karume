@@ -115,7 +115,8 @@ export type StateAppendGeometry = {
 };
 
 /**
- * uniform の Params（5 語 — uniform struct の整列で 32 バイト確保する）。
+ * uniform の Params（5 語を 16 バイト単位に切り上げて 32 バイト確保する — 16 バイト単位の確保は
+ * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
  *
  * MUST: `W ≤ C`（窓がスロット容量を超える形は ADR 0067 決定 4 ③ の違反）。sliding かどうかは
  * `window > 0`（src/kernels/state-attention.ts の `stateSliding`）で、`W = 0` = full。呼び手は

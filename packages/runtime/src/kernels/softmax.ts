@@ -172,7 +172,8 @@ export const SOFTMAX_WGSL: string = softmaxWgsl(false);
 export const SAFE_SOFTMAX_WGSL: string = softmaxWgsl(true);
 
 /**
- * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
+ * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの
+ * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
  *
  * `safe` のとき 3 語目に −inf のビット列を載せる（safe_softmax は WGSL 側で `bitcast` して
  * ① の identity と空行判定に使う）。

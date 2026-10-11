@@ -123,7 +123,7 @@ const alignCornersScale = (lengthIn: number, lengthOut: number): number =>
 
 /**
  * 32-byte uniform params（u32 5 語 + f32 2 語 + 予約 1 語 — 16 バイト単位の確保は
- * プロジェクトの共通形〈ADR 0040〉）。`n` は出力の全要素数。
+ * プロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉）。`n` は出力の全要素数。
  *
  * MUST: 空間軸の長さ 0 をここで拒否する。0 は scale が `(0−1)/(out−1)` で負になり、
  * 読み出しが入力の外へ出る（GPU では例外なしに隣の値が出る）。

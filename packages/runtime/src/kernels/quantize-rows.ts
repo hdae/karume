@@ -147,8 +147,9 @@ fn main(
 `;
 
 /**
- * uniform の Params（`{rows, dim}`）。WGSL の uniform アドレス空間では struct の整列が
- * 16 バイトになるため、2 語ぶんの内容でも 16 バイト確保する MUST（softmax / reduce と同じ）。
+ * uniform の Params（`{rows, dim}`）。2 語ぶんの内容でも 16 バイト確保する（softmax / reduce と
+ * 同じ — 16 バイト単位の確保はプロジェクトの慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の
+ * 要件ではない）。
  */
 export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("quantize_rows params", { rows, dim });

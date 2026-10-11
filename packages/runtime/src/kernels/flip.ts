@@ -51,7 +51,8 @@ export const FLIP_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（3 語だが 16 バイト確保する — uniform struct の整列は 16 バイト）。
+ * uniform の Params（3 語だが 16 バイト確保する — 16 バイト単位の確保はプロジェクトの
+ * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
  * `outer` は載せない（`n = outer · len · inner` から復元は不要で、載せれば同じ事実の二重管理）。
  */
 export const flipParams = (

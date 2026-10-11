@@ -1222,8 +1222,9 @@ const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): v
 };
 
 /**
- * ①③ が共有する uniform（{@link STATE_PARAMS_STRUCT} の 10 語 — uniform struct の整列で
- * 48 バイト確保する）。
+ * ①③ が共有する uniform（{@link STATE_PARAMS_STRUCT} の 10 語を
+ * 16 バイト単位に切り上げて 48 バイト確保する — 16 バイト単位の確保はプロジェクトの
+ * 慣行〈融合パスは ADR 0040 で同じ形に固定〉で、仕様上の要件ではない）。
  */
 export const stateAttentionParams = (
   geometry: StateAttentionGeometry,
@@ -1245,7 +1246,7 @@ export const stateAttentionParams = (
 
 /**
  * ①ₜ の uniform（{@link STATE_QK_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 10 語 —
- * uniform struct の整列で 48 バイト確保する）。
+ * 16 バイト単位に切り上げて 48 バイト確保する — 理由は {@link stateAttentionParams}）。
  *
  * MUST: 幾何の値域門は ① と**同じ 1 本**（{@link assertStateGeometry}）。①ₜ は ① と同じ
  * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
@@ -1270,8 +1271,8 @@ export const stateQkTiledParams = (
 };
 
 /**
- * ③ₜ の uniform（{@link STATE_PV_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 8 語 —
- * uniform struct の整列で 32 バイト確保する）。
+ * ③ₜ の uniform（{@link STATE_PV_TILED_DIMS_EXTRA} と骨格の `{m, n, k}` を合わせた 8 語 =
+ * 32 バイトちょうど — 16 バイト単位の確保の理由は {@link stateAttentionParams}）。
  *
  * MUST: 幾何の値域門は ③ と**同じ 1 本**（{@link assertStateGeometry}）。③ₜ は ③ と同じ
  * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
@@ -1295,7 +1296,7 @@ export const statePvTiledParams = (
 
 /**
  * ② の uniform（`{batch_heads, rows_block, row_offset, col_cap, window, neg_inf}` の 6 語 —
- * uniform struct の整列で 32 バイト確保する）。
+ * 16 バイト単位に切り上げて 32 バイト確保する — 理由は {@link stateAttentionParams}）。
  *
  * MUST: `B·H` と `rows_block` を**畳まずに**受ける（① ③ と同じ 2 軸）。畳んだ 1 語では
  * `z · rows_block + 局所行` へ戻せず、有効行の前詰めから S / stats の行を引けない。
