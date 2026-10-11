@@ -88,3 +88,15 @@
 - `karume/paths.py`（repo topology 依存）は recipe 側の関心事へ — core API は Path を
   受け取る形を保つ。
 - exporter README は移動後の構成で全面改稿する（G1 では最小修正に留めた）。
+
+## 追記（2026-10-11）— core に残るモデル系列名と配布先の既定値
+
+決定 1（core にモデル固有の知識を置かない）の例外として、次の 2 つを core に残すことを認める。
+境界テスト（`tools/exporter/tests/test_architecture_boundary.py`）のコメントもこの範囲で書く。
+
+1. **`karume.migrate.PLE_OWNER`**（pipeline 名 `gemma4` / `gemma4-qat` → PLE sidecar の畳み先の部品名）。
+   旧形式（`karume/4`）の一度きりの移行に限った例外である。旧 manifest は PLE の持ち主を宣言する欄を
+   持たないので、移行 CLI が表として持つ（持ち主の記録は ADR 0108 追記 3 の 6）。新しい配布形はこの表を
+   使わない。
+2. **`karume.modelcard.HF_OWNER`**（配布先の HF アカウントの既定値）。モデルカードの使い方の例と
+   `karume dist` のリポ名の既定に使う。`--repo` で上書きできるので、正しさの欠陥ではない。

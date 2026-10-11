@@ -69,7 +69,9 @@ CORE_MODULES: tuple[str, ...] = (
     # 知っているのはバイト列と宣言だけ。
     "legacy",
     # 旧配布形 → コンテナ形式の移行 CLI（container-v1 §12）。旧形式を読むのはここだけで、
-    # 知っているのは宣言と生バイト（family 知識も repo topology も持たない）。
+    # 知っているのは宣言と生バイト（repo topology は持たない）。family 知識は旧 PLE sidecar の
+    # 持ち主の表 `PLE_OWNER`（pipeline 名 → 部品名）だけで、旧形式の一度きりの移行に限った
+    # 例外（ADR 0065 追記）。
     "migrate",
     "pipeline",
     "goldens",
@@ -104,7 +106,8 @@ RECIPE_MODULE_PREFIXES = ("patch_",)
 #: 「気づいたら `karume/paths.py` が生えていた」を止める門が無くなる。恒真化していないことは
 #: {@link TestTheBoundaryCheckItself} の合成故障注入が示す。
 #: 逆に `dist` / `modelcard` / `cli` はここから降りた — family 知識も repo topology も無い
-#: core の一部になったので、**禁止側ではなく検査される側**（{@link CORE_MODULES}）にいる。
+#: core の一部になったので、**禁止側ではなく検査される側**（{@link CORE_MODULES}）にいる
+#: （配布先 owner の既定値 `modelcard.HF_OWNER` だけは残る — ADR 0065 追記）。
 RECIPE_MODULES = frozenset({"paths"})
 
 #: recipe 側の置き場（ADR 0065 決定 2 — wheel の外・リポ専用）。

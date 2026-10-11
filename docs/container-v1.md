@@ -871,7 +871,8 @@ fail loudly** で止まる。
   `legacy.py`）にだけ置く。`legacy.py` は safetensors の shard 列と piece キーを、`migrate.py` は旧
   `karume/4` manifest と PLE sidecar / 索引を読む。書く → 読み直して検証 → 据え替えの 3 段は、export の一本道と**同じ 1 本**
   （`karume.publish.publish_container`）を通る。移行 CLI が足すのは旧形の読み取りと、旧形にしか無い
-  前提（scale の形・テンソルの過不足・出力先が空であること）の検査だけである。
+  前提（旧テンソルの dtype と shape・scale の dtype と形・テンソルの過不足・出力先が空であること）の
+  検査だけである。
 - **両モード共通の指定**: `--out <dir>`、`--license <識別子>`（必須 — 既定値で出所を偽らない）、
   `--notice <参照>` / `--upstream-revision <revision>`（`provenance` の省略可の欄 — §2.3）、
   `--writer <識別>`、`--part-bytes {256,512,768,1024}`（part 長 MiB・既定 256 — §4.2。集合外は拒否）。
@@ -891,7 +892,12 @@ fail loudly** で止まる。
   全 (モデル, 部品, dtype) を `krm` へ変換し、`assets` を写して `karume/5` の `karume.json` を書く
   （ADR 0109 決定 8）。shard 列を旧 manifest の宣言から組むので、ディレクトリを跨ぐ列もここで解ける。
   グラフ名は `weights` のキーそのもの（§2.1）。越境参照の列は変換せず、`--cross-repo` が指す変換済み
-  ディレクトリの `karume/5` から `container` を引き写す。
+  ディレクトリの `karume/5` から `container` を引き写す。出力先は空（または不在）であることを開始時に
+  見て、リポ全体を作業席（`karume.artifacts.staged_publication`）で組み、全変換・通常ファイルの複写・
+  manifest の検査が通った回だけ据える（途中で落ちた回は出力先に何も残さない）。
+- **旧 manifest の path**: hub の path 検査（ADR 0038 §2・0041 §6 — 空セグメント・先頭ドットのセグメント・
+  許可外の文字を拒否）と同じ文法で読む。書き先は旧 path の親ディレクトリを出力先へ繋ぐので、`../` や
+  絶対パスを通すと出力先の外へ書く。宣言されたファイルが symlink で入力リポの外を指す形も拒否する。
 - **モード間で併用できない指定**（どれも fail loudly）: `--manifest` と位置引数。リポ丸ごとモードでの
   `--graph-name` / `--graph`（グラフ名はキーが決め、`karume/5` は共有 `krg` の席を持たない — ADR 0109
   決定 5）と `--single`（`container.parts` は part 0 + part 1 の 2 要素以上 MUST・HF の公式配布は分割形
@@ -900,6 +906,10 @@ fail loudly** で止まる。
   新旧で一致しない）。出力は `.partial` へ書き、検査を通ってから据え替える（落ちた回は何も残さない）。
 - 旧 scale の**形**（keepdim / group 形）が `rowAxis` / `groupSize` から決まる形と一致することを焼く前に
   見る（正方の重みでは per-column の `[1,N]` と per-channel の `[N,1]` がバイト数で区別できない）。
+- 旧テンソルの **dtype と shape** を、旧書き手の規則（格納 dtype → safetensors dtype が 1 対 1・shape は
+  論理形のまま・scale は F32 — `karume.legacy.LEGACY_STORED_DTYPE`）で IR の宣言と照合してから焼く。
+  PLE sidecar は `values` が `[rows, layers, dim]`・`scales` が F32 の `[rows, layers]`。バイト長だけを
+  見ると、同じ長さの別型や要素数だけ同じ別形が新しいコンテナへ黙って焼かれる。
 
 不変条件:
 
