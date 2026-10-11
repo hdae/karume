@@ -367,6 +367,15 @@ measurements in `docs/research/`.
   rejects the graph, asking for `maxStorageBufferBindingSize`.
   The second entry of `unaccounted` now names only the linear int8 quantization buffers. The estimates
   the Anima and Gemma pipelines use are unchanged.
+- BiRefNet_HR: `segment()` now scales the matte back in the order its upstream uses — the sigmoid is
+  rounded to 8 bits at the graph's resolution, then resized with 8-bit bicubic resampling that
+  matches Pillow's `BICUBIC` bit for bit (`postprocess: "u8-pil-bicubic"`). It used to take the
+  floating-point antialiased bilinear path that Lucida's upstream uses (`"float-bilinear"`, still
+  Lucida's). Rounding stays half-up (upstream truncates). Only the contour changes, and only when the
+  image size differs from the model's resolution: on eight test images the alpha inside the contour
+  band moved by 0.3–2 steps on average and by up to 25 steps (8-bit), and the two were
+  indistinguishable in a blind A/B. At the model's own resolution the output is effectively
+  unchanged (ADR 0125).
 
 ### Fixed
 
@@ -428,6 +437,12 @@ measurements in `docs/research/`.
   vocabulary embedding), also on the precomputed route. `WanGenerateEvent` stages and `WanRunComponent`
   gain `text_encoder`. `deno task demo:wan` names its output directory by route. The gpu-lab Wan JSON is
   `karume-wan-browser/2`.
+- `@karume/models/birefnet`: the pipeline contract is now `birefnet/2`, and `pipelineConfig` gains a
+  required `postprocess` (`"u8-pil-bicubic"` or `"float-bilinear"`; anything else is rejected).
+  This release's `BirefnetPipeline` rejects a `birefnet/1` distribution — including the currently
+  published `karume-birefnet-hr` / `karume-lucida` revisions — as an unsupported major; rebuild a
+  local mirror with `dist.py --pipeline birefnet` / `--pipeline lucida`. The published repositories
+  and the pinned `BIREFNET_SOURCES` revisions are updated at the next release.
 
 ## [0.13.0] - 2026-09-25
 

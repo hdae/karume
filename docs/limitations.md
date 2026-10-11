@@ -350,6 +350,23 @@ device lost にする。BiRefNet 2048² では decoder 末尾の `deform_conv2d`
 `deform_conv2d` を複数 dispatch に分割するか高速化して 1 dispatch を上限内に収めること
 （[perf-ledger](perf-ledger.md) K-63）で、そのとき行を消す。
 
+## BiRefNet 系の α マット: 上流の半精度のモデルの出力とは一致しない・上流の切り捨ては写さない
+
+後処理（logit → 入力画像の寸法の 8bit α）は、系列ごとの上流の**補間のカーネルと段の順序**を写す（配布形の
+`pipelineConfig.postprocess` — HR = `u8-pil-bicubic`・Lucida = `float-bilinear`。ADR
+[0125](decisions/0125-birefnet-matte-postprocess.md)）。契約は「karume の logit に系列ごとの上流の手順を当てた値」
+まで（golden の門 — `packages/models/tests/birefnet_matte_test.ts`）で、次の 3 点は by-design である。
+
+- **上流の半精度のモデルの出力とは一致しない**: HR の上流（同梱 `handler.py`）はモデル全体を半精度で回す
+  （重みも活性も f16）。karume の席はどちらも計算が f32 なので、logit が初めから上流と違う。後処理の最後の段
+  だけ半精度を真似ても上流には近づかないので、写さない（ADR 0125 決定 5）。
+- **上流の切り捨ては写さない**: 8bit への量子化はどの手順も四捨五入（0.5 は切り上げ）。上流はどちらの系列も
+  切り捨てで、f32 の切り捨てでは確信度 1 の前景の 60〜85% が 255 ではなく 254 になる（実画像の実測）。karume
+  では logit 6.23 以上の画素が 255 になる（ADR 0125 決定 4）。
+- 手順はアプリからは選べない（配布形の宣言だけ）。上流の手順に回避の要る問題が無かったので、選択の
+  オプションを足していない（ADR 0125 の「結果」の節・ADR [0005](decisions/0005-verification.md) の追記
+  2026-10-11）。
+
 ## conv1d（groups==1）も同じ dispatch 上限で fail loudly になる（Lout ≈ 8.39M）
 
 conv1d の implicit GEMM（[decisions/0053](decisions/0053-conv1d-implicit-gemm.md)）も

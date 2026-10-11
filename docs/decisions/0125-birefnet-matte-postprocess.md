@@ -1,7 +1,7 @@
 # 0125: BiRefNet の α マットの後処理 — 系列ごとの上流の手順・golden の契約・A/B の規則
 
-- Status: accepted（利用者裁定 2026-10-11 — 裁定 4・28〜32）。A/B の結果と、それを受けた配布形の宣言（S6）は
-  追記で確定する
+- Status: accepted（利用者裁定 2026-10-11 — 裁定 4・28〜32・37・38）。A/B の結果と、それを受けた配布形の
+  宣言は末尾の「結果」の節（追記 2026-10-11）で確定した
 - Date: 2026-10-11
 - 関連: ADR [0008](0008-public-api.md)（公開面は薄く）/ [0038](0038-manifest-v1.md)（`pipelineConfig` の
   拡張と pipeline の major）/ [0113](0113-birefnet-weight-series.md)（BiRefNet 系の重み格納系列）/
@@ -50,7 +50,7 @@
    - `float-bilinear`（Lucida の上流の意図 = **今の経路そのもの**）: 1 ビットも変えない（σ の f32 への格納を
      含む）。
    - パイプラインの既定は `float-bilinear` のまま。手順の引数は `matteFromLogits` の内部の口で、`mod.ts` と
-     サブパスには出さない（ADR 0008）。
+     サブパスには出さない（ADR 0008）。（「結果」の節で改訂: 既定は外し、パイプラインは配布形の宣言を渡す。）
 4. **量子化はどの手順も四捨五入**（`Math.round(255·α)`・0.5 は切り上げ）。上流の切り捨ては `astype(uint8)` の
    慣用であって意図ではない — 確信度 1 の前景は不透明（255）が意図。帰結として、飽和はどの手順も logit 6.23
    から。
@@ -106,7 +106,7 @@
     とおりで、HR は次のリリースで f16 席だけになり（f32 席は同じ値を倍の常駐で持つだけなので退役）、Lucida は
     f32 既定 + f16。スキーマを変える場合の HR の再アップロードは、この f16 席だけへの切り替えと同じ回に乗せる。
     決定 6 の fixture の入力（f32 席の logits の窓）は git に入った値で、recipe の pytest もその値から作り直す
-    ので、f32 席の退役で門は動かない。
+    ので、f32 席の退役で門は動かない。（「結果」の節で確定: HR が上流を採ったので欄を足した。）
 
 ## 採らなかった案
 
@@ -122,10 +122,59 @@
 
 ## Consequences
 
-- 今の経路の出力は変わらない（既定は `float-bilinear` で、本体は逐語の移動）。
+- 今の経路の出力は変わらない（既定は `float-bilinear` で、本体は逐語の移動）。（「結果」の節で改訂: HR の出力は
+  1024² 以外の寸法で輪郭だけ変わる。Lucida は変わらない。）
 - 契約にできるのは「karume の logit に系列ごとの上流の手順を当てた値」まで。上流の半精度のモデルの出力との
   一致は主張しない。
 - Pillow の版を上げるときは、BiRefNet の fixture と Wan の LANCZOS の fixture を作り直す（どちらも recipe の
   pytest が今の Pillow と突き合わせて、作り直し忘れを赤にする）。
 - A/B の道具は `tools/birefnet-ab/`。道具の出力は recipe の `birefnet/matte_ab_check.py` が決定 6 と同じ契約で
   検算する。
+
+## 結果（追記 2026-10-11）— A/B の回答・裁定 37 / 38・配布形の宣言
+
+### A/B の結果
+
+- 決定 10 の素材 8 枚で、HR の 8 対を決定 8 のとおり盲検の 3 択で答えた。回答は **8 対とも「同じ」**（見分けが
+  つかない）。
+- 対 7（down-fern・832×480）は前景が検出されず、2 手順の差が 0 だった（判断材料にならない対）。
+- 数値の列（記録だけ — 決定 9）: 輪郭の帯の中の 2 手順の差は、平均 0.29〜2.05 段・最大 13〜25 段（拡大 4 対は
+  最大 13〜25 段、前景のある縮小 3 対は最大 20〜21 段）。総合列（拡大 4 枚）は、SAD が 4 対とも上流のほうが
+  わずかに小さい（0.003〜5.4%）。MSE は 3 対で小数第 3 位まで同じで、1 対（up-dandelion）は上流が 0.001 大きい。
+  Gradient error は勝ち負けが割れた（上流が小さいのは 4 対中 1 対）。
+- 道具の出力（2 手順の α）は recipe の検算（`birefnet/matte_ab_check.py`）で上流の関数と突き合わせ、
+  不一致は 0。
+- 出力の置き場は `outputs/birefnet-ab/2026-10-11/`（git 追跡外 — `key/metrics.md`・`key/mapping.json`・
+  `blind/answer-sheet.md`）。
+
+### 裁定と決定の確定
+
+- **裁定 37 = a**: 決定 8 の規則（今の経路を残すのは「今の経路」が 5 対以上かつ「上流」が 0 対のときだけ）の
+  とおり、HR は上流の手順 `u8-pil-bicubic` を採る。Lucida は `float-bilinear` のまま（決定 6 の fixture で
+  上流と数値の水準で一致 — A/B はしない）。
+- **裁定 38 = a**: アプリが手順を選ぶ公開オプションは足さない。上流の手順に回避の要る問題は見つからなかった
+  ので、上流に合わせて選択肢は増やさない。方針の正本は ADR [0005](0005-verification.md) の追記
+  （2026-10-11 — 上流との一致の方針: 上流に問題があれば回避策をオプションで用意し、優れていれば既定にする。
+  問題が無ければ上流に合わせ、オプションは足さない）。
+- **決定 2 / 11 の確定（スキーマの変更）**: 配布形の `pipelineConfig` に必須の欄 `postprocess` を足す。値は
+  `u8-pil-bicubic` / `float-bilinear` の閉じた集合で、既定は無く、集合の外は fail loudly。必須の欄の新設なので
+  pipeline の major を `birefnet/2` に上げる（ADR [0038](0038-manifest-v1.md) の繰り上げ規則）。`birefnet/1` の
+  配布形は major の門で落ちる。
+- 欄は組み立て段（`tools/export-recipes/birefnet/distribution.py` の `BIREFNET_POSTPROCESS`）が checkpoint から
+  書く（HR → `u8-pil-bicubic`・Lucida → `float-bilinear`）。TS 側は系列の表を持たない（採らなかった案の
+  2 つ目と同じ理由）。モデルカードはモデルごとの節に手順（補間・段の順序・四捨五入）を宣言から描く。
+- **決定 3 の改訂**: `matteFromLogits` の手順の引数は既定を持たない（宣言の受け口）。パイプラインは
+  `config.postprocess` を渡す。宣言の渡し忘れが、片方の系列の手順で黙って走らないようにするため。
+
+### 影響と再アップロードの時期
+
+- HR の `segment` の出力は、入力画像の寸法がモデルの解像度と違うとき輪郭だけ変わる（上の数値の列の幅）。
+  寸法が同じときは resample を飛ばすので、違いは σ を f32 に格納するかどうかの丸めの割れに限られ、実質
+  変わらない。Lucida の出力は変わらない（`float-bilinear` は同じ経路）。
+- スキーマの変更は main に入れる。HF の 2 リポ（`karume-birefnet-hr` / `karume-lucida`）の再アップロードと
+  `BIREFNET_SOURCES` の revision の更新は、次のリリースでマニフェストの他の変更とまとめて行う（裁定 28 の
+  但し書き）。HR は f16 席だけへの切り替え、Lucida は f32 の焼き直しと同じ回に乗せる（ADR
+  [0113](0113-birefnet-weight-series.md) の追記・backlog の release 節）。それまでは、公開済みの revision
+  （`birefnet/1`）を main の models は読めない。
+- 手元の配布形のミラー（`models/karume-birefnet-hr` / `models/karume-lucida`）は `dist.py` で組み直す。差分は
+  `karume.json`（`pipeline` と `pipelineConfig.postprocess`）と `README.md` だけで、重みの part は変わらない。
