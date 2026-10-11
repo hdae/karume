@@ -283,9 +283,13 @@ deno task demo:wan --generation wan2.2 --image photo.jpg --fit stretch --size 70
   90 levels at sharp color edges. The same JPEG therefore does not give a bit-identical clip to the
   reference; use PNG when the result has to match it.
 - **Alpha is dropped**, not composited over a background, as `convert("RGB")` does.
-- **The EXIF orientation is not applied**, as in the official `generate.py`, which does not call
-  `ImageOps.exif_transpose`. A photo stored sideways with an orientation tag stays sideways; rotate
-  the pixels before passing it.
+- **The EXIF orientation is applied**, from the first Exif block of a JPEG or from the `eXIf` chunk
+  of a PNG when it comes before the image data, as Chrome does. A photo stored sideways with an
+  orientation tag (typically from a phone) is used upright, the same as in the gpu-lab Wan tab, so
+  both pick the same "auto" size. This intentionally differs from the official `generate.py`, which
+  does not call `ImageOps.exif_transpose` and so uses such a photo sideways; to match the reference
+  for a tagged image, rotate the pixels and remove the tag first. An orientation value outside 1–8
+  or a damaged Exif block is ignored (the image is used as stored), again as Chrome does.
 
 ### Output
 

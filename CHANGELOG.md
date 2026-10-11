@@ -261,10 +261,13 @@ measurements in `docs/research/`.
   `deno task demo:wan --generation wan2.2` runs it (the default generation stays `wan2.1`), and
   `--image <PNG|JPEG>` with an optional `--fit <crop|stretch>` runs image-to-video; the example
   decodes the file with fast-png and jpeg-js, which are dependencies of the examples only (PNG gives
-  Pillow's pixels exactly, JPEG differs slightly; the EXIF orientation is not applied, as in the
-  official `generate.py`). The gpu-lab Wan tab gains a generation choice and, for Wan2.2, a
-  condition image decoded by the browser (`createImageBitmap`); its JSON is `karume-wan-browser/5`
-  and records the generation and the condition image of an image-to-video row.
+  Pillow's pixels exactly, JPEG differs slightly). The gpu-lab Wan tab gains a generation choice
+  and, for Wan2.2, a condition image decoded by the browser (`createImageBitmap`); its JSON is
+  `karume-wan-browser/5` and records the generation and the condition image of an image-to-video
+  row. Both the example and the gpu-lab tab apply the EXIF orientation of a JPEG or PNG, so a
+  phone photo tagged to be shown upright is used upright, and both pick the same "auto" size for
+  it. This intentionally differs from the official `generate.py`, which does not apply the
+  orientation; an image without an orientation tag gives the same pixels either way.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
   container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when

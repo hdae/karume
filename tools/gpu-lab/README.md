@@ -599,13 +599,17 @@ image-to-video row with them.
 
 **Image-to-video.** Choose a PNG or JPEG in **条件画像（Wan2.2 の I2V）** (see [4. Wan](#4-wan)). The page
 decodes the file with the browser's own API, without any decoder package: `createImageBitmap` with
-`imageOrientation: "none"`, `colorSpaceConversion: "none"`, and `premultiplyAlpha: "none"`,
+`imageOrientation: "from-image"`, `colorSpaceConversion: "none"`, and `premultiplyAlpha: "none"`,
 then `getImageData` on an `OffscreenCanvas`, and the alpha channel is dropped. So:
 
-- The page does not apply the EXIF orientation (it asks for that explicitly with `imageOrientation`),
-  the same as the Deno example and the reference (Pillow without `ImageOps.exif_transpose`, as in the
-  official `generate.py`). A photo stored on its side (typically a JPEG from a camera or a phone) is
-  used as stored, turned, in all three, so the "画像から自動" size is the same in all three as well.
+- The page applies the EXIF orientation (it asks for that explicitly with `imageOrientation`), the
+  same as the Deno example. A photo stored on its side with an orientation tag (typically a JPEG from
+  a camera or a phone) is used upright in both, so the "画像から自動" size is the same in both as
+  well. This intentionally differs from the reference (the official `generate.py` reads the image
+  with Pillow without `ImageOps.exif_transpose`), where such a photo stays on its side; an image
+  without an orientation tag gives the same orientation in all three. The page does not use
+  `imageOrientation: "none"`: Chrome on an M2 Mac still applied the orientation with it (observed on
+  2026-10-11), and the meaning of `"none"` has changed between versions of the specification.
 - JPEG decoders differ slightly, so the pixels of a JPEG here can differ a little from those of the Deno
   example (`examples/wan`, which decodes with jpeg-js) and of the reference (Pillow), and the clip then
   differs too. An opaque 8-bit PNG without a color profile decodes to exactly the same pixels in all
