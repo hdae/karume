@@ -150,7 +150,7 @@ Deno のファイルシステムを読むアダプター（`Deno.readFile`）は
 同型の carve-out を将来別ランタイム（Node / Bun）へ増やす場合も、この 3 条件を満たす限り本 ADR の
 射程内とする（`@karume/hub/<runtime>` を足すだけで、本体と models は 1 行も変わらない）。
 
-### 5. ローカル取得元は CacheStorage を通らない（バイト複製ゼロ・`prefetchAssets` は no-op）
+### 5. ローカル取得元は CacheStorage を通らない（バイト複製ゼロ・`prefetchAssets` は no-op）（下の追記 2026-10-11 で改定）
 
 ローカルは「温める」対象を持たないので**相 1（`prefetchFile`）を実装しない**。共通層は
 `prefetchFile === undefined` を見て何もせずに抜け、逐次面は相 2（直接逐次読み）だけで同じ
@@ -179,7 +179,8 @@ HF 固有の語彙が診断の**必須欄**だったのを、取得元ごとに�
   （セッションの分類を継がない）。ローカルセッション + リモート越境が正当な構成である以上、
   宣言からは失敗元が決まらないので、失敗元は `SizeViolation` を呼ぶ取得元自身が渡す。
 - `LoadedManifest` を**クラス**にし、`repo` / `revisionSha` を optional・`hubUrl` を**削除**する。
-  取得元そのものを内部欄（`#session`）として運び、資産 3 面（`fetchAssets` / `prefetchAssets` /
+  取得元そのものを内部欄（`#session`）として運び（下の追記 2026-10-11 で改定）、
+  資産 3 面（`fetchAssets` / `prefetchAssets` /
   `streamAssets`）は識別欄から取得元を**組み立て直さない** — 組み立て直す形は「HF なら repo と
   SHA から復元できる」という HF 固有の性質に全面が寄りかかり、復元手段の無い取得元を入れられない。
 
