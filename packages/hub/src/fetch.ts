@@ -164,7 +164,9 @@ export const loadManifest = async (
   // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` や 3 セグメント以上は別の path を
   // 指す。受理集合は越境参照の検査と同じ 1 本（{@link isRepoName}）。エラーを組み立てるのは
   // 共通層なので、検査は取得元アダプター（`sources/hf.ts`）ではなくここに置く。
-  if (!isSource && !isRepoName(ref.repo)) {
+  // 型の外（JS からの呼び出し等）で repo の無い参照が来ると `isRepoName` の split が素の
+  // TypeError で落ち、HubError で分岐する利用者に届かないので、文字列でないものも同じ分岐で断る。
+  if (!isSource && (typeof ref.repo !== "string" || !isRepoName(ref.repo))) {
     throw new HubError(
       `loadManifest: repo '${ref.repo}' が HF の 'owner/name' でない` +
         `（2 セグメントちょうど・許可文字 [A-Za-z0-9._-]・先頭ドット禁止）`,

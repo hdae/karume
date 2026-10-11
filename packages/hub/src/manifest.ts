@@ -560,8 +560,9 @@ const assertPath = (fail: Fail, path: string, where: string): void => {
 
 /**
  * HF の repo 名（`owner/name`）の綴りか — {@link REPO_SEGMENT_RE} の許可リストを 2 セグメント
- * ちょうどに掛ける。取得層が URL へ綴り込む生文字列なので、越境参照の検査と HF 取得元の入口
- * （`sources/hf.ts`）が**この 1 本**を共有する（受理集合を入口ごとに分けない）。
+ * ちょうどに掛ける。取得層が URL へ綴り込む生文字列なので、越境参照の検査と HF のリポ参照を
+ * 受ける入口（`fetch.ts` の `loadManifest`）が**この 1 本**を共有する（受理集合を入口ごとに
+ * 分けない）。
  */
 export const isRepoName = (repo: string): boolean => {
   const segments = repo.split("/");

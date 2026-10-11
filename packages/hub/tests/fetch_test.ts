@@ -9,6 +9,7 @@ import {
   type FileRef,
   HubError,
   HubFetchError,
+  type HubRepoRef,
   type LoadedManifest,
   loadManifest,
   localDirectory,
@@ -241,6 +242,17 @@ Deno.test("loadManifest: URL の構造を壊す repo 名は取得に出る前に
       }
     });
   }
+});
+
+Deno.test("loadManifest: repo が文字列でない参照は素の TypeError でなく HubError で断る", async () => {
+  // 型の外（JS からの呼び出し・未検証の設定値）から来る形を再現するため、意図して型を外す。
+  const ref = { hubUrl: HUB_URL } as unknown as HubRepoRef;
+  const mock = createMockFetch({ sha: SHA, files: serveAll() });
+  await assertRejects(
+    () => loadManifest(ref, { fetch: mock.fetch, caches: new MemoryCacheStorage() }),
+    HubError,
+  );
+  assertEquals(mock.calls, [], "repo の無い参照のまま取得へ出ている");
 });
 
 Deno.test("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", async (t) => {
