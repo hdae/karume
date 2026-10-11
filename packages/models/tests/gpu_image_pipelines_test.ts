@@ -93,7 +93,10 @@ const declaration = (
     nodes,
   });
 
-/** チャネル軸（dim 1）の総和。GPU 側は `sum` の縮約順なので、比較は許容差つきで行う。 */
+/**
+ * チャネル軸（dim 1）の総和。GPU 側は `sum` の縮約順なので CPU とは丸めが割れうる。比較は depth は
+ * 許容差つき、birefnet は丸めの境目の前提の検査（{@link assertNoRoundingTie}）つきで厳密一致。
+ */
 const channelSum = (pixelValues: Float32Array): Float32Array<ArrayBuffer> => {
   const out = new Float32Array(PLANE);
   for (let index = 0; index < PLANE; index += 1) {
@@ -305,7 +308,7 @@ const birefnet: Family = {
   //  3. Pillow の BICUBIC の 2 パス（横 2 → 4・縦 2 → 3・パスの間で 8bit へ丸める）: 出力の変化は
   //     「入力の変化 × 係数の絶対値の和」の切り上げ以下。係数の絶対値の和の最大は横 1.18
   //     （1.088 / −0.088）・縦 1.13（1.066 / −0.066）なので、1 段 → 横で 2 段 → 縦で 3 段。前提なしの
-  //     最悪は 3 段（4 標本の ±1 の割れ 81 通りを 2 万の平面で回した実測も 3 — 2026-10-11）。
+  //     最悪はこの式の上界で 3 段。
   //  4. このテストの入力（`IMAGE` とその反転）は 8 標本とも 255σ が k + 0.5 から 0.105 以上離れていて
   //     （2 の上界の 1,000 倍超）、平面は GPU と CPU で同一になる。resample は整数の演算なので出力も
   //     ビット一致 → 許容差 0。前提は `expected` が毎回確かめる（{@link assertNoRoundingTie}）。

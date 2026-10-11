@@ -7,9 +7,10 @@
 //
 // - `u8-pil-bicubic`（HR の上流の意図）: golden の `<case>.hr`（Pillow の 8bit の BICUBIC の最終 α）と
 //   **0 不一致**。
-// - `float-bilinear`（Lucida の上流の意図 = 今の経路）: golden の `<case>.lucida`（torch の丸める前の
-//   `255α`）を四捨五入した最終 α と一致するか、golden の `255α` が `k + 0.5` から ε（fixture の
-//   `lucida.epsilon`）以内のときだけ 1 段ずれてよい（torch の f32 の座標と重みの丸め — ADR 0125）。
+// - `float-bilinear`（Lucida の上流の意図 = 手順を宣言で選ぶ前のパイプラインの経路そのもの）: golden の
+//   `<case>.lucida`（torch の丸める前の `255α`）を四捨五入した最終 α と一致するか、golden の `255α` が
+//   `k + 0.5` から ε（fixture の `lucida.epsilon`）以内のときだけ 1 段ずれてよい（torch の f32 の座標と
+//   重みの丸め — ADR 0125）。
 //
 // 加えて fixture の作り方に依らない仕様（量子化は四捨五入・手順の既定は無い・未知の手順は落とす・
 // 非有限の logit は画素座標つきで落ちる）を直接縛る。
