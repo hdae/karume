@@ -155,8 +155,13 @@ Deno.test({
         for (const result of built) if (result.status === "rejected") throw result.reason;
         const x = fill([8, 8], (i) => (i % 13) - 6);
 
-        // await を挟まずに発行する（Session 間で区間が重なる形）
-        const [relu, neg] = await Promise.all(sessions.map((session) => session.run({ x0: x })));
+        // await を挟まずに発行する（Session 間で区間が重なる形）。run も allSettled で全部の決着を
+        // 待つ —— Promise.all だと片方の reject で、もう片方の run が走っている最中に dispose へ進む。
+        const ran = await Promise.allSettled(sessions.map((session) => session.run({ x0: x })));
+        const [relu, neg] = ran.map((result) => {
+          if (result.status === "rejected") throw result.reason;
+          return result.value;
+        });
 
         assertEquals([...relu.y.data], [...applyReferenceOp("relu", [x]).data]);
         assertEquals([...neg.y.data], [...applyReferenceOp("neg", [x]).data]);
