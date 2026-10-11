@@ -15,6 +15,7 @@ import {
   wanVaeFrameCount,
   wanVaeLatentChunk,
 } from "../src/wan/vae-chunks.ts";
+import type { GraphOwner } from "../src/hub/components.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 
 /** 潜在タイルの辺・潜在のチャネル数・出力フレームの辺（`8t`）。 */
@@ -22,18 +23,37 @@ const TILE = 4;
 const CHANNELS = 2;
 const SIDE = 8 * TILE;
 
-/** chunk グラフ 1 本の宣言（入力の順 = 潜在 → cache・出力の順 = フレーム → 更新後の cache）。 */
-type ChunkSpec = {
-  readonly inputs: readonly { readonly name: string; readonly shape: readonly StubDim[] }[];
-  readonly outputs: readonly { readonly name: string; readonly shape: readonly StubDim[] }[];
+/** 宣言の dtype（省けば f32）。 */
+type Dtype = GraphOwner["graph"]["inputs"][number]["dtype"];
+
+/** chunk グラフ 1 本の宣言の 1 本（入力 / 出力）。 */
+type ChunkValue = {
+  readonly name: string;
+  readonly shape: readonly StubDim[];
+  readonly dtype?: Dtype;
 };
 
-const owner = (spec: ChunkSpec) =>
-  stubModel({
+/** chunk グラフ 1 本の宣言（入力の順 = 潜在 → cache・出力の順 = フレーム → 更新後の cache）。 */
+type ChunkSpec = {
+  readonly inputs: readonly ChunkValue[];
+  readonly outputs: readonly ChunkValue[];
+};
+
+const owner = (spec: ChunkSpec): GraphOwner => {
+  const stub = stubModel({
     inputs: spec.inputs,
     outputs: spec.outputs.map((output) => output.name),
     values: Object.fromEntries(spec.outputs.map((output) => [output.name, output.shape])),
   });
+  // `stubModel` の値の宣言は f32 固定なので、出力の dtype はここで重ねる。
+  const values = { ...stub.graph.values };
+  for (const output of spec.outputs) {
+    if (output.dtype !== undefined) {
+      values[output.name] = { ...values[output.name], dtype: output.dtype };
+    }
+  }
+  return { graph: { ...stub.graph, values } };
+};
 
 /**
  * 取り決めどおりの 2 本（上流の `feat_idx` 順の cache 3 本のうち、first は time_conv の
@@ -126,6 +146,40 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
       WanVaeChunkError,
       "フレームのチャネル数が first と next で違う（first 12・next 3）",
     );
+  });
+
+  it("潜在・cache の入出力・フレームのどれか 1 本でも宣言の dtype が f32 でなければ WanVaeChunkError", () => {
+    // 形は正しく dtype だけが違う宣言は、形の検査を全部通る。i32 のフレームを f32 として読むと、
+    // 整数の 1 が約 1.4e-45 の有限値になり、有限性の検査も通ってほぼ黒い動画が黙って出る。
+    const rejected: readonly [string, ChunkSpec, ChunkSpec, string][] = [
+      [
+        "フレーム出力が i32",
+        FIRST,
+        patched(NEXT, { outputs: { 0: { ...NEXT.outputs[0], dtype: "i32" } } }),
+        "vae_decoder_next: フレーム出力 'frame' の dtype i32 が f32 でない",
+      ],
+      [
+        "cache の入力が i32",
+        patched(FIRST, { inputs: { 2: { ...FIRST.inputs[2], dtype: "i32" } } }),
+        NEXT,
+        "vae_decoder_first: cache の入力 'cache_02' の dtype i32 が f32 でない",
+      ],
+      [
+        "更新後の cache の出力が bool",
+        FIRST,
+        patched(NEXT, { outputs: { 2: { ...NEXT.outputs[2], dtype: "bool" } } }),
+        "vae_decoder_next: 更新後の cache の出力 'cache_01_out' の dtype bool が f32 でない",
+      ],
+      [
+        "潜在の入力が i32",
+        patched(FIRST, { inputs: { 0: { ...FIRST.inputs[0], dtype: "i32" } } }),
+        NEXT,
+        "vae_decoder_first: 潜在の入力 'latent' の dtype i32 が f32 でない",
+      ],
+    ];
+    for (const [label, first, next, message] of rejected) {
+      assertThrows(() => layoutOf(first, next), WanVaeChunkError, message, label);
+    }
   });
 
   it("1 本の宣言が取り決めから外れたら、どちらのグラフの何かを言って WanVaeChunkError", () => {

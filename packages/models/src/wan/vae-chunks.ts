@@ -113,7 +113,18 @@ const valueShape = (owner: GraphOwner, name: string, where: string): readonly nu
   return staticShape(owner.graph.values[name].shape, `${where} の '${name}'`);
 };
 
-/** 1 本のグラフ宣言を検査し、入出力の取り決めを引く（潜在の形も返す）。 */
+/**
+ * 宣言の dtype が f32 であること。形と名前だけでは、i32 のフレームを読み戻したバイト列が Float32Array
+ * として読まれ（整数の 1 は約 1.4e-45 の有限値）、有限性の検査も通ってほぼ黒い動画が黙って出る。
+ * 量子化された重みの格納 dtype とは別物（ここは入出力の意味上の dtype — ADR 0009）。
+ */
+const assertF32Declared = (dtype: string, where: string, what: string): void => {
+  if (dtype !== "f32") {
+    throw new WanVaeChunkError(`${where}: ${what} の dtype ${dtype} が f32 でない`);
+  }
+};
+
+/** 1 本のグラフ宣言を検査し、入出力の取り決めを引く（潜在の形も返す — 入出力の dtype は全て f32）。 */
 const chunkGraph = (
   owner: GraphOwner,
   where: string,
@@ -124,6 +135,7 @@ const chunkGraph = (
   if (latentSpec?.name !== WAN_VAE_LATENT_INPUT) {
     throw new WanVaeChunkError(`${where}: 先頭の入力が '${WAN_VAE_LATENT_INPUT}' でない`);
   }
+  assertF32Declared(latentSpec.dtype, where, `潜在の入力 '${WAN_VAE_LATENT_INPUT}'`);
   const latent = staticShape(latentSpec.shape, `${where} の '${WAN_VAE_LATENT_INPUT}'`);
   const [channels, latentFrames, rows, cols] = latent;
   if (latent.length !== 4 || latentFrames !== 1 || rows !== cols || channels < 1) {
@@ -140,6 +152,7 @@ const chunkGraph = (
   }
   const [frameOutput, ...cacheOutputs] = outputs;
   const frameShape = valueShape(owner, frameOutput, `${where} のフレーム出力`);
+  assertF32Declared(owner.graph.values[frameOutput].dtype, where, `フレーム出力 '${frameOutput}'`);
   const [sampleChannels, , side] = frameShape;
   if (
     !sameShape(frameShape, [sampleChannels, frames, side, side]) || sampleChannels < 1 ||
@@ -153,12 +166,14 @@ const chunkGraph = (
     if (!CACHE_INPUT.test(spec.name)) {
       throw new WanVaeChunkError(`${where}: 入力 '${spec.name}' が cache_NN の綴りでない`);
     }
+    assertF32Declared(spec.dtype, where, `cache の入力 '${spec.name}'`);
     const shape = staticShape(spec.shape, `${where} の '${spec.name}'`);
     if (shape.length !== 4 || shape[1] !== CACHE_FRAMES) {
       throw new WanVaeChunkError(`${where}: '${spec.name}' は [Cin,2,h,w]（${shape.join(",")}）`);
     }
     const output = cacheOutputs[index];
     const updated = valueShape(owner, output, `${where} の出力`);
+    assertF32Declared(owner.graph.values[output].dtype, where, `更新後の cache の出力 '${output}'`);
     if (!sameShape(shape, updated)) {
       throw new WanVaeChunkError(
         `${where}: 出力 ${
