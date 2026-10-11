@@ -641,7 +641,7 @@ Deno.test({
 
 // --- 直列化と寿命（並行 generate / dispose 済み判定）--------------------------
 //
-// `Sbv2Pipeline` は 3 グラフ（text_encoder 334MB / front / voice）を同時常駐させない契約で、
+// `Sbv2Pipeline` は 3 グラフ（text_encoder / front / voice）を同時常駐させない契約で、
 // それを守るのが `generate` の直列化鎖（モジュール doc の MUST）。並行に呼ぶと run が
 // インターリーブする実装へ退行しても**結果の波形は正しい**ので、観測席の component 列で
 // しか捕まらない。gemma4 側には同型の門がある（`e2e_gemma4_chat_test.ts` の

@@ -436,7 +436,7 @@ Deno.test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は�
 
 Deno.test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は Sbv2InputError）", () => {
   // `generate` はこの門を他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn`
-  // のコンストラクタだけだと、text_encoder（配布形で 334MB）を 1 run 払ってから落ちる。
+  // のコンストラクタだけだと、text_encoder（DeBERTa）を 1 run 払ってから落ちる。
   assertSeed(0);
   assertSeed(42);
   assertSeed(Number.MAX_SAFE_INTEGER);
@@ -543,7 +543,7 @@ describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", (
 // ---- 構築時の資産 × グラフ突合（沈黙誤値クラスの門）------------------------
 //
 // どれも `buildSbv2State` が **GPU を取りに行く前**に通す門。実行時まで残すと、配布形で
-// 334MB の text_encoder を張って 1 run 払ってから、家族も資産も名指ししない汎用文言で落ちる。
+// text_encoder（DeBERTa）を張って 1 run 払ってから、家族も資産も名指ししない汎用文言で落ちる。
 
 /** 名前 → 行番号の表（行番号は表の物理行そのもの）。 */
 const rowNames = (count: number): Map<string, number> =>

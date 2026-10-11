@@ -16,7 +16,7 @@
  *
  * {@link Sbv2Pipeline.fromAssets} は **Session を 1 本も張らない** — 開くのはコンテナ
  * （`openContainer` = 2 文書の解析のみ）までで、GPU 常駐は {@link Sbv2Pipeline.generate} の中で
- * 段ごとに張っては畳む。3 グラフ（text_encoder 334MB / front / voice）を同時に生かさない。
+ * 段ごとに張っては畳む。3 グラフ（text_encoder / front / voice）を同時に生かさない。
  *
  * MUST: この段取りは**公開 API 側でも**守る — `generate` は直列化鎖に載せ（並行呼び出しは
  * 待たされて順に走る）、`dispose` はその完了を待ってから GPU を破棄する。載せないと、並行
@@ -24,9 +24,10 @@
  *
  * ## MUST: 低精度ノブが効くのは front / voice だけ
  *
- * quant の `session` は front / voice の Session にだけ渡す。配布形の `text_encoder` は
- * i8 の 1 dtype しか持たない（ADR 0026 が聴感ゲート込みで受理した 1 系列だけを配る）ので、
- * どの quant を選んでも同じ実体が来る — 実行形ノブの比較軸を SBV2 本体に保つ。
+ * quant の `session`（Session の実行形ノブ）は front / voice の Session にだけ渡し、
+ * `text_encoder` の Session は常に既定の実行形で張る — 実行形ノブの比較軸を SBV2 本体に保つ。
+ * これは重みの**格納 dtype** とは別の話で、`text_encoder` の重みは quant ごとに i8 / i4 の
+ * どちらかが来る（既定 `i8+bert4` と `i4` が i4 — quant 表は ADR 0039 の追記）。
  *
  * ## MUST: 数値の正はここでは担保されない
  *
@@ -360,7 +361,7 @@ export const assertFrontOutputs = (front: GraphOwner): void => {
  * text_encoder が出す hidden の幅と、front のグラフ入力 `bert` の幅が一致することを構築時に見る。
  *
  * MUST: **GPU を取りに行く前**（= text_encoder の Session を張る前）に呼ぶ。実行時まで残すと、
- * 配布形で 334MB の text_encoder を構築して 1 run 払ってから `Session.run` の要素数検査で
+ * 配布形の text_encoder（DeBERTa）を構築して 1 run 払ってから `Session.run` の要素数検査で
  * 落ちる — 家族も資産も名指ししない汎用文言になる。
  * MUST: 見るのは**最終軸だけ**。出力形は `[1, T, dim]` で T が記号次元（トークン数はデータ
  * 依存）なので、形全体を静的と要求すると正当な配布形が通らない。
@@ -467,7 +468,7 @@ const finiteKnob = (value: number, name: string): number => {
  * {@link assertAcceptableSeed}（`request-gates.ts` — 非負の安全整数）へ委ねて型だけを被せ直す。
  *
  * MUST: 他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn` のコンストラクタ
- * だけだと、実行不能と最初から判っている要求に text_encoder（配布形で 334MB）の構築と
+ * だけだと、実行不能と最初から判っている要求に text_encoder（DeBERTa）の構築と
  * 1 run を丸ごと払ってから落ちる（{@link assertTokenLimit} の位置の MUST と同じ理由）。
  * MUST: 型は `Sbv2InputError` を保つ。`Randn` 側も所有者に揃って `ModelInputError` を投げる
  * ようになったので分類軸の外ではなくなったが、SBV2 だけを載せるホストは
@@ -514,7 +515,7 @@ export const assertTokenLimit = (tokens: number, maxTokens: number): void => {
  * `"..."` の 3 トークンへ割れて `[1,0,0]`）、そういう語を並べれば P < T にもなる。
  * どちらの門を落としても、片側だけが上限を超える発話が素通りする。
  * MUST: DeBERTa を回す**前**に呼ぶ。後ろに置くと、超過が確定している要求に対して
- * text_encoder（334MB）を張って回し切ってから front の記号次元で落ちる。
+ * text_encoder（DeBERTa）を張って回し切ってから front の記号次元で落ちる。
  *
  * NOTE: 上限は T と P で同じ 1 つ（`pipelineConfig.maxTokens`）— 焼いた記号次元の上限が
  * 1 組であることは配布側が固定している（`tools/export-recipes/sbv2/tests/test_distribution.py`
@@ -833,7 +834,7 @@ export const synthesizeSbv2 = async (
   assertFiniteNoise(zNoise, knobs.noiseScaleW, options.noiseScaleW !== undefined);
 
   // --- ② text_encoder（DeBERTa・配布形は使う 1 本だけを出す）---------------
-  // quant の低精度ノブは渡さない（配布形の text_encoder は i8 の 1 dtype しか無い）。
+  // quant の実行形ノブは渡さない（モジュール doc「低精度ノブが効くのは front / voice だけ」）。
   const hidden = await withSession(
     state.gpu,
     state.textEncoder,
