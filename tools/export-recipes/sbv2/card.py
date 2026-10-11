@@ -24,6 +24,7 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
+    FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
@@ -273,7 +274,7 @@ def _sbv2_quants(
     model: Mapping[str, Any],
     *,
     abbreviations: Mapping[str, str],
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
 ) -> list[str]:
     """汎用の quant 表に、SBV2 の**丸め方**の備考を足した節。
 
@@ -441,7 +442,7 @@ def render_sbv2_model_card(
     repo: str,
     profile: Sbv2CardProfile,
     abbreviations: Mapping[str, str],
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
     """SBV2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 

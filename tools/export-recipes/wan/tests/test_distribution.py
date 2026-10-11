@@ -42,6 +42,7 @@ from karume.dist import (
     resolve_card_renderer,
     verify_dist,
 )
+from karume.modelcard import FileRefKey
 from wan import umt5_tokenizer
 from wan.card import (
     WAN21_CARD,
@@ -327,7 +328,7 @@ def _reference(umt5_dir: Path, revision: str = _UMT5_REVISION) -> ExternalCompon
     )
 
 
-def _render(manifest: Mapping[str, Any], host_assets: Mapping[str, int]) -> str:
+def _render(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
     return PIPELINE.card_profiles["wan"](
         manifest, repo=f"hdae/{WAN_REPO_NAME}", host_assets=host_assets
     )
@@ -410,7 +411,7 @@ def _stamped(
         return make()
 
 
-def _render22(manifest: Mapping[str, Any], host_assets: Mapping[str, int]) -> str:
+def _render22(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
     return TI2V_PIPELINE.card_profiles["wan-ti2v"](
         manifest, repo=f"hdae/{WAN22_REPO_NAME}", host_assets=host_assets
     )

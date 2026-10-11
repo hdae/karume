@@ -25,6 +25,7 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
+    FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
@@ -499,7 +500,7 @@ def render_birefnet_model_card(
     manifest: Mapping[str, Any],
     repo: str,
     checkpoint: str,
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
     """BiRefNet 系配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 

@@ -103,7 +103,7 @@ from karume.container import (
     read_descriptor_refs,
 )
 from karume.limits import LimitsError, max_state_slot_bytes, required_limits
-from karume.modelcard import HF_OWNER, file_ref_key
+from karume.modelcard import HF_OWNER, FileRefKey, file_ref_key
 from karume.verify import ContainerError, VerifiedContainer, assert_ir_accepted, verify_container
 
 # ---- ① 共有部: 置き場の綴り・共有席の決定・配置・ハッシュ・宣言と現物の突合 -------
@@ -881,15 +881,16 @@ def _model_entry(
     refs: Mapping[str, dict[str, Any]],
     parts: Mapping[str, tuple[str, ...]],
     descriptors: Mapping[str, tuple[DocumentRef, DocumentRef]],
-    host_assets: dict[str, int],
+    host_assets: dict[FileRefKey, int],
 ) -> dict:
     """1 モデルぶんの manifest エントリ（ADR 0109 決定 3）。`refs` は役割名 → 3 点セット。
 
     `parts` は {@link expand_weight_parts} が現物から解決した振り分け表（代表役割 → 順序付き
     part 役割）、`descriptors` は**置いた現物**の part 0 から採った 2 文書の期待値。
 
-    `host_assets`（part 0 の配布相対 path → {@link container_asset_bytes}）は**書き足し先**で、
-    manifest には載らない（モデルカードの内訳注記だけが読む派生値 — 宣言は容器が持つ）。
+    `host_assets`（part 0 の同一性 {@link karume.modelcard.file_ref_key} →
+    {@link container_asset_bytes}）は**書き足し先**で、manifest には載らない（モデルカードの
+    内訳注記だけが読む派生値 — 宣言は容器が持つ）。
 
     MUST: 資産の勘定は **quant が選ぶ席だけ**を開く。どの quant も選ばない dtype 席まで開くと、
     入力コンテナの門（{@link assert_weight_components_verified}）が唯一の検出器である穴に
@@ -924,7 +925,7 @@ def _model_entry(
                 # {@link verify_dist} と越境の突合が別に見る）。
                 head = plan.artifacts[members[0]].source
                 assert head is not None  # ModelPlan.__post_init__ の不変条件
-                host_assets[placed[0]["path"]] = container_asset_bytes(head)
+                host_assets[file_ref_key(placed[0])] = container_asset_bytes(head)
         weights[name] = entry
     return {
         "pipeline": plan.pipeline,
@@ -1266,11 +1267,12 @@ def _materialize_family(
     default_model: str,
     external: Mapping[str, Mapping[str, Any]],
     declared_parts: Mapping[Path, str],
-) -> tuple[dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str, Any], dict[FileRefKey, int]]:
     """検査済みの計画群を `out_dir` へ並べ、`karume.json` を書いて manifest を返す。
 
-    戻りの 2 本目はモデルカード用の派生値（part 0 の配布相対 path →
-    {@link container_asset_bytes}）— manifest には載らない（正本は容器の資産宣言）。
+    戻りの 2 本目はモデルカード用の派生値（part 0 の同一性
+    {@link karume.modelcard.file_ref_key} → {@link container_asset_bytes}）— manifest には
+    載らない（正本は容器の資産宣言）。
 
     ① 共有席を決める（{@link _plan_shared} — 出所の sha256 だけを見る）→ ② 共有席は
     `shared/` へ 1 回だけ・残りは各モデルのサブツリーへ置く → ③ 現物から manifest。
@@ -1348,7 +1350,7 @@ def _materialize_family(
                     )
 
     models: dict[str, Any] = {}
-    host_assets: dict[str, int] = {}
+    host_assets: dict[FileRefKey, int] = {}
     for item in partitioned:
         plan = item.plan
         refs = {}
@@ -1904,10 +1906,10 @@ def resolve_external_components(
 
 #: モデルカードの描き手（manifest とリポ ID と「host 読みの資産」の勘定から本文 1 枚）。
 #:
-#: `host_assets`（part 0 の配布相対 path → 容器が宣言する資産の論理長の和）は manifest から
-#: 導けない**容器の事実**なので、組み立てが引いて渡す（ADR 0109 決定 4 で PLE / `rope_base` が
-#: 容器の中へ入り、独立したファイルの席が消えた）。
-CardRenderer = Callable[[Mapping[str, Any], str, Mapping[str, int]], str]
+#: `host_assets`（part 0 の同一性 {@link karume.modelcard.file_ref_key} → 容器が宣言する資産の
+#: 論理長の和）は manifest から導けない**容器の事実**なので、組み立てが引いて渡す（ADR 0109
+#: 決定 4 で PLE / `rope_base` が容器の中へ入り、独立したファイルの席が消えた）。
+CardRenderer = Callable[[Mapping[str, Any], str, Mapping[FileRefKey, int]], str]
 
 
 @dataclass(frozen=True)

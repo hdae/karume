@@ -18,6 +18,7 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
+    FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
@@ -452,7 +453,7 @@ def render_base_card(
     manifest: Mapping[str, Any],
     repo: str,
     abbreviations: Mapping[str, str],
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
     """公式リポ（CircleStone の 5 変種同居）配布形の `README.md` 本文。
 
@@ -485,7 +486,7 @@ def render_extra_card(
     manifest: Mapping[str, Any],
     repo: str,
     abbreviations: Mapping[str, str],
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
 ) -> str:
     """追加学習リポ（第三者 fine-tune）配布形の `README.md` 本文。"""
     require_pipeline(manifest, SUPPORTED_PIPELINE)

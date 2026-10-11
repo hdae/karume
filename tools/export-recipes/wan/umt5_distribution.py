@@ -56,6 +56,7 @@ from karume.dist import (
 from karume.modelcard import (
     HF_OWNER,
     CardMetadata,
+    FileRefKey,
     frontmatter,
     model_sections,
     models,
@@ -535,7 +536,7 @@ def _umt5_limits(model: Mapping[str, Any]) -> list[str]:
 
 
 def render_umt5_model_card(
-    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
     """umT5-XXL encoder の配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
@@ -785,7 +786,7 @@ def _intake_attribution(intake: Umt5Intake) -> list[str]:
 def render_intake_model_card(
     manifest: Mapping[str, Any],
     repo: str,
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
     *,
     intake: Umt5Intake,
 ) -> str:

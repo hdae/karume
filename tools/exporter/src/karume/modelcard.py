@@ -290,7 +290,7 @@ def _presentation(quant: Mapping[str, Any]) -> str:
 
 
 def _download(
-    model: Mapping[str, Any], quant: Mapping[str, Any], host_assets: Mapping[str, int]
+    model: Mapping[str, Any], quant: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]
 ) -> str:
     """quant 表の Download 欄 — この席を選んだときに落ちる合計と、合計と GPU 常駐量の差。
 
@@ -308,7 +308,7 @@ def _download(
     total = sum(ref["size"] for ref in refs)
     shared = sum(ref["size"] for ref in refs if _is_shared(ref))
     assets = sum(ref["size"] for ref in refs if file_ref_key(ref) in asset_keys)
-    assets += sum(host_assets.get(path, 0) for path in _container_heads(model, quant))
+    assets += sum(host_assets.get(key, 0) for key in _container_heads(model, quant))
     notes = []
     if shared:
         notes.append(f"{_download_size(shared)} shared")
@@ -317,10 +317,15 @@ def _download(
     return _download_size(total) + (f" ({'; '.join(notes)})" if notes else "")
 
 
-def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[str]:
-    """その quant が選ぶコンテナの **part 0 の path**（`host_assets` の鍵 — 同じ容器は 1 度）。"""
+def _container_heads(model: Mapping[str, Any], quant: Mapping[str, Any]) -> set[FileRefKey]:
+    """その quant が選ぶコンテナの **part 0 の同一性**（`host_assets` の鍵 — 同じ容器は 1 度）。
+
+    MUST: 鍵は path ではなく {@link file_ref_key} — 自リポの容器と、借用した容器（別リポ・
+    別 revision）の part 0 が同じ相対 path を持つと、path では 1 つに畳まれて片方の資産量が
+    落ちるか、借用した容器に自リポの資産量が足される。
+    """
     return {
-        model["weights"][name][label]["container"]["parts"][0]["path"]
+        file_ref_key(model["weights"][name][label]["container"]["parts"][0])
         for name, label in quant["weights"].items()
     }
 
@@ -329,7 +334,7 @@ def quants(
     model: Mapping[str, Any],
     *,
     abbreviations: Mapping[str, str] | None = None,
-    host_assets: Mapping[str, int] = {},
+    host_assets: Mapping[FileRefKey, int] = {},
 ) -> list[str]:
     """quant 表（ADR 0074 の席名 + ADR 0075 の表示欄 + 席ごとのダウンロード量）。
 
@@ -338,9 +343,10 @@ def quants(
     Weights 列の綴りが繋がるのはこの 1 行だけで、無いと `bert4` がどの部品の話か読めない。
     略称を使っていない family は渡さない（トークンが weights 名そのものなら対応表は要らない）。
 
-    `host_assets`（part 0 の path → 容器が宣言する資産の論理長の和）は組み立てが
-    {@link karume.dist.container_asset_bytes} から引いて渡す**容器の事実**で、manifest からは
-    導けない。渡さない呼び手（カードだけを組み直すテスト）では内訳注記が容器の資産を数えない。
+    `host_assets`（part 0 の同一性 {@link file_ref_key} → 容器が宣言する資産の論理長の和）は
+    組み立てが {@link karume.dist.container_asset_bytes} から引いて渡す**容器の事実**で、
+    manifest からは導けない。渡さない呼び手（カードだけを組み直すテスト）では内訳注記が容器の
+    資産を数えない。
 
     表の後ろの注記は、廃止したファイル表から**掛かるときだけ**引き継いだもの（sha256 の正本の
     所在・dtype 語彙・`shared/`・越境参照）。掛からない配布形に載せると事実でない

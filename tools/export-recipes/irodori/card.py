@@ -23,6 +23,7 @@ from typing import Any
 
 from karume.modelcard import (
     CardMetadata,
+    FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
@@ -322,7 +323,7 @@ def _irodori_defaults(model: Mapping[str, Any]) -> list[str]:
 
 
 def render_irodori_model_card(
-    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
 ) -> str:
     """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)

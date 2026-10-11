@@ -34,7 +34,15 @@ from karume.dist import (
     assert_storage_absent,
     ir_graph,
 )
-from karume.modelcard import CardMetadata, frontmatter, models, quants, render, require_pipeline
+from karume.modelcard import (
+    CardMetadata,
+    FileRefKey,
+    frontmatter,
+    models,
+    quants,
+    render,
+    require_pipeline,
+)
 
 from .config import (
     CHECKPOINTS,
@@ -281,7 +289,9 @@ def repo_name(model: str) -> str:
     return "karume-gemma4-qat"
 
 
-def render_card(manifest: Mapping[str, Any], repo: str, host_assets: Mapping[str, int] = {}) -> str:
+def render_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
+) -> str:
     """数値・モデル一覧・量子化表を manifest から描く。固定値保持を再量子化と呼ばない。"""
     require_pipeline(manifest, "gemma4-qat/1")
     upstream = tuple(f"google/{checkpoint_name(model)}" for model in manifest["models"])

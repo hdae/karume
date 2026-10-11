@@ -19,6 +19,7 @@ import pytest
 
 from karume.modelcard import (
     CardMetadata,
+    file_ref_key,
     from_pretrained,
     frontmatter,
     model_sections,
@@ -536,3 +537,22 @@ class TestTheSameNameFromAnotherOrigin:
         lines = quants(self._with_back(borrowed))
 
         assert "| 768 B (256 B shared) |" in _row(lines, "f16")
+
+    def test_container_assets_are_counted_per_origin_of_part_0(self) -> None:
+        """容器の資産（`host_assets`）も part 0 の同一性で引く — path では引かない。
+
+        自リポの `alpha/front.krm`（資産 400 B）と借用元の同名 path（資産 100 B）は別の容器。
+        path で引くと 2 つが 1 つに畳まれて片方の資産が落ち、借用した容器だけを選ぶ席に
+        自リポの容器の資産量が足される。
+        """
+        borrowed = {**self._borrowed("hdae/source-a", "1" * 40, 256), "path": "alpha/front.krm"}
+        alpha = self._with_back(borrowed)
+        own = alpha["weights"]["front"]["f16"]["container"]["parts"][0]
+        alpha["quants"]["back-only"] = {"weights": {"back": "f16"}, "session": {}}
+
+        lines = quants(alpha, host_assets={file_ref_key(own): 400, file_ref_key(borrowed): 100})
+
+        assert "| 768 B (256 B shared; 500 B of assets, read on the host) |" in _row(lines, "f16")
+        assert "| 256 B (256 B shared; 100 B of assets, read on the host) |" in _row(
+            lines, "back-only"
+        )

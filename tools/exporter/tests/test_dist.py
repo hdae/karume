@@ -75,6 +75,7 @@ from karume.dist import (
     resolve_repo,
     verify_dist,
 )
+from karume.modelcard import FileRefKey
 
 
 def _write_series(root: Path, payloads: Sequence[bytes], name: str = "model.krm") -> Path:
@@ -1100,7 +1101,7 @@ class TestAtomicReplacement:
         assemble_family(self._versioned_plans(tmp_path / "series", "v1"), out_dir, "A")
         before = self._snapshot(out_dir)
 
-        def explode(manifest: Mapping[str, Any], host_assets: Mapping[str, int]) -> str:
+        def explode(manifest: Mapping[str, Any], host_assets: Mapping[FileRefKey, int]) -> str:
             raise DistError("カードが描けない")
 
         with pytest.raises(DistError, match="カードが描けない"):
