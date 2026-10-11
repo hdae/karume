@@ -1893,10 +1893,18 @@ Deno.test({
                 maxBufferSize: gpu.device.limits.maxBufferSize,
               };
               // 走らせる前の GPU 全体の使用量（画面・他の process — 山から引く基準）。
+              // nvidia-smi の起動は標本の間隔より遅いことがあるので、最初の標本を上限つきで待ってから数本採る。
+              // 上限までに来なければ「標本 0」と記録する（基準を 0 MiB と読ませない）。
               const idle = monitorNvidiaSmi();
               idle.enter("空き");
-              await pause(500);
-              record.idle = formatNvidiaTimeline(await idle.stop());
+              if (await idle.waitForSample(5_000) > 0) await pause(500);
+              const idleTimeline = await idle.stop();
+              record.idle = formatNvidiaTimeline(idleTimeline);
+              // 走行前の温度（熱制限の読みの基準 — 門にはしない）。標本 0・nvidia-smi なしでは載せない。
+              const idlePhase = idleTimeline?.phases.get("空き");
+              if (idlePhase !== undefined && idlePhase.samples > 0) {
+                record.idleTemperatureC = idlePhase.maxTemperatureC;
+              }
               const backingOf = new Map<number | undefined, number>();
               for (const budget of [...PROBE_BUDGETS, ...[...PROBE_BUDGETS].reverse()]) {
                 const label = budgetLabel(budget);
