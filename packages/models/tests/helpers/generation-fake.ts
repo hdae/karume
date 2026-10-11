@@ -9,7 +9,9 @@
  * - **論理長の進行**: `run` の成功で `pastLength` が進む。`commit: "deferred"` の run は進めずに
  *   保留を立て、`commit(rows)` が受理行数ぶんだけ進める（実 `GenerationContext` と同じ順序）。
  *   保留がある間の run と、保留の無い `commit`、sliding ring の余裕を超える deferred run は、
- *   実 context / 実 executor と同じく fail loudly（門の文言まで写す）。
+ *   実 context / 実 executor と同じく fail loudly（門の文言まで写す）。論理長と保留は
+ *   **context ごと**に持つ（`fork` が論理長を写した独立の context を返す — ADR 0066 追記
+ *   2026-10-11。`createGenerationContext` が返すのは常に最初の 1 本 {@link FakeSession.context}）。
  * - **行ごとの logits**: {@link FakeOptions.successor} を渡すと「その行の入力 token → その行の
  *   argmax」の写像になる（= 直前 token だけで決まる決定的な target のモデル）。verify の複数行を
  *   1 本の後続関数で表せるので、投機の受理・棄却を配列 1 本で組める。
@@ -106,6 +108,28 @@ export type RunCall = {
   readonly sameContext: boolean;
 };
 
+/** deferred run の保留（実 `GenerationContext.pendingCommit` と同じ形）。 */
+type FakePending = { readonly pastLength: number; readonly queryLength: number };
+
+/**
+ * fake の context（`GenerationContextFace` + `fork`）。論理長と保留は context ごとに持つ。
+ *
+ * 型を明示しているのは `fork` が自分と同じ型を返す（F-bound）ため — 推論に任せると再帰した型が
+ * 書けない。
+ */
+export type FakeContext = {
+  readonly pastLength: number;
+  readonly pendingCommit: FakePending | undefined;
+  readonly slidingSlack: number | undefined;
+  commit(rows: number): void;
+  /**
+   * 論理長を写した独立の context を返す（実 `GenerationContext.fork` と同じく、保留がある間と
+   * dispose の後は拒否する）。
+   */
+  fork(): Promise<FakeContext>;
+  dispose(): Promise<void>;
+};
+
 const readRow = (
   inputs: RunInputs,
   name: string,
@@ -178,20 +202,41 @@ export type FakeOptions = {
    * 省略と明示は別物である）。
    */
   readonly slidingSlack?: number | undefined;
-  /** dispose の順序を見るための記録先（context は `"context"` を積む）。 */
+  /**
+   * dispose の順序を見るための記録先（最初の context は `"context"`、`fork` で作った context は
+   * 作った順に `"context:fork1"`・`"context:fork2"`… を積む）。
+   */
   readonly disposeLog?: string[];
 };
 
 export type FakeSession = ReturnType<typeof fakeSession>;
+
+/** context 1 本ぶんの可変状態（論理長・保留・dispose の回数）。 */
+type FakeContextState = {
+  pastLength: number;
+  pending: FakePending | undefined;
+  disposals: number;
+};
 
 export const fakeSession = (options: FakeOptions = {}) => {
   const calls: RunCall[] = [];
   const specs: GenerationContextSpec[] = [];
   /** `commit(rows)` に渡った受理行数（cycle ごとに 1 件 — 投機の門の観測口）。 */
   const commits: number[] = [];
-  let pastLength = 0;
-  let pending: { readonly pastLength: number; readonly queryLength: number } | undefined;
-  let disposals = 0;
+  /** この fake が作った context の状態（run は渡された context の状態だけを動かす）。 */
+  const states = new Map<FakeContext, FakeContextState>();
+  /** `fork` で作った context（作った順）。 */
+  const forks: FakeContext[] = [];
+  /**
+   * run ごとに走った context（`calls` と同じ添字）。`RunCall` に載せないのは、呼び出し列を
+   * fake どうしで丸ごと比べる門が context の実体の違いで割れないようにするため。
+   */
+  const runContexts: FakeContext[] = [];
+  const stateOf = (context: FakeContext): FakeContextState => {
+    const state = states.get(context);
+    if (state === undefined) throw new Error("fake: この fake が作っていない context");
+    return state;
+  };
   /** 直前の `derive` が受けた位置列（run の記録へ合流させる — 位置は run の入力ではない）。 */
   let derivedPositions: readonly number[] = [];
   /** 既定の派生入力の席（`[1,M,2]` の f32 を返しつつ、渡った位置列を記録する）。 */
@@ -213,45 +258,76 @@ export const fakeSession = (options: FakeOptions = {}) => {
       );
     },
   };
-  const context = {
-    get pastLength(): number {
-      return pastLength;
-    },
-    get pendingCommit(): { readonly pastLength: number; readonly queryLength: number } | undefined {
-      return pending;
-    },
-    // 宣言しなければ十分大きい値（門に掛からない）。`undefined` の明示は sliding スロット無し。
-    slidingSlack: Object.hasOwn(options, "slidingSlack") ? options.slidingSlack : SLIDING_SLACK,
-    /**
-     * 保留中の deferred run の先頭 `rows` 行を確定させる（実 `GenerationContext.commit` と
-     * 同じ受理集合 — 保留が無い呼びと値域外は fail loudly）。
-     */
-    commit: (rows: number): void => {
-      if (pending === undefined) {
-        throw new Error(
-          "fake: 確定待ちの generation run が無い（deferred で発行した run だけが commit を要る）",
+  // 宣言しなければ十分大きい値（門に掛からない）。`undefined` の明示は sliding スロット無し。
+  const slidingSlack = Object.hasOwn(options, "slidingSlack")
+    ? options.slidingSlack
+    : SLIDING_SLACK;
+  /** context を 1 本組む（状態は `state` だけを読み書きする — 分岐は状態を共有しない）。 */
+  const makeContext = (state: FakeContextState, label: string): FakeContext => {
+    const made: FakeContext = {
+      get pastLength(): number {
+        return state.pastLength;
+      },
+      get pendingCommit(): FakePending | undefined {
+        return state.pending;
+      },
+      slidingSlack,
+      /**
+       * 保留中の deferred run の先頭 `rows` 行を確定させる（実 `GenerationContext.commit` と
+       * 同じ受理集合 — 保留が無い呼びと値域外は fail loudly）。
+       */
+      commit: (rows: number): void => {
+        const pending = state.pending;
+        if (pending === undefined) {
+          throw new Error(
+            "fake: 確定待ちの generation run が無い（deferred で発行した run だけが commit を要る）",
+          );
+        }
+        if (!Number.isSafeInteger(rows) || rows < 0 || rows > pending.queryLength) {
+          throw new Error(`fake: 受理行数 ${rows} が 0..${pending.queryLength} の外`);
+        }
+        state.pastLength = pending.pastLength + rows;
+        state.pending = undefined;
+        commits.push(rows);
+      },
+      fork: (): Promise<FakeContext> => {
+        // 実 `GenerationContext.fork` と同じ拒否（呼んだ時点で判定し、戻り Promise で返す）。
+        if (state.disposals > 0) {
+          return Promise.reject(new Error("fake: dispose 済みの context は fork できない"));
+        }
+        if (state.pending !== undefined) {
+          return Promise.reject(
+            new Error("fake: commit 待ちの generation run がある間は fork できない"),
+          );
+        }
+        const forked = makeContext(
+          { pastLength: state.pastLength, pending: undefined, disposals: 0 },
+          `context:fork${forks.length + 1}`,
         );
-      }
-      if (!Number.isSafeInteger(rows) || rows < 0 || rows > pending.queryLength) {
-        throw new Error(`fake: 受理行数 ${rows} が 0..${pending.queryLength} の外`);
-      }
-      pastLength = pending.pastLength + rows;
-      pending = undefined;
-      commits.push(rows);
-    },
-    dispose: (): Promise<void> => {
-      disposals += 1;
-      options.disposeLog?.push("context");
-      return Promise.resolve();
-    },
+        forks.push(forked);
+        return Promise.resolve(forked);
+      },
+      dispose: (): Promise<void> => {
+        state.disposals += 1;
+        options.disposeLog?.push(label);
+        return Promise.resolve();
+      },
+    };
+    states.set(made, state);
+    return made;
   };
-  const session: GenerationSession<typeof context> = {
+  const rootState: FakeContextState = { pastLength: 0, pending: undefined, disposals: 0 };
+  const context = makeContext(rootState, "context");
+  const session: GenerationSession<FakeContext> = {
     createGenerationContext: (spec) => {
       specs.push(spec);
       return Promise.resolve(context);
     },
     // deno-lint-ignore require-await
     run: async (inputs, bindings, generation): Promise<RunOutputs> => {
+      // 論理長と保留は**渡された context の**もの（分岐した context は状態を共有しない）。
+      const state = stateOf(generation.context);
+      const pending = state.pending;
       // MUST: 実 context と同じ拒否（保留がある間の 2 本目は「どこまでが確定か」が決まらない
       // まま論理長を捕捉する）。記録もしない = 発行の同期区間で落ちる run と同じ扱い。
       if (pending !== undefined) {
@@ -264,7 +340,7 @@ export const fakeSession = (options: FakeOptions = {}) => {
       // ここを持たない fake だと `k + 1 ≤ slidingSlack` を外す退行が GPU 無しでは緑のまま、
       // 実 GPU の最初の verify（GB 級ロードの末）で初めて落ちる。
       if (generation.commit === "deferred") {
-        const slack = context.slidingSlack;
+        const slack = generation.context.slidingSlack;
         if (slack !== undefined && generation.queryLength > slack) {
           throw new Error(
             `run: deferred な generation run の queryLength ${generation.queryLength} が ` +
@@ -285,17 +361,18 @@ export const fakeSession = (options: FakeOptions = {}) => {
         lastRowShape: lastRow.shape,
         queryLength: generation.queryLength,
         commit: generation.commit,
-        pastBefore: pastLength,
+        pastBefore: state.pastLength,
         bindings,
         extra: Object.keys(inputs).filter((name) => name !== IDS && name !== LAST_ROW),
         sameContext: generation.context === context,
       });
+      runContexts.push(generation.context);
       if (options.failAt === call) throw new Error("run が落ちた");
       // 論理長の進行は run の成功で起きる（deferred は保留して commit を待つ — 実 context と同じ）。
       if (generation.commit === "deferred") {
-        pending = { pastLength, queryLength: generation.queryLength };
+        state.pending = { pastLength: state.pastLength, queryLength: generation.queryLength };
       } else {
-        pastLength += generation.queryLength;
+        state.pastLength += generation.queryLength;
       }
       // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
       const rows = options.logitsRows !== undefined &&
@@ -333,15 +410,22 @@ export const fakeSession = (options: FakeOptions = {}) => {
   return {
     session,
     derivedInputs,
-    /** `createGenerationContext` が返す唯一の実体（借り手の `open` に渡る面と同一であること）。 */
+    /**
+     * `createGenerationContext` が返す唯一の実体（借り手の `open` に渡る面と同一であること）。
+     * 下の `disposals` / `pastLength` / `pendingCommit` はこの context の値。
+     */
     context,
+    /** `fork` で作った context（作った順）。 */
+    forks,
     calls,
+    runContexts,
     specs,
     commits,
-    disposals: (): number => disposals,
-    pastLength: (): number => pastLength,
-    pendingCommit: (): { readonly pastLength: number; readonly queryLength: number } | undefined =>
-      pending,
+    disposals: (): number => rootState.disposals,
+    pastLength: (): number => rootState.pastLength,
+    pendingCommit: (): FakePending | undefined => rootState.pending,
+    /** 任意の context（分岐を含む）の dispose の回数。 */
+    disposalsOf: (target: FakeContext): number => stateOf(target).disposals,
   };
 };
 
