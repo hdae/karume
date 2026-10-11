@@ -6,7 +6,12 @@ import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { sortedObject } from "../src/format/container/json.ts";
-import { canonicalIrJson, IrError, parseIrDeclaration } from "../src/format/ir.ts";
+import {
+  canonicalIrDocument,
+  canonicalIrJson,
+  IrError,
+  parseIrDeclaration,
+} from "../src/format/ir.ts";
 import { writeGraphContainer } from "./helpers/container-write.ts";
 
 type Json = Record<string, unknown>;
@@ -128,6 +133,11 @@ describe("canonicalIrJson", () => {
   it("parse → canonical → parse → canonical は不動点（冪等）", () => {
     const first = canonical(baseGraph());
     assertEquals(canonical(JSON.parse(first)), first);
+  });
+
+  it("正準形の文書を JSON.stringify で綴ろうとすると落ちる（別物の JSON を黙って出さない）", () => {
+    const document = canonicalIrDocument(parseIrDeclaration(JSON.stringify(baseGraph())));
+    assertThrows(() => JSON.stringify(document), ContainerFormatError, "canonicalJsonText");
   });
 
   it("states スロットとノードの states 欄・external は書くときだけ現れる", () => {

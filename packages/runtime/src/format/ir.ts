@@ -555,6 +555,10 @@ export const parseIrDeclarationValue = (document: unknown): IrDeclaration =>
  *   `symbols`）は code point 順。
  * - 数値の綴りは `JSON.stringify`（= ECMAScript `Number::toString`）がそのまま正準。
  * - 省略可能な節（`states` / ノードの `states` / `external`）は空・偽なら書かない。
+ *
+ * MUST: 戻り値は `canonicalJsonText` 専用 — `JSON.stringify` で綴らない。名前 map は
+ * `SortedEntries`（code point 順のエントリ列）で表すので、素の `JSON.stringify` は正準形を
+ * 書けない（`SortedEntries` の `toJSON` が投げる）。
  */
 export const canonicalIrDocument = (graph: IrDeclaration): Record<string, unknown> => ({
   format: IR_FORMAT,

@@ -110,6 +110,16 @@ export class SortedEntries {
   constructor(entries: readonly (readonly [string, unknown])[]) {
     this.entries = entries;
   }
+
+  /**
+   * MUST: `JSON.stringify` に渡されたら落ちる。素のまま綴らせると `{"entries":[...]}` という
+   * 別物の JSON が例外なしに出る — 正準形を綴れるのは {@link canonicalJsonText} だけ。
+   */
+  toJSON(): never {
+    throw new ContainerFormatError(
+      "SortedEntries は JSON.stringify で綴れない（canonicalJsonText を使う）",
+    );
+  }
 }
 
 /**
