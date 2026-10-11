@@ -274,6 +274,63 @@ Deno.test("宣言外の一時を束ねる dispatch は宣言の受け口で落�
   validateStepRecipe(tempStep(temps, bind(0)));
 });
 
+Deno.test("生存区間の外で一時を束ねる dispatch は宣言の受け口で落ちる", () => {
+  const read = (id: number): BindingRecipe => ({ binding: 1, source: { kind: "temp", id } });
+  const write = (id: number): BindingRecipe => ({ binding: 2, source: { kind: "temp", id } });
+  // A を dispatch 0 で書いて解放し、B を dispatch 1 で書いて解放したあと、dispatch 2 が A を
+  // 読む形。計画は A と B を同じバイトに重ねるので、通すと B が上書きした値を読む。
+  const afterRelease = tempStep([
+    { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+    { byteLength: 64, allocBefore: 1, releaseAfter: 1 },
+  ], [dispatch("w0", [write(0)]), dispatch("w1", [write(1)]), dispatch("r2", [read(0)])]);
+  assertThrows(
+    () => validateStepRecipe(afterRelease),
+    ExecutionError,
+    "dispatch 2 'r2' の束縛 1 が一時 0 を生存区間 [0, 0] の外で参照する",
+  );
+  // 確保より前の dispatch が束ねる形（同じ領域の前の持ち主の値を読む）。
+  const beforeAlloc = tempStep(
+    [{ byteLength: 64, allocBefore: 1, releaseAfter: 1 }],
+    [dispatch("r0", [read(0)]), dispatch("w1", [write(0)])],
+  );
+  assertThrows(
+    () => validateStepRecipe(beforeAlloc),
+    ExecutionError,
+    "dispatch 0 'r0' の束縛 1 が一時 0 を生存区間 [1, 1] の外で参照する",
+  );
+  // 対照: 区間の内側だけで束ねれば通る（上の 1 本目から dispatch 2 の読みを B へ移した形）。
+  validateStepRecipe(
+    tempStep([
+      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+      { byteLength: 64, allocBefore: 1, releaseAfter: 2 },
+    ], [dispatch("w0", [write(0)]), dispatch("w1", [write(1)]), dispatch("r2", [read(1)])]),
+  );
+});
+
+Deno.test("整数でない寿命境界と一時の添字は宣言の受け口で落ちる", () => {
+  const two = [dispatch("k0"), dispatch("k1")];
+  // 比較だけでは素通りする値（小数は区間の内側に見え、NaN はどの大小比較も偽）。
+  const broken: readonly (readonly [TempRecipe, string])[] = [
+    [{ byteLength: 64, allocBefore: 0.5, releaseAfter: 1 }, "一時 0 の寿命宣言 [0.5, 1]"],
+    [{ byteLength: 64, allocBefore: Number.NaN, releaseAfter: 1 }, "一時 0 の寿命宣言 [NaN, 1]"],
+    [{ byteLength: 64, allocBefore: 0, releaseAfter: Number.NaN }, "一時 0 の寿命宣言 [0, NaN]"],
+  ];
+  for (const [temp, message] of broken) {
+    assertThrows(() => validateStepRecipe(tempStep([temp], two)), ExecutionError, message);
+  }
+  const temps: readonly TempRecipe[] = [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }];
+  for (const id of [0.5, Number.NaN]) {
+    assertThrows(
+      () =>
+        validateStepRecipe(
+          tempStep(temps, [dispatch("gemm", [{ binding: 1, source: { kind: "temp", id } }])]),
+        ),
+      ExecutionError,
+      `dispatch 'gemm' の束縛 1 が一時 ${id} を指すが、宣言は 1 本`,
+    );
+  }
+});
+
 Deno.test("消費計数が実際の解放より多いレシピ列は計画の閉包検査で落ちる", () => {
   assertThrows(
     // 消費者 1 本を宣言しながら、その値を解放するステップがどこにも無い形。

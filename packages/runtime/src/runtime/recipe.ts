@@ -217,8 +217,13 @@ export class StepRecipeBuilder {
  * MUST: 一時の寿命は `0 ≤ allocBefore ≤ releaseAfter < dispatch 数`。外れた宣言は実行相で
  * 「未確保の一時を束ねる」（`temps[id]` が `undefined` のまま createBindGroup へ渡り、真因から
  * 遠い validation エラーになる）か「解放されない一時が残る」（計画の閉包検査まで気づけない）に化ける。
+ * MUST: 寿命境界と束縛が指す一時の添字は整数（`Number.isSafeInteger`）。小数は区間の内側に
+ * 見え、NaN はどの大小比較も偽なので、比較だけの検査を素通りする。
  * MUST: 束縛が指す一時の添字は宣言済みの範囲内。範囲外は上と同じ `undefined` 束縛で、
  * 「どの dispatch がどの一時を読み損ねたか」が診断から消える。
+ * MUST: 一時を束ねる dispatch の添字は、その一時の `[allocBefore, releaseAfter]` の内側。
+ * 計画は区間の外のバイトを別の一時へ配り直すので、外で束ねると前後の持ち主が書いた値を
+ * 例外なしに読む（沈黙の誤値）。
  * MUST: 呼び口は**レシピの宣言の受け口 1 箇所**（recipe-builder の `#buildStep` の戻り）。
  * 素のノードと融合再演の両方がそこを通るので、経路ごとに手書きの検査を置かずに済む
  * （融合ルールの宣言自体は src/runtime/fusion-rule.ts の `assertTempLifetimes` が受け口で落とし、
@@ -230,6 +235,7 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
   recipe.temps.forEach((temp, id) => {
     if (
       !Number.isSafeInteger(temp.byteLength) || temp.byteLength < 1 ||
+      !Number.isSafeInteger(temp.allocBefore) || !Number.isSafeInteger(temp.releaseAfter) ||
       temp.allocBefore < 0 || temp.releaseAfter < temp.allocBefore ||
       temp.releaseAfter >= dispatchCount
     ) {
@@ -239,18 +245,25 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
       );
     }
   });
-  for (const dispatch of recipe.dispatches) {
+  recipe.dispatches.forEach((dispatch, index) => {
     for (const entry of dispatch.bindings) {
       const { source } = entry;
       if (source.kind !== "temp") continue;
-      if (source.id < 0 || source.id >= recipe.temps.length) {
+      if (!Number.isSafeInteger(source.id) || source.id < 0 || source.id >= recipe.temps.length) {
         throw new ExecutionError(
           `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} が一時 ${source.id} を` +
             `指すが、宣言は ${recipe.temps.length} 本`,
         );
       }
+      const temp = recipe.temps[source.id];
+      if (index < temp.allocBefore || index > temp.releaseAfter) {
+        throw new ExecutionError(
+          `${where}: dispatch ${index} '${dispatch.key}' の束縛 ${entry.binding} が一時 ` +
+            `${source.id} を生存区間 [${temp.allocBefore}, ${temp.releaseAfter}] の外で参照する`,
+        );
+      }
     }
-  }
+  });
 };
 
 /**
