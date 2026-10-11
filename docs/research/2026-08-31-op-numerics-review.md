@@ -25,7 +25,7 @@ OP 面全域（kernels 35 / codegen 7 / reference 4 / ops 4 + tests の toleranc
 | softmax / attention 統計 / i8a8 P̃ | max 減算（exp(S−m) ≤ 1）                                                                  | 構造的に安全                                                            |
 | `softplus`（分解形）              | torch 分解が threshold=20 の where ごと IR に乗る（select は不選択腕の NaN を伝播しない） | 安全 — 出荷 IR の直読で確認                                             |
 | `log1p`                           | 級数切替 + 素の log(1+x)                                                                  | 安全（定義域は契約側）                                                  |
-| rms/layer_norm の Σx²             | f32 中間の破綻には \|v\| ≳ 1.8e19 が必要（実測活性と 18 桁差）                            | 到達不能                                                                |
+| rms/layer_norm の Σx²             | f32 中間の破綻には \|v\| ≳ 1.8e19/√dim が必要（dim=4096 で約 2.9e17・2026-10-04 補正）    | 到達不能                                                                |
 | 除算の分母                        | 全経路で構造的に正（scale 床 tiny・行和は safe 変種のみ空行ガード）                       | 安全（例外 = 融合 attention の全 -inf 行 — W-2 として裁定へ）           |
 | `sin`（Snake 活性 α·x）           | WGSL の精度保証域 \|x\|≤π の外（実測 \|αx\| max 71.3）だが e2e 実測で誤差の支配項でない   | 記録のみ（optional）                                                    |
 | `quantize_rows` の Inf 行         | limitations 記載の documented behavior（非有限性は必ず残る）                              | 契約どおり                                                              |

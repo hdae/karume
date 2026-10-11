@@ -16,7 +16,8 @@
  * - **GPU**: 範囲外の要素にだけ NaN（{@link GATHER_OOB_BITS}）を書く。検査は 2 比較 / 要素で
  *   gather はメモリ律速なので実効コストはほぼ 0。WebGPU の境界付きアクセスに任せて無検査に
  *   すると「0 または別の in-bounds 要素」が静かに返り、下流と突合の両方を通過してしまう。
- *   NaN は allclose・golden 突合・下流の全演算に伝播して必ず表に出る。
+ *   NaN は該当カーネルの出力に残り、allclose・golden 突合と算術の後段へ伝播する。ただし比較・
+ *   where・int への cast など NaN を落とす後段では消えうる（比較は NaN に false を返す — torch と同じ）。
  * - **例外にしない理由**: カーネルから throw はできず、host へ通知するには run ごとの
  *   デバイス側フォールト旗 + readback（新しい診断チャネル）が要る。これは gather に付随して
  *   入れる機構ではないので、NaN 汚染に留める。
@@ -71,7 +72,7 @@ fn main(
 `;
 
 /**
- * uniform の Dims（ちょうど 4 語 = 16 バイト。uniform アドレス空間の整列要件を満たす）。
+ * uniform の Dims（ちょうど 4 語 = 16 バイト — プロジェクトの共通形〈ADR 0040〉の 16 バイト単位）。
  * `cols` は 0 でもよい（そのとき `n` も 0 でカーネルのループが 1 度も回らない）。
  */
 export const gatherParams = (

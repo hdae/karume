@@ -36,7 +36,7 @@
  * の座標式（`scale·(i+0.5) − 0.5`）は負値を取りうるのでこの前提が崩れる。**契約に欄が無い**
  * のはそのためで、受理を広げるならこの切り捨てから設計し直すこと。
  * MUST: grid-stride を使う。実モデルの出力は `[1,192,2048,2048]` 級 = 8.05 億要素で、必要な
- * workgroup 数が 1 次元 dispatch 上限（既定 65535）を 3 桁超える。
+ * workgroup 数（256 スレッドで 3,145,728）が 1 次元 dispatch 上限（既定 65535）の約 48 倍になる。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -121,8 +121,8 @@ const alignCornersScale = (lengthIn: number, lengthOut: number): number =>
   lengthOut > 1 ? Math.fround((lengthIn - 1) / (lengthOut - 1)) : 0;
 
 /**
- * 32-byte uniform params（u32 5 語 + f32 2 語 + 予約 1 語 — WGSL の uniform struct は
- * 16 バイト整列 MUST）。`n` は出力の全要素数。
+ * 32-byte uniform params（u32 5 語 + f32 2 語 + 予約 1 語 — 16 バイト単位の確保は
+ * プロジェクトの共通形〈ADR 0040〉）。`n` は出力の全要素数。
  *
  * MUST: 空間軸の長さ 0 をここで拒否する。0 は scale が `(0−1)/(out−1)` で負になり、
  * 読み出しが入力の外へ出る（GPU では例外なしに隣の値が出る）。

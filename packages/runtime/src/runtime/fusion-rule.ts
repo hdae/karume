@@ -65,7 +65,7 @@ export type FusedDispatch = {
    * 文字列で持つ必要が無いため。
    */
   readonly wgsl: () => string;
-  /** binding 0 の Params。既定は uniform（16 バイト整列の MUST は各カーネル側）。 */
+  /** binding 0 の Params。既定は uniform（16 バイト単位の確保は各カーネル側 — ADR 0040 の共通形）。 */
   readonly params: Uint32Array<ArrayBuffer>;
   /**
    * params を **storage** で束ねる（可変長 params を持つ elementwise 族だけ — 素のノードの

@@ -407,7 +407,7 @@ export const attentionQkParams = (
 /**
  * ③ の uniform（`{m, n, k}` — bmm と同じ 3 語）。
  *
- * `kvRepeat` は **GQA 変種だけ**が渡す 4 語目（ADR 0067 決定 2）。16 バイト整列の余りに収まる
+ * `kvRepeat` は **GQA 変種だけ**が渡す 4 語目（ADR 0067 決定 2）。16 バイト確保の余りに収まる
  * ので、GQA でもバイト数は変わらない（省略時は従来どおり 4 語目が 0）。
  *
  * `window` は **行窓変種だけ**が渡す末尾 2 語（①QK と同じ規律 — `kv_repeat` の後ろ）。ここで
@@ -437,8 +437,7 @@ export const attentionPvParams = (
 };
 
 /**
- * ② の uniform。WGSL の uniform アドレス空間では struct の整列が 16 バイトになるため、
- * 2 語ぶんの内容でも 16 バイト確保する MUST（softmax と同じ）。
+ * ② の uniform。2 語ぶんの内容でも 16 バイト確保する（softmax と同じ — 16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  *
  * MUST: regcache 変種を使うなら、その `regCache` をここにも渡して幾何を見る（生成側と二重だが、
  * カーネル直呼びの経路も通る門 — gru_scan の hidden 上限と同型）。`epc` は生成時に焼かれる

@@ -57,8 +57,7 @@ export const CUMSUM_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（行 op 族と同じ 2 語）。WGSL の uniform アドレス空間では struct の整列が
- * 16 バイトになるため、2 語ぶんの内容でも 16 バイト確保する MUST。
+ * uniform の Params（行 op 族と同じ 2 語）。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  */
 export const cumsumParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("cumsum params", { rows, dim });

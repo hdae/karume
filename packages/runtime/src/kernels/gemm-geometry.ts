@@ -1,6 +1,6 @@
 /**
  * f32 / f16 GEMM 骨格（src/kernels/gemm.ts が持つ matmul / bmm / linear / 融合 attention の
- * ①QK・③PV / conv1d / conv2d の implicit GEMM）が共有する**タイル幾何のパラメタ面**。
+ * ①QK・③PV / states 形 attention の ①ₜ・③ₜ / conv1d / conv2d / conv3d の implicit GEMM）が共有する**タイル幾何のパラメタ面**。
  *
  * ```
  * tileM = regM · wgY   （1 workgroup が持つ出力の行数 — conv1d / conv2d の implicit GEMM だけが 32 の変種を取る）
@@ -173,7 +173,7 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
 };
 
 /**
- * パイプラインキーの幾何判別子（`reg64x64` の後ろに付く形）。
+ * パイプラインキーの幾何判別子（タイル辺の断片 `reg{tileM}x{tileN}` の後ろに付く形）。
  *
  * **タイル辺だけでは幾何が決まらない**ぶんを足す（64×64 は `r4×4 wg16×16` とも
  * `r8×4 wg16×8` とも組めるので、辺だけのキーは別物へ衝突する）。wgY は載せない —

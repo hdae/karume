@@ -31,8 +31,8 @@
  * 定数式で書くと「const-expression が NaN」としてシェーダ生成エラーになりうる実装がある
  * （gather / embedding と同じ規律 — src/kernels/gather.ts）。
  * MUST: grid-stride を使う。実モデル（BiRefNet_HR の `decoder_block1`）の出力は
- * `[1,256,512,512]` = 6,710 万要素で、必要な workgroup 数が 1 次元 dispatch 上限
- * （既定 65535）を 3 桁超える。
+ * `[1,256,512,512]` = 6,710 万要素で、必要な workgroup 数（256 スレッドで 262,144）が 1 次元
+ * dispatch 上限（既定 65535）の約 4 倍になる。
  */
 
 import { CodegenError } from "../codegen/errors.ts";
@@ -194,8 +194,8 @@ type DeformConv2dDims = {
 };
 
 /**
- * uniform Dims（13 語ぶんの内容を **16 語 = 64 バイト**確保する — WGSL の uniform struct は
- * 16 バイト整列 MUST）。先頭は出力の全要素数・末尾の欄が {@link DEFORM_CONV2D_OOB_BITS}。
+ * uniform Dims（13 語ぶんの内容を **16 語 = 64 バイト**確保する — 16 バイト単位の確保は
+ * プロジェクトの共通形〈ADR 0040〉）。先頭は出力の全要素数・末尾の欄が {@link DEFORM_CONV2D_OOB_BITS}。
  *
  * MUST: カーネル直呼びの経路でも幾何を見る（契約検査 = ops/shapes.ts の同名の positive 集合と
  * 二重だが、conv_transpose1d / conv2d と同じ二重の門）。空間長 0 の入力は

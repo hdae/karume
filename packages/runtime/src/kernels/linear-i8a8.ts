@@ -607,7 +607,7 @@ ${storeW4a8(geometry, v4)}`
 };
 
 /**
- * uniform の Dims（`{m,n,k}` — f32 骨格と同じ 3 語 + 16 バイト整列）。
+ * uniform の Dims（`{m,n,k}` — f32 骨格と同じ 3 語を 16 バイトで確保）。
  *
  * `groupSize` を渡すと **w4a8 の門**（group 側のオーバフローと k の整除）へ切り替わる。
  * MUST: i8 変種の k 門（{@link LINEAR_I8A8_MAX_K}）は w4a8 に適用しない

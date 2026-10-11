@@ -9,8 +9,8 @@
  *
  * **平均を引かない**。layer_norm が「2 パス（平均 → 偏差平方和）」を強いられていたのは
  * 母分散の桁落ちを避けるためで、rms_norm の縮約は**二乗和 1 本**なので 1 パスで足りる
- * （`E[x²] − E[x]²` のような相殺が構造的に起きない）。bias も無い — 足すと layer_norm と
- * 同じ op になる。
+ * （`E[x²] − E[x]²` のような相殺が構造的に起きない）。bias も無い — ADR 0017 の arity 2
+ * （x と weight の 2 入力）の契約による。
  *
  * ## 走査と加算順序
  *
@@ -140,8 +140,7 @@ const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
 };
 
 /**
- * uniform の Params（rows / dim / eps。WGSL の uniform struct は 16 バイト整列なので
- * 3 語ぶんの内容でも 16 バイト確保する MUST）。
+ * uniform の Params（rows / dim / eps。3 語ぶんの内容でも 16 バイト確保する — 16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  *
  * MUST: eps は f32 のビット列として載せる。u32 として書くと指数部が整数値に化けて、
  * 例外なしに「eps ≈ 0」で走る。

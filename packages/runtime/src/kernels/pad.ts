@@ -53,8 +53,8 @@ export const PAD_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（行 op 族と同じく 4 語 = 16 バイト）。WGSL の uniform アドレス空間では
- * struct の整列が 16 バイトになる MUST。
+ * uniform の Params（行 op 族と同じく 4 語 = 16 バイト — プロジェクトの共通形〈ADR 0040〉の
+ * 16 バイト単位）。
  */
 export const padParams = (
   rows: number,

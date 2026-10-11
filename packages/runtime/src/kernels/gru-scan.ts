@@ -195,8 +195,8 @@ type GruScanDims = {
 };
 
 /**
- * 12 バイト + 整列で 16 バイトの uniform Dims（WGSL の uniform struct は 16 バイト整列 —
- * layer-norm.ts と同じ扱い）。
+ * 12 バイトの内容を 16 バイトで確保する uniform Dims（16 バイト単位の確保はプロジェクトの共通形
+ * 〈ADR 0040〉— layer-norm.ts と同じ扱い）。
  *
  * MUST: `hidden` の上限をここで見る（契約検査と二重だが、カーネル直呼びの経路も通る門）。
  * 超過を黙って通すと `h_shared` の範囲外書き込みになり、例外なしに別ユニットの状態が壊れる。

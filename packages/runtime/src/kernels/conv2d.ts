@@ -270,8 +270,9 @@ export type Conv2dDims = {
 /**
  * 幾何の契約検査（両カーネル共通）。直接カーネルの Dims 並び順で値を返す。
  *
- * MUST: stride 0 はループが進まず GPU ハング（例外にならない）— 契約検査と二重だが、
- * カーネル直呼びの経路も塞ぐ（conv_transpose1d と同じ二重の門）。
+ * MUST: stride 0 を拒否する。stride は座標の乗算にだけ使う（ループの増分ではない）ので、0 だと
+ * 出力長の式（shapes.ts）がゼロ除算になり、カーネルでは全出力が同じ窓を読む誤値になる（例外に
+ * ならない）— 契約検査と二重だが、カーネル直呼びの経路も塞ぐ（conv_transpose1d と同じ二重の門）。
  */
 const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
   // 名前は WGSL の Dims 欄名（`n` の次から）と対。並びがそのまま uniform の語順になる。
@@ -338,8 +339,8 @@ const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
 };
 
 /**
- * 直接カーネルの uniform Dims。17 語なので 16 バイト整列に合わせて 20 語（80 バイト）確保する
- * MUST（uniform アドレス空間の struct 整列。不足すると binding が validation で落ちる）。
+ * 直接カーネルの uniform Dims。17 語を 16 バイト単位に切り上げて 20 語（80 バイト）確保する
+ * （16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  */
 export const conv2dParams = (dims: Conv2dDims): Uint32Array<ArrayBuffer> => {
   const values = checkConv2dDims(dims);

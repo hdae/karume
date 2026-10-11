@@ -389,8 +389,8 @@ type GemmSpec =
   );
 
 /**
- * uniform の Dims（3 語 `{m,n,k}`）。uniform アドレス空間の struct は 16 バイト整列になるため、
- * 3 語ぶんの内容でも 16 バイト確保する MUST（不足すると binding が validation で落ちる）。
+ * uniform の Dims（3 語 `{m,n,k}`）。3 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない — WGSL の
+ * 最小 binding サイズは struct の実サイズ）。
  *
  * bmm もバッチを uniform で運ばない — バッチは `wid.z` から導くので、載せても WGSL が
  * 一度も読まない死んだフィールドになる。
@@ -1103,7 +1103,7 @@ const accumulatorUpdate = (geometry: GemmGeometry, compute: GemmCompute): string
  * head / Dims 追加欄 / prologue / fillA / fillB / store の断片を差し込んだ 1 本のシェーダ。
  *
  * `dimsExtra` は uniform の 4 語目以降（融合 attention ① の `scale` / conv1d / conv2d の畳み込み幾何）。
- * uniform struct は 16 バイト整列なので 4 語目は既に確保済みで、既存 3 op では空文字
+ * uniform は 16 バイト単位で確保するので 4 語目は既に確保済みで、既存 3 op では空文字
  * （生成物は 1 バイトも動かない）。`accInit` も同様に省略時は従来の 0 初期化そのまま。
  *
  * `kExtent` は K タイルループの回数を決める式（既定は静的な `dims.k`）。states 形 ③ₜ だけが

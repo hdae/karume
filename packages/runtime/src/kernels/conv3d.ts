@@ -137,12 +137,12 @@ export const conv3dIgemmWorkgroups = (
 };
 
 /**
- * implicit GEMM の uniform Dims（`{m, n, k}` + 幾何 18 語 = 21 語なので 24 語 = 96 バイト確保 —
- * uniform アドレス空間の struct は 16 バイト整列 MUST）。
+ * implicit GEMM の uniform Dims（`{m, n, k}` + 幾何 18 語 = 21 語を 24 語 = 96 バイトに切り上げて確保 —
+ * 16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  *
  * `m = Cout` / `n = Tout·Hout·Wout` / `k = Cin·Kt·Kh·Kw`。
  * MUST: 並びは gemm.ts の `CONV3D_DIMS_EXTRA` と対。
- * MUST: stride / dilation / 実寸は正整数（stride 0 はループが進まず GPU ハング・0 の辺は縮約を
+ * MUST: stride / dilation / 実寸は正整数（stride 0 は出力長の式のゼロ除算と全出力が同じ窓を読む誤値・0 の辺は縮約を
  * 1 度も回さず出力が bias 一色になる — 契約検査と二重だが、カーネル直呼びの経路も塞ぐ）。
  * MUST: `groups == 1` 専用（縮約帯がグループごとに違うので 1 枚の m タイルが同じ B タイルを
  * 共有できない）。groups > 1 は fail loudly（ADR 0118 決定 1 の実装済み subset）。

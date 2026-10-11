@@ -118,8 +118,7 @@ export const ARGMAX_WGSL: string = [
 ].join("\n");
 
 /**
- * uniform の Params（`{rows, dim, neg_inf}`）。WGSL の uniform アドレス空間では struct の
- * 整列が 16 バイトになるため、3 語ぶんの内容でも 16 バイト確保する MUST。
+ * uniform の Params（`{rows, dim, neg_inf}`）。3 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  *
  * MUST: `dim` は正整数（`dim = 0` は「最大値が無い行」で、番兵 index がそのまま出力へ
  * 漏れる）。契約側も長さ 0 の最終次元を拒否するので、ここは二重の門。

@@ -118,7 +118,7 @@ fn main(
 `;
 
 /**
- * uniform の Dims（ちょうど 4 語 = 16 バイト。uniform アドレス空間の整列要件を満たす）。
+ * uniform の Dims（ちょうど 4 語 = 16 バイト — プロジェクトの共通形〈ADR 0040〉の 16 バイト単位）。
  * `hidden` は 0 でもよい（そのとき `n` も 0 でカーネルのループが 1 度も回らない）。
  *
  * MUST: i4 の group 長は `hidden` を割り切ること（linear の `k % group_size` 門と同じ規律）。

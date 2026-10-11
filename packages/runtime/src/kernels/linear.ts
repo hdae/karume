@@ -2,8 +2,8 @@
  * linear（`x[…,in] × W[out,in] + b[out]`、f32）。先行次元は平坦化して `[m,k] × [k,n]` の
  * 2 次元 GEMM に落とす（`m` = 先行次元の積、`k` = 入力特徴数、`n` = 出力特徴数）。
  *
- * 実体は GEMM 3 op 共通の 64×64 レジスタブロッキング骨格（src/kernels/gemm.ts）で、matmul /
- * bmm との違いは 3 点だけ:
+ * 実体は GEMM 族が共有するレジスタブロッキング骨格（src/kernels/gemm.ts — 寸法は GemmGeometry）で、
+ * matmul / bmm との違いは 3 点だけ:
  *
  * - **重みは転置レイアウト**（torch の `Linear.weight` は `[out, in]`）。連続方向が k なので、
  *   1 スレッドが k 連続 4 要素を読み、**共有メモリ側で転置して置く**（転置コピーは出さない）。

@@ -161,8 +161,8 @@ fn main(
 };
 
 /**
- * uniform の Dims。9 語なので 16 バイト整列に合わせて 12 語（48 バイト）確保する MUST
- * （uniform アドレス空間の struct 整列。不足すると binding が validation で落ちる）。
+ * uniform の Dims。9 語を 16 バイト単位に切り上げて 12 語（48 バイト）確保する
+ * （16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  */
 export const convTranspose1dParams = (dims: {
   readonly batch: number;

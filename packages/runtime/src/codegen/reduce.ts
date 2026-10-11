@@ -173,8 +173,8 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
 };
 
 /**
- * uniform の Params。WGSL の uniform アドレス空間では struct の整列が 16 バイトになるため、
- * 2 語ぶんの内容でも 16 バイト確保する MUST（不足すると binding が validation で落ちる）。
+ * uniform の Params。2 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない — WGSL の最小 binding
+ * サイズは struct の実サイズ〈ここでは 8 バイト〉）。
  */
 export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("reduce params", { rows, dim });
@@ -299,7 +299,7 @@ export const axisReduceWgsl = (spec: ReduceSpec): string => {
 };
 
 /**
- * 軸 reduce の uniform Params（`{out_count, axis_len, inner}`・16 バイト整列）。
+ * 軸 reduce の uniform Params（`{out_count, axis_len, inner}`・16 バイト確保）。
  *
  * `inner` は縮約軸より後ろの次元の積。0 になるのは後続の軸に長さ 0 があるときだけで、
  * そのとき `out_count` も 0 なので `t / inner` は 1 度も評価されない（ループに入らない）。

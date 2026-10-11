@@ -227,8 +227,7 @@ fn main(
 };
 
 /**
- * uniform の Params（`{rows, dim, neg_inf}`）。WGSL の uniform アドレス空間では struct の
- * 整列が 16 バイトになるため、3 語ぶんの内容でも 16 バイト確保する MUST。
+ * uniform の Params（`{rows, dim, neg_inf}`）。3 語ぶんの内容でも 16 バイト確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  *
  * MUST: `k` を載せない（WGSL に焼いてある — 同じ事実を 2 箇所で持つと、片方だけ更新した
  * dispatch が黙って別の本数を書く）。

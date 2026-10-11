@@ -1,6 +1,6 @@
 /**
- * bmm（rank-3 バッチ matmul `[B,M,K] × [B,K,N] → [B,M,N]`、f32）。実体は GEMM 3 op 共通の
- * 64×64 レジスタブロッキング骨格（src/kernels/gemm.ts）で、matmul との違いはバッチ軸を
+ * bmm（rank-3 バッチ matmul `[B,M,K] × [B,K,N] → [B,M,N]`、f32）。実体は GEMM 族が共有する
+ * レジスタブロッキング骨格（src/kernels/gemm.ts — 寸法は GemmGeometry）で、matmul との違いはバッチ軸を
  * dispatch の z 軸に取り、3 入出力のオフセットを行列 1 枚ぶんから導く点だけ。
  *
  * uniform は matmul / linear と同じ 3 語 `{m,n,k}`。バッチ数はシェーダが `wid.z` から導くので
@@ -55,8 +55,8 @@ export const bmmParams = (m: number, n: number, k: number): Uint32Array<ArrayBuf
 /**
  * 行窓変種の uniform（`{m,n,k}` + `{row_offset, rows_full}` の 5 語）。
  *
- * uniform アドレス空間の struct は 16 バイト整列なので、5 語ぶんの内容でも **32 バイト**確保
- * する（不足すると binding が validation で落ちる）。MUST: 並びは gemm.ts の
+ * 5 語ぶんの内容を 16 バイト単位に切り上げて **32 バイト**確保する（16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
+ * MUST: 並びは gemm.ts の
  * `ROW_WINDOW_DIMS_EXTRA` と対。
  *
  * `rowsFull` は行窓側の**元の全 M**、`rowOffset` はそのうちこのブロックが担当する先頭行

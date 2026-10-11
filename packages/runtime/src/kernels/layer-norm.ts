@@ -136,8 +136,7 @@ ${LAYER_NORM_ROW_STATS_WGSL}
 `;
 
 /**
- * uniform の Params（rows / dim / eps。WGSL の uniform struct は 16 バイト整列なので
- * 3 語ぶんの内容でも 16 バイト確保する MUST）。
+ * uniform の Params（rows / dim / eps。3 語ぶんの内容でも 16 バイト確保する — 16 バイト単位の確保はプロジェクトの共通形〈ADR 0040〉に合わせる方針で、仕様上の要件ではない）。
  *
  * MUST: eps は f32 のビット列として載せる。u32 として書くと指数部が整数値に化けて、
  * 例外なしに「eps ≈ 0」で走る。
