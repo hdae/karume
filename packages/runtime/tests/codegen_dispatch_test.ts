@@ -18,6 +18,20 @@ Deno.test("grid-stride カーネルは上限超過を縮退させる（カーネ
   assertEquals(gridStrideWorkgroups(1_000_000_000, 256, LIMIT), LIMIT);
 });
 
+Deno.test("grid-stride は u32 のループ添字が末尾の加算で折り返す要素数を fail loudly にする", () => {
+  // カーネルは `i = i + stride`（stride = workgroup 数 × workgroup サイズ）を u32 で回して
+  // `i < n` を見るので、`n + stride > 2^32` だと末尾の加算が折り返してループが終わらない。
+  const stride = LIMIT * 256;
+  const edge = 2 ** 32 - stride;
+  assertEquals(gridStrideWorkgroups(edge, 256, LIMIT), LIMIT, "n + stride = 2^32 は通る");
+  assertThrows(() => gridStrideWorkgroups(edge + 1, 256, LIMIT), DispatchLimitError, "2^32");
+  // 4294901760 + 65535·256 は u32 で 16711424 に折り返す（レビューの再現値）
+  assertThrows(() => gridStrideWorkgroups(4294901760, 256, LIMIT), DispatchLimitError, "2^32");
+  // 行単位の grid-stride（workgroup サイズ 1 = 行を nwg.x ずつ送る形）も同じ条件
+  assertThrows(() => gridStrideWorkgroups(2 ** 32 - LIMIT + 1, 1, LIMIT), DispatchLimitError);
+  assertEquals(gridStrideWorkgroups(2 ** 32 - LIMIT, 1, LIMIT), LIMIT);
+});
+
 Deno.test("タイル分割カーネルは上限超過を fail loudly にする（タイル欠落は沈黙誤値になる）", () => {
   assertEquals(tiledWorkgroups(1024, 16, LIMIT, "matmul"), 64);
   assertEquals(tiledWorkgroups(1, 16, LIMIT, "matmul"), 1);
