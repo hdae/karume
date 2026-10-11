@@ -2143,3 +2143,46 @@ Deno.test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初
   await fresh.sequence.dispose();
   await opened.sequence.dispose();
 });
+
+Deno.test("T18 分岐: ゲートは写して共有しない（分岐だけを倒しても元のモードは動かない）", async () => {
+  // 投機が勝つ壁（投機 cycle 20ms で 4 個確定・plain step 10ms/token）で元を投機のまま置き、
+  // 分岐のターンだけを T16 の壁（投機 100ms）にして分岐のゲートを plain へ倒す。sequence 層で
+  // ゲートを写さず共有する実装（`gate?.fork()` を `gate` にする退行）では、倒れたのが元のゲート
+  // そのものなので、元の次のターンの最初の cycle が decode 形（plain）になる。
+  // NOTE: 通知の `gate.switches` と停止の `switches` は**ターン内**の数（ターン開始時の累計との
+  // 差）なので、分岐の切替が元の累計に入ったことはそこからは見えない — 縛るのはモードと、元の
+  // ターンの中で切替が起きないこと。
+  const drafter = oracleDrafter();
+  let slow = false;
+  const opened = await openSpeculative({
+    drafter,
+    policy: "auto",
+    gate: FAST_GATE,
+    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? (slow ? 100 : 20) : 10),
+  });
+  const first = await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
+  assertEquals(first.stop.speculation?.switches, 0, "前提: 元のゲートが投機のまま残っていない");
+  assertEquals(
+    stepsOf(opened.phases).at(-1)?.gate?.mode,
+    "speculate",
+    "前提: 元のゲートの定常モードが投機でない",
+  );
+
+  const forked = await opened.sequence.fork();
+  slow = true;
+  const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 20 }));
+  assertEquals(branch.stop.speculation?.switches, 1, "前提: 分岐のゲートが plain へ倒れていない");
+
+  slow = false;
+  const mark = opened.phases.length;
+  const next = await drain(opened.sequence.generate({ prompt: [3], maxNewTokens: 4 }));
+  const head = stepsOf(opened.phases.slice(mark))[0];
+  assert(
+    head?.kind === "verify",
+    `元の次のターンの最初の cycle が投機でない: ${JSON.stringify(head)}`,
+  );
+  assertEquals(head.gate?.mode, "speculate");
+  assertEquals(next.stop.speculation?.switches, 0, "元のターンで切替が起きた");
+  await forked.dispose();
+  await opened.sequence.dispose();
+});
