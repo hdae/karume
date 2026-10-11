@@ -245,7 +245,8 @@ FAMILIES: tuple[Family, ...] = (
     ),
     Family(
         "birefnet",
-        # 系列名は `birefnet_series_name(checkpoint, model)` = 上流リポ名の小文字 + 解像度。
+        # 系列名は `birefnet_series_name(checkpoint, model, dtype)` = 上流リポ名の小文字 + 解像度
+        # （f32 以外は格納 dtype の接尾も）。
         lambda name: name.startswith(("birefnet-", "lucida-")),
         lambda name: birefnet_export.upstream_provenance(
             input_checkpoint(birefnet_export.MODELS_ROOT, name)

@@ -737,7 +737,7 @@ class TestBirefnetCli:
             name = repo.split("/", 1)[1].lower().replace("_", "-")
             for model in BIREFNET_MODELS:
                 expected = f"{name}-{model}"
-                assert birefnet_series_name(checkpoint, model) == expected
+                assert birefnet_series_name(checkpoint, model, BIREFNET_PLAIN_DTYPE) == expected
                 sources = birefnet_sources(tmp_path, checkpoint, model)
                 assert {dtype: path.name for dtype, path in sources.series_by_dtype.items()} == {
                     dtype: expected if dtype == BIREFNET_PLAIN_DTYPE else f"{expected}-{dtype}"

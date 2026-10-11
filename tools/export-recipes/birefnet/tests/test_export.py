@@ -164,20 +164,25 @@ def exported(tmp_path):
 class TestSeriesLayout:
     def test_the_default_output_dir_is_a_series(self):
         """系列出力は `outputs/series/` 配下（配布形の `models/` ではない — _shared.paths）。"""
-        assert bn.default_out_dir(bn.DEFAULT_MODEL_DIR, bn.DEFAULT_RESOLUTION).parent == SERIES_ROOT
+        assert (
+            bn.default_out_dir(bn.DEFAULT_MODEL_DIR, bn.DEFAULT_RESOLUTION, "f16").parent
+            == SERIES_ROOT
+        )
 
     def test_each_resolution_gets_its_own_series(self):
         """MUST: 解像度も綴りへ — 焼く定数が変わるので、同じ席に置くと先の資産が消える。"""
-        low = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024)
-        high = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 2048)
+        low = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024, "f16")
+        high = bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 2048, "f16")
 
         assert low != high
-        assert low.name.endswith("-1024") and high.name.endswith("-2048")
+        assert low.name.endswith("-1024-f16") and high.name.endswith("-2048-f16")
 
     def test_each_model_gets_its_own_series(self):
         other = bn.MODELS_ROOT / "BiRefNet_lite"
 
-        assert bn.default_out_dir(other, 1024) != bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024)
+        assert bn.default_out_dir(other, 1024, "f16") != bn.default_out_dir(
+            bn.DEFAULT_MODEL_DIR, 1024, "f16"
+        )
 
     def test_the_distribution_looks_for_the_same_series_name(self):
         """MUST: 系列名の綴りが**書く側と読む側で一致**する。
@@ -187,13 +192,18 @@ class TestSeriesLayout:
         モデルの系列を掴む**綴りにずれた場合は誰も気づけない。
         """
         from birefnet.card import BIREFNET_UPSTREAM
-        from birefnet.distribution import BIREFNET_MODELS, birefnet_series_name
+        from birefnet.distribution import (
+            BIREFNET_MODELS,
+            birefnet_default_quant,
+            birefnet_series_name,
+        )
 
         for checkpoint, repo in BIREFNET_UPSTREAM.items():
             model_dir = bn.MODELS_ROOT / repo.split("/", 1)[1]
+            dtype = birefnet_default_quant(checkpoint)
             for model in BIREFNET_MODELS:
-                assert bn.default_out_dir(model_dir, int(model)).name == birefnet_series_name(
-                    checkpoint, model
+                assert bn.default_out_dir(model_dir, int(model), dtype).name == (
+                    birefnet_series_name(checkpoint, model, dtype)
                 )
 
 
@@ -603,7 +613,7 @@ class TestProvenance:
         out_dir = tmp_path / "series"
 
         with pytest.raises(UpstreamProvenanceError, match="が無い"):
-            bn.export_series(tmp_path / "BiRefNet_HR", out_dir, bn.DEFAULT_RESOLUTION)
+            bn.export_series(tmp_path / "BiRefNet_HR", out_dir, bn.DEFAULT_RESOLUTION, dtype="f16")
 
         assert not out_dir.exists()
 
@@ -613,11 +623,8 @@ class TestProvenance:
 
 class TestWeightDtypeSeries:
     def test_the_f32_series_keeps_its_existing_name(self):
-        """f32 は接尾なし — 既存系列（配布済みの資産と e2e の網）の綴りを動かさない。"""
-        assert bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024, "f32") == bn.default_out_dir(
-            bn.DEFAULT_MODEL_DIR, 1024
-        )
-        assert bn.default_out_dir(bn.DEFAULT_MODEL_DIR, 1024).name == "birefnet-hr-1024"
+        """f32 は接尾なし — 既存系列（配布済みの資産）の綴りを動かさない。"""
+        assert bn.default_out_dir(bn.MODELS_ROOT / "lucida", 1024, "f32").name == "lucida-1024"
 
     def test_each_storage_dtype_gets_its_own_series(self):
         """MUST: 同居させると f32 系列の網（系列ごとの tolerance）が圧縮資産へ黙って掛かる。"""
@@ -658,6 +665,17 @@ def _record_emit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
         ),
     )
     return seen
+
+
+def _downloaded(model_dir: Path, revision: str) -> Path:
+    """`hf download --local-dir` の取得記録（`_shared.upstream.snapshot_revision` が読む形）だけを
+    置いた `--model-dir`。"""
+    from _shared.upstream import SNAPSHOT_RECORD_DIR, SNAPSHOT_RECORD_FILE
+
+    record = model_dir / SNAPSHOT_RECORD_DIR / f"{SNAPSHOT_RECORD_FILE}.metadata"
+    record.parent.mkdir(parents=True)
+    record.write_text(f"{revision}\netag\n0\n", encoding="utf-8")
+    return model_dir
 
 
 class TestDtypeCli:
@@ -709,6 +727,44 @@ class TestDtypeCli:
                 birefnet_seat_dtypes(checkpoint),
                 birefnet_default_quant(checkpoint),
             )
+
+    def test_a_renamed_hr_directory_still_refuses_f32(self, monkeypatch, tmp_path, capsys):
+        """MUST: checkpoint は取得記録の revision から先に引く — ディレクトリ名を変えた HR も
+        実験の checkpoint へ落ちず、退役した f32 系列を書けない。
+        """
+        from birefnet.card import BIREFNET_CHECKPOINTS
+        from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
+
+        model_dir = _downloaded(tmp_path / "hr-renamed", BIREFNET_CHECKPOINTS["hr"].revision)
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emit された"))
+
+        assert bn.export_dtypes(model_dir) == (
+            birefnet_seat_dtypes("hr"),
+            birefnet_default_quant("hr"),
+        )
+        with pytest.raises(SystemExit):
+            bn.main(["--model-dir", str(model_dir), "--dtype", "f32"])
+        assert "上流 checkpoint の格納より広い dtype" in capsys.readouterr().err
+
+    def test_a_revision_and_a_name_that_disagree_are_refused(self, tmp_path):
+        """MUST: 中身（revision）は HR・名前は Lucida — 食い違いは黙ってどちらかへ倒さない。"""
+        from birefnet.card import BIREFNET_CHECKPOINTS
+
+        model_dir = _downloaded(tmp_path / "lucida", BIREFNET_CHECKPOINTS["hr"].revision)
+
+        with pytest.raises(SystemExit, match="食い違う"):
+            bn.export_dtypes(model_dir)
+
+    def test_an_unpinned_revision_falls_back_to_the_directory_name(self, tmp_path):
+        """固定値に当たらない revision（上流の更新など）はディレクトリ名で引く。"""
+        from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
+
+        model_dir = _downloaded(tmp_path / "BiRefNet_HR", "0" * 40)
+
+        assert bn.export_dtypes(model_dir) == (
+            birefnet_seat_dtypes("hr"),
+            birefnet_default_quant("hr"),
+        )
 
     def test_f16_is_written_to_its_own_series(self, monkeypatch):
         seen = _record_emit(monkeypatch)
@@ -1236,7 +1292,9 @@ class TestExportSeriesQuality:
         tmp_path, corpus = wired
         out_dir = tmp_path / "series"
 
-        summary = bn.export_series(Path("/nonexistent"), out_dir, self.SIZE, corpus_root=corpus)
+        summary = bn.export_series(
+            Path("/nonexistent"), out_dir, self.SIZE, corpus_root=corpus, dtype="f32"
+        )
 
         assert not (out_dir / bn.QUALITY_FILE).exists()
         assert summary["quality"] is None

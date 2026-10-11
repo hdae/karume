@@ -180,7 +180,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from _shared.paths import INPUTS_ROOT, MISC_ROOT, SERIES_ROOT
-from _shared.upstream import snapshot_provenance
+from _shared.upstream import UpstreamProvenanceError, snapshot_provenance, snapshot_revision
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
 from karume.convert import normalize_boundary_tensor
@@ -195,6 +195,7 @@ from .distribution import (
     BIREFNET_ROLE,
     birefnet_default_quant,
     birefnet_directory_checkpoint,
+    birefnet_revision_checkpoint,
     birefnet_seat_dtypes,
 )
 
@@ -311,7 +312,7 @@ SOURCE_IMAGE_KEY = "source_image"
 SOURCE_SHA256_KEY = "source_sha256"
 
 
-def default_out_dir(model_dir: Path, resolution: int, dtype: str = PLAIN_DTYPE) -> Path:
+def default_out_dir(model_dir: Path, resolution: int, dtype: str) -> Path:
     """生成物の既定の置き場（`outputs/series/<モデル名>-<解像度>{,-f16}/`）。
 
     モデル名と解像度の**両方**を系列の綴りへ焼く（モジュール docstring の「モデル軸と
@@ -326,11 +327,44 @@ def default_out_dir(model_dir: Path, resolution: int, dtype: str = PLAIN_DTYPE) 
     return SERIES_ROOT / f"{model_dir.name.lower().replace('_', '-')}-{resolution}{suffix}"
 
 
+def model_dir_checkpoint(model_dir: Path) -> str | None:
+    """`--model-dir` の重みがどの checkpoint か（帰属表のキー・帰属表に無ければ `None`）。
+
+    引き当ての順:
+
+    1. 取得記録の revision（{@link _shared.upstream.snapshot_revision}）が帰属表の固定値
+       （`birefnet.card.BIREFNET_CHECKPOINTS` の `revision`）に当たれば、その checkpoint。
+    2. 取得記録が無い・固定値に当たらないときは、ディレクトリ名（系列名と同じ紐づけ —
+       `birefnet.distribution.birefnet_directory_checkpoint`）。
+
+    revision を先に見るのは、名前だけで引くとディレクトリ名を変えた HR が実験の checkpoint に
+    落ち、席の規則が外れて退役した f32 系列を黙って書けるから。
+
+    MUST: 1 と 2 が**別の** checkpoint を指したら落とす — 中身（revision）と名前（系列名の綴り）が
+    食い違ったまま書くと、ある checkpoint の重みが別の checkpoint の系列名に据わる。
+
+    読めない記録（1 行目が commit SHA でない）は「記録が無い」と同じく 2 へ倒す — 容器へ焼く
+    出所は {@link export_series} が同じ記録から読み直して fail loudly する。
+    """
+    try:
+        by_revision = birefnet_revision_checkpoint(snapshot_revision(model_dir))
+    except UpstreamProvenanceError:
+        by_revision = None
+    by_name = birefnet_directory_checkpoint(model_dir.name)
+    if by_revision is not None and by_name is not None and by_revision != by_name:
+        raise SystemExit(
+            f"{model_dir} の取得記録の revision は checkpoint '{by_revision}' の固定値なのに、"
+            f"ディレクトリ名は checkpoint '{by_name}' の綴り — 中身と系列名が食い違う"
+            "（ディレクトリ名を上流の HF リポ名の末尾に揃える）"
+        )
+    return by_name if by_revision is None else by_revision
+
+
 def export_dtypes(model_dir: Path) -> tuple[tuple[str, ...], str]:
     """`--model-dir` の checkpoint で書ける格納 dtype と既定（配布の席と同じ規則）。
 
-    checkpoint は `--model-dir` のディレクトリ名から引く（系列名と同じ紐づけ —
-    `birefnet.distribution.birefnet_directory_checkpoint`）。規則の正本は
+    checkpoint は取得記録の revision、無ければディレクトリ名から引く（{@link
+    model_dir_checkpoint}）。規則の正本は
     `birefnet.distribution.birefnet_seat_dtypes` / `birefnet_default_quant`（上流の格納より広い
     dtype は書かない・既定は格納と同じ幅）で、ここは同じ関数を引くだけ — 書く側と配る側が
     別々に規則を持つと、配れない系列を焼くか、配る席の系列を焼けなくなる。
@@ -338,7 +372,7 @@ def export_dtypes(model_dir: Path) -> tuple[tuple[str, ...], str]:
     帰属表に無い checkpoint（実験の `--model-dir`）は規則の入力（上流の格納）を表に持たないので、
     語彙の全部・既定 f32 で書く（その系列は配布の組み立てが帰属表に無い checkpoint として落とす）。
     """
-    checkpoint = birefnet_directory_checkpoint(model_dir.name)
+    checkpoint = model_dir_checkpoint(model_dir)
     if checkpoint is None:
         return WEIGHT_DTYPES, PLAIN_DTYPE
     return birefnet_seat_dtypes(checkpoint), birefnet_default_quant(checkpoint)
@@ -901,7 +935,8 @@ def export_series(
     resolution: int,
     real_images: bool = False,
     corpus_root: Path = CORPUS_ROOT,
-    dtype: str = PLAIN_DTYPE,
+    *,
+    dtype: str,
 ) -> dict[str, Any]:
     """IR コンテナと golden io（圧縮系列は `quality.json` も）を書き、要約を返す。
 

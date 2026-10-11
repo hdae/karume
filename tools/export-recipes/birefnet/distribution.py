@@ -346,12 +346,28 @@ def birefnet_checkpoint(checkpoint: str) -> str:
 def birefnet_directory_checkpoint(directory: str) -> str | None:
     """上流チェックポイントのディレクトリ名 → checkpoint 名（{@link birefnet_checkpoint} の逆）。
 
-    `birefnet/export.py` が `--model-dir` から席の規則（{@link birefnet_seat_dtypes}）を引く口 —
-    系列名と同じ紐づけ（ディレクトリ名 = 上流の HF リポ名の末尾）で引く。帰属表に無い名前は
-    `None`（実験の `--model-dir` — 配布の組み立ては帰属表に無い checkpoint を組まない）。
+    `birefnet/export.py` が `--model-dir` から席の規則（{@link birefnet_seat_dtypes}）を引く口の
+    **2 番目**（取得記録の revision が固定値に当たらないとき — {@link
+    birefnet_revision_checkpoint}）で、系列名と同じ紐づけ（ディレクトリ名 = 上流の HF リポ名の
+    末尾）で引く。帰属表に無い名前は `None`（実験の `--model-dir` — 配布の組み立ては帰属表に無い
+    checkpoint を組まない）。
     """
     for checkpoint in BIREFNET_UPSTREAM:
         if birefnet_checkpoint(checkpoint) == directory:
+            return checkpoint
+    return None
+
+
+def birefnet_revision_checkpoint(revision: str) -> str | None:
+    """上流の commit SHA → その revision を固定値に持つ checkpoint 名（当たらなければ `None`）。
+
+    `birefnet/export.py` が `--model-dir` の取得記録（`_shared.upstream.snapshot_revision`）から
+    checkpoint を引く口の**1 番目**。名前と違って中身の出所で引くので、ディレクトリ名を変えても
+    席の規則が外れない。固定値（`birefnet.card.BIREFNET_CHECKPOINTS` の `revision`）は配布の門
+    （{@link birefnet_plan}）が容器の出所と突き合わせる値と同じ。
+    """
+    for checkpoint, entry in BIREFNET_CHECKPOINTS.items():
+        if entry.revision == revision:
             return checkpoint
     return None
 
@@ -371,7 +387,7 @@ def birefnet_resolution(model: str) -> int:
     return int(model)
 
 
-def birefnet_series_name(checkpoint: str, model: str, dtype: str = BIREFNET_PLAIN_DTYPE) -> str:
+def birefnet_series_name(checkpoint: str, model: str, dtype: str) -> str:
     """checkpoint・解像度・格納 dtype → 系列ディレクトリ名。
 
     `birefnet.export.default_out_dir` と同じ式 — f32 は接尾なし（既存系列の綴りのまま）・他は
