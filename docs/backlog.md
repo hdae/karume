@@ -82,6 +82,14 @@
 
 ## later
 
+- **テストの helper の results.ts / reference.ts を GPU の探索から切り離す（起票 2026-10-11・Codex 深掘りレビュー R8-008・利用者の裁定 = 起票のみ）**:
+  `packages/runtime/tests/helpers/environment.ts` の `ENVIRONMENT` は、モジュール評価時に `requestAdapter()` を呼んで確定する。
+  `helpers/results.ts` と `helpers/reference.ts` はこれを値として import する。そのため「実 GPU は要らない」と書く
+  `results_writer_test.ts` / `reference_fixture_test.ts` も、import の時点でアダプタを探索する。device は取らず、アダプタが無い機では
+  null のまま進むので、テストは落ちない。実害は `requestAdapter` の呼び出しだけ。遅延取得では直らない — `openReferences` は
+  テストの登録時に環境キーを同期で読み、`openResults` も同期 API である。直すなら 2 本を「環境を引数で受ける本体」と
+  「既定の `ENVIRONMENT` を束ねる薄い包み」に割り、CPU のテストだけを本体へ向ける（GPU のテストの呼び手は変えない）。
+  直した後は、`navigator.gpu` を未定義にした状態で 2 本のテストの import が `requestAdapter` を呼ばないことを確かめる。
 - **Wan2.2 の T2V / I2V の通しの e2e の helper の重複を寄せる（起票 2026-10-10・利用者の裁定 = later）**: `e2e_wan_ti2v_pipeline_test.ts`（T2V）と
   `e2e_wan_ti2v_i2v_pipeline_test.ts`（I2V — ADR 0121 段 9b）が同じ形の小物を別々に持つ — fixture の読み込み（`readFixture`）・差の計算と整形（`difference` /
   `formatDifference`）・ビット一致（`bitsEqual`）・RGB の取り出し（`rgbBytes`）・非有限の数え上げ（`countNonFinite`）・プロンプトの解決（`textOf`）・帯の導出

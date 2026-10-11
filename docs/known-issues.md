@@ -473,5 +473,7 @@ gemma4 / anima / sbv2 / irodori の e2e は、パイプラインが内部で dev
 - sha256 の行を持つ e2e のうち GPU を自分で取るもの（Wan の pipeline / swap 系の 4 ファイル・runtime 側の実資産 e2e・
   models 側の depth_anything / birefnet / vowel_detector の実資産 e2e）は、取得の直後に実走の GPU そのものを照合している
   （`verifyRunningGpu` / `assertAdapterMatchesEnvironment`）。sha256 の行を持たない Wan の e2e（dit / umt5 / ab / vae 系）も同じく照合している。
-- 直し方は未決: テストから GPU を注入する（パイプラインが自前で要求するのと同じ feature で取る必要がある）か、
+- 直し方の候補: テストから GPU を注入する（パイプラインが自前で要求するのと同じ feature で取る必要がある）か、
   パイプラインが実際に使ったアダプタの情報を読めるようにする（公開面の変更）。
+- **利用者の裁定（2026-10-11）: 起票のまま直さない**（Codex 深掘りレビュー R8-003 の残り）。理由: 起きるのは複数 GPU の機だけ。
+  注入はパイプラインの内部の取り方とずれると sha の行が動く恐れがある。アダプタを読む口は、この問題のためだけに公開面を増やすことになる。
