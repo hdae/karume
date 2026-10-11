@@ -312,6 +312,16 @@ const planSupply = (
     fail(`${where}: rowAxis ${rowAxis} に対して宣言 shape [${shape.join(",")}] の rank が足りない`);
   }
   const rowCount = shape[rowAxis];
+  // 行数 0 の量子化重みは実モデルに用途が無いので受理集合に入れない（空の重みは initializer ごと
+  // 作らない）。受理すると、行長の式を自前で持つ下流（CPU 展開 `decodeI4` の `numel / shape[0]`）が
+  // 0 / 0 の「行長 NaN」という別の層・別の文言で落ちる。供給元に依らずここで落とす。
+  if (rowCount === 0) {
+    fail(
+      `${where}: 行数 0（shape[${rowAxis}] = 0）の量子化重みは受理しない（宣言 shape [${
+        shape.join(",")
+      }] — 量子化行が 1 本も無い）`,
+    );
+  }
   const rowLength = quantizedRowLength(shape, rowAxis);
   if (entry.grouping === "channel" && groupSize !== perChannelGroupSize(rowLength)) {
     fail(

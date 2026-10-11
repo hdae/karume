@@ -46,6 +46,8 @@ ADR [0108](decisions/0108-container-format.md) の具体化。`krm`（モデル�
   （ADR 0108 追記 11）②§9 に抽出元は `krm` だけで、読み手が const 領域の取得長と
   `parts[0].sha256` を照合することを明記する ③§10 の part 長の天井を `krg` の `const.length` にも
   掛ける（読み手が記述の検査で拒否する — 仕様の表はもとから part 0 / 1 を含む）。
+- v1 訂正 6（2026-10-11・裁定）: §6.1 に、行数 0（`shape[rowAxis] = 0`）の量子化重みを読み手の合流層が
+  拒否することを明記する（実モデルに用途が無い — 空の重みは initializer ごと作らない）。
 
 ## 0. 記法と共通規則
 
@@ -522,6 +524,10 @@ rowLength  = numel / shape[rowAxis]
 満たせないので **1**、group 数は **1**（per-channel scale は行ごとに 1 本あり、旧配布形の `[rows, 1]` と
 一致する）。group codec（`int4-sym-g`）の `rowAxis` は **0** だけ（展開カーネルと `decodeI4` が
 先頭次元を行とする）。
+
+**行数 0**（`shape[rowAxis] = 0` — 量子化行が 1 本も無い）の量子化重みは**受理しない**。読み手は
+合流層（`format/container/bind.ts`）で供給元に依らず fail loudly にする（実モデルに用途が無い —
+空の重みは initializer ごと作らない）。
 
 旧配布形で i8 だけが使っていた「重みと同 rank の keepdim broadcast 形」は廃止した（読むのは移行 CLI
 だけ — §12）。i8 の per-channel は

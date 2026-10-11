@@ -504,6 +504,46 @@ describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
   });
 });
 
+// --- 行数 0 の量子化重み -----------------------------------------------------
+// 量子化行が 1 本も無い重みは実モデルに用途が無く、合流層で拒否する。合流層が受理すると、
+// 行長の式を自前で持つ下流（CPU 展開 `decodeI4` の `numel / shape[0]` = 0 / 0）が
+// 別の層・別の文言（「行長 NaN」）で落ちる。
+
+describe("openMemoryContainer: 行数 0 の量子化重み（合流層）", () => {
+  it("int4-sym-g の [0,16] は、CPU 展開の時点でなく合流層で落ちる", () => {
+    assertThrows(
+      () =>
+        openWith(weightDeclaration([0, 16]), {
+          q: {
+            bytes: new Uint8Array(0),
+            encoding: { codec: "int4-sym-g", groupSize: 16, scale: new Uint8Array(0) },
+          },
+          b: { bytes: new Uint8Array(0), encoding: { codec: "f32" } },
+        }),
+      ContainerFormatError,
+      "initializer 'q': 行数 0（shape[0] = 0）の量子化重みは受理しない",
+    );
+  });
+
+  it("int8-sym の rowAxis 1 で行の軸が 0 の [4,0,3] も落ちる", () => {
+    assertThrows(
+      () =>
+        openWith(
+          weightDeclaration([4, 0, 3]),
+          rowAxisOneSupply({
+            codec: "int8-sym",
+            payloadBytes: 0,
+            groupSize: 1,
+            scaleElements: 0,
+            biasElements: 0,
+          }),
+        ),
+      ContainerFormatError,
+      "initializer 'q': 行数 0（shape[1] = 0）の量子化重みは受理しない",
+    );
+  });
+});
+
 describe("openMemoryContainer: 合成した目次", () => {
   it("丸ごとの実体は渡された器をそのまま返す（複製しない）", async () => {
     const tensors = baseTensors();
