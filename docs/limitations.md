@@ -308,14 +308,16 @@ Chrome は開発者向けフラグ（`chrome://flags/#enable-webgpu-developer-fe
 `[1,192,2048,2048]` 3.2GB と cat 出力 `[1,240,2048,2048]` 4.03GB の 2 本が NVIDIA の束縛上限 2GiB を
 超え、Session の計画時 preflight〈ADR 0093 決定 5〉がノード名つきで落としていた）。解消したのは
 recipe 側のパッチ ⑨（`birefnet.patch` — 1×1 conv と bilinear upsample の順序交換で `cat` を消す）と
-runtime 側の静的 liveness パッキング（ADR 0093）の組で、実測（RTX 3080 Ti 12 GiB）は重み 1,116MiB +
-中間の領域 2,948MiB（生存ピーク 2,560MiB）= **GPU 総確保 ≈ 4.1GiB・run 7.5〜8.6 s**。同じ日に
+runtime 側の静的 liveness パッキング（ADR 0093）の組で、f32 席（Lucida の既定）の実測（RTX 3080 Ti 12 GiB・
+2026-10-11）は重み 1,116MiB + 中間の領域 2,948MiB（生存ピーク 2,560MiB）+ 入力と出力の readback 64MiB =
+**GPU 総確保 4,128MiB（約 4.0GiB — 1 GiB = 1,024 MiB）・run 6.6〜6.7 s**。2048² は 2026-09-05 に
 1024² との同居（既定 1024²）で配布形へ入った。
 （かつては「上の conv2d dispatch 上限に decoder の 1×1 conv が当たる」も理由に挙げていたが、
 既定幾何が M128N128 になった `d0afc22` 以降は 2048² の n タイルが 32,768 で上限の内側 —
 残る理由は資源側だけだった。）
-配っている 1024² も軽くはない: 実測で重み 919MiB + 中間の領域 749MiB（ADR 0093 のパッキングと
-パッチ ⑨ の後・2026-09-05 実測。旧プール + 旧末尾では 6,283MiB）= **GPU 総確保が約 1.7GiB** を要し、
+配っている 1024² も軽くはない: f32 席（Lucida の既定）の実測で重み 919MiB + 中間の領域 749MiB（ADR 0093 の
+パッキングとパッチ ⑨ の後。旧プール + 旧末尾では 6,283MiB）+ 入力と出力の readback 16MiB = **GPU 総確保
+1,684MiB（約 1.6GiB）・run 約 1.4 s**（2026-10-11 実測）を要し、
 最大の binding は decoder の `cat_211` `[1,1280,256,256]` 320MiB（次いで ipt 枝内部の `[1,64,1024,1024]` 256MiB と attention のスコア S 230MiB）なので、
 実質**デスクトップ級 GPU 限定**である。配布形の `requiredLimits` **欄が空でも既定スペックの
 device では走らない** — 欄が名乗るのは常駐分（重み・state）だけで、中間は 128MiB を超える
@@ -334,9 +336,9 @@ f16 で格納されるのは適格な重み（linear / conv / 相対位置表 �
 重みスロットを持たない）・bias / norm / α β は f32 のまま残るため。2048² は中間の領域（2,948 MiB）が支配項
 なので、総確保に対する効きは小さい。quant 席は checkpoint ごとに上流の格納の型から導く（ADR 0113 追記 2026-10-11）:
 BiRefNet_HR は `f16` 席だけ（上流の重みが f16 — f32 席は同じ値を倍の常駐で持つだけなので出さない）、Lucida は
-`f32` 既定 + `f16`。HR の `f16` 席の GPU 総確保は 1024² で 1,270 MiB（約 1.2 GiB）・2048² で 3,702 MiB
-（約 3.6 GiB）（2026-10-11 実測・RTX 3080 Ti・1 GiB = 1,024 MiB。中間の領域と最大の binding は f32 席と同じ —
-活性値は f16 席でも f32）。
+`f32` 既定 + `f16`。HR の `f16` 席の GPU 総確保（重み + 中間の領域 + 入力 + 出力の readback）は 1024² で
+1,274 MiB（約 1.2 GiB）・2048² で 3,718 MiB（約 3.6 GiB）（2026-10-11 実測・RTX 3080 Ti・1 GiB = 1,024 MiB。
+中間の領域と最大の binding は f32 席と同じ — 活性値は f16 席でも f32）。
 
 **2048² は Intel Arc B570（Linux xe ドライバ）では走らない — 1 dispatch がジョブ制限 5 秒を超える**
 （2026-09-20 実測・裁定 2026-09-26 = その機の環境キーで明示 SKIP）。xe ドライバは compute ジョブ（= `queue.submit` 1 回）に
@@ -1642,7 +1644,8 @@ ADR 0111 追記 2026-09-26）を足したもの（共有 GPU を渡された経�
   スロット）が既定内に収まることだけ。中間テンソルを数えないのは、融合後の実需要が device の
   granted limit に依存する（行ブロックの刻みがそこで決まる）ため配布形からは原理的に決まらず、
   融合前の最大を焼くと「行ブロックで走る device」を取得の前に誤って拒否するから。中間が既定を
-  超える現物 = BiRefNet 1024²（1 binding 320MiB・GPU 総確保 約 1.7GiB — 上の BiRefNet 節）。
+  超える現物 = BiRefNet 1024²（1 binding 320MiB・GPU 総確保 約 1.6GiB〈f32 席〉/ 約 1.2GiB〈HR の f16 席〉—
+  上の BiRefNet 節）。
   中間の上限超過（slot 実寸 > `maxStorageBufferBindingSize` / 領域 > `maxBufferSize`）は ADR
   [0093](decisions/0093-transient-liveness-packing.md) 決定 5 の計画時 preflight が、Session 構築時と
   見積り（`estimateGraphMemory` — `PreparedModel.estimate` も同じ実装）の**両方で確保の前にノード名つきで

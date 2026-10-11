@@ -81,7 +81,8 @@ scale が作られない・deform の `regular_conv` は丸まるのに f32 で�
    間はどちらのリポも置かない）。カードの `stored_dtype` とヘッダの一致は pytest が実重みのある機で見る。
    f16 席の格納の説明は「linear / convolution / embedding（相対位置表）の重みが f16・deform の sampling
    weights（`regular_conv`）と bias / norm は f32・BatchNorm の α / β は統計から f32 で導いた派生値」。
-   カードの GPU 総確保（1024² 約 1.7 GiB・2048² 約 4.1 GiB）は f32 席の実測で、カードはそう名乗る
+   カードの GPU 総確保（1024² 約 1.7 GiB・2048² 約 4.1 GiB〈訂正 2026-10-11: 1 GiB = 1,024 MiB で約 1.6 GiB・
+   約 4.0 GiB — 元の値は MiB を 1,000 で割っていた〉）は f32 席の実測で、カードはそう名乗る
    （f16 席の総確保は未測）。〈→ 追記 2026-10-11: 実測は checkpoint ごと — HR は f16 席の実測〉
 9. **TS の門**: `e2e_birefnet_test.ts` に f16 の 4 系列（HR の tolerance は f32 系列と同じ値〈golden が
    ビット一致するため〉・Lucida は f32 系列の値を仮置きし実測で導出する）〈→ 追記 2026-10-11: HR の f32
