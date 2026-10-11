@@ -89,12 +89,29 @@ export type SubmitPolicy = {
   readonly maxChunkSize: number;
 };
 
-export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = {
+/**
+ * 既定の政策。凍結するのは、公開の値を書き換えると既定を使う全 Session に波及するため
+ * （scheduler は構築時に写すが、写す前の既定そのものが変わる）。
+ */
+export const DEFAULT_SUBMIT_POLICY: SubmitPolicy = Object.freeze({
   timeBudgetMs: 100,
   initialChunkSize: 16,
   minChunkSize: 1,
   maxChunkSize: 1024,
-};
+});
+
+/**
+ * 政策の写し（{@link SubmitScheduler} の構築と Session の構築の入口が持つ）。
+ *
+ * MUST: 欄は 1 つずつ通常のプロパティ読みで写す（spread にしない）。spread は自前の列挙可能な欄
+ * しか写さないので、継承・非列挙の欄が落ち、写す前は通った政策が 0 の拒否に化ける。
+ */
+export const copySubmitPolicy = (policy: SubmitPolicy): SubmitPolicy => ({
+  timeBudgetMs: policy.timeBudgetMs,
+  initialChunkSize: policy.initialChunkSize,
+  minChunkSize: policy.minChunkSize,
+  maxChunkSize: policy.maxChunkSize,
+});
 
 /**
  * 推定時間に掛ける安全率。チャンクは grid-stride カーネルの workgroup 数で測った
@@ -461,10 +478,14 @@ export class SubmitScheduler {
     policy: SubmitPolicy = DEFAULT_SUBMIT_POLICY,
     now: () => number = () => performance.now(),
   ) {
-    assertPolicy(policy);
+    // MUST: 政策は写してから検査し、写しだけを持つ。呼び手の object を参照のまま持つと、検査の
+    // 後の書き換え（例: initialChunkSize を Infinity へ）でチャンクの上限（TDR の門）も
+    // 0 の拒否（ハングの門）も外れる。
+    const owned = copySubmitPolicy(policy);
+    assertPolicy(owned);
     this.#gpu = gpu;
     this.#device = gpu.device;
-    this.#policy = policy;
+    this.#policy = owned;
     this.#now = now;
     this.#timingEnabled = gpu.gpuTimingEnabled;
     // MUST: 計測有効時の querySet 容量（チャンクの dispatch 数 × 2）は構築時に検査する。
@@ -472,11 +493,11 @@ export class SubmitScheduler {
     // 付くまで #chunkSizeLimit が initialChunkSize を返すため、maxChunkSize > 1024 の政策は
     // 最初の run では落ちず**後の run**で初めて落ちる（公開ノブ `SessionOptions.submitPolicy`
     // の構成ミスが動作中に化ける）。既定政策（1024 → query 2048 = 上限ちょうど）は通る。
-    if (this.#timingEnabled && policy.maxChunkSize * 2 > MAX_TIMESTAMP_QUERIES) {
+    if (this.#timingEnabled && owned.maxChunkSize * 2 > MAX_TIMESTAMP_QUERIES) {
       throw new SubmitPolicyError(
-        `GPU 時間計測が有効な device では SubmitPolicy.maxChunkSize (${policy.maxChunkSize}) が ` +
+        `GPU 時間計測が有効な device では SubmitPolicy.maxChunkSize (${owned.maxChunkSize}) が ` +
           `querySet 容量を超える（query ${
-            policy.maxChunkSize * 2
+            owned.maxChunkSize * 2
           } 件 > ${MAX_TIMESTAMP_QUERIES}）。` +
           `maxChunkSize を ${MAX_TIMESTAMP_QUERIES / 2} 以下にするか、gpuTiming: false で` +
           "計測を切ること",

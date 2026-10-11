@@ -229,6 +229,42 @@ Deno.test("SubmitScheduler はチャンクサイズ 0 相当の政策を構築�
   );
 });
 
+Deno.test("SubmitScheduler は構築時に政策を写し、検査の後の元の object の書き換えで上限が外れない", async () => {
+  // 検査した値と実際に効く値が別になると、チャンクサイズ 0 の拒否（ハングの門）も、submit 本数の
+  // 上限（TDR の門）も、構築後の 1 行の書き換えで外れる。
+  const gpu = createFakeGpu();
+  const policy: { -readonly [K in keyof SubmitPolicy]: number } = { ...fixedPolicy(16) };
+  const scheduler = new SubmitScheduler(gpu.context, policy);
+  policy.initialChunkSize = Infinity;
+  policy.minChunkSize = Infinity;
+  policy.maxChunkSize = Infinity;
+
+  dispatchMany(scheduler, 32);
+  assertEquals(gpu.submitted, [16, 16], "書き換えた上限でチャンクが切られている");
+  await scheduler.flush();
+});
+
+Deno.test("SubmitScheduler の政策の写しは継承・非列挙の欄も読む（写す前と同じく受理する）", () => {
+  // 写しを spread で取ると自前の列挙可能な欄しか写らず、写す前は通った政策が 0 の拒否に化ける。
+  const gpu = createFakeGpu();
+  const inherited: SubmitPolicy = Object.create(fixedPolicy(4));
+  const hidden: SubmitPolicy = { ...fixedPolicy(4) };
+  for (const key of Object.keys(hidden)) {
+    Object.defineProperty(hidden, key, { enumerable: false });
+  }
+  for (const policy of [inherited, hidden]) {
+    const scheduler = new SubmitScheduler(gpu.context, policy);
+    assertEquals(scheduler.stats.currentChunkSize, 4);
+  }
+});
+
+Deno.test("DEFAULT_SUBMIT_POLICY は凍結されていて、書き換えで既定を使う全 Session に波及しない", () => {
+  assertThrows(() => {
+    (DEFAULT_SUBMIT_POLICY as { initialChunkSize: number }).initialChunkSize = Infinity;
+  }, TypeError);
+  assertEquals(DEFAULT_SUBMIT_POLICY.initialChunkSize, 16);
+});
+
 // 計測有効時の querySet 容量（チャンクの dispatch 数 × 2）は構築時に落とす。エンコード時の
 // 門だけだと、実測の裏付けが付いて上限が maxChunkSize へ切り替わった**後の run**で初めて
 // 落ちる（動いていたものが途中から落ちる形）。

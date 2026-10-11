@@ -23,7 +23,7 @@ import {
 import { assertDeviceUsable, type GpuContext, RUNTIME_INTERNAL } from "../gpu/device.ts";
 import { discardFailureScopes, popFailureScopes, pushFailureScopes } from "../gpu/error-scope.ts";
 import { SessionPipelines } from "../gpu/pipeline-cache.ts";
-import { SubmitScheduler } from "../gpu/submit.ts";
+import { copySubmitPolicy, SubmitScheduler } from "../gpu/submit.ts";
 import { BUFFER_USAGE } from "../gpu/webgpu-constants.ts";
 import { type GeometryProfile, selectGeometryProfile } from "../kernels/geometry-profile.ts";
 import { dp4aAvailable } from "../kernels/linear-i8a8.ts";
@@ -650,7 +650,9 @@ export type SessionState = {
 const snapshotSessionOptions = (
   requested: SessionOptions,
 ): { readonly [K in keyof Required<SessionOptions>]: SessionOptions[K] } => ({
-  submitPolicy: requested.submitPolicy === undefined ? undefined : { ...requested.submitPolicy },
+  submitPolicy: requested.submitPolicy === undefined
+    ? undefined
+    : copySubmitPolicy(requested.submitPolicy),
   linearCompute: requested.linearCompute,
   attentionCompute: requested.attentionCompute,
   attentionScoreStorage: requested.attentionScoreStorage,
