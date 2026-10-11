@@ -282,7 +282,7 @@ export const resizePlaneF32 = (
   }
 
   const vertical = buildTaps(sourceHeight, height, KERNELS.bilinear);
-  const out = new Float32Array(width * height) as Float32Array<ArrayBuffer>;
+  const out = new Float32Array(width * height);
   for (let y = 0; y < height; y += 1) {
     const { start, weights } = vertical[y];
     const targetRow = y * width;
@@ -334,7 +334,7 @@ export const normalizeToNchw = (
     }
   }
   const plane = image.width * image.height;
-  const out = new Float32Array(plane * CHANNELS) as Float32Array<ArrayBuffer>;
+  const out = new Float32Array(plane * CHANNELS);
   for (let channel = 0; channel < CHANNELS; channel += 1) {
     const offset = mean[channel] * RESCALE_DIVISOR;
     const divisor = std[channel] * RESCALE_DIVISOR;
