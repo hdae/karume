@@ -335,7 +335,8 @@ depth-anything の実画像 = 判別、vowel-detector の全鎖 = `.lab` の完�
 - 行は環境キーごとに持つ（全機共通で止めると、走れる機の検証まで消える）。GPU の無い機は環境キーを持たないので
   どの行にも当たらない。
 - 行の理由文には根拠と解除条件を書く。解消の合図 = 行を消す。
-- 現在の行: `birefnet-hr-2048` / `lucida-2048` × `deno-intel-graphics-bmg-g21`（Intel Arc B570・Linux xe ドライバ）。
+- 現在の行: 2048² の 3 系列（`birefnet-hr-2048-f16` / `lucida-2048` / `lucida-2048-f16`）× `deno-intel-graphics-bmg-g21`
+  （Intel Arc B570・Linux xe ドライバ）。
   decoder 末尾の `deform_conv2d` 1 dispatch がドライバの compute ジョブ上限 5 s を超えて device lost になり、Deno が
   プロセスごと panic する。解除条件は `deform_conv2d` の分割か高速化で 1 dispatch を上限内に収めること
   （[perf-ledger](../perf-ledger.md) K-63・[limitations](../limitations.md)「BiRefNet 系」節）。

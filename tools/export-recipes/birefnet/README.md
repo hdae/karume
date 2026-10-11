@@ -12,23 +12,23 @@ entry point only.
 
 One graph per model × resolution — the **matte logits** (`preds[-1]`, before the sigmoid) of the
 BiRefNet family, with batch static at 1 and no symbolic axis. The series name is the `--model-dir`
-directory name plus `--resolution` (default `birefnet-hr-1024`), because a BiRefNet graph is a
-different graph per resolution: window masks and padding constants are baked per resolution.
-`--resolution` accepts multiples of 64 only. Two checkpoints share the recipe (BiRefNet_HR and its
-fine-tune Lucida — identical structure, different weights and attribution), so they are one
-`--model-dir` axis rather than two recipes.
+directory name plus `--resolution`, plus `-f16` for an f16 series (default `birefnet-hr-1024-f16`),
+because a BiRefNet graph is a different graph per resolution: window masks and padding constants
+are baked per resolution. `--resolution` accepts multiples of 64 only. Two checkpoints share the
+recipe (BiRefNet_HR and its fine-tune Lucida — identical structure, different weights and
+attribution), so they are one `--model-dir` axis rather than two recipes.
 
 ## Running
 
 ```sh
 cd tools/export-recipes
-uv run --group birefnet python -m birefnet.export
+uv run --group birefnet python -m birefnet.export              # BiRefNet_HR: f16, its only series
 uv run --group birefnet python -m birefnet.export --verify     # eager equivalence vs the unpatched model (3 stages)
 uv run --group birefnet python -m birefnet.export --resolution 2048
-uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida
 uv run --group birefnet python -m birefnet.export --real-images
-uv run --group birefnet python -m birefnet.export --dtype f16 --real-images   # f16 series (ADR 0113)
-uv run --group birefnet python -m birefnet.export --dtype f16 --resolution 2048
+uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida  # Lucida: f32 by default
+uv run --group birefnet python -m birefnet.export --model-dir ../../inputs/birefnet/lucida \
+    --dtype f16 --real-images                                  # Lucida's f16 series (ADR 0113)
 uv run python dist.py --pipeline birefnet --model 1024 --model 2048 \
     --out ../../models/karume-birefnet-hr
 uv run python dist.py --pipeline lucida --model 1024 --model 2048 \
@@ -62,11 +62,17 @@ per-checkpoint table, so a distribution without the declaration is refused rathe
 
 ## Weight storage series (f32 / f16)
 
-`--dtype f16` writes a separate series (`<model>-<resolution>-f16`, e.g. `birefnet-hr-1024-f16`);
-the f32 series keeps its unsuffixed name. `dist` needs **both** series of every resolution it
-assembles: the distribution carries two quant seats, `f32` (the default) and `f16`, laid out as
-`matte/model.f32.krm` and `matte/model.f16.krm`. `--dtype` is exclusive with `--verify`, whose
-reference is the unpatched f32 eager model.
+`--dtype f16` writes a separate series (`<model>-<resolution>-f16`, e.g. `lucida-1024-f16`); the
+f32 series keeps its unsuffixed name. The quant seats come from each upstream checkpoint's storage
+type (ADR 0113): no seat is wider than the checkpoint, and the default is the seat of the same
+width. BiRefNet_HR is stored in f16, so it gets the `f16` seat only: the export writes the f16
+series by default and refuses `--dtype f32` (an f32 series would only widen the same values), and
+`dist --pipeline birefnet` needs just the f16 series of every resolution it assembles. Lucida is
+stored in f32, so it gets `f32` (the default) and `f16`, and `dist --pipeline lucida` needs
+**both** series of every resolution, laid out as `matte/model.f32.krm` and `matte/model.f16.krm`.
+`dist` also checks that every series names the upstream revision pinned for its checkpoint, so a
+series baked from another checkpoint (or another revision) is never assembled. `--dtype` is
+exclusive with `--verify`, whose reference is the unpatched f32 eager model.
 
 The weights are rounded right after loading and **before** the patch layer runs. The BatchNorm
 rewrite derives its per-channel scale and shift in f32 from the (rounded) statistics; rounding after
@@ -77,12 +83,12 @@ constants, the deformable convolutions' sampling weights (`regular_conv`), biase
 parameters stay f32 — so the resident weights shrink to 509 MiB at 1024² rather than to half of
 919 MiB.
 
-The upstream BiRefNet_HR checkpoint is itself stored in f16, so its `f16` series is lossless: the
-golden outputs are bit-identical to the f32 series'. Lucida is stored in f32, so its `f16` series is
-quantized. Every compressed series gets a `quality.json`: in the same process, before rounding, the
-export runs the unrounded f32 weights through the patched graph on the 4 synthetic and the 4 real
-images (the real images are used even without `--real-images`), and records the difference to the
-rounded weights' outputs (max abs / relative RMS of the logits, binary-mask disagreement, alpha MAE,
+The upstream BiRefNet_HR checkpoint is itself stored in f16, so rounding to f16 changes nothing and
+its `f16` series is lossless. Lucida is stored in f32, so its `f16` series is quantized. Every
+compressed series gets a `quality.json`: in the same process, before rounding, the export runs the
+unrounded f32 weights through the patched graph on the 4 synthetic and the 4 real images (the real
+images are used even without `--real-images`), and records the difference to the rounded weights'
+outputs (max abs / relative RMS of the logits, binary-mask disagreement, alpha MAE,
 8-bit alpha steps). If the checkpoint's floating-point tensors are all f16, anything short of a
 bit-identical output in every case fails the export before anything is published. For a lossy
 checkpoint the numbers are recorded and the export fails if the worst case's alpha MAE reaches half

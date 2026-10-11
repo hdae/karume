@@ -42,8 +42,8 @@ deno run -A tools/opbench/main.ts census \
 
 # Series output (no manifest — components are discovered from the directory tree)
 deno run -A tools/opbench/main.ts census \
-  --source outputs/series/birefnet-hr-1024 \
-  --out outputs/bench/birefnet-hr-1024/2026-09-03_op-census
+  --source outputs/series/birefnet-hr-1024-f16 \
+  --out outputs/bench/birefnet-hr-1024-f16/2026-09-03_op-census
 
 # Explicit binding: a longer full-attention capacity
 deno run -A tools/opbench/main.ts census \

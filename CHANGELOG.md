@@ -101,14 +101,19 @@ measurements in `docs/research/`.
   front outputs), and the gate checks determinism, census and a declared relRMS band. `results.json`
   gains the optional `comparisons` field (schema unchanged) and `tools/verify-diff` renders it.
 - BiRefNet recipe: an `f16` weight series (`python -m birefnet.export --dtype f16`, exclusive with
-  `--verify`) and an `f16` quant seat next to `f32` in the `birefnet` / `lucida` distributions
-  (ADR 0113). The default seat stays `f32`. For BiRefNet_HR the `f16` seat is lossless — the
-  upstream checkpoint is itself stored in f16 — while Lucida's is quantized; the NOTICE and model
-  card say which. Each compressed series records its export-time quantization error against the
-  unrounded f32 outputs in `quality.json`, and the export refuses to publish an `f16` series of an
-  all-f16 checkpoint unless every case is bit-identical, or a lossy one whose worst alpha MAE
-  reaches half an 8-bit alpha step (a provisional line). At 1024² the resident weights drop from
-  919 MiB to 509 MiB. The published repositories pick the seat up at the next release.
+  `--verify`) and quant seats derived from each upstream checkpoint's storage type (ADR 0113): no
+  seat is wider than the checkpoint, and the default is the seat of the same width. The `lucida`
+  distribution gains an `f16` seat next to `f32`, which stays the default; Lucida is stored in
+  f32, so its `f16` seat is quantized. The `birefnet` (BiRefNet_HR) distribution carries `f16`
+  only (see Breaking): the upstream checkpoint is itself stored in f16, so that seat is lossless.
+  The NOTICE and model card say which seat is lossless, and the card's GPU memory figures are
+  measured per checkpoint on the seat they name. For BiRefNet_HR the export now writes the `f16`
+  series by default and refuses `--dtype f32`. Each compressed series records its export-time
+  quantization error against the unrounded f32 outputs in `quality.json`, and the export refuses to
+  publish an `f16` series of an all-f16 checkpoint unless every case is bit-identical, or a lossy one
+  whose worst alpha MAE reaches half an 8-bit alpha step (a provisional line). At 1024² the
+  resident weights drop from 919 MiB to 509 MiB. The published repositories pick the seats up at the
+  next release.
 - `tools/flag-bench`: a Deno benchmark that compares Gemma execution flags against a reference on the
   same machine (GPU time as the primary metric, wall clock secondary) and records which kernel keys
   actually ran.
@@ -303,11 +308,12 @@ measurements in `docs/research/`.
   `stateAttentionReduce: "parallel-fused"` instead of `"parallel"`. On an Intel Arc B570, `i4-fast`
   cut GPU decode time per step by 49.3% (E2B) and 41.7% (E4B) against `i4`, and no single flag was
   slower on its own. Rebuild the distribution to pick up the new quants; no requantization is needed.
-- The BiRefNet 2048² GPU tests (`birefnet-hr-2048` / `lucida-2048`) are skipped explicitly on the
-  Intel Arc B570 environment key (`deno-intel-graphics-bmg-g21`), where one `deform_conv2d`
-  dispatch exceeds the Linux xe driver's 5 s job limit and the resulting device-lost panic would
-  stop the whole test process. The skip is per environment key and announced at registration; the
-  asset-completeness test still runs, and other machines run the series as before.
+- The BiRefNet 2048² GPU tests (`birefnet-hr-2048-f16`, `lucida-2048` and `lucida-2048-f16`) are
+  skipped explicitly on the Intel Arc B570 environment key (`deno-intel-graphics-bmg-g21`), where
+  one `deform_conv2d` dispatch exceeds the Linux xe driver's 5 s job limit and the resulting
+  device-lost panic would stop the whole test process. The skip is per environment key and
+  announced at registration; the asset-completeness test still runs, and other machines run the
+  series as before.
 - Anima's `stage` event now marks the start and end of a stage. On the default per-stage path these
   are still the points before the session is built and after it is released; for a DiT carried over
   and kept (`"transformer"`), the `transformer` stage's start and end no longer bracket a weight load
@@ -446,6 +452,12 @@ measurements in `docs/research/`.
   unsupported major; rebuild a local mirror with `dist.py --pipeline birefnet` /
   `--pipeline lucida`. This release republishes both repositories as `birefnet/2` and pins
   `BIREFNET_SOURCES` to the new revisions.
+- `karume-birefnet-hr` (republished with this release) carries only the `f16` quant, which is also
+  the default. The upstream BiRefNet_HR checkpoint is stored in f16, so the former `f32` seat held
+  the same values at nearly twice the resident weight memory (919 MiB against 509 MiB at 1024²).
+  `quant: "f32"` is rejected as an unknown quant; omit `quant` or pass `"f16"`. The matte logits
+  of the `f16` seat are identical to the former `f32` seat's on the reference images.
+  `karume-lucida` keeps `f32` (the default) and gains `f16`.
 
 ## [0.13.0] - 2026-09-25
 

@@ -59,16 +59,18 @@
    （`inputs/birefnet/BiRefNet_HR/model.safetensors`）は浮動小数のテンソルが全て F16（F16 687 本・I64 67 本）、
    同梱 `handler.py:101` の `.half()` がモデル全体を半精度で回す（重みも活性も f16 — σ の半精度はその帰結）。
    HR の karume の席はどちらも計算が f32 で、f32 席は F16 の重みを f32 へ広げた値（値は変わらない）、f16 席は
-   重みの格納だけが f16（ADR 0113 / 0018）。どちらの席でも logit は上流の半精度の活性とは一致しないので、後処理の
-   最後の段だけ半精度を真似ても上流には近づかない。上流の不具合も写さない（例: torch 2.13.0 の CPU の
-   antialias bilinear は幅 1・高さ 2 以上の入力の縦を壊し、全行が先頭の行の値になる — 実測）。
+   重みの格納だけが f16（ADR 0113 / 0018）〈→ ADR 0113 追記 2026-10-11: HR の f32 席は退役し f16 席だけ〉。
+   どちらの席でも logit は上流の半精度の活性とは一致しないので、後処理の最後の段だけ半精度を真似ても上流には
+   近づかない。上流の不具合も写さない（例: torch 2.13.0 の CPU の antialias bilinear は幅 1・高さ 2 以上の入力の
+   縦を壊し、全行が先頭の行の値になる — 実測）。
 6. **golden の契約**（常設の門・CPU だけ・環境に依らない）:
    - 書き手は `tools/export-recipes/birefnet/matte_fixture.py`。系列ごとの上流の関数をそのまま呼び、量子化だけを
      `floor(x + 0.5)` へ差し替える。fixture は `packages/models/tests/fixtures/birefnet-matte/`（git 管理）。
-   - 入力は実画像 e2e の f32 席のマット logits（portrait / street・両系列）の輪郭付近の窓（40×32）と、窓の中心を
-     通る長さ 1024 の行と幅 2 の列（実運用の係数表 1024 → 832 / 480 / 2048）、合成の境界ケース。来歴（ファイル・
-     sha256・窓）を入力表に、torch / torchvision / Pillow / numpy の版を JSON に記録し、recipe の pytest が git の
-     入力から作り直してバイト一致を見る。目標寸法は 1024² 以外（拡大・縮小・非正方・片軸だけ・恒等）。
+   - 入力は実画像 e2e の既定席のマット logits（portrait / street・両系列 — HR は f16 席・Lucida は f32 席〈→ ADR
+     0113 追記 2026-10-11〉）の輪郭付近の窓（40×32）と、窓の中心を通る長さ 1024 の行と幅 2 の列（実運用の
+     係数表 1024 → 832 / 480 / 2048）、合成の境界ケース。来歴（ファイル・sha256・窓）を入力表に、torch /
+     torchvision / Pillow / numpy の版を JSON に記録し、recipe の pytest が git の入力から作り直してバイト一致を
+     見る。目標寸法は 1024² 以外（拡大・縮小・非正方・片軸だけ・恒等）。
    - `u8-pil-bicubic` は **0 不一致**。JS の `Math.exp` と numpy の `exp` は最終 ulp が割れうるので、255σ が
      `k + 0.5` から 1e-9 未満の標本は生成器が拒む。
    - `float-bilinear` は、golden（torch の丸める前の `255α`）の四捨五入と一致するか、golden の `255α` が
@@ -106,7 +108,8 @@
     とおりで、HR は次のリリースで f16 席だけになり（f32 席は同じ値を倍の常駐で持つだけなので退役）、Lucida は
     f32 既定 + f16。スキーマを変える場合の HR の再アップロードは、この f16 席だけへの切り替えと同じ回に乗せる。
     決定 6 の fixture の入力（f32 席の logits の窓）は git に入った値で、recipe の pytest もその値から作り直す
-    ので、f32 席の退役で門は動かない。（「結果」の節で確定: HR が上流を採ったので欄を足した。）
+    ので、f32 席の退役で門は動かない〈→ ADR 0113 追記 2026-10-11: HR の入力は f16 席の logits から採り直した —
+    値と sha256 は f32 席と同じ〉。（「結果」の節で確定: HR が上流を採ったので欄を足した。）
 
 ## 採らなかった案
 
@@ -176,7 +179,8 @@
 - スキーマの変更は main に入れる。HF の 2 リポ（`karume-birefnet-hr` / `karume-lucida`）の再アップロードと
   `BIREFNET_SOURCES` の revision の更新は、次のリリースでマニフェストの他の変更とまとめて行う（裁定 28 の
   但し書き）。HR は f16 席だけへの切り替え、Lucida は f32 の焼き直しと同じ回に乗せる（ADR
-  [0113](0113-birefnet-weight-series.md) の追記・backlog の release 節）。それまでは、公開済みの revision
-  （`birefnet/1`）を main の models は読めない。
+  [0113](0113-birefnet-weight-series.md) の追記・backlog の release 節 — recipe は 2026-10-11 に f16 席だけの形へ
+  変えた）。それまでは、公開済みの revision（`birefnet/1`）を main の models は読めない。
 - 手元の配布形のミラー（`models/karume-birefnet-hr` / `models/karume-lucida`）は `dist.py` で組み直す。差分は
-  `karume.json`（`pipeline` と `pipelineConfig.postprocess`）と `README.md` だけで、重みの part は変わらない。
+  `karume.json`（`pipeline` と `pipelineConfig.postprocess`）と `README.md` だけで、重みの part は変わらない
+  〈→ ADR 0113 追記 2026-10-11: `karume-birefnet-hr` は f16 席だけになるので、f32 の part と quant も消える〉。

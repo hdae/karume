@@ -8,8 +8,8 @@
  *
  *     deno run -A tools/opbench/main.ts census \
  *         --source models/karume-gemma4 --out outputs/bench/karume-gemma4/2026-09-03_op-census
- *     deno run -A tools/opbench/main.ts census --source outputs/series/birefnet-hr-1024 \
- *         --out outputs/bench/birefnet-hr-1024/2026-09-03_op-census
+ *     deno run -A tools/opbench/main.ts census --source outputs/series/birefnet-hr-1024-f16 \
+ *         --out outputs/bench/birefnet-hr-1024-f16/2026-09-03_op-census
  *     deno run -A tools/opbench/main.ts census --source models/karume-gemma4 \
  *         --scenario long=M:1,C:8192 --out <dir>
  *

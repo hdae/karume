@@ -332,7 +332,11 @@ device では走らない** — 欄が名乗るのは常駐分（重み・state�
 f16 で格納されるのは適格な重み（linear / conv / 相対位置表 — 205 本・820 MiB → 410 MiB）だけで、窓マスク
 （1024² で 65 MiB・2048² で 248 MiB）・ゼロ pad 定数（14 / 28 MiB）・deform_conv2d の重み（19 MiB —
 重みスロットを持たない）・bias / norm / α β は f32 のまま残るため。2048² は中間の領域（2,948 MiB）が支配項
-なので、総確保に対する効きは小さい。既定の quant 席は `f32` のまま（段 2 の品質実測の後に裁定）。
+なので、総確保に対する効きは小さい。quant 席は checkpoint ごとに上流の格納の型から導く（ADR 0113 追記 2026-10-11）:
+BiRefNet_HR は `f16` 席だけ（上流の重みが f16 — f32 席は同じ値を倍の常駐で持つだけなので出さない）、Lucida は
+`f32` 既定 + `f16`。HR の `f16` 席の GPU 総確保は 1024² で 1,270 MiB（約 1.2 GiB）・2048² で 3,702 MiB
+（約 3.6 GiB）（2026-10-11 実測・RTX 3080 Ti・1 GiB = 1,024 MiB。中間の領域と最大の binding は f32 席と同じ —
+活性値は f16 席でも f32）。
 
 **2048² は Intel Arc B570（Linux xe ドライバ）では走らない — 1 dispatch がジョブ制限 5 秒を超える**
 （2026-09-20 実測・裁定 2026-09-26 = その機の環境キーで明示 SKIP）。xe ドライバは compute ジョブ（= `queue.submit` 1 回）に
@@ -343,7 +347,7 @@ device lost にする。BiRefNet 2048² では decoder 末尾の `deform_conv2d`
 効かない）。同じ dispatch は 1024²（出力 `[1,256,512,512]`）で 1.66 s なので、要素数 4 倍の 2048² は
 ≈ 6.6 s の見込み。1024² の 2 系列（birefnet-hr / lucida）は B570 でも全緑。Deno はこの device lost を
 例外にせず panic し、後続のテストまでプロセスごと止まる（known-issues「Intel Arc B570」節）。そのため
-`packages/runtime/tests/e2e_birefnet_test.ts` の `HELD_SERIES` に 2048² の 4 系列（birefnet-hr / lucida × f32 / f16）× B570 の環境キー
+`packages/runtime/tests/e2e_birefnet_test.ts` の `HELD_SERIES` に 2048² の 3 系列（birefnet-hr の f16・lucida の f32 / f16）× B570 の環境キー
 （`deno-intel-graphics-bmg-g21`）の行を置き、この機では GPU を使うテスト（golden 突合・幾何判別）を明示 SKIP する
 （登録時に warn・資産の完全性テストは走る・他の機には効かない — ADR
 [0106](decisions/0106-device-keyed-references.md) 追記 2026-09-26 その 3 の held 行）。解除条件は kernel 側で

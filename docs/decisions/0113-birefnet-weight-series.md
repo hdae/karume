@@ -36,6 +36,7 @@ scale が作られない・deform の `regular_conv` は丸まるのに f32 で�
    綴りは接尾なしのまま動かさない。同居させると f32 系列の網（系列ごとの tolerance）が圧縮資産へ黙って
    掛かる（ADR 0018 / 0027 と同じ理由）。`--dtype {f32,f16}`（既定 f32）は `--verify` と排他（ADR 0027
    決定 3 と同じ構造理由 — `--verify` の参照はパッチ前の f32 重みの eager）。i8 は CLI が受け付けない。
+   〈→ 追記 2026-10-11: 書ける dtype と既定は checkpoint ごと — HR は f16 だけ・既定 f16〉
 2. **丸めの位置は `load_model` の直後・`patch.apply` の前**（`birefnet.export.load_wrapper`）。apply の
    後に丸めると ⑦ の α / β まで f16 の値へ動き、格納は f32 のままなので VRAM は減らず数値だけが動く。
    apply の前なら α / β は丸めた統計から f32 で導かれる。丸めは `round_weights_to_f16`（全パラメータと
@@ -62,24 +63,29 @@ scale が作られない・deform の `regular_conv` は丸まるのに f32 で�
      （`--real-images` のときは golden の sanity が掛けている）。
 6. **配布形**: 出力 path を `matte/model.{f32,f16}.krm`・配置の役割名を `matte_{dtype}` に割る。要求表は
    `matte_f32 → f32` / `matte_f16 → f16`、禁止表は f32 席だけ（圧縮の語彙全部 — f16 席の取り違えは要求
-   検査が落とす）。`karume dist --pipeline birefnet|lucida` は両系列が揃わないと組めない。検査
+   検査が落とす）。`karume dist --pipeline birefnet|lucida` は両系列が揃わないと組めない
+   〈→ 追記 2026-10-11: HR は f16 系列だけで組む〉。検査
    （寸法・出所・`pipelineConfig`）は全 dtype の系列に掛け、`pipelineConfig` の一致と、**全 dtype の系列が
    同じ上流 revision を名乗ること**も見る。ライセンス（HR / Lucida とも MIT）と寸法は checkpoint を跨いで
    一致するので、revision を見ないと「HR の f32 系列 + Lucida の f16 系列」が 1 モデルの 2 席として組める。
+   〈→ 追記 2026-10-11: revision の一致は checkpoint の固定 revision との突合に置き換えた〉
 7. **quant 席は f32 / f16 の 2 つ・既定は f32 のまま**。既定の変更は配布の意味の変更なので、段 2 の品質
    実測と目視（実画像 4 枚以上のマット PNG 対）を経て裁定する。HR の f16 は無損失だが、公開済みの既定を
    黙って動かさない。（→ 追記 2026-09-27: HR は次リリースで f16 席のみ・Lucida は f32 既定 + f16）
+   〈→ 追記 2026-10-11: recipe で実施〉
 8. **NOTICE とカードの格納の説明は 1 か所から組む**（`birefnet.card.birefnet_storage_lines`）。checkpoint の
    格納 dtype（manifest に無い事実 — `BirefnetCheckpoint.stored_dtype`）と配る席から、HR は「量子化なし
-   （f32 席は正確に広げただけ・f16 席は上流の値そのもの）」、Lucida は「f16 席は量子化」と名乗る。
+   （f32 席は正確に広げただけ・f16 席は上流の値そのもの）」、Lucida は「f16 席は量子化」と名乗る
+   〈→ 追記 2026-10-11: HR の f32 席は無い〉。
    `base_model_relation` は既定 quant の実体が checkpoint の値を丸めているときだけ `quantized`（既定 f32 の
    間はどちらのリポも置かない）。カードの `stored_dtype` とヘッダの一致は pytest が実重みのある機で見る。
    f16 席の格納の説明は「linear / convolution / embedding（相対位置表）の重みが f16・deform の sampling
    weights（`regular_conv`）と bias / norm は f32・BatchNorm の α / β は統計から f32 で導いた派生値」。
    カードの GPU 総確保（1024² 約 1.7 GiB・2048² 約 4.1 GiB）は f32 席の実測で、カードはそう名乗る
-   （f16 席の総確保は未測）。
+   （f16 席の総確保は未測）。〈→ 追記 2026-10-11: 実測は checkpoint ごと — HR は f16 席の実測〉
 9. **TS の門**: `e2e_birefnet_test.ts` に f16 の 4 系列（HR の tolerance は f32 系列と同じ値〈golden が
-   ビット一致するため〉・Lucida は f32 系列の値を仮置きし実測で導出する）と、容器の**圧縮格納 dtype の
+   ビット一致するため〉・Lucida は f32 系列の値を仮置きし実測で導出する）〈→ 追記 2026-10-11: HR の f32
+   系列は退役〉と、容器の**圧縮格納 dtype の
    集合**を系列の宣言と突き合わせる GPU 不要の検査（ADR 0029 決定 2 の形 — f32 系列は空・f16 系列は
    `["f16"]`）。2048² の f16 系列も B570 の held 行に載せる（落ちる deform_conv2d の重みは f16 系列でも
    f32 格納）。実画像 e2e（models 側）にも 1024² の f16 2 系列を足す（参照値の行は実 GPU で作る）。
@@ -110,7 +116,7 @@ scale が作られない・deform の `regular_conv` は丸まるのに f32 で�
 - 既存の f32 系列 4 本（`outputs/series/{birefnet-hr,lucida}-{1024,2048}`）は上流 revision を持たない
   （出所の revision を容器へ焼く変更より前の資産）ため、`dist` の出所の門で落ちる。配布に反映するときは
   `--dtype f32` で焼き直す（`outputs/misc/e1-dist/series/` の焼き直し版が使える — golden は既存 f32 系列と
-  ビット一致）。
+  ビット一致）。〈→ 追記 2026-10-11: HR の f32 系列は配らないので、焼き直すのは Lucida の 2 本だけ〉
 - `birefnet-hr-1024-f16` の `quality.json` は値の `==`（`torch.equal`）で比べた版のコードで作った記録で、
   ビット一致の欄の意味が現行コードと違う（ビット一致そのものは golden のバイト同一で確認済み）。
   リリース前の焼き直しで作り直す。
@@ -127,7 +133,54 @@ feature を要求しないので、席を f16 だけにしても動く機種は�
 **Lucida は `f32` 既定 + `f16` 任意**（上流が f32 で f16 は有損失 — α の平均絶対差は最大 7.0e-5〈1024²〉/
 4.8e-5〈2048²〉・8 bit の α で最大 1 段・二値マスクの不一致は最大 3.1e-5。小さいが 0 ではない）。
 配布の意味の変更なので、配布反映（HF 再アップロード + pin 更新）と同じ回に recipe（`dist` の HR を f16 席 1 つで
-組める形・既定席・カードの `base_model_relation`・pytest）を変え、HR の f32 系列 2 本
+組める形・既定席・カードの `base_model_relation`・pytest）を変え〈→ 追記 2026-10-11: recipe とテストは先に
+変えた・配布反映は次のリリースのまま〉、HR の f32 系列 2 本
 （`outputs/series/birefnet-hr-{1024,2048}`）とその golden / sha 参照行・`HELD_SERIES` の f32 行を退役する
 （f16 系列の golden が同じ値を持つので検証の被覆は減らない）。決定 6 の「両系列が揃わないと組めない」は Lucida
 にだけ残る。段 2（i8）の裁定はそのときの品質実測で行う。
+
+## 追記（2026-10-11）— HR の f32 席の退役を recipe とテストへ入れる
+
+前の追記の裁定（HR は `f16` 席だけ・Lucida は `f32` 既定 + `f16`）を、配布反映より先に recipe とテストへ入れる。
+配布反映（`karume-birefnet-hr` / `karume-lucida` の HF 再アップロードと `BIREFNET_SOURCES` の pin 更新）は
+次のリリースの回のまま。
+
+1. **席の導出規則**: quant 席は checkpoint ごとに上流 checkpoint の格納の型（`BirefnetCheckpoint.stored_dtype`）から
+   導く — **上流の格納より広い席は出さず、既定席は格納と同じ幅の席**（`birefnet.distribution` の
+   `birefnet_seat_dtypes` / `birefnet_default_quant`）。HR（f16）→ `f16` だけ・既定 `f16`。Lucida（f32）→
+   `f32`（既定）/ `f16`。席の表を checkpoint ごとに手で持たず、系列の取得・配置・weights・quant 表・既定席・
+   NOTICE・`pipelineConfig` の基準の系列はすべてこの席の集合から引く。HR の配置は f16 系列だけを要求し、
+   手元に f32 系列があっても見ない（席に無い dtype の系列を渡された計画は落とす）。Lucida の「両系列が揃わないと
+   組めない」（決定 6）は残る。quant 席の表示欄は（席, 上流の格納）の組で引き、HR の f16 席は並ばない f32 席との
+   比較を名乗らない（`Upstream precision (f16)`）。カードと NOTICE は上流の格納より広い席の文面を持たず（その
+   席を名乗る manifest は描かない）、席が 1 つなら見出しを単数で書く。
+2. **export も同じ規則**: `--model-dir` のディレクトリ名から checkpoint を引き（系列名と同じ紐づけ）、同じ関数で
+   書ける dtype と既定を決める。HR の既定は f16、HR に `--dtype f32` を渡すと argparse の error で理由つきで
+   拒む。Lucida は既定 f32・f16 も可。帰属表に無い `--model-dir` は語彙の全部・既定 f32（`dist` が組まない）。
+   出力先の系列名（`birefnet-hr-1024-f16` など）は変えない。`--verify` は系列を書かないので変えない。
+3. **取り違えの検査は固定 revision に置き換える**: `BIREFNET_CHECKPOINTS` の各 checkpoint が上流 revision を
+   固定で持ち（HR = `a7a562f6fd16021180f2f4348f4de003a2d3d1e1`・Lucida =
+   `6cbedc9722652dc9a3df91dd871f0c4f3334e922` — `inputs/birefnet` の `hf download` の取得記録の値）、`dist` は
+   全容器の `provenance.upstreamRevision` をその値と突き合わせる（`assert_upstream_provenance` — Wan と同じ
+   形）。決定 6 の「全 dtype の系列が同じ revision を名乗る」検査は消した。理由: HR の席が 1 つになると席どうしの
+   一致は何も比べず、「HR のリポに Lucida の系列」を落とせない。固定値で全容器を見れば、席が 1 つでも 2 つでも
+   別 checkpoint・別 revision の系列は組めず、席どうしの一致もこれに含まれる。固定値と手元の取得記録の一致は
+   pytest が取得記録のある機で見る。
+4. **カードの実行資源は checkpoint ごと**（`BirefnetCheckpoint.resources` — 測った席・条件・解像度ごとの数）。
+   「実測していない席の数は名乗らない」は、測った席が manifest に無いモデルのカードを描かないことで保つ。
+   HR は f16 席の実測（2026-10-11・RTX 3080 Ti）、Lucida は f32 席の実測（2026-09-05）のまま。
+
+   | HR f16 席 |      重み | 中間の領域 |   入力 | 総確保（1 GiB = 1,024 MiB） | 最大の binding | 1 枚         |
+   | --------- | --------: | ---------: | -----: | --------------------------: | -------------: | ------------ |
+   | 1024²     | 509.2 MiB |  749.2 MiB | 12 MiB |     1,270 MiB（約 1.2 GiB） |        320 MiB | 1.41〜1.51 s |
+   | 2048²     | 706.2 MiB |  2,948 MiB | 48 MiB |     3,702 MiB（約 3.6 GiB） |      1,280 MiB | 7.25〜7.88 s |
+
+   中間の領域と最大の binding（decoder の `cat_211`）は f32 席と同じ（活性値は f16 席でも f32）。
+5. **退役したもの**: HR の f32 系列 2 本（`birefnet-hr-{1024,2048}`）を読むテストの行（runtime / models の e2e の
+   `SERIES`・`series-graphs.ts`）、HR の f32 の tolerance 定数（実測表と導出は f16 の定数へ移した）、
+   `HELD_SERIES` の `birefnet-hr-2048` の行、sha の参照値の `birefnet-hr-1024/*` の 4 ケース。ADR 0125 決定 6 の
+   fixture の HR の入力は f16 席の logit から採り直した（ケース名・値・sha256 は同じで、差分は来歴のファイル名と
+   席名だけ）。
+6. **HR の f16 系列の出力は f32 系列と一致していた**: 実画像 4 ケースのマット logits の sha256 の参照値の行が
+   2 環境（RTX 3080 Ti・Arc B570）× 4 ケースとも完全一致した（決定 3 の golden のビット一致に加えて、実 GPU の
+   出力も一致）。
