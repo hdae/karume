@@ -606,6 +606,12 @@ export const generateWanVideo = async (
     knobs = plan;
     encodeContexts = () => Promise.resolve(precomputedContexts(plan, dit));
   }
+  // MUST: 呼び手の latents は門（`plan.ts`）が有限性を見たこの同期区間のうちに写して所有する。以降の段は
+  // 開始通知の callback と `settleAbort`（マクロタスクへ譲る）を await するので、写しを DiT の段まで遅らせると、
+  // その間に呼び手が書き換えた値（門を通っていない NaN を含む）で回る。DiT の段はこの写しを写さずに使う。
+  if (knobs.initial.kind === "latents") {
+    knobs = { ...knobs, initial: { kind: "latents", data: Float32Array.from(knobs.initial.data) } };
+  }
   // I2V の encoder の段は最初（text の段より前 — ADR 0121 決定 11）。画像の無い要求は段を持たない。
   let condition: Float32Array<ArrayBuffer> | undefined;
   if (knobs.conditionImage !== undefined) {

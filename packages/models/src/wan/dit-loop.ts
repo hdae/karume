@@ -445,8 +445,10 @@ export const runWanDenoise = async (
   const conditionProj = condition === undefined ? undefined : timestepsProj(0, dit.projWidth);
   const { positive, negative } = contexts;
   const elements = latentShape.reduce((product, dim) => product * dim, 1);
+  // `plan.initial` の latents は呼び手（`generateWanVideo`）が入口の門の直後に写した所有の配列なので、ここでは
+  // 写さない（UniPC は step 0 の潜在を参照のまま持つ — 呼び手の配列を直に渡すと実行中の書き換えが補正子へ届く）。
   let current: Float32Array<ArrayBuffer> = plan.initial.kind === "latents"
-    ? Float32Array.from(plan.initial.data)
+    ? plan.initial.data
     : new WanRandn(plan.initial.seed).normals(elements);
   const observe = state.onRunDiagnostics;
 

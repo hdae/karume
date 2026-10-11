@@ -1983,6 +1983,36 @@ describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", ()
   });
 });
 
+describe("WanPipeline.generate の初期ノイズ（latents）の所有", () => {
+  /** 5 フレームの潜在 [16, 2, 60, 104]（値は要素ごとに変える — 取り違えが DiT の入力に出る）。 */
+  const initialLatents = () =>
+    new Float32Array(16 * 2 * 60 * 104).map((_, index) => ((index % 97) - 48) / 64);
+
+  it("入口の検査の後に呼び手が元の配列を書き換えても、検査した時点の値で生成する（有限値・NaN の両方）", async () => {
+    const baseline = mockPipeline({ textEncoder: "gpu" });
+    await baseline.generate(undefined, { latents: initialLatents() });
+    const expected = baseline.ditRuns[0].tokens;
+    assert(expected.dtype === "f32");
+    for (const value of [7, Number.NaN]) {
+      const latents = initialLatents();
+      const { generate, ditRuns } = mockPipeline({ textEncoder: "gpu" });
+      // text 段の開始通知は入口の検査の後・DiT の段の前に await される（書き換えの窓）。
+      await generate((event) => {
+        if (event.kind === "stage" && event.component === "text_encoder" && event.at === "start") {
+          latents.fill(value);
+        }
+      }, { latents });
+      const tokens = ditRuns[0].tokens;
+      assert(tokens.dtype === "f32" && tokens.data.length === expected.data.length);
+      // 20 万要素の差分表示を作らないよう、最初に割れた要素の添字で比べる。
+      const differs = tokens.data.findIndex((entry, index) =>
+        !Object.is(entry, expected.data[index])
+      );
+      assertEquals(differs, -1, `書き換え後の値 ${value} で DiT を回した`);
+    }
+  });
+});
+
 describe("WanPipeline.generate の中断（模擬 Session — signal.reason を包まず・Session を畳んで・次が回る）", () => {
   it("step 1 の後の中断は step 2 の前で効き、DiT の Session を畳み、VAE の段を張らない・次の generate は回る", async () => {
     const { log, generate } = mockPipeline({});
