@@ -1351,3 +1351,33 @@ class TestTheSharedRowAxes:
         ours = {name: entry.row_axes for name, entry in CODEC_LEDGER.items()}
 
         assert _parse_ts_row_axes(CODECS_TS.read_text(encoding="utf-8")) == ours
+
+
+class TestATrailingNewlineIsRefused:
+    """語彙の検査は末尾の改行付きを拒否する — TS の読み手（JS の `$`）と受理集合を揃える。
+
+    Python の `$` は末尾の改行の直前でも一致するので、`^…$` を `.match` で引くと改行付きが通る。
+    """
+
+    def test_a_graph_name_with_a_trailing_newline_is_refused_by_the_reader(
+        self, tmp_path: Path
+    ) -> None:
+        written = write_synthetic(tmp_path, single=False)
+        edited = json.loads(read_container(written).graph_descriptor_bytes)
+        edited["graphs"] = {f"{name}\n": graph for name, graph in edited["graphs"].items()}
+        rewrite_part0(written[0], graph=canonical_json(edited).encode())
+
+        with pytest.raises(ContainerFormatError, match="語彙外"):
+            read_container(written)
+
+    def test_a_graph_name_with_a_trailing_newline_is_refused_by_the_writer(self) -> None:
+        with pytest.raises(ContainerFormatError, match="語彙外"):
+            container_module._assert_graph_name("synthetic\n")
+
+    def test_a_block_id_with_a_trailing_newline_is_refused(self) -> None:
+        with pytest.raises(ContainerFormatError, match="語彙外"):
+            container_module._require_block_id("b0\n", "test")
+
+    def test_a_sha256_with_a_trailing_newline_is_refused(self) -> None:
+        with pytest.raises(ContainerFormatError, match="sha256"):
+            container_module._require_sha256("a" * 64 + "\n", "test")

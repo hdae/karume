@@ -264,6 +264,11 @@ class TestDeriveModelName:
         with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
             civitai._assert_name(name)
 
+    def test_it_refuses_a_trailing_newline(self) -> None:
+        """Python の `$` は末尾の改行の直前でも一致する — 正本の `MODEL_NAME_RE` と同じく拒む。"""
+        with pytest.raises(SystemExit, match="配布名に使えない文字がある"):
+            civitai._assert_name("anima-wai\n")
+
     def test_it_refuses_the_shared_seat(self) -> None:
         """`shared` は配布リポの共有ファイルの席（`karume.dist` の `SHARED_DIRNAME`）。"""
         with pytest.raises(SystemExit, match="共有ファイルの席と衝突する"):

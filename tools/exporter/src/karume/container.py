@@ -86,6 +86,9 @@ MAX_DESCRIPTOR_BYTES = 32 * _MIB
 #: descriptor / グラフ JSON の入れ子深さの上限（§10）。
 MAX_JSON_DEPTH = 64
 
+# 以下 3 つの語彙は MUST: `.fullmatch` で引く — Python の `$` は末尾の改行の直前でも一致する
+# ので、`.match` だと改行付きの綴りを受理し、TS の読み手（JS の `$`）と受理集合がずれる。
+
 #: グラフ名の語彙（§2.1）。
 GRAPH_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -1714,7 +1717,7 @@ def _const_initializers(
 
 
 def _assert_graph_name(graph_name: str) -> None:
-    if not GRAPH_NAME_PATTERN.match(graph_name):
+    if not GRAPH_NAME_PATTERN.fullmatch(graph_name):
         raise ContainerFormatError(
             f"グラフ名 '{graph_name}' が語彙外（{GRAPH_NAME_PATTERN.pattern}）"
         )
@@ -1963,7 +1966,7 @@ def _require_string(value: Any, where: str) -> str:
 
 def _require_sha256(value: Any, where: str) -> str:
     _require(
-        isinstance(value, str) and SHA256_HEX_PATTERN.match(value) is not None,
+        isinstance(value, str) and SHA256_HEX_PATTERN.fullmatch(value) is not None,
         f"{where} が sha256（小文字 16 進 64 文字）でない: {value!r}",
     )
     return value
@@ -1972,7 +1975,7 @@ def _require_sha256(value: Any, where: str) -> str:
 def _require_block_id(value: Any, where: str) -> str:
     block_id = _require_string(value, where)
     _require(
-        BLOCK_ID_PATTERN.match(block_id) is not None,
+        BLOCK_ID_PATTERN.fullmatch(block_id) is not None,
         f"{where}: block id '{block_id}' が語彙外（{BLOCK_ID_PATTERN.pattern}）",
     )
     return block_id
@@ -2105,7 +2108,7 @@ def _parse_graph_descriptor(raw: bytes) -> GraphDescriptor:
     union: set[str] = set()
     for name, declaration in graphs.items():
         _require(
-            GRAPH_NAME_PATTERN.match(name) is not None,
+            GRAPH_NAME_PATTERN.fullmatch(name) is not None,
             f"{where}.graphs: グラフ名 '{name}' が語彙外",
         )
         union |= set(_graph_required_ops(declaration, f"{where}.graphs['{name}']"))

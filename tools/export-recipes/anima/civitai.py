@@ -67,7 +67,8 @@ MODEL_PATH_PATTERN = re.compile(r"/models/(?P<model>\d+)(?:/[^/]*)?/?")
 #:
 #: MUST: 写しにするのは上の MUST（torch を import しない）から — `karume.dist` を import すると
 #: `karume/__init__.py` 経由で `karume.convert` が torch を引く（2026-09-05 実測）ので、正本を
-#: 直接呼べない。正本が規則を足したらここも同じ日に直す。
+#: 直接呼べない。正本が規則を足したらここも同じ日に直す。正本と同じく `.fullmatch` で引く
+#: （Python の `$` は末尾の改行の直前でも一致する）。
 MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 
 #: 配布名に使えない予約名（`karume.dist` の `SHARED_DIRNAME` — 共有ファイルの席と衝突する）。
@@ -147,7 +148,7 @@ def _slug(text: str) -> str:
 
 def _assert_name(name: str) -> str:
     """配布名として通る綴りかを最後に確かめる（ADR 0077 の受理集合）。"""
-    if MODEL_NAME_PATTERN.match(name) is None:
+    if MODEL_NAME_PATTERN.fullmatch(name) is None:
         raise SystemExit(
             f"配布名に使えない文字がある: {name}（受理集合: A-Za-z0-9._- ・先頭のドット不可）"
         )

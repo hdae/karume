@@ -66,7 +66,7 @@ def _assert_graph_name(graph_name: str) -> str:
     いるのは呼び手だけなので、呼び手が名乗る（container-v1 §2.1 — 移行 CLI が使う部品名と
     同じ綴り MUST）。
     """
-    if GRAPH_NAME_PATTERN.match(graph_name) is None:
+    if GRAPH_NAME_PATTERN.fullmatch(graph_name) is None:
         raise ContainerFormatError(
             f"グラフ名 '{graph_name}' がコンテナの語彙（{GRAPH_NAME_PATTERN.pattern}）から外れる"
         )

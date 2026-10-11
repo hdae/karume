@@ -306,3 +306,10 @@ class TestTheGraphNameIsNamedByTheCaller:
             published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit/1")
 
         assert list(tmp_path.iterdir()) == []
+
+    def test_a_name_with_a_trailing_newline_fails_loudly(self, tmp_path: Path) -> None:
+        """Python の `$` は末尾の改行の直前でも一致する — `.match` だと通り TS が拒否する綴り。"""
+        with pytest.raises(ContainerFormatError, match="語彙"):
+            published(Biased(), EXAMPLE, tmp_path / "model.krm", graph_name="dit\n")
+
+        assert list(tmp_path.iterdir()) == []

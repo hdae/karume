@@ -183,6 +183,10 @@ QUANT_PRESENTATION_LIMITS: Mapping[str, int] = {
     "description": MAX_QUANT_DESCRIPTION_CHARS,
 }
 
+# 以下の綴りの正規表現は MUST: `.fullmatch` で引く — Python の `$` は末尾の改行の直前でも
+# 一致するので、`.match` だと `'owner/name\n'` を受理する。hub（JS の `$`）は拒否するので、
+# 受理集合が hub とずれて「組み立ては緑なのに hub が開けない」manifest になる。
+
 #: 越境コンポーネント参照（ADR 0038 §7 の optional `repo` / `revision` 席）の revision の綴り
 #: — HF の**完全な commit sha**（40 桁 hex 小文字）。ブランチ名やタグは指し先が動くので
 #: pin にならない（{@link ExternalComponents}）。
@@ -576,7 +580,7 @@ def generator_tag() -> str:
 
 def assert_model_name(name: str) -> str:
     """モデル名を検査して返す（manifest のキー兼リポ内ディレクトリ名）。"""
-    if not MODEL_NAME_RE.match(name):
+    if not MODEL_NAME_RE.fullmatch(name):
         raise DistError(
             f"モデル名 '{name}' は許可文字 [A-Za-z0-9._-]（先頭のドット不可）に一致しない"
             " — モデル名はリポ内のディレクトリ名でもあるので hub の path 検査と同じ集合に縛る"
@@ -609,7 +613,7 @@ def assert_rel_path(rel_path: str, where: str) -> str:
             raise DistError(
                 f"{where}: rel_path '{rel_path}' に先頭ドットのセグメント '{segment}' がある"
             )
-        if not PATH_SEGMENT_RE.match(segment):
+        if not PATH_SEGMENT_RE.fullmatch(segment):
             raise DistError(
                 f"{where}: rel_path '{rel_path}' のセグメント '{segment}' が"
                 "許可文字 [A-Za-z0-9._-] に一致しない"
@@ -1724,9 +1728,9 @@ class ExternalComponents:
     roles: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not REPO_RE.match(self.repo):
+        if not REPO_RE.fullmatch(self.repo):
             raise DistError(f"越境参照の repo '{self.repo}' が '<owner>/<name>' の形でない")
-        if not REVISION_RE.match(self.revision):
+        if not REVISION_RE.fullmatch(self.revision):
             raise DistError(
                 f"越境参照の revision '{self.revision}' が 40 桁の commit sha でない"
                 " — ブランチ名やタグは pin にならない（指し先が動くと宣言と現物が食い違う）"
@@ -1742,9 +1746,9 @@ def assert_external_ref(where: str, ref: Mapping[str, Any]) -> None:
         raise DistError(
             f"{where}: 越境参照の欄が {sorted(EXTERNAL_REF_KEYS)} でない（実際: {sorted(ref)}）"
         )
-    if not REPO_RE.match(str(ref["repo"])):
+    if not REPO_RE.fullmatch(str(ref["repo"])):
         raise DistError(f"{where}: repo '{ref['repo']}' が '<owner>/<name>' の形でない")
-    if not REVISION_RE.match(str(ref["revision"])):
+    if not REVISION_RE.fullmatch(str(ref["revision"])):
         raise DistError(
             f"{where}: revision '{ref['revision']}' が 40 桁の commit sha でない"
             " — 参照は不変のバイト列を指すのが成立条件"
@@ -1964,7 +1968,7 @@ def resolve_repo(pipeline: Pipeline, models: Sequence[str], repo: str | None) ->
     あって、モデル名の並びからは決まらない。
     """
     if repo is not None:
-        if not REPO_RE.match(repo):
+        if not REPO_RE.fullmatch(repo):
             raise DistError(f"--repo '{repo}' が '<owner>/<name>' の形でない")
         return repo
     names = sorted({pipeline.repo_name(model) for model in models})

@@ -303,6 +303,21 @@ class TestTheIntake:
         with pytest.raises(ui.Umt5IntakeError, match=match):
             ui.intake(REPO, revision, file, NAME, hub=Unreachable(), out_root=tmp_path)
 
+    def test_a_repository_with_a_trailing_newline_fails_before_the_api(self, tmp_path):
+        """Python の `$` は末尾の改行の直前でも一致する — hub が拒否する綴りを通さない。"""
+
+        class Unreachable:
+            def revision(self, *_: Any) -> Any:
+                raise AssertionError("API を引く前に落ちていない")
+
+            def download(self, *_: Any) -> Any:
+                raise AssertionError("取得の前に落ちていない")
+
+        with pytest.raises(ui.Umt5IntakeError, match="'<owner>/<name>' の形でない"):
+            ui.intake(
+                f"{REPO}\n", FIXTURE_REVISION, FILE, NAME, hub=Unreachable(), out_root=tmp_path
+            )
+
     def test_the_name_of_the_base_row_is_refused(self):
         with pytest.raises(ui.Umt5IntakeError, match="本家の行"):
             ui.assert_intake_name(UMT5_DEFAULT_MODEL)

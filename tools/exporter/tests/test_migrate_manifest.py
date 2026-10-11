@@ -1312,3 +1312,38 @@ class TestThePleShardDeclarations:
         with pytest.raises(MigrateError, match=message):
             migrated(gemma_repo, out)
         assert not out.exists() or not any(out.iterdir())
+
+
+class TestATrailingNewlineIsRefused:
+    """旧 manifest と `--cross-repo` の綴りは末尾の改行付きを拒否する（hub と同じ受理集合）。
+
+    Python の `$` は末尾の改行の直前でも一致するので、`^…$` を `.match` で引くと改行付きが通る。
+    """
+
+    @pytest.mark.parametrize(
+        "spec",
+        [f"hdae/lender\n=/tmp/x@{REVISION}", f"hdae/lender=/tmp/x@{REVISION}\n"],
+    )
+    def test_a_cross_repo_option_with_a_trailing_newline_fails_loudly(self, spec: str) -> None:
+        with pytest.raises(MigrateError, match="--cross-repo"):
+            parse_cross_repo(spec)
+
+    def test_a_pipeline_with_a_trailing_newline_fails_loudly(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        manifest["models"]["alpha"]["pipeline"] = "synthetic/1\n"
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(MigrateError, match="'<name>/<major>' の形でない"):
+            migrated(repo, tmp_path / "out")
+
+    def test_a_sha256_with_a_trailing_newline_fails_loudly(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        manifest = json.loads((repo / "karume.json").read_text(encoding="utf-8"))
+        manifest["models"]["alpha"]["assets"]["tokenizer"]["sha256"] = "a" * 64 + "\n"
+        (repo / "karume.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with pytest.raises(MigrateError, match=r"assets\['tokenizer'\]\.sha256 が sha256"):
+            migrated(repo, tmp_path / "out")

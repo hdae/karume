@@ -334,7 +334,7 @@ def migrate_component(
     _assert_part_length(part_bytes)
     source = base_path(Path(path))
     name = graph_name if graph_name is not None else source.parent.name
-    if GRAPH_NAME_PATTERN.match(name) is None:
+    if GRAPH_NAME_PATTERN.fullmatch(name) is None:
         raise MigrateError(
             f"グラフ名 '{name}' がコンテナの語彙（{GRAPH_NAME_PATTERN.pattern}）から外れる"
             " — `--graph-name` で明示する"
@@ -446,7 +446,7 @@ def _rel_path(value: Any, where: str) -> str:
 
 def _sha256(value: Any, where: str) -> str:
     _require(
-        isinstance(value, str) and SHA256_HEX_PATTERN.match(value) is not None,
+        isinstance(value, str) and SHA256_HEX_PATTERN.fullmatch(value) is not None,
         f"{where} が sha256（小文字 16 進 64 文字）でない: {value!r}",
     )
     return value
@@ -514,7 +514,8 @@ class WeightEntry:
 
 
 #: `pipeline` の綴り `<name>/<major>`（hub の `parsePipeline` と同じ受理形 — 実物は文字列で、
-#: `{name, major}` のオブジェクトではない）。
+#: `{name, major}` のオブジェクトではない）。MUST: `.fullmatch` で引く — Python の `$` は末尾の
+#: 改行の直前でも一致するので、`.match` だと hub が拒否する `'name/1\n'` を受理する。
 PIPELINE_RE = re.compile(r"^([A-Za-z0-9_-]+)/(\d+)$")
 
 
@@ -574,7 +575,7 @@ def _legacy_model(value: Any, where: str) -> LegacyModel:
     )
     pipeline = _text(obj["pipeline"], f"{where}.pipeline")
     _require(
-        PIPELINE_RE.match(pipeline) is not None,
+        PIPELINE_RE.fullmatch(pipeline) is not None,
         f"{where}.pipeline が '<name>/<major>' の形でない: {pipeline!r}",
     )
     weights: dict[str, dict[str, WeightEntry]] = {}
@@ -635,10 +636,10 @@ def parse_cross_repo(spec: str) -> CrossRepo:
     directory, at, revision = rest.rpartition("@")
     _require(bool(at) and bool(directory), f"--cross-repo '{spec}' が {shape} の形でない")
     _require(
-        REPO_RE.match(repo) is not None, f"--cross-repo '{spec}': repo が <owner>/<name> でない"
+        REPO_RE.fullmatch(repo) is not None, f"--cross-repo '{spec}': repo が <owner>/<name> でない"
     )
     _require(
-        REVISION_RE.match(revision) is not None,
+        REVISION_RE.fullmatch(revision) is not None,
         f"--cross-repo '{spec}': revision が 40 桁 hex 小文字でない（pin は完全な commit sha）",
     )
     return CrossRepo(repo, Path(directory), revision)
@@ -989,7 +990,7 @@ def _convert_unit(
     block_bytes: int,
 ) -> tuple[Container, ConvertedContainer]:
     """1 単位（部品 × dtype の shard 列）を `krm` へ変換し、manifest の `container` を組む。"""
-    if GRAPH_NAME_PATTERN.match(unit.component) is None:
+    if GRAPH_NAME_PATTERN.fullmatch(unit.component) is None:
         raise MigrateError(
             f"{where}: 部品名 '{unit.component}' がコンテナのグラフ名の語彙"
             f"（{GRAPH_NAME_PATTERN.pattern}）から外れる"

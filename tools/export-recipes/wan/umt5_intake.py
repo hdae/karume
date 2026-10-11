@@ -374,7 +374,7 @@ def load_intake(directory: Path) -> Umt5Intake:
         )
     name = assert_intake_name(_require(document, "name", str, where))
     repo = _require(document, "repo", str, where)
-    if REPO_RE.match(repo) is None:
+    if REPO_RE.fullmatch(repo) is None:
         raise Umt5IntakeError(f"{where}: repo {repo!r} が '<owner>/<name>' の形でない")
     revision = _require(document, "revision", str, where)
     if _COMMIT_SHA.fullmatch(revision) is None:
@@ -653,7 +653,7 @@ def intake(
     out_root: Path = INTAKE_ROOT,
 ) -> Umt5Intake:
     """上流の safetensors 1 本を `<out_root>/<name>/` へ取り込み、記録を書いて返す。"""
-    if REPO_RE.match(repo) is None:
+    if REPO_RE.fullmatch(repo) is None:
         raise Umt5IntakeError(f"--repo {repo!r} が '<owner>/<name>' の形でない")
     if _COMMIT_SHA.fullmatch(revision) is None:
         raise Umt5IntakeError(

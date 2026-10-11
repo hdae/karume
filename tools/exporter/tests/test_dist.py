@@ -2646,3 +2646,59 @@ class TestTheRepositorySpelling:
     def test_a_dot_after_the_first_character_is_accepted(self, repo: str) -> None:
         """対照 — 先頭以外のドットは hub も受理する（拒否しすぎない）。"""
         assert resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], repo) == repo
+
+
+class TestATrailingNewlineIsRefused:
+    """綴りの検査は末尾の改行付きを拒否する — hub（JS の `$`）と受理集合を揃える。
+
+    Python の `$` は末尾の改行の直前でも一致するので、`^…$` を `.match` で引くと
+    `'owner/name\\n'` が通る。hub は拒否するので、組み立ては緑なのに hub が開けない
+    manifest になる。
+    """
+
+    def test_a_repository_with_a_trailing_newline_is_refused(self) -> None:
+        with pytest.raises(DistError, match="<owner>/<name>"):
+            resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], "owner/name\n")
+
+    def test_a_model_name_with_a_trailing_newline_is_refused(self) -> None:
+        with pytest.raises(DistError, match="許可文字"):
+            assert_model_name("name\n")
+
+    def test_a_relative_path_with_a_trailing_newline_is_refused(self) -> None:
+        with pytest.raises(DistError, match="許可文字"):
+            dist.assert_rel_path("a/b.json\n", "test")
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("repo", "owner/name\n", "<owner>/<name>"),
+            ("revision", "0" * 40 + "\n", "40 桁の commit sha"),
+        ],
+    )
+    def test_an_external_reference_with_a_trailing_newline_is_refused(
+        self, field: str, value: str, message: str
+    ) -> None:
+        ref = {
+            "repo": "owner/name",
+            "revision": "0" * 40,
+            "path": "a/b.json",
+            "size": 1,
+            "sha256": "0" * 64,
+        }
+
+        with pytest.raises(DistError, match=message):
+            dist.assert_external_ref("test", {**ref, field: value})
+
+    def test_the_same_reference_without_the_newline_is_accepted(self) -> None:
+        """対照 — 改行を除いた同じ綴りは通る（拒否の理由が改行だけであることの確認）。"""
+        dist.assert_external_ref(
+            "test",
+            {
+                "repo": "owner/name",
+                "revision": "0" * 40,
+                "path": "a/b.json",
+                "size": 1,
+                "sha256": "0" * 64,
+            },
+        )
+        assert resolve_repo(_PER_MODEL_REPO_PIPELINE, ["m"], "owner/name") == "owner/name"
