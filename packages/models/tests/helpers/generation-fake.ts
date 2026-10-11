@@ -12,6 +12,11 @@
  *   実 context / 実 executor と同じく fail loudly（門の文言まで写す）。論理長と保留は
  *   **context ごと**に持つ（`fork` が論理長を写した独立の context を返す — ADR 0066 追記
  *   2026-10-11。`createGenerationContext` が返すのは常に最初の 1 本 {@link FakeSession.context}）。
+ *   `run` が受けるのは**この fake が作った context だけ**（最初の 1 本と `fork` の分岐 — 他は
+ *   fail loudly）。偽物の `fork` が写す拒否は**保留中（commit 待ち）と dispose 後の 2 つだけ**で、
+ *   実 `GenerationContext.fork` の残りの拒否（汚染・決着していない run・batch の予約・借り手・
+ *   device 消失・Session の dispose 済み）は写さない — それらは実 GPU の門
+ *   （`packages/runtime/tests/gpu_generation_context_test.ts`）が持つ。
  * - **行ごとの logits**: {@link FakeOptions.successor} を渡すと「その行の入力 token → その行の
  *   argmax」の写像になる（= 直前 token だけで決まる決定的な target のモデル）。verify の複数行を
  *   1 本の後続関数で表せるので、投機の受理・棄却を配列 1 本で組める。
@@ -124,7 +129,7 @@ export type FakeContext = {
   commit(rows: number): void;
   /**
    * 論理長を写した独立の context を返す（実 `GenerationContext.fork` と同じく、保留がある間と
-   * dispose の後は拒否する）。
+   * dispose の後は拒否する）。写す拒否はこの 2 つだけ（残りはファイル冒頭の「論理長の進行」）。
    */
   fork(): Promise<FakeContext>;
   dispose(): Promise<void>;
