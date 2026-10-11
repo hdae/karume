@@ -9,7 +9,11 @@
 //    自己相関の変換長不足 / 自己相関の lag が信号長以上）が全部 `RangeError` で落ちる。
 // ② **素朴 DFT との一致**（rtol 1e-12）。バタフライ・ビット反転・回転因子の符号が壊れると、
 //    特徴は「それらしい別の値」になるだけで shape も値域も合ったまま最後まで通る。
-// ③ **ゼロ詰めは末尾**（先頭詰めだと位相が回り、パワースペクトルの平坦性が崩れる）。
+// ③ **ゼロ詰め後も値が正しい**（信号長 < 変換長でパワーと線形自己相関が定義どおり）。
+//    NOTE: 詰める**向き**（末尾 / 先頭）はここでは縛れない。先頭へ詰めても巡回シフトになるだけで、
+//    パワースペクトルも自己相関も変わらない（`[1,2,0,0]` と `[0,0,1,2]` はパワーが共に
+//    `[9,5,1]`、先頭 2 lag の自己相関が共に `[5,2]`）。向きは公開 API から観測できないので、
+//    そのための API は足さない。
 
 import { assertAlmostEquals, assertThrows } from "@std/assert";
 import { Fft } from "../src/vowel-detector/fft.ts";
@@ -130,16 +134,15 @@ Deno.test("Fft.autocorrelation: 素朴な線形自己相関と一致する（長
   }
 });
 
-Deno.test("Fft.powerSpectrum: 足りない長さは末尾へゼロ詰めする（先頭詰めなら位相が回る）", () => {
-  // `[1, 0]` を変換長 4 で通すと、末尾詰め（= `[1,0,0,0]`）なら全ビンが 1。先頭詰め
-  // （`[0,0,1,0]`）でも `|X[k]|²` は 1 のままなので、向きは自己相関側で見る。
+Deno.test("Fft: 変換長に足りない信号をゼロ詰めしてもパワーと線形自己相関が正しい", () => {
+  // `[1, 0]` を変換長 4 で通すと全ビンが 1（単位インパルスのパワー）。
   const out = new Float64Array(3);
   new Fft(4).powerSpectrum(Float32Array.from([1, 0]), out);
   for (let bin = 0; bin < out.length; bin += 1) {
     assertAlmostEquals(out[bin], 1, 1e-12, `bin ${bin}`);
   }
 
-  // 向きの門: `[1, 2]` の自己相関は lag 0 = 5・lag 1 = 2。先頭詰めだと lag 1 が 0 になる。
+  // `[1, 2]` の線形自己相関は lag 0 = 5・lag 1 = 2（詰める向きには依らない — 冒頭③の NOTE）。
   const lags = new Float64Array(2);
   new Fft(4).autocorrelation(Float32Array.from([1, 2]), lags);
   assertAlmostEquals(lags[0], 5, 1e-12);
