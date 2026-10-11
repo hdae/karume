@@ -66,7 +66,7 @@ export const planRowBlocks = (
   }
   if (bytesPerRow > limit) {
     throw new ExecutionError(
-      `${where}: クエリ 1 行ぶんのスコア ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
+      `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
         "（行ブロックでは分割しきれない形）",
     );
   }

@@ -34,10 +34,12 @@ Deno.test("キー長 1 の形は行統計も上限に収まる枚数を自動で
 });
 
 Deno.test("f16 計算でキー長 4 未満の形も行統計で割る", () => {
-  // B·H = 1・M = 8・N = 3・f16 → 1 行のスコア 6B・行統計 8B。上限 16B → 2 行 × 4 枚。
-  const blocks = planAttentionBlocks({ batch: 1, rows: 8, cols: 3, scoreBytes: 2 }, 16);
-  assertEquals(blocks.map((block) => block.rows), [2, 2, 2, 2]);
+  // B·H = 1・M = 8・N = 3・f16 → 1 行のスコア 6B・行統計 8B。上限 24B → 3 行 / 枚で 3 / 3 / 2。
+  // 上限は「スコアだけで割ると行統計が溢れる」値に選ぶ: スコアだけなら 4 行 / 枚 × 2 枚で、
+  // 1 枚の行統計 32B が上限 24B を超える（上限 16B では両式とも 2 行 / 枚になり区別できない）。
+  const blocks = planAttentionBlocks({ batch: 1, rows: 8, cols: 3, scoreBytes: 2 }, 24);
+  assertEquals(blocks.map((block) => block.rows), [3, 3, 2]);
   for (const block of blocks) {
-    assert(block.scoreBytes <= 16 && block.statsBytes <= 16, JSON.stringify(block));
+    assert(block.scoreBytes <= 24 && block.statsBytes <= 24, JSON.stringify(block));
   }
 });

@@ -1000,7 +1000,7 @@ Deno.test("行ブロック分割は上限に収まる最小枚数を等分で返
   assertThrows(
     () => planRowBlocks(10, 1001, 1000),
     ExecutionError,
-    "クエリ 1 行ぶんのスコア",
+    "クエリ 1 行ぶんの一時",
   );
   // 強制枚数が上限に収まらないのも fail loudly（緩める向きには使えない）。
   assertThrows(() => planRowBlocks(10, 100, 400, 2), ExecutionError, "2 枚では 1 枚 500B");
