@@ -923,7 +923,7 @@ export const createGenerationSequence = async <C extends ForkableContextFace<C>>
 /**
  * 分岐が新しい sequence へ引き継ぐ状態（{@link GenerationSequence.fork} が鎖の席の中で捕捉する）。
  */
-type SequenceSeed = {
+type BranchState = {
   /** 元の未 commit frontier（無ければ undefined）。 */
   readonly pendingToken: number | undefined;
   /** 元のゲートを写したゲート（元にゲートが居なければ undefined）。 */
@@ -932,7 +932,7 @@ type SequenceSeed = {
 
 /**
  * 確保済みの context から sequence を組み立てる（{@link createGenerationSequence} と
- * {@link GenerationSequence.fork} が共有する 1 本）。`seed` が無ければ新しい会話（ゲートを
+ * {@link GenerationSequence.fork} が共有する 1 本）。`inherited` が無ければ新しい会話（ゲートを
  * ノブから作る）、あれば分岐（frontier とゲートを引き継ぐ）。
  *
  * MUST: 組み立てに失敗したら context を畳んでから投げ直す（失敗した組み立ての context は
@@ -942,7 +942,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
   options: GenerationSequenceOptions<C>,
   capacity: number,
   context: C,
-  seed: SequenceSeed | undefined,
+  inherited: BranchState | undefined,
 ): Promise<GenerationSequence> => {
   const { session, program } = options;
   /** drafter の面（投機の指定があるときだけ — 借り手は context の直後に開き、先に畳む）。 */
@@ -953,19 +953,19 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
    *
    * MUST: 寿命は sequence である（ターンを跨いで持つ）— 壁と受理数の移動平均はターン 1 本では
    * 収束せず、会話ごとに測り直すと「最初の数 cycle だけ投機」を毎ターン繰り返す。
-   * MUST: fork した sequence へは観測状態を写す（`seed.gate` — 分岐は同じ会話・同じ host の
+   * MUST: fork した sequence へは観測状態を写す（`inherited.gate` — 分岐は同じ会話・同じ host の
    * 続きなので、測り直さない）。
    */
-  let gate: SpeculationGate | undefined = seed?.gate;
+  let gate: SpeculationGate | undefined = inherited?.gate;
   /** 壁時計（ゲートの観測と観測席の `wallMs` が読む — 既定は `performance.now`）。 */
   const now = options.speculative?.now ?? ((): number => performance.now());
   if (options.speculative !== undefined) {
     try {
       // ノブの門は借り手を開く**前**に通す（不正なノブが GB 級のロードの後まで落ちない）。
-      // 分岐（`seed` あり）は元の生成時に検査済みのノブで写したゲートを受け取るので通らない。
-      if (seed === undefined && (options.speculative.policy ?? "auto") === "auto") {
+      // 分岐（`inherited` あり）は元の生成時に検査済みのノブで写したゲートを受け取るので通らない。
+      if (inherited === undefined && (options.speculative.policy ?? "auto") === "auto") {
         gate = createSpeculationGate(options.speculative.gate);
-      } else if (seed === undefined && options.speculative.gate !== undefined) {
+      } else if (inherited === undefined && options.speculative.gate !== undefined) {
         // ゲートの居ない席にノブを渡すのは「効かないノブ」— 黙って通さない（横断不変条件）。
         throw new Error(
           `speculative: policy "always" にゲートのノブ ${
@@ -996,7 +996,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
   // 「generate 1 回ぶん」の直列化（ADR 0083 決定 2）— 自前ロックは作らない。
   const chain = createOperationChain();
   // 分岐は元の未 commit frontier を引き継ぐ（次ターンの prefill 先頭へ連結される — 決定 4）。
-  let pendingToken: number | undefined = seed?.pendingToken;
+  let pendingToken: number | undefined = inherited?.pendingToken;
   /**
    * 保留中の verify のうち frontier にした行数（= target が消費した行数・投機の配送中だけ非 0）。
    * {@link settleCommit} が保留中の verify をここまで commit する。
@@ -1506,7 +1506,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         // generate の合間 = `frontierRows` は 0・deferred の保留も無い）。`context.fork()` は
         // 呼んだ同期区間で論理長とバイトを捕捉するので、frontier とゲートの写しと並べて await を
         // 挟まずに呼ぶ。
-        const inherited: SequenceSeed = { pendingToken, gate: gate?.fork() };
+        const inherited: BranchState = { pendingToken, gate: gate?.fork() };
         const forked = await context.fork();
         // 組み立て（drafter の開き直し）に失敗したら、複製した context は assembleSequence が
         // 畳んでから投げ直す（元は無傷）。
