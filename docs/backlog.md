@@ -117,6 +117,7 @@
   - tokenizer のテストの乱数: `packages/models/tests/gemma4_tokenizer_test.ts` の `nextRandom` は素の乗算 `state * 1103515245` が 2^53 を超えて下位ビットが潰れ、乱択のばらつきが小さい — `Math.imul` の形にする。
   - limitations の数の食い違い: `docs/limitations.md` の「生成 sequence」の節の導入文は「制約が 2 つある」と書くが、箇条は 3 本ある。
   - ADR 0075 の一意化の記述: `docs/decisions/0075-quant-presentation.md` の「取得層は path で一意化してから合計する」は、ADR 0038 追記の `fileRefKey`（`repo@revision/path`）への切り替えと食い違う。
+  - DataView / ArrayBufferView の型引数（lint 規則 `karume/typed-array-buffer` の範囲外）: TS 5.7 以降は `DataView` と `ArrayBufferView` も TypedArray と同じく buffer の型引数を取り、省くと既定の `ArrayBufferLike` になる。src には無印の `DataView` の型注釈が 4 か所残る（`packages/runtime/src/gpu/attention-dp4a-canary.ts`・`packages/runtime/src/format/container/header.ts`・`packages/models/src/audio/wav.ts` の 2 か所 — `ArrayBufferView` は 0 件）— 規則の名前の集合に足すかは別の裁定。
 - **Wan2.2 の T2V / I2V の通しの e2e の helper の重複を寄せる（起票 2026-10-10・利用者の裁定 = later）**: `e2e_wan_ti2v_pipeline_test.ts`（T2V）と
   `e2e_wan_ti2v_i2v_pipeline_test.ts`（I2V — ADR 0121 段 9b）が同じ形の小物を別々に持つ — fixture の読み込み（`readFixture`）・差の計算と整形（`difference` /
   `formatDifference`）・ビット一致（`bitsEqual`）・RGB の取り出し（`rgbBytes`）・非有限の数え上げ（`countNonFinite`）・プロンプトの解決（`textOf`）・帯の導出
