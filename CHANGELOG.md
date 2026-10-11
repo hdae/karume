@@ -363,8 +363,7 @@ measurements in `docs/research/`.
   Without `maxStorageBufferBindingSize`, the estimate counts the fused `attention` op only when its
   row-block count is the same on every device — the score matrix and the row statistics each fit one
   block under the WebGPU core default (128 MiB), or `attentionRowBlockMaxBytes` is at most that
-  default — and otherwise
-  rejects the graph, asking for `maxStorageBufferBindingSize`.
+  default — and otherwise rejects the graph, asking for `maxStorageBufferBindingSize`.
   The second entry of `unaccounted` now names only the linear int8 quantization buffers. The estimates
   the Anima and Gemma pipelines use are unchanged.
 - BiRefNet_HR: `segment()` now scales the matte back in the order its upstream uses — the sigmoid is

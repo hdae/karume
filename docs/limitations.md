@@ -537,13 +537,13 @@ core 既定以下の形）だけを数え、それ以外は上限を名指して
   読み込みの後に落ちる。事前に知る手段は見積り（`EstimateOptions.attentionRowBlockMaxBytes` に同じ値を渡す）。
 - **山は予算なしより下がりうるが、小さくするほど下がるとは限らない**: 予算で縮むのは行ブロック 1 枚ぶんの一時で、中間
   全体の山は中間の配置の割れ方に依る（見積りの計算値で、Wan2.2 の DiT の実用席・121 フレームでは 256 MiB が 512 MiB より
-  大きい — [research 2026-10-11](research/2026-10-11-fused-attention-estimate-before-after.md)。同じ形の実寸の backing は 1 GiB →
+  大きい — [research 2026-10-11（見積りの前後）](research/2026-10-11-fused-attention-estimate-before-after.md)。同じ形の実寸の backing は 1 GiB →
   512 MiB → 256 MiB で単調に下がり、見積りの形は出なかった — 開発機の実測 2026-10-11・
-  [research 2026-10-11](research/2026-10-11-row-block-budget-stage-4b.md)。測ったのはこの 1 形だけ）。
+  [research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)。測ったのはこの 1 形だけ）。
 - **速度の代価は形と機に依る**: 増えた枚数 × 1 枚あたりの dispatch 数（融合 attention 3・分解 attention 4・states 形 2〜3）
   だけ dispatch が増える。小さい形では分割で遅くなった実測があり、分割の方が速かった例もある（ADR 0124 Context）。Wan2.2 の
   DiT の実用席・121 フレーム（開発機の RTX 3080 Ti・Deno）では、計測モードの GPU 時間の合計が予算 1 GiB / 512 MiB で予算なしと
-  揺れの内、256 MiB で +24.9% だった（実測 2026-10-11・[research 2026-10-11](research/2026-10-11-row-block-budget-stage-4b.md)）。
+  揺れの内、256 MiB で +24.9% だった（実測 2026-10-11・[research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)）。
 - **models の pipeline には口が無い**: runtime の `SessionOptions` だけの欄で、`WanTi2vPipeline` などからは渡せない
   （口を出すかは段 4b の実測の後で決める）。
 
@@ -1247,7 +1247,7 @@ Consequences）。
   `SessionOptions.attentionRowBlockMaxBytes` は attention の瞬間の一時を縮めるが、`WanTi2vPipeline` には口が無く、
   10 GB 級で 61 フレーム以上が入るかを確かめる機も無い。12 GiB 級の開発機（RTX 3080 Ti・Deno）の 1280×704×121 の実用席では、予算
   512 MiB で DiT の backing が 5.97 → 4.51 GiB、DiT だけを回したときの GPU 全体の VRAM の山が 11,308 → 9,811 MiB に下がった（実測
-  2026-10-11・出力は予算なしとビット同一・[research 2026-10-11](research/2026-10-11-row-block-budget-stage-4b.md)）。
+  2026-10-11・出力は予算なしとビット同一・[research 2026-10-11（段 4b の実測）](research/2026-10-11-row-block-budget-stage-4b.md)）。
 - **席は参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（既定）の 2 つ**（f16 席は無い — ADR 0121 決定 2）。既定の実用席は
   利用者の視認（1280×704×33・50 ステップの 12 本 — 2026-10-06）で採った席。参照席との自機 A/B 門（ADR 0121 の段 7）では、step 1 の潜在の
   relRMS が 33 フレーム 4.39e-2・121 フレーム 4.92e-2（帯 8.8e-2 / 9.9e-2・121 フレームの門は opt-in `KARUME_WAN_TI2V_121F=1`）。

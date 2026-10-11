@@ -74,7 +74,7 @@ KARUME_WAN_TI2V_ROW_BLOCK_PROBE=1 deno test -A --v8-flags=--expose-gc packages/m
 | 256 MiB | 134 / 3                 | 4.33 GiB（4,645,241,408 B） | −1.65 GiB（−1,684.6 MiB） | 4.27 GiB | 9.01 GiB  | 9,622 / 9,622 MiB           | −1,686 MiB             | 93 / 94 ℃ | 0x425 / 0x25 | 46.2 / 48.2 / 47.7 / 49.4 s |
 
 - 壁時計の 4 回は、ABBA の前半の 1 本目 / 2 本目、後半の 1 本目 / 2 本目の順。
-- 同じ予算の 2 度目の backing は 1 度目と同じだった（テストの門）。diag − backing は全ての予算で 4.6875 GiB（重みぶん）で、backing −
+- 同じ予算の 2 度目の backing は 1 度目と同じだった（テストの門）。diag − backing は全ての予算で約 4.69 GiB（予算に依らずほぼ一定・差は数 KB）で、backing −
   resident も全ての予算で 57,385,536 B と同じだった。
 - 理由のビットは nvidia-smi の `clocks_event_reasons.active` を区間で論理和した値。NVML のビットの割り当てで読むと、0x25 = gpu_idle（0x1）+ sw_power_cap（0x4）+
   sw_thermal_slowdown（0x20）。0x425 はそれに 0x400 のビットが足された値（0x400 の意味は nvml.h で引いていない）。全ての予算の走行が

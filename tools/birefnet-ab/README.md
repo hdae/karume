@@ -1,10 +1,10 @@
 # birefnet-ab
 
 A blind A/B of BiRefNet's alpha-matte post-processing (ADR
-[0125](../../docs/decisions/0125-birefnet-matte-postprocess.md)): the current path
-(`float-bilinear` — antialiased bilinear on the floating-point sigmoid, then round) against the
+[0125](../../docs/decisions/0125-birefnet-matte-postprocess.md)): the path used before the
+procedure was declared per series (`float-bilinear` — antialiased bilinear on the floating-point sigmoid, then round) against the
 BiRefNet_HR upstream's intent (`u8-pil-bicubic` — sigmoid, round to 8 bits, then Pillow's 8-bit
-BICUBIC). Only BiRefNet_HR is compared: for Lucida the current path already matches the upstream at
+BICUBIC). Only BiRefNet_HR is compared: for Lucida that path already matches the upstream at
 the level of numerical intent — the same kernel and the same order of steps (ADR 0125); only the
 quantization differs (round instead of the upstream's truncation, a deliberate choice for every
 procedure).
@@ -56,5 +56,5 @@ are not resolved), so spell `--out` without going through a symbolic link.
 - `work/` — logits (the graph output as is) and the 8-bit alpha of each procedure, for the
   cross-check.
 
-The decision rule is fixed before looking (ADR 0125): the current path stays only if at least five
+The decision rule is fixed before looking (ADR 0125): the earlier path stays only if at least five
 pairs favour it and none favours the upstream; otherwise the upstream procedure is adopted.
