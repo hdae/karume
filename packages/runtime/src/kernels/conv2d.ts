@@ -46,7 +46,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
-import { assertConvAxisExtent } from "./conv-bounds.ts";
+import { assertConvAxisExtent, assertConvFlatExtents } from "./conv-bounds.ts";
 import { GEMM_MTILE_SMALL, gemmMTileGeometry, gemmWgsl } from "./gemm.ts";
 import { GEMM_TILE, type GemmGeometry, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import {
@@ -328,6 +328,12 @@ const checkConv2dDims = (dims: Conv2dDims): readonly number[] => {
       `conv2d params: groups ${dims.groups} が Cin ${dims.channelsIn} / Cout ${dims.channelsOut} を割り切らない`,
     );
   }
+  // 重みの要素数は Cin/groups を使うので、割り切れの検査の後に置く。
+  assertConvFlatExtents("conv2d params", {
+    input: dims.batch * dims.channelsIn * dims.heightIn * dims.widthIn,
+    output: dims.batch * dims.channelsOut * dims.heightOut * dims.widthOut,
+    weight: dims.channelsOut * (dims.channelsIn / dims.groups) * dims.kernelH * dims.kernelW,
+  });
   return values;
 };
 

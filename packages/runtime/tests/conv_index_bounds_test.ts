@@ -13,6 +13,7 @@ import { CodegenError } from "../src/codegen/errors.ts";
 import { type Conv1dDims, conv1dIgemmParams, conv1dParams } from "../src/kernels/conv1d.ts";
 import { type Conv2dDims, conv2dIgemmParams, conv2dParams } from "../src/kernels/conv2d.ts";
 import { convTranspose1dParams } from "../src/kernels/conv-transpose1d.ts";
+import { type Conv3dDims, conv3dIgemmParams } from "../src/kernels/conv3d.ts";
 
 const U32_MAX = 0xffff_ffff;
 // 境界の形: 長さ L・K 1・stride 1・dilation 1 で、L + 2·padding = 2^31 − 1 + (L − 1)。
@@ -183,6 +184,96 @@ describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まら�
       () => convTranspose1dParams(transpose(3, stride + 4, stride, 2)),
       CodegenError,
       "i32 の上限",
+    );
+  });
+});
+
+describe("畳み込みの params: 入力・出力・重みの平坦添字が u32 に収まらない形", () => {
+  // 2^32 + 2^16 要素（各テンソルのデータは確保しない — params の受理集合だけを見る）。
+  const OVER = 65537;
+  const PLANE = 65536;
+
+  it("conv3d: Cin·T·H·W が 2^32 を超える形（最後のチャネルの先頭添字が 0 に折り返す）を拒否する", () => {
+    const unit3d: Conv3dDims = {
+      channelsIn: 1,
+      channelsOut: 1,
+      timeIn: 1,
+      heightIn: 1,
+      widthIn: 1,
+      timeOut: 1,
+      heightOut: 1,
+      widthOut: 1,
+      kernelT: 1,
+      kernelH: 1,
+      kernelW: 1,
+      strideT: 1,
+      strideH: 1,
+      strideW: 1,
+      paddingT: 0,
+      paddingH: 0,
+      paddingW: 0,
+      dilationT: 1,
+      dilationH: 1,
+      dilationW: 1,
+      groups: 1,
+    };
+    const input = { ...unit3d, channelsIn: OVER, widthIn: PLANE, widthOut: PLANE };
+    assertThrows(() => conv3dIgemmParams(input), CodegenError, "入力の要素数");
+    // 2^32 − 2^16 は受理する（門は u32 の域の端）
+    assertEquals(conv3dIgemmParams({ ...input, channelsIn: PLANE - 1 }).length, 24);
+    const output = { ...unit3d, channelsOut: OVER, widthIn: PLANE, widthOut: PLANE };
+    assertThrows(() => conv3dIgemmParams(output), CodegenError, "出力の要素数");
+    const weight = { ...unit3d, channelsOut: OVER, channelsIn: PLANE };
+    assertThrows(() => conv3dIgemmParams(weight), CodegenError, "重みの要素数");
+  });
+
+  it("conv1d: 入力・出力（バッチ込み）・重みのどれかが 2^32 を超える形を direct 版・暗黙 GEMM 版とも拒否する", () => {
+    const cases: readonly (readonly [string, Conv1dDims])[] = [
+      ["入力の要素数", { ...unit1d, channelsIn: OVER, lengthIn: PLANE, lengthOut: PLANE }],
+      // 入力を小さく保つため、出力長は padding で伸ばす（K 1・stride 1 で Lout = 2 + 2·32767）
+      ["出力の要素数", { ...unit1d, batch: OVER, lengthIn: 2, padding: 32767, lengthOut: PLANE }],
+      ["重みの要素数", { ...unit1d, channelsOut: OVER, channelsIn: PLANE }],
+    ];
+    for (const [name, build] of conv1dParamBuilders) {
+      for (const [label, dims] of cases) {
+        assertThrows(() => build(dims), CodegenError, label, `${name} ${label}`);
+      }
+    }
+  });
+
+  it("conv2d: 入力・出力（バッチ込み）・重みのどれかが 2^32 を超える形を direct 版・暗黙 GEMM 版とも拒否する", () => {
+    const cases: readonly (readonly [string, Conv2dDims])[] = [
+      ["入力の要素数", { ...unit2d, channelsIn: OVER, widthIn: PLANE, widthOut: PLANE }],
+      ["出力の要素数", { ...unit2d, batch: OVER, widthIn: 2, paddingW: 32767, widthOut: PLANE }],
+      ["重みの要素数", { ...unit2d, channelsOut: OVER, channelsIn: PLANE }],
+    ];
+    for (const [name, build] of conv2dParamBuilders) {
+      for (const [label, dims] of cases) {
+        assertThrows(() => build(dims), CodegenError, label, `${name} ${label}`);
+      }
+    }
+  });
+
+  it("conv_transpose1d: 入力・重みが 2^32 を超える形を拒否する", () => {
+    const base = {
+      batch: 1,
+      channelsIn: 1,
+      channelsOut: 1,
+      lengthIn: 1,
+      lengthOut: 1,
+      kernel: 1,
+      stride: 1,
+      padding: 0,
+    };
+    assertThrows(
+      () => convTranspose1dParams({ ...base, channelsIn: OVER, lengthIn: PLANE, lengthOut: PLANE }),
+      CodegenError,
+      "入力の要素数",
+    );
+    assertThrows(
+      () => convTranspose1dParams({ ...base, channelsIn: OVER, channelsOut: PLANE }),
+      CodegenError,
+      "重みの要素数",
     );
   });
 });

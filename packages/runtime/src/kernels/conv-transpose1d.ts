@@ -47,7 +47,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
-import { assertI32Coordinates } from "./conv-bounds.ts";
+import { assertConvFlatExtents, assertI32Coordinates } from "./conv-bounds.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -216,6 +216,11 @@ export const convTranspose1dParams = (dims: {
     kernel: dims.kernel,
     length_in: dims.lengthIn,
     "length_out + padding": dims.lengthOut + dims.padding,
+  });
+  assertConvFlatExtents("conv_transpose1d params", {
+    input: dims.batch * dims.channelsIn * dims.lengthIn,
+    output: dims.batch * dims.channelsOut * dims.lengthOut,
+    weight: dims.channelsIn * dims.channelsOut * dims.kernel,
   });
   const n = dims.batch * dims.channelsOut * dims.lengthOut;
   assertU32Params("conv_transpose1d params", { n });

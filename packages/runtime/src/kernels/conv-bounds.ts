@@ -8,6 +8,7 @@
 // （conv3d だけが持っていた前例がある）ため、ここ 1 箇所に置く。
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "../codegen/params.ts";
 
 /** i32 の最大値（2^31 − 1）。 */
 const I32_MAX = 0x7fff_ffff;
@@ -54,4 +55,25 @@ export const assertConvAxisExtent = (
   padding: number,
 ): void => {
   assertI32Coordinates(where, { [`軸 ${axis} の入力長 + 2·padding`]: length + 2 * padding });
+};
+
+/**
+ * 入力・出力・重みの平坦添字の門（各テンソルの要素数 ≤ 2^32 − 1）。
+ *
+ * MUST: WGSL は 3 つのテンソルの添字を u32 の平坦添字（例 `((c·T + t)·H + y)·W + x`・
+ * `(oc·Cin + ic)·K + k`）で組むので、要素数が 2^32 を超えると上位ビットが落ちて別の位置を
+ * 例外なしに読み書きする。uniform の各値と m / n / k の u32 検査では止まらない（バッチやチャネルを
+ * 掛けた積は uniform に載らない — 計画段の検査も安全整数 2^53 で、u32 ではない）。
+ *
+ * @param extents 要素数。出力はバッチを含めた全体（dispatch の z 軸で回すバッチも平坦添字に入る）。
+ */
+export const assertConvFlatExtents = (
+  where: string,
+  extents: { readonly input: number; readonly output: number; readonly weight: number },
+): void => {
+  assertU32Params(where, {
+    入力の要素数: extents.input,
+    出力の要素数: extents.output,
+    重みの要素数: extents.weight,
+  });
 };

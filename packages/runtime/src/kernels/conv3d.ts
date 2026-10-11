@@ -33,7 +33,7 @@
 import { tiledWorkgroups } from "../codegen/dispatch.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
-import { assertConvAxisExtent } from "./conv-bounds.ts";
+import { assertConvAxisExtent, assertConvFlatExtents } from "./conv-bounds.ts";
 import { gemmMTileGeometry, gemmWgsl, LINEAR_SCALE_BINDING } from "./gemm.ts";
 import { GEMM_TILE, gemmTileM, gemmTileN } from "./gemm-geometry.ts";
 import { weightKeyPart, type WeightStorage } from "./weight-storage.ts";
@@ -207,6 +207,12 @@ export const conv3dIgemmParams = (dims: Conv3dDims): Uint32Array<ArrayBuffer> =>
   const n = dims.timeOut * dims.heightOut * dims.widthOut;
   const k = dims.channelsIn * dims.kernelT * dims.kernelH * dims.kernelW;
   assertU32Params("conv3d igemm params", { n, k });
+  // unbatched なので出力は Cout·n、重みは Cout·k（groups == 1）。
+  assertConvFlatExtents("conv3d igemm params", {
+    input: dims.channelsIn * dims.timeIn * dims.heightIn * dims.widthIn,
+    output: dims.channelsOut * n,
+    weight: dims.channelsOut * k,
+  });
   // MUST: 軸ごとに `入力長 + 2·padding ≤ 2^31 − 1`（WGSL の座標演算が i32 — 証明は葉関数の doc）。
   assertConvAxisExtent("conv3d igemm params", "t", dims.timeIn, dims.paddingT);
   assertConvAxisExtent("conv3d igemm params", "h", dims.heightIn, dims.paddingH);
