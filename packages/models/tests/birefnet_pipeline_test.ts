@@ -33,7 +33,14 @@
 //    合ったまま通る（順序違いは α が数十の差でずれるだけ）。順序が入れ替わったら落ちる非対称な
 //    ケースを置く。
 
-import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertAlmostEquals,
+  assertEquals,
+  assertNotEquals,
+  assertRejects,
+  assertThrows,
+} from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseBirefnetPipelineConfig } from "../src/birefnet/config.ts";
 import {
@@ -42,9 +49,10 @@ import {
   BirefnetPipeline,
   preprocessPixelValues,
 } from "../src/birefnet/pipeline.ts";
-import { matteFromLogits } from "../src/birefnet/matte.ts";
+import { matteFromLogits, type MatteProcedure } from "../src/birefnet/matte.ts";
 import { resizePlaneF32, type Rgb8Image } from "../src/image/preprocess.ts";
 import { stubModel } from "./helpers/stub-model.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
 /** 宣言だけの `matte` 容器（家族の門が読む形まで再現し、実行はしない）。 */
@@ -417,4 +425,72 @@ Deno.test("後処理: 非有限の logit は画素座標つきで落ちる（NaN
     Error,
     "マットの logit (x=0, y=0) が非有限値",
   );
+});
+
+// ---- segment の後処理の結線（Session を偽物にして GPU なしで通す）--------------------
+//
+// `segment` が logit に当てる手順が既定の `float-bilinear` であることを縛る（ADR 0125 決定 3 —
+// A/B の結果が出るまで今の経路を変えない）。`matteFromLogits` の既定だけを見るテストでは、
+// パイプラインが別の手順を明示して呼ぶ形へ変わっても緑のまま通る。Session も GPU も偽物で足りる
+// （`run` しか触らない）ので、状態を直接組んで非公開のコンストラクタへ渡す
+// （`vowel_detector_pipeline_test.ts` と同じ流儀）。
+
+/** グラフの寸法（非正方）と入力画像の寸法（拡大 — 2 つの手順の値が割れる向き）。 */
+const FAKE_GRAPH = { width: 6, height: 5 };
+const FAKE_IMAGE = { width: 13, height: 9 };
+
+/** 段差と斜面を持つ logit（2 つの手順の値が割れる入力）。 */
+const fakeLogits = (): Float32Array<ArrayBuffer> =>
+  Float32Array.from(
+    { length: FAKE_GRAPH.width * FAKE_GRAPH.height },
+    (_, index) => (index % FAKE_GRAPH.width < 3 ? -9 : 9) + (index % 7) - 3,
+  );
+
+/** 偽の Session（`run` は決まった logit を返す）を張ったパイプライン。 */
+const pipelineWithFakeSession = (logits: Float32Array<ArrayBuffer>): BirefnetPipeline => {
+  const state = {
+    gpu: fakeGpuContext(fakeDevice()),
+    ownsGpu: false,
+    config: parseBirefnetPipelineConfig({
+      ...PIPELINE_CONFIG,
+      imageWidth: FAKE_GRAPH.width,
+      imageHeight: FAKE_GRAPH.height,
+    }),
+    matte: { graph: { outputs: ["matte"] } },
+    session: {
+      run: () =>
+        Promise.resolve({
+          matte: { dtype: "f32", shape: [1, 1, FAKE_GRAPH.height, FAKE_GRAPH.width], data: logits },
+        }),
+      diagnostics: () => ({}),
+      dispose: () => Promise.resolve(),
+    },
+  };
+  return Reflect.construct(BirefnetPipeline, [state]);
+};
+
+Deno.test("segment: logit に当てる手順は float-bilinear（matteFromLogits の明示の手順とビット一致）", async () => {
+  const logits = fakeLogits();
+  const pipeline = pipelineWithFakeSession(logits);
+  const image: Rgb8Image = {
+    data: new Uint8Array(FAKE_IMAGE.width * FAKE_IMAGE.height * 3).fill(128),
+    ...FAKE_IMAGE,
+  };
+
+  const matte = await pipeline.segment(image);
+
+  const procedure = (name: MatteProcedure) => [
+    ...matteFromLogits(
+      logits,
+      FAKE_GRAPH.width,
+      FAKE_GRAPH.height,
+      FAKE_IMAGE.width,
+      FAKE_IMAGE.height,
+      name,
+    ).data,
+  ];
+  // 恒真化の防止 — この入力で 2 つの手順が同じ値なら、手順の取り違えを掴めない。
+  assertNotEquals(procedure("u8-pil-bicubic"), procedure("float-bilinear"));
+  assertEquals([matte.width, matte.height], [FAKE_IMAGE.width, FAKE_IMAGE.height]);
+  assertEquals([...matte.data], procedure("float-bilinear"));
 });
