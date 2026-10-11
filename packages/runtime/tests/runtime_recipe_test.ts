@@ -326,7 +326,7 @@ Deno.test("整数でない寿命境界と一時の添字は宣言の受け口で
           tempStep(temps, [dispatch("gemm", [{ binding: 1, source: { kind: "temp", id } }])]),
         ),
       ExecutionError,
-      `dispatch 'gemm' の束縛 1 が一時 ${id} を指すが、宣言は 1 本`,
+      `dispatch 'gemm' の束縛 1 の一時の添字 ${id} が整数でない`,
     );
   }
 });

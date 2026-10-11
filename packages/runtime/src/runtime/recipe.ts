@@ -249,7 +249,14 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
     for (const entry of dispatch.bindings) {
       const { source } = entry;
       if (source.kind !== "temp") continue;
-      if (!Number.isSafeInteger(source.id) || source.id < 0 || source.id >= recipe.temps.length) {
+      // 整数でない添字は宣言の本数と関係なく落ちるので、範囲外とは別の文言で原因を名指す。
+      if (!Number.isSafeInteger(source.id)) {
+        throw new ExecutionError(
+          `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} の一時の添字 ` +
+            `${source.id} が整数でない`,
+        );
+      }
+      if (source.id < 0 || source.id >= recipe.temps.length) {
         throw new ExecutionError(
           `${where}: dispatch '${dispatch.key}' の束縛 ${entry.binding} が一時 ${source.id} を` +
             `指すが、宣言は ${recipe.temps.length} 本`,
