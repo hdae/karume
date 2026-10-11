@@ -104,6 +104,7 @@ export const buildRelPosTables = (
   for (let d = -(length - 1); d <= length - 1; d += 1) {
     const shifted = logBucketPosition(d, bucketSize, maxPosition) + span;
     // MUST: i32 へ書く前に有限性を見る（NaN は下の clamp をすり抜けて 0 に化ける）。
+    // 現行の式では上の assertLogBucketDomain が先に除くので到達しない — 式を将来変えたときの防御。
     if (!Number.isFinite(shifted)) {
       throw new Error(`相対位置 ${d} のバケットが有限でない（${shifted}）`);
     }
