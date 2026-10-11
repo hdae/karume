@@ -52,10 +52,15 @@ fixture の切り出しをそのまま入力にして、期待値だけを作り
   超えたら生成器が落ちる。TS の門は「一致する、または golden の `255α` が `k + 0.5` から ε 以内」の
   画素だけを許す。
 
-MUST: Pillow は関数の中で import する（`birefnet` グループは既定の sync に入らない —
-`tests/test_optional_group_imports.py`）。値は torch / torchvision / Pillow / numpy の版で決まる
-ので、版を来歴に記録する（`birefnet/tests/test_matte_fixture.py` が今の版で作り直して突き合わせ、
-版の更新で黙ってずれた fixture を赤にする）。
+Pillow は関数の中で import する。理由は recipe の作法（依存グループが宣言するパッケージは要る
+関数の中で import する — `tests/test_optional_group_imports.py` が機械の門にしている）に揃える
+ためで、Pillow が無いからではない — Pillow 自体は torchvision（exporter の core の依存）経由で
+既定の sync にも入る（ADR 0125 決定 6）。NOTE: 門は配布名から import 名を導く（`pillow`）ので、
+`PIL` を module 直下で import しても門では掴めない。関数内の import は門に頼らず作法として守る。
+
+値は torch / torchvision / Pillow / numpy の版で決まるので、版を来歴に記録する
+（`birefnet/tests/test_matte_fixture.py` が今の版で作り直して突き合わせ、版の更新で黙ってずれた
+fixture を赤にする）。
 """
 
 from __future__ import annotations
@@ -438,7 +443,7 @@ def assert_no_ties(scaled: np.ndarray, where: str) -> None:
     near = np.argwhere(distance < TIE_MARGIN)
     if near.size:
         raise ValueError(
-            f"{where}: 255σ が k + 0.5 の {TIE_MARGIN} 以内の標本がある（{near[:4].tolist()}）"
+            f"{where}: 255σ が k + 0.5 から {TIE_MARGIN} 未満の標本がある（{near[:4].tolist()}）"
             " — 丸めの向きが exp の実装で割れうるので入力を選び直す"
         )
 

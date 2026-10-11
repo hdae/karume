@@ -127,35 +127,43 @@ const loadSubject = async (subject: Subject): Promise<Rgb> => {
 const outputName = (state: BirefnetState): string => state.matte.graph.outputs[0];
 
 /**
- * `body` を走らせ、成否に関わらず最後に Session を畳む（GPU は呼び手のもの）。
+ * `body` を走らせ、成否に関わらず最後に `release` を通す（Session の解放と GPU の破棄に共通の運び方）。
  *
  * MUST: 本体と解放の両方が投げたら本体の例外を消さない — `finally` の中で投げると元の失敗を上書き
  * して、最初に何が壊れたかが消える（`packages/models/src/session/dispose-steps.ts` と同じ理由）。
  * 失敗の運び方も `disposeSteps` に揃える: 1 件ならその例外をそのまま、2 件なら本体を先頭にした
  * `AggregateError`（`disposeSteps` を直接使わないのは、本体の失敗まで「後始末の失敗」と名乗るため）。
+ *
+ * NOTE: `packages/models/src/session/with-session.ts` の `withSession` とは別物。あちらは Session を
+ * 自分で張り（`model.createSession`）、診断を観測する `run` を本体へ渡す。こちらは張られた後の資源
+ * （`loadBirefnetState` が張った Session・`acquireGpu` の GPU）の後始末だけを受け持つ。
  */
-const withSession = async <T>(state: BirefnetState, body: () => Promise<T>): Promise<T> => {
+const runThenRelease = async <T>(
+  body: () => Promise<T>,
+  release: () => Promise<void> | void,
+  what: string,
+): Promise<T> => {
   let value: T;
   try {
     value = await body();
   } catch (error) {
     try {
-      await state.session.dispose();
-    } catch (disposeError) {
+      await release();
+    } catch (releaseError) {
       throw new AggregateError(
-        [error, disposeError],
-        "birefnet-ab: 本体が失敗し、Session の解放も失敗した",
+        [error, releaseError],
+        `birefnet-ab: 本体が失敗し、${what}も失敗した`,
       );
     }
     throw error;
   }
-  await state.session.dispose();
+  await release();
   return value;
 };
 
 /**
  * 1024² のモデルで画像ごとに 1 回だけグラフを回し、logit を保存して手順を全部当てる。
- * MUST: Session は最後に必ず畳む（{@link withSession}）。
+ * MUST: Session は最後に必ず畳む（{@link runThenRelease}）。
  */
 const runBase = async (
   gpu: GpuContext,
@@ -164,31 +172,35 @@ const runBase = async (
   work: string,
 ): Promise<{ readonly pairs: Pair[]; readonly graph: number }> => {
   const state = await loadBirefnetState(denoDirectory(source), { model: BASE_MODEL, gpu });
-  return await withSession(state, async () => {
-    const { imageWidth, imageHeight } = state.config;
-    if (imageWidth !== imageHeight) {
-      throw new Error(
-        `モデル '${BASE_MODEL}' のグラフが正方でない（${imageWidth}×${imageHeight}）`,
-      );
-    }
-    const pairs: Pair[] = [];
-    for (const subject of subjects) {
-      const image = await loadSubject(subject);
-      const logits = await matteLogits(state, image);
-      await writeLogits(
-        work,
-        logitsFile(subject.name, BASE_MODEL),
-        outputName(state),
-        imageWidth,
-        logits,
-      );
-      const alphas = alphasOf(logits, imageWidth, image);
-      await writeAlphas(work, subject.name, alphas);
-      pairs.push({ subject, image, alphas });
-      console.log(`[birefnet-ab] ${subject.name}: ${image.width}×${image.height}`);
-    }
-    return { pairs, graph: imageWidth };
-  });
+  return await runThenRelease(
+    async () => {
+      const { imageWidth, imageHeight } = state.config;
+      if (imageWidth !== imageHeight) {
+        throw new Error(
+          `モデル '${BASE_MODEL}' のグラフが正方でない（${imageWidth}×${imageHeight}）`,
+        );
+      }
+      const pairs: Pair[] = [];
+      for (const subject of subjects) {
+        const image = await loadSubject(subject);
+        const logits = await matteLogits(state, image);
+        await writeLogits(
+          work,
+          logitsFile(subject.name, BASE_MODEL),
+          outputName(state),
+          imageWidth,
+          logits,
+        );
+        const alphas = alphasOf(logits, imageWidth, image);
+        await writeAlphas(work, subject.name, alphas);
+        pairs.push({ subject, image, alphas });
+        console.log(`[birefnet-ab] ${subject.name}: ${image.width}×${image.height}`);
+      }
+      return { pairs, graph: imageWidth };
+    },
+    () => state.session.dispose(),
+    "Session の解放",
+  );
 };
 
 /**
@@ -206,29 +218,33 @@ const runReference = async (
   const targets = pairs.filter(({ image }) => image.width === size && image.height === size);
   if (targets.length === 0) return truths;
   const state = await loadBirefnetState(denoDirectory(source), { model: REFERENCE_MODEL, gpu });
-  return await withSession(state, async () => {
-    const { imageWidth, imageHeight } = state.config;
-    if (imageWidth !== size || imageHeight !== size) {
-      throw new Error(`モデル '${REFERENCE_MODEL}' のグラフが ${imageWidth}×${imageHeight}`);
-    }
-    for (const { subject, image } of targets) {
-      const logits = await matteLogits(state, image);
-      await writeLogits(
-        work,
-        logitsFile(subject.name, REFERENCE_MODEL),
-        outputName(state),
-        size,
-        logits,
-      );
-      const sigma = new Float64Array(logits.length);
-      for (let index = 0; index < logits.length; index += 1) {
-        sigma[index] = 1 / (1 + Math.exp(-logits[index]));
+  return await runThenRelease(
+    async () => {
+      const { imageWidth, imageHeight } = state.config;
+      if (imageWidth !== size || imageHeight !== size) {
+        throw new Error(`モデル '${REFERENCE_MODEL}' のグラフが ${imageWidth}×${imageHeight}`);
       }
-      truths.set(subject.name, sigma);
-      console.log(`[birefnet-ab] ${subject.name}: 擬似正解（モデル ${REFERENCE_MODEL}）`);
-    }
-    return truths;
-  });
+      for (const { subject, image } of targets) {
+        const logits = await matteLogits(state, image);
+        await writeLogits(
+          work,
+          logitsFile(subject.name, REFERENCE_MODEL),
+          outputName(state),
+          size,
+          logits,
+        );
+        const sigma = new Float64Array(logits.length);
+        for (let index = 0; index < logits.length; index += 1) {
+          sigma[index] = 1 / (1 + Math.exp(-logits[index]));
+        }
+        truths.set(subject.name, sigma);
+        console.log(`[birefnet-ab] ${subject.name}: 擬似正解（モデル ${REFERENCE_MODEL}）`);
+      }
+      return truths;
+    },
+    () => state.session.dispose(),
+    "Session の解放",
+  );
 };
 
 const run = async (options: Map<string, string>): Promise<void> => {
@@ -280,14 +296,15 @@ const run = async (options: Map<string, string>): Promise<void> => {
   const work = `${out}/work`;
   await Deno.mkdir(work, { recursive: true });
   const gpu = await acquireGpu();
-  const { pairs, graph, truths } = await (async () => {
-    try {
+  // MUST: GPU の破棄の失敗で本体の失敗を消さない（{@link runThenRelease} — Session と同じ運び方）。
+  const { pairs, graph, truths } = await runThenRelease(
+    async () => {
       const base = await runBase(gpu, source, subjects, work);
       return { ...base, truths: await runReference(gpu, source, base.pairs, work) };
-    } finally {
-      gpu.destroy();
-    }
-  })();
+    },
+    () => gpu.destroy(),
+    "GPU の破棄",
+  );
   await writeAbOutputs({ out, pairs, truths, graph, model: BASE_MODEL, seed, source });
   console.log(`[birefnet-ab] ${out}（盲検の対 ${pairs.length} 組・seed ${seed}）`);
 };
