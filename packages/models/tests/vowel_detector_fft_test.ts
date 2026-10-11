@@ -88,8 +88,9 @@ Deno.test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ち
   );
 });
 
-Deno.test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（負の lag が回り込む添字）", () => {
-  // `[1, 2]` を変換長 4 で通すと逆変換は [5, 2, 0, 2] で、添字 3 は lag −1 の値（線形なら 0）。
+Deno.test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（線形では 0 か、負の lag が回り込む添字）", () => {
+  // `[1, 2]` を変換長 4 で通すと逆変換は [5, 2, 0, 2] で、添字 2 は線形どおり 0、添字 3 は
+  // lag −1 の値（線形なら 0）。両者を区別せず、lag 2 の時点で落とす。
   assertThrows(
     () => new Fft(4).autocorrelation(Float32Array.from([1, 2]), new Float64Array(3)),
     RangeError,
