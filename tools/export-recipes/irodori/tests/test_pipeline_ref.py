@@ -329,6 +329,9 @@ def _graph(tensors: Mapping[str, torch.Tensor]) -> IrGraph:
 
     圧縮格納の適格判定は「重みスロットで消費されているか」なので、宣言だけ並べた器では
     `--dtype i4` が 1 本も効かない（`karume.emit` が fail loudly する）。
+
+    出口の add の鎖は**素材に在る**席（norm の 2 本と持ち上げ定数）だけで組む — 席を 1 本
+    抜いた素材でも、未定義の値を参照しない正当な IR になる（公開の門が IR の受理規則を見る）。
     """
     initializers = {
         _init_name(key): IrInitializer(tensor=key, storage=IrStorage(dtype="f32"))
@@ -338,9 +341,9 @@ def _graph(tensors: Mapping[str, torch.Tensor]) -> IrGraph:
         _init_name(key): IrValue(dtype="f32", shape=list(tensor.shape))
         for key, tensor in tensors.items()
     }
-    values.update(
-        {name: IrValue(dtype="f32", shape=[1, 4]) for name in ("h0", "h1", "h2", "h3", "out")}
-    )
+    chain = [key for key in ("out_norm.weight", "out_norm.bias", CONST_KEY) if key in tensors]
+    links = [f"h{index + 2}" for index in range(len(chain) - 1)] + ["out"]
+    values.update({name: IrValue(dtype="f32", shape=[1, 4]) for name in ("h0", "h1", *links)})
     nodes = [
         IrNode(
             op="linear",
@@ -354,9 +357,10 @@ def _graph(tensors: Mapping[str, torch.Tensor]) -> IrGraph:
             outs=["h1"],
             attrs={},
         ),
-        IrNode(op="add", ins=["h0", _init_name("out_norm.weight")], outs=["h2"], attrs={}),
-        IrNode(op="add", ins=["h2", _init_name("out_norm.bias")], outs=["h3"], attrs={}),
-        IrNode(op="add", ins=["h3", _init_name(CONST_KEY)], outs=["out"], attrs={}),
+        *(
+            IrNode(op="add", ins=[previous, _init_name(key)], outs=[link], attrs={})
+            for previous, key, link in zip(["h0", *links[:-1]], chain, links, strict=True)
+        ),
     ]
     return IrGraph(
         inputs=[IrInput(name="x", dtype="f32", shape=[1, 2 * GROUP])],
@@ -541,8 +545,9 @@ class TestRestoreDitFromI4Series:
             _restore(module, series)
 
     def test_a_shape_mismatch_fails_loudly(self, tmp_path):
+        """コンテナの `[1, 4]` とモジュールの `[4]` — グラフの add は broadcast で通る形。"""
         material = _material()
-        material.tensors["out_norm.bias"] = torch.zeros(2)
+        material.tensors["out_norm.bias"] = torch.zeros(1, 4)
         series = _write_series(tmp_path / "dit", material)
 
         with pytest.raises(SystemExit, match="の形が コンテナ"):

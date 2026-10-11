@@ -195,20 +195,26 @@ class TestTheContract:
     """グラフの入出力（`umt5_context_width`）— 読み手は入力を名前で束ねる。"""
 
     @pytest.mark.parametrize(
-        ("index", "replacement"),
+        ("index", "replacement", "verified"),
         [
-            (0, ("ids", "i32", [1, "L"])),
-            (0, ("input_ids", "f32", [1, "L"])),
-            (1, ("relative_position_buckets", "i32", ["L", "M"])),
+            (0, ("ids", "i32", [1, "L"]), True),
+            # f32 の token id を embedding が受けるグラフは IR の受理規則に反する — 公開の門を
+            # 通らないので、低水準の書き手で故意に作る（門が「入力の dtype」で落とすことを見る）。
+            (0, ("input_ids", "f32", [1, "L"]), False),
+            (1, ("relative_position_buckets", "i32", ["L", "M"]), True),
         ],
         ids=["renamed", "dtype", "second-symbol"],
     )
     def test_it_refuses_other_inputs(
-        self, tmp_path: Path, index: int, replacement: tuple[str, str, list[Any]]
+        self,
+        tmp_path: Path,
+        index: int,
+        replacement: tuple[str, str, list[Any]],
+        verified: bool,
     ) -> None:
         inputs = list(UMT5_INPUTS)
         inputs[index] = replacement
-        container = _series(tmp_path, inputs=inputs)
+        container = _series(tmp_path, inputs=inputs, verified=verified)
         with pytest.raises(DistError, match="グラフ入力"):
             umt5_plan(container)
 

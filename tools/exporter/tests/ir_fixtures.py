@@ -18,6 +18,9 @@
 MUST: バイト列を手で綴らない — 書き出しは `karume.emit.stored_model` →
 `karume.publish.publish_container` の 1 本道を通す（読み直し検証込み）。規則の写しを持つと、
 規則が動いた日にフィクスチャだけが古びて「テストは緑・実物だけ落ちる」になる。
+例外は `ir_container(symbols=…)` の故障注入の席だけ — 束縛点の無い記号は IR の受理規則に
+反するので公開の門（`publish_container`）が拒否する。この席だけは同じ書き手の低水準の口
+（`karume.container.write_model_container`）で書き、読み直し検証を通さない。
 
 同じ引数からは**同じバイト列**が出る（乱数を使わない）— 役割ごとのバイト列の違いは
 `mark`（テンソルキーの接頭辞）から出るので、モジュール定数として持てる。
@@ -46,6 +49,7 @@ from karume.container import (
     canonical_json,
     read_header,
     write_header,
+    write_model_container,
 )
 from karume.dims import parse_dim
 from karume.emit import stored_model
@@ -113,8 +117,12 @@ def _write(
     assets: Mapping[str, AssetInput] = {},
     part_bytes: int = DEFAULT_PART_BYTES,
     block_bytes: int = BLOCK_MAX_BYTES,
+    verified: bool = True,
 ) -> list[bytes]:
-    """書いて読み直して検証し、part ごとのバイト列を添字順に返す。"""
+    """書いて読み直して検証し、part ごとのバイト列を添字順に返す。
+
+    `verified=False` は故障注入の席（モジュール doc の例外）— 公開の門を通さず書くだけにする。
+    """
     stored = stored_model(
         graph,
         tensors,
@@ -123,18 +131,20 @@ def _write(
         weight_dtype_overrides=overrides,
     )
     with TemporaryDirectory() as staging:
-        result = publish_container(
-            Path(staging) / "model.krm",
-            stored.graph,
-            stored.tensors,
-            stored.bindings,
-            graph_name=named if named is not None else graph_name(mark),
-            provenance=FIXTURE_PROVENANCE,
-            assets=assets,
-            part_bytes=part_bytes,
-            block_bytes=block_bytes,
+        args = (Path(staging) / "model.krm", stored.graph, stored.tensors, stored.bindings)
+        options = {
+            "graph_name": named if named is not None else graph_name(mark),
+            "provenance": FIXTURE_PROVENANCE,
+            "assets": assets,
+            "part_bytes": part_bytes,
+            "block_bytes": block_bytes,
+        }
+        parts = (
+            publish_container(*args, **options).parts
+            if verified
+            else write_model_container(*args, **options)
         )
-        return [path.read_bytes() for path in result.parts]
+        return [path.read_bytes() for path in parts]
 
 
 def ir_container(
@@ -181,6 +191,8 @@ def ir_container(
     `symbols` は宣言へ**足すだけ**の記号（`inputs` / `outputs` の shape から導かれる分に加える）。
     「記号次元を持つグラフを配らない」側の門を試すための故障注入の席で、束縛点を持たない記号を
     名乗るのは実物には無い形である — 束縛点のある記号は `inputs` の shape に綴ればよい。
+    IR の受理規則に反する容器になるので、この席を使った回だけ公開の門を通さずに書く
+    （モジュール doc の例外 — 束縛点のある記号で門に届く family はそちらで作ること）。
 
     `named` は容器のグラフ名 = **部品名**（`karume.json` の weights のキー）。既定は `mark` から
     導いた綴りで、weights の席へ挿すフィクスチャは**そのキーで名乗らせる** MUST — 組み立ては
@@ -205,6 +217,7 @@ def ir_container(
         assets=assets,
         part_bytes=part_bytes,
         block_bytes=block_bytes,
+        verified=not symbols,
     )
 
 

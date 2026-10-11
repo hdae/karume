@@ -126,7 +126,6 @@ def _vowel_detector_container(
     in_shape: Sequence[Any] | None = None,
     out_shape: Sequence[Any] | None = None,
     outputs: int = 1,
-    symbols: Sequence[str] = (),
 ) -> list[bytes]:
     """系列に置く母音検出グラフの中身（part 列 — 先頭が part 0）。
 
@@ -137,7 +136,7 @@ def _vowel_detector_container(
     `storage` は実物どおりの混成コンポーネントの格納形（f16 / i8 / i4 は適格外の重みと bias が
     f32 で残り、i4 はさらに i8 が混ざる）— 禁止表（{@link VOWEL_DETECTOR_STORAGE_FORBIDDEN}）の
     門はこの形でしか試せない。残りの引数はグラフ宣言の各軸で、既定は実物どおり
-    （記号 `T` は入力 shape の `2T` が束縛するので、`symbols` は足すだけの席）。
+    （記号 `T` は入力 shape の `2T` が束縛する）。
     """
     shape: Shape = list(in_shape) if in_shape is not None else [1, "2T", feature_dim]
     logits: Shape = (
@@ -150,7 +149,6 @@ def _vowel_detector_container(
         storage=storage,
         inputs=((input_name, shape),),
         outputs=[logits] * outputs,
-        symbols=symbols,
     )
 
 
@@ -407,8 +405,11 @@ class TestVowelDetectorGraphGate:
             vowel_detector_plan(sources)
 
     def test_it_refuses_a_graph_with_a_second_symbol(self, tmp_path: Path) -> None:
-        """記号は時間軸 1 本きり（2 本目はホストが束縛を渡せない）。"""
-        sources = _build_vowel_detector_sources(tmp_path, symbols=("S",))
+        """記号は時間軸 1 本きり（2 本目はホストが束縛を渡せない）。
+
+        特徴軸まで動的に export した形 — 2 本目の記号は入力 shape が束縛する。
+        """
+        sources = _build_vowel_detector_sources(tmp_path, in_shape=(1, "2T", "S"))
         with pytest.raises(DistError, match="記号次元"):
             vowel_detector_plan(sources)
 

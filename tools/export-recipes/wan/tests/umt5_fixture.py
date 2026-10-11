@@ -11,7 +11,8 @@
 
 計算の中身（attention・FFN）は持たない — 門は宣言しか読まない。重みは数十バイトで、実重みも
 transformers も要らない（既定の sync だけで回る）。故障注入の席（表や linear の格納・表の有無・
-入力・出力の幅）は引数で差し替える。
+入力・出力の幅）は引数で差し替える。記号は入力の shape から導く（宣言と束縛点が独立に動かない
+— 2 本目の記号を入力に綴れば、その記号を宣言した正当な IR になる）。
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from typing import Any
 
 import torch
 
-from karume.container import Provenance
+from karume.container import Provenance, write_model_container
+from karume.dims import parse_dim
 from karume.emit import FixedQuantizedWeight, stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.publish import publish_container
@@ -63,11 +65,16 @@ def umt5_container(
     linear_layout: str = "i8",
     inputs: Sequence[tuple[str, str, list[Any]]] = UMT5_INPUTS,
     named: str = UMT5_ROLE,
+    verified: bool = True,
 ) -> list[bytes]:
     """正当な umT5 風の容器 1 本ぶんの part バイト列（添字順 — 先頭が part 0）。
 
     `table_layout` / `linear_layout` は相対位置の表と linear の格納（`"i8"` か `"f32"`）、
     `tables` は表を持つか、`inputs` はグラフ入力の宣言（名前・dtype・形）、`width` は出力の幅。
+
+    `verified=False` は IR の受理規則に反する容器（例: f32 の token id を embedding が受ける）を
+    故意に作る故障注入の席 — 公開の門（`publish_container`）が拒否するので、同じ書き手の低水準の
+    口（`write_model_container`）で書き、読み直し検証を通さない。
     """
     initializers: dict[str, IrInitializer] = {}
     values: dict[str, IrValue] = {}
@@ -113,7 +120,7 @@ def umt5_container(
                 _ramp(BUCKETS, HEADS, offset=layer),
                 table_layout,
             )
-            bias_values = value(f"bias_{layer}", [_L, _L, HEADS])
+            bias_values = value(f"bias_{layer}", [*graph_inputs[1].shape, HEADS])
             nodes.append(
                 IrNode(
                     op="embedding",
@@ -127,7 +134,14 @@ def umt5_container(
     nodes.append(IrNode(op="rms_norm", ins=[hidden, final], outs=[output], attrs={"eps": 1e-6}))
 
     graph = IrGraph(
-        symbols=[_L],
+        symbols=sorted(
+            {
+                parse_dim(dim).sym
+                for spec in graph_inputs
+                for dim in spec.shape
+                if isinstance(dim, str)
+            }
+        ),
         inputs=graph_inputs,
         outputs=[output],
         initializers=initializers,
@@ -136,12 +150,10 @@ def umt5_container(
     )
     stored = stored_model(graph, tensors, fixed_weights=fixed or None)
     with TemporaryDirectory() as staging:
-        result = publish_container(
-            Path(staging) / "model.krm",
-            stored.graph,
-            stored.tensors,
-            stored.bindings,
-            graph_name=named,
-            provenance=provenance,
+        args = (Path(staging) / "model.krm", stored.graph, stored.tensors, stored.bindings)
+        parts = (
+            publish_container(*args, graph_name=named, provenance=provenance).parts
+            if verified
+            else write_model_container(*args, graph_name=named, provenance=provenance)
         )
-        return [path.read_bytes() for path in result.parts]
+        return [path.read_bytes() for path in parts]

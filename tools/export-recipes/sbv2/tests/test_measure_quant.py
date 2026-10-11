@@ -327,6 +327,7 @@ class TestW4GroupSizeReach:
 DIST_PARTS = 3
 
 _LINEAR_KEY = "enc_p.style_proj.weight"
+_LINEAR_BIAS_KEY = "enc_p.style_proj.bias"
 _EMB_KEY = "enc_p.emb.weight"
 
 
@@ -339,12 +340,18 @@ def _write_dist(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     initializers = {
         "w_linear": IrInitializer(tensor=_LINEAR_KEY, storage=IrStorage(dtype="f32")),
+        "b_linear": IrInitializer(tensor=_LINEAR_BIAS_KEY, storage=IrStorage(dtype="f32")),
         "w_emb": IrInitializer(tensor=_EMB_KEY, storage=IrStorage(dtype="f32")),
     }
-    tensors = {_LINEAR_KEY: torch.zeros(8, 64), _EMB_KEY: torch.zeros(4, 32)}
+    weights = {_LINEAR_KEY: torch.zeros(8, 64), _EMB_KEY: torch.zeros(4, 32)}
+    # linear の契約は入力 3 本（bias 込み）— bias は rank 1 の f32 のまま残り、試算の対象
+    # （rank 2 の i8）には数えられない。
+    tensors = {**weights, _LINEAR_BIAS_KEY: torch.zeros(8)}
+    # グラフ入力（`x` / `ids`）は inputs[] だけで宣言する — values に重ねると二重宣言で、IR の
+    # 受理規則に反する（公開の門が拒否する）。
     values = {
-        "x": IrValue(dtype="f32", shape=[1, 64]),
         "w_linear": IrValue(dtype="f32", shape=[8, 64]),
+        "b_linear": IrValue(dtype="f32", shape=[8]),
         "w_emb": IrValue(dtype="f32", shape=[4, 32]),
         "h": IrValue(dtype="f32", shape=[1, 8]),
         "e": IrValue(dtype="f32", shape=[1, 1, 32]),
@@ -358,11 +365,11 @@ def _write_dist(root: Path) -> None:
         initializers=initializers,
         values=values,
         nodes=[
-            IrNode(op="linear", ins=["x", "w_linear"], outs=["h"], attrs={}),
+            IrNode(op="linear", ins=["x", "w_linear", "b_linear"], outs=["h"], attrs={}),
             IrNode(op="embedding", ins=["w_emb", "ids"], outs=["e"], attrs={"padding_idx": -1}),
         ],
     )
-    scales = {key: channel_scale(tensor, 0) for key, tensor in tensors.items()}
+    scales = {key: channel_scale(tensor, 0) for key, tensor in weights.items()}
     stored = stored_model(graph, tensors, weight_dtype="i8", weight_scales=scales)
     publish_container(
         root / "model.i8.krm",

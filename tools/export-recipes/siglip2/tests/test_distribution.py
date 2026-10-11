@@ -164,7 +164,6 @@ def _siglip2_container(
     input_name: str = "pixel_values",
     input_shape: Sequence[Any] | None = None,
     outputs: int = 1,
-    symbols: Sequence[str] = (),
 ) -> list[bytes]:
     """系列に置くvision towerの中身（part 列 — 先頭が part 0）。
 
@@ -186,7 +185,6 @@ def _siglip2_container(
         storage=storage,
         inputs=((input_name, shape),),
         outputs=[[1, hidden]] * outputs,
-        symbols=symbols,
     )
 
 
@@ -474,8 +472,8 @@ class TestSiglip2GraphGate:
             siglip2_plan(sources)
 
     def test_it_refuses_a_graph_with_a_symbolic_axis(self, tmp_path: Path) -> None:
-        """解像度もパッチ数も固定なので、動かす軸は 1 本も無い。"""
-        sources = _build_siglip2_sources(tmp_path, symbols=("T",))
+        """解像度もパッチ数も固定なので、動かす軸は 1 本も無い（高さを動的に export した形）。"""
+        sources = _build_siglip2_sources(tmp_path, input_shape=(1, 3, "T", _SIGLIP2_WIDTH))
         with pytest.raises(DistError, match="記号次元"):
             siglip2_plan(sources)
 

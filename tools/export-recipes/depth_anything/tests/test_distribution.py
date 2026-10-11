@@ -138,7 +138,6 @@ def _depth_anything_container(
     input_shape: Sequence[Any] | None = None,
     depth_shape: Sequence[Any] | None = None,
     outputs: int = 1,
-    symbols: Sequence[str] = (),
 ) -> list[bytes]:
     """系列に置く深度推定グラフの中身（part 列 — 先頭が part 0）。
 
@@ -164,7 +163,6 @@ def _depth_anything_container(
         storage=storage,
         inputs=((input_name, shape),),
         outputs=[depth] * outputs,
-        symbols=symbols,
     )
 
 
@@ -482,8 +480,10 @@ class TestDepthAnythingGraphGate:
             depth_anything_plan(sources)
 
     def test_it_refuses_a_graph_with_a_symbolic_axis(self, tmp_path: Path) -> None:
-        """解像度もパッチ数も固定なので、動かす軸は 1 本も無い。"""
-        sources = _build_depth_anything_sources(tmp_path, symbols=("T",))
+        """解像度もパッチ数も固定なので、動かす軸は 1 本も無い（高さを動的に export した形）。"""
+        sources = _build_depth_anything_sources(
+            tmp_path, input_shape=(1, 3, "T", _DEPTH_ANYTHING_WIDTH)
+        )
         with pytest.raises(DistError, match="記号次元"):
             depth_anything_plan(sources)
 
