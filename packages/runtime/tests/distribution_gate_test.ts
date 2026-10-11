@@ -8,7 +8,7 @@
 // `outputs/series/` だけ持つ機（新しい作業機・worktree を別ホストへ持ち出した場合）では
 // assets_gate_test.ts が緑のまま実資産検査が丸ごと消えるので、ここで 1 本落とす。
 //
-// 射程は**公開済みの全ミラー**（2026-09-25 裁定）。e2e がまだ読まないミラー（siglip2 など）も
+// 欠如の検出（ミラーごと無い形）の射程は**公開済みの全ミラー**（2026-09-25 裁定）。e2e がまだ読まないミラー（siglip2 など）も
 // 載せる — 門番の射程を「今 e2e が読むもの」に合わせると、e2e を足した日に門番の更新を忘れて
 // 無音 SKIP が戻る。未公開の vowel-detector は載せない（配布形を作ってから載せる）。未公開でも
 // e2e（と融合ヒット数の門）が根にするミラー（gemma4-qat / wan2.1 / wan2.2）は載せる。
@@ -19,6 +19,12 @@
 // どちらも「資産が無い」とは別の壊れ方なので、門番が manifest を parse して part の実在と
 // 長さまで突き合わせる。中身（block の sha256）は読まない — 実バイトの突合は各 e2e が
 // `openContainer` の経路で必ず通る（§7 のハッシュ 3 分離）。
+//
+// manifest の parse と既定選択の検査の射程は名簿ではなく**`models/` の配置**から導く（2026-10-11
+// 裁定）。`models/` は配布形だけを置く根（docs/assets-layout.md）なので、子ディレクトリは
+// どれも hub の parser に通す。名簿に頼ると、`karume dist` が焼いたのに名簿へ足していない新しい
+// 配布形（未公開の vowel-detector など）が「焼けたが hub が読めない」まま素通りする。名簿
+// {@link DISTRIBUTIONS} が担うのは「在るべきものが無い」の検出だけで、これは配置からは導けない。
 //
 // この門番自身は資産がある環境では**通る（緑の 1 件として見える）**。ignore にすると
 // 「門番が効いているのか、門番ごと消えているのか」が区別できなくなるため（他の 2 門番と同じ理由）。
@@ -46,7 +52,8 @@ const ALLOW_NO_DISTRIBUTION = Deno.env.get("KARUME_ALLOW_NO_DISTRIBUTION") === "
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
- * 門番が要求する配布形ミラー = 公開済みの 10 リポ + `karume-gemma4-qat` + `karume-wan2.1` + `karume-wan2.2` +
+ * 門番が**在ることを要求する**配布形ミラー（欠如の検出の名簿 — manifest の検査の射程は
+ * {@link discoverDistributions} が配置から導く）= 公開済みの 10 リポ + `karume-gemma4-qat` + `karume-wan2.1` + `karume-wan2.2` +
  * `karume-umt5-xxl`
  * （Wan の GPU 経路の e2e がこのミラーを越境参照の根にする — ADR 0119 段 10d・無いと欠如が無音の SKIP になる）。
  *
@@ -76,7 +83,39 @@ const DISTRIBUTIONS = [
 /** この版の読み手が受け付ける配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
 const MANIFEST_FORMAT = "karume/5";
 
+/** 欠如の検出の名簿（per-mirror の検査で「名簿にあるか」を引く形）。 */
+const REQUIRED: ReadonlySet<string> = new Set(DISTRIBUTIONS);
+
+/**
+ * `karume dist` の作業席の接尾辞（`karume.artifacts.staged_publication` の `.staging` = 書きかけ・
+ * `.old` = 据え替え前の退避）。どちらもミラーではないので manifest の検査に掛けない — 書きかけを
+ * 読めば焼いている最中に門が赤くなり、退避は次の焼きで回収される。
+ */
+const WORK_SEAT_SUFFIXES = [".staging", ".old"] as const;
+
 const distributionRoot = (models: URL, series: string): URL => new URL(`${series}/`, models);
+
+/**
+ * `models` 直下の配布形ミラーを**配置から**列挙する（名前順・作業席とファイルは除く）。
+ *
+ * NOTE: 子はシンボリックリンクでもよい（stat はリンクを辿る）— 資産を別の場所に置いてリンクで
+ * 見せる機がある。`models` 自体が無い機は空を返す（欠如は名簿の検査が名指しで落とす）。
+ * NotFound 以外の I/O 異常は伝播させる（{@link manifestPresent} と同じ理由）。
+ */
+const discoverDistributions = (models: URL): readonly string[] => {
+  let entries: Deno.DirEntry[];
+  try {
+    entries = [...Deno.readDirSync(models)];
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return [];
+    throw cause;
+  }
+  return entries
+    .map((entry) => entry.name)
+    .filter((name) => !WORK_SEAT_SUFFIXES.some((suffix) => name.endsWith(suffix)))
+    .filter((name) => Deno.statSync(new URL(name, models)).isDirectory)
+    .sort();
+};
 
 /**
  * その系列の manifest が置かれているか。
@@ -130,6 +169,13 @@ const assertNoDistributionMissing = (models: URL, series: readonly string[]): vo
  * 「ミラーごと無い」形と、既定選択が旧 major・残骸のまま据わっている形に絞る。
  */
 const assertDistributionIntact = async (root: URL, series: string): Promise<void> => {
+  // MUST: 名簿に無いミラーの欠如はここでしか見えない — `models/` は配布形だけの根なので、
+  // `karume.json` の無い子ディレクトリは焼きかけか前回の残骸で、e2e が読めば別の壊れ方をする。
+  assert(
+    manifestPresent(root),
+    `models/${series}/ に karume.json が無い。models/ は配布形だけを置く根なので、` +
+      "これは焼きかけか残骸のディレクトリ。tools/export-recipes の dist.py で作り直すか、取り除くこと。",
+  );
   const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", root)));
   // parse 自身も major を見るが、`karume/5` を**名指しで**断言しておく — hub が受ける major を
   // 増やした日に、この門番が「旧 major のミラーを据えたまま」を素通しするのを防ぐ。
@@ -169,12 +215,14 @@ Deno.test({
   fn: () => assertNoDistributionMissing(MODELS_ROOT, DISTRIBUTIONS),
 });
 
-for (const series of DISTRIBUTIONS) {
+for (const series of discoverDistributions(MODELS_ROOT)) {
   const root = distributionRoot(MODELS_ROOT, series);
   Deno.test({
-    name: `配布門番: ${series} の manifest が karume/5 で、既定 quant の part が宣言どおり在る`,
-    // 不在は上の 1 本が名指しで落とす（同じ壊れで 2 本赤くしても読み手の仕事は増えない）。
-    ignore: !manifestPresent(root),
+    name:
+      `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
+    // 名簿にあるミラーの不在は上の 1 本が名指しで落とす（同じ壊れで 2 本赤くしても読み手の仕事は
+    // 増えない）。名簿に無いものの不在はここでしか見えないので走らせる。
+    ignore: REQUIRED.has(series) && !manifestPresent(root),
     fn: () => assertDistributionIntact(root, series),
   });
 }
@@ -236,6 +284,54 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
         AssertionError,
       );
       assertStringIncludes(error.message, "無い系列がある: karume-lucida。");
+    });
+  });
+});
+
+describe("配布門番の射程（models/ の配置から導くミラーの一覧）", () => {
+  it("子ディレクトリを名前順に全て拾い、dist の作業席とファイルは拾わない", async () => {
+    await withTemporaryRoot((models) => {
+      for (const name of ["karume-b", "karume-a", "karume-a.staging", "karume-b.old"]) {
+        Deno.mkdirSync(new URL(`${name}/`, models));
+      }
+      Deno.writeTextFileSync(new URL("README.md", models), "");
+      assertEquals(discoverDistributions(models), ["karume-a", "karume-b"]);
+    });
+  });
+
+  it("名簿に無い新しいミラーも拾う（名簿の更新忘れで manifest の検査から漏れない）", async () => {
+    await withTemporaryRoot((models) => {
+      const unlisted = "karume-vowel-detector";
+      assert(!REQUIRED.has(unlisted), "被験体の前提: 名簿に無い名前");
+      Deno.mkdirSync(new URL(`${unlisted}/`, models));
+      assertEquals(discoverDistributions(models), [unlisted]);
+    });
+  });
+
+  it("ディレクトリを指すシンボリックリンクもミラーとして拾う", async () => {
+    await withTemporaryRoot((root) => {
+      const models = new URL("models/", root);
+      const target = new URL("elsewhere/", root);
+      Deno.mkdirSync(models);
+      Deno.mkdirSync(target);
+      Deno.symlinkSync(target.pathname, new URL("karume-linked", models).pathname);
+      assertEquals(discoverDistributions(models), ["karume-linked"]);
+    });
+  });
+
+  it("models/ 自体が無ければ空（欠如は名簿の検査が名指しで落とす）", async () => {
+    await withTemporaryRoot((root) => {
+      assertEquals(discoverDistributions(new URL("missing/", root)), []);
+    });
+  });
+
+  it("karume.json の無いミラーは、そのディレクトリを名指しして FAIL する", async () => {
+    await withTemporaryRoot(async (root) => {
+      await assertRejects(
+        () => assertDistributionIntact(root, "karume-half-built"),
+        AssertionError,
+        "models/karume-half-built/ に karume.json が無い",
+      );
     });
   });
 });

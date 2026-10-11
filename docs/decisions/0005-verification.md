@@ -60,6 +60,10 @@
   見るのは manifest が `karume/5` であることと既定選択の part の実在・長さで、失敗文言は各ミラーの作り方
   〈`tools/export-recipes` の `dist.py`・越境参照で焼く anima-extra は release-runbook〉と opt-out
   `KARUME_ALLOW_NO_DISTRIBUTION=1` を案内する。2026-09-24 までの射程は gemma4 系 2 本だけだった）。
+  manifest の parse と既定選択の検査の射程は、名簿ではなく `models/` の子ディレクトリ全部
+  （`karume dist` の作業席 `.staging` / `.old` を除く）を配置から導く（2026-10-11 裁定 — 名簿へ
+  足していない新しい配布形も hub の parser に通すため。`karume.json` の無い子ディレクトリは FAIL）。
+  名簿が担うのは「在るべきミラーが無い」の検出だけ。
   系列レーンに同梱すると、その系列と関係の無い資産の不在でレーンが赤くなる。
 - **被覆の門**: レーン分割の唯一の危険は「テストを足したのにどのレーンにも入らない」形で、
   これは無音で通る（レーン実行では一度も走らず、フル verify でしか現れない）。
