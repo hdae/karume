@@ -49,7 +49,16 @@ import {
   parseMelBasis,
   VowelDetectorPipeline,
 } from "../src/vowel-detector/pipeline.ts";
-import { FEATURE_DIM, MEL_BINS, N_MELS, SAMPLE_RATE } from "../src/vowel-detector/features.ts";
+import {
+  extractFeatures,
+  FEATURE_DIM,
+  featureFrameCount,
+  HOP,
+  MEL_BINS,
+  N_FFT,
+  N_MELS,
+  SAMPLE_RATE,
+} from "../src/vowel-detector/features.ts";
 import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import { writeSafetensors } from "./helpers/safetensors-write.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
@@ -444,6 +453,10 @@ type FakeRunPlan = {
   readonly runError?: Error;
   readonly disposeError?: Error;
   readonly onRunDiagnostics?: () => void;
+  /** 既定は運用範囲 4..60,000 の配布形。 */
+  readonly config?: VowelDetectorPipelineConfig;
+  /** 既定は正しい寸法のゼロ基底。 */
+  readonly melBasis?: Float32Array<ArrayBuffer>;
 };
 
 /** 1 秒の正弦波（10ms フレーム 97 本 → 端数を落として 96 本 = 運用範囲の内側）。 */
@@ -460,7 +473,7 @@ const pipelineWithFakeSession = (
   const state = {
     gpu: fakeGpuContext(fakeDevice()),
     ownsGpu: false,
-    config: graphConfig,
+    config: plan.config ?? graphConfig,
     graph: {
       graph: { outputs: ["logits"] },
       createSession: () =>
@@ -486,7 +499,7 @@ const pipelineWithFakeSession = (
     },
     symbol: "T",
     sessionOptions: {},
-    melBasis: new Float32Array(N_MELS * MEL_BINS),
+    melBasis: plan.melBasis ?? new Float32Array(N_MELS * MEL_BINS),
     ...(plan.onRunDiagnostics === undefined ? {} : { onRunDiagnostics: plan.onRunDiagnostics }),
   };
   const pipeline: VowelDetectorPipeline = Reflect.construct(VowelDetectorPipeline, [state]);
@@ -534,4 +547,52 @@ Deno.test("detect: run だけが落ちたら、その例外をそのまま運び
 
   assertStrictEquals(error, runFailure);
   assertEquals(disposeCalls(), 1);
+});
+
+// ---- 運用上限は特徴を作る前に見る ------------------------------------------------
+//
+// フレーム数は波形の長さだけで決まる。上限を超える音声で FFT と mel 変換を全フレーム分
+// 回してから拒否すると、600 秒級の音声で数秒同期で占有する（結果は同じ拒否）。観測点は
+// 「寸法の壊れた mel 基底」— 特徴抽出に入れば基底の寸法で落ちるので、上限の拒否が先に
+// 出ることが「抽出に入らなかった」ことの証拠になる。
+
+/** 10ms フレームをちょうど `frames` 本作る長さの無音。 */
+const silenceOfFrames = (frames: number): Float32Array =>
+  new Float32Array(N_FFT + (frames - 1) * HOP);
+
+Deno.test("フレーム数: 長さから数えた本数は特徴抽出の本数と一致する", () => {
+  const melBasis = new Float32Array(N_MELS * MEL_BINS);
+  for (const samples of [N_FFT, N_FFT + HOP - 1, N_FFT + HOP, SAMPLE_RATE, SAMPLE_RATE + 77]) {
+    assertEquals(
+      featureFrameCount(samples),
+      extractFeatures(new Float32Array(samples), melBasis).frames,
+      `samples=${samples}`,
+    );
+  }
+  // 1 フレームも取れない長さは 1 未満（受理の判定は呼び手）。
+  assert(featureFrameCount(N_FFT - 1) < 1);
+});
+
+Deno.test("detect: 上限を超える音声は特徴を作る前に入力エラーで落とす", async () => {
+  const { pipeline } = pipelineWithFakeSession({
+    config: config({ maxFrames: 8 }),
+    melBasis: new Float32Array(0),
+  });
+
+  // 10 本（端数なし）は上限 8 を超える。抽出に入っていれば mel 基底の寸法で落ちる。
+  await assertRejects(
+    () => pipeline.detect(silenceOfFrames(10)),
+    ModelInputError,
+    "音声が長すぎる",
+  );
+});
+
+Deno.test("detect: 端数を落として上限ちょうどになる音声は上限を通って特徴抽出へ進む", async () => {
+  const { pipeline } = pipelineWithFakeSession({
+    config: config({ maxFrames: 8 }),
+    melBasis: new Float32Array(0),
+  });
+
+  // 9 本は端数 1 本を落として 8 本 = 上限ちょうど。上限の判定は切り捨て後の値で比べる。
+  await assertRejects(() => pipeline.detect(silenceOfFrames(9)), Error, "mel 基底が 0 要素");
 });

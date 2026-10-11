@@ -87,7 +87,14 @@ import {
   VOWEL_DETECTOR_PIPELINE_NAME,
   type VowelDetectorPipelineConfig,
 } from "./config.ts";
-import { extractFeatures, HOP, MEL_BINS, N_MELS, SAMPLE_RATE } from "./features.ts";
+import {
+  extractFeatures,
+  featureFrameCount,
+  HOP,
+  MEL_BINS,
+  N_MELS,
+  SAMPLE_RATE,
+} from "./features.ts";
 import { type LabSegment, logitsToSegments, toLab } from "./postprocess.ts";
 import { ModelInputError } from "../errors.ts";
 import { createOperationChain } from "../concurrency/serial.ts";
@@ -579,20 +586,27 @@ const runGraph = (
   );
 };
 
-/** 音声 1 本を通す（特徴 → 端数の切り捨て → 上限検査 → 実長で run → 後処理）。 */
+/**
+ * 音声 1 本を通す（上限検査 → 特徴 → 端数の切り捨て → 下限検査 → 実長で run → 後処理）。
+ */
 const detectAudio = async (
   state: VowelDetectorState,
   audio: Float32Array,
 ): Promise<VowelDetectorResult> => {
   const { config } = state;
-  const features = extractFeatures(audio, state.melBasis);
   // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落とす（**切り捨てであって pad ではない**
   // — 半端フレームを 1 本足すと、その 1 本だけが入力 1 フレーム分しか持たない出力になる）。
-  const usable = features.frames - (features.frames % TIME_STRIDE);
+  const frames = featureFrameCount(audio.length);
+  const usable = frames - (frames % TIME_STRIDE);
   // 端数を落とした後の実長を、配布形が宣言する運用範囲の**両側**と突き合わせる
   // （下限は「出力 1 本を作れるか」より厳しい — グラフの traced 範囲そのもの）。
-  assertFrameFloor(config, usable);
+  // MUST: 上限は特徴を作る**前**に見る（{@link featureFrameCount} の MUST — 長さだけで決まる
+  // 判定のために全フレーム分の FFT と非有限サンプルの走査を払わない）。下限は特徴の後に残す —
+  // 短い波形は抽出が安く、1 フレームも取れない長さは `extractFeatures` がサンプル数を名指しして
+  // 落とす（下限の文言だと負のフレーム数になる）。
   assertFrameLimit(config, usable);
+  const features = extractFeatures(audio, state.melBasis);
+  assertFrameFloor(config, usable);
   const rows = usable / TIME_STRIDE;
 
   const logits = await runGraph(state, {

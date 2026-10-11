@@ -108,6 +108,20 @@ const hannWindow = (length: number): Float32Array => {
 const signbit = (value: number): boolean => value < 0 || (value === 0 && 1 / value < 0);
 
 /**
+ * 波形の長さ（サンプル数）から 10ms フレーム数を出す（{@link extractFeatures} の `frames`）。
+ *
+ * 式は `floor((samples − N_FFT) / HOP) + 1`（librosa の `center=False` と同じ数え方）。
+ * `N_FFT` に満たない長さでは 1 未満を返す（受理の判定は呼び手 — 下の doc）。
+ *
+ * MUST: {@link extractFeatures} もこの 1 本で数える。フレーム数は長さだけで決まるので、
+ * パイプラインは特徴を作る**前**にこれで運用上限を見る（作り切ってから拒否すると、上限を
+ * 超えた長い音声で FFT と mel 変換を全フレーム分回して数秒同期で占有する）。式が 2 か所に
+ * 分かれると、前段の判定と後段の実長が食い違う。
+ */
+export const featureFrameCount = (samples: number): number =>
+  Math.floor((samples - N_FFT) / HOP) + 1;
+
+/**
  * 16kHz モノラル波形 → `[frames, FEATURE_DIM]` の特徴。
  *
  * `melBasis` は `[N_MELS, MEL_BINS]` の行優先（資産の f32 safetensors そのまま）。
@@ -127,7 +141,7 @@ export const extractFeatures = (audio: Float32Array, melBasis: Float32Array): Vo
       } が要る）`,
     );
   }
-  const frames = Math.floor((audio.length - N_FFT) / HOP) + 1;
+  const frames = featureFrameCount(audio.length);
   if (frames < 1) {
     // 波形は呼び手が渡した `detect` の引数そのもので、打つ手は「長い波形を渡す」1 つ
     // （ADR 0107 決定 2）。直上の mel 基底は資産から来る数なので素の `Error` のまま。
