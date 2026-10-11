@@ -15,6 +15,9 @@
   `outputs/series/wan2.2-ti2v-5b-i8-dyn/transformer`。
 - 「融合 attention op」は op が `attention` で states 欄が空のノード。states 形（ADR 0067）と分解 attention の行ブロック
   （ADR 0060・`bmm` の 9 ノード窓）は、変更の前から勘定に入っている。
+- 再計算（「後」の 1 行ぶん）: `deno run -A tools/diag/estimate-table.ts outputs/series/wan2.2-ti2v-5b-i8-dyn/transformer/model.krm --binding-limit 2147483644 --buffer-limit 1099511627776 --bind S=27280 --compute a8 --score f16 --budget 536870912`
+  （束縛・席・予算を行に合わせて替える。参照席は `--compute` / `--score` を省く。台本は表を作った後でコミットした — 2026-10-11 に
+  Wan2.2 の 3 行と Anima の `vae_decoder` の 1 行を再計算して表と一致）。
 
 ## 既存の呼び手の前後
 
