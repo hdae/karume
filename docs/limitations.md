@@ -1010,10 +1010,12 @@ VOICEVOX 系の `is_interrogative` / `enable_interrogative_upspeak` は AudioQue
 ## Anima: steps は 2 以上 1,000 以下の整数だけを受ける
 
 `generate` の `steps` と manifest の `pipelineConfig.defaults.steps` は、2 以上 1,000 以下の整数だけを受ける
-（門は `packages/models/src/anima/sampler.ts` の `assertAcceptableSteps` 1 本。超えると sigma 梯子を確保する前に
-`ModelInputError`）。上限は Wan（`num_train_timesteps` の 1,000）に揃えた実用上の値で、Wan の「超えると整数の
-timestep が重複する」という根拠は Anima には当てはまらない — Anima の timestep 埋め込みは σ の連続値をそのまま
-使う。上限の目的は、巨大な steps で梯子の確保と中断の効かない同期ループを走らせる前に入口で止めること。
+（門は `packages/models/src/anima/sampler.ts` の `assertAcceptableSteps` 1 本で、manifest の門もこれを呼ぶ。
+`generate` では超えると sigma 梯子を確保する前に `ModelInputError`、manifest では資産の齟齬として `Error` — 元の
+`ModelInputError` は `cause` に残る）。上限は Wan（`num_train_timesteps` の 1,000）に揃えた実用上の値で、
+Wan の「超えると整数の timestep が重複する」という根拠は Anima には当てはまらない — Anima の timestep 埋め込みは
+σ の連続値をそのまま使う。上限の目的は、巨大な steps で梯子の確保と中断の効かない同期ループを走らせる前に入口で
+止めること。
 
 ## Anima: 生成中のプレビュー画像は出せない（途中結果は生 latent のみ）
 

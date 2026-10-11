@@ -29,9 +29,9 @@ const MAX_PERIOD = 10000;
  * 実用上の上限。Wan の「超えると整数の timestep が必ず重複する」という根拠は Anima には当てはまらない
  * — Anima の timestep 埋め込みは σ の連続値をそのまま使う（{@link timestepsProj}）。上限の目的は、
  * 巨大な steps で梯子の `Float32Array` を確保して同期ループ（中断も効かない）を走らせる前に入口で
- * 止めること。`export` は manifest の既定の門（`config.ts`）が同じ値を引くため。
+ * 止めること。manifest の既定の門（`config.ts`）は値ではなく {@link assertAcceptableSteps} を呼ぶ。
  */
-export const ANIMA_MAX_STEPS = 1000;
+const ANIMA_MAX_STEPS = 1000;
 
 /**
  * `steps` の受理集合（**2 以上 {@link ANIMA_MAX_STEPS} 以下の整数**）を見る門。**この 1 本が所有者**で、生成の入口

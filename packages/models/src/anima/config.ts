@@ -16,7 +16,7 @@ import type { HubRepoRef } from "@karume/hub";
 
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { assertAcceptableResolution, type ImageSize } from "./resolution.ts";
-import { ANIMA_MAX_STEPS } from "./sampler.ts";
+import { assertAcceptableSteps } from "./sampler.ts";
 
 /** `pipeline` の契約名と、この実装が受け付ける major（ADR 0038 §1）。 */
 export const ANIMA_PIPELINE_NAME = "anima";
@@ -156,15 +156,19 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
   const where = "pipelineConfig.defaults";
   const record = readRecord(raw, where);
   assertAllowedKeys(record, DEFAULTS_KEYS, where);
-  const steps = readNumber(
-    record,
-    "steps",
-    where,
-    // 受理集合は生成の門（`sampler.ts` の `assertAcceptableSteps`）と同じ — 既定が門の外だと、要求が
-    // 何も渡さない generate が入力起因として落ちる。
-    (value) => Number.isInteger(value) && value >= 2 && value <= ANIMA_MAX_STEPS,
-    `2 以上の整数（上限 ${ANIMA_MAX_STEPS}）でない`,
-  );
+  const steps = readNumber(record, "steps", where, Number.isFinite, "有限の数でない");
+  // 既定が生成の門の外だと、要求が何も渡さない generate が入力起因として落ちる。
+  // MUST: 受理集合の条件は生成の門（`sampler.ts` の `assertAcceptableSteps`）1 本を呼ぶ — ここに
+  // 範囲を書き写すと片方だけが緩む。送出型は解像度と同じ理由でここで戻す（落ちる対象は配布
+  // manifest の宣言で、呼び手の要求ではない — ADR 0107 決定 2 の 500 側）。元の
+  // `ModelInputError` は `cause` に残す。
+  try {
+    assertAcceptableSteps(steps);
+  } catch (cause) {
+    throw new Error(`${where}.steps: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
+  }
   const guidanceScale = readNumber(
     record,
     "guidanceScale",
