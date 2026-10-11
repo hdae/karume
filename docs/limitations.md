@@ -480,12 +480,14 @@ initializer にだけ掛かり、食い違えば重みを取る前に `prepareCo
 [0060](decisions/0060-row-block-attention.md)）で、実行相と同じ融合計画が掴んだ窓は融合後の形（行ブロック 1 枚ぶんの
 一時と出力）で数え、束縛上限の検査もそのバッファにだけ当たる（ADR [0093](decisions/0093-transient-liveness-packing.md)
 追記 2026-10-10）。非勘定は `unaccounted` 欄が逐語で列挙する — ①行ブロック attention 以外の融合が畳んで消す
-中間とその融合ルールが宣言するノード内一時 ②states 形**でない** attention のノード内一時（スコアの
-行ブロックと i8a8 の量子化中間）と linear i8a8 の量子化中間 ③params バッファ
+中間とその融合ルールが宣言するノード内一時 ②linear i8a8 の量子化中間 ③params バッファ
 ④`queue.writeBuffer` の実装 staging ⑤退役の窓（予算超過 / 計画の LRU 追い出しで退役した slot
-backing は flush 後の後始末まで生きる）。**states 形 attention のスコア S と行統計は勘定に
-入っている**（行統計は `stateAttentionReduce` が要求する計画だけで、stats/PV 融合が成立する
-計画では 0 バイト）。
+backing は flush 後の後始末まで生きる）。**attention のノード内一時は勘定に入っている** — states 形の
+スコア S と行統計（行統計は `stateAttentionReduce` が要求する計画だけで、stats/PV 融合が成立する計画では
+0 バイト）と、融合 attention op のスコア S・行統計・i8a8 の量子化中間（ADR
+[0124](decisions/0124-attention-row-block-budget.md) 決定 7）。融合 attention op の席は `EstimateOptions` の
+`attentionCompute` / `attentionScoreStorage` で渡し、省略すると runtime 既定の f32 で数える（Anima の段ごとの
+見積りは席を渡していない — 実用席の s16 では過大側・a8 では量子化の一時のぶん過小側）。
 `unaccounted` に載らない差がもう 1 つある: **領域境界の padding** で、見積りの配置は実構築の
 パッカーと数百バイト単位でずれる。`EstimateOptions.maxBufferSize` は state スロット単体の上限検査と
 中間パッキングの領域の上限の両方に効き、`workspaceBytes` を動かしうる（first-fit の領域の割れ方が上限で
@@ -498,6 +500,24 @@ backing は flush 後の後始末まで生きる）。**states 形 attention の
 （ADR [0095](decisions/0095-plan-backing-budget.md) 決定 4・最大シナリオは `generation.chunkBuckets` のバケット形を
 含む — 同 追記 2026-10-10）で、既定 256 MiB の予算がシナリオより大きい小さなモデルでは、実際に保持する量が数 MiB でも
 256 MiB が勘定に載る（過大側）。報告の `planBackingBudgetBytes` で引き算できる・`planBackingBudgetBytes: 0` なら従来の `max(シナリオ)` に戻る。
+
+## attention の行ブロックの予算（`attentionRowBlockMaxBytes`）は一時 1 本ごとの上限で、合計ではない・予算違反は run の計画導出で落ちる
+
+`SessionOptions.attentionRowBlockMaxBytes`（ADR [0124](decisions/0124-attention-row-block-budget.md)）は、スコア S を
+実体化する attention（融合 attention op・states 形・分解 attention の行ブロック）の行ブロックを、device の束縛上限
+（`maxStorageBufferBindingSize`）とこの値の**小さいほう**に収まるように割るノブ。出力のビットは予算なしと同じで、
+省略すると今までと同じ（束縛上限だけで割る）。by-design の性質は次のとおり。
+
+- **一時 1 本ごとの上限で、合計の上限ではない**: S 1 枚と行統計 1 枚はそれぞれこの値以下になるが、同時に生きる合計は
+  この値を超えうる。i8a8 の量子化の一時（行ブロックのループの外）と、FFN の中間のような他の中間はこの値で縛らない
+  （中間の配置の上限検査は束縛上限のまま）。VRAM の総量の予算ではない。
+- **1 行ぶんに満たない予算は run の計画導出で落ちる**（fail loudly — 予算を名指す）: Session の構築時には形が記号のままで
+  枚数が決まらないので、構築時に落ちるのは値域の外（0・負・非整数・NaN・数値でない値）だけ。Wan の DiT なら重みの
+  読み込みの後に落ちる。事前に知る手段は見積り（`EstimateOptions.attentionRowBlockMaxBytes` に同じ値を渡す）。
+- **速度の代価は形と機に依る**: 枚数 × 3 本の dispatch が増える。小さい形では分割で遅くなった実測があり、分割の方が
+  速かった例もある（ADR 0124 Context）。Wan の規模での代価は未測定（ADR 0124 の段 4b で測る）。
+- **models の pipeline には口が無い**: runtime の `SessionOptions` だけの欄で、`WanTi2vPipeline` などからは渡せない
+  （口を出すかは段 4b の実測の後で決める）。
 
 ## slot backing の予算つき保持: 予算に収まらない形は 1 本だけ保持する・常駐入力の破棄は保持中は拒否される
 
@@ -1195,6 +1215,10 @@ Consequences）。
   - **1 submit の時間の懸念**（B570 では S ≥ 18,480〈1280×704 の 81 フレーム以上〉で裏付け前の 16 dispatch が 5 s を超えうるという見積り —
     ADR 0121 Context「容量と時間の見積り」）は、10 GB 級は 57 フレームを超える長さを非対応とするので当たらない（懸念は 81 フレーム以上・
     B570 で回ったのは 57 フレーム〈S = 13,200〉まで）。submit を短くする runtime 側の手は採っていない。
+- **行ブロックの予算（ADR [0124](decisions/0124-attention-row-block-budget.md)）はこの非対応の範囲を変えない**: runtime の
+  `SessionOptions.attentionRowBlockMaxBytes` は attention の瞬間の一時を縮めるが、`WanTi2vPipeline` には口が無く、
+  10 GB 級で 61 フレーム以上が入るかを確かめる機も無い（効き目の見込みは 12 GiB 級の余裕の上積みとして ADR 0124 に
+  推測の幅で書いた）。
 - **席は参照席 `f16+dit8` と実用席 `f16+dit8-a8-attn8-s16`（既定）の 2 つ**（f16 席は無い — ADR 0121 決定 2）。既定の実用席は
   利用者の視認（1280×704×33・50 ステップの 12 本 — 2026-10-06）で採った席。参照席との自機 A/B 門（ADR 0121 の段 7）では、step 1 の潜在の
   relRMS が 33 フレーム 4.39e-2・121 フレーム 4.92e-2（帯 8.8e-2 / 9.9e-2・121 フレームの門は opt-in `KARUME_WAN_TI2V_121F=1`）。

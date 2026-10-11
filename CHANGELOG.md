@@ -270,6 +270,19 @@ measurements in `docs/research/`.
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when
   a part 0 cannot be read, or when the directory has no container. A direct `hf upload` bypasses this
   check.
+- `SessionOptions.attentionRowBlockMaxBytes` (`@karume/runtime`): an optional cap, in bytes, on each
+  temporary buffer of the attention row blocks (the score matrix of one block and its row statistics,
+  each — not their sum). Attention that materializes the score matrix (the fused `attention` op, the
+  state form, and the decomposed attention window) already splits the query rows into blocks that fit
+  the device's `maxStorageBufferBindingSize`; with this option the blocks also fit the given budget,
+  which lowers the memory peak at the attention step in exchange for more dispatches. Outputs are
+  bit-identical to the run without a budget, and omitting the option leaves pipelines, keys and
+  memory unchanged. A budget smaller than one query row of a graph is rejected when that shape is first
+  planned (a `run`), naming the budget; non-positive or non-integer values are rejected at session
+  construction. The pipelines (`@karume/models`) do not expose it.
+- `EstimateOptions` accepts `attentionRowBlockMaxBytes`, `attentionCompute` and
+  `attentionScoreStorage` with the same values and checks as `SessionOptions`, so the estimate splits
+  attention the way the session will (omitted seats are estimated as `"f32"`, the runtime default).
 
 ### Changed
 
@@ -340,6 +353,14 @@ measurements in `docs/research/`.
   part (the model descriptor's provenance) and, in `karume-wan2.1`, the cross-repository reference
   to it change. `wan.umt5_export` selects the umT5 upstream with `--upstream` and the Wan text
   snapshot with `--model`, and rejects an option the subcommand does not use.
+- `@karume/runtime`: the memory estimate (`estimateGraphMemory` / `PreparedModel.estimate`) now
+  counts the internal temporaries of the fused `attention` op — the score matrix and row statistics of
+  each row block, and the int8 quantization buffers of `attentionCompute: "a8"` — with the same
+  functions the session uses, so `workspaceBytes` and `peakAccountedBytes` grow for graphs with that
+  op (for example the Wan2.2 transformer). Combinations a session rejects (an additive mask or grouped
+  query attention with `"a8"`, a non-f32 seat on the state form) are now rejected by the estimate too.
+  The second entry of `unaccounted` now names only the linear int8 quantization buffers. The estimates
+  the Anima and Gemma pipelines use are unchanged.
 
 ### Fixed
 
