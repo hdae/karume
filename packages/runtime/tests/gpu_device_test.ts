@@ -682,3 +682,20 @@ Deno.test("beginBatch は破棄要求済み・消失済みの device で開か�
   await gpu.device.lost;
   await assertRejects(() => gpu.beginBatch(), GpuDeviceLostError, "batch の開始");
 });
+
+Deno.test("beginBatch: ロック待ちの間に消失した device では区間を開かず、ロックをすぐ返す", async () => {
+  // 呼んだ時点の同期判定は通るが、先行区間がロックを返すまで待つ間に消失した形。開いてしまうと
+  // 消失済み device の上で区間ロックを握り続け、利用者が finish するまで後続が待たされる。
+  const { gpu, lose } = losableGpuContext();
+  const first = await gpu.beginBatch();
+  const second = gpu.beginBatch();
+  lose();
+  await gpu.device.lost;
+  await first.finish().catch(() => undefined);
+  await assertRejects(() => second, GpuDeviceLostError, "batch の開始");
+  assertEquals(
+    await gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("next")),
+    "next",
+    "拒否した beginBatch がロックを握ったまま（後続区間が待たされる）",
+  );
+});

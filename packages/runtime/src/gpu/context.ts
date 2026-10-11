@@ -489,6 +489,7 @@ export class GpuContext {
    * MUST: 消失済み・破棄要求済みの device では開かない（{@link assertDeviceUsable}）。開くと
    * 区間ロックを取って enqueue を受理し続け、失敗が `finish()` まで遅れる。区間の途中で消失した
    * ときに finish で検出するのは設計上の受容だが、開く時点で既に使えない device は同期に判定できる。
+   * 判定は入口と、区間ロックを取れた直後の 2 回（先行区間のロック解放を待つ間の消失は入口では見えない）。
    */
   async beginBatch(): Promise<BatchScope> {
     assertDeviceUsable(this, "batch の開始");
@@ -963,6 +964,11 @@ export class BatchScope {
     this.#release = hold.resolve;
     this.#completion = gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
       try {
+        // MUST: ロックを取れた時点で device の生存を見直す（push より前）。`beginBatch` の入口の
+        // 判定は先行区間のロック解放を待つ前なので、待ちの間の消失を見ていない。開くと消失済み
+        // device の上で区間ロックを握り続け、利用者の finish まで後続の区間を待たせる。投げれば
+        // 下の catch が beginBatch の待ちを拒否し、hold を待たずにロックを返す。
+        assertDeviceUsable(gpu, "batch の開始");
         pushFailureScopes(gpu.device);
       } catch (cause) {
         // MUST: 開けなかったことを beginBatch の待ちへ必ず伝える（伝えないとハングになる）。
