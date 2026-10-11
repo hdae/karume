@@ -175,3 +175,6 @@ state スロットは context 所有（ADR 0066）・codegen 決定性。
   上限超過で例外だった。融合後は 1,024 行ずつの 2 枚に割れ、一時 68,812,800 B × 2 領域 + 出力
   262,144 B = 137,887,744 B を返す（`packages/runtime/tests/estimate_test.ts` の手計算定数）。
 - 窓を持たないグラフの値は 1 バイトも動かない。
+
+行ブロックの枚数の上限には利用者の予算（`EstimateOptions.attentionRowBlockMaxBytes`）も効く（束縛上限との小さいほう・実行と
+同じ導出）。融合 attention op のノード内一時も見積りに数える — [ADR 0124](0124-attention-row-block-budget.md) 決定 7。

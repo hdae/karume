@@ -76,3 +76,5 @@
   台帳 K-5b で棄却済み（訂正 2026-10-10 — 旧記述は「寄せて S 自体を非実体化する案」）。
   `FusedDispatch.operands` 省略時の並び規約は doc の MUST のみ
   （型で縛る案は既存 4 ルールの記述量とのトレードで見送り）。
+- 追記（2026-10-11）: 枚数の上限に利用者の予算（`SessionOptions.attentionRowBlockMaxBytes` — 行ブロックの一時 1 本ごとの
+  上限）を足した。上限は束縛上限と予算の小さいほうで、既定（予算なし）は本 ADR のまま — [ADR 0124](0124-attention-row-block-budget.md)。
