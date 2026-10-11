@@ -350,7 +350,7 @@ device lost にする。BiRefNet 2048² では decoder 末尾の `deform_conv2d`
 `deform_conv2d` を複数 dispatch に分割するか高速化して 1 dispatch を上限内に収めること
 （[perf-ledger](perf-ledger.md) K-63）で、そのとき行を消す。
 
-## BiRefNet 系の α マット: 上流の半精度のモデルの出力とは一致しない・上流の切り捨ては写さない
+## BiRefNet 系の α マット: HR の上流の半精度のモデルの出力とは一致しない・上流の切り捨ては写さない
 
 後処理（logit → 入力画像の寸法の 8bit α）は、系列ごとの上流の**補間のカーネルと段の順序**を写す（配布形の
 `pipelineConfig.postprocess` — HR = `u8-pil-bicubic`・Lucida = `float-bilinear`。ADR
