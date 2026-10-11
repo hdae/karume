@@ -495,7 +495,9 @@ const admitDepthAnything = (
 /**
  * admission を通った材料から実行状態を組む（GPU 取得と Session 構築だけ）。
  *
- * MUST: GPU 取得後に許される検査は GPU の能力（shader-f16）だけ（ADR 0028）。
+ * MUST: GPU 取得後に許される検査は GPU の能力（feature の shader-f16 — ADR 0028 / device limits —
+ * ADR 0089 決定 5）だけ。この関数が取得後に見るのは feature だけで、limits は共有 GPU のときに
+ * {@link admitDepthAnything} が見る（自前で取った device の limits はここでは照合しない）。
  */
 const openDepthAnythingState = async (
   admitted: DepthAnythingAdmission,

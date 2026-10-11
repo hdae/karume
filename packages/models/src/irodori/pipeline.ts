@@ -415,7 +415,8 @@ export type IrodoriState = {
  *
  * MUST: 資産の解析は **GPU を取りに行く前**に落とす。順序がずれると、GPU の無い環境では
  * 別の例外に化けて「何が悪かったのか」が読み手に伝わらない。GPU 取得後に許される検査は
- * GPU の能力（shader-f16）だけ（ADR 0028）。
+ * GPU の能力だけ — feature（shader-f16 — ADR 0028）と、自前で取った device の limits
+ * （ADR 0089 決定 5 — 共有 GPU は `admitIrodori` が見る）。
  * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
  */
 const buildIrodoriState = async (

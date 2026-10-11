@@ -1112,7 +1112,8 @@ export class AnimaPipeline {
    *
    * MUST: manifest の契約違反と**資産の解析**は **GPU を取りに行く前**に落とす（他 6 家族と
    * 同じ順序）。順序がずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が
-   * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力（shader-f16）だけ。
+   * 読み手に伝わらない。GPU 取得後に許される検査は GPU の能力だけ — feature（shader-f16 —
+   * ADR 0028）と、自前で取った device の limits（ADR 0089 決定 5 — 共有 GPU は `#admit` が見る）。
    * MUST: Session は 1 本も張らない（VRAM の MUST — モジュール doc）。
    *
    * NOTE: 各段は不可分（3.7GiB の部品を途中で畳む口は無い）なので、
