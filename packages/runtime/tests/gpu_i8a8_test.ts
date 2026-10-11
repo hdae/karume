@@ -731,7 +731,7 @@ Deno.test({
   name: "i8a8: k が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ k·127² は i32 に収まるが、門は安全側。
+    // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ k·127·128 は i32 に収まるが、門は安全側。
     const k = LINEAR_I8A8_MAX_K + 4;
     const prepared = prepareLinear({ name: "overflow gate", m: 1, n: 4, k });
     const gpu = await acquireGpu();

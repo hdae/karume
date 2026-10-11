@@ -190,7 +190,7 @@ export const referenceLinearI8a8 = (input: LinearI8a8Input): Float32Array<ArrayB
   const out = new Float32Array(m * n);
   for (let row = 0; row < m; row += 1) {
     for (let col = 0; col < n; col += 1) {
-      // 整数の厳密和（|acc| ≤ k·127² は 2^53 に遠く及ばないので JS の number で厳密）
+      // 整数の厳密和（|acc| ≤ k·127·128 は 2^53 に遠く及ばないので JS の number で厳密）
       let acc = 0;
       for (let i = 0; i < k; i += 1) acc += q[row * k + i] * weight[col * k + i];
       const combined = Math.fround(scale[row] * weightScale[col]);
