@@ -53,7 +53,8 @@ class BirefnetResources:
     （ADR 0089 決定 3 の意味論）。読み手が最初に確かめたい制約なので、カードが持つ。
     """
 
-    #: GPU 総確保（常駐の重み + 中間の領域 + 入力）。
+    #: GPU 総確保 = runtime の見積り（`PreparedModel.estimate` の `peakAccountedBytes`）: 常駐の
+    #: 重み + 中間の領域 + 入力 + 出力の readback。
     total: str
     #: 中間テンソルに要る領域。**常駐の重みは持たない** — その数は manifest の container
     #: （part 列）側にあり（quant 表が導出する）、ここに写すと同じ量の正本が 2 つになる。
@@ -163,10 +164,11 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
             " case.",
         ),
         stored_dtype="f16",
-        # 総確保 = 重み + 中間の領域 + 入力（1024²: 509 + 749 + 12 = 1,270 MiB・2048²: 706 +
-        # 2,948 + 48 = 3,702 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run は 5 回の範囲
-        # （1 回目は中間の領域の確保を含む）。中間の領域と最大の binding は f32 席と同じ（活性値は
-        # f16 席でも f32）。
+        # 総確保 = runtime の見積りの `peakAccountedBytes`（重み + 中間の領域 + 入力 + 出力の
+        # readback — 1024²: 509.2 + 749.2 + 12 + 4 = 1,274.4 MiB・2048²: 706.2 + 2,948.0 + 48 +
+        # 16 = 3,718.2 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run はウォームアップの 1 回
+        # （計画の当たらない run）を除いた 5 回の範囲で、5 回の 1 回目は中間の領域の確保を含む。
+        # 中間の領域と最大の binding は f32 席と同じ（活性値は f16 席でも f32）。
         resources=BirefnetResourceMeasurement(
             quant="f16",
             conditions="measured 2026-10-11 on an RTX 3080 Ti",
