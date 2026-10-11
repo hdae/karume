@@ -27,6 +27,12 @@ const run = async (args: readonly string[]) => {
   };
 };
 
+/**
+ * file URL を実パスへ（`pathname` は空白・非 ASCII を %エンコードしたままなので、読み込みと文言の照合が
+ * 別の理由で落ちる — リポの他の台本と同じ書き方）。
+ */
+const filePath = (url: URL): string => decodeURIComponent(url.pathname);
+
 /** 対応外の画像（GIF）の fixture。 */
 const GIF = new URL("./fixtures/gif.gif", import.meta.url);
 /** 7×5 の RGB の PNG の fixture。 */
@@ -39,7 +45,7 @@ const runInEmptyDirectory = async (args: readonly string[]) => {
   const cwd = await Deno.makeTempDir({ prefix: "karume-wan-cli-" });
   try {
     const output = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", "--config", CONFIG.pathname, ENTRY.href, ...args],
+      args: ["run", "-A", "--config", filePath(CONFIG), ENTRY.href, ...args],
       cwd,
       stdout: "piped",
       stderr: "piped",
@@ -99,7 +105,7 @@ describe("main.ts — 条件画像の復号は配布形の読み込みより先"
       "--generation",
       "wan2.2",
       "--image",
-      GIF.pathname,
+      filePath(GIF),
     ]);
     assertNotEquals(code, 0);
     assertStringIncludes(stderr, "対応形式は PNG");
@@ -112,12 +118,12 @@ describe("main.ts — 条件画像の復号は配布形の読み込みより先"
       "--generation",
       "wan2.2",
       "--image",
-      RGB_PNG.pathname,
+      filePath(RGB_PNG),
     ]);
     assertNotEquals(code, 0);
     assertStringIncludes(
       stdout,
-      `[wan] image: ${RGB_PNG.pathname}（7×5・fit: パイプラインの既定）`,
+      `[wan] image: ${filePath(RGB_PNG)}（7×5・fit: パイプラインの既定）`,
     );
     assertStringIncludes(stderr, "配布形ミラー models/karume-wan2.2 に karume.json が無い");
     assert(!stdout.includes("[wan] source"), stdout);
