@@ -4,7 +4,10 @@ A blind A/B of BiRefNet's alpha-matte post-processing (ADR
 [0125](../../docs/decisions/0125-birefnet-matte-postprocess.md)): the current path
 (`float-bilinear` — antialiased bilinear on the floating-point sigmoid, then round) against the
 BiRefNet_HR upstream's intent (`u8-pil-bicubic` — sigmoid, round to 8 bits, then Pillow's 8-bit
-BICUBIC). Only BiRefNet_HR is compared; Lucida's upstream already is the current path.
+BICUBIC). Only BiRefNet_HR is compared: for Lucida the current path already matches the upstream at
+the level of numerical intent — the same kernel and the same order of steps (ADR 0125); only the
+quantization differs (round instead of the upstream's truncation, a deliberate choice for every
+procedure).
 
 Each image goes through the graph **once**; both procedures of
 `packages/models/src/birefnet/matte.ts` are applied to the same logits. Loading and the family gates
