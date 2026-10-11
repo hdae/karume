@@ -53,7 +53,7 @@ class BirefnetResources:
     （ADR 0089 決定 3 の意味論）。読み手が最初に確かめたい制約なので、カードが持つ。
     """
 
-    #: GPU 総確保（常駐の重み + 中間の領域）。
+    #: GPU 総確保（常駐の重み + 中間の領域 + 入力）。
     total: str
     #: 中間テンソルに要る領域。**常駐の重みは持たない** — その数は manifest の container
     #: （part 列）側にあり（quant 表が導出する）、ここに写すと同じ量の正本が 2 つになる。
@@ -65,34 +65,26 @@ class BirefnetResources:
     run: str
 
 
-#: モデル名（= 解像度）→ 実行資源の実測。ADR 0093 の静的 liveness パッキングと recipe の
-#: パッチ ⑨（decoder 末尾の 1×1 conv と bilinear upsample の順序交換）の後の値で、正本は
-#: docs/limitations.md の BiRefNet 節。
-#:
-#: MUST: 実測していない解像度の席は置かない — カードが名乗る数は 1 つ残らず実測に紐づく。
-#: 引くのは manifest の `imageWidth` なので（{@link _birefnet_resources}）、実測していない
-#: 解像度で描こうとすると落ちる。
-BIREFNET_RESOURCES: Mapping[str, BirefnetResources] = {
-    "1024": BirefnetResources(
-        total="about 1.7 GiB",
-        intermediates="749 MiB",
-        binding="the largest single storage buffer is 320 MiB",
-        run="about 1.8 s",
-    ),
-    "2048": BirefnetResources(
-        total="about 4.1 GiB",
-        intermediates="2,948 MiB",
-        binding="the largest single storage buffer is 1,280 MiB",
-        run="7.5 – 8.6 s",
-    ),
-}
+@dataclass(frozen=True)
+class BirefnetResourceMeasurement:
+    """1 checkpoint ぶんの実行資源の実測 — 測った quant 席・条件・解像度ごとの数。
 
-#: 上の表を採った条件（実測の性格そのものなので、`pipelineConfig` からは導出しない）。
-BIREFNET_RESOURCE_MEASUREMENT = "measured 2026-09-05 on an RTX 3080 Ti"
+    checkpoint ごとに持つのは、測った席と条件が checkpoint ごとに違うから（HR は f16 席・Lucida は
+    f32 席 — 1 つの表を両方のカードへ写すと、片方が測っていない席の数を名乗る）。
+    値は ADR 0093 の静的 liveness パッキングと recipe のパッチ ⑨（decoder 末尾の 1×1 conv と
+    bilinear upsample の順序交換）の後の実測で、正本は docs/limitations.md の BiRefNet 節。
+    """
 
-#: 上の表を採った quant 席。MUST: カードは総確保を**この席の数として**名乗る — f16 席の総確保は
-#: 実測していない（常駐の重みが減るぶん小さいはずだが、推し量った数は載せない — 冒頭の MUST）。
-BIREFNET_RESOURCE_QUANT = "f32"
+    #: 実測した quant 席。MUST: カードは総確保を**この席の数として**名乗る — 他の席の総確保は
+    #: 推し量らない（冒頭の MUST）。この席が manifest に無いモデルのカードは描かない。
+    quant: str
+    #: 実測の条件（日付・機 — 実測の性格そのものなので、`pipelineConfig` からは導出しない）。
+    conditions: str
+    #: モデル名（= 解像度）→ 数。MUST: 実測していない解像度の席は置かない — カードが名乗る数は
+    #: 1 つ残らず実測に紐づく。引くのは manifest の `imageWidth` なので
+    #: （{@link _birefnet_resources}）、実測していない解像度で描こうとすると落ちる。
+    by_resolution: Mapping[str, BirefnetResources]
+
 
 #: 後処理の手順（manifest の `pipelineConfig.postprocess` — TS 側 `MATTE_PROCEDURES` の綴り）→
 #: カードの説明（補間・段の順序・量子化）。手順の名前は manifest にあるが、その中身の説明は
@@ -143,6 +135,8 @@ class BirefnetCheckpoint:
     #: 同じ事実をヘッダから直接読む（`birefnet.export.checkpoint_dtypes`）ので、2 つの突合は
     #: `birefnet/tests/test_export.py` が実重みのある機で持つ。
     stored_dtype: str
+    #: カードが名乗る実行資源の実測（{@link BirefnetResourceMeasurement}）。
+    resources: BirefnetResourceMeasurement
 
 
 #: 実地確認（2026-08-13 — HF の model API）: どちらも `license: mit`。
@@ -160,6 +154,28 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
             " case.",
         ),
         stored_dtype="f16",
+        # 総確保 = 重み + 中間の領域 + 入力（1024²: 509 + 749 + 12 = 1,270 MiB・2048²: 706 +
+        # 2,948 + 48 = 3,702 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run は 5 回の範囲
+        # （1 回目は中間の領域の確保を含む）。中間の領域と最大の binding は f32 席と同じ（活性値は
+        # f16 席でも f32）。
+        resources=BirefnetResourceMeasurement(
+            quant="f16",
+            conditions="measured 2026-10-11 on an RTX 3080 Ti",
+            by_resolution={
+                "1024": BirefnetResources(
+                    total="about 1.2 GiB",
+                    intermediates="749 MiB",
+                    binding="the largest single storage buffer is 320 MiB",
+                    run="about 1.4 s",
+                ),
+                "2048": BirefnetResources(
+                    total="about 3.6 GiB",
+                    intermediates="2,948 MiB",
+                    binding="the largest single storage buffer is 1,280 MiB",
+                    run="7.3 – 7.9 s",
+                ),
+            },
+        ),
     ),
     "lucida": BirefnetCheckpoint(
         repo="egeorcun/lucida",
@@ -182,6 +198,24 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
             " upstream ships it to run inside a larger ComfyUI pipeline rather than bare.",
         ),
         stored_dtype="f32",
+        resources=BirefnetResourceMeasurement(
+            quant="f32",
+            conditions="measured 2026-09-05 on an RTX 3080 Ti",
+            by_resolution={
+                "1024": BirefnetResources(
+                    total="about 1.7 GiB",
+                    intermediates="749 MiB",
+                    binding="the largest single storage buffer is 320 MiB",
+                    run="about 1.8 s",
+                ),
+                "2048": BirefnetResources(
+                    total="about 4.1 GiB",
+                    intermediates="2,948 MiB",
+                    binding="the largest single storage buffer is 1,280 MiB",
+                    run="7.5 – 8.6 s",
+                ),
+            },
+        ),
     ),
 }
 
@@ -305,18 +339,20 @@ def _birefnet_entry(checkpoint: str) -> BirefnetCheckpoint:
     return entry
 
 
-def _birefnet_resources(config: Mapping[str, Any]) -> BirefnetResources:
-    """このモデルの解像度の実測を引く（{@link BIREFNET_RESOURCES}）。
+def _birefnet_resources(
+    measurement: BirefnetResourceMeasurement, config: Mapping[str, Any]
+) -> BirefnetResources:
+    """このモデルの解像度の実測を引く（{@link BirefnetResourceMeasurement.by_resolution}）。
 
     キーは manifest 側の `imageWidth` — モデル名の綴りではなく**宣言された解像度**で引くので、
     名前を付け替えても実測と対応が切れない。
     """
     resolution = str(config["imageWidth"])
-    resources = BIREFNET_RESOURCES.get(resolution)
+    resources = measurement.by_resolution.get(resolution)
     if resources is None:
         raise ValueError(
             f"入力 {resolution}² の実行資源は実測していない"
-            f"（実測済み: {' / '.join(BIREFNET_RESOURCES)}）— 実測していない数は名乗らない"
+            f"（実測済み: {' / '.join(measurement.by_resolution)}）— 実測していない数は名乗らない"
         )
     return resources
 
@@ -496,17 +532,19 @@ def _birefnet_postprocess(config: Mapping[str, Any]) -> tuple[str, ...]:
     return description
 
 
-def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
+def _birefnet_shape(model: Mapping[str, Any], *, entry: BirefnetCheckpoint) -> list[str]:
     """前処理の定数と入出力の形（利用者が渡すもの・受け取るものがここで読める）。
 
     実行資源はモデルごと（= 解像度ごと）に別の実測なので、この節に載る — 1024² と 2048² で
-    総確保が 2 倍以上違い、「どちらを選ぶか」の判断材料そのものである。
+    総確保が 2 倍以上違い、「どちらを選ぶか」の判断材料そのものである。実測はこのリポの
+    checkpoint のもの（{@link BirefnetCheckpoint.resources}）。
     """
     config = model["pipelineConfig"]
-    resources = _birefnet_resources(config)
-    if BIREFNET_RESOURCE_QUANT not in model["quants"]:
+    measurement = entry.resources
+    resources = _birefnet_resources(measurement, config)
+    if measurement.quant not in model["quants"]:
         raise ValueError(
-            f"実行資源を実測した quant '{BIREFNET_RESOURCE_QUANT}' がこのモデルの席に無い"
+            f"実行資源を実測した quant '{measurement.quant}' がこのモデルの席に無い"
             f"（席: {sorted(model['quants'])}）— 実測していない席の数は名乗らない"
         )
     mean = " / ".join(str(value) for value in config["imageMean"])
@@ -525,11 +563,10 @@ def _birefnet_shape(model: Mapping[str, Any]) -> list[str]:
         "  itself emits pre-sigmoid logits; the sigmoid and the resize back happen on the host).",
         *_birefnet_postprocess(config),
         f"- **required GPU memory**: {resources.total} allocated in total with the"
-        f" `{BIREFNET_RESOURCE_QUANT}` quant — its",
+        f" `{measurement.quant}` quant — its",
         f"  weights listed above, resident, plus {resources.intermediates} for the intermediate"
         " tensors — and",
-        f"  {resources.binding} ({BIREFNET_RESOURCE_MEASUREMENT});"
-        f" one image takes {resources.run}.",
+        f"  {resources.binding} ({measurement.conditions}); one image takes {resources.run}.",
         "  WebGPU's default `maxStorageBufferBindingSize` is 128 MiB, so this is in practice a",
         "  desktop-class GPU requirement. `karume.json` does not declare it: the declared limits",
         "  cover the resident weights and state, not the intermediate tensors a run allocates.",
@@ -560,6 +597,9 @@ def render_birefnet_model_card(
             models(manifest),
             [""],
             _birefnet_usage(manifest, repo),
-            *model_sections(manifest, (partial(quants, host_assets=host_assets), _birefnet_shape)),
+            *model_sections(
+                manifest,
+                (partial(quants, host_assets=host_assets), partial(_birefnet_shape, entry=entry)),
+            ),
         )
     )

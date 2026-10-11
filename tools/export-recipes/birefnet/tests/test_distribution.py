@@ -610,9 +610,9 @@ class TestBirefnetResolutionFamily:
         card = (self._run(tmp_path) / MODEL_CARD_FILENAME).read_text(encoding="utf-8")
         listing = " / ".join(sorted(BIREFNET_MODELS))
         assert f'  // model: "{BIREFNET_DEFAULT_MODEL}", // default — available: {listing}' in card
-        # 資源はモデルごとの実測（1 つを両方の節へ写していれば片方が嘘になる）。
-        assert "about 1.7 GiB" in card
-        assert "about 4.1 GiB" in card
+        # 資源はモデルごとの実測（1 つを両方の節へ写していれば片方が嘘になる）。HR の実測は f16 席。
+        assert "about 1.2 GiB allocated in total with the `f16` quant" in card
+        assert "about 3.6 GiB allocated in total with the `f16` quant" in card
         # 上流は 1 本（同居しているのは同じ checkpoint の解像度違い）。
         assert card.count(f"base_model: {BIREFNET_UPSTREAM['hr']}") == 1
         assert BIREFNET_UPSTREAM["lucida"] not in card

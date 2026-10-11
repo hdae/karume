@@ -2,8 +2,9 @@
 
 実物の配布形の `karume.json` は使わない — 偽 manifest の値がそのまま本文に出ること
 （＝手書きの数値が 1 つも混ざっていないこと）を見るのがここの仕事なので、実物と**違う**値で
-組んだほうが検出力が高い。**例外は解像度**（`imageWidth` / `imageHeight`）: 実行資源の実測表
-（{@link BIREFNET_RESOURCES}）はこの数で引くので、実測していない解像度では描けない。
+組んだほうが検出力が高い。**例外は解像度**（`imageWidth` / `imageHeight`）と**席**: 実行資源の
+実測（checkpoint ごとの `BirefnetCheckpoint.resources`）は解像度で引き、測った席が manifest に
+無ければ描かないので、偽 manifest も実測のある解像度と席を持つ。
 
 manifest からの導出（表・数・使い方）は `birefnet/tests/test_distribution.py` の
 `TestBirefnetModelCard` / `TestBirefnetResolutionFamily` が**組み立て 1 周ぶん**で見る。ここが
@@ -24,9 +25,6 @@ from birefnet.card import (
     BIREFNET_CHECKPOINTS,
     BIREFNET_MATTE_WEIGHTS,
     BIREFNET_POSTPROCESS_DESCRIPTIONS,
-    BIREFNET_RESOURCE_MEASUREMENT,
-    BIREFNET_RESOURCE_QUANT,
-    BIREFNET_RESOURCES,
     BIREFNET_SUPPORTED_PIPELINE,
     BIREFNET_UPSTREAM,
     render_birefnet_model_card,
@@ -91,8 +89,13 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _birefnet_manifest(model: str = MODEL) -> dict[str, Any]:
-    """BiRefNet 系の最小 manifest（解像度以外は実物と重ならない偽値）。"""
+def _birefnet_manifest(
+    model: str = MODEL, seats: tuple[str, ...] = ("f32", "f16")
+) -> dict[str, Any]:
+    """BiRefNet 系の最小 manifest（解像度と席以外は実物と重ならない偽値）。
+
+    `seats` は quant 席の格納 dtype（先頭が既定）。既定は両 checkpoint の実測の席を両方持つ形。
+    """
     side = int(model)
     return {
         "format": "karume/5",
@@ -102,11 +105,14 @@ def _birefnet_manifest(model: str = MODEL) -> dict[str, Any]:
             model: {
                 "pipeline": BIREFNET_SUPPORTED_PIPELINE,
                 "weights": {
-                    "matte": {"f32": _container(_ref("m/model.f32-00001-of-00003.krm", 13, "d"))}
+                    "matte": {
+                        dtype: _container(_ref(f"m/model.{dtype}-00001-of-00003.krm", 13, "d"))
+                        for dtype in seats
+                    }
                 },
                 "assets": {},
-                "quants": {"f32": {"weights": {"matte": "f32"}, "session": {}}},
-                "defaultQuant": "f32",
+                "quants": {dtype: {"weights": {"matte": dtype}, "session": {}} for dtype in seats},
+                "defaultQuant": seats[0],
                 "pipelineConfig": {
                     "imageWidth": side,
                     "imageHeight": side,
@@ -223,51 +229,80 @@ class TestBirefnetEntryPoint:
         assert "BirefnetPipeline.fromPretrained" in card
 
 
+#: checkpoint × 実測した解像度（実行資源の注記のパラメータ）。
+_MEASURED = [
+    (checkpoint, model)
+    for checkpoint, entry in sorted(BIREFNET_CHECKPOINTS.items())
+    for model in sorted(entry.resources.by_resolution)
+]
+
+
 class TestBirefnetResourceNote:
     """実行資源の注記（利用者が「渡す前に知りたい事実」— manifest に無いので定数）。"""
 
-    @pytest.mark.parametrize("model", sorted(BIREFNET_RESOURCES))
-    def test_the_card_names_the_gpu_memory_that_resolution_needs(self, model: str) -> None:
+    @pytest.mark.parametrize(("checkpoint", "model"), _MEASURED)
+    def test_the_card_names_the_gpu_memory_that_resolution_needs(
+        self, checkpoint: str, model: str
+    ) -> None:
         """MUST: 総確保と、128MiB 既定を超える binding の両方を**そのモデルの実測で**名乗る。
 
         WebGPU の `maxStorageBufferBindingSize` の仕様既定は 128MiB なので、それを超える
         binding は「端末によっては要求自体が通らない」制約。カードが黙っていると、読み手は
         `requiredLimits` が空なこと（= 常駐分は既定内）を「既定スペックで動く」と読む。
         """
-        card = render_birefnet_model_card(_birefnet_manifest(model), REPO, CHECKPOINT)
-        resources = BIREFNET_RESOURCES[model]
+        card = render_birefnet_model_card(_birefnet_manifest(model), REPO, checkpoint)
+        measurement = BIREFNET_CHECKPOINTS[checkpoint].resources
+        resources = measurement.by_resolution[model]
 
         assert resources.total in card
         assert resources.binding in card
         assert resources.run in card
-        assert BIREFNET_RESOURCE_MEASUREMENT in card
+        assert measurement.conditions in card
         assert "maxStorageBufferBindingSize" in card
 
-    def test_the_total_is_named_as_the_measured_seats_number(self) -> None:
-        """席が 2 つ並ぶカードで、総確保がどの席の実測かを言う（f16 席の総確保は未測 —
+    def test_each_checkpoint_measured_the_seat_it_names(self) -> None:
+        """実測した席は checkpoint ごと — HR は f16 席（2026-10-11）・Lucida は f32 席
+        （2026-09-05）。"""
+        assert {name: entry.resources.quant for name, entry in BIREFNET_CHECKPOINTS.items()} == {
+            "hr": "f16",
+            "lucida": "f32",
+        }
+
+    @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
+    def test_the_total_is_named_as_the_measured_seats_number(self, checkpoint: str) -> None:
+        """席が 2 つ並ぶカードで、総確保がどの席の実測かを言う（他の席の総確保は推し量らない —
         2026-09-26 レビュー F2）。"""
-        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, CHECKPOINT)
+        card = render_birefnet_model_card(_birefnet_manifest(), REPO, checkpoint)
         prose = " ".join(card.split())
+        measurement = BIREFNET_CHECKPOINTS[checkpoint].resources
 
-        assert BIREFNET_RESOURCE_QUANT == "f32"
-        assert f"{BIREFNET_RESOURCES[MODEL].total} allocated in total with the `f32` quant" in prose
+        assert (
+            f"{measurement.by_resolution[MODEL].total} allocated in total with the"
+            f" `{measurement.quant}` quant" in prose
+        )
 
-    def test_it_refuses_a_model_without_the_measured_seat(self) -> None:
+    @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
+    def test_it_refuses_a_model_without_the_measured_seat(self, checkpoint: str) -> None:
         """実測した席が無い配布形では、総確保を名乗れない（別の席の数として読まれる）。"""
-        manifest = _birefnet_manifest()
-        model = manifest["models"][MODEL]
-        model["quants"] = {"f16": {"weights": {"matte": "f16"}, "session": {}}}
-        model["weights"]["matte"] = {"f16": model["weights"]["matte"]["f32"]}
-        model["defaultQuant"] = "f16"
+        measured = BIREFNET_CHECKPOINTS[checkpoint].resources.quant
+        (other,) = (dtype for dtype in ("f32", "f16") if dtype != measured)
 
-        with pytest.raises(ValueError, match="実測した quant 'f32'"):
-            render_birefnet_model_card(manifest, REPO, CHECKPOINT)
+        with pytest.raises(ValueError, match=f"実測した quant '{measured}'"):
+            render_birefnet_model_card(_birefnet_manifest(seats=(other,)), REPO, checkpoint)
 
     def test_it_does_not_carry_another_resolutions_measurement(self) -> None:
         """1 つの実測を全モデルへ写すと、片方のカードが**測っていない数**を名乗る。"""
         card = render_birefnet_model_card(_birefnet_manifest(MODEL), REPO, CHECKPOINT)
 
-        assert BIREFNET_RESOURCES["2048"].total not in card
+        assert BIREFNET_CHECKPOINTS[CHECKPOINT].resources.by_resolution["2048"].total not in card
+
+    def test_it_does_not_carry_another_checkpoints_measurement(self) -> None:
+        """実測は checkpoint ごと — HR のカードは Lucida の席の数も条件も名乗らない。"""
+        card = render_birefnet_model_card(_birefnet_manifest(MODEL), REPO, CHECKPOINT)
+        other = BIREFNET_CHECKPOINTS["lucida"].resources
+
+        assert other.by_resolution[MODEL].total not in card
+        assert other.conditions not in card
 
 
 def _with_seat(manifest: dict[str, Any], dtype: str, *, default: bool = False) -> dict[str, Any]:
@@ -312,8 +347,8 @@ class TestBirefnetStorageAttribution:
 
     def test_the_storage_lines_follow_the_seats_in_the_manifest(self) -> None:
         """dtype ラベルは manifest から — f32 だけの配布形は f16 席を名乗らない。"""
-        plain = render_birefnet_model_card(_birefnet_manifest(), REPO, "hr")
-        both = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, "hr")
+        plain = render_birefnet_model_card(_birefnet_manifest(seats=("f32",)), REPO, "lucida")
+        both = render_birefnet_model_card(_birefnet_manifest(), REPO, "lucida")
 
         assert "  - `f32`:" in plain and "  - `f16`:" not in plain
         assert "  - `f32`:" in both and "  - `f16`:" in both
