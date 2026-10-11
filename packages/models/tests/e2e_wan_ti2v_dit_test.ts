@@ -77,6 +77,10 @@
  *   1280×704×121（S = 27,280・opt-in `KARUME_WAN_TI2V_121F=1`・単独のプロセス）。恒真化の防止として、①QK の dispatch 本数
  *   （行窓 `:rwa` とそれ以外）が self / cross 別・席の格納幅つきの期待枚数（{@link expectedAttentionBlocks} — runtime と独立に
  *   導く）と一致し、予算なしと違うことを同時に見る。
+ * - **段 4b の計測**（opt-in `KARUME_WAN_TI2V_ROW_BLOCK_PROBE=1` — 門は 2 つだけ: 予算ごとの backing が予算なしより小さい・
+ *   1 submit の GPU 時間 ≤ 1 s）: 実用席の S = 27,280 で予算なし / 1 GiB / 512 MiB / 256 MiB の backing・diag・VRAM の山
+ *   （fdinfo と nvidia-smi の GPU 全体）・1 forward の壁時計（ABBA の順・温度とクロックを下げた理由）・段別の GPU 時間
+ *   （`attention_qk` / `attention_stats` / `attention_pv`）を記録する。数は ADR 0124 の結果の節と research へ転記する。
  *
  * 資産が無い環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。golden の完全性（一部だけある環境は
  * FAIL）は GPU 不要のホストテスト（`wan_ti2v_dit_host_test.ts`）が組ごとに見る。
@@ -107,6 +111,7 @@ import { timestepsProj } from "../src/wan/dit-timestep.ts";
 import { quantOf } from "./helpers/ab-gate.ts";
 import { effectiveSessionOptions } from "./helpers/census-table.ts";
 import { formatDrmUsage, monitorDrmUsage } from "./helpers/drm-usage.ts";
+import { formatNvidiaTimeline, monitorNvidiaSmi } from "./helpers/nvidia-smi.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { settleReleases } from "./helpers/settle-releases.ts";
 import { timestampUnitNs } from "./helpers/timestamp-unit.ts";
@@ -354,6 +359,9 @@ const LONG_CLIP_TOKENS = 27280;
  */
 const SHORT_CLIP_LATENT_SHAPE: readonly number[] = [48, 5, 44, 80];
 const SHORT_CLIP_TOKENS = 4400;
+/** 段 4b の計測（行ブロックの予算ごとの backing・VRAM の山・壁時計・段別の GPU 時間 — ADR 0124）の opt-in。 */
+const ROW_BLOCK_PROBE_ENV = "KARUME_WAN_TI2V_ROW_BLOCK_PROBE";
+const ROW_BLOCK_PROBE = Deno.env.get(ROW_BLOCK_PROBE_ENV) === "1";
 /**
  * golden を持たない S（12,090 / 27,280）の入力の文脈（実プロンプトの埋め込み — S = 192 の golden の io から借りる・合成の乱数は
  * 使わない）。
@@ -391,6 +399,12 @@ if (!LONG_CLIP) {
   console.warn(
     `[karume] 実用席の S = ${LONG_CLIP_TOKENS}（1280×704・121 フレーム）の 1 submit の GPU 時間の門は opt-in のため SKIP する` +
       `（${LONG_CLIP_ENV}=1 で回す）`,
+  );
+}
+if (!ROW_BLOCK_PROBE) {
+  console.warn(
+    `[karume] 行ブロックの予算の計測（実用席・S = ${LONG_CLIP_TOKENS}・ADR 0124 の段 4b）は opt-in のため SKIP する` +
+      `（${ROW_BLOCK_PROBE_ENV}=1 で回す）`,
   );
 }
 if (MODEL_PRESENT && !PRACTICAL_DECLARED) {
@@ -1794,6 +1808,210 @@ Deno.test({
       await settleReleases(gpu);
       gpu.destroy();
     }
+  },
+});
+
+/**
+ * 段 4b の予算（ADR 0124）。1 GiB は「Chrome の点では FFN の項が先に頭打ちになり、1 GiB でも 512 MiB と同じだけ減る」という
+ * 推測を確かめる点として残す。
+ */
+const PROBE_BUDGETS: readonly (number | undefined)[] = [
+  undefined,
+  1024 * MIB,
+  512 * MIB,
+  256 * MIB,
+];
+
+/** 融合 attention の段（パイプラインキーの接頭辞 — f32 / i8a8 のどちらの経路も同じ綴りで始まる）。 */
+const ATTENTION_STAGES = ["attention_qk", "attention_stats", "attention_pv"] as const;
+
+/** 直近 run の融合 attention の段別の GPU 時間（ms — online softmax の前提の材料・ADR 0124 決定 9）。 */
+const attentionStageMs = (
+  diagnostics: SessionDiagnostics,
+  unitNs: number,
+): Readonly<Record<(typeof ATTENTION_STAGES)[number], number>> => {
+  const entries = diagnostics.lastRunTiming?.entries;
+  if (entries === undefined) throw new Error("計測モードなのに lastRunTiming が無い");
+  const msOf = (stage: string): number =>
+    entries.filter(({ key }) => key.startsWith(`${stage}:`))
+      .reduce((total, { ns }) => total + ns, 0) * unitNs / 1e6;
+  return {
+    attention_qk: msOf("attention_qk"),
+    attention_stats: msOf("attention_stats"),
+    attention_pv: msOf("attention_pv"),
+  };
+};
+
+/** 何もしない待ち（nvidia-smi の標本を空き時間で数本採るため）。 */
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+Deno.test({
+  name:
+    `Wan2.2 TI2V DiT 行ブロックの予算の計測（実 GPU・実用席 ${PRACTICAL_QUANT}・S = 27,280・opt-in ${ROW_BLOCK_PROBE_ENV}=1・` +
+    "ADR 0124 の段 4b）: 予算ごとの backing が予算なしより小さく、1 submit の GPU 時間 ≤ 1 s（backing・VRAM の山・壁時計・" +
+    "段別の GPU 時間を記録する）",
+  // 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）・束は配布形の manifest から読む（PRACTICAL_DECLARED）。
+  ignore: !ROW_BLOCK_PROBE || !SMALL_AVAILABLE || !PRACTICAL_DECLARED || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const { prepared, inputsOf } = await openForLongInputs();
+    const inputs = await inputsOf(LONG_CLIP_LATENT_SHAPE, LONG_CLIP_TOKENS);
+    const seatOptions = practicalSessionOptions();
+    const optionsOf = (budget: number | undefined): SessionOptions =>
+      budget === undefined ? seatOptions : { ...seatOptions, attentionRowBlockMaxBytes: budget };
+    const normal: Record<string, unknown>[] = [];
+    const timing: Record<string, unknown>[] = [];
+    const record: Record<string, unknown> = {
+      environment: ENVIRONMENT.key,
+      seat: PRACTICAL_QUANT,
+      tokens: LONG_CLIP_TOKENS,
+      normal,
+      timing,
+    };
+
+    // ① 通常モード（計測なし — 製品の経路）。ABBA の順（予算なし → 1 GiB → 512 → 256 → 256 → 512 → 1 GiB → 予算なし）で、
+    // 熱制限（ADR 0121 の 93 ℃・sw_thermal の前例）の偏りを前後で相殺する。Session は予算ごとに張って畳む。
+    await t.step(
+      "通常モード（ABBA）: backing・diag・VRAM の山・1 forward の壁時計・温度",
+      async () => {
+        await runRecordedCase(
+          results,
+          {
+            id: `${PRACTICAL_QUANT}/s${LONG_CLIP_TOKENS}/row-block-budget-probe/normal`,
+            failureNote: () => JSON.stringify(normal),
+          },
+          async () => {
+            let deviceLost: string | undefined;
+            const gpu = await acquireTestGpu({
+              onDeviceLost: (info) => {
+                deviceLost = `${info.reason}: ${info.message}`;
+              },
+            });
+            try {
+              assertAdapterMatchesEnvironment(gpu);
+              record.limits = {
+                maxStorageBufferBindingSize: gpu.device.limits.maxStorageBufferBindingSize,
+                maxBufferSize: gpu.device.limits.maxBufferSize,
+              };
+              // 走らせる前の GPU 全体の使用量（画面・他の process — 山から引く基準）。
+              const idle = monitorNvidiaSmi();
+              idle.enter("空き");
+              await pause(500);
+              record.idle = formatNvidiaTimeline(await idle.stop());
+              const backingOf = new Map<number | undefined, number>();
+              for (const budget of [...PROBE_BUDGETS, ...[...PROBE_BUDGETS].reverse()]) {
+                const label = budgetLabel(budget);
+                const smi = monitorNvidiaSmi();
+                smi.enter(label);
+                let observed: Awaited<ReturnType<typeof twoRuns>>;
+                let nvidia = "";
+                try {
+                  observed = await twoRuns(prepared, gpu, inputs, optionsOf(budget));
+                } finally {
+                  // 失敗の経路でも nvidia-smi の子を残さない。
+                  nvidia = formatNvidiaTimeline(await smi.stop());
+                }
+                assertEquals(observed.nonFinite, 0, `${label}: 非有限`);
+                // 2 本目 = slot backing（中間の領域 + 入力 — 生成の各ステップが使う形）。
+                const backing = observed.runs[1].backingBytes;
+                const previous = backingOf.get(budget);
+                // 計画は静的なので、同じ予算の 2 度目は同じ backing になる（ABBA の前後で崩れたら計画が動いている）。
+                if (previous !== undefined) {
+                  assertEquals(backing, previous, `${label}: ABBA の 2 度目の backing`);
+                }
+                backingOf.set(budget, backing);
+                normal.push({
+                  budget: label,
+                  backingBytes: backing,
+                  residentBytes: observed.diagnostics.planBacking.residentBytes,
+                  diagBytes: Math.max(...observed.runs.map(({ liveBytes }) => liveBytes)),
+                  buildMs: Math.round(observed.buildMs),
+                  wallMs: observed.runs.map(({ wallMs }) => Math.round(wallMs)),
+                  qk: qkDispatchesOf(observed.diagnostics),
+                  geometryProfile: observed.diagnostics.geometryProfile,
+                  vram: observed.vram,
+                  nvidia,
+                });
+                console.log(
+                  `[wan-ti2v-dit] 行ブロックの予算の計測 ${label}: ${
+                    JSON.stringify(normal.at(-1))
+                  }`,
+                );
+              }
+              const none = backingOf.get(undefined);
+              if (none === undefined) throw new Error("予算なしの backing が無い");
+              for (const budget of PROBE_BUDGETS.filter((value) => value !== undefined)) {
+                const backing = backingOf.get(budget);
+                assert(
+                  backing !== undefined && backing < none,
+                  `${
+                    budgetLabel(budget)
+                  }: backing ${backing} B が予算なしの ${none} B より小さくない（実寸での恒真化の防止）`,
+                );
+              }
+              assertEquals(deviceLost, undefined, "device lost");
+              return { status: "pass", note: JSON.stringify(normal) };
+            } finally {
+              await settleReleases(gpu);
+              gpu.destroy();
+            }
+          },
+        );
+      },
+    );
+
+    // ② 計測モード — 段別の GPU 時間（online softmax の前提の材料）と 1 submit の GPU 時間の最大。
+    await t.step("計測モード: 段別の GPU 時間・1 submit の GPU 時間の最大 ≤ 1 s", async () => {
+      await runRecordedCase(
+        results,
+        {
+          id: `${PRACTICAL_QUANT}/s${LONG_CLIP_TOKENS}/row-block-budget-probe/timing`,
+          failureNote: () => JSON.stringify(timing),
+        },
+        async () => {
+          let deviceLost: string | undefined;
+          const gpu = await acquireTestGpu({
+            gpuTiming: true,
+            onDeviceLost: (info) => {
+              deviceLost = `${info.reason}: ${info.message}`;
+            },
+          });
+          try {
+            assertAdapterMatchesEnvironment(gpu);
+            const unitNs = timestampUnitNs(ENVIRONMENT.key);
+            for (const budget of PROBE_BUDGETS) {
+              const label = budgetLabel(budget);
+              const observed = await twoRuns(prepared, gpu, inputs, optionsOf(budget));
+              assertEquals(observed.nonFinite, 0, `${label}: 非有限`);
+              const submit = submitGpuNote(observed.diagnostics, unitNs);
+              timing.push({
+                budget: label,
+                stageMs: attentionStageMs(observed.diagnostics, unitNs),
+                totalGpuMs: (observed.diagnostics.lastRunTiming?.totalNs ?? 0) * unitNs / 1e6,
+                maxSubmitMs: submit.maxMs,
+                submit: submit.note,
+              });
+              console.log(
+                `[wan-ti2v-dit] 行ブロックの予算の計測（計測モード）${label}: ${
+                  JSON.stringify(timing.at(-1))
+                }`,
+              );
+              assert(
+                submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
+                `${label}: 1 submit の GPU 時間の最大 ${
+                  submit.maxMs.toFixed(1)
+                } ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+              );
+            }
+            assertEquals(deviceLost, undefined, "device lost");
+            return { status: "pass", note: JSON.stringify(timing) };
+          } finally {
+            await settleReleases(gpu);
+            gpu.destroy();
+          }
+        },
+      );
+    });
+    console.log(`[wan-ti2v-dit] 行ブロックの予算の計測（全体）: ${JSON.stringify(record)}`);
   },
 });
 
