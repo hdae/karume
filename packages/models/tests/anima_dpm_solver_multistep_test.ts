@@ -378,3 +378,18 @@ function sigmaLadder(steps: number, shift: number): number[] {
   ladder.push(0);
   return ladder;
 }
+
+Deno.test("dpmSolverMultistepStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
+  // `cfgEulerStep` と同じ組（torch 2.13.0 の CPU で f32 テンソルの合成 = −0.03790003061294556）。
+  // x0 = 0 − 1·v なので、合成の符号を返した値になる。f64 のまま掛けると 0.03789997100830078。
+  const update = dpmSolverMultistepStep({
+    sample: Float32Array.from([0]),
+    cond: Float32Array.from([0.011]),
+    uncond: Float32Array.from([0.5]),
+    guidance: 1.1,
+    sigmas: Float32Array.from([1, 0.5, 0]),
+    index: 0,
+    previousX0: undefined,
+  });
+  assertEquals([...update.x0], [0.03790003061294556]);
+});

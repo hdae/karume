@@ -186,11 +186,14 @@ export const cfgEulerStep = (
   if (!wants && uncond !== undefined) {
     throw new Error("CFG scale 1 で uncond が渡された（uncond 分岐を計算しない経路のはず）");
   }
+  // 倍率は先に f32 へ落とす（torch は Python float のスカラを f32 テンソルとの積の前に f32 へ落とす —
+  // f64 のまま掛けると 1.1 のような f32 で表せない倍率で合成が 1 ulp ずれる）。
+  const scale = f32(guidance);
   const next = new Float32Array(previous.length);
   for (let index = 0; index < previous.length; index += 1) {
     const noise = uncond === undefined
       ? cond[index]
-      : f32(uncond[index] + f32(guidance * f32(cond[index] - uncond[index])));
+      : f32(uncond[index] + f32(scale * f32(cond[index] - uncond[index])));
     next[index] = f32(previous[index] + f32(sigmaDelta * noise));
   }
   return next;

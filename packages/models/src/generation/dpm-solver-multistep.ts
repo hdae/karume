@@ -150,12 +150,15 @@ export const dpmSolverMultistepStep = (
     d1Scale = f32(0.5 * d0Scale);
   }
 
+  // CFG の倍率は先に f32 へ落とす（torch は Python float のスカラを f32 テンソルとの積の前に f32 へ落とす —
+  // f64 のまま掛けると 1.1 のような f32 で表せない倍率で合成が 1 ulp ずれる）。
+  const scale = f32(guidance);
   const next = new Float32Array(sample.length);
   const x0 = new Float32Array(sample.length);
   for (let element = 0; element < sample.length; element += 1) {
     const velocity = uncond === undefined
       ? cond[element]
-      : f32(uncond[element] + f32(guidance * f32(cond[element] - uncond[element])));
+      : f32(uncond[element] + f32(scale * f32(cond[element] - uncond[element])));
     const predicted = f32(sample[element] - f32(sigmaS0 * velocity));
     x0[element] = predicted;
     const base = f32(f32(sampleScale * sample[element]) - f32(d0Scale * predicted));
