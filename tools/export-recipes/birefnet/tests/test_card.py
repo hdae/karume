@@ -131,6 +131,18 @@ def _birefnet_manifest(
     }
 
 
+class TestTheSeatTable:
+    def test_it_is_the_distributions_seats_with_the_default_first(self) -> None:
+        """{@link SEATS} は配布の席の写し — 規則（`birefnet_seat_dtypes` /
+        `birefnet_default_quant`）が動いたのに偽 manifest だけ古い席で組んで緑、を作らない。"""
+        from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
+
+        assert set(SEATS) == set(BIREFNET_CHECKPOINTS)
+        for checkpoint, seats in SEATS.items():
+            assert seats == birefnet_seat_dtypes(checkpoint)
+            assert seats[0] == birefnet_default_quant(checkpoint)
+
+
 class TestBirefnetPostprocess:
     """後処理の手順（`pipelineConfig.postprocess`）の説明 — 手順の名前はモデルの宣言から引く。"""
 
@@ -345,13 +357,6 @@ class TestBirefnetStorageAttribution:
         4 値のどれでもないので置かない。"""
         card = render_birefnet_model_card(
             _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
-        )
-        assert "base_model_relation" not in card
-
-    def test_an_f16_default_for_the_f16_checkpoint_is_not_quantized(self) -> None:
-        """HR の checkpoint 自身が f16 — f16 席を既定にしても値は変わらない。"""
-        card = render_birefnet_model_card(
-            _with_seat(_birefnet_manifest(), "f16", default=True), REPO, "hr"
         )
         assert "base_model_relation" not in card
 

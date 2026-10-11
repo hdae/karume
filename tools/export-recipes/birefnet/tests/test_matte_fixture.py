@@ -74,7 +74,7 @@ class TestTheCommittedFixture:
         crops = {row["name"] for row in real if row["provenance"]["kind"] == "crop"}
         assert crops == {
             f"real-{case}-{image.removeprefix('photo-')}"
-            for _series, case, _seat in matte_fixture.REAL_SERIES
+            for _series, case in matte_fixture.REAL_SERIES
             for image in matte_fixture.REAL_IMAGES
         }
         for row in real:
@@ -98,6 +98,28 @@ class TestTheCommittedFixture:
         )
 
         assert total < matte_fixture.MAX_TOTAL_BYTES
+
+
+class TestTheRealSeries:
+    def test_each_series_is_the_default_seat_of_its_checkpoint(self):
+        """実画像の切り出しの元は、checkpoint ごとに 1 本ずつ、配布の既定席の 1024² の系列。
+
+        退役した席（HR の f32）や既定でない席の logit から fixture を採らない — 系列名の綴りを
+        `birefnet_series_name` で逆に辿った席を、`birefnet_default_quant` と突き合わせる。
+        """
+        from birefnet.card import BIREFNET_CHECKPOINTS
+        from birefnet.distribution import birefnet_default_quant
+
+        resolved = [
+            matte_fixture.real_series_seat(series) for series, _case in matte_fixture.REAL_SERIES
+        ]
+
+        assert sorted(checkpoint for checkpoint, _model, _dtype in resolved) == sorted(
+            BIREFNET_CHECKPOINTS
+        )
+        for checkpoint, model, dtype in resolved:
+            assert model == "1024"
+            assert dtype == birefnet_default_quant(checkpoint)
 
 
 @pytest.fixture(scope="module")

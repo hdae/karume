@@ -79,6 +79,9 @@ import numpy as np
 
 from _shared.paths import REPO_ROOT
 
+from .card import BIREFNET_CHECKPOINTS
+from .distribution import BIREFNET_MODELS, BIREFNET_WEIGHT_DTYPES, birefnet_series_name
+
 #: fixture の置き場（git 管理）。
 FIXTURE_DIR = REPO_ROOT / "packages" / "models" / "tests" / "fixtures" / "birefnet-matte"
 FIXTURE_JSON = "matte.json"
@@ -117,15 +120,16 @@ MIN_SIDE_PIXELS = CROP_WIDTH
 CROP_STRIDE = 4
 
 #: 実画像の切り出しの元 = (e2e が書く系列の綴り — `e2e_birefnet_real_test.ts` の `artifactName`,
-#: ケース名の頭, quant 席)。各 checkpoint の配布の既定席の系列（HR は f16 席だけ — ADR 0113 追記
-#: 2026-10-11。HR の f16 席の logit は退役した f32 席と sha256 まで同じ）。
+#: ケース名の頭)。各 checkpoint の配布の既定席の系列（HR は f16 席だけ — ADR 0113 追記
+#: 2026-10-11。HR の f16 席の logit は退役した f32 席と sha256 まで同じ）。席は系列名から導く
+#: （{@link real_series_seat}）。
 #:
 #: ケース名の頭を系列名から導かないのは、ケース名が fixture の来歴の外の名前だから — 元の系列
 #: （席）を替えても `real-birefnet-hr-*` のまま動かさず、作り直しの差分を来歴（ファイル名）に
 #: 留める。
-REAL_SERIES: tuple[tuple[str, str, str], ...] = (
-    ("birefnet-hr-1024-f16", "birefnet-hr", "f16"),
-    ("lucida-1024", "lucida", "f32"),
+REAL_SERIES: tuple[tuple[str, str], ...] = (
+    ("birefnet-hr-1024-f16", "birefnet-hr"),
+    ("lucida-1024", "lucida"),
 )
 REAL_IMAGES = ("photo-portrait", "photo-street")
 
@@ -332,12 +336,33 @@ def _real_input(
     )
 
 
+def real_series_seat(series: str) -> tuple[str, str, str]:
+    """系列名 → (checkpoint, モデル名 = 解像度, 席の格納 dtype)。
+
+    系列名の綴りの正本（`birefnet.distribution.birefnet_series_name`）を全ての組で引いて逆に
+    辿る — 席を {@link REAL_SERIES} に別に持つと、系列を替えた日に来歴の席だけが古いまま残る。
+    """
+    matches = [
+        (checkpoint, model, dtype)
+        for checkpoint in BIREFNET_CHECKPOINTS
+        for model in BIREFNET_MODELS
+        for dtype in BIREFNET_WEIGHT_DTYPES
+        if birefnet_series_name(checkpoint, model, dtype) == series
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"系列名 '{series}' が BiRefNet の系列の綴りに 1 つで当たらない: {matches}"
+        )
+    return matches[0]
+
+
 def extract_real_inputs(logits_dir: Path) -> tuple[MatteInput, ...]:
     """e2e が書いたマット logits から実画像の切り出しを作る（来歴つき）。"""
     from safetensors.numpy import load_file
 
     inputs = []
-    for series, case, seat in REAL_SERIES:
+    for series, case in REAL_SERIES:
+        _checkpoint, _model, seat = real_series_seat(series)
         for image in REAL_IMAGES:
             path = logits_dir / f"{series}-{image}-matte.safetensors"
             tensors = load_file(path)
