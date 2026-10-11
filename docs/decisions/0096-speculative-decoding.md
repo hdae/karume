@@ -198,9 +198,10 @@ lm_head + argmax（centroid 疎 softmax の topk は exporter に無い — 受�
   採り、既定席は同じケースで相違数を報告する（limitations）。①′ の位置不変化（既定席でも u32 門）は段 4 の候補。
   この「M=4 は ①」は段 4-B の裁定（下の追記）で ①′ を M ≤ 8 へ広げるまでの状態で、現在は verify 形も ①′
   （現行の記述は決定 6 の括弧書きと limitations の投機節）。
-- **見積り**: `estimateSessionMemory` は target の prefill / decode に verify 形 `{ M: k+1, R: k+1 }` を足し
-  （runtime の `generation.scenarios`）、drafter の常駐重み（共有 initializer は除外）と借り手 context の
-  lengths 8 バイトを合算する。
+- **見積り**: `estimateSessionMemory` は target の prefill / decode に verify 形 `{ M, R: k+1 }` を足し
+  （runtime の `generation.scenarios`。M は k+1 を `physicalChunkRows` で見積る context のバケットへ丸めた
+  行数 — 実 run が流す物理行数と同じで、context の許可集合の内側に入る）、drafter の常駐重み（共有
+  initializer は除外）と借り手 context の lengths 8 バイトを合算する。
 - **readonly の sliding 512 列は据え置き**（HF は inclusive 513 列 — 意図的な差。追記 2026-09-08〈段 2〉の
   理由のとおり）。受理率への影響は G2 の実測に含まれる。
 

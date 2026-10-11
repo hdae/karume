@@ -139,10 +139,10 @@ export type AdmissionScenario = {
   /**
    * 中間（transient）slot 表の必要バイト = prepared backing の必要側と同義（**近似**）。
    *
-   * 融合前のノード列を宣言順に歩き、実行相と同じ確保規則（消費回数は `countUses`・
-   * グラフ出力は pinned で解放しない・別名化できる出力は確保せず入力の実体を別名で使う）で
-   * slot の生存区間を作り、実行相と同じ配置関数（生存区間と offset による配置 — ADR 0093）が
-   * 割り当てた領域の総和。**states 形 attention の
+   * 融合前のノード列（行ブロック attention は融合後の形）を宣言順に歩き、実行相と同じ確保規則
+   * （消費回数は `countUses`・グラフ出力は pinned で解放しない・別名化できる出力は確保せず
+   * 入力の実体を別名で使う）で slot の生存区間を作り、実行相と同じ配置関数（生存区間と offset
+   * による配置 — ADR 0093）が割り当てた領域の総和。**states 形 attention の
    * ノード内一時（スコア S と行統計）はここに入る** — 融合の成立に依存せず必ず出て、capacity
    * 律速のグラフでは中間の主役になるため（算式は {@link stateAttentionTemps}）。
    * **行ブロック attention（ADR 0060）の窓は融合後の形で入る** — 実行相と同じ融合計画が掴んだ
