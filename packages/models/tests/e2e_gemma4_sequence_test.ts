@@ -659,12 +659,14 @@ Deno.test({
               `${label}: 元の Z が基準と違う（分岐の Y が元の KV を上書きした）`,
             );
           } finally {
+            // 停止の理由は一致の検査が落ちたときにこそ要る（前提の「前のターンを閉じた」かを読む）。
+            console.log(`[e2e] gemma4 sequence ⑥ ${label}: 停止 ${reasons.join(" ")}`);
             await forked?.dispose();
             await source.dispose();
           }
           console.log(
             `[e2e] gemma4 sequence ⑥ ${label}: 基準 3 本 + 分岐 1 組が一致 / ` +
-              `停止 ${reasons.join(" ")} / ${(performance.now() - stepStarted).toFixed(0)}ms`,
+              `${(performance.now() - stepStarted).toFixed(0)}ms`,
           );
         });
       }

@@ -2079,6 +2079,10 @@ Deno.test({
     );
     const source = await session.createGenerationContext({ chunkLength: 1 });
     try {
+      // 先行の確保・初期化の submit を区間の外へ出す。NOTE: 元のスロットは一度も書いていないので、
+      // 実装の遅延ゼロ初期化が最初の利用（= この複製）に掛かりうる（推測）— 値は複製だけの所要より
+      // 大きく出うる。
+      await gpu.device.queue.onSubmittedWorkDone();
       const started = performance.now();
       const forked = await source.fork();
       await gpu.device.queue.onSubmittedWorkDone();
