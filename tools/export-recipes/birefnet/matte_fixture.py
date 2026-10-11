@@ -34,10 +34,10 @@ fixture の切り出しをそのまま入力にして、期待値だけを作り
 
 - **実画像の logit の切り出し**: `e2e_birefnet_real_test.ts` が書いた既定席のマット logits（HR は
   f16 席・Lucida は f32 席 — {@link REAL_SERIES}。`<系列>-photo-{portrait,street}-matte.safetensors`
-  — 1024² の karume のグラフ出力）から、輪郭の
-  画素（`|logit| < SOFT_LOGIT`）を最も多く含む `CROP_WIDTH × CROP_HEIGHT` の窓を両系列の 2 枚ずつ
-  切り出す。portrait からは窓の中心を通る 1 行と幅 2 の列（長さ 1024）も採り、実運用の係数表
-  （1024 → 832 / 480 / 2048）を掃く。来歴（ファイル・sha256・窓）を入力表に残す。
+  — 1024² の karume のグラフ出力）から、輪郭の画素（`|logit| < SOFT_LOGIT`）を最も多く含む
+  `CROP_WIDTH × CROP_HEIGHT` の窓を両系列の 2 枚ずつ切り出す。portrait からは窓の中心を通る 1 行と
+  幅 2 の列（長さ 1024）も採り、実運用の係数表（1024 → 832 / 480 / 2048）を掃く。来歴（ファイル・
+  sha256・窓）を入力表に残す。
 - **合成の境界ケース**: 素朴な移植が落ちる境界を 1 件ずつ（段差・細線・滑らかな斜面・飽和の帯・
   市松の overshoot・端の切り詰め・台が大きく伸びる縮小）。logit は有限の値を明示する。
 

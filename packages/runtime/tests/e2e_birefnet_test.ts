@@ -365,7 +365,7 @@ const SERIES: readonly Series[] = [
   },
 ];
 
-/** 2048² 系列を Intel Arc B570 で止める理由（{@link HELD_SERIES} の 2 行が共有する）。 */
+/** 2048² 系列を Intel Arc B570 で止める理由（{@link HELD_SERIES} の行が共有する）。 */
 const B570_JOB_TIMEOUT =
   "decoder 末尾の deform_conv2d 1 dispatch（出力 [1,256,1024,1024]・1024² の 1.66 s から ≈ 6.6 s の" +
   "見込み）が Linux xe ドライバの compute ジョブ上限 5 s を超えて device lost になり、Deno はそれを" +

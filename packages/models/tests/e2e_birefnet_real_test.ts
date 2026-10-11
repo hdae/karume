@@ -70,8 +70,8 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
  * 縮む）。残るのは正規化の畳み方の差だけ: TS は `(u8 − mean·255) / (std·255)` を 1 回で、
  * torch 側は同梱 `handler.py` の `ToTensor`（`u8 / 255`）→ `Normalize`（`(x − mean) / std`）で
  * **丸めが 1 回多い**。実測はこの差だけで、**4 系列 × 4 ケースとも maxAbs 4.768e-7**
- * （\|ref\| 上端 2.64 に対し 2 ulp。f16 の 2 系列は入力の golden が f32 系列とビット一致する —
- * 2026-09-26 の突合）。
+ * （退役した `birefnet-hr-1024` を含む当時の 4 系列での実測。\|ref\| 上端 2.64 に対し 2 ulp。
+ * f16 の 2 系列は入力の golden が f32 系列とビット一致する — 2026-09-26 の突合）。
  *
  * atol 1e-6 は実測 4.768e-7 の約 2.1 倍。
  *
