@@ -122,6 +122,13 @@ class BirefnetCheckpoint:
 
     #: 上流チェックポイントの HF リポ ID。
     repo: str
+    #: 配る重みの上流 revision（HF の commit SHA）。系列の容器が名乗る出所
+    #: （`provenance.upstreamRevision` — 台本が `--model-dir` の取得記録から焼く）を組み立てが
+    #: これと突き合わせる（`birefnet.distribution`）。固定値で見るので、別の checkpoint・別の
+    #: revision から焼いた系列は名前が合っていても組めない。値は `inputs/birefnet/<名前>` の
+    #: `hf download` の記録（`_shared.upstream.snapshot_revision`）で確かめた（突合は
+    #: `birefnet/tests/test_export.py` が取得記録のある機で持つ）。
+    revision: str
     #: カードの見出し（上流が名前で売っているモデルは、その名前で呼ぶ）。
     title: str
     #: 概要の 1 行目（何ができる重みか）。
@@ -145,6 +152,7 @@ BIREFNET_LICENSE = "mit"
 BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
     "hr": BirefnetCheckpoint(
         repo="ZhengPeng7/BiRefNet_HR",
+        revision="a7a562f6fd16021180f2f4348f4de003a2d3d1e1",
         title="BiRefNet HR — Karume",
         tagline="the high-resolution general-purpose BiRefNet checkpoint",
         attribution=(
@@ -179,6 +187,7 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
     ),
     "lucida": BirefnetCheckpoint(
         repo="egeorcun/lucida",
+        revision="6cbedc9722652dc9a3df91dd871f0c4f3334e922",
         title="Lucida (BiRefNet) — Karume",
         tagline=(
             "a BiRefNet fine-tune aimed at camouflage, transparency, text/logos and illustration"

@@ -61,7 +61,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from _shared.container_read import read_provenance
 from _shared.licenses import mit_license
 from _shared.upstream import assert_upstream_provenance
 from karume.dist import (
@@ -79,6 +78,7 @@ from karume.dist import (
 )
 
 from .card import (
+    BIREFNET_CHECKPOINTS,
     BIREFNET_LICENSE,
     BIREFNET_POSTPROCESS_DESCRIPTIONS,
     BIREFNET_UPSTREAM,
@@ -479,26 +479,19 @@ def birefnet_plan(
     # 出所」が素通りする。`pipelineConfig` は系列ごとに導いて**一致**を見る（寸法は焼かれた
     # グラフの宣言なので、1 本から導いて他へ写すと別寸法の系列が同居できてしまう）。
     configs: dict[str, dict[str, Any]] = {}
-    revisions: dict[str, str | None] = {}
+    revision = BIREFNET_CHECKPOINTS[checkpoint].revision
     for dtype in BIREFNET_WEIGHT_DTYPES:
         container = placements[birefnet_role(dtype)]
         graph = ir_graph(container)
         configs[dtype] = birefnet_pipeline_config(graph, container, model, checkpoint)
         assert_birefnet_graph(graph, container, configs[dtype])
-        # 容器が名乗る出所を帰属表へ突き合わせる（`_shared.upstream` — depth_anything と同じ
-        # 形）。revision は「名乗っていること」まで: この family の入力は系列だけで、手元の
-        # checkpoint を持たない（{@link BirefnetSources}）。
-        assert_upstream_provenance(container, license=BIREFNET_LICENSE, revision=None)
-        revisions[dtype] = read_provenance(container).upstream_revision
-    # MUST: 全 dtype の系列が**同じ上流 revision** を名乗ること。ライセンス（HR / Lucida とも
-    # MIT）と寸法・前処理は checkpoint を跨いで一致するので、revision を突き合わせないと「HR の
-    # f32 系列 + Lucida の f16 系列」が 1 モデルの 2 席として組み上がる（2026-09-26 レビュー A-1）。
-    if len(set(revisions.values())) != 1:
-        listed = ", ".join(f"{dtype} = {revision}" for dtype, revision in revisions.items())
-        raise DistError(
-            f"格納 dtype の系列が名乗る上流 revision が食い違う（{listed}）— 1 モデルの席は"
-            " 同じ checkpoint の同じ revision から焼く（別 checkpoint の系列を掴んでいる）"
-        )
+        # MUST: 容器が名乗る出所を帰属表の**固定値**（ライセンスと上流 revision — `birefnet.card`
+        # の BIREFNET_CHECKPOINTS）へ突き合わせる（wan と同じ形）。ライセンス（HR / Lucida とも
+        # MIT）と寸法・前処理は checkpoint を跨いで一致するので、revision を見ないと別の
+        # checkpoint の系列（「HR の席に Lucida の系列」・寄せ集めの 2 席 — 2026-09-26 レビュー
+        # A-1）が組み上がる。全容器を同じ固定値で見るので、席どうしの revision の一致も
+        # ここで閉じる。
+        assert_upstream_provenance(container, license=BIREFNET_LICENSE, revision=revision)
     pipeline_config = configs[BIREFNET_PLAIN_DTYPE]
     for dtype, config in configs.items():
         if config != pipeline_config:

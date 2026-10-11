@@ -22,10 +22,11 @@ from typing import Any
 import pytest
 from container_series import i2_container, placed_paths, replace_component, write_component
 from ir_fixtures import Shape, ir_container
-from upstream_fixture import FIXTURE_REVISION, OTHER_REVISION, stamp_fixture_provenance
+from upstream_fixture import OTHER_REVISION, stamp_fixture_provenance
 
 from _shared.licenses import mit_license
 from birefnet.card import (
+    BIREFNET_CHECKPOINTS,
     BIREFNET_LICENSE,
     BIREFNET_POSTPROCESS_DESCRIPTIONS,
     BIREFNET_UPSTREAM,
@@ -71,14 +72,16 @@ from karume.dist import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _baked_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """フィクスチャ容器に「台本が焼いた」出所を名乗らせる（出所の門の正常形）。"""
-    stamp_fixture_provenance(
-        monkeypatch,
-        Provenance(
-            license=BIREFNET_LICENSE, notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
-        ),
+def _baked_provenance(checkpoint: str, revision: str | None = None) -> Provenance:
+    """台本がその checkpoint の取得記録から焼く出所（出所の門の正常形）。
+
+    `revision` を省くと帰属表の固定値（= 組み立てが突き合わせる値）を名乗る。
+    """
+    pinned = BIREFNET_CHECKPOINTS[checkpoint].revision
+    return Provenance(
+        license=BIREFNET_LICENSE,
+        notice=NOTICE_FILENAME,
+        upstream_revision=pinned if revision is None else revision,
     )
 
 
@@ -171,6 +174,7 @@ def _build_birefnet_sources(
     storage: str = BIREFNET_PLAIN_DTYPE,
     f16_storage: str = "f16",
     f16_side: int | None = None,
+    provenance: Provenance | None = None,
     **container: Any,
 ) -> BirefnetSources:
     """系列を偽資産で再現する（配布しない `io.*` / `quality.json` の混入込み）。
@@ -183,24 +187,31 @@ def _build_birefnet_sources(
 
     `storage` は **f32 席の系列**の格納形（禁止表の門のケース）、`f16_storage` は f16 席の系列の
     格納形（要求表の門のケース）。残りのグラフ宣言の軸（`**container`）は全 dtype の系列に掛ける。
+
+    容器が名乗る出所は `provenance`（省くとその checkpoint の固定 revision — {@link
+    _baked_provenance}）で、出所の門のケースだけが差し替える。
     """
     sources = birefnet_sources(root / "outputs" / "series", checkpoint, model)
     shapes = {BIREFNET_PLAIN_DTYPE: (storage, side), "f16": (f16_storage, f16_side)}
-    for dtype, series in sources.series_by_dtype.items():
-        seat_storage, seat_side = shapes[dtype]
-        write_component(
-            series / "model.krm",
-            _birefnet_container(
-                storage=seat_storage,
-                side=seat_side if seat_side is not None else int(model),
-                **container,
-            ),
+    with pytest.MonkeyPatch.context() as patch:
+        stamp_fixture_provenance(
+            patch, _baked_provenance(checkpoint) if provenance is None else provenance
         )
-        # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
-        _write(series / "io.ramp.safetensors", b"io-fixture")
-        if dtype != BIREFNET_PLAIN_DTYPE:
-            # 圧縮系列の品質計測の記録（`birefnet/export.py` の QUALITY_FILE）も配布に入らない。
-            _write(series / "quality.json", b"{}")
+        for dtype, series in sources.series_by_dtype.items():
+            seat_storage, seat_side = shapes[dtype]
+            write_component(
+                series / "model.krm",
+                _birefnet_container(
+                    storage=seat_storage,
+                    side=seat_side if seat_side is not None else int(model),
+                    **container,
+                ),
+            )
+            # 配布に入ってはいけない E2E フィクスチャ（系列には実際にこれが並んでいる）。
+            _write(series / "io.ramp.safetensors", b"io-fixture")
+            if dtype != BIREFNET_PLAIN_DTYPE:
+                # 圧縮系列の品質計測の記録（`birefnet/export.py` の QUALITY_FILE）も配布に入らない。
+                _write(series / "quality.json", b"{}")
     return sources
 
 
@@ -303,54 +314,64 @@ class TestBirefnetLayout:
 
 
 class TestBirefnetContainerProvenance:
-    """容器が名乗る出所を帰属表へ突き合わせる（revision は「名乗っていること」まで）。"""
+    """容器が名乗る出所を帰属表の固定値（ライセンスと上流 revision）へ突き合わせる。"""
 
-    def test_it_refuses_a_container_that_names_another_license(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stamp_fixture_provenance(
-            monkeypatch,
-            Provenance(
-                license="apache-2.0", notice=NOTICE_FILENAME, upstream_revision=FIXTURE_REVISION
+    def test_it_refuses_a_container_that_names_another_license(self, tmp_path: Path) -> None:
+        sources = _build_birefnet_sources(
+            tmp_path,
+            provenance=Provenance(
+                license="apache-2.0",
+                notice=NOTICE_FILENAME,
+                upstream_revision=BIREFNET_CHECKPOINTS[BIREFNET_HR_CHECKPOINT].revision,
             ),
         )
-        sources = _build_birefnet_sources(tmp_path)
 
         with pytest.raises(DistError, match=r"provenance\.license が 'apache-2.0'"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
-    def test_it_refuses_a_container_without_an_upstream_revision(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stamp_fixture_provenance(
-            monkeypatch, Provenance(license=BIREFNET_LICENSE, notice=NOTICE_FILENAME)
+    def test_it_refuses_a_container_without_an_upstream_revision(self, tmp_path: Path) -> None:
+        sources = _build_birefnet_sources(
+            tmp_path, provenance=Provenance(license=BIREFNET_LICENSE, notice=NOTICE_FILENAME)
         )
-        sources = _build_birefnet_sources(tmp_path)
 
         with pytest.raises(DistError, match="upstreamRevision を持たない"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
 
-    def test_every_dtype_series_names_the_same_upstream_revision(self, tmp_path: Path) -> None:
-        """正常形: f32 / f16 の系列が同じ revision を名乗れば組める（下の故障注入の対照）。"""
-        sources = _build_birefnet_sources(tmp_path)
-
-        birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
-
-    def test_it_refuses_the_f16_series_of_another_checkpoint(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("checkpoint", [BIREFNET_HR_CHECKPOINT, BIREFNET_LUCIDA_CHECKPOINT])
+    def test_every_series_naming_the_pinned_revision_is_assembled(
+        self, tmp_path: Path, checkpoint: str
     ) -> None:
+        """正常形: 全席の系列がその checkpoint の固定 revision を名乗れば組める（下の故障注入の
+        対照）。"""
+        sources = _build_birefnet_sources(tmp_path, checkpoint=checkpoint)
+
+        birefnet_plan(sources, checkpoint)
+
+    def test_the_pinned_revisions_tell_the_checkpoints_apart(self) -> None:
+        """固定値が checkpoint を区別すること — 同じ値なら下の取り違えが素通りする。"""
+        revisions = [entry.revision for entry in BIREFNET_CHECKPOINTS.values()]
+
+        assert len(set(revisions)) == len(revisions)
+
+    def test_it_refuses_a_series_baked_from_another_revision(self, tmp_path: Path) -> None:
+        """同じ checkpoint でも固定値と違う revision から焼いた系列は組まない（上流の更新を
+        取り込むなら固定値を動かす — 手元の取得だけ先に進んだ系列を黙って配らない）。"""
+        sources = _build_birefnet_sources(
+            tmp_path, provenance=_baked_provenance(BIREFNET_HR_CHECKPOINT, OTHER_REVISION)
+        )
+
+        with pytest.raises(DistError, match="upstreamRevision が") as raised:
+            birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+        assert OTHER_REVISION in str(raised.value)
+
+    def test_it_refuses_the_f16_series_of_another_checkpoint(self, tmp_path: Path) -> None:
         """故障注入: HR の f32 系列 + Lucida の f16 系列（ライセンスはどちらも MIT・寸法も同じ）。
 
         出所の門がライセンスと revision の有無だけを見ていると、別 checkpoint の系列が 1 モデルの
-        2 席として組み上がる（2026-09-26 レビュー A-1）。revision の一致がそれを落とす。
+        2 席として組み上がる（2026-09-26 レビュー A-1）。全容器を HR の固定値で見るので、Lucida の
+        revision を名乗る f16 系列がそれを落とす — HR のリポには HR の重みだけが入る。
         """
         hr = _build_birefnet_sources(tmp_path / "hr")
-        stamp_fixture_provenance(
-            monkeypatch,
-            Provenance(
-                license=BIREFNET_LICENSE, notice=NOTICE_FILENAME, upstream_revision=OTHER_REVISION
-            ),
-        )
         lucida = _build_birefnet_sources(tmp_path / "lucida", checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
         mixed = BirefnetSources(
             series_by_dtype={
@@ -359,10 +380,11 @@ class TestBirefnetContainerProvenance:
             }
         )
 
-        with pytest.raises(DistError, match="上流 revision が食い違う") as raised:
+        with pytest.raises(DistError, match="upstreamRevision が") as raised:
             birefnet_plan(mixed, BIREFNET_HR_CHECKPOINT)
-        assert FIXTURE_REVISION in str(raised.value)
-        assert OTHER_REVISION in str(raised.value)
+        assert str(lucida.series_by_dtype["f16"]) in str(raised.value)
+        assert BIREFNET_CHECKPOINTS[BIREFNET_LUCIDA_CHECKPOINT].revision in str(raised.value)
+        assert BIREFNET_CHECKPOINTS[BIREFNET_HR_CHECKPOINT].revision in str(raised.value)
 
 
 class TestBirefnetPipelineConfig:

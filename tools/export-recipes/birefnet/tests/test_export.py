@@ -909,6 +909,24 @@ class TestCheckpointCensus:
         }
         assert bn.lossless_under("f16", census) is (entry.stored_dtype == "f16")
 
+    @pytest.mark.parametrize("checkpoint", ["hr", "lucida"])
+    def test_the_pinned_revision_is_the_one_the_script_bakes(self, checkpoint: str):
+        """帰属表の固定 revision（組み立てが容器の出所を突き合わせる値）と、台本が容器へ焼く
+        手元の取得記録の revision の一致。
+
+        取得記録の無い機では SKIP（`inputs/` はリポ管理外）。食い違うと、手元で焼いた系列が
+        全て組み立ての出所の門で落ちる（上流の更新を取り込むなら固定値を動かす）。
+        """
+        from _shared.upstream import SNAPSHOT_RECORD_DIR, SNAPSHOT_RECORD_FILE, snapshot_revision
+        from birefnet.card import BIREFNET_CHECKPOINTS
+
+        entry = BIREFNET_CHECKPOINTS[checkpoint]
+        model_dir = bn.MODELS_ROOT / entry.repo.split("/", 1)[1]
+        if not (model_dir / SNAPSHOT_RECORD_DIR / f"{SNAPSHOT_RECORD_FILE}.metadata").is_file():
+            pytest.skip(f"{model_dir} に取得記録が無い")
+
+        assert snapshot_revision(model_dir) == entry.revision
+
 
 def _logits(*values: float) -> torch.Tensor:
     return torch.tensor(values, dtype=torch.float32).reshape(1, 1, 1, len(values))
