@@ -131,6 +131,14 @@ const ascii = (view: DataView, offset: number): string =>
  * MUST: 走査の境界は物理長でなく **RIFF が offset 4 で宣言した論理終端**（{@link encodeWav} が
  * 書いている欄）。宣言の外に物理バイトが余っていても、それは RIFF 容器の外なので読まない
  * （近似ではなく仕様どおりの無視）。逆に論理終端が物理長を超えるのは切り詰められた器。
+ *
+ * MUST: 走査は論理終端**ちょうど**で終わる。終端の手前に 8 バイトに満たない断片が残るのは、
+ * 壊れた器か、奇数長チャンクの詰めを書き落とした書き手の後で 1 バイトずれたヘッダを読んだ形
+ * （以後のチャンク境界が全部ずれる）。黙って無視すると、チャンク重複や長さ超過を落とす他の
+ * 検査と厳格さが食い違う。
+ * NOTE: 唯一の例外は「**最後の**チャンクが奇数長で詰めの 1 バイトだけが無い」形で、走査は
+ * 終端の 1 バイト先で終わる。実在の書き手に多く、詰めの後ろに読むものが無いのでずれも
+ * 起こらないため受ける。
  */
 const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: RiffChunk } => {
   if (view.byteLength < 12) {
@@ -152,7 +160,14 @@ const findChunks = (view: DataView): { readonly fmt: RiffChunk; readonly data: R
   let fmt: RiffChunk | undefined;
   let data: RiffChunk | undefined;
   let cursor = 12;
-  while (cursor + 8 <= logicalEnd) {
+  while (cursor < logicalEnd) {
+    if (cursor + 8 > logicalEnd) {
+      throw new ModelInputError(
+        `decodeWav: RIFF の終端の手前に ${logicalEnd - cursor} バイトの断片がある` +
+          "（チャンクヘッダは 8 バイト — 器が壊れているか、奇数長チャンクの詰めが欠けて" +
+          "以後の境界がずれている）",
+      );
+    }
     const id = ascii(view, cursor);
     const length = view.getUint32(cursor + 4, true);
     const offset = cursor + 8;

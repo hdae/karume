@@ -341,6 +341,60 @@ describe("decodeWav が同じ id のチャンクを 2 本持つ器を受けた�
   });
 });
 
+describe("decodeWav がチャンクの走査を RIFF の論理終端ちょうどで終えられない器を受けたとき", () => {
+  const single = (): Uint8Array<ArrayBuffer> =>
+    buildWav({
+      format: 1,
+      channels: 1,
+      sampleRate: 48000,
+      bits: 16,
+      payload: int16Payload([16384]),
+    });
+
+  /** 器の末尾に生のバイトを足し、RIFF の宣言サイズを実長に揃える。 */
+  const appendRaw = (wav: Uint8Array<ArrayBuffer>, tail: Uint8Array): Uint8Array<ArrayBuffer> => {
+    const bytes = new Uint8Array(wav.length + tail.length);
+    bytes.set(wav);
+    bytes.set(tail, wav.length);
+    new DataView(bytes.buffer).setUint32(4, bytes.length - 8, true);
+    return bytes;
+  };
+
+  /** 詰めを書き落とした奇数長チャンク（id + 長さ + 中身、詰め無し）。 */
+  const unpaddedChunk = (id: string, body: readonly number[]): Uint8Array => {
+    const bytes = new Uint8Array(8 + body.length);
+    ascii(bytes, 0, id);
+    new DataView(bytes.buffer).setUint32(4, body.length, true);
+    bytes.set(body, 8);
+    return bytes;
+  };
+
+  it("終端の手前に 8 バイトに満たないヘッダ断片（4 バイトの JUNK）があれば落とす", () => {
+    const fragment = new Uint8Array(4);
+    ascii(fragment, 0, "JUNK");
+    assertThrows(
+      () => decodeWav(appendRaw(single(), fragment)),
+      ModelInputError,
+      "RIFF の終端の手前に 4 バイトの断片がある",
+    );
+  });
+
+  it("詰めの欠けた奇数長チャンクの後ろのヘッダを 1 バイトずれて読む形は落とす", () => {
+    // JUNK（長さ 1・詰め無し）の後ろに LIST を置くと、読み手は詰めを 1 バイト読み飛ばして
+    // LIST のヘッダを 1 バイト右から読み、以後のチャンク境界が全部ずれる。
+    const tail = new Uint8Array([
+      ...unpaddedChunk("JUNK", [7]),
+      ...unpaddedChunk("LIST", [0, 0, 0, 0]),
+    ]);
+    assertThrows(() => decodeWav(appendRaw(single(), tail)), ModelInputError, "の断片がある");
+  });
+
+  it("最後のチャンクだけが詰めを欠く形は受ける（実在の書き手に多く、後ろに読むものが無い）", () => {
+    const decoded = decodeWav(appendRaw(single(), unpaddedChunk("JUNK", [7])));
+    assertEquals(Array.from(decoded.data), [0.5]);
+  });
+});
+
 Deno.test("decodeWav: フレーム境界で割り切れない data は落とす", () => {
   assertThrows(
     () =>
