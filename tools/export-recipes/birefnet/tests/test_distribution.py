@@ -294,7 +294,7 @@ class TestBirefnetLayout:
 
     def test_the_order_of_the_given_series_does_not_matter(self, tmp_path: Path) -> None:
         """系列の照合は集合で見る — 並び（席の順）は `birefnet_seat_dtypes` から引くので、渡された
-        系列の並びが違っても同じ計画になる。"""
+        系列の並びが違っても同じ計画になる（席・weights・quants・既定席・artifacts）。"""
         built = _build_birefnet_sources(tmp_path, checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
         reordered = BirefnetSources(
             series_by_dtype=dict(reversed(list(built.series_by_dtype.items())))
@@ -302,10 +302,12 @@ class TestBirefnetLayout:
         assert list(reordered.series_by_dtype) == ["f16", "f32"]
 
         plan = birefnet_plan(reordered, BIREFNET_LUCIDA_CHECKPOINT)
+        expected = birefnet_plan(built, BIREFNET_LUCIDA_CHECKPOINT)
 
         assert list(plan.weights[BIREFNET_ROLE]) == ["f32", "f16"]
         assert list(plan.quants) == ["f32", "f16"]
         assert plan.default_quant == "f32"
+        assert set(plan.artifacts) == set(expected.artifacts)
 
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_birefnet_sources(tmp_path)
@@ -922,6 +924,18 @@ class TestBirefnetWeightDtypes:
 
         with pytest.raises(DistError, match=r"の席 \['f16'\] と違う"):
             birefnet_plan(sources, BIREFNET_HR_CHECKPOINT)
+
+    def test_lucida_does_not_take_sources_without_its_f16_seat(self, tmp_path: Path) -> None:
+        """系列の dict に席のキーが欠けていても組まない（照合は一致で、部分集合では足りない）。
+
+        f32 系列は出所も寸法も Lucida のもので、欠けているのは f16 のキーだけ — 照合が部分集合へ
+        弱まると、この計画は宣言した f16 席の系列を探しに行って照合の外で落ちる。
+        """
+        built = _build_birefnet_sources(tmp_path, checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
+        sources = BirefnetSources(series_by_dtype={"f32": built.series_by_dtype["f32"]})
+
+        with pytest.raises(DistError, match=r"の席 \['f32', 'f16'\] と違う"):
+            birefnet_plan(sources, BIREFNET_LUCIDA_CHECKPOINT)
 
     def test_it_refuses_a_dtype_it_does_not_ship(self) -> None:
         with pytest.raises(DistError, match="は配らない"):

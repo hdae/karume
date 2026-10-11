@@ -351,7 +351,7 @@ def birefnet_directory_checkpoint(directory: str) -> str | None:
     """上流チェックポイントのディレクトリ名 → checkpoint 名（{@link birefnet_checkpoint} の逆）。
 
     `birefnet/export.py` が `--model-dir` から席の規則（{@link birefnet_seat_dtypes}）を引く口の
-    **2 番目**（取得記録の revision が固定値に当たらないとき — {@link
+    **2 番目**（取得記録が無い・読めない・固定値に当たらないとき — {@link
     birefnet_revision_checkpoint}）で、系列名と同じ紐づけ（ディレクトリ名 = 上流の HF リポ名の
     末尾）で引く。帰属表に無い名前は `None`（実験の `--model-dir` — 配布の組み立ては帰属表に無い
     checkpoint を組まない）。

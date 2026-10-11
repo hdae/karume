@@ -340,6 +340,9 @@ def model_dir_checkpoint(model_dir: Path) -> str | None:
     revision を先に見るのは、名前だけで引くとディレクトリ名を変えた HR が実験の checkpoint に
     落ち、席の規則が外れて退役した f32 系列を黙って書けるから。
 
+    固定値外の revision と改名が重なると実験扱い（帰属表に無い checkpoint）になる — 配布の門
+    （`birefnet.distribution.birefnet_plan`）が容器の revision で拒む。
+
     MUST: 1 と 2 が**別の** checkpoint を指したら落とす — 中身（revision）と名前（系列名の綴り）が
     食い違ったまま書くと、ある checkpoint の重みが別の checkpoint の系列名に据わる。
 
@@ -576,7 +579,7 @@ def round_to_storage(model: nn.Module, dtype: str) -> RoundReport | None:
 
 
 def load_wrapper(
-    model_dir: Path, resolution: int, dtype: str = PLAIN_DTYPE
+    model_dir: Path, resolution: int, dtype: str
 ) -> tuple[MatteLogits, RoundReport | None]:
     """重みを丸め、パッチを当て、解像度依存の定数を焼いた export 可能なラッパを返す。
 
