@@ -8,7 +8,7 @@ staging/swap・検証）は `karume.dist` が持つ。ここが持つのは **Bi
 配布するのは **マット 1 グラフだけ**（`birefnet/export.py` は最終段の logit 1 本しか出さない）。
 実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。quant 席（= 格納 dtype）は
 **checkpoint ごとに上流の格納の型から導く**（ADR 0113 追記 2026-10-11 —
-{@link birefnet_seat_dtypes}）: 上流の格納より広い席は出さず、既定は格納と同じ幅の席。HR（上流
+{@link birefnet_seat_dtypes}）: 上流の格納より広い席は出さず、既定は格納と同じ型の席。HR（上流
 f16）は `f16` 席だけ、Lucida（上流 f32）は `f32`（既定）と `f16`。系列は dtype ごとに別ディレクトリ
 （`lucida-1024` / `lucida-1024-f16`）で、配布形では `matte/model.{dtype}.krm` に並ぶ。
 
@@ -177,8 +177,9 @@ def birefnet_seat_dtypes(checkpoint: str) -> tuple[str, ...]:
     規則（ADR 0113 追記 2026-10-11）: **上流 checkpoint の格納（`stored_dtype`）より広い席は
     出さない**。広い席は checkpoint の値を正確に広げるだけで、情報が増えずに常駐とダウンロードが
     増える（HR の f32 席は 1024² で重みの常駐 919 MiB — f16 席は 509 MiB）。格納より狭い席は丸めた
-    値で、NOTICE とカードが量子化と名乗る。HR（f16）→ `("f16",)`・Lucida（f32）→
-    `("f32", "f16")`。
+    値で、NOTICE とカードが量子化と名乗る。格納と**同じ幅の別の型**（f16 の checkpoint に対する
+    bf16 など — 語彙に足した日）も丸めにあたり、値を変えない席ではない（既定席は型の一致で選ぶ —
+    {@link birefnet_default_quant}）。HR（f16）→ `("f16",)`・Lucida（f32）→ `("f32", "f16")`。
 
     MUST: 席の集合はここ 1 つから引く — 系列の取得（{@link birefnet_sources}）・配置・weights・
     quant 表・既定席・NOTICE・`pipelineConfig` の基準の系列。席の表を checkpoint ごとに手で持つと、
@@ -194,19 +195,22 @@ def birefnet_seat_dtypes(checkpoint: str) -> tuple[str, ...]:
 
 
 def birefnet_default_quant(checkpoint: str) -> str:
-    """checkpoint の既定席 = **上流の格納と同じ幅の席**（値を変えない席のうち最も小さい）。
+    """checkpoint の既定席 = **上流の格納 dtype そのものの席**（値を変えない唯一の席）。
 
-    MUST: 該当する席が無い checkpoint は組まない — 別の幅の席を既定に推し量ると、利用者が
+    ビット幅の一致では選ばない — 同じ幅の別の型（f16 の checkpoint に対する bf16 など）は丸めで、
+    幅で選ぶと語彙に足した日に値を変える席を「値を変えない既定」として配りうる。
+
+    MUST: 該当する席が無い checkpoint は組まない — 別の型の席を既定に推し量ると、利用者が
     指定しないときに上流の値と違う重みを配る（または値を広げただけの重い席を配る）。
     """
     stored = _stored_dtype(checkpoint)
-    for dtype in birefnet_seat_dtypes(checkpoint):
-        if birefnet_storage_bits(dtype) == birefnet_storage_bits(stored):
-            return dtype
-    raise DistError(
-        f"BiRefNet 系の checkpoint '{checkpoint}' の格納 {stored} と同じ幅の席が無い"
-        f"（席: {' / '.join(birefnet_seat_dtypes(checkpoint))}）— 既定席を決められない"
-    )
+    seats = birefnet_seat_dtypes(checkpoint)
+    if stored not in seats:
+        raise DistError(
+            f"BiRefNet 系の checkpoint '{checkpoint}' の格納 {stored} の席が無い"
+            f"（席: {' / '.join(seats)}）— 既定席を決められない"
+        )
+    return stored
 
 
 def birefnet_role(dtype: str) -> str:
@@ -577,7 +581,7 @@ def birefnet_plan(
     default_quant = birefnet_default_quant(checkpoint)
     # MUST: 系列はその checkpoint の席の全部で、席に無い dtype は持たない — 欠けた席は宣言だけの
     # 席になり、余った系列は上流の格納より広い（値を広げただけの）席を配る形になる。
-    if tuple(sources.series_by_dtype) != seats:
+    if set(sources.series_by_dtype) != set(seats):
         raise DistError(
             f"系列の格納 dtype {list(sources.series_by_dtype)} が checkpoint '{checkpoint}' の席"
             f" {list(seats)} と違う — 席は上流の格納より広くない dtype の全部"

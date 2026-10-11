@@ -680,7 +680,7 @@ def _downloaded(model_dir: Path, revision: str) -> Path:
 
 class TestDtypeCli:
     def test_the_default_is_the_checkpoints_own_storage(self, monkeypatch):
-        """既定は上流の格納と同じ幅（ADR 0113 追記 2026-10-11）— HR は f16・Lucida は f32。"""
+        """既定は上流の格納と同じ型（ADR 0113 追記 2026-10-11）— HR は f16・Lucida は f32。"""
         seen = _record_emit(monkeypatch)
 
         bn.main([])

@@ -341,7 +341,7 @@ class TestBirefnetStorageAttribution:
 
     @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
     def test_the_default_seat_declares_no_relation(self, checkpoint: str) -> None:
-        """既定席（上流の格納と同じ幅 — HR は f16・Lucida は f32）は checkpoint の値を変えない —
+        """既定席（上流の格納と同じ型 — HR は f16・Lucida は f32）は checkpoint の値を変えない —
         4 値のどれでもないので置かない。"""
         card = render_birefnet_model_card(
             _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint

@@ -60,7 +60,7 @@ S/2 に掛ける（= S%64）。外れた寸法は途中の reshape エラーで�
 必ず分ける（ADR 0018 / 0027 と同じ理由）。
 
 書ける dtype と既定は配布の席と**同じ規則**（{@link export_dtypes} — ADR 0113 追記 2026-10-11）:
-上流 checkpoint の格納より広い dtype は書かず、既定は格納と同じ幅。BiRefNet_HR（上流 f16）は
+上流 checkpoint の格納より広い dtype は書かず、既定は格納と同じ型。BiRefNet_HR（上流 f16）は
 f16 だけ（既定 f16・`--dtype f32` は拒む — f16 の値を f32 へ広げるだけで情報が増えず、配りも
 しない）、Lucida（上流 f32）は f32（既定）と f16。
 
@@ -366,7 +366,7 @@ def export_dtypes(model_dir: Path) -> tuple[tuple[str, ...], str]:
     checkpoint は取得記録の revision、無ければディレクトリ名から引く（{@link
     model_dir_checkpoint}）。規則の正本は
     `birefnet.distribution.birefnet_seat_dtypes` / `birefnet_default_quant`（上流の格納より広い
-    dtype は書かない・既定は格納と同じ幅）で、ここは同じ関数を引くだけ — 書く側と配る側が
+    dtype は書かない・既定は格納と同じ型）で、ここは同じ関数を引くだけ — 書く側と配る側が
     別々に規則を持つと、配れない系列を焼くか、配る席の系列を焼けなくなる。
 
     帰属表に無い checkpoint（実験の `--model-dir`）は規則の入力（上流の格納）を表に持たないので、
@@ -1128,7 +1128,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--dtype",
         choices=WEIGHT_DTYPES,
         default=None,
-        help="重みの格納 dtype（既定は上流 checkpoint の格納と同じ幅 — BiRefNet_HR は f16・Lucida"
+        help="重みの格納 dtype（既定は上流 checkpoint の格納と同じ型 — BiRefNet_HR は f16・Lucida"
         " は f32。上流の格納より広い dtype は拒む。f16 は load 直後・パッチ前に丸めてから適格"
         "スロットだけ f16 で格納し、丸める前の f32 出力との差を quality.json へ書く — ADR 0113。"
         "**emit 専用**で --verify とは排他）",

@@ -292,6 +292,21 @@ class TestBirefnetLayout:
         assert plan.quants["f32"]["session"] == {}
         assert plan.quants["f16"]["session"] == {}
 
+    def test_the_order_of_the_given_series_does_not_matter(self, tmp_path: Path) -> None:
+        """系列の照合は集合で見る — 並び（席の順）は `birefnet_seat_dtypes` から引くので、渡された
+        系列の並びが違っても同じ計画になる。"""
+        built = _build_birefnet_sources(tmp_path, checkpoint=BIREFNET_LUCIDA_CHECKPOINT)
+        reordered = BirefnetSources(
+            series_by_dtype=dict(reversed(list(built.series_by_dtype.items())))
+        )
+        assert list(reordered.series_by_dtype) == ["f16", "f32"]
+
+        plan = birefnet_plan(reordered, BIREFNET_LUCIDA_CHECKPOINT)
+
+        assert list(plan.weights[BIREFNET_ROLE]) == ["f32", "f16"]
+        assert list(plan.quants) == ["f32", "f16"]
+        assert plan.default_quant == "f32"
+
     def test_it_reassembles_over_a_previous_run(self, tmp_path: Path) -> None:
         sources = _build_birefnet_sources(tmp_path)
         out_dir = tmp_path / "models" / birefnet_repo_name(BIREFNET_HR_CHECKPOINT)
@@ -826,7 +841,7 @@ class TestBirefnetWeightDtypes:
     別 root）。"""
 
     def test_the_seats_follow_the_upstream_storage(self) -> None:
-        """上流の格納より広い席は出さず、既定は格納と同じ幅（ADR 0113 追記 2026-10-11）。
+        """上流の格納より広い席は出さず、既定は格納と同じ型（ADR 0113 追記 2026-10-11）。
 
         HR の上流は f16 だけ — f32 席は同じ値を倍の常駐で持つだけなので出さない。Lucida の上流は
         f32 — f32 席（既定）と、丸めた f16 席。
@@ -835,6 +850,25 @@ class TestBirefnetWeightDtypes:
         assert birefnet_default_quant(BIREFNET_HR_CHECKPOINT) == "f16"
         assert birefnet_seat_dtypes(BIREFNET_LUCIDA_CHECKPOINT) == ("f32", "f16")
         assert birefnet_default_quant(BIREFNET_LUCIDA_CHECKPOINT) == "f32"
+
+    def test_the_default_seat_is_the_upstream_type_not_its_width(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MUST: 既定席は上流の格納 dtype そのもの — 同じ幅の別の型（f16 の checkpoint に対する
+        bf16）は丸めなので、それしか席に無ければ既定を決めずに落とす。
+
+        故障注入: 語彙に bf16（16 bit）を足すと HR の席は bf16 だけになる。幅で選ぶ実装はこれを
+        「値を変えない既定」として返す。
+        """
+        import birefnet.card as card
+        import birefnet.distribution as distribution
+
+        monkeypatch.setattr(distribution, "BIREFNET_WEIGHT_DTYPES", ("f32", "bf16"))
+        monkeypatch.setattr(card, "_STORAGE_BITS", {"f32": 32, "f16": 16, "bf16": 16})
+        assert birefnet_seat_dtypes(BIREFNET_HR_CHECKPOINT) == ("bf16",)
+
+        with pytest.raises(DistError, match="既定席を決められない"):
+            birefnet_default_quant(BIREFNET_HR_CHECKPOINT)
 
     def test_each_dtype_has_its_own_output_path(self) -> None:
         """格納 dtype をファイル名に出す（1 ディレクトリに 2 系列が並んでも取り違えない綴り）。"""
@@ -945,7 +979,7 @@ class TestBirefnetWeightDtypes:
     def test_the_quant_seats_carry_display_fields_and_the_storage_width_is_the_default(
         self, tmp_path: Path, checkpoint: str, default: str
     ) -> None:
-        """表示欄（ADR 0075）は席の表から manifest へ同じ文字列で入る。既定は上流の格納と同じ幅。"""
+        """表示欄（ADR 0075）は席の表から manifest へ同じ文字列で入る。既定は上流の格納と同じ型。"""
         sources = _build_birefnet_sources(tmp_path, checkpoint=checkpoint)
         out_dir = tmp_path / "models" / birefnet_repo_name(checkpoint)
         manifest = assemble_family(

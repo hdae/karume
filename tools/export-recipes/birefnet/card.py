@@ -137,7 +137,7 @@ class BirefnetCheckpoint:
     attribution: tuple[str, ...]
     #: 上流 checkpoint の浮動小数の格納 dtype（safetensors ヘッダの実測 2026-09-25 —
     #: HR は F16 687 本・Lucida は F32 687 本）。配る quant 席（この格納より広い席は出さない・
-    #: 既定は同じ幅の席 — `birefnet.distribution.birefnet_seat_dtypes`）、どの席が値を変えずに
+    #: 既定は同じ型の席 — `birefnet.distribution.birefnet_seat_dtypes`）、どの席が値を変えずに
     #: 持てるか（{@link birefnet_storage_lines}）と `base_model_relation`
     #: （{@link _birefnet_relation}）がここから決まる。export 時の品質の門は
     #: 同じ事実をヘッダから直接読む（`birefnet.export.checkpoint_dtypes`）ので、2 つの突合は
