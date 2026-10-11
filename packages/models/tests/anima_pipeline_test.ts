@@ -466,6 +466,30 @@ Deno.test("generate: 受理される residency は入口を通って最初の段
   }
 });
 
+Deno.test("generate: f32 で有限に収まらない guidanceScale は GPU に触る前に ModelInputError", async () => {
+  // CFG は倍率を f32 で掛ける。f64 で有限でも f32 で Infinity になる値は、合成を ±Inf / NaN にする。
+  const manifest = parseManifest(manifestText());
+  await using pipeline = await AnimaPipeline.fromAssets(
+    { manifest, assets: await buildableAssets() },
+    { gpu: fakeGpuContext(fakeDevice()) },
+  );
+  for (const guidanceScale of [1e39, Number.MAX_VALUE, -1e39]) {
+    const events: string[] = [];
+    await assertRejects(
+      () =>
+        pipeline.generate({
+          prompt: "aba",
+          negativePrompt: "b",
+          guidanceScale,
+          onEvent: (event) => void events.push(event.kind),
+        }),
+      ModelInputError,
+      `guidanceScale ${guidanceScale} が f32 に収まる有限の数でない`,
+    );
+    assertEquals(events, [], `${guidanceScale}: 入口の検査より先に段へ入っている`);
+  }
+});
+
 Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
   // 効かないノブを黙って受けると、ユーザーは指定したつもりで実際は 1 文字も使われない
   // （guidance=1 は uncond 分岐を丸ごと計算しない — `generation/dpm-solver-multistep.ts` の
@@ -551,6 +575,33 @@ Deno.test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で e
   const carried = dpm.previousX0;
   assert(carried !== undefined, "DPM++ 2M は x0 を次 step へ持ち回る");
   assertEquals([...carried], [0.5]);
+});
+
+Deno.test("denoiseStep: 更新後の latent が非有限なら step を名指しして落ち、次の step へ渡さない（どちらの更新則も）", () => {
+  // f32 で有限な倍率 1e38 でも、差分 10 との積が f32 で溢れて合成が +Inf になり、更新後が -Inf になる。
+  // 入口の f32 の検査だけでは防げない形（倍率と DiT の出力の組で溢れる）。
+  const input = {
+    sample: Float32Array.from([0, 0.5]),
+    cond: Float32Array.from([0.25, 10]),
+    uncond: Float32Array.from([0.25, 0]),
+    guidance: 1e38,
+    sigmas: Float32Array.from([1, 0.5, 0]),
+    index: 0,
+    previousX0: undefined,
+  };
+  for (const type of ["euler", "dpmpp-2m"] as const) {
+    assertThrows(
+      () => denoiseStep(type, input),
+      Error,
+      "step 1/2 の更新後の latent の要素 1 が非有限",
+      type,
+    );
+  }
+  // 対照: 同じ入力で倍率だけ普通の値なら通る（門が恒真でない）。
+  for (const type of ["euler", "dpmpp-2m"] as const) {
+    const update = denoiseStep(type, { ...input, guidance: 4 });
+    assert(update.sample.every(Number.isFinite), type);
+  }
 });
 
 Deno.test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出所を文言に出す", () => {

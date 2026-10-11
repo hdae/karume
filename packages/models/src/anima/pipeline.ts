@@ -600,12 +600,36 @@ export type AnimaDenoiseUpdate = {
  * {@link needsUncond} が `guidance` だけから決めるので、**種別に依存しない** — 呼び出し側の
  * 分岐は「何 step 回すか」も「uncond を計算するか」も共通のまま。
  *
+ * MUST: 更新後の latent の有限性をここで見る（O(N) のホスト走査）。f32 で有限な CFG 倍率でも DiT の出力との組で
+ * 合成が溢れうる（倍率 1e38 × 差分 10）。非有限の latent を次の step と VAE の段へ黙って渡すと、真因の読めない
+ * 形で最後の RGBA 変換まで遅れて落ちるか、VAE の中のクランプで普通の画素に化ける（Wan の denoise と同じ門）。
+ *
  * NOTE: 入力の形は {@link DpmSolverMultistepInput} をそのまま借りる（Euler が読むのは
  * `sigmas` / `index` / `guidance` / 出力 2 本で、DPM++ 2M の入力の部分集合）。
  * NOTE: `export` は GPU 無しで選択を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
 export const denoiseStep = (
+  type: AnimaSamplerType,
+  input: DpmSolverMultistepInput,
+): AnimaDenoiseUpdate => {
+  const update = applyUpdateRule(type, input);
+  const broken = update.sample.findIndex((value) => !Number.isFinite(value));
+  if (broken !== -1) {
+    const steps = input.sigmas.length - 1;
+    const value = update.sample[broken];
+    throw new Error(
+      `AnimaPipeline: step ${
+        input.index + 1
+      }/${steps} の更新後の latent の要素 ${broken} が非有限` +
+        `（${value}）— DiT の出力・CFG の合成・更新則のどこかが溢れた（次の step と VAE の段へは渡さない）`,
+    );
+  }
+  return update;
+};
+
+/** 更新則 1 本の適用（{@link denoiseStep} の分岐の本体）。 */
+const applyUpdateRule = (
   type: AnimaSamplerType,
   input: DpmSolverMultistepInput,
 ): AnimaDenoiseUpdate => {
@@ -1145,8 +1169,11 @@ export class AnimaPipeline {
     assertAcceptableSeed(seed);
     // steps も同じ理由で入口に置く（受理集合の所有者は梯子側の `assertAcceptableSteps` 1 本）。
     assertAcceptableSteps(steps);
-    if (!Number.isFinite(guidance)) {
-      throw new ModelInputError(`guidanceScale ${guidance} が有限の数でない`);
+    // f32 で見る: CFG は倍率を f32 で掛ける（`cfgEulerStep` / `dpmSolverMultistepStep`）ので、f64 で有限でも
+    // f32 で ±Infinity になる値（`Number.MAX_VALUE` など）は合成を壊す。f32 で有限でも DiT の出力との組で
+    // 溢れる値は、更新後の有限性の門（`denoiseStep`）が step を名指しして落とす。
+    if (!Number.isFinite(Math.fround(guidance))) {
+      throw new ModelInputError(`guidanceScale ${guidance} が f32 に収まる有限の数でない`);
     }
     // 実効 residency（request ?? 構築オプション）。意味は「この generate の**後に** DiT を持つか」
     // — 開始時の常駐 DiT は値に関わらず使う（`residency.ts` の `transformerSource`）。
