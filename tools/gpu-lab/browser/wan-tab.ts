@@ -206,7 +206,7 @@ const optionOf = (value: string, text: string, selected = false): HTMLOptionElem
 type WanRowImage = {
   /** 選んだファイルの名前（`File.name`）。 */
   readonly file: string;
-  /** 復号した画像の寸法（格納された画素の縦横 — EXIF の向きは適用しない・出力寸法へ合わせる前）。 */
+  /** 復号した画像の寸法（EXIF の向きを適用した後の縦横・出力寸法へ合わせる前）。 */
   readonly width: number;
   readonly height: number;
   readonly fit: WanI2vFit;
@@ -225,9 +225,12 @@ type ChosenImage = {
 /**
  * 画像ファイル → RGB8（ブラウザの標準 API — 依存パッケージを持ち込まない）。アルファは捨てる。
  *
- * EXIF の向きは**適用しない**（`imageOrientation: "none"` を明示 — Deno の example〈`examples/wan/decode-image.ts`〉
- * と参照〈上流の `generate.py` は `Image.open(...).convert("RGB")` だけで読む〉と同じ向きの画素にし、
- * 「画像から自動」の寸法〈`selectWanI2vSize`〉を 3 者で揃える）。既定値はかつての仕様と版で揺れたので頼らない。
+ * EXIF の向きは**適用する**（`imageOrientation: "from-image"` を明示 — ADR 0121 の追記 2026-10-11）。Deno の
+ * example（`examples/wan/decode-image.ts`）も適用するので、同じファイルから同じ向きの画素・同じ「画像から自動」の
+ * 寸法（`selectWanI2vSize`）になる。上流の `generate.py` は適用しない（`Image.open(...).convert("RGB")` だけ）が、
+ * スマホの写真が横倒しのまま使われる方が困るので意図して違える。`"none"` は使わない: M2 の Chrome で
+ * `"none"` を渡しても向き 6 の JPEG が向きを適用して読まれた（2026-10-11 の観測）— 仕様がかつての `"none"`
+ * （向きを適用する既定）を `"from-image"` へ改名した経緯があり、版によって意味が違う。
  *
  * 色空間の変換はしない（`colorSpaceConversion: "none"`）。ImageBitmap は事前乗算なしで作るが、2D canvas は
  * 事前乗算で画素を持つので、`drawImage` → `getImageData` の往復で事前乗算を経る — 完全に透明な画素の RGB は
@@ -235,7 +238,7 @@ type ChosenImage = {
  */
 const decodeImage = async (file: File): Promise<Rgb8Image> => {
   const bitmap = await createImageBitmap(file, {
-    imageOrientation: "none",
+    imageOrientation: "from-image",
     colorSpaceConversion: "none",
     premultiplyAlpha: "none",
   });
