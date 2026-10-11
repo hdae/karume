@@ -68,6 +68,8 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。設計の正本�
   限る — 例 `@hdae/fetch-cache`。ADR 0038）。相対 import は `.ts` 付き。WGSL はテンプレート
   リテラル。TypedArray は `<ArrayBuffer>` 明示（lint 規則 `karume/typed-array-buffer`・例外は
   ADR 0002 の例外表）
+- 上流との一致は数値（またはその意図）の水準で取り、上流のバグは写さない。上流に問題があれば回避策を
+  オプションで用意する（優れていれば既定に）。一致が非現実的なら別の方法で正しさを示す（ADR 0005 追記 2026-10-11）
 
 ## docs の置き場（what-goes-where）
 
