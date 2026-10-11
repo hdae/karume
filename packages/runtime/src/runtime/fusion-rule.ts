@@ -190,6 +190,12 @@ export type FusionContext = {
    * 最小枚数の代わりにこの枚数で割る。上限に収まらない枚数は fail loudly。
    */
   readonly rowBlockSplit?: number;
+  /**
+   * 行ブロックの一時 1 本ごとの予算（`SessionOptions.attentionRowBlockMaxBytes` — ADR 0124）。
+   * 枚数の上限は {@link FusionLimits.maxStorageBufferBindingSize} とこの値の小さいほう（`rowBlockLimit`）。
+   * `limits` 自体は下げない（行ブロック以外の判定は granted 値のまま）。省略 = 予算なし。
+   */
+  readonly attentionRowBlockMaxBytes?: number;
   /** 明示指定時だけRMS→addを融合する（ADR 0099）。 */
   readonly fuseRmsNormAdd?: boolean;
   readonly fuseLinearStaticQuantize?: boolean;

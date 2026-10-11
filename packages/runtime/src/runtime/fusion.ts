@@ -107,8 +107,12 @@ export type {
   FusionWeightLayout,
   PackedActivations,
 } from "./fusion-rule.ts";
-/** 行ブロック分割（実体は {@link "./fusion-rules/row-block-attention.ts"}）。 */
-export { planRowBlocks } from "./fusion-rules/row-block-attention.ts";
+/** 行ブロック分割とその上限の導出（実体は {@link "./fusion-rules/row-block-attention.ts"}）。 */
+export {
+  planRowBlocks,
+  type RowBlockLimit,
+  rowBlockLimit,
+} from "./fusion-rules/row-block-attention.ts";
 
 /** MUST: この配列の順が適用順（冒頭「適用順」節）。 */
 export const FUSION_RULES: readonly FusionRule[] = [

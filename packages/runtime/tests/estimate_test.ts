@@ -1299,6 +1299,71 @@ describe("分解 attention の中間（融合後に束縛するバッファで�
 });
 
 // ---------------------------------------------------------------------------
+// 行ブロックの一時 1 本ごとの予算（attentionRowBlockMaxBytes — ADR 0124）
+// ---------------------------------------------------------------------------
+
+describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同じ導出で枚数を決める", () => {
+  describe("分解 attention（ADR 0093 追記 2026-10-10 の例に予算 64 MiB を掛ける）", () => {
+    it("束縛上限 128 MiB の 2 枚が 3 枚に割れ、行ブロック 1 枚ぶんの一時が縮む", () => {
+      const scenario = runScenario(
+        openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
+          attentionRowBlockMaxBytes: 64 * 1024 * 1024,
+        }),
+      );
+      // 1 行 = 4×4200×4 = 67,200B → 予算 67,108,864B に 998 行入るので ceil(2048 / 998) = 3 枚
+      // （683 + 683 + 682 行）。一時は最大 4×683×4200×4 = 45,897,600B で、同時生存は 2 本（2 領域）。
+      // 出力 y 262,144B は mask 加算後の領域の 256B 整列した後ろ（45,897,600B は 256 の倍数でないので
+      // 45,897,728B から）に置かれる。予算なしの 68,812,800 × 2 + 262,144 = 137,887,744B から縮む。
+      assertEquals(scenario.workspaceBytes, 45_897_600 + 45_897_728 + 262_144);
+    });
+
+    it("予算なしの値は予算の欄を足す前と同じ（既定は不変）", () => {
+      const scenario = runScenario(openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate());
+      assertEquals(scenario.workspaceBytes, 68_812_800 * 2 + 262_144);
+    });
+  });
+
+  describe("states 形 attention", () => {
+    it("prefill（M = 4）は予算 512B で 2 枚に割れ、decode（M = 1）は 1 枚のまま", () => {
+      const { prefill, decode } = bothScenarios(
+        openGraph(stateAttentionGraph()).estimate({
+          generation: { chunkLength: 4, bindings: { C: 16 } },
+          // 束縛上限は効かない大きさ（下の states 形の節の WIDE_LIMIT と同じ値）— 予算だけが枚数を動かす。
+          maxStorageBufferBindingSize: 1 << 20,
+          attentionRowBlockMaxBytes: 512,
+        }),
+      );
+      // B·H = 4・列容量 16 → 1 行 4×16×4 = 256B。予算 512B に 2 行 → 2 枚。
+      //   出力 o 512 / S 1 枚 = 4×2×16×4 = 512 / 行統計 1 枚 = 4×2×2×4 = 64（予算なしは 1024 / 128）
+      assertEquals(prefill.workspaceBytes, 512 + 512 + 64);
+      // decode は 1 行 256B ≤ 512B なので 1 枚（予算なしと同じ 128 + 256 + 32）。
+      assertEquals(decode.workspaceBytes, 128 + 256 + 32);
+    });
+  });
+
+  it("1 行ぶんにも満たない予算は、実行の計画導出と同じく予算を名指して fail loudly", () => {
+    assertThrows(
+      () =>
+        openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
+          attentionRowBlockMaxBytes: 67_199,
+        }),
+      ExecutionError,
+      "予算 attentionRowBlockMaxBytes",
+    );
+  });
+
+  it("値域は Session 構築と同じ門で、行ブロックを持たないグラフでも見る", () => {
+    for (const value of [0, -1, 1.5, Number.NaN]) {
+      assertThrows(
+        () => plainModel().estimate({ bindings: { T: 7 }, attentionRowBlockMaxBytes: value }),
+        ExecutionError,
+        `options.attentionRowBlockMaxBytes ${value} は正の安全な整数でなければならない`,
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // states 形 attention のノード内一時（スコア S / 行統計）
 // ---------------------------------------------------------------------------
 

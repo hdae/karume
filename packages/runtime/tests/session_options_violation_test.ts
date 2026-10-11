@@ -107,6 +107,39 @@ describe("sessionOptionsViolation", () => {
     assertEquals(conversions, 0);
   });
 
+  it("attentionRowBlockMaxBytes は正の安全な整数だけを受ける（構築時に分かる不正値だけを落とす）", () => {
+    // 1 行ぶんに満たない予算は形を見ないと決まらない（run の計画導出で落ちる — ADR 0124 決定 5）ので、
+    // ここが受けるのは値域だけ。1 B も値域の内。
+    for (const accepted of [1, 512 * 1024 * 1024, Number.MAX_SAFE_INTEGER]) {
+      assertEquals(sessionOptionsViolation({ attentionRowBlockMaxBytes: accepted }), undefined);
+    }
+    for (
+      const [value, shown] of [
+        [0, "0"],
+        [-1, "-1"],
+        [1.5, "1.5"],
+        [Number.NaN, "NaN"],
+        [Number.POSITIVE_INFINITY, "Infinity"],
+        [Number.MAX_SAFE_INTEGER + 1, String(Number.MAX_SAFE_INTEGER + 1)],
+      ] as const
+    ) {
+      assertEquals(
+        sessionOptionsViolation({ attentionRowBlockMaxBytes: value }),
+        `options.attentionRowBlockMaxBytes ${shown} は正の安全な整数でなければならない`,
+      );
+    }
+    // 数値でない値（JS の消費者）も拒否する。文字列は綴りのまま、他は型名だけを出す。
+    assertEquals(
+      sessionOptionsViolation(withValue("attentionRowBlockMaxBytes", "512")),
+      'options.attentionRowBlockMaxBytes "512" は正の安全な整数でなければならない',
+    );
+    assert(
+      sessionOptionsViolation(withValue("attentionRowBlockMaxBytes", Symbol("budget")))?.includes(
+        "attentionRowBlockMaxBytes symbol",
+      ),
+    );
+  });
+
   it("省略と同じく null も runtime 既定として読む（構築と同じ読み方）", () => {
     // 「欄はあるが値が不正」を既定へ戻さず拒否するのは、明示指定を受ける上位層の責務
     // （@karume/models の resolveSessionOptions）。ここで null を拒否に変えると構築の受理集合が

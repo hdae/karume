@@ -55,7 +55,7 @@ import { attentionScale, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
 import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../../codegen/dispatch.ts";
-import { planRowBlocks } from "../fusion.ts";
+import { planRowBlocks, type RowBlockLimit, rowBlockLimit } from "../fusion.ts";
 import { planStateAttention } from "../state-attention-plan.ts";
 import {
   quantizeRowsGeometry,
@@ -170,8 +170,9 @@ export type AttentionBlock = {
 /**
  * 通常 attention（states 欄なし）のクエリ行ブロックと、1 枚ぶんの一時のバイト数（純関数）。
  *
- * S 1 枚と行統計 1 枚の**両方**が `limit`（device の granted `maxStorageBufferBindingSize`）に
- * 収まる最小枚数の等分で、実行時オートチューンは持たない（ADR 0022）。
+ * S 1 枚と行統計 1 枚の**両方**が `limit`（device の granted `maxStorageBufferBindingSize`、予算を
+ * 掛けたときは {@link rowBlockLimit} の結果）に収まる最小枚数の等分で、実行時オートチューンは
+ * 持たない（ADR 0022）。上限は 1 本ごとで、S と行統計の合計ではない（ADR 0124 決定 1）。
  *
  * MUST: 枚数は行に比例する一時（S と行統計）の 1 行ぶんの**大きいほう**で決める。S だけで
  * 決めると、1 行のスコアが行統計 2 語より小さい形（f32 で N = 1・f16 で N < 4）で S は収まるのに
@@ -191,7 +192,7 @@ export const planAttentionBlocks = (
     /** S の 1 要素のバイト数。 */
     readonly scoreBytes: number;
   },
-  limit: number,
+  limit: number | RowBlockLimit,
   forced?: number,
 ): readonly AttentionBlock[] => {
   const { batch, rows, cols, scoreBytes } = extent;
@@ -318,15 +319,19 @@ export const buildAttention = async (
   }
 
   // クエリ行のブロック分割（ADR 0060 と同じ純関数 — states 形 attention と同じ流儀）。
-  // S 1 枚 = `B·H · block · N · 格納幅` バイトと行統計 1 枚がストレージ束縛の上限に収まる
-  // 最小枚数の等分で（{@link planAttentionBlocks}）、実行時オートチューンは持たない（ADR 0022）。
+  // S 1 枚 = `B·H · block · N · 格納幅` バイトと行統計 1 枚が、ストレージ束縛の上限と予算
+  // （`attentionRowBlockMaxBytes` — ADR 0124）の小さいほうに収まる最小枚数の等分で
+  // （{@link planAttentionBlocks}）、実行時オートチューンは持たない（ADR 0022）。
   // 1 行でも収まらない形は fail loudly。
   // MUST: **n = 1 の機は分割前と完全に同一**（行窓を立てないのでキーも uniform も WGSL も
   // dispatch 列も 1 バイト動かない）。既存のスナップショットとビット同一門がその検出器。
   const scoreBytes = compute === "f16" ? 2 : scoreStorageBytes(scoreStorage);
   const blocks = planAttentionBlocks(
     { batch, rows, cols, scoreBytes },
-    face.state.gpu.limits.maxStorageBufferBindingSize,
+    rowBlockLimit(
+      face.state.gpu.limits.maxStorageBufferBindingSize,
+      face.state.attentionRowBlockMaxBytes,
+    ),
     face.state.rowBlockSplit,
   );
   const windowed = blocks.length > 1;
@@ -589,7 +594,8 @@ const stateSlot = (
  *
  * MUST: 列容量 `colCap` と行ブロックの割り方・一時のバイト式は {@link planStateAttention}
  * （見積り `estimate.ts` と共有する 1 本）だけから引く。S 1 枚 = `B·H · block · colCap · 4`
- * バイトが `maxStorageBufferBindingSize` に収まる最小枚数の等分で、実行時オートチューンは
+ * バイトが `maxStorageBufferBindingSize`（予算を掛けたときは予算との小さいほう — ADR 0124）に
+ * 収まる最小枚数の等分で、実行時オートチューンは
  * 持たない（ADR 0022 / ADR 0060）。1 行でも収まらない形は fail loudly。
  * MUST: 一時（S / 行統計）は**ブロックごとに**確保して返す（全ブロックぶんまとめて取ると、
  * 上限を越えない形にした意味が消える）。
@@ -649,7 +655,10 @@ export const buildStateAttention = async (
       window,
       fuseStatsPv: face.state.stateAttentionReduce === "parallel-fused",
     },
-    face.state.gpu.limits.maxStorageBufferBindingSize,
+    rowBlockLimit(
+      face.state.gpu.limits.maxStorageBufferBindingSize,
+      face.state.attentionRowBlockMaxBytes,
+    ),
     face.state.rowBlockSplit,
   );
 
@@ -895,7 +904,10 @@ export const buildReadonlyStateAttention = async (
   const batchHeads = batch * heads;
   const { colCap, blocks } = planStateAttention(
     { batchHeads, chunkRows: 1, capacity, window },
-    face.state.gpu.limits.maxStorageBufferBindingSize,
+    rowBlockLimit(
+      face.state.gpu.limits.maxStorageBufferBindingSize,
+      face.state.attentionRowBlockMaxBytes,
+    ),
     face.state.rowBlockSplit,
   );
   const qkKey = stateQkParallelReadonlyKey(sliding, gqa);

@@ -61,12 +61,15 @@ export type KeyPredicate = (key: string) => boolean;
  * 型検査で落ちる — 足した人が「数値を変える席か」を必ず判断する。
  * NOTE: unique symbol のテスト専用ノブ（`I8A8_DOT` / `ROW_BLOCK_SPLIT`）は `Extract<…, string>` で
  * 外れる。どちらも参照と整数一致 / Uint32 一致が契約の変種選択で、数値を変えない。
+ * `attentionRowBlockMaxBytes` は行ブロックの枚数だけを変える資源の政策（出力は予算なしと Uint32 で
+ * 一致 — ADR 0124 決定 3 / 4）。
  */
 type NonNumericField =
   | "submitPolicy"
   | "sharedWeights"
   | "planBackingBudgetBytes"
-  | "linearGemvRowsThreadTarget";
+  | "linearGemvRowsThreadTarget"
+  | "attentionRowBlockMaxBytes";
 
 /** 数値を変える `SessionOptions` の席（文字列キーから {@link NonNumericField} を除いた集合）。 */
 export type NumericSeat = Exclude<Extract<keyof SessionOptions, string>, NonNumericField>;

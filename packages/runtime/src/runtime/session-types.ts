@@ -200,7 +200,9 @@ export const I8A8_DOT: unique symbol = Symbol("karume.i8a8Dot");
  * 1 度も走らない。強制分割はその経路を実機で回して 1 枚実行と Uint32 一致させるための唯一の
  * 手段で、環境変数ではなく Session 単位のノブにしてあるのは 1 プロセス内で両方を回すため。
  *
- * MUST: 上限に収まらない枚数は fail loudly（緩める向きには使えない）。
+ * MUST: 上限に収まらない枚数は fail loudly（緩める向きには使えない）。上限は
+ * {@link SessionOptions.attentionRowBlockMaxBytes} を渡したときは束縛上限との小さいほうで、強制枚数は
+ * その範囲でだけ効く（ADR 0124 決定 6）。
  */
 export const ROW_BLOCK_SPLIT: unique symbol = Symbol("karume.rowBlockSplit");
 
@@ -398,6 +400,31 @@ export type SessionOptions = {
    * MUST: 非負の安全な整数でなければ fail loudly。
    */
   readonly planBackingBudgetBytes?: number;
+  /**
+   * attention の**行ブロックの一時 1 本ごとの上限**（バイト・既定なし — ADR 0124）。
+   *
+   * スコア S を実体化する attention の 3 つの形（融合 attention・states 形・分解 attention の
+   * `rowBlockAttention`）は、S をクエリ行のかたまり（行ブロック）に分けて順に計算する。枚数は
+   * 「S 1 枚と行統計 1 枚のそれぞれが上限に収まる最小枚数」で、上限は device の
+   * `maxStorageBufferBindingSize` とこの値の**小さいほう**になる。値を小さくすると枚数が増え、
+   * attention の瞬間に生きている一時が縮む（VRAM の山が下がる）。代わりに dispatch が
+   * 枚数 × 3 本ずつ増える（速度への効きは形と機に依る）。
+   *
+   * - **合計ではない**: S 1 枚と行統計 1 枚はそれぞれこの値以下で、同時に生きる合計はこの値を
+   *   超えうる。i8a8 の量子化の一時（行ブロックのループの外）と他の中間はこの値で縛らない。
+   * - **数値は変えない**: 行ブロックは担当行の割り当てだけを変える（ADR 0060 決定 3）ので、出力は
+   *   予算なしとビット単位で一致する（強制分割の parity が変種を横断して縛る）。数値の席（quant 席・
+   *   manifest の `session`）には入れない資源の政策で、`submitPolicy` と同じ扱い。
+   * - **既定（省略）は束縛上限のまま**: 枚数・パイプラインキー・WGSL・dispatch 列・backing は
+   *   この欄を足す前と 1 バイトも変わらない。
+   * - **落ちる時点**: クエリ 1 行ぶんの一時がこの値を超える形は、その形の計画を最初に導く run で
+   *   予算を名指して fail loudly（構築時には形が記号のままで枚数が決まらない）。事前に知る手段は
+   *   見積り（`EstimateOptions.attentionRowBlockMaxBytes` に同じ値を渡す）。構築時に落とすのは
+   *   値域の外（0・負・非整数・NaN・数値でない値）だけ。
+   *
+   * MUST: 正の安全な整数でなければ fail loudly。
+   */
+  readonly attentionRowBlockMaxBytes?: number;
   /**
    * **共有 initializer の実体**（ADR 0096 段 2 §1.3 / §2.2 — 借り手の initializer 名 →
    * 貸し手 `Session.exportWeight()` の戻り）。

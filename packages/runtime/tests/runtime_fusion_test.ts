@@ -979,6 +979,34 @@ Deno.test("行ブロックは上限に収まる最小枚数で等分され、一
   );
 });
 
+Deno.test("予算 attentionRowBlockMaxBytes は束縛上限との小さいほうで分解 attention を割る（ADR 0124）", () => {
+  const shape: AttentionShape = { heads: 2, queries: 100, keys: 64, headDim: 8 };
+  const ir = parse(attentionGraph(shape));
+  const nodes = planGraph(ir, bindSymbols(ir, attentionInputs(shape))).nodes;
+  const planWith = (budget: number | undefined) =>
+    planFusions(nodes, {
+      useCounts: countUses(ir),
+      outputNames: new Set(ir.outputs),
+      // 束縛上限は 128 MiB（予算なしでは 1 枚）。予算だけが枚数を動かす。
+      limits: TEST_LIMITS,
+      ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
+    });
+  // 予算なしは素の 4 dispatch 列（既定は予算の欄を足す前と同一）。
+  assertEquals(fusedAt(planWith(undefined), 0).dispatches.length, 4);
+  // 1 行 = 2·64·4 = 512B。予算を 1 行 30 枚ぶんにすると、束縛上限で絞ったときと同じ 4 枚（25 行 × 4）。
+  const budgeted = fusedAt(planWith(512 * 30), 0);
+  assertEquals(budgeted.dispatches.length, 16, "4 枚 × 4 dispatch");
+  assertEquals([...new Set(budgeted.temps.map((temp) => temp.byteLength))], [25 * 512]);
+  assertEquals(budgeted.dispatches[0].key, bmmKey(true, 25, "a"), "行窓変種へ振り替わる");
+  // 束縛上限以上の予算は効かない（予算で上限を緩める向きには使えない）。
+  assertEquals(
+    fusedAt(planWith(TEST_LIMITS.maxStorageBufferBindingSize * 2), 0).dispatches.length,
+    4,
+  );
+  // 1 行ぶんに満たない予算は、掴めた窓を素の列へ落とさず予算を名指して fail loudly。
+  assertThrows(() => planWith(511), ExecutionError, "予算 attentionRowBlockMaxBytes");
+});
+
 Deno.test("行ブロック分割は上限に収まる最小枚数を等分で返し、収まらない形は fail loudly", () => {
   // ちょうど上限（10 行 × 100B = 1000B）は 1 枚。
   assertEquals(planRowBlocks(10, 100, 1000), [{ offset: 0, rows: 10 }]);

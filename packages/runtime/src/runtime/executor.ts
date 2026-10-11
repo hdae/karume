@@ -2088,6 +2088,9 @@ export class Session {
       ...(this.#state.rowBlockSplit === undefined
         ? {}
         : { rowBlockSplit: this.#state.rowBlockSplit }),
+      ...(this.#state.attentionRowBlockMaxBytes === undefined
+        ? {}
+        : { attentionRowBlockMaxBytes: this.#state.attentionRowBlockMaxBytes }),
     });
     return { shapes: plan.shapes, fusions: fusion.counts, steps: fusion.steps };
   }

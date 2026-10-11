@@ -16,7 +16,7 @@
 
 import { STATE_STATS_STRIDE, stateSliding } from "../kernels/state-attention.ts";
 import { stateStatsPvEligible } from "../kernels/state-attention-stats-pv.ts";
-import { planRowBlocks } from "./fusion.ts";
+import { planRowBlocks, type RowBlockLimit } from "./fusion.ts";
 
 /**
  * 1 ノードぶんの幾何（`StateAttentionGeometry` のうち、一時の大きさを決める欄だけ）。
@@ -65,16 +65,18 @@ export type StateAttentionPlan = {
  * states 形 attention 1 ノードの列容量と行ブロックごとの一時バイト数を出す（純関数）。
  *
  * S 1 枚 = `B·H · 行数 · colCap · 4` バイトと行統計 1 枚の**両方**が `limit`（device の granted
- * `maxStorageBufferBindingSize`）に収まる最小枚数の等分で、実行時オートチューンは持たない
- * （ADR 0022）。1 行でも収まらない形は {@link planRowBlocks} が fail loudly。
+ * `maxStorageBufferBindingSize`、予算を掛けたときは予算との小さいほう — ADR 0124）に収まる最小枚数の
+ * 等分で、実行時オートチューンは持たない（ADR 0022）。1 行でも収まらない形は {@link planRowBlocks} が
+ * fail loudly。
  *
- * @param limit ストレージ束縛の上限バイト数（granted 値）。
+ * @param limit 1 本ごとの上限。数値はストレージ束縛の上限バイト数（granted 値・予算なし）として読み、
+ *   予算を掛けるときは `rowBlockLimit`（fusion.ts）の結果を渡す（{@link planRowBlocks} と同じ受け方）。
  * @param forced 行ブロックの枚数を明示する（テスト専用 `ROW_BLOCK_SPLIT` の受け口 —
  *   実運用の呼び手は渡さない）。
  */
 export const planStateAttention = (
   extent: StateAttentionExtent,
-  limit: number,
+  limit: number | RowBlockLimit,
   forced?: number,
 ): StateAttentionPlan => {
   const { batchHeads, chunkRows, capacity } = extent;

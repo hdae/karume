@@ -254,6 +254,18 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     } は 1 以上の` +
       "安全な整数でなければならない";
   }
+  // 行ブロックの一時 1 本ごとの予算（ADR 0124 決定 5）。ここで落とすのは構築時に分かる不正値だけ —
+  // 「1 行ぶんにも満たない予算」は形が決まる run の計画導出で予算を名指して落ちる（構築時には
+  // 形が記号のまま）。文言は estimate.ts の同じ門と揃える。
+  const attentionRowBlockMaxBytes = options.attentionRowBlockMaxBytes;
+  if (
+    attentionRowBlockMaxBytes !== undefined &&
+    (!Number.isSafeInteger(attentionRowBlockMaxBytes) || attentionRowBlockMaxBytes < 1)
+  ) {
+    return `options.attentionRowBlockMaxBytes ${
+      describeInputValue(attentionRowBlockMaxBytes)
+    } は正の安全な整数でなければならない`;
+  }
   // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
   // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
   // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
@@ -624,6 +636,13 @@ export type SessionState = {
   /** 行ブロック枚数の強制（テスト専用 — {@link ROW_BLOCK_SPLIT}）。 */
   readonly rowBlockSplit: number | undefined;
   /**
+   * 行ブロックの一時 1 本ごとの予算（{@link SessionOptions.attentionRowBlockMaxBytes} — ADR 0124）。
+   * `undefined` = 予算なし（束縛上限のまま）。
+   * MUST: 構築後に変えない（導出済み計画のキーは解決済み bindings だけで、枚数はこの値を含意している
+   * ものとして計画を引く — {@link rowBlockSplit} と同じ Session 単位の不変値）。
+   */
+  readonly attentionRowBlockMaxBytes: number | undefined;
+  /**
    * GEMM 幾何のプロファイル（`acquireGpu` で注入された表、無ければ adapter から構築時に 1 度だけ
    * 選ぶ静的な表 — DECIDED: ADR 0115）。
    * MUST: 構築後に選び直さない（同じ Session の導出済み計画・パイプラインキーが 1 本の表に
@@ -666,6 +685,7 @@ const snapshotSessionOptions = (
   rmsNormReduce: requested.rmsNormReduce,
   linearGemvRowsThreadTarget: requested.linearGemvRowsThreadTarget,
   planBackingBudgetBytes: requested.planBackingBudgetBytes,
+  attentionRowBlockMaxBytes: requested.attentionRowBlockMaxBytes,
   sharedWeights: requested.sharedWeights,
   [I8A8_DOT]: requested[I8A8_DOT],
   [ROW_BLOCK_SPLIT]: requested[ROW_BLOCK_SPLIT],
@@ -1170,6 +1190,7 @@ export const buildSessionState = async (
     // 決める（当初の根拠だった M2 での変種間の不一致は撤回済み — SessionState.attentionI8a8Dot の doc）。
     attentionI8a8Dot,
     rowBlockSplit: options[ROW_BLOCK_SPLIT],
+    attentionRowBlockMaxBytes: options.attentionRowBlockMaxBytes,
     geometryProfile,
     fuseRmsNormAdd: options.fuseRmsNormAdd ?? false,
     fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,

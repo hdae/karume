@@ -37,40 +37,84 @@ type RowBlock = {
 };
 
 /**
- * クエリ行を「1 枚がストレージ束縛の上限に収まる**最小枚数**」へ等分する純関数。
+ * 行ブロックの一時 **1 本ごと**の上限（バイト）と、それを決めた側（{@link rowBlockLimit} の結果）。
  *
- * 入力は解決済みの静的な数だけ（device の granted limit・1 行あたりのバイト数・行数）で、
+ * 上限は合計ではない: S 1 枚と行統計 1 枚はそれぞれこの上限以下で、同時に生きる合計は上限を
+ * 超えうる（ADR 0124 決定 1）。
+ */
+export type RowBlockLimit = {
+  readonly bytes: number;
+  /**
+   * 上限を決めた側。超過の文言で名指す（利用者の予算で落ちたのか、device の束縛上限で落ちたのかで
+   * 直し方が違う）。
+   */
+  readonly source: "maxStorageBufferBindingSize" | "attentionRowBlockMaxBytes";
+};
+
+/**
+ * 行ブロックの一時 1 本ごとの上限を導く純関数 — device の granted な `maxStorageBufferBindingSize` と、
+ * 利用者が渡す予算（`SessionOptions.attentionRowBlockMaxBytes`）の小さいほう
+ * （DECIDED: docs/decisions/0124-attention-row-block-budget.md 決定 1）。
+ *
+ * MUST: 行ブロックで割る 3 つの形（融合 attention・states 形・分解の `rowBlockAttention`）と見積りは、
+ * 全てこの 1 本を通す。式を呼び手ごとに書くと、片方だけ直された実装に対して見積りが別の枚数を
+ * 主張し続ける。
+ * MUST: 予算なし（`undefined`）では束縛上限そのものを返す — 既定の枚数・キー・WGSL は予算の欄を
+ * 足す前と 1 バイトも変わらない。予算と束縛上限が等しいときも束縛上限の側を名乗る（枚数は同じ）。
+ * NOTE: 中間バッファの配置の上限検査（transient-plan.ts）はこの値を使わない。予算は行ブロックの一時
+ * だけを縛るノブで、FFN の中間のような他の束縛は granted 値のまま検査する。
+ */
+export const rowBlockLimit = (granted: number, budget: number | undefined): RowBlockLimit =>
+  budget !== undefined && budget < granted
+    ? { bytes: budget, source: "attentionRowBlockMaxBytes" }
+    : { bytes: granted, source: "maxStorageBufferBindingSize" };
+
+/**
+ * クエリ行を「1 枚が上限に収まる**最小枚数**」へ等分する純関数。
+ *
+ * 入力は解決済みの静的な数だけ（device の granted limit・利用者の予算・1 行あたりのバイト数・行数）で、
  * 実測は 1 つも混ざらない — 実行時オートチューン禁止（ADR 0022）を満たす唯一の形。
- * したがって同じ device・同じ束縛からは常に同じ枚数が出て、prepared plan のキー
- * （解決済み bindings）が枚数まで含意する（S が違えば別キーなので枚数も別に導かれる）。
+ * したがって同じ device・同じ予算・同じ束縛からは常に同じ枚数が出て、prepared plan のキー
+ * （解決済み bindings）が枚数まで含意する（S が違えば別キーなので枚数も別に導かれる。予算は
+ * Session の寿命を通じて不変）。
  *
  * 等分にするのは、末尾だけ極端に短いブロックを作らないため（幾何のバケットが 1 枚だけ
  * 別になり、パイプラインが 1 本余計に生える）。端数は先頭から 1 行ずつ配る。
  *
  * MUST: **1 行でも上限に入らない形は fail loudly**。ここで黙って分割を諦めると、確保も
- * 束縛も失敗するグラフが「融合が外れただけ」に見える。
+ * 束縛も失敗するグラフが「融合が外れただけ」に見える。上限を予算が決めたときは文言で予算を
+ * 名指す（予算を 1 行ぶん以上にすれば通る形で、device の側の問題ではない）。
  *
- * @param forced 枚数の強制（テスト専用）。上限に収まらない枚数は同じく fail loudly。
+ * @param limit 1 本ごとの上限。数値は device の束縛上限そのもの（予算なし）として読む。予算を
+ *   掛けるときは {@link rowBlockLimit} の結果を渡す。
+ * @param forced 枚数の強制（テスト専用）。上限（予算を掛けたときは予算との小さいほう）に収まらない
+ *   枚数は同じく fail loudly。
  */
 export const planRowBlocks = (
   rows: number,
   bytesPerRow: number,
-  limit: number,
+  limit: number | RowBlockLimit,
   forced?: number,
 ): readonly RowBlock[] => {
-  const where = `行ブロック分割（行 ${rows} × ${bytesPerRow}B / 上限 ${limit}B）`;
+  const cap = typeof limit === "number" ? rowBlockLimit(limit, undefined) : limit;
+  const byBudget = cap.source === "attentionRowBlockMaxBytes";
+  const where = `行ブロック分割（行 ${rows} × ${bytesPerRow}B / 上限 ${cap.bytes}B` +
+    `${byBudget ? " — 予算 attentionRowBlockMaxBytes" : ""}）`;
   for (const [name, value] of [["行数", rows], ["1 行のバイト数", bytesPerRow]] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw new ExecutionError(`${where}: ${name} は正整数（${value}）`);
     }
   }
-  if (bytesPerRow > limit) {
+  if (bytesPerRow > cap.bytes) {
     throw new ExecutionError(
-      `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
-        "（行ブロックでは分割しきれない形）",
+      byBudget
+        ? `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既に予算 attentionRowBlockMaxBytes を` +
+          "超える（行ブロックでは分割しきれない — 予算を 1 行ぶん以上にすること）"
+        : `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
+          "（行ブロックでは分割しきれない形）",
     );
   }
-  const count = forced ?? Math.ceil(rows / Math.floor(limit / bytesPerRow));
+  const count = forced ?? Math.ceil(rows / Math.floor(cap.bytes / bytesPerRow));
   if (!Number.isSafeInteger(count) || count < 1 || count > rows) {
     throw new ExecutionError(
       `${where}: 枚数 ${count} は 1 以上 ${rows} 以下の整数でなければならない`,
@@ -79,9 +123,10 @@ export const planRowBlocks = (
   const base = Math.floor(rows / count);
   const remainder = rows % count;
   const widest = base + (remainder > 0 ? 1 : 0);
-  if (widest * bytesPerRow > limit) {
+  if (widest * bytesPerRow > cap.bytes) {
     throw new ExecutionError(
-      `${where}: ${count} 枚では 1 枚 ${widest * bytesPerRow}B が上限に収まらない`,
+      `${where}: ${count} 枚では 1 枚 ${widest * bytesPerRow}B が` +
+        `${byBudget ? "予算 attentionRowBlockMaxBytes" : "上限"}に収まらない`,
     );
   }
   const blocks: RowBlock[] = [];
@@ -232,10 +277,12 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
 
     // ここから先は fail loudly の領域（掴めた窓は必ず融合する）。素の列へ落としても
     // 実体化幅は増えるだけなので、「分割しきれない」を沈黙の fallback にしてはならない。
+    // 上限は束縛上限と予算の小さいほう（{@link rowBlockLimit}）。`limits` 自体は下げない — dispatch 数の
+    // 検査と他の束縛は granted 値のまま。
     const blocks = planRowBlocks(
       queries,
       heads * keys * 4,
-      context.limits.maxStorageBufferBindingSize,
+      rowBlockLimit(context.limits.maxStorageBufferBindingSize, context.attentionRowBlockMaxBytes),
       context.rowBlockSplit,
     );
     return {

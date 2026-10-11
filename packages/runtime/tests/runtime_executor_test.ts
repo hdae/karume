@@ -140,7 +140,13 @@ const convertible = (): { readonly value: object; readonly conversions: () => nu
 };
 
 Deno.test("構築オプションの数値ノブの診断は利用者の変換を呼ばず、型外の値を ExecutionError で拒否する", async () => {
-  for (const knob of ["planBackingBudgetBytes", "linearGemvRowsThreadTarget"] as const) {
+  for (
+    const knob of [
+      "planBackingBudgetBytes",
+      "linearGemvRowsThreadTarget",
+      "attentionRowBlockMaxBytes",
+    ] as const
+  ) {
     for (
       const make of [() => convertible(), () => ({
         value: Symbol(knob),
@@ -421,6 +427,21 @@ Deno.test("構築は入口時点の options で決まり、構築中の書き換
     4,
     "検査の後に書き換えた submitPolicy の中身が届いた",
   );
+});
+
+Deno.test("attentionRowBlockMaxBytes は入口の写しから Session の状態へ届き、検査の後の書き換えは届かない", async () => {
+  // 予算は行ブロックの枚数を決める Session 単位の不変値（ADR 0124）。導出済み計画のキーは予算を含まない
+  // ので、構築の後で値が動くと同じキーが別の枚数の計画を指す。
+  const options: { -readonly [K in keyof SessionOptions]: SessionOptions[K] } = {
+    attentionRowBlockMaxBytes: 64 * 1024 * 1024,
+  };
+  async function* noShards(): AsyncGenerator<never> {}
+  const building = buildSessionState(fakeGpu(), emptyGraph(), new Map(), noShards(), options);
+  options.attentionRowBlockMaxBytes = 1;
+  assertEquals((await building).attentionRowBlockMaxBytes, 64 * 1024 * 1024);
+  // 省略は予算なし（束縛上限のまま）。
+  const plain = await buildSessionState(fakeGpu(), emptyGraph(), new Map(), noShards(), {});
+  assertEquals(plain.attentionRowBlockMaxBytes, undefined);
 });
 
 Deno.test("構築の入口の写しは非列挙・prototype 由来の欄も読み、写す前と同じ値を拒否する", async () => {

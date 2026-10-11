@@ -43,7 +43,7 @@ import { toSizeClass } from "../gpu/arena.ts";
 import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
 import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
-import { type FusedStep, planAliases, planFusions } from "./fusion.ts";
+import { type FusedStep, planAliases, planFusions, rowBlockLimit } from "./fusion.ts";
 import {
   allowedChunkRows,
   assertChunkBuckets,
@@ -293,6 +293,18 @@ export type EstimateOptions = {
    * ピークは従来どおりシナリオ側の最大になる。
    */
   readonly planBackingBudgetBytes?: number;
+  /**
+   * 行ブロックの一時 1 本ごとの予算（`SessionOptions.attentionRowBlockMaxBytes` と同じ値・省略 = 予算なし
+   * — ADR 0124）。
+   *
+   * 行ブロックの枚数は実行と同じ導出（`rowBlockLimit` — 束縛上限とこの値の小さいほう）で決める。
+   * 効くのは行ブロックで割る勘定（states 形 attention のスコア S と行統計・行ブロック attention の窓の
+   * 一時）で、中間の配置の上限検査は束縛上限のまま（実行と同じ）。
+   * MUST: 検査は `createContainerSession` と同じ（正の安全な整数以外は fail loudly）。
+   * MUST: 1 行ぶんの一時がこの値を超える形は、実行の計画導出と同じ文言で fail loudly — 見積りが
+   * 予算違反を事前に知る手段（実行では重みを上げた後の run で落ちる）。
+   */
+  readonly attentionRowBlockMaxBytes?: number;
 };
 
 /**
@@ -594,7 +606,10 @@ const selectionSplitTempBytes = (node: NodePlan): number => {
  * 無く別の数を主張し続ける（モジュール doc の MUST）。ここが持つのは、見積り固有の材料
  * （記号解決済みのスロット shape）を幾何へ翻訳する部分だけ。
  * MUST: `maxStorageBufferBindingSize` が無ければ fail loudly。枚数は device の granted limit
- * だけで決まるので、既定値で埋めると「どの device でも出ない一時の大きさ」を名乗ることになる。
+ * （と利用者の予算）だけで決まるので、既定値で埋めると「どの device でも出ない一時の大きさ」を
+ * 名乗ることになる。
+ * MUST: 予算（`budget` — `EstimateOptions.attentionRowBlockMaxBytes`）は実行と同じ `rowBlockLimit` で
+ * 束縛上限と合わせる（ADR 0124 決定 7）。
  * NOTE: 値域（正の安全整数）は {@link estimateGraphMemory} の入口が見る — states 形 attention を
  * 持たないグラフはここを通らないので、内側に置くと呼び手から見えない位置の門になる。
  */
@@ -602,6 +617,7 @@ const stateAttentionTemps = (
   node: NodePlan,
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
+  budget: number | undefined,
   stateAttentionReduce: StateAttentionReduce,
 ): readonly StateAttentionBlock[] => {
   const q = node.inputShapes[0];
@@ -631,7 +647,7 @@ const stateAttentionTemps = (
     capacity: slotShape[2],
     window: stateWindow(node.node.attrs, where) ?? 0,
     fuseStatsPv: node.node.ins.length === 3 && stateAttentionReduce === "parallel-fused",
-  }, limit).blocks;
+  }, rowBlockLimit(limit, budget)).blocks;
 };
 
 /**
@@ -642,8 +658,9 @@ const stateAttentionTemps = (
  * softmax 後の全幅に束縛上限が当たり、実行できる形の見積りだけが例外になるため（ADR 0060 の需要形）。
  * 他のルールは従来どおり融合前の列で数える（`unaccounted` の側）。
  *
- * MUST: 束縛上限は確保プログラムの上限検査と同じ値を渡す（行ブロックの枚数はこの値だけで決まる —
- * 別の値で割ると、見積りだけが実行と違う枚数の一時を数える）。行ブロック枚数の強制
+ * MUST: 束縛上限は確保プログラムの上限検査と同じ値を渡す（行ブロックの枚数はこの値と予算だけで
+ * 決まる — 別の値で割ると、見積りだけが実行と違う枚数の一時を数える）。予算（`budget`）は実行と同じく
+ * 融合の文脈の `attentionRowBlockMaxBytes` として渡す（ADR 0124 決定 7）。行ブロック枚数の強制
  * （`rowBlockSplit` — テスト専用）は渡さない（{@link stateAttentionTemps} と同じ理由）。
  * NOTE: `maxComputeWorkgroupsPerDimension` は dispatch 数の上限検査にしか効かず、バイト数を動かさない。
  * 見積りは素のノードでも dispatch 数を検査しない（受ける欄も無い）ので、ここも検査しない値を渡す。
@@ -653,6 +670,7 @@ const rowBlockAttentionSteps = (
   uses: ReadonlyMap<string, number>,
   outputNames: ReadonlySet<string>,
   bindingLimit: number,
+  budget: number | undefined,
 ): ReadonlyMap<number, FusedStep> => {
   const { steps } = planFusions(nodes, {
     useCounts: uses,
@@ -661,6 +679,7 @@ const rowBlockAttentionSteps = (
       maxStorageBufferBindingSize: bindingLimit,
       maxComputeWorkgroupsPerDimension: Number.MAX_SAFE_INTEGER,
     },
+    ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
   });
   const found = new Map<number, FusedStep>();
   // 走査は窓ごとに「passthrough のノード → 融合ステップ」を並べて窓幅ぶん進むので、ステップ列の
@@ -767,6 +786,13 @@ const fusedTransientStep = (
   };
 };
 
+/** 中間の勘定が読む実行ノブ（Session と同じ値 — {@link estimateGraphMemory} の入口で値域を見た後のもの）。 */
+type TransientKnobs = {
+  readonly stateAttentionReduce: StateAttentionReduce;
+  /** 行ブロックの一時 1 本ごとの予算（`undefined` = 予算なし — ADR 0124）。 */
+  readonly attentionRowBlockMaxBytes: number | undefined;
+};
+
 /**
  * 中間バッファ（ノード出力と融合ルールの一時）の GPU バイト数を、実行と**同じ計画関数**で数える
  * （ADR 0093 決定 4 — {@link planTransients} の共有。ADR 0070 決定 5「実行と同じ規則」を関数共有で
@@ -796,8 +822,9 @@ const transientSlotBytes = (
   stateShapes: ReadonlyMap<string, readonly number[]> | undefined,
   limit: number | undefined,
   maxBufferSize: number | undefined,
-  stateAttentionReduce: StateAttentionReduce,
+  knobs: TransientKnobs,
 ): number => {
+  const { stateAttentionReduce, attentionRowBlockMaxBytes } = knobs;
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
   const aliases = planAliases(nodes);
@@ -826,7 +853,14 @@ const transientSlotBytes = (
       // スロットから読み、今 step の k / v 入力を持たない。読みの参照は**在る入力だけ**にする
       // （無い名前を参照に載せると transient 計画が未定義の参照で落ちる）。
       const [q, k, v] = reads;
-      for (const temp of stateAttentionTemps(node, stateShapes, limit, stateAttentionReduce)) {
+      const blocks = stateAttentionTemps(
+        node,
+        stateShapes,
+        limit,
+        attentionRowBlockMaxBytes,
+        stateAttentionReduce,
+      );
+      for (const temp of blocks) {
         const base = dispatches.length;
         const fused = temp.statsBytes === 0;
         const last = base + (fused ? 1 : 2);
@@ -864,7 +898,13 @@ const transientSlotBytes = (
     // 別名も入力を消費する（`uses` に数えられている）ので、解放は全ノードで入力の延べ列。
     return { outputs, temps, dispatches, releases: node.node.ins };
   };
-  const fused = rowBlockAttentionSteps(nodes, uses, outputNames, bindingLimit);
+  const fused = rowBlockAttentionSteps(
+    nodes,
+    uses,
+    outputNames,
+    bindingLimit,
+    attentionRowBlockMaxBytes,
+  );
   const program: TransientStepSpec[] = [];
   for (let index = 0; index < nodes.length;) {
     const step = fused.get(index);
@@ -921,6 +961,9 @@ const transientSlotBytes = (
  *   束縛上限にも使う（無指定なら WebGPU core 既定）。
  * @param options.planBackingBudgetBytes slot backing の保持予算（`SessionOptions` と同じ値）。
  *   {@link AdmissionReport.peakAccountedBytes} の片側の項になる。
+ * @param options.attentionRowBlockMaxBytes 行ブロックの一時 1 本ごとの予算（`SessionOptions` と同じ値 —
+ *   ADR 0124）。行ブロックの枚数を実行と同じ導出で決め、1 行ぶんにも満たない予算は実行と同じ文言で
+ *   fail loudly（予算違反を重みの読み込みの前に知る手段）。
  */
 export const estimateGraphMemory = (
   graph: IrGraph,
@@ -963,6 +1006,19 @@ export const estimateGraphMemory = (
       `options.planBackingBudgetBytes ${
         describeInputValue(budgetBytes)
       } は非負の安全な整数でなければならない`,
+    );
+  }
+  // 行ブロックの一時 1 本ごとの予算も同じ位置・同じ文言（`sessionOptionsViolation` の門 — ADR 0124
+  // 決定 5）。行ブロックで割る形を持たないグラフでも見る（値域門の位置をグラフの形に依らせない）。
+  const attentionRowBlockMaxBytes = options.attentionRowBlockMaxBytes;
+  if (
+    attentionRowBlockMaxBytes !== undefined &&
+    (!Number.isSafeInteger(attentionRowBlockMaxBytes) || attentionRowBlockMaxBytes < 1)
+  ) {
+    throw new ExecutionError(
+      `options.attentionRowBlockMaxBytes ${
+        describeInputValue(attentionRowBlockMaxBytes)
+      } は正の安全な整数でなければならない`,
     );
   }
   const chunkDims = chunkRowDims(graph);
@@ -1067,7 +1123,7 @@ export const estimateGraphMemory = (
         state.shapes,
         options.maxStorageBufferBindingSize,
         options.maxBufferSize,
-        stateAttentionReduce,
+        { stateAttentionReduce, attentionRowBlockMaxBytes },
       ),
     };
   };

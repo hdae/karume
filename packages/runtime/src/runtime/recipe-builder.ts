@@ -146,6 +146,12 @@ export type RecipeBuilderContext = {
    */
   readonly rowBlockSplit: number | undefined;
   /**
+   * 行ブロックの一時 1 本ごとの予算（`SessionOptions.attentionRowBlockMaxBytes` — ADR 0124）。
+   * 融合 attention と states 形は導出相が直接割るので、融合ルールの文脈と同じ値をここにも持つ
+   * （{@link rowBlockSplit} と同じ理由）。`undefined` = 予算なし。
+   */
+  readonly attentionRowBlockMaxBytes: number | undefined;
+  /**
    * GEMM 幾何のプロファイル（executor の {@link SessionState} が構築時に 1 度だけ選ぶ —
    * DECIDED: ADR 0115）。matmul / bmm / linear・融合 attention・conv2d・i8a8 の導出が幾何を引く先。
    */
@@ -199,6 +205,7 @@ export type RecipeBuildFace = {
     | "linearI8a8Dot"
     | "attentionI8a8Dot"
     | "rowBlockSplit"
+    | "attentionRowBlockMaxBytes"
     | "geometryProfile"
   >;
   readonly writeParams: (params: Uint32Array<ArrayBuffer>, usage: number) => GPUBuffer;
