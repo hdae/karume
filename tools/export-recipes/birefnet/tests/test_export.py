@@ -661,12 +661,54 @@ def _record_emit(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Path, str]]:
 
 
 class TestDtypeCli:
-    def test_the_default_is_the_plain_f32_series(self, monkeypatch):
+    def test_the_default_is_the_checkpoints_own_storage(self, monkeypatch):
+        """既定は上流の格納と同じ幅（ADR 0113 追記 2026-10-11）— HR は f16・Lucida は f32。"""
         seen = _record_emit(monkeypatch)
 
         bn.main([])
+        bn.main(["--model-dir", str(bn.MODELS_ROOT / "lucida")])
 
-        assert seen == [(SERIES_ROOT / "birefnet-hr-1024", "f32")]
+        assert seen == [
+            (SERIES_ROOT / "birefnet-hr-1024-f16", "f16"),
+            (SERIES_ROOT / "lucida-1024", "f32"),
+        ]
+
+    def test_hr_refuses_f32(self, monkeypatch, capsys):
+        """HR の上流は f16 だけ — f32 系列は値を正確に広げるだけで情報が増えず、配りもしない。"""
+        monkeypatch.setattr(bn, "export_series", lambda *_a, **_kw: pytest.fail("emit された"))
+
+        with pytest.raises(SystemExit):
+            bn.main(["--dtype", "f32"])
+
+        assert "上流 checkpoint の格納より広い dtype" in capsys.readouterr().err
+
+    def test_lucida_writes_both_dtypes(self, monkeypatch):
+        """Lucida の上流は f32 — f32（既定）と、丸めた f16 の両方を書ける。"""
+        seen = _record_emit(monkeypatch)
+        lucida = str(bn.MODELS_ROOT / "lucida")
+
+        bn.main(["--model-dir", lucida, "--dtype", "f32"])
+        bn.main(["--model-dir", lucida, "--dtype", "f16"])
+
+        assert seen == [
+            (SERIES_ROOT / "lucida-1024", "f32"),
+            (SERIES_ROOT / "lucida-1024-f16", "f16"),
+        ]
+
+    def test_the_script_writes_exactly_the_seats_the_distribution_ships(self):
+        """書く側と配る側の規則は 1 つ（配れない系列を焼かない・配る席の系列は全部焼ける）。
+
+        checkpoint は `--model-dir` のディレクトリ名から引く — 系列名と同じ紐づけ。
+        """
+        from birefnet.card import BIREFNET_CHECKPOINTS
+        from birefnet.distribution import birefnet_default_quant, birefnet_seat_dtypes
+
+        for checkpoint, entry in BIREFNET_CHECKPOINTS.items():
+            model_dir = bn.MODELS_ROOT / entry.repo.split("/", 1)[1]
+            assert bn.export_dtypes(model_dir) == (
+                birefnet_seat_dtypes(checkpoint),
+                birefnet_default_quant(checkpoint),
+            )
 
     def test_f16_is_written_to_its_own_series(self, monkeypatch):
         seen = _record_emit(monkeypatch)

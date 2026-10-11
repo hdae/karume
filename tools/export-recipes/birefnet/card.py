@@ -136,9 +136,10 @@ class BirefnetCheckpoint:
     #: 帰属節の追加行（学習データのライセンス等 — 上流ごとに違う事実）。
     attribution: tuple[str, ...]
     #: 上流 checkpoint の浮動小数の格納 dtype（safetensors ヘッダの実測 2026-09-25 —
-    #: HR は F16 687 本・Lucida は F32 687 本）。どの quant 席が値を変えずに持てるか
-    #: （{@link birefnet_storage_lines}）と `base_model_relation`（{@link _birefnet_relation}）が
-    #: ここから決まる。export 時の品質の門は
+    #: HR は F16 687 本・Lucida は F32 687 本）。配る quant 席（この格納より広い席は出さない・
+    #: 既定は同じ幅の席 — `birefnet.distribution.birefnet_seat_dtypes`）、どの席が値を変えずに
+    #: 持てるか（{@link birefnet_storage_lines}）と `base_model_relation`
+    #: （{@link _birefnet_relation}）がここから決まる。export 時の品質の門は
     #: 同じ事実をヘッダから直接読む（`birefnet.export.checkpoint_dtypes`）ので、2 つの突合は
     #: `birefnet/tests/test_export.py` が実重みのある機で持つ。
     stored_dtype: str
@@ -239,13 +240,16 @@ BIREFNET_UPSTREAM: Mapping[str, str] = {
 #: `birefnet/tests/test_card.py` が見る。
 BIREFNET_MATTE_WEIGHTS = "matte"
 
-#: 格納 dtype → ビット幅（席が checkpoint の値を変えずに持てるかの判定 — 狭い席は丸める）。
+#: 格納 dtype → ビット幅。配る席の規則（checkpoint の格納より広い席は出さない —
+#: `birefnet.distribution.birefnet_seat_dtypes`）と、席が checkpoint の値を変えずに持てるかの
+#: 判定（狭い席は丸める）がここから決まる。
 #: MUST: 知らない dtype は描かない（段 2 の i8 は席と一緒にここへ足す — 推し量った文面を
 #: 法的テキストへ載せない）。
 _STORAGE_BITS: Mapping[str, int] = {"f32": 32, "f16": 16}
 
 
-def _storage_bits(dtype: str) -> int:
+def birefnet_storage_bits(dtype: str) -> int:
+    """格納 dtype のビット幅（{@link _STORAGE_BITS} — 知らない dtype は落とす）。"""
     bits = _STORAGE_BITS.get(dtype)
     if bits is None:
         raise ValueError(
@@ -286,20 +290,21 @@ _BATCHNORM_AFFINE = "inference-time BatchNorm is a derived per-channel affine in
 
 
 def _seat_storage_line(dtype: str, stored: str) -> str:
-    """quant 席 1 つぶんの格納の説明（checkpoint の格納 `stored` との関係で文面が決まる）。"""
-    if dtype == "f32":
-        if stored == "f32":
-            return _wrapped("`f32`: the checkpoint's own f32 values, unchanged.", "  - ")
-        return _wrapped(
-            f"`f32`: the checkpoint's own values, widened exactly from {stored} to f32.", "  - "
-        )
+    """quant 席 1 つぶんの格納の説明（checkpoint の格納 `stored` との関係で文面が決まる）。
+
+    checkpoint の格納より広い席（f16 の checkpoint の f32 席）の文面は持たない — 値を正確に
+    広げるだけの席は配らない（`birefnet.distribution.birefnet_seat_dtypes` の規則）ので、
+    そういう席を持つ manifest は描かずに落とす。
+    """
+    if dtype == "f32" and stored == "f32":
+        return _wrapped("`f32`: the checkpoint's own f32 values, unchanged.", "  - ")
     if dtype == "f16" and stored == "f16":
         return _wrapped(
             f"`f16`: the checkpoint's own f16 values, kept as f16 in {_F16_STORED}; {_F32_KEPT}"
             f" are widened exactly to f32, and {_BATCHNORM_AFFINE}.",
             "  - ",
         )
-    if dtype == "f16" and _storage_bits(stored) > _storage_bits(dtype):
+    if dtype == "f16" and birefnet_storage_bits(stored) > birefnet_storage_bits(dtype):
         return _wrapped(
             "`f16`: **quantized** — every weight was rounded to the nearest f16 value before"
             f" export; {_F16_STORED} are stored as f16, {_F32_KEPT} keep f32 storage,"
@@ -323,9 +328,13 @@ def birefnet_storage_lines(checkpoint: str, dtypes: Sequence[str]) -> list[str]:
     stored = _birefnet_entry(checkpoint).stored_dtype
     if not dtypes:
         raise ValueError("quant 席が 1 つも無い — 格納の説明を組めない")
-    lossless = all(_storage_bits(dtype) >= _storage_bits(stored) for dtype in dtypes)
+    lossless = all(
+        birefnet_storage_bits(dtype) >= birefnet_storage_bits(stored) for dtype in dtypes
+    )
+    # 席が 1 つ（HR）なら単数で書く — 「every quant seat」は比べる席が無いリポで読み手を迷わせる。
+    seats = "every quant seat stores" if len(dtypes) > 1 else "the quant seat stores"
     heading = (
-        "**No quantization**: every quant seat stores the source checkpoint's own values"
+        f"**No quantization**: {seats} the source checkpoint's own values"
         f" (the checkpoint itself is stored in {stored}):"
         if lossless
         else f"**Quantization**: the source checkpoint is stored in {stored}; per quant seat:"
@@ -385,7 +394,7 @@ def _birefnet_relation(manifest: Mapping[str, Any], entry: BirefnetCheckpoint) -
     """
     model = default_model(manifest)
     dtype = model["quants"][model["defaultQuant"]]["weights"][BIREFNET_MATTE_WEIGHTS]
-    if _storage_bits(dtype) < _storage_bits(entry.stored_dtype):
+    if birefnet_storage_bits(dtype) < birefnet_storage_bits(entry.stored_dtype):
         return "quantized"
     return None
 

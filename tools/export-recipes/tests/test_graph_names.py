@@ -227,10 +227,19 @@ class TestTheNamesAreTheWeightsKeys:
         return set(table)
 
     @pytest.mark.parametrize(
-        "family", ["anima", "irodori", "gemma4", "siglip2", "birefnet", "depth_anything", "wan"]
+        "family", ["anima", "irodori", "gemma4", "siglip2", "depth_anything", "wan"]
     )
     def test_the_scripts_cover_exactly_the_weights_keys(self, family: str) -> None:
         assert self._named(family) == self._weights(family)
+
+    def test_birefnet_covers_exactly_the_weights_keys_of_every_checkpoint(self) -> None:
+        """BiRefNet の weights は checkpoint ごと（席が上流の格納から決まる — `birefnet_weights`）
+        なので、family 名から導く表の綴りにならない。checkpoint ごとに名指しで見る。"""
+        from birefnet.card import BIREFNET_CHECKPOINTS
+        from birefnet.distribution import birefnet_weights
+
+        for checkpoint in BIREFNET_CHECKPOINTS:
+            assert self._named("birefnet") == set(birefnet_weights(checkpoint)), checkpoint
 
     def test_vowel_detector_covers_exactly_its_weights_keys(self) -> None:
         """`VOWEL_DETECTOR_WEIGHTS` は family 名から導く綴りにならないので名指しで見る。"""

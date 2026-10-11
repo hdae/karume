@@ -14,9 +14,10 @@ transformers は **5.14.1 でピン**する（`birefnet.patch` が `trust_remote
 ## モデル軸と解像度軸
 
 系列名は `--model-dir` のディレクトリ名（小文字ハイフン化）に **`--resolution` を足した**
-綴り（既定は `birefnet-hr-1024`）。解像度を綴りに入れるのは、BiRefNet の系列が解像度ごとに
-**別のグラフ**になるため — shifted-window マスクも H/W padding のゼロ定数も解像度依存の
-定数として焼かれるので、同じ席へ 2 解像度を書くと先の資産が黙って上書きされる。
+綴り（f32 以外は格納 dtype の接尾も — 既定は `birefnet-hr-1024-f16`）。解像度を綴りに入れる
+のは、BiRefNet の系列が解像度ごとに**別のグラフ**になるため — shifted-window マスクも H/W
+padding のゼロ定数も解像度依存の定数として焼かれるので、同じ席へ 2 解像度を書くと先の資産が
+黙って上書きされる。
 
     uv run --group birefnet python -m birefnet.export --resolution 2048
 
@@ -54,12 +55,19 @@ S/2 に掛ける（= S%64）。外れた寸法は途中の reshape エラーで�
 
 ## 格納 dtype の系列（ADR 0113 — 段 1 は f16 まで）
 
-`--dtype f16` は**別系列**（`birefnet-hr-1024-f16/` のように `-f16` を足した綴り）へ書き出す。
+`--dtype f16` は**別系列**（`lucida-1024-f16/` のように `-f16` を足した綴り）へ書き出す。
 同居させると f32 系列の網（系列ごとに実測した tolerance）が圧縮資産へ黙って掛かるため、系列は
 必ず分ける（ADR 0018 / 0027 と同じ理由）。
 
-    uv run --group birefnet python -m birefnet.export --dtype f16 --real-images
-    uv run --group birefnet python -m birefnet.export --dtype f16 --resolution 2048
+書ける dtype と既定は配布の席と**同じ規則**（{@link export_dtypes} — ADR 0113 追記 2026-10-11）:
+上流 checkpoint の格納より広い dtype は書かず、既定は格納と同じ幅。BiRefNet_HR（上流 f16）は
+f16 だけ（既定 f16・`--dtype f32` は拒む — f16 の値を f32 へ広げるだけで情報が増えず、配りも
+しない）、Lucida（上流 f32）は f32（既定）と f16。
+
+    uv run --group birefnet python -m birefnet.export --real-images
+    uv run --group birefnet python -m birefnet.export --resolution 2048
+    uv run --group birefnet python -m birefnet.export --model-dir <リポの inputs>/birefnet/lucida \
+        --dtype f16 --real-images
 
 MUST: 丸め（fake-quant — ADR 0006）は `load_model` の**直後**・`patch.apply` の**前**
 （{@link load_wrapper}）。⑦ の `ChannelAffine` は BatchNorm の統計から α / β を f32 で導く派生
@@ -183,7 +191,12 @@ from karume.pipeline import export_to_file
 from karume.quantize import RoundReport, round_weights_to_f16
 
 from . import patch
-from .distribution import BIREFNET_ROLE
+from .distribution import (
+    BIREFNET_ROLE,
+    birefnet_default_quant,
+    birefnet_directory_checkpoint,
+    birefnet_seat_dtypes,
+)
 
 #: 実重みの親（`inputs/birefnet/<名前>/` に HF の 7 ファイルを展開した先）。
 MODELS_ROOT = INPUTS_ROOT / "birefnet"
@@ -311,6 +324,24 @@ def default_out_dir(model_dir: Path, resolution: int, dtype: str = PLAIN_DTYPE) 
     """
     suffix = "" if dtype == PLAIN_DTYPE else f"-{dtype}"
     return SERIES_ROOT / f"{model_dir.name.lower().replace('_', '-')}-{resolution}{suffix}"
+
+
+def export_dtypes(model_dir: Path) -> tuple[tuple[str, ...], str]:
+    """`--model-dir` の checkpoint で書ける格納 dtype と既定（配布の席と同じ規則）。
+
+    checkpoint は `--model-dir` のディレクトリ名から引く（系列名と同じ紐づけ —
+    `birefnet.distribution.birefnet_directory_checkpoint`）。規則の正本は
+    `birefnet.distribution.birefnet_seat_dtypes` / `birefnet_default_quant`（上流の格納より広い
+    dtype は書かない・既定は格納と同じ幅）で、ここは同じ関数を引くだけ — 書く側と配る側が
+    別々に規則を持つと、配れない系列を焼くか、配る席の系列を焼けなくなる。
+
+    帰属表に無い checkpoint（実験の `--model-dir`）は規則の入力（上流の格納）を表に持たないので、
+    語彙の全部・既定 f32 で書く（その系列は配布の組み立てが帰属表に無い checkpoint として落とす）。
+    """
+    checkpoint = birefnet_directory_checkpoint(model_dir.name)
+    if checkpoint is None:
+        return WEIGHT_DTYPES, PLAIN_DTYPE
+    return birefnet_seat_dtypes(checkpoint), birefnet_default_quant(checkpoint)
 
 
 def upstream_provenance(model_dir: Path) -> Provenance:
@@ -1062,8 +1093,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--dtype",
         choices=WEIGHT_DTYPES,
         default=None,
-        help="重みの格納 dtype（既定 f32。f16 は load 直後・パッチ前に丸めてから適格スロットだけ"
-        " f16 で格納し、丸める前の f32 出力との差を quality.json へ書く — ADR 0113。"
+        help="重みの格納 dtype（既定は上流 checkpoint の格納と同じ幅 — BiRefNet_HR は f16・Lucida"
+        " は f32。上流の格納より広い dtype は拒む。f16 は load 直後・パッチ前に丸めてから適格"
+        "スロットだけ f16 で格納し、丸める前の f32 出力との差を quality.json へ書く — ADR 0113。"
         "**emit 専用**で --verify とは排他）",
     )
     parser.add_argument(
@@ -1091,7 +1123,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                 f" maxdiff={entry['maxdiff']}"
             )
         return
-    dtype = PLAIN_DTYPE if args.dtype is None else args.dtype
+    dtypes, default_dtype = export_dtypes(args.model_dir)
+    if args.dtype is not None and args.dtype not in dtypes:
+        parser.error(
+            f"--dtype {args.dtype} は {args.model_dir.name} では書かない（書けるのは:"
+            f" {' / '.join(dtypes)}）— 上流 checkpoint の格納より広い dtype は値を正確に広げる"
+            "だけで情報が増えず、配布もしない（ADR 0113 追記 2026-10-11）"
+        )
+    dtype = default_dtype if args.dtype is None else args.dtype
     out_dir = args.out
     if out_dir is None:
         out_dir = default_out_dir(args.model_dir, args.resolution, dtype)

@@ -6,9 +6,11 @@ staging/swap・検証）は `karume.dist` が持つ。ここが持つのは **Bi
 既定にするか。
 
 配布するのは **マット 1 グラフだけ**（`birefnet/export.py` は最終段の logit 1 本しか出さない）。
-実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。格納 dtype は f32 / f16 の
-2 系列で、quant 席も同じ 2 つ（ADR 0113 — 既定は f32 のまま）。系列は dtype ごとに別ディレクトリ
-（`birefnet-hr-1024` / `birefnet-hr-1024-f16`）で、配布形では `matte/model.{dtype}.krm` に並ぶ。
+実行に要る資産もそれ 1 本で、tokenizer も表も無い（`assets` は空）。quant 席（= 格納 dtype）は
+**checkpoint ごとに上流の格納の型から導く**（ADR 0113 追記 2026-10-11 —
+{@link birefnet_seat_dtypes}）: 上流の格納より広い席は出さず、既定は格納と同じ幅の席。HR（上流
+f16）は `f16` 席だけ、Lucida（上流 f32）は `f32`（既定）と `f16`。系列は dtype ごとに別ディレクトリ
+（`lucida-1024` / `lucida-1024-f16`）で、配布形では `matte/model.{dtype}.krm` に並ぶ。
 
 **リポは 2 つ、各リポに 2 モデル**。軸が 2 本あることがこの family の形で、混ぜると配布形が
 静かに壊れる:
@@ -82,6 +84,7 @@ from .card import (
     BIREFNET_LICENSE,
     BIREFNET_POSTPROCESS_DESCRIPTIONS,
     BIREFNET_UPSTREAM,
+    birefnet_storage_bits,
     birefnet_storage_lines,
     render_birefnet_model_card,
 )
@@ -148,15 +151,62 @@ BIREFNET_POSTPROCESS: Mapping[str, str] = {
 BIREFNET_IMAGE_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 BIREFNET_IMAGE_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
-#: 配る格納 dtype（段 1 = f32 / f16 — ADR 0113）。**系列 root・出力 path・格納の要求・weights 宣言・
-#: 配置表の 5 つが同じ 1 表から組まれる**（別々に持つと、席を足した日に片方だけ更新される —
-#: irodori の `IRODORI_DTYPE_ROLES` と同じ規律）。quant 席（{@link BIREFNET_QUANT_SEATS}）は表示欄を
-#: 手で持つ別表なので、鍵の一致は pytest が突き合わせる。i8 は BiRefNet 固有の i8 計画と
-#: 一緒に段 2 で足す（`birefnet.export.WEIGHT_DTYPES` と揃える — 突合は pytest）。
+#: 格納 dtype の語彙（広い順 — 段 1 = f32 / f16・ADR 0113）。**席の集合ではない**: 各 checkpoint が
+#: 配る席はこの語彙から上流の格納の型で絞る（{@link birefnet_seat_dtypes}）。系列名の接尾・出力
+#: path・格納の要求表は役割ごとの事実としてこの語彙の全体で持ち（別々に持つと、dtype を足した
+#: 日に片方だけ更新される — irodori の `IRODORI_DTYPE_ROLES` と同じ規律）、どの役割を組むかは
+#: 席の集合が決める。i8 は BiRefNet 固有の i8 計画と一緒に段 2 で足す
+#: （`birefnet.export.WEIGHT_DTYPES` と揃える — 突合は pytest）。
 BIREFNET_WEIGHT_DTYPES: tuple[str, ...] = ("f32", "f16")
 
-#: 圧縮していない系列の dtype（系列名に接尾が付かない唯一の席）。
+#: 圧縮していない系列の dtype（系列名に接尾が付かない唯一の dtype — 綴りの規則で、既定席とは
+#: 別の事実）。
 BIREFNET_PLAIN_DTYPE = "f32"
+
+
+def _stored_dtype(checkpoint: str) -> str:
+    """上流 checkpoint の格納 dtype（帰属表に無い checkpoint は {@link birefnet_checkpoint} が
+    落とす）。"""
+    birefnet_checkpoint(checkpoint)
+    return BIREFNET_CHECKPOINTS[checkpoint].stored_dtype
+
+
+def birefnet_seat_dtypes(checkpoint: str) -> tuple[str, ...]:
+    """checkpoint が配る quant 席の格納 dtype（{@link BIREFNET_WEIGHT_DTYPES} の並び）。
+
+    規則（ADR 0113 追記 2026-10-11）: **上流 checkpoint の格納（`stored_dtype`）より広い席は
+    出さない**。広い席は checkpoint の値を正確に広げるだけで、情報が増えずに常駐とダウンロードが
+    増える（HR の f32 席は 1024² で重みの常駐 919 MiB — f16 席は 509 MiB）。格納より狭い席は丸めた
+    値で、NOTICE とカードが量子化と名乗る。HR（f16）→ `("f16",)`・Lucida（f32）→
+    `("f32", "f16")`。
+
+    MUST: 席の集合はここ 1 つから引く — 系列の取得（{@link birefnet_sources}）・配置・weights・
+    quant 表・既定席・NOTICE・`pipelineConfig` の基準の系列。席の表を checkpoint ごとに手で持つと、
+    格納の事実（`birefnet.card.BIREFNET_CHECKPOINTS`）と独立に動く。export の `--dtype` も同じ
+    規則で絞る（`birefnet.export`）。
+    """
+    stored = _stored_dtype(checkpoint)
+    return tuple(
+        dtype
+        for dtype in BIREFNET_WEIGHT_DTYPES
+        if birefnet_storage_bits(dtype) <= birefnet_storage_bits(stored)
+    )
+
+
+def birefnet_default_quant(checkpoint: str) -> str:
+    """checkpoint の既定席 = **上流の格納と同じ幅の席**（値を変えない席のうち最も小さい）。
+
+    MUST: 該当する席が無い checkpoint は組まない — 別の幅の席を既定に推し量ると、利用者が
+    指定しないときに上流の値と違う重みを配る（または値を広げただけの重い席を配る）。
+    """
+    stored = _stored_dtype(checkpoint)
+    for dtype in birefnet_seat_dtypes(checkpoint):
+        if birefnet_storage_bits(dtype) == birefnet_storage_bits(stored):
+            return dtype
+    raise DistError(
+        f"BiRefNet 系の checkpoint '{checkpoint}' の格納 {stored} と同じ幅の席が無い"
+        f"（席: {' / '.join(birefnet_seat_dtypes(checkpoint))}）— 既定席を決められない"
+    )
 
 
 def birefnet_role(dtype: str) -> str:
@@ -203,58 +253,77 @@ BIREFNET_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
     birefnet_role(BIREFNET_PLAIN_DTYPE): ("f16", "bf16", "i8", "i4", "i2")
 }
 
-#: weights の宣言（dtype ラベル → 役割名）。マット 1 本が f32 / f16 の 2 席を持つので、quant 表が
-#: 名指しする（{@link complete_quant_weights} は dtype が 1 つのときしか埋めない）。
-BIREFNET_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    BIREFNET_ROLE: {dtype: WeightFiles(birefnet_role(dtype)) for dtype in BIREFNET_WEIGHT_DTYPES}
-}
-
 #: assets の宣言。**空**（実行に要るのはグラフ 1 本だけ）。
 BIREFNET_ASSETS: Mapping[str, str] = {}
 
 
-class BirefnetQuantSeat(NamedTuple):
-    """quant 席 1 つ（格納 dtype と、選択 UI へ出す表示欄 — ADR 0075）。"""
+def birefnet_weights(checkpoint: str) -> dict[str, dict[str, WeightFiles]]:
+    """weights の宣言（dtype ラベル → 役割名 — 席は {@link birefnet_seat_dtypes}）。
 
-    dtype: str
+    マット 1 本が席の数だけ dtype を持つので、quant 表が名指しする
+    （{@link complete_quant_weights} は dtype が 1 つのときしか埋めない）。
+    """
+    return {
+        BIREFNET_ROLE: {
+            dtype: WeightFiles(birefnet_role(dtype)) for dtype in birefnet_seat_dtypes(checkpoint)
+        }
+    }
+
+
+class BirefnetQuantSeat(NamedTuple):
+    """quant 席 1 つの、選択 UI へ出す表示欄（ADR 0075）。"""
+
     #: 選択 UI に出す短い表示名（64 字上限）。
     label: str
     #: 同・1 行の説明（200 字上限）。既定であることは書かない（`defaultQuant` が指している）。
-    #: checkpoint に依らない文面にする（表は HR / Lucida の 2 リポで共有 — 値を変えるかどうかは
-    #: checkpoint 次第なので、その事実は NOTICE とカードの帰属節が持つ）。
     description: str
 
 
-#: quant 席の綴り → {@link BirefnetQuantSeat}。実行形ノブ（`session`）は持たない — 計算は
-#: どちらの席も f32 で、違うのは重みの格納だけ。
-BIREFNET_QUANT_SEATS: Mapping[str, BirefnetQuantSeat] = {
-    "f32": BirefnetQuantSeat(
-        "f32",
+#: （席の格納 dtype, 上流 checkpoint の格納 dtype）→ {@link BirefnetQuantSeat}。実行形ノブ
+#: （`session`）は持たない — 計算はどの席も f32 で、違うのは重みの格納だけ。
+#:
+#: 文面を checkpoint の格納との組で引くのは、並ぶ席が checkpoint ごとに違う（{@link
+#: birefnet_seat_dtypes}）から: f16 席の「a smaller download」は f32 席が並ぶリポ（Lucida）でしか
+#: 成り立たず、f16 席だけのリポ（HR）では比べる相手の無い比較になる。値を変えるかどうか
+#: （量子化か）の詳しい事実は NOTICE とカードの帰属節が持つ。MUST: 組が表に無い席は組まない
+#: （{@link birefnet_quants}）— 推し量った文面を選択 UI へ出さない。
+BIREFNET_QUANT_SEATS: Mapping[tuple[str, str], BirefnetQuantSeat] = {
+    ("f32", "f32"): BirefnetQuantSeat(
         label="Full precision (f32)",
         description="Every weight in f32 storage — the largest download and the most resident"
         " GPU memory.",
     ),
-    "f16": BirefnetQuantSeat(
-        "f16",
+    ("f16", "f32"): BirefnetQuantSeat(
         label="Half-size weights (f16)",
         description="The linear, convolution and embedding (relative-position) weights stored as"
         " f16 and computed in f32 — a smaller download and less resident GPU memory.",
     ),
+    ("f16", "f16"): BirefnetQuantSeat(
+        label="Upstream precision (f16)",
+        description="The checkpoint's own f16 values: the linear, convolution and embedding"
+        " (relative-position) weights stay f16 in storage and are computed in f32.",
+    ),
 }
 
-BIREFNET_QUANTS: Mapping[str, Any] = {
-    name: {
-        "weights": {BIREFNET_ROLE: seat.dtype},
-        "session": {},
-        "label": seat.label,
-        "description": seat.description,
-    }
-    for name, seat in BIREFNET_QUANT_SEATS.items()
-}
 
-#: 既定は f32 のまま（ADR 0113 — 既定席の変更は配布の意味の変更で、段 2 の品質実測と目視を
-#: 経てから裁定する。HR の f16 は無損失だが、公開済みの既定を黙って動かさない）。
-BIREFNET_DEFAULT_QUANT = "f32"
+def birefnet_quants(checkpoint: str) -> dict[str, Any]:
+    """checkpoint の quant 表（席名 = 格納 dtype・並びは {@link birefnet_seat_dtypes}）。"""
+    stored = _stored_dtype(checkpoint)
+    quants: dict[str, Any] = {}
+    for dtype in birefnet_seat_dtypes(checkpoint):
+        seat = BIREFNET_QUANT_SEATS.get((dtype, stored))
+        if seat is None:
+            raise DistError(
+                f"格納 {dtype} の席を {stored} の checkpoint '{checkpoint}' について表示する文面が"
+                " 無い — 推し量った文面を選択 UI へ出さない"
+            )
+        quants[dtype] = {
+            "weights": {BIREFNET_ROLE: dtype},
+            "session": {},
+            "label": seat.label,
+            "description": seat.description,
+        }
+    return quants
 
 
 def birefnet_checkpoint(checkpoint: str) -> str:
@@ -272,6 +341,19 @@ def birefnet_checkpoint(checkpoint: str) -> str:
             f"（既知: {' / '.join(sorted(BIREFNET_UPSTREAM))}）"
         )
     return repo.split("/", 1)[1]
+
+
+def birefnet_directory_checkpoint(directory: str) -> str | None:
+    """上流チェックポイントのディレクトリ名 → checkpoint 名（{@link birefnet_checkpoint} の逆）。
+
+    `birefnet/export.py` が `--model-dir` から席の規則（{@link birefnet_seat_dtypes}）を引く口 —
+    系列名と同じ紐づけ（ディレクトリ名 = 上流の HF リポ名の末尾）で引く。帰属表に無い名前は
+    `None`（実験の `--model-dir` — 配布の組み立ては帰属表に無い checkpoint を組まない）。
+    """
+    for checkpoint in BIREFNET_UPSTREAM:
+        if birefnet_checkpoint(checkpoint) == directory:
+            return checkpoint
+    return None
 
 
 def birefnet_resolution(model: str) -> int:
@@ -330,18 +412,23 @@ class BirefnetSources:
     だけ**なので、系列名の導出（{@link birefnet_series_name}）が帰属の唯一の紐づけになる。
     """
 
-    #: 格納 dtype → 系列 root（{@link BIREFNET_WEIGHT_DTYPES} の全部 — 1 つでも欠けたら組まない）。
+    #: 格納 dtype → 系列 root（checkpoint の席 {@link birefnet_seat_dtypes} の全部 — 1 つでも
+    #: 欠けたら組まない・席に無い dtype の系列も組まない）。
     series_by_dtype: Mapping[str, Path]
 
 
 def birefnet_sources(
     series_dir: Path, checkpoint: str, model: str = BIREFNET_DEFAULT_MODEL
 ) -> BirefnetSources:
-    """系列の親ディレクトリ（`outputs/series/`）と checkpoint・解像度から入力を引く。"""
+    """系列の親ディレクトリ（`outputs/series/`）と checkpoint・解像度から入力を引く。
+
+    引くのはその checkpoint の席の系列だけ（{@link birefnet_seat_dtypes} — HR は f16 系列だけ・
+    Lucida は f32 と f16 の両系列）。席に無い系列（HR の f32 系列）は手元にあっても見ない。
+    """
     return BirefnetSources(
         series_by_dtype={
             dtype: series_dir / birefnet_series_name(checkpoint, model, dtype)
-            for dtype in BIREFNET_WEIGHT_DTYPES
+            for dtype in birefnet_seat_dtypes(checkpoint)
         }
     )
 
@@ -353,8 +440,8 @@ def birefnet_placements(sources: BirefnetSources) -> dict[str, Path]:
     落ちる）。
     """
     return {
-        birefnet_role(dtype): sources.series_by_dtype[dtype] / "model.krm"
-        for dtype in BIREFNET_WEIGHT_DTYPES
+        birefnet_role(dtype): series / "model.krm"
+        for dtype, series in sources.series_by_dtype.items()
     }
 
 
@@ -470,17 +557,27 @@ def birefnet_plan(
     birefnet_checkpoint(checkpoint)
     birefnet_repo_name(checkpoint)
     birefnet_postprocess(checkpoint)
+    seats = birefnet_seat_dtypes(checkpoint)
+    default_quant = birefnet_default_quant(checkpoint)
+    # MUST: 系列はその checkpoint の席の全部で、席に無い dtype は持たない — 欠けた席は宣言だけの
+    # 席になり、余った系列は上流の格納より広い（値を広げただけの）席を配る形になる。
+    if tuple(sources.series_by_dtype) != seats:
+        raise DistError(
+            f"系列の格納 dtype {list(sources.series_by_dtype)} が checkpoint '{checkpoint}' の席"
+            f" {list(seats)} と違う — 席は上流の格納より広くない dtype の全部"
+            "（birefnet_seat_dtypes）"
+        )
     placements = birefnet_placements(sources)
     for role, source in placements.items():
         assert_storage(role, source, BIREFNET_STORAGE_REQUIREMENTS)
         assert_storage_absent(role, source, BIREFNET_STORAGE_FORBIDDEN)
-    # MUST: **格納 dtype の系列を 1 本残らず**検査する（irodori と同じ規律）。f16 系列は f32 とは
-    # 別プロセスの emit なので、片方だけ見ると「f32 は宣言どおりだが f16 だけ別解像度 / 別の
-    # 出所」が素通りする。`pipelineConfig` は系列ごとに導いて**一致**を見る（寸法は焼かれた
+    # MUST: **席の系列を 1 本残らず**検査する（irodori と同じ規律）。f16 系列は f32 とは別
+    # プロセスの emit なので、片方だけ見ると「f32 は宣言どおりだが f16 だけ別解像度 / 別の出所」が
+    # 素通りする。`pipelineConfig` は系列ごとに導いて既定席の系列との**一致**を見る（寸法は焼かれた
     # グラフの宣言なので、1 本から導いて他へ写すと別寸法の系列が同居できてしまう）。
     configs: dict[str, dict[str, Any]] = {}
     revision = BIREFNET_CHECKPOINTS[checkpoint].revision
-    for dtype in BIREFNET_WEIGHT_DTYPES:
+    for dtype in seats:
         container = placements[birefnet_role(dtype)]
         graph = ir_graph(container)
         configs[dtype] = birefnet_pipeline_config(graph, container, model, checkpoint)
@@ -492,13 +589,14 @@ def birefnet_plan(
         # A-1）が組み上がる。全容器を同じ固定値で見るので、席どうしの revision の一致も
         # ここで閉じる。
         assert_upstream_provenance(container, license=BIREFNET_LICENSE, revision=revision)
-    pipeline_config = configs[BIREFNET_PLAIN_DTYPE]
+    pipeline_config = configs[default_quant]
     for dtype, config in configs.items():
         if config != pipeline_config:
             raise DistError(
-                f"格納 {dtype} の系列の pipelineConfig {config} が {BIREFNET_PLAIN_DTYPE} 系列の"
+                f"格納 {dtype} の系列の pipelineConfig {config} が既定席 {default_quant} の系列の"
                 f" {pipeline_config} と食い違う — 同じモデルの席は同じ寸法・前処理で焼く"
             )
+    weights = birefnet_weights(checkpoint)
     return ModelPlan(
         name=model,
         pipeline=BIREFNET_PIPELINE,
@@ -506,10 +604,10 @@ def birefnet_plan(
             role: Artifact(BIREFNET_OUTPUT_PATHS[role], source=source)
             for role, source in placements.items()
         },
-        weights=BIREFNET_WEIGHTS,
+        weights=weights,
         assets=BIREFNET_ASSETS,
-        quants=complete_quant_weights(BIREFNET_WEIGHTS, BIREFNET_QUANTS),
-        default_quant=BIREFNET_DEFAULT_QUANT,
+        quants=complete_quant_weights(weights, birefnet_quants(checkpoint)),
+        default_quant=default_quant,
         pipeline_config=pipeline_config,
     )
 
@@ -550,7 +648,7 @@ BIREFNET_COPYRIGHTS: Mapping[str, tuple[str, ...]] = {
 #: MUST: 文面は配布形の中身と対応していること — 値としては妥当な散文なので `verify_dist` も
 #: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。席ごとの格納の説明
 #: （`{storage}`）はカードの帰属節と同じ 1 か所（`birefnet.card.birefnet_storage_lines`）から、
-#: 配る席の表（{@link BIREFNET_QUANT_SEATS}）と checkpoint の格納から組む。
+#: その checkpoint の席（{@link birefnet_seat_dtypes}）と格納から組む。
 BIREFNET_NOTICE_TEMPLATE = """# NOTICE
 
 This repository redistributes a modified form of `{repo}`, which is licensed under
@@ -583,11 +681,7 @@ def birefnet_root_files(checkpoint: str) -> dict[str, str]:
         "LICENSE.md": mit_license(BIREFNET_COPYRIGHTS[checkpoint]),
         "NOTICE.md": BIREFNET_NOTICE_TEMPLATE.format(
             repo=BIREFNET_UPSTREAM[checkpoint],
-            storage="\n".join(
-                birefnet_storage_lines(
-                    checkpoint, [seat.dtype for seat in BIREFNET_QUANT_SEATS.values()]
-                )
-            ),
+            storage="\n".join(birefnet_storage_lines(checkpoint, birefnet_seat_dtypes(checkpoint))),
         ),
     }
 

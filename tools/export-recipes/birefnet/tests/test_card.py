@@ -39,6 +39,11 @@ CHECKPOINT = "hr"
 #: 既定のモデル名 = 既定の解像度。
 MODEL = "1024"
 
+#: checkpoint → 実物の配布形の席（先頭が既定 — `birefnet.distribution.birefnet_seat_dtypes` の値。
+#: 規則そのものは `birefnet/tests/test_distribution.py` が見る）。偽 manifest もこの席で組む —
+#: カードは測った席が無いモデルも、上流の格納より広い席も描かない。
+SEATS: dict[str, tuple[str, ...]] = {"hr": ("f16",), "lucida": ("f32", "f16")}
+
 #: 別 family の pipeline 契約（**綴りをそのまま持つ** — recipe 間のコード結合を作らないため）。
 #: 2 つの実在テンプレートが互いの manifest を拒むことは `sbv2/tests/test_card.py` が
 #: 両向きで見る。ここが要るのは「自分の契約以外を拒む」という 1 方向だけ。
@@ -90,11 +95,11 @@ def _container(*refs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _birefnet_manifest(
-    model: str = MODEL, seats: tuple[str, ...] = ("f32", "f16")
+    model: str = MODEL, seats: tuple[str, ...] = SEATS[CHECKPOINT]
 ) -> dict[str, Any]:
     """BiRefNet 系の最小 manifest（解像度と席以外は実物と重ならない偽値）。
 
-    `seats` は quant 席の格納 dtype（先頭が既定）。既定は両 checkpoint の実測の席を両方持つ形。
+    `seats` は quant 席の格納 dtype（先頭が既定）。既定は {@link CHECKPOINT}（HR）の実物の席。
     """
     side = int(model)
     return {
@@ -194,16 +199,19 @@ class TestBirefnetCardGate:
     def test_the_title_follows_the_checkpoint(self) -> None:
         """上流が名前で売っているモデルはその名前で呼ぶ（見出しは帰属表 1 つから来る）。"""
         assert "# Lucida (BiRefNet) — Karume" in render_birefnet_model_card(
-            _birefnet_manifest(), REPO, "lucida"
+            _birefnet_manifest(seats=SEATS["lucida"]), REPO, "lucida"
         )
         assert "# BiRefNet HR — Karume" in render_birefnet_model_card(
             _birefnet_manifest(), REPO, CHECKPOINT
         )
 
     def test_the_attribution_does_not_follow_the_model_name(self) -> None:
-        """モデル名は解像度で、帰属の軸ではない — 同じ manifest でも席が違えば別の上流を名乗る。"""
+        """モデル名は解像度で、帰属の軸ではない — 同じモデル名でも席（checkpoint）が違えば別の
+        上流を名乗る。"""
         for checkpoint, repo in BIREFNET_UPSTREAM.items():
-            card = render_birefnet_model_card(_birefnet_manifest(), REPO, checkpoint)
+            card = render_birefnet_model_card(
+                _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
+            )
             assert f"base_model: {repo}" in card
 
     def test_the_upstream_table_is_the_only_source_of_the_repository_ids(self) -> None:
@@ -250,7 +258,9 @@ class TestBirefnetResourceNote:
         binding は「端末によっては要求自体が通らない」制約。カードが黙っていると、読み手は
         `requiredLimits` が空なこと（= 常駐分は既定内）を「既定スペックで動く」と読む。
         """
-        card = render_birefnet_model_card(_birefnet_manifest(model), REPO, checkpoint)
+        card = render_birefnet_model_card(
+            _birefnet_manifest(model, SEATS[checkpoint]), REPO, checkpoint
+        )
         measurement = BIREFNET_CHECKPOINTS[checkpoint].resources
         resources = measurement.by_resolution[model]
 
@@ -270,9 +280,11 @@ class TestBirefnetResourceNote:
 
     @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
     def test_the_total_is_named_as_the_measured_seats_number(self, checkpoint: str) -> None:
-        """席が 2 つ並ぶカードで、総確保がどの席の実測かを言う（他の席の総確保は推し量らない —
-        2026-09-26 レビュー F2）。"""
-        card = render_birefnet_model_card(_birefnet_manifest(), REPO, checkpoint)
+        """総確保がどの席の実測かを言う（席が 2 つ並ぶ Lucida のカードでも、他の席の総確保は
+        推し量らない — 2026-09-26 レビュー F2）。"""
+        card = render_birefnet_model_card(
+            _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
+        )
         prose = " ".join(card.split())
         measurement = BIREFNET_CHECKPOINTS[checkpoint].resources
 
@@ -281,14 +293,15 @@ class TestBirefnetResourceNote:
             f" `{measurement.quant}` quant" in prose
         )
 
-    @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
-    def test_it_refuses_a_model_without_the_measured_seat(self, checkpoint: str) -> None:
-        """実測した席が無い配布形では、総確保を名乗れない（別の席の数として読まれる）。"""
-        measured = BIREFNET_CHECKPOINTS[checkpoint].resources.quant
-        (other,) = (dtype for dtype in ("f32", "f16") if dtype != measured)
+    def test_it_refuses_a_model_without_the_measured_seat(self) -> None:
+        """実測した席が無い配布形では、総確保を名乗れない（別の席の数として読まれる）。
 
-        with pytest.raises(ValueError, match=f"実測した quant '{measured}'"):
-            render_birefnet_model_card(_birefnet_manifest(seats=(other,)), REPO, checkpoint)
+        Lucida（f32 席で実測）の f16 席だけの manifest。HR は f16 席の他に描ける席が無い
+        （f32 席は上流の格納より広く、帰属節が落とす — {@link
+        TestBirefnetStorageAttribution.test_a_seat_wider_than_the_checkpoint_is_refused}）。
+        """
+        with pytest.raises(ValueError, match="実測した quant 'f32'"):
+            render_birefnet_model_card(_birefnet_manifest(seats=("f16",)), REPO, "lucida")
 
     def test_it_does_not_carry_another_resolutions_measurement(self) -> None:
         """1 つの実測を全モデルへ写すと、片方のカードが**測っていない数**を名乗る。"""
@@ -327,9 +340,12 @@ class TestBirefnetStorageAttribution:
         assert BIREFNET_MATTE_WEIGHTS == BIREFNET_ROLE
 
     @pytest.mark.parametrize("checkpoint", sorted(BIREFNET_CHECKPOINTS))
-    def test_an_f32_default_declares_no_relation(self, checkpoint: str) -> None:
-        """f32 席は checkpoint の値を変えない — 4 値のどれでもないので置かない。"""
-        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, checkpoint)
+    def test_the_default_seat_declares_no_relation(self, checkpoint: str) -> None:
+        """既定席（上流の格納と同じ幅 — HR は f16・Lucida は f32）は checkpoint の値を変えない —
+        4 値のどれでもないので置かない。"""
+        card = render_birefnet_model_card(
+            _birefnet_manifest(seats=SEATS[checkpoint]), REPO, checkpoint
+        )
         assert "base_model_relation" not in card
 
     def test_an_f16_default_for_the_f16_checkpoint_is_not_quantized(self) -> None:
@@ -341,28 +357,42 @@ class TestBirefnetStorageAttribution:
 
     def test_an_f16_default_for_the_f32_checkpoint_is_quantized(self) -> None:
         card = render_birefnet_model_card(
-            _with_seat(_birefnet_manifest(), "f16", default=True), REPO, "lucida"
+            _with_seat(_birefnet_manifest(seats=("f32",)), "f16", default=True), REPO, "lucida"
         )
         assert "base_model_relation: quantized" in card
 
     def test_the_storage_lines_follow_the_seats_in_the_manifest(self) -> None:
         """dtype ラベルは manifest から — f32 だけの配布形は f16 席を名乗らない。"""
         plain = render_birefnet_model_card(_birefnet_manifest(seats=("f32",)), REPO, "lucida")
-        both = render_birefnet_model_card(_birefnet_manifest(), REPO, "lucida")
+        both = render_birefnet_model_card(_birefnet_manifest(seats=SEATS["lucida"]), REPO, "lucida")
 
         assert "  - `f32`:" in plain and "  - `f16`:" not in plain
         assert "  - `f32`:" in both and "  - `f16`:" in both
 
     def test_the_hr_card_names_its_f16_checkpoint(self) -> None:
-        """旧文面「source checkpoint's own f32 values」は HR では事実と違った（上流は f16）。"""
-        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, "hr")
+        """HR の唯一の席（f16）は上流の値そのもの — 席が 1 つなので単数で名乗る。
 
-        assert "**No quantization**" in card
-        assert "widened exactly from f16 to f32" in card
+        旧文面「source checkpoint's own f32 values」は HR では事実と違った（上流は f16）。
+        """
+        card = render_birefnet_model_card(_birefnet_manifest(), REPO, "hr")
+        prose = " ".join(card.split())
+
+        assert (
+            "**No quantization**: the quant seat stores the source checkpoint's own values" in prose
+        )
+        assert "  - `f16`: the checkpoint's own f16 values" in card
+        assert "`f32`:" not in card
+        assert "widened exactly from f16 to f32" not in prose
         assert "own f32 values" not in card
 
+    def test_a_seat_wider_than_the_checkpoint_is_refused(self) -> None:
+        """上流の格納より広い席（HR の f32 席）の文面は持たない — 値を正確に広げるだけの席は
+        配らない（ADR 0113 追記 2026-10-11）ので、その席を名乗るカードは描かない。"""
+        with pytest.raises(ValueError, match="格納 f32 の席を f16 の checkpoint"):
+            render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f32"), REPO, "hr")
+
     def test_the_lucida_card_declares_its_f16_seat_quantized(self) -> None:
-        card = render_birefnet_model_card(_with_seat(_birefnet_manifest(), "f16"), REPO, "lucida")
+        card = render_birefnet_model_card(_birefnet_manifest(seats=SEATS["lucida"]), REPO, "lucida")
 
         assert "**Quantization**" in card
         assert "  - `f16`: **quantized**" in card
