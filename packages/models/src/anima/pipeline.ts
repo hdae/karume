@@ -1167,7 +1167,8 @@ export class AnimaPipeline {
     // text encoder / conditioner を回して DiT の重みを上げ終えた後なので、`Randn` 側だけに
     // 検査があると不正な seed が GB 級のロードの末に落ちる。
     assertAcceptableSeed(seed);
-    // steps も同じ理由で入口に置く（受理集合の所有者は梯子側の `assertAcceptableSteps` 1 本）。
+    // steps も入口で見る（他のノブと並べて、入力起因の誤りをプロンプト層より前に返す — 受理集合の
+    // 所有者は梯子側の `assertAcceptableSteps` 1 本。梯子は下で GPU に触る前に組む）。
     assertAcceptableSteps(steps);
     // f32 で見る: CFG は倍率を f32 で掛ける（`cfgEulerStep` / `dpmSolverMultistepStep`）ので、f64 で有限でも
     // f32 で ±Infinity になる値（`Number.MAX_VALUE` など）は合成を壊す。f32 で有限でも DiT の出力との組で

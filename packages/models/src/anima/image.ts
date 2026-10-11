@@ -1,8 +1,13 @@
 /**
  * VAE decode 出力（planar `[1,3,H,W]`・値域 `[-1,1]`）→ インターリーブ RGBA 8bit。
  *
- * 規則は `VaeImageProcessor.postprocess` と同一: `v = clamp(x/2 + 0.5, 0, 1)` を
- * `round(v·255)` で 8bit にする。
+ * 規則は `VaeImageProcessor.postprocess` の式 `v = clamp(x/2 + 0.5, 0, 1)` と `v·255` を **f64** で計算し、
+ * `Math.round`（0.5 は切り上げ）で 8bit にする。
+ *
+ * NOTE: 上流と 8bit で一致する規則ではない。diffusers の `numpy_to_pil` は f32 の `(images * 255).round()`
+ * （numpy の偶数丸め）なので、8bit の境界の近傍で ±1 割れる（例 x = −0.4941176176 は f32 で 64.5 → 64・
+ * ここでは f64 の 64.500004 → 65）。画素値と sha256 の参照行はこの規則で固定してある（変えない —
+ * ADR 0118 の X-3 は記録のみ）。8bit の出力を上流と突き合わせるときは、この差を前提にする。
  *
  * NOTE: **clamp を二重に掛けているのは意図的**（無害）。`AutoencoderKLQwenImage._decode` の
  * `clamp(-1,1)` は IR 側に焼き込まれているので実行経路では飽和済みだが、この関数は
