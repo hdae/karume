@@ -16,7 +16,8 @@
  *   fail loudly）。偽物の `fork` が写す拒否は**保留中（commit 待ち）と dispose 後の 2 つだけ**で、
  *   実 `GenerationContext.fork` の残りの拒否（汚染・決着していない run・batch の予約・借り手・
  *   device 消失・Session の dispose 済み）は写さない — それらは実 GPU の門
- *   （`packages/runtime/tests/gpu_generation_context_test.ts`）が持つ。
+ *   （`packages/runtime/tests/gpu_generation_context_test.ts` と、借り手は
+ *   `packages/runtime/tests/gpu_borrowed_context_test.ts`）が持つ。
  * - **行ごとの logits**: {@link FakeOptions.successor} を渡すと「その行の入力 token → その行の
  *   argmax」の写像になる（= 直前 token だけで決まる決定的な target のモデル）。verify の複数行を
  *   1 本の後続関数で表せるので、投機の受理・棄却を配列 1 本で組める。

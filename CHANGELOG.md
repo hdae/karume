@@ -27,7 +27,8 @@ measurements in `docs/research/`.
   `send` on the branch"; there is no separate `regenerate`. The same seed gives the same reply: the
   sampler's random stream is rebuilt from its `seed` (default 0) on every generate and the copied
   KV cache is bit-identical, so vary the seed per attempt (for example
-  `send(text, { sampler: { ...spec, seed: attempt } })`). Every branch adds one context's state
+  `send(text, { sampler: { ...spec, seed: attempt } })`) with a temperature above 0 (a temperature of
+  0 is greedy and ignores the seed). Every branch adds one context's state
   bytes of VRAM. `fork()` is rejected while a run (including a drafter's run that reads the KV
   cache), a batch reservation or a deferred commit is pending, on a borrowing context, and after
   dispose; the sequence and chat-session versions throw synchronously when already disposed (the

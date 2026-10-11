@@ -55,7 +55,7 @@ import {
 import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
 /**
  * 1 生成ぶんの可変 state の所有者（ADR 0066 決定 1）。**型としてのみ**公開する — 入口は
- * {@link Session.createGenerationContext} だけで、直接構築すると errorScope の門（確保失敗の
+ * {@link Session.createGenerationContext} と {@link GenerationContext.fork} だけで、直接構築すると errorScope の門（確保失敗の
  * 検出）と容量ゲート（追記 5）を迂回できてしまう（`GpuContext` / `ResidentTensor` と同じ流儀）。
  */
 export type { GenerationContext } from "./generation-context.ts";
