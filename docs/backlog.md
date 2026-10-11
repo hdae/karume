@@ -454,6 +454,11 @@
   - hub: 同じ manifest で同じ越境先 repo の別 revision に同じ path・同じ sha256 を置く形（参照は 2 本・
     キャッシュの実体は 1 つ — [limitations](limitations.md) の hub のキャッシュ在庫の節）を、実体キーで
     照合する形（Codex 深掘りレビュー R4-001 の推奨 a）へ作り替えるか、parse で拒否するかを決める。
+  - hub: 自リポを指す越境参照の拒否は HF からの `loadManifest` の parse にしか掛からない。配布形の門
+    （`distribution_gate_test`）・examples の `local-dist-server` / `local-assets`・gpu-lab は公開の
+    `parseManifest(text)` を使うので、手元のミラーで通った manifest が HF に上げてから初めて落ちうる。門で
+    配布先の repo 名を添えて検査するか、exporter の `karume dist` で `--ref-repo` が自リポ（カードの repo
+    名）を指すのを拒否するかを決める。
 
 ## release — リリース準備波（しばらく先）
 
