@@ -150,18 +150,27 @@ Deno.test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、Ca
   );
 });
 
-Deno.test("prefetchAssets: 相 1 を持たない取得元では何もしない（入力検査だけは効く）", async (t) => {
+Deno.test("prefetchAssets: 相 1 を持たない取得元では温めずに complete だけを出す（入力検査だけは効く）", async (t) => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
   const files = selectionFiles(loaded.manifest);
   const refs = PART_KEYS.map((key): FileRef => files[key]);
 
-  await t.step("温めるべきキャッシュが無いのは失敗ではない（no-op で返る）", async () => {
+  await t.step("温めるべきキャッシュが無いのは失敗ではない（実体を読まずに返る）", async () => {
     const progress = recordProgress();
     directory.reads.length = 0;
     await prefetchAssets(loaded, refs, { onProgress: progress.onProgress });
     assertEquals(directory.reads, [], "相 1 が無いのに実体を読んでいる");
-    assertEquals(progress.events, [], "何もしていないのに進捗を出している");
+    // 取得の要らない ref も complete を 1 回ずつ出す（ADR 0086 追記 2026-10-11）— 渡した ref の
+    // size 合計を分母にする呼び手の進捗が、取得元に依らず合計へ届く。
+    assertEquals(
+      progress.events.map((event) => [event.phase, event.path]).sort(),
+      refs.map((ref) => ["complete", ref.path]).sort(),
+      "温めの要らない ref が complete を 1 回ずつ出していない",
+    );
+    const total = refs.reduce((sum, ref) => sum + ref.size, 0);
+    assertEquals(progress.events.at(-1)?.loaded, total, "最後の通知が合計に届いていない");
+    for (const event of progress.events) assertEquals(event.fileLoaded, event.fileTotal);
   });
 
   await t.step("呼び出し側の誤り（空の refs）は取得元に触れる前に落とす", async () => {
@@ -185,18 +194,29 @@ Deno.test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つ�
   await prefetchAssets(loaded, refs, { onProgress: progress.onProgress });
 
   assertEquals(warmed, [CROSS_PATH], "越境 ref が温められていない");
-  // 進捗も温めた ref のぶんだけ出る（相 1 を持たないローカルの ref は 1 つも出さない）。
+  // 進捗は 1 つの規則（全 ref が complete を 1 回）— 温めた越境 ref も、温めの要らないローカルの
+  // ref も同じく出る（ADR 0086 追記 2026-10-11）。
   assertEquals(
-    progress.events.map((event) => [event.phase, event.path]),
-    [["complete", CROSS_PATH]],
-    "越境ぶんの進捗が出ていない",
+    progress.events.map((event) => [event.phase, event.path]).sort(),
+    refs.map((ref) => ["complete", ref.path]).sort(),
+    "ref ごとの complete が揃っていない",
   );
   // ローカルセッションでも越境ぶんは宣言された越境先を名乗る（セッションが名乗りを持たない
-  // ことに引きずられて欄が落ちると、別リポの同じ path と見分けが付かなくなる）。
+  // ことに引きずられて欄が落ちると、別リポの同じ path と見分けが付かなくなる）。ローカルの ref は
+  // 取得先の欄を欄ごと出さない。
   assertEquals(
-    progress.events.map((event) => [event.repo, event.revision]),
-    [[CROSS_REPO, CROSS_REVISION]],
+    progress.events
+      .map((event) => [event.path, event.repo, event.revision])
+      .filter(([, repo]) => repo !== undefined),
+    [[CROSS_PATH, CROSS_REPO, CROSS_REVISION]],
   );
+  for (const event of progress.events) {
+    if (event.path !== CROSS_PATH) {
+      assertEquals(Object.hasOwn(event, "repo"), false, `${event.path} が repo を名乗っている`);
+    }
+  }
+  const total = refs.reduce((sum, ref) => sum + ref.size, 0);
+  assertEquals(progress.events.at(-1)?.loaded, total, "最後の通知が合計に届いていない");
   assertEquals(directory.reads, [], "相 1 を持たない取得元の ref を読みに行っている");
 });
 

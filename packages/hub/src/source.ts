@@ -150,8 +150,8 @@ export type PinnedSource = {
   readonly readFile: (ref: FileRef, options: FileReadOptions) => Promise<Uint8Array>;
   /**
    * ④相 1（optional 能力）— RAM に載せずに、後続の {@link readFile} が安く済む状態にする。
-   * **持たない取得元が正当**で、その場合は温め面が no-op になる（直接読める取得元では「後の
-   * 読みが安く済む状態」が最初から満たされている）。
+   * **持たない取得元が正当**で、その場合は温め面がその ref を温めずに `complete` だけを出す
+   * （直接読める取得元では「後の読みが安く済む状態」が最初から満たされている）。
    */
   readonly prefetchFile?: (ref: FileRef, options: FileReadOptions) => Promise<void>;
   /**

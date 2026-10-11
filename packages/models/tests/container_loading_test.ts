@@ -32,13 +32,15 @@
  */
 
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
-import type { AssetProgress } from "@karume/hub";
+import type { AssetProgress, DistributionSource } from "@karume/hub";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { loadContainerComponents } from "../src/hub/components.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { linearComponent } from "./helpers/container-fixture.ts";
 import {
   HUB_URL,
+  MANIFEST_PATH,
+  manifestBytes,
   NO_FAMILY_GATE,
   prepareComponent,
   prepareSiglip2,
@@ -51,7 +53,7 @@ import {
   SIGLIP2_CONFIG,
 } from "./helpers/container-loading-fixture.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
-import { loadManifest, resolveSelection } from "@karume/hub";
+import { loadManifest, localDirectory, resolveSelection } from "@karume/hub";
 
 /** 長さ 0 でない part（= 取得層が実際に取りに行く列）。 */
 const fetched = (parts: readonly { path: string; size: number }[]): readonly string[] =>
@@ -261,6 +263,146 @@ Deno.test(
       .reduce((sum, part) => sum + part.size, 0);
     assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
     assertEquals(events[events.length - 1].loaded, total);
+  },
+);
+
+/** メモリ上の配布形ディレクトリ（`karume.json` + 配るファイル）を取得元にする。 */
+const memorySource = (
+  models: unknown,
+  files: Iterable<readonly [string, Uint8Array<ArrayBuffer>]>,
+): DistributionSource => {
+  const table = new Map<string, Uint8Array<ArrayBuffer>>([
+    [MANIFEST_PATH, manifestBytes(models)],
+    ...files,
+  ]);
+  return localDirectory({
+    readFile: (path) => {
+      const bytes = table.get(path);
+      if (bytes === undefined) return Promise.reject(new Error(`test: ${path} が無い`));
+      // MUST: buffer 全体を占める view を返す（`DirectoryAdapter.readFile` の契約）。
+      return Promise.resolve(bytes.slice());
+    },
+  }, { label: "test-directory" });
+};
+
+/** 進捗の列が単調増加で合計へ着地し、ファイル 1 本につき complete が 1 回であることを見る。 */
+const assertLandsOnTotal = (
+  events: readonly AssetProgress[],
+  files: readonly { readonly path: string; readonly size: number }[],
+): void => {
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
+  let previous = 0;
+  for (const event of events) {
+    if (event.loaded < previous) {
+      throw new Error(
+        `loaded が巻き戻った: ${previous} → ${event.loaded}（${event.phase} ${event.path}）`,
+      );
+    }
+    previous = event.loaded;
+  }
+  assertEquals(events.at(-1)?.loaded, total, "最後の通知が合計に届いていない");
+  const completes = events.filter((event) => event.phase === "complete");
+  assertEquals(
+    completes.map((event) => event.path).sort(),
+    files.map((file) => file.path).sort(),
+    "complete がファイル 1 本につき 1 回でない",
+  );
+};
+
+Deno.test(
+  "loadContainerComponents: ローカル取得元だけのロードでも、進捗は合計へ着地する",
+  async (t) => {
+    // 相 1（温め）を持たない取得元の part も、温めの段で complete を 1 回出す（ADR 0086 追記
+    // 2026-10-11）— 出さないと分母に入った part の分だけ最後の値が届かず、資産が無ければ通知が
+    // 1 度も来ない。
+    const front = await serveContainer("front/model.f32", linearComponent("front"));
+    const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
+    const tokenizer = new TextEncoder().encode(JSON.stringify({ vocab: ["a"] }));
+    const tokenizerRef = {
+      path: "tokenizer/tokenizer.json",
+      size: tokenizer.byteLength,
+      sha256: [...new Uint8Array(await crypto.subtle.digest("SHA-256", tokenizer))]
+        .map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+    };
+    const parts = [...front.parts, ...voice.parts].filter((part) => part.size > 0);
+    for (const withAssets of [false, true]) {
+      await t.step(withAssets ? "資産あり" : "資産なし", async () => {
+        const source = memorySource(
+          {
+            test: {
+              pipeline: "test/1",
+              weights: { front: { f32: front.entry }, voice: { f32: voice.entry } },
+              assets: withAssets ? { tokenizer: tokenizerRef } : {},
+              quants: { f32: { weights: { front: "f32", voice: "f32" }, session: {} } },
+              defaultQuant: "f32",
+              pipelineConfig: {},
+            },
+          },
+          [...front.files, ...voice.files, [tokenizerRef.path, tokenizer]],
+        );
+        const loaded = await loadManifest(source);
+        const events: AssetProgress[] = [];
+        await loadContainerComponents(
+          "test.fromPretrained",
+          loaded,
+          resolveSelection(loaded.manifest),
+          ["front", "voice"],
+          NO_FAMILY_GATE,
+          { onProgress: (progress) => events.push(progress) },
+        );
+        assertLandsOnTotal(events, withAssets ? [...parts, tokenizerRef] : parts);
+      });
+    }
+  },
+);
+
+Deno.test(
+  "loadContainerComponents: HF とローカルが混ざっても、進捗は 1 つの規則で合計へ着地する",
+  async () => {
+    // 主の配布形はローカル、`voice` だけを疑似 HF のリポから差し替える（同じグラフ記述の容器）。
+    const front = await serveContainer("front/model.f32", linearComponent("front"));
+    const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
+    const models = {
+      test: {
+        pipeline: "test/1",
+        weights: { front: { f32: front.entry }, voice: { f32: voice.entry } },
+        assets: {},
+        quants: { f32: { weights: { front: "f32", voice: "f32" }, session: {} } },
+        defaultQuant: "f32",
+        pipelineConfig: {},
+      },
+    };
+    const loaded = await loadManifest(memorySource(models, [...front.files, ...voice.files]));
+    const mock = serveRepos([{ repo: REPO, models, files: voice.files }]);
+    const events: AssetProgress[] = [];
+    await loadContainerComponents(
+      "test.fromPretrained",
+      loaded,
+      resolveSelection(loaded.manifest),
+      ["front", "voice"],
+      NO_FAMILY_GATE,
+      {
+        fetch: mock.fetch,
+        caches: new MemoryCacheStorage(),
+        components: { voice: { source: { repo: REPO, revision: SHA, hubUrl: HUB_URL } } },
+        onProgress: (progress) => events.push(progress),
+      },
+    );
+    assertEquals(
+      fetched(voice.parts).filter((path) => !mock.paths.includes(path)),
+      [],
+      "差し替えた部品を HF から取っていない",
+    );
+    // HF の part は取得先（repo）を名乗り、ローカルの part は名乗らない — 両方が 1 本の列に並ぶ。
+    const origins = new Set(
+      events.filter((event) => event.phase === "complete").map((event) => event.repo),
+    );
+    assertEquals(origins, new Set([REPO, undefined]), "HF とローカルの混在で観測していない");
+    assertLandsOnTotal(
+      events,
+      [...front.parts, ...voice.parts].filter((part) => part.size > 0),
+    );
   },
 );
 
