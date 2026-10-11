@@ -557,7 +557,7 @@ Deno.test("detect: run だけが落ちたら、その例外をそのまま運び
 // 出ることが「抽出に入らなかった」ことの証拠になる。
 
 /** 10ms フレームをちょうど `frames` 本作る長さの無音。 */
-const silenceOfFrames = (frames: number): Float32Array =>
+const silenceOfFrames = (frames: number): Float32Array<ArrayBuffer> =>
   new Float32Array(N_FFT + (frames - 1) * HOP);
 
 Deno.test("フレーム数: 長さから数えた本数は特徴抽出の本数と一致する", () => {

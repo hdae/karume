@@ -352,7 +352,10 @@ describe("decodeWav がチャンクの走査を RIFF の論理終端ちょうど
     });
 
   /** 器の末尾に生のバイトを足し、RIFF の宣言サイズを実長に揃える。 */
-  const appendRaw = (wav: Uint8Array<ArrayBuffer>, tail: Uint8Array): Uint8Array<ArrayBuffer> => {
+  const appendRaw = (
+    wav: Uint8Array<ArrayBuffer>,
+    tail: Uint8Array<ArrayBuffer>,
+  ): Uint8Array<ArrayBuffer> => {
     const bytes = new Uint8Array(wav.length + tail.length);
     bytes.set(wav);
     bytes.set(tail, wav.length);
@@ -361,7 +364,7 @@ describe("decodeWav がチャンクの走査を RIFF の論理終端ちょうど
   };
 
   /** 詰めを書き落とした奇数長チャンク（id + 長さ + 中身、詰め無し）。 */
-  const unpaddedChunk = (id: string, body: readonly number[]): Uint8Array => {
+  const unpaddedChunk = (id: string, body: readonly number[]): Uint8Array<ArrayBuffer> => {
     const bytes = new Uint8Array(8 + body.length);
     ascii(bytes, 0, id);
     new DataView(bytes.buffer).setUint32(4, body.length, true);

@@ -544,7 +544,7 @@ export const assertPhonemeLimit = (phonemes: number, maxTokens: number): void =>
  * NOTE: `export` は門を直接叩くテストのため（{@link assertTokenLimit} と同じ事情）。
  */
 export const assertFiniteNoise = (
-  noise: Float32Array,
+  noise: Float32Array<ArrayBuffer>,
   noiseScaleW: number,
   fromRequest: boolean,
 ): void => {
