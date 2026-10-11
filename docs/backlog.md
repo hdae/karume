@@ -163,7 +163,7 @@
   （CI 時間と上流突合の強さの交換）。
 - **container-v1 §6.2 の codec 台帳と実装のずれ（起票 2026-09-24）**: 仕様の台帳エントリは `decodeCpu` /
   `executableOps` / `wgsl` を持つが、実装の `CodecEntry`（`packages/runtime/src/format/container/codecs.ts`）は
-  `layout` / `packing` / `scale` / `grouping` / `zeroPoint` だけで、圧縮のまま常駐できる op の判定は今も別々の
+  `layout` / `packing` / `scale` / `grouping` / `zeroPoint` / `rowAxes` だけで、圧縮のまま常駐できる op の判定は今も別々の
   述語（`packages/runtime/src/runtime/plan.ts`）。仕様を実装へ寄せるか、実装を台帳へ畳むかを決める。
   同じ主張は 3 文書にある — container-v1 §6.2（「この 3 分離は現行が既にそうなっている」を含む）・
   [ir-v2](ir-v2.md)「値と型」の適格判定 bullet（「適格 op は台帳の `executableOps` が正本」）・
