@@ -1223,3 +1223,60 @@ class TestThePathsInTheOldManifest:
         with pytest.raises(MigrateError, match="入力リポの外"):
             migrated(repo, out)
         assert not out.exists()
+
+
+class TestAFailedRepositoryMigrationLeavesNothing:
+    """リポ丸ごとの移行は作業席で組み、全部通った回だけ出力先へ据える（R7-011）。
+
+    部品を順に最終の出力先へ置くと、2 つ目の部品で落ちた回に 1 つ目のコンテナだけが残り、
+    同じ指定の再実行が「前回の成果物が残っている」で止まる（出力先を手で消すまで進めない）。
+    """
+
+    def test_a_failure_in_the_second_unit_leaves_the_output_empty_and_rerunnable(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = migrate._migrate_shards
+        calls = 0
+
+        def second_fails(*args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise MigrateError("2 つ目の部品の変換で落ちた回")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(migrate, "_migrate_shards", second_fails)
+        out = tmp_path / "out"
+
+        with pytest.raises(MigrateError, match="2 つ目の部品"):
+            migrated(repo, out)
+        assert calls == 2, "被験体の前提: 変換する単位が 2 つ以上ある"
+        assert not out.exists() or not any(out.iterdir())
+
+        monkeypatch.setattr(migrate, "_migrate_shards", real)
+        migrated(repo, out)
+        assert (out / "karume.json").is_file()
+
+    def test_an_output_that_is_not_empty_is_refused_before_any_conversion(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "stray.txt").write_text("前回の残り\n", encoding="utf-8")
+
+        def never(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("出力先の検査より前に変換が走った")
+
+        monkeypatch.setattr(migrate, "_migrate_shards", never)
+
+        with pytest.raises(MigrateError, match="前回の成果物"):
+            migrated(repo, out)
+        assert sorted(path.name for path in out.iterdir()) == ["stray.txt"]
+
+    def test_an_empty_output_directory_is_accepted(self, repo: Path, tmp_path: Path) -> None:
+        out = tmp_path / "out"
+        out.mkdir()
+
+        migrated(repo, out)
+
+        assert (out / "karume.json").is_file()

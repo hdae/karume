@@ -52,6 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from karume.artifacts import staged_publication
 from karume.container import (
     BLOCK_MAX_BYTES,
     DEFAULT_PART_BYTES,
@@ -708,6 +709,11 @@ def migrate_repository(
 
     MUST: 書くのは**分割形だけ**（単一形の席が無い）— `karume/5` の `container.parts` は
     part 0 + part 1 の 2 要素以上 MUST で、単一形はその形を作れない（ADR 0109 決定 3）。
+
+    MUST: リポ全体を**作業席**で組み、全変換・通常ファイルの複写・manifest の検査が通った回
+    だけ `out_dir` へ据える（{@link karume.artifacts.staged_publication}）。部品を順に最終の
+    出力先へ置くと、途中で落ちた回に先の部品のコンテナだけが残り、同じ指定の再実行が
+    「前回の成果物が残っている」で止まる。出力先が空であることは開始時に 1 度だけ見る。
     """
     _assert_part_length(part_bytes)
     source = Path(manifest_path)
@@ -716,6 +722,10 @@ def migrate_repository(
     _require(
         repo != out and repo not in out.parents and out not in repo.parents,
         f"出力先 {out} が入力リポ {repo} と入れ子になっている（旧入力は読むだけ MUST）",
+    )
+    _require(
+        not out.exists() or (out.is_dir() and not any(out.iterdir())),
+        f"出力先 {out} に前回の成果物が残っている（消してからやり直す — 移行は空の出力先から作る）",
     )
     legacy = read_legacy_manifest(source)
     crosses = {cross.repo: cross for cross in cross_repos}
@@ -730,65 +740,65 @@ def migrate_repository(
         name: _plan_ple(repo, model, f"models['{name}']") for name, model in legacy.models.items()
     }
 
-    containers: dict[_Seat, Container] = {}
-    converted: dict[_Unit, Container] = {}
-    reports: list[ConvertedContainer] = []
-    folded: set[str] = set()
-    crossed = 0
-    for seat, entry in _seats(legacy):
-        fold = folds[seat.model]
-        cross = seat_crosses[seat]
-        if cross is not None:
-            containers[seat] = _crossed_container(crosses[cross[0]], entry, seat)
-            crossed += 1
-            continue
-        folding = fold if fold is not None and fold.component == seat.component else None
-        if folding is not None:
-            folded.add(seat.model)
-        unit = _Unit(
-            seat.component, entry.shards, entry.extras, () if folding is None else folding.refs
-        )
-        found = converted.get(unit)
-        if found is None:
-            found, report = _convert_unit(
-                unit,
-                repo,
-                out,
-                str(seat),
-                provenance=provenance,
-                fold=folding,
-                part_bytes=part_bytes,
-                block_bytes=_block_bytes,
+    with staged_publication(out) as staging:
+        staging.mkdir(parents=True)
+        containers: dict[_Seat, Container] = {}
+        converted: dict[_Unit, Container] = {}
+        reports: list[ConvertedContainer] = []
+        folded: set[str] = set()
+        crossed = 0
+        for seat, entry in _seats(legacy):
+            fold = folds[seat.model]
+            cross = seat_crosses[seat]
+            if cross is not None:
+                containers[seat] = _crossed_container(crosses[cross[0]], entry, seat)
+                crossed += 1
+                continue
+            folding = fold if fold is not None and fold.component == seat.component else None
+            if folding is not None:
+                folded.add(seat.model)
+            unit = _Unit(
+                seat.component, entry.shards, entry.extras, () if folding is None else folding.refs
             )
-            converted[unit] = found
-            reports.append(report)
-        containers[seat] = found
-    for name, fold in folds.items():
-        # MUST: 畳み先が 1 つも無いまま assets から消すと PLE が黙って配布物から落ちる
-        # （持ち主の部品が丸ごと越境参照のときに起きる）。
-        _require(
-            fold is None or name in folded,
-            f"models['{name}']: PLE の持ち主の部品 '{fold.component if fold else ''}' に"
-            "自リポで変換する席が 1 つも無い（畳み先が決まらない）",
-        )
+            found = converted.get(unit)
+            if found is None:
+                found, report = _convert_unit(
+                    unit,
+                    repo,
+                    staging,
+                    str(seat),
+                    provenance=provenance,
+                    fold=folding,
+                    part_bytes=part_bytes,
+                    block_bytes=_block_bytes,
+                )
+                converted[unit] = found
+                reports.append(report)
+            containers[seat] = found
+        for name, fold in folds.items():
+            # MUST: 畳み先が 1 つも無いまま assets から消すと PLE が黙って配布物から落ちる
+            # （持ち主の部品が丸ごと越境参照のときに起きる）。
+            _require(
+                fold is None or name in folded,
+                f"models['{name}']: PLE の持ち主の部品 '{fold.component if fold else ''}' に"
+                "自リポで変換する席が 1 つも無い（畳み先が決まらない）",
+            )
 
-    skip = {MANIFEST_FILE}
-    for unit in converted:
-        skip.update(ref.path for ref in unit.shards)
-        # MUST: 容器の資産になった extras も複写しない（宣言外の実体を配布物に残さない）。
-        skip.update(ref.path for _, ref in unit.extras)
-    for fold in folds.values():
-        if fold is not None:
-            skip.update(fold.paths)
-    copied = _copy_plain_files(repo, out, skip)
+        skip = {MANIFEST_FILE}
+        for unit in converted:
+            skip.update(ref.path for ref in unit.shards)
+            # MUST: 容器の資産になった extras も複写しない（宣言外の実体を配布物に残さない）。
+            skip.update(ref.path for _, ref in unit.extras)
+        for fold in folds.values():
+            if fold is not None:
+                skip.update(fold.paths)
+        copied = _copy_plain_files(repo, staging, skip)
 
-    manifest = _manifest_document(legacy, containers, folds)
-    assert_manifest_limits(manifest)
-    out.mkdir(parents=True, exist_ok=True)
-    written = out / MANIFEST_FILE
-    _require(not written.exists(), f"出力先に {MANIFEST_FILE} が既に在る（消してからやり直す）")
-    written.write_text(manifest_text(manifest), encoding="utf-8")
-    return RepositoryResult(written, tuple(reports), crossed, copied)
+        manifest = _manifest_document(legacy, containers, folds)
+        assert_manifest_limits(manifest)
+        # 作業席は空から組むので、旧 karume.json（複写から外している）と衝突する現物は無い。
+        (staging / MANIFEST_FILE).write_text(manifest_text(manifest), encoding="utf-8")
+    return RepositoryResult(out / MANIFEST_FILE, tuple(reports), crossed, copied)
 
 
 def _assert_declared_files(repo: Path, legacy: LegacyManifest) -> None:
