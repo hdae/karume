@@ -1627,7 +1627,7 @@ export const referenceGruScan = (
   const out = new Float32Array(numel(shape));
   const f32 = Math.fround;
   /** ゲート `g`（0 = r / 1 = z / 2 = n）の隠れ側 `Σ_k W_hh[g·H + j, k]·h[k] + b_hh[g·H + j]`。 */
-  const hiddenGate = (state: Float32Array, gate: number, unit: number): number => {
+  const hiddenGate = (state: Float32Array<ArrayBuffer>, gate: number, unit: number): number => {
     const row = (gate * hidden + unit) * hidden;
     let acc = 0;
     for (let k = 0; k < hidden; k += 1) acc += weight.data[row + k] * state[k];

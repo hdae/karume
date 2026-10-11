@@ -1019,7 +1019,7 @@ export class SubmitScheduler {
   /** query 対の差分をキー別累計へ足す（並びは {@link PendingTiming.entries} と 1:1）。 */
   #accumulate(
     entries: readonly { readonly key: string; readonly work: number }[],
-    stamps: BigUint64Array,
+    stamps: BigUint64Array<ArrayBuffer>,
   ): void {
     for (const [index, entry] of entries.entries()) {
       const delta = stamps[index * 2 + 1] - stamps[index * 2];
@@ -1043,7 +1043,7 @@ export class SubmitScheduler {
    * 取るのは、非単調なサンプルが混じっても負の幅を作らないため（丸めの件数は
    * {@link SubmitScheduler.#accumulate} が数える）。
    */
-  #observeSubmitGpuTime(timing: PendingTiming, stamps: BigUint64Array): void {
+  #observeSubmitGpuTime(timing: PendingTiming, stamps: BigUint64Array<ArrayBuffer>): void {
     let first = stamps[0];
     let last = stamps[0];
     for (const stamp of stamps) {
