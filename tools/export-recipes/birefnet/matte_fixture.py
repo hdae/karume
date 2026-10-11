@@ -448,12 +448,18 @@ def hr_alpha(
     out_width: int,
     out_height: int,
     quantize: Callable[[np.ndarray], np.ndarray] = round_half_up,
+    *,
+    allow_ties: bool = False,
 ) -> np.ndarray:
-    """HR の上流の手順（f64 の σ → 8bit → Pillow の `resize(size)` の既定 = BICUBIC）。"""
+    """HR の上流の手順（f64 の σ → 8bit → Pillow の `resize(size)` の既定 = BICUBIC）。
+
+    `allow_ties` は同点の標本（{@link assert_no_ties}）を拒まずに四捨五入する — 同点の標本が届く
+    出力画素を呼び手が自分で外す場合だけに使う（`birefnet.matte_ab_check`）。
+    """
     from PIL import Image
 
     scaled = sigmoid_f64(logits) * 255
-    if quantize is round_half_up:
+    if quantize is round_half_up and not allow_ties:
         assert_no_ties(scaled, "HR")
     image = Image.fromarray(quantize(scaled))
     if image.mode != "L":
