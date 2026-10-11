@@ -114,8 +114,35 @@ const loadSubject = async (subject: Subject): Promise<Rgb> => {
 const outputName = (state: BirefnetState): string => state.matte.graph.outputs[0];
 
 /**
+ * `body` を走らせ、成否に関わらず最後に Session を畳む（GPU は呼び手のもの）。
+ *
+ * MUST: 本体と解放の両方が投げたら本体の例外を消さない — `finally` の中で投げると元の失敗を上書き
+ * して、最初に何が壊れたかが消える（`packages/models/src/session/dispose-steps.ts` と同じ理由）。
+ * 失敗の運び方も `disposeSteps` に揃える: 1 件ならその例外をそのまま、2 件なら本体を先頭にした
+ * `AggregateError`（`disposeSteps` を直接使わないのは、本体の失敗まで「後始末の失敗」と名乗るため）。
+ */
+const withSession = async <T>(state: BirefnetState, body: () => Promise<T>): Promise<T> => {
+  let value: T;
+  try {
+    value = await body();
+  } catch (error) {
+    try {
+      await state.session.dispose();
+    } catch (disposeError) {
+      throw new AggregateError(
+        [error, disposeError],
+        "birefnet-ab: 本体が失敗し、Session の解放も失敗した",
+      );
+    }
+    throw error;
+  }
+  await state.session.dispose();
+  return value;
+};
+
+/**
  * 1024² のモデルで画像ごとに 1 回だけグラフを回し、logit を保存して手順を全部当てる。
- * MUST: Session は最後に必ず畳む（GPU は呼び手のもの）。
+ * MUST: Session は最後に必ず畳む（{@link withSession}）。
  */
 const runBase = async (
   gpu: GpuContext,
@@ -124,7 +151,7 @@ const runBase = async (
   work: string,
 ): Promise<{ readonly pairs: Pair[]; readonly graph: number }> => {
   const state = await loadBirefnetState(denoDirectory(source), { model: BASE_MODEL, gpu });
-  try {
+  return await withSession(state, async () => {
     const { imageWidth, imageHeight } = state.config;
     if (imageWidth !== imageHeight) {
       throw new Error(
@@ -148,9 +175,7 @@ const runBase = async (
       console.log(`[birefnet-ab] ${subject.name}: ${image.width}×${image.height}`);
     }
     return { pairs, graph: imageWidth };
-  } finally {
-    await state.session.dispose();
-  }
+  });
 };
 
 /**
@@ -168,7 +193,7 @@ const runReference = async (
   const targets = pairs.filter(({ image }) => image.width === size && image.height === size);
   if (targets.length === 0) return truths;
   const state = await loadBirefnetState(denoDirectory(source), { model: REFERENCE_MODEL, gpu });
-  try {
+  return await withSession(state, async () => {
     const { imageWidth, imageHeight } = state.config;
     if (imageWidth !== size || imageHeight !== size) {
       throw new Error(`モデル '${REFERENCE_MODEL}' のグラフが ${imageWidth}×${imageHeight}`);
@@ -190,9 +215,7 @@ const runReference = async (
       console.log(`[birefnet-ab] ${subject.name}: 擬似正解（モデル ${REFERENCE_MODEL}）`);
     }
     return truths;
-  } finally {
-    await state.session.dispose();
-  }
+  });
 };
 
 const run = async (options: Map<string, string>): Promise<void> => {
