@@ -161,14 +161,6 @@
   test_plan 12 の 25 本が収集ごと SKIP される。決めること: a) `transformers` をスタブ化し上流突合を 1〜2 本残す
   （`checkpoint.py` の `isinstance(QuantizedEmbedding)` に注意）か、b) CI に `--group gemma4-qat` を足すか
   （CI 時間と上流突合の強さの交換）。
-- **container-v1 §6.2 の codec 台帳と実装のずれ（起票 2026-09-24）**: 仕様の台帳エントリは `decodeCpu` /
-  `executableOps` / `wgsl` を持つが、実装の `CodecEntry`（`packages/runtime/src/format/container/codecs.ts`）は
-  `layout` / `packing` / `scale` / `grouping` / `zeroPoint` / `rowAxes` だけで、圧縮のまま常駐できる op の判定は今も別々の
-  述語（`packages/runtime/src/runtime/plan.ts`）。仕様を実装へ寄せるか、実装を台帳へ畳むかを決める。
-  同じ主張は 3 文書にある — container-v1 §6.2（「この 3 分離は現行が既にそうなっている」を含む）・
-  [ir-v2](ir-v2.md)「値と型」の適格判定 bullet（「適格 op は台帳の `executableOps` が正本」）・
-  [glossary](glossary.md) の「codec 台帳」行（「3 軸を分けて報告する」）。裁定後は 3 文書を同時に直す。
-  逆向きのずれもある — 実装の `rowAxes`（codec ごとに受理する行軸）は仕様の台帳に無いので、裁定時に一緒に揃える。
 - **depth / birefnet の実資産 e2e が結果記録を包みの外で呼ぶ（起票 2026-09-24）**:
   `packages/models/tests/e2e_depth_anything_real_test.ts` と `e2e_birefnet_real_test.ts` は catch で
   `results.record` を直接呼ぶので、記録が I/O で落ちると元の検証例外が置き換わる（`runRecordedCase` /

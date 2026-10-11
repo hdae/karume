@@ -189,7 +189,9 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   `ternary`。`i32` 以外は**意味論 f32 の符号化**で、`i32` だけが**生の int32**（記号依存定数の
   焼き込み先 — ADR [0010](decisions/0010-symbolic-constant-folding.md)。「格納語彙は f32 の
   符号化」の明示的な例外）。**ランタイムが実行できるのは bf16 以外** — bf16 だけが「宣言としては
-  valid、実行は fail loudly（capability 不足の診断付き）」。
+  valid、実行は fail loudly（capability 不足の診断付き）」。台帳が持つのは格納形式だけで、実行できるかの
+  正本は runtime の `RUNTIME_SUPPORT.storage`（`packages/runtime/src/ops/contracts.ts` — 展開経路の集合）である
+  （container-v1 §6.2・ADR 0108 追記 12）。
 - **合流層**（container-v1 §13.3）: グラフと束縛表を**重み取得前に合流**し、合流後表現に対して
   格納の規則を掛ける（置き場は runtime `format/` の 1 箇所 — Python 側も同じ規則を鏡像で持ち、
   二重実装しない）:
@@ -210,8 +212,10 @@ ADR [0108](decisions/0108-container-format.md)（v2 — 格納の宣言をコン
   **適格判定**で経路が 2 つに分かれる。
   - **適格**（その initializer の消費が `linear` / `conv1d` / `conv2d` / `conv3d` /
     `conv_transpose1d` / `embedding` の**重みスロットだけ**）: 圧縮 payload のまま GPU 常駐し、dequant はカーネル内。
-    codec ごとの適格 op は台帳の `executableOps`（container-v1 §6.3）が正本 — `int4-sym-g` は
-    linear / embedding / conv1d（`groups == 1`）、`int2-off` / `ternary` は linear / embedding。
+    codec ごとの適格 op は台帳ではなく runtime の判定が持つ（`packages/runtime/src/runtime/plan.ts` の
+    `eligibleCompressedInitializers` / `i4EligibleInitializers` / `i2EligibleInitializers` と
+    `runtime/weight-residency.ts` の `planWeightResidency` が正本 — container-v1 §6.2・ADR 0108 追記 12）。
+    `int4-sym-g` は linear / embedding / conv1d（`groups == 1`）、`int2-off` / `ternary` は linear / embedding。
   - **適格外**（bias / norm 系の weight / その他の op / 重みスロットと他スロットの混在消費 /
     消費ゼロ / `graph.outputs` に載った initializer）: **ロード時に CPU で f32 へ展開**する。
     正しさは保たれるが VRAM 削減はゼロで、縮むのは配信サイズだけ。bias が適格にならないのは

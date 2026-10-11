@@ -531,40 +531,54 @@ rowLength  = numel / shape[rowAxis]
 ### 6.2 codec 台帳のエントリ
 
 台帳は**リポ内の不変なデータ**である。import 時登録はしない（横断の不変条件「全モジュール
-副作用ゼロ」に反する）。
+副作用ゼロ」に反する）。台帳が持つのは**格納形式だけ**で、CPU での展開と実行できるかは別の所有者が
+持つ（ADR 0108 追記 12 — 決定 12 の「1 エントリに 3 つをまとめる」は撤回した）。
 
 ```text
-{
-  name,                                                  // 宣言に書く登録名
+登録名 → {
+  layout,                                                // 展開経路の種別（f32 / f16 / bf16 / i32 / i8 / i4 / i2）
   packing:   { blockElements, blockBytes, alignBytes },  // 宣言バイト長と整列の正本
-  levels:    { kind, offset, min, max, unused? },        // 値の集合
-  scale:     { required, dtype, form: "rank2-group" },
-  zeroPoint: { allowed },
-  decodeCpu,                                             // 唯一の CPU 展開
-  executableOps,                                         // 圧縮のまま常駐できる op の集合
-  wgsl?,                                                 // 実行経路（無ければ宣言のみ受理）
+  scale:     "required" | "forbidden",                   // 量子化 codec か（scale / rowAxis / groupSize の要否）
+  grouping:  "channel" | "group" | undefined,            // per-channel か group 量子化か（非量子化は無し）
+  zeroPoint: "allowed" | "forbidden",                    // 初版は 4 種とも forbidden
+  rowAxes,                                               // 宣言してよい rowAxis の集合（非量子化は空）
 }
 ```
 
-**3 つの軸を分けて報告する**:
+正本は `packages/runtime/src/format/container/codecs.ts` の `CODEC_LEDGER` で、Python の鏡像は
+`tools/exporter/src/karume/container.py` の `CODEC_LEDGER`（両側の一致はテストで突合する）。scale の dtype の
+受理集合（初版は `f32` のみ）は codec ごとの欄ではなく台帳共通の定数 `SCALE_DTYPES` が持つ。
+値の集合・詰め順・復元式（§6.3 の表）は codec の仕様で、台帳の欄ではない — 実装は CPU 展開と WGSL が持つ。
 
-| 軸                                 | 判定するもの                     | 判定材料                                    |
-| ---------------------------------- | -------------------------------- | ------------------------------------------- |
-| ① 宣言として読めるか               | 受理 / 拒否                      | `packing` + `scale`（台帳に名前があれば真） |
-| ② 実行できるか                     | 実行 / capability 不足で列挙拒否 | `wgsl` の有無                               |
-| ③ どの op で圧縮のまま常駐できるか | packed 常駐 / ロード時 CPU 展開  | `executableOps`                             |
+**3 つの軸を分けて報告し、軸ごとに所有者を分ける**:
 
-この 3 分離は**現行が既にそうなっている**: `bf16` は①のみ（宣言は valid だが
-`RUNTIME_SUPPORT.storage` に無い — `packages/runtime/src/ops/contracts.ts`）、`i2` は①②③だが
-③は linear / embedding だけ。**新しい codec を「宣言だけ先に受理する」道が既に通っている**。
+| 軸                                 | 判定するもの                     | 所有者（正本）                                                                                                                      |
+| ---------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| ① 宣言として読めるか               | 受理 / 拒否                      | 台帳（`codecs.ts`）と宣言規則（`descriptor.ts` / `memory.ts` / `bind.ts` — 下の §6.3「正本の所在」）                                |
+| ② 実行できるか                     | 実行 / capability 不足で列挙拒否 | `packages/runtime/src/ops/contracts.ts` の `RUNTIME_SUPPORT.storage`（展開経路の集合）と `ops/support.ts` の `assertRuntimeSupport` |
+| ③ どの op で圧縮のまま常駐できるか | packed 常駐 / ロード時 CPU 展開  | `packages/runtime/src/runtime/plan.ts` の述語と `runtime/weight-residency.ts` の `planWeightResidency`                              |
 
-`executableOps` は、今日 3 本に分かれている純関数
-（`plan.ts` の `eligibleCompressedInitializers` / `i2EligibleInitializers` /
-`i4EligibleInitializers` — 後の 2 本はほぼ同文）を 1 欄へ畳む。
+軸 ③ の述語は展開経路ごとに 3 本ある: 共通の `eligibleCompressedInitializers`（消費が重みスロットだけ）と、
+それとの積で狭める `i4EligibleInitializers` / `i2EligibleInitializers`。
 
-`decodeCpu` と `wgsl.unpackScalar` が**同じエントリに並ぶ**ことで、「pack 順の正本は 1 箇所」
-という現行の MUST（`packages/runtime/src/format/i4.ts` 冒頭の MUST・
-`tools/exporter/src/karume/emit.py` の `pack_int4`）が構造として守られる。
+`bf16` は①だけを満たす（台帳にあるので宣言は valid だが、`RUNTIME_SUPPORT.storage` に無いので実行は
+fail loudly）。`i2` は①②③だが③は linear / embedding だけ。**新しい codec を「宣言だけ先に受理する」道が
+通っている**。
+
+展開の実装は軸と別に 2 つある。
+
+- **CPU 展開**: `packages/runtime/src/format/` の `decodeF16`（`f16.ts`）・`decodeI8`（`i8.ts`）・
+  `decodeI4`（`i4.ts`）・`decodeI2`（`i2.ts`）が展開経路ごとに 1 本ずつ持つ。呼ぶのは
+  `packages/runtime/src/runtime/session-build.ts`（軸 ③ で適格外になった重み）。
+- **GPU 展開（WGSL）**: 融合 5 カーネルが共有する生成部品 `packages/runtime/src/kernels/weight-storage.ts` と、
+  専用カーネル（`linear-gemv.ts` / `linear-i8a8.ts` など）が格納形ごとの読み出しを持つ。
+
+**依存の向き MUST**: format 層（台帳・宣言規則・CPU 展開）は実行を知らない。format は `ops/` / `runtime/` /
+`kernels/` を import せず、実行側が台帳の `layout` を読んで分岐する。
+
+pack 順の正本はエクスポータ（`tools/exporter/src/karume/emit.py` の `pack_int4` / `pack_int2`）で、
+CPU 展開（`packages/runtime/src/format/i4.ts` 冒頭の MUST — 展開はこの 1 箇所だけ）と WGSL がその鏡像を
+持つ。
 
 ### 6.3 初版の codec 台帳（4 種）
 
@@ -579,8 +593,8 @@ rowLength  = numel / shape[rowAxis]
 | 旧 `storage.dtype`      | `i8`                                                             | `i4`                                                                              | `i2`                                                          | （新設）                             |
 | 量子化値 `q` の集合     | `[−127, +127]`（**−128 は使わない**・255 準位）                  | `[−7, +7]`（**−8 は使わない**・15 準位）                                          | `[−2, +1]`（4 準位すべて）                                    | `{−1, 0, +1}`（3 準位）              |
 | 格納コード `u`          | `u = q`（符号付き 8bit）                                         | `u = q + 8`（`[1,15]`・0 未使用）                                                 | `u = q + 2`（`[0,3]`）                                        | `u = q + 2`（`[1,3]`・**0 未使用**） |
-| `levels.kind`           | `int-sym`                                                        | `int-sym`                                                                         | `int-offset`                                                  | `int-sym`                            |
-| `levels.offset`         | 0                                                                | 8                                                                                 | 2                                                             | 2                                    |
+| 値の種別                | `int-sym`                                                        | `int-sym`                                                                         | `int-offset`                                                  | `int-sym`                            |
+| 格納オフセット          | 0                                                                | 8                                                                                 | 2                                                             | 2                                    |
 | `packing.blockElements` | 1                                                                | 8                                                                                 | 16                                                            | 16                                   |
 | `packing.blockBytes`    | 1                                                                | 4                                                                                 | 4                                                             | 4                                    |
 | `packing.alignBytes`    | 4                                                                | 4                                                                                 | 4                                                             | 4                                    |
@@ -592,8 +606,8 @@ rowLength  = numel / shape[rowAxis]
 | `zeroPoint.allowed`     | 偽                                                               | 偽（`offset 8` を「zero_point 省略時の既定」と読む予約は ADR 0069 決定 3 が保持） | 偽                                                            | 偽                                   |
 | 宣言 shape の追加条件   | 無し                                                             | 行長 `% groupSize == 0`・`numel` は偶数                                           | 正の rank 2 `[N,K]`・**`K % 16 == 0`**                        | `int2-off` と同一                    |
 | **復元式（CPU）**       | `fround(q · s)`                                                  | `fround((u − 8) · s)`                                                             | `fround((u − 2) · s)`                                         | `fround((u − 2) · s)`                |
-| `executableOps`         | linear / embedding / conv1d / conv2d / conv3d / conv_transpose1d | linear / embedding / conv1d（`groups == 1`）                                      | linear / embedding                                            | `int2-off` と同一                    |
-| `wgsl`                  | 有り                                                             | 有り                                                                              | 有り（`linearCompute` は `f32` のみ）                         | **`int2-off` のものを共有**          |
+| 圧縮常駐できる op（③）  | linear / embedding / conv1d / conv2d / conv3d / conv_transpose1d | linear / embedding / conv1d（`groups == 1`）                                      | linear / embedding                                            | `int2-off` と同一                    |
+| GPU 展開（WGSL）        | 有り                                                             | 有り                                                                              | 有り（`linearCompute` は `f32` のみ）                         | **`int2-off` のものを共有**          |
 
 正本の所在:
 
@@ -1011,7 +1025,7 @@ session ノブ）と、同一 config の重み差し替え（fine-tune）から�
 
 1. **分解 → 合流の往復**で、元の宣言・initializer の順序・常駐計画・見積りが一致する（CPU）。
 2. **77 グラフ全部で、新旧の適格述語の結果が一致する**
-   （`plan.ts` の `eligibleCompressedInitializers` / `i2EligibleInitializers` / `i4EligibleInitializers` — `executableOps` へ畳んだ後も同じ集合が出る）。
+   （`plan.ts` の `eligibleCompressedInitializers` / `i2EligibleInitializers` / `i4EligibleInitializers`）。述語は台帳へ畳まない（ADR 0108 追記 12）。
 3. **同じグラフを再 export するとグラフ記述がバイト同一になる。** `krg` の同一性を内容ハッシュで
    判定する（§9）以上、`graphs[name]` の直列化まで決定的でなければならない。**IR v2 の直列化
    規則は [ir-v2.md](ir-v2.md) の「正準直列化」節で決め切った**（2026-09-22 — キー順はスキーマ順、

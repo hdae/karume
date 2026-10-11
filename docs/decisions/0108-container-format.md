@@ -332,6 +332,8 @@ NOTE: 設計案 v2 はこの流儀の先例として `distribution.py:570` の�
 
 ### 12. codec は**リポ内の不変な台帳**にする
 
+**撤回（2026-10-11）**: エントリの `decodeCpu` / `executableOps` / `wgsl?` と「述語を `executableOps` の 1 欄へ畳む」は撤回した。格納形式・CPU 展開・実行可否は別の所有者に置く（→ 追記 12）。
+
 - import 時登録は**しない**（横断の不変条件「全モジュール副作用ゼロ」に反する）。台帳は
   リポ内のデータで、エントリは
   `{ name, packing, levels, scale, zeroPoint, decodeCpu, executableOps, wgsl? }`。
@@ -968,3 +970,42 @@ block はそもそも詰め物を持たない（`format/container/memory.ts` —
 後勝ちで受理し、検出は exporter の責務）と揃え、他言語の検証器との解釈を一致させる。
 拒否に変える案は `JSON.parse` の前に字句解析を置くことになり、ここでは採らない。
 仕様は [container-v1](../container-v1.md) §0 と [ir-v2](../ir-v2.md)「コンテナ」節。
+
+## 追記 12 — 決定 12 を撤回し、codec の 3 つの所有者を分ける（2026-10-11）
+
+決定 12 のうち、台帳 1 か所に「格納形式・CPU での展開・GPU で圧縮のまま実行できるか」の 3 つをまとめて持たせる
+部分を撤回する（2026-10-04 の利用者裁定）。仕様書を実装に合わせる変更で、コードは変えない。
+
+撤回するのは次の 2 点である。
+
+1. 台帳のエントリに `decodeCpu` / `executableOps` / `wgsl?` を置くこと。
+2. 圧縮のまま常駐できるかの述語（`eligibleCompressedInitializers` / `i2EligibleInitializers` /
+   `i4EligibleInitializers`）を `executableOps` の 1 欄へ畳むこと。
+
+決定 12 の残りは維持する: 台帳はリポ内の不変なデータで import 時登録はしない・未知の codec は重み取得前に
+拒否する・3 つの軸（①宣言として読めるか ②実行できるか ③どの op で圧縮のまま常駐できるか）を分けて報告する。
+
+代わりに、各軸の所有者を次のように置く。
+
+| 持つもの                        | 正本（実装）                                                                                                                                      | 中身                                                                                                                                                                                                                         |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 格納形式（軸 ①）                | `packages/runtime/src/format/container/codecs.ts` の `CODEC_LEDGER`（Python の鏡像は `tools/exporter/src/karume/container.py` の `CODEC_LEDGER`） | 登録名・`layout`（展開経路の種別）・`packing`・`scale`・`grouping`・`zeroPoint`・`rowAxes`。宣言規則は `descriptor.ts`（未知 codec の拒否・欄の有無）・`memory.ts`（欄の有無）・`bind.ts`（値域・整除・scale 長・`rowAxes`） |
+| CPU での展開                    | `packages/runtime/src/format/f16.ts` の `decodeF16`・`i8.ts` の `decodeI8`・`i4.ts` の `decodeI4`・`i2.ts` の `decodeI2`                          | 展開経路ごとに 1 本。呼ぶのは `packages/runtime/src/runtime/session-build.ts`（軸 ③ で適格外になった重みを f32 へ展開する）                                                                                                  |
+| 実行できるか（軸 ②）            | `packages/runtime/src/ops/contracts.ts` の `RUNTIME_SUPPORT.storage` と `packages/runtime/src/ops/support.ts` の `assertRuntimeSupport`           | 実行できる展開経路の集合。`bf16` は台帳にあってここに無い（宣言は受理・実行は capability 不足として重みを取る前に列挙で拒否）                                                                                                |
+| 圧縮のまま常駐できる op（軸 ③） | `packages/runtime/src/runtime/plan.ts` の 3 述語と `packages/runtime/src/runtime/weight-residency.ts` の `planWeightResidency`                    | 展開経路ごとの適格 op。適格外は CPU 展開へ回る                                                                                                                                                                               |
+| GPU での展開（WGSL）            | `packages/runtime/src/kernels/weight-storage.ts`（融合 5 カーネルが共有する生成部品）と専用カーネル（`linear-gemv.ts` / `linear-i8a8.ts` など）   | 格納形ごとの読み出しと scale の乗算                                                                                                                                                                                          |
+
+- **依存の向き MUST**: format 層（台帳・宣言規則・CPU 展開）は実行を知らない。format は `ops/` / `runtime/` /
+  `kernels/` を import せず、実行側が台帳の `layout` を読んで分岐する。
+- **軸 ② の正本は `RUNTIME_SUPPORT.storage`** である。台帳に実行の欄を戻して ② をそこから導く形は採らない。
+- **理由**: 決定 12 のとおり 1 つのエントリに `executableOps` と `wgsl` を置くと、低い層の format が「どの op で
+  実行できるか」「WGSL があるか」という実行側の判断を持ち、依存の向きが逆になる。格納形式とバックエンドの
+  実行能力を別々に申告する作りは業界でも普通である（例: ONNX Runtime の実行プロバイダは、自分が受け持つ
+  ノードを `GetCapability()` で申告する）。決定 12 の動機だった「codec ごとに述語が増えるのを止める」は、
+  畳まずに残す費用として受け入れる。
+- **codec を足すときに触る場所**（実装の現物）: 台帳のエントリ（TS と Python の両側）・CPU 展開 1 本・
+  `RUNTIME_SUPPORT.storage`・圧縮常駐の述語と `planWeightResidency` の展開経路ごとの分岐（共有席の
+  `i4Eligible` / `i2Eligible` を含む）・WGSL の変種。既存の展開経路を共有する codec（`ternary` → `i2`）は、
+  runtime 側では台帳のエントリだけで済む（決定 13 — exporter の量子化器は別）。
+- 仕様書は [container-v1](../container-v1.md) §6.2 / §6.3 / §13.5・[ir-v2](../ir-v2.md)「値と型」・
+  [glossary](../glossary.md)「codec 台帳」を同時に直した。
