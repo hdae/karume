@@ -134,6 +134,12 @@ Deno.test("imageToRgba: 要素数とサイズの食い違いを落とす", () =>
   assertThrows(() => imageToRgba(new Float32Array(6), 0, 1), RangeError);
 });
 
+Deno.test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wanFrameToRgba と同じ入口契約）", () => {
+  // どれも `image.length === 3·width·height` は満たす（長さの照合だけでは通る形）。
+  assertThrows(() => imageToRgba(new Float32Array(3), 0.5, 2), RangeError, "正の整数でない");
+  assertThrows(() => imageToRgba(new Float32Array(3), -1, -1), RangeError, "正の整数でない");
+});
+
 Deno.test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙変換しない）", () => {
   // 2×2 の 3 面。土台は全て有限（clamp 対象の範囲外値も混ぜる）で、1 要素だけ壊す。
   const base = new Float32Array(2 * 2 * 3);

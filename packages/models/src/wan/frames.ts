@@ -23,6 +23,10 @@ export const wanFrameToRgba = (
   frame: number,
 ): Uint8ClampedArray<ArrayBuffer> => {
   const { frames, width, height, data } = video;
+  // 寸法は長さの照合だけでは縛れない（幅 0.5 × 高さ 2 も長さは合う）— Anima の `imageToRgba` と同じ入口契約。
+  if (![frames, width, height].every((dim) => Number.isInteger(dim) && dim > 0)) {
+    throw new RangeError(`動画の寸法 ${frames} フレーム × ${width}×${height} が正の整数でない`);
+  }
   if (!Number.isInteger(frame) || frame < 0 || frame >= frames) {
     throw new RangeError(`フレーム ${frame} が [0, ${frames}) の外`);
   }

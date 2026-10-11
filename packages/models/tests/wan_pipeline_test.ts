@@ -1112,6 +1112,24 @@ describe("フレームの RGBA 化", () => {
     const broken = { ...video, data: Float32Array.from(video.data).fill(Number.NaN, 3, 4) };
     assertThrows(() => wanFrameToRgba(broken, 1), Error, "非有限");
   });
+
+  it("寸法とフレーム数が正の整数でなければ、要素数が合っていても RangeError（Anima の imageToRgba と同じ入口契約）", () => {
+    // どれも `data.length === 3·frames·width·height` は満たす（長さの照合だけでは通る形）。
+    const rejected: readonly { frames: number; width: number; height: number; length: number }[] = [
+      { frames: 1, width: 0.5, height: 2, length: 3 },
+      { frames: 1.5, width: 2, height: 1, length: 9 },
+      { frames: 1, width: -1, height: -1, length: 3 },
+      { frames: 1, width: 0, height: 0, length: 0 },
+    ];
+    for (const { length, ...dims } of rejected) {
+      assertThrows(
+        () => wanFrameToRgba({ ...dims, data: new Float32Array(length) }, 0),
+        RangeError,
+        "正の整数でない",
+        JSON.stringify(dims),
+      );
+    }
+  });
 });
 
 describe("初期ノイズの乱数", () => {
