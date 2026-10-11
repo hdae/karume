@@ -70,6 +70,14 @@
  *   記録する。golden を持たない（入力は乱数の潜在と実プロンプトの埋め込み）ので値の門は無く、非有限 0 と device lost が
  *   無いことだけを見る。確保が最大の形なので opt-in（`KARUME_WAN_TI2V_LONG_PROBE=1`）にして、別の回で回す。
  *
+ * ## 行ブロックの予算（ADR 0124 — `SessionOptions.attentionRowBlockMaxBytes`）
+ *
+ * - **層 1 の門（u32 A/B）**: 同じ入力（乱数の潜在・seed 固定）で予算なし / 512 MiB / 256 MiB を Session ごとに回し、出力が
+ *   予算なしと Uint32 で一致すること。両席（参照席・実用席）で回す。形は 1280×704×17（S = 4,400・既定のレーン）と
+ *   1280×704×121（S = 27,280・opt-in `KARUME_WAN_TI2V_121F=1`・単独のプロセス）。恒真化の防止として、①QK の dispatch 本数
+ *   （行窓 `:rwa` とそれ以外）が self / cross 別・席の格納幅つきの期待枚数（{@link expectedAttentionBlocks} — runtime と独立に
+ *   導く）と一致し、予算なしと違うことを同時に見る。
+ *
  * 資産が無い環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。golden の完全性（一部だけある環境は
  * FAIL）は GPU 不要のホストテスト（`wan_ti2v_dit_host_test.ts`）が組ごとに見る。
  */
@@ -249,6 +257,57 @@ const practicalSessionOptions = (): SessionOptions => {
 };
 
 const GIB = 2 ** 30;
+const MIB = 2 ** 20;
+
+/** Wan2.2 TI2V-5B の DiT の層数（transformer の config `num_layers`）— ①QK の dispatch 本数の期待の掛け数。 */
+const DIT_LAYERS = 30;
+/** cross-attention のキー（テキストのトークン数 — `encoder_hidden_states` の `[1,512,4096]`）。 */
+const TEXT_TOKENS = 512;
+
+/**
+ * 席ごとの S の 1 要素の格納幅（参照席 = 既定の f32・実用席 = s16）。実用席の束は `attentionScoreStorage: "f16"` を宣言し、
+ * Wan2.2 の形（D = 128・キー数 = S と 512）は全て 4 の倍数で s16 に適格（完全適格の検査が経路を縛る — 適格判定を
+ * ここへ写さない）。
+ */
+const SEAT_SCORE_BYTES: Readonly<Record<Seat, number>> = {
+  [REFERENCE_QUANT]: 4,
+  [PRACTICAL_QUANT]: 2,
+};
+
+/**
+ * 行ブロックの期待枚数（ADR 0124 — self / cross 別・席の格納幅つき。runtime と独立に導く）:
+ *
+ *   上限 = min(束縛上限, 予算)・1 枚の行数 = ⌊上限 ÷ (heads × キー数 × 格納幅)⌋・枚数 = ⌈S ÷ 1 枚の行数⌉
+ *
+ * キー数は self が S・cross が 512。1 行のスコアは行統計（2 語 = 8 B）より大きい形だけを扱うので、行統計の項は効かない。
+ * {@link expectedRowBlocks} は self・f32・予算なしに限った前からの式で、予算つきの形には使わない。
+ */
+const expectedAttentionBlocks = (
+  queries: number,
+  keys: number,
+  scoreBytes: number,
+  bindingLimit: number,
+  budget?: number,
+): number => {
+  const limit = budget === undefined ? bindingLimit : Math.min(bindingLimit, budget);
+  return Math.ceil(queries / Math.floor(limit / (WAN22_HEADS * keys * scoreBytes)));
+};
+
+/** ①QK の dispatch 本数（行窓 `:rwa` の本数と、行窓の無い本数）。 */
+type QkDispatches = { readonly windowed: number; readonly unwindowed: number };
+
+/**
+ * ①QK の dispatch 本数の期待（30 層 × self / cross）。1 枚の形は行窓を立てずに層ごとに 1 本、2 枚以上の形は行窓のキーで
+ * 層ごとに枚数ぶん。
+ */
+const expectedQkDispatches = (blocks: { readonly self: number; readonly cross: number }) => {
+  const counts = [blocks.self, blocks.cross];
+  return {
+    windowed: DIT_LAYERS *
+      counts.filter((count) => count > 1).reduce((sum, count) => sum + count, 0),
+    unwindowed: DIT_LAYERS * counts.filter((count) => count === 1).length,
+  } satisfies QkDispatches;
+};
 
 /**
  * 容量の閾値（ADR 0121 決定 8 — S = 8,190 の diag がどちらかの席で超えたら、受理するフレーム数の上限を下げる手を段 6 の前に
@@ -289,6 +348,12 @@ const LONG_CLIP = Deno.env.get(LONG_CLIP_ENV) === "1";
 /** 1280×704・121 フレーム（潜在 `[48,31,44,80]` → S = 31·22·40 = 27,280 — 受理の上限）。 */
 const LONG_CLIP_LATENT_SHAPE: readonly number[] = [48, 31, 44, 80];
 const LONG_CLIP_TOKENS = 27280;
+/**
+ * 1280×704・17 フレーム（潜在 `[48,5,44,80]` → S = 5·22·40 = 4,400 — 行ブロックの予算の層 1 の A/B を既定のレーンで回す形・
+ * ADR 0124 決定 8。通しの e2e の既定のレーンと同じ長さ）。
+ */
+const SHORT_CLIP_LATENT_SHAPE: readonly number[] = [48, 5, 44, 80];
+const SHORT_CLIP_TOKENS = 4400;
 /**
  * golden を持たない S（12,090 / 27,280）の入力の文脈（実プロンプトの埋め込み — S = 192 の golden の io から借りる・合成の乱数は
  * 使わない）。
@@ -582,6 +647,20 @@ const rowBlocksOf = (diagnostics: SessionDiagnostics): number => {
   const layers = count(false);
   assert(layers > 0, "①QK の行窓の無い dispatch（cross-attention）が 1 本も無い");
   return count(true) / layers;
+};
+
+/**
+ * 直近 run の ①QK の dispatch 本数（行窓 `:rwa` とそれ以外 — 計測に依らない census。f32 / i8a8 のどちらのキーも
+ * `attention_qk:` で始まる）。予算で cross も行窓になる形でも数えられる（{@link rowBlocksOf} は cross が行窓を持たない前提）。
+ */
+const qkDispatchesOf = (diagnostics: SessionDiagnostics): QkDispatches => {
+  const qk = (diagnostics.lastRunPipelines ?? []).filter(({ key }) =>
+    key.startsWith("attention_qk:")
+  );
+  const count = (windowed: boolean): number =>
+    qk.filter(({ key }) => key.includes(":rwa") === windowed)
+      .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
+  return { windowed: count(true), unwindowed: count(false) };
 };
 
 /** 1 submit の GPU 時間の観測を ms に直した記録（門は {@link SUBMIT_GPU_LIMIT_MS}）。 */
@@ -1155,8 +1234,11 @@ const bandCandidate = async (
 /**
  * Session を張って同じ入力で 2 本回す（1 本目 = パイプラインの生成と裏付け前のチャンク・2 本目 = 生成の 1 パスに近い 2 回目以降の
  * 形 — 2.1 の通常モードと同じ並び）。fdinfo の区間は構築・各 run・破棄で切る。戻りは 2 本の観測・出力・非有限の数・構築の所要・
- * 区間ごとの VRAM の山と、1 本目の後の行ブロックの枚数と、2 本目の後の診断（計測モードの device では 2 本ぶんの 1 submit の
+ * 区間ごとの VRAM の山と、2 本目の後の行ブロックの枚数と、2 本目の後の診断（計測モードの device では 2 本ぶんの 1 submit の
  * GPU 時間を含む — {@link practicalSubmitGate}）。
+ *
+ * 行ブロックの枚数（{@link rowBlocksOf}）は**読んだときに数える**。予算（`attentionRowBlockMaxBytes` — ADR 0124）で cross も
+ * 行窓になる形では「行窓の無い ①QK = cross」の前提が崩れて数えられないので、枚数を読まない呼び手（予算の A/B と計測）を落とさない。
  */
 const twoRuns = async (
   prepared: PreparedModel,
@@ -1177,7 +1259,6 @@ const twoRuns = async (
   const produced: Float32Array<ArrayBuffer>[] = [];
   let nonFinite = 0;
   let buildMs = 0;
-  let rowBlocks = 0;
   let diagnostics: SessionDiagnostics | undefined;
   let vram: readonly string[] = [];
   try {
@@ -1200,7 +1281,6 @@ const twoRuns = async (
         );
         diagnostics = session.diagnostics();
         runs.push(observeRun(label, diagnostics, wallMs, outputBytes(outputs)));
-        rowBlocks = rowBlocksOf(diagnostics);
         // 次の run の確保の前に、この run の中間の解放を待つ。
         await settleReleases(gpu);
       }
@@ -1216,7 +1296,18 @@ const twoRuns = async (
   }
   // 2 本とも回り終えずにここへは来ない（途中の失敗は上で投げる）— 型を絞るためだけの検査。
   if (diagnostics === undefined) throw new Error("run の後の診断が無い");
-  return { runs, produced, nonFinite, buildMs, vram, rowBlocks, diagnostics };
+  const last = diagnostics;
+  return {
+    runs,
+    produced,
+    nonFinite,
+    buildMs,
+    vram,
+    get rowBlocks(): number {
+      return rowBlocksOf(last);
+    },
+    diagnostics,
+  };
 };
 
 /**
@@ -1321,6 +1412,182 @@ const practicalSubmitGate = async (
     },
   });
 };
+
+/** 層 1 の A/B で回す予算（`undefined` = 予算なし = 正本・先頭に置く）。 */
+const AB_BUDGETS: readonly (number | undefined)[] = [undefined, 512 * MIB, 256 * MIB];
+
+/** 予算の綴り（記録と失敗文言）。 */
+const budgetLabel = (budget: number | undefined): string =>
+  budget === undefined ? "予算なし" : `予算 ${budget / MIB} MiB`;
+
+/** 出力のビット列が定数でない（一致の検査が恒真にならない）こと。 */
+const assertNotConstant = (data: Float32Array, label: string): void => {
+  const bits = new Uint32Array(data.buffer, data.byteOffset, data.length);
+  assert(bits.some((value) => value !== bits[0]), `${label}: 出力が定数（ビット一致が恒真になる）`);
+};
+
+/**
+ * 層 1 の門（ADR 0124 決定 8 — DiT の u32 A/B）。席ごとに、同じ入力で予算なし / 512 MiB / 256 MiB を Session ごとに回し
+ * （{@link twoRuns} — 1 本ずつ張って畳む）、どの本目の出力も予算なしの同じ本目と Uint32 で一致することを門にする。
+ *
+ * 恒真化の防止: ①QK の dispatch 本数（行窓とそれ以外）が、self / cross 別・席の格納幅つきで独立に導いた期待
+ * （{@link expectedAttentionBlocks} / {@link expectedQkDispatches}）と一致し、予算つきでは予算なしと違うことを同時に見る
+ * （予算が DiT の Session に届かないまま同じ経路を 2 回撃つ形を緑にしない）。実用席は束が届いたことも census で見る。
+ */
+const budgetAbGate = async (
+  t: Deno.TestContext,
+  gpu: GpuContext,
+  prepared: PreparedModel,
+  target: {
+    readonly tokens: number;
+    /** 入力の組み立て（step の中で呼ぶ）。 */
+    readonly loadInputs: () => Promise<Record<string, Tensor>>;
+  },
+  deviceLost: () => string | undefined,
+): Promise<void> => {
+  const { tokens, loadInputs } = target;
+  // 期待値の元は device が実際に許した束縛上限（runtime の行ブロックが見るのと同じ値）。
+  const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
+  const inputs = await loadInputs();
+  for (
+    const [seat, optionsOf] of [
+      [REFERENCE_QUANT, (): SessionOptions => ({})],
+      [PRACTICAL_QUANT, practicalSessionOptions],
+    ] as const
+  ) {
+    await t.step({
+      name: `${seat} S = ${tokens}: ${AB_BUDGETS.map(budgetLabel).join(" / ")} の u32 A/B`,
+      // 実用席の束は配布形の manifest から読む（無い機は実用席だけ SKIP — 参照席は回す）。
+      ignore: seat === PRACTICAL_QUANT && !PRACTICAL_DECLARED,
+      fn: async () => {
+        const notes: string[] = [];
+        await runRecordedCase(
+          results,
+          { id: `${seat}/s${tokens}/row-block-budget-ab`, failureNote: () => notes.join(" / ") },
+          async () => {
+            const seatOptions = optionsOf();
+            let reference: { produced: readonly Float32Array[]; qk: QkDispatches } | undefined;
+            for (const budget of AB_BUDGETS) {
+              const label = `${seat} S = ${tokens} ${budgetLabel(budget)}`;
+              const options: SessionOptions = budget === undefined
+                ? seatOptions
+                : { ...seatOptions, attentionRowBlockMaxBytes: budget };
+              const observed = await twoRuns(prepared, gpu, inputs, options);
+              assertEquals(observed.nonFinite, 0, `${label}: 非有限`);
+              const scoreBytes = SEAT_SCORE_BYTES[seat];
+              const blocks = {
+                self: expectedAttentionBlocks(tokens, tokens, scoreBytes, bindingLimit, budget),
+                cross: expectedAttentionBlocks(
+                  tokens,
+                  TEXT_TOKENS,
+                  scoreBytes,
+                  bindingLimit,
+                  budget,
+                ),
+              };
+              const qk = qkDispatchesOf(observed.diagnostics);
+              assertEquals(
+                qk,
+                expectedQkDispatches(blocks),
+                `${label}: ①QK の dispatch 本数（期待 self ${blocks.self} 枚・cross ${blocks.cross} 枚 × ${DIT_LAYERS} 層）`,
+              );
+              if (seat === PRACTICAL_QUANT) {
+                assertSeatsApplied(observed.diagnostics.lastRunPipelines, options, label);
+                // Wan2.2 の形は全て a8 / s16 に適格（SEAT_SCORE_BYTES の前提）— 部分縮退を赤にする。
+                assertAttentionSeatsComplete(observed.diagnostics.lastRunPipelines, options, label);
+              }
+              notes.push(
+                `${
+                  budgetLabel(budget)
+                }: self ${blocks.self} 枚・cross ${blocks.cross} 枚・backing ${
+                  gib(observed.runs[1].backingBytes)
+                }・壁 ${observed.runs.map((run) => (run.wallMs / 1000).toFixed(1)).join(" / ")} s`,
+              );
+              if (reference === undefined) {
+                observed.produced.forEach((data, index) =>
+                  assertNotConstant(data, `${label} の ${index + 1} 本目`)
+                );
+                reference = { produced: observed.produced, qk };
+                continue;
+              }
+              for (const [index, data] of observed.produced.entries()) {
+                assertEquals(
+                  firstBitMismatch(data, reference.produced[index]),
+                  -1,
+                  `${label}: ${
+                    index + 1
+                  } 本目が予算なしと Uint32 で一致しない（値は最初に割れる要素の添字）`,
+                );
+              }
+              assert(
+                qk.windowed !== reference.qk.windowed,
+                `${label}: 行窓の ①QK が予算なしと同じ ${qk.windowed} 本（予算が Session に届いていない）`,
+              );
+            }
+            assertEquals(deviceLost(), undefined, "device lost");
+            const note = notes.join(" / ");
+            console.log(`[wan-ti2v-dit] 行ブロックの予算の u32 A/B ${seat} S = ${tokens}: ${note}`);
+            return { status: "pass", note };
+          },
+        );
+      },
+    });
+  }
+};
+
+Deno.test(
+  "Wan2.2 TI2V DiT 行ブロックの予算の期待値（GPU 不要・ADR 0124）: self / cross 別・席の格納幅つき（束縛上限 2,147,483,644 B）",
+  () => {
+    const blocksOf = (seat: Seat, tokens: number, budget?: number) => ({
+      self: expectedAttentionBlocks(
+        tokens,
+        tokens,
+        SEAT_SCORE_BYTES[seat],
+        B570_STORAGE_BINDING_LIMIT,
+        budget,
+      ),
+      cross: expectedAttentionBlocks(
+        tokens,
+        TEXT_TOKENS,
+        SEAT_SCORE_BYTES[seat],
+        B570_STORAGE_BINDING_LIMIT,
+        budget,
+      ),
+    });
+    const table = (seat: Seat, tokens: number) =>
+      AB_BUDGETS.map((budget) => blocksOf(seat, tokens, budget));
+    // 設計（d6 の事実「行ブロックの枚数 — 計算値」）が node で独立に計算した枚数と同じ。
+    assertEquals(table(PRACTICAL_QUANT, SHORT_CLIP_TOKENS), [
+      { self: 1, cross: 1 },
+      { self: 2, cross: 1 },
+      { self: 4, cross: 1 },
+    ]);
+    assertEquals(table(REFERENCE_QUANT, SHORT_CLIP_TOKENS), [
+      { self: 1, cross: 1 },
+      { self: 4, cross: 1 },
+      { self: 7, cross: 1 },
+    ]);
+    assertEquals(table(PRACTICAL_QUANT, LONG_CLIP_TOKENS), [
+      { self: 17, cross: 1 },
+      { self: 67, cross: 2 },
+      { self: 134, cross: 3 },
+    ]);
+    assertEquals(table(REFERENCE_QUANT, LONG_CLIP_TOKENS), [
+      { self: 34, cross: 1 },
+      { self: 134, cross: 3 },
+      { self: 268, cross: 5 },
+    ]);
+    // 予算なしの self・f32 は前からの式（expectedRowBlocks）と同じ枚数になる。
+    assertEquals(
+      blocksOf(REFERENCE_QUANT, LONG_CLIP_TOKENS).self,
+      expectedRowBlocks(LONG_CLIP_TOKENS, B570_STORAGE_BINDING_LIMIT),
+    );
+    // ①QK の本数: 1 枚の形は層ごとに 1 本（行窓なし）・2 枚以上は層ごとに枚数ぶん（行窓）。
+    assertEquals(expectedQkDispatches({ self: 17, cross: 1 }), { windowed: 510, unwindowed: 30 });
+    assertEquals(expectedQkDispatches({ self: 67, cross: 2 }), { windowed: 2070, unwindowed: 0 });
+    assertEquals(expectedQkDispatches({ self: 1, cross: 1 }), { windowed: 0, unwindowed: 60 });
+  },
+);
 
 Deno.test(
   "Wan2.2 TI2V DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限で S = 8,190 / 7,920 が 3 枚・S = 12,090 が 7 枚",
@@ -1435,6 +1702,28 @@ const gaussianLatents = (count: number, seed: number): Float32Array<ArrayBuffer>
   return out;
 };
 
+/**
+ * golden を持たない形（乱数の潜在・実プロンプトの埋め込み）の DiT を、受け取った device で回す共通の段取り（容器を開き、
+ * 時刻の幅と RoPE の基底を読む）。入力は `loadInputs` が step の中で作る。
+ */
+const openForLongInputs = async (): Promise<{
+  readonly prepared: PreparedModel;
+  readonly inputsOf: (
+    latentShape: readonly number[],
+    tokens: number,
+  ) => Promise<Record<string, Tensor>>;
+}> => {
+  const opened = await openSeriesContainer(MODEL_URL);
+  const prepared = prepareContainer(opened, graphName());
+  const width = prepared.graph.inputs.find(({ name }) => name === "timesteps_proj")?.shape[1];
+  if (typeof width !== "number") throw new Error("timesteps_proj の幅が静的な数でない");
+  const base = await readRopeBase(opened);
+  return {
+    prepared,
+    inputsOf: (latentShape, tokens) => longInputs(base, width, latentShape, tokens),
+  };
+};
+
 Deno.test({
   name:
     `Wan2.2 TI2V DiT 実用席 ${PRACTICAL_QUANT} S = ${LONG_CLIP_TOKENS}（1280×704・121 フレーム・実 GPU・計測モード・` +
@@ -1465,6 +1754,39 @@ Deno.test({
           scope: `s${LONG_CLIP_TOKENS}`,
           inputsLabel: `乱数の潜在（seed ${LONG_SEED}）・${LONG_CONTEXT_CASE} の文脈`,
           loadInputs: () => longInputs(base, width, LONG_CLIP_LATENT_SHAPE, LONG_CLIP_TOKENS),
+        },
+        () => deviceLost,
+      );
+    } finally {
+      await settleReleases(gpu);
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    `Wan2.2 TI2V DiT 行ブロックの予算の u32 A/B（実 GPU・1280×704×121・S = 27,280・opt-in ${LONG_CLIP_ENV}=1・ADR 0124 の` +
+    "層 1）: 予算 512 / 256 MiB の出力が予算なしと Uint32 で一致し、①QK の枚数が self / cross 別の期待どおり",
+  // 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）。実用席は step の中で配布形の有無を見る。
+  ignore: !LONG_CLIP || !SMALL_AVAILABLE || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const { prepared, inputsOf } = await openForLongInputs();
+    let deviceLost: string | undefined;
+    const gpu = await acquireTestGpu({
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    });
+    try {
+      assertAdapterMatchesEnvironment(gpu);
+      await budgetAbGate(
+        t,
+        gpu,
+        prepared,
+        {
+          tokens: LONG_CLIP_TOKENS,
+          loadInputs: () => inputsOf(LONG_CLIP_LATENT_SHAPE, LONG_CLIP_TOKENS),
         },
         () => deviceLost,
       );
@@ -1762,6 +2084,39 @@ Deno.test({
           );
         });
       }
+    } finally {
+      await settleReleases(gpu);
+      gpu.destroy();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    `Wan2.2 TI2V DiT 行ブロックの予算の u32 A/B（実 GPU・1280×704×17・S = 4,400・ADR 0124 の層 1）: 予算 512 / 256 MiB の` +
+    "出力が予算なしと Uint32 で一致し、①QK の枚数が self / cross 別の期待どおり",
+  // 入力の文脈は S = 192 の golden から借りる（SMALL_AVAILABLE）。実用席は step の中で配布形の有無を見る。
+  ignore: !SMALL_AVAILABLE || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const { prepared, inputsOf } = await openForLongInputs();
+    let deviceLost: string | undefined;
+    const gpu = await acquireTestGpu({
+      onDeviceLost: (info) => {
+        deviceLost = `${info.reason}: ${info.message}`;
+      },
+    });
+    try {
+      assertAdapterMatchesEnvironment(gpu);
+      await budgetAbGate(
+        t,
+        gpu,
+        prepared,
+        {
+          tokens: SHORT_CLIP_TOKENS,
+          loadInputs: () => inputsOf(SHORT_CLIP_LATENT_SHAPE, SHORT_CLIP_TOKENS),
+        },
+        () => deviceLost,
+      );
     } finally {
       await settleReleases(gpu);
       gpu.destroy();
