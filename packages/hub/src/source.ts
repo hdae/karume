@@ -219,9 +219,16 @@ export type SourceDriver = {
   readonly pin: (generation: string, options: LoadManifestOptions) => PinnedSource;
 };
 
-// MUST: クラス定義より前に置く — `static` ブロックはクラス評価時に走るので、後ろに置くと
-// TDZ で ReferenceError になる（import 時に落ちる）。
-let readDriver: (source: DistributionSource) => SourceDriver;
+/**
+ * 公開ハンドル → 実装本体。ハンドルの private 欄（`#driver`）にしないのは、欄をクラスの外へ
+ * 読み出す橋渡しに `static` ブロック（クラス評価時 = import 時に走る）が要るため — bundler は
+ * それを副作用と見て、使われていないクラスまで bundle に残す（横断の不変条件「import 時実行の
+ * 禁止」が守るもの）。空の `WeakMap` の構築は副作用の無い式として落とされる。
+ *
+ * キーはハンドル自身（弱参照）で、この表はモジュールの外から見えない — private 欄と同じく、
+ * ハンドルを持っていても実装は読めない。
+ */
+const drivers = new WeakMap<DistributionSource, SourceDriver>();
 
 /**
  * 取得元の**公開ハンドル**。`loadManifest(source, …)` / `fromPretrained(source)` が受け取る値で、
@@ -233,25 +240,33 @@ let readDriver: (source: DistributionSource) => SourceDriver;
  * `HubRepoRef` の綴り間違いが黙って取得元として通る。
  */
 export class DistributionSource {
-  readonly #driver: SourceDriver;
+  /**
+   * 型だけの名目ブランド（実行時には存在しない — 判別は上の MUST どおり `instanceof`）。メンバを
+   * 持たないクラスは構造的に `{}` と同じ型になり、任意のオブジェクト（`HubRepoRef` の綴り間違いを
+   * 含む）が `DistributionSource` として型検査を通ってしまう。
+   */
+  declare private readonly brand: never;
 
   /**
    * MUST: 取得元アダプター（`sources/`）の factory だけが呼ぶ。`SourceDriver` は `mod.ts` が
    * 輸出しないので、利用者はこの引数を型として綴れない。
    */
   constructor(driver: SourceDriver) {
-    this.#driver = driver;
-  }
-
-  // `#driver` を読めるのはクラス本体の中だけなので、モジュール内の 1 関数へ束縛して外へ出す
-  // （static メンバにすると公開面に現れてしまう — このクラスは「メンバを持たない」ことが仕様）。
-  static {
-    readDriver = (source) => source.#driver;
+    drivers.set(this, driver);
   }
 }
 
 /** 公開ハンドルから実装を取り出す（hub の内部だけが呼ぶ）。 */
-export const driverOf = (source: DistributionSource): SourceDriver => readDriver(source);
+export const driverOf = (source: DistributionSource): SourceDriver => {
+  const driver = drivers.get(source);
+  if (driver === undefined) {
+    // コンストラクタを通らずに作られた値（`Object.create(DistributionSource.prototype)` 等）。
+    throw new Error(
+      "hub: 取得元ハンドルに実装が結び付いていない（hub の factory が作った値でない）",
+    );
+  }
+  return driver;
+};
 
 /**
  * 値が取得元ハンドルかを見る（`ref | source` の union を捌く**唯一の判別点**）。

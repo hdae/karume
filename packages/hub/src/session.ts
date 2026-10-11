@@ -82,8 +82,12 @@ type SessionSource = {
   readonly generation: string;
 };
 
-// MUST: クラス定義より前に置く（`static` ブロックの TDZ — `source.ts` の同じ綴りを参照）。
-let readSession: (loaded: LoadedManifest) => SessionSource;
+/**
+ * manifest → その取得元。private 欄（`#session`）にせずモジュール内の表に置く理由は
+ * `source.ts` の `drivers` と同じ（欄を外へ読み出す `static` ブロックが import 時に走り、
+ * bundler が使われていないクラスまで残す）。キーは値自身（弱参照）で、モジュールの外から見えない。
+ */
+const sessions = new WeakMap<LoadedManifest, SessionSource>();
 
 /**
  * 解決済み世代に固定された manifest。以降の取得は全てこの世代で行う。
@@ -100,7 +104,8 @@ let readSession: (loaded: LoadedManifest) => SessionSource;
  * 現れない — 合成した repo や偽の SHA を名乗らせない（実在しないリポを指す診断になる）。
  *
  * MUST: この型は hub の外で組み立てられない（`mod.ts` は型だけを輸出する）。取得元は
- * `#session` に閉じており、値を作り替えて渡すと取得元ごと失われる。
+ * モジュール内の表（`sessions`）に閉じており、値を作り替えて渡すと取得元ごと失われる
+ * （{@link pinnedSourceOf} が fail loudly で断る）。
  */
 export class LoadedManifest {
   /** 取得元が repo という概念を持つ場合のみ（HF: `"owner/name"`）。 */
@@ -108,17 +113,17 @@ export class LoadedManifest {
   /** 解決済み commit SHA（40 桁）。世代の概念を持つ取得元のみ。 */
   readonly revisionSha?: string;
   readonly manifest: Manifest;
-  readonly #session: SessionSource;
+  /**
+   * 型だけの名目ブランド（実行時には存在しない）。公開欄だけのクラスは構造的な型になり、
+   * `{ manifest }` のように手で組んだ値が `LoadedManifest` として型検査を通ってしまう。
+   */
+  declare private readonly brand: never;
 
   constructor(manifest: Manifest, session: SessionSource, origin: SourceOrigin) {
     this.manifest = manifest;
-    this.#session = session;
+    sessions.set(this, session);
     if (origin.repo !== undefined) this.repo = origin.repo;
     if (origin.revisionSha !== undefined) this.revisionSha = origin.revisionSha;
-  }
-
-  static {
-    readSession = (loaded) => loaded.#session;
   }
 }
 
@@ -131,7 +136,12 @@ export const pinnedSourceOf = (
   loaded: LoadedManifest,
   options: LoadManifestOptions,
 ): PinnedSource => {
-  const session = readSession(loaded);
+  const session = sessions.get(loaded);
+  if (session === undefined) {
+    throw new Error(
+      "hub: LoadedManifest に取得元が結び付いていない（loadManifest の返り値を作り替えた値は渡せない）",
+    );
+  }
   return session.driver.pin(session.generation, options);
 };
 

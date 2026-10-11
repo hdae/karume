@@ -439,7 +439,7 @@ Deno.test("localDirectory: 取得元ハンドルは不透明（loadManifest が�
   const dist = await buildLocalDist();
   const directory = memoryDirectory(dist.files);
   const source = localDirectory(directory.adapter, { label: LABEL });
-  // 公開面に生えているメンバは 1 つも無い（実装は `#driver` に閉じている）。
+  // 公開面に生えているメンバは 1 つも無い（実装は hub 内部の表に閉じている — `source.ts`）。
   assertEquals(Object.keys(source), []);
   assertEquals(Reflect.ownKeys(source).length, 0);
   const first = await loadManifest(source);

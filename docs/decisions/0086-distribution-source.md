@@ -249,3 +249,10 @@ CacheStorage を通らない）点は決定 5 のまま変わらない。進捗�
 - 範囲: 判定はこれまでどおり ref ごと。越境先だけが相 1 を持たない形は取得元契約の破れとして
   fail loudly のまま。ADR [0070](0070-shard-loading-admission.md) の追記（2026-08-31）にある
   「`prefetchAssets` はローカル取得元では no-op」もこの追記で読み替える。
+
+**決定 6 の内部欄 `#session`（と決定 1 のハンドルの実装欄）は、モジュール内の `WeakMap` に置き換えた**
+（`session.ts` の `sessions`・`source.ts` の `drivers`）。private 欄を外へ読み出す `static`
+ブロックは import 時に走り、bundler は使われていないクラスまで残す（`deno bundle` で確認）。
+横断の不変条件「import 時実行の禁止」を守る側を採った。値が取得元を運ぶ設計・ハンドルが不透明で
+あること・判別が `instanceof` であることは変わらない。型の名目性は、型だけのブランド
+（`declare private readonly brand: never` — 実行時には存在しない）で保つ。
