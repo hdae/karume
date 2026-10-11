@@ -525,7 +525,14 @@ if (!MIRROR_WITH_DRAFTER) {
   );
 }
 
-/** 1 ターンで生成する token 数（短く — 見たいのは列の一致で、受理率ではない）。 */
+/**
+ * 1 ターンで生成する token 数（短く — 見たいのは列の一致で、受理率ではない）。
+ *
+ * 短いので、ターンは EOS（前のターンを閉じる `<turn|>`）より先に上限で止まりうる。そのときの
+ * 応答は閉じておらず、次の差分は閉じていない応答の続き（末尾の token は pendingToken として
+ * 前置される）に積まれる。会話としては不自然だが、門が見るのは基準と同じ操作列での列の一致
+ * なので成り立つ。どちらで止まったかは各ターンの停止の理由としてログに残す。
+ */
 const FORK_TURN_TOKENS = 12;
 
 /**
@@ -572,7 +579,8 @@ Deno.test({
     );
     try {
       const tokenizer = pipeline.tokenizer;
-      // P0 は全体描画、X / Y / Z は差分（前のターンを閉じる札は pendingToken が前置する）。X と Y は
+      // P0 は全体描画、X / Y / Z は差分（前のターンが EOS で止まれば、閉じる札は pendingToken が
+      // 前置する — 上限で止まって閉じていない場合もある〈{@link FORK_TURN_TOKENS}〉）。X と Y は
       // 違う内容で、Z は直前のターンの中身に依る問い（X の行を読む）にする。
       const p0 = gemma4ChatPrompt(tokenizer, [
         { role: "user", content: "Write one short sentence about the sea." },
@@ -624,18 +632,29 @@ Deno.test({
           // 検査: S = P0 → F = S.fork() → S で X → F で Y → S で Z。
           const source = await pipeline.sequence({ speculative });
           let forked: GenerationSequence | undefined;
+          /** 検査側の各ターンの停止の理由（EOS で閉じたか上限で止まったか — ログに残す）。 */
+          const reasons: string[] = [];
+          const turn = async (
+            name: string,
+            sequence: GenerationSequence,
+            prompt: readonly number[],
+          ): Promise<ForkTurn> => {
+            const observed = await forkTurn(sequence, prompt);
+            reasons.push(`${name}=${observed.stop.reason}`);
+            return observed;
+          };
           try {
-            await forkTurn(source, p0);
+            await turn("P0", source, p0);
             forked = await source.fork();
             assertEquals(forked.used, source.used, `${label}: 分岐が会話の位置を引き継いでいない`);
-            assertEquals(await forkTurn(source, x), expectedX, `${label}: 元の X が基準と違う`);
+            assertEquals(await turn("X", source, x), expectedX, `${label}: 元の X が基準と違う`);
             assertEquals(
-              await forkTurn(forked, y),
+              await turn("Y", forked, y),
               expectedY,
               `${label}: 分岐の Y が基準と違う（複製が元の状態を写していない）`,
             );
             assertEquals(
-              await forkTurn(source, z),
+              await turn("Z", source, z),
               expectedZ,
               `${label}: 元の Z が基準と違う（分岐の Y が元の KV を上書きした）`,
             );
@@ -645,7 +664,7 @@ Deno.test({
           }
           console.log(
             `[e2e] gemma4 sequence ⑥ ${label}: 基準 3 本 + 分岐 1 組が一致 / ` +
-              `${(performance.now() - stepStarted).toFixed(0)}ms`,
+              `停止 ${reasons.join(" ")} / ${(performance.now() - stepStarted).toFixed(0)}ms`,
           );
         });
       }
