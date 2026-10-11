@@ -1191,7 +1191,10 @@ const mockPipeline = (options: {
     createSession: () => {
       log.push(`create:${name}`);
       return Promise.resolve({
-        enqueue: () => Promise.resolve(),
+        enqueue: () => {
+          log.push(`enqueue:${name}`);
+          return Promise.resolve();
+        },
         diagnostics: () => ({}),
         dispose: () => {
           log.push(`dispose:${name}`);
@@ -2042,6 +2045,24 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
       assertStrictEquals(error, reason);
       assertEquals(log.filter((entry) => entry.startsWith("create:")), [], `${textEncoder}`);
     }
+  });
+
+  it("VAE の段の開始通知の中の中断は最初のタイルの前で効き、chunk を 1 本も積まずに VAE の Session を畳む", async () => {
+    const { log, generate } = mockPipeline({});
+    const controller = new AbortController();
+    const reason = new Error("中止ボタン（VAE の開始通知）");
+    const error = await assertRejects(() =>
+      generate((event) => {
+        if (event.kind === "stage" && event.component === "vae_decoder" && event.at === "start") {
+          controller.abort(reason);
+        }
+      }, { signal: controller.signal })
+    );
+    assertStrictEquals(error, reason);
+    assertEquals(log.filter((entry) => entry.startsWith("enqueue:")), [], `タイルを積んだ: ${log}`);
+    assertEquals(log.filter((entry) => entry.startsWith("tile:")), []);
+    assert(log.includes("dispose:vae_decoder_first") && log.includes("dispose:vae_decoder_next"));
+    assert(!log.includes("vae_decoder:end"), `中断した段の end を出した: ${log}`);
   });
 
   it("VAE のタイルの間の中断は次のタイルの前で効き、VAE の Session を畳む", async () => {

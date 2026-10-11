@@ -283,6 +283,9 @@ export const decodeWanVaeStage = async (
     first = await state.vaeFirst.createSession(state.gpu, {});
     next = await state.vaeNext.createSession(state.gpu, {});
     caches = await WanVaeChunkCaches.create(state.gpu, layout);
+    // 最初のタイルの前（開始通知の中や資源の確保中に届いた中断はここで効く — text / encoder / DiT の段と
+    // 同じく、資源を取った後・最初の GPU 作業の前に見る。タイルの間の検査は下の callback）。
+    await settleAbort(signal);
     const sessions = { first, next };
     frames = await decodeWanVaeTiled(
       state.gpu,
