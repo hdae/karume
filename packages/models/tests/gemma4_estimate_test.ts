@@ -46,6 +46,17 @@ describe("gemma4 の見積りが本体へ渡す generation の指定", () => {
     });
     assertEquals(target.scenarios, [{ name: "verify", chunkLength: 4, bindings: { R: 3 } }]);
   });
+
+  it("仮定の chunkLength が pipeline の値より大きく k+1 が梯子の最大段を超えると、verify は仮定の chunk 長で流す", () => {
+    // pipeline の chunk 長 16 で丸めると、見積る context（chunk 長 32・梯子 [4, 8]）の許可集合
+    // {1, 4, 8, 32} に無い 16 を渡し、見積りが ExecutionError になる。
+    const { target } = gemma4EstimateGenerations(wiring(), {
+      capacity: 64,
+      chunkLength: 32,
+      verifyQueryLength: 10,
+    });
+    assertEquals(target.scenarios, [{ name: "verify", chunkLength: 32, bindings: { R: 10 } }]);
+  });
 });
 
 describe("gemma4 の見積りが drafter（借り手 context）へ渡す generation の指定", () => {

@@ -636,8 +636,14 @@ const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
  *
  * MUST: 昇順の前提で先頭一致を採る（ここは順序を検査しない — 検査は
  * `createGenerationProgram` が通す runtime の `assertChunkBuckets` が持つ）。
+ *
+ * 引数を 2 欄に狭めてあるのは、見積り（`gemma4EstimateGenerations`）が pipeline の配線ではなく
+ * **仮定の** chunk 長と梯子に対して同じ規則で行数を選ぶため（実 run と見積りで規則を二重に持たない）。
  */
-export const physicalChunkRows = (queryLength: number, program: GenerationWiring): number =>
+export const physicalChunkRows = (
+  queryLength: number,
+  program: Pick<GenerationWiring, "chunkLength" | "chunkBuckets">,
+): number =>
   queryLength === 1
     ? 1
     : program.chunkBuckets.find((rows) => rows >= queryLength) ?? program.chunkLength;

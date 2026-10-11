@@ -829,20 +829,27 @@ export const gemma4EstimateGenerations = (
 ): Gemma4EstimateGenerations => {
   const bindings = { [wiring.capacitySymbol]: shape.capacity };
   const verifyQueryLength = shape.verifyQueryLength;
+  // MUST: sequence が流すバケット形を渡す（渡さないと、枚数の境界でバケット形が prefill 形
+  // より大きいときにピークが過小になる — ADR 0095 追記 2026-10-10）。
+  const chunkBuckets = wiring.chunkBuckets.filter((bucketRows) => bucketRows < shape.chunkLength);
   return {
     target: {
       chunkLength: shape.chunkLength,
       bindings,
-      // MUST: sequence が流すバケット形を渡す（渡さないと、枚数の境界でバケット形が prefill 形
-      // より大きいときにピークが過小になる — ADR 0095 追記 2026-10-10）。
-      chunkBuckets: wiring.chunkBuckets.filter((bucketRows) => bucketRows < shape.chunkLength),
+      chunkBuckets,
       // 投機の verify は `k+1` 行を 1 run で流す形（prefill / decode のどちらでもない）。
       // R は k+1・物理行数 M は sequence が流す形と同じ（バケットへ丸めた行数 —
       // `chunkLength: k+1` を名乗ると k < 3 で実 run より小さい形を見積る）。
+      // MUST: 丸めは pipeline の配線ではなく**見積る** context（仮定の chunk 長と絞った梯子）に
+      // 対して行う。k+1 が梯子の最大段を超えると丸め先は chunk 長になり、pipeline の chunk 長は
+      // 仮定の context の許可集合 {1, 梯子, 仮定の chunk 長} に無いので、見積りが例外になる。
       ...(verifyQueryLength === undefined ? {} : {
         scenarios: [{
           name: "verify",
-          chunkLength: physicalChunkRows(verifyQueryLength, wiring),
+          chunkLength: physicalChunkRows(verifyQueryLength, {
+            chunkLength: shape.chunkLength,
+            chunkBuckets,
+          }),
           bindings: { [wiring.rowSymbol]: verifyQueryLength },
         }],
       }),
