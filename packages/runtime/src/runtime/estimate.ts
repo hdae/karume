@@ -41,7 +41,7 @@ import { parseDim, solveDim } from "../format/dims.ts";
 import type { IrDim, IrGraph } from "../format/ir.ts";
 import { toSizeClass } from "../gpu/arena.ts";
 import { parseStorageRoles } from "../gpu/pipeline-cache.ts";
-import { numel, RUNTIME_SUPPORT, stateWindow, topkK } from "../ops.ts";
+import { numel, RUNTIME_SUPPORT, stateReadonly, stateWindow, topkK } from "../ops.ts";
 import { assertRuntimeSupport } from "../ops/support.ts";
 import { type FusedStep, planAliases, planFusions, rowBlockLimit } from "./fusion.ts";
 import {
@@ -76,6 +76,7 @@ import {
   type TransientTempSpec,
 } from "./transient-plan.ts";
 import {
+  type ComputePrecision,
   DEFAULT_PLAN_BACKING_BUDGET_BYTES,
   type GenerationContextSpec,
   STATE_ATTENTION_REDUCES,
@@ -88,6 +89,16 @@ import {
 } from "../kernels/argmax.ts";
 import { assertChunkRowsAllowed } from "./recipe.ts";
 import { planStateAttention, type StateAttentionBlock } from "./state-attention-plan.ts";
+import { attentionRoute, type AttentionSeats } from "./attention-route.ts";
+import {
+  attentionI8a8TempBytes,
+  attentionScoreElementBytes,
+  fusedAttentionViolation,
+  planAttentionBlocks,
+  stateAttentionVariantViolation,
+} from "./recipe-builders/attention.ts";
+import { sessionOptionsViolation } from "./session-build.ts";
+import type { ScoreStorage } from "../kernels/score-storage.ts";
 import { planWeightBuffers, type WeightResidency } from "./weight-residency.ts";
 
 /**
@@ -305,6 +316,21 @@ export type EstimateOptions = {
    * 予算違反を事前に知る手段（実行では重みを上げた後の run で落ちる）。
    */
   readonly attentionRowBlockMaxBytes?: number;
+  /**
+   * 融合 attention の計算形（`SessionOptions.attentionCompute` と同じ値・省略は runtime の既定と同じ
+   * `"f32"` — `stateAttentionReduce` と同じ前例）。
+   *
+   * 効くのは融合 attention op のノード内一時（S の 1 要素の幅・i8a8 の量子化の一時の有無 — ADR 0124
+   * 決定 7）。実行が拒否する組（mask × a8・GQA × a8・states 形 × f32 以外）は、実行と同じ判定・同じ文言で
+   * fail loudly（見積りだけが数を返さない）。
+   * MUST: 綴りと組合せ（`attentionScoreStorage` との c16 × s16）は `sessionOptionsViolation` と同じ門。
+   */
+  readonly attentionCompute?: ComputePrecision;
+  /**
+   * 融合 attention の S の格納形（`SessionOptions.attentionScoreStorage` と同じ値・省略は `"f32"`）。
+   * 適格判定（`attentionRoute`）は実行と同じ 1 本で、非適格の形は f32 格納で数える。
+   */
+  readonly attentionScoreStorage?: ScoreStorage;
 };
 
 /**
@@ -791,6 +817,99 @@ type TransientKnobs = {
   readonly stateAttentionReduce: StateAttentionReduce;
   /** 行ブロックの一時 1 本ごとの予算（`undefined` = 予算なし — ADR 0124）。 */
   readonly attentionRowBlockMaxBytes: number | undefined;
+  /** 融合 attention の計算形と S の格納形（省略値は代入済み）。 */
+  readonly seats: AttentionSeats;
+};
+
+/**
+ * 融合 attention op（states 欄なし — ADR 0023）1 ノードのノード内一時と dispatch の読み書き（ADR 0124
+ * 決定 7）。実行（recipe-builders/attention.ts の `buildAttention`）の確保と dispatch の並びを写す:
+ *
+ * 1. i8a8 の ①QK（`route.qk`）: `qq` / `qs` / `kq` / `ks` を確保し、q と k を量子化する 2 dispatch
+ * 2. i8a8 の ③PV（`route.pv`）: `vt` / `vq` / `vs` を確保し、v の permute と Vᵀ の量子化の 2 dispatch
+ * 3. 行ブロックごとに S と行統計を確保し、①QK → ②行統計 → ③PV の 3 dispatch の後に返す
+ * 4. 量子化の一時はノード末尾（最後の ③PV の後）に返す
+ *
+ * MUST: 大きさと枚数は実行と同じ純関数（`attentionRoute`・`attentionScoreElementBytes`・
+ * `planAttentionBlocks`・`attentionI8a8TempBytes`・`rowBlockLimit`）だけから引く。組合せの門も同じ
+ * `fusedAttentionViolation` で、実行が拒否する形には数を返さない。
+ * NOTE: 束縛上限は中間の配置と同じ値（`EstimateOptions.maxStorageBufferBindingSize` — 無指定なら
+ * WebGPU core 既定）。行ブロック attention の窓と同じ扱いで、states 形のように必須にはしない（既存の
+ * 呼び手が上限を渡さずに見積れる形を保つ）。
+ */
+const fusedAttentionProgram = (
+  node: NodePlan,
+  reads: readonly TransientRef[],
+  outputRefs: readonly TransientRef[],
+  bindingLimit: number,
+  knobs: TransientKnobs,
+): { readonly temps: TransientTempSpec[]; readonly dispatches: TransientDispatchSpec[] } => {
+  const [q, k, v] = node.inputShapes;
+  const shape = { batch: q[0] * q[1], rows: q[2], cols: k[2], depth: q[3] };
+  const where = `attention [${q.join(",")}] × [${k.join(",")}] × [${v.join(",")}]`;
+  const { seats } = knobs;
+  const route = attentionRoute(seats, shape.depth, shape.cols);
+  const [qRef, kRef, vRef, maskRef] = reads;
+  const violation = fusedAttentionViolation(
+    where,
+    { heads: q[1], kvHeads: k[1], depth: shape.depth, cols: shape.cols },
+    { i8a8: seats.attentionCompute === "a8", mask: maskRef !== undefined, route },
+  );
+  if (violation !== undefined) throw new ExecutionError(violation);
+  const blocks = planAttentionBlocks(
+    { ...shape, scoreBytes: attentionScoreElementBytes(seats.attentionCompute, route) },
+    rowBlockLimit(bindingLimit, knobs.attentionRowBlockMaxBytes),
+  );
+  const qkI8a8 = route.qk === "i8a8";
+  const pvI8a8 = route.pv === "i8a8";
+  const last = (qkI8a8 ? 2 : 0) + (pvI8a8 ? 2 : 0) + blocks.length * 3 - 1;
+  const temps: TransientTempSpec[] = [];
+  const dispatches: TransientDispatchSpec[] = [];
+  const alloc = (byteLength: number, releaseAfter: number): TransientRef => {
+    temps.push({ byteLength, allocBefore: dispatches.length, releaseAfter });
+    return { kind: "temp", id: temps.length - 1 };
+  };
+  const quantized = attentionI8a8TempBytes(shape);
+  const qk = qkI8a8
+    ? {
+      qq: alloc(quantized.qk.qq, last),
+      qs: alloc(quantized.qk.qs, last),
+      kq: alloc(quantized.qk.kq, last),
+      ks: alloc(quantized.qk.ks, last),
+    }
+    : undefined;
+  if (qk !== undefined) {
+    dispatches.push({ reads: [qRef], writes: [qk.qq, qk.qs] });
+    dispatches.push({ reads: [kRef], writes: [qk.kq, qk.ks] });
+  }
+  const pv = pvI8a8
+    ? {
+      vt: alloc(quantized.pv.vt, last),
+      vq: alloc(quantized.pv.vq, last),
+      vs: alloc(quantized.pv.vs, last),
+    }
+    : undefined;
+  if (pv !== undefined) {
+    dispatches.push({ reads: [vRef], writes: [pv.vt] });
+    dispatches.push({ reads: [pv.vt], writes: [pv.vq, pv.vs] });
+  }
+  for (const block of blocks) {
+    const end = dispatches.length + 2;
+    const scores = alloc(block.scoreBytes, end);
+    const rowStats = alloc(block.statsBytes, end);
+    dispatches.push({
+      reads: qk === undefined
+        ? (maskRef === undefined ? [qRef, kRef] : [qRef, kRef, maskRef])
+        : [qk.qq, qk.kq, qk.qs, qk.ks],
+      writes: [scores],
+    });
+    dispatches.push({ reads: [scores], writes: [rowStats] });
+    dispatches.push({
+      reads: pv === undefined ? [scores, vRef, rowStats] : [scores, pv.vq, rowStats, pv.vs],
+      writes: outputRefs,
+    });
+  }
+  return { temps, dispatches };
 };
 
 /**
@@ -802,9 +921,10 @@ type TransientKnobs = {
  * 融合ステップに置き換える（ADR 0093 追記 2026-10-10 — {@link rowBlockAttentionSteps}）。他の融合が
  * 畳む中間と融合ルールの一時は `unaccounted` の側。素のノードの dispatch は 1 ノード 1 本の近似
  * （読み = `ins`・書き = `outs`）で、usage scope の別領域規則が効く相手を実行相と同じ向きで与える。
- * states 形 attention だけは実行相の 3 dispatch（①qk が scores を書く → ②stats が scores を読み
- * 行統計を書く → ③pv が両方を読み出力を書く）を行ブロックごとに写す — 一時同士の重なりと領域の
- * 分かれ方が総和に効くため。
+ * states 形 attention と融合 attention op（states 欄なし — {@link fusedAttentionProgram}）は実行相の
+ * 3 dispatch（①qk が scores を書く → ②stats が scores を読み行統計を書く → ③pv が両方を読み出力を書く）
+ * を行ブロックごとに写す — 一時同士の重なりと領域の分かれ方が総和に効くため（融合 attention は i8a8 の
+ * 量子化の一時と dispatch も写す — ADR 0124 決定 7）。
  * MUST: 上限超過（slot 実寸 > 束縛上限）は計画関数が**全件列挙して**落とす（ADR 0093 決定 5）。
  * 見積りの入口でも同じ検査が走るので、「この device では中間が束ねられない」形は数を返さず
  * fail loudly になる。検査が当たるのは融合後に実際に束縛するバッファ（行ブロック attention では
@@ -853,6 +973,17 @@ const transientSlotBytes = (
       // スロットから読み、今 step の k / v 入力を持たない。読みの参照は**在る入力だけ**にする
       // （無い名前を参照に載せると transient 計画が未定義の参照で落ちる）。
       const [q, k, v] = reads;
+      // 数値変種 × states 形は実行が一時を取る前に拒否する（実行と同じ判定・同じ文言）。
+      const [qShape, kShape] = node.inputShapes;
+      const readonly = stateReadonly(node.node.attrs, `nodes (${node.node.op})`);
+      const variantViolation = stateAttentionVariantViolation(
+        readonly
+          ? `attention (readonly) [${qShape.join(",")}]`
+          : `attention (states) [${qShape.join(",")}] × [${kShape.join(",")}]`,
+        readonly ? "readonly" : "states",
+        knobs.seats,
+      );
+      if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
       const blocks = stateAttentionTemps(
         node,
         stateShapes,
@@ -879,6 +1010,11 @@ const transientSlotBytes = (
           });
         }
       }
+    } else if (node.contract.kind === "attention") {
+      // 融合 attention op（states 欄なし）のノード内一時（S・行統計・i8a8 の量子化の一時）。
+      const program = fusedAttentionProgram(node, reads, outputRefs, bindingLimit, knobs);
+      temps.push(...program.temps);
+      dispatches.push(...program.dispatches);
     } else if (!isAlias && selectionSplitTempBytes(node) > 0) {
       // 部分最大から最小添字へ縮約する。topkはmergeで元入力の値ビットも読む。
       const partial: TransientRef = { kind: "temp", id: temps.length };
@@ -1021,6 +1157,17 @@ export const estimateGraphMemory = (
       } は正の安全な整数でなければならない`,
     );
   }
+  // 融合 attention の計算形と S の格納形は Session 構築と同じ門（綴り・c16 × s16 の組）で見る
+  // （ADR 0124 決定 7 — Session が作れない席で見積りだけが数を返さない）。
+  const seatViolation = sessionOptionsViolation({
+    attentionCompute: options.attentionCompute,
+    attentionScoreStorage: options.attentionScoreStorage,
+  });
+  if (seatViolation !== undefined) throw new ExecutionError(seatViolation);
+  const seats: AttentionSeats = {
+    attentionCompute: options.attentionCompute ?? "f32",
+    attentionScoreStorage: options.attentionScoreStorage ?? "f32",
+  };
   const chunkDims = chunkRowDims(graph);
   const chunkSymbols = new Set(chunkDims.map((dim) => parseDim(dim).sym));
   const bindings = planBindings(graph, options.bindings, chunkSymbols);
@@ -1123,7 +1270,7 @@ export const estimateGraphMemory = (
         state.shapes,
         options.maxStorageBufferBindingSize,
         options.maxBufferSize,
-        { stateAttentionReduce, attentionRowBlockMaxBytes },
+        { stateAttentionReduce, attentionRowBlockMaxBytes, seats },
       ),
     };
   };

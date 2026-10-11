@@ -1,14 +1,15 @@
 // メモリ必要量 estimator（ADR 0070 決定 5）の実 GPU 突合（GPU に依らない門は estimate_test.ts）。
 //
 // 厳密一致を主張できるのは診断が実測している 2 カテゴリ（圧縮常駐・展開）と state 容量、
-// 融合が 1 本も掛からない states 形 attention の slot 表、および行ブロック attention の窓だけの
-// slot 表。行ブロック attention の窓は見積りが融合後の形で数えるので突合できる（ADR 0093 追記
-// 2026-10-10）。それ以外の中間ピークは**近似**なので突合しない（他の融合が中間を消す — estimator
+// 融合が 1 本も掛からない states 形 attention の slot 表、行ブロック attention の窓だけの
+// slot 表、および融合 attention op 1 ノードだけの slot 表。行ブロック attention の窓は見積りが
+// 融合後の形で数えるので突合できる（ADR 0093 追記 2026-10-10）。融合 attention op のノード内一時
+// （S・行統計・i8a8 の量子化の一時）は見積りが実行と同じ純関数で数える（ADR 0124 決定 7）。それ以外の中間ピークは**近似**なので突合しない（他の融合が中間を消す — estimator
 // の unaccounted 欄が認めている差）。アダプタ無しは明示 SKIP。
 
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
-import type { PreparedModel } from "../src/runtime/executor.ts";
+import type { PreparedModel, SessionOptions } from "../src/runtime/executor.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
 import {
@@ -20,7 +21,12 @@ import {
   stateModel,
   weight,
 } from "./helpers/estimate-graphs.ts";
-import { type DeclarationJson, f32Bytes, fill } from "./helpers/model-fixture.ts";
+import {
+  type DeclarationJson,
+  f32Bytes,
+  fill,
+  singleOpDeclaration,
+} from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 
@@ -256,6 +262,114 @@ Deno.test({
   ignore: !GPU_AVAILABLE,
   // 6144 ÷ 512 = 12 行／枚 → ceil(64 / 12) = 6 枚を等分すると 11 行 × 4 枚 + 10 行 × 2 枚。
   fn: () => assertRowBlockAttentionMatchesEstimate({ limitCap: 6144, expectedBlocks: 6 }),
+});
+
+/**
+ * 融合 attention op（states 欄なし — ADR 0023）1 ノードのグラフの形。DiT の self-attention を縮めた形で、
+ * D % 4 == 0 かつ N % 4 == 0 なので a8 は ①③ とも i8a8・s16 も適格（量子化の一時と permute が全部出る）。
+ */
+const FUSED = { b: 1, h: 4, m: 64, n: 64, d: 128 } as const;
+
+/**
+ * 融合 attention op のノード内一時を見積りが実行と同じに数えることの実測門（ADR 0124 決定 7）。
+ *
+ * グラフは attention 1 ノードだけ（他の融合も別名も成立しない — 上の states 形と同じ条件）なので、
+ * `workspaceBytes` は slot 表の総バイト = `planBacking.residentBytes` と**厳密一致**する。見積りは
+ * 実行（`buildAttention`）の確保と dispatch の並びを写すので、一時の寿命・読み書きの向き・量子化の
+ * 一時の大きさのどれかが写しからずれれば、ここが例外なしで割れる。予算（`attentionRowBlockMaxBytes`）
+ * を掛けた形では、枚数の導出も実行と同じであることを同時に見る。
+ * MUST: 予算を掛けた形は枚数を先に固定する（`expectedBlocks` — 1 枚に落ちた形で緑になると「複数枚での
+ * 一致」を見たことにならない）。枚数の観測は計測に依らない census（行窓の ①QK のキーの dispatch 本数）。
+ */
+const assertFusedAttentionMatchesEstimate = async (
+  variant: {
+    readonly options: SessionOptions;
+    readonly mask?: boolean;
+    readonly expectedBlocks: number;
+  },
+): Promise<void> => {
+  const { b, h, m, n, d } = FUSED;
+  const shapes = [
+    [b, h, m, d],
+    [b, h, n, d],
+    [b, h, n, d],
+    ...(variant.mask ? [[1, 1, m, n]] : []),
+  ];
+  const model = openGraph(
+    singleOpDeclaration("attention", shapes, [[b, h, m, d]], {
+      attrs: { scale: 1 / Math.sqrt(d) },
+    }),
+  );
+  const gpu = await acquireGpu();
+  try {
+    const { scenarios } = model.estimate({
+      maxStorageBufferBindingSize: gpu.limits.maxStorageBufferBindingSize,
+      maxBufferSize: gpu.limits.maxBufferSize,
+      ...variant.options,
+    });
+    assertEquals(scenarios.map((scenario) => scenario.name), ["run"]);
+    const session = await model.createContainerSession(gpu, variant.options);
+    try {
+      const inputs = Object.fromEntries(
+        shapes.map((shape, index) => [
+          `x${index}`,
+          fill(shape, (i) => index === 3 ? ((i % 4 === 3) ? -1 : 0) : ((i % (5 + index)) - 2) / 4),
+        ]),
+      );
+      // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+      for (let step = 0; step < 2; step += 1) await session.run(inputs);
+      const diagnostics = session.diagnostics();
+      const windowedQk = (diagnostics.lastRunPipelines ?? []).filter(({ key }) =>
+        key.startsWith("attention_qk") && key.includes(":rwa")
+      );
+      assertEquals(
+        windowedQk.reduce((total, { dispatchCount }) => total + dispatchCount, 0),
+        variant.expectedBlocks === 1 ? 0 : variant.expectedBlocks,
+        "行ブロックの枚数（1 枚は行窓を立てない）",
+      );
+      assertEquals(diagnostics.planBacking.residentBytes, scenarios[0].workspaceBytes);
+    } finally {
+      await session.dispose();
+    }
+  } finally {
+    gpu.destroy();
+  }
+};
+
+Deno.test({
+  name: "融合 attention op の中間総量が slot 表と厳密一致する（f32・予算なし・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  fn: () => assertFusedAttentionMatchesEstimate({ options: {}, expectedBlocks: 1 }),
+});
+
+Deno.test({
+  name:
+    "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // S の 1 行 = 4 × 64 × 4 = 1,024B。予算 16 KiB は 16 行 / 枚 → M = 64 は 4 枚。
+  fn: () =>
+    assertFusedAttentionMatchesEstimate({
+      options: { attentionRowBlockMaxBytes: 16 * 1024 },
+      mask: true,
+      expectedBlocks: 4,
+    }),
+});
+
+Deno.test({
+  name:
+    "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
+  ignore: !GPU_AVAILABLE,
+  // s16 の S の 1 行 = 4 × 64 × 2 = 512B。予算 16 KiB は 32 行 / 枚 → 2 枚。i8a8 の量子化の一時
+  // （qq / qs / kq / ks / vt / vq / vs）と permute・量子化の 4 dispatch がループの外に並ぶ形。
+  fn: () =>
+    assertFusedAttentionMatchesEstimate({
+      options: {
+        attentionCompute: "a8",
+        attentionScoreStorage: "f16",
+        attentionRowBlockMaxBytes: 16 * 1024,
+      },
+      expectedBlocks: 2,
+    }),
 });
 
 // ---------------------------------------------------------------------------

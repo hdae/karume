@@ -23,6 +23,7 @@ import {
   type AdmissionReport,
   type AdmissionScenario,
   estimateGraphMemory,
+  type EstimateOptions,
 } from "../src/runtime/estimate.ts";
 import type { PreparedModel } from "../src/runtime/executor.ts";
 import { type ExecStep, planFusions } from "../src/runtime/fusion.ts";
@@ -43,7 +44,7 @@ import {
   weight,
 } from "./helpers/estimate-graphs.ts";
 import { mergeGraph, type StorageMap } from "./helpers/merged-graph.ts";
-import { type DeclarationJson, f32Bytes } from "./helpers/model-fixture.ts";
+import { type DeclarationJson, f32Bytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 
 const i32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Int32Array.from(values).buffer);
@@ -1293,6 +1294,114 @@ describe("分解 attention の中間（融合後に束縛するバッファで�
         () => openGraph(decomposedAttentionGraph(LARGE_SCORES, true)).estimate(),
         ExecutionError,
         "'s3_alias' 137625600B / 'masked' 137625600B / 'p4' 137625600B",
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 融合 attention op のノード内一時（ADR 0124 決定 7）
+// ---------------------------------------------------------------------------
+
+/**
+ * 融合 attention op（states 欄なし）1 ノードのグラフ。q `[1,2,8,4]`・k / v `[1,2,6,4]`（B·H = 2・M = 8・
+ * N = 6・D = 4）。D % 4 == 0 で N % 4 != 0 なので、a8 は ①QK だけが i8a8・s16 は不適格（f32 格納へ縮退）。
+ */
+const fusedAttentionModel = (mask = false): PreparedModel =>
+  openGraph(
+    singleOpDeclaration(
+      "attention",
+      [[1, 2, 8, 4], [1, 2, 6, 4], [1, 2, 6, 4], ...(mask ? [[1, 1, 8, 6]] : [])],
+      [[1, 2, 8, 4]],
+      { attrs: { scale: 0.5 } },
+    ),
+  );
+
+describe("融合 attention op のノード内一時を実行と同じ純関数で数える", () => {
+  // 出力 y = 2×8×4×4 = 256B。①QK が S を書き、②が S を読んで行統計を書き、③が S と行統計を読んで y を
+  // 書くので、S・行統計・y は互いに同じ領域に置けない（usage scope — 3 領域）。
+
+  it("f32 は S 2×8×6×4 = 384B と行統計 2×8×2×4 = 128B を出力 256B に足す", () => {
+    assertEquals(runScenario(fusedAttentionModel().estimate()).workspaceBytes, 256 + 384 + 128);
+  });
+
+  it("予算で割ると行ブロック 1 枚ぶんの一時だけが数えられる（1 行 48B → 予算 192B は 4 行 × 2 枚・96B は 2 行 × 4 枚）", () => {
+    const at = (budget: number): number =>
+      runScenario(fusedAttentionModel().estimate({ attentionRowBlockMaxBytes: budget }))
+        .workspaceBytes;
+    // 4 行: S 2×4×6×4 = 192 / 行統計 64。2 行: S 96 / 行統計 32。
+    assertEquals(at(192), 256 + 192 + 64);
+    assertEquals(at(96), 256 + 96 + 32);
+  });
+
+  it("f16 計算は S を 2B で数え、s16 は不適格な形（N % 4 != 0）で f32 格納のまま数える", () => {
+    assertEquals(
+      runScenario(fusedAttentionModel().estimate({ attentionCompute: "f16" })).workspaceBytes,
+      256 + 192 + 128,
+    );
+    assertEquals(
+      runScenario(fusedAttentionModel().estimate({ attentionScoreStorage: "f16" })).workspaceBytes,
+      256 + 384 + 128,
+    );
+  });
+
+  it("a8 は ①QK の量子化の一時（qq / qs / kq / ks）をノード末尾まで数える", () => {
+    // qq 2×8×4 = 64・qs 2×8×4 = 64・kq 2×6×4 = 48・ks 2×6×4 = 48（③PV は N % 4 != 0 で f32 のまま）。
+    // ①QK がこの 4 本を読んで S を書くので S とは別の領域。行統計・y とは衝突しないので y の領域の後ろへ
+    // 256B 整列で並ぶ: y 256 + qq（256〜）+ qs（512〜）+ kq（768〜）+ ks（1,024〜1,072）= 1,072B。
+    // S の領域 384B と行統計の領域 128B を足して 1,584B。
+    assertEquals(
+      runScenario(fusedAttentionModel().estimate({ attentionCompute: "a8" })).workspaceBytes,
+      384 + 1072 + 128,
+    );
+  });
+
+  it("加算 mask は ①QK の読みが 1 本増えるだけで一時は増えない", () => {
+    assertEquals(
+      runScenario(fusedAttentionModel(true).estimate()).workspaceBytes,
+      256 + 384 + 128,
+    );
+  });
+
+  describe("実行が拒否する組には数を返さない（実行と同じ判定・同じ文言）", () => {
+    it("mask × a8", () => {
+      assertThrows(
+        () => fusedAttentionModel(true).estimate({ attentionCompute: "a8" }),
+        ExecutionError,
+        "加算 mask 付きの attention は attentionCompute 'a8' と組めない",
+      );
+    });
+
+    it("states 形 × f32 以外", () => {
+      assertThrows(
+        () =>
+          openGraph(stateAttentionGraph()).estimate({
+            generation: { chunkLength: 4, bindings: { C: 16 } },
+            maxStorageBufferBindingSize: 1 << 20,
+            attentionScoreStorage: "f16",
+          }),
+        ExecutionError,
+        "states 形の attention は attentionScoreStorage 'f16' と組めない",
+      );
+    });
+
+    it("綴りの外と c16 × s16 は Session 構築と同じ門", () => {
+      // 型の外から来る呼び手（JS の消費者）の綴り — 改名前の 'i8a8'。
+      const options: EstimateOptions = {};
+      Object.defineProperty(options, "attentionCompute", { value: "i8a8", enumerable: true });
+      assertThrows(
+        () => fusedAttentionModel().estimate(options),
+        ExecutionError,
+        "attentionCompute",
+      );
+      assertThrows(
+        () =>
+          fusedAttentionModel().estimate({
+            attentionCompute: "f16",
+            attentionScoreStorage: "f16",
+          }),
+        ExecutionError,
+        "同時に指定できない",
       );
     });
   });

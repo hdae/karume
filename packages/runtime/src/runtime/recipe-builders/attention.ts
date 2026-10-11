@@ -50,7 +50,7 @@ import {
   stridedWgsl,
 } from "../../codegen/strided.ts";
 import { type ScoreStorage, scoreStorageBytes } from "../../kernels/score-storage.ts";
-import { attentionRoute } from "../attention-route.ts";
+import { attentionRoute, type AttentionSeats } from "../attention-route.ts";
 import { attentionScale, stateWindow } from "../../ops.ts";
 import { gemmTileM, gemmTileN } from "../../kernels/gemm-geometry.ts";
 import { type I8a8Geometry, i8a8TileM, i8a8TileN } from "../../kernels/i8a8-geometry.ts";
@@ -109,11 +109,12 @@ import {
 } from "../../kernels/state-attention.ts";
 import { stateStatsPvKey, stateStatsPvWgsl } from "../../kernels/state-attention-stats-pv.ts";
 import type { StorageRoles } from "../../gpu/pipeline-cache.ts";
+import type { ComputePrecision } from "../session-types.ts";
 import type { RecipeBuildFace, StateBuildContext } from "../recipe-builder.ts";
 import { PARAMS_STORAGE_USAGE, PARAMS_UNIFORM_USAGE } from "./params-usage.ts";
 
 /** 融合 attention の解決済み形（B·H を畳んだバッチ軸 / クエリ行 M / キー列 N / head 幅 D）。 */
-type AttentionShape = {
+export type AttentionShape = {
   readonly batch: number;
   readonly rows: number;
   readonly cols: number;
@@ -207,6 +208,138 @@ export const planAttentionBlocks = (
 };
 
 /**
+ * 融合 attention の S の 1 要素のバイト数（純関数）。f16 計算は S を `array<f16>` で持つ（2 B）・それ以外は
+ * S の格納形（{@link attentionRoute} が決めた `route.score` — s16 なら 2 B・f32 なら 4 B）。
+ *
+ * MUST: 実行（{@link buildAttention}）と見積り（estimate.ts — ADR 0124 決定 7）はこの 1 本から引く。
+ */
+export const attentionScoreElementBytes = (
+  attentionCompute: ComputePrecision,
+  route: Pick<ReturnType<typeof attentionRoute>, "score">,
+): number => attentionCompute === "f16" ? 2 : scoreStorageBytes(route.score);
+
+/**
+ * 融合 attention の i8a8 の量子化の一時のバイト数（純関数）。①QK 側が `qq` / `qs` / `kq` / `ks`、
+ * ③PV 側が `vt` / `vq` / `vs`。どれも行ブロックのループの外で確保し、ノード末尾まで生きる。
+ *
+ * MUST: 実行（`prepareAttentionQkI8a8` / `prepareAttentionPvI8a8`）と見積り（estimate.ts — ADR 0124
+ * 決定 7）はこの 1 本から引く（式を書き直すと、片方だけ直された実装に対して見積りが別の数を主張し
+ * 続ける）。i8a8 は GQA と組めない（{@link fusedAttentionViolation}）ので、k / v 側も q 側の `B·H` で数える。
+ */
+export const attentionI8a8TempBytes = (shape: AttentionShape): {
+  readonly qk: {
+    readonly qq: number;
+    readonly qs: number;
+    readonly kq: number;
+    readonly ks: number;
+  };
+  readonly pv: { readonly vt: number; readonly vq: number; readonly vs: number };
+} => {
+  const { batch, rows, cols, depth } = shape;
+  return {
+    // 量子化した q / k（i8 を 4 詰め）と per-token scale。
+    qk: {
+      qq: Math.max(4, batch * rows * depth),
+      qs: Math.max(4, batch * rows * 4),
+      kq: Math.max(4, batch * cols * depth),
+      ks: Math.max(4, batch * cols * 4),
+    },
+    // Vᵀ（f32・permute の実体化）と、その量子化結果。
+    pv: {
+      vt: Math.max(4, batch * depth * cols * 4),
+      vq: Math.max(4, batch * depth * cols),
+      vs: Math.max(4, batch * depth * 4),
+    },
+  };
+};
+
+/**
+ * 融合 attention の組合せの門（違反の文言 — 無ければ `undefined`）。実行（{@link buildAttention}）は
+ * 一時を取る前に、見積り（estimate.ts — ADR 0124 決定 7）は数える前に同じ 1 本で見る（実行が拒否する
+ * 組に見積りだけが数を返さないため）。
+ *
+ * - mask × a8: ①QK の i8a8 変種は mask の epilogue を持たない（ADR 0023 / docs/limitations.md）。
+ * - GQA × a8: 未対応（ADR 0067 決定 3）。
+ * - i8a8 の i32 縮約の門: ① は D・③ は N が {@link LINEAR_I8A8_MAX_K} を超えると i32 が巻き戻る。
+ *
+ * MUST: mask × a8 と GQA × a8 は**要求されたモード**（`i8a8`）で見る — `route`（D % 4 / N % 4 の
+ * 適格判定込み）で見ると、縮退する形だけが拒否をすり抜け、f32 の ①QK と i8a8 の ③PV の混成で走る。
+ * 縮約の門は実際に i8a8 を通る段（`route`）だけに掛ける。
+ */
+export const fusedAttentionViolation = (
+  where: string,
+  shape: {
+    /** q 側の head 数 `H`。 */
+    readonly heads: number;
+    /** k / v 側の head 数 `Hkv`（`H` と違えば GQA）。 */
+    readonly kvHeads: number;
+    readonly depth: number;
+    readonly cols: number;
+  },
+  request: {
+    readonly i8a8: boolean;
+    readonly mask: boolean;
+    readonly route: Pick<ReturnType<typeof attentionRoute>, "qk" | "pv">;
+  },
+): string | undefined => {
+  const { heads, kvHeads, depth, cols } = shape;
+  const { i8a8, mask, route } = request;
+  if (mask && i8a8) {
+    return `${where}: 加算 mask 付きの attention は attentionCompute 'a8' と組めない` +
+      "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +
+      "'f16' にすること）";
+  }
+  const kvRepeat = heads / kvHeads;
+  // DECIDED: GQA × i8a8 は fail loudly で開始する（docs/decisions/0067 決定 3）。i8a8 は
+  // head 基底が 5 本（src/kernels/attention-i8a8.ts）で、K / V の量子化・確保も `B·H` 前提
+  // なので、GQA 形をそのまま流すと量子化バッファの取り違えになる。
+  // MUST: 黙って f32 経路へ落とさない（ADR 0058 決定 3 — 性能が静かに変わる）。
+  if (kvRepeat > 1 && i8a8) {
+    return `${where}: GQA（H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
+      "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）";
+  }
+  // MUST: 縮約の門は fail loudly（黙って通すと i32 の巻き戻りで符号ごと化ける。実測形の
+  // D ≤ 384・N ≤ 16,384 に対して門は桁で余裕があるが、置かないと退行の受け皿が消える）。
+  if (route.qk === "i8a8" && depth > LINEAR_I8A8_MAX_K) {
+    return `${where}: D=${depth} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
+      "（attentionCompute を 'f32' にすること）";
+  }
+  if (route.pv === "i8a8" && cols > LINEAR_I8A8_MAX_K) {
+    return `${where}: N=${cols} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
+      "（attentionCompute を 'f32' にすること）";
+  }
+  return undefined;
+};
+
+/**
+ * states 形 / readonly states 形の attention と数値変種の組の門（違反の文言 — 無ければ `undefined`）。
+ * 実行（{@link buildStateAttention} / {@link buildReadonlyStateAttention}）と見積り（estimate.ts —
+ * ADR 0124 決定 7）が同じ 1 本で見る。
+ *
+ * DECIDED: 数値変種 × states 形は fail loudly で開始する（ADR 0058 決定 3 —「未実装の組は縮退でなく
+ * fail loudly」。黙って f32 で走ると opt-in を指定した意味が診断からも数値からも消える）。
+ */
+export const stateAttentionVariantViolation = (
+  where: string,
+  form: "states" | "readonly",
+  seats: AttentionSeats,
+): string | undefined => {
+  if (seats.attentionCompute !== "f32") {
+    return form === "states"
+      ? `${where}: states 形の attention は attentionCompute '${seats.attentionCompute}' と` +
+        "組めない（f32 の別族カーネルのみ — ADR 0067 決定 3 / 4）"
+      : `${where}: readonly の attention は attentionCompute ` +
+        `'${seats.attentionCompute}' と組めない（f32 の別族カーネルのみ）`;
+  }
+  if (seats.attentionScoreStorage !== "f32") {
+    const subject = form === "states" ? "states 形の attention" : "readonly の attention";
+    return `${where}: ${subject} は attentionScoreStorage ` +
+      `'${seats.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`;
+  }
+  return undefined;
+};
+
+/**
  * 融合 attention（ADR 0023）。**1 ノード = 行ブロック 1 枚あたり 3 dispatch**（`cat` と同じ
  * 「複数 dispatch で 1 ノード」の扱い。full-write は**ノードの出力 O について**成立する）:
  *
@@ -292,31 +425,17 @@ export const buildAttention = async (
   // 加算 mask（省略可能な第 4 入力 — 契約は src/ops.ts）。① の epilogue だけの軸で、
   // ②③ からは「S が既に mask 済み」に見える。
   const mask = binds[3];
-  // MUST: i8a8 の ①QK は別カーネル（src/kernels/attention-i8a8.ts）で epilogue を持たない。
-  // 黙って f32 経路へ落とすと「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと
-  // 値が壊れるので、組み合わせそのものを**一時バッファを取る前に** fail loudly にする。
-  // MUST: 判定は **要求されたモード**（`i8a8`）で見る — `route.qk`（D % 4 の適格判定込み）で
-  // 見ると D % 4 != 0 のときだけ拒否をすり抜け、f32 の ①QK と i8a8 の ③PV の混成で走って
-  // しまう。「mask × i8a8 は無条件に fail loudly」が契約（ADR 0023 / docs/limitations.md）。
-  if (mask !== undefined && i8a8) {
-    throw new ExecutionError(
-      `${where}: 加算 mask 付きの attention は attentionCompute 'a8' と組めない` +
-        "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +
-        "'f16' にすること）",
-    );
-  }
-  // DECIDED: GQA × i8a8 は fail loudly で開始する（docs/decisions/0067 決定 3）。i8a8 は
-  // head 基底が 5 本（src/kernels/attention-i8a8.ts）で、K / V の量子化・確保も `B·H` 前提
-  // なので、GQA 形をそのまま流すと量子化バッファの取り違えになる。
-  // MUST: 判定は **要求されたモード**（`i8a8`）で見る — 段ごとの適格判定（`route.qk` /
-  // `route.pv`）で見ると D%4 / N%4 を満たさない形だけ拒否をすり抜ける（mask と同じ規律）。
-  // MUST: 黙って f32 経路へ落とさない（ADR 0058 決定 3 — 性能が静かに変わる）。
-  if (gqa && i8a8) {
-    throw new ExecutionError(
-      `${where}: GQA（H=${q[1]} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
-        "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）",
-    );
-  }
+  // MUST: 組合せの門（mask × a8・GQA × a8・i8a8 の i32 縮約）は**一時バッファを取る前に** fail
+  // loudly にする。i8a8 の ①QK は別カーネル（src/kernels/attention-i8a8.ts）で epilogue を持たず、
+  // 黙って f32 経路へ落とすと「i8a8 を頼んだのに効かない」沈黙になり、mask を落とすと値が壊れる。
+  // 判定は見積りと共有する 1 本（{@link fusedAttentionViolation} — 要求されたモードで見る規律も
+  // そこにある）。
+  const violation = fusedAttentionViolation(
+    where,
+    { heads: q[1], kvHeads, depth, cols },
+    { i8a8, mask: mask !== undefined, route },
+  );
+  if (violation !== undefined) throw new ExecutionError(violation);
 
   // クエリ行のブロック分割（ADR 0060 と同じ純関数 — states 形 attention と同じ流儀）。
   // S 1 枚 = `B·H · block · N · 格納幅` バイトと行統計 1 枚が、ストレージ束縛の上限と予算
@@ -325,7 +444,7 @@ export const buildAttention = async (
   // 1 行でも収まらない形は fail loudly。
   // MUST: **n = 1 の機は分割前と完全に同一**（行窓を立てないのでキーも uniform も WGSL も
   // dispatch 列も 1 バイト動かない）。既存のスナップショットとビット同一門がその検出器。
-  const scoreBytes = compute === "f16" ? 2 : scoreStorageBytes(scoreStorage);
+  const scoreBytes = attentionScoreElementBytes(face.state.attentionCompute, route);
   const blocks = planAttentionBlocks(
     { batch, rows, cols, scoreBytes },
     rowBlockLimit(
@@ -364,7 +483,6 @@ export const buildAttention = async (
       binds,
       scoreStorage,
       { batch, rows, cols, depth },
-      where,
       windowed,
     )
     : {
@@ -384,7 +502,6 @@ export const buildAttention = async (
       binds,
       scoreStorage,
       { batch, rows, cols, depth },
-      where,
       windowed,
     )
     : {
@@ -620,21 +737,10 @@ export const buildStateAttention = async (
   const window = stateWindow(step.node.attrs, where) ?? 0;
   const sliding = stateSliding(window);
   const scale = attentionScale(step.node.attrs, where);
-  // DECIDED: 数値変種 × states 形は fail loudly で開始する（ADR 0058 決定 3 —「未実装の組は
-  // 縮退でなく fail loudly」。黙って f32 で走ると opt-in を指定した意味が診断からも数値からも
-  // 消える）。判定は**一時バッファを取る前**（GQA × i8a8 の門と同じ位置）。
-  if (face.state.attentionCompute !== "f32") {
-    throw new ExecutionError(
-      `${where}: states 形の attention は attentionCompute '${face.state.attentionCompute}' と` +
-        "組めない（f32 の別族カーネルのみ — ADR 0067 決定 3 / 4）",
-    );
-  }
-  if (face.state.attentionScoreStorage !== "f32") {
-    throw new ExecutionError(
-      `${where}: states 形の attention は attentionScoreStorage ` +
-        `'${face.state.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`,
-    );
-  }
+  // 数値変種 × states 形は fail loudly（ADR 0058 決定 3 — 判定は見積りと共有する
+  // {@link stateAttentionVariantViolation}）。判定は**一時バッファを取る前**（GQA × i8a8 の門と同じ位置）。
+  const variantViolation = stateAttentionVariantViolation(where, "states", face.state);
+  if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
   // run 前検査（ADR 0066 決定 4 / ADR 0067 決定 4 ④）の材料。sliding は ring なので容量の
   // 検査対象にしない。
   states.chunkRows.add(chunkRows);
@@ -887,18 +993,8 @@ export const buildReadonlyStateAttention = async (
   const sliding = stateSliding(window);
   const scale = attentionScale(step.node.attrs, where);
   // 数値変種 × states 形は fail loudly（`buildStateAttention` と同じ門 — ADR 0058 決定 3）。
-  if (face.state.attentionCompute !== "f32") {
-    throw new ExecutionError(
-      `${where}: readonly の attention は attentionCompute ` +
-        `'${face.state.attentionCompute}' と組めない（f32 の別族カーネルのみ）`,
-    );
-  }
-  if (face.state.attentionScoreStorage !== "f32") {
-    throw new ExecutionError(
-      `${where}: readonly の attention は attentionScoreStorage ` +
-        `'${face.state.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`,
-    );
-  }
+  const variantViolation = stateAttentionVariantViolation(where, "readonly", face.state);
+  if (variantViolation !== undefined) throw new ExecutionError(variantViolation);
 
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const batchHeads = batch * heads;
@@ -1071,8 +1167,8 @@ export const buildStateAppend = async (
  * 代わりに (c) が **A 側の行窓**で `qq` / `qs` を全 M ストライドから読む。
  * MUST: 一時バッファ（`qq` / `qs` / `kq` / `ks`）はここで宣言し、**ノード末尾**（呼び手）で
  * 確保の逆順に解放する。
- * MUST: `D` のオーバフロー門は fail loudly（黙って通すと i32 の巻き戻りで符号ごと化ける。
- * 実測形の D ≤ 384 に対して門は桁で余裕があるが、置かないと退行の受け皿が消える）。
+ * NOTE: `D` の i32 縮約の門は呼び手の {@link fusedAttentionViolation} が一時を取る前に見る（見積りと
+ * 共有する 1 本）。
  */
 const prepareAttentionQkI8a8 = async (
   face: RecipeBuildFace,
@@ -1080,24 +1176,19 @@ const prepareAttentionQkI8a8 = async (
   binds: readonly BindingSource[],
   scoreStorage: ScoreStorage,
   shape: AttentionShape,
-  where: string,
   rowWindow: boolean,
 ): Promise<AttentionQkStage> => {
   const { batch, rows, cols, depth } = shape;
-  if (depth > LINEAR_I8A8_MAX_K) {
-    throw new ExecutionError(
-      `${where}: D=${depth} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-        "（attentionCompute を 'f32' にすること）",
-    );
-  }
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
   // 量子化した q / k（i8 を 4 詰め）と per-token scale。ノード内で閉じた一時領域で、
   // q 側は**行** scale・k 側は**出力列**の scale になる（同じ per-token 量子化の別の読み方）。
-  const qq = builder.allocTemp(Math.max(4, batch * rows * depth));
-  const qs = builder.allocTemp(Math.max(4, batch * rows * 4));
-  const kq = builder.allocTemp(Math.max(4, batch * cols * depth));
-  const ks = builder.allocTemp(Math.max(4, batch * cols * 4));
+  // 大きさは見積りと共有する式（{@link attentionI8a8TempBytes}）から引く。
+  const bytes = attentionI8a8TempBytes(shape).qk;
+  const qq = builder.allocTemp(bytes.qq);
+  const qs = builder.allocTemp(bytes.qs);
+  const kq = builder.allocTemp(bytes.kq);
+  const ks = builder.allocTemp(bytes.ks);
 
   // (a)(b) 活性の per-token 量子化（行方向 grid-stride。D が短いので 1 workgroup に複数行を
   // 並べて畳む小 D 変種になる — `quantizeRowsGeometry`・perf-ledger P-1）
@@ -1169,8 +1260,8 @@ const prepareAttentionQkI8a8 = async (
  * だけで、(c) は **C 側の行窓**で O の行だけを全 M ストライドへ書く。
  * MUST: 一時バッファ（`vt` / `vq` / `vs`）はここで宣言し、**ノード末尾**（呼び手）で
  * 確保の逆順に解放する。
- * MUST: `N` のオーバフロー門は fail loudly（|acc| ≤ N·127²。実測形の最大 N = 16,384 に対し
- * 門は桁で余裕があるが、置かないと退行の受け皿が消える）。
+ * NOTE: `N` の i32 縮約の門（|acc| ≤ N·127²）は呼び手の {@link fusedAttentionViolation} が一時を取る前に
+ * 見る（見積りと共有する 1 本）。
  */
 const prepareAttentionPvI8a8 = async (
   face: RecipeBuildFace,
@@ -1178,22 +1269,17 @@ const prepareAttentionPvI8a8 = async (
   binds: readonly BindingSource[],
   scoreStorage: ScoreStorage,
   shape: AttentionShape,
-  where: string,
   rowWindow: boolean,
 ): Promise<AttentionPvStage> => {
   const { batch, cols, depth } = shape;
-  if (cols > LINEAR_I8A8_MAX_K) {
-    throw new ExecutionError(
-      `${where}: N=${cols} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-        "（attentionCompute を 'f32' にすること）",
-    );
-  }
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
 
   // Vᵀ（f32・permute の実体化）と、その量子化結果。どれもノード内で閉じた一時領域。
-  const vt = builder.allocTemp(Math.max(4, batch * depth * cols * 4));
-  const vq = builder.allocTemp(Math.max(4, batch * depth * cols));
-  const vs = builder.allocTemp(Math.max(4, batch * depth * 4));
+  // 大きさは見積りと共有する式（{@link attentionI8a8TempBytes}）から引く。
+  const bytes = attentionI8a8TempBytes(shape).pv;
+  const vt = builder.allocTemp(bytes.vt);
+  const vq = builder.allocTemp(bytes.vq);
+  const vs = builder.allocTemp(bytes.vs);
 
   // (a) v[B·H,N,D] → Vᵀ[B·H,D,N]（既存の strided 読みコピー族 — permute そのもの）。
   // MUST: stride は**入力** `[B·H,N,D]` の連続 stride から組む（出力 shape から組むと
