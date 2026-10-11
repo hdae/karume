@@ -1914,6 +1914,20 @@ Deno.test("allclose は NaN / 負の許容差を AllcloseError で拒み、atol 
   );
 });
 
+Deno.test("allclose は rtol = +Infinity を AllcloseError で拒む（参照 0 の要素が合格へ化けない）", () => {
+  // 参照が 0 の要素では rtol·|ref| = Infinity·0 = NaN になり、判定の右辺が NaN になる。拒まないと
+  // atol = 0 でも誤差 999 が合格する。
+  assertThrows(
+    () =>
+      allclose(Float32Array.from([999]), Float32Array.from([0]), {
+        atol: 0,
+        rtol: Number.POSITIVE_INFINITY,
+      }),
+    AllcloseError,
+    "許容差 rtol",
+  );
+});
+
 // 報告欄の**意味**を縛る（pass だけを見ると、worstIndex / maxRelError が何を指すかは誰も
 // 固定していない）。非有限が「後から」現れる形と、参照 0 の相対誤差の床が対象。
 Deno.test("allclose の報告欄は非有限を優先し、参照 0 の相対誤差に床を置く", () => {

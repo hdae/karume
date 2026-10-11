@@ -56,12 +56,15 @@ export const allclose = (
     throw new AllcloseError(`長さ不一致: actual ${actual.length} vs expected ${expected.length}`);
   }
   // MUST: 許容差の NaN と負を拒む。NaN だと判定の右辺が NaN になって `abs > 右辺` が常に false
-  // （どんな誤差も合格）、負だと誤差 0 でも不合格になる。+Infinity は e2e が記録専用の帯として
-  // 意図的に渡すので、有限であることまでは要求しない。
-  for (const [name, value] of [["atol", tolerance.atol], ["rtol", tolerance.rtol]] as const) {
-    if (Number.isNaN(value) || value < 0) {
-      throw new AllcloseError(`許容差 ${name} が NaN か負である: ${value}`);
-    }
+  // （どんな誤差も合格）、負だと誤差 0 でも不合格になる。atol の +Infinity は e2e が記録専用の
+  // 帯として意図的に渡すので、atol には有限であることまでは要求しない。
+  if (Number.isNaN(tolerance.atol) || tolerance.atol < 0) {
+    throw new AllcloseError(`許容差 atol が NaN か負である: ${tolerance.atol}`);
+  }
+  // MUST: rtol は有限の非負に限る。rtol = +Infinity だと参照が 0 の要素で Infinity·0 = NaN となり、
+  // 右辺が NaN になって atol に関係なく合格する（記録専用の帯は atol 側で表す）。
+  if (!Number.isFinite(tolerance.rtol) || tolerance.rtol < 0) {
+    throw new AllcloseError(`許容差 rtol が有限の非負でない: ${tolerance.rtol}`);
   }
   let failCount = 0;
   let maxAbsError = 0;
