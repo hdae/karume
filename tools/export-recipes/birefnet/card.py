@@ -210,21 +210,25 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
             " upstream ships it to run inside a larger ComfyUI pipeline rather than bare.",
         ),
         stored_dtype="f32",
+        # 総確保 = runtime の見積りの `peakAccountedBytes`（重み + 中間の領域 + 入力 + 出力の
+        # readback — 1024²: 919.2 + 749.2 + 12 + 4 = 1,684.5 MiB・2048²: 1,116.2 + 2,948.0 + 48 +
+        # 16 = 4,128.2 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run はウォームアップの 1 回
+        # （計画の当たらない run）を除いた 5 回の範囲で、5 回の 1 回目は中間の領域の確保を含む。
         resources=BirefnetResourceMeasurement(
             quant="f32",
-            conditions="measured 2026-09-05 on an RTX 3080 Ti",
+            conditions="measured 2026-10-11 on an RTX 3080 Ti",
             by_resolution={
                 "1024": BirefnetResources(
-                    total="about 1.7 GiB",
+                    total="about 1.6 GiB",
                     intermediates="749 MiB",
                     binding="the largest single storage buffer is 320 MiB",
-                    run="about 1.8 s",
+                    run="about 1.4 s",
                 ),
                 "2048": BirefnetResources(
-                    total="about 4.1 GiB",
+                    total="about 4.0 GiB",
                     intermediates="2,948 MiB",
                     binding="the largest single storage buffer is 1,280 MiB",
-                    run="7.5 – 8.6 s",
+                    run="6.6 – 6.7 s",
                 ),
             },
         ),
