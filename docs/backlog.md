@@ -332,7 +332,7 @@
   VRAM の観測〈同じ要求の DiT の段の山は I2V 7,927 / T2V 7,931 MiB — encoder の確保は残らない〉・フル verify〈HEAD `6679d123`・4,035 passed・0 failed〉・
   Opus の差分レビュー〈28 件・バグ 0・medium 2 件は `08f21894` / `6679d123`〉・カードと docs（`620a0766` / `732f507b`）・配布形の組み直し〈README.md だけ変化〉
   — ADR 0121 追記「段 9d の結果」。残る確認 1 つ: `cba99c24` の T2V の 50 ステップの実用席の床は GPU 未走（次に T2V の 50 ステップを回すとき）。
-  **段 9 ✅ → I2V を閉じた。次 = 一旦休憩**（利用者が触って使い方を見る）→ 来週の順（裁定 2026-10-10）: ② now 節の退避〈✅ 2026-10-10 — 済んだ記録を research の退避先へ〉→ ③ Codex 深掘りの修正の波〈進行中 2026-10-11 — 推奨案で直せる指摘は取り込み済み: medium 9 件・low / info 183 件のうち修正 100・docs の修正 52・Anima の int8 attention の端数縮退の見える化・テスト不足 7 件・依存グラフの門の typesDependency・ADR 0108 決定 12 の撤回・未対応 op のエラーの判定材料。判断待ちの項は裁定 20〜27 で決着し取り込み済み。裁定 4 / 6 / 8 / 18 の機能 ✅ 2026-10-11 — 裁定 4 = BiRefNet の後処理の手順を系列ごとに配布形で宣言〈HR は上流の手順 `u8-pil-bicubic`・盲検 A/B は 8 対とも見分けがつかず規則どおり上流・pipeline は `birefnet/2`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)〉・裁定 6 = attention の行ブロックの予算〈runtime の `SessionOptions.attentionRowBlockMaxBytes` だけ・出力はビット同一・121 フレームの実用席で 512 MiB なら VRAM の山 −1.46 GiB・ADR [0124](decisions/0124-attention-row-block-budget.md)〉・裁定 8 = 会話の分岐 `fork`〈ADR 0066 / 0083 の追記〉・裁定 18 → 40 = 画像の EXIF の向きは CLI と gpu-lab の両方で適用する〈M2 の Chrome は `imageOrientation: "none"` でも向きを適用したので、上流の `generate.py` と意図して違える側に揃えた・ADR 0121 の追記・利用者の手動確認待ち〉・gpu-lab の Wan の結果を連番 PNG の zip で保存。上流との一致の方針を ADR 0005 に追記。Wan の既定に行ブロックの予算は入れない〈裁定 39 = a・公開 API の口も足さない〉。残り = HR の f32 席の退役〈次の作業 — 系列の焼き直しとミラーの `birefnet/2` での組み直しを含む〉〉
+  **段 9 ✅ → I2V を閉じた。次 = 一旦休憩**（利用者が触って使い方を見る）→ 来週の順（裁定 2026-10-10）: ② now 節の退避〈✅ 2026-10-10 — 済んだ記録を research の退避先へ〉→ ③ Codex 深掘りの修正の波〈進行中 2026-10-11 — 推奨案で直せる指摘は取り込み済み: medium 9 件・low / info 183 件のうち修正 100・docs の修正 52・Anima の int8 attention の端数縮退の見える化・テスト不足 7 件・依存グラフの門の typesDependency・ADR 0108 決定 12 の撤回・未対応 op のエラーの判定材料。判断待ちの項は裁定 20〜27 で決着し取り込み済み。裁定 4 / 6 / 8 / 18 の機能 ✅ 2026-10-11 — 裁定 4 = BiRefNet の後処理の手順を系列ごとに配布形で宣言〈HR は上流の手順 `u8-pil-bicubic`・盲検 A/B は 8 対とも見分けがつかず規則どおり上流・pipeline は `birefnet/2`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)〉・裁定 6 = attention の行ブロックの予算〈runtime の `SessionOptions.attentionRowBlockMaxBytes` だけ・出力はビット同一・121 フレームの実用席で 512 MiB なら VRAM の山 −1.46 GiB・ADR [0124](decisions/0124-attention-row-block-budget.md)〉・裁定 8 = 会話の分岐 `fork`〈ADR 0066 / 0083 の追記〉・裁定 18 → 40 = 画像の EXIF の向きは CLI と gpu-lab の両方で適用する〈M2 の Chrome は `imageOrientation: "none"` でも向きを適用したので、上流の `generate.py` と意図して違える側に揃えた・ADR 0121 の追記・M2 の Chrome で手動確認 OK〉・gpu-lab の Wan の結果を連番 PNG の zip で保存。上流との一致の方針を ADR 0005 に追記。Wan の既定に行ブロックの予算は入れない〈裁定 39 = a・公開 API の口も足さない〉。HR の f32 席の退役 ✅ 2026-10-11〈HR は `f16` 席だけ・席は上流の格納の型から導く・取り違えの検査は固定の上流 revision・カードの実行資源は checkpoint ごとの実測〈総確保の換算の誤記 1.7 / 4.1 → 1.6 / 4.0 GiB も訂正〉・Lucida の f32 系列を上流 revision つきで焼き直し・手元のミラー 2 本を `birefnet/2` で組み直し・ADR 0113 の追記〉。次 = ④ H-37 の計測〉
   〈+ レビューのテスト不足 7 件・依存グラフの門の typesDependency・gpu-lab の EXIF〉→ ④ H-37 の計測 → ⑤ outputs/diag と tools/shared の整理
   〈+ DeBERTa の導出台本を tools/ へ〉→ ⑥ 0.14.0 の準備〈Wan 家族の初公開・Wan2.1 を上げるかはそのとき〉。
   （以下は着手前の列挙）**次** → 段 7（実用席の自機 A/B の門〈S の組は未決 — 832×480 の値が使えなくなった〉・census・決定性・利用者の視認〈参照席自身の品質の裁定を兼ねる・seed 4 本以上・
@@ -515,13 +515,14 @@
   2026-09-26 / 09-27: HR は `f16` 席のみ（上流 `ZhengPeng7/BiRefNet_HR` は f16 の checkpoint 1 本だけで f32 は存在しない
   — f32 席は同じ値を倍の VRAM で持つだけ）。Lucida は f32 既定 + f16 任意（f16 は有損失 — α の平均絶対差 最大 7.0e-5）。
   recipe（`dist` の HR を f16 席 1 つで組める形・既定席・pytest・カードの relation）の変更と、HR の f32 系列 2 本 +
-  golden / sha 参照行 / `HELD_SERIES` の f32 行の退役は配布反映の回に行う（ADR 0113 追記）。**
+  golden / sha 参照行 / `HELD_SERIES` の f32 行の退役は配布反映の回に行う（ADR 0113 追記）。** → 2026-10-11 に先行して実施（下の追記）。
   **追記 2026-10-11**: 同じ回に、配布形の pipeline を `birefnet/2`（後処理の手順の欄 `postprocess` — HR = `u8-pil-bicubic`・
   Lucida = `float-bilinear`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)）で上げ、`BIREFNET_SOURCES` の pin を
   更新する（裁定 28 の但し書き = マニフェストの変更は次のリリースにまとめる）。main は `birefnet/2` だけを読むので、それまで
-  公開中の revision からの `fromPretrained` は major の門で落ちる。HR の f32 席の退役は配布反映を待たずに先に進め
-  （利用者 2026-10-11）、手元のミラーの `birefnet/2` での組み直しもその作業で行う（`dist` は上流 revision を持たない
-  系列を拒むので、系列の焼き直しが先に要る — 手元の今のミラーは `birefnet/1` のまま）。
+  公開中の revision からの `fromPretrained` は major の門で落ちる。HR の f32 席の退役（recipe・テスト・
+  golden / sha 参照行 / `HELD_SERIES` の行）と、Lucida の f32 系列の上流 revision つきの焼き直し・手元のミラー 2 本の
+  `birefnet/2` での組み直しは 2026-10-11 に済んだ（ADR 0113 追記 2026-10-11）。配布反映の回に残るのは HF への
+  再アップロードと `BIREFNET_SOURCES` の pin の更新だけ。
 - **irodori 2 リポ（`irodori-v4-small` / `irodori-v4.1-small`）の HF 再アップロード + pin 更新（B4 = ADR [0114](decisions/0114-irodori-dit-context-split.md)）**:
   配布形に役割 `dit_context` が増えた（breaking — 持たない配布形は新しい models で部品の欠落として落ちる）。later の
   「irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す」と同じ breaking 波の回に行う。ローカルミラーは
