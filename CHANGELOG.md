@@ -361,8 +361,9 @@ measurements in `docs/research/`.
   grouped query attention with `"a8"`, a head dimension or key length beyond the int32 accumulation
   bound of the int8 path, a non-f32 seat on the state form) are now rejected by the estimate too.
   Without `maxStorageBufferBindingSize`, the estimate counts the fused `attention` op only when its
-  row-block count is the same on every device — the score matrix fits one block under the WebGPU
-  core default (128 MiB), or `attentionRowBlockMaxBytes` is at most that default — and otherwise
+  row-block count is the same on every device — the score matrix and the row statistics each fit one
+  block under the WebGPU core default (128 MiB), or `attentionRowBlockMaxBytes` is at most that
+  default — and otherwise
   rejects the graph, asking for `maxStorageBufferBindingSize`.
   The second entry of `unaccounted` now names only the linear int8 quantization buffers. The estimates
   the Anima and Gemma pipelines use are unchanged.
