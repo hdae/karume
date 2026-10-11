@@ -726,10 +726,15 @@ packed int4 / int2（ADR [0069](decisions/0069-packed-w4-storage.md) /
 INT2 の実行は行ごとの scale で、linear / embedding の packed 実行に対応し、`linearCompute` は f32 に限る
 （[ADR 0097](decisions/0097-gemma4-qat-integration.md) 追記 1）。
 
-linear の重み `[N, K]` と embedding の重み `[V, H]` は、論理要素数（N·K・V·H）が 2^32 − 1 を超える形を Session 構築時に
-`CodegenError` で拒否する（格納形を問わない）。GPU は重みを論理要素の u32 平坦添字で引き、packed のローダが語位置へ
-変えるので、積が折り返すと別の行の重みを例外なしに読む。i2 では格納が約 1 GiB で届くため、binding 上限の検査では
-止まらない。
+linear の重み `[N, K]` と embedding の重み `[V, H]` の論理要素数（N·K・V·H）の上限は、GPU が重みの行頭を作る単位で
+経路ごとに違う。linear の経路は実行の形（M）と量子化の設定で決まるので、同じ重みでも拒否されるかは経路しだいになる。
+
+- 行頭を**論理要素の番号**で作る経路は、論理要素数が 2^32 − 1 を超える形を Session 構築時に `CodegenError` で拒否する。
+  対象は linear の GEMM 経路（格納形を問わない）・i8a8 経路のうち i4 重みの w4a8・embedding。packed のローダが論理要素
+  番号を語位置へ変えるので、積が折り返すと別の行の重みを例外なしに読む。i2 では格納が約 1 GiB で届くため、binding
+  上限の検査では止まらない。
+- 行頭を**語の番号**で作る経路（linear の GEMV 族〈1 ≤ M ≤ 64〉と i8 重みの i8a8）には、この門を掛けない。折り返すには
+  格納が 16 GiB 以上要る。
 
 - 公式 safetensors 仕様への追随提案（upstream への I4/U4 追加要望）はしない — 2026-09-01 ユーザー裁定。
   目指す方向が違うため、配布形は専用コンテナ（ADR [0108](decisions/0108-container-format.md)）へ移った。

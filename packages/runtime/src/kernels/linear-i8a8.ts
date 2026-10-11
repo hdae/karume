@@ -83,6 +83,7 @@
  */
 
 import { CodegenError } from "../codegen/errors.ts";
+import { assertU32Params } from "../codegen/params.ts";
 import { gemmParams, LINEAR_SCALE_BINDING } from "./gemm.ts";
 import {
   i4GroupKeyPart,
@@ -616,6 +617,11 @@ ${storeW4a8(geometry, v4)}`
  * `groupSize` を渡すと **w4a8 の門**（group 側のオーバフローと k の整除）へ切り替わる。
  * MUST: i8 変種の k 門（{@link LINEAR_I8A8_MAX_K}）は w4a8 に適用しない
  * （理由は {@link LINEAR_W4A8_MAX_GROUP}）。
+ *
+ * MUST: w4a8 は重みの論理要素数 `n·k ≤ 2^32 − 1` も見る。行頭を論理要素番号
+ * `wcol·dims.k` として u32 で先に作り、`i4lanes` が語位置へ変えるので、積が折り返すと
+ * 別の出力チャネルの重みを例外なしに読む（linear の GEMM 経路の門と同じ機序 — linear.ts）。
+ * i8 変種は行頭を語数 `wcol·k4` で作るので、この門は掛けない。
  */
 export const linearI8a8Params = (
   m: number,
@@ -646,5 +652,7 @@ export const linearI8a8Params = (
       `linear w4a8 params: group_size ${groupSize} が i32 縮約の門 ${LINEAR_W4A8_MAX_GROUP} を超える`,
     );
   }
-  return gemmParams("linear", m, n, k);
+  const params = gemmParams("linear", m, n, k);
+  assertU32Params("linear w4a8 params", { "n * k": n * k });
+  return params;
 };
