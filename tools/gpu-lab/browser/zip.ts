@@ -3,8 +3,10 @@
  *
  * 中身は既に圧縮済みの PNG なので deflate は掛けない（縮まないうえ、書き手が小さく保てる）。形は APPNOTE の
  * 素の zip だけ: 各項目のローカルヘッダ + データ、中央ディレクトリ、終端レコード（EOCD）。名前は UTF-8 で書き、
- * 汎用フラグの bit 11 を立てる。ZIP64 は書かない — 項目数・オフセット・大きさが素の欄に収まらない入力は
- * 黙って壊れた zip にせず投げる（{@link zipStoredLength}）。
+ * ASCII でない名前の項目だけ汎用フラグの bit 11 を立てて version needed を 6.3 にする（bit 11 は APPNOTE 6.3 で
+ * 入った欄 — ASCII だけの名前は CP437 と UTF-8 で同じバイトなので 2.0 のまま古い読み手にも通す）。ZIP64 は
+ * 書かない — 項目数・オフセット・大きさが素の欄に収まらない入力は黙って壊れた zip にせず投げる
+ * （{@link zipStoredLength}）。
  *
  * CRC-32 は PNG の書き手と同じもの（`packages/models/src/image/png.ts` — 多項式は zip と PNG で同じ
  * ISO 3309）を使い、2 本持たない。
@@ -27,6 +29,8 @@ const END_RECORD_SIGNATURE = 0x06054b50;
 
 /** version made by / needed to extract = 2.0（MS-DOS の属性 — 上位バイト 0）。 */
 const ZIP_VERSION = 20;
+/** UTF-8 の名前（bit 11）を使う項目の version = 6.3（bit 11 を定めた APPNOTE の版）。 */
+const ZIP_VERSION_UTF8 = 63;
 /** 汎用フラグの bit 11 = 名前とコメントが UTF-8。 */
 const FLAG_UTF8 = 0x0800;
 const METHOD_STORED = 0;
@@ -110,12 +114,15 @@ export const zipStored = (
   for (const [index, { data }] of entries.entries()) {
     const name = names[index];
     const crc = crc32(data);
+    const utf8 = name.some((byte) => byte >= 0x80);
+    const version = utf8 ? ZIP_VERSION_UTF8 : ZIP_VERSION;
+    const flags = utf8 ? FLAG_UTF8 : 0;
 
     const local = new Uint8Array(LOCAL_HEADER_BYTES + name.length);
     const localView = new DataView(local.buffer);
     localView.setUint32(0, LOCAL_HEADER_SIGNATURE, true);
-    localView.setUint16(4, ZIP_VERSION, true);
-    localView.setUint16(6, FLAG_UTF8, true);
+    localView.setUint16(4, version, true);
+    localView.setUint16(6, flags, true);
     localView.setUint16(8, METHOD_STORED, true);
     localView.setUint16(10, time, true);
     localView.setUint16(12, date, true);
@@ -129,9 +136,9 @@ export const zipStored = (
     const central = new Uint8Array(CENTRAL_HEADER_BYTES + name.length);
     const centralView = new DataView(central.buffer);
     centralView.setUint32(0, CENTRAL_HEADER_SIGNATURE, true);
-    centralView.setUint16(4, ZIP_VERSION, true);
-    centralView.setUint16(6, ZIP_VERSION, true);
-    centralView.setUint16(8, FLAG_UTF8, true);
+    centralView.setUint16(4, version, true);
+    centralView.setUint16(6, version, true);
+    centralView.setUint16(8, flags, true);
     centralView.setUint16(10, METHOD_STORED, true);
     centralView.setUint16(12, time, true);
     centralView.setUint16(14, date, true);

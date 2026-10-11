@@ -18,6 +18,8 @@ type ReadEntry = {
   readonly name: string;
   readonly data: Uint8Array<ArrayBuffer>;
   readonly crc: number;
+  readonly versionMadeBy: number;
+  readonly versionNeeded: number;
   readonly flags: number;
   readonly method: number;
   readonly date: number;
@@ -44,6 +46,8 @@ const readZip = (bytes: Uint8Array<ArrayBuffer>): ReadEntry[] => {
   let expectedLocal = 0;
   for (let index = 0; index < count; index += 1) {
     assertEquals(view.getUint32(at, true), 0x02014b50, "中央ヘッダの署名");
+    const versionMadeBy = view.getUint16(at + 4, true);
+    const versionNeeded = view.getUint16(at + 6, true);
     const flags = view.getUint16(at + 8, true);
     const method = view.getUint16(at + 10, true);
     const time = view.getUint16(at + 12, true);
@@ -64,9 +68,9 @@ const readZip = (bytes: Uint8Array<ArrayBuffer>): ReadEntry[] => {
 
     assertEquals(view.getUint32(localOffset, true), 0x04034b50, "ローカルヘッダの署名");
     assertEquals(
-      [6, 8, 10, 12].map((field) => view.getUint16(localOffset + field, true)),
-      [flags, method, time, date],
-      "ローカルと中央の flags / method / 時刻 / 日付",
+      [4, 6, 8, 10, 12].map((field) => view.getUint16(localOffset + field, true)),
+      [versionNeeded, flags, method, time, date],
+      "ローカルと中央の version needed / flags / method / 時刻 / 日付",
     );
     assertEquals(
       [14, 18, 22].map((field) => view.getUint32(localOffset + field, true)),
@@ -84,6 +88,8 @@ const readZip = (bytes: Uint8Array<ArrayBuffer>): ReadEntry[] => {
       name,
       data: bytes.slice(dataStart, dataStart + size),
       crc,
+      versionMadeBy,
+      versionNeeded,
       flags,
       method,
       date,
@@ -121,11 +127,25 @@ describe("zipStored", () => {
       assertEquals(read[2].crc, 0);
     });
 
-    it("全項目が無圧縮（method 0）で UTF-8 の名前のフラグ（bit 11）を立てる", () => {
+    it("全項目が無圧縮（method 0）", () => {
       for (const entry of readZip(bytes)) {
         assertEquals(entry.method, 0);
-        assertEquals(entry.flags, 0x0800);
       }
+    });
+
+    it("ASCII だけの名前は UTF-8 のフラグを立てず version 2.0 のまま", () => {
+      for (const entry of readZip(bytes).slice(0, 2)) {
+        assertEquals(
+          [entry.flags, entry.versionMadeBy, entry.versionNeeded],
+          [0, 20, 20],
+          entry.name,
+        );
+      }
+    });
+
+    it("ASCII でない名前は UTF-8 のフラグ（bit 11）を立て version を 6.3 にする", () => {
+      const entry = readZip(bytes)[2];
+      assertEquals([entry.flags, entry.versionMadeBy, entry.versionNeeded], [0x0800, 63, 63]);
     });
 
     it("日時は MS-DOS の形（地方時・秒は 2 秒単位に切り捨て）", () => {
