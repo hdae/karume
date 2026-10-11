@@ -7,7 +7,7 @@
 // `gemma4_chat_test.ts` と同じフィクスチャ資産で**本物**を組む（差分描画の等式は本物の綴りでしか
 // 見られない）。
 //
-// 門は 10 本:
+// 門は 11 本:
 //
 // ① **KV の継続**: 2 ターン目は差分（`gemma4ChatTurn`）だけを流し、sequence を作り直さない
 // ② **継げない停止の後**（max-tokens）は sequence を捨てて履歴を全体描画で撃ち直す — ①だけだと
@@ -28,6 +28,8 @@
 //    2 本とも運ぶ（`AggregateError`）
 // ⑩ **受理集合は同期**（不正な要求は履歴も `#busy` も汚さない）／**溢れ判定は確保の前**
 //    （入り切らないターンは KV を 1 本も取らない）／溢れポリシーは**末尾を残す**（値で判定）
+// ⑪ **分岐（`fork`）**: 履歴と KV を引き継いだ独立のセッション・KV が空の会話は複製を出さない・
+//    走行中 / dispose 済みは同期に throw・写しは呼んだ同期区間（直後の send が分岐に入らない）
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
@@ -1100,4 +1102,171 @@ Deno.test("ChatSession 溢れ: 引数展開の上限を超える長さの発話�
   // 位置表（4096）も容量も超える長さなので、どちらの上限で落ちるかは問わない。
   assert(error.requestedNewTokens === MAX_NEW_TOKENS);
   assertEquals(host.created(), 0);
+});
+
+// ---- ⑪ 分岐（`fork` — ADR 0083 追記 2026-10-11・裁定 8）------------------------------
+//
+// 分岐は「同じ設定・同じ履歴の独立のセッション」で、KV を継いでいる会話は sequence ごと複製し、
+// KV が空の会話は履歴だけを写す（GPU の複製を出さない）。台本は host 全体で 1 本なので、分岐と元の
+// どちらで送っても台本の次の答えが返る。
+
+Deno.test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と独立に進む", async () => {
+  const host = fakeHost(
+    [
+      { text: "Blue.", closes: true },
+      { text: "Red.", closes: true },
+      { text: "Green.", closes: true },
+    ],
+    programOf(640),
+  );
+  const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
+  assertEquals(await session.send("Name a color.").text(), "Blue.");
+
+  const branch = await session.fork();
+  assertEquals(host.forks(), 1, "KV を継いでいる会話は sequence ごと複製する");
+  assertEquals(branch.turns, session.turns);
+
+  // 分岐のターンは KV を継いで差分だけを流す（sequence を作り直さない）。
+  assertEquals(await branch.send("Another one.").text(), "Red.");
+  assertEquals(host.created(), 1, "分岐が sequence を作り直した（KV を引き継いでいない）");
+  assertEquals(
+    host.prompts().at(-1),
+    gemma4ChatTurn(tokenizer, { role: "user", content: "Another one." }),
+  );
+  // 元のターンも自分の KV を継ぐ。履歴は互いに混ざらない。
+  assertEquals(await session.send("A third.").text(), "Green.");
+  assertEquals(host.created(), 1);
+  assertEquals(
+    host.prompts().at(-1),
+    gemma4ChatTurn(tokenizer, { role: "user", content: "A third." }),
+  );
+  const base: readonly Gemma4ChatMessage[] = [
+    SYSTEM_MESSAGE,
+    { role: "user", content: "Name a color." },
+    { role: "assistant", content: "Blue." },
+  ];
+  assertEquals(branch.turns, [
+    ...base,
+    { role: "user", content: "Another one." },
+    { role: "assistant", content: "Red." },
+  ]);
+  assertEquals(session.turns, [
+    ...base,
+    { role: "user", content: "A third." },
+    { role: "assistant", content: "Green." },
+  ]);
+
+  // 元を先に dispose してよい（親子の依存を持たない）。どちらも自分の sequence を畳む。
+  await session.dispose();
+  assertEquals(host.disposed(), 1);
+  await branch.dispose();
+  assertEquals(host.disposed(), 2);
+});
+
+Deno.test("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴と設定だけを写す", async (t) => {
+  await t.step("まだ送っていない会話", async () => {
+    const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
+    const session = new Gemma4ChatSession(host, {
+      system: SYSTEM,
+      maxNewTokens: MAX_NEW_TOKENS,
+      capacity: 320,
+      speculative: "always",
+    });
+    const branch = await session.fork();
+    assertEquals(host.forks(), 0, "KV が空なのに複製を出した");
+    assertEquals(branch.turns, [SYSTEM_MESSAGE]);
+    // 分岐の最初の send は全体を描き直し、元と同じ設定（容量・投機）で sequence を作る。
+    assertEquals(await branch.send("Name a color.").text(), "Blue.");
+    assertEquals(host.capacities(), [320]);
+    assertEquals(host.speculatives(), ["always"]);
+    assertEquals(
+      host.prompts()[0],
+      gemma4ChatPrompt(tokenizer, [SYSTEM_MESSAGE, { role: "user", content: "Name a color." }]),
+    );
+    assertEquals(session.turns, [SYSTEM_MESSAGE], "分岐の send が元の履歴へ入った");
+    await branch.dispose();
+    await session.dispose();
+  });
+
+  await t.step("直前のターンが EOS で閉じていない会話（KV は捨ててある）", async () => {
+    const host = fakeHost(
+      [{ text: "Blue", closes: false }, { text: "Red.", closes: true }],
+      programOf(640),
+    );
+    const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
+    assertEquals(await session.send("Name a color.").text(), "Blue");
+    const branch = await session.fork();
+    assertEquals(host.forks(), 0, "KV を捨てた会話なのに複製を出した");
+    assertEquals(branch.turns, session.turns);
+    // 分岐の次のターンは元と同じく履歴から描き直す。
+    assertEquals(await branch.send("Another one.").text(), "Red.");
+    assertEquals(
+      host.prompts().at(-1),
+      gemma4ChatPrompt(tokenizer, [
+        SYSTEM_MESSAGE,
+        { role: "user", content: "Name a color." },
+        { role: "assistant", content: "Blue" },
+        { role: "user", content: "Another one." },
+      ]),
+    );
+    await branch.dispose();
+    await session.dispose();
+  });
+});
+
+Deno.test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落ち、直後の send は分岐に入らない", async () => {
+  const host = fakeHost(
+    [
+      { text: "Blue.", closes: true },
+      { text: "Red.", closes: true },
+      { text: "Green.", closes: true },
+    ],
+    programOf(640),
+  );
+  const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
+
+  // 走行中のターン（stream が終端していない）の間は同期に落ちる。
+  const first = session.send("Name a color.");
+  assertThrows(() => session.fork(), Error, "前のターンがまだ終わっていない");
+  assertEquals(await first.text(), "Blue.");
+  assertEquals(host.forks(), 0, "拒否された fork が複製を出した");
+
+  // fork() の直後（await 前）に元へ send しても、分岐の履歴は呼んだ時点のまま。
+  const forking = session.fork();
+  assertEquals(await session.send("Another one.").text(), "Red.");
+  const branch = await forking;
+  assertEquals(branch.turns, [
+    SYSTEM_MESSAGE,
+    { role: "user", content: "Name a color." },
+    { role: "assistant", content: "Blue." },
+  ]);
+  // 分岐は呼んだ時点の KV から続く（差分で継ぐ）。
+  assertEquals(await branch.send("A third.").text(), "Green.");
+  assertEquals(
+    host.prompts().at(-1),
+    gemma4ChatTurn(tokenizer, { role: "user", content: "A third." }),
+  );
+
+  await session.dispose();
+  assertThrows(() => session.fork(), Error, "Gemma4ChatSession: dispose 済みでは fork できない");
+  await branch.dispose();
+});
+
+Deno.test("ChatSession.fork: KV の複製が失敗したら reject し、元はそのまま続けられる", async () => {
+  const host = fakeHost(
+    [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
+    programOf(640),
+    { forkError: new Error("注入: KV の複製の失敗") },
+  );
+  const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
+  assertEquals(await session.send("Name a color.").text(), "Blue.");
+  await assertRejects(() => session.fork(), Error, "注入: KV の複製の失敗");
+  // 元の KV と履歴は無傷（差分で継げる）。
+  assertEquals(await session.send("Another one.").text(), "Red.");
+  assertEquals(host.created(), 1);
+  assertEquals(
+    host.prompts().at(-1),
+    gemma4ChatTurn(tokenizer, { role: "user", content: "Another one." }),
+  );
+  await session.dispose();
 });

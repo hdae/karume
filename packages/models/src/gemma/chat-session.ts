@@ -33,6 +33,13 @@
  * 残す）を持ち、{@link Gemma4ChatSessionOptions.onOverflow} で丸ごと差し替えられる。ホストが
  * throw する関数を渡せば従来どおりホスト側で扱える。
  *
+ * ## 分岐（{@link Gemma4ChatSession.fork} — ADR 0083 追記 2026-10-11・裁定 8）
+ *
+ * 同じ設定・同じ履歴の独立のセッションを返す。KV を継いでいる会話は `GenerationSequence.fork`
+ * で KV ごと複製し、KV が空の会話（まだ送っていない・直前のターンが EOS で閉じていない）は履歴
+ * だけを写す（GPU の複製を出さない — 分岐の最初の `send` が元と同じく全体を描き直す）。再生成は
+ * `regenerate` を作らず、この使い方として書く（{@link Gemma4ChatSession.fork} の doc）。
+ *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
 
@@ -461,6 +468,63 @@ export class Gemma4ChatSession {
   /** `await using` 対応（Explicit Resource Management）— {@link dispose} の別名。 */
   [Symbol.asyncDispose](): Promise<void> {
     return this.dispose();
+  }
+
+  /**
+   * 同じ設定・同じ履歴の**独立の**セッションを返す（会話の分岐）。返ったセッションは呼び手が
+   * 所有し、`dispose()` も各自で行う（元との親子の依存は無く、元を先に dispose してよい）。
+   *
+   * 再生成はこの使い方で書く — 基点のセッションを進めずに置き、押されるたびに `fork()` して
+   * 分岐の側で `send` する（基点は残るので何度でもやり直せる）:
+   *
+   * ```ts
+   * await session.send("Name a color.").text();
+   * const retry = await session.fork(); // 基点（session）はこのまま置いておく
+   * console.log(await retry.send("Another one.").text());
+   * await retry.dispose(); // 気に入らなければ捨てて、もう一度 session.fork() から
+   * ```
+   *
+   * KV を継いでいる会話は KV を同じ容量のまま丸ごと複製するので、基点 + 分岐 1 本で KV の
+   * VRAM はほぼ 2 倍になる。KV が空の会話（まだ送っていない・直前のターンが配布形の EOS で
+   * 閉じていない）は GPU の複製を出さず、履歴だけを写す。
+   *
+   * dispose 済みと、走行中のターンがある（`send` が返した stream がまだ終端していない）ときは
+   * **同期に** throw する（`send` と同じ規律）。
+   *
+   * MUST: 履歴と「KV に入っている件数」の写しと `sequence.fork()` の呼び出しは、**呼んだ同期区間で**
+   * 行う。後ろへずらすと、直後に発行した `send` が先に元の履歴へ発話を積み、分岐に「答えの無い
+   * 問い」が混ざる（例外にならない取り違え）。
+   */
+  fork(): Promise<Gemma4ChatSession> {
+    if (this.#disposal !== undefined) {
+      throw new Error("Gemma4ChatSession: dispose 済みでは fork できない");
+    }
+    if (this.#busy) {
+      throw new Error(
+        "Gemma4ChatSession: 前のターンがまだ終わっていない" +
+          "（fork はターンの合間だけ — 発行した stream は汲み切るか break で閉じる）",
+      );
+    }
+    // KV と履歴の対応（`#committed`）ごと写す。ターンの合間は「sequence が無い ⇔ KV は空
+    // （`#committed === 0`）」なので、KV の複製は sequence があるときだけ出す。
+    const turns = this.#turns.map((turn) => ({ ...turn }));
+    const committed = this.#committed;
+    const copying = this.#sequence?.fork();
+    const branch = new Gemma4ChatSession(this.#host, {
+      maxNewTokens: this.#maxNewTokens,
+      capacity: this.#capacity,
+      onOverflow: this.#onOverflow,
+      ...(this.#system === undefined ? {} : { system: this.#system }),
+      ...(this.#sampler === undefined ? {} : { sampler: this.#sampler }),
+      ...(this.#speculative === undefined ? {} : { speculative: this.#speculative }),
+    });
+    branch.#turns = turns;
+    if (copying === undefined) return Promise.resolve(branch);
+    return copying.then((sequence) => {
+      branch.#sequence = sequence;
+      branch.#committed = committed;
+      return branch;
+    });
   }
 
   /**
