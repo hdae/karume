@@ -1251,8 +1251,10 @@ const bandCandidate = async (
  * 区間ごとの VRAM の山と、2 本目の後の行ブロックの枚数と、2 本目の後の診断（計測モードの device では 2 本ぶんの 1 submit の
  * GPU 時間を含む — {@link practicalSubmitGate}）。
  *
- * 行ブロックの枚数（{@link rowBlocksOf}）は**読んだときに数える**。予算（`attentionRowBlockMaxBytes` — ADR 0124）で cross も
- * 行窓になる形では「行窓の無い ①QK = cross」の前提が崩れて数えられないので、枚数を読まない呼び手（予算の A/B と計測）を落とさない。
+ * 行ブロックの枚数（{@link rowBlocksOf}）は**呼んだときに数える**関数で返す。予算（`attentionRowBlockMaxBytes` — ADR 0124）で
+ * cross も行窓になる形では「行窓の無い ①QK = cross」の前提が崩れて数えられないので、枚数を呼ばない呼び手（予算の A/B と計測 —
+ * ①QK は `qkDispatchesOf` で別に数える）を落とさない。{@link rowBlocksOf} の census の検査（cross の ①QK が 1 本以上）が要る
+ * 呼び手は、枚数を呼んで記録に載せる。
  */
 const twoRuns = async (
   prepared: PreparedModel,
@@ -1265,7 +1267,7 @@ const twoRuns = async (
   readonly nonFinite: number;
   readonly buildMs: number;
   readonly vram: readonly string[];
-  readonly rowBlocks: number;
+  readonly rowBlocks: () => number;
   readonly diagnostics: SessionDiagnostics;
 }> => {
   const monitor = monitorDrmUsage();
@@ -1317,9 +1319,7 @@ const twoRuns = async (
     nonFinite,
     buildMs,
     vram,
-    get rowBlocks(): number {
-      return rowBlocksOf(last);
-    },
+    rowBlocks: () => rowBlocksOf(last),
     diagnostics,
   };
 };
@@ -1372,7 +1372,7 @@ const practicalSubmitGate = async (
             `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
             ...observed.runs.map((run) => formatRun(run, unitNs)),
             ...observed.vram,
-            `行ブロック ${observed.rowBlocks} 枚`,
+            `行ブロック ${observed.rowBlocks()} 枚`,
             `融合 ${JSON.stringify(observed.diagnostics.lastRunFusions)}`,
             `非有限 ${observed.nonFinite}`,
           ].join(" / ");
@@ -2070,14 +2070,14 @@ Deno.test({
                   `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
                   ...observed.runs.map((run) => formatRun(run)),
                   ...observed.vram,
-                  `行ブロック ${observed.rowBlocks} 枚`,
+                  `行ブロック ${observed.rowBlocks()} 枚`,
                   `非有限 ${observed.nonFinite}`,
                 ].join(" / ");
                 console.log(`[wan-ti2v-dit] ${seat} S = ${LONG_TOKENS}: ${note}`);
                 assertEquals(observed.nonFinite, 0, `${seat} S = ${LONG_TOKENS}: 非有限`);
                 if (seat === REFERENCE_QUANT) {
                   assertEquals(
-                    observed.rowBlocks,
+                    observed.rowBlocks(),
                     expectedRowBlocks(LONG_TOKENS, bindingLimit),
                     `${seat}: self-attention の行ブロック枚数（束縛上限 ${bindingLimit} B）`,
                   );
@@ -2208,6 +2208,8 @@ Deno.test({
                 `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
                 ...observed.runs.map((run) => formatRun(run)),
                 ...observed.vram,
+                // 枚数を呼ぶのは census の検査（cross の ①QK が 1 本以上 — rowBlocksOf）を保つため（予算なしの形）。
+                `行ブロック ${observed.rowBlocks()} 枚`,
                 `非有限 ${observed.nonFinite}`,
               ].join(" / ");
               console.log(
@@ -2289,7 +2291,7 @@ Deno.test({
                 `構築 ${(observed.buildMs / 1000).toFixed(1)} s`,
                 ...observed.runs.map((run) => formatRun(run)),
                 ...observed.vram,
-                `行ブロック ${observed.rowBlocks} 枚`,
+                `行ブロック ${observed.rowBlocks()} 枚`,
                 `非有限 ${observed.nonFinite}`,
               ].join(" / ");
               console.log(
