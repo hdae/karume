@@ -559,6 +559,14 @@ manifest はリポジトリ直下の固定名 **`karume.json`**。
   掛かる。§7 の越境参照（`repo` /
   `revision`）は取得元契約の 1 つ（`originFor`）になり、ローカル取得元では明示 mapping と明示
   fallback だけが解決手段になる（ADR 0086 決定 3）。
+- 2026-10-11: **§7 の越境参照が manifest を読み込んだ repo 自身を指すのは拒否する**
+  （`ManifestFormatError`）。revision が同じでも違っても拒否する。検査するのは `loadManifest` の
+  parse で、取得元が repo を名乗るとき（HF）だけ。テキストだけを受ける `parseManifest` は repo を
+  知らないので掛けない。理由: 参照の同一性（`fileRefKey`）は revision を含むが、HF のキャッシュ
+  実体は revision を含まない。自リポの別 revision を越境で指すと、別の 1 本として数える参照が
+  実体を共有し、`evictCachedAssets` の保護が片方の削除で崩れる。`@karume/models` の取得計画の
+  一意化キー（取得先の repo・revision・path）と hub の `fileRefKey` の対応もずれる。自リポの
+  ファイルは越境の席を使わずに書けるので、用途は無い（手元の配布形 14 本に用例 0 — 2026-10-11 確認）。
 
 ## Gemma高速quantの融合語彙（2026-09-15）
 

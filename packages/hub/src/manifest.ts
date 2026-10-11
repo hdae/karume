@@ -579,16 +579,35 @@ const assertRepo = (fail: Fail, repo: string, where: string): void => {
   }
 };
 
+/** parse 1 回ぶんで、ファイル参照の検査が manifest 全域にわたって共有する文脈。 */
+type RefScope = {
+  /** 同一性（{@link fileRefKey}）→ 最初に現れた参照（3 点セット一致検査の表）。 */
+  readonly seen: Map<string, FileRef>;
+  /**
+   * manifest を読み込んだ repo（HF 取得元のみ・それ以外は `undefined`）。
+   *
+   * MUST: 越境参照がこの repo 自身を指すのは拒否する — 参照の同一性（{@link fileRefKey}）は
+   * revision を含む一方、HF のキャッシュ実体は revision を含まないので、自リポの別 revision を
+   * 越境で指すと「別の 1 本として数える参照」が実体を共有する（在庫の保護が片方の削除で崩れ、
+   * 取得計画の一意化キーも消費側とずれる）。自リポのファイルは越境の席を使わずに書ける。
+   */
+  readonly ownRepo: string | undefined;
+};
+
 /**
  * 越境参照（`repo` + `revision`）を読む。**両方同時にのみ合法**で、片方だけの宣言は
  * fail loudly — `repo` だけなら「どのコミットか」が可変 ref に落ちて不変性が崩れ、
  * `revision` だけなら自リポの解決済み SHA を黙って上書きする経路になる（どちらも
  * 「宣言の意図が読み取れないまま何かを取りに行く」形なので、推測で補わない）。
+ *
+ * 越境先が manifest を読み込んだ repo 自身（`ownRepo`）なら fail loudly（理由は
+ * {@link RefScope.ownRepo}）。
  */
 const parseCrossRepo = (
   fail: Fail,
   raw: Record<string, unknown>,
   where: string,
+  ownRepo: string | undefined,
 ): { readonly repo: string; readonly revision: string } | undefined => {
   const hasRepo = Object.hasOwn(raw, "repo");
   const hasRevision = Object.hasOwn(raw, "revision");
@@ -610,6 +629,12 @@ const parseCrossRepo = (
         `（ブランチ・タグ・短縮形は不可）: '${revision}'`,
     );
   }
+  if (repo === ownRepo) {
+    throw fail.format(
+      `${where}.repo: 越境参照が manifest を読み込んだ repo 自身 '${repo}' を指している` +
+        `（自リポのファイルは 'repo' / 'revision' を書かずに参照する — ADR 0038 追記 2026-10-11）`,
+    );
+  }
   return { repo, revision };
 };
 
@@ -623,7 +648,7 @@ const parseFileRef = (
   fail: Fail,
   raw: unknown,
   where: string,
-  seen: Map<string, FileRef>,
+  scope: RefScope,
   { allowEmpty = false }: { readonly allowEmpty?: boolean } = {},
 ): FileRef => {
   if (!isRecord(raw)) throw fail.format(`${where}: ファイル参照がオブジェクトでない`);
@@ -654,10 +679,10 @@ const parseFileRef = (
     );
   }
   assertPath(fail, path, where);
-  const crossRepo = parseCrossRepo(fail, raw, where);
+  const crossRepo = parseCrossRepo(fail, raw, where, scope.ownRepo);
   const ref: FileRef = { path, size, sha256, ...(crossRepo ?? {}) };
   const key = fileRefKey(ref);
-  const previous = seen.get(key);
+  const previous = scope.seen.get(key);
   if (previous !== undefined) {
     if (previous.size !== size || previous.sha256 !== sha256) {
       throw fail.reference(
@@ -667,7 +692,7 @@ const parseFileRef = (
     }
     return previous;
   }
-  seen.set(key, ref);
+  scope.seen.set(key, ref);
   return ref;
 };
 
@@ -704,7 +729,7 @@ const parseParts = (
   fail: Fail,
   raw: unknown,
   where: string,
-  seen: Map<string, FileRef>,
+  scope: RefScope,
 ): readonly FileRef[] => {
   if (!Array.isArray(raw)) throw fail.format(`${where}: 無い / 配列でない`);
   if (raw.length < 2) {
@@ -718,7 +743,7 @@ const parseParts = (
   }
   return raw.map((entry, index) => {
     // 長さ 0 は「const が空の part 1」の形だけ（part 0 はヘッダ + 2 文書を必ず持つ）。
-    const ref = parseFileRef(fail, entry, `${where}[${index}]`, seen, { allowEmpty: index > 0 });
+    const ref = parseFileRef(fail, entry, `${where}[${index}]`, scope, { allowEmpty: index > 0 });
     if (ref.size > MAX_PART_BYTES) {
       throw fail.format(
         `${where}[${index}]: part '${ref.path}' が ${ref.size} バイトで` +
@@ -737,7 +762,7 @@ const parseContainer = (
   fail: Fail,
   raw: unknown,
   where: string,
-  seen: Map<string, FileRef>,
+  scope: RefScope,
 ): ContainerRef => {
   if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
   assertAllowedKeys(fail, raw, CONTAINER_KEYS, where);
@@ -747,7 +772,7 @@ const parseContainer = (
   const graph = parseDocument(fail, descriptorRaw["graph"], `${where}.descriptor.graph`);
   // krm は必ずモデル記述を持つ（グラフだけの `krg` を配る席は karume/5 に無い — ADR 0109 決定 5）。
   const model = parseDocument(fail, descriptorRaw["model"], `${where}.descriptor.model`);
-  const parts = parseParts(fail, raw["parts"], `${where}.parts`, seen);
+  const parts = parseParts(fail, raw["parts"], `${where}.parts`, scope);
 
   // part 0 は「ヘッダ + 2 文書ちょうど」（container-v1 §8）。宣言どうしの整合なので、1 バイトも
   // 取らずにここで見られる — 取得してから長さ違いに気づく形を作らない。
@@ -783,11 +808,11 @@ const parseWeightContainer = (
   fail: Fail,
   raw: unknown,
   where: string,
-  seen: Map<string, FileRef>,
+  scope: RefScope,
 ): WeightContainer => {
   if (!isRecord(raw)) throw fail.format(`${where}: dtype エントリがオブジェクトでない`);
   assertAllowedKeys(fail, raw, WEIGHT_DTYPE_KEYS, where);
-  return { container: parseContainer(fail, raw["container"], `${where}.container`, seen) };
+  return { container: parseContainer(fail, raw["container"], `${where}.container`, scope) };
 };
 
 /** weights の 1 エントリ（dtype ラベル → コンテナ）。**dtype キーは 1 つ以上必須**。 */
@@ -795,7 +820,7 @@ const parseWeightEntry = (
   fail: Fail,
   raw: unknown,
   where: string,
-  seen: Map<string, FileRef>,
+  scope: RefScope,
 ): WeightEntry => {
   if (!isRecord(raw)) throw fail.format(`${where}: weights エントリがオブジェクトでない`);
   const labels = Object.keys(raw);
@@ -806,7 +831,7 @@ const parseWeightEntry = (
   for (const label of labels) {
     entry = {
       ...entry,
-      [label]: parseWeightContainer(fail, raw[label], `${where}.${label}`, seen),
+      [label]: parseWeightContainer(fail, raw[label], `${where}.${label}`, scope),
     };
   }
   return entry;
@@ -1098,7 +1123,7 @@ const parseModel = (
   root: Record<string, unknown>,
   name: string,
   raw: unknown,
-  seen: Map<string, FileRef>,
+  scope: RefScope,
 ): ModelEntry => {
   const survey = surveyLabels(root, name);
   const { available } = survey;
@@ -1113,14 +1138,14 @@ const parseModel = (
     raw["weights"],
     `${where}.weights`,
     MAX_WEIGHTS,
-    (weightName, value) => parseWeightEntry(fail, value, `${where}.weights.${weightName}`, seen),
+    (weightName, value) => parseWeightEntry(fail, value, `${where}.weights.${weightName}`, scope),
   );
   const assets = parseMap(
     fail,
     raw["assets"],
     `${where}.assets`,
     MAX_ASSETS,
-    (assetName, value) => parseFileRef(fail, value, `${where}.assets.${assetName}`, seen),
+    (assetName, value) => parseFileRef(fail, value, `${where}.assets.${assetName}`, scope),
     true,
   );
   const quants = parseMap(
@@ -1156,8 +1181,21 @@ const parseModel = (
  * `karume.json` のテキストを検査して読む。ADR 0041 の検査を**全て** parse 時に走らせ、1 つでも
  * 破れたら fetch を開始せずに throw する（「DL 開始後に初めて欠けが分かる」を許さないのが
  * manifest 導入の目的そのもの）。
+ *
+ * NOTE: テキストだけでは「どの repo の manifest か」が分からないので、越境参照が読み込んだ repo
+ * 自身を指していないかの検査（{@link parseRepoManifest}）はここでは掛からない。取得の入口
+ * （`loadManifest`）は取得元の repo を添えてそちらで読む。
  */
-export const parseManifest = (text: string): Manifest => {
+export const parseManifest = (text: string): Manifest => parseRepoManifest(text, undefined);
+
+/**
+ * {@link parseManifest} に、manifest を読み込んだ repo（`ownRepo`）を添えて読む。越境参照が
+ * `ownRepo` 自身を指していたら fail loudly（{@link RefScope.ownRepo}）。repo という概念を持たない
+ * 取得元（ローカルディレクトリ）は `undefined` を渡す。
+ *
+ * MUST NOT: barrel（`mod.ts`）には出さない — 取得層の内側の入口（`fetch.ts` の `loadManifest`）。
+ */
+export const parseRepoManifest = (text: string, ownRepo: string | undefined): Manifest => {
   const bytes = new TextEncoder().encode(text).length;
   if (bytes > MAX_MANIFEST_BYTES) {
     throw new ManifestFormatError(
@@ -1190,13 +1228,13 @@ export const parseManifest = (text: string): Manifest => {
 
   // MUST: path の重複検査は manifest 全域で 1 つの表を共有する — モデル間の共有は「同じ path を
   // 書く」だけで成立する形（ADR 0041 §5）なので、モデルごとに表を分けると矛盾を見逃す。
-  const seenPaths = new Map<string, FileRef>();
+  const scope: RefScope = { seen: new Map<string, FileRef>(), ownRepo };
   const models = parseMap(
     fail,
     root["models"],
     "models",
     MAX_MODELS,
-    (name, value) => parseModel(root, name, value, seenPaths),
+    (name, value) => parseModel(root, name, value, scope),
   );
 
   const defaultModel = root["defaultModel"];

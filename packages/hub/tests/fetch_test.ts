@@ -1393,6 +1393,34 @@ Deno.test("fetchAssets: 進捗は実際に取りに行った先の (repo, revisi
   }
 });
 
+Deno.test("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", async (t) => {
+  // 自リポの別 revision を越境で指す形は、参照の同一性（repo と revision を含む）とキャッシュの
+  // 実体（HF では revision を含まない）がずれる — 片方を保護しても共有の実体ごと消える。
+  for (const [label, revision] of [["同じ revision", SHA], ["別の revision", FOREIGN_SHA]]) {
+    await t.step(label, async () => {
+      const selfCross = crossRepoManifest
+        .replaceAll(FOREIGN_REPO, REPO)
+        .replaceAll(FOREIGN_SHA, revision);
+      const mock = createMockFetch({
+        files: crossRepoFiles(new Map([[MANIFEST_PATH, new TextEncoder().encode(selfCross)]])),
+      });
+      const error = await assertRejects(
+        () =>
+          loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
+            fetch: mock.fetch,
+            caches: new MemoryCacheStorage(),
+          }),
+        ManifestFormatError,
+      );
+      assert(error.message.includes(REPO), `${error.message} が自リポを名乗っていない`);
+      assert(
+        error.message.includes("models.m.weights.borrowed"),
+        `${error.message} が違反の場所を名乗っていない`,
+      );
+    });
+  }
+});
+
 // ---- 越境した容器（ADR 0038 §7 / ADR 0109 決定 3 —「越境参照は容器単位」）。exporter は
 // 共有コンポーネントを **part 1 本 = 参照 1 つ**の形で焼くので、受け側は容器の全 part を参照先の
 // URL から取れなければならない（先頭だけ越境する / 列を畳むと、残りの part がセッションの repo に

@@ -328,6 +328,11 @@ const progressKey = (repo: string | undefined, revision: string | undefined, pat
  * `loaded` の取得面が `ref` について出す進捗の引き当てキー。取得先の決め方は hub の公開契約
  * （`AssetProgress.repo` / `revision`）どおり — 越境参照（`repo` と `revision` の対）は宣言された
  * 越境先、それ以外はその manifest のセッション（`LoadedManifest.repo` / `revisionSha`）。
+ *
+ * NOTE: 同じ manifest の参照どうしでは、このキーが同じ ⇔ hub の `fileRefKey` が同じ
+ * （{@link prefetchSeats} の一意化が hub の重複検査と食い違わない）。自リポ参照と越境参照が同じ
+ * キーへ畳まれるのは越境が読み込んだ repo 自身を指すときだけで、その manifest は hub の
+ * `loadManifest` が拒否する（ADR 0038 追記 2026-10-11）。
  */
 const progressKeyOf = (loaded: LoadedManifest, ref: FileRef): string =>
   ref.repo !== undefined && ref.revision !== undefined

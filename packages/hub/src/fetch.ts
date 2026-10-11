@@ -30,7 +30,7 @@ import {
   isRepoName,
   type Manifest,
   MANIFEST_FILENAME,
-  parseManifest,
+  parseRepoManifest,
 } from "./manifest.ts";
 import { createProgressEmitter, type ProgressEmitter } from "./progress.ts";
 import {
@@ -126,8 +126,11 @@ export const assertTightView = (bytes: Uint8Array, path: string): Uint8Array<Arr
   return bytes;
 };
 
-/** バイト列 → `Manifest` の唯一の変換点（取得元の検証フックの内側で呼ばれる）。 */
-const decodeManifest = (bytes: Uint8Array): Manifest => {
+/**
+ * バイト列 → `Manifest` の唯一の変換点（取得元の検証フックの内側で呼ばれる）。`ownRepo` は
+ * manifest を読み込んだ repo（取得元の名乗り `SourceOrigin.repo` — 持たない取得元は `undefined`）。
+ */
+const decodeManifest = (bytes: Uint8Array, ownRepo: string | undefined): Manifest => {
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -136,7 +139,7 @@ const decodeManifest = (bytes: Uint8Array): Manifest => {
       cause: error,
     });
   }
-  return parseManifest(text);
+  return parseRepoManifest(text, ownRepo);
 };
 
 /**
@@ -190,7 +193,7 @@ export const loadManifest = async (
   try {
     await pinned.readManifest({
       parse: (bytes) => {
-        manifest = decodeManifest(bytes);
+        manifest = decodeManifest(bytes, pinned.origin.repo);
       },
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       sizeViolation: manifestOversize(pinned.origin),
