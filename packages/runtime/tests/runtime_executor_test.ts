@@ -353,6 +353,43 @@ Deno.test("構築の途中（重みの供給待ち）で device が失われた�
   assertEquals(borrowed(), 0, "落ちた構築が借用を返していない");
 });
 
+Deno.test("構築の後に device が失われたら、出力 0 本の run / enqueue も成功に化けず GpuDeviceLostError で reject する", async () => {
+  // 出力 0 本のグラフは読み戻しを持たないので、本体の失敗判定（errorScope・完了待ち）だけでは
+  // 消失を拾える保証が無い。受付の同期区間で device を見る。
+  const destroyed = fakeGpu();
+  const onDestroyed = await buildSession(destroyed, emptyGraph(), {});
+  destroyed.destroy();
+  await assertRejects(() => onDestroyed.run({}), GpuDeviceLostError, "run の受付");
+  await onDestroyed.dispose();
+
+  // enqueue は消失の前に開いた区間へ積む（消失後は区間の開始そのものが落ちる）。区間は errorScope
+  // 区間ロックを握るので、run と同じ device では開いたままにしない。
+  const enqueued = fakeGpu();
+  const onEnqueued = await buildSession(enqueued, emptyGraph(), {});
+  const opened = await enqueued.beginBatch();
+  enqueued.destroy();
+  await assertRejects(
+    () => onEnqueued.enqueue({}, { batch: opened }),
+    GpuDeviceLostError,
+    "enqueue の受付",
+  );
+  await assertRejects(
+    () => onEnqueued.enqueueRead({}, { batch: opened }).admitted,
+    GpuDeviceLostError,
+    "enqueue の受付",
+  );
+  // 区間そのものの決着も消失で落ちる（ここが見るのは受付で、区間の後始末は別の門）。
+  await assertRejects(() => opened.finish(), GpuDeviceLostError);
+  await onEnqueued.dispose();
+
+  const { gpu, lose } = losableFakeGpu();
+  const onLost = await buildSession(gpu, emptyGraph(), {});
+  lose();
+  await gpu.device.lost;
+  await assertRejects(() => onLost.run({}), GpuDeviceLostError, "run の受付");
+  await onLost.dispose();
+});
+
 Deno.test("構築は入口時点の options で決まり、構築中の書き換えは検査を経ない state を作らない", async () => {
   // 組合せの検査（ADR 0105 決定 1）は入口で 1 回だけ走る。構築は await を跨ぐので、待つ前に
   // 呼び手が options を書き換えると、検査では拒否される組合せ（sequential + packedStaticQuantize）の

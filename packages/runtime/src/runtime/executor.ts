@@ -30,6 +30,7 @@ import { groupScaleShape } from "../format/container/codecs.ts";
 import type { IrDtype, IrGraph } from "../format/ir.ts";
 import { type ArenaStats, RunArena, STORAGE_USAGE } from "../gpu/arena.ts";
 import {
+  assertDeviceUsable,
   type BatchFailureOrigin,
   type BatchReadSource,
   BatchScopeError,
@@ -808,6 +809,11 @@ export class Session {
       if (this.#disposal !== undefined) {
         throw new ExecutionError("dispose 済みの Session では実行できない");
       }
+      // MUST: device の生存も受付の同期区間で見る（{@link assertDeviceUsable}）。本体の失敗判定は
+      // errorScope と読み戻しの待ちに頼るので、読み戻しを持たない出力 0 本の run は、消失済み・
+      // 破棄要求済みの device でも成功で決着しうる。写しの後に置くのは、利用者の getter が
+      // 同期で `destroy()` を発行できるため（dispose の再検査と同じ位置）。
+      assertDeviceUsable(this.#state.gpu, "run の受付");
       // MUST: 常駐入力の使用予約も**発行の同期区間**で取る（本体の束縛予約だけでは、受理済みの
       // run が居るのに同じ tick の `dispose()` が通る — {@link retainUsedResidents}）。
       const targets: [where: string, resident: ResidentTensor][] = [];
@@ -923,6 +929,10 @@ export class Session {
     if (this.#disposal !== undefined) {
       throw new ExecutionError("dispose 済みの Session では実行できない");
     }
+    // MUST: device の生存も見る（{@link Session.run} の受付と同じ理由 — 出力 0 本の enqueue は
+    // 破棄要求済みの device でも戻り Promise が成功で決着する。区間の finish は落ちるが、
+    // enqueue 自身の決着が成功のままだと、どの enqueue が消失を踏んだかが読めない）。
+    assertDeviceUsable(this.#state.gpu, "enqueue の受付");
     if (this.#readBatch === batch) {
       throw new BatchScopeError(
         "enqueueRead を積んだ batch には、その決着まで同じ Session から enqueue できない" +
