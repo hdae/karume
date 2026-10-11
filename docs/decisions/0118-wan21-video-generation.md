@@ -471,7 +471,7 @@ cache の一覧（形は潜在 32×32 のタイルのとき。各 `[Cin, 2, h, w
 | 系列                                                              | `outputs/series/wan2.1-t2v-1.3b-f16-dyn/`（`transformer` / `vae_decoder_first` / `vae_decoder_next` — 接尾辞 `-dyn` は ADR 0077 の慣例）・`outputs/series/wan2.1-t2v-1.3b-text-embeds/`                                                 |
 | 配布形                                                            | `models/karume-wan2.1/`（モデル `t2v-1.3b`・`defaultModel`）。家族 1 リポ・世代は別リポの規則（ADR 0092 決定 1 / 2 — Wan2.2 は `karume-wan2.2`）                                                                                        |
 | 名前の対応                                                        | 家族名 `wan2.1` = 配布リポ `hdae/karume-wan2.1` = `WAN_SOURCES["wan2.1"]`（キーはリポ名から `karume-` を落としたもの — ADR 0092 決定 3）。サブパスと TS の名前は世代を持たない `./wan` / `WAN_SOURCES`（Wan2.2 はキー `wan2.2` を足す） |
-| quant 席                                                          | `f16`（DiT と VAE の重みを f16 格納・活性 f32）が既定。DiT の i8 席〈参照席 / 実用席〉は [ADR 0120](0120-wan-dit-w8a8-seat.md)（2026-10-03・検収中）・i4 は未定                                                                         |
+| quant 席                                                          | `f16`（DiT と VAE の重みを f16 格納・活性 f32）が既定。DiT の i8 席〈参照席 / 実用席〉は [ADR 0120](0120-wan-dit-w8a8-seat.md)（2026-10-03・検収中）・i4 は未定。→ 2026-10-04 から既定 = 実用席（ADR 0120 裁定）                        |
 | 受理集合                                                          | 832×480 / 480×832 × フレーム数 4n+1（5〜81）。検収するのは 33 と 81                                                                                                                                                                     |
 
 - recipe の依存は recipes の uv プロジェクトの dependency group `wan` に置く（ADR 0065 決定 4）。中身は
