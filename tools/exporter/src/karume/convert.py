@@ -439,7 +439,8 @@ class UnsupportedAtenOpsError(NotImplementedError):
         listed = "\n".join(_describe(report) for report in self.reports.values())
         super().__init__(
             f"未対応 aten op {len(self.reports)} 種:\n{listed}\n"
-            "分類: [Core ATen] = torch.Tag.core 付き（語彙へ足すなら台帳 NOTE のみ）"
+            "分類: [Core ATen] = torch.Tag.core 付き（語彙へ足すなら台帳 NOTE のみ。"
+            "ただし単一出力等の実行モデルの不変条件を壊す追加は ADR 必須 — ADR 0064 軸 B）"
             " / [Core ATen 外] = 語彙へ足すなら ADR 必須（先に分解か recipe 側の書き換えを検討）"
             " / [aten 外] = operator.getitem・カスタム op 等（Core ATen の判定の対象外）。"
             "判定の順序と例外は docs/op-vocabulary.md「op 追加の判定手順」"
