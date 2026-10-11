@@ -1076,7 +1076,9 @@ class TestI4Storage:
         書けなくなる。ランタイム側の受け皿（eligible ∩ i4Eligible の外は CPU 展開）と対の
         設計は「展開経路のある op の重みだけ圧縮・他は f32」で、i8 の適格外と同じ。
         """
-        graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2)
+        # Cout は groups で割り切れる 4 にする（既定の 3 は conv1d の契約〈groups が Cin と Cout を
+        # 割り切る〉を破り、runtime の parser が拒否するグラフになる — 被験体の誤り）。
+        graph, tensors, scales = int4_weight_graph(conv=True, conv_groups=2, conv_shape=(4, 2, 16))
 
         path = write_int4(tmp_path / "model.krm", graph, tensors, scales)
 
