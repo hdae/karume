@@ -4,7 +4,7 @@
 // 持つ — 重複させない。ホスト層の Python 正本とのパリティは
 // `packages/models/tests/vowel_detector_host_test.ts`）。
 //
-// 押さえるのは 5 点:
+// 押さえるのは 6 点:
 //
 // ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
 //    （`src/vowel-detector/pipeline.ts` の `openVowelDetectorState` が掲げる MUST）。観測の
@@ -31,8 +31,11 @@
 //
 // ⑤ **mel 基底資産**（`parseMelBasis`）— テンソル名・dtype・形の 3 つを見る。基底がずれても
 //    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
+//
+// ⑥ **検出の実行経路の例外**（偽の Session）— run や診断コールバックの失敗の後に Session の
+//    解放まで落ちても、呼び手の例外から最初の失敗を辿れる。
 
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -51,6 +54,7 @@ import { LIPSYNC_CLASSES } from "../src/vowel-detector/postprocess.ts";
 import { writeSafetensors } from "./helpers/safetensors-write.ts";
 import { type StubDim, stubModel } from "./helpers/stub-model.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
+import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /**
  * 配布形が宣言する運用範囲
@@ -426,4 +430,108 @@ Deno.test("mel 基底: f32 でない格納形は落とす", () => {
     {},
   );
   assertThrows(() => parseMelBasis(bytes.buffer), Error, "mel 基底が F32 でない");
+});
+
+// ---- 検出の実行経路（Session を偽物にして例外の運び方を見る）------------------
+//
+// `detect` は 1 検出ごとに Session を張って畳む。run や診断コールバックが落ちた後に Session の
+// 解放まで落ちる（device lost では両方が起きる）とき、呼び手が受け取る例外から**最初の失敗**を
+// 辿れることを縛る。Session も GPU も偽物で足りる（`createSession` までしか触らない）ので、
+// 状態を直接組んで非公開のコンストラクタへ渡す（`wan_pipeline_test.ts` と同じ流儀）。
+
+/** 偽の Session が投げるもの・呼び手が渡す診断コールバック。 */
+type FakeRunPlan = {
+  readonly runError?: Error;
+  readonly disposeError?: Error;
+  readonly onRunDiagnostics?: () => void;
+};
+
+/** 1 秒の正弦波（10ms フレーム 97 本 → 端数を落として 96 本 = 運用範囲の内側）。 */
+const ONE_SECOND = Float32Array.from(
+  { length: SAMPLE_RATE },
+  (_, index) => 0.5 * Math.sin((2 * Math.PI * 220 * index) / SAMPLE_RATE),
+);
+
+/** 偽の Session を張る CRNN で組んだパイプラインと、解放の呼び出し回数。 */
+const pipelineWithFakeSession = (
+  plan: FakeRunPlan,
+): { readonly pipeline: VowelDetectorPipeline; readonly disposeCalls: () => number } => {
+  let disposeCalls = 0;
+  const state = {
+    gpu: fakeGpuContext(fakeDevice()),
+    ownsGpu: false,
+    config: graphConfig,
+    graph: {
+      graph: { outputs: ["logits"] },
+      createSession: () =>
+        Promise.resolve({
+          run: () =>
+            plan.runError === undefined
+              ? Promise.resolve({
+                logits: {
+                  dtype: "f32",
+                  shape: [1, 48, LIPSYNC_CLASSES.length],
+                  data: new Float32Array(48 * LIPSYNC_CLASSES.length),
+                },
+              })
+              : Promise.reject(plan.runError),
+          diagnostics: () => ({}),
+          dispose: () => {
+            disposeCalls += 1;
+            return plan.disposeError === undefined
+              ? Promise.resolve()
+              : Promise.reject(plan.disposeError);
+          },
+        }),
+    },
+    symbol: "T",
+    sessionOptions: {},
+    melBasis: new Float32Array(N_MELS * MEL_BINS),
+    ...(plan.onRunDiagnostics === undefined ? {} : { onRunDiagnostics: plan.onRunDiagnostics }),
+  };
+  const pipeline: VowelDetectorPipeline = Reflect.construct(VowelDetectorPipeline, [state]);
+  return { pipeline, disposeCalls: () => disposeCalls };
+};
+
+Deno.test("detect: run が落ちた後に Session の解放も落ちたら、run の例外を先頭に両方を運ぶ", async () => {
+  const runFailure = new Error("run の途中で device lost");
+  const disposeFailure = new Error("flush に失敗した");
+  const { pipeline, disposeCalls } = pipelineWithFakeSession({
+    runError: runFailure,
+    disposeError: disposeFailure,
+  });
+
+  const error = await assertRejects(() => pipeline.detect(ONE_SECOND), AggregateError);
+
+  // 解放の例外だけが届くと、最初に何が壊れたか（run の失敗）が消える。
+  assertStrictEquals(error.errors[0], runFailure);
+  assertStrictEquals(error.errors[1], disposeFailure);
+  assertEquals(disposeCalls(), 1);
+});
+
+Deno.test("detect: 診断コールバックが落ちた後に Session の解放も落ちたら、コールバックの例外を先頭に運ぶ", async () => {
+  const callbackFailure = new Error("診断コールバックが投げた");
+  const disposeFailure = new Error("flush に失敗した");
+  const { pipeline, disposeCalls } = pipelineWithFakeSession({
+    disposeError: disposeFailure,
+    onRunDiagnostics: () => {
+      throw callbackFailure;
+    },
+  });
+
+  const error = await assertRejects(() => pipeline.detect(ONE_SECOND), AggregateError);
+
+  assertStrictEquals(error.errors[0], callbackFailure);
+  assertStrictEquals(error.errors[1], disposeFailure);
+  assertEquals(disposeCalls(), 1);
+});
+
+Deno.test("detect: run だけが落ちたら、その例外をそのまま運び Session は 1 回だけ解放する", async () => {
+  const runFailure = new Error("run の途中で落ちた");
+  const { pipeline, disposeCalls } = pipelineWithFakeSession({ runError: runFailure });
+
+  const error = await assertRejects(() => pipeline.detect(ONE_SECOND));
+
+  assertStrictEquals(error, runFailure);
+  assertEquals(disposeCalls(), 1);
 });

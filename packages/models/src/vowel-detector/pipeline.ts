@@ -66,7 +66,6 @@ import {
   acquireGpu,
   type GpuContext,
   parseSafetensors,
-  type Session,
   type SessionDiagnostics,
   type SessionOptions,
   type Tensor,
@@ -114,6 +113,7 @@ import {
   type ModelComponent,
 } from "../hub/components.ts";
 import { readAssetBuffer } from "../hub/asset-readers.ts";
+import { withSession } from "../session/with-session.ts";
 
 /**
  * manifest の assets 表に現れる取得キーと、その safetensors のテンソル名
@@ -541,34 +541,42 @@ const openVowelDetectorState = async (
 
 /**
  * 1 検出ぶんの Session を張り、使い終わったら必ず解放する。
- * MUST: `finally` で dispose する — 途中で落ちたときに VRAM が残ると、後続の検出が確保に
- * 失敗して「最初の失敗とは別の場所」で落ちる。
+ *
+ * MUST: 張る・畳むは {@link withSession} に任せる — 途中で落ちたときに VRAM が残ると、後続の
+ * 検出が確保に失敗して「最初の失敗とは別の場所」で落ちる。素の `finally` で `dispose` を待つ
+ * 形は、run や診断コールバックの失敗の後に dispose まで失敗すると（device lost では両方が
+ * 起きる）dispose の例外が元の例外を上書きし、最初に何が壊れたかが消える。
+ * NOTE: `withSession` の `run` 包みは記号束縛を受けないので、body に渡る Session で直接
+ * `run` し、診断も同じ順（run の直後）でここから呼ぶ。
  */
-const runGraph = async (
+const runGraph = (
   state: VowelDetectorState,
   features: Tensor,
   rows: number,
 ): Promise<Float32Array> => {
   const model = state.graph;
-  const session: Session = await model.createSession(state.gpu, state.sessionOptions);
-  try {
-    // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
-    // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
-    const outputs = await session.run({ [INPUT_NAME]: features }, { [state.symbol]: rows });
-    if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(session.diagnostics());
-    const name = model.graph.outputs[0];
-    const tensor = outputs[name];
-    if (tensor === undefined) {
-      throw new Error(`vowel-detector: グラフ出力 '${name}' が実行結果に無い`);
-    }
-    // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-    if (tensor.dtype !== "f32") {
-      throw new Error(`vowel-detector: ロジットが f32 でない（${tensor.dtype}）`);
-    }
-    return tensor.data;
-  } finally {
-    await session.dispose();
-  }
+  return withSession(
+    state.gpu,
+    model,
+    state.sessionOptions,
+    undefined,
+    async (_run, session) => {
+      // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
+      // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
+      const outputs = await session.run({ [INPUT_NAME]: features }, { [state.symbol]: rows });
+      if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(session.diagnostics());
+      const name = model.graph.outputs[0];
+      const tensor = outputs[name];
+      if (tensor === undefined) {
+        throw new Error(`vowel-detector: グラフ出力 '${name}' が実行結果に無い`);
+      }
+      // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+      if (tensor.dtype !== "f32") {
+        throw new Error(`vowel-detector: ロジットが f32 でない（${tensor.dtype}）`);
+      }
+      return tensor.data;
+    },
+  );
 };
 
 /** 音声 1 本を通す（特徴 → 端数の切り捨て → 上限検査 → 実長で run → 後処理）。 */
