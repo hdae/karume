@@ -146,7 +146,11 @@ class TestTheUpstreamProcedures:
 
     def test_hr_with_truncation_is_the_upstream_call_chain_itself(self):
         """量子化を切り捨てに戻すと、上流の `ToPILImage()(pred).resize(size)` とビット一致する
-        （差し替えたのが量子化だけであることの裏付け）。"""
+        （差し替えたのが量子化だけであることの裏付け）。
+
+        σ の精度は写さない（ADR 0125 決定 5 — 上流の半精度の σ ではなく f64 の σ で比べる）ので、
+        裏付けの範囲は Pillow の段と `ToPILImage` の切り捨てまで。上流の半精度の sigmoid との
+        一致はここでは主張しない。"""
         import torch
         from torchvision import transforms
 
