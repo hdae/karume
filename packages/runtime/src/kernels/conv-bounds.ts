@@ -30,7 +30,7 @@ export const assertI32Coordinates = (
     if (value > I32_MAX) {
       throw new CodegenError(
         `${where}: ${name} ${value} が i32 の上限 2^31 − 1 を超える` +
-          "（GPU の座標演算は i32 — 折り返すと範囲外 0 の門を通り抜けて誤値になる）",
+          "（GPU の座標演算は i32 — 折り返した座標は例外を出さずに誤値を返す）",
       );
     }
   }

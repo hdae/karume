@@ -12,6 +12,7 @@ import { describe, it } from "@std/testing/bdd";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { type Conv1dDims, conv1dIgemmParams, conv1dParams } from "../src/kernels/conv1d.ts";
 import { type Conv2dDims, conv2dIgemmParams, conv2dParams } from "../src/kernels/conv2d.ts";
+import { convTranspose1dParams } from "../src/kernels/conv-transpose1d.ts";
 
 const U32_MAX = 0xffff_ffff;
 // 境界の形: 長さ L・K 1・stride 1・dilation 1 で、L + 2·padding = 2^31 − 1 + (L − 1)。
@@ -137,5 +138,51 @@ describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
         );
       }
     }
+  });
+});
+
+describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まらない形", () => {
+  // 契約（shapes.ts）は 2·padding == K − stride かつ出力長 = 入力長·stride。
+  const transpose = (
+    lengthIn: number,
+    kernel: number,
+    stride: number,
+    padding: number,
+  ) => ({
+    batch: 1,
+    channelsIn: 1,
+    channelsOut: 1,
+    lengthIn,
+    lengthOut: lengthIn * stride,
+    kernel,
+    stride,
+    padding,
+  });
+
+  it("kernel > 2^31 の形（tap の終端が負に折り返し、期待 6 に対して bias だけを返す）を拒否する", () => {
+    assertThrows(
+      () => convTranspose1dParams(transpose(1, 2 ** 31 + 1, 1, 2 ** 30)),
+      CodegenError,
+      "i32 の上限",
+    );
+  });
+
+  it("kernel = 2^31 − 1 は受理し、2^31 は拒否する", () => {
+    assertEquals(convTranspose1dParams(transpose(1, 2 ** 31 - 1, 1, 2 ** 30 - 1)).length, 12);
+    assertThrows(
+      () => convTranspose1dParams(transpose(1, 2 ** 31, 2, 2 ** 30 - 1)),
+      CodegenError,
+      "i32 の上限",
+    );
+  });
+
+  it("出力座標 + padding が u32 を超える形（末尾の出力が 0 番の入力を読む）を拒否する", () => {
+    // 3·stride = 2^32 − 1 で出力長は u32 に収まるが、WGSL の ox + padding が 2^32 で 0 に折り返す。
+    const stride = (2 ** 32 - 1) / 3;
+    assertThrows(
+      () => convTranspose1dParams(transpose(3, stride + 4, stride, 2)),
+      CodegenError,
+      "i32 の上限",
+    );
   });
 });

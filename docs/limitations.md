@@ -282,6 +282,8 @@ tileN 128 × 65,535）で `DispatchLimitError` になる。Wan2.1 の VAE の ch
 GPU 実行の座標演算は i32 なので、軸ごとに `入力長 + 2·padding ≤ 2^31 − 1` を超える `conv1d` / `conv2d` / `conv3d` は Session 構築時に
 `CodegenError` になる（折り返した座標が範囲外 0 の門を通り抜けて誤値になるため — ADR 0118 追記 2026-10-03。conv1d / conv2d は
 direct 版と暗黙 GEMM 版が同じ門を通る）。CPU 参照の意味論は変えない。実在の資産では起きない（padding / dilation が約 2^30 以上の IR だけ）。
+`conv_transpose1d` も同じ理由で、kernel・入力長・`出力長 + padding` のどれかが 2^31 − 1 を超える形は `CodegenError` になる
+（有効 tap の範囲を i32 で閉じるため）。
 
 ## 幾何プロファイル: フラグ無しの Chrome では `description` で照合する表が自動では当たらない（外部制約）
 

@@ -47,6 +47,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { assertU32Params } from "../codegen/params.ts";
+import { assertI32Coordinates } from "./conv-bounds.ts";
 import {
   WEIGHT_SCALE_VAR,
   weightArrayType,
@@ -205,6 +206,17 @@ export const convTranspose1dParams = (dims: {
   for (const [name, value] of positive) {
     if (value < 1) throw new CodegenError(`conv_transpose1d params: ${name} は正整数（${value}）`);
   }
+  // MUST: tap の範囲の計算が i32 に収まる形に限る。WGSL は `shifted = ox + padding` を u32 で、
+  // `q = shifted / stride`・`length_in`・`(kernel − 1 − r) / stride` を i32 へ再解釈して j の範囲を
+  // 閉じるので、どれかが折り返すと範囲が空や別の区間になり、寄与を落とした・別の入力を読んだ
+  // 値を例外なしに返す（kernel > 2^31 で終端が負になり bias だけが残る形など）。
+  // `length_out + padding ≤ 2^31 − 1` なら shifted と q（と `q + 1`）が、kernel と length_in の
+  // 2 条件で残りの再解釈が i32 に収まる。
+  assertI32Coordinates("conv_transpose1d params", {
+    kernel: dims.kernel,
+    length_in: dims.lengthIn,
+    "length_out + padding": dims.lengthOut + dims.padding,
+  });
   const n = dims.batch * dims.channelsOut * dims.lengthOut;
   assertU32Params("conv_transpose1d params", { n });
   const params = new Uint32Array(12);
