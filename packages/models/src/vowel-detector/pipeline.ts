@@ -514,7 +514,7 @@ const openVowelDetectorState = async (
   open: ComponentOpener,
   options: VowelDetectorPipelineOptions = {},
 ): Promise<VowelDetectorState> => {
-  const { config, quantName, symbol, sessionOptions, gpuFeatures } = admitted;
+  const { config, quantName, quant, symbol, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const graph = open(GRAPH_ROLE);
   const melBasis = parseMelBasis(assetBuffer(assets, MEL_BASIS));
@@ -527,6 +527,16 @@ const openVowelDetectorState = async (
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
+    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
+    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
+    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitVowelDetector` が見ている。
+    if (ownsGpu) {
+      assertRequiredLimitsSatisfied(
+        quant.requiredLimits,
+        gpu.limits,
+        `VowelDetectorPipeline: quant '${quantName}'`,
+      );
+    }
   } catch (error) {
     // 内部で取った GPU は、構築に失敗したら誰も解放できなくなるのでここで返す。
     if (ownsGpu) gpu.destroy();

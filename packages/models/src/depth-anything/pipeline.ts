@@ -504,7 +504,7 @@ const openDepthAnythingState = async (
   open: ComponentOpener,
   options: DepthAnythingPipelineOptions = {},
 ): Promise<DepthAnythingState> => {
-  const { config, quantName, sessionOptions, gpuFeatures } = admitted;
+  const { config, quantName, quant, sessionOptions, gpuFeatures } = admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const depth = open(DEPTH);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
@@ -515,6 +515,16 @@ const openDepthAnythingState = async (
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `DepthAnythingPipeline: quant '${quantName}'`);
+    // 自前で取った device の limits もここで見る — `fromAssets` には取得前の事前判定の席が無く
+    // （`fromPretrained` はアダプタ値で見ている）、見ないと宣言の不足が Session の構築まで遅れ、
+    // 宣言が実需要より厳しい場合は照合自体が一度も行われない。共有 GPU は `admitDepthAnything` が見ている。
+    if (ownsGpu) {
+      assertRequiredLimitsSatisfied(
+        quant.requiredLimits,
+        gpu.limits,
+        `DepthAnythingPipeline: quant '${quantName}'`,
+      );
+    }
     return {
       gpu,
       ownsGpu,
