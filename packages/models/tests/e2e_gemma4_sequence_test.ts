@@ -24,6 +24,10 @@
 //    流しても、①と同じ golden token 列が出る。物理行数を変えると GEMM の幾何が変わる（M の段で
 //    骨格が切り替わる）ので**ビット同一は契約しない** — 実重みで token 列が動かないことがこの
 //    最適化の合格線であり、外れても値は正しいまま（pad 行は 0 で無害）なので他に門が無い。
+// ⑥ **分岐の独立**（`fork` — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）: 公開面
+//    （`Gemma4Pipeline.sequence().fork()`）で分岐した 2 本が KV を共有しないこと。投機なし /
+//    `"always"` / ゲートつきの 3 系統で、fork を使わない同じ操作列（基準）と token 列が一致する。
+//    順序が要（下の節の doc）。
 //
 // NOTE: golden の出所（`reference.json` が束ねた digest）を突き合わせる門は
 // `e2e_gemma4_product_test.ts` の④が同じ 3 本に対して持っている — 同じ資産に 2 つ置かない。
@@ -32,9 +36,12 @@
 //
 // `outputs/series/gemma4-e2b-product/`（重みと PLE の資産が同居する容器）と
 // `outputs/series/gemma4-e2b-decode/`（期待列の正本）。どちらもリポジトリ管理外で、無い環境では
-// **明示 SKIP** する。
+// **明示 SKIP** する。⑥だけは drafter 入りの配布形ミラー `models/karume-gemma4/` を使う（投機の
+// 2 系統を同じ pipeline で回すため）— ミラーが無い環境では⑥だけを明示 SKIP する。
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
+import { denoDirectory } from "@karume/hub/deno";
 import {
   acquireGpu,
   parseSafetensors,
@@ -56,6 +63,16 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 // 開いた容器から PLE の索引と block の読み口を組む（ADR 0109 決定 4）。
 import { seriesPleHandle } from "./helpers/ple-series.ts";
 import { gemma4PleTotalBytes } from "../src/gemma/ple-index.ts";
+import {
+  gemma4ChatPrompt,
+  gemma4ChatTurn,
+  Gemma4Pipeline,
+  type GenerationStop,
+  type SamplerSpec,
+} from "../gemma.ts";
+import { GEMMA4_DRAFT_STEPS } from "../src/gemma/speculative.ts";
+import { mirrorAvailable } from "./helpers/gemma-mirror.ts";
+import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
 
 const PRODUCT_NAME = "gemma4-e2b-product";
 const PRODUCT_ROOT = new URL(`../../../outputs/series/${PRODUCT_NAME}/`, import.meta.url);
@@ -468,6 +485,172 @@ Deno.test({
     } finally {
       await session.dispose();
       gpu.destroy();
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// ⑥ 分岐の独立（fork — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）
+// ---------------------------------------------------------------------------
+//
+// 順序が要: full 層（窓の無い attention）は書いた行を必ず後から読むが、自分が書いていない先の
+// 行は読まない。「分岐が先に別のターン → 元で X」の順では、KV を共有するバグで元の行が上書き
+// されても X の prefill がそれを書き直してから読むので、列は一致してしまう。検出できる順序は
+// 「元が X で進む → 分岐が Y で**同じ位置**を上書き → 元が Z で X の行を読む」で、共有のバグが
+// あると Z の列が変わる（複製漏れは Y の列が変わる）。基準は fork を使わない同じ操作列から作る。
+//
+// NOTE: 「流し直した結果とのビット一致」は保証する門が無いので見ない。ゲートつきの系統は、
+// レーンの機で投機⑤（`e2e_gemma4_speculative_test.ts` の u32 門）が緑であることを前提にする —
+// ゲートは壁時計で M=1 と M=4 を選ぶので、門が赤の device では基準と分岐の列が割れうる
+// （ADR 0066 追記 2026-10-11 の決定性の節）。
+
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+
+/**
+ * drafter 入りの `karume/5` ミラーか（⑥の前提 — 投機の 2 系統を回す）。
+ *
+ * MUST: ファイルの綴りではなく manifest の宣言で見る（`e2e_gemma4_speculative_test.ts` と同じ）。
+ */
+const MIRROR_WITH_DRAFTER = ((): boolean => {
+  if (!mirrorAvailable(MIRROR_DIR)) return false;
+  const manifest = parseManifest(Deno.readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)));
+  return Object.hasOwn(manifest.models[manifest.defaultModel].weights, "drafter");
+})();
+
+if (!MIRROR_WITH_DRAFTER) {
+  console.warn(
+    `[karume] drafter 入りの配布形ミラー（${MIRROR_DIR.pathname}）が無いため Gemma 4 E2B の ` +
+      "分岐（fork）検収を SKIP する。組み立て: cd tools/export-recipes && uv run python dist.py " +
+      "--pipeline gemma4",
+  );
+}
+
+/** 1 ターンで生成する token 数（短く — 見たいのは列の一致で、受理率ではない）。 */
+const FORK_TURN_TOKENS = 12;
+
+/**
+ * 温度 > 0・seed 固定の抽選（RNG は分岐へ写さず `generate` ごとに seed から作る — 同じ指定・
+ * 同じ状態なら同じ列になることも同時に通る）。
+ */
+const FORK_SAMPLER: SamplerSpec = { temperature: 0.8, topK: 64, seed: 20261011 };
+
+/** 1 ターンぶんの観測（token id 列と、投機の勘定を落とした停止 — 勘定は壁時計で揺れうる）。 */
+type ForkTurn = {
+  readonly ids: readonly number[];
+  readonly stop: Omit<GenerationStop, "speculation">;
+};
+
+const forkTurn = async (
+  sequence: GenerationSequence,
+  prompt: readonly number[],
+): Promise<ForkTurn> => {
+  const stream = sequence.generate({
+    prompt: [...prompt],
+    maxNewTokens: FORK_TURN_TOKENS,
+    sampler: FORK_SAMPLER,
+  });
+  const ids: number[] = [];
+  for await (const event of stream) {
+    if (event.kind === "token") ids.push(event.id);
+  }
+  const { speculation: _speculation, ...stop } = await stream.done;
+  return { ids, stop };
+};
+
+Deno.test({
+  name:
+    "Gemma 4 E2B sequence 検収 ⑥: fork した 2 本は KV を共有しない（投機なし / always / ゲートつき・実 GPU）",
+  ignore: !MIRROR_WITH_DRAFTER || !GPU_AVAILABLE,
+  fn: async (t) => {
+    const started = performance.now();
+    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+      speculative: { k: GEMMA4_DRAFT_STEPS },
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+    });
+    console.log(
+      `[e2e] gemma4 sequence ⑥: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
+    );
+    try {
+      const tokenizer = pipeline.tokenizer;
+      // P0 は全体描画、X / Y / Z は差分（前のターンを閉じる札は pendingToken が前置する）。X と Y は
+      // 違う内容で、Z は直前のターンの中身に依る問い（X の行を読む）にする。
+      const p0 = gemma4ChatPrompt(tokenizer, [
+        { role: "user", content: "Write one short sentence about the sea." },
+      ]);
+      const x = gemma4ChatTurn(tokenizer, {
+        role: "user",
+        content: "Now write one about mountains.",
+      });
+      const y = gemma4ChatTurn(tokenizer, {
+        role: "user",
+        content: "Now write one about a desert at night.",
+      });
+      const z = gemma4ChatTurn(tokenizer, {
+        role: "user",
+        content: "Repeat your previous sentence word for word.",
+      });
+
+      const systems = [
+        ["投機なし", false],
+        ["always", "always"],
+        ["ゲートつき", true],
+      ] as const;
+      for (const [label, speculative] of systems) {
+        await t.step(`${label}: S で X → 分岐で Y → S で Z が基準と一致`, async () => {
+          const stepStarted = performance.now();
+          /** fork を使わない操作列（基準）。 */
+          const baseline = async (prompts: readonly (readonly number[])[]): Promise<ForkTurn[]> => {
+            const sequence = await pipeline.sequence({ speculative });
+            try {
+              const turns: ForkTurn[] = [];
+              for (const prompt of prompts) turns.push(await forkTurn(sequence, prompt));
+              return turns;
+            } finally {
+              await sequence.dispose();
+            }
+          };
+          // 基準: B = P0 → X → Z・B2 = P0 → Y。
+          const [, expectedX, expectedZ] = await baseline([p0, x, z]);
+          const [, expectedY] = await baseline([p0, y]);
+          // 陽性対照: Z は直前のターンの行を読む（P0 → Y → Z の Z は基準の Z と違う）。同じなら、
+          // 分岐の Y が元の X の行を上書きしても下の Z の突合では検出できない。
+          const [, , afterY] = await baseline([p0, y, z]);
+          assertNotEquals(
+            afterY.ids,
+            expectedZ.ids,
+            `${label}: Z が直前のターンに依らない（上書きの検出力が無い）`,
+          );
+
+          // 検査: S = P0 → F = S.fork() → S で X → F で Y → S で Z。
+          const source = await pipeline.sequence({ speculative });
+          let forked: GenerationSequence | undefined;
+          try {
+            await forkTurn(source, p0);
+            forked = await source.fork();
+            assertEquals(forked.used, source.used, `${label}: 分岐が会話の位置を引き継いでいない`);
+            assertEquals(await forkTurn(source, x), expectedX, `${label}: 元の X が基準と違う`);
+            assertEquals(
+              await forkTurn(forked, y),
+              expectedY,
+              `${label}: 分岐の Y が基準と違う（複製が元の状態を写していない）`,
+            );
+            assertEquals(
+              await forkTurn(source, z),
+              expectedZ,
+              `${label}: 元の Z が基準と違う（分岐の Y が元の KV を上書きした）`,
+            );
+          } finally {
+            await forked?.dispose();
+            await source.dispose();
+          }
+          console.log(
+            `[e2e] gemma4 sequence ⑥ ${label}: 基準 3 本 + 分岐 1 組が一致 / ` +
+              `${(performance.now() - stepStarted).toFixed(0)}ms`,
+          );
+        });
+      }
+    } finally {
+      await pipeline.dispose();
     }
   },
 });
