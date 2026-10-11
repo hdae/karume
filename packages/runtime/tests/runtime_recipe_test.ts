@@ -12,7 +12,8 @@
  * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
  */
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
+import { GpuDeviceLostError } from "../src/gpu/context.ts";
 import type { StorageRoles } from "../src/gpu/pipeline-cache.ts";
 import type { SubmitScheduler } from "../src/gpu/submit.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
@@ -510,6 +511,49 @@ Deno.test("run の焼き込み実行は送り込みの待ちの間、次のス�
   gate.resolve();
   await running;
   assertEquals(log, ["a", "b"]);
+});
+
+Deno.test("run の焼き込み実行は送り込みの待ちが reject したら、次のステップを積まずに reject を返す", async () => {
+  const log: string[] = [];
+  const lost = new GpuDeviceLostError("模擬: 印の待ちの間の消失");
+  const recipes = [
+    dispatchStep([runnableDispatch("a", [1, 1, 1])]),
+    dispatchStep([runnableDispatch("b", [1, 1, 1])]),
+  ];
+
+  const running = executeBakedPlanPaced(
+    recipes,
+    [[stubGroup()], [stubGroup()]],
+    pacedScheduler(log, [Promise.reject(lost)]),
+  );
+  assert(running !== undefined, "待ちが要ったら Promise を返す");
+  const error = await assertRejects(() => running);
+  // 待ちの失敗は包まずに返す（run の catch が消失の型で後始末を分ける）。
+  assertStrictEquals(error, lost);
+  assertEquals(log, ["a"], "待ちが落ちた後に次のステップを積んだ");
+});
+
+Deno.test("run の焼き込み実行は待ちの後のステップの throw を、同期の throw ではなく reject として返す", async () => {
+  const log: string[] = [];
+  const recipes = [
+    dispatchStep([runnableDispatch("a", [1, 1, 1])]),
+    dispatchStep([runnableDispatch("b", [1, 1, 1])]),
+  ];
+
+  // 2 本目のステップの bind group が無い（generation 面も無い）— 待ちの後の継続の中で throw する。
+  let running: Promise<void> | undefined;
+  try {
+    running = executeBakedPlanPaced(
+      recipes,
+      [[stubGroup()], []],
+      pacedScheduler(log, [Promise.resolve()]),
+    );
+  } catch (cause) {
+    throw new Error(`待ちの後の throw が呼び出しから同期に投げられた: ${cause}`);
+  }
+  assert(running !== undefined, "待ちが要ったら Promise を返す");
+  await assertRejects(() => running, ExecutionError, "dispatch 'b'");
+  assertEquals(log, ["a"]);
 });
 
 Deno.test("run の焼き込み実行は上限の内なら待ちを挟まず、同期の実行と同じ列を積む", () => {
