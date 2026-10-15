@@ -19,8 +19,10 @@ ADR 0092 決定 3（配布リポの revision を焼く流儀）を上流側に�
 umT5 の容器の上流は Wan ではなく本家 `google/umt5-xxl`（{@link UMT5_SOURCES} — ADR 0122 決定 1）。
 本家は pickle の `.bin` 分割形だけを持つので、取得口（{@link umt5_snapshot}）は索引から encoder に
 要る shard を導き、表の shard（sha256 の pin つき）と突き合わせてからその分だけを取る（決定 2）。
-Wan の snapshot（{@link text_snapshot}）はトークナイザ資産・check-mask・事前計算・golden の id 列の
-ために残る（決定 3）。
+`karume-umt5-xxl` が単体で配るトークナイザ資産は本家のトークナイザのファイル（同じ表の sha256 の
+pin つき — {@link pinned_umt5_tokenizer}）から焼く（`wan.umt5_xxl_tokenizer`）。Wan の snapshot
+（{@link text_snapshot}）は Wan のトークナイザ資産（前処理の表つき）・check-mask・事前計算・
+golden の id 列のために残る（決定 3）。
 
     uv run --group wan python -m wan.sources --fetch     # 取得（HF の既定キャッシュへ）
     uv run --group wan python -m wan.sources             # 取得済みの検査（パラメータ数）
@@ -34,6 +36,7 @@ MUST: `huggingface_hub` は関数の中で import する（`wan` グループは
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import struct
 import sys
@@ -152,8 +155,9 @@ ROOT_FILES: tuple[str, ...] = ("README.md", "model_index.json")
 
 @dataclass(frozen=True)
 class Umt5Source:
-    """umT5 の上流 1 本（pin した HF リポと、encoder に要る pickle の shard の sha256 —
-    ADR 0122 決定 1 / 2）。encoder はリポ直下にある（subfolder を持たない）。"""
+    """umT5 の上流 1 本（pin した HF リポと、encoder に要る pickle の shard・トークナイザの
+    ファイルの sha256 — ADR 0122 決定 1 / 2）。encoder とトークナイザはリポ直下にある（subfolder を
+    持たない）。"""
 
     source: UpstreamSource
     #: encoder に要る shard（ファイル名 → HF API の LFS の sha256・64 桁の小文字 16 進）。
@@ -162,12 +166,21 @@ class Umt5Source:
     #: — pickle は読むと任意コードが走りうるので、1 枚目の防御は内容の pin（2 枚目が
     #: `weights_only=True`）。
     shards: Mapping[str, str]
+    #: トークナイザの正本（transformers 5.14.1 の `AutoTokenizer`）が読むファイル（ファイル名 →
+    #: sha256）。`tokenizer.json` と `tokenizer_config.json` の 2 本だけで、リポ全体から読んだときと
+    #: 同じ backend になる（`special_tokens_map.json` と `spiece.model` は backend を変えない —
+    #: 2026-10-15 の実測・`wan.umt5_xxl_tokenizer` の docstring）。取得口
+    #: （{@link pinned_umt5_tokenizer}）は照合したバイト列だけを置き場へ写す。
+    tokenizer: Mapping[str, str]
 
 
 #: umT5 の上流の表（キーは umT5 の配布形のモデル名 — `wan.umt5_distribution.UMT5_DEFAULT_MODEL`）。
 #: 本家の main の commit（tags なし）・ライセンスは API の `cardData` と README の front matter・
 #: shard の sha256 は `/api/models/google/umt5-xxl/revision/<commit>?blobs=true` の LFS の値
-#: （2026-10-04 に確認 — research `2026-10-04-umt5-upstream-provenance` §1）。
+#: （2026-10-04 に確認 — research `2026-10-04-umt5-upstream-provenance` §1）。トークナイザの
+#: `tokenizer.json` は同じ API の LFS の値、LFS でない `tokenizer_config.json` は手元のバイト列の
+#: sha256（その git blob id `c1a69656…` が同じ API の `blobId` と一致することを 2026-10-15 に
+#: 確認）。
 UMT5_SOURCES: dict[str, Umt5Source] = {
     "xxl": Umt5Source(
         source=UpstreamSource(
@@ -184,6 +197,12 @@ UMT5_SOURCES: dict[str, Umt5Source] = {
             ),
             "pytorch_model-00003-of-00006.bin": (
                 "da3d39fffe6464247531c20696715860ccaabdaaad3d5a2979dc2e2fbb7789fc"
+            ),
+        },
+        tokenizer={
+            "tokenizer.json": "af904105ce1071b1202bba0059a841f4a7b85b48b6ec179c4948e3483476e0dd",
+            "tokenizer_config.json": (
+                "616015e2b6c26f9a98ae3171634518d440a46260ebc1115c2596792d33827bdc"
             ),
         },
     ),
@@ -354,42 +373,86 @@ def umt5_snapshot(model: str, *, fetch: bool = False) -> Path:
     （{@link local_snapshot} と同じ理由）。shard の sha256 の照合は読み口
     （`wan.umt5_export.Checkpoint`）が unpickle の前に掛ける — 取得の記録ではなく読む実物で閉じる。
     """
+    row = _umt5_row(model)
+    hint = f"uv run --group wan python -m wan.sources --umt5 {model} --fetch"
+    snapshot = _umt5_download(row, [UMT5_CONFIG, UMT5_BIN_INDEX], fetch=fetch, hint=hint)
+    index = snapshot / UMT5_BIN_INDEX
+    if not index.is_file() or not (snapshot / UMT5_CONFIG).is_file():
+        raise WanSourceError(f"{snapshot} に {UMT5_CONFIG} / {UMT5_BIN_INDEX} が無い — `--fetch`")
+    shards = sorted(set(pinned_umt5_shards(index, row.shards).values()))
+    snapshot = _umt5_download(row, shards, fetch=fetch, hint=hint)
+    missing = [name for name in shards if not (snapshot / name).is_file()]
+    if missing:
+        raise WanSourceError(f"{snapshot} に shard {missing} が無い — `--fetch` で取り直す")
+    return snapshot
+
+
+def pinned_umt5_tokenizer(model: str, destination: Path, *, fetch: bool = False) -> None:
+    """umT5 の上流の pin のトークナイザのファイル（{@link Umt5Source.tokenizer}）を取り、sha256 を
+    照合したバイト列だけを `destination` へ写す（正本はこの置き場から読む）。
+
+    `fetch=False` ならネットワークに出ず、無ければ fail loudly（{@link local_snapshot} と同じ
+    理由）。
+
+    MUST: 照合は写すバイト列そのものに掛ける（読んで照合してから書く — 照合の後で HF キャッシュの
+    実体が差し替わっても、写した側は照合したバイト列のまま）。表に無いファイルは写さない — snapshot
+    の置き場には encoder の取得で落ちた `config.json` なども並ぶので、そこから直に読むと正本が
+    pin していないファイルに依る。
+    """
+    row = _umt5_row(model)
+    names = sorted(row.tokenizer)
+    hint = f"uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer --model {model} --fetch"
+    snapshot = _umt5_download(row, names, fetch=fetch, hint=hint)
+    verified: dict[str, bytes] = {}
+    for name in names:
+        path = snapshot / name
+        if not path.is_file():
+            raise WanSourceError(f"{snapshot} に {name} が無い — `--fetch` で取り直す")
+        data = path.read_bytes()
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != row.tokenizer[name]:
+            raise WanSourceError(
+                f"{path} の sha256 {actual} が表の {row.tokenizer[name]} と違う — 上流の pin"
+                " と別のトークナイザは読まない（表 wan.sources.UMT5_SOURCES か HF キャッシュが"
+                "壊れた）"
+            )
+        verified[name] = data
+    # 全部を照合してから写す（1 本でも違えば 1 本も写さない）。
+    destination.mkdir(parents=True, exist_ok=True)
+    for name, data in verified.items():
+        (destination / name).write_bytes(data)
+
+
+def _umt5_row(model: str) -> Umt5Source:
+    """umT5 の上流の表の行（表に無いモデルは fail loudly）。"""
     row = UMT5_SOURCES.get(model)
     if row is None:
         raise WanSourceError(
             f"umT5 のモデル {model!r} は上流の表に無い（既知: {sorted(UMT5_SOURCES)}）"
         )
+    return row
+
+
+def _umt5_download(row: Umt5Source, patterns: list[str], *, fetch: bool, hint: str) -> Path:
+    """umT5 の上流の pin から `patterns` だけを取る（`fetch=False` ならキャッシュだけを見る）。"""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
     source = row.source
-
-    def download(patterns: list[str]) -> Path:
-        try:
-            return Path(
-                snapshot_download(
-                    source.repo,
-                    revision=source.revision,
-                    allow_patterns=patterns,
-                    local_files_only=not fetch,
-                )
+    try:
+        return Path(
+            snapshot_download(
+                source.repo,
+                revision=source.revision,
+                allow_patterns=patterns,
+                local_files_only=not fetch,
             )
-        except LocalEntryNotFoundError as error:
-            raise WanSourceError(
-                f"{source.repo}@{source.revision} の {patterns} が HF キャッシュに無い — 先に"
-                f" `uv run --group wan python -m wan.sources --umt5 {model} --fetch` で取得する"
-            ) from error
-
-    snapshot = download([UMT5_CONFIG, UMT5_BIN_INDEX])
-    index = snapshot / UMT5_BIN_INDEX
-    if not index.is_file() or not (snapshot / UMT5_CONFIG).is_file():
-        raise WanSourceError(f"{snapshot} に {UMT5_CONFIG} / {UMT5_BIN_INDEX} が無い — `--fetch`")
-    shards = sorted(set(pinned_umt5_shards(index, row.shards).values()))
-    snapshot = download(shards)
-    missing = [name for name in shards if not (snapshot / name).is_file()]
-    if missing:
-        raise WanSourceError(f"{snapshot} に shard {missing} が無い — `--fetch` で取り直す")
-    return snapshot
+        )
+    except LocalEntryNotFoundError as error:
+        raise WanSourceError(
+            f"{source.repo}@{source.revision} の {patterns} が HF キャッシュに無い — 先に"
+            f" `{hint}` で取得する"
+        ) from error
 
 
 def read_safetensors_header(path: Path) -> dict[str, dict[str, object]]:

@@ -57,7 +57,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -142,7 +142,8 @@ RANDOM_SPACE_WEIGHT = 2000
 
 
 def tokenizer_snapshot(model: str = DEFAULT_MODEL) -> Path:
-    """pin した revision の `tokenizer/` だけの snapshot（ネットワークに出ない）。"""
+    """pin した revision の snapshot の `tokenizer/` のディレクトリ（ネットワークに出ない —
+    {@link load_truth} が読む置き場）。"""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
@@ -163,7 +164,7 @@ def tokenizer_snapshot(model: str = DEFAULT_MODEL) -> Path:
         ) from error
     if not (snapshot / "tokenizer" / "tokenizer.json").is_file():
         raise WanSourceError(f"{snapshot}/tokenizer/tokenizer.json が無い")
-    return snapshot
+    return snapshot / "tokenizer"
 
 
 @dataclass(frozen=True)
@@ -184,7 +185,13 @@ class Truth:
     pre_tokenize: Callable[[str], list[str]]
 
 
-def load_truth(snapshot: Path) -> Truth:
+def load_truth(directory: Path) -> Truth:
+    """`directory`（`tokenizer.json` と `tokenizer_config.json` を直下に持つ置き場）の 2 経路の
+    正本。
+
+    Wan は snapshot の `tokenizer/`（{@link tokenizer_snapshot}）、`karume-umt5-xxl` は本家の pin の
+    照合済みの 2 本だけを写した置き場（`wan.umt5_xxl_tokenizer`）を渡す。
+    """
     import transformers
     from tokenizers import Tokenizer
     from transformers import AutoTokenizer
@@ -193,8 +200,8 @@ def load_truth(snapshot: Path) -> Truth:
         raise ValueError(
             f"transformers {transformers.__version__} — id 列の正本は {TRANSFORMERS_VERSION}"
         )
-    path = snapshot / "tokenizer" / "tokenizer.json"
-    auto = AutoTokenizer.from_pretrained(snapshot, subfolder="tokenizer")
+    path = directory / "tokenizer.json"
+    auto = AutoTokenizer.from_pretrained(directory)
     plain = Tokenizer.from_file(str(path))
     backend = auto.backend_tokenizer
 
@@ -277,10 +284,13 @@ def whitespace_split_ranges() -> pc.Ranges:
     return pc.ranges_where(lambda ch: len(splitter.pre_tokenize_str("a" + ch + "b")) > 1)
 
 
-def build_asset(
-    truth: Truth, tables: pc.PromptCleanTables, versions: Mapping[str, str], model: str
-) -> dict[str, Any]:
-    """TS が引くだけの資産（`parseWanTokenizerAsset` が読む形）。"""
+def t5_table_fields(truth: Truth) -> dict[str, Any]:
+    """資産の T5 の表の欄（TS の `parseT5Tables` が読む 7 欄 — 並びは資産の欄の並び）。
+
+    Wan の資産（{@link build_asset}）と `karume-umt5-xxl` の資産（`wan.umt5_xxl_tokenizer`）が
+    同じ 1 本を引く（表の焼き方を 2 本持たない）。backend の構造の検査
+    （{@link check_upstream_shape}）もここで掛ける。
+    """
     check_upstream_shape(truth)
     vocab = [(token, float(score)) for token, score in truth.backend["model"]["vocab"]]
     for token, _ in vocab:
@@ -291,11 +301,7 @@ def build_asset(
         key=lambda pair: pair[1],
     )
     eos = dict(added)["</s>"]
-    source = SOURCES[model]
     return {
-        "format": ASSET_FORMAT,
-        "source": {"repo": source.repo, "revision": source.revision, "subfolder": "tokenizer"},
-        "versions": dict(sorted(versions.items())),
         "maxLength": MAX_LENGTH,
         "unkId": truth.backend["model"]["unk_id"],
         "eosId": eos,
@@ -304,7 +310,33 @@ def build_asset(
         # 行番号 0-origin = id（改行・空のトークンが無いことは上で検査済み）。
         "vocabText": "\n".join(token for token, _ in vocab),
         "scores": [score for _, score in vocab],
+    }
+
+
+def build_asset(
+    truth: Truth, tables: pc.PromptCleanTables, versions: Mapping[str, str], model: str
+) -> dict[str, Any]:
+    """TS が引くだけの資産（`parseWanTokenizerAsset` が読む形）。"""
+    source = SOURCES[model]
+    return {
+        "format": ASSET_FORMAT,
+        "source": {"repo": source.repo, "revision": source.revision, "subfolder": "tokenizer"},
+        "versions": dict(sorted(versions.items())),
+        **t5_table_fields(truth),
         "promptClean": tables.to_json(),
+    }
+
+
+def asset_versions() -> dict[str, str]:
+    """資産の `versions`（前処理の正本の版 + tokenizers / transformers の版 — {@link main} が
+    焼く値）。"""
+    import tokenizers
+    import transformers
+
+    return {
+        **pc.check_versions(),
+        "tokenizers": tokenizers.__version__,
+        "transformers": transformers.__version__,
     }
 
 
@@ -339,37 +371,53 @@ def pieces_of(truth: Truth, added: Sequence[str], text: str) -> list[str]:
     ]
 
 
+def version_split(added: Sequence[str], text: str) -> str | None:
+    """トークナイザに渡す前に拒む形（2 経路の断片化が割れる形）の理由 — 本文中の追加語彙 →
+    空白の直後の `▁` の順。どちらも無ければ None。"""
+    if any(is_added for _, is_added in split_added(text, added)):
+        return "added-token"
+    if " " + METASPACE in text:
+        return "metaspace"
+    return None
+
+
 def expectation(truth: Truth, added: Sequence[str], cleaned: str) -> dict[str, Any]:
     """前処理を通った文字列の期待（id 列か、トークナイザ側の拒否の理由）。
 
     拒否の順は TS と同じ: 追加語彙 → 空白の直後の `▁` → 語彙外 / 上限超え → 下限割れ。
+    """
+    reason = version_split(added, cleaned)
+    if reason is not None:
+        return {"reject": reason}
+    return tokenized_expectation(truth, cleaned)
+
+
+def tokenized_expectation(truth: Truth, text: str) -> dict[str, Any]:
+    """{@link version_split} を通った文字列の期待（2 経路の id 列か、語彙外 / 上限超え /
+    下限割れ）。
 
     MUST: 受理するのは 2 経路の id 列が一致したときだけ。追加語彙と空白の直後の `▁` を除いた後に
     割れたら語彙外で、割れ方は「同じ長さ・同じ位置で transformers 5 が 2・tokenizer.json が 3」
     以外にありえない（それ以外は経路の構成が違う = 落とす）。
     """
-    if any(is_added for _, is_added in split_added(cleaned, added)):
-        return {"reject": "added-token"}
-    if " " + METASPACE in cleaned:
-        return {"reject": "metaspace"}
-    ids = truth.transformers(cleaned)
-    plain = truth.tokenizer_json(cleaned)
+    ids = truth.transformers(text)
+    plain = truth.tokenizer_json(text)
     if ids != plain:
         if len(ids) != len(plain) or any(
             (a, b) != (2, 3) for a, b in zip(ids, plain, strict=True) if a != b
         ):
             raise ValueError(
-                f"2 経路の割れ方が語彙外（2 と 3）でない: {cleaned!r}\n  tf5={ids}\n  json={plain}"
+                f"2 経路の割れ方が語彙外（2 と 3）でない: {text!r}\n  tf5={ids}\n  json={plain}"
             )
         if len(ids) > MAX_LENGTH:
-            raise ValueError(f"語彙外と上限超えが重なるケースは置かない: {cleaned!r}")
+            raise ValueError(f"語彙外と上限超えが重なるケースは置かない: {text!r}")
         return {"reject": "oov"}
     if len(ids) > MAX_LENGTH:
         return {"reject": "too-long"}
     if len(ids) < MIN_TOKENS:
         return {"reject": "too-short"}
-    if truth.masked_length(cleaned) != len(ids):
-        raise ValueError(f"上流の呼び方のマスク長が id 列の長さと違う: {cleaned!r}")
+    if truth.masked_length(text) != len(ids):
+        raise ValueError(f"上流の呼び方のマスク長が id 列の長さと違う: {text!r}")
     return {"ids": ids, "tokenizerJsonIds": plain}
 
 
@@ -478,8 +526,8 @@ def check_boundaries(cases: Sequence[Mapping[str, Any]]) -> None:
         raise ValueError("乱択ケースの過半が拒否 — 受理集合の池になっていない")
 
 
-def vocab_subset(truth: Truth, cases: Sequence[Mapping[str, Any]]) -> list[list[Any]]:
-    """全ケースの断片の**部分文字列**に当たる語彙（各断片の格子が全語彙のときと同じになる）。
+def vocab_subset(truth: Truth, texts: Iterable[str]) -> list[list[Any]]:
+    """全テキストの断片の**部分文字列**に当たる語彙（各断片の格子が全語彙のときと同じになる）。
 
     分割に使われたピースだけを載せると、未知ノードの入り方や同点の勝ち方が部分集合の格子で
     変わりうる。断片の部分文字列を全部載せれば格子そのものが一致する（gemma の
@@ -492,10 +540,8 @@ def vocab_subset(truth: Truth, cases: Sequence[Mapping[str, Any]]) -> list[list[
     added = [entry["content"] for entry in truth.backend["added_tokens"]]
     longest = max(len(token) for token in vocab)
     keep: set[str] = set()
-    for case in cases:
-        if "cleaned" not in case:
-            continue
-        for piece in pieces_of(truth, added, case["cleaned"]):
+    for text in texts:
+        for piece in pieces_of(truth, added, text):
             for start in range(len(piece)):
                 for end in range(start + 1, min(len(piece), start + longest) + 1):
                     if piece[start:end] in vocab:
@@ -532,7 +578,7 @@ def build_parity_fixture(
             "minScore": min(scores),
             "maxTokenLength": max(len(token) for token in tokens),
             "space": asset["space"],
-            "vocab": vocab_subset(truth, cases),
+            "vocab": vocab_subset(truth, [case["cleaned"] for case in cases if "cleaned" in case]),
         },
         "promptClean": asset["promptClean"],
         "cases": list(cases),
@@ -706,17 +752,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(message, flush=True)
 
     started = time.perf_counter()
-    snapshot = tokenizer_snapshot(args.model)
-    truth = load_truth(snapshot)
+    truth = load_truth(tokenizer_snapshot(args.model))
     tables = pc.build_tables()
-    import tokenizers
-    import transformers
-
-    versions = {
-        **pc.check_versions(),
-        "tokenizers": tokenizers.__version__,
-        "transformers": transformers.__version__,
-    }
+    versions = asset_versions()
     asset = build_asset(truth, tables, versions, args.model)
     log(f"[asset] 語彙 {len(asset['scores'])}（{time.perf_counter() - started:.1f}s）")
 

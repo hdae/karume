@@ -113,7 +113,7 @@ from wan.distribution import (
 )
 from wan.prompts import FIXED_PROMPTS
 from wan.sources import DEFAULT_MODEL, SOURCES, UMT5_SOURCES
-from wan.tests.umt5_fixture import umt5_container
+from wan.tests.umt5_fixture import umt5_container, write_tokenizer_asset
 from wan.umt5_distribution import (
     UMT5_DEFAULT_MODEL,
     UMT5_INPUTS,
@@ -313,7 +313,9 @@ def _build_sources(
 def _assemble_umt5(root: Path, sources: WanSources) -> Path:
     """越境参照の参照元（umT5 の配布形）を同じ系列から組む（公開の順序 — umT5 が先）。"""
     out_dir = root / "models" / UMT5_REPO_NAME
-    assemble_family([umt5_plan(sources.text_encoder)], out_dir, UMT5_DEFAULT_MODEL)
+    # umT5 の配布形の必須の資産（トークナイザ — Wan の配布形は参照しない）を同じ系列の親に置く。
+    tokenizer = write_tokenizer_asset(sources.text_encoder.parents[2])
+    assemble_family([umt5_plan(sources.text_encoder, tokenizer)], out_dir, UMT5_DEFAULT_MODEL)
     return out_dir
 
 

@@ -1,10 +1,11 @@
 """umT5-XXL encoder の配布 recipe — 配布リポ `karume-umt5-xxl`（ADR 0119 追記「段 10d の設計」D）。
 
-配るのはグラフ 1 本（`text_encoder` — 系列 `umt5-xxl-i8-dyn` の i8 の S 形容器）だけで、資産は
-持たない（トークナイザは Wan の前処理の表と束ねた形式なので Wan のリポの資産 — 同 C）。Wan の配布形
-`karume-wan2.1` はこのリポの容器を越境参照する（同 A — ADR 0109 決定 3）。読む TS の家族は無く、
-pipeline 名 {@link UMT5_PIPELINE} は部品の役を名乗るだけ（`karume/5` は model ごとに pipeline と
-quant 席を必須にする）。
+配るのはグラフ 1 本（`text_encoder` — 系列 `umt5-xxl-i8-dyn` の i8 の S 形容器）と、本家の
+トークナイザを 1 本の表に焼いた資産 `tokenizer`（系列 `umt5-xxl-tokenizer` — 形式
+`karume-umt5-tokenizer/1`・書き手は `wan.umt5_xxl_tokenizer`）。トークナイザを持つので Wan なしで
+単体で使える（TS の `@karume/models/umt5` の `Umt5Encoder`）。Wan の前処理の表と束ねた
+トークナイザ資産（`karume-wan-umt5-tokenizer/1`）は従来どおり Wan のリポの資産（同 C）。Wan の配布形
+`karume-wan2.2` はこのリポの容器を越境参照する（同 A — ADR 0109 決定 3。Wan2.1 は公開しない）。
 
 出所は本家 `google/umt5-xxl` の encoder（`shared.weight` と `encoder.*` — 容器が名乗る出所は
 `wan.sources.UMT5_SOURCES` の pin・ADR 0122 決定 1）。Wan2.1 Diffusers の `text_encoder` とは f32 で
@@ -31,6 +32,7 @@ MUST: このモジュールは torch を import しない（`import dist` が to
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable, Mapping
 from functools import partial
@@ -55,6 +57,7 @@ from karume.dist import (
 )
 from karume.modelcard import (
     HF_OWNER,
+    REVISION_PIN_COMMENT,
     CardMetadata,
     FileRefKey,
     frontmatter,
@@ -64,6 +67,7 @@ from karume.modelcard import (
     render,
     require_pipeline,
 )
+from wan import umt5_tokenizer, umt5_xxl_tokenizer
 from wan.sources import UMT5_SOURCES, Umt5Source
 from wan.umt5_intake import (
     UNDECLARED_LICENSE,
@@ -72,9 +76,9 @@ from wan.umt5_intake import (
     assert_license_intent,
 )
 
-#: パイプライン契約（ADR 0041 §2 — モデル単位）。読む TS の家族は無い — 部品の役を名乗る
-#: （ADR 0119 追記 D）。Wan の読み手は越境参照の先の `karume.json` を読まないので、この名前を
-#: 解釈する実装は要らない。
+#: パイプライン契約（ADR 0041 §2 — モデル単位）。読む TS の家族は `@karume/models/umt5` の
+#: `Umt5Encoder`（ADR 0119 追記 D の時点では部品の役を名乗るだけだった）。Wan の読み手は越境参照の
+#: 先の `karume.json` を読まない。
 UMT5_PIPELINE = "umt5-encoder/1"
 
 #: 配布リポ名（ADR 0092 決定 2 の `karume-<family>-<変種>`）。
@@ -95,20 +99,45 @@ UMT5_MODEL_FILE = "model.krm"
 #: 同じキーで越境参照する（`wan.distribution.WAN_TEXT_ENCODER_ROLE`）。
 UMT5_ROLE = "text_encoder"
 
+#: トークナイザ資産の役割名 = manifest の `assets` のキー（TS の `Umt5Encoder` が読む名前）。
+UMT5_TOKENIZER_ROLE = "tokenizer"
+
 #: 出力の相対 path（**モデルサブツリー内**）。格納ラベルを path に入れるのは Wan の DiT と同じ理由
 #: （格納の席を足した日に既存の path を動かさない）。
 #:
 #: MUST: Wan の配布形の同じ部品の path と同じ綴り（`wan.distribution.WAN_OUTPUT_PATHS` はここを
 #: 引く）— 越境参照は参照元の `karume.json` が宣言する `<モデル名>/<この path>` を引き当てるので、
 #: 割れると Wan の組み立てが「参照元に無い」で落ちる。
-UMT5_OUTPUT_PATHS: Mapping[str, str] = {UMT5_ROLE: f"{UMT5_ROLE}/model.i8.krm"}
+UMT5_OUTPUT_PATHS: Mapping[str, str] = {
+    UMT5_ROLE: f"{UMT5_ROLE}/model.i8.krm",
+    # 資産は `<役割>/<ファイル名>`（Wan の `umt5_tokenizer/tokenizer.json` と同じ綴りの規則）。
+    UMT5_TOKENIZER_ROLE: f"{UMT5_TOKENIZER_ROLE}/{umt5_xxl_tokenizer.ASSET_FILE}",
+}
 
 #: weights の宣言（部品 → dtype ラベル → 配置の役割）。i8 の 1 席だけ（ADR 0119 決定 5 — i4 は
 #: 品質を測ってから別の席として足す）。
 UMT5_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {UMT5_ROLE: {"i8": WeightFiles(UMT5_ROLE)}}
 
-#: assets は持たない（トークナイザは Wan のリポの資産 — ADR 0119 追記 C）。
-UMT5_ASSETS: Mapping[str, str] = {}
+#: assets の宣言（quant 選択に依存しない無条件ファイル — ADR 0041 §3）。本家のトークナイザの表
+#: 1 本（前処理の表は持たない — Wan の前処理は Wan のリポの資産が持つ）。
+UMT5_ASSETS: Mapping[str, str] = {UMT5_TOKENIZER_ROLE: UMT5_TOKENIZER_ROLE}
+
+#: トークナイザ資産の最上位の欄（書き手 `wan.umt5_xxl_tokenizer.build_asset` の欄 — 前処理の表
+#: `promptClean` などの Wan 固有の欄があれば落とす）。
+UMT5_TOKENIZER_FIELDS: frozenset[str] = frozenset(
+    {
+        "format",
+        "source",
+        "versions",
+        "maxLength",
+        "unkId",
+        "eosId",
+        "addedTokens",
+        "space",
+        "vocabText",
+        "scores",
+    }
+)
 
 #: quant 表（席は 1 つ）。`label` / `description` は選択 UI 向けの表示欄（ADR 0075 決定 1 — 英語）。
 UMT5_QUANTS: Mapping[str, Any] = {
@@ -303,26 +332,104 @@ def umt5_container(series_dir: Path) -> Path:
     return series_dir / UMT5_SERIES / UMT5_ROLE / UMT5_MODEL_FILE
 
 
+def umt5_tokenizer_asset(series_dir: Path) -> Path:
+    """系列の親ディレクトリ（`outputs/series/`）からトークナイザ資産の path を引く。"""
+    return series_dir / umt5_xxl_tokenizer.SERIES_NAME / umt5_xxl_tokenizer.ASSET_FILE
+
+
+def assert_umt5_tokenizer(path: Path, model: str) -> None:
+    """トークナイザ資産が、TS の読む形式・上流の pin・id 列の正本の版・受理の上限と噛み合うことを
+    見る。
+
+    MUST: 組み立てで落とす。資産は表なので `verify_dist` の容器検査には掛からず、読み手が見るのは
+    形式と形だけ — 別の revision のトークナイザ・別の版の transformers で焼いた表は、利用者の手元で
+    「別の id 列」として沈黙する。欄の集合も見る（Wan の前処理の表 `promptClean` のような欄が
+    混ざった資産は、この形式を名乗っていても配らない）。
+
+    見るのは 5 つ: 形式の版（`wan.umt5_xxl_tokenizer.ASSET_FORMAT`）・欄の集合
+    （{@link UMT5_TOKENIZER_FIELDS}）・出所（repo / revision / ファイルの sha256）が
+    `wan.sources.UMT5_SOURCES` の行と一致・id 列の正本の transformers の版が pin
+    （`wan.umt5_tokenizer.TRANSFORMERS_VERSION`）と一致・`maxLength` が受理の上限
+    （{@link UMT5_TOKENS}）と一致。
+    """
+    assert_component_present(path)
+    try:
+        asset = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as cause:
+        raise DistError(f"{path}: トークナイザ資産が JSON として読めない — {cause}") from cause
+    if not isinstance(asset, dict):
+        raise DistError(f"{path}: トークナイザ資産がオブジェクトでない")
+    if asset.get("format") != umt5_xxl_tokenizer.ASSET_FORMAT:
+        raise DistError(
+            f"{path}: 形式 {asset.get('format')!r} が {umt5_xxl_tokenizer.ASSET_FORMAT!r} でない"
+            " — 本家のトークナイザの表だけを配る（`python -m wan.umt5_xxl_tokenizer`）"
+        )
+    if set(asset) != UMT5_TOKENIZER_FIELDS:
+        raise DistError(
+            f"{path}: 欄 {sorted(asset)} が {sorted(UMT5_TOKENIZER_FIELDS)} でない — 前処理の表など"
+            " 単体のトークナイザに無い欄を持つ資産は配らない"
+        )
+    row = UMT5_SOURCES.get(model)
+    if row is None:
+        raise DistError(f"umT5 のモデル {model!r} は上流の表に無い（既知: {sorted(UMT5_SOURCES)}）")
+    expected_source = {
+        "repo": row.source.repo,
+        "revision": row.source.revision,
+        "files": dict(sorted(row.tokenizer.items())),
+    }
+    if asset["source"] != expected_source:
+        raise DistError(
+            f"{path}: トークナイザの出所 {asset['source']!r} が上流の pin {expected_source!r}"
+            " と違う — 別の checkpoint・別のバイト列のトークナイザは配らない"
+        )
+    versions = asset["versions"]
+    pinned = versions.get("transformers") if isinstance(versions, dict) else None
+    if pinned != umt5_tokenizer.TRANSFORMERS_VERSION:
+        raise DistError(
+            f"{path}: トークナイザ資産を焼いた transformers {pinned!r} が id 列の正本の版"
+            f" {umt5_tokenizer.TRANSFORMERS_VERSION!r} と違う"
+        )
+    if asset["maxLength"] != UMT5_TOKENS[1]:
+        raise DistError(
+            f"{path}: maxLength {asset['maxLength']!r} が受理の上限 {UMT5_TOKENS[1]} と違う"
+            " — グラフの有効長の上限（ADR 0119 決定 4）"
+        )
+
+
 def umt5_repo_name(_model: str) -> str:
     """配布リポ名（モデルによらず 1 つ）。"""
     return UMT5_REPO_NAME
 
 
-def umt5_plan(container: Path, model: str = UMT5_DEFAULT_MODEL) -> ModelPlan:
-    """umT5-XXL encoder の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。"""
+def umt5_plan(container: Path, tokenizer: Path, model: str = UMT5_DEFAULT_MODEL) -> ModelPlan:
+    """umT5-XXL encoder の 1 モデルぶんの計画を組む（検査と読み取りをここで全部済ませる）。
+
+    `tokenizer` は本家のトークナイザ資産（{@link umt5_tokenizer_asset}）— 単体で使えるリポの必須の
+    資産で、無ければ落ちる。
+    """
     assert_model_name(model)
     assert_umt5_encoder(container, model)
-    return _encoder_plan(container, model)
+    assert_umt5_tokenizer(tokenizer, model)
+    return _encoder_plan(container, model, tokenizer=tokenizer)
 
 
-def _encoder_plan(container: Path, model: str) -> ModelPlan:
-    """検査を済ませた容器の計画（本家の行と取り込みで同じ席・同じ quant 表）。"""
+def _encoder_plan(container: Path, model: str, *, tokenizer: Path | None) -> ModelPlan:
+    """検査を済ませた容器（と資産）の計画（本家の行と取り込みで同じ席・同じ quant 表）。
+
+    `tokenizer` が None なら資産を持たない計画（取り込み由来の手元の実験用ミラー —
+    {@link intake_plan}）。
+    """
+    artifacts = {UMT5_ROLE: Artifact(UMT5_OUTPUT_PATHS[UMT5_ROLE], source=container)}
+    if tokenizer is not None:
+        artifacts[UMT5_TOKENIZER_ROLE] = Artifact(
+            UMT5_OUTPUT_PATHS[UMT5_TOKENIZER_ROLE], source=tokenizer
+        )
     return ModelPlan(
         name=model,
         pipeline=UMT5_PIPELINE,
-        artifacts={UMT5_ROLE: Artifact(UMT5_OUTPUT_PATHS[UMT5_ROLE], source=container)},
+        artifacts=artifacts,
         weights=UMT5_WEIGHTS,
-        assets=UMT5_ASSETS,
+        assets=UMT5_ASSETS if tokenizer is not None else {},
         quants=complete_quant_weights(UMT5_WEIGHTS, UMT5_QUANTS),
         default_quant=UMT5_DEFAULT_QUANT,
         pipeline_config=UMT5_PIPELINE_CONFIG,
@@ -331,7 +438,7 @@ def _encoder_plan(container: Path, model: str) -> ModelPlan:
 
 def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
     """`--series` の親から計画を組む（CLI のディスパッチ先）。"""
-    return umt5_plan(umt5_container(series_dir), model)
+    return umt5_plan(umt5_container(series_dir), umt5_tokenizer_asset(series_dir), model)
 
 
 #: 改変告知（Apache 2.0 §4(b)）。**このリポが上流の重みへ加えた変更**を列挙する。
@@ -340,18 +447,20 @@ def umt5_dist_plan(series_dir: Path, model: str) -> ModelPlan:
 #: manifest 検査も素通りし、配ってからでないと食い違いに気づけない。上流の格納は F32
 #: （research 2026-10-03 umt5-export-ram — 容器の F32 のままの重みも下位 16 ビットが 0 でない）
 #: なので「bf16 の写し」とは書かない（Wan2.2 の bf16 との関係はカードの Relation の行だけが書く）。
-#: 上流は本家の encoder（ADR 0122 決定 1）で、本家は NOTICE ファイルを持たないので、引き継ぐ NOTICE
-#: の本文は無い。Wan2.1 の checkpoint との同一は 2026-10-04 の実測（research
+#: 上流は本家の encoder（ADR 0122 決定 1）とトークナイザで、本家は NOTICE ファイルを持たないので、
+#: 引き継ぐ NOTICE の本文は無い。Wan2.1 の checkpoint との同一は 2026-10-04 の実測（research
 #: `2026-10-04-umt5-upstream-provenance` §2.1 — 確かめた commit を書く。Wan の pin を動かしても、
-#: 確かめた事実としては変わらない）。
+#: 確かめた事実としては変わらない）。トークナイザの項の「拒む入力」は `wan.umt5_xxl_tokenizer` の
+#: docstring（2026-10-15 の実測）。
 UMT5_NOTICE_MARKDOWN = """# NOTICE
 
 This repository redistributes a modified form of the encoder of the umT5-XXL checkpoint
 `google/umt5-xxl` listed in `README.md` (Google, licensed under the Apache License, Version 2.0 —
-see `LICENSE.md`; that repository has no NOTICE file). That checkpoint holds the encoder in
-float32. Its encoder weights are bit-identical to the float32 `text_encoder` folder of
-`Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit `0fad780a534b6463e45facd96134c9f345acfa5b`, checked on
-2026-10-04). The following changes were made:
+see `LICENSE.md`; that repository has no NOTICE file), and a converted form of that checkpoint's
+tokenizer. That checkpoint holds the encoder in float32. Its encoder weights are bit-identical to
+the float32 `text_encoder` folder of `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` (commit
+`0fad780a534b6463e45facd96134c9f345acfa5b`, checked on 2026-10-04). The following changes were
+made:
 
 - Only the encoder was converted (the vocabulary embedding `shared.weight` and `encoder.*`); the
   decoder and `lm_head` are not included.
@@ -367,9 +476,18 @@ float32. Its encoder weights are bit-identical to the float32 `text_encoder` fol
 - The graph runs on the valid tokens only: it takes the token ids and the relative-position bucket
   indices (computed on the host with the upstream bucketing rule) as inputs and has no attention
   mask, instead of padding the prompt to 512 tokens and masking the padding.
+- **Tokenizer**: the tokenizer files `tokenizer.json` and `tokenizer_config.json` of the same
+  commit were converted into one JSON table (`xxl/tokenizer/tokenizer.json`: the vocabulary and its
+  scores, the added tokens, the set of whitespace characters and the maximum length of 512 tokens),
+  taken from the tokenizer as `transformers` 5.14.1 loads those files. The host reproduces that
+  tokenizer from the table without any text normalization, and it rejects the inputs on which
+  `transformers` 5.14.1 and the original `tokenizer.json` produce different token ids (special
+  tokens written in the text, `▁` right after a space, whitespace other than the plain space, a
+  trailing space, characters outside the vocabulary), as well as inputs of more than 512 tokens,
+  which the upstream would truncate.
 
-No retraining and no fine-tuning were performed. The original checkpoint is not distributed here,
-and neither is the tokenizer.
+No retraining and no fine-tuning were performed. The original checkpoint and its original
+tokenizer files are not distributed here.
 """
 
 
@@ -386,21 +504,18 @@ UMT5_PIPELINE_TAG = "feature-extraction"
 #: 原文の在処（配布リポ直下の `LICENSE.md` と同じテキスト — Apache 2.0 §4(a)）。
 UMT5_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 
-#: Wan の配布リポ名（カードの Usage が名指しする参照元 — `wan.distribution.WAN_REPO_NAME` と同じ
-#: 綴り。あちらがこのモジュールを import するので、こちらからは import できない — 一致は
+#: この encoder を越境参照する Wan の配布リポ名（カードの「Used by」が名指しする — 公開するのは
+#: Wan2.2 だけで、Wan2.1 は公開しない。`wan.distribution.WAN22_REPO_NAME` と同じ綴り。あちらが
+#: このモジュールを import するので、こちらからは import できない — 一致は
 #: `wan/tests/test_umt5_distribution.py` が見る）。
-UMT5_CONSUMER_REPO_NAME = "karume-wan2.1"
+UMT5_CONSUMER_REPO_NAME = "karume-wan2.2"
 
-#: Wan の読み手が受ける有効長（token 数・末尾の `</s>` を含む — ADR 0119 決定 4。TS 側
-#: `packages/models/src/wan/text/tokenizer.ts` の受理集合で、上限はトークナイザ資産の
-#: `maxLength`。manifest に無い事実）。
+#: 受理する有効長（token 数・末尾の `</s>` を含む — ADR 0119 決定 4。下限は `torch.export` の
+#: 0 / 1 特殊化を避けた 2・上限はトークナイザ資産の `maxLength`。manifest に無い事実）。
 UMT5_TOKENS = (2, 512)
 
-
-def _consumer_link() -> str:
-    """参照元の Wan のリポへのリンク（Markdown）。"""
-    repo = f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}"
-    return f"[`{repo}`](https://huggingface.co/{repo})"
+#: encoder の出力の幅（umT5-XXL の `d_model` — カードの Usage が名乗る `[L, 4096]`）。
+UMT5_HIDDEN_WIDTH = 4096
 
 
 def _umt5_upstream(name: str) -> Umt5Source:
@@ -433,18 +548,28 @@ def _umt5_overview(manifest: Mapping[str, Any]) -> list[str]:
     return [
         "## What is this",
         "",
-        "The **umT5-XXL text encoder** that Wan2.1 uses, converted into the WebGPU inference",
-        "runtime **Karume**'s container format (a `.krm` part sequence whose first part carries",
-        "the graph and model descriptors), with int8 weights.",
+        "The encoder of **umT5-XXL** (`google/umt5-xxl`) as a standalone text encoder for the",
+        "WebGPU inference runtime **Karume**: the encoder converted into Karume's container format",
+        "(a `.krm` part sequence whose first part carries the graph and model descriptors) with",
+        "int8 weights, and the checkpoint's tokenizer converted into one JSON table.",
         "",
         f"- One graph, `{UMT5_ROLE}`: the token ids `{UMT5_IDS_INPUT}` `[1, L]` and the",
         f"  relative-position bucket indices `{UMT5_BUCKETS_INPUT}` `[L, L]` (both int32) in,",
-        "  the encoder's last hidden states `[1, L, d_model]` in float32 out. `L` is the number",
-        f"  of tokens of the prompt itself (the Wan pipeline accepts {low} to {high}, the end",
-        "  token included) — there is no padding and no attention mask.",
-        "- The tokenizer and the bucket indices are not part of this repository: the Wan2.1",
-        f"  distribution {_consumer_link()} carries the tokenizer together with",
-        "  Wan's prompt cleaning, and the host builds the bucket indices.",
+        f"  the encoder's last hidden states `[1, L, {UMT5_HIDDEN_WIDTH}]` in float32 out.",
+        f"  `L` is the number of tokens of the prompt itself ({low} to {high}, the end token",
+        "  `</s>` included) — there is no padding and no attention mask.",
+        f"- One asset, `{UMT5_TOKENIZER_ROLE}` (format `{umt5_xxl_tokenizer.ASSET_FORMAT}`):",
+        "  the tokenizer of `google/umt5-xxl` as one JSON table — the vocabulary and its scores,",
+        "  the added tokens, the set of whitespace characters and the maximum length of",
+        f"  {high} tokens. It carries no prompt cleaning.",
+        "- The relative-position bucket indices depend on `L` only and are computed on the host:",
+        "  entry `[i, j]` is the bucket of the distance `j − i` (key position minus query",
+        "  position) under the upstream T5 rule for a bidirectional encoder with 32 buckets and a",
+        "  maximum distance of 128 (`relative_attention_num_buckets` /",
+        "  `relative_attention_max_distance` in the upstream `config.json`). Each direction has",
+        "  16 buckets (keys after the query use 16–31): distances 0 to 7 get one bucket each,",
+        "  and longer distances fall into 8 logarithmically spaced buckets that start at 8, 12,",
+        "  16, 23, 32, 46, 64 and 91 (the last one covers every distance from 91 on).",
         f"- Exporter used for the conversion: `{manifest['generator']}`. The distribution manifest"
         f" is `karume.json` (`{manifest['format']}`).",
     ]
@@ -459,7 +584,8 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "",
     ]
     for name in manifest["models"]:
-        source = _umt5_upstream(name).source
+        upstream = _umt5_upstream(name)
+        source = upstream.source
         # 本家の encoder はリポ直下にある（subfolder は無い）— 読んだキーの範囲で名指しする。
         lines.append(
             f"- **`{name}`**: the encoder weights (`shared.weight` and `encoder.*`) of"
@@ -467,6 +593,14 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             f" licensed **{source.license}** (as of retrieval;"
             f" [full text]({UMT5_LICENSE_TEXT_LINK}) — a verbatim copy is in `LICENSE.md`)."
             " The decoder and `lm_head` are not included."
+        )
+        files = " and ".join(
+            f"`{file}` (SHA-256 `{digest[:16]}…`)"
+            for file, digest in sorted(upstream.tokenizer.items())
+        )
+        lines.append(
+            f"- **`{name}` tokenizer**: the files {files} of the same repository and commit,"
+            " converted into one JSON table."
         )
     lines += [
         "- **Relation to the Wan checkpoints**: every tensor is bit-identical to the float32",
@@ -480,33 +614,81 @@ def _umt5_base_weights(manifest: Mapping[str, Any]) -> list[str]:
         "  row for the embedding), the relative-position bias tables and the RMSNorm weights kept",
         "  in float32 at the source values; `gelu_new` replaced by the equivalent",
         '  `GELU(approximate="tanh")`; the graph runs on the valid tokens with the bucket indices',
-        "  as an input. No retraining and no fine-tuning.",
+        "  as an input; the tokenizer converted into one JSON table. No retraining and no",
+        "  fine-tuning.",
     ]
     return lines
 
 
-def _umt5_usage() -> list[str]:
-    """Usage: 単体の公開クラスは無い — Wan の配布形が越境参照で取る（ADR 0119 追記 A）。
+def _consumer_link() -> str:
+    """この encoder を越境参照する Wan のリポへのリンク（Markdown）。"""
+    repo = f"{HF_OWNER}/{UMT5_CONSUMER_REPO_NAME}"
+    return f"[`{repo}`](https://huggingface.co/{repo})"
 
-    差し替えの段落（ADR 0122 決定 7 の 2）は、この encoder の代わりに互換の encoder を差す使い方で、
-    pin の規則（文字列の取得元は main 追従）と precomputed の経路では効かないことを書く。
+
+def _umt5_usage(repo: str) -> list[str]:
+    """Usage: 単体の公開クラス `Umt5Encoder`（`@karume/models/umt5`）の使い方・入力の規則・
+    この encoder を越境参照する Wan の配布形。
+
+    `fromPretrained` の source は他の家族のカードと同じ object ref 形 + pin の席
+    （`karume.modelcard.REVISION_PIN_COMMENT`）。差し替えの段落（ADR 0122 決定 7 の 2）は、Wan で
+    この encoder の代わりに互換の encoder を差す使い方で、pin の規則（文字列の取得元は main 追従）と
+    precomputed の経路では効かないことを書く。入力の規則は `wan.umt5_xxl_tokenizer` の拒否の 6 つ
+    （2026-10-15 の実測）。
     """
+    low, high = UMT5_TOKENS
     return [
         "## Usage",
         "",
-        "There is no standalone pipeline class for this repository. The Wan2.1 distribution",
-        f"{_consumer_link()} references the encoder from its own",
-        "`karume.json` at a pinned commit of this repository (the size and the SHA-256 of every",
-        "part are declared there too), so `WanPipeline.fromPretrained` on that repository fetches",
-        "it from here — you do not pass this repository yourself.",
+        "```ts",
+        'import { Umt5Encoder } from "jsr:@karume/models/umt5";',
         "",
-        "To run Wan with a compatible umT5-XXL encoder instead of this one (for example a",
+        "const encoder = await Umt5Encoder.fromPretrained({",
+        f'  repo: "{repo}",',
+        *REVISION_PIN_COMMENT,
+        "});",
+        'const { inputIds, hiddenStates } = await encoder.encode("a cat");'
+        f" // hiddenStates: [L, {UMT5_HIDDEN_WIDTH}] f32, row-major",
+        "await encoder.dispose();",
+        "```",
+        "",
+        "`encode` tokenizes the text with the bundled tokenizer, builds the relative-position",
+        "bucket indices, runs the graph and returns the token ids (`L` of them, ending with",
+        f"`</s>`) with the encoder's last hidden states, one row of {UMT5_HIDDEN_WIDTH:,} floats",
+        "per token.",
+        "",
+        "### Input rules",
+        "",
+        "The text is tokenized as it is — no prompt cleaning and no Unicode normalization — and",
+        "`</s>` is appended. The token ids then equal those of `AutoTokenizer` in `transformers`",
+        "5.14.1 and of the original `tokenizer.json` of `google/umt5-xxl` alike. Inputs on which",
+        "those two disagree, or that the graph cannot take, are rejected with an error instead of",
+        "being encoded:",
+        "",
+        "- characters outside the vocabulary;",
+        "- special tokens written in the text (`</s>`, `<extra_id_0>` and the other added tokens);",
+        "- `▁` (U+2581) right after a space;",
+        "- whitespace other than the plain space U+0020 (tabs, line breaks, no-break spaces, the",
+        "  ideographic space and so on), and a trailing space — leading spaces and runs of spaces",
+        "  between words are accepted;",
+        f"- more than {high} tokens (the upstream would truncate silently);",
+        f"- fewer than {low} tokens (an empty text).",
+        "",
+        "### Used by",
+        "",
+        f"{_consumer_link()} (Wan2.2 TI2V 5B) references this encoder from its own `karume.json`",
+        "at a pinned commit of this repository (the size and the SHA-256 of every part are",
+        "declared there too), so `WanTi2vPipeline.fromPretrained` on that repository fetches the",
+        "`text_encoder` from here — you do not pass this repository yourself. It does not use this",
+        "repository's tokenizer: its own tokenizer asset adds Wan's prompt cleaning.",
+        "",
+        "To run Wan2.2 with a compatible umT5-XXL encoder instead of this one (for example a",
         "fine-tune converted with the Karume export recipe), pass it through the component swap",
         "seat: `components: { text_encoder: { source: { repo, revision } } }` in the options of",
-        "`WanPipeline.fromPretrained`. Pin the replacement with a commit — a bare repository name",
-        "follows `main`, so the encoder would move with every push while the Wan manifest pins",
-        'this one. The swap needs the GPU text encoder: `textEncoder: "precomputed"` never loads',
-        "umT5, so a swap has no effect there. The replacement is admitted only if its graph",
+        "`WanTi2vPipeline.fromPretrained`. Pin the replacement with a commit — a bare repository",
+        "name follows `main`, so the encoder would move with every push while the Wan manifest",
+        'pins this one. The swap needs the GPU text encoder: `textEncoder: "precomputed"` never',
+        "loads umT5, so a swap has no effect there. The replacement is admitted only if its graph",
         "description has the same SHA-256 as the `text_encoder` declared by the Wan manifest and",
         "its weights are int8 with float32 tables; the tokenizer still comes from the Wan",
         "distribution and is not checked against the replacement.",
@@ -540,8 +722,7 @@ def render_umt5_model_card(
 ) -> str:
     """umT5-XXL encoder の配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。
 
-    `repo` は受けるだけで使わない — Usage が名指しするのは参照元の Wan のリポで、このリポ自身を
-    `fromPretrained` に渡す使い方は無い（core の描き手の型に合わせる）。
+    `repo` は Usage の `Umt5Encoder.fromPretrained` に綴るこのリポの HF リポ ID。
     """
     require_pipeline(manifest, UMT5_SUPPORTED_PIPELINE)
     return render(
@@ -554,7 +735,7 @@ def render_umt5_model_card(
             [""],
             models(manifest),
             [""],
-            _umt5_usage(),
+            _umt5_usage(repo),
             *model_sections(
                 manifest,
                 (partial(quants, host_assets=host_assets), _umt5_limits),
@@ -841,7 +1022,9 @@ def intake_plan(
         raise DistError(str(cause)) from cause
     assert_model_name(model)
     assert_umt5_encoder(container, model, intake)
-    return _encoder_plan(container, model)
+    # 取り込み由来のミラーは本家のトークナイザ資産を持たない（第三者の encoder に本家の表を
+    # 名乗らせない — 資産の席は手元の実験の範囲で要らない）。
+    return _encoder_plan(container, model, tokenizer=None)
 
 
 def _intake_dist_plan(

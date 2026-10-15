@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from _shared.paths import SERIES_ROOT
 from wan import prompt_clean as pc
 from wan import umt5_tokenizer as ut
 
@@ -99,9 +100,8 @@ class TestPieces:
     def test_the_vocab_subset_keeps_every_substring_of_every_piece(self):
         vocab = [["▁", 0.0], ["▁c", -1.0], ["c", -1.0], ["a", -1.0], ["at", -2.0], ["dog", -3.0]]
         truth = fake_truth({}, vocab=vocab)
-        cases = [{"cleaned": "cat"}, {"reject": "c1"}]
 
-        subset = ut.vocab_subset(truth, cases)
+        subset = ut.vocab_subset(truth, ["cat"])
 
         assert [token for token, _, _ in subset] == ["▁", "▁c", "c", "a", "at"]
         assert subset[1] == ["▁c", 1, -1.0]
@@ -200,6 +200,20 @@ class TestAgainstUpstream:
         regenerated = ut.build_parity_fixture(truth, asset, cases)
 
         assert regenerated == committed
+
+    def test_the_shared_table_builder_bakes_the_series_asset_byte_for_byte(self, upstream):
+        """T5 の表の欄を `karume-umt5-xxl` の資産と共有する 1 本（`t5_table_fields`）へ移しても、
+        Wan の資産は系列の実物とバイト同一（Wan2.2 の配布形が配る資産そのもの）。"""
+        series = SERIES_ROOT / ut.SERIES_NAME / ut.ASSET_FILE
+        if not series.is_file():
+            pytest.skip(f"Wan のトークナイザ資産の系列が無い: {series}")
+        truth, tables, _ = upstream
+
+        rebuilt = json.dumps(
+            ut.build_asset(truth, tables, ut.asset_versions(), "t2v-1.3b"), ensure_ascii=False
+        )
+
+        assert rebuilt.encode("utf-8") == series.read_bytes()
 
     def test_a_case_whose_paths_split_on_added_tokens_is_rejected(self, upstream):
         truth, tables, _ = upstream

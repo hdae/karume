@@ -13,10 +13,14 @@
 transformers も要らない（既定の sync だけで回る）。故障注入の席（表や linear の格納・表の有無・
 入力・出力の幅）は引数で差し替える。記号は入力の shape から導く（宣言と束縛点が独立に動かない
 — 2 本目の記号を入力に綴れば、その記号を宣言した正当な IR になる）。
+
+配布形 `karume-umt5-xxl` の必須の資産（トークナイザ — `wan.umt5_xxl_tokenizer`）の合成
+（{@link write_tokenizer_asset}）もここに置く（umT5 の配布形を組むテストが共有する）。
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,7 +34,15 @@ from karume.emit import FixedQuantizedWeight, stored_model
 from karume.ir import IrGraph, IrInitializer, IrInput, IrNode, IrStorage, IrValue
 from karume.publish import publish_container
 from karume.quantize import channel_scale, quantize_to_int8
-from wan.umt5_distribution import UMT5_INPUTS, UMT5_ROLE, UMT5_SYMBOL
+from wan import umt5_xxl_tokenizer
+from wan.sources import UMT5_SOURCES
+from wan.umt5_distribution import (
+    UMT5_DEFAULT_MODEL,
+    UMT5_INPUTS,
+    UMT5_ROLE,
+    UMT5_SYMBOL,
+    umt5_tokenizer_asset,
+)
 
 #: 合成の寸法（実物の d_model 4096・語彙 256,384・head 64 と**違う**数 — 焼き込んでいれば落ちる）。
 WIDTH = 8
@@ -157,3 +169,35 @@ def umt5_container(
             else write_model_container(*args, graph_name=named, provenance=provenance)
         )
         return [path.read_bytes() for path in parts]
+
+
+def write_tokenizer_asset(series_dir: Path, **overrides: Any) -> Path:
+    """系列の親（`outputs/series/`）にトークナイザ資産を置き、その path を返す。
+
+    最上位の欄は書き手（`wan.umt5_xxl_tokenizer.build_asset`）と同じで、出所は上流の表の行・版は
+    id 列の正本の版（門が見る値）。語彙と表は門が中身を読まないので小さな値。`overrides` は欄の
+    上書きで、値が None の欄は外す（故障注入の席）。
+    """
+    row = UMT5_SOURCES[UMT5_DEFAULT_MODEL]
+    asset: dict[str, Any] = {
+        "format": umt5_xxl_tokenizer.ASSET_FORMAT,
+        "source": {
+            "repo": row.source.repo,
+            "revision": row.source.revision,
+            "files": dict(sorted(row.tokenizer.items())),
+        },
+        "versions": {"tokenizers": "0.22.2", "transformers": "5.14.1"},
+        "maxLength": 512,
+        "unkId": 2,
+        "eosId": 1,
+        "addedTokens": [["<pad>", 0], ["</s>", 1], ["<s>", 2], ["<unk>", 3]],
+        "space": [[32, 32]],
+        "vocabText": "<pad>\n</s>\n<s>\n<unk>\n▁cat",
+        "scores": [0.0, 0.0, 0.0, 0.0, -1.0],
+        **overrides,
+    }
+    path = umt5_tokenizer_asset(series_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {key: value for key, value in asset.items() if value is not None}
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path

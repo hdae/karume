@@ -6,6 +6,7 @@ pin の形（40 桁の SHA・取得する部品の集合）は重み無しで見
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -213,6 +214,15 @@ class TestTheUmt5Row:
         for row in sources.UMT5_SOURCES.values():
             assert re.fullmatch(r"[0-9a-f]{40}", row.source.revision), row
             assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in row.shards.values())
+            assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in row.tokenizer.values())
+
+    def test_the_tokenizer_pin_names_the_two_files_the_truth_reads(self):
+        """`AutoTokenizer` がリポ全体と同じ backend を組むのに要る 2 本
+        （`wan.umt5_xxl_tokenizer`）。"""
+        assert sorted(sources.UMT5_SOURCES["xxl"].tokenizer) == [
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ]
 
     def test_the_encoder_shards_are_derived_from_the_index(self):
         weight_map = {
@@ -240,9 +250,52 @@ class TestTheUmt5Row:
             "encoder.final.weight": "b.bin",
         }
 
-    def test_an_unknown_model_fails_before_any_download(self):
+    def test_an_unknown_model_fails_before_any_download(self, tmp_path: Path):
         with pytest.raises(sources.WanSourceError, match="上流の表に無い"):
             sources.umt5_snapshot("base")
+        with pytest.raises(sources.WanSourceError, match="上流の表に無い"):
+            sources.pinned_umt5_tokenizer("base", tmp_path / "out")
+
+
+class TestThePinnedUmt5Tokenizer:
+    """照合したバイト列だけを写す（表の sha256 と違えば 1 本も写さずに落ちる）。"""
+
+    @pytest.fixture
+    def cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """合成の HF キャッシュ（表のファイル 2 本 + 表に無い `config.json`）と、それを指す表の
+        行。"""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        files = {"tokenizer.json": b'{"a": 1}', "tokenizer_config.json": b'{"b": 2}'}
+        for name, data in files.items():
+            (cache / name).write_bytes(data)
+        (cache / "config.json").write_bytes(b"{}")
+        row = sources.Umt5Source(
+            source=sources.UMT5_SOURCES["xxl"].source,
+            shards={},
+            tokenizer={name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
+        )
+        monkeypatch.setitem(sources.UMT5_SOURCES, "xxl", row)
+        monkeypatch.setattr(sources, "_umt5_download", lambda *_args, **_kwargs: cache)
+        return cache
+
+    def test_it_copies_only_the_pinned_files(self, cache: Path, tmp_path: Path):
+        out = tmp_path / "out"
+
+        sources.pinned_umt5_tokenizer("xxl", out)
+
+        assert sorted(path.name for path in out.iterdir()) == [
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ]
+        assert (out / "tokenizer.json").read_bytes() == (cache / "tokenizer.json").read_bytes()
+
+    def test_a_file_that_differs_from_the_pin_fails_loudly(self, cache: Path, tmp_path: Path):
+        (cache / "tokenizer_config.json").write_bytes(b'{"b": 3}')
+
+        with pytest.raises(sources.WanSourceError, match="表の"):
+            sources.pinned_umt5_tokenizer("xxl", tmp_path / "out")
+        assert not (tmp_path / "out").exists()
 
 
 class TestTheFetchedUmt5Snapshot:

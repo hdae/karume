@@ -584,8 +584,8 @@ written by `wan/umt5_export.py` from the pinned F32 checkpoint one row block at 
 writer checks each shard's SHA-256 against the table before it unpickles anything, and then opens it
 with `torch.load(mmap=True, weights_only=True)`. A directory that merely contains
 `pytorch_model.bin.index.json` is never unpickled — only the pinned row of the table opens `.bin`
-files. The tokenizer asset, `check-mask`, the precomputed embeddings and the ids of the golden cases
-still come from the Wan snapshot (`--model`, as in the sibling Wan scripts); the umT5 upstream is
+files. The Wan tokenizer asset (with the prompt-cleaning tables), `check-mask`, the precomputed
+embeddings and the ids of the golden cases still come from the Wan snapshot (`--model`, as in the sibling Wan scripts); the umT5 upstream is
 `--upstream` (default `xxl`), and `reference` records both axes in the golden metadata.
 
 ```bash
@@ -594,11 +594,20 @@ uv run --group wan --inexact python -m wan.umt5_export write --check   # write t
 uv run --group wan --inexact python -m wan.umt5_export write           # replace the series container (then rerun `reference` for the goldens)
 ```
 
-It ships in its own repository, `models/karume-umt5-xxl/` (`wan/umt5_distribution.py`), which the
-Wan distribution references (below). There is no TypeScript family for it; the pipeline name only
-names the part:
+It ships in its own repository, `models/karume-umt5-xxl/` (`wan/umt5_distribution.py`), together
+with the tokenizer of `google/umt5-xxl` converted into one JSON table, so it can be used without Wan
+(`Umt5Encoder` from `@karume/models/umt5`); the Wan2.2 distribution references its encoder (below).
+The tokenizer asset (format `karume-umt5-tokenizer/1` — the T5 tables of the Wan asset without the
+prompt cleaning) is built by `wan/umt5_xxl_tokenizer.py` from `tokenizer.json` and
+`tokenizer_config.json` at the pinned commit (their SHA-256 are in `UMT5_SOURCES`), into the series
+`outputs/series/umt5-xxl-tokenizer/tokenizer.json`, together with the TypeScript fixture
+`packages/models/tests/fixtures/umt5/tokenizer-cases.json`. Without Wan's prompt cleaning, two more
+input shapes make `transformers` 5.14.1 and the original `tokenizer.json` disagree — whitespace
+other than U+0020 and a trailing space — so they are rejected as well (the module docstring has
+the measurements):
 
 ```bash
+uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer [--fetch]   # asset + fixture (then deno fmt the fixture)
 uv run python dist.py --pipeline umt5   # default model xxl, out models/karume-umt5-xxl
 ```
 
@@ -606,7 +615,7 @@ uv run python dist.py --pipeline umt5   # default model xxl, out models/karume-u
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | model                       | `xxl` (pipeline `umt5-encoder/1`)                                                                                                           |
 | `weights`                   | `text_encoder` with one `i8` container (`text_encoder/model.i8.krm`)                                                                        |
-| `assets`                    | none — the tokenizer is bundled with Wan's prompt cleaning and stays in the Wan repository                                                  |
+| `assets`                    | `tokenizer` (`tokenizer/tokenizer.json` — format `karume-umt5-tokenizer/1`, no prompt cleaning)                                             |
 | `quants`                    | `i8` only; the vocabulary embedding (one 1,050,148,864-byte buffer) makes the build declare `maxBufferSize` / `maxStorageBufferBindingSize` |
 | `pipelineConfig`            | `{}`                                                                                                                                        |
 
@@ -614,10 +623,12 @@ Before anything is placed, the plan checks the container's provenance against th
 `google/umt5-xxl` revision, the binding table per kind of weight (linear layers and the vocabulary
 embedding in int8, RMSNorm weights and relative-position tables in float32 — with the real series:
 169 int8 and 73 float32 weights), and the graph contract (`input_ids [1, L]` and `relative_position_buckets [L, L]`,
-both int32, one symbol `L`, one float32 output `[1, L, W]`). The repository root gets `LICENSE.md`
-(Apache 2.0) and `NOTICE.md` (the encoder only, int8 conversion, `gelu_new` →
-`GELU(approximate="tanh")`, valid tokens only; the upstream is float32 and bit-identical to the Wan
-checkpoint's `text_encoder`).
+both int32, one symbol `L`, one float32 output `[1, L, W]`), and the tokenizer asset against its
+format, its field set, the pinned repository, commit and file SHA-256, the `transformers` version
+and the maximum length of 512. The repository root gets `LICENSE.md` (Apache 2.0) and `NOTICE.md`
+(the encoder only, int8 conversion, `gelu_new` → `GELU(approximate="tanh")`, valid tokens only, the
+converted tokenizer and the inputs the host rejects; the upstream is float32 and bit-identical to
+the Wan checkpoint's `text_encoder`).
 
 ### Third-party compatible encoders (ADR 0122 stage b)
 
