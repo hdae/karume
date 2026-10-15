@@ -333,8 +333,8 @@
   Opus の差分レビュー〈28 件・バグ 0・medium 2 件は `08f21894` / `6679d123`〉・カードと docs（`620a0766` / `732f507b`）・配布形の組み直し〈README.md だけ変化〉
   — ADR 0121 追記「段 9d の結果」。残る確認 1 つ: `cba99c24` の T2V の 50 ステップの実用席の床は GPU 未走（次に T2V の 50 ステップを回すとき）。
   **段 9 ✅ → I2V を閉じた。次 = 一旦休憩**（利用者が触って使い方を見る）→ 来週の順（裁定 2026-10-10）: ② now 節の退避〈✅ 2026-10-10 — 済んだ記録を research の退避先へ〉→ ③ Codex 深掘りの修正の波〈✅ 2026-10-11 — 推奨案で直せる指摘は取り込み済み: medium 9 件・low / info 183 件のうち修正 100・docs の修正 52・Anima の int8 attention の端数縮退の見える化・テスト不足 7 件・依存グラフの門の typesDependency・ADR 0108 決定 12 の撤回・未対応 op のエラーの判定材料。判断待ちの項は裁定 20〜27 で決着し取り込み済み。裁定 4 / 6 / 8 / 18 の機能 ✅ 2026-10-11 — 裁定 4 = BiRefNet の後処理の手順を系列ごとに配布形で宣言〈HR は上流の手順 `u8-pil-bicubic`・盲検 A/B は 8 対とも見分けがつかず規則どおり上流・pipeline は `birefnet/2`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)〉・裁定 6 = attention の行ブロックの予算〈runtime の `SessionOptions.attentionRowBlockMaxBytes` だけ・出力はビット同一・121 フレームの実用席で 512 MiB なら VRAM の山 −1.46 GiB・ADR [0124](decisions/0124-attention-row-block-budget.md)〉・裁定 8 = 会話の分岐 `fork`〈ADR 0066 / 0083 の追記〉・裁定 18 → 40 = 画像の EXIF の向きは CLI と gpu-lab の両方で適用する〈M2 の Chrome は `imageOrientation: "none"` でも向きを適用したので、上流の `generate.py` と意図して違える側に揃えた・ADR 0121 の追記・M2 の Chrome で手動確認 OK〉・gpu-lab の Wan の結果を連番 PNG の zip で保存。上流との一致の方針を ADR 0005 に追記。Wan の既定に行ブロックの予算は入れない〈裁定 39 = a・公開 API の口も足さない〉。HR の f32 席の退役 ✅ 2026-10-11〈HR は `f16` 席だけ・席は上流の格納の型から導く・取り違えの検査は固定の上流 revision・カードの実行資源は checkpoint ごとの実測〈総確保の換算の誤記 1.7 / 4.1 → 1.6 / 4.0 GiB も訂正〉・Lucida の f32 系列を上流 revision つきで焼き直し・手元のミラー 2 本を `birefnet/2` で組み直し・ADR 0113 の追記〉。次 = ④ H-37 の計測〉
-  〈+ レビューのテスト不足 7 件・依存グラフの門の typesDependency・gpu-lab の EXIF〉→ ④ H-37 の計測〈✅ 2026-10-15 — 切れ目の見積もりは 1 step の 0.34〜1.30%（生成の中の補正後）で kill 線の 5% の下 → perf-ledger H-37 は ❌・[research](research/2026-10-15-wan-dit-seams-h37.md)〉→ 次 = ⑤ outputs/diag と tools/shared の整理
-  〈+ DeBERTa の導出台本を tools/ へ〉→ ⑥ 0.14.0 の準備〈Wan 家族の初公開・Wan2.1 を上げるかはそのとき〉。
+  〈+ レビューのテスト不足 7 件・依存グラフの門の typesDependency・gpu-lab の EXIF〉→ ④ H-37 の計測〈✅ 2026-10-15 — 切れ目の見積もりは 1 step の 0.34〜1.30%（生成の中の補正後）で kill 線の 5% の下 → perf-ledger H-37 は ❌・[research](research/2026-10-15-wan-dit-seams-h37.md)〉→ ⑤ outputs/diag と tools/shared の整理
+  〈✅ 2026-10-15 — tools/shared を tools/_shared へ統合・常用の台本 3 本〈GPU の使用中判定 2 本・timestamp の 1 tick の probe〉を tools/diag へ・DeBERTa の崩壊上限の導出 4 段を追跡下へ〈`deberta/collapse_ceilings.py` と `tools/diag/deberta-collapse.ts`・取り直した結果は 2026-10-07 とバイト一致〉・outputs/diag の性格を [assets-layout](assets-layout.md) に明記・調査の台本は記録が指す path を保つため動かさない〉→ 次 = ⑥ 0.14.0 の準備〈Wan 家族の初公開・Wan2.1 を上げるかはそのとき〉。
   （以下は着手前の列挙）**次** → 段 7（実用席の自機 A/B の門〈S の組は未決 — 832×480 の値が使えなくなった〉・census・決定性・利用者の視認〈参照席自身の品質の裁定を兼ねる・seed 4 本以上・
   1280×704・ADR 0119 の裁定〈2026-10-04〉が預けた自由プロンプトの比較〉・既定の寸法 / フレーム数〈今は仮置きの 1280×704・33 フレーム〉・実用席の 2 ステップの sha 行・50 ステップの sha 行〈参照席・実用席 — 段 6 では書いていない〉）→ 段 9（I2V）→ **一旦休憩**（利用者が触って使い方を見る — 2026-10-06）。
   **段 9 の隣接の小物（起票 2026-10-10・レビュー）**:
@@ -503,6 +503,14 @@
   N % 4 == 0 の既存キーの生成物はバイト不変に保つ（スナップショットが検出器）。着手の条件: Anima の 32 px の倍数で
   ない解像度を実用したい要望が出たとき、または N % 4 != 0 の形を受理する系列が a8 / s16 の席を持つとき。
   kill 基準: その形での VRAM と速度の実測で、f32 へ落ちた今の経路に対して差が出ないこと。
+
+- **Wan の視認の道具を tools/ へ上げる（起票 2026-10-15・⑤ の裁定）**: seed × プロンプトの組み合わせで動画を出す
+  `outputs/diag/wan22-visual-dist.ts` / `wan22-visual-free.ts`（git 追跡外）と、WebP 化・左右並置の Python 2 本
+  （`wan22-frames-to-webp.py` / `wan22-ab-sbs.py`）は、ADR 0121 段 7・9d の視認で繰り返し使った台本。Deno の 2 本は大半が
+  重複している（違いは文面の経路〈事前計算の埋め込み / GPU の umT5 で JSON の自由文面〉と I2V の条件画像の口）ので、
+  上げるときは 1 本へ統合して fmt / lint / check に乗せる（置き場の規則は [assets-layout](assets-layout.md) の
+  `outputs/diag/` の項）。着手の条件: 次に Wan の視認 A/B を回すとき（T2V の 50 ステップの実用席の床・Wan2.1 を
+  上げるかの判断）。
 
 ## release — リリース準備波（しばらく先）
 

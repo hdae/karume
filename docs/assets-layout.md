@@ -1,7 +1,8 @@
 # 資産の置き場（models / outputs / inputs）
 
 ローカル資産 3 根の規約（outputs の 4 分割は 2026-08-30 裁定・`outputs/release/` は公開作業で
-後から生えた 5 つ目の席・`outputs/verify/` は検証結果の席として 2026-09-20 に生えた 6 つ目）。
+後から生えた 5 つ目の席・`outputs/verify/` は検証結果の席として 2026-09-20 に生えた 6 つ目・`outputs/diag/` は調査の記録の席として
+2026-10-15 に明文化した 7 つ目）。
 綴りの正本は `tools/export-recipes/_shared/paths.py`（`DIST_ROOT` / `SERIES_ROOT` /
 `EXAMPLES_ROOT` / `BENCH_ROOT` / `VERIFY_ROOT` / `MISC_ROOT` / `INPUTS_ROOT` / `OUTPUTS_ROOT`）。
 **3 根とも git 追跡しない**（全て再生成可能な生成物か手置きの実重みで、リポジトリが持つのは
@@ -15,6 +16,7 @@
 | `outputs/bench/<model>/<日付>_<目的>/`     | e2e ダンプ・ベンチ・視認評価（**消して安全** — 旧 `demo/` の後継）                                                                                      | `outputs/bench/karume-anima/2026-08-30_e2e-mismatch/`          |
 | `outputs/verify/<環境キー>/<日付>_<系列>/` | 検証の結果と実物（**消して安全** — `results.json` + PNG / WAV）                                                                                         | `outputs/verify/deno-intel-graphics-bmg-g21/2026-09-20_anima/` |
 | `outputs/misc/<名前>/`                     | ホスト資産（**消すと再取得・再エミットが要る**）                                                                                                        | `outputs/misc/sbv2-demo/` / `outputs/misc/corpus/`             |
+| `outputs/diag/<題>-<日付>/`                | 調査の記録（台本・probe・生データ — **再生成できないものを含む**・繰り返し回す台本は置かない — 下の bullet）                                            | `outputs/diag/deberta-w8a8-2026-10-07/`                        |
 | `outputs/release/`                         | 公開作業の作業机（**中身で 2 性格** — 下の bullet）                                                                                                     | `outputs/release/upload-karume-siglip2.log`                    |
 | `inputs/<family>/<name>/`                  | 手置きの実重み（ckpt・config — 生成物ではない）                                                                                                         | `inputs/sbv2/F1/`                                              |
 | `inputs/anima/civitai-<versionId>/`        | Civitai 取り込み（重み + `civitai.json` — ADR 0088）                                                                                                    | `inputs/anima/civitai-2983680/`                                |
@@ -59,6 +61,10 @@
   原本控え・調査メモは**再生成できない**（`misc/` と同じ性格）。捨てるときはファイル単位で見る。
   この席の綴りは台本が**手写し**で持つ（zsh から `paths.py` の定数を読めないため `RELEASE_ROOT`
   は無い）ので、変えるなら台本と本表の 2 か所を同時に直す。
+- `outputs/diag/` は**調査の記録**（調査の台本・probe・生データ・ログ）の席で、ADR や known-issues が根拠として
+  指す。新しい調査は `<題>-<日付>/` にまとめる（それより前の平置きの台本は、記録が指す path を保つため動かさない）。
+  捨てるときはファイル単位で見る（`misc/` と同じ性格）。**繰り返し回す台本は置かない** — 手順として回させる台本は
+  追跡下の `tools/diag/` へ（例: GPU の使用中判定 `gpu-busy.zsh`・DeBERTa の崩壊上限の導出 `deberta-collapse.ts`）。
 - 旧 `outputs/series-archive/`（裁定済み系列の退避先）は 2026-08-30 の掃除裁定で**廃止**
   （base i4 の復活レバーは `outputs/series/` の `*-i4-dyn` 系列が引き続き担う —
   `anima/distribution.py` の NOTE）。
