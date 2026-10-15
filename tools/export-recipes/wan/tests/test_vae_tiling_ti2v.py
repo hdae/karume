@@ -130,6 +130,8 @@ class TestUnpatchifyOrder:
         assert not _table_matches(swapped, patchified, _upstream_unpatchify(patchified))
 
     def test_unpatchify_frames_is_the_upstream_function(self):
+        # 被験関数も上流の unpatchify を import する — 比較相手の importorskip より先に評価される。
+        pytest.importorskip("diffusers.models.autoencoders.autoencoder_kl_wan")
         frames = torch.randn(1, 12, 3, 4, 6, generator=torch.Generator().manual_seed(5))
 
         assert torch.equal(

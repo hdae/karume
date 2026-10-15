@@ -269,8 +269,7 @@ class TestOneBlockAtATime:
         """
         import gc
 
-        from diffusers.models.transformers.transformer_wan import WanTransformerBlock
-
+        transformer_wan = pytest.importorskip("diffusers.models.transformers.transformer_wan")
         model = _rounded("i8")
         upstream_blocks = {id(block) for block in model.blocks}
         writer = dit_reference.LayerwiseDit(model.config)
@@ -284,7 +283,7 @@ class TestOneBlockAtATime:
                     gc.collect()  # 到達できない循環の残り（回収待ち）は「生きている」に数えない
                     live.append(
                         sum(
-                            type(item) is WanTransformerBlock
+                            type(item) is transformer_wan.WanTransformerBlock
                             and id(item) not in upstream_blocks
                             and any(not p.is_meta for p in item.parameters())
                             for item in gc.get_objects()
