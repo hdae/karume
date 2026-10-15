@@ -8,7 +8,7 @@
  * 失敗（`error`）の行が 1 つでもあれば終了コード 1（出力の不一致は測定の失敗ではないので終了コードに
  * 含めず、表と要約で赤く出す）。
  *
- * 使い方（リポ直下から・GPU が学習で使われていないことを先に `outputs/diag/gpu-busy.zsh` で確認）:
+ * 使い方（リポ直下から・GPU が学習で使われていないことを先に `tools/diag/gpu-busy.zsh` で確認）:
  *
  *   deno run -A tools/geometry-sweep/main.ts --set quick --op linear --op i8a8-linear
  *

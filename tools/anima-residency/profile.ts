@@ -13,7 +13,7 @@
  * `acquireGpu({ gpuTiming: true })` で取り、列挙しなければ計測なし（`gpuTiming.enabled = false`）で
  * 段の壁時計と dispatch 本数だけ残す。
  *
- * 使い方（リポ直下から・GPU が学習で使われていないことを先に `outputs/diag/gpu-busy.zsh` で確認）:
+ * 使い方（リポ直下から・GPU が学習で使われていないことを先に `tools/diag/gpu-busy.zsh` で確認）:
  *
  *   deno run -A tools/anima-residency/profile.ts --resolution 512x512 --count 2 --quant f16
  *

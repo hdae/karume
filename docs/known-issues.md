@@ -253,7 +253,7 @@ golden `activations` の `sin` は許容差を WGSL 仕様帯へ寄せて消化�
   × 52.08 ≒ 3,375 ms、壁時計の計測窓 3,452 ms と一致）。RTX は period 1 ns で表面化しなかった。
   **2026-10-06・RTX 3080 Ti（NVIDIA ドライバ 615.71）で実測**: 1 tick = 1 ns（133〜153 ms の pass で raw tick が壁時計 − submit の固定費
   〈約 11 ms〉と 1% 以内で一致・query set の使い捨てと使い回しの両方）→ `TIMESTAMP_UNIT_NS` に行を足した。probe =
-  `outputs/diag/timestamp-period-probe.ts`（git 追跡外）。
+  `tools/diag/timestamp-period-probe.ts`。
   Chrome（Dawn）は換算する。karume 側で補正できない（WebGPU API は period を露出しない）ので、
   Deno で GPU 内訳を読むときは period ≠ 1 の GPU に注意する。Deno への issue 起票は未。
 - **Deno 2.9.6 は device lost を例外にせず panic する**（ext/webgpu の `device_poll(...).unwrap()`
@@ -351,7 +351,7 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
 
 - 帰属（推定）: 計画（chunk の切り方）の問題ではなく、GPU 側の一過性の stall（熱か電力のクロック低下・
   コンテキスト切り替え）。計画の問題なら裏付け前の最大が動くはずで、動いていない。
-- 運用の回避 = 時間門が外れた走行は、`outputs/diag/gpu-busy.zsh`（`throttle=` 欄を 2026-10-03 に追加）で
+- 運用の回避 = 時間門が外れた走行は、`tools/diag/gpu-busy.zsh`（`throttle=` 欄を 2026-10-03 に追加）で
   スロットリング理由と温度を見て、冷めてから単独で再走する（緑ならフレーク）。レーンを連続で回すときは
   重い GPU ジョブ（50 ステップの通し・目視の量産）の直後を避ける。
 - 門の統計量（裏付け前の最大 + 裏付け後の窓平均、など）へ替えるかは設計裁定 — ここは起票のみ。
