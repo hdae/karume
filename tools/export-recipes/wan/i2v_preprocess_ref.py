@@ -83,13 +83,13 @@ def stretch_resize(image: Image.Image, width: int, height: int) -> Image.Image:
     上流の `VideoProcessor.resize`（`resize_mode="default"`・`resample="lanczos"`・
     `reducing_gap=None` の既定）をそのまま呼ぶ — 写しで縛ると参照の素性の主張が恒真になる。
     """
-    from diffusers.video_processor import VideoProcessor
-
     if width % VAE_SCALE_FACTOR_SPATIAL or height % VAE_SCALE_FACTOR_SPATIAL:
         raise ValueError(
             f"寸法 {width}×{height} は {VAE_SCALE_FACTOR_SPATIAL} の倍数でない（パイプラインの"
             " check_inputs が拒む）"
         )
+    from diffusers.video_processor import VideoProcessor
+
     processor = VideoProcessor(vae_scale_factor=VAE_SCALE_FACTOR_SPATIAL)
     return processor.resize(image, height=height, width=width)
 

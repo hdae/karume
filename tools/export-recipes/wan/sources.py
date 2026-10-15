@@ -354,14 +354,14 @@ def umt5_snapshot(model: str, *, fetch: bool = False) -> Path:
     （{@link local_snapshot} と同じ理由）。shard の sha256 の照合は読み口
     （`wan.umt5_export.Checkpoint`）が unpickle の前に掛ける — 取得の記録ではなく読む実物で閉じる。
     """
-    from huggingface_hub import snapshot_download
-    from huggingface_hub.errors import LocalEntryNotFoundError
-
     row = UMT5_SOURCES.get(model)
     if row is None:
         raise WanSourceError(
             f"umT5 のモデル {model!r} は上流の表に無い（既知: {sorted(UMT5_SOURCES)}）"
         )
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
     source = row.source
 
     def download(patterns: list[str]) -> Path:
