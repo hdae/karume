@@ -1804,6 +1804,12 @@ Deno 側の実 GPU テストはもともと tolerance 判定なので影響し�
 緩めずに io を撮り直す（2026-10-06 に Ryzen 5 7600 へ換装して撮り直し — 旧参照との差は `activations` /
 `dilated_conv` の 2 spec・絶対差 ≤ 2.4e-7）。
 
+BiRefNet の α マットの後処理の fixture（`birefnet/tests/test_matte_fixture.py` の再生成突合）も同じ
+扱い: lucida（torch の CPU の f32 の σ と resize）の期待値は torch が選ぶ SIMD の kernel で最終 bit が
+変わる（実測 2026-10-15: AVX2 で `disc.up.lucida` の 3 要素・最大 7.5e-9、SIMD なしで 40 ケース・最大
+4.6e-5 — TS 側の ε 1e-2 には効かない）。CI では lucida のバイト突合だけを明示 SKIP し、JSON と hr
+（Pillow の経路 — 3 つの命令セットで一致を実測）はどの環境でもバイト一致を要求する。
+
 ## states 形 attention は f32 経路のみ（数値変種と組めない）・sliding rewind 全拒否
 
 `states` 欄つき attention / `state_append`（ADR

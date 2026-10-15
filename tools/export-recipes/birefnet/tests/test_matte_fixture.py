@@ -5,11 +5,17 @@ TS 側の後処理（`matte.ts` の 2 つの手順）は fixture と突き合わ
 torch / torchvision / Pillow / numpy の版で決まるので、git にある入力から今の版で作り直した組と、
 git にある組（入力表・ケース表・テンソル）が一致することをここで見る — 版を上げて値が変わったのに
 fixture を作り直し忘れた状態を赤にする。
+
+ただし lucida（torch の CPU の f32 の σ と resize）の最終 bit は CPU の命令セットでも変わるので、
+そのバイト一致は参照環境専用（docs/limitations.md「sha256 参照門は参照環境専用」の CPU 側の原則）。
+JSON と hr（Pillow の経路）は x86 の 3 つの命令セット（AVX-512 / AVX2 / SIMD なし）で一致を実測
+（2026-10-15）したので、どの環境でもバイト一致を要求する。
 """
 
 from __future__ import annotations
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -28,22 +34,43 @@ def committed() -> tuple[dict, dict[str, np.ndarray]]:
     return document, load_file(directory / matte_fixture.FIXTURE_TENSORS)
 
 
-class TestTheCommittedFixture:
-    def test_it_is_what_todays_libraries_produce_from_the_committed_inputs(self, committed):
-        document, tensors = committed
+@pytest.fixture(scope="module")
+def rebuilt() -> tuple[dict, dict[str, np.ndarray]]:
+    """git にある入力から今のライブラリで作り直した組。"""
+    return matte_fixture.build_fixture(matte_fixture.committed_real_inputs())
 
-        rebuilt_document, rebuilt_tensors = matte_fixture.build_fixture(
-            matte_fixture.committed_real_inputs()
-        )
+
+def _mismatched(
+    committed: dict[str, np.ndarray], rebuilt: dict[str, np.ndarray], *, lucida: bool
+) -> list[str]:
+    return [
+        name
+        for name, tensor in rebuilt.items()
+        if name.endswith(".lucida") == lucida
+        and (committed[name].dtype != tensor.dtype or not np.array_equal(committed[name], tensor))
+    ]
+
+
+class TestTheCommittedFixture:
+    def test_its_document_and_hr_are_what_todays_libraries_produce(self, committed, rebuilt):
+        document, tensors = committed
+        rebuilt_document, rebuilt_tensors = rebuilt
 
         assert document == rebuilt_document
         assert sorted(tensors) == sorted(rebuilt_tensors)
-        mismatched = [
-            name
-            for name, tensor in rebuilt_tensors.items()
-            if tensors[name].dtype != tensor.dtype or not np.array_equal(tensors[name], tensor)
-        ]
-        assert mismatched == []
+        assert _mismatched(tensors, rebuilt_tensors, lucida=False) == []
+
+    @pytest.mark.skipif(
+        os.environ.get("CI") == "true",
+        reason="lucida の torch CPU 出力は最終 bit が CPU の命令セットで変わる — "
+        "バイト一致は参照環境専用",
+    )
+    def test_its_lucida_is_what_todays_torch_produces(self, committed, rebuilt):
+        _, tensors = committed
+        _, rebuilt_tensors = rebuilt
+
+        assert sorted(tensors) == sorted(rebuilt_tensors)
+        assert _mismatched(tensors, rebuilt_tensors, lucida=True) == []
 
     def test_it_records_the_versions_of_the_libraries_that_decide_the_values(self, committed):
         document, _ = committed

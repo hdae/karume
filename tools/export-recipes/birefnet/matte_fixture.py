@@ -61,7 +61,8 @@ Pillow は関数の中で import する。理由は recipe の作法（依存グ
 
 値は torch / torchvision / Pillow / numpy の版で決まるので、版を来歴に記録する
 （`birefnet/tests/test_matte_fixture.py` が今の版で作り直して突き合わせ、版の更新で黙ってずれた
-fixture を赤にする）。
+fixture を赤にする）。lucida の最終 bit は CPU の命令セット（torch が選ぶ SIMD の kernel）でも
+変わるので、作り直すのは参照環境（開発機）で — 他の機で作ると lucida だけが ulp でずれる。
 """
 
 from __future__ import annotations
@@ -620,6 +621,8 @@ def build_fixture(
             "（U8 [H, W]）・`<case>.lucida`（F32 [H, W] — 丸める前の 255α）。",
             "値は torch / torchvision / Pillow / numpy の版で決まる — 版を変えたら作り直す"
             "（recipe の birefnet/tests/test_matte_fixture.py が今の版と突き合わせる）。",
+            "lucida の最終 bit は CPU の命令セットでも変わる — 作り直しも突き合わせも参照環境"
+            "（開発機）で行う（docs/limitations.md）。",
         ],
         "source": {
             "hr": "PIL.Image.Image.resize((W, H)) on PIL.Image.fromarray(floor(255σ_f64 + 0.5))",

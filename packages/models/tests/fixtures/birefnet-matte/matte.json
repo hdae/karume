@@ -5,7 +5,8 @@
     "hr: numpy の f64 の σ → floor(255σ + 0.5) の uint8 → PIL.Image.fromarray(q)（L）.resize((W, H))（resample 省略 = BICUBIC）。TS の u8-pil-bicubic と 0 不一致が契約（生成器は 255σ が k + 0.5 から tieMargin 未満の標本を拒む）。",
     "lucida: torch の f32 の sigmoid → torchvision.transforms.functional.resize(preds[0], (H, W))（bilinear・antialias 既定）→ × 255（f32）。最終 α は floor(x + 0.5)。TS の float-bilinear は一致するか、golden の 255α が k + 0.5 から epsilon 以内のときだけ 1 段ずれてよい。",
     "テンソルは matte.safetensors の `<input>.logits`（F32 [h, w]）・`<case>.hr`（U8 [H, W]）・`<case>.lucida`（F32 [H, W] — 丸める前の 255α）。",
-    "値は torch / torchvision / Pillow / numpy の版で決まる — 版を変えたら作り直す（recipe の birefnet/tests/test_matte_fixture.py が今の版と突き合わせる）。"
+    "値は torch / torchvision / Pillow / numpy の版で決まる — 版を変えたら作り直す（recipe の birefnet/tests/test_matte_fixture.py が今の版と突き合わせる）。",
+    "lucida の最終 bit は CPU の命令セットでも変わる — 作り直しも突き合わせも参照環境（開発機）で行う（docs/limitations.md）。"
   ],
   "source": {
     "hr": "PIL.Image.Image.resize((W, H)) on PIL.Image.fromarray(floor(255σ_f64 + 0.5))",
