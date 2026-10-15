@@ -273,6 +273,14 @@ measurements in `docs/research/`.
   phone photo tagged to be shown upright is used upright, and both pick the same "auto" size for
   it. This intentionally differs from the official `generate.py`, which does not apply the
   orientation; an image without an orientation tag gives the same pixels either way.
+- Measuring the seams of the Wan transformer loop (the host work, uploads and readbacks between
+  the transformer forwards). Each row of the gpu-lab Wan tab gains `seams` (per-step spans split at
+  each forward's end, their medians from step 2 on, and the VAE tile-assembly time) and, for
+  Wan2.2, `seamInputCheck` (the transformer's owned input bytes against the expected total); a new
+  **切れ目の下見** (seam probe) button measures one step's host work on full-size arrays and an
+  upload and readback of the same bytes as one forward, kept in the top-level `seamProbe[]`. The
+  JSON is now `karume-wan-browser/6`. `tools/wan-seams/main.ts` is the Deno twin: it runs the probe
+  and a text-to-video generate per frame count and writes `karume-wan-seams/1`.
 - Release tooling: `tools/release/hf-upload.zsh upload` first reads `provenance.license` from every
   container of the directory (`tools/release/container_license.ts`, needs Deno) and uploads nothing when
   one carries the undeclared-license mark (`NOASSERTION`, or a value such as `unknown`, in any case), when
