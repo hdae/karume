@@ -132,13 +132,22 @@ import {
   type WanTimeline,
   type WanTimelineMark,
 } from "./wan-plan.ts";
+import {
+  checkWanSeamInputBytes,
+  formatWanSeamProbe,
+  probeWanSeams,
+  type WanSeamInputCheck,
+  type WanSeamProbe,
+  wanSeamSizes,
+} from "./wan-seam-probe.ts";
 import { type ZipEntry, zipStored } from "./zip.ts";
 
 /**
  * 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ・/3 = 読み込みと行が quant の席を持つ・
  * /4 = 読み込み〈`loads[]` と読み込み中の配布形の欄〉と行が世代 `generation`〈`wan2.1` / `wan2.2`〉を持つ・
  * /5 = I2V の行が条件画像 `image` を持ち、段の所要 `timeline.stageMs` に `vae_encoder` が入りうる・
- * /6 = 行が DiT の step の中の区間と VAE の貼り合わせ `seams`〈`summarizeWanSeams` — perf-ledger H-37〉を持つ）。
+ * /6 = 行が DiT の step の中の区間と VAE の貼り合わせ `seams`〈`summarizeWanSeams` — perf-ledger H-37〉と、Wan2.2 の
+ * 行は DiT の入力のバイト数の照合 `seamInputCheck` を持ち、最上位に切れ目の下見の結果 `seamProbe[]` を持つ）。
  */
 const WAN_REPORT_FORMAT = "karume-wan-browser/6";
 
@@ -285,6 +294,11 @@ type WanRow = {
   readonly timeline?: WanTimeline;
   /** step の中の区間と VAE の貼り合わせ（`timeline` と同じ扱い — 集計に失敗した失敗の行では無い）。 */
   readonly seams?: WanSeams;
+  /**
+   * Wan2.2 の完走した行だけ: DiT の Session が所有した入力の総和と、下見の寸法（`wanSeamSizes`）の入力の合計の照合
+   * （下見の転送のバイト数が実物の 1 パスと同じかの裏付け）。
+   */
+  readonly seamInputCheck?: WanSeamInputCheck;
   readonly diagnostics: Partial<Record<WanRunComponent, WanComponentDiagnostics>>;
   readonly rgbSha256?: string;
   readonly reference?: WanReferenceVerdict;
@@ -335,6 +349,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     guidance: element(root, "guidance", HTMLInputElement),
     shift: element(root, "shift", HTMLInputElement),
     run: element(root, "run", HTMLButtonElement),
+    seamProbe: element(root, "seam-probe", HTMLButtonElement),
     info: element(root, "info", HTMLElement),
     status: element(root, "status", HTMLElement),
     limitsSummary: element(root, "limits-summary", HTMLElement),
@@ -422,6 +437,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     /** 進行中の generate の印（`onRunDiagnostics` が DiT の run の印を足す — {@link diagnostics} と同じ寿命）。 */
     marks?: WanTimelineMark[];
     rows: WanRow[];
+    /** 切れ目の下見の結果（JSON の `seamProbe[]`）。 */
+    seamProbes: WanSeamProbe[];
     /**
      * 最新の動画（`fps` は生成した動画の値 — 世代の記述子の出力のフレームレート・`seed` は要求の値 — 連番 PNG の
      * zip の名前に使う）。
@@ -435,6 +452,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     imageDecoding: false,
     loads: [],
     rows: [],
+    seamProbes: [],
     frame: 0,
   };
 
@@ -542,6 +560,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ui.quant.disabled = busy || loaded;
     ui.dispose.disabled = busy || !loaded;
     ui.run.disabled = busy || !loaded || state.imageDecoding;
+    // 下見の寸法は Wan2.2 の定数（`wan-seam-probe.ts`）— Wan2.1 では押せない。
+    ui.seamProbe.disabled = busy || state.loaded?.generation.id !== "wan2.2";
     // Wan2.1 では画像の操作を無効にする（パイプラインが image / fit を拒む）。
     const imageAccepted = acceptsImage(state.generation);
     ui.image.disabled = busy || !imageAccepted;
@@ -562,7 +582,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     ui.prompt.disabled ||= !loaded;
     ui.negative.disabled ||= !loaded;
     ui.freePrompt.disabled = busy || state.loaded?.textEncoder !== "gpu";
-    ui.exportJson.disabled = busy || (state.rows.length === 0 && state.loads.length === 0);
+    ui.exportJson.disabled = busy ||
+      (state.rows.length === 0 && state.loads.length === 0 && state.seamProbes.length === 0);
     ui.downloadFrames.disabled = busy || state.video === undefined;
   };
 
@@ -863,6 +884,11 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       seams.runsPerStep ?? "—"
     } 本 / step）\nVAE 貼り合わせ ${seams.vaeAssembleMs?.toFixed(1) ?? "—"} ms`;
 
+  const formatInputCheck = (check: WanSeamInputCheck): string =>
+    `入力の照合 ${check.matches ? "一致" : "不一致"}（Session ${
+      check.planInputBytes.toLocaleString("en-US")
+    } B · 下見の寸法 ${check.expectedBytes.toLocaleString("en-US")} B）`;
+
   const appendRow = (row: WanRow): void => {
     const tr = document.createElement("tr");
     const timeline = row.timeline;
@@ -881,7 +907,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       ).join("\n"),
       timeline === undefined ? "—" : formatSpans(timeline.stepMs),
       timeline === undefined ? "—" : formatSpans(timeline.tileMs),
-      row.seams === undefined ? "—" : formatSeams(row.seams),
+      [
+        row.seams === undefined ? "—" : formatSeams(row.seams),
+        ...(row.seamInputCheck === undefined ? [] : [formatInputCheck(row.seamInputCheck)]),
+      ].join("\n"),
       Object.entries(row.diagnostics).map(([component, summary]) =>
         formatWanDiagnostics(component, summary)
       ).join("\n"),
@@ -893,6 +922,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const td = document.createElement("td");
       td.textContent = value;
       if (at >= 1) td.className = "wrap";
+      if (at === 6 && row.seamInputCheck?.matches === false) td.className = "wrap bad";
       if (at === 9 && row.reference?.kind === "mismatch") td.className = "wrap bad";
       if (at === 10 && value !== "") td.className = "wrap error";
       tr.append(td);
@@ -1018,6 +1048,14 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       // 完走した生成のイベントの並びが崩れていたらパイプラインの取り決めの破れ — 失敗の行にする
       const timeline = summarizeWanTimeline(marks);
       const seams = summarizeWanSeams(marks);
+      const transformerDiagnostics = diagnostics.get("transformer");
+      const seamInputCheck = loaded.generation.id === "wan2.2" &&
+          transformerDiagnostics !== undefined
+        ? checkWanSeamInputBytes(
+          wanSeamSizes({ frames: resolved.frames, width: resolved.width, height: resolved.height }),
+          transformerDiagnostics.planBacking.inputBytes,
+        )
+        : undefined;
       showVideo(video, frames, resolved.seed);
       row = {
         ...base,
@@ -1025,6 +1063,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         wallMs,
         timeline,
         seams,
+        ...(seamInputCheck === undefined ? {} : { seamInputCheck }),
         diagnostics: summaries(),
         rgbSha256,
         reference,
@@ -1032,6 +1071,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       status(
         `完了 — ${(wallMs / 1000).toFixed(1)} s · sha ${rgbSha256.slice(0, 12)} · ${
           referenceVerdictText(reference)
+        }${
+          seamInputCheck?.matches === false
+            ? " · 入力の照合が不一致（下見の寸法と DiT の入力が違う — 表の行を参照）"
+            : ""
         }`,
       );
     } catch (error) {
@@ -1062,6 +1105,23 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     }
     state.rows.push(row);
     appendRow(row);
+  };
+
+  /**
+   * 切れ目の下見（`wan-seam-probe.ts`）: 今の要求の欄のフレーム数と寸法で、1 step のホストの処理と DiT 1 パスと同じ
+   * バイト数の転送を、読み込んだ device で測る（生成はしない — pipeline は段ごとに Session を畳むので device は空いて
+   * いる）。ホストの処理は主スレッドを数秒止める。
+   */
+  const probeSeams = async (): Promise<void> => {
+    const loaded = state.loaded;
+    if (loaded === undefined) throw Error("先に「読み込む」");
+    if (loaded.generation.id !== "wan2.2") throw Error("切れ目の下見は Wan2.2 だけ");
+    const size = resolveWanFormSize(ui.size.value, state.image?.size);
+    const frames = Number(ui.frames.value);
+    status(`切れ目の下見を測定中（${frames} フレーム · ${wanSizeLabel(size)}）`);
+    const probe = await probeWanSeams(loaded.gpu.device, { frames, ...size });
+    state.seamProbes.push(probe);
+    status(`切れ目の下見 — ${formatWanSeamProbe(probe)}`);
   };
 
   const dispose = async (): Promise<void> => {
@@ -1121,6 +1181,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       loads: state.loads,
       deviceLost: state.deviceLost ?? null,
       rows: state.rows,
+      seamProbe: state.seamProbes,
     };
     downloadText(
       JSON.stringify(report, null, 2),
@@ -1271,6 +1332,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
   ui.image.addEventListener("change", () => void chooseImage());
   ui.clearImage.addEventListener("click", clearImage);
   ui.run.addEventListener("click", exclusive("Wan の生成", generate));
+  ui.seamProbe.addEventListener("click", exclusive("Wan の切れ目の下見", probeSeams));
   ui.dispose.addEventListener("click", exclusive("Wan の破棄", dispose));
   ui.exportJson.addEventListener("click", exportJson);
   ui.downloadFrames.addEventListener("click", exclusive("Wan の連番 PNG の保存", saveFrames));

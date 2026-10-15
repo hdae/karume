@@ -356,6 +356,17 @@ image-to-video rows, the condition image.
   blank for the distribution defaults (50, 5.0, 3.0 for Wan2.1 and 50, 5.0, 5.0 for Wan2.2; the
   placeholders show them after loading). A
   blank negative uses the asset's `negative` row. **生成** (generate) reads them once.
+- **切れ目の下見** (seam probe — perf-ledger H-37) — Wan2.2 only, enabled once loaded and while nothing runs.
+  With the selected frame count and size, and without generating, it measures the host work of one
+  step on full-size arrays (the pipeline's own patchify, unpatchify, CFG, UniPC step, finiteness
+  check, first-frame replacement of image-to-video, and timestep projection; it blocks the page for
+  a few seconds) and, on the loaded device, an upload of the same seven buffers and bytes as one
+  transformer pass (`writeBuffer`, an empty submit, `onSubmittedWorkDone`) and a readback of the
+  same bytes as its output (a copy into a mappable buffer and `mapAsync`), each as the median of 10
+  runs after 2 warm-ups. The status line shows the result and the estimate of one guided step's
+  seams: the host work plus two uploads and two readbacks. These are plain WebGPU calls of the same
+  sizes, not the runtime's own run path. The shared code is `browser/wan-seam-probe.ts`; the Deno
+  twin is `tools/wan-seams/main.ts`.
 - **条件画像（Wan2.2 の I2V）, fit, 画像を外す** (condition image, fit, remove image) — Wan2.2 only; with
   Wan2.1 they are disabled (its pipeline refuses an image), and switching to Wan2.1 removes the image.
   Choose a PNG or JPEG file to turn the next generates into image-to-video: the page decodes it in the
@@ -400,7 +411,11 @@ image-to-video rows, the condition image.
   forward's end, including the session build in step 1 — `segBMs` — from the first forward's end to
   the second's, absent with one forward a step — and `segCMs`, the medians from step 2 on in
   `median`, and `vaeAssembleMs`. A forward's end is taken when the pipeline reports the transformer's
-  session diagnostics, right after the run settles).
+  session diagnostics, right after the run settles. A finished Wan2.2 row also has `seamInputCheck`:
+  the transformer session's owned input bytes (`planBacking.inputBytes`) next to the seam probe's
+  input total for that request, and whether they agree within 256 B an input — the seams column
+  shows it and turns red when they do not. The top level has `seamProbe[]`, one entry per **切れ目の下見**:
+  `sizes`, `hostMs`, `transfer`, and `estimate`).
 
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
 stops it. On the Intel Arc B570 under Deno, a 50-step clip with the `f16` quant takes about 30
