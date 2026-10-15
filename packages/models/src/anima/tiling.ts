@@ -233,6 +233,18 @@ export const latentTile = (
   return out;
 };
 
+// Third-party code notice. `blendVertical`, `blendHorizontal` and `assembleOwnedTiles` below are
+// adapted from `AutoencoderKLQwenImage.blend_v`, `AutoencoderKLQwenImage.blend_h` and
+// `AutoencoderKLQwenImage.tiled_decode` in huggingface/diffusers
+// (`src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py`, `diffusers==0.39.0`). The blend
+// formulas and the blend order (above, then left) are carried over with each f32 operation written
+// out; `assembleOwnedTiles` replaces the stride crop and the final crop by the region assignment
+// (see the module doc). License: Apache License, Version 2.0
+// (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice, copied verbatim from the
+// header of that file:
+//
+//   Copyright 2025 The Qwen-Image Team, Wan Team and The HuggingFace Team. All rights reserved.
+
 /**
  * 上のタイルとの線形ランプ合成（上流 `blend_v` と同型・**in-place**）。
  *

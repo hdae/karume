@@ -61,6 +61,18 @@ export type DpmSolverMultistepUpdate = {
   readonly x0: Float32Array<ArrayBuffer>;
 };
 
+// Third-party code notice. `dpmSolverMultistepStep` below is adapted from
+// `DPMSolverMultistepScheduler.convert_model_output`, `dpm_solver_first_order_update`,
+// `multistep_dpm_solver_second_order_update` and `step` in huggingface/diffusers
+// (`src/diffusers/schedulers/scheduling_dpmsolver_multistep.py`, `diffusers==0.39.0`), specialized
+// to `algorithm_type="dpmsolver++"`, `solver_order=2`, `solver_type="midpoint"`,
+// `final_sigmas_type="zero"` and `prediction_type="flow_prediction"`, with each f32 operation
+// written out in the upstream order and the CFG combination folded into the same loop. License:
+// Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright
+// notice, copied verbatim from the header of that file:
+//
+//   Copyright 2025 TSAIL Team and The HuggingFace Team. All rights reserved.
+
 /**
  * 1 step ぶんの DPM++ 2M 更新（CFG 合成 → x0 予測 → 1 次 / 2 次の状態更新）。
  *

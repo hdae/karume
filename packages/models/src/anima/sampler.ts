@@ -57,6 +57,21 @@ export const assertAcceptableSteps = (steps: number): void => {
   }
 };
 
+// Third-party code notice. `sigmaSchedule` below is adapted from `AnimaSetTimestepsStep.__call__`
+// (its default `np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)` ladder) in
+// huggingface/diffusers (`src/diffusers/modular_pipelines/anima/before_denoise.py`) and from the
+// static shift path of `FlowMatchEulerDiscreteScheduler.set_timesteps`
+// (`src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py`), both `diffusers==0.39.0`.
+// The ladder, the shift and the terminal zero are carried over with each f32 operation written out;
+// the structural checks on the ladder are added here. License: Apache License, Version 2.0
+// (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notices, copied verbatim from
+// the headers of those files:
+//
+//   src/diffusers/modular_pipelines/anima/before_denoise.py:
+//     Copyright 2026 The HuggingFace Team. All rights reserved.
+//   src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py:
+//     Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved.
+
 /**
  * `FlowMatchEulerDiscreteScheduler.set_timesteps`（静的 shift 経路）の TS 実装。
  * 末尾に終端 0 を 1 つ足すので長さは `steps + 1`。
@@ -126,6 +141,15 @@ export const sigmaSchedule = (steps: number, shift: number): Float32Array<ArrayB
   }
   return sigmas;
 };
+
+// Third-party code notice. `timestepsProj` below is adapted from `get_timestep_embedding` in
+// huggingface/diffusers (`src/diffusers/models/embeddings.py`, `diffusers==0.39.0`), specialized to
+// `flip_sin_to_cos=True`, `downscale_freq_shift=0`, `scale=1` and an even width, with each f32
+// operation written out in the upstream order. License: Apache License, Version 2.0
+// (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice, copied verbatim from the
+// header of that file:
+//
+//   Copyright 2026 The HuggingFace Team. All rights reserved.
 
 /**
  * 1 step ぶんの timestep 埋め込み `[width]`（`Timesteps(2048, flip_sin_to_cos=True,

@@ -13,6 +13,15 @@ const f32 = Math.fround;
 /** 上流 `get_timestep_embedding` の既定 `max_period`。 */
 const MAX_PERIOD = 10000;
 
+// Third-party code notice. `timestepsProj` below is adapted from `get_timestep_embedding` in
+// huggingface/diffusers (`src/diffusers/models/embeddings.py`, `diffusers==0.39.0`), specialized to
+// `flip_sin_to_cos=True`, `downscale_freq_shift=0`, `scale=1` and an even width, with each f32
+// operation written out in the upstream order. License: Apache License, Version 2.0
+// (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice, copied verbatim from the
+// header of that file:
+//
+//   Copyright 2026 The HuggingFace Team. All rights reserved.
+
 /**
  * 1 step ぶんの `timesteps_proj` `[width]`（上流の f32 の演算順を 1 演算ずつ写したもの）。
  *

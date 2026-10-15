@@ -34,6 +34,18 @@
 
 const f32 = Math.fround;
 
+// Third-party code notice. `flowShiftedSigmas`, `wanUniPcSchedule`, `lambdaOf` and
+// `WanUniPcSampler` below are adapted from `UniPCMultistepScheduler.set_timesteps`,
+// `convert_model_output`, `step`, `multistep_uni_p_bh_update` and `multistep_uni_c_bh_update` in
+// huggingface/diffusers (`src/diffusers/schedulers/scheduling_unipc_multistep.py`,
+// `diffusers==0.39.0`). Only the branches the Wan2.1 scheduler config takes are carried over (see
+// the module doc), each f32 operation is written out in the upstream order, and `solve2x2` stands
+// in for `torch.linalg.solve`. License: Apache License, Version 2.0
+// (http://www.apache.org/licenses/LICENSE-2.0). Upstream copyright notice, copied verbatim from the
+// header of that file:
+//
+//   Copyright 2025 TSAIL Team and The HuggingFace Team. All rights reserved.
+
 /** 上流の flow の分岐が σ[0] から引く量（`set_timesteps` の `eps`）。 */
 const SIGMA_EPSILON = 1e-6;
 
