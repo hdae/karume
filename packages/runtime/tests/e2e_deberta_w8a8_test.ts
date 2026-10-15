@@ -129,11 +129,10 @@ const STRICT_OUTPUTS = 2;
  * dump は a8 の標本ではないので入れない。最悪は浅い出力ほど小さい（output.2 0.0099 → output.24 0.1620）ので、
  * 1 つのスカラーで掛けると浅い出力の上限が桁違いに緩む — 表にするのはそのため。
  *
- * 材料と再現: `outputs/diag/deberta-w8a8-2026-10-07/d1-derive/`（git 追跡外）。tools/export-recipes
- * から `HF_HUB_OFFLINE=1 uv run --with 'transformers==5.14.1' python
- * ../../outputs/diag/deberta-w8a8-2026-10-07/d1-derive/derive.py` が `derive.json` の `ceilings` に
- * この表を書く（標本の作り方は ADR 0026 追記の「導き直しの手順」）。故障注入は同じ置き場の
- * `fault_inject.ts`（{@link collapseCeilingOf} と {@link judgeCollapse} をそのまま import する）。
+ * 再現: `tools/export-recipes/deberta/collapse_ceilings.py` の `derive` が作業 dir の `derive.json`
+ * の `ceilings` にこの表を書く（標本の作り方と順序は ADR 0026 追記の「導き直しの手順」）。故障注入は
+ * `tools/diag/deberta-collapse.ts` の `faults`（{@link collapseCeilingOf} と {@link judgeCollapse} を
+ * そのまま import する）。2026-10-07 の材料は `outputs/diag/deberta-w8a8-2026-10-07/`（git 追跡外）。
  *
  * 数値パリティではない: 受け持つのは非有限（{@link judgeCollapse} が両側・全要素を見る）と、出力
  * 全体が golden と別物になる崩壊（全要素 0 = 1.0・符号反転 ≈ 2.0・全要素 × 2 ≈ 1.0・× 1.5 ≈ 0.5）

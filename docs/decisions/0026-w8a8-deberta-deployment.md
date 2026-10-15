@@ -249,18 +249,19 @@ census）は変えない。
 
 ### 導き直しの手順
 
-スクリプトは全て `outputs/diag/deberta-w8a8-2026-10-07/` の下（git 追跡外）。Python は
-`tools/export-recipes` から `HF_HUB_OFFLINE=1 uv run --with 'transformers==5.14.1' python <パス>` で回す。
+台本は `tools/diag/deberta-collapse.ts`（GPU の dump と故障注入）と
+`tools/export-recipes/deberta/collapse_ceilings.py`（CPU の段）。4 段とも 1 つの作業 dir（例
+`outputs/diag/deberta-collapse-<日付>/`）を読み書きする。Python は `tools/export-recipes` から
+`HF_HUB_OFFLINE=1 uv run --with 'transformers==5.14.1' python -m deberta.collapse_ceilings …` で回す。
 
-1. GPU の dump（output.0〜24 を連結した f32・a8 と参考の f32 経路の両方）: `deno run -A
-   …/verify-gpu-localize/dump_gpu.ts case0 case1 case2 padded`。
-2. CPU 鏡像の別標本: `ATEN_CPU_CAPABILITY=<avx512|avx2|default>` を付けて `…/mirror-spread/probe.py dump
-   <isa>_t<スレッド数> <スレッド数>`（スレッド数は 1 と 6）。
-3. 上限の導出: `…/d1-derive/derive.py`。摂動アンサンブル（K = 8）はこの中で回す（埋め込みの出口への乱数の
-   入れ方は `…/gpu-localize/mirror_dump.py` の emb-ulp-noise と同じ）。結果は `derive.json`（`ceilings` が
-   テストの上限の表）。
-4. 故障注入: `deno run -A …/d1-derive/fault_inject.ts`（テストファイルの `judgeCollapse` と
-   `collapseCeilingOf` をそのまま import する）。
+1. GPU の dump（output.0〜24 を連結した f32・a8 と参考の f32 経路の両方）: リポ直下から `deno run -A
+   tools/diag/deberta-collapse.ts dump <作業 dir> case0 case1 case2 padded`。
+2. CPU 鏡像の別標本: `ATEN_CPU_CAPABILITY=<avx512|avx2|default>` を付けて `… mirror <作業 dir>
+   <isa>_t<スレッド数> <スレッド数>`（スレッド数は 1 と 6 — 計 6 本）。
+3. 上限の導出: `… derive <作業 dir>`。摂動アンサンブル（K = 8・埋め込みの出口に相対 ±2^-23 の乱数）は
+   この中で回す。結果は `<作業 dir>/derive.json`（`ceilings` がテストの上限の表）。
+4. 故障注入: `deno run -A tools/diag/deberta-collapse.ts faults <作業 dir>`（テストファイルの
+   `judgeCollapse` と `collapseCeilingOf` をそのまま import する）。結果は `<作業 dir>/fault_inject.json`。
 
 ### 鏡像 golden を採り直さない
 
