@@ -30,9 +30,10 @@
 越境コンポーネント参照（ADR [0038](decisions/0038-manifest-v1.md) §7 追記）は**参照先の
 commit SHA を焼き込む**ので、参照先が先に公開されていないと焼けない。現行の組は 2 つ —
 extra（追加学習系）が公式リポの text stack を参照する組（ADR 0087 — 旧 turbo → anima の向きと
-同型）と、`karume-wan2.1` が `karume-umt5-xxl` の text_encoder を参照する組（ADR
-[0119](decisions/0119-wan-umt5-gpu-text-encoder.md) 追記「段 10d の設計」— 手順は下の「家族の初公開」の
-Wan2.1 の項）。anima の組では:
+同型）と、`karume-wan2.2` が `karume-umt5-xxl` の text_encoder を参照する組（ADR
+[0119](decisions/0119-wan-umt5-gpu-text-encoder.md) 追記「段 10d の設計」・ADR
+[0121](decisions/0121-wan22-ti2v-5b.md) 決定 9 — 手順は下の「家族の初公開」の umT5 と Wan2.2 の項）。
+`karume-wan2.1` も同じ参照を持つが HF には公開しない（利用者裁定 2026-10-15）。anima の組では:
 
 1. **`karume-anima` を先に上げる**（§2 の断片化対策込み・公式 5 変種〈`anima-turbo-v1.1`〈既定〉/
    `anima-v1.0` / `anima-aesthetic-v1.1` / `anima-turbo-v1.0` / `anima-aesthetic-v1.0`〉— ADR 0087）
@@ -63,7 +64,7 @@ Wan2.1 の項）。anima の組では:
 参照先を後から上げ直すと SHA が変わり、extra の manifest は**古い revision を指したまま**に
 なる（バイト列は二重 pin で守られるので誤配は起きないが、2 リポの内容が別世代になる）—
 **参照先を上げ直したら extra も焼き直して上げ直す**（Wan も同じ — `karume-umt5-xxl` を上げ直したら
-`karume-wan2.1` も焼き直して上げ直す）。
+`karume-wan2.2` も焼き直して上げ直す）。
 
 **仮の SHA の門**: 参照先が未公開の間の開発用ミラーは、`--ref-revision` に仮の SHA（40 桁の 0）を
 渡し `--allow-placeholder-ref` を**明示**して焼く（`tools/export-recipes/dist.py` の `PLACEHOLDER_REVISION`
@@ -260,16 +261,23 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       食い違った 2026-08-24 / 08-29 の再発防止）
 - [ ] `deno task verify` → コミット
 
-### 家族の初公開（対応表そのものの新設 — 現行の該当: Wan2.1 = `karume-wan2.1`）
+### 家族の初公開（対応表そのものの新設 — 現行の該当: 0.14.0 の umT5 = `karume-umt5-xxl` と Wan2.2 = `karume-wan2.2`）
 
 公開リポを持たない家族は対応表を持たない（ADR 0073 決定 1 — `vowel-detector` と同じ）。表を
 新設する回は、上の「1 エントリ足す」に加えて、表の網羅を縛る門を同じコミットで揃える（どれかを
-忘れると、その門が落ちるか、表が公開面に出ないまま緑になる）:
+忘れると、その門が落ちるか、表が公開面に出ないまま緑になる）。0.14.0 は 2 家族が同時に初公開になる:
+umT5（TS の入口 `Umt5Encoder` — `@karume/models/umt5`）は `UMT5_SOURCES`、Wan は `WAN_SOURCES` を新設する。
 
-- [ ] **公開前の確認（Wan2.1）**: 50 ステップの通し（`KARUME_WAN_FULL_PIPELINE=1 deno task
-      test:models:wan` — 33 フレームと 81 フレームの 2 本で、B570 で約 30 分 + 約 2 時間 = 合計約 2.5 時間）が
-      緑で、sha256 の行が一致すること（ADR 0118 決定 8 —
-      既定のレーンは 2 ステップだけ）
+Wan2.1（`karume-wan2.1`）は HF に公開しない（利用者裁定 2026-10-15 — ADR
+[0118](decisions/0118-wan21-video-generation.md) 追記（2026-10-15））。コードは残し、配布形は手元で
+`dist.py --pipeline wan` から組む（下の Wan2.2 と同じ `--ref-*` 5 指定 — umT5 の公開前なら §0 の仮の SHA と
+`--allow-placeholder-ref`、公開後はその main の SHA。`--out` は既定の `models/karume-wan2.1`）。`WAN_SOURCES` に
+`"wan2.1"` は足さず、`karume-wan2.1` は上げない。
+
+- [ ] **公開前の確認（Wan2.2）**: 50 ステップの通し（`KARUME_WAN_TI2V_FULL_PIPELINE=1 deno test -A
+      --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_pipeline_test.ts --filter "50 ステップ"` —
+      事前計算の経路・1280×704・33 フレームを参照席と実用席で 1 本ずつ。RTX 3080 Ti で約 35 分）が緑で、
+      sha256 の環境行が一致すること（既定のレーンは 2 ステップだけ）。ミラー `models/karume-wan2.2` が要る
 - [ ] **umT5 の系列は出所を本家へ移したもので組む**（ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)
       決定 1 / 4・追記「段 a の結果」）: `karume-umt5-xxl` の容器は上流に本家 `google/umt5-xxl` の commit を名乗り、系列は
       `outputs/series/umt5-xxl-i8-dyn`。旧系列 `wan2.1-umt5-i8-dyn`（Wan の `text_encoder` を名乗る）から組んだミラーは
@@ -277,27 +285,45 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       `uv run --group wan python -m wan.sources --umt5 xxl --fetch`（約 29.8 GB・HF の既定キャッシュへ — encoder に要る
       shard 1〜3 は表の sha256 と読む前に照合する）。NOTE: 本家の索引（`pytorch_model.bin.index.json`）と
       `config.json` は sha256 で pin していない（backlog の起票）
-- [ ] **umT5 リポを先に上げる（Wan2.1 — §0 の越境参照の順序）**: `tools/export-recipes` で
+- [ ] **umT5 のトークナイザ資産を焼く**（ADR 0122 追記（2026-10-15））: `karume-umt5-xxl` はモデル `xxl` の資産
+      `tokenizer`（形式 `karume-umt5-tokenizer/1`）を持つ。系列の席 `outputs/series/umt5-xxl-tokenizer/tokenizer.json` が
+      無い機では `tools/export-recipes` で `uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer`（pin した
+      トークナイザのファイルが HF キャッシュに無ければ `--fetch`）。同じ実行が git 管理のフィクスチャ
+      `packages/models/tests/fixtures/umt5/tokenizer-cases.json` も書くので、その後に
+      `deno fmt packages/models/tests/fixtures/umt5/` を掛ける。席が無いか形式・出所の pin が合わなければ、次の
+      `dist.py --pipeline umt5` が落ちる（`wan.umt5_distribution.assert_umt5_tokenizer`）
+- [ ] **umT5 リポを先に上げる（§0 の越境参照の順序）**: `tools/export-recipes` で
       `uv run python dist.py --pipeline umt5`（`--out` は既定の `models/karume-umt5-xxl`）→ §2 の台本で
       `tools/release/hf-upload.zsh upload karume-umt5-xxl` → その main の SHA を §3 と同じ取り方で確定する
-- [ ] **その実 SHA で Wan を焼き直す**: `uv run python dist.py --pipeline wan --ref-repo hdae/karume-umt5-xxl
+- [ ] **その実 SHA で Wan2.2 を焼き直す**: `uv run python dist.py --pipeline wan-ti2v --ref-repo hdae/karume-umt5-xxl
       --ref-revision <karume-umt5-xxl の main の SHA> --ref-dist ../../models/karume-umt5-xxl --ref-model xxl
       --ref-role text_encoder`（`--allow-placeholder-ref` は**付けない** — 開発用ミラーの仮の SHA のまま
-      上げない。`--out` は既定の `models/karume-wan2.1`）→ `karume.json` の text_encoder の part が全部
-      その SHA を指していることを確かめてから `tools/release/hf-upload.zsh upload karume-wan2.1`
-- [ ] `packages/models/src/wan/config.ts` に `WAN_SOURCES`（キー `"wan2.1"` → `hdae/karume-wan2.1` +
-      main の SHA — ADR 0118 決定 7 の名前の対応）を足し、`wan.ts` と `mod.ts` から出す
-- [ ] `packages/models/src/sources.ts` の `KARUME_SOURCES` へ畳む
-- [ ] `packages/models/tests/sources_test.ts` の `FAMILIES` に 1 行・家族数とリポ数の名指しを更新
-- [ ] `packages/models/tests/models_barrel_surface_test.ts` の家族表の名指し（`*_SOURCES` の列挙）へ足す
+      上げない。`--out` は既定の `models/karume-wan2.2`）→ `karume.json` の text_encoder の part が全部
+      その SHA を指していることを確かめてから `tools/release/hf-upload.zsh upload karume-wan2.2`
+- [ ] 表を足す（キーはリポ名の basename から `karume-` を落としたもの・値は `repo` + main の SHA）:
+      `packages/models/src/umt5/config.ts` に `UMT5_SOURCES`（キー `"umt5-xxl"` → `hdae/karume-umt5-xxl`）を足して
+      `umt5.ts` と `mod.ts` から出し、`packages/models/src/wan/config.ts` に `WAN_SOURCES`（キー `"wan2.2"` →
+      `hdae/karume-wan2.2` — `WanTi2vPipeline` が読む）を足して `wan.ts` と `mod.ts` から出す。NOTE: TS の
+      `UMT5_SOURCES` は公開配布リポの対応表で、recipe の `wan.sources.UMT5_SOURCES`（本家の上流の pin の表）とは別物
+- [ ] `packages/models/src/sources.ts` の `KARUME_SOURCES` へ 2 表とも畳む
+- [ ] `packages/models/tests/sources_test.ts` の `FAMILIES` に 2 行（`load` は `Umt5Encoder.fromPretrained` と
+      `WanTi2vPipeline.fromPretrained`）・家族数とリポ数の名指し（7 家族・10 本 → 9 家族・12 本）を更新
+- [ ] `packages/models/tests/models_barrel_surface_test.ts` の家族表の名指し（`*_SOURCES` の列挙）へ 2 表とも足す
 - [ ] `tools/export-recipes/tests/test_dist_driver.py` の `RELEASE_REPOSITORIES` へ
-      `("wan", ["t2v-1.3b"], None, "karume-wan2.1")` を足す（TS 側の表と同じリポ集合を要求する門）
-- [ ] `WanPipeline.fromPretrained` の ref 省略時の案内（`toManifestSource` の第 3 引数）に
-      `WAN_SOURCES["wan2.1"]（@karume/models/wan）` を渡し、doc の「pin 定数も無い」を改める
-- [ ] `packages/runtime/tests/distribution_gate_test.ts` の `DISTRIBUTIONS` の注記を「公開済み」へ
-      移す（ミラーそのものは公開前から門番に載っている）
-- [ ] 公開面のスナップショット（`KARUME_SURFACE=write`）を書き直し、差分が `WAN_SOURCES` の 1 行
-      ずつ（barrel と `./wan`）であることを確かめる
+      `("umt5", ["xxl"], None, "karume-umt5-xxl")` と `("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2")` を足す
+      （TS 側の表と同じリポ集合を要求する門 — `packages/models/src/*/config.ts` の `repo: "hdae/…",` の行を読む）
+- [ ] ref 省略時の案内（`toManifestSource` の第 3 引数）を渡す: `Umt5Encoder.fromPretrained`
+      （`packages/models/src/umt5/encoder.ts`）に `UMT5_SOURCES["umt5-xxl"]（@karume/models/umt5）`、
+      `WanTi2vPipeline.fromPretrained` に `WAN_SOURCES["wan2.2"]（@karume/models/wan）`。Wan の呼び出しは
+      `packages/models/src/wan/family.ts` の `loadWanFromPretrained` 1 本を `WanPipeline`（2.1）と共有するので、
+      2.1 には案内を出さない形にする（表に 2.1 のキーは無い）
+- [ ] 「表はまだ無い」「未公開で pin 定数も無い」と書いた doc を改める（`rg -n 'UMT5_SOURCES|WAN_SOURCES|未公開|not
+      published' packages/models examples/wan` で拾う）。Wan2.1 の未公開の記述は残す
+- [ ] `packages/runtime/tests/distribution_gate_test.ts` の `DISTRIBUTIONS` の注記で `karume-umt5-xxl` と
+      `karume-wan2.2` を「公開済み」へ移す（ミラーそのものは公開前から門番に載っている。`karume-wan2.1` は
+      未公開のまま e2e が根にするので名簿に残す）
+- [ ] 公開面のスナップショット（`KARUME_SURFACE=write`）を書き直し、差分が `UMT5_SOURCES` と `WAN_SOURCES` の
+      1 行ずつ（barrel と `./umt5` / `./wan`）であることを確かめる
 
 ## 4. JSR publish
 

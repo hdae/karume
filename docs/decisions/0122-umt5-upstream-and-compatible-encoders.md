@@ -602,3 +602,38 @@
 - 本家との出力の差（平均絶対差 28.6〜73.0）は、text encoder が別の重みであることの現れで、劣化ではない。追加学習が対象にした種類の指示への
   反応が違う程度、というのが利用者の見立て（その種類のプロンプトでの比較はしていない）。
 - 残る未解決は、第三者の互換部品の公開の裁定と、版を跨いだグラフ記述の一致の 2 つ。
+
+## 追記（2026-10-15）: umT5 を Wan に依らず単体で使える形にする（決定 3 / 8 の「umT5 のリポに資産を足さない」を改める）
+
+- **利用者裁定（2026-10-15）**: 「umT5 は Wan に関わらず使えるようにしたい」— 0.14.0（`karume-umt5-xxl` の初公開）に入れる。同じ日の
+  裁定で Wan2.1（`karume-wan2.1`）は HF に公開しない（配布形は手元で `dist.py` から組む）ので、umT5 のリポを使う公開の配布は
+  `karume-wan2.2` だけになる。
+- **決定 3 / 8 の改め**: `karume-umt5-xxl` はモデル `xxl` の資産 `tokenizer`（形式 `karume-umt5-tokenizer/1`）を持つ。中身は Wan の
+  資産（`karume-wan-umt5-tokenizer/1`）の T5 の表の部分だけ（語彙・スコア・追加語彙・空白集合・最大長 512）で、Wan の前処理の表は
+  持たない。出所は本家 `google/umt5-xxl` の pin した commit の `tokenizer.json` と `tokenizer_config.json`（両方の sha256 を
+  `wan.sources.UMT5_SOURCES` に pin し、読む前に照合する）。表を作る関数は Wan の資産と共有する（`wan/umt5_tokenizer.py` の
+  `t5_table_fields`）— 書き手は `wan/umt5_xxl_tokenizer.py`・系列の席は `outputs/series/umt5-xxl-tokenizer/tokenizer.json`。
+  Wan2.2 は自分の資産（前処理の表込み）を持ち続け、そのバイトは変わらない。
+- **本家のトークナイザの実測**: 本家の backend は Wan の `tokenizer/` と同じ形で、正規化は要らない（違いはスコアの末尾 1 ulp の
+  表記だけ）。受理する入力の id 列は Wan の資産と一致する（fixture 50 本・Wan のパリティの 218 本・掃引 4,563 本で不一致 0・
+  transformers 5.14.1 と `tokenizer.json` の両経路）。決定 3 が「本家から焼くとスコアの桁で資産のバイトが変わる」と書いた差は、
+  この末尾の表記の差。
+- **受理集合（前処理なしで使う形）**: 拒否の規則は Wan と同じ（本文中の追加語彙・空白の直後の `▁`・語彙外の文字・512 トークン超・
+  2 トークン未満 — ADR 0119 決定 1・4）に、**U+0020 以外の空白と末尾の U+0020** を足す。前処理が無いと、この 2 つの形で
+  transformers 5.14.1 と `tokenizer.json` の id 列が割れる（`"a\tb"` は `[289, 748, 1]` と `[289, 3, 485, 1]`・`"a "` は `[289, 1]` と
+  `[289, 273, 1]`）ので、決定 1 の「どの版の参照とも同じ id 列」を守るため拒む。trim や空白の畳み込みは足さない（足すと第 2 の
+  前処理になる — 直し方は文言が言う）。Wan の経路では前処理が空白を U+0020 1 個へ畳んで両端を落とすので、この拒否は起きない。
+- **TS の入口**: サブパス `@karume/models/umt5`（barrel にも出す）の `Umt5Encoder` — `fromPretrained(ref)` / `fromAssets` /
+  `tokenize(text)` / `encode(text, { signal }) → { inputIds, hiddenStates: [L, 4096] f32 行優先, length, hiddenSize }` /
+  `dispose`。Session は構築から `dispose` まで常駐する（重みは i8 で約 5.3 GiB — 1 回ごとに張ると重みを毎回上げ直す。Wan の
+  text 段は段ごとに張って畳むまま）。pipeline `umt5-encoder/1` はこれで読み手を持つ: admission はトークナイザ資産の宣言を
+  重みの part を取る前に見る。トークナイザを持たない取り込み由来の手元の実験用ミラー（決定 5）は、今どおり Wan の部品差し替え
+  席でだけ使える。
+- **共有の 1 本**: umT5 のホストのコード（バケット表・Session の入出力・グラフの取り決めの門・トークナイザの受理集合）は
+  `packages/models/src/umt5/` に移し、Wan はそれを呼ぶ（Wan のトークナイザ = 前処理 → `Umt5Tokenizer`）。2 本持つと拒否の
+  規則が片方だけ古びる。
+- **取得元の pin**: `UMT5_SOURCES`（キー `umt5-xxl`）は HF への公開の回に足す（ADR 0073 決定 1 — 公開前は `fromPretrained` の
+  `ref` が必須）。手順は release-runbook の「家族の初公開」。
+- **検証**: GPU の e2e（`e2e_umt5_encoder_test.ts`）は Wan の umT5 の移植の門と同じ golden・同じ帯で 10 本とも帯の内・`tokenize` の
+  id 列が golden と一致（RTX 3080 Ti・2026-10-15）。トークナイザのパリティ（`umt5_tokenizer_test.ts` — recipe の fixture と
+  突き合わせ・空白の規則を外す故障注入で 17 本が赤）。

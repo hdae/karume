@@ -1030,3 +1030,10 @@ S = 14,040（832×480・33 フレーム）の DiT 1 forward を f64 参照（活
   短いケースで作る）。
 - **未実走**: Chrome での GPU 経路（umT5 を GPU で — ADR 0119）と実用席（ADR 0120）。gpu-lab の Wan タブの既定の経路は
   `precomputed` のまま（backlog）。
+
+## 追記（2026-10-15）: Wan2.1 は HF に公開しない
+
+- **利用者裁定（2026-10-15）**: 0.14.0 の Wan 家族の初公開は `karume-umt5-xxl` と `karume-wan2.2`（ADR 0121）だけで、`karume-wan2.1` は
+  上げない（利用者 2026-10-10「2.2 が上位互換なので 2.1 は上げないこともできる」）。決定 7 のリポ名は手元の配布形の名前として残り、`WanPipeline`
+  のコードもパッケージに残る（取得元を明示すれば `fromPretrained` で使える — `WAN_SOURCES` に `wan2.1` のキーは無い）。配布形は
+  `dist.py --pipeline wan` で手元に組む。

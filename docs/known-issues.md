@@ -362,7 +362,7 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
 （Wan なら text 段の Session の構築）で落ちる**（推測・実例はまだ無い）。`fromPretrained` の `components` で部品を差し替えると、
 差し替え先の quant 席の `session` / `gpuFeatures` / `requiredLimits` は使われず、**元の manifest の席の値で事前判定する**ので、
 重みを取る前の判定（`requiredLimits` の照合）を通ってしまう。構築は Session を 1 本も張らず
-（`packages/models/src/wan/family.ts:489`）、text 段は generate ごとに Session を張る（`encodeWanPrompts` の中 — `packages/models/src/wan/text-stage.ts:453`）ので、落ちるのは構築の後に
+（`packages/models/src/wan/family.ts:489`）、text 段は generate ごとに Session を張る（`encodeWanPrompts` の中 — `packages/models/src/wan/text-stage.ts:371`）ので、落ちるのは構築の後に
 なる。ADR [0108](decisions/0108-container-format.md) 決定 19 が admission に求める「quant 席と実行設定の整合」の検査が
 無い状態で、by-design ではない。
 
@@ -370,8 +370,8 @@ S = 32,760 の計測モードで **1 submit の GPU 時間の最大 1,268.6 ms**
   の戻りから `containers[key]` だけを使う）。Wan の家族の門は元の manifest の席を引き（`packages/models/src/wan/family.ts:404-411`）、
   その `requiredLimits` で取得前の判定をする（同 `:317-321`）。
 - 今の影響: recipe の書き手（`umt5_export` — `--intake` を含む）は語彙埋め込みを i8 で書くので、recipe で作った互換の
-  umT5 への差し替えでは起きない（グラフ記述が同じならバッファの大きさも同じ）。ただし `umt5Contract`
-  （`packages/models/src/wan/text-stage.ts:220-242`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを
+  umT5 への差し替えでは起きない（グラフ記述が同じならバッファの大きさも同じ）。ただし `umt5Contract` の共有の門
+  （`umt5GraphContract` — `packages/models/src/umt5/graph-contract.ts:128-150`）が求めるのは「格納は i8 か f32 で、i8 が 1 本以上」までなので、語彙埋め込みを
   f32 で持つ部品（埋め込みのバッファが約 4 倍）は門を通り、この形で落ちうる。
 - 直し方の候補（裁定が要る）: 差し替え先の席の `requiredLimits` / `gpuFeatures` を元の席と合わせて判定する（大きい方を取る）か、
   席が食い違う差し替えを admission で拒む。

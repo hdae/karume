@@ -220,9 +220,18 @@ measurements in `docs/research/`.
   f16 score storage). `f16` stays the default; `WanPipeline` accepts `linearCompute`,
   `attentionCompute` and `attentionScoreStorage` from the quant declaration. The GPU numerics gates
   and the visual check for these quants land with ADR 0120 stages 3–6.
-- `karume-umt5-xxl` (ADR 0119): a distribution of the umT5-XXL text encoder alone (`dist.py --pipeline umt5`,
-  pipeline `umt5-encoder/1`, quant `i8`, 26 parts). `karume-wan2.1` references its `text_encoder` across
-  repositories and ships the tokenizer asset `umt5_tokenizer`.
+- `karume-umt5-xxl` (ADR 0119 / 0122): a distribution of the umT5-XXL text encoder alone (`dist.py --pipeline umt5`,
+  pipeline `umt5-encoder/1`, quant `i8`, 26 parts) with the tokenizer of `google/umt5-xxl` as the asset
+  `tokenizer` (format `karume-umt5-tokenizer/1`, no prompt cleaning). The Wan distributions reference its
+  `text_encoder` across repositories and ship their own tokenizer asset `umt5_tokenizer` with Wan's prompt
+  cleaning.
+- `@karume/models/umt5` (ADR 0122): `Umt5Encoder` runs the umT5-XXL encoder on its own —
+  `Umt5Encoder.fromPretrained(ref)` / `fromAssets`, `tokenize(text)`, and `encode(text, { signal })`, which
+  returns the token ids and the last hidden states `[L, 4096]` (f32, row-major). The session stays
+  resident until `dispose()`. The text is tokenized as is: out-of-vocabulary characters, in-text special
+  tokens, `▁` right after a space, whitespace other than U+0020, a trailing space, more than 512 tokens and
+  an empty text are rejected with `ModelInputError` (on those inputs `transformers` and `tokenizer.json`
+  disagree, or the graph cannot take them).
 - `WanPipelineOptions.textEncoder: "gpu" | "precomputed"` (default `"gpu"`): the GPU route runs umT5 and
   accepts any prompt (2–512 tokens; out-of-vocabulary characters, in-text special tokens, HTML entity
   candidates, mojibake, C1 controls and unassigned code points are rejected with a message that says how
