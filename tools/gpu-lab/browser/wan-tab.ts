@@ -1049,6 +1049,10 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const timeline = summarizeWanTimeline(marks);
       const seams = summarizeWanSeams(marks);
       const transformerDiagnostics = diagnostics.get("transformer");
+      if (loaded.generation.id === "wan2.2" && transformerDiagnostics === undefined) {
+        // 完走したのに DiT の診断が無いのはパイプラインの取り決めの破れ — 照合を黙って省かない
+        throw Error("transformer の run の診断が来なかった（入力の照合ができない）");
+      }
       const seamInputCheck = loaded.generation.id === "wan2.2" &&
           transformerDiagnostics !== undefined
         ? checkWanSeamInputBytes(
@@ -1119,6 +1123,9 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     const size = resolveWanFormSize(ui.size.value, state.image?.size);
     const frames = Number(ui.frames.value);
     status(`切れ目の下見を測定中（${frames} フレーム · ${wanSizeLabel(size)}）`);
+    // ホストのベンチは同期で主スレッドを止めるので、先に状態行を描かせる
+    // （次の描画のコールバックの後のタスクまで待つ — setTimeout だけでは描画の前に戻りうる）
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
     const probe = await probeWanSeams(loaded.gpu.device, { frames, ...size });
     state.seamProbes.push(probe);
     status(`切れ目の下見 — ${formatWanSeamProbe(probe)}`);

@@ -602,6 +602,11 @@ export const wanEventMark = (event: WanGenerateEvent, ms: number): WanTimelineMa
       return { kind: "step", step: event.step, ms };
     case "vae-tile":
       return { kind: "tile", tile: event.tile, ms };
+    default: {
+      // 新しいイベントの種類は印を黙って欠かさず、型検査で落とす。
+      const unknown: never = event;
+      throw Error(`未知の生成イベント ${JSON.stringify(unknown)}`);
+    }
   }
 };
 

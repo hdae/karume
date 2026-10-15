@@ -365,7 +365,9 @@ image-to-video rows, the condition image.
   same bytes as its output (a copy into a mappable buffer and `mapAsync`), each as the median of 10
   runs after 2 warm-ups. The status line shows the result and the estimate of one guided step's
   seams: the host work plus two uploads and two readbacks. These are plain WebGPU calls of the same
-  sizes, not the runtime's own run path. The shared code is `browser/wan-seam-probe.ts`; the Deno
+  sizes, not the runtime's own run path, and their bias has no fixed direction: the upload includes
+  a fence the runtime's run does not wait on, and the runtime's own binding and planning costs are
+  not included. The shared code is `browser/wan-seam-probe.ts`; the Deno
   twin is `tools/wan-seams/main.ts`.
 - **条件画像（Wan2.2 の I2V）, fit, 画像を外す** (condition image, fit, remove image) — Wan2.2 only; with
   Wan2.1 they are disabled (its pipeline refuses an image), and switching to Wan2.1 removes the image.

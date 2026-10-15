@@ -23,8 +23,8 @@
  *
  * フラグ: `--source`（既定 models/karume-wan2.2）`--quant`（既定 = 配布形の defaultQuant）`--frames`（既定 33,121 —
  * カンマ区切り）`--resolution`（既定 1280x704）`--steps`（既定 5 — step 1 は Session の構築を含むので、区間の中央値は
- * step 2 以降）`--seed`（既定 42）`--prompt`（既定 boxing-cats = タブの既定 — 埋め込み資産の名前ならその原文、
- * それ以外はそのまま渡す）`--out`（既定 outputs/bench/karume-wan2.2/<今日のローカル日付>_h37-seams）。未知のフラグは
+ * step 2 以降）`--seed`（既定 42）`--prompt`（既定 boxing-cats = タブの既定 — 埋め込み資産の名前で、その原文を渡す。
+ * 名前に無ければ落とす）`--out`（既定 outputs/bench/karume-wan2.2/<今日のローカル日付>_h37-seams）。未知のフラグは
  * 落とす。
  *
  * 書くもの: `<out>/wan-seams-<quant>-<WxH>-<日時>.json`（形式 `karume-wan-seams/1`）。
@@ -228,6 +228,9 @@ const main = async (): Promise<void> => {
   for (const frames of frameCounts) wanSeamSizes({ frames, ...size });
   const outDir = flags.out ?? `outputs/bench/karume-wan2.2/${localDate()}_h37-seams`;
   const source = await openSource(sourceRoot, manifest);
+  // 記録の材料は GPU を取る前に読む（finally の中で読むと、その失敗が生成の失敗を上書きする）。
+  const checkout = await readCheckout();
+  const manifestSha256 = await sha256Hex(manifestBytes);
 
   let deviceLost: { readonly reason: string; readonly message: string } | null = null;
   const gpu = await acquireGpu({
@@ -268,8 +271,15 @@ const main = async (): Promise<void> => {
       } s`,
     );
     try {
-      const prompt = pipeline.prompts.find((candidate) => candidate.name === promptArg)?.prompt ??
-        promptArg;
+      const prompt = pipeline.prompts.find((candidate) => candidate.name === promptArg)?.prompt;
+      if (prompt === undefined) {
+        // 綴り違いの名前を文字どおりのプロンプトとして回すと、記録の名前と符号化した文が食い違う
+        throw new Error(
+          `--prompt ${promptArg} が埋め込み資産の名前に無い（${
+            pipeline.prompts.map((candidate) => candidate.name).join(" / ")
+          }）`,
+        );
+      }
       const encoder = new TextEncoder();
       for (const frames of frameCounts) {
         console.log(`[wan-seams] ${frames}f の下見を測定中`);
@@ -374,11 +384,10 @@ const main = async (): Promise<void> => {
           description: info.description,
         },
       },
-      ...await readCheckout().then(
-        ({ revision, dirty }) => ({ checkout: revision, checkoutDirty: dirty }),
-      ),
+      checkout: checkout.revision,
+      checkoutDirty: checkout.dirty,
       source: sourceRoot.slice(sourceRoot.lastIndexOf("/") + 1),
-      manifestSha256: await sha256Hex(manifestBytes),
+      manifestSha256,
       defaultModel: manifest.defaultModel,
       quant,
       textEncoder: "gpu",

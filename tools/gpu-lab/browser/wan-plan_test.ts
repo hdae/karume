@@ -591,6 +591,36 @@ describe("wan seams", () => {
       "1 番目",
     );
   });
+
+  it("refuses a VAE stage that ends without a tile", () => {
+    assertThrows(
+      () =>
+        summarizeWanSeams([
+          { kind: "stage", component: "vae_decoder", at: "start", ms: 0 },
+          { kind: "stage", component: "vae_decoder", at: "end", ms: 1 },
+        ]),
+      Error,
+      "タイルの印が無い",
+    );
+  });
+
+  it("refuses a tile outside the VAE stage", () => {
+    assertThrows(
+      () => summarizeWanSeams([transformer("start", 0), { kind: "tile", tile: 1, ms: 1 }]),
+      Error,
+      "段 vae_decoder の外",
+    );
+  });
+
+  it("drops the runs of a transformer stage left open by a failed generate", () => {
+    const seams = summarizeWanSeams([
+      transformer("start", 0),
+      run(10),
+      step(1, 12),
+      run(20),
+    ]);
+    assertEquals(seams.steps, [{ step: 1, segAMs: 10, segCMs: 2 }]);
+  });
 });
 
 describe("wan event marks", () => {
@@ -614,6 +644,19 @@ describe("wan event marks", () => {
       tile: 3,
       ms: 2,
     });
+  });
+
+  it("marks a denoise step by its number", () => {
+    assertEquals(
+      wanEventMark({
+        kind: "denoise-step",
+        step: 2,
+        steps: 5,
+        timestep: 900,
+        copyLatents: () => ({ data: new Float32Array(0), shape: [] }),
+      }, 3),
+      { kind: "step", step: 2, ms: 3 },
+    );
   });
 });
 

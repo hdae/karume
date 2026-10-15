@@ -9,7 +9,8 @@
  * - **ホストの処理**（{@link benchWanHostSeams}）: 製品のホストの関数（`packages/models/src/wan/`）を実寸の配列で回す。
  * - **転送**（{@link benchWanTransfer}）: 渡された device で writeBuffer → 空の submit → `onSubmittedWorkDone`（上げ）と
  *   copyBufferToBuffer → MAP_READ の mapAsync → `getMappedRange().slice(0)`（読み戻し）。runtime の run の経路そのもの
- *   ではなく、同じ本数・バイト数の素の WebGPU の操作（runtime の上げと読み戻しの下限の目安）。
+ *   ではなく、同じ本数・バイト数の素の WebGPU の操作による目安で、偏りの向きは決まっていない — 上げは runtime の run が
+ *   待たないフェンス（空の submit の完了待ち）を含み、runtime の側の束縛や計画の費用は含まない。
  * - **見積もり**（{@link estimateWanSeamStep}）と **照合**（{@link checkWanSeamInputBytes}）。
  *
  * NOTE: ホストと転送のベンチは時間と GPU に依存するのでテストしない（寸法と照合と見積もりの算式だけを縛る）。
