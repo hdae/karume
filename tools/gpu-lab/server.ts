@@ -19,7 +19,7 @@
  * 黙ってそのタブ・その経路無しの起動にしない）。
  */
 import { containedPath, fileResponse } from "../llm-speed/browser/server.ts";
-import { readCheckout } from "../shared/checkout.ts";
+import { readCheckout } from "../_shared/checkout.ts";
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_SOURCE = "models/karume-anima";

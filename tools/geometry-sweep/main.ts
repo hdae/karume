@@ -46,7 +46,7 @@ import {
 } from "../../packages/runtime/src/tune/geometries.ts";
 import { ROUNDS } from "../../packages/runtime/src/tune/measurement.ts";
 import { DEFAULT_DRIFT_RANGE, driftOutOfRange } from "../../packages/runtime/src/tune/report.ts";
-import { readCheckout } from "../shared/checkout.ts";
+import { readCheckout } from "../_shared/checkout.ts";
 import { runProfileCommand } from "./profile.ts";
 
 type Flags = {

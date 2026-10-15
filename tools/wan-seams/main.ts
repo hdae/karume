@@ -38,7 +38,7 @@ import {
 import { denoDirectory } from "../../packages/hub/deno.ts";
 import { type WanRunComponent, WanTi2vPipeline } from "../../packages/models/wan.ts";
 import { runMain } from "../../examples/shared/run-main.ts";
-import { readCheckout } from "../shared/checkout.ts";
+import { readCheckout } from "../_shared/checkout.ts";
 import {
   medianOf,
   parseWanSize,

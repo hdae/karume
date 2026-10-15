@@ -31,7 +31,7 @@ import {
   parseResolution,
 } from "../../packages/models/anima.ts";
 import { encodePng } from "../../packages/models/mod.ts";
-import { readCheckout } from "../shared/checkout.ts";
+import { readCheckout } from "../_shared/checkout.ts";
 import {
   createGenerateRecorder,
   DEFAULT_PROMPT,
