@@ -22,6 +22,7 @@ import {
   toSessionOptions,
 } from "../src/session/options.ts";
 import { SIGLIP2_SESSION_POLICY } from "../src/siglip2/pipeline.ts";
+import { UMT5_ENCODER_SESSION_POLICY } from "../src/umt5/encoder.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 
@@ -300,7 +301,7 @@ describe("assertSessionOverrides", () => {
 });
 
 describe("家族の受理表", () => {
-  it("9 家族の表が SessionSpec の全キーを持つ（型の網羅の実行時の対）", () => {
+  it("10 家族の表が SessionSpec の全キーを持つ（型の網羅の実行時の対）", () => {
     // 表の型は `Required<SessionSpec>` の網羅なのでキーが増えれば型検査で落ちる。ここは型を
     // 緩めた改変（`Partial` 化など）が型検査を通ってしまう場合の対。
     const policies = {
@@ -311,6 +312,7 @@ describe("家族の受理表", () => {
       irodori: IRODORI_SESSION_POLICY,
       sbv2: SBV2_SESSION_POLICY,
       siglip2: SIGLIP2_SESSION_POLICY,
+      "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
       "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
       wan: WAN_SESSION_POLICY,
     };

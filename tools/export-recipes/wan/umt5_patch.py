@@ -31,7 +31,7 @@ exporter は `gelu_new` の `pow(x, 3.0)` を拾えない（`aten.pow.Tensor_Sca
 
 {@link relative_position_buckets} は上流の `UMT5Attention._relative_position_bucket` をそのまま呼ぶ
 （式を写さない）。表の向きは上流の `compute_bias` と同じ `table[i][j] = bucket(j − i)`（キーの位置 −
-クエリの位置）。TS の生成器（`packages/models/src/wan/umt5/relative-position.ts`）はこの表と
+クエリの位置）。TS の生成器（`packages/models/src/umt5/relative-position.ts`）はこの表と
 バイト一致する（fixture は {@link wan.umt5_host_fixture}）。
 
 ## 量子化の対象（決定 5）
@@ -58,7 +58,7 @@ from torch.nn import functional
 from karume.quantize import QUANT_MODULE_TYPES, Int8Report, fake_quant_int8, iter_quant_targets
 from wan.umt5_tokenizer import MAX_LENGTH, MIN_TOKENS
 
-#: グラフ入力の名前（並びは forward の引数の順 — TS の `src/wan/umt5/session-io.ts` と同じ綴り）。
+#: グラフ入力の名前（並びは forward の引数の順 — TS の `src/umt5/session-io.ts` と同じ綴り）。
 INPUT_NAMES = ("input_ids", "relative_position_buckets")
 
 #: 有効長の記号次元の名前（決定 4 — 1 シンボル）。

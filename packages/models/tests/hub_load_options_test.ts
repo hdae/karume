@@ -1,4 +1,4 @@
-// 8 家族の `fromPretrained` が hub へ透過するオプション（`src/hub/load-options.ts`）の門。
+// 9 家族の `fromPretrained` が hub へ透過するオプション（`src/hub/load-options.ts`）の門。
 // **GPU も実網も要らない**。
 //
 // 0.11.0 の hub が `onRetry`（429 / 503 の再試行通知）を足したとき、8 家族の
@@ -9,9 +9,9 @@
 //  ② 未定義の欄は**キーごと**現れないこと — `key: undefined` は「無指定」と別物として
 //     取得層の分岐に効きうる（明示 `undefined` の `fetch` が既定 `globalThis.fetch` を潰す等）。
 //  ③ `onProgress` は写さないこと（進捗は家族側が `loadContainerComponents` へ別途載せる）。
-//  ④ 型の門 — 8 家族**全て**が `onRetry` を受けること（欠けたら `deno task check` が赤くなる）。
+//  ④ 型の門 — 9 家族**全て**が `onRetry` を受けること（欠けたら `deno task check` が赤くなる）。
 // 最後に、公開面から見た対として「anima の `fromPretrained` が `onRetry` を `loadManifest` まで
-// 運ぶ」ことを mock fetch の 429 で見る（1 家族で足りる — 運ぶ経路は 8 家族とも同じ 1 本）。
+// 運ぶ」ことを mock fetch の 429 で見る（1 家族で足りる — 運ぶ経路は 9 家族とも同じ 1 本）。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import type { AssetProgress, CacheDiagnostic, RetryDiagnostic } from "@karume/hub";
@@ -24,6 +24,7 @@ import type { Gemma4FromPretrainedOptions } from "../src/gemma/pipeline.ts";
 import type { IrodoriFromPretrainedOptions } from "../src/irodori/pipeline.ts";
 import type { Sbv2FromPretrainedOptions } from "../src/sbv2/pipeline.ts";
 import type { Siglip2FromPretrainedOptions } from "../src/siglip2/pipeline.ts";
+import type { Umt5EncoderFromPretrainedOptions } from "../src/umt5/encoder.ts";
 import type { VowelDetectorFromPretrainedOptions } from "../src/vowel-detector/pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
@@ -77,7 +78,7 @@ Deno.test("hubLoadOptions: onProgress は写さない（進捗は家族側が別
   assertEquals(Object.keys(hubOptions), ["onRetry"]);
 });
 
-Deno.test("型の門: 8 家族の fromPretrained オプションが onRetry を受ける", () => {
+Deno.test("型の門: 9 家族の fromPretrained オプションが onRetry を受ける", () => {
   // `satisfies` が本体（`deno task check` が門）。1 家族でも共有型から外れると赤くなる。
   const perFamily = [
     { onRetry: noopRetry } satisfies AnimaFromPretrainedOptions,
@@ -87,10 +88,11 @@ Deno.test("型の門: 8 家族の fromPretrained オプションが onRetry を�
     { onRetry: noopRetry } satisfies IrodoriFromPretrainedOptions,
     { onRetry: noopRetry } satisfies Sbv2FromPretrainedOptions,
     { onRetry: noopRetry } satisfies Siglip2FromPretrainedOptions,
+    { onRetry: noopRetry } satisfies Umt5EncoderFromPretrainedOptions,
     { onRetry: noopRetry } satisfies VowelDetectorFromPretrainedOptions,
   ];
-  assertEquals(perFamily.length, 8, "家族が 8 つ並んでいない");
-  // 写しの入口（`hubLoadOptions`）が 8 家族の型を**そのまま**受けることも同じ 1 本で見る。
+  assertEquals(perFamily.length, 9, "家族が 9 つ並んでいない");
+  // 写しの入口（`hubLoadOptions`）が 9 家族の型を**そのまま**受けることも同じ 1 本で見る。
   for (const options of perFamily) assertStrictEquals(hubLoadOptions(options).onRetry, noopRetry);
 });
 

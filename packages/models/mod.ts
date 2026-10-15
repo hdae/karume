@@ -1,7 +1,7 @@
 /**
  * `@karume/models` — パイプライン群の barrel。ファミリ別サブパス（`./anima` / `./birefnet` /
  * `./depth-anything` / `./gemma` / `./gemma4-qat` / `./irodori` / `./sbv2` / `./siglip2` /
- * `./vowel-detector` / `./wan`）と両建て（ADR 0037）。
+ * `./umt5` / `./vowel-detector` / `./wan`）と両建て（ADR 0037）。
  *
  * ADR 0008 の流儀で**薄い面**にする — ここに並ぶのは「パイプラインを組んで生成する」「出た
  * 画像を書き出す」という利用者ストーリーだけで、内部モジュールの素通し再輸出はしない。
@@ -299,6 +299,19 @@ export type {
 export type { WanPrompt, WanPromptRole } from "./src/wan/text-embeds.ts";
 /** 動画の 1 フレーム → RGBA 8bit（`./wan` を参照 — uint8 化の規則の正本）。 */
 export { wanFrameToRgba } from "./src/wan/frames.ts";
+
+/**
+ * umT5-XXL のテキスト → encoder の最終隠れ状態（`./umt5` を参照 — 配布形 `karume-umt5-xxl`・Session は構築から
+ * `dispose` まで常駐。入力の規則は Wan のトークナイザと同じ 1 本で、Wan の前処理だけを持たない）。
+ */
+export { Umt5Encoder } from "./src/umt5/encoder.ts";
+export type {
+  Umt5EncodeOptions,
+  Umt5EncoderAssets,
+  Umt5EncoderFromPretrainedOptions,
+  Umt5EncoderOptions,
+  Umt5Encoding,
+} from "./src/umt5/encoder.ts";
 
 /**
  * 全ファミリの取得元対応表を 1 つに畳んだ表（家族ごとの `*_SOURCES` と**同じキー・同じ値** —

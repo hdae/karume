@@ -459,6 +459,30 @@
         "kind": "class"
       },
       {
+        "name": "Umt5EncodeOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5Encoder",
+        "kind": "class"
+      },
+      {
+        "name": "Umt5EncoderAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5EncoderFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5EncoderOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5Encoding",
+        "kind": "typeAlias"
+      },
+      {
         "name": "VowelDetectorAssets",
         "kind": "typeAlias"
       },
@@ -1248,6 +1272,36 @@
       },
       {
         "name": "Siglip2PipelineOptions",
+        "kind": "typeAlias"
+      }
+    ],
+    "./umt5": [
+      {
+        "name": "ModelInputError",
+        "kind": "class"
+      },
+      {
+        "name": "Umt5EncodeOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5Encoder",
+        "kind": "class"
+      },
+      {
+        "name": "Umt5EncoderAssets",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5EncoderFromPretrainedOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5EncoderOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "Umt5Encoding",
         "kind": "typeAlias"
       }
     ],

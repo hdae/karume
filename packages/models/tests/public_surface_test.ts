@@ -5,16 +5,16 @@
 //
 // - 名指しの門（あちら）= **意図の宣言**。「`Gemma4Pipeline` は出す」「`createGemma4Ple` は
 //   出さない」を人が書く。書いていない綴りの増減は素通りする。
-// - この門 = **増減の検出**。何が正しいかは言わず、barrel（`.`）と 10 サブパスそれぞれについて
+// - この門 = **増減の検出**。何が正しいかは言わず、barrel（`.`）と 11 サブパスそれぞれについて
 //   前回との差だけを見る。型 export も採るので、`Object.keys` では観測できない
 //   `export type` の再輸出もここで縛れる（あちらの冒頭 NOTE の穴）。
 //
-// 両建て（ADR 0037）の面が 10 もあるので、1 面だけが痩せた・太った形は目視では拾えない。
+// 両建て（ADR 0037）の面が 11 もあるので、1 面だけが痩せた・太った形は目視では拾えない。
 //
 // 門の実体は runtime 側に 1 本だけ置く（`container-files.ts` 等と同じパッケージ跨ぎ相対 import）。
 
 import { assertPublicSurface } from "../../runtime/tests/helpers/public-surface.ts";
 
-Deno.test("公開面: models の exports（barrel + 10 サブパス）がスナップショットと一致する", async () => {
+Deno.test("公開面: models の exports（barrel + 11 サブパス）がスナップショットと一致する", async () => {
   await assertPublicSurface(new URL("../", import.meta.url));
 });

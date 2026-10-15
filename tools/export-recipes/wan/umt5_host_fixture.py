@@ -1,5 +1,5 @@
 """Wan2.1 の umT5 の相対位置のバケット表について、TS の生成器
-（`packages/models/src/wan/umt5/relative-position.ts`）と突き合わせる fixture を書く
+（`packages/models/src/umt5/relative-position.ts`）と突き合わせる fixture を書く
 （ADR 0119 決定 3・段 10c）。
 
     uv run --group wan --inexact python -m wan.umt5_host_fixture
@@ -115,7 +115,7 @@ def build_fixture(
     meta = {
         "_doc": [
             "Wan2.1 の umT5 の相対位置のバケット表"
-            "（packages/models/src/wan/umt5/relative-position.ts）の突き合わせ用 fixture。",
+            "（packages/models/src/umt5/relative-position.ts）の突き合わせ用 fixture。",
             "生成: tools/export-recipes/wan/umt5_host_fixture.py（期待値は上流の"
             " UMT5Attention._relative_position_bucket の出力 — 同ファイルの doc）。",
             "表の向きは上流の compute_bias と同じ table[i][j] = bucket(j − i)"

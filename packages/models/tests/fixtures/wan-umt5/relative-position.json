@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "Wan2.1 の umT5 の相対位置のバケット表（packages/models/src/wan/umt5/relative-position.ts）の突き合わせ用 fixture。",
+    "Wan2.1 の umT5 の相対位置のバケット表（packages/models/src/umt5/relative-position.ts）の突き合わせ用 fixture。",
     "生成: tools/export-recipes/wan/umt5_host_fixture.py（期待値は上流の UMT5Attention._relative_position_bucket の出力 — 同ファイルの doc）。",
     "表の向きは上流の compute_bias と同じ table[i][j] = bucket(j − i)（キーの位置 − クエリの位置）。",
     "digest は有効長ごとの表（i32 LE・行優先）の SHA-256 を昇順に連ねたものの SHA-256。"

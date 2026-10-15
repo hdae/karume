@@ -105,7 +105,7 @@ from wan.umt5_tokenizer import FIXED_PROMPT_LENGTHS, FIXTURE_DIR, MAX_LENGTH, PA
 REFERENCE_PREFIX = "reference."
 CASE_SUFFIX = ".safetensors"
 
-#: golden のキー（入力はグラフ入力と同じ名前 — TS 側 `e2e_wan_umt5_test.ts` と同じ綴り）。
+#: golden のキー（入力はグラフ入力と同じ名前 — TS 側 `tests/helpers/umt5-golden.ts` と同じ綴り）。
 INPUT_IDS_KEY, BUCKETS_KEY = umt5_patch.INPUT_NAMES
 OUTPUT_F64_KEY = "output.f64"
 OUTPUT_F32_KEY = "output.f32"

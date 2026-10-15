@@ -1,4 +1,4 @@
-// umT5 の相対位置のバケット表について、ホストの TS 生成器（src/wan/umt5/relative-position.ts）と
+// umT5 の相対位置のバケット表について、ホストの TS 生成器（src/umt5/relative-position.ts）と
 // Python 側の正本（recipe `wan/umt5_patch.py` — 上流 `_relative_position_bucket` を呼ぶ）の
 // **バイト一致**を固定する（ADR 0119 決定 3 — sbv2_rel_pos_parity_test.ts と同じ責務）。
 //
@@ -17,10 +17,10 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import {
   buildUmt5RelativePositionBuckets,
-  WAN_UMT5_MAX_LENGTH,
-  WAN_UMT5_RELATIVE_POSITION,
-} from "../src/wan/umt5/relative-position.ts";
-import { WAN_PROMPT_MIN_TOKENS } from "../src/wan/text/tokenizer.ts";
+  UMT5_MAX_LENGTH,
+  UMT5_MIN_TOKENS,
+  UMT5_RELATIVE_POSITION,
+} from "../src/umt5/relative-position.ts";
 
 const FIXTURE_DIR = new URL("./fixtures/wan-umt5/", import.meta.url);
 
@@ -79,11 +79,11 @@ const hex = (bytes: ArrayBuffer): string =>
 Deno.test("umT5 のバケットの構成と有効長の範囲が fixture（pin した config）と一致", () => {
   assertEquals(
     {
-      numBuckets: WAN_UMT5_RELATIVE_POSITION.numBuckets,
-      maxDistance: WAN_UMT5_RELATIVE_POSITION.maxDistance,
+      numBuckets: UMT5_RELATIVE_POSITION.numBuckets,
+      maxDistance: UMT5_RELATIVE_POSITION.maxDistance,
       bidirectional: true,
-      minLength: WAN_PROMPT_MIN_TOKENS,
-      maxLength: WAN_UMT5_MAX_LENGTH,
+      minLength: UMT5_MIN_TOKENS,
+      maxLength: UMT5_MAX_LENGTH,
     },
     {
       numBuckets: meta.num_buckets,
@@ -97,14 +97,14 @@ Deno.test("umT5 のバケットの構成と有効長の範囲が fixture（pin �
 
 Deno.test("umT5 の距離 −511〜511 のバケットが上流の式と一致", () => {
   // 上限の表の 0 行目は距離 0〜511、0 列目は距離 0〜−511（table[i][j] = bucket(j − i)）。
-  const table = buildUmt5RelativePositionBuckets(WAN_UMT5_MAX_LENGTH).data;
+  const table = buildUmt5RelativePositionBuckets(UMT5_MAX_LENGTH).data;
   const expected = fixtureInt32("bucket_by_distance");
-  assertEquals(expected.shape, [2 * WAN_UMT5_MAX_LENGTH - 1]);
+  assertEquals(expected.shape, [2 * UMT5_MAX_LENGTH - 1]);
   const actual = new Int32Array(expected.data.length);
-  for (let distance = meta.distance_offset; distance < WAN_UMT5_MAX_LENGTH; distance += 1) {
+  for (let distance = meta.distance_offset; distance < UMT5_MAX_LENGTH; distance += 1) {
     actual[distance - meta.distance_offset] = distance >= 0
       ? table[distance]
-      : table[-distance * WAN_UMT5_MAX_LENGTH];
+      : table[-distance * UMT5_MAX_LENGTH];
   }
   assertSameElements(
     actual,
@@ -132,18 +132,18 @@ Deno.test("umT5 のバケット表: 有効長 2〜512 の全表の digest が Py
   // digest は表の i32 リトルエンディアンのバイト列で定義される（fixture の doc）。Int32Array の
   // 中身はエンジンのバイト順なので、ビッグエンディアンの機では比べる前に止める。
   assertEquals(new Uint8Array(new Uint32Array([1]).buffer)[0], 1, "リトルエンディアンの機ではない");
-  assertEquals([meta.min_length, meta.max_length], [WAN_PROMPT_MIN_TOKENS, WAN_UMT5_MAX_LENGTH]);
-  const chained = new Uint8Array(32 * (WAN_UMT5_MAX_LENGTH - WAN_PROMPT_MIN_TOKENS + 1));
-  for (let length = WAN_PROMPT_MIN_TOKENS; length <= WAN_UMT5_MAX_LENGTH; length += 1) {
+  assertEquals([meta.min_length, meta.max_length], [UMT5_MIN_TOKENS, UMT5_MAX_LENGTH]);
+  const chained = new Uint8Array(32 * (UMT5_MAX_LENGTH - UMT5_MIN_TOKENS + 1));
+  for (let length = UMT5_MIN_TOKENS; length <= UMT5_MAX_LENGTH; length += 1) {
     const { data } = buildUmt5RelativePositionBuckets(length);
     const digest = await crypto.subtle.digest("SHA-256", data);
-    chained.set(new Uint8Array(digest), 32 * (length - WAN_PROMPT_MIN_TOKENS));
+    chained.set(new Uint8Array(digest), 32 * (length - UMT5_MIN_TOKENS));
   }
   assertEquals(hex(await crypto.subtle.digest("SHA-256", chained)), meta.digest);
 });
 
 Deno.test("buildUmt5RelativePositionBuckets: 有効長の受理集合（グラフの記号次元と同じ 2〜512）", () => {
-  for (const length of [0, 1, WAN_UMT5_MAX_LENGTH + 1, 2.5, Number.NaN]) {
+  for (const length of [0, 1, UMT5_MAX_LENGTH + 1, 2.5, Number.NaN]) {
     assertThrows(
       () => buildUmt5RelativePositionBuckets(length),
       RangeError,

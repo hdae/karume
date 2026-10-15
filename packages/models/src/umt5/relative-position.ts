@@ -1,5 +1,5 @@
 /**
- * Wan2.1 の umT5 の相対位置のバケット表をホストで作る（ADR 0119 決定 3）。
+ * umT5-XXL の相対位置のバケット表をホストで作る（ADR 0119 決定 3）。
  *
  * T5 系の attention は位置の差（キーの位置 − クエリの位置）を 32 個のバケットに落とし、層ごとの表
  * `[32, heads]` から引いた値をスコアに足す。表 `[L, L]` は有効長 L だけで決まるが、L はグラフの
@@ -12,18 +12,17 @@
  * transformers 5.14.1 の `UMT5Attention._relative_position_bucket` をそのまま呼ぶ）。式が割れても
  * shape は合うので、モデルは落ちずに別の距離のバイアスを黙って足す（沈黙誤値）。golden の表も
  * Python が作るので、ホストとゴールデンが同じ誤りを共有すると E2E もすり抜ける。
- * `packages/models/tests/wan_umt5_relative_position_test.ts` が fixture（`fixtures/wan-umt5/`）と
+ * `packages/models/tests/umt5_relative_position_test.ts` が fixture（`fixtures/wan-umt5/`）と
  * 有効長 2〜512 の全表をバイト一致で縛る（sbv2 の `sbv2_rel_pos_parity_test.ts` と同じ責務）。
  *
  * 上流は torch の f32 の `log` で、ここは f64 の `Math.log`。境界（距離 8・12・16・23・32・46・64・91）
  * で切り捨てが割れないことは実測命題（調査 2026-10-03-umt5-encoder-recon §4.3 — 距離 ±511 の全件で
- * 一致）なので、構成（{@link WAN_UMT5_RELATIVE_POSITION}）や上限を変えるときは測り直す。
+ * 一致）なので、構成（{@link UMT5_RELATIVE_POSITION}）や上限を変えるときは測り直す。
  *
  * MUST: モジュール副作用ゼロ（CLAUDE.md）。
  */
 
 import type { Tensor } from "@karume/runtime";
-import { WAN_PROMPT_MIN_TOKENS } from "../text/tokenizer.ts";
 
 /** i32 のテンソル（バケット表の型 — Session の入力にそのまま渡せる）。 */
 export type I32Tensor = Extract<Tensor, { readonly dtype: "i32" }>;
@@ -32,21 +31,28 @@ export type I32Tensor = Extract<Tensor, { readonly dtype: "i32" }>;
  * バケットの構成（umT5-XXL の `text_encoder/config.json` — 双方向〈エンコーダ〉の枝だけ）。
  *
  * 構成の宣言の席は持たない: Python と突き合わせたのはこの 1 組だけで、宣言できるようにすると
- * 検証していない組み合わせを配布側が選べてしまう（`scheduler.ts` の `WAN_UNIPC_CONFIG` と同じ判断）。
+ * 検証していない組み合わせを配布側が選べてしまう（`src/wan/scheduler.ts` の `WAN_UNIPC_CONFIG` と同じ判断）。
  * 値が pin した config と一致することは recipe の pytest（`test_umt5_host_fixture.py`）と
  * fixture のテストが縛る。
  */
-export const WAN_UMT5_RELATIVE_POSITION = { numBuckets: 32, maxDistance: 128 } as const;
+export const UMT5_RELATIVE_POSITION = { numBuckets: 32, maxDistance: 128 } as const;
+
+/**
+ * 有効長の下限（グラフの記号次元の下限 — `torch.export` の 0 / 1 特殊化を避けた 2・ADR 0119 決定 4。
+ * anima の `PROMPT_MIN_TOKENS` と同じ理由）。トークナイザの受理集合の下限もこの値（`</s>` だけの
+ * 長さ 1 を拒む — `./tokenizer.ts`）。
+ */
+export const UMT5_MIN_TOKENS = 2;
 
 /**
  * 有効長の上限（グラフの記号次元の上限・上流の `max_sequence_length` — 決定 4）。Python の表との
  * 一致を確かめたのもここまで（距離 ±511）。
  */
-export const WAN_UMT5_MAX_LENGTH = 512;
+export const UMT5_MAX_LENGTH = 512;
 
 /** 距離 `distance`（キーの位置 − クエリの位置）のバケット（上流の式の双方向の枝）。 */
 const bucketOf = (distance: number): number => {
-  const { numBuckets, maxDistance } = WAN_UMT5_RELATIVE_POSITION;
+  const { numBuckets, maxDistance } = UMT5_RELATIVE_POSITION;
   // 双方向: 半分ずつを向きに割り当てる（正の距離 = キーがクエリより後ろ — 後半の 16〜31）。
   const half = numBuckets / 2;
   const base = distance > 0 ? half : 0;
@@ -70,9 +76,9 @@ const bucketOf = (distance: number): number => {
  * （L = 512 でもバケットの計算は 1,023 回）。
  */
 export const buildUmt5RelativePositionBuckets = (length: number): I32Tensor => {
-  if (!Number.isInteger(length) || length < WAN_PROMPT_MIN_TOKENS || length > WAN_UMT5_MAX_LENGTH) {
+  if (!Number.isInteger(length) || length < UMT5_MIN_TOKENS || length > UMT5_MAX_LENGTH) {
     throw new RangeError(
-      `umT5 の有効長 ${length} が ${WAN_PROMPT_MIN_TOKENS}〜${WAN_UMT5_MAX_LENGTH} の整数でない`,
+      `umT5 の有効長 ${length} が ${UMT5_MIN_TOKENS}〜${UMT5_MAX_LENGTH} の整数でない`,
     );
   }
   // 対角 d = j − i ∈ [−(L−1), L−1] の値（添字は d + L − 1）。
