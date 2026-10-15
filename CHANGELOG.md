@@ -277,7 +277,7 @@ measurements in `docs/research/`.
   the transformer forwards). Each row of the gpu-lab Wan tab gains `seams` (per-step spans split at
   each forward's end, their medians from step 2 on, and the VAE tile-assembly time) and, for
   Wan2.2, `seamInputCheck` (the transformer's owned input bytes against the expected total); a new
-  **切れ目の下見** (seam probe) button measures one step's host work on full-size arrays and an
+  Wan2.2-only **切れ目の下見** (seam probe) button measures one step's host work on full-size arrays and an
   upload and readback of the same bytes as one forward, kept in the top-level `seamProbe[]`. The
   JSON is now `karume-wan-browser/6`. `tools/wan-seams/main.ts` is the Deno twin: it runs the probe
   and a text-to-video generate per frame count and writes `karume-wan-seams/1`.
