@@ -327,7 +327,7 @@ switch next to it lists the quants of the distribution this server serves; its f
 resolves to the manifest's `defaultQuant` at load (`f16+dit8-a8-attn8-s16` for both generations — Wan2.1
 since 2026-10-04, ADR 0120; Wan2.2 since 2026-10-06, ADR 0121), and the resolved name is passed to the
 pipeline and recorded. The saved JSON is
-`karume-wan-browser/5` and carries the generation (`wan2.1` / `wan2.2`), the route, the quant, and, for
+`karume-wan-browser/6` and carries the generation (`wan2.1` / `wan2.2`), the route, the quant, and, for
 image-to-video rows, the condition image.
 
 - **取得元** (source) — blank reads the distribution this server serves for the chosen generation
@@ -370,7 +370,11 @@ image-to-video rows, the condition image.
 - Each generate adds a row: the resolved request, the wall time, each stage's time
   (`vae_encoder` with an image, `text_encoder` with the `gpu` route, `transformer`, `vae_decoder`), the step times and the VAE tile times (the first one includes
   building that stage's sessions, i.e. uploading the weights; then the median and maximum of the
-  rest — a step is two transformer forwards with CFG), the session diagnostics of each component
+  rest — a step is two transformer forwards with CFG), the seams (`切れ目` — the host-side spans
+  between the transformer forwards, perf-ledger H-37: `segC` is the median, from step 2 on, of the
+  time from the step's last forward to the step's end — unpatchify, CFG, UniPC, and the finiteness
+  check, host only — and `VAE 貼り合わせ` is the time from the last VAE tile to the end of the VAE stage —
+  assembling the tiles, disposing of the stage, and finishing the frames), the session diagnostics of each component
   (weights and slot backing allocated, geometry profile, submit count, `窓平均の最大` = the largest
   window mean, a host-inclusive signal that bounds no single submit, and the count of chunks over
   the time budget), the SHA-256 of the RGB bytes (every frame's 8-bit RGB from `wanFrameToRgba`,
@@ -389,9 +393,14 @@ image-to-video rows, the condition image.
   lock, so it does not overlap a generate or a measurement on another tab. To make a video file, feed
   the frames to a tool of your choice, for example
   `ffmpeg -framerate 24 -i frame-%04d.png -c:v libx264 -pix_fmt yuv420p clip.mp4` (use the clip's fps).
-- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/5`; the generation is in
+- **JSON を保存** downloads `wan-browser-<timestamp>.json` (`karume-wan-browser/6`; the generation is in
   each `loads[]` entry, in each row, and next to the loaded source; an image-to-video row has `image`:
-  `file`, `width`, `height`, `fit`, and `sizeFromImage`, without the pixels).
+  `file`, `width`, `height`, `fit`, and `sizeFromImage`, without the pixels; each row has `seams`:
+  `runsPerStep`, `steps[]` with `segAMs` — from the stage start or the previous step to the first
+  forward's end, including the session build in step 1 — `segBMs` — from the first forward's end to
+  the second's, absent with one forward a step — and `segCMs`, the medians from step 2 on in
+  `median`, and `vaeAssembleMs`. A forward's end is taken when the pipeline reports the transformer's
+  session diagnostics, right after the run settles).
 
 There is no way to stop a generate from the page (the pipeline has no `signal` yet); closing the tab
 stops it. On the Intel Arc B570 under Deno, a 50-step clip with the `f16` quant takes about 30
@@ -676,10 +685,10 @@ claimed here.
     twin never injects, so its files lack it.
 - **Profile** — the `GeometryProfile` value (`id`, `match`, `gemmRows`, `attention`, `conv2d`,
   `i8a8`, `provenance`), with `1e999` for the last `maxRows`.
-- **Wan** — `karume-wan-browser/5`, as described in [4. Wan](#4-wan): the adapter, the environment
+- **Wan** — `karume-wan-browser/6`, as described in [4. Wan](#4-wan): the adapter, the environment
   key, the adapter and device limits, the loaded source / generation / quant / route, `loads[]`,
   `deviceLost`, and `rows[]` (each with the generation, the resolved request, the condition image of an
-  image-to-video row, the wall time, the stage / step / tile times, the session diagnostics, the RGB
+  image-to-video row, the wall time, the stage / step / tile times, the seams, the session diagnostics, the RGB
   SHA-256, the reference verdict, and the error).
 
 ## What to confirm

@@ -14,6 +14,8 @@
  * - **要求の組み立て**（{@link buildWanRequest}）: フォームの文字列 → `generate` の要求と、既定を埋めた
  *   解決済みの値（参照ケースの照合と記録に使う）。
  * - **所要の集計**（{@link summarizeWanTimeline}）: 生成イベントの時刻 → 段・step・VAE タイルごとの時間。
+ * - **切れ目の集計**（{@link summarizeWanSeams} — perf-ledger H-37）: 同じ時刻列と DiT の run の印 → step の中の
+ *   区間（run の前・run の間・run の後のホストの処理）と VAE の貼り合わせ。
  * - **sha256 の実物**（{@link wanRgbBytes}）と参照ケースの照合（{@link wanReferenceCaseId} /
  *   {@link checkWanReference}）。
  * - **保存の名前**（{@link wanFramesZipName} / {@link wanFrameFileNames}）: 連番 PNG の zip とその中のフレームの名前。
@@ -22,7 +24,12 @@ import type { SessionDiagnostics } from "../../../packages/runtime/mod.ts";
 import { REQUIRED_LIMIT_KEYS } from "../../../packages/runtime/src/gpu/acquire.ts";
 import { MAX_SINGLE_CONTAINER_BYTES } from "../../../packages/runtime/src/format/container/limits.ts";
 import { planRowBlocks } from "../../../packages/runtime/src/runtime/fusion.ts";
-import type { WanGenerateRequest, WanPrompt } from "../../../packages/models/wan.ts";
+import type {
+  WanGenerateEvent,
+  WanGenerateRequest,
+  WanPrompt,
+  WanRunComponent,
+} from "../../../packages/models/wan.ts";
 import type { WanPipelineConfig } from "../../../packages/models/src/wan/config.ts";
 import {
   WAN21_GENERATION,
@@ -565,7 +572,11 @@ export const buildWanRequest = (
  */
 export type WanTimelineStage = "vae_encoder" | "transformer" | "vae_decoder";
 
-/** 生成イベントの時刻（`performance.now()` の ms）。 */
+/**
+ * 生成イベントの時刻（`performance.now()` の ms）。`run` は DiT の forward 1 回の完了（`onRunDiagnostics` の
+ * `transformer` の callback の先頭で採る — `session.run` が settle し、`session.diagnostics()` を作った直後・
+ * unpatchify の前）。VAE の run は印にしない（タイルの印と同じ時点なので区間を足さない）。
+ */
 export type WanTimelineMark =
   | {
     readonly kind: "stage";
@@ -574,7 +585,29 @@ export type WanTimelineMark =
     readonly ms: number;
   }
   | { readonly kind: "step"; readonly step: number; readonly ms: number }
-  | { readonly kind: "tile"; readonly tile: number; readonly ms: number };
+  | { readonly kind: "tile"; readonly tile: number; readonly ms: number }
+  | { readonly kind: "run"; readonly component: "transformer"; readonly ms: number };
+
+/**
+ * 生成イベント → 印（`text_encoder` の段は印にしない — 呼び手が別に採る）。タブと Deno の CLI
+ * （`tools/wan-seams/main.ts`）が同じ印を採るための 1 本。
+ */
+export const wanEventMark = (event: WanGenerateEvent, ms: number): WanTimelineMark | undefined => {
+  switch (event.kind) {
+    case "stage":
+      return event.component === "text_encoder"
+        ? undefined
+        : { kind: "stage", component: event.component, at: event.at, ms };
+    case "denoise-step":
+      return { kind: "step", step: event.step, ms };
+    case "vae-tile":
+      return { kind: "tile", tile: event.tile, ms };
+  }
+};
+
+/** `onRunDiagnostics` の 1 回 → 印（DiT の run だけ — {@link WanTimelineMark} の doc）。 */
+export const wanRunMark = (component: WanRunComponent, ms: number): WanTimelineMark | undefined =>
+  component === "transformer" ? { kind: "run", component, ms } : undefined;
 
 /**
  * 段・step・タイルごとの所要（ms）。`stepMs[0]` は DiT の段の開始から 1 step 目の完了まで（Session の
@@ -589,7 +622,8 @@ export type WanTimeline = {
 
 /**
  * イベントの時刻列 → {@link WanTimeline}。並びがパイプラインの取り決め（段の start → step / tile が
- * 1 から順に → 段の end）から外れたら落とす — 黙って時間を別の区間へ帰属させない。
+ * 1 から順に → 段の end）から外れたら落とす — 黙って時間を別の区間へ帰属させない。`run` の印は見ない
+ * （{@link summarizeWanSeams} の材料）。
  */
 export const summarizeWanTimeline = (marks: readonly WanTimelineMark[]): WanTimeline => {
   const stageMs: Partial<Record<WanTimelineStage, number>> = {};
@@ -598,6 +632,7 @@ export const summarizeWanTimeline = (marks: readonly WanTimelineMark[]): WanTime
   let open: { readonly component: WanTimelineStage; readonly ms: number } | undefined;
   let last = 0;
   for (const mark of marks) {
+    if (mark.kind === "run") continue;
     if (mark.kind === "stage") {
       if (mark.at === "start") {
         if (open !== undefined) {
@@ -626,6 +661,143 @@ export const summarizeWanTimeline = (marks: readonly WanTimelineMark[]): WanTime
     last = mark.ms;
   }
   return { stageMs, stepMs, tileMs };
+};
+
+/** 中央値（偶数個なら中央 2 つの平均）。空なら落とす。 */
+export const medianOf = (values: readonly number[]): number => {
+  if (values.length === 0) throw RangeError("空の列の中央値");
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+/**
+ * DiT の step 1 本の中の区間（ms — perf-ledger H-37 の「パスの切れ目」）。基準は DiT の段の開始（step 1）か前の
+ * step の完了。run の印の時点は {@link WanTimelineMark} の doc。
+ */
+export type WanSeamStep = {
+  readonly step: number;
+  /**
+   * 基準 → 1 本目の run の完了: I2V の先頭フレームの置き換え・patchify・1 本目の run（CFG なら uncond — 入力の上げ・
+   * GPU の実行・出力の読み戻しを含む）。step 1 は Session の構築（重みの転送）も含む。
+   */
+  readonly segAMs: number;
+  /** 1 本目 → 2 本目の run の完了: unpatchify + cond の run。run が 1 本（negative 無し）の step には無い。 */
+  readonly segBMs?: number;
+  /** 最後の run の完了 → step の完了: unpatchify + CFG + UniPC + 有限性の検査（ホストだけ）。 */
+  readonly segCMs: number;
+};
+
+/** step 2 以降の区間の中央値（step 1 は Session の構築を含むので外す）。 */
+export type WanSeamMedians = {
+  readonly segAMs: number;
+  readonly segBMs?: number;
+  readonly segCMs: number;
+};
+
+export type WanSeams = {
+  /** step 1 本あたりの DiT の run の本数（CFG なら 2・negative 無しなら 1 — step が無ければ無い）。 */
+  readonly runsPerStep?: 1 | 2;
+  readonly steps: readonly WanSeamStep[];
+  /** step が 2 本以上のときだけ。 */
+  readonly median?: WanSeamMedians;
+  /**
+   * VAE の最後のタイルの印 → VAE の段の end: タイルの貼り合わせ（ホスト）+ Session と cache の破棄 + フレームの
+   * 仕上げ（unpatchify・有限性・クランプ）。段が閉じていなければ無い。
+   */
+  readonly vaeAssembleMs?: number;
+};
+
+/**
+ * イベントと run の印の時刻列 → {@link WanSeams}。各 step の run の本数は 1 か 2 で、全 step で揃う
+ * こと。run の印が DiT の段の外に来た・step の印の無いまま段が閉じた・本数が揃わない・step / タイルが段の外に
+ * 来た、のどれも落とす（黙って区間を別の step へ帰属させない — {@link summarizeWanTimeline} と同じ姿勢）。
+ * 末尾の閉じていない段（失敗した生成）の途中の run の印は捨てる（区間を作らない）。
+ */
+export const summarizeWanSeams = (marks: readonly WanTimelineMark[]): WanSeams => {
+  const steps: WanSeamStep[] = [];
+  let runsPerStep: 1 | 2 | undefined;
+  let open: WanTimelineStage | undefined;
+  let base = 0;
+  let runs: number[] = [];
+  let lastTile: number | undefined;
+  let vaeAssembleMs: number | undefined;
+  for (const mark of marks) {
+    switch (mark.kind) {
+      case "stage":
+        if (mark.at === "start") {
+          if (open !== undefined) {
+            throw Error(`段 ${open} が閉じる前に ${mark.component} が始まった`);
+          }
+          open = mark.component;
+          base = mark.ms;
+          continue;
+        }
+        if (open !== mark.component) throw Error(`開いていない段 ${mark.component} の end`);
+        if (mark.component === "transformer" && runs.length > 0) {
+          throw Error(`DiT の run の印 ${runs.length} 本が step の印の無いまま段の end に来た`);
+        }
+        if (mark.component === "vae_decoder") {
+          if (lastTile === undefined) throw Error("vae_decoder の段の end の前にタイルの印が無い");
+          vaeAssembleMs = mark.ms - lastTile;
+        }
+        open = undefined;
+        continue;
+      case "run":
+        if (open !== "transformer") {
+          throw Error(`DiT の run の印が段 transformer の外（${open ?? "段の外"}）に来た`);
+        }
+        runs.push(mark.ms);
+        continue;
+      case "step": {
+        if (open !== "transformer" || mark.step !== steps.length + 1) {
+          throw Error(
+            `step ${mark.step} が段 transformer の ${steps.length + 1} 番目として来ていない`,
+          );
+        }
+        const [first, second] = runs;
+        if (first === undefined || runs.length > 2) {
+          throw Error(`step ${mark.step} の DiT の run の印が ${runs.length} 本（1 か 2）`);
+        }
+        const count = second === undefined ? 1 : 2;
+        if (runsPerStep !== undefined && runsPerStep !== count) {
+          throw Error(
+            `step ${mark.step} の DiT の run が ${count} 本で、前の step の ${runsPerStep} 本と揃わない`,
+          );
+        }
+        runsPerStep = count;
+        steps.push({
+          step: mark.step,
+          segAMs: first - base,
+          ...(second === undefined ? {} : { segBMs: second - first }),
+          segCMs: mark.ms - (second ?? first),
+        });
+        base = mark.ms;
+        runs = [];
+        continue;
+      }
+      case "tile":
+        if (open !== "vae_decoder") {
+          throw Error(`tile ${mark.tile} が段 vae_decoder の外（${open ?? "段の外"}）に来た`);
+        }
+        lastTile = mark.ms;
+        continue;
+    }
+  }
+  const rest = steps.slice(1);
+  const segB = rest.flatMap(({ segBMs }) => segBMs === undefined ? [] : [segBMs]);
+  return {
+    ...(runsPerStep === undefined ? {} : { runsPerStep }),
+    steps,
+    ...(rest.length === 0 ? {} : {
+      median: {
+        segAMs: medianOf(rest.map(({ segAMs }) => segAMs)),
+        ...(segB.length === 0 ? {} : { segBMs: medianOf(segB) }),
+        segCMs: medianOf(rest.map(({ segCMs }) => segCMs)),
+      },
+    }),
+    ...(vaeAssembleMs === undefined ? {} : { vaeAssembleMs }),
+  };
 };
 
 /** 環境キーの基底から落とす商標の飾り（`Intel(R) Graphics` → `intel graphics`）。 */

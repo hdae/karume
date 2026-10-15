@@ -107,10 +107,12 @@ import {
   referenceVerdictText,
   resolveWanFormSize,
   summarizeWanDiagnostics,
+  summarizeWanSeams,
   summarizeWanTimeline,
   WAN_LAB_GENERATIONS,
   WAN_SIZE_FROM_IMAGE,
   type WanComponentDiagnostics,
+  wanEventMark,
   wanFrameChoices,
   wanFrameFileNames,
   wanFramesZipName,
@@ -123,6 +125,8 @@ import {
   type WanReferenceVerdict,
   type WanResolvedRequest,
   wanRgbBytes,
+  wanRunMark,
+  type WanSeams,
   type WanSize,
   wanSizeLabel,
   type WanTimeline,
@@ -133,9 +137,10 @@ import { type ZipEntry, zipStored } from "./zip.ts";
 /**
  * 書き出す JSON の版（/2 = 読み込みと行がテキストエンコーダの経路を持つ・/3 = 読み込みと行が quant の席を持つ・
  * /4 = 読み込み〈`loads[]` と読み込み中の配布形の欄〉と行が世代 `generation`〈`wan2.1` / `wan2.2`〉を持つ・
- * /5 = I2V の行が条件画像 `image` を持ち、段の所要 `timeline.stageMs` に `vae_encoder` が入りうる）。
+ * /5 = I2V の行が条件画像 `image` を持ち、段の所要 `timeline.stageMs` に `vae_encoder` が入りうる・
+ * /6 = 行が DiT の step の中の区間と VAE の貼り合わせ `seams`〈`summarizeWanSeams` — perf-ledger H-37〉を持つ）。
  */
-const WAN_REPORT_FORMAT = "karume-wan-browser/5";
+const WAN_REPORT_FORMAT = "karume-wan-browser/6";
 
 /** テキストエンコーダの経路（`WanPipelineOptions.textEncoder`）。 */
 type WanTextEncoder = NonNullable<WanPipelineOptions["textEncoder"]>;
@@ -278,6 +283,8 @@ type WanRow = {
   readonly caseId?: string;
   readonly wallMs: number;
   readonly timeline?: WanTimeline;
+  /** step の中の区間と VAE の貼り合わせ（`timeline` と同じ扱い — 集計に失敗した失敗の行では無い）。 */
+  readonly seams?: WanSeams;
   readonly diagnostics: Partial<Record<WanRunComponent, WanComponentDiagnostics>>;
   readonly rgbSha256?: string;
   readonly reference?: WanReferenceVerdict;
@@ -412,6 +419,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     deviceLost?: { readonly reason: string; readonly message: string };
     /** 進行中の generate の診断（component → 直近の run）。 */
     diagnostics?: Map<WanRunComponent, SessionDiagnostics>;
+    /** 進行中の generate の印（`onRunDiagnostics` が DiT の run の印を足す — {@link diagnostics} と同じ寿命）。 */
+    marks?: WanTimelineMark[];
     rows: WanRow[];
     /**
      * 最新の動画（`fps` は生成した動画の値 — 世代の記述子の出力のフレームレート・`seed` は要求の値 — 連番 PNG の
@@ -733,9 +742,13 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         // MUST: 席も解決した名前で明示する（参照ケースの id と回した席を 1 つの値から決める）。
         quant,
         onRunDiagnostics: (component, diagnostics) => {
-          if (state.diagnostics === undefined) {
+          // 時刻は先頭で採る（DiT の run の完了の印 — 下の検査や記録の時間を区間へ入れない）。
+          const ms = performance.now();
+          if (state.diagnostics === undefined || state.marks === undefined) {
             throw Error(`${component} の run が generate の外で終わった`);
           }
+          const mark = wanRunMark(component, ms);
+          if (mark !== undefined) state.marks.push(mark);
           state.diagnostics.set(component, diagnostics);
         },
         onProgress: (progress) => {
@@ -844,6 +857,12 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       request.negative === undefined ? "" : ` · negative ${request.negative}`
     }`;
 
+  /** 切れ目の列（step 2 以降の segC の中央値と VAE の貼り合わせ — 区間の意味は `WanSeamStep` の doc）。 */
+  const formatSeams = (seams: WanSeams): string =>
+    `segC 中央値 ${seams.median?.segCMs.toFixed(1) ?? "—"} ms（step 2 以降 · run ${
+      seams.runsPerStep ?? "—"
+    } 本 / step）\nVAE 貼り合わせ ${seams.vaeAssembleMs?.toFixed(1) ?? "—"} ms`;
+
   const appendRow = (row: WanRow): void => {
     const tr = document.createElement("tr");
     const timeline = row.timeline;
@@ -862,6 +881,7 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       ).join("\n"),
       timeline === undefined ? "—" : formatSpans(timeline.stepMs),
       timeline === undefined ? "—" : formatSpans(timeline.tileMs),
+      row.seams === undefined ? "—" : formatSeams(row.seams),
       Object.entries(row.diagnostics).map(([component, summary]) =>
         formatWanDiagnostics(component, summary)
       ).join("\n"),
@@ -873,8 +893,8 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       const td = document.createElement("td");
       td.textContent = value;
       if (at >= 1) td.className = "wrap";
-      if (at === 8 && row.reference?.kind === "mismatch") td.className = "wrap bad";
-      if (at === 9 && value !== "") td.className = "wrap error";
+      if (at === 9 && row.reference?.kind === "mismatch") td.className = "wrap bad";
+      if (at === 10 && value !== "") td.className = "wrap error";
       tr.append(td);
     }
     ui.rows.append(tr);
@@ -932,20 +952,19 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
     const textStage: { start?: number; end?: number } = {};
     const diagnostics = new Map<WanRunComponent, SessionDiagnostics>();
     state.diagnostics = diagnostics;
+    state.marks = marks;
     const started = performance.now();
     const onEvent = (event: WanGenerateEvent): void => {
       const ms = performance.now();
       const elapsed = `${((ms - started) / 1000).toFixed(0)} s`;
+      const mark = wanEventMark(event, ms);
+      if (mark !== undefined) marks.push(mark);
       if (event.kind === "stage") {
-        const { component } = event;
-        if (component === "text_encoder") textStage[event.at] = ms;
-        else marks.push({ kind: "stage", component, at: event.at, ms });
-        status(`${component} ${event.at}（${elapsed}）`);
+        if (event.component === "text_encoder") textStage[event.at] = ms;
+        status(`${event.component} ${event.at}（${elapsed}）`);
       } else if (event.kind === "denoise-step") {
-        marks.push({ kind: "step", step: event.step, ms });
         status(`transformer step ${event.step}/${event.steps}（${elapsed}）`);
       } else {
-        marks.push({ kind: "tile", tile: event.tile, ms });
         status(`vae tile ${event.tile}/${event.tiles}（${elapsed}）`);
       }
     };
@@ -998,12 +1017,14 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
       );
       // 完走した生成のイベントの並びが崩れていたらパイプラインの取り決めの破れ — 失敗の行にする
       const timeline = summarizeWanTimeline(marks);
+      const seams = summarizeWanSeams(marks);
       showVideo(video, frames, resolved.seed);
       row = {
         ...base,
         ...textEncoderMs(),
         wallMs,
         timeline,
+        seams,
         diagnostics: summaries(),
         rgbSha256,
         reference,
@@ -1014,24 +1035,30 @@ export const mountWanTab = (root: HTMLElement, lab: Lab): WanTab => {
         }`,
       );
     } catch (error) {
-      let timeline: WanTimeline | undefined;
-      try {
-        timeline = summarizeWanTimeline(marks);
-      } catch {
-        // 失敗した生成の行では、並びの崩れで生成そのものの失敗（この行の error）を上書きしない —
-        // 所要の内訳なしで残す
-      }
+      // 失敗した生成の行では、並びの崩れで生成そのものの失敗（この行の error）を上書きしない —
+      // 所要の内訳なしで残す
+      const attempt = <T>(summarize: () => T): T | undefined => {
+        try {
+          return summarize();
+        } catch {
+          return undefined;
+        }
+      };
+      const timeline: WanTimeline | undefined = attempt(() => summarizeWanTimeline(marks));
+      const seams: WanSeams | undefined = attempt(() => summarizeWanSeams(marks));
       row = {
         ...base,
         ...textEncoderMs(),
         wallMs: performance.now() - started,
         ...(timeline === undefined ? {} : { timeline }),
+        ...(seams === undefined ? {} : { seams }),
         diagnostics: summaries(),
         error: describeError(error),
       };
       status(`生成が失敗しました（表の行を参照）— ${errorText(error)}`);
     } finally {
       state.diagnostics = undefined;
+      state.marks = undefined;
     }
     state.rows.push(row);
     appendRow(row);

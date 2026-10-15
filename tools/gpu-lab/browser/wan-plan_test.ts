@@ -16,11 +16,13 @@ import {
   judgeWanLimits,
   resolveWanFormSize,
   summarizeWanDiagnostics,
+  summarizeWanSeams,
   summarizeWanTimeline,
   WAN21_LAB,
   WAN22_LAB,
   WAN_SIZE_FROM_IMAGE,
   wanAttentionRowBlocks,
+  wanEventMark,
   type WanForm,
   wanFrameChoices,
   wanFrameFileNames,
@@ -31,6 +33,8 @@ import {
   wanReferenceCaseId,
   type WanResolvedRequest,
   wanRgbBytes,
+  wanRunMark,
+  type WanTimelineMark,
   wanTokenCount,
 } from "./wan-plan.ts";
 
@@ -400,6 +404,28 @@ describe("wan timeline", () => {
     );
   });
 
+  it("gives the same timeline when the transformer run marks are mixed in", () => {
+    const events: WanTimelineMark[] = [
+      { kind: "stage", component: "transformer", at: "start", ms: 100 },
+      { kind: "step", step: 1, ms: 1100 },
+      { kind: "step", step: 2, ms: 1600 },
+      { kind: "stage", component: "transformer", at: "end", ms: 1700 },
+      { kind: "stage", component: "vae_decoder", at: "start", ms: 1800 },
+      { kind: "tile", tile: 1, ms: 2100 },
+      { kind: "stage", component: "vae_decoder", at: "end", ms: 2250 },
+    ];
+    const withRuns: WanTimelineMark[] = [
+      events[0],
+      { kind: "run", component: "transformer", ms: 700 },
+      { kind: "run", component: "transformer", ms: 1000 },
+      events[1],
+      { kind: "run", component: "transformer", ms: 1300 },
+      { kind: "run", component: "transformer", ms: 1500 },
+      ...events.slice(2),
+    ];
+    assertEquals(summarizeWanTimeline(withRuns), summarizeWanTimeline(events));
+  });
+
   it("summarizes spans as the first one and the median and maximum of the rest", () => {
     assertEquals(formatSpans([]), "—");
     assertEquals(formatSpans([12_300]), "1 回目 12.3 s");
@@ -407,6 +433,187 @@ describe("wan timeline", () => {
       formatSpans([12_300, 10_000, 10_500, 9_000, 10_200]),
       "1 回目 12.3 s · 2 回目以降 中央値 10.1 s / 最大 10.5 s（4 回）",
     );
+  });
+});
+
+describe("wan seams", () => {
+  const run = (ms: number): WanTimelineMark => ({ kind: "run", component: "transformer", ms });
+  const step = (index: number, ms: number): WanTimelineMark => ({
+    kind: "step",
+    step: index,
+    ms,
+  });
+  const transformer = (at: "start" | "end", ms: number): WanTimelineMark => ({
+    kind: "stage",
+    component: "transformer",
+    at,
+    ms,
+  });
+
+  describe("with classifier-free guidance (two runs a step)", () => {
+    const marks: WanTimelineMark[] = [
+      transformer("start", 0),
+      run(5_000),
+      run(5_600),
+      step(1, 5_650),
+      run(6_250),
+      run(6_850),
+      step(2, 6_890),
+      run(7_500),
+      run(8_090),
+      step(3, 8_140),
+      run(8_740),
+      run(9_350),
+      step(4, 9_380),
+      transformer("end", 9_400),
+    ];
+
+    it("splits each step into before the first run, between the runs, and after the second run", () => {
+      assertEquals(summarizeWanSeams(marks).steps, [
+        { step: 1, segAMs: 5_000, segBMs: 600, segCMs: 50 },
+        { step: 2, segAMs: 600, segBMs: 600, segCMs: 40 },
+        { step: 3, segAMs: 610, segBMs: 590, segCMs: 50 },
+        { step: 4, segAMs: 600, segBMs: 610, segCMs: 30 },
+      ]);
+    });
+
+    it("takes the medians from step 2 on, leaving out the session build of step 1", () => {
+      const seams = summarizeWanSeams(marks);
+      assertStrictEquals(seams.runsPerStep, 2);
+      assertEquals(seams.median, { segAMs: 600, segBMs: 600, segCMs: 40 });
+    });
+  });
+
+  it("has no between-runs span when every step runs the transformer once", () => {
+    const seams = summarizeWanSeams([
+      transformer("start", 0),
+      run(3_000),
+      step(1, 3_040),
+      run(3_640),
+      step(2, 3_680),
+      run(4_300),
+      step(3, 4_330),
+    ]);
+    assertStrictEquals(seams.runsPerStep, 1);
+    assertEquals(seams.steps, [
+      { step: 1, segAMs: 3_000, segCMs: 40 },
+      { step: 2, segAMs: 600, segCMs: 40 },
+      { step: 3, segAMs: 620, segCMs: 30 },
+    ]);
+    assertEquals(seams.median, { segAMs: 610, segCMs: 35 });
+  });
+
+  it("has no median with a single step", () => {
+    const seams = summarizeWanSeams([transformer("start", 0), run(10), step(1, 12)]);
+    assertStrictEquals(seams.median, undefined);
+  });
+
+  it("times the VAE assembly from the last tile to the end of the stage", () => {
+    const seams = summarizeWanSeams([
+      transformer("start", 0),
+      run(10),
+      step(1, 12),
+      transformer("end", 20),
+      { kind: "stage", component: "vae_decoder", at: "start", ms: 30 },
+      { kind: "tile", tile: 1, ms: 300 },
+      { kind: "tile", tile: 2, ms: 600 },
+      { kind: "stage", component: "vae_decoder", at: "end", ms: 750 },
+    ]);
+    assertStrictEquals(seams.vaeAssembleMs, 150);
+  });
+
+  it("leaves out the VAE assembly when the VAE stage never ended", () => {
+    const seams = summarizeWanSeams([
+      transformer("start", 0),
+      run(10),
+      step(1, 12),
+      transformer("end", 20),
+      { kind: "stage", component: "vae_decoder", at: "start", ms: 30 },
+      { kind: "tile", tile: 1, ms: 300 },
+    ]);
+    assertStrictEquals(seams.vaeAssembleMs, undefined);
+  });
+
+  it("refuses steps whose run counts differ", () => {
+    assertThrows(
+      () =>
+        summarizeWanSeams([
+          transformer("start", 0),
+          run(10),
+          run(20),
+          step(1, 21),
+          run(30),
+          step(2, 31),
+        ]),
+      Error,
+      "揃わない",
+    );
+  });
+
+  it("refuses a step with no run or with more than two", () => {
+    assertThrows(
+      () => summarizeWanSeams([transformer("start", 0), step(1, 1)]),
+      Error,
+      "0 本",
+    );
+    assertThrows(
+      () => summarizeWanSeams([transformer("start", 0), run(1), run(2), run(3), step(1, 4)]),
+      Error,
+      "3 本",
+    );
+  });
+
+  it("refuses a run mark outside the transformer stage", () => {
+    assertThrows(() => summarizeWanSeams([run(1)]), Error, "段 transformer の外");
+    assertThrows(
+      () =>
+        summarizeWanSeams([
+          { kind: "stage", component: "vae_encoder", at: "start", ms: 0 },
+          run(1),
+        ]),
+      Error,
+      "段 transformer の外",
+    );
+  });
+
+  it("refuses runs left without a step when the transformer stage ends", () => {
+    assertThrows(
+      () => summarizeWanSeams([transformer("start", 0), run(1), transformer("end", 2)]),
+      Error,
+      "step の印の無いまま",
+    );
+  });
+
+  it("refuses steps out of order", () => {
+    assertThrows(
+      () => summarizeWanSeams([transformer("start", 0), run(1), step(2, 2)]),
+      Error,
+      "1 番目",
+    );
+  });
+});
+
+describe("wan event marks", () => {
+  it("marks the transformer runs only", () => {
+    assertEquals(wanRunMark("transformer", 5), { kind: "run", component: "transformer", ms: 5 });
+    assertStrictEquals(wanRunMark("vae_decoder_first", 5), undefined);
+    assertStrictEquals(wanRunMark("text_encoder", 5), undefined);
+  });
+
+  it("leaves the text encoder stage to the caller", () => {
+    assertStrictEquals(
+      wanEventMark({ kind: "stage", component: "text_encoder", at: "start" }, 1),
+      undefined,
+    );
+    assertEquals(
+      wanEventMark({ kind: "stage", component: "transformer", at: "end" }, 1),
+      { kind: "stage", component: "transformer", at: "end", ms: 1 },
+    );
+    assertEquals(wanEventMark({ kind: "vae-tile", tile: 3, tiles: 4 }, 2), {
+      kind: "tile",
+      tile: 3,
+      ms: 2,
+    });
   });
 });
 
