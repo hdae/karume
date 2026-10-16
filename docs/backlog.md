@@ -7,7 +7,7 @@
 > [perf-ledger](perf-ledger.md) が正本で、ここは波として参照するだけ ④by-design 制約の正本は
 > [limitations](limitations.md) — 作業化が裁定された時だけここに載る。
 
-## now — 0.13.0 リリース後（2026-09-25）
+## now — 0.14.0 リリース後（2026-10-16）
 
 - **高速化 / メモリの波の残り（起票 2026-09-25・利用者裁定 = 参照層 / 実用層の 2 層に分ける・実用層でもデバイス内決定性 MUST）**:
   イテレーション 1〜3 の済んだ記録（契約と土台・B3 anima の DiT 常駐・B4 irodori の条件側 K/V・H-35・K-70・E1 段 1）は[退避先](research/2026-10-10-backlog-archive-0.12.0-to-0.13.0.md)。
@@ -167,7 +167,7 @@
   窓マスクとゼロ pad の長いゼロ列（2048² の part 3 は 86% がゼロ）。マスクを窓の種類の表 + 添字に、ゼロ pad を
   `expand` にして、ゼロ列は全 part で消えた（GPU の出力は不変・ADR [0113](decisions/0113-birefnet-weight-series.md)
   追記 2026-10-16・[research](research/2026-08-09-xet-fragmentation.md) の 2026-10-16 追記）。0.14.0 の上げ直しの
-  後に、断片化表で term 数を確かめる。**anima の 2 本は別の件で、未解決**: 手元のミラー（0.13.0）の
+  後に、断片化表で term 数を確かめる **→ ✅ 2026-10-16: 大きい part は 42〜64 MiB/term・terms = ranges = xorbs（重複参照なし）。0.14.0 で上げた他の 5 リポも大きい part は 25 MiB/term 以上**。**anima の 2 本は別の件で、未解決**: 手元のミラー（0.13.0）の
   `text_conditioner` part 3 は 5 変種ともゼロページが 0 で、ゼロ列の機序は当てはまらない。細切れになった 2 本
   （`anima-turbo-v1.1` / `anima-v1.0`）は互いにバイト同一で、健全だった他の 3 変種の part 3 とは中身が違う。
 
@@ -341,7 +341,7 @@
   — ADR 0121 追記「段 9d の結果」。残る確認 1 つ: `cba99c24` の T2V の 50 ステップの実用席の床は GPU 未走（次に T2V の 50 ステップを回すとき）**→ ✅ 2026-10-15（参照席・実用席とも sha 行一致・床も緑・RTX 3080 Ti・34 分 45 秒）**。
   **段 9 ✅ → I2V を閉じた。次 = 一旦休憩**（利用者が触って使い方を見る）→ 来週の順（裁定 2026-10-10）: ② now 節の退避〈✅ 2026-10-10 — 済んだ記録を research の退避先へ〉→ ③ Codex 深掘りの修正の波〈✅ 2026-10-11 — 推奨案で直せる指摘は取り込み済み: medium 9 件・low / info 183 件のうち修正 100・docs の修正 52・Anima の int8 attention の端数縮退の見える化・テスト不足 7 件・依存グラフの門の typesDependency・ADR 0108 決定 12 の撤回・未対応 op のエラーの判定材料。判断待ちの項は裁定 20〜27 で決着し取り込み済み。裁定 4 / 6 / 8 / 18 の機能 ✅ 2026-10-11 — 裁定 4 = BiRefNet の後処理の手順を系列ごとに配布形で宣言〈HR は上流の手順 `u8-pil-bicubic`・盲検 A/B は 8 対とも見分けがつかず規則どおり上流・pipeline は `birefnet/2`・ADR [0125](decisions/0125-birefnet-matte-postprocess.md)〉・裁定 6 = attention の行ブロックの予算〈runtime の `SessionOptions.attentionRowBlockMaxBytes` だけ・出力はビット同一・121 フレームの実用席で 512 MiB なら VRAM の山 −1.46 GiB・ADR [0124](decisions/0124-attention-row-block-budget.md)〉・裁定 8 = 会話の分岐 `fork`〈ADR 0066 / 0083 の追記〉・裁定 18 → 40 = 画像の EXIF の向きは CLI と gpu-lab の両方で適用する〈M2 の Chrome は `imageOrientation: "none"` でも向きを適用したので、上流の `generate.py` と意図して違える側に揃えた・ADR 0121 の追記・M2 の Chrome で手動確認 OK〉・gpu-lab の Wan の結果を連番 PNG の zip で保存。上流との一致の方針を ADR 0005 に追記。Wan の既定に行ブロックの予算は入れない〈裁定 39 = a・公開 API の口も足さない〉。HR の f32 席の退役 ✅ 2026-10-11〈HR は `f16` 席だけ・席は上流の格納の型から導く・取り違えの検査は固定の上流 revision・カードの実行資源は checkpoint ごとの実測〈総確保の換算の誤記 1.7 / 4.1 → 1.6 / 4.0 GiB も訂正〉・Lucida の f32 系列を上流 revision つきで焼き直し・手元のミラー 2 本を `birefnet/2` で組み直し・ADR 0113 の追記〉。次 = ④ H-37 の計測〉
   〈+ レビューのテスト不足 7 件・依存グラフの門の typesDependency・gpu-lab の EXIF〉→ ④ H-37 の計測〈✅ 2026-10-15 — 切れ目の見積もりは 1 step の 0.34〜1.30%（生成の中の補正後）で kill 線の 5% の下 → perf-ledger H-37 は ❌・[research](research/2026-10-15-wan-dit-seams-h37.md)〉→ ⑤ outputs/diag と tools/shared の整理
-  〈✅ 2026-10-15 — tools/shared を tools/_shared へ統合・常用の台本 3 本〈GPU の使用中判定 2 本・timestamp の 1 tick の probe〉を tools/diag へ・DeBERTa の崩壊上限の導出 4 段を追跡下へ〈`deberta/collapse_ceilings.py` と `tools/diag/deberta-collapse.ts`・取り直した結果は 2026-10-07 とバイト一致〉・outputs/diag の性格を [assets-layout](assets-layout.md) に明記・調査の台本は記録が指す path を保つため動かさない〉→ 次 = ⑥ 0.14.0 の準備〈Wan 家族の初公開・Wan2.1 を上げるかはそのとき〉**🚧 2026-10-15 — 利用者裁定: Wan2.1 は HF に公開しない（ADR 0118 追記）・vowel-detector は保留・gemma4-qat は公開しない・irodori の重複解消は入れない・umT5 / Wan のライセンスは利用者が確認済み・diffusers からの TS の移植に第三者表記を足す・umT5 を Wan に依らず単体で使える形にして入れる（`@karume/models/umt5` — ADR 0122 追記 2026-10-15）・`@karume/models` に `THIRD_PARTY_NOTICES.md`（diffusers の移植の一覧 + Apache-2.0 の全文・Pillow の著作権表示と許諾文）を同梱する（利用者裁定 2026-10-16 = 6 a）・sbv2 の AGPL の件は 0.14.0 では現状維持（同 7 a — release 節の「裁定待ち」のまま）。範囲は下の release 節**。
+  〈✅ 2026-10-15 — tools/shared を tools/_shared へ統合・常用の台本 3 本〈GPU の使用中判定 2 本・timestamp の 1 tick の probe〉を tools/diag へ・DeBERTa の崩壊上限の導出 4 段を追跡下へ〈`deberta/collapse_ceilings.py` と `tools/diag/deberta-collapse.ts`・取り直した結果は 2026-10-07 とバイト一致〉・outputs/diag の性格を [assets-layout](assets-layout.md) に明記・調査の台本は記録が指す path を保つため動かさない〉→ 次 = ⑥ 0.14.0 の準備〈Wan 家族の初公開・Wan2.1 を上げるかはそのとき〉**✅ 2026-10-16 — 0.14.0 をリリース（JSR の 3 パッケージ・HF の 7 リポ・公開版からの疎通 OK）。利用者裁定（2026-10-15〜16）: Wan2.1 は HF に公開しない（ADR 0118 追記）・vowel-detector は保留・gemma4-qat は公開しない・irodori の重複解消は入れない・umT5 / Wan のライセンスは利用者が確認済み・diffusers からの TS の移植に第三者表記を足す・umT5 を Wan に依らず単体で使える形にして入れる（`@karume/models/umt5` — ADR 0122 追記 2026-10-15）・`@karume/models` に `THIRD_PARTY_NOTICES.md`（diffusers の移植の一覧 + Apache-2.0 の全文・Pillow の著作権表示と許諾文）を同梱する（利用者裁定 2026-10-16 = 6 a）・sbv2 の AGPL の件は 0.14.0 では現状維持（同 7 a — release 節の「裁定待ち」のまま）。範囲は下の release 節**。
   （以下は着手前の列挙）**次** → 段 7（実用席の自機 A/B の門〈S の組は未決 — 832×480 の値が使えなくなった〉・census・決定性・利用者の視認〈参照席自身の品質の裁定を兼ねる・seed 4 本以上・
   1280×704・ADR 0119 の裁定〈2026-10-04〉が預けた自由プロンプトの比較〉・既定の寸法 / フレーム数〈今は仮置きの 1280×704・33 フレーム〉・実用席の 2 ステップの sha 行・50 ステップの sha 行〈参照席・実用席 — 段 6 では書いていない〉）→ 段 9（I2V）→ **一旦休憩**（利用者が触って使い方を見る — 2026-10-06）。
   **段 9 の隣接の小物（起票 2026-10-10・レビュー）**:
@@ -521,11 +521,11 @@
 
 ## release — リリース準備波（しばらく先）
 
-- **gemma4 / gemma4-qat の HF 再アップロード + pin 更新（裁定 8 = a・2026-09-26）**〈0.14.0 で上げるのは `karume-gemma4` だけ — `karume-gemma4-qat` は未公開のまま（初公開になり、上流の revision の記録とライセンスの確認が別に要る・利用者裁定 2026-10-15）〉: manifest 語彙
+- **✅ 0.14.0（2026-10-16）gemma4 / gemma4-qat の HF 再アップロード + pin 更新（裁定 8 = a・2026-09-26）**〈0.14.0 で上げるのは `karume-gemma4` だけ — `karume-gemma4-qat` は未公開のまま（初公開になり、上流の revision の記録とライセンスの確認が別に要る・利用者裁定 2026-10-15）〉: manifest 語彙
   `stateAttentionReduce` の昇格（Breaking — CHANGELOG `[Unreleased]`）と E4B QAT の `i4-gemvpar` / `i4-fast` を
   配布に反映する。次リリースに束ねる（pin の焼き方は ADR [0073](decisions/0073-models-source-pin.md)・
   [release-runbook](release-runbook.md) §2 / §3）。ローカルミラーは焼き直し済み。
-- **birefnet-hr / lucida の HF 再アップロード + pin 更新（E1 段 1 — ADR [0113](decisions/0113-birefnet-weight-series.md)）**:
+- **✅ 0.14.0（2026-10-16 — 窓マスクを表 + 添字にした形で上げ直し）birefnet-hr / lucida の HF 再アップロード + pin 更新（E1 段 1 — ADR [0113](decisions/0113-birefnet-weight-series.md)）**:
   Lucida の f32 系列の焼き直し（上流 revision つき — `--dtype f32`）と f16 席を含めて配布に反映する。**利用者裁定
   2026-09-26 / 09-27: HR は `f16` 席のみ（上流 `ZhengPeng7/BiRefNet_HR` は f16 の checkpoint 1 本だけで f32 は存在しない
   — f32 席は同じ値を倍の VRAM で持つだけ）。Lucida は f32 既定 + f16 任意（f16 は有損失 — α の平均絶対差 最大 7.0e-5）。
@@ -538,11 +538,11 @@
   golden / sha 参照行 / `HELD_SERIES` の行）と、Lucida の f32 系列の上流 revision つきの焼き直し・手元のミラー 2 本の
   `birefnet/2` での組み直しは 2026-10-11 に済んだ（ADR 0113 追記 2026-10-11）。配布反映の回に残るのは HF への
   再アップロードと `BIREFNET_SOURCES` の pin の更新だけ。
-- **irodori 2 リポ（`irodori-v4-small` / `irodori-v4.1-small`）の HF 再アップロード + pin 更新（B4 = ADR [0114](decisions/0114-irodori-dit-context-split.md)）**:
+- **✅ 0.14.0（2026-10-16 — `dit_context` の追加だけ・重複解消は束ねず）irodori 2 リポ（`irodori-v4-small` / `irodori-v4.1-small`）の HF 再アップロード + pin 更新（B4 = ADR [0114](decisions/0114-irodori-dit-context-split.md)）**:
   配布形に役割 `dit_context` が増えた（breaking — 持たない配布形は新しい models で部品の欠落として落ちる）。later の
   「irodori v4-small と v4.1-small の重複 5,605 MiB を越境参照で消す」と同じ breaking 波の回に行う〈→ 0.14.0 では重複解消を束ねず `dit_context` の追加だけで上げる — 利用者裁定 2026-10-15〉。ローカルミラーは
   v4-small が焼き直し済み・v4.1-small は焼き直し中（2026-09-27）。
-- **Wan 家族の初公開（起票 2026-10-09）**〈0.14.0 で上げるのは `karume-umt5-xxl` → `karume-wan2.2` の 2 リポ — `karume-wan2.1` は公開しない（利用者裁定 2026-10-15・ADR 0118 追記）。umT5 は単体の入口 `Umt5Encoder` を持つ家族になったので `UMT5_SOURCES`（キー `umt5-xxl`）も新設する — ADR 0122 追記 2026-10-15〉: `karume-umt5-xxl` → `karume-wan2.1` / `karume-wan2.2` の順（Wan の 2 リポは umT5 を越境参照するので、
+- **✅ 0.14.0（2026-10-16 — `karume-umt5-xxl` と `karume-wan2.2`・`UMT5_SOURCES` / `WAN_SOURCES` 新設）Wan 家族の初公開（起票 2026-10-09）**〈0.14.0 で上げるのは `karume-umt5-xxl` → `karume-wan2.2` の 2 リポ — `karume-wan2.1` は公開しない（利用者裁定 2026-10-15・ADR 0118 追記）。umT5 は単体の入口 `Umt5Encoder` を持つ家族になったので `UMT5_SOURCES`（キー `umt5-xxl`）も新設する — ADR 0122 追記 2026-10-15〉: `karume-umt5-xxl` → `karume-wan2.1` / `karume-wan2.2` の順（Wan の 2 リポは umT5 を越境参照するので、
   umT5 の実 SHA で Wan の 2 リポを焼き直してから上げる — ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md) 決定 8）。
   `WAN_SOURCES` の表（キー `wan2.1` / `wan2.2`）と pin の焼き込み。[release-runbook](release-runbook.md) の §0 と「家族の初公開」は
   `karume-wan2.1` だけを書いているので、`karume-wan2.2`（`dist.py --pipeline wan-ti2v --ref-*`）の手順を足す。
