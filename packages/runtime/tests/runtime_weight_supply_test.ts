@@ -171,7 +171,15 @@ const recorder = () => {
   return { events, counts, gpu, trace };
 };
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+// Node's timers run on libuv's millisecond loop time and can fire up to about 1 ms before
+// `performance.now()` says the delay has elapsed; the timing assertions below compare against that
+// clock, so sleep until the deadline is reached on it.
+const sleep = async (ms: number): Promise<void> => {
+  const until = performance.now() + ms;
+  for (let now = performance.now(); now < until; now = performance.now()) {
+    await new Promise((resolve) => setTimeout(resolve, Math.ceil(until - now)));
+  }
+};
 
 // ---------------------------------------------------------------------------
 
