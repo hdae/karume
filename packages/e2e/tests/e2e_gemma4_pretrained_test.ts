@@ -28,25 +28,27 @@
 // **永続キャッシュ**（Deno は DENO_DIR）へ写すので、この門を 1 度回すと約 4GiB がそこに残る
 // （掃除は `@karume/hub` の `clearHubCache`）。
 
+import { readTextFile, readTextFileSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
-import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
-import type { Gemma4ChatMessage } from "../src/gemma/text/chat.ts";
-import { serveLocalDist } from "../../../examples/shared/local-dist-server.ts";
+import { Gemma4Pipeline } from "../../models/src/gemma/pipeline.ts";
+import type { Gemma4ChatMessage } from "../../models/src/gemma/text/chat.ts";
+import { serveLocalDist } from "@karume/test-support/local-dist-server";
 import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
-import type { SessionOverrides } from "../src/session/options.ts";
+import type { SessionOverrides } from "../../models/src/session/options.ts";
 import {
   assertRowCensus,
   censusRowOf,
   effectiveSessionOptions,
   gemmaComponentOf,
-} from "./helpers/census-table.ts";
-import { GPU_AVAILABLE } from "./helpers/gpu.ts";
-import { allResidentPleBytesOfMirror } from "./helpers/ple-budget.ts";
-import { mirrorAvailable, openGemma4Ple } from "./helpers/gemma-mirror.ts";
+} from "../../models/tests/helpers/census-table.ts";
+import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
+import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
+import { mirrorAvailable, openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -84,7 +86,7 @@ type ChatFixture = {
 };
 
 const fixture = JSON.parse(
-  await Deno.readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
 ) as ChatFixture;
 
 const caseOf = (name: string) => {
@@ -96,7 +98,7 @@ const caseOf = (name: string) => {
 // 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
 const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 const MANIFEST_TEXT = AVAILABLE
-  ? Deno.readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR))
+  ? readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR))
   : undefined;
 
 if (!AVAILABLE) {
@@ -106,7 +108,7 @@ if (!AVAILABLE) {
   );
 }
 
-Deno.test({
+test({
   name: "gemma4 配布形: manifest の宣言と PLE 索引の対応（GPU 不要）",
   ignore: !AVAILABLE,
   fn: async () => {
@@ -132,11 +134,11 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "gemma4 配布形: fromPretrained → chat が実 GPU で完走し既定サンプラが宣言どおり",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+    await using server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
     const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
       maxResidentPleBytes: await maxResidentPleBytes(),
     });
@@ -207,11 +209,11 @@ Deno.test({
  * NOTE: `onRunDiagnostics` を付けると GPU 上の greedy 出力経路は外れる（src/gemma/pipeline.ts の
  * `greedyOutput`）。census はフック有りの経路のもので、この前提は計測を外しても変わらない。
  */
-Deno.test({
+test({
   name: "gemma4 配布形: ③PV の縮約形は明示 > quant 宣言 > 参照経路の順で決まる（census）",
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
-    await using server = serveLocalDist(new URL(".", MIRROR_DIR).pathname);
+    await using server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
     const cases = [
       { name: "i4（宣言なし）→ 参照経路", options: { quant: "i4" }, expect: "sequential" },
       {

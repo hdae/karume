@@ -236,6 +236,12 @@
         "name": "denoDirectory",
         "kind": "function"
       }
+    ],
+    "./node": [
+      {
+        "name": "nodeDirectory",
+        "kind": "function"
+      }
     ]
   }
 }

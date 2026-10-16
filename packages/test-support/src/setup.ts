@@ -8,7 +8,8 @@
  *   are globals in Deno and browsers; tests reference them directly, so install Dawn's copies.
  *   Package sources MUST NOT rely on these globals (see runtime/src/gpu/webgpu-constants.ts).
  *
- * `KARUME_DAWN_FLAGS` passes Dawn toggles, e.g. `disable-dawn-features=timestamp_quantization`.
+ * `KARUME_DAWN_FLAGS` passes Dawn toggles, e.g. `disable-dawn-features=timestamp_quantization`;
+ * `KARUME_NO_DAWN=1` skips Dawn entirely (no `navigator.gpu`).
  */
 
 import { create, globals } from "webgpu";
@@ -16,7 +17,9 @@ import { create, globals } from "webgpu";
 type DawnHost = typeof globalThis & { __karumeDawnGpu?: GPU };
 
 const host = globalThis as DawnHost;
-if (host.__karumeDawnGpu === undefined) {
+// KARUME_NO_DAWN=1 runs the suite as if the machine had no WebGPU (CPU-only cases; the all-skip
+// gates still apply) — useful next to another process that owns the GPU.
+if (host.__karumeDawnGpu === undefined && process.env.KARUME_NO_DAWN !== "1") {
   const flags = (process.env.KARUME_DAWN_FLAGS ?? "").split(/\s+/).filter((flag) => flag !== "");
   try {
     host.__karumeDawnGpu = create(flags);

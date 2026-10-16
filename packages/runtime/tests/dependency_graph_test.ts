@@ -1,56 +1,67 @@
-// パッケージの依存グラフの門。GPU も実資産も要らない（`deno info` を回すだけ）。
+// パッケージの依存グラフの門。GPU も実資産も要らない（ソースを oxc-parser で読んで辺を辿るだけ）。
 //
 // 守る不変条件は CLAUDE.md の「ランタイム依存は Web 標準 API のみ（依存パッケージも Web 標準 API
-// のみで構成されたものに限る）」。型検査ではこれを守れない —— Deno の workspace ではルートの
-// `deno.json` の `imports`（examples 専用の npm 依存や `@std/*`）がメンバーにも効くので、
-// `packages/*` のソースが裸の指定子（`import "jpeg-js"`）を書いても `deno check` は通る。公開した
-// パッケージにはルートの import map が付いていかないので、壊れるのは利用者の手元になってから。
+// のみで構成されたものに限る）」。型検査ではこれを守れない —— ワークスペースでは、メンバーの
+// `package.json` の `dependencies` が宣言していないパッケージでも、devDependencies やワークスペースの
+// 根に入っていれば手元の解決は通る（`packages/*` のソースが裸の指定子 `import "jpeg-js"` を書いても
+// 型検査は緑）。公開したパッケージに付いていくのはそのパッケージの `dependencies` だけなので、
+// 壊れるのは利用者の手元になってから。
 //
-// 見るのは各パッケージの公開の入口（その package の `deno.json` の `exports` の全ての値）から
-// 辿ったモジュールグラフ（`deno info --json`）の、外部の指定子（ワークスペース内のファイル以外）。
+// メンバーは `pnpm-workspace.yaml` の `packages` と各 `packages/*/package.json` から導く（`private`
+// のメンバー = 公開しないテスト用の足場は門の対象にしない。辺の行き先としてはメンバーに数える）。
+// 見るのは各メンバーの公開の入口（その `package.json` の `exports` の全ての値）から辿ったモジュール
+// グラフ（`@karume/test-support/module-graph` が oxc-parser でソースから採る静的な辺）の全ての辺。
 // 許すのは次の 3 つだけ:
 //
-// - **同じメンバーの根の内側のファイル**。
-// - **他のメンバーの公開の入口のファイル**（`@karume/*` はワークスペースの解決でここへ着く）。
-//   他のメンバーの入口でないファイル（`../../hub/src/x.ts` のような根をまたぐ相対 import）と、
-//   どのメンバーにも属さないファイル（リポジトリ根・`examples/`・`tools/` など）は落とす —— どちらも
-//   公開したパッケージの外を指すので、利用者の手元では解決できない。
-// - **辺の出どころのパッケージ自身の `deno.json` が `imports` で宣言した jsr パッケージ**（名前と
-//   版の範囲の一致）。どのパッケージの宣言で許すかは、import を書いたファイルの置き場で決める ——
-//   models が hub 経由で `@hdae/fetch-cache` を引くのは hub の宣言で許すが、models のファイルが
-//   直に書けば models の宣言が要る。
+// - **同じメンバーの根の内側のファイル**（相対 import、または自分自身の名前での自己参照）。
+// - **他のメンバーの公開の入口のファイル**を、`@karume/*` の裸の指定子で、かつ import を書いた
+//   メンバーの `dependencies` が宣言したうえで引くもの。根をまたぐ相対 import（`../../hub/src/x.ts`）
+//   は入口を指していても落とし、どのメンバーにも属さないファイル（リポジトリ根・`examples/`・`tools/`
+//   など）への import も落とす —— どれも公開したパッケージの外を指すので、利用者の手元では解決
+//   できない。
+// - **辺の出どころのメンバー自身の `package.json` の `dependencies` が宣言した外部のパッケージ**
+//   （名前の一致。版は見ない —— `catalog:` の宣言は版をワークスペースの catalog に預けるだけで、
+//   宣言したことに変わりはない。devDependencies は数えない）。どのメンバーの宣言で許すかは、import を
+//   書いたファイルの置き場で決める —— models が hub 経由で `@hdae/fetch-cache` を引くのは hub の
+//   宣言で許すが、models のファイルが直に書けば models の宣言が要る。
 //
-// 外部のパッケージが別の外部のパッケージを引く辺（推移的な依存）は落とす（誰も宣言していない
-// 依存がグラフに入る形）。`npm:` は宣言の有無によらず 1 つでも出たら落とす。許可の一覧はテストに
-// 書き写さず、各 package の `deno.json` から導く。
+// `node:` の組み込みモジュールは Web 標準 API でないので落とす。例外は下の
+// `NODE_BUILTINS_ALLOWED_FROM` に書いたファイルだけ（hub の `./node` サブパス = Node の利用者が
+// 明示的に選ぶ入口）。`npm:` / `jsr:` などスキームつきの指定子はソースに 1 つでも出たら落とす
+// （公開したパッケージを Node やバンドラで読むと解決できない綴り）。許可の一覧はテストに書き
+// 写さず、各 `package.json` から導く。
 //
-// 門が見るのは `deno info` の静的グラフ（リテラルの import / import type / 型参照 / リテラルの
-// 動的 import / `@ts-self-types`・`X-TypeScript-Types` の型だけの辺）に限る。
-// `new Worker(new URL(...))` の先・リテラルでない動的 import・`import.meta.resolve` の先は
+// NOTE: Deno 版の門にあった「外部のパッケージが別の外部のパッケージを引く辺（推移的な依存）を
+// 落とす」規則はここに無い。外部のパッケージの中身を辿るには node_modules を歩く必要があるが、この門は
+// ワークスペースのソースだけを読むので、その規則は検査できない。
+//
+// 門が見るのは静的な辺（リテラルの import / import type / `export … from` / リテラルの動的
+// import / 型の位置の `import("…")` / `import x = require("…")` / `/// <reference path|types>`）に
+// 限る。`new Worker(new URL(...))` の先・リテラルでない動的 import・`import.meta.resolve` の先は
 // グラフに載らないので、この門の外である。
 //
-// `deno info` は `--frozen-lockfile` で回す（lockfile との食い違いは書き換えずに落とす）。外部の
-// jsr パッケージ（hub の `@hdae/fetch-cache`）は DENO_DIR のキャッシュから読む —— キャッシュが
-// 冷えた機ではネットワークに出る（hub のテストの型検査と同じ条件）。取れなければ deno info の失敗か
-// モジュールの error で赤になる（依存の違反としてではなく、その旨の文言で）。
-//
 // MUST: 読めない形は推測せず throw する —— 「読めなかった辺」を「外部の辺が無い」と読み替えると、
-// この門は違反を緑で隠す。`deno info --json` の形（2.9.6 実測）: 辺の解決先は
-// `dependencies[].code.specifier` / `.type.specifier` と、モジュール直下の
-// `typesDependency.dependency.specifier`（書かれた指定子は `typesDependency.specifier`）に入り、
-// 解決の失敗はそれぞれの `error` に出る。import map 経由の jsr は
-// `jsr:@scope/name@range`（サブパスは `jsr:/@scope/name@range/sub` と先頭に `/` が付く）、npm は
-// `npm:name@range`、jsr パッケージの中身のモジュールは `https://jsr.io/@scope/name/<版>/…`。
-// トップレベルの `npmPackages` / `packages` はグラフでなく lockfile 全体の一覧なので使わない。
+// この門は違反を緑で隠す（構文を読めないソース・読めないファイル・知らない形の宣言や exports・
+// 入口に無い `@karume/*` のサブパスは、違反としてではなく throw で赤にする）。
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { readDir, readTextFile } from "@karume/test-support/fs";
+import { type ModuleEdge, walkModuleGraph } from "@karume/test-support/module-graph";
+import { describe, it } from "@karume/test-support/test";
 
-/** リポジトリ根（ワークスペースの `deno.json` の置き場）。 */
+/** リポジトリ根（`pnpm-workspace.yaml` の置き場）。 */
 const REPO_ROOT = new URL("../../../", import.meta.url);
 
-/** 当てにしている `deno info --json` の出力形式版。 */
-const INFO_VERSION = 1;
+/**
+ * `node:` の組み込みモジュールを引いてよいファイル（明示の許可の一覧）。
+ *
+ * hub の `./node` サブパスは Node のファイルシステムで配布形を読む入口で、Node の利用者が明示的に
+ * import する（`mod.ts` からは辿れない）。不変条件の、文書化した唯一の切り出しである —— 理由は
+ * `packages/hub/node.ts` の冒頭。
+ */
+const NODE_BUILTINS_ALLOWED_FROM: ReadonlySet<string> = new Set([
+  new URL("packages/hub/node.ts", REPO_ROOT).href,
+]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,169 +76,151 @@ const text = (value: unknown, what: string): string => {
   return value;
 };
 
-const list = (value: unknown, what: string): readonly unknown[] => {
-  if (!Array.isArray(value)) throw new Error(`依存グラフの門: ${what} が配列でない`);
-  return value;
-};
-
 /** ワークスペースのメンバー 1 つ。 */
 type Member = {
   readonly name: string;
   /** メンバーの根（末尾 `/` 付きの `file:` URL）。 */
   readonly root: string;
+  /** `private: true`（公開しない）のメンバー。門の対象にしない。 */
+  readonly private: boolean;
+  /** 公開の入口（`exports` のサブパス → 絶対 URL）。 */
+  readonly exports: ReadonlyMap<string, string>;
   /** 公開の入口（`exports` の全ての値を絶対 URL にしたもの）。 */
   readonly entries: readonly string[];
-  /** `imports` が宣言した jsr パッケージ（`名前@範囲`）。 */
-  readonly allowed: ReadonlySet<string>;
+  /** `dependencies` が宣言したパッケージの名前（ワークスペースのメンバーも外部も）。 */
+  readonly declared: ReadonlySet<string>;
 };
 
-/** jsr の指定子を `名前@範囲` へ畳む（サブパスは落とす）。jsr でなければ `undefined`。 */
-const jsrPackageOf = (specifier: string): string | undefined => {
-  const matched = /^jsr:\/?(@[^/@]+\/[^/@]+)(?:@([^/]+))?(?:\/.*)?$/.exec(specifier);
-  if (matched === null) {
-    if (specifier.startsWith("jsr:")) {
-      throw new Error(`依存グラフの門: jsr の指定子を読めない: ${specifier}`);
-    }
-    return undefined;
+/** 指定子のパッケージ名（`@scope/name/sub` → `@scope/name`、`name/sub` → `name`）とサブパス。 */
+const packageOf = (specifier: string): { readonly name: string; readonly subpath: string } => {
+  const parts = specifier.split("/");
+  const length = specifier.startsWith("@") ? 2 : 1;
+  const head = parts.slice(0, length);
+  if (head.length < length || head.some((part) => part === "")) {
+    throw new Error(`依存グラフの門: パッケージの指定子を読めない: ${specifier}`);
   }
-  return `${matched[1]}@${matched[2] ?? ""}`;
+  const rest = parts.slice(length);
+  return { name: head.join("/"), subpath: rest.length === 0 ? "." : `./${rest.join("/")}` };
 };
 
-/** `https://jsr.io/@scope/name/<版>/…` のモジュールが属するパッケージの根。jsr.io 以外は `undefined`。 */
-const jsrModuleRoot = (specifier: string): string | undefined =>
-  /^https:\/\/jsr\.io\/@[^/]+\/[^/]+\/[^/]+\//.exec(specifier)?.[0];
+/** 指定子のスキーム（`node:` / `npm:` / `jsr:` / `https:` …）。スキームが無ければ `undefined`。 */
+const schemeOf = (specifier: string): string | undefined =>
+  /^([a-z][a-z0-9+.-]*):/i.exec(specifier)?.[1]?.toLowerCase();
+
+const isRelative = (specifier: string): boolean =>
+  specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("/");
 
 /**
- * `deno.json` の `imports` の値から許可の一覧を導く。
+ * `package.json` の `dependencies` から宣言の一覧（名前）を導く。`workspace:` はメンバー、
+ * `catalog:` は版をワークスペースの catalog に預けた外部の宣言で、どちらも名前で数える。
  *
- * 相対パス（`./` `../`）の宣言はローカルの別名なので許可の一覧に入れない —— その辺は `file:` へ
- * 解決され、ファイルの辺の規則（同じメンバーの内側か、他のメンバーの入口か）で判じる。
- *
- * MUST: それ以外の jsr でない宣言は推測せず throw する —— npm はこの門の禁則そのもので、https 等は
- * 「同じ依存か」を判じる規則をまだ持たない（読めない宣言を黙って許すと門が穴になる）。
+ * MUST: ローカルのパスの宣言（`file:` / `link:` / `portal:` / 相対・絶対パス）は推測せず throw
+ * する —— 公開したパッケージでは利用者の手元を指すので、この門が許してよい形でない。
  */
-const allowedPackagesOf = (imports: Readonly<Record<string, string>>): Set<string> => {
-  const allowed = new Set<string>();
-  for (const [key, value] of Object.entries(imports)) {
-    if (value.startsWith("./") || value.startsWith("../")) continue;
-    const identity = jsrPackageOf(value);
-    if (identity === undefined) {
-      throw new Error(`依存グラフの門: jsr 以外の宣言である（imports["${key}"] = ${value}）`);
+const declaredPackagesOf = (dependencies: Readonly<Record<string, string>>): Set<string> => {
+  const declared = new Set<string>();
+  for (const [name, value] of Object.entries(dependencies)) {
+    if (/^(file|link|portal):/.test(value) || /^(\.{1,2})?\//.test(value)) {
+      throw new Error(
+        `依存グラフの門: ローカルのパスの宣言である（dependencies["${name}"] = ${value}）`,
+      );
     }
-    allowed.add(identity);
+    declared.add(name);
   }
-  return allowed;
+  return declared;
+};
+
+/**
+ * `pnpm-workspace.yaml` の `packages` の並び（ブロック形式の `- glob`）を読む。
+ *
+ * MUST: YAML の全体は読まない —— 読めない形（流れ形式・`!` の除外・末尾の `/*` 1 段以外の glob）は
+ * 推測せず throw する。
+ */
+const workspaceGlobsOf = (yaml: string): string[] => {
+  const lines = yaml.split("\n");
+  const start = lines.findIndex((line) => /^packages:\s*$/.test(line));
+  if (start < 0) throw new Error("依存グラフの門: pnpm-workspace.yaml に packages の並びが無い");
+  const globs: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (!/^\s/.test(line)) break;
+    const glob = /^\s+-\s+(["']?)([^"'#\s]+)\1\s*(#.*)?$/.exec(line)?.[2];
+    if (glob === undefined || !/^[^!*]+(\/\*)?$/.test(glob)) {
+      throw new Error(`依存グラフの門: pnpm-workspace.yaml の packages の項目を読めない: ${line}`);
+    }
+    globs.push(glob);
+  }
+  if (globs.length === 0) {
+    throw new Error("依存グラフの門: pnpm-workspace.yaml の packages が空である");
+  }
+  return globs;
+};
+
+/** glob 1 つをメンバーの根（末尾 `/` 付き）へ展開する（`package.json` の無いディレクトリは数えない — pnpm と同じ）。 */
+const memberRootsOf = async (glob: string): Promise<URL[]> => {
+  if (!glob.endsWith("/*")) return [new URL(`${glob.replace(/\/+$/, "")}/`, REPO_ROOT)];
+  const parent = new URL(glob.slice(0, -1), REPO_ROOT);
+  const roots: URL[] = [];
+  for await (const entry of readDir(parent)) {
+    if (!entry.isDirectory) continue;
+    const root = new URL(`${entry.name}/`, parent);
+    let hasManifest = false;
+    for await (const child of readDir(root)) {
+      if (child.name === "package.json" && child.isFile) hasManifest = true;
+    }
+    if (hasManifest) roots.push(root);
+  }
+  return roots;
+};
+
+const readMember = async (memberRoot: URL): Promise<Member> => {
+  const config = record(
+    JSON.parse(await readTextFile(new URL("package.json", memberRoot))),
+    `${memberRoot.href}package.json`,
+  );
+  const name = text(config.name, `${memberRoot.href}package.json の name`);
+  const isPrivate = config.private === true;
+  // 条件つきの exports（`{ "import": …, "types": … }`）は text が throw する —— 読めない形は推測しない。
+  // exports の無い private のメンバー（テストだけの置き場）は入口 0 本 —— 門の対象でなく、他の
+  // メンバーからそこへ入る辺は「公開の入口でない」で落ちる。
+  const declaredExports: [string, unknown][] = typeof config.exports === "string"
+    ? [[".", config.exports]]
+    : config.exports === undefined && isPrivate
+    ? []
+    : Object.entries(record(config.exports, `${name} の exports`));
+  if (declaredExports.length === 0 && !isPrivate) {
+    throw new Error(`依存グラフの門: ${name} の exports が空である`);
+  }
+  const exports = new Map(
+    declaredExports.map(([subpath, entry]) => [
+      subpath,
+      new URL(text(entry, `${name} の exports["${subpath}"]`), memberRoot).href,
+    ]),
+  );
+  const dependencies = Object.fromEntries(
+    Object.entries(record(config.dependencies ?? {}, `${name} の dependencies`)).map((
+      [key, value],
+    ) => [key, text(value, `${name} の dependencies["${key}"]`)]),
+  );
+  return {
+    name,
+    root: memberRoot.href,
+    private: isPrivate,
+    exports,
+    entries: [...exports.values()],
+    declared: declaredPackagesOf(dependencies),
+  };
 };
 
 const readMembers = async (): Promise<Member[]> => {
-  const root = record(
-    JSON.parse(await Deno.readTextFile(new URL("deno.json", REPO_ROOT))),
-    "ルートの deno.json",
-  );
-  return await Promise.all(
-    list(root.workspace, "ルートの deno.json の workspace").map(async (path, index) => {
-      const memberRoot = new URL(
-        `${text(path, `workspace[${index}]`).replace(/\/+$/, "")}/`,
-        REPO_ROOT,
-      );
-      const config = record(
-        JSON.parse(await Deno.readTextFile(new URL("deno.json", memberRoot))),
-        `${memberRoot.href}deno.json`,
-      );
-      const name = text(config.name, `${memberRoot.href}deno.json の name`);
-      const exports = typeof config.exports === "string"
-        ? [config.exports]
-        : Object.values(record(config.exports, `${name} の exports`));
-      if (exports.length === 0) throw new Error(`依存グラフの門: ${name} の exports が空である`);
-      const imports = Object.fromEntries(
-        Object.entries(record(config.imports ?? {}, `${name} の imports`)).map((
-          [key, value],
-        ) => [key, text(value, `${name} の imports["${key}"]`)]),
-      );
-      return {
-        name,
-        root: memberRoot.href,
-        entries: exports.map((entry, at) =>
-          new URL(text(entry, `${name} の exports[${at}]`), memberRoot).href
-        ),
-        allowed: allowedPackagesOf(imports),
-      };
-    }),
-  );
+  const globs = workspaceGlobsOf(await readTextFile(new URL("pnpm-workspace.yaml", REPO_ROOT)));
+  const roots = (await Promise.all(globs.map(memberRootsOf))).flat();
+  const members = await Promise.all(roots.map(readMember));
+  return members.sort((a, b) => a.name.localeCompare(b.name));
 };
 
 /** グラフの辺 1 本（出どころのモジュール → 書かれた指定子 → 解決先）。 */
-type Edge = {
-  readonly from: string;
-  readonly written: string;
-  readonly resolved: string;
-};
-
-/**
- * 辺 1 本の解決先（`{ specifier }` か `{ error }`）を読む。`dependencies[]` の code / type と
- * モジュール直下の `typesDependency.dependency` は同じ形なので、同じ規則で読む。
- */
-const resolvedOf = (value: unknown, from: string, written: string, what: string): string => {
-  const target = record(value, `${from} → ${written} の ${what}`);
-  if (target.error !== undefined) {
-    throw new Error(
-      `依存グラフの門: 解決できない import がある: ${from} → ${written}: ${String(target.error)}`,
-    );
-  }
-  return text(target.specifier, `${from} → ${written} の ${what}.specifier`);
-};
-
-/**
- * `deno info --json` の出力から辺を全て取り出す（code と type の解決先が割れれば両方）。
- *
- * 型だけの辺（`.js` の `// @ts-self-types="…"`・リモートの `X-TypeScript-Types`）は `dependencies[]`
- * でなくモジュール直下の `typesDependency` に出るので、それも辺として読む —— 読まないと
- * `@ts-self-types="npm:…"` やメンバーの外の型ファイルが、違反とも throw ともならず素通りする。
- * NOTE: 2.9.6 で実測したのは `@ts-self-types` だけで、`X-TypeScript-Types` が同じ欄に出ることは
- * 実測していない。
- * 型だけの辺は実行時のグラフには効かないが、利用者の `deno check` はその先を解決しに行く。
- */
-const edgesOf = (info: unknown): Edge[] => {
-  const parsed = record(info, "deno info の出力");
-  if (parsed.version !== INFO_VERSION) {
-    throw new Error(
-      `依存グラフの門: deno info の出力形式版が ${String(parsed.version)} である` +
-        `（当てにしているのは ${INFO_VERSION}）`,
-    );
-  }
-  const edges: Edge[] = [];
-  for (const [at, value] of list(parsed.modules, "modules").entries()) {
-    const module = record(value, `modules[${at}]`);
-    const from = text(module.specifier, `modules[${at}].specifier`);
-    if (module.error !== undefined) {
-      throw new Error(`依存グラフの門: モジュールを読めない: ${from}: ${String(module.error)}`);
-    }
-    for (
-      const [index, dependency] of list(module.dependencies ?? [], `${from} の dependencies`)
-        .entries()
-    ) {
-      const edge = record(dependency, `${from} の dependencies[${index}]`);
-      const written = text(edge.specifier, `${from} の dependencies[${index}].specifier`);
-      const targets = new Set<string>();
-      for (const side of ["code", "type"] as const) {
-        if (edge[side] === undefined) continue;
-        targets.add(resolvedOf(edge[side], from, written, side));
-      }
-      if (targets.size === 0) {
-        throw new Error(`依存グラフの門: 解決先の無い辺である: ${from} → ${written}`);
-      }
-      for (const resolved of targets) edges.push({ from, written, resolved });
-    }
-    if (module.typesDependency !== undefined) {
-      const types = record(module.typesDependency, `${from} の typesDependency`);
-      const written = text(types.specifier, `${from} の typesDependency.specifier`);
-      // dependency が無い形は解決先の無い辺 —— 推測せず resolvedOf の record で throw させる。
-      const resolved = resolvedOf(types.dependency, from, written, "typesDependency.dependency");
-      edges.push({ from, written, resolved });
-    }
-  }
-  return edges;
-};
+type Edge = ModuleEdge;
 
 /** 判定の結果。`external` は許した外部の辺の数（形が変わって外部の辺を 1 本も読めない門を見分ける）。 */
 type Verdict = {
@@ -236,7 +229,7 @@ type Verdict = {
 };
 
 /** 判定に要るメンバーの面（判定の単体テストが根の無い模型を渡せるよう `root` は含めない）。 */
-type Owner = Pick<Member, "name" | "entries" | "allowed">;
+type Owner = Pick<Member, "name" | "entries" | "declared">;
 
 /**
  * 辺を 1 本ずつ判じる。`ownerOf` はファイルが属するメンバーを返す（どのメンバーにも属さない
@@ -250,93 +243,106 @@ const judgeEdges = (
   let external = 0;
   for (const { from, written, resolved } of edges) {
     const label = `${from} → "${written}"（${resolved}）`;
-    if (resolved.startsWith("npm:")) {
-      violations.push(`npm の依存である（宣言の有無によらず禁止）: ${label}`);
+    const source = ownerOf(from);
+    const sourceName = source?.name ?? "どのメンバーにも属さないファイル";
+    const scheme = schemeOf(written);
+    if (scheme === "node") {
+      if (!NODE_BUILTINS_ALLOWED_FROM.has(from)) {
+        violations.push(`node: の組み込みモジュールである（Web 標準 API でない）: ${label}`);
+      }
       continue;
     }
-    if (from.startsWith("file:")) {
-      if (resolved.startsWith("file:")) {
-        const source = ownerOf(from);
-        const target = ownerOf(resolved);
-        if (target === undefined) {
-          violations.push(`どのメンバーにも属さないファイルへの import である: ${label}`);
-        } else if (target.name !== source?.name && !target.entries.includes(resolved)) {
-          violations.push(
-            `${target.name} の公開の入口でないファイルへの、メンバーをまたぐ import である: ${label}`,
-          );
-        }
-        continue;
-      }
-      const owner = ownerOf(from);
-      const identity = jsrPackageOf(resolved);
-      if (owner !== undefined && identity !== undefined && owner.allowed.has(identity)) {
-        external++;
-        continue;
-      }
-      violations.push(
-        `${owner?.name ?? "どのメンバーにも属さないファイル"} の deno.json の imports が` +
-          `宣言していない外部の依存である: ${label}`,
-      );
+    if (scheme !== undefined) {
+      violations.push(`${scheme}: の指定子である（宣言の有無によらず禁止）: ${label}`);
       continue;
     }
-    // 外部のモジュールから出る辺 —— 同じ jsr パッケージの中に閉じていれば許す。
-    const root = jsrModuleRoot(from);
-    if (root !== undefined && resolved.startsWith(root)) continue;
-    violations.push(`外部のパッケージが別の外部の依存を引いている（推移的な依存）: ${label}`);
+    if (resolved.startsWith("file:")) {
+      const target = ownerOf(resolved);
+      if (target === undefined) {
+        violations.push(`どのメンバーにも属さないファイルへの import である: ${label}`);
+      } else if (target.name === source?.name) {
+        // 同じメンバーの内側（相対 import か、自分自身の名前での自己参照）。
+      } else if (!target.entries.includes(resolved)) {
+        violations.push(
+          `${target.name} の公開の入口でないファイルへの、メンバーをまたぐ import である: ${label}`,
+        );
+      } else if (isRelative(written)) {
+        violations.push(
+          `メンバーをまたぐ相対 import である（${target.name} の入口へは "${target.name}" の` +
+            `指定子で入る）: ${label}`,
+        );
+      } else if (source === undefined || !source.declared.has(target.name)) {
+        violations.push(
+          `${sourceName} の package.json の dependencies が宣言していないメンバーへの依存である: ` +
+            label,
+        );
+      }
+      continue;
+    }
+    if (source !== undefined && source.declared.has(packageOf(written).name)) {
+      external++;
+      continue;
+    }
+    violations.push(
+      `${sourceName} の package.json の dependencies が宣言していない外部の依存である: ${label}`,
+    );
   }
   return { violations, external };
 };
 
-/** 入口 1 つのモジュールグラフの辺を `deno info --json` で採る。 */
-const readEdges = async (entry: string): Promise<Edge[]> => {
-  // cwd はワークスペース根（`@karume/*` をワークスペース内の実体へ解決させるため）。
-  const info = await new Deno.Command(Deno.execPath(), {
-    args: ["info", "--json", "--frozen-lockfile", entry],
-    cwd: REPO_ROOT,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const decoder = new TextDecoder();
-  if (!info.success) {
+/**
+ * 相対でない指定子の解決先。メンバーの名前の指定子（`@karume/hub/node` など）はそのメンバーの
+ * `exports` の入口のファイルへ、それ以外（外部・スキームつき）は書かれたままを返す（辿らない）。
+ *
+ * MUST: メンバーの `exports` に無いサブパスは推測せず throw する（Node の解決でも失敗する形）。
+ */
+const resolverOf = (members: readonly Member[]) => (from: string, written: string): string => {
+  if (schemeOf(written) !== undefined) return written;
+  const { name, subpath } = packageOf(written);
+  const member = members.find((candidate) => candidate.name === name);
+  if (member === undefined) return written;
+  const entry = member.exports.get(subpath);
+  if (entry === undefined) {
     throw new Error(
-      `依存グラフの門: deno info が失敗した（${entry}）:\n${decoder.decode(info.stderr)}`,
+      `依存グラフの門: 解決できない import がある: ${from} → ${written}` +
+        `（${name} の exports に ${subpath} が無い）`,
     );
   }
-  return edgesOf(JSON.parse(decoder.decode(info.stdout)));
+  return entry;
 };
 
 /** メンバー 1 つの全ての入口のグラフを判じる。 */
 const judgeMember = async (member: Member, members: readonly Member[]): Promise<Verdict> => {
   const ownerOf = (file: string): Member | undefined =>
     members.find((candidate) => file.startsWith(candidate.root));
-  const edges = (await Promise.all(member.entries.map(readEdges))).flat();
+  const edges = await walkModuleGraph(member.entries, resolverOf(members));
   return judgeEdges(edges, ownerOf);
 };
 
 const members = await readMembers();
 
 describe("パッケージの依存グラフの門", () => {
-  for (const member of members) {
-    it(`${member.name} の公開の入口から辿った外部の依存は、出どころのパッケージが宣言した jsr だけである`, async () => {
+  for (const member of members.filter((candidate) => !candidate.private)) {
+    it(`${member.name} の公開の入口から辿った外部の依存は、出どころのパッケージが宣言したものだけである`, async () => {
       const { violations } = await judgeMember(member, members);
       assertEquals(
         violations,
         [],
-        "ルートの deno.json の imports はワークスペースのメンバーにも効くので deno check は通るが、" +
+        "ワークスペースでは宣言していない依存も手元で解決できるので型検査は通るが、" +
           "公開したパッケージでは解決できない（または Web 標準 API だけで閉じない）依存がある",
       );
     });
   }
 
   it("対照: hub が宣言した @hdae/fetch-cache の辺を許した外部の辺として数える", async () => {
-    // 出力の形が変わって外部の辺を 1 本も読めなくなると、上の門は無音で緑になる。hub は
+    // 辺の採り方が変わって外部の辺を 1 本も読めなくなると、上の門は無音で緑になる。hub は
     // `@hdae/fetch-cache` を実際に使うので、その辺を読めていることをここで見る。
     const hub = members.find((member) => member.name === "@karume/hub");
     assert(hub !== undefined, "ワークスペースに @karume/hub が無い");
     const { external } = await judgeMember(hub, members);
     assert(
       external > 0,
-      "hub のグラフに許した外部の辺が 1 本も無い（deno info の出力を読めていない）",
+      "hub のグラフに許した外部の辺が 1 本も無い（ソースの辺を読めていない）",
     );
   });
 });
@@ -345,12 +351,12 @@ describe("依存グラフの門の判定", () => {
   const owner = {
     name: "@karume/example",
     entries: ["file:///repo/packages/example/mod.ts"],
-    allowed: allowedPackagesOf({ "@x/y": "jsr:@x/y@^1.2.0" }),
+    declared: declaredPackagesOf({ "@x/y": "catalog:", "@karume/other": "workspace:*" }),
   };
   const other = {
     name: "@karume/other",
     entries: ["file:///repo/packages/other/mod.ts"],
-    allowed: new Set<string>(),
+    declared: new Set<string>(),
   };
   const ownerOf = (path: string) =>
     path.startsWith("file:///repo/packages/example/")
@@ -375,7 +381,7 @@ describe("依存グラフの門の判定", () => {
       resolved: "file:///repo/packages/other/src/x.ts",
     }], ownerOf);
     assertEquals(violations.length, 1);
-    assert(violations[0].includes("@karume/other の公開の入口でない"), violations[0]);
+    assert(violations[0]?.includes("@karume/other の公開の入口でない"), violations[0]);
   });
 
   it("どのメンバーにも属さないワークスペース内のファイルへの import は落とす", () => {
@@ -384,109 +390,116 @@ describe("依存グラフの門の判定", () => {
       ownerOf,
     );
     assertEquals(violations.length, 1);
-    assert(violations[0].includes("どのメンバーにも属さない"), violations[0]);
+    assert(violations[0]?.includes("どのメンバーにも属さない"), violations[0]);
   });
 
-  it("相対パスの宣言はローカルの別名として許可の一覧に入れない", () => {
+  it("ローカルのパスの宣言（file: / link:）は許可の一覧に入れず throw する", () => {
     assertEquals(
-      allowedPackagesOf({ "#util": "./src/util.ts", "@x/y": "jsr:@x/y@^1.2.0" }),
-      new Set(["@x/y@^1.2.0"]),
+      declaredPackagesOf({ "@karume/other": "workspace:*", "@x/y": "catalog:", z: "^1.2.0" }),
+      new Set(["@karume/other", "@x/y", "z"]),
     );
+    assertThrows(() => declaredPackagesOf({ util: "file:../util" }), Error, "ローカルのパス");
+    assertThrows(() => declaredPackagesOf({ util: "link:../util" }), Error, "ローカルのパス");
   });
 
-  it("宣言した jsr はサブパス（jsr:/ の綴り）でも許す", () => {
+  it("宣言した外部のパッケージはサブパスでも許す", () => {
     const verdict = judgeEdges(
-      [{ from: file, written: "@x/y/sub", resolved: "jsr:/@x/y@^1.2.0/sub" }],
+      [{ from: file, written: "@x/y/sub", resolved: "@x/y/sub" }],
       () => owner,
     );
     assertEquals(verdict, { violations: [], external: 1 });
   });
 
-  it("版の範囲が宣言と違う jsr は落とす", () => {
-    const { violations } = judgeEdges(
-      [{ from: file, written: "jsr:@x/y@^2", resolved: "jsr:@x/y@^2" }],
-      () => owner,
-    );
-    assertEquals(violations.length, 1);
-  });
-
-  it("npm は出どころによらず落とし、npm の宣言は許可の一覧に入れない", () => {
-    const { violations } = judgeEdges(
-      [{ from: file, written: "jpeg-js", resolved: "npm:jpeg-js@^0.4.4" }],
-      () => owner,
-    );
-    assertEquals(violations.length, 1);
-    assertThrows(() => allowedPackagesOf({ "jpeg-js": "npm:jpeg-js@^0.4.4" }), Error, "jsr 以外");
-  });
-
-  it("jsr パッケージの中の辺は同じパッケージに閉じていれば許し、別のパッケージへ出れば落とす", () => {
-    const inner = "https://jsr.io/@x/y/1.2.3/mod.ts";
+  it("宣言していない外部のパッケージと、宣言していないメンバーへの依存は落とす", () => {
     const { violations } = judgeEdges([
-      { from: inner, written: "./a.ts", resolved: "https://jsr.io/@x/y/1.2.3/a.ts" },
-      { from: inner, written: "jsr:@x/z@^1", resolved: "jsr:@x/z@^1" },
+      { from: file, written: "jpeg-js", resolved: "jpeg-js" },
+      {
+        from: "file:///repo/packages/other/mod.ts",
+        written: "@karume/example",
+        resolved: "file:///repo/packages/example/mod.ts",
+      },
+    ], ownerOf);
+    assertEquals(violations.length, 2);
+    assert(violations[0]?.includes("宣言していない外部の依存"), violations[0]);
+    assert(violations[1]?.includes("宣言していないメンバーへの依存"), violations[1]);
+  });
+
+  it("npm: / jsr: の指定子は宣言の有無によらず落とす", () => {
+    const { violations } = judgeEdges([
+      { from: file, written: "npm:jpeg-js@^0.4.4", resolved: "npm:jpeg-js@^0.4.4" },
+      { from: file, written: "jsr:@x/y@^1.2.0", resolved: "jsr:@x/y@^1.2.0" },
+    ], () => owner);
+    assertEquals(violations.length, 2);
+    assert(violations[0]?.includes("npm: の指定子"), violations[0]);
+    assert(violations[1]?.includes("jsr: の指定子"), violations[1]);
+  });
+
+  it("node: は許可の一覧のファイル（hub の node.ts）からだけ許し、ほかのファイルからは落とす", () => {
+    const hubNode = new URL("packages/hub/node.ts", REPO_ROOT).href;
+    const { violations } = judgeEdges([
+      { from: hubNode, written: "node:fs/promises", resolved: "node:fs/promises" },
+      { from: file, written: "node:fs", resolved: "node:fs" },
     ], () => owner);
     assertEquals(violations.length, 1);
-    assert(violations[0].includes("jsr:@x/z@^1"), violations[0]);
+    assert(violations[0]?.includes(`${file} → "node:fs"`), violations[0]);
   });
 
-  describe("モジュール直下の typesDependency（`@ts-self-types` / `X-TypeScript-Types`）", () => {
-    // `deno info --json` は型だけの辺を `dependencies[]` でなくモジュール直下に出す（2.9.6 実測）。
-    const infoWithTypes = (dependency: Record<string, unknown>) => ({
-      version: INFO_VERSION,
-      modules: [{
-        specifier: "file:///repo/packages/example/src/impl.js",
-        typesDependency: { specifier: "./impl.d.ts", dependency },
-      }],
-    });
+  describe("ソースから採る辺（型だけの辺 / 型の位置の import / 動的 import）", () => {
+    // 辺は oxc-parser でソースから採る。ファイルの読み出しは模型に差し替える。
+    const impl = "file:///repo/packages/example/src/impl.ts";
+    const graphOf = (sources: Readonly<Record<string, string>>) =>
+      walkModuleGraph([impl], resolverOf([]), (url) => {
+        const source = sources[url];
+        return source === undefined
+          ? Promise.reject(new Error(`not found: ${url}`))
+          : Promise.resolve(source);
+      });
 
-    it("npm の型パッケージを指していれば落とす", () => {
-      const edges = edgesOf(infoWithTypes({ specifier: "npm:@types/x" }));
+    it("npm の型パッケージを指していれば落とす", async () => {
+      const edges = await graphOf({ [impl]: `import type { X } from "npm:@types/x";\n` });
       const { violations } = judgeEdges(edges, ownerOf);
       assertEquals(violations.length, 1);
-      assert(violations[0].includes("npm:@types/x"), violations[0]);
+      assert(violations[0]?.includes("npm:@types/x"), violations[0]);
     });
 
-    it("同じメンバーの内側のファイルを指していれば辺として読んだうえで許す", () => {
-      const edges = edgesOf(
-        infoWithTypes({ specifier: "file:///repo/packages/example/src/impl.d.ts" }),
-      );
-      assertEquals(edges, [{
-        from: "file:///repo/packages/example/src/impl.js",
-        written: "./impl.d.ts",
-        resolved: "file:///repo/packages/example/src/impl.d.ts",
-      }]);
+    it("同じメンバーの内側のファイルを指していれば辺として読んだうえで許す", async () => {
+      const edges = await graphOf({
+        [impl]: `export type { T } from "./types.ts";\n` +
+          `export const lazy = () => import("./lazy.ts");\n`,
+        "file:///repo/packages/example/src/types.ts": "export type T = number;\n",
+        "file:///repo/packages/example/src/lazy.ts": "export {};\n",
+      });
+      assertEquals(edges, [
+        { from: impl, written: "./types.ts", resolved: "file:///repo/packages/example/src/types.ts" },
+        { from: impl, written: "./lazy.ts", resolved: "file:///repo/packages/example/src/lazy.ts" },
+      ]);
       assertEquals(judgeEdges(edges, ownerOf), { violations: [], external: 0 });
     });
 
-    it("解決できていなければ throw する", () => {
-      assertThrows(
-        () => edgesOf(infoWithTypes({ error: 'Import "x" not a dependency' })),
+    it("構文を読めなければ throw する", async () => {
+      await assertRejects(
+        () => graphOf({ [impl]: "import { from './x.ts'\n" }),
         Error,
-        "解決できない",
+        "cannot parse",
       );
     });
 
-    it("どのメンバーにも属さない型ファイルを指していれば落とす", () => {
-      // `@ts-self-types="../outside/types.d.ts"` がメンバーの外を指す形（書かれた指定子は判定に効か
-      // ないので模型の固定値のまま）。
-      const edges = edgesOf(infoWithTypes({ specifier: "file:///repo/outside/types.d.ts" }));
+    it("どのメンバーにも属さない型ファイルを指していれば落とす", async () => {
+      // 型の位置の `import("…")` がメンバーの外を指す形。
+      const edges = await graphOf({
+        [impl]: `export type U = import("../../../outside/types.ts").U;\n`,
+        "file:///repo/outside/types.ts": "export type U = string;\n",
+      });
       const { violations } = judgeEdges(edges, ownerOf);
       assertEquals(violations.length, 1);
-      assert(violations[0].includes("どのメンバーにも属さない"), violations[0]);
+      assert(violations[0]?.includes("どのメンバーにも属さない"), violations[0]);
     });
 
-    it("解決先（dependency）が欠けていれば推測せず throw する", () => {
-      assertThrows(
-        () =>
-          edgesOf({
-            version: INFO_VERSION,
-            modules: [{
-              specifier: "file:///repo/packages/example/src/impl.js",
-              typesDependency: { specifier: "./x.d.ts" },
-            }],
-          }),
+    it("辺の先のファイルを読めなければ推測せず throw する", async () => {
+      await assertRejects(
+        () => graphOf({ [impl]: `export { y } from "./missing.ts";\n` }),
         Error,
-        "typesDependency.dependency がオブジェクトでない",
+        "cannot read file:///repo/packages/example/src/missing.ts",
       );
     });
   });

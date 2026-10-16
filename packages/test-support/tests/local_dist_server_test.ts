@@ -1,0 +1,199 @@
+// 使い捨ての疑似 HF サーバの門（実 GPU も実資産も要らない — 127.0.0.1 の使い捨てポートと
+// 数バイトのダミー part だけ）。
+//
+// 唯一の消費者（`packages/models/tests/e2e_gemma4_pretrained_test.ts`）は実 GPU + 実資産が要る
+// ので、パス門・配信表・起動時検査はここで縛る。観測はステータスコードと文言の部分一致。
+
+import { makeTempDir, mkdir, remove, writeFile, writeTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { serveLocalDist } from "@karume/test-support/local-dist-server";
+
+const encoder = new TextEncoder();
+/** サーバが名乗る主リポと固定 SHA（`local-dist-server.ts` の綴り）。 */
+const REPO = "karume-local/dist";
+const SHA = "0".repeat(40);
+const CROSS_REPO = "someone/shared";
+const CROSS_REVISION = "c".repeat(40);
+const PART0_PATH = "net/model.f16-00001-of-00002.krm";
+const PART1_PATH = "net/model.f16-00002-of-00002.krm";
+const CROSS_PATH = "text_encoder/model.safetensors";
+
+/** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
+const HEADER_BYTES = 24;
+/** 合成 descriptor の 2 文書の長さ（中身は配られるだけ — 長さの整合が manifest の門）。 */
+const GRAPH_BYTES = 10;
+const MODEL_BYTES = 12;
+
+const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
+  [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+
+type Json = Record<string, unknown>;
+
+const fileRef = async (path: string, bytes: Uint8Array<ArrayBuffer>): Promise<Json> => ({
+  path,
+  size: bytes.byteLength,
+  sha256: await sha256Hex(bytes),
+});
+
+/** `<root>/dist` に配布形を、`<root>/shared` に越境ミラーを置く（隣接同名ミラーの配置）。 */
+const buildDist = async (
+  root: string,
+  options: { readonly cross?: readonly string[]; readonly mirror?: boolean } = {},
+): Promise<string> => {
+  const dir = `${root}/dist`;
+  await mkdir(`${dir}/net`, { recursive: true });
+  const part0Bytes = new Uint8Array(new ArrayBuffer(HEADER_BYTES + GRAPH_BYTES + MODEL_BYTES))
+    .fill(0x41);
+  const part1Bytes = encoder.encode("part-bytes");
+  await writeFile(`${dir}/${PART0_PATH}`, part0Bytes);
+  await writeFile(`${dir}/${PART1_PATH}`, part1Bytes);
+  const assets: Json = {};
+  for (const [at, revision] of (options.cross ?? []).entries()) {
+    assets[`cross${at}`] = {
+      path: CROSS_PATH,
+      size: 4,
+      sha256: "1".repeat(64),
+      repo: CROSS_REPO,
+      revision,
+    };
+  }
+  if (options.mirror === true) {
+    await mkdir(`${root}/shared/text_encoder`, { recursive: true });
+    await writeFile(`${root}/shared/${CROSS_PATH}`, encoder.encode("xxxx"));
+  }
+  const manifest = {
+    format: "karume/5",
+    generator: "karume/test",
+    defaultModel: "m",
+    models: {
+      m: {
+        pipeline: "anima/1",
+        weights: {
+          net: {
+            f16: {
+              container: {
+                descriptor: {
+                  graph: { length: GRAPH_BYTES, sha256: "1".repeat(64) },
+                  model: { length: MODEL_BYTES, sha256: "2".repeat(64) },
+                },
+                parts: [
+                  await fileRef(PART0_PATH, part0Bytes),
+                  await fileRef(PART1_PATH, part1Bytes),
+                ],
+              },
+            },
+          },
+        },
+        assets,
+        quants: { f16: { weights: { net: "f16" }, session: {} } },
+        defaultQuant: "f16",
+        pipelineConfig: {},
+      },
+    },
+  };
+  await writeTextFile(`${dir}/karume.json`, JSON.stringify(manifest));
+  return dir;
+};
+
+const withRoot = async (fn: (root: string) => Promise<void>): Promise<void> => {
+  const root = await makeTempDir({ prefix: "karume-dist-server-test-" });
+  try {
+    await fn(root);
+  } finally {
+    await remove(root, { recursive: true });
+  }
+};
+
+/** 本文まで読み切る（読み残すとテストのリソース検査に引っかかる）。 */
+const get = async (
+  url: string,
+): Promise<{ status: number; body: string; length: string | null }> => {
+  const response = await fetch(url);
+  const length = response.headers.get("content-length");
+  return { status: response.status, body: await response.text(), length };
+};
+
+test("serveLocalDist: revision 解決は 40 桁の固定 SHA を返す", async () => {
+  await withRoot(async (root) => {
+    const dir = await buildDist(root);
+    await using server = await serveLocalDist(dir);
+    const hub = server.source.hubUrl;
+    const { status, body } = await get(`${hub}/api/models/${REPO}/revision/main`);
+    assertEquals(status, 200);
+    assertEquals(JSON.parse(body), { sha: SHA });
+  });
+});
+
+test("serveLocalDist: resolve は 200 で返し content-length が実ファイル長と一致する", async () => {
+  await withRoot(async (root) => {
+    const dir = await buildDist(root);
+    await using server = await serveLocalDist(dir);
+    const hub = server.source.hubUrl;
+    const { status, body, length } = await get(`${hub}/${REPO}/resolve/${SHA}/${PART1_PATH}`);
+    assertEquals(status, 200);
+    assertEquals(body, "part-bytes");
+    assertEquals(length, String(encoder.encode("part-bytes").byteLength));
+  });
+});
+
+test("serveLocalDist: 配布形の外へ出る path は 404（`..` / 先頭 / / 空セグメント）", async () => {
+  await withRoot(async (root) => {
+    const dir = await buildDist(root);
+    await using server = await serveLocalDist(dir);
+    const hub = server.source.hubUrl;
+    for (
+      const spelled of [
+        "..%2F..%2Fetc%2Fpasswd",
+        "%2e%2e%2ffoo",
+        "%2Fetc%2Fpasswd",
+        "net%2F%2Fmodel.f16-00002-of-00002.krm",
+      ]
+    ) {
+      const { status } = await get(`${hub}/${REPO}/resolve/${SHA}/${spelled}`);
+      assertEquals(status, 404, `${spelled} が 404 でない`);
+    }
+  });
+});
+
+test("serveLocalDist: revision が宣言と違えば 404、未知の repo も 404", async () => {
+  await withRoot(async (root) => {
+    const dir = await buildDist(root);
+    await using server = await serveLocalDist(dir);
+    const hub = server.source.hubUrl;
+    assertEquals(
+      (await get(`${hub}/${REPO}/resolve/${"d".repeat(40)}/${PART1_PATH}`)).status,
+      404,
+    );
+    assertEquals((await get(`${hub}/someone/other/resolve/${SHA}/${PART1_PATH}`)).status, 404);
+    assertEquals((await get(`${hub}/api/models/someone/other/revision/main`)).status, 404);
+  });
+});
+
+test("serveLocalDist: 越境参照の revision が 1 リポで割れていたら起動時に落ちる", async () => {
+  await withRoot(async (root) => {
+    const dir = await buildDist(root, {
+      cross: [CROSS_REVISION, "e".repeat(40)],
+      mirror: true,
+    });
+    assertThrows(
+      () => serveLocalDist(dir),
+      Error,
+      "越境参照の revision が 1 リポで割れている",
+    );
+  });
+});
+
+test("serveLocalDist: 越境参照のミラーが無ければ起動時に落ちる（実行中の 404 にしない）", async () => {
+  await withRoot(async (root) => {
+    const dir = await buildDist(root, { cross: [CROSS_REVISION] });
+    const error = assertThrows(
+      () => serveLocalDist(dir),
+      Error,
+      "越境参照のミラーが無い",
+    );
+    assertStringIncludes(error.message, CROSS_PATH);
+  });
+});

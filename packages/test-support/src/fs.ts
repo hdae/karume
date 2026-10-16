@@ -37,7 +37,6 @@ import {
   writeFile as nodeWriteFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 export type PathLike = string | URL;
 
@@ -99,9 +98,10 @@ export const readTextFileSync = (path: PathLike): string => nodeReadFileSync(pat
 const flag = (options: WriteOptions | undefined): "a" | "w" | "wx" =>
   options?.createNew === true ? "wx" : options?.append === true ? "a" : "w";
 
-export const writeFile = (path: PathLike, data: Uint8Array, options?: WriteOptions): Promise<void> =>
+// Any buffer is accepted on the write side (a deliberate `ArrayBufferLike` boundary, like Deno.writeFile).
+export const writeFile = (path: PathLike, data: Uint8Array<ArrayBufferLike>, options?: WriteOptions): Promise<void> =>
   nodeWriteFile(path, data, { flag: flag(options) });
-export const writeFileSync = (path: PathLike, data: Uint8Array, options?: WriteOptions): void =>
+export const writeFileSync = (path: PathLike, data: Uint8Array<ArrayBufferLike>, options?: WriteOptions): void =>
   nodeWriteFileSync(path, data, { flag: flag(options) });
 export const writeTextFile = (path: PathLike, text: string, options?: WriteOptions): Promise<void> =>
   nodeWriteFile(path, text, { encoding: "utf8", flag: flag(options) });
@@ -128,8 +128,10 @@ export const removeSync = (path: PathLike, options?: RemoveOptions): void => {
   rmSync(path);
 };
 
+// `mkdtemp` appends the random part to the template string itself, so the template must end with
+// the directory separator when there is no prefix (`join` would strip it).
 const tempTemplate = (options: TempDirOptions | undefined): string =>
-  join(options?.dir ?? tmpdir(), options?.prefix ?? "");
+  `${(options?.dir ?? tmpdir()).replace(/\/+$/, "")}/${options?.prefix ?? ""}`;
 
 export const makeTempDir = (options?: TempDirOptions): Promise<string> => mkdtemp(tempTemplate(options));
 export const makeTempDirSync = (options?: TempDirOptions): string => mkdtempSync(tempTemplate(options));

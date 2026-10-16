@@ -8,19 +8,34 @@
 // - **スナップショット = 増減の検出**（ここ）— 何が正しいかは言わず、前回との差だけを見る。
 //   型 export も含めて採るので、値では観測できない面（`export type` だけの再輸出）も縛れる。
 //
-// 採り方は `deno doc --json <entry>` の出力。`deno.json` の `exports` が entry の真実源で、
-// 面が 1 つ増えれば走査も自動で増える（門の側に面の一覧を二重に持たない）。
+// 採り方は TypeScript 7 の同期 API（`typescript/unstable/sync`）で entry の module symbol の
+// exports を引く。`package.json` の `exports` が entry の真実源で、面が 1 つ増えれば走査も
+// 自動で増える（門の側に面の一覧を二重に持たない）。kind の語彙は以前の採り方（`deno doc`）の
+// 語彙を引き継ぐ（fixture をそのまま読むため — 分類規則は `kindsOf` に書く）。
 //
 // MUST: 読めない形は推測せず throw する — 「採れなかった」を「面が空」と読み替えると、この門は
 // 面が丸ごと消えたことを緑で隠す。
 
+import { fileURLToPath } from "node:url";
 import { assert } from "@std/assert";
+import { readTextFile, writeTextFile } from "@karume/test-support/fs";
+import {
+  isArrowFunction,
+  isClassExpression,
+  isFunctionExpression,
+  isVariableDeclaration,
+  SyntaxKind,
+} from "typescript/unstable/ast";
+import {
+  API,
+  type Checker,
+  type Program,
+  type Symbol as TsSymbol,
+  SymbolFlags,
+} from "typescript/unstable/sync";
 
 /** fixture の形式版。形を変えるときは上げて、読み手（`parseSnapshot`）も直す。 */
 const SCHEMA = 1;
-
-/** 当てにしている `deno doc --json` の出力形式版。 */
-const DOC_VERSION = 2;
 
 /** スナップショットの書き直しを指示する環境変数（未設定 = 比較 / `"write"` = 書き直し）。 */
 const MODE_ENV = "KARUME_SURFACE";
@@ -30,16 +45,15 @@ const HOW_TO_UPDATE =
   `意図した変更なら ${MODE_ENV}=write で同じテストを回してスナップショットを更新し、差分を CHANGELOG に書くこと。`;
 
 /**
- * 公開シンボル 1 つ。`kind` は `deno doc` の語彙をそのまま使う（`class` / `function` /
- * `typeAlias` / `variable` …）— 独自の分類を挟むと、deno 側が語彙を増やしたときに黙って
- * 丸められる。
+ * 公開シンボル 1 つ。`kind` は `deno doc` の語彙（`class` / `function` / `typeAlias` /
+ * `variable` / `interface` / `enum` / `namespace`）— fixture はこの語彙で書かれている。
  */
 export type PublicSymbol = {
   readonly name: string;
   readonly kind: string;
 };
 
-/** fixture の形。`entries` のキーは `deno.json` の `exports` の綴り。 */
+/** fixture の形。`entries` のキーは `package.json` の `exports` の綴り。 */
 type SurfaceSnapshot = {
   readonly schema: number;
   readonly entries: Readonly<Record<string, readonly PublicSymbol[]>>;
@@ -71,7 +85,7 @@ const bySymbol = (left: PublicSymbol, right: PublicSymbol): number =>
 
 /**
  * 集合演算に使う「キー → シンボル」の索引。キーは `name` と `kind` の対を畳んだもので、区切りの
- * `::` は TS の識別子にも `deno doc` の kind にも現れない。キーは**読み戻さない** —— 差分の表示は
+ * `::` は TS の識別子にも kind の語彙にも現れない。キーは**読み戻さない** —— 差分の表示は
  * 索引が持つシンボルそのものから組む。
  */
 const index = (symbols: readonly PublicSymbol[]): ReadonlyMap<string, PublicSymbol> =>
@@ -81,77 +95,129 @@ const index = (symbols: readonly PublicSymbol[]): ReadonlyMap<string, PublicSymb
 const labelOf = (symbol: PublicSymbol): string => `${symbol.name} (${symbol.kind})`;
 
 /**
- * `deno.json` の `exports` を「entry の綴り → パッケージ根からの相対パス」へ正規化する。
+ * `package.json` の `exports` を「entry の綴り → パッケージ根からの相対パス」へ正規化する。
  *
- * 今の 3 パッケージはどれもマップ形。文字列 1 本の形（`"exports": "./mod.ts"`）は JSR の仕様上
- * ありうる形への備えで、キーを持たないので、マップ形の既定面と同じ `"."` を綴りとして与える
- * （fixture のキーを 2 つの形で割らない）。
+ * 今の 3 パッケージはどれもマップ形で、値は文字列 1 本。文字列 1 本の形（`"exports": "./mod.ts"`）
+ * はキーを持たないので、マップ形の既定面と同じ `"."` を綴りとして与える（fixture のキーを 2 つの
+ * 形で割らない）。条件付き exports（値がオブジェクト）は読まずに throw する — どの条件の entry を
+ * 面と見なすかはこの門では決めない。
  */
 const exportEntries = (exports: unknown): ReadonlyMap<string, string> => {
   if (typeof exports === "string") return new Map([[".", exports]]);
   const entries = new Map<string, string>();
-  for (const [spec, target] of Object.entries(record(exports, "deno.json の exports"))) {
+  for (const [spec, target] of Object.entries(record(exports, "package.json の exports"))) {
     entries.set(spec, text(target, `exports["${spec}"]`));
   }
-  if (entries.size === 0) throw new Error("公開面の門: deno.json の exports が空である");
+  if (entries.size === 0) throw new Error("公開面の門: package.json の exports が空である");
   return entries;
 };
 
+/** symbol の flags → kind。1 つの symbol が複数を併せ持つ（宣言の併合）なら kind も複数出す。 */
+const KIND_BY_FLAG: readonly (readonly [SymbolFlags, string])[] = [
+  [SymbolFlags.Class, "class"],
+  [SymbolFlags.Function, "function"],
+  [SymbolFlags.Variable, "variable"],
+  [SymbolFlags.TypeAlias, "typeAlias"],
+  [SymbolFlags.Interface, "interface"],
+  [SymbolFlags.Enum, "enum"],
+  [SymbolFlags.Module, "namespace"],
+];
+
 /**
- * entry 1 つが export するシンボルを `deno doc --json` から採る。
- *
- * `cwd` はワークスペース根（`@karume/*` のバレ指定子をワークスペース内の実体へ解決させるため —
- * パッケージ側の `imports` だけで解決すると JSR の公開版を見に行く）。
+ * 変数宣言 1 つの kind。`deno doc` は初期化子が**直に** arrow 関数 / function 式なら
+ * `function`、class 式なら `class` と数え、それ以外（括弧・`as`・`satisfies` で包んだ形を
+ * 含む）は `variable` と数える（deno 2 系の `deno doc --json` で実測 2026-10-16）。fixture は
+ * その語彙で書かれているので同じ規則で分ける。
  */
-const readSurface = async (entry: URL, workspaceRoot: URL): Promise<readonly PublicSymbol[]> => {
-  const doc = await new Deno.Command(Deno.execPath(), {
-    args: ["doc", "--json", entry.href],
-    cwd: workspaceRoot,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const decoder = new TextDecoder();
-  if (!doc.success) {
-    throw new Error(
-      `公開面の門: deno doc が失敗した（${entry.href}）:\n${decoder.decode(doc.stderr)}`,
-    );
+const variableKind = (declaration: TsSymbol["declarations"][number], name: string): string => {
+  const node = declaration.resolve();
+  if (node === undefined || !isVariableDeclaration(node)) {
+    throw new Error(`公開面の門: ${name} の変数宣言を AST へ解決できない`);
   }
-  const parsed = record(JSON.parse(decoder.decode(doc.stdout)), "deno doc の出力");
-  if (parsed.version !== DOC_VERSION) {
-    throw new Error(
-      `公開面の門: deno doc の出力が version ${DOC_VERSION} でない（${String(parsed.version)}）` +
-        " — 採り方を見直すこと",
-    );
-  }
-  const nodes = record(parsed.nodes, "deno doc の nodes");
-  const node = nodes[entry.href];
-  if (node === undefined) {
-    throw new Error(
-      `公開面の門: ${entry.href} の節が deno doc の出力に無い（節: ${
-        Object.keys(nodes).join(", ")
-      }）`,
-    );
-  }
-  // module doc は `symbols` の**兄弟**（`module_doc`）なので、`symbols` だけ読めば除外できる。
-  const symbols = list(record(node, "deno doc の節").symbols, "節の symbols");
-  const collected: PublicSymbol[] = [];
-  for (const rawSymbol of symbols) {
-    const symbol = record(rawSymbol, "symbols の要素");
-    const name = text(symbol.name, "シンボルの name");
-    for (const rawDeclaration of list(symbol.declarations, `${name} の declarations`)) {
-      const declaration = record(rawDeclaration, `${name} の declarations の要素`);
-      // `--private` を付けていないので export 以外は出ない。出たら採り方の前提が崩れている。
-      const declarationKind = text(declaration.declarationKind, `${name} の declarationKind`);
-      if (declarationKind !== "export") {
-        throw new Error(
-          `公開面の門: ${name} の declarationKind が export でない（${declarationKind}）`,
-        );
-      }
-      collected.push({ name, kind: text(declaration.kind, `${name} の kind`) });
+  const initializer = node.initializer;
+  if (initializer === undefined) return "variable";
+  if (isArrowFunction(initializer) || isFunctionExpression(initializer)) return "function";
+  if (isClassExpression(initializer)) return "class";
+  return "variable";
+};
+
+/**
+ * export された symbol（別名なら解決済みの実体）1 つの kind の一覧。overload は flags が 1 つ
+ * なので 1 件に畳まれる。型だけの再輸出（`export type { X }`）も実体の kind で数える
+ * （`deno doc` も区別しなかった）。
+ */
+const kindsOf = (symbol: TsSymbol, name: string): readonly string[] => {
+  const kinds: string[] = [];
+  for (const [flag, kind] of KIND_BY_FLAG) {
+    if ((symbol.flags & flag) === 0) continue;
+    if (flag !== SymbolFlags.Variable) {
+      kinds.push(kind);
+      continue;
+    }
+    for (const declaration of symbol.declarations) {
+      if (declaration.kind !== SyntaxKind.VariableDeclaration) continue;
+      kinds.push(variableKind(declaration, name));
     }
   }
-  // overload は同じ名前で宣言が複数並ぶ（kind は同じ）。索引に入れる過程で 1 つへ畳まれる。
+  // 語彙に無い形（ここまで来るのは想定外）を「面に無い」と読み替えない。
+  if (kinds.length === 0) {
+    throw new Error(`公開面の門: ${name} の kind を決められない（flags: ${symbol.flags}）`);
+  }
+  return kinds;
+};
+
+/** entry 1 つが export するシンボルを型検査器から採る。 */
+const readSurface = (checker: Checker, program: Program, entry: string): PublicSymbol[] => {
+  const sourceFile = program.getSourceFile(entry);
+  if (sourceFile === undefined) {
+    throw new Error(`公開面の門: ${entry} が tsconfig.json の program に入っていない`);
+  }
+  const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
+  if (moduleSymbol === undefined) {
+    throw new Error(`公開面の門: ${entry} の module symbol が無い（module として読めない）`);
+  }
+  const collected: PublicSymbol[] = [];
+  for (const exported of checker.getExportsOfModule(moduleSymbol)) {
+    // 名前は export 側の綴り（`export { a as b }` は `b`）、kind は別名を辿った実体から採る。
+    const name = exported.name;
+    const target = (exported.flags & SymbolFlags.Alias) === 0
+      ? exported
+      : checker.getAliasedSymbol(exported);
+    if (checker.isUnknownSymbol(target)) {
+      throw new Error(`公開面の門: ${entry} の ${name} の別名を解決できない`);
+    }
+    for (const kind of kindsOf(target, name)) collected.push({ name, kind });
+  }
+  // 同じ kind が重なる形（同名の変数宣言が複数）は索引に入れる過程で 1 つへ畳まれる。
   return [...index(collected).values()].sort(bySymbol);
+};
+
+/**
+ * パッケージの全 entry の公開面を採る。tsgo のプロセスを 1 つ起こし、ワークスペース根の
+ * `tsconfig.json` の program 上で読む（`@karume/*` の指定子をワークスペース内の実体へ
+ * 解決させるため）。
+ */
+const collectSurfaces = (
+  entries: ReadonlyMap<string, string>,
+  packageRoot: URL,
+  workspaceRoot: URL,
+): Map<string, readonly PublicSymbol[]> => {
+  const api = new API({ cwd: fileURLToPath(workspaceRoot) });
+  try {
+    const configFile = fileURLToPath(new URL("tsconfig.json", workspaceRoot));
+    const project = api.updateSnapshot({ openProjects: [configFile] }).getProject(configFile);
+    if (project === undefined) {
+      throw new Error(`公開面の門: ${configFile} の project を開けない`);
+    }
+    const actual = new Map<string, readonly PublicSymbol[]>();
+    for (const [spec, target] of entries) {
+      const entry = fileURLToPath(new URL(target, packageRoot));
+      actual.set(spec, readSurface(project.checker, project.program, entry));
+    }
+    return actual;
+  } finally {
+    api.close();
+  }
 };
 
 /** fixture を読み、形を検査して返す。 */
@@ -180,7 +246,7 @@ const parseSnapshot = (source: string, file: URL): SurfaceSnapshot => {
 /** fixture の書き出し形（2 スペース・entry の綴り順・末尾改行）。 */
 const serialize = (entries: ReadonlyMap<string, readonly PublicSymbol[]>): string => {
   const ordered: Record<string, readonly PublicSymbol[]> = {};
-  // entry の綴りで並べる（`deno.json` の並べ替えが fixture の差分に化けないようにする）。
+  // entry の綴りで並べる（`package.json` の並べ替えが fixture の差分に化けないようにする）。
   for (const spec of [...entries.keys()].sort(compare)) ordered[spec] = entries.get(spec) ?? [];
   return `${JSON.stringify({ schema: SCHEMA, entries: ordered }, null, 2)}\n`;
 };
@@ -188,32 +254,29 @@ const serialize = (entries: ReadonlyMap<string, readonly PublicSymbol[]>): strin
 /**
  * パッケージ 1 つの公開面をスナップショットと突き合わせる（`KARUME_SURFACE=write` なら書き直す）。
  *
- * @param packageRoot パッケージ根（`deno.json` の置き場）。fixture は
+ * @param packageRoot パッケージ根（`package.json` の置き場）。fixture は
  *   `<packageRoot>/tests/fixtures/public-surface.json`。
  */
 export const assertPublicSurface = async (packageRoot: URL): Promise<void> => {
-  const mode = Deno.env.get(MODE_ENV);
+  const mode = process.env[MODE_ENV];
   if (mode !== undefined && mode !== "write") {
     throw new Error(`公開面の門: ${MODE_ENV} が受けるのは未設定か "write" だけである（${mode}）`);
   }
   const config = record(
-    JSON.parse(await Deno.readTextFile(new URL("deno.json", packageRoot))),
-    `${packageRoot.href}deno.json`,
+    JSON.parse(await readTextFile(new URL("package.json", packageRoot))),
+    `${packageRoot.href}package.json`,
   );
-  // `packages/<pkg>/` の 2 つ上がワークスペース根（root `deno.json` の置き場）。
+  // `packages/<pkg>/` の 2 つ上がワークスペース根（root `tsconfig.json` の置き場）。
   const workspaceRoot = new URL("../../", packageRoot);
-  const actual = new Map<string, readonly PublicSymbol[]>();
-  for (const [spec, target] of exportEntries(config.exports)) {
-    actual.set(spec, await readSurface(new URL(target, packageRoot), workspaceRoot));
-  }
+  const actual = collectSurfaces(exportEntries(config.exports), packageRoot, workspaceRoot);
 
   const snapshotFile = new URL("tests/fixtures/public-surface.json", packageRoot);
   if (mode === "write") {
-    await Deno.writeTextFile(snapshotFile, serialize(actual));
+    await writeTextFile(snapshotFile, serialize(actual));
     return;
   }
 
-  const expected = parseSnapshot(await Deno.readTextFile(snapshotFile), snapshotFile).entries;
+  const expected = parseSnapshot(await readTextFile(snapshotFile), snapshotFile).entries;
   const specs = [...new Set([...Object.keys(expected), ...actual.keys()])].sort(compare);
   const diff: string[] = [];
   // 面（entry）そのものの増減は symbol 差分と**独立に**出す。両側の不在は下の `?? []` で

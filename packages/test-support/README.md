@@ -30,8 +30,9 @@ names and its Japanese text. Do not fix, prune, or restructure tests in this pha
    - hand-built platform objects that fail with "Property '__brand' is missing" → `platformObject<T>({...})`.
 3. Type-check: `node packages/test-support/codemod/check-ported.mjs <files>` must print 0 errors.
    (The gate hides errors in files that still reference Deno; everything else must be clean.)
-4. Run: `flock /tmp/karume-gpu.lock vp test <files>` — the lock serialises GPU use between
-   concurrent porting sessions. Compare the Vitest summary with the Deno baseline for the same files
+4. Run: `vp test <files>`. Wrap runs that exercise the GPU (family lanes, runtime GPU tests) in
+   `flock /tmp/karume-gpu.lock …` so concurrent sessions do not share the device; CPU-only files
+   (the Vitest setup only creates the Dawn instance) do not need the lock. Compare the Vitest summary with the Deno baseline for the same files
    (`node packages/test-support/codemod/deno-baseline.mjs <files>` prints the Deno counts from
    `outputs/misc/0.15-baseline-2026-10-16/deno-junit/*.xml`): the number of passed tests and of
    skipped (= Deno "ignored") tests must match. Sub-steps are not counted by Vitest; a mismatch in

@@ -32,7 +32,7 @@ for (const [parent, pkg] of ["packages", "tools"].flatMap((p) => readdirSync(joi
 const config = join(root, `tsconfig.check-${process.pid}.json`);
 writeFileSync(config, JSON.stringify({
   extends: "./tsconfig.json",
-  include: ["packages/*/*.ts", "packages/*/src/**/*.ts", "packages/test-support/src/**/*.ts", "tools/{lint,published-smoke,verify-diff,release}/*.ts", "tools/{lint,published-smoke,verify-diff,release}/src/**/*.ts", "vite.config.ts", ...ported.sort()],
+  include: ["packages/*/*.ts", "packages/*/src/**/*.ts", "packages/test-support/src/**/*.ts", "tools/lint/*.ts", "tools/published-smoke/*.ts", "tools/verify-diff/*.ts", "tools/release/*.ts", "vite.config.ts", ...ported.sort()],
 }, null, 2));
 let lines;
 try {
