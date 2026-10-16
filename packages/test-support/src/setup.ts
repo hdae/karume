@@ -18,12 +18,19 @@ type DawnHost = typeof globalThis & { __karumeDawnGpu?: GPU };
 const host = globalThis as DawnHost;
 if (host.__karumeDawnGpu === undefined) {
   const flags = (process.env.KARUME_DAWN_FLAGS ?? "").split(/\s+/).filter((flag) => flag !== "");
-  host.__karumeDawnGpu = create(flags);
+  try {
+    host.__karumeDawnGpu = create(flags);
+  } catch (error) {
+    // A machine without a usable WebGPU backend (e.g. a CI runner without Vulkan) behaves like a
+    // browser without WebGPU: `navigator.gpu` stays undefined, GPU cases are skipped, and the
+    // all-skip gate (KARUME_ALLOW_NO_GPU) decides whether that is acceptable.
+    console.warn(`[karume] Dawn could not be created; running without navigator.gpu: ${String(error)}`);
+  }
   Object.assign(globalThis, globals);
 }
 
 const current: GPU | undefined = navigator.gpu;
-if (current === undefined) {
+if (current === undefined && host.__karumeDawnGpu !== undefined) {
   Object.defineProperty(navigator, "gpu", {
     value: host.__karumeDawnGpu,
     configurable: true,

@@ -1,13 +1,12 @@
 name: CI
 
-# 品質ゲート。実 GPU テストは CI ランナーで回らない（ADR 0005: アダプタ無し環境は明示 SKIP・
-# リリース判定は実 GPU 緑が必須）。ここでは KARUME_ALLOW_NO_GPU=1 で GPU ケースを SKIP させて
-# 非 GPU テストの回帰を捕え、加えて `deno publish --dry-run` で JSR 公開グラフ（slow types・
-# 公開 API 型出力）を検証する。実 GPU 緑の担保はローカル / self-hosted の責務。
+# Quality gates. Real-GPU tests do not run on CI runners (ADR 0005: an environment without an
+# adapter skips them explicitly; a release needs a green real-GPU run). Here the GPU cases are
+# skipped with KARUME_ALLOW_NO_GPU=1 so that the non-GPU tests catch regressions. Publishing
+# dry-runs return once the 0.15.0 registry decision (JSR / npm) is made.
 #
-# Python 側は ADR 0065（core / recipe 分離）の境界に合わせて 2 job に割る — PyPI へ出る
-# `exporter-core` と、リポ専用の `export-recipes`。job を分けること自体が「wheel の境界」を
-# 目に見える形にする。
+# The Python side is split in two jobs along the ADR 0065 boundary (core / recipes): the
+# `exporter-core` that ships to PyPI and the repository-only `export-recipes`.
 
 on:
   pull_request:
@@ -22,34 +21,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: denoland/setup-deno@v2
+      - uses: pnpm/action-setup@v4
         with:
-          # ローカル開発機と同一にピン（fmt の挙動はバージョンで変わり得るため）。
-          deno-version: "2.9.6"
-      - name: Format
-        run: deno fmt --check
-      - name: Lint
-        run: deno lint
-      - name: Type-check
-        # 対象は root deno.json の check タスクと共有（examples 込み — CI とローカル verify の
-        # 検査範囲を二重定義しない）。
-        run: deno task check
-      - name: Test (non-GPU)
-        # GPU ケースは GPU_AVAILABLE=false で ignore され、全 SKIP 門番は環境変数で抜ける。
-        # 実重み資産（outputs/series/）と配布形ミラー（models/）— いずれも git 追跡外 — も CI には
-        # 無いので、資産側・配布側の門番も抜ける。
+          # Same major as the local toolchain (vp-managed pnpm); the lockfile format is v9.
+          version: 12
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        # Build scripts stay declined (pnpm-workspace.yaml allowBuilds); the lockfile must be current.
+        run: pnpm install --frozen-lockfile
+      - name: Lint + type-check
+        # Formatting is checked once the Oxfmt switch lands (phase 1, last commit); until then
+        # `vp check` runs lint (Oxlint, type-aware) and the TypeScript 7 type check.
+        run: pnpm exec vp check --no-fmt
+      - name: Test (core lane, non-GPU)
+        # GPU cases are skipped (no adapter) and the all-skip gates are opened explicitly. The real
+        # weight assets (outputs/series/) and distribution mirrors (models/) are not on CI either,
+        # so the asset and distribution gates are opened too. Family lanes need those assets and
+        # run locally before a release.
         env:
           KARUME_ALLOW_NO_GPU: "1"
           KARUME_ALLOW_NO_ASSETS: "1"
           KARUME_ALLOW_NO_DISTRIBUTION: "1"
-        run: deno test -A
-      - name: Publish dry-run
-        # 認証不要（denoland/deno#22679 修正済み）。3 パッケージの公開グラフを検証する。
-        run: deno publish --dry-run
-      - name: Lockfile is up to date
-        # 上の step が deno.lock を書き換えていたら、コミットされた lock が陳腐化している。
-        # `deno task --frozen` は子の `deno check` へ伝わらないので、書き換えの有無を差分で見る。
-        run: git diff --exit-code deno.lock
+        run: pnpm exec vp test --project core
 
   exporter-core:
     # PyPI `karume`（汎用 exporter core）の門番。torch は pytorch-cpu index の CPU wheel なので
