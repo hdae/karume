@@ -89,6 +89,17 @@ const contentKey = (repo: string, ref: FileRef): readonly string[] => [
 /** 在庫の突合キー。repo はプレフィックスで絞り込み済みなので (path, sha256) の組で足りる。 */
 const stockKey = (path: string, sha256: string): string => `${path} ${sha256}`;
 
+/**
+ * Read strategy for the fetch layer. Its own default is "stream" only on Deno (a Blob loads the
+ * whole body into memory there); Node's Blob is in-memory as well, so Node gets "stream" too, and
+ * browsers keep the layer's default ("blob": a lazy slice of a disk-backed Blob). The runtime is
+ * probed through optional globals only, not through any runtime API (ADR 0002).
+ */
+const defaultReadStrategy = (): "stream" | undefined => {
+  const host = globalThis as { readonly Deno?: unknown; readonly process?: { readonly versions?: { readonly node?: unknown } } };
+  return host.Deno !== undefined || typeof host.process?.versions?.node === "string" ? "stream" : undefined;
+};
+
 const pinnedHfSource = (
   repo: string,
   generation: string,
@@ -189,8 +200,10 @@ const pinnedHfSource = (
     // 「先に prefetchAssets を通せ」という手順を負わせないため（消費側は行を要求するだけでよい）。
     openFile: async (ref, { signal }): Promise<AssetRangeReader> => {
       const spec = { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size };
+      const strategy = defaultReadStrategy();
       const openOptions = {
         ...shared,
+        ...(strategy === undefined ? {} : { strategy }),
         ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
       };
       let opened = await openHfFile(target, spec, openOptions);
@@ -211,8 +224,8 @@ const pinnedHfSource = (
       const entry = opened;
       return {
         // 費用の型は取得層の読み出し戦略そのもの: "blob" は遅延 Blob の slice（offset に依らない）・
-        // "stream" は本文の読み飛ばし（offset に比例）。Deno の既定は "stream"（`blob()` が全量を
-        // ヒープへ載せるため）なので、Deno では "scan"・ブラウザでは "seek" になる。
+        // "stream" は本文の読み飛ばし（offset に比例）。Deno と Node では "stream"（`blob()` が全量を
+        // ヒープへ載せるため — `defaultReadStrategy`）なので "scan"・ブラウザでは "seek" になる。
         cost: entry.strategy === "blob" ? "seek" : "scan",
         read: async (offset, length, readOptions) => {
           const bytes = await entry.read(offset, length, readOptions);

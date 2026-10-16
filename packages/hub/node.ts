@@ -63,8 +63,9 @@ export const nodeDirectory = (
       try {
         return owned(await readFile(at, { ...(signal === undefined ? {} : { signal }) }));
       } catch (error) {
-        // MUST: propagate aborts untouched (the common layer tells "cancelled" from "failed").
-        if (signal?.aborted === true) throw error;
+        // MUST: an abort surfaces as the caller's reason, untouched (the common layer tells "cancelled"
+        // from "failed"; Node wraps it in an AbortError whose cause is the reason).
+        if (signal?.aborted === true) throw signal.reason;
         // Missing, unreadable, or a directory: all fail loudly as "cannot read". Naming the real
         // path is this adapter's responsibility — the common layer only knows the manifest path.
         throw new Error(`@karume/hub/node: cannot read ${at}`, { cause: error });
