@@ -61,7 +61,7 @@ fragmentation_table() {
     echo "### FAILED xet-read-token を取れない（$OWNER/$NAME）— 断片化を検証していない"
     return 1
   fi
-  if ! cas=$(print -r -- "$tok" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); if (typeof t.casUrl!=="string"||typeof t.accessToken!=="string") Deno.exit(1); console.log(t.casUrl+" "+t.accessToken)'); then
+  if ! cas=$(print -r -- "$tok" | node -e 'const t=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (typeof t.casUrl!=="string"||typeof t.accessToken!=="string") process.exit(1); console.log(t.casUrl+" "+t.accessToken)'); then
     echo "### FAILED xet-read-token の応答に casUrl / accessToken が無い（$OWNER/$NAME）— 断片化を検証していない"
     return 1
   fi
@@ -89,7 +89,7 @@ fragmentation_table() {
     fi
     # 終了コード 1 = terms が無い（JSON として読めない場合も含む）/ 2 = fetch_info が無いか形が違う。
     # fetch_info を読めない行も FAILED にする（ranges=0 の行を出すと取得範囲が少ない健全な行に見える）。
-    stats=$(print -r -- "$recon" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); if (!Array.isArray(t.terms)) Deno.exit(1); const fi=t.fetch_info; if (typeof fi!=="object"||fi===null||Array.isArray(fi)||!Object.values(fi).every(Array.isArray)) Deno.exit(2); console.log(t.terms.length+" "+Object.values(fi).reduce((n,r)=>n+r.length,0)+" "+new Set(t.terms.map(x=>x.hash)).size)')
+    stats=$(print -r -- "$recon" | node -e 'const t=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (!Array.isArray(t.terms)) process.exit(1); const fi=t.fetch_info; if (typeof fi!=="object"||fi===null||Array.isArray(fi)||!Object.values(fi).every(Array.isArray)) process.exit(2); console.log(t.terms.length+" "+Object.values(fi).reduce((n,r)=>n+r.length,0)+" "+new Set(t.terms.map(x=>x.hash)).size)')
     statsCode=$?
     if (( statsCode == 2 )); then
       echo "### FAILED $rel reconstruction の応答に fetch_info が無い（hash $hash）"
@@ -127,7 +127,7 @@ case $MODE in
     # models/ の下へ写した実験用ミラーや symlink も止まる）。shard-cache の退避や hf の起動より前に
     # 置く。読めない part 0 と、容器が 1 本も無いディレクトリも落とす（検証できなかったものを合格に
     # 見せない）。
-    deno run --no-config --allow-read "${SELF:h}/container_license.ts" "models/$NAME" 2>&1 | tee -a "$LOG"
+    node "${SELF:h}/container_license.ts" "models/$NAME" 2>&1 | tee -a "$LOG"
     if (( ${pipestatus[1]} != 0 )); then
       echo "### FAILED 公開前の門: 容器の出所を確かめられない / 未宣言の印がある（models/$NAME）— 上げない" | tee -a "$LOG"
       exit 1
@@ -166,7 +166,7 @@ case $MODE in
       echo "### xet log $L $ENABLED query_dedup=$Q" >> "$LOG"
     done
     (( ${#XET_LOGS} > 0 )) || echo "### xet log 今回の upload の log が無い" >> "$LOG"
-    SHA=$(curl -sS "https://huggingface.co/api/models/$OWNER/$NAME/revision/main" | deno eval 'const t=await new Response(Deno.stdin.readable).text(); console.log(JSON.parse(t).sha)')
+    SHA=$(curl -sS "https://huggingface.co/api/models/$OWNER/$NAME/revision/main" | node -e 'const t=require("node:fs").readFileSync(0,"utf8"); console.log(JSON.parse(t).sha)')
     echo "### main sha $SHA" >> "$LOG"
     # 表は判定の前に出す（落ちる場合でも断片化の実測を残す）。0 件なら表側が落ちる。
     fragmentation_table >> "$LOG" || { echo "### FAILED 断片化を検証できなかった" >> "$LOG"; summarize; exit 1 }

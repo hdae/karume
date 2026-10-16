@@ -5,9 +5,9 @@
 // ③ 読めない文書で黙って空にしないこと の 3 面である。
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
-import { buildDiff, type LoadedResults, parseResultsDocument } from "./diff.ts";
-import { parseArgs, single } from "./main.ts";
+import { describe, it } from "@karume/test-support/test";
+import { buildDiff, type LoadedResults, parseResultsDocument } from "../diff.ts";
+import { parseArgs, single } from "../main.ts";
 
 /** 席 1 本ぶんの合成入力（`results.json` の実物と同じ形を境界の検査に通す）。 */
 const seat = (

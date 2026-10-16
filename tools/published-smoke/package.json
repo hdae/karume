@@ -6,7 +6,14 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "smoke": "node main.ts",
+    "smoke:deno": "deno run -A main.ts",
     "test": "vp test"
+  },
+  "dependencies": {
+    "@karume/hub": "jsr:^0.14.0",
+    "@karume/models": "jsr:^0.14.0",
+    "webgpu": "catalog:"
   },
   "devDependencies": {
     "@karume/test-support": "workspace:*"

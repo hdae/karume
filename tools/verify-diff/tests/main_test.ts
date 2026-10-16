@@ -1,31 +1,39 @@
-// verify-diff の CLI 面の門（GPU も outputs/ も触らない — 席は毎回 Deno.makeTempDir に合成する）。
+// verify-diff の CLI 面の門（GPU も outputs/ も触らない — 席は毎回一時ディレクトリに合成する）。
 //
 // 純関数部は diff_test.ts が押さえるので、ここで固定するのは**プロセスとして走らせたときだけ
 // 観測できる面**である: ① 根の歩き方（席の読み込み・`--root` の綴りの解釈）② 終了コードの契約
 // （差異は 0・読めない文書だけ 1 — ADR 0106）③ Markdown と `--json` の出力の形。
 //
-// 道具立ては tools/opbench/main_test.ts:44 と同じ（Deno.Command で main.ts を起動する）。
+// 道具立て: node:child_process の execFile で `node main.ts` を子プロセスとして起動する。
 
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 
-const ENTRY = new URL("./main.ts", import.meta.url);
-const DECODER = new TextDecoder();
+const ENTRY = fileURLToPath(new URL("../main.ts", import.meta.url));
 
 type Run = { readonly code: number; readonly stdout: string; readonly stderr: string };
 
-const run = async (args: readonly string[]): Promise<Run> => {
-  const output = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "-A", ENTRY.href, ...args],
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  return {
-    code: output.code,
-    stdout: DECODER.decode(output.stdout),
-    stderr: DECODER.decode(output.stderr),
-  };
-};
+/** 終了コードが 0 でなくても結果として返す（起動そのものの失敗だけ reject する）。 */
+const run = (args: readonly string[]): Promise<Run> =>
+  new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [ENTRY, ...args],
+      { encoding: "utf8" },
+      (error, stdout, stderr) => {
+        const code = error === null ? 0 : error.code;
+        if (typeof code !== "number") {
+          reject(error);
+          return;
+        }
+        resolve({ code, stdout, stderr });
+      },
+    );
+  });
 
 /** `results.json` 1 本ぶんの中身（書き手 `packages/runtime/tests/helpers/results.ts` と同じ形）。 */
 const document = (
@@ -51,8 +59,8 @@ const writeSeat = async (
   body: unknown,
 ): Promise<void> => {
   const directory = `${root}/${environmentDir}/${seat}`;
-  await Deno.mkdir(directory, { recursive: true });
-  await Deno.writeTextFile(
+  await mkdir(directory, { recursive: true });
+  await writeTextFile(
     `${directory}/results.json`,
     typeof body === "string" ? body : JSON.stringify(body),
   );
@@ -63,12 +71,12 @@ const withRoot = async (
   place: (root: string) => Promise<void>,
   use: (root: string) => Promise<void>,
 ): Promise<void> => {
-  const root = await Deno.makeTempDir({ prefix: "verify-diff-" });
+  const root = await makeTempDir({ prefix: "verify-diff-" });
   try {
     await place(root);
     await use(root);
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 };
 
@@ -222,7 +230,7 @@ describe("verify-diff CLI: 読めない根", () => {
   it("席に results.json が無ければ終了コード 1", async () => {
     await withRoot(
       async (root) => {
-        await Deno.mkdir(`${root}/deno-a/2026-09-21_anima`, { recursive: true });
+        await mkdir(`${root}/deno-a/2026-09-21_anima`, { recursive: true });
       },
       async (root) => {
         const result = await run(["--root", root]);
@@ -290,7 +298,7 @@ describe("verify-diff CLI: 読めない根", () => {
 
 describe("verify-diff CLI: --root の綴り", () => {
   it("`%` を含む根は実名のまま読む（`%41` を `A` に解かない）", async () => {
-    const parent = await Deno.makeTempDir({ prefix: "verify-diff-escape-" });
+    const parent = await makeTempDir({ prefix: "verify-diff-escape-" });
     try {
       // 実体 `x%41y` と、`%41` を解いた先の `xAy` を並べて置く（別の場所を黙って読む形）。
       await writeSeat(
@@ -321,12 +329,12 @@ describe("verify-diff CLI: --root の綴り", () => {
         `%41 を解いた別の根を読んでいる:\n${result.stdout}`,
       );
     } finally {
-      await Deno.remove(parent, { recursive: true });
+      await remove(parent, { recursive: true });
     }
   });
 
   it("`#` を含む根も読める（URL の素片として切り落とさない）", async () => {
-    const parent = await Deno.makeTempDir({ prefix: "verify-diff-hash-" });
+    const parent = await makeTempDir({ prefix: "verify-diff-hash-" });
     try {
       const root = `${parent}/hash#dir`;
       await writeSeat(
@@ -343,7 +351,7 @@ describe("verify-diff CLI: --root の綴り", () => {
       assertEquals(result.code, 0, result.stderr);
       assertStringIncludes(result.stdout, "| base | pass |");
     } finally {
-      await Deno.remove(parent, { recursive: true });
+      await remove(parent, { recursive: true });
     }
   });
 });

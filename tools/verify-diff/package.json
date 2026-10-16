@@ -6,6 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "verify-diff": "node main.ts",
     "test": "vp test"
   },
   "devDependencies": {

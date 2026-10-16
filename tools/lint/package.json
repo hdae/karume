@@ -9,6 +9,7 @@
     "test": "vp test"
   },
   "devDependencies": {
-    "@karume/test-support": "workspace:*"
+    "@karume/test-support": "workspace:*",
+    "vite-plus": "catalog:"
   }
 }

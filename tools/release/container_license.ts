@@ -3,7 +3,7 @@
 // （`unknown` など・大文字小文字を問わない — `UNIDENTIFIED_LICENSES`）があれば拒む。容器が 1 本も無い
 // ディレクトリも拒む（読む出所が無いものを合格に見せない）。
 //
-//     deno run --no-config --allow-read tools/release/container_license.ts models/<repo>
+//     node tools/release/container_license.ts models/<repo>
 //
 // `hf-upload.zsh upload` が上げる前に呼ぶ（置き場ではなく容器の中身で閉じる — 手で `models/` の下へ
 // 写したミラーや symlink も、中身で止まる）。容器ごとに `### provenance <相対 path> license=<識別子>`
@@ -14,7 +14,10 @@
 // part 1 以降（const 領域・重みの block）は magic を持たない。`KRGC`（`krg`）は provenance を引き継がない
 // （§9）ので読まない。偶然 `KRMC` で始まる part 1 以降は descriptor として読めずに落ちる（安全側）。
 //
-// MUST: import を持たない（台本と一緒に一時ディレクトリへ写して試す — `hf_upload_test.ts`）。
+// MUST: `node:` の組み込み以外を import しない（台本と一緒に一時ディレクトリへ写して試す —
+// `tests/hf_upload_test.ts`）。
+
+import { type FileHandle, open, readdir, realpath, stat } from "node:fs/promises";
 
 /** ライセンス未宣言の印（`wan.umt5_intake.UNDECLARED_LICENSE` と同じ綴り）。 */
 export const UNDECLARED_LICENSE = "NOASSERTION";
@@ -55,18 +58,19 @@ export type ContainerLicense = {
 };
 
 const readExactly = async (
-  file: Deno.FsFile,
+  file: FileHandle,
+  position: number,
   length: number,
   where: string,
-): Promise<Uint8Array> => {
+): Promise<Uint8Array<ArrayBuffer>> => {
   const buffer = new Uint8Array(length);
   let offset = 0;
   while (offset < length) {
-    const read = await file.read(buffer.subarray(offset));
-    if (read === null) {
+    const { bytesRead } = await file.read(buffer, offset, length - offset, position + offset);
+    if (bytesRead === 0) {
       throw new ContainerLicenseError(`${where}: ${length} バイトを読む前にファイルが終わった`);
     }
-    offset += read;
+    offset += bytesRead;
   }
   return buffer;
 };
@@ -81,13 +85,12 @@ const descriptorLength = (view: DataView, offset: number, where: string): number
 
 /** `.krm` 1 本の provenance.license（part 0 でなければ `undefined`）。 */
 export const readPart0License = async (path: string): Promise<string | undefined> => {
-  const file = await Deno.open(path, { read: true });
+  const file = await open(path, "r");
   try {
     const head = new Uint8Array(4);
-    const got = await file.read(head);
-    if (got !== 4 || new TextDecoder().decode(head) !== "KRMC") return undefined;
-    await file.seek(0, Deno.SeekMode.Start);
-    const header = await readExactly(file, HEADER_BYTES, path);
+    const { bytesRead } = await file.read(head, 0, 4, 0);
+    if (bytesRead !== 4 || new TextDecoder().decode(head) !== "KRMC") return undefined;
+    const header = await readExactly(file, 0, HEADER_BYTES, path);
     const view = new DataView(header.buffer);
     const version = view.getUint32(4, true);
     if (version !== 1) {
@@ -95,9 +98,8 @@ export const readPart0License = async (path: string): Promise<string | undefined
     }
     const graphBytes = descriptorLength(view, 8, path);
     const modelBytes = descriptorLength(view, 16, path);
-    await file.seek(HEADER_BYTES + graphBytes, Deno.SeekMode.Start);
     const text = new TextDecoder("utf-8", { fatal: true }).decode(
-      await readExactly(file, modelBytes, path),
+      await readExactly(file, HEADER_BYTES + graphBytes, modelBytes, path),
     );
     let model: unknown;
     try {
@@ -120,7 +122,7 @@ export const readPart0License = async (path: string): Promise<string | undefined
     }
     return license;
   } finally {
-    file.close();
+    await file.close();
   }
 };
 
@@ -130,19 +132,19 @@ export const readContainerLicenses = async (root: string): Promise<ContainerLice
   const visited = new Set<string>();
   let containerFiles = 0;
   const walk = async (directory: string, relative: string): Promise<void> => {
-    const real = await Deno.realPath(directory);
+    const real = await realpath(directory);
     if (visited.has(real)) return;
     visited.add(real);
-    const entries: Deno.DirEntry[] = [];
-    for await (const entry of Deno.readDir(directory)) entries.push(entry);
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      const path = `${directory}/${entry.name}`;
-      const rel = relative === "" ? entry.name : `${relative}/${entry.name}`;
-      const info = await Deno.stat(path);
-      if (info.isDirectory) {
+    const names = await readdir(directory);
+    names.sort((a, b) => a.localeCompare(b));
+    for (const name of names) {
+      const path = `${directory}/${name}`;
+      const rel = relative === "" ? name : `${relative}/${name}`;
+      // stat は symlink を辿る（張ったミラーも中身で読む）。
+      const info = await stat(path);
+      if (info.isDirectory()) {
         await walk(path, rel);
-      } else if (info.isFile && entry.name.endsWith(".krm")) {
+      } else if (info.isFile() && name.endsWith(".krm")) {
         containerFiles += 1;
         const license = await readPart0License(path);
         if (license !== undefined) found.push({ path: rel, license });
@@ -165,10 +167,11 @@ export const readContainerLicenses = async (root: string): Promise<ContainerLice
 };
 
 if (import.meta.main) {
-  const root = Deno.args[0];
-  if (root === undefined || Deno.args.length !== 1) {
+  const args = process.argv.slice(2);
+  const root = args[0];
+  if (root === undefined || args.length !== 1) {
     console.log("### FAILED 使い方: container_license.ts <配布ディレクトリ>");
-    Deno.exit(2);
+    process.exit(2);
   }
   try {
     const licenses = await readContainerLicenses(root);
@@ -182,12 +185,12 @@ if (import.meta.main) {
           `${undeclared.length} 本 — 手元の実験用ミラーは公開しない（ADR 0122 決定 6）: ` +
           undeclared.map(({ path, license }) => `${path}（${license}）`).join(", "),
       );
-      Deno.exit(1);
+      process.exit(1);
     }
   } catch (error) {
     console.log(
       `### FAILED 容器の出所を読めない — ${error instanceof Error ? error.message : String(error)}`,
     );
-    Deno.exit(1);
+    process.exit(1);
   }
 }

@@ -3,6 +3,9 @@ import { laneProjects } from "./packages/test-support/src/lanes.ts";
 
 export default defineConfig({
   lint: {
+    // Repository rule (ADR 0002): TypedArray types in packages/*/src must name their buffer type.
+    jsPlugins: [{ name: "karume", specifier: "./tools/lint/oxlint-plugin.ts" }],
+    rules: { "karume/typed-array-buffer": "error" },
     options: { typeAware: true, typeCheck: true },
   },
   test: {

@@ -1,16 +1,25 @@
 // 公開済み JSR パッケージからの疎通（docs/release-runbook.md §5）。
 //
-// ワークスペース配下で `jsr:@karume/*` を import すると Deno は**ローカルの workspace member に
-// 解決する**ため、リポの deno.json の下で走らせても公開物の疎通にならない。このツールは自前の
-// deno.json（workspace 非 member）で起動して registry の公開物を取りに行く（起動時に Deno が
-// 「parent workspace を無視する」warning を 1 行出すのは想定どおり）。公開直後は依存の最小経過
-// 時間チェックに掛かるので、同 deno.json が `jsr:@karume/*` だけを除外している。
+// Node（主）と Deno（従 — Deno から公開物が import できることの確認）の両方で同じファイルを走らせる。
+// 公開物は bare 指定子（`@karume/hub` / `@karume/models`）で引き、その解決先を registry の公開物に
+// 固定するのはこのディレクトリ自前の設定:
+//   - Node: package.json の `jsr:^<版>` 依存（pnpm が npm.jsr.io から入れる — workspace:* ではない）
+//   - Deno: deno.json の import map（`jsr:@karume/*@<版>`）。ワークスペース配下で `jsr:@karume/*` を
+//     引くと Deno は**ローカルの workspace member に解決する**ので、自前の deno.json（workspace 非
+//     member）で起動する（起動時に「parent workspace を無視する」warning が 1 行出るのは想定どおり）。
+//     公開直後は依存の最小経過時間チェックに掛かるので、同 deno.json が `jsr:@karume/*` だけを除外している。
+// 解決された版は期待の版（packages/models/package.json）と突き合わせ、食い違えば落とす。
 //
 // 検査 = models barrel の取得元対応表（`KARUME_SOURCES` — 全家族の和集合。ADR 0092）の全
 // エントリで manifest を解決し、1 家族（sbv2）は `fromPretrained` まで通す（GPU が要る —
 // `--manifests-only` で省く）。
-// 起動: deno task smoke:published [--manifests-only]
+// 起動: node tools/published-smoke/main.ts [--manifests-only]
+//       deno run -A main.ts [--manifests-only]（tools/published-smoke で）
 
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isPinRef, parseSmokeArgs, type PinRef } from "./cli.ts";
 
 type HubModule = {
@@ -22,6 +31,15 @@ type Sbv2Module = {
   };
   SBV2_SOURCES: Record<string, unknown>;
 };
+type DawnModule = { create: (flags: string[]) => GPU };
+
+// 動的 import の指定子は `string` 型の変数で渡す（型は付かない — 使う面だけ構造で宣言して受ける）。
+// 型付けの対象はワークスペースの版ではなく公開物で、リテラルにすると Deno の型検査はワークスペース
+// member へ、tsc は未導入の node_modules へ解決しに行く。
+const HUB: string = "@karume/hub";
+const MODELS: string = "@karume/models";
+const MODELS_SBV2: string = "@karume/models/sbv2";
+const DAWN: string = "webgpu";
 
 /**
  * 動的 import で受けた値を**キー付きの表として引ける形**へ絞る。`typeof === "object"` だけだと
@@ -30,26 +48,73 @@ type Sbv2Module = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-const readPublishedVersion = async (): Promise<string> => {
-  const url = new URL("../../packages/models/deno.json", import.meta.url);
-  const parsed: unknown = JSON.parse(await Deno.readTextFile(url));
-  const version = (parsed as { version?: unknown }).version;
+const readVersion = async (path: string): Promise<string> => {
+  const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+  const version = isRecord(parsed) ? parsed.version : undefined;
   if (typeof version !== "string") {
-    throw new Error(`version が読めない: ${url}`);
+    throw new Error(`version が読めない: ${path}`);
   }
   return version;
 };
 
-const { manifestsOnly } = parseSmokeArgs(Deno.args);
-const version = await readPublishedVersion();
+/**
+ * bare 指定子が実際に解決される公開版。
+ *
+ * - Deno は import map の jsr 指定子を版の解決前の綴りのまま返す（`jsr:@karume/hub@0.14.0`）—
+ *   deno.json の imports は完全一致の版で書く（`^` を付けると期待の版と一致せず落ちる）。
+ * - Node は導入済みパッケージ内の file URL を返す — 最寄りの package.json が版を持つ。
+ */
+const resolvedVersion = async (specifier: string): Promise<string> => {
+  const resolved = import.meta.resolve(specifier);
+  const jsr = /^jsr:\/?@karume\/[^@/]+@([^/]+)/.exec(resolved)?.[1];
+  if (jsr !== undefined) return jsr;
+  if (resolved.startsWith("file:")) {
+    let dir = dirname(fileURLToPath(resolved));
+    while (!existsSync(join(dir, "package.json"))) {
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return await readVersion(join(dir, "package.json"));
+  }
+  throw new Error(`${specifier} の解決先から版が読めない: ${resolved}`);
+};
+
+/**
+ * Node には `navigator.gpu` が無く、公開版の `fromPretrained` は `navigator.gpu` からアダプタを取る。
+ * Node でだけ Dawn（npm `webgpu`）を `navigator.gpu` として置く（ブラウザと Deno が持つ形 —
+ * test-support の setup と同じ置き方）。
+ */
+const ensureNavigatorGpu = async (): Promise<void> => {
+  const current: GPU | undefined = navigator.gpu;
+  if (current !== undefined) return;
+  const { create } = (await import(DAWN)) as DawnModule;
+  Object.defineProperty(navigator, "gpu", {
+    value: create([]),
+    configurable: true,
+    enumerable: true,
+  });
+};
+
+const { manifestsOnly } = parseSmokeArgs(process.argv.slice(2));
+const version = await readVersion(
+  fileURLToPath(new URL("../../packages/models/package.json", import.meta.url)),
+);
 console.log(`published smoke: @karume/* @ ${version}`);
 
-// 動的 import の指定子は実行時の文字列なので型は付かない — 使う面だけ構造で宣言して受ける。
-const models = (await import(`jsr:@karume/models@${version}`)) as Record<
-  string,
-  unknown
->;
-const hub = (await import(`jsr:@karume/hub@${version}`)) as HubModule;
+for (const specifier of [HUB, MODELS]) {
+  const resolved = await resolvedVersion(specifier);
+  if (resolved !== version) {
+    throw new Error(
+      `${specifier} が ${resolved} に解決された（期待 ${version} — packages/models/package.json）。` +
+        "Node は tools/published-smoke/package.json の依存を上げて pnpm install、" +
+        "Deno は tools/published-smoke/deno.json の imports を合わせる",
+    );
+  }
+}
+
+const models = (await import(MODELS)) as Record<string, unknown>;
+const hub = (await import(HUB)) as HubModule;
 
 const sources: unknown = models.KARUME_SOURCES;
 if (!isRecord(sources)) {
@@ -82,8 +147,8 @@ if (manifestsOnly) {
     `published smoke OK: ${pins.length} manifests（fromPretrained は省略）`,
   );
 } else {
-  const { Sbv2Pipeline, SBV2_SOURCES } =
-    (await import(`jsr:@karume/models@${version}/sbv2`)) as Sbv2Module;
+  await ensureNavigatorGpu();
+  const { Sbv2Pipeline, SBV2_SOURCES } = (await import(MODELS_SBV2)) as Sbv2Module;
   const pin: unknown = SBV2_SOURCES["sbv2-jvnv"];
   if (!isPinRef(pin)) throw new Error('SBV2_SOURCES["sbv2-jvnv"] が pin エントリでない');
   const started = performance.now();

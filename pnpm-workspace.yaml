@@ -30,6 +30,12 @@ minimumReleaseAge: 10080
 # user-chosen pin), so the age guard cannot add protection there and would only block installs for
 # the first week after each Vite+ release. Ordinary dependencies stay under the guard.
 minimumReleaseAgeExclude:
+  # The maintainer's own packages (same exemption as deno.json's minimumDependencyAge.exclude):
+  # published-smoke installs the freshly published @karume/* right after a release.
+  - "@karume/*"
+  - "@jsr/karume__*"
+  - "@hdae/*"
+  - "@jsr/hdae__*"
   - vite-plus
   - "@voidzero-dev/*"
   - vitest

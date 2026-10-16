@@ -1,5 +1,9 @@
 {
   "lock": false,
+  "imports": {
+    "@karume/hub": "jsr:@karume/hub@0.14.0",
+    "@karume/models": "jsr:@karume/models@0.14.0"
+  },
   "fmt": {
     "lineWidth": 100,
     "proseWrap": "preserve"

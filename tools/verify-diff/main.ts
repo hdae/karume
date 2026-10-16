@@ -1,10 +1,10 @@
 /**
  * verify-diff — 複数の機で採った検証結果を並べ、割れた所を 1 コマンドで出す読み取り専用の道具。
  *
- *     deno run -A tools/verify-diff/main.ts
- *     deno run -A tools/verify-diff/main.ts --family anima --family golden
- *     deno run -A tools/verify-diff/main.ts --date 2026-09-21
- *     deno run -A tools/verify-diff/main.ts --root ~/verify-from-another-box --json
+ *     node tools/verify-diff/main.ts
+ *     node tools/verify-diff/main.ts --family anima --family golden
+ *     node tools/verify-diff/main.ts --date 2026-09-21
+ *     node tools/verify-diff/main.ts --root ~/verify-from-another-box --json
  *
  * 読むのは `outputs/verify/<環境キー>/<日付>_<系列>/results.json`（ADR 0106 決定 5 の席）だけで、
  * 何も書かない。2 台目の結果は**手で** `outputs/verify/<環境キー>/` へコピーする前提である
@@ -19,6 +19,9 @@
  * クロスデバイス一致はそもそも保証しない（docs/limitations.md）ので、実物の sha 違いも差異として
  * 挙げるだけ。1 で落ちるのは読めない・スキーマが違うときだけで、黙って「差異なし」は出さない。
  */
+
+import type { Dirent } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 
 import {
   buildDiff,
@@ -40,7 +43,7 @@ const OPTIONS: ReadonlySet<string> = new Set(["root", "family", "date"]);
 /** 値を取らないオプション（opbench の `--キー 値` の対に 1 形だけ足す）。 */
 const FLAGS: ReadonlySet<string> = new Set(["json"]);
 
-const USAGE = `使い方: deno run -A tools/verify-diff/main.ts [オプション]
+const USAGE = `使い方: node tools/verify-diff/main.ts [オプション]
   --root <dir>         結果の根（既定 = このリポジトリの outputs/verify/）
   --family <name>      この系列だけ（繰り返し可・既定 = 根にある全系列）
   --date YYYY-MM-DD    この日付（UTC）の席だけ（既定 = 環境ごとに最新の日付）
@@ -103,7 +106,7 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
  * `xAy` を黙って読む（別の場所の結果を、打った綴りの根として表示する）形になる。
  */
 const directoryUrl = (path: string): URL => {
-  const absolute = path.startsWith("/") ? path : `${Deno.cwd()}/${path}`;
+  const absolute = path.startsWith("/") ? path : `${process.cwd()}/${path}`;
   const encoded = absolute.split("/").map(encodeURIComponent).join("/");
   return new URL(`file://${encoded.endsWith("/") ? encoded : `${encoded}/`}`);
 };
@@ -111,6 +114,10 @@ const directoryUrl = (path: string): URL => {
 /** 子ディレクトリの URL（名前に `#` / `?` が入っても別の場所を指さないようにする）。 */
 const childUrl = (parent: URL, name: string): URL =>
   new URL(`${encodeURIComponent(name)}/`, parent);
+
+/** node:fs が path の不在で投げる失敗（`ENOENT`）。 */
+const isNotFound = (cause: unknown): boolean =>
+  cause instanceof Error && "code" in cause && cause.code === "ENOENT";
 
 /**
  * 根を歩いて `results.json` を全部読む。
@@ -121,28 +128,28 @@ const childUrl = (parent: URL, name: string): URL =>
  */
 const loadRoot = async (root: URL, label: string): Promise<LoadedResults[]> => {
   const loaded: LoadedResults[] = [];
-  let environments: Deno.DirEntry[];
+  let environments: Dirent[];
   try {
-    environments = await Array.fromAsync(Deno.readDir(root));
+    environments = await readdir(root, { withFileTypes: true });
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) {
+    if (isNotFound(cause)) {
       throw new Error(`結果の根が無い: ${label}（--root で置き場を指す）`);
     }
     throw cause;
   }
   for (const environment of environments) {
-    if (!environment.isDirectory) continue;
+    if (!environment.isDirectory()) continue;
     const environmentDir = childUrl(root, environment.name);
-    for (const seat of await Array.fromAsync(Deno.readDir(environmentDir))) {
+    for (const seat of await readdir(environmentDir, { withFileTypes: true })) {
       const matched = SEAT.exec(seat.name);
-      if (!seat.isDirectory || matched === null) continue;
+      if (!seat.isDirectory() || matched === null) continue;
       const path = `${label}/${environment.name}/${seat.name}/results.json`;
       const file = new URL("results.json", childUrl(environmentDir, seat.name));
       let text: string;
       try {
-        text = await Deno.readTextFile(file);
+        text = await readFile(file, "utf8");
       } catch (cause) {
-        if (cause instanceof Deno.errors.NotFound) {
+        if (isNotFound(cause)) {
           throw new Error(`${path}: 席に results.json が無い（壊れた席）`);
         }
         throw cause;
@@ -341,9 +348,10 @@ const run = async (argv: readonly string[]): Promise<void> => {
 
 if (import.meta.main) {
   try {
-    await run(Deno.args);
+    await run(process.argv.slice(2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
-    Deno.exit(1);
+    // process.exit() は非同期の pipe（macOS / Windows）に積まれた stderr を切り落とすので使わない。
+    process.exitCode = 1;
   }
 }

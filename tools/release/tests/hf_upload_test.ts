@@ -7,21 +7,25 @@
 //
 // zsh が無い環境（CI の ubuntu ランナーなど）は明示 SKIP する（ADR 0005）。
 
+import { spawn, spawnSync } from "node:child_process";
+import { copyFile, truncate, writeFile as writeFileWithMode } from "node:fs/promises";
+import { isNotFound, makeTempDir, mkdir, remove, stat, symlink, writeFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertNotEquals, assertRejects } from "@std/assert";
 import {
   ContainerLicenseError,
   isUnidentifiedLicense,
   readContainerLicenses,
   UNDECLARED_LICENSE,
-} from "./container_license.ts";
+} from "../container_license.ts";
 
 const hasZsh = (): boolean => {
-  try {
-    return new Deno.Command("zsh", { args: ["-c", "true"] }).outputSync().success;
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return false;
-    throw error;
+  const result = spawnSync("zsh", ["-c", "true"], { stdio: "ignore" });
+  if (result.error !== undefined) {
+    if (isNotFound(result.error)) return false;
+    throw result.error;
   }
+  return result.status === 0;
 };
 
 const ZSH_AVAILABLE = hasZsh();
@@ -29,8 +33,34 @@ if (!ZSH_AVAILABLE) {
   console.warn("[karume] zsh が無いため tools/release/hf-upload.zsh の門を SKIP する");
 }
 
-const SCRIPT = new URL("./hf-upload.zsh", import.meta.url);
+const SCRIPT = new URL("../hf-upload.zsh", import.meta.url);
 const NAME = "karume-stub";
+
+/**
+ * zsh で台本を走らせ、終了コードと stdout を返す（stderr は読み捨てる）。env は親の環境に重ねる。
+ * 非 0 の終了も結果として返す（台本の終了コードを見るテストなので reject しない）。
+ */
+const runZsh = (
+  args: readonly string[],
+  env: Readonly<Record<string, string>>,
+): Promise<Run> =>
+  new Promise((resolve, reject) => {
+    const child = spawn("zsh", args, {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.resume();
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (code === null) {
+        reject(new Error(`zsh ${args.join(" ")} がシグナル ${signal} で終わった`));
+        return;
+      }
+      resolve({ code, stdout: Buffer.concat(stdout).toString("utf8") });
+    });
+  });
 
 /**
  * HF / CAS を演じる curl。part の名前で応答を決める:
@@ -73,33 +103,30 @@ const runCheck = async (
   parts: Readonly<Record<string, number>>,
   env: Readonly<Record<string, string>> = {},
 ): Promise<Run> => {
-  const root = await Deno.makeTempDir({ prefix: "karume-hf-upload-test-" });
+  const root = await makeTempDir({ prefix: "karume-hf-upload-test-" });
   try {
-    await Deno.mkdir(`${root}/tools/release`, { recursive: true });
-    await Deno.copyFile(SCRIPT, `${root}/tools/release/hf-upload.zsh`);
-    await Deno.mkdir(`${root}/bin`);
-    await Deno.writeTextFile(`${root}/bin/curl`, STUB_CURL, { mode: 0o755 });
-    await Deno.mkdir(`${root}/models/${NAME}`, { recursive: true });
+    await mkdir(`${root}/tools/release`, { recursive: true });
+    await copyFile(SCRIPT, `${root}/tools/release/hf-upload.zsh`);
+    await mkdir(`${root}/bin`);
+    await writeFileWithMode(`${root}/bin/curl`, STUB_CURL, { mode: 0o755 });
+    await mkdir(`${root}/models/${NAME}`, { recursive: true });
     for (const [name, bytes] of Object.entries(parts)) {
       // 疎ファイルで大きさだけ作る（中身は台本が読まない — 見るのは stat の長さ）。
-      await Deno.writeFile(`${root}/models/${NAME}/${name}`, new Uint8Array(0));
-      await Deno.truncate(`${root}/models/${NAME}/${name}`, bytes);
+      await writeFile(`${root}/models/${NAME}/${name}`, new Uint8Array(0));
+      await truncate(`${root}/models/${NAME}/${name}`, bytes);
     }
-    const output = await new Deno.Command("zsh", {
-      args: [`${root}/tools/release/hf-upload.zsh`, "check", NAME],
-      env: { ...env, PATH: `${root}/bin:${Deno.env.get("PATH") ?? ""}` },
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    return { code: output.code, stdout: new TextDecoder().decode(output.stdout) };
+    return await runZsh([`${root}/tools/release/hf-upload.zsh`, "check", NAME], {
+      ...env,
+      PATH: `${root}/bin:${process.env.PATH ?? ""}`,
+    });
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 };
 
 const MIB = 1048576;
 
-Deno.test({
+test({
   name:
     "hf-upload check: 全 part を検証できたら表を出して 0 で終わる（xet に載らない小さいファイルは SKIP 行）",
   ignore: !ZSH_AVAILABLE,
@@ -112,7 +139,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "hf-upload check: HF に無い part は FAILED 行で非 0 になり、健全な行に化けない",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
@@ -125,7 +152,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "hf-upload check: term が 0 本の reconstruction と、大きいのに xet ハッシュの無い part は FAILED",
   ignore: !ZSH_AVAILABLE,
@@ -138,7 +165,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "hf-upload check: 表は terms の隣に fetch_info の取得レンジ数を出し、MiB/term は terms で割ったまま",
   ignore: !ZSH_AVAILABLE,
@@ -162,7 +189,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "hf-upload check: fetch_info の無い reconstruction は FAILED 行で非 0 になり、健全な行に化けない",
   ignore: !ZSH_AVAILABLE,
@@ -178,7 +205,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "hf-upload check: xet-read-token を取れなければ表を始めずに非 0 で落ちる",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
@@ -239,44 +266,42 @@ const runUpload = async (
   files: Readonly<Record<string, Uint8Array>>,
   { linkMirror = false }: { readonly linkMirror?: boolean } = {},
 ): Promise<Upload> => {
-  const root = await Deno.makeTempDir({ prefix: "karume-hf-upload-gate-" });
+  const root = await makeTempDir({ prefix: "karume-hf-upload-gate-" });
   try {
-    await Deno.mkdir(`${root}/tools/release`, { recursive: true });
-    await Deno.copyFile(SCRIPT, `${root}/tools/release/hf-upload.zsh`);
-    await Deno.copyFile(
-      new URL("./container_license.ts", import.meta.url),
+    await mkdir(`${root}/tools/release`, { recursive: true });
+    await copyFile(SCRIPT, `${root}/tools/release/hf-upload.zsh`);
+    await copyFile(
+      new URL("../container_license.ts", import.meta.url),
       `${root}/tools/release/container_license.ts`,
     );
-    await Deno.mkdir(`${root}/tools/.venv/bin`, { recursive: true });
-    await Deno.writeTextFile(`${root}/tools/.venv/bin/hf`, STUB_HF, { mode: 0o755 });
-    await Deno.mkdir(`${root}/home`);
-    await Deno.mkdir(`${root}/models`);
+    await mkdir(`${root}/tools/.venv/bin`, { recursive: true });
+    await writeFileWithMode(`${root}/tools/.venv/bin/hf`, STUB_HF, { mode: 0o755 });
+    await mkdir(`${root}/home`);
+    await mkdir(`${root}/models`);
     const mirror = linkMirror ? `${root}/elsewhere/${NAME}` : `${root}/models/${NAME}`;
-    await Deno.mkdir(mirror, { recursive: true });
-    if (linkMirror) await Deno.symlink(mirror, `${root}/models/${NAME}`);
+    await mkdir(mirror, { recursive: true });
+    if (linkMirror) await symlink(mirror, `${root}/models/${NAME}`);
     for (const [path, bytes] of Object.entries(files)) {
       const target = `${mirror}/${path}`;
-      await Deno.mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true });
-      await Deno.writeFile(target, bytes);
+      await mkdir(target.slice(0, target.lastIndexOf("/")), { recursive: true });
+      await writeFile(target, bytes);
     }
     const marker = `${root}/hf-called`;
-    const output = await new Deno.Command("zsh", {
-      args: [`${root}/tools/release/hf-upload.zsh`, "upload", NAME],
-      // HOME を一時ディレクトリへ向ける（台本は ~/.cache/huggingface の shard-cache を退避する）。
-      env: { HOME: `${root}/home`, HF_CALLED: marker },
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    const hfCalled = await Deno.stat(marker).then(() => true, () => false);
-    return { code: output.code, stdout: new TextDecoder().decode(output.stdout), hfCalled };
+    // HOME を一時ディレクトリへ向ける（台本は ~/.cache/huggingface の shard-cache を退避する）。
+    const output = await runZsh([`${root}/tools/release/hf-upload.zsh`, "upload", NAME], {
+      HOME: `${root}/home`,
+      HF_CALLED: marker,
+    });
+    const hfCalled = await stat(marker).then(() => true, () => false);
+    return { ...output, hfCalled };
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 };
 
 const ENCODER_PARTS = "xxl/text_encoder/model.i8";
 
-Deno.test({
+test({
   name: "hf-upload upload: ライセンス未宣言の印の容器があれば hf を呼ばずに非 0 で落ちる",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
@@ -295,7 +320,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "hf-upload upload: models/ の下へ symlink で張った実験用ミラーも中身で止まる",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
@@ -312,7 +337,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "hf-upload upload: 宣言済みのライセンスの容器だけなら門を通り hf を呼ぶ",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
@@ -330,7 +355,7 @@ Deno.test({
 });
 
 for (const license of ["unknown", "noassertion"]) {
-  Deno.test({
+  test({
     name: `hf-upload upload: 再配布の条件を識別しない値（${license}）の容器も hf を呼ばずに落ちる`,
     ignore: !ZSH_AVAILABLE,
     fn: async () => {
@@ -346,7 +371,7 @@ for (const license of ["unknown", "noassertion"]) {
   });
 }
 
-Deno.test({
+test({
   name:
     "hf-upload upload: 容器が 1 本も無いディレクトリ（生の safetensors だけ）は hf を呼ばずに落ちる",
   ignore: !ZSH_AVAILABLE,
@@ -361,7 +386,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "hf-upload upload: 読めない part 0 は合格に見せず hf を呼ばずに落ちる",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
@@ -376,55 +401,55 @@ Deno.test({
   },
 });
 
-Deno.test("container_license: part 0 だけを読み、part 1 以降と krg は読まない", async () => {
-  const root = await Deno.makeTempDir({ prefix: "karume-container-license-" });
+test("container_license: part 0 だけを読み、part 1 以降と krg は読まない", async () => {
+  const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
-    await Deno.mkdir(`${root}/a`);
-    await Deno.writeFile(`${root}/a/model-00001-of-00002.krm`, part0("apache-2.0"));
-    await Deno.writeFile(`${root}/a/model-00002-of-00002.krm`, weights);
+    await mkdir(`${root}/a`);
+    await writeFile(`${root}/a/model-00001-of-00002.krm`, part0("apache-2.0"));
+    await writeFile(`${root}/a/model-00002-of-00002.krm`, weights);
     const krg = part0("ignored");
     krg.set(encoder.encode("KRGC"), 0);
-    await Deno.writeFile(`${root}/a/model.krg`, krg);
-    await Deno.writeFile(`${root}/b.krm`, part0(UNDECLARED_LICENSE));
+    await writeFile(`${root}/a/model.krg`, krg);
+    await writeFile(`${root}/b.krm`, part0(UNDECLARED_LICENSE));
 
     assertEquals(await readContainerLicenses(root), [
       { path: "a/model-00001-of-00002.krm", license: "apache-2.0" },
       { path: "b.krm", license: UNDECLARED_LICENSE },
     ]);
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 });
 
-Deno.test("container_license: part 列があるのに part 0 が無ければ読めなかったとして落ちる", async () => {
-  const root = await Deno.makeTempDir({ prefix: "karume-container-license-" });
+test("container_license: part 列があるのに part 0 が無ければ読めなかったとして落ちる", async () => {
+  const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
-    await Deno.writeFile(`${root}/model-00002-of-00002.krm`, weights);
+    await writeFile(`${root}/model-00002-of-00002.krm`, weights);
     await assertRejects(
       () => readContainerLicenses(root),
       ContainerLicenseError,
       "part 0 が 1 本も無い",
     );
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 });
 
-Deno.test("container_license: 容器が 1 本も無いディレクトリは読めなかったとして落ちる", async () => {
-  const root = await Deno.makeTempDir({ prefix: "karume-container-license-" });
+test("container_license: 容器が 1 本も無いディレクトリは読めなかったとして落ちる", async () => {
+  const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
-    await Deno.writeFile(`${root}/model.safetensors`, weights);
+    await writeFile(`${root}/model.safetensors`, weights);
     await assertRejects(
       () => readContainerLicenses(root),
       ContainerLicenseError,
       "容器（.krm）が 1 本も無い",
     );
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 });
 
-Deno.test("container_license: 印の綴りの違いと再配布の条件を識別しない値を未宣言として扱う", () => {
+test("container_license: 印の綴りの違いと再配布の条件を識別しない値を未宣言として扱う", () => {
   for (
     const license of [
       UNDECLARED_LICENSE,
@@ -444,16 +469,16 @@ Deno.test("container_license: 印の綴りの違いと再配布の条件を識�
   }
 });
 
-Deno.test("container_license: provenance.license の無いモデル記述は落ちる", async () => {
-  const root = await Deno.makeTempDir({ prefix: "karume-container-license-" });
+test("container_license: provenance.license の無いモデル記述は落ちる", async () => {
+  const root = await makeTempDir({ prefix: "karume-container-license-" });
   try {
-    await Deno.writeFile(`${root}/model.krm`, part0("apache-2.0", { provenance: {} }));
+    await writeFile(`${root}/model.krm`, part0("apache-2.0", { provenance: {} }));
     await assertRejects(
       () => readContainerLicenses(root),
       ContainerLicenseError,
       "provenance.license が無い",
     );
   } finally {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   }
 });

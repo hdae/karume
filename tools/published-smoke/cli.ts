@@ -1,8 +1,8 @@
 /**
  * published-smoke の純ロジック（引数の門と pin エントリの型ガード）。
  *
- * `main.ts` は起動と同時に registry から `jsr:@karume/*` を動的 import するので、テストから
- * import できない（ネットワークと公開物が要る）。門だけをここへ置いて `main_test.ts` が見る。
+ * `main.ts` は起動と同時に registry の公開物（`@karume/*`）を動的 import するので、テストから
+ * import できない（ネットワークと公開物が要る）。門だけをここへ置いて `tests/main_test.ts` が見る。
  */
 
 /** 取得元対応表の 1 エントリ（`{repo, revision}` の pin — ADR 0092）。 */
@@ -13,8 +13,8 @@ export const isPinRef = (value: unknown): value is PinRef =>
   typeof (value as { repo?: unknown }).repo === "string" &&
   typeof (value as { revision?: unknown }).revision === "string";
 
-/** 起動の 2 通り（README の起動例と同じ綴り）。 */
-export const USAGE = "deno task smoke:published [--manifests-only]";
+/** 起動の 2 通り（README の起動例と同じ綴り — Deno での起動は `deno run -A main.ts` に同じ引数）。 */
+export const USAGE = "node tools/published-smoke/main.ts [--manifests-only]";
 
 /** 受ける引数はこれだけ（`--manifests-only` = GPU の要る fromPretrained を省く）。 */
 const KNOWN: ReadonlySet<string> = new Set(["--manifests-only"]);
