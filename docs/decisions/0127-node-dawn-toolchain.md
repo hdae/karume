@@ -239,15 +239,18 @@ differs only where intended (phase 3).
   (`published-smoke` does this). Caveat, from Node's documented behaviour rather than a Karume
   measurement: Node does not strip types from files under `node_modules`, so an npm release of the
   `.ts` sources as they are would not load; npm publishing implies a build step (tsdown).
-- **JSR publishing configuration.** `packages/hub/deno.json` still lists only `./deno` in its JSR
-  `exports`; `./node` must be added before publishing. Which file carries the JSR configuration once
-  the Deno workspace files leave the tree (`deno.json` or `jsr.json`) is not decided.
+- **JSR publishing configuration.** `packages/hub/deno.json` lists `./node` now. Which file carries the
+  JSR configuration once the Deno workspace files leave the tree (`deno.json` or `jsr.json`) is not
+  decided; the root `deno.json` keeps only the workspace, the import map and the dependency-age
+  setting until then.
 - **When `deno.json` / `deno.lock` leave the development tree**, and what happens to the existing
   `deno-*` reference rows in the fixtures (kept as history or pruned).
 - **Whether a Deno import check runs before publishing** (in CI or the runbook), in addition to the
   post-release `published-smoke` run.
 - **When Deno support ends altogether**, given the end of Deno runtime development around 2027-10.
-- **Default Dawn timestamp setting in the test harness** (quantised default, or the 1,024 ns toggle).
+- **Default Dawn timestamp setting in the test harness.** Decided during the port: the setup disables
+  Dawn's 65,536 ns quantisation (`disable-dawn-features=timestamp_quantization`); short dispatches
+  measured 0 ns otherwise. `KARUME_DAWN_FLAGS` replaces the toggles when a run needs others.
 - **Final form of GPU serialisation in Vitest** (the current `forks` + `fileParallelism: false`
   setting works; it has not been reviewed as the long-term setting) and a replacement for the
   Deno sanitizers.
@@ -256,3 +259,15 @@ differs only where intended (phase 3).
   ADR 0005's manual real-browser acceptance stage, which used the examples harness, needs a new
   home in the same step.
 - **Maintenance of the release-age exclusion list** when Vite+ adds or renames its packages.
+- **A CacheStorage for Node.** Node has no Cache API, and hub's HTTP source (Hugging Face) prefetches
+  through one, so a Node application can read local distributions (`@karume/hub/node`) but cannot
+  fetch from the hub today. The tests pass an in-memory `CacheStorage`. A file-backed implementation
+  for Node (or an alternative download path) is needed before Node is a complete host.
+- **The fetch layer's read strategy on Node.** `@hdae/fetch-cache` defaults to the "blob" strategy
+  unless a Deno global exists; hub asks for "stream" on Deno and Node itself (Node's Blob is
+  in-memory). The default belongs in the fetch layer.
+- **What the per-environment sha256 rows hash.** PNG artifacts are hashed as encoded bytes, and the
+  deflate output differs between Deno's and Node's zlib while the pixels are identical (the port
+  measured 0 numeric differences across every family; 69 of 80 Node rows equal the Deno rows and the
+  11 others are all anima PNGs). Hashing the decoded pixels (or the raw tensor) would make the rows
+  runtime-independent.
