@@ -215,13 +215,13 @@ export type WanTextStage =
   /** 資産の埋め込みを引く（`textEmbeds` — Session を張らない）。 */
   | { readonly kind: "precomputed" }
   | {
-    readonly kind: "gpu";
-    /** プロンプト層（前処理 → トークナイザ — 入口の門）。 */
-    readonly encoder: WanPromptEncoder;
-    /** umT5 の部品（generate ごとに Session を張って畳む — 決定 11）。 */
-    readonly component: ModelComponent;
-    readonly contract: Umt5Contract;
-  };
+      readonly kind: "gpu";
+      /** プロンプト層（前処理 → トークナイザ — 入口の門）。 */
+      readonly encoder: WanPromptEncoder;
+      /** umT5 の部品（generate ごとに Session を張って畳む — 決定 11）。 */
+      readonly component: ModelComponent;
+      readonly contract: Umt5Contract;
+    };
 
 /**
  * text 段の資産を読んで組む（構築で呼ぶ — 資産が届いた後・GPU を取りに行く前）。埋め込み資産を解析して
@@ -291,9 +291,9 @@ export const precomputedPromptGate = (
     if (entry === undefined) {
       throw new ModelInputError(
         `${what} がテキスト埋め込み資産の集合に無い（事前計算の経路〈textEncoder: "precomputed"〉は ` +
-          `${embeds.entries.length} 本だけを受ける: ${
-            embeds.entries.map((entry) => entry.name).join(" / ")
-          } — 原文か正規化後の文字列に完全一致させる。${owner}.prompts で引ける）`,
+          `${embeds.entries.length} 本だけを受ける: ${embeds.entries
+            .map((entry) => entry.name)
+            .join(" / ")} — 原文か正規化後の文字列に完全一致させる。${owner}.prompts で引ける）`,
       );
     }
     return entry;
@@ -325,19 +325,17 @@ export const precomputedContexts = (
   dit: DitContract,
 ): WanContexts => ({
   positive: padWanTextEmbedding(plan.positive, dit.contextRows, dit.contextWidth),
-  negative: plan.negative === undefined
-    ? undefined
-    : padWanTextEmbedding(plan.negative, dit.contextRows, dit.contextWidth),
+  negative:
+    plan.negative === undefined
+      ? undefined
+      : padWanTextEmbedding(plan.negative, dit.contextRows, dit.contextWidth),
 });
 
 /** text 段が読む構築済みの材料（パイプラインの内部状態のうちこの段の分 — 構造で受ける）。 */
 type WanTextEncodeState = {
   readonly gpu: GpuContext;
   readonly dit: DitContract;
-  readonly onRunDiagnostics?: (
-    component: WanRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**

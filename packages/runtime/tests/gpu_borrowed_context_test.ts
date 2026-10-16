@@ -115,13 +115,15 @@ const borrowerGraph = (): DeclarationJson => ({
     kslot: { dtype: "f32", shape: [1, KV_HEADS, "C", DEPTH], external: true },
     vslot: { dtype: "f32", shape: [1, KV_HEADS, "C", DEPTH], external: true },
   },
-  nodes: [{
-    op: "attention",
-    ins: ["q"],
-    outs: ["o"],
-    attrs: { scale: SCALE, window: WINDOW, readonly: true },
-    states: { k: "kslot", v: "vslot" },
-  }],
+  nodes: [
+    {
+      op: "attention",
+      ins: ["q"],
+      outs: ["o"],
+      attrs: { scale: SCALE, window: WINDOW, readonly: true },
+      states: { k: "kslot", v: "vslot" },
+    },
+  ],
 });
 
 const tensor = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Tensor => ({
@@ -248,8 +250,7 @@ const assertDraft = async (
 };
 
 test({
-  name:
-    "借り手 context の run が貸し手スロットの実内容と一致する（P < W / = W / ring 一周後・実 GPU）",
+  name: "借り手 context の run が貸し手スロットの実内容と一致する（P < W / = W / ring 一周後・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const capacity = 16;
@@ -568,7 +569,12 @@ const draftWords = async (
   salt: number,
 ): Promise<number[]> => {
   const outputs = await borrower.run(
-    { q: tensor([1, HEADS, 1, DEPTH], seeded(HEADS * DEPTH, (i) => QUERY(i + salt))) },
+    {
+      q: tensor(
+        [1, HEADS, 1, DEPTH],
+        seeded(HEADS * DEPTH, (i) => QUERY(i + salt)),
+      ),
+    },
     {},
     { context: borrowed, queryLength: 1 },
   );
@@ -665,8 +671,7 @@ test({
 });
 
 test({
-  name:
-    "借り手 context の spec の門（borrow と external は対・chunkLength 1・継承する束縛・実 GPU）",
+  name: "借り手 context の spec の門（borrow と external は対・chunkLength 1・継承する束縛・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -911,9 +916,7 @@ const weightBorrowerGraph = (): DeclarationJson => ({
     embed: { dtype: "f32", shape: [VOCAB, HIDDEN] },
     y: { dtype: "f32", shape: [VOCAB, HIDDEN] },
   },
-  nodes: [
-    { op: "embedding", ins: ["embed", "index"], outs: ["y"], attrs: { padding_idx: -1 } },
-  ],
+  nodes: [{ op: "embedding", ins: ["embed", "index"], outs: ["y"], attrs: { padding_idx: -1 } }],
 });
 
 /**
@@ -933,12 +936,14 @@ const convLenderGraph = (): DeclarationJson => ({
     b: { dtype: "f32", shape: [4] },
     y: { dtype: "f32", shape: [1, 4, 4] },
   },
-  nodes: [{
-    op: "conv1d",
-    ins: ["x", "w", "b"],
-    outs: ["y"],
-    attrs: { stride: 1, padding: 0, dilation: 1, groups: 1 },
-  }],
+  nodes: [
+    {
+      op: "conv1d",
+      ins: ["x", "w", "b"],
+      outs: ["y"],
+      attrs: { stride: 1, padding: 0, dilation: 1, groups: 1 },
+    },
+  ],
 });
 
 /** 同じバイト列を conv_transpose1d（`[Cin,Cout,K]` = 行の軸 **1**）で食う借り手。 */
@@ -955,12 +960,14 @@ const convBorrowerGraph = (): DeclarationJson => ({
     c: { dtype: "f32", shape: [2] },
     u: { dtype: "f32", shape: [1, 2, 8] },
   },
-  nodes: [{
-    op: "conv_transpose1d",
-    ins: ["z", "w", "c"],
-    outs: ["u"],
-    attrs: { stride: 1, padding: 0 },
-  }],
+  nodes: [
+    {
+      op: "conv_transpose1d",
+      ins: ["z", "w", "c"],
+      outs: ["u"],
+      attrs: { stride: 1, padding: 0 },
+    },
+  ],
 });
 
 const openConvLenderModel = () =>
@@ -1089,10 +1096,7 @@ test({
         );
 
       // ① 渡し忘れ（宣言 1 本に対して 0 本）
-      const missing = await assertRejects(
-        () => build(weightBorrowerGraph()),
-        ExecutionError,
-      );
+      const missing = await assertRejects(() => build(weightBorrowerGraph()), ExecutionError);
       assert(missing.message.includes("不足 [embed]"), missing.message);
 
       // ② 余剰（宣言に無い名前）
@@ -1160,11 +1164,7 @@ test({
       // ⑥ 借り物の再輸出は拒否する（借用の連鎖は持たない）。
       const chained = await build(weightBorrowerGraph(), { embed: shared });
       try {
-        assertThrows(
-          () => chained.exportWeight("embed"),
-          ExecutionError,
-          "借り物の再輸出",
-        );
+        assertThrows(() => chained.exportWeight("embed"), ExecutionError, "借り物の再輸出");
       } finally {
         await chained.dispose();
       }
@@ -1199,14 +1199,17 @@ const dtypeLenderGraph = (dtype: "f32" | "i32"): DeclarationJson => ({
 });
 
 const openDtypeLenderModel = (dtype: "f32" | "i32") =>
-  openGraphModel(dtypeLenderGraph(dtype), [{
-    graph: "model",
-    initializer: "w",
-    bytes: dtype === "f32"
-      ? f32Bytes([1, 2, -3, 0.5])
-      : new Uint8Array(Int32Array.from([1, 2, -3, 5]).buffer),
-    encoding: { codec: dtype },
-  }]);
+  openGraphModel(dtypeLenderGraph(dtype), [
+    {
+      graph: "model",
+      initializer: "w",
+      bytes:
+        dtype === "f32"
+          ? f32Bytes([1, 2, -3, 0.5])
+          : new Uint8Array(Int32Array.from([1, 2, -3, 5]).buffer),
+      encoding: { codec: dtype },
+    },
+  ]);
 
 /**
  * 借り手: `w` を `shared` で借り（意味論 dtype は `dtype` と宣言）、自前の f32 initializer
@@ -1236,9 +1239,10 @@ const dtypeBorrowerContainer = (dtype: "f32" | "i32" | "bool") => {
       { op: "add", ins: ["c", "bias"], outs: ["y"], attrs: {} },
     ],
   });
-  const declaration: IrDeclaration = dtype === "bool"
-    ? { ...parsed, values: { ...parsed.values, w: { ...parsed.values["w"], dtype: "bool" } } }
-    : parsed;
+  const declaration: IrDeclaration =
+    dtype === "bool"
+      ? { ...parsed, values: { ...parsed.values, w: { ...parsed.values["w"], dtype: "bool" } } }
+      : parsed;
   return openMemoryContainer({
     graphs: { model: declaration },
     tensors: {
@@ -1269,8 +1273,7 @@ const countCreateBuffer = async <T>(
 };
 
 test({
-  name:
-    "共有 initializer の門: 貸し手と借り手の意味論 dtype の不一致は、借り手の GPU 確保より前に fail loudly（実 GPU）",
+  name: "共有 initializer の門: 貸し手と借り手の意味論 dtype の不一致は、借り手の GPU 確保より前に fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1300,13 +1303,11 @@ test({
         dtype: "f32" | "i32" | "bool",
         lenderDtype: string,
       ): Promise<void> => {
-        const { allocated, result: outcome } = await countCreateBuffer(
-          gpu,
-          () =>
-            build(lender, dtype).then(
-              (borrower) => ({ borrower }),
-              (error: unknown) => ({ error }),
-            ),
+        const { allocated, result: outcome } = await countCreateBuffer(gpu, () =>
+          build(lender, dtype).then(
+            (borrower) => ({ borrower }),
+            (error: unknown) => ({ error }),
+          ),
         );
         if ("borrower" in outcome) {
           // 借り手を先に返す — 掴んだままだと finally の貸し手 dispose が「貸し出し中」で拒否され、
@@ -1331,9 +1332,8 @@ test({
 
       // 対照: dtype が一致すれば構築は通り、借り手は自前の `bias` を確保する（= 確保ゼロの観測は
       // 空振りではない）。
-      const { allocated: matchedAllocations, result: matched } = await countCreateBuffer(
-        gpu,
-        () => build(f32Lender, "f32"),
+      const { allocated: matchedAllocations, result: matched } = await countCreateBuffer(gpu, () =>
+        build(f32Lender, "f32"),
       );
       await matched.dispose();
       assert(matchedAllocations > 0, `一致した借り手の確保回数 ${matchedAllocations}`);

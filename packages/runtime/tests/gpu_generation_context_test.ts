@@ -438,8 +438,7 @@ test({
 });
 
 test({
-  name:
-    "スロット単体が maxStorageBufferBindingSize を超える容量は fail loudly（絞った device・実 GPU）",
+  name: "スロット単体が maxStorageBufferBindingSize を超える容量は fail loudly（絞った device・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // Gemma 4 E2B の full 層（131K 容量 × f32）と同型の 1GiB スロット。core 既定 128MiB の機では
@@ -471,10 +470,7 @@ test({
           ExecutionError,
         );
         assert(error.message.includes(`${slotBytes} バイト`), error.message);
-        assert(
-          error.message.includes(`${CORE_STORAGE_BINDING_LIMIT} バイト`),
-          error.message,
-        );
+        assert(error.message.includes(`${CORE_STORAGE_BINDING_LIMIT} バイト`), error.message);
         assertEquals(
           session.diagnostics().stateBacking.contextCount,
           0,
@@ -752,10 +748,7 @@ test({
 
       // 捕捉 P が現在値と割れた進行は fail loudly（リースがあれば起きない = 内部の不変条件破れ）。
       for (const captured of [4, 6]) {
-        const split = assertThrows(
-          () => internals(context).advance(captured, 1),
-          ExecutionError,
-        );
+        const split = assertThrows(() => internals(context).advance(captured, 1), ExecutionError);
         assert(split.message.includes("食い違う"), split.message);
       }
       assertThrows(() => internals(context).writeLengths(4, 1), ExecutionError, "食い違う");
@@ -801,10 +794,7 @@ test({
         // 加算後の overflow はここでしか見られない（両項が u32 以下でも和は溢れる）。
         internals(context).advance(0, U32_MAX);
         assertEquals(context.pastLength, U32_MAX);
-        const overflow = assertThrows(
-          () => internals(context).advance(U32_MAX, 1),
-          ExecutionError,
-        );
+        const overflow = assertThrows(() => internals(context).advance(U32_MAX, 1), ExecutionError);
         assert(overflow.message.includes("u32 の上限"), overflow.message);
         assertEquals(context.pastLength, U32_MAX, "拒否された進行は論理長を動かさない");
         // rewind の位置も pastLength を上限に持つので u32 を超えられない。
@@ -842,18 +832,16 @@ test({
       // ADR 0066 追記 3 の「以後の全操作 fail loudly」— `pastLength` の読みも遮断面に入る
       // （復旧不能な context の論理長を正常値として返すと、ホストは必ず「ここから再開できる」
       // と読む）。
-      for (
-        const operation of [
-          () => context.pastLength,
-          () => context.pendingCommit,
-          () => context.rewind(0),
-          () => context.commit(0),
-          () => internals(context).pastLength(),
-          () => internals(context).acquireRun(),
-          () => internals(context).advance(2, 1),
-          () => internals(context).writeLengths(2, 1),
-        ]
-      ) {
+      for (const operation of [
+        () => context.pastLength,
+        () => context.pendingCommit,
+        () => context.rewind(0),
+        () => context.commit(0),
+        () => internals(context).pastLength(),
+        () => internals(context).acquireRun(),
+        () => internals(context).advance(2, 1),
+        () => internals(context).writeLengths(2, 1),
+      ]) {
         const error = assertThrows(operation, ExecutionError);
         assert(error.message.includes("汚染された"), error.message);
         assert(
@@ -1124,10 +1112,7 @@ test({
       assertEquals(first.status, "fulfilled", "1 本目は従来どおり通る");
       assertEquals(second.status, "rejected");
       assert(second.status === "rejected");
-      assert(
-        second.reason instanceof ExecutionError,
-        `拒否の型が違う: ${String(second.reason)}`,
-      );
+      assert(second.reason instanceof ExecutionError, `拒否の型が違う: ${String(second.reason)}`);
       assert(second.reason.message.includes("並行発行"), second.reason.message);
       assertEquals(context.pastLength, 1, "進んだのは 1 本目のぶんだけ");
 
@@ -1136,7 +1121,10 @@ test({
         session.run({ x: RUN_INPUT }, {}, { context, queryLength: 1 }),
         session.run({ x: RUN_INPUT }, {}, { context: other, queryLength: 1 }),
       ]);
-      assertEquals(parallel.map((result) => result.status), ["fulfilled", "fulfilled"]);
+      assertEquals(
+        parallel.map((result) => result.status),
+        ["fulfilled", "fulfilled"],
+      );
       assertEquals(context.pastLength, 2);
       assertEquals(other.pastLength, 1);
     } finally {
@@ -1333,7 +1321,10 @@ test({
       }
 
       // 容量 16 / 窓 8 → 余裕 8。容量ちょうど（8）なら 0。
-      for (const [capacity, slack] of [[16, 8], [8, 0]] as const) {
+      for (const [capacity, slack] of [
+        [16, 8],
+        [8, 0],
+      ] as const) {
         const context = await sliding.createGenerationContext({
           chunkLength: 1,
           bindings: { C: capacity },
@@ -1442,7 +1433,10 @@ const forkGraph = (): DeclarationJson => ({
       attrs: { scale: 0.5 },
       states: { k: "kslot", v: "vslot" },
     },
-    ...[["k", "kslot"], ["v", "vslot"]].map(([name, slot]) => ({
+    ...[
+      ["k", "kslot"],
+      ["v", "vslot"],
+    ].map(([name, slot]) => ({
       op: "state_append",
       ins: [name],
       outs: [],
@@ -1545,7 +1539,10 @@ test({
       const words = await readSlotWords(gpu, source);
       // 期待値が自明でないこと（書いた行が 0 のままだと、写し漏れも一致してしまう）。
       for (const [name, slot] of Object.entries(words)) {
-        assert(slot.some((word) => word !== 0), `${name}: 元のスロットが全 0（門が空振りする）`);
+        assert(
+          slot.some((word) => word !== 0),
+          `${name}: 元のスロットが全 0（門が空振りする）`,
+        );
       }
 
       forked = await source.fork();
@@ -1626,8 +1623,7 @@ test({
 });
 
 test({
-  name:
-    "fork() を await せず同じ tick に元へ run を発行しても、複製は呼んだ時点の状態を持つ（実 GPU）",
+  name: "fork() を await せず同じ tick に元へ run を発行しても、複製は呼んだ時点の状態を持つ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1675,7 +1671,7 @@ test({
       const disposal = source.dispose();
       // dispose 要求の後の fork は拒否される（拒否の (a)）。
       const late = assertRejects(() => source.fork(), ExecutionError, "dispose 済み");
-      forks.push(...await Promise.all([first, second]));
+      forks.push(...(await Promise.all([first, second])));
       await disposal;
       await late;
 
@@ -1699,8 +1695,7 @@ test({
 });
 
 test({
-  name:
-    "fork の拒否: 汚染・進行中 run・batch の予約中・commit 待ち・dispose 済み Session（実 GPU）",
+  name: "fork の拒否: 汚染・進行中 run・batch の予約中・commit 待ち・dispose 済み Session（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1742,11 +1737,15 @@ test({
 
       // (f) deferred commit の確定待ち（物理 ring に書いた行のどこまでが確定か決まっていない）。
       const deferred = await fresh();
-      await session.run(forkInputs(1, 0), {}, {
-        context: deferred,
-        queryLength: 1,
-        commit: "deferred",
-      });
+      await session.run(
+        forkInputs(1, 0),
+        {},
+        {
+          context: deferred,
+          queryLength: 1,
+          commit: "deferred",
+        },
+      );
       await assertRejects(() => deferred.fork(), ExecutionError, "commit 待ち");
       deferred.commit(1);
       contexts.push(await deferred.fork());
@@ -1901,8 +1900,7 @@ test({
 });
 
 test({
-  name:
-    "分岐の独立の門は空振りでない — 複製の dispatch が元のスロットを束ねると元が動く（故障注入・実 GPU）",
+  name: "分岐の独立の門は空振りでない — 複製の dispatch が元のスロットを束ねると元が動く（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1967,8 +1965,7 @@ const delayedAdoptHost = (
 });
 
 test({
-  name:
-    "同期区間の門は空振りでない — 複製の前に await を挟む host では後続の書き込みを写す（故障注入・実 GPU）",
+  name: "同期区間の門は空振りでない — 複製の前に await を挟む host では後続の書き込みを写す（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -2011,12 +2008,10 @@ test({
       // 待ちを挟むと、同じ同期区間の後続の書き込みが複製に入る（= 上の門が赤になる）。microtask
       // 1 段でもここは捕まる（書き込みが同期区間の中にあるため）。run 経由の書き込みは本体が
       // マイクロタスクの先で積まれるので、そちらで microtask のずれを捕まえる保証は無い（推測）。
-      for (
-        const [label, delay] of [
-          ["microtask", () => Promise.resolve()],
-          ["macrotask", () => new Promise<void>((resolve) => setTimeout(resolve, 0))],
-        ] as const
-      ) {
+      for (const [label, delay] of [
+        ["microtask", () => Promise.resolve()],
+        ["macrotask", () => new Promise<void>((resolve) => setTimeout(resolve, 0))],
+      ] as const) {
         assertEquals(
           await forkThenOverwrite(delayedAdoptHost(gpu, graph, delay)),
           [...later],
@@ -2030,8 +2025,7 @@ test({
 });
 
 test({
-  name:
-    "実 Session の fork も同期区間で複製する — 同じ区間の後続の書き込みは複製に入らない（実 GPU）",
+  name: "実 Session の fork も同期区間で複製する — 同じ区間の後続の書き込みは複製に入らない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 上の門は host を自作するので、`Session.#adopt`（判定 → `allocate` を同期に呼ぶ）の側に
@@ -2075,7 +2069,7 @@ test({
     // 置かない（device と負荷で動く）— 弱い GPU で TDR 域に近づくかを読む材料として残す。
     // MUST: 区間の末尾で queue の完了を待つ。fork が待つ popErrorScope の解決はコピーの実行
     // 完了を待たない（128 MiB で 0.1 ms という観測）ので、それだけでは複製の所要を測れない。
-    const rows = 64 * 1024 * 1024 / (2 * 4 * 4);
+    const rows = (64 * 1024 * 1024) / (2 * 4 * 4);
     const gpu = await acquireGpu();
     const session = await stateSession(
       gpu,
@@ -2097,9 +2091,9 @@ test({
       try {
         assertEquals(internals(forked).bytes, internals(source).bytes);
         console.log(
-          `[gpu] GenerationContext.fork: ${
-            (internals(source).bytes / (1024 * 1024)).toFixed(0)
-          } MiB を ${elapsed.toFixed(1)} ms（確保 + 複製の実行完了まで）`,
+          `[gpu] GenerationContext.fork: ${(internals(source).bytes / (1024 * 1024)).toFixed(
+            0,
+          )} MiB を ${elapsed.toFixed(1)} ms（確保 + 複製の実行完了まで）`,
         );
       } finally {
         await forked.dispose();

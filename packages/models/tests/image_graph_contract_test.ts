@@ -73,21 +73,23 @@ const assetsOf = async (key: string, graph: IrDeclaration) =>
   );
 
 const manifestOf = (pipeline: string, key: string, config: Record<string, unknown>): Manifest =>
-  parseManifest(JSON.stringify({
-    format: "karume/5",
-    generator: "karume/0.1.0",
-    defaultModel: "test",
-    models: {
-      test: {
-        pipeline,
-        weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
-        assets: {},
-        quants: { f32: { weights: { [key]: "f32" }, session: {} } },
-        defaultQuant: "f32",
-        pipelineConfig: config,
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "karume/0.1.0",
+      defaultModel: "test",
+      models: {
+        test: {
+          pipeline,
+          weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
+          assets: {},
+          quants: { f32: { weights: { [key]: "f32" }, session: {} } },
+          defaultQuant: "f32",
+          pipelineConfig: config,
+        },
       },
-    },
-  }));
+    }),
+  );
 
 const IMAGE_CONFIG: Record<string, unknown> = {
   imageWidth: SIZE,
@@ -149,10 +151,7 @@ describe("画像 3 家族の構築前検査", () => {
               ...IMAGE_CONFIG,
               interpolation: "bicubic",
             }),
-            assets: await assetsOf(
-              "depth",
-              declaration("i32", "predicted_depth", [1, SIZE, SIZE]),
-            ),
+            assets: await assetsOf("depth", declaration("i32", "predicted_depth", [1, SIZE, SIZE])),
           }),
         Error,
         "depth-anything: 前処理の pixel_values — グラフ入力 'pixel_values' の dtype が i32",

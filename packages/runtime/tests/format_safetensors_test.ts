@@ -294,8 +294,7 @@ test("parseSafetensorsHeader: ヘッダ区間だけで全量解析と同じ表�
       ...parseSafetensorsHeader(
         HEADER_FIXTURE.slice(0, 8 + headerLength),
         HEADER_FIXTURE.byteLength,
-      )
-        .tensors,
+      ).tensors,
     ],
     [...full.tensors],
   );

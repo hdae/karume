@@ -252,9 +252,10 @@ export class WanUniPcSampler {
       x0[element] = f32(sample[element] - f32(sigma * modelOutput[element]));
     }
     const lastSample = this.#lastSample;
-    const corrected = index > 0 && lastSample !== undefined
-      ? this.#correct(x0, lastSample, this.#thisOrder)
-      : sample;
+    const corrected =
+      index > 0 && lastSample !== undefined
+        ? this.#correct(x0, lastSample, this.#thisOrder)
+        : sample;
     this.#history.push(x0);
     if (this.#history.length > solverOrder) this.#history.shift();
     // lower_order_final: 最後の数 step は残りの step 数まで次数を落とす。warmup は済んだ数 + 1 まで。
@@ -363,7 +364,13 @@ export class WanUniPcSampler {
     const m1 = this.#history[this.#history.length - 2];
     const rk = this.#ratioOf(index - 2, interval);
     // R = stack([rks^0, rks^1]) = [[1, 1], [rk, 1]]（rks = [rk, 1]）。
-    const [rho0, rho1] = solve2x2([[1, 1], [rk, 1]], [b[0], b[1]]);
+    const [rho0, rho1] = solve2x2(
+      [
+        [1, 1],
+        [rk, 1],
+      ],
+      [b[0], b[1]],
+    );
     for (let element = 0; element < out.length; element += 1) {
       const base = f32(
         f32(interval.ratio * lastSample[element]) - f32(interval.x0Weight * m0[element]),

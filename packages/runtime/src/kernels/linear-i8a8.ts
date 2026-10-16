@@ -185,10 +185,11 @@ export const linearI8a8Key = (
   }
   i4GroupShift("linear i8a8", weight, groupSize);
   // w4a8 の group scale を端列でも範囲内に収める世代。i8 の生成物は従来のまま。
-  return `linear:v${weight === "i4" ? 5 : 4}:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${
-    dp4a ? "dp4a" : "dp4aEmu"
-  }` +
-    (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`);
+  return (
+    `linear:v${weight === "i4" ? 5 : 4}:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${
+      dp4a ? "dp4a" : "dp4aEmu"
+    }` + (weight === "i8" ? "" : `${weightKeyPart(weight)}${i4GroupKeyPart(groupSize)}`)
+  );
 };
 
 /**
@@ -215,7 +216,7 @@ fn idot(a: u32, b: u32) -> i32 {
 }`;
 
 /** 添字の加算オフセット（0 は省く — 生成物を読める形に保つ）。 */
-const at = (offset: number): string => offset === 0 ? "" : ` + ${offset}u`;
+const at = (offset: number): string => (offset === 0 ? "" : ` + ${offset}u`);
 
 /**
  * x タイルの担当（K タイルループ不変な行番号と行頭オフセット）。1 スレッドが
@@ -230,9 +231,9 @@ const prologueA = (geometry: I8a8Geometry): string => {
       `  let arow${slot} = ${slot === 0 ? `wid.y * ${tileM}u + ar` : `arow0 + ${slot * stride}u`};
   let arow_base${slot} = arow${slot} * k4;`,
   ).join("\n");
-  return `  // x タイルの担当（${tileM} 行 × ${i8a8KPacks(geometry)} pack を ${
-    i8a8Threads(geometry)
-  } スレッドで ${i8a8ASlots(geometry)} 巡）
+  return `  // x タイルの担当（${tileM} 行 × ${i8a8KPacks(geometry)} pack を ${i8a8Threads(
+    geometry,
+  )} スレッドで ${i8a8ASlots(geometry)} 巡）
   let ar = tid / ${i8a8KPacks(geometry)}u;
   let ap = tid % ${i8a8KPacks(geometry)}u;
   let sa_at = ap * ${tileM}u + ar;
@@ -255,9 +256,9 @@ const prologueB = (geometry: I8a8Geometry, rowStride = "k4"): string => {
       `  let wcol${slot} = ${slot === 0 ? `wid.x * ${tileN}u + wc` : `wcol0 + ${slot * stride}u`};
   let wrow_base${slot} = wcol${slot} * ${rowStride};`,
   ).join("\n");
-  return `  // W タイルの担当（${tileN} 出力チャネル × ${i8a8KPacks(geometry)} pack を ${
-    i8a8Threads(geometry)
-  } スレッドで ${i8a8BSlots(geometry)} 巡）。
+  return `  // W タイルの担当（${tileN} 出力チャネル × ${i8a8KPacks(geometry)} pack を ${i8a8Threads(
+    geometry,
+  )} スレッドで ${i8a8BSlots(geometry)} 巡）。
   // 重みは [n,k] のまま読む（連続方向が k = パック方向なので**転置が要らない**）
   let wc = tid / ${i8a8KPacks(geometry)}u;
   let wp = tid % ${i8a8KPacks(geometry)}u;
@@ -274,12 +275,15 @@ ${slots}`;
 const fillTilesA = (geometry: I8a8Geometry): string => {
   const kPacks = i8a8KPacks(geometry);
   const stride = i8a8FillStride(geometry);
-  const a = Array.from({ length: i8a8ASlots(geometry) }, (_, slot) =>
-    `    var av${slot} = 0u;
+  const a = Array.from(
+    { length: i8a8ASlots(geometry) },
+    (_, slot) =>
+      `    var av${slot} = 0u;
     if (arow${slot} < dims.m && apack < k4) {
       av${slot} = xq[arow_base${slot} + apack];
     }
-    sa[sa_at${at(slot * stride)}] = av${slot};`).join("\n");
+    sa[sa_at${at(slot * stride)}] = av${slot};`,
+  ).join("\n");
   return `    // 範囲外は 0 で埋める（dot4I8Packed(0, x) == 0 なので K 端数でも結果は厳密）
     let apack = t * ${kPacks}u + ap;
 ${a}`;
@@ -289,12 +293,15 @@ ${a}`;
 const fillTilesB = (geometry: I8a8Geometry): string => {
   const kPacks = i8a8KPacks(geometry);
   const stride = i8a8FillStride(geometry);
-  const b = Array.from({ length: i8a8BSlots(geometry) }, (_, slot) =>
-    `    var wv${slot} = 0u;
+  const b = Array.from(
+    { length: i8a8BSlots(geometry) },
+    (_, slot) =>
+      `    var wv${slot} = 0u;
     if (wcol${slot} < dims.n && wpack < k4) {
       wv${slot} = w[wrow_base${slot} + wpack];
     }
-    sb[sb_at${at(slot * stride)}] = wv${slot};`).join("\n");
+    sb[sb_at${at(slot * stride)}] = wv${slot};`,
+  ).join("\n");
   return `    let wpack = t * ${kPacks}u + wp;
 ${b}`;
 };
@@ -313,12 +320,15 @@ const fillTiles = (geometry: I8a8Geometry): string =>
  */
 const fillTilesBI4 = (geometry: I8a8Geometry): string => {
   const stride = i8a8FillStride(geometry);
-  const b = Array.from({ length: i8a8BSlots(geometry) }, (_, slot) =>
-    `    var wv${slot} = 0u;
+  const b = Array.from(
+    { length: i8a8BSlots(geometry) },
+    (_, slot) =>
+      `    var wv${slot} = 0u;
     if (wcol${slot} < dims.n) {
       wv${slot} = i4lanes(wrow_base${slot} + welem);
     }
-    sb[sb_at${at(slot * stride)}] = wv${slot};`).join("\n");
+    sb[sb_at${at(slot * stride)}] = wv${slot};`,
+  ).join("\n");
   return `    // i4 は 1 語 8 要素なので pack の添字は平坦要素（k % g == 0 ∧ g % tileK == 0 で K 端数なし）
     let welem = t * ${geometry.tileK}u + wp * ${I8A8_PACK}u;
 ${b}`;
@@ -332,30 +342,29 @@ ${b}`;
 const store = (geometry: I8a8Geometry, v4: boolean): string => {
   const { regM, regN } = geometry;
   const quads = regN / I8A8_PACK;
-  const rows = Array.from(
-    { length: regM },
-    (_, row) =>
-      row === 0
-        ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${regM}u;`
-        : `  let orow${row} = orow0 + ${row}u;`,
+  const rows = Array.from({ length: regM }, (_, row) =>
+    row === 0
+      ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${regM}u;`
+      : `  let orow${row} = orow0 + ${row}u;`,
   ).join("\n");
   if (v4) {
-    const quadDecls = Array.from(
-      { length: quads },
-      (_, quad) =>
-        quad === 0
-          ? `  let ocq0 = wid.x * ${i8a8TileN(geometry) / I8A8_PACK}u + lid.x * ${quads}u;`
-          : `  let ocq${quad} = ocq0 + ${quad}u;`,
+    const quadDecls = Array.from({ length: quads }, (_, quad) =>
+      quad === 0
+        ? `  let ocq0 = wid.x * ${i8a8TileN(geometry) / I8A8_PACK}u + lid.x * ${quads}u;`
+        : `  let ocq${quad} = ocq0 + ${quad}u;`,
     ).join("\n");
     const blocks = Array.from({ length: quads }, (_, quad) => {
-      const rowStores = Array.from({ length: regM }, (_, row) =>
-        `    if (orow${row} < dims.m) {
+      const rowStores = Array.from(
+        { length: regM },
+        (_, row) =>
+          `    if (orow${row} < dims.m) {
       out[orow${row} * n4 + ocq${quad}] = fma(vec4<f32>(acc${row}_${quad}), xscale[orow${row}] * ws, biasv);
-    }`).join("\n");
+    }`,
+      ).join("\n");
       return `  if (ocq${quad} < n4) {
     // n % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${
-        I8A8_PACK - 1
-      } < n（bias は常に f32 — ADR 0006）
+      I8A8_PACK - 1
+    } < n（bias は常に f32 — ADR 0006）
     let oc = ocq${quad} * ${I8A8_PACK}u;
     let ws = vec4<f32>(wscale[oc], wscale[oc + 1u], wscale[oc + 2u], wscale[oc + 3u]);
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
@@ -390,7 +399,7 @@ ${rowStores}`;
 };
 
 /** 担当列（`ocol` 起点の相対 `col`）の WGSL 式。 */
-const columnAt = (col: number): string => col === 0 ? "ocol" : `ocol + ${col}u`;
+const columnAt = (col: number): string => (col === 0 ? "ocol" : `ocol + ${col}u`);
 
 /**
  * w4a8 の**ループ前**の束縛 — 出力の担当行 / 列と、列ごとの group scale 行頭。
@@ -400,12 +409,10 @@ const columnAt = (col: number): string => col === 0 ? "ocol" : `ocol + ${col}u`;
  */
 const prologueW4a8 = (geometry: I8a8Geometry, shift: number): string => {
   const { regM, regN } = geometry;
-  const rows = Array.from(
-    { length: regM },
-    (_, row) =>
-      row === 0
-        ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${regM}u;`
-        : `  let orow${row} = orow0 + ${row}u;`,
+  const rows = Array.from({ length: regM }, (_, row) =>
+    row === 0
+      ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${regM}u;`
+      : `  let orow${row} = orow0 + ${row}u;`,
   ).join("\n");
   const bases = Array.from(
     { length: regN },
@@ -415,7 +422,8 @@ const prologueW4a8 = (geometry: I8a8Geometry, shift: number): string => {
     Array.from(
       { length: regN / I8A8_PACK },
       (_, quad) => `  var accf${row}_${quad} = vec4<f32>(0.0);`,
-    ).join("\n")).join("\n");
+    ).join("\n"),
+  ).join("\n");
   return `  // 出力の担当は**ループの外**（group 境界の flush が列ごとの scale を引く）
   let ocol = wid.x * ${i8a8TileN(geometry)}u + lid.x * ${regN}u;
 ${rows}
@@ -468,7 +476,8 @@ const loopW4a8 = (geometry: I8a8Geometry, groupSize: number): string => {
     Array.from(
       { length: geometry.regN / I8A8_PACK },
       (_, quad) => `    var acc${row}_${quad} = vec4<i32>(0);`,
-    ).join("\n")).join("\n");
+    ).join("\n"),
+  ).join("\n");
   return `  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   for (var gi = 0u; gi < groups; gi = gi + 1u) {
@@ -497,20 +506,21 @@ const storeW4a8 = (geometry: I8a8Geometry, v4: boolean): string => {
   const { regM, regN } = geometry;
   const quads = regN / I8A8_PACK;
   if (v4) {
-    const quadDecls = Array.from(
-      { length: quads },
-      (_, quad) =>
-        quad === 0 ? `  let ocq0 = ocol / ${I8A8_PACK}u;` : `  let ocq${quad} = ocq0 + ${quad}u;`,
+    const quadDecls = Array.from({ length: quads }, (_, quad) =>
+      quad === 0 ? `  let ocq0 = ocol / ${I8A8_PACK}u;` : `  let ocq${quad} = ocq0 + ${quad}u;`,
     ).join("\n");
     const blocks = Array.from({ length: quads }, (_, quad) => {
-      const rowStores = Array.from({ length: regM }, (_, row) =>
-        `    if (orow${row} < dims.m) {
+      const rowStores = Array.from(
+        { length: regM },
+        (_, row) =>
+          `    if (orow${row} < dims.m) {
       out[orow${row} * n4 + ocq${quad}] = fma(accf${row}_${quad}, vec4<f32>(xscale[orow${row}]), biasv);
-    }`).join("\n");
+    }`,
+      ).join("\n");
       return `  if (ocq${quad} < n4) {
     // n % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${
-        I8A8_PACK - 1
-      } < n（bias は常に f32 — ADR 0006）
+      I8A8_PACK - 1
+    } < n（bias は常に f32 — ADR 0006）
     let oc = ocq${quad} * ${I8A8_PACK}u;
     let biasv = vec4<f32>(bias[oc], bias[oc + 1u], bias[oc + 2u], bias[oc + 3u]);
     // MUST: xs は最後の fma（単一丸め）へ回す — wscale は group 境界で畳み済み
@@ -591,8 +601,8 @@ fn main(
 ${prologueA(geometry)}
 ${prologueB(geometry, shift === undefined ? "k4" : "dims.k")}
 ${
-    shift === undefined || groupSize === undefined
-      ? `  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
+  shift === undefined || groupSize === undefined
+    ? `  // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;
 ${i8a8AccumulatorInit(geometry)}
@@ -603,10 +613,10 @@ ${i8a8InnerProductLoop(geometry)}
     workgroupBarrier();
   }
 ${store(geometry, v4)}`
-      : `${prologueW4a8(geometry, shift)}
+    : `${prologueW4a8(geometry, shift)}
 ${loopW4a8(geometry, groupSize)}
 ${storeW4a8(geometry, v4)}`
-  }
+}
 }
 `;
 };
@@ -643,9 +653,7 @@ export const linearI8a8Params = (
   // group が K を割り切らないと最後の group が短くなり、flush の位置が WGSL の焼き込み
   // （tiles/group が定数）とずれる — 黙って通すと縮約が k を超えて隣の行を食う。
   if (k % groupSize !== 0) {
-    throw new CodegenError(
-      `linear w4a8 params: k=${k} が group_size ${groupSize} で割り切れない`,
-    );
+    throw new CodegenError(`linear w4a8 params: k=${k} が group_size ${groupSize} で割り切れない`);
   }
   if (groupSize > LINEAR_W4A8_MAX_GROUP) {
     throw new CodegenError(

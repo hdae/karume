@@ -81,7 +81,7 @@ const COMPONENTS = [
   "codec_encoder",
 ] as const;
 
-type Component = typeof COMPONENTS[number];
+type Component = (typeof COMPONENTS)[number];
 /** 出力 1 本の宣言で足りる部品（`dit_context` は K / V の対を出すので別の器 — {@link ContextSpec}）。 */
 type SingleOutput = Exclude<Component, "dit_context">;
 
@@ -95,10 +95,10 @@ const CONTEXT_ROWS = CONFIG.maxTextLen + CONFIG.speakerRows + CONFIG.maxCaptionL
 /** context K / V 1 本の形（20 heads × 64 head_dim — reshape 後・transpose 前）。 */
 const CONTEXT_SHAPE = [1, CONTEXT_ROWS, 20, 64] as const;
 /** `dit_context` の出力 = `dit` の K / V 入力（ブロック順に K, V）。 */
-const CONTEXT_NAMES: readonly string[] = Array.from(
-  { length: BLOCKS },
-  (_, block) => [`context_k_${block}`, `context_v_${block}`],
-).flat();
+const CONTEXT_NAMES: readonly string[] = Array.from({ length: BLOCKS }, (_, block) => [
+  `context_k_${block}`,
+  `context_v_${block}`,
+]).flat();
 
 /** 宣言の 1 値（dtype を省略すると f32 — 突合の器 `TensorlessGraphSpec` と同じ既定）。 */
 type ValueSpec = {
@@ -141,9 +141,9 @@ const contextInput = (spec: ContextSpec): ModelInput => ({
       ),
       states: {},
       nodes: spec.outputs.map((output) => {
-        const source = spec.inputs.find((input) =>
-          (input.dtype ?? "f32") === (output.dtype ?? "f32")
-        ) ?? spec.inputs[0];
+        const source =
+          spec.inputs.find((input) => (input.dtype ?? "f32") === (output.dtype ?? "f32")) ??
+          spec.inputs[0];
         return { op: "mul", ins: [source.name, source.name], outs: [output.name], attrs: {} };
       }),
     }),
@@ -222,16 +222,15 @@ type Patch = Partial<Record<SingleOutput, TensorlessGraphSpec>> & {
 };
 
 /** 1 本だけ差し替えた容器 9 本を組む（`tokenizer` は入れない — 観測の仕掛け）。 */
-const assetsWith = async (
-  patch: Patch = {},
-): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
+const assetsWith = async (patch: Patch = {}): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const specs = { ...graphSpecs(), ...patch };
   const context = patch.dit_context ?? contextSpec();
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   for (const name of COMPONENTS) {
-    const container = name === "dit_context"
-      ? await writeContainer(contextInput(context))
-      : await tensorlessContainer(name, specs[name]);
+    const container =
+      name === "dit_context"
+        ? await writeContainer(contextInput(context))
+        : await tensorlessContainer(name, specs[name]);
     assets = { ...assets, ...partAssets(name, container) };
   }
   return assets;
@@ -263,9 +262,7 @@ const manifestText = (): string => {
   });
 };
 
-const build = async (
-  patch: Patch = {},
-): Promise<unknown> =>
+const build = async (patch: Patch = {}): Promise<unknown> =>
   await IrodoriPipeline.fromAssets({
     manifest: parseManifest(manifestText()),
     assets: await assetsWith(patch),
@@ -282,8 +279,8 @@ const breakAxis = <
 ): Input[] =>
   inputs.map((input) =>
     input.name === inputName
-      ? { ...input, shape: input.shape.map((dim, index) => index === axis ? value : dim) }
-      : input
+      ? { ...input, shape: input.shape.map((dim, index) => (index === axis ? value : dim)) }
+      : input,
   );
 
 /** グラフ 1 本の入力 1 本の 1 軸だけを壊す。 */
@@ -302,18 +299,14 @@ const breakInput = (
 };
 
 /** グラフ 1 本の出力の 1 軸だけを壊す。 */
-const breakOutput = (
-  component: SingleOutput,
-  axis: number,
-  value: number | string,
-): Patch => {
+const breakOutput = (component: SingleOutput, axis: number, value: number | string): Patch => {
   const spec = graphSpecs()[component];
   return {
     [component]: {
       ...spec,
       output: {
         ...spec.output,
-        shape: spec.output.shape.map((dim, index) => index === axis ? value : dim),
+        shape: spec.output.shape.map((dim, index) => (index === axis ? value : dim)),
       },
     },
   };
@@ -462,10 +455,7 @@ test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経�
   const twoSymbols: TensorlessGraphSpec = {
     ...specs.dit,
     symbols: ["S", "B"],
-    inputs: [
-      { name: "x_t", shape: ["B", "S", CONFIG.latentDim] },
-      ...specs.dit.inputs.slice(1),
-    ],
+    inputs: [{ name: "x_t", shape: ["B", "S", CONFIG.latentDim] }, ...specs.dit.inputs.slice(1)],
     output: { name: "v", shape: ["B", "S", CONFIG.latentDim] },
   };
   // 並びが宣言順（`S, B`）でないのは、容器のグラフ記述が**正準形**（記号は符号位置順 —
@@ -540,7 +530,7 @@ test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の
         dit: {
           ...dit,
           inputs: dit.inputs.map((input) =>
-            input.name === "context_v_11" ? { ...input, name: "context_v_12" } : input
+            input.name === "context_v_11" ? { ...input, name: "context_v_12" } : input,
           ),
         },
       }),
@@ -574,7 +564,7 @@ test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype �
   const transposed: ContextSpec = {
     ...spec,
     outputs: spec.outputs.map((output) =>
-      output.name === "context_k_3" ? { ...output, shape: [1, CONTEXT_ROWS, 64, 20] } : output
+      output.name === "context_k_3" ? { ...output, shape: [1, CONTEXT_ROWS, 64, 20] } : output,
     ),
   };
   const shape = await assertRejects(
@@ -590,7 +580,7 @@ test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype �
     ...spec,
     inputs: [...spec.inputs, { name: "ids", shape: [1], dtype: "i32" }],
     outputs: spec.outputs.map((output) =>
-      output.name === "context_v_0" ? { ...output, dtype: "i32" } : output
+      output.name === "context_v_0" ? { ...output, dtype: "i32" } : output,
     ),
   };
   await assertRejects(
@@ -607,9 +597,8 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
   let weights: Record<string, unknown> = {};
   let files: (readonly [string, Uint8Array<ArrayBuffer>])[] = [];
   for (const name of COMPONENTS) {
-    const input = name === "dit_context"
-      ? contextInput(contextSpec())
-      : tensorlessInput(name, specs[name]);
+    const input =
+      name === "dit_context" ? contextInput(contextSpec()) : tensorlessInput(name, specs[name]);
     const served = await serveContainer(`${name}/model.f32`, input);
     weights = { ...weights, [name]: { f32: served.entry } };
     files = [...files, ...served.files];
@@ -618,7 +607,7 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
   const widened: TensorlessGraphSpec = {
     ...specs.dit,
     inputs: specs.dit.inputs.map((input) =>
-      input.name === "x_t" ? { ...input, shape: wide } : input
+      input.name === "x_t" ? { ...input, shape: wide } : input,
     ),
     output: { ...specs.dit.output, shape: wide },
   };
@@ -649,11 +638,14 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
 
   const error = await assertRejects(
     () =>
-      IrodoriPipeline.fromPretrained({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, {
-        fetch: mock.fetch,
-        caches: new MemoryCacheStorage(),
-        components: { dit: { source: { repo: OTHER_REPO, revision: SHA, hubUrl: HUB_URL } } },
-      }),
+      IrodoriPipeline.fromPretrained(
+        { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+        {
+          fetch: mock.fetch,
+          caches: new MemoryCacheStorage(),
+          components: { dit: { source: { repo: OTHER_REPO, revision: SHA, hubUrl: HUB_URL } } },
+        },
+      ),
     Error,
     "グラフ記述が manifest の宣言と違う",
   );
@@ -664,7 +656,10 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
     mock.requests.filter((request) => request.repo === OTHER_REPO),
     [{ repo: OTHER_REPO, path: MANIFEST_PATH }],
   );
-  assertEquals(mock.paths.filter((path) => path !== MANIFEST_PATH), []);
+  assertEquals(
+    mock.paths.filter((path) => path !== MANIFEST_PATH),
+    [],
+  );
 });
 
 // ---- 実行ノブの明示指定（明示 > quant 宣言 > runtime 既定 — ADR 0058 追記 2026-09-26）----------
@@ -701,10 +696,13 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
 test("admitIrodori: 受理される linearCompute の明示は突合を通って資産の段まで進む", async () => {
   await assertRejects(
     async () =>
-      await IrodoriPipeline.fromAssets({
-        manifest: parseManifest(manifestText()),
-        assets: await assetsWith(),
-      }, { linearCompute: "a8" }),
+      await IrodoriPipeline.fromAssets(
+        {
+          manifest: parseManifest(manifestText()),
+          assets: await assetsWith(),
+        },
+        { linearCompute: "a8" },
+      ),
     Error,
     "irodori: 資産 'tokenizer' が無い",
   );
@@ -715,10 +713,13 @@ test("admitIrodori: 明示の f16 を共有 GPU が持たなければ GPU 取得
   // 重みを上げた後の Session 構築まで遅らせもしない）。
   await assertRejects(
     async () =>
-      await IrodoriPipeline.fromAssets({
-        manifest: parseManifest(manifestText()),
-        assets: await assetsWith(),
-      }, { gpu: fakeGpuContext(fakeDevice()), linearCompute: "f16" }),
+      await IrodoriPipeline.fromAssets(
+        {
+          manifest: parseManifest(manifestText()),
+          assets: await assetsWith(),
+        },
+        { gpu: fakeGpuContext(fakeDevice()), linearCompute: "f16" },
+      ),
     Error,
     "shader-f16",
   );

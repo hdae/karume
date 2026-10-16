@@ -43,14 +43,8 @@ export const buildLayerNorm = async (
   const dim = shape[shape.length - 1];
   const rows = numel(shape.slice(0, -1));
   const { eps } = layerNormAttrs(step.node.attrs, `nodes (${step.node.op})`);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    LAYER_NORM_KEY,
-    LAYER_NORM_WGSL,
-  );
-  const params = face.writeParams(
-    layerNormParams(rows, dim, eps),
-    PARAMS_UNIFORM_USAGE,
-  );
+  const { pipeline, layout, roles } = await face.state.cache.get(LAYER_NORM_KEY, LAYER_NORM_WGSL);
+  const params = face.writeParams(layerNormParams(rows, dim, eps), PARAMS_UNIFORM_USAGE);
   const groups = gridStrideWorkgroups(
     rows,
     1,
@@ -108,7 +102,10 @@ export const buildStaticQuantize = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [
       // packed も f32 経路と同じ「1 スレッド 1 要素」の幾何（ADR 0105 追記 1）なので、
       // dispatch 数は要素数から引く（詰めるのは workgroup 内の共有メモリ経由）。

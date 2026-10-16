@@ -156,7 +156,7 @@ export const SEMANTIC_DTYPES = ["f32", "i32", "bool"] as const;
 
 /** state スロットの dtype 語彙。現状 f32 のみ（ADR 0066 決定 2）。 */
 const STATE_DTYPES = ["f32"] as const;
-type IrStateDtype = typeof STATE_DTYPES[number];
+type IrStateDtype = (typeof STATE_DTYPES)[number];
 
 /**
  * 席だけが予約されている state スロットの dtype（ADR 0066 追記 5）。格納を f16 にすると
@@ -219,7 +219,7 @@ const asNonEmptyString = (value: unknown, where: string): string => {
 /** 重複を許さない文字列配列（集合として扱う欄 — 重複は集合等価の判定を曖昧にする）。 */
 const asUniqueStrings = (value: unknown, where: string): string[] => {
   const list = asArray(value, where).map((item, index) =>
-    asNonEmptyString(item, `${where}[${index}]`)
+    asNonEmptyString(item, `${where}[${index}]`),
   );
   const seen = new Set<string>();
   for (const item of list) {
@@ -452,9 +452,9 @@ const parseIrDocument = <I>(
 
   // MUST: values と同じ理由で null プロトタイプ（上のコメント参照）。
   const initializers: Record<string, I> = Object.create(null);
-  for (
-    const [name, raw] of Object.entries(asPlainObject(root["initializers"], "graph.initializers"))
-  ) {
+  for (const [name, raw] of Object.entries(
+    asPlainObject(root["initializers"], "graph.initializers"),
+  )) {
     // 空の initializer 名も同じく拒否する（values 側のコメント参照 — 空名 value と対で書かれた
     // 空名 initializer は宣言完全性検査の両側を満たしてしまい、参照不能な実テンソル 1 本が
     // 配布形に居座る）。
@@ -486,10 +486,10 @@ const parseIrDocument = <I>(
     return {
       op: asNonEmptyString(obj["op"], `${where}.op`),
       ins: asArray(obj["ins"], `${where}.ins`).map((input, i) =>
-        asNonEmptyString(input, `${where}.ins[${i}]`)
+        asNonEmptyString(input, `${where}.ins[${i}]`),
       ),
       outs: asArray(obj["outs"], `${where}.outs`).map((out, i) =>
-        asNonEmptyString(out, `${where}.outs[${i}]`)
+        asNonEmptyString(out, `${where}.outs[${i}]`),
       ),
       attrs: asPlainObject(obj["attrs"], `${where}.attrs`),
       states: parseNodeStates(obj, states, where),
@@ -538,9 +538,9 @@ export const parseIrDeclarationValue = (document: unknown): IrDeclaration =>
     // 宣言なので、2 通りの綴りを許すと正準直列化が 1 つに決まらない）。
     if (obj["shared"] !== true) {
       throw new IrError(
-        `${where}.shared: ${
-          JSON.stringify(obj["shared"])
-        } は書けない（借り物のときだけ true を書く）`,
+        `${where}.shared: ${JSON.stringify(
+          obj["shared"],
+        )} は書けない（借り物のときだけ true を書く）`,
       );
     }
     return { shared: true };
@@ -573,13 +573,15 @@ export const canonicalIrDocument = (graph: IrDeclaration): Record<string, unknow
   outputs: [...graph.outputs],
   initializers: sortedObject(graph.initializers, (init) => (init.shared ? { shared: true } : {})),
   values: sortedObject(graph.values, (value) => ({ dtype: value.dtype, shape: [...value.shape] })),
-  ...(Object.keys(graph.states).length === 0 ? {} : {
-    states: sortedObject(graph.states, (slot) => ({
-      dtype: slot.dtype,
-      shape: [...slot.shape],
-      ...(slot.external ? { external: true } : {}),
-    })),
-  }),
+  ...(Object.keys(graph.states).length === 0
+    ? {}
+    : {
+        states: sortedObject(graph.states, (slot) => ({
+          dtype: slot.dtype,
+          shape: [...slot.shape],
+          ...(slot.external ? { external: true } : {}),
+        })),
+      }),
   nodes: graph.nodes.map((node) => ({
     op: node.op,
     ins: [...node.ins],
@@ -769,9 +771,9 @@ const checkRequiredOps = (requiredOps: readonly string[], nodes: readonly IrNode
   const extra = [...declared].filter((op) => !used.has(op)).sort();
   if (missing.length > 0 || extra.length > 0) {
     throw new IrError(
-      `graph.requires.ops が使用 op 集合と一致しない: 宣言漏れ [${missing.join(", ")}] / 余剰 [${
-        extra.join(", ")
-      }]`,
+      `graph.requires.ops が使用 op 集合と一致しない: 宣言漏れ [${missing.join(", ")}] / 余剰 [${extra.join(
+        ", ",
+      )}]`,
     );
   }
 };

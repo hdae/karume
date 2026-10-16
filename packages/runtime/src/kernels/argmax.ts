@@ -163,10 +163,8 @@ export const ARGMAX_SPLIT_SPAN = ARGMAX_WORKGROUP_SIZE * ARGMAX_SPLIT_ELEMENTS;
  */
 export const ARGMAX_SPLIT_MIN_DIM = ARGMAX_SPLIT_SPAN * 4;
 
-export const ARGMAX_SPLIT_PARTIAL_KEY =
-  `argmax:v2:f32>i32:lastdim:minindex:split-partial:wg${ARGMAX_WORKGROUP_SIZE}e${ARGMAX_SPLIT_ELEMENTS}`;
-export const ARGMAX_SPLIT_MERGE_KEY =
-  `argmax:v2:f32>i32:lastdim:minindex:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
+export const ARGMAX_SPLIT_PARTIAL_KEY = `argmax:v2:f32>i32:lastdim:minindex:split-partial:wg${ARGMAX_WORKGROUP_SIZE}e${ARGMAX_SPLIT_ELEMENTS}`;
+export const ARGMAX_SPLIT_MERGE_KEY = `argmax:v2:f32>i32:lastdim:minindex:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
 
 /** 行長 `dim` を 2 相に割るときの区間数（割らない形は 0）。 */
 export const argmaxSplitGroups = (dim: number): number =>
@@ -278,9 +276,9 @@ const splitMergeWgsl = (valueOutput: boolean): string =>
     "@group(0) @binding(2) var<storage, read_write> out: array<i32>;",
     ...(valueOutput
       ? [
-        "@group(0) @binding(3) var<storage, read_write> value: array<u32>;",
-        "@group(0) @binding(4) var<storage, read> input: array<u32>;",
-      ]
+          "@group(0) @binding(3) var<storage, read_write> value: array<u32>;",
+          "@group(0) @binding(4) var<storage, read> input: array<u32>;",
+        ]
       : []),
     "",
     F32_RANK_WGSL,
@@ -328,8 +326,7 @@ const splitMergeWgsl = (valueOutput: boolean): string =>
   ].join("\n");
 
 export const ARGMAX_SPLIT_MERGE_WGSL: string = splitMergeWgsl(false);
-export const TOPK_ONE_SPLIT_MERGE_KEY =
-  `topk:v2:f32+i32:lastdim:desc:minindex:k1:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
+export const TOPK_ONE_SPLIT_MERGE_KEY = `topk:v2:f32+i32:lastdim:desc:minindex:k1:split-merge:wg${ARGMAX_WORKGROUP_SIZE}`;
 export const topkOneSplitMergeWgsl = (): string => splitMergeWgsl(true);
 
 /**

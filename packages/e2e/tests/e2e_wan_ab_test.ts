@@ -116,14 +116,15 @@ const knobRungs = (
 ): readonly { readonly label: string; readonly session: SessionSpec }[] => {
   const { linearCompute, attentionCompute, attentionScoreStorage, ...rest } = declared;
   if (
-    linearCompute === undefined || attentionCompute === undefined ||
-    attentionScoreStorage === undefined || Object.keys(rest).length > 0
+    linearCompute === undefined ||
+    attentionCompute === undefined ||
+    attentionScoreStorage === undefined ||
+    Object.keys(rest).length > 0
   ) {
     throw new Error(
-      `${where}: 実用席の宣言 ${
-        JSON.stringify(declared)
-      } が linear / attention / S の格納の 3 ノブちょうど` +
-        "でない（段の並びを決め直す）",
+      `${where}: 実用席の宣言 ${JSON.stringify(
+        declared,
+      )} が linear / attention / S の格納の 3 ノブちょうど` + "でない（段の並びを決め直す）",
     );
   }
   return [
@@ -195,9 +196,10 @@ const recordKnobLadder = async (
       let previous = reference.observation;
       for (const [index, { label, session }] of rungs.entries()) {
         const where = `${id} ${label}`;
-        const observed = index === rungs.length - 1
-          ? practical
-          : await observeOverridden(gpu, subject, session, frames);
+        const observed =
+          index === rungs.length - 1
+            ? practical
+            : await observeOverridden(gpu, subject, session, frames);
         const effective = effectiveSessionOf(subject, session, where);
         const census = mergeCensus(observed.passes, where);
         // 段の席にそのノブが届いていなければ、その段の relRMS は名乗るものを測っていない。
@@ -216,9 +218,9 @@ const recordKnobLadder = async (
           ),
         );
         notes.push(
-          `${label}: 参照席に対し ${describeAb(toReference)}・1 段前に対し ${
-            describeAb(toPrevious)
-          }・census ${describeBundleCensus(census, effective)}`,
+          `${label}: 参照席に対し ${describeAb(toReference)}・1 段前に対し ${describeAb(
+            toPrevious,
+          )}・census ${describeBundleCensus(census, effective)}`,
         );
         assertEquals(Number.isFinite(toReference.relRms), true, `${where}: 非有限`);
         previous = observed;

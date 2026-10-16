@@ -19,15 +19,15 @@ import {
 /** `GPUAdapterInfo` の実体（読むのは 4 欄だけだが、型は全欄を要求する）。 */
 const adapterInfo = (fields: Partial<Omit<GPUAdapterInfo, "__brand">>): GPUAdapterInfo =>
   platformObject<GPUAdapterInfo>({
-  vendor: "",
-  architecture: "",
-  device: "",
-  description: "",
-  subgroupMinSize: 0,
-  subgroupMaxSize: 0,
-  isFallbackAdapter: false,
-  ...fields,
-});
+    vendor: "",
+    architecture: "",
+    device: "",
+    description: "",
+    subgroupMinSize: 0,
+    subgroupMaxSize: 0,
+    isFallbackAdapter: false,
+    ...fields,
+  });
 
 test("環境キー: Node（Dawn）は device から作る（description はドライバ版なので使わない）", () => {
   assertEquals(

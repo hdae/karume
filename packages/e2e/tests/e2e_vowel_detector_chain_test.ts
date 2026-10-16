@@ -56,7 +56,11 @@ import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, prepareContainer, type PreparedModel } from "@karume/runtime";
 import { decodeWav } from "../../models/src/audio/wav.ts";
-import { extractFeatures, FEATURE_DIM, SAMPLE_RATE } from "../../models/src/vowel-detector/features.ts";
+import {
+  extractFeatures,
+  FEATURE_DIM,
+  SAMPLE_RATE,
+} from "../../models/src/vowel-detector/features.ts";
 import { logitsToSegments, toLab } from "../../models/src/vowel-detector/postprocess.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
@@ -270,7 +274,10 @@ const SERIES_NAME = "vowel-detector-crnn-epoch3";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 /** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
-const FIXTURE_PATH = new URL("../../models/tests/fixtures/vowel-detector/parity.json", import.meta.url);
+const FIXTURE_PATH = new URL(
+  "../../models/tests/fixtures/vowel-detector/parity.json",
+  import.meta.url,
+);
 const MODEL_FILE = "model.krm";
 /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
 const MODEL_GRAPH = seriesGraph(SERIES_NAME);
@@ -422,13 +429,15 @@ for (const entry of CASES) {
           assertAdapterMatchesEnvironment(gpu);
           const session = await parsed.createContainerSession(gpu);
           try {
-            const output = (await session.run({
-              [INPUT_NAME]: {
-                dtype: "f32",
-                shape: [1, usable, FEATURE_DIM],
-                data: features.data.slice(0, usable * FEATURE_DIM),
-              },
-            }))[outputName];
+            const output = (
+              await session.run({
+                [INPUT_NAME]: {
+                  dtype: "f32",
+                  shape: [1, usable, FEATURE_DIM],
+                  data: features.data.slice(0, usable * FEATURE_DIM),
+                },
+              })
+            )[outputName];
             // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
             assert(output.dtype === "f32", `${entry.name}: ロジットの dtype が ${output.dtype}`);
             assertEquals(output.shape, [1, usable / 2, CLASS_COUNT], `${entry.name}: 出力の形`);

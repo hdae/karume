@@ -185,9 +185,8 @@ const heapPop = (heap: QueuedMerge[]): QueuedMerge | undefined => {
  * 値で、黙って U+FFFD へ潰すと id 列が静かに変わるため。
  */
 export const bpeEncode = (model: BpeModel, piece: string): number[] =>
-  mergeSymbols(
-    initialSymbols(model, piece),
-    (left, right) => model.merges.get(pairKey(model, left, right)),
+  mergeSymbols(initialSymbols(model, piece), (left, right) =>
+    model.merges.get(pairKey(model, left, right)),
   );
 
 /**

@@ -23,9 +23,16 @@ const MODELS = "packages/models/tests";
 const E2E = "packages/e2e/tests";
 
 /** `*<token>*_test.ts` in both test directories. */
-const both = (token: string): string[] => [`${MODELS}/*${token}*_test.ts`, `${E2E}/*${token}*_test.ts`];
+const both = (token: string): string[] => [
+  `${MODELS}/*${token}*_test.ts`,
+  `${E2E}/*${token}*_test.ts`,
+];
 
-const family = (name: string, include: readonly string[], exclude: readonly string[] = []): Lane => ({
+const family = (
+  name: string,
+  include: readonly string[],
+  exclude: readonly string[] = [],
+): Lane => ({
   name: `models:${name}`,
   include,
   exclude,

@@ -70,9 +70,8 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
     const multiply = nodes[cursor + 1];
     const offset = nodes[cursor + 2];
     if (modulate === undefined || multiply === undefined || offset === undefined) return undefined;
-    if (
-      modulate.node.op !== "add" || multiply.node.op !== "mul" || offset.node.op !== "add"
-    ) return undefined;
+    if (modulate.node.op !== "add" || multiply.node.op !== "mul" || offset.node.op !== "add")
+      return undefined;
 
     // MUST: use-count と解放簿記は**畳むノードだけ**から導く（passthrough は素のノードとして
     // 既存経路が数える）。
@@ -83,7 +82,8 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
       multiply.node.ins[0] !== norm.outputs[0].name ||
       multiply.node.ins[1] !== modulate.outputs[0].name ||
       offset.node.ins[0] !== multiply.outputs[0].name
-    ) return undefined;
+    )
+      return undefined;
 
     const rowShape = norm.inputShapes[0];
     if (rowShape.length < 2 || rowShape.some((extent) => extent < 1)) return undefined;
@@ -104,7 +104,8 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
       !sameShape(offset.inputShapes[0], rowShape) ||
       !sameShape(offset.inputShapes[1], modShape) ||
       !sameShape(offset.outputs[0].shape, rowShape)
-    ) return undefined;
+    )
+      return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
     // bind 面はカーネルの binding 1〜6 と 1 対 1 なので**重複を許さない**（同じ値名が 2 スロットに
@@ -136,13 +137,15 @@ export const ADALN_RULE = defineRule<AdalnMatch>({
     outputName: matched.outputName,
     outputShape: matched.outputShape,
     temps: [],
-    dispatches: [{
-      key: ADALN_NORM_KEY,
-      wgsl: () => ADALN_NORM_WGSL,
-      params: adalnNormParams(matched.rows, matched.dim, matched.eps),
-      // 1 行 = 1 workgroup（行方向 grid-stride）なので、割り数は 1 で行数がそのまま
-      // workgroup 数になる。`@workgroup_size` は行内の 256 スレッドで別物。
-      workgroups: { kind: "gridStride", items: matched.rows, size: 1 },
-    }],
+    dispatches: [
+      {
+        key: ADALN_NORM_KEY,
+        wgsl: () => ADALN_NORM_WGSL,
+        params: adalnNormParams(matched.rows, matched.dim, matched.eps),
+        // 1 行 = 1 workgroup（行方向 grid-stride）なので、割り数は 1 で行数がそのまま
+        // workgroup 数になる。`@workgroup_size` は行内の 256 スレッドで別物。
+        workgroups: { kind: "gridStride", items: matched.rows, size: 1 },
+      },
+    ],
   }),
 });

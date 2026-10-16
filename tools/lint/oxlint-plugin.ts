@@ -75,7 +75,8 @@ const plugin: Plugin = {
       meta: {
         type: "problem",
         docs: {
-          description: "packages/<pkg>/src/ の型の位置の TypedArray にバッファの型引数を求める（ADR 0002）",
+          description:
+            "packages/<pkg>/src/ の型の位置の TypedArray にバッファの型引数を求める（ADR 0002）",
         },
       },
       create(context) {

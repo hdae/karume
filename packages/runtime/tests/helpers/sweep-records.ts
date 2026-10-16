@@ -90,7 +90,7 @@ export const caseRows = (
 ): Record<string, unknown>[] => [
   row(ref, gemmCandidate(defaultGeometry), true, defaultMeasured),
   ...candidates.map(([geometry, measured]) =>
-    row(ref, gemmCandidate(geometry), false, { identical: true, ...measured })
+    row(ref, gemmCandidate(geometry), false, { identical: true, ...measured }),
   ),
 ];
 
@@ -114,8 +114,8 @@ export const report = (
   adapter,
   settings: { candidateSet: "full" },
   gpuTiming: { feature: true, unit: "ns", quantized: false },
-  cases: [...new Set(rows.map((entry) => String(entry.caseId)))].map((caseId) =>
-    repeats[caseId] ?? { caseId, defaultRepeat: { perDispatch: 1, driftRatio: 1 } }
+  cases: [...new Set(rows.map((entry) => String(entry.caseId)))].map(
+    (caseId) => repeats[caseId] ?? { caseId, defaultRepeat: { perDispatch: 1, driftRatio: 1 } },
   ),
   rows,
 });
@@ -151,36 +151,39 @@ export const FAST: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 
 /** linear M = 1024 の 1 ケース（既定と、既定より 1.2 倍速く出力の一致する幾何 1 つ）。 */
 export const sweep = (name: string, sha256: string): SweepSource =>
-  parseSweepReport({
-    format: REPORT_FORMAT,
-    date: "2026-09-29T00:00:00.000Z",
-    adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
-    settings: { candidateSet: "full" },
-    gpuTiming: { feature: true, unit: "ns", quantized: false },
-    cases: [{ caseId: "linear-m1024", defaultRepeat: { perDispatch: 1, driftRatio: 1 } }],
-    rows: [
-      {
-        caseId: "linear-m1024",
-        op: "linear",
-        shape: "M1024 N64 K64",
-        geometry: gemmCandidate(DEFAULT).name,
-        geometryParams: DEFAULT,
-        isDefault: true,
-        speedupVsDefault: 1,
-        identicalToDefault: true,
-      },
-      {
-        caseId: "linear-m1024",
-        op: "linear",
-        shape: "M1024 N64 K64",
-        geometry: gemmCandidate(FAST).name,
-        geometryParams: FAST,
-        isDefault: false,
-        speedupVsDefault: 1.2,
-        identicalToDefault: true,
-      },
-    ],
-  }, { path: name, sha256 });
+  parseSweepReport(
+    {
+      format: REPORT_FORMAT,
+      date: "2026-09-29T00:00:00.000Z",
+      adapter: { vendor: "apple", architecture: "metal-3", device: "", description: "Test GPU" },
+      settings: { candidateSet: "full" },
+      gpuTiming: { feature: true, unit: "ns", quantized: false },
+      cases: [{ caseId: "linear-m1024", defaultRepeat: { perDispatch: 1, driftRatio: 1 } }],
+      rows: [
+        {
+          caseId: "linear-m1024",
+          op: "linear",
+          shape: "M1024 N64 K64",
+          geometry: gemmCandidate(DEFAULT).name,
+          geometryParams: DEFAULT,
+          isDefault: true,
+          speedupVsDefault: 1,
+          identicalToDefault: true,
+        },
+        {
+          caseId: "linear-m1024",
+          op: "linear",
+          shape: "M1024 N64 K64",
+          geometry: gemmCandidate(FAST).name,
+          geometryParams: FAST,
+          isDefault: false,
+          speedupVsDefault: 1.2,
+          identicalToDefault: true,
+        },
+      ],
+    },
+    { path: name, sha256 },
+  );
 
 export const SPEC = {
   from: ["a.json", "b.json"],

@@ -1,19 +1,8 @@
 {
-  "workspace": [
-    "./packages/runtime",
-    "./packages/hub",
-    "./packages/models"
-  ],
-  "exclude": [
-    "inputs/",
-    "outputs/",
-    "models/",
-    ".claude/reviews/"
-  ],
+  "workspace": ["./packages/runtime", "./packages/hub", "./packages/models"],
+  "exclude": ["inputs/", "outputs/", "models/", ".claude/reviews/"],
   "minimumDependencyAge": {
-    "exclude": [
-      "jsr:@hdae/*"
-    ]
+    "exclude": ["jsr:@hdae/*"]
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@1",

@@ -16,20 +16,8 @@
   "bidirectional": true,
   "min_length": 2,
   "max_length": 512,
-  "input_names": [
-    "input_ids",
-    "relative_position_buckets"
-  ],
+  "input_names": ["input_ids", "relative_position_buckets"],
   "distance_offset": -511,
-  "representative_lengths": [
-    2,
-    8,
-    9,
-    17,
-    28,
-    50,
-    92,
-    126
-  ],
+  "representative_lengths": [2, 8, 9, 17, 28, 50, 92, 126],
   "digest": "974a652044512217d5d3c971d5430becfb60c02c8728b5a8262ac9c065479445"
 }

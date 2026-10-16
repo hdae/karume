@@ -7,7 +7,8 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 /** CPU の通常の数値比較から順位を作る。GPU の整数順序変換を複製しない。 */
 const rank = (data: Float32Array<ArrayBuffer>, base: number, dim: number): number[] =>
   Array.from({ length: dim }, (_, i) => i).sort((a, b) => {
-    const va = data[base + a], vb = data[base + b];
+    const va = data[base + a],
+      vb = data[base + b];
     if (Number.isNaN(va)) return Number.isNaN(vb) ? a - b : -1;
     if (Number.isNaN(vb)) return 1;
     return va > vb ? -1 : va < vb ? 1 : a - b;
@@ -32,10 +33,11 @@ test({
     const gpu = await acquireGpu();
     try {
       for (const dim of [4, 257, 16383, 16384, 16385, 262144]) {
-        const rows = cases.length, data = new Float32Array(rows * dim).fill(-Infinity);
+        const rows = cases.length,
+          data = new Float32Array(rows * dim).fill(-Infinity);
         const bits = new Uint32Array(data.buffer);
         // 最小 index 同点を、レーン・部分区間の境界を越えて検査する。
-        const positions = [0, Math.floor(dim / 3), Math.floor(dim * 2 / 3), dim - 1];
+        const positions = [0, Math.floor(dim / 3), Math.floor((dim * 2) / 3), dim - 1];
         for (let r = 0; r < rows; r++) {
           for (let i = 0; i < positions.length; i++) bits[r * dim + positions[i]] = cases[r][i];
         }
@@ -44,7 +46,12 @@ test({
           const graph = singleOpDeclaration(
             op,
             [[rows, dim]],
-            op === "topk" ? [[rows, 1], [rows, 1]] : [[rows, 1]],
+            op === "topk"
+              ? [
+                  [rows, 1],
+                  [rows, 1],
+                ]
+              : [[rows, 1]],
             {
               outDtypes: op === "topk" ? ["f32", "i32"] : ["i32"],
               attrs: op === "topk" ? { k: 1 } : {},
@@ -86,43 +93,36 @@ test({
   ignore: !GPU_AVAILABLE,
   async fn() {
     const edgeBits = [
-      0x80000000,
-      1,
-      0x80000001,
-      0x007fffff,
-      0x807fffff,
-      0,
-      0x00800000,
-      0x80800000,
-      0x7f800000,
-      0xff800000,
-      0x7fa12345,
-      0xffc05678,
-      0x7f7fffff,
-      0xff7fffff,
-      2,
-      0x80000002,
+      0x80000000, 1, 0x80000001, 0x007fffff, 0x807fffff, 0, 0x00800000, 0x80800000, 0x7f800000,
+      0xff800000, 0x7fa12345, 0xffc05678, 0x7f7fffff, 0xff7fffff, 2, 0x80000002,
     ];
     const gpu = await acquireGpu();
     try {
-      for (const [dim, k] of [[16, 16], [257, 4], [257, 63], [16385, 4]]) {
-        const rows = 4, data = new Float32Array(rows * dim), bits = new Uint32Array(data.buffer);
+      for (const [dim, k] of [
+        [16, 16],
+        [257, 4],
+        [257, 63],
+        [16385, 4],
+      ]) {
+        const rows = 4,
+          data = new Float32Array(rows * dim),
+          bits = new Uint32Array(data.buffer);
         let state = 123456789;
         for (let i = 0; i < bits.length; i++) {
           state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
           const row = Math.floor(i / dim);
           // row 0/1 は全要素が正/負の非正規数、row 2 は境界と重複、row 3 は全ビット分布。
-          bits[i] = row === 0
-            ? state & 0x7fffff
-            : row === 1
-            ? (state & 0x7fffff) | 0x80000000
-            : row === 2
-            ? edgeBits[i % edgeBits.length]
-            : state;
+          bits[i] =
+            row === 0
+              ? state & 0x7fffff
+              : row === 1
+                ? (state & 0x7fffff) | 0x80000000
+                : row === 2
+                  ? edgeBits[i % edgeBits.length]
+                  : state;
         }
-        const expected = Array.from(
-          { length: rows },
-          (_, r) => rank(data, r * dim, dim).slice(0, k),
+        const expected = Array.from({ length: rows }, (_, r) =>
+          rank(data, r * dim, dim).slice(0, k),
         );
         const session = await createSessionFromContainer(
           gpu,
@@ -130,7 +130,10 @@ test({
             singleOpDeclaration(
               "topk",
               [[rows, dim]],
-              [[rows, k], [rows, k]],
+              [
+                [rows, k],
+                [rows, k],
+              ],
               { outDtypes: ["f32", "i32"], attrs: { k } },
             ),
             [],

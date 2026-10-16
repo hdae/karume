@@ -31,7 +31,7 @@ export const asNumber = (value: unknown, label: string): number => {
 };
 
 /** Unicode コードポイントの上限（区間表も合成鍵もコードポイントを鍵にする）。 */
-export const MAX_CODE_POINT = 0x10FFFF;
+export const MAX_CODE_POINT = 0x10ffff;
 
 /**
  * コードポイントとして受ける数値。

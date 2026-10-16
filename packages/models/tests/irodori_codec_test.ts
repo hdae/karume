@@ -135,7 +135,10 @@ test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複数枚�
 
   assertEquals(waveform.length, frames * TILE_HOP);
   // offset / take / start のどれかの掛け算が違えば、この恒等列が崩れる。
-  assertEquals([...waveform], Array.from({ length: frames * TILE_HOP }, (_, index) => index));
+  assertEquals(
+    [...waveform],
+    Array.from({ length: frames * TILE_HOP }, (_, index) => index),
+  );
 });
 
 test("decodeTiles: 位置を無視する decoder では一致が破れる（門が恒真でない証拠）", async () => {
@@ -146,9 +149,7 @@ test("decodeTiles: 位置を無視する decoder では一致が破れる（門�
     rampLatent(frames),
     { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
     (_slice, tileFrames) =>
-      Promise.resolve(
-        Float32Array.from({ length: tileFrames * TILE_HOP }, (_, index) => index),
-      ),
+      Promise.resolve(Float32Array.from({ length: tileFrames * TILE_HOP }, (_, index) => index)),
   );
   assertEquals(
     [...waveform].some((value, index) => value !== index),
@@ -299,11 +300,7 @@ test("findFlatteningPoint: 末尾を 0 にした位置をそのまま返す（go
 });
 
 test("findFlatteningPoint: 要素数が frames × latentDim と違えば落とす", () => {
-  assertThrows(
-    () => findFlatteningPoint(new Float32Array(31), 1, LATENT_DIM),
-    Error,
-    "要素数 31",
-  );
+  assertThrows(() => findFlatteningPoint(new Float32Array(31), 1, LATENT_DIM), Error, "要素数 31");
 });
 
 test("trimmedSampleCount: 短いほうを採る（上流 max_samples）", () => {

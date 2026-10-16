@@ -112,7 +112,7 @@ export const createProgressEmitter = (
     const fileTotal = fileSizeOf(targets, refKey);
     // complete は全量が揃った点なので size をそのまま渡す（キャッシュヒットは downloading が
     // 1 度も出ず `received` に載らないため、受信実績から引くと 0 に見える）。
-    const fileLoaded = phase === "downloading" ? received.get(refKey) ?? 0 : fileTotal;
+    const fileLoaded = phase === "downloading" ? (received.get(refKey) ?? 0) : fileTotal;
     // MUST: 全体 `loaded` にも同じ値を積む — このファイルぶんだけ `received` から引くと、
     // 同一イベントで fileLoaded が size なのに loaded がそれを数えない矛盾が出る（全ファイル
     // キャッシュ済みの起動では loaded が 0 のまま complete が並ぶ）。downloading では

@@ -37,8 +37,7 @@ export const GATHER_OOB_BITS = 0x7fc00000;
 
 export const GATHER_KEY = `gather:v1:f32:i32:lastdim:wg${GATHER_WORKGROUP_SIZE}`;
 
-export const GATHER_WGSL: string =
-  `// karume gather (out[..., j] = src[..., index[..., j]], 最終次元固定, f32 / 添字 i32)
+export const GATHER_WGSL: string = `// karume gather (out[..., j] = src[..., index[..., j]], 最終次元固定, f32 / 添字 i32)
 struct Dims {
   n: u32,
   cols: u32,

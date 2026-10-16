@@ -64,7 +64,11 @@ import {
 import { WAN21_GENERATION } from "../../models/src/wan/descriptor.ts";
 import { planWanGenerationTiles } from "../../models/src/wan/tile-decode.ts";
 import { disposeSteps } from "../../models/src/session/dispose-steps.ts";
-import { type DrmUsage, formatDrmUsage, sampleDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
+import {
+  type DrmUsage,
+  formatDrmUsage,
+  sampleDrmUsage,
+} from "../../models/tests/helpers/drm-usage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { allclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
@@ -104,7 +108,8 @@ type CaseName = (typeof CASES)[number];
 const DEGENERATE_FIXTURE = "vae_chunks.band.safetensors";
 
 /** SKIP 時にそのまま貼れる生成コマンド（chunk グラフ 2 本 + タイル参照）。 */
-const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
+const GENERATE_COMMAND =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.export_vae && uv run --group wan --inexact python -m wan.vae_tiling";
 
 const modelUrl = (component: string): URL => new URL(`${component}/${MODEL_FILE}`, SERIES_ROOT);
@@ -139,7 +144,11 @@ test({
   // 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
   ignore: !ANY_PRESENT,
   fn: () => {
-    assertEquals(PRESENT, PRESENT.map(() => true), `${SERIES_ROOT.pathname} の欠け`);
+    assertEquals(
+      PRESENT,
+      PRESENT.map(() => true),
+      `${SERIES_ROOT.pathname} の欠け`,
+    );
   },
 });
 
@@ -357,8 +366,12 @@ test({
             assertEquals(want.shape, [3, wanVaeFrameCount(chunks), 480, 832]);
             await poisonFrames(liveCaches, chunks);
             const started = performance.now();
-            const { result: got, before, peak } = await withDrmPeak(() =>
-              decodeWanVaeTiled(gpu, sessions, liveCaches, plan, latents.data)
+            const {
+              result: got,
+              before,
+              peak,
+            } = await withDrmPeak(() =>
+              decodeWanVaeTiled(gpu, sessions, liveCaches, plan, latents.data),
             );
             const elapsedMs = performance.now() - started;
             const { report, referenceMax, ratio } = compare(got, want.data, TOLERANCE);
@@ -375,18 +388,16 @@ test({
                 `nonFinite=${report.nonFiniteCount} decodeMs=${elapsedMs.toFixed(0)}`,
             );
             console.log(
-              `[wan-vae-tiles] drm fdinfo GiB: before {${formatDrmUsage(before)}} peak {${
-                formatDrmUsage(peak)
-              }} ` +
-                `breakdown=${
-                  JSON.stringify(
-                    vramBreakdown(
-                      sessions.first.diagnostics(),
-                      sessions.next.diagnostics(),
-                      liveCaches,
-                    ),
-                  )
-                }`,
+              `[wan-vae-tiles] drm fdinfo GiB: before {${formatDrmUsage(before)}} peak {${formatDrmUsage(
+                peak,
+              )}} ` +
+                `breakdown=${JSON.stringify(
+                  vramBreakdown(
+                    sessions.first.diagnostics(),
+                    sessions.next.diagnostics(),
+                    liveCaches,
+                  ),
+                )}`,
             );
             // 観測（門ではない）: 非タイルの上流 decode との差（タイル化の近似）。
             const full = fixture.tensor("frames_full").data;
@@ -433,9 +444,9 @@ test({
             const assembleMs = performance.now() - assembleStarted;
             const { report, referenceMax, ratio } = compare(got, acceptWant, TOLERANCE);
             measurements.push({
-              output: `frames(${acceptLatents.shape[1]} chunks × ${
-                wanVaeTileCount(acceptPlan)
-              } tiles)`,
+              output: `frames(${acceptLatents.shape[1]} chunks × ${wanVaeTileCount(
+                acceptPlan,
+              )} tiles)`,
               maxAbs: report.maxAbsError,
               maxRel: report.maxRelError,
               tolerance: TOLERANCE,
@@ -443,9 +454,9 @@ test({
             });
             console.log(
               `[wan-vae-tiles] accept: maxAbs=${report.maxAbsError} refMax=${referenceMax} ` +
-                `ratio=${ratio} nonFinite=${report.nonFiniteCount} decodeMs=${
-                  decodeMs.toFixed(0)
-                } assembleMs=${assembleMs.toFixed(0)}`,
+                `ratio=${ratio} nonFinite=${report.nonFiniteCount} decodeMs=${decodeMs.toFixed(
+                  0,
+                )} assembleMs=${assembleMs.toFixed(0)}`,
             );
             assertEquals(report.nonFiniteCount, 0, "accept: 非有限");
             assert(report.pass, `accept: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
@@ -467,7 +478,9 @@ test({
             ...acceptPlan,
             rows: {
               ...acceptPlan.rows,
-              starts: acceptPlan.rows.starts.map((start, index) => index === 1 ? start + 1 : start),
+              starts: acceptPlan.rows.starts.map((start, index) =>
+                index === 1 ? start + 1 : start,
+              ),
             },
           }),
         },

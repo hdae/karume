@@ -71,9 +71,6 @@ test("prepareContainer は capability 不足・契約違反を重みの block �
   // add に 3 本目の入力（capability 表は slot dtype しか見ないのでアリティは契約検査の担当）
   badArity.nodes[1].ins = ["h", "b", "b"];
   const contractViolation = countingContainer(await openModelBytes(badArity, baseTensors()));
-  assertThrows(
-    () => prepareContainer(contractViolation.container, GRAPH_NAME),
-    OpContractError,
-  );
+  assertThrows(() => prepareContainer(contractViolation.container, GRAPH_NAME), OpContractError);
   assertEquals(contractViolation.reads(), 0, "契約検査の前に重みの block を取っている");
 });

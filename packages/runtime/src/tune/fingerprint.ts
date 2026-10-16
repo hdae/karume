@@ -89,13 +89,11 @@ export const canonicalJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (typeof value === "object") {
     const entries: [string, unknown][] = Object.entries(value);
-    return `{${
-      entries
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-        .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-        .join(",")
-    }}`;
+    return `{${entries
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
   }
   throw new Error(`正規の JSON: ${typeof value} の値は書けない`);
 };
@@ -116,7 +114,8 @@ export class KernelsIdError extends Error {
 }
 
 /** dispatch 数の上限に当たったときに添える説明（device の上限で掃引を通った幾何でも落ちうる理由）。 */
-const LIMIT_NOTE = `指紋は device に依らないよう、WebGPU が全 device に保証する ` +
+const LIMIT_NOTE =
+  `指紋は device に依らないよう、WebGPU が全 device に保証する ` +
   `maxComputeWorkgroupsPerDimension の既定値 ${FINGERPRINT_WORKGROUP_LIMIT} で dispatch を組む — ` +
   "上限の大きい device の掃引を通った幾何でも、この数を超える表は指紋を導けない";
 
@@ -224,9 +223,9 @@ export const profileKernelsId = (
       for (const { field, candidate } of roles) {
         const launch = naming(
           () =>
-            `ケース ${sweepCase.id} で ${field} の幾何 ${candidate.name} ${
-              JSON.stringify(candidate.geometry)
-            } の dispatch を組めない`,
+            `ケース ${sweepCase.id} で ${field} の幾何 ${candidate.name} ${JSON.stringify(
+              candidate.geometry,
+            )} の dispatch を組めない`,
           () => plan.launch(candidate),
         );
         lines.push(launchLine(launch));
@@ -288,22 +287,25 @@ export const candidateKernelsId = (
     if (sweepCase === undefined) {
       throw new KernelsIdError(`測った行のケース ${row.caseId} が今の runtime の形状表に無い`);
     }
-    const plan = plans.get(sweepCase.id) ?? naming(
-      () => `ケース ${sweepCase.id} の case plan を組めない`,
-      () => planner(sweepCase, FINGERPRINT_WORKGROUP_LIMIT, dp4a),
-    );
+    const plan =
+      plans.get(sweepCase.id) ??
+      naming(
+        () => `ケース ${sweepCase.id} の case plan を組めない`,
+        () => planner(sweepCase, FINGERPRINT_WORKGROUP_LIMIT, dp4a),
+      );
     plans.set(sweepCase.id, plan);
     // 族は幾何の形（tileK の有無）とケースの op から決まる（名前は文言の名指しにだけ効く）
-    const candidate = "tileK" in row.geometryParams
-      ? i8a8Candidate(row.geometryParams)
-      : sweepCase.op === "conv2d"
-      ? conv2dCandidate(row.geometryParams)
-      : gemmCandidate(row.geometryParams);
+    const candidate =
+      "tileK" in row.geometryParams
+        ? i8a8Candidate(row.geometryParams)
+        : sweepCase.op === "conv2d"
+          ? conv2dCandidate(row.geometryParams)
+          : gemmCandidate(row.geometryParams);
     const launch = naming(
       () =>
-        `ケース ${sweepCase.id} で測った幾何 ${candidate.name} ${
-          JSON.stringify(candidate.geometry)
-        } の dispatch を組めない`,
+        `ケース ${sweepCase.id} で測った幾何 ${candidate.name} ${JSON.stringify(
+          candidate.geometry,
+        )} の dispatch を組めない`,
       () => plan.launch(candidate),
     );
     lines.push(launchLine(launch));
@@ -322,7 +324,10 @@ export const sweepCandidateKernelsId = (rows: readonly MeasuredRow[], dp4a: bool
   candidateKernelsId(rows, dp4a, SWEEP_CASES, casePlan);
 
 /** ケースの型のどれかが持つ欄の名前（ケースの型の和の各要素の keyof の和）。 */
-type SweepCaseField = SweepCase extends infer Case ? Case extends SweepCase ? keyof Case : never
+type SweepCaseField = SweepCase extends infer Case
+  ? Case extends SweepCase
+    ? keyof Case
+    : never
   : never;
 
 /**
@@ -372,10 +377,8 @@ const caseSetFields = (sweepCase: SweepCase): Record<string, unknown> =>
   );
 
 /** ケース集合の版の本体（{@link sweepCaseSetId} — ケースと境界を注入できる形）。 */
-export const caseSetId = (
-  cases: readonly SweepCase[],
-  bounds: readonly number[],
-): string => fnv1a64Hex(canonicalJson({ cases: cases.map(caseSetFields), bounds }));
+export const caseSetId = (cases: readonly SweepCase[], bounds: readonly number[]): string =>
+  fnv1a64Hex(canonicalJson({ cases: cases.map(caseSetFields), bounds }));
 
 /**
  * ケース集合の版（`provenance.caseSet` — ADR 0117 決定 4）: 掃引のケース（`SWEEP_CASES`）の dispatch を

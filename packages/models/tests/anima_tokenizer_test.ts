@@ -70,10 +70,7 @@ type Fixture = {
   readonly cases: FixtureCase[];
 };
 
-const FIXTURE_PATH = new URL(
-  "./fixtures/anima-text/parity.json",
-  import.meta.url,
-);
+const FIXTURE_PATH = new URL("./fixtures/anima-text/parity.json", import.meta.url);
 const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 const qwenAssets: Qwen2Assets = {
@@ -166,8 +163,8 @@ test("NFC: 分節表を 1 区間落とすと素の normalize と同じ（= 別 i
   const text = "\u0818\u089A";
   assertEquals(normalizeNfc(text, qwenAssets.nfcSegments), text, "分節表あり = 正本");
   assertEquals(text.normalize("NFC"), "\u089A\u0818", "素の NFC は並べ替える");
-  const dropped = qwenAssets.nfcSegments.filter(([start, end]) =>
-    !(start <= 0x089a && 0x089a <= end)
+  const dropped = qwenAssets.nfcSegments.filter(
+    ([start, end]) => !(start <= 0x089a && 0x089a <= end),
   );
   assertEquals(normalizeNfc(text, dropped), "\u089A\u0818", "表から落ちると正本と割れる");
 });
@@ -197,9 +194,7 @@ test("追加語彙は leftmost-longest（途中まで一致する文字列は切
     { text: "b", added: false },
   ]);
   // 途中まで一致（`<|endoftext|x`）は 1 件も切り出さない。
-  assertEquals(splitAddedTokens("<|endoftext|x", added), [
-    { text: "<|endoftext|x", added: false },
-  ]);
+  assertEquals(splitAddedTokens("<|endoftext|x", added), [{ text: "<|endoftext|x", added: false }]);
   // 位置が同じなら長い方が勝つ（短い候補を先に置いても結果が変わらない）。
   assertEquals(splitAddedTokens("<|a|>", ["<|a|>", "<|a"]), [{ text: "<|a|>", added: true }]);
   // 空文字の追加語彙は全位置で一致して走査が進まない（無限ループの芽）。
@@ -208,10 +203,44 @@ test("追加語彙は leftmost-longest（途中まで一致する文字列は切
 
 test("区間表: 昇順・非重複でない表は受け付けない（黙って別の分類にしない）", () => {
   // `inCodeRanges` は二分探索なので、順序が崩れた表は例外にならず判定だけが変わる。
-  assertEquals(parseCodeRanges([[1, 2], [4, 9]], "表"), [[1, 2], [4, 9]]);
+  assertEquals(
+    parseCodeRanges(
+      [
+        [1, 2],
+        [4, 9],
+      ],
+      "表",
+    ),
+    [
+      [1, 2],
+      [4, 9],
+    ],
+  );
   assertThrows(() => parseCodeRanges([[5, 1]], "表"), Error, "始端が終端より大きい");
-  assertThrows(() => parseCodeRanges([[4, 6], [1, 2]], "表"), Error, "昇順でない");
-  assertThrows(() => parseCodeRanges([[1, 5], [5, 9]], "表"), Error, "重なる");
+  assertThrows(
+    () =>
+      parseCodeRanges(
+        [
+          [4, 6],
+          [1, 2],
+        ],
+        "表",
+      ),
+    Error,
+    "昇順でない",
+  );
+  assertThrows(
+    () =>
+      parseCodeRanges(
+        [
+          [1, 5],
+          [5, 9],
+        ],
+        "表",
+      ),
+    Error,
+    "重なる",
+  );
   assertThrows(() => parseCodeRanges([[1, 2], [4]], "表"), Error, "数値対でない");
 });
 
@@ -227,10 +256,7 @@ test("正規化: 結合文字クラスタは最短の一致接頭辞だけを出
 
 test("正規化: クラスタが 6 バイト以上になると丸ごと置換の経路に入らない", () => {
   // A(1) + U+0302(2) + U+0301(2) + U+0301(2) = 7 バイト → 1 文字ずつ（何も合成されない）。
-  assertEquals(
-    normalizeSpm(t5Assets.normalizer, "A\u0302\u0301\u0301"),
-    "A\u0302\u0301\u0301",
-  );
+  assertEquals(normalizeSpm(t5Assets.normalizer, "A\u0302\u0301\u0301"), "A\u0302\u0301\u0301");
 });
 
 test("正規化: クラスタがちょうど 6 バイトでも丸ごと置換の経路に入らない（境界そのもの）", () => {
@@ -238,10 +264,7 @@ test("正規化: クラスタがちょうど 6 バイトでも丸ごと置換の
   // 「U+00A0 → 空白」の 1cp 規則が丸ごと置換として発火し、結合文字 2 個が黙って消える。
   // 既存の直叩き 2 本は 5 バイトと 7 バイトしか持たず、この 1 文字の書き換えを素通しする
   // （28 ケースのパリティも同様 — 故障注入で実測）。
-  assertEquals(
-    normalizeSpm(t5Assets.normalizer, "\u00A0\u0300\u0300"),
-    " \u0300\u0300",
-  );
+  assertEquals(normalizeSpm(t5Assets.normalizer, "\u00A0\u0300\u0300"), " \u0300\u0300");
 });
 
 test("正規化: 制御文字の直後ではクラスタが切れる（結合文字を巻き込まない）", () => {
@@ -647,17 +670,41 @@ test("資産の値域門: 行番号 = id の表に重複行があれば落とす
 
 test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens / caseFold）", () => {
   assertThrows(
-    () => createTokenizers(...brokenQwen2({ addedTokens: [["<|x|>", 3], ["<|x|>", 4]] })),
+    () =>
+      createTokenizers(
+        ...brokenQwen2({
+          addedTokens: [
+            ["<|x|>", 3],
+            ["<|x|>", 4],
+          ],
+        }),
+      ),
     Error,
     '鍵 "<|x|>" が重複している',
   );
   assertThrows(
-    () => createTokenizers(...brokenQwen2({ caseFold: [[0x41, 0x61], [0x41, 0x62]] })),
+    () =>
+      createTokenizers(
+        ...brokenQwen2({
+          caseFold: [
+            [0x41, 0x61],
+            [0x41, 0x62],
+          ],
+        }),
+      ),
     Error,
     "tokenizer.caseFold: 鍵 65 が重複している",
   );
   assertThrows(
-    () => createTokenizers(...brokenT5({ addedTokens: [["<x>", 3], ["<x>", 4]] })),
+    () =>
+      createTokenizers(
+        ...brokenT5({
+          addedTokens: [
+            ["<x>", 3],
+            ["<x>", 4],
+          ],
+        }),
+      ),
     Error,
     "tokenizer_2.addedTokens: 鍵 ",
   );
@@ -676,7 +723,7 @@ test("区間表: 非整数・コードポイント域外は受け付けない（
   assertThrows(() => parseCodeRanges([[-1, 90]], "表"), Error, "コードポイントが");
   assertThrows(() => parseCodeRanges([[65, 0x110000]], "表"), Error, "コードポイントが");
   // 端点ちょうど（0 と 0x10FFFF）は受理集合の内側。
-  assertEquals(parseCodeRanges([[0, 0x10FFFF]], "表"), [[0, 0x10FFFF]]);
+  assertEquals(parseCodeRanges([[0, 0x10ffff]], "表"), [[0, 0x10ffff]]);
 });
 
 test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は落とす", () => {
@@ -690,12 +737,30 @@ test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は
   });
   // 後勝ちで通すと、正規化の結果だけが静かに変わる（tokenize の id 列が別物になる）。
   assertThrows(
-    () => parseSpmTables(tables({ single: [[0x41, "a"], [0x41, "b"]] }), "表"),
+    () =>
+      parseSpmTables(
+        tables({
+          single: [
+            [0x41, "a"],
+            [0x41, "b"],
+          ],
+        }),
+        "表",
+      ),
     Error,
     "表.single: 鍵 65 が重複している",
   );
   assertThrows(
-    () => parseSpmTables(tables({ multi: [[0x41, 0x42, "x"], [0x41, 0x42, "y"]] }), "表"),
+    () =>
+      parseSpmTables(
+        tables({
+          multi: [
+            [0x41, 0x42, "x"],
+            [0x41, 0x42, "y"],
+          ],
+        }),
+        "表",
+      ),
     Error,
     "表.multi: 鍵 ",
   );
@@ -740,8 +805,20 @@ test("Qwen2 BPE: rank の小さい対が先・同じ rank なら左の対が先�
   // 同率（同じ対が並ぶ）なら左から: aaa → aa + a（a + aa ではない）。
   assertEquals(tinyQwen(vocab, [["a", "a", 0]]).encode("aaa"), [1, 0]);
   // rank は位置より優先: b c（rank 0）が a b（rank 1）より先に併合される。
-  assertEquals(tinyQwen(vocab, [["b", "c", 0], ["a", "b", 1]]).encode("abc"), [0, 4]);
-  assertEquals(tinyQwen(vocab, [["b", "c", 1], ["a", "b", 0]]).encode("abc"), [5, 3]);
+  assertEquals(
+    tinyQwen(vocab, [
+      ["b", "c", 0],
+      ["a", "b", 1],
+    ]).encode("abc"),
+    [0, 4],
+  );
+  assertEquals(
+    tinyQwen(vocab, [
+      ["b", "c", 1],
+      ["a", "b", 0],
+    ]).encode("abc"),
+    [5, 3],
+  );
 });
 
 test("Qwen2 BPE: 区切りの無い長い 1 片でも併合は二次時間にならない", () => {
@@ -752,6 +829,9 @@ test("Qwen2 BPE: 区切りの無い長い 1 片でも併合は二次時間にな
   const started = performance.now();
   const ids = qwen2.encode("a".repeat(8_000));
   const elapsed = performance.now() - started;
-  assertEquals(ids, Array.from({ length: 512 }, () => 1));
+  assertEquals(
+    ids,
+    Array.from({ length: 512 }, () => 1),
+  );
   assert(elapsed < 300, `8,000 文字の 1 片の BPE に ${elapsed.toFixed(0)} ms かかった`);
 });

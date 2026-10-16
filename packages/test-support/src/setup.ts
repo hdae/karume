@@ -35,7 +35,9 @@ if (host.__karumeDawnGpu === undefined && process.env.KARUME_NO_DAWN !== "1") {
     // A machine without a usable WebGPU backend (e.g. a CI runner without Vulkan) behaves like a
     // browser without WebGPU: `navigator.gpu` stays undefined, GPU cases are skipped, and the
     // all-skip gate (KARUME_ALLOW_NO_GPU) decides whether that is acceptable.
-    console.warn(`[karume] Dawn could not be created; running without navigator.gpu: ${String(error)}`);
+    console.warn(
+      `[karume] Dawn could not be created; running without navigator.gpu: ${String(error)}`,
+    );
   }
 }
 

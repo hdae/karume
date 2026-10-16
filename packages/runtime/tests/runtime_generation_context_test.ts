@@ -64,7 +64,10 @@ test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理す�
   }
 
   // 順序: 重複も降順も「queryLength 以上の最小」を線形走査で決められなくする。
-  for (const buckets of [[2, 2], [4, 3]]) {
+  for (const buckets of [
+    [2, 2],
+    [4, 3],
+  ]) {
     const error = assertThrows(() => assertChunkBuckets(buckets, 8), ExecutionError);
     assert(error.message.includes("chunkBuckets[1]"), error.message);
     assert(error.message.includes("狭義昇順でない"), error.message);
@@ -110,9 +113,6 @@ test("resolveSlotShape は未束縛シンボルと正でない容量を拒否す
   const unbound = assertThrows(() => resolveSlotShape("k", [1, "C", 4], {}), ExecutionError);
   assert(unbound.message.includes("'C' が束縛されていない"), unbound.message);
 
-  const empty = assertThrows(
-    () => resolveSlotShape("k", [1, "C", 4], { C: 0 }),
-    ExecutionError,
-  );
+  const empty = assertThrows(() => resolveSlotShape("k", [1, "C", 4], { C: 0 }), ExecutionError);
   assert(empty.message.includes("容量 0"), empty.message);
 });

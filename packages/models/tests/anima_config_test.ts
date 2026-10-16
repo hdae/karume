@@ -187,7 +187,7 @@ test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側であ
   // 逆側: 受理集合の条件は生成要求と共有するが、manifest 側で外れたのは資産の齟齬なので
   // `ModelInputError` では**ない**（ADR 0107 決定 2）。元の例外は `cause` に残る。
   const thrown = assertThrows(() =>
-    parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } }))
+    parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } })),
   );
   assert(thrown instanceof Error);
   assert(!(thrown instanceof ModelInputError));

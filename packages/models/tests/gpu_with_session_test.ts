@@ -96,11 +96,7 @@ const emptyLog = (): SessionLog => ({ sessions: [], options: [], disposeCalls: 0
 
 /** 解放済みの Session は以後の run を fail loudly で拒む（dispose が本当に効いたことの観測点）。 */
 const assertDisposed = async (session: Session): Promise<void> => {
-  await assertRejects(
-    () => session.run(inputOf([1, 2])),
-    ExecutionError,
-    "dispose 済み",
-  );
+  await assertRejects(() => session.run(inputOf([1, 2])), ExecutionError, "dispose 済み");
 };
 
 const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> => {
@@ -149,7 +145,7 @@ describe({
             withSession(gpu, spiedComponent(log), {}, undefined, async (run) => {
               await run(inputOf([1, 2]));
               throw thrown;
-            })
+            }),
           );
 
           assertStrictEquals(error, thrown);
@@ -216,7 +212,10 @@ describe({
             return [valuesOf(first), valuesOf(second)];
           });
 
-          assertEquals(outputs, [[2, 4], [6, -8]]);
+          assertEquals(outputs, [
+            [2, 4],
+            [6, -8],
+          ]);
           assertEquals(events, ["observe", "run 1 が戻った", "observe", "run 2 が戻った"]);
           // run の前に読んだ診断なら直近 run の欄は空のまま。
           assert(observed.every((diagnostics) => diagnostics.lastRun !== undefined));
@@ -228,12 +227,8 @@ describe({
         await withGpu(async (gpu) => {
           const log = emptyLog();
 
-          const values = await withSession(
-            gpu,
-            spiedComponent(log),
-            {},
-            undefined,
-            async (run) => valuesOf(await run(inputOf([0.5, -1.5]))),
+          const values = await withSession(gpu, spiedComponent(log), {}, undefined, async (run) =>
+            valuesOf(await run(inputOf([0.5, -1.5]))),
           );
 
           assertEquals(values, [1, -3]);

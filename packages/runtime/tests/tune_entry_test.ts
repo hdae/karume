@@ -52,19 +52,24 @@ const assertRecordFields = (swept: GeometrySweepReport): void => {
 };
 
 describe("deriveGeometryProfile", () => {
-  const inputs = [{
-    report: report(
-      caseRows(linearCase(1024), BIG, [[A, { speedup: 1.2 }], [B, { speedup: 1.01 }]]),
-    ),
-    path: "a.json",
-    sha256: "sha-a",
-  }];
+  const inputs = [
+    {
+      report: report(
+        caseRows(linearCase(1024), BIG, [
+          [A, { speedup: 1.2 }],
+          [B, { speedup: 1.01 }],
+        ]),
+      ),
+      path: "a.json",
+      sha256: "sha-a",
+    },
+  ];
 
   it("記録から表と採否の行を返し、CLI / GPU lab の経路（deriveProfile → buildGeometryProfile）と同じ値になる", () => {
     const options = { id: "test-gpu", vendor: "apple", architecture: "metal-3" } as const;
     const { profile, verdicts } = deriveGeometryProfile(inputs, options);
     const sources = inputs.map(({ report, path, sha256 }) =>
-      parseSweepReport(report, { path, sha256 })
+      parseSweepReport(report, { path, sha256 }),
     );
     const internal = deriveProfile(sources, { ...options, minSpeedup: 1.05 });
     assertEquals(profile, buildGeometryProfile(options, sources, internal));
@@ -74,11 +79,13 @@ describe("deriveGeometryProfile", () => {
   });
 
   it("minSpeedup の既定は ×1.05（×1.04 の勝ちは採らない）で、1 未満と非有限は投げる", () => {
-    const close = [{
-      report: report(caseRows(linearCase(1024), BIG, [[A, { speedup: 1.04 }]])),
-      path: "a.json",
-      sha256: "sha-a",
-    }];
+    const close = [
+      {
+        report: report(caseRows(linearCase(1024), BIG, [[A, { speedup: 1.04 }]])),
+        path: "a.json",
+        sha256: "sha-a",
+      },
+    ];
     const largest = (minSpeedup?: number) =>
       deriveGeometryProfile(close, {
         id: "x",
@@ -93,14 +100,16 @@ describe("deriveGeometryProfile", () => {
   });
 
   it("門に落ちる記録（壁時計で測った掃引）は生成器の理由のまま投げる", () => {
-    const wall = [{
-      report: {
-        ...report(caseRows(linearCase(1024), BIG, [])),
-        gpuTiming: { feature: false, unit: "wall", quantized: false },
+    const wall = [
+      {
+        report: {
+          ...report(caseRows(linearCase(1024), BIG, [])),
+          gpuTiming: { feature: false, unit: "wall", quantized: false },
+        },
+        path: "wall.json",
+        sha256: "sha-wall",
       },
-      path: "wall.json",
-      sha256: "sha-wall",
-    }];
+    ];
     assertThrows(
       () => deriveGeometryProfile(wall, { id: "x", optIn: true }),
       Error,
@@ -182,8 +191,7 @@ describe("runGeometrySweep: 実 GPU", () => {
   });
 
   it({
-    name:
-      "1 ケースを quick で測ると既定の行が先頭・全行が既定と出力一致し、通知は started → 行 → ケースの順",
+    name: "1 ケースを quick で測ると既定の行が先頭・全行が既定と出力一致し、通知は started → 行 → ケースの順",
     ignore: adapter === null,
     fn: async () => {
       const id = "linear-m16-n3072-k1024";
@@ -215,7 +223,10 @@ describe("runGeometrySweep: 実 GPU", () => {
       }
       assertEquals(notified, swept.rows);
       assertEquals(kinds, ["started", ...swept.rows.map(() => "row" as const), "case"]);
-      assertEquals(swept.cases.map((summary) => summary.caseId), [id]);
+      assertEquals(
+        swept.cases.map((summary) => summary.caseId),
+        [id],
+      );
       assert((swept.cases[0].defaultRepeat?.driftRatio ?? 0) > 0);
       assertEquals(swept.aborted, false);
       assertRecordFields(swept);
@@ -229,8 +240,7 @@ describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
   const id = "linear-m16-n3072-k1024";
 
   it({
-    name:
-      "ケースの途中（既定の行の直後）で中断すると aborted が true で、そのケースは再測定を持たず elapsedMs を持つ",
+    name: "ケースの途中（既定の行の直後）で中断すると aborted が true で、そのケースは再測定を持たず elapsedMs を持つ",
     ignore: adapter === null,
     fn: async () => {
       const abort = new AbortController();
@@ -246,15 +256,17 @@ describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
       assertEquals(swept.aborted, true);
       assertEquals(swept.rows.length, 1);
       assertEquals(swept.rows[0].isDefault, true);
-      assertEquals(swept.cases.map((summary) => summary.caseId), [id]);
+      assertEquals(
+        swept.cases.map((summary) => summary.caseId),
+        [id],
+      );
       assertEquals(swept.cases[0].defaultRepeat, undefined);
       assertRecordFields(swept);
     },
   });
 
   it({
-    name:
-      "全て測り終えた後（最後のケースの通知）に届いた中断は数えない（aborted が false — 記録は欠けていない）",
+    name: "全て測り終えた後（最後のケースの通知）に届いた中断は数えない（aborted が false — 記録は欠けていない）",
     ignore: adapter === null,
     fn: async () => {
       const abort = new AbortController();

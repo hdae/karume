@@ -104,9 +104,8 @@ test("umT5 の距離 −511〜511 のバケットが上流の式と一致", () =
   assertEquals(expected.shape, [2 * UMT5_MAX_LENGTH - 1]);
   const actual = new Int32Array(expected.data.length);
   for (let distance = meta.distance_offset; distance < UMT5_MAX_LENGTH; distance += 1) {
-    actual[distance - meta.distance_offset] = distance >= 0
-      ? table[distance]
-      : table[-distance * UMT5_MAX_LENGTH];
+    actual[distance - meta.distance_offset] =
+      distance >= 0 ? table[distance] : table[-distance * UMT5_MAX_LENGTH];
   }
   assertSameElements(
     actual,

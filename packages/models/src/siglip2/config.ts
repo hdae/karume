@@ -77,7 +77,7 @@ export const SIGLIP2_PIPELINE_MAJOR = 1;
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
 // SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
 export const SIGLIP2_SOURCES = {
-  "siglip2": {
+  siglip2: {
     repo: "hdae/karume-siglip2",
     revision: "71077b1810e42e9a1a25d80ee0f43c75db5d3b23",
   },

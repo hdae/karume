@@ -30,7 +30,8 @@ export const WAN_TI2V_VAE_NEXT = "vae_decoder_next";
 export const WAN_TI2V_VAE_MODEL_FILE = "model.krm";
 
 /** SKIP 時にそのまま貼れる生成コマンド（容器 2 本とフィクスチャ 3 本を一組で据える）。 */
-export const WAN_TI2V_VAE_GENERATE = "cd tools/export-recipes && uv run --group wan --inexact " +
+export const WAN_TI2V_VAE_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.export_vae --model ti2v-5b";
 
 /** フィクスチャ 1 本（帯の決定用 1 本 + 受入れ 2 本 — 2.1 と同じ組み立て）。 */
@@ -90,9 +91,9 @@ export const WAN_TI2V_VAE_CACHE_TABLE: readonly Ti2vVaeCacheRow[] = [
 ];
 
 /** `time_conv` の cache（next だけが持つ — 表の `timeConv` から）。 */
-export const WAN_TI2V_VAE_TIME_CONV_CACHES: readonly string[] = WAN_TI2V_VAE_CACHE_TABLE
-  .filter(({ timeConv }) => timeConv)
-  .map(({ name }) => name);
+export const WAN_TI2V_VAE_TIME_CONV_CACHES: readonly string[] = WAN_TI2V_VAE_CACHE_TABLE.filter(
+  ({ timeConv }) => timeConv,
+).map(({ name }) => name);
 
 /**
  * cache の常駐の合計バイト数（f32 — 116,940,800 要素 × 4。recipe の実重みのテストの要素数と同じ値で、表とは独立に

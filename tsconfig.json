@@ -1,19 +1,11 @@
 {
   "compilerOptions": {
     "target": "esnext",
-    "lib": [
-      "esnext",
-      "dom",
-      "dom.iterable",
-      "dom.asynciterable"
-    ],
+    "lib": ["esnext", "dom", "dom.iterable", "dom.asynciterable"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "moduleDetection": "force",
-    "types": [
-      "node",
-      "@webgpu/types"
-    ],
+    "types": ["node", "@webgpu/types"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,

@@ -179,19 +179,17 @@ const containerComponent = (opened: OpenedContainer, prepared: PreparedModel): M
 });
 
 /** 開いた部品の表から供給口を作る（開いていない役割は fail loudly）。 */
-const openerOf = (
-  where: string,
-  components: ReadonlyMap<string, ModelComponent>,
-): ComponentOpener =>
-(key) => {
-  const component = components.get(key);
-  if (component === undefined) {
-    throw new Error(
-      `${where}: 部品 '${key}' は開いていない（開いた部品: ${[...components.keys()].join(" / ")}）`,
-    );
-  }
-  return component;
-};
+const openerOf =
+  (where: string, components: ReadonlyMap<string, ModelComponent>): ComponentOpener =>
+  (key) => {
+    const component = components.get(key);
+    if (component === undefined) {
+      throw new Error(
+        `${where}: 部品 '${key}' は開いていない（開いた部品: ${[...components.keys()].join(" / ")}）`,
+      );
+    }
+    return component;
+  };
 
 /** `<役割>[<添字>]` の添字部分（10 進整数のみ）。 */
 const PART_INDEX = /^\d+$/;
@@ -279,9 +277,10 @@ export const assetComponentOpener = async (
   const components = new Map<string, ModelComponent>();
   for (const key of componentKeys) {
     const plan = planComponentKeys(where, keys, key);
-    const input: ContainerInput = plan.kind === "bytes"
-      ? { kind: "bytes", bytes: new Uint8Array(buffer(plan.key)) }
-      : { kind: "parts", parts: plan.keys.map((partKey) => new Uint8Array(buffer(partKey))) };
+    const input: ContainerInput =
+      plan.kind === "bytes"
+        ? { kind: "bytes", bytes: new Uint8Array(buffer(plan.key)) }
+        : { kind: "parts", parts: plan.keys.map((partKey) => new Uint8Array(buffer(partKey))) };
     const opened = await openContainer(input);
     components.set(key, containerComponent(opened, prepareContainer(opened, key)));
   }
@@ -420,9 +419,9 @@ export const loadContainerComponents = async <Admitted>(
     if (base === undefined) {
       throw new Error(
         `${where}: 部品 '${key}' の容器が manifest に無い` +
-          `（選択 ${selection.model} / ${selection.quant} が持つ部品: ${
-            Object.keys(selection.containers).join(" / ")
-          }）`,
+          `（選択 ${selection.model} / ${selection.quant} が持つ部品: ${Object.keys(
+            selection.containers,
+          ).join(" / ")}）`,
       );
     }
     const replacement = Object.hasOwn(replacements, key) ? replacements[key] : undefined;
@@ -495,16 +494,13 @@ export const loadContainerComponents = async <Admitted>(
 
   // 3. 重みの part を落とす（全部品ぶんを取得元ごとに 1 回で — Session を遅延構築する家族で
   // 「重みの DL が初回実行まで遅れ、ロード進捗にも現れない」形を無くす）。
-  await prefetchSeats(
-    seats,
-    (seat) => nonEmptyParts(seat.container.parts.slice(1)),
-    hubOptions,
-  );
+  await prefetchSeats(seats, (seat) => nonEmptyParts(seat.container.parts.slice(1)), hubOptions);
 
   // 4. 残りの資産（tokenizer 等）は全量面のまま。
-  const assets = Object.keys(selection.assets).length === 0
-    ? {}
-    : await fetchAssets(loaded, selection.assets, hubOptions);
+  const assets =
+    Object.keys(selection.assets).length === 0
+      ? {}
+      : await fetchAssets(loaded, selection.assets, hubOptions);
 
   return { open, assets, admitted };
 };

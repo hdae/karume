@@ -154,7 +154,11 @@ import {
   type WanFamilySpec,
   type WanState,
 } from "../../models/src/wan/family.ts";
-import { wanConditionMask, wanDitPatch, withWanFirstFrameCondition } from "../../models/src/wan/dit-loop.ts";
+import {
+  wanConditionMask,
+  wanDitPatch,
+  withWanFirstFrameCondition,
+} from "../../models/src/wan/dit-loop.ts";
 import {
   patchifyLatents,
   unpatchifyTokens,
@@ -177,7 +181,11 @@ import {
 import { WAN_VAE_LATENT_INPUT } from "../../models/src/wan/vae-chunks.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
+import {
+  type DrmTimeline,
+  formatDrmUsage,
+  monitorDrmUsage,
+} from "../../models/tests/helpers/drm-usage.ts";
 import { filePresent } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
   WAN_I2V_SOURCE_SHAPE,
@@ -185,7 +193,10 @@ import {
   WAN_I2V_STEPS_ROOT,
   wanI2vStepsFixtureUrl,
 } from "../../models/tests/helpers/wan-i2v-fixture.ts";
-import { WAN_I2V_ENCODER_BAND, WAN_I2V_IMAGE_SHA256 } from "../../models/tests/helpers/wan-i2v-image.ts";
+import {
+  WAN_I2V_ENCODER_BAND,
+  WAN_I2V_IMAGE_SHA256,
+} from "../../models/tests/helpers/wan-i2v-image.ts";
 import {
   readWanTi2vDistributionManifestText,
   WAN_TI2V_ASSEMBLE_COMMAND,
@@ -243,10 +254,7 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
  * MUST: 受入れ（`accept-ferret`）の結果を見てこの値も、決定用のケースも変えない（帯の決定と受入れの独立が崩れる）。
  * 受入れが帯を外れたら帯を広げずに原因を調べる。
  */
-const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [
-  2.9e-3,
-  3.5e-3,
-];
+const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [2.9e-3, 3.5e-3];
 
 /**
  * 最後の潜在（置き換えた後 — VAE へ渡す値・`[48,3,44,80]`）の帯。`undefined` = 未導出（{@link LATENT_RATIO_BANDS} と同じ規則）。
@@ -387,7 +395,9 @@ if (!ANY_FIXTURE) {
   );
 }
 
-const references = openReferences(new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url),
+);
 const results = openResults("wan-ti2v-i2v-pipeline");
 /** 50 ステップの通しの結果の席（`results.json` は走行ごとに丸ごと書き直されるので、別のプロセスで回す回と分ける）。 */
 const fullResults = openResults("wan-ti2v-i2v-pipeline-full");
@@ -487,9 +497,9 @@ const difference = (got: Float32Array, want: Float32Array): Difference => {
 };
 
 const formatDifference = (label: string, diff: Difference): string =>
-  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${
-    diff.referenceMax.toFixed(3)
-  }）`;
+  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${diff.referenceMax.toFixed(
+    3,
+  )}）`;
 
 /** f32 の列どうしのビット一致（NaN の符号や -0 も区別する）。 */
 const bitsEqual = (got: Float32Array, want: Float32Array): boolean => {
@@ -552,9 +562,9 @@ const firstFrameDifference = (
 };
 
 const formatFirstFrame = (diff: { readonly maxAbs: number; readonly meanAbs: number }): string =>
-  `先頭フレームと条件画像の差（[-1,1]・観測）maxAbs ${diff.maxAbs.toFixed(3)}・meanAbs ${
-    diff.meanAbs.toFixed(4)
-  }`;
+  `先頭フレームと条件画像の差（[-1,1]・観測）maxAbs ${diff.maxAbs.toFixed(3)}・meanAbs ${diff.meanAbs.toFixed(
+    4,
+  )}`;
 
 /** 潜在 `[C, F, H, W]`（`LATENT_SHAPE`）のフレーム 1 枚を `[C, 1, H, W]` に切り出す。 */
 const latentFrame = (latents: Float32Array, frame: number): Float32Array<ArrayBuffer> => {
@@ -574,10 +584,8 @@ const latentFrame = (latents: Float32Array, frame: number): Float32Array<ArrayBu
  * 進む。差がどのフレームにあるかを記録して、帯を読むときの手掛かりにする）。
  */
 const frameMaxAbs = (got: Float32Array, want: Float32Array): string =>
-  Array.from(
-    { length: LATENT_SHAPE[1] },
-    (_, frame) =>
-      difference(latentFrame(got, frame), latentFrame(want, frame)).maxAbs.toExponential(2),
+  Array.from({ length: LATENT_SHAPE[1] }, (_, frame) =>
+    difference(latentFrame(got, frame), latentFrame(want, frame)).maxAbs.toExponential(2),
   ).join(", ");
 
 const textOf = (
@@ -675,7 +683,10 @@ const tokenSourcesOf = (patch: WanPatchGeometry): Int32Array<ArrayBuffer> => {
   const sources = Int32Array.from(patchifyLatents(indices, LATENT_SHAPE, patch));
   const seen = new Uint8Array(count);
   for (const source of sources) seen[source] += 1;
-  assert(seen.every((times) => times === 1), "patchify が潜在の添字の置換になっていない");
+  assert(
+    seen.every((times) => times === 1),
+    "patchify が潜在の添字の置換になっていない",
+  );
   return sources;
 };
 
@@ -717,26 +728,31 @@ const probedState = (
   alter?: (inputs: RunInputs) => RunInputs,
 ): WanState => ({
   ...state,
-  transformer: withSessionHook(state.transformer, "run", (inputs) => {
-    const altered = alter === undefined ? inputs : alter(inputs);
-    const tokens = f32Input(altered, DIT_TOKENS).data;
-    assertEquals(tokens.length, sources.length, "DiT の tokens の要素数");
-    const modelInput = new Float32Array(sources.length);
-    for (let index = 0; index < sources.length; index += 1) {
-      modelInput[sources[index]] = tokens[index];
-    }
-    record.dit.push({
-      modelInput,
-      proj: Float32Array.from(f32Input(altered, DIT_TIMESTEPS_PROJ).data),
-      conditionProj: Float32Array.from(f32Input(altered, DIT_TIMESTEPS_PROJ_CONDITION).data),
-      mask: Uint32Array.from(boolInput(altered, DIT_CONDITION_MASK).data),
-    });
-    return altered;
-  }, (outputs) => {
-    record.ditOutputs.push(
-      unpatchifyTokens(f32Input(outputs, state.dit.output).data, LATENT_SHAPE, state.dit.patch),
-    );
-  }),
+  transformer: withSessionHook(
+    state.transformer,
+    "run",
+    (inputs) => {
+      const altered = alter === undefined ? inputs : alter(inputs);
+      const tokens = f32Input(altered, DIT_TOKENS).data;
+      assertEquals(tokens.length, sources.length, "DiT の tokens の要素数");
+      const modelInput = new Float32Array(sources.length);
+      for (let index = 0; index < sources.length; index += 1) {
+        modelInput[sources[index]] = tokens[index];
+      }
+      record.dit.push({
+        modelInput,
+        proj: Float32Array.from(f32Input(altered, DIT_TIMESTEPS_PROJ).data),
+        conditionProj: Float32Array.from(f32Input(altered, DIT_TIMESTEPS_PROJ_CONDITION).data),
+        mask: Uint32Array.from(boolInput(altered, DIT_CONDITION_MASK).data),
+      });
+      return altered;
+    },
+    (outputs) => {
+      record.ditOutputs.push(
+        unpatchifyTokens(f32Input(outputs, state.dit.output).data, LATENT_SHAPE, state.dit.patch),
+      );
+    },
+  ),
   vaeFirst: withSessionHook(state.vaeFirst, "enqueue", (inputs) => {
     record.vaeFirstLatents.push(Float32Array.from(f32Input(inputs, WAN_VAE_LATENT_INPUT).data));
     return inputs;
@@ -817,10 +833,8 @@ const assertVaeReceivesLatents = (
   const cols = fixture.meta("cols_starts").split(",").map(Number);
   const [channels, frames, height, width] = LATENT_SHAPE;
   const stats = WAN22_TI2V_FAMILY.generation.latents;
-  const expected = Array.from(
-    { length: frames },
-    (_, frame) =>
-      denormalizeWanLatents(frame === 0 ? condition : latentFrame(schedulerLatents, frame), stats),
+  const expected = Array.from({ length: frames }, (_, frame) =>
+    denormalizeWanLatents(frame === 0 ? condition : latentFrame(schedulerLatents, frame), stats),
   );
   const chunks = [
     {
@@ -854,10 +868,7 @@ const assertVaeReceivesLatents = (
           for (let channel = 0; channel < channels; channel += 1) {
             for (let y = 0; y < tile; y += 1) {
               const from = (channel * height + top + y) * width + left;
-              window.set(
-                expected[frame].subarray(from, from + tile),
-                (channel * tile + y) * tile,
-              );
+              window.set(expected[frame].subarray(from, from + tile), (channel * tile + y) * tile);
             }
           }
           const at = unmatched.findIndex((latent) => firstValueMismatch(latent, window) === -1);
@@ -894,11 +905,14 @@ const assertConditionInBand = (diff: Difference, where: string): void => {
 type Generate = (request: WanTi2vGenerateRequest) => Promise<GeneratedVideo>;
 
 const viaState =
-  (state: WanState, spec: WanFamilySpec = WAN22_TI2V_FAMILY): Generate => (request) =>
+  (state: WanState, spec: WanFamilySpec = WAN22_TI2V_FAMILY): Generate =>
+  (request) =>
     generateWanVideo(spec, state, request);
 
-const viaPipeline = (pipeline: WanTi2vPipeline): Generate => (request) =>
-  pipeline.generate(request);
+const viaPipeline =
+  (pipeline: WanTi2vPipeline): Generate =>
+  (request) =>
+    pipeline.generate(request);
 
 /** 1 回の generate の観測（イベントから — 各 step の後の潜在・段の所要・段の境目の VRAM）。 */
 type Observed = {
@@ -945,7 +959,9 @@ const observe = async (
     if (event.at === "start") stageStarted.set(event.component, performance.now());
     else stageMs[event.component] = performance.now() - (stageStarted.get(event.component) ?? 0);
     if (
-      options.abortAfterDenoise === true && event.component === "transformer" && event.at === "end"
+      options.abortAfterDenoise === true &&
+      event.component === "transformer" &&
+      event.at === "end"
     ) {
       throw abort;
     }
@@ -972,18 +988,17 @@ const observe = async (
 const formatObserved = (observed: Observed): string[] => {
   const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(3)} GiB`;
   const lines = [
-    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${
-      Object.entries(observed.stageMs).map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
-        .join("・")
-    }`,
+    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${Object.entries(observed.stageMs)
+      .map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
+      .join("・")}`,
     ...[...observed.drm.peaks].map(([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`),
     ...observed.drm.marks.map(({ label, usage }) => `VRAM 点 [${label}] ${formatDrmUsage(usage)}`),
   ];
   for (const [component, diagnostics] of observed.diagnostics) {
     lines.push(
-      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${
-        gib(diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes)
-      }・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本`,
+      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${gib(
+        diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes,
+      )}・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本`,
     );
   }
   return lines;
@@ -1124,9 +1139,10 @@ test({
         const want = fixture.tensor(`latents.${step}`);
         assert(
           bitsEqual(latents, want),
-          `${name}: step ${step} の潜在がビット一致しない（${
-            formatDifference("潜在", difference(latents, want))
-          }）`,
+          `${name}: step ${step} の潜在がビット一致しない（${formatDifference(
+            "潜在",
+            difference(latents, want),
+          )}）`,
         );
       }
       // 最後の潜在 = 最後のスケジューラの潜在の先頭フレームを条件の潜在で置き換えた値（製品の関数で作り直す）。
@@ -1137,9 +1153,10 @@ test({
       );
       assert(
         bitsEqual(final, fixture.tensor("latents_final")),
-        `${name}: 最後の潜在がビット一致しない（${
-          formatDifference("latents_final", difference(final, fixture.tensor("latents_final")))
-        }）`,
+        `${name}: 最後の潜在がビット一致しない（${formatDifference(
+          "latents_final",
+          difference(final, fixture.tensor("latents_final")),
+        )}）`,
       );
     }
   },
@@ -1147,7 +1164,7 @@ test({
 
 /** 観測点（帯を持つ出力 — 各 step の後のスケジューラの潜在・最後の潜在・クランプ後のフレーム）。 */
 const OBSERVATION_POINTS = ["latents.0", "latents.1", "latents_final", "frames"] as const;
-type ObservationPoint = typeof OBSERVATION_POINTS[number];
+type ObservationPoint = (typeof OBSERVATION_POINTS)[number];
 
 /** 観測点ごとの帯（未導出は `undefined`）。 */
 const bandOf = (point: ObservationPoint): number | undefined => {
@@ -1204,7 +1221,7 @@ test({
     /** 既定のケースの参照（故障注入と実用席・縦長が読む）。 */
     let defaultFixture: Fixture | undefined;
     const defaultFixtureOf = async (): Promise<Fixture> =>
-      defaultFixture ??= await readFixture(wanI2vStepsFixtureUrl(DEFAULT_CASE));
+      (defaultFixture ??= await readFixture(wanI2vStepsFixtureUrl(DEFAULT_CASE)));
     /** 既定のケースの要求（実用席も同じ要求 — 席だけが違う）。 */
     const defaultRequest = async (
       prompts: readonly WanPrompt[],
@@ -1314,15 +1331,16 @@ test({
                   const diffs = OBSERVATION_POINTS.map((point) => ({
                     point,
                     band: bandOf(point),
-                    diff: point === "frames"
-                      // 参照のフレームはクランプ後で書かれている（`ti2v_few_step_ref.decode_frames` の clamp）。
-                      ? difference(video.data, fixture.tensor("frames"))
-                      : point === "latents_final"
-                      ? difference(final, fixture.tensor("latents_final"))
-                      : difference(
-                        observed.latents[point === "latents.0" ? 0 : 1],
-                        fixture.tensor(point),
-                      ),
+                    diff:
+                      point === "frames"
+                        ? // 参照のフレームはクランプ後で書かれている（`ti2v_few_step_ref.decode_frames` の clamp）。
+                          difference(video.data, fixture.tensor("frames"))
+                        : point === "latents_final"
+                          ? difference(final, fixture.tensor("latents_final"))
+                          : difference(
+                              observed.latents[point === "latents.0" ? 0 : 1],
+                              fixture.tensor(point),
+                            ),
                   }));
                   for (const { point, band, diff } of diffs) {
                     measurements.push({
@@ -1330,35 +1348,39 @@ test({
                       maxAbs: diff.maxAbs,
                       maxRel: diff.maxRel,
                       // 未導出の帯は無限の帯として記録する（判定は下で赤にする — T2V と同じ扱い）。
-                      tolerance: band === undefined
-                        ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
-                        : { atol: band * diff.referenceMax, rtol: 0 },
+                      tolerance:
+                        band === undefined
+                          ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
+                          : { atol: band * diff.referenceMax, rtol: 0 },
                       stage: "karume",
                     });
                   }
                   const conditionDiff = difference(condition, fixture.tensor("condition_latents"));
                   const notes = [
                     ...diffs.map(({ point, diff }) => formatDifference(point, diff)),
-                    ...(["latents.0", "latents.1"] as const).map((point, step) =>
-                      `${point} のフレームごとの maxAbs（観測）[${
-                        frameMaxAbs(observed.latents[step], fixture.tensor(point))
-                      }]`
+                    ...(["latents.0", "latents.1"] as const).map(
+                      (point, step) =>
+                        `${point} のフレームごとの maxAbs（観測）[${frameMaxAbs(
+                          observed.latents[step],
+                          fixture.tensor(point),
+                        )}]`,
                     ),
-                    `${
-                      formatDifference("条件の潜在", conditionDiff)
-                    }・encoder の帯 ${WAN_I2V_ENCODER_BAND} の ${
-                      (conditionDiff.maxAbs / WAN_I2V_ENCODER_BAND).toFixed(2)
-                    } 倍`,
+                    `${formatDifference(
+                      "条件の潜在",
+                      conditionDiff,
+                    )}・encoder の帯 ${WAN_I2V_ENCODER_BAND} の ${(
+                      conditionDiff.maxAbs / WAN_I2V_ENCODER_BAND
+                    ).toFixed(2)} 倍`,
                     // step 0 のモデル入力は参照と条件の潜在の差しか違わないので、DiT の forward の差をここで切り出せる。
-                    ...(["noise_uncond.0", "noise_cond.0"] as const).map((key, pass) =>
-                      `DiT の出力 ${key}（観測・フレームごとの maxAbs [${
-                        frameMaxAbs(record.ditOutputs[pass], fixture.tensor(key))
-                      }]） ${
-                        formatDifference(
+                    ...(["noise_uncond.0", "noise_cond.0"] as const).map(
+                      (key, pass) =>
+                        `DiT の出力 ${key}（観測・フレームごとの maxAbs [${frameMaxAbs(
+                          record.ditOutputs[pass],
+                          fixture.tensor(key),
+                        )}]） ${formatDifference(
                           "",
                           difference(record.ditOutputs[pass], fixture.tensor(key)),
-                        )
-                      }`
+                        )}`,
                     ),
                     formatFirstFrame(firstFrameDifference(video, fixture.bytes("rgb8"))),
                     ...formatObserved(observed),
@@ -1377,7 +1399,7 @@ test({
                     ratios: {
                       "latents.0": diffs[0].diff.ratio,
                       "latents.1": diffs[1].diff.ratio,
-                      "latents_final": diffs[2].diff.ratio,
+                      latents_final: diffs[2].diff.ratio,
                       frames: diffs[3].diff.ratio,
                     },
                   });
@@ -1417,31 +1439,32 @@ test({
         await t.step("帯の候補（未導出）", () => {
           const expected = CASES.filter(({ role }) => role === "band").length;
           const decided = caseRatios.filter(({ role }) => role === "band");
-          const candidate = decided.length === expected
-            ? OBSERVATION_POINTS.map((point) => {
-              const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
-              return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${
-                (worst * 5).toExponential(3)
-              }（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
-            }).join(" / ")
-            : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない` +
-              "（opt-in KARUME_WAN_TI2V_I2V_FULL=1 で決定用の全ケースを回す・落ちたケースは先に調べる）";
-          const accepted = caseRatios.filter(({ role }) => role === "accept").map((
-            { name, ratios },
-          ) =>
-            `${name} ${
-              OBSERVATION_POINTS.map((point) => `${point} ${ratios[point].toExponential(3)}`).join(
-                "・",
-              )
-            }`
-          );
-          const lines = caseRatios.filter(({ role }) => role === "band").map(({ name, ratios }) =>
-            `${name} ${
-              OBSERVATION_POINTS.map((point) => `${point} ${ratios[point].toExponential(3)}`).join(
-                "・",
-              )
-            }`
-          );
+          const candidate =
+            decided.length === expected
+              ? OBSERVATION_POINTS.map((point) => {
+                  const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
+                  return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${(
+                    worst * 5
+                  ).toExponential(3)}（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
+                }).join(" / ")
+              : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない` +
+                "（opt-in KARUME_WAN_TI2V_I2V_FULL=1 で決定用の全ケースを回す・落ちたケースは先に調べる）";
+          const accepted = caseRatios
+            .filter(({ role }) => role === "accept")
+            .map(
+              ({ name, ratios }) =>
+                `${name} ${OBSERVATION_POINTS.map(
+                  (point) => `${point} ${ratios[point].toExponential(3)}`,
+                ).join("・")}`,
+            );
+          const lines = caseRatios
+            .filter(({ role }) => role === "band")
+            .map(
+              ({ name, ratios }) =>
+                `${name} ${OBSERVATION_POINTS.map(
+                  (point) => `${point} ${ratios[point].toExponential(3)}`,
+                ).join("・")}`,
+            );
           throw new Error(
             `帯が未導出 — ${candidate}。決定用の比: ${
               lines.join(" / ") || "なし"
@@ -1474,9 +1497,11 @@ test({
          * 帯のほかに名指しで赤になるべき検査（DiT の入力の結線 — 文言の断片 / 条件の潜在の門）。結線と条件の門が
          * 実データで赤になることを、GPU の時間を足さずに同じ走行の記録で示す。
          */
-        readonly named: { readonly kind: "wiring"; readonly fragment: string } | {
-          readonly kind: "condition";
-        };
+        readonly named:
+          | { readonly kind: "wiring"; readonly fragment: string }
+          | {
+              readonly kind: "condition";
+            };
       }[] = [
         {
           label: "条件マスクを全て偽",
@@ -1533,9 +1558,10 @@ test({
               const fixture = await defaultFixtureOf();
               const record = emptyRecord();
               let current: Float32Array<ArrayBuffer> = fixture.tensor("latents_init");
-              const altered = alter === undefined
-                ? undefined
-                : (inputs: RunInputs): RunInputs => alter(inputs, current);
+              const altered =
+                alter === undefined
+                  ? undefined
+                  : (inputs: RunInputs): RunInputs => alter(inputs, current);
               const observed = await observe(
                 viaState(probedState(state, record, sources, altered), spec),
                 diagnostics,
@@ -1557,9 +1583,10 @@ test({
                 fixture.tensor(`latents.${STEPS - 1}`),
               );
               console.log(
-                `[wan-ti2v-i2v-pipeline] fault ${label}: ${
-                  formatDifference(`latents.${STEPS - 1}`, diff)
-                }（${
+                `[wan-ti2v-i2v-pipeline] fault ${label}: ${formatDifference(
+                  `latents.${STEPS - 1}`,
+                  diff,
+                )}（${
                   lastBand === undefined
                     ? "帯は未導出"
                     : `帯の ${(diff.ratio / lastBand).toFixed(1)} 倍`
@@ -1841,13 +1868,14 @@ test({
  * （2 ステップの残り・縦長・50 ステップの 2 席）は opt-in のときだけ登録する（既定のレーンでは回らないので、登録すると行が
  * 無い機の参照門を赤にする）。
  */
-const CASE_IDS = DIST_PRESENT && ANY_FIXTURE
-  ? [
-    ...CASES.filter(({ optIn }) => !optIn || I2V_FULL).map(({ name }) => bandCaseId(name)),
-    PRACTICAL_CASE_ID,
-    ...(I2V_FULL ? [PORTRAIT_CASE_ID, ...FULL_CASES.map(({ id }) => id)] : []),
-  ]
-  : [];
+const CASE_IDS =
+  DIST_PRESENT && ANY_FIXTURE
+    ? [
+        ...CASES.filter(({ optIn }) => !optIn || I2V_FULL).map(({ name }) => bandCaseId(name)),
+        PRACTICAL_CASE_ID,
+        ...(I2V_FULL ? [PORTRAIT_CASE_ID, ...FULL_CASES.map(({ id }) => id)] : []),
+      ]
+    : [];
 const RUNNABLE = DIST_PRESENT && GPU_AVAILABLE && ANY_FIXTURE;
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

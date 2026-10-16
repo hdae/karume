@@ -85,7 +85,7 @@ export const ATTENTION_STATS_STRIDE = 2;
  * 計算 `:c16` / 格納 `:s16` / mask の 3 語が同時に立ちうるので、並び順をここ 1 箇所で固定
  * しないと同一構成が 2 通りのキーを持つ。
  */
-const maskKeyPart = (mask: boolean): string => mask ? ":mask" : "";
+const maskKeyPart = (mask: boolean): string => (mask ? ":mask" : "");
 
 /**
  * **GQA**（整除 broadcast — ADR 0067 決定 1 / 2）の判別子。
@@ -96,7 +96,7 @@ const maskKeyPart = (mask: boolean): string => mask ? ":mask" : "";
  * MUST: `r` の値そのものは載せない（uniform で運ぶ — 載せると r の種類ぶんパイプラインが
  * 増える。scale / row_offset と同じ規律）。
  */
-const gqaKeyPart = (gqa: boolean): string => gqa ? ":gqa" : "";
+const gqaKeyPart = (gqa: boolean): string => (gqa ? ":gqa" : "");
 
 /**
  * **行窓**（クエリ行のブロック実行 — {@link "./gemm.ts"} `GemmRowWindow`）の判別子。
@@ -125,9 +125,9 @@ export const attentionQkKey = (
   rowWindow = false,
   geometry?: GemmGeometry,
 ): string =>
-  `attention_qk:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${
-    scoreKeyPart(score)
-  }${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
+  `attention_qk:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${scoreKeyPart(
+    score,
+  )}${maskKeyPart(mask)}${gqaKeyPart(gqa)}${rowWindowKeyPart("a", rowWindow)}`;
 
 /** ③PV のキー（`geometry` の規律は {@link attentionQkKey} と同じ）。 */
 export const attentionPvKey = (
@@ -138,9 +138,9 @@ export const attentionPvKey = (
   rowWindow = false,
   geometry?: GemmGeometry,
 ): string =>
-  `attention_pv:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${
-    scoreKeyPart(score)
-  }${gqaKeyPart(gqa)}${rowWindowKeyPart("c", rowWindow)}`;
+  `attention_pv:v1:f32:${gemmKeyPart(v4, undefined, geometry)}${gemmComputeKeyPart(compute)}${scoreKeyPart(
+    score,
+  )}${gqaKeyPart(gqa)}${rowWindowKeyPart("c", rowWindow)}`;
 
 /**
  * ② の **regcache 変種**（S を 1 回だけ読んでレジスタに残す）が受け持てる 1 スレッドあたりの
@@ -172,9 +172,9 @@ export const attentionStatsKey = (
   score: ScoreStorage = "f32",
   regCache?: number,
 ): string =>
-  `attention_stats:v2:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}${
-    gemmComputeKeyPart(compute)
-  }${scoreKeyPart(score)}${regCache === undefined ? "" : `:rc${regCache}`}`;
+  `attention_stats:v2:f32:lastdim:safe:wg${ATTENTION_STATS_WORKGROUP_SIZE}${gemmComputeKeyPart(
+    compute,
+  )}${scoreKeyPart(score)}${regCache === undefined ? "" : `:rc${regCache}`}`;
 
 /** f32 変種のキー（既存の呼び出し面 — 正本は {@link attentionStatsKey}）。 */
 export const ATTENTION_STATS_KEY = attentionStatsKey();
@@ -221,46 +221,53 @@ export const attentionStatsWgsl = (
   // MUST: S は f32 へ広げてから縮約する（拡幅は厳密なので、同じ S に対して f32 変種と
   // **ビット単位で同じ** m / inv が出る）。f16 のまま max / exp を取ると縮約の丸め列が
   // 変わり、ADR 0023 の「② は softmax のパス①② と逐語一致」が崩れる。
-  const read = (index: string): string => f16 ? `f32(s[${index}])` : scoreReadAt("s", score, index);
+  const read = (index: string): string =>
+    f16 ? `f32(s[${index}])` : scoreReadAt("s", score, index);
   // regcache 変種は「要素 → スレッドの割当」も「縮約の順序」も 2 回読み版と**完全に同一**で、
   // 違いは S を 2 度読むか 1 度読んでレジスタに残すかだけ（範囲外はどちらの段でも触らない）。
   // したがって m / inv は 1 ビットも動かない — ADR 0023 のビット同一の根拠 3 を壊さない。
   const slots = regCache === undefined ? [] : Array.from({ length: regCache }, (_, at) => at);
-  const indexPrologue = regCache === undefined ? "" : `${
-    slots
-      .map((at) =>
-        `  let i${at} = lid${at === 0 ? "" : ` + ${at * ATTENTION_STATS_WORKGROUP_SIZE}u`};`
-      )
-      .join("\n")
-  }\n`;
-  const maxPass = regCache === undefined
-    ? `    var i = lid;
+  const indexPrologue =
+    regCache === undefined
+      ? ""
+      : `${slots
+          .map(
+            (at) =>
+              `  let i${at} = lid${at === 0 ? "" : ` + ${at * ATTENTION_STATS_WORKGROUP_SIZE}u`};`,
+          )
+          .join("\n")}\n`;
+  const maxPass =
+    regCache === undefined
+      ? `    var i = lid;
     while (i < dim) {
       hi = nan_max(hi, ${read("base + i")});
       i = i + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
     }`
-    : slots
-      .map((at) =>
-        `    var c${at} = 0.0;
+      : slots
+          .map(
+            (at) =>
+              `    var c${at} = 0.0;
     if (i${at} < dim) {
       c${at} = ${read(`base + i${at}`)};
       hi = nan_max(hi, c${at});
-    }`
-      )
-      .join("\n");
-  const sumPass = regCache === undefined
-    ? `    var j = lid;
+    }`,
+          )
+          .join("\n");
+  const sumPass =
+    regCache === undefined
+      ? `    var j = lid;
     while (j < dim) {
       acc = acc + exp(${read("base + j")} - amax);
       j = j + ${ATTENTION_STATS_WORKGROUP_SIZE}u;
     }`
-    : slots
-      .map((at) =>
-        `    if (i${at} < dim) {
+      : slots
+          .map(
+            (at) =>
+              `    if (i${at} < dim) {
       acc = acc + exp(c${at} - amax);
-    }`
-      )
-      .join("\n");
+    }`,
+          )
+          .join("\n");
   return `// karume attention_stats (行ごとの m = amax(S) と inv = 1/Σexp(S - m), f32${
     f16 ? ", S は f16 格納" : ""
   }${scoreNote(score)}${

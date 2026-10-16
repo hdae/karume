@@ -178,10 +178,7 @@ for (const steps of [2, STEPS]) {
   test(`UniPC: ${steps} step の σ 列は上流とビット一致・timestep は完全一致`, () => {
     const expected = meta.schedules[String(steps)];
     const schedule = wanUniPcSchedule(steps, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
-    assertEquals(
-      [...bitsOf(schedule.sigmas)],
-      [...bitsOf(Float32Array.from(expected.sigmas_f32))],
-    );
+    assertEquals([...bitsOf(schedule.sigmas)], [...bitsOf(Float32Array.from(expected.sigmas_f32))]);
     assertEquals(schedule.timesteps, expected.timesteps);
     assertEquals(schedule.timesteps[0], 999, "最初の timestep は σ[0] の 1e-6 の補正で 999");
     // f64 の中間列（補正込み・最後の 0 を足した形）も上流の numpy の式と完全一致する。
@@ -233,8 +230,9 @@ test("UniPC 故障注入（σ 列の門）: σ[0] の補正を落とす・σ 列
       { label: "σ[0] の 1e-6 の補正を落とす", sigmas: noEpsilon },
       {
         label: "σ 列を 1 つずらす（51 step の列の 2 本目から）",
-        sigmas: wanUniPcSchedule(STEPS + 1, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas
-          .slice(1),
+        sigmas: wanUniPcSchedule(STEPS + 1, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas.slice(
+          1,
+        ),
       },
       {
         label: "shift 5.0",
@@ -287,9 +285,9 @@ test("UniPC 故障注入（軌跡の門）: bh2 → bh1・1 次に落とす・st
     // （上流の `x_t_ − alpha_t·B_h·0`）。門は有限の要素の差で見る。
     const { maxAbs, nonFinite } = trajectoryDifference(states());
     console.log(
-      `[wan-scheduler] fault ${label}: maxAbs=${maxAbs}（atol の ${
-        (maxAbs / TRAJECTORY_ATOL).toExponential(2)
-      } 倍）・非有限 ${nonFinite}`,
+      `[wan-scheduler] fault ${label}: maxAbs=${maxAbs}（atol の ${(
+        maxAbs / TRAJECTORY_ATOL
+      ).toExponential(2)} 倍）・非有限 ${nonFinite}`,
     );
     assert(
       maxAbs > UPDATE_FAULT_MARGIN * TRAJECTORY_ATOL,
@@ -305,10 +303,10 @@ test("UniPC: σ 列の外の step と長さ違いの入力は fail loudly", () =
   assertThrows(() => sampler.step(new Float32Array(3), new Float32Array(4)), RangeError, "要素");
   const once = sampler.step(new Float32Array([1, -1]), new Float32Array([0.5, 0.25]));
   // 1 step（σ: 0.999999 → 0）は 1 次で x0 の予測そのものになる: x0 = x − σ·v。
-  assertEquals([...once], [
-    Math.fround(0.5 - schedule.sigmas[0]),
-    Math.fround(0.25 + schedule.sigmas[0]),
-  ]);
+  assertEquals(
+    [...once],
+    [Math.fround(0.5 - schedule.sigmas[0]), Math.fround(0.25 + schedule.sigmas[0])],
+  );
   assertThrows(() => sampler.step(new Float32Array(2), new Float32Array(2)), RangeError, "σ 列");
   assertThrows(() => wanUniPcSchedule(0, SHIFT, 1000), RangeError, "steps");
   assertThrows(() => wanUniPcSchedule(2, 0, 1000), RangeError, "shift");
@@ -337,7 +335,7 @@ test("CFG: uncond + g·(cond − uncond) は上流の式とビット一致（gui
   const cond = floats("cfg.cond");
   const uncond = floats("cfg.uncond");
   const reordered = cond.map((value, index) =>
-    Math.fround(Math.fround(value * 5) + Math.fround(uncond[index] * -4))
+    Math.fround(Math.fround(value * 5) + Math.fround(uncond[index] * -4)),
   );
   assert(
     bitsOf(reordered).some((bits, index) => bits !== bitsOf(got)[index]),

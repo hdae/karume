@@ -12,15 +12,11 @@ import { approximatePreview } from "../src/anima/preview.ts";
 const syntheticLatents = (): Float32Array<ArrayBuffer> =>
   Float32Array.from(
     { length: 16 * 4 },
-    (_, at) => ((Math.floor(at / 4) + (at % 4)) % 5 - 2) * 0.5,
+    (_, at) => (((Math.floor(at / 4) + (at % 4)) % 5) - 2) * 0.5,
   );
 
 test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 / 要素数）", () => {
-  assertThrows(
-    () => approximatePreview(new Float32Array(16), [16, 2, 2]),
-    Error,
-    "4 軸でない",
-  );
+  assertThrows(() => approximatePreview(new Float32Array(16), [16, 2, 2]), Error, "4 軸でない");
   assertThrows(
     () => approximatePreview(new Float32Array(2 * 16 * 4), [2, 16, 2, 2]),
     Error,
@@ -58,22 +54,8 @@ test("approximatePreview: 合成 latent の RGBA golden（係数表の書き換�
   //   `delta=0.01 で golden が動かない定数: 無し` — どの定数が書き換わっても落ちる。
   const got = approximatePreview(syntheticLatents(), [1, 16, 2, 2]);
   assertEquals([got.width, got.height], [2, 2]);
-  assertEquals([...got.rgba], [
-    133,
-    173,
-    84,
-    255,
-    78,
-    127,
-    32,
-    255,
-    102,
-    120,
-    114,
-    255,
-    48,
-    4,
-    25,
-    255,
-  ]);
+  assertEquals(
+    [...got.rgba],
+    [133, 173, 84, 255, 78, 127, 32, 255, 102, 120, 114, 255, 48, 4, 25, 255],
+  );
 });

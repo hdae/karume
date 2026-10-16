@@ -47,18 +47,23 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
   heads: ["linear"],
   match: (nodes, index, context) => {
     if (
-      context.fuseLinearStaticQuantize !== true || context.linearGemvReduce !== "parallel" ||
+      context.fuseLinearStaticQuantize !== true ||
+      context.linearGemvReduce !== "parallel" ||
       context.linearCompute !== "f32"
-    ) return undefined;
-    const linear = nodes[index], srq = nodes[index + 1];
+    )
+      return undefined;
+    const linear = nodes[index],
+      srq = nodes[index + 1];
     if (linear?.node.op !== "linear" || srq?.node.op !== "static_quantize") return undefined;
     const chain = [linear, srq];
     if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
     if (
-      linear.node.ins.length !== 3 || new Set(linear.node.ins).size !== 3 ||
+      linear.node.ins.length !== 3 ||
+      new Set(linear.node.ins).size !== 3 ||
       srq.node.ins[0] !== linear.outputs[0].name ||
       !sameShape(linear.outputs[0].shape, srq.outputs[0].shape)
-    ) return undefined;
+    )
+      return undefined;
     const weight = context.weightLayouts?.get(linear.node.ins[1]);
     if (weight === undefined || weight.storage === "f16") return undefined;
     const m = numel(linear.inputShapes[0].slice(0, -1));
@@ -106,33 +111,37 @@ export const LINEAR_STATIC_QUANTIZE_RULE = defineRule<LinearStaticQuantizeMatch>
     outputName: m.outputName,
     outputShape: m.shape,
     temps: [],
-    dispatches: [{
-      key: m.packedX === undefined
-        ? linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes)
-        : linearGemvStaticQuantizePackedKey(m.storage, m.group, m.lanes),
-      wgsl: () =>
-        m.packedX === undefined
-          ? linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes)
-          : linearGemvStaticQuantizePackedWgsl(m.storage, m.group, m.lanes),
-      params: m.packedX === undefined
-        ? linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group)
-        : linearGemvStaticQuantizePackedParams(
-          m.storage,
-          m.m,
-          m.n,
-          m.k,
-          m.packedX,
-          m.scale,
-          m.group,
-        ),
-      operands: [
-        { kind: "bind", index: 0 },
-        { kind: "bind", index: 1 },
-        { kind: "bind", index: 2 },
-        { kind: "output" },
-        { kind: "weightScale", index: 1 },
-      ],
-      workgroups: { kind: "tiled", counts: m.workgroups },
-    }],
+    dispatches: [
+      {
+        key:
+          m.packedX === undefined
+            ? linearGemvStaticQuantizeKey(m.storage, m.group, m.lanes)
+            : linearGemvStaticQuantizePackedKey(m.storage, m.group, m.lanes),
+        wgsl: () =>
+          m.packedX === undefined
+            ? linearGemvStaticQuantizeWgsl(m.storage, m.group, m.lanes)
+            : linearGemvStaticQuantizePackedWgsl(m.storage, m.group, m.lanes),
+        params:
+          m.packedX === undefined
+            ? linearGemvStaticQuantizeParams(m.storage, m.m, m.n, m.k, m.scale, m.group)
+            : linearGemvStaticQuantizePackedParams(
+                m.storage,
+                m.m,
+                m.n,
+                m.k,
+                m.packedX,
+                m.scale,
+                m.group,
+              ),
+        operands: [
+          { kind: "bind", index: 0 },
+          { kind: "bind", index: 1 },
+          { kind: "bind", index: 2 },
+          { kind: "output" },
+          { kind: "weightScale", index: 1 },
+        ],
+        workgroups: { kind: "tiled", counts: m.workgroups },
+      },
+    ],
   }),
 });

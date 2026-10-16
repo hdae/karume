@@ -126,12 +126,14 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
       // 語彙全体）。入力側の集合で代用すると、比較や bool の sum のように dtype が変わる op で
       // 正しいグラフが落ちる。契約より出力が多い形（出力数違反）は入力側と同様に契約検査の
       // 担当で、余ったぶんは全 slot の和で見て 1 件でも多く拾う。
-      const accept = op.outDtypes[slot] ??
-        new Set(op.outDtypes.flatMap((slotAccept) => [...slotAccept]));
+      const accept =
+        op.outDtypes[slot] ?? new Set(op.outDtypes.flatMap((slotAccept) => [...slotAccept]));
       const dtype = declaredDtype(graph, name);
       if (!accept.has(dtype)) badDtypes.set(name, dtype);
     });
-    const unknown = Object.keys(node.attrs).filter((key) => !op.attrKeys.has(key)).sort();
+    const unknown = Object.keys(node.attrs)
+      .filter((key) => !op.attrKeys.has(key))
+      .sort();
     if (unknown.length > 0) badAttrs.push(`${where}: ${unknown.join(", ")}`);
   });
 
@@ -148,9 +150,12 @@ export const assertRuntimeSupport = (graph: IrGraph, support: RuntimeSupport): v
   }
 
   if (
-    missingOps.size === 0 && badDtypes.size === 0 && badAttrs.length === 0 &&
+    missingOps.size === 0 &&
+    badDtypes.size === 0 &&
+    badAttrs.length === 0 &&
     missingStorage.size === 0
-  ) return;
+  )
+    return;
 
   const diagnostics: string[] = [];
   if (missingOps.size > 0) {

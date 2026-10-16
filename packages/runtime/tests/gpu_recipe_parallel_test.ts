@@ -12,12 +12,15 @@ const graph = (): DeclarationJson => ({
   outputs: ["a", "b"],
   initializers: {},
   values: { a: { dtype: "f32", shape: [4] }, b: { dtype: "f32", shape: [4] } },
-  nodes: [{ op: "relu", ins: ["x"], outs: ["a"], attrs: {} }, {
-    op: "neg",
-    ins: ["a"],
-    outs: ["b"],
-    attrs: {},
-  }],
+  nodes: [
+    { op: "relu", ins: ["x"], outs: ["a"], attrs: {} },
+    {
+      op: "neg",
+      ins: ["a"],
+      outs: ["b"],
+      attrs: {},
+    },
+  ],
 });
 for (const fail of [false, true]) {
   test({
@@ -29,7 +32,8 @@ for (const fail of [false, true]) {
       const original = gpu.device.createComputePipelineAsync.bind(gpu.device);
       const gate = Promise.withResolvers<void>(),
         both = Promise.withResolvers<void>();
-      let count = 0, settled = false;
+      let count = 0,
+        settled = false;
       const failure = new RangeError("injected compile failure");
       gpu.device.createComputePipelineAsync = async (descriptor) => {
         const index = count++;
@@ -40,20 +44,20 @@ for (const fail of [false, true]) {
       };
       const inputs = { x: fill([4], (i) => i - 1) };
       const running = session.run(inputs);
-      const checked = running.then(() => {
-        settled = true;
-      }, () => {
-        settled = true;
-      });
+      const checked = running.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
           both.promise,
           new Promise<never>((_, reject) => {
-            timeout = setTimeout(
-              () => reject(Error("compile requests were serialized")),
-              2000,
-            );
+            timeout = setTimeout(() => reject(Error("compile requests were serialized")), 2000);
           }),
         ]);
         assertEquals(count, 2);
@@ -61,11 +65,7 @@ for (const fail of [false, true]) {
         assertEquals(settled, false, "未決着compileを残したままrunを返さない");
         gate.resolve();
         if (fail) {
-          const error = await assertRejects(
-            () => running,
-            RangeError,
-            "injected compile failure",
-          );
+          const error = await assertRejects(() => running, RangeError, "injected compile failure");
           assertEquals(error, failure);
           assertEquals(session.diagnostics().lastRunPrepared, undefined);
         } else {

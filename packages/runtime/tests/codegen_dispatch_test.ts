@@ -37,10 +37,7 @@ test("タイル分割カーネルは上限超過を fail loudly にする（タ�
   assertEquals(tiledWorkgroups(1024, 16, LIMIT, "matmul"), 64);
   assertEquals(tiledWorkgroups(1, 16, LIMIT, "matmul"), 1);
   assertEquals(tiledWorkgroups(0, 16, LIMIT, "matmul"), 0);
-  assertThrows(
-    () => tiledWorkgroups(LIMIT * 16 + 1, 16, LIMIT, "matmul"),
-    DispatchLimitError,
-  );
+  assertThrows(() => tiledWorkgroups(LIMIT * 16 + 1, 16, LIMIT, "matmul"), DispatchLimitError);
   // conv2d の implicit GEMM（ADR 0024）も同じカテゴリ。辺は**幾何から導く**ので、まず幾何が
   // 動いていないことを期待値リテラルで固定してから、実モデル形の枚数を固定する。
   assertEquals(CONV2D_N_TILE, 128, "n の辺が動いたら以下の枚数の前提が変わる");

@@ -257,8 +257,11 @@ const practicalSessionOptions = (): SessionOptions => {
     );
   }
   const where = `wan-ti2v ${WAN_TI2V_DIST_MODEL}/${PRACTICAL_QUANT}`;
-  const declared =
-    quantOf(parseManifest(distManifestText), WAN_TI2V_DIST_MODEL, PRACTICAL_QUANT).session;
+  const declared = quantOf(
+    parseManifest(distManifestText),
+    WAN_TI2V_DIST_MODEL,
+    PRACTICAL_QUANT,
+  ).session;
   return effectiveSessionOptions("wan", declared, {}, where);
 };
 
@@ -309,8 +312,8 @@ type QkDispatches = { readonly windowed: number; readonly unwindowed: number };
 const expectedQkDispatches = (blocks: { readonly self: number; readonly cross: number }) => {
   const counts = [blocks.self, blocks.cross];
   return {
-    windowed: DIT_LAYERS *
-      counts.filter((count) => count > 1).reduce((sum, count) => sum + count, 0),
+    windowed:
+      DIT_LAYERS * counts.filter((count) => count > 1).reduce((sum, count) => sum + count, 0),
     unwindowed: DIT_LAYERS * counts.filter((count) => count === 1).length,
   } satisfies QkDispatches;
 };
@@ -374,10 +377,10 @@ const LONG_SEED = 20262121;
 
 const MODEL_URL = new URL(WAN_TI2V_MODEL_FILE, WAN_TI2V_SERIES_DIR);
 const MODEL_PRESENT = modelPresent(MODEL_URL);
-const SMALL_AVAILABLE = MODEL_PRESENT &&
-  WAN_TI2V_CASES.every(({ name }) => caseFiles(name).every(filePresent));
-const FULL_AVAILABLE = MODEL_PRESENT &&
-  WAN_TI2V_FULL_CASES.every(({ name }) => caseFiles(name).every(filePresent));
+const SMALL_AVAILABLE =
+  MODEL_PRESENT && WAN_TI2V_CASES.every(({ name }) => caseFiles(name).every(filePresent));
+const FULL_AVAILABLE =
+  MODEL_PRESENT && WAN_TI2V_FULL_CASES.every(({ name }) => caseFiles(name).every(filePresent));
 
 if (!SMALL_AVAILABLE) {
   console.warn(
@@ -590,9 +593,9 @@ const quantileRatio = (
   referenceQuantile: number,
 ): string => {
   const numerator = absErrorQuantile(actual, expected, RECORDED_QUANTILE);
-  return `${label}: p99.99 ベースの r ${
-    (numerator / referenceQuantile).toPrecision(3)
-  }（記録だけ・分子 ${numerator.toExponential(3)} / 分母 ${referenceQuantile.toExponential(3)}）`;
+  return `${label}: p99.99 ベースの r ${(numerator / referenceQuantile).toPrecision(
+    3,
+  )}（記録だけ・分子 ${numerator.toExponential(3)} / 分母 ${referenceQuantile.toExponential(3)}）`;
 };
 
 const gib = (bytes: number): string => `${(bytes / GIB).toFixed(2)} GiB`;
@@ -626,7 +629,9 @@ const observeRun = (
     label,
     wallMs,
     gpuTicks: diagnostics.lastRunTiming?.totalNs,
-    liveBytes: diagnostics.weights.allocatedBytes + (diagnostics.lastRun?.allocatedBytes ?? 0) +
+    liveBytes:
+      diagnostics.weights.allocatedBytes +
+      (diagnostics.lastRun?.allocatedBytes ?? 0) +
       backingBytes,
     weightBytes: diagnostics.weights.allocatedBytes,
     backingBytes,
@@ -639,10 +644,10 @@ const formatRun = (run: Run, unitNs?: number): string =>
   `${run.label}: 壁 ${(run.wallMs / 1000).toFixed(2)} s` +
   (run.gpuTicks === undefined || unitNs === undefined
     ? ""
-    : `・GPU ${(run.gpuTicks * unitNs / 1e9).toFixed(2)} s`) +
-  `・確保 ${gib(run.liveBytes)}（うち重み ${gib(run.weightBytes)}・slot backing ${
-    gib(run.backingBytes)
-  }・readback staging ${gib(run.stagingBytes)}）`;
+    : `・GPU ${((run.gpuTicks * unitNs) / 1e9).toFixed(2)} s`) +
+  `・確保 ${gib(run.liveBytes)}（うち重み ${gib(run.weightBytes)}・slot backing ${gib(
+    run.backingBytes,
+  )}・readback staging ${gib(run.stagingBytes)}）`;
 
 /** グラフ出力のバイト数の和（readback staging の大きさ）。 */
 const outputBytes = (outputs: Readonly<Record<string, Tensor>>): number =>
@@ -654,10 +659,11 @@ const outputBytes = (outputs: Readonly<Record<string, Tensor>>): number =>
  */
 const rowBlocksOf = (diagnostics: SessionDiagnostics): number => {
   const qk = (diagnostics.lastRunPipelines ?? []).filter(({ key }) =>
-    key.startsWith("attention_qk:")
+    key.startsWith("attention_qk:"),
   );
   const count = (windowed: boolean): number =>
-    qk.filter(({ key }) => key.includes(":rwa") === windowed)
+    qk
+      .filter(({ key }) => key.includes(":rwa") === windowed)
       .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
   const layers = count(false);
   assert(layers > 0, "①QK の行窓の無い dispatch（cross-attention）が 1 本も無い");
@@ -670,10 +676,11 @@ const rowBlocksOf = (diagnostics: SessionDiagnostics): number => {
  */
 const qkDispatchesOf = (diagnostics: SessionDiagnostics): QkDispatches => {
   const qk = (diagnostics.lastRunPipelines ?? []).filter(({ key }) =>
-    key.startsWith("attention_qk:")
+    key.startsWith("attention_qk:"),
   );
   const count = (windowed: boolean): number =>
-    qk.filter(({ key }) => key.includes(":rwa") === windowed)
+    qk
+      .filter(({ key }) => key.includes(":rwa") === windowed)
       .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
   return { windowed: count(true), unwindowed: count(false) };
 };
@@ -691,7 +698,7 @@ const submitGpuNote = (
   const budget = diagnostics.submit.chunkBudget;
   const observed = budget.submitGpuTime;
   if (observed === undefined) throw new Error("計測モードなのに submit の GPU 時間が無い");
-  const ms = (ns: number): string => `${(ns * unitNs / 1e6).toFixed(1)} ms`;
+  const ms = (ns: number): string => `${((ns * unitNs) / 1e6).toFixed(1)} ms`;
   const note = [
     `1 submit の GPU 時間の最大 ${ms(observed.maxNs)}（${observed.submits} 本）`,
     `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
@@ -704,7 +711,7 @@ const submitGpuNote = (
     `submit ${diagnostics.submit.submitCount} 本・dispatch ${diagnostics.submit.dispatchCount} 本`,
   ].join("・");
   return {
-    maxMs: observed.maxNs * unitNs / 1e6,
+    maxMs: (observed.maxNs * unitNs) / 1e6,
     submits: observed.submits,
     unbackedSubmits: observed.unbackedSubmits,
     note,
@@ -721,24 +728,27 @@ const capacityNote = (seat: Seat, tokens: number, runs: readonly Run[]): string 
   const parts = [
     `diag ${gib(diag)}`,
     over
-      ? `容量の閾値 ${
-        gib(DIAG_THRESHOLD_BYTES)
-      } を超えた — 決定 8 の手（受理するフレーム数の上限を下げる）を段 6 の前に確定する`
+      ? `容量の閾値 ${gib(
+          DIAG_THRESHOLD_BYTES,
+        )} を超えた — 決定 8 の手（受理するフレーム数の上限を下げる）を段 6 の前に確定する`
       : `容量の閾値 ${gib(DIAG_THRESHOLD_BYTES)} の内（余裕 ${gib(DIAG_THRESHOLD_BYTES - diag)}）`,
   ];
   if (tokens === EXTRAPOLATED_TOKENS) {
     const extrapolated = EXTRAPOLATED_DIAG_GIB[seat];
     parts.push(
-      `容量の表の外挿 ${extrapolated.toFixed(2)} GiB（2.1 型のグラフ）との差 ${
-        (diag / GIB - extrapolated).toFixed(2)
-      } GiB — I2V 対応の増分の見込み +${I2V_INCREMENT_GIB.placed}（where を消費の直前に置けたとき）/ 悪い側 +${I2V_INCREMENT_GIB.hoisted} GiB`,
+      `容量の表の外挿 ${extrapolated.toFixed(2)} GiB（2.1 型のグラフ）との差 ${(
+        diag / GIB -
+        extrapolated
+      ).toFixed(
+        2,
+      )} GiB — I2V 対応の増分の見込み +${I2V_INCREMENT_GIB.placed}（where を消費の直前に置けたとき）/ 悪い側 +${I2V_INCREMENT_GIB.hoisted} GiB`,
     );
   }
   if (over) {
     console.warn(
-      `[wan-ti2v-dit] ${seat} S = ${tokens} の diag ${gib(diag)} が容量の閾値 ${
-        gib(DIAG_THRESHOLD_BYTES)
-      } を超えた` +
+      `[wan-ti2v-dit] ${seat} S = ${tokens} の diag ${gib(diag)} が容量の閾値 ${gib(
+        DIAG_THRESHOLD_BYTES,
+      )} を超えた` +
         "（ADR 0121 決定 8 — 受理するフレーム数の上限を下げる手を段 6 の前に確定する）",
     );
   }
@@ -817,9 +827,9 @@ const faultInjections = async (
     faults.push({
       label,
       ratio,
-      note: `故障注入 ${label}: maxAbs ${diff.maxAbs.toExponential(3)}（比 ${
-        ratio.toExponential(2)
-      }）`,
+      note: `故障注入 ${label}: maxAbs ${diff.maxAbs.toExponential(3)}（比 ${ratio.toExponential(
+        2,
+      )}）`,
     });
   };
   const width = timestepWidth(inputs);
@@ -935,25 +945,29 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
             const diffF32 = difference(latents, reference);
             const r = normalizedRatio(diff, referenceRatio);
             ratios.push({ name, form, accept, latentShape: golden.latentShape, ratio: r });
-            measurements.push({
-              output: "latents",
-              maxAbs: diff.maxAbs,
-              maxRel: diff.maxRel,
-              tolerance: toleranceOf(diff, band, referenceRatio),
-              stage: "karume",
-            }, {
-              output: "latents@f32-reference",
-              maxAbs: diffF32.maxAbs,
-              maxRel: diffF32.maxRel,
-              tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
-              stage: "karume",
-            }, {
-              output: "f32-reference@f64-reference",
-              maxAbs: referenceError.maxAbs,
-              maxRel: referenceError.maxRel,
-              tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
-              stage: "karume",
-            });
+            measurements.push(
+              {
+                output: "latents",
+                maxAbs: diff.maxAbs,
+                maxRel: diff.maxRel,
+                tolerance: toleranceOf(diff, band, referenceRatio),
+                stage: "karume",
+              },
+              {
+                output: "latents@f32-reference",
+                maxAbs: diffF32.maxAbs,
+                maxRel: diffF32.maxRel,
+                tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
+                stage: "karume",
+              },
+              {
+                output: "f32-reference@f64-reference",
+                maxAbs: referenceError.maxAbs,
+                maxRel: referenceError.maxRel,
+                tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
+                stage: "karume",
+              },
+            );
             const diagnostics = session.diagnostics();
             const rowBlocks = full === undefined ? undefined : rowBlocksOf(diagnostics);
             const notes = [
@@ -1002,12 +1016,13 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
               );
               faults = await faultInjections(golden, inputs, grid, form, expected, run);
               notes.push(
-                ...faults.map(({ note, ratio }) =>
-                  `${note}・r ${(ratio / referenceRatio).toPrecision(3)}（${
-                    band === undefined
-                      ? "帯は未導出"
-                      : `帯の ${(ratio / referenceRatio / band).toFixed(1)} 倍`
-                  }）`
+                ...faults.map(
+                  ({ note, ratio }) =>
+                    `${note}・r ${(ratio / referenceRatio).toPrecision(3)}（${
+                      band === undefined
+                        ? "帯は未導出"
+                        : `帯の ${(ratio / referenceRatio / band).toFixed(1)} 倍`
+                    }）`,
                 ),
               );
             }
@@ -1026,9 +1041,9 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
               const normalized = ratio / referenceRatio;
               assert(
                 normalized > band,
-                `${id}: 故障注入 ${label} の r ${
-                  normalized.toPrecision(3)
-                } が${bandLabel} ${band} の内に収まった`,
+                `${id}: 故障注入 ${label} の r ${normalized.toPrecision(
+                  3,
+                )} が${bandLabel} ${band} の内に収まった`,
               );
             }
             if (accept) {
@@ -1039,9 +1054,9 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
               const margin = subtle.ratio / referenceRatio / band;
               assert(
                 margin >= SUBTLE_FAULT_MARGIN,
-                `${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が${bandLabel}の ${
-                  margin.toFixed(2)
-                } 倍（${SUBTLE_FAULT_MARGIN} 倍以上のはず — 帯が広すぎる兆候）`,
+                `${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が${bandLabel}の ${margin.toFixed(
+                  2,
+                )} 倍（${SUBTLE_FAULT_MARGIN} 倍以上のはず — 帯が広すぎる兆候）`,
               );
             }
             assert(r <= band, `${id}: ${notes[0]} が${bandLabel} ${band} の外`);
@@ -1049,9 +1064,9 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
               const hostRatio = normalizedRatio(hostDiff, referenceRatio);
               assert(
                 hostRatio <= band,
-                `${id}: 製品の経路の入力の r ${
-                  hostRatio.toPrecision(3)
-                } が${bandLabel} ${band} の外`,
+                `${id}: 製品の経路の入力の r ${hostRatio.toPrecision(
+                  3,
+                )} が${bandLabel} ${band} の外`,
               );
             }
             return { status: "pass", note: caseNote };
@@ -1085,9 +1100,9 @@ const ratioGate = async (spec: GateSpec): Promise<readonly CaseRatio[]> => {
               );
               assert(
                 submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
-                `1 submit の GPU 時間の最大 ${
-                  submit.maxMs.toFixed(1)
-                } ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+                `1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
+                  1,
+                )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
               );
               assertEquals(full.deviceLost(), undefined, "device lost");
               return Promise.resolve({ status: "pass", note });
@@ -1146,9 +1161,11 @@ const scaleFault = async (
               tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
               stage: "karume",
             });
-            note = `${
-              formatNormalized(`故障注入 ${SCALE_FAULT} / f64 参照`, diff, referenceRatio)
-            }（${
+            note = `${formatNormalized(
+              `故障注入 ${SCALE_FAULT} / f64 参照`,
+              diff,
+              referenceRatio,
+            )}（${
               band === undefined ? "帯は未導出" : `帯の ${(normalized / band).toFixed(1)} 倍`
             }）`;
             console.log(`[wan-ti2v-dit] ${id}: ${note}`);
@@ -1157,9 +1174,9 @@ const scaleFault = async (
             }
             assert(
               normalized > band,
-              `${id}: 故障注入 ${SCALE_FAULT} の r ${
-                normalized.toPrecision(3)
-              } が帯 ${band} の内に収まった`,
+              `${id}: 故障注入 ${SCALE_FAULT} の r ${normalized.toPrecision(
+                3,
+              )} が帯 ${band} の内に収まった`,
             );
             return { status: "pass", note };
           },
@@ -1196,13 +1213,14 @@ const recordWorst = async (
         const rows = ratios.filter((row) => row.accept === accept);
         const shapes = [...new Set(rows.map(({ latentShape }) => shapeLabel(latentShape)))];
         return [
-          ...(["t2v", "i2v"] as const).map((form) =>
-            `${form.toUpperCase()} ${worstOf(rows.filter((row) => row.form === form))}`
+          ...(["t2v", "i2v"] as const).map(
+            (form) => `${form.toUpperCase()} ${worstOf(rows.filter((row) => row.form === form))}`,
           ),
-          ...shapes.map((shape) =>
-            `潜在 [${shape}] ${
-              worstOf(rows.filter(({ latentShape }) => shapeLabel(latentShape) === shape))
-            }`
+          ...shapes.map(
+            (shape) =>
+              `潜在 [${shape}] ${worstOf(
+                rows.filter(({ latentShape }) => shapeLabel(latentShape) === shape),
+              )}`,
           ),
         ];
       };
@@ -1230,13 +1248,15 @@ const bandCandidate = async (
     const decided = ratios.filter(({ accept }) => !accept);
     const worst = Math.max(...decided.map(({ ratio }) => ratio));
     const unit = 10 ** (Math.floor(Math.log10(worst * 5)) - 1);
-    const candidate = decided.length === expected
-      ? `決定用 ${expected} 本の最悪 r ${worst.toPrecision(3)} × 5 = ${
-        (worst * 5).toPrecision(3)
-      }` +
-        `（有効数字 2 桁へ切り上げ ${Number((Math.ceil(worst * 5 / unit) * unit).toPrecision(2))}）`
-      : `決定用 ${expected} 本のうち r が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
-    const accepted = ratios.filter(({ accept }) => accept)
+    const candidate =
+      decided.length === expected
+        ? `決定用 ${expected} 本の最悪 r ${worst.toPrecision(3)} × 5 = ${(worst * 5).toPrecision(
+            3,
+          )}` +
+          `（有効数字 2 桁へ切り上げ ${Number((Math.ceil((worst * 5) / unit) * unit).toPrecision(2))}）`
+        : `決定用 ${expected} 本のうち r が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
+    const accepted = ratios
+      .filter(({ accept }) => accept)
       .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`);
     throw new Error(
       `${label}: 帯が未導出 — ${candidate}。受入れの r（帯の決定に使わない）: ${
@@ -1397,7 +1417,8 @@ const practicalSubmitGate = async (
           const route = attentionRoute(seats, WAN22_HEAD_DIM, tokens);
           const requestedStage = seats.attentionCompute === "a8" ? "i8a8" : "dense";
           if (
-            route.qk === requestedStage && route.pv === requestedStage &&
+            route.qk === requestedStage &&
+            route.pv === requestedStage &&
             route.score === seats.attentionScoreStorage
           ) {
             assertAttentionSeatsComplete(
@@ -1416,9 +1437,9 @@ const practicalSubmitGate = async (
           );
           assert(
             submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
-            `1 submit の GPU 時間の最大 ${
-              submit.maxMs.toFixed(1)
-            } ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+            `1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
+              1,
+            )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
           );
           assertEquals(deviceLost(), undefined, "device lost");
           return { status: "pass", note };
@@ -1438,7 +1459,10 @@ const budgetLabel = (budget: number | undefined): string =>
 /** 出力のビット列が定数でない（一致の検査が恒真にならない）こと。 */
 const assertNotConstant = (data: Float32Array, label: string): void => {
   const bits = new Uint32Array(data.buffer, data.byteOffset, data.length);
-  assert(bits.some((value) => value !== bits[0]), `${label}: 出力が定数（ビット一致が恒真になる）`);
+  assert(
+    bits.some((value) => value !== bits[0]),
+    `${label}: 出力が定数（ビット一致が恒真になる）`,
+  );
 };
 
 /**
@@ -1464,12 +1488,10 @@ const budgetAbGate = async (
   // 期待値の元は device が実際に許した束縛上限（runtime の行ブロックが見るのと同じ値）。
   const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
   const inputs = await loadInputs();
-  for (
-    const [seat, optionsOf] of [
-      [REFERENCE_QUANT, (): SessionOptions => ({})],
-      [PRACTICAL_QUANT, practicalSessionOptions],
-    ] as const
-  ) {
+  for (const [seat, optionsOf] of [
+    [REFERENCE_QUANT, (): SessionOptions => ({})],
+    [PRACTICAL_QUANT, practicalSessionOptions],
+  ] as const) {
     await t.step({
       name: `${seat} S = ${tokens}: ${AB_BUDGETS.map(budgetLabel).join(" / ")} の u32 A/B`,
       // 実用席の束は配布形の manifest から読む（無い機は実用席だけ SKIP — 参照席は回す）。
@@ -1484,9 +1506,10 @@ const budgetAbGate = async (
             let reference: { produced: readonly Float32Array[]; qk: QkDispatches } | undefined;
             for (const budget of AB_BUDGETS) {
               const label = `${seat} S = ${tokens} ${budgetLabel(budget)}`;
-              const options: SessionOptions = budget === undefined
-                ? seatOptions
-                : { ...seatOptions, attentionRowBlockMaxBytes: budget };
+              const options: SessionOptions =
+                budget === undefined
+                  ? seatOptions
+                  : { ...seatOptions, attentionRowBlockMaxBytes: budget };
               const observed = await twoRuns(prepared, gpu, inputs, options);
               assertEquals(observed.nonFinite, 0, `${label}: 非有限`);
               const scoreBytes = SEAT_SCORE_BYTES[seat];
@@ -1512,15 +1535,15 @@ const budgetAbGate = async (
                 assertAttentionSeatsComplete(observed.diagnostics.lastRunPipelines, options, label);
               }
               notes.push(
-                `${
-                  budgetLabel(budget)
-                }: self ${blocks.self} 枚・cross ${blocks.cross} 枚・backing ${
-                  gib(observed.runs[1].backingBytes)
-                }・壁 ${observed.runs.map((run) => (run.wallMs / 1000).toFixed(1)).join(" / ")} s`,
+                `${budgetLabel(
+                  budget,
+                )}: self ${blocks.self} 枚・cross ${blocks.cross} 枚・backing ${gib(
+                  observed.runs[1].backingBytes,
+                )}・壁 ${observed.runs.map((run) => (run.wallMs / 1000).toFixed(1)).join(" / ")} s`,
               );
               if (reference === undefined) {
                 observed.produced.forEach((data, index) =>
-                  assertNotConstant(data, `${label} の ${index + 1} 本目`)
+                  assertNotConstant(data, `${label} の ${index + 1} 本目`),
                 );
                 reference = { produced: observed.produced, qk };
                 continue;
@@ -1550,104 +1573,94 @@ const budgetAbGate = async (
   }
 };
 
-test(
-  "Wan2.2 TI2V DiT 行ブロックの予算の期待値（GPU 不要・ADR 0124）: self / cross 別・席の格納幅つき（束縛上限 2,147,483,644 B）",
-  () => {
-    const blocksOf = (seat: Seat, tokens: number, budget?: number) => ({
-      self: expectedAttentionBlocks(
-        tokens,
-        tokens,
-        SEAT_SCORE_BYTES[seat],
-        B570_STORAGE_BINDING_LIMIT,
-        budget,
-      ),
-      cross: expectedAttentionBlocks(
-        tokens,
-        TEXT_TOKENS,
-        SEAT_SCORE_BYTES[seat],
-        B570_STORAGE_BINDING_LIMIT,
-        budget,
-      ),
-    });
-    const table = (seat: Seat, tokens: number) =>
-      AB_BUDGETS.map((budget) => blocksOf(seat, tokens, budget));
-    // 設計（d6 の事実「行ブロックの枚数 — 計算値」）が node で独立に計算した枚数と同じ。
-    assertEquals(table(PRACTICAL_QUANT, SHORT_CLIP_TOKENS), [
-      { self: 1, cross: 1 },
-      { self: 2, cross: 1 },
-      { self: 4, cross: 1 },
-    ]);
-    assertEquals(table(REFERENCE_QUANT, SHORT_CLIP_TOKENS), [
-      { self: 1, cross: 1 },
-      { self: 4, cross: 1 },
-      { self: 7, cross: 1 },
-    ]);
-    assertEquals(table(PRACTICAL_QUANT, LONG_CLIP_TOKENS), [
-      { self: 17, cross: 1 },
-      { self: 67, cross: 2 },
-      { self: 134, cross: 3 },
-    ]);
-    assertEquals(table(REFERENCE_QUANT, LONG_CLIP_TOKENS), [
-      { self: 34, cross: 1 },
-      { self: 134, cross: 3 },
-      { self: 268, cross: 5 },
-    ]);
-    // 予算なしの self・f32 は前からの式（expectedRowBlocks）と同じ枚数になる。
-    assertEquals(
-      blocksOf(REFERENCE_QUANT, LONG_CLIP_TOKENS).self,
-      expectedRowBlocks(LONG_CLIP_TOKENS, B570_STORAGE_BINDING_LIMIT),
-    );
-    // ①QK の本数: 1 枚の形は層ごとに 1 本（行窓なし）・2 枚以上は層ごとに枚数ぶん（行窓）。
-    assertEquals(expectedQkDispatches({ self: 17, cross: 1 }), { windowed: 510, unwindowed: 30 });
-    assertEquals(expectedQkDispatches({ self: 67, cross: 2 }), { windowed: 2070, unwindowed: 0 });
-    assertEquals(expectedQkDispatches({ self: 1, cross: 1 }), { windowed: 0, unwindowed: 60 });
-  },
-);
+test("Wan2.2 TI2V DiT 行ブロックの予算の期待値（GPU 不要・ADR 0124）: self / cross 別・席の格納幅つき（束縛上限 2,147,483,644 B）", () => {
+  const blocksOf = (seat: Seat, tokens: number, budget?: number) => ({
+    self: expectedAttentionBlocks(
+      tokens,
+      tokens,
+      SEAT_SCORE_BYTES[seat],
+      B570_STORAGE_BINDING_LIMIT,
+      budget,
+    ),
+    cross: expectedAttentionBlocks(
+      tokens,
+      TEXT_TOKENS,
+      SEAT_SCORE_BYTES[seat],
+      B570_STORAGE_BINDING_LIMIT,
+      budget,
+    ),
+  });
+  const table = (seat: Seat, tokens: number) =>
+    AB_BUDGETS.map((budget) => blocksOf(seat, tokens, budget));
+  // 設計（d6 の事実「行ブロックの枚数 — 計算値」）が node で独立に計算した枚数と同じ。
+  assertEquals(table(PRACTICAL_QUANT, SHORT_CLIP_TOKENS), [
+    { self: 1, cross: 1 },
+    { self: 2, cross: 1 },
+    { self: 4, cross: 1 },
+  ]);
+  assertEquals(table(REFERENCE_QUANT, SHORT_CLIP_TOKENS), [
+    { self: 1, cross: 1 },
+    { self: 4, cross: 1 },
+    { self: 7, cross: 1 },
+  ]);
+  assertEquals(table(PRACTICAL_QUANT, LONG_CLIP_TOKENS), [
+    { self: 17, cross: 1 },
+    { self: 67, cross: 2 },
+    { self: 134, cross: 3 },
+  ]);
+  assertEquals(table(REFERENCE_QUANT, LONG_CLIP_TOKENS), [
+    { self: 34, cross: 1 },
+    { self: 134, cross: 3 },
+    { self: 268, cross: 5 },
+  ]);
+  // 予算なしの self・f32 は前からの式（expectedRowBlocks）と同じ枚数になる。
+  assertEquals(
+    blocksOf(REFERENCE_QUANT, LONG_CLIP_TOKENS).self,
+    expectedRowBlocks(LONG_CLIP_TOKENS, B570_STORAGE_BINDING_LIMIT),
+  );
+  // ①QK の本数: 1 枚の形は層ごとに 1 本（行窓なし）・2 枚以上は層ごとに枚数ぶん（行窓）。
+  assertEquals(expectedQkDispatches({ self: 17, cross: 1 }), { windowed: 510, unwindowed: 30 });
+  assertEquals(expectedQkDispatches({ self: 67, cross: 2 }), { windowed: 2070, unwindowed: 0 });
+  assertEquals(expectedQkDispatches({ self: 1, cross: 1 }), { windowed: 0, unwindowed: 60 });
+});
 
-test(
-  "Wan2.2 TI2V DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限で S = 8,190 / 7,920 が 3 枚・S = 12,090 が 7 枚",
-  () => {
-    assertEquals(
-      [...FULL_TOKENS_ORDER, LONG_TOKENS].map((tokens) =>
-        expectedRowBlocks(tokens, B570_STORAGE_BINDING_LIMIT)
-      ),
-      [3, 3, 7],
-    );
-  },
-);
+test("Wan2.2 TI2V DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限で S = 8,190 / 7,920 が 3 枚・S = 12,090 が 7 枚", () => {
+  assertEquals(
+    [...FULL_TOKENS_ORDER, LONG_TOKENS].map((tokens) =>
+      expectedRowBlocks(tokens, B570_STORAGE_BINDING_LIMIT),
+    ),
+    [3, 3, 7],
+  );
+});
 
-test(
-  "Wan2.2 TI2V DiT ケースの表（GPU 不要）: 実寸は S ごとに決定用 3 本 + 受入れ T2V 2 本 + I2V 2 本・名前の役割 / 形 / S が欄と一致",
-  () => {
-    for (const { tokens, cases } of FULL_GROUPS) {
+test("Wan2.2 TI2V DiT ケースの表（GPU 不要）: 実寸は S ごとに決定用 3 本 + 受入れ T2V 2 本 + I2V 2 本・名前の役割 / 形 / S が欄と一致", () => {
+  for (const { tokens, cases } of FULL_GROUPS) {
+    assertEquals(
+      cases.filter((testCase) => !isAccept(testCase)).length,
+      3,
+      `S = ${tokens} の決定用`,
+    );
+    for (const form of ["t2v", "i2v"] as const) {
       assertEquals(
-        cases.filter((testCase) => !isAccept(testCase)).length,
-        3,
-        `S = ${tokens} の決定用`,
-      );
-      for (const form of ["t2v", "i2v"] as const) {
-        assertEquals(
-          cases.filter((testCase) => isAccept(testCase) && testCase.form === form).length,
-          2,
-          `S = ${tokens} の受入れの ${form}`,
-        );
-      }
-    }
-    const decided = WAN_TI2V_FULL_CASES.filter((testCase) => !isAccept(testCase));
-    assertEquals(decided.filter(({ form }) => form === "t2v").length, 3, "決定用の T2V");
-    assertEquals(decided.filter(({ form }) => form === "i2v").length, 3, "決定用の I2V");
-    for (const { name, role, form, tokens } of WAN_TI2V_FULL_CASES) {
-      assert(
-        name.startsWith(`${role}-${form}-s${String(tokens).padStart(5, "0")}-t`),
-        `${name}: 名前の役割 / 形 / S が欄（${role} / ${form} / ${tokens}）と食い違う`,
+        cases.filter((testCase) => isAccept(testCase) && testCase.form === form).length,
+        2,
+        `S = ${tokens} の受入れの ${form}`,
       );
     }
-  },
-);
+  }
+  const decided = WAN_TI2V_FULL_CASES.filter((testCase) => !isAccept(testCase));
+  assertEquals(decided.filter(({ form }) => form === "t2v").length, 3, "決定用の T2V");
+  assertEquals(decided.filter(({ form }) => form === "i2v").length, 3, "決定用の I2V");
+  for (const { name, role, form, tokens } of WAN_TI2V_FULL_CASES) {
+    assert(
+      name.startsWith(`${role}-${form}-s${String(tokens).padStart(5, "0")}-t`),
+      `${name}: 名前の役割 / 形 / S が欄（${role} / ${form} / ${tokens}）と食い違う`,
+    );
+  }
+});
 
 test({
-  name:
-    `Wan2.2 TI2V DiT 故障注入の対象（GPU 不要）: ${SCALE_FAULT_WEIGHT} が容器の i8 の linear で companion scale を持つ`,
+  name: `Wan2.2 TI2V DiT 故障注入の対象（GPU 不要）: ${SCALE_FAULT_WEIGHT} が容器の i8 の linear で companion scale を持つ`,
   ignore: !MODEL_PRESENT,
   fn: async () => {
     const opened = await openSeriesContainer(MODEL_URL);
@@ -1834,8 +1847,11 @@ const attentionStageMs = (
   const entries = diagnostics.lastRunTiming?.entries;
   if (entries === undefined) throw new Error("計測モードなのに lastRunTiming が無い");
   const msOf = (stage: string): number =>
-    entries.filter(({ key }) => key.startsWith(`${stage}:`))
-      .reduce((total, { ns }) => total + ns, 0) * unitNs / 1e6;
+    (entries
+      .filter(({ key }) => key.startsWith(`${stage}:`))
+      .reduce((total, { ns }) => total + ns, 0) *
+      unitNs) /
+    1e6;
   return {
     attention_qk: msOf("attention_qk"),
     attention_stats: msOf("attention_stats"),
@@ -1898,7 +1914,7 @@ test({
               // 上限までに来なければ「標本 0」と記録する（基準を 0 MiB と読ませない）。
               const idle = monitorNvidiaSmi();
               idle.enter("空き");
-              if (await idle.waitForSample(5_000) > 0) await pause(500);
+              if ((await idle.waitForSample(5_000)) > 0) await pause(500);
               const idleTimeline = await idle.stop();
               record.idle = formatNvidiaTimeline(idleTimeline);
               // 走行前の温度（熱制限の読みの基準 — 門にはしない）。標本 0・nvidia-smi なしでは載せない。
@@ -1941,9 +1957,9 @@ test({
                   nvidia,
                 });
                 console.log(
-                  `[wan-ti2v-dit] 行ブロックの予算の計測 ${label}: ${
-                    JSON.stringify(normal.at(-1))
-                  }`,
+                  `[wan-ti2v-dit] 行ブロックの予算の計測 ${label}: ${JSON.stringify(
+                    normal.at(-1),
+                  )}`,
                 );
               }
               const none = backingOf.get(undefined);
@@ -1952,9 +1968,9 @@ test({
                 const backing = backingOf.get(budget);
                 assert(
                   backing !== undefined && backing < none,
-                  `${
-                    budgetLabel(budget)
-                  }: backing ${backing} B が予算なしの ${none} B より小さくない（実寸での恒真化の防止）`,
+                  `${budgetLabel(
+                    budget,
+                  )}: backing ${backing} B が予算なしの ${none} B より小さくない（実寸での恒真化の防止）`,
                 );
               }
               assertEquals(deviceLost, undefined, "device lost");
@@ -1995,20 +2011,20 @@ test({
               timing.push({
                 budget: label,
                 stageMs: attentionStageMs(observed.diagnostics, unitNs),
-                totalGpuMs: (observed.diagnostics.lastRunTiming?.totalNs ?? 0) * unitNs / 1e6,
+                totalGpuMs: ((observed.diagnostics.lastRunTiming?.totalNs ?? 0) * unitNs) / 1e6,
                 maxSubmitMs: submit.maxMs,
                 submit: submit.note,
               });
               console.log(
-                `[wan-ti2v-dit] 行ブロックの予算の計測（計測モード）${label}: ${
-                  JSON.stringify(timing.at(-1))
-                }`,
+                `[wan-ti2v-dit] 行ブロックの予算の計測（計測モード）${label}: ${JSON.stringify(
+                  timing.at(-1),
+                )}`,
               );
               assert(
                 submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
-                `${label}: 1 submit の GPU 時間の最大 ${
-                  submit.maxMs.toFixed(1)
-                } ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+                `${label}: 1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
+                  1,
+                )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
               );
             }
             assertEquals(deviceLost, undefined, "device lost");
@@ -2049,12 +2065,10 @@ test({
     try {
       assertAdapterMatchesEnvironment(gpu);
       const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
-      for (
-        const [seat, optionsOf] of [
-          [REFERENCE_QUANT, (): SessionOptions => ({})],
-          [PRACTICAL_QUANT, practicalSessionOptions],
-        ] as const
-      ) {
+      for (const [seat, optionsOf] of [
+        [REFERENCE_QUANT, (): SessionOptions => ({})],
+        [PRACTICAL_QUANT, practicalSessionOptions],
+      ] as const) {
         await t.step({
           name: `${seat} S = ${LONG_TOKENS}`,
           // 実用席の束は配布形の manifest から読む（無い機は実用席だけ SKIP — 参照席は回す）。
@@ -2131,7 +2145,7 @@ test({
       const ratios: CaseRatio[] = [];
       for (const { tokens, cases, normalModeCase } of FULL_GROUPS) {
         ratios.push(
-          ...await ratioGate({
+          ...(await ratioGate({
             t,
             gpu,
             prepared,
@@ -2139,7 +2153,7 @@ test({
             band: FULL_BAND,
             full: { tokens, bindingLimit, deviceLost: () => deviceLost },
             normalModeCase,
-          }),
+          })),
         );
         await scaleFault(t, gpu, opened, graph, cases, FULL_BAND);
         await practicalSubmitGate(
@@ -2202,15 +2216,13 @@ test({
                 unpatchifyTokens(tokensOut, golden.latentShape, WAN22_GEOMETRY),
                 expected,
               );
-              measurements.push(
-                {
-                  output: "latents",
-                  maxAbs: diff.maxAbs,
-                  maxRel: diff.maxRel,
-                  tolerance: toleranceOf(diff, FULL_BAND, referenceRatio),
-                  stage: "karume",
-                } satisfies Measurement,
-              );
+              measurements.push({
+                output: "latents",
+                maxAbs: diff.maxAbs,
+                maxRel: diff.maxRel,
+                tolerance: toleranceOf(diff, FULL_BAND, referenceRatio),
+                stage: "karume",
+              } satisfies Measurement);
               note = [
                 formatNormalized("io の入力 / f64 参照", diff, referenceRatio),
                 capacityNote(REFERENCE_QUANT, tokens, observed.runs),
@@ -2229,9 +2241,9 @@ test({
               if (FULL_BAND !== undefined) {
                 assert(
                   normalizedRatio(diff, referenceRatio) <= FULL_BAND,
-                  `${name}: 通常モードの r ${
-                    normalizedRatio(diff, referenceRatio).toPrecision(3)
-                  } が実寸の帯 ${FULL_BAND} の外`,
+                  `${name}: 通常モードの r ${normalizedRatio(diff, referenceRatio).toPrecision(
+                    3,
+                  )} が実寸の帯 ${FULL_BAND} の外`,
                 );
               }
               const measured = measuredTokens.get(name);
@@ -2246,8 +2258,7 @@ test({
                   -1,
                   `${name}: 通常モードの ${
                     observed.runs[index].label
-                  }が計測モードの出力と Uint32 で一致しない` +
-                    "（値は最初に割れる要素の添字）",
+                  }が計測モードの出力と Uint32 で一致しない` + "（値は最初に割れる要素の添字）",
                 );
               }
               assertEquals(deviceLost, undefined, "device lost");
@@ -2354,8 +2365,7 @@ test({
 });
 
 test({
-  name:
-    `Wan2.2 TI2V DiT 参照席 ${REFERENCE_QUANT}（実 GPU / CPU f64）: S = 192 の組の 1 forward が帯の内・故障注入 4 件は帯の外`,
+  name: `Wan2.2 TI2V DiT 参照席 ${REFERENCE_QUANT}（実 GPU / CPU f64）: S = 192 の組の 1 forward が帯の内・故障注入 4 件は帯の外`,
   ignore: !SMALL_AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     const graph = graphName();

@@ -18,7 +18,8 @@ describe({
   ignore: !GPU_AVAILABLE,
   fn: () => {
     it("元のparallel＋元のSRQと全境界・特殊値・M1/4/8で一致する", async () => {
-      const gpu = await acquireGpu(), d = gpu.device;
+      const gpu = await acquireGpu(),
+        d = gpu.device;
       let checks = 0;
       try {
         const cache = new Map<string, GPUComputePipeline>();
@@ -38,21 +39,18 @@ describe({
           for (const k of [linearGemvUnit(storage) * 5, 1536]) {
             for (const lanes of [2, 4, 8, 16, 32] as const) {
               for (const m of [1, 4, 8]) {
-                for (
-                  const scenario of [
-                    "normal",
-                    "wide",
-                    "boundary",
-                    "special",
-                    "identity",
-                    "rounding",
-                  ] as const
-                ) {
+                for (const scenario of [
+                  "normal",
+                  "wide",
+                  "boundary",
+                  "special",
+                  "identity",
+                  "rounding",
+                ] as const) {
                   const n = scenario === "boundary" ? 768 : 36,
                     group = storage === "i4" ? (k === 1536 ? 512 : 32) : undefined,
-                    scale = scenario === "identity" || scenario === "rounding"
-                      ? 0
-                      : Math.fround(.00071),
+                    scale =
+                      scenario === "identity" || scenario === "rounding" ? 0 : Math.fround(0.00071),
                     bits = storage === "i2" ? 2 : storage === "i4" ? 4 : 8;
                   d.pushErrorScope("validation");
                   const owned: GPUBuffer[] = [];
@@ -70,30 +68,36 @@ describe({
                     return b;
                   };
                   try {
-                    const x = Float32Array.from(
-                      { length: m * k },
-                      (_, i) =>
-                        scenario === "special"
-                          ? [Infinity, -Infinity, NaN, -0][i % 4]
-                          : scenario === "boundary"
+                    const x = Float32Array.from({ length: m * k }, (_, i) =>
+                      scenario === "special"
+                        ? [Infinity, -Infinity, NaN, -0][i % 4]
+                        : scenario === "boundary"
                           ? 0
-                          : Math.sin(i * .037) * (scenario === "wide" ? 1e4 : .75),
+                          : Math.sin(i * 0.037) * (scenario === "wide" ? 1e4 : 0.75),
                     );
                     const w = Uint32Array.from(
-                      { length: n * k * bits / 32 },
+                      { length: (n * k * bits) / 32 },
                       (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 0,
                     );
                     const boundary = staticQuantizeParams(m * n, scale);
-                    const bias = scenario === "boundary"
-                      ? new Float32Array(
-                        Uint32Array.from({ length: n }, (_, i) =>
-                          ((boundary[1 + Math.floor(i / 6)] + Math.floor(i % 6 / 2) - 1) |
-                            (i % 2 ? 0x80000000 : 0)) >>> 0).buffer,
-                      )
-                      : Float32Array.from({ length: n }, (_, i) => (i % 7 - 3) * .11);
-                    const ws = Float32Array.from({
-                      length: n * (group === undefined ? 1 : k / group),
-                    }, (_, i) => (i % 17 + 1) * .00017);
+                    const bias =
+                      scenario === "boundary"
+                        ? new Float32Array(
+                            Uint32Array.from(
+                              { length: n },
+                              (_, i) =>
+                                ((boundary[1 + Math.floor(i / 6)] + Math.floor((i % 6) / 2) - 1) |
+                                  (i % 2 ? 0x80000000 : 0)) >>>
+                                0,
+                            ).buffer,
+                          )
+                        : Float32Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11);
+                    const ws = Float32Array.from(
+                      {
+                        length: n * (group === undefined ? 1 : k / group),
+                      },
+                      (_, i) => ((i % 17) + 1) * 0.00017,
+                    );
                     const input = make(x),
                       weight = make(w),
                       biasBuf = make(bias),
@@ -113,7 +117,8 @@ describe({
                       );
                     const mask = scenario === "rounding" ? 0x80000000 : 0;
                     d.queue.writeBuffer(fp, 12, Uint32Array.of(mask));
-                    const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+                    const encoder = d.createCommandEncoder(),
+                      pass = encoder.beginComputePass();
                     const dispatch = (
                       pipeline: GPUComputePipeline,
                       buffers: GPUBuffer[],
@@ -139,7 +144,7 @@ describe({
                       Math.ceil(n / (128 / lanes)),
                       m,
                     );
-                    dispatch(srq, [sp, middle, a], Math.ceil(m * n / 128));
+                    dispatch(srq, [sp, middle, a], Math.ceil((m * n) / 128));
                     dispatch(
                       compile(linearSrqWgsl(storage, group, lanes)),
                       [fp, input, weight, biasBuf, b, scaleBuf],
@@ -156,10 +161,13 @@ describe({
                     let different = 0;
                     for (let i = 0; i < m * n; i++) {
                       if (
-                        ((words[i] ^ mask) >>> 0) !== words[i + m * n] &&
-                        !((words[i] & 0x7fffffff) > 0x7f800000 &&
-                          (words[i + m * n] & 0x7fffffff) > 0x7f800000)
-                      ) different++;
+                        (words[i] ^ mask) >>> 0 !== words[i + m * n] &&
+                        !(
+                          (words[i] & 0x7fffffff) > 0x7f800000 &&
+                          (words[i + m * n] & 0x7fffffff) > 0x7f800000
+                        )
+                      )
+                        different++;
                     }
                     assertEquals(
                       different,

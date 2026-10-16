@@ -71,7 +71,7 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
       // 1 行 = 24 × 27,280 × 2 = 1,309,440 B。1 枚に入る行は 1,640 / 820 / 410 / 205 行。
       assertEquals(
         [undefined, GiB, 512 * MiB, 256 * MiB].map((budget) =>
-          blocksOf(TOKENS_121F, TOKENS_121F, 2, budget)
+          blocksOf(TOKENS_121F, TOKENS_121F, 2, budget),
         ),
         [17, 34, 67, 134],
       );
@@ -81,7 +81,7 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
       // 1 行 = 2,618,880 B。1 枚に入る行は 820 / 205 / 102 行。
       assertEquals(
         [undefined, 512 * MiB, 256 * MiB].map((budget) =>
-          blocksOf(TOKENS_121F, TOKENS_121F, 4, budget)
+          blocksOf(TOKENS_121F, TOKENS_121F, 4, budget),
         ),
         [34, 134, 268],
       );
@@ -93,7 +93,7 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
       // 1 行 = 24 × 512 × 2 = 24,576 B。1 枚に入る行は 87,381 / 21,845 / 10,922 行。
       assertEquals(
         [undefined, 512 * MiB, 256 * MiB].map((budget) =>
-          blocksOf(TOKENS_121F, TEXT_TOKENS, 2, budget)
+          blocksOf(TOKENS_121F, TEXT_TOKENS, 2, budget),
         ),
         [1, 2, 3],
       );
@@ -103,7 +103,7 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
       // 1 行 = 49,152 B。1 枚に入る行は 43,690 / 21,845 / 10,922 / 5,461 行。
       assertEquals(
         [undefined, GiB, 512 * MiB, 256 * MiB].map((budget) =>
-          blocksOf(TOKENS_121F, TEXT_TOKENS, 4, budget)
+          blocksOf(TOKENS_121F, TEXT_TOKENS, 4, budget),
         ),
         [1, 2, 3, 5],
       );
@@ -115,8 +115,14 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
       // 実用席の 1 行 = 211,200 B（1 枚 10,168 / 2,542 / 1,271 行）。参照席の 1 行 = 422,400 B
       // （5,084 / 1,271 / 635 行）。
       const budgets = [undefined, 512 * MiB, 256 * MiB];
-      assertEquals(budgets.map((budget) => blocksOf(TOKENS_17F, TOKENS_17F, 2, budget)), [1, 2, 4]);
-      assertEquals(budgets.map((budget) => blocksOf(TOKENS_17F, TOKENS_17F, 4, budget)), [1, 4, 7]);
+      assertEquals(
+        budgets.map((budget) => blocksOf(TOKENS_17F, TOKENS_17F, 2, budget)),
+        [1, 2, 4],
+      );
+      assertEquals(
+        budgets.map((budget) => blocksOf(TOKENS_17F, TOKENS_17F, 4, budget)),
+        [1, 4, 7],
+      );
     });
 
     it("cross はどの席・どの予算でも 1 枚", () => {
@@ -135,10 +141,13 @@ describe("融合 attention の枚数（Wan2.2 TI2V-5B の形・束縛上限 2,14
       { batch: 8, rows: 4, cols: 16, scoreBytes: 4 },
       rowBlockLimit(GRANTED, 1100),
     );
-    assertEquals(blocks.map((block) => [block.scoreBytes, block.statsBytes]), [
-      [1024, 128],
-      [1024, 128],
-    ]);
+    assertEquals(
+      blocks.map((block) => [block.scoreBytes, block.statsBytes]),
+      [
+        [1024, 128],
+        [1024, 128],
+      ],
+    );
     // 合計 1,152 B は予算 1,100 B を超える — 予算は合計の上限ではない。
     assertEquals(blocks[0].scoreBytes + blocks[0].statsBytes > 1100, true);
   });
@@ -188,8 +197,14 @@ describe("テスト専用の強制枚数（ROW_BLOCK_SPLIT）と予算の併用"
   const limit = rowBlockLimit(GRANTED, 400);
 
   it("予算に収まる枚数は通る（強制が予算より細かく割るのは許す）", () => {
-    assertEquals(planRowBlocks(10, 100, limit, 5).map((block) => block.rows), [2, 2, 2, 2, 2]);
-    assertEquals(planRowBlocks(10, 100, limit, 3).map((block) => block.rows), [4, 3, 3]);
+    assertEquals(
+      planRowBlocks(10, 100, limit, 5).map((block) => block.rows),
+      [2, 2, 2, 2, 2],
+    );
+    assertEquals(
+      planRowBlocks(10, 100, limit, 3).map((block) => block.rows),
+      [4, 3, 3],
+    );
   });
 
   it("予算に収まらない枚数は予算を名指して fail loudly（強制で予算を緩めない）", () => {

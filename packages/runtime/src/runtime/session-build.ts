@@ -54,8 +54,8 @@ import {
 import { executionKnobDefaults, sessionOptionsViolation } from "./session-options-check.ts";
 
 /** MUST: `queue.writeBuffer` で書くバッファはプール外（アリーナの不変条件）。 */
-export const HOST_WRITTEN_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
-  BUFFER_USAGE.COPY_SRC;
+export const HOST_WRITTEN_USAGE =
+  BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
 /**
  * companion scale の実体（量子化 codec のみ・piece 列では piece 1 だけ）。
@@ -176,9 +176,9 @@ const assertRowScale = (
 ): void => {
   if (scaleShape[0] !== weightShape[rowAxis] || scaleShape[1] !== 1) {
     throw new ExecutionError(
-      `initializer '${name}': scale [${scaleShape.join(",")}] が重み [${
-        weightShape.join(",")
-      }] の軸 ${rowAxis} の per-channel 形 [${weightShape[rowAxis]},1] でない`,
+      `initializer '${name}': scale [${scaleShape.join(",")}] が重み [${weightShape.join(
+        ",",
+      )}] の軸 ${rowAxis} の per-channel 形 [${weightShape[rowAxis]},1] でない`,
     );
   }
 };
@@ -447,9 +447,8 @@ export type SessionState = {
 const snapshotSessionOptions = (
   requested: SessionOptions,
 ): { readonly [K in keyof Required<SessionOptions>]: SessionOptions[K] } => ({
-  submitPolicy: requested.submitPolicy === undefined
-    ? undefined
-    : copySubmitPolicy(requested.submitPolicy),
+  submitPolicy:
+    requested.submitPolicy === undefined ? undefined : copySubmitPolicy(requested.submitPolicy),
   linearCompute: requested.linearCompute,
   attentionCompute: requested.attentionCompute,
   attentionScoreStorage: requested.attentionScoreStorage,
@@ -508,16 +507,16 @@ export const buildSessionState = async (
   // 以降は GPU の能力（feature / WGSL 言語機能）を見る門だけ。
   if (
     rmsNormReduce === "subgroup32" &&
-    (!gpu.features.has("subgroups") || !gpu.features.has("subgroup-size-control") ||
+    (!gpu.features.has("subgroups") ||
+      !gpu.features.has("subgroup-size-control") ||
       !gpu.wgslLanguageFeatures.has("subgroup_id"))
   ) {
-    throw new ExecutionError(
-      "rmsNormReduce: subgroup32 は acquireGpu({ subgroups: true }) が必要",
-    );
+    throw new ExecutionError("rmsNormReduce: subgroup32 は acquireGpu({ subgroups: true }) が必要");
   }
   if (
     linearGemvReduce === "parallel-subgroup32" &&
-    (!gpu.features.has("subgroups") || !gpu.features.has("subgroup-size-control") ||
+    (!gpu.features.has("subgroups") ||
+      !gpu.features.has("subgroup-size-control") ||
       !gpu.wgslLanguageFeatures.has("subgroup_id"))
   ) {
     throw new ExecutionError(
@@ -544,8 +543,8 @@ export const buildSessionState = async (
   // MUST: 選択はここ 1 箇所。dp4a カナリア（`resolveAttentionI8a8Dot`）と診断の id
   // （`SessionState.geometryProfile`）はこの返り値を引く — 別々に選ぶと、カナリアが検証した幾何と
   // 実走の幾何が食い違いうる。
-  const geometryProfile = gpu[RUNTIME_INTERNAL].geometryProfile ??
-    selectGeometryProfile(gpu.adapterInfo);
+  const geometryProfile =
+    gpu[RUNTIME_INTERNAL].geometryProfile ?? selectGeometryProfile(gpu.adapterInfo);
 
   // MUST: 重みの確保に入る前に、席ごとの確保寸法を device の絶対上限と突き合わせる（batch
   // ループより前 = 1 バイトも上げる前）。確保失敗の検出は item（block）単位 errorScope
@@ -667,9 +666,7 @@ export const buildSessionState = async (
         // （供給元）なので `items` には現れない — 現れたら簿記の破れで、通すと貸し手の
         // バッファを指す名前に別のバイト列を上書きすることになる。
         if (seat.seat === "shared" || initializer.storage === undefined) {
-          throw new ExecutionError(
-            `initializer '${name}': 共有宣言（shared）なのに実体が来た`,
-          );
+          throw new ExecutionError(`initializer '${name}': 共有宣言（shared）なのに実体が来た`);
         }
         const storage = initializer.storage;
         const layout = codecLayout(storage.codec);
@@ -681,16 +678,14 @@ export const buildSessionState = async (
         // （行あたりの長さは宣言から割り切れる — 供給元が shape の残り次元を突き合わせて
         // いるので、行数だけが piece ごとに変わる）。
         const piece = item.piece;
-        const pieceShape = piece === undefined
-          ? declaredShape
-          : [piece.rows, ...declaredShape.slice(1)];
+        const pieceShape =
+          piece === undefined ? declaredShape : [piece.rows, ...declaredShape.slice(1)];
         const rows = pieceShape[0];
         // MUST: 宣言由来のバイト長と現物が食い違ったら落とす。プランナ（と見積り）は実
         // テンソルを見ずに宣言だけで数えるので、ここが「宣言 = 現物」を実際に確かめる唯一の
         // 点になる（供給元の突合門が成立していれば発火しない — 二重の網）。
-        const expectedBytes = piece === undefined
-          ? seat.payloadBytes
-          : rows * (seat.payloadBytes / declaredRows);
+        const expectedBytes =
+          piece === undefined ? seat.payloadBytes : rows * (seat.payloadBytes / declaredRows);
         if (raw.byteLength !== expectedBytes) {
           throw new ExecutionError(
             `initializer '${name}': 宣言由来 ${expectedBytes} バイトに対し実テンソルが ${raw.byteLength} バイト`,
@@ -770,7 +765,7 @@ export const buildSessionState = async (
             payload = timedDecode(() =>
               layout === "i2"
                 ? decodeI2(raw, pieceShape, scale.values, scaleShape)
-                : decodeI8(raw, pieceShape, scale.values, scaleShape)
+                : decodeI8(raw, pieceShape, scale.values, scaleShape),
             );
             hostExpandedBytes += payload.byteLength;
           }
@@ -813,7 +808,7 @@ export const buildSessionState = async (
             }
             const scale = expandedScale();
             payload = timedDecode(() =>
-              decodeI4(raw, pieceShape, scale.values, scale.shape, groupSize)
+              decodeI4(raw, pieceShape, scale.values, scale.shape, groupSize),
             );
             hostExpandedBytes += payload.byteLength;
           }
@@ -824,9 +819,10 @@ export const buildSessionState = async (
         if (piece === undefined) {
           weightBuffers.set(name, timedAlloc(Math.max(4, payload.byteLength)));
         } else if (piece.first) {
-          const aligned = seat.seat === "expanded"
-            ? seat.expandedBytes
-            : seat.payloadBytes + ((4 - (seat.payloadBytes % 4)) % 4);
+          const aligned =
+            seat.seat === "expanded"
+              ? seat.expandedBytes
+              : seat.payloadBytes + ((4 - (seat.payloadBytes % 4)) % 4);
           weightBuffers.set(name, timedAlloc(Math.max(4, aligned)));
         }
         const buffer = weightBuffers.get(name);
@@ -896,10 +892,7 @@ export const buildSessionState = async (
       // MUST: 消失後の onSubmittedWorkDone が解決しない実装がありうる（実測は
       // raceCanaryDeviceLost の doc）ため競わせる — ハングを失敗に変換する保険。
       const fenceStart = performance.now();
-      await gpu[RUNTIME_INTERNAL].raceDeviceLost(
-        gpu.device.queue.onSubmittedWorkDone(),
-        label,
-      );
+      await gpu[RUNTIME_INTERNAL].raceDeviceLost(gpu.device.queue.onSubmittedWorkDone(), label);
       uploadFenceMs += performance.now() - fenceStart;
       supplyBoundary = performance.now();
     }

@@ -29,7 +29,7 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 /** 行の (部品, 相) を全て並べる。 */
 const phasesOf = (row: BundleCensusRow): readonly (readonly [string, string])[] =>
   Object.entries(row.census).flatMap(([component, phases]) =>
-    Object.keys(phases ?? {}).map((phase) => [component, phase] as const)
+    Object.keys(phases ?? {}).map((phase) => [component, phase] as const),
   );
 
 describe("census 表の行の整合（GPU・資産不要）", () => {
@@ -103,14 +103,16 @@ describe("表の鍵は manifest の session を家族の合成に通した実効
     // 宣言の無い席（`i4`）は参照の束 — 家族のコード既定が合成へ紛れ込むとここが空でなくなる。
     assertEquals(bundleKey(effectiveSessionOptions("gemma4", {}, {}, where)), "");
     // 明示の参照値は宣言に勝ち、鍵から落ちる（③ を sequential へ戻した i4-gemvpar は GEMV だけの束）。
-    const reverted = effectiveSessionOptions("gemma4", declared, {
-      stateAttentionReduce: "sequential",
-    }, where);
-    assertEquals(bundleKey(reverted), "linearGemvReduce=parallel");
-    assertEquals(
-      censusRowOf("gemma4", "e2b", reverted)?.session,
-      { linearGemvReduce: "parallel" },
+    const reverted = effectiveSessionOptions(
+      "gemma4",
+      declared,
+      {
+        stateAttentionReduce: "sequential",
+      },
+      where,
     );
+    assertEquals(bundleKey(reverted), "linearGemvReduce=parallel");
+    assertEquals(censusRowOf("gemma4", "e2b", reverted)?.session, { linearGemvReduce: "parallel" });
   });
 
   it("行の無い束・未知の系列は引けない", () => {
@@ -144,7 +146,7 @@ const listMirrors = async (): Promise<readonly (readonly [string, Manifest])[]> 
       if (manifest !== undefined) mirrors.push([entry.name, manifest]);
     }
   } catch (cause) {
-    if (!(isNotFound(cause))) throw cause;
+    if (!isNotFound(cause)) throw cause;
   }
   return mirrors.toSorted(([a], [b]) => a.localeCompare(b));
 };

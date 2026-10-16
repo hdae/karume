@@ -14,7 +14,12 @@ import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 type Storage = "i2" | "i4" | "i8";
 
 /** 圧縮語の境界、group ごとのscale、符号が揃わない決定的な入力。 */
-const fixture = (storage: Storage, n: number, k: number, group?: number): {
+const fixture = (
+  storage: Storage,
+  n: number,
+  k: number,
+  group?: number,
+): {
   packed: Uint32Array<ArrayBuffer>;
   input: Float32Array<ArrayBuffer>;
   bias: Float32Array<ArrayBuffer>;
@@ -23,14 +28,14 @@ const fixture = (storage: Storage, n: number, k: number, group?: number): {
 } => {
   const bits = storage === "i2" ? 2 : storage === "i4" ? 4 : 8;
   const packed = Uint32Array.from(
-    { length: n * k * bits / 32 },
+    { length: (n * k * bits) / 32 },
     (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 0,
   );
   const input = Float32Array.from({ length: 8 * k }, (_, i) => Math.sin(i * 0.037) * 0.75);
-  const bias = Float32Array.from({ length: n }, (_, i) => (i % 7 - 3) * 0.11);
+  const bias = Float32Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11);
   const scale = Float32Array.from(
     { length: n * (group === undefined ? 1 : k / group) },
-    (_, i) => (i % 17 + 1) * 0.00017,
+    (_, i) => ((i % 17) + 1) * 0.00017,
   );
   const reference = new Float64Array(8 * n);
   for (let row = 0; row < 8; row++) {
@@ -38,8 +43,8 @@ const fixture = (storage: Storage, n: number, k: number, group?: number): {
       let sum = 0;
       for (let inner = 0; inner < k; inner++) {
         const index = col * k + inner;
-        const code = (packed[Math.floor(index * bits / 32)] >>> ((index * bits) % 32)) &
-          ((1 << bits) - 1);
+        const code =
+          (packed[Math.floor((index * bits) / 32)] >>> ((index * bits) % 32)) & ((1 << bits) - 1);
         const q = bits === 8 ? (code << 24) >> 24 : code - (1 << (bits - 1));
         const s = scale[group === undefined ? col : col * (k / group) + Math.floor(inner / group)];
         sum += input[row * k + inner] * Math.fround(q * s);
@@ -60,15 +65,23 @@ describe({
       try {
         for (const storage of ["i2", "i4", "i8"] as const) {
           const unit = linearGemvUnit(storage);
-          const shapes = [{ k: unit, group: storage === "i4" ? 32 : undefined }, {
-            k: unit * 5,
-            group: storage === "i4" ? 32 : undefined,
-          }, { k: 4096, group: storage === "i4" ? 32 : undefined }];
+          const shapes = [
+            { k: unit, group: storage === "i4" ? 32 : undefined },
+            {
+              k: unit * 5,
+              group: storage === "i4" ? 32 : undefined,
+            },
+            { k: 4096, group: storage === "i4" ? 32 : undefined },
+          ];
           if (storage === "i4") {
-            shapes.push({ k: 1536, group: 512 }, { k: 6144, group: 2048 }, {
-              k: 4096,
-              group: 4096,
-            });
+            shapes.push(
+              { k: 1536, group: 512 },
+              { k: 6144, group: 2048 },
+              {
+                k: 4096,
+                group: 4096,
+              },
+            );
           }
           // E4B の行（2026-09-26・lanes は E2B から写した未実測）の縮約長 × group。1 出力の算術は
           // (格納, k, group, lanes) だけで決まり n は dispatch 数しか変えないので、n は上と同じ 36 列
@@ -170,8 +183,8 @@ describe({
                   const values = new Float32Array(out.buffer);
                   for (let i = 0; i < values.length; i++) {
                     const expected = data.reference[i];
-                    const tolerance = GEMM_TOLERANCE.atol +
-                      GEMM_TOLERANCE.rtol * Math.abs(expected);
+                    const tolerance =
+                      GEMM_TOLERANCE.atol + GEMM_TOLERANCE.rtol * Math.abs(expected);
                     assert(Number.isFinite(values[i]));
                     assert(
                       Math.abs(values[i] - expected) <= tolerance,

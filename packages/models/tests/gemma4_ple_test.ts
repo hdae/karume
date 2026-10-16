@@ -57,10 +57,7 @@ const ROW_BYTES = SPEC.layers * SPEC.dim + SPEC.layers * 4;
 
 const fixture = (options: { readonly defer?: boolean } = {}) => pleFixture(SPEC, options);
 
-const pleOf = (
-  rig: ReturnType<typeof fixture>,
-  maxResidentBytes?: number,
-) =>
+const pleOf = (rig: ReturnType<typeof fixture>, maxResidentBytes?: number) =>
   createGemma4Ple({
     index: rig.index,
     openBlock: rig.openBlock,
@@ -334,8 +331,8 @@ test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行を�
     JSON.stringify(rig.reads),
   );
   assert(
-    rig.reads.some((read) =>
-      read.asset === "ple.scales.0" && read.offset === 2 * rig.index.scales.rowBytes
+    rig.reads.some(
+      (read) => read.asset === "ple.scales.0" && read.offset === 2 * rig.index.scales.rowBytes,
     ),
     JSON.stringify(rig.reads),
   );
@@ -577,11 +574,7 @@ test("Gemma4Ple.gather: 中断済みの signal では block を 1 本も開か�
   const ple = pleOf(rig);
   const controller = new AbortController();
   controller.abort(new Error("test abort"));
-  await assertRejects(
-    () => ple.gather([0], { signal: controller.signal }),
-    Error,
-    "test abort",
-  );
+  await assertRejects(() => ple.gather([0], { signal: controller.signal }), Error, "test abort");
   assertEquals(rig.opens.length, 0);
 });
 
@@ -620,11 +613,12 @@ test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止め�
       read: (offset: number, length: number) => {
         calls += 1;
         inFlight += 1;
-        const pending = calls === 1
-          ? new Promise<Uint8Array<ArrayBuffer>>((_resolve, reject) =>
-            setTimeout(() => reject(new Error("injected read failure")), 0)
-          )
-          : reader.read(offset, length);
+        const pending =
+          calls === 1
+            ? new Promise<Uint8Array<ArrayBuffer>>((_resolve, reject) =>
+                setTimeout(() => reject(new Error("injected read failure")), 0),
+              )
+            : reader.read(offset, length);
         return pending.finally(() => {
           inFlight -= 1;
         });

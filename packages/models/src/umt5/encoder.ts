@@ -132,11 +132,9 @@ export type Umt5EncoderOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、取得層のノブの説明は
  * {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Umt5EncoderFromPretrainedOptions =
-  & Umt5EncoderOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions
-  & {
+export type Umt5EncoderFromPretrainedOptions = Umt5EncoderOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions & {
     /** 取得（manifest と重み約 5.3 GiB・トークナイザ資産）の中断。構築の後には持ち越さない。 */
     readonly signal?: AbortSignal;
   };
@@ -334,7 +332,7 @@ const buildUmt5 = async (
   const textEncoder = open(TEXT_ENCODER);
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU は {@link admitUmt5} が
   // 同じ 1 本で見ているが、自前で取った device はここが唯一の門。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `${OWNER}: quant '${quantName}'`);
@@ -537,7 +535,7 @@ export class Umt5Encoder {
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();
         },
-      ])
+      ]),
     );
     return this.#disposal;
   }

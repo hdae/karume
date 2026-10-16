@@ -255,7 +255,10 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
-          q: quantizedPieces([[0, 1], [2, ROWS]]),
+          q: quantizedPieces([
+            [0, 1],
+            [2, ROWS],
+          ]),
           b: biasTensor(),
         }),
       ContainerFormatError,
@@ -267,7 +270,10 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
-          q: quantizedPieces([[0, 2], [2, 3]]),
+          q: quantizedPieces([
+            [0, 2],
+            [2, 3],
+          ]),
           b: biasTensor(),
         }),
       ContainerFormatError,
@@ -280,7 +286,10 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
-          q: quantizedPieces([[0, 2], [2, ROWS + 1]]),
+          q: quantizedPieces([
+            [0, 2],
+            [2, ROWS + 1],
+          ]),
           b: biasTensor(),
         }),
       ContainerFormatError,
@@ -293,7 +302,11 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
-          q: quantizedPieces([[0, 2], [2, 2], [2, ROWS]]),
+          q: quantizedPieces([
+            [0, 2],
+            [2, 2],
+            [2, ROWS],
+          ]),
           b: biasTensor(),
         }),
       ContainerFormatError,
@@ -305,7 +318,10 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
-          q: quantizedPieces([[-1, 2], [2, ROWS]]),
+          q: quantizedPieces([
+            [-1, 2],
+            [2, ROWS],
+          ]),
           b: biasTensor(),
         }),
       ContainerFormatError,
@@ -319,7 +335,10 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
-          q: quantizedPieces([[0, 1.5], [1.5, ROWS]]),
+          q: quantizedPieces([
+            [0, 1.5],
+            [1.5, ROWS],
+          ]),
           b: biasTensor(),
         }),
       ContainerFormatError,
@@ -421,12 +440,14 @@ const weightDeclaration = (shape: readonly number[]): DeclarationJson => {
       b: { dtype: "f32", shape: [channelsOut] },
       y: { dtype: "f32", shape: [1, channelsOut, length - 1 + kernel] },
     },
-    nodes: [{
-      op: "conv_transpose1d",
-      ins: ["x", "q", "b"],
-      outs: ["y"],
-      attrs: { stride: 1, padding: 0 },
-    }],
+    nodes: [
+      {
+        op: "conv_transpose1d",
+        ins: ["x", "q", "b"],
+        outs: ["y"],
+        attrs: { stride: 1, padding: 0 },
+      },
+    ],
   };
 };
 
@@ -555,7 +576,13 @@ describe("openMemoryContainer: 合成した目次", () => {
   it("piece は readBlock のたびに read() を引き直す（保持しない）", async () => {
     const reads: number[] = [];
     const container = openWith(quantizedDeclaration(), {
-      q: quantizedPieces([[0, 2], [2, ROWS]], (index) => reads.push(index)),
+      q: quantizedPieces(
+        [
+          [0, 2],
+          [2, ROWS],
+        ],
+        (index) => reads.push(index),
+      ),
       b: biasTensor(),
     });
     assertEquals(reads, []);
@@ -576,33 +603,42 @@ describe("openMemoryContainer: 合成した目次", () => {
 
   it("丸ごとの実体と scale は part 2・piece は 2 の次から 1 本 1 part", () => {
     const container = openWith(quantizedDeclaration(), {
-      q: quantizedPieces([[0, 2], [2, ROWS]]),
+      q: quantizedPieces([
+        [0, 2],
+        [2, ROWS],
+      ]),
       b: biasTensor(),
     });
     const supplies = container.graphs[GRAPH_NAME].supplies;
     const q = supplies.get("q");
-    assertEquals(q?.blocks.map((block) => [block.id, block.part, block.length]), [
-      [`${GRAPH_NAME}/q#piece1`, 3, 2 * ROW_LENGTH],
-      [`${GRAPH_NAME}/q#piece2`, 4, 2 * ROW_LENGTH],
-    ]);
+    assertEquals(
+      q?.blocks.map((block) => [block.id, block.part, block.length]),
+      [
+        [`${GRAPH_NAME}/q#piece1`, 3, 2 * ROW_LENGTH],
+        [`${GRAPH_NAME}/q#piece2`, 4, 2 * ROW_LENGTH],
+      ],
+    );
     // 規則③: companion scale は piece 1 と同じ part。
-    assertEquals([q?.scale?.id, q?.scale?.part, q?.scale?.length], [
-      `${GRAPH_NAME}/q#scale`,
-      3,
-      ROWS * 4,
-    ]);
+    assertEquals(
+      [q?.scale?.id, q?.scale?.part, q?.scale?.length],
+      [`${GRAPH_NAME}/q#scale`, 3, ROWS * 4],
+    );
     const b = supplies.get("b");
-    assertEquals(b?.blocks.map((block) => [block.id, block.part, block.length]), [
-      [`${GRAPH_NAME}/b`, 2, ROWS * 4],
-    ]);
+    assertEquals(
+      b?.blocks.map((block) => [block.id, block.part, block.length]),
+      [[`${GRAPH_NAME}/b`, 2, ROWS * 4]],
+    );
   });
 
   it("丸ごとだけの供給は全部 part 2 に載る", () => {
     const supplies = memoryModel().graphs[GRAPH_NAME].supplies;
-    assertEquals([...supplies].map(([name, supply]) => [name, supply.blocks[0].part]), [
-      ["w", 2],
-      ["b", 2],
-    ]);
+    assertEquals(
+      [...supplies].map(([name, supply]) => [name, supply.blocks[0].part]),
+      [
+        ["w", 2],
+        ["b", 2],
+      ],
+    );
   });
 
   it("丸ごと供給は累積が part 長を超えたところで次の part へ移る", () => {
@@ -619,9 +655,7 @@ describe("openMemoryContainer: 合成した目次", () => {
       outputs: ["y"],
       initializers: Object.fromEntries(names.map((name) => [name, {}])),
       values: {
-        ...Object.fromEntries(
-          names.map((name) => [name, { dtype: "f32", shape: [CHUNK / 4] }]),
-        ),
+        ...Object.fromEntries(names.map((name) => [name, { dtype: "f32", shape: [CHUNK / 4] }])),
         y: { dtype: "f32", shape: [1] },
       },
       nodes: [{ op: "add", ins: ["x", "x"], outs: ["y"], attrs: {} }],
@@ -630,16 +664,17 @@ describe("openMemoryContainer: 合成した目次", () => {
       bytes: new Uint8Array(new ArrayBuffer(CHUNK)),
       encoding: { codec: "f32" },
     });
-    const supplies = openWith(
-      graph,
-      Object.fromEntries(names.map((name) => [name, bigTensor()])),
-    ).graphs[GRAPH_NAME].supplies;
+    const supplies = openWith(graph, Object.fromEntries(names.map((name) => [name, bigTensor()])))
+      .graphs[GRAPH_NAME].supplies;
     // 96 MiB × 2 は 256 MiB に収まるので同じ part・3 本目で溢れて次の part へ。
-    assertEquals([...supplies].map(([name, supply]) => [name, supply.blocks[0].part]), [
-      ["a", 2],
-      ["b", 2],
-      ["c", 3],
-    ]);
+    assertEquals(
+      [...supplies].map(([name, supply]) => [name, supply.blocks[0].part]),
+      [
+        ["a", 2],
+        ["b", 2],
+        ["c", 3],
+      ],
+    );
   });
 });
 
@@ -696,7 +731,8 @@ describe("openMemoryContainer: 名前 '__proto__'", () => {
   it("ブラウザの __proto__ accessor の下でも、グラフ名と initializer 名を own property で保全する", () => {
     // 宣言の own key は JSON.parse で作る MUST（オブジェクトリテラルの `"__proto__":` は
     // [[Prototype]] 指定になる）。
-    const declaration = declarationOf(JSON.parse(`{
+    const declaration = declarationOf(
+      JSON.parse(`{
       "format": "karume-ir",
       "version": 2,
       "requires": { "ops": ["matmul"] },
@@ -709,14 +745,15 @@ describe("openMemoryContainer: 名前 '__proto__'", () => {
         "y": { "dtype": "f32", "shape": [2, 3] }
       },
       "nodes": [{ "op": "matmul", "ins": ["x", "__proto__"], "outs": ["y"], "attrs": {} }]
-    }`));
+    }`),
+    );
     const tensors: Record<string, MemoryTensor> = JSON.parse('{"__proto__":null}');
     tensors["__proto__"] = { bytes: f32Bytes(new Array(12).fill(1)), encoding: { codec: "f32" } };
     const opened = withBrowserProtoAccessor(() =>
       openMemoryContainer({
         graphs: { ["__proto__"]: declaration },
         tensors: { ["__proto__"]: tensors },
-      })
+      }),
     );
     assertEquals(Object.hasOwn(opened.graphs, "__proto__"), true);
     assertEquals(opened.graphs["__proto__"].supplies.has("__proto__"), true);

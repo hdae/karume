@@ -84,14 +84,19 @@ const filesOf = (refs: readonly FileRef[]): Record<string, FileRef> =>
 const prepare = async (
   routes: MockRoutes,
   caches: MemoryCacheStorage,
-): Promise<
-  { loaded: LoadedManifest; refs: FileRef[]; mock: ReturnType<typeof createMockFetch> }
-> => {
+): Promise<{
+  loaded: LoadedManifest;
+  refs: FileRef[];
+  mock: ReturnType<typeof createMockFetch>;
+}> => {
   const loader = createMockFetch(routes);
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: loader.fetch,
-    caches,
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: loader.fetch,
+      caches,
+    },
+  );
   return { loaded, refs: assetRefs(loaded), mock: createMockFetch(routes) };
 };
 
@@ -165,7 +170,10 @@ test("prefetchAssets: 落とした後の fetchAssets は 1 度も network に出
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, filesOf(refs), { fetch: second.fetch, caches });
 
-  assertEquals(Object.keys(assets), refs.map((ref) => ref.path));
+  assertEquals(
+    Object.keys(assets),
+    refs.map((ref) => ref.path),
+  );
   for (const ref of refs) assertEquals(assets[ref.path], payloadFor(ref.path));
   assertEquals(second.calls, [], "温めた後の全量面が network に出ている");
   assertEquals(mock.calls.length, warmed, "1 回目の mock も追加で呼ばれている");
@@ -210,7 +218,7 @@ test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 �
         completes.push(progress.path);
         controller.abort(reason);
       },
-    })
+    }),
   );
 
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
@@ -245,7 +253,7 @@ test("prefetchAssets: 中断の後には complete を 1 つも出さない（全
         if (controller.signal.aborted) afterAbort.push(`${progress.phase} ${progress.path}`);
         else controller.abort(reason);
       },
-    })
+    }),
   );
 
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
@@ -268,7 +276,7 @@ test("prefetchAssets: 取得中の中断は HubFetchError に包まれず素通�
       onProgress: (progress) => {
         if (progress.phase === "downloading") controller.abort(reason);
       },
-    })
+    }),
   );
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
 });

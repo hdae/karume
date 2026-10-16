@@ -60,7 +60,11 @@ import {
   type SafetensorsFile,
   type Tensor,
 } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -107,7 +111,8 @@ const GOLDEN_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 0 };
 const SERIES_NAME = "depth-anything-v2-small-hf";
 
 /** SKIP 時にそのまま貼れる生成コマンド（実画像 golden まで含む形）。 */
-const GENERATE = "cd tools/export-recipes && uv run --group depth-anything-preprocess" +
+const GENERATE =
+  "cd tools/export-recipes && uv run --group depth-anything-preprocess" +
   " python -m depth_anything.export --real-images";
 
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
@@ -155,8 +160,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 const discoverCases = (root: URL): readonly string[] =>
   listDir(root)
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();

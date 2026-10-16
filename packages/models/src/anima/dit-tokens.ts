@@ -85,10 +85,7 @@ const latentSides = (
 };
 
 /** latent `[1,C,H,W]` に対応するトークン長 `S`。 */
-export const tokenCount = (
-  latentShape: readonly number[],
-  geometry: DitPatchGeometry,
-): number => {
+export const tokenCount = (latentShape: readonly number[], geometry: DitPatchGeometry): number => {
   const [height, width] = latentSides(latentShape, geometry, "トークン長");
   return (height / geometry.patchHeight) * (width / geometry.patchWidth);
 };

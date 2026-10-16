@@ -192,11 +192,14 @@ test("AnimaPipeline.fromPretrained: onRetry が loadManifest まで届く（429 
   // manifest の後（容器の part 0）は 404 なので落ちる。ここで見たいのは「家族の
   // `fromPretrained` が `onRetry` を取得層まで運ぶ」ことだけ。
   await assertRejects(() =>
-    AnimaPipeline.fromPretrained({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, {
-      fetch,
-      caches: new MemoryCacheStorage(),
-      onRetry: (diagnostic) => retries.push(diagnostic),
-    })
+    AnimaPipeline.fromPretrained(
+      { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+      {
+        fetch,
+        caches: new MemoryCacheStorage(),
+        onRetry: (diagnostic) => retries.push(diagnostic),
+      },
+    ),
   );
   assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
   assertEquals(retries[0].status, 429);

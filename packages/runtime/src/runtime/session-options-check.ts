@@ -95,15 +95,20 @@ const executionKnobsViolation = (
   ];
   const violations = knobs
     .filter(([, value, accepted]) => typeof value !== "string" || !Object.hasOwn(accepted, value))
-    .map(([name, value, accepted]) =>
-      `  - ${name}: ${
-        typeof value === "string" ? JSON.stringify(value) : typeof value
-      }（受理するのは ${Object.keys(accepted).map((accept) => `'${accept}'`).join(" / ")}）`
+    .map(
+      ([name, value, accepted]) =>
+        `  - ${name}: ${
+          typeof value === "string" ? JSON.stringify(value) : typeof value
+        }（受理するのは ${Object.keys(accepted)
+          .map((accept) => `'${accept}'`)
+          .join(" / ")}）`,
     );
   if (violations.length === 0) return undefined;
-  return `SessionOptions の実行形ノブ ${violations.length} 本が受理集合の外（既定へ黙って縮退させない）:\n` +
+  return (
+    `SessionOptions の実行形ノブ ${violations.length} 本が受理集合の外（既定へ黙って縮退させない）:\n` +
     `${violations.join("\n")}\n` +
-    "綴りを確認すること（linearCompute の 'i8a8' は 0.5.0 で 'a8' へ改名した — ADR 0074 決定 3）";
+    "綴りを確認すること（linearCompute の 'i8a8' は 0.5.0 で 'a8' へ改名した — ADR 0074 決定 3）"
+  );
 };
 
 /**
@@ -201,10 +206,11 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   }
   // 値域の検査（union を読まない）は綴りの門の後 — 文言は estimate.ts の同じ門と揃える。
   if (!Number.isSafeInteger(planBackingBudgetBytes) || planBackingBudgetBytes < 0) {
-    return `options.planBackingBudgetBytes ${
-      describeInputValue(planBackingBudgetBytes)
-    } は非負の安全な整数で` +
-      "なければならない";
+    return (
+      `options.planBackingBudgetBytes ${describeInputValue(
+        planBackingBudgetBytes,
+      )} は非負の安全な整数で` + "なければならない"
+    );
   }
   // 行ブロック gemv の並列度目標も同じ形で検査する（0 / 負 / 非整数は「スレッド数の目標」として
   // 意味を持たず、黙って受けると rows が最大のまま選ばれた走行になる）。
@@ -213,10 +219,11 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     linearGemvRowsThreadTarget !== undefined &&
     (!Number.isSafeInteger(linearGemvRowsThreadTarget) || linearGemvRowsThreadTarget < 1)
   ) {
-    return `options.linearGemvRowsThreadTarget ${
-      describeInputValue(linearGemvRowsThreadTarget)
-    } は 1 以上の` +
-      "安全な整数でなければならない";
+    return (
+      `options.linearGemvRowsThreadTarget ${describeInputValue(
+        linearGemvRowsThreadTarget,
+      )} は 1 以上の` + "安全な整数でなければならない"
+    );
   }
   // 行ブロックの一時 1 本ごとの予算（ADR 0124 決定 5）。ここで落とすのは構築時に分かる不正値だけ —
   // 「1 行ぶんにも満たない予算」は形が決まる run の計画導出で予算を名指して落ちる（構築時には
@@ -226,17 +233,19 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     attentionRowBlockMaxBytes !== undefined &&
     (!Number.isSafeInteger(attentionRowBlockMaxBytes) || attentionRowBlockMaxBytes < 1)
   ) {
-    return `options.attentionRowBlockMaxBytes ${
-      describeInputValue(attentionRowBlockMaxBytes)
-    } は正の安全な整数でなければならない`;
+    return `options.attentionRowBlockMaxBytes ${describeInputValue(
+      attentionRowBlockMaxBytes,
+    )} は正の安全な整数でなければならない`;
   }
   // MUST: S の格納形は 1 つに決まらなければならない。`:c16` は S を array<f16> で持つ
   // **別の形**（ADR 0028）なので、s16 と併記されたら黙ってどちらかに解釈せず落とす
   // （どちらの丸め列で走ったのかが診断からも数値からも見えなくなる）。
   if (attentionScoreStorage === "f16" && attentionCompute === "f16") {
-    return "attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に指定できない" +
+    return (
+      "attentionScoreStorage 'f16' と attentionCompute 'f16' は同時に指定できない" +
       "（attentionCompute 'f16' は S を array<f16> で持つ別の格納形 — " +
-      "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'a8' にすること）";
+      "shader-f16 無しで S を半分にするなら attentionCompute を 'f32' か 'a8' にすること）"
+    );
   }
   return undefined;
 };

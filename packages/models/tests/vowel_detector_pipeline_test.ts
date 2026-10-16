@@ -206,10 +206,12 @@ const crnnGraph = (
 ) =>
   stubModel({
     symbols: patch.symbols ?? ["T"],
-    inputs: [{
-      name: patch.inputName ?? "features",
-      shape: patch.inputShape ?? [1, "2T", FEATURE_DIM],
-    }],
+    inputs: [
+      {
+        name: patch.inputName ?? "features",
+        shape: patch.inputShape ?? [1, "2T", FEATURE_DIM],
+      },
+    ],
     outputs: ["logits"],
     values: { logits: patch.outputShape ?? [1, "T", LIPSYNC_CLASSES.length] },
   });
@@ -345,11 +347,7 @@ test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）"
 });
 
 test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集合が空になる）", () => {
-  assertThrows(
-    () => config({ minFrames: MAX_FRAMES + 2 }),
-    Error,
-    "受理できる入力長が 1 本も無い",
-  );
+  assertThrows(() => config({ minFrames: MAX_FRAMES + 2 }), Error, "受理できる入力長が 1 本も無い");
 });
 
 // ---- 運用範囲（入力長の門・両側）---------------------------------------------
@@ -401,11 +399,16 @@ const melBasisBytes = (
   shape: readonly number[] = [N_MELS, MEL_BINS],
 ): Uint8Array<ArrayBuffer> =>
   writeSafetensors(
-    new Map([[name, {
-      dtype: "F32" as const,
-      shape,
-      data: new Float32Array(shape.reduce((product, dim) => product * dim, 1)),
-    }]]),
+    new Map([
+      [
+        name,
+        {
+          dtype: "F32" as const,
+          shape,
+          data: new Float32Array(shape.reduce((product, dim) => product * dim, 1)),
+        },
+      ],
+    ]),
     {},
   );
 
@@ -432,11 +435,16 @@ test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸と�
 
 test("mel 基底: f32 でない格納形は落とす", () => {
   const bytes = writeSafetensors(
-    new Map([["mel_basis", {
-      dtype: "I32" as const,
-      shape: [N_MELS, MEL_BINS],
-      data: new Int32Array(N_MELS * MEL_BINS),
-    }]]),
+    new Map([
+      [
+        "mel_basis",
+        {
+          dtype: "I32" as const,
+          shape: [N_MELS, MEL_BINS],
+          data: new Int32Array(N_MELS * MEL_BINS),
+        },
+      ],
+    ]),
     {},
   );
   assertThrows(() => parseMelBasis(bytes.buffer), Error, "mel 基底が F32 でない");
@@ -482,12 +490,12 @@ const pipelineWithFakeSession = (
           run: () =>
             plan.runError === undefined
               ? Promise.resolve({
-                logits: {
-                  dtype: "f32",
-                  shape: [1, 48, LIPSYNC_CLASSES.length],
-                  data: new Float32Array(48 * LIPSYNC_CLASSES.length),
-                },
-              })
+                  logits: {
+                    dtype: "f32",
+                    shape: [1, 48, LIPSYNC_CLASSES.length],
+                    data: new Float32Array(48 * LIPSYNC_CLASSES.length),
+                  },
+                })
               : Promise.reject(plan.runError),
           diagnostics: () => ({}),
           dispose: () => {

@@ -111,10 +111,9 @@ const splitOnSpace = (text: string, space: CodeRanges): string[] => {
 
 /** 未知の片の表示（語彙外の拒否のメッセージ用 — 人が直す箇所を探せる形）。 */
 const describeText = (text: string): string =>
-  `${JSON.stringify(text)}（${
-    toCodePoints(text).map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`)
-      .join(" ")
-  }）`;
+  `${JSON.stringify(text)}（${toCodePoints(text)
+    .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")}`)
+    .join(" ")}）`;
 
 export class T5UnigramTokenizer {
   readonly #tables: T5Tables;

@@ -111,10 +111,7 @@ test("decodeI8: 符号付き 8bit を per-channel scale で展開する（keepdi
   // [2,3] の重み。チャネル軸 0 の scale [2,1] が行ごとに掛かる。
   const bytes = i8BytesFrom([127, -128, 0, 1, -1, 64]);
   const scale = Float32Array.from([0.5, 0.25]);
-  assertEquals(
-    [...decodeI8(bytes, [2, 3], scale, [2, 1])],
-    [63.5, -64, 0, 0.25, -0.25, 16],
-  );
+  assertEquals([...decodeI8(bytes, [2, 3], scale, [2, 1])], [63.5, -64, 0, 0.25, -0.25, 16]);
   // チャネル軸 1（conv_transpose1d の形）。列ごとに掛かる。
   assertEquals(
     [...decodeI8(bytes, [2, 3], Float32Array.from([1, 2, 4]), [1, 3])],
@@ -155,11 +152,7 @@ test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と�
 
 test("decodeI8: broadcast できない scale と要素数不一致を拒否する", () => {
   const bytes = i8BytesFrom([1, 2, 3, 4, 5, 6]);
-  assertThrows(
-    () => decodeI8(bytes, [2, 3], Float32Array.from([1, 2]), [2]),
-    I8Error,
-    "rank",
-  );
+  assertThrows(() => decodeI8(bytes, [2, 3], Float32Array.from([1, 2]), [2]), I8Error, "rank");
   // 軸 1 が 2（重みの 3 と違う）— 要素数は shape と整合しているので broadcast 検査が見る
   assertThrows(
     () => decodeI8(bytes, [2, 3], Float32Array.from([1, 2, 3, 4]), [2, 2]),
@@ -195,11 +188,13 @@ test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設して
   assertEquals(eligible(linearDeclaration()), ["w"]);
   // 混在消費（weight スロット以外でも消費）は適格を失う
   assertEquals(
-    eligible(linearDeclaration(
-      [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
-      { z: { dtype: "f32", shape: [3, 4] } },
-      ["z"],
-    )),
+    eligible(
+      linearDeclaration(
+        [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
+        { z: { dtype: "f32", shape: [3, 4] } },
+        ["z"],
+      ),
+    ),
     [],
   );
 });
@@ -331,11 +326,14 @@ const weightedModel = (
     },
   });
   // ins の並びは契約どおり（embedding は weight が先頭・他は x の次）
-  const ins = testCase.op === "embedding" ? ["w", ...testCase.inputs.map(([name]) => name)] : [
-    ...testCase.inputs.map(([name]) => name),
-    "w",
-    ...(testCase.bias === undefined ? [] : ["b"]),
-  ];
+  const ins =
+    testCase.op === "embedding"
+      ? ["w", ...testCase.inputs.map(([name]) => name)]
+      : [
+          ...testCase.inputs.map(([name]) => name),
+          "w",
+          ...(testCase.bias === undefined ? [] : ["b"]),
+        ];
   const declaration: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -455,13 +453,14 @@ test({
           `${testCase.name}: GPU 常駐圧縮バイト数（scale 込み）`,
         );
         const reference = refTensor(testCase.weight.shape, quantized.values);
-        const operands: RefTensor[] = testCase.op === "embedding"
-          ? [reference, ...testCase.inputs.map(([, tensor]) => tensor as RefTensor)]
-          : [
-            ...testCase.inputs.map(([, tensor]) => tensor as RefTensor),
-            reference,
-            ...(testCase.bias === undefined ? [] : [testCase.bias as RefTensor]),
-          ];
+        const operands: RefTensor[] =
+          testCase.op === "embedding"
+            ? [reference, ...testCase.inputs.map(([, tensor]) => tensor as RefTensor)]
+            : [
+                ...testCase.inputs.map(([, tensor]) => tensor as RefTensor),
+                reference,
+                ...(testCase.bias === undefined ? [] : [testCase.bias as RefTensor]),
+              ];
         const expected = applyReferenceOp(
           testCase.op,
           operands,
@@ -494,8 +493,10 @@ test({
   fn: async () => {
     // 行（= 出力チャネル）ごとに大きさが違う重み。POSITIVE のままだと各行の最大値が
     // 一致して scale が全チャネル同じになり、軸の取り違えが数値に出ない。
-    const rowVarying = (cols: number) => (i: number): number =>
-      POSITIVE(i) * (1 + (Math.floor(i / cols) % 7) * 0.25);
+    const rowVarying =
+      (cols: number) =>
+      (i: number): number =>
+        POSITIVE(i) * (1 + (Math.floor(i / cols) % 7) * 0.25);
     const cases: readonly WeightedCase[] = [
       {
         // k=20（4 の倍数・16 の倍数でない）/ n=68（最終タイルの有効 quad が 16 中 1）/
@@ -528,10 +529,7 @@ test({
           testCase.channelAxis,
         );
         // scale がチャネルごとに違う（同じなら軸の取り違えが数値に出ない — 恒真化の門）
-        assert(
-          new Set(quantized.scale).size > 1,
-          `${testCase.name}: scale が全チャネルで同じ`,
-        );
+        assert(new Set(quantized.scale).size > 1, `${testCase.name}: scale が全チャネルで同じ`);
         const session = await createSessionFromContainer(
           gpu,
           await weightedModel(testCase, quantized),
@@ -600,16 +598,18 @@ test({
       },
       nodes: [{ op: "embedding", ins: ["w", "index"], outs: ["y"], attrs: { padding_idx: -1 } }],
     };
-    const opened = await openModelBytes(declaration, [{
-      graph: GRAPH_NAME,
-      initializer: "w",
-      bytes,
-      encoding: {
-        codec: "int8-sym",
-        groupSize: hidden,
-        scale: { bytes: f32Bytes(scale), dtype: "f32" },
+    const opened = await openModelBytes(declaration, [
+      {
+        graph: GRAPH_NAME,
+        initializer: "w",
+        bytes,
+        encoding: {
+          codec: "int8-sym",
+          groupSize: hidden,
+          scale: { bytes: f32Bytes(scale), dtype: "f32" },
+        },
       },
-    }]);
+    ]);
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
     let actual: Float32Array<ArrayBuffer>;
@@ -689,7 +689,7 @@ const poisonedI8Graph = (
 };
 
 /** 毒値 0xDEADBEEF を f32 として読んだもの（0 でない有限値）。 */
-const POISON = new Float32Array(new Uint32Array([0xDEADBEEF]).buffer)[0];
+const POISON = new Float32Array(new Uint32Array([0xdeadbeef]).buffer)[0];
 
 test({
   name: "w=i8 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
@@ -890,8 +890,7 @@ test({
  * `graph.outputs` を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま読める。
  */
 test({
-  name:
-    "graph 出力にした i8 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+  name: "graph 出力にした i8 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const weight = fill([3, 4], POSITIVE);

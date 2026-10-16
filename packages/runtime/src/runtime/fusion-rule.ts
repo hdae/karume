@@ -251,9 +251,10 @@ export const windowTouchesState = (window: readonly NodePlan[]): boolean =>
 
 /** 鎖の全ノードが f32 専業か（融合カーネルは全て f32 固定）。 */
 export const allF32 = (chain: readonly NodePlan[]): boolean =>
-  chain.every((step) =>
-    step.outputs.every((out) => out.dtype === "f32") &&
-    step.inputDtypes.every((dtype) => dtype === "f32")
+  chain.every(
+    (step) =>
+      step.outputs.every((out) => out.dtype === "f32") &&
+      step.inputDtypes.every((dtype) => dtype === "f32"),
   );
 
 /**
@@ -265,11 +266,13 @@ export const allF32 = (chain: readonly NodePlan[]): boolean =>
  * 依らせない — 判定の順序を変えても結論が動かない形にしておく）。
  */
 export const internalsArePrivate = (chain: readonly NodePlan[], context: FusionContext): boolean =>
-  chain.slice(0, -1).every((step) =>
-    step.outputs.every((out) =>
-      (context.useCounts.get(out.name) ?? 0) === 1 && !context.outputNames.has(out.name)
-    )
-  );
+  chain
+    .slice(0, -1)
+    .every((step) =>
+      step.outputs.every(
+        (out) => (context.useCounts.get(out.name) ?? 0) === 1 && !context.outputNames.has(out.name),
+      ),
+    );
 
 /**
  * 鎖が消費した外部入力の延べ列（重複込み・元の node.ins の並び順）。
@@ -354,8 +357,10 @@ const assertTempLifetimes = (
 ): void => {
   temps.forEach((temp, id) => {
     if (
-      !Number.isSafeInteger(temp.byteLength) || temp.byteLength < 1 ||
-      temp.allocBefore < 0 || temp.releaseAfter < temp.allocBefore ||
+      !Number.isSafeInteger(temp.byteLength) ||
+      temp.byteLength < 1 ||
+      temp.allocBefore < 0 ||
+      temp.releaseAfter < temp.allocBefore ||
       temp.releaseAfter >= dispatchCount
     ) {
       throw new ExecutionError(
@@ -383,9 +388,7 @@ export const defineRule = <Matched extends FusionMatch>(rule: {
     index: number,
     context: FusionScanContext,
   ) => Matched | undefined;
-  readonly build: (
-    matched: Matched,
-  ) => Omit<FusedStep, "kind" | "rule" | "ins" | "nodeCount">;
+  readonly build: (matched: Matched) => Omit<FusedStep, "kind" | "rule" | "ins" | "nodeCount">;
 }): FusionRule => ({
   name: rule.name,
   heads: rule.heads,

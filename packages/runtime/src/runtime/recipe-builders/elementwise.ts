@@ -93,9 +93,10 @@ export const buildElementwise = async (
   // rank 0（スカラ）は codegen の rank ≥ 1 契約に合わせて長さ 1 の 1 次元に正規化する。
   const outShape = step.outputs[0].shape.length === 0 ? [1] : [...step.outputs[0].shape];
   const rank = outShape.length;
-  const spec: ElementwiseSpec = element.op === CAST_OP
-    ? { op: CAST_OP, rank, dtype: element.dtype, to: element.to }
-    : { op: element.op, rank, dtype: element.dtype };
+  const spec: ElementwiseSpec =
+    element.op === CAST_OP
+      ? { op: CAST_OP, rank, dtype: element.dtype, to: element.to }
+      : { op: element.op, rank, dtype: element.dtype };
   const key = elementwiseKey(spec);
   const { pipeline, layout, roles } = await face.state.cache.get(key, elementwiseWgsl(spec));
   // attrs のスカラ（clamp の min/max など）は params の末尾に f32 で載る（並びは契約表）。
@@ -176,7 +177,10 @@ export const buildRowReduce = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };
@@ -208,15 +212,7 @@ export const buildArgmax = async (
   const groups = argmaxSplitGroups(dim);
   // 外側が空なら従来経路へ残す（topk(k=1) と同じ — 分割一時 0B はレシピの寿命契約に入らない）。
   if (rows > 0 && groups > 0) {
-    await buildMaxIndexSplit(
-      face,
-      rows,
-      dim,
-      groups,
-      binds[0],
-      outs[0],
-      builder,
-    );
+    await buildMaxIndexSplit(face, rows, dim, groups, binds[0], outs[0], builder);
     return;
   }
   const { pipeline, layout, roles } = await face.state.cache.get(ARGMAX_KEY, ARGMAX_WGSL);
@@ -228,7 +224,10 @@ export const buildArgmax = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [gridStrideWorkgroups(rows, 1, limit), 1, 1],
   });
 };
@@ -257,10 +256,7 @@ const buildMaxIndexSplit = async (
     mergeKey,
     value === undefined ? ARGMAX_SPLIT_MERGE_WGSL : topkOneSplitMergeWgsl(),
   );
-  const params = face.writeParams(
-    argmaxSplitParams(rows, dim, groups),
-    PARAMS_UNIFORM_USAGE,
-  );
+  const params = face.writeParams(argmaxSplitParams(rows, dim, groups), PARAMS_UNIFORM_USAGE);
   // 部分結果 [rows, groups, 2]（u32）。partial の直前に確保し merge の直後に返す。
   const partial = builder.allocTemp(argmaxSplitPartialBytes(rows, groups));
   builder.dispatch({
@@ -269,7 +265,10 @@ const buildMaxIndexSplit = async (
     layout: partialPipeline.layout,
     roles: partialPipeline.roles,
     params,
-    bindings: [{ binding: 1, source: input }, { binding: 2, source: partial }],
+    bindings: [
+      { binding: 1, source: input },
+      { binding: 2, source: partial },
+    ],
     // x 軸 = 区間（1 workgroup = 1 区間・欠落は沈黙誤値なので上限超過は fail loudly）、
     // y 軸 = 行（grid-stride で縮退可）。
     workgroups: [
@@ -289,7 +288,10 @@ const buildMaxIndexSplit = async (
       { binding: 2, source: index },
       ...(value === undefined
         ? []
-        : [{ binding: 3, source: value }, { binding: 4, source: input }]),
+        : [
+            { binding: 3, source: value },
+            { binding: 4, source: input },
+          ]),
     ],
     workgroups: [gridStrideWorkgroups(rows, 1, limit), 1, 1],
   });
@@ -327,16 +329,7 @@ export const buildTopk = async (
   const splitGroups = topkOneSplitGroups(dim);
   // 外側が空なら従来経路へ残す。分割一時0Bはレシピの寿命契約に入らない。
   if (k === 1 && rows > 0 && splitGroups > 0) {
-    await buildMaxIndexSplit(
-      face,
-      rows,
-      dim,
-      splitGroups,
-      binds[0],
-      outs[1],
-      builder,
-      outs[0],
-    );
+    await buildMaxIndexSplit(face, rows, dim, splitGroups, binds[0], outs[1], builder, outs[0]);
     return;
   }
   const key = topkKey(k);
@@ -390,7 +383,10 @@ export const buildCumsum = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };
@@ -429,7 +425,10 @@ export const buildSoftmax = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };
@@ -453,10 +452,7 @@ export const buildMaskedFill = async (
     out: "masked_fill の出力",
   });
   const value = maskedFillValue(step.node.attrs, `nodes (${step.node.op})`);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    MASKED_FILL_KEY,
-    MASKED_FILL_WGSL,
-  );
+  const { pipeline, layout, roles } = await face.state.cache.get(MASKED_FILL_KEY, MASKED_FILL_WGSL);
   const params = face.writeParams(
     maskedFillParams(outShape, maskStrides, value),
     PARAMS_STORAGE_USAGE,

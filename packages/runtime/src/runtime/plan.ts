@@ -46,8 +46,8 @@ export const describeInputValue = (value: unknown): string =>
   typeof value === "number"
     ? String(value)
     : typeof value === "string"
-    ? JSON.stringify(value)
-    : typeof value;
+      ? JSON.stringify(value)
+      : typeof value;
 
 /** 記号次元 → 実行時の具体値。 */
 export type SymbolBindings = Readonly<Record<string, number>>;
@@ -83,10 +83,7 @@ export type GraphPlan = {
 };
 
 /** 宣言 shape を束縛で具体化する。未束縛シンボルは dims.ts が DimError で落とす。 */
-export const resolveShape = (
-  shape: readonly IrDim[],
-  bindings: SymbolBindings,
-): number[] =>
+export const resolveShape = (shape: readonly IrDim[], bindings: SymbolBindings): number[] =>
   shape.map((dim) => (typeof dim === "number" ? dim : evalDim(parseDim(dim), bindings)));
 
 /** 値名 → 宣言（入力は inputs[]、それ以外は values{} — IR がちょうど 1 箇所を保証する）。 */
@@ -140,9 +137,9 @@ export const validateGraphContracts = (graph: IrGraph): void => {
   for (const spec of graph.inputs) {
     if (!IO_DTYPES.includes(spec.dtype)) {
       throw new ExecutionError(
-        `入力 '${spec.name}' の意味論 dtype '${spec.dtype}' は転送できない（${
-          IO_DTYPES.join(" / ")
-        } のみ）`,
+        `入力 '${spec.name}' の意味論 dtype '${spec.dtype}' は転送できない（${IO_DTYPES.join(
+          " / ",
+        )} のみ）`,
       );
     }
   }
@@ -204,19 +201,19 @@ const assertStateOwnership = (graph: IrGraph): void => {
       throw new ExecutionError(
         node.op === STATE_APPEND_OP
           ? `state スロット '${slot}': external なのに ${STATE_APPEND_OP}（${where}）が居る` +
-            "（借り物のスロットへ書けるのは貸し手だけ — ADR 0096 段 2 §1.1）"
+              "（借り物のスロットへ書けるのは貸し手だけ — ADR 0096 段 2 §1.1）"
           : `${where}: external な state スロット '${slot}' を readonly でない ${node.op} が読む` +
-            "（external の読者は attrs.readonly の attention だけ — ADR 0096 段 2 §1.1）",
+              "（external の読者は attrs.readonly の attention だけ — ADR 0096 段 2 §1.1）",
       );
     }
   });
   if (external.length === 0 || external.length === names.length) return;
   throw new ExecutionError(
-    `state スロットに external と非 external が混在している（external: [${
-      external.join(", ")
-    }] / 自前: [${
-      names.filter((name) => !graph.states[name].external).join(", ")
-    }]）— 借り手 context は自前スロットを持たない（ADR 0096 段 2 §1.1）`,
+    `state スロットに external と非 external が混在している（external: [${external.join(
+      ", ",
+    )}] / 自前: [${names
+      .filter((name) => !graph.states[name].external)
+      .join(", ")}]）— 借り手 context は自前スロットを持たない（ADR 0096 段 2 §1.1）`,
   );
 };
 
@@ -274,16 +271,18 @@ const assertStateOrder = (graph: IrGraph): void => {
     }
     if (appends.length > 1) {
       throw new ExecutionError(
-        `state スロット '${slot}': ${STATE_APPEND_OP} が ${appends.length} 本（nodes[${
-          appends.map((touch) => touch.index).join("], nodes[")
-        }]）— 1 step に 1 回まで（ADR 0067 決定 5b）`,
+        `state スロット '${slot}': ${STATE_APPEND_OP} が ${appends.length} 本（nodes[${appends
+          .map((touch) => touch.index)
+          .join("], nodes[")}]）— 1 step に 1 回まで（ADR 0067 決定 5b）`,
       );
     }
     if (appends.length === 0) {
       throw new ExecutionError(
-        `state スロット '${slot}': ${STATE_APPEND_OP} が 1 本も無い（読者 nodes[${
-          list.map((touch) => touch.index).join("], nodes[")
-        }] だけ）— 読者が居るスロットには終端 ${STATE_APPEND_OP} がちょうど 1 本 MUST` +
+        `state スロット '${slot}': ${STATE_APPEND_OP} が 1 本も無い（読者 nodes[${list
+          .map((touch) => touch.index)
+          .join(
+            "], nodes[",
+          )}] だけ）— 読者が居るスロットには終端 ${STATE_APPEND_OP} がちょうど 1 本 MUST` +
           `（ADR 0067 決定 5b。書き手が居ないと未初期化の過去を読んで論理長だけ進む）`,
       );
     }
@@ -333,17 +332,17 @@ const assertSymPrefixSlice = (graph: IrGraph, node: IrNode, where: string): void
   const { sym, slices } = symPrefixSliceAttrs(node.attrs, where);
   if (!graph.symbols.includes(sym)) {
     throw new ExecutionError(
-      `${where}: sym_prefix_slice の sym '${sym}' が graph.symbols [${
-        graph.symbols.join(", ")
-      }] に無い`,
+      `${where}: sym_prefix_slice の sym '${sym}' が graph.symbols [${graph.symbols.join(
+        ", ",
+      )}] に無い`,
     );
   }
   const source = declarationOf(graph, node.ins[0]).shape;
   if (source.some((dim) => typeof dim !== "number")) {
     throw new ExecutionError(
-      `${where}: sym_prefix_slice の入力 '${node.ins[0]}' の宣言 shape [${
-        source.join(",")
-      }] に記号次元がある（入力は Tmax で焼いた静的形でなければならない）`,
+      `${where}: sym_prefix_slice の入力 '${node.ins[0]}' の宣言 shape [${source.join(
+        ",",
+      )}] に記号次元がある（入力は Tmax で焼いた静的形でなければならない）`,
     );
   }
   for (const slice of slices) {
@@ -382,9 +381,9 @@ const assertStaticLayoutAxis = (
     const shape = declarationOf(graph, name).shape;
     if (dim < shape.length && typeof shape[dim] !== "number") {
       throw new ExecutionError(
-        `${where}: ${node.op} の軸 ${dim} が入力 '${name}' の宣言 [${
-          shape.join(",")
-        }] で記号次元（記号軸の切り出しは sym_prefix_slice の担当）`,
+        `${where}: ${node.op} の軸 ${dim} が入力 '${name}' の宣言 [${shape.join(
+          ",",
+        )}] で記号次元（記号軸の切り出しは sym_prefix_slice の担当）`,
       );
     }
   }
@@ -743,9 +742,9 @@ export const bindSymbols = (
     const actual = inputShapes[spec.name];
     if (resolved.some((dim, index) => dim !== actual[index])) {
       throw new ExecutionError(
-        `入力 '${spec.name}': shape [${actual.join(",")}] が宣言 [${
-          spec.shape.join(",")
-        }]（束縛後 [${resolved.join(",")}]）と一致しない`,
+        `入力 '${spec.name}': shape [${actual.join(",")}] が宣言 [${spec.shape.join(
+          ",",
+        )}]（束縛後 [${resolved.join(",")}]）と一致しない`,
       );
     }
   }
@@ -830,9 +829,9 @@ export const planGraph = (
         declaredShape.some((dim, i) => dim !== shape[i])
       ) {
         throw new ExecutionError(
-          `${where}: 出力 '${node.outs[slot]}' の計算 shape [${shape.join(",")}] が宣言 [${
-            declaredShape.join(",")
-          }] と一致しない`,
+          `${where}: 出力 '${node.outs[slot]}' の計算 shape [${shape.join(",")}] が宣言 [${declaredShape.join(
+            ",",
+          )}] と一致しない`,
         );
       }
     });

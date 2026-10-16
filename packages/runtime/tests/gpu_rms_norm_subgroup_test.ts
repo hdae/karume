@@ -26,20 +26,18 @@ describe({
           );
         }
         // 診断で利用者の変換を呼ばないこと: 変換が走れば `ExecutionError` ではなく "boom" が抜ける。
-        for (
-          const value of [
-            {
-              toString(): string {
-                throw new Error("boom");
-              },
+        for (const value of [
+          {
+            toString(): string {
+              throw new Error("boom");
             },
-            {
-              [Symbol.toPrimitive](): string {
-                throw new Error("boom");
-              },
+          },
+          {
+            [Symbol.toPrimitive](): string {
+              throw new Error("boom");
             },
-          ]
-        ) {
+          },
+        ]) {
           const options: SessionOptions = {};
           Reflect.set(options, "rmsNormReduce", value);
           const error = await assertRejects(
@@ -58,7 +56,9 @@ describe({
       const adapter = await navigator.gpu.requestAdapter();
       const features = new Set<string>(adapter?.features ?? []);
       const host: GPU & { wgslLanguageFeatures?: Iterable<string> } = navigator.gpu;
-      const supported = features.has("subgroups") && features.has("subgroup-size-control") &&
+      const supported =
+        features.has("subgroups") &&
+        features.has("subgroup-size-control") &&
         new Set(host.wgslLanguageFeatures).has("subgroup_id");
       await t.step({
         name: "subgroups実走（Deno未対応なら明示SKIP、Chromeは別途同じ検査を実行）",

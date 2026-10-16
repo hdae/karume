@@ -20,11 +20,13 @@ const dispatch = async (
     order.push(index);
     inFlight += size;
     peak = Math.max(peak, inFlight);
-    running.push((async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      inFlight -= size;
-      admission.release(size);
-    })());
+    running.push(
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= size;
+        admission.release(size);
+      })(),
+    );
   }
   await Promise.all(running);
   return { peak, order };

@@ -112,7 +112,8 @@ const isAborted = (error: unknown, signal?: AbortSignal): boolean =>
  * しない）。
  */
 const isTightView = (bytes: Uint8Array<ArrayBufferLike>): bytes is Uint8Array<ArrayBuffer> =>
-  bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+  bytes.buffer instanceof ArrayBuffer &&
+  bytes.byteOffset === 0 &&
   bytes.byteLength === bytes.buffer.byteLength;
 
 export const assertTightView = (
@@ -211,9 +212,7 @@ export const loadManifest = async (
   // 取得を抜けた直後にも見る（この後は同期の組み立てだけなので、これが返却前の最後の関門）。
   options.signal?.throwIfAborted();
   if (manifest === undefined) {
-    throw new Error(
-      `hub: ${MANIFEST_FILENAME} の検証フックが走っていない（取得層の不変条件破れ）`,
-    );
+    throw new Error(`hub: ${MANIFEST_FILENAME} の検証フックが走っていない（取得層の不変条件破れ）`);
   }
   // 取得元は**この値が運ぶ**（識別欄から組み立て直さない — 復元手段の無い取得元が入れられない）。
   return new LoadedManifest(manifest, { driver, generation }, pinned.origin);
@@ -265,9 +264,10 @@ export const fetchAssetsWithBudget = async (
   const progress = createProgressEmitter(unique, context.originOf, options.onProgress);
 
   const failure = new AbortController();
-  const signal = options.signal === undefined
-    ? failure.signal
-    : AbortSignal.any([failure.signal, options.signal]);
+  const signal =
+    options.signal === undefined
+      ? failure.signal
+      : AbortSignal.any([failure.signal, options.signal]);
   const bytesByRef = new Map<string, Uint8Array<ArrayBuffer>>();
 
   const fetchOne = async (ref: FileRef): Promise<void> => {
@@ -335,13 +335,15 @@ export const fetchAssetsWithBudget = async (
   signal.throwIfAborted();
 
   // 表は一度だけ組む。fromEntries は __proto__ も通常の own property にする。
-  return Object.fromEntries(keys.map((key): readonly [string, Uint8Array<ArrayBuffer>] => {
-    const bytes = bytesByRef.get(fileRefKey(files[key]));
-    if (bytes === undefined) {
-      throw new Error(`hub: ${files[key].path} の bytes が揃っていない（取得層の不変条件破れ）`);
-    }
-    return [key, bytes];
-  }));
+  return Object.fromEntries(
+    keys.map((key): readonly [string, Uint8Array<ArrayBuffer>] => {
+      const bytes = bytesByRef.get(fileRefKey(files[key]));
+      if (bytes === undefined) {
+        throw new Error(`hub: ${files[key].path} の bytes が揃っていない（取得層の不変条件破れ）`);
+      }
+      return [key, bytes];
+    }),
+  );
 };
 
 /**
@@ -394,9 +396,10 @@ const runPrefetchPhase = async (
   progress: ProgressEmitter,
 ): Promise<void> => {
   const failure = new AbortController();
-  const prefetchSignal = options.signal === undefined
-    ? failure.signal
-    : AbortSignal.any([failure.signal, options.signal]);
+  const prefetchSignal =
+    options.signal === undefined
+      ? failure.signal
+      : AbortSignal.any([failure.signal, options.signal]);
 
   const prefetchOne = async (ref: FileRef): Promise<void> => {
     // MUST: 記録ハッシュが一致するエントリは network に出ない＝取得元の signal 監視が効かない
@@ -572,7 +575,10 @@ export const openAsset = async (
       // 取得層は宣言 size を読み出しの境界に使わないので、同じ sha256 に短い size を宣言した参照が
       // warm エントリを開いたとき宣言の外（実体の残り）が読め、宣言で拒否するローカルと割れる。
       if (
-        !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 ||
+        !Number.isInteger(offset) ||
+        !Number.isInteger(length) ||
+        offset < 0 ||
+        length < 0 ||
         offset + length > ref.size
       ) {
         throw new Error(

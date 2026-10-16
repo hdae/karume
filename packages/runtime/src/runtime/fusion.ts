@@ -148,7 +148,8 @@ const permuteKeepsElementOrder = (plan: NodePlan): boolean => {
  */
 const aliasesInput = (plan: NodePlan, internal: ReadonlySet<string>): boolean =>
   plan.contract.kind === "reshape" ||
-  (plan.contract.kind === "permute" && internal.has(plan.node.ins[0]) &&
+  (plan.contract.kind === "permute" &&
+    internal.has(plan.node.ins[0]) &&
     permuteKeepsElementOrder(plan)) ||
   (plan.contract.kind === "expand" && sameShape(plan.inputShapes[0], plan.outputs[0].shape));
 
@@ -236,9 +237,7 @@ const scanFusions = (
 /**
  * 値名 → その値を消費するノード（延べ — 同じノードが 2 度取れば 2 回入る）。
  */
-const consumersByValue = (
-  nodes: readonly NodePlan[],
-): ReadonlyMap<string, readonly NodePlan[]> => {
+const consumersByValue = (nodes: readonly NodePlan[]): ReadonlyMap<string, readonly NodePlan[]> => {
   const consumers = new Map<string, NodePlan[]>();
   for (const plan of nodes) {
     for (const name of plan.node.ins) {
@@ -259,11 +258,7 @@ const consumersByValue = (
  * 並列 GEMV へ落ちるだけでは足りず、**実測で packed が効いた行**（ADR 0105 追記 1）に
  * 限る — 効かない形まで packed にすると、生産側 SRQ ごと丸損になる。
  */
-const readsPackedActivation = (
-  plan: NodePlan,
-  name: string,
-  context: FusionContext,
-): boolean => {
+const readsPackedActivation = (plan: NodePlan, name: string, context: FusionContext): boolean => {
   if (plan.node.op !== "linear" || plan.node.ins.length !== 3) return false;
   if (plan.node.ins[0] !== name || plan.node.ins[1] === name || plan.node.ins[2] === name) {
     return false;
@@ -306,9 +301,11 @@ const packedStaticQuantizeValues = (
   context: FusionContext,
 ): ReadonlyMap<string, number> => {
   if (
-    context.packedStaticQuantize !== true || context.linearGemvReduce !== "parallel" ||
+    context.packedStaticQuantize !== true ||
+    context.linearGemvReduce !== "parallel" ||
     context.linearCompute !== "f32"
-  ) return NO_PACKED;
+  )
+    return NO_PACKED;
   const consumers = consumersByValue(nodes);
   const foldedElsewhere = new Set<string>();
   for (const step of steps) {
@@ -342,10 +339,7 @@ const packedStaticQuantizeValues = (
  * linear→SRQ 融合が組む dispatch のキー・WGSL・params だけ）ので、2 度の走査は**同じ窓を
  * 同じルールが掴む** — 対付けの入力が 2 度目で動くことはない。
  */
-export const planFusions = (
-  nodes: readonly NodePlan[],
-  context: FusionContext,
-): FusionPlan => {
+export const planFusions = (nodes: readonly NodePlan[], context: FusionContext): FusionPlan => {
   const first = scanFusions(nodes, context, NO_PACKED);
   const packed = packedStaticQuantizeValues(nodes, first.steps, context);
   return packed.size === 0 ? first : scanFusions(nodes, context, packed);
@@ -378,11 +372,8 @@ export type UnfusedWindow = {
  * （2 本目は鎖の末尾なので見られない）。別に持つと、受理集合が変わったとき候補表だけが
  * 古い基準で「畳める」と言い続ける。
  */
-const outputStaysInternal = (
-  step: NodePlan,
-  tail: NodePlan,
-  context: FusionContext,
-): boolean => internalsArePrivate([step, tail], context);
+const outputStaysInternal = (step: NodePlan, tail: NodePlan, context: FusionContext): boolean =>
+  internalsArePrivate([step, tail], context);
 
 /**
  * 連続窓のうち**畳む部分列**（鎖）を求める。窓の最終ノードへ流れ込むノードのうち、出力が

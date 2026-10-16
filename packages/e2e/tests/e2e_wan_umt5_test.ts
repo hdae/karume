@@ -56,7 +56,10 @@ import {
   type Tensor,
 } from "@karume/runtime";
 import { parseWanTokenizerAsset, WanPromptEncoder } from "../../models/src/wan/text/tokenizer.ts";
-import { buildUmt5RelativePositionBuckets, type I32Tensor } from "../../models/src/umt5/relative-position.ts";
+import {
+  buildUmt5RelativePositionBuckets,
+  type I32Tensor,
+} from "../../models/src/umt5/relative-position.ts";
 import { type Umt5SessionInputs, umt5SessionInputs } from "../../models/src/umt5/session-io.ts";
 import { formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -228,9 +231,9 @@ const rowQuality = (actual: Float32Array, base: Float32Array, width: number): st
     baseSquares += right;
     minCosine = Math.min(minCosine, dot / Math.sqrt(left * right));
   }
-  return `行ごとのコサイン類似度の最小 ${minCosine.toFixed(6)}・相対フロベニウス ${
-    Math.sqrt(errorSquares / baseSquares).toExponential(3)
-  }・maxAbs ${maxAbs.toExponential(3)}`;
+  return `行ごとのコサイン類似度の最小 ${minCosine.toFixed(6)}・相対フロベニウス ${Math.sqrt(
+    errorSquares / baseSquares,
+  ).toExponential(3)}・maxAbs ${maxAbs.toExponential(3)}`;
 };
 
 /** 相対位置の表を 1 ずらした表（`table'[i][j] = bucket(j + 1 − i)` — ホストの距離の 1 ずれの故障注入）。 */
@@ -275,7 +278,10 @@ const swappedTablesContainer = (
     }
     return supply.blocks[0].id;
   };
-  const swap = new Map([[blockOf(first), blockOf(second)], [blockOf(second), blockOf(first)]]);
+  const swap = new Map([
+    [blockOf(first), blockOf(second)],
+    [blockOf(second), blockOf(first)],
+  ]);
   return {
     graphs: opened.graphs,
     readBlock: (id) => opened.readBlock(swap.get(id) ?? id),
@@ -334,11 +340,11 @@ const observeRun = (label: string, diagnostics: SessionDiagnostics, wallMs: numb
 });
 
 const formatRun = (run: Run): string =>
-  `${run.label}: 壁 ${(run.wallMs / 1000).toFixed(2)} s・確保 ${
-    gib(run.weightBytes + run.arenaBytes + run.backingBytes)
-  }（重み ${gib(run.weightBytes)}・アリーナ ${gib(run.arenaBytes)}・常駐 ${
-    gib(run.backingBytes)
-  }）`;
+  `${run.label}: 壁 ${(run.wallMs / 1000).toFixed(2)} s・確保 ${gib(
+    run.weightBytes + run.arenaBytes + run.backingBytes,
+  )}（重み ${gib(run.weightBytes)}・アリーナ ${gib(run.arenaBytes)}・常駐 ${gib(
+    run.backingBytes,
+  )}）`;
 
 /** 1 forward を回して出力（f32 `[1, L, 4096]`）と観測を返す（次の run の前に解放を待つ）。 */
 const forward = async (
@@ -405,21 +411,27 @@ type CaseRatio = { readonly name: string; readonly role: CaseRole; readonly rati
 const bandCandidate = (ratios: readonly CaseRatio[]): string => {
   const expected = CASES.filter(({ role }) => role === "band").length;
   const decided = ratios.filter(({ role }) => role === "band");
-  const accepted = ratios.filter(({ role }) => role === "accept")
-    .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`).join(" / ") || "なし";
+  const accepted =
+    ratios
+      .filter(({ role }) => role === "accept")
+      .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`)
+      .join(" / ") || "なし";
   if (decided.length !== expected) {
-    return `決定用 ${expected} 本のうち r が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）。` +
-      `受入れの r: ${accepted}`;
+    return (
+      `決定用 ${expected} 本のうち r が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）。` +
+      `受入れの r: ${accepted}`
+    );
   }
   const worst = Math.max(...decided.map(({ ratio }) => ratio));
   const unit = 10 ** (Math.floor(Math.log10(worst * 5)) - 1);
-  const candidate = Number((Math.ceil(worst * 5 / unit) * unit).toPrecision(2));
-  return `決定用 ${expected} 本（${
-    decided.map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`).join(" / ")
-  }）の最悪 r ${worst.toPrecision(3)} × 5 = ${
-    (worst * 5).toPrecision(3)
-  }（有効数字 2 桁へ切り上げ ${candidate}）。` +
-    `受入れの r（帯の決定に使わない）: ${accepted}`;
+  const candidate = Number((Math.ceil((worst * 5) / unit) * unit).toPrecision(2));
+  return (
+    `決定用 ${expected} 本（${decided
+      .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`)
+      .join(" / ")}）の最悪 r ${worst.toPrecision(3)} × 5 = ${(worst * 5).toPrecision(
+      3,
+    )}（有効数字 2 桁へ切り上げ ${candidate}）。` + `受入れの r（帯の決定に使わない）: ${accepted}`
+  );
 };
 
 test({
@@ -471,135 +483,148 @@ test({
         for (const { name, role, embedding } of CASES) {
           await t.step(`${name}（${role}）`, async () => {
             let caseNote = "";
-            await runRecordedCase(results, {
-              id: name,
-              failureNote: () => caseNote,
-            }, async ({ measurements }) => {
-              const golden = await loadGolden(name);
-              const { ids, inputs } = hostInputs(encoder, golden, name);
-              const referenceRatio = referenceRatioOf(golden, name);
-              monitor.enter(`run ${name}`);
-              const { output, run } = await forward(session, prepared, gpu, inputs, name);
-              runs.push(run);
-              assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
-              const diff = difference(output.data, golden.expected);
-              const diffF32 = difference(output.data, golden.reference);
-              const referenceDiff = difference(golden.reference, golden.expected);
-              const ratio = ratioOf(diff) / referenceRatio;
-              ratios.push({ name, role, ratio });
-              const unbounded = { atol: Number.POSITIVE_INFINITY, rtol: 0 };
-              measurements.push(
-                {
-                  output: "output@f64-reference",
-                  maxAbs: diff.maxAbs,
-                  maxRel: diff.maxRel,
-                  // 判定と同じ境界を絶対値へ写す（未導出の回は無限の帯 — 判定は下で赤にする）。
-                  tolerance: band === undefined
-                    ? unbounded
-                    : { atol: band * referenceRatio * diff.referenceMaxAbs, rtol: 0 },
-                  stage: "karume",
-                },
-                {
-                  output: "output@f32-reference",
-                  maxAbs: diffF32.maxAbs,
-                  maxRel: diffF32.maxRel,
-                  tolerance: unbounded,
-                  stage: "karume",
-                },
-                {
-                  output: "f32-reference@f64-reference",
-                  maxAbs: referenceDiff.maxAbs,
-                  maxRel: referenceDiff.maxRel,
-                  tolerance: unbounded,
-                  stage: "karume",
-                },
-              );
-              const notes = [
-                `L ${ids.length}`,
-                formatRatio("GPU / f64 参照", diff, referenceRatio),
-                `CPU f32 参照 / f64 参照（正規化の分母）: 比 ${referenceRatio.toExponential(3)}`,
-                formatRun(run),
-              ];
-              assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
-
-              const faults: { label: string; ratio: number }[] = [];
-              if (role === "accept") {
-                const width = golden.outputShape[golden.outputShape.length - 1];
-                const unquantized = golden.unquantized;
-                if (unquantized === undefined) {
-                  throw new Error(`${name}: 受入れなのに量子化なしの参照が無い`);
-                }
-                const unquantizedDiff = difference(output.data, unquantized.reference);
-                measurements.push({
-                  output: "output@unquantized-f32-reference",
-                  maxAbs: unquantizedDiff.maxAbs,
-                  maxRel: unquantizedDiff.maxRel,
-                  tolerance: unbounded,
-                  stage: "karume",
-                });
-                const asset = embeds !== undefined && embedding !== undefined
-                  ? floatsOf(embeds, embedding, `text_embeds の ${embedding}`)
-                  : undefined;
-                // 基準（量子化なし f32）自身の誤差 — 下の差がこれより桁で大きいことを読むための床。
-                notes.push(
-                  `量子化なし CPU f32 参照 / 量子化なし f64 参照: 比 ${
-                    ratioOf(difference(unquantized.reference, unquantized.expected))
-                      .toExponential(3)
-                  }`,
-                  `品質 i8 の丸めの影響（GPU i8 / 基準 量子化なし CPU f32）: ${
-                    rowQuality(output.data, unquantized.reference, width)
-                  }`,
+            await runRecordedCase(
+              results,
+              {
+                id: name,
+                failureNote: () => caseNote,
+              },
+              async ({ measurements }) => {
+                const golden = await loadGolden(name);
+                const { ids, inputs } = hostInputs(encoder, golden, name);
+                const referenceRatio = referenceRatioOf(golden, name);
+                monitor.enter(`run ${name}`);
+                const { output, run } = await forward(session, prepared, gpu, inputs, name);
+                runs.push(run);
+                assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
+                const diff = difference(output.data, golden.expected);
+                const diffF32 = difference(output.data, golden.reference);
+                const referenceDiff = difference(golden.reference, golden.expected);
+                const ratio = ratioOf(diff) / referenceRatio;
+                ratios.push({ name, role, ratio });
+                const unbounded = { atol: Number.POSITIVE_INFINITY, rtol: 0 };
+                measurements.push(
+                  {
+                    output: "output@f64-reference",
+                    maxAbs: diff.maxAbs,
+                    maxRel: diff.maxRel,
+                    // 判定と同じ境界を絶対値へ写す（未導出の回は無限の帯 — 判定は下で赤にする）。
+                    tolerance:
+                      band === undefined
+                        ? unbounded
+                        : { atol: band * referenceRatio * diff.referenceMaxAbs, rtol: 0 },
+                    stage: "karume",
+                  },
+                  {
+                    output: "output@f32-reference",
+                    maxAbs: diffF32.maxAbs,
+                    maxRel: diffF32.maxRel,
+                    tolerance: unbounded,
+                    stage: "karume",
+                  },
+                  {
+                    output: "f32-reference@f64-reference",
+                    maxAbs: referenceDiff.maxAbs,
+                    maxRel: referenceDiff.maxRel,
+                    tolerance: unbounded,
+                    stage: "karume",
+                  },
                 );
-                if (asset !== undefined) {
-                  notes.push(
-                    `品質 bf16 の影響（bf16 資産 / 基準 量子化なし CPU f32）: ${
-                      rowQuality(asset, unquantized.reference, width)
-                    }`,
-                  );
-                }
-                notes.push(
-                  `品質（基準 CPU f32 参照）GPU i8: ${
-                    rowQuality(output.data, golden.reference, width)
-                  }`,
-                );
-                if (asset !== undefined) {
-                  notes.push(
-                    `品質（基準 CPU f32 参照）bf16 資産: ${
-                      rowQuality(asset, golden.reference, width)
-                    }`,
-                    `品質（基準 bf16 資産）GPU i8: ${rowQuality(output.data, asset, width)}`,
-                  );
-                }
-                const injected: readonly (readonly [string, Umt5SessionInputs])[] = [
-                  ["相対位置の表を 1 ずらす", umt5SessionInputs(ids, shiftedBuckets(ids.length))],
-                  [
-                    "id 列の中ほどの 1 トークンを別の id に",
-                    umt5SessionInputs(
-                      replacedToken(ids),
-                      buildUmt5RelativePositionBuckets(ids.length),
-                    ),
-                  ],
+                const notes = [
+                  `L ${ids.length}`,
+                  formatRatio("GPU / f64 参照", diff, referenceRatio),
+                  `CPU f32 参照 / f64 参照（正規化の分母）: 比 ${referenceRatio.toExponential(3)}`,
+                  formatRun(run),
                 ];
-                for (const [label, faulty] of injected) {
-                  const { output: faultOutput } = await forward(
-                    session,
-                    prepared,
-                    gpu,
-                    faulty,
-                    `${name} ${label}`,
+                assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+
+                const faults: { label: string; ratio: number }[] = [];
+                if (role === "accept") {
+                  const width = golden.outputShape[golden.outputShape.length - 1];
+                  const unquantized = golden.unquantized;
+                  if (unquantized === undefined) {
+                    throw new Error(`${name}: 受入れなのに量子化なしの参照が無い`);
+                  }
+                  const unquantizedDiff = difference(output.data, unquantized.reference);
+                  measurements.push({
+                    output: "output@unquantized-f32-reference",
+                    maxAbs: unquantizedDiff.maxAbs,
+                    maxRel: unquantizedDiff.maxRel,
+                    tolerance: unbounded,
+                    stage: "karume",
+                  });
+                  const asset =
+                    embeds !== undefined && embedding !== undefined
+                      ? floatsOf(embeds, embedding, `text_embeds の ${embedding}`)
+                      : undefined;
+                  // 基準（量子化なし f32）自身の誤差 — 下の差がこれより桁で大きいことを読むための床。
+                  notes.push(
+                    `量子化なし CPU f32 参照 / 量子化なし f64 参照: 比 ${ratioOf(
+                      difference(unquantized.reference, unquantized.expected),
+                    ).toExponential(3)}`,
+                    `品質 i8 の丸めの影響（GPU i8 / 基準 量子化なし CPU f32）: ${rowQuality(
+                      output.data,
+                      unquantized.reference,
+                      width,
+                    )}`,
                   );
-                  const faultDiff = difference(faultOutput.data, golden.expected);
-                  faults.push({ label, ratio: ratioOf(faultDiff) / referenceRatio });
-                  notes.push(`故障注入 ${formatRatio(label, faultDiff, referenceRatio)}`);
+                  if (asset !== undefined) {
+                    notes.push(
+                      `品質 bf16 の影響（bf16 資産 / 基準 量子化なし CPU f32）: ${rowQuality(
+                        asset,
+                        unquantized.reference,
+                        width,
+                      )}`,
+                    );
+                  }
+                  notes.push(
+                    `品質（基準 CPU f32 参照）GPU i8: ${rowQuality(
+                      output.data,
+                      golden.reference,
+                      width,
+                    )}`,
+                  );
+                  if (asset !== undefined) {
+                    notes.push(
+                      `品質（基準 CPU f32 参照）bf16 資産: ${rowQuality(
+                        asset,
+                        golden.reference,
+                        width,
+                      )}`,
+                      `品質（基準 bf16 資産）GPU i8: ${rowQuality(output.data, asset, width)}`,
+                    );
+                  }
+                  const injected: readonly (readonly [string, Umt5SessionInputs])[] = [
+                    ["相対位置の表を 1 ずらす", umt5SessionInputs(ids, shiftedBuckets(ids.length))],
+                    [
+                      "id 列の中ほどの 1 トークンを別の id に",
+                      umt5SessionInputs(
+                        replacedToken(ids),
+                        buildUmt5RelativePositionBuckets(ids.length),
+                      ),
+                    ],
+                  ];
+                  for (const [label, faulty] of injected) {
+                    const { output: faultOutput } = await forward(
+                      session,
+                      prepared,
+                      gpu,
+                      faulty,
+                      `${name} ${label}`,
+                    );
+                    const faultDiff = difference(faultOutput.data, golden.expected);
+                    faults.push({ label, ratio: ratioOf(faultDiff) / referenceRatio });
+                    notes.push(`故障注入 ${formatRatio(label, faultDiff, referenceRatio)}`);
+                  }
                 }
-              }
-              // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
-              caseNote = notes.join(" / ");
-              console.log(`[wan-umt5] ${name}: ${caseNote}`);
-              assertEquals(deviceLost, undefined, "device lost");
-              judgeBand(band, name, ratio, faults);
-              return { status: "pass", note: caseNote };
-            });
+                // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
+                caseNote = notes.join(" / ");
+                console.log(`[wan-umt5] ${name}: ${caseNote}`);
+                assertEquals(deviceLost, undefined, "device lost");
+                judgeBand(band, name, ratio, faults);
+                return { status: "pass", note: caseNote };
+              },
+            );
           });
         }
       } finally {
@@ -614,17 +639,15 @@ test({
         const weightBytes = runs.length === 0 ? 0 : runs[0].weightBytes;
         const note = [
           `構築 ${(buildMs / 1000).toFixed(1)} s`,
-          `重みの確保 ${gib(weightBytes)}（ADR 0119 の見立て i8 ${gib(ESTIMATED_WEIGHT_BYTES)} の ${
-            (weightBytes / ESTIMATED_WEIGHT_BYTES).toFixed(3)
-          } 倍）`,
+          `重みの確保 ${gib(weightBytes)}（ADR 0119 の見立て i8 ${gib(ESTIMATED_WEIGHT_BYTES)} の ${(
+            weightBytes / ESTIMATED_WEIGHT_BYTES
+          ).toFixed(3)} 倍）`,
           ...runs.map(formatRun),
           ...[...peaks].map(([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`),
         ].join(" / ");
         console.log(`[wan-umt5] 資源: ${note}`);
-        await runRecordedCase(
-          results,
-          { id: "umt5/resources" },
-          () => Promise.resolve({ status: "pass", note }),
+        await runRecordedCase(results, { id: "umt5/resources" }, () =>
+          Promise.resolve({ status: "pass", note }),
         );
       });
 
@@ -750,12 +773,13 @@ test({
     try {
       assertAdapterMatchesEnvironment(gpu);
       const unitNs = lookupTimestampUnitNs(ENVIRONMENT.key);
-      const lines: string[] = unitNs === undefined
-        ? [
-          `環境キー '${ENVIRONMENT.key}' は timestamp の換算表（helpers/timestamp-unit.ts）に無い — ` +
-          "GPU 時間は記録しない（推測で換算しない）",
-        ]
-        : [];
+      const lines: string[] =
+        unitNs === undefined
+          ? [
+              `環境キー '${ENVIRONMENT.key}' は timestamp の換算表（helpers/timestamp-unit.ts）に無い — ` +
+                "GPU 時間は記録しない（推測で換算しない）",
+            ]
+          : [];
       const session = await prepared.createContainerSession(gpu);
       try {
         for (const { name } of CASES) {
@@ -768,19 +792,19 @@ test({
           }
           lines.push(
             `${name}（L ${ids.length}）: 壁 ${(run.wallMs / 1000).toFixed(2)} s` +
-              (unitNs === undefined ? "" : `・GPU ${(ticks * unitNs / 1e9).toFixed(3)} s`),
+              (unitNs === undefined ? "" : `・GPU ${((ticks * unitNs) / 1e9).toFixed(3)} s`),
           );
         }
         const submit = session.diagnostics().submit;
         const observed = submit.chunkBudget.submitGpuTime;
         if (observed === undefined) throw new Error("計測モードなのに submit の GPU 時間が無い");
         if (unitNs !== undefined) {
-          const ms = (ns: number): string => `${(ns * unitNs / 1e6).toFixed(1)} ms`;
-          const maxMs = observed.maxNs * unitNs / 1e6;
+          const ms = (ns: number): string => `${((ns * unitNs) / 1e6).toFixed(1)} ms`;
+          const maxMs = (observed.maxNs * unitNs) / 1e6;
           lines.push(
-            `1 submit の GPU 時間の最大 ${
-              ms(observed.maxNs)
-            }（${observed.submits} 本・目安 ${SUBMIT_GPU_GUIDE_MS} ms ${
+            `1 submit の GPU 時間の最大 ${ms(
+              observed.maxNs,
+            )}（${observed.submits} 本・目安 ${SUBMIT_GPU_GUIDE_MS} ms ${
               maxMs <= SUBMIT_GPU_GUIDE_MS ? "以内" : "を越えた"
             }）`,
             `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
@@ -799,10 +823,8 @@ test({
       assertEquals(deviceLost, undefined, "device lost");
       const note = lines.join(" / ");
       console.log(`[wan-umt5] 資源（計測モード）: ${note}`);
-      await runRecordedCase(
-        results,
-        { id: "umt5/resources/gpu-timing" },
-        () => Promise.resolve({ status: "pass", note }),
+      await runRecordedCase(results, { id: "umt5/resources/gpu-timing" }, () =>
+        Promise.resolve({ status: "pass", note }),
       );
     } finally {
       await settleReleases(gpu);

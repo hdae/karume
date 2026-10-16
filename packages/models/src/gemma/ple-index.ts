@@ -139,9 +139,7 @@ const readTable = (
   assertAllowedKeys(table, TABLE_KEYS, at);
   const rowBytes = readCount(table, "rowBytes", at);
   if (rowBytes !== expectedRowBytes) {
-    throw new Error(
-      `${at}.rowBytes ${rowBytes} が宣言から決まる ${expectedRowBytes} と違う`,
-    );
+    throw new Error(`${at}.rowBytes ${rowBytes} が宣言から決まる ${expectedRowBytes} と違う`);
   }
   if (!Array.isArray(table.blocks) || table.blocks.length === 0) {
     throw new Error(`${at}.blocks が非空の配列でない`);
@@ -207,7 +205,7 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
     layers,
     dim,
     embedScale,
-    values: readTable(root, "values", layers * dim / factor, tokens, where),
+    values: readTable(root, "values", (layers * dim) / factor, tokens, where),
     scales: readTable(root, "scales", layers * SCALE_BYTES, tokens, where),
   };
 };
@@ -318,8 +316,7 @@ export const assertGemma4PleAssets = (
   }
   if (problems.length === 0) return;
   throw new Error(
-    `${where}: PLE の索引と容器の資産が食い違う（${problems.length} 件） — ` +
-      problems.join(" / "),
+    `${where}: PLE の索引と容器の資産が食い違う（${problems.length} 件） — ` + problems.join(" / "),
   );
 };
 

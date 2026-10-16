@@ -204,8 +204,10 @@ export const compareToDefault = (row: SweepRow, reference: DefaultReference): Sw
   if (row.error !== undefined) return row;
   return {
     ...row,
-    ...(reference.perDispatch === undefined || !(reference.perDispatch > 0) ||
-        row.perDispatch === undefined || !(row.perDispatch > 0)
+    ...(reference.perDispatch === undefined ||
+    !(reference.perDispatch > 0) ||
+    row.perDispatch === undefined ||
+    !(row.perDispatch > 0)
       ? {}
       : { speedupVsDefault: reference.perDispatch / row.perDispatch }),
     ...(reference.outputSha256 === undefined || row.outputSha256 === undefined

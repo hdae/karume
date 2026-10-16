@@ -56,7 +56,10 @@ const i32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
  * 引くたびに一緒に押さえる（2 本に増えたら黙って先頭だけ見る形にしない）。
  */
 const runScenario = (report: AdmissionReport): AdmissionScenario => {
-  assertEquals(report.scenarios.map((scenario) => scenario.name), ["run"]);
+  assertEquals(
+    report.scenarios.map((scenario) => scenario.name),
+    ["run"],
+  );
   return report.scenarios[0];
 };
 
@@ -148,8 +151,10 @@ test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最
   const scenario = runScenario(report);
   assertEquals(
     report.peakAccountedBytes,
-    report.resident.weights.totalBytes + report.resident.stateBytes +
-      scenario.ioBytes + scenario.workspaceBytes,
+    report.resident.weights.totalBytes +
+      report.resident.stateBytes +
+      scenario.ioBytes +
+      scenario.workspaceBytes,
   );
   // 116（非圧縮常駐）+ 0（state）+ 220（io）+ 280（workspace — 下の「generation なし」参照）
   assertEquals(report.peakAccountedBytes, 616);
@@ -178,8 +183,7 @@ test("予算はシナリオごとの数字を動かさない（効くのはピ�
 
 test("予算が最大シナリオより小さいときは最大シナリオが立つ（max の切り替わり）", () => {
   const peak = (planBackingBudgetBytes: number): number =>
-    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes })
-      .peakAccountedBytes;
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes }).peakAccountedBytes;
   // 最大シナリオは 500（io 220 + workspace 280）。新規 1 本だけで予算を超える形は他を全て
   // 退役させて 1 本だけ持つので、予算より大きいシナリオはそのまま勘定側に立つ。
   assertEquals(peak(0), 616);
@@ -196,8 +200,7 @@ test("報告は使った予算をそのまま載せる（呼び手が組み直�
     4096,
   );
   assertEquals(
-    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 })
-      .planBackingBudgetBytes,
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 }).planBackingBudgetBytes,
     0,
   );
 });
@@ -217,8 +220,7 @@ test("予算の値域は createSessionFromContainer と同じ門（非負の安�
   }
   // 対照: 0 は正当値（従来の容量 1）— 上の 4 本が「何を渡しても落ちる」ではないことの証明。
   assertEquals(
-    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 })
-      .peakAccountedBytes,
+    plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 }).peakAccountedBytes,
     616,
   );
 });
@@ -411,12 +413,14 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
     b: { dtype: "f32", shape: [4] },
     y: { dtype: "f32", shape: [1, 4, 5] },
   },
-  nodes: [{
-    op: "conv1d",
-    ins: ["x", "w", "b"],
-    outs: ["y"],
-    attrs: { stride: 1, padding: 0, dilation: 1, groups },
-  }],
+  nodes: [
+    {
+      op: "conv1d",
+      ins: ["x", "w", "b"],
+      outs: ["y"],
+      attrs: { stride: 1, padding: 0, dilation: 1, groups },
+    },
+  ],
 });
 
 /** {@link i4Conv1dGraph} の `w` の格納（合流後のグラフを直に組む口で使う）。 */
@@ -822,7 +826,10 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
   // 追加名どうしの重複も同じ門（名前で引く呼び手が先頭だけを見る形を作らない）。
   assertThrows(
     () =>
-      verifyRowsReport([{ name: "verify", chunkLength: 2 }, { name: "verify", chunkLength: 3 }]),
+      verifyRowsReport([
+        { name: "verify", chunkLength: 2 },
+        { name: "verify", chunkLength: 3 },
+      ]),
     ExecutionError,
     "既にある",
   );
@@ -942,10 +949,7 @@ const fanOutGraph = (): DeclarationJson => ({
 
 test("直列チェーンのピークは同時生存 2 本ぶん（消費が尽きた中間は解放される）", () => {
   // 64 要素 = 256 バイト。t2 を確保した時点が 2 本 = 512
-  assertEquals(
-    runScenario(openGraph(chainGraph(["y"])).estimate()).workspaceBytes,
-    512,
-  );
+  assertEquals(runScenario(openGraph(chainGraph(["y"])).estimate()).workspaceBytes, 512);
 });
 
 test("幅広 fan-out は同時生存 4 本ぶんに、読み書きの同居禁止で 1 本が上乗せされる", () => {
@@ -1138,10 +1142,10 @@ const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepR
       const bookkeeping = { name, uses: uses.get(name) ?? 0, pinned: outputNames.has(name) };
       return step.aliasesInput
         ? {
-          ...bookkeeping,
-          kind: "alias" as const,
-          source: { kind: "value" as const, name: step.plan.node.ins[0] },
-        }
+            ...bookkeeping,
+            kind: "alias" as const,
+            source: { kind: "value" as const, name: step.plan.node.ins[0] },
+          }
         : { ...bookkeeping, kind: "alloc" as const, byteLength: numel(shape) * 4 };
     });
     const bindings = [
@@ -1251,7 +1255,11 @@ test("融合が掛からない形では estimator の中間総量と実行計画
     limits: TEST_LIMITS,
   });
   // 前提の確認: 融合が 1 本でも掛かると「融合前の列を歩く」estimator の勘定と比べられない。
-  assertEquals(fusion.steps.every((step) => step.kind === "node"), true, "融合が掛かっている");
+  assertEquals(
+    fusion.steps.every((step) => step.kind === "node"),
+    true,
+    "融合が掛かっている",
+  );
   assertEquals(fusion.counts.identityExpand, 1);
 
   const transientPlan = planRecipes(slotRecipes(fusion.steps, model.graph), CORE_TRANSIENT_LIMITS);
@@ -1262,10 +1270,7 @@ test("融合が掛からない形では estimator の中間総量と実行計画
     transientPlan.slots.map((slot) => slot.byteLength),
     [256, 16, 48, 48, 256, 256, 20, 20, 256, 256],
   );
-  assertEquals(
-    runScenario(model.estimate()).workspaceBytes,
-    transientPlan.totalBytes,
-  );
+  assertEquals(runScenario(model.estimate()).workspaceBytes, transientPlan.totalBytes);
 });
 
 // ---------------------------------------------------------------------------
@@ -1357,10 +1362,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
   });
 
   it("加算 mask は ①QK の読みが 1 本増えるだけで一時は増えない", () => {
-    assertEquals(
-      runScenario(fusedAttentionModel(true).estimate()).workspaceBytes,
-      256 + 384 + 128,
-    );
+    assertEquals(runScenario(fusedAttentionModel(true).estimate()).workspaceBytes, 256 + 384 + 128);
   });
 
   describe("実行が拒否する組には数を返さない（実行と同じ判定・同じ文言）", () => {
@@ -1413,7 +1415,11 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       openGraph(
         singleOpDeclaration(
           "attention",
-          [[1, 1, 8192, 4], [1, 1, 8192, 4], [1, 1, 8192, 4]],
+          [
+            [1, 1, 8192, 4],
+            [1, 1, 8192, 4],
+            [1, 1, 8192, 4],
+          ],
           [[1, 1, 8192, 4]],
           { attrs: { scale: 0.5 } },
         ),
@@ -1542,9 +1548,7 @@ const stateAttentionReport = (options: {
   });
 
 test("states 形 attention の S / 行統計が中間に乗る（full 変種・行ブロック 1 枚）", () => {
-  const { prefill, decode } = bothScenarios(
-    stateAttentionReport({ capacity: 16, chunkLength: 4 }),
-  );
+  const { prefill, decode } = bothScenarios(stateAttentionReport({ capacity: 16, chunkLength: 4 }));
   // B·H = 4・列容量 = C = 16。prefill（M=4）は 1 行 4×16×4=256B で上限に余裕があり 1 枚。
   //   出力 o [1,4,4,8]=128 要素 → 512 / S = 4×4×16×4 = 1024 / 行統計 = 4×4×2×4 = 128
   assertEquals(prefill.workspaceBytes, 512 + 1024 + 128);
@@ -1581,13 +1585,15 @@ test("readonly 変種（借り手の cross-attention・ins は q だけ）の S 
       kslot: { dtype: "f32", shape: [1, 2, "C", 8], external: true },
       vslot: { dtype: "f32", shape: [1, 2, "C", 8], external: true },
     },
-    nodes: [{
-      op: "attention",
-      ins: ["q"],
-      outs: ["o"],
-      attrs: { scale: 0.5, readonly: true },
-      states: { k: "kslot", v: "vslot" },
-    }],
+    nodes: [
+      {
+        op: "attention",
+        ins: ["q"],
+        outs: ["o"],
+        attrs: { scale: 0.5, readonly: true },
+        states: { k: "kslot", v: "vslot" },
+      },
+    ],
   };
   const report = openGraph(graph).estimate({
     generation: { chunkLength: 1, bindings: { C: 16 } },
@@ -1627,7 +1633,7 @@ test("sliding 変種の列容量は W−1+M（capacity を上げても S は動�
   // state スロットは C に比例したまま（S だけが窓で頭打ちになる）
   assertEquals(
     stateAttentionReport({ capacity: 32, chunkLength: 4, window: 6 }).resident.stateBytes,
-    (1 * 2 * 32 * 8) * 4 * 2 + 8,
+    1 * 2 * 32 * 8 * 4 * 2 + 8,
   );
 });
 
@@ -1824,11 +1830,7 @@ describe("chunkBuckets を渡した見積りのピーク", () => {
 // ---------------------------------------------------------------------------
 
 test("未束縛の記号次元は fail loudly（黙って 0 で埋めない）", () => {
-  assertThrows(
-    () => plainModel().estimate(),
-    ExecutionError,
-    "シンボル 'T' が束縛されていない",
-  );
+  assertThrows(() => plainModel().estimate(), ExecutionError, "シンボル 'T' が束縛されていない");
 });
 
 test("契約違反のグラフは常駐計画より先に契約検査で落ちる（nodes[i] (op) を名乗る）", () => {
@@ -1862,17 +1864,20 @@ test("契約違反のグラフは常駐計画より先に契約検査で落ち�
   // 同じグラフが添字を持たない `nodes (conv1d)` で落ちるようになる。
   const prepared = assertThrows(
     () =>
-      openGraph({
-        ...graph,
-        nodes: [{ ...graph.nodes[0], attrs: { stride: 1, padding: 0, dilation: 1 } }],
-      }, [
-        weight("b", f32Bytes([0, 0, 0, 0])),
-        weight("w", new Uint8Array(new ArrayBuffer(128)), {
-          codec: "int4-sym-g",
-          groupSize: 16,
-          scale: { bytes: f32Bytes(new Array(16).fill(1)), dtype: "f32" },
-        }),
-      ]),
+      openGraph(
+        {
+          ...graph,
+          nodes: [{ ...graph.nodes[0], attrs: { stride: 1, padding: 0, dilation: 1 } }],
+        },
+        [
+          weight("b", f32Bytes([0, 0, 0, 0])),
+          weight("w", new Uint8Array(new ArrayBuffer(128)), {
+            codec: "int4-sym-g",
+            groupSize: 16,
+            scale: { bytes: f32Bytes(new Array(16).fill(1)), dtype: "f32" },
+          }),
+        ],
+      ),
     OpContractError,
     "nodes[",
   );
@@ -1888,11 +1893,7 @@ test("states 専用記号を options.bindings で受けない（束縛点は gen
 });
 
 test("states 形グラフを generation 無しで見積らない（context が要る旨で落ちる）", () => {
-  assertThrows(
-    () => stateModel().estimate({ bindings: { T: 2 } }),
-    Error,
-    "GenerationContext",
-  );
+  assertThrows(() => stateModel().estimate({ bindings: { T: 2 } }), Error, "GenerationContext");
 });
 
 test("states 宣言の無いグラフに generation を渡すと fail loudly", () => {
@@ -1939,11 +1940,7 @@ test("states と入力の両方に現れる記号の食い違いは fail loudly�
 });
 
 test("グラフに無い記号の束縛は fail loudly", () => {
-  assertThrows(
-    () => plainModel().estimate({ bindings: { T: 7, Z: 3 } }),
-    ExecutionError,
-    "'Z'",
-  );
+  assertThrows(() => plainModel().estimate({ bindings: { T: 7, Z: 3 } }), ExecutionError, "'Z'");
 });
 
 // ---------------------------------------------------------------------------
@@ -2091,11 +2088,7 @@ test("attentionの見積り設定は文字列への変換前に型を拒否す�
   for (const value of [["parallel-fused"], object, false, 0, 1n, Symbol("parallel-fused")]) {
     const options = { bindings: { T: 2 } };
     Object.defineProperty(options, "stateAttentionReduce", { value });
-    assertThrows(
-      () => model.estimate(options),
-      ExecutionError,
-      "stateAttentionReduce",
-    );
+    assertThrows(() => model.estimate(options), ExecutionError, "stateAttentionReduce");
   }
   assertEquals(conversions, 0);
 });

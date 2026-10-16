@@ -91,7 +91,10 @@ describe("subgroup32変種の積和はparallelと同じ綴り", () => {
   // `acc + x * d` のまま残ると、Metal では縮約の入れ方が式形で変わり u32 一致が崩れる（ADR 0105 追記 4）。
   // GPU 実走の u32 一致門（helpers/gemv-subgroup-check.ts）は Deno で SKIP になるので、この門が常設側。
   const macLines = (wgsl: string): string[] =>
-    wgsl.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("acc = "));
+    wgsl
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("acc = "));
   it("全60形でfma行の列が一致し、積和にacc + x * dが残らない", () => {
     let compared = 0;
     for (const storage of ["i2", "i4", "i8"] as const) {

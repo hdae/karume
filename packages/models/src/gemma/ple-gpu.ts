@@ -102,10 +102,7 @@ const PLE_RESIDENCIES: readonly Gemma4PleResidency[] = ["host", "gpu"];
  * MUST: 型の外から来た綴り違いを既定へ倒さない — `"GPU"` のような指定が黙ってホスト経路で
  * 走ると、「GPU 常駐にしたのに速くならない」が例外も警告も無いまま残る。
  */
-export const assertGemma4PleResidency = (
-  where: string,
-  value: unknown,
-): Gemma4PleResidency => {
+export const assertGemma4PleResidency = (where: string, value: unknown): Gemma4PleResidency => {
   if (typeof value !== "string" || !PLE_RESIDENCIES.includes(value as Gemma4PleResidency)) {
     throw new Error(
       `${where}: pleResidency ${JSON.stringify(value)} が ${PLE_RESIDENCIES.join(" / ")} でない`,
@@ -302,15 +299,16 @@ export const buildGemma4PleGatherContainer = async (
   const table = index.values;
   const readBlock = (block: Gemma4PleBlock) => (): Promise<Uint8Array<ArrayBuffer>> =>
     readBlockRange(openBlock, block, 0, gemma4PleBlockBytes(table, block));
-  const values: MemoryTensor = table.blocks.length < 2
-    ? { encoding, bytes: await readBlock(table.blocks[0])() }
-    : {
-      encoding,
-      pieces: table.blocks.map((block) => ({
-        rows: [block.start * index.layers, block.stop * index.layers] as const,
-        read: readBlock(block),
-      })),
-    };
+  const values: MemoryTensor =
+    table.blocks.length < 2
+      ? { encoding, bytes: await readBlock(table.blocks[0])() }
+      : {
+          encoding,
+          pieces: table.blocks.map((block) => ({
+            rows: [block.start * index.layers, block.stop * index.layers] as const,
+            read: readBlock(block),
+          })),
+        };
   return openMemoryContainer({
     graphs: { [GATHER_GRAPH]: gemma4PleGatherGraph(index) },
     tensors: {
@@ -345,9 +343,11 @@ const assertBindingLimits = (options: Gemma4PleResidentOptions, valuesBytes: num
     `${options.entry}: pleResidency: "gpu" は PLE の量子化バイト列 ${valuesBytes} バイトを` +
       `単一束縛で載せるが、この device は ` +
       shortfalls.map(([key, granted]) => `${key} ${granted}`).join(" / ") +
-      `（不足 ${
-        shortfalls.map(([key, granted]) => `${key} ${valuesBytes - granted}`).join(" / ")
-      } バイト）— 既定の pleResidency: "host" で読むか、束縛上限の大きい device で開く`,
+      `（不足 ${shortfalls
+        .map(([key, granted]) => `${key} ${valuesBytes - granted}`)
+        .join(
+          " / ",
+        )} バイト）— 既定の pleResidency: "host" で読むか、束縛上限の大きい device で開く`,
   );
 };
 

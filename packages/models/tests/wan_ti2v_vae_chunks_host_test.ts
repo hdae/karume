@@ -125,8 +125,8 @@ const irViolations = (graph: Graph): readonly string[] => {
   ];
   for (const [name, shape] of shapes) {
     if (shape.length <= MAX_VALUE_RANK) continue;
-    const conv3dWeight = shape.length === 5 && weights.has(name) &&
-      Object.hasOwn(graph.initializers, name);
+    const conv3dWeight =
+      shape.length === 5 && weights.has(name) && Object.hasOwn(graph.initializers, name);
     if (!conv3dWeight) {
       violations.push(`rank ${shape.length} の値 '${name}'（rank 5 は conv3d の重みだけ）`);
     }
@@ -168,7 +168,10 @@ test({
       CACHE_TABLE.map(({ name, shape }) => [name, shape]),
       "cache の表（next の入力の順）",
     );
-    assertEquals(layout.next.caches, CACHE_TABLE.map(({ name }) => name));
+    assertEquals(
+      layout.next.caches,
+      CACHE_TABLE.map(({ name }) => name),
+    );
     assertEquals(
       layout.first.caches,
       CACHE_TABLE.filter(({ timeConv }) => !timeConv).map(({ name }) => name),
@@ -219,7 +222,8 @@ test({
 });
 
 test({
-  name: "Wan2.2 TI2V VAE chunk IR の検査自身（GPU 不要）: 書き換えた宣言を 1 件ずつ拒む" +
+  name:
+    "Wan2.2 TI2V VAE chunk IR の検査自身（GPU 不要）: 書き換えた宣言を 1 件ずつ拒む" +
     "（initializer でない conv3d の重み・rank 5 のグラフ入力・rank 5 の conv2d の重み・語彙外の op・attention 0 本）",
   ignore: !ALL_PRESENT,
   fn: async () => {
@@ -258,7 +262,7 @@ test({
         {
           ...graph,
           inputs: graph.inputs.map((declared, index) =>
-            index === 0 ? { ...declared, shape: [1, ...declared.shape] } : declared
+            index === 0 ? { ...declared, shape: [1, ...declared.shape] } : declared,
           ),
         },
         `rank 5 の値 '${input.name}'`,
@@ -276,7 +280,7 @@ test({
         {
           ...graph,
           nodes: graph.nodes.map((node, index) =>
-            index === multiply ? { ...node, op: "pad" } : node
+            index === multiply ? { ...node, op: "pad" } : node,
           ),
         },
         "語彙外の op pad",
@@ -286,7 +290,7 @@ test({
         {
           ...graph,
           nodes: graph.nodes.map((node, index) =>
-            index === attention ? { ...node, op: "mul" } : node
+            index === attention ? { ...node, op: "mul" } : node,
           ),
         },
         "attention のノードが 0 本",

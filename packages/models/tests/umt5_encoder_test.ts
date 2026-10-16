@@ -100,12 +100,14 @@ const umt5Input = (storage: "i8" | "i4" = "i8"): ModelInput => ({
         last_hidden_state: { dtype: "f32", shape: [1, "L", HIDDEN] },
       },
       states: {},
-      nodes: [{
-        op: "embedding",
-        ins: ["embed", "input_ids"],
-        outs: ["last_hidden_state"],
-        attrs: { padding_idx: -1 },
-      }],
+      nodes: [
+        {
+          op: "embedding",
+          ins: ["embed", "input_ids"],
+          outs: ["last_hidden_state"],
+          attrs: { padding_idx: -1 },
+        },
+      ],
     }),
   },
   consts: [],
@@ -116,17 +118,27 @@ const umt5Input = (storage: "i8" | "i4" = "i8"): ModelInput => ({
 
 /** 最小のトークナイザ資産（形式 `karume-umt5-tokenizer/1` — 語彙 6 行・上限 512）。 */
 const tokenizerJson = (patch: Record<string, unknown> = {}): Uint8Array<ArrayBuffer> =>
-  new TextEncoder().encode(JSON.stringify({
-    format: UMT5_TOKENIZER_FORMAT,
-    maxLength: 512,
-    unkId: 2,
-    eosId: 1,
-    addedTokens: [["<pad>", 0], ["</s>", 1], ["<s>", 2], ["<unk>", 3]],
-    space: [[0x09, 0x0d], [0x20, 0x20]],
-    vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁",
-    scores: [0, 0, 0, 0, -1, -2],
-    ...patch,
-  }));
+  new TextEncoder().encode(
+    JSON.stringify({
+      format: UMT5_TOKENIZER_FORMAT,
+      maxLength: 512,
+      unkId: 2,
+      eosId: 1,
+      addedTokens: [
+        ["<pad>", 0],
+        ["</s>", 1],
+        ["<s>", 2],
+        ["<unk>", 3],
+      ],
+      space: [
+        [0x09, 0x0d],
+        [0x20, 0x20],
+      ],
+      vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁",
+      scores: [0, 0, 0, 0, -1, -2],
+      ...patch,
+    }),
+  );
 
 /** トークナイザ資産の宣言（`fromAssets` の門は中身を読まないので 3 点セットは綴りだけ合わせる）。 */
 const TOKENIZER_REF = { path: "xxl/tokenizer/tokenizer.json", size: 8, sha256: "f".repeat(64) };
@@ -135,26 +147,25 @@ const TOKENIZER_REF = { path: "xxl/tokenizer/tokenizer.json", size: 8, sha256: "
  * 配布形 `karume-umt5-xxl` の骨格（`models/karume-umt5-xxl/karume.json` と同じ欄 — 検査に要る分だけ）。`patch` は
  * `models["xxl"]` の中身を上書きする。
  */
-const manifestOf = (
-  textEncoder: Record<string, unknown>,
-  patch: Record<string, unknown> = {},
-) =>
-  parseManifest(JSON.stringify({
-    format: "karume/5",
-    generator: "karume/0.1.0",
-    defaultModel: "xxl",
-    models: {
-      xxl: {
-        pipeline: "umt5-encoder/1",
-        weights: { text_encoder: { i8: textEncoder } },
-        assets: { tokenizer: TOKENIZER_REF },
-        quants: { i8: { weights: { text_encoder: "i8" }, session: {} } },
-        defaultQuant: "i8",
-        pipelineConfig: {},
-        ...patch,
+const manifestOf = (textEncoder: Record<string, unknown>, patch: Record<string, unknown> = {}) =>
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "karume/0.1.0",
+      defaultModel: "xxl",
+      models: {
+        xxl: {
+          pipeline: "umt5-encoder/1",
+          weights: { text_encoder: { i8: textEncoder } },
+          assets: { tokenizer: TOKENIZER_REF },
+          quants: { i8: { weights: { text_encoder: "i8" }, session: {} } },
+          defaultQuant: "i8",
+          pipelineConfig: {},
+          ...patch,
+        },
       },
-    },
-  }));
+    }),
+  );
 
 const written = await writeContainer(umt5Input());
 const writtenI4 = await writeContainer(umt5Input("i4"));
@@ -293,28 +304,33 @@ const serveUmt5 = async (patch: Record<string, unknown>, tokenizer: Uint8Array<A
     blockBytes: 512,
   });
   const tokenizerRef = await fileRef("xxl/tokenizer/tokenizer.json", tokenizer);
-  const mock = serveRepos([{
-    repo: REPO,
-    models: {
-      test: {
-        pipeline: "umt5-encoder/1",
-        weights: { text_encoder: { i8: served.entry } },
-        assets: { tokenizer: tokenizerRef },
-        quants: { i8: { weights: { text_encoder: "i8" }, session: {} } },
-        defaultQuant: "i8",
-        pipelineConfig: {},
-        ...patch,
+  const mock = serveRepos([
+    {
+      repo: REPO,
+      models: {
+        test: {
+          pipeline: "umt5-encoder/1",
+          weights: { text_encoder: { i8: served.entry } },
+          assets: { tokenizer: tokenizerRef },
+          quants: { i8: { weights: { text_encoder: "i8" }, session: {} } },
+          defaultQuant: "i8",
+          pipelineConfig: {},
+          ...patch,
+        },
       },
+      files: [...served.files, [tokenizerRef.path, tokenizer]],
     },
-    files: [...served.files, [tokenizerRef.path, tokenizer]],
-  }]);
+  ]);
   const load = (options: Umt5EncoderFromPretrainedOptions = {}) =>
-    Umt5Encoder.fromPretrained({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, {
-      gpu: fakeGpu(),
-      fetch: mock.fetch,
-      caches: new MemoryCacheStorage(),
-      ...options,
-    });
+    Umt5Encoder.fromPretrained(
+      { repo: REPO, revision: SHA, hubUrl: HUB_URL },
+      {
+        gpu: fakeGpu(),
+        fetch: mock.fetch,
+        caches: new MemoryCacheStorage(),
+        ...options,
+      },
+    );
   return { load, paths: mock.paths, parts: served.parts, tokenizerRef };
 };
 

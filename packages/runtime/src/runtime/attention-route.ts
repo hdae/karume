@@ -52,8 +52,7 @@ export const attentionRoute = (
   return {
     qk: i8a8 && attentionQkI8a8Eligible(depth) ? "i8a8" : "dense",
     pv: i8a8 && attentionPvI8a8Eligible(cols) ? "i8a8" : "dense",
-    score: seats.attentionScoreStorage === "f16" && attentionScoreUsesF16(depth, cols)
-      ? "f16"
-      : "f32",
+    score:
+      seats.attentionScoreStorage === "f16" && attentionScoreUsesF16(depth, cols) ? "f16" : "f32",
   };
 };

@@ -43,13 +43,15 @@ const drafterGraph = (): DeclarationJson => ({
     "l13.k": { dtype: "f32", shape: [1, KV_HEADS, CAPACITY, DEPTH], external: true },
     "l13.v": { dtype: "f32", shape: [1, KV_HEADS, CAPACITY, DEPTH], external: true },
   },
-  nodes: [{
-    op: "attention",
-    ins: ["q"],
-    outs: ["o"],
-    attrs: { scale: 0.5, window: WINDOW, readonly: true },
-    states: { k: "l13.k", v: "l13.v" },
-  }],
+  nodes: [
+    {
+      op: "attention",
+      ins: ["q"],
+      outs: ["o"],
+      attrs: { scale: 0.5, window: WINDOW, readonly: true },
+      states: { k: "l13.k", v: "l13.v" },
+    },
+  ],
 });
 
 /** 貸し手側の最小形（自前スロット + 通常の states 形 attention + append 2 本）。 */
@@ -106,9 +108,7 @@ const mutated = (mutate: (graph: DeclarationJson) => void): DeclarationJson => {
 };
 
 const slotShapes = (graph: IrGraph): ReadonlyMap<string, readonly number[]> =>
-  new Map(
-    Object.entries(graph.states).map(([name, slot]) => [name, slot.shape.map(Number)]),
-  );
+  new Map(Object.entries(graph.states).map(([name, slot]) => [name, slot.shape.map(Number)]));
 
 test("drafter の最小形（external 2 本 + readonly attention 1 本）は受理される", () => {
   const graph = parse(drafterGraph());
@@ -128,31 +128,35 @@ test("貸し手（自前スロット + append）は 1 バイトも影響を受�
 });
 
 test("external スロットへの state_append は拒否する（書けるのは貸し手だけ）", () => {
-  const graph = parse(mutated((g) => {
-    g.requires.ops = ["attention", "state_append"];
-    g.inputs.push({ name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] });
-    g.nodes.push({
-      op: "state_append",
-      ins: ["k"],
-      outs: [],
-      attrs: { window: WINDOW },
-      states: { slot: "l13.k" },
-    });
-  }));
+  const graph = parse(
+    mutated((g) => {
+      g.requires.ops = ["attention", "state_append"];
+      g.inputs.push({ name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] });
+      g.nodes.push({
+        op: "state_append",
+        ins: ["k"],
+        outs: [],
+        attrs: { window: WINDOW },
+        states: { slot: "l13.k" },
+      });
+    }),
+  );
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "external なのに state_append");
 });
 
 test("external スロットを readonly でない attention が読む形は拒否する", () => {
   // 読者を従来の states 形（ins 3 本）に戻す = 「今 step の k/v を足す」形。書き手が居ない
   // スロットに対してこれを許すと、必ず未初期化行を過去として読む。
-  const graph = parse(mutated((g) => {
-    g.inputs.push(
-      { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
-      { name: "v", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
-    );
-    g.nodes[0].ins = ["q", "k", "v"];
-    g.nodes[0].attrs = { scale: 0.5, window: WINDOW };
-  }));
+  const graph = parse(
+    mutated((g) => {
+      g.inputs.push(
+        { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
+        { name: "v", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
+      );
+      g.nodes[0].ins = ["q", "k", "v"];
+      g.nodes[0].attrs = { scale: 0.5, window: WINDOW };
+    }),
+  );
   assertThrows(
     () => validateGraphContracts(graph),
     ExecutionError,
@@ -161,11 +165,13 @@ test("external スロットを readonly でない attention が読む形は拒�
 });
 
 test("readonly の読者が非 external スロットを読む形は拒否する", () => {
-  const graph = parse(mutated((g) => {
-    if (g.states === undefined) throw new Error("states が無い");
-    delete g.states["l13.k"].external;
-    delete g.states["l13.v"].external;
-  }));
+  const graph = parse(
+    mutated((g) => {
+      if (g.states === undefined) throw new Error("states が無い");
+      delete g.states["l13.k"].external;
+      delete g.states["l13.v"].external;
+    }),
+  );
   assertThrows(
     () => validateGraphContracts(graph),
     ExecutionError,
@@ -174,10 +180,12 @@ test("readonly の読者が非 external スロットを読む形は拒否する"
 });
 
 test("external と非 external の混在は拒否する（借り手は自前スロットを持たない）", () => {
-  const graph = parse(mutated((g) => {
-    if (g.states === undefined) throw new Error("states が無い");
-    delete g.states["l13.v"].external;
-  }));
+  const graph = parse(
+    mutated((g) => {
+      if (g.states === undefined) throw new Error("states が無い");
+      delete g.states["l13.v"].external;
+    }),
+  );
   // 混在の判定より先に「readonly が非 external を読む」で落ちる（どちらも同じ層・同じ型）。
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "ADR 0096 段 2 §1.1");
 });
@@ -203,25 +211,29 @@ test("states[].external は true 以外を書けない（不存在と同義の�
 });
 
 test("readonly の attention は入力 1 本ちょうど（3 本は拒否・states 欄が要る）", () => {
-  const threeIns = parse(mutated((g) => {
-    g.inputs.push(
-      { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
-      { name: "v", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
-    );
-    g.nodes[0].ins = ["q", "k", "v"];
-  }));
+  const threeIns = parse(
+    mutated((g) => {
+      g.inputs.push(
+        { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
+        { name: "v", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
+      );
+      g.nodes[0].ins = ["q", "k", "v"];
+    }),
+  );
   assertThrows(() => validateGraphContracts(threeIns), OpContractError, "入力 1 本ちょうど");
 
-  const noStates = parse(mutated((g) => {
-    g.inputs.push(
-      { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
-      { name: "v", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
-    );
-    g.nodes[0].ins = ["q", "k", "v"];
-    delete g.nodes[0].states;
-    g.nodes[0].attrs = { scale: 0.5, readonly: true };
-    delete g.states;
-  }));
+  const noStates = parse(
+    mutated((g) => {
+      g.inputs.push(
+        { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
+        { name: "v", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
+      );
+      g.nodes[0].ins = ["q", "k", "v"];
+      delete g.nodes[0].states;
+      g.nodes[0].attrs = { scale: 0.5, readonly: true };
+      delete g.states;
+    }),
+  );
   assertThrows(
     () => validateGraphContracts(noStates),
     OpContractError,
@@ -230,49 +242,73 @@ test("readonly の attention は入力 1 本ちょうど（3 本は拒否・stat
 });
 
 test("attrs.readonly は true のみ・state_append には書けない", () => {
-  const falsy = parse(mutated((g) => {
-    g.nodes[0].attrs = { scale: 0.5, window: WINDOW, readonly: false };
-  }));
+  const falsy = parse(
+    mutated((g) => {
+      g.nodes[0].attrs = { scale: 0.5, window: WINDOW, readonly: false };
+    }),
+  );
   assertThrows(() => validateGraphContracts(falsy), OpContractError, "readonly は true のみ");
 
-  const onAppend = parse(mutated((g) => {
-    g.requires.ops = ["attention", "state_append"];
-    g.inputs.push({ name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] });
-    g.nodes.push({
-      op: "state_append",
-      ins: ["k"],
-      outs: [],
-      attrs: { window: WINDOW, readonly: true },
-      states: { slot: "l13.k" },
-    });
-  }));
+  const onAppend = parse(
+    mutated((g) => {
+      g.requires.ops = ["attention", "state_append"];
+      g.inputs.push({ name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] });
+      g.nodes.push({
+        op: "state_append",
+        ins: ["k"],
+        outs: [],
+        attrs: { window: WINDOW, readonly: true },
+        states: { slot: "l13.k" },
+      });
+    }),
+  );
   assertThrows(() => validateGraphContracts(onAppend), OpContractError, "attrs.readonly は無い");
 });
 
 test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C", () => {
   const cases: readonly (readonly [string, (graph: DeclarationJson) => void, string])[] = [
-    ["M が 2", (g) => {
-      g.inputs[0].shape = [1, HEADS, 2, DEPTH];
-      g.values.o.shape = [1, HEADS, 2, DEPTH];
-    }, "M（軸 2）が 1 ちょうど"],
-    ["D がスロットと不一致", (g) => {
-      g.inputs[0].shape = [1, HEADS, 1, DEPTH * 2];
-      g.values.o.shape = [1, HEADS, 1, DEPTH * 2];
-    }, "B / D が不一致"],
-    ["H が Hkv の倍数でない", (g) => {
-      g.inputs[0].shape = [1, HEADS + 1, 1, DEPTH];
-      g.values.o.shape = [1, HEADS + 1, 1, DEPTH];
-      if (g.states === undefined) throw new Error("states が無い");
-      g.states["l13.k"].shape = [1, 2, CAPACITY, DEPTH];
-      g.states["l13.v"].shape = [1, 2, CAPACITY, DEPTH];
-    }, "正の整数倍でない"],
-    ["window が容量を超える", (g) => {
-      g.nodes[0].attrs = { scale: 0.5, window: CAPACITY + 1, readonly: true };
-    }, "スロット容量"],
-    ["k / v スロットが同形でない", (g) => {
-      if (g.states === undefined) throw new Error("states が無い");
-      g.states["l13.v"].shape = [1, KV_HEADS, CAPACITY * 2, DEPTH];
-    }, "同形でない"],
+    [
+      "M が 2",
+      (g) => {
+        g.inputs[0].shape = [1, HEADS, 2, DEPTH];
+        g.values.o.shape = [1, HEADS, 2, DEPTH];
+      },
+      "M（軸 2）が 1 ちょうど",
+    ],
+    [
+      "D がスロットと不一致",
+      (g) => {
+        g.inputs[0].shape = [1, HEADS, 1, DEPTH * 2];
+        g.values.o.shape = [1, HEADS, 1, DEPTH * 2];
+      },
+      "B / D が不一致",
+    ],
+    [
+      "H が Hkv の倍数でない",
+      (g) => {
+        g.inputs[0].shape = [1, HEADS + 1, 1, DEPTH];
+        g.values.o.shape = [1, HEADS + 1, 1, DEPTH];
+        if (g.states === undefined) throw new Error("states が無い");
+        g.states["l13.k"].shape = [1, 2, CAPACITY, DEPTH];
+        g.states["l13.v"].shape = [1, 2, CAPACITY, DEPTH];
+      },
+      "正の整数倍でない",
+    ],
+    [
+      "window が容量を超える",
+      (g) => {
+        g.nodes[0].attrs = { scale: 0.5, window: CAPACITY + 1, readonly: true };
+      },
+      "スロット容量",
+    ],
+    [
+      "k / v スロットが同形でない",
+      (g) => {
+        if (g.states === undefined) throw new Error("states が無い");
+        g.states["l13.v"].shape = [1, KV_HEADS, CAPACITY * 2, DEPTH];
+      },
+      "同形でない",
+    ],
   ];
   for (const [name, mutate, message] of cases) {
     const graph = parse(mutated(mutate));

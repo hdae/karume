@@ -143,11 +143,14 @@ test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する
     const mock = createMockFetch({ sha: SHA, files: serveAll() });
     const caches = new MemoryCacheStorage();
     return await captureWarnings(async () => {
-      await loadManifest({
-        repo: REPO,
-        hubUrl: HUB_URL,
-        ...(revision === undefined ? {} : { revision }),
-      }, { fetch: mock.fetch, caches });
+      await loadManifest(
+        {
+          repo: REPO,
+          hubUrl: HUB_URL,
+          ...(revision === undefined ? {} : { revision }),
+        },
+        { fetch: mock.fetch, caches },
+      );
     });
   };
 
@@ -179,10 +182,13 @@ test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する
     const warnings = await captureWarnings(async () => {
       await assertRejects(
         () =>
-          loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-            fetch: mock.fetch,
-            caches: new MemoryCacheStorage(),
-          }),
+          loadManifest(
+            { repo: REPO, hubUrl: HUB_URL },
+            {
+              fetch: mock.fetch,
+              caches: new MemoryCacheStorage(),
+            },
+          ),
         HubFetchError,
       );
     });
@@ -193,10 +199,13 @@ test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する
 test("loadManifest: revision に SHA を渡すと解決リクエストが発生しない", async () => {
   const mock = createMockFetch({ files: serveAll() }); // sha 無し = 解決 API は 404
   const caches = new MemoryCacheStorage();
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: mock.fetch,
-    caches,
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: mock.fetch,
+      caches,
+    },
+  );
   assertEquals(loaded.revisionSha, SHA);
   assertEquals(mock.calls, [resolveUrl(MANIFEST_PATH)]);
 });
@@ -271,10 +280,13 @@ test("loadManifest: revision 解決の応答が commit SHA でなければ固定
       const mock = createMockFetch({ sha, files: serveAll() });
       const error = await assertRejects(
         () =>
-          loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: "main" }, {
-            fetch: mock.fetch,
-            caches: new MemoryCacheStorage(),
-          }),
+          loadManifest(
+            { repo: REPO, hubUrl: HUB_URL, revision: "main" },
+            {
+              fetch: mock.fetch,
+              caches: new MemoryCacheStorage(),
+            },
+          ),
         HubFetchError,
       );
       assertEquals(error.repo, REPO);
@@ -296,10 +308,13 @@ test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾
   await captureWarnings(async () => {
     await assertRejects(
       () =>
-        loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-          fetch: mock.fetch,
-          caches: new MemoryCacheStorage(),
-        }),
+        loadManifest(
+          { repo: REPO, hubUrl: HUB_URL },
+          {
+            fetch: mock.fetch,
+            caches: new MemoryCacheStorage(),
+          },
+        ),
       ManifestFormatError,
     );
   });
@@ -313,10 +328,13 @@ test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付けて
   await captureWarnings(async () => {
     error = await assertRejects(
       () =>
-        loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-          fetch: mock.fetch,
-          caches: new MemoryCacheStorage(),
-        }),
+        loadManifest(
+          { repo: REPO, hubUrl: HUB_URL },
+          {
+            fetch: mock.fetch,
+            caches: new MemoryCacheStorage(),
+          },
+        ),
       HubFetchError,
     );
   });
@@ -332,11 +350,14 @@ test("loadManifest: revision 解決の 429 は onRetry で届き、取り直し�
   const retries: RetryDiagnostic[] = [];
   let loaded!: LoadedManifest;
   await captureWarnings(async () => {
-    loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL }, {
-      fetch: rateLimitOnce(mock.fetch, (url) => url === revisionUrl("main")),
-      caches,
-      onRetry: (diagnostic) => retries.push(diagnostic),
-    });
+    loaded = await loadManifest(
+      { repo: REPO, hubUrl: HUB_URL },
+      {
+        fetch: rateLimitOnce(mock.fetch, (url) => url === revisionUrl("main")),
+        caches,
+        onRetry: (diagnostic) => retries.push(diagnostic),
+      },
+    );
   });
   assertEquals(loaded.revisionSha, SHA, "429 の後に解決できていない");
   assertEquals(
@@ -351,11 +372,14 @@ test("loadManifest: karume.json の 429 も onRetry で届く", async () => {
   const mock = createMockFetch({ files: serveAll() });
   const target = resolveUrl(MANIFEST_PATH);
   const retries: RetryDiagnostic[] = [];
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: rateLimitOnce(mock.fetch, (url) => url === target),
-    caches,
-    onRetry: (diagnostic) => retries.push(diagnostic),
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: rateLimitOnce(mock.fetch, (url) => url === target),
+      caches,
+      onRetry: (diagnostic) => retries.push(diagnostic),
+    },
+  );
   assertEquals(loaded.manifest.available.models, ["anima-turbo", "anima-lite"]);
   assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
   assertEquals(retries[0].url, target, "通知が karume.json 以外の URL を名乗っている");
@@ -412,11 +436,7 @@ test("loadManifest: 真実源の karume.json が壊れていれば ManifestForma
       loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, { fetch: mock.fetch, caches }),
     ManifestFormatError,
   );
-  assertEquals(
-    hubCache(caches).entries.size,
-    0,
-    "壊れた manifest をキャッシュに残している",
-  );
+  assertEquals(hubCache(caches).entries.size, 0, "壊れた manifest をキャッシュに残している");
 });
 
 test("loadManifest: 完全キャッシュ済みでも中断済み signal なら manifest を返さない", async () => {
@@ -430,15 +450,11 @@ test("loadManifest: 完全キャッシュ済みでも中断済み signal なら 
   controller.abort(reason);
   const second = createMockFetch({ files: serveAll() });
   const error = await assertRejects(() =>
-    loadManifest(ref, { fetch: second.fetch, caches, signal: controller.signal })
+    loadManifest(ref, { fetch: second.fetch, caches, signal: controller.signal }),
   );
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assertEquals(second.calls, [], "中断済みなのに network へ出ている");
-  assertEquals(
-    hubCache(caches).entries.size,
-    1,
-    "中断を破損と取り違えてキャッシュを捨てている",
-  );
+  assertEquals(hubCache(caches).entries.size, 1, "中断を破損と取り違えてキャッシュを捨てている");
 });
 
 test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", async (t) => {
@@ -493,10 +509,13 @@ test("loadManifest: 旧名前空間（karume/1 系）を入口で回収する", 
   await caches.open("other/1");
 
   const mock = createMockFetch({ files: serveAll() });
-  await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: mock.fetch,
-    caches,
-  });
+  await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: mock.fetch,
+      caches,
+    },
+  );
 
   const names = [...caches.namespaces.keys()];
   assertEquals(names.includes("karume/1"), false, "旧名前空間が残っている");
@@ -512,10 +531,13 @@ test("loadManifest: 旧名前空間（karume/1 系）を入口で回収する", 
 
 const load = async (routes: MockRoutes, caches: MemoryCacheStorage) => {
   const mock = createMockFetch(routes);
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: mock.fetch,
-    caches,
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: mock.fetch,
+      caches,
+    },
+  );
   return { mock, loaded };
 };
 
@@ -778,7 +800,10 @@ test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に�
   assertEquals(Object.keys(assets), ["first", "big", "small"]);
   // calls[0] は load() が出した manifest 取得。小さな要求は先行と同時に収まるが、予算待ちの大きな
   // 要求を追い越さない（宣言順の head-of-line blocking）。
-  assertEquals(mock.calls.slice(1), [first, big, small].map((ref) => resolveUrl(ref.path)));
+  assertEquals(
+    mock.calls.slice(1),
+    [first, big, small].map((ref) => resolveUrl(ref.path)),
+  );
   assert(peakBytes <= budget, `in-flight が予算を超えた（最大 ${peakBytes}B / 予算 ${budget}B）`);
   assertEquals(mock.peakConcurrency(), 1, "収まらない要求が先行と同時に走った");
 });
@@ -903,10 +928,13 @@ test("fetchAssets: content-length は正しいのに body が足りない取得�
   const short = full.slice(0, full.byteLength - 2);
   // content-length は manifest の size を主張しつつ、body だけ短く流す（取得層の上限は
   // 超過しか見ないので、ここを止めるのは取得層の検証だけ）。
-  const { mock, loaded } = await load({
-    files: serveAll(new Map([[path, short]])),
-    contentLength: (target) => target === path ? full.byteLength : undefined,
-  }, caches);
+  const { mock, loaded } = await load(
+    {
+      files: serveAll(new Map([[path, short]])),
+      contentLength: (target) => (target === path ? full.byteLength : undefined),
+    },
+    caches,
+  );
   const error = await assertRejects(
     () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
@@ -946,7 +974,7 @@ test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら�
   controller.abort(reason);
   const second = createMockFetch({ files: serveAll() });
   const error = await assertRejects(() =>
-    fetchAssets(loaded, files, { fetch: second.fetch, caches, signal: controller.signal })
+    fetchAssets(loaded, files, { fetch: second.fetch, caches, signal: controller.signal }),
   );
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assertEquals(second.calls, [], "中断済みなのに network へ出ている");
@@ -979,7 +1007,7 @@ test("fetchAssets: キャッシュ読出し中の中断でも資産を返さず�
         events.push(progress);
         controller.abort(reason);
       },
-    })
+    }),
   );
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assert(uniquePaths > 1, "取り消しの効き目を観測できる本数になっていない");
@@ -992,11 +1020,14 @@ test("fetchAssets: キャッシュ読出し中の中断でも資産を返さず�
 test("fetchAssets: 認証の有無でキャッシュを分けない（ヘッダは取得へ透過する）", async () => {
   const caches = new MemoryCacheStorage();
   const authed = createMockFetch({ files: serveAll() });
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: authed.fetch,
-    caches,
-    headers: { authorization: "Bearer hf_token" },
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: authed.fetch,
+      caches,
+      headers: { authorization: "Bearer hf_token" },
+    },
+  );
   const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, {
     fetch: authed.fetch,
@@ -1044,11 +1075,14 @@ test("fetchAssets: 受信バイトが size を超えれば取得層の上限で 
   const path = TEXT_ENCODER_PARTS[1];
   const declared = payloadFor(path).byteLength;
   const bloated = new TextEncoder().encode(`karume-test:${path}${"!".repeat(64)}`);
-  const { mock, loaded } = await load({
-    files: serveAll(new Map([[path, bloated]])),
-    // content-length は正しい値を主張しつつ、body だけ多く流す。
-    contentLength: (target) => target === path ? declared : undefined,
-  }, caches);
+  const { mock, loaded } = await load(
+    {
+      files: serveAll(new Map([[path, bloated]])),
+      // content-length は正しい値を主張しつつ、body だけ多く流す。
+      contentLength: (target) => (target === path ? declared : undefined),
+    },
+    caches,
+  );
   const error = await assertRejects(
     () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
@@ -1074,7 +1108,7 @@ test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
       caches,
       signal: controller.signal,
       onProgress: () => controller.abort(),
-    })
+    }),
   );
   assert(error instanceof DOMException && error.name === "AbortError", `${error} が中断でない`);
 });
@@ -1090,7 +1124,7 @@ test("fetchAssets: abort(reason) の custom Error はそのまま伝播する（
       caches,
       signal: controller.signal,
       onProgress: () => controller.abort(reason),
-    })
+    }),
   );
   assertStrictEquals(error, reason, "呼び出し側が渡した reason が別のエラーに包まれている");
 });
@@ -1105,7 +1139,7 @@ test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", 
       caches,
       signal: controller.signal,
       onProgress: () => controller.abort("app:cancelled"),
-    })
+    }),
   );
   assertStrictEquals(error, "app:cancelled");
 });
@@ -1137,8 +1171,8 @@ test("onProgress の例外は通知の段に依らず取得を落とさない（
   await t.step("prefetchAssets（キャッシュヒット = complete だけ）", async () => {
     const caches = new MemoryCacheStorage();
     const { mock, loaded } = await load({ files: serveAll() }, caches);
-    const refs = Object.values(selectionFiles(loaded.manifest)).filter((ref, index, all) =>
-      all.findIndex((other) => other.path === ref.path) === index
+    const refs = Object.values(selectionFiles(loaded.manifest)).filter(
+      (ref, index, all) => all.findIndex((other) => other.path === ref.path) === index,
     );
     await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
     const warnings = await captureWarnings(async () => {
@@ -1315,9 +1349,12 @@ test("fetchAssets: 越境参照は宣言された (repo, revision) から取る"
 test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA を名乗る", async () => {
   const caches = new MemoryCacheStorage();
   const corrupt = tamper(foreignBytes);
-  const { mock, loaded } = await load({
-    files: crossRepoFiles(new Map([[`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, corrupt]])),
-  }, caches);
+  const { mock, loaded } = await load(
+    {
+      files: crossRepoFiles(new Map([[`${FOREIGN_REPO}@${FOREIGN_SHA}/${CROSS_PATH}`, corrupt]])),
+    },
+    caches,
+  );
   const error = await assertRejects(
     () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
@@ -1337,7 +1374,10 @@ test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の URL を
     caches,
     onRetry: (diagnostic) => retries.push(diagnostic),
   });
-  assertEquals(retries.map((diagnostic) => diagnostic.url), [foreignUrl]);
+  assertEquals(
+    retries.map((diagnostic) => diagnostic.url),
+    [foreignUrl],
+  );
   assertEquals(assets["borrowed[0]"], foreignBytes, "取り直した越境ぶんが返っていない");
   assertEquals(countCalls(mock.calls, foreignUrl), 2, "429 の後に取り直していない");
 });
@@ -1380,8 +1420,10 @@ test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) �
     onProgress: (progress) => events.push(progress),
   });
   const origins = (path: string): string[] =>
-    events.filter((event) => event.phase === "complete" && event.path === path)
-      .map((event) => `${event.repo}@${event.revision}`).sort();
+    events
+      .filter((event) => event.phase === "complete" && event.path === path)
+      .map((event) => `${event.repo}@${event.revision}`)
+      .sort();
   assertEquals(
     origins(CROSS_PATH),
     [`${FOREIGN_REPO}@${FOREIGN_SHA}`, `${REPO}@${SHA}`].sort(),
@@ -1402,7 +1444,10 @@ test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) �
 test("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", async (t) => {
   // 自リポの別 revision を越境で指す形は、参照の同一性（repo と revision を含む）とキャッシュの
   // 実体（HF では revision を含まない）がずれる — 片方を保護しても共有の実体ごと消える。
-  for (const [label, revision] of [["同じ revision", SHA], ["別の revision", FOREIGN_SHA]]) {
+  for (const [label, revision] of [
+    ["同じ revision", SHA],
+    ["別の revision", FOREIGN_SHA],
+  ]) {
     await t.step(label, async () => {
       const selfCross = crossRepoManifest
         .replaceAll(FOREIGN_REPO, REPO)
@@ -1412,10 +1457,13 @@ test("loadManifest: 読み込んだ repo 自身を指す越境参照は Manifest
       });
       const error = await assertRejects(
         () =>
-          loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-            fetch: mock.fetch,
-            caches: new MemoryCacheStorage(),
-          }),
+          loadManifest(
+            { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+            {
+              fetch: mock.fetch,
+              caches: new MemoryCacheStorage(),
+            },
+          ),
         ManifestFormatError,
       );
       assert(error.message.includes(REPO), `${error.message} が自リポを名乗っていない`);
@@ -1438,7 +1486,7 @@ const SPLIT_PATHS = [
 ];
 
 const splitBytes = SPLIT_PATHS.map((path) =>
-  new TextEncoder().encode(`karume-test:foreign-part:${path}`)
+  new TextEncoder().encode(`karume-test:foreign-part:${path}`),
 );
 
 const splitShardManifest = JSON.stringify({
@@ -1453,13 +1501,15 @@ const splitShardManifest = JSON.stringify({
           f16: {
             container: {
               descriptor: descriptorFor(splitBytes[0].byteLength),
-              parts: await Promise.all(SPLIT_PATHS.map(async (path, index) => ({
-                path,
-                size: splitBytes[index].byteLength,
-                sha256: await digestOf(splitBytes[index]),
-                repo: FOREIGN_REPO,
-                revision: FOREIGN_SHA,
-              }))),
+              parts: await Promise.all(
+                SPLIT_PATHS.map(async (path, index) => ({
+                  path,
+                  size: splitBytes[index].byteLength,
+                  sha256: await digestOf(splitBytes[index]),
+                  repo: FOREIGN_REPO,
+                  revision: FOREIGN_SHA,
+                })),
+              ),
             },
           },
         },
@@ -1475,8 +1525,8 @@ const splitShardManifest = JSON.stringify({
 const splitShardFiles = (): Map<string, Uint8Array<ArrayBuffer>> =>
   new Map([
     [MANIFEST_PATH, new TextEncoder().encode(splitShardManifest)],
-    ...SPLIT_PATHS.map((path, index) =>
-      [`${FOREIGN_REPO}@${FOREIGN_SHA}/${path}`, splitBytes[index]] as const
+    ...SPLIT_PATHS.map(
+      (path, index) => [`${FOREIGN_REPO}@${FOREIGN_SHA}/${path}`, splitBytes[index]] as const,
     ),
   ]);
 
@@ -1570,10 +1620,13 @@ const openable = async (): Promise<{
 }> => {
   const mock = createMockFetch({ files: serveAll() });
   const caches = new MemoryCacheStorage();
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: mock.fetch,
-    caches,
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: mock.fetch,
+      caches,
+    },
+  );
   return { mock, caches, loaded, ref: selectionFiles(loaded.manifest)["tokenizer"] };
 };
 
@@ -1591,7 +1644,11 @@ test("openAsset: 温め済みの参照は取得を起こさずに区間だけを
   assertEquals(reader.cost, "scan");
 
   const middle = Math.floor(ref.size / 2);
-  for (const [offset, length] of [[0, 4], [middle, 3], [ref.size - 5, 5]]) {
+  for (const [offset, length] of [
+    [0, 4],
+    [middle, 3],
+    [ref.size - 5, 5],
+  ]) {
     const bytes = await reader.read(offset, length);
     assertEquals(
       bytes,
@@ -1744,7 +1801,7 @@ test("openAsset: 温め済みの口を開いている最中の中断でも読み
   const calls = mock.calls.length;
 
   const error = await assertRejects(() =>
-    openAsset(loaded, ref, { ...access, signal: controller.signal })
+    openAsset(loaded, ref, { ...access, signal: controller.signal }),
   );
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
@@ -1752,10 +1809,13 @@ test("openAsset: 温め済みの口を開いている最中の中断でも読み
 
 test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
   const mock = createMockFetch({ files: serveAll() });
-  const remote = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: mock.fetch,
-    caches: new MemoryCacheStorage(),
-  });
+  const remote = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: mock.fetch,
+      caches: new MemoryCacheStorage(),
+    },
+  );
   const files = selectionFiles(remote.manifest);
   const ref = files[Object.keys(files)[0]];
 
@@ -1790,14 +1850,19 @@ test("openAsset: abort 済み signal は口の有無に依らず reason をそ�
 test("fetchAssets: 特殊キーも own property で返し、同じ参照の bytes を共有する", async () => {
   const served = serveAll();
   const reads: string[] = [];
-  const loaded = await loadManifest(localDirectory({
-    readFile: (path) => {
-      reads.push(path);
-      const bytes = served.get(path);
-      if (bytes === undefined) throw new Error(`未定義の資産 ${path}`);
-      return Promise.resolve(bytes);
-    },
-  }, { label: "synthetic" }));
+  const loaded = await loadManifest(
+    localDirectory(
+      {
+        readFile: (path) => {
+          reads.push(path);
+          const bytes = served.get(path);
+          if (bytes === undefined) throw new Error(`未定義の資産 ${path}`);
+          return Promise.resolve(bytes);
+        },
+      },
+      { label: "synthetic" },
+    ),
+  );
   const ref = Object.values(selectionFiles(loaded.manifest))[0];
   const files = Object.fromEntries(
     ["__proto__", "constructor", "2", "toString"].map((key) => [key, ref]),

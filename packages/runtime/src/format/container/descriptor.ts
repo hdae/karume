@@ -137,10 +137,10 @@ export type WeightPiece = {
 export type WeightSupply =
   | { readonly block: string; readonly pieces?: undefined; readonly encoding: Encoding }
   | {
-    readonly block?: undefined;
-    readonly pieces: readonly WeightPiece[];
-    readonly encoding: Encoding;
-  };
+      readonly block?: undefined;
+      readonly pieces: readonly WeightPiece[];
+      readonly encoding: Encoding;
+    };
 
 /** 資産（§2.2 — runtime は `role` を解釈しない）。 */
 export type AssetBinding = {
@@ -471,9 +471,9 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
   );
   if (!sameSet(sortedByCodePoints(ops), union)) {
     fail(
-      `${path}.capabilities.ops [${ops.join(", ")}] が graphs の requires.ops の和集合 [${
-        union.join(", ")
-      }] と一致しない`,
+      `${path}.capabilities.ops [${ops.join(", ")}] が graphs の requires.ops の和集合 [${union.join(
+        ", ",
+      )}] と一致しない`,
     );
   }
 
@@ -481,7 +481,7 @@ export const parseGraphDescriptor = (bytes: Uint8Array<ArrayBuffer>): GraphDescr
   requireKeys(constObject, ["length", "blocks", "constants"], [], `${path}.const`);
   const length = requireIndex(constObject["length"], `${path}.const.length`);
   const blocks = requireArray(constObject["blocks"], `${path}.const.blocks`).map((block, i) =>
-    parseConstBlock(block, `${path}.const.blocks[${i}]`)
+    parseConstBlock(block, `${path}.const.blocks[${i}]`),
   );
   const constants = requireArray(constObject["constants"], `${path}.const.constants`).map(
     (entry, i) => {
@@ -700,7 +700,7 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
   });
 
   const blocks = requireArray(object["blocks"], `${path}.blocks`).map((block, i) =>
-    parseDataBlock(block, `${path}.blocks[${i}]`)
+    parseDataBlock(block, `${path}.blocks[${i}]`),
   );
 
   const bindingObject = requireObject(object["binding"], `${path}.binding`);
@@ -758,7 +758,9 @@ export const parseModelDescriptor = (bytes: Uint8Array<ArrayBuffer>): ModelDescr
 };
 
 /** 供給形の実体 block と付随 block（scale / zeroPoint）— 参照検査の共通経路。 */
-const supplyBlocks = (supply: WeightSupply): {
+const supplyBlocks = (
+  supply: WeightSupply,
+): {
   readonly weights: readonly string[];
   readonly scale: string | undefined;
   readonly zeroPoint: string | undefined;
@@ -829,9 +831,10 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
       const entryPath = `${path}.binding['${graphName}']['${name}']`;
       usedCodecs.add(supply.encoding.codec);
       const refs = supplyBlocks(supply);
-      const parts = refs.weights.map((id, i) =>
-        claim(id, "weight", `${entryPath}${supply.pieces === undefined ? "" : `.pieces[${i}]`}`)
-          .part
+      const parts = refs.weights.map(
+        (id, i) =>
+          claim(id, "weight", `${entryPath}${supply.pieces === undefined ? "" : `.pieces[${i}]`}`)
+            .part,
       );
       const firstPart = parts[0];
       // 規則③: companion scale / zeroPoint の block は実体（piece 列なら piece 1）と同一 part。
@@ -844,8 +847,11 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
         }
       }
       if (refs.zeroPoint !== undefined) {
-        const zeroPart =
-          claim(refs.zeroPoint, "zero-point", `${entryPath}.encoding.zeroPoint`).part;
+        const zeroPart = claim(
+          refs.zeroPoint,
+          "zero-point",
+          `${entryPath}.encoding.zeroPoint`,
+        ).part;
         if (zeroPart !== firstPart) {
           fail(
             `${entryPath}.encoding.zeroPoint: zeroPoint が part ${zeroPart}・実体の先頭が part ${firstPart}（同一 part MUST）`,
@@ -873,9 +879,9 @@ export const validateModelDescriptor = (descriptor: ModelDescriptor): void => {
   const actual = sortedByCodePoints(usedCodecs);
   if (!sameSet(declared, actual)) {
     fail(
-      `${path}.codecs [${declared.join(", ")}] が束縛表の codec 集合 [${
-        actual.join(", ")
-      }] と一致しない`,
+      `${path}.codecs [${declared.join(", ")}] が束縛表の codec 集合 [${actual.join(
+        ", ",
+      )}] と一致しない`,
     );
   }
 };
@@ -919,9 +925,9 @@ export const validateAgainstGraph = (model: ModelDescriptor, graph: GraphDescrip
     const surplus = bound.filter((name) => !expected.includes(name));
     if (missing.length > 0 || surplus.length > 0) {
       fail(
-        `グラフ '${graphName}' の束縛表が initializer 宣言と一致しない: 不足 [${
-          missing.join(", ")
-        }] / 余剰 [${surplus.join(", ")}]（shared 宣言と const 供給は束縛表に載せない）`,
+        `グラフ '${graphName}' の束縛表が initializer 宣言と一致しない: 不足 [${missing.join(
+          ", ",
+        )}] / 余剰 [${surplus.join(", ")}]（shared 宣言と const 供給は束縛表に載せない）`,
       );
     }
   }
@@ -951,14 +957,15 @@ export const serializeModelDescriptor = (descriptor: ModelDescriptor): Uint8Arra
       sortedObject(supplies, (supply) => ({
         ...(supply.block === undefined
           ? {
-            pieces: supply.pieces.map((piece) => ({
-              block: piece.block,
-              rows: [piece.rows[0], piece.rows[1]],
-            })),
-          }
+              pieces: supply.pieces.map((piece) => ({
+                block: piece.block,
+                rows: [piece.rows[0], piece.rows[1]],
+              })),
+            }
           : { block: supply.block }),
         encoding: canonicalEncoding(supply.encoding),
-      }))),
+      })),
+    ),
     assets: sortedObject(descriptor.assets, (asset) => ({
       block: asset.block,
       role: asset.role,

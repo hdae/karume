@@ -12,7 +12,7 @@ const input = (m: number, k = 1536) => ({
   x: {
     dtype: "f32" as const,
     shape: [m, k],
-    data: Float32Array.from({ length: m * k }, (_, i) => Math.sin(i * .037) * .75),
+    data: Float32Array.from({ length: m * k }, (_, i) => Math.sin(i * 0.037) * 0.75),
   },
 });
 const words = (data: ArrayBufferView<ArrayBuffer>) =>
@@ -39,7 +39,8 @@ describe({
                 fuseLinearStaticQuantize: true,
               });
               try {
-                const x = input(m), expected = await baseline.run(x);
+                const x = input(m),
+                  expected = await baseline.run(x);
                 // 2回目は導出済み計画を使う。同じscaleの参照が保たれ、xは後続negまで生きる。
                 for (let repeat = 0; repeat < 2; repeat++) {
                   const actual = await fused.run(x);
@@ -121,15 +122,13 @@ describe({
             "fuseLinearStaticQuantize",
           );
         }
-        for (
-          const options of [
-            {},
-            { linearGemvReduce: "sequential" },
-            { linearGemvReduce: "parallel-subgroup32" },
-            { linearGemvReduce: "parallel", linearCompute: "f16" },
-            { linearGemvReduce: "parallel", linearCompute: "a8" },
-          ] satisfies SessionOptions[]
-        ) {
+        for (const options of [
+          {},
+          { linearGemvReduce: "sequential" },
+          { linearGemvReduce: "parallel-subgroup32" },
+          { linearGemvReduce: "parallel", linearCompute: "f16" },
+          { linearGemvReduce: "parallel", linearCompute: "a8" },
+        ] satisfies SessionOptions[]) {
           await assertRejects(
             () =>
               createSessionFromContainer(gpu, model, GRAPH_NAME, {

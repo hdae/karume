@@ -75,10 +75,7 @@ export const stridedWgsl = (spec: StridedSpec): string => {
   }
   decode.push("    let c0 = rem;");
 
-  const terms = Array.from(
-    { length: STRIDED_RANK },
-    (_, d) => `c${d} * params[${strideAt(d)}u]`,
-  );
+  const terms = Array.from({ length: STRIDED_RANK }, (_, d) => `c${d} * params[${strideAt(d)}u]`);
 
   return [
     `// karume strided copy (rank ${STRIDED_RANK}, ${scalar}, generated)`,
@@ -180,7 +177,7 @@ export const expandSrcStrides = (
   const contiguous = contiguousStrides(srcShape);
   const offset = outShape.length - srcShape.length;
   return outShape.map((_, d) =>
-    d < offset || srcShape[d - offset] === 1 ? 0 : contiguous[d - offset]
+    d < offset || srcShape[d - offset] === 1 ? 0 : contiguous[d - offset],
   );
 };
 
@@ -200,11 +197,7 @@ export const sliceSrcStrides = (srcShape: readonly number[]): number[] => {
  * 縮んだ shape から組むと切り出し軸より前の送り幅が縮み、2 行目以降が別の行を読む
  * （sym_prefix_slice の MUST と同型の罠）。
  */
-export const sliceSrcOffset = (
-  srcShape: readonly number[],
-  dim: number,
-  start: number,
-): number => {
+export const sliceSrcOffset = (srcShape: readonly number[], dim: number, start: number): number => {
   assertRank(srcShape, "slice の入力");
   if (!Number.isSafeInteger(dim) || dim < 0 || dim >= srcShape.length) {
     throw new CodegenError(
@@ -312,10 +305,7 @@ export const stridedWriteWgsl = (spec: StridedSpec): string => {
   }
   decode.push("    let c0 = rem;");
 
-  const terms = Array.from(
-    { length: STRIDED_RANK },
-    (_, d) => `c${d} * params[${strideAt(d)}u]`,
-  );
+  const terms = Array.from({ length: STRIDED_RANK }, (_, d) => `c${d} * params[${strideAt(d)}u]`);
 
   return [
     `// karume strided write (rank ${STRIDED_RANK}, ${scalar}, generated)`,
@@ -366,11 +356,7 @@ export const catOutStrides = (outShape: readonly number[]): number[] => {
   return contiguousStrides(outShape);
 };
 
-export const catOutOffset = (
-  outShape: readonly number[],
-  dim: number,
-  written: number,
-): number => {
+export const catOutOffset = (outShape: readonly number[], dim: number, written: number): number => {
   assertRank(outShape, "cat の出力");
   if (!Number.isSafeInteger(dim) || dim < 0 || dim >= outShape.length) {
     throw new CodegenError(`strided params: cat の dim ${dim} が出力 rank ${outShape.length} の外`);

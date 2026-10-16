@@ -355,7 +355,10 @@ test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（cycle
   });
   // 予算の残り（`k' = min(k, 残り − 1)`）で本数が縮み、最後の cycle は draft を採らない。
   assertEquals(run.drafter.calls.length, 3);
-  assertEquals(verifyCalls(run.fake).map((call) => call.queryLength), [4, 3, 2, 1]);
+  assertEquals(
+    verifyCalls(run.fake).map((call) => call.queryLength),
+    [4, 3, 2, 1],
+  );
 });
 
 test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 個を確定させる", async () => {
@@ -457,9 +460,9 @@ test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列は�
     assertEquals(tokenIds(greedy.events), chainFrom(PROMPT[PROMPT.length - 1], 9));
     assert(
       tokenIds(sampled.events).join() !== tokenIds(greedy.events).join(),
-      `温度 1 でも argmax の列しか出ていない（RNG が消費されていない）: ${
-        tokenIds(sampled.events).join(",")
-      }`,
+      `温度 1 でも argmax の列しか出ていない（RNG が消費されていない）: ${tokenIds(
+        sampled.events,
+      ).join(",")}`,
     );
   });
 
@@ -473,11 +476,11 @@ test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列は�
       policy: "auto",
       gate: FAST_GATE,
       session: TWO_WAY,
-      clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+      clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
     });
     // ブロック（2 cycle）が満ちるまで回す必要があるので、この step だけ予算を伸ばす。
     const budgeted: GenerationRequest = { ...request(TWO_WAY_SEED), maxNewTokens: 24 };
-    const gated = { ...opened, ...await drain(opened.sequence.generate(budgeted)) };
+    const gated = { ...opened, ...(await drain(opened.sequence.generate(budgeted))) };
     // ゲートが本当に**倒れている**（`W1` の測り直し 1 手だけを見て「落ちた」と読まない）。
     assertEquals(
       gated.stop.speculation?.switches,
@@ -623,10 +626,26 @@ test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 形�
   assertEquals(run.fake.commits, [4, 1]);
   assertEquals(run.drafter.calls.length, 1, "残り 1 個の cycle で draft run を出した");
   const verifies = verifyCalls(run.fake);
-  assertEquals(verifies.map((call) => call.queryLength), [4, 1]);
-  assertEquals(verifies.map((call) => call.lastRows), [[0, 1, 2, 3], [0]]);
-  assertEquals(verifies.map((call) => call.idsShape), [[1, 4], [1, 1]], "k'=0 は decode 形");
-  assertEquals(verifies.map((call) => call.commit), ["deferred", "deferred"]);
+  assertEquals(
+    verifies.map((call) => call.queryLength),
+    [4, 1],
+  );
+  assertEquals(
+    verifies.map((call) => call.lastRows),
+    [[0, 1, 2, 3], [0]],
+  );
+  assertEquals(
+    verifies.map((call) => call.idsShape),
+    [
+      [1, 4],
+      [1, 1],
+    ],
+    "k'=0 は decode 形",
+  );
+  assertEquals(
+    verifies.map((call) => call.commit),
+    ["deferred", "deferred"],
+  );
   // `max-tokens` の tokens は要求した数そのもの（超えても足りなくてもいけない）。
   assertEquals(withoutSpeculation(run.stop), { reason: "max-tokens", tokens: 6 });
   // `k' = 0` の cycle は draft を採らないので受理数 0 = histogram の添字 0 に入る。
@@ -700,7 +719,9 @@ test("T7 中断: draft の後・verify の前で止めれば保留は 1 つも�
 
   let caught: unknown;
   try {
-    for await (const _event of stream) { /* 中断まで汲む */ }
+    for await (const _event of stream) {
+      /* 中断まで汲む */
+    }
   } catch (error) {
     caught = error;
   }
@@ -1205,11 +1226,13 @@ test("T11 hidden: 最初の cycle の hidden は prefill の**最終 chunk** の
     request: { prompt, maxNewTokens: 3 },
   });
   assertEquals(run.fake.calls.length, 3, "prefill 2 本 + verify 1 本");
-  assertEquals(run.drafter.calls, [{
-    token: SUCCESSOR[9],
-    position: prompt.length,
-    hidden: [hiddenMark(1, 0), 9, 0, 0],
-  }]);
+  assertEquals(run.drafter.calls, [
+    {
+      token: SUCCESSOR[9],
+      position: prompt.length,
+      hidden: [hiddenMark(1, 0), 9, 0, 0],
+    },
+  ]);
 });
 
 // ---- T12 / T13: draft の値域門と last_row の pad ---------------------------------
@@ -1400,7 +1423,7 @@ test("T14 used: 配送の直後は常に「その token の position + 1」", as
  */
 const placedRows = (fake: FakeSession): number[][] =>
   fake.calls.flatMap((call) =>
-    call.ids.slice(0, call.queryLength).map((id, row) => [call.positions[row], id])
+    call.ids.slice(0, call.queryLength).map((id, row) => [call.positions[row], id]),
   );
 
 test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 frontier は次ターンへ再投入されない", async () => {
@@ -1423,7 +1446,12 @@ test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 fro
   // 同じ sequence で次のターン（frontier は既に KV に居るので prompt はそのまま流れる）。
   const next = await drain(opened.sequence.generate({ prompt: [4], maxNewTokens: 1 }));
   assertEquals(tokenIds(next.events), [SUCCESSOR[4]]);
-  assertEquals(placedRows(opened.fake), [[0, 1], [1, 2], [2, 6], [3, 4]]);
+  assertEquals(placedRows(opened.fake), [
+    [0, 1],
+    [1, 2],
+    [2, 6],
+    [3, 4],
+  ]);
 });
 
 // ---- T16: 自己採算ゲート（`policy: "auto"`・偽時計）-------------------------------
@@ -1462,9 +1490,9 @@ test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それで
     drafter,
     policy: "auto",
     gate: FAST_GATE,
-    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
   });
-  const run = { ...opened, ...await drain(opened.sequence.generate(request)) };
+  const run = { ...opened, ...(await drain(opened.sequence.generate(request))) };
 
   // 契約の芯は変わらない（ゲートは速さだけを変え、出力は変えない）。
   await assertMatchesPlain(request, run);
@@ -1510,7 +1538,7 @@ test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と fron
     drafter,
     policy: "auto",
     gate: { ...FAST_GATE, burst: 1, exploreBase: 2 },
-    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
   });
   await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
 
@@ -1539,10 +1567,7 @@ test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は
       drafter,
       policy: "auto",
       gate: FAST_GATE,
-      clock: fakeClock(
-        drafter,
-        (cycle, drafted) => slow(cycle) ? 10_000 : (drafted ? 20 : 10),
-      ),
+      clock: fakeClock(drafter, (cycle, drafted) => (slow(cycle) ? 10_000 : drafted ? 20 : 10)),
     });
     await drain(opened.sequence.generate(turn1));
     const second = await drain(opened.sequence.generate(turn2));
@@ -1592,15 +1617,15 @@ test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は
       // 既定の測り直し間隔（16 観測）は 1 ターンの予算に入らないので、周期そのものは 4 に縮めて
       // 見る（既定値の側は `generation_gate_test.ts` の T5 が持つ）。
       gate: { ...FAST_GATE, exploreBase: 4 },
-      clock: fakeClock(drafter, (cycle, drafted) => cycle === 0 ? 10_000 : (drafted ? 20 : 10)),
+      clock: fakeClock(drafter, (cycle, drafted) => (cycle === 0 ? 10_000 : drafted ? 20 : 10)),
     });
     const run = {
       ...opened,
-      ...await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 30 })),
+      ...(await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 30 }))),
     };
     assertEquals(
       run.phases.flatMap((phase) =>
-        phase.kind === "verify" || phase.kind === "decode" ? [phase.kind] : []
+        phase.kind === "verify" || phase.kind === "decode" ? [phase.kind] : [],
       ),
       [
         "verify",
@@ -1626,7 +1651,7 @@ test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は
 type StepPhase = Extract<GenerationRunPhase, { kind: "decode" | "verify" }>;
 
 const stepsOf = (phases: readonly GenerationRunPhase[]): readonly StepPhase[] =>
-  phases.flatMap((phase) => phase.kind === "decode" || phase.kind === "verify" ? [phase] : []);
+  phases.flatMap((phase) => (phase.kind === "decode" || phase.kind === "verify" ? [phase] : []));
 
 /** 期待値 1 通ぶんのゲートの状態。 */
 const gateOf = (
@@ -1644,28 +1669,31 @@ test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消�
       drafter,
       policy: "auto",
       gate: FAST_GATE,
-      clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+      clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
     });
     const run = {
       ...opened,
-      ...await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 })),
+      ...(await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }))),
     };
     const steps = stepsOf(run.phases);
 
     // 配送は 4 →（`W1` の初回サンプル）1 → 4 → 4 → plain 5 本 → 予算末尾の 1（T16 の commits）。
     // 壁はその形のとおり「draft を採った cycle だけ 100ms」である。
-    assertEquals(steps.map((phase) => phase.kind), [
-      "verify",
-      "decode",
-      "verify",
-      "verify",
-      "decode",
-      "decode",
-      "decode",
-      "decode",
-      "decode",
-      "verify",
-    ]);
+    assertEquals(
+      steps.map((phase) => phase.kind),
+      [
+        "verify",
+        "decode",
+        "verify",
+        "verify",
+        "decode",
+        "decode",
+        "decode",
+        "decode",
+        "decode",
+        "verify",
+      ],
+    );
     assertEquals(
       steps.map((phase) => phase.wallMs),
       [100, 10, 100, 100, 10, 10, 10, 10, 10, 10],
@@ -1679,30 +1707,33 @@ test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消�
       drafter,
       policy: "auto",
       gate: FAST_GATE,
-      clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+      clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
     });
     const run = {
       ...opened,
-      ...await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 })),
+      ...(await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }))),
     };
 
     // 3 本目の投機 cycle（run 添字 3）でブロック 2 本目が満ちて倒れる = その観測の**結果**が
     // `mode: "plain"` / `switches: 1` である。観測の前に読む実装だと 1 本ぶん後ろへずれる。
-    assertEquals(stepsOf(run.phases).map((phase) => phase.gate), [
-      // ターン最初の cycle は壁の観測に混ぜない（`skip()` — 混ぜない 2 種類の 1 つ）。
-      gateOf("speculate", 0, false),
-      // `W1` の初回サンプル（2 回目の決定で 1 step だけ plain を挟む）。
-      gateOf("speculate", 0, true),
-      gateOf("speculate", 0, true),
-      gateOf("plain", 1, true),
-      gateOf("plain", 1, true),
-      gateOf("plain", 1, true),
-      gateOf("plain", 1, true),
-      gateOf("plain", 1, true),
-      gateOf("plain", 1, true),
-      // 予算末尾の強制 plain も混ぜない（呼び手の予算で形が決まった cycle）。
-      gateOf("plain", 1, false),
-    ]);
+    assertEquals(
+      stepsOf(run.phases).map((phase) => phase.gate),
+      [
+        // ターン最初の cycle は壁の観測に混ぜない（`skip()` — 混ぜない 2 種類の 1 つ）。
+        gateOf("speculate", 0, false),
+        // `W1` の初回サンプル（2 回目の決定で 1 step だけ plain を挟む）。
+        gateOf("speculate", 0, true),
+        gateOf("speculate", 0, true),
+        gateOf("plain", 1, true),
+        gateOf("plain", 1, true),
+        gateOf("plain", 1, true),
+        gateOf("plain", 1, true),
+        gateOf("plain", 1, true),
+        gateOf("plain", 1, true),
+        // 予算末尾の強制 plain も混ぜない（呼び手の予算で形が決まった cycle）。
+        gateOf("plain", 1, false),
+      ],
+    );
     assertEquals(run.stop.speculation?.switches, 1, "T16 と同じ位置で倒れていない");
   });
 
@@ -1748,7 +1779,10 @@ test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消�
   await t.step("非投機の decode も壁を載せ、ゲートの欄は持たない", async () => {
     const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
     const steps = stepsOf(plain.phases);
-    assertEquals(steps.map((phase) => phase.kind), ["decode", "decode"]);
+    assertEquals(
+      steps.map((phase) => phase.kind),
+      ["decode", "decode"],
+    );
     for (const phase of steps) {
       const wallMs = phase.wallMs;
       // 非投機の sequence は偽時計を差せない（`now` は投機の指定の欄）ので、実値ではなく
@@ -1773,9 +1807,12 @@ test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消�
         program: { stopTokens },
       });
       const verifies = stepsOf(run.phases).flatMap((phase) =>
-        phase.kind === "verify" ? [phase] : []
+        phase.kind === "verify" ? [phase] : [],
       );
-      assertEquals(verifies.map((phase) => [phase.accepted, phase.delivered]), [[2, 2]]);
+      assertEquals(
+        verifies.map((phase) => [phase.accepted, phase.delivered]),
+        [[2, 2]],
+      );
       assertEquals(
         verifies.reduce((sum, phase) => sum + (phase.delivered ?? 0), 0),
         run.stop.speculation?.delivered,
@@ -1791,7 +1828,7 @@ test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消�
       request: { prompt: PROMPT, maxNewTokens: 7 },
     });
     const delivered = stepsOf(run.phases).flatMap((phase) =>
-      phase.kind === "verify" ? [phase.delivered] : []
+      phase.kind === "verify" ? [phase.delivered] : [],
     );
     assertEquals(delivered, [2, 2, 2]);
     assertEquals(run.stop.speculation?.delivered, 6);
@@ -1928,7 +1965,10 @@ test("acceptDrafts: 先頭一致で止まった位置が受理数・その行の
     const { row } = rowsOf([8, 7, 3, 13]);
     const { sampler, histories } = recordingSampler();
     acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop);
-    assertEquals(histories, [[1, 2, 6], [1, 2, 6, 8]]);
+    assertEquals(histories, [
+      [1, 2, 6],
+      [1, 2, 6, 8],
+    ]);
   });
 
   await t.step("受理した draft が停止 token なら列挙を止め、後続行の抽選をしない", () => {
@@ -1936,23 +1976,32 @@ test("acceptDrafts: 先頭一致で止まった位置が受理数・その行の
     // 非投機はこの位置で生成を終えるので、その先の logits には触れないのが正しい。
     const { row, read } = rowsOf([8, 9]);
     const { sampler, histories } = recordingSampler();
-    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], (token) => token === 9), {
-      accepted: 2,
-      confirmed: [8, 9],
-    });
+    assertEquals(
+      acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], (token) => token === 9),
+      {
+        accepted: 2,
+        confirmed: [8, 9],
+      },
+    );
     assertEquals(read, [0, 1], "停止 token の先の行を読んでいる");
     // 抽選も 2 回だけ（確定 token 1 個につき 1 回 = RNG の消費列が非投機と並ぶ）。
-    assertEquals(histories, [[1, 2, 6], [1, 2, 6, 8]]);
+    assertEquals(histories, [
+      [1, 2, 6],
+      [1, 2, 6, 8],
+    ]);
   });
 
   await t.step("棄却時の b′ が停止 token なら確定列は accepted + 1 個のまま", () => {
     // 行 1 で外れて b′ = 7 を引き、その 7 が停止 token。列は `[d₁, b′]` = 長さ accepted + 1。
     const { row, read } = rowsOf([8, 7, 3, 13]);
     const { sampler } = recordingSampler();
-    assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], (token) => token === 7), {
-      accepted: 1,
-      confirmed: [8, 7],
-    });
+    assertEquals(
+      acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], (token) => token === 7),
+      {
+        accepted: 1,
+        confirmed: [8, 7],
+      },
+    );
     assertEquals(read, [0, 1]);
   });
 });
@@ -2109,7 +2158,7 @@ test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の c
     drafter,
     policy: "auto",
     gate: FAST_GATE,
-    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? 100 : 10),
+    clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
   });
   const first = await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
   assertEquals(first.stop.speculation?.switches, 1, "前提: 元のゲートが plain へ倒れていない");
@@ -2159,7 +2208,7 @@ test("T18 分岐: ゲートは写して共有しない（分岐だけを倒し�
     drafter,
     policy: "auto",
     gate: FAST_GATE,
-    clock: fakeClock(drafter, (_cycle, drafted) => drafted ? (slow ? 100 : 20) : 10),
+    clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? (slow ? 100 : 20) : 10)),
   });
   const first = await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
   assertEquals(first.stop.speculation?.switches, 0, "前提: 元のゲートが投機のまま残っていない");

@@ -41,8 +41,7 @@ const SCHEMA = 1;
 const MODE_ENV = "KARUME_SURFACE";
 
 /** 面が食い違ったときに読み手へ渡す手順。 */
-const HOW_TO_UPDATE =
-  `意図した変更なら ${MODE_ENV}=write で同じテストを回してスナップショットを更新し、差分を CHANGELOG に書くこと。`;
+const HOW_TO_UPDATE = `意図した変更なら ${MODE_ENV}=write で同じテストを回してスナップショットを更新し、差分を CHANGELOG に書くこと。`;
 
 /**
  * 公開シンボル 1 つ。`kind` は `deno doc` の語彙（`class` / `function` / `typeAlias` /
@@ -78,7 +77,7 @@ const list = (value: unknown, what: string): readonly unknown[] => {
 };
 
 /** ロケール非依存の辞書順（fixture の並びを実行環境で揺らさない）。 */
-const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+const compare = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 const bySymbol = (left: PublicSymbol, right: PublicSymbol): number =>
   left.name === right.name ? compare(left.kind, right.kind) : compare(left.name, right.name);
@@ -180,9 +179,8 @@ const readSurface = (checker: Checker, program: Program, entry: string): PublicS
   for (const exported of checker.getExportsOfModule(moduleSymbol)) {
     // 名前は export 側の綴り（`export { a as b }` は `b`）、kind は別名を辿った実体から採る。
     const name = exported.name;
-    const target = (exported.flags & SymbolFlags.Alias) === 0
-      ? exported
-      : checker.getAliasedSymbol(exported);
+    const target =
+      (exported.flags & SymbolFlags.Alias) === 0 ? exported : checker.getAliasedSymbol(exported);
     if (checker.isUnknownSymbol(target)) {
       throw new Error(`公開面の門: ${entry} の ${name} の別名を解決できない`);
     }
@@ -229,9 +227,9 @@ const parseSnapshot = (source: string, file: URL): SurfaceSnapshot => {
     );
   }
   const entries: Record<string, readonly PublicSymbol[]> = {};
-  for (
-    const [spec, value] of Object.entries(record(parsed.entries, "スナップショットの entries"))
-  ) {
+  for (const [spec, value] of Object.entries(
+    record(parsed.entries, "スナップショットの entries"),
+  )) {
     entries[spec] = list(value, `entries["${spec}"]`).map((item) => {
       const symbol = record(item, `entries["${spec}"] の要素`);
       return {

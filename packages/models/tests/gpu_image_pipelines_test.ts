@@ -141,21 +141,23 @@ type Family = {
 
 /** 配布形の骨格（部品 1 本・quant 1 つ）。 */
 const manifestOf = (pipeline: string, key: string, config: Record<string, unknown>) =>
-  parseManifest(JSON.stringify({
-    format: "karume/5",
-    generator: "karume/0.1.0",
-    defaultModel: "test",
-    models: {
-      test: {
-        pipeline,
-        weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
-        assets: {},
-        quants: { f32: { weights: { [key]: "f32" }, session: {} } },
-        defaultQuant: "f32",
-        pipelineConfig: config,
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "karume/0.1.0",
+      defaultModel: "test",
+      models: {
+        test: {
+          pipeline,
+          weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
+          assets: {},
+          quants: { f32: { weights: { [key]: "f32" }, session: {} } },
+          defaultQuant: "f32",
+          pipelineConfig: config,
+        },
       },
-    },
-  }));
+    }),
+  );
 
 /** 部品 1 本の容器を書いて、全量面のキー（`<部品>[i]`）へ畳む。 */
 const assetsOf = async (key: string, graph: IrDeclaration) =>
@@ -231,19 +233,27 @@ const DEPTH_CONFIG: Record<string, unknown> = {
 const siglip2: Family = {
   name: "Siglip2Pipeline.embed",
   build: async (options) => {
-    const pipeline = await Siglip2Pipeline.fromAssets({
-      manifest: manifestOf("siglip2/1", "vision", SIGLIP2_CONFIG),
-      assets: await assetsOf(
-        "vision",
-        declaration(["reshape", "add"], "pooler_output", {
-          flat: f32([1, CHANNELS * PLANE]),
-          pooler_output: f32([1, CHANNELS * PLANE]),
-        }, [
-          { op: "reshape", ins: ["pixel_values"], outs: ["flat"], attrs: {} },
-          { op: "add", ins: ["flat", "flat"], outs: ["pooler_output"], attrs: {} },
-        ]),
-      ),
-    }, options);
+    const pipeline = await Siglip2Pipeline.fromAssets(
+      {
+        manifest: manifestOf("siglip2/1", "vision", SIGLIP2_CONFIG),
+        assets: await assetsOf(
+          "vision",
+          declaration(
+            ["reshape", "add"],
+            "pooler_output",
+            {
+              flat: f32([1, CHANNELS * PLANE]),
+              pooler_output: f32([1, CHANNELS * PLANE]),
+            },
+            [
+              { op: "reshape", ins: ["pixel_values"], outs: ["flat"], attrs: {} },
+              { op: "add", ins: ["flat", "flat"], outs: ["pooler_output"], attrs: {} },
+            ],
+          ),
+        ),
+      },
+      options,
+    );
     return {
       run: async (image) => ({ values: Array.from(await pipeline.embed(image)) }),
       dispose: () => pipeline.dispose(),
@@ -262,19 +272,27 @@ const siglip2: Family = {
 const birefnet: Family = {
   name: "BirefnetPipeline.segment",
   build: async (options) => {
-    const pipeline = await BirefnetPipeline.fromAssets({
-      manifest: manifestOf("birefnet/2", "matte", BIREFNET_CONFIG),
-      assets: await assetsOf(
-        "matte",
-        declaration(["sum", "reshape"], "logits", {
-          summed: f32([1, SIZE, SIZE]),
-          logits: f32([1, 1, SIZE, SIZE]),
-        }, [
-          { op: "sum", ins: ["pixel_values"], outs: ["summed"], attrs: { dim: 1 } },
-          { op: "reshape", ins: ["summed"], outs: ["logits"], attrs: {} },
-        ]),
-      ),
-    }, options);
+    const pipeline = await BirefnetPipeline.fromAssets(
+      {
+        manifest: manifestOf("birefnet/2", "matte", BIREFNET_CONFIG),
+        assets: await assetsOf(
+          "matte",
+          declaration(
+            ["sum", "reshape"],
+            "logits",
+            {
+              summed: f32([1, SIZE, SIZE]),
+              logits: f32([1, 1, SIZE, SIZE]),
+            },
+            [
+              { op: "sum", ins: ["pixel_values"], outs: ["summed"], attrs: { dim: 1 } },
+              { op: "reshape", ins: ["summed"], outs: ["logits"], attrs: {} },
+            ],
+          ),
+        ),
+      },
+      options,
+    );
     return {
       run: async (image) => {
         const matte = await pipeline.segment(image);
@@ -319,15 +337,18 @@ const birefnet: Family = {
 const depthAnything: Family = {
   name: "DepthAnythingPipeline.estimate",
   build: async (options) => {
-    const pipeline = await DepthAnythingPipeline.fromAssets({
-      manifest: manifestOf("depth-anything/1", "depth", DEPTH_CONFIG),
-      assets: await assetsOf(
-        "depth",
-        declaration(["sum"], "predicted_depth", { predicted_depth: f32([1, SIZE, SIZE]) }, [
-          { op: "sum", ins: ["pixel_values"], outs: ["predicted_depth"], attrs: { dim: 1 } },
-        ]),
-      ),
-    }, options);
+    const pipeline = await DepthAnythingPipeline.fromAssets(
+      {
+        manifest: manifestOf("depth-anything/1", "depth", DEPTH_CONFIG),
+        assets: await assetsOf(
+          "depth",
+          declaration(["sum"], "predicted_depth", { predicted_depth: f32([1, SIZE, SIZE]) }, [
+            { op: "sum", ins: ["pixel_values"], outs: ["predicted_depth"], attrs: { dim: 1 } },
+          ]),
+        ),
+      },
+      options,
+    );
     return {
       run: async (image) => {
         const depth = await pipeline.estimate(image);
@@ -394,7 +415,7 @@ for (const family of [siglip2, birefnet, depthAnything]) {
       it("並行に呼んでも両方が正しい値を返す（1 つの Session を順に使う）", async () => {
         await withGpu(async (gpu) => {
           let calls = 0;
-          const handle = await family.build({ gpu, onRunDiagnostics: () => calls += 1 });
+          const handle = await family.build({ gpu, onRunDiagnostics: () => (calls += 1) });
           try {
             const flipped: Rgb8Image = { ...IMAGE, data: IMAGE.data.map((byte) => 255 - byte) };
             const [first, second] = await Promise.all([handle.run(IMAGE), handle.run(flipped)]);

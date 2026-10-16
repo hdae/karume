@@ -121,7 +121,7 @@ const asDtypeSpec = (value: unknown): DtypeSpec => {
     return {
       kind,
       slots: array(field(value, "slots"), "dtypes.slots").map((slot, index) =>
-        strings(slot, `dtypes.slots[${index}]`)
+        strings(slot, `dtypes.slots[${index}]`),
       ),
     };
   }
@@ -180,13 +180,15 @@ const asOpEntry = (raw: unknown): OpEntry => {
       );
     }),
     attrs: strings(field(raw, "attrs"), "attrs"),
-    optionalAttrs: raw["optional_attrs"] === undefined
-      ? []
-      : strings(raw["optional_attrs"], "optional_attrs"),
-    states: states === undefined || typeof required !== "boolean" ? undefined : {
-      keys: strings(field(states, "keys"), "states.keys"),
-      required,
-    },
+    optionalAttrs:
+      raw["optional_attrs"] === undefined ? [] : strings(raw["optional_attrs"], "optional_attrs"),
+    states:
+      states === undefined || typeof required !== "boolean"
+        ? undefined
+        : {
+            keys: strings(field(states, "keys"), "states.keys"),
+            required,
+          },
     weightSlot,
     channelAxis,
   };
@@ -236,27 +238,35 @@ const asShapeCase = (raw: unknown): ShapeCase => {
   return {
     op,
     ins: array(field(raw, "ins"), `${op}.ins`).map((shape, index) =>
-      dims(shape, `${op}.ins[${index}]`)
+      dims(shape, `${op}.ins[${index}]`),
     ),
     attrs: attrs === undefined ? undefined : attrs,
     declared: declared === undefined ? undefined : dims(declared, `${op}.declared`),
     bindings,
-    states: states === undefined ? undefined : Object.fromEntries(
-      Object.entries(states).map(([key, slot]) => {
-        if (typeof slot !== "string") {
-          throw new Error(`fixture: ${op}.states[${key}] が文字列でない`);
-        }
-        return [key, slot];
-      }),
-    ),
-    stateShapes: stateShapes === undefined ? undefined : Object.fromEntries(
-      Object.entries(stateShapes).map((
-        [slot, shape],
-      ) => [slot, dims(shape, `${op}.state_shapes['${slot}']`)]),
-    ),
-    outs: outs === undefined
-      ? undefined
-      : array(outs, `${op}.outs`).map((shape, index) => dims(shape, `${op}.outs[${index}]`)),
+    states:
+      states === undefined
+        ? undefined
+        : Object.fromEntries(
+            Object.entries(states).map(([key, slot]) => {
+              if (typeof slot !== "string") {
+                throw new Error(`fixture: ${op}.states[${key}] が文字列でない`);
+              }
+              return [key, slot];
+            }),
+          ),
+    stateShapes:
+      stateShapes === undefined
+        ? undefined
+        : Object.fromEntries(
+            Object.entries(stateShapes).map(([slot, shape]) => [
+              slot,
+              dims(shape, `${op}.state_shapes['${slot}']`),
+            ]),
+          ),
+    outs:
+      outs === undefined
+        ? undefined
+        : array(outs, `${op}.outs`).map((shape, index) => dims(shape, `${op}.outs[${index}]`)),
     throws,
     why: typeof raw["why"] === "string" ? raw["why"] : "",
   };
@@ -288,10 +298,7 @@ const label = (testCase: ShapeCase): string =>
 
 test("適合表の op 集合が契約表と完全一致する", async () => {
   const fixture = await loadFixture();
-  assertEquals(
-    fixture.ops.map((entry) => entry.op).sort(),
-    [...OP_CONTRACTS.keys()].sort(),
-  );
+  assertEquals(fixture.ops.map((entry) => entry.op).sort(), [...OP_CONTRACTS.keys()].sort());
   // 表の中で op が重複していない（重複すると片方の宣言が黙って無視される）
   assertEquals(new Set(fixture.ops.map((entry) => entry.op)).size, fixture.ops.length);
 });
@@ -324,10 +331,12 @@ test("適合表のアリティ / スロット dtype / attrs キーが契約表�
       `${entry.op}: 省略可能 attrs キー集合`,
     );
     assertEquals(
-      contract.states === undefined ? undefined : {
-        keys: [...contract.states.keys].sort(),
-        required: contract.states.required,
-      },
+      contract.states === undefined
+        ? undefined
+        : {
+            keys: [...contract.states.keys].sort(),
+            required: contract.states.required,
+          },
       entry.states === undefined
         ? undefined
         : { keys: [...entry.states.keys].sort(), required: entry.states.required },
@@ -368,22 +377,18 @@ test("適合表の出力 dtype 写像が契約表と一致する", async () => {
     const domain = slots.kind === "uniform" ? slots.accept : slots.slots[0];
     // 省略された op は「出力 1 本・スロット 0 の受理集合上の恒等写像」が期待値。
     const expected = (entry.outDtypes ?? [{}]).map((slot) =>
-      Object.fromEntries([...domain].sort().map((dtype) => [dtype, slot[dtype] ?? dtype]))
+      Object.fromEntries([...domain].sort().map((dtype) => [dtype, slot[dtype] ?? dtype])),
     );
     assertEquals(
       contract.outputDtypes.map((slot) =>
-        Object.fromEntries([...slot].sort(([a], [b]) => a.localeCompare(b)))
+        Object.fromEntries([...slot].sort(([a], [b]) => a.localeCompare(b))),
       ),
       expected,
       `${entry.op}: 出力 slot 別の dtype 写像`,
     );
     // 出力数は写像の列長そのもの（表と実装で本数が割れると、2 本目の出力の dtype が
     // 誰にも照合されない状態になる）。
-    assertEquals(
-      outputCountOf(contract),
-      expected.length,
-      `${entry.op}: 契約が宣言する出力数`,
-    );
+    assertEquals(outputCountOf(contract), expected.length, `${entry.op}: 契約が宣言する出力数`);
   }
 });
 
@@ -479,17 +484,22 @@ test("適合表の出力 shape 規則を computeOutputShape がそのとおり�
     const contract = resolveOpContract(testCase.op);
     const ins = testCase.ins.map((shape) => resolveDims(shape, testCase.bindings));
     const context = {
-      declared: testCase.declared === undefined
-        ? undefined
-        : resolveDims(testCase.declared, testCase.bindings),
+      declared:
+        testCase.declared === undefined
+          ? undefined
+          : resolveDims(testCase.declared, testCase.bindings),
       attrs: testCase.attrs,
       bindings: testCase.bindings,
       states: testCase.states,
-      stateShapes: testCase.stateShapes === undefined ? undefined : new Map(
-        Object.entries(testCase.stateShapes).map((
-          [slot, shape],
-        ) => [slot, resolveDims(shape, testCase.bindings)]),
-      ),
+      stateShapes:
+        testCase.stateShapes === undefined
+          ? undefined
+          : new Map(
+              Object.entries(testCase.stateShapes).map(([slot, shape]) => [
+                slot,
+                resolveDims(shape, testCase.bindings),
+              ]),
+            ),
     };
     if (testCase.throws) {
       assertThrows(

@@ -18,7 +18,7 @@
       "numpy": "2.5.2"
     }
   },
-  "tieMargin": 1e-09,
+  "tieMargin": 1e-9,
   "lucida": {
     "epsilon": 0.01,
     "measuredMaxDelta": 0.004202127456665039

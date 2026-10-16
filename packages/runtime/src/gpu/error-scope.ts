@@ -148,7 +148,10 @@ export const popFailureScopes = async (
  */
 export const discardFailureScopes = async (device: GPUDevice): Promise<boolean> => {
   const settle = (pop: Promise<GPUError | null>): Promise<boolean> =>
-    pop.then((error) => error !== null, () => true);
+    pop.then(
+      (error) => error !== null,
+      () => true,
+    );
   const validation = settle(device.popErrorScope());
   const outOfMemory = settle(device.popErrorScope());
   const [validationFailed, outOfMemoryFailed] = await Promise.all([validation, outOfMemory]);

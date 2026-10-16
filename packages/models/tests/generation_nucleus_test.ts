@@ -65,7 +65,7 @@ test("top-p 単独指定の全語彙順位", async (t) => {
     let state = 20260910;
     const logits = Float32Array.from({ length: 8192 }, () => {
       state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-      return state / 2 ** 32 * 16 - 8;
+      return (state / 2 ** 32) * 16 - 8;
     });
     const { weights, total } = orderedWeights(logits);
     let cumulative = 0;
@@ -81,14 +81,12 @@ test("top-p 単独指定の全語彙順位", async (t) => {
 
   await t.step("昇順・降順・同値が多い大語彙でも分布の全ビットが参照と一致する", () => {
     for (const shape of ["ascending", "descending", "ties"] as const) {
-      const logits = Float32Array.from(
-        { length: 32768 },
-        (_, token) =>
-          shape === "ascending"
-            ? token / 4096 - 4
-            : shape === "descending"
+      const logits = Float32Array.from({ length: 32768 }, (_, token) =>
+        shape === "ascending"
+          ? token / 4096 - 4
+          : shape === "descending"
             ? 4 - token / 4096
-            : token % 17 - 8,
+            : (token % 17) - 8,
       );
       for (const topP of [0.1, 0.9, 0.999]) assertNucleus(logits, topP);
     }

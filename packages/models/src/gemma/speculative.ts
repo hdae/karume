@@ -354,9 +354,7 @@ export const draftOnce = async (
     throw new Error(`${where}: 位置 ${position} が非負整数でない`);
   }
   if (hidden.length !== drafter.hiddenSize) {
-    throw new Error(
-      `${where}: hidden の要素数 ${hidden.length} が幅 ${drafter.hiddenSize} と違う`,
-    );
+    throw new Error(`${where}: hidden の要素数 ${hidden.length} が幅 ${drafter.hiddenSize} と違う`);
   }
   const inputs: Record<string, Tensor> = {
     [TOKEN_INPUT]: { dtype: "i32", shape: [1, 1], data: Int32Array.of(token) },

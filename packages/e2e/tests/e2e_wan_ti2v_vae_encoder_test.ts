@@ -94,7 +94,12 @@ import { normalizeWanLatents } from "../../models/src/wan/latents.ts";
 import { disposeSteps } from "../../models/src/session/dispose-steps.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { filePresent, firstBitMismatch, readBuffer, viewOf } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import {
+  filePresent,
+  firstBitMismatch,
+  readBuffer,
+  viewOf,
+} from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
   WAN_I2V_ENCODER_BAND,
   WAN_I2V_GOLDEN_CASES,
@@ -167,15 +172,16 @@ type EncoderCase = WanI2vGoldenCase & {
  * encoder の golden（fit = crop の 9 本 — golden の表の並び = 寸法ごとに画像 3 枚。回す順もこの並び = 束縛は
  * 1280×704 → 704×1280 → 256×160）。
  */
-const CASES: readonly EncoderCase[] = WAN_I2V_GOLDEN_CASES
-  .filter(({ fit }) => fit === "crop")
-  .map((testCase) => ({
+const CASES: readonly EncoderCase[] = WAN_I2V_GOLDEN_CASES.filter(({ fit }) => fit === "crop").map(
+  (testCase) => ({
     ...testCase,
     name: wanI2vGoldenName(testCase),
     role: BAND_IMAGES.includes(testCase.image) ? "band" : "accept",
-  }));
-const FAULT_CASE = CASES.find(({ image, width, height }) =>
-  image === FAULT_IMAGE && width === FAULT_SIZE.width && height === FAULT_SIZE.height
+  }),
+);
+const FAULT_CASE = CASES.find(
+  ({ image, width, height }) =>
+    image === FAULT_IMAGE && width === FAULT_SIZE.width && height === FAULT_SIZE.height,
 );
 
 const modelUrl = (part: string): URL => new URL(`${part}/${MODEL_FILE}`, ROOT);
@@ -342,21 +348,26 @@ const sliceRange = (node: IrNode | undefined): string =>
  * 故障: post の出口の切り出しを quant_conv の出力の後半（logvar 側の 48 ch）へ。出口の slice（dim 0・[0, 48)）が
  * 宣言に無ければ投げる（注入が空振りしない）。
  */
-const takeLogvarHalf = (output: string) => (nodes: readonly IrNode[]): readonly IrNode[] => {
-  const index = producers(nodes).get(output);
-  const node = index === undefined ? undefined : nodes[index];
-  if (
-    index === undefined || node?.op !== "slice" || node.attrs["dim"] !== 0 ||
-    node.attrs["start"] !== 0 || node.attrs["end"] !== LATENT_CHANNELS
-  ) {
-    throw new Error(`post の出口 '${output}' が mu の切り出しでない（${sliceRange(node)}）`);
-  }
-  const logvar = {
-    ...node,
-    attrs: { ...node.attrs, start: LATENT_CHANNELS, end: 2 * LATENT_CHANNELS },
+const takeLogvarHalf =
+  (output: string) =>
+  (nodes: readonly IrNode[]): readonly IrNode[] => {
+    const index = producers(nodes).get(output);
+    const node = index === undefined ? undefined : nodes[index];
+    if (
+      index === undefined ||
+      node?.op !== "slice" ||
+      node.attrs["dim"] !== 0 ||
+      node.attrs["start"] !== 0 ||
+      node.attrs["end"] !== LATENT_CHANNELS
+    ) {
+      throw new Error(`post の出口 '${output}' が mu の切り出しでない（${sliceRange(node)}）`);
+    }
+    const logvar = {
+      ...node,
+      attrs: { ...node.attrs, start: LATENT_CHANNELS, end: 2 * LATENT_CHANNELS },
+    };
+    return nodes.map((current, at) => (at === index ? logvar : current));
   };
-  return nodes.map((current, at) => at === index ? logvar : current);
-};
 
 /**
  * 故障: AvgDown3D の時間倍率 2 のブロック（2 本 — down_blocks.1 / .2）で、ショートカットの空間 2×2 の平均を
@@ -373,10 +384,12 @@ const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
     return index === undefined ? undefined : { index, node: nodes[index] };
   };
   const isSlice = (node: IrNode, start: number, end: number): boolean =>
-    node.op === "slice" && node.attrs["dim"] === 1 && node.attrs["start"] === start &&
+    node.op === "slice" &&
+    node.attrs["dim"] === 1 &&
+    node.attrs["start"] === start &&
     node.attrs["end"] === end;
   const replaced = new Map<number, IrNode>();
-  const cats = nodes.flatMap((node, index) => node.op === "cat" ? [index] : []);
+  const cats = nodes.flatMap((node, index) => (node.op === "cat" ? [index] : []));
   assertEquals(cats.length, 2, "pre の cat が時間倍率 2 のショートカットの 2 本でない");
   for (const catIndex of cats) {
     const cat = nodes[catIndex];
@@ -384,14 +397,23 @@ const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
     const zero = nodeOf(zeroName ?? "");
     const sum = nodeOf(sumName ?? "");
     if (
-      cat.attrs["dim"] !== 1 || cat.ins.length !== 2 || zero === undefined || sum === undefined ||
-      !isSlice(zero.node, 0, 1) || sum.node.op !== "add"
+      cat.attrs["dim"] !== 1 ||
+      cat.ins.length !== 2 ||
+      zero === undefined ||
+      sum === undefined ||
+      !isSlice(zero.node, 0, 1) ||
+      sum.node.op !== "add"
     ) {
       throw new Error(`cat '${cat.outs[0]}' がショートカットの閉じた形でない`);
     }
-    const data = sum.node.ins.map(nodeOf).find((entry) =>
-      entry !== undefined && isSlice(entry.node, 1, 2) && entry.node.ins[0] === zero.node.ins[0]
-    );
+    const data = sum.node.ins
+      .map(nodeOf)
+      .find(
+        (entry) =>
+          entry !== undefined &&
+          isSlice(entry.node, 1, 2) &&
+          entry.node.ins[0] === zero.node.ins[0],
+      );
     if (data === undefined) throw new Error(`cat '${cat.outs[0]}' の奇数番の slice が無い`);
     replaced.set(zero.index, { ...zero.node, attrs: { ...zero.node.attrs, start: 1, end: 2 } });
     replaced.set(data.index, { ...data.node, attrs: { ...data.node.attrs, start: 0, end: 1 } });
@@ -515,7 +537,8 @@ const attentionPipelines = (diagnostics: SessionDiagnostics) => {
   const pipelines = diagnostics.lastRunPipelines;
   if (pipelines === undefined) throw new Error("attn: 直近 run の pipeline の census が無い");
   const dispatches = (kernel: (typeof ATTENTION_KERNELS)[number]): number =>
-    pipelines.filter(({ key }) => key.split(":")[0] === kernel)
+    pipelines
+      .filter(({ key }) => key.split(":")[0] === kernel)
       .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
   return {
     dispatches: Object.fromEntries(ATTENTION_KERNELS.map((kernel) => [kernel, dispatches(kernel)])),
@@ -530,9 +553,9 @@ const vramNote = (sessions: EncoderParts<Session>, residents: EncoderResidents):
   const mib = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(1)} MiB`;
   const parts = Object.entries(sessions).map(([part, session]) => {
     const stats = session.diagnostics();
-    return `${part} 重み ${mib(stats.weights.allocatedBytes)}・backing ${
-      mib(stats.planBacking.residentBytes + stats.planBacking.inputBytes)
-    }（${stats.planBacking.retainedCount} 本）`;
+    return `${part} 重み ${mib(stats.weights.allocatedBytes)}・backing ${mib(
+      stats.planBacking.residentBytes + stats.planBacking.inputBytes,
+    )}（${stats.planBacking.retainedCount} 本）`;
   });
   return [...parts, `常駐 ${mib(residents.bytes)}`].join(" / ");
 };
@@ -543,8 +566,7 @@ const maxAbsOf = (values: Float32Array): number =>
 // ---- テスト -----------------------------------------------------------------------------------
 
 test({
-  name:
-    "Wan2.2 TI2V VAE encoder: 3 グラフと golden 9 本が揃っている（一部だけなら FAIL・無ければ SKIP）",
+  name: "Wan2.2 TI2V VAE encoder: 3 グラフと golden 9 本が揃っている（一部だけなら FAIL・無ければ SKIP）",
   ignore: !ANY_ASSETS,
   fn: () => {
     const missing = ASSETS.filter(({ present }) => !present).map(({ path }) => path);
@@ -649,15 +671,15 @@ test({
                 tolerance: TOLERANCE,
                 stage: "karume",
               });
-              const line = `${testCase.name}: latent maxAbs=${report.maxAbsError} refMax=${
-                maxAbsOf(golden.latent)
-              } / mu maxAbs=${muReport.maxAbsError} refMax=${
-                maxAbsOf(golden.mu)
-              } nonFinite=${report.nonFiniteCount} encodeMs=${encodeMs.toFixed(0)}${
+              const line = `${testCase.name}: latent maxAbs=${report.maxAbsError} refMax=${maxAbsOf(
+                golden.latent,
+              )} / mu maxAbs=${muReport.maxAbsError} refMax=${maxAbsOf(
+                golden.mu,
+              )} nonFinite=${report.nonFiniteCount} encodeMs=${encodeMs.toFixed(0)}${
                 cold ? "（寸法の 1 本目）" : ""
-              } / ${vramNote(live, residents)} / attention ${
-                JSON.stringify(attention.dispatches)
-              } ${attention.keys.join(" ")}`;
+              } / ${vramNote(live, residents)} / attention ${JSON.stringify(
+                attention.dispatches,
+              )} ${attention.keys.join(" ")}`;
               console.log(`[wan-ti2v-vae-encoder] ${line}`);
               assertEquals(report.nonFiniteCount, 0, `${testCase.name}: 非有限`);
               // mid の attention（D = 640・S = h·w）が融合 attention の 3 段を通る（モジュール doc）。行統計の
@@ -665,9 +687,9 @@ test({
               for (const kernel of ATTENTION_KERNELS) {
                 assert(
                   attention.dispatches[kernel] > 0,
-                  `${testCase.name}: ${kernel} の dispatch が 0 本（${
-                    JSON.stringify(attention.dispatches)
-                  }）`,
+                  `${testCase.name}: ${kernel} の dispatch が 0 本（${JSON.stringify(
+                    attention.dispatches,
+                  )}）`,
                 );
               }
               observed.set(testCase.name, report.maxAbsError);
@@ -706,10 +728,9 @@ test({
               tolerance: TOLERANCE,
               stage: "karume",
             });
-            const line =
-              `fault ${id}: maxAbs=${report.maxAbsError} nonFinite=${report.nonFiniteCount}${
-                BAND === undefined ? "" : ` band×${(report.maxAbsError / BAND).toFixed(0)}`
-              }`;
+            const line = `fault ${id}: maxAbs=${report.maxAbsError} nonFinite=${report.nonFiniteCount}${
+              BAND === undefined ? "" : ` band×${(report.maxAbsError / BAND).toFixed(0)}`
+            }`;
             console.log(`[wan-ti2v-vae-encoder] ${line}`);
             if (BAND === undefined) {
               throw new Error(`${label}: 帯が未導出（故障注入の maxAbs ${report.maxAbsError}）`);
@@ -825,21 +846,23 @@ test({
       if (BAND === undefined) {
         await t.step("帯の候補（未導出）", async () => {
           const bandCases = CASES.filter(({ role }) => role === "band");
-          const missing = bandCases.filter(({ name }) => !observed.has(name)).map(({ name }) =>
-            name
-          );
+          const missing = bandCases
+            .filter(({ name }) => !observed.has(name))
+            .map(({ name }) => name);
           const worst = Math.max(...bandCases.map(({ name }) => observed.get(name) ?? 0));
-          const candidate = missing.length > 0
-            ? `決定用 ${missing.join(" / ")} が maxAbs を出す前に落ちた — 候補にしない`
-            : worst > 0
-            ? `決定用の最悪 ${worst.toExponential(3)} × 5 = ${(worst * 5).toExponential(3)}` +
-              `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`
-            : "決定用の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
-          const accepted = CASES.filter(({ role }) => role === "accept")
-            .map(({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`);
-          const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${
-            accepted.join(" / ")
-          }`;
+          const candidate =
+            missing.length > 0
+              ? `決定用 ${missing.join(" / ")} が maxAbs を出す前に落ちた — 候補にしない`
+              : worst > 0
+                ? `決定用の最悪 ${worst.toExponential(3)} × 5 = ${(worst * 5).toExponential(3)}` +
+                  `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`
+                : "決定用の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
+          const accepted = CASES.filter(({ role }) => role === "accept").map(
+            ({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`,
+          );
+          const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
+            " / ",
+          )}`;
           await runRecordedCase(
             results,
             { id: "band-candidate", failureNote: () => message },

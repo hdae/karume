@@ -34,14 +34,20 @@ const IN_SCOPE = "packages/runtime/src/sample.ts";
 
 const PLUGIN_PATH = fileURLToPath(new URL("../oxlint-plugin.ts", import.meta.url));
 /** この workspace の Vite+ の CLI（PATH に依らず、リポが固定した版の `vp` を走らせる）。 */
-const VP_BIN = join(dirname(createRequire(import.meta.url).resolve("vite-plus/package.json")), "bin", "vp");
+const VP_BIN = join(
+  dirname(createRequire(import.meta.url).resolve("vite-plus/package.json")),
+  "bin",
+  "vp",
+);
 
 /** `vp lint -f json` の出力のうち、ここで読む欄。`offset` / `length` は UTF-8 のバイト単位。 */
 type LintDiagnostic = {
   readonly message: string;
   readonly code: string;
   readonly filename: string;
-  readonly labels: readonly { readonly span: { readonly offset: number; readonly length: number } }[];
+  readonly labels: readonly {
+    readonly span: { readonly offset: number; readonly length: number };
+  }[];
 };
 type LintOutput = { readonly diagnostics: readonly LintDiagnostic[] };
 
@@ -64,7 +70,10 @@ const viteConfig = (): string =>
 const lint = async (files: Readonly<Record<string, string>>): Promise<LintDiagnostic[]> => {
   const root = await makeTempDir({ prefix: "karume-lint-" });
   try {
-    await writeTextFile(join(root, "package.json"), '{ "name": "fixture", "private": true, "type": "module" }\n');
+    await writeTextFile(
+      join(root, "package.json"),
+      '{ "name": "fixture", "private": true, "type": "module" }\n',
+    );
     await writeTextFile(join(root, "vite.config.ts"), viteConfig());
     for (const [path, source] of Object.entries(files)) {
       await mkdir(dirname(join(root, path)), { recursive: true });
@@ -76,8 +85,13 @@ const lint = async (files: Readonly<Record<string, string>>): Promise<LintDiagno
       ({ stdout } = await promisify(execFile)(process.execPath, args, { cwd: root }));
     } catch (error) {
       if (
-        !(error instanceof Error && "code" in error && error.code === 1 &&
-          "stdout" in error && typeof error.stdout === "string")
+        !(
+          error instanceof Error &&
+          "code" in error &&
+          error.code === 1 &&
+          "stdout" in error &&
+          typeof error.stdout === "string"
+        )
       ) {
         const stderr = error instanceof Error && "stderr" in error ? String(error.stderr) : "";
         throw new Error(`vp lint が報告以外の理由で失敗した: ${stderr}`, { cause: error });
@@ -92,11 +106,15 @@ const lint = async (files: Readonly<Record<string, string>>): Promise<LintDiagno
 };
 
 /** 診断が指す元の綴り（報告の範囲が指す文字列）を、ファイルごとにソースの順で返す。 */
-const reportedByFile = async (files: Readonly<Record<string, string>>): Promise<Map<string, string[]>> => {
+const reportedByFile = async (
+  files: Readonly<Record<string, string>>,
+): Promise<Map<string, string[]>> => {
   const result = new Map<string, string[]>(Object.keys(files).map((path) => [path, []]));
   const diagnostics = await lint(files);
   const spans = diagnostics
-    .flatMap((diagnostic) => diagnostic.labels.map((label) => ({ filename: diagnostic.filename, ...label.span })))
+    .flatMap((diagnostic) =>
+      diagnostic.labels.map((label) => ({ filename: diagnostic.filename, ...label.span })),
+    )
     .sort((a, b) => a.offset - b.offset);
   for (const { filename, offset, length } of spans) {
     const bytes = new TextEncoder().encode(files[filename]);
@@ -192,18 +210,21 @@ test("型引数を書いた型と、値の位置は報告しない", async (t) =
     assertEquals(await reported(source), []);
   });
 
-  await t.step("new / from / instanceof / typeof の型クエリ・コメント・文字列は対象外", async () => {
-    const source = [
-      "// Float32Array をコメントに書いても型の位置ではない",
-      "export const a = new Float32Array(4);",
-      "export const b = Uint8Array.from([1, 2]);",
-      "export const c = (value: unknown): boolean => value instanceof Int16Array;",
-      "export const d: typeof Float64Array = Float64Array;",
-      'export const e = "Uint32Array";',
-      "export const f = Float32Array.BYTES_PER_ELEMENT;",
-    ].join("\n");
-    assertEquals(await reported(source), []);
-  });
+  await t.step(
+    "new / from / instanceof / typeof の型クエリ・コメント・文字列は対象外",
+    async () => {
+      const source = [
+        "// Float32Array をコメントに書いても型の位置ではない",
+        "export const a = new Float32Array(4);",
+        "export const b = Uint8Array.from([1, 2]);",
+        "export const c = (value: unknown): boolean => value instanceof Int16Array;",
+        "export const d: typeof Float64Array = Float64Array;",
+        'export const e = "Uint32Array";',
+        "export const f = Float32Array.BYTES_PER_ELEMENT;",
+      ].join("\n");
+      assertEquals(await reported(source), []);
+    },
+  );
 
   await t.step(
     "TypedArray の名前を型参照に書かない typeof 経由の形は取りこぼす（ADR 0002 に明記）",
@@ -224,7 +245,9 @@ test("対象は packages/<pkg>/src/ の下だけ", async (t) => {
 
   await t.step("packages の 3 パッケージの src は対象", async () => {
     const filenames = ["runtime", "hub", "models"].map((pkg) => `packages/${pkg}/src/deep/file.ts`);
-    const result = await reportedByFile(Object.fromEntries(filenames.map((filename) => [filename, bare])));
+    const result = await reportedByFile(
+      Object.fromEntries(filenames.map((filename) => [filename, bare])),
+    );
     for (const filename of filenames) {
       assertEquals(result.get(filename), ["Float32Array"], filename);
     }
@@ -238,7 +261,9 @@ test("対象は packages/<pkg>/src/ の下だけ", async (t) => {
       "tools/lint/sample.ts",
       "examples/wan/main.ts",
     ];
-    const result = await reportedByFile(Object.fromEntries(filenames.map((filename) => [filename, bare])));
+    const result = await reportedByFile(
+      Object.fromEntries(filenames.map((filename) => [filename, bare])),
+    );
     for (const filename of filenames) {
       assertEquals(result.get(filename), [], filename);
     }

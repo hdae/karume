@@ -97,11 +97,13 @@ test("適格判定は WEIGHT_SLOTS の op の weight スロット消費だけを
   // MUST: 同じ initializer が weight 以外でも消費されたら適格を失う（混在消費）。
   // 圧縮のまま上げると elementwise 側のカーネルが u32 を f32 として読む沈黙誤値になる。
   assertEquals(
-    eligible(linearDeclaration(
-      [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
-      { z: { dtype: "f32", shape: [3, 4] } },
-      ["z"],
-    )),
+    eligible(
+      linearDeclaration(
+        [{ op: "add", ins: ["w", "w"], outs: ["z"], attrs: {} }],
+        { z: { dtype: "f32", shape: [3, 4] } },
+        ["z"],
+      ),
+    ),
     [],
   );
 
@@ -244,11 +246,14 @@ const weightedModel = (
     encoding: { codec: "f16" },
   });
   // ins の並びは契約どおり（embedding は weight が先頭・他は x の次）
-  const ins = testCase.op === "embedding" ? ["w", ...testCase.inputs.map(([name]) => name)] : [
-    ...testCase.inputs.map(([name]) => name),
-    "w",
-    ...(testCase.bias === undefined ? [] : ["b"]),
-  ];
+  const ins =
+    testCase.op === "embedding"
+      ? ["w", ...testCase.inputs.map(([name]) => name)]
+      : [
+          ...testCase.inputs.map(([name]) => name),
+          "w",
+          ...(testCase.bias === undefined ? [] : ["b"]),
+        ];
   const declaration: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -367,13 +372,14 @@ test({
           `${testCase.name}: GPU 常駐圧縮バイト数`,
         );
         const reference = refTensor(testCase.weight.shape, quantized.values);
-        const operands: RefTensor[] = testCase.op === "embedding"
-          ? [reference, ...testCase.inputs.map(([, tensor]) => tensor as RefTensor)]
-          : [
-            ...testCase.inputs.map(([, tensor]) => tensor as RefTensor),
-            reference,
-            ...(testCase.bias === undefined ? [] : [testCase.bias as RefTensor]),
-          ];
+        const operands: RefTensor[] =
+          testCase.op === "embedding"
+            ? [reference, ...testCase.inputs.map(([, tensor]) => tensor as RefTensor)]
+            : [
+                ...testCase.inputs.map(([, tensor]) => tensor as RefTensor),
+                reference,
+                ...(testCase.bias === undefined ? [] : [testCase.bias as RefTensor]),
+              ];
         const expected = applyReferenceOp(
           testCase.op,
           operands,
@@ -467,9 +473,7 @@ test({
   fn: async () => {
     const vocab = 256;
     const hidden = 256;
-    const bytes = f16BytesFromBits(
-      Array.from({ length: vocab * hidden }, (_, i) => i),
-    );
+    const bytes = f16BytesFromBits(Array.from({ length: vocab * hidden }, (_, i) => i));
     const declaration: DeclarationJson = {
       format: "karume-ir",
       version: 2,
@@ -482,12 +486,14 @@ test({
         w: { dtype: "f32", shape: [vocab, hidden] },
         y: { dtype: "f32", shape: [vocab, hidden] },
       },
-      nodes: [{
-        op: "embedding",
-        ins: ["w", "index"],
-        outs: ["y"],
-        attrs: { padding_idx: -1 },
-      }],
+      nodes: [
+        {
+          op: "embedding",
+          ins: ["w", "index"],
+          outs: ["y"],
+          attrs: { padding_idx: -1 },
+        },
+      ],
     };
     const opened = await openModelBytes(declaration, [
       { graph: GRAPH_NAME, initializer: "w", bytes, encoding: { codec: "f16" } },
@@ -578,7 +584,7 @@ const poisonedF16Graph = (
 };
 
 /** 毒値 0xDEADBEEF を f32 として読んだもの（0 でない有限値）。 */
-const POISON = new Float32Array(new Uint32Array([0xDEADBEEF]).buffer)[0];
+const POISON = new Float32Array(new Uint32Array([0xdeadbeef]).buffer)[0];
 
 test({
   name: "w=f16 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
@@ -838,8 +844,7 @@ test({
  * を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま読める。
  */
 test({
-  name:
-    "graph 出力にした f16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+  name: "graph 出力にした f16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const weight = fill([3, 4], POSITIVE);

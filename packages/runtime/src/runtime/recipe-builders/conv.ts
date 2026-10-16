@@ -148,10 +148,7 @@ export const buildGruScan = async (
   const key = gruScanKey(direction);
   const { pipeline, layout, roles } = await face.state.cache.get(key, gruScanWgsl(direction));
   const [time, batch, hidden] = step.outputs[0].shape;
-  const params = face.writeParams(
-    gruScanParams({ time, batch, hidden }),
-    PARAMS_UNIFORM_USAGE,
-  );
+  const params = face.writeParams(gruScanParams({ time, batch, hidden }), PARAMS_UNIFORM_USAGE);
   builder.dispatch({
     key,
     pipeline,

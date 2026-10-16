@@ -63,7 +63,8 @@ export type TempDirOptions = { readonly prefix?: string; readonly dir?: string }
 const owned = (buffer: Buffer): Uint8Array<ArrayBuffer> => {
   const backing = buffer.buffer;
   if (
-    backing instanceof ArrayBuffer && buffer.byteOffset === 0 &&
+    backing instanceof ArrayBuffer &&
+    buffer.byteOffset === 0 &&
     backing.byteLength === buffer.byteLength
   ) {
     return new Uint8Array(backing);
@@ -90,14 +91,18 @@ export type ReadOptions = { readonly signal?: AbortSignal };
 /** `fs.readFile` refuses files above this size (ERR_FS_FILE_TOO_LARGE); larger ones are read in chunks. */
 const READ_FILE_LIMIT = 2 ** 31 - 1;
 
-export const readFile = async (path: PathLike, options?: ReadOptions): Promise<Uint8Array<ArrayBuffer>> => {
+export const readFile = async (
+  path: PathLike,
+  options?: ReadOptions,
+): Promise<Uint8Array<ArrayBuffer>> => {
   const { size } = await nodeStat(path);
   if (size <= READ_FILE_LIMIT) return owned(await nodeReadFile(path, { signal: options?.signal }));
   // Deno.readFile had no size limit (the suite reads 2.6 GB reference tensors).
   options?.signal?.throwIfAborted();
   return readRange(path, 0, size);
 };
-export const readFileSync = (path: PathLike): Uint8Array<ArrayBuffer> => owned(nodeReadFileSync(path));
+export const readFileSync = (path: PathLike): Uint8Array<ArrayBuffer> =>
+  owned(nodeReadFileSync(path));
 export const readTextFile = (path: PathLike, options?: ReadOptions): Promise<string> =>
   nodeReadFile(path, { encoding: "utf8", signal: options?.signal });
 export const readTextFileSync = (path: PathLike): string => nodeReadFileSync(path, "utf8");
@@ -107,12 +112,21 @@ const flag = (options: WriteOptions | undefined): "a" | "w" | "wx" =>
   options?.createNew === true ? "wx" : options?.append === true ? "a" : "w";
 
 // Any buffer is accepted on the write side (a deliberate `ArrayBufferLike` boundary, like Deno.writeFile).
-export const writeFile = (path: PathLike, data: Uint8Array<ArrayBufferLike>, options?: WriteOptions): Promise<void> =>
-  nodeWriteFile(path, data, { flag: flag(options) });
-export const writeFileSync = (path: PathLike, data: Uint8Array<ArrayBufferLike>, options?: WriteOptions): void =>
-  nodeWriteFileSync(path, data, { flag: flag(options) });
-export const writeTextFile = (path: PathLike, text: string, options?: WriteOptions): Promise<void> =>
-  nodeWriteFile(path, text, { encoding: "utf8", flag: flag(options) });
+export const writeFile = (
+  path: PathLike,
+  data: Uint8Array<ArrayBufferLike>,
+  options?: WriteOptions,
+): Promise<void> => nodeWriteFile(path, data, { flag: flag(options) });
+export const writeFileSync = (
+  path: PathLike,
+  data: Uint8Array<ArrayBufferLike>,
+  options?: WriteOptions,
+): void => nodeWriteFileSync(path, data, { flag: flag(options) });
+export const writeTextFile = (
+  path: PathLike,
+  text: string,
+  options?: WriteOptions,
+): Promise<void> => nodeWriteFile(path, text, { encoding: "utf8", flag: flag(options) });
 export const writeTextFileSync = (path: PathLike, text: string, options?: WriteOptions): void =>
   nodeWriteFileSync(path, text, { encoding: "utf8", flag: flag(options) });
 
@@ -141,8 +155,10 @@ export const removeSync = (path: PathLike, options?: RemoveOptions): void => {
 const tempTemplate = (options: TempDirOptions | undefined): string =>
   `${(options?.dir ?? tmpdir()).replace(/\/+$/, "")}/${options?.prefix ?? ""}`;
 
-export const makeTempDir = (options?: TempDirOptions): Promise<string> => mkdtemp(tempTemplate(options));
-export const makeTempDirSync = (options?: TempDirOptions): string => mkdtempSync(tempTemplate(options));
+export const makeTempDir = (options?: TempDirOptions): Promise<string> =>
+  mkdtemp(tempTemplate(options));
+export const makeTempDirSync = (options?: TempDirOptions): string =>
+  mkdtempSync(tempTemplate(options));
 
 const fileInfo = (stats: Stats): FileInfo => ({
   isFile: stats.isFile(),
@@ -170,8 +186,10 @@ export async function* readDir(path: PathLike): AsyncIterableIterator<DirEntry> 
 export const readDirSync = (path: PathLike): DirEntry[] =>
   readdirSync(path, { withFileTypes: true }).map(dirEntry);
 
-export const symlink = (target: PathLike, path: PathLike): Promise<void> => nodeSymlink(target, path);
-export const symlinkSync = (target: PathLike, path: PathLike): void => nodeSymlinkSync(target, path);
+export const symlink = (target: PathLike, path: PathLike): Promise<void> =>
+  nodeSymlink(target, path);
+export const symlinkSync = (target: PathLike, path: PathLike): void =>
+  nodeSymlinkSync(target, path);
 export const readLinkSync = (path: PathLike): string => readlinkSync(path, "utf8");
 
 /**

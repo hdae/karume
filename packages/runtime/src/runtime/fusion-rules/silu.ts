@@ -64,7 +64,8 @@ export const SILU_RULE = defineRule<SiluMatch>({
       !sameShape(sigmoid.outputs[0].shape, shape) ||
       mul.inputShapes.some((inputShape) => !sameShape(inputShape, shape)) ||
       !sameShape(mul.outputs[0].shape, shape)
-    ) return undefined;
+    )
+      return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
@@ -83,12 +84,14 @@ export const SILU_RULE = defineRule<SiluMatch>({
       outputName: matched.outputName,
       outputShape: matched.outputShape,
       temps: [],
-      dispatches: [{
-        key: siluKey(matched.multiplyOrder),
-        wgsl: () => siluWgsl(matched.multiplyOrder),
-        params: siluParams(count),
-        workgroups: { kind: "gridStride", items: count, size: SILU_WORKGROUP_SIZE },
-      }],
+      dispatches: [
+        {
+          key: siluKey(matched.multiplyOrder),
+          wgsl: () => siluWgsl(matched.multiplyOrder),
+          params: siluParams(count),
+          workgroups: { kind: "gridStride", items: count, size: SILU_WORKGROUP_SIZE },
+        },
+      ],
     };
   },
 });

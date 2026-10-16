@@ -385,7 +385,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     let cursor = target;
     for (let layer = 0; layer < index.layers; layer += 1) {
       const scale = scales[scalesFrom + layer];
-      const base = valuesFrom + layer * index.dim / factor;
+      const base = valuesFrom + (layer * index.dim) / factor;
       if (factor === 1) {
         for (let column = 0; column < index.dim; column += 1) {
           data[cursor + column] = Math.fround(values[base + column] * scale) * index.embedScale;
@@ -644,7 +644,10 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
           // 行キャッシュに載せるのは**両表とも行読みで引いた**行だけ（全量 block の view を
           // 保存すると block そのものが予算の外で生き残る）。中断・dispose 後には復活させない。
           if (
-            values.owned && scales.owned && !disposed && options.signal?.aborted !== true &&
+            values.owned &&
+            scales.owned &&
+            !disposed &&
+            options.signal?.aborted !== true &&
             budget - residentBytes >= rowBytes
           ) {
             rowCache.delete(id);

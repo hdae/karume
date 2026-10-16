@@ -148,11 +148,7 @@ export const toSbv2Utterance = (phrases: Sbv2Phrases): Sbv2Utterance => {
   }[] = [];
 
   for (const [index, phrase] of phrases.result.accentPhrases.entries()) {
-    const tones = phraseTones(
-      phrase.accentNucleus,
-      phrase.moras.length,
-      `accentPhrases[${index}]`,
-    );
+    const tones = phraseTones(phrase.accentNucleus, phrase.moras.length, `accentPhrases[${index}]`);
     for (const [at, mora] of phrase.moras.entries()) {
       moras.push({
         kana: mora.kana,

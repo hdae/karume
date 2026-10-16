@@ -310,7 +310,7 @@ export const maskedFillCase = (): DegenerateCase => {
   const value = -3.4028234663852886e38;
   const x = fill(outShape, SIGNED);
   // mask は最終次元を stride 0 で複製する形（実測の右詰め broadcast と同型）。
-  const mask = fill([rows, 1], (i) => i % 3 === 0 ? 1 : 0, "bool");
+  const mask = fill([rows, 1], (i) => (i % 3 === 0 ? 1 : 0), "bool");
   return {
     name: "masked_fill",
     key: MASKED_FILL_KEY,
@@ -402,14 +402,15 @@ export const convTranspose1dCase = (storage: WeightStorage): DegenerateCase => {
     uniformParams: true,
     inputs: [x, weight.payload, bias],
     weightScale: weight.scale,
-    expected: applyReferenceOp("conv_transpose1d", [x, weight.reference, bias], {
-      stride,
-      padding,
-    }, [
-      batch,
-      channelsOut,
-      lengthOut,
-    ]),
+    expected: applyReferenceOp(
+      "conv_transpose1d",
+      [x, weight.reference, bias],
+      {
+        stride,
+        padding,
+      },
+      [batch, channelsOut, lengthOut],
+    ),
     natural: Math.ceil((batch * channelsOut * lengthOut) / CONV_TRANSPOSE1D_WORKGROUP_SIZE),
     groups: 2,
   };
@@ -564,9 +565,7 @@ export const deformConv2dCase = (): DegenerateCase => {
       { padding: [paddingH, paddingW] },
       [batch, channelsOut, heightOut, widthOut],
     ),
-    natural: Math.ceil(
-      (batch * channelsOut * heightOut * widthOut) / DEFORM_CONV2D_WORKGROUP_SIZE,
-    ),
+    natural: Math.ceil((batch * channelsOut * heightOut * widthOut) / DEFORM_CONV2D_WORKGROUP_SIZE),
     groups: 2,
   };
 };
@@ -583,13 +582,7 @@ export const upsampleBilinear2dCase = (): DegenerateCase => {
     name: "upsample_bilinear2d",
     key: UPSAMPLE_BILINEAR2D_KEY,
     wgsl: UPSAMPLE_BILINEAR2D_WGSL,
-    params: upsampleBilinear2dParams(
-      heightOut * widthOut,
-      heightIn,
-      widthIn,
-      heightOut,
-      widthOut,
-    ),
+    params: upsampleBilinear2dParams(heightOut * widthOut, heightIn, widthIn, heightOut, widthOut),
     uniformParams: true,
     inputs: [x],
     expected: applyReferenceOp(
@@ -885,8 +878,8 @@ export const attentionStatsS16Case = (): DegenerateCase => {
   // GPU と同じ格納形（下位半分が偶数添字）へ詰める
   const words = new Uint32Array(rounded.length / 2);
   for (let i = 0; i < words.length; i += 1) {
-    words[i] = (f32ToF16Bits(rounded[2 * i]) & 0xffff) |
-      ((f32ToF16Bits(rounded[2 * i + 1]) & 0xffff) << 16);
+    words[i] =
+      (f32ToF16Bits(rounded[2 * i]) & 0xffff) | ((f32ToF16Bits(rounded[2 * i + 1]) & 0xffff) << 16);
   }
   return {
     name: "attention_stats s16",
@@ -965,10 +958,15 @@ export const layerNormCase = (): DegenerateCase => {
     params: layerNormParams(rows, dim, eps),
     uniformParams: true,
     inputs: [input, weight, bias],
-    expected: applyReferenceOp("layer_norm", [input, weight, bias], {
-      normalized_shape: [dim],
-      eps,
-    }, [rows, dim]),
+    expected: applyReferenceOp(
+      "layer_norm",
+      [input, weight, bias],
+      {
+        normalized_shape: [dim],
+        eps,
+      },
+      [rows, dim],
+    ),
     natural: rows,
     groups: 2,
   };
@@ -994,11 +992,7 @@ export const gruScanCase = (): DegenerateCase => {
     params: gruScanParams({ time, batch, hidden }),
     uniformParams: true,
     inputs: [gi, initial, weight, bias],
-    expected: applyReferenceOp("gru_scan", [gi, initial, weight, bias], {}, [
-      time,
-      batch,
-      hidden,
-    ]),
+    expected: applyReferenceOp("gru_scan", [gi, initial, weight, bias], {}, [time, batch, hidden]),
     natural: batch,
     groups: 2,
   };
@@ -1077,9 +1071,8 @@ export const siluCase = (): DegenerateCase => {
   const count = 100_000;
   const input = fill([count], SIGNED);
   const sigmoid = applyReferenceOp("sigmoid", [input], {}, [count]);
-  const expected = Float32Array.from(
-    { length: count },
-    (_, i) => Math.fround(input.data[i] * sigmoid.data[i]),
+  const expected = Float32Array.from({ length: count }, (_, i) =>
+    Math.fround(input.data[i] * sigmoid.data[i]),
   );
   return {
     name: "silu（融合）",
@@ -1110,10 +1103,15 @@ export const adalnNormCase = (): DegenerateCase => {
   const scaleVec = fill([dim], (i) => ((i % 7) - 3) * 0.25);
   const one = fill([1], () => 1);
   const shift = fill([dim], (i) => ((i % 5) - 2) * 0.375);
-  const normalized = applyReferenceOp("layer_norm", [input, weight, bias], {
-    normalized_shape: [dim],
-    eps,
-  }, [rows, dim]);
+  const normalized = applyReferenceOp(
+    "layer_norm",
+    [input, weight, bias],
+    {
+      normalized_shape: [dim],
+      eps,
+    },
+    [rows, dim],
+  );
   const expected = new Float32Array(rows * dim);
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < dim; col += 1) {

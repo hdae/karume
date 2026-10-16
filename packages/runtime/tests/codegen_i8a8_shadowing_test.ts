@@ -121,10 +121,10 @@ test("shadowedDeclarations は属性付きの引数（実カーネルと同じ�
   @builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
 ) { ${body} }`;
   assertEquals(shadowedDeclarations(attributed("let lid = 1u;")), ["lid@1"]);
-  assertEquals(
-    shadowedDeclarations(attributed("let wid = 0u; { var lid = 2u; }")),
-    ["wid@1", "lid@2"],
-  );
+  assertEquals(shadowedDeclarations(attributed("let wid = 0u; { var lid = 2u; }")), [
+    "wid@1",
+    "lid@2",
+  ]);
   // 対照: 引数と別名の宣言は何も報告しない。
   assertEquals(shadowedDeclarations(attributed("let tile = wid.x + lid.y;")), []);
 });
@@ -134,7 +134,7 @@ test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコー�
   assert(geometries.length >= 48, `候補が ${geometries.length} 本しか無い`);
   // 欠陥を踏む形（K 側の充填スロット = regN · tileK / 4 / wgY が 5 以上）が格子に含まれていること
   assert(
-    geometries.some((g) => g.regN * (g.tileK / 4) / g.wgY >= 5),
+    geometries.some((g) => (g.regN * (g.tileK / 4)) / g.wgY >= 5),
     "充填スロット 5 以上の幾何が候補に無い（門が欠陥を踏めない）",
   );
   const failures: string[] = [];

@@ -114,10 +114,7 @@ const assertExact = (
       assert(Number.isNaN(actual[i]), `${where}[${i}]: 参照 NaN に対し ${actual[i]}`);
       continue;
     }
-    assert(
-      actual[i] === expected[i],
-      `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`,
-    );
+    assert(actual[i] === expected[i], `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`);
   }
 };
 
@@ -211,16 +208,21 @@ const runQuantizeRows = async (
         { binding: 3, resource: { buffer: xs } },
       ],
     });
-    scheduler.dispatch(pipeline, bindGroup, [
-      groups ??
-        gridStrideWorkgroups(
-          rows,
-          geometry.rowsPerGroup,
-          gpu.limits.maxComputeWorkgroupsPerDimension,
-        ),
-      1,
-      1,
-    ], key);
+    scheduler.dispatch(
+      pipeline,
+      bindGroup,
+      [
+        groups ??
+          gridStrideWorkgroups(
+            rows,
+            geometry.rowsPerGroup,
+            gpu.limits.maxComputeWorkgroupsPerDimension,
+          ),
+        1,
+        1,
+      ],
+      key,
+    );
     await scheduler.flush();
     const qBytes = await readbackBytes(gpu.device, xq, rows * dim);
     const scaleBytes = await readbackBytes(gpu.device, xs, rows * 4);
@@ -257,8 +259,7 @@ test({
 });
 
 test({
-  name:
-    "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
+  name: "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 幾何は dim から決まる: 128 → 8 行 × 32 レーン / 64 → 16 × 16 / 20 → 32 × 8 / 8 → 128 × 2。
@@ -287,8 +288,7 @@ test({
         // 自然な本数と、縮退（2 workgroup で grid-stride を回す）の両方。
         for (const groups of [undefined, 2]) {
           const grouped = await runQuantizeRows(gpu, x, rows, dim, groups, geometry);
-          const label =
-            `dim ${dim} r${geometry.rowsPerGroup}w${geometry.lanesPerRow} groups ${groups}`;
+          const label = `dim ${dim} r${geometry.rowsPerGroup}w${geometry.lanesPerRow} groups ${groups}`;
           assertEquals([...grouped.q], [...baseline.q], `${label}: q`);
           assertEquals(
             Array.from(new Uint32Array(grouped.scale.buffer)),
@@ -304,8 +304,7 @@ test({
 });
 
 test({
-  name:
-    "quantize_rows が TS 参照と一致する（絶対値最大の厳密復元 / 全ゼロ行 / 行別 scale / 端数・実 GPU）",
+  name: "quantize_rows が TS 参照と一致する（絶対値最大の厳密復元 / 全ゼロ行 / 行別 scale / 端数・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // dim は 4 の倍数だが **256（workgroup 幅）の倍数でも 16 の倍数でもない**形を選ぶ
@@ -385,11 +384,7 @@ test({
     // |−Inf| = +Inf なので絶対値最大は +Inf（scale に符号は残らない）
     assertEquals(actual.scale[3], Number.POSITIVE_INFINITY, "−Inf 行の scale");
     // 通常行の量子化値は参照と一致（非有限行の q は契約の外 — ファイル冒頭）
-    assertExact(
-      actual.q.slice(0, dim),
-      expected.q.slice(0, dim),
-      "quantize_rows q（通常行）",
-    );
+    assertExact(actual.q.slice(0, dim), expected.q.slice(0, dim), "quantize_rows q（通常行）");
   },
 });
 
@@ -496,19 +491,16 @@ const runLinear = async (
   prepared: PreparedLinear,
   options: SessionOptions,
 ): Promise<{ readonly y: Tensor; readonly pipelineCount: number; readonly keys: string[] }> => {
-  const session = await createSessionFromContainer(
-    gpu,
-    await prepared.model,
-    GRAPH_NAME,
-    options,
-  );
+  const session = await createSessionFromContainer(gpu, await prepared.model, GRAPH_NAME, options);
   try {
     const outputs = await session.run({ x: prepared.x });
     const diagnostics = session.diagnostics();
     return {
       y: outputs["y"],
       pipelineCount: diagnostics.pipelineCount,
-      keys: requireCensus(diagnostics.lastRunPipelines, "linear").map((row) => row.key).sort(),
+      keys: requireCensus(diagnostics.lastRunPipelines, "linear")
+        .map((row) => row.key)
+        .sort(),
     };
   } finally {
     await session.dispose();
@@ -536,8 +528,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
 ];
 
 test({
-  name:
-    "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
+  name: "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -689,8 +680,7 @@ test({
  * とは無関係の別要因）ので、ここは 2 経路の一致だけを見る。
  */
 test({
-  name:
-    "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
+  name: "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const m = 3;
@@ -741,11 +731,7 @@ test({
         linearCompute: "a8",
       });
       try {
-        await assertRejects(
-          () => session.run({ x: prepared.x }),
-          ExecutionError,
-          "i32 縮約の門",
-        );
+        await assertRejects(() => session.run({ x: prepared.x }), ExecutionError, "i32 縮約の門");
       } finally {
         await session.dispose();
       }
@@ -776,12 +762,14 @@ test({
  * MUST: 重みは **group ごとに振幅を変える**（全 group 同じ scale だと group 添字の
  * 取り違え〈行/group の入れ替え・shift 誤り〉が一切値に出ない）。
  */
-const groupVarying = (cols: number, groupSize: number) => (i: number): number => {
-  const group = Math.floor((i % cols) / groupSize);
-  const row = Math.floor(i / cols);
-  const base = (0.125 + (i % 11) * 0.5) * (i % 2 === 0 ? 1 : -1);
-  return base * (1 + group * 0.75 + (row % 5) * 0.25);
-};
+const groupVarying =
+  (cols: number, groupSize: number) =>
+  (i: number): number => {
+    const group = Math.floor((i % cols) / groupSize);
+    const row = Math.floor(i / cols);
+    const base = (0.125 + (i % 11) * 0.5) * (i % 2 === 0 ? 1 : -1);
+    return base * (1 + group * 0.75 + (row % 5) * 0.25);
+  };
 
 /** `linear(x, w, b)` 1 本のグラフ（w は i4 + group scale）。 */
 const i4LinearModel = (
@@ -887,8 +875,8 @@ const prepareW4a8 = (
   const gated = Float32Array.from(x.data);
   for (let row = 0; row < m; row += 1) {
     const slice = gated.subarray(row * k, row * k + k);
-    const exempt = slice.some((value) => !Number.isFinite(value)) ||
-      slice.every((value) => value === 0);
+    const exempt =
+      slice.some((value) => !Number.isFinite(value)) || slice.every((value) => value === 0);
     if (exempt) {
       for (let i = 0; i < k; i += 1) slice[i] = SIGNED(row * k + i);
     }
@@ -911,8 +899,7 @@ const prepareW4a8 = (
 };
 
 test({
-  name:
-    "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
+  name: "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -939,11 +926,7 @@ test({
           `${testCase.name}: 走ったパイプラインキー`,
         );
         // 診断で「i4 常駐 × その group 長」が読めること（ADR 0021）
-        assertEquals(
-          key.endsWith(`:wi4g${testCase.groupSize}`),
-          true,
-          `${testCase.name}: 判別子`,
-        );
+        assertEquals(key.endsWith(`:wi4g${testCase.groupSize}`), true, `${testCase.name}: 判別子`);
       }
     } finally {
       gpu.destroy();
@@ -1000,8 +983,7 @@ test({
 });
 
 test({
-  name:
-    "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
+  name: "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1039,8 +1021,7 @@ test({
 });
 
 test({
-  name:
-    "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
+  name: "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

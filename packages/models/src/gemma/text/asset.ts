@@ -115,13 +115,11 @@ const asArray = (value: unknown, label: string): unknown[] => {
 const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
   const spec = asRecord(raw, label);
   assertAllowedKeys(spec, SPEC_KEYS, label);
-  for (
-    const [field, want] of [
-      ["normalizer", SPEC_NORMALIZER],
-      ["preTokenizer", SPEC_PRE_TOKENIZER],
-      ["decoder", SPEC_DECODER],
-    ] as const
-  ) {
+  for (const [field, want] of [
+    ["normalizer", SPEC_NORMALIZER],
+    ["preTokenizer", SPEC_PRE_TOKENIZER],
+    ["decoder", SPEC_DECODER],
+  ] as const) {
     const got = asString(readField(spec, field, label), `${label}.${field}`);
     if (got !== want) {
       throw new Error(
@@ -137,11 +135,7 @@ const parseSpec = (raw: unknown, label: string): GemmaTokenizerSpec => {
 };
 
 /** `左 右` の行を id 対 + rank（行番号）へ。 */
-const parseMerges = (
-  raw: unknown,
-  count: unknown,
-  label: string,
-): [number, number, number][] => {
+const parseMerges = (raw: unknown, count: unknown, label: string): [number, number, number][] => {
   const text = asString(raw, label);
   // MUST: 件数を突き合わせる。merges が欠けても BPE は「見つからないので結合しない」だけで
   // **落ちない** — 分割が変わって id 列が静かに別物になる。
@@ -155,10 +149,7 @@ const parseMerges = (
     if (parts.length !== 2) throw new Error(`${label}: 行 ${rank} が「左 右」でない`);
     return [
       asId(Number(parts[0]), `${label}[${rank}].左`),
-      asId(
-        Number(parts[1]),
-        `${label}[${rank}].右`,
-      ),
+      asId(Number(parts[1]), `${label}[${rank}].右`),
       rank,
     ];
   });
@@ -192,17 +183,15 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
   assertAllowedKeys(asset, ASSET_KEYS, "tokenizer");
   const spec = parseSpec(readField(asset, "spec", "tokenizer"), "tokenizer.spec");
 
-  const vocabLines = asArray(readField(asset, "vocab", "tokenizer"), "tokenizer.vocab").map((
-    token,
-    index,
-  ) => asString(token, `tokenizer.vocab[${index}]`));
+  const vocabLines = asArray(readField(asset, "vocab", "tokenizer"), "tokenizer.vocab").map(
+    (token, index) => asString(token, `tokenizer.vocab[${index}]`),
+  );
   // 行番号 = id なので、重複は「例外にならない配布破損」（先の id が引けなくなる）。
   assertUniqueLines(vocabLines, "tokenizer.vocab");
 
-  const byteIds = asArray(readField(asset, "byteIds", "tokenizer"), "tokenizer.byteIds").map((
-    id,
-    index,
-  ) => asId(id, `tokenizer.byteIds[${index}]`));
+  const byteIds = asArray(readField(asset, "byteIds", "tokenizer"), "tokenizer.byteIds").map(
+    (id, index) => asId(id, `tokenizer.byteIds[${index}]`),
+  );
   const model = createBpeModel({
     vocab: vocabLines.map((token, id) => [id, token] as const),
     merges: parseMerges(
@@ -236,12 +225,10 @@ const interpretGemmaTokenizerAsset = (raw: unknown): GemmaTokenizerAssets => {
     }
   }
   const specialIds = new Set<number>();
-  for (
-    const [index, id] of asArray(
-      readField(asset, "specialIds", "tokenizer"),
-      "tokenizer.specialIds",
-    ).entries()
-  ) {
+  for (const [index, id] of asArray(
+    readField(asset, "specialIds", "tokenizer"),
+    "tokenizer.specialIds",
+  ).entries()) {
     const specialId = asId(id, `tokenizer.specialIds[${index}]`);
     // 特殊トークンは追加語彙の部分集合（正本の `is_special_token` も追加語彙側を見る）。
     // 外れた id を通すと「skip されるはずのトークンが本文に出る / 出ないはずが消える」。

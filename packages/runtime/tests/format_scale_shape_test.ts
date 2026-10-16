@@ -146,12 +146,14 @@ const declarationOf = (testCase: Case): DeclarationJson => {
         b: { dtype: "f32", shape: [channelsOut] },
         y: { dtype: "f32", shape: [1, channelsOut, length - kernel + 1] },
       },
-      nodes: [{
-        op: "conv1d",
-        ins: ["x", "w", "b"],
-        outs: ["y"],
-        attrs: { stride: 1, padding: 0, dilation: 1, groups: 1 },
-      }],
+      nodes: [
+        {
+          op: "conv1d",
+          ins: ["x", "w", "b"],
+          outs: ["y"],
+          attrs: { stride: 1, padding: 0, dilation: 1, groups: 1 },
+        },
+      ],
     };
   }
   const [channelsIn, channelsOut, kernel] = shape;
@@ -164,12 +166,14 @@ const declarationOf = (testCase: Case): DeclarationJson => {
       b: { dtype: "f32", shape: [channelsOut] },
       y: { dtype: "f32", shape: [1, channelsOut, length - 1 + kernel] },
     },
-    nodes: [{
-      op: "conv_transpose1d",
-      ins: ["x", "w", "b"],
-      outs: ["y"],
-      attrs: { stride: 1, padding: 0 },
-    }],
+    nodes: [
+      {
+        op: "conv_transpose1d",
+        ins: ["x", "w", "b"],
+        outs: ["y"],
+        attrs: { stride: 1, padding: 0 },
+      },
+    ],
   };
 };
 

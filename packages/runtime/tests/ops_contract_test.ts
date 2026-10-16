@@ -171,22 +171,15 @@ test("ランタイム対応表と capability 照会は契約表から導かれ�
   assertEquals(slots("embedding"), [["f32"], ["i32"]]);
   assertEquals(slots("masked_fill"), [["f32"], ["bool"]]);
   // uniform 契約はアリティぶん同じ集合が並ぶ（消費側がスロット番号で引けること）
-  assertEquals(slots("mul"), [["f32", "i32"], ["f32", "i32"]]);
+  assertEquals(slots("mul"), [
+    ["f32", "i32"],
+    ["f32", "i32"],
+  ]);
   assertEquals(slots("relu"), [["f32"]]);
   assertEquals(slots("conv1d"), [["f32"], ["f32"], ["f32"]]);
-  assertEquals([...support("conv1d").attrKeys].sort(), [
-    "dilation",
-    "groups",
-    "padding",
-    "stride",
-  ]);
+  assertEquals([...support("conv1d").attrKeys].sort(), ["dilation", "groups", "padding", "stride"]);
   assertEquals(slots("conv2d"), [["f32"], ["f32"], ["f32"]]);
-  assertEquals([...support("conv2d").attrKeys].sort(), [
-    "dilation",
-    "groups",
-    "padding",
-    "stride",
-  ]);
+  assertEquals([...support("conv2d").attrKeys].sort(), ["dilation", "groups", "padding", "stride"]);
   // rms_norm はアリティ 2（bias が無い）— 射影のスロット数がそのまま契約面になる
   assertEquals(slots("rms_norm"), [["f32"], ["f32"]]);
   assertEquals([...support("rms_norm").attrKeys], ["eps"]);
@@ -239,35 +232,33 @@ test("dtype の解禁は op ごとで、実測に出ない組み合わせは f32
   // スロット別に整数 / bool を受ける。
   assertEquals(dtypes("embedding"), ["f32", "i32"]);
   assertEquals(dtypes("masked_fill"), ["bool", "f32"]);
-  for (
-    const op of [
-      "add",
-      "div",
-      "relu",
-      "gelu",
-      "gelu_tanh",
-      "sin",
-      "matmul",
-      "bmm",
-      "amax",
-      "amin",
-      "log1p",
-      "clamp",
-      "clamp_min",
-      "leaky_relu",
-      "cumsum",
-      "permute",
-      "linear",
-      "layer_norm",
-      "rms_norm",
-      "softmax",
-      "safe_softmax",
-      "conv1d",
-      "conv2d",
-      "conv3d",
-      "conv_transpose1d",
-    ]
-  ) {
+  for (const op of [
+    "add",
+    "div",
+    "relu",
+    "gelu",
+    "gelu_tanh",
+    "sin",
+    "matmul",
+    "bmm",
+    "amax",
+    "amin",
+    "log1p",
+    "clamp",
+    "clamp_min",
+    "leaky_relu",
+    "cumsum",
+    "permute",
+    "linear",
+    "layer_norm",
+    "rms_norm",
+    "softmax",
+    "safe_softmax",
+    "conv1d",
+    "conv2d",
+    "conv3d",
+    "conv_transpose1d",
+  ]) {
     assertEquals(dtypes(op), ["f32"], op);
   }
   assertThrows(() => assertDtype(resolveOpContract("amax"), "bool", "t"), OpContractError);
@@ -309,7 +300,10 @@ test("スロット別契約の出力はスロット 0 と同型で、混合は u
   ) =>
     resolveNodeDtypes(
       resolveOpContract(op),
-      node(op, inputDtypes.map((_, index) => `x${index}`)),
+      node(
+        op,
+        inputDtypes.map((_, index) => `x${index}`),
+      ),
       inputDtypes,
       [declared],
       "t",
@@ -429,14 +423,12 @@ test("deform_conv2d の attrs は padding 1 本だけ・アリティ 5 固定", 
     "deformConv2d",
   );
   // stride / dilation / groups / offset_groups の欄は無い = 宣言外キーとして落ちる
-  for (
-    const extra of [
-      { stride: [1, 1] },
-      { dilation: [1, 1] },
-      { groups: 1 },
-      { offset_groups: 1 },
-    ]
-  ) {
+  for (const extra of [
+    { stride: [1, 1] },
+    { dilation: [1, 1] },
+    { groups: 1 },
+    { offset_groups: 1 },
+  ]) {
     assertThrows(
       () =>
         assertNodeContract(
@@ -452,12 +444,10 @@ test("deform_conv2d の attrs は padding 1 本だけ・アリティ 5 固定", 
     OpContractError,
   );
   // mask を落とした DCNv1 も、余分なスロットも受理しない（アリティが絞りそのもの）
-  for (
-    const ins of [
-      ["x", "w", "off", "b"],
-      ["x", "w", "off", "mask", "b", "extra"],
-    ]
-  ) {
+  for (const ins of [
+    ["x", "w", "off", "b"],
+    ["x", "w", "off", "mask", "b", "extra"],
+  ]) {
     assertThrows(
       () => assertNodeContract(node("deform_conv2d", ins, { padding: [1, 0] }), "t"),
       OpContractError,
@@ -486,10 +476,7 @@ test("upsample_bilinear2d の attrs は output_size 1 本だけ（align_corners 
     );
   }
   // 出力空間の宣言は必須（既定値補完なし）
-  assertThrows(
-    () => assertNodeContract(node("upsample_bilinear2d", ["x"]), "t"),
-    OpContractError,
-  );
+  assertThrows(() => assertNodeContract(node("upsample_bilinear2d", ["x"]), "t"), OpContractError);
   // アリティ 1 固定（重みも bias も持たない）
   assertThrows(
     () => assertNodeContract(node("upsample_bilinear2d", ["x", "w"], { output_size: [7, 9] }), "t"),
@@ -565,10 +552,7 @@ test("出力 dtype は契約から導かれ、宣言との食い違いを拒否�
   assertEquals(resolve("bitwise_not", ["a"], ["bool"], "bool"), "bool");
   // 宣言が契約と食い違う
   assertThrows(() => resolve("mul", ["a", "b"], ["i32", "i32"], "f32"), OpContractError);
-  assertThrows(
-    () => resolve("cast", ["a"], ["f32"], "f32", { to: "i32" }),
-    OpContractError,
-  );
+  assertThrows(() => resolve("cast", ["a"], ["f32"], "f32", { to: "i32" }), OpContractError);
   // 混合型の elementwise は語彙に無い
   assertThrows(() => resolve("mul", ["a", "b"], ["i32", "f32"], "i32"), OpContractError);
   // 入力 dtype が契約外
@@ -616,9 +600,10 @@ test("出力 dtype 写像の定義域がスロット 0 の受理集合と一致�
   // 恒等でないのは実測に出た 5 系統だけ（比較 4 本 / bool の sum → i32 / where → 値の側 /
   // argmax → 添字 i32 / topk → slot 1 が添字 i32〈slot 0 の値は恒等〉）
   const nonIdentity = [...OP_CONTRACTS]
-    .filter(([name, contract]) =>
-      name !== "cast" &&
-      contract.outputDtypes.some((slot) => [...slot].some(([from, to]) => from !== to))
+    .filter(
+      ([name, contract]) =>
+        name !== "cast" &&
+        contract.outputDtypes.some((slot) => [...slot].some(([from, to]) => from !== to)),
     )
     .map(([name]) => name)
     .sort();
@@ -639,10 +624,7 @@ test("clamp / leaky_relu / 比較の attrs スキーマが値域まで検査す�
   assertEquals([...attrKeysOf(resolveOpContract("clamp"))].sort(), ["max", "min"]);
   assertEquals(attrKeysOf(resolveOpContract("leaky_relu")), ["negative_slope"]);
   assertEquals(attrKeysOf(resolveOpContract("ge_scalar")), ["value"]);
-  assertEquals(
-    assertNodeContract(node("clamp", ["a"], { min: -1, max: 1 }), "t").kind,
-    "unary",
-  );
+  assertEquals(assertNodeContract(node("clamp", ["a"], { min: -1, max: 1 }), "t").kind, "unary");
   // 必須キーの欠落（既定値補完はしない — ADR 0015 / 0012）
   assertThrows(() => assertNodeContract(node("clamp", ["a"], { min: -1 }), "t"), OpContractError);
   assertThrows(() => assertNodeContract(node("leaky_relu", ["a"], {}), "t"), OpContractError);
@@ -733,10 +715,7 @@ test("argmax は attrs 空・最終次元固定・rank 保存で、出力は i32
   // 長さ 0 なのが最終次元でなければ受理（出力が空になるだけ）
   assertEquals(shape([0, 3]), [0, 1]);
   // 契約外 attrs は fail loudly（attrs 空契約 — ADR 0012）
-  assertThrows(
-    () => assertNodeContract(node("argmax", ["x"], { dim: 1 }), "t"),
-    OpContractError,
-  );
+  assertThrows(() => assertNodeContract(node("argmax", ["x"], { dim: 1 }), "t"), OpContractError);
   assertThrows(() => shape([]), OpContractError);
   // 長さ 0 の最終次元に「最大値の添字」は無い（amax / amin と同じ絞り）
   assertThrows(() => shape([3, 0]), OpContractError);
@@ -785,9 +764,15 @@ test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32）で�
   const shapes = (ins: readonly number[], k: unknown) =>
     computeOutputShape(contract, [ins], "t", { attrs: { k } });
   // 2 本とも [..., k]（rank 保存・先行次元は素通し）
-  assertEquals(shapes([6, 10], 3), [[6, 3], [6, 3]]);
+  assertEquals(shapes([6, 10], 3), [
+    [6, 3],
+    [6, 3],
+  ]);
   assertEquals(shapes([4], 4), [[4], [4]]);
-  assertEquals(shapes([2, 3, 5], 1), [[2, 3, 1], [2, 3, 1]]);
+  assertEquals(shapes([2, 3, 5], 1), [
+    [2, 3, 1],
+    [2, 3, 1],
+  ]);
   // 受理領域の外は全て fail loudly（縮退しない）
   assertThrows(() => shapes([6, 10], 11), OpContractError, "最終次元");
   assertThrows(() => shapes([6, 10], 0), OpContractError);
@@ -812,7 +797,14 @@ test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32）で�
 test("where は三者を右詰め broadcast し、出力は値の側と同形になる", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(resolveOpContract("where"), ins, "t")[0];
-  assertEquals(shape([[1, 4], [3, 4], [3, 1]]), [3, 4]);
+  assertEquals(
+    shape([
+      [1, 4],
+      [3, 4],
+      [3, 1],
+    ]),
+    [3, 4],
+  );
   // 条件が値より低い rank（spline の inside 判定の形）
   assertEquals(shape([[5], [2, 3, 5], [1]]), [2, 3, 5]);
   // 条件だけが広い形も torch と同じく通る（出力は 3 者の broadcast）
@@ -839,8 +831,20 @@ test("出力 shape 計算が op ごとの契約どおりに決まる", () => {
     attrs?: Readonly<Record<string, unknown>>,
   ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs })[0];
   assertEquals(shape("relu", [[2, 3]]), [2, 3]);
-  assertEquals(shape("add", [[4, 1], [1, 5]]), [4, 5]);
-  assertEquals(shape("matmul", [[7, 5], [5, 3]]), [7, 3]);
+  assertEquals(
+    shape("add", [
+      [4, 1],
+      [1, 5],
+    ]),
+    [4, 5],
+  );
+  assertEquals(
+    shape("matmul", [
+      [7, 5],
+      [5, 3],
+    ]),
+    [7, 3],
+  );
   assertEquals(shape("sum", [[6, 10]], { dim: 1 }), [6]);
   assertEquals(shape("amax", [[2, 3, 4]], { dim: 2 }), [2, 3]);
   assertEquals(shape("sum", [[4]], { dim: 0 }), []);
@@ -857,32 +861,119 @@ test("出力 shape 計算が op ごとの契約どおりに決まる", () => {
 test("bmm は rank-3 のバッチ一致・縮約一致だけを受理する", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(resolveOpContract("bmm"), ins, "t")[0];
-  assertEquals(shape([[2, 6, 3], [2, 3, 5]]), [2, 6, 5]);
-  assertEquals(shape([[7, 1, 4], [7, 4, 9]]), [7, 1, 9]);
+  assertEquals(
+    shape([
+      [2, 6, 3],
+      [2, 3, 5],
+    ]),
+    [2, 6, 5],
+  );
+  assertEquals(
+    shape([
+      [7, 1, 4],
+      [7, 4, 9],
+    ]),
+    [7, 1, 9],
+  );
   // rank-2 は matmul の担当（兼用にしない）
-  assertThrows(() => shape([[6, 3], [3, 5]]), OpContractError);
-  assertThrows(() => shape([[2, 6, 3], [3, 5]]), OpContractError);
-  assertThrows(() => shape([[2, 2, 6, 3], [2, 2, 3, 5]]), OpContractError);
+  assertThrows(
+    () =>
+      shape([
+        [6, 3],
+        [3, 5],
+      ]),
+    OpContractError,
+  );
+  assertThrows(
+    () =>
+      shape([
+        [2, 6, 3],
+        [3, 5],
+      ]),
+    OpContractError,
+  );
+  assertThrows(
+    () =>
+      shape([
+        [2, 2, 6, 3],
+        [2, 2, 3, 5],
+      ]),
+    OpContractError,
+  );
   // バッチ次元の不一致（broadcast も stride 0 も語彙に無い）
-  assertThrows(() => shape([[2, 6, 3], [3, 3, 5]]), OpContractError);
-  assertThrows(() => shape([[1, 6, 3], [2, 3, 5]]), OpContractError);
+  assertThrows(
+    () =>
+      shape([
+        [2, 6, 3],
+        [3, 3, 5],
+      ]),
+    OpContractError,
+  );
+  assertThrows(
+    () =>
+      shape([
+        [1, 6, 3],
+        [2, 3, 5],
+      ]),
+    OpContractError,
+  );
   // 縮約次元の不一致（K と N / M の取り違え）
-  assertThrows(() => shape([[2, 6, 3], [2, 5, 3]]), OpContractError);
+  assertThrows(
+    () =>
+      shape([
+        [2, 6, 3],
+        [2, 5, 3],
+      ]),
+    OpContractError,
+  );
 });
 
 test("gather は先行次元一致を要求し、出力は index と同形になる", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(resolveOpContract("gather"), ins, "t")[0];
   // 実測形（src f32[16,T,512] / index i32[16,T,T]）と同型 — 最終次元だけが違う
-  assertEquals(shape([[4, 6, 9], [4, 6, 6]]), [4, 6, 6]);
+  assertEquals(
+    shape([
+      [4, 6, 9],
+      [4, 6, 6],
+    ]),
+    [4, 6, 6],
+  );
   // 出力の最終次元は src より長くてもよい（同じ添字を何度引いてもよい）
-  assertEquals(shape([[2, 3], [2, 7]]), [2, 7]);
+  assertEquals(
+    shape([
+      [2, 3],
+      [2, 7],
+    ]),
+    [2, 7],
+  );
   assertEquals(shape([[5], [3]]), [3]);
   // 先行次元の不一致（torch の一般 gather より狭い契約）
-  assertThrows(() => shape([[4, 6, 9], [4, 5, 6]]), OpContractError);
-  assertThrows(() => shape([[4, 6, 9], [3, 6, 6]]), OpContractError);
+  assertThrows(
+    () =>
+      shape([
+        [4, 6, 9],
+        [4, 5, 6],
+      ]),
+    OpContractError,
+  );
+  assertThrows(
+    () =>
+      shape([
+        [4, 6, 9],
+        [3, 6, 6],
+      ]),
+    OpContractError,
+  );
   // rank 不一致・スカラ
-  assertThrows(() => shape([[4, 6, 9], [6, 6]]), OpContractError);
+  assertThrows(
+    () =>
+      shape([
+        [4, 6, 9],
+        [6, 6],
+      ]),
+    OpContractError,
+  );
   assertThrows(() => shape([[], []]), OpContractError);
 });
 
@@ -898,25 +989,16 @@ test("sym_prefix_slice は attrs と束縛から prefix 長を決める", () => 
 
   assertEquals([...attrKeysOf(resolveOpContract("sym_prefix_slice"))].sort(), ["slices", "sym"]);
   // 相対位置バケット表の実測形（2 軸とも記号）
-  assertEquals(
-    shape([[512, 512]], { sym: "T", slices: [slice(0), slice(1)] }, { T: 7 }),
-    [7, 7],
-  );
+  assertEquals(shape([[512, 512]], { sym: "T", slices: [slice(0), slice(1)] }, { T: 7 }), [7, 7]);
   // 縮めない軸は Tmax 形のまま残る
   assertEquals(shape([[512, 64]], { sym: "T", slices: [slice(0)] }, { T: 7 }), [7, 64]);
   // coeff / offset 付き（次元言語 coeff·sym+offset をそのまま使う）
   assertEquals(shape([[64]], { sym: "T", slices: [slice(0, 2, 3)] }, { T: 5 }), [13]);
 
   // Tmax 超過（定数バッファの範囲外読み出しになる）
-  assertThrows(
-    () => shape([[8, 8]], { sym: "T", slices: [slice(0)] }, { T: 9 }),
-    OpContractError,
-  );
+  assertThrows(() => shape([[8, 8]], { sym: "T", slices: [slice(0)] }, { T: 9 }), OpContractError);
   // 入力 rank の外の dim / 束縛が渡っていない形
-  assertThrows(
-    () => shape([[8, 8]], { sym: "T", slices: [slice(2)] }, { T: 4 }),
-    OpContractError,
-  );
+  assertThrows(() => shape([[8, 8]], { sym: "T", slices: [slice(2)] }, { T: 4 }), OpContractError);
   assertThrows(() => shape([[8, 8]], { sym: "T", slices: [slice(0)] }), OpContractError);
   // MUST: 束縛の参照は Object.hasOwn のみ（prototype 由来の名前で NaN 長にしない）
   assertThrows(
@@ -1098,10 +1180,12 @@ test("融合 op の attrs スキーマが値域まで検査する", () => {
     groups: 1,
   };
   assertEquals(accept("conv2d", ["x", "w", "b"], conv2Attrs).kind, "conv2d");
-  assertEquals(
-    conv2dAttrs({ stride: [2, 3], padding: [1, 0], dilation: [1, 2], groups: 4 }, "t"),
-    { stride: [2, 3], padding: [1, 0], dilation: [1, 2], groups: 4 },
-  );
+  assertEquals(conv2dAttrs({ stride: [2, 3], padding: [1, 0], dilation: [1, 2], groups: 4 }, "t"), {
+    stride: [2, 3],
+    padding: [1, 0],
+    dilation: [1, 2],
+    groups: 4,
+  });
   // MUST: 軸ごとに独立に見る（片側だけ 0 の stride を素通しするとカーネルがハングする）
   reject("conv2d", ["x", "w", "b"], { ...conv2Attrs, stride: [0, 1] });
   reject("conv2d", ["x", "w", "b"], { ...conv2Attrs, stride: [1, 0] });
@@ -1168,7 +1252,7 @@ test("融合 op の attrs スキーマが値域まで検査する", () => {
  * 運ばれるので、往復で 1 ulp でも動くと GPU に載る埋め値が torch と食い違う。
  */
 test("masked_fill の埋め値 −3.4e38 は JSON 往復と f32 丸めで ulp が動かない", () => {
-  const value = -3.4028234663852886e+38;
+  const value = -3.4028234663852886e38;
   // f32 の最小有限値そのもの（f32 へ丸めても値が変わらない = ulp 不変）
   assertEquals(Math.fround(value), value);
   assertEquals(new Float32Array([value])[0], value);
@@ -1225,19 +1309,57 @@ test("融合 op の出力 shape が契約どおりに決まる", () => {
   assertThrows(() => shape("safe_softmax", [[3, 0]], { dim: 1 }), OpContractError);
 
   // embedding — 出力は index の形に hidden を足したもの
-  assertEquals(shape("embedding", [[7, 4], [2, 3]]), [2, 3, 4]);
+  assertEquals(
+    shape("embedding", [
+      [7, 4],
+      [2, 3],
+    ]),
+    [2, 3, 4],
+  );
   assertEquals(shape("embedding", [[7, 4], [5]]), [5, 4]);
   assertThrows(() => shape("embedding", [[7], [5]]), OpContractError);
   assertThrows(() => shape("embedding", [[7, 4], []]), OpContractError);
 
   // masked_fill — 出力は常に x と同形（mask は右詰め broadcast で読むだけ）
   const fill = { value: 0 };
-  assertEquals(shape("masked_fill", [[1, 3, 4, 5], [1, 1, 4, 5]], fill), [1, 3, 4, 5]);
+  assertEquals(
+    shape(
+      "masked_fill",
+      [
+        [1, 3, 4, 5],
+        [1, 1, 4, 5],
+      ],
+      fill,
+    ),
+    [1, 3, 4, 5],
+  );
   assertEquals(shape("masked_fill", [[3, 4, 5], [5]], fill), [3, 4, 5]);
   // MUST: mask が x を広げる形は拒否（broadcastShapes をそのまま使うと通ってしまう）
   assertThrows(() => shape("masked_fill", [[1], [4]], fill), OpContractError);
-  assertThrows(() => shape("masked_fill", [[3, 4], [2, 3, 4]], fill), OpContractError);
-  assertThrows(() => shape("masked_fill", [[3, 4], [3, 5]], fill), OpContractError);
+  assertThrows(
+    () =>
+      shape(
+        "masked_fill",
+        [
+          [3, 4],
+          [2, 3, 4],
+        ],
+        fill,
+      ),
+    OpContractError,
+  );
+  assertThrows(
+    () =>
+      shape(
+        "masked_fill",
+        [
+          [3, 4],
+          [3, 5],
+        ],
+        fill,
+      ),
+    OpContractError,
+  );
 
   // conv1d — 出力長は floor((L + 2P − D·(K−1) − 1) / S) + 1（ADR 0015 の dilation 一般形）
   const conv = { stride: 1, padding: 1, dilation: 1, groups: 1 };
@@ -1262,10 +1384,7 @@ test("融合 op の出力 shape が契約どおりに決まる", () => {
     [1, 3, 4],
   );
   // groups は Cin / Cout の両方を割り切る必要がある（重みの第 2 軸は Cin/groups）
-  assertEquals(
-    shape("conv1d", [[1, 6, 11], [9, 2, 3], [9]], { ...conv, groups: 3 }),
-    [1, 9, 11],
-  );
+  assertEquals(shape("conv1d", [[1, 6, 11], [9, 2, 3], [9]], { ...conv, groups: 3 }), [1, 9, 11]);
   assertThrows(
     () => shape("conv1d", [[1, 6, 11], [9, 2, 3], [9]], { ...conv, groups: 4 }),
     OpContractError,
@@ -1328,8 +1447,22 @@ test("契約に合わない shape は全て fail loudly", () => {
     ins: readonly (readonly number[])[],
     attrs?: Readonly<Record<string, unknown>>,
   ) => computeOutputShape(resolveOpContract(op), ins, "t", { attrs })[0];
-  assertThrows(() => shape("matmul", [[7, 5], [4, 3]]), OpContractError);
-  assertThrows(() => shape("matmul", [[2, 3, 4], [4, 3]]), OpContractError);
+  assertThrows(
+    () =>
+      shape("matmul", [
+        [7, 5],
+        [4, 3],
+      ]),
+    OpContractError,
+  );
+  assertThrows(
+    () =>
+      shape("matmul", [
+        [2, 3, 4],
+        [4, 3],
+      ]),
+    OpContractError,
+  );
   assertThrows(() => shape("sum", [[]], { dim: 0 }), OpContractError);
   // 空軸の amax は identity が定義できない（sum は 0 なので通る）
   assertThrows(() => shape("amax", [[3, 0]], { dim: 1 }), OpContractError);
@@ -1432,10 +1565,10 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
   );
   assertThrows(() => shape("rms_norm", [[3, 8], [8]], { eps: 1e39 }), OpContractError, "無限大");
   // 正常な eps はどちらも通る（門を広げすぎていないことの対）
-  assertEquals(shape("layer_norm", [[3, 8], [8], [8]], { normalized_shape: [8], eps: 1e-5 }), [
-    3,
-    8,
-  ]);
+  assertEquals(
+    shape("layer_norm", [[3, 8], [8], [8]], { normalized_shape: [8], eps: 1e-5 }),
+    [3, 8],
+  );
   assertEquals(shape("rms_norm", [[3, 8], [8]], { eps: 1e-5 }), [3, 8]);
 
   // params の f32 語へ載るスカラ attr も同じ門（「有限の f32 スカラ」の宣言どおり）
@@ -1452,7 +1585,7 @@ test("params 層の値域門は契約層にも揃っている（f32 域 / カー
     "attention",
   );
   assertEquals(
-    assertNodeContract(node("clamp", ["x"], { min: -3.4028234663852886e+38, max: 0.1 }), "t").kind,
+    assertNodeContract(node("clamp", ["x"], { min: -3.4028234663852886e38, max: 0.1 }), "t").kind,
     "unary",
   );
 
@@ -1577,10 +1710,9 @@ test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理する",
 
   // 拒否: dtype（uniform 契約なので mask も f32 — bool マスクは masked_fill の語彙）
   const maskNode = node("attention", ["q", "k", "v", "m"], attrs);
-  assertEquals(
-    resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", "f32"], ["f32"], "t"),
-    ["f32"],
-  );
+  assertEquals(resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", "f32"], ["f32"], "t"), [
+    "f32",
+  ]);
   for (const dtype of ["bool", "i32"] as const) {
     assertThrows(
       () => resolveNodeDtypes(contract, maskNode, ["f32", "f32", "f32", dtype], ["f32"], "t"),
@@ -1634,7 +1766,11 @@ test("state_append は出力 0 本の effect op で、states 欄が必須", () =
 
 // 0 本を許すのは契約が effect を宣言する op **だけ**（パーサは本数に意味を与えない）。
 test("effect でない op の outs 空は契約層が落とす", () => {
-  for (const [op, ins] of [["relu", ["a"]], ["add", ["a", "b"]], ["topk", ["a"]]] as const) {
+  for (const [op, ins] of [
+    ["relu", ["a"]],
+    ["add", ["a", "b"]],
+    ["topk", ["a"]],
+  ] as const) {
     assertThrows(
       () => assertNodeContract({ ...node(op, ins, op === "topk" ? { k: 2 } : {}), outs: [] }, "t"),
       OpContractError,
@@ -1666,17 +1802,34 @@ test("attention は B = 0 / M = 0 の退化した q を契約層で名指しし�
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(contract, ins, "t", { attrs: { scale: 0.5 } })[0];
   // 対照: 正常形は出力 [B,H,M,D] を返す
-  assertEquals(shape([[1, 2, 4, 8], [1, 2, 4, 8], [1, 2, 4, 8]]), [1, 2, 4, 8]);
+  assertEquals(
+    shape([
+      [1, 2, 4, 8],
+      [1, 2, 4, 8],
+      [1, 2, 4, 8],
+    ]),
+    [1, 2, 4, 8],
+  );
   // B = 0 は「完全一致」を満たすので素通りしていた — 実行相の行ブロック planner が attention を
   // 名乗らない診断で落ちる前に、契約層で名指しする
   assertThrows(
-    () => shape([[0, 2, 4, 8], [0, 2, 4, 8], [0, 2, 4, 8]]),
+    () =>
+      shape([
+        [0, 2, 4, 8],
+        [0, 2, 4, 8],
+        [0, 2, 4, 8],
+      ]),
     OpContractError,
     "attention の B",
   );
   // 従来形の M = 0（states 形は元から拒否していた）
   assertThrows(
-    () => shape([[1, 2, 0, 8], [1, 2, 4, 8], [1, 2, 4, 8]]),
+    () =>
+      shape([
+        [1, 2, 0, 8],
+        [1, 2, 4, 8],
+        [1, 2, 4, 8],
+      ]),
     OpContractError,
     "M が 0",
   );
@@ -1751,11 +1904,12 @@ test("省略可能 attr `window` は states 欄を持つノードでのみ宣言
     assertEquals(stateWindow({ window }, "t"), 512);
   }
   // capability 射影には必須と省略可能の**和**が載る（列挙門が states 形を拒否しないため）
-  assertEquals(
-    [...RUNTIME_SUPPORT.ops.get("attention")?.attrKeys ?? []].sort(),
-    ["readonly", "scale", "window"],
-  );
-  assertEquals([...RUNTIME_SUPPORT.ops.get("state_append")?.attrKeys ?? []], ["window"]);
+  assertEquals([...(RUNTIME_SUPPORT.ops.get("attention")?.attrKeys ?? [])].sort(), [
+    "readonly",
+    "scale",
+    "window",
+  ]);
+  assertEquals([...(RUNTIME_SUPPORT.ops.get("state_append")?.attrKeys ?? [])], ["window"]);
   // 契約外 attrs の判定は従来どおり（省略可能の受理は window 1 本だけを広げる）
   assertThrows(
     () => assertNodeContract(appendNode({ windows: 512 }), "t"),

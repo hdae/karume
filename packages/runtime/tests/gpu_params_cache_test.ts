@@ -222,86 +222,94 @@ const freshOutput = async (
 // 再試行でも同じ無効バッファを直参照する計画に当たり、validation エラーが Session の寿命いっぱい
 // 続く。巻き戻すのは「その実行が新しく足したもの」だけで、既存の正常なエントリは残す。
 describe("params の確保が非致命 OOM で失敗した実行の後（注入・実 GPU）", () => {
-  it("失敗した run が足した params と計画だけを捨てて次の run で作り直し、既存の計画は残す", {
-    ignore: !GPU_AVAILABLE,
-  }, async () => {
-    const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
-    const oom = injectOutOfMemory(gpu.device);
-    try {
-      await session.run({ x: input(4) });
+  it(
+    "失敗した run が足した params と計画だけを捨てて次の run で作り直し、既存の計画は残す",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      const oom = injectOutOfMemory(gpu.device);
+      try {
+        await session.run({ x: input(4) });
 
-      oom.arm();
-      await assertRejects(
-        () => session.run({ x: input(9) }, { T: 9 }),
-        GpuOutOfMemoryError,
-        "注入: 非致命 OOM",
-      );
-      assertEquals(oom.fired(), 1, "注入が run の pop に当たっていない（門が空振る）");
+        oom.arm();
+        await assertRejects(
+          () => session.run({ x: input(9) }, { T: 9 }),
+          GpuOutOfMemoryError,
+          "注入: 非致命 OOM",
+        );
+        assertEquals(oom.fired(), 1, "注入が run の pop に当たっていない（門が空振る）");
 
-      await session.run({ x: input(4) });
-      assertEquals(
-        session.diagnostics().lastRunPrepared?.hit,
-        true,
-        "失敗と無関係な既存の計画まで捨てている",
-      );
+        await session.run({ x: input(4) });
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          "失敗と無関係な既存の計画まで捨てている",
+        );
 
-      const retried = await session.run({ x: input(9) }, { T: 9 });
-      assertEquals(
-        session.diagnostics().lastRunPrepared?.hit,
-        false,
-        "失敗した run が登録した計画が残っている",
-      );
-      assertEquals(
-        session.diagnostics().lastRunParams,
-        { allocCount: 3, reuseCount: 1 },
-        "失敗した run が確保した params をキャッシュから再利用している",
-      );
-      assertEquals(Array.from(retried["y"].data), await freshOutput(gpu, 9));
-    } finally {
-      oom.restore();
-      await session.dispose();
-      gpu.destroy();
-    }
-  });
+        const retried = await session.run({ x: input(9) }, { T: 9 });
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          false,
+          "失敗した run が登録した計画が残っている",
+        );
+        assertEquals(
+          session.diagnostics().lastRunParams,
+          { allocCount: 3, reuseCount: 1 },
+          "失敗した run が確保した params をキャッシュから再利用している",
+        );
+        assertEquals(Array.from(retried["y"].data), await freshOutput(gpu, 9));
+      } finally {
+        oom.restore();
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
 
-  it("失敗で決着した batch の enqueue が足した params と計画を捨て、次の batch で作り直す", {
-    ignore: !GPU_AVAILABLE,
-  }, async () => {
-    const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
-    const oom = injectOutOfMemory(gpu.device);
-    try {
-      const failed = await gpu.beginBatch();
-      await session.enqueue({ x: input(4) }, { batch: failed });
-      assertEquals(session.diagnostics().lastRunParams?.allocCount, 3, "導出が走っていない");
-      oom.arm();
-      await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
-      assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
+  it(
+    "失敗で決着した batch の enqueue が足した params と計画を捨て、次の batch で作り直す",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      const oom = injectOutOfMemory(gpu.device);
+      try {
+        const failed = await gpu.beginBatch();
+        await session.enqueue({ x: input(4) }, { batch: failed });
+        assertEquals(session.diagnostics().lastRunParams?.allocCount, 3, "導出が走っていない");
+        oom.arm();
+        await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
+        assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
 
-      const retry = await gpu.beginBatch();
-      await session.enqueue({ x: input(4) }, { batch: retry });
-      await retry.finish();
-      assertEquals(
-        session.diagnostics().lastRunPrepared?.hit,
-        false,
-        "失敗した batch の enqueue が登録した計画が残っている",
-      );
-      assertEquals(
-        session.diagnostics().lastRunParams,
-        { allocCount: 3, reuseCount: 1 },
-        "失敗した batch の enqueue が確保した params をキャッシュから再利用している",
-      );
-      assertEquals(
-        Array.from((await session.run({ x: input(4) }))["y"].data),
-        await freshOutput(gpu, 4),
-      );
-    } finally {
-      oom.restore();
-      await session.dispose();
-      gpu.destroy();
-    }
-  });
+        const retry = await gpu.beginBatch();
+        await session.enqueue({ x: input(4) }, { batch: retry });
+        await retry.finish();
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          false,
+          "失敗した batch の enqueue が登録した計画が残っている",
+        );
+        assertEquals(
+          session.diagnostics().lastRunParams,
+          { allocCount: 3, reuseCount: 1 },
+          "失敗した batch の enqueue が確保した params をキャッシュから再利用している",
+        );
+        assertEquals(
+          Array.from((await session.run({ x: input(4) }))["y"].data),
+          await freshOutput(gpu, 4),
+        );
+      } finally {
+        oom.restore();
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
 });
 
 // GPU 側の失敗でなければ、作れた params と計画は有効なので外さない。外すと、何度でも同じく落ちる
@@ -309,47 +317,51 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
 // 積もる（params は破棄せず weights アリーナが持つ — `RecipeBuilder.forgetParams`）。
 // enqueue は導出が入力の検査より前にあるので、入力の誤りでも params を載せた後に落ちる。
 describe("ホスト側の失敗（入力の要素数の誤り）で落ちる enqueue を繰り返したとき（実 GPU）", () => {
-  it("1 回目に作れた params と計画を残し、繰り返しても params を新しく確保しない", {
-    ignore: !GPU_AVAILABLE,
-  }, async () => {
-    const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
-    // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる。
-    const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
-    const failOnce = async (): Promise<void> => {
-      const batch = await gpu.beginBatch();
-      await assertRejects(() => session.enqueue({ x: wrongCount }, { batch }), ExecutionError);
-      await assertRejects(() => batch.finish(), ExecutionError);
-    };
-    try {
-      const initial = session.diagnostics().weights.allocCount;
-      await failOnce();
-      const derived = session.diagnostics().weights.allocCount;
-      assertEquals(derived - initial, 3, "1 回目の enqueue が導出していない（門が空振る）");
+  it(
+    "1 回目に作れた params と計画を残し、繰り返しても params を新しく確保しない",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる。
+      const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
+      const failOnce = async (): Promise<void> => {
+        const batch = await gpu.beginBatch();
+        await assertRejects(() => session.enqueue({ x: wrongCount }, { batch }), ExecutionError);
+        await assertRejects(() => batch.finish(), ExecutionError);
+      };
+      try {
+        const initial = session.diagnostics().weights.allocCount;
+        await failOnce();
+        const derived = session.diagnostics().weights.allocCount;
+        assertEquals(derived - initial, 3, "1 回目の enqueue が導出していない（門が空振る）");
 
-      await failOnce();
-      await failOnce();
-      assertEquals(
-        session.diagnostics().weights.allocCount,
-        derived,
-        "同じホスト側の失敗のたびに params を新しく確保している",
-      );
+        await failOnce();
+        await failOnce();
+        assertEquals(
+          session.diagnostics().weights.allocCount,
+          derived,
+          "同じホスト側の失敗のたびに params を新しく確保している",
+        );
 
-      const batch = await gpu.beginBatch();
-      await session.enqueue({ x: input(4) }, { batch });
-      await batch.finish();
-      assertEquals(
-        session.diagnostics().lastRunPrepared?.hit,
-        true,
-        "ホスト側の失敗で、作れた計画を捨てている",
-      );
-      assertEquals(
-        Array.from((await session.run({ x: input(4) }))["y"].data),
-        await freshOutput(gpu, 4),
-      );
-    } finally {
-      await session.dispose();
-      gpu.destroy();
-    }
-  });
+        const batch = await gpu.beginBatch();
+        await session.enqueue({ x: input(4) }, { batch });
+        await batch.finish();
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          "ホスト側の失敗で、作れた計画を捨てている",
+        );
+        assertEquals(
+          Array.from((await session.run({ x: input(4) }))["y"].data),
+          await freshOutput(gpu, 4),
+        );
+      } finally {
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
 });

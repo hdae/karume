@@ -130,10 +130,7 @@ const containerOf = (text: string) =>
 test("parseManifest: fixture の全違反ケースが宣言どおりのエラー型で赤くなる", async (t) => {
   for (const testCase of invalidCases) {
     await t.step(`${testCase.name} → ${testCase.error}`, () => {
-      const thrown = assertThrows(
-        () => parseManifest(JSON.stringify(testCase.manifest)),
-        HubError,
-      );
+      const thrown = assertThrows(() => parseManifest(JSON.stringify(testCase.manifest)), HubError);
       assertEquals(thrown.name, testCase.error);
       assert(
         matchesDeclaredClass(thrown, testCase.error),
@@ -144,10 +141,7 @@ test("parseManifest: fixture の全違反ケースが宣言どおりのエラー
 });
 
 test("parseManifest: JSON として壊れていれば ManifestFormatError に包んで再送出する", () => {
-  const error = assertThrows(
-    () => parseManifest('{"format": "karume/5",}'),
-    ManifestFormatError,
-  );
+  const error = assertThrows(() => parseManifest('{"format": "karume/5",}'), ManifestFormatError);
   assert(error.cause instanceof SyntaxError, "元の SyntaxError を cause に残す");
 });
 
@@ -156,15 +150,17 @@ test("parseManifest: v1（karume/1）は読まずに未対応 major として落
   // 新クライアントが旧 manifest を**旧解釈で黙って実行する**経路も作らない。
   const error = assertThrows(
     () =>
-      parseManifest(JSON.stringify({
-        format: "karume/1",
-        generator: "karume/0.1.0",
-        pipeline: "anima/1",
-        components: { net: { file: FILE } },
-        presets: { p: { weights: {}, session: {} } },
-        defaultPreset: "p",
-        pipelineConfig: {},
-      })),
+      parseManifest(
+        JSON.stringify({
+          format: "karume/1",
+          generator: "karume/0.1.0",
+          pipeline: "anima/1",
+          components: { net: { file: FILE } },
+          presets: { p: { weights: {}, session: {} } },
+          defaultPreset: "p",
+          pipelineConfig: {},
+        }),
+      ),
     ManifestFormatError,
   );
   assert(
@@ -179,23 +175,25 @@ test("parseManifest: 直前版（karume/4）も読まず、現行が karume/5 �
   // （この版は karume/5 のみ読む）が隠れる。断絶は format 文字列だけが宣言する（ADR 0109 決定 1）。
   const error = assertThrows(
     () =>
-      parseManifest(JSON.stringify({
-        format: "karume/4",
-        generator: "karume/0.1.0",
-        defaultModel: "m",
-        models: {
-          m: {
-            pipeline: "anima/1",
-            weights: {
-              net: { f16: { shards: [{ ...PART1, path: "net/model.f16.safetensors" }] } },
+      parseManifest(
+        JSON.stringify({
+          format: "karume/4",
+          generator: "karume/0.1.0",
+          defaultModel: "m",
+          models: {
+            m: {
+              pipeline: "anima/1",
+              weights: {
+                net: { f16: { shards: [{ ...PART1, path: "net/model.f16.safetensors" }] } },
+              },
+              assets: {},
+              quants: { q: { weights: { net: "f16" }, session: {} } },
+              defaultQuant: "q",
+              pipelineConfig: {},
             },
-            assets: {},
-            quants: { q: { weights: { net: "f16" }, session: {} } },
-            defaultQuant: "q",
-            pipelineConfig: {},
           },
-        },
-      })),
+        }),
+      ),
     ManifestFormatError,
   );
   assert(error.message.includes("karume/4"), `${error.message} が拒否した版を名指ししていない`);
@@ -214,21 +212,23 @@ test("parseManifest: karume/2 の綴り（dtype エントリが {file}）も版�
   // format を未知キー検査より先に見ていることの観測点（上の v4 と同じ理由を旧い綴りで踏む）。
   const error = assertThrows(
     () =>
-      parseManifest(JSON.stringify({
-        format: "karume/2",
-        generator: "karume/0.1.0",
-        defaultModel: "m",
-        models: {
-          m: {
-            pipeline: "anima/1",
-            weights: { net: { f16: { file: FILE } } },
-            assets: {},
-            quants: { q: { weights: { net: "f16" }, session: {} } },
-            defaultQuant: "q",
-            pipelineConfig: {},
+      parseManifest(
+        JSON.stringify({
+          format: "karume/2",
+          generator: "karume/0.1.0",
+          defaultModel: "m",
+          models: {
+            m: {
+              pipeline: "anima/1",
+              weights: { net: { f16: { file: FILE } } },
+              assets: {},
+              quants: { q: { weights: { net: "f16" }, session: {} } },
+              defaultQuant: "q",
+              pipelineConfig: {},
+            },
           },
-        },
-      })),
+        }),
+      ),
     ManifestFormatError,
   );
   assert(error.message.includes("karume/2"), `${error.message} が拒否した版を名指ししていない`);
@@ -268,10 +268,12 @@ test("parseManifest: 規模上限を数値で弾く", async (t) => {
     }
     assertThrows(
       () =>
-        parseManifest(withModel({
-          weights,
-          quants: { q: { weights: mapping, session: {} } },
-        })),
+        parseManifest(
+          withModel({
+            weights,
+            quants: { q: { weights: mapping, session: {} } },
+          }),
+        ),
       ManifestFormatError,
     );
   });
@@ -334,10 +336,7 @@ test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラー
     const text = withDeepConfig(3000);
     assert(new TextEncoder().encode(text).length < 1024 * 1024, "1MiB 未満で組めていない");
     const error = assertThrows(() => parseManifest(text), ManifestFormatError);
-    assert(
-      error.message.includes("入れ子"),
-      `${error.message} が深さ超過を名指ししていない`,
-    );
+    assert(error.message.includes("入れ子"), `${error.message} が深さ超過を名指ししていない`);
   });
 
   await t.step("実用の入れ子（pipelineConfig 数段）は通る", () => {
@@ -437,31 +436,33 @@ test("parseManifest: エラーに利用可能な model / quant / dtype ラベル
   });
   const error = assertThrows(
     () =>
-      parseManifest(JSON.stringify({
-        format: "karume/5",
-        generator: "karume/0.1.0",
-        defaultModel: "fast",
-        models: {
-          fast: {
-            pipeline: "anima/1",
-            weights: {
-              net: { f16: { container: container("b2") }, i8: { container: container("c3") } },
+      parseManifest(
+        JSON.stringify({
+          format: "karume/5",
+          generator: "karume/0.1.0",
+          defaultModel: "fast",
+          models: {
+            fast: {
+              pipeline: "anima/1",
+              weights: {
+                net: { f16: { container: container("b2") }, i8: { container: container("c3") } },
+              },
+              assets: {},
+              quants: { w8: { weights: { net: "q4" }, session: {} } },
+              defaultQuant: "w8",
+              pipelineConfig: {},
             },
-            assets: {},
-            quants: { w8: { weights: { net: "q4" }, session: {} } },
-            defaultQuant: "w8",
-            pipelineConfig: {},
+            slim: {
+              pipeline: "anima/1",
+              weights: { net: { i8: { container: container("d4") } } },
+              assets: {},
+              quants: { w8: { weights: { net: "i8" }, session: {} } },
+              defaultQuant: "w8",
+              pipelineConfig: {},
+            },
           },
-          slim: {
-            pipeline: "anima/1",
-            weights: { net: { i8: { container: container("d4") } } },
-            assets: {},
-            quants: { w8: { weights: { net: "i8" }, session: {} } },
-            defaultQuant: "w8",
-            pipelineConfig: {},
-          },
-        },
-      })),
+        }),
+      ),
     ManifestReferenceError,
   );
   assertEquals(error.available.models, ["fast", "slim"]);
@@ -567,9 +568,13 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
   await t.step("parts の中でも同一 path の 3 点セット不一致は拒否する", () => {
     const error = assertThrows(
       () =>
-        parseManifest(withModel({
-          weights: withContainer({ parts: [PART0, PART1, { ...PART1, sha256: "d4".repeat(32) }] }),
-        })),
+        parseManifest(
+          withModel({
+            weights: withContainer({
+              parts: [PART0, PART1, { ...PART1, sha256: "d4".repeat(32) }],
+            }),
+          }),
+        ),
       ManifestReferenceError,
     );
     assert(
@@ -582,9 +587,11 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
     for (const retired of ["shards", "extras"]) {
       const error = assertThrows(
         () =>
-          parseManifest(withModel({
-            weights: { net: { f16: { container: CONTAINER, [retired]: {} } } },
-          })),
+          parseManifest(
+            withModel({
+              weights: { net: { f16: { container: CONTAINER, [retired]: {} } } },
+            }),
+          ),
         ManifestReferenceError,
         undefined,
         `dtype エントリの '${retired}' が通ってしまった`,
@@ -623,9 +630,11 @@ test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t
   await t.step("descriptor の model は省略できない（krm は必ずモデル記述を持つ）", () => {
     assertThrows(
       () =>
-        parseManifest(withModel({
-          weights: withContainer({ descriptor: { graph: DESCRIPTOR.graph } }),
-        })),
+        parseManifest(
+          withModel({
+            weights: withContainer({ descriptor: { graph: DESCRIPTOR.graph } }),
+          }),
+        ),
       ManifestFormatError,
       "descriptor.model: 無い",
     );
@@ -643,9 +652,11 @@ test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど�
     for (const delta of [-1, 1]) {
       const error = assertThrows(
         () =>
-          parseManifest(withModel({
-            weights: withContainer({ parts: [{ ...PART0, size: PART0_SIZE + delta }, PART1] }),
-          })),
+          parseManifest(
+            withModel({
+              weights: withContainer({ parts: [{ ...PART0, size: PART0_SIZE + delta }, PART1] }),
+            }),
+          ),
         ManifestFormatError,
         undefined,
         `part 0 の size ${PART0_SIZE + delta} が通ってしまった`,
@@ -659,12 +670,14 @@ test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど�
 
   await t.step("descriptor の長さを動かせば part 0 の要求もその分動く", () => {
     const graph = { ...DESCRIPTOR.graph, length: GRAPH_LENGTH + 100 };
-    const container = containerOf(withModel({
-      weights: withContainer({
-        descriptor: { ...DESCRIPTOR, graph },
-        parts: [{ ...PART0, size: PART0_SIZE + 100 }, PART1],
+    const container = containerOf(
+      withModel({
+        weights: withContainer({
+          descriptor: { ...DESCRIPTOR, graph },
+          parts: [{ ...PART0, size: PART0_SIZE + 100 }, PART1],
+        }),
       }),
-    }));
+    );
     assertEquals(container.parts[0].size, PART0_SIZE + 100);
   });
 });
@@ -701,11 +714,13 @@ test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10
     for (const sha256 of ["F2".repeat(32), "f2".repeat(31), 12]) {
       assertThrows(
         () =>
-          parseManifest(withModel({
-            weights: withContainer({
-              descriptor: { ...DESCRIPTOR, model: { length: MODEL_LENGTH, sha256 } },
+          parseManifest(
+            withModel({
+              weights: withContainer({
+                descriptor: { ...DESCRIPTOR, model: { length: MODEL_LENGTH, sha256 } },
+              }),
             }),
-          })),
+          ),
         ManifestFormatError,
         undefined,
         `descriptor の sha256 '${sha256}' が通ってしまった`,
@@ -728,9 +743,11 @@ test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — フ
   await t.step("上限超過は落ち、エラーが part の path・寸法・上限を名指しする", () => {
     const error = assertThrows(
       () =>
-        parseManifest(withModel({
-          weights: withContainer({ parts: [PART0, big(LIMIT + 1, "c3")] }),
-        })),
+        parseManifest(
+          withModel({
+            weights: withContainer({ parts: [PART0, big(LIMIT + 1, "c3")] }),
+          }),
+        ),
       ManifestFormatError,
     );
     for (const expected of ["net/model-00002-of-00002.krm", String(LIMIT + 1), String(LIMIT)]) {
@@ -750,9 +767,11 @@ test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — フ
     // MUST: 上限は**part 分割の契約**であって全 FileRef の天井ではない（それは 16GiB の
     // `MAX_FILE_BYTES`）。ここを取り違えると、part に割らない単体の資産で上限を超えるものが
     // 読めなくなる。
-    const manifest = parseManifest(withModel({
-      assets: { style_vectors: { ...FILE, path: "style/vectors.safetensors", size: LIMIT + 1 } },
-    }));
+    const manifest = parseManifest(
+      withModel({
+        assets: { style_vectors: { ...FILE, path: "style/vectors.safetensors", size: LIMIT + 1 } },
+      }),
+    );
     assertEquals(manifest.models["m"].assets["style_vectors"].size, LIMIT + 1);
   });
 });
@@ -762,9 +781,11 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
   const emptyPart = { path: "net/model-00002-of-00003.krm", size: 0, sha256: EMPTY_SHA };
 
   await t.step("添字 1 の長さ 0 は通り、宣言にそのまま残る", () => {
-    const container = containerOf(withModel({
-      weights: withContainer({ parts: [PART0, emptyPart, part(2, 3, 16, "d4")] }),
-    }));
+    const container = containerOf(
+      withModel({
+        weights: withContainer({ parts: [PART0, emptyPart, part(2, 3, 16, "d4")] }),
+      }),
+    );
     assertEquals(container.parts[1].size, 0);
     assertEquals(container.parts[1].sha256, EMPTY_SHA);
   });
@@ -772,9 +793,11 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
   await t.step("part 0 の長さ 0 は落ちる（ヘッダ + 2 文書を必ず持つ）", () => {
     assertThrows(
       () =>
-        parseManifest(withModel({
-          weights: withContainer({ parts: [{ ...PART0, size: 0, sha256: EMPTY_SHA }, PART1] }),
-        })),
+        parseManifest(
+          withModel({
+            weights: withContainer({ parts: [{ ...PART0, size: 0, sha256: EMPTY_SHA }, PART1] }),
+          }),
+        ),
       ManifestFormatError,
     );
   });
@@ -782,11 +805,13 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
   await t.step("長さ 0 なのに sha256 が空列の値でなければ落ちる", () => {
     const error = assertThrows(
       () =>
-        parseManifest(withModel({
-          weights: withContainer({
-            parts: [PART0, { ...emptyPart, sha256: "c3".repeat(32) }, part(2, 3, 16, "d4")],
+        parseManifest(
+          withModel({
+            weights: withContainer({
+              parts: [PART0, { ...emptyPart, sha256: "c3".repeat(32) }, part(2, 3, 16, "d4")],
+            }),
           }),
-        })),
+        ),
       ManifestFormatError,
     );
     assert(error.message.includes(EMPTY_SHA), `${error.message} が空列の sha256 を出していない`);
@@ -795,9 +820,11 @@ test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決�
   await t.step("assets の長さ 0 は従来どおり拒否する（空を許すのは parts だけ）", () => {
     assertThrows(
       () =>
-        parseManifest(withModel({
-          assets: { tokenizer: { ...FILE, size: 0, sha256: EMPTY_SHA } },
-        })),
+        parseManifest(
+          withModel({
+            assets: { tokenizer: { ...FILE, size: 0, sha256: EMPTY_SHA } },
+          }),
+        ),
       ManifestFormatError,
     );
   });
@@ -816,10 +843,12 @@ const withQuant = (patch: Record<string, unknown>): string =>
 
 test("parseManifest: quant の表示欄 label / description（ADR 0075）", async (t) => {
   await t.step("設定した文字列がそのまま型面へ出る", () => {
-    const manifest = parseManifest(withQuant({
-      label: "Balanced (int8)",
-      description: "Half the download of f16 with no visible difference.",
-    }));
+    const manifest = parseManifest(
+      withQuant({
+        label: "Balanced (int8)",
+        description: "Half the download of f16 with no visible difference.",
+      }),
+    );
     const quant = manifest.models["m"].quants["q"];
     assertEquals(quant.label, "Balanced (int8)");
     assertEquals(quant.description, "Half the download of f16 with no visible difference.");
@@ -834,14 +863,13 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
   await t.step("上限ちょうどは通り、1 文字超で落ちる", () => {
     // 片側だけだと「常に落ちる」実装でも緑になるので、境界の両側を観測する。
     assertEquals(
-      parseManifest(withQuant({ label: "x".repeat(64) })).models["m"].quants["q"].label
-        ?.length,
+      parseManifest(withQuant({ label: "x".repeat(64) })).models["m"].quants["q"].label?.length,
       64,
     );
     assertThrows(() => parseManifest(withQuant({ label: "x".repeat(65) })), ManifestFormatError);
     assertEquals(
-      parseManifest(withQuant({ description: "x".repeat(200) })).models["m"].quants["q"]
-        .description?.length,
+      parseManifest(withQuant({ description: "x".repeat(200) })).models["m"].quants["q"].description
+        ?.length,
       200,
     );
     assertThrows(
@@ -867,9 +895,9 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
 
   await t.step("内容の意味は解釈しない（上限内なら実態と食い違う説明も通る）", () => {
     // ADR 0075 決定 2: 長さは境界検査、内容の妥当性は hub には判定できないし、しない。
-    const quant =
-      parseManifest(withQuant({ label: "f32 (lossless)", description: "🌀".repeat(64) }))
-        .models["m"].quants["q"];
+    const quant = parseManifest(
+      withQuant({ label: "f32 (lossless)", description: "🌀".repeat(64) }),
+    ).models["m"].quants["q"];
     assertEquals(quant.label, "f32 (lossless)");
     // サロゲートペアはコードポイント 1 つとして数える（同じ見た目が綴りで通ったり落ちたりしない）。
     assertEquals(quant.description, "🌀".repeat(64));
@@ -878,9 +906,11 @@ test("parseManifest: quant の表示欄 label / description（ADR 0075）", asyn
 
 test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席）", async (t) => {
   await t.step("limit 名 → 最小値の部分写像として型面へ出る", () => {
-    const manifest = parseManifest(withQuant({
-      requiredLimits: { maxBufferSize: 2147483648, maxStorageBufferBindingSize: 1073741824 },
-    }));
+    const manifest = parseManifest(
+      withQuant({
+        requiredLimits: { maxBufferSize: 2147483648, maxStorageBufferBindingSize: 1073741824 },
+      }),
+    );
     assertEquals(manifest.models["m"].quants["q"].requiredLimits, {
       maxBufferSize: 2147483648,
       maxStorageBufferBindingSize: 1073741824,
@@ -890,8 +920,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
   await t.step("未設定の席は欄を持たず、空の宣言は空のまま通る", () => {
     assertEquals(parseManifest(withModel()).models["m"].quants["q"].requiredLimits, undefined);
     assertEquals(
-      parseManifest(withQuant({ requiredLimits: {} })).models["m"].quants["q"]
-        .requiredLimits,
+      parseManifest(withQuant({ requiredLimits: {} })).models["m"].quants["q"].requiredLimits,
       {},
     );
   });
@@ -899,23 +928,22 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
   await t.step("runtime の requiredLimits 語彙の名前を受ける", () => {
     // 綴りが runtime（`REQUIRED_LIMIT_KEYS`）と 1 対 1 であることの観測点。compute 系まで
     // 明示する語彙なので、workgroup 系が拒否されないことまで見る。
-    const manifest = parseManifest(withQuant({
-      requiredLimits: {
-        maxUniformBufferBindingSize: 65536,
-        maxStorageBuffersPerShaderStage: 10,
-        maxUniformBuffersPerShaderStage: 12,
-        maxComputeWorkgroupStorageSize: 32768,
-        maxComputeInvocationsPerWorkgroup: 1024,
-        maxComputeWorkgroupSizeX: 1024,
-        maxComputeWorkgroupSizeY: 1024,
-        maxComputeWorkgroupSizeZ: 64,
-        maxComputeWorkgroupsPerDimension: 65535,
-      },
-    }));
-    assertEquals(
-      Object.keys(manifest.models["m"].quants["q"].requiredLimits ?? {}).length,
-      9,
+    const manifest = parseManifest(
+      withQuant({
+        requiredLimits: {
+          maxUniformBufferBindingSize: 65536,
+          maxStorageBuffersPerShaderStage: 10,
+          maxUniformBuffersPerShaderStage: 12,
+          maxComputeWorkgroupStorageSize: 32768,
+          maxComputeInvocationsPerWorkgroup: 1024,
+          maxComputeWorkgroupSizeX: 1024,
+          maxComputeWorkgroupSizeY: 1024,
+          maxComputeWorkgroupSizeZ: 64,
+          maxComputeWorkgroupsPerDimension: 65535,
+        },
+      }),
     );
+    assertEquals(Object.keys(manifest.models["m"].quants["q"].requiredLimits ?? {}).length, 9);
   });
 
   await t.step("未知の limit 名は許可一覧つきで落ちる（綴り違いを黙って無視しない）", () => {
@@ -937,10 +965,7 @@ test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席�
         undefined,
         `requiredLimits.maxBufferSize = ${JSON.stringify(value)} が通ってしまった`,
       );
-      assert(
-        error.message.includes("期待 正の安全整数"),
-        `${error.message} が期待を出していない`,
-      );
+      assert(error.message.includes("期待 正の安全整数"), `${error.message} が期待を出していない`);
     }
   });
 });
@@ -952,7 +977,10 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
   /** 容器まるごとを越境させた形（ADR 0109 決定 3 — 越境は容器単位）。 */
   const foreignContainer = (patch: Record<string, unknown> = {}) => ({
     descriptor: DESCRIPTOR,
-    parts: [{ ...PART0, ...cross, ...patch }, { ...PART1, ...cross, ...patch }],
+    parts: [
+      { ...PART0, ...cross, ...patch },
+      { ...PART1, ...cross, ...patch },
+    ],
   });
 
   await t.step("容器の全 part に同じ座標が載る", () => {
@@ -966,9 +994,11 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
   });
 
   await t.step("assets の参照にも同じ席が載る", () => {
-    const manifest = parseManifest(withModel({
-      assets: { tokenizer: { ...FILE, ...cross } },
-    }));
+    const manifest = parseManifest(
+      withModel({
+        assets: { tokenizer: { ...FILE, ...cross } },
+      }),
+    );
     assertEquals(manifest.models["m"].assets["tokenizer"].repo, "other/stack");
     assertEquals(manifest.models["m"].assets["tokenizer"].revision, COMMIT);
   });
@@ -1000,9 +1030,16 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     for (const half of [{ repo: "other/stack" }, { revision: COMMIT }]) {
       const error = assertThrows(
         () =>
-          parseManifest(withModel({
-            weights: withContainer({ parts: [{ ...PART0, ...half }, { ...PART1, ...half }] }),
-          })),
+          parseManifest(
+            withModel({
+              weights: withContainer({
+                parts: [
+                  { ...PART0, ...half },
+                  { ...PART1, ...half },
+                ],
+              }),
+            }),
+          ),
         ManifestFormatError,
         undefined,
         `${JSON.stringify(half)} だけの宣言が通ってしまった`,
@@ -1018,9 +1055,11 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     for (const revision of ["main", "v1.0", COMMIT.slice(0, 7), COMMIT.toUpperCase()]) {
       assertThrows(
         () =>
-          parseManifest(withModel({
-            weights: { net: { f16: { container: foreignContainer({ revision }) } } },
-          })),
+          parseManifest(
+            withModel({
+              weights: { net: { f16: { container: foreignContainer({ revision }) } } },
+            }),
+          ),
         ManifestFormatError,
         undefined,
         `revision '${revision}' が通ってしまった`,
@@ -1032,9 +1071,11 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
     for (const repo of ["stack", "other/stack/extra", "other/..", "other/.hidden", "other/re po"]) {
       assertThrows(
         () =>
-          parseManifest(withModel({
-            weights: { net: { f16: { container: foreignContainer({ repo }) } } },
-          })),
+          parseManifest(
+            withModel({
+              weights: { net: { f16: { container: foreignContainer({ repo }) } } },
+            }),
+          ),
         ManifestFormatError,
         undefined,
         `repo '${repo}' が通ってしまった`,
@@ -1045,35 +1086,39 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
   await t.step("同じ path でもリポが違えば別のファイル（3 点セット一致を要求しない）", () => {
     // path だけで畳むと、正しい manifest が「重複 path の食い違い」で拒否され、取得層では
     // 片方のバイト列がもう片方に配られる。同一性は (repo, revision, path) の 3 つ。
-    const manifest = parseManifest(withModel({
-      weights: {
-        net: { f16: { container: CONTAINER } },
-        text: {
-          f16: {
-            container: {
-              descriptor: DESCRIPTOR,
-              parts: [
-                { ...PART0, ...cross, size: PART0_SIZE },
-                { ...PART1, ...cross, size: 128, sha256: "e5".repeat(32) },
-              ],
+    const manifest = parseManifest(
+      withModel({
+        weights: {
+          net: { f16: { container: CONTAINER } },
+          text: {
+            f16: {
+              container: {
+                descriptor: DESCRIPTOR,
+                parts: [
+                  { ...PART0, ...cross, size: PART0_SIZE },
+                  { ...PART1, ...cross, size: 128, sha256: "e5".repeat(32) },
+                ],
+              },
             },
           },
         },
-      },
-      quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
-    }));
+        quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
+      }),
+    );
     assertEquals(manifest.models["m"].weights["net"]["f16"].container.parts[1].size, 64);
     assertEquals(manifest.models["m"].weights["text"]["f16"].container.parts[1].size, 128);
   });
 
   await t.step("同一の (repo, revision, path) は 1 本に畳まれる", () => {
-    const manifest = parseManifest(withModel({
-      weights: {
-        net: { f16: { container: foreignContainer() } },
-        text: { f16: { container: foreignContainer() } },
-      },
-      quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
-    }));
+    const manifest = parseManifest(
+      withModel({
+        weights: {
+          net: { f16: { container: foreignContainer() } },
+          text: { f16: { container: foreignContainer() } },
+        },
+        quants: { q: { weights: { net: "f16", text: "f16" }, session: {} } },
+      }),
+    );
     const net = manifest.models["m"].weights["net"]["f16"].container;
     const text = manifest.models["m"].weights["text"]["f16"].container;
     assert(net.parts[1] === text.parts[1], "同一参照が畳まれていない");
@@ -1082,22 +1127,24 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
   await t.step("同一の (repo, revision, path) で 3 点セットが食い違えば拒否する", () => {
     assertThrows(
       () =>
-        parseManifest(withModel({
-          weights: {
-            net: {
-              f16: {
-                container: {
-                  descriptor: DESCRIPTOR,
-                  parts: [
-                    { ...PART0, ...cross },
-                    { ...PART1, ...cross },
-                    { ...PART1, ...cross, size: 99 },
-                  ],
+        parseManifest(
+          withModel({
+            weights: {
+              net: {
+                f16: {
+                  container: {
+                    descriptor: DESCRIPTOR,
+                    parts: [
+                      { ...PART0, ...cross },
+                      { ...PART1, ...cross },
+                      { ...PART1, ...cross, size: 99 },
+                    ],
+                  },
                 },
               },
             },
-          },
-        })),
+          }),
+        ),
       ManifestReferenceError,
     );
   });
@@ -1106,27 +1153,36 @@ test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 �
 test("parseManifest: quantのGEMV加算指定を保持し、未指定と不正値を区別する", async (t) => {
   for (const linearGemvReduce of ["sequential", "parallel"] as const) {
     await t.step(linearGemvReduce, () => {
-      const manifest = parseManifest(withModel({
-        quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce } } },
-      }));
+      const manifest = parseManifest(
+        withModel({
+          quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce } } },
+        }),
+      );
       assertEquals(manifest.models.m.quants.q.session, { linearGemvReduce });
     });
   }
   assertEquals(parseManifest(withModel()).models.m.quants.q.session, {});
   for (const value of ["auto", "Parallel", 1, true, null]) {
-    assertThrows(() =>
-      parseManifest(withModel({
-        quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce: value } } },
-      })), HubError);
+    assertThrows(
+      () =>
+        parseManifest(
+          withModel({
+            quants: { q: { weights: { net: "f16" }, session: { linearGemvReduce: value } } },
+          }),
+        ),
+      HubError,
+    );
   }
 });
 
 test("parseManifest: quantのattention縮約形を保持し、未指定と不正値を区別する", async (t) => {
   for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
     await t.step(stateAttentionReduce, () => {
-      const manifest = parseManifest(withModel({
-        quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce } } },
-      }));
+      const manifest = parseManifest(
+        withModel({
+          quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce } } },
+        }),
+      );
       assertEquals(manifest.models.m.quants.q.session, { stateAttentionReduce });
     });
   }
@@ -1136,9 +1192,11 @@ test("parseManifest: quantのattention縮約形を保持し、未指定と不正
     await t.step(`${JSON.stringify(value)}は拒否`, () => {
       assertThrows(
         () =>
-          parseManifest(withModel({
-            quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce: value } } },
-          })),
+          parseManifest(
+            withModel({
+              quants: { q: { weights: { net: "f16" }, session: { stateAttentionReduce: value } } },
+            }),
+          ),
         HubError,
       );
     });
@@ -1150,9 +1208,11 @@ test("parseManifest: quantのattention縮約形を保持し、未指定と不正
       stateAttentionReduce: "parallel-fused",
       fuseRmsNormAdd: true,
     } as const;
-    const manifest = parseManifest(withModel({
-      quants: { q: { weights: { net: "f16" }, session } },
-    }));
+    const manifest = parseManifest(
+      withModel({
+        quants: { q: { weights: { net: "f16" }, session } },
+      }),
+    );
     assertEquals(manifest.models.m.quants.q.session, session);
   });
 });
@@ -1162,9 +1222,11 @@ test("parseManifest: 融合の真偽値を保持し、未指定・不正値と�
     for (const value of [false, true]) {
       await t.step(`${key}=${value}`, () => {
         const session = { [key]: value };
-        const manifest = parseManifest(withModel({
-          quants: { q: { weights: { net: "f16" }, session } },
-        }));
+        const manifest = parseManifest(
+          withModel({
+            quants: { q: { weights: { net: "f16" }, session } },
+          }),
+        );
         assertEquals(manifest.models.m.quants.q.session, session);
       });
     }
@@ -1173,9 +1235,11 @@ test("parseManifest: 融合の真偽値を保持し、未指定・不正値と�
       await t.step(`${key}=${JSON.stringify(value)}は拒否`, () => {
         assertThrows(
           () =>
-            parseManifest(withModel({
-              quants: { q: { weights: { net: "f16" }, session: { [key]: value } } },
-            })),
+            parseManifest(
+              withModel({
+                quants: { q: { weights: { net: "f16" }, session: { [key]: value } } },
+              }),
+            ),
           HubError,
         );
       });
@@ -1189,9 +1253,11 @@ test("parseManifest: 融合の真偽値を保持し、未指定・不正値と�
       fuseLinearStaticQuantize: true,
       packedStaticQuantize: true,
     } as const;
-    const manifest = parseManifest(withModel({
-      quants: { q: { weights: { net: "f16" }, session } },
-    }));
+    const manifest = parseManifest(
+      withModel({
+        quants: { q: { weights: { net: "f16" }, session } },
+      }),
+    );
     assertEquals(manifest.models.m.quants.q.session, session);
   });
   await t.step("未宣言なら欄ごと無い", () => {

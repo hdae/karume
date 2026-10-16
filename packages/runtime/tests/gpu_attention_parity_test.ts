@@ -232,15 +232,12 @@ test({
         assertEquals(
           mismatches,
           [],
-          `${shape.name}: 分解経路とビット列が違う（最初の食い違い: ${
-            mismatches.map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`).join(" / ")
-          }）`,
+          `${shape.name}: 分解経路とビット列が違う（最初の食い違い: ${mismatches
+            .map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`)
+            .join(" / ")}）`,
         );
         // 恒真化の門: 出力が全て同じ値なら「一致」は何も検証していない
-        assert(
-          new Set(a).size > 1,
-          `${shape.name}: 出力が定数（ビット一致が恒真になっている）`,
-        );
+        assert(new Set(a).size > 1, `${shape.name}: 出力が定数（ビット一致が恒真になっている）`);
       }
     } finally {
       gpu.destroy();
@@ -258,8 +255,7 @@ test({
  * （エクスポータが −inf を折り込む形）を通す。
  */
 test({
-  name:
-    "加算 mask 付き attention の出力が分解経路（bmm → add → softmax → bmm）とビット単位で一致する（実 GPU）",
+  name: "加算 mask 付き attention の出力が分解経路（bmm → add → softmax → bmm）とビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -310,9 +306,9 @@ test({
         assertEquals(
           mismatches,
           [],
-          `${where}: 分解経路とビット列が違う（最初の食い違い: ${
-            mismatches.map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`).join(" / ")
-          }）`,
+          `${where}: 分解経路とビット列が違う（最初の食い違い: ${mismatches
+            .map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`)
+            .join(" / ")}）`,
         );
         // 恒真化の門 ①: 出力が定数なら「一致」は何も検証していない
         assert(new Set(a).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
@@ -417,7 +413,10 @@ test({
         const entries = requireCensus(session.diagnostics().lastRunPipelines, "masked attention");
         const keys = entries.map((entry) => entry.key);
         // 1 ノード = 3 dispatch のまま（mask で dispatch は増えない）
-        assertEquals(entries.reduce((sum, entry) => sum + entry.dispatchCount, 0), 3);
+        assertEquals(
+          entries.reduce((sum, entry) => sum + entry.dispatchCount, 0),
+          3,
+        );
         assertEquals(keys.includes(attentionQkKey(true, "f32", "f32", true)), true, "mask 変種");
         assertEquals(keys.includes(attentionQkKey(true)), false, "mask 無しの ①QK が残っている");
         // ②③ は mask なしと同じキー（生成物も同じ = スナップショットが固定）
@@ -464,14 +463,14 @@ test({
         const masked = await createSessionFromContainer(
           gpu,
           await openGraphModel(
-            singleOpDeclaration("attention", [q.shape, k.shape, v.shape, mask.shape], [[
-              b,
-              h,
-              m,
-              d,
-            ]], {
-              attrs,
-            }),
+            singleOpDeclaration(
+              "attention",
+              [q.shape, k.shape, v.shape, mask.shape],
+              [[b, h, m, d]],
+              {
+                attrs,
+              },
+            ),
           ),
           GRAPH_NAME,
           { attentionCompute: "a8" },

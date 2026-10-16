@@ -57,7 +57,11 @@ import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-s
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -308,12 +312,12 @@ const DIT_CONTEXT_OUTPUTS = 24;
  * 突合する」沈黙誤りになるので、本数が IR の出力数と合っているかもケースごとに検査する。
  */
 const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
-  "backbone": [BACKBONE_TOLERANCE],
+  backbone: [BACKBONE_TOLERANCE],
   "text-proj": [TEXT_PROJ_TOLERANCE],
   "caption-proj": [CAPTION_PROJ_TOLERANCE, CAPTION_NORM_TOLERANCE],
-  "speaker": [SPEAKER_TOLERANCE],
-  "duration": [DURATION_TOLERANCE],
-  "dit": [DIT_TOLERANCE],
+  speaker: [SPEAKER_TOLERANCE],
+  duration: [DURATION_TOLERANCE],
+  dit: [DIT_TOLERANCE],
   "dit-context": Array.from({ length: DIT_CONTEXT_OUTPUTS }, () => DIT_CONTEXT_TOLERANCE),
 };
 
@@ -361,26 +365,12 @@ const TEXT_CASES = [
 
 /** ターゲット別の期待ケース（ソート済み — 列挙結果と `assertEquals` で突き合わせる）。 */
 const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
-  "backbone": TEXT_CASES,
+  backbone: TEXT_CASES,
   "caption-proj": TEXT_CASES,
   "text-proj": TEXT_CASES,
-  "speaker": [
-    "ref-1s",
-    "ref-30s",
-    "ref-5s",
-    "ref-max",
-    "ref-min",
-    "ref-real-full",
-    "ref-real-short",
-  ],
-  "duration": [
-    "dur-both",
-    "dur-caption-only",
-    "dur-long",
-    "dur-neither",
-    "dur-speaker-only",
-  ],
-  "dit": [
+  speaker: ["ref-1s", "ref-30s", "ref-5s", "ref-max", "ref-min", "ref-real-full", "ref-real-short"],
+  duration: ["dur-both", "dur-caption-only", "dur-long", "dur-neither", "dur-speaker-only"],
+  dit: [
     "dit-cond-1s",
     "dit-cond-late",
     "dit-cond-max",
@@ -428,8 +418,8 @@ const discoverTargets = (root: URL): readonly string[] =>
 
 const discoverCases = (root: URL, target: string): readonly string[] =>
   listDir(new URL(`${target}/`, root))
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();
@@ -461,16 +451,8 @@ test({
   ignore: !AVAILABLE,
   fn: () => {
     assertEquals(TARGETS, EXPECTED_TARGETS, `${SERIES_ROOT.pathname} のターゲット`);
-    assertEquals(
-      Object.keys(TOLERANCES).sort(),
-      EXPECTED_TARGETS,
-      "ターゲット別 tolerance の表",
-    );
-    assertEquals(
-      Object.keys(GRAPH_NAMES).sort(),
-      EXPECTED_TARGETS,
-      "ターゲット別グラフ名の表",
-    );
+    assertEquals(Object.keys(TOLERANCES).sort(), EXPECTED_TARGETS, "ターゲット別 tolerance の表");
+    assertEquals(Object.keys(GRAPH_NAMES).sort(), EXPECTED_TARGETS, "ターゲット別グラフ名の表");
     for (const target of TARGETS) {
       assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
       assertEquals(

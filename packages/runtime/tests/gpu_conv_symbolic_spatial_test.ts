@@ -155,7 +155,10 @@ test({
             const reference = referenceDown(x);
             assertEquals(outputs["y3"].shape, [CHANNELS_MID, 1, 2 * h, 2 * w], "conv3d の出口の形");
             assertEquals(outputs["y"].shape, [1, CHANNELS_OUT, h, w], "conv2d の出口の形");
-            for (const [name, expected] of [["y3", reference.y3], ["y", reference.y]] as const) {
+            for (const [name, expected] of [
+              ["y3", reference.y3],
+              ["y", reference.y],
+            ] as const) {
               const got = outputs[name].data;
               if (!(got instanceof Float32Array) || !(expected.data instanceof Float32Array)) {
                 throw new Error(`${name}: f32 でない`);

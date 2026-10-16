@@ -16,9 +16,10 @@ const fuse = (
 ) => {
   // 合流結果（格納つき IrGraph）は供給元に依らない — メモリ内容器 1 本で足りる。
   const graph = mergedGraph(linearStaticQuantizeModel(o).graphs[GRAPH_NAME], GRAPH_NAME);
-  const weight: FusionWeightLayout = o.storage === "i4"
-    ? { storage: "i4", groupSize: o.group ?? 512 }
-    : { storage: o.storage ?? "i8" };
+  const weight: FusionWeightLayout =
+    o.storage === "i4"
+      ? { storage: "i4", groupSize: o.group ?? 512 }
+      : { storage: o.storage ?? "i8" };
   return planFusions(planGraph(graph, {}).nodes, {
     useCounts: countUses(graph),
     outputNames: new Set(graph.outputs),
@@ -60,42 +61,42 @@ describe("linear→static_quantizeの任意融合", () => {
     }
   });
   it("無指定・別計算方式・展開済み重み・未検収形は既存経路へ残す", () => {
-    for (
-      const context of [
-        { fuseLinearStaticQuantize: undefined },
-        { fuseLinearStaticQuantize: false },
-        { linearGemvReduce: "sequential" },
-        { linearGemvReduce: "parallel-subgroup32" },
-        { linearCompute: "a8" },
-        { linearCompute: "f16" },
-        { weightLayouts: new Map() },
-        { weightLayouts: new Map([["w", { storage: "f16" }]]) },
-      ] satisfies Partial<Parameters<typeof planFusions>[1]>[]
-    ) {
+    for (const context of [
+      { fuseLinearStaticQuantize: undefined },
+      { fuseLinearStaticQuantize: false },
+      { linearGemvReduce: "sequential" },
+      { linearGemvReduce: "parallel-subgroup32" },
+      { linearCompute: "a8" },
+      { linearCompute: "f16" },
+      { weightLayouts: new Map() },
+      { weightLayouts: new Map([["w", { storage: "f16" }]]) },
+    ] satisfies Partial<Parameters<typeof planFusions>[1]>[]) {
       assertEquals(fuse({}, context).counts.linearStaticQuantize, 0);
     }
-    for (
-      const o of [
-        { m: 9 },
-        { n: 260 },
-        { k: 1504 },
-        { publicLinear: true },
-        { sharedLinear: true },
-        { interpose: true },
-      ]
-    ) assertEquals(fuse(o).counts.linearStaticQuantize, 0);
+    for (const o of [
+      { m: 9 },
+      { n: 260 },
+      { k: 1504 },
+      { publicLinear: true },
+      { sharedLinear: true },
+      { interpose: true },
+    ])
+      assertEquals(fuse(o).counts.linearStaticQuantize, 0);
   });
   it("scale 0は既存の恒等演算を維持し、tile数の上限を黙って縮めない", () => {
     const step = fuse({ scale: 0 }).steps[0];
     if (step.kind !== "fused") throw Error("融合されていない");
     assertEquals(step.dispatches[0].params[262], 1);
     assertThrows(() =>
-      fuse({}, {
-        limits: {
-          maxStorageBufferBindingSize: 128 * 1024 * 1024,
-          maxComputeWorkgroupsPerDimension: 2,
+      fuse(
+        {},
+        {
+          limits: {
+            maxStorageBufferBindingSize: 128 * 1024 * 1024,
+            maxComputeWorkgroupsPerDimension: 2,
+          },
         },
-      })
+      ),
     );
   });
 });

@@ -251,8 +251,12 @@ export const wanVaeLatentTile = (
   const { rows, cols } = plan;
   // 整数も見る — 大小比較だけでは 0.5 / NaN が通り、`starts[0.5]` が undefined になってゼロのタイルを黙って返す。
   if (
-    !Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row >= rows.starts.length ||
-    col < 0 || col >= cols.starts.length
+    !Number.isInteger(row) ||
+    !Number.isInteger(col) ||
+    row < 0 ||
+    row >= rows.starts.length ||
+    col < 0 ||
+    col >= cols.starts.length
   ) {
     throw new RangeError(
       `タイル (${row}, ${col}) が範囲外（${rows.starts.length}×${cols.starts.length}）`,
@@ -440,7 +444,10 @@ export const assembleWanVaeTiles = (
   tiles: readonly Float32Array<ArrayBuffer>[],
   plan: WanVaeTilePlan,
 ): Float32Array<ArrayBuffer> =>
-  assembleOwnedTiles(tiles.map((tile) => Float32Array.from(tile)), plan);
+  assembleOwnedTiles(
+    tiles.map((tile) => Float32Array.from(tile)),
+    plan,
+  );
 
 /**
  * 全タイルを行優先で decode する（**タイルが外・chunk が内** — タイルごとに
@@ -466,8 +473,10 @@ export const decodeWanVaeTiles = async (
 ): Promise<Float32Array<ArrayBuffer>[]> => {
   const { layout } = caches;
   if (
-    plan.latentChannels !== layout.latentChannels || plan.rows.tile !== layout.tile ||
-    plan.cols.tile !== layout.tile || plan.scale * layout.tile !== layout.sampleTile ||
+    plan.latentChannels !== layout.latentChannels ||
+    plan.rows.tile !== layout.tile ||
+    plan.cols.tile !== layout.tile ||
+    plan.scale * layout.tile !== layout.sampleTile ||
     plan.sampleChannels !== layout.sampleChannels
   ) {
     throw new Error(

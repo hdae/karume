@@ -75,7 +75,8 @@ const PRACTICAL = "f16+dit8-a8-attn8-s16";
 const OBSERVATION = "step1-latent";
 
 /** 入力（`e2e_anima_test.ts` の sha 門と同じ — step 1 の sigma は steps で決まるので揃える）。 */
-const PROMPT = "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, outdoors, " +
+const PROMPT =
+  "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, outdoors, " +
   "smile, upper body, masterpiece, best quality";
 const STEPS = 8;
 const SEED = 42;
@@ -151,18 +152,16 @@ const observeStep1 = async (
       if (component === "transformer") runs.push(diagnostics.lastRunPipelines);
     },
   });
-  const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(
-    where,
-    (capture) =>
-      pipeline.generate({
-        prompt: PROMPT,
-        resolution,
-        steps: STEPS,
-        seed,
-        onEvent: (event) => {
-          if (event.kind === "denoise-step" && event.step === 1) capture(event.copyLatents().data);
-        },
-      }),
+  const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(where, (capture) =>
+    pipeline.generate({
+      prompt: PROMPT,
+      resolution,
+      steps: STEPS,
+      seed,
+      onEvent: (event) => {
+        if (event.kind === "denoise-step" && event.step === 1) capture(event.copyLatents().data);
+      },
+    }),
   );
   return { latent, census: mergeCensus(runs, `${where} の transformer`) };
 };
@@ -229,10 +228,8 @@ test({
         resolution,
         SEED,
       );
-      const faulty = await withManifestOverride(
-        ASSETS_DIR,
-        injected,
-        (source) => observeStep1(source, PRACTICAL, resolution, SEED),
+      const faulty = await withManifestOverride(ASSETS_DIR, injected, (source) =>
+        observeStep1(source, PRACTICAL, resolution, SEED),
       );
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(
@@ -292,10 +289,8 @@ test({
         resolution,
         SEED,
       );
-      const faulty = await withManifestOverride(
-        ASSETS_DIR,
-        injected,
-        (source) => observeStep1(source, PRACTICAL, resolution, SEED),
+      const faulty = await withManifestOverride(ASSETS_DIR, injected, (source) =>
+        observeStep1(source, PRACTICAL, resolution, SEED),
       );
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(

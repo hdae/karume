@@ -216,9 +216,9 @@ const assertSameBits = (actual: Tensor, expected: Tensor, label: string): void =
   assertEquals(
     mismatches,
     [],
-    `${label}: ビット列が違う（最初の食い違い: ${
-      mismatches.map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`).join(" / ")
-    }）`,
+    `${label}: ビット列が違う（最初の食い違い: ${mismatches
+      .map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`)
+      .join(" / ")}）`,
   );
   // 恒真化の門: 出力が定数なら「一致」は何も検証していない。
   assert(new Set(a).size > 1, `${label}: 出力が定数（ビット一致が恒真になっている）`);
@@ -231,7 +231,7 @@ const shapeVariants = (
   SHAPES.flatMap((shape) =>
     variants
       .filter((variant) => shape.h === shape.kv || variant.gqa === true)
-      .map((variant) => ({ shape, variant }))
+      .map((variant) => ({ shape, variant })),
   );
 
 /** ① 強制分割 parity（2 / 3 / 5 枚を 1 枚実行と Uint32 で突き合わせ、ピークの単調減少も見る）。 */
@@ -302,8 +302,7 @@ const assertBudgetSplitParity = async (
 };
 
 test({
-  name:
-    "融合 attention の行ブロック実行は枚数を変えても 1 枚実行と**ビット単位で一致**する（実 GPU）",
+  name: "融合 attention の行ブロック実行は枚数を変えても 1 枚実行と**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -316,8 +315,7 @@ test({
 });
 
 test({
-  name:
-    "予算 attentionRowBlockMaxBytes で割った融合 attention は 1 枚実行と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  name: "予算 attentionRowBlockMaxBytes で割った融合 attention は 1 枚実行と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -330,8 +328,7 @@ test({
 });
 
 test({
-  name:
-    "f16 計算（f16 / f16 + mask・GQA 形を含む）の行ブロック実行も、強制分割と予算分割の両方で 1 枚実行と**ビット単位で一致**する（実 GPU・shader-f16）",
+  name: "f16 計算（f16 / f16 + mask・GQA 形を含む）の行ブロック実行も、強制分割と予算分割の両方で 1 枚実行と**ビット単位で一致**する（実 GPU・shader-f16）",
   // feature の無い機の SKIP は門番（gpu_gate_test.ts の shader-f16）が FAIL にする。
   ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
   fn: async () => {
@@ -409,9 +406,9 @@ test({
           assertEquals(
             windowed.length,
             2,
-            `${label} / ${split} 枚: 行窓のキーは ①QK と ③PV の 2 本（実際は ${
-              windowed.map(([key]) => key).join(" / ")
-            }）`,
+            `${label} / ${split} 枚: 行窓のキーは ①QK と ③PV の 2 本（実際は ${windowed
+              .map(([key]) => key)
+              .join(" / ")}）`,
           );
           for (const [key, count] of windowed) {
             assertEquals(count, split, `${label} / ${split} 枚: ${key} の dispatch 回数`);
@@ -440,8 +437,7 @@ const OVERSIZE: Shape = {
 };
 
 test({
-  name:
-    "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超える融合 attention が行ブロックで通る（実 GPU）",
+  name: "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超える融合 attention が行ブロックで通る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const { b, h, m, n } = OVERSIZE;

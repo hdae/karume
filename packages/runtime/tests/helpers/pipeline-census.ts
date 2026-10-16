@@ -131,7 +131,7 @@ const stateVariants = (
 ): ReadonlySet<string> =>
   new Set(
     keyOf.flatMap((key) =>
-      [false, true].flatMap((sliding) => [false, true].map((gqa) => key(sliding, gqa)))
+      [false, true].flatMap((sliding) => [false, true].map((gqa) => key(sliding, gqa))),
     ),
   );
 
@@ -156,10 +156,7 @@ const STATE_PARALLEL_KEYS = stateVariants(
 );
 const STATE_STATS_PV_KEYS = stateVariants(stateStatsPvKey);
 const GEMV_PARALLEL_FAMILY = familyOf(GEMV_PARALLEL_SAMPLE);
-const GEMV_SUBGROUP = suffixOf(
-  linearGemvSubgroupKey("i8", undefined, 4),
-  GEMV_PARALLEL_SAMPLE,
-);
+const GEMV_SUBGROUP = suffixOf(linearGemvSubgroupKey("i8", undefined, 4), GEMV_PARALLEL_SAMPLE);
 const GEMV_STATIC_QUANTIZE = suffixOf(
   linearGemvStaticQuantizeKey("i8", undefined, 4),
   GEMV_PARALLEL_SAMPLE,
@@ -268,14 +265,12 @@ export const mergeCensus = (
 };
 
 /** census の期待 1 件（「本数ちょうど」か「下限」）。 */
-export type CensusExpectation =
-  & {
-    /** 失敗文言に出す名前。 */
-    readonly label: string;
-    /** 判別述語（文字列はキーの完全一致）。 */
-    readonly match: string | KeyPredicate;
-  }
-  & ({ readonly count: number } | { readonly atLeast: number });
+export type CensusExpectation = {
+  /** 失敗文言に出す名前。 */
+  readonly label: string;
+  /** 判別述語（文字列はキーの完全一致）。 */
+  readonly match: string | KeyPredicate;
+} & ({ readonly count: number } | { readonly atLeast: number });
 
 /** 期待ごとの本数を検査する。rows が undefined / 空なら fail loudly（{@link requireCensus}）。 */
 export const assertPipelineCensus = (
@@ -330,9 +325,9 @@ export const assertSeatsApplied = (
         const hits = census.filter((row) => predicate(row.key)).map((row) => row.key);
         assert(
           hits.length === 0,
-          `${where}: ${seat} は参照値 ${JSON.stringify(value)} なのに ${variant} の変種が走った — ${
-            hits.join(" / ")
-          }`,
+          `${where}: ${seat} は参照値 ${JSON.stringify(value)} なのに ${variant} の変種が走った — ${hits.join(
+            " / ",
+          )}`,
         );
       }
       continue;
@@ -344,9 +339,9 @@ export const assertSeatsApplied = (
     );
     assert(
       countDispatches(census, predicate) > 0,
-      `${where}: ${seat}=${JSON.stringify(value)} の変種が 1 本も走っていない — ${
-        census.map((row) => row.key).join(" / ")
-      }`,
+      `${where}: ${seat}=${JSON.stringify(value)} の変種が 1 本も走っていない — ${census
+        .map((row) => row.key)
+        .join(" / ")}`,
     );
   }
 };
@@ -385,8 +380,10 @@ export const assertAttentionSeatsComplete = (
       const inFamily: KeyPredicate = (key) => familyOf(key) === family;
       const total = countDispatches(census, inFamily);
       const applied = countDispatches(census, (key) => inFamily(key) && variant(key));
-      const keys = census.filter((row) => inFamily(row.key))
-        .map((row) => `${row.key}×${row.dispatchCount}`).join(" / ");
+      const keys = census
+        .filter((row) => inFamily(row.key))
+        .map((row) => `${row.key}×${row.dispatchCount}`)
+        .join(" / ");
       assert(total > 0, `${where}: ${seat} を宣言したのに ${family} の dispatch が 1 本も無い`);
       assert(
         applied === total,

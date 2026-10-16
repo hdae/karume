@@ -35,12 +35,15 @@ test("sigmaSchedule: shift は manifest の値で効く（1 なら素の linspac
   // shift=1 では `1·σ / (0·σ + 1) = σ` に潰れる。scheduler の値を manifest から取る配線が
   // 死んで定数に固定されていたら、この 1 本が落ちる。
   const plain = sigmaSchedule(4, 1);
-  assertEquals([...plain].slice(0, 4).map((value) => Math.fround(value)), [
-    Math.fround(1),
-    Math.fround(1 + (0.25 - 1) / 3),
-    Math.fround(1 + 2 * (0.25 - 1) / 3),
-    Math.fround(0.25),
-  ]);
+  assertEquals(
+    [...plain].slice(0, 4).map((value) => Math.fround(value)),
+    [
+      Math.fround(1),
+      Math.fround(1 + (0.25 - 1) / 3),
+      Math.fround(1 + (2 * (0.25 - 1)) / 3),
+      Math.fround(0.25),
+    ],
+  );
   const shifted = sigmaSchedule(4, SHIFT);
   assert(shifted[1] !== plain[1], "shift が効いていない");
 });
@@ -131,13 +134,7 @@ test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら落と�
 
 test("cfgEulerStep: CFG!=1 は uncond + scale·(cond − uncond) を Euler へ渡す", () => {
   const previous = Float32Array.from([0]);
-  const got = cfgEulerStep(
-    previous,
-    Float32Array.from([1]),
-    Float32Array.from([0.5]),
-    -2,
-    4,
-  );
+  const got = cfgEulerStep(previous, Float32Array.from([1]), Float32Array.from([0.5]), -2, 4);
   // noise = 0.5 + 4·(1 − 0.5) = 2.5 → 0 + (−2)·2.5 = −5
   assertEquals([...got], [-5]);
 });

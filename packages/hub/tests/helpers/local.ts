@@ -31,9 +31,9 @@ export const FETCHED_PART_PATHS: readonly string[] = PART_PATHS.filter(
  * 選択の表（`helpers/selection.ts` の `selectionFiles`）で part を指すキー。添字は**宣言上の
  * part の id** なので、長さ 0 の part を飛ばしても後続の添字は詰まらない。
  */
-export const PART_KEYS: readonly string[] = PART_PATHS
-  .map((_path, index) => `net[${index}]`)
-  .filter((_key, index) => index !== EMPTY_PART_INDEX);
+export const PART_KEYS: readonly string[] = PART_PATHS.map(
+  (_path, index) => `net[${index}]`,
+).filter((_key, index) => index !== EMPTY_PART_INDEX);
 export const TOKENIZER_PATH = "tokenizer/tokenizer.json";
 
 /** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
@@ -105,11 +105,11 @@ export const buildLocalDist = async (
     tokenizer: await fileRefJson(TOKENIZER_PATH, tokenizer),
     ...(options.cross === true
       ? {
-        text_encoder: await fileRefJson(CROSS_PATH, crossBytes, {
-          repo: CROSS_REPO,
-          revision: CROSS_REVISION,
-        }),
-      }
+          text_encoder: await fileRefJson(CROSS_PATH, crossBytes, {
+            repo: CROSS_REPO,
+            revision: CROSS_REVISION,
+          }),
+        }
       : {}),
   };
   const partRefs = await Promise.all(parts.map(({ path, bytes }) => fileRefJson(path, bytes)));

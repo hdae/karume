@@ -14,21 +14,19 @@ const CODEC: Readonly<Record<"i2" | "i4" | "i8", CodecName>> = {
 };
 
 export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> => {
-  for (
-    const shape of [
-      { storage: "i2", bits: 2, n: 12288, k: 1536, group: undefined },
-      { storage: "i4", bits: 4, n: 256, k: 1536, group: 32 },
-      { storage: "i4", bits: 4, n: 256, k: 1536, group: 512 },
-      { storage: "i4", bits: 4, n: 1536, k: 2048, group: 2048 },
-      { storage: "i4", bits: 4, n: 1536, k: 4096, group: 4096 },
-      { storage: "i8", bits: 8, n: 256, k: 1536, group: undefined },
-      { storage: "i8", bits: 8, n: 36, k: 1536, group: undefined },
-    ] as const
-  ) {
+  for (const shape of [
+    { storage: "i2", bits: 2, n: 12288, k: 1536, group: undefined },
+    { storage: "i4", bits: 4, n: 256, k: 1536, group: 32 },
+    { storage: "i4", bits: 4, n: 256, k: 1536, group: 512 },
+    { storage: "i4", bits: 4, n: 1536, k: 2048, group: 2048 },
+    { storage: "i4", bits: 4, n: 1536, k: 4096, group: 4096 },
+    { storage: "i8", bits: 8, n: 256, k: 1536, group: undefined },
+    { storage: "i8", bits: 8, n: 36, k: 1536, group: undefined },
+  ] as const) {
     const { storage, n, k, bits, group } = shape;
     const w = Uint8Array.from(
-      { length: n * k * bits / 8 },
-      (_, i) => (Math.imul(i + 1, 0x9e3779b9) >>> 24),
+      { length: (n * k * bits) / 8 },
+      (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
     );
     // per-channel（i2 / i8）は groups = 1、group 量子化（i4）は 行長 / group。
     const groups = group === undefined ? 1 : k / group;
@@ -42,16 +40,14 @@ export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> =>
           groupSize: group ?? k,
           scale: {
             dtype: "f32",
-            bytes: f32Bytes(
-              Array.from({ length: n * groups }, (_, i) => (i % 17 + 1) * 0.00017),
-            ),
+            bytes: f32Bytes(Array.from({ length: n * groups }, (_, i) => ((i % 17) + 1) * 0.00017)),
           },
         },
       },
       {
         graph: GRAPH_NAME,
         initializer: "b",
-        bytes: f32Bytes(Array.from({ length: n }, (_, i) => (i % 7 - 3) * 0.11)),
+        bytes: f32Bytes(Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11)),
         encoding: { codec: "f32" },
       },
     ];
@@ -80,10 +76,7 @@ export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> =>
           parallel ? { linearGemvReduce: "parallel-subgroup32" } : {},
         );
         try {
-          const input = Float32Array.from(
-            { length: m * k },
-            (_, i) => Math.sin(i * 0.037) * 0.75,
-          );
+          const input = Float32Array.from({ length: m * k }, (_, i) => Math.sin(i * 0.037) * 0.75);
           const output = (await session.run({ x: { dtype: "f32", shape: [m, k], data: input } })).y;
           assertEquals(output.shape, [m, n]);
           for (const value of output.data) assert(Number.isFinite(value));
@@ -95,8 +88,7 @@ export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> =>
             `${where} ${census.map((row) => row.key)}`,
           );
           if (parallel && m <= 8 && n !== 36) {
-            const first = new Uint32Array(output.data.buffer, output.data.byteOffset, n)
-              .slice();
+            const first = new Uint32Array(output.data.buffer, output.data.byteOffset, n).slice();
             expected ??= first;
             assertEquals(first, expected);
           }

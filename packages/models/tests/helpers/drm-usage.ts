@@ -1,4 +1,10 @@
-import { type DirEntry, isNotFound, readDirSync, readLinkSync, readTextFileSync } from "@karume/test-support/fs";
+import {
+  type DirEntry,
+  isNotFound,
+  readDirSync,
+  readLinkSync,
+  readTextFileSync,
+} from "@karume/test-support/fs";
 /**
  * この process の GPU メモリの使用量の標本化（診断 — Linux の DRM fdinfo）。
  *
@@ -40,9 +46,9 @@ export const sampleDrmUsage = (): DrmUsage | undefined => {
     const client = /^drm-client-id:\s*(\d+)/m.exec(info)?.[1];
     if (client === undefined) continue;
     const regions = new Map<string, number>();
-    for (
-      const [, region, value, unit] of info.matchAll(/^drm-total-(\S+):\s*(\d+)\s*(KiB|MiB)?/gm)
-    ) {
+    for (const [, region, value, unit] of info.matchAll(
+      /^drm-total-(\S+):\s*(\d+)\s*(KiB|MiB)?/gm,
+    )) {
       if (region.startsWith("cycles-")) continue;
       regions.set(region, Number(value) * FDINFO_UNITS[unit ?? ""]);
     }
@@ -68,7 +74,9 @@ export type DrmTimeline = {
  * 区間ごとの山を採る標本化を始める。`enter(区間名)` で区間を切り替え（切り替えの直前と直後に 1 回ずつ
  * 標本を採る）、`mark(名前)` でその時点の値を残し、`stop()` で止めて決着を返す。
  */
-export const monitorDrmUsage = (intervalMs = 10): {
+export const monitorDrmUsage = (
+  intervalMs = 10,
+): {
   readonly enter: (phase: string) => void;
   readonly mark: (label: string) => void;
   readonly stop: () => DrmTimeline;

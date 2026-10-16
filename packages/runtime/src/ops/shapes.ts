@@ -203,7 +203,8 @@ const isReadonlyStateAttention = (
   context: ShapeContext,
   where: string,
 ): boolean =>
-  found.readonlyArity !== undefined && referencesStates(context) &&
+  found.readonlyArity !== undefined &&
+  referencesStates(context) &&
   stateReadonly(context.attrs ?? {}, where);
 
 /**
@@ -239,9 +240,9 @@ const readonlyStateAttentionShape = (
   // MUST: k / v スロットは**同形**（states 形と同じ理由 — 容量の違う組は片方だけ先に wrap する）。
   if (kSlot.shape.some((dim, axis) => dim !== vSlot.shape[axis])) {
     throw new OpContractError(
-      `${where}: readonly の attention の k / v スロットが同形でない（'${kSlot.name}' [${
-        kSlot.shape.join(",")
-      }] / '${vSlot.name}' [${vSlot.shape.join(",")}]）`,
+      `${where}: readonly の attention の k / v スロットが同形でない（'${kSlot.name}' [${kSlot.shape.join(
+        ",",
+      )}] / '${vSlot.name}' [${vSlot.shape.join(",")}]）`,
     );
   }
   if (q[0] !== kSlot.shape[0] || q[3] !== kSlot.shape[3]) {
@@ -346,9 +347,9 @@ export const computeOutputShape = (
       // 同じ op 名で通り、B の取り違えが shape 検査を素通りする。
       if (a.length !== 3 || b.length !== 3) {
         throw new OpContractError(
-          `${where}: bmm は rank-3 × rank-3 のみ（rank-2 は matmul）: [${a.join(",")}] × [${
-            b.join(",")
-          }]`,
+          `${where}: bmm は rank-3 × rank-3 のみ（rank-2 は matmul）: [${a.join(",")}] × [${b.join(
+            ",",
+          )}]`,
         );
       }
       if (a[0] !== b[0]) {
@@ -369,17 +370,17 @@ export const computeOutputShape = (
       // torch の一般 gather（他軸の長さが src 以下でよい）より狭いが、実測形はこれで足りる。
       if (src.length === 0 || index.length !== src.length) {
         throw new OpContractError(
-          `${where}: gather は src と index が同じ rank（1 以上）: [${src.join(",")}] / [${
-            index.join(",")
-          }]`,
+          `${where}: gather は src と index が同じ rank（1 以上）: [${src.join(",")}] / [${index.join(
+            ",",
+          )}]`,
         );
       }
       const mismatch = src.findIndex((dim, d) => d < src.length - 1 && dim !== index[d]);
       if (mismatch >= 0) {
         throw new OpContractError(
-          `${where}: gather の先行次元 ${mismatch} が不一致 [${src.join(",")}] / [${
-            index.join(",")
-          }]`,
+          `${where}: gather の先行次元 ${mismatch} が不一致 [${src.join(",")}] / [${index.join(
+            ",",
+          )}]`,
         );
       }
       // 出力は index と同形（値は src から引く）。添字の値域は実行時データ依存なので
@@ -389,9 +390,7 @@ export const computeOutputShape = (
     case "rowReduce": {
       const shape = inputShapes[0];
       if (shape.length === 0) {
-        throw new OpContractError(
-          `${where}: reduce の入力は rank 1 以上（スカラは縮約できない）`,
-        );
+        throw new OpContractError(`${where}: reduce の入力は rank 1 以上（スカラは縮約できない）`);
       }
       const dim = reduceDim(context.attrs ?? {}, where);
       // MUST: 負値・rank 外は fail loudly（負の軸表記の正規化はエクスポータ境界の責務で、
@@ -412,9 +411,7 @@ export const computeOutputShape = (
       // reduce 族と違い軸は attrs ではなく**最終次元固定**（欄の不存在が「他の軸は語彙に
       // 無い」の宣言 — ADR 0068 決定 2）。
       if (shape.length === 0) {
-        throw new OpContractError(
-          `${where}: argmax の入力は rank 1 以上（スカラは縮約できない）`,
-        );
+        throw new OpContractError(`${where}: argmax の入力は rank 1 以上（スカラは縮約できない）`);
       }
       const last = shape.length - 1;
       // 長さ 0 の軸に「最大値の添字」は無い（torch も拒否する）。amax / amin と同じ絞りで、
@@ -429,9 +426,7 @@ export const computeOutputShape = (
       const shape = inputShapes[0];
       // 軸は最終次元固定（argmax と同じ絞り）。多出力なので**列を直接組んで返す**唯一のアーム。
       if (shape.length === 0) {
-        throw new OpContractError(
-          `${where}: topk の入力は rank 1 以上（スカラは縮約できない）`,
-        );
+        throw new OpContractError(`${where}: topk の入力は rank 1 以上（スカラは縮約できない）`);
       }
       const last = shape.length - 1;
       const k = topkK(context.attrs ?? {}, where);
@@ -440,9 +435,9 @@ export const computeOutputShape = (
       // 突合でそのまま落ちる — 「大きい順の k 本」が定義できない形を 1 本の述語で拒否する。
       if (k > shape[last]) {
         throw new OpContractError(
-          `${where}: topk の attrs.k=${k} が最終次元 ${shape[last]} を超える（入力 [${
-            shape.join(",")
-          }]）`,
+          `${where}: topk の attrs.k=${k} が最終次元 ${shape[last]} を超える（入力 [${shape.join(
+            ",",
+          )}]）`,
         );
       }
       // 値と添字は同形（`[…, k]`）。rank は保存され、最終次元だけが k になる。
@@ -531,9 +526,9 @@ export const computeOutputShape = (
         shape.forEach((extent, axis) => {
           if (axis !== dim && extent !== first[axis]) {
             throw new OpContractError(
-              `${where}: cat の入力 ${index} [${shape.join(",")}] が入力 0 [${
-                first.join(",")
-              }] と軸 ${axis} で違う（連結軸は ${dim}）`,
+              `${where}: cat の入力 ${index} [${shape.join(",")}] が入力 0 [${first.join(
+                ",",
+              )}] と軸 ${axis} で違う（連結軸は ${dim}）`,
             );
           }
         });
@@ -559,9 +554,7 @@ export const computeOutputShape = (
       const source = inputShapes[0];
       const dim = flipDim(context.attrs ?? {}, where);
       if (source.length < 1 || dim >= source.length) {
-        throw new OpContractError(
-          `${where}: flip の dim ${dim} が入力 rank ${source.length} の外`,
-        );
+        throw new OpContractError(`${where}: flip の dim ${dim} が入力 rank ${source.length} の外`);
       }
       // 反転は shape を変えない（恒等 shape 規則）。
       return sole([...source]);
@@ -603,9 +596,9 @@ export const computeOutputShape = (
       const [x, weight, bias] = inputShapes;
       if (x.length < 1 || weight.length !== 2 || bias.length !== 1) {
         throw new OpContractError(
-          `${where}: linear は x[…,in] × W[out,in] + b[out]（rank ≥ 1 / 2 / 1）: [${
-            x.join(",")
-          }] / [${weight.join(",")}] / [${bias.join(",")}]`,
+          `${where}: linear は x[…,in] × W[out,in] + b[out]（rank ≥ 1 / 2 / 1）: [${x.join(
+            ",",
+          )}] / [${weight.join(",")}] / [${bias.join(",")}]`,
         );
       }
       const [out, inFeatures] = weight;
@@ -627,17 +620,20 @@ export const computeOutputShape = (
       // 契約は「最終次元のみ」（attrs 検査済み）。ここでは実 shape の末尾との一致を見る。
       if (x.length < 1 || x[x.length - 1] !== normalizedShape[0]) {
         throw new OpContractError(
-          `${where}: layer_norm の normalized_shape [${normalizedShape.join(",")}] が入力 [${
-            x.join(",")
-          }] の最終次元と違う`,
+          `${where}: layer_norm の normalized_shape [${normalizedShape.join(",")}] が入力 [${x.join(
+            ",",
+          )}] の最終次元と違う`,
         );
       }
-      for (const [name, shape] of [["weight", weight], ["bias", bias]] as const) {
+      for (const [name, shape] of [
+        ["weight", weight],
+        ["bias", bias],
+      ] as const) {
         if (shape.length !== 1 || shape[0] !== normalizedShape[0]) {
           throw new OpContractError(
-            `${where}: layer_norm の ${name} [${shape.join(",")}] が normalized_shape [${
-              normalizedShape.join(",")
-            }] と違う`,
+            `${where}: layer_norm の ${name} [${shape.join(",")}] が normalized_shape [${normalizedShape.join(
+              ",",
+            )}] と違う`,
           );
         }
       }
@@ -663,9 +659,9 @@ export const computeOutputShape = (
       // 正規化長の正本は **weight の長さ**（attrs に normalized_shape の欄を作らない — ADR 0017）。
       if (weight.length !== 1 || weight[0] !== dim) {
         throw new OpContractError(
-          `${where}: rms_norm の weight [${weight.join(",")}] が入力 [${
-            x.join(",")
-          }] の最終次元長 ${dim} の rank1 でない`,
+          `${where}: rms_norm の weight [${weight.join(",")}] が入力 [${x.join(
+            ",",
+          )}] の最終次元長 ${dim} の rank1 でない`,
         );
       }
       return sole([...x]);
@@ -675,9 +671,9 @@ export const computeOutputShape = (
       const { stride, padding, dilation, groups } = conv2dAttrs(context.attrs ?? {}, where);
       if (x.length !== 4 || weight.length !== 4 || bias.length !== 1) {
         throw new OpContractError(
-          `${where}: conv2d は x[B,Cin,H,W] / W[Cout,Cin/groups,Kh,Kw] / b[Cout]（rank 4 / 4 / 1）: [${
-            x.join(",")
-          }] / [${weight.join(",")}] / [${bias.join(",")}]`,
+          `${where}: conv2d は x[B,Cin,H,W] / W[Cout,Cin/groups,Kh,Kw] / b[Cout]（rank 4 / 4 / 1）: [${x.join(
+            ",",
+          )}] / [${weight.join(",")}] / [${bias.join(",")}]`,
         );
       }
       const [, channelsIn] = x;
@@ -712,9 +708,9 @@ export const computeOutputShape = (
         // 転んで出力が入力より長くなる — params 側は正整数として落とす）。
         if (kernel < 1) {
           throw new OpContractError(
-            `${where}: conv2d のカーネル長 K${name.toLowerCase()} は正整数（重み [${
-              weight.join(",")
-            }]）`,
+            `${where}: conv2d のカーネル長 K${name.toLowerCase()} は正整数（重み [${weight.join(
+              ",",
+            )}]）`,
           );
         }
         const span = length + 2 * padding[axis] - dilation[axis] * (kernel - 1) - 1;
@@ -736,9 +732,9 @@ export const computeOutputShape = (
       // 先頭軸を Cin と読む取り違えが要素数の合う形で素通りしうる。
       if (x.length !== 4 || weight.length !== 5 || bias.length !== 1) {
         throw new OpContractError(
-          `${where}: conv3d は x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]（rank 4 / 5 / 1 — x は unbatched）: [${
-            x.join(",")
-          }] / [${weight.join(",")}] / [${bias.join(",")}]`,
+          `${where}: conv3d は x[Cin,T,H,W] / W[Cout,Cin/groups,Kt,Kh,Kw] / b[Cout]（rank 4 / 5 / 1 — x は unbatched）: [${x.join(
+            ",",
+          )}] / [${weight.join(",")}] / [${bias.join(",")}]`,
         );
       }
       const [channelsIn] = x;
@@ -772,9 +768,9 @@ export const computeOutputShape = (
         // 負に転んで出力が入力より長くなる — params 側は正整数として落とす）。
         if (kernel < 1) {
           throw new OpContractError(
-            `${where}: conv3d のカーネル長 K${name.toLowerCase()} は正整数（重み [${
-              weight.join(",")
-            }]）`,
+            `${where}: conv3d のカーネル長 K${name.toLowerCase()} は正整数（重み [${weight.join(
+              ",",
+            )}]）`,
           );
         }
         const span = length + 2 * padding[axis] - dilation[axis] * (kernel - 1) - 1;
@@ -896,9 +892,9 @@ export const computeOutputShape = (
           kSlot.shape.some((dim, axis) => dim !== vSlot.shape[axis])
         ) {
           throw new OpContractError(
-            `${where}: attention の k / v スロットが同形でない（'${kSlot.name}' [${
-              kSlot.shape.join(",")
-            }] / '${vSlot.name}' [${vSlot.shape.join(",")}]）`,
+            `${where}: attention の k / v スロットが同形でない（'${kSlot.name}' [${kSlot.shape.join(
+              ",",
+            )}] / '${vSlot.name}' [${vSlot.shape.join(",")}]）`,
           );
         }
         assertStateSlotForm(kSlot, k, window, where);
@@ -983,9 +979,9 @@ export const computeOutputShape = (
       mask.forEach((extent, index) => {
         if (extent !== 1 && extent !== x[offset + index]) {
           throw new OpContractError(
-            `${where}: masked_fill の mask [${mask.join(",")}] が x [${
-              x.join(",")
-            }] へ右詰め broadcast できない（次元 ${index}）`,
+            `${where}: masked_fill の mask [${mask.join(",")}] が x [${x.join(
+              ",",
+            )}] へ右詰め broadcast できない（次元 ${index}）`,
           );
         }
       });
@@ -996,9 +992,9 @@ export const computeOutputShape = (
       const { stride, padding, dilation, groups } = conv1dAttrs(context.attrs ?? {}, where);
       if (x.length !== 3 || weight.length !== 3 || bias.length !== 1) {
         throw new OpContractError(
-          `${where}: conv1d は x[B,Cin,L] / W[Cout,Cin/groups,K] / b[Cout]（rank 3 / 3 / 1）: [${
-            x.join(",")
-          }] / [${weight.join(",")}] / [${bias.join(",")}]`,
+          `${where}: conv1d は x[B,Cin,L] / W[Cout,Cin/groups,K] / b[Cout]（rank 3 / 3 / 1）: [${x.join(
+            ",",
+          )}] / [${weight.join(",")}] / [${bias.join(",")}]`,
         );
       }
       const [, channelsIn, length] = x;
@@ -1047,9 +1043,9 @@ export const computeOutputShape = (
       const { stride, padding } = convTranspose1dAttrs(context.attrs ?? {}, where);
       if (x.length !== 3 || weight.length !== 3 || bias.length !== 1) {
         throw new OpContractError(
-          `${where}: conv_transpose1d は x[B,Cin,L] / W[Cin,Cout,K] / b[Cout]（rank 3 / 3 / 1）: [${
-            x.join(",")
-          }] / [${weight.join(",")}] / [${bias.join(",")}]`,
+          `${where}: conv_transpose1d は x[B,Cin,L] / W[Cin,Cout,K] / b[Cout]（rank 3 / 3 / 1）: [${x.join(
+            ",",
+          )}] / [${weight.join(",")}] / [${bias.join(",")}]`,
         );
       }
       const [, channelsIn, length] = x;
@@ -1058,9 +1054,9 @@ export const computeOutputShape = (
       // （Cin == Cout）が作れるので、テストは非対称チャネル数で固定する（ADR 0015）。
       if (weightIn !== channelsIn) {
         throw new OpContractError(
-          `${where}: conv_transpose1d の重みは [Cin, Cout, K]（Cin = ${channelsIn}）のはずが [${
-            weight.join(",")
-          }]（x は [${x.join(",")}]）`,
+          `${where}: conv_transpose1d の重みは [Cin, Cout, K]（Cin = ${channelsIn}）のはずが [${weight.join(
+            ",",
+          )}]（x は [${x.join(",")}]）`,
         );
       }
       if (bias[0] !== channelsOut) {
@@ -1082,15 +1078,18 @@ export const computeOutputShape = (
       const [x, weight, offset, mask, bias] = inputShapes;
       const { padding } = deformConv2dAttrs(context.attrs ?? {}, where);
       if (
-        x.length !== 4 || weight.length !== 4 || offset.length !== 4 || mask.length !== 4 ||
+        x.length !== 4 ||
+        weight.length !== 4 ||
+        offset.length !== 4 ||
+        mask.length !== 4 ||
         bias.length !== 1
       ) {
         throw new OpContractError(
-          `${where}: deform_conv2d は x[B,Cin,H,W] / W[Cout,Cin,Kh,Kw] / offset[B,2·Kh·Kw,Hout,Wout] / mask[B,Kh·Kw,Hout,Wout] / b[Cout]（rank 4/4/4/4/1）: [${
-            x.join(",")
-          }] / [${weight.join(",")}] / [${offset.join(",")}] / [${mask.join(",")}] / [${
-            bias.join(",")
-          }]`,
+          `${where}: deform_conv2d は x[B,Cin,H,W] / W[Cout,Cin,Kh,Kw] / offset[B,2·Kh·Kw,Hout,Wout] / mask[B,Kh·Kw,Hout,Wout] / b[Cout]（rank 4/4/4/4/1）: [${x.join(
+            ",",
+          )}] / [${weight.join(",")}] / [${offset.join(",")}] / [${mask.join(",")}] / [${bias.join(
+            ",",
+          )}]`,
         );
       }
       const [batch, channelsIn] = x;
@@ -1100,22 +1099,20 @@ export const computeOutputShape = (
       // 正の出力形まで導出でき、全タップが範囲外判定に落ちて **bias 一色**の沈黙誤値になる
       // （GPU は params で落ちるが、CPU 参照はその値を有効な結果として返す）。
       // Hout / Wout は下の `spatial` が `length < 1` で見るので、ここでは静的な入力側だけ。
-      for (
-        const [name, value] of [
-          ["batch", batch],
-          ["channels_in", channelsIn],
-          ["channels_out", channelsOut],
-          ["height_in", x[2]],
-          ["width_in", x[3]],
-          ["kernel_h", kernelH],
-          ["kernel_w", kernelW],
-        ] as const
-      ) {
+      for (const [name, value] of [
+        ["batch", batch],
+        ["channels_in", channelsIn],
+        ["channels_out", channelsOut],
+        ["height_in", x[2]],
+        ["width_in", x[3]],
+        ["kernel_h", kernelH],
+        ["kernel_w", kernelW],
+      ] as const) {
         if (value < 1) {
           throw new OpContractError(
-            `${where}: deform_conv2d の ${name} は正整数（x [${x.join(",")}] / W [${
-              weight.join(",")
-            }]）`,
+            `${where}: deform_conv2d の ${name} は正整数（x [${x.join(",")}] / W [${weight.join(
+              ",",
+            )}]）`,
           );
         }
       }
@@ -1123,9 +1120,9 @@ export const computeOutputShape = (
       // （[Cin, Cout, Kh, Kw]）は要素数が合う形が作れるので、テストは Cin ≠ Cout で固定する。
       if (weightIn !== channelsIn) {
         throw new OpContractError(
-          `${where}: deform_conv2d の重みは [Cout, Cin, Kh, Kw]（Cin = ${channelsIn}）のはずが [${
-            weight.join(",")
-          }]（x は [${x.join(",")}]）`,
+          `${where}: deform_conv2d の重みは [Cout, Cin, Kh, Kw]（Cin = ${channelsIn}）のはずが [${weight.join(
+            ",",
+          )}]（x は [${x.join(",")}]）`,
         );
       }
       if (bias[0] !== channelsOut) {
@@ -1152,20 +1149,20 @@ export const computeOutputShape = (
       // MUST: offset / mask は**突き合わせるだけ**（出力形の正本は x + weight + attrs）。
       // offset 側から Hout を取ると「offset だけ形が違う IR」が素通りする。
       // offset_groups の欄が無い = 1 固定なので、チャネル長は 2·Kh·Kw / Kh·Kw ちょうど。
-      for (
-        const [name, shape, channels] of [
-          ["offset", offset, 2 * taps],
-          ["mask", mask, taps],
-        ] as const
-      ) {
+      for (const [name, shape, channels] of [
+        ["offset", offset, 2 * taps],
+        ["mask", mask, taps],
+      ] as const) {
         if (
-          shape[0] !== batch || shape[1] !== channels || shape[2] !== heightOut ||
+          shape[0] !== batch ||
+          shape[1] !== channels ||
+          shape[2] !== heightOut ||
           shape[3] !== widthOut
         ) {
           throw new OpContractError(
-            `${where}: deform_conv2d の ${name} は [${batch},${channels},${heightOut},${widthOut}]（offset_groups = 1）のはずが [${
-              shape.join(",")
-            }]`,
+            `${where}: deform_conv2d の ${name} は [${batch},${channels},${heightOut},${widthOut}]（offset_groups = 1）のはずが [${shape.join(
+              ",",
+            )}]`,
           );
         }
       }
@@ -1181,12 +1178,15 @@ export const computeOutputShape = (
       }
       // MUST: 長さ 0 の空間軸を通さない。scale は `(in − 1) / (out − 1)` なので in = 0 は
       // 負の scale になり、読み出しが入力の外へ出る（GPU では例外なしに隣の値が出る）。
-      for (const [name, axis] of [["H", 2], ["W", 3]] as const) {
+      for (const [name, axis] of [
+        ["H", 2],
+        ["W", 3],
+      ] as const) {
         if (x[axis] === 0) {
           throw new OpContractError(
-            `${where}: upsample_bilinear2d は長さ 0 の空間軸 ${name} を補間できない（[${
-              x.join(",")
-            }]）`,
+            `${where}: upsample_bilinear2d は長さ 0 の空間軸 ${name} を補間できない（[${x.join(
+              ",",
+            )}]）`,
           );
         }
       }
@@ -1196,9 +1196,9 @@ export const computeOutputShape = (
       const [gi, initial, weight, bias] = inputShapes;
       if (gi.length !== 3 || initial.length !== 2 || weight.length !== 2 || bias.length !== 1) {
         throw new OpContractError(
-          `${where}: ${found.name} は gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H]（rank 3/2/2/1）: [${
-            gi.join(",")
-          }] / [${initial.join(",")}] / [${weight.join(",")}] / [${bias.join(",")}]`,
+          `${where}: ${found.name} は gi[T,N,3H] / h0[N,H] / W_hh[3H,H] / b_hh[3H]（rank 3/2/2/1）: [${gi.join(
+            ",",
+          )}] / [${initial.join(",")}] / [${weight.join(",")}] / [${bias.join(",")}]`,
         );
       }
       const [time, batch, gates] = gi;
@@ -1211,16 +1211,16 @@ export const computeOutputShape = (
       // CPU 参照だけが実行できる形になる。
       if (hidden < 1 || hidden > GRU_SCAN_MAX_HIDDEN) {
         throw new OpContractError(
-          `${where}: ${found.name} の隠れ幅 H ${hidden} が 1 〜 ${GRU_SCAN_MAX_HIDDEN} の外（h0 [${
-            initial.join(",")
-          }] — 1 lane = 1 隠れユニットの割り当て上限。ADR 0056 決定 5）`,
+          `${where}: ${found.name} の隠れ幅 H ${hidden} が 1 〜 ${GRU_SCAN_MAX_HIDDEN} の外（h0 [${initial.join(
+            ",",
+          )}] — 1 lane = 1 隠れユニットの割り当て上限。ADR 0056 決定 5）`,
         );
       }
       if (batch !== initialBatch) {
         throw new OpContractError(
-          `${where}: ${found.name} のバッチが gi [${gi.join(",")}] と h0 [${
-            initial.join(",")
-          }] で不一致`,
+          `${where}: ${found.name} のバッチが gi [${gi.join(",")}] と h0 [${initial.join(
+            ",",
+          )}] で不一致`,
         );
       }
       if (gates !== 3 * hidden) {
@@ -1230,9 +1230,9 @@ export const computeOutputShape = (
       }
       if (weight[0] !== 3 * hidden || weight[1] !== hidden) {
         throw new OpContractError(
-          `${where}: ${found.name} の W_hh は [3H, H] = [${3 * hidden},${hidden}] のはずが [${
-            weight.join(",")
-          }]`,
+          `${where}: ${found.name} の W_hh は [3H, H] = [${3 * hidden},${hidden}] のはずが [${weight.join(
+            ",",
+          )}]`,
         );
       }
       if (bias[0] !== 3 * hidden) {
@@ -1252,14 +1252,16 @@ export const computeOutputShape = (
           `${where}: permute の dims [${dims.join(",")}] が入力 rank ${source.length} と違う`,
         );
       }
-      return sole(dims.map((dim) => {
-        if (dim >= source.length) {
-          throw new OpContractError(
-            `${where}: permute の dims に入力 rank ${source.length} 外の軸 ${dim} がある`,
-          );
-        }
-        return source[dim];
-      }));
+      return sole(
+        dims.map((dim) => {
+          if (dim >= source.length) {
+            throw new OpContractError(
+              `${where}: permute の dims に入力 rank ${source.length} 外の軸 ${dim} がある`,
+            );
+          }
+          return source[dim];
+        }),
+      );
     }
   }
 };

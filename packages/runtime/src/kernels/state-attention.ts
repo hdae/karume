@@ -254,9 +254,10 @@ export const stateVariantKeyPart = (sliding: boolean, gqa: boolean): string =>
 export const stateSliding = (window: number): boolean => window > 0;
 
 export const stateQkKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ①' の D 方向レーン数（workgroup = `TILE_X × D_LANES` = 256 スレッド — ③' と同じ
@@ -266,9 +267,10 @@ export const STATE_QK_D_LANES = 16;
 
 /** ①' のキー（`:par` が census 門の目印 — ① と同じ変種ビットを後置）。 */
 export const stateQkParallelKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ①' の**適用条件** — `M`（物理 chunk 行数）が 8 以下の計画だけ。席（`stateAttentionReduce`）が
@@ -304,9 +306,10 @@ export const stateQkParallelEligible = (chunkRows: number): boolean => chunkRows
  * dispatch 数と噛み合わずに出力タイルが欠落する）。
  */
 export const stateQkTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
-  `attention_state_qk:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_qk:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ①ₜ の**適用条件** — `M`（物理 chunk 行数）が最小の行タイル辺 16 以上の計画だけ。
@@ -328,14 +331,16 @@ export const stateQkTiledEligible = (chunkRows: number): boolean => chunkRows >=
 // v2: 行 max を nan_max へ（全 NaN 行が空行判定へ化けて stats (0,0) になる穴を塞ぐ —
 // ADR 0020。非 NaN 入力ではビット不変）
 export const stateStatsKey = (sliding: boolean): string =>
-  `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}${
-    stateVariantKeyPart(sliding, false)
-  }`;
+  `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}${stateVariantKeyPart(
+    sliding,
+    false,
+  )}`;
 
 export const statePvKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_ATTENTION_TILE_M}${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ③' の KV 方向レーン数（workgroup = `TILE_X × KV_LANES` = 256 スレッド — ポータビリティの床
@@ -345,9 +350,10 @@ export const STATE_PV_KV_LANES = 16;
 
 /** ③' のキー（`:par` が census 門の目印 — ③ と同じ変種ビットを後置）。 */
 export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ③ₜ のキー（GEMM 骨格のタイル経路 — perf-ledger K-13 段 2）。綴りの規律は ①ₜ の
@@ -360,9 +366,10 @@ export const statePvParallelKey = (sliding: boolean, gqa: boolean): string =>
  * （{@link statePvTiledWorkgroups}）へ渡すものと**同じ値**。
  */
 export const statePvTiledKey = (sliding: boolean, gqa: boolean, chunkRows: number): string =>
-  `attention_state_pv:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_pv:v1:f32:${gemmGeometryTileKeyPart(gemmGeometryForRows(chunkRows))}${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ③ₜ の**適用条件** — `M`（物理 chunk 行数）が最小の行タイル辺 16 以上の計画だけ。
@@ -945,8 +952,7 @@ export const stateStatsWgsl = (sliding: boolean): string =>
   stateStatsBodyWgsl(sliding, {
     headerNote: "",
     live: stateLiveWgsl(sliding),
-    rowsNote:
-      `  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
+    rowsNote: `  // 有効行は各 z 平面の**前詰め** rows 本。total = 0 ならループへ入らないので rows での
   // 除算・剰余は 0 除算にならない（ホストも 0 なら dispatch を積まない）
 `,
     amaxBarrierNote: `    // scratch の読み終わりを揃えてから ② で上書きする
@@ -954,8 +960,7 @@ export const stateStatsWgsl = (sliding: boolean): string =>
     sumNote: `    // ② Σ exp(S - amax)。**空行（amax == -inf）は 1 度も回さない** —
     // exp(-inf - (-inf)) = exp(NaN) = NaN が分母へ入る
 `,
-    emptyStatsNote:
-      `      // 空行は (0.0, 0.0)。③ の exp(-inf - 0) * 0 = 0 で出力が**厳密 0** になる
+    emptyStatsNote: `      // 空行は (0.0, 0.0)。③ の exp(-inf - 0) * 0 = 0 で出力が**厳密 0** になる
 `,
     tailBarrierNote: `    // 次の行が scratch[lid] を上書きする前に scratch[0] の読み終わりを揃える
 `,
@@ -1252,9 +1257,7 @@ export const stateAttentionParams = (
  * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
  * MUST: 並びは {@link STATE_QK_TILED_DIMS_EXTRA} と対（この 2 つが唯一の対）。
  */
-export const stateQkTiledParams = (
-  geometry: StateAttentionGeometry,
-): Uint32Array<ArrayBuffer> => {
+export const stateQkTiledParams = (geometry: StateAttentionGeometry): Uint32Array<ArrayBuffer> => {
   assertStateGeometry("attention_state_qk (tiled) params", geometry);
   const params = new Uint32Array(12);
   params[0] = geometry.rowsBlock;
@@ -1278,9 +1281,7 @@ export const stateQkTiledParams = (
  * 静的幾何から出るので、門を別に持つと片方だけ通る形ができる。
  * MUST: 並びは {@link STATE_PV_TILED_DIMS_EXTRA} と対（この 2 つが唯一の対）。
  */
-export const statePvTiledParams = (
-  geometry: StateAttentionGeometry,
-): Uint32Array<ArrayBuffer> => {
+export const statePvTiledParams = (geometry: StateAttentionGeometry): Uint32Array<ArrayBuffer> => {
   assertStateGeometry("attention_state_pv (tiled) params", geometry);
   const params = new Uint32Array(8);
   params[0] = geometry.rowsBlock;
@@ -1363,11 +1364,8 @@ export const stateLiveColumns = (window: number, past: number, query: number): n
  * MUST: WGSL 側（{@link stateEffectiveRowsWgsl}）と**同じ式**。ホストが幾何の純関数で、
  * カーネルはその写し。
  */
-export const stateEffectiveRows = (
-  rowsBlock: number,
-  rowOffset: number,
-  query: number,
-): number => Math.min(rowsBlock, Math.max(0, query - rowOffset));
+export const stateEffectiveRows = (rowsBlock: number, rowOffset: number, query: number): number =>
+  Math.min(rowsBlock, Math.max(0, query - rowOffset));
 
 /** `queryLength` の値域門（搬送先は u32・`Q ≥ 1` は `GenerationContext` の契約と同じ）。 */
 const assertQueryLength = (where: string, query: number): void => {
@@ -1637,21 +1635,24 @@ const stateReadonlyWindowFn = (sliding: boolean, uniform = STATE_UNIFORM): strin
 
 /** ①' readonly のキー（`:par:ro` — 束縛が 1 本少ないので ①' とは別キー MUST）。 */
 export const stateQkParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par:ro${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_qk:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_QK_D_LANES}:par:ro${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /** ② readonly のキー（live の式が違うので ② とは別キー MUST）。 */
 export const stateStatsReadonlyKey = (sliding: boolean): string =>
-  `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}:ro${
-    stateVariantKeyPart(sliding, false)
-  }`;
+  `attention_state_stats:v2:f32:wg${STATE_STATS_WORKGROUP_SIZE}:ro${stateVariantKeyPart(
+    sliding,
+    false,
+  )}`;
 
 /** ③' readonly のキー（`:par:ro`）。 */
 export const statePvParallelReadonlyKey = (sliding: boolean, gqa: boolean): string =>
-  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par:ro${
-    stateVariantKeyPart(sliding, gqa)
-  }`;
+  `attention_state_pv:v1:f32:wg${STATE_ATTENTION_TILE_X}x${STATE_PV_KV_LANES}:par:ro${stateVariantKeyPart(
+    sliding,
+    gqa,
+  )}`;
 
 /**
  * ①' readonly。束縛（**ins が無いので 1 本詰まる** — ①' と同じ番号にしない）:
@@ -1747,8 +1748,7 @@ export const stateStatsReadonlyWgsl = (sliding: boolean): string =>
     live: stateReadonlyLiveWgsl(sliding),
     rowsNote: "",
     amaxBarrierNote: "",
-    sumNote:
-      `    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
+    sumNote: `    // ② Σ exp(S - amax)。**空行（amax == -inf・P = 0 の列 0 本を含む）は 1 度も回さない**
 `,
     emptyStatsNote: "",
     tailBarrierNote: "",

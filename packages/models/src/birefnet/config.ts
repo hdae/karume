@@ -102,7 +102,7 @@ export const BIREFNET_SOURCES = {
     repo: "hdae/karume-birefnet-hr",
     revision: "e0ed9f06843703265aa849477e6be5460ba8a300",
   },
-  "lucida": {
+  lucida: {
     repo: "hdae/karume-lucida",
     revision: "a416313c112b75a1735c6d6793ec5e2ff77d1a6a",
   },
@@ -149,9 +149,9 @@ const readPostprocess = (raw: Readonly<Record<string, unknown>>, where: string):
   const procedure = MATTE_PROCEDURES.find((name) => name === value);
   if (procedure === undefined) {
     throw new Error(
-      `${where}.${key}: 未知の後処理の手順 ${JSON.stringify(value)}（期待 ${
-        MATTE_PROCEDURES.map((name) => `'${name}'`).join(" / ")
-      }）`,
+      `${where}.${key}: 未知の後処理の手順 ${JSON.stringify(value)}（期待 ${MATTE_PROCEDURES.map(
+        (name) => `'${name}'`,
+      ).join(" / ")}）`,
     );
   }
   return procedure;

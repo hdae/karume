@@ -67,12 +67,12 @@ const highShelf = (sampleRate: number, gainDb: number, q: number, fc: number): B
   const alpha = Math.sin(w0) / (2 * q);
   const cos = Math.cos(w0);
   const root = Math.sqrt(amplitude);
-  const b0 = amplitude * ((amplitude + 1) + (amplitude - 1) * cos + 2 * root * alpha);
-  const b1 = -2 * amplitude * ((amplitude - 1) + (amplitude + 1) * cos);
-  const b2 = amplitude * ((amplitude + 1) + (amplitude - 1) * cos - 2 * root * alpha);
-  const a0 = (amplitude + 1) - (amplitude - 1) * cos + 2 * root * alpha;
-  const a1 = 2 * ((amplitude - 1) - (amplitude + 1) * cos);
-  const a2 = (amplitude + 1) - (amplitude - 1) * cos - 2 * root * alpha;
+  const b0 = amplitude * (amplitude + 1 + (amplitude - 1) * cos + 2 * root * alpha);
+  const b1 = -2 * amplitude * (amplitude - 1 + (amplitude + 1) * cos);
+  const b2 = amplitude * (amplitude + 1 + (amplitude - 1) * cos - 2 * root * alpha);
+  const a0 = amplitude + 1 - (amplitude - 1) * cos + 2 * root * alpha;
+  const a1 = 2 * (amplitude - 1 - (amplitude + 1) * cos);
+  const a2 = amplitude + 1 - (amplitude - 1) * cos - 2 * root * alpha;
   return { b: [b0 / a0, b1 / a0, b2 / a0], a: [1, a1 / a0, a2 / a0] };
 };
 

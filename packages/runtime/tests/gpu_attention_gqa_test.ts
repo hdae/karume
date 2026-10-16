@@ -174,9 +174,8 @@ const runAttention = async (
   options: SessionOptions = {},
 ): Promise<RunResult> => {
   const out = [q.shape[0], q.shape[1], q.shape[2], q.shape[3]];
-  const shapes = mask === undefined
-    ? [q.shape, k.shape, v.shape]
-    : [q.shape, k.shape, v.shape, mask.shape];
+  const shapes =
+    mask === undefined ? [q.shape, k.shape, v.shape] : [q.shape, k.shape, v.shape, mask.shape];
   const graph = singleOpDeclaration("attention", shapes, [out], {
     attrs: { scale: halfScale(q.shape[3]) },
   });
@@ -237,17 +236,16 @@ const assertBitEqual = (fused: Tensor, split: Tensor, where: string): void => {
   assertEquals(
     mismatches(fused, split),
     [],
-    `${where}: 実体化版とビット列が違う（最初の食い違い: ${
-      mismatches(fused, split).map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`).join(" / ")
-    }）`,
+    `${where}: 実体化版とビット列が違う（最初の食い違い: ${mismatches(fused, split)
+      .map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`)
+      .join(" / ")}）`,
   );
   // 恒真化の門: 出力が定数なら「一致」は何も検証していない
   assert(new Set(bits(fused)).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
 };
 
 test({
-  name:
-    "GQA 形 attention の出力が repeat_kv 実体化版と**ビット単位で一致**する（r ∈ {1,2,4,8}・実 GPU）",
+  name: "GQA 形 attention の出力が repeat_kv 実体化版と**ビット単位で一致**する（r ∈ {1,2,4,8}・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -389,8 +387,8 @@ test({
         const { keys } = await runAttention(gpu, q, k, v);
         assert(keys.length > 0, `${shape.name}: 内訳が空（キー検査が空振りしている）`);
         const gqa = shape.h !== shape.kv;
-        const attention = keys.filter((key) =>
-          key.startsWith("attention_qk") || key.startsWith("attention_pv")
+        const attention = keys.filter(
+          (key) => key.startsWith("attention_qk") || key.startsWith("attention_pv"),
         );
         assertEquals(attention.length, 2, `${shape.name}: ①③ が 1 本ずつ走る`);
         assertEquals(
@@ -427,8 +425,7 @@ test({
  * まで見る — 拒否が要求モードではなく段の適格性で決まる実装では、そこだけが沈黙で縮退する。
  */
 test({
-  name:
-    "GQA × attentionCompute 'a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
+  name: "GQA × attentionCompute 'a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const shape = SHAPES[2];

@@ -213,11 +213,12 @@ const runBoth = async (
       }),
       [xBuffer, weightBuffer, offsetBuffer, maskBuffer, biasBuffer],
     );
-    scheduler.dispatch(deformPipeline, deformGroup, [
-      gridStrideWorkgroups(count, DEFORM_CONV2D_WORKGROUP_SIZE, limit),
-      1,
-      1,
-    ], DEFORM_CONV2D_KEY);
+    scheduler.dispatch(
+      deformPipeline,
+      deformGroup,
+      [gridStrideWorkgroups(count, DEFORM_CONV2D_WORKGROUP_SIZE, limit), 1, 1],
+      DEFORM_CONV2D_KEY,
+    );
 
     const convKey = conv2dKey("f32");
     const { pipeline: convPipeline, layout: convLayout } = await cache.get(
@@ -246,11 +247,12 @@ const runBoth = async (
       }),
       [xBuffer, weightBuffer, biasBuffer],
     );
-    scheduler.dispatch(convPipeline, convGroup, [
-      gridStrideWorkgroups(count, CONV2D_WORKGROUP_SIZE, limit),
-      1,
-      1,
-    ], convKey);
+    scheduler.dispatch(
+      convPipeline,
+      convGroup,
+      [gridStrideWorkgroups(count, CONV2D_WORKGROUP_SIZE, limit), 1, 1],
+      convKey,
+    );
 
     await scheduler.flush();
     const [deform, conv] = await Promise.all(

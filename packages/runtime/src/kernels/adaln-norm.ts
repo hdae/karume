@@ -53,8 +53,7 @@ export const ADALN_NORM_WORKGROUP_SIZE = LAYER_NORM_WORKGROUP_SIZE;
 
 export const ADALN_NORM_KEY = `adaln_norm:v1:lastdim:f32:wg${ADALN_NORM_WORKGROUP_SIZE}`;
 
-export const ADALN_NORM_WGSL: string =
-  `// karume adaLN (layer_norm -> 1 + scale -> mul -> add, f32, staged 変調)
+export const ADALN_NORM_WGSL: string = `// karume adaLN (layer_norm -> 1 + scale -> mul -> add, f32, staged 変調)
 struct Params {
   rows: u32,
   dim: u32,

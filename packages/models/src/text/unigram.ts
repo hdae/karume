@@ -53,10 +53,7 @@ export type UnigramSegment = { readonly text: string; readonly entry?: UnigramVo
  * Rust 側の既定で融合する）。融合しないと日本語のように語彙に無い文字が続く入力で未知が
  * 1 文字ずつ並び、正本との突合が落ちる。
  */
-export const unigramSegments = (
-  model: UnigramModel,
-  cps: readonly number[],
-): UnigramSegment[] => {
+export const unigramSegments = (model: UnigramModel, cps: readonly number[]): UnigramSegment[] => {
   const out: UnigramSegment[] = [];
   // 連続する未知ノードを溜める緩衝。空でない = 直前まで未知が続いていた。
   let pending = "";
@@ -146,7 +143,7 @@ const viterbi = (
   }
   const best: number[][] = begin.map((lengths) => Array.from(lengths, () => 0));
   const prev: (Slot | undefined)[][] = begin.map((lengths) =>
-    Array.from(lengths, (): Slot | undefined => undefined)
+    Array.from(lengths, (): Slot | undefined => undefined),
   );
 
   /** pos で終わる最良ノード。pos=0 は bos（スコア 0）。到達不能なら undefined。 */

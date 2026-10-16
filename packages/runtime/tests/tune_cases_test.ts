@@ -15,14 +15,14 @@ const profileSegmentOf = (rows: number): number =>
 const gemmRowsCases = SWEEP_CASES.flatMap((sweepCase) =>
   sweepCase.op === "linear" || sweepCase.op === "matmul" || sweepCase.op === "bmm"
     ? [{ op: sweepCase.op, m: sweepCase.m }]
-    : []
+    : [],
 );
 
 describe("プロファイルの gemmRows の段の境界", () => {
   it("末尾の Infinity を除いた境界は、linear / matmul / bmm の掃引ケースの M（≤ 512）の集合と一致する", () => {
-    const sweptRows = [
-      ...new Set(gemmRowsCases.map(({ m }) => m).filter((m) => m <= 512)),
-    ].sort((a, b) => a - b);
+    const sweptRows = [...new Set(gemmRowsCases.map(({ m }) => m).filter((m) => m <= 512))].sort(
+      (a, b) => a - b,
+    );
     assertEquals(PROFILE_GEMM_ROWS_BOUNDS.slice(0, -1), sweptRows);
     assertEquals(PROFILE_GEMM_ROWS_BOUNDS.at(-1), Number.POSITIVE_INFINITY);
   });
@@ -39,13 +39,14 @@ describe("プロファイルの gemmRows の段の境界", () => {
   it("どの段にも linear / matmul / bmm のケースが 1 本以上ある（> 512 の段の bmm を除く）", () => {
     PROFILE_GEMM_ROWS_BOUNDS.forEach((maxRows, segment) => {
       // > 512 の段の bmm は census に無く、ADR 0116 決定 4 の対象外（足すのは linear しか無かった段だけ）
-      const ops = maxRows === Number.POSITIVE_INFINITY
-        ? (["linear", "matmul"] as const)
-        : (["linear", "matmul", "bmm"] as const);
+      const ops =
+        maxRows === Number.POSITIVE_INFINITY
+          ? (["linear", "matmul"] as const)
+          : (["linear", "matmul", "bmm"] as const);
       for (const op of ops) {
         assert(
-          gemmRowsCases.some((sweepCase) =>
-            sweepCase.op === op && profileSegmentOf(sweepCase.m) === segment
+          gemmRowsCases.some(
+            (sweepCase) => sweepCase.op === op && profileSegmentOf(sweepCase.m) === segment,
           ),
           `段 ≤ ${maxRows} に ${op} が無い`,
         );
@@ -59,7 +60,10 @@ describe("形状表", () => {
     const ids = SWEEP_CASES.map((sweepCase) => sweepCase.id);
     assertEquals(new Set(ids).size, ids.length);
     for (const op of SWEEP_OPS) {
-      assert(SWEEP_CASES.some((sweepCase) => sweepCase.op === op), op);
+      assert(
+        SWEEP_CASES.some((sweepCase) => sweepCase.op === op),
+        op,
+      );
     }
   });
 
@@ -73,7 +77,7 @@ describe("形状表", () => {
 
   it("matmul は census に無い鏡像で、本数 0・鏡像元は同じ M / N / K の linear のケース", () => {
     const matmuls = SWEEP_CASES.flatMap((sweepCase) =>
-      sweepCase.op === "matmul" ? [sweepCase] : []
+      sweepCase.op === "matmul" ? [sweepCase] : [],
     );
     assert(matmuls.length > 0);
     for (const sweepCase of matmuls) {
@@ -95,7 +99,7 @@ describe("形状表", () => {
 
   it("matmul はプロファイルの gemmRows の 7 段を 1 本ずつ持ち、既定の 3 バケット（≤ 64 / 65〜512 / > 512）も全て覆う", () => {
     const matmuls = SWEEP_CASES.flatMap((sweepCase) =>
-      sweepCase.op === "matmul" ? [sweepCase] : []
+      sweepCase.op === "matmul" ? [sweepCase] : [],
     );
     assertEquals(
       matmuls.map((sweepCase) => profileSegmentOf(sweepCase.m)).sort((a, b) => a - b),
@@ -103,7 +107,7 @@ describe("形状表", () => {
     );
     const defaultBuckets = new Set(
       matmuls.map((sweepCase) =>
-        GEMM_ROWS_BUCKETS.findIndex((bucket) => sweepCase.m <= bucket.maxRows)
+        GEMM_ROWS_BUCKETS.findIndex((bucket) => sweepCase.m <= bucket.maxRows),
       ),
     );
     assertEquals([...defaultBuckets].sort(), [0, 1, 2]);
@@ -145,7 +149,7 @@ describe("形状表", () => {
   it("conv2d は m タイル 32 行と 64 行の両方の本番幾何を 1 行以上持つ", () => {
     const mTiles = new Set(
       SWEEP_CASES.flatMap((sweepCase) =>
-        sweepCase.op === "conv2d" ? [conv2dIgemmMTile(sweepCase.channelsOut)] : []
+        sweepCase.op === "conv2d" ? [conv2dIgemmMTile(sweepCase.channelsOut)] : [],
       ),
     );
     assertEquals([...mTiles].sort(), [32, 64]);
@@ -157,7 +161,7 @@ describe("形状表", () => {
         SWEEP_CASES.flatMap((sweepCase) =>
           sweepCase.op === op && sweepCase.stage === stage
             ? [`${sweepCase.batchHeads}/${sweepCase.m}/${sweepCase.n}/${sweepCase.d}`]
-            : []
+            : [],
         );
       assertEquals(shapes("qk"), shapes("pv"), op);
     }

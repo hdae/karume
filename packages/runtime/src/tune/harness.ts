@@ -528,10 +528,10 @@ const i8a8AttentionPlan = (sweepCase: AttentionCase, limit: number, dp4a: boolea
       { name: "kscale", bytes: batchHeads * n * F32, fill: "scale" },
       ...(stagePv
         ? [
-          // Vᵀ[B·H,D,N] の per-column 量子化（行 = (b,h,d)・N 連続 — :1141-1142）
-          { name: "vq", bytes: batchHeads * d * n, fill: "i8" as const },
-          { name: "vscale", bytes: batchHeads * d * F32, fill: "scale" as const },
-        ]
+            // Vᵀ[B·H,D,N] の per-column 量子化（行 = (b,h,d)・N 連続 — :1141-1142）
+            { name: "vq", bytes: batchHeads * d * n, fill: "i8" as const },
+            { name: "vscale", bytes: batchHeads * d * F32, fill: "scale" as const },
+          ]
         : []),
       ...attentionShared(sweepCase),
     ],
@@ -655,26 +655,26 @@ export const assertBindingRoles = (
   const expected = sortedList(launch.bindings.map((_, index) => index + 1));
   if (declared !== expected) {
     throw new Error(
-      `${launch.key}: WGSL の storage 束縛 [${declared}] が写した表の位置 [${expected}]（${
-        launch.bindings.join(", ")
-      }）と違う`,
+      `${launch.key}: WGSL の storage 束縛 [${declared}] が写した表の位置 [${expected}]（${launch.bindings.join(
+        ", ",
+      )}）と違う`,
     );
   }
   const expectedWrites = sortedList(
-    launch.bindings.flatMap((name, index) => launch.writes.includes(name) ? [index + 1] : []),
+    launch.bindings.flatMap((name, index) => (launch.writes.includes(name) ? [index + 1] : [])),
   );
   const declaredWrites = sortedList(roles.writes);
   if (declaredWrites !== expectedWrites) {
     throw new Error(
-      `${launch.key}: WGSL の書き込み束縛 [${declaredWrites}] が写した表の書き込み先 [${expectedWrites}]（${
-        launch.writes.join(", ")
-      }）と違う`,
+      `${launch.key}: WGSL の書き込み束縛 [${declaredWrites}] が写した表の書き込み先 [${expectedWrites}]（${launch.writes.join(
+        ", ",
+      )}）と違う`,
     );
   }
 };
 
 /** xorshift32（決定的・seed ≠ 0）。 */
-const xorshift = (seed: number): () => number => {
+const xorshift = (seed: number): (() => number) => {
   let state = seed >>> 0 || 1;
   return () => {
     state = (state ^ (state << 13)) >>> 0;
@@ -687,7 +687,7 @@ const xorshift = (seed: number): () => number => {
 const TWO_POW_32 = 2 ** 32;
 
 /** 1 語ぶんの値を `fill` の形式で作る（u32 のビット列として返す）。 */
-const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): () => number => {
+const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): (() => number) => {
   const bits = new Float32Array(1);
   const word = new Uint32Array(bits.buffer);
   switch (fill) {
@@ -708,7 +708,7 @@ const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): () => numb
       // kernels/weight-storage.ts の `unpack2x16float(w[i >> 1])[i & 1]`）
       const half = (): number => {
         const r = next();
-        return ((r >>> 12) & 1) << 15 | (11 + (r & 3)) << 10 | ((r >>> 2) & 0x3ff);
+        return (((r >>> 12) & 1) << 15) | ((11 + (r & 3)) << 10) | ((r >>> 2) & 0x3ff);
       };
       return () => (half() | (half() << 16)) >>> 0;
     }
@@ -731,7 +731,7 @@ const wordFiller = (fill: Exclude<Fill, "none">, next: () => number): () => numb
  * 資源表の `index` 番目を埋める u32 語の列（決定的 — {@link createResources} とテストの CPU 参照が
  * 共有する 1 本の経路）。
  */
-export const resourceWordStream = (fill: Exclude<Fill, "none">, index: number): () => number =>
+export const resourceWordStream = (fill: Exclude<Fill, "none">, index: number): (() => number) =>
   wordFiller(fill, xorshift(0x9e3779b9 ^ (index + 1)));
 
 /** 計測に使う device まわりの束（掃引 1 回ぶん — 後始末は {@link destroySweepContext}）。 */
@@ -820,18 +820,18 @@ export const createSweepContext = async (
     }),
     timestamps: gpu.gpuTimingEnabled
       ? {
-        querySet: device.createQuerySet({ type: "timestamp", count: 2 }),
-        resolve: device.createBuffer({
-          label: "geometry-sweep-resolve",
-          size: 16,
-          usage: BUFFER_USAGE.QUERY_RESOLVE | BUFFER_USAGE.COPY_SRC,
-        }),
-        read: device.createBuffer({
-          label: "geometry-sweep-timestamps",
-          size: 16,
-          usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
-        }),
-      }
+          querySet: device.createQuerySet({ type: "timestamp", count: 2 }),
+          resolve: device.createBuffer({
+            label: "geometry-sweep-resolve",
+            size: 16,
+            usage: BUFFER_USAGE.QUERY_RESOLVE | BUFFER_USAGE.COPY_SRC,
+          }),
+          read: device.createBuffer({
+            label: "geometry-sweep-timestamps",
+            size: 16,
+            usage: BUFFER_USAGE.COPY_DST | BUFFER_USAGE.MAP_READ,
+          }),
+        }
       : undefined,
   }));
   return {
@@ -874,17 +874,16 @@ const createResources = async (
           label: `geometry-sweep-${spec.name}`,
           size,
           usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC,
-        }));
+        }),
+      );
       buffers.set(spec.name, buffer);
       if (spec.fill === "none") continue;
       const word = resourceWordStream(spec.fill, index);
       for (let offset = 0; offset < size; offset += FILL_CHUNK_BYTES) {
         const chunk = new Uint32Array(Math.min(FILL_CHUNK_BYTES, size - offset) / 4);
         for (let at = 0; at < chunk.length; at += 1) chunk[at] = word();
-        await scoped(
-          gpu,
-          `writeBuffer(${spec.name})`,
-          () => gpu.device.queue.writeBuffer(buffer, offset, chunk),
+        await scoped(gpu, `writeBuffer(${spec.name})`, () =>
+          gpu.device.queue.writeBuffer(buffer, offset, chunk),
         );
       }
     }
@@ -912,7 +911,7 @@ const prepareLaunch = async (
   // パイプラインは device 寿命のキャッシュから引く（同じキーに別の WGSL が来たら
   // PipelineKeyConflictError — 明示幾何のキーが判別力を失っていないことの検出器にもなる）
   const { pipeline, layout, roles } = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
-    gpu[RUNTIME_INTERNAL].pipelines().get(launch.key, launch.wgsl)
+    gpu[RUNTIME_INTERNAL].pipelines().get(launch.key, launch.wgsl),
   );
   assertBindingRoles(launch, roles);
   const params = await scoped(gpu, `params(${launch.key})`, () => {
@@ -931,10 +930,8 @@ const prepareLaunch = async (
       if (buffer === undefined) throw new Error(`${launch.key}: 資源 ${name} が無い`);
       entries.push({ binding: index + 1, resource: { buffer } });
     }
-    const bindGroup = await scoped(
-      gpu,
-      `createBindGroup(${launch.key})`,
-      () => gpu.device.createBindGroup({ layout, entries }),
+    const bindGroup = await scoped(gpu, `createBindGroup(${launch.key})`, () =>
+      gpu.device.createBindGroup({ layout, entries }),
     );
     return { launch, pipeline, bindGroup, params };
   } catch (cause) {
@@ -966,13 +963,15 @@ const runPass = async (
   const wallNs = await submitAndWait(context.gpu, ready.launch.key, (encoder) => {
     if (clear !== undefined) encoder.clearBuffer(clear);
     const pass = encoder.beginComputePass(
-      timestamps === undefined ? {} : {
-        timestampWrites: {
-          querySet: timestamps.querySet,
-          beginningOfPassWriteIndex: 0,
-          endOfPassWriteIndex: 1,
-        },
-      },
+      timestamps === undefined
+        ? {}
+        : {
+            timestampWrites: {
+              querySet: timestamps.querySet,
+              beginningOfPassWriteIndex: 0,
+              endOfPassWriteIndex: 1,
+            },
+          },
     );
     pass.setPipeline(ready.pipeline);
     pass.setBindGroup(0, ready.bindGroup);
@@ -1062,7 +1061,7 @@ const warmUp = async (context: SweepContext, ready: ReadyLaunch, reps: number): 
   for (let pass = 0; pass < WARMUP_MAX_PASSES; pass += 1) {
     if (pass >= WARMUP_MIN_RUNS && total >= WARMUP_NS) return;
     const sample = await runPass(context, ready, reps, timed);
-    total += timed ? sample.gpu ?? 0 : sample.wallNs;
+    total += timed ? (sample.gpu ?? 0) : sample.wallNs;
   }
 };
 
@@ -1097,9 +1096,8 @@ const timeLaunch = async (
     const { wallNs } = await runPass(context, ready, reps, false);
     if (wallNs >= PROBE_MIN_NS || reps >= SWEEP_MAX_REPS) {
       const average = wallNs / reps;
-      const slope = previous === undefined
-        ? 0
-        : (wallNs - previous.wallNs) / (reps - previous.reps);
+      const slope =
+        previous === undefined ? 0 : (wallNs - previous.wallNs) / (reps - previous.reps);
       // 傾きが立たない（1 点目で届いた / 揺れで負）なら平均へ倒す。揺れで傾きが潰れても pass が
       // 目標の 4 倍を超えないよう、平均の 1/4 を下限に置く
       probeNs = slope > 0 ? Math.max(slope, average / 4) : average;

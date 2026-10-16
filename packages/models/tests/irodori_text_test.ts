@@ -149,7 +149,10 @@ test("符号化: byte_fallback は UTF-8 バイト列そのもの（語彙を見
   const byteCase = fixture.encode.cases.find((entry) => entry.name === "emoji-byte-fallback");
   assert(byteCase !== undefined, "c ケースがフィクスチャに無い");
   const bytes = new TextEncoder().encode(byteCase.raw);
-  assertEquals(byteCase.ids, [...bytes].map((byte) => fixture.asset.byteBaseId + byte));
+  assertEquals(
+    byteCase.ids,
+    [...bytes].map((byte) => fixture.asset.byteBaseId + byte),
+  );
 });
 
 test("資産: バイトトークン 256 本の id が byteBaseId + バイト値で連番になっている", () => {
@@ -230,7 +233,10 @@ test("caption: 2 経路の id 列が実際に割れる（門が恒真でない�
   }
   // 公式 Voice Design 文は正規化に無感 = 既存 golden（caption 系）はこの修正で動かない側。
   const insensitive = fixture.encode.caption.filter((entry) => !entry.normalizeSensitive);
-  assertEquals(insensitive.map((entry) => entry.name), ["caption-official"]);
+  assertEquals(
+    insensitive.map((entry) => entry.name),
+    ["caption-official"],
+  );
   for (const entry of insensitive) {
     assertEquals(entry.idsPacked, entry.normalizedIdsPacked);
   }
@@ -297,7 +303,11 @@ test("資産パーサ: 素の JSON から資産表を組み、id / スコアを�
   const parsed = parseIrodoriTokenizerAsset({
     vocabText,
     scores,
-    addedTokens: [["<unk>", 0], ["<s>", 1], ["<pad>", 2]],
+    addedTokens: [
+      ["<unk>", 0],
+      ["<s>", 1],
+      ["<pad>", 2],
+    ],
     bosId: 1,
     padId: 2,
     unkId: 0,
@@ -333,9 +343,15 @@ test("資産パーサ: 行数不一致と必須キー欠落は fail loudly", () 
     Error,
     "scores の長さ",
   );
-  for (
-    const key of ["vocabText", "scores", "addedTokens", "bosId", "padId", "unkId", "byteBaseId"]
-  ) {
+  for (const key of [
+    "vocabText",
+    "scores",
+    "addedTokens",
+    "bosId",
+    "padId",
+    "unkId",
+    "byteBaseId",
+  ]) {
     const broken: Record<string, unknown> = { ...base };
     delete broken[key];
     assertThrows(
@@ -420,16 +436,29 @@ test("資産パーサ: 追加トークンの id は語彙の行数未満で、�
   // 正例: 語彙と一致する綴り・語彙に無い綴りの範囲内の id はどちらも通る。
   const parsed = parseIrodoriTokenizerAsset({
     ...base,
-    addedTokens: [["<s>", 0], ["<pad>", 1], ["<x>", VOCAB_SIZE - 1]],
+    addedTokens: [
+      ["<s>", 0],
+      ["<pad>", 1],
+      ["<x>", VOCAB_SIZE - 1],
+    ],
   });
-  assertEquals([...parsed.addedTokens], [["<s>", 0], ["<pad>", 1], ["<x>", VOCAB_SIZE - 1]]);
+  assertEquals(
+    [...parsed.addedTokens],
+    [
+      ["<s>", 0],
+      ["<pad>", 1],
+      ["<x>", VOCAB_SIZE - 1],
+    ],
+  );
 });
 
 test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語彙内にあることを要求する（G4-02）", () => {
   const VOCAB_SIZE = 300;
   const base = {
-    vocabText: [...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`), ...BYTE_TOKENS]
-      .join("\n"),
+    vocabText: [
+      ...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`),
+      ...BYTE_TOKENS,
+    ].join("\n"),
     scores: Array.from({ length: VOCAB_SIZE }, () => 0),
     addedTokens: [],
     bosId: 0,
@@ -483,8 +512,10 @@ test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の綴り�
 test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす（`Map` の後勝ちを禁じる）", () => {
   const VOCAB_SIZE = 300;
   const base = {
-    vocabText: [...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`), ...BYTE_TOKENS]
-      .join("\n"),
+    vocabText: [
+      ...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`),
+      ...BYTE_TOKENS,
+    ].join("\n"),
     scores: Array.from({ length: VOCAB_SIZE }, () => 0),
     addedTokens: [["t0", 0]],
     bosId: 0,
@@ -509,7 +540,14 @@ test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす
   );
   // 追加語彙は正規化の**前**に切り出されるので、後勝ちは切り出し先 id を静かに変える。
   assertThrows(
-    () => parseIrodoriTokenizerAsset({ ...base, addedTokens: [["t0", 0], ["t0", 1]] }),
+    () =>
+      parseIrodoriTokenizerAsset({
+        ...base,
+        addedTokens: [
+          ["t0", 0],
+          ["t0", 1],
+        ],
+      }),
     Error,
     "tokenizer.addedTokens: 鍵 ",
   );
@@ -519,8 +557,10 @@ test("資産パーサ: scores は有限（minScore が汚れると未知ノー�
   const VOCAB_SIZE = 300;
   const scores = Array.from({ length: VOCAB_SIZE }, () => 0);
   const base = {
-    vocabText: [...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`), ...BYTE_TOKENS]
-      .join("\n"),
+    vocabText: [
+      ...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`),
+      ...BYTE_TOKENS,
+    ].join("\n"),
     scores,
     addedTokens: [],
     bosId: 0,

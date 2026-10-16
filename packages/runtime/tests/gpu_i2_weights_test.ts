@@ -26,7 +26,7 @@ const weight = (
   scale: Float32Array<ArrayBuffer>;
   values: Float32Array<ArrayBuffer>;
 } => {
-  const bytes = new Uint8Array(n * k / 4),
+  const bytes = new Uint8Array((n * k) / 4),
     scale = Float32Array.from({ length: n }, (_, r) => Math.fround(0.13 + (r % 7) * 0.031));
   const values = new Float32Array(n * k);
   for (let i = 0; i < values.length; i++) {
@@ -36,12 +36,7 @@ const weight = (
   }
   return { bytes, scale, values };
 };
-const linearDeclaration = (
-  m: number,
-  n: number,
-  k: number,
-  expanded = false,
-): DeclarationJson => ({
+const linearDeclaration = (m: number, n: number, k: number, expanded = false): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
   requires: { ops: ["linear"] },
@@ -69,7 +64,7 @@ const weightTensors = (
     tensors.push({
       graph: GRAPH_NAME,
       initializer: "b",
-      bytes: f32Bytes(Array.from({ length: n }, (_, i) => (i % 5 - 2) * 0.17)),
+      bytes: f32Bytes(Array.from({ length: n }, (_, i) => ((i % 5) - 2) * 0.17)),
       encoding: { codec: "f32" },
     });
   }
@@ -77,21 +72,21 @@ const weightTensors = (
     tensors.push(
       storage === "i2"
         ? {
-          graph: GRAPH_NAME,
-          initializer: "w",
-          bytes: w.bytes,
-          encoding: {
-            codec: "int2-off",
-            groupSize: k,
-            scale: { bytes: new Uint8Array(w.scale.buffer), dtype: "f32" },
-          },
-        }
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: w.bytes,
+            encoding: {
+              codec: "int2-off",
+              groupSize: k,
+              scale: { bytes: new Uint8Array(w.scale.buffer), dtype: "f32" },
+            },
+          }
         : {
-          graph: GRAPH_NAME,
-          initializer: "w",
-          bytes: new Uint8Array(w.values.buffer),
-          encoding: { codec: "f32" },
-        },
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: new Uint8Array(w.values.buffer),
+            encoding: { codec: "f32" },
+          },
     );
   }
   return tensors;
@@ -114,13 +109,15 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [m, n, k] of [[1, 68, 192], [3, 68, 192], [8, 8192, 64], [64, 68, 64], [65, 68, 64], [
-          65,
-          68,
-          48,
-        ], [17, 19, 48]]
-      ) {
+      for (const [m, n, k] of [
+        [1, 68, 192],
+        [3, 68, 192],
+        [8, 8192, 64],
+        [64, 68, 64],
+        [65, 68, 64],
+        [65, 68, 48],
+        [17, 19, 48],
+      ]) {
         const w = weight(n, k),
           x = {
             dtype: "f32",
@@ -138,7 +135,8 @@ test({
           GRAPH_NAME,
         );
         try {
-          const actual = (await session.run({ x })).y, expected = (await baseline.run({ x })).y;
+          const actual = (await session.run({ x })).y,
+            expected = (await baseline.run({ x })).y;
           assertEquals(bits(actual), bits(expected), `${m},${n},${k}`);
           const diagnostics = session.diagnostics();
           assertEquals(
@@ -150,8 +148,8 @@ test({
             prepared.estimate().resident.weights.compressedBytes,
             w.bytes.byteLength + w.scale.byteLength,
           );
-          const keys = requireCensus(diagnostics.lastRunPipelines, "i2 linear").map((row) =>
-            row.key
+          const keys = requireCensus(diagnostics.lastRunPipelines, "i2 linear").map(
+            (row) => row.key,
           );
           assert(keys.some((key) => key.includes(":wi2")));
           assertEquals(
@@ -174,7 +172,9 @@ test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const n = 7, k = 64, w = weight(n, k);
+    const n = 7,
+      k = 64,
+      w = weight(n, k);
     const graph = linearDeclaration(1, n, k);
     delete graph.initializers.b;
     delete graph.values.b;
@@ -189,11 +189,12 @@ test({
         GRAPH_NAME,
       );
       try {
-        const y =
-          (await owner.run({ ids: { dtype: "i32", shape: [3], data: Int32Array.of(6, 0, 3) } })).y;
+        const y = (
+          await owner.run({ ids: { dtype: "i32", shape: [3], data: Int32Array.of(6, 0, 3) } })
+        ).y;
         const expected = new Float32Array(3 * k);
         [6, 0, 3].forEach((row, i) =>
-          expected.set(w.values.subarray(row * k, (row + 1) * k), i * k)
+          expected.set(w.values.subarray(row * k, (row + 1) * k), i * k),
         );
         assertEquals(bits(y), new Uint32Array(expected.buffer));
         const borrowed = linearDeclaration(1, n, k);
@@ -236,7 +237,9 @@ test({
   ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu({ shaderF16: true });
-    const n = 4, k = 64, w = weight(n, k);
+    const n = 4,
+      k = 64,
+      w = weight(n, k);
     try {
       const expanded = await createSessionFromContainer(
         gpu,
@@ -281,7 +284,9 @@ test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
-    const n = 7, k = 64, w = weight(n, k);
+    const n = 7,
+      k = 64,
+      w = weight(n, k);
     try {
       for (const expanded of [false, true]) {
         const graph = linearDeclaration(1, n, k, expanded);
@@ -304,7 +309,8 @@ test({
             shape: [1, k],
             data: Float32Array.from({ length: k }, (_, i) => Math.sin(i) * 0.4),
           } satisfies Tensor;
-          const expected = await full.run({ x }), actual = await partial.run({ x });
+          const expected = await full.run({ x }),
+            actual = await partial.run({ x });
           for (const name of graph.outputs) assertEquals(bits(actual[name]), bits(expected[name]));
           assertEquals(partial.diagnostics().storage, full.diagnostics().storage);
         } finally {
@@ -325,7 +331,12 @@ test({
     const gpu = await acquireGpu();
     try {
       // r1 / r2 / r4、語の先読みと残り、長い K を跨ぐ。scale と bias は2冪に限定しない。
-      for (const [m, n, k] of [[3, 68, 320], [3, 8192, 320], [7, 8192, 576], [2, 68, 12288]]) {
+      for (const [m, n, k] of [
+        [3, 68, 320],
+        [3, 8192, 320],
+        [7, 8192, 576],
+        [2, 68, 12288],
+      ]) {
         const w = weight(n, k);
         const rows = await createSessionFromContainer(
           gpu,
@@ -345,9 +356,11 @@ test({
           const actual = bits((await rows.run({ x: { dtype: "f32", shape: [m, k], data } })).y);
           for (let row = 0; row < m; row++) {
             const expected = bits(
-              (await single.run({
-                x: { dtype: "f32", shape: [1, k], data: data.slice(row * k, (row + 1) * k) },
-              })).y,
+              (
+                await single.run({
+                  x: { dtype: "f32", shape: [1, k], data: data.slice(row * k, (row + 1) * k) },
+                })
+              ).y,
             );
             assertEquals(
               actual.subarray(row * n, (row + 1) * n),

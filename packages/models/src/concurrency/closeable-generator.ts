@@ -9,9 +9,7 @@ export const closeableGenerator = <T>(
 ): AsyncGenerator<T, void, undefined> => {
   let started = false;
   let closing: Promise<void> | undefined;
-  const close = (
-    result: Promise<IteratorResult<T, void>>,
-  ): Promise<IteratorResult<T, void>> => {
+  const close = (result: Promise<IteratorResult<T, void>>): Promise<IteratorResult<T, void>> => {
     // return に渡された Promise の拒否も所有者へ通知する。終了値の解決と要求の順序は
     // native generator が担い、所有者の後始末だけを最初の終了に一度重ねる。
     closing ??= result.then(
@@ -35,8 +33,8 @@ export const closeableGenerator = <T>(
       started = true;
       return generator.next(...args);
     },
-    return: (value) => started ? generator.return(value) : close(generator.return(value)),
-    throw: (error) => started ? generator.throw(error) : close(generator.throw(error)),
+    return: (value) => (started ? generator.return(value) : close(generator.return(value))),
+    throw: (error) => (started ? generator.throw(error) : close(generator.throw(error))),
     [Symbol.asyncIterator]: () => iterator,
     [Symbol.asyncDispose]: async () => {
       await iterator.return(undefined);

@@ -56,7 +56,7 @@ type SpecWriter = (source: SessionOverrides) => SessionOptions;
  * getter が判定した値と写した値をすり替えられないようにする。
  */
 const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
-  linearCompute: ({ linearCompute }) => linearCompute === undefined ? {} : { linearCompute },
+  linearCompute: ({ linearCompute }) => (linearCompute === undefined ? {} : { linearCompute }),
   attentionCompute: ({ attentionCompute }) =>
     attentionCompute === undefined ? {} : { attentionCompute },
   attentionScoreStorage: ({ attentionScoreStorage }) =>
@@ -65,7 +65,7 @@ const WRITERS: { readonly [K in keyof Required<SessionSpec>]: SpecWriter } = {
     linearGemvReduce === undefined ? {} : { linearGemvReduce },
   stateAttentionReduce: ({ stateAttentionReduce }) =>
     stateAttentionReduce === undefined ? {} : { stateAttentionReduce },
-  fuseRmsNormAdd: ({ fuseRmsNormAdd }) => fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd },
+  fuseRmsNormAdd: ({ fuseRmsNormAdd }) => (fuseRmsNormAdd === undefined ? {} : { fuseRmsNormAdd }),
   fuseLinearStaticQuantize: ({ fuseLinearStaticQuantize }) =>
     fuseLinearStaticQuantize === undefined ? {} : { fuseLinearStaticQuantize },
   packedStaticQuantize: ({ packedStaticQuantize }) =>
@@ -93,9 +93,8 @@ const LINEAR_COMPUTES: Readonly<Record<NonNullable<SessionOptions["linearCompute
 };
 const ATTENTION_COMPUTES: Readonly<Record<NonNullable<SessionOptions["attentionCompute"]>, true>> =
   { f32: true, f16: true, a8: true };
-const SCORE_STORAGES: Readonly<
-  Record<NonNullable<SessionOptions["attentionScoreStorage"]>, true>
-> = { f32: true, f16: true };
+const SCORE_STORAGES: Readonly<Record<NonNullable<SessionOptions["attentionScoreStorage"]>, true>> =
+  { f32: true, f16: true };
 const LINEAR_GEMV_REDUCES: Readonly<Record<NonNullable<SessionOptions["linearGemvReduce"]>, true>> =
   { sequential: true, parallel: true, "parallel-subgroup32": true };
 const STATE_ATTENTION_REDUCES: Readonly<

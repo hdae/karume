@@ -39,10 +39,7 @@ export const RMS_NORM_KEY = `rms_norm:v1:f32:lastdim:wg${RMS_NORM_WORKGROUP_SIZE
 /** 後続addの入力順。加算の左右をコード生成でも維持する。 */
 export type RmsNormAddOrder = "norm-residual" | "residual-norm";
 
-const rmsNormWgsl = (
-  workgroupSize: 128 | 256,
-  addOrder?: RmsNormAddOrder,
-): string =>
+const rmsNormWgsl = (workgroupSize: 128 | 256, addOrder?: RmsNormAddOrder): string =>
   `// karume rms_norm (last dim, weight only, f32, 二乗和 1 パス)
 struct Params {
   rows: u32,
@@ -57,10 +54,8 @@ struct Params {
 var<workgroup> scratch: array<f32, ${workgroupSize}>;
 
 ${
-    addOrder === undefined
-      ? ""
-      : "@group(0) @binding(3) var<storage, read> residual: array<f32>;\n"
-  }@compute @workgroup_size(${workgroupSize})
+  addOrder === undefined ? "" : "@group(0) @binding(3) var<storage, read> residual: array<f32>;\n"
+}@compute @workgroup_size(${workgroupSize})
 fn main(
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(local_invocation_id) lid3: vec3<u32>,
@@ -98,12 +93,12 @@ fn main(
     var o = lid;
     while (o < dim) {
       ${
-    addOrder === undefined
-      ? "out[base + o] = x[base + o] * inv * weight[o];"
-      : addOrder === "norm-residual"
-      ? "out[base + o] = bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask) + residual[base + o];"
-      : "out[base + o] = residual[base + o] + bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask);"
-  }
+        addOrder === undefined
+          ? "out[base + o] = x[base + o] * inv * weight[o];"
+          : addOrder === "norm-residual"
+            ? "out[base + o] = bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask) + residual[base + o];"
+            : "out[base + o] = residual[base + o] + bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask);"
+      }
       o = o + ${workgroupSize}u;
     }
     row = row + nwg.x;
@@ -150,11 +145,7 @@ const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
  * `1e-50` は f32 で 0、`1e39` は `+Inf` になり、どちらも f64 のまま計算する CPU 参照と分岐する。
  * 非ゼロの subnormal も FTZ の GPU では 0 に潰れるので拒否する（判定は codegen/f32-eps.ts を共有）。
  */
-export const rmsNormParams = (
-  rows: number,
-  dim: number,
-  eps: number,
-): Uint32Array<ArrayBuffer> => {
+export const rmsNormParams = (rows: number, dim: number, eps: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("rms_norm params", { rows, dim });
   if (dim < 1) {
     throw new CodegenError(`rms_norm params: dim は正整数（${dim}）`);

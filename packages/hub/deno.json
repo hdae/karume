@@ -11,8 +11,6 @@
     "@hdae/fetch-cache": "jsr:@hdae/fetch-cache@^0.8.0"
   },
   "publish": {
-    "exclude": [
-      "tests/"
-    ]
+    "exclude": ["tests/"]
   }
 }

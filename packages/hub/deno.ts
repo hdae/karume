@@ -23,7 +23,10 @@ import {
  * where the `Deno` global does not exist; under Deno the real global shadows this declaration.
  */
 declare const Deno: {
-  readFile(path: string | URL, options?: { signal?: AbortSignal }): Promise<Uint8Array<ArrayBuffer>>;
+  readFile(
+    path: string | URL,
+    options?: { signal?: AbortSignal },
+  ): Promise<Uint8Array<ArrayBuffer>>;
   open(path: string | URL): Promise<DenoFsFile>;
   readonly SeekMode: { readonly Start: 0 };
 };

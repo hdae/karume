@@ -205,12 +205,14 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
     b: { dtype: "f32", shape: [4] },
     y: { dtype: "f32", shape: [1, 4, 5] },
   },
-  nodes: [{
-    op: "conv1d",
-    ins: ["x", "w", "b"],
-    outs: ["y"],
-    attrs: { stride: 1, padding: 0, dilation: 1, groups },
-  }],
+  nodes: [
+    {
+      op: "conv1d",
+      ins: ["x", "w", "b"],
+      outs: ["y"],
+      attrs: { stride: 1, padding: 0, dilation: 1, groups },
+    },
+  ],
 });
 
 const i4Conv1dModel = (groups: number): ResidencyTarget =>

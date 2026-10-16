@@ -370,9 +370,9 @@ const assertCoverage = (
           assertEquals(
             word,
             0,
-            `${label}: pad 行 (z=${z}, row=${row}, d=${d}) が厳密 +0.0 でない（0x${
-              word.toString(16).padStart(8, "0")
-            }）`,
+            `${label}: pad 行 (z=${z}, row=${row}, d=${d}) が厳密 +0.0 でない（0x${word
+              .toString(16)
+              .padStart(8, "0")}）`,
           );
           pad += 1;
         } else if (word !== 0) liveNonZero += 1;
@@ -392,9 +392,11 @@ const assertSameWords = (
   for (let index = 0; index < actual.length; index += 1) {
     if (actual[index] === expected[index]) continue;
     throw new Error(
-      `${label}: 語 ${index} が違う（③ₜ 0x${actual[index].toString(16).padStart(8, "0")} / ③ 0x${
-        expected[index].toString(16).padStart(8, "0")
-      }）`,
+      `${label}: 語 ${index} が違う（③ₜ 0x${actual[index].toString(16).padStart(8, "0")} / ③ 0x${expected[
+        index
+      ]
+        .toString(16)
+        .padStart(8, "0")}）`,
     );
   }
 };
@@ -543,9 +545,9 @@ test({
                 assertEquals(
                   word,
                   0,
-                  `${variant}: pad 行 (z=${z}, row=${row}, d=${d}) が厳密 +0.0 でない（0x${
-                    word.toString(16).padStart(8, "0")
-                  }）`,
+                  `${variant}: pad 行 (z=${z}, row=${row}, d=${d}) が厳密 +0.0 でない（0x${word
+                    .toString(16)
+                    .padStart(8, "0")}）`,
                 );
               } else if ((word & 0x7f800000) === 0x7f800000) nonFinite += 1;
             }
@@ -571,20 +573,15 @@ test({
     const inputs = makeInputs(spec);
     try {
       const reference = await runStatePv(gpu.device, spec, inputs, "sequential", { cache });
-      for (
-        const [label, mutate] of [
-          // ① 確率の inv（`1/Σexp(S−m)`）を外す（A ローダの 1 項が ③ と違う形になる）
-          [
-            "確率の inv 除去",
-            (wgsl: string) => wgsl.replace(/ \* row_inv\d+;/g, ";"),
-          ],
-          // ② 列の 2 源を取り違える（全列を ins から読む）
-          [
-            "V の 2 源取り違え",
-            (wgsl: string) => wgsl.replace(/(let vpast\d+ = vcol\d+) < past;/g, "$1 < 0u;"),
-          ],
-        ] as const
-      ) {
+      for (const [label, mutate] of [
+        // ① 確率の inv（`1/Σexp(S−m)`）を外す（A ローダの 1 項が ③ と違う形になる）
+        ["確率の inv 除去", (wgsl: string) => wgsl.replace(/ \* row_inv\d+;/g, ";")],
+        // ② 列の 2 源を取り違える（全列を ins から読む）
+        [
+          "V の 2 源取り違え",
+          (wgsl: string) => wgsl.replace(/(let vpast\d+ = vcol\d+) < past;/g, "$1 < 0u;"),
+        ],
+      ] as const) {
         let mutated = false;
         const broken = await runStatePv(gpu.device, spec, inputs, "tiled", {
           cache,

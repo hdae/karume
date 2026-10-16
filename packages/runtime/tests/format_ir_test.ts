@@ -42,7 +42,10 @@ test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
   assertEquals(graph.inputs, [{ name: "x", dtype: "f32", shape: ["T", 4] }]);
   assertEquals(graph.outputs, ["y"]);
   assertEquals(graph.requires.ops, ["add", "matmul"]);
-  assertEquals(graph.nodes.map((node) => node.op), ["matmul", "add"]);
+  assertEquals(
+    graph.nodes.map((node) => node.op),
+    ["matmul", "add"],
+  );
   assertEquals(Object.keys(graph.initializers), ["w", "b"]);
   assertEquals(graph.initializers["w"], { shared: false });
   assertEquals(graph.values["w"], { dtype: "f32", shape: [4, 3] });
@@ -265,7 +268,11 @@ test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否�
     for (let i = 0; i < length; i += 1) if (i !== index) shape[i] = 4;
     return shape;
   };
-  for (const [hint, index] of [["先頭", 0], ["途中", 1], ["末尾", 2]] as const) {
+  for (const [hint, index] of [
+    ["先頭", 0],
+    ["途中", 1],
+    ["末尾", 2],
+  ] as const) {
     const graph = baseDeclaration();
     graph.values["w"].shape = holeAt(index, 3);
     assertThrows(
@@ -658,16 +665,16 @@ const parseStateful = (mutate: (graph: DeclarationJson) => void = () => {}): IrD
 test("parseIrDeclaration: ノードの states 欄を読む", () => {
   const graph = parseStateful();
 
-  assertEquals(graph.nodes.map((node) => node.op), [
-    "matmul",
-    "add",
-    "attention",
-    "state_append",
-    "state_append",
-  ]);
+  assertEquals(
+    graph.nodes.map((node) => node.op),
+    ["matmul", "add", "attention", "state_append", "state_append"],
+  );
   // 欄を持たないノードは空表（常在欄 — 消費側が `?? {}` を書かずに済む）
   assertEquals(Object.keys(graph.nodes[0].states), []);
-  assertEquals(Object.entries(graph.nodes[2].states), [["k", "kv.k"], ["v", "kv.v"]]);
+  assertEquals(Object.entries(graph.nodes[2].states), [
+    ["k", "kv.k"],
+    ["v", "kv.v"],
+  ]);
   assertEquals(graph.nodes[3].states["slot"], "kv.k");
   // 0 出力ノードはパーサを通る（本数の執行点は契約層 — ADR 0067 決定 5）
   assertEquals(graph.nodes[3].outs, []);

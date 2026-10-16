@@ -18,7 +18,7 @@ const resolvesWithoutTimer = async (start: () => Promise<void>): Promise<boolean
     timer = setTimeout(() => resolve("timer"), 0);
   });
   try {
-    return await Promise.race([start().then(() => "helper" as const), timerFired]) === "helper";
+    return (await Promise.race([start().then(() => "helper" as const), timerFired])) === "helper";
   } finally {
     clearTimeout(timer);
   }

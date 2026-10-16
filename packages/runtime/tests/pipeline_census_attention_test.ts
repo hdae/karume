@@ -31,16 +31,18 @@ const attentionRows = (route: AttentionRoute, blocks: number): readonly CensusRo
   const score: ScoreStorage = route.score;
   return [
     {
-      key: route.qk === "i8a8"
-        ? attentionQkI8a8Key(true, true, score)
-        : attentionQkKey(true, "f32", score),
+      key:
+        route.qk === "i8a8"
+          ? attentionQkI8a8Key(true, true, score)
+          : attentionQkKey(true, "f32", score),
       dispatchCount: blocks,
     },
     { key: attentionStatsKey("f32", score, 16), dispatchCount: blocks },
     {
-      key: route.pv === "i8a8"
-        ? attentionPvI8a8Key(true, true, score)
-        : attentionPvKey(true, "f32", score),
+      key:
+        route.pv === "i8a8"
+          ? attentionPvI8a8Key(true, true, score)
+          : attentionPvKey(true, "f32", score),
       dispatchCount: blocks,
     },
   ];

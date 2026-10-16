@@ -61,9 +61,9 @@ const scaleStrides = (
     const extent = scaleShape[axis];
     if (extent !== 1 && extent !== shape[axis]) {
       throw new I8Error(
-        `scale [${scaleShape.join(",")}] の軸 ${axis} が重み [${
-          shape.join(",")
-        }] へ broadcast できない`,
+        `scale [${scaleShape.join(",")}] の軸 ${axis} が重み [${shape.join(
+          ",",
+        )}] へ broadcast できない`,
       );
     }
     strides[axis] = extent === 1 ? 0 : stride;

@@ -143,8 +143,8 @@ const packScores = (scores: Float32Array): Uint32Array<ArrayBuffer> => {
   for (let i = 0; i < words.length; i += 1) {
     // MUST: 下位半分が偶数添字（`pack2x16float(vec2(x, y))` の x 側）。入れ替えると
     // GPU の読みと 1 要素ずれ、行の端だけが静かに誤る
-    words[i] = (f32ToF16Bits(scores[2 * i]) & 0xffff) |
-      ((f32ToF16Bits(scores[2 * i + 1]) & 0xffff) << 16);
+    words[i] =
+      (f32ToF16Bits(scores[2 * i]) & 0xffff) | ((f32ToF16Bits(scores[2 * i + 1]) & 0xffff) << 16);
   }
   return words;
 };
@@ -290,7 +290,14 @@ const s16Oracle = async (
   }
   const scores = await runGraph(
     gpu,
-    singleOpDeclaration("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
+    singleOpDeclaration(
+      "bmm",
+      [
+        [heads, m, d],
+        [heads, d, n],
+      ],
+      [[heads, m, n]],
+    ),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
   // ここが唯一の丸め（①QK の書き出し = pack2x16float に対応する）
@@ -301,7 +308,14 @@ const s16Oracle = async (
   );
   return await runGraph(
     gpu,
-    singleOpDeclaration("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
+    singleOpDeclaration(
+      "bmm",
+      [
+        [heads, m, n],
+        [heads, n, d],
+      ],
+      [[heads, m, d]],
+    ),
     {
       x0: tensorOf([heads, m, n], probs),
       x1: tensorOf([heads, n, d], v as Float32Array<ArrayBuffer>),
@@ -377,14 +391,12 @@ const readbackBytes = async (
 
 /** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
 const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
-  [...byKey].filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY)).reduce(
-    (sum, [, count]) => sum + count,
-    0,
-  );
+  [...byKey]
+    .filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY))
+    .reduce((sum, [, count]) => sum + count, 0);
 
 test({
-  name:
-    "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
+  name: "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // `scale = 1` かつ k を単位ベクトルにすると `S[m][n] = q[m][n % D]` が**厳密**に出る
@@ -445,7 +457,7 @@ test({
       const words = new Uint32Array(raw.buffer, 0, (m * n) / 2);
       let rounded = 0;
       for (let index = 0; index < m * n; index += 1) {
-        const source = q[Math.floor(index / n) * d + (index % n) % d];
+        const source = q[Math.floor(index / n) * d + ((index % n) % d)];
         const word = words[index >> 1];
         const got = decodeHalf((index & 1) === 1 ? word >>> 16 : word & 0xffff);
         const want = roundToF16(source);
@@ -469,8 +481,7 @@ test({
 // ---------------------------------------------------------------------------
 
 test({
-  name:
-    "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  name: "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -504,10 +515,7 @@ test({
         // S の確保が半分になっている（案 γ の本体価値 — RunArena の実測で見える形）。
         // MUST: 差分比較を条件で包まない（peakTransientBytes は計測 feature に依らず実 run なら
         // 常に正 — 0 に落ちたらそれ自体が診断面の退行で、門が黙って消える形になる）。
-        assert(
-          plain.peakTransientBytes > 0,
-          `${name}: peakTransient の観測点が空振りしている`,
-        );
+        assert(plain.peakTransientBytes > 0, `${name}: peakTransient の観測点が空振りしている`);
         assertEquals(
           plain.peakTransientBytes - actual.peakTransientBytes,
           b * h * m * n * 2,
@@ -539,22 +547,18 @@ test({
         assert(actual.entries.length > 0, `${name}: 内訳が空（キー検査が空振りしている）`);
         const running = new Map(actual.entries.map((entry) => [entry.key, entry.dispatchCount]));
         // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
-        for (
-          const key of [
-            attentionQkKey(true, "f32", "f16"),
-            attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
-            attentionPvKey(true, "f32", "f16"),
-          ]
-        ) {
+        for (const key of [
+          attentionQkKey(true, "f32", "f16"),
+          attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
+          attentionPvKey(true, "f32", "f16"),
+        ]) {
           assertEquals(running.get(key), 1, `${name}: '${key}' が 1 本走っていない`);
         }
-        for (
-          const key of [
-            attentionQkKey(true),
-            attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
-            attentionPvKey(true),
-          ]
-        ) {
+        for (const key of [
+          attentionQkKey(true),
+          attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
+          attentionPvKey(true),
+        ]) {
           assertEquals(running.has(key), false, `${name}: f32 格納の '${key}' が残っている`);
         }
       }
@@ -569,8 +573,7 @@ test({
 // ---------------------------------------------------------------------------
 
 test({
-  name:
-    "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
+  name: "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -627,12 +630,16 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      const graph = singleOpDeclaration("attention", [[1, 1, 4, 4], [1, 1, 4, 4], [1, 1, 4, 4]], [[
-        1,
-        1,
-        4,
-        4,
-      ]], { attrs: { scale: halfScale(4) } });
+      const graph = singleOpDeclaration(
+        "attention",
+        [
+          [1, 1, 4, 4],
+          [1, 1, 4, 4],
+          [1, 1, 4, 4],
+        ],
+        [[1, 1, 4, 4]],
+        { attrs: { scale: halfScale(4) } },
+      );
       const opened = await openGraphModel(graph);
       const error = await assertRejects(
         () =>
@@ -642,10 +649,7 @@ test({
           }),
         ExecutionError,
       );
-      assert(
-        error.message.includes("同時に指定できない"),
-        `案内が足りない: ${error.message}`,
-      );
+      assert(error.message.includes("同時に指定できない"), `案内が足りない: ${error.message}`);
       // MUST: **s16 単独は shader-f16 無しの device で通る**（ADR 0030 決定 1 と同じ規律 —
       // ここが落ちると案 γ の「feature 非依存」という前提そのものが崩れる）
       const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME, {
@@ -665,8 +669,7 @@ test({
 const A8_S16_SHAPE: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
 
 test({
-  name:
-    "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
+  name: "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -694,8 +697,7 @@ test({
 
 /** 直交（3 軸が同時に立つ）を見る唯一の検出器。無条件 assert の理由は上の census と同じ。 */
 test({
-  name:
-    "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
+  name: "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -711,18 +713,13 @@ test({
       assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16")), 1);
       assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16")), 1);
       // ②行統計は f32 計算のまま s16 を読む
-      assertEquals(
-        byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))),
-        1,
-      );
+      assertEquals(byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))), 1);
       // f32 格納の変種は 1 本も残らない
-      for (
-        const key of [
-          attentionQkI8a8Key(true, true),
-          attentionPvI8a8Key(true, true),
-          attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
-        ]
-      ) {
+      for (const key of [
+        attentionQkI8a8Key(true, true),
+        attentionPvI8a8Key(true, true),
+        attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
+      ]) {
         assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);
       }
       // i8a8 の前段（q / k / Vᵀ の量子化と Vᵀ の permute）は s16 に影響されない
@@ -851,8 +848,7 @@ const observeQpS16 = async (
 };
 
 test({
-  name:
-    "③PV i8a8 × s16: qP は「f16 に丸めた S」から作った TS 参照と必ず ±1 段以内で一致する（実 GPU）",
+  name: "③PV i8a8 × s16: qP は「f16 に丸めた S」から作った TS 参照と必ず ±1 段以内で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -910,9 +906,9 @@ test({
     // 実測の記録（ADR 0030 の門を s16 で再導出した値）。恒真化しないよう上限も置く
     const rate = mismatched / total;
     console.log(
-      `qP（S は f16 格納）の GPU/TS 不一致率: ${mismatched} / ${total} = ${
-        (rate * 100).toFixed(4)
-      }%（全て ±1 段）`,
+      `qP（S は f16 格納）の GPU/TS 不一致率: ${mismatched} / ${total} = ${(rate * 100).toFixed(
+        4,
+      )}%（全て ±1 段）`,
     );
     assert(rate < 0.02, `qP の不一致率 ${rate} が 2% を超えた（exp の実装差にしては大きい）`);
   },
@@ -955,16 +951,13 @@ test({
       const plain = await run({});
       const nanRows = (data: Float32Array): readonly number[] =>
         Array.from({ length: b * h * m }, (_, row) => row).filter((row) =>
-          [...data.slice(row * d, (row + 1) * d)].some(Number.isNaN)
+          [...data.slice(row * d, (row + 1) * d)].some(Number.isNaN),
         );
       // 汚染する行は f32 格納と完全に同じ（pack2x16float が NaN を 0 や有限値へ潰していない）
       assertEquals(nanRows(s16), nanRows(plain), "NaN 行の集合が f32 格納と違う");
       assertEquals(nanRows(s16), [1 * m + 3], "NaN が 1 行に閉じていない");
       // 汚染していない行は 1 つも NaN でない（行が全滅していたら比較が恒真になる）
-      assert(
-        [...s16].filter(Number.isNaN).length === d,
-        "NaN が 1 行ぶんを超えて広がっている",
-      );
+      assert([...s16].filter(Number.isNaN).length === d, "NaN が 1 行ぶんを超えて広がっている");
     } finally {
       gpu.destroy();
     }

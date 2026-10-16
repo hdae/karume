@@ -41,7 +41,7 @@ const node = (
       reads: [
         ...ins.map(value),
         ...(options.temps ?? []).flatMap((t, id) =>
-          t.allocBefore < index && t.releaseAfter >= index ? [temp(id)] : []
+          t.allocBefore < index && t.releaseAfter >= index ? [temp(id)] : [],
         ),
       ],
       writes: [
@@ -89,13 +89,15 @@ const assertWellFormed = (
   });
   for (let a = 0; a < live.length; a += 1) {
     for (let b = a + 1; b < live.length; b += 1) {
-      const x = live[a], y = live[b];
+      const x = live[a],
+        y = live[b];
       if (x.slot === y.slot) continue;
-      const sx = plan.slots[x.slot], sy = plan.slots[y.slot];
+      const sx = plan.slots[x.slot],
+        sy = plan.slots[y.slot];
       const timeOverlap = x.from <= y.to && y.from <= x.to;
       if (!timeOverlap || sx.region !== sy.region) continue;
-      const spaceOverlap = sx.offset < sy.offset + sy.byteLength &&
-        sy.offset < sx.offset + sx.byteLength;
+      const spaceOverlap =
+        sx.offset < sy.offset + sy.byteLength && sy.offset < sx.offset + sx.byteLength;
       assert(
         !spaceOverlap,
         `slot ${x.slot} と ${y.slot} が同じ領域 ${sx.region} で時間も空間も重なる`,
@@ -107,7 +109,10 @@ const assertWellFormed = (
     assert(slot.offset + slot.byteLength <= plan.regions[slot.region], "領域からはみ出さない");
     assert(slot.byteLength <= limits.maxStorageBufferBindingSize, "束縛上限の内側");
   }
-  assertEquals(plan.totalBytes, plan.regions.reduce((t, r) => t + r, 0));
+  assertEquals(
+    plan.totalBytes,
+    plan.regions.reduce((t, r) => t + r, 0),
+  );
   assert(plan.totalBytes >= plan.peakLiveBytes, "領域総和は生存ピーク以上");
 };
 
@@ -134,7 +139,8 @@ test("同じ dispatch で読まれる入力と書かれる出力は別の領域�
   const program: TransientProgram = [node("a", 8, [], 1), node("b", 8, ["a"], 0, { pinned: true })];
   const plan = planTransients(program, LOOSE);
   assertWellFormed(plan, program, LOOSE);
-  const [a] = plan.steps[0].outputs, [b] = plan.steps[1].outputs;
+  const [a] = plan.steps[0].outputs,
+    [b] = plan.steps[1].outputs;
   assert(a !== undefined && b !== undefined);
   assert(plan.slots[a].region !== plan.slots[b].region, "読み側と書き側が同じ領域に居る");
 });
@@ -167,7 +173,8 @@ test("別名（reshape）は確保を出さず、根の slot の生存を延ば�
   assertEquals(plan.slots.length, 2, "別名は slot を作らない");
   assertEquals(plan.steps[1].outputs[0], undefined);
   // a は v 越しに b が読むまで生きる → b と別領域（読み書きの分離）。
-  const [a] = plan.steps[0].outputs, [b] = plan.steps[2].outputs;
+  const [a] = plan.steps[0].outputs,
+    [b] = plan.steps[2].outputs;
   assert(a !== undefined && b !== undefined && plan.slots[a].region !== plan.slots[b].region);
 });
 
@@ -231,7 +238,10 @@ test("offset は offsetAlignment に整列する（実寸は整列しない）",
   assertWellFormed(plan, program, limits);
   const offsets = plan.slots.map((s) => s.offset);
   assert(offsets.every((o) => o % 256 === 0));
-  assert(plan.slots.every((s) => s.byteLength === 4), "束縛 size は実寸のまま");
+  assert(
+    plan.slots.every((s) => s.byteLength === 4),
+    "束縛 size は実寸のまま",
+  );
 });
 
 test("束縛上限を超える中間は配置の前に全件列挙して落ちる", () => {
@@ -252,12 +262,15 @@ test("束縛上限を超える中間は配置の前に全件列挙して落ち�
 });
 
 test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly", () => {
-  const over: TransientProgram = [node("a", 8, [], 0), {
-    outputs: [],
-    temps: [],
-    dispatches: [],
-    releases: ["a"],
-  }];
+  const over: TransientProgram = [
+    node("a", 8, [], 0),
+    {
+      outputs: [],
+      temps: [],
+      dispatches: [],
+      releases: ["a"],
+    },
+  ];
   assertThrows(() => planTransients(over, LOOSE), ExecutionError, "参照カウントが負");
   const leak: TransientProgram = [node("a", 8, [], 2), node("b", 8, ["a"], 0, { pinned: true })];
   assertThrows(() => planTransients(leak, LOOSE), ExecutionError, "解放されない中間");
@@ -289,9 +302,10 @@ test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件
       const name = `v${i}`;
       const uses = i > 190 ? 0 : 1 + Math.floor(rand() * 3);
       const bytes = 4 * (1 + Math.floor(rand() * 64));
-      const temps = rand() < 0.3
-        ? [{ byteLength: 4 * (1 + Math.floor(rand() * 16)), allocBefore: 0, releaseAfter: 0 }]
-        : [];
+      const temps =
+        rand() < 0.3
+          ? [{ byteLength: 4 * (1 + Math.floor(rand() * 16)), allocBefore: 0, releaseAfter: 0 }]
+          : [];
       program.push(node(name, bytes, ins, uses, { pinned: uses === 0, temps }));
       names.push(name);
       remaining.set(name, uses);
@@ -299,7 +313,7 @@ test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件
     // 未消費の残りは末尾で読み切る（解放漏れを作らない）。
     const tail = names.filter((n) => (remaining.get(n) ?? 0) > 0);
     const tailReleases = tail.flatMap((n) =>
-      Array.from({ length: remaining.get(n) ?? 0 }, () => n)
+      Array.from({ length: remaining.get(n) ?? 0 }, () => n),
     );
     program.push({
       outputs: [{ name: "sink", kind: "alloc", byteLength: 4, uses: 0, pinned: true }],

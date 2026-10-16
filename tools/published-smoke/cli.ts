@@ -9,7 +9,8 @@
 export type PinRef = { readonly repo: string; readonly revision: string };
 
 export const isPinRef = (value: unknown): value is PinRef =>
-  typeof value === "object" && value !== null &&
+  typeof value === "object" &&
+  value !== null &&
   typeof (value as { repo?: unknown }).repo === "string" &&
   typeof (value as { revision?: unknown }).revision === "string";
 
@@ -27,9 +28,7 @@ const KNOWN: ReadonlySet<string> = new Set(["--manifests-only"]);
  * 完全経路へ静かに落ちる。GPU の無い機体では sbv2 の `fromPretrained` が別の理由で落ちるので、
  * 公開直後の疎通が「公開物が壊れている」という**偽の赤**として読まれる。
  */
-export const parseSmokeArgs = (
-  argv: readonly string[],
-): { readonly manifestsOnly: boolean } => {
+export const parseSmokeArgs = (argv: readonly string[]): { readonly manifestsOnly: boolean } => {
   for (const arg of argv) {
     if (!KNOWN.has(arg)) throw new Error(`未知の引数 ${arg}（使い方: ${USAGE}）`);
   }

@@ -33,21 +33,24 @@ test({
     // 書き手は宣言をパースしてから書くので、壊れた宣言は容器に入らない。読み手の側の門
     // （`descriptor.ts` の宣言パース）を撃つには、**正しい krm を書いてからグラフ記述の
     // バイト列を壊す**しかない。
-    const written = await writeModelContainer({
-      graphs: { [GRAPH_NAME]: parseIrDeclarationValue(chainGraph()) },
-      consts: [],
-      weights: chainTensors(),
-      assets: [],
-      provenance: { license: "test" },
-    }, {});
+    const written = await writeModelContainer(
+      {
+        graphs: { [GRAPH_NAME]: parseIrDeclarationValue(chainGraph()) },
+        consts: [],
+        weights: chainTensors(),
+        assets: [],
+        provenance: { license: "test" },
+      },
+      {},
+    );
     const descriptorDoc = JSON.parse(new TextDecoder().decode(written.graphDescriptorBytes));
     const declaration = anyOf(descriptorDoc).graphs[GRAPH_NAME];
     // `S` は入力 shape に素の形で現れないので、どの実行時値からも束縛が取れない。
     declaration.symbols = ["S", "T"];
     declaration.values.h = { dtype: "f32", shape: ["S", 3] };
-    const graphBytes = new TextEncoder().encode(JSON.stringify(descriptorDoc)) as Uint8Array<
-      ArrayBuffer
-    >;
+    const graphBytes = new TextEncoder().encode(
+      JSON.stringify(descriptorDoc),
+    ) as Uint8Array<ArrayBuffer>;
     // 単一形は block の offset が part 0 の長さから決まるので、長さの変わる書き換えは
     // part 列で渡す（part 0 = ヘッダ + 2 文書）。
     const parts = [...written.parts];
@@ -142,19 +145,18 @@ const convertible = (): { readonly value: object; readonly conversions: () => nu
 };
 
 test("構築オプションの数値ノブの診断は利用者の変換を呼ばず、型外の値を ExecutionError で拒否する", async () => {
-  for (
-    const knob of [
-      "planBackingBudgetBytes",
-      "linearGemvRowsThreadTarget",
-      "attentionRowBlockMaxBytes",
-    ] as const
-  ) {
-    for (
-      const make of [() => convertible(), () => ({
+  for (const knob of [
+    "planBackingBudgetBytes",
+    "linearGemvRowsThreadTarget",
+    "attentionRowBlockMaxBytes",
+  ] as const) {
+    for (const make of [
+      () => convertible(),
+      () => ({
         value: Symbol(knob),
         conversions: () => 0,
-      })]
-    ) {
+      }),
+    ]) {
       const { value, conversions } = make();
       const options: SessionOptions = {};
       Object.defineProperty(options, knob, { value, enumerable: true });
@@ -200,12 +202,10 @@ test("run の generation の読みと context の内部面の取り出しは、�
       queryLength: 1,
     } as unknown as GenerationRun;
     const missingContext = { context: null, queryLength: 1 } as unknown as GenerationRun;
-    for (
-      const [generation, expected] of [[throwingGetter, failure], [
-        missingContext,
-        undefined,
-      ]] as const
-    ) {
+    for (const [generation, expected] of [
+      [throwingGetter, failure],
+      [missingContext, undefined],
+    ] as const) {
       // 同期 throw なら `.then` に届かずここで例外が抜ける（受け口の契約違反としてテストが落ちる）。
       const outcome = await session.run({}, {}, generation).then(
         () => "resolved",
@@ -260,7 +260,10 @@ const losableFakeGpu = (): { readonly gpu: GpuContext; readonly lose: () => void
       LIMITS,
       new Set(),
     ),
-    lose: (): void => lost.resolve(platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" })),
+    lose: (): void =>
+      lost.resolve(
+        platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }),
+      ),
   };
 };
 

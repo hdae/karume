@@ -107,7 +107,10 @@ export const quantizeRowsReference = (
 ): QuantizedRows => {
   // MUST: 計算の前に形と長さを突き合わせる。足りない要素は undefined → NaN として行の scale へ
   // 伝播し、契約外の「NaN 行」を期待値として返す（テンソル中の NaN は正規の入力なので見ない）。
-  for (const [name, value] of [["rows", rows], ["dim", dim]] as const) {
+  for (const [name, value] of [
+    ["rows", rows],
+    ["dim", dim],
+  ] as const) {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new I8a8Error(`行量子化の参照: ${name}=${value} が非負の整数でない`);
     }
@@ -146,11 +149,7 @@ export const quantizeRowsReference = (
  * 実測して門にする — 余裕が縮んだのに気づかずに atol=0 を掲げると、実質は「たまたま通って
  * いるだけ」になる。|x/s| ≤ 127 での 2.5 ULP は約 1.9e-5 なので、1e-3 も取れば桁で安全。
  */
-export const quantizeRowsTieMargin = (
-  x: ArrayLike<number>,
-  rows: number,
-  dim: number,
-): number => {
+export const quantizeRowsTieMargin = (x: ArrayLike<number>, rows: number, dim: number): number => {
   const { scale } = quantizeRowsReference(x, rows, dim);
   let margin = Number.POSITIVE_INFINITY;
   for (let row = 0; row < rows; row += 1) {

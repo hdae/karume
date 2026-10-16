@@ -122,7 +122,7 @@ if (!isRecord(sources)) {
 }
 // filter は tuple の第 2 要素を絞れないので flatMap で型ごと絞る（as を使わない）。
 const pins = Object.entries(sources).flatMap(([name, value]) =>
-  isPinRef(value) ? [[name, value] as const] : []
+  isPinRef(value) ? [[name, value] as const] : [],
 );
 if (pins.length === 0) {
   throw new Error("KARUME_SOURCES にエントリが 1 本も無い");
@@ -136,16 +136,14 @@ for (const [name, ref] of pins) {
     throw new Error(`${name}: manifest.format が文字列でない`);
   }
   console.log(
-    `  manifest OK ${name} ${ref.repo}@${ref.revision.slice(0, 8)} format=${format} (${
-      (performance.now() - started).toFixed(0)
-    }ms)`,
+    `  manifest OK ${name} ${ref.repo}@${ref.revision.slice(0, 8)} format=${format} (${(
+      performance.now() - started
+    ).toFixed(0)}ms)`,
   );
 }
 
 if (manifestsOnly) {
-  console.log(
-    `published smoke OK: ${pins.length} manifests（fromPretrained は省略）`,
-  );
+  console.log(`published smoke OK: ${pins.length} manifests（fromPretrained は省略）`);
 } else {
   await ensureNavigatorGpu();
   const { Sbv2Pipeline, SBV2_SOURCES } = (await import(MODELS_SBV2)) as Sbv2Module;
@@ -157,7 +155,5 @@ if (manifestsOnly) {
     `  fromPretrained OK sbv2-jvnv (${((performance.now() - started) / 1000).toFixed(1)}s)`,
   );
   await pipeline.dispose();
-  console.log(
-    `published smoke OK: ${pins.length} manifests + sbv2 fromPretrained`,
-  );
+  console.log(`published smoke OK: ${pins.length} manifests + sbv2 fromPretrained`);
 }

@@ -134,7 +134,7 @@ const representatives: Readonly<Record<string, Readonly<Record<string, readonly 
 /** 網羅表を (席, 値, 述語) の平たい列に。 */
 const signatureEntries = (): readonly (readonly [string, string, KeyPredicate])[] =>
   Object.entries(signatures).flatMap(([seat, variants]) =>
-    Object.entries(variants).map(([value, predicate]) => [seat, value, predicate] as const)
+    Object.entries(variants).map(([value, predicate]) => [seat, value, predicate] as const),
   );
 
 describe("SEAT_SIGNATURES", () => {
@@ -188,7 +188,10 @@ describe("countDispatches", () => {
     const census = rows(["linear:a", 3], ["linear:b", 2], ["relu", 5]);
     assertEquals(countDispatches(census, "linear:a"), 3);
     assertEquals(countDispatches(census, "linear"), 0, "前方一致ではない");
-    assertEquals(countDispatches(census, (key) => key.startsWith("linear:")), 5);
+    assertEquals(
+      countDispatches(census, (key) => key.startsWith("linear:")),
+      5,
+    );
   });
 });
 
@@ -209,11 +212,15 @@ describe("assertPipelineCensus", () => {
   const census = rows(["linear:a", 3], ["relu", 1]);
 
   it("本数ちょうど・下限の両方を満たせば通る", () => {
-    assertPipelineCensus(census, [
-      { label: "linear:a", match: "linear:a", count: 3 },
-      { label: "relu 以上", match: "relu", atLeast: 1 },
-      { label: "無いキー", match: "gelu", count: 0 },
-    ], "where");
+    assertPipelineCensus(
+      census,
+      [
+        { label: "linear:a", match: "linear:a", count: 3 },
+        { label: "relu 以上", match: "relu", atLeast: 1 },
+        { label: "無いキー", match: "gelu", count: 0 },
+      ],
+      "where",
+    );
   });
 
   it("本数ちょうどが外れれば落ちる", () => {
@@ -244,9 +251,13 @@ describe("assertSeatsApplied", () => {
   const sequential = linearGemvKey("i4", 32);
 
   it("非参照値の席は、その変種が 1 本以上あれば通る", () => {
-    assertSeatsApplied(rows([parallel, 7], [RMS_NORM_KEY, 2]), {
-      linearGemvReduce: "parallel",
-    }, "where");
+    assertSeatsApplied(
+      rows([parallel, 7], [RMS_NORM_KEY, 2]),
+      {
+        linearGemvReduce: "parallel",
+      },
+      "where",
+    );
   });
 
   it("非参照値の席で変種が 1 本も無ければ落ちる（沈黙縮退の検出）", () => {
@@ -271,11 +282,15 @@ describe("assertSeatsApplied", () => {
   });
 
   it("参照値を明示した席は、どの非参照値の変種も無ければ通る", () => {
-    assertSeatsApplied(rows([sequential, 3], [RMS_NORM_KEY, 1]), {
-      linearGemvReduce: "sequential",
-      fuseRmsNormAdd: false,
-      rmsNormReduce: "workgroup",
-    }, "where");
+    assertSeatsApplied(
+      rows([sequential, 3], [RMS_NORM_KEY, 1]),
+      {
+        linearGemvReduce: "sequential",
+        fuseRmsNormAdd: false,
+        rmsNormReduce: "workgroup",
+      },
+      "where",
+    );
   });
 
   it("参照値の席は非参照値のどれか 1 つでも走れば落ちる（subgroup32 も parallel 族の変種）", () => {

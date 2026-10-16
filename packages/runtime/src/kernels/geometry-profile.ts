@@ -325,24 +325,20 @@ export const assertGeometryProfile: (profile: unknown) => asserts profile is Geo
   );
   const attention = recordOf(fields.attention, where, "attention");
   const conv2d = recordOf(fields.conv2d, where, "conv2d");
-  for (
-    const [name, geometry] of [
-      ["attention.qk", attention.qk],
-      ["attention.pv", attention.pv],
-      ["conv2d.rows64", conv2d.rows64],
-      ["conv2d.rows32", conv2d.rows32],
-    ] as const
-  ) {
+  for (const [name, geometry] of [
+    ["attention.qk", attention.qk],
+    ["attention.pv", attention.pv],
+    ["conv2d.rows64", conv2d.rows64],
+    ["conv2d.rows32", conv2d.rows32],
+  ] as const) {
     assertGemmGeometry(gemmGeometryOf(geometry, where, name), `${where}: ${name}`);
   }
   const i8a8 = recordOf(fields.i8a8, where, "i8a8");
-  for (
-    const [name, geometry] of [
-      ["i8a8.linear", i8a8.linear],
-      ["i8a8.attentionQk", i8a8.attentionQk],
-      ["i8a8.attentionPv", i8a8.attentionPv],
-    ] as const
-  ) {
+  for (const [name, geometry] of [
+    ["i8a8.linear", i8a8.linear],
+    ["i8a8.attentionQk", i8a8.attentionQk],
+    ["i8a8.attentionPv", i8a8.attentionPv],
+  ] as const) {
     assertI8a8Geometry(i8a8GeometryOf(geometry, where, name), `${where}: ${name}`);
   }
   if (fields.provenance !== undefined) assertProvenanceShape(fields.provenance, where);
@@ -491,21 +487,27 @@ export const selectGeometryProfile = (
   }
   // match を省いた表は `profile.match?.vendor` が undefined で、文字列の adapter.vendor に一致しない。
   const described = adapter.description === "" ? undefined : adapter.description;
-  const withDescription = described === undefined
-    ? undefined
-    : profiles.find((profile) =>
-      profile.match?.vendor === adapter.vendor &&
-      profile.match.architecture === adapter.architecture &&
-      profile.match.description === described
-    );
+  const withDescription =
+    described === undefined
+      ? undefined
+      : profiles.find(
+          (profile) =>
+            profile.match?.vendor === adapter.vendor &&
+            profile.match.architecture === adapter.architecture &&
+            profile.match.description === described,
+        );
   if (withDescription !== undefined) return withDescription;
-  const exact = profiles.find((profile) =>
-    profile.match?.vendor === adapter.vendor && profile.match.architecture !== undefined &&
-    profile.match.architecture === adapter.architecture && profile.match.description === undefined
+  const exact = profiles.find(
+    (profile) =>
+      profile.match?.vendor === adapter.vendor &&
+      profile.match.architecture !== undefined &&
+      profile.match.architecture === adapter.architecture &&
+      profile.match.description === undefined,
   );
   if (exact !== undefined) return exact;
-  const vendorOnly = profiles.find((profile) =>
-    profile.match?.vendor === adapter.vendor && profile.match.architecture === undefined
+  const vendorOnly = profiles.find(
+    (profile) =>
+      profile.match?.vendor === adapter.vendor && profile.match.architecture === undefined,
   );
   return vendorOnly ?? DEFAULT_GEOMETRY_PROFILE;
 };

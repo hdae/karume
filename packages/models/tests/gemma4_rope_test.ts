@@ -205,14 +205,8 @@ test("同じ入力の 2 回生成はビット同一（決定性）", () => {
   const positions = [0, 1, 2, 511, 4096, 131071];
   const a = gemma4RopeRows(spec, positions);
   const b = gemma4RopeRows(spec, positions);
-  assertEquals(
-    new Uint32Array(a.cos.buffer),
-    new Uint32Array(b.cos.buffer),
-  );
-  assertEquals(
-    new Uint32Array(a.sin.buffer),
-    new Uint32Array(b.sin.buffer),
-  );
+  assertEquals(new Uint32Array(a.cos.buffer), new Uint32Array(b.cos.buffer));
+  assertEquals(new Uint32Array(a.sin.buffer), new Uint32Array(b.sin.buffer));
 });
 
 test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, rows, headDim]・f32", () => {

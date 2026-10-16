@@ -31,11 +31,7 @@ export const IO_ENCODING: Readonly<Record<IrDtype, SafetensorsDtype>> = {
  * MUST: 格納 dtype が宣言と食い違ったら落とす — 要素は全型 4 バイトなので、黙って
  * 読み替えるとビット列の再解釈が「通ってしまう」。
  */
-export const ioTensor = (
-  file: SafetensorsFile,
-  view: TensorView,
-  dtype: IrDtype,
-): Tensor => {
+export const ioTensor = (file: SafetensorsFile, view: TensorView, dtype: IrDtype): Tensor => {
   assertEquals(view.dtype, IO_ENCODING[dtype], `golden テンソル '${view.name}' の dtype`);
   const count = view.byteLength / 4;
   switch (dtype) {

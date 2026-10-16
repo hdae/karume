@@ -98,13 +98,13 @@ describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
     const huge = (axis: "h" | "w"): Conv2dDims =>
       axis === "h"
         ? {
-          ...unit2d,
-          heightIn: 2,
-          heightOut: 2,
-          kernelH: 3,
-          paddingH: U32_MAX,
-          dilationH: U32_MAX,
-        }
+            ...unit2d,
+            heightIn: 2,
+            heightOut: 2,
+            kernelH: 3,
+            paddingH: U32_MAX,
+            dilationH: U32_MAX,
+          }
         : { ...unit2d, widthIn: 2, widthOut: 2, kernelW: 3, paddingW: U32_MAX, dilationW: U32_MAX };
     for (const [name, build] of conv2dParamBuilders) {
       for (const axis of ["h", "w"] as const) {
@@ -117,17 +117,17 @@ describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
     const withLength = (axis: "h" | "w", length: number): Conv2dDims =>
       axis === "h"
         ? {
-          ...unit2d,
-          heightIn: length,
-          heightOut: length + 2 * EDGE_PADDING,
-          paddingH: EDGE_PADDING,
-        }
+            ...unit2d,
+            heightIn: length,
+            heightOut: length + 2 * EDGE_PADDING,
+            paddingH: EDGE_PADDING,
+          }
         : {
-          ...unit2d,
-          widthIn: length,
-          widthOut: length + 2 * EDGE_PADDING,
-          paddingW: EDGE_PADDING,
-        };
+            ...unit2d,
+            widthIn: length,
+            widthOut: length + 2 * EDGE_PADDING,
+            paddingW: EDGE_PADDING,
+          };
     for (const [name, build] of conv2dParamBuilders) {
       for (const axis of ["h", "w"] as const) {
         build(withLength(axis, 1));
@@ -144,12 +144,7 @@ describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
 
 describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まらない形", () => {
   // 契約（shapes.ts）は 2·padding == K − stride かつ出力長 = 入力長·stride。
-  const transpose = (
-    lengthIn: number,
-    kernel: number,
-    stride: number,
-    padding: number,
-  ) => ({
+  const transpose = (lengthIn: number, kernel: number, stride: number, padding: number) => ({
     batch: 1,
     channelsIn: 1,
     channelsOut: 1,

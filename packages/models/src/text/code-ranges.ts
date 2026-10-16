@@ -42,8 +42,10 @@ export const parseCodeRanges = (raw: unknown, label: string): CodeRanges => {
   const ranges: (readonly [number, number])[] = [];
   for (const [index, entry] of raw.entries()) {
     if (
-      !Array.isArray(entry) || entry.length !== 2 ||
-      typeof entry[0] !== "number" || typeof entry[1] !== "number"
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "number"
     ) {
       throw new Error(`${label}[${index}]: 区間が [start, end] の数値対でない`);
     }

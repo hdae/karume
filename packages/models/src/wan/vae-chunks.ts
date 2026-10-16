@@ -155,7 +155,8 @@ const chunkGraph = (
   assertF32Declared(owner.graph.values[frameOutput].dtype, where, `フレーム出力 '${frameOutput}'`);
   const [sampleChannels, , side] = frameShape;
   if (
-    !sameShape(frameShape, [sampleChannels, frames, side, side]) || sampleChannels < 1 ||
+    !sameShape(frameShape, [sampleChannels, frames, side, side]) ||
+    sampleChannels < 1 ||
     side % rows !== 0
   ) {
     throw new WanVaeChunkError(
@@ -200,9 +201,9 @@ export const wanVaeChunkLayout = (first: GraphOwner, next: GraphOwner): WanVaeCh
   const nextGraph = chunkGraph(next, "vae_decoder_next", NEXT_FRAMES);
   if (!sameShape(firstGraph.latent, nextGraph.latent)) {
     throw new WanVaeChunkError(
-      `潜在の形が 2 本で違う（first [${firstGraph.latent.join(",")}]・next [${
-        nextGraph.latent.join(",")
-      }]）`,
+      `潜在の形が 2 本で違う（first [${firstGraph.latent.join(",")}]・next [${nextGraph.latent.join(
+        ",",
+      )}]）`,
     );
   }
   const [sampleChannels, , sampleTile] = nextGraph.graph.frameShape;
@@ -472,5 +473,8 @@ export const decodeWanVaeTile = async (
   const read = await batch.finishAndRead(
     Object.fromEntries(frames.map((resident, index) => [names[index], resident])),
   );
-  return concatWanVaeFrames(layout, names.map((name) => read[name]));
+  return concatWanVaeFrames(
+    layout,
+    names.map((name) => read[name]),
+  );
 };

@@ -104,12 +104,13 @@ export const i8a8WorkgroupStorageBytes = (geometry: I8a8Geometry): number =>
  */
 export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void => {
   const { regM, regN, wgX, wgY, tileK } = geometry;
-  for (
-    const [name, value] of [["regM", regM], ["regN", regN], ["wgX", wgX], ["wgY", wgY], [
-      "tileK",
-      tileK,
-    ]] as const
-  ) {
+  for (const [name, value] of [
+    ["regM", regM],
+    ["regN", regN],
+    ["wgX", wgX],
+    ["wgY", wgY],
+    ["tileK", tileK],
+  ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw new CodegenError(`${where}: 幾何の ${name} は正整数（${value}）`);
     }
@@ -130,9 +131,9 @@ export const assertI8a8Geometry = (geometry: I8a8Geometry, where: string): void 
   const stride = i8a8FillStride(geometry);
   if (i8a8TileM(geometry) % stride !== 0 || i8a8TileN(geometry) % stride !== 0) {
     throw new CodegenError(
-      `${where}: タイル辺 ${i8a8TileM(geometry)}x${
-        i8a8TileN(geometry)
-      } が充填ストライド ${stride} で割り切れない`,
+      `${where}: タイル辺 ${i8a8TileM(geometry)}x${i8a8TileN(
+        geometry,
+      )} が充填ストライド ${stride} で割り切れない`,
     );
   }
 };
@@ -195,14 +196,11 @@ export const defaultI8a8Geometry = (op: I8a8GemmOp): I8a8Geometry =>
  */
 export const i8a8AccumulatorInit = (geometry: I8a8Geometry): string => {
   const quads = geometry.regN / I8A8_PACK;
-  return Array.from(
-    { length: geometry.regM },
-    (_, row) =>
-      Array.from({ length: quads }, (_, quad) => `  var acc${row}_${quad} = vec4<i32>(0);`).join(
-        "\n",
-      ),
-  )
-    .join("\n");
+  return Array.from({ length: geometry.regM }, (_, row) =>
+    Array.from({ length: quads }, (_, quad) => `  var acc${row}_${quad} = vec4<i32>(0);`).join(
+      "\n",
+    ),
+  ).join("\n");
 };
 
 /**
@@ -217,7 +215,7 @@ export const i8a8InnerProductLoop = (geometry: I8a8Geometry): string => {
   const { regM, regN } = geometry;
   const quads = regN / I8A8_PACK;
   const kPacks = i8a8KPacks(geometry);
-  const at = (offset: number): string => offset === 0 ? "" : ` + ${offset}u`;
+  const at = (offset: number): string => (offset === 0 ? "" : ` + ${offset}u`);
   const bLoads = Array.from(
     { length: regN },
     (_, col) => `      let b${col} = sb[bcol${at(col)}];`,
@@ -246,6 +244,6 @@ ${rows}
 
 /** 生成コメント用の幾何注記（ヘッダ 1 行に載せる形）。 */
 export const i8a8GeometryNote = (geometry: I8a8Geometry): string =>
-  `タイル ${i8a8TileM(geometry)}x${
-    i8a8TileN(geometry)
-  } / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY} / K ${geometry.tileK}`;
+  `タイル ${i8a8TileM(geometry)}x${i8a8TileN(
+    geometry,
+  )} / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY} / K ${geometry.tileK}`;

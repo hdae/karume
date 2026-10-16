@@ -116,10 +116,7 @@ const residencyOf = (
  * 引数の順は「束縛上限・バッファ上限」で、**あえて逆転させられる**（2 本を独立に見ている
  * ことの検出条件そのもの）。
  */
-const limits = (
-  maxStorageBufferBindingSize: number,
-  maxBufferSize: number,
-): RequiredLimits => ({
+const limits = (maxStorageBufferBindingSize: number, maxBufferSize: number): RequiredLimits => ({
   maxBufferSize,
   maxStorageBufferBindingSize,
   maxUniformBufferBindingSize: 65536,
@@ -283,10 +280,10 @@ const f16LinearModel = (): BoundContainer => {
   const supplied = autoTensors(graph, STORAGE).map((tensor) =>
     tensor.initializer === "w"
       ? {
-        ...tensor,
-        bytes: f16BytesFromBits(new Array(32).fill(f32ToF16Bits(0))),
-      }
-      : tensor
+          ...tensor,
+          bytes: f16BytesFromBits(new Array(32).fill(f32ToF16Bits(0))),
+        }
+      : tensor,
   );
   return memoryModel(graph, supplied);
 };
@@ -445,10 +442,7 @@ test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回
   assertEquals(await createRejectionAt(graph, 32, 1024), undefined, "境界ちょうどは確保へ進む");
   // 1 バイト下回ると、見積りも実構築も落ちる。文言は 1 本の門を共有しているので同一。
   const rejection = await createRejectionAt(graph, 31, 1024);
-  const estimateError = assertThrows(
-    () => stateEstimateAt(graph, 31, 1024),
-    ExecutionError,
-  );
+  const estimateError = assertThrows(() => stateEstimateAt(graph, 31, 1024), ExecutionError);
   assertEquals(estimateError.message, rejection);
   assertStringIncludes(
     estimateError.message,

@@ -155,9 +155,9 @@ const parseDefaults = (
   // 「生成を 1 回走らせて初めて分かる」を作らない）。
   if (!speakers.has(speaker)) {
     throw new Error(
-      `${where}.speaker: '${speaker}' が speakers に無い（利用可能: ${
-        [...speakers.keys()].join(" / ")
-      }）`,
+      `${where}.speaker: '${speaker}' が speakers に無い（利用可能: ${[...speakers.keys()].join(
+        " / ",
+      )}）`,
     );
   }
   if (!styles.has(style)) {

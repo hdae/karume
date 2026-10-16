@@ -61,7 +61,8 @@ const bucketOf = (distance: number): number => {
   const maxExact = half / 2;
   if (magnitude < maxExact) return base + magnitude;
   // 上流の `log_ratio.to(torch.long)`（0 への切り捨て — 対数の比は 0 以上なので floor と同じ）。
-  const large = maxExact +
+  const large =
+    maxExact +
     Math.trunc(
       (Math.log(magnitude / maxExact) / Math.log(maxDistance / maxExact)) * (half - maxExact),
     );

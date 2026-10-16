@@ -106,11 +106,7 @@ test("RunArena.allocHostWritten は COPY_DST の無い usage を拒否する", (
   assertEquals(uniform.usage, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
   assertEquals(arena.stats.allocatedBytes, 64);
 
-  assertThrows(
-    () => arena.allocHostWritten(64, GPUBufferUsage.UNIFORM),
-    ArenaError,
-    "COPY_DST",
-  );
+  assertThrows(() => arena.allocHostWritten(64, GPUBufferUsage.UNIFORM), ArenaError, "COPY_DST");
 });
 
 test("RunArena.destroy は flush 完了後にのみバッファを破棄する", async () => {

@@ -19,8 +19,13 @@ describe({
         async () => {
           const gpu = await acquireGpu();
           try {
-            for (const shape of [[1, 3, 1, 5], [1, 1, 4, 9], [1, 3, 4, 5]]) {
-              const dims = [0, 2, 1, 3], outShape = dims.map((axis) => shape[axis]);
+            for (const shape of [
+              [1, 3, 1, 5],
+              [1, 1, 4, 9],
+              [1, 3, 4, 5],
+            ]) {
+              const dims = [0, 2, 1, 3],
+                outShape = dims.map((axis) => shape[axis]);
               const graph = singleOpDeclaration("permute", [shape], [outShape], {
                 attrs: { dims },
                 inDtypes: [dtype],
@@ -53,11 +58,7 @@ describe({
               );
               try {
                 for (const repeat of [0, 1]) {
-                  const input = fill(
-                    shape,
-                    (i) => i * 3 + repeat,
-                    dtype,
-                  );
+                  const input = fill(shape, (i) => i * 3 + repeat, dtype);
                   const words = new Uint32Array(input.data.buffer);
                   if (repeat === 0) {
                     words.set([0, 0x80000000, 1, 0x80000001, 0x7f800000, 0xff800000, 0x7fc00123]);
@@ -86,7 +87,9 @@ describe({
     }
 
     it("別名の出力と共有元を後段まで保持し、再実行でも壊さない", async () => {
-      const gpu = await acquireGpu(), shape = [1, 3, 1, 5], permuted = [1, 1, 3, 5];
+      const gpu = await acquireGpu(),
+        shape = [1, 3, 1, 5],
+        permuted = [1, 1, 3, 5];
       const graph = singleOpDeclaration("permute", [shape], [permuted], {
         attrs: { dims: [0, 2, 1, 3] },
       });
@@ -109,12 +112,15 @@ describe({
         );
         try {
           for (const repeat of [0, 1, 2]) {
-            const input = fill(shape, (i) => i + repeat + .5);
+            const input = fill(shape, (i) => i + repeat + 0.5);
             const before = session.diagnostics().submit.dispatchCount;
             const outputs = await session.run({ x0: input });
             assertEquals(outputs.y.shape, permuted);
             for (const key of ["y", "back"]) {
-              assertEquals(Array.from(outputs[key].data), Array.from(input.data, (x) => -x));
+              assertEquals(
+                Array.from(outputs[key].data),
+                Array.from(input.data, (x) => -x),
+              );
             }
             assertEquals(outputs.late.data, input.data);
             assertEquals(session.diagnostics().submit.dispatchCount - before, 2);
@@ -128,7 +134,9 @@ describe({
     });
 
     it("入力由来のpermute出力は実体を保ち、同じ常駐入力へ書き戻せる", async () => {
-      const gpu = await acquireGpu(), shape = [1, 2, 1, 4], permuted = [1, 1, 2, 4];
+      const gpu = await acquireGpu(),
+        shape = [1, 2, 1, 4],
+        permuted = [1, 1, 2, 4];
       const graph = singleOpDeclaration("permute", [shape], [permuted], {
         attrs: { dims: [0, 2, 1, 3] },
       });
@@ -148,7 +156,7 @@ describe({
         );
         try {
           for (const repeat of [0, 1]) {
-            const values = Float32Array.from({ length: 8 }, (_, i) => i + repeat + .5);
+            const values = Float32Array.from({ length: 8 }, (_, i) => i + repeat + 0.5);
             state.write(values);
             const batch = await gpu.beginBatch();
             try {
@@ -169,23 +177,27 @@ describe({
     });
 
     it("常駐initializerのコピーを維持し、複数runで重みを破棄しない", async () => {
-      const gpu = await acquireGpu(), shape = [1, 2, 1, 4], outShape = [1, 1, 2, 4];
+      const gpu = await acquireGpu(),
+        shape = [1, 2, 1, 4],
+        outShape = [1, 1, 2, 4];
       const graph = singleOpDeclaration("permute", [shape], [outShape], {
         attrs: { dims: [0, 2, 1, 3] },
       });
       graph.inputs = [];
       graph.initializers.x0 = {};
       graph.values.x0 = { dtype: "f32", shape };
-      const values = Float32Array.from({ length: 8 }, (_, i) => i + .5);
+      const values = Float32Array.from({ length: 8 }, (_, i) => i + 0.5);
       try {
         const session = await createSessionFromContainer(
           gpu,
-          await openModelBytes(graph, [{
-            graph: GRAPH_NAME,
-            initializer: "x0",
-            bytes: new Uint8Array(values.buffer),
-            encoding: { codec: "f32" },
-          }]),
+          await openModelBytes(graph, [
+            {
+              graph: GRAPH_NAME,
+              initializer: "x0",
+              bytes: new Uint8Array(values.buffer),
+              encoding: { codec: "f32" },
+            },
+          ]),
           GRAPH_NAME,
         );
         try {

@@ -44,12 +44,15 @@ import {
 
 describe("deriveProfile: 規則の抽出", () => {
   it("既定比が --min-speedup 未満の幾何しか無いクラスは、掃引の既定の行の幾何を書く", () => {
-    const verdicts = deriveProfile([
-      source([
-        ...caseRows(linearCase(1024), BIG, [[A, { speedup: 1.04 }]]),
-        ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.3 }]]),
-      ]),
-    ], OPTIONS);
+    const verdicts = deriveProfile(
+      [
+        source([
+          ...caseRows(linearCase(1024), BIG, [[A, { speedup: 1.04 }]]),
+          ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.3 }]]),
+        ]),
+      ],
+      OPTIONS,
+    );
     const verdict = verdictOf(verdicts, "gemmRows > 512");
     assertEquals(verdict.outcome.kind, "default");
     assertEquals(verdict.outcome.geometry, BIG);
@@ -58,12 +61,17 @@ describe("deriveProfile: 規則の抽出", () => {
 
   it("出力が既定と不一致の幾何は、最も速くても採らない", () => {
     const verdict = verdictOf(
-      deriveProfile([
-        source(caseRows(linearCase(1024), BIG, [
-          [A, { speedup: 2, identical: false }],
-          [B, { speedup: 1.3 }],
-        ])),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          source(
+            caseRows(linearCase(1024), BIG, [
+              [A, { speedup: 2, identical: false }],
+              [B, { speedup: 1.3 }],
+            ]),
+          ),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "adopted");
@@ -73,12 +81,21 @@ describe("deriveProfile: 規則の抽出", () => {
 
   it("クラスの 1 ケースでも既定比の門を越えない幾何は、幾何平均が最大でも採らない", () => {
     const verdict = verdictOf(
-      deriveProfile([
-        source([
-          ...caseRows(linearCase(1024), BIG, [[A, { speedup: 3 }], [B, { speedup: 1.2 }]]),
-          ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.01 }], [B, { speedup: 1.2 }]]),
-        ]),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          source([
+            ...caseRows(linearCase(1024), BIG, [
+              [A, { speedup: 3 }],
+              [B, { speedup: 1.2 }],
+            ]),
+            ...caseRows(linearCase(4096), BIG, [
+              [A, { speedup: 1.01 }],
+              [B, { speedup: 1.2 }],
+            ]),
+          ]),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.geometry, B);
@@ -87,12 +104,18 @@ describe("deriveProfile: 規則の抽出", () => {
 
   it("クラスのどれかのケースで測っていない・失敗した幾何は採らない", () => {
     const verdict = verdictOf(
-      deriveProfile([
-        source([
-          ...caseRows(linearCase(1024), BIG, [[A, { speedup: 2 }], [B, { speedup: 1.5 }]]),
-          ...caseRows(linearCase(4096), BIG, [[B, { speedup: 1.5, error: "device lost" }]]),
-        ]),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          source([
+            ...caseRows(linearCase(1024), BIG, [
+              [A, { speedup: 2 }],
+              [B, { speedup: 1.5 }],
+            ]),
+            ...caseRows(linearCase(4096), BIG, [[B, { speedup: 1.5, error: "device lost" }]]),
+          ]),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "default");
@@ -103,12 +126,21 @@ describe("deriveProfile: 規則の抽出", () => {
   it("候補どうしは幾何平均で比べる（算術平均なら逆を選ぶ組）", () => {
     // A: (1.6, 1.06) 算術 1.33・幾何 1.302 / B: (1.31, 1.31) 算術 1.31・幾何 1.31
     const verdict = verdictOf(
-      deriveProfile([
-        source([
-          ...caseRows(linearCase(1024), BIG, [[A, { speedup: 1.6 }], [B, { speedup: 1.31 }]]),
-          ...caseRows(linearCase(4096), BIG, [[A, { speedup: 1.06 }], [B, { speedup: 1.31 }]]),
-        ]),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          source([
+            ...caseRows(linearCase(1024), BIG, [
+              [A, { speedup: 1.6 }],
+              [B, { speedup: 1.31 }],
+            ]),
+            ...caseRows(linearCase(4096), BIG, [
+              [A, { speedup: 1.06 }],
+              [B, { speedup: 1.31 }],
+            ]),
+          ]),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assertEquals(verdict.outcome.kind, "adopted");
@@ -118,7 +150,7 @@ describe("deriveProfile: 規則の抽出", () => {
 
   it("行数は段の境界 ±1 で正しい段に入り（rows <= maxRows で最初に当たる段）、conv2d は既定の行の tileM で分ける", () => {
     // 既定の行は M を覆う既定の段の幾何（掃引は既定の 3 段の表で組む）— 段の既定がずれると生成が止まる
-    const defaultFor = (m: number): GemmGeometry => m <= 64 ? SMALL : m <= 512 ? A : BIG;
+    const defaultFor = (m: number): GemmGeometry => (m <= 64 ? SMALL : m <= 512 ? A : BIG);
     const expected: readonly (readonly [number, string])[] = [
       [16, "gemmRows ≤ 16"],
       [17, "gemmRows 17〜32"],
@@ -142,19 +174,22 @@ describe("deriveProfile: 規則の抽出", () => {
       row(ref, conv2dCandidate(gemmMTileGeometry(mTile)), true),
       row(ref, conv2dCandidate(B), false, { speedup: 1.4, identical: true }),
     ];
-    const verdicts = deriveProfile([
-      source([
-        ...expected.flatMap(([m]) =>
-          caseRows(
-            linearCase(m),
-            defaultFor(m),
-            m === 33 || m === 64 ? [[B, { speedup: 1.2 }]] : [],
-          )
-        ),
-        ...conv2dRows(conv(96, 32), 32),
-        ...conv2dRows(conv(192, 64), 64),
-      ]),
-    ], OPTIONS);
+    const verdicts = deriveProfile(
+      [
+        source([
+          ...expected.flatMap(([m]) =>
+            caseRows(
+              linearCase(m),
+              defaultFor(m),
+              m === 33 || m === 64 ? [[B, { speedup: 1.2 }]] : [],
+            ),
+          ),
+          ...conv2dRows(conv(96, 32), 32),
+          ...conv2dRows(conv(192, 64), 64),
+        ]),
+      ],
+      OPTIONS,
+    );
     for (const slot of ROWS_SLOT_NAMES) {
       const cases = expected.filter(([, name]) => name === slot).map(([m]) => `linear-m${m}`);
       assertEquals(verdictOf(verdicts, slot).cases, cases.sort(), slot);
@@ -165,18 +200,21 @@ describe("deriveProfile: 規則の抽出", () => {
   });
 
   it("matmul / bmm の行は shape の M で gemmRows の欄に入る（bmm はバッチ数に依らず行列 1 枚の M）", () => {
-    const verdicts = deriveProfile([
-      source([
-        ...caseRows(matmulCase(16), SMALL, []),
-        ...caseRows(bmmCase(600, 17), SMALL, []),
-        ...caseRows(matmulCase(64), SMALL, []),
-        ...caseRows(bmmCase(600, 64), SMALL, []),
-        ...caseRows(matmulCase(65), A, []),
-        ...caseRows(bmmCase(16, 512), A, []),
-        ...caseRows(matmulCase(512), A, []),
-        ...caseRows(matmulCase(4096), BIG, []),
-      ]),
-    ], OPTIONS);
+    const verdicts = deriveProfile(
+      [
+        source([
+          ...caseRows(matmulCase(16), SMALL, []),
+          ...caseRows(bmmCase(600, 17), SMALL, []),
+          ...caseRows(matmulCase(64), SMALL, []),
+          ...caseRows(bmmCase(600, 64), SMALL, []),
+          ...caseRows(matmulCase(65), A, []),
+          ...caseRows(bmmCase(16, 512), A, []),
+          ...caseRows(matmulCase(512), A, []),
+          ...caseRows(matmulCase(4096), BIG, []),
+        ]),
+      ],
+      OPTIONS,
+    );
     assertEquals(verdictOf(verdicts, "gemmRows ≤ 16").cases, ["matmul-m16"]);
     assertEquals(verdictOf(verdicts, "gemmRows 17〜32").cases, ["bmm-b600-m17"]);
     assertEquals(verdictOf(verdicts, "gemmRows 33〜64").cases, ["bmm-b600-m64", "matmul-m64"]);
@@ -186,14 +224,23 @@ describe("deriveProfile: 規則の抽出", () => {
   });
 
   it("matmul / bmm の観測も欄の全ケースに数える（そこで ×1.05 未満なら linear で速くても採らない）", () => {
-    const verdicts = deriveProfile([
-      source([
-        ...caseRows(linearCase(1024), BIG, [[A, { speedup: 1.5 }], [B, { speedup: 1.2 }]]),
-        ...caseRows(matmulCase(4096), BIG, [[A, { speedup: 1.02 }], [B, { speedup: 1.2 }]]),
-        ...caseRows(linearCase(512), A, [[B, { speedup: 1.5 }]]),
-        ...caseRows(bmmCase(16, 512), A, [[B, { speedup: 1.04 }]]),
-      ]),
-    ], OPTIONS);
+    const verdicts = deriveProfile(
+      [
+        source([
+          ...caseRows(linearCase(1024), BIG, [
+            [A, { speedup: 1.5 }],
+            [B, { speedup: 1.2 }],
+          ]),
+          ...caseRows(matmulCase(4096), BIG, [
+            [A, { speedup: 1.02 }],
+            [B, { speedup: 1.2 }],
+          ]),
+          ...caseRows(linearCase(512), A, [[B, { speedup: 1.5 }]]),
+          ...caseRows(bmmCase(16, 512), A, [[B, { speedup: 1.04 }]]),
+        ]),
+      ],
+      OPTIONS,
+    );
     const large = verdictOf(verdicts, "gemmRows > 512");
     assertEquals(large.cases, ["linear-m1024", "matmul-m4096"]);
     assertEquals(large.outcome.kind, "adopted");
@@ -220,13 +267,25 @@ describe("deriveProfile: 規則の抽出", () => {
   it("同じケースを複数の掃引が測れば比はその幾何平均、1 本でも不一致なら採らない", () => {
     const ref = linearCase(1024);
     const verdict = verdictOf(
-      deriveProfile([
-        source(caseRows(ref, BIG, [[A, { speedup: 1.2 }], [B, { speedup: 1.5 }]]), "quick.json"),
-        source(
-          caseRows(ref, BIG, [[A, { speedup: 1 }], [B, { speedup: 1.5, identical: false }]]),
-          "full.json",
-        ),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          source(
+            caseRows(ref, BIG, [
+              [A, { speedup: 1.2 }],
+              [B, { speedup: 1.5 }],
+            ]),
+            "quick.json",
+          ),
+          source(
+            caseRows(ref, BIG, [
+              [A, { speedup: 1 }],
+              [B, { speedup: 1.5, identical: false }],
+            ]),
+            "full.json",
+          ),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assert(verdict.outcome.kind === "adopted");
@@ -242,12 +301,15 @@ describe("deriveProfile: 規則の抽出", () => {
       op: "i8a8-attention",
       shape: "pv BH16 M64 N64 D128",
     };
-    const verdicts = deriveProfile([
-      source([
-        row(ref, i8a8Candidate(defaultI8a8Geometry("attention_pv")), true),
-        row(ref, i8a8Candidate(tile), false, { speedup: 1.1, identical: true }),
-      ]),
-    ], OPTIONS);
+    const verdicts = deriveProfile(
+      [
+        source([
+          row(ref, i8a8Candidate(defaultI8a8Geometry("attention_pv")), true),
+          row(ref, i8a8Candidate(tile), false, { speedup: 1.1, identical: true }),
+        ]),
+      ],
+      OPTIONS,
+    );
     assertEquals(verdictOf(verdicts, "i8a8.attentionPv").outcome.geometry, tile);
     assertEquals(
       verdictOf(verdicts, "i8a8.attentionQk").outcome.geometry,
@@ -298,7 +360,10 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
       { [ref.caseId]: drift(ref.caseId, 1.2) },
     );
     const steady = source(
-      caseRows(ref, BIG, [[A, { speedup: 1.3 }], [B, { speedup: 1.3 }]]),
+      caseRows(ref, BIG, [
+        [A, { speedup: 1.3 }],
+        [B, { speedup: 1.3 }],
+      ]),
       "steady.json",
     );
     const verdict = verdictOf(deriveProfile([drifted, steady], OPTIONS), "gemmRows > 512");
@@ -314,10 +379,13 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
       ...caseRows(wide, BIG, [[A, { speedup: 1.3 }]]),
     ];
     const verdict = verdictOf(
-      deriveProfile([
-        sweepWith(rows, "first.json", { [wide.caseId]: drift(wide.caseId, 1.15) }),
-        sweepWith(rows, "second.json", { [wide.caseId]: drift(wide.caseId, 0.8) }),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          sweepWith(rows, "first.json", { [wide.caseId]: drift(wide.caseId, 1.15) }),
+          sweepWith(rows, "second.json", { [wide.caseId]: drift(wide.caseId, 0.8) }),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assertEquals(verdict.cases, [ref.caseId, wide.caseId]);
@@ -327,19 +395,25 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
       rejectionOf(verdict, A),
       `${wide.caseId} で測っていない（全掃引で比の材料から外した）`,
     );
-    assertEquals(verdict.excluded.map((entry) => [entry.path, entry.caseId]), [
-      ["first.json", wide.caseId],
-      ["second.json", wide.caseId],
-    ]);
+    assertEquals(
+      verdict.excluded.map((entry) => [entry.path, entry.caseId]),
+      [
+        ["first.json", wide.caseId],
+        ["second.json", wide.caseId],
+      ],
+    );
   });
 
   it("クラスの全ケースを外したら、欄は既定でその理由を残す", () => {
     const verdict = verdictOf(
-      deriveProfile([
-        sweepWith(caseRows(ref, BIG, [[A, { speedup: 1.5 }]]), "sweep.json", {
-          [ref.caseId]: drift(ref.caseId, 1.5),
-        }),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          sweepWith(caseRows(ref, BIG, [[A, { speedup: 1.5 }]]), "sweep.json", {
+            [ref.caseId]: drift(ref.caseId, 1.5),
+          }),
+        ],
+        OPTIONS,
+      ),
       "gemmRows > 512",
     );
     assert(verdict.outcome.kind === "default");
@@ -351,10 +425,13 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     const only = linearCase(128);
     const rows = caseRows(only, A, [[B, { speedup: 1.5 }]]);
     const verdict = verdictOf(
-      deriveProfile([
-        sweepWith(rows, "first.json", { [only.caseId]: drift(only.caseId, 1.15) }),
-        sweepWith(rows, "second.json", { [only.caseId]: drift(only.caseId, 0.8) }),
-      ], OPTIONS),
+      deriveProfile(
+        [
+          sweepWith(rows, "first.json", { [only.caseId]: drift(only.caseId, 1.15) }),
+          sweepWith(rows, "second.json", { [only.caseId]: drift(only.caseId, 0.8) }),
+        ],
+        OPTIONS,
+      ),
       "gemmRows 65〜128",
     );
     assertEquals(verdict.cases, [only.caseId]);
@@ -382,18 +459,22 @@ describe("deriveProfile: 既定の再測定比が範囲外のケースは、そ�
     // cases[4] はケースの記録（cases[] の要素）ごと無い — 掃引が途中で止まった記録の形
     const truncated = {
       ...built,
-      cases: (built.cases as readonly Record<string, unknown>[])
-        .filter((entry) => entry.caseId !== cases[4].caseId),
+      cases: (built.cases as readonly Record<string, unknown>[]).filter(
+        (entry) => entry.caseId !== cases[4].caseId,
+      ),
     };
     const verdict = verdictOf(
       deriveProfile([parseSweepReport(truncated, { path: "sweep.json", sha256: "0" })], OPTIONS),
       "gemmRows > 512",
     );
-    assertEquals(verdict.excluded.map(({ caseId, reason }) => [caseId, reason]), [
-      [cases[2].caseId, "既定の再測定が失敗（device lost）"],
-      [cases[3].caseId, "既定の再測定が無い"],
-      [cases[4].caseId, "既定の再測定が無い"],
-    ]);
+    assertEquals(
+      verdict.excluded.map(({ caseId, reason }) => [caseId, reason]),
+      [
+        [cases[2].caseId, "既定の再測定が失敗（device lost）"],
+        [cases[3].caseId, "既定の再測定が無い"],
+        [cases[4].caseId, "既定の再測定が無い"],
+      ],
+    );
   });
 });
 
@@ -403,14 +484,18 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
   const QUANTUM = 100_000;
   /** 量子化した掃引（`gpuTiming.quantized` true・既定の再測定比は 1）。 */
   const quantizedSource = (rows: readonly Record<string, unknown>[], name: string): SweepSource =>
-    parseSweepReport({
-      ...report(rows),
-      gpuTiming: { feature: true, unit: "ns", quantized: true },
-    }, { path: name, sha256: `sha-${name}` });
+    parseSweepReport(
+      {
+        ...report(rows),
+        gpuTiming: { feature: true, unit: "ns", quantized: true },
+      },
+      { path: name, sha256: `sha-${name}` },
+    );
   /** min の round が `ms` ミリ秒の rounds（e = 100 µs ÷ min）。 */
-  const roundsOf = (
-    ms: number,
-  ): readonly number[] => [ms * 10 * QUANTUM, ms * 10 * QUANTUM + QUANTUM];
+  const roundsOf = (ms: number): readonly number[] => [
+    ms * 10 * QUANTUM,
+    ms * 10 * QUANTUM + QUANTUM,
+  ];
   const lines = (verdict: SlotVerdict): string[] =>
     verdictLines([verdict]).filter((line) => line.startsWith("  - 掃引 "));
 
@@ -433,10 +518,15 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
   it("E > 1% の観測だけを外し、同じケースの他の幾何は残す（E は既定の行の e も足す）", () => {
     // e(既定) = 0.1 / 20 = 0.5%。A: e = 0.1 / 12.5 = 0.8% で E = 1.3% → 外す（e だけなら 1% 以下）。
     // B: e = 0.1 / 50 = 0.2% で E = 0.7% → 残す。外さなければ A（×1.5）が B（×1.2）に勝つ
-    const rows = caseRows(ref, BIG, [
-      [A, { speedup: 1.5, rounds: roundsOf(12.5) }],
-      [B, { speedup: 1.2, rounds: roundsOf(50) }],
-    ], { rounds: roundsOf(20) });
+    const rows = caseRows(
+      ref,
+      BIG,
+      [
+        [A, { speedup: 1.5, rounds: roundsOf(12.5) }],
+        [B, { speedup: 1.2, rounds: roundsOf(50) }],
+      ],
+      { rounds: roundsOf(20) },
+    );
     const verdict = verdictOf(
       deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
       "gemmRows > 512",
@@ -460,9 +550,9 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
 
   it("E がちょうど 1% の観測は残す（門は E > 1% で外す）", () => {
     // e(既定) = 0.1 / 20 = 0.5%・A: e = 0.1 / 20 = 0.5% で E = 1.00% → 残す
-    const rows = caseRows(ref, BIG, [
-      [A, { speedup: 1.5, rounds: roundsOf(20) }],
-    ], { rounds: roundsOf(20) });
+    const rows = caseRows(ref, BIG, [[A, { speedup: 1.5, rounds: roundsOf(20) }]], {
+      rounds: roundsOf(20),
+    });
     const verdict = verdictOf(
       deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
       "gemmRows > 512",
@@ -473,9 +563,12 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
   });
 
   it("外した観測の出力の不一致は、判定に効く（正しさの門は丸めに依らない）", () => {
-    const rows = caseRows(ref, BIG, [
-      [A, { speedup: 1.5, identical: false, rounds: roundsOf(2) }],
-    ], { rounds: roundsOf(100) });
+    const rows = caseRows(
+      ref,
+      BIG,
+      [[A, { speedup: 1.5, identical: false, rounds: roundsOf(2) }]],
+      { rounds: roundsOf(100) },
+    );
     const steady = source(caseRows(ref, BIG, [[A, { speedup: 1.3 }]]), "steady.json");
     const verdict = verdictOf(
       deriveProfile([quantizedSource(rows, "q.json"), steady], OPTIONS),
@@ -483,15 +576,23 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
     );
     assertEquals(verdict.outcome.kind, "default");
     assertEquals(rejectionOf(verdict, A), `${ref.caseId} で出力が既定と不一致`);
-    assertEquals(verdict.excluded.map((entry) => entry.geometry), [gemmCandidate(A).name]);
+    assertEquals(
+      verdict.excluded.map((entry) => entry.geometry),
+      [gemmCandidate(A).name],
+    );
   });
 
   it("既定の行の e が 1% を超えるケースは全観測を外し、採否の行には 1 行だけ載る", () => {
     // e(既定) = 0.1 / 5 = 2% → どの幾何も E > 1%（A・B とも e は小さい）
-    const rows = caseRows(ref, BIG, [
-      [A, { speedup: 1.5, rounds: roundsOf(80) }],
-      [B, { speedup: 1.2, rounds: roundsOf(80) }],
-    ], { rounds: roundsOf(5) });
+    const rows = caseRows(
+      ref,
+      BIG,
+      [
+        [A, { speedup: 1.5, rounds: roundsOf(80) }],
+        [B, { speedup: 1.2, rounds: roundsOf(80) }],
+      ],
+      { rounds: roundsOf(5) },
+    );
     const verdict = verdictOf(
       deriveProfile([quantizedSource(rows, "q.json")], OPTIONS),
       "gemmRows > 512",
@@ -522,18 +623,24 @@ describe("deriveProfile: 量子化した timestamp は観測ごとの丸め誤�
     assert(verdict.outcome.kind === "adopted");
     assertEquals(verdict.outcome.geometry, A);
     assertEquals(verdict.outcome.geomean, 1.3);
-    assertEquals(verdict.excluded.map(({ path, geometry }) => [path, geometry]), [
-      ["quick.json", gemmCandidate(A).name],
-    ]);
+    assertEquals(
+      verdict.excluded.map(({ path, geometry }) => [path, geometry]),
+      [["quick.json", gemmCandidate(A).name]],
+    );
   });
 
   it("rounds が無い・正の round が無い行は上界を出せないので外す（既定の行ならケースごと）", () => {
     const wide = linearCase(4096);
     const rows = [
-      ...caseRows(ref, BIG, [
-        [A, { speedup: 1.3 }],
-        [B, { speedup: 1.3, rounds: [0, 0] }],
-      ], { rounds: roundsOf(100) }),
+      ...caseRows(
+        ref,
+        BIG,
+        [
+          [A, { speedup: 1.3 }],
+          [B, { speedup: 1.3, rounds: [0, 0] }],
+        ],
+        { rounds: roundsOf(100) },
+      ),
       ...caseRows(wide, BIG, [[A, { speedup: 1.3, rounds: roundsOf(80) }]]),
     ];
     const verdict = verdictOf(
@@ -633,11 +740,7 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
     const m5 = source(rows, "m5.json", { ...ADAPTER, description: "Apple M5" });
     const blank = source(rows, "blank.json", { ...ADAPTER, description: "" });
     for (const target of [{ optIn: true } as const, OPTIONS]) {
-      assertThrows(
-        () => deriveProfile([m2, m5], { ...target, minSpeedup: 1.05 }),
-        Error,
-        "と違う",
-      );
+      assertThrows(() => deriveProfile([m2, m5], { ...target, minSpeedup: 1.05 }), Error, "と違う");
       assertThrows(
         () => deriveProfile([m2, blank], { ...target, minSpeedup: 1.05 }),
         Error,
@@ -651,10 +754,13 @@ describe("deriveProfile: description で adapter の機種まで揃える", () =
     deriveProfile([source(rows)], { optIn: true, minSpeedup: 1.05 });
     assertThrows(
       () =>
-        deriveProfile([
-          source(rows, "m2.json"),
-          source(rows, "other.json", { ...ADAPTER, architecture: "metal-2" }),
-        ], { optIn: true, minSpeedup: 1.05 }),
+        deriveProfile(
+          [
+            source(rows, "m2.json"),
+            source(rows, "other.json", { ...ADAPTER, architecture: "metal-2" }),
+          ],
+          { optIn: true, minSpeedup: 1.05 },
+        ),
       Error,
       "と違う",
     );
@@ -665,7 +771,10 @@ describe("deriveProfile: runtime の既定プロファイルとの整合", () =>
   it("ケースが無いクラスに書く既定: gemmRows の段はその範囲を覆う既定の段の幾何、他の欄は DEFAULT_GEOMETRY_PROFILE と同じ（14 欄・この順）", () => {
     const profile = DEFAULT_GEOMETRY_PROFILE;
     // 既定の表は 3 段のまま（≤ 64 / 65〜512 / > 512 — ADR 0116 決定 3）
-    assertEquals(profile.gemmRows.map((rule) => rule.maxRows), [64, 512, Infinity]);
+    assertEquals(
+      profile.gemmRows.map((rule) => rule.maxRows),
+      [64, 512, Infinity],
+    );
     const [small, middle, large] = profile.gemmRows.map((rule) => rule.geometry);
     const expected: Readonly<Record<string, GemmGeometry | I8a8Geometry>> = {
       "gemmRows ≤ 16": small,
@@ -684,7 +793,10 @@ describe("deriveProfile: runtime の既定プロファイルとの整合", () =>
       "i8a8.attentionPv": profile.i8a8.attentionPv,
     };
     const verdicts = deriveProfile([source([])], OPTIONS);
-    assertEquals(verdicts.map((verdict) => verdict.slot), Object.keys(expected));
+    assertEquals(
+      verdicts.map((verdict) => verdict.slot),
+      Object.keys(expected),
+    );
     for (const verdict of verdicts) {
       assertEquals(verdict.outcome.geometry, expected[verdict.slot], verdict.slot);
     }
@@ -694,8 +806,14 @@ describe("deriveProfile: runtime の既定プロファイルとの整合", () =>
 describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
   it("生成器の境界（PROFILE_GEMM_ROWS_BOUNDS）は 7 段で、欄名と効く範囲を行数の範囲で綴る（添字で綴らない）", () => {
     const segments = profileRowsSegments(PROFILE_GEMM_ROWS_BOUNDS);
-    assertEquals(segments.map((segment) => segment.maxRows), [16, 32, 64, 128, 256, 512, Infinity]);
-    assertEquals(segments.map((segment) => segment.slot), [...ROWS_SLOT_NAMES]);
+    assertEquals(
+      segments.map((segment) => segment.maxRows),
+      [16, 32, 64, 128, 256, 512, Infinity],
+    );
+    assertEquals(
+      segments.map((segment) => segment.slot),
+      [...ROWS_SLOT_NAMES],
+    );
     assertEquals(segments[1].scope, "linear / matmul / bmm の行数 17〜32");
     assertEquals(segments[6].scope, "linear / matmul / bmm の行数 > 512");
   });
@@ -710,9 +828,10 @@ describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
 
   it("綴りと段の既定は渡した境界から導く（既定の境界そのものなら既定の表と同じ 3 段）", () => {
     assertEquals(
-      profileRowsSegments([64, 512, Infinity]).map((
-        segment,
-      ) => [segment.maxRows, segment.fallback]),
+      profileRowsSegments([64, 512, Infinity]).map((segment) => [
+        segment.maxRows,
+        segment.fallback,
+      ]),
       GEMM_ROWS_BUCKETS.map((rule) => [rule.maxRows, rule.geometry]),
     );
     assertEquals(
@@ -735,13 +854,19 @@ describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
   });
 
   it("狭義昇順でない・末尾が Infinity でない・正整数でない境界の集合は生成を止める", () => {
-    for (const bounds of [[64, 32, 512, Infinity], [64, 64, 512, Infinity]]) {
+    for (const bounds of [
+      [64, 32, 512, Infinity],
+      [64, 64, 512, Infinity],
+    ]) {
       assertThrows(() => profileRowsSegments(bounds), Error, "狭義昇順でない");
     }
     for (const bounds of [[64, 512], []]) {
       assertThrows(() => profileRowsSegments(bounds), Error, "末尾が Infinity でない");
     }
-    for (const bounds of [[0, 64, 512, Infinity], [16.5, 64, 512, Infinity]]) {
+    for (const bounds of [
+      [0, 64, 512, Infinity],
+      [16.5, 64, 512, Infinity],
+    ]) {
       assertThrows(() => profileRowsSegments(bounds), Error, "正整数");
     }
   });
@@ -749,12 +874,18 @@ describe("profileRowsSegments: gemmRows の段の境界の検査", () => {
 
 describe("deriveProfile: ケースが 1 本の段", () => {
   it("段の 1 ケースで ×1.05 以上の幾何を採り、未満なら段の既定のまま", () => {
-    const verdicts = deriveProfile([
-      source([
-        ...caseRows(linearCase(16), SMALL, [[A, { speedup: 1.05 }], [B, { speedup: 1.04 }]]),
-        ...caseRows(linearCase(32), SMALL, [[A, { speedup: 1.049 }]]),
-      ]),
-    ], OPTIONS);
+    const verdicts = deriveProfile(
+      [
+        source([
+          ...caseRows(linearCase(16), SMALL, [
+            [A, { speedup: 1.05 }],
+            [B, { speedup: 1.04 }],
+          ]),
+          ...caseRows(linearCase(32), SMALL, [[A, { speedup: 1.049 }]]),
+        ]),
+      ],
+      OPTIONS,
+    );
     const adopted = verdictOf(verdicts, "gemmRows ≤ 16");
     assertEquals(adopted.cases, ["linear-m16"]);
     assert(adopted.outcome.kind === "adopted");
@@ -824,10 +955,13 @@ describe("deriveProfile: adapter を混ぜない", () => {
   it("掃引どうしの adapter（vendor / architecture）が違えば落ちる", () => {
     assertThrows(
       () =>
-        deriveProfile([
-          source(rows, "m2.json"),
-          source(rows, "other.json", { ...ADAPTER, architecture: "metal-2" }),
-        ], { vendor: "apple", minSpeedup: 1.05 }),
+        deriveProfile(
+          [
+            source(rows, "m2.json"),
+            source(rows, "other.json", { ...ADAPTER, architecture: "metal-2" }),
+          ],
+          { vendor: "apple", minSpeedup: 1.05 },
+        ),
       Error,
       "と違う",
     );
@@ -847,11 +981,7 @@ describe("deriveProfile: adapter を混ぜない", () => {
   });
 
   it("同じ掃引（同じ sha256）を 2 度渡すと落ちる", () => {
-    assertThrows(
-      () => deriveProfile([source(rows), source(rows)], OPTIONS),
-      Error,
-      "2 度",
-    );
+    assertThrows(() => deriveProfile([source(rows), source(rows)], OPTIONS), Error, "2 度");
   });
 
   it("掃引どうしの adapter の device が違えば、他の 3 欄が同じでも落ちる（表は 4 欄の 1 組だけを持つ）", () => {
@@ -913,10 +1043,13 @@ describe("parseSweepReport", () => {
   });
 
   it("timestamp が量子化された掃引も受け、刻み 100 µs を観測ごとの上界に使う", () => {
-    const parsed = parseSweepReport({
-      ...report(caseRows(linearCase(1024), BIG, [])),
-      gpuTiming: { feature: true, unit: "ns", quantized: true },
-    }, meta);
+    const parsed = parseSweepReport(
+      {
+        ...report(caseRows(linearCase(1024), BIG, [])),
+        gpuTiming: { feature: true, unit: "ns", quantized: true },
+      },
+      meta,
+    );
     assertEquals(parsed.timestampQuantum, 100_000);
     assertEquals(
       parseSweepReport(report(caseRows(linearCase(1024), BIG, [])), meta).timestampQuantum,
@@ -929,20 +1062,26 @@ describe("parseSweepReport", () => {
     for (const quantized of [undefined, "true", 1]) {
       assertThrows(
         () =>
-          parseSweepReport({
-            ...report(rows),
-            gpuTiming: { feature: true, unit: "ns", quantized },
-          }, meta),
+          parseSweepReport(
+            {
+              ...report(rows),
+              gpuTiming: { feature: true, unit: "ns", quantized },
+            },
+            meta,
+          ),
         Error,
         "gpuTiming.quantized が真偽値でない",
       );
     }
     assertThrows(
       () =>
-        parseSweepReport({
-          ...report(rows),
-          gpuTiming: { feature: true, unit: "deno-raw-tick", quantized: true },
-        }, meta),
+        parseSweepReport(
+          {
+            ...report(rows),
+            gpuTiming: { feature: true, unit: "deno-raw-tick", quantized: true },
+          },
+          meta,
+        ),
       Error,
       "単位が deno-raw-tick",
     );
@@ -950,9 +1089,12 @@ describe("parseSweepReport", () => {
 
   it("rounds に負の値・数でない値がある行と、reps が正整数でない行は落とす", () => {
     const ref = linearCase(1024);
-    for (
-      const measured of [{ rounds: [1, -1] }, { rounds: [Number.NaN] }, { reps: 1.5 }, { reps: 0 }]
-    ) {
+    for (const measured of [
+      { rounds: [1, -1] },
+      { rounds: [Number.NaN] },
+      { reps: 1.5 },
+      { reps: 0 },
+    ]) {
       assertThrows(
         () =>
           parseSweepReport(report(caseRows(ref, BIG, [[A, { speedup: 1.2, ...measured }]])), meta),
@@ -965,10 +1107,13 @@ describe("parseSweepReport", () => {
   it("壁時計（unit wall）の掃引は材料にしない", () => {
     assertThrows(
       () =>
-        parseSweepReport({
-          ...report(caseRows(linearCase(1024), BIG, [])),
-          gpuTiming: { feature: false, unit: "wall", quantized: false },
-        }, meta),
+        parseSweepReport(
+          {
+            ...report(caseRows(linearCase(1024), BIG, [])),
+            gpuTiming: { feature: false, unit: "wall", quantized: false },
+          },
+          meta,
+        ),
       Error,
       'gpuTiming.unit が "wall"',
     );
@@ -981,10 +1126,13 @@ describe("parseSweepReport", () => {
 
   it("GPU の timestamp で測った掃引（ns / deno-raw-tick）は受ける", () => {
     for (const unit of ["ns", "deno-raw-tick"]) {
-      const parsed = parseSweepReport({
-        ...report(caseRows(linearCase(1024), BIG, [])),
-        gpuTiming: { feature: true, unit, quantized: false },
-      }, meta);
+      const parsed = parseSweepReport(
+        {
+          ...report(caseRows(linearCase(1024), BIG, [])),
+          gpuTiming: { feature: true, unit, quantized: false },
+        },
+        meta,
+      );
       assertEquals(parsed.rows.length, 1);
     }
   });

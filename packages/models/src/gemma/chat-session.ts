@@ -190,9 +190,10 @@ export type Gemma4ChatTurnOptions = {
  * モデルに見せる文脈としては壊れているため。落とせるものが無ければ `turns` をそのまま返す
  * （= セッションが `GenerationCapacityError` で落とす — この 1 発話だけで入り切らない）。
  */
-export const dropOldestTurns: Gemma4ChatOverflowPolicy = (
-  { turns, system },
-): readonly Gemma4ChatMessage[] => {
+export const dropOldestTurns: Gemma4ChatOverflowPolicy = ({
+  turns,
+  system,
+}): readonly Gemma4ChatMessage[] => {
   const floor = system === undefined ? 0 : 1;
   // 末尾の 1 件（= 今答えようとしている発話）は落とさない。
   const droppable = turns.length - floor - 1;
@@ -551,7 +552,7 @@ export class Gemma4ChatSession {
     maxNewTokens: number,
   ): Promise<{ readonly sequence: GenerationSequence; readonly prompt: number[] }> {
     const attempts = this.#turns.length;
-    for (let attempt = 0;; attempt += 1) {
+    for (let attempt = 0; ; attempt += 1) {
       // MUST: `await` 明けの再検査（`send` は発行時に見るが、本体が走り出すのはその後）。
       // セッションだけを dispose した後に発行済みの stream を汲むと、生きた pipeline から
       // 新しい容量ぶんの sequence を取れてしまう。
@@ -582,9 +583,10 @@ export class Gemma4ChatSession {
           `Gemma4ChatSession 内部不整合: KV は空だが sequence の used が ${held.used}`,
         );
       }
-      const prompt = this.#committed === 0
-        ? gemma4ChatPrompt(this.#host.tokenizer, this.#turns)
-        : gemma4ChatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
+      const prompt =
+        this.#committed === 0
+          ? gemma4ChatPrompt(this.#host.tokenizer, this.#turns)
+          : gemma4ChatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
       const detail = overflowOf(
         this.#host.program,
         this.#capacity,
@@ -611,9 +613,7 @@ export class Gemma4ChatSession {
         return { sequence: created, prompt };
       }
       if (attempt >= attempts) {
-        throw new Error(
-          `Gemma4ChatSession 内部不整合: 溢れ処理が ${attempts} 回で収束しなかった`,
-        );
+        throw new Error(`Gemma4ChatSession 内部不整合: 溢れ処理が ${attempts} 回で収束しなかった`);
       }
       await this.#shrink(detail);
     }

@@ -12,7 +12,10 @@ const root = resolve(new URL("../../../", import.meta.url).pathname);
 const destDir = join(root, "packages/e2e/tests");
 const write = process.argv.includes("--write");
 const files = process.argv.slice(2).filter((a) => a !== "--write");
-if (files.length === 0) { console.error("usage: move-e2e.mjs [--write] <file.ts>..."); process.exit(2); }
+if (files.length === 0) {
+  console.error("usage: move-e2e.mjs [--write] <file.ts>...");
+  process.exit(2);
+}
 
 const relSpec = (fromDir, spec, oldDir) => {
   let r = relative(fromDir, resolve(oldDir, spec)).split(sep).join("/");
@@ -37,21 +40,33 @@ for (const file of files) {
     if (out !== spec) rewritten++;
     return out;
   };
-  text = text.replace(/((?:from|import)\s*")(\.\.?\/[^"\n]+)(")/g, (_, a, s, b) => a + rewrite(s) + b);
+  text = text.replace(
+    /((?:from|import)\s*")(\.\.?\/[^"\n]+)(")/g,
+    (_, a, s, b) => a + rewrite(s) + b,
+  );
   text = text.replace(/(import\(\s*")(\.\.?\/[^"\n]+)(")/g, (_, a, s, b) => a + rewrite(s) + b);
   // Any relative URL against import.meta.url, with or without a leading "./" (not scheme URLs).
-  text = text.replace(/(new URL\(\s*")((?![a-z]+:)[^"\n/][^"\n]*|\.\.?\/[^"\n]+)("\s*,\s*import\.meta\.url\s*\))/g, (_, a, s, b) => a + rewrite(s) + b);
+  text = text.replace(
+    /(new URL\(\s*")((?![a-z]+:)[^"\n/][^"\n]*|\.\.?\/[^"\n]+)("\s*,\s*import\.meta\.url\s*\))/g,
+    (_, a, s, b) => a + rewrite(s) + b,
+  );
   const leftovers = [];
   text.split("\n").forEach((line, i) => {
     if (/^\s*(\*|\/\/|\/\*)/.test(line)) return;
     for (const m of line.matchAll(/"(\.\.?\/[^"\n]*)"/g)) {
-      if (/(?:from|import)\s*"$/.test(line.slice(0, m.index)) || /import\(\s*"$/.test(line.slice(0, m.index))) continue;
+      if (
+        /(?:from|import)\s*"$/.test(line.slice(0, m.index)) ||
+        /import\(\s*"$/.test(line.slice(0, m.index))
+      )
+        continue;
       if (/new URL\(\s*"$/.test(line.slice(0, m.index)) && /import\.meta\.url/.test(line)) continue;
       leftovers.push(`${i + 1}: ${line.trim().slice(0, 120)}`);
     }
   });
   total += rewritten;
-  console.log(`${relative(root, abs)} → packages/e2e/tests/${basename(abs)}: ${rewritten} specifier(s) rewritten`);
+  console.log(
+    `${relative(root, abs)} → packages/e2e/tests/${basename(abs)}: ${rewritten} specifier(s) rewritten`,
+  );
   for (const l of leftovers) console.log(`  REVIEW ${l}`);
   if (write) {
     execFileSync("git", ["mv", abs, newAbs], { cwd: root });

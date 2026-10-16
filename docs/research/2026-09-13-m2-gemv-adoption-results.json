@@ -12,10 +12,7 @@
       "reduce": "sequential",
       "case": "english-list",
       "decodeMedian": 26.150030612656586,
-      "decodeRange": [
-        26.07367676134176,
-        26.205723246686354
-      ],
+      "decodeRange": [26.07367676134176, 26.205723246686354],
       "ttftMedianMs": 342.35000002384186,
       "firstTtftMs": 556.8849999904633,
       "deterministic": true
@@ -26,10 +23,7 @@
       "reduce": "sequential",
       "case": "japanese-list",
       "decodeMedian": 25.945465103171106,
-      "decodeRange": [
-        25.92485905904362,
-        26.047857770427413
-      ],
+      "decodeRange": [25.92485905904362, 26.047857770427413],
       "ttftMedianMs": 634.1000000238419,
       "firstTtftMs": 693.0649999976158,
       "deterministic": true
@@ -40,10 +34,7 @@
       "reduce": "parallel",
       "case": "english-list",
       "decodeMedian": 32.597222509555046,
-      "decodeRange": [
-        32.50396625838715,
-        32.75577450529187
-      ],
+      "decodeRange": [32.50396625838715, 32.75577450529187],
       "ttftMedianMs": 340.15499997138977,
       "firstTtftMs": 471.10000002384186,
       "deterministic": true
@@ -54,10 +45,7 @@
       "reduce": "parallel",
       "case": "japanese-list",
       "decodeMedian": 32.659493674086384,
-      "decodeRange": [
-        32.48737246716615,
-        32.664404354499595
-      ],
+      "decodeRange": [32.48737246716615, 32.664404354499595],
       "ttftMedianMs": 634.9800000190735,
       "firstTtftMs": 699.9250000119209,
       "deterministic": true
@@ -68,10 +56,7 @@
       "reduce": null,
       "case": "english-list",
       "decodeMedian": 19.34856751494112,
-      "decodeRange": [
-        19.048454127130796,
-        19.34936976328567
-      ],
+      "decodeRange": [19.048454127130796, 19.34936976328567],
       "ttftMedianMs": 188.6050000190735,
       "firstTtftMs": 456.11500000953674,
       "deterministic": true
@@ -82,10 +67,7 @@
       "reduce": null,
       "case": "japanese-list",
       "decodeMedian": 19.04851172147297,
-      "decodeRange": [
-        19.042437432128523,
-        19.280589190519326
-      ],
+      "decodeRange": [19.042437432128523, 19.280589190519326],
       "ttftMedianMs": 240.5700000524521,
       "firstTtftMs": 244.0600000023842,
       "deterministic": true
@@ -96,10 +78,7 @@
       "reduce": "sequential",
       "case": "english-list",
       "decodeMedian": 29.289451845681548,
-      "decodeRange": [
-        26.860517171681426,
-        30.726910921329246
-      ],
+      "decodeRange": [26.860517171681426, 30.726910921329246],
       "ttftMedianMs": 388.81500005722046,
       "firstTtftMs": 517.589999973774,
       "deterministic": true
@@ -110,10 +89,7 @@
       "reduce": "sequential",
       "case": "japanese-list",
       "decodeMedian": 28.287526996688513,
-      "decodeRange": [
-        26.552309102461766,
-        30.6859777257699
-      ],
+      "decodeRange": [26.552309102461766, 30.6859777257699],
       "ttftMedianMs": 763.5600000023842,
       "firstTtftMs": 907.5299999713898,
       "deterministic": true
@@ -124,10 +100,7 @@
       "reduce": "parallel",
       "case": "english-list",
       "decodeMedian": 34.42011664617503,
-      "decodeRange": [
-        30.95762245517579,
-        34.42256153046326
-      ],
+      "decodeRange": [30.95762245517579, 34.42256153046326],
       "ttftMedianMs": 387.7900000214577,
       "firstTtftMs": 519.9399999976158,
       "deterministic": true
@@ -138,10 +111,7 @@
       "reduce": "parallel",
       "case": "japanese-list",
       "decodeMedian": 34.3630428211079,
-      "decodeRange": [
-        32.12622035041016,
-        34.38076423607877
-      ],
+      "decodeRange": [32.12622035041016, 34.38076423607877],
       "ttftMedianMs": 763.2800000309944,
       "firstTtftMs": 864.0049999952316,
       "deterministic": true
@@ -152,10 +122,7 @@
       "reduce": null,
       "case": "english-list",
       "decodeMedian": 19.94339873503376,
-      "decodeRange": [
-        19.602443771381658,
-        19.979829885974507
-      ],
+      "decodeRange": [19.602443771381658, 19.979829885974507],
       "ttftMedianMs": 694.8149999976158,
       "firstTtftMs": 844.0550000071526,
       "deterministic": true
@@ -166,10 +133,7 @@
       "reduce": null,
       "case": "japanese-list",
       "decodeMedian": 19.969760077717517,
-      "decodeRange": [
-        19.51062399936391,
-        19.97916458533752
-      ],
+      "decodeRange": [19.51062399936391, 19.97916458533752],
       "ttftMedianMs": 830.9700000286102,
       "firstTtftMs": 828.714999973774,
       "deterministic": true

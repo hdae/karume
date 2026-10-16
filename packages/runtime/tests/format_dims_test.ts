@@ -45,8 +45,11 @@ const section = (root: Record<string, unknown>, key: string): readonly unknown[]
 
 const asValidCase = (raw: unknown): ValidCase => {
   if (
-    !isRecord(raw) || typeof raw["text"] !== "string" || typeof raw["coeff"] !== "number" ||
-    typeof raw["sym"] !== "string" || typeof raw["offset"] !== "number"
+    !isRecord(raw) ||
+    typeof raw["text"] !== "string" ||
+    typeof raw["coeff"] !== "number" ||
+    typeof raw["sym"] !== "string" ||
+    typeof raw["offset"] !== "number"
   ) {
     throw new Error(`fixture: valid ケースの形が不正 ${JSON.stringify(raw)}`);
   }

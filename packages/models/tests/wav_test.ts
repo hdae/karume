@@ -13,11 +13,9 @@ import { ModelInputError } from "../src/errors.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
 
 /** golden `meta.json` の置き場（`tools/export-recipes/irodori/dacvae/host.py` の既定の出力先）。 */
-const HOST_GOLDEN = new URL(
-  "../../../outputs/series/dacvae-32dim/host/meta.json",
-  import.meta.url,
-);
-const HOST_COMMAND = "cd tools/export-recipes && uv run --with descript-audiotools --with einops " +
+const HOST_GOLDEN = new URL("../../../outputs/series/dacvae-32dim/host/meta.json", import.meta.url);
+const HOST_COMMAND =
+  "cd tools/export-recipes && uv run --with descript-audiotools --with einops " +
   "--with 'transformers==5.14.1' python -m irodori.dacvae.host";
 
 const goldenText = await readTextIfPresent(HOST_GOLDEN);
@@ -481,9 +479,11 @@ test("decodeWav: fmt の block align / byte rate が導出値と矛盾するフ�
 test("encodeWav: 非有限サンプルは位置と値付きで落とす（無音・クリップに化けさせない）", () => {
   // クリップの `Math.max` / `Math.min` は NaN を素通しし、`Math.round(NaN)` → `setInt16` が
   // 0 を書く。±Infinity はフルスケールへ張り付く。どちらも例外にならない。
-  for (
-    const [value, text] of [[NaN, "NaN"], [Infinity, "Infinity"], [-Infinity, "-Infinity"]] as const
-  ) {
+  for (const [value, text] of [
+    [NaN, "NaN"],
+    [Infinity, "Infinity"],
+    [-Infinity, "-Infinity"],
+  ] as const) {
     const samples = Float32Array.of(0.1, 0.2, value, 0.3);
     assertThrows(
       () => encodeWav(samples, 48000),

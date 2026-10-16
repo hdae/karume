@@ -144,9 +144,9 @@ const parseDeclaration = (name: string, raw: unknown): DeclaredTensor => {
   const expected = declaredByteLength(dtype, count);
   if (end - begin !== expected) {
     throw new SafetensorsError(
-      `${where}: サイズ不一致 offsets=${end - begin} 期待=${expected}（${dtype} [${
-        shape.join(",")
-      }]）`,
+      `${where}: サイズ不一致 offsets=${end - begin} 期待=${expected}（${dtype} [${shape.join(
+        ",",
+      )}]）`,
     );
   }
   return { name, dtype, shape, begin, end };
@@ -222,17 +222,13 @@ export const parseSafetensorsHeader = (
     throw new SafetensorsError(`ファイル長 ${fileLength} が非負整数でない`);
   }
   if (fileLength < HEADER_LENGTH_BYTES) {
-    throw new SafetensorsError(
-      `ファイルが短すぎる: ${fileLength} バイト（ヘッダ長すら無い）`,
-    );
+    throw new SafetensorsError(`ファイルが短すぎる: ${fileLength} バイト（ヘッダ長すら無い）`);
   }
   const bytes = asPrefixBytes(prefix);
   const headerLength = safetensorsHeaderLength(bytes);
   const dataStart = HEADER_LENGTH_BYTES + headerLength;
   if (dataStart > fileLength) {
-    throw new SafetensorsError(
-      `ヘッダ長 ${headerLength} がファイル長 ${fileLength} を超える`,
-    );
+    throw new SafetensorsError(`ヘッダ長 ${headerLength} がファイル長 ${fileLength} を超える`);
   }
   if (bytes.byteLength < dataStart) {
     throw new SafetensorsError(

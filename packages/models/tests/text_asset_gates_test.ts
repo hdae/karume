@@ -57,12 +57,31 @@ test("asVocabId: 語彙の行数以上の id は落とす（gather が別の行�
 });
 
 test("parseAddedTokens: 対の列を写像にし、重複鍵は後勝ちにせず落とす", () => {
-  const parsed = parseAddedTokens([["<s>", 1], ["</s>", 2]], "added");
-  assertEquals([...parsed], [["<s>", 1], ["</s>", 2]]);
+  const parsed = parseAddedTokens(
+    [
+      ["<s>", 1],
+      ["</s>", 2],
+    ],
+    "added",
+  );
+  assertEquals(
+    [...parsed],
+    [
+      ["<s>", 1],
+      ["</s>", 2],
+    ],
+  );
 
   // 重複鍵を `Map.set` の後勝ちで飲み込むと、分割規則だけが静かに変わる。
   assertThrows(
-    () => parseAddedTokens([["<s>", 1], ["<s>", 9]], "added"),
+    () =>
+      parseAddedTokens(
+        [
+          ["<s>", 1],
+          ["<s>", 9],
+        ],
+        "added",
+      ),
     Error,
     'added: 鍵 "<s>" が重複している',
   );

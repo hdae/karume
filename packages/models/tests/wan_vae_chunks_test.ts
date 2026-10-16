@@ -116,11 +116,14 @@ describe("wanVaeChunkLayout（グラフ宣言 → chunk 列の取り決め）", 
   it("タイル辺・縮尺・cache の形を宣言から引き、cache の入出力を同じ順で対にする", () => {
     const layout = layoutOf();
     assertEquals([layout.latentChannels, layout.tile, layout.sampleTile], [CHANNELS, TILE, SIDE]);
-    assertEquals([...layout.cacheShapes.entries()], [
-      ["cache_00", [3, 2, TILE, TILE]],
-      ["cache_01", [4, 2, TILE, TILE]],
-      ["cache_02", [5, 2, 2 * TILE, 2 * TILE]],
-    ]);
+    assertEquals(
+      [...layout.cacheShapes.entries()],
+      [
+        ["cache_00", [3, 2, TILE, TILE]],
+        ["cache_01", [4, 2, TILE, TILE]],
+        ["cache_02", [5, 2, 2 * TILE, 2 * TILE]],
+      ],
+    );
     assertEquals(layout.first.caches, ["cache_00", "cache_02"]);
     assertEquals(layout.first.cacheOutputs, ["cache_00_out", "cache_02_out"]);
     assertEquals(layout.next.caches, ["cache_00", "cache_01", "cache_02"]);
@@ -328,7 +331,7 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
     assertEquals(chunk.shape, [CHANNELS, 1, TILE, TILE]);
     assert(chunk.dtype === "f32");
     const expected = [0, 1].flatMap((channel) =>
-      Array.from({ length: area }, (_, pixel) => channel * 100 + 10 + pixel)
+      Array.from({ length: area }, (_, pixel) => channel * 100 + 10 + pixel),
     );
     assertEquals([...chunk.data], expected);
   });
@@ -344,14 +347,17 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
     const plane = SIDE * SIDE;
     // chunk k の値 = `k·10 + c`（chunk 0 は 1 枚・以降は 4 枚）。
     const chunk = (index: number, frames: number) =>
-      new Float32Array(3 * frames * plane).map((_, at) =>
-        index * 10 + Math.floor(at / (frames * plane))
+      new Float32Array(3 * frames * plane).map(
+        (_, at) => index * 10 + Math.floor(at / (frames * plane)),
       ).buffer;
     const out = concatWanVaeFrames(layout, [chunk(0, 1), chunk(1, 4), chunk(2, 4)]);
     assertEquals(out.length, 3 * 9 * plane);
     for (let channel = 0; channel < 3; channel += 1) {
       const frames = Array.from({ length: 9 }, (_, frame) => out[(channel * 9 + frame) * plane]);
-      assertEquals(frames, [0, 10, 10, 10, 10, 20, 20, 20, 20].map((value) => value + channel));
+      assertEquals(
+        frames,
+        [0, 10, 10, 10, 10, 20, 20, 20, 20].map((value) => value + channel),
+      );
     }
     assertThrows(
       () => concatWanVaeFrames(layout, [chunk(0, 1), chunk(1, 1)]),
@@ -369,14 +375,17 @@ describe("潜在の chunk の切り出しとフレームの連結", () => {
     const plane = SIDE * SIDE;
     // chunk k の値 = `k·100 + c`（3 を仮定した連結は c ≥ 3 の平面を写さず、長さも合わない）。
     const chunk = (index: number, frames: number) =>
-      new Float32Array(channels * frames * plane).map((_, at) =>
-        index * 100 + Math.floor(at / (frames * plane))
+      new Float32Array(channels * frames * plane).map(
+        (_, at) => index * 100 + Math.floor(at / (frames * plane)),
       ).buffer;
     const out = concatWanVaeFrames(wide, [chunk(0, 1), chunk(1, 4)]);
     assertEquals(out.length, channels * 5 * plane);
     for (let channel = 0; channel < channels; channel += 1) {
       const frames = Array.from({ length: 5 }, (_, frame) => out[(channel * 5 + frame) * plane]);
-      assertEquals(frames, [0, 100, 100, 100, 100].map((value) => value + channel));
+      assertEquals(
+        frames,
+        [0, 100, 100, 100, 100].map((value) => value + channel),
+      );
     }
   });
 });
@@ -399,9 +408,10 @@ describe("WanVaeChunkCaches.create（常駐の確保と失敗時の後始末）"
     // 模擬の常駐（`dispose` と `byteLength` だけを持つ — 実体は fake device に作れないのでテストの境界で cast する）。
     gpu.createResident = (byteLength: number, label = "resident") => {
       created.push(label);
-      return Promise.resolve(
-        { byteLength, dispose: () => disposed.push(label) } as unknown as ResidentTensor,
-      );
+      return Promise.resolve({
+        byteLength,
+        dispose: () => disposed.push(label),
+      } as unknown as ResidentTensor);
     };
     await assertRejects(() => WanVaeChunkCaches.create(gpu, layout), RangeError);
     assertEquals(disposed.toSorted(), created.toSorted(), "確保した常駐が解放されずに残った");

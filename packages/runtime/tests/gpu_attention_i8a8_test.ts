@@ -108,10 +108,7 @@ const assertExact = (
       assert(Number.isNaN(actual[i]), `${where}[${i}]: 参照 NaN に対し ${actual[i]}`);
       continue;
     }
-    assert(
-      actual[i] === expected[i],
-      `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`,
-    );
+    assert(actual[i] === expected[i], `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`);
   }
 };
 
@@ -258,11 +255,12 @@ const runAttentionQkI8a8 = async (
           { binding: 3, resource: { buffer: scales } },
         ],
       });
-      scheduler.dispatch(quantizePipeline, bindGroup, [
-        gridStrideWorkgroups(rows, 1, limit),
-        1,
-        1,
-      ], QUANTIZE_ROWS_KEY);
+      scheduler.dispatch(
+        quantizePipeline,
+        bindGroup,
+        [gridStrideWorkgroups(rows, 1, limit), 1, 1],
+        QUANTIZE_ROWS_KEY,
+      );
       return { payload, scales };
     };
     const query = quantize(prepared.q, batch * m);
@@ -291,11 +289,16 @@ const runAttentionQkI8a8 = async (
     });
     // MUST: dispatch の辺は**このカーネルの幾何**（キー・生成物へ渡したものと同じ）から導く。
     // 定数を渡すと実タイル辺と食い違い、下回った側でタイルが欠落して沈黙誤値になる。
-    scheduler.dispatch(pipeline, bindGroup, [
-      tiledWorkgroups(n, i8a8TileN(geometry), limit, shape.name),
-      tiledWorkgroups(m, i8a8TileM(geometry), limit, shape.name),
-      tiledWorkgroups(batch, 1, limit, shape.name),
-    ], pipelineKey);
+    scheduler.dispatch(
+      pipeline,
+      bindGroup,
+      [
+        tiledWorkgroups(n, i8a8TileN(geometry), limit, shape.name),
+        tiledWorkgroups(m, i8a8TileM(geometry), limit, shape.name),
+        tiledWorkgroups(batch, 1, limit, shape.name),
+      ],
+      pipelineKey,
+    );
     await scheduler.flush();
     const bytes = await readbackBytes(gpu.device, scores, batch * m * n * 4);
     return new Float32Array(bytes.buffer, 0, batch * m * n);
@@ -310,10 +313,9 @@ const runAttentionQkI8a8 = async (
 
 /** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
 const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
-  [...byKey].filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY)).reduce(
-    (sum, [, count]) => sum + count,
-    0,
-  );
+  [...byKey]
+    .filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY))
+    .reduce((sum, [, count]) => sum + count, 0);
 
 test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れている（atol=0 の前提）", () => {
   // GPU の除算は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段揺れうる。
@@ -333,8 +335,7 @@ test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れて
 // ---------------------------------------------------------------------------
 
 test({
-  name:
-    "attention_qk i8a8 の S が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  name: "attention_qk i8a8 の S が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -362,8 +363,7 @@ test({
 });
 
 test({
-  name:
-    "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
+  name: "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 充填の値変数が関数スコープの `k4`（K のパック数）を覆い隠していた欠陥（2026-09-27）の検出器。
@@ -374,7 +374,7 @@ test({
       { regM: 8, regN: 8, wgX: 8, wgY: 4, tileK: 32 },
     ];
     for (const geometry of geometries) {
-      const slots = geometry.regN * (geometry.tileK / 4) / geometry.wgY;
+      const slots = (geometry.regN * (geometry.tileK / 4)) / geometry.wgY;
       assert(
         slots >= 5,
         `${i8a8GeometryKeyPart(geometry, false)}: 充填スロット ${slots} では欠陥を踏まない`,
@@ -457,8 +457,7 @@ test({
 });
 
 test({
-  name:
-    "attention_qk i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  name: "attention_qk i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -559,8 +558,7 @@ test({
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 test({
-  name:
-    "attentionCompute:'a8' の変種選択（①QK i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
+  name: "attentionCompute:'a8' の変種選択（①QK i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -656,8 +654,7 @@ test({
 });
 
 test({
-  name:
-    "attention i8a8: D が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  name: "attention i8a8: D が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ D·127² は i32 に収まるが、門は安全側。

@@ -25,7 +25,10 @@ export const createOperationChain = (): OperationChain => {
   let chain: Promise<void> = Promise.resolve();
   return <T>(operation: () => T | Promise<T>): Promise<T> => {
     const result = chain.then(operation);
-    chain = result.then(() => undefined, () => undefined);
+    chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   };
 };

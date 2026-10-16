@@ -149,12 +149,13 @@ test("parseJpExtraRules: blankId は音素・tone・language の 3 表すべて�
 
 test("parseJpExtraRules: bertRelPos は対数バケットの式が成立する組だけを受ける", () => {
   // (2, 2) は対数の分母も係数も 0 で NaN を作り、i32 化で 0 の添字に化ける（資産の入口で落とす）。
-  for (
-    const bertRelPos of [{ positionBuckets: 2, maxPosition: 2 }, {
+  for (const bertRelPos of [
+    { positionBuckets: 2, maxPosition: 2 },
+    {
       positionBuckets: 4,
       maxPosition: 3,
-    }]
-  ) {
+    },
+  ]) {
     assertThrows(
       () => parseJpExtraRules({ ...TEST_RULES_JSON, bertRelPos }, "x"),
       Error,
@@ -162,19 +163,23 @@ test("parseJpExtraRules: bertRelPos は対数バケットの式が成立する�
       JSON.stringify(bertRelPos),
     );
   }
-  assertEquals(
-    parseJpExtraRules(TEST_RULES_JSON, "x").bertRelPos,
-    { positionBuckets: 256, maxPosition: 512 },
-  );
+  assertEquals(parseJpExtraRules(TEST_RULES_JSON, "x").bertRelPos, {
+    positionBuckets: 256,
+    maxPosition: 512,
+  });
 });
 
 test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だけでは通さない）", () => {
   // 決め手は samplingRate — `Sbv2Pipeline.generate` の `sampleRate` として**そのまま公開結果
   // へ出る**唯一の欄なので、負値や 0 はどこでも例外にならず「正常に見える壊れた WAV」に
   // なる。残りは遅れて fail loudly するだけだが、門をここへ揃える。
-  for (
-    const key of ["samplingRate", "hopLength", "bertHiddenFromEnd", "numTones", "numLanguages"]
-  ) {
+  for (const key of [
+    "samplingRate",
+    "hopLength",
+    "bertHiddenFromEnd",
+    "numTones",
+    "numLanguages",
+  ]) {
     for (const bad of [0, -1, 1.5]) {
       assertThrows(
         () => parseJpExtraRules({ ...TEST_RULES_JSON, [key]: bad }, "x"),
@@ -238,7 +243,10 @@ test("distributePhone: 巨大な 1 語でも文字数に比例する時間で分
   const elapsed = performance.now() - started;
   assertEquals(perWord.length, size);
   assertEquals(perWord.slice(0, 4), [2, 2, 2, 1]);
-  assertEquals(perWord.reduce((sum, count) => sum + count, 0), size + 3);
+  assertEquals(
+    perWord.reduce((sum, count) => sum + count, 0),
+    size + 3,
+  );
   assert(elapsed < 500, `${size} 文字への分配に ${elapsed.toFixed(0)} ms かかった`);
 });
 
@@ -388,7 +396,10 @@ test("tileBertToPhoneLevel: 故障注入 — word2ph の配分が変わると値
   const a = tileBertToPhoneLevel(hidden, 2, [1, 2]);
   const b = tileBertToPhoneLevel(hidden, 2, [2, 1]);
   assertEquals(a.columns, b.columns, "合計は同じ（= 長さでは検出できない形）");
-  assert([...a.data].some((value, index) => value !== b.data[index]), "配分を変えても同じ値");
+  assert(
+    [...a.data].some((value, index) => value !== b.data[index]),
+    "配分を変えても同じ値",
+  );
 });
 
 test("tileBertToPhoneLevel: トークン数と word2ph 長の不一致は落とす", () => {
@@ -420,10 +431,7 @@ test({
   name: "デモ資産: symbols.json が JP-Extra の規則として読める",
   ignore: !assetAvailable,
   fn: async () => {
-    const rules = parseJpExtraRules(
-      JSON.parse(await readTextFile(SYMBOLS_PATH)),
-      "symbols.json",
-    );
+    const rules = parseJpExtraRules(JSON.parse(await readTextFile(SYMBOLS_PATH)), "symbols.json");
     // 値そのものは資産が正（TS 側に期待値表を作らない — それをやると資産の意味が消える）。
     // ここで固定するのは「規則として成立していること」だけ。
     assertEquals(rules.symbols[0], rules.pad, "記号表の先頭が PAD");

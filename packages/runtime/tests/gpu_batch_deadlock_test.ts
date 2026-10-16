@@ -41,7 +41,7 @@ const GRAPH: DeclarationJson = {
 const input = (phase: number): Tensor => ({
   dtype: "f32",
   shape: [ROWS, COLS],
-  data: Float32Array.from({ length: COUNT }, (_, i) => ((i + phase * 3) % 9 - 4) * 0.5),
+  data: Float32Array.from({ length: COUNT }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
 /** 参照値（実装とは独立に f32 で丸める）。 */

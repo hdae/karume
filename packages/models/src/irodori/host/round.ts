@@ -99,10 +99,7 @@ export const sequenceLengthFromLogFrames = (
  * `targetSamples` は S × hopLength より最大 `hopLength − 1` サンプル短い — 呼び出し側は
  * 波形をこの長さで切る（切らないと指定秒より長い音声が出る）。
  */
-export const sequenceLengthFromSeconds = (
-  seconds: number,
-  bounds: SampleBounds,
-): SequencePlan => {
+export const sequenceLengthFromSeconds = (seconds: number, bounds: SampleBounds): SequencePlan => {
   // `seconds` は呼び手の要求ノブ（`IrodoriGenerateRequest.durationSeconds`）なので 400 側
   // （ADR 0107）。`maxSequenceLength` 経由で配布形の `maxSeconds` が入る経路もあるが、そちらは
   // `config.ts` が parse 時に有限性を確かめた後なのでここへは届かない。

@@ -46,10 +46,7 @@
 import type { Tensor } from "@karume/runtime";
 
 /** 層種別の名前（上流 `layer_types` の綴りそのまま — グラフ入力名の一部になる）。 */
-export const GEMMA4_ROPE_LAYER_TYPES = [
-  "sliding_attention",
-  "full_attention",
-] as const;
+export const GEMMA4_ROPE_LAYER_TYPES = ["sliding_attention", "full_attention"] as const;
 
 export type Gemma4RopeLayerType = (typeof GEMMA4_ROPE_LAYER_TYPES)[number];
 
@@ -79,15 +76,13 @@ export type Gemma4RopePart = (typeof GEMMA4_ROPE_PARTS)[number];
  * MUST: ここが唯一の生成箇所（配布側の門 `GEMMA4_GRAPH_INPUTS` と TS の派生入力名は同じ文字列
  * から出す）。
  */
-export const gemma4RopeInputName = (
-  layerType: Gemma4RopeLayerType,
-  part: Gemma4RopePart,
-): string => `rope_${layerType}_${part}`;
+export const gemma4RopeInputName = (layerType: Gemma4RopeLayerType, part: Gemma4RopePart): string =>
+  `rope_${layerType}_${part}`;
 
 /** 4 本のグラフ入力名（層種別 × 部の固定順）。 */
 export const gemma4RopeInputNames = (): string[] =>
   GEMMA4_ROPE_LAYER_TYPES.flatMap((layerType) =>
-    GEMMA4_ROPE_PARTS.map((part) => gemma4RopeInputName(layerType, part))
+    GEMMA4_ROPE_PARTS.map((part) => gemma4RopeInputName(layerType, part)),
   );
 
 /**
@@ -97,10 +92,7 @@ export const gemma4RopeInputNames = (): string[] =>
  * 「前半 = 後半」の並びが崩れ、上流と別の表を黙って作る。`theta` は正の有限値
  * （`theta ** 負` が 0 / Inf に落ちる形を弾く）。
  */
-const assertGemma4RopeLayerSpec = (
-  where: string,
-  spec: Gemma4RopeLayerSpec,
-): void => {
+const assertGemma4RopeLayerSpec = (where: string, spec: Gemma4RopeLayerSpec): void => {
   const { theta, headDim, rotaryDim } = spec;
   if (!Number.isFinite(theta) || theta <= 0) {
     throw new Error(`${where}: theta は正の有限値（${theta}）`);
@@ -108,20 +100,14 @@ const assertGemma4RopeLayerSpec = (
   if (!Number.isInteger(headDim) || headDim < 2 || headDim % 2 !== 0) {
     throw new Error(`${where}: headDim は 2 以上の偶数（${headDim}）`);
   }
-  if (
-    !Number.isInteger(rotaryDim) || rotaryDim < 2 || rotaryDim % 2 !== 0 ||
-    rotaryDim > headDim
-  ) {
+  if (!Number.isInteger(rotaryDim) || rotaryDim < 2 || rotaryDim % 2 !== 0 || rotaryDim > headDim) {
     throw new Error(
       `${where}: rotaryDim は 2 以上 headDim 以下の偶数（${rotaryDim} / headDim ${headDim}）`,
     );
   }
 };
 
-export const assertGemma4RopeSpec = (
-  where: string,
-  spec: Gemma4RopeSpec,
-): void => {
+export const assertGemma4RopeSpec = (where: string, spec: Gemma4RopeSpec): void => {
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
     assertGemma4RopeLayerSpec(`${where}.${layerType}`, spec[layerType]);
   }
@@ -143,10 +129,7 @@ const ropeInverseFrequencies = (
   const invFreq = new Float64Array(half);
   for (let i = 0; i < rotated; i += 1) {
     invFreq[i] = qat
-      ? Math.fround(
-        1 /
-          Math.fround(Math.pow(spec.theta, Math.fround(2 * i / spec.headDim))),
-      )
+      ? Math.fround(1 / Math.fround(Math.pow(spec.theta, Math.fround((2 * i) / spec.headDim))))
       : Math.pow(spec.theta, -(2 * i) / spec.headDim);
     if (qat && (!Number.isFinite(invFreq[i]) || invFreq[i] <= 0)) {
       throw new Error("gemma4-qat rope: f32 逆周波数が正の有限数でない");

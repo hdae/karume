@@ -43,20 +43,22 @@ const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): Declaration
     inputs.push({ name: "z", dtype: "f32", shape: [...SHAPE] });
   }
 
-  const nodes: DeclarationJson["nodes"] = [{
-    op: "sigmoid",
-    ins: ["x"],
-    outs: [sigmoidName],
-    attrs: {},
-  }];
+  const nodes: DeclarationJson["nodes"] = [
+    {
+      op: "sigmoid",
+      ins: ["x"],
+      outs: [sigmoidName],
+      attrs: {},
+    },
+  ];
   if (options.interpose) {
     nodes.push({ op: "reshape", ins: [sigmoidName], outs: [mulSigmoidName], attrs: {} });
   }
   const mulInputs = options.otherMul
     ? [mulSigmoidName, "z"]
     : order === "xs"
-    ? ["x", mulSigmoidName]
-    : [mulSigmoidName, "x"];
+      ? ["x", mulSigmoidName]
+      : [mulSigmoidName, "x"];
   nodes.push({ op: "mul", ins: mulInputs, outs: ["y"], attrs: {} });
   if (options.extraConsumer) {
     nodes.push({ op: "neg", ins: [sigmoidName], outs: ["sigmoid_copy"], attrs: {} });
@@ -112,26 +114,15 @@ const testInput = (): Tensor => {
   const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
   // 有限値 / 符号付きゼロ / subnormal / 最小正規化数 / overflow 境界 / ±Inf / NaN を同居させる。
   words(x).set([
-    0x00000000,
-    0x80000000,
-    0x00000001,
-    0x80000001,
-    0x007fffff,
-    0x807fffff,
-    0x00800000,
-    0x80800000,
-    0x7f800000,
-    0xff800000,
-    0x7fc01234,
-    0xff801234,
+    0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x00800000, 0x80800000,
+    0x7f800000, 0xff800000, 0x7fc01234, 0xff801234,
   ]);
   x.data.set([80, -80, 88, -88, 100, -100], 12);
   return x;
 };
 
 test({
-  name:
-    "SiLU 融合は xs / sx 両順で primitive と有限ビット / NaN 分類が一致し、2→1 dispatch へ畳む（実 GPU）",
+  name: "SiLU 融合は xs / sx 両順で primitive と有限ビット / NaN 分類が一致し、2→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -213,8 +204,7 @@ test({
 });
 
 test({
-  name:
-    "SiLU の内部 sigmoid output / 別 consumer / 別名 / 別 mul 入力は strict matcher から fallback する（実 GPU）",
+  name: "SiLU の内部 sigmoid output / 別 consumer / 別名 / 別 mul 入力は strict matcher から fallback する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

@@ -3,6 +3,10 @@
   "version": "0.14.0",
   "description": "Model pipelines and tokenizers on top of @karume/runtime and @karume/hub.",
   "license": "MIT",
+  "files": [
+    "*.ts",
+    "src"
+  ],
   "type": "module",
   "exports": {
     ".": "./mod.ts",
@@ -18,10 +22,6 @@
     "./umt5": "./umt5.ts",
     "./wan": "./wan.ts"
   },
-  "files": [
-    "*.ts",
-    "src"
-  ],
   "scripts": {
     "test": "vp test"
   },

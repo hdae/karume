@@ -20,19 +20,14 @@ type Run = { readonly code: number; readonly stdout: string; readonly stderr: st
 /** 終了コードが 0 でなくても結果として返す（起動そのものの失敗だけ reject する）。 */
 const run = (args: readonly string[]): Promise<Run> =>
   new Promise((resolve, reject) => {
-    execFile(
-      process.execPath,
-      [ENTRY, ...args],
-      { encoding: "utf8" },
-      (error, stdout, stderr) => {
-        const code = error === null ? 0 : error.code;
-        if (typeof code !== "number") {
-          reject(error);
-          return;
-        }
-        resolve({ code, stdout, stderr });
-      },
-    );
+    execFile(process.execPath, [ENTRY, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
+      const code = error === null ? 0 : error.code;
+      if (typeof code !== "number") {
+        reject(error);
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
   });
 
 /** `results.json` 1 本ぶんの中身（書き手 `packages/runtime/tests/helpers/results.ts` と同じ形）。 */
@@ -88,17 +83,13 @@ describe("verify-diff CLI: 読める根", () => {
           root,
           "deno-a",
           "2026-09-21_anima",
-          document("anima", "deno-a", [
-            passing("base"),
-          ]),
+          document("anima", "deno-a", [passing("base")]),
         );
         await writeSeat(
           root,
           "deno-b",
           "2026-09-21_anima",
-          document("anima", "deno-b", [
-            { id: "base", status: "fail", elapsedMs: 2 },
-          ]),
+          document("anima", "deno-b", [{ id: "base", status: "fail", elapsedMs: 2 }]),
         );
       },
       async (root) => {
@@ -121,9 +112,7 @@ describe("verify-diff CLI: 読める根", () => {
           root,
           "deno-a",
           "2026-09-21_anima",
-          document("anima", "deno-a", [
-            passing("base"),
-          ]),
+          document("anima", "deno-a", [passing("base")]),
         );
       },
       async (root) => {
@@ -134,10 +123,12 @@ describe("verify-diff CLI: 読める根", () => {
         assertEquals(report.families.length, 1);
         assertEquals(report.families[0].family, "anima");
         assertEquals(report.families[0].environments, ["deno-a"]);
-        assertEquals(report.families[0].rows, [{
-          id: "base",
-          cells: { "deno-a": { status: "pass", elapsedMs: 1 } },
-        }]);
+        assertEquals(report.families[0].rows, [
+          {
+            id: "base",
+            cells: { "deno-a": { status: "pass", elapsedMs: 1 } },
+          },
+        ]);
       },
     );
   });
@@ -149,28 +140,30 @@ describe("verify-diff CLI: 読める根", () => {
           root,
           "deno-a",
           "2026-09-26_anima-ab",
-          document("anima-ab", "deno-a", [{
-            id: "f16+dit8-a8-attn8-s16-512",
-            status: "fail",
-            elapsedMs: 1,
-            comparisons: [
-              {
-                output: "step1-latent",
-                reference: "f16+dit8",
-                practical: "f16+dit8-a8-attn8-s16",
-                relRms: 0.0123,
-                maxAbs: 0.5,
-                band: { metric: "relRms", floor: 0.001, ceiling: 0.025 },
-              },
-              {
-                output: "zz-unbanded",
-                reference: "f16+dit8",
-                practical: "f16+dit8-a8-attn8-s16",
-                relRms: null,
-                maxAbs: null,
-              },
-            ],
-          }]),
+          document("anima-ab", "deno-a", [
+            {
+              id: "f16+dit8-a8-attn8-s16-512",
+              status: "fail",
+              elapsedMs: 1,
+              comparisons: [
+                {
+                  output: "step1-latent",
+                  reference: "f16+dit8",
+                  practical: "f16+dit8-a8-attn8-s16",
+                  relRms: 0.0123,
+                  maxAbs: 0.5,
+                  band: { metric: "relRms", floor: 0.001, ceiling: 0.025 },
+                },
+                {
+                  output: "zz-unbanded",
+                  reference: "f16+dit8",
+                  practical: "f16+dit8-a8-attn8-s16",
+                  relRms: null,
+                  maxAbs: null,
+                },
+              ],
+            },
+          ]),
         ),
       async (root) => {
         const result = await run(["--root", root]);
@@ -196,17 +189,13 @@ describe("verify-diff CLI: 読める根", () => {
           root,
           "deno-a",
           "2026-09-21_anima",
-          document("anima", "deno-a", [
-            passing("base"),
-          ]),
+          document("anima", "deno-a", [passing("base")]),
         );
         await writeSeat(
           root,
           "copied",
           "2026-09-21_anima",
-          document("anima", "deno-a", [
-            { id: "base", status: "fail", elapsedMs: 2 },
-          ]),
+          document("anima", "deno-a", [{ id: "base", status: "fail", elapsedMs: 2 }]),
         );
       },
       async (root) => {
@@ -275,11 +264,14 @@ describe("verify-diff CLI: 読めない根", () => {
           root,
           "deno-a",
           "2026-09-21_anima",
-          document("anima", "deno-a", [passing("base"), {
-            id: "base",
-            status: "fail",
-            elapsedMs: 2,
-          }]),
+          document("anima", "deno-a", [
+            passing("base"),
+            {
+              id: "base",
+              status: "fail",
+              elapsedMs: 2,
+            },
+          ]),
         ),
       async (root) => {
         const result = await run(["--root", root]);
@@ -305,19 +297,13 @@ describe("verify-diff CLI: --root の綴り", () => {
         `${parent}/x%41y`,
         "deno-a",
         "2026-09-21_anima",
-        document(
-          "anima",
-          "deno-a",
-          [passing("literal")],
-        ),
+        document("anima", "deno-a", [passing("literal")]),
       );
       await writeSeat(
         `${parent}/xAy`,
         "deno-a",
         "2026-09-21_anima",
-        document("anima", "deno-a", [
-          passing("decoded"),
-        ]),
+        document("anima", "deno-a", [passing("decoded")]),
       );
 
       const result = await run(["--root", `${parent}/x%41y`]);
@@ -341,9 +327,7 @@ describe("verify-diff CLI: --root の綴り", () => {
         root,
         "deno-a",
         "2026-09-21_anima",
-        document("anima", "deno-a", [
-          passing("base"),
-        ]),
+        document("anima", "deno-a", [passing("base")]),
       );
 
       const result = await run(["--root", root]);

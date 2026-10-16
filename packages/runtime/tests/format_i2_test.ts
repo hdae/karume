@@ -42,45 +42,21 @@ const i2Weight = (
 
 test("INT2 の全符号値・byte内位置と行別scaleを解釈する", async () => {
   const expected = [
-    -2,
-    -1,
-    0,
-    1,
-    1,
-    0,
-    -1,
-    -2,
-    0,
-    -2,
-    1,
-    -1,
-    -1,
-    1,
-    -2,
-    0,
-    1,
-    0,
-    -1,
-    -2,
-    -2,
-    -1,
-    0,
-    1,
-    -1,
-    1,
-    -2,
-    0,
-    0,
-    -2,
-    1,
-    -1,
+    -2, -1, 0, 1, 1, 0, -1, -2, 0, -2, 1, -1, -1, 1, -2, 0, 1, 0, -1, -2, -2, -1, 0, 1, -1, 1, -2,
+    0, 0, -2, 1, -1,
   ].map((q, i) => Math.fround(q * scales[Math.floor(i / 16)]));
   assertEquals(decodeI2(bytes, [2, 16], scales, [2, 1]), new Float32Array(expected));
   // 容器（`krm`）を 1 往復させて、読み手の側でも i2 の席が立つことを見る。
   const loaded = prepareContainer(await openModelBytes(graph(), [i2Weight()]), GRAPH_NAME);
   const buffers = planWeightBuffers(planWeightResidency(loaded.graph));
-  assertEquals(buffers.map((b) => b.declaredBytes), [8, 8]);
-  assertEquals(buffers.map((b) => b.seat), ["i2", "i2"]);
+  assertEquals(
+    buffers.map((b) => b.declaredBytes),
+    [8, 8],
+  );
+  assertEquals(
+    buffers.map((b) => b.seat),
+    ["i2", "i2"],
+  );
 });
 
 test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
@@ -105,12 +81,14 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
   // scale を持たない `int2-off` は供給の時点で落ちる（v1 の `storage.scale` 欠落の行き先）。
   assertThrows(
     () =>
-      memoryModel(graph(), [{
-        graph: GRAPH_NAME,
-        initializer: "w",
-        bytes,
-        encoding: { codec: "int2-off" },
-      }]),
+      memoryModel(graph(), [
+        {
+          graph: GRAPH_NAME,
+          initializer: "w",
+          bytes,
+          encoding: { codec: "int2-off" },
+        },
+      ]),
     ContainerFormatError,
     "scale と groupSize が要る",
   );

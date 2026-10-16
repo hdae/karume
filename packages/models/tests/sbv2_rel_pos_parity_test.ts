@@ -13,7 +13,13 @@
 // GPU は使わない。系列資産（`outputs/series/deberta-i8/sbv2-22layer/`）と配布形の
 // `symbols.json` が無い環境では SKIP する。
 
-import { type DirEntry, isNotFound, readDirSync, readFile, readTextFileSync } from "@karume/test-support/fs";
+import {
+  type DirEntry,
+  isNotFound,
+  readDirSync,
+  readFile,
+  readTextFileSync,
+} from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, prepareContainer } from "@karume/runtime";
@@ -69,8 +75,8 @@ const readSymbols = (): { positionBuckets: number; maxPosition: number } | undef
 };
 
 const CASES = listDir(SERIES_ROOT)
-  .filter((entry) =>
-    entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+  .filter(
+    (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
   )
   .map((entry) => entry.name)
   .sort();

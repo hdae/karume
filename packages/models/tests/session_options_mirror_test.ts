@@ -83,7 +83,7 @@ const listMirrors = async (): Promise<readonly (readonly [string, Manifest])[]> 
       if (manifest !== undefined) mirrors.push([entry.name, manifest]);
     }
   } catch (cause) {
-    if (!(isNotFound(cause))) throw cause;
+    if (!isNotFound(cause)) throw cause;
   }
   return mirrors.sort(([a], [b]) => a.localeCompare(b));
 };

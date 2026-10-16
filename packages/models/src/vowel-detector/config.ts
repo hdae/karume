@@ -109,7 +109,8 @@ const readClasses = (
   if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
   const value = raw[key];
   if (
-    !Array.isArray(value) || value.length !== LIPSYNC_CLASSES.length ||
+    !Array.isArray(value) ||
+    value.length !== LIPSYNC_CLASSES.length ||
     value.some((entry, index) => entry !== LIPSYNC_CLASSES[index])
   ) {
     throw new Error(
@@ -127,15 +128,13 @@ const readClasses = (
  * MUST: 2 の倍数であることまで見る — グラフ入力は `2T` なので、奇数の境界は「その 1 本だけは
  * 通らない境界」という、宣言としては成立するが意味の壊れた数になる。
  */
-const readFrameBound = (
-  raw: Record<string, unknown>,
-  key: string,
-  where: string,
-): number => {
+const readFrameBound = (raw: Record<string, unknown>, key: string, where: string): number => {
   if (!Object.hasOwn(raw, key)) throw new Error(`${where}.${key}: 無い`);
   const value = raw[key];
   if (
-    typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 ||
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value <= 0 ||
     value % LENGTH_MULTIPLE !== 0
   ) {
     throw new Error(

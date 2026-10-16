@@ -30,13 +30,17 @@ describe("RMS→addの任意融合", () => {
     for (const enabled of [undefined, false]) {
       const plan = fuse({}, enabled);
       assertEquals(plan.counts.rmsNormAdd, 0);
-      assertEquals(plan.steps.map((step) => step.kind), ["node", "node", "node"]);
+      assertEquals(
+        plan.steps.map((step) => step.kind),
+        ["node", "node", "node"],
+      );
     }
   });
   it("両入力順と実測した幅を受理し、外部入力の延べ参照を保持する", () => {
     for (const dim of [256, 1536, 2560]) {
       for (const normFirst of [false, true]) {
-        const plan = fuse({ dim, normFirst }, true), step = plan.steps[0];
+        const plan = fuse({ dim, normFirst }, true),
+          step = plan.steps[0];
         assertEquals(plan.counts.rmsNormAdd, 1);
         if (step.kind !== "fused") throw Error("融合されていない");
         assertEquals(step.binds, ["x", "w", "r"]);
@@ -52,7 +56,8 @@ describe("RMS→addの任意融合", () => {
   });
   it("subgroup32は融合の適格条件を保ち、両加算順を別キーへ選ぶ", () => {
     for (const normFirst of [false, true]) {
-      const plan = fuse({ normFirst }, true, true), step = plan.steps[0];
+      const plan = fuse({ normFirst }, true, true),
+        step = plan.steps[0];
       if (step.kind !== "fused") throw Error("融合されていない");
       assertEquals(
         step.dispatches[0].key,
@@ -63,17 +68,16 @@ describe("RMS→addの任意融合", () => {
     }
   });
   it("公開・共有・非隣接・broadcast・重複binding・未検収幅は融合しない", () => {
-    for (
-      const options of [
-        { normOutput: true },
-        { extraNormConsumer: true },
-        { interpose: true },
-        { broadcast: true },
-        { sharedResidual: true },
-        { dim: 128 },
-        { dim: 512 },
-        { dim: 1537 },
-      ]
-    ) assertEquals(fuse(options, true).counts.rmsNormAdd, 0, JSON.stringify(options));
+    for (const options of [
+      { normOutput: true },
+      { extraNormConsumer: true },
+      { interpose: true },
+      { broadcast: true },
+      { sharedResidual: true },
+      { dim: 128 },
+      { dim: 512 },
+      { dim: 1537 },
+    ])
+      assertEquals(fuse(options, true).counts.rmsNormAdd, 0, JSON.stringify(options));
   });
 });

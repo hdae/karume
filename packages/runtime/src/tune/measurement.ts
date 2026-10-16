@@ -32,11 +32,7 @@ export const ROUNDS = 5;
  * 上限は呼び手が渡す — 掃引は同じバッファへ重ね打ちするので大きく取り（harness.ts の
  * `SWEEP_MAX_REPS`）、opbench は出力の readback が反復に比例するので小さく取る（`MAX_REPS`）。
  */
-export const calibrateReps = (
-  nsPerDispatch: number,
-  targetMs: number,
-  maxReps: number,
-): number => {
+export const calibrateReps = (nsPerDispatch: number, targetMs: number, maxReps: number): number => {
   if (!Number.isFinite(nsPerDispatch) || nsPerDispatch <= 0) return maxReps;
   const reps = Math.ceil((targetMs * 1e6) / nsPerDispatch);
   return Math.max(1, Math.min(maxReps, reps));

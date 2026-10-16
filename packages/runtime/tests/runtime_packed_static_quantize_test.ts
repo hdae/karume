@@ -179,10 +179,7 @@ const storageMap = (o: Options = {}): StorageMap => {
   };
 };
 
-const plan = (
-  o: Options = {},
-  context: Partial<Parameters<typeof planFusions>[1]> = {},
-) => {
+const plan = (o: Options = {}, context: Partial<Parameters<typeof planFusions>[1]> = {}) => {
   const ir = mergeGraph(packedGraph(o), storageMap(o));
   const shape = o.shape ?? DEFAULT_SHAPE;
   const layout = (s: Shape): FusionWeightLayout =>
@@ -214,7 +211,7 @@ const roles = (steps: ReturnType<typeof plan>["steps"]): readonly string[] =>
   steps.flatMap((step) =>
     step.kind === "node" && step.packedActivations !== undefined
       ? [`${step.plan.node.op}:${step.packedActivations.role}`]
-      : []
+      : [],
   );
 
 describe("packed int8 活性の対付け（ADR 0105）", () => {
@@ -225,10 +222,7 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
         const label = `${JSON.stringify(shape)} M=${m}`;
         const fused = plan({ shape, m });
         assertEquals(fused.counts.packedStaticQuantize, 1, label);
-        assertEquals(roles(fused.steps), [
-          "static_quantize:write",
-          "linear:read",
-        ], label);
+        assertEquals(roles(fused.steps), ["static_quantize:write", "linear:read"], label);
         for (const step of fused.steps) {
           if (step.kind !== "node" || step.packedActivations === undefined) continue;
           assertEquals(step.packedActivations.scale, scale, "生産側 SRQ の scale を両側が持つ");
@@ -259,18 +253,16 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
   });
 
   it("席・縮約方式・計算方式が揃わなければ f32 のまま", () => {
-    for (
-      const context of [
-        { packedStaticQuantize: undefined },
-        { packedStaticQuantize: false },
-        { linearGemvReduce: "sequential" },
-        { linearGemvReduce: "parallel-subgroup32" },
-        { linearCompute: "a8" },
-        { linearCompute: "f16" },
-        { weightLayouts: new Map() },
-        { weightLayouts: new Map([["w", { storage: "f16" }]]) },
-      ] satisfies Partial<Parameters<typeof planFusions>[1]>[]
-    ) {
+    for (const context of [
+      { packedStaticQuantize: undefined },
+      { packedStaticQuantize: false },
+      { linearGemvReduce: "sequential" },
+      { linearGemvReduce: "parallel-subgroup32" },
+      { linearCompute: "a8" },
+      { linearCompute: "f16" },
+      { weightLayouts: new Map() },
+      { weightLayouts: new Map([["w", { storage: "f16" }]]) },
+    ] satisfies Partial<Parameters<typeof planFusions>[1]>[]) {
       const fused = plan({}, context);
       assertEquals(fused.counts.packedStaticQuantize, 0, JSON.stringify(context));
       assertEquals(roles(fused.steps), [], JSON.stringify(context));
@@ -278,16 +270,14 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
   });
 
   it("消費先が 1 本でも並列 GEMV の活性でなければ f32 のまま", () => {
-    for (
-      const o of [
-        { extraConsumer: true },
-        { unparallelConsumer: true },
-        { weightConsumer: true },
-        { publicQuantized: true },
-        { m: 9 },
-        { scale: 0 },
-      ] satisfies Options[]
-    ) {
+    for (const o of [
+      { extraConsumer: true },
+      { unparallelConsumer: true },
+      { weightConsumer: true },
+      { publicQuantized: true },
+      { m: 9 },
+      { scale: 0 },
+    ] satisfies Options[]) {
       const fused = plan(o);
       assertEquals(fused.counts.packedStaticQuantize, 0, JSON.stringify(o));
       assertEquals(roles(fused.steps), [], JSON.stringify(o));
@@ -334,10 +324,7 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
     assertEquals(fused.counts.linearStaticQuantize, 1);
     const step = fused.steps.find((s) => s.kind === "fused");
     if (step === undefined || step.kind !== "fused") throw Error("融合されていない");
-    assertEquals(
-      step.dispatches[0].key,
-      linearGemvStaticQuantizePackedKey("i2", undefined, 32),
-    );
+    assertEquals(step.dispatches[0].key, linearGemvStaticQuantizePackedKey("i2", undefined, 32));
     // 出力側 SRQ の表は語 4〜263、活性 scale は末尾の語 264。
     assertEquals(
       step.dispatches[0].params,
@@ -429,9 +416,10 @@ describe("packed 活性の生成物（ADR 0105）", () => {
 
   it("packed 出力の SRQ params は恒等 scale と 4 の倍数でない要素数を断る", () => {
     const scale = Math.fround(0.00071);
-    assertEquals([...staticQuantizePackedParams(1536, scale)], [
-      ...staticQuantizeParams(1536, scale),
-    ]);
+    assertEquals(
+      [...staticQuantizePackedParams(1536, scale)],
+      [...staticQuantizeParams(1536, scale)],
+    );
     assertThrows(() => staticQuantizePackedParams(1536, 0), Error, "恒等");
     assertThrows(() => staticQuantizePackedParams(1534, scale), Error, "4 の倍数");
   });

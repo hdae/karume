@@ -13,7 +13,8 @@ export type RmsNormAddGraphOptions = {
 
 /** 内部値の公開・別consumer・broadcastで融合の適格性だけを変える。 */
 export const rmsNormAddGraph = (options: RmsNormAddGraphOptions = {}): DeclarationJson => {
-  const dim = options.dim ?? 1536, shape = [options.rows ?? 4, dim];
+  const dim = options.dim ?? 1536,
+    shape = [options.rows ?? 4, dim];
   const n = options.interpose ? "alias" : "n";
   const residual = options.sharedResidual ? "x" : "r";
   const inputs: DeclarationJson["inputs"] = [

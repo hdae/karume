@@ -40,9 +40,9 @@ export const geometryProfileMismatch = (
   }
   for (const field of ADAPTER_FIELDS) {
     if (provenance.adapter[field] !== adapterInfo[field]) {
-      return `表 '${profile.id}' の adapter の ${field} が違う（表 ${
-        JSON.stringify(provenance.adapter[field])
-      } / この adapter ${JSON.stringify(adapterInfo[field])} — 別の機か別の adapter で作った表）`;
+      return `表 '${profile.id}' の adapter の ${field} が違う（表 ${JSON.stringify(
+        provenance.adapter[field],
+      )} / この adapter ${JSON.stringify(adapterInfo[field])} — 別の機か別の adapter で作った表）`;
     }
   }
   let kernels: string;
@@ -57,13 +57,17 @@ export const geometryProfileMismatch = (
     throw cause;
   }
   if (kernels !== provenance.kernels) {
-    return `表 '${profile.id}' のカーネルの指紋が違う（表 ${provenance.kernels} / 今の runtime ${kernels}` +
-      " — runtime の更新で表か既定の幾何のカーネルが変わった）";
+    return (
+      `表 '${profile.id}' のカーネルの指紋が違う（表 ${provenance.kernels} / 今の runtime ${kernels}` +
+      " — runtime の更新で表か既定の幾何のカーネルが変わった）"
+    );
   }
   const caseSet = sweepCaseSetId();
   if (caseSet !== provenance.caseSet) {
-    return `表 '${profile.id}' のケース集合の版が違う（表 ${provenance.caseSet} / 今の runtime ${caseSet}` +
-      " — runtime の更新で掃引のケースか gemmRows の段の境界が変わった）";
+    return (
+      `表 '${profile.id}' のケース集合の版が違う（表 ${provenance.caseSet} / 今の runtime ${caseSet}` +
+      " — runtime の更新で掃引のケースか gemmRows の段の境界が変わった）"
+    );
   }
   return undefined;
 };

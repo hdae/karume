@@ -69,11 +69,9 @@ const F32_TINY = 1.1754943508222875e-38;
  */
 const INV_ABS_MAX = 1 / QUANTIZE_ROWS_ABS_MAX;
 
-export const QUANTIZE_ROWS_KEY =
-  `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`;
+export const QUANTIZE_ROWS_KEY = `quantize_rows:v1:f32>i8:pertoken:wg${QUANTIZE_ROWS_WORKGROUP_SIZE}`;
 
-export const QUANTIZE_ROWS_WGSL: string =
-  `// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
+export const QUANTIZE_ROWS_WGSL: string = `// karume quantize_rows (行ごとの per-token symmetric i8: s = max(amax/127, tiny), q = clamp(round(x/s), ±127))
 struct Params {
   rows: u32,
   dim: u32,

@@ -63,7 +63,9 @@ type ChatFixture = {
 };
 
 const fixture = JSON.parse(
-  await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(
+    new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url),
+  ),
 ) as ChatFixture;
 
 const caseOf = (name: string) => {
@@ -115,9 +117,7 @@ test({
     let fetchCalls = 0;
     const fetchStub: typeof globalThis.fetch = (input) => {
       fetchCalls += 1;
-      return Promise.reject(
-        new Error(`test: ローカル取得元が network へ出た（${String(input)}）`),
-      );
+      return Promise.reject(new Error(`test: ローカル取得元が network へ出た（${String(input)}）`));
     };
     const cacheDiagnostics: string[] = [];
     const retryDiagnostics: string[] = [];

@@ -65,7 +65,7 @@ export type CodecEntry = {
 
 /** scale の dtype の受理集合（初版は f32 のみ — §6.1）。 */
 export const SCALE_DTYPES = ["f32"] as const;
-export type ScaleDtype = typeof SCALE_DTYPES[number];
+export type ScaleDtype = (typeof SCALE_DTYPES)[number];
 
 /** group 量子化の group 長の下限（ADR 0069 決定 2 — ORT と同じ制約）。 */
 export const MIN_GROUP_SIZE = 16;
@@ -92,38 +92,50 @@ export const CODEC_LEDGER: ReadonlyMap<CodecName, CodecEntry> = new Map<CodecNam
   ["f16", RAW("f16", 2)],
   ["bf16", RAW("bf16", 2)],
   ["i32", RAW("i32", 4)],
-  ["int8-sym", {
-    layout: "i8",
-    packing: { blockElements: 1, blockBytes: 1, alignBytes: 4 },
-    scale: "required",
-    grouping: "channel",
-    zeroPoint: "forbidden",
-    rowAxes: [0, 1],
-  }],
-  ["int4-sym-g", {
-    layout: "i4",
-    packing: { blockElements: 8, blockBytes: 4, alignBytes: 4 },
-    scale: "required",
-    grouping: "group",
-    zeroPoint: "forbidden",
-    rowAxes: [0],
-  }],
-  ["int2-off", {
-    layout: "i2",
-    packing: { blockElements: 16, blockBytes: 4, alignBytes: 4 },
-    scale: "required",
-    grouping: "channel",
-    zeroPoint: "forbidden",
-    rowAxes: [0],
-  }],
-  ["ternary", {
-    layout: "i2",
-    packing: { blockElements: 16, blockBytes: 4, alignBytes: 4 },
-    scale: "required",
-    grouping: "channel",
-    zeroPoint: "forbidden",
-    rowAxes: [0],
-  }],
+  [
+    "int8-sym",
+    {
+      layout: "i8",
+      packing: { blockElements: 1, blockBytes: 1, alignBytes: 4 },
+      scale: "required",
+      grouping: "channel",
+      zeroPoint: "forbidden",
+      rowAxes: [0, 1],
+    },
+  ],
+  [
+    "int4-sym-g",
+    {
+      layout: "i4",
+      packing: { blockElements: 8, blockBytes: 4, alignBytes: 4 },
+      scale: "required",
+      grouping: "group",
+      zeroPoint: "forbidden",
+      rowAxes: [0],
+    },
+  ],
+  [
+    "int2-off",
+    {
+      layout: "i2",
+      packing: { blockElements: 16, blockBytes: 4, alignBytes: 4 },
+      scale: "required",
+      grouping: "channel",
+      zeroPoint: "forbidden",
+      rowAxes: [0],
+    },
+  ],
+  [
+    "ternary",
+    {
+      layout: "i2",
+      packing: { blockElements: 16, blockBytes: 4, alignBytes: 4 },
+      scale: "required",
+      grouping: "channel",
+      zeroPoint: "forbidden",
+      rowAxes: [0],
+    },
+  ],
 ]);
 
 export const isCodecName = (value: unknown): value is CodecName =>

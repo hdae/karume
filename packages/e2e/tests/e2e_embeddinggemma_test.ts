@@ -20,7 +20,11 @@ import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-s
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -95,8 +99,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 const discoverCases = (root: URL): readonly string[] =>
   listDir(root)
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();

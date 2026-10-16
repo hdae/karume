@@ -125,13 +125,10 @@ export const planRequiredLimits = (
  * 取得した device の limits が要求以上であることを検査する。
  * 要求漏れ・実装都合の降格は「カーネルが静かに頭打ちになる」形で現れるため、ここで落とす。
  */
-export const assertLimitsGranted = (
-  planned: RequiredLimits,
-  granted: GPUSupportedLimits,
-): void => {
-  const shortfalls = REQUIRED_LIMIT_KEYS
-    .filter((key) => granted[key] < planned[key])
-    .map((key) => `${key}: granted ${granted[key]} < required ${planned[key]}`);
+export const assertLimitsGranted = (planned: RequiredLimits, granted: GPUSupportedLimits): void => {
+  const shortfalls = REQUIRED_LIMIT_KEYS.filter((key) => granted[key] < planned[key]).map(
+    (key) => `${key}: granted ${granted[key]} < required ${planned[key]}`,
+  );
   if (shortfalls.length > 0) {
     throw new GpuLimitError(`requiredLimits が満たされていない: ${shortfalls.join(", ")}`);
   }
@@ -239,8 +236,7 @@ export const planShaderF16Feature = (
  *
  * コストは `shaderF16: true` を渡した呼び出しにだけ乗る。
  */
-const SHADER_F16_CANARY_WGSL =
-  `// karume shader-f16 カナリア（既知解の突合 — feature 列挙は「動く」の証拠にならない）
+const SHADER_F16_CANARY_WGSL = `// karume shader-f16 カナリア（既知解の突合 — feature 列挙は「動く」の証拠にならない）
 enable f16;
 @group(0) @binding(0) var<storage, read_write> out: array<f32>;
 
@@ -294,9 +290,9 @@ const raceCanaryDeviceLost = <T>(
     work,
     device.lost.then((info): never => {
       throw new GpuDeviceLostError(
-        `${feature} カナリアの${where}中に device が失われた（再構築が必要）${
-          describeDeviceLoss(info)
-        }`,
+        `${feature} カナリアの${where}中に device が失われた（再構築が必要）${describeDeviceLoss(
+          info,
+        )}`,
       );
     }),
   ]);
@@ -320,17 +316,14 @@ export const assertShaderF16Executes = async (device: GPUDevice): Promise<void> 
   try {
     const pipeline = await raceCanaryDeviceLost(
       device,
-      withPipelineScope(
-        device,
-        "shader-f16 カナリア",
-        () =>
-          device.createComputePipeline({
-            layout: "auto",
-            compute: {
-              module: device.createShaderModule({ code: SHADER_F16_CANARY_WGSL }),
-              entryPoint: "main",
-            },
-          }),
+      withPipelineScope(device, "shader-f16 カナリア", () =>
+        device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({ code: SHADER_F16_CANARY_WGSL }),
+            entryPoint: "main",
+          },
+        }),
       ),
       "パイプライン生成",
     );
@@ -469,11 +462,10 @@ fn main(@builtin(local_invocation_index) lid: u32,
         });
         const bindings = device.createBindGroup({
           layout: pipeline.getBindGroupLayout(0),
-          entries: [
-            { binding: 0, resource: { buffer: out } },
-          ],
+          entries: [{ binding: 0, resource: { buffer: out } }],
         });
-        const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+        const encoder = device.createCommandEncoder(),
+          pass = encoder.beginComputePass();
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, bindings);
         pass.dispatchWorkgroups(1);
@@ -625,18 +617,18 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   // 直接渡した表の門はアダプタにも device にも触れる前（GPU に依らない入力の検査）。
   // 複製するのは、呼び手が後から書き換えても device の寿命の間の表が変わらないようにするため
   // （Infinity は structuredClone を通る）。
-  const givenProfile = source === undefined || typeof source === "function"
-    ? undefined
-    : cloneCheckedGeometryProfile(source, DIRECT_PROFILE_LABEL);
+  const givenProfile =
+    source === undefined || typeof source === "function"
+      ? undefined
+      : cloneCheckedGeometryProfile(source, DIRECT_PROFILE_LABEL);
   const { gpu, adapter } = await requestAdapterOrThrow(options.adapter, options.gpu);
   // コールバックに渡す値と GpuContext.adapterInfo を同じ 1 回の読みにする（別々に読むと、コールバックが
   // 引いた adapter と device の adapter の情報が食い違う形を作れてしまう）
   const adapterInfo = readAdapterInfo(adapter);
   // MUST: コールバックは adapter を取った後・device を作る前に 1 度だけ呼ぶ（ADR 0117 決定 6）。投げた
   // 例外はそのまま伝え、壊れた表とともに device を作らない
-  const geometryProfile = typeof source === "function"
-    ? profileFromCallback(source(adapterInfo))
-    : givenProfile;
+  const geometryProfile =
+    typeof source === "function" ? profileFromCallback(source(adapterInfo)) : givenProfile;
   const limits = planRequiredLimits(adapter.limits, options[LIMIT_CAPS]);
   // 門の順序は構造（上の複製の門）→ 上限。上限は adapter が要るので、直接渡した表もここで見る。見るのは
   // 計画した limits（= device が持つ値 — 絞りの caps を含む）
@@ -665,7 +657,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
       ...(timestampQuery ? [TIMESTAMP_QUERY_FEATURE] : []),
       ...(shaderF16 ? [SHADER_F16_FEATURE] : []),
       // Denoの型定義に未収録のWebGPU機能。上で実機の広告を検査した境界に限定する。
-      ...subgroupFeatures as readonly GPUFeatureName[],
+      ...(subgroupFeatures as readonly GPUFeatureName[]),
     ],
     requiredLimits: limits,
   });
@@ -711,7 +703,9 @@ const cloneCheckedGeometryProfile = (profile: unknown, label: string): GeometryP
 
 /** `then` を関数で持つ値（Promise と、Promise を名乗る自作の thenable）。 */
 const isThenable = (value: unknown): boolean =>
-  typeof value === "object" && value !== null && "then" in value &&
+  typeof value === "object" &&
+  value !== null &&
+  "then" in value &&
   typeof value.then === "function";
 
 /** 拒否が誰にも捕まらない Promise を作らないための no-op（{@link profileFromCallback}）。 */

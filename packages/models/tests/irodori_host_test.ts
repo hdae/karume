@@ -77,14 +77,22 @@ test("sequenceLengthFromSeconds: 秒 → サンプル → フレーム（上流 
   assertEquals(sequenceLengthFromSeconds(1, BOUNDS), { frames: 25, targetSamples: 48000 });
   // 端数は切り上げ（1 フレーム足りない発話を作らない）。1.004s = 48,192 サンプル → 26 フレーム。
   assertEquals(sequenceLengthFromSeconds(1.004, BOUNDS), { frames: 26, targetSamples: 48192 });
-  assertEquals(sequenceLengthFromSeconds(0.1, BOUNDS), {
-    frames: 13,
-    targetSamples: 24000,
-  }, "下限 0.5s へ clamp");
-  assertEquals(sequenceLengthFromSeconds(100, BOUNDS), {
-    frames: 750,
-    targetSamples: 1_440_000,
-  }, "上限 30s へ clamp");
+  assertEquals(
+    sequenceLengthFromSeconds(0.1, BOUNDS),
+    {
+      frames: 13,
+      targetSamples: 24000,
+    },
+    "下限 0.5s へ clamp",
+  );
+  assertEquals(
+    sequenceLengthFromSeconds(100, BOUNDS),
+    {
+      frames: 750,
+      targetSamples: 1_440_000,
+    },
+    "上限 30s へ clamp",
+  );
 });
 
 test("sequenceLengthFromSeconds: サンプル境界の 1 フレーム差（frameRate 経由との分かれ目）", () => {
@@ -424,10 +432,7 @@ test("packCaptionIds: 正規化を掛けない（上流 `_synthesize` は captio
 });
 
 test("packCaptionIds: 落とすのは前後の空白だけ（中の全角空白は残る）", () => {
-  assertEquals(
-    [...packCaptionIds(tinyTokenizer(), " あ　い ", 16)],
-    [1, 4, ...byteIds("　"), 5],
-  );
+  assertEquals([...packCaptionIds(tinyTokenizer(), " あ　い ", 16)], [1, 4, ...byteIds("　"), 5]);
 });
 
 test("packCaptionIds: strip 後に空なら落とす（BOS だけの caption を条件に載せない）", () => {
@@ -449,7 +454,10 @@ test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
   const b = new Randn(7).normals(64);
   const c = new Randn(8).normals(64);
   assertEquals([...a], [...b]);
-  assert([...a].some((value, index) => value !== c[index]), "seed を変えても同じ列");
+  assert(
+    [...a].some((value, index) => value !== c[index]),
+    "seed を変えても同じ列",
+  );
 });
 
 test("Randn: 標準正規らしい統計量を持ち、scale が線形に効く", () => {
@@ -507,9 +515,6 @@ describe("irodori の内部不変条件の破れ（ADR 0107 の線引きの裏�
     // 呼び手が入力を直しても直らない配線の破れ（= 500 相当）。ここまで `ModelInputError` に
     // すると、ホストは「入力を直せ」を返せない失敗まで 400 で返すことになる。
     const error = assertThrows(() => buildDitMask(3, { ...USED, speaker: 6 }, CAPS), Error);
-    assert(
-      !(error instanceof ModelInputError),
-      "内部不変条件の破れが入力起因の型に混ざっている",
-    );
+    assert(!(error instanceof ModelInputError), "内部不変条件の破れが入力起因の型に混ざっている");
   });
 });

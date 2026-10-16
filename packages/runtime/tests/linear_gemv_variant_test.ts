@@ -15,10 +15,9 @@ describe("M=1 GEMVの形状選択", () => {
     assertNotEquals(linearGemvKey("i8", undefined, selected), linearGemvKey("i8"));
     assertEquals(
       linearGemvWgsl("i8", undefined, selected),
-      linearGemvWgsl("i8").replace("32 列 / wg", "16 列 / wg").replace(
-        "@workgroup_size(32)",
-        "@workgroup_size(16)",
-      ),
+      linearGemvWgsl("i8")
+        .replace("32 列 / wg", "16 列 / wg")
+        .replace("@workgroup_size(32)", "@workgroup_size(16)"),
     );
   });
 
@@ -31,9 +30,13 @@ describe("M=1 GEMVの形状選択", () => {
         unroll: 4,
       });
     }
-    for (
-      const [n, k] of [[262140, 1536], [262148, 1536], [262144, 1520], [262144, 1552], [6144, 1536]]
-    ) {
+    for (const [n, k] of [
+      [262140, 1536],
+      [262148, 1536],
+      [262144, 1520],
+      [262144, 1552],
+      [6144, 1536],
+    ]) {
       assertEquals(defaultLinearGemvVariant({ storage: "i8", n, k }), { cols: 32, unroll: 4 });
     }
   });

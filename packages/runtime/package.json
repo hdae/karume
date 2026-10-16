@@ -3,16 +3,16 @@
   "version": "0.14.0",
   "description": "WebGPU inference runtime for Karume IR containers (pure TypeScript + WGSL).",
   "license": "MIT",
-  "type": "module",
-  "exports": {
-    ".": "./mod.ts",
-    "./tune": "./tune.ts"
-  },
   "files": [
     "mod.ts",
     "tune.ts",
     "src"
   ],
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts",
+    "./tune": "./tune.ts"
+  },
   "scripts": {
     "test": "vp test"
   },

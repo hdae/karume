@@ -73,8 +73,7 @@ const assertNonTrivial = (census: Census | undefined): Census => {
 };
 
 test({
-  name:
-    "lastRunPipelines は計測の実発行内訳とキー集合・本数が一致する（ミス / ヒット run・実 GPU）",
+  name: "lastRunPipelines は計測の実発行内訳とキー集合・本数が一致する（ミス / ヒット run・実 GPU）",
   // 計測（timestamp-query）が無い device では突合の相手が居ない — 明示 SKIP。
   ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
@@ -168,11 +167,7 @@ test({
         { op: "matmul", ins: ["t", "x1"], outs: ["y"], attrs: {} },
       ],
     };
-    const session = await createSessionFromContainer(
-      gpu,
-      await openGraphModel(graph),
-      GRAPH_NAME,
-    );
+    const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
     const small = () => ({ x0: fill([1, 1], () => 1), x1: fill([1, 4], () => 1) });
     try {
       // 対照: 成功 run の直後は埋まっている（失敗 run の undefined が「最初から空」ではない証明）。

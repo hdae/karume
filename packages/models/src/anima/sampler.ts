@@ -230,9 +230,10 @@ export const cfgEulerStep = (
   const scale = f32(guidance);
   const next = new Float32Array(previous.length);
   for (let index = 0; index < previous.length; index += 1) {
-    const noise = uncond === undefined
-      ? cond[index]
-      : f32(uncond[index] + f32(scale * f32(cond[index] - uncond[index])));
+    const noise =
+      uncond === undefined
+        ? cond[index]
+        : f32(uncond[index] + f32(scale * f32(cond[index] - uncond[index])));
     next[index] = f32(previous[index] + f32(sigmaDelta * noise));
   }
   return next;

@@ -204,7 +204,7 @@ test("PipelineCache は internal スコープの捕捉を GpuInternalError に�
 
   // 積み残しが無いことの裏（2 本とも pop されていれば直後の正常な生成が通る）。
   gpu.internalError = null;
-  assert(await cache.get("k", WGSL_A) !== undefined);
+  assert((await cache.get("k", WGSL_A)) !== undefined);
 });
 
 // 優先順位の門: internal で無効化されたパイプラインを触る後続の操作は**派生の** validation を
@@ -398,10 +398,7 @@ test("async compile の既知でない例外を validation へ塗り替えない
   const cause = new RangeError("unexpected rejection");
   gpu.device.createComputePipelineAsync = () => Promise.reject(cause);
   const cache = new PipelineCache(gpu.device);
-  const error = await assertRejects(
-    () => cache.get("unexpected", WGSL_A),
-    RangeError,
-  );
+  const error = await assertRejects(() => cache.get("unexpected", WGSL_A), RangeError);
   assertStrictEquals(error, cause);
   assertEquals(cache.size, 0);
 });
@@ -446,7 +443,8 @@ test("非同期 compile の完了順が逆でもキーと layout を取り違え
     getBindGroupLayout: () => platformObject<GPUBindGroupLayout>({ label: "second" }),
   });
   const cache = new PipelineCache(gpu.device);
-  const pa = cache.get("first", WGSL_A), pb = cache.get("second", WGSL_B);
+  const pa = cache.get("first", WGSL_A),
+    pb = cache.get("second", WGSL_B);
   second.resolve(b);
   assertStrictEquals((await pb).pipeline, b);
   first.resolve(a);

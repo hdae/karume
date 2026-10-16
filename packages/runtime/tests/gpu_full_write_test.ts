@@ -33,7 +33,7 @@ import { quantizeI8 } from "./helpers/i8.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 
 /** 毒値 0xDEADBEEF を f32 として読んだもの（-6.259854e18 — 0 でない有限値）。 */
-const POISON = new Float32Array(new Uint32Array([0xDEADBEEF]).buffer)[0];
+const POISON = new Float32Array(new Uint32Array([0xdeadbeef]).buffer)[0];
 
 /**
  * 「毒値を作る恒等 cast」+ 「検査対象ノード」の 2 ノードグラフ。
@@ -104,7 +104,10 @@ test({
     // [2,1] + [2,2] → [2,3]。毒値バッファは 6 要素で、cat の出力とサイズクラスが一致する。
     const graph = poisonGraph(
       [2, 3],
-      [{ name: "a", shape: [2, 1] }, { name: "b", shape: [2, 2] }],
+      [
+        { name: "a", shape: [2, 1] },
+        { name: "b", shape: [2, 2] },
+      ],
       {
         op: "cat",
         attrs: { dim: 1 },
@@ -117,7 +120,11 @@ test({
     // 再利用が起きていなければ毒値検査は何も見ていない（恒真化の門）
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals([...output.data], [10, 20, 21, 11, 22, 23]);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
   },
 });
 
@@ -154,7 +161,11 @@ test({
     const { output, reuseCount } = await runPoisoned(graph, { x: fill([2, 3], (i) => 1 + i) });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals([...output.data], [3, 2, 1, 6, 5, 4]);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
   },
 });
 
@@ -174,7 +185,11 @@ test({
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals(output.shape, [2, 2, 3, 2]);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
     // 平面ごとに端が入力の端と一致する（平面添字がずれると隣の平面の値が出る）
     for (let plane = 0; plane < 4; plane += 1) {
       assertEquals(output.data[plane * 6], 1 + plane * 6, `平面 ${plane} の左上`);
@@ -212,7 +227,11 @@ test({
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals(output.shape, outShape);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
     // MUST: バッチ 2 枚が**別の値**になっている（B の段を落とすと 2 枚目が 1 枚目の複製に
     // なり、毒値検査だけでは素通りする）。
     assertEquals(
@@ -252,7 +271,11 @@ test({
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals(output.shape, outShape);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
     // MUST: バッチ 2 枚が**別の値**（B の段を落とすと 2 枚目が 1 枚目の複製になり、毒値検査
     // だけでは素通りする）。h0 が枚ごとに違うので、段が効いていれば必ず割れる。
     for (let step = 0; step < outShape[0]; step += 1) {
@@ -302,7 +325,11 @@ test({
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals(output.shape, [1, 4, 4, 4]);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
   },
 });
 
@@ -387,7 +414,10 @@ test({
     // [3,4]（毒値バッファは 12 要素で同サイズクラス）。
     const graph = poisonGraph(
       [3, 4],
-      [{ name: "x", shape: [3, 4] }, { name: "w", shape: [4] }],
+      [
+        { name: "x", shape: [3, 4] },
+        { name: "w", shape: [4] },
+      ],
       { op: "rms_norm", attrs: { eps: 1e-6 } },
     );
     const { output, reuseCount } = await runPoisoned(graph, {
@@ -395,7 +425,11 @@ test({
       w: fill([4], () => 1),
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
   },
 });
 
@@ -418,27 +452,39 @@ const GEMM_POISON_CASES: readonly {
     name: "matmul v4 [65,20] × [20,68]",
     op: "matmul",
     outShape: [65, 68],
-    operands: [{ name: "a", shape: [65, 20] }, { name: "b", shape: [20, 68] }],
+    operands: [
+      { name: "a", shape: [65, 20] },
+      { name: "b", shape: [20, 68] },
+    ],
   },
   // スカラ（k=19 / n=23 とも 4 の倍数でない）
   {
     name: "matmul スカラ [70,19] × [19,23]",
     op: "matmul",
     outShape: [70, 23],
-    operands: [{ name: "a", shape: [70, 19] }, { name: "b", shape: [19, 23] }],
+    operands: [
+      { name: "a", shape: [70, 19] },
+      { name: "b", shape: [19, 23] },
+    ],
   },
   // bmm はバッチ軸（z）も全域を覆う必要がある
   {
     name: "bmm v4 [3,68,20] × [3,20,12]",
     op: "bmm",
     outShape: [3, 68, 12],
-    operands: [{ name: "a", shape: [3, 68, 20] }, { name: "b", shape: [3, 20, 12] }],
+    operands: [
+      { name: "a", shape: [3, 68, 20] },
+      { name: "b", shape: [3, 20, 12] },
+    ],
   },
   {
     name: "bmm スカラ [2,70,19] × [2,19,23]",
     op: "bmm",
     outShape: [2, 70, 23],
-    operands: [{ name: "a", shape: [2, 70, 19] }, { name: "b", shape: [2, 19, 23] }],
+    operands: [
+      { name: "a", shape: [2, 70, 19] },
+      { name: "b", shape: [2, 19, 23] },
+    ],
   },
   // linear は bias 加算ぶんだけ書き出し式が違う（重み格納 f32 の経路）
   {
@@ -510,7 +556,11 @@ test({
       b: fill([2], () => 0),
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
   },
 });
 
@@ -649,7 +699,11 @@ test({
       v: fill([1, 2, 5, 4], (i) => ((i % 9) - 4) * 0.25),
     });
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
     // 恒真化の門: 出力が全て同じ値なら「毒値が無い」は何も検証していない
     assert(new Set([...output.data]).size > 1, "出力が定数（毒値検査が恒真になっている）");
   },
@@ -671,14 +725,12 @@ test({
   name: "S の f16 格納変種も毒値を 1 語も残さない（①QK の 2 語書き / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
-    for (
-      const testCase of [
-        // 1 タイルに収まる最小形（S 144B / 行統計 48B / O 96B は全て別クラス）
-        { name: "attention s16 小 M3 N12 D4", m: 3, n: 12, d: 4 },
-        // 行 / 列とも 64 タイルを跨ぐ形（端タイルの 2 語書きが検出対象）
-        { name: "attention s16 タイル端 M65 N68 D20", m: 65, n: 68, d: 20 },
-      ]
-    ) {
+    for (const testCase of [
+      // 1 タイルに収まる最小形（S 144B / 行統計 48B / O 96B は全て別クラス）
+      { name: "attention s16 小 M3 N12 D4", m: 3, n: 12, d: 4 },
+      // 行 / 列とも 64 タイルを跨ぐ形（端タイルの 2 語書きが検出対象）
+      { name: "attention s16 タイル端 M65 N68 D20", m: 65, n: 68, d: 20 },
+    ]) {
       const { name, m, n, d } = testCase;
       const { output, reuseCount } = await runPoisoned(
         poisonGraph(
@@ -698,7 +750,11 @@ test({
         { attentionScoreStorage: "f16" },
       );
       assert(reuseCount >= 1, `${name}: プール再利用が起きていない（${reuseCount}）`);
-      assertEquals([...output.data].filter((value) => value === POISON), [], `${name}: 毒値の残存`);
+      assertEquals(
+        [...output.data].filter((value) => value === POISON),
+        [],
+        `${name}: 毒値の残存`,
+      );
       // 恒真化の門: 出力が全て同じ値なら「毒値が無い」は何も検証していない
       assert(new Set([...output.data]).size > 1, `${name}: 出力が定数`);
     }
@@ -745,19 +801,21 @@ test({
     assert(new Set([...attention.output.data]).size > 1, "attention f16: 出力が定数");
 
     // linear は v4 とスカラで書き出しのガードが別の式（64 を跨ぐ形にする）
-    for (
-      const testCase of [
-        { name: "linear f16 v4 [65,20] × W[68,20]", m: 65, n: 68, k: 20 },
-        { name: "linear f16 スカラ [70,37] × W[23,37]", m: 70, n: 23, k: 37 },
-      ]
-    ) {
+    for (const testCase of [
+      { name: "linear f16 v4 [65,20] × W[68,20]", m: 65, n: 68, k: 20 },
+      { name: "linear f16 スカラ [70,37] × W[23,37]", m: 70, n: 23, k: 37 },
+    ]) {
       const { name, m, n, k } = testCase;
       const { output, reuseCount } = await runPoisoned(
-        poisonGraph([m, n], [
-          { name: "x", shape: [m, k] },
-          { name: "w", shape: [n, k] },
-          { name: "b", shape: [n] },
-        ], { op: "linear", attrs: {} }),
+        poisonGraph(
+          [m, n],
+          [
+            { name: "x", shape: [m, k] },
+            { name: "w", shape: [n, k] },
+            { name: "b", shape: [n] },
+          ],
+          { op: "linear", attrs: {} },
+        ),
         {
           x: fill([m, k], (i) => 0.25 + (i % 11) * 0.5),
           w: fill([n, k], (i) => 0.125 + (i % 7) * 0.25),
@@ -795,23 +853,14 @@ test({
     assert(reuseCount >= 1, `プール再利用が起きていない（reuseCount=${reuseCount}）`);
     assertEquals(output.shape, [3, 5]);
     // Σ_j x[i,j,k] = Σ_j (1 + 20i + 5j + k) = 4 + 80i + 30 + 4k
-    assertEquals([...output.data], [
-      34,
-      38,
-      42,
-      46,
-      50,
-      114,
-      118,
-      122,
-      126,
-      130,
-      194,
-      198,
-      202,
-      206,
-      210,
-    ]);
-    assertEquals([...output.data].filter((value) => value === POISON), [], "毒値の残存");
+    assertEquals(
+      [...output.data],
+      [34, 38, 42, 46, 50, 114, 118, 122, 126, 130, 194, 198, 202, 206, 210],
+    );
+    assertEquals(
+      [...output.data].filter((value) => value === POISON),
+      [],
+      "毒値の残存",
+    );
   },
 });

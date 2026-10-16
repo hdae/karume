@@ -64,7 +64,8 @@ describe({
   ignore: !GPU_AVAILABLE,
   fn: () => {
     it("全 256 コード × 代表 scale で復元が現行 SRQ 出力と u32 一致する（-0.0 だけ +0.0 へ落ちる）", async () => {
-      const gpu = await acquireGpu(), d = gpu.device;
+      const gpu = await acquireGpu(),
+        d = gpu.device;
       try {
         const cache = new Map<string, GPUComputePipeline>();
         const compile = (code: string): GPUComputePipeline => {
@@ -113,7 +114,8 @@ describe({
               Uint32Array.of(count / 4, f32Bits(scale), 0, 0),
               U.UNIFORM | U.COPY_DST,
             );
-            const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+            const encoder = d.createCommandEncoder(),
+              pass = encoder.beginComputePass();
             const dispatch = (code: string, buffers: GPUBuffer[], gx: number): void => {
               const pipeline = compile(code);
               pass.setPipeline(pipeline);
@@ -140,9 +142,11 @@ describe({
             await stage.mapAsync(MAP_MODE.READ);
             const words = new Uint32Array(stage.getMappedRange().slice(0));
             stage.unmap();
-            let negativeZero = 0, different = 0;
+            let negativeZero = 0,
+              different = 0;
             for (let i = 0; i < count; i += 1) {
-              const a = words[i], b = words[i + count];
+              const a = words[i],
+                b = words[i + count];
               if (a === b) continue;
               if (a === 0x80000000 && b === 0) negativeZero += 1;
               else different += 1;
@@ -175,7 +179,8 @@ describe({
     const SENTINEL = 0xdeadbeef;
 
     it("新カーネルは端の長さでも f32 経路と同じコード列を出す（コード巡回 × count 6 種）", async () => {
-      const gpu = await acquireGpu(), d = gpu.device;
+      const gpu = await acquireGpu(),
+        d = gpu.device;
       try {
         const cache = new Map<string, GPUComputePipeline>();
         const compile = (code: string): GPUComputePipeline => {
@@ -222,7 +227,8 @@ describe({
               const sp = make(staticQuantizeParams(count, scale), U.UNIFORM | U.COPY_DST);
               const pp = make(staticQuantizePackedParams(count, scale), U.UNIFORM | U.COPY_DST);
               const rp = make(Uint32Array.of(words, f32Bits(scale), 0, 0), U.UNIFORM | U.COPY_DST);
-              const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+              const encoder = d.createCommandEncoder(),
+                pass = encoder.beginComputePass();
               const dispatch = (code: string, buffers: GPUBuffer[], gx: number): void => {
                 const pipeline = compile(code);
                 pass.setPipeline(pipeline);
@@ -251,9 +257,11 @@ describe({
               const read = new Uint32Array(stage.getMappedRange().slice(0));
               stage.unmap();
               // 契約は「f32 経路の語と一致・ただし `-0.0` だけ `+0.0` へ落ちる」（ADR 0105）。
-              let different = 0, negativeZero = 0;
+              let different = 0,
+                negativeZero = 0;
               for (let i = 0; i < count; i += 1) {
-                const reference = read[i], restoredWord = read[i + count];
+                const reference = read[i],
+                  restoredWord = read[i + count];
                 if (reference === 0x80000000) {
                   negativeZero += 1;
                   if (restoredWord !== 0) different += 1;
@@ -290,7 +298,8 @@ describe({
     });
 
     it("NaN は符号ビットに従って +127 / -128 へ飽和する（quiet / signaling とも・f32 経路と違う唯一の 2 値の片方）", async () => {
-      const gpu = await acquireGpu(), d = gpu.device;
+      const gpu = await acquireGpu(),
+        d = gpu.device;
       try {
         // 入力はビット列で渡す（カーネルは u32 として読むので NaN のペイロードも届く）。
         // +qNaN / -qNaN / +sNaN / -sNaN / 1.0 / -1.0 / +0 / -0
@@ -304,7 +313,8 @@ describe({
           0,
           0x80000000,
         );
-        const count = bits.length, scale = 0.5;
+        const count = bits.length,
+          scale = 0.5;
         const owned: GPUBuffer[] = [];
         d.pushErrorScope("validation");
         let validationError: GPUError | null = null;
@@ -330,7 +340,8 @@ describe({
               entryPoint: "main",
             },
           });
-          const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+          const encoder = d.createCommandEncoder(),
+            pass = encoder.beginComputePass();
           pass.setPipeline(pipeline);
           pass.setBindGroup(
             0,
@@ -365,7 +376,8 @@ describe({
     });
 
     it("並列 GEMV の packed 変種は現行経路と u32 完全一致する（i2/i4/i8 × lane × 融合あり/なし）", async () => {
-      const gpu = await acquireGpu(), d = gpu.device;
+      const gpu = await acquireGpu(),
+        d = gpu.device;
       try {
         const cache = new Map<string, GPUComputePipeline>();
         const compile = (code: string): GPUComputePipeline => {
@@ -407,37 +419,34 @@ describe({
                     };
                     try {
                       // 活性は int8 の全域を跨ぐ形・特殊値を含む形・素直な形の 3 通り。
-                      const x = Float32Array.from(
-                        { length: m * k },
-                        (_, i) =>
-                          scenario === "codes"
-                            ? ((i % 256) - 128 + (i % 3) * 0.4) * xScale
-                            : scenario === "special"
+                      const x = Float32Array.from({ length: m * k }, (_, i) =>
+                        scenario === "codes"
+                          ? ((i % 256) - 128 + (i % 3) * 0.4) * xScale
+                          : scenario === "special"
                             ? [Infinity, -Infinity, -0, -xScale * 1e-6][i % 4]
                             : Math.sin(i * 0.037) * 0.75,
                       );
                       const w = Uint32Array.from(
-                        { length: n * k * bits / 32 },
+                        { length: (n * k * bits) / 32 },
                         (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 0,
                       );
-                      const bias = Float32Array.from(
-                        { length: n },
-                        (_, i) => (i % 7 - 3) * 0.11,
+                      const bias = Float32Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11);
+                      const ws = Float32Array.from(
+                        {
+                          length: n * (group === undefined ? 1 : k / group),
+                        },
+                        (_, i) => ((i % 17) + 1) * 0.00017,
                       );
-                      const ws = Float32Array.from({
-                        length: n * (group === undefined ? 1 : k / group),
-                      }, (_, i) => (i % 17 + 1) * 0.00017);
                       const input = make(x),
                         weight = make(w),
                         biasBuf = make(bias),
                         scaleBuf = make(ws);
-                      const xf32 = make(m * k * 4), xPacked = make(m * k);
-                      const a = make(m * n * 4), b = make(m * n * 4);
+                      const xf32 = make(m * k * 4),
+                        xPacked = make(m * k);
+                      const a = make(m * n * 4),
+                        b = make(m * n * 4);
                       const stage = make(m * n * 8, U.MAP_READ | U.COPY_DST);
-                      const sp = make(
-                          staticQuantizeParams(m * k, xScale),
-                          U.UNIFORM | U.COPY_DST,
-                        ),
+                      const sp = make(staticQuantizeParams(m * k, xScale), U.UNIFORM | U.COPY_DST),
                         pp = make(
                           staticQuantizePackedParams(m * k, xScale),
                           U.UNIFORM | U.COPY_DST,
@@ -447,14 +456,14 @@ describe({
                         : linearGemvParams(storage, m, n, k, group);
                       const packedParams = quantize
                         ? linearGemvStaticQuantizePackedParams(
-                          storage,
-                          m,
-                          n,
-                          k,
-                          xScale,
-                          outScale,
-                          group,
-                        )
+                            storage,
+                            m,
+                            n,
+                            k,
+                            xScale,
+                            outScale,
+                            group,
+                          )
                         : linearGemvParallelPackedParams(storage, m, n, k, xScale, group);
                       const lp = make(plainParams, U.UNIFORM | U.COPY_DST),
                         kp = make(packedParams, U.UNIFORM | U.COPY_DST);
@@ -480,11 +489,11 @@ describe({
                         );
                         pass.dispatchWorkgroups(gx, gy);
                       };
-                      dispatch(STATIC_QUANTIZE_WGSL, [sp, input, xf32], Math.ceil(m * k / 128));
+                      dispatch(STATIC_QUANTIZE_WGSL, [sp, input, xf32], Math.ceil((m * k) / 128));
                       dispatch(
                         STATIC_QUANTIZE_PACKED_WGSL,
                         [pp, input, xPacked],
-                        Math.ceil(m * k / 128),
+                        Math.ceil((m * k) / 128),
                       );
                       const tiles = Math.ceil(n / (128 / lanes));
                       dispatch(

@@ -21,15 +21,15 @@ const permutations = (axes: readonly number[]): number[][] =>
   axes.length === 0
     ? [[]]
     : axes.flatMap((axis, i) =>
-      permutations(axes.filter((_, j) => i !== j)).map((rest) => [axis, ...rest])
-    );
+        permutations(axes.filter((_, j) => i !== j)).map((rest) => [axis, ...rest]),
+      );
 
 describe("要素順を保つpermuteの別名化", () => {
   it("rank 1〜4の全軸順を、平坦な要素番号の並べ替えと照合する", () => {
     let cases = 0;
     for (const rank of [1, 2, 3, 4]) {
       for (let code = 0; code < 3 ** rank; code++) {
-        const shape = Array.from({ length: rank }, (_, i) => 1 + Math.floor(code / 3 ** i) % 3);
+        const shape = Array.from({ length: rank }, (_, i) => 1 + (Math.floor(code / 3 ** i) % 3));
         for (const dims of permutations(Array.from({ length: rank }, (_, i) => i))) {
           const graph = parse(
             singleOpDeclaration("permute", [shape], [dims.map((axis) => shape[axis])], {
@@ -37,26 +37,19 @@ describe("要素順を保つpermuteの別名化", () => {
             }),
           );
           // コピー元を内部確保にし、所有権の条件と添字の条件を分けて検証する。
-          const owned = singleOpDeclaration(
-            "permute",
-            [shape],
-            [dims.map((axis) => shape[axis])],
-            { attrs: { dims } },
-          );
+          const owned = singleOpDeclaration("permute", [shape], [dims.map((axis) => shape[axis])], {
+            attrs: { dims },
+          });
           owned.requires.ops.push("neg");
           owned.values.h = { dtype: "f32", shape };
           owned.nodes[0].ins = ["h"];
           owned.nodes.unshift({ op: "neg", ins: ["x0"], outs: ["h"], attrs: {} });
           const plans = planGraph(parse(owned), {}).nodes;
           assertEquals(planAliases(planGraph(graph, {}).nodes).size, 0);
-          const expected = permutedSourceIndices(shape, dims).every((source, output) =>
-            source === output
+          const expected = permutedSourceIndices(shape, dims).every(
+            (source, output) => source === output,
           );
-          assertEquals(
-            planAliases(plans).has(plans[1]),
-            expected,
-            JSON.stringify({ shape, dims }),
-          );
+          assertEquals(planAliases(plans).has(plans[1]), expected, JSON.stringify({ shape, dims }));
           cases++;
         }
       }
@@ -88,7 +81,10 @@ describe("要素順を保つpermuteの別名化", () => {
   });
 
   it("見積りも実行と同じ別名判定を使い、共有元1本だけを数える", () => {
-    for (const [dims, expectedBytes] of [[[1, 0, 2], 24], [[2, 0, 1], 48]] as const) {
+    for (const [dims, expectedBytes] of [
+      [[1, 0, 2], 24],
+      [[2, 0, 1], 48],
+    ] as const) {
       const shape = [1, 2, 3];
       const graph = singleOpDeclaration("permute", [shape], [dims.map((axis) => shape[axis])], {
         attrs: { dims: [...dims] },
@@ -98,7 +94,10 @@ describe("要素順を保つpermuteの別名化", () => {
       graph.nodes[0].ins = ["h"];
       graph.nodes.unshift({ op: "neg", ins: ["x0"], outs: ["h"], attrs: {} });
       const report = openGraph(graph).estimate();
-      assertEquals(report.scenarios.map((s) => s.name), ["run"]);
+      assertEquals(
+        report.scenarios.map((s) => s.name),
+        ["run"],
+      );
       assertEquals(report.scenarios[0].workspaceBytes, expectedBytes);
     }
   });

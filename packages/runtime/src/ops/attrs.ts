@@ -20,19 +20,16 @@ export type AttrSchema = Readonly<Record<string, (value: unknown, where: string)
 const assertCastTarget = (value: unknown, where: string): IrDtype => {
   if (!isSemanticDtype(value)) {
     throw new OpContractError(
-      `${where}: cast の変換先が意味論 dtype でない（${SEMANTIC_DTYPES.join(" / ")}）: ${
-        JSON.stringify(value)
-      }`,
+      `${where}: cast の変換先が意味論 dtype でない（${SEMANTIC_DTYPES.join(" / ")}）: ${JSON.stringify(
+        value,
+      )}`,
     );
   }
   return value;
 };
 
 /** cast ノードの変換先 dtype（attrs の検査は {@link assertNodeContract} が済ませている前提）。 */
-export const castTargetDtype = (
-  attrs: Readonly<Record<string, unknown>>,
-  where: string,
-): IrDtype =>
+export const castTargetDtype = (attrs: Readonly<Record<string, unknown>>, where: string): IrDtype =>
   assertCastTarget(Object.hasOwn(attrs, "to") ? attrs["to"] : undefined, `${where} の attrs.to`);
 
 export const CAST_ATTRS: AttrSchema = {
@@ -175,10 +172,7 @@ export const PAD_ATTRS: AttrSchema = {
   },
 };
 
-export const padAttrs = (
-  attrs: Readonly<Record<string, unknown>>,
-  where: string,
-): PadAttrs => ({
+export const padAttrs = (attrs: Readonly<Record<string, unknown>>, where: string): PadAttrs => ({
   left: assertIntegerAttr(attrValue(attrs, "left"), `${where} の attrs.left`, 0),
   right: assertIntegerAttr(attrValue(attrs, "right"), `${where} の attrs.right`, 0),
 });
@@ -214,8 +208,8 @@ const assertPrefixSlices = (value: unknown, where: string): readonly PrefixSlice
       throw new OpContractError(`${at}: オブジェクトでない: ${JSON.stringify(raw)}`);
     }
     const entry: Record<string, unknown> = raw as Record<string, unknown>;
-    const unknown = Object.keys(entry).filter((key) =>
-      !PREFIX_SLICE_KEYS.some((known) => known === key)
+    const unknown = Object.keys(entry).filter(
+      (key) => !PREFIX_SLICE_KEYS.some((known) => known === key),
     );
     if (unknown.length > 0) {
       throw new OpContractError(`${at}: 未知のキー [${unknown.sort().join(", ")}]`);
@@ -274,9 +268,9 @@ export const symPrefixSliceAttrs = (
 const assertNormalizedShape = (value: unknown, where: string): readonly number[] => {
   if (!Array.isArray(value) || value.length !== 1) {
     throw new OpContractError(
-      `${where}: layer_norm の normalized_shape は長さ 1 の配列のみ（最終次元の正規化だけを実行できる）: ${
-        JSON.stringify(value)
-      }`,
+      `${where}: layer_norm の normalized_shape は長さ 1 の配列のみ（最終次元の正規化だけを実行できる）: ${JSON.stringify(
+        value,
+      )}`,
     );
   }
   return [assertIntegerAttr(value[0], `${where}[0]`, 1)];
@@ -306,16 +300,16 @@ const assertEps = (value: unknown, where: string, what: string): number => {
   }
   if (defect === "subnormal") {
     throw new OpContractError(
-      `${where}: ${what} の eps が f32 の正規化数へ丸まらない（FTZ 実装では GPU 側だけ eps=0 で走る）: ${
-        JSON.stringify(value)
-      }`,
+      `${where}: ${what} の eps が f32 の正規化数へ丸まらない（FTZ 実装では GPU 側だけ eps=0 で走る）: ${JSON.stringify(
+        value,
+      )}`,
     );
   }
   if (defect === "overflow") {
     throw new OpContractError(
-      `${where}: ${what} の eps が f32 へ丸めると無限大になる（GPU 側だけ eps=Inf で走る）: ${
-        JSON.stringify(value)
-      }`,
+      `${where}: ${what} の eps が f32 へ丸めると無限大になる（GPU 側だけ eps=Inf で走る）: ${JSON.stringify(
+        value,
+      )}`,
     );
   }
   return value;
@@ -407,10 +401,7 @@ export const ATTENTION_ATTRS: AttrSchema = {
 };
 
 /** attention ノードの半スケール（検査は {@link assertNodeContract} が済ませている前提）。 */
-export const attentionScale = (
-  attrs: Readonly<Record<string, unknown>>,
-  where: string,
-): number =>
+export const attentionScale = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
   assertFiniteAttr(attrValue(attrs, "scale"), `${where} の attrs.scale`, "attention の scale");
 
 /**
@@ -452,10 +443,7 @@ export const STATE_READONLY_ATTRS: AttrSchema = {
  *
  * MUST: 参照は `Object.hasOwn` のみ（Object.prototype 由来のキーが素通りしない）。
  */
-export const stateReadonly = (
-  attrs: Readonly<Record<string, unknown>>,
-  where: string,
-): boolean => {
+export const stateReadonly = (attrs: Readonly<Record<string, unknown>>, where: string): boolean => {
   if (!Object.hasOwn(attrs, "readonly")) return false;
   STATE_READONLY_ATTRS["readonly"](attrs["readonly"], `${where} の attrs.readonly`);
   return true;
@@ -629,10 +617,8 @@ export const softmaxDim = (attrs: Readonly<Record<string, unknown>>, where: stri
   assertIntegerAttr(attrValue(attrs, "dim"), `${where} の attrs.dim`, 0);
 
 /** masked_fill ノードの埋め値。 */
-export const maskedFillValue = (
-  attrs: Readonly<Record<string, unknown>>,
-  where: string,
-): number => assertFillValue(attrValue(attrs, "value"), `${where} の attrs.value`);
+export const maskedFillValue = (attrs: Readonly<Record<string, unknown>>, where: string): number =>
+  assertFillValue(attrValue(attrs, "value"), `${where} の attrs.value`);
 
 /** cumsum ノードの累積軸（非負の軸番号）。 */
 export const cumsumDim = (attrs: Readonly<Record<string, unknown>>, where: string): number =>

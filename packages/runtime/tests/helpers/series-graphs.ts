@@ -26,7 +26,7 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
   "lucida-2048": { "": "matte" },
   "lucida-2048-f16": { "": "matte" },
   "dacvae-32dim": { decoder: "codec_decoder", encoder: "codec_encoder" },
-  "deberta": { "full-24layer": "text_encoder" },
+  deberta: { "full-24layer": "text_encoder" },
   "deberta-i8": { "full-24layer": "text_encoder", "sbv2-22layer": "text_encoder" },
   "depth-anything-v2-small-hf": { "": "depth" },
   "embeddinggemma-300m": { "": "model" },
@@ -96,7 +96,7 @@ export const seriesComponents = (series: string): Readonly<Record<string, string
 export const seriesGraph = (series: string, component = ""): string => {
   const components = seriesComponents(series);
   if (!Object.hasOwn(components, component)) {
-    const known = Object.keys(components).map((name) => name === "" ? "<根直下>" : name);
+    const known = Object.keys(components).map((name) => (name === "" ? "<根直下>" : name));
     throw new Error(
       `系列 ${series} の部品 ${component === "" ? "<根直下>" : component} がグラフ名の表に無い` +
         `（helpers/series-graphs.ts）。在るのは ${known.join(" / ")}。`,

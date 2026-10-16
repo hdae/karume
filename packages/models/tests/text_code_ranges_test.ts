@@ -9,22 +9,26 @@ import { assertEquals } from "@std/assert";
 import { type CodeRanges, inCodeRanges } from "../src/text/code-ranges.ts";
 
 test("inCodeRanges: 区間の両端は含み、その 1 つ外は含まない", () => {
-  const ranges: CodeRanges = [[0x41, 0x5A]];
+  const ranges: CodeRanges = [[0x41, 0x5a]];
   assertEquals(inCodeRanges(ranges, 0x40), false);
   assertEquals(inCodeRanges(ranges, 0x41), true);
-  assertEquals(inCodeRanges(ranges, 0x4D), true);
-  assertEquals(inCodeRanges(ranges, 0x5A), true);
-  assertEquals(inCodeRanges(ranges, 0x5B), false);
+  assertEquals(inCodeRanges(ranges, 0x4d), true);
+  assertEquals(inCodeRanges(ranges, 0x5a), true);
+  assertEquals(inCodeRanges(ranges, 0x5b), false);
 });
 
 test("inCodeRanges: 1 点区間と表の両端の区間も落とさない", () => {
   // 先頭 / 末尾の区間は二分探索の縮小が片側へ寄るので、間の区間とは別に見る。
-  const ranges: CodeRanges = [[0, 0], [0x10, 0x12], [0x10FFFF, 0x10FFFF]];
+  const ranges: CodeRanges = [
+    [0, 0],
+    [0x10, 0x12],
+    [0x10ffff, 0x10ffff],
+  ];
   assertEquals(inCodeRanges(ranges, 0), true);
   assertEquals(inCodeRanges(ranges, 1), false);
   assertEquals(inCodeRanges(ranges, 0x11), true);
-  assertEquals(inCodeRanges(ranges, 0x10FFFE), false);
-  assertEquals(inCodeRanges(ranges, 0x10FFFF), true);
+  assertEquals(inCodeRanges(ranges, 0x10fffe), false);
+  assertEquals(inCodeRanges(ranges, 0x10ffff), true);
 });
 
 test("inCodeRanges: 空表は何も含まない（表が落ちても素通りで気づける形にしない）", () => {

@@ -20,7 +20,11 @@ test({
     const selected = defaultLinearGemvVariant({ storage: "i8", n: 262144, k: 1536 });
     assertEquals(selected.cols, 16);
     try {
-      for (const [n, k] of [[68, 1536], [4, 16], [36, 80]]) {
+      for (const [n, k] of [
+        [68, 1536],
+        [4, 16],
+        [36, 80],
+      ]) {
         device.pushErrorScope("validation");
         const owned: GPUBuffer[] = [];
         const make = (
@@ -37,12 +41,12 @@ test({
         };
         try {
           const packed = Uint32Array.from(
-            { length: n * k / 4 },
+            { length: (n * k) / 4 },
             (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 0,
           );
           const input = Float32Array.from({ length: k }, (_, i) => Math.sin(i * 0.037) * 0.75);
-          const scale = Float32Array.from({ length: n }, (_, i) => (i % 17 + 1) * 0.00017);
-          const bias = Float32Array.from({ length: n }, (_, i) => (i % 7 - 3) * 0.11);
+          const scale = Float32Array.from({ length: n }, (_, i) => ((i % 17) + 1) * 0.00017);
+          const bias = Float32Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11);
           const buffers = [
             make(linearGemvParams("i8", 1, n, k), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST),
             make(input),

@@ -66,30 +66,32 @@ const weights = () => ({
 });
 
 const declaration = (): IrDeclaration =>
-  parseIrDeclaration(JSON.stringify({
-    format: "karume-ir",
-    version: 2,
-    requires: { ops: ["add", "linear"] },
-    symbols: [],
-    inputs: [{ name: "x", dtype: "f32", shape: [M, K] }],
-    outputs: ["y"],
-    initializers: { "enc.w1": {}, "enc.b1": {}, "enc.h": {}, "enc.w2": {}, "enc.b2": {} },
-    values: {
-      "enc.w1": { dtype: "f32", shape: [H, K] },
-      "enc.b1": { dtype: "f32", shape: [H] },
-      "enc.h": { dtype: "f32", shape: [H] },
-      "enc.w2": { dtype: "f32", shape: [N, H] },
-      "enc.b2": { dtype: "f32", shape: [N] },
-      t: { dtype: "f32", shape: [M, H] },
-      u: { dtype: "f32", shape: [M, H] },
-      y: { dtype: "f32", shape: [M, N] },
-    },
-    nodes: [
-      { op: "linear", ins: ["x", "enc.w1", "enc.b1"], outs: ["t"], attrs: {} },
-      { op: "add", ins: ["t", "enc.h"], outs: ["u"], attrs: {} },
-      { op: "linear", ins: ["u", "enc.w2", "enc.b2"], outs: ["y"], attrs: {} },
-    ],
-  }));
+  parseIrDeclaration(
+    JSON.stringify({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["add", "linear"] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [M, K] }],
+      outputs: ["y"],
+      initializers: { "enc.w1": {}, "enc.b1": {}, "enc.h": {}, "enc.w2": {}, "enc.b2": {} },
+      values: {
+        "enc.w1": { dtype: "f32", shape: [H, K] },
+        "enc.b1": { dtype: "f32", shape: [H] },
+        "enc.h": { dtype: "f32", shape: [H] },
+        "enc.w2": { dtype: "f32", shape: [N, H] },
+        "enc.b2": { dtype: "f32", shape: [N] },
+        t: { dtype: "f32", shape: [M, H] },
+        u: { dtype: "f32", shape: [M, H] },
+        y: { dtype: "f32", shape: [M, N] },
+      },
+      nodes: [
+        { op: "linear", ins: ["x", "enc.w1", "enc.b1"], outs: ["t"], attrs: {} },
+        { op: "add", ins: ["t", "enc.h"], outs: ["u"], attrs: {} },
+        { op: "linear", ins: ["u", "enc.w2", "enc.b2"], outs: ["y"], attrs: {} },
+      ],
+    }),
+  );
 
 type Quantized = {
   readonly w1: ReturnType<typeof quantizeI4>;
@@ -146,7 +148,10 @@ const containerInput = (q: Quantized) => ({
 /** i8 の重みを行範囲で 2 本に割った piece の読み口（`krm` 側の 5/3 分割とは別の 4/4 分割）。 */
 const w2Pieces = (q: Quantized, counter: { reads: number }) => {
   const rowBytes = H;
-  const ranges: readonly (readonly [number, number])[] = [[0, N / 2], [N / 2, N]];
+  const ranges: readonly (readonly [number, number])[] = [
+    [0, N / 2],
+    [N / 2, N],
+  ];
   return ranges.map((rows) => ({
     rows,
     read: (): Promise<Uint8Array<ArrayBuffer>> => {
@@ -293,7 +298,10 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
       // 同じ割り方になると、この A/B は分割の不変条件を見なくなる。
       const w2Rows = (bound: BoundContainer) =>
         bound.graphs.main.supplies.get("enc.w2")?.blocks.map((block) => block.rows);
-      assertEquals(w2Rows(memory), [[0, N / 2], [N / 2, N]]);
+      assertEquals(w2Rows(memory), [
+        [0, N / 2],
+        [N / 2, N],
+      ]);
       assertNotEquals(w2Rows(opened), w2Rows(memory), "krm とメモリ側の piece の割り方が同じ");
       const session = await createSessionFromContainer(gpu, memory, "main");
       try {
@@ -347,9 +355,9 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
         assertEquals(
           miswiredReport.pass,
           false,
-          `${label}: i4 の scale を 1 チャネルずらした参照でも通った（${
-            formatAllclose(miswiredReport)
-          }）`,
+          `${label}: i4 の scale を 1 チャネルずらした参照でも通った（${formatAllclose(
+            miswiredReport,
+          )}）`,
         );
       }
     } finally {
@@ -394,7 +402,10 @@ describe("memory container session", { ignore: !GPU_AVAILABLE }, () => {
         viewed.offsets.some((offset) => offset !== 0),
         "重みの block が全部 part の先頭から読まれている（byteOffset ≠ 0 の view を通っていない）",
       );
-      assert(viewed.offsets.every((offset) => offset % 64 === 0), "block 開始が 64 B 整列でない");
+      assert(
+        viewed.offsets.every((offset) => offset % 64 === 0),
+        "block 開始が 64 B 整列でない",
+      );
     } finally {
       gpu.destroy();
     }

@@ -174,7 +174,7 @@ const ditLinear = (op: LinearCase["op"]): LinearCase[] =>
       source: `transformer [1,${m},${k}] × [${n},${k}]${
         m === 4096 ? "" : "（census の M 4096 を 1024 に置換）"
       }`,
-    }))
+    })),
   );
 
 const LINEAR_CASES: readonly LinearCase[] = [
@@ -290,9 +290,8 @@ const BMM_DERIVED_CASES: readonly BmmCase[] = [16, 32, 128, 256].flatMap((m) =>
     n: 64,
     k,
     censusCount: count,
-    source:
-      `${component} bmm [16,${m},${k}] × [16,${k},64]（census の M ${origin} を ${m} に置換）`,
-  }))
+    source: `${component} bmm [16,${m},${k}] × [16,${k},64]（census の M ${origin} を ${m} に置換）`,
+  })),
 );
 
 /** DiT の attention 4 形（census: transformer の self `[1,16,4096,128]`²・cross N = 512・各 count 28）。 */
@@ -315,12 +314,12 @@ const attentionCases = (op: AttentionCase["op"]): AttentionCase[] =>
       n,
       d: 128,
       scale: DIT_ATTENTION_SCALE,
-      score: op === "attention" ? "f32" as const : "f16" as const,
+      score: op === "attention" ? ("f32" as const) : ("f16" as const),
       censusCount: 28,
       source: `transformer attention [1,16,${m},128] × [1,16,${n},128]${
         m === 4096 ? "" : "（census の M 4096 を 1024 に置換）"
       }`,
-    }))
+    })),
   );
 
 const ATTENTION_CASES: readonly AttentionCase[] = [
@@ -373,8 +372,9 @@ export const caseFlops = (sweepCase: SweepCase): number => {
       return 2 * sweepCase.batchHeads * sweepCase.m * sweepCase.n * sweepCase.d;
     case "conv2d":
       // implicit GEMM 換算（M = Cout・N = H·W・K = Cin·9 — padding 域の読み飛ばしは数えない）
-      return 2 * sweepCase.channelsOut * sweepCase.height * sweepCase.width *
-        sweepCase.channelsIn * 9;
+      return (
+        2 * sweepCase.channelsOut * sweepCase.height * sweepCase.width * sweepCase.channelsIn * 9
+      );
   }
 };
 

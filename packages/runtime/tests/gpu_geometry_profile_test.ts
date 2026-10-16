@@ -107,7 +107,7 @@ const representativeRows = (rules: readonly GemmRowsRule[]): readonly number[] =
   rules.map((rule, index) =>
     rule.maxRows === Number.POSITIVE_INFINITY
       ? (rules[index - 1]?.maxRows ?? 0) + 512
-      : rule.maxRows
+      : rule.maxRows,
   );
 
 /**
@@ -118,9 +118,8 @@ const representativeRows = (rules: readonly GemmRowsRule[]): readonly number[] =
 const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =>
   representativeRows(rules).map((m, index) => {
     const { maxRows, geometry } = rules[index];
-    const range = maxRows === Number.POSITIVE_INFINITY
-      ? `> ${rules[index - 1]?.maxRows ?? 0}`
-      : `≤ ${maxRows}`;
+    const range =
+      maxRows === Number.POSITIVE_INFINITY ? `> ${rules[index - 1]?.maxRows ?? 0}` : `≤ ${maxRows}`;
     return {
       ...linearCase(m),
       name: `linear M=${m}（gemmRows ${range}）`,
@@ -152,10 +151,12 @@ const conv2dCase = (channelsOut: number, rows: "rows64" | "rows32"): ProfileCase
       x1: fill([channelsOut, channelsIn, 3, 3], WEIGHT),
       x2: fill([channelsOut], BIAS),
     },
-    expected: (profile) => [{
-      prefix: "conv2d:v3:f32:igemm",
-      parts: conv2dParts(profile.conv2d[rows]),
-    }],
+    expected: (profile) => [
+      {
+        prefix: "conv2d:v3:f32:igemm",
+        parts: conv2dParts(profile.conv2d[rows]),
+      },
+    ],
   };
 };
 
@@ -165,12 +166,16 @@ const attentionCase = (compute: "f32" | "a8"): ProfileCase => {
     name: `attention ${compute}`,
     model: async () =>
       await openGraphModel(
-        singleOpDeclaration("attention", [[b, h, m, d], [b, h, n, d], [b, h, n, d]], [[
-          b,
-          h,
-          m,
-          d,
-        ]], { attrs: { scale: halfScale(d) } }),
+        singleOpDeclaration(
+          "attention",
+          [
+            [b, h, m, d],
+            [b, h, n, d],
+            [b, h, n, d],
+          ],
+          [[b, h, m, d]],
+          { attrs: { scale: halfScale(d) } },
+        ),
       ),
     inputs: {
       x0: fill([b, h, m, d], SIGNED),
@@ -182,25 +187,25 @@ const attentionCase = (compute: "f32" | "a8"): ProfileCase => {
     expected: (profile) =>
       compute === "a8"
         ? [
-          {
-            prefix: "attention_qk:v3:i8a8:",
-            parts: [i8a8GeometryKeyPart(profile.i8a8.attentionQk, false)],
-          },
-          {
-            prefix: "attention_pv:v3:i8a8:",
-            parts: [i8a8GeometryKeyPart(profile.i8a8.attentionPv, false)],
-          },
-        ]
+            {
+              prefix: "attention_qk:v3:i8a8:",
+              parts: [i8a8GeometryKeyPart(profile.i8a8.attentionQk, false)],
+            },
+            {
+              prefix: "attention_pv:v3:i8a8:",
+              parts: [i8a8GeometryKeyPart(profile.i8a8.attentionPv, false)],
+            },
+          ]
         : [
-          {
-            prefix: "attention_qk:v1:f32:",
-            parts: [gemmGeometryTileKeyPart(profile.attention.qk)],
-          },
-          {
-            prefix: "attention_pv:v1:f32:",
-            parts: [gemmGeometryTileKeyPart(profile.attention.pv)],
-          },
-        ],
+            {
+              prefix: "attention_qk:v1:f32:",
+              parts: [gemmGeometryTileKeyPart(profile.attention.qk)],
+            },
+            {
+              prefix: "attention_pv:v1:f32:",
+              parts: [gemmGeometryTileKeyPart(profile.attention.pv)],
+            },
+          ],
   };
 };
 
@@ -250,10 +255,12 @@ const linearI8a8Case = (): ProfileCase => {
       ),
     inputs: { x0: fill([m, k], SIGNED) },
     options: { linearCompute: "a8", [I8A8_DOT]: "emu" },
-    expected: (profile) => [{
-      prefix: "linear:v4:i8a8:",
-      parts: [i8a8GeometryKeyPart(profile.i8a8.linear, false)],
-    }],
+    expected: (profile) => [
+      {
+        prefix: "linear:v4:i8a8:",
+        parts: [i8a8GeometryKeyPart(profile.i8a8.linear, false)],
+      },
+    ],
   };
 };
 
@@ -262,7 +269,16 @@ const OTHER_CASES: readonly ProfileCase[] = [
   {
     name: "matmul M=700",
     model: async () =>
-      await openGraphModel(singleOpDeclaration("matmul", [[700, 64], [64, 80]], [[700, 80]])),
+      await openGraphModel(
+        singleOpDeclaration(
+          "matmul",
+          [
+            [700, 64],
+            [64, 80],
+          ],
+          [[700, 80]],
+        ),
+      ),
     inputs: { x0: fill([700, 64], SIGNED), x1: fill([64, 80], WEIGHT) },
     expected: rowsKey("matmul:", 700),
   },
@@ -270,7 +286,14 @@ const OTHER_CASES: readonly ProfileCase[] = [
     name: "bmm M=600",
     model: async () =>
       await openGraphModel(
-        singleOpDeclaration("bmm", [[2, 600, 64], [2, 64, 80]], [[2, 600, 80]]),
+        singleOpDeclaration(
+          "bmm",
+          [
+            [2, 600, 64],
+            [2, 64, 80],
+          ],
+          [[2, 600, 80]],
+        ),
       ),
     inputs: { x0: fill([2, 600, 64], SIGNED), x1: fill([2, 64, 80], WEIGHT) },
     expected: rowsKey("bmm:", 600),
@@ -364,8 +387,8 @@ const assertRunsWithProfile = async (
   assertEquals(actual.profile, profile.id, testCase.name);
   for (const { prefix, parts } of testCase.expected(profile)) {
     assert(
-      actual.keys.some((key) =>
-        key.startsWith(prefix) && parts.every((part) => key.includes(part))
+      actual.keys.some(
+        (key) => key.startsWith(prefix) && parts.every((part) => key.includes(part)),
       ),
       `${testCase.name}: ${prefix}…${parts.join("…")} のキーで走っていない` +
         `（実際: ${actual.keys.join(" / ")}）`,
@@ -427,14 +450,15 @@ describe({
           const baseline = contextAs(gpu, "", "", "");
           // match のある表は adapter を偽装して選択の経路（description を含む）で、match を省いた
           // 注入専用の表は注入の席で組む（adapter は空 — 選択では既定にしか落ちない）。
-          const subject = profile.match === undefined
-            ? contextAs(gpu, "", "", "", profile)
-            : contextAs(
-              gpu,
-              profile.match.vendor ?? "",
-              profile.match.architecture ?? "",
-              profile.match.description ?? "",
-            );
+          const subject =
+            profile.match === undefined
+              ? contextAs(gpu, "", "", "", profile)
+              : contextAs(
+                  gpu,
+                  profile.match.vendor ?? "",
+                  profile.match.architecture ?? "",
+                  profile.match.description ?? "",
+                );
           const rowCases = gemmRowsCases(profile.gemmRows);
           assertEquals(rowCases.length, profile.gemmRows.length, "gemmRows の規則を取りこぼした");
           for (const testCase of [...rowCases, ...OTHER_CASES]) {
@@ -541,12 +565,9 @@ describe({
           return createShaderModule(descriptor);
         };
         const testCase = attentionCase("a8");
-        const session = await createSessionFromContainer(
-          gpu,
-          await testCase.model(),
-          GRAPH_NAME,
-          { attentionCompute: "a8" },
-        );
+        const session = await createSessionFromContainer(gpu, await testCase.model(), GRAPH_NAME, {
+          attentionCompute: "a8",
+        });
         try {
           assertEquals(session.diagnostics().geometryProfile, APPLE_METAL_3.id);
         } finally {

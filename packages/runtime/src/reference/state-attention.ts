@@ -192,13 +192,14 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
       selected.reverse();
       // ① S（述語を満たす列だけ。述語外の列は K を読まない）
       const scores = selected.map((col) => {
-        const kBase = col < past
-          ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
-          : (kvPlane * chunkRows + (col - past)) * depth;
+        const kBase =
+          col < past
+            ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
+            : (kvPlane * chunkRows + (col - past)) * depth;
         const source = col < past ? input.slotK : input.insK;
         let acc = 0;
         for (let d = 0; d < depth; d += 1) {
-          acc += (input.q[qBase + d] * scale) * (source[kBase + d] * scale);
+          acc += input.q[qBase + d] * scale * (source[kBase + d] * scale);
         }
         return Math.fround(acc);
       });
@@ -216,9 +217,10 @@ export const referenceStateAttention = (input: StateAttentionRefInput): RefTenso
       for (let d = 0; d < depth; d += 1) {
         let acc = 0;
         for (const [i, col] of selected.entries()) {
-          const vBase = col < past
-            ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
-            : (kvPlane * chunkRows + (col - past)) * depth;
+          const vBase =
+            col < past
+              ? (kvPlane * capacity + slotRow(window, capacity, col)) * depth
+              : (kvPlane * chunkRows + (col - past)) * depth;
           const source = col < past ? input.slotV : input.insV;
           acc += weights[i] * source[vBase + d];
         }
@@ -358,7 +360,7 @@ export const referenceStateAttentionReadonly = (
       const kBase = (kvPlane * capacity + slotRow(window, capacity, col)) * depth;
       let acc = 0;
       for (let d = 0; d < depth; d += 1) {
-        acc += (input.q[qBase + d] * scale) * (input.slotK[kBase + d] * scale);
+        acc += input.q[qBase + d] * scale * (input.slotK[kBase + d] * scale);
       }
       scores[cl] = Math.fround(acc);
     }
@@ -374,7 +376,8 @@ export const referenceStateAttentionReadonly = (
       let acc = 0;
       for (let cl = 0; cl < live; cl += 1) {
         const col = base + cl;
-        acc += weights[cl] *
+        acc +=
+          weights[cl] *
           input.slotV[(kvPlane * capacity + slotRow(window, capacity, col)) * depth + d];
       }
       out[qBase + d] = Math.fround(acc);

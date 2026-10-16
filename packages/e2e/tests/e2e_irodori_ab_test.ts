@@ -135,18 +135,16 @@ const observeStep1 = async (
       if (component === "dit") runs.push(diagnostics.lastRunPipelines);
     },
   });
-  const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(
-    where,
-    (capture) =>
-      pipeline.generateLatent({
-        text: input.text,
-        ...(input.caption === undefined ? {} : { caption: input.caption }),
-        seed,
-        durationSeconds: DURATION_SECONDS,
-        onEvent: (event) => {
-          if (event.kind === "denoise-step" && event.step === 1) capture(event.copyLatents().data);
-        },
-      }),
+  const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(where, (capture) =>
+    pipeline.generateLatent({
+      text: input.text,
+      ...(input.caption === undefined ? {} : { caption: input.caption }),
+      seed,
+      durationSeconds: DURATION_SECONDS,
+      onEvent: (event) => {
+        if (event.kind === "denoise-step" && event.step === 1) capture(event.copyLatents().data);
+      },
+    }),
   );
   return { latent, census: mergeCensus(runs, `${where} の dit`) };
 };
@@ -212,10 +210,8 @@ test({
         FAULT_CASE,
         SEED,
       );
-      const faulty = await withManifestOverride(
-        ASSETS_DIR,
-        injected,
-        (source) => observeStep1(source, PRACTICAL, FAULT_CASE, SEED),
+      const faulty = await withManifestOverride(ASSETS_DIR, injected, (source) =>
+        observeStep1(source, PRACTICAL, FAULT_CASE, SEED),
       );
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(

@@ -504,8 +504,8 @@ test({
             const limit = spec.past + local;
             for (let cl = 0; cl < live; cl += 1) {
               const col = base + cl;
-              const inWindow = col <= limit &&
-                (!stateSliding(spec.window) || limit - col < spec.window);
+              const inWindow =
+                col <= limit && (!stateSliding(spec.window) || limit - col < spec.window);
               const at = (plane * rowsBlock + local) * colCap + cl;
               if (inWindow) {
                 assertEquals(
@@ -794,17 +794,18 @@ type Injection = {
   readonly apply: (kernel: string, wgsl: string) => string;
 };
 
-const replaceIn = (
-  target: readonly string[],
-  from: string,
-  to: string,
-): (kernel: string, wgsl: string) => string =>
-(kernel, wgsl) => {
-  if (!target.includes(kernel)) return wgsl;
-  const mutated = wgsl.replaceAll(from, to);
-  assertMutated(wgsl, mutated, `${kernel}: ${from}`);
-  return mutated;
-};
+const replaceIn =
+  (
+    target: readonly string[],
+    from: string,
+    to: string,
+  ): ((kernel: string, wgsl: string) => string) =>
+  (kernel, wgsl) => {
+    if (!target.includes(kernel)) return wgsl;
+    const mutated = wgsl.replaceAll(from, to);
+    assertMutated(wgsl, mutated, `${kernel}: ${from}`);
+    return mutated;
+  };
 
 const INJECTIONS: readonly Injection[] = [
   // ① sliding の下限述語を落とす（= causal 上限だけの実装。ADR 0067 決定 4 の第 5 巡 high）
@@ -1069,8 +1070,8 @@ test({
       for (let plane = 0; plane < emptySpec.batch * emptySpec.heads; plane += 1) {
         const at = rowBase(emptySpec, plane, 0);
         assert(
-          [...emptyOut.out.slice(at, at + emptySpec.depth)].some((value) =>
-            !Number.isFinite(value)
+          [...emptyOut.out.slice(at, at + emptySpec.depth)].some(
+            (value) => !Number.isFinite(value),
           ),
           `−Inf: 平面 ${plane} の有効行が有限のまま（V が読まれていない）`,
         );
@@ -1109,11 +1110,7 @@ test({
         `空行ガード: 添字 ${nonZero} が厳密 0 でない（${injected.out[nonZero] ?? ""}）`,
       );
       // ② NaN が 1 つも無い（exp(-inf - (-inf)) 回避の直接の裏）
-      assertEquals(
-        injected.out.some(Number.isNaN),
-        false,
-        "空行ガード: 出力に NaN が残っている",
-      );
+      assertEquals(injected.out.some(Number.isNaN), false, "空行ガード: 出力に NaN が残っている");
       // ③ 毒値も残っていない（③PV が全行を書いた = full-write は空行でも保たれる）
       assertEquals(
         injected.out.some((value) => value === STATE_S_POISON),

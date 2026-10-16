@@ -198,9 +198,8 @@ test("normalizeReference: 非有限サンプルは位置付きで落とす（利
   // すり抜け、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰した**上で NaN 1 点だけを
   // 残す。どちらも例外にならず「ほぼ無音の参照音声」として encoder まで届く。
   for (const value of [NaN, Infinity, -Infinity]) {
-    const samples = Float32Array.from(
-      { length: SAMPLE_RATE },
-      (_, index) => (index === 7 ? value : 0.1),
+    const samples = Float32Array.from({ length: SAMPLE_RATE }, (_, index) =>
+      index === 7 ? value : 0.1,
     ) as Float32Array<ArrayBuffer>;
     assertThrows(
       () => normalizeReference(samples, SAMPLE_RATE),
@@ -231,7 +230,10 @@ test("normalizeReference: 有限な入力は通る（検査が全部を落とし
   ) as Float32Array<ArrayBuffer>;
   const normalized = normalizeReference(samples, SAMPLE_RATE);
   assertEquals(normalized.data.length, samples.length);
-  assertEquals(normalized.data.every((sample) => Number.isFinite(sample)), true);
+  assertEquals(
+    normalized.data.every((sample) => Number.isFinite(sample)),
+    true,
+  );
 });
 
 // ---- reflect pad（golden 無しでも成り立つ形）------------------------------
@@ -295,9 +297,9 @@ test({
       worstGain = Math.max(worstGain, Math.abs(gainDiff), Math.abs(peakGainDiff));
       worstWave = Math.max(worstWave, waveDiff, padDiff);
       rows.push(
-        `  ${name.padEnd(11)} refDb ${refDbDiff.toExponential(3)} / 利得 ${
-          gainDiff.toExponential(3)
-        } / peak 利得 ${peakGainDiff.toExponential(3)} / 波形 ${waveDiff.toExponential(3)}`,
+        `  ${name.padEnd(11)} refDb ${refDbDiff.toExponential(3)} / 利得 ${gainDiff.toExponential(
+          3,
+        )} / peak 利得 ${peakGainDiff.toExponential(3)} / 波形 ${waveDiff.toExponential(3)}`,
       );
 
       assertAlmostEquals(refDb, expected.refDb, REF_DB_ATOL, `${name}: refDb`);
@@ -311,9 +313,9 @@ test({
     }
     console.log(
       `[parity] irodori 参照音声の前処理（tolerance: refDb ${REF_DB_ATOL} / 利得 ${GAIN_RTOL}` +
-        ` / 波形 ${WAVE_ATOL}）\n${rows.join("\n")}\n  最悪: refDb ${
-          worstRefDb.toExponential(3)
-        } / 利得 ${worstGain.toExponential(3)} / 波形 ${worstWave.toExponential(3)}`,
+        ` / 波形 ${WAVE_ATOL}）\n${rows.join("\n")}\n  最悪: refDb ${worstRefDb.toExponential(
+          3,
+        )} / 利得 ${worstGain.toExponential(3)} / 波形 ${worstWave.toExponential(3)}`,
     );
   },
 });
@@ -335,10 +337,7 @@ test({
     // ② peak 制限枝。**LUFS 経路でこれを踏むのは ref-short だけ**（ref-hot は上流の
     //    「正規化しない」経路で peak を踏むケースで、−16 正規化を通すと利得 0.27 倍で
     //    peak が 0.81 まで下がり、制限が掛からない）。
-    const normalizedShort = normalizeReference(
-      (await readCase("ref-short"))["raw"],
-      SAMPLE_RATE,
-    );
+    const normalizedShort = normalizeReference((await readCase("ref-short"))["raw"], SAMPLE_RATE);
     assertEquals(normalizedShort.peakBeforeScale > 1, true, "ref-short が peak > 1 にならない");
     assertEquals(normalizedShort.peakGain < 1, true, "ref-short で peak 制限が掛かっていない");
     const normalizedHot = normalizeReference((await readCase("ref-hot"))["raw"], SAMPLE_RATE);

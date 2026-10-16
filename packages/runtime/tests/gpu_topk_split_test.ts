@@ -21,16 +21,8 @@ test({
           bits = new Uint32Array(data.buffer);
         const indices = [4095, 4096, 0, 7, 8, dim - 1, 4097, 10, 9, 17];
         const values = [
-          0x40e00000,
-          0xffc01234,
-          0xff800000,
-          0x80000000,
-          0x7f800000,
-          0x41400000,
-          0x7fc05678,
-          0x00000000,
-          0x7fa01234,
-          0xffa03456,
+          0x40e00000, 0xffc01234, 0xff800000, 0x80000000, 0x7f800000, 0x41400000, 0x7fc05678,
+          0x00000000, 0x7fa01234, 0xffa03456,
         ];
         for (let r = 0; r < rows; r++) bits[r * dim + indices[r]] = values[r];
         bits[4096] = values[0];
@@ -39,10 +31,18 @@ test({
         bits[4 * dim + 8192] = 0x7f800000;
         bits[6 * dim + 8192] = 0xffc04321;
         bits[7 * dim + 8192] = 0x80000000;
-        const graph = singleOpDeclaration("topk", [[rows, dim]], [[rows, 1], [rows, 1]], {
-          outDtypes: ["f32", "i32"],
-          attrs: { k: 1 },
-        });
+        const graph = singleOpDeclaration(
+          "topk",
+          [[rows, dim]],
+          [
+            [rows, 1],
+            [rows, 1],
+          ],
+          {
+            outDtypes: ["f32", "i32"],
+            attrs: { k: 1 },
+          },
+        );
         const prepared = prepareContainer(await openModelBytes(graph, []), GRAPH_NAME);
         const expected = prepared.estimate();
         const session = await prepared.createContainerSession(gpu);
@@ -54,11 +54,7 @@ test({
           assertEquals(Array.from(out.y1.data), indices);
           assertEquals(
             Array.from(
-              new Uint32Array(
-                out.y.data.buffer,
-                out.y.data.byteOffset,
-                out.y.data.length,
-              ),
+              new Uint32Array(out.y.data.buffer, out.y.data.byteOffset, out.y.data.length),
             ),
             values,
           );
@@ -88,19 +84,23 @@ const intermediateGraph = (rows: number, dim: number): DeclarationJson => ({
     value: { dtype: "f32", shape: [rows, 1] },
     index: { dtype: "i32", shape: [rows, 1] },
   },
-  nodes: [{ op: "neg", ins: ["x"], outs: ["z"], attrs: {} }, {
-    op: "topk",
-    ins: ["z"],
-    outs: ["value", "index"],
-    attrs: { k: 1 },
-  }],
+  nodes: [
+    { op: "neg", ins: ["x"], outs: ["z"], attrs: {} },
+    {
+      op: "topk",
+      ins: ["z"],
+      outs: ["value", "index"],
+      attrs: { k: 1 },
+    },
+  ],
 });
 
 test({
   name: "topk k=1: 中間入力をmergeまで保ち初回とbacking再利用で同じ値を返す",
   ignore: !GPU_AVAILABLE,
   async fn() {
-    const rows = 8, dim = 32769;
+    const rows = 8,
+      dim = 32769;
     const gpu = await acquireGpu();
     try {
       const session = await prepareContainer(
@@ -132,7 +132,8 @@ test({
 });
 
 test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", async () => {
-  const rows = 512, dim = 16384;
+  const rows = 512,
+    dim = 16384;
   const opened = await openModelBytes(intermediateGraph(rows, dim), []);
   const estimate = prepareContainer(opened, GRAPH_NAME).estimate();
   // mergeは元入力と部分結果を読みつつ、値と添字を別の領域に書く必要がある。
@@ -153,7 +154,10 @@ test({
             singleOpDeclaration(
               "topk",
               [[0, dim]],
-              [[0, 1], [0, 1]],
+              [
+                [0, 1],
+                [0, 1],
+              ],
               { outDtypes: ["f32", "i32"], attrs: { k: 1 } },
             ),
             [],

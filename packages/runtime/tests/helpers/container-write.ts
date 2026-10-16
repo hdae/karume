@@ -344,10 +344,12 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     const rows = assertPayloadLength(input, tensor, path);
     const cuts = cutPieces(tensor.bytes, rows, blockBytes, path);
     const pieceIds = cuts.map(() => nextId("w", "weight"));
-    const head = [{
-      id: pieceIds[0],
-      payload: storedPayload(cuts[0].bytes, cuts[0].last, `${path} piece 0`),
-    }];
+    const head = [
+      {
+        id: pieceIds[0],
+        payload: storedPayload(cuts[0].bytes, cuts[0].last, `${path} piece 0`),
+      },
+    ];
     let scaleId: string | undefined;
     if (tensor.encoding.scale !== undefined) {
       scaleId = nextId("s", "scale");
@@ -360,15 +362,21 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     placeGroup(head, path);
     for (const [i, cut] of cuts.entries()) {
       if (i === 0) continue;
-      placeGroup([{
-        id: pieceIds[i],
-        payload: storedPayload(cut.bytes, cut.last, `${path} piece ${i}`),
-      }], `${path} piece ${i}`);
+      placeGroup(
+        [
+          {
+            id: pieceIds[i],
+            payload: storedPayload(cut.bytes, cut.last, `${path} piece ${i}`),
+          },
+        ],
+        `${path} piece ${i}`,
+      );
     }
     const encoding = resolveEncoding(tensor.encoding, scaleId);
-    const supply: WeightSupply = cuts.length === 1
-      ? { block: pieceIds[0], encoding }
-      : { pieces: cuts.map((cut, i) => ({ block: pieceIds[i], rows: cut.rows })), encoding };
+    const supply: WeightSupply =
+      cuts.length === 1
+        ? { block: pieceIds[0], encoding }
+        : { pieces: cuts.map((cut, i) => ({ block: pieceIds[i], rows: cut.rows })), encoding };
     binding[tensor.graph] = { ...(binding[tensor.graph] ?? {}), [tensor.initializer]: supply };
   }
 
@@ -410,9 +418,10 @@ const buildGraphDescriptor = (input: ModelInput, region: ConstRegion): GraphDesc
 export const writeGraphContainer = async (
   input: ModelInput,
   options: WriteOptions = {},
-): Promise<
-  { readonly bytes: Uint8Array<ArrayBuffer>; readonly descriptorBytes: Uint8Array<ArrayBuffer> }
-> => {
+): Promise<{
+  readonly bytes: Uint8Array<ArrayBuffer>;
+  readonly descriptorBytes: Uint8Array<ArrayBuffer>;
+}> => {
   const region = await buildConstRegion(input, options.blockBytes ?? BLOCK_MAX_BYTES);
   const descriptorBytes = serializeGraphDescriptor(buildGraphDescriptor(input, region));
   return { bytes: assembleGraphContainer(descriptorBytes, region.bytes), descriptorBytes };
@@ -448,11 +457,13 @@ export const writeModelContainer = async (
       });
     }
   }
-  const partRecords: PartRecord[] = [{
-    index: 1,
-    length: region.bytes.byteLength,
-    sha256: await sha256Hex(region.bytes),
-  }];
+  const partRecords: PartRecord[] = [
+    {
+      index: 1,
+      length: region.bytes.byteLength,
+      sha256: await sha256Hex(region.bytes),
+    },
+  ];
   for (const [i, bytes] of dataParts.entries()) {
     partRecords.push({ index: i + 2, length: bytes.byteLength, sha256: await sha256Hex(bytes) });
   }
@@ -485,7 +496,10 @@ export const writeModelContainer = async (
   part0.set(modelDescriptorBytes, HEADER_BYTES + graphDescriptorBytes.byteLength);
 
   const parts = [part0, region.bytes, ...dataParts];
-  const layout = derivePartOffsets(part0.byteLength, parts.slice(1).map((part) => part.byteLength));
+  const layout = derivePartOffsets(
+    part0.byteLength,
+    parts.slice(1).map((part) => part.byteLength),
+  );
   const single = new Uint8Array(new ArrayBuffer(layout.totalLength));
   single.fill(PAD_BYTE);
   for (const [i, part] of parts.entries()) single.set(part, layout.offsets[i]);

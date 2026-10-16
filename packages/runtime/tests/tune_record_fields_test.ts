@@ -121,17 +121,15 @@ describe("記録の照合キー caseSet / defaultKernels（ADR 0117 決定 8）"
 
 describe("表の provenance.userAgent（ADR 0117 追記 2026-10-02）", () => {
   it("記録の userAgent の文字列をそのまま 1 要素の配列で写す", () => {
-    assertEquals(
-      derive(record({ userAgent: CHROME_154 })).profile.provenance?.userAgent,
-      [CHROME_154],
-    );
+    assertEquals(derive(record({ userAgent: CHROME_154 })).profile.provenance?.userAgent, [
+      CHROME_154,
+    ]);
   });
 
   it("Deno の CLI の記録（{ deno }）は Deno の navigator.userAgent と同じ綴り Deno/<版> にする", () => {
-    assertEquals(
-      derive(record({ userAgent: { deno: "2.9.6" } })).profile.provenance?.userAgent,
-      ["Deno/2.9.6"],
-    );
+    assertEquals(derive(record({ userAgent: { deno: "2.9.6" } })).profile.provenance?.userAgent, [
+      "Deno/2.9.6",
+    ]);
   });
 
   it("全ての記録で同じ値なら 1 要素だけ書く（今のブラウザとそのまま比べられる）", () => {
@@ -183,9 +181,10 @@ describe("表の provenance.userAgent（ADR 0117 追記 2026-10-02）", () => {
     assertEquals(geometryProfileMismatch(profile, ADAPTER), undefined);
     const otherBrowser = {
       ...profile,
-      provenance: profile.provenance === undefined
-        ? undefined
-        : { ...profile.provenance, userAgent: [CHROME_154] },
+      provenance:
+        profile.provenance === undefined
+          ? undefined
+          : { ...profile.provenance, userAgent: [CHROME_154] },
     };
     assertEquals(geometryProfileMismatch(otherBrowser, ADAPTER), undefined);
   });
@@ -235,10 +234,12 @@ describe("記録の照合キー candidateKernels（測った候補のカーネ�
     const current = sweepCandidateKernelsId(MEASURED, false);
     const error = assertThrows(
       () =>
-        derive(measuredRecord({
-          defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
-          candidateKernels: stale,
-        })),
+        derive(
+          measuredRecord({
+            defaultKernels: geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
+            candidateKernels: stale,
+          }),
+        ),
       Error,
       `sweep-0.json: candidateKernels ${stale} が今の runtime の ${current} と違う（測った候補のカーネル`,
     );

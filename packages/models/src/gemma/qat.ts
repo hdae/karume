@@ -26,12 +26,8 @@ export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
   return model;
 };
 
-export const admitGemma4Qat = (
-  graph: Graph,
-  selected?: string,
-): Gemma4QatModel => {
-  const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")
-    ?.shape;
+export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel => {
+  const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (shape === undefined) {
     throw new Error("Gemma4QatPipeline: グラフ入力 per_layer_inputs が無い");
   }
@@ -67,8 +63,8 @@ export const admitGemma4Qat = (
       consumers.set(input, list);
     }
   }
-  const embeddings = graph.nodes.filter((node) =>
-    node.op === "embedding" && node.ins[1] === "input_ids"
+  const embeddings = graph.nodes.filter(
+    (node) => node.op === "embedding" && node.ins[1] === "input_ids",
   );
   if (embeddings.length !== 1) {
     throw new Error("Gemma4QatPipeline: token embedding が1本でない");
@@ -78,7 +74,8 @@ export const admitGemma4Qat = (
   if (tokenStorage === undefined || codecLayout(tokenStorage.codec) !== "i2") {
     throw new Error("Gemma4QatPipeline: token embedding は固定 INT2 が必要");
   }
-  let heads = 0, ordinary = 0;
+  let heads = 0,
+    ordinary = 0;
   const storages = new Set<string>();
   for (const node of graph.nodes) {
     if (node.op !== "linear") continue;
@@ -92,9 +89,7 @@ export const admitGemma4Qat = (
       continue;
     }
     if (weight === undefined) {
-      throw new Error(
-        `Gemma4QatPipeline: linear の重み '${node.ins[1]}' が initializer でない`,
-      );
+      throw new Error(`Gemma4QatPipeline: linear の重み '${node.ins[1]}' が initializer でない`);
     }
     if (weight.shared !== undefined) {
       throw new Error(
@@ -116,7 +111,8 @@ export const admitGemma4Qat = (
     const before = producers.get(node.ins[0]);
     const after = consumers.get(node.outs[0]);
     if (
-      before?.op !== "static_quantize" || after?.length !== 1 ||
+      before?.op !== "static_quantize" ||
+      after?.length !== 1 ||
       after[0].op !== "static_quantize"
     ) {
       throw new Error("Gemma4QatPipeline: linear の前後に固定 SRQ が必要");
@@ -157,8 +153,7 @@ export const assertGemma4QatPle = (
   }
   // 層数と次元の正本はグラフの `per_layer_inputs`（tokens の突合は `createGemma4Ple` が持つ —
   // 同じ検査を 2 実装持たない）。
-  const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")
-    ?.shape;
+  const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (index.layers !== shape?.[2]) {
     throw new Error(
       `Gemma4QatPipeline: PLE の層数 ${index.layers} がグラフの per_layer_inputs` +

@@ -24,12 +24,12 @@ const baseGraph = (): Json => ({
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
   outputs: ["y"],
-  initializers: { "enc.w": {}, "b": {} },
+  initializers: { "enc.w": {}, b: {} },
   values: {
     "enc.w": { dtype: "f32", shape: [4, 3] },
-    "b": { dtype: "f32", shape: [3] },
-    "h": { dtype: "f32", shape: ["T", 3] },
-    "y": { dtype: "f32", shape: ["T", 3] },
+    b: { dtype: "f32", shape: [3] },
+    h: { dtype: "f32", shape: ["T", 3] },
+    y: { dtype: "f32", shape: ["T", 3] },
   },
   nodes: [
     { op: "matmul", ins: ["x", "enc.w"], outs: ["h"], attrs: {} },
@@ -44,7 +44,7 @@ describe("parseIrDeclaration", () => {
   it("v2 の最小グラフを受理し、initializer は {} か {shared:true} だけ", () => {
     const graph = parseIrDeclaration(JSON.stringify(baseGraph()));
     assertEquals(graph.version, 2);
-    assertEquals(graph.initializers, { "enc.w": { shared: false }, "b": { shared: false } });
+    assertEquals(graph.initializers, { "enc.w": { shared: false }, b: { shared: false } });
     const shared = baseGraph();
     (shared.initializers as Json)["b"] = { shared: true };
     assertEquals(parseIrDeclaration(JSON.stringify(shared)).initializers["b"], { shared: true });
@@ -69,12 +69,12 @@ describe("canonicalIrJson", () => {
     const shuffled: Json = {
       nodes: graph.nodes,
       values: {
-        "y": (graph.values as Json)["y"],
-        "b": (graph.values as Json)["b"],
-        "h": (graph.values as Json)["h"],
+        y: (graph.values as Json)["y"],
+        b: (graph.values as Json)["b"],
+        h: (graph.values as Json)["h"],
         "enc.w": (graph.values as Json)["enc.w"],
       },
-      initializers: { "enc.w": {}, "b": {} },
+      initializers: { "enc.w": {}, b: {} },
       outputs: ["y"],
       inputs: graph.inputs,
       symbols: ["T"],
@@ -115,7 +115,7 @@ describe("canonicalIrJson", () => {
 
   it("attrs のキーは再帰的に code point 順（配列の順序は保つ）", () => {
     const graph = baseGraph();
-    (graph.nodes as Json[])[0].attrs = { z: 1, a: { y: [3, 1, 2], b: true }, "é": "e", "B": 0 };
+    (graph.nodes as Json[])[0].attrs = { z: 1, a: { y: [3, 1, 2], b: true }, é: "e", B: 0 };
     const text = canonical(graph);
     // ASCII 大文字 < 小文字 < 非 ASCII（code point 順）。
     assertEquals(text.includes('"attrs":{"B":0,"a":{"b":true,"y":[3,1,2]},"z":1,"é":"e"}'), true);
@@ -166,25 +166,27 @@ describe("容器 descriptor の正準直列化（docs/container-v1.md §0・ir-v
     // 0xFFFF より小さい）なら U+1F600 が先になる — 並びが割れる最小の組。
     const emoji = "\u{1F600}";
     const last = "￿";
-    const graph = parseIrDeclaration(JSON.stringify({
-      format: "karume-ir",
-      version: 2,
-      requires: { ops: ["add"] },
-      symbols: [],
-      inputs: [{ name: "x", dtype: "f32", shape: [4] }],
-      outputs: ["y"],
-      initializers: { [emoji]: {}, [last]: {} },
-      values: {
-        [emoji]: { dtype: "f32", shape: [4] },
-        [last]: { dtype: "f32", shape: [4] },
-        "h": { dtype: "f32", shape: [4] },
-        "y": { dtype: "f32", shape: [4] },
-      },
-      nodes: [
-        { op: "add", ins: ["x", emoji], outs: ["h"], attrs: {} },
-        { op: "add", ins: ["h", last], outs: ["y"], attrs: {} },
-      ],
-    }));
+    const graph = parseIrDeclaration(
+      JSON.stringify({
+        format: "karume-ir",
+        version: 2,
+        requires: { ops: ["add"] },
+        symbols: [],
+        inputs: [{ name: "x", dtype: "f32", shape: [4] }],
+        outputs: ["y"],
+        initializers: { [emoji]: {}, [last]: {} },
+        values: {
+          [emoji]: { dtype: "f32", shape: [4] },
+          [last]: { dtype: "f32", shape: [4] },
+          h: { dtype: "f32", shape: [4] },
+          y: { dtype: "f32", shape: [4] },
+        },
+        nodes: [
+          { op: "add", ins: ["x", emoji], outs: ["h"], attrs: {} },
+          { op: "add", ins: ["h", last], outs: ["y"], attrs: {} },
+        ],
+      }),
+    );
     const constOf = (initializer: string) => ({
       graph: "g",
       initializer,

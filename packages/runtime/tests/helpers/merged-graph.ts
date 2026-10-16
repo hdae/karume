@@ -38,20 +38,24 @@ const encodingOf = (
   shape: readonly number[],
   name: string,
 ): EncodingInput => {
-  const codec: CodecName = spec === undefined
-    ? (dtype === "i32" ? "i32" : "f32")
-    : typeof spec === "string"
-    ? spec
-    : spec.codec;
+  const codec: CodecName =
+    spec === undefined
+      ? dtype === "i32"
+        ? "i32"
+        : "f32"
+      : typeof spec === "string"
+        ? spec
+        : spec.codec;
   const entry = codecEntry(codec);
   if (entry.scale === "forbidden") return { codec };
-  const rowAxis = typeof spec === "object" ? spec.rowAxis ?? 0 : 0;
+  const rowAxis = typeof spec === "object" ? (spec.rowAxis ?? 0) : 0;
   const rowLength = quantizedRowLength(shape, rowAxis);
-  const groupSize = entry.grouping === "channel"
-    ? perChannelGroupSize(rowLength)
-    : typeof spec === "object" && spec.groupSize !== undefined
-    ? spec.groupSize
-    : rowLength;
+  const groupSize =
+    entry.grouping === "channel"
+      ? perChannelGroupSize(rowLength)
+      : typeof spec === "object" && spec.groupSize !== undefined
+        ? spec.groupSize
+        : rowLength;
   return {
     codec,
     ...(rowAxis === 0 ? {} : { rowAxis }),
@@ -101,7 +105,5 @@ export const mergeTensors = (
  * 宣言 → 合流後の `IrGraph`。供給は {@link autoTensors} が宣言から作る（中身は 0 埋め）。
  * 格納を動かしたいテストは `storage` に initializer 名で codec を渡す。
  */
-export const mergeGraph = (
-  declaration: DeclarationJson,
-  storage: StorageMap = {},
-): IrGraph => mergeTensors(declaration, autoTensors(declaration, storage));
+export const mergeGraph = (declaration: DeclarationJson, storage: StorageMap = {}): IrGraph =>
+  mergeTensors(declaration, autoTensors(declaration, storage));

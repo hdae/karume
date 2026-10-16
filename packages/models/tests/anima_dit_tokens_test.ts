@@ -59,12 +59,17 @@ test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は h·W'
       for (let col = 0; col < cols; col += 1) {
         for (let innerH = 0; innerH < patchHeight; innerH += 1) {
           for (let innerW = 0; innerW < patchWidth; innerW += 1) {
-            const at = channel * height * width +
-              (row * patchHeight + innerH) * width + col * patchWidth + innerW;
+            const at =
+              channel * height * width +
+              (row * patchHeight + innerH) * width +
+              col * patchWidth +
+              innerW;
             assertEquals(
               tokens[
-                (row * cols + col) * tokenWidth + channel * patchVolume +
-                innerH * patchWidth + innerW
+                (row * cols + col) * tokenWidth +
+                  channel * patchVolume +
+                  innerH * patchWidth +
+                  innerW
               ],
               latents[at],
               `c=${channel} h=${row}.${innerH} w=${col}.${innerW}`,
@@ -98,13 +103,17 @@ test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順では
       for (let innerH = 0; innerH < patchHeight; innerH += 1) {
         for (let innerW = 0; innerW < patchWidth; innerW += 1) {
           for (let channel = 0; channel < channels; channel += 1) {
-            const at = channel * height * width +
-              (row * patchHeight + innerH) * width + col * patchWidth + innerW;
+            const at =
+              channel * height * width +
+              (row * patchHeight + innerH) * width +
+              col * patchWidth +
+              innerW;
             assertEquals(
               latents[at],
               tokens[
                 (row * cols + col) * tokenWidth +
-                (innerH * patchWidth + innerW) * channels + channel
+                  (innerH * patchWidth + innerW) * channels +
+                  channel
               ],
               `c=${channel} h=${row}.${innerH} w=${col}.${innerW}`,
             );
@@ -117,11 +126,7 @@ test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順では
 
 test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にしない）", () => {
   const shape = [1, TOKEN_GEOMETRY.channels, 4, 9];
-  assertThrows(
-    () => patchifyLatents(new Float32Array(4), shape, TOKEN_GEOMETRY),
-    Error,
-    "要素数",
-  );
+  assertThrows(() => patchifyLatents(new Float32Array(4), shape, TOKEN_GEOMETRY), Error, "要素数");
   assertThrows(
     () => patchifyLatents(new Float32Array(36), [1, 3, 5, 9], TOKEN_GEOMETRY),
     Error,
@@ -132,11 +137,7 @@ test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にし
     Error,
     "[1,C,H,W] 前提",
   );
-  assertThrows(
-    () => unpatchifyTokens(new Float32Array(7), shape, TOKEN_GEOMETRY),
-    Error,
-    "要素数",
-  );
+  assertThrows(() => unpatchifyTokens(new Float32Array(7), shape, TOKEN_GEOMETRY), Error, "要素数");
 });
 
 /** 軸ごとに違う幅・違う値を持つ素表（ブロック順と読み出し位置の取り違えが必ず露見する形）。 */
@@ -146,7 +147,7 @@ const syntheticRopeBase = (rows: number): RopeBase => {
     Float32Array.from(
       { length: rows * widths[axis] },
       (_, i) =>
-        (axis + 1) * 1000 + kind * 100 + Math.floor(i / widths[axis]) * 10 + i % widths[axis],
+        (axis + 1) * 1000 + kind * 100 + Math.floor(i / widths[axis]) * 10 + (i % widths[axis]),
     );
   return {
     rows,
@@ -269,26 +270,28 @@ test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行
 test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
   assertThrows(
     () =>
-      parseRopeBase(buildSafetensors([
-        { name: "cos_t", ...ropeTable(2, 1, 0) },
-        { name: "sin_t", ...ropeTable(2, 1, 0) },
-      ])),
+      parseRopeBase(
+        buildSafetensors([
+          { name: "cos_t", ...ropeTable(2, 1, 0) },
+          { name: "sin_t", ...ropeTable(2, 1, 0) },
+        ]),
+      ),
     Error,
     "'cos_h' が無い",
   );
   assertThrows(
     () =>
-      parseRopeBase(buildSafetensors([
-        { name: "cos_t", dtype: "F16", shape: [2, 1], data: new Uint8Array(4) },
-      ])),
+      parseRopeBase(
+        buildSafetensors([{ name: "cos_t", dtype: "F16", shape: [2, 1], data: new Uint8Array(4) }]),
+      ),
     Error,
     "F32 が必要",
   );
   assertThrows(
     () =>
-      parseRopeBase(buildSafetensors([
-        { name: "cos_t", dtype: "F32", shape: [2], data: f32Bytes([0, 0]) },
-      ])),
+      parseRopeBase(
+        buildSafetensors([{ name: "cos_t", dtype: "F32", shape: [2], data: f32Bytes([0, 0]) }]),
+      ),
     Error,
     "rank が 2 でない",
   );

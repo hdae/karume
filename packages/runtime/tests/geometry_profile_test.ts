@@ -137,13 +137,11 @@ describe("selectGeometryProfile の選択順", () => {
 
   it("どれにも当たらない adapter は既定プロファイルへ落ちる（照合は完全一致で、大小文字も揃えない）", () => {
     const profiles = [APPLE, APPLE_METAL3];
-    for (
-      const adapter of [
-        { vendor: "32902", architecture: "" },
-        { vendor: "Apple", architecture: "metal-3" },
-        { vendor: "", architecture: "" },
-      ]
-    ) {
+    for (const adapter of [
+      { vendor: "32902", architecture: "" },
+      { vendor: "Apple", architecture: "metal-3" },
+      { vendor: "", architecture: "" },
+    ]) {
       assertStrictEquals(
         selectGeometryProfile(adapter, profiles),
         DEFAULT_GEOMETRY_PROFILE,
@@ -266,29 +264,25 @@ describe("公開の一覧 BUILTIN_GEOMETRY_PROFILES は深く凍結した複製"
 describe("description の照合と match を省いた注入専用の表", () => {
   it("description まで一致する規則が (vendor, architecture) だけの規則より先に当たり、一覧の並び順に依らない", () => {
     const adapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
-    for (
-      const profiles of [
-        [APPLE, APPLE_METAL3, APPLE_M2],
-        [APPLE_M2, APPLE_METAL3, APPLE],
-        [APPLE_METAL3, APPLE_M2],
-      ]
-    ) {
+    for (const profiles of [
+      [APPLE, APPLE_METAL3, APPLE_M2],
+      [APPLE_M2, APPLE_METAL3, APPLE],
+      [APPLE_METAL3, APPLE_M2],
+    ]) {
       assertStrictEquals(selectGeometryProfile(adapter, profiles), APPLE_M2);
     }
   });
 
   it("description の規則は description が空・無い・違う adapter に当たらず、次の順位へ落ちる", () => {
     const profiles = [APPLE, APPLE_METAL3, APPLE_M2];
-    for (
-      const adapter of [
-        { vendor: "apple", architecture: "metal-3", description: "" },
-        { vendor: "apple", architecture: "metal-3" },
-        { vendor: "apple", architecture: "metal-3", description: "Apple M5" },
-        // 前方一致・部分一致・大小文字の揃えはしない
-        { vendor: "apple", architecture: "metal-3", description: "Apple M2 Pro" },
-        { vendor: "apple", architecture: "metal-3", description: "apple m2" },
-      ]
-    ) {
+    for (const adapter of [
+      { vendor: "apple", architecture: "metal-3", description: "" },
+      { vendor: "apple", architecture: "metal-3" },
+      { vendor: "apple", architecture: "metal-3", description: "Apple M5" },
+      // 前方一致・部分一致・大小文字の揃えはしない
+      { vendor: "apple", architecture: "metal-3", description: "Apple M2 Pro" },
+      { vendor: "apple", architecture: "metal-3", description: "apple m2" },
+    ]) {
       assertStrictEquals(
         selectGeometryProfile(adapter, profiles),
         APPLE_METAL3,
@@ -301,10 +295,9 @@ describe("description の照合と match を省いた注入専用の表", () => 
     assertStrictEquals(selectGeometryProfile(m5, [APPLE_M2]), DEFAULT_GEOMETRY_PROFILE);
     // description が同じでも architecture が違えば当たらない
     assertStrictEquals(
-      selectGeometryProfile(
-        { vendor: "apple", architecture: "metal-2", description: "Apple M2" },
-        [APPLE_M2],
-      ),
+      selectGeometryProfile({ vendor: "apple", architecture: "metal-2", description: "Apple M2" }, [
+        APPLE_M2,
+      ]),
       DEFAULT_GEOMETRY_PROFILE,
     );
   });
@@ -337,9 +330,7 @@ describe("description の照合と match を省いた注入専用の表", () => 
     );
     assertThrows(
       () =>
-        selectGeometryProfile(adapter, [
-          profileOf("opt-in-broken", undefined, { gemmRows: [] }),
-        ]),
+        selectGeometryProfile(adapter, [profileOf("opt-in-broken", undefined, { gemmRows: [] })]),
       CodegenError,
       "gemmRows が空",
     );
@@ -463,14 +454,12 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
         assertEquals(bmmKey(v4, rows, undefined, geometry), bmmKey(v4, rows), `bmm M=${rows}`);
         assertEquals(bmmWgsl(v4, rows, undefined, geometry), bmmWgsl(v4, rows), `bmm M=${rows}`);
       }
-      for (
-        const [weight, v4, compute] of [
-          ["f32", true, "f32"],
-          ["f16", false, "f32"],
-          ["f16", true, "f16"],
-          ["i8", true, "f32"],
-        ] as const
-      ) {
+      for (const [weight, v4, compute] of [
+        ["f32", true, "f32"],
+        ["f16", false, "f32"],
+        ["f16", true, "f16"],
+        ["i8", true, "f32"],
+      ] as const) {
         const where = `linear ${weight}/${v4}/${compute} M=${rows}`;
         assertEquals(
           linearKey(weight, v4, compute, rows, undefined, geometry),
@@ -496,15 +485,13 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
 
   it("融合 attention f32 の ①QK / ③PV（変種の軸を跨いで）", () => {
     const { qk, pv } = profile.attention;
-    for (
-      const [v4, compute, score, mask, gqa, rowWindow] of [
-        [true, "f32", "f32", false, false, false],
-        [false, "f32", "f32", false, false, false],
-        [true, "f16", "f32", false, false, false],
-        [true, "f32", "f16", true, false, false],
-        [true, "f32", "f32", true, true, true],
-      ] as const
-    ) {
+    for (const [v4, compute, score, mask, gqa, rowWindow] of [
+      [true, "f32", "f32", false, false, false],
+      [false, "f32", "f32", false, false, false],
+      [true, "f16", "f32", false, false, false],
+      [true, "f32", "f16", true, false, false],
+      [true, "f32", "f32", true, true, true],
+    ] as const) {
       const where = `v4=${v4} ${compute} s=${score} mask=${mask} gqa=${gqa} rw=${rowWindow}`;
       assertEquals(
         attentionQkKey(v4, compute, score, mask, gqa, rowWindow, qk),
@@ -532,7 +519,11 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
   it("conv2d の implicit GEMM（m タイルの 64 行 / 32 行クラス）", () => {
     for (const mTile of [64, 32]) {
       const geometry = conv2dProfileGeometry(profile, mTile);
-      for (const [weight, v4] of [["f32", true], ["f16", false], ["i8", true]] as const) {
+      for (const [weight, v4] of [
+        ["f32", true],
+        ["f16", false],
+        ["i8", true],
+      ] as const) {
         assertEquals(
           conv2dIgemmKey(weight, v4, mTile, geometry),
           conv2dIgemmKey(weight, v4, mTile),
@@ -549,7 +540,10 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
 
   it("i8a8 の linear / 融合 attention ①QK / ③PV", () => {
     const { linear, attentionQk, attentionPv } = profile.i8a8;
-    for (const [v4, dp4a] of [[true, true], [false, false]] as const) {
+    for (const [v4, dp4a] of [
+      [true, true],
+      [false, false],
+    ] as const) {
       assertEquals(linearI8a8Key(v4, dp4a, linear), linearI8a8Key(v4, dp4a));
       assertEquals(linearI8a8Wgsl(v4, dp4a, linear), linearI8a8Wgsl(v4, dp4a));
       assertEquals(
@@ -557,7 +551,7 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
         linearI8a8Key(v4, dp4a, undefined, "i4", 32),
       );
       // S の f16 格納（s16）は v4 経路専用（生成の門が落とす）
-      for (const score of v4 ? ["f32", "f16"] as const : ["f32"] as const) {
+      for (const score of v4 ? (["f32", "f16"] as const) : (["f32"] as const)) {
         assertEquals(
           attentionQkI8a8Key(v4, dp4a, score, attentionQk),
           attentionQkI8a8Key(v4, dp4a, score),
@@ -581,9 +575,13 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
 
 describe("gemmRowsGeometry", () => {
   const rules = (...entries: (readonly [number, GemmGeometry])[]): GeometryProfile =>
-    profileOf("rules", { vendor: "test" }, {
-      gemmRows: entries.map(([maxRows, geometry]) => ({ maxRows, geometry })),
-    });
+    profileOf(
+      "rules",
+      { vendor: "test" },
+      {
+        gemmRows: entries.map(([maxRows, geometry]) => ({ maxRows, geometry })),
+      },
+    );
   const small = gemmGeometryForRows(1);
 
   it("maxRows ちょうどはその規則・1 越えると次の規則（最後の Infinity は u32 の上端まで当たる）", () => {
@@ -604,11 +602,7 @@ describe("gemmRowsGeometry", () => {
   it("規則が狭義昇順でない・最後が Infinity でない・空の表は、選択でも引く側でも fail loudly", () => {
     const adapter = { vendor: "test", architecture: "" };
     const broken: readonly (readonly [string, GeometryProfile, string])[] = [
-      [
-        "降順",
-        rules([100, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]),
-        "狭義昇順",
-      ],
+      ["降順", rules([100, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]), "狭義昇順"],
       ["同値", rules([10, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]), "狭義昇順"],
       ["最後が有限", rules([10, small], [100, M64N32]), "Infinity"],
       ["空", rules(), "空"],
@@ -628,9 +622,13 @@ describe("gemmRowsGeometry", () => {
 
 describe("conv2dProfileGeometry と幾何の門", () => {
   it("m タイルのクラス 64 / 32 は rows64 / rows32 を引き、それ以外は fail loudly", () => {
-    const profile = profileOf("conv", { vendor: "test" }, {
-      conv2d: { rows64: M64N64, rows32: M64N32 },
-    });
+    const profile = profileOf(
+      "conv",
+      { vendor: "test" },
+      {
+        conv2d: { rows64: M64N64, rows32: M64N32 },
+      },
+    );
     assertStrictEquals(conv2dProfileGeometry(profile, 64), M64N64);
     assertStrictEquals(conv2dProfileGeometry(profile, 32), M64N32);
     assertThrows(() => conv2dProfileGeometry(profile, 16), CodegenError, "クラスが無い");
@@ -650,18 +648,26 @@ describe("conv2dProfileGeometry と幾何の門", () => {
       ],
       [
         "gemmRows",
-        profileOf("rows", { vendor: "test" }, {
-          gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: hole }],
-        }),
+        profileOf(
+          "rows",
+          { vendor: "test" },
+          {
+            gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: hole }],
+          },
+        ),
       ],
       [
         "i8a8.attentionPv",
-        profileOf("i8a8", { vendor: "test" }, {
-          i8a8: {
-            ...DEFAULT_GEOMETRY_PROFILE.i8a8,
-            attentionPv: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+        profileOf(
+          "i8a8",
+          { vendor: "test" },
+          {
+            i8a8: {
+              ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+              attentionPv: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+            },
           },
-        }),
+        ),
       ],
     ];
     for (const [name, profile] of broken) {
@@ -747,9 +753,13 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
       ],
       [
         "gemmRows の幾何",
-        profileOf("rows", { vendor: "test" }, {
-          gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: hole }],
-        }),
+        profileOf(
+          "rows",
+          { vendor: "test" },
+          {
+            gemmRows: [{ maxRows: Number.POSITIVE_INFINITY, geometry: hole }],
+          },
+        ),
         "gemmRows",
       ],
       [
@@ -759,12 +769,16 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
       ],
       [
         "i8a8.linear の幾何",
-        profileOf("i8a8", { vendor: "test" }, {
-          i8a8: {
-            ...DEFAULT_GEOMETRY_PROFILE.i8a8,
-            linear: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+        profileOf(
+          "i8a8",
+          { vendor: "test" },
+          {
+            i8a8: {
+              ...DEFAULT_GEOMETRY_PROFILE.i8a8,
+              linear: { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 6 },
+            },
           },
-        }),
+        ),
         "i8a8.linear",
       ],
     ];
@@ -828,7 +842,7 @@ const withFakeAdapter = async (
 /** コールバックの戻りの型を外れて来る値（JS の呼び手・async 関数）を、型検査を経ずに渡すための口。 */
 const untypedCallback = (
   returned: unknown,
-): (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined =>
+): ((adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined) =>
   // テスト専用の境界: 型が拒む戻り（Promise など）を、型の外から来る値として再現する
   (() => returned) as unknown as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined;
 
@@ -918,7 +932,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
           geometryProfile: () => {
             throw thrown;
           },
-        })
+        }),
       );
       assertStrictEquals(caught, thrown);
     });
@@ -995,16 +1009,14 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     assert(typeof foreignAsync === "function");
     process.on("unhandledRejection", onUnhandled);
     try {
-      for (
-        const [name, callback] of [
-          // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
-          [
-            "async 関数",
-            foreignAsync as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined,
-          ],
-          ["reject 済みの Promise", untypedCallback(foreignRejected)],
-        ] as const
-      ) {
+      for (const [name, callback] of [
+        // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
+        [
+          "async 関数",
+          foreignAsync as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined,
+        ],
+        ["reject 済みの Promise", untypedCallback(foreignRejected)],
+      ] as const) {
         const requests = await withFakeAdapter(FAKE_INFO, async () => {
           await assertRejects(
             () => acquireGpu({ geometryProfile: callback }),
@@ -1029,11 +1041,14 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       called += 1;
     };
     const thenables: readonly (readonly [string, unknown])[] = [
-      ["getter の then", {
-        get then() {
-          return then;
+      [
+        "getter の then",
+        {
+          get then() {
+            return then;
+          },
         },
-      }],
+      ],
       ["toStringTag が Promise", { [Symbol.toStringTag]: "Promise", then }],
     ];
     for (const [name, thenable] of thenables) {
@@ -1331,13 +1346,11 @@ describe("共有メモリの導出（純関数）は codegen の var<workgroup> 
 
   it("i8a8（linear・融合 attention ①QK / ③PV — 変数ごとの 16 バイト切り上げを含む）", () => {
     for (const geometry of SAMPLE_I8A8) {
-      for (
-        const [name, wgsl] of [
-          ["linear", linearI8a8Wgsl(true, true, geometry)],
-          ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", geometry)],
-          ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", geometry)],
-        ] as const
-      ) {
+      for (const [name, wgsl] of [
+        ["linear", linearI8a8Wgsl(true, true, geometry)],
+        ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", geometry)],
+        ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", geometry)],
+      ] as const) {
         assertEquals(
           i8a8WorkgroupStorageBytes(geometry),
           declaredWorkgroupBytes(wgsl),
@@ -1380,9 +1393,12 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     }, WEBGPU_DEFAULT_LIMITS);
     assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
     // 対照: 上限は定数ではなく adapter の limits — 1024 invocation の adapter では通る
-    const allowed = await withCountingGpu(async () => {
-      await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
-    }, { ...WEBGPU_DEFAULT_LIMITS, maxComputeInvocationsPerWorkgroup: 1024 });
+    const allowed = await withCountingGpu(
+      async () => {
+        await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
+      },
+      { ...WEBGPU_DEFAULT_LIMITS, maxComputeInvocationsPerWorkgroup: 1024 },
+    );
     assertEquals(allowed, 1);
   });
 
@@ -1390,17 +1406,20 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     const profile = profileOf("size-x", undefined, {
       attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
     });
-    const requests = await withCountingGpu(async () => {
-      await assertRejects(
-        () => acquireGpu({ geometryProfile: profile }),
-        GpuFeatureError,
-        "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgX 32 が maxComputeWorkgroupSizeX 16 を超える",
-      );
-    }, {
-      ...WEBGPU_DEFAULT_LIMITS,
-      maxComputeInvocationsPerWorkgroup: 1024,
-      maxComputeWorkgroupSizeX: 16,
-    });
+    const requests = await withCountingGpu(
+      async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: profile }),
+          GpuFeatureError,
+          "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgX 32 が maxComputeWorkgroupSizeX 16 を超える",
+        );
+      },
+      {
+        ...WEBGPU_DEFAULT_LIMITS,
+        maxComputeInvocationsPerWorkgroup: 1024,
+        maxComputeWorkgroupSizeX: 16,
+      },
+    );
     assertEquals(requests, 0);
   });
 
@@ -1408,17 +1427,20 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     const profile = profileOf("size-y", undefined, {
       attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
     });
-    const requests = await withCountingGpu(async () => {
-      await assertRejects(
-        () => acquireGpu({ geometryProfile: profile }),
-        GpuFeatureError,
-        "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgY 16 が maxComputeWorkgroupSizeY 8 を超える",
-      );
-    }, {
-      ...WEBGPU_DEFAULT_LIMITS,
-      maxComputeInvocationsPerWorkgroup: 1024,
-      maxComputeWorkgroupSizeY: 8,
-    });
+    const requests = await withCountingGpu(
+      async () => {
+        await assertRejects(
+          () => acquireGpu({ geometryProfile: profile }),
+          GpuFeatureError,
+          "attention.qk（regM=8 regN=4 wgX=32 wgY=16）: wgY 16 が maxComputeWorkgroupSizeY 8 を超える",
+        );
+      },
+      {
+        ...WEBGPU_DEFAULT_LIMITS,
+        maxComputeInvocationsPerWorkgroup: 1024,
+        maxComputeWorkgroupSizeY: 8,
+      },
+    );
     assertEquals(requests, 0);
   });
 
@@ -1445,9 +1467,12 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
       );
     }, WEBGPU_DEFAULT_LIMITS);
     assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
-    const allowed = await withCountingGpu(async () => {
-      await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
-    }, { ...WEBGPU_DEFAULT_LIMITS, maxComputeWorkgroupStorageSize: 32_768 });
+    const allowed = await withCountingGpu(
+      async () => {
+        await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
+      },
+      { ...WEBGPU_DEFAULT_LIMITS, maxComputeWorkgroupStorageSize: 32_768 },
+    );
     assertEquals(allowed, 1);
   });
 

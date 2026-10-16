@@ -117,8 +117,7 @@ const SERIES: readonly Series[] = [
   { name: "birefnet-hr-1024-f16", generate: `${EXPORT_PREFIX} --dtype f16 --real-images` },
   {
     name: "lucida-1024-f16",
-    generate:
-      `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
+    generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
   },
 ];
 
@@ -226,7 +225,7 @@ const goldenCount = (series: Series): number =>
  * MUST: NotFound 以外は伝播させる（`exists` と同じ理由）。
  */
 const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) =>
-  exists(new URL(entry.file, CORPUS_DIR))
+  exists(new URL(entry.file, CORPUS_DIR)),
 );
 
 const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
@@ -320,7 +319,8 @@ for (const series of SERIES) {
 
   for (const entry of REAL_CASES) {
     test({
-      name: `BiRefNet 実画像前処理パリティ: ${series.name} / ${entry.name}` +
+      name:
+        `BiRefNet 実画像前処理パリティ: ${series.name} / ${entry.name}` +
         "（TS の畳んだ正規化 対 handler.py の 2 段）",
       ignore: !realAvailable,
       fn: async () => {
@@ -379,7 +379,8 @@ for (const series of SERIES) {
   }
 
   test({
-    name: `BiRefNet 実画像 判別: ${series.name} — 顕著物体のある 2 枚の前景比が無い 2 枚を` +
+    name:
+      `BiRefNet 実画像 判別: ${series.name} — 顕著物体のある 2 枚の前景比が無い 2 枚を` +
       "上回る（マット PNG も書く）",
     ignore: !realAvailable || !GPU_AVAILABLE,
     fn: async () => {
@@ -435,9 +436,11 @@ for (const series of SERIES) {
                 height,
               );
               const pixels = normalizeToNchw(image, IMAGE_MEAN, IMAGE_STD);
-              const output = (await session.run({
-                [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
-              }))[outputName];
+              const output = (
+                await session.run({
+                  [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
+                })
+              )[outputName];
               // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
               assert(output.dtype === "f32", `${real.name}: マットの dtype が ${output.dtype}`);
               ratios.set(real.name, foregroundRatio(output.data));
@@ -515,9 +518,10 @@ for (const series of SERIES) {
         id: series.name,
         status: mismatches.length === 0 ? "pass" : "fail",
         elapsedMs: elapsedMs(),
-        note: mismatches.length === 0
-          ? ratioNote()
-          : `${ratioNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
+        note:
+          mismatches.length === 0
+            ? ratioNote()
+            : `${ratioNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
       });
       console.log(
         `[karume] BiRefNet のマットを ${results.dir.pathname} へ書いた` +
@@ -526,9 +530,9 @@ for (const series of SERIES) {
       // 決着は画像ごと・系列ごとに積み終えている（先に投げると実測 sha が結果に残らない）。
       assert(
         mismatches.length === 0,
-        mismatches.map(({ label, settlement }) =>
-          referenceMismatchMessage(label, settlement, references)
-        ).join("\n"),
+        mismatches
+          .map(({ label, settlement }) => referenceMismatchMessage(label, settlement, references))
+          .join("\n"),
       );
     },
   });
@@ -538,7 +542,7 @@ for (const series of SERIES) {
 // 数えない — 節ごと SKIP しているため）。
 const RUNNABLE = GPU_AVAILABLE && RUNNABLE_SERIES.length > 0;
 const CASE_IDS: readonly string[] = RUNNABLE_SERIES.flatMap((series) =>
-  REAL_CASES.map((entry) => referenceCaseId(series, entry.name))
+  REAL_CASES.map((entry) => referenceCaseId(series, entry.name)),
 );
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 // 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。

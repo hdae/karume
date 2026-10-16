@@ -75,12 +75,12 @@ const tokenizer = new Umt5Tokenizer(t5Tables);
 
 /** 拒否の理由 → メッセージの目印（理由ごとに他の理由の文言に現れない綴り）。 */
 const REJECT_MARKERS: Record<string, string> = {
-  "oov": "語彙に無い文字列",
+  oov: "語彙に無い文字列",
   "too-long": `上限 ${UMT5_MAX_LENGTH}`,
   "too-short": `最低 ${UMT5_MIN_TOKENS}`,
   "added-token": "特殊トークン",
-  "metaspace": "U+2581",
-  "whitespace": "U+0020",
+  metaspace: "U+2581",
+  whitespace: "U+0020",
 };
 
 /** recipe が焼いた実資産（全語彙 — 在れば部分集合の格子に依らない突合も回す）。 */
@@ -103,11 +103,7 @@ const caseById = (id: string): FixtureCase => {
 };
 
 /** 拒否の期待（理由の目印を含む `ModelInputError`）。 */
-const assertRejected = (
-  run: () => unknown,
-  reason: string,
-  message?: string,
-): ModelInputError => {
+const assertRejected = (run: () => unknown, reason: string, message?: string): ModelInputError => {
   const marker = REJECT_MARKERS[reason];
   assert(marker !== undefined, `未知の拒否の理由 ${reason}`);
   return assertThrows(run, ModelInputError, marker, message);
@@ -157,11 +153,7 @@ test("下限: 2 トークンは受理・空文字（</s> だけ）は拒む", ()
 });
 
 test("空白: 先頭と語の間の U+0020 は受け、末尾の U+0020 と U+0020 以外の空白は拒む", () => {
-  assertEquals(
-    [...tokenizer.tokenize("  a cat")],
-    caseById("leading-spaces").ids,
-    "先頭の U+0020",
-  );
+  assertEquals([...tokenizer.tokenize("  a cat")], caseById("leading-spaces").ids, "先頭の U+0020");
   assertEquals(
     [...tokenizer.tokenize("a   cat  sits")],
     caseById("inner-spaces").ids,
@@ -190,9 +182,11 @@ test("拒否の文言に呼び手のラベルが出る・孤立サロゲート�
 
 /** Wan のパリティ用フィクスチャの空白集合（Wan の資産の `space` — 前処理の後に通すトークナイザの表）。 */
 const wanSpace: CodeRanges = parseCodeRanges(
-  (JSON.parse(
-    await readTextFile(new URL("./fixtures/wan-text/parity.json", import.meta.url)),
-  ) as { readonly t5: { readonly space: unknown } }).t5.space,
+  (
+    JSON.parse(await readTextFile(new URL("./fixtures/wan-text/parity.json", import.meta.url))) as {
+      readonly t5: { readonly space: unknown };
+    }
+  ).t5.space,
   "wan.space",
 );
 
@@ -233,8 +227,16 @@ const minimalAsset = (patch: Record<string, unknown> = {}): Record<string, unkno
   maxLength: 512,
   unkId: 2,
   eosId: 1,
-  addedTokens: [["<pad>", 0], ["</s>", 1], ["<s>", 2], ["<unk>", 3]],
-  space: [[0x09, 0x0d], [0x20, 0x20]],
+  addedTokens: [
+    ["<pad>", 0],
+    ["</s>", 1],
+    ["<s>", 2],
+    ["<unk>", 3],
+  ],
+  space: [
+    [0x09, 0x0d],
+    [0x20, 0x20],
+  ],
   vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁",
   scores: [0, 0, 0, 0, -1, -2],
   ...patch,
@@ -267,13 +269,18 @@ test("parseUmt5TokenizerAsset: 知らない形式の版は読まない（Wan の
 test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではない素の Error）", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
     ["スコアの本数違い", { scores: [0, 0, 0, 0, -1] }, "scores の長さ"],
-    [
-      "語彙の重複行",
-      { vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁cat" },
-      "重複は配布の破損",
-    ],
+    ["語彙の重複行", { vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁cat" }, "重複は配布の破損"],
     ["非有限のスコア", { scores: [0, 0, 0, 0, -1, Number.NaN] }, "有限"],
-    ["空白の表の重なり", { space: [[0x09, 0x20], [0x20, 0x20]] }, "重なる"],
+    [
+      "空白の表の重なり",
+      {
+        space: [
+          [0x09, 0x20],
+          [0x20, 0x20],
+        ],
+      },
+      "重なる",
+    ],
     ["最大長が無い", { maxLength: undefined }, "maxLength"],
     ["eos が語彙の外", { eosId: 6 }, "eosId"],
   ];

@@ -151,11 +151,8 @@ const declaredScaleBytes = (count: number, where: string): number => {
  * 静かに割れる（割れても `found.record.length === pieceBytes` の突合は両方が同じ誤りを
  * 持つぶん恒真になる）。
  */
-export const pieceRowBytes = (
-  codec: CodecName,
-  shape: readonly number[],
-  where: string,
-): number => rowBytesOfPayload(declaredPayloadBytes(codec, numelOf(shape), where), shape, where);
+export const pieceRowBytes = (codec: CodecName, shape: readonly number[], where: string): number =>
+  rowBytesOfPayload(declaredPayloadBytes(codec, numelOf(shape), where), shape, where);
 
 /** {@link pieceRowBytes} の本体（payload を既に持っている呼び手が再計算を避けるための口）。 */
 const rowBytesOfPayload = (payload: number, shape: readonly number[], where: string): number => {
@@ -172,15 +169,13 @@ const planSupply = (
   where: string,
   dtype: IrDtype,
   shape: readonly number[],
-  supply:
-    & { readonly encoding: Encoding }
-    & (
-      | { readonly block: string; readonly pieces?: undefined }
-      | {
+  supply: { readonly encoding: Encoding } & (
+    | { readonly block: string; readonly pieces?: undefined }
+    | {
         readonly block?: undefined;
         readonly pieces: WeightSupply extends { pieces?: infer P } ? NonNullable<P> : never;
       }
-    ),
+  ),
   locate: Locator,
   origin: InitializerSupply["origin"],
 ): InitializerSupply => {
@@ -192,9 +187,9 @@ const planSupply = (
   const numel = numelOf(shape);
   if (entry.layout === "i2" && !isI2Shape(shape)) {
     fail(
-      `${where}: codec '${encoding.codec}' は正の rank 2・行長 16 の倍数の宣言 shape が要る（[${
-        shape.join(",")
-      }]）`,
+      `${where}: codec '${encoding.codec}' は正の rank 2・行長 16 の倍数の宣言 shape が要る（[${shape.join(
+        ",",
+      )}]）`,
     );
   }
   const payload = declaredPayloadBytes(encoding.codec, numel, where);
@@ -303,9 +298,9 @@ const planSupply = (
   const groupSize = encoding.groupSize ?? 0;
   if (!entry.rowAxes.some((axis) => axis === rowAxis)) {
     fail(
-      `${where}: codec '${encoding.codec}' の rowAxis は ${
-        entry.rowAxes.join(" / ")
-      } だけ（宣言は ${rowAxis} — container-v1 §6.3）`,
+      `${where}: codec '${encoding.codec}' の rowAxis は ${entry.rowAxes.join(
+        " / ",
+      )} だけ（宣言は ${rowAxis} — container-v1 §6.3）`,
     );
   }
   if (shape.length === 0 || (rowAxis === 1 && shape.length < 2)) {
@@ -317,17 +312,17 @@ const planSupply = (
   // 0 / 0 の「行長 NaN」という別の層・別の文言で落ちる。供給元に依らずここで落とす。
   if (rowCount === 0) {
     fail(
-      `${where}: 行数 0（shape[${rowAxis}] = 0）の量子化重みは受理しない（宣言 shape [${
-        shape.join(",")
-      }] — 量子化行が 1 本も無い）`,
+      `${where}: 行数 0（shape[${rowAxis}] = 0）の量子化重みは受理しない（宣言 shape [${shape.join(
+        ",",
+      )}] — 量子化行が 1 本も無い）`,
     );
   }
   const rowLength = quantizedRowLength(shape, rowAxis);
   if (entry.grouping === "channel" && groupSize !== perChannelGroupSize(rowLength)) {
     fail(
-      `${where}: codec '${encoding.codec}' は per-channel なので groupSize は行長 ${
-        perChannelGroupSize(rowLength)
-      } に等しい MUST（宣言は ${groupSize}）`,
+      `${where}: codec '${encoding.codec}' は per-channel なので groupSize は行長 ${perChannelGroupSize(
+        rowLength,
+      )} に等しい MUST（宣言は ${groupSize}）`,
     );
   }
   if (entry.grouping === "group") {
@@ -459,12 +454,12 @@ export const bindDeclarations = (input: {
         );
         continue;
       }
-      const graphBinding = binding !== undefined && Object.hasOwn(binding, graphName)
-        ? binding[graphName]
-        : undefined;
-      const supply = graphBinding !== undefined && Object.hasOwn(graphBinding, name)
-        ? graphBinding[name]
-        : undefined;
+      const graphBinding =
+        binding !== undefined && Object.hasOwn(binding, graphName) ? binding[graphName] : undefined;
+      const supply =
+        graphBinding !== undefined && Object.hasOwn(graphBinding, name)
+          ? graphBinding[name]
+          : undefined;
       if (supply === undefined) {
         // krg（束縛表を持たない）で const 以外の initializer は「重みが要る」宣言 — 供給計画は無い。
         if (binding === undefined) continue;

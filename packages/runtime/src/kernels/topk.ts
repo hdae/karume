@@ -117,9 +117,9 @@ export const assertTopkK = (k: number, storageLimitBytes: number, where: string)
   const max = topkMaxK(storageLimitBytes);
   if (k > max) {
     throw new CodegenError(
-      `${where}: topk の k=${k} が実装上限 ${max} を超える（workgroup storage ${
-        topkWorkgroupStorageBytes(k)
-      } バイトが要るが device 上限は ${storageLimitBytes} バイト・1 行 ${TOPK_WORKGROUP_SIZE} レーン）`,
+      `${where}: topk の k=${k} が実装上限 ${max} を超える（workgroup storage ${topkWorkgroupStorageBytes(
+        k,
+      )} バイトが要るが device 上限は ${storageLimitBytes} バイト・1 行 ${TOPK_WORKGROUP_SIZE} レーン）`,
     );
   }
 };

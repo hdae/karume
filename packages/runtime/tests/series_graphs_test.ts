@@ -22,21 +22,13 @@ test("seriesGraph は表どおりのグラフ名を返す（根直下と部品�
 });
 
 test("seriesGraph は表に無い系列を名指しで落とす", () => {
-  const error = assertThrows(
-    () => seriesGraph("gemma4-e2b-produkt"),
-    Error,
-    "gemma4-e2b-produkt",
-  );
+  const error = assertThrows(() => seriesGraph("gemma4-e2b-produkt"), Error, "gemma4-e2b-produkt");
   // 在る綴りを一緒に出す（打ち間違いは一覧が無いと直せない）。
   assertEquals(error.message.includes("gemma4-e2b-product"), true, error.message);
 });
 
 test("seriesGraph は表に在る系列でも、表に無い部品を落とす", () => {
-  const error = assertThrows(
-    () => seriesGraph("dacvae-32dim", "decoders"),
-    Error,
-    "decoders",
-  );
+  const error = assertThrows(() => seriesGraph("dacvae-32dim", "decoders"), Error, "decoders");
   assertEquals(error.message.includes("decoder"), true, error.message);
 });
 
@@ -61,7 +53,7 @@ test("表のグラフ名はすべて容器のグラフ名語彙に収まる", ()
   const outside = Object.entries(SERIES_GRAPHS).flatMap(([series, components]) =>
     Object.entries(components)
       .filter(([, graph]) => !GRAPH_NAME_PATTERN.test(graph))
-      .map(([component, graph]) => `${series}/${component}: ${graph}`)
+      .map(([component, graph]) => `${series}/${component}: ${graph}`),
   );
   assertEquals(outside, [], `グラフ名の語彙（${GRAPH_NAME_PATTERN}）から外れた行`);
 });

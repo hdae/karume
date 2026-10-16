@@ -112,7 +112,8 @@ export const gemmCandidates = (): GemmCandidate[] => {
         for (const wgY of [4, 8, 16]) {
           const geometry: GemmGeometry = { regM, regN, wgX, wgY };
           if (
-            gemmThreads(geometry) <= MAX_THREADS && gemmTileM(geometry) <= MAX_TILE &&
+            gemmThreads(geometry) <= MAX_THREADS &&
+            gemmTileM(geometry) <= MAX_TILE &&
             gemmTileN(geometry) <= MAX_TILE &&
             passes(() => assertGemmGeometry(geometry, "geometry-sweep"))
           ) {
@@ -235,7 +236,7 @@ export const quickPlusI8a8Candidates = (): I8a8Candidate[] =>
 export const CANDIDATE_SETS = ["quick+", "quick", "full"] as const;
 
 /** 候補集合（`quick` / `quick+` / `full` — {@link CANDIDATE_SETS}）。 */
-export type CandidateSet = typeof CANDIDATE_SETS[number];
+export type CandidateSet = (typeof CANDIDATE_SETS)[number];
 
 /** 集合を指定しないときの既定（`quick+` — 登録済みの表の幾何まで quick の時間で測る）。 */
 export const DEFAULT_CANDIDATE_SET: CandidateSet = "quick+";
@@ -248,21 +249,21 @@ export const gemmCandidatesIn = (set: CandidateSet): GemmCandidate[] =>
   set === "quick"
     ? quickGemmCandidates()
     : set === "quick+"
-    ? quickPlusGemmCandidates()
-    : gemmCandidates();
+      ? quickPlusGemmCandidates()
+      : gemmCandidates();
 
 /** conv2d の implicit GEMM の集合。 */
 export const conv2dCandidatesIn = (set: CandidateSet): GemmCandidate[] =>
   set === "quick"
     ? quickConv2dCandidates()
     : set === "quick+"
-    ? quickPlusConv2dCandidates()
-    : conv2dCandidates();
+      ? quickPlusConv2dCandidates()
+      : conv2dCandidates();
 
 /** i8a8 族の集合。 */
 export const i8a8CandidatesIn = (set: CandidateSet): I8a8Candidate[] =>
   set === "quick"
     ? quickI8a8Candidates()
     : set === "quick+"
-    ? quickPlusI8a8Candidates()
-    : i8a8Candidates();
+      ? quickPlusI8a8Candidates()
+      : i8a8Candidates();

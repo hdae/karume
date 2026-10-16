@@ -5,10 +5,7 @@
   "localMain": "4dca96af3bee228065c9ece1b0826f23f7822f7f",
   "head": "c014231cd4b1875870674f3bf20247a4cf7cbc41",
   "mainAncestor": true,
-  "leftRight": [
-    "0",
-    "62"
-  ],
+  "leftRight": ["0", "62"],
   "commitCount": 62,
   "fileCount": 356,
   "groups": {

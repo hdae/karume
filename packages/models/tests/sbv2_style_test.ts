@@ -52,12 +52,14 @@ const styleTableAsset = (
   rows: readonly (readonly number[])[],
   name: string = STYLE_TENSOR,
 ): ArrayBuffer =>
-  buildSafetensors([{
-    name,
-    dtype: "F32",
-    shape: [rows.length, rows[0].length],
-    data: f32Bytes(rows.flat()),
-  }]);
+  buildSafetensors([
+    {
+      name,
+      dtype: "F32",
+      shape: [rows.length, rows[0].length],
+      data: f32Bytes(rows.flat()),
+    },
+  ]);
 
 test("スタイル表の解釈: 行数・列数は現物の safetensors が決める", async (t) => {
   await t.step("shape をそのまま [行, 列] として読み、値は行優先で並ぶ", () => {
@@ -92,31 +94,34 @@ test("スタイル表の解釈: 行数・列数は現物の safetensors が決�
   });
 
   await t.step("F32 でない表は落ちる（バイト解釈がずれれば全ての行が別物）", () => {
-    const buffer = buildSafetensors([{
-      name: STYLE_TENSOR,
-      dtype: "F16",
-      shape: [4, COLS],
-      data: new Uint8Array(4 * COLS * 2),
-    }]);
+    const buffer = buildSafetensors([
+      {
+        name: STYLE_TENSOR,
+        dtype: "F16",
+        shape: [4, COLS],
+        data: new Uint8Array(4 * COLS * 2),
+      },
+    ]);
     assertThrows(() => parseSbv2Table(buffer, STYLE_TENSOR), Error, "F32 でない");
   });
 
   await t.step("2 次元でない表は落ちる（行の切り出し幅が決まらない）", () => {
-    const buffer = buildSafetensors([{
-      name: STYLE_TENSOR,
-      dtype: "F32",
-      shape: [4 * COLS],
-      data: f32Bytes(STYLE_TABLE),
-    }]);
+    const buffer = buildSafetensors([
+      {
+        name: STYLE_TENSOR,
+        dtype: "F32",
+        shape: [4 * COLS],
+        data: f32Bytes(STYLE_TABLE),
+      },
+    ]);
     assertThrows(() => parseSbv2Table(buffer, STYLE_TENSOR), Error, "2 次元でない");
   });
 });
 
 test("スタイル混合 mean + (picked − mean)·weight: mean は行 0", async (t) => {
-  const mix = (
-    index: number,
-    weight: number,
-  ): number[] => [...styleVector(STYLE_TABLE, STYLE_ROWS.length, COLS, index, weight).data];
+  const mix = (index: number, weight: number): number[] => [
+    ...styleVector(STYLE_TABLE, STYLE_ROWS.length, COLS, index, weight).data,
+  ];
 
   await t.step("weight 1 は選んだ行そのもの（[1, cols] の f32 テンソル）", () => {
     const tensor = styleVector(STYLE_TABLE, STYLE_ROWS.length, COLS, 2, 1);

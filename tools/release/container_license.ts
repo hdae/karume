@@ -108,15 +108,17 @@ export const readPart0License = async (path: string): Promise<string | undefined
       throw new ContainerLicenseError(`${path}: モデル記述が JSON として読めない`, { cause });
     }
     if (
-      typeof model !== "object" || model === null ||
+      typeof model !== "object" ||
+      model === null ||
       (model as { format?: unknown }).format !== "karume-model"
     ) {
       throw new ContainerLicenseError(`${path}: モデル記述の format が karume-model でない`);
     }
     const provenance = (model as { provenance?: unknown }).provenance;
-    const license = typeof provenance === "object" && provenance !== null
-      ? (provenance as { license?: unknown }).license
-      : undefined;
+    const license =
+      typeof provenance === "object" && provenance !== null
+        ? (provenance as { license?: unknown }).license
+        : undefined;
     if (typeof license !== "string" || license === "") {
       throw new ContainerLicenseError(`${path}: provenance.license が無い`);
     }

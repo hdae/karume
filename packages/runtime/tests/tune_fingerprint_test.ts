@@ -65,14 +65,12 @@ describe("fnv1a64Hex", () => {
   });
 
   it("多バイト文字・長い文字列でも BigInt の素朴な実装と一致する（UTF-8 のバイト列のハッシュ）", () => {
-    for (
-      const text of [
-        "幾何プロファイル",
-        "\u0000￿\u{1f600}",
-        "x".repeat(10_000),
-        JSON.stringify(SWEEP_CASES),
-      ]
-    ) {
+    for (const text of [
+      "幾何プロファイル",
+      "\u0000￿\u{1f600}",
+      "x".repeat(10_000),
+      JSON.stringify(SWEEP_CASES),
+    ]) {
       assertEquals(fnv1a64Hex(text), referenceFnv1a64(text), text.slice(0, 16));
     }
   });
@@ -98,7 +96,7 @@ const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, Geometr
     variants.set(`gemmRows[${index}]`, {
       ...base,
       gemmRows: base.gemmRows.map((entry, at) =>
-        at === index ? { ...entry, geometry: another(rule.geometry, gemm) } : entry
+        at === index ? { ...entry, geometry: another(rule.geometry, gemm) } : entry,
       ),
     });
   });
@@ -189,9 +187,10 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
       ...DEFAULT_GEOMETRY_PROFILE,
       gemmRows: PROFILE_GEMM_ROWS_BOUNDS.map((maxRows) => ({
         maxRows,
-        geometry: (DEFAULT_GEOMETRY_PROFILE.gemmRows.find((rule) => maxRows <= rule.maxRows) ??
-          DEFAULT_GEOMETRY_PROFILE.gemmRows[DEFAULT_GEOMETRY_PROFILE.gemmRows.length - 1])
-          .geometry,
+        geometry: (
+          DEFAULT_GEOMETRY_PROFILE.gemmRows.find((rule) => maxRows <= rule.maxRows) ??
+          DEFAULT_GEOMETRY_PROFILE.gemmRows[DEFAULT_GEOMETRY_PROFILE.gemmRows.length - 1]
+        ).geometry,
       })),
     };
     assertEquals(geometryProfileKernelsId(refined), value);
@@ -206,8 +205,8 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     const shifted: CasePlanner = (sweepCase, limit, dp4a) => {
       const plan = casePlan(sweepCase, limit, dp4a);
       if (sweepCase !== target) return plan;
-      const candidate = quickGemmCandidates().find(({ name }) =>
-        name !== plan.defaultCandidate.name
+      const candidate = quickGemmCandidates().find(
+        ({ name }) => name !== plan.defaultCandidate.name,
       );
       assert(candidate !== undefined);
       return { ...plan, defaultCandidate: candidate };
@@ -244,13 +243,14 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
     // 全ケースの launch のうち 1 欄だけを差し替えた case plan（その欄だけが違う runtime を模す）
     const altered =
-      (change: (launch: Launch) => Launch): CasePlanner => (sweepCase, limit, dp4a) => {
+      (change: (launch: Launch) => Launch): CasePlanner =>
+      (sweepCase, limit, dp4a) => {
         const plan = casePlan(sweepCase, limit, dp4a);
         return { ...plan, launch: (candidate) => change(plan.launch(candidate)) };
       };
     const params = altered((launch) => ({
       ...launch,
-      params: Uint32Array.from(launch.params, (value, index) => index === 0 ? value + 1 : value),
+      params: Uint32Array.from(launch.params, (value, index) => (index === 0 ? value + 1 : value)),
     }));
     const workgroups = altered((launch) => ({
       ...launch,
@@ -272,15 +272,13 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     };
     const error = assertThrows(() => geometryProfileKernelsId(narrow), KernelsIdError);
     assertInstanceOf(error.cause, DispatchLimitError);
-    for (
-      const part of [
-        "conv2d-c96-512x512",
-        "表 'narrow' の conv2d.rows32",
-        '{"regM":1,"regN":4,"wgX":1,"wgY":16}',
-        "65535",
-        "全 device に保証する",
-      ]
-    ) {
+    for (const part of [
+      "conv2d-c96-512x512",
+      "表 'narrow' の conv2d.rows32",
+      '{"regM":1,"regN":4,"wgX":1,"wgY":16}',
+      "65535",
+      "全 device に保証する",
+    ]) {
       assertStringIncludes(error.message, part);
     }
   });
@@ -315,10 +313,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
     return found;
   };
   /** ケースを候補の全幾何で測った行（書き手の行の形のうち指紋が読む欄）。 */
-  const rowsOf = (
-    sweepCase: SweepCase,
-    candidates: readonly GeometryCandidate[],
-  ): MeasuredRow[] =>
+  const rowsOf = (sweepCase: SweepCase, candidates: readonly GeometryCandidate[]): MeasuredRow[] =>
     candidates.map((candidate) => ({ caseId: sweepCase.id, geometryParams: candidate.geometry }));
   const LINEAR = caseOf("linear");
   const I8A8 = caseOf("i8a8-linear");
@@ -399,7 +394,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
       rowsOf(sweepCase, [
         casePlan(sweepCase, 65535, false).defaultCandidate,
         ...candidatesFor(sweepCase, "full"),
-      ])
+      ]),
     );
     for (const dp4a of [false, true]) {
       assertMatch(sweepCandidateKernelsId(rows, dp4a), /^[0-9a-f]{16}$/);
@@ -473,10 +468,7 @@ describe("sweepCaseSetId: ケース集合の版", () => {
     assertNotEquals(replaced(conv2d, { ...conv2dCase, width: 64 }), base, "width");
     assertNotEquals(caseSetId(SWEEP_CASES, [16, 32, 64, 512, Number.POSITIVE_INFINITY]), base);
     // 末尾の Infinity も値として数える（素の JSON.stringify は null に落とし、別の値と区別しない）
-    assertNotEquals(
-      caseSetId(SWEEP_CASES, [...PROFILE_GEMM_ROWS_BOUNDS.slice(0, -1), 1024]),
-      base,
-    );
+    assertNotEquals(caseSetId(SWEEP_CASES, [...PROFILE_GEMM_ROWS_BOUNDS.slice(0, -1), 1024]), base);
   });
 
   it("説明などの情報の欄（source・censusCount・mirrorOf）だけを変えても値は変わらない", () => {
@@ -485,10 +477,10 @@ describe("sweepCaseSetId: ケース集合の版", () => {
       sweepCase.op === "matmul"
         ? { ...sweepCase, source: `${sweepCase.source}（改）`, mirrorOf: "other" }
         : {
-          ...sweepCase,
-          source: `${sweepCase.source}（改）`,
-          censusCount: sweepCase.censusCount + 1,
-        }
+            ...sweepCase,
+            source: `${sweepCase.source}（改）`,
+            censusCount: sweepCase.censusCount + 1,
+          },
     );
     assertEquals(caseSetId(described, PROFILE_GEMM_ROWS_BOUNDS), base);
   });
@@ -505,7 +497,7 @@ describe("sweepCaseSetId: ケース集合の版", () => {
 
   it("ケースのキーの並びには依らない（正規の JSON）", () => {
     const reordered = SWEEP_CASES.map((sweepCase) =>
-      Object.fromEntries(Object.entries(sweepCase).reverse())
+      Object.fromEntries(Object.entries(sweepCase).reverse()),
     );
     assertEquals(canonicalJson(reordered), canonicalJson(SWEEP_CASES));
   });

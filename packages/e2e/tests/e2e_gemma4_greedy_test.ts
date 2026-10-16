@@ -481,9 +481,8 @@ const assertDecodeForm = (parsed: PreparedModel): void => {
   const storage: Record<string, number> = {};
   for (const initializer of Object.values(graph.initializers)) {
     // 共有 initializer（借り物）は格納を持たない。黙って落とさず `shared` として数える。
-    const layout = initializer.storage === undefined
-      ? "shared"
-      : codecLayout(initializer.storage.codec);
+    const layout =
+      initializer.storage === undefined ? "shared" : codecLayout(initializer.storage.codec);
     storage[layout] = (storage[layout] ?? 0) + 1;
   }
   for (const [layout, expected] of Object.entries({ i8: 36, i4: 276 })) {
@@ -813,8 +812,8 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
   // ④ 非 states の attention 系が 0 本（融合 attention の別族へ落ちていない）。
   assertEquals(
     entries
-      .filter((entry) =>
-        entry.key.startsWith("attention") && !entry.key.startsWith("attention_state")
+      .filter(
+        (entry) => entry.key.startsWith("attention") && !entry.key.startsWith("attention_state"),
       )
       .map((entry) => entry.key),
     [],
@@ -825,8 +824,8 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
   // 適格から落ちた重みは例外を出さず f32 展開されるので、キーの側からしか見えない。
   // M=1 の i4 linear は GEMV 族 `linear_gemv:`（ADR 0082）で走るので両族を拾う —
   // `linear:` 前置だけだと decode run の 276 本が検査から抜ける（ADR 0082 帰結の注意）。
-  const linear = entries.filter((entry) =>
-    entry.key.startsWith("linear:") || entry.key.startsWith("linear_gemv:")
+  const linear = entries.filter(
+    (entry) => entry.key.startsWith("linear:") || entry.key.startsWith("linear_gemv:"),
   );
   assert(linear.length > 0, `${where}: linear の内訳が無い（走った内訳: ${shown}）`);
   assertEquals(

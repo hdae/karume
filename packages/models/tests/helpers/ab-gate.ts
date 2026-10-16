@@ -44,15 +44,21 @@ export type AbMeasurement = {
 /** {@link referencePartnerOf} が読む manifest の部分（`Manifest` はこれに代入できる）。 */
 export type QuantTable = {
   readonly models: Readonly<
-    Record<string, {
-      readonly quants: Readonly<
-        Record<string, {
-          readonly weights: Readonly<Record<string, string>>;
-          readonly session: SessionSpec;
-          readonly gpuFeatures?: GpuFeaturesSpec;
-        }>
-      >;
-    }>
+    Record<
+      string,
+      {
+        readonly quants: Readonly<
+          Record<
+            string,
+            {
+              readonly weights: Readonly<Record<string, string>>;
+              readonly session: SessionSpec;
+              readonly gpuFeatures?: GpuFeaturesSpec;
+            }
+          >
+        >;
+      }
+    >
   >;
 };
 
@@ -62,9 +68,9 @@ type QuantEntry = QuantTable["models"][string]["quants"][string];
 export const quantOf = (manifest: QuantTable, model: string, quant: string): QuantEntry => {
   if (!Object.hasOwn(manifest.models, model)) {
     throw new Error(
-      `manifest に model '${model}' が無い（あるもの: ${
-        Object.keys(manifest.models).join(" / ")
-      }）`,
+      `manifest に model '${model}' が無い（あるもの: ${Object.keys(manifest.models).join(
+        " / ",
+      )}）`,
     );
   }
   const { quants } = manifest.models[model];
@@ -81,16 +87,18 @@ const sameWeights = (
   right: Readonly<Record<string, string>>,
 ): boolean => {
   const keys = Object.keys(left);
-  return keys.length === Object.keys(right).length &&
-    keys.every((key) => Object.hasOwn(right, key) && right[key] === left[key]);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && right[key] === left[key])
+  );
 };
 
 /** 要求が立っている feature 名（`shaderF16: false` は要求していないのと同じ）。 */
 const requiredFeatures = (features: GpuFeaturesSpec | undefined): ReadonlySet<string> =>
   new Set(
-    Object.entries(features ?? {}).filter(([, required]) => required === true).map(([name]) =>
-      name
-    ),
+    Object.entries(features ?? {})
+      .filter(([, required]) => required === true)
+      .map(([name]) => name),
   );
 
 /**
@@ -114,11 +122,13 @@ export const referencePartnerOf = (manifest: QuantTable, model: string, quant: s
   const candidates = Object.keys(quants).filter((name) => {
     if (name === quant) return false;
     const candidate = quants[name];
-    return sameWeights(candidate.weights, practical.weights) &&
+    return (
+      sameWeights(candidate.weights, practical.weights) &&
       Object.keys(candidate.session).length === 0 &&
       [...requiredFeatures(candidate.gpuFeatures)].every((feature) =>
-        practicalFeatures.has(feature)
-      );
+        practicalFeatures.has(feature),
+      )
+    );
   });
   if (candidates.length !== 1) {
     throw new Error(

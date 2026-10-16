@@ -76,7 +76,11 @@ test("decodeI8: バイト長・rank・broadcast・scale 要素数の違反を拒
 });
 
 test("alignI8Payload: 端数 1 / 2 / 3 を 4 の倍数までゼロ詰めし、整列済みはコピーしない", () => {
-  for (const [length, padded] of [[5, 8], [6, 8], [7, 8]] as const) {
+  for (const [length, padded] of [
+    [5, 8],
+    [6, 8],
+    [7, 8],
+  ] as const) {
     const bytes = new Uint8Array(Array.from({ length }, (_, i) => i + 1));
     const result = alignI8Payload(bytes);
     assertEquals(result.byteLength, padded, `${length} バイトの詰め先`);

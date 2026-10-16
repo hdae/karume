@@ -308,7 +308,7 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
   const batchRatio = (): number | undefined =>
     batchDelivered <= 0 || plainWall === undefined || plainWall <= 0
       ? undefined
-      : (batchWall / batchDelivered) / plainWall;
+      : batchWall / batchDelivered / plainWall;
 
   /**
    * plain へ倒す（ブロックが `confirm` 本連続で負けた / `earlyLeave` の席で 1 本が強い負けだった
@@ -420,9 +420,7 @@ const openGate = (knobs: GateKnobs, initial: GateState): SpeculationGate => {
   };
 };
 
-export const createSpeculationGate = (
-  options: SpeculationGateOptions = {},
-): SpeculationGate => {
+export const createSpeculationGate = (options: SpeculationGateOptions = {}): SpeculationGate => {
   const alpha = options.alpha ?? 0.2;
   const window = options.window ?? 16;
   const confirm = options.confirm ?? 2;

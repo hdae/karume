@@ -32,7 +32,8 @@ const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0
 /** 決着の staging（label `batch-readback`）の確保数と map 数を数える。 */
 const countStagings = (gpu: GpuContext): { stagings(): number; maps(): number } => {
   const create = gpu.device.createBuffer.bind(gpu.device);
-  let stagings = 0, maps = 0;
+  let stagings = 0,
+    maps = 0;
   gpu.device.createBuffer = (descriptor): GPUBuffer => {
     const buffer = create(descriptor);
     if (descriptor.label === "batch-readback") {
@@ -49,15 +50,20 @@ const countStagings = (gpu: GpuContext): { stagings(): number; maps(): number } 
 };
 
 test("batch enqueueRead: グラフ出力を終端の map 1 回で読み戻し run と同じ値を返す", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
-  const fences = countFences(gpu), staging = countStagings(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
+  const fences = countFences(gpu),
+    staging = countStagings(gpu);
   try {
     const expected = await target.run({ x0: input() });
     const before = fences.count();
     const batch = await gpu.beginBatch();
     const read = target.enqueueRead({ x0: input() }, { batch });
     let settled = false;
-    read.outputs.then(() => (settled = true), () => (settled = true));
+    read.outputs.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
     await read.admitted;
     await tick();
     assertEquals(settled, false, "決着前に outputs が解決した");
@@ -75,7 +81,9 @@ test("batch enqueueRead: グラフ出力を終端の map 1 回で読み戻し ru
 });
 
 test("batch enqueueRead: finishAndRead の常駐と同じ 1 本の staging に連結する", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu), sink = await gpu.createResident(12);
+  const gpu = await acquireGpu(),
+    target = await session(gpu),
+    sink = await gpu.createResident(12);
   const staging = countStagings(gpu);
   try {
     const batch = await gpu.beginBatch();
@@ -93,7 +101,8 @@ test("batch enqueueRead: finishAndRead の常駐と同じ 1 本の staging に�
 });
 
 test("batch enqueueRead: 同じ Session の後続 enqueue は決着まで拒否し、次の batch では通る", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   try {
     const batch = await gpu.beginBatch();
     const read = target.enqueueRead({ x0: input() }, { batch });
@@ -113,7 +122,8 @@ test("batch enqueueRead: 同じ Session の後続 enqueue は決着まで拒否�
 });
 
 test("batch enqueueRead: 受理の失敗は admitted と outputs の両方に出て finish にも帰属する", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   try {
     const wrong = { dtype: "f32", shape: [1], data: Float32Array.of(1) } satisfies Tensor;
     const batch = await gpu.beginBatch();
@@ -133,7 +143,8 @@ test("batch enqueueRead: 受理の失敗は admitted と outputs の両方に出
 });
 
 test("batch enqueueRead: 区間の GPU 失敗では outputs も拒否し成功データを返さない", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   const bad = new ResidentTensor(
     gpu,
     987653,
@@ -169,7 +180,8 @@ const aliasSession = async (gpu: GpuContext) =>
   );
 
 test("batch enqueueRead: 出力が常駐入力の別名なら受理で落ち、区間に何も積まない", async () => {
-  const gpu = await acquireGpu(), target = await aliasSession(gpu);
+  const gpu = await acquireGpu(),
+    target = await aliasSession(gpu);
   const resident = await gpu.createResident(16, "r");
   try {
     resident.write(Float32Array.of(1, 2, 3, 4));
@@ -196,7 +208,8 @@ test("batch enqueueRead: 出力が常駐入力の別名なら受理で落ち、�
 test("batch enqueueRead: ホスト入力の別名出力は通り、入力の値を返す", async () => {
   // ホスト入力の実体は backing 所有で、決着までの上書きは同じ Session の後続 enqueue だけ
   // （#readBatch が塞ぐ）なので許す。
-  const gpu = await acquireGpu(), target = await aliasSession(gpu);
+  const gpu = await acquireGpu(),
+    target = await aliasSession(gpu);
   try {
     const batch = await gpu.beginBatch();
     const read = target.enqueueRead(
@@ -213,7 +226,8 @@ test("batch enqueueRead: ホスト入力の別名出力は通り、入力の値�
 });
 
 test("batch enqueueRead: 決着前の Session.dispose は受付終了の前に拒否し、finish 後は通る", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   try {
     const expected = await target.run({ x0: input() });
     const batch = await gpu.beginBatch();

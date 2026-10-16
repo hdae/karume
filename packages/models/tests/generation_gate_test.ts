@@ -72,7 +72,7 @@ const run = (gate: SpeculationGate, walls: Walls, count: number): SpeculationDec
 
 /** 決定列の中で `plain` が出た添字。 */
 const plainAt = (decisions: readonly SpeculationDecision[]): number[] =>
-  decisions.flatMap((decision, index) => decision === "plain" ? [index] : []);
+  decisions.flatMap((decision, index) => (decision === "plain" ? [index] : []));
 
 /** 決定列のうち speculate の本数（= ブロック / バーストに積まれた cycle の数）。 */
 const speculateCount = (decisions: readonly SpeculationDecision[]): number =>
@@ -86,10 +86,7 @@ const speculateCount = (decisions: readonly SpeculationDecision[]): number =>
  * `W1` の測り直しを混ぜないためと、倒れた瞬間の step（決定は speculate・観測の後は plain）を
  * バーストに数えないためである。
  */
-const plainModeRuns = (
-  steps: readonly Observed[],
-  kind: SpeculationDecision,
-): number[] => {
+const plainModeRuns = (steps: readonly Observed[], kind: SpeculationDecision): number[] => {
   const lengths: number[] = [];
   let current = 0;
   for (const observed of steps) {
@@ -258,10 +255,10 @@ test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら�
   // 課題が変わって投機が勝つようになる → 間隔 16 ぶん plain を回した後、8 cycle のバーストで
   // 測る（当たりのバーストは満ちるまで回る = 打ち切りは負け側にしか効かない）。
   const steps = trace(gate, WINNING, 24);
-  assertEquals(steps.map((observed) => observed.decision), [
-    ...Array.from({ length: 16 }, () => "plain"),
-    ...Array.from({ length: 8 }, () => "speculate"),
-  ]);
+  assertEquals(
+    steps.map((observed) => observed.decision),
+    [...Array.from({ length: 16 }, () => "plain"), ...Array.from({ length: 8 }, () => "speculate")],
+  );
   assertEquals(
     steps.slice(16, 23).map((observed) => observed.mode),
     Array.from({ length: 7 }, () => "plain"),
@@ -352,13 +349,10 @@ test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step は�
   // 数える実装だと 1 手早く（決定 4 本目で）倒れる。
   const counted = createSpeculationGate({ window: 4, confirm: 1 });
   const steps = trace(counted, LOSING, 5);
-  assertEquals(steps.map((observed) => observed.mode), [
-    "speculate",
-    "speculate",
-    "speculate",
-    "speculate",
-    "plain",
-  ]);
+  assertEquals(
+    steps.map((observed) => observed.mode),
+    ["speculate", "speculate", "speculate", "speculate", "plain"],
+  );
   assertEquals(counted.switches, 1);
 });
 
@@ -396,11 +390,10 @@ test("ゲート T7 冪等: decide は状態を動かさない（切替は観測�
   // 古いまま出る）が緑のまま通る。
   await t.step("起点（まだ何も測っていない）", () => {
     const gate = createSpeculationGate();
-    assertEquals([gate.decide(), gate.decide(), gate.decide()], [
-      "speculate",
-      "speculate",
-      "speculate",
-    ]);
+    assertEquals(
+      [gate.decide(), gate.decide(), gate.decide()],
+      ["speculate", "speculate", "speculate"],
+    );
     assertEquals(gate.switches, 0);
   });
 
@@ -414,10 +407,11 @@ test("ゲート T7 冪等: decide は状態を動かさない（切替は観測�
     assertEquals(gate.switches, 1, "決定を読んだだけで切替が進んでいる");
 
     // 読みの回数は周期に効かないので、探索バーストはきっかり 17 手目に始まる。
-    assertEquals(run(gate, LOSING, 17), [
-      ...Array.from({ length: 16 }, () => "plain"),
-      "speculate",
-    ], "重複読みが探索の周期を進めている");
+    assertEquals(
+      run(gate, LOSING, 17),
+      [...Array.from({ length: 16 }, () => "plain"), "speculate"],
+      "重複読みが探索の周期を進めている",
+    );
     assertEquals(gate.switches, 1);
     assertEquals(gate.mode, "plain");
   });
@@ -465,8 +459,8 @@ type Condition = Walls & {
 
 const CONDITIONS: readonly Condition[] = [
   { name: "RTX 抽出", cycle: 53.7, delivered: 3.39, plain: 29.22, ratio: 0.542, mode: "speculate" },
-  { name: "RTX 要約", cycle: 55.8, delivered: 2.65, plain: 29.67, ratio: 0.710, mode: "speculate" },
-  { name: "RTX 対話", cycle: 46.8, delivered: 2.03, plain: 27.13, ratio: 0.850, mode: "speculate" },
+  { name: "RTX 要約", cycle: 55.8, delivered: 2.65, plain: 29.67, ratio: 0.71, mode: "speculate" },
+  { name: "RTX 対話", cycle: 46.8, delivered: 2.03, plain: 27.13, ratio: 0.85, mode: "speculate" },
   {
     name: "RTX 自由文",
     cycle: 46.5,
@@ -476,8 +470,8 @@ const CONDITIONS: readonly Condition[] = [
     mode: "plain",
     eagerBlocks: 2,
   },
-  { name: "M2 抽出", cycle: 172.4, delivered: 3.39, plain: 66.03, ratio: 0.770, mode: "speculate" },
-  { name: "M2 要約", cycle: 170.7, delivered: 2.65, plain: 66.39, ratio: 0.970, mode: "speculate" },
+  { name: "M2 抽出", cycle: 172.4, delivered: 3.39, plain: 66.03, ratio: 0.77, mode: "speculate" },
+  { name: "M2 要約", cycle: 170.7, delivered: 2.65, plain: 66.39, ratio: 0.97, mode: "speculate" },
   {
     name: "M2 対話",
     cycle: 123.0,
@@ -503,7 +497,7 @@ test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ�
     await t.step(`${condition.name}（比 ${condition.ratio}）`, () => {
       // 定数が research の表と同じものであること（表を写し間違えた瞬間に赤くなる）。
       assertAlmostEquals(
-        (condition.cycle / condition.delivered) / condition.plain,
+        condition.cycle / condition.delivered / condition.plain,
         condition.ratio,
         0.001,
         `${condition.name}: 壁の定数から出る比が表の値と違う`,
@@ -570,21 +564,13 @@ test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ�
 
 test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) => {
   await t.step("alpha は 0 < α ≤ 1", () => {
-    assertThrows(
-      () => createSpeculationGate({ alpha: 0 }),
-      Error,
-      "alpha 0 が正の有限数でない",
-    );
+    assertThrows(() => createSpeculationGate({ alpha: 0 }), Error, "alpha 0 が正の有限数でない");
     assertThrows(
       () => createSpeculationGate({ alpha: Number.NaN }),
       Error,
       "alpha NaN が正の有限数でない",
     );
-    assertThrows(
-      () => createSpeculationGate({ alpha: 1.5 }),
-      Error,
-      "alpha 1.5 が 0 < α ≤ 1 の外",
-    );
+    assertThrows(() => createSpeculationGate({ alpha: 1.5 }), Error, "alpha 1.5 が 0 < α ≤ 1 の外");
   });
 
   await t.step("ブロックは 2 cycle 以上（1 なら 1 サンプル判定に戻る）", () => {
@@ -606,11 +592,7 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
       Error,
       "confirm 0 が 1 以上の整数でない",
     );
-    assertThrows(
-      () => createSpeculationGate({ burst: 0 }),
-      Error,
-      "burst 0 が 1 以上の整数でない",
-    );
+    assertThrows(() => createSpeculationGate({ burst: 0 }), Error, "burst 0 が 1 以上の整数でない");
   });
 
   await t.step("打ち切りの下限は 1 以上 burst 以下の整数", () => {
@@ -635,16 +617,14 @@ test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) =
   });
 
   await t.step("強い負けの上乗せは 2 本とも正の有限数（早抜けは未指定 = off）", () => {
-    for (
-      const [name, value] of [
-        ["earlyLeave", 0],
-        ["earlyLeave", -1],
-        ["earlyLeave", Number.POSITIVE_INFINITY],
-        ["burstAbort", 0],
-        ["burstAbort", -1],
-        ["burstAbort", Number.POSITIVE_INFINITY],
-      ] as const
-    ) {
+    for (const [name, value] of [
+      ["earlyLeave", 0],
+      ["earlyLeave", -1],
+      ["earlyLeave", Number.POSITIVE_INFINITY],
+      ["burstAbort", 0],
+      ["burstAbort", -1],
+      ["burstAbort", Number.POSITIVE_INFINITY],
+    ] as const) {
       assertThrows(
         () => createSpeculationGate({ [name]: value }),
         Error,

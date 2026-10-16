@@ -225,10 +225,7 @@ const BINARY_BOOL: Readonly<Partial<Record<BinaryOpName, (a: boolean, b: boolean
 };
 
 /** dtype ごとの二項演算子（無い組み合わせは契約検査を通っていても参照実装が無い = 内部矛盾）。 */
-const binaryEvaluator = (
-  op: BinaryOpName,
-  dtype: IrDtype,
-): (a: number, b: number) => number => {
+const binaryEvaluator = (op: BinaryOpName, dtype: IrDtype): ((a: number, b: number) => number) => {
   if (dtype === "bool") {
     const logical = BINARY_BOOL[op];
     if (logical !== undefined) return (a, b) => (logical(a !== 0, b !== 0) ? 1 : 0);
@@ -259,7 +256,7 @@ export const referenceUnary = (
   }
   // MUST: スカラ attr は f32 へ丸めてから使う（GPU 側は params の f32 語で受け取る）。
   const scalars = scalarParamValues(contract, attrs, "reference").map((value) =>
-    Math.fround(value)
+    Math.fround(value),
   );
   const outDtype = outputDtypeOf(contract, 0, x.dtype, "reference");
   if (op === "ge_scalar" || op === "le_scalar" || op === "gt_scalar") {
@@ -341,9 +338,10 @@ export const referenceWhere = (cond: RefTensor, a: RefTensor, b: RefTensor): Ref
   const shape = computeOutputShape(contract, [cond.shape, a.shape, b.shape], "reference")[0];
   const values = new Array<number>(numel(shape));
   for (let i = 0; i < values.length; i += 1) {
-    values[i] = cond.data[broadcastIndex(i, shape, cond.shape)] !== 0
-      ? a.data[broadcastIndex(i, shape, a.shape)]
-      : b.data[broadcastIndex(i, shape, b.shape)];
+    values[i] =
+      cond.data[broadcastIndex(i, shape, cond.shape)] !== 0
+        ? a.data[broadcastIndex(i, shape, a.shape)]
+        : b.data[broadcastIndex(i, shape, b.shape)];
   }
   return materialize(outputDtypeOf(contract, 0, cond.dtype, "reference"), shape, values);
 };
@@ -505,11 +503,7 @@ const F32_MAX = Math.fround(3.402823466e38);
  * 側（−F32_MAX）と例外なしに値が割れる（tolerance は EXACT なので吸収されない）。有限入力は
  * 全て [−F32_MAX, F32_MAX] に入るので、この始点で値は 1 ビットも動かない。
  */
-export const referenceRowReduce = (
-  op: ReduceOpName,
-  x: RefTensor,
-  axis: number,
-): RefTensor => {
+export const referenceRowReduce = (op: ReduceOpName, x: RefTensor, axis: number): RefTensor => {
   const contract = resolveOpContract(op);
   assertDtype(contract, x.dtype, "reference");
   const attrs = { dim: axis };
@@ -764,9 +758,14 @@ export const referenceCat = (
 ): RefTensor => {
   const contract = resolveOpContract("cat");
   for (const input of inputs) assertDtype(contract, input.dtype, "reference");
-  const shape = computeOutputShape(contract, inputs.map((input) => input.shape), "reference", {
-    attrs,
-  })[0];
+  const shape = computeOutputShape(
+    contract,
+    inputs.map((input) => input.shape),
+    "reference",
+    {
+      attrs,
+    },
+  )[0];
   const dim = catDim(attrs, "reference");
   const rank = shape.length;
   const values = new Array<number | undefined>(numel(shape)).fill(undefined);
@@ -801,10 +800,7 @@ export const referenceCat = (
  * 判定して転写値か 0 を書く gather 形なので、同じ分岐を写すと境界の off-by-one が両側で
  * 相殺する。ゼロ領域が本当に 0 であること自体もこの形なら値で出る。
  */
-export const referencePad = (
-  x: RefTensor,
-  attrs: Readonly<Record<string, unknown>>,
-): RefTensor => {
+export const referencePad = (x: RefTensor, attrs: Readonly<Record<string, unknown>>): RefTensor => {
   const contract = resolveOpContract("pad");
   assertDtype(contract, x.dtype, "reference");
   const shape = computeOutputShape(contract, [x.shape], "reference", { attrs })[0];
@@ -874,9 +870,9 @@ export const referenceSymPrefixSlice = (x: RefTensor, shape: readonly number[]):
   target.forEach((extent, index) => {
     if (extent < 0 || extent > x.shape[index]) {
       throw new ReferenceOpError(
-        `sym_prefix_slice の prefix [${target.join(",")}] が定数 [${
-          x.shape.join(",")
-        }] に収まらない`,
+        `sym_prefix_slice の prefix [${target.join(",")}] が定数 [${x.shape.join(
+          ",",
+        )}] に収まらない`,
       );
     }
   });
@@ -1098,14 +1094,15 @@ export const referenceAttention = (
       for (let col = 0; col < cols; col += 1) {
         let acc = 0;
         for (let d = 0; d < depth; d += 1) {
-          acc += (q.data[qBase + row * depth + d] * scale) *
-            (k.data[kvBase + col * depth + d] * scale);
+          acc +=
+            q.data[qBase + row * depth + d] * scale * (k.data[kvBase + col * depth + d] * scale);
         }
         // mask は S を f32 へ丸めた**後**に足す（GPU 側の書き出し epilogue と同じ位置）。
         // mask は [1,1,M,N] なので添字にバッチが入らない = 全 head が同じ行を読む。
-        scores[col] = mask === undefined
-          ? Math.fround(acc)
-          : Math.fround(Math.fround(acc) + mask.data[row * cols + col]);
+        scores[col] =
+          mask === undefined
+            ? Math.fround(acc)
+            : Math.fround(Math.fround(acc) + mask.data[row * cols + col]);
       }
       // ② safe-softmax（amax を引く形 MUST — referenceSoftmax と同じ）。全列 −inf の行
       //（全マスク行）は P を全 0 に確定する — GPU 側 attention_stats v2 の空行ガードの鏡像
@@ -1226,7 +1223,8 @@ export const referenceConv1d = (
           for (let k = 0; k < kernel; k += 1) {
             const ix = ox * stride + k * dilation - padding;
             if (ix < 0 || ix >= lengthIn) continue;
-            acc += x.data[(item * channelsIn + icBase + icRel) * lengthIn + ix] *
+            acc +=
+              x.data[(item * channelsIn + icBase + icRel) * lengthIn + ix] *
               weight.data[(oc * inPerGroup + icRel) * kernel + k];
           }
         }
@@ -1287,7 +1285,8 @@ export const referenceConv2d = (
               for (let kw = 0; kw < kernelW; kw += 1) {
                 const ix = ox * stride[1] + kw * dilation[1] - padding[1];
                 if (ix < 0 || ix >= widthIn) continue;
-                acc += x.data[(plane + iy) * widthIn + ix] *
+                acc +=
+                  x.data[(plane + iy) * widthIn + ix] *
                   weight.data[(weightPlane + kh) * kernelW + kw];
               }
             }
@@ -1355,7 +1354,8 @@ export const referenceConv3d = (
                 for (let kw = 0; kw < kernelW; kw += 1) {
                   const ix = ox * stride[2] + kw * dilation[2] - padding[2];
                   if (ix < 0 || ix >= widthIn) continue;
-                  acc += x.data[(plane + iy) * widthIn + ix] *
+                  acc +=
+                    x.data[(plane + iy) * widthIn + ix] *
                     weight.data[(weightPlane + kh) * kernelW + kw];
                 }
               }
@@ -1404,7 +1404,8 @@ export const referenceConvTranspose1d = (
             if (shifted < 0 || shifted % stride !== 0) continue;
             const ix = shifted / stride;
             if (ix >= lengthIn) continue;
-            acc += x.data[(item * channelsIn + ic) * lengthIn + ix] *
+            acc +=
+              x.data[(item * channelsIn + ic) * lengthIn + ix] *
               weight.data[(ic * channelsOut + oc) * kernel + k];
           }
         }
@@ -1463,9 +1464,7 @@ export const referenceDeformConv2d = (
   /** `x[item, channel]` 平面の双線形サンプル（範囲外は 0・NaN は伝播）。 */
   const sample = (plane: number, sourceY: number, sourceX: number): number => {
     if (Number.isNaN(sourceY) || Number.isNaN(sourceX)) return Number.NaN;
-    if (
-      !(sourceY > -1 && sourceY < heightIn && sourceX > -1 && sourceX < widthIn)
-    ) {
+    if (!(sourceY > -1 && sourceY < heightIn && sourceX > -1 && sourceX < widthIn)) {
       return 0;
     }
     const y0 = Math.floor(sourceY);
@@ -1479,8 +1478,12 @@ export const referenceDeformConv2d = (
       y >= 0 && y < heightIn && columnX >= 0 && columnX < widthIn
         ? x.data[plane + y * widthIn + columnX]
         : 0;
-    return ly0 * lx0 * at(y0, x0) + ly0 * lx1 * at(y0, x0 + 1) +
-      ly1 * lx0 * at(y0 + 1, x0) + ly1 * lx1 * at(y0 + 1, x0 + 1);
+    return (
+      ly0 * lx0 * at(y0, x0) +
+      ly0 * lx1 * at(y0, x0 + 1) +
+      ly1 * lx0 * at(y0 + 1, x0) +
+      ly1 * lx1 * at(y0 + 1, x0 + 1)
+    );
   };
   for (let item = 0; item < batch; item += 1) {
     for (let oc = 0; oc < channelsOut; oc += 1) {
@@ -1495,19 +1498,16 @@ export const referenceDeformConv2d = (
                 const pixel = oy * widthOut + ox;
                 // offset のチャネル並びは **偶数 = y / 奇数 = x**（torchvision 逐語）。
                 const offsetBase = (item * 2 * taps + 2 * tap) * heightOut * widthOut;
-                const sourceY = Math.fround(
-                  oy - padding[0] + kh + offset.data[offsetBase + pixel],
-                );
+                const sourceY = Math.fround(oy - padding[0] + kh + offset.data[offsetBase + pixel]);
                 const sourceX = Math.fround(
                   ox - padding[1] + kw + offset.data[offsetBase + heightOut * widthOut + pixel],
                 );
                 // modulator は**補間の後**に掛かる（`(m · v) · w` — 括り方まで torchvision と同じ）。
-                const modulated = mask.data[(item * taps + tap) * heightOut * widthOut + pixel] *
+                const modulated =
+                  mask.data[(item * taps + tap) * heightOut * widthOut + pixel] *
                   sample(plane, sourceY, sourceX);
-                acc += modulated * weight.data[
-                  ((oc * channelsIn + ic) * kernelH + kh) * kernelW +
-                  kw
-                ];
+                acc +=
+                  modulated * weight.data[((oc * channelsIn + ic) * kernelH + kh) * kernelW + kw];
               }
             }
           }
@@ -1577,9 +1577,11 @@ export const referenceUpsampleBilinear2d = (
         for (const column of columns) {
           const at = (y: number, index: number): number => x.data[plane + y * widthIn + index];
           // H が外・W が内の入れ子（torch の式木と同じ組み方）。
-          const top = (1 - column.lambda) * at(row.low, column.low) +
+          const top =
+            (1 - column.lambda) * at(row.low, column.low) +
             column.lambda * at(row.low, column.high);
-          const bottom = (1 - column.lambda) * at(row.high, column.low) +
+          const bottom =
+            (1 - column.lambda) * at(row.high, column.low) +
             column.lambda * at(row.high, column.high);
           out[flat] = Math.fround((1 - row.lambda) * top + row.lambda * bottom);
           flat += 1;
@@ -1643,20 +1645,23 @@ export const referenceGruScan = (
       const next = new Float32Array(hidden);
       for (let unit = 0; unit < hidden; unit += 1) {
         // ゲートの足し順は**隠れ側が第 1 引数**（torch の分解形の逐語）
-        const reset = f32(UNARY_F32.sigmoid(
-          f32(hiddenGate(state, 0, unit) + gi.data[inputBase + unit]),
-          NO_SCALARS,
-        ));
-        const update = f32(UNARY_F32.sigmoid(
-          f32(hiddenGate(state, 1, unit) + gi.data[inputBase + hidden + unit]),
-          NO_SCALARS,
-        ));
+        const reset = f32(
+          UNARY_F32.sigmoid(
+            f32(hiddenGate(state, 0, unit) + gi.data[inputBase + unit]),
+            NO_SCALARS,
+          ),
+        );
+        const update = f32(
+          UNARY_F32.sigmoid(
+            f32(hiddenGate(state, 1, unit) + gi.data[inputBase + hidden + unit]),
+            NO_SCALARS,
+          ),
+        );
         // n = tanh(i_n + h_n·r) — 積は `h_n · r`・和は入力側が第 1 引数
         const gated = f32(hiddenGate(state, 2, unit) * reset);
-        const candidate = f32(UNARY_F32.tanh(
-          f32(gi.data[inputBase + 2 * hidden + unit] + gated),
-          NO_SCALARS,
-        ));
+        const candidate = f32(
+          UNARY_F32.tanh(f32(gi.data[inputBase + 2 * hidden + unit] + gated), NO_SCALARS),
+        );
         // h' = (h − n)·z + n
         const decayed = f32(f32(state[unit] - candidate) * update);
         next[unit] = f32(decayed + candidate);
@@ -1717,12 +1722,17 @@ export const applyReferenceOpOutputs = (
   // しか受けないので通さない（attrs と dtype は上で見ている）。state_append は下で
   // 「CPU 参照を持たない」として落とす。
   if (contract.kind !== "symPrefixSlice" && contract.kind !== "stateAppend") {
-    computeOutputShape(contract, inputs.map((input) => input.shape), "reference", {
-      attrs,
-      ...(contract.kind === "reshape" || contract.kind === "expand"
-        ? { declared: declared() }
-        : {}),
-    });
+    computeOutputShape(
+      contract,
+      inputs.map((input) => input.shape),
+      "reference",
+      {
+        attrs,
+        ...(contract.kind === "reshape" || contract.kind === "expand"
+          ? { declared: declared() }
+          : {}),
+      },
+    );
   }
   switch (contract.kind) {
     case "unary":
@@ -1802,14 +1812,9 @@ export const applyReferenceOpOutputs = (
     case "convTranspose1d":
       return sole(referenceConvTranspose1d(inputs[0], inputs[1], inputs[2], attrs));
     case "deformConv2d":
-      return sole(referenceDeformConv2d(
-        inputs[0],
-        inputs[1],
-        inputs[2],
-        inputs[3],
-        inputs[4],
-        attrs,
-      ));
+      return sole(
+        referenceDeformConv2d(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], attrs),
+      );
     case "upsampleBilinear2d":
       return sole(referenceUpsampleBilinear2d(inputs[0], attrs));
     case "gruScan":
@@ -1852,7 +1857,9 @@ export const referenceStaticQuantize = (
   const output = new Float32Array(input.length);
   const bits = new Uint32Array(output.buffer);
   for (let i = 0; i < input.length; i++) {
-    const value = input[i], sign = value & 0x80000000, magnitude = value & 0x7fffffff;
+    const value = input[i],
+      sign = value & 0x80000000,
+      magnitude = value & 0x7fffffff;
     if (scale === 0) {
       bits[i] = value;
       continue;
@@ -1863,7 +1870,8 @@ export const referenceStaticQuantize = (
       continue;
     }
     const q = Math.fround(Math.abs(x.data[i]) / scale);
-    const lower = Math.floor(q), fraction = q - lower;
+    const lower = Math.floor(q),
+      fraction = q - lower;
     const rounded = fraction > 0.5 || (fraction === 0.5 && lower % 2 !== 0) ? lower + 1 : lower;
     output[i] = Math.fround(Math.min(rounded, sign === 0 ? 127 : 128) * scale);
     bits[i] |= sign;

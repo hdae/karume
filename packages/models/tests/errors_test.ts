@@ -65,11 +65,7 @@ describe("assertAcceptableSeed（3 家族が共有する seed の受理集合）
 
   it("負・端数・NaN・安全整数の外を ModelInputError で落とす", () => {
     for (const seed of [-1, 1.5, Number.NaN, 2 ** 53]) {
-      assertThrows(
-        () => assertAcceptableSeed(seed),
-        ModelInputError,
-        "非負の安全整数でない",
-      );
+      assertThrows(() => assertAcceptableSeed(seed), ModelInputError, "非負の安全整数でない");
     }
   });
 });

@@ -114,7 +114,10 @@ const STATE_THEN_CHAIN_GRAPH: DeclarationJson = {
 };
 
 /** 引き金が渡す消失情報（`reason` は GpuContext の分岐に使われない）。 */
-const LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" });
+const LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({
+  reason: "destroyed",
+  message: "テストによる消失",
+});
 
 const x = (): Tensor => ({ dtype: "f32", shape: [4, 3], data: new Float32Array(12) });
 
@@ -212,7 +215,7 @@ test("state を書く generation run が印の待ちの後で落ちたら、cont
   setWorkDone(() => Promise.reject(failure));
 
   const error = await assertRejects(() =>
-    model.run({ k: k(), x: x() }, {}, { context, queryLength: 2 })
+    model.run({ k: k(), x: x() }, {}, { context, queryLength: 2 }),
   );
   assertStrictEquals(error, failure);
 

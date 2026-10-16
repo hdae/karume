@@ -260,11 +260,7 @@ export const MATH_CASES: readonly OpCase[] = [
     // 分岐の取り違えが値に出るよう、a は正・b は負の値域で埋める
     name: "where cond[1,4] ? a[3,4] : b[3,1]",
     op: "where",
-    inputs: [
-      fill([1, 4], MASK, "bool"),
-      fill([3, 4], POSITIVE),
-      fill([3, 1], (i) => -10 - i),
-    ],
+    inputs: [fill([1, 4], MASK, "bool"), fill([3, 4], POSITIVE), fill([3, 1], (i) => -10 - i)],
     outShapes: [[3, 4]],
     // 出力は条件（スロット 0）ではなく**値の側**と同型（契約表の写像 bool → f32）
     outDtypes: ["f32"],
@@ -687,12 +683,14 @@ export const ARGMAX_CASES: readonly OpCase[] = [
     // （全行が区間 0 に最大値を持つと merge が「区間 0 しか読まない」誤りを値に出さない）。
     name: "argmax [3,20000]（2 相・最大値が行ごとに別の区間）",
     op: "argmax",
-    inputs: [fill([3, 20000], (i) => {
-      const row = Math.floor(i / 20000);
-      const at = i % 20000;
-      const peak = [4096 + 7, 3 * 4096 + 4000, 19999][row];
-      return at === peak ? 99 : SIGNED(i);
-    })],
+    inputs: [
+      fill([3, 20000], (i) => {
+        const row = Math.floor(i / 20000);
+        const at = i % 20000;
+        const peak = [4096 + 7, 3 * 4096 + 4000, 19999][row];
+        return at === peak ? 99 : SIGNED(i);
+      }),
+    ],
     outShapes: [[3, 1]],
     outDtypes: ["i32"],
   },
@@ -761,7 +759,10 @@ export const TOPK_CASES: readonly OpCase[] = [
     name: "topk [6,10] k=3",
     op: "topk",
     inputs: [fill([6, 10], SIGNED)],
-    outShapes: [[6, 3], [6, 3]],
+    outShapes: [
+      [6, 3],
+      [6, 3],
+    ],
     outDtypes: ["f32", "i32"],
     attrs: { k: 3 },
   },
@@ -771,14 +772,19 @@ export const TOPK_CASES: readonly OpCase[] = [
     // 「別の行を読む」誤りも「行ループが 1 周で止まる」誤りも値に出ない）。
     name: "topk [3,700] k=4（レーン局所リストへの挿入が繰り返される・行ごとに別位置）",
     op: "topk",
-    inputs: [fill([3, 700], (i) => {
-      const row = Math.floor(i / 700);
-      const col = i % 700;
-      // 行 r の上位 4 本は 300+100r から 7 飛びの 4 点（レーンも跨ぐ）
-      const rank = (col - (300 + row * 100)) / 7;
-      return Number.isInteger(rank) && rank >= 0 && rank < 4 ? 90 - rank : SIGNED(i);
-    })],
-    outShapes: [[3, 4], [3, 4]],
+    inputs: [
+      fill([3, 700], (i) => {
+        const row = Math.floor(i / 700);
+        const col = i % 700;
+        // 行 r の上位 4 本は 300+100r から 7 飛びの 4 点（レーンも跨ぐ）
+        const rank = (col - (300 + row * 100)) / 7;
+        return Number.isInteger(rank) && rank >= 0 && rank < 4 ? 90 - rank : SIGNED(i);
+      }),
+    ],
+    outShapes: [
+      [3, 4],
+      [3, 4],
+    ],
     outDtypes: ["f32", "i32"],
     attrs: { k: 4 },
   },
@@ -788,11 +794,16 @@ export const TOPK_CASES: readonly OpCase[] = [
     // 同じ要素が k 回出る。
     name: "topk [2,320] k=5（上位 5 本が全てレーン 0）",
     op: "topk",
-    inputs: [fill([2, 320], (i) => {
-      const col = i % 320;
-      return col % 32 === 0 && col / 32 < 5 ? 100 - col / 32 : SIGNED(i);
-    })],
-    outShapes: [[2, 5], [2, 5]],
+    inputs: [
+      fill([2, 320], (i) => {
+        const col = i % 320;
+        return col % 32 === 0 && col / 32 < 5 ? 100 - col / 32 : SIGNED(i);
+      }),
+    ],
+    outShapes: [
+      [2, 5],
+      [2, 5],
+    ],
     outDtypes: ["f32", "i32"],
     attrs: { k: 5 },
   },
@@ -800,7 +811,10 @@ export const TOPK_CASES: readonly OpCase[] = [
     name: "topk rank3 [2,3,7] k=2",
     op: "topk",
     inputs: [fill([2, 3, 7], SIGNED)],
-    outShapes: [[2, 3, 2], [2, 3, 2]],
+    outShapes: [
+      [2, 3, 2],
+      [2, 3, 2],
+    ],
     outDtypes: ["f32", "i32"],
     attrs: { k: 2 },
   },
@@ -818,7 +832,10 @@ export const TOPK_CASES: readonly OpCase[] = [
     name: "topk [2,64] k=33（k > レーン数）",
     op: "topk",
     inputs: [fill([2, 64], (i) => SIGNED(i) + (i % 64) * 0.01)],
-    outShapes: [[2, 33], [2, 33]],
+    outShapes: [
+      [2, 33],
+      [2, 33],
+    ],
     outDtypes: ["f32", "i32"],
     attrs: { k: 33 },
   },
@@ -826,7 +843,10 @@ export const TOPK_CASES: readonly OpCase[] = [
     name: "topk 最終次元が 1 [5,1] k=1",
     op: "topk",
     inputs: [fill([5, 1], SIGNED)],
-    outShapes: [[5, 1], [5, 1]],
+    outShapes: [
+      [5, 1],
+      [5, 1],
+    ],
     outDtypes: ["f32", "i32"],
     attrs: { k: 1 },
   },
@@ -1045,7 +1065,7 @@ export const LAYOUT2_CASES: readonly OpCase[] = [
 ];
 
 /** masked_fill の実測埋め値（f32 の最小有限値 — ADR 0012）。 */
-const NEG_F32_MAX = -3.4028234663852886e+38;
+const NEG_F32_MAX = -3.4028234663852886e38;
 /** 素朴 softmax なら f32 で exp が 0 に潰れる領域（safe-softmax の必要性を踏む）。 */
 const HUGE_NEGATIVE = (i: number): number => -200 + (i % 7) * 3;
 /** 0/1 の bool マスク（3 要素に 1 つ真）。 */
@@ -1127,11 +1147,7 @@ export const FUSED_CASES: readonly OpCase[] = [
     // 1/sqrt(0) = inf で出力が NaN になる経路で、結果は bias そのものになる。
     name: "layer_norm 分散 0 の行 [3,8] eps=1e-7",
     op: "layer_norm",
-    inputs: [
-      fill([3, 8], (i) => Math.floor(i / 8) + 1),
-      fill([8], POSITIVE),
-      fill([8], SIGNED),
-    ],
+    inputs: [fill([3, 8], (i) => Math.floor(i / 8) + 1), fill([8], POSITIVE), fill([8], SIGNED)],
     outShapes: [[3, 8]],
     attrs: { normalized_shape: [8], eps: 1e-7 },
   },

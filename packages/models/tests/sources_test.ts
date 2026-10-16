@@ -47,10 +47,12 @@ import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 /** 取得 URL を記録して**その場で落とす** fetch（network へは 1 バイトも出ない）。 */
-const recordingFetch = (urls: string[]): typeof globalThis.fetch => (input) => {
-  urls.push(input instanceof Request ? input.url : String(input));
-  return Promise.reject(new Error("sources_test: ここから先へは出ない"));
-};
+const recordingFetch =
+  (urls: string[]): typeof globalThis.fetch =>
+  (input) => {
+    urls.push(input instanceof Request ? input.url : String(input));
+    return Promise.reject(new Error("sources_test: ここから先へは出ない"));
+  };
 
 type LoadOptions = { fetch: typeof globalThis.fetch; caches: CacheStorage };
 
@@ -66,7 +68,7 @@ const requestedPaths = async (
   // MUST: `caches` も注入する — 実 Cache Storage に触れると、他テストの残骸でヒット経路に
   // 化けて「network を叩かない」別の話を検査してしまう。
   await assertRejects(() =>
-    load({ fetch: recordingFetch(urls), caches: new MemoryCacheStorage() })
+    load({ fetch: recordingFetch(urls), caches: new MemoryCacheStorage() }),
   );
   return urls.map((url) => new URL(url).pathname);
 };
@@ -164,17 +166,20 @@ for (const { name, sources, keys } of FAMILIES) {
 // 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
 // ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
 test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () => {
-  assertEquals(FAMILIES.map(({ name }) => name), [
-    "ANIMA_SOURCES",
-    "IRODORI_SOURCES",
-    "SBV2_SOURCES",
-    "GEMMA4_SOURCES",
-    "SIGLIP2_SOURCES",
-    "DEPTH_ANYTHING_SOURCES",
-    "BIREFNET_SOURCES",
-    "UMT5_SOURCES",
-    "WAN_SOURCES",
-  ]);
+  assertEquals(
+    FAMILIES.map(({ name }) => name),
+    [
+      "ANIMA_SOURCES",
+      "IRODORI_SOURCES",
+      "SBV2_SOURCES",
+      "GEMMA4_SOURCES",
+      "SIGLIP2_SOURCES",
+      "DEPTH_ANYTHING_SOURCES",
+      "BIREFNET_SOURCES",
+      "UMT5_SOURCES",
+      "WAN_SOURCES",
+    ],
+  );
   assertEquals(Object.keys(KARUME_SOURCES).length, 12);
 });
 
@@ -222,7 +227,7 @@ for (const { name, sources, load } of FAMILIES) {
 // commit SHA ではないので、manifest を取る**前に** revision 解決 API を 1 往復する。
 test("sbv2: 文字列 ref は main 追従のまま（revision 解決 API を経由する）", async () => {
   const paths = await requestedPaths((options) =>
-    Sbv2Pipeline.fromPretrained("someone/karume-sbv2-fork", options)
+    Sbv2Pipeline.fromPretrained("someone/karume-sbv2-fork", options),
   );
   assertEquals(paths, ["/api/models/someone/karume-sbv2-fork/revision/main"]);
 });

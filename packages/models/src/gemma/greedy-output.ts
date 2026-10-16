@@ -43,9 +43,7 @@ const selectionModel = (vocabSize: number): PreparedModel => {
       value: { dtype: "f32", shape: [1, 1, 1] },
       index: { dtype: "i32", shape: [1, 1, 1] },
     },
-    nodes: [
-      { op: "topk", ins: ["logits"], outs: ["value", "index"], attrs: { k: 1 } },
-    ],
+    nodes: [{ op: "topk", ins: ["logits"], outs: ["value", "index"], attrs: { k: 1 } }],
   });
   return prepareContainer(
     openMemoryContainer({ graphs: { [SELECT_GRAPH]: graph }, tensors: {} }),
@@ -132,10 +130,11 @@ export const createGemmaGreedyOutput = (
   vocabSize: number,
   ple?: Gemma4PleResident,
 ): GemmaGreedyOutput => {
-  const model = selectionModel(vocabSize), chain = createOperationChain();
+  const model = selectionModel(vocabSize),
+    chain = createOperationChain();
   // selectorの入力は常駐であり、ホスト入力ぶんも含むこの見積りは保守的な上界。
-  const extraBytes = vocabSize * 4 + 8 +
-    model.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes;
+  const extraBytes =
+    vocabSize * 4 + 8 + model.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes;
   let ready: Promise<Resources> | undefined;
   let disposal: Promise<void> | undefined;
   const assertAlive = (): void => {
@@ -193,10 +192,13 @@ export const createGemmaGreedyOutput = (
             generation,
             copyOutputs: { [logitsName]: r.logits },
           });
-          await r.selector.enqueue({ logits: r.logits }, {
-            batch,
-            copyOutputs: { value: r.value, index: r.index },
-          });
+          await r.selector.enqueue(
+            { logits: r.logits },
+            {
+              batch,
+              copyOutputs: { value: r.value, index: r.index },
+            },
+          );
           const out = await batch.finishAndRead({ value: r.value, index: r.index });
           return { value: new Float32Array(out.value)[0], index: new Int32Array(out.index)[0] };
         } finally {

@@ -84,10 +84,18 @@ import {
   wanSpatialCompression,
 } from "../../models/src/wan/tile-decode.ts";
 import { disposeSteps } from "../../models/src/session/dispose-steps.ts";
-import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
+import {
+  type DrmTimeline,
+  formatDrmUsage,
+  monitorDrmUsage,
+} from "../../models/tests/helpers/drm-usage.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { bitsEqual, readFixture, vramBreakdown } from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
+import {
+  bitsEqual,
+  readFixture,
+  vramBreakdown,
+} from "../../models/tests/helpers/wan-vae-chunk-loop.ts";
 import {
   ti2vVaeAssets,
   ti2vVaeFixtureUrl,
@@ -177,8 +185,7 @@ test({
 });
 
 test({
-  name:
-    "Wan2.2 TI2V VAE タイル参照: タイル参照があるなら照合の前提の chunk グラフの組（容器 2 本 + vae_chunks.*）も揃っている",
+  name: "Wan2.2 TI2V VAE タイル参照: タイル参照があるなら照合の前提の chunk グラフの組（容器 2 本 + vae_chunks.*）も揃っている",
   // タイル参照の書き手は chunk の組に依らない（HF の snapshot から書く）ので、この組み合わせは起こりうる。SKIP に
   // すると GPU の照合が一度も走らないままレーンが緑で終わる。
   ignore: !ANY_TILES,
@@ -344,20 +351,21 @@ const bandCandidate = async (
   if (BAND !== undefined) return;
   await t.step("帯の候補（未導出）", async () => {
     const band = observed.get("band");
-    const candidate = band === undefined
-      ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
-      : band > 0
-      ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
-        `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
-      : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
+    const candidate =
+      band === undefined
+        ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
+        : band > 0
+          ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
+            `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
+          : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
     const format = (value: number | undefined): string => value?.toExponential(3) ?? "—";
-    const accepted = ["accept", "accept-rgb", "wide"].map((label) =>
-      `${label} ${format(observed.get(label))}`
+    const accepted = ["accept", "accept-rgb", "wide"].map(
+      (label) => `${label} ${format(observed.get(label))}`,
     );
     const injected = [...faults].map(([label, value]) => `${label} ${format(value)}`);
-    const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${
-      accepted.join(" / ")
-    }。故障注入の maxAbs（C4 で帯の外かを判定）: ${
+    const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
+      " / ",
+    )}。故障注入の maxAbs（C4 で帯の外かを判定）: ${
       injected.length === 0 ? "—" : injected.join(" / ")
     }`;
     await runRecordedCase(results, { id: "band-candidate", failureNote: () => message }, () => {
@@ -588,9 +596,9 @@ test({
                 totalWithZeroStaging: breakdown.total + zeroStaging,
               }).map(([name, bytes]) => [name, gib(bytes)]),
             );
-            bandNote = `band: tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${
-              elapsedMs.toFixed(0)
-            } vram GiB ${JSON.stringify(vram)}（見積り ${VRAM_ESTIMATE_GIB} GiB）`;
+            bandNote = `band: tiles=${wanVaeTileCount(plan)} chunks=${chunks} decodeMs=${elapsedMs.toFixed(
+              0,
+            )} vram GiB ${JSON.stringify(vram)}（見積り ${VRAM_ESTIMATE_GIB} GiB）`;
             console.log(`[wan-ti2v-vae-tiles] ${bandNote}`);
             judge(
               "band",
@@ -752,7 +760,9 @@ test({
             ...acceptPlan,
             rows: {
               ...acceptPlan.rows,
-              starts: acceptPlan.rows.starts.map((start, index) => index === 1 ? start + 1 : start),
+              starts: acceptPlan.rows.starts.map((start, index) =>
+                index === 1 ? start + 1 : start,
+              ),
             },
           }),
         },
@@ -806,8 +816,8 @@ test({
         await runRecordedCase(results, { id: "record" }, () => {
           timeline = drm.stop();
           const lines = [
-            ...[...timeline.peaks].map(([phase, peak]) =>
-              `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`
+            ...[...timeline.peaks].map(
+              ([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`,
             ),
             bandNote ?? "band の観測なし（band が decode を終える前に落ちた）",
           ];

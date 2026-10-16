@@ -105,10 +105,13 @@ type LanczosFixture = {
 const isLanczosCase = (value: unknown): value is LanczosCase => {
   if (typeof value !== "object" || value === null) return false;
   const row = value as Record<string, unknown>;
-  return typeof row.name === "string" && typeof row.why === "string" &&
-    [row.height, row.width, row.outHeight, row.outWidth].every((size) =>
-      Number.isInteger(size) && (size as number) > 0
-    );
+  return (
+    typeof row.name === "string" &&
+    typeof row.why === "string" &&
+    [row.height, row.width, row.outHeight, row.outWidth].every(
+      (size) => Number.isInteger(size) && (size as number) > 0,
+    )
+  );
 };
 
 /**
@@ -117,14 +120,13 @@ const isLanczosCase = (value: unknown): value is LanczosCase => {
  * 一致を誰も見ていない状態が緑になる）。
  */
 const readLanczosFixture = async (): Promise<LanczosFixture> => {
-  const raw = JSON.parse(await readTextFile(WAN_I2V_LANCZOS_FIXTURE)) as Record<
-    string,
-    unknown
-  >;
+  const raw = JSON.parse(await readTextFile(WAN_I2V_LANCZOS_FIXTURE)) as Record<string, unknown>;
   const source = raw.source as Record<string, unknown> | undefined;
   if (
-    typeof source?.pillow !== "string" || typeof raw.tensors !== "string" ||
-    !Array.isArray(raw.cases) || !raw.cases.every(isLanczosCase)
+    typeof source?.pillow !== "string" ||
+    typeof raw.tensors !== "string" ||
+    !Array.isArray(raw.cases) ||
+    !raw.cases.every(isLanczosCase)
   ) {
     throw new Error(
       `${WAN_I2V_LANCZOS_FIXTURE.pathname}: ケース表の形が {source.pillow, tensors, cases} でない`,
@@ -225,11 +227,11 @@ describe("LANCZOS（Pillow の 8bit 経路の逐語の移植）", () => {
       [50, 9, 13, 31, { left: 0, top: 0, width: 13, height: 31 }], // 窓 = 全体
     ];
     for (const [width, height, outWidth, outHeight, window] of table) {
-      const image = synthetic(
-        width,
-        height,
-        (x, y) => [(x * 37 + y * 11) & 255, (x * y) & 255, (x ^ y) * 5 & 255],
-      );
+      const image = synthetic(width, height, (x, y) => [
+        (x * 37 + y * 11) & 255,
+        (x * y) & 255,
+        ((x ^ y) * 5) & 255,
+      ]);
       const whole = resizeRgb8Lanczos(image, outWidth, outHeight);
       const windowed = resizeRgb8LanczosWindow(image, outWidth, outHeight, window);
       assertEquals([windowed.width, windowed.height], [window.width, window.height]);
@@ -243,14 +245,12 @@ describe("LANCZOS（Pillow の 8bit 経路の逐語の移植）", () => {
 
   it("窓が出力の外にはみ出せば RangeError（内部の事前条件）", () => {
     const image = coordinateImage(4, 4);
-    for (
-      const window of [
-        { left: 5, top: 0, width: 4, height: 8 },
-        { left: 0, top: -1, width: 8, height: 8 },
-        { left: 0, top: 0, width: 0, height: 8 },
-        { left: 0.5, top: 0, width: 4, height: 8 },
-      ]
-    ) {
+    for (const window of [
+      { left: 5, top: 0, width: 4, height: 8 },
+      { left: 0, top: -1, width: 8, height: 8 },
+      { left: 0, top: 0, width: 0, height: 8 },
+      { left: 0.5, top: 0, width: 4, height: 8 },
+    ]) {
       assertThrows(() => resizeRgb8LanczosWindow(image, 8, 8, window), RangeError, "窓");
     }
   });
@@ -264,40 +264,13 @@ describe("LANCZOS（Pillow の 8bit 経路の逐語の移植）", () => {
     });
     const resized = resizeRgb8Lanczos(image, 32, 1);
     const red = Array.from({ length: 32 }, (_, x) => resized.data[x * CHANNELS]);
-    assertEquals(red, [
-      5,
-      5,
-      5,
-      5,
-      5,
-      5,
-      5,
-      9,
-      13,
-      10,
-      0,
-      0,
-      0,
-      0,
-      28,
-      91,
-      164,
-      227,
-      255,
-      255,
-      255,
-      255,
-      245,
-      242,
-      246,
-      250,
-      250,
-      250,
-      250,
-      250,
-      250,
-      250,
-    ]);
+    assertEquals(
+      red,
+      [
+        5, 5, 5, 5, 5, 5, 5, 9, 13, 10, 0, 0, 0, 0, 28, 91, 164, 227, 255, 255, 255, 255, 245, 242,
+        246, 250, 250, 250, 250, 250, 250, 250,
+      ],
+    );
   });
 
   it("出力寸法が正の整数でなければ RangeError（内部の事前条件）・画像の長さの食い違いは ModelInputError", () => {
@@ -348,30 +321,28 @@ describe("出力寸法の選択（受理集合 × 公式の比較式 max(r/rc, r
 
   it("明示した寸法は縦横比より優先し、片方だけならその欄が合う候補から選ぶ", () => {
     const landscape = blank(832, 480);
-    assertEquals(
-      selectWanI2vSize(landscape, { width: 704, height: 1280 }, WAN22_TI2V_GENERATION),
-      { width: 704, height: 1280 },
-    );
-    assertEquals(
-      selectWanI2vSize(landscape, { width: 704 }, WAN22_TI2V_GENERATION),
-      { width: 704, height: 1280 },
-    );
-    assertEquals(
-      selectWanI2vSize(blank(480, 832), { height: 704 }, WAN22_TI2V_GENERATION),
-      { width: 1280, height: 704 },
-    );
+    assertEquals(selectWanI2vSize(landscape, { width: 704, height: 1280 }, WAN22_TI2V_GENERATION), {
+      width: 704,
+      height: 1280,
+    });
+    assertEquals(selectWanI2vSize(landscape, { width: 704 }, WAN22_TI2V_GENERATION), {
+      width: 704,
+      height: 1280,
+    });
+    assertEquals(selectWanI2vSize(blank(480, 832), { height: 704 }, WAN22_TI2V_GENERATION), {
+      width: 1280,
+      height: 704,
+    });
   });
 
   it("明示した寸法が受理集合の外なら ModelInputError", () => {
     const image = blank(832, 480);
-    for (
-      const [requested, message] of [
-        [{ width: 832, height: 480 }, "832×480 が受理集合（1280×704 / 704×1280）に無い"],
-        [{ width: 1280, height: 1280 }, "1280×1280 が受理集合"],
-        [{ width: 1000 }, "width 1000 が受理集合"],
-        [{ height: 1000 }, "height 1000 が受理集合"],
-      ] as const
-    ) {
+    for (const [requested, message] of [
+      [{ width: 832, height: 480 }, "832×480 が受理集合（1280×704 / 704×1280）に無い"],
+      [{ width: 1280, height: 1280 }, "1280×1280 が受理集合"],
+      [{ width: 1000 }, "width 1000 が受理集合"],
+      [{ height: 1000 }, "height 1000 が受理集合"],
+    ] as const) {
       assertThrows(
         () => selectWanI2vSize(image, requested, WAN22_TI2V_GENERATION),
         ModelInputError,
@@ -438,18 +409,22 @@ describe("寸法合わせ（crop = 覆ってから中央を切り出す / stretc
 
   it("crop の切り出し位置は (rw − ow) // 2（余りは右・下へ — 床関数）", () => {
     // 縮尺 1 の軸は LANCZOS のパスを飛ばすので、出力の画素は入力の画素そのもの（座標から位置を読み戻せる）。
-    for (
-      const [width, height, left, top] of [
-        [1280, 800, 0, 48],
-        [1280, 805, 0, 50], // (805 − 704) / 2 = 50.5 → 50
-        [1400, 704, 60, 0],
-        [1401, 704, 60, 0], // 60.5 → 60
-      ] as const
-    ) {
+    for (const [width, height, left, top] of [
+      [1280, 800, 0, 48],
+      [1280, 805, 0, 50], // (805 − 704) / 2 = 50.5 → 50
+      [1400, 704, 60, 0],
+      [1401, 704, 60, 0], // 60.5 → 60
+    ] as const) {
       const image = coordinateImage(width, height);
       const fitted = fitWanI2vImage(image, landscape, "crop");
       assertEquals([fitted.width, fitted.height], [1280, 704]);
-      for (const [x, y] of [[0, 0], [1279, 0], [0, 703], [1279, 703], [640, 352]] as const) {
+      for (const [x, y] of [
+        [0, 0],
+        [1279, 0],
+        [0, 703],
+        [1279, 703],
+        [640, 352],
+      ] as const) {
         assertEquals(
           pixelAt(fitted, x, y),
           pixelAt(image, x + left, y + top),
@@ -460,11 +435,11 @@ describe("寸法合わせ（crop = 覆ってから中央を切り出す / stretc
   });
 
   it("crop は覆う寸法へ全体を伸縮してから中央を切り出した値と uint8 で同じ（縦横比の極端な 64×4 → 覆う寸法 11,264×704）", () => {
-    const image = synthetic(
-      64,
-      4,
-      (x, y) => [(x * 13 + y * 71) & 255, (x * 7) & 255, (y * 97) & 255],
-    );
+    const image = synthetic(64, 4, (x, y) => [
+      (x * 13 + y * 71) & 255,
+      (x * 7) & 255,
+      (y * 97) & 255,
+    ]);
     const cover = wanI2vCoverSize(image, landscape);
     assertEquals(cover, { width: 11264, height: 704 });
     const whole = resizeRgb8Lanczos(image, cover.width, cover.height);
@@ -494,8 +469,9 @@ describe("寸法合わせ（crop = 覆ってから中央を切り出す / stretc
     const stretched = fitWanI2vImage(image, landscape, "stretch");
     assertEquals([stretched.width, stretched.height], [1280, 704]);
     const reddish = (fitted: Rgb8Image): boolean =>
-      Array.from({ length: fitted.width * fitted.height }, (_, at) => at * CHANNELS)
-        .some((at) => fitted.data[at] > 200 && fitted.data[at + 1] < 60);
+      Array.from({ length: fitted.width * fitted.height }, (_, at) => at * CHANNELS).some(
+        (at) => fitted.data[at] > 200 && fitted.data[at + 1] < 60,
+      );
     assert(!reddish(cropped), "crop に上端の帯が残った");
     assert(reddish(stretched), "stretch で上端の帯が消えた");
     const [r, g] = pixelAt(stretched, 640, 0);
@@ -552,7 +528,7 @@ const viewPermute = (
   order: readonly number[],
 ): Float32Array<ArrayBuffer> => {
   const strides = viewShape.map((_, axis) =>
-    viewShape.slice(axis + 1).reduce((product, dim) => product * dim, 1)
+    viewShape.slice(axis + 1).reduce((product, dim) => product * dim, 1),
   );
   const outShape = order.map((axis) => viewShape[axis]);
   const out = new Float32Array(data.length);
@@ -630,7 +606,7 @@ describe("前処理の鎖（寸法の選択 → 寸法合わせ → [-1, 1] → 
     const image = coordinateImage(832, 480);
     const fits: readonly WanI2vFit[] = ["crop", "stretch"];
     const [crop, stretch] = fits.map((fit) =>
-      preprocessWanI2vImage(image, { fit }, WAN22_TI2V_GENERATION)
+      preprocessWanI2vImage(image, { fit }, WAN22_TI2V_GENERATION),
     );
     assertEquals(crop.shape, stretch.shape);
     assertNotEquals(firstBitMismatch(crop.pixels, stretch.pixels), -1);
@@ -643,9 +619,8 @@ describe("encoder の出口の正規化（上流 (mu − mean) · f32(1 / f32(st
   const stats = WAN22_TI2V_GENERATION.latents;
   const perChannel = 4096;
   const channels = WAN22_LATENTS_MEAN.length;
-  const mu = Float32Array.from(
-    { length: channels * perChannel },
-    (_, index) => Math.fround(Math.sin(index) * 2),
+  const mu = Float32Array.from({ length: channels * perChannel }, (_, index) =>
+    Math.fround(Math.sin(index) * 2),
   );
 
   it("値は f32(f32(mu − mean) · f32(1 / f32(std)))（チャネルは軸 0）", () => {

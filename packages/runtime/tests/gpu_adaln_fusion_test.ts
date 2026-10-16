@@ -52,12 +52,14 @@ const adalnGraph = (options: AdalnGraphOptions = {}): DeclarationJson => {
     { name: "shift_src", dtype: "f32", shape: [1, DIM] },
     { name: "scale_src", dtype: "f32", shape: [1, DIM] },
   ];
-  const nodes: DeclarationJson["nodes"] = [{
-    op: "layer_norm",
-    ins: ["x", "ln_weight", "ln_bias"],
-    outs: ["t"],
-    attrs: { normalized_shape: [DIM], eps: 0.000001 },
-  }];
+  const nodes: DeclarationJson["nodes"] = [
+    {
+      op: "layer_norm",
+      ins: ["x", "ln_weight", "ln_bias"],
+      outs: ["t"],
+      attrs: { normalized_shape: [DIM], eps: 0.000001 },
+    },
+  ];
   let normForMul = "t";
   if (options.interpose) {
     values.t_alias = { dtype: "f32", shape: [...ROW_SHAPE] };
@@ -151,8 +153,7 @@ const testInputs = (options: AdalnGraphOptions = {}): Readonly<Record<string, Te
 });
 
 test({
-  name:
-    "adaLN 融合は窓 6 / 7 とも primitive と有限ビット / NaN 分類が一致し、4→1 dispatch へ畳む（実 GPU）",
+  name: "adaLN 融合は窓 6 / 7 とも primitive と有限ビット / NaN 分類が一致し、4→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

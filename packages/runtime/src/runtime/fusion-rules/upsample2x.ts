@@ -46,15 +46,22 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
     const vertical = nodes[index + 4];
     const output = nodes[index + 5];
     if (
-      horizontal === undefined || flatten === undefined || addHeightAxis === undefined ||
-      vertical === undefined || output === undefined
-    ) return undefined;
+      horizontal === undefined ||
+      flatten === undefined ||
+      addHeightAxis === undefined ||
+      vertical === undefined ||
+      output === undefined
+    )
+      return undefined;
     const chain = [first, horizontal, flatten, addHeightAxis, vertical, output];
     if (
-      horizontal.node.op !== "expand" || flatten.node.op !== "reshape" ||
-      addHeightAxis.node.op !== "reshape" || vertical.node.op !== "expand" ||
+      horizontal.node.op !== "expand" ||
+      flatten.node.op !== "reshape" ||
+      addHeightAxis.node.op !== "reshape" ||
+      vertical.node.op !== "expand" ||
       output.node.op !== "reshape"
-    ) return undefined;
+    )
+      return undefined;
     if (!allF32(chain)) return undefined;
 
     const inputName = first.node.ins[0];
@@ -64,7 +71,8 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
       addHeightAxis.node.ins[0] !== flatten.outputs[0].name ||
       vertical.node.ins[0] !== addHeightAxis.outputs[0].name ||
       output.node.ins[0] !== vertical.outputs[0].name
-    ) return undefined;
+    )
+      return undefined;
 
     const inputShape = first.inputShapes[0];
     if (inputShape.length !== 4 || inputShape.some((dim) => dim < 1)) return undefined;
@@ -75,7 +83,8 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
     const outWidth = width * 2;
     if (
       ![batchChannels, flatRows, outHeight, outWidth].every((value) => Number.isSafeInteger(value))
-    ) return undefined;
+    )
+      return undefined;
 
     if (
       !sameShape(first.outputs[0].shape, [flatRows, width, 1]) ||
@@ -84,7 +93,8 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
       !sameShape(addHeightAxis.outputs[0].shape, [batchChannels, height, 1, outWidth]) ||
       !sameShape(vertical.outputs[0].shape, [batchChannels, height, 2, outWidth]) ||
       !sameShape(output.outputs[0].shape, [batch, channels, outHeight, outWidth])
-    ) return undefined;
+    )
+      return undefined;
     if (!internalsArePrivate(chain, context)) return undefined;
 
     return {
@@ -104,17 +114,19 @@ export const UPSAMPLE_2X_RULE = defineRule<Upsample2xMatch>({
       outputName: matched.outputName,
       outputShape: matched.outputShape,
       temps: [],
-      dispatches: [{
-        key: UPSAMPLE_2X_KEY,
-        wgsl: () => UPSAMPLE_2X_WGSL,
-        // 巨大 shape は GPU 確保より先に u32 添字の契約で fail loudly させる。
-        params: upsample2xParams(sourceCount, matched.width),
-        workgroups: {
-          kind: "gridStride",
-          items: sourceCount,
-          size: UPSAMPLE_2X_WORKGROUP_SIZE,
+      dispatches: [
+        {
+          key: UPSAMPLE_2X_KEY,
+          wgsl: () => UPSAMPLE_2X_WGSL,
+          // 巨大 shape は GPU 確保より先に u32 添字の契約で fail loudly させる。
+          params: upsample2xParams(sourceCount, matched.width),
+          workgroups: {
+            kind: "gridStride",
+            items: sourceCount,
+            size: UPSAMPLE_2X_WORKGROUP_SIZE,
+          },
         },
-      }],
+      ],
     };
   },
 });

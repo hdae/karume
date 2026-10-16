@@ -117,7 +117,11 @@ import {
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
 import { WAN_ASSEMBLE_COMMAND } from "../../models/tests/helpers/wan-distribution.ts";
-import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
+import {
+  type DrmTimeline,
+  formatDrmUsage,
+  monitorDrmUsage,
+} from "../../models/tests/helpers/drm-usage.ts";
 import { verifyRunningGpu } from "../../runtime/tests/helpers/environment.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import {
@@ -287,7 +291,8 @@ const DEFAULT_FRAMES = 33;
  */
 const FULL_STEPS = 50;
 
-const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
+const GENERATE_COMMAND =
+  "cd tools/export-recipes && uv run --group wan --inexact " +
   "python -m wan.text_embeds && uv run --group wan --inexact python -m wan.few_step_ref";
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
 
@@ -332,21 +337,21 @@ const ANY_PRESENT = DIST_PRESENT && ANY_FIXTURE;
  */
 const TEXT_ENCODER_PART0 = DIST_PRESENT
   ? resolveSelection(parseManifest(await readTextFile(new URL("karume.json", DIST_ROOT))))
-    .containers[TEXT_ENCODER]?.parts[0]
+      .containers[TEXT_ENCODER]?.parts[0]
   : undefined;
 /** umT5 の越境先の repo（自リポの容器なら undefined — mapping が要らない）。 */
 const UMT5_REPO = TEXT_ENCODER_PART0?.repo;
 const UMT5_PRESENT = fileExists(new URL("karume.json", UMT5_ROOT));
 /** GPU 経路を組める（配布形が umT5 を持ち、越境なら越境先のミラーもある）。 */
-const GPU_TEXT_PRESENT = DIST_PRESENT && TEXT_ENCODER_PART0 !== undefined &&
-  (UMT5_REPO === undefined || UMT5_PRESENT);
+const GPU_TEXT_PRESENT =
+  DIST_PRESENT && TEXT_ENCODER_PART0 !== undefined && (UMT5_REPO === undefined || UMT5_PRESENT);
 if (DIST_PRESENT && !GPU_TEXT_PRESENT) {
   console.warn(
     TEXT_ENCODER_PART0 === undefined
       ? `[karume] 配布形ミラー ${DIST_ROOT.pathname} が umT5（${TEXT_ENCODER}）を持たないため、Wan の GPU 経路の` +
-        `ケースと umT5 の admission の故障を SKIP する。組み直し: ${WAN_ASSEMBLE_COMMAND}`
+          `ケースと umT5 の admission の故障を SKIP する。組み直し: ${WAN_ASSEMBLE_COMMAND}`
       : `[karume] umT5 の配布形ミラー ${UMT5_ROOT.pathname}（${UMT5_REPO} の越境先）が無いため、Wan の GPU 経路の` +
-        `ケースと umT5 の admission の故障を SKIP する。組み立て: ${ASSEMBLE_UMT5_COMMAND}`,
+          `ケースと umT5 の admission の故障を SKIP する。組み立て: ${ASSEMBLE_UMT5_COMMAND}`,
   );
 }
 
@@ -401,7 +406,9 @@ const rowClassOf = async (quant: string): Promise<string> => {
     : `${quant}: 実用行（session 非空 — 実用層の退行と決定性の検出器）`;
 };
 
-const references = openReferences(new URL("../../models/tests/fixtures/references/wan.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/wan.json", import.meta.url),
+);
 const results = openResults("wan-pipeline");
 /** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
 const fullResults = openResults("wan-pipeline-full");
@@ -449,19 +456,25 @@ const UMT5_PREFIX = "umt5:";
  */
 const countingSource = (manifest: Record<string, unknown>, requested: string[]) => {
   const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
-  const umt5 = localDirectory({
-    readFile: async (path) => {
-      requested.push(`${UMT5_PREFIX}${path}`);
-      return await readFile(new URL(path, UMT5_ROOT));
+  const umt5 = localDirectory(
+    {
+      readFile: async (path) => {
+        requested.push(`${UMT5_PREFIX}${path}`);
+        return await readFile(new URL(path, UMT5_ROOT));
+      },
     },
-  }, { label: "wan-admission-fault-umt5" });
-  return localDirectory({
-    readFile: async (path) => {
-      requested.push(path);
-      if (path === "karume.json") return manifestBytes;
-      return await readFile(new URL(path, DIST_ROOT));
+    { label: "wan-admission-fault-umt5" },
+  );
+  return localDirectory(
+    {
+      readFile: async (path) => {
+        requested.push(path);
+        if (path === "karume.json") return manifestBytes;
+        return await readFile(new URL(path, DIST_ROOT));
+      },
     },
-  }, { label: "wan-admission-fault", ...(UMT5_PRESENT ? { crossRepo: crossRepoOf(umt5) } : {}) });
+    { label: "wan-admission-fault", ...(UMT5_PRESENT ? { crossRepo: crossRepoOf(umt5) } : {}) },
+  );
 };
 
 test({
@@ -481,10 +494,10 @@ test({
     const heavyPaths = new Set([
       ...Object.values(model.weights).flatMap((entry) =>
         Object.values(entry).flatMap((weights) =>
-          weights.container.parts.slice(1).map((ref) =>
-            ref.repo === undefined ? ref.path : `${UMT5_PREFIX}${ref.path}`
-          )
-        )
+          weights.container.parts
+            .slice(1)
+            .map((ref) => (ref.repo === undefined ? ref.path : `${UMT5_PREFIX}${ref.path}`)),
+        ),
       ),
       ...Object.values(model.assets).map((ref) => ref.path),
     ]);
@@ -645,9 +658,9 @@ const difference = (got: Float32Array, want: Float32Array): Difference => {
 };
 
 const formatDifference = (label: string, diff: Difference): string =>
-  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${
-    diff.referenceMax.toFixed(3)
-  }）`;
+  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${diff.referenceMax.toFixed(
+    3,
+  )}）`;
 
 /** 上流の `clamp(-1, 1)`（参照のフレームはクランプ前で書かれている）。 */
 const clamped = (values: Float32Array): Float32Array =>
@@ -703,7 +716,9 @@ const observe = async (
     if (event.at === "start") stageStarted.set(event.component, performance.now());
     else stageMs[event.component] = performance.now() - (stageStarted.get(event.component) ?? 0);
     if (
-      options.abortAfterDenoise === true && event.component === "transformer" && event.at === "end"
+      options.abortAfterDenoise === true &&
+      event.component === "transformer" &&
+      event.at === "end"
     ) {
       throw abort;
     }
@@ -730,18 +745,17 @@ const observe = async (
 const formatObserved = (observed: Observed): string[] => {
   const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(3)} GiB`;
   const lines = [
-    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${
-      Object.entries(observed.stageMs).map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
-        .join("・")
-    }`,
+    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${Object.entries(observed.stageMs)
+      .map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
+      .join("・")}`,
     ...[...observed.drm.peaks].map(([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`),
     ...observed.drm.marks.map(({ label, usage }) => `VRAM 点 [${label}] ${formatDrmUsage(usage)}`),
   ];
   for (const [component, diagnostics] of observed.diagnostics) {
     lines.push(
-      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${
-        gib(diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes)
-      }・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本・窓平均の最大 ${
+      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${gib(
+        diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes,
+      )}・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本・窓平均の最大 ${
         diagnostics.submit.chunkBudget.maxWindowMeanMs?.toFixed(1) ?? "—"
       } ms・予算超過 ${diagnostics.submit.chunkBudget.overBudgetChunks} 本`,
     );
@@ -813,9 +827,10 @@ test({
         const wantBits = new Uint32Array(want.buffer, want.byteOffset, want.length);
         assert(
           bits.every((value, index) => value === wantBits[index]),
-          `${name}: step ${step} の潜在がビット一致しない（${
-            formatDifference("潜在", difference(latents, want))
-          }）`,
+          `${name}: step ${step} の潜在がビット一致しない（${formatDifference(
+            "潜在",
+            difference(latents, want),
+          )}）`,
         );
       }
     }
@@ -967,19 +982,25 @@ test({
         const lastBand = LATENT_RATIO_BANDS[STEPS - 1];
         for (const { label, request } of faults) {
           await t.step(`故障注入: ${label} → ${ACCEPT_CASE} の潜在が帯の外`, async () => {
-            const observed = await observe(pipeline, diagnostics, {
-              ...request,
-              latents: accept.tensor("latents_init"),
-              steps: STEPS,
-            }, { abortAfterDenoise: true });
+            const observed = await observe(
+              pipeline,
+              diagnostics,
+              {
+                ...request,
+                latents: accept.tensor("latents_init"),
+                steps: STEPS,
+              },
+              { abortAfterDenoise: true },
+            );
             const diff = difference(
               observed.latents[STEPS - 1],
               accept.tensor(`latents.${STEPS - 1}`),
             );
             console.log(
-              `[wan-pipeline] fault ${label}: ${
-                formatDifference(`latents.${STEPS - 1}`, diff)
-              }（帯の ${(diff.ratio / lastBand).toFixed(1)} 倍）`,
+              `[wan-pipeline] fault ${label}: ${formatDifference(
+                `latents.${STEPS - 1}`,
+                diff,
+              )}（帯の ${(diff.ratio / lastBand).toFixed(1)} 倍）`,
             );
             assert(
               diff.ratio > FAULT_MARGIN * lastBand,
@@ -1033,9 +1054,10 @@ test({
       await using pipeline = await loadPipeline(gpu, diagnostics, "gpu", F16_QUANT);
       for (const spec of GPU_TEXT_CASES) {
         await t.step(spec.id, async () => {
-          const prompt = "asset" in spec.prompt
-            ? textOf(pipeline.prompts, spec.prompt.asset, "prompt")
-            : spec.prompt.text;
+          const prompt =
+            "asset" in spec.prompt
+              ? textOf(pipeline.prompts, spec.prompt.asset, "prompt")
+              : spec.prompt.text;
           let settlement: ReferenceSettlement | undefined;
           try {
             await runRecordedCase(results, { id: spec.id }, async () => {
@@ -1226,11 +1248,11 @@ test({
 const CASE_IDS = [
   ...(ANY_PRESENT
     ? [
-      ...CASES.map(({ name }) => `2step-${name}`),
-      SEED_CASE.id,
-      ...SEAT_QUANTS.map((quant) => seatCaseId(quant, SEED_CASE.id)),
-      ...(FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
-    ]
+        ...CASES.map(({ name }) => `2step-${name}`),
+        SEED_CASE.id,
+        ...SEAT_QUANTS.map((quant) => seatCaseId(quant, SEED_CASE.id)),
+        ...(FULL_PIPELINE ? FULL_CASES.map(({ id }) => id) : []),
+      ]
     : []),
   ...(GPU_TEXT_PRESENT ? GPU_TEXT_CASES.map(({ id }) => id) : []),
 ];

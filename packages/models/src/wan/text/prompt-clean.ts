@@ -171,16 +171,20 @@ const uncurlQuotes = (tables: PromptCleanTables, text: string): string => {
     out += inCodeRanges(tables.doubleQuotes, cp)
       ? '"'
       : inCodeRanges(tables.singleQuotes, cp)
-      ? "'"
-      : ch;
+        ? "'"
+        : ch;
   }
   return out;
 };
 
 /** `fix_line_breaks`（`ftfy/fixes.py` の逐語 — 置換の順も同じ）。 */
 const fixLineBreaks = (text: string): string =>
-  text.replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll(" ", "\n")
-    .replaceAll(" ", "\n").replaceAll("\u0085", "\n");
+  text
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .replaceAll(" ", "\n")
+    .replaceAll(" ", "\n")
+    .replaceAll("\u0085", "\n");
 
 /**
  * `remove_terminal_escapes`（`ESC [ (\d|;)* 英字` を消す）。`re.sub` と同じく左から試し、
@@ -332,8 +336,10 @@ const parseCharMap = (raw: unknown, label: string): Map<number, string> => {
   const out = new Map<number, string>();
   for (const entry of raw) {
     if (
-      !Array.isArray(entry) || entry.length !== 2 ||
-      typeof entry[0] !== "number" || typeof entry[1] !== "string"
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "string"
     ) {
       throw new Error(`${label}: [cp, 文字列] でない`);
     }

@@ -42,7 +42,11 @@ import { acquireGpu } from "@karume/runtime";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { IrodoriPipeline, type IrodoriRunComponent } from "../../models/mod.ts";
 import { requireCensus, SEAT_SIGNATURES } from "../../runtime/tests/helpers/pipeline-census.ts";
-import { assertRowCensus, censusRowOf, effectiveSessionOptions } from "../../models/tests/helpers/census-table.ts";
+import {
+  assertRowCensus,
+  censusRowOf,
+  effectiveSessionOptions,
+} from "../../models/tests/helpers/census-table.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import {
   ASSETS_DIR,
@@ -264,8 +268,7 @@ test({
 });
 
 test({
-  name:
-    `e2e(実GPU): dit / dit_context の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
+  name: `e2e(実GPU): dit / dit_context の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
   ignore: !RUNNABLE,
   fn: async () => {
     // ここで `gpu` を渡すので破棄もこちらの責任になる（渡した側が所有権を持つ —
@@ -289,16 +292,19 @@ test({
         dit: [],
         "dit-context": [],
       };
-      await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-        gpu,
-        model: MODEL,
-        quant: QUANT,
-        onRunDiagnostics: (component, diagnostics) => {
-          if (!isCensusComponent(component)) return;
-          observed[component].push(censusOf(diagnostics, component));
-          runs[component].push(diagnostics.lastRunPipelines);
+      await using pipeline = await IrodoriPipeline.fromAssets(
+        { manifest, assets },
+        {
+          gpu,
+          model: MODEL,
+          quant: QUANT,
+          onRunDiagnostics: (component, diagnostics) => {
+            if (!isCensusComponent(component)) return;
+            observed[component].push(censusOf(diagnostics, component));
+            runs[component].push(diagnostics.lastRunPipelines);
+          },
         },
-      });
+      );
       // `durationSeconds` で S を固定するのは `duration` を回さず短く保つため（見たいのは
       // 長さではなく「何が走ったか」）。参照も caption も無い最小構成で足りる。
       await pipeline.generateLatent({
@@ -338,7 +344,7 @@ test({
       const checked = assertRowCensus(
         row,
         new Map(CENSUS_COMPONENTS.map((component) => [PHASE_OF[component], runs[component]])),
-        (phase) => phase === PHASE_OF.dit ? "dit" : "dit-context",
+        (phase) => (phase === PHASE_OF.dit ? "dit" : "dit-context"),
         where,
       );
       assert(checked > 0, `${where}: 表の期待と突き合わせた run が 1 本も無い`);

@@ -49,16 +49,15 @@ for (const dtype of ["i2", "i4"] as const) {
     const dir = new URL(`./fixtures/gemma4-ple-packed/${dtype}/`, import.meta.url);
     const opened = await openSeriesContainer(new URL(SERIES_MODEL_FILE, dir));
     const { index, openBlock } = await seriesPleHandle(opened, `test: ${dtype} fixture`);
-    const oracle = parseSafetensors(
-      (await readFile(new URL("oracle.safetensors", dir))).buffer,
-    );
-    const iv = oracle.tensors.get("ids")!, ev = oracle.tensors.get("expected")!;
+    const oracle = parseSafetensors((await readFile(new URL("oracle.safetensors", dir))).buffer);
+    const iv = oracle.tensors.get("ids")!,
+      ev = oracle.tensors.get("expected")!;
     const ids = Array.from(new Int32Array(oracle.buffer, iv.byteOffset, iv.byteLength / 4));
     const expected = new Uint32Array(oracle.buffer, ev.byteOffset, ev.byteLength / 4);
     const distinct = new Set(ids).size;
     const factor = dtype === "i2" ? 4 : 2;
     assertEquals(index.storage, dtype);
-    assertEquals(index.values.rowBytes, index.layers * index.dim / factor);
+    assertEquals(index.values.rowBytes, (index.layers * index.dim) / factor);
     assertEquals(
       gemma4PleTotalBytes(index),
       index.tokens * (index.layers * (index.dim / factor + 4)),

@@ -54,9 +54,7 @@ export const combineCfg = (
   const out = new Float32Array(cond.length);
   for (const variant of variants) {
     if (variant.velocity.length !== cond.length) {
-      throw new Error(
-        `CFG 変種の長さ ${variant.velocity.length} が cond ${cond.length} と違う`,
-      );
+      throw new Error(`CFG 変種の長さ ${variant.velocity.length} が cond ${cond.length} と違う`);
     }
   }
   for (let index = 0; index < cond.length; index += 1) {

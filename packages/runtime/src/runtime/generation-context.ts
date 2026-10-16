@@ -97,10 +97,7 @@ export type GenerationContextHost = {
    * @param refusal Session が dispose 済みのときに投げる `ExecutionError` の文言（呼び手の文脈を
    *   付ける — 呼んだ時点と確保の後のどちらの検査で落ちても同じ文言）。
    */
-  adopt(
-    allocate: () => Promise<GenerationContext>,
-    refusal: string,
-  ): Promise<GenerationContext>;
+  adopt(allocate: () => Promise<GenerationContext>, refusal: string): Promise<GenerationContext>;
 };
 
 /**
@@ -277,10 +274,7 @@ const slidingSlackRows = (
  * 指定に見積りだけが正常値を返すと、作れない構成へ admission の数字が与えられる。
  */
 export const assertChunkLength = (chunkLength: number): void => {
-  if (
-    !Number.isSafeInteger(chunkLength) || chunkLength < 1 ||
-    chunkLength > MAX_LOGICAL_LENGTH
-  ) {
+  if (!Number.isSafeInteger(chunkLength) || chunkLength < 1 || chunkLength > MAX_LOGICAL_LENGTH) {
     throw new ExecutionError(
       `chunkLength ${chunkLength} が 1..${MAX_LOGICAL_LENGTH} の整数でない` +
         "（固定長 prefill chunk の行数・搬送先は u32 — ADR 0066 決定 4 / 追記 4）",
@@ -555,9 +549,8 @@ export class GenerationContext {
     // 借り手の余裕は**貸し手の写し**（ADR 0096 段 2 §2.1）。自前で導出すると、貸し手が
     // sliding 宣言を持つのに借り手の readonly ノードが window を宣言していない形で
     // 「余裕なし」を名乗り、投機の上限がホスト側で緩む。
-    this.slidingSlack = borrow === undefined
-      ? slidingSlackRows(slots, slidingSlots)
-      : borrow.slidingSlack;
+    this.slidingSlack =
+      borrow === undefined ? slidingSlackRows(slots, slidingSlots) : borrow.slidingSlack;
     this.#lengths = lengths;
     this.chunkLength = chunkLength;
     // 凍結コピー: 呼び出し側の配列を後から書き換えられると、許可集合（下）と公開面が割れる。
@@ -572,9 +565,10 @@ export class GenerationContext {
       // 容量は確定済み（静的物理格納 — ADR 0066 決定 3）なので、ここで 1 度畳んで持つ。
       // MUST: 借り手はスロットのバイト数を数えない（実体は貸し手 context の所有物で、
       // 両方が数えると診断 `stateBacking.residentBytes` が同じ VRAM を二重計上する）。
-      bytes: borrow === undefined
-        ? [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) + LENGTHS_BYTES
-        : LENGTHS_BYTES,
+      bytes:
+        borrow === undefined
+          ? [...slots.values()].reduce((total, slot) => total + slot.byteLength, 0) + LENGTHS_BYTES
+          : LENGTHS_BYTES,
       bindings,
       assertLendable: (where: string): void => {
         this.#assertUsable(where);
@@ -840,9 +834,9 @@ export class GenerationContext {
       if (window !== lent) {
         const show = (value: number | undefined): string => value?.toString() ?? "宣言なし";
         throw new ExecutionError(
-          `state '${name}': attrs.window が貸し手と食い違う（貸し手 ${show(lent)} / 借り手 ${
-            show(window)
-          }）— 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
+          `state '${name}': attrs.window が貸し手と食い違う（貸し手 ${show(lent)} / 借り手 ${show(
+            window,
+          )}）— 論理 col → 物理 row の写像は読み書き同式 MUST（ADR 0067 決定 4）`,
         );
       }
       const shape = resolveSlotShape(name, graph.states[name].shape, bindings);
@@ -1096,9 +1090,9 @@ export class GenerationContext {
     }
     if (this.#slidingSlots.size > 0) {
       throw new ExecutionError(
-        `rewind: sliding スロット [${
-          [...this.#slidingSlots.keys()].join(", ")
-        }] を含む context は` +
+        `rewind: sliding スロット [${[...this.#slidingSlots.keys()].join(
+          ", ",
+        )}] を含む context は` +
           "巻き戻せない（ring はエビクト後に物理配置と論理範囲が一致しないため — ADR 0066 " +
           "追記 2）。有効なのは全スロットが非 sliding の context だけで、復旧は新しい context",
       );

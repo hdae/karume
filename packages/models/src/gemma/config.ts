@@ -50,7 +50,7 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
 // SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
 export const GEMMA4_SOURCES = {
-  "gemma4": {
+  gemma4: {
     repo: "hdae/karume-gemma4",
     revision: "6495175541701064fa98953988e45c21b320f7c0",
   },
@@ -262,13 +262,7 @@ export const parseGemma4PipelineConfig = (raw: unknown): Gemma4PipelineConfig =>
   // （`ModelInputError`）で落ちる（ADR 0107 決定 2）。書き手 `gemma4_pipeline_config` も [2, max] で焼く。
   const chunkRows = (value: number): boolean => Number.isSafeInteger(value) && value >= 2;
   const chunkLength = readNumber(raw, "chunkLength", where, chunkRows, "2 以上の整数でない");
-  const maxChunkLength = readNumber(
-    raw,
-    "maxChunkLength",
-    where,
-    chunkRows,
-    "2 以上の整数でない",
-  );
+  const maxChunkLength = readNumber(raw, "maxChunkLength", where, chunkRows, "2 以上の整数でない");
   const maxPosition = readNumber(raw, "maxPosition", where, positiveInteger, "1 以上の整数でない");
   const capacity = readNumber(raw, "capacity", where, positiveInteger, "1 以上の整数でない");
   if (chunkLength > maxChunkLength) {

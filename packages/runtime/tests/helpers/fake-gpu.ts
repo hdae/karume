@@ -58,10 +58,8 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
     },
   }) as unknown as GPUDevice;
 
-export const fakeGpuContext = (
-  device: GPUDevice,
-  onDeviceLost?: DeviceLostHandler,
-): GpuContext => new GpuContext(device, readAdapterInfo({}), ZERO_LIMITS, new Set(), onDeviceLost);
+export const fakeGpuContext = (device: GPUDevice, onDeviceLost?: DeviceLostHandler): GpuContext =>
+  new GpuContext(device, readAdapterInfo({}), ZERO_LIMITS, new Set(), onDeviceLost);
 
 /** 引き金に何も渡さなかったときの消失情報（`reason` は GpuContext の分岐に使われない）。 */
 const DEFAULT_LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({

@@ -22,15 +22,16 @@ const close = (actual: Tensor, expected: Tensor): void => {
 export const checkRmsSubgroup = async (
   gpu: GpuContext,
 ): Promise<{ cases: number; elements: number }> => {
-  let cases = 0, elements = 0;
+  let cases = 0,
+    elements = 0;
   for (const dim of [1, 17, 128, 129, 255, 256, 257, 1024, 1536, 1537, 2560, 2561]) {
     let first: Uint32Array<ArrayBuffer> | undefined;
     for (const rows of [1, 4, 8, 19]) {
       const x = fill(
         [rows, dim],
-        (i) => Math.sin((i % dim) * .713 + .19) * (1 + Math.floor(i / dim)),
+        (i) => Math.sin((i % dim) * 0.713 + 0.19) * (1 + Math.floor(i / dim)),
       );
-      const w = fill([dim], (i) => .2 + Math.cos(i * .17));
+      const w = fill([dim], (i) => 0.2 + Math.cos(i * 0.17));
       const graph = singleOpDeclaration("rms_norm", [[rows, dim], [dim]], [[rows, dim]], {
         attrs: { eps: 1e-6 },
       });
@@ -56,9 +57,9 @@ export const checkRmsSubgroup = async (
   for (const dim of [256, 1536, 2560]) {
     for (const normFirst of [false, true]) {
       const rows = 19;
-      const x = fill([rows, dim], (i) => Math.sin(i * .713 + .19) * 4);
-      const w = fill([dim], (i) => .2 + Math.cos(i * .17));
-      const r = fill([rows, dim], (i) => Math.cos(i * .531) * 3);
+      const x = fill([rows, dim], (i) => Math.sin(i * 0.713 + 0.19) * 4);
+      const w = fill([dim], (i) => 0.2 + Math.cos(i * 0.17));
+      const r = fill([rows, dim], (i) => Math.cos(i * 0.531) * 3);
       const model = await openModelBytes(rmsNormAddGraph({ rows, dim, normFirst }), []);
       const session = await createSessionFromContainer(gpu, model, GRAPH_NAME, {
         rmsNormReduce: "subgroup32",
@@ -73,7 +74,8 @@ export const checkRmsSubgroup = async (
             const norm = applyReferenceOp("rms_norm", [x, w], { eps: 1e-6 });
             for (let i = 0; i < r.data.length; i++) r.data[i] = -norm.data[i];
           }
-          const actual = await session.run({ x, w, r }), expected = await separate.run({ x, w, r });
+          const actual = await session.run({ x, w, r }),
+            expected = await separate.run({ x, w, r });
           assertEquals(
             bits(actual.y),
             bits(expected.y),
@@ -91,7 +93,10 @@ export const checkRmsSubgroup = async (
     }
   }
   // 2 workgroupで19行を処理し、共有部分和の読み終わりより早い上書きを検出する。
-  const d = gpu.device, rows = 19, dim = 1537, owned: GPUBuffer[] = [];
+  const d = gpu.device,
+    rows = 19,
+    dim = 1537,
+    owned: GPUBuffer[] = [];
   let error: GPUError | null = null;
   d.pushErrorScope("validation");
   const buffer = (data: ArrayBufferView<ArrayBuffer> | number, usage: number): GPUBuffer => {
@@ -101,8 +106,11 @@ export const checkRmsSubgroup = async (
     return b;
   };
   try {
-    const x = Float32Array.from({ length: rows * dim }, (_, i) => Math.sin(i * .23) * (1 + i % 7));
-    const w = Float32Array.from({ length: dim }, (_, i) => Math.cos(i * .37));
+    const x = Float32Array.from(
+      { length: rows * dim },
+      (_, i) => Math.sin(i * 0.23) * (1 + (i % 7)),
+    );
+    const w = Float32Array.from({ length: dim }, (_, i) => Math.cos(i * 0.37));
     const resources = [
       buffer(rmsNormParams(rows, dim, 1e-6), U.UNIFORM | U.COPY_DST),
       buffer(x, U.STORAGE | U.COPY_DST),
@@ -121,7 +129,8 @@ export const checkRmsSubgroup = async (
       layout: pipeline.getBindGroupLayout(0),
       entries: resources.map((b, binding) => ({ binding, resource: { buffer: b } })),
     });
-    const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+    const encoder = d.createCommandEncoder(),
+      pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group);
     pass.dispatchWorkgroups(2);

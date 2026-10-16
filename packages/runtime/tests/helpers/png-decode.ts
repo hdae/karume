@@ -117,9 +117,7 @@ export const decodePng = async (
   if (parts.length === 0) throw new Error(`${where}: IDAT が無い`);
   const [width, height] = size;
 
-  const compressed = new Uint8Array(
-    parts.reduce((sum, part) => sum + part.length, 0),
-  );
+  const compressed = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
   let offset = 0;
   for (const part of parts) {
     compressed.set(part, offset);

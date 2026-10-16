@@ -273,10 +273,7 @@ export type WanState = {
   /** 埋め込み資産（`"precomputed"` の受理集合・両経路の `prompts`）。 */
   readonly textEmbeds: WanTextEmbeds;
   readonly text: WanTextStage;
-  readonly onRunDiagnostics?: (
-    component: WanRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -461,18 +458,19 @@ const admitWan = async (
   const textEncoder = admitWanText(route, open, dit, spec.owner);
   // I2V の encoder は decoder の潜在と空間の圧縮に照らして見る（受理寸法の被覆を含む — `wanVaeEncoderContract`）。
   // 未知の DiT の入力の形は ditContract が先に落としている。
-  const vaeEncoder = spec.generation.ditInputForm === "ti2v"
-    ? wanVaeEncoderContract(
-      {
-        pre: open(VAE_ENCODER_PRE),
-        attn: open(VAE_ENCODER_ATTN),
-        post: open(VAE_ENCODER_POST),
-      },
-      layout,
-      spec.generation,
-      spec.owner,
-    )
-    : undefined;
+  const vaeEncoder =
+    spec.generation.ditInputForm === "ti2v"
+      ? wanVaeEncoderContract(
+          {
+            pre: open(VAE_ENCODER_PRE),
+            attn: open(VAE_ENCODER_ATTN),
+            post: open(VAE_ENCODER_POST),
+          },
+          layout,
+          spec.generation,
+          spec.owner,
+        )
+      : undefined;
   return {
     config,
     quantName,
@@ -514,7 +512,7 @@ const buildWan = async (
   );
 
   await settleAbort(options.signal);
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を誰も
@@ -543,12 +541,15 @@ const buildWan = async (
       transformer: open(TRANSFORMER),
       vaeFirst: open(VAE_DECODER_FIRST),
       vaeNext: open(VAE_DECODER_NEXT),
-      vaeEncoder: admitted.vaeEncoder === undefined ? undefined : {
-        pre: open(VAE_ENCODER_PRE),
-        attn: open(VAE_ENCODER_ATTN),
-        post: open(VAE_ENCODER_POST),
-        contract: admitted.vaeEncoder,
-      },
+      vaeEncoder:
+        admitted.vaeEncoder === undefined
+          ? undefined
+          : {
+              pre: open(VAE_ENCODER_PRE),
+              attn: open(VAE_ENCODER_ATTN),
+              post: open(VAE_ENCODER_POST),
+              contract: admitted.vaeEncoder,
+            },
       layout,
       ropeBase,
       dit,
@@ -576,11 +577,12 @@ export const generateWanVideo = async (
 ): Promise<GeneratedVideo> => {
   const { dit } = state;
   const { onEvent, signal } = request;
-  const emit = onEvent === undefined
-    ? () => Promise.resolve()
-    : async (event: WanGenerateEvent) => {
-      await onEvent(event);
-    };
+  const emit =
+    onEvent === undefined
+      ? () => Promise.resolve()
+      : async (event: WanGenerateEvent) => {
+          await onEvent(event);
+        };
   // 入口の門は経路ごと（どちらも GPU に触る前の純粋な検査）。プロンプトの文脈は経路ごとに作り、
   // encoder・DiT・VAE の段は同じ 1 本を通る。text の段は encoder の段の後に回すので、ここでは組み方だけを決める。
   let knobs: WanGenerationKnobs;
@@ -640,15 +642,7 @@ export const generateWanVideo = async (
   const contexts = await encodeContexts();
   // 段の境目（text → DiT）。
   await settleAbort(signal);
-  const latents = await runWanDenoise(
-    state,
-    knobs,
-    contexts,
-    condition,
-    emit,
-    signal,
-    spec.owner,
-  );
+  const latents = await runWanDenoise(state, knobs, contexts, condition, emit, signal, spec.owner);
   // 段の境目（DiT → VAE）。
   await settleAbort(signal);
   const data = await decodeWanVaeStage(

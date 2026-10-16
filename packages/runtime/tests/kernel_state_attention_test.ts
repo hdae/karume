@@ -145,14 +145,12 @@ test("論理 col → スロット物理行の写像は読み（①③）と書�
     const fragment = stateSlotRowWgsl(sliding);
     // MUST: 逐語で含まれること。片方だけ別式にすると ring が一周した後の全読みが黙って
     // 別の行を指す（ADR 0067 決定 4 の「読み書き同式 MUST」の機械証明）
-    for (
-      const [name, wgsl] of [
-        ["qk", stateQkWgsl(sliding, false)],
-        ["qk gqa", stateQkWgsl(sliding, true)],
-        ["pv", statePvWgsl(sliding, false)],
-        ["append", stateAppendWgsl(sliding)],
-      ] as const
-    ) {
+    for (const [name, wgsl] of [
+      ["qk", stateQkWgsl(sliding, false)],
+      ["qk gqa", stateQkWgsl(sliding, true)],
+      ["pv", statePvWgsl(sliding, false)],
+      ["append", stateAppendWgsl(sliding)],
+    ] as const) {
       assertEquals(wgsl.includes(fragment), true, `${name}: slot_row の断片が共有されていない`);
     }
   }
@@ -226,13 +224,11 @@ test("KV 並列縮約の PV 3 変種は pad 行の 0 を lane 0 だけが書く�
     return wgsl.slice(start, wgsl.indexOf("return;", start));
   };
   for (const [sliding, gqa] of VARIANTS) {
-    for (
-      const [name, wgsl] of [
-        ["③'", statePvParallelWgsl(sliding, gqa)],
-        ["③' readonly", statePvParallelReadonlyWgsl(sliding, gqa)],
-        ["②③ 融合", stateStatsPvWgsl(sliding, gqa)],
-      ] as const
-    ) {
+    for (const [name, wgsl] of [
+      ["③'", statePvParallelWgsl(sliding, gqa)],
+      ["③' readonly", statePvParallelReadonlyWgsl(sliding, gqa)],
+      ["②③ 融合", stateStatsPvWgsl(sliding, gqa)],
+    ] as const) {
       const where = `${name} sliding=${sliding} gqa=${gqa}`;
       const branch = padBranch(wgsl);
       assertEquals(branch.includes("out[at] = 0.0;"), true, `${where}: pad 行の 0 書き`);
@@ -271,11 +267,7 @@ test("①③ の params は語順どおりに詰まる（同じ幾何を 2 つ�
 
 test("①③ の params 門が沈黙誤値になる幾何を全て拒否する", () => {
   // r = 0（WGSL の u32 ゼロ除算は trap せず実装依存値 = kv 平面が化ける）
-  assertThrows(
-    () => stateAttentionParams({ ...GEOMETRY, kvRepeat: 0 }),
-    CodegenError,
-    "kv_repeat",
-  );
+  assertThrows(() => stateAttentionParams({ ...GEOMETRY, kvRepeat: 0 }), CodegenError, "kv_repeat");
   // 行ブロックが chunk からはみ出す（q / O の行が別のバッチへ回り込む）
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
@@ -283,11 +275,7 @@ test("①③ の params 門が沈黙誤値になる幾何を全て拒否する",
     "行ブロック",
   );
   // full: col_cap < C（P + Q ≤ C の context 側検査を通った形が S からはみ出す）
-  assertThrows(
-    () => stateAttentionParams({ ...GEOMETRY, colCap: 31 }),
-    CodegenError,
-    "col_cap",
-  );
+  assertThrows(() => stateAttentionParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
   // sliding: W > C
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, window: 33, colCap: 40 }),
@@ -313,11 +301,7 @@ test("①③ の params 門が沈黙誤値になる幾何を全て拒否する",
     CodegenError,
     "scale は f32 として有限の数値",
   );
-  assertThrows(
-    () => stateAttentionParams({ ...GEOMETRY, depth: 2 ** 32 }),
-    CodegenError,
-    "depth",
-  );
+  assertThrows(() => stateAttentionParams({ ...GEOMETRY, depth: 2 ** 32 }), CodegenError, "depth");
   assertThrows(() => stateStatsParams(0, 4, 0, 32, 0), CodegenError, "batch_heads");
   assertThrows(() => stateStatsParams(6, 0, 0, 32, 0), CodegenError, "rows_block");
   // ② も sliding の値域門を持つ（②は sliding フラグを別引数で受けないので col_cap との
@@ -332,11 +316,7 @@ test("state_append の params 門（容量・正整数・u32 域）", () => {
   const base = { kvPlanes: 2, chunkRows: 4, depth: 3, capacity: 16, window: 0 };
   assertEquals([...stateAppendParams(base)], [2, 4, 3, 16, 0, 0, 0, 0]);
   assertEquals([...stateAppendParams({ ...base, window: 8 }).subarray(0, 5)], [2, 4, 3, 16, 8]);
-  assertThrows(
-    () => stateAppendParams({ ...base, window: 17 }),
-    CodegenError,
-    "window",
-  );
+  assertThrows(() => stateAppendParams({ ...base, window: 17 }), CodegenError, "window");
   assertThrows(() => stateAppendParams({ ...base, depth: 0 }), CodegenError, "正整数");
   assertThrows(() => stateAppendParams({ ...base, capacity: -1 }), CodegenError, "capacity");
 });
@@ -366,10 +346,7 @@ test("dispatch 幾何は live 列に比例し、容量には依らない（ADR 0
   // ③ は論理長に依らない（pad 行も書く = full-write。走査を切るのはカーネル側）
   assertEquals(statePvWorkgroups(DISPATCH, LIMIT, "t"), [2, 1, 6]);
   // ② は grid-stride なので上限超過は**縮退**（②③ の別扱いが崩れていないこと）
-  assertEquals(
-    stateStatsWorkgroups({ ...DISPATCH, batchHeads: 4096 }, 4, 100, "t"),
-    [100, 1, 1],
-  );
+  assertEquals(stateStatsWorkgroups({ ...DISPATCH, batchHeads: 4096 }, 4, 100, "t"), [100, 1, 1]);
 });
 
 test("①② の行方向 dispatch は M ではなく Q に比例する（pad だけのブロックは 0）", () => {
@@ -403,7 +380,11 @@ test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 655
   // ⌈C/16⌉ にする等）小 / 大がここで割れる。
   const smallCapacity = { ...DISPATCH, capacity: 64, colCap: 64 };
   const largeCapacity = { ...DISPATCH, capacity: 65536, colCap: 65536 };
-  for (const [past, query] of [[0, 1], [7, 4], [513, 16]] as const) {
+  for (const [past, query] of [
+    [0, 1],
+    [7, 4],
+    [513, 16],
+  ] as const) {
     const where = `(P,Q)=(${past},${query})`;
     assertEquals(
       stateQkWorkgroups(smallCapacity, past, query, LIMIT, "t"),
@@ -427,11 +408,7 @@ test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 655
 });
 
 test("dispatch の上限超過はタイル系が fail loudly・grid-stride 系が縮退", () => {
-  assertThrows(
-    () => stateQkWorkgroups(DISPATCH, 100000, 1, 16, "t"),
-    DispatchLimitError,
-    "上限",
-  );
+  assertThrows(() => stateQkWorkgroups(DISPATCH, 100000, 1, 16, "t"), DispatchLimitError, "上限");
   assertThrows(
     () => statePvWorkgroups({ ...DISPATCH, batchHeads: 70000 }, 65535, "t"),
     DispatchLimitError,
@@ -468,17 +445,15 @@ test("live 範囲の純関数（full は P+Q・sliding は W で頭打ち）", (
 });
 
 /** D=1 の手計算オラクル用の入力（in-window の V を col 番号にすると出力が「窓の平均」になる）。 */
-const windowProbe = (
-  options: {
-    readonly window: number;
-    readonly past: number;
-    readonly query: number;
-    readonly chunkRows: number;
-    readonly capacity: number;
-    /** resident でない物理行に置く毒値（読まれたら出力が跳ねる）。 */
-    readonly poison: number;
-  },
-): StateAttentionRefInput => {
+const windowProbe = (options: {
+  readonly window: number;
+  readonly past: number;
+  readonly query: number;
+  readonly chunkRows: number;
+  readonly capacity: number;
+  /** resident でない物理行に置く毒値（読まれたら出力が跳ねる）。 */
+  readonly poison: number;
+}): StateAttentionRefInput => {
   const { window, past, query, chunkRows, capacity, poison } = options;
   const slotK = new Float32Array(capacity);
   const slotV = new Float32Array(capacity).fill(poison);
@@ -600,7 +575,7 @@ test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓�
   ];
   const [past, query, chunkRows] = [3, 2, 2];
   for (const { name, window, capacity, nanColumn, row, expected } of cases) {
-    const slotRowOf = (col: number) => stateSliding(window) ? col % capacity : col;
+    const slotRowOf = (col: number) => (stateSliding(window) ? col % capacity : col);
     const slotV = new Float32Array(capacity).fill(Number.NaN);
     const insV = new Float32Array(chunkRows);
     for (let col = 0; col < past + query; col += 1) {
@@ -643,7 +618,7 @@ const liveRangeAttention = (input: StateAttentionRefInput): Float32Array<ArrayBu
   const scale = Math.fround(input.scale);
   const base = stateColumnBase(window, past);
   const live = stateLiveColumns(window, past, query);
-  const slotRowOf = (col: number) => stateSliding(window) ? col % capacity : col;
+  const slotRowOf = (col: number) => (stateSliding(window) ? col % capacity : col);
   const rowOf = (kvPlane: number, col: number) =>
     col < past
       ? { source: "slot" as const, offset: (kvPlane * capacity + slotRowOf(col)) * depth }
@@ -666,7 +641,7 @@ const liveRangeAttention = (input: StateAttentionRefInput): Float32Array<ArrayBu
         const k = source === "slot" ? input.slotK : input.insK;
         let acc = 0;
         for (let d = 0; d < depth; d += 1) {
-          acc += (input.q[qBase + d] * scale) * (k[offset + d] * scale);
+          acc += input.q[qBase + d] * scale * (k[offset + d] * scale);
         }
         scores[cl] = Math.fround(acc);
       }
@@ -973,10 +948,7 @@ test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化�
 test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
   // 席の目印（census 門がこの `:par` を見る）。幾何は `wg16x16` = TILE_X × D レーン
   assertEquals(stateQkParallelKey(false, false), "attention_state_qk:v1:f32:wg16x16:par");
-  assertEquals(
-    stateQkParallelKey(true, true),
-    "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa",
-  );
+  assertEquals(stateQkParallelKey(true, true), "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa");
   assertEquals(STATE_QK_D_LANES, 16);
   for (const [sliding, gqa] of VARIANTS) {
     // ① と ①' は別キー（同じ構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
@@ -1008,10 +980,7 @@ test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 有�
   // z 軸は B·H・列軸は容量に依らない（live だけが効く = 仕事量合格条件）
   assertEquals(stateQkParallelWorkgroups(DISPATCH, 100, 4, LIMIT, "t")[2], 6);
   // MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠け、②③ が残骸を読む）
-  assertThrows(
-    () => stateQkParallelWorkgroups(DISPATCH, 4096, 1, 8, "t"),
-    DispatchLimitError,
-  );
+  assertThrows(() => stateQkParallelWorkgroups(DISPATCH, 4096, 1, 8, "t"), DispatchLimitError);
 });
 
 test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外へ外挿しない", () => {
@@ -1051,7 +1020,7 @@ test("①ₜ のキーは M の幾何バケットを載せる（辺だけでな�
     ...VARIANTS.map(([sliding, gqa]) => stateQkKey(sliding, gqa)),
     ...VARIANTS.map(([sliding, gqa]) => stateQkParallelKey(sliding, gqa)),
     ...VARIANTS.flatMap(([sliding, gqa]) =>
-      [16, 100, 768].map((rows) => stateQkTiledKey(sliding, gqa, rows))
+      [16, 100, 768].map((rows) => stateQkTiledKey(sliding, gqa, rows)),
     ),
   ];
   assertEquals(new Set(keys).size, keys.length);
@@ -1088,34 +1057,29 @@ test("①ₜ は ① の契約断片（読み書き同式・述語・有効行�
 test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / col_cap / depth）", () => {
   const params = stateQkTiledParams({ ...GEOMETRY, rowOffset: 4 });
   assertEquals(params.length, 12, "uniform 整列で 48 バイト");
-  assertEquals([...params.slice(0, 9)], [
-    GEOMETRY.rowsBlock,
-    GEOMETRY.colCap,
-    GEOMETRY.depth,
-    4,
-    GEOMETRY.chunkRows,
-    GEOMETRY.kvRepeat,
-    GEOMETRY.window,
-    GEOMETRY.capacity,
-    STATE_NEG_INF_BITS,
-  ]);
+  assertEquals(
+    [...params.slice(0, 9)],
+    [
+      GEOMETRY.rowsBlock,
+      GEOMETRY.colCap,
+      GEOMETRY.depth,
+      4,
+      GEOMETRY.chunkRows,
+      GEOMETRY.kvRepeat,
+      GEOMETRY.window,
+      GEOMETRY.capacity,
+      STATE_NEG_INF_BITS,
+    ],
+  );
   assertEquals(new Float32Array(params.buffer)[9], GEOMETRY.scale);
   // 値域門は ① と同じ 1 本（別に持つと片方だけ通る形ができる）
-  assertThrows(
-    () => stateQkTiledParams({ ...GEOMETRY, kvRepeat: 0 }),
-    CodegenError,
-    "kv_repeat",
-  );
+  assertThrows(() => stateQkTiledParams({ ...GEOMETRY, kvRepeat: 0 }), CodegenError, "kv_repeat");
   assertThrows(
     () => stateQkTiledParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
     CodegenError,
     "行ブロック",
   );
-  assertThrows(
-    () => stateQkTiledParams({ ...GEOMETRY, colCap: 31 }),
-    CodegenError,
-    "col_cap",
-  );
+  assertThrows(() => stateQkTiledParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
 });
 
 test("①ₜ の dispatch の辺は M の幾何バケットから出る（定数で持ち回らない）", () => {
@@ -1176,7 +1140,7 @@ test("③ₜ のキーは M の幾何バケットを載せる（辺だけでな�
     ...VARIANTS.map(([sliding, gqa]) => statePvKey(sliding, gqa)),
     ...VARIANTS.map(([sliding, gqa]) => statePvParallelKey(sliding, gqa)),
     ...VARIANTS.flatMap(([sliding, gqa]) =>
-      [16, 100, 768].map((rows) => statePvTiledKey(sliding, gqa, rows))
+      [16, 100, 768].map((rows) => statePvTiledKey(sliding, gqa, rows)),
     ),
   ];
   assertEquals(new Set(keys).size, keys.length);
@@ -1217,16 +1181,19 @@ test("③ₜ は ③ の契約断片（読み書き同式・有効行・確率�
 test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / depth / col_cap）", () => {
   const params = statePvTiledParams({ ...GEOMETRY, rowOffset: 4 });
   assertEquals(params.length, 8, "uniform 整列で 32 バイト");
-  assertEquals([...params], [
-    GEOMETRY.rowsBlock,
-    GEOMETRY.depth,
-    GEOMETRY.colCap,
-    4,
-    GEOMETRY.chunkRows,
-    GEOMETRY.kvRepeat,
-    GEOMETRY.window,
-    GEOMETRY.capacity,
-  ]);
+  assertEquals(
+    [...params],
+    [
+      GEOMETRY.rowsBlock,
+      GEOMETRY.depth,
+      GEOMETRY.colCap,
+      4,
+      GEOMETRY.chunkRows,
+      GEOMETRY.kvRepeat,
+      GEOMETRY.window,
+      GEOMETRY.capacity,
+    ],
+  );
   // 値域門は ③ と同じ 1 本（別に持つと片方だけ通る形ができる）
   assertThrows(() => statePvTiledParams({ ...GEOMETRY, kvRepeat: 0 }), CodegenError, "kv_repeat");
   assertThrows(

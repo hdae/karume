@@ -77,9 +77,9 @@ const embeddingScaleWgsl = (weight: WeightStorage, groupShift: number | undefine
 
 export const embeddingKey = (weight: WeightStorage, groupSize?: number): string => {
   i4GroupShift("embedding", weight, groupSize);
-  return `embedding:v1:f32:i32:wg${EMBEDDING_WORKGROUP_SIZE}${weightKeyPart(weight)}${
-    i4GroupKeyPart(groupSize)
-  }`;
+  return `embedding:v1:f32:i32:wg${EMBEDDING_WORKGROUP_SIZE}${weightKeyPart(weight)}${i4GroupKeyPart(
+    groupSize,
+  )}`;
 };
 
 export const embeddingWgsl = (weight: WeightStorage, groupSize?: number): string =>

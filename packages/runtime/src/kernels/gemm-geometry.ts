@@ -129,14 +129,12 @@ export const gemmQuadSlots = (geometry: GemmGeometry): number =>
  */
 export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void => {
   const { regM, regN, wgX, wgY } = geometry;
-  for (
-    const [name, value] of [
-      ["regM", regM],
-      ["regN", regN],
-      ["wgX", wgX],
-      ["wgY", wgY],
-    ] as const
-  ) {
+  for (const [name, value] of [
+    ["regM", regM],
+    ["regN", regN],
+    ["wgX", wgX],
+    ["wgY", wgY],
+  ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw new CodegenError(`${where}: 幾何の ${name} は正整数（${value}）`);
     }
@@ -146,12 +144,10 @@ export const assertGemmGeometry = (geometry: GemmGeometry, where: string): void 
     throw new CodegenError(`${where}: regN は ${GEMM_QUAD} の倍数（acc は vec4 束ね・${regN}）`);
   }
   const threads = gemmThreads(geometry);
-  for (
-    const [name, unit] of [
-      ["K quad", GEMM_K_QUADS],
-      ["列 quad", gemmColumnQuads(geometry)],
-    ] as const
-  ) {
+  for (const [name, unit] of [
+    ["K quad", GEMM_K_QUADS],
+    ["列 quad", gemmColumnQuads(geometry)],
+  ] as const) {
     if (threads % unit !== 0) {
       throw new CodegenError(
         `${where}: スレッド数 ${threads} が ${name} 数 ${unit} で割り切れない（充填の担当が組めない）`,
@@ -198,9 +194,9 @@ export const gemmGeometryTileKeyPart = (geometry: GemmGeometry): string =>
 
 /** 生成コメント用の幾何注記（WGSL ヘッダ 1 行に載せる形）。 */
 export const gemmGeometryNote = (geometry: GemmGeometry): string =>
-  `レジスタ ${gemmTileM(geometry)}x${
-    gemmTileN(geometry)
-  } タイル / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY}`;
+  `レジスタ ${gemmTileM(geometry)}x${gemmTileN(
+    geometry,
+  )} タイル / 1 スレッド ${geometry.regM}x${geometry.regN} / wg ${geometry.wgX}x${geometry.wgY}`;
 
 /**
  * 既定の幾何を決める**唯一の純関数**。全 op 共通の 1 点で、op 別の既定は持たない
@@ -304,7 +300,8 @@ export const GEMM_ROWS_BUCKETS: readonly {
 export const gemmGeometryForRows = (rows: number): GemmGeometry => {
   assertU32Params("幾何の選択", { "行数 M": rows });
   // 最後の段は上限なし（Infinity）なので、u32 の行数は必ずどれかの段に当たる。
-  const bucket = GEMM_ROWS_BUCKETS.find((rule) => rows <= rule.maxRows) ??
+  const bucket =
+    GEMM_ROWS_BUCKETS.find((rule) => rows <= rule.maxRows) ??
     GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
   return bucket.geometry;
 };
@@ -322,11 +319,9 @@ export const gemmAccumulatorInit = (
   geometry: GemmGeometry,
   init: (row: number) => string = () => "vec4<f32>(0.0)",
 ): string =>
-  Array.from(
-    { length: geometry.regM },
-    (_, row) =>
-      Array.from(
-        { length: gemmQuadsPerThread(geometry) },
-        (_, quad) => `  var acc${row}_${quad} = ${init(row)};`,
-      ).join("\n"),
+  Array.from({ length: geometry.regM }, (_, row) =>
+    Array.from(
+      { length: gemmQuadsPerThread(geometry) },
+      (_, quad) => `  var acc${row}_${quad} = ${init(row)};`,
+    ).join("\n"),
   ).join("\n");

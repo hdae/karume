@@ -155,12 +155,7 @@ export const runTopkDirect = async (
       1,
       device.limits.maxComputeWorkgroupsPerDimension,
     );
-    dispatch(
-      device,
-      pipelineOf(device, cache, wgsl),
-      [params, input, values, indices],
-      groups,
-    );
+    dispatch(device, pipelineOf(device, cache, wgsl), [params, input, values, indices], groups);
     return {
       values: new Float32Array(await readBytes(device, values, count), 0, count),
       indices: new Int32Array(await readBytes(device, indices, count), 0, count),

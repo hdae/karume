@@ -244,11 +244,7 @@ const residentNames = (
  * 不一致の validation で偶然落ちる = キャッシュが当たった瞬間に検出が消える）。
  * `BatchScope` が owner を検査しているのと同じ門をここに置く。
  */
-const assertResidentUsable = (
-  resident: ResidentTensor,
-  gpu: GpuContext,
-  where: string,
-): void => {
+const assertResidentUsable = (resident: ResidentTensor, gpu: GpuContext, where: string): void => {
   if (resident.disposed) {
     throw new ExecutionError(`${where}: 破棄済みの常駐テンソル '${resident.label}' は使えない`);
   }
@@ -272,9 +268,7 @@ const generationEncoding = (
   past: number,
   query: number,
 ): GenerationEncoding => ({
-  slots: new Map(
-    [...context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.buffer]),
-  ),
+  slots: new Map([...context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.buffer])),
   lengths: context[RUNTIME_INTERNAL].lengths,
   past,
   query,
@@ -366,13 +360,14 @@ const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): 
   // MUST: `commit` の値域は発行の同期区間で見る。型の外から来た綴り違いを既定へ倒すと、
   // deferred のつもりで発行した run が黙って論理長を進める（例外も警告も出ない位置ずれ）。
   if (
-    capturedGeneration?.commit !== undefined && capturedGeneration.commit !== "immediate" &&
+    capturedGeneration?.commit !== undefined &&
+    capturedGeneration.commit !== "immediate" &&
     capturedGeneration.commit !== "deferred"
   ) {
     throw new ExecutionError(
-      `run: generation.commit ${
-        describeInputValue(capturedGeneration.commit)
-      } は 'immediate' か 'deferred' のみ`,
+      `run: generation.commit ${describeInputValue(
+        capturedGeneration.commit,
+      )} は 'immediate' か 'deferred' のみ`,
     );
   }
   // MUST: deferred run が sliding ring へ書ける行数は**余裕まで**（`Q ≤ slidingSlack`）。
@@ -788,11 +783,14 @@ export class Session {
       // MUST: 第 3 引数の写し・値域の検査・`[RUNTIME_INTERNAL]` の取り出しもこの try の中で行う
       // （外に置くと getter の throw や型外の context が同期 throw として漏れる — {@link Session.#admit}
       // と同じ規律）。順序は写し → 値域 → 取り出し → 入力の写し（リースの取得は予約の後）。
-      capturedGeneration = generation === undefined ? undefined : {
-        context: generation.context,
-        queryLength: generation.queryLength,
-        commit: generation.commit,
-      };
+      capturedGeneration =
+        generation === undefined
+          ? undefined
+          : {
+              context: generation.context,
+              queryLength: generation.queryLength,
+              commit: generation.commit,
+            };
       assertGenerationCommit(capturedGeneration);
       lease = capturedGeneration?.context[RUNTIME_INTERNAL];
       // MUST: 入力の写しはリース取得より**前**（写しが落ちた後に返し手の居ないリースが 1 本
@@ -985,19 +983,21 @@ export class Session {
       const generation = options.generation;
       capturedOptions = {
         batch: scope,
-        ...(generation === undefined ? {} : {
-          generation: {
-            context: generation.context,
-            queryLength: generation.queryLength,
-            commit: generation.commit,
-          },
-        }),
+        ...(generation === undefined
+          ? {}
+          : {
+              generation: {
+                context: generation.context,
+                queryLength: generation.queryLength,
+                commit: generation.commit,
+              },
+            }),
         bindings: { ...options.bindings },
         ...(options.copyOutputs === undefined
           ? {}
-          // 写し先の Record も member 差し替えを固定する（入力と同じ理由 — 差し替えが通ると
-          // 「書けたのに別の常駐テンソルへ」の沈黙誤値になる）。実体は借りたまま。
-          : { copyOutputs: { ...options.copyOutputs } }),
+          : // 写し先の Record も member 差し替えを固定する（入力と同じ理由 — 差し替えが通ると
+            // 「書けたのに別の常駐テンソルへ」の沈黙誤値になる）。実体は借りたまま。
+            { copyOutputs: { ...options.copyOutputs } }),
       };
       // MUST: 写しの後にもう一度（{@link Session.#assertEnqueueAdmissible}）— 最終検査は資源予約と
       // 直列化鎖への追加の直前に置く。
@@ -1184,9 +1184,7 @@ export class Session {
     }
     const { graph, residency, weightBuffers, residentWeights, gpu } = this.#state;
     if (!Object.hasOwn(graph.initializers, initializerName)) {
-      throw new ExecutionError(
-        `exportWeight: initializer '${initializerName}' がグラフに無い`,
-      );
+      throw new ExecutionError(`exportWeight: initializer '${initializerName}' がグラフに無い`);
     }
     const seat = residency.get(initializerName);
     if (seat === undefined) {
@@ -1307,9 +1305,8 @@ export class Session {
       lastRunFusions: this.#lastRunFusions,
       lastRunParams: this.#lastRunParams,
       lastRunPrepared: this.#lastRunPrepared,
-      lastRunPipelines: this.#lastRunRecipes === undefined
-        ? undefined
-        : pipelineCensus(this.#lastRunRecipes),
+      lastRunPipelines:
+        this.#lastRunRecipes === undefined ? undefined : pipelineCensus(this.#lastRunRecipes),
       planBacking: {
         // MUST: 保持集合から毎回導出する（独立に足し引きするカウンタで持たない — #contexts と同じ規律）。
         residentBytes: [...this.#backings.values()].reduce(
@@ -1325,8 +1322,10 @@ export class Session {
       },
       stateBacking: {
         // MUST: 生存集合から毎回導出する（{@link Session.#contexts} の doc）。
-        residentBytes: [...this.#contexts]
-          .reduce((total, context) => total + context[RUNTIME_INTERNAL].bytes, 0),
+        residentBytes: [...this.#contexts].reduce(
+          (total, context) => total + context[RUNTIME_INTERNAL].bytes,
+          0,
+        ),
         contextCount: this.#contextCount,
         rebindCount: this.#stateRebinds,
       },
@@ -1336,7 +1335,10 @@ export class Session {
   /** 直前の実行の決着後に `body` を走らせる。戻り値はこの呼び出し自身の結果 / 例外。 */
   #serialize<T>(body: () => Promise<T>): Promise<T> {
     const result = this.#chain.then(body);
-    this.#chain = result.then(() => undefined, () => undefined);
+    this.#chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   }
 
@@ -1357,22 +1359,30 @@ export class Session {
   ): PreparedInvocation {
     // 束縛解決済みのスロット容量。レシピと計画鍵に載るのは**この容量だけ**で、context の
     // 識別子は 1 バイトも載らない（ADR 0066 決定 5 — {@link Session.#preparedKey}）。
-    const stateShapes = generation === undefined ? undefined : new Map(
-      [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [name, slot.shape]),
-    );
+    const stateShapes =
+      generation === undefined
+        ? undefined
+        : new Map(
+            [...generation.context[RUNTIME_INTERNAL].slots].map(([name, slot]) => [
+              name,
+              slot.shape,
+            ]),
+          );
     // MUST: 論理長は実行の頭で 1 度だけ読む（汚染・破棄・device 消失はこの読みが落とす）。
     // uniform へ書く値・dispatch 数の算出・容量の検査・進行が同じ 1 つの値から出ることが、
     // 「GPU が走査する範囲」と「ホストが撃った workgroup 数」の一致の根拠になる（下流の
     // `writeLengths` / `advance` はこの捕捉値を受け取り、context の現在値と照合する）。
     // MUST: 読むのは**内部面**（利用者面の `pastLength` ではない）。dispose は 2 段で、
     // 受理済みのこの実行は 1 段目（受付終了）の後にも完走する契約のため。
-    const pastLength = generation === undefined
-      ? 0
-      : generation.context[RUNTIME_INTERNAL].pastLength();
-    const face = generation === undefined ? undefined : {
-      context: generation.context,
-      encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
-    };
+    const pastLength =
+      generation === undefined ? 0 : generation.context[RUNTIME_INTERNAL].pastLength();
+    const face =
+      generation === undefined
+        ? undefined
+        : {
+            context: generation.context,
+            encoding: generationEncoding(generation.context, pastLength, generation.queryLength),
+          };
     const { inputShapes, residentInputs } = captured;
     // MUST: 束縛の解決（= 入力 shape の検証）はヒット・ミスに関わらず**毎回走らせる**。
     // ここが飛ぶと、キャッシュに当たった実行だけ入力 shape の宣言不一致を素通りする。
@@ -1472,9 +1482,9 @@ export class Session {
       device,
       singleFence
         ? () => {
-          scheduler.submitPending();
-          return Promise.resolve();
-        }
+            scheduler.submitPending();
+            return Promise.resolve();
+          }
         : () => scheduler.flush(),
     );
     // MUST: env は **run 寿命の実体だけ**（グラフ入力とノード出力）。Session 常駐の重み /
@@ -1528,7 +1538,7 @@ export class Session {
               // MUST: 入力の検査（値依存 — 毎 run）は backing 構築より前。ここで落ちる run に
               // slot（DiT で ~GiB 規模）の構築を払わせない。
               const data = graph.inputs.map((spec) =>
-                this.#checkInput(spec.name, captured.values.get(spec.name), shapes)
+                this.#checkInput(spec.name, captured.values.get(spec.name), shapes),
               );
               // MUST: backing を作るのは**ヒット run だけ**。単発 run（1 回しか走らない
               // ワークロード）に slot メモリを払わせないための唯一の門で、ミス run の挙動と
@@ -1537,12 +1547,7 @@ export class Session {
               // Session 所有の実体を束ねる dispatch だけで、context 所有の実体を束ねる dispatch は
               // 焼かれずに残り、下の `#generationGroups` が context ごとに埋める。分けているから
               // こそ、backing は context を切り替えても作り直さずに済む。
-              const activated = this.#activateBacking(
-                preparedKey,
-                recipes,
-                shapes,
-                residentInputs,
-              );
+              const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
               backing = activated.backing;
               if (activated.built) {
                 additions.backings.push({ key: preparedKey, build: activated.backing.build });
@@ -1575,10 +1580,7 @@ export class Session {
                 pastLength,
                 generation.queryLength,
               );
-              generation.context[RUNTIME_INTERNAL].writeLengths(
-                pastLength,
-                generation.queryLength,
-              );
+              generation.context[RUNTIME_INTERNAL].writeLengths(pastLength, generation.queryLength);
             }
             // MUST: スナップショットは書き dispatch を**積む前**（`SubmitScheduler.dispatch` は
             // チャンク上限・時間予算で run の途中に自動 submit する — src/gpu/submit.ts）。
@@ -1612,11 +1614,13 @@ export class Session {
                 recipes,
                 baked.groups,
                 scheduler,
-                generationFace === undefined ? undefined : {
-                  groups: baked.groups,
-                  encoding: generationFace.encoding,
-                  onStep: noteStateWrite,
-                },
+                generationFace === undefined
+                  ? undefined
+                  : {
+                      groups: baked.groups,
+                      encoding: generationFace.encoding,
+                      onStep: noteStateWrite,
+                    },
               );
               // 上限に届かない run では undefined（待ちも譲りも足さない — ADR 0123）。
               if (paced !== undefined) await paced;
@@ -1629,11 +1633,13 @@ export class Session {
                 recipes,
                 backing.groups,
                 scheduler,
-                generationFace === undefined ? undefined : {
-                  groups: this.#generationGroups(generationFace, backing, recipes),
-                  encoding: generationFace.encoding,
-                  onStep: noteStateWrite,
-                },
+                generationFace === undefined
+                  ? undefined
+                  : {
+                      groups: this.#generationGroups(generationFace, backing, recipes),
+                      encoding: generationFace.encoding,
+                      onStep: noteStateWrite,
+                    },
               );
               if (paced !== undefined) await paced;
             }
@@ -1689,9 +1695,10 @@ export class Session {
           }
 
           // backed run は env を組まない（読み戻し先は焼き込み時に確定した写像）。
-          outputs = staged === undefined
-            ? await this.#readOutputs(this.#runValues(backing, missValues), shapes, arena)
-            : await this.#finishStagedRead(staged);
+          outputs =
+            staged === undefined
+              ? await this.#readOutputs(this.#runValues(backing, missValues), shapes, arena)
+              : await this.#finishStagedRead(staged);
           this.#lastRun = arena.stats;
           this.#lastRunParams = this.#recipeBuilder.paramsStats;
         } catch (cause) {
@@ -1840,8 +1847,8 @@ export class Session {
     if (generation !== undefined && !this.#contexts.has(generation.context)) {
       throw new ExecutionError("enqueue の GenerationContext がこの Session の生存集合に無い");
     }
-    const { stateShapes, pastLength, face, preparedKey, prepared, derived, shapes } = this
-      .#prepareInvocation(generation, captured, options.bindings ?? {});
+    const { stateShapes, pastLength, face, preparedKey, prepared, derived, shapes } =
+      this.#prepareInvocation(generation, captured, options.bindings ?? {});
     let stateWriteSubmits: number | undefined;
     const { residentInputs } = captured;
 
@@ -1860,7 +1867,7 @@ export class Session {
       // MUST: 入力と写し先の検査（値依存）は backing 構築より前。ここで落ちる enqueue に
       // slot の構築を払わせない。
       const data = graph.inputs.map((spec) =>
-        this.#checkInput(spec.name, captured.values.get(spec.name), shapes)
+        this.#checkInput(spec.name, captured.values.get(spec.name), shapes),
       );
       const copies = this.#planCopyOutputs(options.copyOutputs, shapes);
       const activated = this.#activateBacking(preparedKey, recipes, shapes, residentInputs);
@@ -1870,9 +1877,10 @@ export class Session {
       // MUST: 写し元の解決（実体に依存する検査）は dispatch を 1 本も積む前に済ませる。
       const writes = this.#resolveCopyOutputs(copies, activated.backing);
       // MUST: 読み戻す出力の解決（実体に依存する検査）も dispatch を 1 本も積む前に済ませる。
-      reads = read === undefined
-        ? undefined
-        : this.#planReadback(activated.backing, shapes, residentInputs);
+      reads =
+        read === undefined
+          ? undefined
+          : this.#planReadback(activated.backing, shapes, residentInputs);
       // MUST: 読み戻しの合計上限も dispatch の前に検査する（登録は submit の後なので、そこで
       // 初めて落ちると state を書いた後の失敗になり context を poison する）。
       if (reads !== undefined) {
@@ -1900,15 +1908,17 @@ export class Session {
         recipes,
         activated.backing.groups,
         scheduler,
-        face === undefined ? undefined : {
-          groups: this.#generationGroups(face, activated.backing, recipes),
-          encoding: face.encoding,
-          onStep: (recipe) => {
-            if (recipe.writesState && stateWriteSubmits === undefined) {
-              stateWriteSubmits = scheduler.submitCount;
-            }
-          },
-        },
+        face === undefined
+          ? undefined
+          : {
+              groups: this.#generationGroups(face, activated.backing, recipes),
+              encoding: face.encoding,
+              onStep: (recipe) => {
+                if (recipe.writesState && stateWriteSubmits === undefined) {
+                  stateWriteSubmits = scheduler.submitCount;
+                }
+              },
+            },
       );
       // MUST: 写しは dispatch 列の**後**に積む（同じコマンド列の FIFO が「書き終わった slot を
       // 読む」の根拠）。写し先が同じ enqueue の常駐入力を兼ねる形（ループの状態更新）も、
@@ -1989,9 +1999,9 @@ export class Session {
     return Object.entries(copyOutputs).map(([name, target]) => {
       if (!this.#state.outputNames.has(name)) {
         throw new ExecutionError(
-          `copyOutputs '${name}' はグラフ出力ではない（[${
-            [...this.#state.outputNames].join(", ")
-          }]）`,
+          `copyOutputs '${name}' はグラフ出力ではない（[${[...this.#state.outputNames].join(
+            ", ",
+          )}]）`,
         );
       }
       assertResidentUsable(target, this.#state.gpu, `copyOutputs '${name}'`);
@@ -1999,9 +2009,9 @@ export class Session {
       const size = outputByteSize(numel(shape));
       if (target.byteLength !== size) {
         throw new ExecutionError(
-          `copyOutputs '${name}': 常駐テンソル '${target.label}' の ${target.byteLength} バイトが shape [${
-            shape.join(",")
-          }] の ${size} バイトと合わない`,
+          `copyOutputs '${name}': 常駐テンソル '${target.label}' の ${target.byteLength} バイトが shape [${shape.join(
+            ",",
+          )}] の ${size} バイトと合わない`,
         );
       }
       return { name, target, size };
@@ -2063,17 +2073,17 @@ export class Session {
     // 実体を融合の純関数へ渡さず、プラン導出時だけ格納記述へ射影する。
     // packed 活性の対付け（ADR 0105）も消費先 linear の格納形を見るので、どちらかの席が
     // 立っていれば射影する。
-    const weightLayouts = this.#state.fuseLinearStaticQuantize ||
-        this.#state.packedStaticQuantize
-      ? new Map(
-        [...this.#state.residentWeights].map(([name, weight]): [string, FusionWeightLayout] => [
-          name,
-          weight.storage === "i4"
-            ? { storage: weight.storage, groupSize: weight.groupSize }
-            : { storage: weight.storage },
-        ]),
-      )
-      : undefined;
+    const weightLayouts =
+      this.#state.fuseLinearStaticQuantize || this.#state.packedStaticQuantize
+        ? new Map(
+            [...this.#state.residentWeights].map(([name, weight]): [string, FusionWeightLayout] => [
+              name,
+              weight.storage === "i4"
+                ? { storage: weight.storage, groupSize: weight.groupSize }
+                : { storage: weight.storage },
+            ]),
+          )
+        : undefined;
     const fusion = planFusions(plan.nodes, {
       useCounts: this.#state.useCounts,
       fuseRmsNormAdd: this.#state.fuseRmsNormAdd,
@@ -2135,16 +2145,19 @@ export class Session {
     // states 専用記号（KV 容量 `C` 等）は dims 節に**載せない** — bindSymbols が要求も受理も
     // しない（ADR 0066 追記 7）ので値が無く、容量の情報は下の capacities 節が完全に持つ。
     const statesOnly = statesOnlySymbols(graph);
-    const dims = graph.symbols.filter((sym) => !statesOnly.has(sym))
-      .map((sym) => bindings[sym]).join(",");
-    const bound = residents.size === 0 ? "" : `|${
-      graph.inputs
-        .map((spec) => {
-          const resident = residents.get(spec.name);
-          return resident === undefined ? "t" : `r${resident[RUNTIME_INTERNAL].id}`;
-        })
-        .join(",")
-    }`;
+    const dims = graph.symbols
+      .filter((sym) => !statesOnly.has(sym))
+      .map((sym) => bindings[sym])
+      .join(",");
+    const bound =
+      residents.size === 0
+        ? ""
+        : `|${graph.inputs
+            .map((spec) => {
+              const resident = residents.get(spec.name);
+              return resident === undefined ? "t" : `r${resident[RUNTIME_INTERNAL].id}`;
+            })
+            .join(",")}`;
     if (stateShapes === undefined) return `${dims}${bound}`;
     // MUST: 並べる順は `graph.states` の宣言順（Map の反復順に依存させない — スロットの
     // 集合が同じでも順序が違う 2 つの context が別鍵になると、切替のたびに再導出が起きる）。
@@ -2554,9 +2567,9 @@ export class Session {
     const count = numel(shape);
     if (tensor.data.length !== count) {
       throw new ExecutionError(
-        `入力 '${name}': 要素数 ${tensor.data.length} が shape [${
-          shape.join(",")
-        }] の ${count} と合わない`,
+        `入力 '${name}': 要素数 ${tensor.data.length} が shape [${shape.join(
+          ",",
+        )}] の ${count} と合わない`,
       );
     }
     return tensor.data;
@@ -2580,9 +2593,9 @@ export class Session {
     const wanted = Math.max(4, numel(shape) * 4);
     if (resident.byteLength !== wanted) {
       throw new ExecutionError(
-        `入力 '${name}': 常駐テンソル '${resident.label}' の ${resident.byteLength} バイトが shape [${
-          shape.join(",")
-        }] の ${wanted} バイトと合わない`,
+        `入力 '${name}': 常駐テンソル '${resident.label}' の ${resident.byteLength} バイトが shape [${shape.join(
+          ",",
+        )}] の ${wanted} バイトと合わない`,
       );
     }
   }
@@ -2665,8 +2678,8 @@ export class Session {
     name: string,
   ): ResolvedOutput {
     const weight = this.#state.weightBuffers.get(name);
-    const binding = values.get(name) ??
-      (weight === undefined ? undefined : { buffer: weight, readable: true });
+    const binding =
+      values.get(name) ?? (weight === undefined ? undefined : { buffer: weight, readable: true });
     if (binding === undefined) throw new ExecutionError(`グラフ出力 '${name}' のバッファが無い`);
     if (!binding.readable) {
       throw new ExecutionError(`グラフ出力 '${name}' がピン留めされておらず読み戻せない`);
@@ -2779,12 +2792,7 @@ export class Session {
       item.staging.unmap();
       // MUST: 読み戻す TypedArray は宣言 dtype から決める（要素は全型 4 バイトなので、
       // f32 固定にすると i32 / bool の出力が黙ってビット列の読み替えになる）。
-      outputs[item.name] = hostTensor(
-        this.#declaredDtype(item.name),
-        item.shape,
-        copy,
-        item.count,
-      );
+      outputs[item.name] = hostTensor(this.#declaredDtype(item.name), item.shape, copy, item.count);
     }
     return outputs;
   }
@@ -2823,12 +2831,8 @@ export class Session {
     let popped = false;
     try {
       const encoder = device.createCommandEncoder();
-      const staged = this.#stageOutputs(
-        env,
-        shapes,
-        arena,
-        (source, offset, size, staging) =>
-          encoder.copyBufferToBuffer(source, offset, staging, 0, size),
+      const staged = this.#stageOutputs(env, shapes, arena, (source, offset, size, staging) =>
+        encoder.copyBufferToBuffer(source, offset, staging, 0, size),
       );
       device.queue.submit([encoder.finish()]);
 
@@ -2895,9 +2899,9 @@ export class PreparedModel {
     const bound = opened.graphs[graphName];
     if (bound === undefined) {
       throw new ExecutionError(
-        `コンテナにグラフ '${graphName}' が無い（在るのは ${
-          Object.keys(opened.graphs).join(" / ")
-        }）`,
+        `コンテナにグラフ '${graphName}' が無い（在るのは ${Object.keys(opened.graphs).join(
+          " / ",
+        )}）`,
       );
     }
     return new PreparedModel({ opened, graphName }, mergedGraph(bound, graphName));
@@ -2992,12 +2996,15 @@ export const containerBatches = async function* (
           ),
         };
       }
-      const piece = supply.blocks.length === 1 ? undefined : {
-        rowOffset: block.rows[0],
-        rows: block.rows[1] - block.rows[0],
-        first: index === 0,
-        last: index === supply.blocks.length - 1,
-      };
+      const piece =
+        supply.blocks.length === 1
+          ? undefined
+          : {
+              rowOffset: block.rows[0],
+              rows: block.rows[1] - block.rows[0],
+              first: index === 0,
+              last: index === supply.blocks.length - 1,
+            };
       yield {
         name,
         payload,

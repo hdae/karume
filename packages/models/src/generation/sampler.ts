@@ -178,10 +178,7 @@ const assertSpec = (spec: SamplerSpec): void => {
     // `-Infinity` は「その token を禁止する」慣用（HF の `SequenceBias` と同じ）。`+Infinity` と
     // `NaN` は softmax を NaN にするだけなので受けない。number 以外（文字列・null・boolean）は
     // 加算で暗黙変換されて別の値になるので受けない。
-    if (
-      typeof bias !== "number" ||
-      !(Number.isFinite(bias) || bias === Number.NEGATIVE_INFINITY)
-    ) {
+    if (typeof bias !== "number" || !(Number.isFinite(bias) || bias === Number.NEGATIVE_INFINITY)) {
       throw new ModelInputError(`logitBias[${token}] ${bias} が有限数でも -Infinity でもない`);
     }
   }
@@ -278,12 +275,8 @@ const hasFiniteMaximum = (logits: Float32Array<ArrayBuffer>): boolean => {
  * MUST: 判定は**投げる直前**にだけ走らせる（`raw` の走査は語彙 V に比例するので、毎 step の
  * 通常経路へ足さない）。
  */
-const nonFiniteMaximum = (
-  message: string,
-  raw: Float32Array<ArrayBuffer> | undefined,
-): Error => (raw !== undefined && hasFiniteMaximum(raw)
-  ? new ModelInputError(message)
-  : new Error(message));
+const nonFiniteMaximum = (message: string, raw: Float32Array<ArrayBuffer> | undefined): Error =>
+  raw !== undefined && hasFiniteMaximum(raw) ? new ModelInputError(message) : new Error(message);
 
 /**
  * CPU/GPUで共通の最大値検査。非有限値をtokenへ畳まず、従来のエラーを返す。
@@ -291,11 +284,7 @@ const nonFiniteMaximum = (
  * `raw` を渡せる面（加工前 logits を持っている呼び手）だけが、非有限の最大値を
  * {@link nonFiniteMaximum} の規則で入力起因と内部異常に分ける。
  */
-const checkedMaximum = (
-  value: number,
-  index: number,
-  raw?: Float32Array<ArrayBuffer>,
-): number => {
+const checkedMaximum = (value: number, index: number, raw?: Float32Array<ArrayBuffer>): number => {
   if (value !== value) {
     throw new Error(`logits[${index}] が NaN（非有限） — token id へ畳まずここで落とす`);
   }
@@ -565,11 +554,13 @@ export const snapshotSpec = (spec: SamplerSpec): SamplerSpec => {
   assertSpec(spec);
   return Object.freeze({
     ...spec,
-    ...(spec.logitBias === undefined ? {} : {
-      logitBias: Object.freeze(
-        spec.logitBias.map(([token, bias]) => Object.freeze([token, bias] as const)),
-      ),
-    }),
+    ...(spec.logitBias === undefined
+      ? {}
+      : {
+          logitBias: Object.freeze(
+            spec.logitBias.map(([token, bias]) => Object.freeze([token, bias] as const)),
+          ),
+        }),
   });
 };
 
@@ -586,8 +577,10 @@ export const createSampler = (spec: SamplerSpec = {}): Sampler => {
   // 遅らせると不正な seed が GB 級のロードの末に落ちる — `request-gates.ts` の
   // `assertAcceptableSeed` がその受理集合の所有者）。
   const random = new Randu(frozen.seed ?? 0);
-  const rawGreedy = (frozen.temperature ?? 0) === 0 &&
-    (frozen.repetitionPenalty ?? 1) === 1 && (frozen.logitBias?.length ?? 0) === 0;
+  const rawGreedy =
+    (frozen.temperature ?? 0) === 0 &&
+    (frozen.repetitionPenalty ?? 1) === 1 &&
+    (frozen.logitBias?.length ?? 0) === 0;
   return {
     ...(rawGreedy ? { greedy: checkedMaximum } : {}),
     next(logits: Float32Array<ArrayBuffer>, history: readonly number[]): number {

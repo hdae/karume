@@ -221,7 +221,7 @@ describe("captureThenAbort: 観測点で生成を打ち切る", () => {
   it("打ち切り以外の例外はそのまま上げる", async () => {
     const cause = new Error("DiT の構築に失敗");
     const thrown = await assertRejects(() =>
-      captureThenAbort<number>("gen", () => Promise.reject(cause))
+      captureThenAbort<number>("gen", () => Promise.reject(cause)),
     );
     assertEquals(thrown, cause);
   });

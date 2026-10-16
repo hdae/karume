@@ -93,7 +93,7 @@ const infAlongAxis = (
   shape: readonly number[],
   axis: number,
   sign: -1 | 1,
-): (i: number) => number => {
+): ((i: number) => number) => {
   const axisLen = shape[axis];
   const inner = numel(shape.slice(axis + 1));
   return (i: number): number => {
@@ -102,10 +102,7 @@ const infAlongAxis = (
   };
 };
 
-const nanAlongAxis = (
-  shape: readonly number[],
-  axis: number,
-): (i: number) => number => {
+const nanAlongAxis = (shape: readonly number[], axis: number): ((i: number) => number) => {
   const axisLen = shape[axis];
   const inner = numel(shape.slice(axis + 1));
   /** 縮約列ごとの NaN の位置（-1 = NaN 無しの対照）。 */
@@ -159,26 +156,25 @@ const readbackBits = async (
 const runBoth = async (
   gpu: GpuContext,
   testCase: ParityCase,
-): Promise<
-  {
-    readonly viaPermute: Uint32Array;
-    readonly viaAxis: Uint32Array;
-    readonly permuteDims: readonly number[];
-    readonly reference: Float32Array | Int32Array;
-  }
-> => {
+): Promise<{
+  readonly viaPermute: Uint32Array;
+  readonly viaAxis: Uint32Array;
+  readonly permuteDims: readonly number[];
+  readonly reference: Float32Array | Int32Array;
+}> => {
   const { shape, axis, op, dtype } = testCase;
   const scheduler = new SubmitScheduler(gpu);
   const cache = new PipelineCache(gpu.device);
   const arena = new RunArena(gpu.device, () => scheduler.flush());
   try {
-    const generator = testCase.nan === true
-      ? nanAlongAxis(shape, axis)
-      : testCase.inf !== undefined
-      ? infAlongAxis(shape, axis, testCase.inf)
-      : dtype === "bool"
-      ? BOOLEAN
-      : SIGNED;
+    const generator =
+      testCase.nan === true
+        ? nanAlongAxis(shape, axis)
+        : testCase.inf !== undefined
+          ? infAlongAxis(shape, axis, testCase.inf)
+          : dtype === "bool"
+            ? BOOLEAN
+            : SIGNED;
     const x = fill(shape, generator, dtype === "bool" ? "bool" : "f32");
     const upload = (data: ArrayBufferView<ArrayBuffer>): GPUBuffer => {
       const buffer = arena.allocHostWritten(Math.max(4, data.byteLength), STORAGE_IN);
@@ -231,11 +227,7 @@ const runBoth = async (
           binding: 0,
           resource: {
             buffer: (() => {
-              const params = stridedParams(
-                permutedShape,
-                permuteSrcStrides(shape, permuteDims),
-                0,
-              );
+              const params = stridedParams(permutedShape, permuteSrcStrides(shape, permuteDims), 0);
               const buffer = arena.allocHostWritten(params.byteLength, STORAGE_IN);
               gpu.device.queue.writeBuffer(buffer, 0, params);
               return buffer;
@@ -246,11 +238,12 @@ const runBoth = async (
         { binding: 2, resource: { buffer: permuted } },
       ],
     });
-    scheduler.dispatch(stridedPipeline, stridedGroup, [
-      gridStrideWorkgroups(numel(shape), STRIDED_WORKGROUP_SIZE, limit),
-      1,
-      1,
-    ], stridedKey({ dtype }));
+    scheduler.dispatch(
+      stridedPipeline,
+      stridedGroup,
+      [gridStrideWorkgroups(numel(shape), STRIDED_WORKGROUP_SIZE, limit), 1, 1],
+      stridedKey({ dtype }),
+    );
 
     const rowKey = reduceKey({ op, dtype });
     const { pipeline: rowPipeline, layout: rowLayout } = await cache.get(
@@ -274,13 +267,7 @@ const runBoth = async (
     const axisOut = allocOut();
     scheduler.dispatch(
       axisPipeline,
-      bind(
-        axisLayout,
-        axisReduceParams(outCount, axisLen, inner),
-        UNIFORM_IN,
-        xBuffer,
-        axisOut,
-      ),
+      bind(axisLayout, axisReduceParams(outCount, axisLen, inner), UNIFORM_IN, xBuffer, axisOut),
       [gridStrideWorkgroups(outCount, AXIS_REDUCE_WORKGROUP_SIZE, limit), 1, 1],
       axisKey,
     );
@@ -467,9 +454,10 @@ test({
           `${testCase.name}: 出力が定数（ビット一致が恒真になっている）`,
         );
         // 両カーネルが**揃って**誤る形の検出器（ビット比較だけでは気づけない）
-        const values = testCase.dtype === "bool"
-          ? new Int32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length)
-          : new Float32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length);
+        const values =
+          testCase.dtype === "bool"
+            ? new Int32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length)
+            : new Float32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length);
         if (testCase.nan === true) {
           // MUST: allclose は NaN をどちらの側でも不合格にするので NaN ケースには使えない —
           // **isNaN パターンの一致 + 非 NaN 要素の厳密一致**で突き合わせる

@@ -228,10 +228,7 @@ export const createMockFetch = (routes: MockRoutes): MockFetch => {
   const authorizations: (string | null)[] = [];
   let inFlight = 0;
   let peak = 0;
-  const fetchImpl = (
-    input: string | URL | Request,
-    init?: RequestInit,
-  ): Promise<Response> => {
+  const fetchImpl = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const href = urlOf(input);
     calls.push(href);
     authorizations.push(new Headers(init?.headers).get("authorization"));
@@ -284,9 +281,7 @@ export const createMockFetch = (routes: MockRoutes): MockFetch => {
       },
       cancel: finish,
     });
-    return Promise.resolve(
-      new Response(body, { headers: { "content-length": String(declared) } }),
-    );
+    return Promise.resolve(new Response(body, { headers: { "content-length": String(declared) } }));
   };
   return { fetch: fetchImpl, calls, authorizations, peakConcurrency: () => peak };
 };
@@ -303,29 +298,27 @@ const notFound = (): Response =>
  * するため — 温め面（相 1）の `prefetchUrl` は転送中断を `cache.put` の reject 経由で包み直すので
  * signal の reason が復元されるが、応答待ちの中断は生の `AbortError` のまま上がってくる。
  */
-export const abortWhileAwaitingResponse = (
-  base: typeof globalThis.fetch,
-  victimPath: string,
-): typeof globalThis.fetch =>
-async (input, init) => {
-  const signal = init?.signal;
-  if (urlOf(input).endsWith(victimPath) || signal === undefined || signal === null) {
+export const abortWhileAwaitingResponse =
+  (base: typeof globalThis.fetch, victimPath: string): typeof globalThis.fetch =>
+  async (input, init) => {
+    const signal = init?.signal;
+    if (urlOf(input).endsWith(victimPath) || signal === undefined || signal === null) {
+      return await base(input, init);
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 50);
+      const done = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      if (signal.aborted) done();
+      else signal.addEventListener("abort", done, { once: true });
+    });
+    if (signal.aborted) {
+      throw new DOMException("BodyStreamBuffer was aborted", "AbortError");
+    }
     return await base(input, init);
-  }
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, 50);
-    const done = (): void => {
-      clearTimeout(timer);
-      resolve();
-    };
-    if (signal.aborted) done();
-    else signal.addEventListener("abort", done, { once: true });
-  });
-  if (signal.aborted) {
-    throw new DOMException("BodyStreamBuffer was aborted", "AbortError");
-  }
-  return await base(input, init);
-};
+  };
 
 /**
  * Chrome の観測挙動を被せる `fetch` ラッパ。**body 読み取り中に abort された取得を、
@@ -336,34 +329,33 @@ async (input, init) => {
  * 「最初の失敗そのもの」を持って決着してしまい、真因が失われる形を再現できない。真犯人以外が
  * この固定文言で落ちる状況を作って初めて、決着順やワーカーの配列位置で拾う実装が露見する。
  */
-export const withChromeAbortShape = (
-  base: typeof globalThis.fetch,
-): typeof globalThis.fetch =>
-async (input, init) => {
-  const response = await base(input, init);
-  const signal = init?.signal;
-  const source = response.body;
-  if (!response.ok || source === null || signal === undefined || signal === null) {
-    return response;
-  }
-  const reader = source.getReader();
-  const body = new ReadableStream<Uint8Array>({
-    pull: async (controller) => {
-      try {
-        const { done, value } = await reader.read();
-        if (done) controller.close();
-        else controller.enqueue(value);
-      } catch (error) {
-        controller.error(
-          signal.aborted ? new DOMException("BodyStreamBuffer was aborted", "AbortError") : error,
-        );
-      }
-    },
-    cancel: (reason) => reader.cancel(reason),
-  });
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-};
+export const withChromeAbortShape =
+  (base: typeof globalThis.fetch): typeof globalThis.fetch =>
+  async (input, init) => {
+    const response = await base(input, init);
+    const signal = init?.signal;
+    const source = response.body;
+    if (!response.ok || source === null || signal === undefined || signal === null) {
+      return response;
+    }
+    const reader = source.getReader();
+    const body = new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        try {
+          const { done, value } = await reader.read();
+          if (done) controller.close();
+          else controller.enqueue(value);
+        } catch (error) {
+          controller.error(
+            signal.aborted ? new DOMException("BodyStreamBuffer was aborted", "AbortError") : error,
+          );
+        }
+      },
+      cancel: (reason) => reader.cancel(reason),
+    });
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };

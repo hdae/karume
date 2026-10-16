@@ -82,7 +82,7 @@ export const storedValue = (
   const bits = storage === "i8" ? 8 : storage === "i4" ? 4 : 2;
   const span = 1 << bits;
   const offset = span >> 1;
-  return ((quantized(id, layer, column) % span) + span) % span - offset;
+  return (((quantized(id, layer, column) % span) + span) % span) - offset;
 };
 
 /** 逆量子化 → embed scale の 2 段（`writeRow` と同じ順序・同じ丸め点）。 */
@@ -118,16 +118,16 @@ const valuesBlockBytes = (
   const bits = 8 / factor;
   const mask = (1 << bits) - 1;
   const offset = 1 << (bits - 1);
-  const rowBytes = spec.layers * spec.dim / factor;
+  const rowBytes = (spec.layers * spec.dim) / factor;
   const bytes = new Uint8Array(new ArrayBuffer((stop - start) * rowBytes));
   for (let row = 0; row < stop - start; row += 1) {
     for (let layer = 0; layer < spec.layers; layer += 1) {
-      const base = row * rowBytes + layer * spec.dim / factor;
+      const base = row * rowBytes + (layer * spec.dim) / factor;
       for (let column = 0; column < spec.dim; column += 1) {
         // i8 は素の符号付きバイト（`writeRow` は `Int8Array` でそのまま読む）。packed は
         // `+ offset` で持ち上げた無符号のニブル / 2bit（`writeRow` が引き戻す）。
-        const value = storedValue(storage, start + row, layer, column) +
-          (factor === 1 ? 0 : offset);
+        const value =
+          storedValue(storage, start + row, layer, column) + (factor === 1 ? 0 : offset);
         bytes[base + Math.floor(column / factor)] |= (value & mask) << (bits * (column % factor));
       }
     }
@@ -156,10 +156,7 @@ export type PleFixtureOptions = {
 };
 
 /** 合成の索引と block を作る。 */
-export const pleFixture = (
-  spec: PleFixtureSpec,
-  options: PleFixtureOptions = {},
-): PleFixture => {
+export const pleFixture = (spec: PleFixtureSpec, options: PleFixtureOptions = {}): PleFixture => {
   const storage = spec.storage ?? "i8";
   const factor = packFactor({ storage });
   const valueRows = spec.valueRows ?? spec.tokens;
@@ -172,7 +169,7 @@ export const pleFixture = (
     dim: spec.dim,
     embedScale: spec.embedScale,
     values: {
-      rowBytes: spec.layers * spec.dim / factor,
+      rowBytes: (spec.layers * spec.dim) / factor,
       blocks: partition(spec.tokens, valueRows, "ple.values"),
     },
     scales: {
@@ -210,9 +207,10 @@ export const pleFixture = (
         inFlight += 1;
         peak.inFlight = Math.max(peak.inFlight, inFlight);
         const slice = bytes.slice(offset, offset + length);
-        const pending = options.defer === true
-          ? new Promise<Uint8Array<ArrayBuffer>>((resolve) => setTimeout(() => resolve(slice), 0))
-          : Promise.resolve(slice);
+        const pending =
+          options.defer === true
+            ? new Promise<Uint8Array<ArrayBuffer>>((resolve) => setTimeout(() => resolve(slice), 0))
+            : Promise.resolve(slice);
         // 減らすのは**解決した後**（`finally`）— 返す前に減らすと、この数は常に 1 になり
         // 「撒いたまま返ってきていない本数」を測らなくなる。
         return pending.finally(() => {

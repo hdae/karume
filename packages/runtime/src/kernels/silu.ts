@@ -47,9 +47,10 @@ export const siluKey = (order: SiluMulOrder): string => {
 export const siluWgsl = (order: SiluMulOrder): string => {
   const canonicalOrder = canonicalizeOrder(order);
   // 置換元 mul も元入力を別 dispatch で読み直す。レジスタ越しに持ち越さない形で書く。
-  const product = canonicalOrder === "x-sigmoid"
-    ? "x_for_mul * sigmoid_after_store"
-    : "sigmoid_after_store * x_for_mul";
+  const product =
+    canonicalOrder === "x-sigmoid"
+      ? "x_for_mul * sigmoid_after_store"
+      : "sigmoid_after_store * x_for_mul";
   return `// karume SiLU (${canonicalOrder}, f32, staged sigmoid, full-write)
 struct Params {
   n: u32,

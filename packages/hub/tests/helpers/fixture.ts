@@ -45,15 +45,14 @@ export const TRANSFORMER_I8_PARTS: readonly string[] = pathsOf("anima-turbo", "t
 export const VAE_DECODER_PARTS: readonly string[] = pathsOf("anima-turbo", "vae_decoder", "f16");
 
 /** 長さ 0 の part を除いた i8 の取得対象（選択の列に載るのはこの 2 本）。 */
-export const TRANSFORMER_I8_FETCHED: readonly string[] = partsOf(
-  "anima-turbo",
-  "transformer",
-  "i8",
-).filter((ref) => ref.size > 0).map((ref) => ref.path);
+export const TRANSFORMER_I8_FETCHED: readonly string[] = partsOf("anima-turbo", "transformer", "i8")
+  .filter((ref) => ref.size > 0)
+  .map((ref) => ref.path);
 
 /** 長さ 0 の part の path（取得も読みも起きない 1 本）。 */
 export const TRANSFORMER_I8_EMPTY: string = partsOf("anima-turbo", "transformer", "i8")
-  .filter((ref) => ref.size === 0).map((ref) => ref.path)[0];
+  .filter((ref) => ref.size === 0)
+  .map((ref) => ref.path)[0];
 
 export const TOKENIZER = "tokenizer/qwen2-tokenizer.json";
 export const STYLE_VECTORS = "style/style_vectors.safetensors";

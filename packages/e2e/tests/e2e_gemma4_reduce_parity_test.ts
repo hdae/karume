@@ -55,7 +55,9 @@ type ChatFixture = {
 };
 
 const fixture = JSON.parse(
-  await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(
+    new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url),
+  ),
 ) as ChatFixture;
 
 const promptOf = (name: string): readonly number[] => {

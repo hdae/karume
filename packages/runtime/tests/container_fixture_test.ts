@@ -30,20 +30,20 @@ const FIXTURE = new URL("./fixtures/container/synthetic.krm", import.meta.url);
 const SPLIT_FIXTURE_PARTS = 5;
 const splitFixture = (index: number): URL =>
   new URL(
-    `./fixtures/container/synthetic-split-${String(index + 1).padStart(5, "0")}-of-${
-      String(SPLIT_FIXTURE_PARTS).padStart(5, "0")
-    }.krm`,
+    `./fixtures/container/synthetic-split-${String(index + 1).padStart(5, "0")}-of-${String(
+      SPLIT_FIXTURE_PARTS,
+    ).padStart(5, "0")}.krm`,
     import.meta.url,
   );
 
 const fixtureBytes = async (): Promise<Uint8Array<ArrayBuffer>> =>
-  await readFile(FIXTURE) as Uint8Array<ArrayBuffer>;
+  (await readFile(FIXTURE)) as Uint8Array<ArrayBuffer>;
 
 const splitParts = async (): Promise<Uint8Array<ArrayBuffer>[]> =>
   await Promise.all(
     Array.from(
       { length: SPLIT_FIXTURE_PARTS },
-      async (_, i) => await readFile(splitFixture(i)) as Uint8Array<ArrayBuffer>,
+      async (_, i) => (await readFile(splitFixture(i))) as Uint8Array<ArrayBuffer>,
     ),
   );
 
@@ -95,7 +95,13 @@ describe("container fixture (Python writer)", () => {
 
     // block 上限（fixture は 256 B）を超えた重みは行境界で 2 本に割れている。
     const big = bound.supplies.get("big.weight");
-    assertEquals(big?.blocks.map((block) => block.rows), [[0, 8], [8, 16]]);
+    assertEquals(
+      big?.blocks.map((block) => block.rows),
+      [
+        [0, 8],
+        [8, 16],
+      ],
+    );
     // 規則③: companion scale は piece 1 と同じ part。
     assertEquals(big?.scale?.part, big?.blocks[0].part);
 
@@ -117,12 +123,15 @@ describe("container fixture (Python writer)", () => {
   it("2 文書は正準直列化と一致する（parse → serialize でバイト同一）", async () => {
     const bytes = await fixtureBytes();
     const header = readHeader(bytes);
-    const graphBytes = bytes.subarray(HEADER_BYTES, HEADER_BYTES + header.graphDescriptorLength)
+    const graphBytes = bytes
+      .subarray(HEADER_BYTES, HEADER_BYTES + header.graphDescriptorLength)
       .slice();
-    const modelBytes = bytes.subarray(
-      HEADER_BYTES + header.graphDescriptorLength,
-      HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength,
-    ).slice();
+    const modelBytes = bytes
+      .subarray(
+        HEADER_BYTES + header.graphDescriptorLength,
+        HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength,
+      )
+      .slice();
 
     assertEquals(serializeGraphDescriptor(parseGraphDescriptor(graphBytes)), graphBytes);
     assertEquals(serializeModelDescriptor(parseModelDescriptor(modelBytes)), modelBytes);
@@ -201,12 +210,15 @@ describe("split container fixture (Python writer)", () => {
   it("2 文書は正準直列化と一致する（parse → serialize でバイト同一）", async () => {
     const parts = await splitParts();
     const header = readHeader(parts[0]);
-    const graphBytes = parts[0].subarray(HEADER_BYTES, HEADER_BYTES + header.graphDescriptorLength)
+    const graphBytes = parts[0]
+      .subarray(HEADER_BYTES, HEADER_BYTES + header.graphDescriptorLength)
       .slice();
-    const modelBytes = parts[0].subarray(
-      HEADER_BYTES + header.graphDescriptorLength,
-      HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength,
-    ).slice();
+    const modelBytes = parts[0]
+      .subarray(
+        HEADER_BYTES + header.graphDescriptorLength,
+        HEADER_BYTES + header.graphDescriptorLength + header.modelDescriptorLength,
+      )
+      .slice();
 
     assertEquals(serializeGraphDescriptor(parseGraphDescriptor(graphBytes)), graphBytes);
     assertEquals(serializeModelDescriptor(parseModelDescriptor(modelBytes)), modelBytes);

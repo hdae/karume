@@ -25,11 +25,11 @@ export type NvidiaPhase = {
 /** {@link monitorNvidiaSmi} の決着（`nvidia-smi` が無い機では `undefined`）。 */
 export type NvidiaTimeline =
   | {
-    /** 区間ごとの観測（`enter` した区間は標本 0 でも載る）。 */
-    readonly phases: ReadonlyMap<string, NvidiaPhase>;
-    /** 標本として読めなかった行（古いドライバのエラー行など — {@link parseNvidiaSample}）。記録だけで、門にはしない。 */
-    readonly errorLines: readonly string[];
-  }
+      /** 区間ごとの観測（`enter` した区間は標本 0 でも載る）。 */
+      readonly phases: ReadonlyMap<string, NvidiaPhase>;
+      /** 標本として読めなかった行（古いドライバのエラー行など — {@link parseNvidiaSample}）。記録だけで、門にはしない。 */
+      readonly errorLines: readonly string[];
+    }
   | undefined;
 
 const QUERY = "memory.used,temperature.gpu,clocks_event_reasons.active";
@@ -72,7 +72,9 @@ const WAIT_STEP_MS = 50;
  * `waitForSample(上限 ms)` は今の区間に標本が 1 本来るまで上限つきで待ち、来た本数を返す（`nvidia-smi` の
  * 起動は標本の間隔より遅いことがあり、短い区間は待たないと標本 0 になる）。
  */
-export const monitorNvidiaSmi = (intervalMs = 100): {
+export const monitorNvidiaSmi = (
+  intervalMs = 100,
+): {
   readonly enter: (phase: string) => void;
   readonly waitForSample: (timeoutMs: number) => Promise<number>;
   readonly stop: () => Promise<NvidiaTimeline>;
@@ -148,12 +150,15 @@ export const monitorNvidiaSmi = (intervalMs = 100): {
       if (missing) return undefined;
       return {
         phases: new Map(
-          [...phases].map(([name, value]) => [name, {
-            peakMemoryMiB: value.peak,
-            maxTemperatureC: value.temperature,
-            eventReasons: `0x${value.reasons.toString(16).padStart(16, "0")}`,
-            samples: value.samples,
-          }]),
+          [...phases].map(([name, value]) => [
+            name,
+            {
+              peakMemoryMiB: value.peak,
+              maxTemperatureC: value.temperature,
+              eventReasons: `0x${value.reasons.toString(16).padStart(16, "0")}`,
+              samples: value.samples,
+            },
+          ]),
         ),
         errorLines: [...errorLines],
       };
@@ -173,13 +178,16 @@ export const formatNvidiaTimeline = (timeline: NvidiaTimeline): string => {
     .map(([name, value]) =>
       value.samples === 0
         ? `[${name}] 標本 0（観測なし）`
-        : `[${name}] VRAM 山 ${value.peakMemoryMiB} MiB・最高 ${value.maxTemperatureC} ℃・理由 ${value.eventReasons}`
+        : `[${name}] VRAM 山 ${value.peakMemoryMiB} MiB・最高 ${value.maxTemperatureC} ℃・理由 ${value.eventReasons}`,
     );
   // 同じエラー行は標本の間隔ごとに繰り返すので、本数と異なる行の綴りを残す。
-  const errors = timeline.errorLines.length === 0 ? [] : [
-    `読めない行 ${timeline.errorLines.length} 本（${
-      [...new Set(timeline.errorLines)].join(" | ")
-    }）`,
-  ];
+  const errors =
+    timeline.errorLines.length === 0
+      ? []
+      : [
+          `読めない行 ${timeline.errorLines.length} 本（${[...new Set(timeline.errorLines)].join(
+            " | ",
+          )}）`,
+        ];
   return [...phases, ...errors].join(" / ");
 };

@@ -136,7 +136,7 @@ const refsOf = (manifest: Manifest, selection: ResolveOptions): readonly FileRef
 /** manifest の全 (model, quant) の組。 */
 const allSelections = (manifest: Manifest): readonly Selection[] =>
   Object.entries(manifest.models).flatMap(([model, entry]) =>
-    Object.keys(entry.quants).map((quant): Selection => ({ model, quant }))
+    Object.keys(entry.quants).map((quant): Selection => ({ model, quant })),
   );
 
 /**
@@ -306,9 +306,10 @@ export const evictCachedAssets = async (
   // 守る側の候補。既定で同一集合の選択を外すのは、キャッシュの粒度では対象と区別できず
   // 「片方だけ消す」が定義上できないため — 守る側に数えると必ず全ファイルが `shared` になり、
   // 1 本も消えないのに「守った」と名乗る嘘になる。真部分集合・上位集合は従来どおり守る。
-  const protectors = options.protect === undefined
-    ? others.filter((other) => !sameRefSet(other.refs, targets))
-    : protectorsOf(manifest, options.protect, target);
+  const protectors =
+    options.protect === undefined
+      ? others.filter((other) => !sameRefSet(other.refs, targets))
+      : protectorsOf(manifest, options.protect, target);
   // 在庫の問い合わせは**全選択の和集合に対して 1 回**（origin ごと）。選択ごとに引くと、
   // 同じ repo の全列挙を選択の数だけ繰り返すことになる。守る側は manifest の選択なので、
   // その参照はこの和集合に必ず含まれる。
@@ -356,8 +357,9 @@ export const evictCachedAssets = async (
   // 呼び出し前の観測（`stock`）で見る。
   const evictedKeys = new Set(evicted.map(fileRefKey));
   const alsoEvicted = others
-    .filter((other) =>
-      other.refs.every(isCached) && other.refs.some((ref) => evictedKeys.has(fileRefKey(ref)))
+    .filter(
+      (other) =>
+        other.refs.every(isCached) && other.refs.some((ref) => evictedKeys.has(fileRefKey(ref))),
     )
     .map((other) => labelOf(other.selection));
   return { evicted, kept, alsoEvicted };

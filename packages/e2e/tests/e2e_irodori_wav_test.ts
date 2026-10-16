@@ -78,7 +78,10 @@ import {
   IrodoriPipeline,
   type IrodoriRunComponent,
 } from "../../models/mod.ts";
-import { type IrodoriPipelineConfig, parseIrodoriPipelineConfig } from "../../models/src/irodori/config.ts";
+import {
+  type IrodoriPipelineConfig,
+  parseIrodoriPipelineConfig,
+} from "../../models/src/irodori/config.ts";
 import { tSchedule } from "../../models/src/irodori/host/sampler.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { assertRunningAdapter } from "../../runtime/tests/helpers/environment.ts";
@@ -89,7 +92,10 @@ import {
   registerReferenceGate,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
-import { readFileIfPresent, readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import {
+  readFileIfPresent,
+  readTextIfPresent,
+} from "../../models/tests/helpers/read-if-present.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
 const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
@@ -219,7 +225,7 @@ const loadLocalAssets = async (
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   const read = async (key: string, ref: FileRef): Promise<void> => {
     const cached = byPath.get(ref.path);
-    const bytes = cached ?? await readFile(new URL(ref.path, ASSETS_DIR));
+    const bytes = cached ?? (await readFile(new URL(ref.path, ASSETS_DIR)));
     if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };
@@ -311,8 +317,10 @@ const describeFirstDifference = async (
     return `先頭差分は RIFF ヘッダ内（オフセット ${at}）: バイト ${reference[at]} → ${actual[at]}`;
   }
   const i16 = (bytes: Uint8Array<ArrayBuffer>, sample: number): number =>
-    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-      .getInt16(HEADER_BYTES + sample * 2, true);
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt16(
+      HEADER_BYTES + sample * 2,
+      true,
+    );
   const sample = Math.floor((at - HEADER_BYTES) / 2);
   const last = Math.floor((shared - HEADER_BYTES) / 2) - 1;
   const neighbours: string[] = [];
@@ -389,17 +397,18 @@ const runCase = async (
   const dumped = results.artifact(`${resultId}.wav`);
   await writeFile(dumped, wav);
   console.log(
-    `[e2e] irodori ${MODEL}/${QUANT} ${item.name}${onEvent === undefined ? "" : "(onEvent)"}: ${
-      (elapsedMs / 1000).toFixed(1)
-    }s / S ${audio.frames} / ` +
+    `[e2e] irodori ${MODEL}/${QUANT} ${item.name}${onEvent === undefined ? "" : "(onEvent)"}: ${(
+      elapsedMs / 1000
+    ).toFixed(1)}s / S ${audio.frames} / ` +
       `forwards ${audio.forwards} / WAV ${wav.length}B / ` +
       `${(audio.data.length / audio.sampleRate).toFixed(2)}s / sha256 ${actual}`,
   );
   // 経路間ビット同一（MUST）の判定は参照行を経由せず、通常経路の実測と直に比べる。
-  const twinMismatch = observed !== undefined && observed.twinSha !== actual
-    ? `通常経路の WAV とビット同一でない（通常 ${observed.twinSha} / onEvent ${actual}）— ` +
-      "観測席が数値に触っているか、ホスト経路と常駐経路の出力が割れている"
-    : undefined;
+  const twinMismatch =
+    observed !== undefined && observed.twinSha !== actual
+      ? `通常経路の WAV とビット同一でない（通常 ${observed.twinSha} / onEvent ${actual}）— ` +
+        "観測席が数値に触っているか、ホスト経路と常駐経路の出力が割れている"
+      : undefined;
   const check = references.check(item.name, actual);
   announceCheck(item.name, check, actual);
   const expected = expectedOf(check);
@@ -414,9 +423,7 @@ const runCase = async (
   });
   if (twinMismatch !== undefined) throw new Error(`${item.name}: ${twinMismatch}`);
   if (check.status === "fail") {
-    throw new Error(
-      await mismatchReport(item, config, audio, wav, check.expected, actual, dumped),
-    );
+    throw new Error(await mismatchReport(item, config, audio, wav, check.expected, actual, dumped));
   }
   return { audio, sha: actual };
 };
@@ -439,12 +446,15 @@ test({
     const runs: { component: IrodoriRunComponent; hasArena: boolean }[] = [];
     // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
     // 3.3GB の資産を 2 度読まないよう、全ケースは 1 本のパイプラインを共有する。
-    await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: QUANT,
-      onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
-        runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
-    });
+    await using pipeline = await IrodoriPipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: QUANT,
+        onRunDiagnostics: (component: IrodoriRunComponent, diagnostics: SessionDiagnostics) =>
+          runs.push({ component, hasArena: diagnostics.lastRun !== undefined }),
+      },
+    );
     /** 通常経路の実測 sha（onEvent 経路との経路間ビット同一を、参照行を経由せずに見る相手）。 */
     const plainSha = new Map<string, string>();
     for (const item of CASES) {
@@ -604,10 +614,9 @@ test({
     // （ここでパイプラインを解放するため）。
     await t.step("dispose は in-flight の完了を待ち、2 度目も同じ完了を返す", async () => {
       const order: string[] = [];
-      const running = pipeline.generate({ text: CASES[1].text, seed: CASES[1].seed })
-        .then(() => {
-          order.push("generate");
-        });
+      const running = pipeline.generate({ text: CASES[1].text, seed: CASES[1].seed }).then(() => {
+        order.push("generate");
+      });
       const disposal = pipeline.dispose();
       assertStrictEquals(pipeline.dispose(), disposal, "2 度目の dispose が別の完了を返す");
       await Promise.all([running, disposal.then(() => order.push("dispose"))]);

@@ -57,18 +57,21 @@ const unfused = (nodes: ReturnType<typeof plan>["nodes"]): readonly ExecStep[] =
 
 /** 窓の要約（op 名列 / 窓幅 / 先頭ノード位置 / 鎖の出力名）。 */
 const outline = (windows: readonly UnfusedWindow[]): readonly string[] =>
-  windows.map((window) =>
-    `${window.ops.join(",")}@${window.nodeIndex}+${window.windowSize}=${window.outputName}`
+  windows.map(
+    (window) =>
+      `${window.ops.join(",")}@${window.nodeIndex}+${window.windowSize}=${window.outputName}`,
   );
 
 /**
  * 素の 3 ノード鎖（`neg → add → mul`）。どのルールの綴りにも当たらないので、計画は必ず素の
  * 列になる（= 列挙器の入力として素直な形）。
  */
-const chainGraph = (options: {
-  readonly extraConsumer?: boolean;
-  readonly internalOutput?: boolean;
-} = {}): DeclarationJson => {
+const chainGraph = (
+  options: {
+    readonly extraConsumer?: boolean;
+    readonly internalOutput?: boolean;
+  } = {},
+): DeclarationJson => {
   const shape = [4, 8];
   const nodes: DeclarationJson["nodes"] = [
     { op: "neg", ins: ["x"], outs: ["a"], attrs: {} },
@@ -119,18 +122,18 @@ test("素のノード列から長さ 2〜maxWindow の窓を全て列挙する",
 });
 
 test("鎖の内部値が外へ出る窓は候補にならない（別 consumer / graph output）", () => {
-  for (
-    const [label, graph] of [
-      ["別 consumer", chainGraph({ extraConsumer: true })],
-      ["graph output", chainGraph({ internalOutput: true })],
-    ] as const
-  ) {
+  for (const [label, graph] of [
+    ["別 consumer", chainGraph({ extraConsumer: true })],
+    ["graph output", chainGraph({ internalOutput: true })],
+  ] as const) {
     const { nodes, context } = plan(graph, CHAIN_INPUTS);
     // 残るのは `b` を**最終出力**にする窓だけ（融合ステップは最終出力を実体化するので、
     // 最終ノードの出力が外へ出ることは適格）。
-    assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 4)), [
-      "neg,add@0+2=b",
-    ], label);
+    assertEquals(
+      outline(enumerateUnfusedWindows(unfused(nodes), context, 4)),
+      ["neg,add@0+2=b"],
+      label,
+    );
   }
 });
 
@@ -207,7 +210,7 @@ test("state を触るノードを含む窓は候補にならない", () => {
   // 現行の op 語彙では `states` 欄を持てるのが `attention` / `state_append` だけで、この綴りの
   // 窓は実グラフから踏めない。窓の仕組み側の不変条件として、合成ノードで判定点を固定する。
   const tainted = nodes.map((node, index) =>
-    index === 1 ? { ...node, node: { ...node.node, states: { k: "kv" } } } : node
+    index === 1 ? { ...node, node: { ...node.node, states: { k: "kv" } } } : node,
   );
   assertEquals(outline(enumerateUnfusedWindows(unfused(tainted), context, 3)), []);
 });

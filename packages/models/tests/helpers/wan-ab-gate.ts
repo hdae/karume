@@ -170,21 +170,19 @@ const observeStep1 = async (
     });
     const prompt = pipeline.prompts.find(({ name }) => name === PROMPT)?.prompt;
     if (prompt === undefined) throw new Error(`${where}: 埋め込み資産に '${PROMPT}' が無い`);
-    const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(
-      where,
-      (capture) =>
-        pipeline.generate({
-          prompt,
-          seed,
-          steps: STEPS,
-          frames,
-          ...subject.request,
-          onEvent: (event) => {
-            if (event.kind === "denoise-step" && event.step === 1) {
-              capture(event.copyLatents().data);
-            }
-          },
-        }),
+    const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(where, (capture) =>
+      pipeline.generate({
+        prompt,
+        seed,
+        steps: STEPS,
+        frames,
+        ...subject.request,
+        onEvent: (event) => {
+          if (event.kind === "denoise-step" && event.step === 1) {
+            capture(event.copyLatents().data);
+          }
+        },
+      }),
     );
     assertEquals(passes.length, PASSES_TO_STEP1, `${where}: step 1 までの DiT のパス数`);
     if (subject.request?.image !== undefined) {
@@ -344,17 +342,13 @@ export const runWanAbCase = async (
     await runRecordedCase(results, { id, failureNote: errorText }, (recorded) => {
       const measured = measureAb(first.latent, referenceRun.latent);
       recorded.comparisons.push(
-        comparisonOf(
-          { output: WAN_AB_OBSERVATION, reference, practical },
-          measured,
-          band,
-        ),
+        comparisonOf({ output: WAN_AB_OBSERVATION, reference, practical }, measured, band),
       );
       const census = describeBundleCensus(mergeCensus(first.passes, id), effective);
       console.log(
-        `[e2e] ${label} A/B ${id}: ${reference} → ${practical} ${
-          describeAb(measured)
-        } / census ${census}`,
+        `[e2e] ${label} A/B ${id}: ${reference} → ${practical} ${describeAb(
+          measured,
+        )} / census ${census}`,
       );
       assertBitIdentical(first.latent, second.latent, `${id}: 実用席の 2 回`);
       assertPracticalCensus(row, first, effective, `${id}: 実用席の transformer`);
@@ -373,23 +367,19 @@ export const runWanAbCase = async (
     "故障注入 ① 実用席の session を空にした manifest（= 参照席そのもの）は床で赤",
     async () => {
       const faultId = `fault1-empty-session-${frames}f`;
-      await runRecordedCase(
-        results,
-        { id: faultId, failureNote: errorText },
-        async (recorded) => {
-          const faulty = await observeOverridden(gpu, subject, {}, frames);
-          const measured = measureAb(faulty.latent, referenceRun.latent);
-          recorded.comparisons.push(
-            comparisonOf(
-              { output: WAN_AB_OBSERVATION, reference, practical: `${practical}（session 空）` },
-              measured,
-              band,
-            ),
-          );
-          console.log(`[e2e] ${label} 故障注入 ① ${describeAb(measured)}`);
-          assertThrows(() => judgeAb(measured, band, faultId), Error, "床の失敗");
-        },
-      );
+      await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
+        const faulty = await observeOverridden(gpu, subject, {}, frames);
+        const measured = measureAb(faulty.latent, referenceRun.latent);
+        recorded.comparisons.push(
+          comparisonOf(
+            { output: WAN_AB_OBSERVATION, reference, practical: `${practical}（session 空）` },
+            measured,
+            band,
+          ),
+        );
+        console.log(`[e2e] ${label} 故障注入 ① ${describeAb(measured)}`);
+        assertThrows(() => judgeAb(measured, band, faultId), Error, "床の失敗");
+      });
     },
   );
 
@@ -399,85 +389,74 @@ export const runWanAbCase = async (
     "故障注入 ② / ⑤ 実用席を別 seed で回す — 1 回目との決定性・参照席に対する上限が赤",
     async () => {
       const faultId = `fault2-5-other-seed-${frames}f`;
-      await runRecordedCase(
-        results,
-        { id: faultId, failureNote: errorText },
-        async (recorded) => {
-          const shifted = await observeStep1(
-            gpu,
-            subject,
-            nodeDirectory(subject.assetsRoot),
-            practical,
-            frames,
-            SEED + 1,
-          );
-          // ② 決定性: 同じ席の 2 回目だけ入力が違う形（ビット一致の門が実物の潜在で差を掴む）。
-          assertThrows(
-            () => assertBitIdentical(first.latent, shifted.latent, "故障注入 ②"),
-            Error,
-            "ビット一致しない",
-          );
-          // ⑤ 上限: 観測点が参照と無関係な潜在になった形（崩壊の代理 — 別の初期ノイズの step 1）。
-          const measured = measureAb(shifted.latent, referenceRun.latent);
-          recorded.comparisons.push(
-            comparisonOf(
-              {
-                output: WAN_AB_OBSERVATION,
-                reference,
-                practical: `${practical}（seed ${SEED + 1}）`,
-              },
-              measured,
-              band,
-            ),
-          );
-          console.log(`[e2e] ${label} 故障注入 ⑤ ${describeAb(measured)}`);
-          assertThrows(() => judgeAb(measured, band, faultId), Error, "上限の失敗");
-        },
-      );
+      await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
+        const shifted = await observeStep1(
+          gpu,
+          subject,
+          nodeDirectory(subject.assetsRoot),
+          practical,
+          frames,
+          SEED + 1,
+        );
+        // ② 決定性: 同じ席の 2 回目だけ入力が違う形（ビット一致の門が実物の潜在で差を掴む）。
+        assertThrows(
+          () => assertBitIdentical(first.latent, shifted.latent, "故障注入 ②"),
+          Error,
+          "ビット一致しない",
+        );
+        // ⑤ 上限: 観測点が参照と無関係な潜在になった形（崩壊の代理 — 別の初期ノイズの step 1）。
+        const measured = measureAb(shifted.latent, referenceRun.latent);
+        recorded.comparisons.push(
+          comparisonOf(
+            {
+              output: WAN_AB_OBSERVATION,
+              reference,
+              practical: `${practical}（seed ${SEED + 1}）`,
+            },
+            measured,
+            band,
+          ),
+        );
+        console.log(`[e2e] ${label} 故障注入 ⑤ ${describeAb(measured)}`);
+        assertThrows(() => judgeAb(measured, band, faultId), Error, "上限の失敗");
+      });
     },
   );
 
   // ③ 帯の判定は記録だけ（ADR 0030 決定 5 の再演 — 積み重ねた席の後段の失効は数値で掴みにくい。帯が緑の
   // ままなら census が要ることの実証、赤なら床の係数を 0 より上に置く材料）。
-  await t.step(
-    "故障注入 ③ attentionCompute だけ外した席は census で赤（帯は記録）",
-    async () => {
-      const faultId = `fault3-no-attention-a8-${frames}f`;
-      await runRecordedCase(
-        results,
-        { id: faultId, failureNote: errorText },
-        async (recorded) => {
-          const { attentionCompute: _dropped, ...withoutAttention } = declaredSessionOf(subject);
-          const faulty = await observeOverridden(gpu, subject, withoutAttention, frames);
-          const measured = measureAb(faulty.latent, referenceRun.latent);
-          recorded.comparisons.push(
-            comparisonOf(
-              {
-                output: WAN_AB_OBSERVATION,
-                reference,
-                practical: `${practical}（attentionCompute 外し）`,
-              },
-              measured,
-              band,
-            ),
-          );
-          let bandVerdict = "緑";
-          try {
-            judgeAb(measured, band, faultId);
-          } catch (cause) {
-            bandVerdict = `赤（${errorText(cause)}）`;
-          }
-          console.log(`[e2e] ${label} 故障注入 ③ ${describeAb(measured)} / 帯 ${bandVerdict}`);
-          assertThrows(
-            () => assertPracticalCensus(row, faulty, effective, faultId),
-            Error,
-            "attentionCompute",
-          );
-          return { status: "pass", note: `帯 ${bandVerdict}` };
-        },
+  await t.step("故障注入 ③ attentionCompute だけ外した席は census で赤（帯は記録）", async () => {
+    const faultId = `fault3-no-attention-a8-${frames}f`;
+    await runRecordedCase(results, { id: faultId, failureNote: errorText }, async (recorded) => {
+      const { attentionCompute: _dropped, ...withoutAttention } = declaredSessionOf(subject);
+      const faulty = await observeOverridden(gpu, subject, withoutAttention, frames);
+      const measured = measureAb(faulty.latent, referenceRun.latent);
+      recorded.comparisons.push(
+        comparisonOf(
+          {
+            output: WAN_AB_OBSERVATION,
+            reference,
+            practical: `${practical}（attentionCompute 外し）`,
+          },
+          measured,
+          band,
+        ),
       );
-    },
-  );
+      let bandVerdict = "緑";
+      try {
+        judgeAb(measured, band, faultId);
+      } catch (cause) {
+        bandVerdict = `赤（${errorText(cause)}）`;
+      }
+      console.log(`[e2e] ${label} 故障注入 ③ ${describeAb(measured)} / 帯 ${bandVerdict}`);
+      assertThrows(
+        () => assertPracticalCensus(row, faulty, effective, faultId),
+        Error,
+        "attentionCompute",
+      );
+      return { status: "pass", note: `帯 ${bandVerdict}` };
+    });
+  });
 
   await t.step(
     "故障注入 ④ census 表の linear の本数を 1 ずらすと実物の census で赤（GPU の追加なし）",

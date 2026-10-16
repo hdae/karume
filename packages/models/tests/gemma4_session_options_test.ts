@@ -62,10 +62,14 @@ describe("Gemmaのquant実行設定", () => {
         "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
       );
       assertEquals(
-        resolve(fast, {
-          linearGemvReduce,
-          fuseLinearStaticQuantize: false,
-        }, "test"),
+        resolve(
+          fast,
+          {
+            linearGemvReduce,
+            fuseLinearStaticQuantize: false,
+          },
+          "test",
+        ),
         { ...fast, linearGemvReduce, fuseLinearStaticQuantize: false },
       );
     }
@@ -75,9 +79,13 @@ describe("Gemmaのquant実行設定", () => {
       "linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
     assertEquals(
-      resolve({ fuseLinearStaticQuantize: true }, {
-        linearGemvReduce: "parallel",
-      }, "test"),
+      resolve(
+        { fuseLinearStaticQuantize: true },
+        {
+          linearGemvReduce: "parallel",
+        },
+        "test",
+      ),
       { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
     );
   });
@@ -103,11 +111,15 @@ describe("Gemmaのquant実行設定", () => {
     );
     assertThrows(
       () =>
-        resolve(fast, {
-          linearGemvReduce: "sequential",
-          fuseLinearStaticQuantize: false,
-          packedStaticQuantize: true,
-        }, "test"),
+        resolve(
+          fast,
+          {
+            linearGemvReduce: "sequential",
+            fuseLinearStaticQuantize: false,
+            packedStaticQuantize: true,
+          },
+          "test",
+        ),
       ModelInputError,
       "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );
@@ -229,9 +241,13 @@ describe("Gemmaのquant実行設定", () => {
     );
     assertThrows(
       () =>
-        resolve({ packedStaticQuantize: true, linearGemvReduce: "parallel" }, {
-          linearGemvReduce: "sequential",
-        }, "test"),
+        resolve(
+          { packedStaticQuantize: true, linearGemvReduce: "parallel" },
+          {
+            linearGemvReduce: "sequential",
+          },
+          "test",
+        ),
       ModelInputError,
       "packedStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
     );

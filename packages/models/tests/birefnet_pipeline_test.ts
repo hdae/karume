@@ -405,7 +405,11 @@ test("resizePlaneF32: 同寸法なら値をそのまま通す（丸めも縮退�
 
 test("resizePlaneF32: 一様な平面は寸法を変えても一様（重み総和が 1）", () => {
   const plane = new Float32Array(5 * 7).fill(0.375);
-  for (const [width, height] of [[3, 2], [11, 13], [5, 7]] as const) {
+  for (const [width, height] of [
+    [3, 2],
+    [11, 13],
+    [5, 7],
+  ] as const) {
     const out = resizePlaneF32(plane, 5, 7, width, height);
     assertEquals(out.length, width * height);
     for (const value of out) assertAlmostEquals(value, 0.375, 1e-6);

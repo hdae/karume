@@ -68,11 +68,7 @@ test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
 });
 
 test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違いの黙認を作らない）", () => {
-  assertThrows(
-    () => parseIrodoriPipelineConfig(withPatch({ step: 40 })),
-    Error,
-    "未知キー 'step'",
-  );
+  assertThrows(() => parseIrodoriPipelineConfig(withPatch({ step: 40 })), Error, "未知キー 'step'");
 });
 
 test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", () => {

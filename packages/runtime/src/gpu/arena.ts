@@ -37,8 +37,7 @@ export class ArenaError extends Error {
  * {@link ResidentTensor}（src/gpu/device.ts）も**この定数**で作る。別立てにすると、同じ役割の
  * バッファが 2 つの usage を持つ形になる。
  */
-export const STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST |
-  BUFFER_USAGE.COPY_SRC;
+export const STORAGE_USAGE = BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST | BUFFER_USAGE.COPY_SRC;
 
 /**
  * サイズクラスは「4 バイト整列した実バイト数そのもの」とする。

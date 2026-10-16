@@ -55,10 +55,10 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
   const calls = { workDone: 0 };
   const workDone = options.workDone ?? ((): Promise<void> => Promise.resolve());
   const timing = options.timestamps !== undefined;
-  const stamps = [...options.timestamps ?? []];
+  const stamps = [...(options.timestamps ?? [])];
   const destroys: number[] = [];
   /** 確保 1 件を台帳に載せ、その destroy を返す（故障注入の番号に当たれば載せずに投げる）。 */
-  const track = (): () => void => {
+  const track = (): (() => void) => {
     const index = destroys.length;
     if (options.failCreateAt === index + 1) {
       throw new TypeError(`故障注入: 計測資源の確保 ${index + 1} 件目の同期例外`);
@@ -87,9 +87,10 @@ const createFakeGpu = (options: FakeOptions = {}): FakeGpu => {
     // 回収の順（チャンク順）にこの列から 1 組ずつ配る。
     createBuffer: (descriptor: GPUBufferDescriptor) => {
       const destroy = track();
-      const mapped = (descriptor.usage & BUFFER_USAGE.MAP_READ) === 0
-        ? new BigUint64Array(0)
-        : BigUint64Array.from(stamps.shift() ?? []);
+      const mapped =
+        (descriptor.usage & BUFFER_USAGE.MAP_READ) === 0
+          ? new BigUint64Array(0)
+          : BigUint64Array.from(stamps.shift() ?? []);
       return {
         mapAsync: (): Promise<void> => Promise.resolve(),
         getMappedRange: (): ArrayBuffer => mapped.buffer,
@@ -132,7 +133,9 @@ const fakeTarget = {} as unknown as GPUBuffer;
  * 計測窓は「窓最初の submit → flush の `onSubmittedWorkDone` 完了」なので、完了の瞬間に
  * 時計を進めると窓の実測がちょうど `elapsedMs` になる（注入した時刻源で規則を固定できる形）。
  */
-const gpuTimeClock = (elapsedMs: () => number): {
+const gpuTimeClock = (
+  elapsedMs: () => number,
+): {
   readonly now: () => number;
   /** ホスト側で時間が経った（= エンコードに掛かった）ことを作る。 */
   readonly advance: (ms: number) => void;
@@ -731,7 +734,12 @@ test("submit の GPU 時間の幅は非単調なサンプルが混じっても�
 
 test("単発 dispatch の差分が全て 0 の間は最大の dispatch のキーを名乗らない", async () => {
   // チャンク 1 は 2 dispatch とも差 0（幅は pass 間の隙間だけ）。チャンク 2 で初めて正の差が来る。
-  const gpu = createFakeGpu({ timestamps: [[100n, 100n, 200n, 200n], [0n, 5n]] });
+  const gpu = createFakeGpu({
+    timestamps: [
+      [100n, 100n, 200n, 200n],
+      [0n, 5n],
+    ],
+  });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
 
   dispatchMany(scheduler, 2);

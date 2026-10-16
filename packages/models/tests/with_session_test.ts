@@ -30,7 +30,7 @@ describe("withSession", () => {
         withSession(fakeGpuContext(fakeDevice()), component, {}, undefined, () => {
           bodyCalled = true;
           return Promise.resolve();
-        })
+        }),
       );
 
       assertStrictEquals(error, failure);

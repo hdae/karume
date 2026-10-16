@@ -109,7 +109,10 @@ const tokensOf = (size: ImageSize): number =>
  */
 export const assertAcceptableResolution = (size: ImageSize): void => {
   const label = `${size.width}×${size.height}`;
-  for (const [side, axis] of [[size.width, "幅"], [size.height, "高さ"]] as const) {
+  for (const [side, axis] of [
+    [size.width, "幅"],
+    [size.height, "高さ"],
+  ] as const) {
     if (!Number.isInteger(side)) {
       throw new ModelInputError(`解像度 ${label} の${axis} ${side} が整数でない`);
     }

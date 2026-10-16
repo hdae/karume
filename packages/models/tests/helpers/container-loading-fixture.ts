@@ -97,10 +97,7 @@ const createMockFetch = (
 };
 
 /** manifest の 3 点セット（path / size / sha256）を現物から作る。 */
-export const fileRef = async (
-  path: string,
-  bytes: Uint8Array<ArrayBuffer>,
-): Promise<FileRef> => ({
+export const fileRef = async (path: string, bytes: Uint8Array<ArrayBuffer>): Promise<FileRef> => ({
   path,
   size: bytes.byteLength,
   sha256: await sha256Hex(bytes),
@@ -131,8 +128,8 @@ export const serveContainer = async (
     blockBytes: options.blockBytes ?? 512,
   });
   const total = String(written.parts.length).padStart(5, "0");
-  const paths = written.parts.map((_, index) =>
-    `${stem}-${String(index + 1).padStart(5, "0")}-of-${total}.krm`
+  const paths = written.parts.map(
+    (_, index) => `${stem}-${String(index + 1).padStart(5, "0")}-of-${total}.krm`,
   );
   const parts = await Promise.all(
     written.parts.map((bytes, index) => fileRef(paths[index], bytes)),
@@ -169,9 +166,7 @@ export type RepoSpec = {
 export const serveRepos = (specs: readonly RepoSpec[]): MockFetch =>
   createMockFetch(
     new Map(
-      specs.map((
-        spec,
-      ) => [
+      specs.map((spec) => [
         spec.repo,
         new Map<string, Uint8Array<ArrayBuffer>>([
           [MANIFEST_PATH, manifestBytes(spec.models)],
@@ -250,11 +245,13 @@ const siglip2Component = (): ModelInput => ({
       version: 2,
       requires: { ops: ["linear"] },
       symbols: [],
-      inputs: [{
-        name: "pixel_values",
-        dtype: "f32",
-        shape: [1, CHANNELS, IMAGE_SIZE, IMAGE_SIZE],
-      }],
+      inputs: [
+        {
+          name: "pixel_values",
+          dtype: "f32",
+          shape: [1, CHANNELS, IMAGE_SIZE, IMAGE_SIZE],
+        },
+      ],
       outputs: ["pooler_output"],
       initializers: { w: {}, b: {} },
       values: {
@@ -263,12 +260,14 @@ const siglip2Component = (): ModelInput => ({
         pooler_output: { dtype: "f32", shape: [1, HIDDEN_DIM] },
       },
       states: {},
-      nodes: [{
-        op: "linear",
-        ins: ["pixel_values", "w", "b"],
-        outs: ["pooler_output"],
-        attrs: {},
-      }],
+      nodes: [
+        {
+          op: "linear",
+          ins: ["pixel_values", "w", "b"],
+          outs: ["pooler_output"],
+          attrs: {},
+        },
+      ],
     }),
   },
   consts: [],
@@ -297,9 +296,7 @@ const siglip2Component = (): ModelInput => ({
  * MUST: グラフは実行可能な `linear` 1 段のまま — 非対応 op にすると runtime の capability 門
  * （②が既に縛る側）で落ちてしまい、家族の門を通ったことの証明にならない。
  */
-export const prepareSiglip2 = async (
-  patch: Record<string, unknown>,
-): Promise<ContainerRig> => {
+export const prepareSiglip2 = async (patch: Record<string, unknown>): Promise<ContainerRig> => {
   const served = await serveContainer("vision/model.f32", siglip2Component(), {
     partBytes: 2 * 1024 * 1024,
     blockBytes: 2 * 1024 * 1024,

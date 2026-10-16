@@ -67,7 +67,10 @@ test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブレン
   assertEquals(wanVaeTileCount(plan), 12);
   assertEquals([...plan.rows.starts], [0, 14, 28]);
   assertEquals([...plan.cols.starts], [0, 24, 48, 72]);
-  assertEquals([1, 2].map((index) => wanVaeBlendExtentAt(plan.rows, SCALE, index)), [144, 144]);
+  assertEquals(
+    [1, 2].map((index) => wanVaeBlendExtentAt(plan.rows, SCALE, index)),
+    [144, 144],
+  );
   assertEquals(
     [1, 2, 3].map((index) => wanVaeBlendExtentAt(plan.cols, SCALE, index)),
     [64, 64, 64],
@@ -126,7 +129,10 @@ test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", 
 test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラフの比 × unpatchify — Python 側と同じ式）", () => {
   // 2 点で式を縛る（Python 側 test_vae_tiling.py と同じ行）。unpatchify の倍率を無視する退行は
   // (8, 2) で割れる（グラフの比だけなら 8）。
-  for (const [scale, patchSize, expected] of [[8, 1, 8], [8, 2, 4]] as const) {
+  for (const [scale, patchSize, expected] of [
+    [8, 1, 8],
+    [8, 2, 4],
+  ] as const) {
     assertEquals(wanVaeMinTileOverlap(scale, patchSize), expected, `(${scale}, ${patchSize})`);
   }
   assertEquals(wanVaeSpatialCompression(8, 2), 16);
@@ -138,7 +144,13 @@ test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数�
     Error,
     "重なり 64 px が空間の圧縮 24（グラフの比 8 × unpatchify 3）で割り切れない",
   );
-  for (const [scale, patchSize] of [[7.8125, 1], [8, 1.5], [0, 1], [8, 0], [-8, 1]] as const) {
+  for (const [scale, patchSize] of [
+    [7.8125, 1],
+    [8, 1.5],
+    [0, 1],
+    [8, 0],
+    [-8, 1],
+  ] as const) {
     assertThrows(
       () => wanVaeMinTileOverlap(scale, patchSize),
       Error,
@@ -186,7 +198,12 @@ test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイ�
   // （`wanVaeLatentChunk` の chunk の添字と同じ穴）。
   const plan = smallPlan(10, 12, 1);
   const latents = new Float32Array(2 * 3 * 10 * 12).fill(1);
-  for (const [row, col] of [[0.5, 0], [0, 0.5], [Number.NaN, 0], [0, Number.NaN]]) {
+  for (const [row, col] of [
+    [0.5, 0],
+    [0, 0.5],
+    [Number.NaN, 0],
+    [0, Number.NaN],
+  ]) {
     assertThrows(
       () => wanVaeLatentTile(plan, latents, row, col),
       RangeError,
@@ -221,7 +238,10 @@ test("assembleWanVaeTiles: 位置依存のタイルを線形ランプが解析�
   assertEquals([...plan.rows.starts], [0, 4, 8]);
   const expected = [0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 6, 7];
   for (const axis of ["rows", "cols"] as const) {
-    const out = assembleWanVaeTiles(Array.from({ length: 9 }, () => rampTile(axis)), plan);
+    const out = assembleWanVaeTiles(
+      Array.from({ length: 9 }, () => rampTile(axis)),
+      plan,
+    );
     assertEquals(out.length, 3 * 2 * 256);
     for (let plane = 0; plane < 6; plane += 1) {
       const line = Array.from(
@@ -261,8 +281,15 @@ test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊し�
   const before = tiles.map((tile) => [...tile]);
   const out = assembleWanVaeTiles(tiles, plan);
   assertEquals(out.length, 3 * 2 * 32 * 52);
-  assert(out.every((value) => value >= 7 && value <= 9), "覆われていない画素が残っている");
-  assertEquals(tiles.map((tile) => [...tile]), before, "渡したタイルが書き換わった");
+  assert(
+    out.every((value) => value >= 7 && value <= 9),
+    "覆われていない画素が残っている",
+  );
+  assertEquals(
+    tiles.map((tile) => [...tile]),
+    before,
+    "渡したタイルが書き換わった",
+  );
 });
 
 test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落とす", () => {
@@ -321,7 +348,10 @@ test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶�
   // 2 行（列）が同じ絶対位置を指す限り位置に戻る — 縛るのは入れ子の配置でのブレンド幅（対ごと）・開始位置
   // × 縮尺・担当領域の対応。重みの向きと縦 → 横の順は、隣のタイルが同じ値を持つこの形では差が出ないので
   // 上の解析解のテスト（傾斜・角）が持つ。
-  for (const [height, width] of [[60, 104], [104, 60]] as const) {
+  for (const [height, width] of [
+    [60, 104],
+    [104, 60],
+  ] as const) {
     const plan = planWanVaeTiles(
       { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE, sampleChannels: 3 },
       height,
@@ -378,7 +408,10 @@ type Shape4 = readonly [number, number, number, number];
  * ずれ）が下位。Python 側（`tools/export-recipes/wan/tests/test_vae_tiling_ti2v.py` の
  * `UNPATCHIFY_SOURCE_CHANNEL`）と同じ値で凍結し、そちらが上流の関数そのものと照合する（二重凍結）。
  */
-const UNPATCHIFY_SOURCE_CHANNEL: readonly (readonly number[])[] = [[0, 2], [1, 3]];
+const UNPATCHIFY_SOURCE_CHANNEL: readonly (readonly number[])[] = [
+  [0, 2],
+  [1, 3],
+];
 
 /** 表から組んだ unpatchify（p = 2 — 出力の座標から入力を引く。実装の入れ子のループとは別の組み立て）。 */
 const unpatchifyByTable = (
@@ -394,9 +427,10 @@ const unpatchifyByTable = (
       for (let y = 0; y < outHeight; y += 1) {
         for (let x = 0; x < outWidth; x += 1) {
           const source = channel * 4 + table[y % 2][x % 2];
-          out[((channel * count + frame) * outHeight + y) * outWidth + x] = input[
-            ((source * count + frame) * height + Math.floor(y / 2)) * width + Math.floor(x / 2)
-          ];
+          out[((channel * count + frame) * outHeight + y) * outWidth + x] =
+            input[
+              ((source * count + frame) * height + Math.floor(y / 2)) * width + Math.floor(x / 2)
+            ];
         }
       }
     }
@@ -424,7 +458,15 @@ test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx と d
   // （入力チャネル k の先頭 = k · 2·3·5）。
   assertEquals([got[1], got[10]], [2 * 30, 1 * 30]);
   // 対照: arange が並びの誤り（幅と高さのずれの取り違え）を区別できること。
-  assertNotEquals([...got], [...unpatchifyByTable(input, PATCH_SHAPE, [[0, 1], [2, 3]])]);
+  assertNotEquals(
+    [...got],
+    [
+      ...unpatchifyByTable(input, PATCH_SHAPE, [
+        [0, 1],
+        [2, 3],
+      ]),
+    ],
+  );
   assertEquals([...input], [...arange(input.length)], "入力を書き換えた");
 });
 

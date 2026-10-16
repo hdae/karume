@@ -182,9 +182,7 @@ export const assertRopeInputShapes = (
       const name = gemma4RopeInputName(layerType, part);
       const input = graph.inputs.find((entry) => entry.name === name);
       if (input === undefined) {
-        throw new Error(
-          `${entry}: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`,
-        );
+        throw new Error(`${entry}: グラフ入力 '${name}' が無い（RoPE がホスト供給の資産でない）`);
       }
       if (input.shape.length !== 3 || input.shape[2] !== headDim) {
         throw new Error(
@@ -232,16 +230,18 @@ export const admitGemma4 = (
     capacitySymbol,
     // drafter の門は `./speculative.ts` が持つ（借り物スロット・共有 initializer の綴りは
     // 投機の知識で、target の門とは別の 1 本）。target の材料は**確定したもの**を渡す。
-    ...(drafter === undefined ? {} : {
-      drafter: {
-        admission: admitGemma4Drafter(entry, drafter.graph, {
-          graph,
-          rope: config.rope,
-          hiddenSize: hiddenSizeOf(graph, entry),
-          capacitySymbol,
+    ...(drafter === undefined
+      ? {}
+      : {
+          drafter: {
+            admission: admitGemma4Drafter(entry, drafter.graph, {
+              graph,
+              rope: config.rope,
+              hiddenSize: hiddenSizeOf(graph, entry),
+              capacitySymbol,
+            }),
+          },
         }),
-      },
-    }),
   };
 };
 
@@ -273,9 +273,7 @@ export const assertChunkLength = (
   entry: string = gemmaEntryName("gemma4"),
 ): number => {
   if (!Number.isSafeInteger(chunkLength) || chunkLength < 2) {
-    throw new ModelInputError(
-      `${entry}: chunkLength ${chunkLength} が 2 以上の整数でない`,
-    );
+    throw new ModelInputError(`${entry}: chunkLength ${chunkLength} が 2 以上の整数でない`);
   }
   if (chunkLength > config.maxChunkLength) {
     throw new ModelInputError(

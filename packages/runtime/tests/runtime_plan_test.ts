@@ -232,15 +232,20 @@ const prefixSliceGraph = (overrides: Partial<DeclarationJson> = {}): Declaration
     table: { dtype: "i32", shape: [6, 5] },
     y: { dtype: "i32", shape: ["T", "T"] },
   },
-  nodes: [{
-    op: "sym_prefix_slice",
-    ins: ["table"],
-    outs: ["y"],
-    attrs: {
-      sym: "T",
-      slices: [{ dim: 0, coeff: 1, offset: 0 }, { dim: 1, coeff: 1, offset: 0 }],
+  nodes: [
+    {
+      op: "sym_prefix_slice",
+      ins: ["table"],
+      outs: ["y"],
+      attrs: {
+        sym: "T",
+        slices: [
+          { dim: 0, coeff: 1, offset: 0 },
+          { dim: 1, coeff: 1, offset: 0 },
+        ],
+      },
     },
-  }],
+  ],
   ...overrides,
 });
 
@@ -308,10 +313,19 @@ const layoutAxisGraph = (
 test("slice / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
   // 受理: 対象軸は静的で、他の軸が記号なのは構わない
   validateGraphContracts(
-    parse(layoutAxisGraph("slice", { dim: 1, start: 1, end: 3 }, [{
-      name: "x",
-      shape: ["T", 4],
-    }], ["T", 2])),
+    parse(
+      layoutAxisGraph(
+        "slice",
+        { dim: 1, start: 1, end: 3 },
+        [
+          {
+            name: "x",
+            shape: ["T", 4],
+          },
+        ],
+        ["T", 2],
+      ),
+    ),
   );
   validateGraphContracts(
     parse(layoutAxisGraph("flip", { dim: 1 }, [{ name: "x", shape: ["T", 4] }], ["T", 4])),
@@ -321,10 +335,19 @@ test("slice / flip の記号軸は Session 構築時に落ちる（静的軸の�
   assertThrows(
     () =>
       validateGraphContracts(
-        parse(layoutAxisGraph("slice", { dim: 0, start: 0, end: 2 }, [{
-          name: "x",
-          shape: ["T", 4],
-        }], [2, 4])),
+        parse(
+          layoutAxisGraph(
+            "slice",
+            { dim: 0, start: 0, end: 2 },
+            [
+              {
+                name: "x",
+                shape: ["T", 4],
+              },
+            ],
+            [2, 4],
+          ),
+        ),
       ),
     ExecutionError,
   );
@@ -344,34 +367,62 @@ test("slice / flip の記号軸は Session 構築時に落ちる（静的軸の�
 test("cat の連結軸は同一シンボルの一次和まで受理し、異シンボルの混在で落ちる", () => {
   // 受理: 連結軸が静的（他の軸が記号なのは構わない）
   validateGraphContracts(
-    parse(layoutAxisGraph("cat", { dim: 1 }, [
-      { name: "a", shape: ["T", 2] },
-      { name: "b", shape: ["T", 3] },
-    ], ["T", 5])),
+    parse(
+      layoutAxisGraph(
+        "cat",
+        { dim: 1 },
+        [
+          { name: "a", shape: ["T", 2] },
+          { name: "b", shape: ["T", 3] },
+        ],
+        ["T", 5],
+      ),
+    ),
   );
   // 受理: 記号 + 定数（`S+1519` と同型）
   validateGraphContracts(
-    parse(layoutAxisGraph("cat", { dim: 0 }, [
-      { name: "a", shape: ["T", 2] },
-      { name: "b", shape: [3, 2] },
-    ], ["T+3", 2])),
+    parse(
+      layoutAxisGraph(
+        "cat",
+        { dim: 0 },
+        [
+          { name: "a", shape: ["T", 2] },
+          { name: "b", shape: [3, 2] },
+        ],
+        ["T+3", 2],
+      ),
+    ),
   );
   // 受理: 同一シンボルどうし（係数が積み上がる）
   validateGraphContracts(
-    parse(layoutAxisGraph("cat", { dim: 0 }, [
-      { name: "a", shape: ["T", 2] },
-      { name: "b", shape: ["T", 2] },
-    ], ["2T", 2])),
+    parse(
+      layoutAxisGraph(
+        "cat",
+        { dim: 0 },
+        [
+          { name: "a", shape: ["T", 2] },
+          { name: "b", shape: ["T", 2] },
+        ],
+        ["2T", 2],
+      ),
+    ),
   );
 
   // 拒否: 異なるシンボルの混在（和が 1 次元 1 シンボルの文法に載らない）
   assertThrows(
     () =>
       validateGraphContracts(
-        parse(layoutAxisGraph("cat", { dim: 0 }, [
-          { name: "a", shape: ["T", 2] },
-          { name: "b", shape: ["U", 2] },
-        ], ["T", 2])),
+        parse(
+          layoutAxisGraph(
+            "cat",
+            { dim: 0 },
+            [
+              { name: "a", shape: ["T", 2] },
+              { name: "b", shape: ["U", 2] },
+            ],
+            ["T", 2],
+          ),
+        ),
       ),
     ExecutionError,
     "異なるシンボル",
@@ -381,11 +432,18 @@ test("cat の連結軸は同一シンボルの一次和まで受理し、異シ�
 // cat のアリティは**下限** 2（可変アリティ — ADR 0014）。1 本は恒等コピーで語彙に無い。
 test("cat の入力は 2 本以上で、3 本以上も契約検査を通る", () => {
   validateGraphContracts(
-    parse(layoutAxisGraph("cat", { dim: 1 }, [
-      { name: "a", shape: [2, 1] },
-      { name: "b", shape: [2, 2] },
-      { name: "c", shape: [2, 3] },
-    ], [2, 6])),
+    parse(
+      layoutAxisGraph(
+        "cat",
+        { dim: 1 },
+        [
+          { name: "a", shape: [2, 1] },
+          { name: "b", shape: [2, 2] },
+          { name: "c", shape: [2, 3] },
+        ],
+        [2, 6],
+      ),
+    ),
   );
   assertThrows(
     () =>
@@ -437,14 +495,20 @@ const stateGraph = (
 
 /** 容量記号 `C` は入力に現れない（束縛点は createGenerationContext — ADR 0066 追記 7）。 */
 const stateShapes = (capacity = 16): ReadonlyMap<string, readonly number[]> =>
-  new Map([["kv.k", [1, 2, capacity, 4]], ["kv.v", [1, 2, capacity, 4]]]);
+  new Map([
+    ["kv.k", [1, 2, capacity, 4]],
+    ["kv.v", [1, 2, capacity, 4]],
+  ]);
 
 test("state 参照グラフは契約検査を通り、スロット shape を渡せば計画できる", () => {
   const graph = parse(stateGraph());
   validateGraphContracts(graph);
 
   const plan = planGraph(graph, { M: 3, C: 16 }, stateShapes());
-  assertEquals(plan.nodes[0].outputs.map((out) => out.name), ["o"]);
+  assertEquals(
+    plan.nodes[0].outputs.map((out) => out.name),
+    ["o"],
+  );
   assertEquals(plan.nodes[0].outputs[0].shape, [1, 8, 3, 4]);
   // effect op は出力列が空（`outs` が 0 本であることが計画にもそのまま出る）
   assertEquals(plan.nodes[1].outputs, []);
@@ -466,12 +530,16 @@ test("同一スロットへの state_append は 1 step に 1 本まで", () => {
   const nodes = stateGraph().nodes;
   assertThrows(
     () =>
-      validateGraphContracts(parse(stateGraph([
-        nodes[0],
-        nodes[1],
-        { op: "state_append", ins: ["v"], outs: [], attrs: {}, states: { slot: "kv.k" } },
-        nodes[2],
-      ]))),
+      validateGraphContracts(
+        parse(
+          stateGraph([
+            nodes[0],
+            nodes[1],
+            { op: "state_append", ins: ["v"], outs: [], attrs: {}, states: { slot: "kv.k" } },
+            nodes[2],
+          ]),
+        ),
+      ),
     ExecutionError,
     "state_append が 2 本",
   );
@@ -485,23 +553,27 @@ test("state を読むスロットには終端 state_append がちょうど 1 本
   const reader = base.nodes[0];
   const error = assertThrows(
     () =>
-      validateGraphContracts(parse({
-        ...base,
-        requires: { ops: ["attention"] },
-        nodes: [reader],
-      })),
+      validateGraphContracts(
+        parse({
+          ...base,
+          requires: { ops: ["attention"] },
+          nodes: [reader],
+        }),
+      ),
     ExecutionError,
     "state_append が 1 本も無い",
   );
   assert(error.message.includes("kv.k"), error.message);
 
   // 同じスロットを 2 本の読者が共有する形（KV 共有層）は、終端 append が各スロット 1 本なら通る
-  validateGraphContracts(parse({
-    ...base,
-    outputs: ["o", "o2"],
-    values: { ...base.values, o2: { dtype: "f32", shape: [1, 8, "M", 4] } },
-    nodes: [reader, { ...reader, outs: ["o2"] }, base.nodes[1], base.nodes[2]],
-  }));
+  validateGraphContracts(
+    parse({
+      ...base,
+      outputs: ["o", "o2"],
+      values: { ...base.values, o2: { dtype: "f32", shape: [1, 8, "M", 4] } },
+      nodes: [reader, { ...reader, outs: ["o2"] }, base.nodes[1], base.nodes[2]],
+    }),
+  );
 });
 
 test("state_append より後に同じスロットの読者を置けない", () => {
@@ -572,11 +644,7 @@ test("states 専用記号は bindSymbols が要求せず、seed に来たら拒�
   assertEquals(Object.hasOwn(bindings, "C"), false);
   // seed で渡す形は fail loudly（context 生成時の容量との二重簿記 — 食い違いは値に出ず
   // 計画キャッシュの鍵だけが静かに割れる）
-  assertThrows(
-    () => bindSymbols(graph, inputs, { C: 16 }),
-    ExecutionError,
-    "states 専用記号",
-  );
+  assertThrows(() => bindSymbols(graph, inputs, { C: 16 }), ExecutionError, "states 専用記号");
   // 入力にも現れる記号は従来どおり（states に**も**現れる形は「専用」ではない）
   assertThrows(
     () => bindSymbols(graph, { q: [1, 8, 3, 4], k: [1, 2, 5, 4], v: [1, 2, 3, 4] }),
@@ -643,12 +711,14 @@ const conv3dGraph = (groups: number): DeclarationJson => ({
     b: { dtype: "f32", shape: [6] },
     y: { dtype: "f32", shape: [6, 2, 6, 6] },
   },
-  nodes: [{
-    op: "conv3d",
-    ins: ["x", "w", "b"],
-    outs: ["y"],
-    attrs: { stride: [1, 1, 1], padding: [0, 1, 1], dilation: [1, 1, 1], groups },
-  }],
+  nodes: [
+    {
+      op: "conv3d",
+      ins: ["x", "w", "b"],
+      outs: ["y"],
+      attrs: { stride: [1, 1, 1], padding: [0, 1, 1], dilation: [1, 1, 1], groups },
+    },
+  ],
 });
 
 // 意味論（契約・CPU 参照）は groups 一般を受けるが、GPU の実装済み subset は groups == 1 だけ

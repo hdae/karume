@@ -46,11 +46,9 @@ import { assertU32Params } from "../codegen/params.ts";
 export const UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE = 256;
 
 /** MUST: WGSL を変えたらキーも上げる（パイプラインキャッシュは本文を見ない）。 */
-export const UPSAMPLE_BILINEAR2D_KEY =
-  `upsample_bilinear2d:v2:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`;
+export const UPSAMPLE_BILINEAR2D_KEY = `upsample_bilinear2d:v2:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`;
 
-export const UPSAMPLE_BILINEAR2D_WGSL: string =
-  `// karume upsample_bilinear2d (NCHW bilinear, align_corners=true, f32, full-write)
+export const UPSAMPLE_BILINEAR2D_WGSL: string = `// karume upsample_bilinear2d (NCHW bilinear, align_corners=true, f32, full-write)
 struct Params {
   n: u32,
   in_h: u32,

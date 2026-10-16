@@ -51,17 +51,17 @@ export type SweepFixture = {
 
 export const loadSweepFixture = async (): Promise<SweepFixture> =>
   JSON.parse(
-    await readTextFile(
-      new URL("../fixtures/wan-text/prompt-clean-sweep.json", import.meta.url),
-    ),
+    await readTextFile(new URL("../fixtures/wan-text/prompt-clean-sweep.json", import.meta.url)),
   ) as SweepFixture;
 
 /** 前処理の表（parity フィクスチャの `promptClean` — 資産と同じ形の全体）。 */
 export const loadPromptCleanTables = async (): Promise<PromptCleanTables> =>
   parsePromptCleanTables(
-    (JSON.parse(
-      await readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
-    ) as { promptClean: unknown }).promptClean,
+    (
+      JSON.parse(
+        await readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
+      ) as { promptClean: unknown }
+    ).promptClean,
     "promptClean",
   );
 
@@ -69,7 +69,7 @@ export const loadPromptCleanTables = async (): Promise<PromptCleanTables> =>
 const BLOCK_DIGEST_HEX = 16;
 
 /** 32 ビットの xorshift（recipe の `XorShift32` と同じ列）。 */
-export const xorshift32 = (seed: number): () => number => {
+export const xorshift32 = (seed: number): (() => number) => {
   let x = seed >>> 0;
   return () => {
     x ^= x << 13;
@@ -96,7 +96,7 @@ export function* fuzzStrings(
 ): Generator<string> {
   const next = xorshift32(seed);
   for (let index = 0; index < count; index++) {
-    const length = 1 + next() % maxLength;
+    const length = 1 + (next() % maxLength);
     let text = "";
     for (let k = 0; k < length; k++) text += String.fromCodePoint(pool[next() % pool.length]);
     yield text;

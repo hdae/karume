@@ -136,30 +136,27 @@ export class PipelineCache {
     const roles = parseStorageRoles(wgsl);
     const resolved = (async (): Promise<CachedPipeline> => {
       let compiling: Promise<PipelineCompilation> | undefined;
-      const created = await withPipelineScope(
-        this.#device,
-        `createShaderModule(${key})`,
-        () => {
-          const module = this.#device.createShaderModule({
-            label: key,
-            code: wgsl,
-          });
-          // スコープを張った同期区間で発行し、完了は pop の後に待つ。
-          // DECIDED: docs/decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11
-          // 拒否も値にして直ちに受ける。module の検証が先に落ちても未処理の拒否を残さない。
-          const pending = this.#device.createComputePipelineAsync({
+      const created = await withPipelineScope(this.#device, `createShaderModule(${key})`, () => {
+        const module = this.#device.createShaderModule({
+          label: key,
+          code: wgsl,
+        });
+        // スコープを張った同期区間で発行し、完了は pop の後に待つ。
+        // DECIDED: docs/decisions/0042-prepared-execution-plan.md#非同期コンパイル2026-09-11
+        // 拒否も値にして直ちに受ける。module の検証が先に落ちても未処理の拒否を残さない。
+        const pending = this.#device
+          .createComputePipelineAsync({
             label: key,
             layout: "auto",
             compute: { module },
           })
-            .then(
-              (pipeline) => ({ ok: true as const, pipeline }),
-              (cause: unknown) => ({ ok: false as const, cause }),
-            );
-          compiling = pending;
-          return { module, pending };
-        },
-      ).catch(async (cause: unknown) => {
+          .then(
+            (pipeline) => ({ ok: true as const, pipeline }),
+            (cause: unknown) => ({ ok: false as const, cause }),
+          );
+        compiling = pending;
+        return { module, pending };
+      }).catch(async (cause: unknown) => {
         // モジュールの検証失敗でも、発行済みコンパイルの決着前に再試行や破棄へ進めない。
         await compiling;
         throw cause;
@@ -168,16 +165,17 @@ export class PipelineCache {
       if (!result.ok) {
         const cause = result.cause;
         if (
-          cause instanceof Error && "reason" in cause &&
+          cause instanceof Error &&
+          "reason" in cause &&
           (cause.reason === "internal" || cause.reason === "validation")
         ) {
           // GPUPipelineError.message だけでは診断が空になる実装がある。
           // 補足の取得自体が落ちても、根因と拒否理由を上書きしない。
           const details = await created.module.getCompilationInfo().then(
             (info) =>
-              info.messages.map((message) =>
-                `${message.lineNum}:${message.linePos} ${message.message}`
-              ).join("; "),
+              info.messages
+                .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`)
+                .join("; "),
             (diagnosticCause: unknown) => `getCompilationInfo failed: ${String(diagnosticCause)}`,
           );
           const message = `createComputePipelineAsync(${key}): ${String(cause)} ${details}`;
@@ -188,15 +186,11 @@ export class PipelineCache {
         throw cause;
       }
       // layout 取得も別の同期スコープで囲む。待機中に他の生成のスコープを吸い込まない。
-      return await withPipelineScope(
-        this.#device,
-        `getBindGroupLayout(${key})`,
-        () => ({
-          pipeline: result.pipeline,
-          layout: result.pipeline.getBindGroupLayout(0),
-          roles,
-        }),
-      );
+      return await withPipelineScope(this.#device, `getBindGroupLayout(${key})`, () => ({
+        pipeline: result.pipeline,
+        layout: result.pipeline.getBindGroupLayout(0),
+        roles,
+      }));
     })().catch((cause: unknown) => {
       this.#entries.delete(key);
       throw cause;

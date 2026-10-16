@@ -227,7 +227,7 @@ test("fromAssets: 中断済み signal は資産へ触る前に reason そのま�
   const reason = new Error("中止ボタン");
   controller.abort(reason);
   const error = await assertRejects(() =>
-    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
+    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
   assertStrictEquals(error, reason);
@@ -243,7 +243,7 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
   const reason = new Error("中止ボタン（実行中）");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
-    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
+    AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   assertStrictEquals(error, reason);
 });
@@ -252,14 +252,16 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
 
 /** quant の `session` だけを差し替えた manifest（他の欄は {@link manifestText} の骨格）。 */
 const manifestWithSession = (session: Record<string, unknown>) =>
-  parseManifest(manifestText({
-    quants: {
-      "f16+dit8-a8-attn8-s16": {
-        weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "f16"])),
-        session,
+  parseManifest(
+    manifestText({
+      quants: {
+        "f16+dit8-a8-attn8-s16": {
+          weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "f16"])),
+          session,
+        },
       },
-    },
-  }));
+    }),
+  );
 
 /** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
 const optionsWith = (key: string, value: unknown): AnimaPipelineOptions => {
@@ -310,10 +312,13 @@ test("fromAssets: 受理される明示は admission を通って資産の段ま
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, {
-        linearCompute: "f16",
-        attentionScoreStorage: "f16",
-      }),
+      AnimaPipeline.fromAssets(
+        { manifest, assets: COMPONENTS },
+        {
+          linearCompute: "f16",
+          attentionScoreStorage: "f16",
+        },
+      ),
     Error,
     "資産 'tokenizer' が無い",
   );
@@ -325,10 +330,13 @@ test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産�
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
-      AnimaPipeline.fromAssets({ manifest, assets: emptyAssets }, {
-        gpu: fakeGpuContext(fakeDevice()),
-        linearCompute: "f16",
-      }),
+      AnimaPipeline.fromAssets(
+        { manifest, assets: emptyAssets },
+        {
+          gpu: fakeGpuContext(fakeDevice()),
+          linearCompute: "f16",
+        },
+      ),
     Error,
     "shader-f16",
   );
@@ -397,10 +405,12 @@ const buildableAssets = async (): Promise<Record<string, Uint8Array<ArrayBuffer>
   });
   const ropeTable = (): DumpTensor => ({ dtype: "F32", shape: [2, 1], data: new Float32Array(2) });
   const rope = writeSafetensors(
-    new Map(["t", "h", "w"].flatMap((axis) => [
-      [`cos_${axis}`, ropeTable()] as const,
-      [`sin_${axis}`, ropeTable()] as const,
-    ])),
+    new Map(
+      ["t", "h", "w"].flatMap((axis) => [
+        [`cos_${axis}`, ropeTable()] as const,
+        [`sin_${axis}`, ropeTable()] as const,
+      ]),
+    ),
     {},
   );
   const transformer = await tensorlessContainer(
@@ -460,7 +470,7 @@ test("generate: 受理される residency は入口を通って最初の段（GP
         onEvent: (event) => {
           if (event.kind === "stage") events.push(`${event.component}:${event.at}`);
         },
-      })
+      }),
     );
     assert(!(error instanceof ModelInputError), `${residency}: 入口で落ちている（${error}）`);
     assertEquals(events, ["text_encoder:start"], `${residency}: 最初の段に入っていない`);
@@ -621,7 +631,10 @@ test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出
   );
   assertStringIncludes(misspelled.message, "実際 'dpm++'");
   // 非文字列でも「実際」に何が来たかを出す（型の縁で診断が消えない）。
-  for (const [value, expected] of [[2, "実際 2"], [undefined, "実際 undefined"]] as const) {
+  for (const [value, expected] of [
+    [2, "実際 2"],
+    [undefined, "実際 undefined"],
+  ] as const) {
     const thrown = assertThrows(() => assertAnimaSamplerType(value, "sampler"), Error);
     assertStringIncludes(thrown.message, expected);
   }

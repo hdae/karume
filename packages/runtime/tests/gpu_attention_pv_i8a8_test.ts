@@ -470,10 +470,9 @@ const observeQuantizedP = (
 
 /** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
 const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
-  [...byKey].filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY)).reduce(
-    (sum, [, count]) => sum + count,
-    0,
-  );
+  [...byKey]
+    .filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY))
+    .reduce((sum, [, count]) => sum + count, 0);
 
 test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れている（vq 突合の前提）", () => {
   // GPU の除算（`x/s`）は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段
@@ -492,8 +491,7 @@ test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れて�
 // ---------------------------------------------------------------------------
 
 test({
-  name:
-    "attention_pv i8a8 の O が TS 参照（整数の手前で割った純関数）と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  name: "attention_pv i8a8 の O が TS 参照（整数の手前で割った純関数）と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -610,8 +608,7 @@ test({
 // ---------------------------------------------------------------------------
 
 test({
-  name:
-    "attention_pv i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  name: "attention_pv i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -730,8 +727,7 @@ test({
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
 test({
-  name:
-    "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
+  name: "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -797,8 +793,7 @@ test({
 
 /** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。空の census を落とす理由は上の census と同じ。 */
 test({
-  name:
-    "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
+  name: "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -849,8 +844,7 @@ test({
 });
 
 test({
-  name:
-    "attention_pv i8a8: N が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  name: "attention_pv i8a8: N が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ N·127² は i32 に収まるが、門は安全側。

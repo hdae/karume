@@ -15,7 +15,10 @@ import { f32Bytes } from "./helpers/model-fixture.ts";
 
 const workspaceBytes = (model: PreparedModel): number => {
   const report = model.estimate();
-  assertEquals(report.scenarios.map((scenario) => scenario.name), ["run"]);
+  assertEquals(
+    report.scenarios.map((scenario) => scenario.name),
+    ["run"],
+  );
   return report.scenarios[0].workspaceBytes;
 };
 
@@ -24,32 +27,35 @@ const workspaceBytes = (model: PreparedModel): number => {
  * の 3 段。中間は 8 / 12 / 4 バイトで、**同時に生きるのは高々 2 本**（8+12 = 20）。
  */
 const chainModel = (): PreparedModel =>
-  openGraph({
-    format: "karume-ir",
-    version: 2,
-    requires: { ops: ["matmul"] },
-    symbols: [],
-    inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],
-    outputs: ["h3"],
-    initializers: { w1: {}, w2: {}, w3: {} },
-    values: {
-      w1: { dtype: "f32", shape: [2, 2] },
-      w2: { dtype: "f32", shape: [2, 3] },
-      w3: { dtype: "f32", shape: [3, 1] },
-      h1: { dtype: "f32", shape: [1, 2] },
-      h2: { dtype: "f32", shape: [1, 3] },
-      h3: { dtype: "f32", shape: [1, 1] },
+  openGraph(
+    {
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["matmul"] },
+      symbols: [],
+      inputs: [{ name: "x", dtype: "f32", shape: [1, 2] }],
+      outputs: ["h3"],
+      initializers: { w1: {}, w2: {}, w3: {} },
+      values: {
+        w1: { dtype: "f32", shape: [2, 2] },
+        w2: { dtype: "f32", shape: [2, 3] },
+        w3: { dtype: "f32", shape: [3, 1] },
+        h1: { dtype: "f32", shape: [1, 2] },
+        h2: { dtype: "f32", shape: [1, 3] },
+        h3: { dtype: "f32", shape: [1, 1] },
+      },
+      nodes: [
+        { op: "matmul", ins: ["x", "w1"], outs: ["h1"], attrs: {} },
+        { op: "matmul", ins: ["h1", "w2"], outs: ["h2"], attrs: {} },
+        { op: "matmul", ins: ["h2", "w3"], outs: ["h3"], attrs: {} },
+      ],
     },
-    nodes: [
-      { op: "matmul", ins: ["x", "w1"], outs: ["h1"], attrs: {} },
-      { op: "matmul", ins: ["h1", "w2"], outs: ["h2"], attrs: {} },
-      { op: "matmul", ins: ["h2", "w3"], outs: ["h3"], attrs: {} },
+    [
+      weight("w1", f32Bytes(new Array(4).fill(1))),
+      weight("w2", f32Bytes(new Array(6).fill(1))),
+      weight("w3", f32Bytes(new Array(3).fill(1))),
     ],
-  }, [
-    weight("w1", f32Bytes(new Array(4).fill(1))),
-    weight("w2", f32Bytes(new Array(6).fill(1))),
-    weight("w3", f32Bytes(new Array(3).fill(1))),
-  ]);
+  );
 
 test("中間の総量は領域の総和（読み書きの同居禁止で領域が割れ、配り直しはサイズに依らない）", () => {
   // 8（h1）+ 12（h2）+ 4（h3）。h2 は h1 を読む dispatch が書くので別領域（12 / 8）。h3 は h2 を
@@ -103,7 +109,10 @@ test("渡された maxBufferSize を中間の領域の上限に使う（実行�
   const model = reluChainModel(["h1", "h3"]);
   const scenario = (options: Parameters<PreparedModel["estimate"]>[0]) => {
     const report = model.estimate(options);
-    assertEquals(report.scenarios.map(({ name }) => name), ["run"]);
+    assertEquals(
+      report.scenarios.map(({ name }) => name),
+      ["run"],
+    );
     return report.scenarios[0];
   };
   assertEquals(scenario({ maxStorageBufferBindingSize: 256 }).workspaceBytes, 272);

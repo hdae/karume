@@ -54,12 +54,17 @@ const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value > 0;
 
 const isInputRow = (value: unknown): value is MatteInputRow =>
-  isRecord(value) && typeof value.name === "string" && isPositiveInteger(value.width) &&
+  isRecord(value) &&
+  typeof value.name === "string" &&
+  isPositiveInteger(value.width) &&
   isPositiveInteger(value.height);
 
 const isCaseRow = (value: unknown): value is MatteCaseRow =>
-  isRecord(value) && typeof value.name === "string" && typeof value.input === "string" &&
-  isPositiveInteger(value.outWidth) && isPositiveInteger(value.outHeight);
+  isRecord(value) &&
+  typeof value.name === "string" &&
+  typeof value.input === "string" &&
+  isPositiveInteger(value.outWidth) &&
+  isPositiveInteger(value.outHeight);
 
 /**
  * fixture（入力表・ケース表の JSON + テンソルの safetensors）を読む。形が書き手の doc から外れたら
@@ -68,10 +73,16 @@ const isCaseRow = (value: unknown): value is MatteCaseRow =>
 const readFixture = async (): Promise<MatteFixture> => {
   const raw: unknown = JSON.parse(await readTextFile(FIXTURE));
   if (
-    !isRecord(raw) || !isRecord(raw.source) || !isRecord(raw.source.versions) ||
-    !isRecord(raw.lucida) || typeof raw.lucida.epsilon !== "number" ||
-    typeof raw.tensors !== "string" || !Array.isArray(raw.inputs) ||
-    !raw.inputs.every(isInputRow) || !Array.isArray(raw.cases) || !raw.cases.every(isCaseRow)
+    !isRecord(raw) ||
+    !isRecord(raw.source) ||
+    !isRecord(raw.source.versions) ||
+    !isRecord(raw.lucida) ||
+    typeof raw.lucida.epsilon !== "number" ||
+    typeof raw.tensors !== "string" ||
+    !Array.isArray(raw.inputs) ||
+    !raw.inputs.every(isInputRow) ||
+    !Array.isArray(raw.cases) ||
+    !raw.cases.every(isCaseRow)
   ) {
     throw new Error(
       `${FIXTURE.pathname}: 形が {source.versions, lucida.epsilon, tensors, inputs, cases} でない`,
@@ -98,10 +109,10 @@ const fixture = await readFixture();
 /** 入力の logit（F32 `[height, width]` — 形の食い違いは fail loudly）。 */
 const logitsOf = (row: MatteInputRow): Float32Array<ArrayBuffer> => {
   const key = `${row.name}.logits`;
-  assertEquals([...viewOf(fixture.tensors, key, "matte の fixture").shape], [
-    row.height,
-    row.width,
-  ]);
+  assertEquals(
+    [...viewOf(fixture.tensors, key, "matte の fixture").shape],
+    [row.height, row.width],
+  );
   return floatsOf(fixture.tensors, key, "matte の fixture");
 };
 
@@ -194,7 +205,8 @@ describe("float-bilinear（Lucida の上流の意図）", () => {
         if (actual[index] === expected) continue;
         const boundary = Math.min(actual[index], expected) + 0.5;
         if (
-          Math.abs(actual[index] - expected) === 1 && Math.abs(scaled[index] - boundary) <= epsilon
+          Math.abs(actual[index] - expected) === 1 &&
+          Math.abs(scaled[index] - boundary) <= epsilon
         ) {
           continue;
         }
@@ -250,7 +262,10 @@ describe("手順の共通の約束", () => {
     const step = Float32Array.of(-12, -12, 12, 12);
     const bilinear = matteFromLogits(step, 4, 1, 8, 1, "float-bilinear").data;
     const bicubic = matteFromLogits(step, 4, 1, 8, 1, "u8-pil-bicubic").data;
-    assert([...bilinear].some((value, index) => value !== bicubic[index]), "2 つの手順が同じ値");
+    assert(
+      [...bilinear].some((value, index) => value !== bicubic[index]),
+      "2 つの手順が同じ値",
+    );
   });
 
   it("未知の手順の名前は落とす（Object.prototype のメンバも手順として受けない）", () => {

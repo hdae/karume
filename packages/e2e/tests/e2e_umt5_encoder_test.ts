@@ -67,8 +67,7 @@ if (!DIST_PRESENT) {
   console.warn(
     `[karume] umT5 の golden（${
       goldenUrl(CASES[0].name).pathname
-    } など）が揃っていないため umT5 の encoder の ` +
-      `e2e を SKIP する。生成: ${GENERATE}`,
+    } など）が揃っていないため umT5 の encoder の ` + `e2e を SKIP する。生成: ${GENERATE}`,
   );
 }
 
@@ -143,9 +142,11 @@ test({
             const referenceRatio = referenceRatioOf(golden, name);
             const ratio = ratioOf(diff) / referenceRatio;
             console.log(
-              `[umt5-encoder] ${name}: L ${encoding.length} / ${
-                formatRatio("GPU / f64 参照", diff, referenceRatio)
-              }`,
+              `[umt5-encoder] ${name}: L ${encoding.length} / ${formatRatio(
+                "GPU / f64 参照",
+                diff,
+                referenceRatio,
+              )}`,
             );
             assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
             assertEquals(deviceLost, undefined, "device lost");
@@ -161,7 +162,7 @@ test({
             const reason = new Error("umt5-encoder: テストの中断");
             controller.abort(reason);
             const error = await assertRejects(() =>
-              encoder.encode("a cat", { signal: controller.signal })
+              encoder.encode("a cat", { signal: controller.signal }),
             );
             assertStrictEquals(error, reason);
             const after = await encoder.encode("a cat");

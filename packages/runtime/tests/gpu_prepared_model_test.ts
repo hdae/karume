@@ -168,9 +168,11 @@ test({
       // 同じ device で正常な容器から作り直し、最後まで走ること（x[1,4]·w[4,3] + b）。
       const session = await createSessionFromContainer(gpu, healthy, GRAPH_NAME);
       try {
-        const out = (await session.run({
-          x: { dtype: "f32", shape: [1, 4], data: Float32Array.from([1, 1, 1, 1]) },
-        }))["y"];
+        const out = (
+          await session.run({
+            x: { dtype: "f32", shape: [1, 4], data: Float32Array.from([1, 1, 1, 1]) },
+          })
+        )["y"];
         // w は全要素 0.5 なので行和は 2・b は [1,2,3]。
         assertEquals([...out.data], [3, 4, 5]);
       } finally {

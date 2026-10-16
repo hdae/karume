@@ -498,10 +498,12 @@ const surveyLabels = (root: Record<string, unknown>, model?: string): LabelSurve
   const weightsRecord = isRecord(weightsRaw) ? weightsRaw : {};
   const weights = headKeys(weightsRecord, MAX_WEIGHTS);
   // 一度で組む — 累積オブジェクトを 1 件ごとにスプレッドで複製すると件数の 2 乗になる。
-  const dtypes = Object.fromEntries(weights.keys.flatMap((name) => {
-    const labels = weightsRecord[name];
-    return isRecord(labels) ? [[name, Object.keys(labels)]] : [];
-  }));
+  const dtypes = Object.fromEntries(
+    weights.keys.flatMap((name) => {
+      const labels = weightsRecord[name];
+      return isRecord(labels) ? [[name, Object.keys(labels)]] : [];
+    }),
+  );
   return {
     available: { models: models.keys, quants: quants.keys, dtypes },
     truncated: models.truncated || quants.truncated || weights.truncated,
@@ -758,12 +760,7 @@ const parseParts = (
  * コンテナ 1 本の入口を読む。ここで見るのは**宣言だけで閉じるもの**だけ（ADR 0109 決定 6）—
  * descriptor の長さ / part の件数と天井 / part 0 の長さ / 越境の一様性。
  */
-const parseContainer = (
-  fail: Fail,
-  raw: unknown,
-  where: string,
-  scope: RefScope,
-): ContainerRef => {
+const parseContainer = (fail: Fail, raw: unknown, where: string, scope: RefScope): ContainerRef => {
   if (!isRecord(raw)) throw fail.format(`${where}: 無い / オブジェクトでない`);
   assertAllowedKeys(fail, raw, CONTAINER_KEYS, where);
   const descriptorRaw = raw["descriptor"];
@@ -790,9 +787,10 @@ const parseContainer = (
   const head = crossRefOf(parts[0]);
   for (const [index, ref] of parts.entries()) {
     const cross = crossRefOf(ref);
-    const agrees = head === undefined
-      ? cross === undefined
-      : cross !== undefined && cross.repo === head.repo && cross.revision === head.revision;
+    const agrees =
+      head === undefined
+        ? cross === undefined
+        : cross !== undefined && cross.repo === head.repo && cross.revision === head.revision;
     if (!agrees) {
       throw fail.format(
         `${where}.parts[${index}]: 越境参照は容器単位 — ADR 0109 決定 3` +
@@ -898,11 +896,7 @@ const parseSession = (fail: Fail, raw: unknown, where: string): SessionSpec => {
   };
 };
 
-const parseGpuFeatures = (
-  fail: Fail,
-  raw: unknown,
-  where: string,
-): GpuFeaturesSpec | undefined => {
+const parseGpuFeatures = (fail: Fail, raw: unknown, where: string): GpuFeaturesSpec | undefined => {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw fail.format(`${where}.gpuFeatures: オブジェクトでない`);
   assertAllowedKeys(fail, raw, GPU_FEATURE_KEYS, `${where}.gpuFeatures`);
@@ -948,9 +942,7 @@ const parseQuantWeights = (
   }
   for (const name of Object.keys(weights)) {
     if (!Object.hasOwn(mapping, name)) {
-      throw fail.reference(
-        `${where}.weights: '${name}' の dtype 指定が無い（完全写像が必要）`,
-      );
+      throw fail.reference(`${where}.weights: '${name}' の dtype 指定が無い（完全写像が必要）`);
     }
   }
   return mapping;
@@ -1148,12 +1140,8 @@ const parseModel = (
     (assetName, value) => parseFileRef(fail, value, `${where}.assets.${assetName}`, scope),
     true,
   );
-  const quants = parseMap(
-    fail,
-    raw["quants"],
-    `${where}.quants`,
-    MAX_QUANTS,
-    (quantName, value) => parseQuant(fail, value, `${where}.quants.${quantName}`, weights),
+  const quants = parseMap(fail, raw["quants"], `${where}.quants`, MAX_QUANTS, (quantName, value) =>
+    parseQuant(fail, value, `${where}.quants.${quantName}`, weights),
   );
 
   const defaultQuant = raw["defaultQuant"];
@@ -1229,12 +1217,8 @@ export const parseRepoManifest = (text: string, ownRepo: string | undefined): Ma
   // MUST: path の重複検査は manifest 全域で 1 つの表を共有する — モデル間の共有は「同じ path を
   // 書く」だけで成立する形（ADR 0041 §5）なので、モデルごとに表を分けると矛盾を見逃す。
   const scope: RefScope = { seen: new Map<string, FileRef>(), ownRepo };
-  const models = parseMap(
-    fail,
-    root["models"],
-    "models",
-    MAX_MODELS,
-    (name, value) => parseModel(root, name, value, scope),
+  const models = parseMap(fail, root["models"], "models", MAX_MODELS, (name, value) =>
+    parseModel(root, name, value, scope),
   );
 
   const defaultModel = root["defaultModel"];

@@ -123,8 +123,7 @@ const seriesGraphOf = (opened: OpenedContainer) => {
 };
 
 test({
-  name:
-    "Wan2.2 TI2V DiT 資産: 容器と全ケース（S = 192・T2V 5 本 + I2V 5 本）の golden が揃っている",
+  name: "Wan2.2 TI2V DiT 資産: 容器と全ケース（S = 192・T2V 5 本 + I2V 5 本）の golden が揃っている",
   // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
   ignore: !ANY_PRESENT,
   fn: () => {
@@ -138,8 +137,7 @@ test({
 });
 
 test({
-  name:
-    "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
+  name: "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
   ignore: !MODEL_PRESENT,
   fn: async () => {
     const graph = seriesGraphOf(await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR)));
@@ -152,16 +150,15 @@ test({
     const count = (op: string): number => declaration.nodes.filter((node) => node.op === op).length;
     assertEquals(count("linear"), EXPECTED_LINEAR_NODES, "linear のノード（dispatch）の本数");
     assertEquals(count("where"), EXPECTED_WHERE_NODES, "where のノードの本数");
-    const i8 = [...graph.supplies.values()].filter(({ encoding }) =>
-      codecLayout(encoding.codec) === "i8"
+    const i8 = [...graph.supplies.values()].filter(
+      ({ encoding }) => codecLayout(encoding.codec) === "i8",
     );
     assertEquals(i8.length, EXPECTED_I8_WEIGHTS, "i8 の重みの本数");
   },
 });
 
 test({
-  name:
-    "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
+  name: "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
   ignore: !MODEL_PRESENT,
   fn: async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_DIR));
@@ -211,12 +208,10 @@ const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
 
     const { timestep, conditionTimestep: condition } = golden;
     assertEquals(condition, form === "i2v" ? 0 : timestep, `${name}: 条件側の timestep`);
-    for (
-      const [key, value] of [
-        ["input.timesteps_proj", timestep],
-        ["input.timesteps_proj_condition", condition],
-      ] as const
-    ) {
+    for (const [key, value] of [
+      ["input.timesteps_proj", timestep],
+      ["input.timesteps_proj_condition", condition],
+    ] as const) {
       const expected = floatsOf(io, key, name);
       const diff = maxAbsDiff(timestepsProj(value, expected.length), expected);
       assert(diff <= TIMESTEPS_PROJ_ATOL, `${name}: ${key} の差 ${diff}`);
@@ -240,15 +235,13 @@ const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
 };
 
 test({
-  name:
-    "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
+  name: "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
   ignore: !ASSETS_AVAILABLE,
   fn: () => assertHostInputs(CASES),
 });
 
 test({
-  name:
-    "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
+  name: "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
   // 1 本も無ければ「まだ足していない」として SKIP。1 本でもあれば欠けは FAIL（足す途中・中断）。
   ignore: !FULL_ANY_PRESENT,
   fn: () => {

@@ -5,9 +5,9 @@ export class I2Error extends Error {
 
 /** 論理形 [rows, width]。各行を u32 整列させ、末尾の暗黙パディングを禁止する。 */
 export const isI2Shape = (shape: readonly (number | string)[]): boolean =>
-  shape.length === 2 && shape.every((dim) =>
-    typeof dim === "number" && Number.isSafeInteger(dim) && dim > 0
-  ) && Number(shape[1]) % 16 === 0;
+  shape.length === 2 &&
+  shape.every((dim) => typeof dim === "number" && Number.isSafeInteger(dim) && dim > 0) &&
+  Number(shape[1]) % 16 === 0;
 
 /** 下位 2bit から順に u=q+2。scale の乗算ごとに f32 へ丸める。 */
 export const decodeI2 = (
@@ -27,7 +27,9 @@ export const decodeI2 = (
     );
   }
   if (
-    scaleShape.length !== 2 || scaleShape[0] !== rows || scaleShape[1] !== 1 ||
+    scaleShape.length !== 2 ||
+    scaleShape[0] !== rows ||
+    scaleShape[1] !== 1 ||
     scale.length !== rows
   ) {
     throw new I2Error(`i2 の scale [${scaleShape.join(",")}] は [${rows},1] が必要`);

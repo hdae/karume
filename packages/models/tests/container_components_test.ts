@@ -35,9 +35,7 @@ import { loadManifest, resolveSelection } from "@karume/hub";
 /** 差し替え先の疑似リポ。 */
 const OTHER_REPO = "karume-test/replacement";
 
-const modelsOf = (
-  entries: Readonly<Record<string, ServedContainer>>,
-): unknown => ({
+const modelsOf = (entries: Readonly<Record<string, ServedContainer>>): unknown => ({
   test: {
     pipeline: "test/1",
     weights: Object.fromEntries(
@@ -59,9 +57,10 @@ const modelsOf = (
  * 2 リポを立てる。元リポは `front` / `voice` の 2 部品、差し替え先は `voice` 1 本だけ
  * （`sameGraph` が偽なら**別のグラフ**で書く = 記述の sha256 が動く）。
  */
-const prepareSeats = async (
-  options: { readonly sameGraph: boolean; readonly replacementStem?: string },
-) => {
+const prepareSeats = async (options: {
+  readonly sameGraph: boolean;
+  readonly replacementStem?: string;
+}) => {
   const front = await serveContainer("front/model.f32", linearComponent("front"));
   const voice = await serveContainer("voice/model.f32", linearComponent("voice", { w: 0.5 }));
   // 差し替え先: 同じグラフ宣言 + 別の重み値（グラフ記述はバイト同一で sha256 も一致する）。
@@ -69,8 +68,8 @@ const prepareSeats = async (
     options.replacementStem ?? "other/voice.f32",
     options.sameGraph
       ? linearComponent("voice", { w: 1.5 })
-      // `op` が違えば `requires.ops` とノード列が動く = グラフ記述の sha256 も動く。
-      : linearComponent("voice", { op: "add" }),
+      : // `op` が違えば `requires.ops` とノード列が動く = グラフ記述の sha256 も動く。
+        linearComponent("voice", { op: "add" }),
   );
   const mock = serveRepos([
     { repo: REPO, models: modelsOf({ front, voice }), files: [...front.files, ...voice.files] },
@@ -202,7 +201,8 @@ test("components: 差し替え先の part が元リポの別部品と同じ path
   const rig = await prepareSeats({ sameGraph: true, replacementStem: "front/model.f32" });
   const nonEmpty = (parts: readonly { path: string; size: number }[]) =>
     parts.filter((part) => part.size > 0);
-  const shared = nonEmpty(rig.parts.front).map((part) => part.path)
+  const shared = nonEmpty(rig.parts.front)
+    .map((part) => part.path)
     .filter((path) => nonEmpty(rig.parts.replacement).some((part) => part.path === path));
   assertEquals(shared.length > 0, true, "同じ path を持つ 2 本で観測していない");
 
@@ -220,8 +220,10 @@ test("components: 差し替え先の part が元リポの別部品と同じ path
     },
   );
 
-  const total = [...nonEmpty(rig.parts.front), ...nonEmpty(rig.parts.replacement)]
-    .reduce((sum, part) => sum + part.size, 0);
+  const total = [...nonEmpty(rig.parts.front), ...nonEmpty(rig.parts.replacement)].reduce(
+    (sum, part) => sum + part.size,
+    0,
+  );
   assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
   assertEquals(events[events.length - 1].loaded, total);
   for (const path of shared) {

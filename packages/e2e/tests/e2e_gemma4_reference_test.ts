@@ -21,11 +21,17 @@ import { openReferences, registerReferenceGate } from "../../runtime/tests/helpe
 import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
-import { mirrorSeats, seatCaseId, settleSeatReference } from "../../models/tests/helpers/gemma-reference.ts";
+import {
+  mirrorSeats,
+  seatCaseId,
+  settleSeatReference,
+} from "../../models/tests/helpers/gemma-reference.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 /** token id 列の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。 */
-const references = openReferences(new URL("../../models/tests/fixtures/references/gemma4.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/gemma4.json", import.meta.url),
+);
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_gemma4/` — 消して安全）。 */
 const results = openResults("gemma4");
 
@@ -44,7 +50,8 @@ const SEATS = mirrorSeats(MIRROR_DIR);
 for (const seat of SEATS) {
   const id = seatCaseId(seat);
   test({
-    name: `gemma4 ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
+    name:
+      `gemma4 ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
       "固定プロンプトの greedy の token id 列がこの機の参照値と一致する（実 GPU）",
     ignore: !RUNNABLE || references.lacksReference(id),
     fn: () =>

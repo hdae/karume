@@ -111,8 +111,10 @@ export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
   const single = new Map<number, string>();
   for (const entry of asArray(obj["single"], `${label}.single`)) {
     if (
-      !Array.isArray(entry) || entry.length !== 2 ||
-      typeof entry[0] !== "number" || typeof entry[1] !== "string"
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "string"
     ) {
       throw new Error(`${label}.single: [cp, 文字列] でない`);
     }
@@ -122,8 +124,11 @@ export const parseSpmTables = (raw: unknown, label: string): SpmTables => {
   const multi = new Map<number, string>();
   for (const entry of asArray(obj["multi"], `${label}.multi`)) {
     if (
-      !Array.isArray(entry) || entry.length !== 3 || typeof entry[0] !== "number" ||
-      typeof entry[1] !== "number" || typeof entry[2] !== "string"
+      !Array.isArray(entry) ||
+      entry.length !== 3 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "number" ||
+      typeof entry[2] !== "string"
     ) {
       throw new Error(`${label}.multi: [cp, cp, 文字列] でない`);
     }

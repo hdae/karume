@@ -5,11 +5,11 @@ packages:
 catalogMode: prefer
 
 catalog:
-  '@hdae/fetch-cache': jsr:^0.8.0
-  '@hdae/yomi': jsr:^0.4.2
-  '@std/assert': jsr:^1.0.19
+  "@hdae/fetch-cache": jsr:^0.8.0
+  "@hdae/yomi": jsr:^0.4.2
+  "@std/assert": jsr:^1.0.19
   "@types/node": ^24
-  '@webgpu/types': ^0.1.74
+  "@webgpu/types": ^0.1.74
   oxc-parser: ^0.153.0
   typescript: ^7.0.2
   vite: npm:@voidzero-dev/vite-plus-core@1.2.0

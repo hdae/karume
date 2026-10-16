@@ -54,7 +54,8 @@ const GREEDY_STEPS = 16;
  * 早く EOS を引かない開放的な入力（parity が 1〜2 token で閉じると decode 側が空振りする）。
  * 前置きの長い問いにしてあるのは、prefill をバケット 1 本ではなく複数行で踏ませるためである。
  */
-const PROMPT = "List three things that make the ocean important to the planet, with one " +
+const PROMPT =
+  "List three things that make the ocean important to the planet, with one " +
   "short sentence for each.";
 
 const isFile = (url: URL): boolean => {
@@ -68,7 +69,8 @@ const isFile = (url: URL): boolean => {
 
 // PLE は容器の資産なので、索引の有無は容器の有無と同じ（欠けていれば `openSeriesPle` が
 // 資産の突合で fail loudly する）。
-const PRODUCT_PRESENT = isFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)) &&
+const PRODUCT_PRESENT =
+  isFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT)) &&
   modelPresent(new URL(SERIES_MODEL_FILE, PRODUCT_ROOT));
 const QAT_PRESENT = mirrorAvailable(QAT_ROOT);
 const GEMMA_PRESENT = mirrorAvailable(GEMMA_ROOT);
@@ -111,9 +113,7 @@ test({
   ignore: !PRODUCT_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
     const { index, openBlock } = await openSeriesPle(PRODUCT_ROOT);
-    const probe = parseSafetensors(
-      (await readFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT))).buffer,
-    );
+    const probe = parseSafetensors((await readFile(new URL(PLE_PROBE_FILE, PRODUCT_ROOT))).buffer);
     const tokenView = probe.tensors.get(PROBE_TOKENS_KEY);
     const inputView = probe.tensors.get(PROBE_INPUTS_KEY);
     assert(tokenView !== undefined && inputView !== undefined, "probe のテンソル 2 本");
@@ -153,7 +153,7 @@ test({
         // ① torch の 35 表経路との厳密一致。
         assertBitsEqual(actual, golden, "GPU 内 gather と golden");
         // ② ホスト経路（ADR 0085 決定 4 の正本）との交差 parity。
-        const reference = await host.gather([...tokens]) as Tensor & { data: Float32Array };
+        const reference = (await host.gather([...tokens])) as Tensor & { data: Float32Array };
         assertBitsEqual(actual, reference.data, "GPU 内 gather とホスト gather");
       } finally {
         await resident.dispose();
@@ -199,7 +199,7 @@ for (const model of ["e2b", "e4b"] as const) {
         "host 経路が刻みぶん生成していない（parity が空振りする）",
       );
       const actual = await generateIds(() =>
-        Gemma4QatPipeline.fromPretrained(source, { model, pleResidency: "gpu" })
+        Gemma4QatPipeline.fromPretrained(source, { model, pleResidency: "gpu" }),
       );
       assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
     },
@@ -215,7 +215,8 @@ test({
     const { index } = await openGemma4Ple(GEMMA_ROOT);
     const bytes = gemma4PleGpuBytes(index);
     const gpu = await acquireGpu();
-    const fits = gpu.limits.maxStorageBufferBindingSize >= bytes.values &&
+    const fits =
+      gpu.limits.maxStorageBufferBindingSize >= bytes.values &&
       gpu.limits.maxBufferSize >= bytes.values;
     gpu.destroy();
     if (!fits) {
@@ -234,7 +235,7 @@ test({
       "host 経路が刻みぶん生成していない（parity が空振りする）",
     );
     const actual = await generateIds(() =>
-      Gemma4Pipeline.fromPretrained(source, { pleResidency: "gpu" })
+      Gemma4Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
     );
     assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
   },
@@ -244,8 +245,7 @@ test({
 // 同じ batch に積むので、GPU 常駐席が余分に払うフェンスは prefill の chunk ぶんだけになる
 // （ADR 0054 追記〈グラフ出力の一括読み戻し〉— 席の残件 ①）。
 test({
-  name:
-    "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
+  name: "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
   ignore: !QAT_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
     const source = nodeDirectory(QAT_ROOT);

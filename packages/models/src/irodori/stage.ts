@@ -37,9 +37,11 @@ const NO_EVENTS: EmitEvent = () => Promise.resolve();
 export const emitter = (
   onEvent: ((event: IrodoriGenerateEvent) => void | Promise<void>) | undefined,
 ): EmitEvent =>
-  onEvent === undefined ? NO_EVENTS : async (event: IrodoriGenerateEvent) => {
-    await onEvent(event);
-  };
+  onEvent === undefined
+    ? NO_EVENTS
+    : async (event: IrodoriGenerateEvent) => {
+        await onEvent(event);
+      };
 
 export const asF32 = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
   if (tensor.dtype !== "f32") throw new Error(`${where}: f32 でない（${tensor.dtype}）`);

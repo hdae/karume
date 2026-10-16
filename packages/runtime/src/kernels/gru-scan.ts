@@ -85,9 +85,9 @@ const canonicalizeDirection = (direction: GruScanDirection): GruScanDirection =>
  * v2: 候補ゲートの tanh を TANH_STABLE_WGSL の共有へ差し替え（Metal fast-math の沈黙 NaN 根治）。
  */
 export const gruScanKey = (direction: GruScanDirection): string =>
-  `gru_scan:v2:f32:${
-    canonicalizeDirection(direction)
-  }:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`;
+  `gru_scan:v2:f32:${canonicalizeDirection(
+    direction,
+  )}:wg${GRU_SCAN_WORKGROUP_SIZE}:h${GRU_SCAN_MAX_HIDDEN}`;
 
 export const gruScanWgsl = (direction: GruScanDirection): string => {
   const canonical = canonicalizeDirection(direction);

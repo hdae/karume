@@ -270,7 +270,11 @@ const loadIo = async (caseName: string): Promise<IoGolden> => {
  */
 const assertDecodeForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
-  assertEquals(graph.inputs.map((spec) => spec.name), [INPUT_IDS, POSITION_IDS], "グラフ入力");
+  assertEquals(
+    graph.inputs.map((spec) => spec.name),
+    [INPUT_IDS, POSITION_IDS],
+    "グラフ入力",
+  );
   assertEquals(graph.outputs.length, 2, "graph.outputs の本数（logits / token の 2 本）");
 
   // 出力 1 の供給元が argmax（ADR 0068 決定 4 の decode 出口）。`generateGreedy` はこの出力を
@@ -620,8 +624,8 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
   // ③ 非 states の attention 系が 0 本（融合 attention の別族へ落ちていない）。
   assertEquals(
     entries
-      .filter((entry) =>
-        entry.key.startsWith("attention") && !entry.key.startsWith("attention_state")
+      .filter(
+        (entry) => entry.key.startsWith("attention") && !entry.key.startsWith("attention_state"),
       )
       .map((entry) => entry.key),
     [],

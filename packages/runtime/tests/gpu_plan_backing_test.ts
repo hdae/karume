@@ -75,7 +75,7 @@ const openedModel = () =>
 const input = (rows: number, phase = 0): Tensor => ({
   dtype: "f32",
   shape: [rows, 3],
-  data: Float32Array.from({ length: rows * 3 }, (_, i) => ((i + phase * 3) % 9 - 4) * 0.5),
+  data: Float32Array.from({ length: rows * 3 }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
 /** 出力のビット列。値の一致は「バイト同値」で見る（丸めの取り違えを許容しない）。 */
@@ -300,9 +300,9 @@ test({
       const wide = await backingBytes(gpu, 9);
       assert(
         accountedBytes([wide]) > accountedBytes([narrow]),
-        `T=9 の backing が T=4 より大きくない（${JSON.stringify(narrow)} / ${
-          JSON.stringify(wide)
-        }）`,
+        `T=9 の backing が T=4 より大きくない（${JSON.stringify(narrow)} / ${JSON.stringify(
+          wide,
+        )}）`,
       );
 
       // 既定予算（256 MiB）— この 2 形はどちらも数十バイトなので両方が収まる。
@@ -509,7 +509,7 @@ const TEMP_GRAPH: DeclarationJson = {
 
 const ROWS = 6;
 const tempInputs = (phase: number) => ({
-  q: fill([1, 1, ROWS, 4], (i) => ((i + phase) % 7 - 3) * 0.25),
+  q: fill([1, 1, ROWS, 4], (i) => (((i + phase) % 7) - 3) * 0.25),
   k: fill([1, 1, 4, 4], (i) => ((i % 5) - 2) * 0.5),
   v: fill([1, 1, 4, 4], (i) => ((i % 3) - 1) * 0.75),
 });
@@ -594,7 +594,9 @@ type BufferRecord = { readonly destroyCounts: number[] };
  * MUST: 返す実体は**本物の GPUBuffer のまま**にする（`destroy` だけを包む）。差し替えると
  * bind group 生成に渡す実体がテスト側の作り物になり、門が実装を検査しなくなる。
  */
-const injectStorageFault = (device: GPUDevice): {
+const injectStorageFault = (
+  device: GPUDevice,
+): {
   /** 以後の storage 確保を新しい記録へ載せる（`failAt` 本目で同期 throw）。 */
   readonly record: (failAt?: number) => BufferRecord;
   readonly restore: () => void;
@@ -691,11 +693,7 @@ const assertPartialBackingFault = async (
     await session.run({ x: wide }, { T: 9 });
 
     const partial = fault.record(2);
-    await assertRejects(
-      () => session.run({ x: wide }, { T: 9 }),
-      Error,
-      "注入: storage 2 本目",
-    );
+    await assertRejects(() => session.run({ x: wide }, { T: 9 }), Error, "注入: storage 2 本目");
 
     assertEquals(partial.destroyCounts, [1], "確保済みの 1 本がちょうど 1 回だけ返る");
     assertEquals(
@@ -734,15 +732,13 @@ const assertPartialBackingFault = async (
 };
 
 test({
-  name:
-    "backing 確保の途中失敗は確保済みだけを 1 回返し、旧 backing は保持したまま（既定予算・故障注入・実 GPU）",
+  name: "backing 確保の途中失敗は確保済みだけを 1 回返し、旧 backing は保持したまま（既定予算・故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertPartialBackingFault(undefined, { retainsOld: true }),
 });
 
 test({
-  name:
-    "予算 0 では確保の前に旧 backing が退役し、確保済みと合わせてちょうど 1 回ずつ返る（故障注入・実 GPU）",
+  name: "予算 0 では確保の前に旧 backing が退役し、確保済みと合わせてちょうど 1 回ずつ返る（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertPartialBackingFault(0, { retainsOld: false }),
 });
@@ -803,12 +799,12 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
       const smallRecord = fault.record();
       await session.run({ x: input(2) });
 
-      const kept = touched === 4
-        ? { record: narrowRecord, measured: narrow, rows: 4 }
-        : { record: wideRecord, measured: wide, rows: 9 };
-      const evicted = touched === 4
-        ? { record: wideRecord, rows: 9 }
-        : { record: narrowRecord, rows: 4 };
+      const kept =
+        touched === 4
+          ? { record: narrowRecord, measured: narrow, rows: 4 }
+          : { record: wideRecord, measured: wide, rows: 9 };
+      const evicted =
+        touched === 4 ? { record: wideRecord, rows: 9 } : { record: narrowRecord, rows: 4 };
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([kept.measured, small], 3),
@@ -998,40 +994,44 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
 // batch。同じ区間の別の enqueue が作った backing は有効なので、決着で退役させない — 退役させると
 // 無関係な入力の誤りのたびに backing を作り直すことになる（ADR 0095 決定 2 が避けている形）。
 describe("ホスト側の失敗だけで batch が失敗に決着したとき（実 GPU）", () => {
-  it("同じ区間の別の enqueue が新規構築した backing は保持したまま残す", {
-    ignore: !GPU_AVAILABLE,
-  }, async () => {
-    const gpu = await acquireGpu();
-    const session = await createSessionFromContainer(gpu, await openedModel(), "model");
-    const storage = injectStorageFault(gpu.device);
-    try {
-      storage.record();
-      await session.run({ x: input(4, 0) });
+  it(
+    "同じ区間の別の enqueue が新規構築した backing は保持したまま残す",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      const session = await createSessionFromContainer(gpu, await openedModel(), "model");
+      const storage = injectStorageFault(gpu.device);
+      try {
+        storage.record();
+        await session.run({ x: input(4, 0) });
 
-      const built = storage.record();
-      const batch = await gpu.beginBatch();
-      await session.enqueue({ x: input(4, 0) }, { batch });
-      // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる（backing の構築より前）。
-      const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
-      await assertRejects(() => session.enqueue({ x: wrongCount }, { batch }), ExecutionError);
-      await assertRejects(() => batch.finish(), ExecutionError);
+        const built = storage.record();
+        const batch = await gpu.beginBatch();
+        await session.enqueue({ x: input(4, 0) }, { batch });
+        // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる（backing の構築より前）。
+        const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
+        await assertRejects(() => session.enqueue({ x: wrongCount }, { batch }), ExecutionError);
+        await assertRejects(() => batch.finish(), ExecutionError);
 
-      const stats = session.diagnostics().planBacking;
-      assertEquals(
-        [stats.retainedCount, stats.buildCount],
-        [1, 1],
-        "ホスト側の失敗だけの決着で、別の enqueue が作った backing を退役させている",
-      );
-      assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
-      assertEquals(
-        built.destroyCounts,
-        Array(built.destroyCounts.length).fill(0),
-        "保持中の backing の実体を破棄している",
-      );
-    } finally {
-      storage.restore();
-      await session.dispose();
-      gpu.destroy();
-    }
-  });
+        const stats = session.diagnostics().planBacking;
+        assertEquals(
+          [stats.retainedCount, stats.buildCount],
+          [1, 1],
+          "ホスト側の失敗だけの決着で、別の enqueue が作った backing を退役させている",
+        );
+        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assertEquals(
+          built.destroyCounts,
+          Array(built.destroyCounts.length).fill(0),
+          "保持中の backing の実体を破棄している",
+        );
+      } finally {
+        storage.restore();
+        await session.dispose();
+        gpu.destroy();
+      }
+    },
+  );
 });

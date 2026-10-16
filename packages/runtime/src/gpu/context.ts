@@ -427,7 +427,10 @@ export class GpuContext {
   /** {@link GpuContextInternals.withScopeLock} の実体（面は `RUNTIME_INTERNAL` の下だけ）。 */
   #withScopeLock<T>(body: () => Promise<T>): Promise<T> {
     const result = this.#scopeChain.then(body);
-    this.#scopeChain = result.then(() => undefined, () => undefined);
+    this.#scopeChain = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   }
 
@@ -1240,7 +1243,8 @@ export class BatchScope {
       let totalBytes = 0;
       for (const [name, resident] of entries) {
         if (
-          !(resident instanceof ResidentTensor) || resident[RUNTIME_INTERNAL].owner !== this.#gpu
+          !(resident instanceof ResidentTensor) ||
+          resident[RUNTIME_INTERNAL].owner !== this.#gpu
         ) {
           throw new BatchScopeError(
             `finishAndRead '${name}': 同じ GpuContext の ResidentTensor が必要`,
@@ -1262,9 +1266,7 @@ export class BatchScope {
   /** `finishAndRead` の受け口（未終了・settle 中でない batch へ 1 回だけ）。 */
   #assertReadbackAcceptable(): void {
     if (this.#finished || this.#settling) {
-      throw new BatchScopeError(
-        "finishAndRead は未終了・settle中でない batch に1回だけ指定できる",
-      );
+      throw new BatchScopeError("finishAndRead は未終了・settle中でない batch に1回だけ指定できる");
     }
   }
 
@@ -1399,7 +1401,9 @@ export class BatchScope {
         for (const finalizer of this.#finalizers) {
           try {
             finalizer.fail(failure.cause, origin);
-          } catch { /* 元の失敗を保持し、残る使用予約も返す。 */ }
+          } catch {
+            /* 元の失敗を保持し、残る使用予約も返す。 */
+          }
         }
       };
       if (failure !== undefined) notifyFailure();

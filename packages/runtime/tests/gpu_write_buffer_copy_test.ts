@@ -139,9 +139,8 @@ describe("writeBuffer は呼んだ時点でバイト列を写す", { ignore: !GP
       assert(expected.every(Number.isFinite), "基準の出力に非有限値がある");
 
       const poisoned = supply();
-      const { result: session, writes } = await withPoisonedWrites(
-        gpu.device.queue,
-        () => createSessionFromContainer(gpu, openMemoryContainer(poisoned.input), "main"),
+      const { result: session, writes } = await withPoisonedWrites(gpu.device.queue, () =>
+        createSessionFromContainer(gpu, openMemoryContainer(poisoned.input), "main"),
       );
       try {
         // 毒は writeBuffer に渡った器そのもの（ここでは供給の器）に入っている。

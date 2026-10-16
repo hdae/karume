@@ -40,7 +40,8 @@ const input = (values = [-1, -4, -4, -2]): Record<string, Tensor> => ({
   x: { dtype: "f32", shape: [1, 1, 4], data: Float32Array.from(values) },
 });
 test("greedy出力: 通常runとbatchが別contextで同時発行されても直列化される", async () => {
-  const gpu = await acquireGpu(), target = await targetSession(gpu);
+  const gpu = await acquireGpu(),
+    target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4);
   const a = await h.session.createGenerationContext({ chunkLength: 1 }),
     b = await h.session.createGenerationContext({ chunkLength: 1 });
@@ -66,10 +67,12 @@ test("greedy出力: 通常runとbatchが別contextで同時発行されても直
   }
 });
 test("greedy出力: 準備失敗で部分確保を返し、次の発行で再試行する", async () => {
-  const gpu = await acquireGpu(), target = await targetSession(gpu);
+  const gpu = await acquireGpu(),
+    target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4),
     context = await h.session.createGenerationContext({ chunkLength: 1 });
-  const create = gpu.createResident.bind(gpu), made: ResidentTensor[] = [];
+  const create = gpu.createResident.bind(gpu),
+    made: ResidentTensor[] = [];
   let calls = 0;
   gpu.createResident = async (...args) => {
     if (++calls === 2) throw Error("resident fault");
@@ -97,17 +100,20 @@ test("greedy出力: 準備失敗で部分確保を返し、次の発行で再試
   }
 });
 test("greedy出力: 未awaitの生成後のdisposeは完了を待ち全residentを返す", async () => {
-  const gpu = await acquireGpu(), target = await targetSession(gpu);
+  const gpu = await acquireGpu(),
+    target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4),
     context = await h.session.createGenerationContext({ chunkLength: 1 });
-  const create = gpu.createResident.bind(gpu), made: ResidentTensor[] = [];
+  const create = gpu.createResident.bind(gpu),
+    made: ResidentTensor[] = [];
   gpu.createResident = async (...args) => {
     const r = await create(...args);
     made.push(r);
     return r;
   };
   try {
-    const pending = h.greedy(input(), { context, queryLength: 1 }), disposed = h.dispose();
+    const pending = h.greedy(input(), { context, queryLength: 1 }),
+      disposed = h.dispose();
     assertThrows(() => h.greedy(input(), { context, queryLength: 1 }));
     assertEquals(await pending, { value: 4, index: 1 });
     await disposed;

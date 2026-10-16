@@ -85,11 +85,7 @@ test("sampler: NaN は最大値でなくても落ちる（比較が全部 false 
   // 一度 NaN になった後の候補を全部弾き、③softmax の分母が NaN になる。どれも例外を出さない。
   const poisoned = f32([1, NaN, 3, 2]);
   assertThrows(() => createSampler().next(poisoned, []), Error, "NaN");
-  assertThrows(
-    () => samplerDistribution(poisoned, { temperature: 1, topK: 2 }, []),
-    Error,
-    "NaN",
-  );
+  assertThrows(() => samplerDistribution(poisoned, { temperature: 1, topK: 2 }, []), Error, "NaN");
   assertThrows(
     () => samplerDistribution(poisoned, { temperature: 1, topP: 0.9 }, []),
     Error,
@@ -98,7 +94,11 @@ test("sampler: NaN は最大値でなくても落ちる（比較が全部 false 
 });
 
 test("sampler: greedy は範囲内の最初の NaN を最大値より優先して拒否する", () => {
-  for (const values of [[NaN, 3, 2], [Infinity, 3, NaN], [NaN, NaN, Infinity]]) {
+  for (const values of [
+    [NaN, 3, 2],
+    [Infinity, 3, NaN],
+    [NaN, NaN, Infinity],
+  ]) {
     // 外側の NaN は view の対象外。最大値を見つけても末尾まで検査する。
     const backing = f32([NaN, ...values, NaN]);
     const logits = backing.subarray(1, backing.length - 1);
@@ -115,7 +115,11 @@ test("sampler: greedy は範囲内の最初の NaN を最大値より優先し�
 
 test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", () => {
   for (const topK of [1, 2, 4, 8]) {
-    for (const values of [[NaN, 3, 2, 1], [3, NaN, 2, NaN], [Infinity, 3, 2, NaN]]) {
+    for (const values of [
+      [NaN, 3, 2, 1],
+      [3, NaN, 2, NaN],
+      [Infinity, 3, 2, NaN],
+    ]) {
       const backing = f32([NaN, ...values, NaN]);
       const logits = backing.subarray(1, backing.length - 1);
       const first = values.findIndex(Number.isNaN);
@@ -132,11 +136,15 @@ test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", (
   // 加工で生じた NaN も、上位候補から外れる位置にあっても拒否する。
   assertThrows(
     () =>
-      samplerDistribution(f32([3, 2, Infinity]), {
-        temperature: 1,
-        topK: 1,
-        logitBias: [[2, -Infinity]],
-      }, []),
+      samplerDistribution(
+        f32([3, 2, Infinity]),
+        {
+          temperature: 1,
+          topK: 1,
+          logitBias: [[2, -Infinity]],
+        },
+        [],
+      ),
     Error,
     "logits[2] が NaN",
   );
@@ -149,11 +157,7 @@ test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる
   assertThrows(() => createSampler().next(f32([NaN, NaN, NaN]), []), Error, "非有限");
   assertThrows(() => createSampler().next(f32([-Infinity, -Infinity]), []), Error, "非有限");
   // 温度 > 0 側も同じ段で落ちる（softmax が全 0 になって抽選が壊れる前）。
-  assertThrows(
-    () => createSampler({ temperature: 1 }).next(f32([NaN, NaN]), []),
-    Error,
-    "非有限",
-  );
+  assertThrows(() => createSampler({ temperature: 1 }).next(f32([NaN, NaN]), []), Error, "非有限");
 });
 
 // ---------------------------------------------------------------------------
@@ -353,18 +357,10 @@ test("sampler: 履歴の token id が語彙の外なら fail loudly", () => {
 
 test("sampler: logit bias は温度の前に加算される", () => {
   const logits = f32([2, 1, 0]);
-  const distribution = samplerDistribution(
-    logits,
-    { temperature: 2, logitBias: [[2, 6]] },
-    [],
-  );
+  const distribution = samplerDistribution(logits, { temperature: 2, logitBias: [[2, 6]] }, []);
   // 加算 → 除算の順（[2,1,6] / 2 = [1,0.5,3]）。温度の後に足す実装なら [1,0.5,3] にならない。
   assertProbabilities(distribution.probabilities, softmax([1, 0.5, 3]), "bias then temperature");
-  assertEquals(
-    createSampler({ logitBias: [[2, 6]] }).next(logits, []),
-    2,
-    "温度 0 でも効く",
-  );
+  assertEquals(createSampler({ logitBias: [[2, 6]] }).next(logits, []), 2, "温度 0 でも効く");
 });
 
 test("sampler: logit bias の -Infinity はその token を候補から外す", () => {
@@ -377,7 +373,10 @@ test("sampler: logit bias の -Infinity はその token を候補から外す", 
 });
 
 test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さない）", () => {
-  const banned: SamplerSpec["logitBias"] = [[0, -Infinity], [1, -Infinity]];
+  const banned: SamplerSpec["logitBias"] = [
+    [0, -Infinity],
+    [1, -Infinity],
+  ];
   // 加工前の logits の最大値は有限なので、候補を消したのは呼び手の `logitBias` で確定する
   // = 入力起因（ADR 0107 決定 2 — 打つ手は「禁止指定を外す」）。温度 0 / 温度ありの 2 経路とも。
   assertThrows(
@@ -409,10 +408,14 @@ test("sampler: 加工前から非有限な logits は入力起因ではない（
   }
   // 禁止指定が付いていても、加工前が非有限なら出所はモデル出力側のまま。
   const withBias = assertThrows(() =>
-    samplerDistribution(f32([-Infinity, -Infinity]), {
-      temperature: 1,
-      logitBias: [[0, -Infinity]],
-    }, [])
+    samplerDistribution(
+      f32([-Infinity, -Infinity]),
+      {
+        temperature: 1,
+        logitBias: [[0, -Infinity]],
+      },
+      [],
+    ),
   );
   assert(!(withBias instanceof ModelInputError));
 });
@@ -429,12 +432,29 @@ test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（�
   // `Map` なら黙って後勝ちで畳んでいた形（`[[2,6],[2,-1]]`）— 配列では「2 つ書いた bias の
   // 片方だけが効く」ことになるので落とす。値が同じでも落とす（畳み方の疑義は同じ）。
   assertThrows(
-    () => createSampler({ logitBias: [[2, 6], [2, -1]] }),
+    () =>
+      createSampler({
+        logitBias: [
+          [2, 6],
+          [2, -1],
+        ],
+      }),
     ModelInputError,
     "token 2 が 2 度出る",
   );
   assertThrows(
-    () => samplerDistribution(f32([1, 2, 3]), { temperature: 1, logitBias: [[0, 1], [0, 1]] }, []),
+    () =>
+      samplerDistribution(
+        f32([1, 2, 3]),
+        {
+          temperature: 1,
+          logitBias: [
+            [0, 1],
+            [0, 1],
+          ],
+        },
+        [],
+      ),
     ModelInputError,
     "token 0 が 2 度出る",
   );
@@ -474,7 +494,12 @@ test("sampler: 受理できない指定は構築時に落ちる", () => {
     { logitBias: [[-1, 1]] },
     { logitBias: [[0, Number.POSITIVE_INFINITY]] },
     { logitBias: [[0, Number.NaN]] },
-    { logitBias: [[0, 1], [0, 2]] },
+    {
+      logitBias: [
+        [0, 1],
+        [0, 2],
+      ],
+    },
   ];
   for (const spec of rejected) {
     assertThrows(
@@ -559,7 +584,12 @@ test("sampler: 型を外した logitBias は加算せずに入力の誤りで落
   });
 
   await t.step("-Infinity（禁止）と有限数は従来どおり受ける", () => {
-    createSampler({ logitBias: [[0, Number.NEGATIVE_INFINITY], [1, -2.5]] });
+    createSampler({
+      logitBias: [
+        [0, Number.NEGATIVE_INFINITY],
+        [1, -2.5],
+      ],
+    });
   });
 });
 
@@ -585,11 +615,7 @@ test("sampler: 失敗の分類は呼び手の分岐先で決まる", async (t) =
 
   await t.step("logits の NaN は入力起因ではない（呼び手が要求を直しても直らない）", () => {
     // 重みか配線の破れで、HTTP サーバーなら 500。同じ型で捕まると「入力を直せ」と返す形になる。
-    const error = assertThrows(
-      () => createSampler().next(f32([Number.NaN, 1]), []),
-      Error,
-      "NaN",
-    );
+    const error = assertThrows(() => createSampler().next(f32([Number.NaN, 1]), []), Error, "NaN");
     assert(!(error instanceof ModelInputError), "logits の NaN が入力起因に分類されている");
   });
 
@@ -633,14 +659,18 @@ const chiSquare = (counts: readonly number[], probabilities: readonly number[]):
   const total = counts.reduce((sum, count) => sum + count, 0);
   return counts.reduce((statistic, observed, index) => {
     const expected = probabilities[index] * total;
-    return statistic + ((observed - expected) ** 2) / expected;
+    return statistic + (observed - expected) ** 2 / expected;
   }, 0);
 };
 
 test("sampler: 温度 1 の抽選が理論分布に従う（χ² 門・自由度 3・α = 1e-4）", () => {
   for (const seed of [20_260_831, 7]) {
     const counts = drawCounts({ temperature: 1, seed }, DRAWS);
-    assertEquals(counts.reduce((sum, count) => sum + count, 0), DRAWS, `seed ${seed}: 総数`);
+    assertEquals(
+      counts.reduce((sum, count) => sum + count, 0),
+      DRAWS,
+      `seed ${seed}: 総数`,
+    );
     const statistic = chiSquare(counts, BASE_PROBABILITIES);
     assert(
       statistic < CHI_SQUARE_DF3_1E4,
@@ -660,9 +690,9 @@ test("sampler: 温度が分布を鋭くする（温度 0.5 の理論分布と一
   assert(
     statistic < CHI_SQUARE_DF3_1E4,
     `χ² = ${statistic.toFixed(3)} が ${CHI_SQUARE_DF3_1E4} 以上` +
-      `（観測 ${counts.join("/")} / 期待 ${
-        expected.map((p) => (p * DRAWS).toFixed(1)).join("/")
-      }）`,
+      `（観測 ${counts.join("/")} / 期待 ${expected
+        .map((p) => (p * DRAWS).toFixed(1))
+        .join("/")}）`,
   );
 });
 

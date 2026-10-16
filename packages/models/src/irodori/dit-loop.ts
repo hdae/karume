@@ -74,11 +74,9 @@ import { withSession } from "../session/with-session.ts";
  * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
-export const latentSnapshot = (
-  latent: Float32Array<ArrayBuffer>,
-  shape: readonly number[],
-): () => IrodoriLatentSnapshot =>
-(): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
+export const latentSnapshot =
+  (latent: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => IrodoriLatentSnapshot) =>
+  (): IrodoriLatentSnapshot => ({ data: new Float32Array(latent), shape: [...shape] });
 
 /**
  * latent 段の結果。`plan.targetSamples` は波形の切り出しに要るので**決めた場所から持ち回る**
@@ -253,58 +251,51 @@ export const runDitLoopOnHost = async (
         return tensor;
       },
     );
-    await withStageSession(
-      state,
-      emit,
-      "dit",
-      state.dit,
-      state.ditSessionOptions,
-      async (run) => {
-        for (let step = 0; step < config.steps; step += 1) {
-          const t = loop.schedule[step];
-          const tNext = loop.schedule[step + 1];
-          const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
-          const xTensor = f32(x, [1, loop.frames, config.latentDim]);
-          const cond = asF32(
-            outputAt(
-              state.dit,
-              await run({ x_t: xTensor, t_embed: tEmbed, mask: loop.condMask, ...context }),
-              0,
-            ),
-            "dit の速度場",
-          );
-          forwards += 1;
-          const variants: CfgVariant[] = [];
-          if (t >= config.cfgMinT && t <= config.cfgMaxT) {
-            // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
-            for (const variant of loop.uncondVariants) {
-              const outputs = await run({
-                x_t: xTensor,
-                t_embed: tEmbed,
-                mask: variant.mask,
-                ...context,
-              });
-              forwards += 1;
-              variants.push({
-                scale: variant.scale,
-                velocity: asF32(
-                  outputAt(state.dit, outputs, 0),
-                  `dit の速度場（uncond ${variant.segment}）`,
-                ),
-              });
-            }
+    await withStageSession(state, emit, "dit", state.dit, state.ditSessionOptions, async (run) => {
+      for (let step = 0; step < config.steps; step += 1) {
+        const t = loop.schedule[step];
+        const tNext = loop.schedule[step + 1];
+        const tEmbed = f32(timestepEmbedding(t, loop.frequencies), [1, config.timestepEmbedDim]);
+        const xTensor = f32(x, [1, loop.frames, config.latentDim]);
+        const cond = asF32(
+          outputAt(
+            state.dit,
+            await run({ x_t: xTensor, t_embed: tEmbed, mask: loop.condMask, ...context }),
+            0,
+          ),
+          "dit の速度場",
+        );
+        forwards += 1;
+        const variants: CfgVariant[] = [];
+        if (t >= config.cfgMinT && t <= config.cfgMaxT) {
+          // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
+          for (const variant of loop.uncondVariants) {
+            const outputs = await run({
+              x_t: xTensor,
+              t_embed: tEmbed,
+              mask: variant.mask,
+              ...context,
+            });
+            forwards += 1;
+            variants.push({
+              scale: variant.scale,
+              velocity: asF32(
+                outputAt(state.dit, outputs, 0),
+                `dit の速度場（uncond ${variant.segment}）`,
+              ),
+            });
           }
-          x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
-          await emit({
-            kind: "denoise-step",
-            step: step + 1,
-            steps: config.steps,
-            t,
-            copyLatents: latentSnapshot(x, [loop.frames, config.latentDim]),
-          });
         }
-      },
-    );
+        x = eulerStep(x, combineCfg(cond, variants), Math.fround(tNext - t));
+        await emit({
+          kind: "denoise-step",
+          step: step + 1,
+          steps: config.steps,
+          t,
+          copyLatents: latentSnapshot(x, [loop.frames, config.latentDim]),
+        });
+      }
+    });
   } catch (error) {
     failure = { error };
     throw error;
@@ -373,10 +364,7 @@ export const runDitLoopResident = async (
     };
     // ホストが組んだ小グラフは重みを 1 本も持たない（`krm` を書く理由が無い）ので、宣言だけを
     // メモリ内容器に載せて Session にする。
-    const openHostGraph = async (
-      name: string,
-      declaration: IrDeclaration,
-    ): Promise<Session> => {
+    const openHostGraph = async (name: string, declaration: IrDeclaration): Promise<Session> => {
       // 供給が 1 本も無いので `tensors` は空表（`greedy-output.ts` と同じ綴り）。
       const bound = openMemoryContainer({ graphs: { [name]: declaration }, tensors: {} });
       const session = await createSessionFromContainer(gpu, bound, name, {});
@@ -407,30 +395,35 @@ export const runDitLoopResident = async (
         // 間ずっと実測 0 = チャンクは初期値 16 のままで、約 96,000 dispatch が 6,000 回の submit に
         // 割れる。代償はフェンス 1 本（≈11 ms）。
         if (step === 0) await batch.settle();
-        const guided = t >= config.cfgMinT && t <= config.cfgMaxT &&
-          loop.uncondVariants.length > 0;
+        const guided = t >= config.cfgMinT && t <= config.cfgMaxT && loop.uncondVariants.length > 0;
         if (guided) {
           // MUST: 合成順は SEGMENT_ORDER（text → speaker → caption）— `combineCfg` の doc。
           for (let index = 0; index < loop.uncondVariants.length; index += 1) {
             await forward(loop.uncondVariants[index].mask, vVariant);
             // k = 0 の被加数は cond そのもの（正本 `combineCfg` の `let value = base`）。同じ
             // バッファを acc_in と cond の 2 口で読むだけなので WebGPU 上も合法。
-            await combine.enqueue({
-              [COMBINE_INPUTS.accumulator]: index === 0 ? vCond : accumulator,
-              [COMBINE_INPUTS.cond]: vCond,
-              [COMBINE_INPUTS.variant]: vVariant,
-              [COMBINE_INPUTS.scale]: scales[index],
-            }, { batch, copyOutputs: { [COMBINE_OUTPUT]: accumulator } });
+            await combine.enqueue(
+              {
+                [COMBINE_INPUTS.accumulator]: index === 0 ? vCond : accumulator,
+                [COMBINE_INPUTS.cond]: vCond,
+                [COMBINE_INPUTS.variant]: vVariant,
+                [COMBINE_INPUTS.scale]: scales[index],
+              },
+              { batch, copyOutputs: { [COMBINE_OUTPUT]: accumulator } },
+            );
           }
         }
-        await euler.enqueue({
-          [EULER_INPUTS.x]: xT,
-          [EULER_INPUTS.velocity]: guided ? accumulator : vCond,
-          [EULER_INPUTS.deltaT]: f32(
-            Float32Array.of(Math.fround(loop.schedule[step + 1] - t)),
-            [1],
-          ),
-        }, { batch, copyOutputs: { [EULER_OUTPUT]: xT } });
+        await euler.enqueue(
+          {
+            [EULER_INPUTS.x]: xT,
+            [EULER_INPUTS.velocity]: guided ? accumulator : vCond,
+            [EULER_INPUTS.deltaT]: f32(
+              Float32Array.of(Math.fround(loop.schedule[step + 1] - t)),
+              [1],
+            ),
+          },
+          { batch, copyOutputs: { [EULER_OUTPUT]: xT } },
+        );
       }
     });
     return { x: new Float32Array(await xT.read()), forwards };

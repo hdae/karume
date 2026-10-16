@@ -234,9 +234,12 @@ export const validateStepRecipe = (recipe: StepRecipe): void => {
   const dispatchCount = recipe.dispatches.length;
   recipe.temps.forEach((temp, id) => {
     if (
-      !Number.isSafeInteger(temp.byteLength) || temp.byteLength < 1 ||
-      !Number.isSafeInteger(temp.allocBefore) || !Number.isSafeInteger(temp.releaseAfter) ||
-      temp.allocBefore < 0 || temp.releaseAfter < temp.allocBefore ||
+      !Number.isSafeInteger(temp.byteLength) ||
+      temp.byteLength < 1 ||
+      !Number.isSafeInteger(temp.allocBefore) ||
+      !Number.isSafeInteger(temp.releaseAfter) ||
+      temp.allocBefore < 0 ||
+      temp.releaseAfter < temp.allocBefore ||
       temp.releaseAfter >= dispatchCount
     ) {
       throw new ExecutionError(
@@ -507,8 +510,8 @@ const dispatchWithWork = (
  * 解決される（{@link resolveWorkgroups}）。
  */
 const bindsGeneration = (dispatch: DispatchRecipe): boolean =>
-  dispatch.bindings.some((entry) =>
-    entry.source.kind === "state" || entry.source.kind === "lengths"
+  dispatch.bindings.some(
+    (entry) => entry.source.kind === "state" || entry.source.kind === "lengths",
   );
 
 /**
@@ -550,9 +553,8 @@ export const buildTransientProgram = (recipes: readonly StepRecipe[]): Transient
       name: output.name,
       kind: output.kind,
       byteLength: output.kind === "alloc" ? output.byteLength : 0,
-      source: output.kind === "alias" && output.source.kind === "value"
-        ? output.source.name
-        : undefined,
+      source:
+        output.kind === "alias" && output.source.kind === "value" ? output.source.name : undefined,
       uses: output.uses,
       pinned: output.pinned,
     })),
@@ -563,9 +565,10 @@ export const buildTransientProgram = (recipes: readonly StepRecipe[]): Transient
       for (const entry of dispatch.bindings) {
         const { source } = entry;
         if (source.kind !== "value" && source.kind !== "temp") continue;
-        const ref: TransientRef = source.kind === "value"
-          ? { kind: "value", name: source.name }
-          : { kind: "temp", id: source.id };
+        const ref: TransientRef =
+          source.kind === "value"
+            ? { kind: "value", name: source.name }
+            : { kind: "temp", id: source.id };
         if (dispatch.roles.writes.has(entry.binding)) writes.push(ref);
         else if (dispatch.roles.reads.has(entry.binding)) reads.push(ref);
         else {
@@ -674,12 +677,10 @@ const bakeGroups = (
     groups.push(
       recipe.dispatches.map((dispatch) =>
         select(dispatch)
-          ? createBindGroup(
-            device,
-            dispatch,
-            (source) => resolveBinding(source, values, temps, generation),
-          )
-          : undefined
+          ? createBindGroup(device, dispatch, (source) =>
+              resolveBinding(source, values, temps, generation),
+            )
+          : undefined,
       ),
     );
   });
@@ -790,7 +791,7 @@ export const executeBakedPlan = (
   generation?: BakedGeneration,
 ): void => {
   recipes.forEach((recipe, index) =>
-    dispatchBakedStep(recipe, index, groups, scheduler, generation)
+    dispatchBakedStep(recipe, index, groups, scheduler, generation),
   );
 };
 

@@ -159,9 +159,9 @@ const assertSymbols = (
   const wanted = [...expected].sort();
   if (declared.length !== wanted.length || declared.some((name, at) => name !== wanted[at])) {
     throw new Error(
-      `${owner}: ${part} の記号が [${model.graph.symbols.join(", ")}]（期待: [${
-        expected.join(", ")
-      }]）`,
+      `${owner}: ${part} の記号が [${model.graph.symbols.join(", ")}]（期待: [${expected.join(
+        ", ",
+      )}]）`,
     );
   }
 };
@@ -253,12 +253,7 @@ export const wanVaeEncoderContract = (
   assertDims(
     owner,
     pre.inputShape,
-    [
-      patchChannels,
-      1,
-      scaledSymbol(inputScale, preHeight),
-      scaledSymbol(inputScale, preWidth),
-    ],
+    [patchChannels, 1, scaledSymbol(inputScale, preHeight), scaledSymbol(inputScale, preWidth)],
     `${VAE_ENCODER_PRE} の入力 '${pre.input}'`,
   );
 
@@ -272,12 +267,10 @@ export const wanVaeEncoderContract = (
     `入力 '${attn.input}'`,
   );
   assertSymbols(owner, VAE_ENCODER_ATTN, parts.attn, [sequence]);
-  for (
-    const [what, dims] of [
-      [`入力 '${attn.input}'`, attn.inputShape],
-      [`出力 '${attn.output}'`, attn.outputShape],
-    ] as const
-  ) {
+  for (const [what, dims] of [
+    [`入力 '${attn.input}'`, attn.inputShape],
+    [`出力 '${attn.output}'`, attn.outputShape],
+  ] as const) {
     assertDims(owner, dims, [hiddenChannels, sequence], `${VAE_ENCODER_ATTN} の${what}`);
   }
 
@@ -317,10 +310,7 @@ export const wanVaeEncoderContract = (
 type WanVaeEncodeState = {
   readonly gpu: GpuContext;
   readonly vaeEncoder: WanVaeEncoder;
-  readonly onRunDiagnostics?: (
-    component: WanRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /** 段の 3 Session（段の中で回す順）。 */
@@ -448,14 +438,7 @@ export const encodeWanImageStage = async (
     };
     // run の前（3 グラフの batch は不可分 — 中断はここで効く）。
     await settleAbort(signal);
-    const read = await runEncoderBatch(
-      state.gpu,
-      opened,
-      carried,
-      contract,
-      binding,
-      image.pixels,
-    );
+    const read = await runEncoderBatch(state.gpu, opened, carried, contract, binding, image.pixels);
     observe?.(VAE_ENCODER_PRE, opened.pre.diagnostics());
     observe?.(VAE_ENCODER_ATTN, opened.attn.diagnostics());
     observe?.(VAE_ENCODER_POST, opened.post.diagnostics());
@@ -465,9 +448,9 @@ export const encodeWanImageStage = async (
     if (broken !== -1) {
       const pixel = broken % area;
       throw new Error(
-        `${owner}: 条件画像の潜在（VAE encoder の mu の正規化の後）の channel ${
-          Math.floor(broken / area)
-        }・位置 (x=${pixel % binding.width}, y=${Math.floor(pixel / binding.width)}) が非有限` +
+        `${owner}: 条件画像の潜在（VAE encoder の mu の正規化の後）の channel ${Math.floor(
+          broken / area,
+        )}・位置 (x=${pixel % binding.width}, y=${Math.floor(pixel / binding.width)}) が非有限` +
           `（${latents[broken]}）— DiT の段へは渡さない`,
       );
     }

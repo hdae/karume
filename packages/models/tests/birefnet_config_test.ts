@@ -102,11 +102,10 @@ test("チャネル定数は長さ 3 の数の配列だけ", () => {
 });
 
 test("imageMean は負も受ける（平行移動なので値域を狭めない）", () => {
-  assertEquals(parseBirefnetPipelineConfig(withPatch({ imageMean: [-0.5, 0, 0.5] })).imageMean, [
-    -0.5,
-    0,
-    0.5,
-  ]);
+  assertEquals(
+    parseBirefnetPipelineConfig(withPatch({ imageMean: [-0.5, 0, 0.5] })).imageMean,
+    [-0.5, 0, 0.5],
+  );
 });
 
 test("非有限な定数は落とす（全画素が NaN になる）", () => {

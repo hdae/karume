@@ -61,26 +61,34 @@ type InitializerSpec = {
 /** initializer ごとに 1 ノードで消費する最小の IR v2 グラフ。 */
 const declaration = (initializers: Readonly<Record<string, InitializerSpec>>): IrDeclaration => {
   const names = Object.keys(initializers);
-  return parseIrDeclaration(JSON.stringify({
-    format: "karume-ir",
-    version: 2,
-    requires: { ops: ["matmul"] },
-    symbols: ["T"],
-    inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
-    outputs: names.map((_, i) => `y${i}`),
-    initializers: Object.fromEntries(
-      names.map((name) => [name, initializers[name].shared ? { shared: true } : {}]),
-    ),
-    values: {
-      ...Object.fromEntries(
-        names.map((
-          name,
-        ) => [name, { dtype: initializers[name].dtype ?? "f32", shape: initializers[name].shape }]),
+  return parseIrDeclaration(
+    JSON.stringify({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["matmul"] },
+      symbols: ["T"],
+      inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+      outputs: names.map((_, i) => `y${i}`),
+      initializers: Object.fromEntries(
+        names.map((name) => [name, initializers[name].shared ? { shared: true } : {}]),
       ),
-      ...Object.fromEntries(names.map((_, i) => [`y${i}`, { dtype: "f32", shape: ["T", 4] }])),
-    },
-    nodes: names.map((name, i) => ({ op: "matmul", ins: ["x", name], outs: [`y${i}`], attrs: {} })),
-  }));
+      values: {
+        ...Object.fromEntries(
+          names.map((name) => [
+            name,
+            { dtype: initializers[name].dtype ?? "f32", shape: initializers[name].shape },
+          ]),
+        ),
+        ...Object.fromEntries(names.map((_, i) => [`y${i}`, { dtype: "f32", shape: ["T", 4] }])),
+      },
+      nodes: names.map((name, i) => ({
+        op: "matmul",
+        ins: ["x", name],
+        outs: [`y${i}`],
+        attrs: {},
+      })),
+    }),
+  );
 };
 
 const F32 = 4;
@@ -128,7 +136,7 @@ const syntheticModel = (): ModelInput => ({
       // i4 + companion scale（規則③で同一 part に置かれる）。行長 64 / group 32 = 2 group。
       graph: "text_encoder",
       initializer: "proj.weight",
-      bytes: bytesOf(12 * 64 / 2, 22),
+      bytes: bytesOf((12 * 64) / 2, 22),
       encoding: {
         codec: "int4-sym-g",
         groupSize: 32,
@@ -218,9 +226,7 @@ const openWithModelDescriptor = async (
     modelDescriptorLength: modelBytes.byteLength,
   });
   const part0 = new Uint8Array(
-    new ArrayBuffer(
-      HEADER_BYTES + written.graphDescriptorBytes.byteLength + modelBytes.byteLength,
-    ),
+    new ArrayBuffer(HEADER_BYTES + written.graphDescriptorBytes.byteLength + modelBytes.byteLength),
   );
   part0.set(header, 0);
   part0.set(written.graphDescriptorBytes, HEADER_BYTES);
@@ -418,12 +424,14 @@ describe("container round trip", () => {
       graphs: {
         text_encoder: declaration({ "enc.weight": { shape: [16, 32] } }),
       },
-      weights: [{
-        graph: "text_encoder",
-        initializer: "enc.weight",
-        bytes: bytesOf(16 * 32 * 2, 21),
-        encoding: { codec: "f16" },
-      }],
+      weights: [
+        {
+          graph: "text_encoder",
+          initializer: "enc.weight",
+          bytes: bytesOf(16 * 32 * 2, 21),
+          encoding: { codec: "f16" },
+        },
+      ],
       assets: [],
     };
     const written = await writeModelContainer(model, OPTIONS);
@@ -641,10 +649,9 @@ describe("container round trip", () => {
       ContainerFormatError,
       "本だが宣言は",
     );
-    const shorter = written.parts.map((
-      part,
-      i,
-    ) => (i === 2 ? part.subarray(0, part.byteLength - 4) : part));
+    const shorter = written.parts.map((part, i) =>
+      i === 2 ? part.subarray(0, part.byteLength - 4) : part,
+    );
     await assertRejects(
       () => openContainer({ kind: "parts", parts: shorter }),
       ContainerFormatError,
@@ -704,9 +711,8 @@ describe("container round trip", () => {
 describe("container descriptor", () => {
   it("正準直列化した 2 文書は parse → serialize で同じバイト列に戻る", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
-    const { serializeGraphDescriptor, serializeModelDescriptor } = await import(
-      "../src/format/container/descriptor.ts"
-    );
+    const { serializeGraphDescriptor, serializeModelDescriptor } =
+      await import("../src/format/container/descriptor.ts");
     assertEquals(
       serializeGraphDescriptor(parseGraphDescriptor(written.graphDescriptorBytes)),
       written.graphDescriptorBytes,
@@ -720,33 +726,70 @@ describe("container descriptor", () => {
   it("台帳に無い codec・台帳と食い違う packing・未知キーを拒否する", async () => {
     const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     const supply = (doc: Record<string, unknown>) => anyOf(doc).binding.text_encoder["proj.weight"];
-    rejectsModel("未知 codec", bytes, (doc) => {
-      supply(doc).encoding.codec = "int3-sym";
-    }, "台帳に無い codec");
-    rejectsModel("packing 不一致", bytes, (doc) => {
-      supply(doc).encoding.packing.blockElements = 4;
-    }, "別の版の台帳");
-    rejectsModel("未知キー", bytes, (doc) => {
-      supply(doc).encoding.bits = 4;
-    }, "未知のキー");
-    rejectsModel("資産の論理長と block 長の不整合", bytes, (doc) => {
-      anyOf(doc).assets.style_vectors.length = 296;
-    }, "切り上げた値が block");
-    rejectsModel("非量子化に groupSize", bytes, (doc) => {
-      anyOf(doc).binding.text_encoder["enc.weight"].encoding.groupSize = 32;
-    }, "量子化でないので書けない");
-    rejectsModel("量子化に scale 無し", bytes, (doc) => {
-      delete supply(doc).encoding.scale;
-    }, "量子化なので必須");
-    rejectsModel("codecs の集合が束縛表と違う", bytes, (doc) => {
-      anyOf(doc).codecs = ["f16"];
-    }, "codec 集合");
+    rejectsModel(
+      "未知 codec",
+      bytes,
+      (doc) => {
+        supply(doc).encoding.codec = "int3-sym";
+      },
+      "台帳に無い codec",
+    );
+    rejectsModel(
+      "packing 不一致",
+      bytes,
+      (doc) => {
+        supply(doc).encoding.packing.blockElements = 4;
+      },
+      "別の版の台帳",
+    );
+    rejectsModel(
+      "未知キー",
+      bytes,
+      (doc) => {
+        supply(doc).encoding.bits = 4;
+      },
+      "未知のキー",
+    );
+    rejectsModel(
+      "資産の論理長と block 長の不整合",
+      bytes,
+      (doc) => {
+        anyOf(doc).assets.style_vectors.length = 296;
+      },
+      "切り上げた値が block",
+    );
+    rejectsModel(
+      "非量子化に groupSize",
+      bytes,
+      (doc) => {
+        anyOf(doc).binding.text_encoder["enc.weight"].encoding.groupSize = 32;
+      },
+      "量子化でないので書けない",
+    );
+    rejectsModel(
+      "量子化に scale 無し",
+      bytes,
+      (doc) => {
+        delete supply(doc).encoding.scale;
+      },
+      "量子化なので必須",
+    );
+    rejectsModel(
+      "codecs の集合が束縛表と違う",
+      bytes,
+      (doc) => {
+        anyOf(doc).codecs = ["f16"];
+      },
+      "codec 集合",
+    );
     const { graphDescriptorBytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     assertThrows(
       () =>
-        parseGraphDescriptor(mutateJson(graphDescriptorBytes, (doc) => {
-          anyOf(doc).capabilities.features = ["range-fetch"];
-        })),
+        parseGraphDescriptor(
+          mutateJson(graphDescriptorBytes, (doc) => {
+            anyOf(doc).capabilities.features = ["range-fetch"];
+          }),
+        ),
       ContainerFormatError,
       "未知の機能",
     );
@@ -756,21 +799,36 @@ describe("container descriptor", () => {
     // 読み手は scale を宣言された dtype で読むので、受理集合（初版は f32 だけ）を見ていないと
     // f16 の列を f32 として読む沈黙誤値になる。値域の門はここでしか撃たれない。
     const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
-    rejectsModel("scale.dtype が受理集合の外", bytes, (doc) => {
-      anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.dtype = "f16";
-    }, "受理集合");
+    rejectsModel(
+      "scale.dtype が受理集合の外",
+      bytes,
+      (doc) => {
+        anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.dtype = "f16";
+      },
+      "受理集合",
+    );
   });
 
   it("束縛表が実在しない block を指せば落ちる（規則⑤ の逆向き — 参照先が無い）", async () => {
     // 余剰 block（どこからも参照されない）は規則⑤ が拒否する。その逆向き、束縛の側が
     // 目次に無い id を名乗る形もここで塞ぐ（読み手が block を取りに行く前に落ちる）。
     const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
-    rejectsModel("実体が未宣言の block", bytes, (doc) => {
-      anyOf(doc).binding.front["front.bias"].block = "absent";
-    }, "目次に無い block");
-    rejectsModel("scale が未宣言の block", bytes, (doc) => {
-      anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block = "absent";
-    }, "目次に無い block");
+    rejectsModel(
+      "実体が未宣言の block",
+      bytes,
+      (doc) => {
+        anyOf(doc).binding.front["front.bias"].block = "absent";
+      },
+      "目次に無い block",
+    );
+    rejectsModel(
+      "scale が未宣言の block",
+      bytes,
+      (doc) => {
+        anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block = "absent";
+      },
+      "目次に無い block",
+    );
   });
 
   it("溢れて Infinity になる数・深すぎる入れ子・__proto__ を拒否する", async () => {
@@ -792,44 +850,94 @@ describe("container descriptor", () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const bytes = written.modelDescriptorBytes;
     const bigSupply = (doc: Record<string, unknown>) => anyOf(doc).binding.front["big.weight"];
-    rejectsModel("二重束縛（規則①）", bytes, (doc) => {
-      anyOf(doc).binding.front["front.bias"].block = bigSupply(doc).pieces[0].block;
-    }, "二重に束縛");
-    rejectsModel("余剰 block（規則⑤）", bytes, (doc) => {
-      delete anyOf(doc).assets["style_vectors"];
-    }, "参照されていない");
-    rejectsModel("piece の穴（規則④）", bytes, (doc) => {
-      bigSupply(doc).pieces[1].rows[0] += 1;
-    }, "から続かない");
-    rejectsModel("piece 1 本", bytes, (doc) => {
-      bigSupply(doc).pieces = [bigSupply(doc).pieces[0]];
-    }, "2 本以上");
-    rejectsModel("block と pieces の両方", bytes, (doc) => {
-      bigSupply(doc).block = "w0001";
-    }, "どちらか一方");
-    rejectsModel("role の取り違え", bytes, (doc) => {
-      const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
-      anyOf(doc).blocks.find((block: { id: string }) => block.id === scaleId).role = "weight";
-    }, "role は");
-    rejectsModel("scale が別 part（規則③）", bytes, (doc) => {
-      const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
-      const block = anyOf(doc).blocks.find((block: { id: string }) => block.id === scaleId);
-      const other = anyOf(doc).parts.find((part: { index: number }) =>
-        part.index >= 2 && part.index !== block.part
-      );
-      block.part = other.index;
-      block.offset = Math.ceil(other.length / 64) * 64;
-      other.length = block.offset + block.length;
-    }, "同一 part MUST");
-    rejectsModel("offset の整列", bytes, (doc) => {
-      anyOf(doc).blocks[0].offset += 4;
-    }, "の倍数でない");
-    rejectsModel("parts の添字", bytes, (doc) => {
-      anyOf(doc).parts[0].index = 0;
-    }, "index が 1 でない");
-    rejectsModel("part 1 への block", bytes, (doc) => {
-      anyOf(doc).blocks[0].part = 1;
-    }, "2 未満");
+    rejectsModel(
+      "二重束縛（規則①）",
+      bytes,
+      (doc) => {
+        anyOf(doc).binding.front["front.bias"].block = bigSupply(doc).pieces[0].block;
+      },
+      "二重に束縛",
+    );
+    rejectsModel(
+      "余剰 block（規則⑤）",
+      bytes,
+      (doc) => {
+        delete anyOf(doc).assets["style_vectors"];
+      },
+      "参照されていない",
+    );
+    rejectsModel(
+      "piece の穴（規則④）",
+      bytes,
+      (doc) => {
+        bigSupply(doc).pieces[1].rows[0] += 1;
+      },
+      "から続かない",
+    );
+    rejectsModel(
+      "piece 1 本",
+      bytes,
+      (doc) => {
+        bigSupply(doc).pieces = [bigSupply(doc).pieces[0]];
+      },
+      "2 本以上",
+    );
+    rejectsModel(
+      "block と pieces の両方",
+      bytes,
+      (doc) => {
+        bigSupply(doc).block = "w0001";
+      },
+      "どちらか一方",
+    );
+    rejectsModel(
+      "role の取り違え",
+      bytes,
+      (doc) => {
+        const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
+        anyOf(doc).blocks.find((block: { id: string }) => block.id === scaleId).role = "weight";
+      },
+      "role は",
+    );
+    rejectsModel(
+      "scale が別 part（規則③）",
+      bytes,
+      (doc) => {
+        const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
+        const block = anyOf(doc).blocks.find((block: { id: string }) => block.id === scaleId);
+        const other = anyOf(doc).parts.find(
+          (part: { index: number }) => part.index >= 2 && part.index !== block.part,
+        );
+        block.part = other.index;
+        block.offset = Math.ceil(other.length / 64) * 64;
+        other.length = block.offset + block.length;
+      },
+      "同一 part MUST",
+    );
+    rejectsModel(
+      "offset の整列",
+      bytes,
+      (doc) => {
+        anyOf(doc).blocks[0].offset += 4;
+      },
+      "の倍数でない",
+    );
+    rejectsModel(
+      "parts の添字",
+      bytes,
+      (doc) => {
+        anyOf(doc).parts[0].index = 0;
+      },
+      "index が 1 でない",
+    );
+    rejectsModel(
+      "part 1 への block",
+      bytes,
+      (doc) => {
+        anyOf(doc).blocks[0].part = 1;
+      },
+      "2 未満",
+    );
   });
 
   it("束縛表のキー集合は shared でも const でもない initializer の集合と完全一致する（規則⑤）", async () => {
@@ -853,18 +961,23 @@ describe("container descriptor", () => {
     // block 上限と part 長を 512 B にして、2 piece を part 2 / part 3 に 1 本ずつ置かせる。
     // 2 block の所在（part）だけを入れ替えると、目次の構造（重なり・part 長）は正しいまま
     // piece 1 が piece 2 より後の part に来る。門が無いと開けてしまい、構築が内部簿記の破れで落ちる。
-    const written = await writeModelContainer({
-      graphs: { g: declaration({ "tall.weight": { shape: [32, 8] } }) },
-      consts: [],
-      weights: [{
-        graph: "g",
-        initializer: "tall.weight",
-        bytes: bytesOf(32 * 8 * F32, 41),
-        encoding: { codec: "f32" },
-      }],
-      assets: [],
-      provenance: { license: "apache-2.0", writer: "test" },
-    }, { partBytes: 512, blockBytes: 512 });
+    const written = await writeModelContainer(
+      {
+        graphs: { g: declaration({ "tall.weight": { shape: [32, 8] } }) },
+        consts: [],
+        weights: [
+          {
+            graph: "g",
+            initializer: "tall.weight",
+            bytes: bytesOf(32 * 8 * F32, 41),
+            encoding: { codec: "f32" },
+          },
+        ],
+        assets: [],
+        provenance: { license: "apache-2.0", writer: "test" },
+      },
+      { partBytes: 512, blockBytes: 512 },
+    );
     const pieces = (doc: Record<string, unknown>): { block: string }[] =>
       anyOf(doc).binding.g["tall.weight"].pieces;
     const blockOf = (doc: Record<string, unknown>, id: string): { part: number } =>
@@ -892,12 +1005,15 @@ describe("container descriptor", () => {
     const base = syntheticModel();
     await assertRejects(
       () =>
-        writeModelContainer({
-          ...base,
-          weights: base.weights.map((
-            w,
-          ) => (w.initializer === "enc.weight" ? { ...w, bytes: bytesOf(16 * 32 * 2 + 2, 1) } : w)),
-        }, OPTIONS),
+        writeModelContainer(
+          {
+            ...base,
+            weights: base.weights.map((w) =>
+              w.initializer === "enc.weight" ? { ...w, bytes: bytesOf(16 * 32 * 2 + 2, 1) } : w,
+            ),
+          },
+          OPTIONS,
+        ),
       ContainerFormatError,
       "宣言から決まる",
     );
@@ -945,9 +1061,10 @@ describe("container descriptor", () => {
       () =>
         rewrite((input) => ({
           ...input,
-          weights: input.weights.map((w) => (w.initializer === "big.weight"
-            ? { ...w, encoding: { ...w.encoding, groupSize: 16 } }
-            : w)
+          weights: input.weights.map((w) =>
+            w.initializer === "big.weight"
+              ? { ...w, encoding: { ...w.encoding, groupSize: 16 } }
+              : w,
           ),
         })),
       ContainerFormatError,
@@ -958,9 +1075,10 @@ describe("container descriptor", () => {
       () =>
         rewrite((input) => ({
           ...input,
-          weights: input.weights.map((w) => (w.initializer === "proj.weight"
-            ? { ...w, encoding: { ...w.encoding, groupSize: 24 } }
-            : w)
+          weights: input.weights.map((w) =>
+            w.initializer === "proj.weight"
+              ? { ...w, encoding: { ...w.encoding, groupSize: 24 } }
+              : w,
           ),
         })),
       ContainerFormatError,
@@ -971,12 +1089,13 @@ describe("container descriptor", () => {
       () =>
         rewrite((input) => ({
           ...input,
-          weights: input.weights.map((w) => (w.initializer === "proj.weight"
-            ? {
-              ...w,
-              encoding: { ...w.encoding, scale: { bytes: bytesOf(12 * F32, 1), dtype: "f32" } },
-            }
-            : w)
+          weights: input.weights.map((w) =>
+            w.initializer === "proj.weight"
+              ? {
+                  ...w,
+                  encoding: { ...w.encoding, scale: { bytes: bytesOf(12 * F32, 1), dtype: "f32" } },
+                }
+              : w,
           ),
         })),
       ContainerFormatError,
@@ -985,18 +1104,23 @@ describe("container descriptor", () => {
     // 意味論 i32 に f16 は組めない。
     await assertRejects(
       () =>
-        writeModelContainer({
-          ...base,
-          graphs: { g: declaration({ "idx": { shape: [8], dtype: "i32" } }) },
-          consts: [],
-          assets: [],
-          weights: [{
-            graph: "g",
-            initializer: "idx",
-            bytes: bytesOf(16, 3),
-            encoding: { codec: "f16" },
-          }],
-        }, OPTIONS).then((written) => openContainer({ kind: "parts", parts: written.parts })),
+        writeModelContainer(
+          {
+            ...base,
+            graphs: { g: declaration({ idx: { shape: [8], dtype: "i32" } }) },
+            consts: [],
+            assets: [],
+            weights: [
+              {
+                graph: "g",
+                initializer: "idx",
+                bytes: bytesOf(16, 3),
+                encoding: { codec: "f16" },
+              },
+            ],
+          },
+          OPTIONS,
+        ).then((written) => openContainer({ kind: "parts", parts: written.parts })),
       ContainerFormatError,
       "組めない",
     );
@@ -1004,23 +1128,28 @@ describe("container descriptor", () => {
 
   it("合流層: rowAxis 1 は int8-sym だけ — 両軸の長さが等しい i4 の形でも openContainer で落ちる", async () => {
     // [32,32]・group 16 は軸 0 と読んでも軸 1 と読んでも scale が [32,2] で、長さの突合は区別しない。
-    const written = await writeModelContainer({
-      graphs: { g: declaration({ "square.weight": { shape: [32, 32] } }) },
-      consts: [],
-      weights: [{
-        graph: "g",
-        initializer: "square.weight",
-        bytes: bytesOf(32 * 32 / 2, 41),
-        encoding: {
-          codec: "int4-sym-g",
-          rowAxis: 1,
-          groupSize: 16,
-          scale: { bytes: bytesOf(32 * 2 * F32, 42), dtype: "f32" },
-        },
-      }],
-      assets: [],
-      provenance: { license: "apache-2.0", writer: "test" },
-    }, OPTIONS);
+    const written = await writeModelContainer(
+      {
+        graphs: { g: declaration({ "square.weight": { shape: [32, 32] } }) },
+        consts: [],
+        weights: [
+          {
+            graph: "g",
+            initializer: "square.weight",
+            bytes: bytesOf((32 * 32) / 2, 41),
+            encoding: {
+              codec: "int4-sym-g",
+              rowAxis: 1,
+              groupSize: 16,
+              scale: { bytes: bytesOf(32 * 2 * F32, 42), dtype: "f32" },
+            },
+          },
+        ],
+        assets: [],
+        provenance: { license: "apache-2.0", writer: "test" },
+      },
+      OPTIONS,
+    );
     await assertRejects(
       () => openContainer({ kind: "parts", parts: written.parts }),
       ContainerFormatError,
@@ -1038,7 +1167,7 @@ describe("container descriptor", () => {
     // IR の器は null プロトタイプなので initializer 名 toString は正当に宣言できる。素の {} を
     // 名前で引くと Object.prototype の関数が「在る」ことになり、不足の列挙漏れや TypeError に化ける。
     const input: ModelInput = {
-      graphs: { g: declaration({ "toString": { shape: [4, 4] }, "a": { shape: [4, 4] } }) },
+      graphs: { g: declaration({ toString: { shape: [4, 4] }, a: { shape: [4, 4] } }) },
       consts: [],
       weights: ["toString", "a"].map((initializer, i) => ({
         graph: "g",
@@ -1053,11 +1182,13 @@ describe("container descriptor", () => {
     const graph = parseGraphDescriptor(written.graphDescriptorBytes);
 
     // 束縛表から toString を外す（block は別名へ付け替えて参照を保つ）→ 不足として列挙される。
-    const moved = parseModelDescriptor(mutateJson(written.modelDescriptorBytes, (doc) => {
-      const supplies = anyOf(doc).binding.g;
-      supplies["ghost"] = supplies["toString"];
-      delete supplies["toString"];
-    }));
+    const moved = parseModelDescriptor(
+      mutateJson(written.modelDescriptorBytes, (doc) => {
+        const supplies = anyOf(doc).binding.g;
+        supplies["ghost"] = supplies["toString"];
+        delete supplies["toString"];
+      }),
+    );
     assertThrows(
       () => validateAgainstGraph(moved, graph),
       ContainerFormatError,
@@ -1083,9 +1214,11 @@ describe("container descriptor", () => {
     const withConst = await writeModelContainer(syntheticModel(), OPTIONS);
     assertThrows(
       () =>
-        parseGraphDescriptor(mutateJson(withConst.graphDescriptorBytes, (doc) => {
-          anyOf(doc).const.constants[0].graph = "constructor";
-        })),
+        parseGraphDescriptor(
+          mutateJson(withConst.graphDescriptorBytes, (doc) => {
+            anyOf(doc).const.constants[0].graph = "constructor";
+          }),
+        ),
       ContainerFormatError,
       "未宣言のグラフ 'constructor'",
     );

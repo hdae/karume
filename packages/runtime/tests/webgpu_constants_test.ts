@@ -27,18 +27,21 @@ test({
   name: "BUFFER_USAGE は GPUBufferUsage の全ビットを仕様どおり写している",
   ignore: !BUFFER_USAGE_NAMESPACE,
   fn: () => {
-    assertEquals({ ...BUFFER_USAGE }, {
-      MAP_READ: GPUBufferUsage.MAP_READ,
-      MAP_WRITE: GPUBufferUsage.MAP_WRITE,
-      COPY_SRC: GPUBufferUsage.COPY_SRC,
-      COPY_DST: GPUBufferUsage.COPY_DST,
-      INDEX: GPUBufferUsage.INDEX,
-      VERTEX: GPUBufferUsage.VERTEX,
-      UNIFORM: GPUBufferUsage.UNIFORM,
-      STORAGE: GPUBufferUsage.STORAGE,
-      INDIRECT: GPUBufferUsage.INDIRECT,
-      QUERY_RESOLVE: GPUBufferUsage.QUERY_RESOLVE,
-    });
+    assertEquals(
+      { ...BUFFER_USAGE },
+      {
+        MAP_READ: GPUBufferUsage.MAP_READ,
+        MAP_WRITE: GPUBufferUsage.MAP_WRITE,
+        COPY_SRC: GPUBufferUsage.COPY_SRC,
+        COPY_DST: GPUBufferUsage.COPY_DST,
+        INDEX: GPUBufferUsage.INDEX,
+        VERTEX: GPUBufferUsage.VERTEX,
+        UNIFORM: GPUBufferUsage.UNIFORM,
+        STORAGE: GPUBufferUsage.STORAGE,
+        INDIRECT: GPUBufferUsage.INDIRECT,
+        QUERY_RESOLVE: GPUBufferUsage.QUERY_RESOLVE,
+      },
+    );
   },
 });
 
@@ -46,9 +49,12 @@ test({
   name: "MAP_MODE は GPUMapMode の全ビットを仕様どおり写している",
   ignore: !MAP_MODE_NAMESPACE,
   fn: () => {
-    assertEquals({ ...MAP_MODE }, {
-      READ: GPUMapMode.READ,
-      WRITE: GPUMapMode.WRITE,
-    });
+    assertEquals(
+      { ...MAP_MODE },
+      {
+        READ: GPUMapMode.READ,
+        WRITE: GPUMapMode.WRITE,
+      },
+    );
   },
 });

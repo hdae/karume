@@ -109,10 +109,7 @@ type PngOptions = {
 const buildPng = async (options: PngOptions = {}): Promise<Uint8Array<ArrayBuffer>> => {
   const compressed = await deflate(scanlines(options.filter ?? 0));
   const idat = options.splitIdat
-    ? [
-      chunk("IDAT", compressed.subarray(0, 3)),
-      chunk("IDAT", compressed.subarray(3)),
-    ]
+    ? [chunk("IDAT", compressed.subarray(0, 3)), chunk("IDAT", compressed.subarray(3))]
     : [chunk("IDAT", compressed)];
   return concat([
     SIGNATURE,

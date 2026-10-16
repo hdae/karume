@@ -165,9 +165,9 @@ export const conv2dIgemmMTile = (channelsOut: number): number => {
 
 export const conv2dWgsl = (weight: WeightStorage): string => {
   assertDirectWeight(weight);
-  return `// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32${
-    weightNote(weight)
-  }, 直接畳み込み)
+  return `// karume conv2d (x[B,Cin,H,W] * W[Cout,Cin/groups,Kh,Kw] + b[Cout], f32${weightNote(
+    weight,
+  )}, 直接畳み込み)
 struct Dims {
   n: u32,
   batch: u32,
@@ -233,9 +233,12 @@ fn main(
         for (var kw = 0u; kw < dims.kernel_w; kw = kw + 1u) {
           let ix = origin_x + i32(kw * dims.dilation_w);
           if (ix >= 0 && u32(ix) < dims.width_in) {
-            acc = acc + x[row_base + u32(ix)] * ${
-    weightRead("w", weight, "w_row + kw", WEIGHT_SCALE_VAR)
-  };
+            acc = acc + x[row_base + u32(ix)] * ${weightRead(
+              "w",
+              weight,
+              "w_row + kw",
+              WEIGHT_SCALE_VAR,
+            )};
           }
         }
       }

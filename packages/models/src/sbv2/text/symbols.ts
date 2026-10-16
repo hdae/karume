@@ -179,10 +179,7 @@ export const parseJpExtraRules = (raw: unknown, where: string): JpExtraRules => 
     // fail loudly するが、門をここへ揃えて資産の不正として構築時に落とす。
     samplingRate: asPositiveInteger(root["samplingRate"], `${where}.samplingRate`),
     hopLength: asPositiveInteger(root["hopLength"], `${where}.hopLength`),
-    bertHiddenFromEnd: asPositiveInteger(
-      root["bertHiddenFromEnd"],
-      `${where}.bertHiddenFromEnd`,
-    ),
+    bertHiddenFromEnd: asPositiveInteger(root["bertHiddenFromEnd"], `${where}.bertHiddenFromEnd`),
     bertRelPos: parseBertRelPos(root["bertRelPos"], `${where}.bertRelPos`),
     ...(root["defaults"] === undefined
       ? {}
@@ -280,7 +277,10 @@ export const phonesTonesToModelIds = (
   return {
     phoneIds: intersperse(phoneIds, rules.blankId),
     toneIds: intersperse(shiftedTones, rules.blankId),
-    languageIds: intersperse(phoneIds.map(() => rules.languageId), rules.blankId),
+    languageIds: intersperse(
+      phoneIds.map(() => rules.languageId),
+      rules.blankId,
+    ),
   };
 };
 

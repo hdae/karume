@@ -120,18 +120,21 @@ type WanPlanRequest = Pick<
  */
 const assertRgb8Shaped = (image: unknown): void => {
   if (
-    typeof image === "object" && image !== null && "data" in image &&
+    typeof image === "object" &&
+    image !== null &&
+    "data" in image &&
     image.data instanceof Uint8Array
   ) {
     return;
   }
-  const actual = image === null
-    ? "null"
-    : typeof image !== "object"
-    ? typeof image
-    : "data" in image
-    ? `data が ${Object.prototype.toString.call(image.data).slice("[object ".length, -1)}`
-    : "data が無い";
+  const actual =
+    image === null
+      ? "null"
+      : typeof image !== "object"
+        ? typeof image
+        : "data" in image
+          ? `data が ${Object.prototype.toString.call(image.data).slice("[object ".length, -1)}`
+          : "data が無い";
   throw new ModelInputError(
     `image が RGB8 の画像（data が Uint8Array・width・height の object）でない（実際: ${actual}）`,
   );
@@ -210,9 +213,10 @@ export const planWanRequest = <Text>(
   // CFG の uncond 側（上流の `do_classifier_free_guidance = guidance_scale > 1`）。
   let negative: Text | undefined;
   if (guidance > 1) {
-    negative = request.negativePrompt !== undefined
-      ? resolve(request.negativePrompt, "negativePrompt")
-      : gate.defaultNegative();
+    negative =
+      request.negativePrompt !== undefined
+        ? resolve(request.negativePrompt, "negativePrompt")
+        : gate.defaultNegative();
   } else if (request.negativePrompt !== undefined) {
     throw new ModelInputError(
       "guidance 1 では uncond 側を回さないので negativePrompt は効かない（効かせるなら guidance を 1 より大きくする）",
@@ -221,8 +225,10 @@ export const planWanRequest = <Text>(
 
   const frames = request.frames ?? generation.defaults.frames;
   if (
-    !Number.isInteger(frames) || frames < generation.minFrames ||
-    frames > generation.maxFrames || (frames - 1) % TEMPORAL_COMPRESSION !== 0
+    !Number.isInteger(frames) ||
+    frames < generation.minFrames ||
+    frames > generation.maxFrames ||
+    (frames - 1) % TEMPORAL_COMPRESSION !== 0
   ) {
     throw new ModelInputError(
       `frames ${frames} が受理集合（4n+1 の ${generation.minFrames}〜${generation.maxFrames}）に無い`,
@@ -232,7 +238,8 @@ export const planWanRequest = <Text>(
   // 値が undefined の欄は欄が無いのと同じに読む（2.2 の T2V と同じ読み方 — 画像を運ばないので、2.1 で I2V が回ると
   // いう誤った期待を作らない）。
   if (
-    generation.ditInputForm !== "ti2v" && (request.image !== undefined || request.fit !== undefined)
+    generation.ditInputForm !== "ti2v" &&
+    (request.image !== undefined || request.fit !== undefined)
   ) {
     throw new ModelInputError(
       "image / fit（画像からの生成）はこの世代では受けない（受けるのは Wan2.2 の WanTi2vPipeline）",
@@ -252,13 +259,11 @@ export const planWanRequest = <Text>(
   if (request.image === undefined) {
     width = request.width ?? generation.defaults.width;
     height = request.height ?? generation.defaults.height;
-    if (
-      !generation.acceptedSizes.some((size) => size.width === width && size.height === height)
-    ) {
+    if (!generation.acceptedSizes.some((size) => size.width === width && size.height === height)) {
       throw new ModelInputError(
-        `${width}×${height} が受理集合（${
-          generation.acceptedSizes.map((size) => `${size.width}×${size.height}`).join(" / ")
-        }）に無い`,
+        `${width}×${height} が受理集合（${generation.acceptedSizes
+          .map((size) => `${size.width}×${size.height}`)
+          .join(" / ")}）に無い`,
       );
     }
   } else {
@@ -281,9 +286,7 @@ export const planWanRequest = <Text>(
   ];
   if (!latentShape.every(Number.isInteger)) {
     // 受理集合は空間の圧縮で割り切れる寸法だけ — 割れるなら資産の取り違え（入力起因ではない）。
-    throw new Error(
-      `潜在の形 [${latentShape}] が整数でない（空間の圧縮 ${compression}）`,
-    );
+    throw new Error(`潜在の形 [${latentShape}] が整数でない（空間の圧縮 ${compression}）`);
   }
 
   if (request.seed !== undefined && request.latents !== undefined) {

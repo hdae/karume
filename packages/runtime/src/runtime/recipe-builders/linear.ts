@@ -80,10 +80,7 @@ export const buildMatmul = async (
   // 出力タイルが静かに欠ける。
   const geometry = gemmRowsGeometry(face.state.geometryProfile, m);
   const key = matmulKey(v4, m, geometry);
-  const { pipeline, layout, roles } = await face.state.cache.get(
-    key,
-    matmulWgsl(v4, m, geometry),
-  );
+  const { pipeline, layout, roles } = await face.state.cache.get(key, matmulWgsl(v4, m, geometry));
   const params = face.writeParams(matmulParams(m, n, k), PARAMS_UNIFORM_USAGE);
   const limit = face.state.gpu.limits.maxComputeWorkgroupsPerDimension;
   const where = `matmul [${a.join(",")}] × [${b.join(",")}]`;
@@ -177,15 +174,17 @@ export const buildLinear = async (
   // `vec4<u32>` の束縛に f32 の語が流れる = 例外なしの沈黙誤値になる。対付けの受理は
   // fusion.ts の 1 箇所だが、**同じ述語で**ここでも確かめる（fail loudly）。
   if (packed !== undefined) {
-    const eligible = packed.role === "read" &&
-      face.state.linearGemvReduce === "parallel" && face.state.linearCompute === "f32" &&
+    const eligible =
+      packed.role === "read" &&
+      face.state.linearGemvReduce === "parallel" &&
+      face.state.linearCompute === "f32" &&
       linearGemvPackedEligible(
-          weightStorage,
-          m,
-          n,
-          k,
-          weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
-        ) !== undefined;
+        weightStorage,
+        m,
+        n,
+        k,
+        weightStorage === "i4" ? face.weightGroupSize(step) : undefined,
+      ) !== undefined;
     if (!eligible) {
       throw new ExecutionError(
         `linear [${x.join(",")}] × [${weight.join(",")}]: ` +
@@ -208,7 +207,9 @@ export const buildLinear = async (
   // 無関係の別要因）。
   if (
     face.state.linearCompute === "a8" &&
-    (weightStorage === "i8" || weightStorage === "i4") && k > 0 && k % 4 === 0
+    (weightStorage === "i8" || weightStorage === "i4") &&
+    k > 0 &&
+    k % 4 === 0
   ) {
     await buildLinearI8a8(face, step, binds, outs, builder, m, n, k, weightStorage);
     return;
@@ -262,8 +263,12 @@ export const buildLinear = async (
   // f16 / f32 格納も M=1 のみ同じ骨格へ（ADR 0082 追記 6・7）。計算は f32 のまま、
   // 重み 1 語 = f16 は 8 要素、f32 は 4 要素。行ブロックと f16 計算はこの変種の検収範囲に含めない。
   if (
-    m === 1 && (weightStorage === "f16" || weightStorage === "f32") &&
-    compute === "f32" && v4 && k > 0 && k % linearGemvUnit(weightStorage) === 0
+    m === 1 &&
+    (weightStorage === "f16" || weightStorage === "f32") &&
+    compute === "f32" &&
+    v4 &&
+    k > 0 &&
+    k % linearGemvUnit(weightStorage) === 0
   ) {
     await buildLinearGemv(
       face,
@@ -283,7 +288,10 @@ export const buildLinear = async (
   const i4Unit = linearGemvUnit("i4");
   const gemvRows = m >= 1 && m <= LINEAR_GEMV_MAX_ROWS;
   if (
-    gemvRows && weightStorage === "i2" && compute === "f32" && v4 &&
+    gemvRows &&
+    weightStorage === "i2" &&
+    compute === "f32" &&
+    v4 &&
     k % linearGemvUnit("i2") === 0
   ) {
     await buildLinearGemv(face, step, binds, outs, builder, "i2", m, n, k, undefined, packed);
@@ -291,8 +299,12 @@ export const buildLinear = async (
   }
 
   if (
-    gemvRows && weightStorage === "i4" && compute === "f32" && v4 &&
-    groupSize !== undefined && groupSize % i4Unit === 0 &&
+    gemvRows &&
+    weightStorage === "i4" &&
+    compute === "f32" &&
+    v4 &&
+    groupSize !== undefined &&
+    groupSize % i4Unit === 0 &&
     k % i4Unit === 0
   ) {
     await buildLinearGemv(face, step, binds, outs, builder, "i4", m, n, k, groupSize, packed);
@@ -301,7 +313,10 @@ export const buildLinear = async (
   // i8 格納（lm_head — perf-ledger K-16）。i4 と同じ族・同じ変種で、違うのは 1 語が運ぶ
   // 要素数（16）と scale の引き方（出力チャネルごと 1 本 = 縮約の外で 1 度だけ束ねる）だけ。
   if (
-    gemvRows && weightStorage === "i8" && compute === "f32" && v4 &&
+    gemvRows &&
+    weightStorage === "i8" &&
+    compute === "f32" &&
+    v4 &&
     k % linearGemvUnit("i8") === 0
   ) {
     await buildLinearGemv(face, step, binds, outs, builder, "i8", m, n, k, undefined, packed);
@@ -372,37 +387,40 @@ const buildLinearGemv = async (
   const where = `linear gemv [${x.join(",")}] × [${weight.join(",")}]`;
   // 数値を変える選択は明示指定時のみ。参照経路の選択・WGSLは従来どおり。
   const subgroup = face.state.linearGemvReduce === "parallel-subgroup32";
-  const lanes = face.state.linearGemvReduce !== "sequential"
-    ? linearGemvParallelLanes(storage, m, n, k, groupSize)
-    : undefined;
-  const rowsVariant = m === 1 || lanes !== undefined
-    ? undefined
-    : defaultLinearGemvRowsVariant(storage, m, n, face.state.linearGemvRowsThreadTarget);
+  const lanes =
+    face.state.linearGemvReduce !== "sequential"
+      ? linearGemvParallelLanes(storage, m, n, k, groupSize)
+      : undefined;
+  const rowsVariant =
+    m === 1 || lanes !== undefined
+      ? undefined
+      : defaultLinearGemvRowsVariant(storage, m, n, face.state.linearGemvRowsThreadTarget);
   const variant = rowsVariant ?? defaultLinearGemvVariant({ storage, n, k });
   const rows = rowsVariant?.rows ?? 1;
   // packed 活性の変種は並列（非 subgroup）だけが持つ。`buildLinear` の門を通っていれば
   // ここは必ず `lanes !== undefined && !subgroup` になる。
   const packedScale = packed === undefined ? undefined : packed.scale;
-  const key = lanes !== undefined
-    ? subgroup
-      ? linearGemvSubgroupKey(storage, groupSize, lanes)
-      : packedScale === undefined
-      ? linearGemvParallelKey(storage, groupSize, lanes)
-      : linearGemvParallelPackedKey(storage, groupSize, lanes)
-    : rowsVariant === undefined
-    ? linearGemvKey(storage, groupSize, variant)
-    : linearGemvRowsKey(storage, groupSize, rowsVariant);
+  const key =
+    lanes !== undefined
+      ? subgroup
+        ? linearGemvSubgroupKey(storage, groupSize, lanes)
+        : packedScale === undefined
+          ? linearGemvParallelKey(storage, groupSize, lanes)
+          : linearGemvParallelPackedKey(storage, groupSize, lanes)
+      : rowsVariant === undefined
+        ? linearGemvKey(storage, groupSize, variant)
+        : linearGemvRowsKey(storage, groupSize, rowsVariant);
   const { pipeline, layout, roles } = await face.state.cache.get(
     key,
     lanes !== undefined
       ? subgroup
         ? linearGemvSubgroupWgsl(storage, groupSize, lanes)
         : packedScale === undefined
-        ? linearGemvParallelWgsl(storage, groupSize, lanes)
-        : linearGemvParallelPackedWgsl(storage, groupSize, lanes)
+          ? linearGemvParallelWgsl(storage, groupSize, lanes)
+          : linearGemvParallelPackedWgsl(storage, groupSize, lanes)
       : rowsVariant === undefined
-      ? linearGemvWgsl(storage, groupSize, variant)
-      : linearGemvRowsWgsl(storage, groupSize, rowsVariant),
+        ? linearGemvWgsl(storage, groupSize, variant)
+        : linearGemvRowsWgsl(storage, groupSize, rowsVariant),
   );
   // uniform は既定経路と同じ 3 語（束縛レイアウトを分けない）。整除の検査は族側の 1 箇所。
   // packed 変種だけが Dims の末尾へ活性 scale を 1 語足す。
@@ -474,11 +492,11 @@ const buildLinearI8a8 = async (
   // ① 活性の per-token 量子化（1 行 = 1 workgroup・行方向 grid-stride）
   const quantizeGeometry = quantizeRowsGeometry(k);
   const quantizeKey = quantizeRowsKey(quantizeGeometry);
-  const { pipeline: quantizePipeline, layout: quantizeLayout, roles: quantizeRoles } = await face
-    .state.cache.get(
-      quantizeKey,
-      quantizeRowsWgsl(quantizeGeometry),
-    );
+  const {
+    pipeline: quantizePipeline,
+    layout: quantizeLayout,
+    roles: quantizeRoles,
+  } = await face.state.cache.get(quantizeKey, quantizeRowsWgsl(quantizeGeometry));
   builder.dispatch({
     key: quantizeKey,
     pipeline: quantizePipeline,

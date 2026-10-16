@@ -52,7 +52,10 @@ describe("pipelineCensus", () => {
   describe("並び", () => {
     it("出現順ではなくキーの辞書順（コード単位比較 — 大文字が小文字より前）", () => {
       const census = pipelineCensus([step("b"), step("a:2"), step("B"), step("a:10"), step("a")]);
-      assertEquals(census.map((entry) => entry.key), ["B", "a", "a:10", "a:2", "b"]);
+      assertEquals(
+        census.map((entry) => entry.key),
+        ["B", "a", "a:10", "a:2", "b"],
+      );
     });
 
     it("入力の並びを入れ替えても同じ表になる（計画の並びに依らない決定性）", () => {

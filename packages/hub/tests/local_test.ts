@@ -120,9 +120,7 @@ test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheSt
     caches,
   });
   const selected = selectionFiles(loaded.manifest);
-  const files = Object.fromEntries(
-    PART_KEYS.map((key): [string, FileRef] => [key, selected[key]]),
-  );
+  const files = Object.fromEntries(PART_KEYS.map((key): [string, FileRef] => [key, selected[key]]));
   const progress = recordProgress();
 
   const assets = await fetchAssets(loaded, files, { onProgress: progress.onProgress });
@@ -133,7 +131,10 @@ test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheSt
   // 温めが丸ごと省かれるので、1 本につき読みは 1 回だけ（温めてから読み直す形にならない）。
   assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS]);
   // 受信の途中という状態が無いので、進捗はファイルごとの complete 1 点だけ。
-  assertEquals(progress.events.map((event) => event.phase), ["complete", "complete"]);
+  assertEquals(
+    progress.events.map((event) => event.phase),
+    ["complete", "complete"],
+  );
   // repo も世代も持たない取得元のファイルは、取得先の欄を**欄ごと**出さない（合成した名前や
   // 偽の SHA を名乗らない — `loaded.repo` / `revisionSha` と同じ規律）。
   for (const event of progress.events) {
@@ -279,10 +280,9 @@ test("localDirectory: 実体が無いファイルは実パスを cause に残し
 });
 
 test("localDirectory: 上限を超えた karume.json は ManifestFormatError", async () => {
-  const oversized = new Map<string, Uint8Array<ArrayBuffer>>([[
-    MANIFEST_FILENAME,
-    new TextEncoder().encode(" ".repeat(2 * 1024 * 1024)),
-  ]]);
+  const oversized = new Map<string, Uint8Array<ArrayBuffer>>([
+    [MANIFEST_FILENAME, new TextEncoder().encode(" ".repeat(2 * 1024 * 1024))],
+  ]);
   const directory = memoryDirectory(oversized);
   const error = await assertRejects(
     () => loadManifest(localDirectory(directory.adapter, { label: LABEL })),
@@ -292,10 +292,9 @@ test("localDirectory: 上限を超えた karume.json は ManifestFormatError", a
 });
 
 test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatError で落ちる", async () => {
-  const broken = new Map<string, Uint8Array<ArrayBuffer>>([[
-    MANIFEST_FILENAME,
-    new TextEncoder().encode('{"format": "karume/5"'),
-  ]]);
+  const broken = new Map<string, Uint8Array<ArrayBuffer>>([
+    [MANIFEST_FILENAME, new TextEncoder().encode('{"format": "karume/5"')],
+  ]);
   const directory = memoryDirectory(broken);
   const source = localDirectory(directory.adapter, { label: LABEL });
   // ローカルには evict すべきキャッシュが無いので、self-heal も「1 往復だけ取り直す」も無い。
@@ -338,12 +337,14 @@ const fakeRemote = (
         return Promise.resolve(new Uint8Array(bytes));
       },
       // 相 1 は取得元ごとの optional 能力（`source.ts` ④）。持つ取得元だけがこの席を生やす。
-      ...(options.warmed === undefined ? {} : {
-        prefetchFile: (ref: FileRef): Promise<void> => {
-          options.warmed?.push(ref.path);
-          return Promise.resolve();
-        },
-      }),
+      ...(options.warmed === undefined
+        ? {}
+        : {
+            prefetchFile: (ref: FileRef): Promise<void> => {
+              options.warmed?.push(ref.path);
+              return Promise.resolve();
+            },
+          }),
       originFor: (crossRepo, crossRevision) => pinnedFor(crossRepo, crossRevision),
     };
   };

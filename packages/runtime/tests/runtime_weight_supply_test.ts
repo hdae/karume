@@ -302,9 +302,8 @@ describe("重みの供給は block を 1 本ずつ読んで上げる", () => {
     const { events, counts, gpu, trace } = recorder();
     const injected = new Error("注入: block の取得に失敗");
     // part 1 本目の 2 本目（b を上げた後・フェンスの前）で落とす。
-    const failing = trace(
-      container(),
-      (id) => id === "model/c" ? Promise.reject(injected) : Promise.resolve(),
+    const failing = trace(container(), (id) =>
+      id === "model/c" ? Promise.reject(injected) : Promise.resolve(),
     );
     const error = await assertRejects(() => createSessionFromContainer(gpu, failing, GRAPH_NAME));
 

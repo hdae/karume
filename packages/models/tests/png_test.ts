@@ -51,7 +51,10 @@ test("encodePng: シグネチャ + IHDR/IDAT/IEND の順で、全チャンクの
 
   assertEquals([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const chunks = walkChunks(png);
-  assertEquals(chunks.map((chunk) => chunk.type), ["IHDR", "IDAT", "IEND"]);
+  assertEquals(
+    chunks.map((chunk) => chunk.type),
+    ["IHDR", "IDAT", "IEND"],
+  );
   for (const chunk of chunks) assert(chunk.crcOk, `${chunk.type} の CRC が合わない`);
 
   const ihdr = new DataView(
@@ -170,7 +173,7 @@ test("encodePng: deflate が効いている（一様画像が生バイト列よ�
   const rgba = new Uint8ClampedArray(width * height * 4).fill(255);
   const png = await encodePng(rgba, width, height);
   assert(
-    png.length < width * height * 3 / 10,
+    png.length < (width * height * 3) / 10,
     `PNG ${png.length}B が無圧縮 ${width * height * 3}B の 1/10 未満でない`,
   );
 });
@@ -193,6 +196,7 @@ test("encodePng: 同じ入力からバイト単位で同じ PNG が出る（決�
   // 生成画像の同一性を sha256 で門にする運用（ADR 0037 の P3 門）は、この決定性の上に立つ。
   const digest = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
-      .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
   assertEquals(await digest(first), await digest(second));
 });

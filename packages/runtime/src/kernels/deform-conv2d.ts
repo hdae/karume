@@ -54,11 +54,9 @@ export const DEFORM_CONV2D_OOB_BITS = 0x7fc00000;
  *
  * v2: NaN 判定を写しの `is_nan` から共有断片 {@link IS_NAN_BITS_WGSL} へ替えた（判定式は同一）。
  */
-export const DEFORM_CONV2D_KEY =
-  `deform_conv2d:v2:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`;
+export const DEFORM_CONV2D_KEY = `deform_conv2d:v2:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`;
 
-export const DEFORM_CONV2D_WGSL: string =
-  `// karume deform_conv2d (DCNv2: x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, 直接畳み込み)
+export const DEFORM_CONV2D_WGSL: string = `// karume deform_conv2d (DCNv2: x[B,Cin,H,W] * W[Cout,Cin,Kh,Kw] + b[Cout], f32, 直接畳み込み)
 struct Dims {
   n: u32,
   batch: u32,

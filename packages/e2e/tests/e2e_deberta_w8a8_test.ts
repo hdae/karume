@@ -142,7 +142,7 @@ const STRICT_OUTPUTS = 2;
  * 上限を広げて通すのではなく、先に i8a8 の scale / accumulator / 適格判定のどれが動いたかを確かめる。
  */
 const COLLAPSE_CEILINGS: Readonly<Record<string, number>> = {
-  "output.2": 0.020,
+  "output.2": 0.02,
   "output.3": 0.037,
   "output.4": 0.051,
   "output.5": 0.062,
@@ -261,7 +261,8 @@ const ROOT = new URL("../../../outputs/series/deberta-i8/full-24layer/", import.
 const GRAPH = seriesGraph("deberta-i8", "full-24layer");
 const VARIANT = "i8/full-24layer";
 /** SKIP 時にそのまま貼れる生成コマンド（tools/export-recipes/deberta/README.md）。 */
-const GENERATE = "cd tools/export-recipes && uv run --with 'transformers==5.14.1' " +
+const GENERATE =
+  "cd tools/export-recipes && uv run --with 'transformers==5.14.1' " +
   "python -m deberta.export --dtype i8 --layers 24 --act-quant";
 
 /**
@@ -323,8 +324,9 @@ const mirrorFiles = (root: URL): readonly string[] => {
     throw cause;
   }
   return entries
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(ACT_IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) =>
+        entry.isFile && entry.name.startsWith(ACT_IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name)
     .sort();
@@ -359,16 +361,15 @@ describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らな�
   // 固定の合成データ: 1 チャネルだけ桁の大きい外れ値チャネルを持つ golden（実物の channel 686 の形）。
   const SIZE = 1024;
   const OUTLIER = 686;
-  const golden = Float32Array.from(
-    { length: SIZE },
-    (_, index) => index === OUTLIER ? 28.8 : Math.sin(index * 0.37 + 0.1) * (1 + (index % 7) * 0.3),
+  const golden = Float32Array.from({ length: SIZE }, (_, index) =>
+    index === OUTLIER ? 28.8 : Math.sin(index * 0.37 + 0.1) * (1 + (index % 7) * 0.3),
   );
   const normOf = (values: ArrayLike<number>): number =>
     Math.sqrt(Array.from(values, (value) => value * value).reduce((sum, value) => sum + value, 0));
   /** golden に、相対 RMS 誤差がちょうど `target` になる揺れ（golden と別周期）を足した別標本。 */
   const sampleAt = (target: number): Float32Array => {
     const noise = Array.from({ length: SIZE }, (_, index) => Math.cos(index * 1.13 + 0.7));
-    const scale = target * normOf(golden) / normOf(noise);
+    const scale = (target * normOf(golden)) / normOf(noise);
     return Float32Array.from(golden, (value, index) => value + noise[index] * scale);
   };
   const map = (values: Float32Array, f: (value: number) => number): Float32Array =>
@@ -602,8 +603,7 @@ for (const file of FILES) {
 }
 
 test({
-  name:
-    `DeBERTa w8a8（${VARIANT}）: run が i8a8 GEMM と quantize_rows だけで linear を回す（キー census）`,
+  name: `DeBERTa w8a8（${VARIANT}）: run が i8a8 GEMM と quantize_rows だけで linear を回す（キー census）`,
   ignore: !RUNNABLE,
   fn: async () => {
     // 内訳は T に依らない（計画は記号次元の束縛で形が変わるだけで、dispatch の並びは同じ）ので

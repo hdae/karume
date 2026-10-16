@@ -162,7 +162,8 @@ const assertPolicy = (policy: SubmitPolicy): void => {
     );
   }
   if (
-    policy.initialChunkSize < policy.minChunkSize || policy.initialChunkSize > policy.maxChunkSize
+    policy.initialChunkSize < policy.minChunkSize ||
+    policy.initialChunkSize > policy.maxChunkSize
   ) {
     throw new SubmitPolicyError(
       `SubmitPolicy.initialChunkSize (${policy.initialChunkSize}) が [${policy.minChunkSize}, ${policy.maxChunkSize}] の外にある`,
@@ -746,20 +747,22 @@ export class SubmitScheduler {
         overBudgetChunks: this.#overBudgetChunks,
         maxWindowMeanMs: this.#maxWindowMeanMs,
         // 読み手が可変の内部状態を掴まないよう、読むたびに写す（undefined の欄は書かない）。
-        ...(this.#submitGpuTime === undefined ? {} : {
-          submitGpuTime: {
-            submits: this.#submitGpuTime.submits,
-            maxNs: this.#submitGpuTime.maxNs,
-            unbackedSubmits: this.#submitGpuTime.unbackedSubmits,
-            ...(this.#submitGpuTime.maxUnbackedNs === undefined
-              ? {}
-              : { maxUnbackedNs: this.#submitGpuTime.maxUnbackedNs }),
-            maxDispatchNs: this.#submitGpuTime.maxDispatchNs,
-            ...(this.#submitGpuTime.maxDispatchKey === undefined
-              ? {}
-              : { maxDispatchKey: this.#submitGpuTime.maxDispatchKey }),
-          },
-        }),
+        ...(this.#submitGpuTime === undefined
+          ? {}
+          : {
+              submitGpuTime: {
+                submits: this.#submitGpuTime.submits,
+                maxNs: this.#submitGpuTime.maxNs,
+                unbackedSubmits: this.#submitGpuTime.unbackedSubmits,
+                ...(this.#submitGpuTime.maxUnbackedNs === undefined
+                  ? {}
+                  : { maxUnbackedNs: this.#submitGpuTime.maxUnbackedNs }),
+                maxDispatchNs: this.#submitGpuTime.maxDispatchNs,
+                ...(this.#submitGpuTime.maxDispatchKey === undefined
+                  ? {}
+                  : { maxDispatchKey: this.#submitGpuTime.maxDispatchKey }),
+              },
+            }),
       },
     };
   }
@@ -1025,8 +1028,11 @@ export class SubmitScheduler {
       const delta = stamps[index * 2 + 1] - stamps[index * 2];
       // MUST: 負値は 0 に丸めたうえで**件数を残す**（黙って捨てない — ADR 0021）。
       if (delta < 0n) this.#clampedNegativeSamples += 1;
-      const total = this.#timingTotals.get(entry.key) ??
-        { ns: 0, dispatchCount: 0, workgroupCount: 0 };
+      const total = this.#timingTotals.get(entry.key) ?? {
+        ns: 0,
+        dispatchCount: 0,
+        workgroupCount: 0,
+      };
       total.ns += delta < 0n ? 0 : Number(delta);
       total.dispatchCount += 1;
       total.workgroupCount += entry.work;
@@ -1051,14 +1057,14 @@ export class SubmitScheduler {
       if (stamp > last) last = stamp;
     }
     const spanNs = Number(last - first);
-    const observed = this.#submitGpuTime ??= {
+    const observed = (this.#submitGpuTime ??= {
       submits: 0,
       maxNs: 0,
       unbackedSubmits: 0,
       maxUnbackedNs: undefined,
       maxDispatchNs: 0,
       maxDispatchKey: undefined,
-    };
+    });
     observed.submits += 1;
     observed.maxNs = Math.max(observed.maxNs, spanNs);
     if (!timing.backed) {

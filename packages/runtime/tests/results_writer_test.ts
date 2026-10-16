@@ -4,7 +4,14 @@
 // **その時点までの全件**で書き直されること（途中で落ちても直前までが残る）、実物の置き場が
 // 同じディレクトリ配下に閉じること。実 GPU も `outputs/` も要らない — 根と環境は注入する。
 
-import { makeTempDirSync, mkdirSync, readTextFile, removeSync, writeFile, writeTextFileSync } from "@karume/test-support/fs";
+import {
+  makeTempDirSync,
+  mkdirSync,
+  readTextFile,
+  removeSync,
+  writeFile,
+  writeTextFileSync,
+} from "@karume/test-support/fs";
 import {
   assert,
   assertEquals,
@@ -79,7 +86,10 @@ test("結果の書き出し: record のたびに全件で書き直され、実�
     assertEquals(document.schema, 1);
     assertEquals(document.family, "irodori");
     assertEquals(document.environment.key, KEY);
-    assertEquals(document.cases.map((entry) => entry.id), ["voice-clone", "no-ref"]);
+    assertEquals(
+      document.cases.map((entry) => entry.id),
+      ["voice-clone", "no-ref"],
+    );
     assertEquals(document.cases[1].status, "written");
     // 参照値を作った回は expected を持たない（JSON.stringify が undefined の欄を落とす）。
     assertEquals(Object.hasOwn(document.cases[1], "expected"), false);
@@ -161,13 +171,15 @@ test("結果の書き出し: 非有限の実測は null として書かれる", 
       id: "activations",
       status: "fail",
       elapsedMs: 9,
-      measurements: [{
-        output: "sin",
-        maxAbs: Number.POSITIVE_INFINITY,
-        maxRel: Number.NaN,
-        tolerance: { atol: 1e-6, rtol: 1e-5 },
-        stage: "karume",
-      }],
+      measurements: [
+        {
+          output: "sin",
+          maxAbs: Number.POSITIVE_INFINITY,
+          maxRel: Number.NaN,
+          tolerance: { atol: 1e-6, rtol: 1e-5 },
+          stage: "karume",
+        },
+      ],
     });
     const text = await readTextFile(new URL("results.json", results.dir));
     assertStringIncludes(text, `"maxAbs": null`);
@@ -231,18 +243,16 @@ test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ 
       environment: ENVIRONMENT,
     });
     // `?` / `#` の後ろはクエリ・フラグメントへ回り、記録する名前と書き込み先（`a`）がずれる。
-    for (
-      const name of [
-        "..\\outside.wav",
-        "..",
-        ".",
-        "%2e%2e",
-        "%2E%2E\\x.wav",
-        "",
-        "a?b.wav",
-        "a#b.wav",
-      ]
-    ) {
+    for (const name of [
+      "..\\outside.wav",
+      "..",
+      ".",
+      "%2e%2e",
+      "%2E%2E\\x.wav",
+      "",
+      "a?b.wav",
+      "a#b.wav",
+    ]) {
       assertThrows(() => results.artifact(name), Error, "実物の名前", JSON.stringify(name));
     }
     // 対照: 普通の名前（点を含む拡張子や連番）は席の直下へ解決される。
@@ -315,16 +325,20 @@ test("runRecordedCase: 本体が投げた回は fail を残してから同じ例
   const cause = new Error("output.0: allclose 不一致");
   const order: string[] = [];
   const thrown = await assertRejects(() =>
-    runRecordedCase(results, {
-      id: "case1",
-      onFailure: () => {
-        order.push(`onFailure（積んだ件数 ${entries.length}）`);
+    runRecordedCase(
+      results,
+      {
+        id: "case1",
+        onFailure: () => {
+          order.push(`onFailure（積んだ件数 ${entries.length}）`);
+        },
       },
-    }, ({ measurements }) => {
-      // 落ちる前に測れた分も決着に載る（どこまで測れたかが失敗の診断になる）。
-      measurements.push(MEASUREMENT);
-      return Promise.reject(cause);
-    })
+      ({ measurements }) => {
+        // 落ちる前に測れた分も決着に載る（どこまで測れたかが失敗の診断になる）。
+        measurements.push(MEASUREMENT);
+        return Promise.reject(cause);
+      },
+    ),
   );
   assertStrictEquals(thrown, cause, "元の検証例外が別の例外に置き換わった");
   assertEquals(entries.length, 1);
@@ -337,10 +351,8 @@ test("runRecordedCase: 本体が投げた回は fail を残してから同じ例
 
 test("runRecordedCase: 本体が fail を返した回は投げずに note つきで残す", async () => {
   const { results, entries } = fakeResults();
-  await runRecordedCase(
-    results,
-    { id: "gelu" },
-    () => Promise.resolve({ status: "fail", note: "仕様帯で受理: sin" }),
+  await runRecordedCase(results, { id: "gelu" }, () =>
+    Promise.resolve({ status: "fail", note: "仕様帯で受理: sin" }),
   );
   assertEquals(entries.length, 1);
   assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "note", "measurements"]);
@@ -353,10 +365,14 @@ test("runRecordedCase: 投げた回の note は failureNote が例外から作�
   const { results, entries } = fakeResults();
   await assertRejects(
     () =>
-      runRecordedCase(results, {
-        id: "gelu",
-        failureNote: (cause) => `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
-      }, () => Promise.reject(new Error("createSession 失敗"))),
+      runRecordedCase(
+        results,
+        {
+          id: "gelu",
+          failureNote: (cause) => `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
+        },
+        () => Promise.reject(new Error("createSession 失敗")),
+      ),
     Error,
     "createSession 失敗",
   );
@@ -370,7 +386,7 @@ test("runRecordedCase: 投げた回に記録が落ちても元の例外を投げ
   let thrown: unknown;
   const said = await captureConsoleError(async () => {
     thrown = await assertRejects(() =>
-      runRecordedCase(results, { id: "case2" }, () => Promise.reject(cause))
+      runRecordedCase(results, { id: "case2" }, () => Promise.reject(cause)),
     );
   });
   assertStrictEquals(thrown, cause, "元の検証例外が I/O 例外に置き換わった");
@@ -383,12 +399,16 @@ test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailure �
   let failed = false;
   await assertRejects(
     () =>
-      runRecordedCase(results, {
-        id: "case3",
-        onFailure: () => {
-          failed = true;
+      runRecordedCase(
+        results,
+        {
+          id: "case3",
+          onFailure: () => {
+            failed = true;
+          },
         },
-      }, () => Promise.resolve(undefined)),
+        () => Promise.resolve(undefined),
+      ),
     Error,
     "results.json を書けない",
   );
@@ -408,23 +428,21 @@ test("往復: runRecordedCase が書いた results.json を verify-diff の読�
       return Promise.resolve(undefined);
     });
     const cause = new Error("測る前に落ちた");
-    await assertRejects(
-      () =>
-        runRecordedCase(
-          results,
-          { id: "thrown", failureNote: String },
-          () => Promise.reject(cause),
-        ),
+    await assertRejects(() =>
+      runRecordedCase(results, { id: "thrown", failureNote: String }, () => Promise.reject(cause)),
     );
 
     const text = await readTextFile(new URL("results.json", results.dir));
     const document = parseResultsDocument(JSON.parse(text));
     assertEquals(document.family, "golden");
     assertEquals(document.environment.key, KEY);
-    assertEquals(document.cases.map((entry) => [entry.id, entry.status]), [
-      ["measured", "pass"],
-      ["thrown", "fail"],
-    ]);
+    assertEquals(
+      document.cases.map((entry) => [entry.id, entry.status]),
+      [
+        ["measured", "pass"],
+        ["thrown", "fail"],
+      ],
+    );
     // 非有限は書き手の JSON.stringify で null になり、読み手は「測れなかった」として受ける。
     assertEquals(document.cases[0].measurements, [{ ...MEASUREMENT, maxAbs: null }]);
     // runRecordedCase 経由は測る前に投げた回も欄を持つ（空配列）。
@@ -515,7 +533,8 @@ describe("runRecordedCase の決着に載せた参照値の欄", () => {
         actual: "b".repeat(64),
         expected: "a".repeat(64),
         status: "fail",
-      }));
+      }),
+    );
     assertEquals(Object.keys(entries[0]), [
       "id",
       "status",
@@ -547,7 +566,8 @@ describe("runRecordedCase の決着に載せた参照値の欄", () => {
           expected: "a".repeat(64),
           actual: "b".repeat(64),
           artifact: "rewritten.safetensors",
-        }));
+        }),
+      );
       const text = await readTextFile(new URL("results.json", results.dir));
       const [entry] = parseResultsDocument(JSON.parse(text)).cases;
       assertEquals(

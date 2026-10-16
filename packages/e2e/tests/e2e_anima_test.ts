@@ -86,7 +86,9 @@ const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 /** CFG の門が選ぶモデル（素の base — 既定の turbo は CFG=1 で uncond 側を通らない）。 */
 const BASE_MODEL = "anima-v1.0";
 /** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
-const references = openReferences(new URL("../../models/tests/fixtures/references/anima.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/anima.json", import.meta.url),
+);
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_anima/` — 消して安全）。 */
 const results = openResults("anima");
 
@@ -94,7 +96,8 @@ const results = openResults("anima");
  * 移行元デモの既定プロンプト（参照 PNG を焼いた時の文字列そのもの）。
  * ネガティブは `guidanceScale 1` で 1 文字も使われないので渡さない（渡すと fail loudly）。
  */
-const PROMPT = "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, outdoors, " +
+const PROMPT =
+  "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, outdoors, " +
   "smile, upper body, masterpiece, best quality";
 const STEPS = 8;
 const SEED = 42;
@@ -192,7 +195,8 @@ const serveAssets = (origins: ReadonlyMap<string, ServedOrigin>): Promise<AssetS
         // revision 解決を要求するのはセッション repo だけ（越境参照は commit SHA 固定なので、
         // 取得層が解決要求そのものを出さない）。
         if (REVISION_RE.test(pathname)) {
-          response.writeHead(200, { "content-type": "application/json" })
+          response
+            .writeHead(200, { "content-type": "application/json" })
             .end(JSON.stringify({ sha: REVISION_SHA }));
           return;
         }
@@ -215,7 +219,7 @@ const serveAssets = (origins: ReadonlyMap<string, ServedOrigin>): Promise<AssetS
         addr: { port },
         shutdown: () =>
           new Promise((done, fail) => {
-            server.close((error) => error === undefined ? done() : fail(error));
+            server.close((error) => (error === undefined ? done() : fail(error)));
             server.closeAllConnections();
           }),
       });
@@ -246,9 +250,7 @@ const servedOrigins = (
     ...(model === undefined ? {} : { model }),
   });
   const refs: FileRef[] = [
-    ...Object.keys(selection.containers).flatMap((name) => [
-      ...selection.containers[name].parts,
-    ]),
+    ...Object.keys(selection.containers).flatMap((name) => [...selection.containers[name].parts]),
     ...Object.keys(selection.assets).map((name) => selection.assets[name]),
   ];
   for (const ref of refs) {
@@ -271,18 +273,20 @@ const servedOrigins = (
 /** 画素の要約（参照 sha と食い違ったときに「どれくらい違う絵なのか」を言うため）。 */
 const describePixels = (image: GeneratedImage): string => {
   const channels = ["R", "G", "B"];
-  return channels.map((name, offset) => {
-    let sum = 0;
-    let min = 255;
-    let max = 0;
-    for (let at = offset; at < image.data.length; at += 4) {
-      const value = image.data[at];
-      sum += value;
-      if (value < min) min = value;
-      if (value > max) max = value;
-    }
-    return `${name} 平均 ${(sum / (image.width * image.height)).toFixed(2)} / 範囲 ${min}〜${max}`;
-  }).join(" / ");
+  return channels
+    .map((name, offset) => {
+      let sum = 0;
+      let min = 255;
+      let max = 0;
+      for (let at = offset; at < image.data.length; at += 4) {
+        const value = image.data[at];
+        sum += value;
+        if (value < min) min = value;
+        if (value > max) max = value;
+      }
+      return `${name} 平均 ${(sum / (image.width * image.height)).toFixed(2)} / 範囲 ${min}〜${max}`;
+    })
+    .join(" / ");
 };
 
 /**
@@ -330,10 +334,11 @@ const settlePng = async (
   // 双子の行との突合は**判定だけ**先に済ませる。ここで投げると自分の決着が記録されないまま
   // 実物だけが席に残り、同じ日の前回の決着と組で読まれる（双子が同値なら自分の不一致でもある）。
   const twinSha = twin === undefined ? undefined : references.lookup(twin);
-  const twinMismatch = twinSha === undefined || twinSha === actual
-    ? undefined
-    : `${twin} とビット同一でない（${twin} ${twinSha} / 実測 ${actual}）— ` +
-      "別経路が同じバイトを産んでいない";
+  const twinMismatch =
+    twinSha === undefined || twinSha === actual
+      ? undefined
+      : `${twin} とビット同一でない（${twin} ${twinSha} / 実測 ${actual}）— ` +
+        "別経路が同じバイトを産んでいない";
   const check = references.check(label, actual);
   announceCheck(label, check, actual);
   const expected = expectedOf(check);
@@ -438,18 +443,16 @@ for (const { quant, resolution } of REFERENCE) {
   // 保つので、どちらの経路も裸のまま残らない。
   const sampler: AnimaSamplerType | undefined = resolution.width === 512 ? "euler" : undefined;
   test({
-    name: `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
+    name:
+      `e2e(実GPU): quant ${quant} / ${formatResolution(resolution)} / ${STEPS}step / ` +
       `seed ${SEED} の PNG が参照 sha256 と一致する` +
       (sampler === undefined ? "" : `（sampler:"${sampler}" 明示）`),
     ignore: !RUNNABLE || references.lacksReference(label),
     fn: async () => {
-      await withTurbo(
-        quant,
-        {},
-        (pipeline) =>
-          assertReferencePng(label, pipeline, resolution, {
-            ...(sampler === undefined ? {} : { sampler }),
-          }),
+      await withTurbo(quant, {}, (pipeline) =>
+        assertReferencePng(label, pipeline, resolution, {
+          ...(sampler === undefined ? {} : { sampler }),
+        }),
       );
     },
   });
@@ -471,16 +474,14 @@ for (const { quant, resolution } of REFERENCE) {
 const TURBO_DPMPP_CASE = `${caseIdOf(REFERENCE[1].quant, REFERENCE[1].resolution)}-dpmpp`;
 
 test({
-  name: `e2e(実GPU): turbo ${formatResolution(REFERENCE[1].resolution)} を request の ` +
+  name:
+    `e2e(実GPU): turbo ${formatResolution(REFERENCE[1].resolution)} を request の ` +
     `sampler:"dpmpp-2m" で回すと DPM++ 2M の参照 sha256 と一致する`,
   ignore: !RUNNABLE || references.lacksReference(TURBO_DPMPP_CASE),
   fn: async () => {
     const { quant, resolution } = REFERENCE[1];
-    await withTurbo(
-      quant,
-      {},
-      (pipeline) =>
-        assertReferencePng(TURBO_DPMPP_CASE, pipeline, resolution, { sampler: "dpmpp-2m" }),
+    await withTurbo(quant, {}, (pipeline) =>
+      assertReferencePng(TURBO_DPMPP_CASE, pipeline, resolution, { sampler: "dpmpp-2m" }),
     );
   },
 });
@@ -551,8 +552,11 @@ const assertBaseReferencePng = async (
   label: string,
   options: { readonly sampler?: AnimaSamplerType; readonly source?: DistributionSource } = {},
 ): Promise<void> => {
-  const { dir, manifest, model } = options.source ??
-    { dir: ASSETS_DIR, manifest: readManifest(), model: BASE_MODEL };
+  const { dir, manifest, model } = options.source ?? {
+    dir: ASSETS_DIR,
+    manifest: readManifest(),
+    model: BASE_MODEL,
+  };
   const { quant } = BASE_REFERENCE;
   const server = await serveAssets(servedOrigins(manifest, quant, dir, model));
   try {
@@ -568,7 +572,8 @@ const assertBaseReferencePng = async (
 };
 
 test({
-  name: `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
+  name:
+    `e2e(実GPU): 素の base / CFG ${BASE_REFERENCE.guidanceScale} / ` +
     `${BASE_REFERENCE.steps}step の PNG が参照 sha256 と一致する`,
   ignore: !RUNNABLE || references.lacksReference("base-cfg"),
   fn: () => assertBaseReferencePng("base-cfg"),
@@ -596,7 +601,7 @@ const readLocalAssets = async (
     if (ref.repo !== undefined) {
       throw new Error(`全量面では越境参照 '${ref.repo}' を解けない（キー ${key}）`);
     }
-    const bytes = byPath.get(ref.path) ?? await readFile(new URL(ref.path, dir));
+    const bytes = byPath.get(ref.path) ?? (await readFile(new URL(ref.path, dir)));
     byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };
@@ -610,8 +615,7 @@ const readLocalAssets = async (
 };
 
 test({
-  name:
-    "e2e(実GPU): 分割配布形を fromAssets（全量面）で組んでも 素の base の参照 sha256 と一致する",
+  name: "e2e(実GPU): 分割配布形を fromAssets（全量面）で組んでも 素の base の参照 sha256 と一致する",
   ignore: !RUNNABLE || references.lacksReference("base-cfg-fromAssets-shards"),
   fn: async () => {
     const { quant } = BASE_REFERENCE;
@@ -637,7 +641,8 @@ test({
  * 履歴に持つので、turbo（CFG 無し）の一致だけでは合成と履歴の噛み合わせが裸のまま残る。
  */
 test({
-  name: `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
+  name:
+    `e2e(実GPU): 素の base を request の sampler:"dpmpp-2m" で回すと ` +
     `DPM++ 2M の参照 sha256 と一致する`,
   ignore: !RUNNABLE || references.lacksReference("base-cfg-dpmpp"),
   fn: () => assertBaseReferencePng("base-cfg-dpmpp", { sampler: "dpmpp-2m" }),
@@ -714,8 +719,10 @@ test({
     for (const component of observed) counts.set(component, (counts.get(component) ?? 0) + 1);
     const runsOf = (component: string): number => counts.get(component) ?? 0;
     if (
-      runsOf("text_encoder") !== 1 || runsOf("text_conditioner") !== 1 ||
-      runsOf("transformer") !== STEPS || runsOf("vae_decoder") < 1
+      runsOf("text_encoder") !== 1 ||
+      runsOf("text_conditioner") !== 1 ||
+      runsOf("transformer") !== STEPS ||
+      runsOf("vae_decoder") < 1
     ) {
       throw new Error(
         "観測席の run 数が実行構造と合わない: " +
@@ -769,124 +776,128 @@ test({
     const runs: string[] = [];
     // 戻りは**解放済み**の本体（`withTurbo` を抜けた時点で dispose が走っている）。中断した
     // 生成の後でも解放が正常に効くこと（直列化鎖は失敗を次へ持ち越さない）はここで通る。
-    const disposed = await withTurbo(quant, {
-      onRunDiagnostics: (component) => runs.push(component),
-    }, async (pipeline) => {
-      await t.step("イベント列と途中 latent を固定し、PNG は参照 sha256 のまま", async () => {
-        const log: string[] = [];
-        const shapes: string[] = [];
-        const lengths: number[] = [];
-        let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
-        let firstStepData: Float32Array | undefined;
-        await assertReferencePng("onEvent-1024", pipeline, resolution, {
-          twin: caseIdOf(REFERENCE[0].quant, REFERENCE[0].resolution),
-          onEvent: (event) => {
-            if (event.kind === "stage") {
-              log.push(`stage:${event.component}:${event.at}`);
-              return;
-            }
-            if (event.kind === "vae-tile") {
-              log.push(`tile:${event.tile}/${event.tiles}`);
-              return;
-            }
-            // 既定の段ごと運転では出ない — 出たら下の期待列と食い違って落ちる。
-            if (event.kind === "residency") {
-              log.push(`residency:${event.action}/${event.reason}`);
-              return;
-            }
-            log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
-            const snapshot = event.copyLatents();
-            shapes.push(snapshot.shape.join("x"));
-            lengths.push(snapshot.data.length);
-            // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
-            snapshot.data.fill(Number.NaN);
-            if (event.step === 1) {
-              firstStep = event.copyLatents;
-              firstStepData = event.copyLatents().data;
-            }
-          },
+    const disposed = await withTurbo(
+      quant,
+      {
+        onRunDiagnostics: (component) => runs.push(component),
+      },
+      async (pipeline) => {
+        await t.step("イベント列と途中 latent を固定し、PNG は参照 sha256 のまま", async () => {
+          const log: string[] = [];
+          const shapes: string[] = [];
+          const lengths: number[] = [];
+          let firstStep: (() => { data: Float32Array<ArrayBuffer> }) | undefined;
+          let firstStepData: Float32Array | undefined;
+          await assertReferencePng("onEvent-1024", pipeline, resolution, {
+            twin: caseIdOf(REFERENCE[0].quant, REFERENCE[0].resolution),
+            onEvent: (event) => {
+              if (event.kind === "stage") {
+                log.push(`stage:${event.component}:${event.at}`);
+                return;
+              }
+              if (event.kind === "vae-tile") {
+                log.push(`tile:${event.tile}/${event.tiles}`);
+                return;
+              }
+              // 既定の段ごと運転では出ない — 出たら下の期待列と食い違って落ちる。
+              if (event.kind === "residency") {
+                log.push(`residency:${event.action}/${event.reason}`);
+                return;
+              }
+              log.push(`step:${event.step}/${event.steps}@${event.sigma}`);
+              const snapshot = event.copyLatents();
+              shapes.push(snapshot.shape.join("x"));
+              lengths.push(snapshot.data.length);
+              // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、PNG の sha が割れる。
+              snapshot.data.fill(Number.NaN);
+              if (event.step === 1) {
+                firstStep = event.copyLatents;
+                firstStepData = event.copyLatents().data;
+              }
+            },
+          });
+
+          // ① 実行構造との完全一致。VAE タイル数は診断側の run 数から採る（独立な観測）。
+          const tiles = runs.filter((component) => component === "vae_decoder").length;
+          const sigmas = sigmaSchedule(STEPS, scheduler.shift);
+          assertEquals(
+            log,
+            [
+              "stage:text_encoder:start",
+              "stage:text_encoder:end",
+              "stage:text_conditioner:start",
+              "stage:text_conditioner:end",
+              "stage:transformer:start",
+              ...Array.from({ length: STEPS }, (_, at) => `step:${at + 1}/${STEPS}@${sigmas[at]}`),
+              "stage:transformer:end",
+              "stage:vae_decoder:start",
+              ...Array.from({ length: tiles }, (_, at) => `tile:${at + 1}/${tiles}`),
+              "stage:vae_decoder:end",
+            ],
+            "イベント列が実行構造と合わない（段の前後 / step 数 / タイル数）",
+          );
+
+          // ② 途中 latent の形。解像度から導く（テストに 128 を書かない）。
+          const latentHeight = resolution.height / ANIMA_SPATIAL_COMPRESSION;
+          const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
+          const channels = lengths[0] / (latentHeight * latentWidth);
+          assertEquals(
+            new Set(shapes),
+            new Set([`1x${channels}x${latentHeight}x${latentWidth}`]),
+            `途中 latent の形が [1,C,${latentHeight},${latentWidth}] でない`,
+          );
+          assertEquals(
+            new Set(lengths),
+            new Set([channels * latentHeight * latentWidth]),
+            "途中 latent の要素数が形と合わない",
+          );
+
+          // ③ 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
+          assertEquals(
+            Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
+            Array.from((firstStepData as Float32Array).slice(0, 8)),
+            "生成後に呼んだ copyLatents が step 1 の値を返さない",
+          );
         });
 
-        // ① 実行構造との完全一致。VAE タイル数は診断側の run 数から採る（独立な観測）。
-        const tiles = runs.filter((component) => component === "vae_decoder").length;
-        const sigmas = sigmaSchedule(STEPS, scheduler.shift);
-        assertEquals(
-          log,
-          [
-            "stage:text_encoder:start",
-            "stage:text_encoder:end",
-            "stage:text_conditioner:start",
-            "stage:text_conditioner:end",
-            "stage:transformer:start",
-            ...Array.from({ length: STEPS }, (_, at) => `step:${at + 1}/${STEPS}@${sigmas[at]}`),
-            "stage:transformer:end",
-            "stage:vae_decoder:start",
-            ...Array.from({ length: tiles }, (_, at) => `tile:${at + 1}/${tiles}`),
-            "stage:vae_decoder:end",
-          ],
-          "イベント列が実行構造と合わない（段の前後 / step 数 / タイル数）",
-        );
-
-        // ② 途中 latent の形。解像度から導く（テストに 128 を書かない）。
-        const latentHeight = resolution.height / ANIMA_SPATIAL_COMPRESSION;
-        const latentWidth = resolution.width / ANIMA_SPATIAL_COMPRESSION;
-        const channels = lengths[0] / (latentHeight * latentWidth);
-        assertEquals(
-          new Set(shapes),
-          new Set([`1x${channels}x${latentHeight}x${latentWidth}`]),
-          `途中 latent の形が [1,C,${latentHeight},${latentWidth}] でない`,
-        );
-        assertEquals(
-          new Set(lengths),
-          new Set([channels * latentHeight * latentWidth]),
-          "途中 latent の要素数が形と合わない",
-        );
-
-        // ③ 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
-        assertEquals(
-          Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
-          Array.from((firstStepData as Float32Array).slice(0, 8)),
-          "生成後に呼んだ copyLatents が step 1 の値を返さない",
-        );
-      });
-
-      await t.step("コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
-        const seen: string[] = [];
-        const abortAt = 2;
-        await assertRejects(
-          () =>
-            pipeline.generate({
-              prompt: PROMPT,
-              resolution: { width: 512, height: 512 },
-              steps: abortAt,
-              seed: SEED,
-              onEvent: (event) => {
-                seen.push(
-                  event.kind === "stage"
-                    ? `stage:${event.component}:${event.at}`
-                    : event.kind === "denoise-step"
-                    ? `step:${event.step}`
-                    : event.kind === "residency"
-                    ? `residency:${event.action}/${event.reason}`
-                    : `tile:${event.tile}`,
-                );
-                if (event.kind === "denoise-step" && event.step === abortAt) {
-                  throw new Error("購読側で中断");
-                }
-              },
-            }),
-          Error,
-          "購読側で中断",
-        );
-        // 例外を握らないので DiT の段で止まる — VAE 段は 1 度も開かない。
-        assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
-        assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
-        assertFalse(
-          seen.some((entry) => entry.startsWith("stage:vae_decoder")),
-          "中断したのに VAE 段へ入っている",
-        );
-      });
-    });
+        await t.step("コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
+          const seen: string[] = [];
+          const abortAt = 2;
+          await assertRejects(
+            () =>
+              pipeline.generate({
+                prompt: PROMPT,
+                resolution: { width: 512, height: 512 },
+                steps: abortAt,
+                seed: SEED,
+                onEvent: (event) => {
+                  seen.push(
+                    event.kind === "stage"
+                      ? `stage:${event.component}:${event.at}`
+                      : event.kind === "denoise-step"
+                        ? `step:${event.step}`
+                        : event.kind === "residency"
+                          ? `residency:${event.action}/${event.reason}`
+                          : `tile:${event.tile}`,
+                  );
+                  if (event.kind === "denoise-step" && event.step === abortAt) {
+                    throw new Error("購読側で中断");
+                  }
+                },
+              }),
+            Error,
+            "購読側で中断",
+          );
+          // 例外を握らないので DiT の段で止まる — VAE 段は 1 度も開かない。
+          assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
+          assertFalse(seen.includes("stage:transformer:end"), "中断したのに段が正常終了している");
+          assertFalse(
+            seen.some((entry) => entry.startsWith("stage:vae_decoder")),
+            "中断したのに VAE 段へ入っている",
+          );
+        });
+      },
+    );
     await assertRejects(
       () => disposed.generate({ prompt: PROMPT, steps: 2, seed: SEED }),
       Error,
@@ -1000,7 +1011,8 @@ const RESIDENCY_TWINS = {
   512: caseIdOf(REFERENCE[1].quant, REFERENCE[1].resolution),
 } as const;
 
-const RESIDENCY_RUNNABLE = RUNNABLE &&
+const RESIDENCY_RUNNABLE =
+  RUNNABLE &&
   references.lookup(RESIDENCY_TWINS[1024]) !== undefined &&
   references.lookup(RESIDENCY_TWINS[512]) !== undefined;
 
@@ -1093,8 +1105,10 @@ const transformerRuns = () => {
  */
 const expectedStages = (
   residency: readonly string[],
-  headroom: { readonly beforeText?: readonly string[]; readonly beforeVae?: readonly string[] } =
-    {},
+  headroom: {
+    readonly beforeText?: readonly string[];
+    readonly beforeVae?: readonly string[];
+  } = {},
 ): string[] => [
   ...(headroom.beforeText ?? []).map((entry) => `residency:${entry}`),
   "stage:text_encoder:start",
@@ -1117,78 +1131,83 @@ test({
   fn: async (t) => {
     const { quant } = REFERENCE[0];
     const runs = transformerRuns();
-    await withTurbo(quant, { residency: "transformer", onRunDiagnostics: runs.observe }, async (
-      pipeline,
-    ) => {
-      const generate = async (label: string, size: 512 | 1024): Promise<void> => {
-        runs.begin();
-        const log = await assertResidencyTwin(label, pipeline, size, undefined);
-        assertEquals(log, expectedStages(["retained/request"]), `${label} のイベント列`);
-      };
-      const weightsOf = (diagnostics: SessionDiagnostics): number =>
-        diagnostics.weights.allocatedBytes;
+    await withTurbo(
+      quant,
+      { residency: "transformer", onRunDiagnostics: runs.observe },
+      async (pipeline) => {
+        const generate = async (label: string, size: 512 | 1024): Promise<void> => {
+          runs.begin();
+          const log = await assertResidencyTwin(label, pipeline, size, undefined);
+          assertEquals(log, expectedStages(["retained/request"]), `${label} のイベント列`);
+        };
+        const weightsOf = (diagnostics: SessionDiagnostics): number =>
+          diagnostics.weights.allocatedBytes;
 
-      await t.step(
-        "(a) 1024² を 2 回: 2 回とも双子の行と一致し、2 回目は計画にも backing にも当たる",
-        async () => {
-          await generate("residency-1024-first", 1024);
-          await generate("residency-1024-second", 1024);
-          const [first, second] = runs.perGenerate;
-          assertEquals(first.length, STEPS);
-          assertEquals(second.length, STEPS);
-          // 段ごと運転なら 2 回目の最初の run は新しい Session なので必ず外れる（常駐の直接証拠）。
-          assertEquals(
-            second[0].lastRunPrepared?.hit,
-            true,
-            "2 回目の最初の run が導出済み計画に当たらない",
-          );
-          assertEquals(
-            second.at(-1)?.planBacking.buildCount,
-            first.at(-1)?.planBacking.buildCount,
-            "2 回目の generate で backing を作り直している",
-          );
-          assertEquals(weightsOf(second[0]), weightsOf(first[0]), "2 回目で重みのバイト数が増えた");
-        },
-      );
-
-      await t.step(
-        "(b) 512² → 1024² → 512² の往復: 各解像度の双子と一致し、保持する backing は 1 本まで",
-        async () => {
-          await generate("residency-roundtrip-512-first", 512);
-          await generate("residency-roundtrip-1024", 1024);
-          await generate("residency-roundtrip-512-second", 512);
-        },
-      );
-
-      const all = runs.perGenerate.flat();
-      for (const diagnostics of all) {
-        assertEquals(
-          diagnostics.planBacking.retainedCount <= 1,
-          true,
-          `backing を ${diagnostics.planBacking.retainedCount} 本保持している`,
+        await t.step(
+          "(a) 1024² を 2 回: 2 回とも双子の行と一致し、2 回目は計画にも backing にも当たる",
+          async () => {
+            await generate("residency-1024-first", 1024);
+            await generate("residency-1024-second", 1024);
+            const [first, second] = runs.perGenerate;
+            assertEquals(first.length, STEPS);
+            assertEquals(second.length, STEPS);
+            // 段ごと運転なら 2 回目の最初の run は新しい Session なので必ず外れる（常駐の直接証拠）。
+            assertEquals(
+              second[0].lastRunPrepared?.hit,
+              true,
+              "2 回目の最初の run が導出済み計画に当たらない",
+            );
+            assertEquals(
+              second.at(-1)?.planBacking.buildCount,
+              first.at(-1)?.planBacking.buildCount,
+              "2 回目の generate で backing を作り直している",
+            );
+            assertEquals(
+              weightsOf(second[0]),
+              weightsOf(first[0]),
+              "2 回目で重みのバイト数が増えた",
+            );
+          },
         );
-      }
-      // 重みアリーナは params キャッシュの実体も抱える（`SessionDiagnostics.weights` の doc）ので、
-      // 解像度を変えて新しい計画を導いた run では params のぶんだけ本数とバイト数が増える。
-      // 「重みを読み直していない」の厳密な形は「最初の run 以降に増えた本数 = 各 run が確保した
-      // params の本数」— initializer の再アップロードが 1 本でも混ざれば右辺より大きくなる。
-      const [first, ...later] = all;
-      const paramsAllocated = later.reduce(
-        (sum, diagnostics) => sum + (diagnostics.lastRunParams?.allocCount ?? 0),
-        0,
-      );
-      assertEquals(
-        (later.at(-1) ?? first).weights.allocCount - first.weights.allocCount,
-        paramsAllocated,
-        "generate を跨いで重みアリーナに params 以外の確保が増えた（重みの読み直し）",
-      );
-    });
+
+        await t.step(
+          "(b) 512² → 1024² → 512² の往復: 各解像度の双子と一致し、保持する backing は 1 本まで",
+          async () => {
+            await generate("residency-roundtrip-512-first", 512);
+            await generate("residency-roundtrip-1024", 1024);
+            await generate("residency-roundtrip-512-second", 512);
+          },
+        );
+
+        const all = runs.perGenerate.flat();
+        for (const diagnostics of all) {
+          assertEquals(
+            diagnostics.planBacking.retainedCount <= 1,
+            true,
+            `backing を ${diagnostics.planBacking.retainedCount} 本保持している`,
+          );
+        }
+        // 重みアリーナは params キャッシュの実体も抱える（`SessionDiagnostics.weights` の doc）ので、
+        // 解像度を変えて新しい計画を導いた run では params のぶんだけ本数とバイト数が増える。
+        // 「重みを読み直していない」の厳密な形は「最初の run 以降に増えた本数 = 各 run が確保した
+        // params の本数」— initializer の再アップロードが 1 本でも混ざれば右辺より大きくなる。
+        const [first, ...later] = all;
+        const paramsAllocated = later.reduce(
+          (sum, diagnostics) => sum + (diagnostics.lastRunParams?.allocCount ?? 0),
+          0,
+        );
+        assertEquals(
+          (later.at(-1) ?? first).weights.allocCount - first.weights.allocCount,
+          paramsAllocated,
+          "generate を跨いで重みアリーナに params 以外の確保が増えた（重みの読み直し）",
+        );
+      },
+    );
   },
 });
 
 test({
-  name:
-    "e2e(実GPU): residency の request 上書き（持つ → 手放す）・中断後の作り直し・常駐ありの dispose",
+  name: "e2e(実GPU): residency の request 上書き（持つ → 手放す）・中断後の作り直し・常駐ありの dispose",
   ignore: !RESIDENCY_RUNNABLE,
   fn: async (t) => {
     const { quant } = REFERENCE[1];
@@ -1238,7 +1257,7 @@ test({
                     seen.push(
                       event.kind === "denoise-step"
                         ? `step:${event.step}`
-                        : residencyLogOf(event) ?? `tile:${event.kind}`,
+                        : (residencyLogOf(event) ?? `tile:${event.kind}`),
                     );
                     if (event.kind === "denoise-step" && event.step === abortAt) {
                       throw new Error("購読側で中断");
@@ -1312,7 +1331,7 @@ const fillUntilOom = async (
   size: number,
   dummies: GPUBuffer[],
 ): Promise<number> => {
-  for (let count = 0;; count += 1) {
+  for (let count = 0; ; count += 1) {
     if (count >= HEADROOM_DUMMY_LIMIT) {
       throw new Error(`ダミー ${count} 本を積んでも out-of-memory が返らない`);
     }

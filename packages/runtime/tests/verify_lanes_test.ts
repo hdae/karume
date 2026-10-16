@@ -51,9 +51,11 @@ const globToRegExp = (pattern: string): RegExp => {
     } else if (rest.startsWith("{")) {
       const close = rest.indexOf("}");
       if (close < 0) throw new Error(`レーン解析: 閉じていない { である: ${pattern}`);
-      source += `(?:${
-        rest.slice(1, close).split(",").map((part) => part.replace(/[.+^$()|\\]/g, "\\$&")).join("|")
-      })`;
+      source += `(?:${rest
+        .slice(1, close)
+        .split(",")
+        .map((part) => part.replace(/[.+^$()|\\]/g, "\\$&"))
+        .join("|")})`;
       rest = rest.slice(close + 1);
     } else {
       source += rest[0]!.replace(/[.+^$()|\\]/g, "\\$&");
@@ -82,11 +84,12 @@ const walkFiles = (dir: string): string[] => {
 };
 
 /** テストの置き場の全ファイル（`packages/<pkg>/tests` と `tools/<tool>/tests` 配下）。 */
-const TEST_DIRS = ["packages", "tools"].flatMap((parent) =>
-  readDirSync(new URL(`${parent}/`, REPO_ROOT))
-    .filter((entry) => entry.isDirectory)
-    .map((entry) => `${parent}/${entry.name}/tests`)
-)
+const TEST_DIRS = ["packages", "tools"]
+  .flatMap((parent) =>
+    readDirSync(new URL(`${parent}/`, REPO_ROOT))
+      .filter((entry) => entry.isDirectory)
+      .map((entry) => `${parent}/${entry.name}/tests`),
+  )
   .filter((dir) => {
     try {
       readDirSync(new URL(`${dir}/`, REPO_ROOT));
@@ -103,10 +106,11 @@ const ALL_TEST_FILES = ALL_FILES.filter((file) => globToRegExp(ALL_TESTS).test(f
 /** Vitest / Deno がテストとして扱いうる綴り（`test.<ext>` / `*.test.<ext>` / `*_test.<ext>`）。 */
 const TEST_EXTENSIONS = ["ts", "tsx", "mts", "js", "mjs", "jsx"] as const;
 const looksLikeTestFile = (name: string): boolean =>
-  TEST_EXTENSIONS.some((extension) =>
-    name === `test.${extension}` ||
-    name.endsWith(`.test.${extension}`) ||
-    name.endsWith(`_test.${extension}`)
+  TEST_EXTENSIONS.some(
+    (extension) =>
+      name === `test.${extension}` ||
+      name.endsWith(`.test.${extension}`) ||
+      name.endsWith(`_test.${extension}`),
   );
 const basename = (file: string): string => file.slice(file.lastIndexOf("/") + 1);
 
@@ -115,9 +119,10 @@ const filesOf = (lane: Lane): Set<string> => {
   const includes = lane.include.map(globToRegExp);
   const excludes = lane.exclude.map(globToRegExp);
   return new Set(
-    ALL_TEST_FILES.filter((file) =>
-      includes.some((matches) => matches.test(file)) &&
-      !excludes.some((matches) => matches.test(file))
+    ALL_TEST_FILES.filter(
+      (file) =>
+        includes.some((matches) => matches.test(file)) &&
+        !excludes.some((matches) => matches.test(file)),
     ),
   );
 };
@@ -158,9 +163,9 @@ test("レーンの門: 各レーンは 1 本以上を収集する", () => {
 });
 
 test("レーンの門: テストの綴りは *_test.ts だけ", () => {
-  const strays = ALL_FILES
-    .filter((file) => looksLikeTestFile(basename(file)) && !file.endsWith("_test.ts"))
-    .sort();
+  const strays = ALL_FILES.filter(
+    (file) => looksLikeTestFile(basename(file)) && !file.endsWith("_test.ts"),
+  ).sort();
   assertEquals(
     strays,
     [],
@@ -174,14 +179,26 @@ const EXPOSE_GC_FLAG = "--expose-gc";
 test("レーンの門: Vitest の設定は projects を LANES から作り、worker に --expose-gc を渡す", () => {
   // フラグの無い走行では `gc` が生えず、取得口の緩和が黙って効かなくなる（赤にはならない）。
   const config: unknown = viteConfig;
-  assert(typeof config === "object" && config !== null && "test" in config, "vite.config.ts が test 設定を持たない");
+  assert(
+    typeof config === "object" && config !== null && "test" in config,
+    "vite.config.ts が test 設定を持たない",
+  );
   const testConfig: unknown = config.test;
-  assert(typeof testConfig === "object" && testConfig !== null, "vite.config.ts の test が object でない");
+  assert(
+    typeof testConfig === "object" && testConfig !== null,
+    "vite.config.ts の test が object でない",
+  );
   const execArgv: unknown = "execArgv" in testConfig ? testConfig.execArgv : undefined;
-  assert(Array.isArray(execArgv) && execArgv.includes(EXPOSE_GC_FLAG), `${EXPOSE_GC_FLAG} を worker に渡していない`);
+  assert(
+    Array.isArray(execArgv) && execArgv.includes(EXPOSE_GC_FLAG),
+    `${EXPOSE_GC_FLAG} を worker に渡していない`,
+  );
   const projects: unknown = "projects" in testConfig ? testConfig.projects : undefined;
   assertEquals(projects, laneProjects(), "vite.config.ts の projects が LANES と食い違う");
-  assertEquals(laneProjects().map((project) => project.test.name), LANES.map((lane) => lane.name));
+  assertEquals(
+    laneProjects().map((project) => project.test.name),
+    LANES.map((lane) => lane.name),
+  );
 });
 
 test("レーン解析: glob は * と **/ と {a,b} だけを展開する", () => {
@@ -190,9 +207,21 @@ test("レーン解析: glob は * と **/ と {a,b} だけを展開する", () =
   assert(matches.test("packages/runtime/tests/helpers/nested_test.ts"));
   assert(!matches.test("packages/hub/src/fetch_test.ts"));
   assert(!matches.test("packages/hub/tests/fetch.test.ts"));
-  assert(globToRegExp("packages/{models,e2e}/tests/*anima*_test.ts").test("packages/e2e/tests/e2e_anima_test.ts"));
-  assert(!globToRegExp("packages/models/tests/*anima*_test.ts").test("packages/e2e/tests/e2e_anima_test.ts"));
-  for (const bad of ["packages/**", "packages/?/tests/*_test.ts", "packages/[ab]/tests/*_test.ts"]) {
+  assert(
+    globToRegExp("packages/{models,e2e}/tests/*anima*_test.ts").test(
+      "packages/e2e/tests/e2e_anima_test.ts",
+    ),
+  );
+  assert(
+    !globToRegExp("packages/models/tests/*anima*_test.ts").test(
+      "packages/e2e/tests/e2e_anima_test.ts",
+    ),
+  );
+  for (const bad of [
+    "packages/**",
+    "packages/?/tests/*_test.ts",
+    "packages/[ab]/tests/*_test.ts",
+  ]) {
     let threw = false;
     try {
       globToRegExp(bad);

@@ -10,7 +10,10 @@ import { bits, cases } from "./helpers/static-quantize-oracle.ts";
 test("static_quantize の独立 CPU 参照は公式の境界・特殊値 24,416 入力とビット一致する", async () => {
   const fixture = await cases();
   assertEquals(fixture.length, 30);
-  assertEquals(fixture.reduce((sum, c) => sum + c.x.length, 0), 24416);
+  assertEquals(
+    fixture.reduce((sum, c) => sum + c.x.length, 0),
+    24416,
+  );
   for (const c of fixture) {
     const before = bits(c.x).slice();
     const result = referenceStaticQuantize(refTensor([c.x.length], c.x), { scale: c.scale });
@@ -23,13 +26,16 @@ test("static_quantize の独立 CPU 参照は公式の境界・特殊値 24,416 
 test("static_quantize は scale を暗黙に丸めず不正属性・dtype を拒否する", () => {
   for (const scale of [-1, NaN, Infinity, -Infinity, 0.1, 1e-50, 1e39, undefined, true, "1"]) {
     assertThrows(() =>
-      assertNodeContract({
-        op: "static_quantize",
-        ins: ["x"],
-        outs: ["y"],
-        attrs: { scale },
-        states: {},
-      }, "test")
+      assertNodeContract(
+        {
+          op: "static_quantize",
+          ins: ["x"],
+          outs: ["y"],
+          attrs: { scale },
+          states: {},
+        },
+        "test",
+      ),
     );
   }
   assertThrows(() => referenceStaticQuantize(refTensor([1], Int32Array.of(1)), { scale: 1 }));

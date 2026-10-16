@@ -9,7 +9,15 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { copyFile, truncate, writeFile as writeFileWithMode } from "node:fs/promises";
-import { isNotFound, makeTempDir, mkdir, remove, stat, symlink, writeFile } from "@karume/test-support/fs";
+import {
+  isNotFound,
+  makeTempDir,
+  mkdir,
+  remove,
+  stat,
+  symlink,
+  writeFile,
+} from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertNotEquals, assertRejects } from "@std/assert";
 import {
@@ -40,10 +48,7 @@ const NAME = "karume-stub";
  * zsh で台本を走らせ、終了コードと stdout を返す（stderr は読み捨てる）。env は親の環境に重ねる。
  * 非 0 の終了も結果として返す（台本の終了コードを見るテストなので reject しない）。
  */
-const runZsh = (
-  args: readonly string[],
-  env: Readonly<Record<string, string>>,
-): Promise<Run> =>
+const runZsh = (args: readonly string[], env: Readonly<Record<string, string>>): Promise<Run> =>
   new Promise((resolve, reject) => {
     const child = spawn("zsh", args, {
       env: { ...process.env, ...env },
@@ -127,8 +132,7 @@ const runCheck = async (
 const MIB = 1048576;
 
 test({
-  name:
-    "hf-upload check: 全 part を検証できたら表を出して 0 で終わる（xet に載らない小さいファイルは SKIP 行）",
+  name: "hf-upload check: 全 part を検証できたら表を出して 0 で終わる（xet に載らない小さいファイルは SKIP 行）",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "small.krm": 1024 });
@@ -153,8 +157,7 @@ test({
 });
 
 test({
-  name:
-    "hf-upload check: term が 0 本の reconstruction と、大きいのに xet ハッシュの無い part は FAILED",
+  name: "hf-upload check: term が 0 本の reconstruction と、大きいのに xet ハッシュの無い part は FAILED",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
     const run = await runCheck({ "empty.krm": 20 * MIB, "large-plain.krm": 20 * MIB });
@@ -166,8 +169,7 @@ test({
 });
 
 test({
-  name:
-    "hf-upload check: 表は terms の隣に fetch_info の取得レンジ数を出し、MiB/term は terms で割ったまま",
+  name: "hf-upload check: 表は terms の隣に fetch_info の取得レンジ数を出し、MiB/term は terms で割ったまま",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "spread.krm": 30 * MIB });
@@ -190,8 +192,7 @@ test({
 });
 
 test({
-  name:
-    "hf-upload check: fetch_info の無い reconstruction は FAILED 行で非 0 になり、健全な行に化けない",
+  name: "hf-upload check: fetch_info の無い reconstruction は FAILED 行で非 0 になり、健全な行に化けない",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
     const run = await runCheck({ "good.krm": 20 * MIB, "nofetch.krm": 20 * MIB });
@@ -292,7 +293,10 @@ const runUpload = async (
       HOME: `${root}/home`,
       HF_CALLED: marker,
     });
-    const hfCalled = await stat(marker).then(() => true, () => false);
+    const hfCalled = await stat(marker).then(
+      () => true,
+      () => false,
+    );
     return { ...output, hfCalled };
   } finally {
     await remove(root, { recursive: true });
@@ -372,8 +376,7 @@ for (const license of ["unknown", "noassertion"]) {
 }
 
 test({
-  name:
-    "hf-upload upload: 容器が 1 本も無いディレクトリ（生の safetensors だけ）は hf を呼ばずに落ちる",
+  name: "hf-upload upload: 容器が 1 本も無いディレクトリ（生の safetensors だけ）は hf を呼ばずに落ちる",
   ignore: !ZSH_AVAILABLE,
   fn: async () => {
     const run = await runUpload({
@@ -450,16 +453,14 @@ test("container_license: 容器が 1 本も無いディレクトリは読めな�
 });
 
 test("container_license: 印の綴りの違いと再配布の条件を識別しない値を未宣言として扱う", () => {
-  for (
-    const license of [
-      UNDECLARED_LICENSE,
-      "noassertion",
-      " NoAssertion ",
-      "unknown",
-      "UNKNOWN",
-      "none",
-    ]
-  ) {
+  for (const license of [
+    UNDECLARED_LICENSE,
+    "noassertion",
+    " NoAssertion ",
+    "unknown",
+    "UNKNOWN",
+    "none",
+  ]) {
     assert(isUnidentifiedLicense(license), license);
   }
   // 対: 識別子として名乗る値は通す（判定がどれでも落ちる形でない）。`other` は既存の配布形（anima）が

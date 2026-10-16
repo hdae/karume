@@ -137,24 +137,24 @@ type AttentionStagePipeline = {
 type AttentionQkStage =
   | (AttentionStagePipeline & { readonly kind: "dense" })
   | (AttentionStagePipeline & {
-    readonly kind: "i8a8";
-    readonly geometry: I8a8Geometry;
-    readonly qq: TempSource;
-    readonly qs: TempSource;
-    readonly kq: TempSource;
-    readonly ks: TempSource;
-  });
+      readonly kind: "i8a8";
+      readonly geometry: I8a8Geometry;
+      readonly qq: TempSource;
+      readonly qs: TempSource;
+      readonly kq: TempSource;
+      readonly ks: TempSource;
+    });
 
 /** ③PV の実行段（①QK と同じ規律 — `vt` / `vq` / `vs` はループを跨いで生きる）。 */
 type AttentionPvStage =
   | (AttentionStagePipeline & { readonly kind: "dense" })
   | (AttentionStagePipeline & {
-    readonly kind: "i8a8";
-    readonly geometry: I8a8Geometry;
-    readonly vt: TempSource;
-    readonly vq: TempSource;
-    readonly vs: TempSource;
-  });
+      readonly kind: "i8a8";
+      readonly geometry: I8a8Geometry;
+      readonly vt: TempSource;
+      readonly vq: TempSource;
+      readonly vs: TempSource;
+    });
 
 /** 通常 attention の行ブロック 1 枚ぶんの一時（確保順 — 解放は逆順）。 */
 export type AttentionBlock = {
@@ -216,7 +216,7 @@ export const planAttentionBlocks = (
 export const attentionScoreElementBytes = (
   attentionCompute: ComputePrecision,
   route: Pick<ReturnType<typeof attentionRoute>, "score">,
-): number => attentionCompute === "f16" ? 2 : scoreStorageBytes(route.score);
+): number => (attentionCompute === "f16" ? 2 : scoreStorageBytes(route.score));
 
 /**
  * 融合 attention の i8a8 の量子化の一時のバイト数（純関数）。①QK 側が `qq` / `qs` / `kq` / `ks`、
@@ -226,7 +226,9 @@ export const attentionScoreElementBytes = (
  * 決定 7）はこの 1 本から引く（式を書き直すと、片方だけ直された実装に対して見積りが別の数を主張し
  * 続ける）。i8a8 は GQA と組めない（{@link fusedAttentionViolation}）ので、k / v 側も q 側の `B·H` で数える。
  */
-export const attentionI8a8TempBytes = (shape: AttentionShape): {
+export const attentionI8a8TempBytes = (
+  shape: AttentionShape,
+): {
   readonly qk: {
     readonly qq: number;
     readonly qs: number;
@@ -285,9 +287,11 @@ export const fusedAttentionViolation = (
   const { heads, kvHeads, depth, cols } = shape;
   const { i8a8, mask, route } = request;
   if (mask && i8a8) {
-    return `${where}: 加算 mask 付きの attention は attentionCompute 'a8' と組めない` +
+    return (
+      `${where}: 加算 mask 付きの attention は attentionCompute 'a8' と組めない` +
       "（①QK の i8a8 変種は mask の epilogue を持たない — attentionCompute を 'f32' か " +
-      "'f16' にすること）";
+      "'f16' にすること）"
+    );
   }
   const kvRepeat = heads / kvHeads;
   // DECIDED: GQA × i8a8 は fail loudly で開始する（docs/decisions/0067 決定 3）。i8a8 は
@@ -295,18 +299,24 @@ export const fusedAttentionViolation = (
   // なので、GQA 形をそのまま流すと量子化バッファの取り違えになる。
   // MUST: 黙って f32 経路へ落とさない（ADR 0058 決定 3 — 性能が静かに変わる）。
   if (kvRepeat > 1 && i8a8) {
-    return `${where}: GQA（H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
-      "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）";
+    return (
+      `${where}: GQA（H=${heads} / Hkv=${kvHeads} → r=${kvRepeat}）× i8a8 は未対応` +
+      "（ADR 0067 決定 3・後日サポート予定 — attentionCompute を 'f32' か 'f16' にすること）"
+    );
   }
   // MUST: 縮約の門は fail loudly（黙って通すと i32 の巻き戻りで符号ごと化ける。実測形の
   // D ≤ 384・N ≤ 16,384 に対して門は桁で余裕があるが、置かないと退行の受け皿が消える）。
   if (route.qk === "i8a8" && depth > LINEAR_I8A8_MAX_K) {
-    return `${where}: D=${depth} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-      "（attentionCompute を 'f32' にすること）";
+    return (
+      `${where}: D=${depth} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
+      "（attentionCompute を 'f32' にすること）"
+    );
   }
   if (route.pv === "i8a8" && cols > LINEAR_I8A8_MAX_K) {
-    return `${where}: N=${cols} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
-      "（attentionCompute を 'f32' にすること）";
+    return (
+      `${where}: N=${cols} が i8a8 経路の i32 縮約の門 ${LINEAR_I8A8_MAX_K} を超える` +
+      "（attentionCompute を 'f32' にすること）"
+    );
   }
   return undefined;
 };
@@ -327,14 +337,16 @@ export const stateAttentionVariantViolation = (
   if (seats.attentionCompute !== "f32") {
     return form === "states"
       ? `${where}: states 形の attention は attentionCompute '${seats.attentionCompute}' と` +
-        "組めない（f32 の別族カーネルのみ — ADR 0067 決定 3 / 4）"
+          "組めない（f32 の別族カーネルのみ — ADR 0067 決定 3 / 4）"
       : `${where}: readonly の attention は attentionCompute ` +
-        `'${seats.attentionCompute}' と組めない（f32 の別族カーネルのみ）`;
+          `'${seats.attentionCompute}' と組めない（f32 の別族カーネルのみ）`;
   }
   if (seats.attentionScoreStorage !== "f32") {
     const subject = form === "states" ? "states 形の attention" : "readonly の attention";
-    return `${where}: ${subject} は attentionScoreStorage ` +
-      `'${seats.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`;
+    return (
+      `${where}: ${subject} は attentionScoreStorage ` +
+      `'${seats.attentionScoreStorage}' と組めない（S の格納は f32 のみ）`
+    );
   }
   return undefined;
 };
@@ -476,42 +488,44 @@ export const buildAttention = async (
   // `O(B·H·(M+N)·D)` で S の `O(B·H·M·N)` より 1 次低い（実測 = anima DiT の自己注意
   // S=8892 で 122.8MiB 対 S 1 枚 2,413.0MiB = +5.1%）。**上限に効くのはバッファ 1 本ごとの
   // サイズ**なので、束縛上限に対する峰は S のブロック 1 枚のまま動かない。
-  const qk: AttentionQkStage = route.qk === "i8a8"
-    ? await prepareAttentionQkI8a8(
-      face,
-      builder,
-      binds,
-      scoreStorage,
-      { batch, rows, cols, depth },
-      windowed,
-    )
-    : {
-      kind: "dense",
-      key: qkKey,
-      ...await face.state.cache.get(
-        qkKey,
-        attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry),
-      ),
-    };
+  const qk: AttentionQkStage =
+    route.qk === "i8a8"
+      ? await prepareAttentionQkI8a8(
+          face,
+          builder,
+          binds,
+          scoreStorage,
+          { batch, rows, cols, depth },
+          windowed,
+        )
+      : {
+          kind: "dense",
+          key: qkKey,
+          ...(await face.state.cache.get(
+            qkKey,
+            attentionQkWgsl(qkV4, compute, scoreStorage, hasMask, gqa, windowed, qkGeometry),
+          )),
+        };
   const pvV4 = gemmUsesVec4(cols, depth);
   const pvKey = attentionPvKey(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry);
-  const pv: AttentionPvStage = route.pv === "i8a8"
-    ? await prepareAttentionPvI8a8(
-      face,
-      builder,
-      binds,
-      scoreStorage,
-      { batch, rows, cols, depth },
-      windowed,
-    )
-    : {
-      kind: "dense",
-      key: pvKey,
-      ...await face.state.cache.get(
-        pvKey,
-        attentionPvWgsl(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry),
-      ),
-    };
+  const pv: AttentionPvStage =
+    route.pv === "i8a8"
+      ? await prepareAttentionPvI8a8(
+          face,
+          builder,
+          binds,
+          scoreStorage,
+          { batch, rows, cols, depth },
+          windowed,
+        )
+      : {
+          kind: "dense",
+          key: pvKey,
+          ...(await face.state.cache.get(
+            pvKey,
+            attentionPvWgsl(pvV4, compute, scoreStorage, gqa, windowed, pvGeometry),
+          )),
+        };
   // ② 行統計 — 1 行 = 1 workgroup で、行方向は grid-stride（softmax と同じ形）。
   // S を 1 回だけ読む regcache 変種は dim 依存の生成なので、`epc` がキー軸に増える
   // （値はどちらもビット同一 — src/kernels/attention.ts）。ブロック化しても**行内で閉じる**
@@ -567,14 +581,7 @@ export const buildAttention = async (
         layout: qk.layout,
         roles: qk.roles,
         params: face.writeParams(
-          attentionQkParams(
-            block.rows,
-            cols,
-            depth,
-            scale,
-            gqa ? kvRepeat : undefined,
-            window,
-          ),
+          attentionQkParams(block.rows, cols, depth, scale, gqa ? kvRepeat : undefined, window),
           PARAMS_UNIFORM_USAGE,
         ),
         bindings: [
@@ -601,7 +608,10 @@ export const buildAttention = async (
         attentionStatsParams(batch * block.rows, cols, statsRegCache),
         PARAMS_UNIFORM_USAGE,
       ),
-      bindings: [{ binding: 1, source: scores }, { binding: 2, source: rowStats }],
+      bindings: [
+        { binding: 1, source: scores },
+        { binding: 2, source: rowStats },
+      ],
       workgroups: [gridStrideWorkgroups(batch * block.rows, 1, limit), 1, 1],
     });
 
@@ -803,23 +813,23 @@ export const buildStateAttention = async (
   const qkKey = qkParallel
     ? stateQkParallelKey(sliding, gqa)
     : qkTiled
-    ? stateQkTiledKey(sliding, gqa, chunkRows)
-    : stateQkKey(sliding, gqa);
+      ? stateQkTiledKey(sliding, gqa, chunkRows)
+      : stateQkKey(sliding, gqa);
   const statsKey = stateStatsKey(sliding);
   const pvKey = fusedStatsPv
     ? stateStatsPvKey(sliding, gqa)
     : pvTiled
-    ? statePvTiledKey(sliding, gqa, chunkRows)
-    : pvParallel
-    ? statePvParallelKey(sliding, gqa)
-    : statePvKey(sliding, gqa);
+      ? statePvTiledKey(sliding, gqa, chunkRows)
+      : pvParallel
+        ? statePvParallelKey(sliding, gqa)
+        : statePvKey(sliding, gqa);
   const qk = await face.state.cache.get(
     qkKey,
     qkParallel
       ? stateQkParallelWgsl(sliding, gqa)
       : qkTiled
-      ? stateQkTiledWgsl(sliding, gqa, chunkRows)
-      : stateQkWgsl(sliding, gqa),
+        ? stateQkTiledWgsl(sliding, gqa, chunkRows)
+        : stateQkWgsl(sliding, gqa),
   );
   const stats = fusedStatsPv
     ? undefined
@@ -829,10 +839,10 @@ export const buildStateAttention = async (
     fusedStatsPv
       ? stateStatsPvWgsl(sliding, gqa)
       : pvTiled
-      ? statePvTiledWgsl(sliding, gqa, chunkRows)
-      : pvParallel
-      ? statePvParallelWgsl(sliding, gqa)
-      : statePvWgsl(sliding, gqa),
+        ? statePvTiledWgsl(sliding, gqa, chunkRows)
+        : pvParallel
+          ? statePvParallelWgsl(sliding, gqa)
+          : statePvWgsl(sliding, gqa),
   );
 
   for (const block of blocks) {
@@ -853,7 +863,7 @@ export const buildStateAttention = async (
     // 計画では 1 本も組まない（組んでも誰も束縛しない死んだ uniform になる）。
     let shared: GPUBuffer | undefined;
     const sharedParams = (): GPUBuffer =>
-      shared ??= face.writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE);
+      (shared ??= face.writeParams(stateAttentionParams(geometry), PARAMS_UNIFORM_USAGE));
     // ①ₜ / ③ₜ は骨格の `Dims`（先頭 3 語が m / n / k）を binding 0 に置くので、**同じ静的幾何を
     // 別の語順で**組み直す（③ₜ は `neg_inf` / `scale` を読まないので語数も違う）。①③ 共有の
     // 語順は動かさない — ③ と見積りが同じ表を読む。
@@ -892,15 +902,15 @@ export const buildStateAttention = async (
         qkParallel
           ? stateQkParallelWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`)
           : qkTiled
-          ? stateQkTiledWorkgroups(
-            dispatchGeometry,
-            chunkRows,
-            past,
-            query,
-            limit,
-            `${where} ①QK`,
-          )
-          : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
+            ? stateQkTiledWorkgroups(
+                dispatchGeometry,
+                chunkRows,
+                past,
+                query,
+                limit,
+                `${where} ①QK`,
+              )
+            : stateQkWorkgroups(dispatchGeometry, past, query, limit, `${where} ①QK`),
     });
 
     if (stats !== undefined && rowStats !== undefined) {
@@ -942,8 +952,8 @@ export const buildStateAttention = async (
       workgroups: pvTiled
         ? statePvTiledWorkgroups(dispatchGeometry, chunkRows, limit, `${where} ③PV`)
         : pvParallel
-        ? statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
-        : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
+          ? statePvParallelWorkgroups(dispatchGeometry, limit, `${where} ③PV`)
+          : statePvWorkgroups(dispatchGeometry, limit, `${where} ③PV`),
     });
 
     // MUST: 確保の逆順で返す（計画の再生と同じ順）。
@@ -1088,11 +1098,7 @@ export const buildReadonlyStateAttention = async (
         { binding: 4, source: outs[0] },
         { binding: 5, source: { kind: "lengths" } },
       ],
-      workgroups: statePvParallelReadonlyWorkgroups(
-        dispatchGeometry,
-        limit,
-        `${where} ③'PV(ro)`,
-      ),
+      workgroups: statePvParallelReadonlyWorkgroups(dispatchGeometry, limit, `${where} ③'PV(ro)`),
     });
 
     // MUST: 確保の逆順で返す（計画の再生と同じ順）。
@@ -1194,11 +1200,11 @@ const prepareAttentionQkI8a8 = async (
   // 並べて畳む小 D 変種になる — `quantizeRowsGeometry`・perf-ledger P-1）
   const quantizeGeometry = quantizeRowsGeometry(depth);
   const quantizeKey = quantizeRowsKey(quantizeGeometry);
-  const { pipeline: quantizePipeline, layout: quantizeLayout, roles: quantizeRoles } = await face
-    .state.cache.get(
-      quantizeKey,
-      quantizeRowsWgsl(quantizeGeometry),
-    );
+  const {
+    pipeline: quantizePipeline,
+    layout: quantizeLayout,
+    roles: quantizeRoles,
+  } = await face.state.cache.get(quantizeKey, quantizeRowsWgsl(quantizeGeometry));
   const quantize = (
     source: BindingSource,
     payload: TempSource,
@@ -1286,40 +1292,35 @@ const prepareAttentionPvI8a8 = async (
   // D == N のときだけ一致する。実測形は D != N なので露見するが、単体テストが本来の検出器）。
   const stridedSpec = { dtype: "f32" } as const;
   const permuteKey = stridedKey(stridedSpec);
-  const { pipeline: permutePipeline, layout: permuteLayout, roles: permuteRoles } = await face.state
-    .cache.get(
-      permuteKey,
-      stridedWgsl(stridedSpec),
-    );
+  const {
+    pipeline: permutePipeline,
+    layout: permuteLayout,
+    roles: permuteRoles,
+  } = await face.state.cache.get(permuteKey, stridedWgsl(stridedSpec));
   builder.dispatch({
     key: permuteKey,
     pipeline: permutePipeline,
     layout: permuteLayout,
     roles: permuteRoles,
     params: face.writeParams(
-      stridedParams(
-        [batch, depth, cols],
-        permuteSrcStrides([batch, cols, depth], [0, 2, 1]),
-        0,
-      ),
+      stridedParams([batch, depth, cols], permuteSrcStrides([batch, cols, depth], [0, 2, 1]), 0),
       PARAMS_STORAGE_USAGE,
     ),
-    bindings: [{ binding: 1, source: binds[2] }, { binding: 2, source: vt }],
-    workgroups: [
-      gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit),
-      1,
-      1,
+    bindings: [
+      { binding: 1, source: binds[2] },
+      { binding: 2, source: vt },
     ],
+    workgroups: [gridStrideWorkgroups(batch * depth * cols, STRIDED_WORKGROUP_SIZE, limit), 1, 1],
   });
 
   // (b) Vᵀ の量子化（行 = (b,h,d)・行長 N — per-column scale と N 連続パックが同時に出る）
   const quantizeGeometry = quantizeRowsGeometry(cols);
   const quantizeKey = quantizeRowsKey(quantizeGeometry);
-  const { pipeline: quantizePipeline, layout: quantizeLayout, roles: quantizeRoles } = await face
-    .state.cache.get(
-      quantizeKey,
-      quantizeRowsWgsl(quantizeGeometry),
-    );
+  const {
+    pipeline: quantizePipeline,
+    layout: quantizeLayout,
+    roles: quantizeRoles,
+  } = await face.state.cache.get(quantizeKey, quantizeRowsWgsl(quantizeGeometry));
   builder.dispatch({
     key: quantizeKey,
     pipeline: quantizePipeline,

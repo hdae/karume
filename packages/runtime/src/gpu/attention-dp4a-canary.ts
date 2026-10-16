@@ -214,7 +214,7 @@ const QK_QUERY_QUANT = (row: number, col: number): number => {
  */
 const QK_KEY_QUANT = (col: number, i: number): number => {
   if (i === 0) return col % 2 === 0 ? 127 : -127;
-  return ((i * 7 + col * 5) % 67) < 34 ? 64 : -64;
+  return (i * 7 + col * 5) % 67 < 34 ? 64 : -64;
 };
 
 /** ①QK の q（f32・量子化前 = 量子化値 × 行 scale）。 */
@@ -568,7 +568,8 @@ export const probeAttentionI8a8Dot = async (
         device.createComputePipeline({
           layout: "auto",
           compute: { module: device.createShaderModule({ code: patch(wgsl) }), entryPoint: "main" },
-        })),
+        }),
+      ),
       `${WHERE} '${key}' のパイプライン生成`,
     );
 
@@ -658,19 +659,19 @@ export const probeAttentionI8a8Dot = async (
           ],
           compare: (bytes) =>
             score === "f16"
-              // s16 変種の出力 ≡ S をホストで f16 に丸めた f32 変種（丸めは格納の 1 回だけ）
-              ? compareToReference(
-                key,
-                unpackScoresF16(new Uint32Array(bytes)),
-                Float32Array.from(qk.expected, roundToF16),
-                new Uint8Array(bytes),
-              )
+              ? // s16 変種の出力 ≡ S をホストで f16 に丸めた f32 変種（丸めは格納の 1 回だけ）
+                compareToReference(
+                  key,
+                  unpackScoresF16(new Uint32Array(bytes)),
+                  Float32Array.from(qk.expected, roundToF16),
+                  new Uint8Array(bytes),
+                )
               : compareToReference(
-                key,
-                new Float32Array(bytes),
-                qk.expected,
-                new Uint8Array(bytes),
-              ),
+                  key,
+                  new Float32Array(bytes),
+                  qk.expected,
+                  new Uint8Array(bytes),
+                ),
         };
       });
       const pvVariants = pvPipelines.map(({ key, pipeline, score }): Variant => {
@@ -769,8 +770,10 @@ export const probeAttentionI8a8Dot = async (
       maxBandRatio: outcomes.reduce((worst, o) => Math.max(worst, o.maxBandRatio), 0),
       // 変種を跨いだ集約も帯外を優先する（compareToReference と同じ理由 — 帯外の変種が
       // あるのに、並び順が先の帯内変種の 1 ULP 差を代表にしない）。
-      mismatch: (outcomes.find((outcome) => !outcome.withinBand) ??
-        outcomes.find((outcome) => outcome.mismatch !== undefined))?.mismatch,
+      mismatch: (
+        outcomes.find((outcome) => !outcome.withinBand) ??
+        outcomes.find((outcome) => outcome.mismatch !== undefined)
+      )?.mismatch,
       variants: outcomes,
     };
   } finally {
@@ -817,10 +820,7 @@ export const formatAttentionI8a8Decision = (decision: AttentionI8a8Decision): st
   `${BRANCH_NOTE[decision.branch]}ので '${decision.dot}' を選んだ` +
   `（既知解との最大絶対誤差 ${decision.maxAbsError} / 帯余裕 ${decision.maxBandRatio}）`;
 
-const decide = (
-  probe: CanaryProbe,
-  branch: CanaryBranch,
-): AttentionI8a8Decision => ({
+const decide = (probe: CanaryProbe, branch: CanaryBranch): AttentionI8a8Decision => ({
   dot: probe.dot,
   exact: probe.exact,
   branch,
@@ -838,8 +838,10 @@ const armsBitIdentical = (a: CanaryProbe, b: CanaryProbe): boolean =>
   a.variants.length === b.variants.length &&
   a.variants.every((variant, index) => {
     const other = b.variants[index].output;
-    return variant.output.length === other.length &&
-      variant.output.every((byte, at) => byte === other[at]);
+    return (
+      variant.output.length === other.length &&
+      variant.output.every((byte, at) => byte === other[at])
+    );
   });
 
 /**

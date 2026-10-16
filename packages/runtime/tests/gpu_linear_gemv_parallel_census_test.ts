@@ -41,26 +41,24 @@ describe({
     it("明示指定の対象だけに適用し、M1/4/8で全出力列のu32一致を保つ", async () => {
       const gpu = await acquireGpu();
       try {
-        for (
-          const shape of [
-            { storage: "i2", bits: 2, n: 12288, k: 1536, group: undefined },
-            { storage: "i4", bits: 4, n: 256, k: 1536, group: 32 },
-            { storage: "i4", bits: 4, n: 256, k: 1536, group: 512 },
-            { storage: "i4", bits: 4, n: 1536, k: 2048, group: 2048 },
-            { storage: "i4", bits: 4, n: 1536, k: 4096, group: 4096 },
-            { storage: "i8", bits: 8, n: 256, k: 1536, group: undefined },
-            // E4B の行（2026-09-26・lanes は E2B から写した未実測）の代表 — l32 / l4 × g32 / g512 /
-            // g2048 / i8。実寸の n で全出力列を見る。
-            { storage: "i4", bits: 4, n: 512, k: 2560, group: 32 },
-            { storage: "i4", bits: 4, n: 10240, k: 2560, group: 512 },
-            { storage: "i4", bits: 4, n: 2560, k: 10240, group: 2048 },
-            { storage: "i8", bits: 8, n: 2560, k: 256, group: undefined },
-          ] as const
-        ) {
+        for (const shape of [
+          { storage: "i2", bits: 2, n: 12288, k: 1536, group: undefined },
+          { storage: "i4", bits: 4, n: 256, k: 1536, group: 32 },
+          { storage: "i4", bits: 4, n: 256, k: 1536, group: 512 },
+          { storage: "i4", bits: 4, n: 1536, k: 2048, group: 2048 },
+          { storage: "i4", bits: 4, n: 1536, k: 4096, group: 4096 },
+          { storage: "i8", bits: 8, n: 256, k: 1536, group: undefined },
+          // E4B の行（2026-09-26・lanes は E2B から写した未実測）の代表 — l32 / l4 × g32 / g512 /
+          // g2048 / i8。実寸の n で全出力列を見る。
+          { storage: "i4", bits: 4, n: 512, k: 2560, group: 32 },
+          { storage: "i4", bits: 4, n: 10240, k: 2560, group: 512 },
+          { storage: "i4", bits: 4, n: 2560, k: 10240, group: 2048 },
+          { storage: "i8", bits: 8, n: 2560, k: 256, group: undefined },
+        ] as const) {
           const { storage, n, k, bits, group } = shape;
           const w = Uint8Array.from(
-            { length: n * k * bits / 8 },
-            (_, i) => (Math.imul(i + 1, 0x9e3779b9) >>> 24),
+            { length: (n * k * bits) / 8 },
+            (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
           );
           // per-channel（i2 / i8）は groups = 1、group 量子化（i4）は 行長 / group。
           const groups = group === undefined ? 1 : k / group;
@@ -75,7 +73,7 @@ describe({
                 scale: {
                   dtype: "f32",
                   bytes: f32Bytes(
-                    Array.from({ length: n * groups }, (_, i) => (i % 17 + 1) * 0.00017),
+                    Array.from({ length: n * groups }, (_, i) => ((i % 17) + 1) * 0.00017),
                   ),
                 },
               },
@@ -83,7 +81,7 @@ describe({
             {
               graph: GRAPH_NAME,
               initializer: "b",
-              bytes: f32Bytes(Array.from({ length: n }, (_, i) => (i % 7 - 3) * 0.11)),
+              bytes: f32Bytes(Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11)),
               encoding: { codec: "f32" },
             },
           ];
@@ -116,8 +114,9 @@ describe({
                   { length: m * k },
                   (_, i) => Math.sin(i * 0.037) * 0.75,
                 );
-                const output =
-                  (await session.run({ x: { dtype: "f32", shape: [m, k], data: input } })).y;
+                const output = (
+                  await session.run({ x: { dtype: "f32", shape: [m, k], data: input } })
+                ).y;
                 assertEquals(output.shape, [m, n]);
                 for (const value of output.data) assert(Number.isFinite(value));
                 const where = `${storage} M${m}`;
@@ -128,8 +127,11 @@ describe({
                   `${where} ${census.map((row) => row.key)}`,
                 );
                 if (parallel && m <= 8) {
-                  const first = new Uint32Array(output.data.buffer, output.data.byteOffset, n)
-                    .slice();
+                  const first = new Uint32Array(
+                    output.data.buffer,
+                    output.data.byteOffset,
+                    n,
+                  ).slice();
                   expected ??= first;
                   assertEquals(first, expected);
                 }
@@ -207,23 +209,25 @@ const planParallelKeys = (
     const [x, weight] = step.inputShapes;
     const m = x.slice(0, -1).reduce((product, dim) => product * dim, 1);
     const seat = residency.get(step.node.ins[1]);
-    const storage = seat?.seat === "i2" || seat?.seat === "i4" || seat?.seat === "i8"
-      ? seat.seat
-      : undefined;
+    const storage =
+      seat?.seat === "i2" || seat?.seat === "i4" || seat?.seat === "i8" ? seat.seat : undefined;
     const group = seat?.seat === "i4" ? seat.groupSize : undefined;
-    const lanes = storage === undefined
-      ? undefined
-      : linearGemvParallelEligible(storage, m, weight[0], weight[1], group);
-    const key = storage === undefined || lanes === undefined
-      ? NOT_PARALLEL
-      : linearGemvParallelKey(storage, group, lanes);
+    const lanes =
+      storage === undefined
+        ? undefined
+        : linearGemvParallelEligible(storage, m, weight[0], weight[1], group);
+    const key =
+      storage === undefined || lanes === undefined
+        ? NOT_PARALLEL
+        : linearGemvParallelKey(storage, group, lanes);
     keys.set(key, (keys.get(key) ?? 0) + 1);
     if (
       storage !== undefined &&
       linearGemvPackedEligible(storage, m, weight[0], weight[1], group) !== undefined
-    ) packed += 1;
+    )
+      packed += 1;
   }
-  return { keys: Object.fromEntries([...keys].toSorted(([a], [b]) => a < b ? -1 : 1)), packed };
+  return { keys: Object.fromEntries([...keys].toSorted(([a], [b]) => (a < b ? -1 : 1))), packed };
 };
 
 describe({
@@ -238,15 +242,17 @@ describe({
       // i4 g512 l32 = k/v 40 + k/v(full) 8 / i4 g2048 l32 = o 35 + down 42 / i4 g4096 l32 = o(full) 7 /
       // i8 l32 = per_layer_input_gate 42 / i8 l4 = per_layer_projection 42 / 対象外 2。
       const expected = Object.fromEntries(
-        ([
-          [linearGemvParallelKey("i4", 512, 4), 126],
-          [linearGemvParallelKey("i4", 512, 32), 48],
-          [linearGemvParallelKey("i4", 2048, 32), 77],
-          [linearGemvParallelKey("i4", 4096, 32), 7],
-          [linearGemvParallelKey("i8", undefined, 32), 42],
-          [linearGemvParallelKey("i8", undefined, 4), 42],
-          [NOT_PARALLEL, 2],
-        ] as const).toSorted(([a], [b]) => a < b ? -1 : 1),
+        (
+          [
+            [linearGemvParallelKey("i4", 512, 4), 126],
+            [linearGemvParallelKey("i4", 512, 32), 48],
+            [linearGemvParallelKey("i4", 2048, 32), 77],
+            [linearGemvParallelKey("i4", 4096, 32), 7],
+            [linearGemvParallelKey("i8", undefined, 32), 42],
+            [linearGemvParallelKey("i8", undefined, 4), 42],
+            [NOT_PARALLEL, 2],
+          ] as const
+        ).toSorted(([a], [b]) => (a < b ? -1 : 1)),
       );
       for (const rows of [1, 4, 8]) {
         const { keys, packed } = planParallelKeys(graph, rows);

@@ -104,19 +104,17 @@ describe("buildGeometryProfile: 指紋を導けない表", () => {
     const verdicts = deriveProfile(SOURCES, SPEC).map((verdict) =>
       verdict.slot === "conv2d.rows32"
         ? { ...verdict, outcome: { ...verdict.outcome, geometry: narrow } }
-        : verdict
+        : verdict,
     );
     const error = assertThrows(() => buildGeometryProfile(SPEC, SOURCES, verdicts), Error);
     assertInstanceOf(error.cause, KernelsIdError);
-    for (
-      const part of [
-        "生成した表 'test-gpu' の provenance.kernels（カーネルの指紋）を導けない",
-        "conv2d-c96-512x512",
-        "conv2d.rows32",
-        JSON.stringify(narrow),
-        "65535",
-      ]
-    ) {
+    for (const part of [
+      "生成した表 'test-gpu' の provenance.kernels（カーネルの指紋）を導けない",
+      "conv2d-c96-512x512",
+      "conv2d.rows32",
+      JSON.stringify(narrow),
+      "65535",
+    ]) {
       assertStringIncludes(error.message, part);
     }
   });

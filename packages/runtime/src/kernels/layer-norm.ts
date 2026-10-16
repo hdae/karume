@@ -97,8 +97,7 @@ export const LAYER_NORM_ROW_STATS_WGSL: string = `    let base = row * dim;
  */
 export const LAYER_NORM_AFFINE_WGSL = "(x[base + o] - mean) * inv * weight[o] + bias[o]";
 
-export const LAYER_NORM_WGSL: string =
-  `// karume layer_norm (last dim, affine, f32, 2 パス / 母分散)
+export const LAYER_NORM_WGSL: string = `// karume layer_norm (last dim, affine, f32, 2 パス / 母分散)
 struct Params {
   rows: u32,
   dim: u32,

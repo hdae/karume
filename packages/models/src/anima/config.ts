@@ -60,7 +60,7 @@ export const ANIMA_PIPELINE_MAJOR = 1;
 // NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
 // SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
 export const ANIMA_SOURCES = {
-  "anima": {
+  anima: {
     repo: "hdae/karume-anima",
     revision: "bf0c7a634540b64f6317ca6414b6d61c7a95274c",
   },
@@ -72,12 +72,7 @@ export const ANIMA_SOURCES = {
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
 const SCHEDULER_KEYS: readonly string[] = ["type", "shift", "numTrainTimesteps"];
-const DEFAULTS_KEYS: readonly string[] = [
-  "steps",
-  "guidanceScale",
-  "resolution",
-  "negativePrompt",
-];
+const DEFAULTS_KEYS: readonly string[] = ["steps", "guidanceScale", "resolution", "negativePrompt"];
 const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
 
 /**
@@ -88,7 +83,7 @@ const RESOLUTION_KEYS: readonly string[] = ["width", "height"];
  * - `"euler"` — `FlowMatchEulerDiscreteScheduler` の 1 次更新（`sampler.ts` の `cfgEulerStep`）。
  * - `"dpmpp-2m"` — DPM++ 2M（`src/generation/dpm-solver-multistep.ts`）。
  */
-export type AnimaSamplerType = typeof ANIMA_SAMPLER_TYPES[number];
+export type AnimaSamplerType = (typeof ANIMA_SAMPLER_TYPES)[number];
 
 /**
  * {@link AnimaSamplerType} の値の並び（語彙の正本 — 型はここから導く）。検査
@@ -195,9 +190,10 @@ const parseDefaults = (raw: unknown): AnimaDefaults => {
  * request の `sampler`）を指す。
  */
 export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamplerType => {
-  const accepted = typeof value === "string"
-    ? ANIMA_SAMPLER_TYPES.find((candidate) => candidate === value)
-    : undefined;
+  const accepted =
+    typeof value === "string"
+      ? ANIMA_SAMPLER_TYPES.find((candidate) => candidate === value)
+      : undefined;
   if (accepted === undefined) {
     throw new Error(
       `${where}: 期待 ${ANIMA_SAMPLER_TYPES.map((name) => `'${name}'`).join(" / ")}` +
@@ -208,10 +204,7 @@ export const assertAnimaSamplerType = (value: unknown, where: string): AnimaSamp
 };
 
 /** `scheduler.type` を読む（欄ごと無ければ既定 — 未知値は {@link assertAnimaSamplerType} が落とす）。 */
-const parseSamplerType = (
-  record: Record<string, unknown>,
-  where: string,
-): AnimaSamplerType =>
+const parseSamplerType = (record: Record<string, unknown>, where: string): AnimaSamplerType =>
   Object.hasOwn(record, "type")
     ? assertAnimaSamplerType(record["type"], `${where}.type`)
     : DEFAULT_SAMPLER_TYPE;

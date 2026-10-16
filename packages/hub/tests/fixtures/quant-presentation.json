@@ -49,9 +49,7 @@
     {
       "name": "label-array",
       "field": "label",
-      "value": [
-        "a label"
-      ],
+      "value": ["a label"],
       "accepted": false
     },
     {
@@ -128,9 +126,7 @@
     {
       "name": "description-array",
       "field": "description",
-      "value": [
-        "a label"
-      ],
+      "value": ["a label"],
       "accepted": false
     },
     {

@@ -113,16 +113,8 @@ test({
     const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
     // コピー融合は算術をしないため、以下のビット列も全て保存されなければならない。
     new Uint32Array(x.data.buffer).set([
-      0x00000000,
-      0x80000000,
-      0x00000001,
-      0x80000001,
-      0x007fffff,
-      0x807fffff,
-      0x7f800000,
-      0xff800000,
-      0x7fc01234,
-      0xff801234,
+      0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x7f800000,
+      0xff800000, 0x7fc01234, 0xff801234,
     ]);
     const fused = await createSessionFromContainer(
       gpu,
@@ -158,8 +150,7 @@ test({
 });
 
 test({
-  name:
-    "upsample x2 の内部値が output / 別 consumer なら、また near-shape なら融合しない（実 GPU）",
+  name: "upsample x2 の内部値が output / 別 consumer なら、また near-shape なら融合しない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

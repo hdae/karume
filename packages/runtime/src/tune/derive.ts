@@ -105,17 +105,17 @@ export const ROUNDING_ERROR_LIMIT = 0.01;
  */
 export type ProfileTarget =
   | {
-    readonly optIn?: undefined;
-    readonly vendor: string;
-    readonly architecture?: string;
-    readonly description?: string;
-  }
+      readonly optIn?: undefined;
+      readonly vendor: string;
+      readonly architecture?: string;
+      readonly description?: string;
+    }
   | {
-    readonly optIn: true;
-    readonly vendor?: undefined;
-    readonly architecture?: undefined;
-    readonly description?: undefined;
-  };
+      readonly optIn: true;
+      readonly vendor?: undefined;
+      readonly architecture?: undefined;
+      readonly description?: undefined;
+    };
 
 type Geometry = GemmGeometry | I8a8Geometry;
 
@@ -222,8 +222,8 @@ const isI8a8Op = (op: SweepOp): boolean => op === "i8a8-linear" || op === "i8a8-
 const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geometry => {
   if (!isRecord(value)) throw new Error(`${where}: geometryParams がオブジェクトでない`);
   const keys = isI8a8Op(op)
-    ? ["regM", "regN", "wgX", "wgY", "tileK"] as const
-    : ["regM", "regN", "wgX", "wgY"] as const;
+    ? (["regM", "regN", "wgX", "wgY", "tileK"] as const)
+    : (["regM", "regN", "wgX", "wgY"] as const);
   const extra = Object.keys(value).filter((key) => !(keys as readonly string[]).includes(key));
   if (extra.length > 0) {
     throw new Error(`${where}: geometryParams に想定外の欄 ${extra.join(", ")}`);
@@ -237,13 +237,13 @@ const parseGeometryParams = (value: unknown, op: SweepOp, where: string): Geomet
     params[key] = field;
   }
   return isI8a8Op(op)
-    ? {
-      regM: params.regM,
-      regN: params.regN,
-      wgX: params.wgX,
-      wgY: params.wgY,
-      tileK: params.tileK,
-    } satisfies I8a8Geometry
+    ? ({
+        regM: params.regM,
+        regN: params.regN,
+        wgX: params.wgX,
+        wgY: params.wgY,
+        tileK: params.tileK,
+      } satisfies I8a8Geometry)
     : { regM: params.regM, regN: params.regN, wgX: params.wgX, wgY: params.wgY };
 };
 
@@ -280,9 +280,10 @@ const parseCaseRepeat = (value: unknown, where: string): SweepCaseRepeat => {
   if (repeat !== undefined && !isRecord(repeat)) {
     throw new Error(`${where}: defaultRepeat がオブジェクトでない`);
   }
-  const driftRatio = repeat === undefined
-    ? undefined
-    : optional(repeat, "driftRatio", isPositiveNumber, `${where} defaultRepeat`);
+  const driftRatio =
+    repeat === undefined
+      ? undefined
+      : optional(repeat, "driftRatio", isPositiveNumber, `${where} defaultRepeat`);
   const error = optional(value, "defaultRepeatError", isString, where);
   return {
     caseId: requireString(value, "caseId", where),
@@ -301,9 +302,9 @@ const parseCandidateSet = (settings: unknown, where: string): CandidateSet => {
   if (candidateSet !== undefined) {
     if (typeof candidateSet !== "string" || !isCandidateSet(candidateSet)) {
       throw new Error(
-        `${where}: settings.candidateSet が ${CANDIDATE_SETS.join(" / ")} のどれでもない（${
-          JSON.stringify(candidateSet)
-        }）`,
+        `${where}: settings.candidateSet が ${CANDIDATE_SETS.join(" / ")} のどれでもない（${JSON.stringify(
+          candidateSet,
+        )}）`,
       );
     }
     return candidateSet;
@@ -386,7 +387,8 @@ export const parseSweepReport = (
   // MUST: GPU の timestamp で測った掃引だけを受ける（ADR 0115 §4・ADR 0117 決定 3）。壁時計は
   // submit → 完了の床を含むので幾何どうしの比が 1 へ縮み、床は pass ごとに動くので丸めのような
   // 既知の定数で誤差を押さえられない（行ごとの上界を記録だけから出せない）
-  const timingFix = "Deno の CLI は adapter が timestamp-query を列挙すれば timestamp で測る" +
+  const timingFix =
+    "Deno の CLI は adapter が timestamp-query を列挙すれば timestamp で測る" +
     "（単位 deno-raw-tick）ので timestamp-query を持つ adapter で、Chrome のページは" +
     "「GPU の timestamp で測る」にチェックを入れて測り直す";
   const gpuTiming = parsed.gpuTiming;
@@ -404,9 +406,7 @@ export const parseSweepReport = (
   // （deriveProfile・ADR 0117 決定 3）
   const quantized = gpuTiming.quantized;
   if (!isBoolean(quantized)) {
-    throw new Error(
-      `${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(quantized)}）`,
-    );
+    throw new Error(`${where}: gpuTiming.quantized が真偽値でない（${JSON.stringify(quantized)}）`);
   }
   // 書き手（report.ts の roundsLookQuantized）は単位 ns でだけ量子化を判定する。raw tick に ns の刻みを
   // 当てると上界が別物になるので、組が崩れた記録は落とす
@@ -432,7 +432,7 @@ export const parseSweepReport = (
     throw new Error(`${where}: cases が配列でない（ケースごとの既定の再測定が読めない）`);
   }
   const cases = parsed.cases.map((entry, index) =>
-    parseCaseRepeat(entry, `${where} cases[${index}]`)
+    parseCaseRepeat(entry, `${where} cases[${index}]`),
   );
   const caseIds = new Set<string>();
   for (const { caseId } of cases) {
@@ -559,9 +559,9 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
       );
     }
   });
-  const missing = GEMM_ROWS_BUCKETS
-    .map((rule) => rule.maxRows)
-    .filter((maxRows) => !bounds.includes(maxRows));
+  const missing = GEMM_ROWS_BUCKETS.map((rule) => rule.maxRows).filter(
+    (maxRows) => !bounds.includes(maxRows),
+  );
   if (missing.length > 0) {
     throw new Error(
       `${where}: 既定の表の境界 ${missing.join(" / ")} を含まない（既定の細分でない）— ` +
@@ -570,7 +570,8 @@ export const profileRowsSegments = (bounds: readonly number[]): readonly RowsSeg
   }
   return bounds.map((maxRows, index) => {
     const range = rowsRange(bounds, index);
-    const covering = GEMM_ROWS_BUCKETS.find((rule) => maxRows <= rule.maxRows) ??
+    const covering =
+      GEMM_ROWS_BUCKETS.find((rule) => maxRows <= rule.maxRows) ??
       GEMM_ROWS_BUCKETS[GEMM_ROWS_BUCKETS.length - 1];
     return {
       slot: `gemmRows ${range}`,
@@ -666,8 +667,8 @@ const slotOf = (
       }
       const rows = Number(matched[1]);
       // 段の列は末尾が Infinity（profileRowsSegments の検査済み）なので必ずどれかに当たる
-      return (segments.find((segment) => rows <= segment.maxRows) ??
-        segments[segments.length - 1]).slot;
+      return (segments.find((segment) => rows <= segment.maxRows) ?? segments[segments.length - 1])
+        .slot;
     }
     case "attention":
       return attentionStage(row, where) === "qk" ? "attention.qk" : "attention.pv";
@@ -702,20 +703,20 @@ export type SlotVerdict = {
   readonly cases: readonly string[];
   readonly outcome:
     | {
-      readonly kind: "adopted";
-      readonly name: string;
-      readonly geometry: Geometry;
-      /** ケース間の幾何平均。 */
-      readonly geomean: number;
-      readonly min: number;
-      readonly max: number;
-    }
+        readonly kind: "adopted";
+        readonly name: string;
+        readonly geometry: Geometry;
+        /** ケース間の幾何平均。 */
+        readonly geomean: number;
+        readonly min: number;
+        readonly max: number;
+      }
     | {
-      readonly kind: "default";
-      readonly name: string;
-      readonly geometry: Geometry;
-      readonly reason: string;
-    };
+        readonly kind: "default";
+        readonly name: string;
+        readonly geometry: Geometry;
+        readonly reason: string;
+      };
   /** 採らなかった幾何と理由（名前の昇順）。 */
   readonly rejected: readonly { readonly name: string; readonly reason: string }[];
   /**
@@ -811,11 +812,11 @@ type SlotRow = { readonly row: SweepObservation; readonly included: boolean };
 
 type Eligibility =
   | {
-    readonly eligible: true;
-    readonly geomean: number;
-    readonly min: number;
-    readonly max: number;
-  }
+      readonly eligible: true;
+      readonly geomean: number;
+      readonly min: number;
+      readonly max: number;
+    }
   | { readonly eligible: false; readonly reason: string };
 
 /**
@@ -843,7 +844,7 @@ const judgeCandidate = (
       return { eligible: false, reason: `${caseId} で出力が既定と不一致` };
     }
     const seen = (observations.get(caseId) ?? []).flatMap(({ row, included }) =>
-      included ? [row] : []
+      included ? [row] : [],
     );
     if (seen.length === 0) {
       return {
@@ -862,7 +863,7 @@ const judgeCandidate = (
     }
     perCase.push({ caseId, speedup: geometricMean(speedups) });
   }
-  const worst = perCase.reduce((low, entry) => entry.speedup < low.speedup ? entry : low);
+  const worst = perCase.reduce((low, entry) => (entry.speedup < low.speedup ? entry : low));
   if (worst.speedup < minSpeedup) {
     return {
       eligible: false,
@@ -908,9 +909,9 @@ const judgeSlot = (
   // MUST: クラスの既定は 1 つ。割れていれば比の土台がケースごとに違う（掃引の版違いなど）
   if (defaultKeys.size !== 1) {
     throw new Error(
-      `${spec.slot}: 既定の行の幾何が割れている（${
-        [...new Set(defaults.map((row) => row.geometry))].join(" / ")
-      }）`,
+      `${spec.slot}: 既定の行の幾何が割れている（${[
+        ...new Set(defaults.map((row) => row.geometry)),
+      ].join(" / ")}）`,
     );
   }
   const defaultRow = defaults[0];
@@ -923,15 +924,14 @@ const judgeSlot = (
         "と違う — 古い runtime で取った掃引か境界のずれ。比の土台が別物なので生成しない",
     );
   }
-  const byName = new Map<
-    string,
-    { geometry: Geometry; observations: Map<string, SlotRow[]> }
-  >();
+  const byName = new Map<string, { geometry: Geometry; observations: Map<string, SlotRow[]> }>();
   for (const slotRow of slotRows) {
     const { row } = slotRow;
     if (row.isDefault || row.geometry === defaultRow.geometry) continue;
-    const entry = byName.get(row.geometry) ??
-      { geometry: row.geometryParams, observations: new Map<string, SlotRow[]>() };
+    const entry = byName.get(row.geometry) ?? {
+      geometry: row.geometryParams,
+      observations: new Map<string, SlotRow[]>(),
+    };
     if (geometryKey(entry.geometry) !== geometryKey(row.geometryParams)) {
       throw new Error(`${spec.slot}: 幾何 ${row.geometry} の geometryParams が行ごとに違う`);
     }
@@ -945,10 +945,10 @@ const judgeSlot = (
       geometry: entry.geometry,
       eligibility: judgeCandidate(cases, entry.observations, unmeasured, minSpeedup),
     }))
-    .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   const eligible = judged
     .flatMap((candidate) =>
-      candidate.eligibility.eligible ? [{ ...candidate, ...candidate.eligibility }] : []
+      candidate.eligibility.eligible ? [{ ...candidate, ...candidate.eligibility }] : [],
     )
     // 幾何平均の降順・同値は名前の昇順（入力の順に依らず決まる）
     .sort((left, right) => right.geomean - left.geomean || (left.name < right.name ? -1 : 1));
@@ -958,32 +958,34 @@ const judgeSlot = (
     .map((candidate) => ({
       name: candidate.name,
       reason: candidate.eligibility.eligible
-        ? `幾何平均 ${formatRatio(candidate.eligibility.geomean)}（採用 ${
-          formatRatio(winner.geomean)
-        } に届かない）`
+        ? `幾何平均 ${formatRatio(candidate.eligibility.geomean)}（採用 ${formatRatio(
+            winner.geomean,
+          )} に届かない）`
         : candidate.eligibility.reason,
     }));
   return {
     slot: spec.slot,
     scope: spec.scope,
     cases,
-    outcome: winner === undefined
-      ? {
-        kind: "default",
-        name: defaultRow.geometry,
-        geometry: defaultRow.geometryParams,
-        reason: unmeasured.size === cases.length
-          ? "クラスの全ケースを全掃引で比の材料から外した"
-          : `全ケースで出力が一致し ${formatRatio(minSpeedup)} 以上の幾何が無い`,
-      }
-      : {
-        kind: "adopted",
-        name: winner.name,
-        geometry: winner.geometry,
-        geomean: winner.geomean,
-        min: winner.min,
-        max: winner.max,
-      },
+    outcome:
+      winner === undefined
+        ? {
+            kind: "default",
+            name: defaultRow.geometry,
+            geometry: defaultRow.geometryParams,
+            reason:
+              unmeasured.size === cases.length
+                ? "クラスの全ケースを全掃引で比の材料から外した"
+                : `全ケースで出力が一致し ${formatRatio(minSpeedup)} 以上の幾何が無い`,
+          }
+        : {
+            kind: "adopted",
+            name: winner.name,
+            geometry: winner.geometry,
+            geomean: winner.geomean,
+            min: winner.min,
+            max: winner.max,
+          },
     rejected,
     excluded,
   };
@@ -994,7 +996,8 @@ export const targetLabel = (target: ProfileTarget): string =>
   target.optIn === true
     ? "（注入専用 — match なし）"
     : [target.vendor, target.architecture, target.description]
-      .filter((part) => part !== undefined).join(" / ");
+        .filter((part) => part !== undefined)
+        .join(" / ");
 
 /**
  * 掃引の記録（1 本以上・同じ adapter）から欄ごとの採否を出す（純関数）。
@@ -1034,16 +1037,15 @@ export const deriveProfile = (
     // description を指定したら、その機種の掃引だけ（同じ vendor / architecture の別機種を混ぜない）
     const { vendor, architecture, description } = source.adapter;
     if (
-      options.optIn !== true && (
-        vendor !== options.vendor ||
+      options.optIn !== true &&
+      (vendor !== options.vendor ||
         (options.architecture !== undefined && architecture !== options.architecture) ||
-        (options.description !== undefined && description !== options.description)
-      )
+        (options.description !== undefined && description !== options.description))
     ) {
       throw new Error(
-        `${source.path}: adapter ${vendor} / ${architecture} / ${description} が指定した ${
-          targetLabel(options)
-        } と合わない`,
+        `${source.path}: adapter ${vendor} / ${architecture} / ${description} が指定した ${targetLabel(
+          options,
+        )} と合わない`,
       );
     }
     // MUST: 掃引どうしは adapter の 4 欄が全て一致（空どうしは一致・片方だけ空は不一致 — ADR 0117
@@ -1084,13 +1086,17 @@ export const deriveProfile = (
       if (base === undefined) throw new Error(`${source.path}: ${row.caseId} の既定の行が無い`);
       // ケースごと外す理由（再測定比 → 既定の行の丸め）。既定の行が失敗したケースは比を持たないので
       // 丸めを見ない（比の材料が無い — 失敗は judgeCandidate が見る）
-      const caseReason = exclusionReason(repeats.get(row.caseId)) ??
+      const caseReason =
+        exclusionReason(repeats.get(row.caseId)) ??
         (base.row.error === undefined ? defaultRoundingReason(base.bound) : undefined);
       // 観測ごとに外す理由（E = e(r) + e(d)）。既定比を持たない行（失敗など）は比の材料でないので見ない
-      const rowReason = caseReason !== undefined || row.isDefault ||
-          row.speedupVsDefault === undefined || "unknown" in base.bound
-        ? undefined
-        : rowRoundingReason(roundingBound(row, source.timestampQuantum), base.bound.bound);
+      const rowReason =
+        caseReason !== undefined ||
+        row.isDefault ||
+        row.speedupVsDefault === undefined ||
+        "unknown" in base.bound
+          ? undefined
+          : rowRoundingReason(roundingBound(row, source.timestampQuantum), base.bound.bound);
       if (caseReason !== undefined && !excludedCases.has(row.caseId)) {
         excludedCases.add(row.caseId);
         excludedHere.push({
@@ -1131,7 +1137,7 @@ export const deriveProfile = (
       bySlot.get(spec.slot) ?? [],
       excludedBySlot.get(spec.slot) ?? [],
       options.minSpeedup,
-    )
+    ),
   );
 };
 
@@ -1140,11 +1146,12 @@ export const verdictLines = (verdicts: readonly SlotVerdict[]): string[] =>
   verdicts.flatMap((verdict) => {
     const head = `${verdict.slot}（${verdict.scope}・${verdict.cases.length} ケース）`;
     const { outcome } = verdict;
-    const line = outcome.kind === "adopted"
-      ? `- ${head}: 採用 ${outcome.name} ${formatRatio(outcome.geomean)}（${
-        formatRatio(outcome.min)
-      }〜${formatRatio(outcome.max)}）`
-      : `- ${head}: 既定 ${outcome.name} のまま（${outcome.reason}）`;
+    const line =
+      outcome.kind === "adopted"
+        ? `- ${head}: 採用 ${outcome.name} ${formatRatio(outcome.geomean)}（${formatRatio(
+            outcome.min,
+          )}〜${formatRatio(outcome.max)}）`
+        : `- ${head}: 既定 ${outcome.name} のまま（${outcome.reason}）`;
     return [
       line,
       ...verdict.excluded.map((excluded) => `  - ${excludedCaseLine(excluded)}`),
@@ -1195,13 +1202,15 @@ export const buildGeometryProfile = (
   const joined = (pick: (source: SweepSource) => string): string => sources.map(pick).join(", ");
   const table: GeometryProfile = {
     id: spec.id,
-    ...(spec.optIn === true ? {} : {
-      match: {
-        vendor: spec.vendor,
-        ...(spec.architecture === undefined ? {} : { architecture: spec.architecture }),
-        ...(spec.description === undefined ? {} : { description: spec.description }),
-      },
-    }),
+    ...(spec.optIn === true
+      ? {}
+      : {
+          match: {
+            vendor: spec.vendor,
+            ...(spec.architecture === undefined ? {} : { architecture: spec.architecture }),
+            ...(spec.description === undefined ? {} : { description: spec.description }),
+          },
+        }),
     gemmRows: segments.map((segment) => ({
       maxRows: segment.maxRows,
       geometry: gemmSlot(verdicts, segment.slot),
@@ -1337,7 +1346,7 @@ export const deriveGeometryProfile = (
     throw new Error(`minSpeedup は 1 以上の数（${minSpeedup}）`);
   }
   const sources = reports.map(({ report, path, sha256 }) =>
-    parseSweepReport(report, { path, sha256 })
+    parseSweepReport(report, { path, sha256 }),
   );
   const spec = { ...options, minSpeedup };
   const verdicts = deriveProfile(sources, spec);
@@ -1371,7 +1380,7 @@ export const infinityJson = (value: unknown): string => {
   }
   return JSON.stringify(
     value,
-    (_key, entry: unknown) => entry === Number.POSITIVE_INFINITY ? INFINITY_MARK : entry,
+    (_key, entry: unknown) => (entry === Number.POSITIVE_INFINITY ? INFINITY_MARK : entry),
     2,
   ).replaceAll(JSON.stringify(INFINITY_MARK), INFINITY_JSON);
 };

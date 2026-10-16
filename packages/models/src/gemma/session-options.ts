@@ -53,10 +53,8 @@ export const GEMMA_SESSION_POLICY: FamilySessionPolicy = {
  *
  * NOTE: `export` は2つの入口が同じ門を通すため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
-export const assertGemmaSessionOverrides = (
-  overrides: GemmaSessionOptions,
-  where: string,
-): void => assertSessionOverrides(GEMMA_SESSION_POLICY, overrides, where);
+export const assertGemmaSessionOverrides = (overrides: GemmaSessionOptions, where: string): void =>
+  assertSessionOverrides(GEMMA_SESSION_POLICY, overrides, where);
 
 // DECIDED: docs/decisions/0104-gemma-fast-quant.md
 export const resolveGemmaSessionOptions = (

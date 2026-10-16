@@ -34,7 +34,7 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /** f32 の最小有限値。「行 max が −inf でない」は `amax_row >= この値` と同値。 */
-const NEG_F32_MAX = -3.4028234663852886e+38;
+const NEG_F32_MAX = -3.4028234663852886e38;
 
 /**
  * 分解ガード相当の参照グラフ（既存語彙だけで組む）。
@@ -158,8 +158,7 @@ const CASES: readonly Case[] = [
 ];
 
 test({
-  name:
-    "safe_softmax 1 ノードの出力が分解ガード相当（softmax + masked_fill）と**ビット単位で一致**する（実 GPU）",
+  name: "safe_softmax 1 ノードの出力が分解ガード相当（softmax + masked_fill）と**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -190,11 +189,10 @@ test({
         assertEquals(
           mismatches.length,
           0,
-          `${name}: ${mismatches.length} 要素がビット不一致（先頭 ${
-            mismatches.slice(0, 4).map((i) =>
-              `#${i} safe=0x${a[i].toString(16)} guarded=0x${b[i].toString(16)}`
-            ).join(" / ")
-          }）`,
+          `${name}: ${mismatches.length} 要素がビット不一致（先頭 ${mismatches
+            .slice(0, 4)
+            .map((i) => `#${i} safe=0x${a[i].toString(16)} guarded=0x${b[i].toString(16)}`)
+            .join(" / ")}）`,
         );
 
         // 故障注入の確認: 空行が本当に 0 で、非空行は 0 でない（両者が「素の softmax の
@@ -206,7 +204,10 @@ test({
           if (empty.has(row)) {
             assertEquals(slice, Array(dim).fill(0), `${name}: 空行 ${row} が 0 でない`);
           } else {
-            assert(slice.some((v) => v > 0), `${name}: 非空行 ${row} が全 0`);
+            assert(
+              slice.some((v) => v > 0),
+              `${name}: 非空行 ${row} が全 0`,
+            );
           }
         }
       }
@@ -225,7 +226,11 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (const [rows, dim] of [[4, 9], [3, 300], [130, 4]] as const) {
+      for (const [rows, dim] of [
+        [4, 9],
+        [3, 300],
+        [130, 4],
+      ] as const) {
         const x = fill([rows, dim], SCORE);
         const safe = await run(
           gpu,

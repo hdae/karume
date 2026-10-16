@@ -41,7 +41,10 @@ const f32Only: OpSupport = {
 };
 
 const M0_SUPPORT: RuntimeSupport = {
-  ops: new Map([["matmul", f32Only], ["add", f32Only]]),
+  ops: new Map([
+    ["matmul", f32Only],
+    ["add", f32Only],
+  ]),
   storage: new Set<CodecLayout>(["f32"]),
   io: new Set<IrDtype>(["f32"]),
 };

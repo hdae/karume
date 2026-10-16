@@ -113,10 +113,7 @@ test("roundToF16 は独立実装の RTNE 符号化器と f32 入力の全域で�
   for (let i = -20000; i < 20000; i += 7) {
     for (const step of [1e-4, 3.7e-2, 11.3]) {
       const value = Math.fround(i * step);
-      assert(
-        Object.is(roundToF16(value), viaBits(value)),
-        `roundToF16(${value}) が割れた`,
-      );
+      assert(Object.is(roundToF16(value), viaBits(value)), `roundToF16(${value}) が割れた`);
     }
   }
   assert(Number.isNaN(roundToF16(Number.NaN)));
@@ -431,7 +428,14 @@ const attentionOracle = async (
   }
   const scores = await runGraph(
     gpu,
-    singleOpDeclaration("bmm", [[heads, m, d], [heads, d, n]], [[heads, m, n]]),
+    singleOpDeclaration(
+      "bmm",
+      [
+        [heads, m, d],
+        [heads, d, n],
+      ],
+      [[heads, m, n]],
+    ),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
 
@@ -445,7 +449,14 @@ const attentionOracle = async (
   // ③ P と v を f16 へ（③ のタイル充填の丸め）
   const out = await runGraph(
     gpu,
-    singleOpDeclaration("bmm", [[heads, m, n], [heads, n, d]], [[heads, m, d]]),
+    singleOpDeclaration(
+      "bmm",
+      [
+        [heads, m, n],
+        [heads, n, d],
+      ],
+      [[heads, m, d]],
+    ),
     {
       x0: tensorOf([heads, m, n], roundedCopy(probs.output)),
       x1: tensorOf([heads, n, d], roundedCopy(v as Float32Array<ArrayBuffer>)),
@@ -475,9 +486,14 @@ test({
           },
         );
 
-        const actual = await runGraph(gpu, graph, { x0: q, x1: k, x2: v }, {
-          attentionCompute: "f16",
-        });
+        const actual = await runGraph(
+          gpu,
+          graph,
+          { x0: q, x1: k, x2: v },
+          {
+            attentionCompute: "f16",
+          },
+        );
         const plain = await runGraph(gpu, graph, { x0: q, x1: k, x2: v });
         const oracle = await attentionOracle(
           gpu,
@@ -498,23 +514,19 @@ test({
         // `attentionStatsRegCache(n)` を導いてキーへ載せる）。省くと `:rc` 無しの綴りに
         // なり、走ったキーと必ず食い違う。
         const regCache = attentionStatsRegCache(n);
-        for (
-          const key of [
-            attentionQkKey(qkV4, "f16"),
-            attentionStatsKey("f16", "f32", regCache),
-            attentionPvKey(pvV4, "f16"),
-          ]
-        ) {
+        for (const key of [
+          attentionQkKey(qkV4, "f16"),
+          attentionStatsKey("f16", "f32", regCache),
+          attentionPvKey(pvV4, "f16"),
+        ]) {
           assert(running.has(key), `attention ${name}: '${key}' が走っていない`);
         }
         // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
-        for (
-          const key of [
-            attentionQkKey(qkV4),
-            attentionStatsKey("f32", "f32", regCache),
-            attentionPvKey(pvV4),
-          ]
-        ) {
+        for (const key of [
+          attentionQkKey(qkV4),
+          attentionStatsKey("f32", "f32", regCache),
+          attentionPvKey(pvV4),
+        ]) {
           assert(!running.has(key), `attention ${name}: f32 変種 '${key}' が残っている`);
         }
       }

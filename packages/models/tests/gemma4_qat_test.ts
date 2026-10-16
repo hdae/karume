@@ -88,7 +88,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       break;
     case "no-head":
       // head の linear が token embedding と別の重みを引く（共有 head が 0 本になる）。
-      raw = raw.map((node, i) => i === 7 ? { ...node, ins: ["input2", "w4"] } : node);
+      raw = raw.map((node, i) => (i === 7 ? { ...node, ins: ["input2", "w4"] } : node));
       break;
     case "no-projection":
       raw = raw.filter((_, i) => i !== 1);
@@ -97,7 +97,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       raw = [...raw, { op: "linear", ins: ["embedded", PROJECTION], outs: ["projected2"] }];
       break;
     case "linear-not-initializer":
-      raw = raw.map((node, i) => i === 3 ? { ...node, ins: ["input4", "absent"] } : node);
+      raw = raw.map((node, i) => (i === 3 ? { ...node, ins: ["input4", "absent"] } : node));
       break;
     case "linear-shared":
       initializers.w8 = { shared: true };
@@ -109,10 +109,10 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       initializers.w8 = { storage: { codec: "int4-sym-g", groupSize: 32, rowAxis: 0 } };
       break;
     case "srq-before-missing":
-      raw = raw.map((node, i) => i === 2 ? { ...node, op: "reshape" } : node);
+      raw = raw.map((node, i) => (i === 2 ? { ...node, op: "reshape" } : node));
       break;
     case "srq-after-missing":
-      raw = raw.map((node, i) => i === 4 ? { ...node, op: "reshape" } : node);
+      raw = raw.map((node, i) => (i === 4 ? { ...node, op: "reshape" } : node));
       break;
     case "extra-consumer":
       raw = [...raw, { op: "reshape", ins: ["linear4"], outs: ["spare"] }];
@@ -300,9 +300,7 @@ test("QAT のホスト RoPE", async (t) => {
     // （ADR 0097 追記 5 が全ビット一致を保証していない）。丸め契約を意図して変える
     // ときだけ焼き直す。
     const golden = JSON.parse(
-      await readTextFile(
-        new URL("./fixtures/gemma4-qat-rope-golden.json", import.meta.url),
-      ),
+      await readTextFile(new URL("./fixtures/gemma4-qat-rope-golden.json", import.meta.url)),
     ) as {
       readonly positions: readonly number[];
       readonly spec: Gemma4RopeSpec;
@@ -320,9 +318,9 @@ test("QAT のホスト RoPE", async (t) => {
       for (let i = 0; i < expected.length; i++) {
         if (actual[i] === expected[i]) continue;
         throw new Error(
-          `${name}[${i}]: 0x${actual[i].toString(16)} が golden 0x${
-            expected[i].toString(16)
-          } と違う`,
+          `${name}[${i}]: 0x${actual[i].toString(16)} が golden 0x${expected[i].toString(
+            16,
+          )} と違う`,
         );
       }
     }
@@ -331,10 +329,13 @@ test("QAT のホスト RoPE", async (t) => {
     assertThrows(() => gemma4QatRopeInputs(spec, [-1]), Error, "非負整数");
     assertThrows(
       () =>
-        gemma4QatRopeInputs({
-          ...spec,
-          full_attention: { theta: 1e300, headDim: 4, rotaryDim: 4 },
-        }, [1]),
+        gemma4QatRopeInputs(
+          {
+            ...spec,
+            full_attention: { theta: 1e300, headDim: 4, rotaryDim: 4 },
+          },
+          [1],
+        ),
       Error,
       "f32 逆周波数",
     );

@@ -48,56 +48,64 @@ describe("probePieces（試し確保の割り方）", () => {
 });
 
 describe("fitsHeadroom（実 GPU）", () => {
-  it("小さい量は入り、天井を越える量は device を生かしたまま false", {
-    ignore: !GPU_AVAILABLE,
-  }, async () => {
-    const gpu = await acquireGpu();
-    try {
-      let lost = false;
-      gpu.onLost(() => {
-        lost = true;
-      });
-      assertEquals(await fitsHeadroom(gpu, 4), true);
-      // 1 TiB — どの device でも入らない（maxBufferSize ごとの片に割って順に確保し、途中で OOM する）。
-      assertEquals(await fitsHeadroom(gpu, 2 ** 40), false);
-      // 非致命の確認: 続けて小さい量が入り、本当の確保 + 書き込み + フェンスも通る。
-      assertEquals(await fitsHeadroom(gpu, 4), true);
-      gpu.device.pushErrorScope("out-of-memory");
-      const buffer = gpu.device.createBuffer({
-        size: 16 * MIB,
-        usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
-      });
-      gpu.device.queue.writeBuffer(buffer, 0, new Uint8Array(16 * MIB));
-      assertEquals(await gpu.device.popErrorScope(), null);
-      await gpu.device.queue.onSubmittedWorkDone();
-      buffer.destroy();
-      assertEquals(lost, false);
-      assertEquals(gpu.lost, undefined);
-    } finally {
-      gpu.destroy();
-    }
-  });
-
-  it("true の後は同じ量を本当に確保できる（解放を待ってから返る）", {
-    ignore: !GPU_AVAILABLE,
-  }, async () => {
-    const gpu = await acquireGpu();
-    try {
-      const bytes = 512 * MIB;
-      if (!(await fitsHeadroom(gpu, bytes))) {
-        // 512 MiB も入らない機は前提が崩れている（テストの対象外 — 明示して落とす）。
-        throw new Error("512 MiB の試し確保が通らない device では検証できない");
+  it(
+    "小さい量は入り、天井を越える量は device を生かしたまま false",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      try {
+        let lost = false;
+        gpu.onLost(() => {
+          lost = true;
+        });
+        assertEquals(await fitsHeadroom(gpu, 4), true);
+        // 1 TiB — どの device でも入らない（maxBufferSize ごとの片に割って順に確保し、途中で OOM する）。
+        assertEquals(await fitsHeadroom(gpu, 2 ** 40), false);
+        // 非致命の確認: 続けて小さい量が入り、本当の確保 + 書き込み + フェンスも通る。
+        assertEquals(await fitsHeadroom(gpu, 4), true);
+        gpu.device.pushErrorScope("out-of-memory");
+        const buffer = gpu.device.createBuffer({
+          size: 16 * MIB,
+          usage: BUFFER_USAGE.STORAGE | BUFFER_USAGE.COPY_DST,
+        });
+        gpu.device.queue.writeBuffer(buffer, 0, new Uint8Array(16 * MIB));
+        assertEquals(await gpu.device.popErrorScope(), null);
+        await gpu.device.queue.onSubmittedWorkDone();
+        buffer.destroy();
+        assertEquals(lost, false);
+        assertEquals(gpu.lost, undefined);
+      } finally {
+        gpu.destroy();
       }
-      const pieces = probePieces(bytes, gpu.limits.maxBufferSize);
-      gpu.device.pushErrorScope("out-of-memory");
-      const buffers = pieces.map((size) =>
-        gpu.device.createBuffer({ size, usage: BUFFER_USAGE.STORAGE })
-      );
-      assertEquals(await gpu.device.popErrorScope(), null);
-      for (const buffer of buffers) buffer.destroy();
-      await gpu.device.queue.onSubmittedWorkDone();
-    } finally {
-      gpu.destroy();
-    }
-  });
+    },
+  );
+
+  it(
+    "true の後は同じ量を本当に確保できる（解放を待ってから返る）",
+    {
+      ignore: !GPU_AVAILABLE,
+    },
+    async () => {
+      const gpu = await acquireGpu();
+      try {
+        const bytes = 512 * MIB;
+        if (!(await fitsHeadroom(gpu, bytes))) {
+          // 512 MiB も入らない機は前提が崩れている（テストの対象外 — 明示して落とす）。
+          throw new Error("512 MiB の試し確保が通らない device では検証できない");
+        }
+        const pieces = probePieces(bytes, gpu.limits.maxBufferSize);
+        gpu.device.pushErrorScope("out-of-memory");
+        const buffers = pieces.map((size) =>
+          gpu.device.createBuffer({ size, usage: BUFFER_USAGE.STORAGE }),
+        );
+        assertEquals(await gpu.device.popErrorScope(), null);
+        for (const buffer of buffers) buffer.destroy();
+        await gpu.device.queue.onSubmittedWorkDone();
+      } finally {
+        gpu.destroy();
+      }
+    },
+  );
 });

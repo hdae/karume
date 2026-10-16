@@ -128,11 +128,12 @@ export const openContainerSource = (
     const existing = plans.get(index);
     if (existing !== undefined) return existing;
     const { openFile } = origin;
-    const opened: Promise<ReadPlan> = openFile === undefined
-      ? Promise.resolve({ kind: "scan" })
-      : openFile(partAt(index), {}).then((reader): ReadPlan =>
-        reader.cost === "seek" ? { kind: "seek", reader } : { kind: "scan" }
-      );
+    const opened: Promise<ReadPlan> =
+      openFile === undefined
+        ? Promise.resolve({ kind: "scan" })
+        : openFile(partAt(index), {}).then((reader): ReadPlan =>
+            reader.cost === "seek" ? { kind: "seek", reader } : { kind: "scan" },
+          );
     // MUST: 失敗した決定は覚えない — 覚えると、一過性の失敗で開けなかった part が以後の読みで
     // すべて同じ reject を返し続ける（開き直す手段が消える）。
     const decided = opened.catch((error: unknown) => {
@@ -165,11 +166,13 @@ export const openContainerSource = (
   const readWhole = (index: number, ref: FileRef): Promise<Uint8Array<ArrayBuffer>> => {
     const current = held;
     if (current !== undefined && current.part === index) return current.bytes;
-    const pending = origin.readFile(ref, {
-      // この面は取得ではないので進捗は出さない（温めは呼び手が prefetchAssets で済ませている）。
-      onProgress: () => {},
-      sizeViolation: context.sizeViolation(ref),
-    }).then((bytes) => assertTightView(bytes, ref.path));
+    const pending = origin
+      .readFile(ref, {
+        // この面は取得ではないので進捗は出さない（温めは呼び手が prefetchAssets で済ませている）。
+        onProgress: () => {},
+        sizeViolation: context.sizeViolation(ref),
+      })
+      .then((bytes) => assertTightView(bytes, ref.path));
     const entry: HeldPart = {
       part: index,
       // MUST: 失敗した全量読みは席に残さない（残すと以後の読みが同じ reject を返し続ける）。
@@ -195,7 +198,10 @@ export const openContainerSource = (
         );
       }
       if (
-        !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 ||
+        !Number.isInteger(offset) ||
+        !Number.isInteger(length) ||
+        offset < 0 ||
+        length < 0 ||
         offset + length > ref.size
       ) {
         throw new Error(

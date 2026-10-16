@@ -139,11 +139,9 @@ export type Siglip2PipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Siglip2FromPretrainedOptions =
-  & Siglip2PipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions
-  & {
+export type Siglip2FromPretrainedOptions = Siglip2PipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
@@ -394,11 +392,7 @@ const admitSiglip2 = (
   // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(
-      gpuFeatures,
-      options.gpu,
-      `Siglip2Pipeline: quant '${quantName}'`,
-    );
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `Siglip2Pipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,
@@ -427,7 +421,7 @@ const openSiglip2State = async (
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitSiglip2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `Siglip2Pipeline: quant '${quantName}'`);
@@ -627,7 +621,7 @@ export class Siglip2Pipeline {
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();
         },
-      ])
+      ]),
     );
     return this.#disposal;
   }

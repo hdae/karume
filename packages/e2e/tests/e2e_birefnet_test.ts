@@ -77,8 +77,15 @@ import {
   type SafetensorsFile,
   type Tensor,
 } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
-import { assertAdapterMatchesEnvironment, ENVIRONMENT } from "../../runtime/tests/helpers/environment.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
+import {
+  assertAdapterMatchesEnvironment,
+  ENVIRONMENT,
+} from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
@@ -351,16 +358,14 @@ const SERIES: readonly Series[] = [
   },
   {
     name: "lucida-1024-f16",
-    generate:
-      `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
+    generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
     tolerance: LUCIDA_F16_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_F16_REAL_TOLERANCE,
     compressedStorage: ["f16"],
   },
   {
     name: "lucida-2048-f16",
-    generate:
-      `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --resolution 2048`,
+    generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --resolution 2048`,
     tolerance: LUCIDA_F16_2048_SYNTHETIC_TOLERANCE,
     realTolerance: LUCIDA_F16_REAL_TOLERANCE,
     compressedStorage: ["f16"],
@@ -397,13 +402,12 @@ const B570_JOB_TIMEOUT =
  *   deform_conv2d で、その重みは f16 系列でも f32 格納のまま（適格外）なので、格納 dtype を変えても
  *   同じ 1 dispatch が走るため。
  */
-const HELD_SERIES: Readonly<
-  Record<string, Readonly<Record<string, { readonly reason: string }>>>
-> = {
-  "lucida-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
-  "birefnet-hr-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
-  "lucida-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
-};
+const HELD_SERIES: Readonly<Record<string, Readonly<Record<string, { readonly reason: string }>>>> =
+  {
+    "lucida-2048": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+    "birefnet-hr-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+    "lucida-2048-f16": { "deno-intel-graphics-bmg-g21": { reason: B570_JOB_TIMEOUT } },
+  };
 
 /** この走行の機で止める理由（無ければ `undefined` = 止めない）。 */
 const heldReason = (series: Series): string | undefined => {
@@ -461,8 +465,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 const discoverCases = (root: URL): readonly string[] =>
   listDir(root)
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();
@@ -605,13 +609,16 @@ const ENVIRONMENT_KEY_FORMAT = /^(deno|chrome)-[a-z0-9]+(-[a-z0-9]+)*$/;
 test("BiRefNet 環境別の SKIP 表: 行は実走する系列を指し、内側のキーは環境キーの書式", () => {
   // 系列名の綴り違いは行を黙って効かなくする（止めたはずの系列が走ってプロセスごと落ちる）。
   const names = new Set(SERIES.map((series) => series.name));
-  assertEquals(Object.keys(HELD_SERIES).filter((name) => !names.has(name)), []);
+  assertEquals(
+    Object.keys(HELD_SERIES).filter((name) => !names.has(name)),
+    [],
+  );
   // 環境キーの綴り違い（大文字・商標記号・空白の残り）も同じく行を黙って効かなくする —
   // `environmentKey` はこの書式の外を作らないので、外れた行はどの機にも当たらない。
   const malformed = Object.entries(HELD_SERIES).flatMap(([series, byEnvironment]) =>
     Object.keys(byEnvironment)
       .filter((key) => !ENVIRONMENT_KEY_FORMAT.test(key))
-      .map((key) => `${series} / ${key}`)
+      .map((key) => `${series} / ${key}`),
   );
   assertEquals(malformed, []);
 });
@@ -666,7 +673,7 @@ for (const series of SERIES) {
         ...new Set(
           Object.values(parsed.graph.initializers)
             .flatMap((initializer) =>
-              initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)]
+              initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)],
             )
             .filter(isCompressedLayout),
         ),

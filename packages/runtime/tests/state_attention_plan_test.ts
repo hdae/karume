@@ -45,8 +45,14 @@ test("行ブロックは chunk 行を漏らさず重ねずに覆い、1 枚が�
     { offset: 2, rows: 2, scoreBytes: 1024, statsBytes: 128 },
   ]);
   // 覆いの性質（行の総和と offset の連続）を式ではなく結果から確かめる。
-  assertEquals(plan.blocks.reduce((sum, block) => sum + block.rows, 0), 4);
-  assertEquals(plan.blocks.map((block) => block.offset), [0, 2]);
+  assertEquals(
+    plan.blocks.reduce((sum, block) => sum + block.rows, 0),
+    4,
+  );
+  assertEquals(
+    plan.blocks.map((block) => block.offset),
+    [0, 2],
+  );
   for (const block of plan.blocks) assert(block.scoreBytes <= 1536);
 });
 
@@ -63,7 +69,10 @@ test("端数は先頭のブロックへ寄り、1 行狭いブロックが混ざ
 test("枚数の明示（forced）は上限に余裕があっても割る", () => {
   const plan = planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, WIDE_LIMIT, 4);
   assertEquals(plan.blocks.length, 4);
-  assertEquals(plan.blocks.map((block) => block.offset), [0, 1, 2, 3]);
+  assertEquals(
+    plan.blocks.map((block) => block.offset),
+    [0, 1, 2, 3],
+  );
   assertEquals(plan.blocks[0], { offset: 0, rows: 1, scoreBytes: 512, statsBytes: 64 });
   // 明示しなければ 1 枚（forced が実際に効いていることの対）。
   assertEquals(

@@ -108,9 +108,10 @@ export type OpenedContainer = {
   readonly graphs: Readonly<Record<string, BoundGraph>>;
   readonly source: BlockSource;
   /** block 1 本の所在（part と目次の行）。 */
-  locate(
-    id: string,
-  ): { readonly part: number; readonly record: ConstBlockRecord | DataBlockRecord };
+  locate(id: string): {
+    readonly part: number;
+    readonly record: ConstBlockRecord | DataBlockRecord;
+  };
   /**
    * block を 1 本取って返す。取得元が検証済みでなければ（{@link BlockSource.verified} が false）
    * sha256 を検証する（§7 — 未検証の取得元だけが block ごとに一括 digest）。
@@ -279,9 +280,8 @@ export const openContainer = async (
   const graphs = bindGraphs(graph, model);
 
   // krg の part 1 は const 領域そのもの（§3）。krm は parts の宣言長。
-  const partLengths = model === undefined
-    ? [graph.const.length]
-    : model.parts.map((part) => part.length);
+  const partLengths =
+    model === undefined ? [graph.const.length] : model.parts.map((part) => part.length);
   const source = input.kind === "bytes" ? bytesSource(input.bytes, part0Bytes, partLengths) : head;
   if (source.partCount !== partLengths.length + 1) {
     throw new ContainerFormatError(
@@ -338,9 +338,8 @@ export const openContainer = async (
   };
 
   const asset: OpenedContainer["asset"] = (name) => {
-    const binding = model !== undefined && Object.hasOwn(model.assets, name)
-      ? model.assets[name]
-      : undefined;
+    const binding =
+      model !== undefined && Object.hasOwn(model.assets, name) ? model.assets[name] : undefined;
     if (binding === undefined) throw new ContainerFormatError(`未宣言の資産 '${name}'`);
     const found = locate(binding.block);
     let verifiedBlock: Promise<Uint8Array<ArrayBuffer>> | undefined;
@@ -382,9 +381,10 @@ export const openContainer = async (
       throw new ContainerFormatError("krg 抽出は krm からだけ（krg 入力は抽出元にならない — §9）");
     }
     const regionLength = graph.const.length;
-    const region = regionLength === 0
-      ? new Uint8Array(new ArrayBuffer(0))
-      : await source.read(1, 0, regionLength);
+    const region =
+      regionLength === 0
+        ? new Uint8Array(new ArrayBuffer(0))
+        : await source.read(1, 0, regionLength);
     if (region.byteLength !== regionLength) {
       throw new ContainerFormatError(
         `const 領域: 取得長 ${region.byteLength} が宣言 ${regionLength} と違う`,

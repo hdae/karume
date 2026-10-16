@@ -212,10 +212,10 @@ export type OpContract =
   | (ContractBase & { readonly kind: "matmul"; readonly name: "matmul"; readonly arity: 2 })
   | (ContractBase & { readonly kind: "bmm"; readonly name: typeof BMM_OP; readonly arity: 2 })
   | (ContractBase & {
-    readonly kind: "gather";
-    readonly name: typeof GATHER_OP;
-    readonly arity: 2;
-  })
+      readonly kind: "gather";
+      readonly name: typeof GATHER_OP;
+      readonly arity: 2;
+    })
   | (ContractBase & { readonly kind: "rowReduce"; readonly name: ReduceOpName; readonly arity: 1 })
   // 最終次元の argmax（ADR 0068 決定 2）。reduce 族と kind を分けるのは、attrs（無し）・
   // 出力 dtype（i32）・rank の扱い（保存）・カーネル族（identity −inf + index 追跡）の
@@ -228,134 +228,134 @@ export type OpContract =
   | (ContractBase & { readonly kind: "topk"; readonly name: typeof TOPK_OP; readonly arity: 1 })
   | (ContractBase & { readonly kind: "cast"; readonly name: typeof CAST_OP; readonly arity: 1 })
   | (ContractBase & {
-    readonly kind: "reshape";
-    readonly name: typeof RESHAPE_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "reshape";
+      readonly name: typeof RESHAPE_OP;
+      readonly arity: 1;
+    })
   | (ContractBase & {
-    readonly kind: "permute";
-    readonly name: typeof PERMUTE_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "permute";
+      readonly name: typeof PERMUTE_OP;
+      readonly arity: 1;
+    })
   | (ContractBase & {
-    readonly kind: "expand";
-    readonly name: typeof EXPAND_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "expand";
+      readonly name: typeof EXPAND_OP;
+      readonly arity: 1;
+    })
   | (ContractBase & { readonly kind: "slice"; readonly name: typeof SLICE_OP; readonly arity: 1 })
   // 唯一の可変アリティ op。`arity` は**下限** 2（1 本だけの cat は恒等コピーで、実測にも
   // 出ない — 表現を持たないことがそのまま fail loudly になる）。
   | (ContractBase & {
-    readonly kind: "cat";
-    readonly name: typeof CAT_OP;
-    readonly arity: 2;
-    readonly variadic: true;
-  })
+      readonly kind: "cat";
+      readonly name: typeof CAT_OP;
+      readonly arity: 2;
+      readonly variadic: true;
+    })
   | (ContractBase & { readonly kind: "pad"; readonly name: typeof PAD_OP; readonly arity: 1 })
   | (ContractBase & { readonly kind: "flip"; readonly name: typeof FLIP_OP; readonly arity: 1 })
   | (ContractBase & {
-    readonly kind: "symPrefixSlice";
-    readonly name: typeof SYM_PREFIX_SLICE_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "symPrefixSlice";
+      readonly name: typeof SYM_PREFIX_SLICE_OP;
+      readonly arity: 1;
+    })
   | (ContractBase & { readonly kind: "linear"; readonly name: typeof LINEAR_OP; readonly arity: 3 })
   | (ContractBase & {
-    readonly kind: "layerNorm";
-    readonly name: typeof LAYER_NORM_OP;
-    readonly arity: 3;
-  })
+      readonly kind: "layerNorm";
+      readonly name: typeof LAYER_NORM_OP;
+      readonly arity: 3;
+    })
   // affine が weight だけなのでアリティ 2（bias の欄を作らない — ADR 0017）。
   | (ContractBase & {
-    readonly kind: "rmsNorm";
-    readonly name: typeof RMS_NORM_OP;
-    readonly arity: 2;
-  })
+      readonly kind: "rmsNorm";
+      readonly name: typeof RMS_NORM_OP;
+      readonly arity: 2;
+    })
   | (ContractBase & {
-    readonly kind: "staticQuantize";
-    readonly name: typeof STATIC_QUANTIZE_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "staticQuantize";
+      readonly name: typeof STATIC_QUANTIZE_OP;
+      readonly arity: 1;
+    })
   | (ContractBase & {
-    readonly kind: "softmax";
-    readonly name: typeof SOFTMAX_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "softmax";
+      readonly name: typeof SOFTMAX_OP;
+      readonly arity: 1;
+    })
   // softmax と同一契約の別 op（空行 → 全 0。ADR 0044）。kind を分けるのは、executor / CPU
   // 参照の網羅 switch に「どちらの意味論で実行するか」を必ず宣言させるため。
   | (ContractBase & {
-    readonly kind: "safeSoftmax";
-    readonly name: typeof SAFE_SOFTMAX_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "safeSoftmax";
+      readonly name: typeof SAFE_SOFTMAX_OP;
+      readonly arity: 1;
+    })
   // 融合 attention（ADR 0023）。arity 3〜4（4 本目は省略可能な加算 mask）・attrs `scale`
   // 宣言必須・rank-4 head-first。
   | (ContractBase & {
-    readonly kind: "attention";
-    readonly name: typeof ATTENTION_OP;
-    readonly arity: 3;
-    readonly maxArity: 4;
-    readonly readonlyArity: typeof READONLY_ATTENTION_ARITY;
-  })
+      readonly kind: "attention";
+      readonly name: typeof ATTENTION_OP;
+      readonly arity: 3;
+      readonly maxArity: 4;
+      readonly readonlyArity: typeof READONLY_ATTENTION_ARITY;
+    })
   // 今 step の k/v を state スロットへ書く effect op（ADR 0067 決定 5）。**出力 0 本**の
   // 最初の入居者で、`states` 欄が必須（`{ slot }` ちょうど）。kind を attention と分けるのは、
   // 出力本数・states 欄のキー・カーネル族（ring 書込み）が全て別だから。
   | (ContractBase & {
-    readonly kind: "stateAppend";
-    readonly name: typeof STATE_APPEND_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "stateAppend";
+      readonly name: typeof STATE_APPEND_OP;
+      readonly arity: 1;
+    })
   | (ContractBase & {
-    readonly kind: "embedding";
-    readonly name: typeof EMBEDDING_OP;
-    readonly arity: 2;
-  })
+      readonly kind: "embedding";
+      readonly name: typeof EMBEDDING_OP;
+      readonly arity: 2;
+    })
   | (ContractBase & {
-    readonly kind: "maskedFill";
-    readonly name: typeof MASKED_FILL_OP;
-    readonly arity: 2;
-  })
+      readonly kind: "maskedFill";
+      readonly name: typeof MASKED_FILL_OP;
+      readonly arity: 2;
+    })
   | (ContractBase & {
-    readonly kind: "conv1d";
-    readonly name: typeof CONV1D_OP;
-    readonly arity: 3;
-  })
+      readonly kind: "conv1d";
+      readonly name: typeof CONV1D_OP;
+      readonly arity: 3;
+    })
   | (ContractBase & {
-    readonly kind: "conv2d";
-    readonly name: typeof CONV2D_OP;
-    readonly arity: 3;
-  })
+      readonly kind: "conv2d";
+      readonly name: typeof CONV2D_OP;
+      readonly arity: 3;
+    })
   // unbatched の 3 次元畳み込み（拡張分子層 — ADR 0118 決定 1）。x / weight / bias の 3 本固定。
   | (ContractBase & {
-    readonly kind: "conv3d";
-    readonly name: typeof CONV3D_OP;
-    readonly arity: 3;
-  })
+      readonly kind: "conv3d";
+      readonly name: typeof CONV3D_OP;
+      readonly arity: 3;
+    })
   | (ContractBase & {
-    readonly kind: "convTranspose1d";
-    readonly name: typeof CONV_TRANSPOSE1D_OP;
-    readonly arity: 3;
-  })
+      readonly kind: "convTranspose1d";
+      readonly name: typeof CONV_TRANSPOSE1D_OP;
+      readonly arity: 3;
+    })
   // DCNv2（ADR 0055）。x / weight / offset / mask / bias の 5 本固定 — mask がスロットとして
   // 必須であることが「DCNv1 は語彙に無い」を構造で表す。
   | (ContractBase & {
-    readonly kind: "deformConv2d";
-    readonly name: typeof DEFORM_CONV2D_OP;
-    readonly arity: 5;
-  })
+      readonly kind: "deformConv2d";
+      readonly name: typeof DEFORM_CONV2D_OP;
+      readonly arity: 5;
+    })
   // 双線形 resample（第 1 層）。入力は x 1 本だけ（重みも bias も無い）で、出力空間は
   // attrs `output_size` が宣言する。
   | (ContractBase & {
-    readonly kind: "upsampleBilinear2d";
-    readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
-    readonly arity: 1;
-  })
+      readonly kind: "upsampleBilinear2d";
+      readonly name: typeof UPSAMPLE_BILINEAR2D_OP;
+      readonly arity: 1;
+    })
   // GRU の隠れ側スキャン（ADR 0056）。走査方向だけが違う 2 op を 1 kind で持つ（reduce 族や
   // gelu / gelu_tanh と同じ扱い — 契約面は完全に同一で、消費側は `name` で方向を引く）。
   | (ContractBase & {
-    readonly kind: "gruScan";
-    readonly name: GruScanOpName;
-    readonly arity: 4;
-  });
+      readonly kind: "gruScan";
+      readonly name: GruScanOpName;
+      readonly arity: 4;
+    });
 
 /** f32 専業の op（実測グラフに i32 / bool 形が現れていない — 対称性のためには解禁しない）。 */
 const F32: readonly IrDtype[] = ["f32"];
@@ -426,7 +426,15 @@ const OUTPUT_DTYPES: ReadonlyMap<string, readonly ReadonlyMap<IrDtype, IrDtype>[
   ["ge_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
   ["le_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
   ["gt_scalar", [new Map<IrDtype, IrDtype>([["f32", "bool"]])]],
-  ["sum", [new Map<IrDtype, IrDtype>([["f32", "f32"], ["bool", "i32"]])]],
+  [
+    "sum",
+    [
+      new Map<IrDtype, IrDtype>([
+        ["f32", "f32"],
+        ["bool", "i32"],
+      ]),
+    ],
+  ],
   [WHERE_OP, [new Map<IrDtype, IrDtype>([["bool", "f32"]])]],
   [ARGMAX_OP, [new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
   [TOPK_OP, [new Map<IrDtype, IrDtype>(), new Map<IrDtype, IrDtype>([["f32", "i32"]])]],
@@ -458,7 +466,7 @@ export const scalarParamValues = (
       attrValue(attrs, key),
       `${where} の attrs.${key}`,
       `op '${found.name}' の ${key}`,
-    )
+    ),
   );
   if (found.name === "clamp" && values[0] > values[1]) {
     throw new OpContractError(`${where}: clamp の min ${values[0]} が max ${values[1]} を超える`);
@@ -490,8 +498,8 @@ const slotContract = (
   const domain = firstSlotAccept(slotDtypes);
   // 宣言が無い dtype は恒等写像で埋める（定義域 = スロット 0 の受理集合という不変条件を
   // 出力 slot ごとに構造で満たす — 表の書き忘れが「出力が決まらない dtype」にならない）。
-  const outputDtypes = (OUTPUT_DTYPES.get(name) ?? SINGLE_IDENTITY_OUTPUT).map((slot) =>
-    new Map<IrDtype, IrDtype>(domain.map((dtype) => [dtype, slot.get(dtype) ?? dtype]))
+  const outputDtypes = (OUTPUT_DTYPES.get(name) ?? SINGLE_IDENTITY_OUTPUT).map(
+    (slot) => new Map<IrDtype, IrDtype>(domain.map((dtype) => [dtype, slot.get(dtype) ?? dtype])),
   );
   return { dtypes: unionDtypes(slotDtypes), slotDtypes, outputDtypes, attrs };
 };
@@ -521,186 +529,252 @@ export const OP_CONTRACTS: ReadonlyMap<string, OpContract> = new Map<string, OpC
   ]),
   // 条件 bool と値 f32 のスロット別契約。出力は**値の側**（写像 bool → f32 — 出力元
   // スロットを指す欄は作らない規律）。
-  [WHERE_OP, {
-    ...slotContract(WHERE_OP, { kind: "perSlot", slots: [BOOL, F32, F32] }),
-    kind: "where",
-    name: WHERE_OP,
-    arity: 3,
-  }],
-  [CUMSUM_OP, {
-    ...contract(CUMSUM_OP, CUMSUM_ATTRS),
-    kind: "cumsum",
-    name: CUMSUM_OP,
-    arity: 1,
-  }],
+  [
+    WHERE_OP,
+    {
+      ...slotContract(WHERE_OP, { kind: "perSlot", slots: [BOOL, F32, F32] }),
+      kind: "where",
+      name: WHERE_OP,
+      arity: 3,
+    },
+  ],
+  [
+    CUMSUM_OP,
+    {
+      ...contract(CUMSUM_OP, CUMSUM_ATTRS),
+      kind: "cumsum",
+      name: CUMSUM_OP,
+      arity: 1,
+    },
+  ],
   [MATMUL_OP, { ...contract(MATMUL_OP), kind: "matmul", name: MATMUL_OP, arity: 2 }],
   [BMM_OP, { ...contract(BMM_OP), kind: "bmm", name: BMM_OP, arity: 2 }],
   // 最初のスロット別 dtype 契約: 値 f32 と添字 i32 が混在し、出力は値の側と同型。
-  [GATHER_OP, {
-    ...slotContract(GATHER_OP, { kind: "perSlot", slots: [F32, I32] }),
-    kind: "gather",
-    name: GATHER_OP,
-    arity: 2,
-  }],
+  [
+    GATHER_OP,
+    {
+      ...slotContract(GATHER_OP, { kind: "perSlot", slots: [F32, I32] }),
+      kind: "gather",
+      name: GATHER_OP,
+      arity: 2,
+    },
+  ],
   // 最終次元の argmax（ADR 0068 決定 2）。attrs 空・入力 f32 → 出力 i32（写像は
   // OUTPUT_DTYPES）で、rank 保存は shape 規則が持つ。
   [ARGMAX_OP, { ...contract(ARGMAX_OP), kind: "argmax", name: ARGMAX_OP, arity: 1 }],
   // 最終次元の top-k（ADR 0068 決定 3）。attrs `k` 宣言必須・出力 2 本（値 f32 + 添字 i32 —
   // 写像は OUTPUT_DTYPES）で、`[…, k]` の shape 規則と受理領域は shape 計算側が持つ。
   [TOPK_OP, { ...contract(TOPK_OP, TOPK_ATTRS), kind: "topk", name: TOPK_OP, arity: 1 }],
-  [CAST_OP, {
-    ...slotContract(CAST_OP, { kind: "uniform", accept: ANY_DTYPE }, CAST_ATTRS),
-    kind: "cast",
-    name: CAST_OP,
-    arity: 1,
-  }],
+  [
+    CAST_OP,
+    {
+      ...slotContract(CAST_OP, { kind: "uniform", accept: ANY_DTYPE }, CAST_ATTRS),
+      kind: "cast",
+      name: CAST_OP,
+      arity: 1,
+    },
+  ],
   [RESHAPE_OP, { ...contract(RESHAPE_OP), kind: "reshape", name: RESHAPE_OP, arity: 1 }],
-  [PERMUTE_OP, {
-    ...contract(PERMUTE_OP, PERMUTE_ATTRS),
-    kind: "permute",
-    name: PERMUTE_OP,
-    arity: 1,
-  }],
+  [
+    PERMUTE_OP,
+    {
+      ...contract(PERMUTE_OP, PERMUTE_ATTRS),
+      kind: "permute",
+      name: PERMUTE_OP,
+      arity: 1,
+    },
+  ],
   [EXPAND_OP, { ...contract(EXPAND_OP), kind: "expand", name: EXPAND_OP, arity: 1 }],
   // レイアウト第 2 群（ADR 0014）。実測は全て f32（enc_p の m_p/logs_p 分割・coupling の
   // 96/96 分割と cat・相対位置 value 側の pad・flow/sdp の Flip — recon §2）なので、
   // dtype は解禁表に載せない = f32 専業。
   [SLICE_OP, { ...contract(SLICE_OP, SLICE_ATTRS), kind: "slice", name: SLICE_OP, arity: 1 }],
-  [CAT_OP, {
-    ...contract(CAT_OP, AXIS_ATTRS),
-    kind: "cat",
-    name: CAT_OP,
-    arity: 2,
-    variadic: true,
-  }],
+  [
+    CAT_OP,
+    {
+      ...contract(CAT_OP, AXIS_ATTRS),
+      kind: "cat",
+      name: CAT_OP,
+      arity: 2,
+      variadic: true,
+    },
+  ],
   [PAD_OP, { ...contract(PAD_OP, PAD_ATTRS), kind: "pad", name: PAD_OP, arity: 1 }],
   [FLIP_OP, { ...contract(FLIP_OP, AXIS_ATTRS), kind: "flip", name: FLIP_OP, arity: 1 }],
-  [SYM_PREFIX_SLICE_OP, {
-    ...contract(SYM_PREFIX_SLICE_OP, SYM_PREFIX_SLICE_ATTRS),
-    kind: "symPrefixSlice",
-    name: SYM_PREFIX_SLICE_OP,
-    arity: 1,
-  }],
+  [
+    SYM_PREFIX_SLICE_OP,
+    {
+      ...contract(SYM_PREFIX_SLICE_OP, SYM_PREFIX_SLICE_ATTRS),
+      kind: "symPrefixSlice",
+      name: SYM_PREFIX_SLICE_OP,
+      arity: 1,
+    },
+  ],
   // 融合 op（ADR 0012）。bias / affine を持つ 3 本はアリティ 3 固定 — 実測が bias 常時ありで、
   // 「bias 無し」を表す欄を作らないことがそのまま fail loudly になる。
   [LINEAR_OP, { ...contract(LINEAR_OP), kind: "linear", name: LINEAR_OP, arity: 3 }],
-  [LAYER_NORM_OP, {
-    ...contract(LAYER_NORM_OP, LAYER_NORM_ATTRS),
-    kind: "layerNorm",
-    name: LAYER_NORM_OP,
-    arity: 3,
-  }],
+  [
+    LAYER_NORM_OP,
+    {
+      ...contract(LAYER_NORM_OP, LAYER_NORM_ATTRS),
+      kind: "layerNorm",
+      name: LAYER_NORM_OP,
+      arity: 3,
+    },
+  ],
   // bias が無いのでアリティ 2（ADR 0017）。weight 無しの形はエクスポータが ones 合成で
   // アリティ 2 へ正規化する — ゼロ bias 合成（ADR 0015）と同じ手筋。
-  [RMS_NORM_OP, {
-    ...contract(RMS_NORM_OP, RMS_NORM_ATTRS),
-    kind: "rmsNorm",
-    name: RMS_NORM_OP,
-    arity: 2,
-  }],
-  [STATIC_QUANTIZE_OP, {
-    ...contract(STATIC_QUANTIZE_OP, STATIC_QUANTIZE_ATTRS),
-    kind: "staticQuantize",
-    name: STATIC_QUANTIZE_OP,
-    arity: 1,
-  }],
-  [SOFTMAX_OP, {
-    ...contract(SOFTMAX_OP, SOFTMAX_ATTRS),
-    kind: "softmax",
-    name: SOFTMAX_OP,
-    arity: 1,
-  }],
+  [
+    RMS_NORM_OP,
+    {
+      ...contract(RMS_NORM_OP, RMS_NORM_ATTRS),
+      kind: "rmsNorm",
+      name: RMS_NORM_OP,
+      arity: 2,
+    },
+  ],
+  [
+    STATIC_QUANTIZE_OP,
+    {
+      ...contract(STATIC_QUANTIZE_OP, STATIC_QUANTIZE_ATTRS),
+      kind: "staticQuantize",
+      name: STATIC_QUANTIZE_OP,
+      arity: 1,
+    },
+  ],
+  [
+    SOFTMAX_OP,
+    {
+      ...contract(SOFTMAX_OP, SOFTMAX_ATTRS),
+      kind: "softmax",
+      name: SOFTMAX_OP,
+      arity: 1,
+    },
+  ],
   // ADR 0044。attrs スキーマは softmax と**同じ 1 本を共有**する（複製すると片方だけ
   // 絞りが緩む形が作れる）。
-  [SAFE_SOFTMAX_OP, {
-    ...contract(SAFE_SOFTMAX_OP, SOFTMAX_ATTRS),
-    kind: "safeSoftmax",
-    name: SAFE_SOFTMAX_OP,
-    arity: 1,
-  }],
+  [
+    SAFE_SOFTMAX_OP,
+    {
+      ...contract(SAFE_SOFTMAX_OP, SOFTMAX_ATTRS),
+      kind: "safeSoftmax",
+      name: SAFE_SOFTMAX_OP,
+      arity: 1,
+    },
+  ],
   // 融合 attention（ADR 0023）。q / k / v と省略可能な mask の 4 本とも f32 で同型
   // （uniform 契約）。mask は加算型なので値の側と同じ dtype で、bool は受理しない。
   // states 欄（ADR 0067 決定 4）は**省略可能** — 欄の有無が従来形 / states 形を判別し、
   // 欄がある形だけが `window` を宣言できる（従来形の受理集合は 1 バイトも動かない）。
-  [ATTENTION_OP, {
-    ...contract(ATTENTION_OP, ATTENTION_ATTRS),
-    kind: "attention",
-    name: ATTENTION_OP,
-    arity: 3,
-    maxArity: 4,
-    // `window` と `readonly` はどちらも states 形専用の省略可能 attr（ADR 0067 決定 4 /
-    // ADR 0096 段 2 §1.2）。`state_append` が共有するのは `window` の 1 本だけ（append に
-    // readonly は無い）なので、合成はここで行い STATE_WINDOW_ATTRS 自体は動かさない。
-    optionalAttrs: { ...STATE_WINDOW_ATTRS, ...STATE_READONLY_ATTRS },
-    readonlyArity: READONLY_ATTENTION_ARITY,
-    states: { keys: ["k", "v"], required: false },
-  }],
+  [
+    ATTENTION_OP,
+    {
+      ...contract(ATTENTION_OP, ATTENTION_ATTRS),
+      kind: "attention",
+      name: ATTENTION_OP,
+      arity: 3,
+      maxArity: 4,
+      // `window` と `readonly` はどちらも states 形専用の省略可能 attr（ADR 0067 決定 4 /
+      // ADR 0096 段 2 §1.2）。`state_append` が共有するのは `window` の 1 本だけ（append に
+      // readonly は無い）なので、合成はここで行い STATE_WINDOW_ATTRS 自体は動かさない。
+      optionalAttrs: { ...STATE_WINDOW_ATTRS, ...STATE_READONLY_ATTRS },
+      readonlyArity: READONLY_ATTENTION_ARITY,
+      states: { keys: ["k", "v"], required: false },
+    },
+  ],
   // state スロットへの書き込み（ADR 0067 決定 5）。入力 1 本・**出力 0 本**（OUTPUT_DTYPES の
   // 空列がその宣言）・states 欄必須。
-  [STATE_APPEND_OP, {
-    ...contract(STATE_APPEND_OP),
-    kind: "stateAppend",
-    name: STATE_APPEND_OP,
-    arity: 1,
-    optionalAttrs: STATE_WINDOW_ATTRS,
-    states: { keys: ["slot"], required: true },
-  }],
+  [
+    STATE_APPEND_OP,
+    {
+      ...contract(STATE_APPEND_OP),
+      kind: "stateAppend",
+      name: STATE_APPEND_OP,
+      arity: 1,
+      optionalAttrs: STATE_WINDOW_ATTRS,
+      states: { keys: ["slot"], required: true },
+    },
+  ],
   // 値 f32 と添字 i32 のスロット別契約（gather と同型 — 出力は値の側と同型）。
-  [EMBEDDING_OP, {
-    ...slotContract(EMBEDDING_OP, { kind: "perSlot", slots: [F32, I32] }, EMBEDDING_ATTRS),
-    kind: "embedding",
-    name: EMBEDDING_OP,
-    arity: 2,
-  }],
+  [
+    EMBEDDING_OP,
+    {
+      ...slotContract(EMBEDDING_OP, { kind: "perSlot", slots: [F32, I32] }, EMBEDDING_ATTRS),
+      kind: "embedding",
+      name: EMBEDDING_OP,
+      arity: 2,
+    },
+  ],
   // 値 f32 と条件 bool のスロット別契約。出力はスロット 0（値の側）と同型。
-  [MASKED_FILL_OP, {
-    ...slotContract(MASKED_FILL_OP, { kind: "perSlot", slots: [F32, BOOL] }, MASKED_FILL_ATTRS),
-    kind: "maskedFill",
-    name: MASKED_FILL_OP,
-    arity: 2,
-  }],
-  [CONV1D_OP, {
-    ...contract(CONV1D_OP, CONV1D_ATTRS),
-    kind: "conv1d",
-    name: CONV1D_OP,
-    arity: 3,
-  }],
-  [CONV2D_OP, {
-    ...contract(CONV2D_OP, CONV2D_ATTRS),
-    kind: "conv2d",
-    name: CONV2D_OP,
-    arity: 3,
-  }],
+  [
+    MASKED_FILL_OP,
+    {
+      ...slotContract(MASKED_FILL_OP, { kind: "perSlot", slots: [F32, BOOL] }, MASKED_FILL_ATTRS),
+      kind: "maskedFill",
+      name: MASKED_FILL_OP,
+      arity: 2,
+    },
+  ],
+  [
+    CONV1D_OP,
+    {
+      ...contract(CONV1D_OP, CONV1D_ATTRS),
+      kind: "conv1d",
+      name: CONV1D_OP,
+      arity: 3,
+    },
+  ],
+  [
+    CONV2D_OP,
+    {
+      ...contract(CONV2D_OP, CONV2D_ATTRS),
+      kind: "conv2d",
+      name: CONV2D_OP,
+      arity: 3,
+    },
+  ],
   // unbatched（x は rank 4）の 3 次元畳み込み（ADR 0118 決定 1）。3 スロットとも f32 で同型。
-  [CONV3D_OP, {
-    ...contract(CONV3D_OP, CONV3D_ATTRS),
-    kind: "conv3d",
-    name: CONV3D_OP,
-    arity: 3,
-  }],
+  [
+    CONV3D_OP,
+    {
+      ...contract(CONV3D_OP, CONV3D_ATTRS),
+      kind: "conv3d",
+      name: CONV3D_OP,
+      arity: 3,
+    },
+  ],
   // bias 無し conv はエクスポータのゼロ bias 合成でアリティ 3 に正規化される（ADR 0015）—
   // カーネルにも契約にも arity 分岐を持ち込まない。
-  [CONV_TRANSPOSE1D_OP, {
-    ...contract(CONV_TRANSPOSE1D_OP, CONV_TRANSPOSE1D_ATTRS),
-    kind: "convTranspose1d",
-    name: CONV_TRANSPOSE1D_OP,
-    arity: 3,
-  }],
+  [
+    CONV_TRANSPOSE1D_OP,
+    {
+      ...contract(CONV_TRANSPOSE1D_OP, CONV_TRANSPOSE1D_ATTRS),
+      kind: "convTranspose1d",
+      name: CONV_TRANSPOSE1D_OP,
+      arity: 3,
+    },
+  ],
   // DCNv2（第 1' 層・ADR 0055）。5 スロットとも f32 で同型（offset / mask も値の側と
   // 同じ dtype）。重みは持つが**低精度格納の適格外**なので WEIGHT_SLOTS には載せない。
-  [DEFORM_CONV2D_OP, {
-    ...contract(DEFORM_CONV2D_OP, DEFORM_CONV2D_ATTRS),
-    kind: "deformConv2d",
-    name: DEFORM_CONV2D_OP,
-    arity: 5,
-  }],
+  [
+    DEFORM_CONV2D_OP,
+    {
+      ...contract(DEFORM_CONV2D_OP, DEFORM_CONV2D_ATTRS),
+      kind: "deformConv2d",
+      name: DEFORM_CONV2D_OP,
+      arity: 5,
+    },
+  ],
   // 双線形 resample（第 1 層）。重みを持たないので WEIGHT_SLOTS には載らない。
-  [UPSAMPLE_BILINEAR2D_OP, {
-    ...contract(UPSAMPLE_BILINEAR2D_OP, UPSAMPLE_BILINEAR2D_ATTRS),
-    kind: "upsampleBilinear2d",
-    name: UPSAMPLE_BILINEAR2D_OP,
-    arity: 1,
-  }],
+  [
+    UPSAMPLE_BILINEAR2D_OP,
+    {
+      ...contract(UPSAMPLE_BILINEAR2D_OP, UPSAMPLE_BILINEAR2D_ATTRS),
+      kind: "upsampleBilinear2d",
+      name: UPSAMPLE_BILINEAR2D_OP,
+      arity: 1,
+    },
+  ],
   // GRU 隠れ側スキャン 2 方向（第 2 層・ADR 0056）。4 スロットとも f32 で同型・attrs 空。
   // `w_hh` は op 内スロットなので**低精度格納の適格外**（WEIGHT_SLOTS に載せない）— 入力側の
   // 重みは呼び手の `linear` が持つので、そちらは従来どおり f16 / i8 が効く。
@@ -757,16 +831,20 @@ export const IO_DTYPES: readonly IrDtype[] = SEMANTIC_DTYPES;
  */
 export const RUNTIME_SUPPORT: RuntimeSupport = {
   ops: new Map<string, OpSupport>(
-    [...OP_CONTRACTS].map(([name, found]) => [name, {
-      dtypes: new Set(found.dtypes),
-      slotDtypes: slotDtypesOf(found).map((accept) => new Set(accept)),
-      // cast の出力は attrs.to で決まる（写像は恒等で埋まっているが値域が狭すぎる）ので、
-      // 列挙門には語彙全体を渡す。それ以外は出力 slot ごとの写像の値域そのもの。
-      outDtypes: found.kind === "cast"
-        ? [new Set(SEMANTIC_DTYPES)]
-        : found.outputDtypes.map((slot) => new Set(slot.values())),
-      attrKeys: new Set([...attrKeysOf(found), ...optionalAttrKeysOf(found)]),
-    }]),
+    [...OP_CONTRACTS].map(([name, found]) => [
+      name,
+      {
+        dtypes: new Set(found.dtypes),
+        slotDtypes: slotDtypesOf(found).map((accept) => new Set(accept)),
+        // cast の出力は attrs.to で決まる（写像は恒等で埋まっているが値域が狭すぎる）ので、
+        // 列挙門には語彙全体を渡す。それ以外は出力 slot ごとの写像の値域そのもの。
+        outDtypes:
+          found.kind === "cast"
+            ? [new Set(SEMANTIC_DTYPES)]
+            : found.outputDtypes.map((slot) => new Set(slot.values())),
+        attrKeys: new Set([...attrKeysOf(found), ...optionalAttrKeysOf(found)]),
+      },
+    ]),
   ),
   // 生の int32 格納（ADR 0010）は記号依存定数の焼き込み先として実行対象。f16（ADR 0018）・
   // i8（ADR 0019）・i4（ADR 0069）・i2（ADR 0097 追記 1）は実行経路が入った（適格な重みスロットは
@@ -913,8 +991,9 @@ export const assertAttrKeys = (
   where: string,
 ): void => {
   const optional = found.optionalAttrs;
-  const unknown = Object.keys(attrs).filter((key) =>
-    !Object.hasOwn(found.attrs, key) && (optional === undefined || !Object.hasOwn(optional, key))
+  const unknown = Object.keys(attrs).filter(
+    (key) =>
+      !Object.hasOwn(found.attrs, key) && (optional === undefined || !Object.hasOwn(optional, key)),
   );
   if (unknown.length > 0) {
     throw new OpContractError(
@@ -988,9 +1067,9 @@ const assertStateField = (
   if (keys.length === 0) {
     if (declared.required) {
       throw new OpContractError(
-        `${where}: op '${found.name}' の states 欄が無い（契約は [${
-          declared.keys.join(", ")
-        }] ちょうど）`,
+        `${where}: op '${found.name}' の states 欄が無い（契約は [${declared.keys.join(
+          ", ",
+        )}] ちょうど）`,
       );
     }
     return;
@@ -999,9 +1078,9 @@ const assertStateField = (
   const actual = [...keys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の states 欄のキーが [${actual.join(", ")}]（契約は [${
-        expected.join(", ")
-      }] ちょうど）`,
+      `${where}: op '${found.name}' の states 欄のキーが [${actual.join(", ")}]（契約は [${expected.join(
+        ", ",
+      )}] ちょうど）`,
     );
   }
   const slots = declared.keys.map((key) => node.states[key]);
@@ -1048,9 +1127,9 @@ export const outputDtypeOf = (
 export const assertDtype = (found: OpContract, dtype: IrDtype, where: string): void => {
   if (!found.dtypes.includes(dtype)) {
     throw new OpContractError(
-      `${where}: op '${found.name}' は意味論 dtype '${dtype}' を実行できない（対応: ${
-        found.dtypes.join(", ")
-      }）`,
+      `${where}: op '${found.name}' は意味論 dtype '${dtype}' を実行できない（対応: ${found.dtypes.join(
+        ", ",
+      )}）`,
     );
   }
 };
@@ -1075,9 +1154,9 @@ export const assertSlotDtype = (
   }
   if (!accept.includes(dtype)) {
     throw new OpContractError(
-      `${where}: op '${found.name}' の入力スロット ${slot} は意味論 dtype '${dtype}' を実行できない（対応: ${
-        accept.join(", ")
-      }）`,
+      `${where}: op '${found.name}' の入力スロット ${slot} は意味論 dtype '${dtype}' を実行できない（対応: ${accept.join(
+        ", ",
+      )}）`,
     );
   }
 };
@@ -1126,9 +1205,10 @@ export const resolveNodeDtypes = (
   where: string,
 ): readonly IrDtype[] => {
   assertInputDtypes(found, inputDtypes, (index) => `${where} の入力 '${node.ins[index]}'`, where);
-  const expected: readonly IrDtype[] = found.kind === "cast"
-    ? [castTargetDtype(node.attrs, where)]
-    : found.outputDtypes.map((_, slot) => outputDtypeOf(found, slot, inputDtypes[0], where));
+  const expected: readonly IrDtype[] =
+    found.kind === "cast"
+      ? [castTargetDtype(node.attrs, where)]
+      : found.outputDtypes.map((_, slot) => outputDtypeOf(found, slot, inputDtypes[0], where));
   if (declaredOutputs.length !== expected.length) {
     throw new OpContractError(
       `${where}: op '${found.name}' の出力の宣言が ${declaredOutputs.length} 本（契約は ${expected.length} 本）`,

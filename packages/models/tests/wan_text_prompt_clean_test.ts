@@ -106,7 +106,10 @@ test("壊れた表で不動点に届かなければ素の Error で落ちる（�
   // 全角 A ↔ A の循環（上流の表には無い — 資産の破損だけが作る形）。
   const cyclic = {
     ...tables,
-    width: new Map([[0x41, "Ａ"], [0xff21, "A"]]),
+    width: new Map([
+      [0x41, "Ａ"],
+      [0xff21, "A"],
+    ]),
   };
   const error = assertThrows(() => cleanPrompt(cyclic, "A"), Error, "不動点");
   assert(!(error instanceof ModelInputError), "資産の破損は入力起因ではない");
@@ -146,14 +149,12 @@ for (const check of fixture.badness.filter((entry) => entry.template === undefin
   test(`BADNESS_RE の JS 訳 [乱択 ${check.name}] が上流の is_bad と全件一致`, async () => {
     const pool = expandRanges(fixture.pools[check.pool as string]);
     let bits = "";
-    for (
-      const text of fuzzStrings(
-        pool,
-        check.seed as number,
-        check.count as number,
-        check.maxLength as number,
-      )
-    ) {
+    for (const text of fuzzStrings(
+      pool,
+      check.seed as number,
+      check.count as number,
+      check.maxLength as number,
+    )) {
       bits += tables.badness.test(text) ? "1" : "0";
     }
     assertEquals([...bits].filter((bit) => bit === "1").length, check.hits, "当たった本数");

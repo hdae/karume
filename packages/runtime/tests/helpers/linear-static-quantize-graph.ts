@@ -17,7 +17,9 @@ export type LinearStaticQuantizeOptions = {
 
 /** 隣接条件を変えても非融合の実行が成立する検査用グラフ（IR v2 の宣言 — 格納は持たない）。 */
 export const linearStaticQuantizeGraph = (o: LinearStaticQuantizeOptions = {}): DeclarationJson => {
-  const m = o.m ?? 4, n = o.n ?? 256, k = o.k ?? 1536;
+  const m = o.m ?? 4,
+    n = o.n ?? 256,
+    k = o.k ?? 1536;
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -45,7 +47,7 @@ export const linearStaticQuantizeGraph = (o: LinearStaticQuantizeOptions = {}): 
     op: "static_quantize",
     ins: ["linear"],
     outs: ["y"],
-    attrs: { scale: o.scale ?? Math.fround(.00071) },
+    attrs: { scale: o.scale ?? Math.fround(0.00071) },
   });
   if (!o.interpose) graph.nodes.push(copy);
   if (o.sharedLinear) {
@@ -58,16 +60,16 @@ export const linearStaticQuantizeGraph = (o: LinearStaticQuantizeOptions = {}): 
 
 /** 格納（codec / group / companion scale）は供給側が決める — v1 の `storage` 宣言の行き先。 */
 const weightEncoding = (o: LinearStaticQuantizeOptions): EncodingInput => {
-  const n = o.n ?? 256, k = o.k ?? 1536, storage = o.storage ?? "i8";
-  const groupSize = storage === "i4" ? o.group ?? 512 : k;
+  const n = o.n ?? 256,
+    k = o.k ?? 1536,
+    storage = o.storage ?? "i8";
+  const groupSize = storage === "i4" ? (o.group ?? 512) : k;
   const groups = k / groupSize;
   return {
     codec: storage === "i2" ? "int2-off" : storage === "i4" ? "int4-sym-g" : "int8-sym",
     groupSize,
     scale: {
-      bytes: f32Bytes(
-        Array.from({ length: n * groups }, (_, i) => (i % 17 + 1) * .00017),
-      ),
+      bytes: f32Bytes(Array.from({ length: n * groups }, (_, i) => ((i % 17) + 1) * 0.00017)),
       dtype: "f32",
     },
   };
@@ -77,22 +79,28 @@ const weightEncoding = (o: LinearStaticQuantizeOptions): EncodingInput => {
 export const linearStaticQuantizeTensors = (
   o: LinearStaticQuantizeOptions = {},
 ): readonly TensorInput[] => {
-  const n = o.n ?? 256, k = o.k ?? 1536, storage = o.storage ?? "i8";
+  const n = o.n ?? 256,
+    k = o.k ?? 1536,
+    storage = o.storage ?? "i8";
   const bits = storage === "i2" ? 2 : storage === "i4" ? 4 : 8;
   return [
-    ...o.sharedWeight ? [] : [{
-      graph: GRAPH_NAME,
-      initializer: "w",
-      bytes: Uint8Array.from(
-        { length: n * k * bits / 8 },
-        (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
-      ),
-      encoding: weightEncoding(o),
-    }],
+    ...(o.sharedWeight
+      ? []
+      : [
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: Uint8Array.from(
+              { length: (n * k * bits) / 8 },
+              (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
+            ),
+            encoding: weightEncoding(o),
+          },
+        ]),
     {
       graph: GRAPH_NAME,
       initializer: "b",
-      bytes: f32Bytes(Array.from({ length: n }, (_, i) => (i % 7 - 3) * .11)),
+      bytes: f32Bytes(Array.from({ length: n }, (_, i) => ((i % 7) - 3) * 0.11)),
       encoding: { codec: "f32" } satisfies EncodingInput,
     },
   ];

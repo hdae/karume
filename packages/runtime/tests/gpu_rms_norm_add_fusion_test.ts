@@ -14,11 +14,7 @@ import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 
 const words = (t: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(t.data.buffer, t.data.byteOffset, t.data.length);
-const parity = (
-  a: Uint32Array<ArrayBuffer>,
-  b: Uint32Array<ArrayBuffer>,
-  label: string,
-): void => {
+const parity = (a: Uint32Array<ArrayBuffer>, b: Uint32Array<ArrayBuffer>, label: string): void => {
   assertEquals(a.length, b.length, label);
   for (let i = 0; i < a.length; i++) {
     if ((b[i] & 0x7fffffff) > 0x7f800000) {
@@ -52,25 +48,18 @@ describe({
               );
               try {
                 for (const pattern of ["finite", "cancel", "special", "zeros"]) {
-                  const x = fill([rows, dim], (i) => Math.sin((i % dim) * .713 + .19) * 4);
-                  const w = fill([dim], (i) => .2 + Math.cos(i * .17));
-                  const r = fill([rows, dim], (i) => Math.cos((i % dim) * .531) * 3);
+                  const x = fill([rows, dim], (i) => Math.sin((i % dim) * 0.713 + 0.19) * 4);
+                  const w = fill([dim], (i) => 0.2 + Math.cos(i * 0.17));
+                  const r = fill([rows, dim], (i) => Math.cos((i % dim) * 0.531) * 3);
                   if (pattern === "special") {
                     words(x).set([
-                      0,
-                      0x80000000,
-                      1,
-                      0x80000001,
-                      0x00800000,
-                      0x80800000,
-                      0x7f800000,
-                      0xff800000,
+                      0, 0x80000000, 1, 0x80000001, 0x00800000, 0x80800000, 0x7f800000, 0xff800000,
                       0x7fc00123,
                     ]);
                   }
                   if (pattern === "zeros") {
                     words(x).set(
-                      Uint32Array.from({ length: rows * dim }, (_, i) => i % 2 ? 0x80000000 : 0),
+                      Uint32Array.from({ length: rows * dim }, (_, i) => (i % 2 ? 0x80000000 : 0)),
                     );
                   }
                   if (pattern === "cancel") {
@@ -102,7 +91,10 @@ describe({
       }
     }
     it("強制grid-strideで全行を書き、uniformのXORが実行される", async () => {
-      const gpu = await acquireGpu(), d = gpu.device, rows = 9, dim = 1536;
+      const gpu = await acquireGpu(),
+        d = gpu.device,
+        rows = 9,
+        dim = 1536;
       const owned: GPUBuffer[] = [];
       d.pushErrorScope("validation");
       const make = (data: ArrayBufferView<ArrayBuffer> | number, usage: number): GPUBuffer => {
@@ -115,7 +107,7 @@ describe({
         return buffer;
       };
       try {
-        const x = fill([rows, dim], (i) => Math.sin(i * .713 + .19) * 4),
+        const x = fill([rows, dim], (i) => Math.sin(i * 0.713 + 0.19) * 4),
           w = fill([dim], () => 1),
           r = fill([rows, dim], () => 0);
         const reference = await createSessionFromContainer(
@@ -146,7 +138,8 @@ describe({
           for (const mask of [0, 1, 0x80000000]) {
             d.queue.writeBuffer(params, 12, new Uint32Array([mask]));
             d.queue.writeBuffer(buffers[4], 0, new Uint32Array(rows * dim).fill(0xdeadbeef));
-            const e = d.createCommandEncoder(), p = e.beginComputePass();
+            const e = d.createCommandEncoder(),
+              p = e.beginComputePass();
             p.setPipeline(pipeline);
             p.setBindGroup(0, group);
             p.dispatchWorkgroups(2);
@@ -156,7 +149,11 @@ describe({
             await stage.mapAsync(MAP_MODE.READ);
             const actual = new Uint32Array(stage.getMappedRange().slice(0));
             stage.unmap();
-            parity(actual, expected.map((v) => (v ^ mask) >>> 0), `mask=${mask}`);
+            parity(
+              actual,
+              expected.map((v) => (v ^ mask) >>> 0),
+              `mask=${mask}`,
+            );
           }
         } finally {
           await reference.dispose();

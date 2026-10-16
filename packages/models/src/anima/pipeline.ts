@@ -225,11 +225,7 @@ export type AnimaGenerateRequest = {
  * {@link AnimaPipelineOptions.onRunDiagnostics} が受けるコンポーネント名（Session 1 本 = 1 名）。
  * `stage` イベント（{@link AnimaGenerateEvent}）の段名も同じ 4 名。
  */
-export type AnimaRunComponent =
-  | "text_encoder"
-  | "text_conditioner"
-  | "transformer"
-  | "vae_decoder";
+export type AnimaRunComponent = "text_encoder" | "text_conditioner" | "transformer" | "vae_decoder";
 
 /** `denoise-step` の `copyLatents()` が返す途中 latent の写し。 */
 export type AnimaLatentSnapshot = {
@@ -249,15 +245,15 @@ export type AnimaGenerateEvent =
    */
   | { readonly kind: "stage"; readonly component: AnimaRunComponent; readonly at: "start" | "end" }
   | {
-    readonly kind: "denoise-step";
-    /** 完了した step 数（1-based）。 */
-    readonly step: number;
-    readonly steps: number;
-    /** その step で消費した sigma。 */
-    readonly sigma: number;
-    /** 呼んだときだけ途中 latent を写して返す（{@link latentSnapshot}）。 */
-    readonly copyLatents: () => AnimaLatentSnapshot;
-  }
+      readonly kind: "denoise-step";
+      /** 完了した step 数（1-based）。 */
+      readonly step: number;
+      readonly steps: number;
+      /** その step で消費した sigma。 */
+      readonly sigma: number;
+      /** 呼んだときだけ途中 latent を写して返す（{@link latentSnapshot}）。 */
+      readonly copyLatents: () => AnimaLatentSnapshot;
+    }
   /** VAE タイル 1 枚の decode 完了（`tile` は 1-based）。 */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number }
   /**
@@ -285,11 +281,11 @@ export type AnimaGenerateEvent =
    *   `onEvent` の throw を含む）ので常駐 DiT を捨てた。
    */
   | {
-    readonly kind: "residency";
-    readonly component: "transformer";
-    readonly action: AnimaResidencyAction;
-    readonly reason: AnimaResidencyReason;
-  };
+      readonly kind: "residency";
+      readonly component: "transformer";
+      readonly action: AnimaResidencyAction;
+      readonly reason: AnimaResidencyReason;
+    };
 
 /**
  * 途中 latent を返す口を作る（**lazy copy** — 呼ばれたときだけ写す）。
@@ -308,11 +304,9 @@ export type AnimaGenerateEvent =
  * NOTE: `export` は GPU 無しで独立性を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
-export const latentSnapshot = (
-  latents: Float32Array<ArrayBuffer>,
-  shape: readonly number[],
-): () => AnimaLatentSnapshot =>
-(): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
+export const latentSnapshot =
+  (latents: Float32Array<ArrayBuffer>, shape: readonly number[]): (() => AnimaLatentSnapshot) =>
+  (): AnimaLatentSnapshot => ({ data: new Float32Array(latents), shape: [...shape] });
 
 /**
  * Anima が受ける実行ノブ（manifest の quant 宣言と明示指定の両方）。優先順位・値域・組合せ・
@@ -410,10 +404,9 @@ export type AnimaPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 欄ごとの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type AnimaFromPretrainedOptions =
-  & AnimaPipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions;
+export type AnimaFromPretrainedOptions = AnimaPipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions;
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
 export type AnimaAssets = {
@@ -452,10 +445,7 @@ const assetBytes = (
  * グラフ入力の**静的**次元を引く。
  * MUST: パイプライン側に literal を置かない — コンテナが正で、モデルを差し替えたら値も追随する。
  */
-const graphInputShape = (
-  model: GraphOwner,
-  inputName: string,
-): readonly (number | string)[] => {
+const graphInputShape = (model: GraphOwner, inputName: string): readonly (number | string)[] => {
   const spec = model.graph.inputs.find((input) => input.name === inputName);
   if (spec === undefined) throw new Error(`グラフ入力 '${inputName}' が無い`);
   return spec.shape;
@@ -672,11 +662,7 @@ type DynDitPlan = {
  * 解像度から S 形 DiT の材料を組む。denoise ループの外で 1 度だけ呼ぶ（毎 step 組み直すと
  * 1024px で 4MB×2 の無駄が step ごとに乗る）。
  */
-const planDynDit = (
-  model: GraphOwner,
-  ropeBase: RopeBase,
-  resolution: ImageSize,
-): DynDitPlan => {
+const planDynDit = (model: GraphOwner, ropeBase: RopeBase, resolution: ImageSize): DynDitPlan => {
   const tokenWidth = featureWidth(graphInputShape(model, "tokens"), "グラフ入力 'tokens'");
   const geometry = ditPatchGeometry(
     tokenWidth,
@@ -738,10 +724,7 @@ export const disposeResidencyThenGpu = (
   residency: { readonly dispose: () => Promise<void> },
   destroyGpu: (() => void) | undefined,
 ): Promise<void> =>
-  disposeSteps([
-    () => residency.dispose(),
-    ...(destroyGpu === undefined ? [] : [destroyGpu]),
-  ]);
+  disposeSteps([() => residency.dispose(), ...(destroyGpu === undefined ? [] : [destroyGpu])]);
 
 /**
  * 1 グラフぶんの Session を張り、使い終わったら必ず解放する。
@@ -942,10 +925,7 @@ export class AnimaPipeline {
    * 資産の**宣言**（名前 → 役割・論理長）だけでバイト列はまだ無い（待つと重み prefetch より前
    * という位置が保てない）ので {@link AnimaPipeline.#build} に残る。
    */
-  static #admit(
-    manifest: Manifest,
-    options: AnimaPipelineOptions,
-  ): AnimaAdmission {
+  static #admit(manifest: Manifest, options: AnimaPipelineOptions): AnimaAdmission {
     // 中断の検査は**段の境目**に置く（各段は不可分 — 3.7GiB の部品を途中で畳む口は無い）。
     // 入口が最初の 1 本: 中断済みで呼ばれたら資産に 1 バイトも触らずに返す。
     options.signal?.throwIfAborted();
@@ -991,19 +971,16 @@ export class AnimaPipeline {
     );
     const gpuFeatures = sessionGpuFeatures(quant.gpuFeatures, sessionOptions);
     // residency も同じ席で見る（未知の綴りを重みの取得の後まで持ち越さない）。
-    const residency = options.residency === undefined
-      ? DEFAULT_ANIMA_RESIDENCY
-      : assertAnimaResidency(options.residency, "AnimaPipeline: residency");
+    const residency =
+      options.residency === undefined
+        ? DEFAULT_ANIMA_RESIDENCY
+        : assertAnimaResidency(options.residency, "AnimaPipeline: residency");
 
     // MUST: 共有 GPU の能力不足（feature / device limit）はこの席で落とす — 自前で取る場合と
     // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
     // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
     if (options.gpu !== undefined) {
-      assertGpuFeaturesGranted(
-        gpuFeatures,
-        options.gpu,
-        `AnimaPipeline: quant '${quantName}'`,
-      );
+      assertGpuFeaturesGranted(gpuFeatures, options.gpu, `AnimaPipeline: quant '${quantName}'`);
       assertRequiredLimitsSatisfied(
         quant.requiredLimits,
         options.gpu.limits,
@@ -1056,7 +1033,7 @@ export class AnimaPipeline {
     // 構築まで進んでから落ちる（あるいは黙って別の経路へ縮退する）。共有 GPU は
     // {@link AnimaPipeline.#admit} が既に同じ 1 本で見ているが、自前で取った device は
     // ここが唯一の門。
-    const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+    const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
     const ownsGpu = options.gpu === undefined;
     try {
       // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
@@ -1164,9 +1141,10 @@ export class AnimaPipeline {
     const seed = request.seed ?? 0;
     // 更新則は request が優先で、省略時だけ配布者の宣言に落ちる。未知の綴りは GPU に触る前に
     // 期待と実際を並べて落とす（TS 型を通らない JS 呼び出し向け — 既定への無言の縮退を作らない）。
-    const sampler = request.sampler === undefined
-      ? state.config.scheduler.type
-      : assertAnimaSamplerType(request.sampler, "sampler");
+    const sampler =
+      request.sampler === undefined
+        ? state.config.scheduler.type
+        : assertAnimaSamplerType(request.sampler, "sampler");
     assertAcceptableResolution(resolution);
     // seed の検査も入口に置く。生成器を作るのは DiT の段（`new Randn(seed)`）で、そこは
     // text encoder / conditioner を回して DiT の重みを上げ終えた後なので、`Randn` 側だけに
@@ -1183,9 +1161,10 @@ export class AnimaPipeline {
     }
     // 実効 residency（request ?? 構築オプション）。意味は「この generate の**後に** DiT を持つか」
     // — 開始時の常駐 DiT は値に関わらず使う（`residency.ts` の `transformerSource`）。
-    const residency = request.residency === undefined
-      ? state.residency
-      : assertAnimaResidency(request.residency, "residency");
+    const residency =
+      request.residency === undefined
+        ? state.residency
+        : assertAnimaResidency(request.residency, "residency");
 
     const wantsUncond = needsUncond(guidance);
     const negativePrompt = resolveNegativePrompt(
@@ -1196,11 +1175,12 @@ export class AnimaPipeline {
 
     // 生成イベントの発火口。未購読なら何もしない 1 本に畳んで、発火点に分岐を置かない。
     const { onEvent } = request;
-    const emit: (event: AnimaGenerateEvent) => Promise<void> = onEvent === undefined
-      ? () => Promise.resolve()
-      : async (event) => {
-        await onEvent(event);
-      };
+    const emit: (event: AnimaGenerateEvent) => Promise<void> =
+      onEvent === undefined
+        ? () => Promise.resolve()
+        : async (event) => {
+            await onEvent(event);
+          };
     const notifyResidency = (notice: ResidencyNotice): Promise<void> =>
       emit({ kind: "residency", component: "transformer", ...notice });
     /** 先回りの退避の試し確保（`TransformerResidency.ensureHeadroom` の `probe`）。 */
@@ -1250,28 +1230,24 @@ export class AnimaPipeline {
       }
 
       // --- ② テキスト経路（DiT ロードの前に解放する）---------------------------
-      const hidden = await withStage(
-        "text_encoder",
-        state.textEncoder,
-        (run) =>
-          Promise.all([
-            run({ input_ids: idsTensor(positive.qwenIds) }),
-            ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
-          ]),
+      const hidden = await withStage("text_encoder", state.textEncoder, (run) =>
+        Promise.all([
+          run({ input_ids: idsTensor(positive.qwenIds) }),
+          ...(negative === undefined ? [] : [run({ input_ids: idsTensor(negative.qwenIds) })]),
+        ]),
       );
-      const embeds = await withStage(
-        "text_conditioner",
-        state.textConditioner,
-        (run) =>
-          Promise.all([
-            run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
-            ...(negative === undefined ? [] : [
-              run({
-                source_hidden_states: hidden[1],
-                target_input_ids: idsTensor(negative.t5Ids),
-              }),
-            ]),
-          ]),
+      const embeds = await withStage("text_conditioner", state.textConditioner, (run) =>
+        Promise.all([
+          run({ source_hidden_states: hidden[0], target_input_ids: idsTensor(positive.t5Ids) }),
+          ...(negative === undefined
+            ? []
+            : [
+                run({
+                  source_hidden_states: hidden[1],
+                  target_input_ids: idsTensor(negative.t5Ids),
+                }),
+              ]),
+        ]),
       );
 
       // --- ③ denoise（DiT を N step。段ごと運転なら VAE ロードの前に解放する）---------
@@ -1374,45 +1350,41 @@ export class AnimaPipeline {
       // --- ④ 逆正規化 → VAE decode（常時タイル — ADR 0038 §4）-------------------
       const { mean: latentsMean, std: latentsStd } = animaLatents();
       const denormalized = denormalizeLatents(latents, latentShape, latentsMean, latentsStd);
-      const decoded = await withStage(
-        "vae_decoder",
-        state.vaeDecoder,
-        async (run) => {
-          const tileShape = staticInputShape(state.vaeDecoder, "latents");
-          const sampleShape = staticOutputShape(state.vaeDecoder);
-          const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
-          const tiles = tileCount(geometry);
-          const blendsOf = (axis: typeof geometry.rows): number[] =>
-            axis.starts.slice(1).map((_, index) => blendExtentAt(axis, geometry.scale, index + 1));
-          let decodedTiles = 0;
-          const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
-            const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
-            const sample = asF32(output, `VAE 出力（タイル ${row},${col}）`);
-            decodedTiles += 1;
-            await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
-            return sample;
-          });
-          // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
-          // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
-          return {
-            pixels,
-            width: geometry.cols.extent * geometry.scale,
-            height: geometry.rows.extent * geometry.scale,
-            tiles,
-            // ブレンド幅は**対ごと**（丸め等間隔なので 1 latent まで動く）。診断に載るのは
-            // 幾何そのもので、代表値へ畳むと食い違いの手掛かりが消える。
-            blend: [blendsOf(geometry.rows), blendsOf(geometry.cols)] as const,
-          };
-        },
-      );
+      const decoded = await withStage("vae_decoder", state.vaeDecoder, async (run) => {
+        const tileShape = staticInputShape(state.vaeDecoder, "latents");
+        const sampleShape = staticOutputShape(state.vaeDecoder);
+        const geometry = planVaeTiling(latentShape, tileShape, sampleShape);
+        const tiles = tileCount(geometry);
+        const blendsOf = (axis: typeof geometry.rows): number[] =>
+          axis.starts.slice(1).map((_, index) => blendExtentAt(axis, geometry.scale, index + 1));
+        let decodedTiles = 0;
+        const pixels = await decodeTiled(denormalized, geometry, async (tile, row, col) => {
+          const output = await run({ latents: { dtype: "f32", shape: tileShape, data: tile } });
+          const sample = asF32(output, `VAE 出力（タイル ${row},${col}）`);
+          decodedTiles += 1;
+          await emit({ kind: "vae-tile", tile: decodedTiles, tiles });
+          return sample;
+        });
+        // 寸法は**幾何**が正本（latent の全長 × 縮尺）。画素数から逆算しない — 非正方では
+        // `3·H·W` の分解が一意でなく、逆算では縦横の取り違えが原理的に検出できない。
+        return {
+          pixels,
+          width: geometry.cols.extent * geometry.scale,
+          height: geometry.rows.extent * geometry.scale,
+          tiles,
+          // ブレンド幅は**対ごと**（丸め等間隔なので 1 latent まで動く）。診断に載るのは
+          // 幾何そのもので、代表値へ畳むと食い違いの手掛かりが消える。
+          blend: [blendsOf(geometry.rows), blendsOf(geometry.cols)] as const,
+        };
+      });
 
       // MUST: 出た画像の寸法はノブではなく**資産**が決める。ここで食い違うなら開いた export が
       // 想定と違うので、黙って返さない。要素数との整合は `imageToRgba` が見る。
       if (decoded.width !== resolution.width || decoded.height !== resolution.height) {
         throw new Error(
-          `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${
-            formatResolution(resolution)
-          } と違う（タイル ${decoded.tiles} 枚 / ブレンド 縦 [${decoded.blend[0]}] 横 [${
+          `VAE 出力が ${decoded.width}×${decoded.height} で要求解像度 ${formatResolution(
+            resolution,
+          )} と違う（タイル ${decoded.tiles} 枚 / ブレンド 縦 [${decoded.blend[0]}] 横 [${
             decoded.blend[1]
           }]px）`,
         );
@@ -1449,7 +1421,7 @@ export class AnimaPipeline {
       disposeResidencyThenGpu(
         this.#residency,
         this.#state.ownsGpu ? () => this.#state.gpu.destroy() : undefined,
-      )
+      ),
     );
     return this.#disposal;
   }

@@ -155,13 +155,11 @@ describe("geometryProfileMismatch", () => {
   });
 
   it("provenance.userAgent（掃引したブラウザの参考の欄）は照合しない — 違っても欄が無くても一致", () => {
-    for (
-      const overrides of [
-        { userAgent: ["Mozilla/5.0 (Macintosh) Chrome/153.0.0.0"] },
-        { userAgent: ["Deno/2.9.6"] },
-        {},
-      ]
-    ) {
+    for (const overrides of [
+      { userAgent: ["Mozilla/5.0 (Macintosh) Chrome/153.0.0.0"] },
+      { userAgent: ["Deno/2.9.6"] },
+      {},
+    ]) {
       assertEquals(
         geometryProfileMismatch(stored(DEFAULT_GEOMETRY_PROFILE, overrides), ADAPTER),
         undefined,

@@ -44,7 +44,11 @@ import {
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
 import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
-import { createSampler, isStopToken, type SamplerSpec } from "../../models/src/generation/sampler.ts";
+import {
+  createSampler,
+  isStopToken,
+  type SamplerSpec,
+} from "../../models/src/generation/sampler.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -112,7 +116,7 @@ const exists = (url: URL): boolean => {
 
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every(({ name }) =>
-  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
+  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
 );
 const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 

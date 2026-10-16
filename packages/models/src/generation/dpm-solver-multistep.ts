@@ -135,9 +135,7 @@ export const dpmSolverMultistepStep = (
   }
   // 状態の受け渡しが切れていたら黙って 1 次へ落ちない（1 次と 2 次は別の絵になる）。
   if ((index === 0) !== (previousX0 === undefined)) {
-    throw new Error(
-      `step ${index} と直前 x0 の有無が食い違う（step 0 でのみ undefined を渡す）`,
-    );
+    throw new Error(`step ${index} と直前 x0 の有無が食い違う（step 0 でのみ undefined を渡す）`);
   }
 
   const sigmaS0 = sigmas[index];
@@ -168,9 +166,10 @@ export const dpmSolverMultistepStep = (
   const next = new Float32Array(sample.length);
   const x0 = new Float32Array(sample.length);
   for (let element = 0; element < sample.length; element += 1) {
-    const velocity = uncond === undefined
-      ? cond[element]
-      : f32(uncond[element] + f32(scale * f32(cond[element] - uncond[element])));
+    const velocity =
+      uncond === undefined
+        ? cond[element]
+        : f32(uncond[element] + f32(scale * f32(cond[element] - uncond[element])));
     const predicted = f32(sample[element] - f32(sigmaS0 * velocity));
     x0[element] = predicted;
     const base = f32(f32(sampleScale * sample[element]) - f32(d0Scale * predicted));

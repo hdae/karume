@@ -52,7 +52,11 @@ import {
   type Gemma4PleTable,
   PLE_INDEX_ASSET,
 } from "../../models/src/gemma/ple-index.ts";
-import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
+import {
+  gemma4RopeInputNames,
+  gemma4RopeInputs,
+  type Gemma4RopeSpec,
+} from "../../models/src/gemma/rope.ts";
 import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
@@ -142,7 +146,7 @@ const exists = (url: URL): boolean => {
 
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every((name) =>
-  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
+  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
 );
 const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
@@ -185,7 +189,10 @@ test({
 
 /** 系列ディレクトリの名前（記録が名乗る `series` と突き合わせる側）。 */
 const seriesName = (root: URL): string =>
-  root.pathname.split("/").filter((part) => part !== "").at(-1) ?? "";
+  root.pathname
+    .split("/")
+    .filter((part) => part !== "")
+    .at(-1) ?? "";
 
 /** JSON の 1 段を「キー → 未検査の値」へ落とす（未知の形は明確な文言で落とす）。 */
 const objectAt = (value: unknown, where: string): Map<string, unknown> => {
@@ -415,7 +422,8 @@ test({
         if (first !== "") continue;
         const token = tokens[Math.floor(element / (LAYERS * PLE_DIM))];
         const layer = Math.floor(element / PLE_DIM) % LAYERS;
-        first = `token ${token} / 層 ${layer} / 列 ${element % PLE_DIM}: ` +
+        first =
+          `token ${token} / 層 ${layer} / 列 ${element % PLE_DIM}: ` +
           `${data[element]} ≠ ${expected[element]}`;
       }
       assertEquals(
@@ -442,8 +450,8 @@ test({
     assertProbeMatch(byRows.data, "行読み経路");
     const rowStats = rows.stats();
     // 期待値の前提: 全量へ倒れるぶんが既定予算に収まること（溢れると方針表が諦めて行読みへ戻る）。
-    const plannedFullBytes = fullBytesOf(index.values, valuePlan) +
-      fullBytesOf(index.scales, scalePlan);
+    const plannedFullBytes =
+      fullBytesOf(index.values, valuePlan) + fullBytesOf(index.scales, scalePlan);
     assert(
       plannedFullBytes <= budget,
       `全量読みへ倒れる ${plannedFullBytes} バイトが既定予算 ${budget} バイトを超える` +
@@ -474,7 +482,7 @@ test({
     // どれも下限（32 行）に届くので方針表が全量読みへ倒れる。probe の位置は列の先頭に置いて
     // あるので、比べるのは同じ要素数の前半だけでよい。値が **1 bit も動かない**ことが門である。
     const filler = [...touched].flatMap((position) =>
-      Array.from({ length: 32 }, (_row, row) => index.values.blocks[position].start + row)
+      Array.from({ length: 32 }, (_row, row) => index.values.blocks[position].start + row),
     );
     const full = await openPle(allResidentBytes(index));
     const byFull = await full.gather([...tokens, ...filler]);

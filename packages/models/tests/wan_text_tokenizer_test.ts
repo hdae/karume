@@ -74,11 +74,11 @@ const encoder = new WanPromptEncoder({ t5: t5Tables, promptClean });
 
 /** トークナイザ側の拒否の理由 → メッセージの目印（前処理の拒否は `PromptCleanError.reason`）。 */
 const TOKENIZER_REJECTS: Record<string, string> = {
-  "oov": "語彙に無い文字列",
+  oov: "語彙に無い文字列",
   "too-long": "上限 512",
   "too-short": `最低 ${WAN_PROMPT_MIN_TOKENS}`,
   "added-token": "特殊トークン",
-  "metaspace": "U+2581",
+  metaspace: "U+2581",
 };
 const PROMPT_CLEAN_REJECTS = new Set(["unassigned", "c1", "entity", "mojibake"]);
 
@@ -200,7 +200,10 @@ const tinyTables = (maxLength: number): T5Tables => ({
   maxTokenLength: 1,
   unkId: 2,
   eosId: 1,
-  addedTokens: new Map([["</s>", 1], ["<s>", 2]]),
+  addedTokens: new Map([
+    ["</s>", 1],
+    ["<s>", 2],
+  ]),
   space: [[0x20, 0x20]],
   maxLength,
 });
@@ -250,7 +253,12 @@ const minimalAsset = (patch: Record<string, unknown> = {}): Record<string, unkno
   maxLength: 512,
   unkId: 2,
   eosId: 1,
-  addedTokens: [["<pad>", 0], ["</s>", 1], ["<s>", 2], ["<unk>", 3]],
+  addedTokens: [
+    ["<pad>", 0],
+    ["</s>", 1],
+    ["<s>", 2],
+    ["<unk>", 3],
+  ],
   space: [[0x20, 0x20]],
   vocabText: "<pad>\n</s>\n<s>\n<unk>\n▁cat\n▁",
   scores: [0, 0, 0, 0, -1, -2],
@@ -280,12 +288,28 @@ test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙って�
     minimalAsset({ promptClean: { ...clean, ...patch } });
   assertThrows(() => parseWanTokenizerAsset(broken({ badness: "[" })), Error, "正規表現");
   assertThrows(
-    () => parseWanTokenizerAsset(broken({ assigned: [[10, 20], [15, 30]] })),
+    () =>
+      parseWanTokenizerAsset(
+        broken({
+          assigned: [
+            [10, 20],
+            [15, 30],
+          ],
+        }),
+      ),
     Error,
     "重なる",
   );
   assertThrows(
-    () => parseWanTokenizerAsset(broken({ width: [[0xff21, "A"], [0xff21, "B"]] })),
+    () =>
+      parseWanTokenizerAsset(
+        broken({
+          width: [
+            [0xff21, "A"],
+            [0xff21, "B"],
+          ],
+        }),
+      ),
     Error,
     "重複",
   );
@@ -310,12 +334,10 @@ test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻訳と
   assert(typeof source === "string");
   const withBadness = (badness: string): Record<string, unknown> =>
     minimalAsset({ promptClean: { ...clean, badness } });
-  for (
-    const [label, badness] of [
-      ["末尾の 1 文字を変えた式", `${source.slice(0, -1)}X`],
-      ["破滅的なバックトラッキングの式", "(a+)+$"],
-    ]
-  ) {
+  for (const [label, badness] of [
+    ["末尾の 1 文字を変えた式", `${source.slice(0, -1)}X`],
+    ["破滅的なバックトラッキングの式", "(a+)+$"],
+  ]) {
     assertThrows(
       () => parseWanTokenizerAsset(withBadness(badness)),
       Error,

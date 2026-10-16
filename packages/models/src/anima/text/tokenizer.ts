@@ -62,7 +62,10 @@ export const assertPromptTokenLengths = (
   t5Length: number,
   maxLength: number,
 ): void => {
-  for (const [which, length] of [["Qwen2", qwenLength], ["T5", t5Length]] as const) {
+  for (const [which, length] of [
+    ["Qwen2", qwenLength],
+    ["T5", t5Length],
+  ] as const) {
     if (length < PROMPT_MIN_TOKENS) {
       throw new ModelInputError(
         `${label}の ${which} id 列が ${length} トークン（最低 ${PROMPT_MIN_TOKENS}）— ` +
@@ -74,9 +77,7 @@ export const assertPromptTokenLengths = (
       // 上限側は入力起因ではない（ADR 0107 決定 2）— 両トークナイザは `maxLength` で切り詰めて
       // から返すので、ここに来るのは切り詰めが壊れたときだけ = 内部不変条件の破れである。
       // 呼び手がプロンプトを短くしても直らないので素の `Error` のまま投げる。
-      throw new Error(
-        `${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`,
-      );
+      throw new Error(`${label}の ${which} id 列が ${length} トークン（上限 ${maxLength}）`);
     }
   }
 };
@@ -136,8 +137,10 @@ const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
   const out = new Map<number, number>();
   for (const entry of raw) {
     if (
-      !Array.isArray(entry) || entry.length !== 2 ||
-      typeof entry[0] !== "number" || typeof entry[1] !== "number"
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "number"
     ) {
       throw new Error(`${label}: [cp, cp] でない`);
     }
@@ -155,12 +158,7 @@ const parseCaseFold = (raw: unknown, label: string): Qwen2CaseFold => {
  * だけで**落ちない** — 分割が変わって id 列が静かに別物になる（`vocabText` 側は語彙に無い
  * トークンで落ちるが、こちらは沈黙誤値）。
  */
-const parseLines = (
-  raw: unknown,
-  count: unknown,
-  label: string,
-  countLabel: string,
-): string[] => {
+const parseLines = (raw: unknown, count: unknown, label: string, countLabel: string): string[] => {
   const lines = asString(raw, label).split("\n");
   const want = asNumber(count, countLabel);
   if (lines.length !== want) {

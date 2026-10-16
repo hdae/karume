@@ -121,9 +121,9 @@ export const parseWanTextEmbeds = (buffer: ArrayBuffer): WanTextEmbeds => {
     if (view === undefined) throw new WanTextEmbedsError(`${where}: テンソル '${name}' が無い`);
     if (view.dtype !== "F32" || view.shape.length !== 2 || view.shape[0] !== tokens) {
       throw new WanTextEmbedsError(
-        `テンソル '${name}' が F32 [${tokens}, width] でない（${view.dtype} [${
-          view.shape.join(",")
-        }]）`,
+        `テンソル '${name}' が F32 [${tokens}, width] でない（${view.dtype} [${view.shape.join(
+          ",",
+        )}]）`,
       );
     }
     width ??= view.shape[1];

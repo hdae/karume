@@ -620,7 +620,8 @@ const selectionSplitTempBytes = (node: NodePlan): number => {
   if (
     node.node.op !== "argmax" &&
     !(node.node.op === "topk" && topkK(node.node.attrs, "topk estimate") === 1)
-  ) return 0;
+  )
+    return 0;
   const input = node.inputShapes[0];
   const dim = input[input.length - 1];
   const groups = node.node.op === "topk" ? topkOneSplitGroups(dim) : argmaxSplitGroups(dim);
@@ -673,13 +674,16 @@ const stateAttentionTemps = (
   // 行ブロックの枚数を明示する `forced`（テスト専用 `ROW_BLOCK_SPLIT`）は渡さない —
   // `EstimateOptions` に受け口が無く、実運用の呼び手も使わないため（見積りは既定の等分だけを
   // 名乗る）。
-  return planStateAttention({
-    batchHeads: batch * heads,
-    chunkRows,
-    capacity: slotShape[2],
-    window: stateWindow(node.node.attrs, where) ?? 0,
-    fuseStatsPv: node.node.ins.length === 3 && stateAttentionReduce === "parallel-fused",
-  }, rowBlockLimit(limit, budget)).blocks;
+  return planStateAttention(
+    {
+      batchHeads: batch * heads,
+      chunkRows,
+      capacity: slotShape[2],
+      window: stateWindow(node.node.attrs, where) ?? 0,
+      fuseStatsPv: node.node.ins.length === 3 && stateAttentionReduce === "parallel-fused",
+    },
+    rowBlockLimit(limit, budget),
+  ).blocks;
 };
 
 /**
@@ -786,11 +790,12 @@ const fusedTransientStep = (
           `${where} の dispatch '${dispatch.key}' が常駐 scale を束ねている`,
         );
       }
-      const ref: TransientRef = operand.kind === "temp"
-        ? { kind: "temp", id: operand.id }
-        : operand.kind === "output"
-        ? output
-        : bindRef(operand.index);
+      const ref: TransientRef =
+        operand.kind === "temp"
+          ? { kind: "temp", id: operand.id }
+          : operand.kind === "output"
+            ? output
+            : bindRef(operand.index);
       // binding 0 は params なので、オペランドは binding 1 から並ぶ。
       const binding = slot + 1;
       if (roles.writes.has(binding)) writes.push(ref);
@@ -805,13 +810,15 @@ const fusedTransientStep = (
     return { reads, writes };
   });
   return {
-    outputs: [{
-      name: step.outputName,
-      kind: "alloc",
-      byteLength: numel(step.outputShape) * 4,
-      uses: uses.get(step.outputName) ?? 0,
-      pinned: outputNames.has(step.outputName),
-    }],
+    outputs: [
+      {
+        name: step.outputName,
+        kind: "alloc",
+        byteLength: numel(step.outputShape) * 4,
+        uses: uses.get(step.outputName) ?? 0,
+        pinned: outputNames.has(step.outputName),
+      },
+    ],
     temps: step.temps,
     dispatches,
     releases: step.ins,
@@ -911,11 +918,11 @@ const fusedAttentionProgram = (
   const quantized = attentionI8a8TempBytes(shape);
   const qk = qkI8a8
     ? {
-      qq: alloc(quantized.qk.qq, last),
-      qs: alloc(quantized.qk.qs, last),
-      kq: alloc(quantized.qk.kq, last),
-      ks: alloc(quantized.qk.ks, last),
-    }
+        qq: alloc(quantized.qk.qq, last),
+        qs: alloc(quantized.qk.qs, last),
+        kq: alloc(quantized.qk.kq, last),
+        ks: alloc(quantized.qk.ks, last),
+      }
     : undefined;
   if (qk !== undefined) {
     dispatches.push({ reads: [qRef], writes: [qk.qq, qk.qs] });
@@ -923,10 +930,10 @@ const fusedAttentionProgram = (
   }
   const pv = pvI8a8
     ? {
-      vt: alloc(quantized.pv.vt, last),
-      vq: alloc(quantized.pv.vq, last),
-      vs: alloc(quantized.pv.vs, last),
-    }
+        vt: alloc(quantized.pv.vt, last),
+        vq: alloc(quantized.pv.vq, last),
+        vs: alloc(quantized.pv.vs, last),
+      }
     : undefined;
   if (pv !== undefined) {
     dispatches.push({ reads: [vRef], writes: [pv.vt] });
@@ -937,9 +944,12 @@ const fusedAttentionProgram = (
     const scores = alloc(block.scoreBytes, end);
     const rowStats = alloc(block.statsBytes, end);
     dispatches.push({
-      reads: qk === undefined
-        ? (maskRef === undefined ? [qRef, kRef] : [qRef, kRef, maskRef])
-        : [qk.qq, qk.kq, qk.qs, qk.ks],
+      reads:
+        qk === undefined
+          ? maskRef === undefined
+            ? [qRef, kRef]
+            : [qRef, kRef, maskRef]
+          : [qk.qq, qk.kq, qk.qs, qk.ks],
       writes: [scores],
     });
     dispatches.push({ reads: [scores], writes: [rowStats] });
@@ -1179,9 +1189,9 @@ export const estimateGraphMemory = (
   const budgetBytes = options.planBackingBudgetBytes ?? DEFAULT_PLAN_BACKING_BUDGET_BYTES;
   if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 0) {
     throw new ExecutionError(
-      `options.planBackingBudgetBytes ${
-        describeInputValue(budgetBytes)
-      } は非負の安全な整数でなければならない`,
+      `options.planBackingBudgetBytes ${describeInputValue(
+        budgetBytes,
+      )} は非負の安全な整数でなければならない`,
     );
   }
   // 行ブロックの一時 1 本ごとの予算も同じ位置・同じ文言（`sessionOptionsViolation` の門 — ADR 0124
@@ -1192,9 +1202,9 @@ export const estimateGraphMemory = (
     (!Number.isSafeInteger(attentionRowBlockMaxBytes) || attentionRowBlockMaxBytes < 1)
   ) {
     throw new ExecutionError(
-      `options.attentionRowBlockMaxBytes ${
-        describeInputValue(attentionRowBlockMaxBytes)
-      } は正の安全な整数でなければならない`,
+      `options.attentionRowBlockMaxBytes ${describeInputValue(
+        attentionRowBlockMaxBytes,
+      )} は正の安全な整数でなければならない`,
     );
   }
   // 融合 attention の計算形と S の格納形は Session 構築と同じ門（綴り・c16 × s16 の組）で見る
@@ -1225,12 +1235,13 @@ export const estimateGraphMemory = (
     );
   }
   // ADR 0066 決定 4 の実行 2 形をそれぞれ独立に計算する（chunk 行だけが違う同じグラフ）。
-  const plans: [name: string, bindings: SymbolBindings][] = chunkLength === undefined
-    ? [["run", bindings]]
-    : [
-      ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],
-      ["decode", bindChunkRows(bindings, chunkDims, 1, "decode")],
-    ];
+  const plans: [name: string, bindings: SymbolBindings][] =
+    chunkLength === undefined
+      ? [["run", bindings]]
+      : [
+          ["prefill", bindChunkRows(bindings, chunkDims, chunkLength, "prefill")],
+          ["decode", bindChunkRows(bindings, chunkDims, 1, "decode")],
+        ];
   // 呼び手が足す形（ADR 0096 の verify run など）は既存 2 形の後ろに宣言順で並ぶ。計算経路は
   // 同じ 1 本で、変わるのは物理 chunk 行と（渡されたなら）グラフ入力側の束縛だけ。
   const generation = options.generation;
@@ -1248,7 +1259,8 @@ export const estimateGraphMemory = (
       // MUST: 値域は `1..chunkLength`（`queryLength ≤ chunkLength` の契約と同じ上限 —
       // 宣言 shape に載らない行数の見積りを返さない）。
       if (
-        !Number.isSafeInteger(spec.chunkLength) || spec.chunkLength < 1 ||
+        !Number.isSafeInteger(spec.chunkLength) ||
+        spec.chunkLength < 1 ||
         spec.chunkLength > generation.chunkLength
       ) {
         throw new ExecutionError(
@@ -1257,11 +1269,7 @@ export const estimateGraphMemory = (
         );
       }
       // 束縛は既定の写しに上書きしてから、既存 2 形と同じ門（`planBindings`）を通す。
-      const base = planBindings(
-        graph,
-        { ...options.bindings, ...spec.bindings },
-        chunkSymbols,
-      );
+      const base = planBindings(graph, { ...options.bindings, ...spec.bindings }, chunkSymbols);
       plans.push([spec.name, bindChunkRows(base, chunkDims, spec.chunkLength, spec.name)]);
     }
   }
@@ -1279,12 +1287,14 @@ export const estimateGraphMemory = (
     },
   );
 
-  const allowedRows = generation === undefined
-    ? undefined
-    : allowedChunkRows(generation.chunkLength, generation.chunkBuckets ?? []);
-  const estimateScenario = (
-    [name, scenarioBindings]: [name: string, bindings: SymbolBindings],
-  ): AdmissionScenario => {
+  const allowedRows =
+    generation === undefined
+      ? undefined
+      : allowedChunkRows(generation.chunkLength, generation.chunkBuckets ?? []);
+  const estimateScenario = ([name, scenarioBindings]: [
+    name: string,
+    bindings: SymbolBindings,
+  ]): AdmissionScenario => {
     // MUST: states と入力の両方に現れる記号は 2 つの束縛点で同じ値（run が拒否する分裂 —
     // ADR 0066 追記 7 — に見積りだけが正常値を返さない）。シナリオごとに解決値が変わるので
     // 照合もシナリオごと。
@@ -1318,8 +1328,8 @@ export const estimateGraphMemory = (
 
   const weightBytes = weights.compressed + weights.uncompressed + weights.expanded;
   const peakScenarioBytes = Math.max(
-    ...[...scenarios, ...buckets.map(estimateScenario)].map((scenario) =>
-      scenario.ioBytes + scenario.workspaceBytes
+    ...[...scenarios, ...buckets.map(estimateScenario)].map(
+      (scenario) => scenario.ioBytes + scenario.workspaceBytes,
     ),
   );
   return {

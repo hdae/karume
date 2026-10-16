@@ -18,12 +18,34 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 const FS_NAMES = [
-  "readFile", "readFileSync", "readTextFile", "readTextFileSync",
-  "writeFile", "writeFileSync", "writeTextFile", "writeTextFileSync",
-  "mkdir", "mkdirSync", "remove", "removeSync", "makeTempDir", "makeTempDirSync",
-  "stat", "statSync", "readDir", "readDirSync", "symlink", "symlinkSync", "readLinkSync", "realPathSync",
+  "readFile",
+  "readFileSync",
+  "readTextFile",
+  "readTextFileSync",
+  "writeFile",
+  "writeFileSync",
+  "writeTextFile",
+  "writeTextFileSync",
+  "mkdir",
+  "mkdirSync",
+  "remove",
+  "removeSync",
+  "makeTempDir",
+  "makeTempDirSync",
+  "stat",
+  "statSync",
+  "readDir",
+  "readDirSync",
+  "symlink",
+  "symlinkSync",
+  "readLinkSync",
+  "realPathSync",
 ];
-const ERROR_PREDICATES = { NotFound: "isNotFound", IsADirectory: "isADirectory", FilesystemLoop: "isFilesystemLoop" };
+const ERROR_PREDICATES = {
+  NotFound: "isNotFound",
+  IsADirectory: "isADirectory",
+  FilesystemLoop: "isFilesystemLoop",
+};
 const TEST_MODULE = "@karume/test-support/test";
 const FS_MODULE = "@karume/test-support/fs";
 
@@ -40,15 +62,27 @@ const count = (text, re) => (text.match(re) ?? []).length;
 /** Merge `names` into an existing `import { ... } from "<module>";` or insert a new import at the top. */
 const ensureImport = (text, module, names) => {
   if (names.size === 0) return text;
-  const re = new RegExp(`^import \\{([^}]*)\\} from "${module.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}";\\n`, "m");
+  const re = new RegExp(
+    `^import \\{([^}]*)\\} from "${module.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}";\\n`,
+    "m",
+  );
   const existing = text.match(re);
   if (existing) {
-    const present = new Set(existing[1].split(",").map((s) => s.trim()).filter(Boolean));
+    const present = new Set(
+      existing[1]
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
     for (const n of names) present.add(n);
-    const sorted = [...present].sort((a, b) => a.replace(/^type /, "").localeCompare(b.replace(/^type /, "")));
+    const sorted = [...present].sort((a, b) =>
+      a.replace(/^type /, "").localeCompare(b.replace(/^type /, "")),
+    );
     return text.replace(re, `import { ${sorted.join(", ")} } from "${module}";\n`);
   }
-  const sorted = [...names].sort((a, b) => a.replace(/^type /, "").localeCompare(b.replace(/^type /, "")));
+  const sorted = [...names].sort((a, b) =>
+    a.replace(/^type /, "").localeCompare(b.replace(/^type /, "")),
+  );
   const line = `import { ${sorted.join(", ")} } from "${module}";\n`;
   const at = text.search(/^import /m);
   return at < 0 ? line + text : text.slice(0, at) + line + text.slice(at);
@@ -79,24 +113,46 @@ for (const file of files) {
     report.push(`Deno.test ×${nTest}${localTest ? " (aliased denoTest)" : ""}`);
   }
   const nCtx = count(text, /\bDeno\.TestContext\b/g);
-  if (nCtx > 0) { text = text.replace(/\bDeno\.TestContext\b/g, "TestContext"); testNames.add("type TestContext"); report.push(`Deno.TestContext ×${nCtx}`); }
+  if (nCtx > 0) {
+    text = text.replace(/\bDeno\.TestContext\b/g, "TestContext");
+    testNames.add("type TestContext");
+    report.push(`Deno.TestContext ×${nCtx}`);
+  }
   // env
   const nEnvLit = count(text, /\bDeno\.env\.get\("([A-Z0-9_]+)"\)/g);
-  if (nEnvLit > 0) { text = text.replace(/\bDeno\.env\.get\("([A-Z0-9_]+)"\)/g, "process.env.$1"); report.push(`Deno.env.get(literal) ×${nEnvLit}`); }
+  if (nEnvLit > 0) {
+    text = text.replace(/\bDeno\.env\.get\("([A-Z0-9_]+)"\)/g, "process.env.$1");
+    report.push(`Deno.env.get(literal) ×${nEnvLit}`);
+  }
   const nEnvExpr = count(text, /\bDeno\.env\.get\(([^()"]+)\)/g);
-  if (nEnvExpr > 0) { text = text.replace(/\bDeno\.env\.get\(([^()"]+)\)/g, "process.env[$1]"); report.push(`Deno.env.get(expr) ×${nEnvExpr}`); }
+  if (nEnvExpr > 0) {
+    text = text.replace(/\bDeno\.env\.get\(([^()"]+)\)/g, "process.env[$1]");
+    report.push(`Deno.env.get(expr) ×${nEnvExpr}`);
+  }
   // fs
   for (const name of FS_NAMES) {
     const re = new RegExp(`\\bDeno\\.${name}\\(`, "g");
     const n = count(text, re);
-    if (n > 0) { text = text.replace(re, `${name}(`); fsNames.add(name); report.push(`Deno.${name} ×${n}`); }
+    if (n > 0) {
+      text = text.replace(re, `${name}(`);
+      fsNames.add(name);
+      report.push(`Deno.${name} ×${n}`);
+    }
   }
   const nDirEntry = count(text, /\bDeno\.DirEntry\b/g);
-  if (nDirEntry > 0) { text = text.replace(/\bDeno\.DirEntry\b/g, "DirEntry"); fsNames.add("type DirEntry"); report.push(`Deno.DirEntry ×${nDirEntry}`); }
+  if (nDirEntry > 0) {
+    text = text.replace(/\bDeno\.DirEntry\b/g, "DirEntry");
+    fsNames.add("type DirEntry");
+    report.push(`Deno.DirEntry ×${nDirEntry}`);
+  }
   for (const [cls, predicate] of Object.entries(ERROR_PREDICATES)) {
     const re = new RegExp(`\\b([A-Za-z_$][\\w$]*) instanceof Deno\\.errors\\.${cls}\\b`, "g");
     const n = count(text, re);
-    if (n > 0) { text = text.replace(re, `${predicate}($1)`); fsNames.add(predicate); report.push(`instanceof Deno.errors.${cls} ×${n}`); }
+    if (n > 0) {
+      text = text.replace(re, `${predicate}($1)`);
+      fsNames.add(predicate);
+      report.push(`instanceof Deno.errors.${cls} ×${n}`);
+    }
   }
   // process
   const simple = [
@@ -107,7 +163,10 @@ for (const file of files) {
   ];
   for (const [re, to, label] of simple) {
     const n = count(text, re);
-    if (n > 0) { text = text.replace(re, to); report.push(`${label} ×${n}`); }
+    if (n > 0) {
+      text = text.replace(re, to);
+      report.push(`${label} ×${n}`);
+    }
   }
 
   text = ensureImport(text, TEST_MODULE, testNames);
@@ -115,7 +174,8 @@ for (const file of files) {
 
   const remaining = [];
   text.split("\n").forEach((line, i) => {
-    if (/\bDeno\./.test(line) && !/^\s*(\*|\/\/|\/\*)/.test(line)) remaining.push(`${i + 1}: ${line.trim().slice(0, 110)}`);
+    if (/\bDeno\./.test(line) && !/^\s*(\*|\/\/|\/\*)/.test(line))
+      remaining.push(`${i + 1}: ${line.trim().slice(0, 110)}`);
   });
   totalRemaining += remaining.length;
 
@@ -124,4 +184,6 @@ for (const file of files) {
   for (const r of remaining) console.log(`  REMAINING ${r}`);
   if (write && changed) writeFileSync(file, text);
 }
-console.log(`\n${files.length} file(s), ${totalRemaining} remaining Deno reference(s)${write ? "" : " (dry run — nothing written)"}`);
+console.log(
+  `\n${files.length} file(s), ${totalRemaining} remaining Deno reference(s)${write ? "" : " (dry run — nothing written)"}`,
+);

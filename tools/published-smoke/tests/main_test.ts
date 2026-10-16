@@ -23,11 +23,7 @@ test("parseSmokeArgs: 引数なしは完全経路・--manifests-only は manifes
 });
 
 test("parseSmokeArgs: 打ち間違いは黙って完全経路へ落ちず、使い方つきで落ちる", () => {
-  assertThrows(
-    () => parseSmokeArgs(["--manifest-only"]),
-    Error,
-    "未知の引数 --manifest-only",
-  );
+  assertThrows(() => parseSmokeArgs(["--manifest-only"]), Error, "未知の引数 --manifest-only");
   assertThrows(() => parseSmokeArgs(["--manifests_only"]), Error, "未知の引数");
   assertThrows(() => parseSmokeArgs(["extra"]), Error, "未知の引数 extra");
 });

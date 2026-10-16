@@ -215,7 +215,7 @@ test("fromAssets: 中断済み signal は資産へ触る前に reason そのま�
   const reason = new Error("中止ボタン");
   controller.abort(reason);
   const error = await assertRejects(() =>
-    IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
+    IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
   assertStrictEquals(error, reason);
@@ -231,7 +231,7 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
   const reason = new Error("中止ボタン（実行中）");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
-    IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal })
+    IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
   assertStrictEquals(error, reason);
 });
@@ -331,10 +331,13 @@ test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim
   assertIrodoriRequest({ text, speaker: audio(7 * 1920 + 1) }, config);
   assertThrows(
     () =>
-      assertIrodoriRequest({
-        text,
-        speaker: { audio: { data: new Float32Array(8 * 1920), sampleRate: 24000 } },
-      }, config),
+      assertIrodoriRequest(
+        {
+          text,
+          speaker: { audio: { data: new Float32Array(8 * 1920), sampleRate: 24000 } },
+        },
+        config,
+      ),
     ModelInputError,
     "リサンプル",
   );

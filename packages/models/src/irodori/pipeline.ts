@@ -308,20 +308,20 @@ export type IrodoriLatentSnapshot = {
 export type IrodoriGenerateEvent =
   /** 段の Session 構築の**前**（`start`）と解放の**後**（`end`）— GB 級ロードの進捗が見える。 */
   | {
-    readonly kind: "stage";
-    readonly component: IrodoriRunComponent;
-    readonly at: "start" | "end";
-  }
+      readonly kind: "stage";
+      readonly component: IrodoriRunComponent;
+      readonly at: "start" | "end";
+    }
   | {
-    readonly kind: "denoise-step";
-    /** 完了した step 数（1-based）。**CFG の内側の forward 数ではない**。 */
-    readonly step: number;
-    readonly steps: number;
-    /** その step で消費した時刻 `t`（flow matching のスケジュール — anima の sigma に当たる）。 */
-    readonly t: number;
-    /** 呼んだときだけ途中潜在を写して返す（{@link "./dit-loop.ts"} の `latentSnapshot`）。 */
-    readonly copyLatents: () => IrodoriLatentSnapshot;
-  };
+      readonly kind: "denoise-step";
+      /** 完了した step 数（1-based）。**CFG の内側の forward 数ではない**。 */
+      readonly step: number;
+      readonly steps: number;
+      /** その step で消費した時刻 `t`（flow matching のスケジュール — anima の sigma に当たる）。 */
+      readonly t: number;
+      /** 呼んだときだけ途中潜在を写して返す（{@link "./dit-loop.ts"} の `latentSnapshot`）。 */
+      readonly copyLatents: () => IrodoriLatentSnapshot;
+    };
 
 /** 構築オプション（{@link IrodoriPipeline.fromAssets} / {@link IrodoriPipeline.fromPretrained} 共通）。 */
 export type IrodoriPipelineOptions = {
@@ -381,10 +381,9 @@ export type IrodoriPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 欄ごとの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type IrodoriFromPretrainedOptions =
-  & IrodoriPipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions;
+export type IrodoriFromPretrainedOptions = IrodoriPipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions;
 
 /** 取得済み資産から直接組むときの入力（hub の `fetchAssets` の返り値をそのまま渡す）。 */
 export type IrodoriAssets = {
@@ -434,15 +433,8 @@ const buildIrodoriState = async (
   open: ComponentOpener,
   options: IrodoriPipelineOptions = {},
 ): Promise<IrodoriState> => {
-  const {
-    config,
-    quantName,
-    quant,
-    ditSymbol,
-    ditContextOutputs,
-    ditSessionOptions,
-    gpuFeatures,
-  } = admitted;
+  const { config, quantName, quant, ditSymbol, ditContextOutputs, ditSessionOptions, gpuFeatures } =
+    admitted;
   // 供給口は admission が見たものと**同じ 1 本**（`open` は開いた部品を引き当てるだけ）。
   const backbone = open(BACKBONE);
   const textProj = open(TEXT_PROJ);
@@ -465,7 +457,7 @@ const buildIrodoriState = async (
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link "./admission.ts"} の `admitIrodori` が既に同じ 1 本で見ているが、自前で取った
   // device はここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     // MUST: GPU 取得**後**の中断検査は try の中に置く — 外に出すと、内部で取った device を
@@ -574,9 +566,10 @@ const generateLatent = async (
   const textIds = packIds(state.tokenizer, request.text, config.maxTextLen, "text");
   // caption の有無は**生の文字列**で決める（上流 `str(req.caption).strip() != ""`）。
   const captionText = request.caption ?? "";
-  const captionIds = captionText.trim().length === 0
-    ? undefined
-    : packCaptionIds(state.tokenizer, captionText, config.maxCaptionLen);
+  const captionIds =
+    captionText.trim().length === 0
+      ? undefined
+      : packCaptionIds(state.tokenizer, captionText, config.maxCaptionLen);
 
   // --- ① backbone（text / caption を同じ 1 セッションで回す）---------------
   // 1.26GB の重みを 2 度アップロードしないため 1 セッション 2 run にしてある。診断は run
@@ -719,21 +712,21 @@ const generateLatent = async (
   // CFG が有効な条件（上流 `has_*_cfg`）: 強さが正で、かつその条件が実際に載っていること
   // （text は必ず 1 token 以上ある — 空文字は packIds が落とす）。uncond マスクは step ごとに
   // 作り直さず、ここで 1 度だけ組む。
-  const uncondVariants: readonly UncondVariant[] = SEGMENT_ORDER
-    .filter((segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0)
-    .map((segment) => ({
-      segment,
-      // MUST: 強さは f32 で持つ — ホスト経路の `combineCfg` は f64 のまま乗算に入れ、常駐経路は
-      // GPU へ渡す前に f32 へ丸めるので、値が f32 非厳密だと 2 経路が 1〜2 ulp 割れる。
-      // `parseCfgScales` が f32 厳密しか受理しないので現物では恒等だが、ここで丸めておくと
-      // 「ホスト側が見るのは f32」が局所で読める（数値の正本は `host/sampler.ts`）。
-      scale: Math.fround(config.cfgScales[segment]),
-      mask: {
-        dtype: "bool",
-        shape: maskShape,
-        data: buildDitMask(frames, used, caps, segment),
-      } satisfies Tensor,
-    }));
+  const uncondVariants: readonly UncondVariant[] = SEGMENT_ORDER.filter(
+    (segment: IrodoriSegment) => config.cfgScales[segment] > 0 && used[segment] > 0,
+  ).map((segment) => ({
+    segment,
+    // MUST: 強さは f32 で持つ — ホスト経路の `combineCfg` は f64 のまま乗算に入れ、常駐経路は
+    // GPU へ渡す前に f32 へ丸めるので、値が f32 非厳密だと 2 経路が 1〜2 ulp 割れる。
+    // `parseCfgScales` が f32 厳密しか受理しないので現物では恒等だが、ここで丸めておくと
+    // 「ホスト側が見るのは f32」が局所で読める（数値の正本は `host/sampler.ts`）。
+    scale: Math.fround(config.cfgScales[segment]),
+    mask: {
+      dtype: "bool",
+      shape: maskShape,
+      data: buildDitMask(frames, used, caps, segment),
+    } satisfies Tensor,
+  }));
 
   // --- ⑥' 条件側 K/V 射影 + ⑦ Euler + CFG independent（2 経路とも dit-loop.ts）---
   const noiseLength = frames * config.latentDim;
@@ -766,9 +759,10 @@ const generateLatent = async (
   // だけは従来のホストループへ落とす。積む演算はどちらも同型で、出力は同じでなければならない。
   // 生成イベントの購読（`onEvent`）も同じ理由でホスト経路を選ぶ — 1 batch + 単一フェンスの
   // 常駐経路は step の完了そのものがホストから観測できない（`onEvent` の doc の MUST）。
-  const { x, forwards } = state.gpu.gpuTimingEnabled || request.onEvent !== undefined
-    ? await runDitLoopOnHost(state, emit, loop)
-    : await runDitLoopResident(state, loop);
+  const { x, forwards } =
+    state.gpu.gpuTimingEnabled || request.onEvent !== undefined
+      ? await runDitLoopOnHost(state, emit, loop)
+      : await runDitLoopResident(state, loop);
 
   return {
     latent: {
@@ -826,9 +820,10 @@ const generateAudio = async (
     haloFrames: config.codecHaloFrames,
   });
   const waveform = await decodeWaveform(state, emit, latent, tiles);
-  const data = samples === waveform.length
-    ? waveform
-    : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>);
+  const data =
+    samples === waveform.length
+      ? waveform
+      : (waveform.slice(0, samples) as Float32Array<ArrayBuffer>);
   // MUST: 非有限値を黙って返さない。WAV 化は NaN を 0 に丸め ±Inf をフルスケールへ張り付かせる
   // ので、沈黙誤値が「一部だけ無音 / 一部だけ轟音の音声」として出てしまう。
   for (const sample of data) {
@@ -985,8 +980,8 @@ export class IrodoriPipeline {
       throw new Error("IrodoriPipeline: dispose 済みでは生成できない");
     }
     assertIrodoriRequest(request, this.#state.config);
-    return await this.#chain(async () =>
-      (await generateLatent(this.#state, emitter(request.onEvent), request)).latent
+    return await this.#chain(
+      async () => (await generateLatent(this.#state, emitter(request.onEvent), request)).latent,
     );
   }
 

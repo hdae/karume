@@ -44,46 +44,44 @@ export const ELEMENTWISE_WORKGROUP_SIZE = 256;
 
 export type ElementwiseSpec =
   | {
-    readonly op: UnaryOpName | BinaryOpName | typeof WHERE_OP;
-    /** 出力 rank。1 以上（rank 0 のスカラは呼び出し側が rank 1・長さ 1 に正規化する）。 */
-    readonly rank: number;
-    /**
-     * **値スロット**の意味論 dtype。出力 dtype は契約表の写像で決まる（比較 op は bool）。
-     * where の条件スロットは常に bool なので、ここに載るのは値の側だけ。
-     */
-    readonly dtype: IrDtype;
-  }
+      readonly op: UnaryOpName | BinaryOpName | typeof WHERE_OP;
+      /** 出力 rank。1 以上（rank 0 のスカラは呼び出し側が rank 1・長さ 1 に正規化する）。 */
+      readonly rank: number;
+      /**
+       * **値スロット**の意味論 dtype。出力 dtype は契約表の写像で決まる（比較 op は bool）。
+       * where の条件スロットは常に bool なので、ここに載るのは値の側だけ。
+       */
+      readonly dtype: IrDtype;
+    }
   | {
-    readonly op: typeof CAST_OP;
-    readonly rank: number;
-    /** 変換元の意味論 dtype。 */
-    readonly dtype: IrDtype;
-    /** 変換先の意味論 dtype。 */
-    readonly to: IrDtype;
-  };
+      readonly op: typeof CAST_OP;
+      readonly rank: number;
+      /** 変換元の意味論 dtype。 */
+      readonly dtype: IrDtype;
+      /** 変換先の意味論 dtype。 */
+      readonly to: IrDtype;
+    };
 
 /**
  * 正準化の結果は kind で判別可能なユニオン。op 名の型は kind で確定するので、
  * 生成側が `op as UnaryOpName` のような取り違えの効かないキャストを書かずに済む
  * （ops.ts の OpContract と同じ方針）。`arity` は入力の個数。
  */
-type CanonicalSpec =
-  & {
-    readonly rank: number;
-    /** 値スロットの dtype（キーに載る側）。 */
-    readonly from: IrDtype;
-    readonly to: IrDtype;
-    /** 入力スロットごとの要素型（bindings の `array<T>` に埋まる）。 */
-    readonly slots: readonly IrDtype[];
-    /** params 末尾に載る f32 スカラの本数。 */
-    readonly scalars: number;
-  }
-  & (
-    | { readonly kind: "unary"; readonly op: UnaryOpName; readonly arity: 1 }
-    | { readonly kind: "binary"; readonly op: BinaryOpName; readonly arity: 2 }
-    | { readonly kind: "cast"; readonly op: typeof CAST_OP; readonly arity: 1 }
-    | { readonly kind: "where"; readonly op: typeof WHERE_OP; readonly arity: 3 }
-  );
+type CanonicalSpec = {
+  readonly rank: number;
+  /** 値スロットの dtype（キーに載る側）。 */
+  readonly from: IrDtype;
+  readonly to: IrDtype;
+  /** 入力スロットごとの要素型（bindings の `array<T>` に埋まる）。 */
+  readonly slots: readonly IrDtype[];
+  /** params 末尾に載る f32 スカラの本数。 */
+  readonly scalars: number;
+} & (
+  | { readonly kind: "unary"; readonly op: UnaryOpName; readonly arity: 1 }
+  | { readonly kind: "binary"; readonly op: BinaryOpName; readonly arity: 2 }
+  | { readonly kind: "cast"; readonly op: typeof CAST_OP; readonly arity: 1 }
+  | { readonly kind: "where"; readonly op: typeof WHERE_OP; readonly arity: 3 }
+);
 
 const isUnary = (op: string): op is UnaryOpName => UNARY_OPS.some((name) => name === op);
 const isBinary = (op: string): op is BinaryOpName => BINARY_OPS.some((name) => name === op);
@@ -412,10 +410,7 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
 
   const loads: string[] = [];
   for (let k = 0; k < arity; k += 1) {
-    const terms = Array.from(
-      { length: rank },
-      (_, d) => `c${d} * params[${strideBase(k) + d}u]`,
-    );
+    const terms = Array.from({ length: rank }, (_, d) => `c${d} * params[${strideBase(k) + d}u]`);
     loads.push(`    let v${k} = in${k}[${terms.join(" + ")}];`);
   }
 
@@ -426,14 +421,15 @@ export const elementwiseWgsl = (spec: ElementwiseSpec): string => {
   );
   const scalarName = (index: number): string => `s${index}`;
 
-  const value = canonical.kind === "cast"
-    ? castWgsl("v0", from, to)
-    : canonical.kind === "unary"
-    ? UNARY_WGSL[canonical.op]("v0", scalarName)
-    : canonical.kind === "binary"
-    ? BINARY_WGSL[canonical.op]("v0", "v1")
-    // torch の where(cond, a, b) = cond ? a : b。WGSL の select(f, t, cond) は引数順が逆。
-    : `select(v2, v1, v0 != 0u)`;
+  const value =
+    canonical.kind === "cast"
+      ? castWgsl("v0", from, to)
+      : canonical.kind === "unary"
+        ? UNARY_WGSL[canonical.op]("v0", scalarName)
+        : canonical.kind === "binary"
+          ? BINARY_WGSL[canonical.op]("v0", "v1")
+          : // torch の where(cond, a, b) = cond ? a : b。WGSL の select(f, t, cond) は引数順が逆。
+            `select(v2, v1, v0 != 0u)`;
   const used = usedHelpers(value);
 
   return [

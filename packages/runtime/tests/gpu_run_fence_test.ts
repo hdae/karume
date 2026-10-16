@@ -50,11 +50,13 @@ const NO_OUTPUT = graph([]);
 const input = (phase: number): Tensor => ({
   dtype: "f32",
   shape: [ROWS, COLS],
-  data: Float32Array.from({ length: COUNT }, (_, i) => ((i + phase * 3) % 9 - 4) * 0.5),
+  data: Float32Array.from({ length: COUNT }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
 /** 参照値（ノードごとに f32 へ丸めながら手計算する — 実装とは独立）。 */
-const expected = (phase: number): {
+const expected = (
+  phase: number,
+): {
   readonly y: Float32Array<ArrayBuffer>;
   readonly s: Float32Array<ArrayBuffer>;
 } => {

@@ -23,10 +23,7 @@ const isPunctuationWord = (word: Sbv2Word, punctuations: ReadonlySet<string>): b
  * 語アライメントから DeBERTa 入力テキストを組む。記号要素は正規形句読点へ置き換え、
  * それ以外は surface をそのまま連結する。
  */
-export const toBertText = (
-  words: readonly Sbv2Word[],
-  punctuations: ReadonlySet<string>,
-): string =>
+export const toBertText = (words: readonly Sbv2Word[], punctuations: ReadonlySet<string>): string =>
   words
     .map((word) => (isPunctuationWord(word, punctuations) ? word.phones[0] : word.surface))
     .join("");

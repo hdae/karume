@@ -62,8 +62,8 @@ test("バケットの幾何は全て充填の整除条件を満たす（穴の�
     // 落ちる組み合わせは「充填が届かない語が 0 のまま内積へ入る」= 例外の出ない誤値
     assertGemmGeometry(geometry, `M=${rows}`);
     // 共有メモリは WebGPU 既定上限 16,384 B（sa = tileM·16 f32 + sb = 16·(tileN/4) vec4）
-    const shared = gemmTileM(geometry) * GEMM_TILE_K * 4 +
-      GEMM_TILE_K * (gemmTileN(geometry) / 4) * 16;
+    const shared =
+      gemmTileM(geometry) * GEMM_TILE_K * 4 + GEMM_TILE_K * (gemmTileN(geometry) / 4) * 16;
     assertEquals(shared <= 16384, true, `M=${rows}: 共有 ${shared} B`);
     // 小 M バケットは行タイル 4 枚（= 重みの読み直し 4 回）以内。掃引の結論は「読み直しを
     // 増やしてでも workgroup を増やす方が勝つ」だが、際限なく増えると転送律速へ戻る

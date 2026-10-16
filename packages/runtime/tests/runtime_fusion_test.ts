@@ -53,7 +53,7 @@ const fuse = (
 
 /** ステップ列の要約（rule 名、素のノードは op 名）。 */
 const outline = (steps: readonly ExecStep[]): readonly string[] =>
-  steps.map((step) => step.kind === "fused" ? `fused:${step.rule}` : step.plan.node.op);
+  steps.map((step) => (step.kind === "fused" ? `fused:${step.rule}` : step.plan.node.op));
 
 const fusedAt = (plan: FusionPlan, index: number) => {
   const step = plan.steps[index];
@@ -62,15 +62,18 @@ const fusedAt = (plan: FusionPlan, index: number) => {
 };
 
 test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
-  assertEquals(FUSION_RULES.map((rule) => rule.name), [
-    "linearStaticQuantize",
-    "rmsNormAdd",
-    "silu",
-    "upsample2x",
-    "rope",
-    "adaln",
-    "rowBlockAttention",
-  ]);
+  assertEquals(
+    FUSION_RULES.map((rule) => rule.name),
+    [
+      "linearStaticQuantize",
+      "rmsNormAdd",
+      "silu",
+      "upsample2x",
+      "rope",
+      "adaln",
+      "rowBlockAttention",
+    ],
+  );
   const seen = new Set<string>();
   for (const rule of FUSION_RULES) {
     for (const head of rule.heads) {
@@ -122,10 +125,10 @@ const siluGraph = (options: SiluOptions = {}): DeclarationJson => {
   const mulIns = options.gateWithOther
     ? [mulSigmoid, "z"]
     : options.order === "sigmoid-x"
-    ? [mulSigmoid, "x"]
-    : options.broadcast
-    ? ["x2", mulSigmoid]
-    : ["x", mulSigmoid];
+      ? [mulSigmoid, "x"]
+      : options.broadcast
+        ? ["x2", mulSigmoid]
+        : ["x", mulSigmoid];
   if (options.broadcast) inputs.push({ name: "x2", dtype: "f32", shape: [...shape] });
   nodes.push({ op: "mul", ins: mulIns, outs: ["y"], attrs: {} });
   if (options.extraConsumer) {
@@ -213,7 +216,7 @@ test("state を触るノードを含む窓はどのルールも掴まない（�
 
   for (const tainted of [0, 1]) {
     const nodes = plan.nodes.map((node, index) =>
-      index === tainted ? { ...node, node: { ...node.node, states: { k: "kv" } } } : node
+      index === tainted ? { ...node, node: { ...node.node, states: { k: "kv" } } } : node,
     );
     const fused = planFusions(nodes, context);
     assertEquals(fused.counts.silu, 0, `nodes[${tainted}] に states 欄があるのに掴んだ`);
@@ -344,14 +347,15 @@ const ropeGraph = (options: RopeOptions = {}): DeclarationJson => {
   const split = headDim / (options.nearSplit ? 4 : 2);
   const full = options.layout === "bshd" ? [batch, 5, heads, headDim] : [batch, heads, 5, headDim];
   const low = options.layout === "bshd" ? [batch, 5, heads, split] : [batch, heads, 5, split];
-  const high = options.layout === "bshd"
-    ? [batch, 5, heads, headDim - split]
-    : [batch, heads, 5, headDim - split];
+  const high =
+    options.layout === "bshd"
+      ? [batch, 5, heads, headDim - split]
+      : [batch, heads, 5, headDim - split];
   const table = options.nearTable
     ? full
     : options.layout === "bshd"
-    ? [1, 5, 1, headDim]
-    : [1, 1, 5, headDim];
+      ? [1, 5, 1, headDim]
+      : [1, 1, 5, headDim];
   const values: DeclarationJson["values"] = {
     first: { dtype: "f32", shape: low },
     second: { dtype: "f32", shape: high },
@@ -455,20 +459,18 @@ const ropeInputs = (options: RopeOptions = {}): Readonly<Record<string, readonly
   const table = options.nearTable
     ? full
     : options.layout === "bshd"
-    ? [1, 5, 1, headDim]
-    : [1, 1, 5, headDim];
+      ? [1, 5, 1, headDim]
+      : [1, 1, 5, headDim];
   return options.prefixSlicedSin
     ? { x: full, cos: table, bind: [5] }
     : { x: full, cos: table, sin: table };
 };
 
 test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin を 1 回ずつ消費する", () => {
-  for (
-    const [order, expectedIns] of [
-      ["slice-first", ["x", "x", "x", "cos", "sin"]],
-      ["direct-first", ["x", "cos", "x", "x", "sin"]],
-    ] as const
-  ) {
+  for (const [order, expectedIns] of [
+    ["slice-first", ["x", "x", "x", "cos", "sin"]],
+    ["direct-first", ["x", "cos", "x", "x", "sin"]],
+  ] as const) {
     const plan = fuse(ropeGraph({ order, heads: 4 }), ropeInputs({ heads: 4 }));
     assertEquals(outline(plan.steps), ["fused:rope"], order);
     const step = fusedAt(plan, 0);
@@ -560,19 +562,25 @@ const expandGraph = (outShape: readonly number[]): DeclarationJson => ({
 
 test("恒等 expand だけが 0 dispatch の別名になり、複製軸があれば実体化コピーへ戻る", () => {
   const identity = fuse(expandGraph([3, 1]), { x: [3, 1] });
-  assertEquals(identity.steps.map((step) => step.kind === "node" && step.aliasesInput), [
-    false, // neg
-    true, // 恒等 expand
-    true, // reshape は無条件に別名
-  ]);
+  assertEquals(
+    identity.steps.map((step) => step.kind === "node" && step.aliasesInput),
+    [
+      false, // neg
+      true, // 恒等 expand
+      true, // reshape は無条件に別名
+    ],
+  );
   assertEquals(identity.counts.identityExpand, 1);
 
   const replicated = fuse(expandGraph([3, 4]), { x: [3, 1] });
-  assertEquals(replicated.steps.map((step) => step.kind === "node" && step.aliasesInput), [
-    false,
-    false, // 1 軸でも複製があれば別名化しない
-    true,
-  ]);
+  assertEquals(
+    replicated.steps.map((step) => step.kind === "node" && step.aliasesInput),
+    [
+      false,
+      false, // 1 軸でも複製があれば別名化しない
+      true,
+    ],
+  );
   assertEquals(replicated.counts.identityExpand, 0);
 });
 
@@ -629,12 +637,14 @@ const adalnGraph = (options: AdalnOptions = {}): DeclarationJson => {
     ...(options.sharedAffine ? [] : [{ name: "ln_bias", dtype, shape: [DIM] }]),
     { name: "one", dtype, shape: options.wideOne ? [DIM] : [1] },
   ];
-  const nodes: DeclarationJson["nodes"] = [{
-    op: "layer_norm",
-    ins: ["x", "ln_weight", biasName],
-    outs: ["t"],
-    attrs: { normalized_shape: [DIM], eps: 0.000001 },
-  }];
+  const nodes: DeclarationJson["nodes"] = [
+    {
+      op: "layer_norm",
+      ins: ["x", "ln_weight", biasName],
+      outs: ["t"],
+      attrs: { normalized_shape: [DIM], eps: 0.000001 },
+    },
+  ];
   const extraOutputs: string[] = [];
 
   /** 変調ベクトル 1 本。`viaReshape` なら窓内 passthrough に、でなければ直接 graph input に。 */
@@ -1012,7 +1022,10 @@ test("行ブロック分割は上限に収まる最小枚数を等分で返し�
   // ちょうど上限（10 行 × 100B = 1000B）は 1 枚。
   assertEquals(planRowBlocks(10, 100, 1000), [{ offset: 0, rows: 10 }]);
   // 1 要素ぶん超えたら 2 枚（5 / 5）。
-  assertEquals(planRowBlocks(10, 100, 999), [{ offset: 0, rows: 5 }, { offset: 5, rows: 5 }]);
+  assertEquals(planRowBlocks(10, 100, 999), [
+    { offset: 0, rows: 5 },
+    { offset: 5, rows: 5 },
+  ]);
   // 端数は先頭から 1 行ずつ配る（3 枚 = 4 / 3 / 3）。
   assertEquals(planRowBlocks(10, 100, 400), [
     { offset: 0, rows: 4 },
@@ -1026,11 +1039,7 @@ test("行ブロック分割は上限に収まる最小枚数を等分で返し�
     { offset: 7, rows: 3 },
   ]);
   // 1 行でも収まらない形は fail loudly（黙って素の列へ落とすと確保が失敗するだけ）。
-  assertThrows(
-    () => planRowBlocks(10, 1001, 1000),
-    ExecutionError,
-    "クエリ 1 行ぶんの一時",
-  );
+  assertThrows(() => planRowBlocks(10, 1001, 1000), ExecutionError, "クエリ 1 行ぶんの一時");
   // 強制枚数が上限に収まらないのも fail loudly（緩める向きには使えない）。
   assertThrows(() => planRowBlocks(10, 100, 400, 2), ExecutionError, "2 枚では 1 枚 500B");
   // 行数より多い枚数・0 枚は取れない。
@@ -1048,33 +1057,36 @@ test("行ブロック attention の反例（隣接 / mask 形 / op 違い / 非�
     1,
     "正方形の土台が掴めていない（下の 2 反例が恒真になる）",
   );
-  const cases:
-    readonly (readonly [string, DeclarationJson, Readonly<Record<string, readonly number[]>>])[] = [
-      ["別名を 1 本挟む", attentionGraph(ATTENTION, { interpose: true }), attentionInputs()],
-      [
-        "mask が行ごと [1,1,M,N]",
-        attentionGraph(ATTENTION, { rowMask: true }),
-        attentionInputs(ATTENTION, { rowMask: true }),
-      ],
-      ["素の softmax", attentionGraph(ATTENTION, { plainSoftmax: true }), attentionInputs()],
-      [
-        "V 側 expand が複製軸を持つ",
-        attentionGraph(ATTENTION, { broadcastV: true }),
-        attentionInputs(ATTENTION, { broadcastV: true }),
-      ],
-      ["PV の入力順が逆", attentionGraph(square, { swapPv: true }), attentionInputs(square)],
-      [
-        "中間 S が graph output",
-        attentionGraph(ATTENTION, { scoresOutput: true }),
-        attentionInputs(),
-      ],
-      ["P に別 consumer", attentionGraph(ATTENTION, { extraConsumer: true }), attentionInputs()],
-      [
-        "q と kᵀ が同じ入力（bind 重複）",
-        attentionGraph(square, { sameQk: true }),
-        attentionInputs(square, { sameQk: true }),
-      ],
-    ];
+  const cases: readonly (readonly [
+    string,
+    DeclarationJson,
+    Readonly<Record<string, readonly number[]>>,
+  ])[] = [
+    ["別名を 1 本挟む", attentionGraph(ATTENTION, { interpose: true }), attentionInputs()],
+    [
+      "mask が行ごと [1,1,M,N]",
+      attentionGraph(ATTENTION, { rowMask: true }),
+      attentionInputs(ATTENTION, { rowMask: true }),
+    ],
+    ["素の softmax", attentionGraph(ATTENTION, { plainSoftmax: true }), attentionInputs()],
+    [
+      "V 側 expand が複製軸を持つ",
+      attentionGraph(ATTENTION, { broadcastV: true }),
+      attentionInputs(ATTENTION, { broadcastV: true }),
+    ],
+    ["PV の入力順が逆", attentionGraph(square, { swapPv: true }), attentionInputs(square)],
+    [
+      "中間 S が graph output",
+      attentionGraph(ATTENTION, { scoresOutput: true }),
+      attentionInputs(),
+    ],
+    ["P に別 consumer", attentionGraph(ATTENTION, { extraConsumer: true }), attentionInputs()],
+    [
+      "q と kᵀ が同じ入力（bind 重複）",
+      attentionGraph(square, { sameQk: true }),
+      attentionInputs(square, { sameQk: true }),
+    ],
+  ];
   for (const [label, graph, inputs] of cases) {
     const plan = fuse(graph, inputs);
     assertEquals(
@@ -1193,18 +1205,16 @@ test("BSHD RoPEは両発行順でhead数をuniformへ渡し、私有中間だけ
     assertEquals(step.nodeCount, 7);
     assertEquals(step.dispatches[0].key, ROPE_BSHD_KEY);
     assertEquals([...step.dispatches[0].params], [4 * 5 * 256, 4, 256, 128]);
-    for (
-      const negative of [
-        { interpose: true },
-        { internalOutput: true },
-        { extraConsumer: true },
-        { nearSplit: true },
-        { batch2: true },
-        { swappedAdd: true },
-        { nearTable: true },
-        { gapReshape: true },
-      ]
-    ) {
+    for (const negative of [
+      { interpose: true },
+      { internalOutput: true },
+      { extraConsumer: true },
+      { nearSplit: true },
+      { batch2: true },
+      { swappedAdd: true },
+      { nearTable: true },
+      { gapReshape: true },
+    ]) {
       const rejected = { ...options, ...negative };
       assertEquals(
         fuse(ropeGraph(rejected), ropeInputs(rejected)).counts.rope,

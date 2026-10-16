@@ -114,7 +114,9 @@ describe("ternary: Session 構築の入口（containerBatches）", () => {
     await assertRejects(
       async () => {
         for await (const batch of containerBatches(opened, GRAPH_NAME)) {
-          for await (const _item of batch.items) { /* 引くたびに block を読んで検査する */ }
+          for await (const _item of batch.items) {
+            /* 引くたびに block を読んで検査する */
+          }
         }
       },
       ContainerFormatError,

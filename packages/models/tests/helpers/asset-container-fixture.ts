@@ -21,7 +21,8 @@ export const parts = (key: string): Record<string, Uint8Array<ArrayBuffer>> =>
 
 /** 家族側の資産アクセサ（`assetBuffer`）と同じ姿の最小実装。 */
 const bufferOf =
-  (assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>) => (key: string): ArrayBuffer => {
+  (assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>) =>
+  (key: string): ArrayBuffer => {
     if (!Object.hasOwn(assets, key)) {
       throw new Error(
         `test: 資産 '${key}' が無い（揃っているキー: ${Object.keys(assets).join(" / ")}）`,

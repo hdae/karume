@@ -182,9 +182,9 @@ export const resizeRgb8 = (
   // 名前の綴り違いなので素の `Error`（ADR 0107 決定 3 — sampler 名と同じ扱い）。
   if (!Object.hasOwn(KERNELS, filter)) {
     throw new Error(
-      `resizeRgb8: 補間フィルタ ${JSON.stringify(filter)} は未対応（期待 ${
-        Object.keys(KERNELS).map((name) => `'${name}'`).join(" / ")
-      }）`,
+      `resizeRgb8: 補間フィルタ ${JSON.stringify(filter)} は未対応（期待 ${Object.keys(KERNELS)
+        .map((name) => `'${name}'`)
+        .join(" / ")}）`,
     );
   }
   const kernel = KERNELS[filter];
@@ -254,12 +254,12 @@ export const resizePlaneF32 = (
   width: number,
   height: number,
 ): Float32Array<ArrayBuffer> => {
-  for (
-    const [size, label] of [[sourceWidth, "入力幅"], [sourceHeight, "入力高さ"], [
-      width,
-      "出力幅",
-    ], [height, "出力高さ"]] as const
-  ) {
+  for (const [size, label] of [
+    [sourceWidth, "入力幅"],
+    [sourceHeight, "入力高さ"],
+    [width, "出力幅"],
+    [height, "出力高さ"],
+  ] as const) {
     if (!Number.isInteger(size) || size <= 0) {
       throw new RangeError(`${label} ${size} が正の整数でない`);
     }
@@ -326,8 +326,10 @@ export const normalizationOverflow = (
     const low = (0 - offset) / divisor;
     const high = (255 - offset) / divisor;
     if (!Number.isFinite(Math.fround(low)) || !Number.isFinite(Math.fround(high))) {
-      return `チャネル ${channel} の正規化後の値域 [${low}, ${high}] が f32 で有限に収まらない` +
-        `（mean ${mean[channel]} / std ${std[channel]}）`;
+      return (
+        `チャネル ${channel} の正規化後の値域 [${low}, ${high}] が f32 で有限に収まらない` +
+        `（mean ${mean[channel]} / std ${std[channel]}）`
+      );
     }
   }
   return undefined;

@@ -51,16 +51,14 @@ import { quantizeI8 } from "./helpers/i8.ts";
  * MUST: 絞ったときは `expectedBlocks` を渡して枚数を先に固定する（1 枚に落ちた形で緑になると
  * 「複数枚での一致」を見たことにならない）。
  */
-const assertPlanBackingMatchesEstimate = async (
-  variant: {
-    readonly capacity: number;
-    readonly window?: number;
-    readonly heads?: number;
-    readonly chunkLength?: number;
-    readonly limitCap?: number;
-    readonly expectedBlocks?: number;
-  },
-): Promise<void> => {
+const assertPlanBackingMatchesEstimate = async (variant: {
+  readonly capacity: number;
+  readonly window?: number;
+  readonly heads?: number;
+  readonly chunkLength?: number;
+  readonly limitCap?: number;
+  readonly expectedBlocks?: number;
+}): Promise<void> => {
   const heads = variant.heads ?? 4;
   const chunkLength = variant.chunkLength ?? 4;
   const gpu = await acquireGpu(
@@ -75,12 +73,15 @@ const assertPlanBackingMatchesEstimate = async (
     }
     if (variant.expectedBlocks !== undefined) {
       // 実行と見積りが共有する純関数そのもので枚数を固定する（前提の可視化）。
-      const blocks = planStateAttention({
-        batchHeads: heads,
-        chunkRows: chunkLength,
-        capacity: variant.capacity,
-        window: variant.window,
-      }, limit).blocks;
+      const blocks = planStateAttention(
+        {
+          batchHeads: heads,
+          chunkRows: chunkLength,
+          capacity: variant.capacity,
+          window: variant.window,
+        },
+        limit,
+      ).blocks;
       assertEquals(blocks.length, variant.expectedBlocks, "行ブロックの枚数");
     }
     const model = openGraph(stateAttentionGraph(variant.window, heads));
@@ -201,9 +202,10 @@ const DECOMPOSED = { heads: 2, queries: 64, keys: 64, headDim: 8 } as const;
  * MUST: 枚数は `expectedBlocks` で先に固定する（想定と違う枚数で緑になると、見たい形を見たことに
  * ならない）。
  */
-const assertRowBlockAttentionMatchesEstimate = async (
-  variant: { readonly limitCap?: number; readonly expectedBlocks: number },
-): Promise<void> => {
+const assertRowBlockAttentionMatchesEstimate = async (variant: {
+  readonly limitCap?: number;
+  readonly expectedBlocks: number;
+}): Promise<void> => {
   const { heads, queries, keys, headDim } = DECOMPOSED;
   const gpu = await acquireGpu(
     variant.limitCap === undefined
@@ -223,7 +225,10 @@ const assertRowBlockAttentionMatchesEstimate = async (
     );
     const model = openGraph(decomposedAttentionGraph(DECOMPOSED));
     const { scenarios } = model.estimate({ maxStorageBufferBindingSize: limit });
-    assertEquals(scenarios.map((scenario) => scenario.name), ["run"]);
+    assertEquals(
+      scenarios.map((scenario) => scenario.name),
+      ["run"],
+    );
     const session = await model.createContainerSession(gpu);
     try {
       // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
@@ -282,13 +287,11 @@ const FUSED = { b: 1, h: 4, m: 64, n: 64, d: 128 } as const;
  * MUST: 予算を掛けた形は枚数を先に固定する（`expectedBlocks` — 1 枚に落ちた形で緑になると「複数枚での
  * 一致」を見たことにならない）。枚数の観測は計測に依らない census（行窓の ①QK のキーの dispatch 本数）。
  */
-const assertFusedAttentionMatchesEstimate = async (
-  variant: {
-    readonly options: SessionOptions;
-    readonly mask?: boolean;
-    readonly expectedBlocks: number;
-  },
-): Promise<void> => {
+const assertFusedAttentionMatchesEstimate = async (variant: {
+  readonly options: SessionOptions;
+  readonly mask?: boolean;
+  readonly expectedBlocks: number;
+}): Promise<void> => {
   const { b, h, m, n, d } = FUSED;
   const shapes = [
     [b, h, m, d],
@@ -308,20 +311,23 @@ const assertFusedAttentionMatchesEstimate = async (
       maxBufferSize: gpu.limits.maxBufferSize,
       ...variant.options,
     });
-    assertEquals(scenarios.map((scenario) => scenario.name), ["run"]);
+    assertEquals(
+      scenarios.map((scenario) => scenario.name),
+      ["run"],
+    );
     const session = await model.createContainerSession(gpu, variant.options);
     try {
       const inputs = Object.fromEntries(
         shapes.map((shape, index) => [
           `x${index}`,
-          fill(shape, (i) => index === 3 ? ((i % 4 === 3) ? -1 : 0) : ((i % (5 + index)) - 2) / 4),
+          fill(shape, (i) => (index === 3 ? (i % 4 === 3 ? -1 : 0) : ((i % (5 + index)) - 2) / 4)),
         ]),
       );
       // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
       for (let step = 0; step < 2; step += 1) await session.run(inputs);
       const diagnostics = session.diagnostics();
-      const windowedQk = (diagnostics.lastRunPipelines ?? []).filter(({ key }) =>
-        key.startsWith("attention_qk") && key.includes(":rwa")
+      const windowedQk = (diagnostics.lastRunPipelines ?? []).filter(
+        ({ key }) => key.startsWith("attention_qk") && key.includes(":rwa"),
       );
       assertEquals(
         windowedQk.reduce((total, { dispatchCount }) => total + dispatchCount, 0),
@@ -344,8 +350,7 @@ test({
 });
 
 test({
-  name:
-    "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
+  name: "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
   ignore: !GPU_AVAILABLE,
   // S の 1 行 = 4 × 64 × 4 = 1,024B。予算 16 KiB は 16 行 / 枚 → M = 64 は 4 枚。
   fn: () =>
@@ -357,8 +362,7 @@ test({
 });
 
 test({
-  name:
-    "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
+  name: "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   // s16 の S の 1 行 = 4 × 64 × 2 = 512B。予算 16 KiB は 32 行 / 枚 → 2 枚。i8a8 の量子化の一時
   // （qq / qs / kq / ks / vt / vq / vs）と permute・量子化の 4 dispatch がループの外に並ぶ形。

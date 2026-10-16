@@ -67,12 +67,10 @@ const fixture = (m: number, n: number, k: number) => {
     tensors,
     input,
     reference: () =>
-      applyReferenceOp(
-        "linear",
-        [input, refTensor([n, k], weight), refTensor([n], bias)],
-        {},
-        [m, n],
-      ),
+      applyReferenceOp("linear", [input, refTensor([n, k], weight), refTensor([n], bias)], {}, [
+        m,
+        n,
+      ]),
   };
 };
 
@@ -107,12 +105,16 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [n, k] of [[64, 128], [100, 20], [36, 24], [68, 28], [4, 4], [32, 12], [36, 132], [
-          100,
-          260,
-        ]]
-      ) {
+      for (const [n, k] of [
+        [64, 128],
+        [100, 20],
+        [36, 24],
+        [68, 28],
+        [4, 4],
+        [32, 12],
+        [36, 132],
+        [100, 260],
+      ]) {
         const data = fixture(1, n, k);
         const actual = await run(gpu, data);
         // f32 の門は M=1 だけ。M=2 は同じ M16N16 GEMM 骨格で、族内比較にはならない。
@@ -136,18 +138,14 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const c of [
-          { m: 2, n: 36, k: 20 },
-          { m: 1, n: 36, k: 18 },
-          { m: 1, n: 35, k: 20 },
-        ] as const
-      ) {
+      for (const c of [
+        { m: 2, n: 36, k: 20 },
+        { m: 1, n: 36, k: 18 },
+        { m: 1, n: 35, k: 20 },
+      ] as const) {
         const data = fixture(c.m, c.n, c.k);
         const actual = await run(gpu, data);
-        assertEquals(actual.keys, [
-          linearKey("f32", c.k % 4 === 0 && c.n % 4 === 0, "f32", c.m),
-        ]);
+        assertEquals(actual.keys, [linearKey("f32", c.k % 4 === 0 && c.n % 4 === 0, "f32", c.m)]);
         const report = compareTensors(actual.output, data.reference(), GEMM_TOLERANCE);
         assert(report.pass, formatAllclose(report));
       }

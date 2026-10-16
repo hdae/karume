@@ -25,7 +25,14 @@
 // NOTE: 見るのは実重み e2e 11 本が共有する `outputs/series/` の 1 根だけ。配布形ミラー
 // （`models/`）は distribution_gate_test.ts の担当で、そちらの SKIP は本門番の射程外。
 
-import { isNotFound, makeTempDirSync, mkdirSync, removeSync, statSync, writeFileSync } from "@karume/test-support/fs";
+import {
+  isNotFound,
+  makeTempDirSync,
+  mkdirSync,
+  removeSync,
+  statSync,
+  writeFileSync,
+} from "@karume/test-support/fs";
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { describe, it, test } from "@karume/test-support/test";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
@@ -64,8 +71,8 @@ const representativeOf = (parent: URL, series: string, component: string): URL =
 const seriesAssetsPresent = (parent: URL): boolean =>
   Object.entries(SERIES_GRAPHS).some(([series, components]) =>
     Object.keys(components).some((component) =>
-      modelPresent(representativeOf(parent, series, component))
-    )
+      modelPresent(representativeOf(parent, series, component)),
+    ),
   );
 
 /** ディレクトリが在るか（不在は偽・それ以外の I/O 異常は伝播させる）。 */
@@ -144,11 +151,13 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
   };
 
   it("表に無い系列のディレクトリだけなら、容器が在っても資産無しと判定する", () => {
-    assertFalse(judge((parent) => {
-      const root = new URL("anima-f16/", parent);
-      mkdirSync(root);
-      writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
-    }));
+    assertFalse(
+      judge((parent) => {
+        const root = new URL("anima-f16/", parent);
+        mkdirSync(root);
+        writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
+      }),
+    );
   });
 
   it("表の系列のディレクトリが在っても、容器が無ければ資産無しと判定する", () => {
@@ -156,18 +165,22 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
   });
 
   it("表の系列に容器の part が在れば資産ありと判定する", () => {
-    assert(judge((parent) => {
-      const root = new URL("birefnet-hr-1024-f16/", parent);
-      mkdirSync(root);
-      writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
-    }));
+    assert(
+      judge((parent) => {
+        const root = new URL("birefnet-hr-1024-f16/", parent);
+        mkdirSync(root);
+        writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
+      }),
+    );
   });
 
   it("表の系列の部品ディレクトリに容器が在れば資産ありと判定する", () => {
-    assert(judge((parent) => {
-      const component = new URL("dacvae-32dim/decoder/", parent);
-      mkdirSync(component, { recursive: true });
-      writeFileSync(new URL("model-00001-of-00001.krm", component), new Uint8Array());
-    }));
+    assert(
+      judge((parent) => {
+        const component = new URL("dacvae-32dim/decoder/", parent);
+        mkdirSync(component, { recursive: true });
+        writeFileSync(new URL("model-00001-of-00001.krm", component), new Uint8Array());
+      }),
+    );
   });
 });

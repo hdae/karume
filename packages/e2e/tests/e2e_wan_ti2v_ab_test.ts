@@ -278,7 +278,8 @@ for (const { frames, band, optIn } of CASES) {
 {
   const id = `${WAN_TI2V_PRACTICAL_QUANT}-i2v-crop-${I2V_FRAMES}f`;
   test({
-    name: `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う` +
+    name:
+      `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う` +
       "（自機 A/B・条件画像 boxing-cats・opt-in KARUME_WAN_TI2V_I2V_FULL=1）",
     ignore: !RUNNABLE || !I2V_FULL || !I2V_FIXTURE_PRESENT,
     fn: async (t) => {
@@ -286,12 +287,12 @@ for (const { frames, band, optIn } of CASES) {
       const gpu = await acquireTestGpu();
       try {
         assertAdapterMatchesEnvironment(gpu);
-        await runWanAbCase(
-          t,
-          gpu,
-          subjectOf(i2vResults, { ...REQUEST, image, fit: "crop" }),
-          { id, frames: I2V_FRAMES, band: I2V_BAND, faults: false },
-        );
+        await runWanAbCase(t, gpu, subjectOf(i2vResults, { ...REQUEST, image, fit: "crop" }), {
+          id,
+          frames: I2V_FRAMES,
+          band: I2V_BAND,
+          faults: false,
+        });
       } finally {
         await settleReleases(gpu);
         gpu.destroy();

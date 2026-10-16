@@ -67,10 +67,7 @@ const crossOrigin = (repo: string, revision: string): OriginNaming => ({
   revisionSha: revision,
 });
 
-export const createFetchContext = (
-  loaded: LoadedManifest,
-  session: SourceOrigin,
-): FetchContext => {
+export const createFetchContext = (loaded: LoadedManifest, session: SourceOrigin): FetchContext => {
   const available: AvailableLabels = loaded.manifest.available;
   const originOf = (ref: FileRef): OriginNaming => {
     const cross = crossRefOf(ref);
@@ -115,10 +112,7 @@ export const createFetchContext = (
  * 名乗りは**世代解決前**のもの（{@link ../source.ts SourceDriver.origin} — HF なら要求した
  * ref まで含む）。世代の概念を持たない取得元はここで落ちようがないので、案内は可変 ref 向け。
  */
-export const revisionResolutionFailure = (
-  origin: SourceOrigin,
-  cause: unknown,
-): HubFetchError =>
+export const revisionResolutionFailure = (origin: SourceOrigin, cause: unknown): HubFetchError =>
   new HubFetchError(
     `世代の解決に失敗した（${origin.label}）。可変 ref はオフラインで` +
       `起動できない — revision に commit SHA を渡すと解決要求そのものが発生しない`,
@@ -126,11 +120,13 @@ export const revisionResolutionFailure = (
   );
 
 /** `karume.json` が上限バイト数を超えた。 */
-export const manifestOversize = (origin: SourceOrigin): SizeViolation => (actual) =>
-  new ManifestFormatError(
-    `manifest: ${MANIFEST_FILENAME} が上限 ${MAX_MANIFEST_BYTES} バイトを超えた` +
-      `（${actual} バイト — ${origin.label}）`,
-  );
+export const manifestOversize =
+  (origin: SourceOrigin): SizeViolation =>
+  (actual) =>
+    new ManifestFormatError(
+      `manifest: ${MANIFEST_FILENAME} が上限 ${MAX_MANIFEST_BYTES} バイトを超えた` +
+        `（${actual} バイト — ${origin.label}）`,
+    );
 
 /** `karume.json` そのものの取得に失敗した。 */
 export const manifestFetchFailure = (origin: SourceOrigin, cause: unknown): HubFetchError =>

@@ -62,10 +62,7 @@ const EMPTY_INDEX = 1;
 /** 取得も読みも起きる part（長さ 0 を除いた 2 本）。 */
 const NET_FETCHED = NET_PARTS.filter((_path, index) => index !== EMPTY_INDEX);
 
-const CROSS_PARTS = [
-  "shared/model-00001-of-00002.krm",
-  "shared/model-00002-of-00002.krm",
-];
+const CROSS_PARTS = ["shared/model-00001-of-00002.krm", "shared/model-00002-of-00002.krm"];
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
@@ -84,16 +81,18 @@ const containerFor = async (
   paths: readonly string[],
   options: { readonly emptyIndex?: number; readonly cross?: boolean } = {},
 ) => {
-  const parts = await Promise.all(paths.map(async (path, index) =>
-    index === options.emptyIndex
-      ? {
-        path,
-        size: 0,
-        sha256: EMPTY_SHA,
-        ...(options.cross === true ? { repo: FOREIGN_REPO, revision: FOREIGN_SHA } : {}),
-      }
-      : await partRef(path, options.cross === true)
-  ));
+  const parts = await Promise.all(
+    paths.map(async (path, index) =>
+      index === options.emptyIndex
+        ? {
+            path,
+            size: 0,
+            sha256: EMPTY_SHA,
+            ...(options.cross === true ? { repo: FOREIGN_REPO, revision: FOREIGN_SHA } : {}),
+          }
+        : await partRef(path, options.cross === true),
+    ),
+  );
   return {
     descriptor: {
       graph: {
@@ -164,10 +163,13 @@ const openRemote = async (
   files: Map<string, Uint8Array<ArrayBuffer>> = serveAll(),
 ): Promise<{ loaded: LoadedManifest; mock: MockFetch }> => {
   const loader = createMockFetch({ files });
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: loader.fetch,
-    caches,
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: loader.fetch,
+      caches,
+    },
+  );
   // manifest の取得を数えないよう、以降は記録の空な mock を渡す。
   return { loaded, mock: createMockFetch({ files }) };
 };
@@ -181,10 +183,14 @@ const warmParts = async (
   name: string,
   options: { readonly fetch: typeof globalThis.fetch; readonly caches: CacheStorage },
 ): Promise<void> => {
-  await prefetchAssets(loaded, containerOf(loaded, name).parts.filter((ref) => ref.size > 0), {
-    fetch: options.fetch,
-    caches: options.caches,
-  });
+  await prefetchAssets(
+    loaded,
+    containerOf(loaded, name).parts.filter((ref) => ref.size > 0),
+    {
+      fetch: options.fetch,
+      caches: options.caches,
+    },
+  );
 };
 
 /** ローカルディレクトリのセッション（越境先だけ差し替えられる）。 */
@@ -276,7 +282,12 @@ test("openContainerSource: scan 型の read は保持枠の part の器を写さ
   const middle = Math.floor(payload.byteLength / 2);
 
   const views: Uint8Array<ArrayBuffer>[] = [];
-  for (const [offset, length] of [[0, 4], [middle, 3], [payload.byteLength - 5, 5], [2, 0]]) {
+  for (const [offset, length] of [
+    [0, 4],
+    [middle, 3],
+    [payload.byteLength - 5, 5],
+    [2, 0],
+  ]) {
     const bytes = await source.read(2, offset, length);
     assertEquals(
       bytes,
@@ -332,7 +343,13 @@ test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fa
   });
   const size = source.partLength(2);
 
-  for (const [offset, length] of [[size - 1, 2], [size, 1], [-1, 2], [0, 1.5], [0, size + 1]]) {
+  for (const [offset, length] of [
+    [size - 1, 2],
+    [size, 1],
+    [-1, 2],
+    [0, 1.5],
+    [0, size + 1],
+  ]) {
     const error = await assertRejects(() => source.read(2, offset, length), Error);
     assert(error.message.includes(String(size)), `${error.message} が宣言 size を名乗っていない`);
   }
@@ -410,7 +427,11 @@ test("openContainerSource: scan 型は同じ part を何度読んでも全量読
   directory.reads.length = 0;
 
   const payload = payloadFor(NET_PARTS[2]);
-  for (const [offset, length] of [[0, 4], [4, 4], [8, 4]]) {
+  for (const [offset, length] of [
+    [0, 4],
+    [4, 4],
+    [8, 4],
+  ]) {
     assertEquals(
       await source.read(2, offset, length),
       new Uint8Array(payload.subarray(offset, offset + length)),
@@ -432,7 +453,11 @@ test("openContainerSource: scan 型は同じ part への並行 read も全量読
   directory.reads.length = 0;
 
   const payload = payloadFor(NET_PARTS[2]);
-  const ranges: readonly (readonly [number, number])[] = [[0, 4], [4, 4], [8, 4]];
+  const ranges: readonly (readonly [number, number])[] = [
+    [0, 4],
+    [4, 4],
+    [8, 4],
+  ];
   const bytes = await Promise.all(ranges.map(([offset, length]) => source.read(2, offset, length)));
 
   ranges.forEach(([offset, length], index) => {
@@ -450,15 +475,13 @@ test("openContainerSource: HF の scan 経路も 2 区間目で取得層を叩�
   await warmParts(loaded, "net", { fetch: mock.fetch, caches });
   const cache = hubCache(caches);
 
-  const matchesFor = async (
-    ranges: readonly (readonly [number, number])[],
-  ): Promise<number> => {
+  const matchesFor = async (ranges: readonly (readonly [number, number])[]): Promise<number> => {
     const source = openContainerSource(loaded, containerOf(loaded, "net"), {
       fetch: mock.fetch,
       caches,
     });
     let matches = 0;
-    cache.onMatch = () => matches += 1;
+    cache.onMatch = () => (matches += 1);
     try {
       for (const [offset, length] of ranges) await source.read(2, offset, length);
     } finally {
@@ -468,7 +491,11 @@ test("openContainerSource: HF の scan 経路も 2 区間目で取得層を叩�
   };
 
   const once = await matchesFor([[0, 4]]);
-  const thrice = await matchesFor([[0, 4], [4, 4], [8, 4]]);
+  const thrice = await matchesFor([
+    [0, 4],
+    [4, 4],
+    [8, 4],
+  ]);
   assertEquals(thrice, once, "同じ part の 2 区間目以降が取得層の読出しを起こしている");
 });
 
@@ -495,7 +522,10 @@ test("openContainerSource: seek 型は要求した区間だけをアダプター
   const payload = payloadFor(NET_PARTS[2]);
   assertEquals(await source.read(2, 4, 3), new Uint8Array(payload.subarray(4, 7)));
   assertEquals(await source.read(2, 0, 2), new Uint8Array(payload.subarray(0, 2)));
-  assertEquals(ranges, [[NET_PARTS[2], 4, 3], [NET_PARTS[2], 0, 2]]);
+  assertEquals(ranges, [
+    [NET_PARTS[2], 4, 3],
+    [NET_PARTS[2], 0, 2],
+  ]);
   assertEquals(base.reads, [], "区間読みが全量読みへ降りている");
 });
 
@@ -624,7 +654,7 @@ test("openContainerSource: 中断済みの signal では口を返さない", asy
       fetch: mock.fetch,
       caches,
       signal: controller.signal,
-    })
+    }),
   );
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
   assertEquals(mock.calls, [], "中断済みなのに network へ出ている");

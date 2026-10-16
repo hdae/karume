@@ -66,25 +66,24 @@ describe("states attention の行統計/PV融合", () => {
     name: "ring・GQA・端数D・pad・行分割でparallelと同じ値を返す",
     ignore: !GPU_AVAILABLE,
     fn: async () => {
-      const gpu = await acquireGpu(), cache = new Map<string, GPUComputePipeline>();
+      const gpu = await acquireGpu(),
+        cache = new Map<string, GPUComputePipeline>();
       let maxAbs = 0;
       try {
         for (const depth of [1, 17, 256, 512]) {
-          for (
-            const [chunkRows, query, window, past] of [
-              [1, 1, 0, 0],
-              [4, 4, 0, 31],
-              [8, 1, 0, 95],
-              [8, 4, 1, 4095],
-              [4, 1, 31, 4095],
-              [8, 8, 127, 0xfffffff0],
-              // live 701（= past + query）で行統計の 256 レーン grid-stride が 3 周回る形。
-              // 他の 6 形は live ≤ 134 なので 1 周で終わり、多周回の加算順が ② と一致する
-              // ことを実機で見る線が無い（colCap 717 ≤ 1024 で適用条件は満たす）。
-              // 実行時間が depth ループ 4 本に掛かるので、長い列はこの 1 形だけにする。
-              [1, 1, 0, 700],
-            ]
-          ) {
+          for (const [chunkRows, query, window, past] of [
+            [1, 1, 0, 0],
+            [4, 4, 0, 31],
+            [8, 1, 0, 95],
+            [8, 4, 1, 4095],
+            [4, 1, 31, 4095],
+            [8, 8, 127, 0xfffffff0],
+            // live 701（= past + query）で行統計の 256 レーン grid-stride が 3 周回る形。
+            // 他の 6 形は live ≤ 134 なので 1 周で終わり、多周回の加算順が ② と一致する
+            // ことを実機で見る線が無い（colCap 717 ≤ 1024 で適用条件は満たす）。
+            // 実行時間が depth ループ 4 本に掛かるので、長い列はこの 1 形だけにする。
+            [1, 1, 0, 700],
+          ]) {
             const spec: StateCase = {
               name: "fused",
               batch: 2,
@@ -131,7 +130,8 @@ describe("states attention の行統計/PV融合", () => {
     name: "NaN/Infの分類とpadの厳密0を維持する",
     ignore: !GPU_AVAILABLE,
     fn: async () => {
-      const gpu = await acquireGpu(), cache = new Map<string, GPUComputePipeline>();
+      const gpu = await acquireGpu(),
+        cache = new Map<string, GPUComputePipeline>();
       try {
         const spec: StateCase = {
           name: "special",
@@ -159,7 +159,8 @@ describe("states attention の行統計/PV融合", () => {
             pvReduce: "parallel",
             statsPvFusion: true,
           });
-          const a = new Uint32Array(after.out.buffer), b = new Uint32Array(before.out.buffer);
+          const a = new Uint32Array(after.out.buffer),
+            b = new Uint32Array(before.out.buffer);
           for (let i = 0; i < a.length; i++) {
             if (Number.isNaN(before.out[i])) assert(Number.isNaN(after.out[i]));
             else assertEquals(a[i], b[i]);

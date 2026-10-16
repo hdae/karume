@@ -150,10 +150,7 @@ const runDegenerate = async (gpu: GpuContext, testCase: DegenerateCase): Promise
     await scheduler.flush();
 
     const actual = await readback(gpu.device, dst, count, testCase.expected.dtype);
-    const report = compareTensors(
-      refTensor(testCase.expected.shape, actual),
-      testCase.expected,
-    );
+    const report = compareTensors(refTensor(testCase.expected.shape, actual), testCase.expected);
     assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
   } finally {
     await arena.destroy();

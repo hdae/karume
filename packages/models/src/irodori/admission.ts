@@ -177,10 +177,7 @@ const DIT_STEP_INPUTS = ["x_t", "t_embed", "mask"] as const;
  * 形や dtype が食い違っていてもバイト数さえ合えば、別の並びとして読まれた K / V で沈黙のまま
  * 回る。名前の食い違いは実行時にも落ちるが、GB 級の重みを落とした**後**になる。
  */
-const admitDitContext = (
-  dit: GraphOwner,
-  ditContext: GraphOwner,
-): readonly DitContextOutput[] => {
+const admitDitContext = (dit: GraphOwner, ditContext: GraphOwner): readonly DitContextOutput[] => {
   const symbols = ditContext.graph.symbols;
   if (symbols.length !== 0) {
     throw new Error(
@@ -212,7 +209,8 @@ const admitDitContext = (
     const input = ditInputs.get(name);
     if (input === undefined) throw new Error(`irodori: dit の入力 '${name}' が無い`);
     const dims = value.shape.filter((dim): dim is number => typeof dim === "number");
-    const sameShape = value.shape.length === input.shape.length &&
+    const sameShape =
+      value.shape.length === input.shape.length &&
       value.shape.every((dim, axis) => dim === input.shape[axis]);
     if (dims.length !== value.shape.length || value.dtype !== input.dtype || !sameShape) {
       const produced = `${value.dtype} [${value.shape.join(", ")}]`;
@@ -418,11 +416,7 @@ export const admitIrodori = async (
   // 違って `acquireGpu` を待つ理由が無く、重みを落とす前に判る唯一の家族門（要求と検査の
   // 写像は `session/gpu-features.ts` の 1 本で、後段の検査も同じ関数を呼ぶ）。
   if (options.gpu !== undefined) {
-    assertGpuFeaturesGranted(
-      gpuFeatures,
-      options.gpu,
-      `IrodoriPipeline: quant '${quantName}'`,
-    );
+    assertGpuFeaturesGranted(gpuFeatures, options.gpu, `IrodoriPipeline: quant '${quantName}'`);
     assertRequiredLimitsSatisfied(
       quant.requiredLimits,
       options.gpu.limits,

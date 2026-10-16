@@ -65,41 +65,41 @@ export type WeightResidency =
   | { readonly seat: "raw"; readonly payloadBytes: number }
   | { readonly seat: "f16"; readonly payloadBytes: number }
   | {
-    readonly seat: "i8" | "i2";
-    readonly payloadBytes: number;
-    readonly scaleBytes: number;
-    /** 行（per-channel scale が掛かる）の軸 — 宣言 `storage.rowAxis`（消費側 op の軸と一致することは検査済み）。 */
-    readonly rowAxis: 0 | 1;
-  }
+      readonly seat: "i8" | "i2";
+      readonly payloadBytes: number;
+      readonly scaleBytes: number;
+      /** 行（per-channel scale が掛かる）の軸 — 宣言 `storage.rowAxis`（消費側 op の軸と一致することは検査済み）。 */
+      readonly rowAxis: 0 | 1;
+    }
   | {
-    readonly seat: "i4";
-    readonly payloadBytes: number;
-    readonly scaleBytes: number;
-    readonly groupSize: number;
-  }
+      readonly seat: "i4";
+      readonly payloadBytes: number;
+      readonly scaleBytes: number;
+      readonly groupSize: number;
+    }
   | {
-    readonly seat: "expanded";
-    readonly payloadBytes: number;
-    /** CPU で f32 へ展開した後のバイト数（常駐するのはこちら）。 */
-    readonly expandedBytes: number;
-  }
+      readonly seat: "expanded";
+      readonly payloadBytes: number;
+      /** CPU で f32 へ展開した後のバイト数（常駐するのはこちら）。 */
+      readonly expandedBytes: number;
+    }
   | {
-    /**
-     * **借り物の重み**（ADR 0096 段 2 §1.3 の共有 initializer）。この Session は 1 バイトも
-     * 確保・転送せず、実体は貸し手 Session の GPU バッファをそのまま束ねる
-     * （`SessionOptions.sharedWeights`）。
-     */
-    readonly seat: "shared";
-    /**
-     * 借り手側の消費（適格判定）。借り手は格納を宣言しない（正本は貸し手の常駐重み）ので、
-     * 期待する席は貸し手の codec が分かる構築時に {@link resolveSharedWeights} が導く。
-     */
-    readonly eligible: boolean;
-    readonly i4Eligible: boolean;
-    readonly i2Eligible: boolean;
-    /** 消費側 op から決まる per-channel scale の軸（重みスロットで消費されないときは無い）。 */
-    readonly consumerAxis?: 0 | 1;
-  };
+      /**
+       * **借り物の重み**（ADR 0096 段 2 §1.3 の共有 initializer）。この Session は 1 バイトも
+       * 確保・転送せず、実体は貸し手 Session の GPU バッファをそのまま束ねる
+       * （`SessionOptions.sharedWeights`）。
+       */
+      readonly seat: "shared";
+      /**
+       * 借り手側の消費（適格判定）。借り手は格納を宣言しない（正本は貸し手の常駐重み）ので、
+       * 期待する席は貸し手の codec が分かる構築時に {@link resolveSharedWeights} が導く。
+       */
+      readonly eligible: boolean;
+      readonly i4Eligible: boolean;
+      readonly i2Eligible: boolean;
+      /** 消費側 op から決まる per-channel scale の軸（重みスロットで消費されないときは無い）。 */
+      readonly consumerAxis?: 0 | 1;
+    };
 
 /**
  * グラフだけから initializer ごとの常駐分類を決める（GPU も safetensors も要らない純関数）。
@@ -154,11 +154,12 @@ export const planWeightResidency = (graph: IrGraph): ReadonlyMap<string, WeightR
       plan.set(name, { seat: "raw", payloadBytes: bytes });
       continue;
     }
-    const resident = layout === "i4"
-      ? eligible.has(name) && i4Eligible.has(name)
-      : layout === "i2"
-      ? eligible.has(name) && i2Eligible.has(name)
-      : eligible.has(name);
+    const resident =
+      layout === "i4"
+        ? eligible.has(name) && i4Eligible.has(name)
+        : layout === "i2"
+          ? eligible.has(name) && i2Eligible.has(name)
+          : eligible.has(name);
     if (!resident) {
       plan.set(name, { seat: "expanded", payloadBytes: bytes, expandedBytes: count * 4 });
       continue;
@@ -212,11 +213,12 @@ const expectedSharedSeat = (
 ): Exclude<WeightResidency["seat"], "shared"> => {
   const layout = codecLayout(codec);
   if (layout === "f32" || layout === "i32" || layout === "bf16") return "raw";
-  const resident = layout === "i4"
-    ? seat.eligible && seat.i4Eligible
-    : layout === "i2"
-    ? seat.eligible && seat.i2Eligible
-    : seat.eligible;
+  const resident =
+    layout === "i4"
+      ? seat.eligible && seat.i4Eligible
+      : layout === "i2"
+        ? seat.eligible && seat.i2Eligible
+        : seat.eligible;
   return resident ? layout : "expanded";
 };
 
@@ -309,9 +311,9 @@ export const resolveSharedWeights = (
   const surplus = given.filter((name) => !declared.includes(name));
   if (missing.length > 0 || surplus.length > 0) {
     throw new ExecutionError(
-      `options.sharedWeights がグラフの shared 宣言と一致しない: 不足 [${
-        missing.join(", ")
-      }] / 余剰 [${surplus.join(", ")}]` +
+      `options.sharedWeights がグラフの shared 宣言と一致しない: 不足 [${missing.join(
+        ", ",
+      )}] / 余剰 [${surplus.join(", ")}]` +
         "（shared 宣言 1 本につき 1 つ・過不足なく渡す MUST — ADR 0096 段 2 §2.2）",
     );
   }
@@ -350,9 +352,8 @@ export const resolveSharedWeights = (
     // 借り手は格納を宣言しない — 貸し手の codec と借り手側の消費から期待席を導き、貸し手の
     // 実際の席（と i8 / i2 の行の軸）と突き合わせる。
     const expected = expectedSharedSeat(shared.codec, seat);
-    const expectedAxis = expected === "i8" || expected === "i2"
-      ? seat.consumerAxis ?? 0
-      : undefined;
+    const expectedAxis =
+      expected === "i8" || expected === "i2" ? (seat.consumerAxis ?? 0) : undefined;
     if (expected !== shared.seat || expectedAxis !== shared.rowAxis) {
       throw new ExecutionError(
         `${where}: 消費席が貸し手と互換でない（借り手は席 '${expected}'${
@@ -442,8 +443,8 @@ const bufferLabel = (buffer: WeightBuffer): string =>
   buffer.kind === "scale"
     ? "scale"
     : buffer.seat === "expanded"
-    ? "payload（f32 展開後）"
-    : "payload";
+      ? "payload（f32 展開後）"
+      : "payload";
 
 /**
  * 重み 1 本ずつの確保寸法を device の絶対上限と突き合わせ、超過があれば**確保の前に**落とす。

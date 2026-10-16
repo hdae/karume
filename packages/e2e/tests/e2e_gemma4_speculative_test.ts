@@ -62,21 +62,33 @@ import {
   type StateAttentionReduce,
   type Tensor,
 } from "@karume/runtime";
-import { Gemma4Pipeline, type GenerationRunPhase, type GenerationStop } from "../../models/gemma.ts";
+import {
+  Gemma4Pipeline,
+  type GenerationRunPhase,
+  type GenerationStop,
+} from "../../models/gemma.ts";
 import { parseGemma4PipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
 import { gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
 import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
 import type { SamplerSpec } from "../../models/src/generation/sampler.ts";
-import { mirrorAvailable, openGemma4Ple, openMirrorComponent } from "../../models/tests/helpers/gemma-mirror.ts";
+import {
+  mirrorAvailable,
+  openGemma4Ple,
+  openMirrorComponent,
+} from "../../models/tests/helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
-import { allResidentBytes, allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
+import {
+  allResidentBytes,
+  allResidentPleBytesOfMirror,
+} from "../../models/tests/helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド（段 2 の門と同文）。 */
-const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
+const ASSEMBLE_COMMAND =
+  "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
   "（drafter 系列と golden は … python -m gemma4.export_drafter）";
 
 /** golden のケース（正本は `export_drafter.py` の GOLDEN_CASES）。 */
@@ -330,11 +342,7 @@ test({
           // 投機の唯一の契約（速くなるだけで列は変わらない）。
           assertEquals(speculative.ids, plain.ids, `${name}: 投機 / 非投機の token id 列`);
           assertEquals(speculative.positions, plain.positions, `${name}: 絶対位置列`);
-          assertEquals(
-            speculative.stop.reason,
-            plain.stop.reason,
-            `${name}: 停止理由`,
-          );
+          assertEquals(speculative.stop.reason, plain.stop.reason, `${name}: 停止理由`);
           assertEquals(speculative.stop.tokens, plain.stop.tokens, `${name}: 生成 token 数`);
           // 非投機の sequence は勘定の欄ごと持たない（欄が生えていたら投機経路を通っている）。
           assertEquals(plain.stop.speculation, undefined, `${name}: 非投機ターンの speculation 欄`);
@@ -346,9 +354,9 @@ test({
           console.log(
             `[e2e] gemma4 投機① ${name}: T=${golden.prompt.length} / ${speculative.ids.length} ` +
               `token / ${speculation.cycles} cycle / 受理 ${speculation.accepted}/` +
-              `${speculation.drafted} / ${perCycle.toFixed(3)} token/cycle / 分布 [${
-                speculation.acceptedHistogram.join(",")
-              }] / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ${plain.ms.toFixed(0)}ms / ` +
+              `${speculation.drafted} / ${perCycle.toFixed(3)} token/cycle / 分布 [${speculation.acceptedHistogram.join(
+                ",",
+              )}] / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ${plain.ms.toFixed(0)}ms / ` +
               `torch 継続列との先頭一致 ${goldenPrefix}`,
           );
 
@@ -364,9 +372,9 @@ test({
             assert(
               perCycle >= floor,
               `${name}: 受理率 ${perCycle.toFixed(3)} token/cycle が床 ${floor.toFixed(2)} に` +
-                `満たない（受理 ${speculation.accepted} / ${speculation.cycles} cycle・分布 [${
-                  speculation.acceptedHistogram.join(",")
-                }]）`,
+                `満たない（受理 ${speculation.accepted} / ${speculation.cycles} cycle・分布 [${speculation.acceptedHistogram.join(
+                  ",",
+                )}]）`,
             );
           }
         });
@@ -417,9 +425,11 @@ test({
           assert(speculation !== undefined && speculation.cycles >= 1, "投機が張られていない");
           console.log(
             `[e2e] gemma4 投機① readme-recipes（温度 ${sampler.temperature}・topK ${sampler.topK}・` +
-              `topP ${sampler.topP}）: ${plain.ids.length} token / ${speculation.cycles} cycle / ${
-                tokensPerCycle(speculative.stop).toFixed(3)
-              } token/cycle / 温度 0 との先頭一致 ${commonPrefix(plain.ids, greedy.ids)}`,
+              `topP ${sampler.topP}）: ${plain.ids.length} token / ${speculation.cycles} cycle / ${tokensPerCycle(
+                speculative.stop,
+              ).toFixed(
+                3,
+              )} token/cycle / 温度 0 との先頭一致 ${commonPrefix(plain.ids, greedy.ids)}`,
           );
         },
       );
@@ -506,49 +516,46 @@ test({
     );
     const k = GEMMA4_DRAFT_STEPS;
     try {
-      await t.step(
-        "② 既定席（i4-fast）で投機 / 非投機の token 列が一致する",
-        async () => {
-          for (const name of CASES) {
-            const golden = await readGoldenCase(name);
-            const capacity = capacityFor(pipeline, golden.prompt.length);
-            const speculative = await runTurn(pipeline, golden.prompt, {
-              speculative: "always",
-              capacity,
-              tokens: MAX_NEW_TOKENS,
-            });
-            const plain = await runTurn(pipeline, golden.prompt, {
-              speculative: false,
-              capacity,
-              tokens: MAX_NEW_TOKENS,
-            });
-            // 既定席でも M=1（decode）と M=4（verify）はビット同一（⑤の門）なので、列の一致を
-            // ①と同じく門にする — 自己採算ゲートの壁時計の選択が出力を変えない前提がこれである。
-            assertEquals(speculative.ids.length, MAX_NEW_TOKENS, `${name}: 投機側の token 数`);
-            assertEquals(plain.ids.length, MAX_NEW_TOKENS, `${name}: 非投機側の token 数`);
-            const first = commonPrefix(speculative.ids, plain.ids);
-            let diverged = 0;
-            for (let index = 0; index < MAX_NEW_TOKENS; index += 1) {
-              if (speculative.ids[index] !== plain.ids[index]) diverged += 1;
-            }
-            console.log(
-              `[e2e] gemma4 投機② ${name}: 相違 ${diverged}/${MAX_NEW_TOKENS} 個・最初の不一致 ` +
-                `${first === MAX_NEW_TOKENS ? "無し" : `@${first}`} / ${
-                  tokensPerCycle(speculative.stop).toFixed(3)
-                } token/cycle / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ` +
-                `${plain.ms.toFixed(0)}ms`,
-            );
-            // MUST: ログを門より先に出す（割れた機でも相違の位置と個数が記録に残るように）。
-            assertEquals(
-              diverged,
-              0,
-              `${name}: 既定席で投機 / 非投機の token 列が ${diverged}/${MAX_NEW_TOKENS} 個違う` +
-                `（最初 @${first}）— この機では M=1 と M=4 がビット同一でない`,
-            );
-            assertEquals(first, MAX_NEW_TOKENS, `${name}: 投機 / 非投機の共通接頭辞`);
+      await t.step("② 既定席（i4-fast）で投機 / 非投機の token 列が一致する", async () => {
+        for (const name of CASES) {
+          const golden = await readGoldenCase(name);
+          const capacity = capacityFor(pipeline, golden.prompt.length);
+          const speculative = await runTurn(pipeline, golden.prompt, {
+            speculative: "always",
+            capacity,
+            tokens: MAX_NEW_TOKENS,
+          });
+          const plain = await runTurn(pipeline, golden.prompt, {
+            speculative: false,
+            capacity,
+            tokens: MAX_NEW_TOKENS,
+          });
+          // 既定席でも M=1（decode）と M=4（verify）はビット同一（⑤の門）なので、列の一致を
+          // ①と同じく門にする — 自己採算ゲートの壁時計の選択が出力を変えない前提がこれである。
+          assertEquals(speculative.ids.length, MAX_NEW_TOKENS, `${name}: 投機側の token 数`);
+          assertEquals(plain.ids.length, MAX_NEW_TOKENS, `${name}: 非投機側の token 数`);
+          const first = commonPrefix(speculative.ids, plain.ids);
+          let diverged = 0;
+          for (let index = 0; index < MAX_NEW_TOKENS; index += 1) {
+            if (speculative.ids[index] !== plain.ids[index]) diverged += 1;
           }
-        },
-      );
+          console.log(
+            `[e2e] gemma4 投機② ${name}: 相違 ${diverged}/${MAX_NEW_TOKENS} 個・最初の不一致 ` +
+              `${first === MAX_NEW_TOKENS ? "無し" : `@${first}`} / ${tokensPerCycle(
+                speculative.stop,
+              ).toFixed(3)} token/cycle / 投機 ${speculative.ms.toFixed(0)}ms vs 非投機 ` +
+              `${plain.ms.toFixed(0)}ms`,
+          );
+          // MUST: ログを門より先に出す（割れた機でも相違の位置と個数が記録に残るように）。
+          assertEquals(
+            diverged,
+            0,
+            `${name}: 既定席で投機 / 非投機の token 列が ${diverged}/${MAX_NEW_TOKENS} 個違う` +
+              `（最初 @${first}）— この機では M=1 と M=4 がビット同一でない`,
+          );
+          assertEquals(first, MAX_NEW_TOKENS, `${name}: 投機 / 非投機の共通接頭辞`);
+        }
+      });
 
       await t.step(
         "② 既定席の自己採算ゲート付き（speculative: true）: always と同じ列を出す",
@@ -618,7 +625,7 @@ test({
         );
         // cycle は 1 始まりの連番（同じ cycle の draft と verify が同じ番号を名乗る）。
         assertEquals(
-          verifies.map((record) => record.phase.kind === "verify" ? record.phase.cycle : -1),
+          verifies.map((record) => (record.phase.kind === "verify" ? record.phase.cycle : -1)),
           Array.from({ length: speculation.cycles }, (_unused, index) => index + 1),
           "verify の cycle 番号",
         );
@@ -643,14 +650,14 @@ test({
         // (context, backing) の組が変わったときだけで、同じ物理行数の verify が続く区間では
         // 1 度も増えない。
         const rowsSeries = verifies.map((record) =>
-          record.phase.kind === "verify" ? record.phase.rows : -1
+          record.phase.kind === "verify" ? record.phase.rows : -1,
         );
         // MUST: 縛るのは「**M=k+1 の verify が続く区間**で焼き直さない」である。予算末尾の
         // `k' = 0` の cycle だけは decode 形（M=1）の run になり、その物理行数がこの context で
         // 初出なら bind group が 1 度だけ焼き直される — 末尾が `k'=0` に着地するかは受理列
         // （GPU / driver 依存）で決まるので、混ぜると環境差で割れる門になる。
-        const bucketed = verifies.filter((record) =>
-          record.phase.kind === "verify" && record.phase.rows > 1
+        const bucketed = verifies.filter(
+          (record) => record.phase.kind === "verify" && record.phase.rows > 1,
         );
         const rebinds = bucketed.map((record) => record.rebindCount);
         // 実測（2026-09-08）では prefill 形 → verify 形の切替ぶん 1 回だけが 2 本目の verify までに
@@ -664,22 +671,22 @@ test({
         assertEquals(
           settled.size,
           1,
-          `2 本目以降の verify で rebindCount が動いた（cycle 数に比例して焼き直している）: [${
-            rebinds.join(",")
-          }]`,
+          `2 本目以降の verify で rebindCount が動いた（cycle 数に比例して焼き直している）: [${rebinds.join(
+            ",",
+          )}]`,
         );
         assert(
           rebinds[1] - rebinds[0] <= 1,
-          `verify 形へ落ち着くまでの焼き直しが ${rebinds[1] - rebinds[0]} 回ある: [${
-            rebinds.join(",")
-          }]`,
+          `verify 形へ落ち着くまでの焼き直しが ${rebinds[1] - rebinds[0]} 回ある: [${rebinds.join(
+            ",",
+          )}]`,
         );
         console.log(
           `[e2e] gemma4 投機③: prefill ${prefills.length} + draft ${drafts.length} + verify ` +
             `${verifies.length} 通（うち M=k+1 が ${bucketed.length} 本）/ 配送 ` +
-            `${turn.stop.tokens} token / verify の行数 [${rowsSeries.join(",")}] / rebind [${
-              rebinds.join(",")
-            }]`,
+            `${turn.stop.tokens} token / verify の行数 [${rowsSeries.join(",")}] / rebind [${rebinds.join(
+              ",",
+            )}]`,
         );
       });
 
@@ -738,7 +745,8 @@ test({
         assertEquals(
           verify.ioBytes - decode.ioBytes,
           // 入力: 行が k 本増える（token / PLE / RoPE）+ 行選択 `last_row` が k 要素増える。
-          k * perRowInputBytes + k * 4 +
+          k * perRowInputBytes +
+            k * 4 +
             // 出力: 選んだ行の logits と hidden を k 行ぶん余計に readback する。
             k * (VOCAB + HIDDEN) * 4,
           `verify（${rows} 行）と decode（1 行）の ioBytes 差`,
@@ -867,35 +875,53 @@ test({
           chunkBuckets: [VERIFY_ROWS],
         });
         try {
-          await run(session, logitsName, context, {
-            rows: CHUNK_LENGTH,
-            ids: prompt,
-            position: 0,
-            lastRow: [prompt.length - 1],
-            commit: "immediate",
-          }, "prefill");
+          await run(
+            session,
+            logitsName,
+            context,
+            {
+              rows: CHUNK_LENGTH,
+              ids: prompt,
+              position: 0,
+              lastRow: [prompt.length - 1],
+              commit: "immediate",
+            },
+            "prefill",
+          );
           assertEquals(context.pastLength, prompt.length, "prefill 後の論理長");
           // frontier `b` と、その後ろに置く draft 3 本（値は任意 — 見るのは行 0 だけで、
           // 後続行は「同じ run に居る」ことだけが効く）。golden の継続列から採る。
           const frontier = golden.continuation[0];
           const drafts = golden.continuation.slice(1, 1 + GEMMA4_DRAFT_STEPS);
-          const deferred = await run(session, logitsName, context, {
-            rows: VERIFY_ROWS,
-            ids: [frontier, ...drafts],
-            position: prompt.length,
-            lastRow: Array.from({ length: VERIFY_ROWS }, (_unused, row) => row),
-            commit: "deferred",
-          }, "verify");
+          const deferred = await run(
+            session,
+            logitsName,
+            context,
+            {
+              rows: VERIFY_ROWS,
+              ids: [frontier, ...drafts],
+              position: prompt.length,
+              lastRow: Array.from({ length: VERIFY_ROWS }, (_unused, row) => row),
+              commit: "deferred",
+            },
+            "verify",
+          );
           // 1 行も受理しない（= 全棄却の cycle）。論理長は prefill 直後のまま。
           context.commit(0);
           assertEquals(context.pastLength, prompt.length, "commit(0) 後の論理長");
-          const immediate = await run(session, logitsName, context, {
-            rows: 1,
-            ids: [frontier],
-            position: prompt.length,
-            lastRow: [0],
-            commit: "immediate",
-          }, "decode");
+          const immediate = await run(
+            session,
+            logitsName,
+            context,
+            {
+              rows: 1,
+              ids: [frontier],
+              position: prompt.length,
+              lastRow: [0],
+              commit: "immediate",
+            },
+            "decode",
+          );
           assertEquals(session.diagnostics().lastRunFusions?.rmsNormAdd, fuseRmsNormAdd ? 106 : 0);
           return {
             // 行 0 だけを写す（`deferred` の実体は 4 行ぶん）。
@@ -966,9 +992,9 @@ test({
                 // MUST: ログを門より先に出す（割れた機でも相違の規模が記録に残るように）。
                 console.log(
                   `[e2e] gemma4 投機⑤ ${attention}/${gemv}/fuse=${fuse}: u32 相違 ${mismatches}/${VOCAB} 語` +
-                    `（最初 @${firstIndex}）/ 最大絶対差 ${maxAbsDiff} / ${
-                      (performance.now() - started).toFixed(0)
-                    }ms`,
+                    `（最初 @${firstIndex}）/ 最大絶対差 ${maxAbsDiff} / ${(
+                      performance.now() - started
+                    ).toFixed(0)}ms`,
                 );
                 assertEquals(mismatches, 0);
                 assertEquals(left, right);

@@ -68,15 +68,15 @@ export type MemoryPiece = {
  */
 export type MemoryTensor =
   | {
-    readonly encoding: MemoryEncoding;
-    readonly bytes: Uint8Array<ArrayBuffer>;
-    readonly pieces?: undefined;
-  }
+      readonly encoding: MemoryEncoding;
+      readonly bytes: Uint8Array<ArrayBuffer>;
+      readonly pieces?: undefined;
+    }
   | {
-    readonly encoding: MemoryEncoding;
-    readonly bytes?: undefined;
-    readonly pieces: readonly MemoryPiece[];
-  };
+      readonly encoding: MemoryEncoding;
+      readonly bytes?: undefined;
+      readonly pieces: readonly MemoryPiece[];
+    };
 
 export type MemoryContainerInput = {
   /**
@@ -158,11 +158,14 @@ const resolveEncoding = (
  * そして `readBlock` の取得長と目次の宣言長の突合。束縛規則そのものは合流層が見る（モジュール doc）。
  */
 export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer => {
-  const located = new Map<string, {
-    readonly part: number;
-    readonly record: SupplyRecord;
-    readonly read: () => Promise<Uint8Array<ArrayBuffer>>;
-  }>();
+  const located = new Map<
+    string,
+    {
+      readonly part: number;
+      readonly record: SupplyRecord;
+      readonly read: () => Promise<Uint8Array<ArrayBuffer>>;
+    }
+  >();
   const register = (
     id: string,
     part: number,
@@ -217,9 +220,9 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
     const surplus = Object.keys(supplied).filter((name) => !expected.includes(name));
     if (missing.length > 0 || surplus.length > 0) {
       throw new ContainerFormatError(
-        `グラフ '${graphName}' の供給が initializer 宣言と一致しない: 不足 [${
-          missing.join(", ")
-        }] / 余剰 [${surplus.join(", ")}]（shared 宣言は供給しない）`,
+        `グラフ '${graphName}' の供給が initializer 宣言と一致しない: 不足 [${missing.join(
+          ", ",
+        )}] / 余剰 [${surplus.join(", ")}]（shared 宣言は供給しない）`,
       );
     }
     const supplies: Record<string, WeightSupply> = Object.create(null);
@@ -249,9 +252,7 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         supplies[name] = { block: id, encoding };
       } else {
         if (tensor.pieces.length < 2) {
-          throw new ContainerFormatError(
-            `${where}: pieces は 2 本以上（1 本なら bytes で渡す）`,
-          );
+          throw new ContainerFormatError(`${where}: pieces は 2 本以上（1 本なら bytes で渡す）`);
         }
         const shape = declaration.values[name].shape.map(Number);
         const rowBytes = pieceRowBytes(encoding.codec, shape, where);
@@ -260,11 +261,8 @@ export const openMemoryContainer = (input: MemoryContainerInput): BoundContainer
         scalePart = firstPart;
         const pieces = tensor.pieces.map((piece, index) => {
           const block = `${id}#piece${index + 1}`;
-          register(
-            block,
-            firstPart + index,
-            (piece.rows[1] - piece.rows[0]) * rowBytes,
-            () => piece.read(),
+          register(block, firstPart + index, (piece.rows[1] - piece.rows[0]) * rowBytes, () =>
+            piece.read(),
           );
           return { block, rows: piece.rows };
         });

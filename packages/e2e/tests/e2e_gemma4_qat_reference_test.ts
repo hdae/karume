@@ -47,7 +47,7 @@ const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
 
 /** `Gemma4QatPipeline.fromPretrained` が受ける model（`Gemma4QatFromPretrainedOptions.model`）。 */
 const QAT_MODELS = ["e2b", "e4b"] as const;
-type QatModel = typeof QAT_MODELS[number];
+type QatModel = (typeof QAT_MODELS)[number];
 
 /**
  * manifest の model 名を QAT の選択軸へ絞る。知らない model は登録時に throw — 黙って外すと、
@@ -70,7 +70,8 @@ const SEATS: readonly Seat<QatModel>[] = mirrorSeats(MIRROR_DIR).map(qatSeat);
 for (const seat of SEATS) {
   const id = seatCaseId(seat);
   test({
-    name: `gemma4-qat ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
+    name:
+      `gemma4-qat ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
       "固定プロンプトの greedy の token id 列がこの機の参照値と一致する（実 GPU）",
     ignore: !RUNNABLE || references.lacksReference(id),
     fn: () =>

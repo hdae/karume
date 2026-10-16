@@ -52,9 +52,21 @@ describe("正規化の params: eps", () => {
   it("op 契約（attrs）と params の受理集合が一致する", () => {
     for (const [label, eps] of VALUES) {
       const contract = accepts(() => LAYER_NORM_ATTRS.eps(eps, "test"));
-      assertEquals(accepts(() => layerNormParams(4, 8, eps)), contract, `layer_norm ${label}`);
-      assertEquals(accepts(() => RMS_NORM_ATTRS.eps(eps, "test")), contract, `rms 契約 ${label}`);
-      assertEquals(accepts(() => rmsNormParams(4, 8, eps)), contract, `rms_norm ${label}`);
+      assertEquals(
+        accepts(() => layerNormParams(4, 8, eps)),
+        contract,
+        `layer_norm ${label}`,
+      );
+      assertEquals(
+        accepts(() => RMS_NORM_ATTRS.eps(eps, "test")),
+        contract,
+        `rms 契約 ${label}`,
+      );
+      assertEquals(
+        accepts(() => rmsNormParams(4, 8, eps)),
+        contract,
+        `rms_norm ${label}`,
+      );
     }
   });
 });

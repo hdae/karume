@@ -201,31 +201,29 @@ export type GenerationProgramSpec = {
  * MUST: フィールドを足すときは {@link createGenerationProgram} の検証も同時に足す — 検証されない
  * 配線欄は「setup 時に全結線を検証する」という本型の存在理由を静かに壊す。
  */
-export type GenerationWiring =
-  & Omit<GenerationProgramSpec, "graph" | "chunkBuckets">
-  & {
-    /**
-     * 検証済みの prefill バケット（**省略できない** — 宣言の無い spec は空配列へ畳んである）。
-     *
-     * 省略可能なまま持ち回すと、物理行数を選ぶ側（`sequence.ts`）が毎回 `?? []` を書くことに
-     * なり、その 1 つが欠けても「バケットが黙って効かない」だけで例外は出ない。
-     */
-    readonly chunkBuckets: readonly number[];
-    /**
-     * hidden 出口の最終軸 H（{@link GenerationProgramSpec.hidden} の宣言形から**導出**した値）。
-     *
-     * MUST: 呼び手に宣言させない（`vocabSize` と違い、突き合わせる相手が資産側に無い）。
-     * グラフが唯一の源なので、宣言を受けると「配線の H」と「グラフの H」が独立に更新される
-     * 二重持ちになる。
-     */
-    readonly hiddenSize: number;
-    /**
-     * 行数記号 R の名前（`last_row` 入力の宣言形 `[R]` から**導出**）。run では `last_row` の要素数が
-     * これを束縛するが、run を伴わない見積り（`estimateGraphMemory` の `bindings`）は入力 shape を
-     * 持たないので、この名前で R = 1 を明示して渡す。
-     */
-    readonly rowSymbol: string;
-  };
+export type GenerationWiring = Omit<GenerationProgramSpec, "graph" | "chunkBuckets"> & {
+  /**
+   * 検証済みの prefill バケット（**省略できない** — 宣言の無い spec は空配列へ畳んである）。
+   *
+   * 省略可能なまま持ち回すと、物理行数を選ぶ側（`sequence.ts`）が毎回 `?? []` を書くことに
+   * なり、その 1 つが欠けても「バケットが黙って効かない」だけで例外は出ない。
+   */
+  readonly chunkBuckets: readonly number[];
+  /**
+   * hidden 出口の最終軸 H（{@link GenerationProgramSpec.hidden} の宣言形から**導出**した値）。
+   *
+   * MUST: 呼び手に宣言させない（`vocabSize` と違い、突き合わせる相手が資産側に無い）。
+   * グラフが唯一の源なので、宣言を受けると「配線の H」と「グラフの H」が独立に更新される
+   * 二重持ちになる。
+   */
+  readonly hiddenSize: number;
+  /**
+   * 行数記号 R の名前（`last_row` 入力の宣言形 `[R]` から**導出**）。run では `last_row` の要素数が
+   * これを束縛するが、run を伴わない見積り（`estimateGraphMemory` の `bindings`）は入力 shape を
+   * 持たないので、この名前で R = 1 を明示して渡す。
+   */
+  readonly rowSymbol: string;
+};
 
 /**
  * 検証済み静的配線の**読み口**（公開面 — `Gemma4Pipeline.program`）。
@@ -313,11 +311,7 @@ const assertDtype = (actual: string, expected: string, where: string): void => {
  * decode 形（`M = 1`）の 2 本を同じグラフで回せず（ADR 0066 決定 4）、その食い違いは
  * 「decode の 1 回目で形が合わない」という真因から遠い診断で出る。
  */
-const assertRowInput = (
-  graph: GenerationGraph,
-  name: string,
-  role: string,
-): string => {
+const assertRowInput = (graph: GenerationGraph, name: string, role: string): string => {
   const spec = findInput(graph, name, role);
   assertDtype(spec.dtype, "i32", `${role} '${name}'`);
   const lengthSymbol = spec.shape[1];
@@ -387,7 +381,9 @@ const assertLogitsOutput = (
   const info = findOutputValue(graph, name, "logits 出口");
   assertDtype(info.dtype, "f32", `logits 出口 '${name}'`);
   if (
-    info.shape.length !== 3 || info.shape[0] !== 1 || info.shape[1] !== rowSymbol ||
+    info.shape.length !== 3 ||
+    info.shape[0] !== 1 ||
+    info.shape[1] !== rowSymbol ||
     info.shape[2] !== vocabSize
   ) {
     throw new Error(
@@ -411,7 +407,9 @@ const assertHiddenOutput = (graph: GenerationGraph, name: string, rowSymbol: str
   assertDtype(info.dtype, "f32", `hidden 出口 '${name}'`);
   const hiddenSize = info.shape[2];
   if (
-    info.shape.length !== 3 || info.shape[0] !== 1 || info.shape[1] !== rowSymbol ||
+    info.shape.length !== 3 ||
+    info.shape[0] !== 1 ||
+    info.shape[1] !== rowSymbol ||
     typeof hiddenSize !== "number"
   ) {
     throw new Error(

@@ -86,15 +86,15 @@ fn main(
     let src = (kv_plane * params.chunk_rows + row) * params.depth + d;
     let dst = (kv_plane * params.capacity + slot_row(past + row)) * params.depth + d;
 ${
-    sliding
-      ? `    // ring が一周する Q > C では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
+  sliding
+    ? `    // ring が一周する Q > C では同じ物理行へ複数の論理行が写る。**最後の論理行だけ**が
     // 書く（全行を並列に書かせると勝者が実装依存 = 沈黙の非決定性）。法は slot_row と同じ
     // **capacity**（window で切ると C > W のとき誰とも alias しない行が黙って書かれない）
     if (row + params.capacity >= query) {
       slot[dst] = x[src];
     }`
-      : "    slot[dst] = x[src];"
-  }
+    : "    slot[dst] = x[src];"
+}
     i = i + stride;
   }
 }
@@ -123,9 +123,7 @@ export type StateAppendGeometry = {
  * キー選択・WGSL 生成・この params の 3 者を**同じ `window` の値**から導くこと（片方だけ
  * sliding にすると `col % 0u` が実装依存値になる）。
  */
-export const stateAppendParams = (
-  geometry: StateAppendGeometry,
-): Uint32Array<ArrayBuffer> => {
+export const stateAppendParams = (geometry: StateAppendGeometry): Uint32Array<ArrayBuffer> => {
   const { kvPlanes, chunkRows, depth, capacity, window } = geometry;
   assertU32Params("state_append params", {
     kv_planes: kvPlanes,

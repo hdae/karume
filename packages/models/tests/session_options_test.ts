@@ -145,9 +145,14 @@ describe("resolveSessionOptions: キーごとの優先順位", () => {
       linearCompute: "a8",
     });
     assertEquals(
-      resolveSessionOptions(ALL, { linearCompute: "a8", attentionCompute: "a8" }, {
-        linearCompute: "f16",
-      }, "test"),
+      resolveSessionOptions(
+        ALL,
+        { linearCompute: "a8", attentionCompute: "a8" },
+        {
+          linearCompute: "f16",
+        },
+        "test",
+      ),
       { linearCompute: "f16", attentionCompute: "a8" },
     );
     assertEquals(resolveSessionOptions(ALL, {}, { attentionScoreStorage: "f16" }, "test"), {
@@ -223,9 +228,14 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     // 明示指定は宣言の不備を隠さない（受けない宣言は、上書きの有無に依らず資産の齟齬）。
     assertThrows(
       () =>
-        resolveSessionOptions(LINEAR_ONLY, { attentionCompute: "a8" }, {
-          linearCompute: "f32",
-        }, "test"),
+        resolveSessionOptions(
+          LINEAR_ONLY,
+          { attentionCompute: "a8" },
+          {
+            linearCompute: "f32",
+          },
+          "test",
+        ),
       Error,
       "session.attentionComputeは未対応",
     );
@@ -253,9 +263,14 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     // 明示が関与して初めて成立 = 入力起因 → ModelInputError（文言は同じ runtime の 1 本）。
     const fromInput = assertThrows(
       () =>
-        resolveSessionOptions(ALL, { attentionScoreStorage: "f16" }, {
-          attentionCompute: "f16",
-        }, "test"),
+        resolveSessionOptions(
+          ALL,
+          { attentionScoreStorage: "f16" },
+          {
+            attentionCompute: "f16",
+          },
+          "test",
+        ),
       ModelInputError,
     );
     assertEquals(fromInput.message, fromAsset.message);

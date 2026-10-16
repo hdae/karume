@@ -162,9 +162,9 @@ export const conv1dIgemmWgsl = (
 
 export const conv1dWgsl = (weight: WeightStorage): string => {
   assertDirectWeight(weight);
-  return `// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32${
-    weightNote(weight)
-  }, 直接畳み込み)
+  return `// karume conv1d (x[B,Cin,L] * W[Cout,Cin/groups,K] + b[Cout], f32${weightNote(
+    weight,
+  )}, 直接畳み込み)
 struct Dims {
   n: u32,
   batch: u32,
@@ -213,9 +213,12 @@ fn main(
         let ix = origin + i32(k * dims.dilation);
         // padding 域は 0 詰め — 加算せずに読み飛ばす
         if (ix >= 0 && u32(ix) < dims.length_in) {
-          acc = acc + x[x_base + u32(ix)] * ${
-    weightRead("w", weight, "w_base + k", WEIGHT_SCALE_VAR)
-  };
+          acc = acc + x[x_base + u32(ix)] * ${weightRead(
+            "w",
+            weight,
+            "w_base + k",
+            WEIGHT_SCALE_VAR,
+          )};
         }
       }
     }
@@ -336,15 +339,10 @@ export const conv1dIgemmParams = (dims: Conv1dDims): Uint32Array<ArrayBuffer> =>
   params[0] = dims.channelsOut;
   params[1] = dims.lengthOut;
   params[2] = k;
-  [
-    dims.channelsIn,
-    dims.lengthIn,
-    dims.kernel,
-    dims.stride,
-    dims.padding,
-    dims.dilation,
-  ].forEach((value, index) => {
-    params[index + 3] = value;
-  });
+  [dims.channelsIn, dims.lengthIn, dims.kernel, dims.stride, dims.padding, dims.dilation].forEach(
+    (value, index) => {
+      params[index + 3] = value;
+    },
+  );
   return params;
 };

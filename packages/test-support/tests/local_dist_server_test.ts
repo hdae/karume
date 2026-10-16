@@ -45,8 +45,9 @@ const buildDist = async (
 ): Promise<string> => {
   const dir = `${root}/dist`;
   await mkdir(`${dir}/net`, { recursive: true });
-  const part0Bytes = new Uint8Array(new ArrayBuffer(HEADER_BYTES + GRAPH_BYTES + MODEL_BYTES))
-    .fill(0x41);
+  const part0Bytes = new Uint8Array(new ArrayBuffer(HEADER_BYTES + GRAPH_BYTES + MODEL_BYTES)).fill(
+    0x41,
+  );
   const part1Bytes = encoder.encode("part-bytes");
   await writeFile(`${dir}/${PART0_PATH}`, part0Bytes);
   await writeFile(`${dir}/${PART1_PATH}`, part1Bytes);
@@ -144,14 +145,12 @@ test("serveLocalDist: 配布形の外へ出る path は 404（`..` / 先頭 / / 
     const dir = await buildDist(root);
     await using server = await serveLocalDist(dir);
     const hub = server.source.hubUrl;
-    for (
-      const spelled of [
-        "..%2F..%2Fetc%2Fpasswd",
-        "%2e%2e%2ffoo",
-        "%2Fetc%2Fpasswd",
-        "net%2F%2Fmodel.f16-00002-of-00002.krm",
-      ]
-    ) {
+    for (const spelled of [
+      "..%2F..%2Fetc%2Fpasswd",
+      "%2e%2e%2ffoo",
+      "%2Fetc%2Fpasswd",
+      "net%2F%2Fmodel.f16-00002-of-00002.krm",
+    ]) {
       const { status } = await get(`${hub}/${REPO}/resolve/${SHA}/${spelled}`);
       assertEquals(status, 404, `${spelled} が 404 でない`);
     }
@@ -163,10 +162,7 @@ test("serveLocalDist: revision が宣言と違えば 404、未知の repo も 40
     const dir = await buildDist(root);
     await using server = await serveLocalDist(dir);
     const hub = server.source.hubUrl;
-    assertEquals(
-      (await get(`${hub}/${REPO}/resolve/${"d".repeat(40)}/${PART1_PATH}`)).status,
-      404,
-    );
+    assertEquals((await get(`${hub}/${REPO}/resolve/${"d".repeat(40)}/${PART1_PATH}`)).status, 404);
     assertEquals((await get(`${hub}/someone/other/resolve/${SHA}/${PART1_PATH}`)).status, 404);
     assertEquals((await get(`${hub}/api/models/someone/other/revision/main`)).status, 404);
   });
@@ -178,22 +174,14 @@ test("serveLocalDist: 越境参照の revision が 1 リポで割れていたら
       cross: [CROSS_REVISION, "e".repeat(40)],
       mirror: true,
     });
-    assertThrows(
-      () => serveLocalDist(dir),
-      Error,
-      "越境参照の revision が 1 リポで割れている",
-    );
+    assertThrows(() => serveLocalDist(dir), Error, "越境参照の revision が 1 リポで割れている");
   });
 });
 
 test("serveLocalDist: 越境参照のミラーが無ければ起動時に落ちる（実行中の 404 にしない）", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root, { cross: [CROSS_REVISION] });
-    const error = assertThrows(
-      () => serveLocalDist(dir),
-      Error,
-      "越境参照のミラーが無い",
-    );
+    const error = assertThrows(() => serveLocalDist(dir), Error, "越境参照のミラーが無い");
     assertStringIncludes(error.message, CROSS_PATH);
   });
 });

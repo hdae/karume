@@ -62,8 +62,7 @@ export const SOFTMAX_WORKGROUP_SIZE = 256;
 // v2: 行 max を nan_max へ（全 NaN 行の沈黙 0 化を塞ぐ — 上の MUST）
 export const SOFTMAX_KEY = `softmax:v2:f32:lastdim:safe:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
-export const SAFE_SOFTMAX_KEY =
-  `safe_softmax:v2:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`;
+export const SAFE_SOFTMAX_KEY = `safe_softmax:v2:f32:lastdim:safe:emptyrow0:wg${SOFTMAX_WORKGROUP_SIZE}`;
 
 /** f32 の最大有限値。WGSL に無限大リテラルが無いため amax の identity にこれを使う。 */
 const F32_MAX = "3.402823466e38";
@@ -123,14 +122,14 @@ ${safe ? "  let neg_inf = bitcast<f32>(params.neg_inf);\n" : ""}  var row = wid.
       stride = stride / 2u;
     }
 ${
-    safe
-      ? `    let row_max = scratch[0u];
+  safe
+    ? `    let row_max = scratch[0u];
     // 全要素 -inf の行（torch のガードが 0 を返す行）— 減算項を 0 にして NaN を作らない
     let empty = row_max == neg_inf;
     let amax = select(row_max, 0.0, empty);
 `
-      : "    let amax = scratch[0u];\n"
-  }    // scratch の読み終わりを揃えてから ② で上書きする
+    : "    let amax = scratch[0u];\n"
+}    // scratch の読み終わりを揃えてから ② で上書きする
     workgroupBarrier();
 
     // ② Σ exp(x - amax)（最大要素が exp(0) = 1 を出すので分母は必ず 1 以上）
@@ -158,8 +157,8 @@ ${
     var o = lid;
     while (o < dim) {
       out[base + o] = ${
-    safe ? "select(exp(x[base + o] - amax) * inv, 0.0, empty)" : "exp(x[base + o] - amax) * inv"
-  };
+        safe ? "select(exp(x[base + o] - amax) * inv, 0.0, empty)" : "exp(x[base + o] - amax) * inv"
+      };
       o = o + ${SOFTMAX_WORKGROUP_SIZE}u;
     }
     row = row + nwg.x;

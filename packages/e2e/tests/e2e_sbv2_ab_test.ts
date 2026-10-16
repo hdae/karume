@@ -121,7 +121,8 @@ const utteranceOnce = (() => {
   let cached: Promise<Sbv2Utterance> | undefined;
   return (): Promise<Sbv2Utterance> => {
     // TypeScript 7 does not narrow `cached` after `??=`; keep the single-evaluation semantics explicitly.
-    const utterance = cached ??
+    const utterance =
+      cached ??
       getDictionary().then((dictionary) => toSbv2Utterance(analyzeWithWords(dictionary, TEXT)));
     cached = utterance;
     return utterance;
@@ -141,7 +142,7 @@ const loadLocalAssets = async (
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   const read = async (key: string, ref: FileRef): Promise<void> => {
     const cached = byPath.get(ref.path);
-    const bytes = cached ?? await readFile(new URL(ref.path, ASSETS_DIR));
+    const bytes = cached ?? (await readFile(new URL(ref.path, ASSETS_DIR)));
     if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };
@@ -171,13 +172,15 @@ const capturingOutputs = (
       ...args: Parameters<Session["run"]>
     ): Promise<Awaited<ReturnType<Session["run"]>>> => {
       const outputs = await session.run(...args);
-      sink(component.graph.outputs.map((name) => {
-        const tensor = outputs[name];
-        if (tensor === undefined || tensor.dtype !== "f32") {
-          throw new Error(`front の出力 '${name}' が f32 で無い / 無い`);
-        }
-        return new Float32Array(tensor.data);
-      }));
+      sink(
+        component.graph.outputs.map((name) => {
+          const tensor = outputs[name];
+          if (tensor === undefined || tensor.dtype !== "f32") {
+            throw new Error(`front の出力 '${name}' が f32 で無い / 無い`);
+          }
+          return new Float32Array(tensor.data);
+        }),
+      );
       return outputs;
     };
     return new Proxy(session, {
@@ -242,10 +245,7 @@ const observeFront = async (
 };
 
 /** front の出力ごとの実測（位置で {@link FRONT_OUTPUTS} と対にする）。 */
-const measureFront = (
-  practical: Observation,
-  reference: Observation,
-): readonly AbMeasurement[] => {
+const measureFront = (practical: Observation, reference: Observation): readonly AbMeasurement[] => {
   if (practical.front.length !== FRONT_OUTPUTS.length) {
     throw new Error(
       `front の出力が ${practical.front.length} 本（期待 ${FRONT_OUTPUTS.length} 本 — 位置の対応が崩れた）`,
@@ -277,9 +277,10 @@ test({
         );
         console.log(`[e2e] sbv2 A/B ${ID} ${name}: ${describeAb(measured[index])}`);
       });
-      const census = `front ${describeBundleCensus(first.census.front, declared)} / voice ${
-        describeBundleCensus(first.census.voice, declared)
-      }`;
+      const census = `front ${describeBundleCensus(first.census.front, declared)} / voice ${describeBundleCensus(
+        first.census.voice,
+        declared,
+      )}`;
       console.log(`[e2e] sbv2 A/B ${ID}: ${reference} → ${PRACTICAL} / census ${census}`);
       FRONT_OUTPUTS.forEach(({ name }, index) => {
         assertBitIdentical(first.front[index], second.front[index], `${ID}: 実用席の 2 回 ${name}`);

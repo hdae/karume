@@ -95,10 +95,10 @@ const readMirror = (): string | undefined => {
 
 test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読む", () => {
   assertEquals(parseGemma4PipelineConfig(MINIMAL), MINIMAL);
-  assertEquals(
-    parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...RECOMMENDED } }),
-    { ...MINIMAL, sampler: RECOMMENDED },
-  );
+  assertEquals(parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...RECOMMENDED } }), {
+    ...MINIMAL,
+    sampler: RECOMMENDED,
+  });
 });
 
 test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (t) => {
@@ -345,11 +345,14 @@ test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開く前�
   const junk = new Uint8Array<ArrayBuffer>(new ArrayBuffer(8));
   const error = await assertRejects(
     () =>
-      Gemma4Pipeline.fromAssets({
-        config: MINIMAL as unknown as Gemma4PipelineConfig,
-        model: [junk],
-        tokenizer: junk,
-      }, { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" }),
+      Gemma4Pipeline.fromAssets(
+        {
+          config: MINIMAL as unknown as Gemma4PipelineConfig,
+          model: [junk],
+          tokenizer: junk,
+        },
+        { fuseLinearStaticQuantize: true, linearGemvReduce: "sequential" },
+      ),
     ModelInputError,
     "fuseLinearStaticQuantize は linearGemvReduce: parallel / linearCompute: f32 のみ対応",
   );

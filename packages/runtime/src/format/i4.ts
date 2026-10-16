@@ -69,9 +69,9 @@ export const decodeI4 = (
     scaleShape.some((dim, axis) => dim !== expected[axis])
   ) {
     throw new I4Error(
-      `scale [${scaleShape.join(",")}] が重み [${shape.join(",")}] の group 形 [${
-        expected.join(",")
-      }]（group_size=${groupSize}）でない`,
+      `scale [${scaleShape.join(",")}] が重み [${shape.join(",")}] の group 形 [${expected.join(
+        ",",
+      )}]（group_size=${groupSize}）でない`,
     );
   }
   if (scale.length !== numel(scaleShape)) {

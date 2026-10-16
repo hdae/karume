@@ -29,7 +29,20 @@
 // この門番自身は資産がある環境では**通る（緑の 1 件として見える）**。ignore にすると
 // 「門番が効いているのか、門番ごと消えているのか」が区別できなくなるため（他の 2 門番と同じ理由）。
 
-import { type DirEntry, isFilesystemLoop, isNotFound, makeTempDirSync, mkdirSync, readDirSync, readTextFile, removeSync, statSync, symlinkSync, writeFileSync, writeTextFileSync } from "@karume/test-support/fs";
+import {
+  type DirEntry,
+  isFilesystemLoop,
+  isNotFound,
+  makeTempDirSync,
+  mkdirSync,
+  readDirSync,
+  readTextFile,
+  removeSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+  writeTextFileSync,
+} from "@karume/test-support/fs";
 import {
   assert,
   assertEquals,
@@ -254,8 +267,7 @@ test({
 for (const series of discoverDistributions(MODELS_ROOT)) {
   const root = distributionRoot(MODELS_ROOT, series);
   test({
-    name:
-      `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
+    name: `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
     // 名簿にあるミラーの不在は上の 1 本が名指しで落とす（同じ壊れで 2 本赤くしても読み手の仕事は
     // 増えない）。名簿に無いものの不在はここでしか見えないので走らせる。
     ignore: REQUIRED.has(series) && manifestKnownAbsent(root),
@@ -357,10 +369,7 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
 
   it("壊れたリンクと辿れないリンクも投げずに拾う（登録時に落ちてファイルごと消えない）", async () => {
     await withTemporaryRoot((models) => {
-      symlinkSync(
-        new URL("nowhere", models).pathname,
-        new URL("karume-broken", models).pathname,
-      );
+      symlinkSync(new URL("nowhere", models).pathname, new URL("karume-broken", models).pathname);
       symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
       assertEquals(discoverDistributions(models), ["karume-broken", "karume-loop"]);
     });
@@ -368,10 +377,7 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
 
   it("壊れたリンクのミラーは、そのディレクトリを名指しして FAIL する", async () => {
     await withTemporaryRoot(async (models) => {
-      symlinkSync(
-        new URL("nowhere", models).pathname,
-        new URL("karume-broken", models).pathname,
-      );
+      symlinkSync(new URL("nowhere", models).pathname, new URL("karume-broken", models).pathname);
       await assertRejects(
         () => assertDistributionIntact(distributionRoot(models, "karume-broken"), "karume-broken"),
         AssertionError,

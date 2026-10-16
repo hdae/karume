@@ -207,8 +207,12 @@ export const latentTile = (
   const { rows, cols, channels } = geometry;
   // 整数も見る — 大小比較だけでは 0.5 / NaN が通り、`starts[0.5]` が undefined になってゼロのタイルを黙って返す。
   if (
-    !Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row >= rows.starts.length ||
-    col < 0 || col >= cols.starts.length
+    !Number.isInteger(row) ||
+    !Number.isInteger(col) ||
+    row < 0 ||
+    row >= rows.starts.length ||
+    col < 0 ||
+    col >= cols.starts.length
   ) {
     throw new RangeError(
       `タイル (${row}, ${col}) が範囲外（${rows.starts.length}×${cols.starts.length}）`,
@@ -407,7 +411,10 @@ export const assembleTiles = (
   decoded: readonly Float32Array<ArrayBuffer>[],
   geometry: TileGeometry,
 ): Float32Array<ArrayBuffer> =>
-  assembleOwnedTiles(decoded.map((tile) => Float32Array.from(tile)), geometry);
+  assembleOwnedTiles(
+    decoded.map((tile) => Float32Array.from(tile)),
+    geometry,
+  );
 
 /**
  * タイル decode の駆動（唯一の非純粋な継ぎ目 = `decode` コールバック）。

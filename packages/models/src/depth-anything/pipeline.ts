@@ -194,11 +194,9 @@ export type DepthAnythingPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type DepthAnythingFromPretrainedOptions =
-  & DepthAnythingPipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions
-  & {
+export type DepthAnythingFromPretrainedOptions = DepthAnythingPipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
@@ -225,12 +223,7 @@ const assetBuffer = (
  * part 列（`depth[0]` / `depth[1]` / …）。
  */
 const assetOpener = (assets: DepthAnythingAssets["assets"]): Promise<ComponentOpener> =>
-  assetComponentOpener(
-    "depth-anything",
-    assets,
-    (key) => assetBuffer(assets, key),
-    COMPONENT_KEYS,
-  );
+  assetComponentOpener("depth-anything", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
  * グラフ入力の 1 軸ぶんの**静的**次元が `pipelineConfig` の宣言と一致することを見る。
@@ -512,7 +505,7 @@ const openDepthAnythingState = async (
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitDepthAnything} が既に同じ 1 本で見ているが、自前で取った device は
   // ここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `DepthAnythingPipeline: quant '${quantName}'`);
@@ -544,10 +537,7 @@ const openDepthAnythingState = async (
 };
 
 /** 画像 1 枚を通す（前処理 → `depth` 1 回 → 元解像度へ戻す）。 */
-const estimateImage = async (
-  state: DepthAnythingState,
-  image: Rgb8Image,
-): Promise<DepthMap> => {
+const estimateImage = async (state: DepthAnythingState, image: Rgb8Image): Promise<DepthMap> => {
   const { config } = state;
   const pixelValues: Tensor = {
     dtype: "f32",
@@ -569,13 +559,7 @@ const estimateImage = async (
         `${config.imageWidth}×${config.imageHeight} と違う`,
     );
   }
-  return resampleDepth(
-    depth,
-    config.imageWidth,
-    config.imageHeight,
-    image.width,
-    image.height,
-  );
+  return resampleDepth(depth, config.imageWidth, config.imageHeight, image.width, image.height);
 };
 
 /**
@@ -722,7 +706,7 @@ export class DepthAnythingPipeline {
         () => {
           if (this.#state.ownsGpu) this.#state.gpu.destroy();
         },
-      ])
+      ]),
     );
     return this.#disposal;
   }

@@ -253,15 +253,13 @@ export const fakeSession = (options: FakeOptions = {}) => {
         throw new Error(`fake: ids ${ids.length} と positions ${positions.length} の長さが違う`);
       }
       derivedPositions = [...positions];
-      return Promise.resolve(
-        {
-          [DERIVED]: {
-            dtype: "f32",
-            shape: [1, ids.length, 2],
-            data: new Float32Array(ids.length * 2),
-          },
-        } satisfies RunInputs,
-      );
+      return Promise.resolve({
+        [DERIVED]: {
+          dtype: "f32",
+          shape: [1, ids.length, 2],
+          data: new Float32Array(ids.length * 2),
+        },
+      } satisfies RunInputs);
     },
   };
   // 宣言しなければ十分大きい値（門に掛からない）。`undefined` の明示は sliding スロット無し。
@@ -381,26 +379,28 @@ export const fakeSession = (options: FakeOptions = {}) => {
         state.pastLength += generation.queryLength;
       }
       // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
-      const rows = options.logitsRows !== undefined &&
-          (options.logitsRowsAt === undefined || options.logitsRowsAt === call)
-        ? options.logitsRows
-        : lastRow.values.length;
+      const rows =
+        options.logitsRows !== undefined &&
+        (options.logitsRowsAt === undefined || options.logitsRowsAt === call)
+          ? options.logitsRows
+          : lastRow.values.length;
       const logits = new Float32Array(rows * VOCAB);
       const hidden = new Float32Array(rows * HIDDEN_SIZE);
       for (let row = 0; row < rows; row += 1) {
         // 出力の行 n が運ぶのは `last_row[n]` が指した**入力行**のものである（行数を偽る故障
         // 注入では添字が尽きるので、その分は入力行 0 に畳む）。
         const inputRow = lastRow.values[row] ?? 0;
-        const id = options.successor === undefined
-          ? options.tokens?.[call] ?? (call + 1) % VOCAB
-          : options.successor[ids.values[inputRow]];
+        const id =
+          options.successor === undefined
+            ? (options.tokens?.[call] ?? (call + 1) % VOCAB)
+            : options.successor[ids.values[inputRow]];
         logits[row * VOCAB + id] = 10;
         if (options.runnerUp !== undefined) {
           logits[row * VOCAB + options.runnerUp.id] = options.runnerUp.logit;
         }
         // 汚染は行の**別の** id に置く（狙った id を潰すと「行の argmax」の写像が壊れる）。
         if (options.nanAt === call && (options.nanRow === undefined || options.nanRow === row)) {
-          logits[row * VOCAB + (id + 1) % VOCAB] = Number.NaN;
+          logits[row * VOCAB + ((id + 1) % VOCAB)] = Number.NaN;
         }
         hidden[row * HIDDEN_SIZE] = hiddenMark(call, inputRow);
         hidden[row * HIDDEN_SIZE + 1] = ids.values[inputRow];
@@ -459,6 +459,6 @@ export const runShape = (phases: readonly GenerationRunPhase[]): GenerationRunPh
     phase.kind === "verify"
       ? { kind: phase.kind, cycle: phase.cycle, rows: phase.rows, accepted: phase.accepted }
       : phase.kind === "decode"
-      ? { kind: phase.kind, step: phase.step }
-      : phase
+        ? { kind: phase.kind, step: phase.step }
+        : phase,
   );

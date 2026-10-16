@@ -51,14 +51,15 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 const discoverCases = (target: string): readonly string[] =>
   listDir(new URL(`${target}/`, MODELS_ROOT))
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name)
     .sort();
 
-const AVAILABLE = TABLE_INPUT_TARGETS
-  .flatMap((target) => discoverCases(target).map((ioFile) => ({ target, ioFile })));
+const AVAILABLE = TABLE_INPUT_TARGETS.flatMap((target) =>
+  discoverCases(target).map((ioFile) => ({ target, ioFile })),
+);
 
 if (AVAILABLE.length === 0) {
   console.warn(

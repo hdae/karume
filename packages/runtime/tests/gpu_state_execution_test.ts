@@ -219,12 +219,8 @@ const advanceOracle = (
     scale: halfScale(model.depth),
   });
   const appendBase = { ...common, kvPlanes: model.kvHeads };
-  state.slotK = asF32(
-    referenceStateAppend({ ...appendBase, x: inputs.k, slot: state.slotK }).data,
-  );
-  state.slotV = asF32(
-    referenceStateAppend({ ...appendBase, x: inputs.v, slot: state.slotV }).data,
-  );
+  state.slotK = asF32(referenceStateAppend({ ...appendBase, x: inputs.k, slot: state.slotK }).data);
+  state.slotV = asF32(referenceStateAppend({ ...appendBase, x: inputs.v, slot: state.slotV }).data);
   state.past += query;
   return asF32(expected.data);
 };
@@ -271,7 +267,10 @@ const assertStep = async (
   const expected = advanceOracle(model, capacity, state, inputs, chunkRows, query);
   // MUST: 期待値が自明でないことを毎回見る（両側が全 0 なら突合は恒真になる — states 形は
   // 空行の厳密 0 が正規に出るので、この確認が無いと「何も計算していない」実装が緑で通る）。
-  assert(expected.some((value) => Math.abs(value) > 1e-3), `${label}: 期待出力が自明（全 ~0）`);
+  assert(
+    expected.some((value) => Math.abs(value) > 1e-3),
+    `${label}: 期待出力が自明（全 ~0）`,
+  );
   const report = compareTensors(
     { dtype: "f32", data: actual },
     { dtype: "f32", data: expected },
@@ -563,13 +562,15 @@ const verifyBorrowerGraph = (capacity: number): DeclarationJson => {
       kslot: { dtype: "f32", shape: [1, model.kvHeads, capacity, model.depth], external: true },
       vslot: { dtype: "f32", shape: [1, model.kvHeads, capacity, model.depth], external: true },
     },
-    nodes: [{
-      op: "attention",
-      ins: ["q"],
-      outs: ["o"],
-      attrs: { scale: halfScale(model.depth), window: VERIFY_WINDOW, readonly: true },
-      states: { k: "kslot", v: "vslot" },
-    }],
+    nodes: [
+      {
+        op: "attention",
+        ins: ["q"],
+        outs: ["o"],
+        attrs: { scale: halfScale(model.depth), window: VERIFY_WINDOW, readonly: true },
+        states: { k: "kslot", v: "vslot" },
+      },
+    ],
   };
 };
 
@@ -669,8 +670,7 @@ const runBorrowedVerifyChain = async (
 };
 
 test({
-  name:
-    "deferred commit + 借り手の readonly 窓: 棄却行は drafter が読む列を 1 語も動かさない（実 GPU）",
+  name: "deferred commit + 借り手の readonly 窓: 棄却行は drafter が読む列を 1 語も動かさない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -735,19 +735,17 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [label, model, sliding] of [
-          ["full r=1", FULL, false],
-          ["full r=2", GQA, false],
-          ["sliding r=1", SLIDING, true],
-        ] as const
-      ) {
+      for (const [label, model, sliding] of [
+        ["full r=1", FULL, false],
+        ["full r=2", GQA, false],
+        ["sliding r=1", SLIDING, true],
+      ] as const) {
         const session = await stateSession(gpu, model);
         const context = await session.createGenerationContext({ chunkLength: 2 });
         try {
           await runStep(session, context, model, stepInputs(model, 2, 7), 2, 2);
-          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map((row) =>
-            row.key
+          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
+            (row) => row.key,
           );
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           assertEquals(
@@ -792,18 +790,16 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
-          ["full r=2 parallel decode M=1", GQA, false, "parallel", 1, true, true],
-          // M=2（投機の verify 相当・M ≤ 8）は ①' も ③' も上がる
-          ["full r=2 parallel verify M=2", GQA, false, "parallel", 2, true, true],
-          ["sliding r=1 parallel decode M=1", SLIDING, true, "parallel", 1, true, true],
-          ["sliding r=1 parallel verify M=2", SLIDING, true, "parallel", 2, true, true],
-          // 席が既定なら M=1 でも上がらない（適用条件だけを見て席を無視する実装を落とす）
-          ["full r=2 sequential decode M=1", GQA, false, "sequential", 1, false, false],
-          ["full r=2 sequential prefill M=2", GQA, false, "sequential", 2, false, false],
-        ] as const
-      ) {
+      for (const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
+        ["full r=2 parallel decode M=1", GQA, false, "parallel", 1, true, true],
+        // M=2（投機の verify 相当・M ≤ 8）は ①' も ③' も上がる
+        ["full r=2 parallel verify M=2", GQA, false, "parallel", 2, true, true],
+        ["sliding r=1 parallel decode M=1", SLIDING, true, "parallel", 1, true, true],
+        ["sliding r=1 parallel verify M=2", SLIDING, true, "parallel", 2, true, true],
+        // 席が既定なら M=1 でも上がらない（適用条件だけを見て席を無視する実装を落とす）
+        ["full r=2 sequential decode M=1", GQA, false, "sequential", 1, false, false],
+        ["full r=2 sequential prefill M=2", GQA, false, "sequential", 2, false, false],
+      ] as const) {
         const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
         // chunkLength は行の M そのもの（M=1 の decode 形も M=9 の prefill 形も同じ context 契約の内側）。
         const context = await session.createGenerationContext({
@@ -818,25 +814,23 @@ test({
             chunkRows,
             chunkRows,
           );
-          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map((row) =>
-            row.key
+          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
+            (row) => row.key,
           );
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           const gqa = model.heads !== model.kvHeads;
-          for (
-            const [stage, expected, other] of [
-              [
-                "①QK",
-                qkParallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa),
-                qkParallel ? stateQkKey(sliding, gqa) : stateQkParallelKey(sliding, gqa),
-              ],
-              [
-                "③PV",
-                pvParallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa),
-                pvParallel ? statePvKey(sliding, gqa) : statePvParallelKey(sliding, gqa),
-              ],
-            ] as const
-          ) {
+          for (const [stage, expected, other] of [
+            [
+              "①QK",
+              qkParallel ? stateQkParallelKey(sliding, gqa) : stateQkKey(sliding, gqa),
+              qkParallel ? stateQkKey(sliding, gqa) : stateQkParallelKey(sliding, gqa),
+            ],
+            [
+              "③PV",
+              pvParallel ? statePvParallelKey(sliding, gqa) : statePvKey(sliding, gqa),
+              pvParallel ? statePvKey(sliding, gqa) : statePvParallelKey(sliding, gqa),
+            ],
+          ] as const) {
             assertEquals(
               keys.includes(expected),
               true,
@@ -845,9 +839,9 @@ test({
             assertEquals(
               keys.includes(other),
               false,
-              `${label}: 席と計画から期待されない ${stage} のキーが混ざっている（${
-                keys.join(" / ")
-              }）`,
+              `${label}: 席と計画から期待されない ${stage} のキーが混ざっている（${keys.join(
+                " / ",
+              )}）`,
             );
           }
         } finally {
@@ -887,22 +881,20 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [label, model, sliding, reduce, chunkRows, qkExpected, pvExpected] of [
-          ["full r=2 prefill M=16", TILED, false, "sequential", 16, "tiled", "tiled"],
-          // 席はタイル経路を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
-          ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled", "tiled"],
-          ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled", "tiled"],
-          // M=2 はどちらのタイル経路も適用外で ①'（M ≤ 8）も ③' も席どおり上がる
-          ["full r=2 parallel M=2", TILED, false, "parallel", 2, "parallel", "parallel"],
-          // M=9 は ①' の適用外（M ≤ 8 の外・タイル経路の手前）なので ①QK は逐次のまま、
-          // ③PV だけが席どおり ③' へ上がる（段で適用範囲が違うことの直接の観測点）
-          ["full r=2 parallel M=9", TILED, false, "parallel", 9, "sequential", "parallel"],
-          // M=1 も適用外。席どおりに 2 段とも分かれる
-          ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential", "sequential"],
-          ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel", "parallel"],
-        ] as const
-      ) {
+      for (const [label, model, sliding, reduce, chunkRows, qkExpected, pvExpected] of [
+        ["full r=2 prefill M=16", TILED, false, "sequential", 16, "tiled", "tiled"],
+        // 席はタイル経路を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
+        ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled", "tiled"],
+        ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled", "tiled"],
+        // M=2 はどちらのタイル経路も適用外で ①'（M ≤ 8）も ③' も席どおり上がる
+        ["full r=2 parallel M=2", TILED, false, "parallel", 2, "parallel", "parallel"],
+        // M=9 は ①' の適用外（M ≤ 8 の外・タイル経路の手前）なので ①QK は逐次のまま、
+        // ③PV だけが席どおり ③' へ上がる（段で適用範囲が違うことの直接の観測点）
+        ["full r=2 parallel M=9", TILED, false, "parallel", 9, "sequential", "parallel"],
+        // M=1 も適用外。席どおりに 2 段とも分かれる
+        ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential", "sequential"],
+        ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel", "parallel"],
+      ] as const) {
         const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
         const context = await session.createGenerationContext({ chunkLength: chunkRows });
         try {
@@ -914,26 +906,32 @@ test({
             chunkRows,
             chunkRows,
           );
-          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map((row) =>
-            row.key
+          const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
+            (row) => row.key,
           );
           assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
           const gqa = model.heads !== model.kvHeads;
           const shown = keys.join(" / ");
-          for (
-            const [stage, expected, routes] of [
-              ["①QK", qkExpected, [
+          for (const [stage, expected, routes] of [
+            [
+              "①QK",
+              qkExpected,
+              [
                 ["sequential", stateQkKey(sliding, gqa)],
                 ["parallel", stateQkParallelKey(sliding, gqa)],
                 ["tiled", stateQkTiledKey(sliding, gqa, chunkRows)],
-              ]],
-              ["③PV", pvExpected, [
+              ],
+            ],
+            [
+              "③PV",
+              pvExpected,
+              [
                 ["sequential", statePvKey(sliding, gqa)],
                 ["parallel", statePvParallelKey(sliding, gqa)],
                 ["tiled", statePvTiledKey(sliding, gqa, chunkRows)],
-              ]],
-            ] as const
-          ) {
+              ],
+            ],
+          ] as const) {
             for (const [route, key] of routes) {
               assertEquals(
                 keys.includes(key),
@@ -1370,8 +1368,7 @@ test({
  * 中身を見ずに外す側へ倒す」形もこの門で赤くなる。
  */
 test({
-  name:
-    "ミス run が run 前検査で落ちても計画と params は残り、繰り返しても params を新しく確保しない（実 GPU）",
+  name: "ミス run が run 前検査で落ちても計画と params は残り、繰り返しても params を新しく確保しない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1425,8 +1422,7 @@ test({
  * （`helpers/oom-injection.ts`）ので、run 前検査で落ちた run の後始末の pop に当たる。
  */
 test({
-  name:
-    "ミス run が run 前検査で落ちても、捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す（注入・実 GPU）",
+  name: "ミス run が run 前検査で落ちても、捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す（注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1587,15 +1583,16 @@ test({
       assertEquals(plain.pastLength, QUERY_ROWS);
 
       // 両方とも CPU 参照と一致する（片側だけ見ると「同じように壊れた」形を見逃す）。
-      for (
-        const [label, state, inputs, actual, chunkRows] of [
-          ["バケット形（M=4）", bucketState, bucketIn, bucketOut, 4],
-          ["prefill 形（M=8）", plainState, plainIn, plainOut, 8],
-        ] as const
-      ) {
+      for (const [label, state, inputs, actual, chunkRows] of [
+        ["バケット形（M=4）", bucketState, bucketIn, bucketOut, 4],
+        ["prefill 形（M=8）", plainState, plainIn, plainOut, 8],
+      ] as const) {
         const expected = advanceOracle(FULL, 8, state, inputs, chunkRows, QUERY_ROWS);
         const valid = takeRows(FULL.heads, chunkRows, FULL.depth, QUERY_ROWS, expected);
-        assert(valid.some((value) => Math.abs(value) > 1e-3), `${label}: 期待出力が自明（全 ~0）`);
+        assert(
+          valid.some((value) => Math.abs(value) > 1e-3),
+          `${label}: 期待出力が自明（全 ~0）`,
+        );
         const report = compareTensors(
           { dtype: "f32", data: actual },
           { dtype: "f32", data: expected },
@@ -1895,7 +1892,12 @@ test({
 
       /** 各 run 決着時の `[backing 構築回数, 焼き直し回数]`。 */
       const builds: [number, number][] = [];
-      for (const [rows, salt] of [[1, 23], [4, 31], [1, 43], [4, 53]] as const) {
+      for (const [rows, salt] of [
+        [1, 23],
+        [4, 31],
+        [1, 43],
+        [4, 53],
+      ] as const) {
         await assertStep(session, context, FULL, 8, state, rows, 1, salt, `M=${rows} へ切替`);
         assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
         const diagnostics = session.diagnostics();
@@ -1906,7 +1908,12 @@ test({
       // backing のバッファを束ねた束が使い回されている。
       assertEquals(
         builds,
-        [[1, 1], [2, 2], [3, 3], [4, 4]],
+        [
+          [1, 1],
+          [2, 2],
+          [3, 3],
+          [4, 4],
+        ],
         "backing の再構築に context 側の焼き直しが追随していない",
       );
       assertEquals(
@@ -1943,7 +1950,14 @@ test({
       await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 初回（導出）");
 
       const builds: [number, number][] = [];
-      for (const [rows, salt] of [[1, 23], [4, 31], [1, 43], [4, 53], [1, 61], [4, 71]] as const) {
+      for (const [rows, salt] of [
+        [1, 23],
+        [4, 31],
+        [1, 43],
+        [4, 53],
+        [1, 61],
+        [4, 71],
+      ] as const) {
         await assertStep(session, context, FULL, 8, state, rows, 1, salt, `M=${rows} へ切替`);
         assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
         const diagnostics = session.diagnostics();
@@ -1954,7 +1968,14 @@ test({
       // 形はここが緑でも値で落ちる。
       assertEquals(
         builds,
-        [[1, 1], [2, 2], [2, 2], [2, 2], [2, 2], [2, 2]],
+        [
+          [1, 1],
+          [2, 2],
+          [2, 2],
+          [2, 2],
+          [2, 2],
+          [2, 2],
+        ],
         "保持した形の往復で backing の作り直し / 焼き直しが起きている",
       );
       assertEquals(session.diagnostics().planBacking.retainedCount, 2, "2 形が保持されていない");
@@ -2043,9 +2064,9 @@ test({
     // 「最古 1 本の退役」ではなくなる。比べるのは予算が勘定する量（領域 + 所有入力）。
     assert(
       accountedBytes([mid]) <= accountedBytes([wide]),
-      `M=2 の実測 ${JSON.stringify(mid)} が M=4 の ${
-        JSON.stringify(wide)
-      } 以下でない（門が空振る）`,
+      `M=2 の実測 ${JSON.stringify(mid)} が M=4 の ${JSON.stringify(
+        wide,
+      )} 以下でない（門が空振る）`,
     );
 
     const session = await stateSession(gpu, BUDGET_MODEL, {
@@ -2064,7 +2085,12 @@ test({
     };
     try {
       // M=4 と M=1 を 2 本ずつ回して両方を保持させる（1 本目は導出 = backing 不使用）。
-      for (const [rows, salt] of [[4, 0], [4, 7], [1, 13], [1, 19]] as const) {
+      for (const [rows, salt] of [
+        [4, 0],
+        [4, 7],
+        [1, 13],
+        [1, 19],
+      ] as const) {
         await assertStep(
           session,
           context,
@@ -2212,14 +2238,12 @@ test({
     const state = newOracle(GQA, 8);
     try {
       // prefill（M=4 / Q=4）→ decode ×3（M=1 / Q=1）。salt は step ごとに変える
-      for (
-        const [chunkRows, query, salt, label] of [
-          [4, 4, 2, "prefill"],
-          [1, 1, 17, "decode 1"],
-          [1, 1, 29, "decode 2"],
-          [1, 1, 43, "decode 3"],
-        ] as const
-      ) {
+      for (const [chunkRows, query, salt, label] of [
+        [4, 4, 2, "prefill"],
+        [1, 1, 17, "decode 1"],
+        [1, 1, 29, "decode 2"],
+        [1, 1, 43, "decode 3"],
+      ] as const) {
         const inputs = stepInputs(GQA, chunkRows, salt);
         const actual = await runStep(parallel, parallelContext, GQA, inputs, chunkRows, query);
         const baseline = await runStep(

@@ -7,7 +7,13 @@
 //
 // 実 GPU も環境変数も要らない — 環境とモードは引数で注入する。
 
-import { makeTempDirSync, readFile, readTextFileSync, removeSync, writeTextFileSync } from "@karume/test-support/fs";
+import {
+  makeTempDirSync,
+  readFile,
+  readTextFileSync,
+  removeSync,
+  writeTextFileSync,
+} from "@karume/test-support/fs";
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { describe, it, test } from "@karume/test-support/test";
 import type { Environment } from "./helpers/environment.ts";
@@ -250,17 +256,14 @@ test("参照門: opt-in のケースは登録から外した走行では数え�
   // `opt-in` は環境変数で有効になるケース（行は別の機にしか無い）。無効の走行では呼び手が登録に
   // 含めない（e2e_wan_pipeline_test.ts の CASE_IDS の条件つき登録）— 門は fixture 全体ではなく
   // 登録した集合だけを数える。
-  withFixture(
-    { "case-1": { [CURRENT]: SHA_A }, "opt-in": { [OTHER]: SHA_B } },
-    (fixtureUrl) => {
-      const references = openReferences(fixtureUrl, {
-        environment: environment(CURRENT),
-        mode: undefined,
-      });
-      assertEquals(referenceGatePasses(references, ["case-1"]), true, "無効の opt-in を数えた");
-      assertEquals(referenceGatePasses(references, ["case-1", "opt-in"]), false);
-    },
-  );
+  withFixture({ "case-1": { [CURRENT]: SHA_A }, "opt-in": { [OTHER]: SHA_B } }, (fixtureUrl) => {
+    const references = openReferences(fixtureUrl, {
+      environment: environment(CURRENT),
+      mode: undefined,
+    });
+    assertEquals(referenceGatePasses(references, ["case-1"]), true, "無効の opt-in を数えた");
+    assertEquals(referenceGatePasses(references, ["case-1", "opt-in"]), false);
+  });
 });
 
 test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
@@ -279,11 +282,7 @@ test("参照 fixture: 未設定モードで行が無いケースを突き合わ�
       environment: environment(CURRENT),
       mode: undefined,
     });
-    assertThrows(
-      () => references.check("case-1", SHA_A),
-      Error,
-      "KARUME_REFERENCE=write",
-    );
+    assertThrows(() => references.check("case-1", SHA_A), Error, "KARUME_REFERENCE=write");
   });
 });
 
@@ -384,9 +383,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isCasesDocument = (
   value: unknown,
 ): value is { readonly cases: Record<string, Record<string, string>> } =>
-  isRecord(value) && isRecord(value.cases) &&
-  Object.values(value.cases).every((rows) =>
-    isRecord(rows) && Object.values(rows).every((sha) => typeof sha === "string")
+  isRecord(value) &&
+  isRecord(value.cases) &&
+  Object.values(value.cases).every(
+    (rows) => isRecord(rows) && Object.values(rows).every((sha) => typeof sha === "string"),
   );
 
 /** ディスク上の fixture の `cases` を読む（型ガードで絞る — 形が崩れていれば落ちる）。 */
@@ -442,11 +442,7 @@ describe("settleReference", () => {
         bytes: BYTES,
       });
       assertEquals(settlement.check, { status: "fail", expected: SHA_A });
-      assertEquals(
-        await readFile(settlement.artifactUrl),
-        BYTES,
-        "不一致の回に実物が残っていない",
-      );
+      assertEquals(await readFile(settlement.artifactUrl), BYTES, "不一致の回に実物が残っていない");
       assertEquals(readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
     });
   });
@@ -606,10 +602,12 @@ describe("referenceEntryFields", () => {
 
   it("pass / fail は突き合わせた行を expected に持つ", () => {
     for (const status of ["pass", "fail"] as const) {
-      assertEquals(
-        referenceEntryFields(settlementOf({ status, expected: SHA_A }), "case-1.png"),
-        { status, expected: SHA_A, actual: SHA_B, artifact: "case-1.png" },
-      );
+      assertEquals(referenceEntryFields(settlementOf({ status, expected: SHA_A }), "case-1.png"), {
+        status,
+        expected: SHA_A,
+        actual: SHA_B,
+        artifact: "case-1.png",
+      });
     }
   });
 });

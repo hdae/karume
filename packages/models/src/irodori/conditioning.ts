@@ -33,9 +33,7 @@ export const rightPad = (
   where: string,
 ): Float32Array<ArrayBuffer> => {
   if (state.rows > rows) {
-    throw new Error(
-      `IrodoriPipeline: ${where} の長さ ${state.rows} が宣言長 ${rows} を超えている`,
-    );
+    throw new Error(`IrodoriPipeline: ${where} の長さ ${state.rows} が宣言長 ${rows} を超えている`);
   }
   if (state.data.length !== state.rows * width) {
     throw new Error(
@@ -118,9 +116,10 @@ const encodeReferenceAudio = async (
   const { config } = state;
   assertReferenceAudio(audio, config);
   const maxSamples = referenceMaxSamples(config);
-  const limited = audio.data.length > maxSamples
-    ? (audio.data.slice(0, maxSamples) as Float32Array<ArrayBuffer>)
-    : audio.data;
+  const limited =
+    audio.data.length > maxSamples
+      ? (audio.data.slice(0, maxSamples) as Float32Array<ArrayBuffer>)
+      : audio.data;
   const padded = reflectPadToHop(
     normalizeReference(limited, config.sampleRate).data,
     config.hopLength,
@@ -251,26 +250,20 @@ export const encodeSpeaker = async (
   // patch の破れの**出所**は 2 経路で違う（呼び手の latent = 入力起因 / codec encoder の出力 =
   // 内部不変条件）ので、条件は 1 本のまま送出型だけを分ける。音声経路の行数は切り詰めで
   // 宣言長に収まるので、そちらは最終突合せ（{@link rightPad}）に任せる。
-  const patched = "audio" in input
-    ? patchReferenceLatent(
-      await encodeReferenceAudio(state, emit, input.audio),
-      config.latentDim,
-      config.speakerPatchSize,
-    )
-    : patchRequestedLatent(input.latent, config);
-  const encoded = await withStageSession(
-    state,
-    emit,
-    "speaker",
-    state.speaker,
-    {},
-    async (run) => {
-      const outputs = await run({
-        latent: f32(patched.data, [1, patched.tokens, patched.width]),
-      });
-      return asF32(outputAt(state.speaker, outputs, 0), "speaker の出力");
-    },
-  );
+  const patched =
+    "audio" in input
+      ? patchReferenceLatent(
+          await encodeReferenceAudio(state, emit, input.audio),
+          config.latentDim,
+          config.speakerPatchSize,
+        )
+      : patchRequestedLatent(input.latent, config);
+  const encoded = await withStageSession(state, emit, "speaker", state.speaker, {}, async (run) => {
+    const outputs = await run({
+      latent: f32(patched.data, [1, patched.tokens, patched.width]),
+    });
+    return asF32(outputAt(state.speaker, outputs, 0), "speaker の出力");
+  });
   // 平均トークンの前置はグラフの外（ADR 0047 決定 4）。
   return {
     data: prependMeanToken(encoded, patched.tokens, config.speakerDim),

@@ -83,10 +83,7 @@ const WEIGHT = (i: number): number => (((i * 11) % 19) - 9) * 0.0041;
 const BIAS = (i: number): number => 0.375 + (i % 5) * 0.25;
 
 /** `fill` の大寸法版（実寸の 3,770 万要素で JS 配列を経由しない）。 */
-const generate = (
-  count: number,
-  value: (index: number) => number,
-): Float32Array<ArrayBuffer> => {
+const generate = (count: number, value: (index: number) => number): Float32Array<ArrayBuffer> => {
   const data = new Float32Array(count);
   for (let i = 0; i < count; i += 1) data[i] = value(i);
   return data;
@@ -124,7 +121,7 @@ const dimsOf = (testCase: Conv3dCase): Conv3dDims => {
       testCase.dilation[axis],
       testCase.kernel[axis],
       testCase.stride[axis],
-    )
+    ),
   );
   return {
     channelsIn: testCase.channelsIn,
@@ -319,7 +316,10 @@ const firstMismatches = (
 /** 恒真化の門（出力が定数なら一致は何も検証していない）。 */
 const assertNotConstant = (bits: Uint32Array, where: string): void => {
   const first = bits[0];
-  assert(bits.some((value) => value !== first), `${where}: 出力が定数（一致が恒真になっている）`);
+  assert(
+    bits.some((value) => value !== first),
+    `${where}: 出力が定数（一致が恒真になっている）`,
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -459,15 +459,15 @@ const runParity = async (
 }> => {
   const dims = dimsOf(testCase);
   const xShape = [dims.channelsIn, dims.timeIn, dims.heightIn, dims.widthIn];
-  const wShape = [
-    dims.channelsOut,
-    dims.channelsIn,
-    dims.kernelT,
-    dims.kernelH,
-    dims.kernelW,
-  ];
-  const x = generate(xShape.reduce((a, b) => a * b, 1), SIGNED);
-  const w = generate(wShape.reduce((a, b) => a * b, 1), WEIGHT);
+  const wShape = [dims.channelsOut, dims.channelsIn, dims.kernelT, dims.kernelH, dims.kernelW];
+  const x = generate(
+    xShape.reduce((a, b) => a * b, 1),
+    SIGNED,
+  );
+  const w = generate(
+    wShape.reduce((a, b) => a * b, 1),
+    WEIGHT,
+  );
   const bias = generate(dims.channelsOut, BIAS);
   const payload = weightPayload(w, wShape, testCase.storage);
   return await withRig(gpu, async (rig) => {
@@ -558,7 +558,10 @@ const runFrameIdentity = async (
     }
   }
   const wShape = [dims.channelsOut, cin, 1, dims.kernelH, dims.kernelW];
-  const w = generate(wShape.reduce((a, b) => a * b, 1), WEIGHT);
+  const w = generate(
+    wShape.reduce((a, b) => a * b, 1),
+    WEIGHT,
+  );
   // 重みは [Cout, Cin, 1, Kh, Kw] と [Cout, Cin, Kh, Kw] で**同じバイト列**（同じバッファを束縛する）
   const payload = weightPayload(w, wShape, testCase.storage);
   const bias = generate(dims.channelsOut, BIAS);
@@ -722,8 +725,7 @@ const IDENTITY_REAL: readonly Conv3dCase[] = [
 ];
 
 test({
-  name:
-    "恒等門 ①: Kt = 1 の conv3d はフレームごとの conv2d と Uint32 で一致する（小形 3 種 + 実寸 4 形・実 GPU）",
+  name: "恒等門 ①: Kt = 1 の conv3d はフレームごとの conv2d と Uint32 で一致する（小形 3 種 + 実寸 4 形・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -783,11 +785,7 @@ const runZeroFrameIdentity = async (
   }
   const w1Shape = [cout, cin, 1, dims.kernelH, dims.kernelW];
   const w1 = weightPayload(sliced, w1Shape, testCase.storage);
-  assertEquals(
-    [...w1.values],
-    [...sliced],
-    `${testCase.name}: 最終スライスの再格納で値が動いた`,
-  );
+  assertEquals([...w1.values], [...sliced], `${testCase.name}: 最終スライスの再格納で値が動いた`);
   const bias = generate(cout, BIAS);
   const dims1 = { ...dims, timeIn: 1, kernelT: 1 };
   return await withRig(gpu, async (rig) => {
@@ -871,8 +869,7 @@ const ZERO_FRAME_CASES: readonly Conv3dCase[] = [
 ];
 
 test({
-  name:
-    "恒等門 ②: 先頭 2 枚がゼロの Kt = 3 は最終スライスの Kt = 1 と一致する（符号付きゼロのみ許容・実 GPU）",
+  name: "恒等門 ②: 先頭 2 枚がゼロの Kt = 3 は最終スライスの Kt = 1 と一致する（符号付きゼロのみ許容・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -897,7 +894,7 @@ test({
 // ---------------------------------------------------------------------------
 
 /** 毒値 0xDEADBEEF を f32 として読んだもの（0 でない有限値 — tests/gpu_full_write_test.ts と同じ）。 */
-const POISON = new Float32Array(new Uint32Array([0xDEADBEEF]).buffer)[0];
+const POISON = new Float32Array(new Uint32Array([0xdeadbeef]).buffer)[0];
 
 const conv3dAttrs = (padding: Triple, groups = 1): Record<string, unknown> => ({
   stride: [1, 1, 1],
@@ -983,8 +980,7 @@ const POISON_CASES: readonly {
 ];
 
 test({
-  name:
-    "conv3d は毒値を 1 語も残さず、executor は既定幾何の implicit GEMM を踏む（full-write / 実 GPU）",
+  name: "conv3d は毒値を 1 語も残さず、executor は既定幾何の implicit GEMM を踏む（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     for (const testCase of POISON_CASES) {
@@ -1036,14 +1032,14 @@ test({
     // 起きず assertRejects だけが静かに落ちるドリフトになる — gpu_runtime_executor_test.ts と同じ）。
     const tileN = gemmTileN(gemmMTileGeometry(GEMM_MTILE_SMALL));
     const n = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
-    const graph = singleOpDeclaration("conv3d", [[1, 1, 1, n], [1, 1, 1, 1, 1], [1]], [[
-      1,
-      1,
-      1,
-      n,
-    ]], {
-      attrs: conv3dAttrs([0, 0, 0]),
-    });
+    const graph = singleOpDeclaration(
+      "conv3d",
+      [[1, 1, 1, n], [1, 1, 1, 1, 1], [1]],
+      [[1, 1, 1, n]],
+      {
+        attrs: conv3dAttrs([0, 0, 0]),
+      },
+    );
     const session = await createSessionFromContainer(
       gpu,
       await openModelBytes(graph, []),
@@ -1068,8 +1064,7 @@ test({
 });
 
 test({
-  name:
-    "conv3d の groups > 1 は Session の構築時に落ちる（GPU の実装済み subset — ADR 0118 決定 1）",
+  name: "conv3d の groups > 1 は Session の構築時に落ちる（GPU の実装済み subset — ADR 0118 決定 1）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -1104,7 +1099,12 @@ test({
     const wShape = [10, 4, 3, 3, 3];
     const outShape = [10, 1, 5, 8];
     const x = fill(xShape, SIGNED);
-    const quantized = quantizeF16(generate(wShape.reduce((a, b) => a * b, 1), WEIGHT));
+    const quantized = quantizeF16(
+      generate(
+        wShape.reduce((a, b) => a * b, 1),
+        WEIGHT,
+      ),
+    );
     const bias = generate(10, BIAS);
     const declaration: DeclarationJson = {
       format: "karume-ir",

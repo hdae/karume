@@ -264,9 +264,8 @@ export class Qwen2Tokenizer {
       let merge = row.get(right);
       if (merge === undefined) {
         const rank = this.#assets.merges.get(`${spellings[left]} ${spellings[right]}`);
-        merge = rank === undefined
-          ? null
-          : { rank, newId: intern(spellings[left] + spellings[right]) };
+        merge =
+          rank === undefined ? null : { rank, newId: intern(spellings[left] + spellings[right]) };
         row.set(right, merge);
       }
       return merge ?? undefined;

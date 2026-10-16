@@ -34,7 +34,7 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
     ...(profile.match === undefined ? {} : { match: Object.freeze({ ...profile.match }) }),
     gemmRows: Object.freeze(
       profile.gemmRows.map((rule) =>
-        Object.freeze({ maxRows: rule.maxRows, geometry: geometry(rule.geometry) })
+        Object.freeze({ maxRows: rule.maxRows, geometry: geometry(rule.geometry) }),
       ),
     ),
     attention: Object.freeze({
@@ -50,21 +50,20 @@ const freezeGeometryProfile = (profile: GeometryProfile): GeometryProfile => {
       attentionQk: geometry(profile.i8a8.attentionQk),
       attentionPv: geometry(profile.i8a8.attentionPv),
     }),
-    ...(profile.provenance === undefined ? {} : {
-      provenance: Object.freeze({
-        ...profile.provenance,
-        ...(profile.provenance.userAgent === undefined
-          ? {}
-          : { userAgent: Object.freeze([...profile.provenance.userAgent]) }),
-        adapter: Object.freeze({ ...profile.provenance.adapter }),
-      }),
-    }),
+    ...(profile.provenance === undefined
+      ? {}
+      : {
+          provenance: Object.freeze({
+            ...profile.provenance,
+            ...(profile.provenance.userAgent === undefined
+              ? {}
+              : { userAgent: Object.freeze([...profile.provenance.userAgent]) }),
+            adapter: Object.freeze({ ...profile.provenance.adapter }),
+          }),
+        }),
   });
 };
 
 export const BUILTIN_GEOMETRY_PROFILES: readonly GeometryProfile[] = Object.freeze(
-  [
-    APPLE_METAL_3,
-    NVIDIA_BLACKWELL,
-  ].map(freezeGeometryProfile),
+  [APPLE_METAL_3, NVIDIA_BLACKWELL].map(freezeGeometryProfile),
 );

@@ -151,24 +151,24 @@ export type WanGenerateEvent =
    * `vae_decoder` は chunk グラフ 2 本の段。途中で落ちたら `end` は出ない。
    */
   | {
-    readonly kind: "stage";
-    readonly component: "vae_encoder" | "text_encoder" | "transformer" | "vae_decoder";
-    readonly at: "start" | "end";
-  }
+      readonly kind: "stage";
+      readonly component: "vae_encoder" | "text_encoder" | "transformer" | "vae_decoder";
+      readonly at: "start" | "end";
+    }
   | {
-    readonly kind: "denoise-step";
-    /** 完了した step 数（1 始まり）。 */
-    readonly step: number;
-    readonly steps: number;
-    /** その step で DiT へ渡した timestep（整数）。 */
-    readonly timestep: number;
-    /**
-     * 呼んだときだけ途中の潜在を写して返す（UniPC の更新の後の潜在）。I2V（Wan2.2 に `image` を渡した要求）では
-     * スケジューラの状態そのもので、先頭の潜在フレームは条件の潜在に置き換わっていない — 置き換えは DiT の段の
-     * 最後に 1 回（上流 diffusers の `callback_on_step_end` が受ける `latents` と同じ値）。
-     */
-    readonly copyLatents: () => WanLatentSnapshot;
-  }
+      readonly kind: "denoise-step";
+      /** 完了した step 数（1 始まり）。 */
+      readonly step: number;
+      readonly steps: number;
+      /** その step で DiT へ渡した timestep（整数）。 */
+      readonly timestep: number;
+      /**
+       * 呼んだときだけ途中の潜在を写して返す（UniPC の更新の後の潜在）。I2V（Wan2.2 に `image` を渡した要求）では
+       * スケジューラの状態そのもので、先頭の潜在フレームは条件の潜在に置き換わっていない — 置き換えは DiT の段の
+       * 最後に 1 回（上流 diffusers の `callback_on_step_end` が受ける `latents` と同じ値）。
+       */
+      readonly copyLatents: () => WanLatentSnapshot;
+    }
   /** VAE のタイル 1 枚の decode の完了（`tile` は 1 始まり）。 */
   | { readonly kind: "vae-tile"; readonly tile: number; readonly tiles: number };
 
@@ -295,10 +295,7 @@ export type WanPipelineOptions = {
    * 1 プロンプト = 1 回・DiT は 1 forward = 1 回・VAE は 1 タイル = first / next の 1 回ずつ）。例外は握らない
    * （fail loudly）。
    */
-  readonly onRunDiagnostics?: (
-    component: WanRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
   /**
    * 構築の中断。class の `fromPretrained` は同じ 1 本を取得層へも渡すので、取得（umT5 だけで
    * 約 5.3 GiB）と組み立てのどちらの最中でも効く。組み立ての段の境目（入口・容器を開いた後・資産の
@@ -318,10 +315,9 @@ export type WanPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、欄ごとの
  * 説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type WanFromPretrainedOptions =
-  & WanPipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions;
+export type WanFromPretrainedOptions = WanPipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions;
 
 /**
  * 取得済みの manifest + 資産（hub の `fetchAssets` の返り値をそのまま渡せる形）。`assets` の部品は

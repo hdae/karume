@@ -353,10 +353,7 @@ const assertWriteCoverage = (
  * **書かれる行だけ**を並べた語列。行ブロックを割ると S の行ストライド（`rows_block`）が
  * 変わるので、割り方の違う 2 回を突き合わせるにはこの正規化が要る。
  */
-const liveRows = (
-  spec: StateCase,
-  blocks: readonly Uint32Array<ArrayBuffer>[],
-): number[] => {
+const liveRows = (spec: StateCase, blocks: readonly Uint32Array<ArrayBuffer>[]): number[] => {
   const colCap = caseColCap(spec);
   const batchHeads = spec.batch * spec.heads;
   const live = stateLiveColumns(spec.window, spec.past, spec.query);
@@ -387,9 +384,9 @@ const assertSameWords = (
     for (let index = 0; index < got.length; index += 1) {
       if (got[index] === want[index]) continue;
       throw new Error(
-        `${label}: ブロック ${block} の語 ${index} が違う（①ₜ 0x${
-          got[index].toString(16).padStart(8, "0")
-        } / ① 0x${want[index].toString(16).padStart(8, "0")}）`,
+        `${label}: ブロック ${block} の語 ${index} が違う（①ₜ 0x${got[index]
+          .toString(16)
+          .padStart(8, "0")} / ① 0x${want[index].toString(16).padStart(8, "0")}）`,
       );
     }
   }
@@ -436,8 +433,7 @@ test({
 });
 
 test({
-  name:
-    "①ₜ は 2 回 dispatch・容量 C・行ブロックの割り方のどれを変えても書いた語が動かない（実 GPU）",
+  name: "①ₜ は 2 回 dispatch・容量 C・行ブロックの割り方のどれを変えても書いた語が動かない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -523,20 +519,18 @@ test({
     const inputs = makeInputs(spec);
     try {
       const reference = await runStateQk(gpu.device, spec, inputs, "sequential", { cache });
-      for (
-        const [label, mutate] of [
-          // ① B ローダの半スケールを外す（k 側にだけ scale が掛からない = 1 項の式が ① と違う）
-          [
-            "B ローダの半スケール除去",
-            (wgsl: string) => wgsl.replace(/^ *(wv\d+) = \1 \* dims\.scale;\n/gm, ""),
-          ],
-          // ② 列基点の 2 源を取り違える（全列を ins から読む）
-          [
-            "列基点の 2 源取り違え",
-            (wgsl: string) => wgsl.replace(/(let kpast\d+ = kcol\d+) < past;/g, "$1 < 0u;"),
-          ],
-        ] as const
-      ) {
+      for (const [label, mutate] of [
+        // ① B ローダの半スケールを外す（k 側にだけ scale が掛からない = 1 項の式が ① と違う）
+        [
+          "B ローダの半スケール除去",
+          (wgsl: string) => wgsl.replace(/^ *(wv\d+) = \1 \* dims\.scale;\n/gm, ""),
+        ],
+        // ② 列基点の 2 源を取り違える（全列を ins から読む）
+        [
+          "列基点の 2 源取り違え",
+          (wgsl: string) => wgsl.replace(/(let kpast\d+ = kcol\d+) < past;/g, "$1 < 0u;"),
+        ],
+      ] as const) {
         let mutated = false;
         const broken = await runStateQk(gpu.device, spec, inputs, "tiled", {
           cache,

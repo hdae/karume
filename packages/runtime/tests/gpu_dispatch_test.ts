@@ -39,10 +39,7 @@ test({
       const input = Float32Array.from({ length: count }, (_, i) => i);
       const bytes = input.byteLength;
 
-      const src = arena.allocHostWritten(
-        bytes,
-        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      );
+      const src = arena.allocHostWritten(bytes, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
       gpu.device.queue.writeBuffer(src, 0, input);
 
       const dst = arena.allocRegion(bytes);
@@ -89,8 +86,7 @@ test({
 });
 
 test({
-  name:
-    "領域の offset 束縛で中間と出力を 1 本のバッファに同居させ、配り直しても結果が壊れない（実 GPU）",
+  name: "領域の offset 束縛で中間と出力を 1 本のバッファに同居させ、配り直しても結果が壊れない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -104,7 +100,11 @@ test({
         bytes,
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       );
-      gpu.device.queue.writeBuffer(source, 0, Float32Array.from({ length: count }, () => 1));
+      gpu.device.queue.writeBuffer(
+        source,
+        0,
+        Float32Array.from({ length: count }, () => 1),
+      );
 
       const { pipeline, layout, roles } = await cache.get(
         "test:double_plus_one:f32",

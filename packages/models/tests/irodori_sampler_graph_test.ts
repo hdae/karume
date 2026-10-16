@@ -105,11 +105,7 @@ const countFences = (gpu: GpuContext): { readonly count: () => number; restore: 
  * ホストで組んだ宣言（重み 0 本）をメモリ内容器に載せて Session にする
  * （`dit-loop.ts` の `openHostGraph` と同じ組み方）。
  */
-const hostSession = (
-  gpu: GpuContext,
-  name: string,
-  declaration: IrDeclaration,
-): Promise<Session> =>
+const hostSession = (gpu: GpuContext, name: string, declaration: IrDeclaration): Promise<Session> =>
   createSessionFromContainer(
     gpu,
     openMemoryContainer({ graphs: { [name]: declaration }, tensors: {} }),
@@ -169,18 +165,24 @@ const residentLoop = async (
         vCond.write(step.cond);
         for (let k = 0; k < step.variants.length; k += 1) {
           vVariant.write(step.variants[k]);
-          await combine.enqueue({
-            [COMBINE_INPUTS.accumulator]: k === 0 ? vCond : accumulator,
-            [COMBINE_INPUTS.cond]: vCond,
-            [COMBINE_INPUTS.variant]: vVariant,
-            [COMBINE_INPUTS.scale]: scalar(SCALES[k]),
-          }, { batch, copyOutputs: { [COMBINE_OUTPUT]: accumulator } });
+          await combine.enqueue(
+            {
+              [COMBINE_INPUTS.accumulator]: k === 0 ? vCond : accumulator,
+              [COMBINE_INPUTS.cond]: vCond,
+              [COMBINE_INPUTS.variant]: vVariant,
+              [COMBINE_INPUTS.scale]: scalar(SCALES[k]),
+            },
+            { batch, copyOutputs: { [COMBINE_OUTPUT]: accumulator } },
+          );
         }
-        await euler.enqueue({
-          [EULER_INPUTS.x]: xT,
-          [EULER_INPUTS.velocity]: step.variants.length > 0 ? accumulator : vCond,
-          [EULER_INPUTS.deltaT]: scalar(step.deltaT),
-        }, { batch, copyOutputs: { [EULER_OUTPUT]: xT } });
+        await euler.enqueue(
+          {
+            [EULER_INPUTS.x]: xT,
+            [EULER_INPUTS.velocity]: step.variants.length > 0 ? accumulator : vCond,
+            [EULER_INPUTS.deltaT]: scalar(step.deltaT),
+          },
+          { batch, copyOutputs: { [EULER_OUTPUT]: xT } },
+        );
       }
       assertEquals(fences.count() - before, 0, "enqueue はフェンスを 1 本も張らない");
     } finally {

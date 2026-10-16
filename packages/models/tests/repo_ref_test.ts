@@ -107,9 +107,12 @@ test("toManifestSource: 取得元ハンドルは綴りの門を通さずその�
   // ローカルの配布形は HF の repo ではないので、`owner/name` を要求する門に掛けてはならない
   // （掛けると「repo が必須」で落ち、手元のディレクトリからは 1 バイトも読めない）。
   // 実体は 1 度も読まないので、アダプターは読まれたら落ちる形で十分。
-  const source = localDirectory({
-    readFile: () => Promise.reject(new Error("repo_ref_test: 判別だけで実体を読んだ")),
-  }, { label: "./models/karume-test" });
+  const source = localDirectory(
+    {
+      readFile: () => Promise.reject(new Error("repo_ref_test: 判別だけで実体を読んだ")),
+    },
+    { label: "./models/karume-test" },
+  );
   assertStrictEquals(toManifestSource(source, "Gemma4Pipeline.fromPretrained"), source);
 });
 

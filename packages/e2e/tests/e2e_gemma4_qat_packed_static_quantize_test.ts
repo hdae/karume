@@ -48,10 +48,12 @@ describe({
             },
           });
           try {
-            const prompt = gemma4ChatPrompt(pipeline.tokenizer, [{
-              role: "user",
-              content: "Write a numbered list of twenty tips for learning a new language.",
-            }]);
+            const prompt = gemma4ChatPrompt(pipeline.tokenizer, [
+              {
+                role: "user",
+                content: "Write a numbered list of twenty tips for learning a new language.",
+              },
+            ]);
             const sequence = await pipeline.sequence({ capacity: 256 });
             try {
               const stream = sequence.generate({

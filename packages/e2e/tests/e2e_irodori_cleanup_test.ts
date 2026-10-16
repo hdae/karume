@@ -24,16 +24,18 @@ if (!hasQuantSeat("i8")) {
   console.warn(`[karume] Irodori cleanup テストの i8 資産が無いため SKIP。生成: ${DIST_COMMAND}`);
 }
 test({
-  name:
-    "Irodori 常駐ループ: 本体と多重 cleanup の失敗を保ち、全 Session と resident を解放する（実 GPU）",
+  name: "Irodori 常駐ループ: 本体と多重 cleanup の失敗を保ち、全 Session と resident を解放する（実 GPU）",
   ignore: !GPU_AVAILABLE || !hasQuantSeat("i8"),
   fn: async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest, "i8");
-    const pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: "i8",
-    });
+    const pipeline = await IrodoriPipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: "i8",
+      },
+    );
     const build = Session.build;
     const enqueue = Session.prototype.enqueue;
     const sessionDispose = Session.prototype.dispose;
@@ -100,7 +102,7 @@ test({
         }
       };
       const error = await assertRejects(() =>
-        pipeline.generateLatent({ text: "こんにちは。", durationSeconds: 0.5, seed: 7 })
+        pipeline.generateLatent({ text: "こんにちは。", durationSeconds: 0.5, seed: 7 }),
       );
       const flatten = (error: unknown): unknown[] =>
         error instanceof AggregateError ? error.errors.flatMap(flatten) : [error];
@@ -135,7 +137,9 @@ test({
           sessions,
           residents,
           order: order.slice(start),
-          failures: failures.map((error) => error instanceof Error ? error.message : String(error)),
+          failures: failures.map((error) =>
+            error instanceof Error ? error.message : String(error),
+          ),
         }),
       );
     } finally {

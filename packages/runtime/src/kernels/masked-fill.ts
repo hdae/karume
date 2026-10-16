@@ -23,8 +23,7 @@ import { STRIDED_RANK } from "../codegen/strided.ts";
 
 export const MASKED_FILL_WORKGROUP_SIZE = 256;
 
-export const MASKED_FILL_KEY =
-  `masked_fill:v1:f32:bool:r${STRIDED_RANK}:wg${MASKED_FILL_WORKGROUP_SIZE}`;
+export const MASKED_FILL_KEY = `masked_fill:v1:f32:bool:r${STRIDED_RANK}:wg${MASKED_FILL_WORKGROUP_SIZE}`;
 
 /**
  * params のレイアウト（storage, u32 配列）:
@@ -59,9 +58,10 @@ export const MASKED_FILL_WGSL: string = [
     return `    let c${d} = rem % params[${dimAt(d)}u]; rem = rem / params[${dimAt(d)}u];`;
   }),
   "    let c0 = rem;",
-  `    let mask_index = ${
-    Array.from({ length: STRIDED_RANK }, (_, d) => `c${d} * params[${strideAt(d)}u]`).join(" + ")
-  };`,
+  `    let mask_index = ${Array.from(
+    { length: STRIDED_RANK },
+    (_, d) => `c${d} * params[${strideAt(d)}u]`,
+  ).join(" + ")};`,
   "    // bool の格納は u32 の 0 / 1（ADR 0009）— 真の位置だけを埋め値に差し替える",
   "    out[i] = select(x[i], fill, mask[mask_index] != 0u);",
   "    i = i + stride;",

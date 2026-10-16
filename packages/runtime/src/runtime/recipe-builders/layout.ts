@@ -61,15 +61,16 @@ export const buildStridedCopy = async (
   const srcShape = step.inputShapes[0];
   const outShape = step.outputs[0].shape;
   const where = `nodes (${step.node.op})`;
-  const srcStrides = kind === "permute"
-    ? permuteSrcStrides(srcShape, permuteDims(step.node.attrs, where))
-    : kind === "expand"
-    ? expandSrcStrides(srcShape, outShape)
-    : kind === "slice"
-    ? sliceSrcStrides(srcShape)
-    // MUST: 束縛後の outShape ではなく **srcShape（Tmax 形）** から組む（prefixSliceSrcStrides
-    // の MUST — 送り幅を縮めると 2 行目以降が別の行を読む）。
-    : prefixSliceSrcStrides(srcShape);
+  const srcStrides =
+    kind === "permute"
+      ? permuteSrcStrides(srcShape, permuteDims(step.node.attrs, where))
+      : kind === "expand"
+        ? expandSrcStrides(srcShape, outShape)
+        : kind === "slice"
+          ? sliceSrcStrides(srcShape)
+          : // MUST: 束縛後の outShape ではなく **srcShape（Tmax 形）** から組む（prefixSliceSrcStrides
+            // の MUST — 送り幅を縮めると 2 行目以降が別の行を読む）。
+            prefixSliceSrcStrides(srcShape);
   // offset は ADR 0011 の (offset, strides[4]) モデルそのもの。permute / expand /
   // sym_prefix_slice は入力の先頭から読むので 0 で、**slice だけが 0 以外**を取る
   // （ADR 0011 が予告した「可変点 1 語」がここ）。
@@ -97,7 +98,10 @@ export const buildStridedCopy = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };
@@ -143,7 +147,10 @@ export const buildCat = async (
       layout,
       roles,
       params,
-      bindings: [{ binding: 1, source }, { binding: 2, source: outs[0] }],
+      bindings: [
+        { binding: 1, source },
+        { binding: 2, source: outs[0] },
+      ],
       workgroups: [groups, 1, 1],
     });
     written += srcShape[dim];
@@ -187,7 +194,10 @@ export const buildPad = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };
@@ -223,7 +233,10 @@ export const buildFlip = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };
@@ -247,13 +260,7 @@ export const buildUpsampleBilinear2d = async (
     UPSAMPLE_BILINEAR2D_WGSL,
   );
   const params = face.writeParams(
-    upsampleBilinear2dParams(
-      numel(outShape),
-      srcShape[2],
-      srcShape[3],
-      outShape[2],
-      outShape[3],
-    ),
+    upsampleBilinear2dParams(numel(outShape), srcShape[2], srcShape[3], outShape[2], outShape[3]),
     PARAMS_UNIFORM_USAGE,
   );
   const groups = gridStrideWorkgroups(
@@ -267,7 +274,10 @@ export const buildUpsampleBilinear2d = async (
     layout,
     roles,
     params,
-    bindings: [{ binding: 1, source: binds[0] }, { binding: 2, source: outs[0] }],
+    bindings: [
+      { binding: 1, source: binds[0] },
+      { binding: 2, source: outs[0] },
+    ],
     workgroups: [groups, 1, 1],
   });
 };

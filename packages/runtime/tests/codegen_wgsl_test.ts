@@ -291,10 +291,8 @@ const BMM_WGSL = bmmWgsl(false);
  * 融合 attention の ①③（ADR 0023）と conv1d / conv2d の implicit GEMM（ADR 0024）も同じ
  * 骨格を共有するので、内積ループ・タイル辺・キーの検査が自動でこちらにも掛かる。
  */
-const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, true]
-  .flatMap((
-    v4,
-  ) => [
+const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, true].flatMap(
+  (v4) => [
     [`matmul${v4 ? " v4" : ""}`, matmulKey(v4), matmulWgsl(v4)] as const,
     [`bmm${v4 ? " v4" : ""}`, bmmKey(v4), bmmWgsl(v4)] as const,
     [`attention_qk${v4 ? " v4" : ""}`, attentionQkKey(v4), attentionQkWgsl(v4)] as const,
@@ -330,7 +328,8 @@ const GEMM_VARIANTS: readonly (readonly [string, string, string])[] = [false, tr
       linearKey("i4", v4, "f32", undefined, 32),
       linearWgsl("i4", v4, "f32", undefined, 32),
     ] as const,
-  ]);
+  ],
+);
 const EMBEDDING_WGSL = embeddingWgsl("f32");
 const CONV1D_WGSL = conv1dWgsl("f32");
 const CONV1D_KEY = conv1dKey("f32");
@@ -381,10 +380,7 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ],
     ["elementwise_log1p_r1.wgsl", elementwiseWgsl({ op: "log1p", rank: 1, dtype: "f32" })],
     ["elementwise_clamp_r2.wgsl", elementwiseWgsl({ op: "clamp", rank: 2, dtype: "f32" })],
-    [
-      "elementwise_clamp_min_r1.wgsl",
-      elementwiseWgsl({ op: "clamp_min", rank: 1, dtype: "f32" }),
-    ],
+    ["elementwise_clamp_min_r1.wgsl", elementwiseWgsl({ op: "clamp_min", rank: 1, dtype: "f32" })],
     [
       "elementwise_leaky_relu_r1.wgsl",
       elementwiseWgsl({ op: "leaky_relu", rank: 1, dtype: "f32" }),
@@ -546,15 +542,9 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
     ["linear_gemv_static_quantize_g512_l4.wgsl", linearGemvStaticQuantizeWgsl("i4", 512, 4)],
     ["linear_gemv_static_quantize_wi8_l32.wgsl", linearGemvStaticQuantizeWgsl("i8", undefined, 32)],
     // packed int8 活性の変種（ADR 0105）— 活性の束縛と復元だけが違う 6 本。
-    [
-      "linear_gemv_parallel_packed_wi2_l2.wgsl",
-      linearGemvParallelPackedWgsl("i2", undefined, 2),
-    ],
+    ["linear_gemv_parallel_packed_wi2_l2.wgsl", linearGemvParallelPackedWgsl("i2", undefined, 2)],
     ["linear_gemv_parallel_packed_g512_l4.wgsl", linearGemvParallelPackedWgsl("i4", 512, 4)],
-    [
-      "linear_gemv_parallel_packed_wi8_l16.wgsl",
-      linearGemvParallelPackedWgsl("i8", undefined, 16),
-    ],
+    ["linear_gemv_parallel_packed_wi8_l16.wgsl", linearGemvParallelPackedWgsl("i8", undefined, 16)],
     [
       "linear_gemv_static_quantize_packed_wi2_l2.wgsl",
       linearGemvStaticQuantizePackedWgsl("i2", undefined, 2),
@@ -817,7 +807,8 @@ test("生成した WGSL がスナップショットとバイト単位で一致�
   // 無い名前は上の readTextFile で落ちる（= 片側だけ足した状態を両方向で塞ぐ）。
   assertEquals(
     [...readDirSync(new URL("./fixtures/wgsl/", import.meta.url))]
-      .map((entry) => entry.name).sort(),
+      .map((entry) => entry.name)
+      .sort(),
     cases.map(([name]) => name).sort(),
     "fixtures/wgsl の中身とスナップショット列挙が食い違う",
   );
@@ -885,12 +876,10 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
   // MUST: 選ばれうる最大形（i4 8 行 / i8 16 行 = 天井 256 要素/語）の生成テキストに上限を置く。
   // テキスト量がそのままシェーダの解析・検証費（naga はテキスト量に超線形）で、8 行 73 KB ≈ 55 ms が
   // 黙って 100 KB / 200 ms へ戻る退行を止める検出器（perf-ledger K-21・research 2026-09-07-gemv-rows-k21 §6）。
-  for (
-    const [label, text] of [
-      ["i4 r8", linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 8 })],
-      ["i8 r16", linearGemvRowsWgsl("i8", undefined, { cols: 32, unroll: 4, rows: 16 })],
-    ] as const
-  ) {
+  for (const [label, text] of [
+    ["i4 r8", linearGemvRowsWgsl("i4", 32, { cols: 32, unroll: 4, rows: 8 })],
+    ["i8 r16", linearGemvRowsWgsl("i8", undefined, { cols: 32, unroll: 4, rows: 16 })],
+  ] as const) {
     assert(
       text.length <= 80_000,
       `linear gemv rows ${label}: 生成テキスト ${text.length} 文字が上限 80,000 を超えた`,
@@ -1021,20 +1010,16 @@ test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtyp
   for (const k of [1, 4, TOPK_CORE_LIMIT_MAX_K]) {
     assertEquals(topkWgsl(k), topkWgsl(k), `topk:k=${k}`);
   }
-  for (const direction of (["forward", "reverse"] as const)) {
+  for (const direction of ["forward", "reverse"] as const) {
     assertEquals(gruScanWgsl(direction), gruScanWgsl(direction), `gru_scan:${direction}`);
   }
-  for (const order of (["x-sigmoid", "sigmoid-x"] as const)) {
+  for (const order of ["x-sigmoid", "sigmoid-x"] as const) {
     assertEquals(siluWgsl(order), siluWgsl(order), `silu:${order}`);
   }
-  for (const order of (["norm-residual", "residual-norm"] as const)) {
+  for (const order of ["norm-residual", "residual-norm"] as const) {
     assertEquals(rmsNormAddWgsl(order), rmsNormAddWgsl(order), `rms_norm_add:${order}`);
   }
-  assertEquals(
-    embeddingWgsl("i4", 32),
-    embeddingWgsl("i4", 32),
-    "embedding:i4:g32",
-  );
+  assertEquals(embeddingWgsl("i4", 32), embeddingWgsl("i4", 32), "embedding:i4:g32");
   for (const weight of WEIGHT_STORAGES) {
     assertEquals(embeddingWgsl(weight), embeddingWgsl(weight), `embedding:${weight}`);
     assertEquals(conv1dWgsl(weight), conv1dWgsl(weight), `conv1d:${weight}`);
@@ -1095,7 +1080,7 @@ test("パイプラインキーは生成入力ごとに一意（別カーネル�
         conv2dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
         conv1dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
         conv3dIgemmKey(weight, v4, GEMM_MTILE_SMALL),
-      ])
+      ]),
     ),
     // i4 は **group 長ごとに別キー**（shift を WGSL に焼く — ADR 0069）。g 部がキーに
     // 乗っていないと group 32 のパイプラインが group 64 の資産で走り、scale 添字がずれた
@@ -1138,7 +1123,7 @@ test("パイプラインキーは生成入力ごとに一意（別カーネル�
       [16, 32, 64].flatMap((groupSize) => [
         linearI8a8Key(v4, false, undefined, "i4", groupSize),
         linearI8a8Key(v4, true, undefined, "i4", groupSize),
-      ])
+      ]),
     ),
     // 融合 attention ①QK / ③PV の i8a8 変種も同じ規律
     // （f32 / :c16 / i8a8 の 3 系統 × 段の 2 本が全て別キー）
@@ -1213,17 +1198,10 @@ test("strided params は rank 不足を左詰めで 1 / 0 に埋める", () => {
   assertEquals([...params.slice(0, 5)], [12, 1, 1, 3, 4]);
   assertEquals([...params.slice(5, 9)], [0, 0, 1, 3]);
   assertEquals(params[9], 0, "permute / expand の offset は常に 0");
-  assertEquals([...stridedParams([2, 3, 4, 5], [60, 20, 5, 1], 7).slice(1)], [
-    2,
-    3,
-    4,
-    5,
-    60,
-    20,
-    5,
-    1,
-    7,
-  ]);
+  assertEquals(
+    [...stridedParams([2, 3, 4, 5], [60, 20, 5, 1], 7).slice(1)],
+    [2, 3, 4, 5, 60, 20, 5, 1, 7],
+  );
 });
 
 // ADR 0014: slice は既存の読み族の流用で、可変点は **params の offset 1 語**だけ。
@@ -1490,7 +1468,10 @@ test("clamp / clamp_min / relu / amax / amin は NaN を比較ではなくビッ
   }
   // MUST: 縮約は 2 段（1 スレッドの走査 + workgroup の木）。片方だけ守っても NaN は
   // 反対側の段で identity（±F32_MAX）に飲まれるので、両段が同じ関数を通ること。
-  for (const [op, fn] of [["amax", "nan_max"], ["amin", "nan_min"]] as const) {
+  for (const [op, fn] of [
+    ["amax", "nan_max"],
+    ["amin", "nan_min"],
+  ] as const) {
     const wgsl = reduceWgsl({ op, dtype: "f32" });
     assertEquals(wgsl.includes(bits), true, op);
     assertEquals(wgsl.includes(`acc = ${fn}(acc, x[base + i]);`), true, op);
@@ -1579,10 +1560,7 @@ test("argmax は最小 index を保存する比較式・−inf identity・ビッ
   // ① タイブレーク: 同値なら小さい index が勝つ（辞書式順序の 1 本の述語）
   assertEquals(ARGMAX_WGSL.includes("return kb > ka || (kb == ka && ib < ia);"), true);
   // 述語は 1 箇所定義で、走査・木の両方が同じ関数を呼ぶ（向きの取り違えを構造で潰す）
-  assertEquals(
-    ARGMAX_WGSL.includes("fn rank_key_beats(kb: u32, ib: u32, ka: u32, ia: u32)"),
-    true,
-  );
+  assertEquals(ARGMAX_WGSL.includes("fn rank_key_beats(kb: u32, ib: u32, ka: u32, ia: u32)"), true);
   assertEquals(ARGMAX_WGSL.includes("if (rank_key_beats(v, i, best, best_at)) {"), true);
   assertEquals(
     ARGMAX_WGSL.includes(
@@ -1633,10 +1611,7 @@ test("argmax は最小 index を保存する比較式・−inf identity・ビッ
  */
 test("topk は 2 相（レーン局所 top-k → トーナメント merge）で、最小 index を保存する述語を共有する", () => {
   assertEquals(TOPK_WORKGROUP_SIZE, 32);
-  assertEquals(
-    topkKey(4),
-    `topk:v2:f32+i32:lastdim:desc:minindex:k4:wg${TOPK_WORKGROUP_SIZE}`,
-  );
+  assertEquals(topkKey(4), `topk:v2:f32+i32:lastdim:desc:minindex:k4:wg${TOPK_WORKGROUP_SIZE}`);
   // キーは k を含む（k ごとに別 WGSL）
   assertEquals(topkKey(1) === topkKey(2), false);
   const wgsl = topkWgsl(4);
@@ -1655,9 +1630,7 @@ test("topk は 2 相（レーン局所 top-k → トーナメント merge）で�
   assertEquals(wgsl.includes("fn rank_key_beats(kb: u32, ib: u32, ka: u32, ia: u32)"), true);
   assertEquals(wgsl.includes("return kb > ka || (kb == ka && ib < ia);"), true);
   assertEquals(
-    wgsl.includes(
-      "if (rank_key_beats(v, i, cand_value[block + 3u], cand_index[block + 3u])) {",
-    ),
+    wgsl.includes("if (rank_key_beats(v, i, cand_value[block + 3u], cand_index[block + 3u])) {"),
     true,
   );
   assertEquals(
@@ -1741,10 +1714,7 @@ test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に�
   );
   assertEquals(ROPE_WGSL.includes("products[lid] = vec2<u32>(direct_bits, cross_bits);"), true);
   assertEquals(ROPE_WGSL.match(/workgroupBarrier\(\);/g)?.length, 2);
-  assertEquals(
-    ROPE_WGSL.includes("out[i] = bitcast<f32>(pair.x) + bitcast<f32>(pair.y);"),
-    true,
-  );
+  assertEquals(ROPE_WGSL.includes("out[i] = bitcast<f32>(pair.x) + bitcast<f32>(pair.y);"), true);
   assertEquals([...ropeParams(2 * 3 * 128, 3, 128)], [768, 3, 128, 64]);
   assertEquals(ropeParams(768, 3, 128).byteLength, 16);
   assertThrows(() => ropeParams(768, 0, 128), CodegenError, "sequence");
@@ -1792,9 +1762,7 @@ test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タッ�
   assertEquals(UPSAMPLE_BILINEAR2D_WGSL.includes("clamp("), false, "座標の clamp は使わない");
   // 式木は H が外・W が内（torch の CUDA カーネルと同形 — 括弧が動くと丸め列が変わる）
   assertEquals(
-    UPSAMPLE_BILINEAR2D_WGSL.includes(
-      "out[i] = ly0 * (lx0 * x[row0 + x0] + lx1 * x[row0 + x1])",
-    ),
+    UPSAMPLE_BILINEAR2D_WGSL.includes("out[i] = ly0 * (lx0 * x[row0 + x0] + lx1 * x[row0 + x1])"),
     true,
   );
   const params = upsampleBilinear2dParams(2 * 3 * 7 * 9, 4, 5, 7, 9);
@@ -1841,10 +1809,7 @@ test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分け�
   // MUST: NaN はビット列で判定して**伝播**させる（正の形だけだと 0 寄与に落ちる）。
   // 判定は共有断片の正本 1 本を注入する（ADR 0020 — 写しを持つと正本の改訂に取り残される）。
   assertEquals(DEFORM_CONV2D_WGSL.includes(IS_NAN_BITS_WGSL), true, "共有断片を注入していない");
-  assertEquals(
-    DEFORM_CONV2D_WGSL.includes("if (is_nan_bits(sy) || is_nan_bits(sx)) {"),
-    true,
-  );
+  assertEquals(DEFORM_CONV2D_WGSL.includes("if (is_nan_bits(sy) || is_nan_bits(sx)) {"), true);
   assertEquals(DEFORM_CONV2D_WGSL.includes("fn is_nan("), false, "NaN 判定の写しが残っている");
   assertEquals(DEFORM_CONV2D_WGSL.includes("return bitcast<f32>(dims.oob);"), true);
   // MUST: NaN のビット列は params で運ぶ（定数式の `bitcast<f32>(0x…)` は「const-expression が
@@ -1857,10 +1822,7 @@ test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分け�
   // MUST: 座標の clamp は使わない（境界外は clamp ではなくゼロ埋め）
   assertEquals(DEFORM_CONV2D_WGSL.includes("clamp("), false, "座標の clamp は使わない");
   // MUST: 偶数チャネル = y / 奇数 = x
-  assertEquals(
-    DEFORM_CONV2D_WGSL.includes("offsets[offset_base + 2u * tap * plane_out]"),
-    true,
-  );
+  assertEquals(DEFORM_CONV2D_WGSL.includes("offsets[offset_base + 2u * tap * plane_out]"), true);
   assertEquals(
     DEFORM_CONV2D_WGSL.includes("offsets[offset_base + (2u * tap + 1u) * plane_out]"),
     true,
@@ -1891,10 +1853,7 @@ test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分け�
     paddingH: 1,
     paddingW: 0,
   });
-  assertEquals(
-    [...params],
-    [80, 1, 3, 5, 4, 5, 4, 4, 3, 2, 1, 0, DEFORM_CONV2D_OOB_BITS, 0, 0, 0],
-  );
+  assertEquals([...params], [80, 1, 3, 5, 4, 5, 4, 4, 3, 2, 1, 0, DEFORM_CONV2D_OOB_BITS, 0, 0, 0]);
   // uniform struct の整列は 16 バイト（13 語ぶんの内容を 16 語 = 64 バイト確保する）
   assertEquals(params.byteLength, 64);
   const dims = {
@@ -1910,11 +1869,7 @@ test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分け�
     paddingH: 1,
     paddingW: 0,
   };
-  assertThrows(
-    () => deformConv2dParams({ ...dims, paddingH: -1 }),
-    CodegenError,
-    "非負整数",
-  );
+  assertThrows(() => deformConv2dParams({ ...dims, paddingH: -1 }), CodegenError, "非負整数");
   // 空間長 0 は全タップが範囲外判定に落ち、出力が bias 一色になる沈黙誤値
   assertThrows(() => deformConv2dParams({ ...dims, heightIn: 0 }), CodegenError, "height_in");
   assertThrows(() => deformConv2dParams({ ...dims, widthIn: 0 }), CodegenError, "width_in");
@@ -1943,7 +1898,10 @@ test("gru_scan は更新式を分解形の逐語で書き、mul と add の間�
 
   const forward = gruScanWgsl("forward");
   const reverse = gruScanWgsl("reverse");
-  for (const [where, wgsl] of [["forward", forward], ["reverse", reverse]] as const) {
+  for (const [where, wgsl] of [
+    ["forward", forward],
+    ["reverse", reverse],
+  ] as const) {
     // MUST: 縮約は k 昇順の逐次で字面も GEMM と同じ（`acc = acc + a * b`）
     assertEquals(wgsl.includes("acc_r = acc_r + w_hh[row_r + k] * hk;"), true, where);
     // MUST: bias は last（conv 系の bias-first を写すと linear とのビット同一が崩れる）
@@ -1953,11 +1911,7 @@ test("gru_scan は更新式を分解形の逐語で書き、mul と add の間�
       where,
     );
     // MUST: 候補ゲートは素の tanh でなく tanh_stable（Metal fast-math の沈黙 NaN — v2）
-    assertEquals(
-      wgsl.includes("cand = tanh_stable(gi[gi_base + hidden * 2u + lid]"),
-      true,
-      where,
-    );
+    assertEquals(wgsl.includes("cand = tanh_stable(gi[gi_base + hidden * 2u + lid]"), true, where);
     assertEquals(wgsl.includes("fn tanh_stable(x: f32)"), true, where);
     // MUST: 丸め障壁 ①（n の積）と ②（更新式の積）が workgroup memory 往復で残っている
     assertEquals(wgsl.includes("stage[lid] = bitcast<u32>(gh_n * gate_r);"), true, where);
@@ -2012,7 +1966,10 @@ test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち�
 
   const xs = siluWgsl("x-sigmoid");
   const sx = siluWgsl("sigmoid-x");
-  for (const [where, wgsl] of [["x-sigmoid", xs], ["sigmoid-x", sx]] as const) {
+  for (const [where, wgsl] of [
+    ["x-sigmoid", xs],
+    ["sigmoid-x", sx],
+  ] as const) {
     assertEquals(wgsl.includes("var<workgroup> sigmoid_bits: array<u32, 256>;"), true, where);
     assertEquals(
       wgsl.includes("sigmoid_bits[lid] = bitcast<u32>(sigmoid_stable(x_for_sigmoid));"),
@@ -2094,10 +2051,7 @@ test("elementwise params はスカラ attr を末尾に f32 のビット列で�
   assertEquals(floats[5], -1.5);
   assertEquals(floats[6], 2.25);
   // 既定は 0 本（既存 op の params レイアウトは変わらない）
-  assertEquals(
-    elementwiseParams({ op: "neg", rank: 2, dtype: "f32" }, [2, 3], [[2, 3]]).length,
-    5,
-  );
+  assertEquals(elementwiseParams({ op: "neg", rank: 2, dtype: "f32" }, [2, 3], [[2, 3]]).length, 5);
   assertThrows(
     () => elementwiseParams({ op: "clamp_min", rank: 1, dtype: "f32" }, [2], [[2]], [Number.NaN]),
     CodegenError,
@@ -2123,21 +2077,21 @@ test("elementwise params はスカラ attr を末尾に f32 のビット列で�
     "アリティ",
   );
   // スカラの本数も同じ 1 箇所で見る（多すぎるぶんは黙って捨てられていた）
-  assertThrows(
-    () => elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5]),
-    CodegenError,
-    "スカラ",
-  );
+  assertThrows(() => elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5]), CodegenError, "スカラ");
   // rank も spec 側が正本（出力 shape だけから導かない）
   assertThrows(() => elementwiseParams(clamp, [6], [[6]], [-1.5, 2.25]), CodegenError, "rank");
 });
 
 test("elementwise params は右詰め broadcast の stride を 0 にする", () => {
   // 出力 [2,3,4] に対し in0=[2,3,4]（連続）、in1=[3,1]（右詰めで [1,3,1]）
-  const params = elementwiseParams({ op: "add", rank: 3, dtype: "f32" }, [2, 3, 4], [
+  const params = elementwiseParams(
+    { op: "add", rank: 3, dtype: "f32" },
     [2, 3, 4],
-    [3, 1],
-  ]);
+    [
+      [2, 3, 4],
+      [3, 1],
+    ],
+  );
   assertEquals([...params.slice(0, 4)], [24, 2, 3, 4]);
   assertEquals([...params.slice(4, 7)], [12, 4, 1]);
   assertEquals([...params.slice(7, 10)], [0, 1, 0]);
@@ -2161,13 +2115,30 @@ test("elementwise params は broadcast 不能な軸長を受理しない", () =>
     "一致せず 1 でもない",
   );
   assertThrows(
-    () => elementwiseParams({ op: "add", rank: 2, dtype: "f32" }, [2, 3], [[2, 3], [2, 4]]),
+    () =>
+      elementwiseParams(
+        { op: "add", rank: 2, dtype: "f32" },
+        [2, 3],
+        [
+          [2, 3],
+          [2, 4],
+        ],
+      ),
     CodegenError,
     "一致せず 1 でもない",
   );
   // 適合形は 1 語も動かない（門を広げすぎていないことの対）
   assertEquals(
-    [...elementwiseParams({ op: "add", rank: 2, dtype: "f32" }, [2, 3], [[2, 3], [1, 3]])],
+    [
+      ...elementwiseParams(
+        { op: "add", rank: 2, dtype: "f32" },
+        [2, 3],
+        [
+          [2, 3],
+          [1, 3],
+        ],
+      ),
+    ],
     [6, 2, 3, 3, 1, 0, 1],
   );
 });
@@ -2203,7 +2174,7 @@ test("bmm は matmul と別カーネルで、バッチ軸のオフセットを�
     // バッチは workgroup の z 軸から取り、3 バッファとも行列 1 枚ぶんのオフセットで読み書きする。
     // MUST: v4 では base も **quad 単位**（`m * k4`）— 要素単位のまま組むと batch ≥ 2 で
     // 隣のバッチを読み書きし、例外なしの誤値になる（タイル境界の GPU ケースが唯一の検出器）。
-    const unit = (dim: string) => v4 ? `${dim}4` : `dims.${dim}`;
+    const unit = (dim: string) => (v4 ? `${dim}4` : `dims.${dim}`);
     assertEquals(bmmWgsl(v4).includes(`let abase = wid.z * dims.m * ${unit("k")};`), true, where);
     assertEquals(bmmWgsl(v4).includes(`let bbase = wid.z * dims.k * ${unit("n")};`), true, where);
     assertEquals(bmmWgsl(v4).includes(`let cbase = wid.z * dims.m * ${unit("n")};`), true, where);
@@ -2286,16 +2257,14 @@ test("融合 attention の 3 カーネルは分解経路とビット同一にな
   // `1.0 / Σ` のどれかが変わればビット同一が壊れるので、softmax 側の本文と断片単位で
   // 突き合わせる（写し崩れの唯一の機械的検出器）。v2 から identity と空行ガードは
   // **safe_softmax 側**と共有する（有限行では plain 形とビット同一 — attention.ts 根拠 3）。
-  for (
-    const shared of [
-      "    var i = lid;\n    while (i < dim) {",
-      "    var stride = 128u;",
-      "        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
-      "    var stride2 = 128u;",
-      "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
-      "    let inv = 1.0 / scratch[0u];",
-    ]
-  ) {
+  for (const shared of [
+    "    var i = lid;\n    while (i < dim) {",
+    "    var stride = 128u;",
+    "        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
+    "    var stride2 = 128u;",
+    "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
+    "    let inv = 1.0 / scratch[0u];",
+  ]) {
     assertEquals(SOFTMAX_WGSL.includes(shared), true, `softmax 側に無い断片: ${shared}`);
     assertEquals(
       ATTENTION_STATS_WGSL.includes(shared),
@@ -2304,27 +2273,18 @@ test("融合 attention の 3 カーネルは分解経路とビット同一にな
     );
   }
   // safe_softmax と共有するガード 3 点（identity −inf・空行判定・amax の select）
-  for (
-    const guard of [
-      "let neg_inf = bitcast<f32>(params.neg_inf);",
-      "    var hi = neg_inf;",
-      "    let row_max = scratch[0u];",
-      "    let empty = row_max == neg_inf;",
-      "    let amax = select(row_max, 0.0, empty);",
-    ]
-  ) {
+  for (const guard of [
+    "let neg_inf = bitcast<f32>(params.neg_inf);",
+    "    var hi = neg_inf;",
+    "    let row_max = scratch[0u];",
+    "    let empty = row_max == neg_inf;",
+    "    let amax = select(row_max, 0.0, empty);",
+  ]) {
     assertEquals(SAFE_SOFTMAX_WGSL.includes(guard), true, `safe_softmax 側に無い: ${guard}`);
-    assertEquals(
-      ATTENTION_STATS_WGSL.includes(guard),
-      true,
-      `attention_stats 側に無い: ${guard}`,
-    );
+    assertEquals(ATTENTION_STATS_WGSL.includes(guard), true, `attention_stats 側に無い: ${guard}`);
   }
   // 走査の本体は行の要素を読む式まで一致する（`x[base + …]` が `s[base + …]` になるだけ）
-  assertEquals(
-    ATTENTION_STATS_WGSL.includes("acc = acc + exp(s[base + j] - amax);"),
-    true,
-  );
+  assertEquals(ATTENTION_STATS_WGSL.includes("acc = acc + exp(s[base + j] - amax);"), true);
   assertEquals(SOFTMAX_WGSL.includes("acc = acc + exp(x[base + j] - amax);"), true);
   // ② は行を書き戻さない（3 パス → 1 パス化の実体 — 出力は行あたり 2 語だけ）。
   // 空行は (0.0, 0.0)（amax は select 済み・inv だけここで確定する）
@@ -2446,7 +2406,7 @@ test("attention の加算 mask は ①QK の epilogue だけを変え、②③ �
   );
   // 同一構成が 2 通りのキーを持たない（mask の有無 × v4 × 格納の全数が一意）
   const keys = [false, true].flatMap((v4) =>
-    [false, true].map((mask) => attentionQkKey(v4, "f32", "f32", mask))
+    [false, true].map((mask) => attentionQkKey(v4, "f32", "f32", mask)),
   );
   assertEquals(new Set(keys).size, keys.length);
 });
@@ -2461,12 +2421,13 @@ test("attention の加算 mask は ①QK の epilogue だけを変え、②③ �
 const undoGqa = (text: string, side: "k" | "v", mapped: string, plain: string): string =>
   text
     .split("\n")
-    .filter((line) =>
-      line !== "  kv_repeat: u32," &&
-      !line.includes("GQA（ADR 0067 決定 2）") &&
-      !line.includes("q / S / O / 行統計は q-head のまま")
+    .filter(
+      (line) =>
+        line !== "  kv_repeat: u32," &&
+        !line.includes("GQA（ADR 0067 決定 2）") &&
+        !line.includes("q / S / O / 行統計は q-head のまま"),
     )
-    .map((line) => line === mapped ? plain : line)
+    .map((line) => (line === mapped ? plain : line))
     .join("\n")
     .replace(`, GQA（${side} は kv-head へ整数除算で写す）`, "");
 
@@ -2555,7 +2516,9 @@ test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だけを
       // MUST: 行統計（rbase）も出力（cbase）も q-head のまま（S は [B·H,M,N] のまま）
       for (const line of gqa.split("\n")) {
         if (
-          line.includes("let rbase") || line.includes("let cbase") || line.includes("let abase")
+          line.includes("let rbase") ||
+          line.includes("let cbase") ||
+          line.includes("let abase")
         ) {
           assertEquals(line.includes("kv_repeat"), false, `${where}: q 側が写っている: ${line}`);
         }
@@ -2591,8 +2554,8 @@ test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だけを
       [false, true].flatMap((gqa) => [
         attentionQkKey(v4, "f32", "f32", mask, gqa),
         attentionPvKey(v4, "f32", "f32", gqa),
-      ])
-    )
+      ]),
+    ),
   );
   assertEquals(new Set(allKeys).size, 2 * 2 * 2 + 2 * 2, "①は mask×gqa×v4 / ③は gqa×v4 で一意");
 
@@ -2734,9 +2697,9 @@ test("融合 attention の行窓変種は片側の base と mask の行添字だ
         [false, true].flatMap((window) => [
           attentionQkKey(v4, "f32", "f32", mask, gqa, window),
           attentionPvKey(v4, "f32", "f32", gqa, window),
-        ])
-      )
-    )
+        ]),
+      ),
+    ),
   );
   assertEquals(
     new Set(allKeys).size,
@@ -2767,14 +2730,12 @@ test("融合 attention の行窓変種は片側の base と mask の行添字だ
   assertEquals(attentionQkI8a8Params(5, 12, 4, 0.5).byteLength, 16, "窓なしは従来どおり 16B");
   assertEquals(attentionPvI8a8Params(5, 4, 8).byteLength, 16, "窓なしは従来どおり 16B");
   // MUST: ブロックが全 M をはみ出す組は fail loudly（黙って通すと隣のバッチを読み書きする）。
-  for (
-    const build of [
-      () => attentionQkParams(5, 7, 4, 0.5, undefined, { offset: 5, rowsFull: 9 }),
-      () => attentionPvParams(5, 4, 7, undefined, { offset: 5, rowsFull: 9 }),
-      () => attentionQkI8a8Params(8, 12, 4, 0.5, { offset: 4, rowsFull: 9 }),
-      () => attentionPvI8a8Params(8, 4, 8, { offset: 4, rowsFull: 9 }),
-    ]
-  ) {
+  for (const build of [
+    () => attentionQkParams(5, 7, 4, 0.5, undefined, { offset: 5, rowsFull: 9 }),
+    () => attentionPvParams(5, 4, 7, undefined, { offset: 5, rowsFull: 9 }),
+    () => attentionQkI8a8Params(8, 12, 4, 0.5, { offset: 4, rowsFull: 9 }),
+    () => attentionPvI8a8Params(8, 4, 8, { offset: 4, rowsFull: 9 }),
+  ]) {
     assertThrows(build, CodegenError, "をはみ出す");
   }
 });
@@ -2841,13 +2802,14 @@ test("GEMM 骨格 8 op のタイル辺・キー・TS 定数が既定幾何と一
     assertEquals(key.includes(conv ? "wg16x8" : "r8x8w16"), true, where);
     // 端チャネル読出しの保護で conv と i8 linear の世代を更新する。
     // WGSL を変えていない格納形式と attention / matmul / bmm の世代は維持する。
-    const version = where.startsWith("attention") || where.startsWith("conv3d")
-      ? ":v1:"
-      : where.startsWith("conv1d")
-      ? ":v4:"
-      : where.startsWith("conv2d") || where.startsWith("linear i8")
-      ? ":v3:"
-      : ":v2:";
+    const version =
+      where.startsWith("attention") || where.startsWith("conv3d")
+        ? ":v1:"
+        : where.startsWith("conv1d")
+          ? ":v4:"
+          : where.startsWith("conv2d") || where.startsWith("linear i8")
+            ? ":v3:"
+            : ":v2:";
     assertEquals(key.includes(version), true, where);
     // 旧 16×16 タイルの痕跡が残っていない（キーの改版と生成物の総取り替えは対）
     assertEquals(key.includes("tile16"), false, where);
@@ -2949,7 +2911,7 @@ test("conv2dIgemmMTile は M%64 が 1..32 のときだけ 32 行を選ぶ", () =
   // 無駄の単調性（選んだタイルが常に「無駄が真に小さいか同じ」であること）
   for (let m = 1; m <= 256; m += 1) {
     const chosen = conv2dIgemmMTile(m);
-    const waste = (tile: number) => Math.ceil(m / tile) * tile / m;
+    const waste = (tile: number) => (Math.ceil(m / tile) * tile) / m;
     assertEquals(waste(chosen) <= waste(chosen === 64 ? 32 : 64), true, `M=${m}`);
   }
 });
@@ -3074,9 +3036,7 @@ test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 軸 Dim
     // 平坦 k → (ic, k)（ic を最内に取ると同じ tap 集合のまま加算順序だけが変わる）
     assertEquals(wgsl.includes("let ic = brow0 / dims.kernel;"), true, where);
     assertEquals(
-      wgsl.includes(
-        "let kt = i32((brow0 % dims.kernel) * dims.dilation) - i32(dims.padding);",
-      ),
+      wgsl.includes("let kt = i32((brow0 % dims.kernel) * dims.dilation) - i32(dims.padding);"),
       true,
       where,
     );
@@ -3090,15 +3050,13 @@ test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 軸 Dim
     }
     // A タイル・内積ループ・store は 2D 版と**同じ断片**（1 文字でも割れたら共有が壊れている）
     const conv2d = conv2dIgemmWgsl("f32", v4);
-    for (
-      const shared of [
-        "  let ar = tid / 4u;",
-        "  let arow_base0 = arow0 * dims.k;",
-        "  let bias0 = wid.y * 64u + lid.y * 8u;",
-        "      acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;",
-        "  let orow0 = wid.y * 64u + lid.y * 8u;",
-      ]
-    ) {
+    for (const shared of [
+      "  let ar = tid / 4u;",
+      "  let arow_base0 = arow0 * dims.k;",
+      "  let bias0 = wid.y * 64u + lid.y * 8u;",
+      "      acc0_0 = acc0_0 + sa[(lid.y * 8u + 0u) * 16u + kk] * bv0;",
+      "  let orow0 = wid.y * 64u + lid.y * 8u;",
+    ]) {
       assertEquals(wgsl.includes(shared), true, `${where}: ${shared}`);
       assertEquals(conv2d.includes(shared), true, `conv2d igemm v4=${v4}: ${shared}`);
     }
@@ -3207,9 +3165,7 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
   assertEquals(QUANTIZE_ROWS_WGSL.includes("/ 127"), false, "scale を除算で作っている");
   // MUST: ±127 に閉じる（−128 を使わない = 絶対値最大の要素が厳密に復元される）
   assertEquals(
-    QUANTIZE_ROWS_WGSL.includes(
-      "let r = clamp(round(v), vec4<f32>(-127.0), vec4<f32>(127.0));",
-    ),
+    QUANTIZE_ROWS_WGSL.includes("let r = clamp(round(v), vec4<f32>(-127.0), vec4<f32>(127.0));"),
     true,
   );
   assertEquals(QUANTIZE_ROWS_WGSL.includes("pack4xI8Clamp"), false, "飽和 pack に頼っている");
@@ -3244,16 +3200,14 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
   );
   assertEquals(quantizeRowsKey(quantizeRowsGeometry(128)), `${QUANTIZE_ROWS_KEY}:r8w32`);
   const grouped = quantizeRowsWgsl(quantizeRowsGeometry(128));
-  for (
-    const line of [
-      "let s = select(max(amax * 0.007874015748031496, 1.1754943508222875e-38), amax, is_nan_bits(amax));",
-      "let r = clamp(round(v), vec4<f32>(-127.0), vec4<f32>(127.0));",
-      "xq[qbase + q] = pack4xI8(vec4<i32>(r));",
-      "acc = nan_max(acc, abs(x[base + i]));",
-      "scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
-      "rowBase = rowBase + nwg.x * 8u;",
-    ]
-  ) {
+  for (const line of [
+    "let s = select(max(amax * 0.007874015748031496, 1.1754943508222875e-38), amax, is_nan_bits(amax));",
+    "let r = clamp(round(v), vec4<f32>(-127.0), vec4<f32>(127.0));",
+    "xq[qbase + q] = pack4xI8(vec4<i32>(r));",
+    "acc = nan_max(acc, abs(x[base + i]));",
+    "scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
+    "rowBase = rowBase + nwg.x * 8u;",
+  ]) {
     assertEquals(grouped.includes(line), true, `小 D 変種に無い: ${line}`);
   }
   assertEquals(grouped.includes("/ 127"), false);
@@ -3283,10 +3237,13 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
       // 内積は 8 行 × 2 列 quad へ静的展開（8×8 出力 = 64 内積）。**組ごとにちょうど 1 回**で、
       // 行番号は codegen 時に確定する — accumulator に動的添字が残っていないことが条件。
       for (let i = 0; i < 8; i += 1) {
-        for (const [quad, lanes] of [[0, [0, 1, 2, 3]], [1, [4, 5, 6, 7]]] as const) {
-          const inner = `      acc${i}_${quad} = acc${i}_${quad} + vec4<i32>(${
-            lanes.map((lane) => `idot(a${i}, b${lane})`).join(", ")
-          });`;
+        for (const [quad, lanes] of [
+          [0, [0, 1, 2, 3]],
+          [1, [4, 5, 6, 7]],
+        ] as const) {
+          const inner = `      acc${i}_${quad} = acc${i}_${quad} + vec4<i32>(${lanes
+            .map((lane) => `idot(a${i}, b${lane})`)
+            .join(", ")});`;
           assertEquals(wgsl.split(inner).length, 2, `${where}: 行 ${i} quad ${quad} の内積`);
         }
       }
@@ -3308,9 +3265,7 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
       // 束縛: 5 = 重み scale（linear と共通）/ 6 = 活性 scale（i8a8 だけ）
       assertEquals(wgsl.includes("@group(0) @binding(5) var<storage, read> wscale:"), true, where);
       assertEquals(
-        wgsl.includes(
-          `@group(0) @binding(${LINEAR_ACT_SCALE_BINDING}) var<storage, read> xscale:`,
-        ),
+        wgsl.includes(`@group(0) @binding(${LINEAR_ACT_SCALE_BINDING}) var<storage, read> xscale:`),
         true,
         where,
       );
@@ -3344,11 +3299,7 @@ test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生�
   assertEquals([...linearI8a8Params(5, 7, 8)], [5, 7, 8, 0]);
   assertEquals(linearI8a8Params(5, 7, 8).byteLength, 16);
   assertThrows(() => linearI8a8Params(5, 7, 7), CodegenError, "4 の倍数");
-  assertThrows(
-    () => linearI8a8Params(5, 7, LINEAR_I8A8_MAX_K + 4),
-    CodegenError,
-    "i32 縮約の門",
-  );
+  assertThrows(() => linearI8a8Params(5, 7, LINEAR_I8A8_MAX_K + 4), CodegenError, "i32 縮約の門");
   // 拡張の判定は WGSL 言語機能の列挙（device feature ではない）
   assertEquals(dp4aAvailable(new Set([DP4A_WGSL_FEATURE])), true);
   assertEquals(dp4aAvailable(new Set(["shader-f16"])), false);
@@ -3378,8 +3329,7 @@ test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の 
       // タイルごとでも出力ごとでもない — 丸めが k/g + 1 回であることの構造的な担保）。
       for (let row = 0; row < 8; row += 1) {
         for (const quad of [0, 1]) {
-          const flush =
-            `    accf${row}_${quad} = fma(vec4<f32>(acc${row}_${quad}), ws${quad}, accf${row}_${quad});`;
+          const flush = `    accf${row}_${quad} = fma(vec4<f32>(acc${row}_${quad}), ws${quad}, accf${row}_${quad});`;
           assertEquals(wgsl.split(flush).length, 2, `${where}: 行 ${row} quad ${quad} の flush`);
         }
       }
@@ -3467,8 +3417,9 @@ test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の 
   // 正例（門が広すぎないことの対）: group が K タイルの倍数なら通り、内側ループの
   // `tilesPerGroup = group / tileK` がそのまま焼かれる。tileK を動かした幾何でも同じ。
   assertEquals(
-    linearI8a8Wgsl(true, true, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 32 }, "i4", 32)
-      .includes("let gbase = gi * 1u;"),
+    linearI8a8Wgsl(true, true, { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 32 }, "i4", 32).includes(
+      "let gbase = gi * 1u;",
+    ),
     true,
     "tileK 32 × group 32 は 1 group = 1 タイル",
   );
@@ -3489,11 +3440,7 @@ test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の 
     4,
     "w4a8 では i8 の k 門を適用しない",
   );
-  assertThrows(
-    () => linearI8a8Params(5, 8, 48, 32),
-    CodegenError,
-    "group_size 32 で割り切れない",
-  );
+  assertThrows(() => linearI8a8Params(5, 8, 48, 32), CodegenError, "group_size 32 で割り切れない");
   assertThrows(
     () => linearI8a8Params(5, 8, LINEAR_W4A8_MAX_GROUP * 2, LINEAR_W4A8_MAX_GROUP * 2),
     CodegenError,
@@ -3527,10 +3474,13 @@ test("i8a8 attention_qk は半スケールを dequant 側に持ち、バッチ b
       // 内積は 8 行 × 2 列 quad へ静的展開（linear の i8a8 と同じ展開）。**組ごとにちょうど
       // 1 回**で、行番号は codegen 時に確定する — accumulator に動的添字が残っていないことが条件。
       for (let i = 0; i < 8; i += 1) {
-        for (const [quad, lanes] of [[0, [0, 1, 2, 3]], [1, [4, 5, 6, 7]]] as const) {
-          const inner = `      acc${i}_${quad} = acc${i}_${quad} + vec4<i32>(${
-            lanes.map((lane) => `idot(a${i}, b${lane})`).join(", ")
-          });`;
+        for (const [quad, lanes] of [
+          [0, [0, 1, 2, 3]],
+          [1, [4, 5, 6, 7]],
+        ] as const) {
+          const inner = `      acc${i}_${quad} = acc${i}_${quad} + vec4<i32>(${lanes
+            .map((lane) => `idot(a${i}, b${lane})`)
+            .join(", ")});`;
           assertEquals(wgsl.split(inner).length, 2, `${where}: 行 ${i} quad ${quad} の内積`);
         }
       }
@@ -3633,10 +3583,13 @@ test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale と�
       // 内積は 8 行 × 2 列 quad へ静的展開（①QK / linear の i8a8 と同じ展開）。**組ごとに
       // ちょうど 1 回**で、accumulator に動的添字が残っていないことが条件（下の `acc[` 検査が対）。
       for (let i = 0; i < 8; i += 1) {
-        for (const [quad, lanes] of [[0, [0, 1, 2, 3]], [1, [4, 5, 6, 7]]] as const) {
-          const inner = `      acc${i}_${quad} = acc${i}_${quad} + vec4<i32>(${
-            lanes.map((lane) => `idot(a${i}, b${lane})`).join(", ")
-          });`;
+        for (const [quad, lanes] of [
+          [0, [0, 1, 2, 3]],
+          [1, [4, 5, 6, 7]],
+        ] as const) {
+          const inner = `      acc${i}_${quad} = acc${i}_${quad} + vec4<i32>(${lanes
+            .map((lane) => `idot(a${i}, b${lane})`)
+            .join(", ")});`;
           assertEquals(wgsl.split(inner).length, 2, `${where}: 行 ${i} quad ${quad} の内積`);
         }
       }
@@ -3772,10 +3725,13 @@ test("i8a8 の幾何はキーと生成物に反映され、割り切れない組
   // ① 既定: linear / ①QK は M128N64、③PV だけ M64N128（N = D = 128 の 1 タイル化が勝つ）
   assertEquals(defaultI8a8Geometry("linear"), { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 });
   assertEquals(defaultI8a8Geometry("attention_qk"), defaultI8a8Geometry("linear"));
-  assertEquals(
-    defaultI8a8Geometry("attention_pv"),
-    { regM: 8, regN: 8, wgX: 16, wgY: 8, tileK: 16 },
-  );
+  assertEquals(defaultI8a8Geometry("attention_pv"), {
+    regM: 8,
+    regN: 8,
+    wgX: 16,
+    wgY: 8,
+    tileK: 16,
+  });
   assertEquals(i8a8TileM(defaultI8a8Geometry("linear")), 128);
   assertEquals(i8a8TileN(defaultI8a8Geometry("linear")), 64);
   assertEquals(i8a8TileM(defaultI8a8Geometry("attention_pv")), 64);
@@ -3791,26 +3747,22 @@ test("i8a8 の幾何はキーと生成物に反映され、割り切れない組
     i8a8GeometryKeyPart(alt, true),
     i8a8GeometryKeyPart(defaultI8a8Geometry("linear"), true),
   );
-  for (
-    const [where, keyOf] of [
-      ["linear", (geometry: I8a8Geometry) => linearI8a8Key(true, true, geometry)],
-      ["attention_qk", (geometry: I8a8Geometry) => attentionQkI8a8Key(true, true, "f32", geometry)],
-      ["attention_pv", (geometry: I8a8Geometry) => attentionPvI8a8Key(true, true, "f32", geometry)],
-    ] as const
-  ) {
+  for (const [where, keyOf] of [
+    ["linear", (geometry: I8a8Geometry) => linearI8a8Key(true, true, geometry)],
+    ["attention_qk", (geometry: I8a8Geometry) => attentionQkI8a8Key(true, true, "f32", geometry)],
+    ["attention_pv", (geometry: I8a8Geometry) => attentionPvI8a8Key(true, true, "f32", geometry)],
+  ] as const) {
     assertNotEquals(keyOf(alt), keyOf(defaultI8a8Geometry("linear")), `${where}: 幾何がキーに無い`);
     assertEquals(keyOf(alt).includes("tile128x64r16x8w8x8k32v4"), true, where);
   }
 
   // ③ 生成物: workgroup 形・共有タイルのバイト数・充填スロット数が幾何どおりに動く
   // （tileK 32 = 8 pack / 64 スレッドなので A は 16 巡・B は 8 巡）
-  for (
-    const [where, wgsl] of [
-      ["linear", linearI8a8Wgsl(true, true, alt)],
-      ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", alt)],
-      ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", alt)],
-    ] as const
-  ) {
+  for (const [where, wgsl] of [
+    ["linear", linearI8a8Wgsl(true, true, alt)],
+    ["attention_qk", attentionQkI8a8Wgsl(true, true, "f32", alt)],
+    ["attention_pv", attentionPvI8a8Wgsl(true, true, "f32", alt)],
+  ] as const) {
     assertEquals(wgsl.includes("@compute @workgroup_size(8, 8)"), true, where);
     assertEquals(wgsl.includes("var<workgroup> sa: array<u32, 1024>;"), true, where);
     assertEquals(wgsl.includes("var<workgroup> sb: array<u32, 512>;"), true, where);
@@ -3872,15 +3824,13 @@ test("attention_stats の regcache 変種は割当と縮約順を変えずに S 
   // MUST: 範囲外はどちらの段でも**触らない**（0.0 を混ぜると max も総和も静かに誤る）
   assertEquals(cached.split("if (i0 < dim) {").length - 1, 2, "範囲外の門が 2 段とも要る");
   // ツリー縮約と書き出しは 2 回読み版と逐語同一
-  for (
-    const shared of [
-      "      scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
-      "      scratch[lid] = scratch[lid] + scratch[lid + stride2];",
-      "    let inv = 1.0 / scratch[0u];",
-      "      stats[row * 2u] = amax;",
-      "    row = row + nwg.x;",
-    ]
-  ) {
+  for (const shared of [
+    "      scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
+    "      scratch[lid] = scratch[lid] + scratch[lid + stride2];",
+    "    let inv = 1.0 / scratch[0u];",
+    "      stats[row * 2u] = amax;",
+    "    row = row + nwg.x;",
+  ]) {
     assertEquals(cached.includes(shared), true, `regcache 版に無い: ${shared}`);
   }
   // dim → epc は 1 箇所の純関数。上限を超える形は 2 回読みへ落ちる（値はどちらも同じ）
@@ -4003,15 +3953,13 @@ test("融合カーネルは既存カーネルと別物で、契約どおりの�
   // safe_softmax（ADR 0044）は softmax の ①②③ を**逐語で**共有し、足すのは identity の
   // -inf 化・空行判定・書き出しの select だけ。ここが崩れると parity（分解ガード相当との
   // ビット同一）が黙って壊れるので、共有断片を素の softmax 側と突き合わせて固定する。
-  for (
-    const shared of [
-      "      hi = nan_max(hi, x[base + i]);",
-      "        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
-      "      acc = acc + exp(x[base + j] - amax);",
-      "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
-      "    let inv = 1.0 / scratch[0u];",
-    ]
-  ) {
+  for (const shared of [
+    "      hi = nan_max(hi, x[base + i]);",
+    "        scratch[lid] = nan_max(scratch[lid], scratch[lid + stride]);",
+    "      acc = acc + exp(x[base + j] - amax);",
+    "        scratch[lid] = scratch[lid] + scratch[lid + stride2];",
+    "    let inv = 1.0 / scratch[0u];",
+  ]) {
     assertEquals(SAFE_SOFTMAX_WGSL.includes(shared), true, `safe_softmax 側に無い断片: ${shared}`);
     assertEquals(SOFTMAX_WGSL.includes(shared), true, `softmax 側に無い断片: ${shared}`);
   }
@@ -4140,12 +4088,12 @@ const dropHeader = (wgsl: string): string => wgsl.slice(wgsl.indexOf("\n") + 1);
 test("w=f16 変種は重みだけを array<u32> + unpack2x16float で読み、他は f32 変種と同一", () => {
   // (f32 変種, f16 変種, 重み配列名, f32 変種での読み出し式（複数可）)
   const variants: readonly (readonly [string, string, string, readonly string[]])[] = [
-    [LINEAR_WGSL, linearWgsl("f16", false), "w", [
-      "wbase",
-      "wbase + 1u",
-      "wbase + 2u",
-      "wbase + 3u",
-    ]],
+    [
+      LINEAR_WGSL,
+      linearWgsl("f16", false),
+      "w",
+      ["wbase", "wbase + 1u", "wbase + 2u", "wbase + 3u"],
+    ],
     [EMBEDDING_WGSL, embeddingWgsl("f16"), "weight", ["u32(pick) * dims.hidden + col"]],
     [CONV1D_WGSL, conv1dWgsl("f16"), "w", ["w_base + k"]],
     [CONV2D_WGSL, conv2dWgsl("f16"), "w", ["w_row + kw"]],
@@ -4225,13 +4173,11 @@ test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4 変�
   assertEquals(i8Wgsl.includes("acc0_0 * "), false, "縮約の外で scale を掛けていない");
 
   // 逆写像で f32 v4 変種そのものに戻る（他は一切動いていない）
-  const scaleArg = (slot: number): string => slot === 0 ? "wscale_v" : `wscale_v${slot}`;
-  for (
-    const [wgsl, call] of [
-      [f16Wgsl, (slot: number) => `dequant4(wrow_base${slot} + wk0)`],
-      [i8Wgsl, (slot: number) => `dequant4(wrow_base${slot} + wk0, ${scaleArg(slot)})`],
-    ] as const
-  ) {
+  const scaleArg = (slot: number): string => (slot === 0 ? "wscale_v" : `wscale_v${slot}`);
+  for (const [wgsl, call] of [
+    [f16Wgsl, (slot: number) => `dequant4(wrow_base${slot} + wk0)`],
+    [i8Wgsl, (slot: number) => `dequant4(wrow_base${slot} + wk0, ${scaleArg(slot)})`],
+  ] as const) {
     let rewound = wgsl
       .replace(/\n@group\(0\) @binding\(5\) var<storage, read> wscale: array<f32>;\n/, "")
       .replace(/\/\/ (f16|i8) 格納の quad 展開:[\s\S]*?\n}\n\n/, "")
@@ -4287,7 +4233,10 @@ test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡幅�
       where,
     );
     // MUST: 判定はコメントを除いた本体で行う（禁じている形をコメントに書いてあるため）
-    const code = wgsl.split("\n").filter((line) => !line.trimStart().startsWith("//")).join("\n");
+    const code = wgsl
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("//"))
+      .join("\n");
     assertEquals(code.includes("f32(av"), false, `${where}: MAC ごとの変換`);
     // ① 丸めは共有タイルへの書き込みだけ（A タイルは 4 成分とも f16(...) で包む）
     assertEquals(wgsl.includes("sa[sa_base0] = f16(av0.x);"), true, where);
@@ -4379,11 +4328,7 @@ test("GEMM 骨格の accumulator は acc{行}_{列 quad} の静的展開で、�
 });
 
 test("重み i8 格納 × f16 計算（w8a16）は生成の入口で fail loudly", () => {
-  assertThrows(
-    () => linearWgsl("i8", true, "f16"),
-    CodegenError,
-    "w8a16",
-  );
+  assertThrows(() => linearWgsl("i8", true, "f16"), CodegenError, "w8a16");
   // 組み合わせ以外は通る（i8 × f32 計算 / f16 格納 × f16 計算）
   linearWgsl("i8", true);
   linearWgsl("f16", true, "f16");
@@ -4416,7 +4361,10 @@ test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader-f16 
     // S の束縛は必ず u32 の平坦配列（vec4<f32> / f16 のまま残っていたら型が合わない）
     assertEquals(/var<storage, read(_write)?> s: array<u32>;/.test(wgsl), true, `${where}: S 束縛`);
     // MUST: 判定はコメントを除いた本体で（禁じている形をコメントに書いてあるため）
-    const code = wgsl.split("\n").filter((line) => !line.trimStart().startsWith("//")).join("\n");
+    const code = wgsl
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("//"))
+      .join("\n");
     // MUST: `un` を含まない `pack2x16float` だけを数える（部分一致で unpack を巻き込むと
     // 「丸めが 1 箇所」の主張が読み側の本数で埋まって恒真になる）
     const packs = code.match(/(?<!un)pack2x16float\(/g) ?? [];
@@ -4458,9 +4406,7 @@ test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader-f16 
   );
   // 書き手は f32 変種と同じ値式のまま（丸めが値の計算へ紛れ込んでいない）
   assertEquals(
-    attentionQkWgsl(true, "f32", "f16").includes(
-      "score_store(cbase + orow0 * n4 + ocq0, acc0_0);",
-    ),
+    attentionQkWgsl(true, "f32", "f16").includes("score_store(cbase + orow0 * n4 + ocq0, acc0_0);"),
     true,
   );
 });
@@ -4519,35 +4465,29 @@ test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 と別�
 
 test("S の f16 格納は「スカラ経路」と「c16 との併用」を生成の入口で fail loudly", () => {
   // スカラ経路の部分書きは同じ u32 語への read-modify-write（黙って f32 格納へ落とさない）
-  for (
-    const [where, generate] of [
-      ["attention_qk", () => attentionQkWgsl(false, "f32", "f16")],
-      ["attention_pv", () => attentionPvWgsl(false, "f32", "f16")],
-      ["attention_qk i8a8", () => attentionQkI8a8Wgsl(false, true, "f16")],
-    ] as const
-  ) {
+  for (const [where, generate] of [
+    ["attention_qk", () => attentionQkWgsl(false, "f32", "f16")],
+    ["attention_pv", () => attentionPvWgsl(false, "f32", "f16")],
+    ["attention_qk i8a8", () => attentionQkI8a8Wgsl(false, true, "f16")],
+  ] as const) {
     assertThrows(generate, CodegenError, "v4 経路専用", where);
   }
   // `:c16` は S を array<f16> で持つ別の格納形（冗長かつ矛盾する組）
-  for (
-    const [where, generate] of [
-      ["attention_qk", () => attentionQkWgsl(true, "f16", "f16")],
-      ["attention_pv", () => attentionPvWgsl(true, "f16", "f16")],
-      ["attention_stats", () => attentionStatsWgsl("f16", "f16")],
-    ] as const
-  ) {
+  for (const [where, generate] of [
+    ["attention_qk", () => attentionQkWgsl(true, "f16", "f16")],
+    ["attention_pv", () => attentionPvWgsl(true, "f16", "f16")],
+    ["attention_stats", () => attentionStatsWgsl("f16", "f16")],
+  ] as const) {
     assertThrows(generate, CodegenError, "同時に指定できない", where);
   }
   // 適格判定は書き手が v4 を取る条件そのもの（D%4 と N%4 の**両方**）
-  for (
-    const [depth, cols, expected] of [
-      [4, 8, true],
-      [128, 4096, true],
-      [4, 6, false],
-      [13, 8, false],
-      [13, 19, false],
-    ] as const
-  ) {
+  for (const [depth, cols, expected] of [
+    [4, 8, true],
+    [128, 4096, true],
+    [4, 6, false],
+    [13, 8, false],
+    [13, 19, false],
+  ] as const) {
     assertEquals(attentionScoreUsesF16(depth, cols), expected, `D=${depth} N=${cols}`);
     // 適格な形では f32 の ①QK も i8a8 の ①QK も v4 を取る（縮退の混成が起きない前提）
     if (expected) {
@@ -4728,19 +4668,15 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
   assertThrows(() => embeddingParams(-1, 2, 7), CodegenError);
 
   // rank 不足は左詰めで dims=1 / strides=0 に埋める（strided 族と同じ埋め方）
-  const filled = maskedFillParams([3, 4], [0, 1], -3.4028234663852886e+38);
+  const filled = maskedFillParams([3, 4], [0, 1], -3.4028234663852886e38);
   assertEquals([...filled.slice(1, 1 + STRIDED_RANK)], [1, 1, 3, 4]);
   assertEquals([...filled.slice(1 + STRIDED_RANK, 1 + 2 * STRIDED_RANK)], [0, 0, 0, 1]);
-  assertEquals(new Float32Array(filled.buffer)[1 + 2 * STRIDED_RANK], -3.4028234663852886e+38);
+  assertEquals(new Float32Array(filled.buffer)[1 + 2 * STRIDED_RANK], -3.4028234663852886e38);
   assertThrows(() => maskedFillParams([3, 4], [1], 0), CodegenError);
   assertThrows(() => maskedFillParams([], [], 0), CodegenError);
   assertThrows(() => maskedFillParams([2, 3], [1, 1], Number.NaN), CodegenError);
   // MUST: 埋め値の有限判定も f32 として（f32 最小有限値ちょうどは通り、1e39 は落ちる）
-  assertThrows(
-    () => maskedFillParams([2, 3], [1, 1], 1e39),
-    CodegenError,
-    "f32 として有限でない",
-  );
+  assertThrows(() => maskedFillParams([2, 3], [1, 1], 1e39), CodegenError, "f32 として有限でない");
 
   const conv = conv1dParams({
     batch: 2,
@@ -4792,17 +4728,20 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
     dilation: 2,
     groups: 1,
   });
-  assertEquals([...conv1Igemm.slice(0, 9)], [
-    9, // m = Cout
-    4, // n = Lout（B は掛けない）
-    6 * 3, // k = Cin·K
-    6,
-    11,
-    3,
-    3,
-    1,
-    2,
-  ]);
+  assertEquals(
+    [...conv1Igemm.slice(0, 9)],
+    [
+      9, // m = Cout
+      4, // n = Lout（B は掛けない）
+      6 * 3, // k = Cin·K
+      6,
+      11,
+      3,
+      3,
+      1,
+      2,
+    ],
+  );
   assertEquals(conv1Igemm.byteLength % 16, 0);
   // 契約検査は直接カーネルと共有（同じ幾何は同じ理由で落ちる）+ groups > 1 は専用の門
   const conv1IgemmParams = (over: Partial<Parameters<typeof conv1dIgemmParams>[0]>) =>
@@ -4844,25 +4783,10 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
     dilationW: 1,
     groups: 3,
   });
-  assertEquals([...conv2.slice(0, 17)], [
-    2 * 9 * 5 * 4,
-    2,
-    6,
-    9,
-    7,
-    11,
-    5,
-    4,
-    2,
-    3,
-    1,
-    3,
-    0,
-    1,
-    2,
-    1,
-    3,
-  ]);
+  assertEquals(
+    [...conv2.slice(0, 17)],
+    [2 * 9 * 5 * 4, 2, 6, 9, 7, 11, 5, 4, 2, 3, 1, 3, 0, 1, 2, 1, 3],
+  );
   // uniform の struct は 16 バイト整列（17 語ぶんの内容でも 20 語確保する）
   assertEquals(conv2.byteLength % 16, 0);
   const conv2Params = (over: Partial<Parameters<typeof conv2dParams>[0]>) =>
@@ -4916,23 +4840,26 @@ test("融合カーネルの params は契約外の値を fail loudly にする",
     dilationW: 1,
     groups: 1,
   });
-  assertEquals([...igemm.slice(0, 15)], [
-    9, // m = Cout
-    5 * 4, // n = Hout·Wout（B は掛けない）
-    6 * 2 * 3, // k = Cin·Kh·Kw
-    6,
-    7,
-    11,
-    4,
-    2,
-    3,
-    1,
-    3,
-    0,
-    1,
-    2,
-    1,
-  ]);
+  assertEquals(
+    [...igemm.slice(0, 15)],
+    [
+      9, // m = Cout
+      5 * 4, // n = Hout·Wout（B は掛けない）
+      6 * 2 * 3, // k = Cin·Kh·Kw
+      6,
+      7,
+      11,
+      4,
+      2,
+      3,
+      1,
+      3,
+      0,
+      1,
+      2,
+      1,
+    ],
+  );
   assertEquals(igemm.byteLength % 16, 0);
   // 契約検査は直接カーネルと共有（同じ幾何は同じ理由で落ちる）+ groups > 1 は専用の門
   const igemmParams = (over: Partial<Parameters<typeof conv2dIgemmParams>[0]>) =>
@@ -5156,47 +5083,48 @@ test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、契�
   const params = conv3dIgemmParams(base);
   // 21 語は 16 バイト整列の 24 語（96 バイト）に詰める（uniform の struct 整列 MUST）
   assertEquals(params.length, 24);
-  assertEquals([...params.slice(0, 21)], [
-    7, // m = Cout
-    2 * 4 * 5, // n = Tout·Hout·Wout（時間軸は N に畳む）
-    3 * 3 * 2 * 4, // k = Cin·Kt·Kh·Kw
-    3, // channels_in
-    6, // time_in
-    9, // height_in
-    11, // width_in
-    4, // height_out
-    5, // width_out
-    3, // kernel_t
-    2, // kernel_h
-    4, // kernel_w
-    2, // stride_t
-    2, // stride_h
-    2, // stride_w
-    0, // padding_t
-    1, // padding_h
-    0, // padding_w
-    1, // dilation_t
-    3, // dilation_h
-    1, // dilation_w
-  ]);
+  assertEquals(
+    [...params.slice(0, 21)],
+    [
+      7, // m = Cout
+      2 * 4 * 5, // n = Tout·Hout·Wout（時間軸は N に畳む）
+      3 * 3 * 2 * 4, // k = Cin·Kt·Kh·Kw
+      3, // channels_in
+      6, // time_in
+      9, // height_in
+      11, // width_in
+      4, // height_out
+      5, // width_out
+      3, // kernel_t
+      2, // kernel_h
+      4, // kernel_w
+      2, // stride_t
+      2, // stride_h
+      2, // stride_w
+      0, // padding_t
+      1, // padding_h
+      0, // padding_w
+      1, // dilation_t
+      3, // dilation_h
+      1, // dilation_w
+    ],
+  );
   assertEquals([...params.slice(21)], [0, 0, 0], "詰め物はゼロ");
   // MUST: 軸ごとに独立に見る（片側だけ 0 の形が素通りすると GPU ハング / bias 一色になる）
-  for (
-    const key of [
-      "strideT",
-      "strideH",
-      "strideW",
-      "dilationT",
-      "dilationH",
-      "dilationW",
-      "kernelT",
-      "kernelH",
-      "kernelW",
-      "timeIn",
-      "timeOut",
-      "channelsIn",
-    ] as const
-  ) {
+  for (const key of [
+    "strideT",
+    "strideH",
+    "strideW",
+    "dilationT",
+    "dilationH",
+    "dilationW",
+    "kernelT",
+    "kernelH",
+    "kernelW",
+    "timeIn",
+    "timeOut",
+    "channelsIn",
+  ] as const) {
     assertThrows(() => conv3dIgemmParams({ ...base, [key]: 0 }), CodegenError, "正整数");
   }
   assertThrows(() => conv3dIgemmParams({ ...base, paddingT: -1 }), CodegenError);

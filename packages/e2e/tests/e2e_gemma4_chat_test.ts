@@ -127,7 +127,9 @@ type ChatFixture = {
 };
 
 const fixture = JSON.parse(
-  await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(
+    new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url),
+  ),
 ) as ChatFixture;
 
 const caseOf = (name: string) => {
@@ -145,26 +147,27 @@ if (!AVAILABLE) {
   );
 }
 
-const openPipeline = async (
-  options: Gemma4PipelineOptions = {},
-): Promise<Gemma4Pipeline> =>
-  await Gemma4Pipeline.fromAssets({
-    ...(await gemma4MirrorAssets(MIRROR_DIR)),
-    // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
-    // ミラー側で動いても、golden を採ったときと同じ形で回す）。
-    config: {
-      chunkLength: CHUNK_LENGTH,
-      maxChunkLength: MAX_CHUNK_LENGTH,
-      maxPosition: MAX_POSITION,
-      capacity: CAPACITY,
-      rope: ROPE,
+const openPipeline = async (options: Gemma4PipelineOptions = {}): Promise<Gemma4Pipeline> =>
+  await Gemma4Pipeline.fromAssets(
+    {
+      ...(await gemma4MirrorAssets(MIRROR_DIR)),
+      // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
+      // ミラー側で動いても、golden を採ったときと同じ形で回す）。
+      config: {
+        chunkLength: CHUNK_LENGTH,
+        maxChunkLength: MAX_CHUNK_LENGTH,
+        maxPosition: MAX_POSITION,
+        capacity: CAPACITY,
+        rope: ROPE,
+      },
     },
-  }, {
-    // 予算は索引から導く（= PLE 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で書くと
-    // 資産世代で block 幅が変われば別の本数を意味してしまう — helper の doc。
-    maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
-    ...options,
-  });
+    {
+      // 予算は索引から導く（= PLE 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で書くと
+      // 資産世代で block 幅が変われば別の本数を意味してしまう — helper の doc。
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+      ...options,
+    },
+  );
 
 test({
   name: "Gemma 4 E2B chat 検収: 文字列 in → 文字列 out・逐次と一括の一致（実 GPU）",
@@ -240,10 +243,9 @@ test({
         );
         assertThrows(
           () =>
-            pipeline.chat(
-              [{ role: "tool", content: "…" }] as unknown as Gemma4ChatMessage[],
-              { maxNewTokens: 4 },
-            ),
+            pipeline.chat([{ role: "tool", content: "…" }] as unknown as Gemma4ChatMessage[], {
+              maxNewTokens: 4,
+            }),
           Error,
           "role",
         );
@@ -293,11 +295,7 @@ test({
           const first1 = await turn(prompt1, maxNewTokens);
           assertEquals(first1.text, answer1, "1 ターン目（全体描画は chat と同じ経路）");
           // `used` は「会話が占めている論理位置」— prompt + 生成（停止 token 込み）で説明が付く。
-          assertEquals(
-            sequence.used,
-            prompt1.length + first1.stop.tokens,
-            "1 ターン目の後の used",
-          );
+          assertEquals(sequence.used, prompt1.length + first1.stop.tokens, "1 ターン目の後の used");
 
           const delta = gemma4ChatTurn(pipeline.tokenizer, FOLLOW_UP);
           const second = await turn(delta, FOLLOW_UP_TOKENS);
@@ -336,12 +334,16 @@ test({
         const second = session.send(FOLLOW_UP.content, { maxNewTokens: FOLLOW_UP_TOKENS });
         assertEquals(await second.text(), followUpAnswer, "2 ターン目（⑥ の参照と逐語一致）");
         assertEquals((await second.done).reason, "eos", "2 ターン目の停止理由");
-        assertEquals(session.turns, [
-          first[0],
-          { role: "assistant", content: expected },
-          FOLLOW_UP,
-          { role: "assistant", content: followUpAnswer },
-        ], "履歴は「流した本文」だけで積まれる");
+        assertEquals(
+          session.turns,
+          [
+            first[0],
+            { role: "assistant", content: expected },
+            FOLLOW_UP,
+            { role: "assistant", content: followUpAnswer },
+          ],
+          "履歴は「流した本文」だけで積まれる",
+        );
       });
 
       await t.step("⑧ 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
@@ -454,7 +456,9 @@ test({
       assert(issued !== undefined, "dispose の前に stream を発行していない");
       await assertRejects(
         async () => {
-          for await (const _chunk of issued) { /* 1 個も来ない */ }
+          for await (const _chunk of issued) {
+            /* 1 個も来ない */
+          }
         },
         Error,
         "Gemma4Pipeline: dispose 済みでは生成できない",
@@ -521,7 +525,9 @@ test({
         }
         assertEquals(
           report.peakAccountedBytes,
-          report.resident.weights.totalBytes + report.resident.stateBytes + budget +
+          report.resident.weights.totalBytes +
+            report.resident.stateBytes +
+            budget +
             (report.auxiliaryBytes ?? 0),
           "ピークが予算と補助資源を勘定に入れていない",
         );
@@ -584,7 +590,9 @@ const observeSecondTurn = async (options: Gemma4PipelineOptions): Promise<Observ
   try {
     for (const turn of [0, 1]) {
       const stream = pipeline.chat(messages, { maxNewTokens: OBSERVED_NEW_TOKENS });
-      for await (const _chunk of stream) { /* 片は使わない（回すことが目的） */ }
+      for await (const _chunk of stream) {
+        /* 片は使わない（回すことが目的） */
+      }
       assertEquals((await stream.done).reason, "max-tokens", `ターン ${turn} が途中で止まった`);
       // 1 ターン目は導出（ミス run）専用。捨てて 2 ターン目だけを残す。
       if (turn === 0) runs.length = 0;
@@ -642,9 +650,9 @@ test({
       assertEquals(
         run.retainedCount,
         2,
-        `既定予算で 2 形が保持されていない（切替のたびに退役している）: ${
-          JSON.stringify(budgeted)
-        }`,
+        `既定予算で 2 形が保持されていない（切替のたびに退役している）: ${JSON.stringify(
+          budgeted,
+        )}`,
       );
     }
     for (const run of budgetedDecodes) {

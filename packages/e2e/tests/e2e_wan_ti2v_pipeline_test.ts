@@ -131,7 +131,11 @@ import {
 } from "../../models/src/wan/scheduler.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import { type DrmTimeline, formatDrmUsage, monitorDrmUsage } from "../../models/tests/helpers/drm-usage.ts";
+import {
+  type DrmTimeline,
+  formatDrmUsage,
+  monitorDrmUsage,
+} from "../../models/tests/helpers/drm-usage.ts";
 import { filePresent, WAN_TI2V_SERIES_NAME } from "../../models/tests/helpers/wan-ti2v-dit.ts";
 import {
   readWanTi2vDistributionManifestText,
@@ -173,10 +177,7 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
  * MUST: 受入れ（`accept-ferret`）の結果を見てこの値も、決定用のケースも変えない（帯の決定と受入れの独立が崩れる）。
  * 受入れが帯を外れたら帯を広げずに原因を調べる。
  */
-const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [
-  3.6e-5,
-  9.5e-4,
-];
+const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [3.6e-5, 9.5e-4];
 
 /**
  * 2 ステップの通しの出力フレーム（クランプ後の `[3,17,704,1280]` — 参照もクランプ後で書かれている）の帯。`undefined` = 未導出
@@ -340,9 +341,8 @@ const fixtureUrl = (name: string): URL => new URL(`pipeline_steps.${name}.safete
 
 /** 配布形の manifest（無ければ `undefined` — 通しの照合を SKIP する）。 */
 const DIST_MANIFEST_TEXT = await readWanTi2vDistributionManifestText();
-const DIST_MANIFEST = DIST_MANIFEST_TEXT === undefined
-  ? undefined
-  : parseManifest(DIST_MANIFEST_TEXT);
+const DIST_MANIFEST =
+  DIST_MANIFEST_TEXT === undefined ? undefined : parseManifest(DIST_MANIFEST_TEXT);
 const DIST_PRESENT = DIST_MANIFEST !== undefined;
 if (!DIST_PRESENT) {
   console.warn(
@@ -354,9 +354,10 @@ if (!DIST_PRESENT) {
  * umT5 の越境先の repo（配布形の既定の選択の `text_encoder` の part 0 が宣言する — キーを写経しない）。配布形が umT5 を
  * 持たない・自リポに持つ形は 2.2 の配布形の宣言の外なので、GPU 経路の構築で fail loudly にする（{@link umt5CrossRepo}）。
  */
-const UMT5_REPO = DIST_MANIFEST === undefined
-  ? undefined
-  : resolveSelection(DIST_MANIFEST).containers[TEXT_ENCODER]?.parts[0]?.repo;
+const UMT5_REPO =
+  DIST_MANIFEST === undefined
+    ? undefined
+    : resolveSelection(DIST_MANIFEST).containers[TEXT_ENCODER]?.parts[0]?.repo;
 const UMT5_PRESENT = filePresent(new URL("karume.json", UMT5_ROOT));
 /** GPU 経路を組める（配布形と umT5 のミラーがある）。 */
 const GPU_TEXT_PRESENT = DIST_PRESENT && UMT5_PRESENT;
@@ -388,7 +389,9 @@ if (!ANY_FIXTURE) {
   );
 }
 
-const references = openReferences(new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url),
+);
 const results = openResults("wan-ti2v-pipeline");
 /** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
 const fullResults = openResults("wan-ti2v-pipeline-full");
@@ -468,9 +471,9 @@ const difference = (got: Float32Array, want: Float32Array): Difference => {
 };
 
 const formatDifference = (label: string, diff: Difference): string =>
-  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${
-    diff.referenceMax.toFixed(3)
-  }）`;
+  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${diff.referenceMax.toFixed(
+    3,
+  )}）`;
 
 /** f32 の列どうしのビット一致（NaN の符号や -0 も区別する）。 */
 const bitsEqual = (got: Float32Array, want: Float32Array): boolean => {
@@ -533,7 +536,9 @@ const observe = async (
     if (event.at === "start") stageStarted.set(event.component, performance.now());
     else stageMs[event.component] = performance.now() - (stageStarted.get(event.component) ?? 0);
     if (
-      options.abortAfterDenoise === true && event.component === "transformer" && event.at === "end"
+      options.abortAfterDenoise === true &&
+      event.component === "transformer" &&
+      event.at === "end"
     ) {
       throw abort;
     }
@@ -560,18 +565,17 @@ const observe = async (
 const formatObserved = (observed: Observed): string[] => {
   const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(3)} GiB`;
   const lines = [
-    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${
-      Object.entries(observed.stageMs).map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
-        .join("・")
-    }`,
+    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${Object.entries(observed.stageMs)
+      .map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
+      .join("・")}`,
     ...[...observed.drm.peaks].map(([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`),
     ...observed.drm.marks.map(({ label, usage }) => `VRAM 点 [${label}] ${formatDrmUsage(usage)}`),
   ];
   for (const [component, diagnostics] of observed.diagnostics) {
     lines.push(
-      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${
-        gib(diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes)
-      }・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本・窓平均の最大 ${
+      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${gib(
+        diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes,
+      )}・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本・窓平均の最大 ${
         diagnostics.submit.chunkBudget.maxWindowMeanMs?.toFixed(1) ?? "—"
       } ms・予算超過 ${diagnostics.submit.chunkBudget.overBudgetChunks} 本`,
     );
@@ -681,9 +685,10 @@ test({
         const want = fixture.tensor(`latents.${step}`);
         assert(
           bitsEqual(latents, want),
-          `${name}: step ${step} の潜在がビット一致しない（${
-            formatDifference("潜在", difference(latents, want))
-          }）`,
+          `${name}: step ${step} の潜在がビット一致しない（${formatDifference(
+            "潜在",
+            difference(latents, want),
+          )}）`,
         );
       }
     }
@@ -692,7 +697,7 @@ test({
 
 /** 観測点（帯を持つ出力 — 各 step の後の潜在とクランプ後のフレーム）。 */
 const OBSERVATION_POINTS = ["latents.0", "latents.1", "frames"] as const;
-type ObservationPoint = typeof OBSERVATION_POINTS[number];
+type ObservationPoint = (typeof OBSERVATION_POINTS)[number];
 
 /** 観測点ごとの帯（未導出は `undefined`）。 */
 const bandOf = (point: ObservationPoint): number | undefined =>
@@ -829,21 +834,21 @@ test({
                     assert("video" in observed, "generate が最後まで回っていない");
                     assertEquals(observed.latents.length, STEPS, "denoise-step の数");
                     const { video } = observed;
-                    assertEquals([video.frames, video.height, video.width], [
-                      FRAMES,
-                      HEIGHT,
-                      WIDTH,
-                    ]);
+                    assertEquals(
+                      [video.frames, video.height, video.width],
+                      [FRAMES, HEIGHT, WIDTH],
+                    );
                     const diffs = OBSERVATION_POINTS.map((point) => ({
                       point,
                       band: bandOf(point),
                       // 参照のフレームはクランプ後で書かれている（`ti2v_few_step_ref.decode_frames` の clamp）。
-                      diff: point === "frames"
-                        ? difference(video.data, fixture.tensor("frames"))
-                        : difference(
-                          observed.latents[point === "latents.0" ? 0 : 1],
-                          fixture.tensor(point),
-                        ),
+                      diff:
+                        point === "frames"
+                          ? difference(video.data, fixture.tensor("frames"))
+                          : difference(
+                              observed.latents[point === "latents.0" ? 0 : 1],
+                              fixture.tensor(point),
+                            ),
                     }));
                     for (const { point, band, diff } of diffs) {
                       measurements.push({
@@ -851,9 +856,10 @@ test({
                         maxAbs: diff.maxAbs,
                         maxRel: diff.maxRel,
                         // 未導出の帯は無限の帯として記録する（判定は下で赤にする — 段 2 の `toleranceOf` と同じ扱い）。
-                        tolerance: band === undefined
-                          ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
-                          : { atol: band * diff.referenceMax, rtol: 0 },
+                        tolerance:
+                          band === undefined
+                            ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
+                            : { atol: band * diff.referenceMax, rtol: 0 },
                         stage: "karume",
                       });
                     }
@@ -917,22 +923,25 @@ test({
             fn: () => {
               const expected = CASES.filter(({ role }) => role === "band").length;
               const decided = caseRatios.filter(({ role }) => role === "band");
-              const candidate = decided.length === expected
-                ? OBSERVATION_POINTS.map((point) => {
-                  const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
-                  return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${
-                    (worst * 5).toExponential(3)
-                  }（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
-                }).join(" / ")
-                : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
-              const accepted = caseRatios.filter(({ role }) => role === "accept").map((
-                { name, ratios },
-              ) =>
-                `${name} ${
-                  OBSERVATION_POINTS.map((point) => `${point} ${ratios[point].toExponential(3)}`)
-                    .join("・")
-                }`
-              );
+              const candidate =
+                decided.length === expected
+                  ? OBSERVATION_POINTS.map((point) => {
+                      const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
+                      return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${(
+                        worst * 5
+                      ).toExponential(
+                        3,
+                      )}（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
+                    }).join(" / ")
+                  : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
+              const accepted = caseRatios
+                .filter(({ role }) => role === "accept")
+                .map(
+                  ({ name, ratios }) =>
+                    `${name} ${OBSERVATION_POINTS.map(
+                      (point) => `${point} ${ratios[point].toExponential(3)}`,
+                    ).join("・")}`,
+                );
               throw new Error(
                 `帯が未導出 — ${candidate}。受入れの比（帯の決定に使わない）: ${
                   accepted.join(" / ") || "なし"
@@ -979,12 +988,17 @@ test({
                 const accept = acceptFixture;
                 const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
                 const negative = textOf(prompts, accept.meta("negative"), "prompt");
-                const observed = await observe(pipeline, diagnostics, {
-                  ...request(ferret, negative),
-                  latents: accept.tensor("latents_init"),
-                  width: WIDTH,
-                  height: HEIGHT,
-                }, { abortAfterDenoise: true });
+                const observed = await observe(
+                  pipeline,
+                  diagnostics,
+                  {
+                    ...request(ferret, negative),
+                    latents: accept.tensor("latents_init"),
+                    width: WIDTH,
+                    height: HEIGHT,
+                  },
+                  { abortAfterDenoise: true },
+                );
                 // 段のイベント名が変わって打ち切りが効かないと、28 タイルの VAE を黙って払う（値の判定には出ない）。
                 assert(!("video" in observed), "DiT の段の後で止まっていない");
                 assertEquals(observed.latents.length, STEPS, "denoise-step の数");
@@ -993,9 +1007,10 @@ test({
                   accept.tensor(`latents.${STEPS - 1}`),
                 );
                 console.log(
-                  `[wan-ti2v-pipeline] fault ${label}: ${
-                    formatDifference(`latents.${STEPS - 1}`, diff)
-                  }（${
+                  `[wan-ti2v-pipeline] fault ${label}: ${formatDifference(
+                    `latents.${STEPS - 1}`,
+                    diff,
+                  )}（${
                     lastBand === undefined
                       ? "帯は未導出"
                       : `帯の ${(diff.ratio / lastBand).toFixed(1)} 倍`
@@ -1019,13 +1034,11 @@ test({
 
         // seed 経路の 2 ステップ（2 寸法 — 完走・非有限 0・sha256 の環境行）。
         for (const { id, width, height } of SEED_CASES) {
-          await t.step(
-            `${id}（seed 経路・sha256 の環境行）`,
-            () =>
-              runSeedCase(pipeline, id, width, height, (bytes) => {
-                // 実用席のケースと同じ要求（1280×704）の実物だけ床の相手に残す。
-                if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
-              }),
+          await t.step(`${id}（seed 経路・sha256 の環境行）`, () =>
+            runSeedCase(pipeline, id, width, height, (bytes) => {
+              // 実用席のケースと同じ要求（1280×704）の実物だけ床の相手に残す。
+              if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
+            }),
           );
         }
       } finally {
@@ -1169,11 +1182,7 @@ test({
               const { video } = observed;
               assertEquals([video.frames, video.height, video.width], [FULL_FRAMES, HEIGHT, WIDTH]);
               const nonFinite = countNonFinite(video.data);
-              const notes = [
-                `席 ${quant}`,
-                `非有限 ${nonFinite}`,
-                ...formatObserved(observed),
-              ];
+              const notes = [`席 ${quant}`, `非有限 ${nonFinite}`, ...formatObserved(observed)];
               console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
               assertEquals(nonFinite, 0, "非有限");
               assertEquals(deviceLost, undefined, "device lost");

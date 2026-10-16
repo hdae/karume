@@ -47,12 +47,14 @@ const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
  * group ごとに振幅の違う重み（group scale の添字が値に出る形 — 恒真化の防波堤）。
  * さらに隣接要素の符号を交互にして、pack の上下 nibble の取り違えも値に出す。
  */
-const groupVarying = (cols: number, groupSize: number) => (i: number): number => {
-  const group = Math.floor((i % cols) / groupSize);
-  const row = Math.floor(i / cols);
-  const base = (0.125 + (i % 11) * 0.5) * (i % 2 === 0 ? 1 : -1);
-  return base * (1 + group * 0.75 + (row % 5) * 0.25);
-};
+const groupVarying =
+  (cols: number, groupSize: number) =>
+  (i: number): number => {
+    const group = Math.floor((i % cols) / groupSize);
+    const row = Math.floor(i / cols);
+    const base = (0.125 + (i % 11) * 0.5) * (i % 2 === 0 ? 1 : -1);
+    return base * (1 + group * 0.75 + (row % 5) * 0.25);
+  };
 
 type I4Case = {
   readonly name: string;
@@ -257,12 +259,10 @@ test({
       const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME);
       try {
         const outputs = await session.run({ x });
-        for (
-          const [name, weight, quantized] of [
-            ["y16", w16, q16] as const,
-            ["y32", w32, q32] as const,
-          ]
-        ) {
+        for (const [name, weight, quantized] of [
+          ["y16", w16, q16] as const,
+          ["y32", w32, q32] as const,
+        ]) {
           const expected = applyReferenceOp(
             "linear",
             [x as RefTensor, refTensor(weight.shape, quantized.values), bias as RefTensor],
@@ -343,16 +343,18 @@ const i4EmbeddingModel = (
     },
     nodes: [{ op: "embedding", ins: ["w", "index"], outs: ["y"], attrs: { padding_idx: -1 } }],
   };
-  return openModelBytes(declaration, [{
-    graph: GRAPH_NAME,
-    initializer: "w",
-    bytes: quantized.bytes,
-    encoding: {
-      codec: "int4-sym-g",
-      groupSize,
-      scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+  return openModelBytes(declaration, [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: quantized.bytes,
+      encoding: {
+        codec: "int4-sym-g",
+        groupSize,
+        scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+      },
     },
-  }]);
+  ]);
 };
 
 test({
@@ -569,30 +571,30 @@ const conv1dModel = (
     declaration,
     storage === "i4"
       ? [
-        {
-          graph: GRAPH_NAME,
-          initializer: "w",
-          bytes: quantized.bytes,
-          encoding: {
-            codec: "int4-sym-g",
-            groupSize,
-            scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: quantized.bytes,
+            encoding: {
+              codec: "int4-sym-g",
+              groupSize,
+              scale: { bytes: f32Bytes([...quantized.scale]), dtype: "f32" },
+            },
           },
-        },
-        biasTensor,
-      ]
-      // 双子（f32 常駐）は**丸め後の重み**をそのまま f32 で積む。同じ igemm カーネルが同じ
-      // f32 の MAC 列を同じ順で畳むので、i4 の GPU dequant が CPU 展開とビット一致なら
-      // 出力もビット一致する。
-      : [
-        {
-          graph: GRAPH_NAME,
-          initializer: "w",
-          bytes: f32Bytes([...quantized.values]),
-          encoding: { codec: "f32" },
-        },
-        biasTensor,
-      ],
+          biasTensor,
+        ]
+      : // 双子（f32 常駐）は**丸め後の重み**をそのまま f32 で積む。同じ igemm カーネルが同じ
+        // f32 の MAC 列を同じ順で畳むので、i4 の GPU dequant が CPU 展開とビット一致なら
+        // 出力もビット一致する。
+        [
+          {
+            graph: GRAPH_NAME,
+            initializer: "w",
+            bytes: f32Bytes([...quantized.values]),
+            encoding: { codec: "f32" },
+          },
+          biasTensor,
+        ],
   );
 };
 
@@ -810,11 +812,7 @@ test({
         assert(diagnostics.hostExpandedBytes > 0, "CPU 展開されていない");
         const expected = applyReferenceOp(
           "conv1d",
-          [
-            x as RefTensor,
-            refTensor(weight.shape, quantized.values),
-            bias as RefTensor,
-          ],
+          [x as RefTensor, refTensor(weight.shape, quantized.values), bias as RefTensor],
           { ...attrs, groups },
           outShape,
         );
@@ -880,12 +878,8 @@ test({
     try {
       // Lout = 4（v4 = `dequant4`）と Lout = 3（スカラ = `dequant`）の両方を踏む
       for (const lengthIn of [4, 3]) {
-        const x = fill(
-          [channelsIn, channelsIn, lengthIn],
-          (i) =>
-            (Math.floor(i / (channelsIn * lengthIn)) === Math.floor(i / lengthIn) % channelsIn)
-              ? 1
-              : 0,
+        const x = fill([channelsIn, channelsIn, lengthIn], (i) =>
+          Math.floor(i / (channelsIn * lengthIn)) === Math.floor(i / lengthIn) % channelsIn ? 1 : 0,
         );
         const outShape = [channelsIn, channelsOut, lengthIn];
         assertEquals(
@@ -907,14 +901,11 @@ test({
         // out[b][oc][l] = w[oc][b][0]（one-hot の恒等）— 重み側の添字へ読み替えて突き合わせる
         const actualBits = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
         const expectedBits = new Uint32Array(
-          Float32Array.from(
-            { length: channelsIn * channelsOut * lengthIn },
-            (_, i) => {
-              const batch = Math.floor(i / (channelsOut * lengthIn));
-              const channel = Math.floor(i / lengthIn) % channelsOut;
-              return expected[channel * channelsIn + batch];
-            },
-          ).buffer,
+          Float32Array.from({ length: channelsIn * channelsOut * lengthIn }, (_, i) => {
+            const batch = Math.floor(i / (channelsOut * lengthIn));
+            const channel = Math.floor(i / lengthIn) % channelsOut;
+            return expected[channel * channelsIn + batch];
+          }).buffer,
         );
         assertEquals(actualBits, expectedBits, `Lin=${lengthIn}: A 側展開が CPU 展開と違う`);
       }
@@ -938,11 +929,7 @@ test("i4 の適格は linear / embedding / groups==1 の conv1d の重みスロ�
   // ここは**適格判定だけ**を見るので、shape 契約の通らない組でも成立する形（同じ実体を
   // rank 2 と rank 3 の両方の重みスロットに置く形）を直接与える。
   const eligible = (nodes: readonly unknown[]): readonly string[] =>
-    [
-      ...i4EligibleInitializers(
-        { initializers: { w: {} }, nodes } as never,
-      ),
-    ].sort();
+    [...i4EligibleInitializers({ initializers: { w: {} }, nodes } as never)].sort();
   assertEquals(eligible([{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }]), ["w"]);
   assertEquals(eligible([{ op: "embedding", ins: ["w", "x"], outs: ["y"], attrs: {} }]), ["w"]);
   // linear と embedding の両方で食われる形（tied lm_head）はどちらも展開経路を持つので適格
@@ -995,12 +982,14 @@ test("i4 の適格は linear / embedding / groups==1 の conv1d の重みスロ�
   // depthwise の重みが i4 で常駐して直接カーネルが packed バイトを f32 として読む）
   assertThrows(
     () =>
-      eligible([{
-        op: "conv1d",
-        ins: ["x", "w", "b"],
-        outs: ["y"],
-        attrs: { stride: 1, padding: 0, dilation: 1 },
-      }]),
+      eligible([
+        {
+          op: "conv1d",
+          ins: ["x", "w", "b"],
+          outs: ["y"],
+          attrs: { stride: 1, padding: 0, dilation: 1 },
+        },
+      ]),
     Error,
     "attrs.groups",
   );
@@ -1025,11 +1014,7 @@ test({
         { linearCompute: "f16" },
       );
       try {
-        await assertRejects(
-          () => session.run({ x: testCase.x }),
-          Error,
-          "w4a16",
-        );
+        await assertRejects(() => session.run({ x: testCase.x }), Error, "w4a16");
       } finally {
         await session.dispose();
       }

@@ -120,10 +120,7 @@ test("attrs 付き unary は torch と同じ定義で、スカラは f32 に丸�
   assertEquals([...clampMin.data], [-1, -1, 0, 1, 3]);
   // MUST: NaN は伝播する（torch の clamp(NaN, min=m) = NaN）。`x >= min ? x : min` の
   // 向きで書くと NaN が min に化けるので、この 1 本が向きの検出器になる。
-  assertEquals(
-    Number.isNaN(referenceUnary("clamp_min", t([1], [NaN]), { min: 0 }).data[0]),
-    true,
-  );
+  assertEquals(Number.isNaN(referenceUnary("clamp_min", t([1], [NaN]), { min: 0 }).data[0]), true);
   // 実測のチャネル L2 正規化（clamp(min=eps)）— 下限が極小でも 0 が持ち上がる
   assertEquals(
     [...referenceUnary("clamp_min", t([2], [0, 5]), { min: 1e-12 }).data],
@@ -133,7 +130,10 @@ test("attrs 付き unary は torch と同じ定義で、スカラは f32 に丸�
 
   // slope 2 種（ADR 0015 — 実測は 0.1 と 0.01 が混在する）
   const steep = referenceUnary("leaky_relu", t([4], [-2, -1, 0, 3]), { negative_slope: 0.1 });
-  assertEquals([...steep.data], [-0.2, -0.1, 0, 3].map((v) => Math.fround(v)));
+  assertEquals(
+    [...steep.data],
+    [-0.2, -0.1, 0, 3].map((v) => Math.fround(v)),
+  );
   const shallow = referenceUnary("leaky_relu", t([2], [-2, 2]), { negative_slope: 0.01 });
   assertEquals([...shallow.data], [Math.fround(-0.02), 2]);
   // MUST: NaN は伝播する（torch の leaky_relu(NaN) = NaN）
@@ -166,11 +166,7 @@ test("ge / bitwise_and は broadcast したうえで bool を返す", () => {
   assertEquals(ge.shape, [3, 3]);
   assertEquals([...ge.data], [0, 0, 0, 1, 0, 0, 1, 1, 1]);
 
-  const and = referenceBinary(
-    "bitwise_and",
-    bools([2, 2], [1, 1, 0, 0]),
-    bools([2], [1, 0]),
-  );
+  const and = referenceBinary("bitwise_and", bools([2, 2], [1, 1, 0, 0]), bools([2], [1, 0]));
   assertEquals(and.dtype, "bool");
   assertEquals([...and.data], [1, 0, 0, 0]);
   // dtype の混在と契約外 dtype は拒否
@@ -324,20 +320,10 @@ test("reduce は attrs.dim の軸だけを畳む（軸ごとに答えが割れ�
 
   // amax / amin も軸で割れる（sum の添字式だけを直しても通らない形）
   assertEquals([...referenceRowReduce("amax", x, 1).data], [20, 21, 22, 23, 120, 121, 122, 123]);
-  assertEquals([...referenceRowReduce("amin", x, 0).data], [
-    0,
-    1,
-    2,
-    3,
-    10,
-    11,
-    12,
-    13,
-    20,
-    21,
-    22,
-    23,
-  ]);
+  assertEquals(
+    [...referenceRowReduce("amin", x, 0).data],
+    [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23],
+  );
 
   // 軸は attrs 経由でも同じ（applyReferenceOp の結線）
   assertEquals([...applyReferenceOp("sum", [x], { dim: 1 }).data], [...axis1.data]);
@@ -415,11 +401,7 @@ test("topk の CPU 参照は値と添字の 2 本を返し、単数形の入口�
   assertEquals([...outputs[1].data], [1, 2, 2, 3]);
   // MUST: 単数形の入口は多出力を黙って slot 0 だけ返さない（添字が誰にも突き合わされない
   // テストが書けてしまう）
-  assertThrows(
-    () => applyReferenceOp("topk", [x], { k: 2 }),
-    ReferenceOpError,
-    "出力 2 本",
-  );
+  assertThrows(() => applyReferenceOp("topk", [x], { k: 2 }), ReferenceOpError, "出力 2 本");
   // 受理領域の外（k=0 / k > 最終次元 / k 欠落 / 記号 k）は全て fail loudly
   assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: 0 }), OpContractError);
   assertThrows(() => applyReferenceOpOutputs("topk", [x], { k: 5 }), OpContractError);
@@ -598,24 +580,7 @@ test("flip は静的軸の添字を反転する", () => {
 
 test("sym_prefix_slice は Tmax 定数の先頭だけを切り出す", () => {
   // 相対位置バケット表の実測形 — Tmax 4×4 の定数から T=2 の先頭 2×2 を取り出す
-  const table = i32([4, 4], [
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-    11,
-    12,
-    13,
-    14,
-    15,
-  ]);
+  const table = i32([4, 4], [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   const sliced = referenceSymPrefixSlice(table, [2, 2]);
   assertEquals(sliced.shape, [2, 2]);
   // MUST: 行の送り幅は **Tmax 形（4）** — 出力 shape（2）から組むと [0,1,2,3] になる
@@ -650,10 +615,7 @@ test("linear は転置レイアウトの重みで既知値を返す", () => {
     referenceLinear(
       t([2, 1, 3], [1, 2, 3, 4, 5, 6]),
       t([2, 3], [1, 0, -1, 2, 2, 2]),
-      t([2], [
-        10,
-        -1,
-      ]),
+      t([2], [10, -1]),
     ).shape,
     [2, 1, 2],
   );
@@ -740,11 +702,14 @@ test("softmax は amax を引いて大入力でも壊れない", () => {
   assertAlmostEquals(out.data[0] + out.data[1] + out.data[2], 1, 1e-6);
   // 素朴形なら exp(-200) が f32 で 0 に潰れて 0/0 = NaN になる領域
   const huge = referenceSoftmax(t([1, 2], [-200, -199]), attrs);
-  assertEquals(huge.data.every((v) => Number.isFinite(v)), true);
+  assertEquals(
+    huge.data.every((v) => Number.isFinite(v)),
+    true,
+  );
   assertAlmostEquals(huge.data[0] + huge.data[1], 1, 1e-6);
   assertAlmostEquals(huge.data[1] / huge.data[0], Math.E, 1e-4);
   // 全要素が同じ行（masked_fill で全マスクされた行）は一様分布
-  const masked = referenceSoftmax(t([1, 4], Array(4).fill(-3.4028234663852886e+38)), attrs);
+  const masked = referenceSoftmax(t([1, 4], Array(4).fill(-3.4028234663852886e38)), attrs);
   assertEquals([...masked.data], [0.25, 0.25, 0.25, 0.25]);
   // 最終次元以外は語彙に無い
   assertThrows(() => referenceSoftmax(t([2, 3], [1, 2, 3, 4, 5, 6]), { dim: 0 }), OpContractError);
@@ -768,7 +733,7 @@ test("safe_softmax は全 −inf の行に 0 を書き、それ以外は softmax
   assertAlmostEquals(out.data[6], 0, 1e-12);
   assertAlmostEquals(out.data[7] + out.data[8], 1, 1e-6);
   // masked_fill の埋め値（−F32_MAX）は **有限**なので空行ではない（一様分布のまま）
-  const filled = referenceSafeSoftmax(t([1, 4], Array(4).fill(-3.4028234663852886e+38)), attrs);
+  const filled = referenceSafeSoftmax(t([1, 4], Array(4).fill(-3.4028234663852886e38)), attrs);
   assertEquals([...filled.data], [0.25, 0.25, 0.25, 0.25]);
   // 契約は softmax と同一（最終次元のみ）
   assertThrows(
@@ -801,7 +766,10 @@ test("attention は scale を q と k の両方へ掛け、safe-softmax で大�
     value,
     { scale: 1 },
   );
-  assertEquals([...huge.data].every((v) => Number.isFinite(v)), true);
+  assertEquals(
+    [...huge.data].every((v) => Number.isFinite(v)),
+    true,
+  );
 
   // B / H を別々の軸として扱う（積が同じ形で取り違えが起きない）
   const batched = referenceAttention(
@@ -845,7 +813,10 @@ test("attention は scale を q と k の両方へ掛け、safe-softmax で大�
     { scale: 2 },
     t([1, 1, 1, 2], [-1e30, 0]),
   );
-  assertEquals([...twoHeads.data].map((v) => Math.round(v)), [30, 40, 70, 80]);
+  assertEquals(
+    [...twoHeads.data].map((v) => Math.round(v)),
+    [30, 40, 70, 80],
+  );
   // 統一入口も 4 本目を落とさず渡す（渡し忘れると mask 無しの値が黙って返る）
   assertEquals(
     [
@@ -899,18 +870,16 @@ test("embedding は行を引き直し、範囲外添字を拒否する", () => {
 });
 
 test("masked_fill は mask の真の位置だけを埋め、mask を右詰め broadcast する", () => {
-  const out = referenceMaskedFill(
-    t([2, 3], [1, 2, 3, 4, 5, 6]),
-    bools([3], [1, 0, 1]),
-    { value: -7.5 },
-  );
+  const out = referenceMaskedFill(t([2, 3], [1, 2, 3, 4, 5, 6]), bools([3], [1, 0, 1]), {
+    value: -7.5,
+  });
   assertEquals(out.shape, [2, 3]);
   assertEquals([...out.data], [-7.5, 2, -7.5, -7.5, 5, -7.5]);
   // 実測の埋め値（f32 の最小有限値）が丸めで動かない
   const extreme = referenceMaskedFill(t([2], [1, 2]), bools([2], [1, 0]), {
-    value: -3.4028234663852886e+38,
+    value: -3.4028234663852886e38,
   });
-  assertEquals([...extreme.data], [-3.4028234663852886e+38, 2]);
+  assertEquals([...extreme.data], [-3.4028234663852886e38, 2]);
   // mask が x を広げる形は契約が落とす（埋め値が本来無い要素へ漏れない）
   assertThrows(
     () => referenceMaskedFill(t([1], [1]), bools([3], [1, 0, 1]), { value: 0 }),
@@ -922,12 +891,10 @@ const CONV = { stride: 1, padding: 0, dilation: 1, groups: 1 } as const;
 
 test("conv1d は padding を 0 詰めで扱い、stride で出力長が決まる", () => {
   // x[1,1,4] = [1,2,3,4] / W[1,1,3] = [1,1,1] / bias = 0、stride 1 / padding 1
-  const same = referenceConv1d(
-    t([1, 1, 4], [1, 2, 3, 4]),
-    t([1, 1, 3], [1, 1, 1]),
-    t([1], [0]),
-    { ...CONV, padding: 1 },
-  );
+  const same = referenceConv1d(t([1, 1, 4], [1, 2, 3, 4]), t([1, 1, 3], [1, 1, 1]), t([1], [0]), {
+    ...CONV,
+    padding: 1,
+  });
   assertEquals(same.shape, [1, 1, 4]);
   // 両端は padding 域を読み飛ばす（[0+1+2, 1+2+3, 2+3+4, 3+4+0]）
   assertEquals([...same.data], [3, 6, 9, 7]);
@@ -1060,12 +1027,10 @@ test("conv2d の stride / padding / dilation は H と W で独立に効く", ()
   assertEquals([...dilated.data], [13121, 14232, 15343, 16454]);
 
   // padding 域は 0 詰めで**読み飛ばす**（両端が padding だけを見る出力を持つ形）
-  const padded = referenceConv2d(
-    t([1, 1, 1, 1], [7]),
-    t([1, 1, 1, 1], [3]),
-    t([1], [0]),
-    { ...CONV2D, padding: [1, 0] },
-  );
+  const padded = referenceConv2d(t([1, 1, 1, 1], [7]), t([1, 1, 1, 1], [3]), t([1], [0]), {
+    ...CONV2D,
+    padding: [1, 0],
+  });
   assertEquals(padded.shape, [1, 1, 3, 1]);
   assertEquals([...padded.data], [0, 21, 0]);
 });
@@ -1155,12 +1120,10 @@ test("conv3d の stride / padding / dilation は T / H / W で独立に効く", 
 
   // padding T = 2（Kt=3・T=1）: padding 域は 0 詰めで**読み飛ばす** — どの出力も実在の 1 フレームを
   // 別のタップで 1 度だけ読む（out[0] は w[2]・out[1] は w[1]・out[2] は w[0]）
-  const padded = referenceConv3d(
-    t([1, 1, 1, 1], [7]),
-    t([1, 1, 3, 1, 1], [1, 3, 5]),
-    t([1], [0]),
-    { ...CONV3D, padding: [2, 0, 0] },
-  );
+  const padded = referenceConv3d(t([1, 1, 1, 1], [7]), t([1, 1, 3, 1, 1], [1, 3, 5]), t([1], [0]), {
+    ...CONV3D,
+    padding: [2, 0, 0],
+  });
   assertEquals(padded.shape, [1, 3, 1, 1]);
   assertEquals([...padded.data], [35, 21, 7]);
 
@@ -1258,12 +1221,10 @@ test("conv3d（Kt = 1）は フレームごとの conv2d と厳密に一致す�
 test("conv_transpose1d は [Cin,Cout,K] の重みで入力を stride 倍に伸ばす", () => {
   // x[1,1,3] = [1,2,3] / W[1,1,2] = [1,10] / stride 2 / padding 0 → 出力長 6
   // out[2i] = x[i]·w[0] / out[2i+1] = x[i]·w[1]
-  const up = referenceConvTranspose1d(
-    t([1, 1, 3], [1, 2, 3]),
-    t([1, 1, 2], [1, 10]),
-    t([1], [0]),
-    { stride: 2, padding: 0 },
-  );
+  const up = referenceConvTranspose1d(t([1, 1, 3], [1, 2, 3]), t([1, 1, 2], [1, 10]), t([1], [0]), {
+    stride: 2,
+    padding: 0,
+  });
   assertEquals(up.shape, [1, 1, 6]);
   assertEquals([...up.data], [1, 10, 2, 20, 3, 30]);
 
@@ -1309,20 +1270,23 @@ test("conv_transpose1d は [Cin,Cout,K] の重みで入力を stride 倍に伸�
   );
   assertEquals(wide.shape, [1, 3, 4]);
   // 手計算: out[oc][2i+j] = x0[i]·W[0][oc][j] + x1[i]·W[1][oc][j]
-  assertEquals([...wide.data], [
-    71,
-    82,
-    142,
-    164, // oc0
-    93,
-    104,
-    186,
-    208, // oc1
-    115,
-    126,
-    230,
-    252, // oc2
-  ]);
+  assertEquals(
+    [...wide.data],
+    [
+      71,
+      82,
+      142,
+      164, // oc0
+      93,
+      104,
+      186,
+      208, // oc1
+      115,
+      126,
+      230,
+      252, // oc2
+    ],
+  );
 
   // bias は出力チャネルごとに 1 度だけ足される（寄与本数に比例しない）
   const biased = referenceConvTranspose1d(
@@ -1344,16 +1308,7 @@ test("deform_conv2d の 1×1 分岐は offset の 3 分岐を手計算どおり�
   const ones = t([1, 1, 2, 2], [1, 1, 1, 1]);
   /** offset は `[y 平面 4 要素, x 平面 4 要素]`（偶数チャネル = y / 奇数 = x）。 */
   const offset = (shiftY: number, shiftX: number): RefTensor =>
-    t([1, 2, 2, 2], [
-      shiftY,
-      shiftY,
-      shiftY,
-      shiftY,
-      shiftX,
-      shiftX,
-      shiftX,
-      shiftX,
-    ]);
+    t([1, 2, 2, 2], [shiftY, shiftY, shiftY, shiftY, shiftX, shiftX, shiftX, shiftX]);
   const run = (off: RefTensor, mask: RefTensor = ones): readonly number[] => [
     ...applyReferenceOp("deform_conv2d", [x, weight, off, mask, bias], { padding: [0, 0] }).data,
   ];
@@ -1466,16 +1421,10 @@ test("deform_conv2d は NaN の offset を 0 に落とさず伝播させる", ()
   assertEquals(Number.isNaN(out.data[0]), true, "NaN の offset は出力へ伝播する");
   assertEquals([...out.data.slice(1)], [2, 3, 4], "他の要素は巻き添えにならない");
   // ±Inf は torch と同じく「範囲外 = 0」（NaN とは別扱い）
-  const infinite = t([1, 2, 2, 2], [
-    Number.POSITIVE_INFINITY,
-    Number.NEGATIVE_INFINITY,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-  ]);
+  const infinite = t(
+    [1, 2, 2, 2],
+    [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, 0, 0, 0, 0, 0],
+  );
   const clipped = applyReferenceOp("deform_conv2d", [x, weight, infinite, mask, bias], {
     padding: [0, 0],
   });
@@ -1552,9 +1501,8 @@ test("deform_conv2d は一様な整数 offset を conv2d の窓ずらしとし�
   const uniformOffset = (shiftY: number, shiftX: number): RefTensor =>
     t(
       [1, 12, 7, 7],
-      Array.from(
-        { length: 12 * 49 },
-        (_unused, index) => Math.floor(index / 49) % 2 === 0 ? shiftY : shiftX,
+      Array.from({ length: 12 * 49 }, (_unused, index) =>
+        Math.floor(index / 49) % 2 === 0 ? shiftY : shiftX,
       ),
     );
 
@@ -1756,10 +1704,7 @@ test("applyReferenceOp は契約表の kind で分岐し、アリティ違反を
   assertThrows(() => applyReferenceOp("cat", [t([2], [1, 2])], { dim: 0 }), ReferenceOpError);
 
   // ADR 0017 の 3 本も同じ入口を通る（結線漏れは kind の網羅で型が止めるが、実行経路は別）
-  assertEquals(
-    [...applyReferenceOp("clamp_min", [t([2], [-1, 2])], { min: 0 }).data],
-    [0, 2],
-  );
+  assertEquals([...applyReferenceOp("clamp_min", [t([2], [-1, 2])], { min: 0 }).data], [0, 2]);
   // mean(x²) = 9 → rms 3 → 3/3·2 = 2（eps は 1e-12 で無視できる大きさ）
   assertAlmostEquals(
     applyReferenceOp("rms_norm", [t([1, 1], [3]), t([1], [2])], { eps: 1e-12 }).data[0],
@@ -1768,11 +1713,12 @@ test("applyReferenceOp は契約表の kind で分岐し、アリティ違反を
   );
   assertEquals(
     [
-      ...applyReferenceOp(
-        "conv2d",
-        [t([1, 1, 1, 1], [2]), t([1, 1, 1, 1], [3]), t([1], [1])],
-        { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 },
-      ).data,
+      ...applyReferenceOp("conv2d", [t([1, 1, 1, 1], [2]), t([1, 1, 1, 1], [3]), t([1], [1])], {
+        stride: [1, 1],
+        padding: [0, 0],
+        dilation: [1, 1],
+        groups: 1,
+      }).data,
     ],
     [7],
   );
@@ -1886,14 +1832,12 @@ test("allclose は NaN / Inf をどちらの側でも不合格にする", () => 
 test("allclose は NaN / 負の許容差を AllcloseError で拒み、atol = +Infinity は記録用の帯として通す", () => {
   const actual = Float32Array.from([999]);
   const expected = Float32Array.from([0]);
-  for (
-    const tolerance of [
-      { atol: Number.NaN, rtol: 0 },
-      { atol: 0, rtol: Number.NaN },
-      { atol: -1e-5, rtol: 1e-3 },
-      { atol: 1e-5, rtol: -1e-3 },
-    ]
-  ) {
+  for (const tolerance of [
+    { atol: Number.NaN, rtol: 0 },
+    { atol: 0, rtol: Number.NaN },
+    { atol: -1e-5, rtol: 1e-3 },
+    { atol: 1e-5, rtol: -1e-3 },
+  ]) {
     assertThrows(
       () => allclose(actual, expected, tolerance),
       AllcloseError,
@@ -1909,10 +1853,7 @@ test("allclose は NaN / 負の許容差を AllcloseError で拒み、atol = +In
     );
   }
   // 対照: atol = +Infinity は e2e が記録専用の帯として意図的に渡す（有限であることまでは要求しない）。
-  assertEquals(
-    allclose(actual, expected, { atol: Number.POSITIVE_INFINITY, rtol: 0 }).pass,
-    true,
-  );
+  assertEquals(allclose(actual, expected, { atol: Number.POSITIVE_INFINITY, rtol: 0 }).pass, true);
 });
 
 test("allclose は rtol = +Infinity を AllcloseError で拒む（参照 0 の要素が合格へ化けない）", () => {

@@ -50,23 +50,25 @@ const manifestOf = (
   config: Record<string, unknown>,
   assets: Record<string, unknown> = {},
 ): Manifest =>
-  parseManifest(JSON.stringify({
-    format: "karume/5",
-    generator: "karume/0.1.0",
-    defaultModel: "test",
-    models: {
-      test: {
-        pipeline,
-        weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
-        assets,
-        quants: {
-          f32: { weights: { [key]: "f32" }, session: {}, requiredLimits: UNSATISFIABLE },
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "karume/0.1.0",
+      defaultModel: "test",
+      models: {
+        test: {
+          pipeline,
+          weights: { [key]: { f32: declaredContainer(`${key}/model.f32`) } },
+          assets,
+          quants: {
+            f32: { weights: { [key]: "f32" }, session: {}, requiredLimits: UNSATISFIABLE },
+          },
+          defaultQuant: "f32",
+          pipelineConfig: config,
         },
-        defaultQuant: "f32",
-        pipelineConfig: config,
       },
-    },
-  }));
+    }),
+  );
 
 /** 宣言だけの容器 1 本を全量面のキー（`<部品>[i]`）へ畳む。 */
 const containerOf = async (key: string, spec: TensorlessGraphSpec) =>
@@ -150,17 +152,22 @@ const families: readonly Family[] = [
           },
         ),
         assets: {
-          ...await containerOf("crnn", {
+          ...(await containerOf("crnn", {
             symbols: ["T"],
             inputs: [{ name: "features", shape: [1, "2T", FEATURE_DIM] }],
             output: { name: "logits", shape: [1, "T", LIPSYNC_CLASSES.length] },
-          }),
+          })),
           mel_basis: writeSafetensors(
-            new Map([["mel_basis", {
-              dtype: "F32" as const,
-              shape: [N_MELS, MEL_BINS],
-              data: new Float32Array(N_MELS * MEL_BINS),
-            }]]),
+            new Map([
+              [
+                "mel_basis",
+                {
+                  dtype: "F32" as const,
+                  shape: [N_MELS, MEL_BINS],
+                  data: new Float32Array(N_MELS * MEL_BINS),
+                },
+              ],
+            ]),
             {},
           ),
         },

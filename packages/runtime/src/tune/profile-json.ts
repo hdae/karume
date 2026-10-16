@@ -36,7 +36,7 @@ const show = (value: unknown): string => {
   return typeof value === "number" ? String(value) : JSON.stringify(value);
 };
 
-const child = (path: string, key: string): string => path === ROOT ? key : `${path}.${key}`;
+const child = (path: string, key: string): string => (path === ROOT ? key : `${path}.${key}`);
 
 /** `path` の値がオブジェクトで、欄が `required` ∪ `optional` に収まり、`required` が全てあることを見る。 */
 const readRecord = (
@@ -49,8 +49,8 @@ const readRecord = (
     return fail(path, `がオブジェクトでない（${show(value)}）`);
   }
   const fields: Record<string, unknown> = { ...value };
-  const unknown = Object.keys(fields).filter((key) =>
-    !required.includes(key) && !optional.includes(key)
+  const unknown = Object.keys(fields).filter(
+    (key) => !required.includes(key) && !optional.includes(key),
   );
   if (unknown.length > 0) {
     return fail(
@@ -153,15 +153,12 @@ const readGemmRows = (value: unknown, path: string): GemmRowsRule[] => {
 
 const readProvenance = (value: unknown, path: string): Provenance => {
   // userAgent は参考の任意欄（照合に使わない — ADR 0117 追記 2026-10-02）。未知の欄の拒否は保つ
-  const fields = readRecord(value, path, [
-    "sweep",
-    "sha256",
-    "date",
-    "candidateSet",
-    "adapter",
-    "kernels",
-    "caseSet",
-  ], ["userAgent"]);
+  const fields = readRecord(
+    value,
+    path,
+    ["sweep", "sha256", "date", "candidateSet", "adapter", "kernels", "caseSet"],
+    ["userAgent"],
+  );
   const adapterPath = child(path, "adapter");
   const adapter = readRecord(fields.adapter, adapterPath, [
     "vendor",
@@ -208,10 +205,12 @@ export const parseGeometryProfileJson = (text: string): GeometryProfile => {
       { cause },
     );
   }
-  const fields = readRecord(parsed, ROOT, ["id", "gemmRows", "attention", "conv2d", "i8a8"], [
-    "match",
-    "provenance",
-  ]);
+  const fields = readRecord(
+    parsed,
+    ROOT,
+    ["id", "gemmRows", "attention", "conv2d", "i8a8"],
+    ["match", "provenance"],
+  );
   const attention = readRecord(fields.attention, "attention", ["qk", "pv"]);
   const conv2d = readRecord(fields.conv2d, "conv2d", ["rows64", "rows32"]);
   const i8a8 = readRecord(fields.i8a8, "i8a8", ["linear", "attentionQk", "attentionPv"]);

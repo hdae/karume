@@ -80,15 +80,11 @@ export class StepFailureError extends Error {
 const describeError = (error: unknown): string =>
   error instanceof Error ? (error.stack ?? `${error.name}: ${error.message}`) : String(error);
 
-const createContext = (
-  path: readonly string[],
-  failures: StepFailure[],
-): TestContext => ({
+const createContext = (path: readonly string[], failures: StepFailure[]): TestContext => ({
   name: path[path.length - 1] ?? "",
   async step(first: StepDefinition | string, second?: TestFunction): Promise<boolean> {
-    const definition: StepDefinition = typeof first === "string"
-      ? { name: first, fn: requireFunction(second, first) }
-      : first;
+    const definition: StepDefinition =
+      typeof first === "string" ? { name: first, fn: requireFunction(second, first) } : first;
     if (definition.ignore === true) return true;
     const stepPath = [...path, definition.name];
     const before = failures.length;
@@ -133,11 +129,12 @@ export function test(
   third?: TestFunction,
 ): void {
   const definition = toDefinition(first, second, third);
-  const register = definition.only === true
-    ? vitestTest.only
-    : definition.ignore === true
-    ? vitestTest.skip
-    : vitestTest;
+  const register =
+    definition.only === true
+      ? vitestTest.only
+      : definition.ignore === true
+        ? vitestTest.skip
+        : vitestTest;
   register(definition.name, () => runWithSteps(definition.name, definition.fn));
 }
 
@@ -152,16 +149,18 @@ export function describe(
   second?: (() => void) | RegistrationOptions,
   third?: () => void,
 ): void {
-  const definition: SuiteDefinition = typeof first !== "string"
-    ? first
-    : typeof second === "function"
-    ? { name: first, fn: second }
-    : { ...second, name: first, fn: requireSuite(third, first) };
-  const register = definition.only === true
-    ? vitestDescribe.only
-    : definition.ignore === true
-    ? vitestDescribe.skip
-    : vitestDescribe;
+  const definition: SuiteDefinition =
+    typeof first !== "string"
+      ? first
+      : typeof second === "function"
+        ? { name: first, fn: second }
+        : { ...second, name: first, fn: requireSuite(third, first) };
+  const register =
+    definition.only === true
+      ? vitestDescribe.only
+      : definition.ignore === true
+        ? vitestDescribe.skip
+        : vitestDescribe;
   register(definition.name, definition.fn);
 }
 

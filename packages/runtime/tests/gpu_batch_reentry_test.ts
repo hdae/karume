@@ -53,7 +53,9 @@ const settleWithin = async <T>(work: Promise<T>, label: string): Promise<T> => {
 };
 
 test("batch: 読み戻しがフェンス前に落ちた窓は捨て、submit の推定を更新しない", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu), sink = await gpu.createResident(12);
+  const gpu = await acquireGpu(),
+    target = await session(gpu),
+    sink = await gpu.createResident(12);
   try {
     const batch = await gpu.beginBatch();
     await target.enqueue({ x0: input() }, { batch, copyOutputs: { y: sink } });
@@ -73,16 +75,20 @@ test("batch: 読み戻しがフェンス前に落ちた窓は捨て、submit の
 });
 
 test("batch enqueue: 入力 getter からの enqueueRead 再入は写しの後の再検査で拒否する", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   try {
     const batch = await gpu.beginBatch();
     let read: EnqueueRead | undefined;
-    const outer = target.enqueue({
-      get x0(): Tensor {
-        read = target.enqueueRead({ x0: input() }, { batch });
-        return { dtype: "f32", shape: [3], data: Float32Array.of(10, 20, 30) };
+    const outer = target.enqueue(
+      {
+        get x0(): Tensor {
+          read = target.enqueueRead({ x0: input() }, { batch });
+          return { dtype: "f32", shape: [3], data: Float32Array.of(10, 20, 30) };
+        },
       },
-    }, { batch });
+      { batch },
+    );
     await assertRejects(() => outer, BatchScopeError, "enqueueRead を積んだ batch");
     await batch.finish();
     assertEquals(
@@ -97,17 +103,24 @@ test("batch enqueue: 入力 getter からの enqueueRead 再入は写しの後�
 });
 
 test("batch enqueue: 入力 getter からの run 再入は自己デッドロックでなく BatchScopeError にする", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   try {
     const batch = await gpu.beginBatch();
     let run: Promise<RunOutputs> | undefined;
-    const outer = target.enqueue({
-      get x0(): Tensor {
-        run = target.run({ x0: input() });
-        return input();
+    const outer = target.enqueue(
+      {
+        get x0(): Tensor {
+          run = target.run({ x0: input() });
+          return input();
+        },
       },
-    }, { batch });
-    await settleWithin(assertRejects(() => outer, BatchScopeError, "未決着の run"), "enqueue");
+      { batch },
+    );
+    await settleWithin(
+      assertRejects(() => outer, BatchScopeError, "未決着の run"),
+      "enqueue",
+    );
     await settleWithin(batch.finish(), "finish");
     assertEquals(Array.from((await settleWithin(run!, "run")).y.data), [-1, -2, -3]);
   } finally {
@@ -117,7 +130,8 @@ test("batch enqueue: 入力 getter からの run 再入は自己デッドロッ�
 });
 
 test("run: 入力 getter からの dispose 再入は破棄済みとして拒否し、破棄後に backing を作らない", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   try {
     let disposal: Promise<void> | undefined;
     await assertRejects(
@@ -143,7 +157,9 @@ test("run: 入力 getter からの dispose 再入は破棄済みとして拒否�
 });
 
 test("batch finishAndRead: 出力 getter からの再入は写しの後の再検査で拒否し、内側の登録を守る", async () => {
-  const gpu = await acquireGpu(), a = await gpu.createResident(4), b = await gpu.createResident(4);
+  const gpu = await acquireGpu(),
+    a = await gpu.createResident(4),
+    b = await gpu.createResident(4);
   a.write(Float32Array.of(1));
   b.write(Float32Array.of(2));
   try {

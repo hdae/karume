@@ -11,9 +11,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 4,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -41,16 +39,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -100,9 +89,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 8,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -130,16 +117,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -189,9 +167,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 8,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -219,16 +195,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -278,9 +245,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 4,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -308,16 +273,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -367,9 +323,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 4,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -397,16 +351,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -456,9 +401,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 8,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -486,16 +429,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -545,9 +479,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 8,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -575,16 +507,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -634,9 +557,7 @@
         "metadata": {
           "manifestSha256": "ae23f43cc141d369edc0669ae097fca3e95a91f27ccaf0089f56be4984834ac8",
           "experimentalTargetLanes": 4,
-          "enabledFeatures": [
-            "core-features-and-limits"
-          ],
+          "enabledFeatures": ["core-features-and-limits"],
           "wgslLanguageFeatures": [
             "packed_4x8_integer_dot_product",
             "subgroup_uniformity",
@@ -664,16 +585,7 @@
           "rmsNormReduce": "workgroup",
           "submitMaxChunkSize": 768,
           "prefillBuckets": "dense",
-          "chunkBuckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "pleBudget": "default-two-shards"
         },
         "cases": [
@@ -760,11 +672,7 @@
           "mode": "dispatch",
           "decodeTokensPerSecond": 60.45485078206925,
           "targetKey": "linear_gemv_parallel:wi4g32:l4",
-          "targetWorkgroups": [
-            384,
-            1,
-            1
-          ],
+          "targetWorkgroups": [384, 1, 1],
           "targetDispatchesPerToken": 40,
           "targetMedianUs": 26.624,
           "targetTotalGpuMsPerToken": 1.086919111111111
@@ -797,11 +705,7 @@
           "mode": "dispatch",
           "decodeTokensPerSecond": 58.15563555801467,
           "targetKey": "linear_gemv_parallel:wi4g32:l8",
-          "targetWorkgroups": [
-            768,
-            1,
-            1
-          ],
+          "targetWorkgroups": [768, 1, 1],
           "targetDispatchesPerToken": 40,
           "targetMedianUs": 43.008,
           "targetTotalGpuMsPerToken": 1.7191659682539684
@@ -834,11 +738,7 @@
           "mode": "dispatch",
           "decodeTokensPerSecond": 57.93103448275862,
           "targetKey": "linear_gemv_parallel:wi4g32:l8",
-          "targetWorkgroups": [
-            768,
-            1,
-            1
-          ],
+          "targetWorkgroups": [768, 1, 1],
           "targetDispatchesPerToken": 40,
           "targetMedianUs": 43.008,
           "targetTotalGpuMsPerToken": 1.7195073015873015
@@ -871,11 +771,7 @@
           "mode": "dispatch",
           "decodeTokensPerSecond": 61.6498678931318,
           "targetKey": "linear_gemv_parallel:wi4g32:l4",
-          "targetWorkgroups": [
-            384,
-            1,
-            1
-          ],
+          "targetWorkgroups": [384, 1, 1],
           "targetDispatchesPerToken": 40,
           "targetMedianUs": 27.648,
           "targetTotalGpuMsPerToken": 1.0949648253968254
@@ -984,10 +880,7 @@
         }
       ],
       "rejected": [],
-      "features": [
-        "core-features-and-limits",
-        "timestamp-query"
-      ],
+      "features": ["core-features-and-limits", "timestamp-query"],
       "adapter": {
         "vendor": "nvidia",
         "architecture": "ampere",
@@ -1000,11 +893,11 @@
   "numeric": {
     "cases": 36,
     "elements": 483444,
-    "maxAbsError": 4.4965759427029184e-07,
+    "maxAbsError": 4.4965759427029184e-7,
     "maxToleranceRatio": 0.0022444659171972285,
     "tolerance": {
       "atol": 0.0002,
-      "rtol": 4e-06
+      "rtol": 4e-6
     },
     "checks": [
       {
@@ -1014,8 +907,8 @@
         "lanes": 4,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.43137428576523e-08,
-        "maxToleranceRatio": 7.109015495380563e-05,
+        "maxAbs": 1.43137428576523e-8,
+        "maxToleranceRatio": 7.109015495380563e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1027,8 +920,8 @@
         "lanes": 4,
         "m": 4,
         "elements": 144,
-        "maxAbs": 1.6242742401084698e-08,
-        "maxToleranceRatio": 8.093991339131266e-05,
+        "maxAbs": 1.6242742401084698e-8,
+        "maxToleranceRatio": 8.093991339131266e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1040,7 +933,7 @@
         "lanes": 4,
         "m": 8,
         "elements": 288,
-        "maxAbs": 2.382543123902181e-08,
+        "maxAbs": 2.382543123902181e-8,
         "maxToleranceRatio": 0.000118259958687701,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1053,8 +946,8 @@
         "lanes": 8,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.43137428576523e-08,
-        "maxToleranceRatio": 7.109015495380563e-05,
+        "maxAbs": 1.43137428576523e-8,
+        "maxToleranceRatio": 7.109015495380563e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1066,8 +959,8 @@
         "lanes": 8,
         "m": 4,
         "elements": 144,
-        "maxAbs": 1.6242742401084698e-08,
-        "maxToleranceRatio": 8.093991339131266e-05,
+        "maxAbs": 1.6242742401084698e-8,
+        "maxToleranceRatio": 8.093991339131266e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1079,7 +972,7 @@
         "lanes": 8,
         "m": 8,
         "elements": 288,
-        "maxAbs": 2.382543123902181e-08,
+        "maxAbs": 2.382543123902181e-8,
         "maxToleranceRatio": 0.000118259958687701,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1092,8 +985,8 @@
         "lanes": 16,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.43137428576523e-08,
-        "maxToleranceRatio": 7.109015495380563e-05,
+        "maxAbs": 1.43137428576523e-8,
+        "maxToleranceRatio": 7.109015495380563e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1105,8 +998,8 @@
         "lanes": 16,
         "m": 4,
         "elements": 144,
-        "maxAbs": 1.6242742401084698e-08,
-        "maxToleranceRatio": 8.093991339131266e-05,
+        "maxAbs": 1.6242742401084698e-8,
+        "maxToleranceRatio": 8.093991339131266e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1118,7 +1011,7 @@
         "lanes": 16,
         "m": 8,
         "elements": 288,
-        "maxAbs": 2.382543123902181e-08,
+        "maxAbs": 2.382543123902181e-8,
         "maxToleranceRatio": 0.000118259958687701,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1131,8 +1024,8 @@
         "lanes": 4,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.5420296373136466e-08,
-        "maxToleranceRatio": 7.658624740905021e-05,
+        "maxAbs": 1.5420296373136466e-8,
+        "maxToleranceRatio": 7.658624740905021e-5,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1144,7 +1037,7 @@
         "lanes": 4,
         "m": 4,
         "elements": 144,
-        "maxAbs": 2.65775512708899e-08,
+        "maxAbs": 2.65775512708899e-8,
         "maxToleranceRatio": 0.00013204710855669116,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1157,7 +1050,7 @@
         "lanes": 4,
         "m": 8,
         "elements": 288,
-        "maxAbs": 2.8756587278078172e-08,
+        "maxAbs": 2.8756587278078172e-8,
         "maxToleranceRatio": 0.00014309291820345182,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1170,8 +1063,8 @@
         "lanes": 8,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.5420296373136466e-08,
-        "maxToleranceRatio": 7.658624740905021e-05,
+        "maxAbs": 1.5420296373136466e-8,
+        "maxToleranceRatio": 7.658624740905021e-5,
         "mismatchAgainstL4": 6,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1183,7 +1076,7 @@
         "lanes": 8,
         "m": 4,
         "elements": 144,
-        "maxAbs": 2.162651488446521e-08,
+        "maxAbs": 2.162651488446521e-8,
         "maxToleranceRatio": 0.00010762480743093919,
         "mismatchAgainstL4": 26,
         "firstRowU32Match": true,
@@ -1196,7 +1089,7 @@
         "lanes": 8,
         "m": 8,
         "elements": 288,
-        "maxAbs": 2.8756587278078172e-08,
+        "maxAbs": 2.8756587278078172e-8,
         "maxToleranceRatio": 0.00014309291820345182,
         "mismatchAgainstL4": 65,
         "firstRowU32Match": true,
@@ -1209,8 +1102,8 @@
         "lanes": 16,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.5420296373136466e-08,
-        "maxToleranceRatio": 7.658624740905021e-05,
+        "maxAbs": 1.5420296373136466e-8,
+        "maxToleranceRatio": 7.658624740905021e-5,
         "mismatchAgainstL4": 6,
         "firstRowU32Match": true,
         "unusedRowsUntouched": true
@@ -1222,7 +1115,7 @@
         "lanes": 16,
         "m": 4,
         "elements": 144,
-        "maxAbs": 2.162651488446521e-08,
+        "maxAbs": 2.162651488446521e-8,
         "maxToleranceRatio": 0.00010762480743093919,
         "mismatchAgainstL4": 26,
         "firstRowU32Match": true,
@@ -1235,7 +1128,7 @@
         "lanes": 16,
         "m": 8,
         "elements": 288,
-        "maxAbs": 2.8756587278078172e-08,
+        "maxAbs": 2.8756587278078172e-8,
         "maxToleranceRatio": 0.00014309291820345182,
         "mismatchAgainstL4": 65,
         "firstRowU32Match": true,
@@ -1248,7 +1141,7 @@
         "lanes": 4,
         "m": 1,
         "elements": 36,
-        "maxAbs": 2.1301615626967418e-07,
+        "maxAbs": 2.1301615626967418e-7,
         "maxToleranceRatio": 0.0010628123467492695,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1261,7 +1154,7 @@
         "lanes": 4,
         "m": 4,
         "elements": 144,
-        "maxAbs": 3.197241293939612e-07,
+        "maxAbs": 3.197241293939612e-7,
         "maxToleranceRatio": 0.0015968698371994813,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1274,7 +1167,7 @@
         "lanes": 4,
         "m": 8,
         "elements": 288,
-        "maxAbs": 3.197241293939612e-07,
+        "maxAbs": 3.197241293939612e-7,
         "maxToleranceRatio": 0.0015968698371994813,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1287,7 +1180,7 @@
         "lanes": 8,
         "m": 1,
         "elements": 36,
-        "maxAbs": 1.1153290246923575e-07,
+        "maxAbs": 1.1153290246923575e-7,
         "maxToleranceRatio": 0.0005510044547401861,
         "mismatchAgainstL4": 32,
         "firstRowU32Match": true,
@@ -1300,7 +1193,7 @@
         "lanes": 8,
         "m": 4,
         "elements": 144,
-        "maxAbs": 1.6327447466268907e-07,
+        "maxAbs": 1.6327447466268907e-7,
         "maxToleranceRatio": 0.0008090507122150728,
         "mismatchAgainstL4": 123,
         "firstRowU32Match": true,
@@ -1313,7 +1206,7 @@
         "lanes": 8,
         "m": 8,
         "elements": 288,
-        "maxAbs": 1.6327447466268907e-07,
+        "maxAbs": 1.6327447466268907e-7,
         "maxToleranceRatio": 0.0008090507122150728,
         "mismatchAgainstL4": 241,
         "firstRowU32Match": true,
@@ -1326,7 +1219,7 @@
         "lanes": 16,
         "m": 1,
         "elements": 36,
-        "maxAbs": 8.986876492977913e-08,
+        "maxAbs": 8.986876492977913e-8,
         "maxToleranceRatio": 0.00044882488521860465,
         "mismatchAgainstL4": 29,
         "firstRowU32Match": true,
@@ -1339,7 +1232,7 @@
         "lanes": 16,
         "m": 4,
         "elements": 144,
-        "maxAbs": 1.0235301711736255e-07,
+        "maxAbs": 1.0235301711736255e-7,
         "maxToleranceRatio": 0.0005073442758382394,
         "mismatchAgainstL4": 121,
         "firstRowU32Match": true,
@@ -1352,7 +1245,7 @@
         "lanes": 16,
         "m": 8,
         "elements": 288,
-        "maxAbs": 1.0235301711736255e-07,
+        "maxAbs": 1.0235301711736255e-7,
         "maxToleranceRatio": 0.0005073442758382394,
         "mismatchAgainstL4": 233,
         "firstRowU32Match": true,
@@ -1365,7 +1258,7 @@
         "lanes": 4,
         "m": 1,
         "elements": 12288,
-        "maxAbs": 4.4965759427029184e-07,
+        "maxAbs": 4.4965759427029184e-7,
         "maxToleranceRatio": 0.0022444659171972285,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1378,7 +1271,7 @@
         "lanes": 4,
         "m": 4,
         "elements": 49152,
-        "maxAbs": 4.4965759427029184e-07,
+        "maxAbs": 4.4965759427029184e-7,
         "maxToleranceRatio": 0.0022444659171972285,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1391,7 +1284,7 @@
         "lanes": 4,
         "m": 8,
         "elements": 98304,
-        "maxAbs": 4.4965759427029184e-07,
+        "maxAbs": 4.4965759427029184e-7,
         "maxToleranceRatio": 0.0022444659171972285,
         "mismatchAgainstL4": 0,
         "firstRowU32Match": true,
@@ -1404,7 +1297,7 @@
         "lanes": 8,
         "m": 1,
         "elements": 12288,
-        "maxAbs": 2.2016603334895635e-07,
+        "maxAbs": 2.2016603334895635e-7,
         "maxToleranceRatio": 0.00109582353085811,
         "mismatchAgainstL4": 10351,
         "firstRowU32Match": true,
@@ -1417,7 +1310,7 @@
         "lanes": 8,
         "m": 4,
         "elements": 49152,
-        "maxAbs": 2.500792287696285e-07,
+        "maxAbs": 2.500792287696285e-7,
         "maxToleranceRatio": 0.001239699626484548,
         "mismatchAgainstL4": 41196,
         "firstRowU32Match": true,
@@ -1430,7 +1323,7 @@
         "lanes": 8,
         "m": 8,
         "elements": 98304,
-        "maxAbs": 2.53112560522073e-07,
+        "maxAbs": 2.53112560522073e-7,
         "maxToleranceRatio": 0.001255684360194427,
         "mismatchAgainstL4": 82044,
         "firstRowU32Match": true,
@@ -1443,7 +1336,7 @@
         "lanes": 16,
         "m": 1,
         "elements": 12288,
-        "maxAbs": 1.7944125269009348e-07,
+        "maxAbs": 1.7944125269009348e-7,
         "maxToleranceRatio": 0.0008937040277867197,
         "mismatchAgainstL4": 10301,
         "firstRowU32Match": true,
@@ -1456,7 +1349,7 @@
         "lanes": 16,
         "m": 4,
         "elements": 49152,
-        "maxAbs": 1.8818929903297033e-07,
+        "maxAbs": 1.8818929903297033e-7,
         "maxToleranceRatio": 0.0009311359647571022,
         "mismatchAgainstL4": 41338,
         "firstRowU32Match": true,
@@ -1469,7 +1362,7 @@
         "lanes": 16,
         "m": 8,
         "elements": 98304,
-        "maxAbs": 1.9387298569317757e-07,
+        "maxAbs": 1.9387298569317757e-7,
         "maxToleranceRatio": 0.0009690984113467302,
         "mismatchAgainstL4": 82430,
         "firstRowU32Match": true,

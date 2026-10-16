@@ -18,9 +18,11 @@ const small = (fake: FakeSession) => {
   let calls = 0;
   const greedy: GenerationGreedyRun<FakeSession["context"]> = async (inputs, generation) => {
     calls++;
-    const out = await fake.session.run(inputs, undefined, generation), x = out.logits;
+    const out = await fake.session.run(inputs, undefined, generation),
+      x = out.logits;
     assert(x.dtype === "f32");
-    let index = 0, value = -Infinity;
+    let index = 0,
+      value = -Infinity;
     for (let i = 0; i < x.data.length; i++) {
       if (Number.isNaN(x.data[i])) return { index: i, value: x.data[i] };
       if (x.data[i] > value) {
@@ -33,22 +35,28 @@ const small = (fake: FakeSession) => {
   return { greedy, calls: () => calls };
 };
 test("greedy能力は温度0・加工無しの固定snapshotからだけ得る", () => {
-  for (
-    const spec of [{}, { temperature: 0 }, { topK: 5, topP: .1 }, {
+  for (const spec of [
+    {},
+    { temperature: 0 },
+    { topK: 5, topP: 0.1 },
+    {
       repetitionPenalty: 1,
       logitBias: [],
-    }]
-  ) {
+    },
+  ]) {
     const s = createSampler(spec);
     assert(s.greedy !== undefined);
     assertEquals(s.greedy(4, 7), 7);
     for (const value of [NaN, Infinity, -Infinity]) assertThrows(() => s.greedy?.(value, 2));
   }
-  for (
-    const spec of [{ temperature: 1 }, { temperature: 1, topK: 1 }, { repetitionPenalty: 1.1 }, {
+  for (const spec of [
+    { temperature: 1 },
+    { temperature: 1, topK: 1 },
+    { repetitionPenalty: 1.1 },
+    {
       logitBias: [[2, 0]],
-    }] satisfies SamplerSpec[]
-  ) {
+    },
+  ] satisfies SamplerSpec[]) {
     assertEquals(createSampler(spec).greedy, undefined);
   }
   const mutable = { temperature: 0, logitBias: [] as [number, number][] },
@@ -71,7 +79,8 @@ test("小出力でも複数chunk・複数ターン・samplingへの切替が同�
   try {
     for (const sampler of [{ temperature: 0 }, { temperature: 1, seed: 17 }, { temperature: 0 }]) {
       const request = { prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4, sampler };
-      const x = await drain(slow.generate(request)), y = await drain(quick.generate(request));
+      const x = await drain(slow.generate(request)),
+        y = await drain(quick.generate(request));
       assertEquals(y, x);
       assertEquals(quick.used, slow.used);
       assertEquals(b.calls, a.calls);
@@ -96,16 +105,16 @@ test("penalty・bias・診断・投機は通常runを使う", async () => {
       ...(kind === "diagnostics" ? { onRun: () => {} } : {}),
       ...(kind === "speculative"
         ? {
-          speculative: {
-            policy: "always" as const,
-            open: () =>
-              Promise.resolve({
-                steps: 1,
-                draft: () => Promise.resolve(Int32Array.of(6)),
-                dispose: () => Promise.resolve(),
-              }),
-          },
-        }
+            speculative: {
+              policy: "always" as const,
+              open: () =>
+                Promise.resolve({
+                  steps: 1,
+                  draft: () => Promise.resolve(Int32Array.of(6)),
+                  dispose: () => Promise.resolve(),
+                }),
+            },
+          }
         : {}),
     });
     try {
@@ -113,11 +122,12 @@ test("penalty・bias・診断・投機は通常runを使う", async () => {
         sequence.generate({
           prompt: [1, 2],
           maxNewTokens: 2,
-          sampler: kind === "penalty"
-            ? { repetitionPenalty: 1.1 }
-            : kind === "bias"
-            ? { logitBias: [[3, 1]] }
-            : { temperature: 0 },
+          sampler:
+            kind === "penalty"
+              ? { repetitionPenalty: 1.1 }
+              : kind === "bias"
+                ? { logitBias: [[3, 1]] }
+                : { temperature: 0 },
         }),
       );
     } finally {
@@ -129,7 +139,9 @@ test("penalty・bias・診断・投機は通常runを使う", async () => {
 for (const nanAt of [0, 1]) {
   test(`小出力のNaN失敗後も書き込み済みfrontierを重複投入しない: ${nanAt}`, async () => {
     const options: FakeOptions = { tokens: [5, 6, 7, 8, 9], nanAt };
-    const a = fakeSession(options), b = fakeSession(options), fast = small(b);
+    const a = fakeSession(options),
+      b = fakeSession(options),
+      fast = small(b);
     const slow = await createGenerationSequence({ session: a.session, program: programOf(a) });
     const quick = await createGenerationSequence({
       session: b.session,
@@ -152,7 +164,8 @@ for (const nanAt of [0, 1]) {
 }
 
 test("中間prefillのNaNを最後のchunkの抽選と混同しない", async () => {
-  const f = fakeSession({ tokens: [5, 6], nanAt: 0 }), fast = small(f);
+  const f = fakeSession({ tokens: [5, 6], nanAt: 0 }),
+    fast = small(f);
   const sequence = await createGenerationSequence({
     session: f.session,
     program: programOf(f),
@@ -178,7 +191,8 @@ test("小出力も早期終了・中断後の会話を通常runと同じ位置�
         program: programOf(f),
         ...(optimized ? { greedy: fast.greedy } : {}),
       });
-      const control = new AbortController(), reason = Error("stop test");
+      const control = new AbortController(),
+        reason = Error("stop test");
       try {
         const stream = sequence.generate({
           prompt: [1, 2],

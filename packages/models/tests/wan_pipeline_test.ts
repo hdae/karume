@@ -109,11 +109,12 @@ const buildAsset = (
     readonly tensors?: readonly { name: string; shape: number[] }[];
   } = {},
 ): ArrayBuffer => {
-  const tensors = options.tensors ??
-    rows.map((row) => ({ name: row.name, shape: [row.tokens, WIDTH] }));
+  const tensors =
+    options.tensors ?? rows.map((row) => ({ name: row.name, shape: [row.tokens, WIDTH] }));
   const header: Record<string, unknown> = {
-    __metadata__: options.metadata ??
-      { [WAN_TEXT_EMBEDS_METADATA_KEY]: JSON.stringify({ prompts: rows, source: {} }) },
+    __metadata__: options.metadata ?? {
+      [WAN_TEXT_EMBEDS_METADATA_KEY]: JSON.stringify({ prompts: rows, source: {} }),
+    },
   };
   const payloads: Float32Array[] = [];
   let offset = 0;
@@ -156,11 +157,14 @@ const plan = (request: Partial<WanGenerateRequest>) =>
 describe("テキスト埋め込み資産", () => {
   it("メタの並びのまま行を返し、行は [tokens, width] の f32", () => {
     assertEquals(EMBEDS.width, WIDTH);
-    assertEquals(EMBEDS.entries.map((entry) => [entry.name, entry.tokens]), [
-      ["cats", 2],
-      ["ferret", 3],
-      ["negative", 1],
-    ]);
+    assertEquals(
+      EMBEDS.entries.map((entry) => [entry.name, entry.tokens]),
+      [
+        ["cats", 2],
+        ["ferret", 3],
+        ["negative", 1],
+      ],
+    );
     assertEquals(
       [...EMBEDS.entries[1].data],
       [1, 1.1, 1.2, 1, 1.1, 1.2, 1, 1.1, 1.2].map(Math.fround),
@@ -203,10 +207,14 @@ describe("テキスト埋め込み資産", () => {
       [
         "'cats' が F32 [2, width] でない",
         buildAsset(ROWS, {
-          tensors: [{ name: "cats", shape: [3, WIDTH] }, { name: "ferret", shape: [3, WIDTH] }, {
-            name: "negative",
-            shape: [1, WIDTH],
-          }],
+          tensors: [
+            { name: "cats", shape: [3, WIDTH] },
+            { name: "ferret", shape: [3, WIDTH] },
+            {
+              name: "negative",
+              shape: [1, WIDTH],
+            },
+          ],
         }),
       ],
       [
@@ -222,16 +230,22 @@ describe("テキスト埋め込み資産", () => {
       [
         "テンソル 'negative' が無い",
         buildAsset(ROWS, {
-          tensors: [{ name: "cats", shape: [2, WIDTH] }, { name: "ferret", shape: [3, WIDTH] }],
+          tensors: [
+            { name: "cats", shape: [2, WIDTH] },
+            { name: "ferret", shape: [3, WIDTH] },
+          ],
         }),
       ],
       [
         "メタに無いテンソル",
         buildAsset(ROWS, {
-          tensors: [...ROWS.map((row) => ({ name: row.name, shape: [row.tokens, WIDTH] })), {
-            name: "extra",
-            shape: [1, WIDTH],
-          }],
+          tensors: [
+            ...ROWS.map((row) => ({ name: row.name, shape: [row.tokens, WIDTH] })),
+            {
+              name: "extra",
+              shape: [1, WIDTH],
+            },
+          ],
         }),
       ],
       ["役割", buildAsset([{ ...ROWS[0], role: "neutral" }])],
@@ -255,11 +269,7 @@ describe("テキスト埋め込み資産", () => {
       );
       // 'ferret' の行 1・列 1（WIDTH = 3）。
       ferret.data[1 * WIDTH + 1] = bad;
-      assertThrows(
-        () => parseWanTextEmbeds(asset),
-        WanTextEmbedsError,
-        "'ferret' の行 1・列 1",
-      );
+      assertThrows(() => parseWanTextEmbeds(asset), WanTextEmbedsError, "'ferret' の行 1・列 1");
     }
   });
 });
@@ -296,7 +306,10 @@ describe("planWanGeneration（generate の入口の門）", () => {
   it("フレーム数は 4n+1 の 5〜81 だけを受け、85（上限超え）/ 34（4n+1 でない）は範囲を言って拒む", () => {
     const accepted = Array.from({ length: 20 }, (_, index) => 5 + 4 * index);
     assertEquals(accepted.at(-1), 81);
-    assertEquals(accepted.map((frames) => plan({ frames }).frames), accepted);
+    assertEquals(
+      accepted.map((frames) => plan({ frames }).frames),
+      accepted,
+    );
     assertEquals(plan({ frames: 81 }).latentShape, [16, 21, 60, 104]);
     for (const frames of [85, 34]) {
       const error = assertThrows(() => plan({ frames }), ModelInputError, "4n+1 の 5〜81");
@@ -462,10 +475,7 @@ describe("planWanGeneration（generate の入口の門）", () => {
 
   it("計画は要求の steps × shift のスケジュールを持つ（denoise は組み直さずにこれを使う）", () => {
     const explicit = plan({ steps: 3, shift: 1.5 });
-    assertEquals(
-      explicit.schedule,
-      wanUniPcSchedule(3, 1.5, WAN_UNIPC_CONFIG.numTrainTimesteps),
-    );
+    assertEquals(explicit.schedule, wanUniPcSchedule(3, 1.5, WAN_UNIPC_CONFIG.numTrainTimesteps));
     assertEquals(plan({}).schedule.timesteps.length, 50, "省いた steps は既定の 50");
   });
 
@@ -517,7 +527,10 @@ describe("家族 admission: VAE のタイルが受理する寸法を全部覆う
 
   it("chunk グラフの検査は通るがタイル decode できない資産を、寸法と理由を言って拒む", () => {
     // 8: 重なりの下限 8 がタイル幅未満にならない。64: 潜在の短辺 60 より大きい。
-    for (const [tile, reason] of [[8, "最小の重なり"], [64, "タイル幅 64 より小さい"]] as const) {
+    for (const [tile, reason] of [
+      [8, "最小の重なり"],
+      [64, "タイル幅 64 より小さい"],
+    ] as const) {
       const error = assertThrows(
         () => assertWanVaeTilesCover(layoutOf(tile), WAN21_FAMILY.generation, WAN21_FAMILY.owner),
         Error,
@@ -841,7 +854,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
     /** 正常形の入力 1 本を差し替える（`replacement` を省けば外す）。 */
     const replaced = (name: string, replacement?: Ti2vInput): readonly Ti2vInput[] =>
       TI2V_VALID.flatMap((input) =>
-        input.name !== name ? [input] : replacement === undefined ? [] : [replacement]
+        input.name !== name ? [input] : replacement === undefined ? [] : [replacement],
       );
 
     it("正常形は通り、form を ti2v として返す（数値の欄は t2v と同じく宣言から引く）", () => {
@@ -862,7 +875,7 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
           replaced("condition_mask"),
           "ti2v",
           `WanTi2vPipeline: transformer のグラフ入力が [${T2V_NAMES}, timesteps_proj_condition]` +
-          `（期待: [${TI2V_NAMES}] — 入力の形 'ti2v'）`,
+            `（期待: [${TI2V_NAMES}] — 入力の形 'ti2v'）`,
         ],
         [
           "condition_mask が f32",
@@ -906,14 +919,14 @@ describe("家族 admission: DiT のグラフ宣言 × ホストが組む形（ra
           TI2V_VALID,
           "t2v",
           `WanTi2vPipeline: transformer のグラフ入力が [${TI2V_NAMES}]` +
-          `（期待: [${T2V_NAMES}] — 入力の形 't2v'）`,
+            `（期待: [${T2V_NAMES}] — 入力の形 't2v'）`,
         ],
         [
           "2.1 の 5 本の宣言を ti2v として開く",
           TI2V_VALID.slice(0, 5),
           "ti2v",
           `WanTi2vPipeline: transformer のグラフ入力が [${T2V_NAMES}]` +
-          `（期待: [${TI2V_NAMES}] — 入力の形 'ti2v'）`,
+            `（期待: [${TI2V_NAMES}] — 入力の形 'ti2v'）`,
         ],
       ];
       for (const [label, inputs, form, message] of rejected) {
@@ -1078,7 +1091,7 @@ describe("潜在の逆正規化", () => {
   it("上流の順（std の逆数で割ってから mean を足す）で、掛け算の順とは最終ビットが割れる", () => {
     const perChannel = 4096;
     const latents = new Float32Array(16 * perChannel).map((_, index) =>
-      Math.fround(Math.sin(index) * 3)
+      Math.fround(Math.sin(index) * 3),
     );
     const got = denormalizeWanLatents(latents, WAN21_GENERATION.latents);
     let differsFromProduct = 0;
@@ -1168,26 +1181,20 @@ describe("初期ノイズの乱数", () => {
     // 列が変われば seed 付きの全 clip が黙って変わるので、先頭の値そのものを固定する。seed 0 は
     // generate の既定・42 は example と opt-in の sha 行の seed。値は Deno（V8）で焼いた f32
     // （ECMAScript は Math.log / cos / sin を実装依存の近似とするので、別のエンジンでは割れうる）。
-    assertEquals([...new WanRandn(0).normals(8)], [
-      -0.45275774598121643,
-      0.20776604115962982,
-      2.6506059169769287,
-      -0.4904228150844574,
-      -0.9886041283607483,
-      1.8721014261245728,
-      0.2524627149105072,
-      -1.853424310684204,
-    ]);
-    assertEquals([...new WanRandn(42).normals(8)], [
-      0.41471976041793823,
-      0.6526812314987183,
-      -0.8918862342834473,
-      1.3268336057662964,
-      1.72959303855896,
-      -1.883416771888733,
-      0.5456204414367676,
-      -1.6568357944488525,
-    ]);
+    assertEquals(
+      [...new WanRandn(0).normals(8)],
+      [
+        -0.45275774598121643, 0.20776604115962982, 2.6506059169769287, -0.4904228150844574,
+        -0.9886041283607483, 1.8721014261245728, 0.2524627149105072, -1.853424310684204,
+      ],
+    );
+    assertEquals(
+      [...new WanRandn(42).normals(8)],
+      [
+        0.41471976041793823, 0.6526812314987183, -0.8918862342834473, 1.3268336057662964,
+        1.72959303855896, -1.883416771888733, 0.5456204414367676, -1.6568357944488525,
+      ],
+    );
   });
 });
 
@@ -1246,36 +1253,36 @@ const mockPipeline = (options: {
   const gpuText = options.textEncoder === "gpu";
   const text = gpuText
     ? {
-      kind: "gpu",
-      encoder: wanParityEncoder(),
-      contract: { output: "umt5_out" },
-      component: {
-        createSession: (_gpu: unknown, sessionOptions: unknown) => {
-          log.push(`create:text_encoder:${JSON.stringify(sessionOptions)}`);
-          return Promise.resolve({
-            run: (inputs: Record<string, Tensor>) => {
-              const tokens = inputs.input_ids.shape[1];
-              log.push(`run:text_encoder:${tokens}`);
-              options.onUmt5Run?.(tokens);
-              return Promise.resolve({
-                umt5_out: {
-                  dtype: "f32",
-                  shape: [1, tokens, WIDTH],
-                  data: new Float32Array(tokens * WIDTH).fill(
-                    options.umt5Value?.(tokens) ?? tokens / 1000,
-                  ),
-                },
-              });
-            },
-            diagnostics: () => ({}),
-            dispose: () => {
-              log.push("dispose:text_encoder");
-              return Promise.resolve();
-            },
-          });
+        kind: "gpu",
+        encoder: wanParityEncoder(),
+        contract: { output: "umt5_out" },
+        component: {
+          createSession: (_gpu: unknown, sessionOptions: unknown) => {
+            log.push(`create:text_encoder:${JSON.stringify(sessionOptions)}`);
+            return Promise.resolve({
+              run: (inputs: Record<string, Tensor>) => {
+                const tokens = inputs.input_ids.shape[1];
+                log.push(`run:text_encoder:${tokens}`);
+                options.onUmt5Run?.(tokens);
+                return Promise.resolve({
+                  umt5_out: {
+                    dtype: "f32",
+                    shape: [1, tokens, WIDTH],
+                    data: new Float32Array(tokens * WIDTH).fill(
+                      options.umt5Value?.(tokens) ?? tokens / 1000,
+                    ),
+                  },
+                });
+              },
+              diagnostics: () => ({}),
+              dispose: () => {
+                log.push("dispose:text_encoder");
+                return Promise.resolve();
+              },
+            });
+          },
         },
-      },
-    }
+      }
     : { kind: "precomputed" };
   const state = {
     gpu: {
@@ -1366,8 +1373,8 @@ const mockPipeline = (options: {
           event.kind === "stage"
             ? `${event.component}:${event.at}`
             : event.kind === "denoise-step"
-            ? `step:${event.step}`
-            : `tile:${event.tile}`,
+              ? `step:${event.step}`
+              : `tile:${event.tile}`,
         );
         await onEvent?.(event);
       },
@@ -1380,8 +1387,14 @@ describe("WanPipeline.generate（模擬 Session）", () => {
     const { log, generate } = mockPipeline({ vaeValue: 2 });
     const video = await generate();
     assertEquals([video.frames, video.width, video.height], [5, 832, 480]);
-    assert(video.data.every((value) => value === 1), "クランプ前の 2 が 1 になっていない");
-    assertEquals(log.filter((entry) => entry.startsWith("step:")), ["step:1", "step:2"]);
+    assert(
+      video.data.every((value) => value === 1),
+      "クランプ前の 2 が 1 になっていない",
+    );
+    assertEquals(
+      log.filter((entry) => entry.startsWith("step:")),
+      ["step:1", "step:2"],
+    );
     assertEquals(log.filter((entry) => entry.startsWith("tile:")).length, 12);
     assertEquals(log.at(-1), "vae_decoder:end");
   });
@@ -1420,7 +1433,10 @@ describe("WanPipeline.generate（模擬 Session）", () => {
         const tokens = inputs.tokens.shape[1];
         assertEquals(mask.shape, [1, tokens, 1]);
         assertEquals(mask.data.length, tokens);
-        assert(mask.data.every((value) => value === 0), "T2V の条件マスクに 0 でない要素がある");
+        assert(
+          mask.data.every((value) => value === 0),
+          "T2V の条件マスクに 0 でない要素がある",
+        );
         masks.add(mask.data);
       }
       assertEquals(masks.size, 1, "条件マスクを run ごとに作り直した");
@@ -1502,7 +1518,10 @@ describe("WanPipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS
   const MESSAGE =
     "image / fit（画像からの生成）はこの世代では受けない（受けるのは Wan2.2 の WanTi2vPipeline）";
 
-  for (const [key, value] of [["image", IMAGE], ["fit", "crop"]] as const) {
+  for (const [key, value] of [
+    ["image", IMAGE],
+    ["fit", "crop"],
+  ] as const) {
     it(`${key} を渡すと Session を 1 本も張らずに ModelInputError（2.2 の class を案内する）`, async () => {
       const { log, generate } = mockPipeline({});
       await assertRejects(
@@ -1510,7 +1529,10 @@ describe("WanPipeline.generate: I2V の欄（Wan2.2 だけの image / fit — JS
         ModelInputError,
         MESSAGE,
       );
-      assertEquals(log.filter((entry) => entry.startsWith("create:")), []);
+      assertEquals(
+        log.filter((entry) => entry.startsWith("create:")),
+        [],
+      );
     });
   }
 });
@@ -1542,8 +1564,8 @@ describe("planWanGpuGeneration（GPU 経路の入口の門）", () => {
 
   it("資産に無い文字列も受け、明示の negative はその文字列を符号化する・guidance 1 は uncond を回さない", () => {
     // 固定 4 本以外の受理されたケース（境界・乱択 — 資産の集合の外）。
-    const free = wanParityCases.find((entry) =>
-      entry.ids !== undefined && !entry.id.startsWith("fixed-")
+    const free = wanParityCases.find(
+      (entry) => entry.ids !== undefined && !entry.id.startsWith("fixed-"),
     );
     assert(free !== undefined, "フィクスチャに受理された非固定のケースが無い");
     assertEquals([...gpuPlan({ prompt: free.text }).positive], free.ids);
@@ -1610,8 +1632,7 @@ if (textEmbedsSeries === undefined) {
 }
 
 test({
-  name:
-    "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
+  name: "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
   ignore: textEmbedsSeries === undefined,
   fn: () => {
     if (textEmbedsSeries === undefined) throw new Error("ignore の条件と食い違う");
@@ -1659,16 +1680,19 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
         inputs: spec.inputs.map((input) => ({ ...input, shape: [...input.shape] })),
         outputs: spec.outputs.map((output) => output.name),
         initializers: Object.fromEntries(
-          spec.storages.map((
-            codec,
-            index,
-          ) => [`w${index}`, codec === "shared" ? { shared: true } : { storage: { codec } }]),
+          spec.storages.map((codec, index) => [
+            `w${index}`,
+            codec === "shared" ? { shared: true } : { storage: { codec } },
+          ]),
         ),
         values: Object.fromEntries(
-          spec.outputs.map((output) => [output.name, {
-            dtype: output.dtype,
-            shape: [...output.shape],
-          }]),
+          spec.outputs.map((output) => [
+            output.name,
+            {
+              dtype: output.dtype,
+              shape: [...output.shape],
+            },
+          ]),
         ),
         states: {},
         nodes: [],
@@ -1748,31 +1772,33 @@ describe("家族 admission: umT5 のグラフ宣言 × ホストが組む形（�
 
 /** 構築の入口のテストが使う manifest（`models/karume-wan2.1/karume.json` の骨格 — 宣言だけ）。 */
 const wanManifest = (weightNames: readonly string[]) =>
-  parseManifest(JSON.stringify({
-    format: "karume/5",
-    generator: "karume/0.1.0",
-    defaultModel: "t2v-1.3b",
-    models: {
-      "t2v-1.3b": {
-        pipeline: "wan/1",
-        weights: Object.fromEntries(
-          weightNames.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
-        ),
-        assets: {
-          text_embeds: { path: "text_embeds.safetensors", size: 8, sha256: "e".repeat(64) },
-          umt5_tokenizer: { path: "tokenizer.json", size: 8, sha256: "f".repeat(64) },
-        },
-        quants: {
-          f16: {
-            weights: Object.fromEntries(weightNames.map((name) => [name, "f16"])),
-            session: {},
+  parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "karume/0.1.0",
+      defaultModel: "t2v-1.3b",
+      models: {
+        "t2v-1.3b": {
+          pipeline: "wan/1",
+          weights: Object.fromEntries(
+            weightNames.map((name) => [name, { f16: declaredContainer(`${name}/model.f16`) }]),
+          ),
+          assets: {
+            text_embeds: { path: "text_embeds.safetensors", size: 8, sha256: "e".repeat(64) },
+            umt5_tokenizer: { path: "tokenizer.json", size: 8, sha256: "f".repeat(64) },
           },
+          quants: {
+            f16: {
+              weights: Object.fromEntries(weightNames.map((name) => [name, "f16"])),
+              session: {},
+            },
+          },
+          defaultQuant: "f16",
+          pipelineConfig: { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } },
         },
-        defaultQuant: "f16",
-        pipelineConfig: { scheduler: { shift: 3 }, defaults: { steps: 50, guidance: 5 } },
       },
-    },
-  }));
+    }),
+  );
 const WITH_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next", "text_encoder"];
 const WITHOUT_UMT5 = ["transformer", "vae_decoder_first", "vae_decoder_next"];
 
@@ -1881,8 +1907,8 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
           manifest: wanManifest(WITHOUT_UMT5),
           assets: {
             ...SHELL_COMPONENTS,
-            ...await vae("vae_decoder_first", 1, latent, sample),
-            ...await vae("vae_decoder_next", 4, latent, sample),
+            ...(await vae("vae_decoder_first", 1, latent, sample)),
+            ...(await vae("vae_decoder_next", 4, latent, sample)),
           },
         },
         { textEncoder: "precomputed" },
@@ -1912,7 +1938,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
       WanPipeline.fromAssets(
         { manifest: wanManifest(WITH_UMT5), assets: {} },
         { signal: controller.signal },
-      )
+      ),
     );
     assertStrictEquals(error, reason);
   });
@@ -1925,7 +1951,7 @@ describe("構築の入口（経路の綴り・umT5 の宣言・取る部品・�
       WanPipeline.fromAssets(
         { manifest: wanManifest(WITH_UMT5), assets: {} },
         { signal: controller.signal },
-      )
+      ),
     );
     assertStrictEquals(error, reason);
   });
@@ -1945,8 +1971,7 @@ if (distManifestText === undefined) {
 const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
 
 test({
-  name:
-    "配布形の既定席: quant を省いた構築は実用席へ解決する（manifest の karume.json だけを読む）",
+  name: "配布形の既定席: quant を省いた構築は実用席へ解決する（manifest の karume.json だけを読む）",
   ignore: distManifestText === undefined,
   fn: async () => {
     assert(distManifestText !== undefined);
@@ -1993,16 +2018,23 @@ describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", ()
     assertEquals(uncond.length, 512 * WIDTH);
     assertEquals(rowsOf(uncond, 126 / 1000), 126, "uncond は negative（126 トークン）の出力");
     assertEquals(rowsOf(cond, 28 / 1000), 28, "cond は positive（28 トークン）の出力");
-    assert(uncond.subarray(126 * WIDTH).every((entry) => entry === 0), "有効長の後ろがゼロでない");
-    assert(cond.subarray(28 * WIDTH).every((entry) => entry === 0), "有効長の後ろがゼロでない");
+    assert(
+      uncond.subarray(126 * WIDTH).every((entry) => entry === 0),
+      "有効長の後ろがゼロでない",
+    );
+    assert(
+      cond.subarray(28 * WIDTH).every((entry) => entry === 0),
+      "有効長の後ろがゼロでない",
+    );
   });
 
   it("guidance 1 は negative を回さない（umT5 の run は 1 回）", async () => {
     const { log, generate } = mockPipeline({ textEncoder: "gpu" });
     await generate(undefined, { guidance: 1 });
-    assertEquals(log.filter((entry) => entry.startsWith("run:text_encoder")), [
-      "run:text_encoder:28",
-    ]);
+    assertEquals(
+      log.filter((entry) => entry.startsWith("run:text_encoder")),
+      ["run:text_encoder:28"],
+    );
   });
 
   it("umT5 の出力が非有限なら text 段で名指しで落ち、Session を畳み、DiT の段を張らない", async () => {
@@ -2019,7 +2051,10 @@ describe("WanPipeline.generate（模擬 Session・GPU 経路の text 段）", ()
   it("入口の門（前処理の拒否）は Session を 1 本も張らずに落ちる", async () => {
     const { log, generate } = mockPipeline({ textEncoder: "gpu" });
     await assertRejects(() => generate(undefined, { prompt: "R&D lab" }), PromptCleanError);
-    assertEquals(log.filter((entry) => entry.startsWith("create:")), []);
+    assertEquals(
+      log.filter((entry) => entry.startsWith("create:")),
+      [],
+    );
   });
 });
 
@@ -2037,16 +2072,23 @@ describe("WanPipeline.generate の初期ノイズ（latents）の所有", () => 
       const latents = initialLatents();
       const { generate, ditRuns } = mockPipeline({ textEncoder: "gpu" });
       // text 段の開始通知は入口の検査の後・DiT の段の前に await される（書き換えの窓）。
-      await generate((event) => {
-        if (event.kind === "stage" && event.component === "text_encoder" && event.at === "start") {
-          latents.fill(value);
-        }
-      }, { latents });
+      await generate(
+        (event) => {
+          if (
+            event.kind === "stage" &&
+            event.component === "text_encoder" &&
+            event.at === "start"
+          ) {
+            latents.fill(value);
+          }
+        },
+        { latents },
+      );
       const tokens = ditRuns[0].tokens;
       assert(tokens.dtype === "f32" && tokens.data.length === expected.data.length);
       // 20 万要素の差分表示を作らないよう、最初に割れた要素の添字で比べる。
-      const differs = tokens.data.findIndex((entry, index) =>
-        !Object.is(entry, expected.data[index])
+      const differs = tokens.data.findIndex(
+        (entry, index) => !Object.is(entry, expected.data[index]),
       );
       assertEquals(differs, -1, `書き換え後の値 ${value} で DiT を回した`);
     }
@@ -2059,9 +2101,12 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
     const controller = new AbortController();
     const reason = new Error("中止ボタン");
     const error = await assertRejects(() =>
-      generate((event) => {
-        if (event.kind === "denoise-step" && event.step === 1) controller.abort(reason);
-      }, { signal: controller.signal })
+      generate(
+        (event) => {
+          if (event.kind === "denoise-step" && event.step === 1) controller.abort(reason);
+        },
+        { signal: controller.signal },
+      ),
     );
     assertStrictEquals(error, reason);
     assert(!log.includes("step:2"), `中断の後に step を回した: ${log}`);
@@ -2077,11 +2122,14 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
     const controller = new AbortController();
     const reason = new Error("中止ボタン（timer）");
     const error = await assertRejects(() =>
-      generate((event) => {
-        if (event.kind === "denoise-step" && event.step === 1) {
-          setTimeout(() => controller.abort(reason), 0);
-        }
-      }, { signal: controller.signal })
+      generate(
+        (event) => {
+          if (event.kind === "denoise-step" && event.step === 1) {
+            setTimeout(() => controller.abort(reason), 0);
+          }
+        },
+        { signal: controller.signal },
+      ),
     );
     assertStrictEquals(error, reason);
     assert(!log.includes("step:2"), `タスクで届いた中断を step 2 の前で見ていない: ${log}`);
@@ -2098,9 +2146,10 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
     });
     const error = await assertRejects(() => generate(undefined, { signal: controller.signal }));
     assertStrictEquals(error, reason);
-    assertEquals(log.filter((entry) => entry.startsWith("run:text_encoder")), [
-      "run:text_encoder:28",
-    ]);
+    assertEquals(
+      log.filter((entry) => entry.startsWith("run:text_encoder")),
+      ["run:text_encoder:28"],
+    );
     assertEquals(log.at(-1), "dispose:text_encoder");
     assert(!log.includes("create:transformer"), `DiT の段へ進んだ: ${log}`);
   });
@@ -2113,7 +2162,11 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
       controller.abort(reason);
       const error = await assertRejects(() => generate(undefined, { signal: controller.signal }));
       assertStrictEquals(error, reason);
-      assertEquals(log.filter((entry) => entry.startsWith("create:")), [], `${textEncoder}`);
+      assertEquals(
+        log.filter((entry) => entry.startsWith("create:")),
+        [],
+        `${textEncoder}`,
+      );
     }
   });
 
@@ -2122,15 +2175,25 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
     const controller = new AbortController();
     const reason = new Error("中止ボタン（VAE の開始通知）");
     const error = await assertRejects(() =>
-      generate((event) => {
-        if (event.kind === "stage" && event.component === "vae_decoder" && event.at === "start") {
-          controller.abort(reason);
-        }
-      }, { signal: controller.signal })
+      generate(
+        (event) => {
+          if (event.kind === "stage" && event.component === "vae_decoder" && event.at === "start") {
+            controller.abort(reason);
+          }
+        },
+        { signal: controller.signal },
+      ),
     );
     assertStrictEquals(error, reason);
-    assertEquals(log.filter((entry) => entry.startsWith("enqueue:")), [], `タイルを積んだ: ${log}`);
-    assertEquals(log.filter((entry) => entry.startsWith("tile:")), []);
+    assertEquals(
+      log.filter((entry) => entry.startsWith("enqueue:")),
+      [],
+      `タイルを積んだ: ${log}`,
+    );
+    assertEquals(
+      log.filter((entry) => entry.startsWith("tile:")),
+      [],
+    );
     assert(log.includes("dispose:vae_decoder_first") && log.includes("dispose:vae_decoder_next"));
     assert(!log.includes("vae_decoder:end"), `中断した段の end を出した: ${log}`);
   });
@@ -2140,12 +2203,18 @@ describe("WanPipeline.generate の中断（模擬 Session — signal.reason を�
     const controller = new AbortController();
     const reason = new Error("中止ボタン（VAE）");
     const error = await assertRejects(() =>
-      generate((event) => {
-        if (event.kind === "vae-tile" && event.tile === 1) controller.abort(reason);
-      }, { signal: controller.signal })
+      generate(
+        (event) => {
+          if (event.kind === "vae-tile" && event.tile === 1) controller.abort(reason);
+        },
+        { signal: controller.signal },
+      ),
     );
     assertStrictEquals(error, reason);
-    assertEquals(log.filter((entry) => entry.startsWith("tile:")), ["tile:1"]);
+    assertEquals(
+      log.filter((entry) => entry.startsWith("tile:")),
+      ["tile:1"],
+    );
     assert(log.includes("dispose:vae_decoder_first") && log.includes("dispose:vae_decoder_next"));
     assert(!log.includes("vae_decoder:end"), `中断した段の end を出した: ${log}`);
   });

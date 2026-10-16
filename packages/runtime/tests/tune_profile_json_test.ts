@@ -65,7 +65,7 @@ describe("parseGeometryProfileJson: geometryProfileJson との往復", () => {
 
 describe("parseGeometryProfileJson: 未知の欄は全ての階層で拒む", () => {
   const rows = (index: number, change: (rule: GeometryProfile["gemmRows"][number]) => unknown) =>
-    BASE.gemmRows.map((rule, at) => at === index ? change(rule) : rule);
+    BASE.gemmRows.map((rule, at) => (at === index ? change(rule) : rule));
   const provenance = BASE.provenance;
   assert(provenance !== undefined);
   const cases: readonly (readonly [string, unknown, string])[] = [
@@ -81,10 +81,14 @@ describe("parseGeometryProfileJson: 未知の欄は全ての階層で拒む", ()
       "tileK",
     ],
     ["attention", { ...BASE, attention: { ...BASE.attention, rows: 1 } }, "rows"],
-    ["attention.pv", {
-      ...BASE,
-      attention: { ...BASE.attention, pv: { ...BASE.attention.pv, k: 1 } },
-    }, "k"],
+    [
+      "attention.pv",
+      {
+        ...BASE,
+        attention: { ...BASE.attention, pv: { ...BASE.attention.pv, k: 1 } },
+      },
+      "k",
+    ],
     ["conv2d", { ...BASE, conv2d: { ...BASE.conv2d, rows16: BASE.conv2d.rows32 } }, "rows16"],
     [
       "conv2d.rows32",
@@ -148,7 +152,7 @@ describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
       "末尾以外の maxRows が文字列",
       {
         ...BASE,
-        gemmRows: BASE.gemmRows.map((rule, at) => at === 0 ? { ...rule, maxRows: "16" } : rule),
+        gemmRows: BASE.gemmRows.map((rule, at) => (at === 0 ? { ...rule, maxRows: "16" } : rule)),
       },
       "gemmRows[0].maxRows が数でない",
     ],
@@ -218,7 +222,7 @@ describe("parseGeometryProfileJson: gemmRows の末尾の Infinity", () => {
     rejects(
       json({
         ...BASE,
-        gemmRows: BASE.gemmRows.map((rule, at) => at === 6 ? { ...rule, maxRows: 4096 } : rule),
+        gemmRows: BASE.gemmRows.map((rule, at) => (at === 6 ? { ...rule, maxRows: 4096 } : rule)),
       }),
       "gemmRows[6].maxRows が Infinity でない（4096",
     );
@@ -237,7 +241,7 @@ describe("parseGeometryProfileJson: 最後に runtime の注入の門（assertGe
       "gemmRows が狭義昇順でない",
       {
         ...BASE,
-        gemmRows: BASE.gemmRows.map((rule, at) => at === 1 ? { ...rule, maxRows: 16 } : rule),
+        gemmRows: BASE.gemmRows.map((rule, at) => (at === 1 ? { ...rule, maxRows: 16 } : rule)),
       },
       "狭義昇順でない",
     ],

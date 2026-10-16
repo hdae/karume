@@ -104,12 +104,14 @@ const declarationOf = (spec: TensorlessGraphSpec): IrDeclaration =>
     initializers: {},
     values: { [spec.output.name]: { dtype: "f32", shape: spec.output.shape } },
     states: {},
-    nodes: [{
-      op: "mul",
-      ins: [spec.inputs[0].name, spec.inputs[0].name],
-      outs: [spec.output.name],
-      attrs: {},
-    }],
+    nodes: [
+      {
+        op: "mul",
+        ins: [spec.inputs[0].name, spec.inputs[0].name],
+        outs: [spec.output.name],
+        attrs: {},
+      },
+    ],
   });
 
 /**

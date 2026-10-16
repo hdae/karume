@@ -62,7 +62,7 @@ const CONSUMER: DeclarationJson = {
 const input = (phase: number): Tensor => ({
   dtype: "f32",
   shape: [ROWS, COLS],
-  data: Float32Array.from({ length: COUNT }, (_, i) => ((i + phase * 3) % 9 - 4) * 0.5),
+  data: Float32Array.from({ length: COUNT }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
 /** 参照値。ノードごとに f32 へ丸めながら手計算する（実装とは独立）。 */
@@ -156,8 +156,7 @@ test({
 });
 
 test({
-  name:
-    "settle() は区間の途中でフェンスを 1 本だけ張り、以後のチャンク上限を推定へ切り替える（実 GPU）",
+  name: "settle() は区間の途中でフェンスを 1 本だけ張り、以後のチャンク上限を推定へ切り替える（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -381,11 +380,7 @@ test({
       await session.run({ x: bound });
       assertEquals(bound.bakedReferences, 1);
 
-      assertThrows(
-        () => bound.dispose(),
-        ResidentTensorError,
-        "焼き込み bind group から参照中",
-      );
+      assertThrows(() => bound.dispose(), ResidentTensorError, "焼き込み bind group から参照中");
       assertEquals(bound.disposed, false, "拒否した破棄で状態を壊さない");
 
       // 恒真化の門: 参照されていない常駐テンソルは同じ呼び出しで通る（検査が常に落ちる形に
@@ -633,7 +628,7 @@ test({
       // 成功で返る、という沈黙の空振りになる。
       // NOTE: phase は 3 周期（`input` の式）なので、値が割れる範囲で 3 本積む。
       const pending = [0, 1, 2].map((phase) =>
-        session.enqueue({ x: input(phase) }, { batch, copyOutputs: { y: sink } })
+        session.enqueue({ x: input(phase) }, { batch, copyOutputs: { y: sink } }),
       );
       await batch.finish();
       await Promise.all(pending);
@@ -1020,16 +1015,17 @@ const INITIALIZER_OUTPUT: DeclarationJson = {
 };
 
 const openInitializerOutputModel = () =>
-  openGraphModel(INITIALIZER_OUTPUT, [{
-    graph: "model",
-    initializer: "c",
-    bytes: f32Bytes(Array.from({ length: COUNT }, (_, i) => i * 0.25)),
-    encoding: { codec: "f32" },
-  }]);
+  openGraphModel(INITIALIZER_OUTPUT, [
+    {
+      graph: "model",
+      initializer: "c",
+      bytes: f32Bytes(Array.from({ length: COUNT }, (_, i) => i * 0.25)),
+      encoding: { codec: "f32" },
+    },
+  ]);
 
 test({
-  name:
-    "initializer 由来のグラフ出力への copyOutputs は積む前に落ち、区間の他を巻き添えにしない（実 GPU）",
+  name: "initializer 由来のグラフ出力への copyOutputs は積む前に落ち、区間の他を巻き添えにしない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

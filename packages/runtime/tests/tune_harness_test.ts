@@ -52,10 +52,7 @@ const I8A8_LINEAR: LinearCase = {
 };
 
 /** 融合 attention の小形（B·H 2・M = N = 128・D 128 — 既定幾何 128×128 の 1 タイル）。 */
-const attentionCase = (
-  op: AttentionCase["op"],
-  stage: AttentionCase["stage"],
-): AttentionCase => ({
+const attentionCase = (op: AttentionCase["op"], stage: AttentionCase["stage"]): AttentionCase => ({
   id: `test-${op}-${stage}-bh2-m128-n128-d128`,
   op,
   stage,
@@ -234,8 +231,7 @@ test({
 });
 
 test({
-  name:
-    "実 GPU: f32 融合 attention の ③PV（前段 ①QK → ② 行統計）を既定と 64×64/256 で測ると出力が一致する",
+  name: "実 GPU: f32 融合 attention の ③PV（前段 ①QK → ② 行統計）を既定と 64×64/256 で測ると出力が一致する",
   ignore: adapter === null,
   fn: async () => {
     assertMeasuredPair(
@@ -305,7 +301,7 @@ const adjacentF32 = (value: number, up: boolean): number => {
     const tiny = new Float32Array(bits.buffer)[0];
     return up ? tiny : -tiny;
   }
-  bits[0] += (value > 0) === up ? 1 : -1;
+  bits[0] += value > 0 === up ? 1 : -1;
   return new Float32Array(bits.buffer)[0];
 };
 
@@ -318,7 +314,7 @@ const fmaF32 = (a: number, b: number, c: number): number => {
   const product = a * b;
   const sum = product + c;
   const virtual = sum - product;
-  const error = (product - (sum - virtual)) + (c - virtual);
+  const error = product - (sum - virtual) + (c - virtual);
   const rounded = Math.fround(sum);
   if (error === 0 || rounded === sum) return rounded;
   const other = adjacentF32(rounded, rounded < sum);
@@ -342,8 +338,7 @@ const resourceWords = (target: SweepCase, name: string): Uint32Array<ArrayBuffer
 };
 
 test({
-  name:
-    "実 GPU: f32 linear の既定幾何の出力は CPU 参照（K 昇順の逐次積和 + 末尾の bias・非融合か fma 縮約のどちらか）とビット同一",
+  name: "実 GPU: f32 linear の既定幾何の出力は CPU 参照（K 昇順の逐次積和 + 末尾の bias・非融合か fma 縮約のどちらか）とビット同一",
   ignore: adapter === null,
   fn: async () => {
     const target: LinearCase = {
@@ -459,8 +454,7 @@ const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promis
 };
 
 test({
-  name:
-    "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
+  name: "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
   ignore: adapter === null,
   fn: async () => {
     // M / N / K を全て違う値にする（m・n・k の取り違えが寸法の食い違いとして出る）
@@ -478,8 +472,7 @@ test({
 });
 
 test({
-  name:
-    "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
+  name: "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
   ignore: adapter === null,
   fn: async () => {
     // 入力は資源ごとの擬似乱数列なのでバッチごとに値が違う — z のオフセットを取り違えると

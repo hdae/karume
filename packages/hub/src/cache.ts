@@ -18,8 +18,8 @@ const LEGACY_CACHE_NAMESPACE = "karume/1";
 
 /** 旧名前空間（本体 `karume/1` と、認証隔離だった `karume/1:*`）の名前を列挙する。 */
 const legacyCacheNames = async (storage: CacheStorage): Promise<string[]> =>
-  (await storage.keys()).filter((name) =>
-    name === LEGACY_CACHE_NAMESPACE || name.startsWith(`${LEGACY_CACHE_NAMESPACE}:`)
+  (await storage.keys()).filter(
+    (name) => name === LEGACY_CACHE_NAMESPACE || name.startsWith(`${LEGACY_CACHE_NAMESPACE}:`),
   );
 
 /**

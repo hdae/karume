@@ -52,9 +52,9 @@ const sequencePattern = (name: string): RegExp => {
   const stem = dot <= 0 ? name : name.slice(0, dot);
   const suffix = dot <= 0 ? "" : name.slice(dot);
   return new RegExp(
-    `^${escapeRegExp(stem)}-(\\d{${INDEX_DIGITS}})-of-(\\d{${INDEX_DIGITS}})${
-      escapeRegExp(suffix)
-    }$`,
+    `^${escapeRegExp(stem)}-(\\d{${INDEX_DIGITS}})-of-(\\d{${INDEX_DIGITS}})${escapeRegExp(
+      suffix,
+    )}$`,
   );
 };
 

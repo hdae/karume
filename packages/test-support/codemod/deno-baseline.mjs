@@ -18,7 +18,12 @@ for (const name of readdirSync(junitDir).filter((n) => n.endsWith(".xml"))) {
     const body = m[2];
     const cases = [...body.matchAll(/<testcase name="([^"]*)"[^>]*>([\s\S]*?)<\/testcase>/g)];
     const top = cases.filter((c) => !c[1].includes(" &gt; "));
-    const entry = suites.get(file) ?? { lane: name.replace(/\.xml$/, ""), tests: 0, skipped: 0, failed: 0 };
+    const entry = suites.get(file) ?? {
+      lane: name.replace(/\.xml$/, ""),
+      tests: 0,
+      skipped: 0,
+      failed: 0,
+    };
     entry.tests += top.length;
     entry.skipped += top.filter((c) => /<skipped/.test(c[2])).length;
     entry.failed += top.filter((c) => /<failure/.test(c[2])).length;
@@ -34,8 +39,17 @@ let totals = { tests: 0, skipped: 0, failed: 0 };
 for (const f of files) {
   const rel = relative(root, resolve(f));
   const e = suites.get(rel);
-  if (!e) { console.log(`${rel}: (not in the Deno baseline)`); continue; }
-  console.log(`${rel}: lane=${e.lane} tests=${e.tests} passed=${e.tests - e.skipped - e.failed} skipped=${e.skipped} failed=${e.failed}`);
-  totals.tests += e.tests; totals.skipped += e.skipped; totals.failed += e.failed;
+  if (!e) {
+    console.log(`${rel}: (not in the Deno baseline)`);
+    continue;
+  }
+  console.log(
+    `${rel}: lane=${e.lane} tests=${e.tests} passed=${e.tests - e.skipped - e.failed} skipped=${e.skipped} failed=${e.failed}`,
+  );
+  totals.tests += e.tests;
+  totals.skipped += e.skipped;
+  totals.failed += e.failed;
 }
-console.log(`total: tests=${totals.tests} passed=${totals.tests - totals.skipped - totals.failed} skipped=${totals.skipped} failed=${totals.failed}`);
+console.log(
+  `total: tests=${totals.tests} passed=${totals.tests - totals.skipped - totals.failed} skipped=${totals.skipped} failed=${totals.failed}`,
+);

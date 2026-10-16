@@ -7,108 +7,72 @@
         "qat-packed-off-wall-0": {
           "english-list": {
             "decodeTokPerS_median": 94.5,
-            "decodeTokPerS_range": [
-              94.04,
-              94.77
-            ],
+            "decodeTokPerS_range": [94.04, 94.77],
             "ttftMs_median": 39.9
           },
           "japanese-list": {
             "decodeTokPerS_median": 94.4,
-            "decodeTokPerS_range": [
-              93.81,
-              95.63
-            ],
+            "decodeTokPerS_range": [93.81, 95.63],
             "ttftMs_median": 65.8
           }
         },
         "qat-packed-on-wall-0": {
           "english-list": {
             "decodeTokPerS_median": 93.37,
-            "decodeTokPerS_range": [
-              93.25,
-              93.54
-            ],
+            "decodeTokPerS_range": [93.25, 93.54],
             "ttftMs_median": 40.2
           },
           "japanese-list": {
             "decodeTokPerS_median": 93.14,
-            "decodeTokPerS_range": [
-              92.08,
-              93.88
-            ],
+            "decodeTokPerS_range": [92.08, 93.88],
             "ttftMs_median": 60.6
           }
         },
         "qat-packed-on-wall-1": {
           "english-list": {
             "decodeTokPerS_median": 94.07,
-            "decodeTokPerS_range": [
-              93.57,
-              94.37
-            ],
+            "decodeTokPerS_range": [93.57, 94.37],
             "ttftMs_median": 40.1
           },
           "japanese-list": {
             "decodeTokPerS_median": 95.88,
-            "decodeTokPerS_range": [
-              94.94,
-              96.01
-            ],
+            "decodeTokPerS_range": [94.94, 96.01],
             "ttftMs_median": 66.9
           }
         },
         "qat-packed-off-wall-1": {
           "english-list": {
             "decodeTokPerS_median": 94.02,
-            "decodeTokPerS_range": [
-              88.91,
-              94.03
-            ],
+            "decodeTokPerS_range": [88.91, 94.03],
             "ttftMs_median": 41.5
           },
           "japanese-list": {
             "decodeTokPerS_median": 95.18,
-            "decodeTokPerS_range": [
-              95.08,
-              95.35
-            ],
+            "decodeTokPerS_range": [95.08, 95.35],
             "ttftMs_median": 85.9
           }
         },
         "qat-packed-off-wall-2": {
           "english-list": {
             "decodeTokPerS_median": 93.67,
-            "decodeTokPerS_range": [
-              93.2,
-              93.83
-            ],
+            "decodeTokPerS_range": [93.2, 93.83],
             "ttftMs_median": 40.7
           },
           "japanese-list": {
             "decodeTokPerS_median": 94.75,
-            "decodeTokPerS_range": [
-              93.53,
-              95.6
-            ],
+            "decodeTokPerS_range": [93.53, 95.6],
             "ttftMs_median": 72.3
           }
         },
         "qat-packed-on-wall-2": {
           "english-list": {
             "decodeTokPerS_median": 93.06,
-            "decodeTokPerS_range": [
-              86.29,
-              94.48
-            ],
+            "decodeTokPerS_range": [86.29, 94.48],
             "ttftMs_median": 40.8
           },
           "japanese-list": {
             "decodeTokPerS_median": 94.59,
-            "decodeTokPerS_range": [
-              94.33,
-              95.37
-            ],
+            "decodeTokPerS_range": [94.33, 95.37],
             "ttftMs_median": 64.2
           }
         }
@@ -128,12 +92,8 @@
             "min": 6.899,
             "max": 7.406
           },
-          "dispatchPerToken": [
-            1134
-          ],
-          "passesPerToken": [
-            3
-          ]
+          "dispatchPerToken": [1134],
+          "passesPerToken": [3]
         },
         "qat-packed-off-profile-0": {
           "gpuMsPerToken": {
@@ -141,12 +101,8 @@
             "min": 6.806,
             "max": 7.344
           },
-          "dispatchPerToken": [
-            1134
-          ],
-          "passesPerToken": [
-            3
-          ]
+          "dispatchPerToken": [1134],
+          "passesPerToken": [3]
         }
       },
       "perKeyCorrected": {
@@ -342,108 +298,72 @@
         "qat-packed-off-wall-0": {
           "english-list": {
             "decodeTokPerS_median": 95.67,
-            "decodeTokPerS_range": [
-              94.81,
-              95.88
-            ],
+            "decodeTokPerS_range": [94.81, 95.88],
             "ttftMs_median": 39.2
           },
           "japanese-list": {
             "decodeTokPerS_median": 94.68,
-            "decodeTokPerS_range": [
-              91.3,
-              94.71
-            ],
+            "decodeTokPerS_range": [91.3, 94.71],
             "ttftMs_median": 60.3
           }
         },
         "qat-packed-on-wall-0": {
           "english-list": {
             "decodeTokPerS_median": 103.26,
-            "decodeTokPerS_range": [
-              100.48,
-              103.74
-            ],
+            "decodeTokPerS_range": [100.48, 103.74],
             "ttftMs_median": 41
           },
           "japanese-list": {
             "decodeTokPerS_median": 104.55,
-            "decodeTokPerS_range": [
-              102.32,
-              105.51
-            ],
+            "decodeTokPerS_range": [102.32, 105.51],
             "ttftMs_median": 68.1
           }
         },
         "qat-packed-on-wall-1": {
           "english-list": {
             "decodeTokPerS_median": 103.65,
-            "decodeTokPerS_range": [
-              101.89,
-              103.82
-            ],
+            "decodeTokPerS_range": [101.89, 103.82],
             "ttftMs_median": 41.1
           },
           "japanese-list": {
             "decodeTokPerS_median": 102.86,
-            "decodeTokPerS_range": [
-              100.41,
-              105.53
-            ],
+            "decodeTokPerS_range": [100.41, 105.53],
             "ttftMs_median": 62.7
           }
         },
         "qat-packed-off-wall-1": {
           "english-list": {
             "decodeTokPerS_median": 94,
-            "decodeTokPerS_range": [
-              90.53,
-              94.51
-            ],
+            "decodeTokPerS_range": [90.53, 94.51],
             "ttftMs_median": 41.2
           },
           "japanese-list": {
             "decodeTokPerS_median": 95.86,
-            "decodeTokPerS_range": [
-              95.27,
-              96.23
-            ],
+            "decodeTokPerS_range": [95.27, 96.23],
             "ttftMs_median": 85
           }
         },
         "qat-packed-off-wall-2": {
           "english-list": {
             "decodeTokPerS_median": 94.48,
-            "decodeTokPerS_range": [
-              94.47,
-              94.89
-            ],
+            "decodeTokPerS_range": [94.47, 94.89],
             "ttftMs_median": 40.8
           },
           "japanese-list": {
             "decodeTokPerS_median": 95.32,
-            "decodeTokPerS_range": [
-              95.14,
-              95.56
-            ],
+            "decodeTokPerS_range": [95.14, 95.56],
             "ttftMs_median": 66.1
           }
         },
         "qat-packed-on-wall-2": {
           "english-list": {
             "decodeTokPerS_median": 102.82,
-            "decodeTokPerS_range": [
-              101.2,
-              103.31
-            ],
+            "decodeTokPerS_range": [101.2, 103.31],
             "ttftMs_median": 40.7
           },
           "japanese-list": {
             "decodeTokPerS_median": 102.02,
-            "decodeTokPerS_range": [
-              97.77,
-              102.31
-            ],
+            "decodeTokPerS_range": [97.77, 102.31],
             "ttftMs_median": 61.2
           }
         }
@@ -463,12 +383,8 @@
             "min": 6.392,
             "max": 6.735
           },
-          "dispatchPerToken": [
-            1134
-          ],
-          "passesPerToken": [
-            3
-          ]
+          "dispatchPerToken": [1134],
+          "passesPerToken": [3]
         },
         "qat-packed-off-profile-0": {
           "gpuMsPerToken": {
@@ -476,12 +392,8 @@
             "min": 6.915,
             "max": 7.257
           },
-          "dispatchPerToken": [
-            1134
-          ],
-          "passesPerToken": [
-            3
-          ]
+          "dispatchPerToken": [1134],
+          "passesPerToken": [3]
         }
       },
       "perKeyCorrected": {

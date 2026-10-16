@@ -86,7 +86,7 @@ export const loadLocalAssets = async (
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   const read = async (key: string, ref: FileRef): Promise<void> => {
     const cached = byPath.get(ref.path);
-    const bytes = cached ?? await readFile(new URL(ref.path, ASSETS_DIR));
+    const bytes = cached ?? (await readFile(new URL(ref.path, ASSETS_DIR)));
     if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };

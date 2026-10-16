@@ -24,15 +24,13 @@ describe("parseNvidiaSample", () => {
   });
 
   it("3 欄に割れない行と、使用量・温度が数でない行はエラー行（undefined）", () => {
-    for (
-      const line of [
-        "Failed to initialize NVML: Driver/library version mismatch",
-        "1234, 56",
-        "1234, 56, 0x0, 7",
-        "[N/A], 56, 0x0",
-        ", 56, 0x0",
-      ]
-    ) {
+    for (const line of [
+      "Failed to initialize NVML: Driver/library version mismatch",
+      "1234, 56",
+      "1234, 56, 0x0, 7",
+      "[N/A], 56, 0x0",
+      ", 56, 0x0",
+    ]) {
       assertEquals(parseNvidiaSample(line), undefined, line);
     }
   });

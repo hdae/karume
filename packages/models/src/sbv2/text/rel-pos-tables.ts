@@ -67,9 +67,8 @@ const logBucketPosition = (rel: number, bucketSize: number, maxPosition: number)
   const absPos = rel < mid && rel > -mid ? mid - 1 : Math.abs(rel);
   if (absPos <= mid) return rel;
   const sign = Math.sign(rel);
-  const logPos = Math.ceil(
-    (Math.log(absPos / mid) / Math.log((maxPosition - 1) / mid)) * (mid - 1),
-  ) + mid;
+  const logPos =
+    Math.ceil((Math.log(absPos / mid) / Math.log((maxPosition - 1) / mid)) * (mid - 1)) + mid;
   return logPos * sign;
 };
 

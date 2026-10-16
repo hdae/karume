@@ -90,8 +90,8 @@ export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
   const kind: ContainerKind | undefined = matchesMagic(bytes, MAGIC_MODEL)
     ? "model"
     : matchesMagic(bytes, MAGIC_GRAPH)
-    ? "graph"
-    : undefined;
+      ? "graph"
+      : undefined;
   if (kind === undefined) {
     const seen = Array.from(bytes.subarray(0, 4), (b) => b.toString(16).padStart(2, "0")).join(" ");
     throw new ContainerFormatError(
@@ -106,12 +106,10 @@ export const readHeader = (bytes: Uint8Array<ArrayBuffer>): ContainerHeader => {
   const graphDescriptorLength = readSafeUint64(view, 8, "グラフ記述の長さ");
   const modelDescriptorLength = readSafeUint64(view, 16, "モデル記述の長さ");
   if (graphDescriptorLength === 0) throw new ContainerFormatError("グラフ記述の長さが 0");
-  for (
-    const [label, length] of [["グラフ記述", graphDescriptorLength], [
-      "モデル記述",
-      modelDescriptorLength,
-    ]] as const
-  ) {
+  for (const [label, length] of [
+    ["グラフ記述", graphDescriptorLength],
+    ["モデル記述", modelDescriptorLength],
+  ] as const) {
     if (length > MAX_DESCRIPTOR_BYTES) {
       throw new ContainerFormatError(
         `${label}の長さ ${length} が上限 ${MAX_DESCRIPTOR_BYTES} を超える`,

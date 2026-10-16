@@ -23,7 +23,8 @@ const declaration = (shape: readonly number[], scale: number): DeclarationJson =
 });
 
 const direct = async (gpu: GpuContext, c: Case): Promise<Uint32Array<ArrayBuffer>> => {
-  const d = gpu.device, buffers: GPUBuffer[] = [];
+  const d = gpu.device,
+    buffers: GPUBuffer[] = [];
   d.pushErrorScope("validation");
   let result: Uint32Array<ArrayBuffer>;
   let error: GPUError | null = null;
@@ -48,7 +49,8 @@ const direct = async (gpu: GpuContext, c: Case): Promise<Uint32Array<ArrayBuffer
       layout: p.getBindGroupLayout(0),
       entries: [params, x, y].map((buffer, binding) => ({ binding, resource: { buffer } })),
     });
-    const encoder = d.createCommandEncoder(), pass = encoder.beginComputePass();
+    const encoder = d.createCommandEncoder(),
+      pass = encoder.beginComputePass();
     pass.setPipeline(p);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(1);

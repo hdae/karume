@@ -99,10 +99,7 @@ const protoOutputGraph = (): DeclarationJson => ({
 // 現れないため krm でも受理され、名前が届くかどうかはメモリ経路と同じ経路で決まる。
 // GPU は要らないので ignore の外に置く。
 test("'__proto__' を値名に持つ宣言は krm が黙って消さずに拒否する", async () => {
-  const error = await assertRejects(
-    () => openGraphModel(protoOutputGraph()),
-    ContainerFormatError,
-  );
+  const error = await assertRejects(() => openGraphModel(protoOutputGraph()), ContainerFormatError);
   assertStringIncludes(error.message, "__proto__");
 });
 
@@ -188,12 +185,10 @@ const aliasGraph = (aliasOp: "reshape" | "expand"): DeclarationJson => {
   };
 };
 
-for (
-  const [aliasOp, expectedShape, identityExpands] of [
-    ["reshape", [6, 2], 0],
-    ["expand", [3, 4], 2],
-  ] as const
-) {
+for (const [aliasOp, expectedShape, identityExpands] of [
+  ["reshape", [6, 2], 0],
+  ["expand", [3, 4], 2],
+] as const) {
   test({
     name: `${aliasOp} の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）`,
     ignore: !GPU_AVAILABLE,
@@ -281,8 +276,7 @@ const topkLifetimeGraph = (pinIndices: boolean): DeclarationJson => ({
 });
 
 test({
-  name:
-    "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
+  name: "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -521,15 +515,13 @@ test({
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
-      for (
-        const options of [
-          jsCallerOptions({ linearGemvReduce: "paralel" }),
-          { linearGemvReduce: "parallel", linearCompute: "f16" } as const,
-          { linearGemvReduce: "parallel", linearCompute: "a8" } as const,
-          { linearGemvReduce: "parallel-subgroup32", linearCompute: "f16" } as const,
-          { linearGemvReduce: "parallel-subgroup32", linearCompute: "a8" } as const,
-        ]
-      ) {
+      for (const options of [
+        jsCallerOptions({ linearGemvReduce: "paralel" }),
+        { linearGemvReduce: "parallel", linearCompute: "f16" } as const,
+        { linearGemvReduce: "parallel", linearCompute: "a8" } as const,
+        { linearGemvReduce: "parallel-subgroup32", linearCompute: "f16" } as const,
+        { linearGemvReduce: "parallel-subgroup32", linearCompute: "a8" } as const,
+      ]) {
         await assertRejects(
           () => createSessionFromContainer(gpu, opened, "model", options),
           ExecutionError,

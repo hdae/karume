@@ -27,8 +27,10 @@ const loadCases = async (): Promise<readonly PresentationCase[]> => {
   if (!isRecord(raw) || !Array.isArray(raw["cases"])) throw new Error("fixture: cases が無い");
   const cases = raw["cases"].map((entry: unknown): PresentationCase => {
     if (
-      !isRecord(entry) || typeof entry["name"] !== "string" ||
-      typeof entry["field"] !== "string" || typeof entry["accepted"] !== "boolean"
+      !isRecord(entry) ||
+      typeof entry["name"] !== "string" ||
+      typeof entry["field"] !== "string" ||
+      typeof entry["accepted"] !== "boolean"
     ) {
       throw new Error(`fixture: ケースの形が不正 ${JSON.stringify(entry)}`);
     }
@@ -61,10 +63,7 @@ const manifestWith = (testCase: PresentationCase): string => {
 
 describe("quant の表示欄の受理集合（共有表 quant-presentation.json）", () => {
   it("表は label と description の両方の欄を覆う", () => {
-    assertEquals([...new Set(cases.map((entry) => entry.field))].sort(), [
-      "description",
-      "label",
-    ]);
+    assertEquals([...new Set(cases.map((entry) => entry.field))].sort(), ["description", "label"]);
   });
 
   for (const testCase of cases) {

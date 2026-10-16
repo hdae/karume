@@ -180,6 +180,9 @@ export const decomposedAttentionGraph = (
 export const bothScenarios = (
   report: AdmissionReport,
 ): { readonly prefill: AdmissionScenario; readonly decode: AdmissionScenario } => {
-  assertEquals(report.scenarios.map((scenario) => scenario.name), ["prefill", "decode"]);
+  assertEquals(
+    report.scenarios.map((scenario) => scenario.name),
+    ["prefill", "decode"],
+  );
   return { prefill: report.scenarios[0], decode: report.scenarios[1] };
 };

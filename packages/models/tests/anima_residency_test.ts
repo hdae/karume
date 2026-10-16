@@ -130,10 +130,14 @@ const createHarness = (options: HarnessOptions = {}) => {
     need: number,
   ): Promise<void> => {
     if (!residency.holding) return;
-    await residency.ensureHeadroom(need, (bytes) => {
-      probes.push({ point, need: bytes });
-      return Promise.resolve(!(request.headroomShort?.includes(point) ?? false));
-    }, notify);
+    await residency.ensureHeadroom(
+      need,
+      (bytes) => {
+        probes.push({ point, need: bytes });
+        return Promise.resolve(!(request.headroomShort?.includes(point) ?? false));
+      },
+      notify,
+    );
   };
 
   const generate = async (request: FakeRequest): Promise<number> => {
@@ -177,7 +181,11 @@ describe("assertAnimaResidency", () => {
 
   it("未知の綴りは既定へ縮退せず、出所と実際の値を名指しして ModelInputError で落とす", () => {
     // 綴り違いが黙って段ごと運転になると、opt-in が効いていないことに速度でしか気付けない。
-    for (const [value, actual] of [["transformers", "'transformers'"], [null, "null"], [1, "1"]]) {
+    for (const [value, actual] of [
+      ["transformers", "'transformers'"],
+      [null, "null"],
+      [1, "1"],
+    ]) {
       assertThrows(
         () => assertAnimaResidency(value, "residency"),
         ModelInputError,
@@ -370,7 +378,10 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assert(h.sessions[0].disposed);
       assertFalse(h.residency.holding);
       await h.residency.dispose();
-      assertEquals(h.log.filter((entry) => entry.startsWith("dispose")), ["dispose:1"]);
+      assertEquals(
+        h.log.filter((entry) => entry.startsWith("dispose")),
+        ["dispose:1"],
+      );
     });
   });
 
@@ -525,12 +536,12 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       // 通知の throw は中断の手段（onEvent の契約）。退避そのものは済んでいる。
       const reason = new Error("中止ボタン");
       const h = createHarness({
-        notifyThrows: (notice) => notice.action === "evicted" ? reason : undefined,
+        notifyThrows: (notice) => (notice.action === "evicted" ? reason : undefined),
       });
       await h.generate({ residency: "transformer" });
       h.log.length = 0;
       const error = await assertRejects(() =>
-        h.generate({ residency: "transformer", faults: { vae: ["oom"] } })
+        h.generate({ residency: "transformer", faults: { vae: ["oom"] } }),
       );
       assertStrictEquals(error, reason);
       assertEquals(h.log, [
@@ -655,7 +666,10 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
           AggregateError,
         );
         // 元の失敗は無い — 並ぶのは後始末の失敗だけ（OOM の退避では先頭に元の OOM が来る）。
-        assertEquals(error.errors.map((cause: Error) => cause.message), ["dispose 1 に失敗"]);
+        assertEquals(
+          error.errors.map((cause: Error) => cause.message),
+          ["dispose 1 に失敗"],
+        );
         assertEquals(error.message, "anima: DiT の後始末が失敗した");
         assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
         assert(h.residency.downgraded);
@@ -669,7 +683,10 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
           () => h.residency.ensureHeadroom(NEED, probe, h.notify),
           AggregateError,
         );
-        assertEquals(error.errors.map((cause: Error) => cause.message), ["解放待ちに失敗"]);
+        assertEquals(
+          error.errors.map((cause: Error) => cause.message),
+          ["解放待ちに失敗"],
+        );
         assertEquals(h.notices, [{ action: "evicted", reason: "headroom" }]);
         assert(h.residency.downgraded);
         assertFalse(h.residency.holding);
@@ -686,16 +703,16 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
           () => h.residency.ensureHeadroom(NEED, probe, h.notify),
           AggregateError,
         );
-        assertEquals(error.errors.map((cause: Error) => cause.message), [
-          "解放待ちに失敗",
-          "購読側の失敗",
-        ]);
+        assertEquals(
+          error.errors.map((cause: Error) => cause.message),
+          ["解放待ちに失敗", "購読側の失敗"],
+        );
       });
 
       it("後始末が通って evicted / headroom の通知で購読側が投げたら、その例外をそのまま投げる（格下げは残る）", async () => {
         const reason = new Error("中止ボタン");
         const h = await holdingHarness({
-          notifyThrows: (notice) => notice.action === "evicted" ? reason : undefined,
+          notifyThrows: (notice) => (notice.action === "evicted" ? reason : undefined),
         });
         const { probe } = recordingProbe(false);
         const error = await assertRejects(() => h.residency.ensureHeadroom(NEED, probe, h.notify));
@@ -834,7 +851,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
             notified.push(notice);
             return Promise.reject(reason);
           },
-        })
+        }),
       );
       assertStrictEquals(error, reason);
       assertEquals(notified, [{ action: "evicted", reason: "failure" }]);
@@ -904,7 +921,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
     it("手放しの通知で購読側が同じ例外を投げ直しても元の例外 1 本、破棄の失敗は AggregateError に並べる", async () => {
       const reason = new Error("中止ボタン");
       const h = createHarness({
-        notifyThrows: (notice) => notice.action === "released" ? reason : undefined,
+        notifyThrows: (notice) => (notice.action === "released" ? reason : undefined),
       });
       await h.generate({ residency: "transformer" });
       // 返り値が投げるべき例外（pipeline の失敗経路は `throw await releaseIfRequested(...)`）。
@@ -920,10 +937,10 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       const error = await broken.residency.releaseIfRequested(original, "per-stage", broken.notify);
       assert(error instanceof AggregateError);
       assertStrictEquals(error.errors[0], original, "元の失敗を先頭に置いていない");
-      assertEquals(error.errors.map((cause: Error) => cause.message), [
-        "text が失敗",
-        "dispose 1 に失敗",
-      ]);
+      assertEquals(
+        error.errors.map((cause: Error) => cause.message),
+        ["text が失敗", "dispose 1 に失敗"],
+      );
       assertFalse(broken.residency.holding, "破棄に失敗した Session を席に残している");
       assertEquals(broken.notices.at(-1), { action: "released", reason: "request" });
     });

@@ -41,7 +41,7 @@ import { CodegenError } from "../codegen/errors.ts";
 export type ScoreStorage = "f32" | "f16";
 
 /** S 1 要素あたりの格納バイト数（f16 は 2 要素で 1 語）。 */
-export const scoreStorageBytes = (storage: ScoreStorage): number => storage === "f16" ? 2 : 4;
+export const scoreStorageBytes = (storage: ScoreStorage): number => (storage === "f16" ? 2 : 4);
 
 /**
  * S を f16 格納にできる形か。
@@ -69,7 +69,7 @@ export const attentionScoreUsesF16 = (depth: number, cols: number): boolean =>
  * MUST: f32 は空文字（既存キーは 1 文字も動かない）。MUST: 語は**キーの末尾**に置く — 3 つの
  * 軸が同時に立ちうるので、並び順を 1 箇所で固定しないと同一構成が 2 通りのキーを持つ。
  */
-export const scoreKeyPart = (storage: ScoreStorage): string => storage === "f16" ? ":s16" : "";
+export const scoreKeyPart = (storage: ScoreStorage): string => (storage === "f16" ? ":s16" : "");
 
 /** WGSL 先頭コメントに足す但し書き（f32 は空 — 既存バイト列を保つ）。 */
 export const scoreNote = (storage: ScoreStorage): string =>
@@ -148,7 +148,8 @@ export const scoreStoreQuad = (
   storage: ScoreStorage,
   quad: string,
   value: string,
-): string => storage === "f16" ? `score_store(${quad}, ${value});` : `${name}[${quad}] = ${value};`;
+): string =>
+  storage === "f16" ? `score_store(${quad}, ${value});` : `${name}[${quad}] = ${value};`;
 
 /**
  * s16 変種の生成前提を落とす（黙って f32 経路の WGSL を返さない）。

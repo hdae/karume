@@ -189,8 +189,7 @@ test("planShaderF16Feature は undefined を「要求しない」に倒し、必
 });
 
 test({
-  name:
-    "acquireGpu({shaderF16}) は feature を要求し、実走カナリアを通したときだけ有効になる（実 GPU）",
+  name: "acquireGpu({shaderF16}) は feature を要求し、実走カナリアを通したときだけ有効になる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // ① 既定では要求しない（既存経路の device 能力面を 1 ビットも広げない）
@@ -231,13 +230,15 @@ test({
  * device。不一致経路と消失経路は実 GPU では作れない（前者は `denoland/deno#23125` の環境が、
  * 後者は実行中の TDR が要る）ので、この 2 つはここでしか固定できない。
  */
-const canaryDevice = (parts: {
-  /** 読み戻しで観測させる f32 値。**未指定なら mapAsync は永久に解決しない**（作り物の窓）。 */
-  readonly mapped?: readonly number[];
-  /** true なら popErrorScope が解決しない（作り物の窓 — 下のテストのコメントを参照）。 */
-  readonly hangValidation?: boolean;
-  readonly lost?: Promise<GPUDeviceLostInfo>;
-} = {}): GPUDevice => {
+const canaryDevice = (
+  parts: {
+    /** 読み戻しで観測させる f32 値。**未指定なら mapAsync は永久に解決しない**（作り物の窓）。 */
+    readonly mapped?: readonly number[];
+    /** true なら popErrorScope が解決しない（作り物の窓 — 下のテストのコメントを参照）。 */
+    readonly hangValidation?: boolean;
+    readonly lost?: Promise<GPUDeviceLostInfo>;
+  } = {},
+): GPUDevice => {
   const buffer = {
     destroy: (): void => {},
     unmap: (): void => {},
@@ -276,7 +277,9 @@ const CANARY_SOLUTION = [4.0029296875, 1] as const;
 
 /** 決着済みの消失（`reason` はカナリアの分岐に使われないため固定値でよい）。 */
 const loss = (): Promise<GPUDeviceLostInfo> =>
-  Promise.resolve(platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }));
+  Promise.resolve(
+    platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }),
+  );
 
 /**
  * マクロタスクで決着する消失。マイクロタスクだけで進む段（パイプライン生成の errorScope pop
@@ -285,14 +288,23 @@ const loss = (): Promise<GPUDeviceLostInfo> =>
  */
 const lossAfterMacrotask = (): Promise<GPUDeviceLostInfo> =>
   new Promise((resolve) =>
-    setTimeout(() => resolve(platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" })), 0)
+    setTimeout(
+      () =>
+        resolve(
+          platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }),
+        ),
+      0,
+    ),
   );
 
 test("shader-f16 カナリアは既知解と一致したときだけ通る", async () => {
   await assertShaderF16Executes(canaryDevice({ mapped: CANARY_SOLUTION }));
 
   // denoland/deno#23125 の沈黙全 0 と、丸めが起きない実装（共有タイルの素通り）
-  for (const observed of [[0, 0], [4.00146484375, 1]]) {
+  for (const observed of [
+    [0, 0],
+    [4.00146484375, 1],
+  ]) {
     const error = await assertRejects(
       () => assertShaderF16Executes(canaryDevice({ mapped: observed })),
       GpuFeatureError,
@@ -472,7 +484,7 @@ const poppingDevice = (scopes: readonly (string | undefined)[]): GPUDevice => {
   return {
     popErrorScope: (): Promise<GPUError | null> => {
       const message = queue.shift();
-      return Promise.resolve(message === undefined ? null : { message } as GPUError);
+      return Promise.resolve(message === undefined ? null : ({ message } as GPUError));
     },
   } as unknown as GPUDevice;
 };
@@ -534,10 +546,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           return await popFailureScopes(gpu.device, faulty ? "faulty" : "innocent");
         });
 
-      const [faultyResult, innocentResult] = await Promise.all([
-        scoped(true, 1),
-        scoped(false, 8),
-      ]);
+      const [faultyResult, innocentResult] = await Promise.all([scoped(true, 1), scoped(false, 8)]);
 
       assertInstanceOf(faultyResult, GpuValidationError, "エラーを起こした側が捕捉する");
       assert(faultyResult.message.startsWith("faulty:"), faultyResult.message);
@@ -553,7 +562,7 @@ test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     let notified = 0;
-    const gpu = await acquireGpu({ onDeviceLost: () => notified += 1 });
+    const gpu = await acquireGpu({ onDeviceLost: () => (notified += 1) });
 
     assertEquals(gpu.lost, undefined);
     assertEquals(gpu.destroyRequested, false);
@@ -578,9 +587,11 @@ test("subgroup32は明示要求と必要な全機能を要求し、既定では�
     "subgroups",
     "subgroup-size-control",
   ]);
-  for (
-    const absent of [new Set<string>(), new Set(["subgroups"]), new Set(["subgroup-size-control"])]
-  ) {
+  for (const absent of [
+    new Set<string>(),
+    new Set(["subgroups"]),
+    new Set(["subgroup-size-control"]),
+  ]) {
     assertThrows(() => planSubgroup32Features(absent, language, true), GpuFeatureError);
   }
   assertThrows(

@@ -90,31 +90,38 @@ describe("results.json の境界の検査", () => {
     );
     // 別の ID なら 2 件とも残る（重複だけを断る）。
     const loaded = seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("extra")]);
-    assertEquals(loaded.document.cases.map((one) => one.id), ["base", "extra"]);
+    assertEquals(
+      loaded.document.cases.map((one) => one.id),
+      ["base", "extra"],
+    );
   });
 
   it("measurements を読む（非有限が null で来ても落ちない）", () => {
-    const loaded = seat("deno-a", "2026-09-21", "golden", [{
-      id: "activations",
-      status: "pass",
-      elapsedMs: 3,
-      measurements: [
-        {
-          output: "y",
-          maxAbs: 0.00002,
-          maxRel: null,
-          tolerance: { atol: 0.00048828125, rtol: 0 },
-          stage: "spec",
-        },
-      ],
-    }]);
-    assertEquals(loaded.document.cases[0].measurements, [{
-      output: "y",
-      maxAbs: 0.00002,
-      maxRel: null,
-      tolerance: { atol: 0.00048828125, rtol: 0 },
-      stage: "spec",
-    }]);
+    const loaded = seat("deno-a", "2026-09-21", "golden", [
+      {
+        id: "activations",
+        status: "pass",
+        elapsedMs: 3,
+        measurements: [
+          {
+            output: "y",
+            maxAbs: 0.00002,
+            maxRel: null,
+            tolerance: { atol: 0.00048828125, rtol: 0 },
+            stage: "spec",
+          },
+        ],
+      },
+    ]);
+    assertEquals(loaded.document.cases[0].measurements, [
+      {
+        output: "y",
+        maxAbs: 0.00002,
+        maxRel: null,
+        tolerance: { atol: 0.00048828125, rtol: 0 },
+        stage: "spec",
+      },
+    ]);
     // 行列にもそのまま載る（--json と実測の小表が読む所）。
     const report = buildDiff([loaded]);
     assertEquals(report.families[0].rows[0].cells["deno-a"].measurements?.[0].maxRel, null);
@@ -131,12 +138,14 @@ describe("results.json の境界の検査", () => {
     };
     // 帯の無い回は欄ごと無い（書き手の JSON.stringify が undefined の欄を落とす）。
     const { band: _dropped, ...unbanded } = banded;
-    const loaded = seat("deno-a", "2026-09-26", "anima-ab", [{
-      id: "f16+dit8-a8-attn8-s16-1024",
-      status: "fail",
-      elapsedMs: 3,
-      comparisons: [banded, { ...unbanded, output: "m_p", relRms: null }],
-    }]);
+    const loaded = seat("deno-a", "2026-09-26", "anima-ab", [
+      {
+        id: "f16+dit8-a8-attn8-s16-1024",
+        status: "fail",
+        elapsedMs: 3,
+        comparisons: [banded, { ...unbanded, output: "m_p", relRms: null }],
+      },
+    ]);
     assertEquals(loaded.document.cases[0].comparisons, [
       banded,
       { ...unbanded, output: "m_p", relRms: null },
@@ -145,12 +154,14 @@ describe("results.json の境界の検査", () => {
     assertEquals(report.families[0].rows[0].cells["deno-a"].comparisons?.[0].relRms, 0.012);
 
     const broken = (comparison: Record<string, unknown>) => () =>
-      seat("deno-a", "2026-09-26", "anima-ab", [{
-        id: "x",
-        status: "pass",
-        elapsedMs: 1,
-        comparisons: [comparison],
-      }]);
+      seat("deno-a", "2026-09-26", "anima-ab", [
+        {
+          id: "x",
+          status: "pass",
+          elapsedMs: 1,
+          comparisons: [comparison],
+        },
+      ]);
     assertThrows(
       broken({ ...banded, band: { ...banded.band, metric: "maxAbs" } }),
       Error,
@@ -164,12 +175,14 @@ describe("results.json の境界の検査", () => {
     assertThrows(broken({ ...banded, practical: 3 }), Error, "practical が文字列でない");
     assertThrows(
       () =>
-        seat("deno-a", "2026-09-26", "anima-ab", [{
-          id: "x",
-          status: "pass",
-          elapsedMs: 1,
-          comparisons: {},
-        }]),
+        seat("deno-a", "2026-09-26", "anima-ab", [
+          {
+            id: "x",
+            status: "pass",
+            elapsedMs: 1,
+            comparisons: {},
+          },
+        ]),
       Error,
       "comparisons が配列でない",
     );
@@ -182,21 +195,29 @@ describe("席の選び方", () => {
       seat("deno-a", "2026-09-20", "anima", [passing("base")]),
       seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("extra")]),
     ]);
-    assertEquals(report.families[0].selected, [{
-      environment: "deno-a",
-      date: "2026-09-21",
-      path: "outputs/verify/deno-a/2026-09-21_anima/results.json",
-      checkout: { sha: "1111111111111111111111111111111111111111", dirty: false },
-    }]);
-    assertEquals(report.families[0].rows.map((row) => row.id), ["base", "extra"]);
+    assertEquals(report.families[0].selected, [
+      {
+        environment: "deno-a",
+        date: "2026-09-21",
+        path: "outputs/verify/deno-a/2026-09-21_anima/results.json",
+        checkout: { sha: "1111111111111111111111111111111111111111", dirty: false },
+      },
+    ]);
+    assertEquals(
+      report.families[0].rows.map((row) => row.id),
+      ["base", "extra"],
+    );
   });
 
   it("--date を指定するとその日付だけを採り、持たない環境は「無し」になる", () => {
-    const report = buildDiff([
-      seat("deno-a", "2026-09-20", "anima", [passing("base")]),
-      seat("deno-a", "2026-09-21", "anima", [passing("base")]),
-      seat("deno-b", "2026-09-21", "anima", [passing("base")]),
-    ], { date: "2026-09-20" });
+    const report = buildDiff(
+      [
+        seat("deno-a", "2026-09-20", "anima", [passing("base")]),
+        seat("deno-a", "2026-09-21", "anima", [passing("base")]),
+        seat("deno-b", "2026-09-21", "anima", [passing("base")]),
+      ],
+      { date: "2026-09-20" },
+    );
     assertEquals(report.families[0].environments, ["deno-a"]);
     assertEquals(report.families[0].selected[0].date, "2026-09-20");
     assertEquals(report.families[0].absent, ["deno-b"]);
@@ -220,10 +241,13 @@ describe("席の選び方", () => {
     const report = buildDiff([first, second]);
     assertEquals(report.warnings, [
       "同じ系列・環境キー・日付の席が 2 つある（anima / deno-a / 2026-09-21）— 片方だけを採る: " +
-      `${first.path} / ${second.path}`,
+        `${first.path} / ${second.path}`,
     ]);
     // 採るのは 1 本のまま（警告は「どちらが消えたか」を読み手に渡すためのもの）。
-    assertEquals(report.families[0].selected.map((one) => one.path), [first.path]);
+    assertEquals(
+      report.families[0].selected.map((one) => one.path),
+      [first.path],
+    );
     // 日付が違えば「最新を採る」ので警告は出ない。
     assertEquals(
       buildDiff([
@@ -235,11 +259,17 @@ describe("席の選び方", () => {
   });
 
   it("--family で指定した系列だけを行列にし、当たらない指定は警告にする", () => {
-    const report = buildDiff([
-      seat("deno-a", "2026-09-21", "anima", [passing("base")]),
-      seat("deno-a", "2026-09-21", "sbv2", [passing("jvnv")]),
-    ], { families: ["sbv2", "irodori"] });
-    assertEquals(report.families.map((matrix) => matrix.family), ["sbv2"]);
+    const report = buildDiff(
+      [
+        seat("deno-a", "2026-09-21", "anima", [passing("base")]),
+        seat("deno-a", "2026-09-21", "sbv2", [passing("jvnv")]),
+      ],
+      { families: ["sbv2", "irodori"] },
+    );
+    assertEquals(
+      report.families.map((matrix) => matrix.family),
+      ["sbv2"],
+    );
     assertEquals(report.warnings, ["--family irodori に当たる結果が無い"]);
   });
 });
@@ -259,11 +289,13 @@ describe("環境間の差異", () => {
       seat("deno-a", "2026-09-21", "anima", [passing("base")]),
       seat("deno-b", "2026-09-21", "anima", [{ id: "base", status: "fail", elapsedMs: 2 }]),
     ]);
-    assertEquals(report.families[0].differences, [{
-      caseId: "base",
-      kind: "status",
-      values: { "deno-a": "pass", "deno-b": "fail" },
-    }]);
+    assertEquals(report.families[0].differences, [
+      {
+        caseId: "base",
+        kind: "status",
+        values: { "deno-a": "pass", "deno-b": "fail" },
+      },
+    ]);
   });
 
   it("実物の sha が食い違うケースを挙げる（赤にはしない = 差異として並ぶだけ）", () => {
@@ -271,11 +303,13 @@ describe("環境間の差異", () => {
       seat("deno-a", "2026-09-21", "anima", [passing("base", "aa")]),
       seat("deno-b", "2026-09-21", "anima", [passing("base", "bb")]),
     ]);
-    assertEquals(report.families[0].differences, [{
-      caseId: "base",
-      kind: "actual",
-      values: { "deno-a": "aa", "deno-b": "bb" },
-    }]);
+    assertEquals(report.families[0].differences, [
+      {
+        caseId: "base",
+        kind: "actual",
+        values: { "deno-a": "aa", "deno-b": "bb" },
+      },
+    ]);
   });
 
   it("片方にしか無いケースを挙げる", () => {
@@ -283,12 +317,14 @@ describe("環境間の差異", () => {
       seat("deno-a", "2026-09-21", "anima", [passing("base"), passing("only-a")]),
       seat("deno-b", "2026-09-21", "anima", [passing("base")]),
     ]);
-    assertEquals(report.families[0].differences, [{
-      caseId: "only-a",
-      kind: "missing",
-      values: { "deno-a": "pass" },
-      missing: ["deno-b"],
-    }]);
+    assertEquals(report.families[0].differences, [
+      {
+        caseId: "only-a",
+        kind: "missing",
+        values: { "deno-a": "pass" },
+        missing: ["deno-b"],
+      },
+    ]);
   });
 });
 
@@ -303,7 +339,7 @@ describe("チェックアウトの警告", () => {
     ]);
     assertEquals(report.families[0].warnings, [
       "checkout の sha が環境間で食い違う（別のコミットの結果を並べている）: " +
-      "deno-a=1111111 / deno-b=2222222",
+        "deno-a=1111111 / deno-b=2222222",
     ]);
   });
 

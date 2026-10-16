@@ -478,11 +478,10 @@ export class RecipeBuilder {
         dispatch.params,
         dispatch.paramsStorage === true ? PARAMS_STORAGE_USAGE : PARAMS_UNIFORM_USAGE,
       );
-      const operands = dispatch.operands ??
-        [
-          ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
-          { kind: "output" } as const,
-        ];
+      const operands = dispatch.operands ?? [
+        ...binds.map((_, at): FusedOperand => ({ kind: "bind", index: at })),
+        { kind: "output" } as const,
+      ];
       const { workgroups } = dispatch;
       builder.dispatch({
         key: dispatch.key,
@@ -494,9 +493,10 @@ export class RecipeBuilder {
           binding: slot + 1,
           source: resolve(operand),
         })),
-        workgroups: workgroups.kind === "tiled"
-          ? workgroups.counts
-          : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1],
+        workgroups:
+          workgroups.kind === "tiled"
+            ? workgroups.counts
+            : [gridStrideWorkgroups(workgroups.items, workgroups.size, limit), 1, 1],
       });
       // MUST: 同一境界の解放は確保の逆順（計画の再生と同じ順）。
       for (let id = step.temps.length - 1; id >= 0; id -= 1) {

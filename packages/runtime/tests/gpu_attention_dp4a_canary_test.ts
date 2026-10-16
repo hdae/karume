@@ -119,8 +119,10 @@ const BREAK_BOTH: CanaryWgslPatch = (wgsl) => wgsl.replace("  return dot", "  re
  * 載せてあり、丸め境界まで帯の 24 倍離れている — RC1-1・下の余裕門）。摂動が「入れた倍率
  * そのままで観測できる」のは O を 3 変種とも f32 で書く ③PV だけ。
  */
-const nudgePv = (factor: string): CanaryWgslPatch => (wgsl) =>
-  wgsl.replaceAll("let prow = stats[", `let prow = ${factor} * stats[`);
+const nudgePv =
+  (factor: string): CanaryWgslPatch =>
+  (wgsl) =>
+    wgsl.replaceAll("let prow = stats[", `let prow = ${factor} * stats[`);
 
 /**
  * 帯**内**の摂動（両腕・同一）。`1.0000001` は f32 で 1 + 1 ULP に丸まるので、掛けると出力は
@@ -182,7 +184,7 @@ test("③PV の qP は丸め境界から十分離れている（GPU の exp 誤�
       const shifted = Math.fround(pv.scores[row * pv.cols + i] - max);
       const p = Math.fround(Math.fround(Math.exp(shifted)) * 127);
       seen.add(Math.round(p));
-      worst = Math.min(worst, Math.abs((p - Math.floor(p)) - 0.5));
+      worst = Math.min(worst, Math.abs(p - Math.floor(p) - 0.5));
     }
   }
   assert(worst > QUANT_MARGIN, `qP の最悪余裕が ${worst} しかない（固定 S を選び直すこと）`);
@@ -307,21 +309,24 @@ test("メモ: 一過性の OOM で落ちた判定は保持せず、次の要求�
 test("メモ: 数値の不一致と device 消失で落ちた判定は保持し、走らせ直さない", async () => {
   // どちらも device の性質（または device 自体が使えない）なので、走らせ直しても同じ結論を得る
   // ためだけに 1 submit を払うことになる。
-  for (
-    const failure of [
-      new GpuFeatureError("両腕とも sanity 帯を外した"),
-      new GpuDeviceLostError("カナリアの検証中に device が失われた"),
-    ]
-  ) {
+  for (const failure of [
+    new GpuFeatureError("両腕とも sanity 帯を外した"),
+    new GpuDeviceLostError("カナリアの検証中に device が失われた"),
+  ]) {
     const gpu = fakeGpuContext(fakeDevice());
     await assertRejects(() =>
-      gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => Promise.reject(failure))
+      gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => Promise.reject(failure)),
     );
     let reruns = 0;
-    const again = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
-      reruns += 1;
-      return Promise.resolve(memoDecision);
-    }).then(() => undefined, (cause: unknown) => cause);
+    const again = await gpu[RUNTIME_INTERNAL]
+      .attentionI8a8Dot(() => {
+        reruns += 1;
+        return Promise.resolve(memoDecision);
+      })
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
     assertEquals(reruns, 0, `${failure.name} の後にカナリアが走り直している`);
     assertStrictEquals(again, failure, "保持した失敗と別の結果を配っている");
   }
@@ -342,7 +347,13 @@ test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちた�
   const oom = new GpuOutOfMemoryError("カナリアの一時バッファ: out of memory");
   pending.reject(oom);
   for (const waiter of [first, second]) {
-    assertStrictEquals(await waiter.then(() => undefined, (cause: unknown) => cause), oom);
+    assertStrictEquals(
+      await waiter.then(
+        () => undefined,
+        (cause: unknown) => cause,
+      ),
+      oom,
+    );
   }
   // 落ちた後の要求は新しい 1 本を走らせる。
   const retried = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
@@ -384,7 +395,7 @@ test({
         // はない）。band 機では非対象 — 両腕の同一性は band-both-identical 分岐自体が検証済み。
         // MUST: 直接呼ぶときも device 単位の errorScope 区間ロックの中で（probe の doc）。
         const emu = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
-          probeAttentionI8a8Dot(gpu, "emu", DEFAULT_CANARY_GEOMETRY)
+          probeAttentionI8a8Dot(gpu, "emu", DEFAULT_CANARY_GEOMETRY),
         );
         assertEquals(emu.mismatch, undefined, "エミュ変種が既知解を外した");
         assert(emu.exact, "エミュ変種が atol=0 で一致していない");
@@ -423,19 +434,23 @@ test({
       // 検出器: probe が組んだパイプラインキーが**渡した幾何**のキーそのもので、既定幾何の
       // キーとは違う（既定幾何を直に引く実装へ戻ると、ここが既定のキーを返して落ちる）。
       const probe = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
-        probeAttentionI8a8Dot(gpu, "dp4a", geometry)
+        probeAttentionI8a8Dot(gpu, "dp4a", geometry),
       );
-      const shapes = [[true, "f32"], [false, "f32"], [true, "f16"]] as const;
+      const shapes = [
+        [true, "f32"],
+        [false, "f32"],
+        [true, "f16"],
+      ] as const;
       const expected = [
         ...shapes.map(([v4, score]) => attentionQkI8a8Key(v4, true, score, PROFILE_GEOMETRY)),
         ...shapes.map(([v4, score]) => attentionPvI8a8Key(v4, true, score, PROFILE_GEOMETRY)),
       ];
       const defaults = [
         ...shapes.map(([v4, score]) =>
-          attentionQkI8a8Key(v4, true, score, DEFAULT_CANARY_GEOMETRY.qk)
+          attentionQkI8a8Key(v4, true, score, DEFAULT_CANARY_GEOMETRY.qk),
         ),
         ...shapes.map(([v4, score]) =>
-          attentionPvI8a8Key(v4, true, score, DEFAULT_CANARY_GEOMETRY.pv)
+          attentionPvI8a8Key(v4, true, score, DEFAULT_CANARY_GEOMETRY.pv),
         ),
       ];
       assertEquals(
@@ -624,7 +639,7 @@ test({
       // 実機は健全なので、注入した判定をメモへ**先に**焼く（焼かなければ dp4a になる）。
       // Session がこの席を読んでいることは、キーが `:dp4aEmu` になることでしか観測できない。
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
-        decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A)
+        decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A),
       );
       assertEquals(seeded.dot, "emu");
 
@@ -664,19 +679,23 @@ test({
     const gpu = await acquireGpu();
     try {
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
-        decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A)
+        decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A),
       );
       assertEquals(seeded.dot, "emu");
       for (const pass of [1, 2]) {
         const census = await runAttention(gpu, { attentionCompute: "a8" });
         const qkV4 = attentionQkI8a8UsesVec4(16);
         const pvV4 = attentionPvI8a8UsesVec4(8);
-        assertPipelineCensus(census, [
-          { label: "①QK の emu 変種", match: attentionQkI8a8Key(qkV4, false), atLeast: 1 },
-          { label: "①QK の dp4a 変種", match: attentionQkI8a8Key(qkV4, true), count: 0 },
-          { label: "③PV の emu 変種", match: attentionPvI8a8Key(pvV4, false), atLeast: 1 },
-          { label: "③PV の dp4a 変種", match: attentionPvI8a8Key(pvV4, true), count: 0 },
-        ], `${pass} 本目`);
+        assertPipelineCensus(
+          census,
+          [
+            { label: "①QK の emu 変種", match: attentionQkI8a8Key(qkV4, false), atLeast: 1 },
+            { label: "①QK の dp4a 変種", match: attentionQkI8a8Key(qkV4, true), count: 0 },
+            { label: "③PV の emu 変種", match: attentionPvI8a8Key(pvV4, false), atLeast: 1 },
+            { label: "③PV の dp4a 変種", match: attentionPvI8a8Key(pvV4, true), count: 0 },
+          ],
+          `${pass} 本目`,
+        );
       }
     } finally {
       gpu.destroy();

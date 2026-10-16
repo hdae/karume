@@ -109,7 +109,7 @@ const partitionsOf = (length: number, samples: number): number[][][] => {
   if (length <= 12) {
     const out: number[][][] = [];
     for (let mask = 0; mask < 1 << Math.max(0, length - 1); mask++) {
-      out.push(build(Array.from({ length: length - 1 }, (_, bit) => (mask >> bit & 1) === 1)));
+      out.push(build(Array.from({ length: length - 1 }, (_, bit) => ((mask >> bit) & 1) === 1)));
     }
     return out;
   }
@@ -148,7 +148,11 @@ const minimalAsset = (): Record<string, unknown> => {
     mergesText: `${vocab.indexOf("a")} ${vocab.indexOf("a")}`,
     mergesCount: 1,
     byteIds: Array.from({ length: 256 }, (_, byte) => vocab.indexOf(byteToken(byte))),
-    addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2]],
+    addedTokens: [
+      ["<unk>", 0],
+      ["<bos>", 1],
+      ["<eos>", 2],
+    ],
     specialIds: [0, 1, 2],
     unkId: 0,
     bosId: 1,
@@ -228,7 +232,13 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
       () =>
         parseAsset({
           ...minimalAsset(),
-          addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["<x>", 300], ["<y>", 300]],
+          addedTokens: [
+            ["<unk>", 0],
+            ["<bos>", 1],
+            ["<eos>", 2],
+            ["<x>", 300],
+            ["<y>", 300],
+          ],
         }),
       Error,
       "tokenizer.addedTokens: id 300 が 2 つの綴りに割り当てられている",
@@ -241,7 +251,12 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
       () =>
         parseAsset({
           ...minimalAsset(),
-          addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["ZZ", 259]],
+          addedTokens: [
+            ["<unk>", 0],
+            ["<bos>", 1],
+            ["<eos>", 2],
+            ["ZZ", 259],
+          ],
         }),
       Error,
       "id 259",
@@ -251,7 +266,12 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
   await t.step("語彙の外への採番は従来どおり受ける（EmbeddingGemma の形）", () => {
     parseAsset({
       ...minimalAsset(),
-      addedTokens: [["<unk>", 0], ["<bos>", 1], ["<eos>", 2], ["<image_soft_token>", 261]],
+      addedTokens: [
+        ["<unk>", 0],
+        ["<bos>", 1],
+        ["<eos>", 2],
+        ["<image_soft_token>", 261],
+      ],
     });
   });
 
@@ -268,16 +288,14 @@ test("資産 JSON の門: 信用できない外部入力として扱う", async 
   });
 });
 
-for (
-  const { family, fixtureName, series } of [
-    { family: "gemma4", fixtureName: "gemma4", series: "gemma4-e2b-tokenizer" },
-    {
-      family: "EmbeddingGemma",
-      fixtureName: "embeddinggemma",
-      series: "embeddinggemma-300m-tokenizer",
-    },
-  ]
-) {
+for (const { family, fixtureName, series } of [
+  { family: "gemma4", fixtureName: "gemma4", series: "gemma4-e2b-tokenizer" },
+  {
+    family: "EmbeddingGemma",
+    fixtureName: "embeddinggemma",
+    series: "embeddinggemma-300m-tokenizer",
+  },
+]) {
   const fixture = await readFixture(fixtureName);
   const tokenizer = new GemmaTokenizer(assetsOf(fixture));
 
@@ -347,9 +365,9 @@ for (
   // 実資産 1 本の解釈は 0.6 秒級（併合 514,906 本の組み立て）。門ごとに組み直さない。
   let fullTokenizer: GemmaTokenizer | undefined;
   const full = (): GemmaTokenizer =>
-    fullTokenizer ??= new GemmaTokenizer(
+    (fullTokenizer ??= new GemmaTokenizer(
       parseGemmaTokenizerAsset(seriesBytes as Uint8Array<ArrayBuffer>),
-    );
+    ));
 
   if (seriesBytes === undefined) {
     console.warn(

@@ -60,10 +60,7 @@ const selectionOf = async (mirror: URL, choice: MirrorChoice) => {
  *
  * 全 part を RAM に載せる {@link gemma4MirrorAssets} と違い、PLE の読み口はこちらから取る。
  */
-const openModelContainer = async (
-  mirror: URL,
-  choice: MirrorChoice,
-): Promise<OpenedContainer> => {
+const openModelContainer = async (mirror: URL, choice: MirrorChoice): Promise<OpenedContainer> => {
   const { loaded, container } = await selectionOf(mirror, choice);
   return await openContainer(
     { kind: "source", source: openContainerSource(loaded, container) },
@@ -126,10 +123,7 @@ export const openGemma4Ple = async (
 ): Promise<Gemma4PleHandle> => {
   const opened = await openModelContainer(mirror, choice);
   return {
-    index: await readGemma4PleIndex(
-      `test: ${mirror.pathname}`,
-      gemma4PleAssetSource(opened),
-    ),
+    index: await readGemma4PleIndex(`test: ${mirror.pathname}`, gemma4PleAssetSource(opened)),
     openBlock: (asset) => opened.asset(asset),
   };
 };
@@ -152,9 +146,7 @@ export const gemma4MirrorAssets = async (
   }
   return {
     config: parseGemma4PipelineConfig(loaded.manifest.models[modelName].pipelineConfig),
-    model: await Promise.all(
-      container.parts.map((part) => readFile(new URL(part.path, mirror))),
-    ),
+    model: await Promise.all(container.parts.map((part) => readFile(new URL(part.path, mirror)))),
     tokenizer: await readFile(new URL(tokenizer.path, mirror)),
   };
 };

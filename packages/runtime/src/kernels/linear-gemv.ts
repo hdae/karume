@@ -148,9 +148,11 @@ export type LinearGemvRowsVariant = LinearGemvVariant & {
  * §7）。M=1の実測形を渡す場合は追記10の語彙INT8をc16へ選択する。
  * MUST: 既定の変更はビット同一門（tests/gpu_linear_gemv_test.ts）の再実測とセット。
  */
-export const defaultLinearGemvVariant = (
-  shape?: { readonly storage: WeightStorage; readonly n: number; readonly k: number },
-): LinearGemvVariant => ({
+export const defaultLinearGemvVariant = (shape?: {
+  readonly storage: WeightStorage;
+  readonly n: number;
+  readonly k: number;
+}): LinearGemvVariant => ({
   // DECIDED: 大語彙INT8の実測形だけ担当列数を減らす（ADR 0082 追記10）。
   // docs/decisions/0082-linear-gemv-decode.md
   cols: shape?.storage === "i8" && shape.n === 262144 && shape.k === 1536 ? 16 : 32,
@@ -307,19 +309,13 @@ export const linearGemvParams = (
     throw new CodegenError(`linear_gemv params: ${storage} 格納は m=1 のみ（${m}）`);
   }
   if (!Number.isSafeInteger(m) || m < 1 || m > LINEAR_GEMV_MAX_ROWS) {
-    throw new CodegenError(
-      `linear_gemv params: m は 1..${LINEAR_GEMV_MAX_ROWS} の整数（${m}）`,
-    );
+    throw new CodegenError(`linear_gemv params: m は 1..${LINEAR_GEMV_MAX_ROWS} の整数（${m}）`);
   }
   if (!Number.isSafeInteger(k) || k < 0 || k % unit !== 0) {
-    throw new CodegenError(
-      `linear_gemv params: k は ${unit} の倍数の非負整数（${k}）`,
-    );
+    throw new CodegenError(`linear_gemv params: k は ${unit} の倍数の非負整数（${k}）`);
   }
   if (groupSize !== undefined && k % groupSize !== 0) {
-    throw new CodegenError(
-      `linear_gemv params: k=${k} が group_size ${groupSize} で割り切れない`,
-    );
+    throw new CodegenError(`linear_gemv params: k=${k} が group_size ${groupSize} で割り切れない`);
   }
   return gemmParams("linear", m, n, k);
 };
@@ -338,9 +334,9 @@ export const linearGemvKey = (
 ): string => {
   assertVariant(variant);
   gemvGroupShift(storage, groupSize);
-  return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}${weightKeyPart(storage)}${
-    i4GroupKeyPart(groupSize)
-  }`;
+  return `linear_gemv:v1:f32:c${variant.cols}u${variant.unroll}${weightKeyPart(storage)}${i4GroupKeyPart(
+    groupSize,
+  )}`;
 };
 
 /**
@@ -356,9 +352,9 @@ export const linearGemvRowsKey = (
   assertRowsVariant(variant);
   assertRowsStorage(storage);
   gemvGroupShift(storage, groupSize);
-  return `linear_gemv:v2:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${
-    weightKeyPart(storage)
-  }${i4GroupKeyPart(groupSize)}`;
+  return `linear_gemv:v2:f32:c${variant.cols}u${variant.unroll}r${variant.rows}${weightKeyPart(
+    storage,
+  )}${i4GroupKeyPart(groupSize)}`;
 };
 
 /**
@@ -369,22 +365,17 @@ export const linearGemvRowsKey = (
  * 出力は `f32`（1 スレッド 1 列のスカラ書き — 既定 v4 経路の `vec4<f32>` と違い n の整除を
  * 要らない）。
  */
-const bindings = (
-  unit: number,
-  storage: WeightStorage,
-  quantize = false,
-  packed = false,
-): string =>
+const bindings = (unit: number, storage: WeightStorage, quantize = false, packed = false): string =>
   `@group(0) @binding(1) var<storage, read> x: array<vec4<${packed ? "u32" : "f32"}>>;
 // 行頭が 16 B 整列なのは k % ${unit} == 0 から（適格判定が保証する）
 @group(0) @binding(2) var<storage, read> w: array<vec4<${storage === "f32" ? "f32" : "u32"}>>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<${quantize ? "u32" : "f32"}>;
 ${
-    storage === "f16" || storage === "f32"
-      ? ""
-      : "@group(0) @binding(5) var<storage, read> wscale: array<f32>;"
-  }`;
+  storage === "f16" || storage === "f32"
+    ? ""
+    : "@group(0) @binding(5) var<storage, read> wscale: array<f32>;"
+}`;
 
 /**
  * 語 1 本ぶんの読み（重み語 + x の quad 先頭 + i4 だけ group scale）。
@@ -401,10 +392,11 @@ const unitLoads = (
   packed = false,
 ): string => {
   const unit = linearGemvUnit(storage);
-  const groupScale = storage === "i4"
-    ? `
+  const groupScale =
+    storage === "i4"
+      ? `
     let ws${slot} = wscale[scale_base + ((unit${slot} * ${unit}u) >> ${shift}u)];`
-    : "";
+      : "";
   // packed 活性は 1 束縛要素（`vec4<u32>`）が 16 要素を運ぶ（f32 の quad は 4 要素）。
   return `    let unit${slot} = ${unitExpr};
     let pw${slot} = w[row_base + unit${slot}];${groupScale}
@@ -467,25 +459,29 @@ const mac = (fma: boolean, x: string, d: string): string =>
  */
 const unitMacsI4 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
-  return lanes.map((component, quad) => {
-    const bytes = `b${slot}_${quad}`;
-    const xa = `xa${slot}_${quad}`;
-    const xb = `xb${slot}_${quad}`;
-    // 語の成分 `quad` は要素 8·quad..8·quad+7 = x の quad 2 本ぶん。
-    const macs = lanes.flatMap((byte, lane) => {
-      const source = lane < 2 ? xa : xb;
-      const low = lanes[(lane * 2) % 4];
-      const high = lanes[(lane * 2 + 1) % 4];
-      return [
-        mac(fma, `${source}.${low}`, `(f32(i32(${bytes}.${byte} & 0xFu) - 8) * ws${slot})`),
-        mac(fma, `${source}.${high}`, `(f32(i32(${bytes}.${byte} >> 4u) - 8) * ws${slot})`),
-      ];
-    }).join("\n");
-    return `    let ${bytes} = unpack4xU8(pw${slot}.${component});
+  return lanes
+    .map((component, quad) => {
+      const bytes = `b${slot}_${quad}`;
+      const xa = `xa${slot}_${quad}`;
+      const xb = `xb${slot}_${quad}`;
+      // 語の成分 `quad` は要素 8·quad..8·quad+7 = x の quad 2 本ぶん。
+      const macs = lanes
+        .flatMap((byte, lane) => {
+          const source = lane < 2 ? xa : xb;
+          const low = lanes[(lane * 2) % 4];
+          const high = lanes[(lane * 2 + 1) % 4];
+          return [
+            mac(fma, `${source}.${low}`, `(f32(i32(${bytes}.${byte} & 0xFu) - 8) * ws${slot})`),
+            mac(fma, `${source}.${high}`, `(f32(i32(${bytes}.${byte} >> 4u) - 8) * ws${slot})`),
+          ];
+        })
+        .join("\n");
+      return `    let ${bytes} = unpack4xU8(pw${slot}.${component});
 ${activationQuad(packed, slot, xa, quad * 2)}
 ${activationQuad(packed, slot, xb, quad * 2 + 1)}
 ${macs}`;
-  }).join("\n");
+    })
+    .join("\n");
 };
 
 /**
@@ -498,16 +494,18 @@ ${macs}`;
  */
 const unitMacsI8 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
-  return lanes.map((component, quad) => {
-    const bytes = `b${slot}_${quad}`;
-    const xa = `xa${slot}_${quad}`;
-    const macs = lanes.map((lane) =>
-      mac(fma, `${xa}.${lane}`, `(f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR})`)
-    ).join("\n");
-    return `    let ${bytes} = unpack4xI8(pw${slot}.${component});
+  return lanes
+    .map((component, quad) => {
+      const bytes = `b${slot}_${quad}`;
+      const xa = `xa${slot}_${quad}`;
+      const macs = lanes
+        .map((lane) => mac(fma, `${xa}.${lane}`, `(f32(${bytes}.${lane}) * ${WEIGHT_SCALE_VAR})`))
+        .join("\n");
+      return `    let ${bytes} = unpack4xI8(pw${slot}.${component});
 ${activationQuad(packed, slot, xa, quad)}
 ${macs}`;
-  }).join("\n");
+    })
+    .join("\n");
 };
 
 /**
@@ -516,21 +514,23 @@ ${macs}`;
  */
 const unitMacsF16 = (slot: string): string => {
   const lanes = ["x", "y", "z", "w"] as const;
-  return lanes.map((component, pair) => {
-    const weights = `h${slot}_${pair}`;
-    const activation = `x${slot}_${pair}`;
-    return `    let ${weights} = unpack2x16float(pw${slot}.${component});
+  return lanes
+    .map((component, pair) => {
+      const weights = `h${slot}_${pair}`;
+      const activation = `x${slot}_${pair}`;
+      return `    let ${weights} = unpack2x16float(pw${slot}.${component});
     let ${activation} = x[xq${slot} + ${Math.floor(pair / 2)}u];
     acc = acc + ${activation}.${lanes[(pair * 2) % 4]} * ${weights}.x;
     acc = acc + ${activation}.${lanes[(pair * 2 + 1) % 4]} * ${weights}.y;`;
-  }).join("\n");
+    })
+    .join("\n");
 };
 
 /** f32 4 要素 / 語。通常 GEMM と同じ K 昇順の積和を静的成分で展開する。 */
 const unitMacsF32 = (slot: string): string => {
-  const macs = ["x", "y", "z", "w"].map((lane) =>
-    `    acc = acc + xf${slot}.${lane} * pw${slot}.${lane};`
-  ).join("\n");
+  const macs = ["x", "y", "z", "w"]
+    .map((lane) => `    acc = acc + xf${slot}.${lane} * pw${slot}.${lane};`)
+    .join("\n");
   return `    let xf${slot} = x[xq${slot}];
 ${macs}`;
 };
@@ -538,19 +538,21 @@ ${macs}`;
 /** INT2 の16 B語を K 昇順に積和する。成分添字を静的にして Metal の動的添字を避ける。 */
 const unitMacsI2 = (slot: string, packed = false, fma = false): string => {
   const lanes = ["x", "y", "z", "w"] as const;
-  return lanes.flatMap((component, word) =>
-    lanes.map((_, byte) => {
-      const index = word * 4 + byte;
-      const quantized = `q${slot}_${index}`;
-      const decoded = `d${slot}_${index}`;
-      const activation = `x${slot}_${index}_0`;
-      const products = `${activationQuad(packed, slot, activation, index)}
+  return lanes
+    .flatMap((component, word) =>
+      lanes.map((_, byte) => {
+        const index = word * 4 + byte;
+        const quantized = `q${slot}_${index}`;
+        const decoded = `d${slot}_${index}`;
+        const activation = `x${slot}_${index}_0`;
+        const products = `${activationQuad(packed, slot, activation, index)}
 ${lanes.map((lane) => mac(fma, `${activation}.${lane}`, `${decoded}.${lane}`)).join("\n")}`;
-      return `    let ${quantized} = (pw${slot}.${component} >> ${byte * 8}u) & 255u;
+        return `    let ${quantized} = (pw${slot}.${component} >> ${byte * 8}u) & 255u;
     let ${decoded} = vec4<f32>(vec4<i32>(vec4<u32>(${quantized}, ${quantized} >> 2u, ${quantized} >> 4u, ${quantized} >> 6u) & vec4<u32>(3u)) - vec4<i32>(2)) * ${WEIGHT_SCALE_VAR};
 ${products}`;
-    })
-  ).join("\n");
+      }),
+    )
+    .join("\n");
 };
 
 /**
@@ -577,12 +579,12 @@ const unitMacs = (storage: WeightStorage, slot: string, packed = false, fma = fa
   storage === "f32"
     ? unitMacsF32(slot)
     : storage === "f16"
-    ? unitMacsF16(slot)
-    : storage === "i4"
-    ? unitMacsI4(slot, packed, fma)
-    : storage === "i2"
-    ? unitMacsI2(slot, packed, fma)
-    : unitMacsI8(slot, packed, fma);
+      ? unitMacsF16(slot)
+      : storage === "i4"
+        ? unitMacsI4(slot, packed, fma)
+        : storage === "i2"
+          ? unitMacsI2(slot, packed, fma)
+          : unitMacsI8(slot, packed, fma);
 
 /**
  * I4/I8も行ごとの積和を小さな関数へまとめる。K昇順とf32の丸め点はM=1と同じ。
@@ -612,8 +614,8 @@ const rowsMacs = (storage: WeightStorage, slot: string, rows: number): string =>
   storage === "i4"
     ? rowsWordCall("i4", slot, rows)
     : storage === "i2"
-    ? rowsMacsI2(slot, rows)
-    : rowsWordCall("i8", slot, rows);
+      ? rowsMacsI2(slot, rows)
+      : rowsWordCall("i8", slot, rows);
 
 /** i4 は行あたりの scale 本数から group の先頭を導く / i8 は出力チャネル 1 本を巻き上げる。 */
 const scaleSetupWgsl = (storage: WeightStorage, shift: number | undefined): string =>
@@ -640,9 +642,9 @@ export const linearGemvWgsl = (
   const slots = Array.from({ length: unroll }, (_, slot) => `${slot}`);
   const loads = slots.map((slot) => unitLoads(storage, slot, `unit + ${slot}u`, shift)).join("\n");
   const macs = slots.map((slot) => unitMacs(storage, slot)).join("\n");
-  return `// karume linear gemv (M=1: out[n] = x[k] · wᵀ[n,k] + bias[n], f32${
-    weightNote(storage)
-  }, ${cols} 列 / wg, 語 ${unroll} 本先読み)
+  return `// karume linear gemv (M=1: out[n] = x[k] · wᵀ[n,k] + bias[n], f32${weightNote(
+    storage,
+  )}, ${cols} 列 / wg, 語 ${unroll} 本先読み)
 struct Dims {
   m: u32,
   n: u32,
@@ -703,17 +705,21 @@ export const linearGemvRowsWgsl = (
   const rowList = Array.from({ length: rows }, (_, row) => row);
   const loads = slots.map((slot) => unitLoads(storage, slot, `unit + ${slot}u`, shift)).join("\n");
   const macs = slots.map((slot) => rowsMacs(storage, slot, rows)).join("\n");
-  const rowHeads = rowList.map((row) => `  let xr${row} = min(row0 + ${row}u, dims.m - 1u) * kq;`)
+  const rowHeads = rowList
+    .map((row) => `  let xr${row} = min(row0 + ${row}u, dims.m - 1u) * kq;`)
     .join("\n");
   const accs = rowList.map((row) => `  var acc${row} = 0.0;`).join("\n");
-  const stores = rowList.map((row) =>
-    `  if (row0 + ${row}u < dims.m) {
+  const stores = rowList
+    .map(
+      (row) =>
+        `  if (row0 + ${row}u < dims.m) {
     out[(row0 + ${row}u) * dims.n + col] = acc${row} + bias[col];
-  }`
-  ).join("\n");
-  return `// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32${
-    weightNote(storage)
-  }, ${cols} 列 / wg, 語 ${unroll} 本先読み, ${rows} 行 / スレッド)
+  }`,
+    )
+    .join("\n");
+  return `// karume linear gemv rows (M≥2: out[m,n] = x[m,k] · wᵀ[n,k] + bias[n], f32${weightNote(
+    storage,
+  )}, ${cols} 列 / wg, 語 ${unroll} 本先読み, ${rows} 行 / スレッド)
 struct Dims {
   m: u32,
   n: u32,
@@ -861,8 +867,8 @@ const parallelShapeFor = (
   group?: number,
 ): ParallelShape | undefined => {
   if (m < 1 || m > 8) return undefined;
-  return PARALLEL_SHAPES.find((shape) =>
-    shape.storage === storage && shape.n === n && shape.k === k && shape.group === group
+  return PARALLEL_SHAPES.find(
+    (shape) => shape.storage === storage && shape.n === n && shape.k === k && shape.group === group,
   );
 };
 
@@ -1065,11 +1071,9 @@ fn quantize(bits: u32) -> u32 {
   let magnitude = bits & 0x7fffffffu;
   if (magnitude > 0x7f800000u) { return bits | 0x00400000u; }
   var lo = 0u;
-${
-  [64, 32, 16, 8, 4, 2, 1].map((step) =>
-    `  lo += select(0u, ${step}u, magnitude >= srqWord(lo + ${step}u));`
-  ).join("\n")
-}
+${[64, 32, 16, 8, 4, 2, 1]
+  .map((step) => `  lo += select(0u, ${step}u, magnitude >= srqWord(lo + ${step}u));`)
+  .join("\n")}
   lo += select(0u, 1u, magnitude >= srqWord(128u));
   let sign = bits & 0x80000000u;
   let level = min(lo, select(127u, 128u, sign != 0u));
@@ -1129,10 +1133,10 @@ ${unitMacs(storage, "t", packed, true)}
   }
   if (col < dims.n && lane == 0u) {
     out[wg.y * dims.n + col] = ${
-    quantize
-      ? "quantize(bitcast<u32>(partial[lid] + bias[col]) ^ dims.rounding_mask)"
-      : "partial[lid] + bias[col]"
-  };
+      quantize
+        ? "quantize(bitcast<u32>(partial[lid] + bias[col]) ^ dims.rounding_mask)"
+        : "partial[lid] + bias[col]"
+    };
   }
 }
 `;

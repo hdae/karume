@@ -125,7 +125,10 @@ const refInput = (
  * 門 ②の相手: 同じスロットに対する states 形（①'/③'）を「past = P−1・Q = 1・ins = 位置 P−1 の
  * 行」で組む。ins に置くのは貸し手スロットの物理行 `slot_row(P−1)` の中身そのもの。
  */
-const equivalentStatesRun = (spec: StateCase, inputs: StateReadonlyInputs): {
+const equivalentStatesRun = (
+  spec: StateCase,
+  inputs: StateReadonlyInputs,
+): {
   readonly spec: StateCase;
   readonly inputs: StateInputs;
 } => {
@@ -166,8 +169,7 @@ const assertBitIdentical = (
 };
 
 test({
-  name:
-    "states 形 readonly 変種: 参照の帯・states 形（P−1・Q=1）とビット同一・空行と決定性（実 GPU）",
+  name: "states 形 readonly 変種: 参照の帯・states 形（P−1・Q=1）とビット同一・空行と決定性（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -242,8 +244,7 @@ const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutatio
 ];
 
 test({
-  name:
-    "states 形 readonly 変種: 故障注入（live のずれ・窓の先頭のずれ・写像の法）は参照の帯で落ちる（実 GPU）",
+  name: "states 形 readonly 変種: 故障注入（live のずれ・窓の先頭のずれ・写像の法）は参照の帯で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

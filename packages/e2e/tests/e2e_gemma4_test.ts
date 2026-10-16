@@ -42,7 +42,11 @@ import {
   type PreparedModel,
   type Tensor,
 } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -55,7 +59,11 @@ import {
   registerReferenceGate,
   settleOrObserve,
 } from "../../runtime/tests/helpers/reference.ts";
-import { openResults, recordFailure, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
+import {
+  openResults,
+  recordFailure,
+  runRecordedCase,
+} from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 
@@ -168,8 +176,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 const discoverCases = (root: URL): readonly string[] =>
   listDir(root)
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();
@@ -371,7 +379,11 @@ test({
         await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
         GRAPH_NAME,
       );
-      assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
+      assertEquals(
+        parsed.graph.inputs.map((spec) => spec.name),
+        ["input_ids"],
+        "グラフ入力",
+      );
       assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
       const outputName = parsed.graph.outputs[0];
       const declared = parsed.graph.values[outputName].dtype;
@@ -399,69 +411,73 @@ test({
           const mismatches: string[] = [];
           for (const caseName of CASES) {
             let settlement: ReferenceSettlement | undefined;
-            await runRecordedCase(results, {
-              id: caseName,
-              // 決着はケースの席に残る — 系列の catch で二重に積まない。
-              onFailure: () => {
-                caseSettled = true;
-              },
-            }, async ({ measurements }) => {
-              const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
-              const outputs = await session.run(inputs);
-              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-              const actual = outputs[outputName];
-              const where = `${caseName} output.0 ('${outputName}')`;
-              assertEquals(actual.shape, expected.shape, `${where}: shape`);
-              assertEquals(actual.dtype, declared, `${where}: dtype`);
-
-              // ② 数値
-              const report = compareTensors(actual, expected, GEMMA4_TOLERANCE);
-              measurements.push({
-                output: outputName,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: GEMMA4_TOLERANCE,
-                stage: "karume",
-              });
-              assert(report.pass, `${where}: ${formatAllclose(report)}`);
-
-              // ③ 意味論（最終位置の 1 位）。②が緩んでも独立に残る線で、MQA の head 写像違い・
-              // 層種別 mask の取り違え・RoPE の位置ずれ・PLE の層割り付け違いはどれもここで 1 位を
-              // 動かす。
-              const golden = greedyTop(expected, `${caseName} golden`);
-              const observed = greedyTop(actual, `${caseName} GPU`);
-              // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
-              // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、②の許容内の数値差で 1 位は
-              // 動けない。
-              assert(
-                golden.margin > 2 * GEMMA4_TOLERANCE.atol,
-                `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
-                  `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
-              );
-              assertEquals(
-                observed.top,
-                golden.top,
-                `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
-                  `golden 余裕 ${golden.margin}）`,
-              );
-              console.log(
-                `[e2e] gemma4 1-shot ${caseName}: T=${expected.shape[1]} / top=${observed.top} / ` +
-                  `golden 余裕 ${golden.margin.toExponential(3)} / ${formatAllclose(report)}`,
-              );
-              tops.push(observed.top);
-
-              // ②③が通った後で、③と同じ最終行を実物（safetensors 1 本・metadata なし）にし、
-              // この機の参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばす —
-              // settleOrObserve）。
-              const row = lastLogits(actual, `${caseName} GPU`);
-              const outcome = await settleOrObserve(references, results, {
+            await runRecordedCase(
+              results,
+              {
                 id: caseName,
-                artifact: `${caseName}-last-logits.safetensors`,
-                bytes: f32ArtifactBytes(outputName, [1, row.length], row),
-              });
-              settlement = outcome.settlement;
-              return outcome.fields;
-            });
+                // 決着はケースの席に残る — 系列の catch で二重に積まない。
+                onFailure: () => {
+                  caseSettled = true;
+                },
+              },
+              async ({ measurements }) => {
+                const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
+                const outputs = await session.run(inputs);
+                assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+                const actual = outputs[outputName];
+                const where = `${caseName} output.0 ('${outputName}')`;
+                assertEquals(actual.shape, expected.shape, `${where}: shape`);
+                assertEquals(actual.dtype, declared, `${where}: dtype`);
+
+                // ② 数値
+                const report = compareTensors(actual, expected, GEMMA4_TOLERANCE);
+                measurements.push({
+                  output: outputName,
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: GEMMA4_TOLERANCE,
+                  stage: "karume",
+                });
+                assert(report.pass, `${where}: ${formatAllclose(report)}`);
+
+                // ③ 意味論（最終位置の 1 位）。②が緩んでも独立に残る線で、MQA の head 写像違い・
+                // 層種別 mask の取り違え・RoPE の位置ずれ・PLE の層割り付け違いはどれもここで 1 位を
+                // 動かす。
+                const golden = greedyTop(expected, `${caseName} golden`);
+                const observed = greedyTop(actual, `${caseName} GPU`);
+                // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
+                // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、②の許容内の数値差で 1 位は
+                // 動けない。
+                assert(
+                  golden.margin > 2 * GEMMA4_TOLERANCE.atol,
+                  `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
+                    `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
+                );
+                assertEquals(
+                  observed.top,
+                  golden.top,
+                  `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
+                    `golden 余裕 ${golden.margin}）`,
+                );
+                console.log(
+                  `[e2e] gemma4 1-shot ${caseName}: T=${expected.shape[1]} / top=${observed.top} / ` +
+                    `golden 余裕 ${golden.margin.toExponential(3)} / ${formatAllclose(report)}`,
+                );
+                tops.push(observed.top);
+
+                // ②③が通った後で、③と同じ最終行を実物（safetensors 1 本・metadata なし）にし、
+                // この機の参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばす —
+                // settleOrObserve）。
+                const row = lastLogits(actual, `${caseName} GPU`);
+                const outcome = await settleOrObserve(references, results, {
+                  id: caseName,
+                  artifact: `${caseName}-last-logits.safetensors`,
+                  bytes: f32ArtifactBytes(outputName, [1, row.length], row),
+                });
+                settlement = outcome.settlement;
+                return outcome.fields;
+              },
+            );
             if (settlement?.check.status === "fail") {
               mismatches.push(referenceMismatchMessage(caseName, settlement, references));
             }
@@ -521,8 +537,8 @@ const dispatches = (of: readonly TimingEntry[]): number =>
  * - 両方の linear 変種が出ること = 混成そのもの（片側だけなら「一様格納が通っただけ」）。
  */
 const assertStorageKeys = (entries: readonly TimingEntry[], shown: string): void => {
-  const linear = entries.filter((entry) =>
-    entry.key.startsWith("linear:") || entry.key.startsWith("linear_gemv:")
+  const linear = entries.filter(
+    (entry) => entry.key.startsWith("linear:") || entry.key.startsWith("linear_gemv:"),
   );
   assert(linear.length > 0, `linear の内訳が無い（走った内訳: ${shown}）`);
   assertEquals(
@@ -609,9 +625,9 @@ test({
         console.log(
           `[e2e] gemma4 1-shot census: QK ${dispatches(qk)} / PV ${dispatches(pv)} / ` +
             `linear ${dispatches(entries.filter((entry) => entry.key.startsWith("linear:")))} / ` +
-            `embedding ${
-              dispatches(entries.filter((entry) => entry.key.startsWith("embedding:")))
-            }`,
+            `embedding ${dispatches(
+              entries.filter((entry) => entry.key.startsWith("embedding:")),
+            )}`,
         );
       } finally {
         await session.dispose();

@@ -29,7 +29,13 @@
 // golden `outputs/series/gemma4-e2b-drafter/`。どちらもリポジトリ管理外で、ミラーが無い環境では
 // **明示 SKIP**、ミラーがあるのに golden が欠けている形は SKIP でなく **FAIL** にする。
 
-import { isNotFound, readFile, readTextFile, readTextFileSync, statSync } from "@karume/test-support/fs";
+import {
+  isNotFound,
+  readFile,
+  readTextFile,
+  readTextFileSync,
+  statSync,
+} from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
@@ -55,7 +61,11 @@ import type { Gemma4Assets } from "../../models/src/gemma/pipeline.ts";
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
 import { parseGemma4PipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
-import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
+import {
+  gemma4RopeInputNames,
+  gemma4RopeInputs,
+  type Gemma4RopeSpec,
+} from "../../models/src/gemma/rope.ts";
 import {
   admitGemma4Drafter,
   draftOnce,
@@ -64,15 +74,23 @@ import {
   openDrafterContext,
 } from "../../models/src/gemma/speculative.ts";
 import { planPrefillChunks } from "../../models/src/generation/greedy.ts";
-import { mirrorAvailable, openGemma4Ple, openMirrorComponent } from "../../models/tests/helpers/gemma-mirror.ts";
+import {
+  mirrorAvailable,
+  openGemma4Ple,
+  openMirrorComponent,
+} from "../../models/tests/helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
-import { allResidentBytes, allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
+import {
+  allResidentBytes,
+  allResidentPleBytesOfMirror,
+} from "../../models/tests/helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
-const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
+const ASSEMBLE_COMMAND =
+  "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
   "（drafter 系列と golden は … python -m gemma4.export_drafter）";
 
 /** 配布形の役割名（`Gemma4Pipeline` の同名定数と同じ綴り — 焼く側は `distribution.py`）。 */
@@ -266,8 +284,8 @@ test({
 
     // 共有 initializer は 1 本で、バイトを持たない（格納が無い）。名前がそのまま貸し手の
     // initializer 名（= 実体の鍵）。
-    const shared = Object.keys(drafter.initializers).filter((name) =>
-      drafter.initializers[name].shared !== undefined
+    const shared = Object.keys(drafter.initializers).filter(
+      (name) => drafter.initializers[name].shared !== undefined,
     );
     assertEquals(shared.length, 1, "共有 initializer の本数");
     assertEquals(
@@ -458,9 +476,10 @@ test({
     try {
       // 借りるのは埋め込み表 1 本（バイトは 1 つも複製されない）。
       const sharedWeights = Object.fromEntries(
-        Object.keys(admitted.sharedWeights).map((
+        Object.keys(admitted.sharedWeights).map((borrower) => [
           borrower,
-        ) => [borrower, target.exportWeight(admitted.sharedWeights[borrower])]),
+          target.exportWeight(admitted.sharedWeights[borrower]),
+        ]),
       );
       drafterSession = await drafterOpened.createSession(gpu, {
         ...sessionOptions,
@@ -594,21 +613,16 @@ test({
           counts.push({ perStep, total, cycles: golden.cycles });
           console.log(
             `[e2e] gemma4 drafter ${name}: T=${promptLength} / ${golden.cycles} サイクル / 一致 ` +
-              `${total}/${golden.cycles * GEMMA4_DRAFT_STEPS}（段別 ${
-                perStep.map((hit, step) =>
-                  `${step + 1}: ${(hit / golden.cycles * 100).toFixed(1)}%`
-                ).join(" / ")
-              }）/ ${(performance.now() - started).toFixed(0)}ms`,
+              `${total}/${golden.cycles * GEMMA4_DRAFT_STEPS}（段別 ${perStep
+                .map((hit, step) => `${step + 1}: ${((hit / golden.cycles) * 100).toFixed(1)}%`)
+                .join(" / ")}）/ ${(performance.now() - started).toFixed(0)}ms`,
           );
         });
       }
 
       await t.step("① 3 ケース合計の一致率が門を満たす", () => {
         const matched = counts.reduce((sum, entry) => sum + entry.total, 0);
-        const drafts = counts.reduce(
-          (sum, entry) => sum + entry.cycles * GEMMA4_DRAFT_STEPS,
-          0,
-        );
+        const drafts = counts.reduce((sum, entry) => sum + entry.cycles * GEMMA4_DRAFT_STEPS, 0);
         assertEquals(counts.length, CASES.length, "突合したケース数");
         const rate = matched / drafts;
         console.log(
@@ -617,13 +631,14 @@ test({
         );
         assert(
           rate >= MATCH_FLOOR,
-          `draft の一致率 ${(rate * 100).toFixed(2)}% が門 ${
-            (MATCH_FLOOR * 100).toFixed(0)
-          }% に満たない（段別: ${
-            counts.map((entry, index) =>
-              `${CASES[index]} ${entry.perStep.map((hit) => `${hit}/${entry.cycles}`).join(",")}`
-            ).join(" / ")
-          }）`,
+          `draft の一致率 ${(rate * 100).toFixed(2)}% が門 ${(MATCH_FLOOR * 100).toFixed(
+            0,
+          )}% に満たない（段別: ${counts
+            .map(
+              (entry, index) =>
+                `${CASES[index]} ${entry.perStep.map((hit) => `${hit}/${entry.cycles}`).join(",")}`,
+            )
+            .join(" / ")}）`,
         );
       });
 
@@ -680,7 +695,9 @@ test({
   ignore: !MIRROR_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     const fixture: ChatFixture = JSON.parse(
-      await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+      await readTextFile(
+        new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url),
+      ),
     );
     const chatCase = fixture.chat.find((row) => row.name === CHAT_CASE.fixture);
     assert(chatCase !== undefined, `フィクスチャに chat ケース '${CHAT_CASE.fixture}' が無い`);
@@ -692,47 +709,41 @@ test({
     });
     try {
       console.log(
-        `[e2e] gemma4 drafter pipeline: 投機ありのロード ${
-          (performance.now() - started).toFixed(0)
-        }ms`,
+        `[e2e] gemma4 drafter pipeline: 投機ありのロード ${(performance.now() - started).toFixed(
+          0,
+        )}ms`,
       );
       // NOTE: この pipeline は drafter を持つので、`chat` は**既定で投機を張る**（段 3）。
       // 受理率・非投機との token 列一致・phase・見積りの厳密門は `e2e_gemma4_speculative_test.ts`
       // が持つ — ここが見るのは「既定経路（chat）で投機が実際に張られ、それでも golden が
       // 1 文字も動かない」ことである。
-      await t.step(
-        "① 投機を張っても chat の golden は 1 文字も動かない",
-        async () => {
-          const stream = pipeline.chat(chatCase.messages, {
-            maxNewTokens: CHAT_CASE.maxNewTokens,
-            sampler: { temperature: 0 },
-          });
-          assertEquals(await stream.text(), CHAT_CASE.expected, "温度 0 の出力");
-          const stop = await stream.done;
-          assertEquals(stop.tokens, CHAT_CASE.stop.tokens, "生成 token 数（停止 token 込み）");
-          assert(stop.reason === "eos", `停止理由が eos でない: ${JSON.stringify(stop)}`);
-          assertEquals(stop.token, CHAT_CASE.stop.token, "停止 token");
-          // MUST: 投機が**実際に張られた**ことをここで見る（張られていなければ①は
-          // 「非投機の golden 再走」に化け、投機経路は 1 度も踏まれない）。`cycles > 0` は
-          // verify run が回ったこと、`accepted > 0` は draft が 1 本以上受理されたこと —
-          // 後者が無いと「毎 cycle 全棄却 = decode と同じ列を遠回りで出しただけ」と区別が付かない。
-          const speculation = stop.speculation;
-          assert(
-            speculation !== undefined,
-            `既定で投機が張られていない: ${JSON.stringify(stop)}`,
-          );
-          assert(speculation.cycles > 0, "verify run が 1 本も回っていない");
-          assert(
-            speculation.accepted > 0,
-            `draft が 1 本も受理されていない（${speculation.cycles} cycle / ` +
-              `drafted ${speculation.drafted}）`,
-          );
-          console.log(
-            `[e2e] gemma4 drafter chat: ${speculation.cycles} cycle / 受理 ` +
-              `${speculation.accepted}/${speculation.drafted} / 配送 ${stop.tokens} token`,
-          );
-        },
-      );
+      await t.step("① 投機を張っても chat の golden は 1 文字も動かない", async () => {
+        const stream = pipeline.chat(chatCase.messages, {
+          maxNewTokens: CHAT_CASE.maxNewTokens,
+          sampler: { temperature: 0 },
+        });
+        assertEquals(await stream.text(), CHAT_CASE.expected, "温度 0 の出力");
+        const stop = await stream.done;
+        assertEquals(stop.tokens, CHAT_CASE.stop.tokens, "生成 token 数（停止 token 込み）");
+        assert(stop.reason === "eos", `停止理由が eos でない: ${JSON.stringify(stop)}`);
+        assertEquals(stop.token, CHAT_CASE.stop.token, "停止 token");
+        // MUST: 投機が**実際に張られた**ことをここで見る（張られていなければ①は
+        // 「非投機の golden 再走」に化け、投機経路は 1 度も踏まれない）。`cycles > 0` は
+        // verify run が回ったこと、`accepted > 0` は draft が 1 本以上受理されたこと —
+        // 後者が無いと「毎 cycle 全棄却 = decode と同じ列を遠回りで出しただけ」と区別が付かない。
+        const speculation = stop.speculation;
+        assert(speculation !== undefined, `既定で投機が張られていない: ${JSON.stringify(stop)}`);
+        assert(speculation.cycles > 0, "verify run が 1 本も回っていない");
+        assert(
+          speculation.accepted > 0,
+          `draft が 1 本も受理されていない（${speculation.cycles} cycle / ` +
+            `drafted ${speculation.drafted}）`,
+        );
+        console.log(
+          `[e2e] gemma4 drafter chat: ${speculation.cycles} cycle / 受理 ` +
+            `${speculation.accepted}/${speculation.drafted} / 配送 ${stop.tokens} token`,
+        );
+      });
 
       await t.step("② 見積りは target + drafter の常駐を合算する", () => {
         const report = pipeline.estimateSessionMemory();
@@ -751,19 +762,22 @@ test({
         const { chunkBuckets } = pipeline.program;
         assert(chunkBuckets.length > 0, "バケットが無い（バケット形の勘定を見ない門になる）");
         const bucketShapes = chunkBuckets.map((rows) => {
-          const prefill = pipeline.estimateSessionMemory({ chunkLength: rows }).scenarios
-            .find((one) => one.name === "prefill");
+          const prefill = pipeline
+            .estimateSessionMemory({ chunkLength: rows })
+            .scenarios.find((one) => one.name === "prefill");
           assert(prefill !== undefined, `バケット ${rows} 行の prefill 形が報告に無い`);
           return prefill.ioBytes + prefill.workspaceBytes;
         });
         assertEquals(
           report.peakAccountedBytes,
-          report.resident.weights.totalBytes + report.resident.stateBytes +
+          report.resident.weights.totalBytes +
+            report.resident.stateBytes +
             Math.max(
               report.planBackingBudgetBytes,
               ...report.scenarios.map((one) => one.ioBytes + one.workspaceBytes),
               ...bucketShapes,
-            ) + report.auxiliaryBytes,
+            ) +
+            report.auxiliaryBytes,
           "drafter合算後も追加勘定とピークの内訳が一致する",
         );
         // 厳密一致の門（2 Session の診断との突合・借り手 state 8 バイト・verify シナリオの

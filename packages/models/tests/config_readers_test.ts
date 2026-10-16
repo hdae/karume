@@ -101,7 +101,11 @@ test("readChannels: 配列でない / 長さが 3 でないものを落とす", 
 });
 
 test("readChannels: 要素の型違い・条件外は要素ごとに落とし、文言に配列全体を出す", () => {
-  for (const bad of [[1, "2", 3], [1, 2, Number.NaN], [0.2, 0, 0.2]]) {
+  for (const bad of [
+    [1, "2", 3],
+    [1, 2, Number.NaN],
+    [0.2, 0, 0.2],
+  ]) {
     assertThrows(
       () => readChannels({ c: bad }, "c", "here", isPositive, "正の有限数でない要素がある"),
       Error,

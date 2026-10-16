@@ -76,9 +76,15 @@ const MESSAGE_KEYS: readonly string[] = ["role", "content"];
 const isPythonSpace = (code: number): boolean =>
   (code >= 0x09 && code <= 0x0d) || // \t \n \v \f \r
   (code >= 0x1c && code <= 0x20) || // ファイル / グループ / レコード / 単位区切り + 空白
-  code === 0x85 || code === 0xa0 || code === 0x1680 ||
+  code === 0x85 ||
+  code === 0xa0 ||
+  code === 0x1680 ||
   (code >= 0x2000 && code <= 0x200a) ||
-  code === 0x2028 || code === 0x2029 || code === 0x202f || code === 0x205f || code === 0x3000;
+  code === 0x2028 ||
+  code === 0x2029 ||
+  code === 0x202f ||
+  code === 0x205f ||
+  code === 0x3000;
 
 /** Jinja の `trim`（= `str.strip()`）。 */
 const trim = (text: string): string => {
@@ -242,8 +248,10 @@ export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
   }
   // 先頭の改行は「前 turn を閉じた `<turn|>` の直後」の 1 文字（`renderGemma4Chat` の
   // `${END_OF_TURN}\n`）。`<turn|>` 自体は pendingToken が前置するのでここには無い。
-  return `\n${START_OF_TURN}${message.role}\n${trim(message.content)}${END_OF_TURN}\n` +
-    `${START_OF_TURN}${MODEL_ROLE}\n`;
+  return (
+    `\n${START_OF_TURN}${message.role}\n${trim(message.content)}${END_OF_TURN}\n` +
+    `${START_OF_TURN}${MODEL_ROLE}\n`
+  );
 };
 
 /**
@@ -253,10 +261,8 @@ export const renderGemma4ChatTurn = (message: Gemma4ChatMessage): string => {
  * 多ターンの会話を `Gemma4Pipeline.sequence()` で回すときの入口である。過去 turn は context の
  * KV にあるので、毎ターン会話全体を描き直す（= O(n²) の prefill）必要は無い。
  */
-export const gemma4ChatTurn = (
-  tokenizer: GemmaTokenizer,
-  message: Gemma4ChatMessage,
-): number[] => tokenizer.encode(renderGemma4ChatTurn(message));
+export const gemma4ChatTurn = (tokenizer: GemmaTokenizer, message: Gemma4ChatMessage): number[] =>
+  tokenizer.encode(renderGemma4ChatTurn(message));
 
 /**
  * 停止 token の集合（ADR 0083 決定 8）— **トークナイザ資産から導出する**。

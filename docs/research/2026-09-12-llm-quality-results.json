@@ -29,19 +29,13 @@
         "correct": 42,
         "count": 64,
         "accuracy": 0.65625,
-        "wilson95": [
-          0.5340364020991819,
-          0.7607685792155665
-        ]
+        "wilson95": [0.5340364020991819, 0.7607685792155665]
       },
       "arcTokenNormalized": {
         "correct": 43,
         "count": 64,
         "accuracy": 0.671875,
-        "wilson95": [
-          0.549991058490915,
-          0.7742944209553081
-        ]
+        "wilson95": [0.549991058490915, 0.7742944209553081]
       },
       "wiki": {
         "tokens": 1922,
@@ -68,19 +62,13 @@
         "correct": 36,
         "count": 64,
         "accuracy": 0.5625,
-        "wilson95": [
-          0.4408620895699301,
-          0.6770599029559693
-        ]
+        "wilson95": [0.4408620895699301, 0.6770599029559693]
       },
       "arcTokenNormalized": {
         "correct": 37,
         "count": 64,
         "accuracy": 0.578125,
-        "wilson95": [
-          0.456100315400829,
-          0.6913021752565451
-        ]
+        "wilson95": [0.456100315400829, 0.6913021752565451]
       },
       "wiki": {
         "tokens": 1922,
@@ -99,7 +87,7 @@
           "path": "/home/developer/workspace/karume/outputs/series/qwen3-06b-gptq-i4-2026-09-10-probe/io.capital-en.safetensors",
           "bytes": 3039108,
           "sha256": "23ceed95fe2fe53fc70a6e5b95539b23a5d3d3e4ba4127a415874bbd9a98598b",
-          "maxAbs": 2.574920654296875e-05,
+          "maxAbs": 2.574920654296875e-5,
           "atol": 0.001
         },
         "loadedParameterCount": 311
@@ -114,19 +102,13 @@
         "correct": 47,
         "count": 64,
         "accuracy": 0.734375,
-        "wilson95": [
-          0.6151712627143486,
-          0.8270362092577739
-        ]
+        "wilson95": [0.6151712627143486, 0.8270362092577739]
       },
       "arcTokenNormalized": {
         "correct": 48,
         "count": 64,
         "accuracy": 0.75,
-        "wilson95": [
-          0.631837235413303,
-          0.8398507346902941
-        ]
+        "wilson95": [0.631837235413303, 0.8398507346902941]
       },
       "wiki": {
         "tokens": 1820,
@@ -153,19 +135,13 @@
         "correct": 41,
         "count": 64,
         "accuracy": 0.640625,
-        "wilson95": [
-          0.518208506097791,
-          0.7471159770854825
-        ]
+        "wilson95": [0.518208506097791, 0.7471159770854825]
       },
       "arcTokenNormalized": {
         "correct": 45,
         "count": 64,
         "accuracy": 0.703125,
-        "wilson95": [
-          0.5822979889645707,
-          0.8009484867446022
-        ]
+        "wilson95": [0.5822979889645707, 0.8009484867446022]
       },
       "wiki": {
         "tokens": 1820,
@@ -184,7 +160,7 @@
           "path": "/home/developer/workspace/karume/outputs/series/minicpm5-2b-gptq-i4-2026-09-10-probe/io.capital-en.safetensors",
           "bytes": 3133840,
           "sha256": "94daff467a3f298fffa9612269e3ff6f0aeb28323943314f6b2987fa0a0ac1df",
-          "maxAbs": 4.38690185546875e-05,
+          "maxAbs": 4.38690185546875e-5,
           "atol": 0.001
         },
         "loadedParameterCount": 381
@@ -194,16 +170,8 @@
     }
   ],
   "scope": {
-    "completed": [
-      "qwen3-06b",
-      "minicpm5-2b"
-    ],
-    "pending": [
-      "gemma4-e2b",
-      "gemma4-e4b",
-      "gemma4-qat-e2b",
-      "gemma4-qat-e4b"
-    ],
+    "completed": ["qwen3-06b", "minicpm5-2b"],
+    "pending": ["gemma4-e2b", "gemma4-e4b", "gemma4-qat-e2b", "gemma4-qat-e4b"],
     "reason": "速度比較を優先。Gemmaの読込・少数採点は通過したが本表へ混ぜない。"
   }
 }

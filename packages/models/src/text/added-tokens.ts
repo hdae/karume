@@ -90,7 +90,5 @@ export const createAddedTokenMatcher = (added: readonly string[]): AddedTokenMat
  * 1 回きりの切り出し（索引を組んで捨てる）。encode を繰り返す tokenizer は
  * {@link createAddedTokenMatcher} を構築時に 1 回だけ呼んで使い回す。
  */
-export const splitAddedTokens = (
-  text: string,
-  added: readonly string[],
-): AddedTokenChunk[] => createAddedTokenMatcher(added).split(text);
+export const splitAddedTokens = (text: string, added: readonly string[]): AddedTokenChunk[] =>
+  createAddedTokenMatcher(added).split(text);

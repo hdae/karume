@@ -98,9 +98,13 @@ export const planRowBlocks = (
 ): readonly RowBlock[] => {
   const cap = typeof limit === "number" ? rowBlockLimit(limit, undefined) : limit;
   const byBudget = cap.source === "attentionRowBlockMaxBytes";
-  const where = `行ブロック分割（行 ${rows} × ${bytesPerRow}B / 上限 ${cap.bytes}B` +
+  const where =
+    `行ブロック分割（行 ${rows} × ${bytesPerRow}B / 上限 ${cap.bytes}B` +
     `${byBudget ? " — 予算 attentionRowBlockMaxBytes" : ""}）`;
-  for (const [name, value] of [["行数", rows], ["1 行のバイト数", bytesPerRow]] as const) {
+  for (const [name, value] of [
+    ["行数", rows],
+    ["1 行のバイト数", bytesPerRow],
+  ] as const) {
     if (!Number.isSafeInteger(value) || value < 1) {
       throw new ExecutionError(`${where}: ${name} は正整数（${value}）`);
     }
@@ -109,9 +113,9 @@ export const planRowBlocks = (
     throw new ExecutionError(
       byBudget
         ? `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既に予算 attentionRowBlockMaxBytes を` +
-          "超える（行ブロックでは分割しきれない — 予算を 1 行ぶん以上にすること）"
+            "超える（行ブロックでは分割しきれない — 予算を 1 行ぶん以上にすること）"
         : `${where}: クエリ 1 行ぶんの一時 ${bytesPerRow}B が既にストレージ束縛の上限を超える` +
-          "（行ブロックでは分割しきれない形）",
+            "（行ブロックでは分割しきれない形）",
     );
   }
   const count = forced ?? Math.ceil(rows / Math.floor(cap.bytes / bytesPerRow));
@@ -213,22 +217,17 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
     const reshapeV = nodes[index + 7];
     const pv = nodes[index + 8];
     if (
-      reshapeScores?.node.op !== "reshape" || addMask?.node.op !== "add" ||
-      softmax?.node.op !== SAFE_SOFTMAX_OP || expandP?.node.op !== "expand" ||
-      reshapeP?.node.op !== "reshape" || expandV?.node.op !== "expand" ||
-      reshapeV?.node.op !== "reshape" || pv?.node.op !== "bmm"
-    ) return undefined;
-    const chain = [
-      qk,
-      reshapeScores,
-      addMask,
-      softmax,
-      expandP,
-      reshapeP,
-      expandV,
-      reshapeV,
-      pv,
-    ];
+      reshapeScores?.node.op !== "reshape" ||
+      addMask?.node.op !== "add" ||
+      softmax?.node.op !== SAFE_SOFTMAX_OP ||
+      expandP?.node.op !== "expand" ||
+      reshapeP?.node.op !== "reshape" ||
+      expandV?.node.op !== "expand" ||
+      reshapeV?.node.op !== "reshape" ||
+      pv?.node.op !== "bmm"
+    )
+      return undefined;
+    const chain = [qk, reshapeScores, addMask, softmax, expandP, reshapeP, expandV, reshapeV, pv];
     if (!allF32(chain)) return undefined;
 
     // 結線（窓の並びだけでは「同じ形の別の鎖が隣り合っている」を排除できない）。
@@ -241,7 +240,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       reshapeV.node.ins[0] !== expandV.outputs[0].name ||
       pv.node.ins[0] !== reshapeP.outputs[0].name ||
       pv.node.ins[1] !== reshapeV.outputs[0].name
-    ) return undefined;
+    )
+      return undefined;
 
     const [qShape, ktShape] = qk.inputShapes;
     if (qShape.length !== 3 || ktShape.length !== 3) return undefined;
@@ -265,7 +265,8 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       !sameShape(expandV.outputs[0].shape, [1, heads, keys, headDim]) ||
       !sameShape(reshapeV.outputs[0].shape, [heads, keys, headDim]) ||
       !sameShape(pv.outputs[0].shape, [heads, queries, headDim])
-    ) return undefined;
+    )
+      return undefined;
     // 縮約軸は最終次元固定（契約が既に見ているが、窓の受理集合としても明示する）。
     if (softmaxDim(softmax.node.attrs ?? {}, "行ブロック attention の safe_softmax") !== 3) {
       return undefined;
@@ -322,8 +323,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       // ① QK: A（q）だけ全 M ストライド + 行オフセットで読み、S はブロックとして書く。
       const qkV4 = gemmUsesVec4(headDim, keys);
       const qkGeometry = gemmGeometryForRows(rows);
-      const qkWhere =
-        `行ブロック bmm(QK) [${heads},${rows},${headDim}] × [${heads},${headDim},${keys}]`;
+      const qkWhere = `行ブロック bmm(QK) [${heads},${rows},${headDim}] × [${heads},${headDim},${keys}]`;
       dispatches.push({
         key: bmmKey(qkV4, rows, windowed ? "a" : undefined),
         wgsl: () => bmmWgsl(qkV4, rows, windowed ? "a" : undefined),
@@ -380,8 +380,7 @@ export const ROW_BLOCK_ATTENTION_RULE = defineRule<RowBlockAttentionMatch>({
       // ④ PV: A（P）はブロックとして読み、出力だけ全 M ストライド + 行オフセットで書く。
       const pvV4 = gemmUsesVec4(keys, headDim);
       const pvGeometry = gemmGeometryForRows(rows);
-      const pvWhere =
-        `行ブロック bmm(PV) [${heads},${rows},${keys}] × [${heads},${keys},${headDim}]`;
+      const pvWhere = `行ブロック bmm(PV) [${heads},${rows},${keys}] × [${heads},${keys},${headDim}]`;
       dispatches.push({
         key: bmmKey(pvV4, rows, windowed ? "c" : undefined),
         wgsl: () => bmmWgsl(pvV4, rows, windowed ? "c" : undefined),

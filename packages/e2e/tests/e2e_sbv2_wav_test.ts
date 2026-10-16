@@ -93,12 +93,17 @@ import {
   registerReferenceGate,
 } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
-import { readFileIfPresent, readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
+import {
+  readFileIfPresent,
+  readTextIfPresent,
+} from "../../models/tests/helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
 const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
 /** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
-const references = openReferences(new URL("../../models/tests/fixtures/references/sbv2.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/sbv2.json", import.meta.url),
+);
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_sbv2/` — 消して安全）。 */
 const results = openResults("sbv2");
 /**
@@ -197,7 +202,8 @@ const utteranceOnce = (() => {
   let cached: Promise<Sbv2Utterance> | undefined;
   return (): Promise<Sbv2Utterance> => {
     // TypeScript 7 does not narrow `cached` after `??=`; keep the single-evaluation semantics explicitly.
-    const utterance = cached ??
+    const utterance =
+      cached ??
       getDictionary().then((dictionary) => toSbv2Utterance(analyzeWithWords(dictionary, TEXT)));
     cached = utterance;
     return utterance;
@@ -234,7 +240,7 @@ const loadLocalAssets = async (
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   const read = async (key: string, ref: FileRef): Promise<void> => {
     const cached = byPath.get(ref.path);
-    const bytes = cached ?? await readFile(new URL(ref.path, ASSETS_DIR));
+    const bytes = cached ?? (await readFile(new URL(ref.path, ASSETS_DIR)));
     if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };
@@ -307,15 +313,19 @@ const describeFirstDifference = async (
     return `先頭 ${shared} バイトは一致（長さだけが違う: 参照 ${reference.length} / 実測 ${actual.length}）`;
   }
   const header = 44;
-  const where = at < header
-    ? `RIFF ヘッダ内（オフセット ${at}）`
-    : `サンプル ${Math.floor((at - header) / 2)}（オフセット ${at}）`;
+  const where =
+    at < header
+      ? `RIFF ヘッダ内（オフセット ${at}）`
+      : `サンプル ${Math.floor((at - header) / 2)}（オフセット ${at}）`;
   const view = (bytes: Uint8Array): number =>
-    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-      .getInt16(header + Math.floor((at - header) / 2) * 2, true);
-  const values = at < header
-    ? `バイト ${reference[at]} → ${actual[at]}`
-    : `i16 ${view(reference)} → ${view(actual)}`;
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt16(
+      header + Math.floor((at - header) / 2) * 2,
+      true,
+    );
+  const values =
+    at < header
+      ? `バイト ${reference[at]} → ${actual[at]}`
+      : `i16 ${view(reference)} → ${view(actual)}`;
   return `先頭差分は ${where}: ${values}`;
 };
 
@@ -336,15 +346,16 @@ const mismatchReport = async (
   dumped: URL,
 ): Promise<string> => {
   // 先頭差分位置の材料（凍結した参照 WAV の実体）は F1 / i8 の分しか無い。
-  const difference = model === MODEL && quant === QUANT
-    ? `\n  ${await describeFirstDifference(expected, wav)}`
-    : "";
-  return `出力 WAV の sha256 が参照と一致しない\n` +
+  const difference =
+    model === MODEL && quant === QUANT ? `\n  ${await describeFirstDifference(expected, wav)}` : "";
+  return (
+    `出力 WAV の sha256 が参照と一致しない\n` +
     `  期待 ${expected}\n  実際 ${actual}\n` +
     `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
     `${(audio.data.length / audio.sampleRate).toFixed(3)}s\n` +
     `  実効ノブ ${describeKnobs(defaults, quant, model)}${difference}\n` +
-    `  実物 ${dumped.pathname}`;
+    `  実物 ${dumped.pathname}`
+  );
 };
 
 /**
@@ -406,8 +417,7 @@ const assertNoCollision = (
 };
 
 test({
-  name:
-    `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
   ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, QUANT)),
   fn: async () => {
     const manifest = readManifest();
@@ -415,10 +425,13 @@ test({
     const assets = await loadLocalAssets(manifest);
     const started = performance.now();
     // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: QUANT,
-    });
+    await using pipeline = await Sbv2Pipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: QUANT,
+      },
+    );
     // ノブは 1 つも渡さない — 参照 WAV と同じく `pipelineConfig.defaults` に埋めさせる。
     const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
@@ -434,18 +447,20 @@ test({
 });
 
 test({
-  name:
-    `e2e(実GPU): 配布形 ${MODEL} / quant ${BERT4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${BERT4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
   ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, BERT4_QUANT)),
   fn: async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest, BERT4_QUANT);
     const started = performance.now();
-    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: BERT4_QUANT,
-    });
+    await using pipeline = await Sbv2Pipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: BERT4_QUANT,
+      },
+    );
     // ノブは 1 つも渡さない — `i8` の門と同じ条件（差は text_encoder の格納形だけ）。
     const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
@@ -457,27 +472,31 @@ test({
         `${(audio.data.length / audio.sampleRate).toFixed(2)}s / yomi ${YOMI_VERSION} / ` +
         `sha256 ${actual}`,
     );
-    assertNoCollision(actual, BERT4_QUANT, [{
-      caseId: caseIdOf(MODEL, QUANT),
-      why: "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
-    }]);
+    assertNoCollision(actual, BERT4_QUANT, [
+      {
+        caseId: caseIdOf(MODEL, QUANT),
+        why: "i4 席が効いていない（i4 quant の解決が既定へ落ちた / i4 席に i8 資産が入っている）",
+      },
+    ]);
     await settleCase(audio, wav, actual, defaults, elapsedMs, BERT4_QUANT);
   },
 });
 
 test({
-  name:
-    `e2e(実GPU): 配布形 ${MODEL} / quant ${W4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+  name: `e2e(実GPU): 配布形 ${MODEL} / quant ${W4_QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
   ignore: !RUNNABLE || references.lacksReference(caseIdOf(MODEL, W4_QUANT)),
   fn: async () => {
     const manifest = readManifest();
     const defaults = assertReferenceKnobs(modelEntry(manifest));
     const assets = await loadLocalAssets(manifest, W4_QUANT);
     const started = performance.now();
-    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: W4_QUANT,
-    });
+    await using pipeline = await Sbv2Pipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: W4_QUANT,
+      },
+    );
     // ノブは 1 つも渡さない — `i8` の門と同じ条件（差は 3 席の格納形だけ）。
     const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
     const wav = encodeWav(audio.data, audio.sampleRate);
@@ -506,18 +525,20 @@ test({
 
 for (const gate of SPEAKER_GATES) {
   test({
-    name:
-      `e2e(実GPU): 配布形 ${gate.model} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
+    name: `e2e(実GPU): 配布形 ${gate.model} / quant ${QUANT} / seed ${SEED} の WAV が参照 sha256 と一致する`,
     ignore: !RUNNABLE || references.lacksReference(caseIdOf(gate.model, QUANT)),
     fn: async () => {
       const manifest = readManifest();
       const defaults = assertReferenceKnobs(modelEntry(manifest, gate.model), gate.speaker);
       const assets = await loadLocalAssets(manifest, QUANT, gate.model);
       const started = performance.now();
-      await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-        model: gate.model,
-        quant: QUANT,
-      });
+      await using pipeline = await Sbv2Pipeline.fromAssets(
+        { manifest, assets },
+        {
+          model: gate.model,
+          quant: QUANT,
+        },
+      );
       const audio = await pipeline.generate(await utteranceOnce(), { seed: SEED });
       const wav = encodeWav(audio.data, audio.sampleRate);
       const actual = await sha256Hex(wav);
@@ -530,10 +551,12 @@ for (const gate of SPEAKER_GATES) {
       );
       // モデルごとに net_g の実重みが違う — F1 と一致したら資産解決が別モデルへ倒れている
       // （shape は同じまま別人の声が出る沈黙誤値クラス）。
-      assertNoCollision(actual, gate.model, [{
-        caseId: caseIdOf(MODEL, QUANT),
-        why: "資産解決が別モデルへ倒れている（model 選択が効いていない）",
-      }]);
+      assertNoCollision(actual, gate.model, [
+        {
+          caseId: caseIdOf(MODEL, QUANT),
+          why: "資産解決が別モデルへ倒れている（model 選択が効いていない）",
+        },
+      ]);
       await settleCase(audio, wav, actual, defaults, elapsedMs, QUANT, gate.model);
     },
   });
@@ -552,21 +575,24 @@ test({
   fn: async (t) => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
-    const open = (
-      patch: Record<string, Uint8Array<ArrayBuffer>> = {},
-    ): Promise<Sbv2Pipeline> =>
-      Sbv2Pipeline.fromAssets({ manifest, assets: { ...assets, ...patch } }, {
-        model: MODEL,
-        quant: QUANT,
-      });
+    const open = (patch: Record<string, Uint8Array<ArrayBuffer>> = {}): Promise<Sbv2Pipeline> =>
+      Sbv2Pipeline.fromAssets(
+        { manifest, assets: { ...assets, ...patch } },
+        {
+          model: MODEL,
+          quant: QUANT,
+        },
+      );
     const table = (name: string, rows: number, cols: number): Uint8Array<ArrayBuffer> =>
       new Uint8Array(
-        buildSafetensors([{
-          name,
-          dtype: "F32",
-          shape: [rows, cols],
-          data: f32Bytes(new Float32Array(rows * cols)),
-        }]),
+        buildSafetensors([
+          {
+            name,
+            dtype: "F32",
+            shape: [rows, cols],
+            data: f32Bytes(new Float32Array(rows * cols)),
+          },
+        ]),
       );
 
     await using pipeline = await open();
@@ -657,11 +683,14 @@ test({
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
     const seen: string[] = [];
-    const pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: QUANT,
-      onRunDiagnostics: (component) => seen.push(component),
-    });
+    const pipeline = await Sbv2Pipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: QUANT,
+        onRunDiagnostics: (component) => seen.push(component),
+      },
+    );
     const utterance = await utteranceOnce();
 
     try {
@@ -672,14 +701,7 @@ test({
           pipeline.generate(utterance, { seed: SEED }),
           pipeline.generate(utterance, { seed: SEED }),
         ]);
-        assertEquals(seen, [
-          "text_encoder",
-          "front",
-          "voice",
-          "text_encoder",
-          "front",
-          "voice",
-        ]);
+        assertEquals(seen, ["text_encoder", "front", "voice", "text_encoder", "front", "voice"]);
       });
     } finally {
       // 上の段が落ちても GPU は返す（この後の 2 段は dispose 済みの挙動を見る）。
@@ -714,19 +736,25 @@ test({
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
     const seen: { component: string; dispatches: number; ran: boolean; timed: boolean }[] = [];
-    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: QUANT,
-      onRunDiagnostics: (component, diagnostics) =>
-        seen.push({
-          component,
-          dispatches: diagnostics.submit.dispatchCount,
-          ran: diagnostics.lastRun !== undefined,
-          timed: diagnostics.lastRunTiming !== undefined,
-        }),
-    });
+    await using pipeline = await Sbv2Pipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: QUANT,
+        onRunDiagnostics: (component, diagnostics) =>
+          seen.push({
+            component,
+            dispatches: diagnostics.submit.dispatchCount,
+            ran: diagnostics.lastRun !== undefined,
+            timed: diagnostics.lastRunTiming !== undefined,
+          }),
+      },
+    );
     await pipeline.generate(await utteranceOnce(), { seed: SEED });
-    assertEquals(seen.map((run) => run.component), ["text_encoder", "front", "voice"]);
+    assertEquals(
+      seen.map((run) => run.component),
+      ["text_encoder", "front", "voice"],
+    );
     for (const run of seen) {
       if (run.dispatches <= 0 || !run.ran) {
         throw new Error(
@@ -749,10 +777,13 @@ test({
   fn: async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest);
-    await using pipeline = await Sbv2Pipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: QUANT,
-    });
+    await using pipeline = await Sbv2Pipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: QUANT,
+      },
+    );
 
     // 参照 WAV と同じ発話（門が使っているもの）。tone を全部反転させれば、同じ資産・
     // 同じ seed でも別の波形が出る — 「発話が実際に読まれている」ことの実証。
@@ -778,13 +809,16 @@ test({
     const first = utterance.moras[0];
     await assertRejects(
       () =>
-        pipeline.generate({
-          ...utterance,
-          moras: [
-            { ...first, vowel: first.vowel === "a" ? "i" : "a" },
-            ...utterance.moras.slice(1),
-          ],
-        }, { seed: SEED }),
+        pipeline.generate(
+          {
+            ...utterance,
+            moras: [
+              { ...first, vowel: first.vowel === "a" ? "i" : "a" },
+              ...utterance.moras.slice(1),
+            ],
+          },
+          { seed: SEED },
+        ),
       Error,
       "が words の",
     );

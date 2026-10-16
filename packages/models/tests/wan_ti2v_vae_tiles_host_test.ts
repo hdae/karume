@@ -106,7 +106,10 @@ test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを
   assertEquals(planOf({ width: 704, height: 1280, frames: 121 }).latentShape, [48, 31, 80, 44]);
 
   // 公式の対応寸法の外（832×480 / 480×832）と上限を超えるフレーム数は入力起因で落ちる。
-  for (const [width, height] of [[832, 480], [480, 832]]) {
+  for (const [width, height] of [
+    [832, 480],
+    [480, 832],
+  ]) {
     assertThrows(
       () => planOf({ width, height }),
       ModelInputError,
@@ -213,13 +216,12 @@ test("Wan2.2 のタイル計画の故障注入: 重なりをグラフの比 8 �
   // unpatchify の倍率を落とした記述子 = 圧縮 8・重なり 8。潜在 16 / 30 は重なり 4 でも 8 でも同じ開始位置になる
   // ので、この注入を区別するのは 44 / 52 / 80 の行だけ（そこを名指す）。
   const graphScaleOnly = { ...WAN22_TI2V_GENERATION, vaePatchSize: 1 };
-  const broken = AXIS_STARTS_TI2V
-    .filter(([extent, starts]) => {
-      const injected = rowStarts(extent, graphScaleOnly);
-      return injected.length !== starts.length ||
-        injected.some((start, index) => start !== starts[index]);
-    })
-    .map(([extent]) => extent);
+  const broken = AXIS_STARTS_TI2V.filter(([extent, starts]) => {
+    const injected = rowStarts(extent, graphScaleOnly);
+    return (
+      injected.length !== starts.length || injected.some((start, index) => start !== starts[index])
+    );
+  }).map(([extent]) => extent);
   assertEquals(broken, [44, 52, 80]);
 });
 
@@ -236,12 +238,10 @@ test("WAN22_LATENTS_MEAN / STD: fixture wan22-ti2v.json とビット一致（48 
     await readTextFile(new URL("./fixtures/wan-latents/wan22-ti2v.json", import.meta.url)),
   ) as LatentStatsFixture;
   assertEquals(fixture.source.repo, "Wan-AI/Wan2.2-TI2V-5B-Diffusers");
-  for (
-    const [name, constant, values] of [
-      ["mean", WAN22_LATENTS_MEAN, fixture.mean],
-      ["std", WAN22_LATENTS_STD, fixture.std],
-    ] as const
-  ) {
+  for (const [name, constant, values] of [
+    ["mean", WAN22_LATENTS_MEAN, fixture.mean],
+    ["std", WAN22_LATENTS_STD, fixture.std],
+  ] as const) {
     assertEquals(constant.length, LAYOUT.latentChannels, `${name}: 本数`);
     assertEquals(
       [...constant],

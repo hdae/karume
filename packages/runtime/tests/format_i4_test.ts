@@ -25,7 +25,10 @@ test("decodeI4: 隣接要素が全て異なる非対称パターンの位置が�
     bytes[i >> 1] |= (i & 1) === 1 ? u << 4 : u;
   }
   const decoded = decodeI4(bytes, [1, 16], Float32Array.from([0.5]), [1, 1], 16);
-  assertEquals([...decoded], q.map((value) => value * 0.5));
+  assertEquals(
+    [...decoded],
+    q.map((value) => value * 0.5),
+  );
 });
 
 test("decodeI4: scale は group ごとに引かれる（行 × group の平坦順）", () => {
@@ -74,7 +77,7 @@ test("decodeI4: conv1d の rank 3 重みは rank 2 scale で展開できる（�
   const shape = [2, 4, 4];
   const groupSize = 8;
   const count = 2 * 4 * 4;
-  const q = Array.from({ length: count }, (_, i) => ((i % 15) - 7));
+  const q = Array.from({ length: count }, (_, i) => (i % 15) - 7);
   const bytes = new Uint8Array(count / 2);
   for (const [i, value] of q.entries()) {
     const u = value + 8;
@@ -128,11 +131,7 @@ test("decodeI4: バイト長・group 形 scale・整除の違反を拒否する"
     "割り切らない",
   );
   // scale 実体の要素数が shape と合わない
-  assertThrows(
-    () => decodeI4(bytes, [2, 8], Float32Array.from([1]), [2, 2], 4),
-    I4Error,
-    "要素数",
-  );
+  assertThrows(() => decodeI4(bytes, [2, 8], Float32Array.from([1]), [2, 2], 4), I4Error, "要素数");
   // rank 0（量子化軸が無い）
   assertThrows(
     () => decodeI4(new Uint8Array(0), [], Float32Array.from([]), [], 16),

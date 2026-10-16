@@ -199,7 +199,11 @@ test("nodeDirectory: 区間読みは実体の同区間と一致する（先頭 /
     assertEquals(reader.cost, "seek");
 
     const middle = Math.floor(ref.size / 2);
-    for (const [offset, length] of [[0, 4], [middle, 3], [ref.size - 5, 5]]) {
+    for (const [offset, length] of [
+      [0, 4],
+      [middle, 3],
+      [ref.size - 5, 5],
+    ]) {
       const bytes = await reader.read(offset, length);
       assertEquals(
         bytes,
@@ -233,7 +237,12 @@ test("nodeDirectory: 宣言 size の外はアダプターへ降ろす前に落�
     const reader = await openAsset(loaded, ref);
     assert(reader !== undefined, "読み口が開かない");
 
-    for (const [offset, length] of [[ref.size - 1, 2], [ref.size, 1], [-1, 2], [0, 1.5]]) {
+    for (const [offset, length] of [
+      [ref.size - 1, 2],
+      [ref.size, 1],
+      [-1, 2],
+      [0, 1.5],
+    ]) {
       const error = await assertRejects(() => reader.read(offset, length), Error);
       assert(error.message.includes(ref.path), `${error.message} が path を名乗っていない`);
       assert(

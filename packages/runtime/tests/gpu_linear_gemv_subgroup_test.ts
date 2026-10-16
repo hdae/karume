@@ -33,7 +33,8 @@ describe({
       const adapter = await navigator.gpu.requestAdapter();
       const features = new Set<string>(adapter?.features ?? []);
       const host: GPU & { wgslLanguageFeatures?: Iterable<string> } = navigator.gpu;
-      const supported = features.has("subgroups") &&
+      const supported =
+        features.has("subgroups") &&
         features.has("subgroup-size-control") &&
         new Set(host.wgslLanguageFeatures).has("subgroup_id");
       await t.step({

@@ -33,7 +33,11 @@ describe("resizeU8PlaneBicubic の事前条件", () => {
   });
 
   it("出力の寸法が正の整数でなければ RangeError", () => {
-    for (const [width, height] of [[0, 2], [2, -1], [2.5, 2]] as const) {
+    for (const [width, height] of [
+      [0, 2],
+      [2, -1],
+      [2.5, 2],
+    ] as const) {
       assertThrows(
         () => resizeU8PlaneBicubic(new Uint8Array(6), 3, 2, width, height),
         RangeError,
@@ -53,14 +57,12 @@ describe("resampleU8Window の事前条件", () => {
   const image = { data: new Uint8Array(4 * 3 * 3), width: 4, height: 3, channels: 3 };
 
   it("窓が出力の内側に無ければ RangeError（はみ出し・負の座標・空の窓）", () => {
-    for (
-      const window of [
-        { left: 6, top: 0, width: 2, height: 2 },
-        { left: 0, top: 4, width: 2, height: 2 },
-        { left: -1, top: 0, width: 2, height: 2 },
-        { left: 0, top: 0, width: 0, height: 2 },
-      ]
-    ) {
+    for (const window of [
+      { left: 6, top: 0, width: 2, height: 2 },
+      { left: 0, top: 4, width: 2, height: 2 },
+      { left: -1, top: 0, width: 2, height: 2 },
+      { left: 0, top: 0, width: 0, height: 2 },
+    ]) {
       assertThrows(
         () => resampleU8Window(image, 7, 5, window, PILLOW_LANCZOS),
         RangeError,

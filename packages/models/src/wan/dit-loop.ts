@@ -96,11 +96,8 @@ const graphInput = (
 };
 
 /** グラフ入力の形（無ければ fail loudly）。 */
-const inputShape = (
-  owner: string,
-  model: GraphOwner,
-  name: string,
-): readonly (number | string)[] => graphInput(owner, model, name).shape;
+const inputShape = (owner: string, model: GraphOwner, name: string): readonly (number | string)[] =>
+  graphInput(owner, model, name).shape;
 
 /** グラフ入力の dtype と形（ホストが組む dtype・形と違えば fail loudly）。 */
 const assertInput = (
@@ -259,10 +256,7 @@ type WanDenoiseState = {
   readonly transformer: ModelComponent;
   readonly ropeBase: WanRopeBase;
   readonly dit: DitContract;
-  readonly onRunDiagnostics?: (
-    component: WanRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -306,18 +300,20 @@ export const ditInputs = (input: {
   [DIT_CONTEXT]: { dtype: "f32", shape: input.contextShape, data: input.context },
   [DIT_ROPE_COS]: { dtype: "f32", shape: input.ropeShape, data: input.rope.cos },
   [DIT_ROPE_SIN]: { dtype: "f32", shape: input.ropeShape, data: input.rope.sin },
-  ...(input.condition === undefined ? {} : {
-    [DIT_TIMESTEPS_PROJ_CONDITION]: {
-      dtype: "f32",
-      shape: input.projShape,
-      data: input.condition.proj,
-    },
-    [DIT_CONDITION_MASK]: {
-      dtype: "bool",
-      shape: input.condition.maskShape,
-      data: input.condition.mask,
-    },
-  }),
+  ...(input.condition === undefined
+    ? {}
+    : {
+        [DIT_TIMESTEPS_PROJ_CONDITION]: {
+          dtype: "f32",
+          shape: input.projShape,
+          data: input.condition.proj,
+        },
+        [DIT_CONDITION_MASK]: {
+          dtype: "bool",
+          shape: input.condition.maskShape,
+          data: input.condition.mask,
+        },
+      }),
 });
 
 /**
@@ -452,9 +448,10 @@ export const runWanDenoise = async (
   const elements = latentShape.reduce((product, dim) => product * dim, 1);
   // `plan.initial` の latents は呼び手（`generateWanVideo`）が入口の門の直後に写した所有の配列なので、ここでは
   // 写さない（UniPC は step 0 の潜在を参照のまま持つ — 呼び手の配列を直に渡すと実行中の書き換えが補正子へ届く）。
-  let current: Float32Array<ArrayBuffer> = plan.initial.kind === "latents"
-    ? plan.initial.data
-    : new WanRandn(plan.initial.seed).normals(elements);
+  let current: Float32Array<ArrayBuffer> =
+    plan.initial.kind === "latents"
+      ? plan.initial.data
+      : new WanRandn(plan.initial.seed).normals(elements);
   const observe = state.onRunDiagnostics;
 
   await emit({ kind: "stage", component: "transformer", at: "start" });
@@ -467,9 +464,10 @@ export const runWanDenoise = async (
       context: Float32Array<ArrayBuffer>,
     ): Promise<Float32Array<ArrayBuffer>> => {
       // T2V の条件側の時刻は生成側と同じ配列（決定 3 — どちらも読むだけの借用）。
-      const conditionInputs = conditionMask === undefined
-        ? undefined
-        : { proj: conditionProj ?? proj, mask: conditionMask, maskShape };
+      const conditionInputs =
+        conditionMask === undefined
+          ? undefined
+          : { proj: conditionProj ?? proj, mask: conditionMask, maskShape };
       const outputs = await session.run(
         ditInputs({
           tokens,
@@ -494,15 +492,15 @@ export const runWanDenoise = async (
       const proj = timestepsProj(timestep, dit.projWidth);
       // CFG は uncond → cond の逐次 2 回（B = 1 — 決定 5）。同じ潜在なので patchify は 1 回。
       // 合成はホストで。I2V はモデル入力だけ先頭フレームを置き換える（UniPC へは置き換えない `current`）。
-      const modelInput = condition === undefined
-        ? current
-        : withWanFirstFrameCondition(current, condition, latentShape);
+      const modelInput =
+        condition === undefined
+          ? current
+          : withWanFirstFrameCondition(current, condition, latentShape);
       const tokens = patchifyLatents(modelInput, latentShape, patch);
       const uncond = negative === undefined ? undefined : await predict(tokens, proj, negative);
       const cond = await predict(tokens, proj, positive);
-      const velocity = uncond === undefined
-        ? cond
-        : wanClassifierFreeGuidance(cond, uncond, plan.guidance);
+      const velocity =
+        uncond === undefined ? cond : wanClassifierFreeGuidance(cond, uncond, plan.guidance);
       current = sampler.step(velocity, current);
       const broken = firstNonFinite(current);
       if (broken !== -1) {
@@ -536,9 +534,8 @@ export const runWanDenoise = async (
   }
   // I2V はループの後に 1 回置き換えてから VAE の段へ渡す（上流 diffusers と同じ — 置き換えた要素は有限の条件と
   // 門を通った潜在だけから作るので、有限性は保たれる）。
-  const latents = condition === undefined
-    ? current
-    : withWanFirstFrameCondition(current, condition, latentShape);
+  const latents =
+    condition === undefined ? current : withWanFirstFrameCondition(current, condition, latentShape);
   await emit({ kind: "stage", component: "transformer", at: "end" });
   return latents;
 };

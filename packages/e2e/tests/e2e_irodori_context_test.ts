@@ -63,8 +63,8 @@ const kindOf = (inputs: RunInputs): "context" | "dit" | undefined =>
   Object.hasOwn(inputs, "x_t")
     ? "dit"
     : Object.hasOwn(inputs, "speaker_state")
-    ? "context"
-    : undefined;
+      ? "context"
+      : undefined;
 
 type Calls = { context: number; dit: number };
 
@@ -80,11 +80,14 @@ test({
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest, QUANT);
     const observed: IrodoriRunComponent[] = [];
-    await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-      model: MODEL,
-      quant: QUANT,
-      onRunDiagnostics: (component) => observed.push(component),
-    });
+    await using pipeline = await IrodoriPipeline.fromAssets(
+      { manifest, assets },
+      {
+        model: MODEL,
+        quant: QUANT,
+        onRunDiagnostics: (component) => observed.push(component),
+      },
+    );
     const run = Session.prototype.run;
     const enqueue = Session.prototype.enqueue;
 
@@ -181,17 +184,21 @@ test({
             if (kindOf(inputs) !== "dit") return enqueue.call(this, inputs, options);
             if (!Object.hasOwn(inputs, "context_k_0") || !Object.hasOwn(inputs, "context_v_0")) {
               throw new Error(
-                `dit の入力に context_k_0 / context_v_0 が無い（${
-                  Object.keys(inputs).join(", ")
-                }）`,
+                `dit の入力に context_k_0 / context_v_0 が無い（${Object.keys(inputs).join(
+                  ", ",
+                )}）`,
               );
             }
             swapped += 1;
-            return enqueue.call(this, {
-              ...inputs,
-              context_k_0: inputs["context_v_0"],
-              context_v_0: inputs["context_k_0"],
-            }, options);
+            return enqueue.call(
+              this,
+              {
+                ...inputs,
+                context_k_0: inputs["context_v_0"],
+                context_v_0: inputs["context_k_0"],
+              },
+              options,
+            );
           };
           const faulted = await wavSha(pipeline);
           assert(

@@ -27,15 +27,14 @@ const ropeGraph = (
   headDim = 128,
   layout: "bhsd" | "bshd" = "bhsd",
 ): DeclarationJson => {
-  const shape = layout === "bshd"
-    ? [1, "S", heads, headDim] as const
-    : [1, heads, "S", headDim] as const;
-  const tableShape = layout === "bshd"
-    ? [1, "S", 1, headDim] as const
-    : [1, 1, "S", headDim] as const;
-  const halfShape = layout === "bshd"
-    ? [1, "S", heads, headDim / 2] as const
-    : [1, heads, "S", headDim / 2] as const;
+  const shape =
+    layout === "bshd" ? ([1, "S", heads, headDim] as const) : ([1, heads, "S", headDim] as const);
+  const tableShape =
+    layout === "bshd" ? ([1, "S", 1, headDim] as const) : ([1, 1, "S", headDim] as const);
+  const halfShape =
+    layout === "bshd"
+      ? ([1, "S", heads, headDim / 2] as const)
+      : ([1, heads, "S", headDim / 2] as const);
   const values: DeclarationJson["values"] = {
     first: { dtype: "f32", shape: [...halfShape] },
     second: { dtype: "f32", shape: [...halfShape] },
@@ -116,8 +115,12 @@ const assertFloatParity = (actual: Uint32Array, expected: Uint32Array): void => 
     assertEquals(
       Number.isNaN(actualValue) && Number.isNaN(expectedValue),
       true,
-      "非 NaN はビット一致する index=" + i + " actual=0x" + actual[i].toString(16) +
-        " expected=0x" + expected[i].toString(16),
+      "非 NaN はビット一致する index=" +
+        i +
+        " actual=0x" +
+        actual[i].toString(16) +
+        " expected=0x" +
+        expected[i].toString(16),
     );
   }
 };
@@ -145,8 +148,7 @@ const ropeInputs = (heads: number, sequence: number): Readonly<Record<string, Te
 };
 
 test({
-  name:
-    "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
+  name: "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -174,11 +176,7 @@ test({
             `${order}: slice×2 + neg + cat×2 + mul×2 + add`,
           );
           assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: 融合カウンタ`);
-          assertEquals(
-            split.diagnostics().lastRunFusions?.rope,
-            0,
-            `${order}: 反例のカウンタは 0`,
-          );
+          assertEquals(split.diagnostics().lastRunFusions?.rope, 0, `${order}: 反例のカウンタは 0`);
         } finally {
           await fused.dispose();
           await split.dispose();
@@ -372,32 +370,21 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [heads, sequence, dim] of [[8, 1, 256], [16, 17, 64], [3, 17, 6], [4, 3, 128], [
-          8,
-          9,
-          256,
-        ], [
-          2,
-          5,
-          512,
-        ]]
-      ) {
+      for (const [heads, sequence, dim] of [
+        [8, 1, 256],
+        [16, 17, 64],
+        [3, 17, 6],
+        [4, 3, 128],
+        [8, 9, 256],
+        [2, 5, 512],
+      ]) {
         const inputs = {
           x: fill([1, sequence, heads, dim], (i) => Math.sin(i * 0.37) * 3.1 + i / 997),
           cos: fill([1, sequence, 1, dim], (i) => Math.cos(i * 0.19 + 0.3)),
           sin: fill([1, sequence, 1, dim], (i) => Math.sin(i * 0.23 - 0.2)),
         };
         new Uint32Array(inputs.x.data.buffer).set([
-          0,
-          0x80000000,
-          1,
-          0x80000001,
-          0x007fffff,
-          0x807fffff,
-          0x7f800000,
-          0xff800000,
-          0x7fc01234,
+          0, 0x80000000, 1, 0x80000001, 0x007fffff, 0x807fffff, 0x7f800000, 0xff800000, 0x7fc01234,
           0xff801234,
         ]);
         for (const order of ["slice-first", "direct-first"] as const) {
@@ -436,7 +423,9 @@ test({
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupsPerDimension: 2 } });
-    const heads = 8, sequence = 17, dim = 128;
+    const heads = 8,
+      sequence = 17,
+      dim = 128;
     const inputs = {
       x: fill([1, sequence, heads, dim], (i) => Math.sin(i * 0.013)),
       cos: fill([1, sequence, 1, dim], (i) => Math.cos(i * 0.017)),

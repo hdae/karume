@@ -101,10 +101,10 @@ test("readAssetJson: JSON 構文違反は decode とは別の文言で落ちる�
   );
   // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
-  assertEquals(
-    readAssetJson("irodori", "weights / assets", { tokenizer: valid }, "tokenizer"),
-    { unkId: 0, space: "あ" },
-  );
+  assertEquals(readAssetJson("irodori", "weights / assets", { tokenizer: valid }, "tokenizer"), {
+    unkId: 0,
+    space: "あ",
+  });
 });
 
 test("readAssetJson: 資産そのものが無い場合は buffer 段の文言で落ちる", () => {

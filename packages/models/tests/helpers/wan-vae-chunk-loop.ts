@@ -102,10 +102,7 @@ export const decodeWithFault = async (
           const copyOutputs = caches.copyOutputs(graph, frames[index]);
           const output = graph.cacheOutputs[graph.caches.indexOf(fault.cache)];
           delete copyOutputs[output];
-          await session.enqueue(
-            { latent, ...caches.inputs(graph) },
-            { batch, copyOutputs },
-          );
+          await session.enqueue({ latent, ...caches.inputs(graph) }, { batch, copyOutputs });
         } else {
           await enqueueWanVaeChunk(batch, session, graph, caches, latent, frames[index]);
         }
@@ -133,7 +130,10 @@ export const decodeWithFault = async (
   } else {
     await runRange(0, chunks);
   }
-  return concatWanVaeFrames(layout, frames.map((_, index) => read[`frame${index}`]));
+  return concatWanVaeFrames(
+    layout,
+    frames.map((_, index) => read[`frame${index}`]),
+  );
 };
 
 /**
@@ -157,7 +157,8 @@ export const vramBreakdown = (
   caches: WanVaeChunkCaches,
 ): Record<string, number> => {
   const session = (diagnostics: SessionDiagnostics): number =>
-    diagnostics.weights.allocatedBytes + diagnostics.planBacking.residentBytes +
+    diagnostics.weights.allocatedBytes +
+    diagnostics.planBacking.residentBytes +
     diagnostics.planBacking.inputBytes;
   const parts = {
     firstWeights: first.weights.allocatedBytes,

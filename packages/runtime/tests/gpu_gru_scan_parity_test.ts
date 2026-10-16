@@ -88,7 +88,7 @@ const decomposedGraph = (geometry: Geometry, reverse: boolean): DeclarationJson 
   };
 
   // 走査順（逆方向は t が降順）。書き出し先の時間添字は常に t そのもの。
-  const order = Array.from({ length: time }, (_unused, step) => reverse ? time - 1 - step : step);
+  const order = Array.from({ length: time }, (_unused, step) => (reverse ? time - 1 - step : step));
   const stacked: string[] = [];
   let state = "h0";
   for (const t of order) {
@@ -231,7 +231,7 @@ const saturatedInputsFor = (geometry: Geometry): Record<string, FilledTensor> =>
   const { time, batch, hidden } = geometry;
   const gates = 3 * hidden;
   const gi = (i: number): number =>
-    (i % gates) >= 2 * hidden ? SATURATED_N_GATE[i % SATURATED_N_GATE.length] : GATE_INPUT(i);
+    i % gates >= 2 * hidden ? SATURATED_N_GATE[i % SATURATED_N_GATE.length] : GATE_INPUT(i);
   return {
     gi: fill([time, batch, gates], gi),
     h0: fill([batch, hidden], STATE_INIT),
@@ -262,8 +262,7 @@ const asSingleOpInputs = (
 
 for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
   test({
-    name:
-      `${op} 1 ノードの出力が torch 分解の逐語（linear + elementwise 列）と**ビット単位で一致**する（実 GPU）`,
+    name: `${op} 1 ノードの出力が torch 分解の逐語（linear + elementwise 列）と**ビット単位で一致**する（実 GPU）`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {
       const gpu = await acquireGpu();
@@ -296,11 +295,10 @@ for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
           assertEquals(
             mismatches.length,
             0,
-            `${label}: ${mismatches.length} / ${a.length} 要素がビット不一致（先頭 ${
-              mismatches.slice(0, 4).map((i) =>
-                `#${i} fused=0x${a[i].toString(16)} decomposed=0x${b[i].toString(16)}`
-              ).join(" / ")
-            }）`,
+            `${label}: ${mismatches.length} / ${a.length} 要素がビット不一致（先頭 ${mismatches
+              .slice(0, 4)
+              .map((i) => `#${i} fused=0x${a[i].toString(16)} decomposed=0x${b[i].toString(16)}`)
+              .join(" / ")}）`,
           );
 
           // 恒真化の確認: 出力が定数列でない（分解側が全て同じ値なら一致は何も語らない）

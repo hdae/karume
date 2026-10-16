@@ -64,9 +64,7 @@ const readBuffer = async (name: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 };
 
-const meta = JSON.parse(
-  await readTextFile(new URL("host.json", FIXTURE_DIR)),
-) as HostMeta;
+const meta = JSON.parse(await readTextFile(new URL("host.json", FIXTURE_DIR))) as HostMeta;
 const host = parseSafetensors(await readBuffer("host.safetensors"));
 const ropeBaseBuffer = await readBuffer("rope_base.safetensors");
 
@@ -127,11 +125,7 @@ test("wanTokenGrid: patch で割り切れない潜在・チャネル数違い・
 });
 
 test("patchifyLatents: 上流の patch 埋め込みの並び（1-hot conv3d）とビット一致する", () => {
-  const tokens = patchifyLatents(
-    floats(host, "patchify.latents"),
-    meta.latent_shape,
-    WAN_GEOMETRY,
-  );
+  const tokens = patchifyLatents(floats(host, "patchify.latents"), meta.latent_shape, WAN_GEOMETRY);
   const expected = floats(host, "patchify.tokens");
   assertEquals(firstBitMismatch(tokens, expected), -1, "patchify の並びが上流と割れる");
 });
@@ -167,10 +161,11 @@ test("patchify / unpatchify: 添字の式（独立オラクル）どおりに並
     for (let f = 0; f < frames; f += 1) {
       for (let h = 0; h < height; h += 1) {
         for (let w = 0; w < width; w += 1) {
-          const token = (Math.floor(f / patchFrames) * grid.rows + Math.floor(h / patchHeight)) *
-              grid.cols + Math.floor(w / patchWidth);
-          const inner = ((f % patchFrames) * patchHeight + (h % patchHeight)) * patchWidth +
-            (w % patchWidth);
+          const token =
+            (Math.floor(f / patchFrames) * grid.rows + Math.floor(h / patchHeight)) * grid.cols +
+            Math.floor(w / patchWidth);
+          const inner =
+            ((f % patchFrames) * patchHeight + (h % patchHeight)) * patchWidth + (w % patchWidth);
           const value = latents[((c * frames + f) * height + h) * width + w];
           const volume = patchFrames * patchHeight * patchWidth;
           // 入口は (c, pt, ph, pw)。
@@ -178,9 +173,7 @@ test("patchify / unpatchify: 添字の式（独立オラクル）どおりに並
           // 出口は (pt, ph, pw, c) — 入口のトークンを出口の並びとして読むと別の画素へ散る。
           assertEquals(
             back[((c * frames + f) * height + h) * width + w],
-            tokens[
-              token * tokenWidth + inner * channels + c
-            ],
+            tokens[token * tokenWidth + inner * channels + c],
           );
         }
       }
@@ -263,7 +256,7 @@ const ropeSpecs = (): TensorSpec[] =>
       dtype: "F32",
       shape: [2, index + 1],
       data: f32Bytes(Array.from({ length: 2 * (index + 1) }, (_, i) => i)),
-    }))
+    })),
   );
 
 test("parseWanRopeBase: 正しい形は軸ごとの行数・幅を返す", () => {
@@ -284,13 +277,13 @@ test("parseWanRopeBase: 想定外のキー・欠け・行数違い・F32 以外�
   const rows = ropeSpecs().map((spec) =>
     spec.name.endsWith("_w")
       ? { ...spec, shape: [1, 6], data: f32Bytes(new Array(6).fill(0)) }
-      : spec
+      : spec,
   );
   assertThrows(() => parseWanRopeBase(buildSafetensors(rows)), Error, "行数");
   const dtype = ropeSpecs().map((spec) =>
     spec.name === "cos_t"
       ? { ...spec, dtype: "I32", data: new Uint8Array(new Int32Array([0, 1]).buffer) }
-      : spec
+      : spec,
   );
   assertThrows(() => parseWanRopeBase(buildSafetensors(dtype)), Error, "F32");
 });

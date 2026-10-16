@@ -34,8 +34,9 @@ import {
 import { filePresent, firstBitMismatch, readBuffer, viewOf } from "./helpers/wan-ti2v-dit.ts";
 
 /** 登録時点で必要なので同期で数える（`ignore` の判定に使う）。 */
-const present = WAN_I2V_GOLDEN_CASES.filter((testCase) => filePresent(wanI2vGoldenUrl(testCase)))
-  .length;
+const present = WAN_I2V_GOLDEN_CASES.filter((testCase) =>
+  filePresent(wanI2vGoldenUrl(testCase)),
+).length;
 
 if (present === 0) {
   console.warn(
@@ -81,8 +82,7 @@ const floatsOf = (
 
 describe("I2V の実画像の前処理と encoder の出口の正規化 × 上流の golden（ビット一致）", () => {
   it({
-    name:
-      `golden が ${WAN_I2V_GOLDEN_CASES.length} 本揃っている（1 本も無ければ SKIP・一部だけなら FAIL）`,
+    name: `golden が ${WAN_I2V_GOLDEN_CASES.length} 本揃っている（1 本も無ければ SKIP・一部だけなら FAIL）`,
     ignore: present === 0,
     fn: () => {
       const missing = WAN_I2V_GOLDEN_CASES.map(wanI2vGoldenUrl)

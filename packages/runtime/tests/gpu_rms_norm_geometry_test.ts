@@ -50,7 +50,9 @@ const direct = async (
     };
     const rows = x.length / weight.length;
     const params = buffer(rmsNormParams(rows, weight.length, 1e-6), U.UNIFORM | U.COPY_DST);
-    const input = buffer(x), w = buffer(weight), output = buffer(x.byteLength);
+    const input = buffer(x),
+      w = buffer(weight),
+      output = buffer(x.byteLength);
     const staging = buffer(x.byteLength, U.MAP_READ | U.COPY_DST);
     const pipeline = await device.createComputePipelineAsync({
       layout: "auto",
@@ -63,7 +65,8 @@ const direct = async (
         resource: { buffer },
       })),
     });
-    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+    const encoder = device.createCommandEncoder(),
+      pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group);
     // 行を再訪させる。行ごとに値が異なるので、scratch の寿命と grid-stride の誤りも値に出る。
@@ -100,19 +103,20 @@ const model = (
     values: { w: { dtype: "f32", shape: [dim] }, y: { dtype: "f32", shape: [rows, dim] } },
     nodes: [{ op: "rms_norm", ins: ["x", "w"], outs: ["y"], attrs: { eps: 1e-6 } }],
   };
-  return openModelBytes(graph, [{
-    graph: GRAPH_NAME,
-    initializer: "w",
-    bytes: f32Bytes([...weight]),
-    encoding: { codec: "f32" },
-  }]);
+  return openModelBytes(graph, [
+    {
+      graph: GRAPH_NAME,
+      initializer: "w",
+      bytes: f32Bytes([...weight]),
+      encoding: { codec: "f32" },
+    },
+  ]);
 };
 const bits = (data: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
 test({
-  name:
-    "rms_norm の 128 スレッド版は端の幅でも従来版とビット一致し、128 を超える幅は従来版を選ぶ（実 GPU）",
+  name: "rms_norm の 128 スレッド版は端の幅でも従来版とビット一致し、128 を超える幅は従来版を選ぶ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -121,9 +125,9 @@ test({
         const rows = 19;
         const x = Float32Array.from(
           { length: rows * dim },
-          (_, i) => Math.sin(i * .731) * (1 + i % 11),
+          (_, i) => Math.sin(i * 0.731) * (1 + (i % 11)),
         );
-        const weight = Float32Array.from({ length: dim }, (_, i) => Math.cos(i * .23) * 1.3);
+        const weight = Float32Array.from({ length: dim }, (_, i) => Math.cos(i * 0.23) * 1.3);
         const expected = await direct(gpu, RMS_NORM_WGSL, x, weight);
         if (dim <= 128) {
           assertEquals(bits(await direct(gpu, RMS_NORM_128_WGSL, x, weight)), bits(expected));
@@ -139,12 +143,10 @@ test({
           assert(y.dtype === "f32");
           assertEquals(bits(y.data), bits(expected), `dim=${dim}`);
           assertEquals(
-            requireCensus(session.diagnostics().lastRunPipelines, `dim=${dim}`).map((row) =>
-              row.key
+            requireCensus(session.diagnostics().lastRunPipelines, `dim=${dim}`).map(
+              (row) => row.key,
             ),
-            [
-              dim <= 128 ? RMS_NORM_128_KEY : RMS_NORM_KEY,
-            ],
+            [dim <= 128 ? RMS_NORM_128_KEY : RMS_NORM_KEY],
           );
           const reference = applyReferenceOp("rms_norm", [input, refTensor([dim], weight)], {
             eps: 1e-6,
@@ -176,12 +178,12 @@ test({
           x[dim * 3 + i] = 1 + i;
           x[dim * 4 + i] = 2 - i;
           x[dim * 5 + i] = 3 + i;
-          x[dim * 6 + i] = Math.sin(i + .1);
+          x[dim * 6 + i] = Math.sin(i + 0.1);
         }
         x[dim * 3] = Infinity;
         x[dim * 4] = -Infinity;
         x[dim * 5] = NaN;
-        const weight = Float32Array.from({ length: dim }, (_, i) => i % 2 === 0 ? -1 : .3);
+        const weight = Float32Array.from({ length: dim }, (_, i) => (i % 2 === 0 ? -1 : 0.3));
         const expected = await direct(gpu, RMS_NORM_WGSL, x, weight);
         const actual = await direct(gpu, RMS_NORM_128_WGSL, x, weight);
         for (let i = 0; i < x.length; i++) {

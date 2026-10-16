@@ -33,14 +33,22 @@ test("格子探索: 経路はスコアの和で決まる", async (t) => {
     // a(-1) + b(-1) と ab(-2) がちょうど同点。正本（tokenizers の Unigram）は同じ位置で終わる
     // ノードを開始位置の昇順に積み、同点なら先に積まれた = 長い方を残す。`>=` にすると
     // [4, 5] へ黙って変わる。
-    const model = buildModel([["a", 4, -1], ["b", 5, -1], ["ab", 6, -2]]);
+    const model = buildModel([
+      ["a", 4, -1],
+      ["b", 5, -1],
+      ["ab", 6, -2],
+    ]);
     assertEquals(tokenize(model, "ab"), [6]);
   });
 
   await t.step("同点でなければスコアの高い経路が勝つ（常に最長ではない）", () => {
     // 同じ形で ab だけを -3 に落とすと、短い 2 個の方が和で上回る。上の規則が
     // 「いつも最長を返すだけ」に退化していないことをここで捕まえる。
-    const model = buildModel([["a", 4, -1], ["b", 5, -1], ["ab", 6, -3]]);
+    const model = buildModel([
+      ["a", 4, -1],
+      ["b", 5, -1],
+      ["ab", 6, -3],
+    ]);
     assertEquals(tokenize(model, "ab"), [4, 5]);
   });
 });
@@ -81,7 +89,13 @@ test("未知の扱い: byte_fallback あり", async (t) => {
   });
 
   await t.step("語彙にある断片はバイト展開されない", () => {
-    const withKana = buildModel([["a", 4, -1], ["あ", 7, -1]], { byteBaseId: BYTE_BASE });
+    const withKana = buildModel(
+      [
+        ["a", 4, -1],
+        ["あ", 7, -1],
+      ],
+      { byteBaseId: BYTE_BASE },
+    );
     assertEquals(tokenize(withKana, "aあ"), [4, 7]);
   });
 });

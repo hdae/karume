@@ -3,18 +3,18 @@
   "version": "0.14.0",
   "description": "Manifest resolution, download and cache for Karume model distributions.",
   "license": "MIT",
-  "type": "module",
-  "exports": {
-    ".": "./mod.ts",
-    "./deno": "./deno.ts",
-    "./node": "./node.ts"
-  },
   "files": [
     "mod.ts",
     "deno.ts",
     "node.ts",
     "src"
   ],
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts",
+    "./deno": "./deno.ts",
+    "./node": "./node.ts"
+  },
   "scripts": {
     "test": "vp test"
   },

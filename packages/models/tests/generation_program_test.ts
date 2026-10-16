@@ -56,9 +56,7 @@ const graphWithValue = (
   values: { ...graphOf().values, [name]: info },
 });
 
-const specOf = (
-  override: Partial<GenerationProgramSpec> = {},
-): GenerationProgramSpec => ({
+const specOf = (override: Partial<GenerationProgramSpec> = {}): GenerationProgramSpec => ({
   graph: graphOf(),
   inputIds: IDS,
   lastRow: LAST_ROW,
@@ -157,7 +155,7 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
         graph: {
           ...graphOf(),
           inputs: graphOf().inputs.map((input) =>
-            input.name === IDS ? { ...input, dtype: "f32" } : input
+            input.name === IDS ? { ...input, dtype: "f32" } : input,
           ),
         },
       },
@@ -170,7 +168,7 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
         graph: {
           ...graphOf(),
           inputs: graphOf().inputs.map((input) =>
-            input.name === IDS ? { ...input, shape: [1, 4] } : input
+            input.name === IDS ? { ...input, shape: [1, 4] } : input,
           ),
         },
       },
@@ -182,7 +180,7 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
         graph: {
           ...graphOf(),
           inputs: graphOf().inputs.map((input) =>
-            input.name === LAST_ROW ? { ...input, shape: [1, 1] } : input
+            input.name === LAST_ROW ? { ...input, shape: [1, 1] } : input,
           ),
         },
       },
@@ -195,7 +193,7 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
         graph: {
           ...graphOf(),
           inputs: graphOf().inputs.map((input) =>
-            input.name === LAST_ROW ? { ...input, shape: [1] } : input
+            input.name === LAST_ROW ? { ...input, shape: [1] } : input,
           ),
         },
       },
@@ -224,11 +222,7 @@ test("createGenerationProgram: 入力長と選択行数に同じ記号を使う�
       [HIDDEN]: { dtype: "f32", shape: [1, "M", HIDDEN_SIZE] },
     },
   };
-  assertThrows(
-    () => createGenerationProgram(specOf({ graph })),
-    Error,
-    "同じ記号 M",
-  );
+  assertThrows(() => createGenerationProgram(specOf({ graph })), Error, "同じ記号 M");
 });
 
 test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る", () => {
@@ -239,10 +233,7 @@ test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る
   );
   // ノード出力として存在するだけの名前は run から返ってこない（グラフ出力に載っているかを見る）。
   assertThrows(
-    () =>
-      createGenerationProgram(
-        specOf({ graph: { ...graphOf(), outputs: [HIDDEN] } }),
-      ),
+    () => createGenerationProgram(specOf({ graph: { ...graphOf(), outputs: [HIDDEN] } })),
     Error,
     "logits 出口 'logits' がグラフ出力に無い",
   );
@@ -284,10 +275,7 @@ test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る
 test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () => {
   // 出口 1 本の旧配布形は「hidden がグラフ出力に無い」として落ちる（互換分岐は無い）。
   assertThrows(
-    () =>
-      createGenerationProgram(
-        specOf({ graph: { ...graphOf(), outputs: [LOGITS] } }),
-      ),
+    () => createGenerationProgram(specOf({ graph: { ...graphOf(), outputs: [LOGITS] } })),
     Error,
     "hidden 出口 'hidden' がグラフ出力に無い",
   );
@@ -414,9 +402,7 @@ test("createGenerationProgram: 記号は入力 shape か容量記号のどちら
   // 容量記号が 1 本足りない形（states の記号が 2 本ある資産）。
   assertThrows(
     () =>
-      createGenerationProgram(
-        specOf({ graph: { ...graphOf(), symbols: ["C", "D", "M", "R"] } }),
-      ),
+      createGenerationProgram(specOf({ graph: { ...graphOf(), symbols: ["C", "D", "M", "R"] } })),
     Error,
     "記号 D が入力 shape からも容量記号からも決まらない",
   );

@@ -179,9 +179,8 @@ const fixedTaps = (
     const coefficients = new Int32Array(count);
     for (let x = 0; x < count; x += 1) {
       const weight = total !== 0 ? weights[x] / total : weights[x];
-      coefficients[x] = weight < 0
-        ? Math.trunc(-0.5 + weight * FIXED_ONE)
-        : Math.trunc(0.5 + weight * FIXED_ONE);
+      coefficients[x] =
+        weight < 0 ? Math.trunc(-0.5 + weight * FIXED_ONE) : Math.trunc(0.5 + weight * FIXED_ONE);
     }
     taps.push({ start, coefficients });
   }
@@ -300,8 +299,10 @@ export const resampleU8Window = (
 ): U8Image<ArrayBuffer> => {
   const { channels } = image;
   if (
-    !isPositiveInteger(image.width) || !isPositiveInteger(image.height) ||
-    !isPositiveInteger(channels) || image.data.length !== image.width * image.height * channels
+    !isPositiveInteger(image.width) ||
+    !isPositiveInteger(image.height) ||
+    !isPositiveInteger(channels) ||
+    image.data.length !== image.width * image.height * channels
   ) {
     throw new RangeError(
       `${filter.name} の入力 ${image.width}×${image.height}×${channels} と長さ ${image.data.length} が` +
@@ -313,9 +314,14 @@ export const resampleU8Window = (
   }
   const { left, top } = window;
   if (
-    !Number.isInteger(left) || !Number.isInteger(top) || left < 0 || top < 0 ||
-    !isPositiveInteger(window.width) || !isPositiveInteger(window.height) ||
-    left + window.width > width || top + window.height > height
+    !Number.isInteger(left) ||
+    !Number.isInteger(top) ||
+    left < 0 ||
+    top < 0 ||
+    !isPositiveInteger(window.width) ||
+    !isPositiveInteger(window.height) ||
+    left + window.width > width ||
+    top + window.height > height
   ) {
     throw new RangeError(
       `${filter.name} の窓 (${left}, ${top}) ${window.width}×${window.height} が出力 ${width}×${height}` +
@@ -323,16 +329,17 @@ export const resampleU8Window = (
     );
   }
   const columns = { offset: left, length: window.width };
-  const verticalTaps = height === image.height
-    ? undefined
-    : fixedTaps(image.height, height, filter, { offset: top, length: window.height });
+  const verticalTaps =
+    height === image.height
+      ? undefined
+      : fixedTaps(image.height, height, filter, { offset: top, length: window.height });
   // 横パスが回す入力の行（縦を飛ばすなら窓の行そのもの）。
-  const rows = verticalTaps === undefined
-    ? { offset: top, length: window.height }
-    : rowsReadBy(verticalTaps);
-  const band = width === image.width
-    ? cropU8(image, columns, rows)
-    : resampleHorizontal(image, fixedTaps(image.width, width, filter, columns), rows);
+  const rows =
+    verticalTaps === undefined ? { offset: top, length: window.height } : rowsReadBy(verticalTaps);
+  const band =
+    width === image.width
+      ? cropU8(image, columns, rows)
+      : resampleHorizontal(image, fixedTaps(image.width, width, filter, columns), rows);
   return verticalTaps === undefined ? band : resampleVertical(band, verticalTaps, rows.offset);
 };
 

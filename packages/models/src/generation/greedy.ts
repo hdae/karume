@@ -63,10 +63,7 @@ export type GreedySpec<C extends GenerationDisposable = GenerationContext> = {
    * GB 級の遅延ロード（PLE の block）を待つ席が要るためで、この関数の目的は固定 token id 列での
    * 検収なので、待ちの入る派生入力は通さない。
    */
-  readonly derive?: (
-    ids: Int32Array<ArrayBuffer>,
-    positions: Int32Array<ArrayBuffer>,
-  ) => RunInputs;
+  readonly derive?: (ids: Int32Array<ArrayBuffer>, positions: Int32Array<ArrayBuffer>) => RunInputs;
   /** argmax token を出すグラフ出力の名前（`[1,M,1]` の i32 — token-only 形は `[1,1,1]`）。 */
   readonly token: string;
   /**
@@ -196,7 +193,9 @@ const readToken = (outputs: RunOutputs, name: string, rows: number, row: number)
     );
   }
   if (
-    tensor.shape.length !== 3 || tensor.shape[0] !== 1 || tensor.shape[1] !== rows ||
+    tensor.shape.length !== 3 ||
+    tensor.shape[0] !== 1 ||
+    tensor.shape[1] !== rows ||
     tensor.shape[2] !== 1
   ) {
     throw new Error(

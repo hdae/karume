@@ -63,9 +63,9 @@ export const encodeWav = (
   if (riffBytes > U32_MAX) {
     throw new ModelInputError(
       `サンプル数 ${samples.length}（data ${dataBytes} バイト）の RIFF チャンク長 ${riffBytes} が` +
-        ` u32 に収まらない（上限 ${
-          Math.floor((U32_MAX - (HEADER_BYTES - 8)) / bytesPerSample)
-        } サンプル）`,
+        ` u32 に収まらない（上限 ${Math.floor(
+          (U32_MAX - (HEADER_BYTES - 8)) / bytesPerSample,
+        )} サンプル）`,
     );
   }
   // MUST: 非有限サンプルはここで落とす。下のクリップは `Math.max` / `Math.min` なので NaN を

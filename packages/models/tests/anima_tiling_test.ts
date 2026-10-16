@@ -151,12 +151,13 @@ test("planTileAxis: 受理集合の全 97 辺の開始位置を値で凍結す�
   // 表が受理集合を**覆っている**ことを先に見る。辺の下限 / 天井 / 刻みが動いたとき、表が
   // 黙って部分被覆になるのではなくここで割れる。
   const sides: number[] = [];
-  for (
-    let side = MIN_RESOLUTION_SIDE;
-    side <= MAX_RESOLUTION_SIDE;
-    side += RESOLUTION_GRANULARITY
-  ) sides.push(side);
-  assertEquals(AXIS_STARTS.map(([side]) => side), sides, "表が覆う辺");
+  for (let side = MIN_RESOLUTION_SIDE; side <= MAX_RESOLUTION_SIDE; side += RESOLUTION_GRANULARITY)
+    sides.push(side);
+  assertEquals(
+    AXIS_STARTS.map(([side]) => side),
+    sides,
+    "表が覆う辺",
+  );
 
   const tile = MIN_RESOLUTION_SIDE / ANIMA_SPATIAL_COMPRESSION;
   for (const [side, starts] of AXIS_STARTS) {
@@ -195,10 +196,7 @@ test("planTileAxis: どの latent 全長でも配置の不変条件が成り立�
     // 丸め等間隔の実体 = 間隔（したがってブレンド幅）の差は高々 1 latent。上流同型の
     // 「固定 stride + 末尾だけスナップ」に退行すると最後の対だけ大きく開いてここで割れる。
     if (gaps.length > 0) {
-      assert(
-        Math.max(...gaps) - Math.min(...gaps) <= 1,
-        `${where}: 間隔のばらつき ${gaps}`,
-      );
+      assert(Math.max(...gaps) - Math.min(...gaps) <= 1, `${where}: 間隔のばらつき ${gaps}`);
     }
   }
 });
@@ -253,7 +251,12 @@ test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを�
   // タイルを黙って返す。
   const geometry = planVaeTiling([1, 2, 4, 4], [1, 2, 2, 2], [1, 1, 2, 2], 1);
   const latents = new Float32Array(2 * 16).fill(1);
-  for (const [row, col] of [[0.5, 0], [0, 0.5], [Number.NaN, 0], [0, Number.NaN]]) {
+  for (const [row, col] of [
+    [0.5, 0],
+    [0, 0.5],
+    [Number.NaN, 0],
+    [0, Number.NaN],
+  ]) {
     assertThrows(
       () => latentTile(latents, geometry, row, col),
       RangeError,
@@ -292,18 +295,30 @@ test("assembleTiles: 位置依存の decode 出力を線形ランプが解析解
     }
   }
   const expected = [0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 6, 7];
-  const rows = assembleTiles(Array.from({ length: 9 }, () => rowRamp), geometry);
+  const rows = assembleTiles(
+    Array.from({ length: 9 }, () => rowRamp),
+    geometry,
+  );
   assertEquals([...Array.from({ length: 16 }, (_, y) => rows[y * 16])], expected, "行方向");
-  const cols = assembleTiles(Array.from({ length: 9 }, () => colRamp), geometry);
+  const cols = assembleTiles(
+    Array.from({ length: 9 }, () => colRamp),
+    geometry,
+  );
   assertEquals([...cols.subarray(0, 16)], expected, "列方向");
 });
 
 test("assembleTiles: 末端まで覆う（stride 幅で切り詰めるだけだと欠ける）", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const flat = new Float32Array(64).fill(7);
-  const image = assembleTiles(Array.from({ length: 9 }, () => flat), geometry);
+  const image = assembleTiles(
+    Array.from({ length: 9 }, () => flat),
+    geometry,
+  );
   assertEquals(image.length, 16 * 16);
-  assert(image.every((value) => value === 7), "覆われていない画素が残っている");
+  assert(
+    image.every((value) => value === 7),
+    "覆われていない画素が残っている",
+  );
 });
 
 test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレンドは写しの上）", () => {
@@ -311,7 +326,10 @@ test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレ�
   const tiles = Array.from({ length: 9 }, (_, index) => new Float32Array(64).fill(index + 1));
   const before = tiles.map((tile) => [...tile]);
   assembleTiles(tiles, geometry);
-  assertEquals(tiles.map((tile) => [...tile]), before);
+  assertEquals(
+    tiles.map((tile) => [...tile]),
+    before,
+  );
 });
 
 test("assembleTiles: タイル枚数と要素数の食い違いを落とす", () => {
@@ -319,11 +337,7 @@ test("assembleTiles: タイル枚数と要素数の食い違いを落とす", ()
   const flat = new Float32Array(64);
   assertThrows(() => assembleTiles([flat], geometry), Error, "幾何の");
   assertThrows(
-    () =>
-      assembleTiles(
-        [...Array.from({ length: 8 }, () => flat), new Float32Array(63)],
-        geometry,
-      ),
+    () => assembleTiles([...Array.from({ length: 8 }, () => flat), new Float32Array(63)], geometry),
     Error,
     "1 枚目",
   );
@@ -355,10 +369,8 @@ test("decodeTiled: decode の返り値は所有権ごと受け取り、写しを
   const handed = makeTiles();
   const pristine = makeTiles();
 
-  const image = await decodeTiled(
-    new Float32Array(2 * 256),
-    geometry,
-    (_tile, row, col) => Promise.resolve(handed[row * colCount + col]),
+  const image = await decodeTiled(new Float32Array(2 * 256), geometry, (_tile, row, col) =>
+    Promise.resolve(handed[row * colCount + col]),
   );
 
   // 所有権を取っても畳み方は公開面と 1 ビットも変わらない。

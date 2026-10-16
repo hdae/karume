@@ -109,8 +109,12 @@ export const patchifyLatents = (
           const base = token * tokenWidth + channel * volume;
           for (let innerT = 0; innerT < patchFrames; innerT += 1) {
             for (let innerH = 0; innerH < patchHeight; innerH += 1) {
-              const line = ((channel * frames + frame * patchFrames + innerT) * height +
-                    row * patchHeight + innerH) * width + col * patchWidth;
+              const line =
+                ((channel * frames + frame * patchFrames + innerT) * height +
+                  row * patchHeight +
+                  innerH) *
+                  width +
+                col * patchWidth;
               const at = base + (innerT * patchHeight + innerH) * patchWidth;
               for (let innerW = 0; innerW < patchWidth; innerW += 1) {
                 tokens[at + innerW] = latents[line + innerW];
@@ -152,10 +156,12 @@ export const unpatchifyTokens = (
         for (let innerT = 0; innerT < patchFrames; innerT += 1) {
           for (let innerH = 0; innerH < patchHeight; innerH += 1) {
             for (let innerW = 0; innerW < patchWidth; innerW += 1) {
-              const inner = token +
-                ((innerT * patchHeight + innerH) * patchWidth + innerW) * channels;
-              const at = ((frame * patchFrames + innerT) * height + row * patchHeight + innerH) *
-                  width + col * patchWidth + innerW;
+              const inner =
+                token + ((innerT * patchHeight + innerH) * patchWidth + innerW) * channels;
+              const at =
+                ((frame * patchFrames + innerT) * height + row * patchHeight + innerH) * width +
+                col * patchWidth +
+                innerW;
               for (let channel = 0; channel < channels; channel += 1) {
                 latents[channel * frames * height * width + at] = tokens[inner + channel];
               }

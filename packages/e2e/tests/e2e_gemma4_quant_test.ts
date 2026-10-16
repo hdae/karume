@@ -1,5 +1,13 @@
 /** 同じ配布重みのquant選択と明示指定が、実際のGEMV・融合設定へ届くことを検証する。 */
-import { makeTempDir, readDir, readFile, readTextFile, remove, symlink, writeTextFile } from "@karume/test-support/fs";
+import {
+  makeTempDir,
+  readDir,
+  readFile,
+  readTextFile,
+  remove,
+  symlink,
+  writeTextFile,
+} from "@karume/test-support/fs";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
 import { localDirectory, parseManifest } from "@karume/hub";
@@ -83,90 +91,89 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             createNew: true,
           });
           const runs = new Map<string, { text: string; stop: unknown }>();
-          for (
-            const mode of [
-              {
-                name: "default",
-                options: {},
-                parallel: true,
-                rms: true,
-                srq: family === "gemma4-qat",
-                packed: family === "gemma4-qat",
+          for (const mode of [
+            {
+              name: "default",
+              options: {},
+              parallel: true,
+              rms: true,
+              srq: family === "gemma4-qat",
+              packed: family === "gemma4-qat",
+            },
+            {
+              // i4-gemvpar は parallel だけを宣言する quant なので packed も立たない。
+              name: "parallel-reference",
+              options: { quant: "i4-gemvpar" },
+              parallel: true,
+              rms: false,
+              srq: false,
+              packed: false,
+            },
+            {
+              name: "explicit-fast",
+              options: { quant: "i4", ...fastSession },
+              parallel: true,
+              rms: true,
+              srq: family === "gemma4-qat",
+              packed: family === "gemma4-qat",
+            },
+            {
+              name: "disable-rms",
+              options: { fuseRmsNormAdd: false },
+              parallel: true,
+              rms: false,
+              srq: family === "gemma4-qat",
+              packed: family === "gemma4-qat",
+            },
+            {
+              // packed が掴むのは素のまま残った SRQ なので、linear→SRQ 融合とは独立に立つ。
+              name: "disable-srq",
+              options: { fuseLinearStaticQuantize: false },
+              parallel: true,
+              rms: true,
+              srq: false,
+              packed: family === "gemma4-qat",
+            },
+            {
+              name: "disable-both",
+              options: { fuseRmsNormAdd: false, fuseLinearStaticQuantize: false },
+              parallel: true,
+              rms: false,
+              srq: false,
+              packed: family === "gemma4-qat",
+            },
+            {
+              name: "reference",
+              options: { quant: "i4" },
+              parallel: false,
+              rms: false,
+              srq: false,
+              packed: false,
+            },
+            {
+              // sequential へ倒すので packed も明示 false で降ろす（quant 由来の true でも
+              // parallel 必須の拒否は効く）。
+              name: "override",
+              options: {
+                linearGemvReduce: "sequential",
+                fuseRmsNormAdd: false,
+                fuseLinearStaticQuantize: false,
+                packedStaticQuantize: false,
               },
-              {
-                // i4-gemvpar は parallel だけを宣言する quant なので packed も立たない。
-                name: "parallel-reference",
-                options: { quant: "i4-gemvpar" },
-                parallel: true,
-                rms: false,
-                srq: false,
-                packed: false,
-              },
-              {
-                name: "explicit-fast",
-                options: { quant: "i4", ...fastSession },
-                parallel: true,
-                rms: true,
-                srq: family === "gemma4-qat",
-                packed: family === "gemma4-qat",
-              },
-              {
-                name: "disable-rms",
-                options: { fuseRmsNormAdd: false },
-                parallel: true,
-                rms: false,
-                srq: family === "gemma4-qat",
-                packed: family === "gemma4-qat",
-              },
-              {
-                // packed が掴むのは素のまま残った SRQ なので、linear→SRQ 融合とは独立に立つ。
-                name: "disable-srq",
-                options: { fuseLinearStaticQuantize: false },
-                parallel: true,
-                rms: true,
-                srq: false,
-                packed: family === "gemma4-qat",
-              },
-              {
-                name: "disable-both",
-                options: { fuseRmsNormAdd: false, fuseLinearStaticQuantize: false },
-                parallel: true,
-                rms: false,
-                srq: false,
-                packed: family === "gemma4-qat",
-              },
-              {
-                name: "reference",
-                options: { quant: "i4" },
-                parallel: false,
-                rms: false,
-                srq: false,
-                packed: false,
-              },
-              {
-                // sequential へ倒すので packed も明示 false で降ろす（quant 由来の true でも
-                // parallel 必須の拒否は効く）。
-                name: "override",
-                options: {
-                  linearGemvReduce: "sequential",
-                  fuseRmsNormAdd: false,
-                  fuseLinearStaticQuantize: false,
-                  packedStaticQuantize: false,
-                },
-                parallel: false,
-                rms: false,
-                srq: false,
-                packed: false,
-              },
-            ] as const
-          ) {
+              parallel: false,
+              rms: false,
+              srq: false,
+              packed: false,
+            },
+          ] as const) {
             // NOTE: census は計測に依らない `lastRunPipelines`。`onRunDiagnostics` を付けると GPU 上の
             // greedy 出力経路は外れる（src/gemma/pipeline.ts の `greedyOutput`）— 下の census は
             // フック有りの経路のもので、この前提は計測を外しても変わらない。
             // 実効の束（差し替えた quant 席の宣言 + 明示指定を家族の合成に通した値）。
-            const { quant = "i4-fast", ...overrides }:
-              & { readonly quant?: keyof typeof quantSessions }
-              & SessionOverrides = mode.options;
+            const {
+              quant = "i4-fast",
+              ...overrides
+            }: { readonly quant?: keyof typeof quantSessions } & SessionOverrides = mode.options;
             const row = censusRowOf(
               family,
               "e2b",
@@ -188,16 +195,20 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 },
               } satisfies Gemma4QatFromPretrainedOptions;
               const source = nodeDirectory(temp);
-              const pipeline = family === "gemma4"
-                ? await Gemma4Pipeline.fromPretrained(source, options)
-                : await Gemma4QatPipeline.fromPretrained(source, options);
+              const pipeline =
+                family === "gemma4"
+                  ? await Gemma4Pipeline.fromPretrained(source, options)
+                  : await Gemma4QatPipeline.fromPretrained(source, options);
               try {
-                const stream = pipeline.chat([
-                  {
-                    role: "user",
-                    content: "Write a numbered list of twenty tips for learning a new language.",
-                  },
-                ], { capacity: 128, maxNewTokens: 24, sampler: { temperature: 0 } });
+                const stream = pipeline.chat(
+                  [
+                    {
+                      role: "user",
+                      content: "Write a numbered list of twenty tips for learning a new language.",
+                    },
+                  ],
+                  { capacity: 128, maxNewTokens: 24, sampler: { temperature: 0 } },
+                );
                 const text = await stream.text();
                 const stop = await stream.done;
                 assert(text.length > 0);
@@ -208,12 +219,16 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 // 実効の席（quant 席の宣言 + 明示指定の合成結果）を両側で見る — 非参照値は
                 // 変種が 1 本以上・参照値は変種が 0 本（packed 変種のキーは既存キーの末尾に
                 // 断片が付く — ADR 0105 決定 4。述語は tests/helpers/pipeline-census.ts）。
-                assertSeatsApplied(merged, {
-                  linearGemvReduce: mode.parallel ? "parallel" : "sequential",
-                  fuseRmsNormAdd: mode.rms,
-                  fuseLinearStaticQuantize: mode.srq,
-                  packedStaticQuantize: mode.packed,
-                }, mode.name);
+                assertSeatsApplied(
+                  merged,
+                  {
+                    linearGemvReduce: mode.parallel ? "parallel" : "sequential",
+                    fuseRmsNormAdd: mode.rms,
+                    fuseLinearStaticQuantize: mode.srq,
+                    packedStaticQuantize: mode.packed,
+                  },
+                  mode.name,
+                );
                 // 束の census 表に行があれば、相ごと・run ごとに本数ちょうどで見る（並列 GEMV の
                 // 適格表から一部の形が外れて逐次へ落ちると、上の 1 本以上の検査は通るがここで赤）。
                 if (row !== undefined) {
@@ -227,15 +242,13 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          for (
-            const name of [
-              "parallel-reference",
-              "explicit-fast",
-              "disable-rms",
-              "disable-srq",
-              "disable-both",
-            ]
-          ) {
+          for (const name of [
+            "parallel-reference",
+            "explicit-fast",
+            "disable-rms",
+            "disable-srq",
+            "disable-both",
+          ]) {
             assertEquals(runs.get("default"), runs.get(name), name);
           }
           assertEquals(runs.get("reference"), runs.get("override"));
@@ -260,10 +273,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 },
               });
               try {
-                const prompt = gemma4ChatPrompt(pipeline.tokenizer, [{
-                  role: "user",
-                  content: "Write a numbered list of twenty tips for learning a new language.",
-                }]);
+                const prompt = gemma4ChatPrompt(pipeline.tokenizer, [
+                  {
+                    role: "user",
+                    content: "Write a numbered list of twenty tips for learning a new language.",
+                  },
+                ]);
                 const outputs: number[][] = [];
                 for (const speculative of [false, "always"] as const) {
                   const sequence = await pipeline.sequence({ capacity: 128, speculative });
@@ -293,19 +308,28 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   const phaseRuns = phaseCensus.get(phase);
                   assert(phaseRuns !== undefined, phase);
                   // RMS融合の適用はtarget側のdecode/verifyで見る。
-                  assertSeatsApplied(mergeCensus(phaseRuns, phase), {
-                    linearGemvReduce: "parallel",
-                    ...(phase === "draft" ? {} : { fuseRmsNormAdd: true }),
-                  }, phase);
+                  assertSeatsApplied(
+                    mergeCensus(phaseRuns, phase),
+                    {
+                      linearGemvReduce: "parallel",
+                      ...(phase === "draft" ? {} : { fuseRmsNormAdd: true }),
+                    },
+                    phase,
+                  );
                 }
                 // 束の census 表（既定 quant の宣言 + 明示の sequential）に行があれば、相ごと・
                 // run ごとに本数ちょうどで見る（drafter の逐次 GEMV への縮退本数もここで固定）。
                 const row = censusRowOf(
                   family,
                   "e2b",
-                  effectiveSessionOptions(family, quantSessions["i4-fast"], {
-                    stateAttentionReduce: "sequential",
-                  }, "speculative"),
+                  effectiveSessionOptions(
+                    family,
+                    quantSessions["i4-fast"],
+                    {
+                      stateAttentionReduce: "sequential",
+                    },
+                    "speculative",
+                  ),
                 );
                 if (row !== undefined) {
                   const checked = assertRowCensus(
@@ -330,23 +354,26 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           const heavyPaths = new Set([
             ...Object.values(parsed.models.e2b.weights).flatMap((entry) =>
               Object.values(entry).flatMap((weights) =>
-                weights.container.parts.slice(1).map((ref) => ref.path)
-              )
+                weights.container.parts.slice(1).map((ref) => ref.path),
+              ),
             ),
             ...Object.values(parsed.models.e2b.assets).map((ref) => ref.path),
           ]);
           assert(heavyPaths.size > 0);
           const requested: string[] = [];
-          const noWeightsSource = localDirectory({
-            readFile: async (path) => {
-              requested.push(path);
-              assert(
-                !heavyPaths.has(path),
-                `不正な実行設定で重みの part・資産を取得している: ${path}`,
-              );
-              return await readFile(`${temp}/${path}`);
+          const noWeightsSource = localDirectory(
+            {
+              readFile: async (path) => {
+                requested.push(path);
+                assert(
+                  !heavyPaths.has(path),
+                  `不正な実行設定で重みの part・資産を取得している: ${path}`,
+                );
+                return await readFile(`${temp}/${path}`);
+              },
             },
-          }, { label: "invalid-gemma-quant" });
+            { label: "invalid-gemma-quant" },
+          );
           const loadUnsupported = () =>
             family === "gemma4"
               ? Gemma4Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })

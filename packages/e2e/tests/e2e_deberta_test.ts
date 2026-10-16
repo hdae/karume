@@ -46,7 +46,11 @@ import {
   prepareContainer,
   type Tensor,
 } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -240,8 +244,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 /** 通常ケースの golden ファイル名（`io.<case>.safetensors`）。鏡像は prefix で外れる。 */
 const goldenFiles = (root: URL): readonly string[] =>
   listDir(root)
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name)
     .sort();
@@ -351,7 +355,7 @@ for (const variant of VARIANTS) {
             ...new Set(
               Object.values(parsed.graph.initializers)
                 .flatMap((initializer) =>
-                  initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)]
+                  initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)],
                 )
                 .filter((layout) => layout === "f16" || layout === "i8"),
             ),

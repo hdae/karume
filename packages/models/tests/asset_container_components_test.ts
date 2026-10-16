@@ -35,10 +35,7 @@ test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", a
 });
 
 test("assetComponentOpener: 単一形キーと分割形キーの混在は落ちる", async () => {
-  const error = await assertRejects(
-    () => openerOf({ dit: single(), ...parts("dit") }),
-    Error,
-  );
+  const error = await assertRejects(() => openerOf({ dit: single(), ...parts("dit") }), Error);
   assertStringIncludes(error.message, "単一形のキーと分割形のキー");
   assertStringIncludes(error.message, "dit / dit[0]");
 });
@@ -47,10 +44,7 @@ test("assetComponentOpener: 単一形キーと [0] 以外の分割形キーの�
   // `[0]` から連続する範囲だけを拾う実装だと、`[0]` が無いときに混在検査を飛ばして「単一形の
   // 1 本」として組んでしまう（`dit[1]` を黙って無視する = 分割配布のつもりで組んだ Record が
   // 遠くの層から「part が足りない」で落ちる）。
-  const error = await assertRejects(
-    () => openerOf({ dit: single(), "dit[1]": part(1) }),
-    Error,
-  );
+  const error = await assertRejects(() => openerOf({ dit: single(), "dit[1]": part(1) }), Error);
   assertStringIncludes(error.message, "単一形のキーと分割形のキー");
   assertStringIncludes(error.message, "dit / dit[1]");
 });
@@ -75,10 +69,7 @@ test("assetComponentOpener: 単一形の 1 本も同じ供給口から開ける"
 });
 
 test("assetComponentOpener: キーがどちらの形でも無ければ 2 形の綴りを添えて落ちる", async () => {
-  const error = await assertRejects(
-    () => openerOf(parts("dit"), ["dit", "vae"]),
-    Error,
-  );
+  const error = await assertRejects(() => openerOf(parts("dit"), ["dit", "vae"]), Error);
   assertStringIncludes(error.message, "部品 'vae' の容器が無い");
   assertStringIncludes(error.message, "分割形なら 'vae[0]' から添字順");
 });

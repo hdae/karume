@@ -1,12 +1,6 @@
 {
   "note": "karume 自身の gemma4QatRopeInputs 出力の凍結（上流 Torch とのビット一致ではない — ADR 0097 追記 5）。",
-  "positions": [
-    0,
-    1,
-    17,
-    127,
-    4095
-  ],
+  "positions": [0, 1, 17, 127, 4095],
   "spec": {
     "sliding_attention": {
       "theta": 10000,

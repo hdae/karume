@@ -132,7 +132,10 @@ test("buildZp: 故障注入 — 展開インデックスがずれると値も変
   const a = buildZp(mP, logsP, Int32Array.from([0, 1, 2]), 1, noise, 1);
   const b = buildZp(mP, logsP, Int32Array.from([0, 0, 2]), 1, noise, 1);
   assertEquals(a.length, b.length, "長さは同じ（= 長さでは検出できない形）");
-  assert([...a].some((value, index) => value !== b[index]), "展開を変えても同じ値");
+  assert(
+    [...a].some((value, index) => value !== b[index]),
+    "展開を変えても同じ値",
+  );
 });
 
 test("buildZp: 形状の食い違いは落とす", () => {
@@ -153,7 +156,10 @@ test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
   const b = new Randn(7).normals(64);
   const c = new Randn(8).normals(64);
   assertEquals([...a], [...b]);
-  assert([...a].some((value, index) => value !== c[index]), "seed を変えても同じ列");
+  assert(
+    [...a].some((value, index) => value !== c[index]),
+    "seed を変えても同じ列",
+  );
 });
 
 test("Randn: 標準正規らしい統計量を持ち、scale が線形に効く", () => {

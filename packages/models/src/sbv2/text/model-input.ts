@@ -55,10 +55,7 @@ export type Sbv2ModelInput = {
  * @param phones {@link toSbv2PhoneTone} の出力（両端 PAD 込み）。
  * @param words 語アライメント（PAD を含まない）。
  */
-export const assertWordPhones = (
-  phones: readonly string[],
-  words: readonly Sbv2Word[],
-): void => {
+export const assertWordPhones = (phones: readonly string[], words: readonly Sbv2Word[]): void => {
   const aligned = words.flatMap((word) => word.phones);
   // 両端 PAD は「語」ではないので語アライメントには現れない。
   const derived = phones.slice(1, -1);

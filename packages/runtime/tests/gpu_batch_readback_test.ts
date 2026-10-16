@@ -31,12 +31,15 @@ test("batch read: 未await enqueueと出力snapshotを1map・queue待ち0回で�
     marker = await gpu.createResident(4),
     decoy = await gpu.createResident(12);
   marker.write(Uint32Array.of(0x7fa01234));
-  const fences = countFences(gpu), create = gpu.device.createBuffer.bind(gpu.device);
-  let maps = 0, destroyed = 0;
+  const fences = countFences(gpu),
+    create = gpu.device.createBuffer.bind(gpu.device);
+  let maps = 0,
+    destroyed = 0;
   gpu.device.createBuffer = (desc): GPUBuffer => {
     const buffer = create(desc);
     if (desc.label === "batch-readback") {
-      const map = buffer.mapAsync.bind(buffer), destroy = buffer.destroy.bind(buffer);
+      const map = buffer.mapAsync.bind(buffer),
+        destroy = buffer.destroy.bind(buffer);
       buffer.mapAsync = (...args) => {
         maps++;
         return map(...args);
@@ -53,7 +56,8 @@ test("batch read: 未await enqueueと出力snapshotを1map・queue待ち0回で�
     const enqueued = target.enqueue({ x0: input() }, { batch, copyOutputs: { y: sink } });
     const selected: Record<string, ResidentTensor> = { a: sink, b: marker };
     Object.defineProperty(selected, "__proto__", { value: marker, enumerable: true });
-    const pending = batch.finishAndRead(selected), finish = batch.finish();
+    const pending = batch.finishAndRead(selected),
+      finish = batch.finish();
     assertStrictEquals(finish, batch.finish());
     assertThrows(() => marker.dispose(), ResidentTensorError);
     selected.a = decoy;
@@ -79,7 +83,8 @@ test("batch read: 未await enqueueと出力snapshotを1map・queue待ち0回で�
 });
 
 test("batch read: 空集合は従来の完了フェンスで閉じる", async () => {
-  const gpu = await acquireGpu(), fences = countFences(gpu);
+  const gpu = await acquireGpu(),
+    fences = countFences(gpu);
   try {
     const batch = await gpu.beginBatch();
     assertEquals(await batch.finishAndRead({}), {});
@@ -91,7 +96,8 @@ test("batch read: 空集合は従来の完了フェンスで閉じる", async ()
 });
 
 test("batch read: finish先行・settle中を拒否しsettle後は読める", async () => {
-  const gpu = await acquireGpu(), sink = await gpu.createResident(4);
+  const gpu = await acquireGpu(),
+    sink = await gpu.createResident(4);
   sink.write(Int32Array.of(91));
   try {
     const first = await gpu.beginBatch();
@@ -183,7 +189,8 @@ for (const fault of ["create", "copy", "map", "getMappedRange"] as const) {
       encoder = gpu.device.createCommandEncoder.bind(gpu.device),
       error = new Error(`injected ${fault}`);
     sink.write(Int32Array.of(43));
-    let created = 0, destroyed = 0;
+    let created = 0,
+      destroyed = 0;
     gpu.device.createBuffer = (desc): GPUBuffer => {
       if (desc.label === "batch-readback" && fault === "create") throw error;
       const b = create(desc);
@@ -254,7 +261,9 @@ test("batch read: copyのGPU validationをmap例外で隠さない", async () =>
 });
 
 test("batch read: enqueue側の失敗でも成功データを返さない", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu), sink = await gpu.createResident(12);
+  const gpu = await acquireGpu(),
+    target = await session(gpu),
+    sink = await gpu.createResident(12);
   try {
     const batch = await gpu.beginBatch();
     const wrong = { dtype: "f32", shape: [1], data: Float32Array.of(1) } satisfies Tensor;
@@ -286,7 +295,8 @@ test("batch read: map未決着のdevice lossでもハングせず予約を戻す
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const batch = await gpu.beginBatch(), pending = batch.finishAndRead({ sink });
+    const batch = await gpu.beginBatch(),
+      pending = batch.finishAndRead({ sink });
     void pending.catch(() => undefined);
     await entered.promise;
     gpu.destroy();
@@ -304,7 +314,8 @@ test("batch read: map未決着のdevice lossでもハングせず予約を戻す
 });
 
 test("batch read: GPU失敗とenqueue失敗が重なってもホスト側の原因を保つ", async () => {
-  const gpu = await acquireGpu(), target = await session(gpu);
+  const gpu = await acquireGpu(),
+    target = await session(gpu);
   const create = gpu.device.createBuffer.bind(gpu.device);
   const bad = new ResidentTensor(
     gpu,

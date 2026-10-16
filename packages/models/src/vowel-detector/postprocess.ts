@@ -36,7 +36,7 @@ const SWITCH_PENALTY = 4.0;
 const MIN_DURATION_FRAMES = 2;
 
 const CLASS_COUNT = LIPSYNC_CLASSES.length;
-const classId = (label: typeof LIPSYNC_CLASSES[number]): number => LIPSYNC_CLASSES.indexOf(label);
+const classId = (label: (typeof LIPSYNC_CLASSES)[number]): number => LIPSYNC_CLASSES.indexOf(label);
 const CONS_ID = classId("cons");
 const PAU_ID = classId("pau");
 /** cons を**後続へ**吸収してよい相手（母音と撥音）。 */
@@ -272,6 +272,6 @@ export const logitsToSegments = (
  * （リップシンクのタイムライン）との突合が文字列比較で外れる。
  */
 export const toLab = (segments: readonly LabSegment[]): string =>
-  segments.map((segment) =>
-    `${segment.start.toFixed(7)} ${segment.end.toFixed(7)} ${segment.label}\n`
-  ).join("");
+  segments
+    .map((segment) => `${segment.start.toFixed(7)} ${segment.end.toFixed(7)} ${segment.label}\n`)
+    .join("");

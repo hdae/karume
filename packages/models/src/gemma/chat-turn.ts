@@ -56,19 +56,19 @@ export type Gemma4RunPhase = GenerationRunPhase;
 export type Gemma4ChatStop =
   | GenerationStop
   | {
-    readonly reason: "stop-string";
-    /** 一致した停止文字列（出力には含まれない）。 */
-    readonly stopString: string;
-    readonly tokens: number;
-    /**
-     * 投機の勘定（`GenerationStop.speculation` をそのまま写したもの — 投機 sequence の
-     * ターンだけ載る）。
-     *
-     * MUST: 写す。この枝は理由を差し替えるために object を組み直すので、写さないと
-     * 「停止文字列で閉じたターンだけ勘定が消える」形になる（例外にならない欠落）。
-     */
-    readonly speculation?: GenerationSpeculation;
-  };
+      readonly reason: "stop-string";
+      /** 一致した停止文字列（出力には含まれない）。 */
+      readonly stopString: string;
+      readonly tokens: number;
+      /**
+       * 投機の勘定（`GenerationStop.speculation` をそのまま写したもの — 投機 sequence の
+       * ターンだけ載る）。
+       *
+       * MUST: 写す。この枝は理由を差し替えるために object を組み直すので、写さないと
+       * 「停止文字列で閉じたターンだけ勘定が消える」形になる（例外にならない欠落）。
+       */
+      readonly speculation?: GenerationSpeculation;
+    };
 
 /**
  * 文字列片の列（`for await` で汲む）+ 停止理由 + 一括で受け取る口。
@@ -204,13 +204,11 @@ export const chatStreamOf = (
  * 無しで書ける。{@link Gemma4State} は `SessionDiagnostics` でそのまま満たす。
  * NOTE: `export` は門を直接叩くテストのため（`mod.ts` / サブパス面には出さない — ADR 0008）。
  */
-export const runDiagnosticsHook = <D>(
-  state: {
-    readonly session: { diagnostics: () => D };
-    readonly drafter?: { readonly session: { diagnostics: () => D } };
-    readonly onRunDiagnostics?: (diagnostics: D, phase: Gemma4RunPhase) => void;
-  },
-): ((phase: Gemma4RunPhase) => void) | undefined => {
+export const runDiagnosticsHook = <D>(state: {
+  readonly session: { diagnostics: () => D };
+  readonly drafter?: { readonly session: { diagnostics: () => D } };
+  readonly onRunDiagnostics?: (diagnostics: D, phase: Gemma4RunPhase) => void;
+}): ((phase: Gemma4RunPhase) => void) | undefined => {
   const listener = state.onRunDiagnostics;
   if (listener === undefined) return undefined;
   return (phase: Gemma4RunPhase): void => {
@@ -222,9 +220,7 @@ export const runDiagnosticsHook = <D>(
     // draft run は drafter Session でしか起きない（居なければ簿記の破れ — 黙って貸し手の
     // 診断を渡すと、別の run の値が draft の名前で積算される）。
     if (drafter === undefined) {
-      throw new Error(
-        "Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた",
-      );
+      throw new Error("Gemma4Pipeline: drafter が居ないのに draft run の観測が届いた");
     }
     listener(drafter.session.diagnostics(), phase);
   };
@@ -237,10 +233,7 @@ export const runDiagnosticsHook = <D>(
  * （この層で数え直さない）。写す欄が増えたときに片方の入口だけ古いまま残るのを防ぐため、
  * 組み立てを 1 本にしてある。
  */
-export const stopStringOf = (
-  stopString: string,
-  inner: GenerationStop,
-): Gemma4ChatStop => ({
+export const stopStringOf = (stopString: string, inner: GenerationStop): Gemma4ChatStop => ({
   reason: "stop-string",
   stopString,
   tokens: inner.tokens,
@@ -297,9 +290,10 @@ export const completeChatTurn = async (options: {
   let failure = options.failure;
   let stop: Gemma4ChatStop | undefined;
   try {
-    const inner = options.stream === undefined
-      ? { reason: "closed", tokens: 0 } satisfies Gemma4ChatStop
-      : await options.stream.done;
+    const inner =
+      options.stream === undefined
+        ? ({ reason: "closed", tokens: 0 } satisfies Gemma4ChatStop)
+        : await options.stream.done;
     // 中断は iterable が reason を投げ、done は aborted を返す既存契約を維持する。
     if (failure === undefined || inner.reason === "aborted") {
       stop = options.matched === undefined ? inner : stopStringOf(options.matched, inner);
@@ -308,12 +302,7 @@ export const completeChatTurn = async (options: {
     failure ??= { error };
   }
   try {
-    await closeChatTurn(
-      options.where,
-      failure,
-      () => options.cleanup(stop),
-      options.release,
-    );
+    await closeChatTurn(options.where, failure, () => options.cleanup(stop), options.release);
   } catch (error) {
     options.fail(error);
     throw error;

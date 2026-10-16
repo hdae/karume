@@ -38,18 +38,22 @@ import {
 import { CORE_TRANSIENT_LIMITS } from "../src/runtime/transient-plan.ts";
 
 /** 出力列だけのステップ（dispatch と一時は確保簿記の別軸なので空で足りる）。 */
-const step = (
-  outputs: readonly StepOutput[],
-  releases: readonly string[] = [],
-): StepRecipe => ({ outputs, temps: [], dispatches: [], releases, writesState: false });
+const step = (outputs: readonly StepOutput[], releases: readonly string[] = []): StepRecipe => ({
+  outputs,
+  temps: [],
+  dispatches: [],
+  releases,
+  writesState: false,
+});
 
 /** 領域から確保する出力（`byteLength` は 4 の倍数 = サイズクラスと同値にしておく）。 */
-const alloc = (
-  name: string,
-  byteLength: number,
-  uses: number,
-  pinned = false,
-): StepOutput => ({ kind: "alloc", byteLength, name, uses, pinned });
+const alloc = (name: string, byteLength: number, uses: number, pinned = false): StepOutput => ({
+  kind: "alloc",
+  byteLength,
+  name,
+  uses,
+  pinned,
+});
 
 /** 別名の出力（入力実体をそのまま出力にする reshape / 恒等 expand — ADR 0011）。 */
 const alias = (name: string, source: string, uses: number): StepOutput => ({
@@ -88,35 +92,52 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
     // 別名は根の名前を持ち、確保を出さない。
     step([alias("d", "c", 0)]),
     // 別名元が常駐（重み）なら根なし（slot を持たない値）。
-    step([{
-      kind: "alias",
-      source: { kind: "resident", buffer: ({}) as unknown as GPUBuffer },
-      name: "e",
-      uses: 0,
-      pinned: false,
-    }]),
+    step([
+      {
+        kind: "alias",
+        source: { kind: "resident", buffer: {} as unknown as GPUBuffer },
+        name: "e",
+        uses: 0,
+        pinned: false,
+      },
+    ]),
   ]);
 
-  assertEquals(program.map((s) => s.outputs), [
-    [{ name: "a", kind: "alloc", byteLength: 64, source: undefined, uses: 1, pinned: false }],
-    [{ name: "b", kind: "alloc", byteLength: 64, source: undefined, uses: 0, pinned: false }],
-    [{ name: "c", kind: "alloc", byteLength: 64, source: undefined, uses: 0, pinned: true }],
-    [{ name: "d", kind: "alias", byteLength: 0, source: "c", uses: 0, pinned: false }],
-    [{ name: "e", kind: "alias", byteLength: 0, source: undefined, uses: 0, pinned: false }],
-  ]);
-  assertEquals(program.map((s) => s.releases), [[], [], ["a"], [], []]);
+  assertEquals(
+    program.map((s) => s.outputs),
+    [
+      [{ name: "a", kind: "alloc", byteLength: 64, source: undefined, uses: 1, pinned: false }],
+      [{ name: "b", kind: "alloc", byteLength: 64, source: undefined, uses: 0, pinned: false }],
+      [{ name: "c", kind: "alloc", byteLength: 64, source: undefined, uses: 0, pinned: true }],
+      [{ name: "d", kind: "alias", byteLength: 0, source: "c", uses: 0, pinned: false }],
+      [{ name: "e", kind: "alias", byteLength: 0, source: undefined, uses: 0, pinned: false }],
+    ],
+  );
+  assertEquals(
+    program.map((s) => s.releases),
+    [[], [], ["a"], [], []],
+  );
 
   // 計画（256 整列）: a は c の確保より後（c を書く dispatch が a を読む）に生存を終えるので
   // a と c は重なり、c が掴めるのは消費者ゼロで先に生存を終えた b の区間（offset 256）。
-  const plan = planRecipes([
-    step([alloc("a", 64, 1)]),
-    step([alloc("b", 64, 0)], []),
-    step([alloc("c", 64, 0, true)], ["a"]),
-    step([alias("d", "c", 0)]),
-  ], CORE_TRANSIENT_LIMITS);
+  const plan = planRecipes(
+    [
+      step([alloc("a", 64, 1)]),
+      step([alloc("b", 64, 0)], []),
+      step([alloc("c", 64, 0, true)], ["a"]),
+      step([alias("d", "c", 0)]),
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
   assertEquals(plan.regions, [256 + 64]);
-  assertEquals(plan.steps.map((assigned) => assigned.outputs), [[0], [1], [2], [undefined]]);
-  assertEquals(plan.slots.map((slot) => slot.offset), [0, 256, 256]);
+  assertEquals(
+    plan.steps.map((assigned) => assigned.outputs),
+    [[0], [1], [2], [undefined]],
+  );
+  assertEquals(
+    plan.slots.map((slot) => slot.offset),
+    [0, 256, 256],
+  );
   assertEquals(plan.pinned, new Set([2]));
   assertEquals(plan.sharedSlots, 1, "c が b のバイトを配り直されている");
 });
@@ -138,28 +159,43 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
  */
 test("topk の実形（値 + 添字・同一サイズ）の計画が手計算どおり", () => {
   const bytes = 3 * 2 * 4;
-  const plan = planRecipes([
-    step([alloc("v", bytes, 1), alloc("i", bytes, 0, true)]),
-    step([alloc("nv", bytes, 1)], ["v"]),
-    step([alloc("e", bytes, 0, true)], ["nv"]),
-  ], CORE_TRANSIENT_LIMITS);
+  const plan = planRecipes(
+    [
+      step([alloc("v", bytes, 1), alloc("i", bytes, 0, true)]),
+      step([alloc("nv", bytes, 1)], ["v"]),
+      step([alloc("e", bytes, 0, true)], ["nv"]),
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
 
   // 実寸 24 は 256 整列の offset で並ぶ: v 0 / i 256 / nv 512（v が生きている間）/ e 0（v の跡）。
-  assertEquals(plan.slots.map((slot) => slot.offset), [0, 256, 512, 0]);
-  assertEquals(plan.steps.map((assigned) => assigned.outputs), [[0, 1], [2], [3]]);
+  assertEquals(
+    plan.slots.map((slot) => slot.offset),
+    [0, 256, 512, 0],
+  );
+  assertEquals(
+    plan.steps.map((assigned) => assigned.outputs),
+    [[0, 1], [2], [3]],
+  );
   assertEquals(plan.pinned, new Set([1, 3]));
   // 生存ピーク = v / i / nv の 3 本ぶん（実 GPU 側の `peakTransientBytes` 72 と一致する）。
   assertEquals(plan.peakLiveBytes, 72);
 });
 
 test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独立して retain / pin する", () => {
-  const plan = planRecipes([
-    step([alloc("v", 64, 1), alloc("i", 32, 0, true)]),
-    step([alloc("y", 64, 0, true)], ["v"]),
-  ], CORE_TRANSIENT_LIMITS);
+  const plan = planRecipes(
+    [step([alloc("v", 64, 1), alloc("i", 32, 0, true)]), step([alloc("y", 64, 0, true)], ["v"])],
+    CORE_TRANSIENT_LIMITS,
+  );
 
-  assertEquals(plan.slots.map((slot) => slot.byteLength), [64, 32, 64]);
-  assertEquals(plan.steps.map((assigned) => assigned.outputs), [[0, 1], [2]]);
+  assertEquals(
+    plan.slots.map((slot) => slot.byteLength),
+    [64, 32, 64],
+  );
+  assertEquals(
+    plan.steps.map((assigned) => assigned.outputs),
+    [[0, 1], [2]],
+  );
   assertEquals(plan.pinned, new Set([1, 2]));
 });
 
@@ -168,38 +204,51 @@ test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独
 // ---------------------------------------------------------------------------
 
 test("dispatch の読み / 書きは WGSL の役割から採り、常駐・state・論理長は計画に現れない", () => {
-  const program = buildTransientProgram([{
-    outputs: [alloc("y", 64, 0, true)],
-    temps: [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }],
-    dispatches: [
-      dispatch("k", [
-        { binding: 1, source: { kind: "value", name: "x" } },
-        { binding: 2, source: { kind: "resident", buffer: ({}) as unknown as GPUBuffer } },
-        { binding: 3, source: { kind: "temp", id: 0 } },
-        { binding: 4, source: { kind: "state", name: "kv.k" } },
-        { binding: 5, source: { kind: "lengths" } },
-        { binding: 6, source: { kind: "value", name: "y" } },
-      ], roles([1, 2, 4, 5], [3, 6])),
-    ],
-    releases: [],
-    writesState: false,
-  }]);
-  assertEquals(program[0].dispatches, [{
-    reads: [{ kind: "value", name: "x" }],
-    writes: [{ kind: "temp", id: 0 }, { kind: "value", name: "y" }],
-  }]);
+  const program = buildTransientProgram([
+    {
+      outputs: [alloc("y", 64, 0, true)],
+      temps: [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }],
+      dispatches: [
+        dispatch(
+          "k",
+          [
+            { binding: 1, source: { kind: "value", name: "x" } },
+            { binding: 2, source: { kind: "resident", buffer: {} as unknown as GPUBuffer } },
+            { binding: 3, source: { kind: "temp", id: 0 } },
+            { binding: 4, source: { kind: "state", name: "kv.k" } },
+            { binding: 5, source: { kind: "lengths" } },
+            { binding: 6, source: { kind: "value", name: "y" } },
+          ],
+          roles([1, 2, 4, 5], [3, 6]),
+        ),
+      ],
+      releases: [],
+      writesState: false,
+    },
+  ]);
+  assertEquals(program[0].dispatches, [
+    {
+      reads: [{ kind: "value", name: "x" }],
+      writes: [
+        { kind: "temp", id: 0 },
+        { kind: "value", name: "y" },
+      ],
+    },
+  ]);
 });
 
 test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fail loudly", () => {
-  const recipes = [{
-    outputs: [alloc("y", 64, 0, true)],
-    temps: [],
-    dispatches: [
-      dispatch("gemm", [{ binding: 7, source: { kind: "value", name: "y" } }], roles([1], [2])),
-    ],
-    releases: [],
-    writesState: false,
-  }];
+  const recipes = [
+    {
+      outputs: [alloc("y", 64, 0, true)],
+      temps: [],
+      dispatches: [
+        dispatch("gemm", [{ binding: 7, source: { kind: "value", name: "y" } }], roles([1], [2])),
+      ],
+      releases: [],
+      writesState: false,
+    },
+  ];
   const error = assertThrows(() => buildTransientProgram(recipes), ExecutionError);
   assert(
     error.message.includes("dispatch 'gemm' の束縛 7 に WGSL の storage 宣言が無い"),
@@ -208,23 +257,33 @@ test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fai
 });
 
 test("同じ dispatch で読む入力と書く出力は別領域に置かれる（計画まで通した形）", () => {
-  const plan = planRecipes([
-    step([alloc("h", 64, 1)]),
-    {
-      outputs: [alloc("y", 64, 0, true)],
-      temps: [],
-      dispatches: [
-        dispatch("neg", [
-          { binding: 1, source: { kind: "value", name: "h" } },
-          { binding: 2, source: { kind: "value", name: "y" } },
-        ], roles([1], [2])),
-      ],
-      releases: ["h"],
-      writesState: false,
-    },
-  ], CORE_TRANSIENT_LIMITS);
+  const plan = planRecipes(
+    [
+      step([alloc("h", 64, 1)]),
+      {
+        outputs: [alloc("y", 64, 0, true)],
+        temps: [],
+        dispatches: [
+          dispatch(
+            "neg",
+            [
+              { binding: 1, source: { kind: "value", name: "h" } },
+              { binding: 2, source: { kind: "value", name: "y" } },
+            ],
+            roles([1], [2]),
+          ),
+        ],
+        releases: ["h"],
+        writesState: false,
+      },
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
   assertEquals(plan.regions, [64, 64]);
-  assertEquals(plan.slots.map((slot) => slot.region), [0, 1]);
+  assertEquals(
+    plan.slots.map((slot) => slot.region),
+    [0, 1],
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -280,10 +339,13 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
   const write = (id: number): BindingRecipe => ({ binding: 2, source: { kind: "temp", id } });
   // A を dispatch 0 で書いて解放し、B を dispatch 1 で書いて解放したあと、dispatch 2 が A を
   // 読む形。計画は A と B を同じバイトに重ねるので、通すと B が上書きした値を読む。
-  const afterRelease = tempStep([
-    { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
-    { byteLength: 64, allocBefore: 1, releaseAfter: 1 },
-  ], [dispatch("w0", [write(0)]), dispatch("w1", [write(1)]), dispatch("r2", [read(0)])]);
+  const afterRelease = tempStep(
+    [
+      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+      { byteLength: 64, allocBefore: 1, releaseAfter: 1 },
+    ],
+    [dispatch("w0", [write(0)]), dispatch("w1", [write(1)]), dispatch("r2", [read(0)])],
+  );
   assertThrows(
     () => validateStepRecipe(afterRelease),
     ExecutionError,
@@ -301,10 +363,13 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
   );
   // 対照: 区間の内側だけで束ねれば通る（上の 1 本目から dispatch 2 の読みを B へ移した形）。
   validateStepRecipe(
-    tempStep([
-      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
-      { byteLength: 64, allocBefore: 1, releaseAfter: 2 },
-    ], [dispatch("w0", [write(0)]), dispatch("w1", [write(1)]), dispatch("r2", [read(1)])]),
+    tempStep(
+      [
+        { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+        { byteLength: 64, allocBefore: 1, releaseAfter: 2 },
+      ],
+      [dispatch("w0", [write(0)]), dispatch("w1", [write(1)]), dispatch("r2", [read(1)])],
+    ),
   );
 });
 
@@ -381,13 +446,19 @@ const tempSlotsStep = (
 
 test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴む", () => {
   // i8a8 attention と同型の「ループ外一時（0 と 2）がループ内一時（1）を挟む」形。
-  const plan = planRecipes([
-    tempSlotsStep([
-      { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
-      { byteLength: 64, allocBefore: 1, releaseAfter: 1 },
-      { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
-    ], 3),
-  ], CORE_TRANSIENT_LIMITS);
+  const plan = planRecipes(
+    [
+      tempSlotsStep(
+        [
+          { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
+          { byteLength: 64, allocBefore: 1, releaseAfter: 1 },
+          { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
+        ],
+        3,
+      ),
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
 
   // 3 本とも同時生存するので配り直しが起きない（生存ピーク = 3 本ぶん・共有 0）。
   assertEquals(plan.peakLiveBytes, 192);
@@ -399,13 +470,19 @@ test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴�
 });
 
 test("同一境界で解放された一時のバイトは、次のステップの一時が配り直される", () => {
-  const plan = planRecipes([
-    tempSlotsStep([
-      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
-      { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
-    ], 2),
-    tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
-  ], CORE_TRANSIENT_LIMITS);
+  const plan = planRecipes(
+    [
+      tempSlotsStep(
+        [
+          { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+          { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
+        ],
+        2,
+      ),
+      tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
 
   // 2 本目のステップは新しいバイトを生やさない（領域は 2 本ぶんのまま）。
   assertEquals(plan.regions, [64 + 256]);
@@ -417,19 +494,25 @@ test("同一境界で解放された一時のバイトは、次のステップ�
 
 test("出力と一時は同じ領域を共有し、pin された区間だけが配り直されない", () => {
   // 消費者ゼロの出力はステップ末尾で生存を終えるので、次のステップの一時がそのバイトを掴む。
-  const shared = planRecipes([
-    tempSlotsStep([], 0, [alloc("a", 64, 0)]),
-    tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
-  ], CORE_TRANSIENT_LIMITS);
+  const shared = planRecipes(
+    [
+      tempSlotsStep([], 0, [alloc("a", 64, 0)]),
+      tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
   assertEquals(shared.regions, [64]);
   assertEquals(shared.steps[1].temps, [1]);
   assertEquals(shared.slots[1].offset, 0);
 
   // pin（グラフ出力）は refs が 0 になっても生存を終えない。
-  const pinnedPlan = planRecipes([
-    tempSlotsStep([], 0, [alloc("y", 64, 0, true)]),
-    tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
-  ], CORE_TRANSIENT_LIMITS);
+  const pinnedPlan = planRecipes(
+    [
+      tempSlotsStep([], 0, [alloc("y", 64, 0, true)]),
+      tempSlotsStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }], 1),
+    ],
+    CORE_TRANSIENT_LIMITS,
+  );
   assertEquals(pinnedPlan.regions, [64 + 256]);
   assertEquals(pinnedPlan.slots[1].offset, 256);
   assertEquals(pinnedPlan.pinned, new Set([0]));
@@ -456,9 +539,7 @@ const dispatchStep = (dispatches: readonly Dispatch[]): StepRecipe => ({
 });
 
 /** 積まれた dispatch を記録するだけのスケジューラ（GPU 資源を持たない）。 */
-const recordingScheduler = (
-  log: string[],
-): SubmitScheduler =>
+const recordingScheduler = (log: string[]): SubmitScheduler =>
   ({
     dispatch: (
       _pipeline: unknown,
@@ -517,7 +598,7 @@ test("論理長から算出した workgroup 数が 0 の軸を持つ dispatch �
     groups: [[undefined]],
     encoding: {
       slots: new Map(),
-      lengths: ({}) as unknown as GPUBuffer,
+      lengths: {} as unknown as GPUBuffer,
       past,
       query,
     },
@@ -541,12 +622,12 @@ const pacedScheduler = (
   waits: readonly (Promise<void> | undefined)[],
 ): SubmitScheduler => {
   let calls = 0;
-  return ({
+  return {
     dispatch: (_pipeline: unknown, _group: unknown, _workgroups: unknown, key: string) => {
       log.push(key);
     },
     backpressure: () => waits[calls++],
-  }) as unknown as SubmitScheduler;
+  } as unknown as SubmitScheduler;
 };
 
 test("run の焼き込み実行は送り込みの待ちの間、次のステップの dispatch を積まない", async () => {
@@ -654,17 +735,19 @@ const bakeOne = (
   bakeAllBindGroups(
     recipes,
     {
-      device: ({ createBindGroup: stubGroup }) as unknown as GPUDevice,
+      device: { createBindGroup: stubGroup } as unknown as GPUDevice,
       plan: planRecipes(recipes, CORE_TRANSIENT_LIMITS),
       regions: [],
       inputs: new Map(),
     },
-    generation === undefined ? undefined : {
-      slots: generation.slots,
-      lengths: ({}) as unknown as GPUBuffer,
-      past: 0,
-      query: 1,
-    },
+    generation === undefined
+      ? undefined
+      : {
+          slots: generation.slots,
+          lengths: {} as unknown as GPUBuffer,
+          past: 0,
+          query: 1,
+        },
   );
 };
 
@@ -685,9 +768,12 @@ test("generation 面を欠いた実行は state / 論理長の束縛で fail lou
 test("GenerationContext が持たないスロット名は実体解決で fail loudly", () => {
   const error = assertThrows(
     () =>
-      bakeOne({ kind: "state", name: "kv.v" }, {
-        slots: new Map([["kv.k", ({}) as unknown as GPUBuffer]]),
-      }),
+      bakeOne(
+        { kind: "state", name: "kv.v" },
+        {
+          slots: new Map([["kv.k", {} as unknown as GPUBuffer]]),
+        },
+      ),
     ExecutionError,
   );
   assert(
@@ -760,9 +846,6 @@ test("assertGenerationRun は full スロットの容量超過を許可集合に
   };
   const allowed = new Set([1, 4, 8]);
   assertGenerationRun(limits, allowed, 2, 4);
-  const error = assertThrows(
-    () => assertGenerationRun(limits, allowed, 3, 4),
-    ExecutionError,
-  );
+  const error = assertThrows(() => assertGenerationRun(limits, allowed, 3, 4), ExecutionError);
   assert(error.message.includes("state 'kslot'"), error.message);
 });

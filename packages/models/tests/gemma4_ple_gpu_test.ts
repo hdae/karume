@@ -64,14 +64,17 @@ test("pleResidency: 受理と、併用できないノブの拒否", () => {
   );
   // 逆側: 綴り違いは「受理集合を引き直す」側なので入力起因にしない（決定 3 の除外）。
   const misspelled = assertThrows(() =>
-    resolveGemma4PleResidency("T", { pleResidency: "GPU" as "gpu" })
+    resolveGemma4PleResidency("T", { pleResidency: "GPU" as "gpu" }),
   );
   assert(!(misspelled instanceof ModelInputError));
 });
 
 test("gather IR: embedding → mul の 2 ノードで、添字の形がそのまま per-layer の形になる", () => {
   const graph = gemma4PleGatherGraph(index);
-  assertEquals(graph.nodes.map((node) => node.op), ["embedding", "mul"]);
+  assertEquals(
+    graph.nodes.map((node) => node.op),
+    ["embedding", "mul"],
+  );
   assertEquals(graph.nodes[0].ins, ["ple", "ple_index"]);
   assertEquals(graph.nodes[1].ins, ["ple_raw", "embed_scale"]);
   assertEquals(graph.inputs, [{ name: "ple_index", dtype: "i32", shape: [1, "M", 2] }]);
@@ -84,7 +87,11 @@ test("gather IR: embedding → mul の 2 ノードで、添字の形がそのま
 });
 
 test("メモリ内容器: 格納 dtype が codec 台帳の登録名と group 長に写る", async () => {
-  const mapping = [["i8", "int8-sym"], ["i4", "int4-sym-g"], ["i2", "int2-off"]] as const;
+  const mapping = [
+    ["i8", "int8-sym"],
+    ["i4", "int4-sym-g"],
+    ["i2", "int2-off"],
+  ] as const;
   for (const [storage, codec] of mapping) {
     const fixture = pleFixture({ ...SPEC, storage });
     const bound = await buildGemma4PleGatherContainer(fixture.index, fixture.openBlock, "T");
@@ -128,9 +135,7 @@ test("メモリ内容器: block 1 本の索引は piece に割らず丸ごと 1 
  */
 const documentOf = (declaration: IrDeclaration): Record<string, unknown> => ({
   ...declaration,
-  initializers: Object.fromEntries(
-    Object.keys(declaration.initializers).map((name) => [name, {}]),
-  ),
+  initializers: Object.fromEntries(Object.keys(declaration.initializers).map((name) => [name, {}])),
 });
 
 test("gather IR: グラフ単体の規則を通る（嘘の requires.ops は宣言の段で落ちる）", () => {
@@ -155,20 +160,35 @@ test("gather IR: ランタイムの op 契約と格納を通る", async () => {
 });
 
 test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）", () => {
-  const e2b = pleFixture({ storage: "i4", tokens: 4096, layers: 35, dim: 256, embedScale: 16 })
-    .index;
+  const e2b = pleFixture({
+    storage: "i4",
+    tokens: 4096,
+    layers: 35,
+    dim: 256,
+    embedScale: 16,
+  }).index;
   assertEquals(gemma4PleGpuBytes(e2b), {
-    values: 4096 * 35 * 256 / 2,
+    values: (4096 * 35 * 256) / 2,
     scales: 4096 * 35 * 4,
-    total: 4096 * 35 * 256 / 2 + 4096 * 35 * 4,
+    total: (4096 * 35 * 256) / 2 + 4096 * 35 * 4,
   });
   // i8（通常 Gemma 4）は同じ寸法で倍になる。
-  const i8 = pleFixture({ storage: "i8", tokens: 4096, layers: 35, dim: 256, embedScale: 16 })
-    .index;
+  const i8 = pleFixture({
+    storage: "i8",
+    tokens: 4096,
+    layers: 35,
+    dim: 256,
+    embedScale: 16,
+  }).index;
   assertEquals(gemma4PleGpuBytes(i8).values, 4096 * 35 * 256);
-  const i2 = pleFixture({ storage: "i2", tokens: 4096, layers: 35, dim: 256, embedScale: 16 })
-    .index;
-  assertEquals(gemma4PleGpuBytes(i2).values, 4096 * 35 * 256 / 4);
+  const i2 = pleFixture({
+    storage: "i2",
+    tokens: 4096,
+    layers: 35,
+    dim: 256,
+    embedScale: 16,
+  }).index;
+  assertEquals(gemma4PleGpuBytes(i2).values, (4096 * 35 * 256) / 4);
 });
 
 test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の values と一致する", async () => {
@@ -176,7 +196,13 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
   const supply = bound.graphs.ple.supplies.get("ple");
   assert(supply !== undefined, "initializer 'ple' の供給が無い");
   // piece は `values` の block と 1 対 1（行範囲は token 区間 × 層数 — 1 行 = 1 層ぶん）。
-  assertEquals(supply.blocks.map((block) => block.rows), [[0, 8], [8, 12]]);
+  assertEquals(
+    supply.blocks.map((block) => block.rows),
+    [
+      [0, 8],
+      [8, 12],
+    ],
+  );
   // part 割り: piece k はそれぞれ別 part（= 構築時のフェンス 1 本ぶん）で、companion scale は
   // piece 1 と同じ part（container-v1 §13.3 の規則③）。
   const parts = supply.blocks.map((block) => block.part);
@@ -186,7 +212,10 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
   // block 順に読み直した piece を繋ぐと、原本の values の連結そのものになる。
   const collected: Uint8Array[] = [];
   for (const block of supply.blocks) collected.push(await bound.readBlock(block.id));
-  assertEquals(collected.map((piece) => piece.byteLength / ROW_BYTES), [8, 4]);
+  assertEquals(
+    collected.map((piece) => piece.byteLength / ROW_BYTES),
+    [8, 4],
+  );
   const joined = new Uint8Array(WEIGHT_ROWS * ROW_BYTES);
   let cursor = 0;
   for (const piece of collected) {
@@ -210,9 +239,8 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
   const scales = new Float32Array(scaleBytes.buffer, scaleBytes.byteOffset, WEIGHT_ROWS);
   assertEquals(
     [...scales],
-    Array.from(
-      { length: WEIGHT_ROWS },
-      (_row, row) => scaleOf(Math.floor(row / SPEC.layers), row % SPEC.layers),
+    Array.from({ length: WEIGHT_ROWS }, (_row, row) =>
+      scaleOf(Math.floor(row / SPEC.layers), row % SPEC.layers),
     ),
   );
 
@@ -220,8 +248,5 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
   const embedScale = bound.graphs.ple.supplies.get("embed_scale");
   assertEquals(embedScale?.encoding.codec, "f32");
   const embedBytes = await bound.readBlock(embedScale!.blocks[0].id);
-  assertEquals(
-    new Float32Array(embedBytes.buffer, embedBytes.byteOffset, 1)[0],
-    SPEC.embedScale,
-  );
+  assertEquals(new Float32Array(embedBytes.buffer, embedBytes.byteOffset, 1)[0], SPEC.embedScale);
 });

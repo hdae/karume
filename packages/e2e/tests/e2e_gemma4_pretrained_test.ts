@@ -87,7 +87,9 @@ type ChatFixture = {
 };
 
 const fixture = JSON.parse(
-  await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(
+    new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url),
+  ),
 ) as ChatFixture;
 
 const caseOf = (name: string) => {
@@ -236,9 +238,10 @@ test({
     for (const one of cases) {
       await t.step(one.name, async () => {
         // 実効の束（選んだ quant 席の宣言 + 明示指定を家族の合成に通した値）→ 束の census 表の行。
-        const { quant = entry.defaultQuant, ...overrides }:
-          & { readonly quant?: string }
-          & SessionOverrides = one.options;
+        const {
+          quant = entry.defaultQuant,
+          ...overrides
+        }: { readonly quant?: string } & SessionOverrides = one.options;
         const row = censusRowOf(
           "gemma4",
           "e2b",
@@ -267,7 +270,9 @@ test({
               maxNewTokens: 4,
               sampler: { temperature: 0 },
             });
-            for await (const _ of stream) { /* 走らせるだけ */ }
+            for await (const _ of stream) {
+              /* 走らせるだけ */
+            }
             await stream.done;
           } finally {
             await pipeline.dispose();

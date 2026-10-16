@@ -402,7 +402,7 @@ export const registerReferenceGate = (
       const { missing, staleHolds } = referenceGateFindings(references, options.caseIds, holds);
       const lines = [
         `この環境（${environment}）の参照値の門が赤（登録 ${options.caseIds.length} ケース・` +
-        `行の置き場: ${references.fixtureUrl.pathname}）。`,
+          `行の置き場: ${references.fixtureUrl.pathname}）。`,
       ];
       if (options.caseIds.length === 0) {
         lines.push("走れる門に登録ケースが 0 件（呼び手の登録漏れ）。");
@@ -561,17 +561,21 @@ export const f32ArtifactBytes = (
   const count = shape.reduce((product, dim) => product * dim, 1);
   if (count !== data.length) {
     throw new Error(
-      `実物 '${name}': shape [${
-        shape.join(",")
-      }] の要素数 ${count} とデータ長 ${data.length} が食い違う`,
+      `実物 '${name}': shape [${shape.join(
+        ",",
+      )}] の要素数 ${count} とデータ長 ${data.length} が食い違う`,
     );
   }
-  return new Uint8Array(buildSafetensors([{
-    name,
-    dtype: "F32",
-    shape,
-    data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-  }]));
+  return new Uint8Array(
+    buildSafetensors([
+      {
+        name,
+        dtype: "F32",
+        shape,
+        data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+      },
+    ]),
+  );
 };
 
 /**
@@ -590,10 +594,12 @@ export const referenceMismatchMessage = (
   if (check.status !== "fail") {
     throw new Error(`${label}: 決着が '${check.status}' なので不一致の診断は作れない`);
   }
-  return `${label}: 実物の sha256 が参照と一致しない\n` +
+  return (
+    `${label}: 実物の sha256 が参照と一致しない\n` +
     `  期待 ${check.expected}\n  実際 ${settlement.sha256}\n` +
     `  実物 ${settlement.artifactUrl.pathname}（参照はバイト列ではなく sha256 のみなので先頭差分位置は出せない）\n` +
     `  参照値 ${references.fixtureUrl.pathname}\n` +
     "  tolerance に逃げない — 意図した変更なら、何が変わったのかを言えたうえで " +
-    "KARUME_REFERENCE=rewrite で焼き直すこと";
+    "KARUME_REFERENCE=rewrite で焼き直すこと"
+  );
 };

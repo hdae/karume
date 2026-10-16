@@ -33,7 +33,10 @@ const graph = (window?: number): DeclarationJson => {
         attrs: { scale: 0.5, ...attrs },
         states: { k: "kslot", v: "vslot" },
       },
-      ...[["k", "kslot"], ["v", "vslot"]].map(([name, slot]) => ({
+      ...[
+        ["k", "kslot"],
+        ["v", "vslot"],
+      ].map(([name, slot]) => ({
         op: "state_append",
         ins: [name],
         outs: [],
@@ -45,17 +48,17 @@ const graph = (window?: number): DeclarationJson => {
 };
 const inputs = (rows: number, phase: number): Record<string, Tensor> =>
   Object.fromEntries(
-    ["q", "k", "v"].map((
+    ["q", "k", "v"].map((name, n) => [
       name,
-      n,
-    ) => [name, {
-      dtype: "f32",
-      shape: [1, 1, rows, 4],
-      data: Float32Array.from(
-        { length: rows * 4 },
-        (_, i) => ((i * 7 + n * 3 + phase * 5) % 17 - 8) * .13,
-      ),
-    }]),
+      {
+        dtype: "f32",
+        shape: [1, 1, rows, 4],
+        data: Float32Array.from(
+          { length: rows * 4 },
+          (_, i) => (((i * 7 + n * 3 + phase * 5) % 17) - 8) * 0.13,
+        ),
+      },
+    ]),
   );
 const open = async (window?: number) => {
   const gpu = await acquireGpu(),
@@ -82,7 +85,8 @@ for (const window of [undefined, 4]) {
           x = inputs(rows, step),
           sink = sinks[step === 0 ? 0 : 1];
         const ref = await session.run(x, {}, { context: a, queryLength: q });
-        const batch = await gpu.beginBatch(), fences = countFences(gpu);
+        const batch = await gpu.beginBatch(),
+          fences = countFences(gpu);
         try {
           await session.enqueue(x, {
             batch,
@@ -112,7 +116,8 @@ for (const window of [undefined, 4]) {
       if (window === undefined) {
         a.rewind(2);
         b.rewind(2);
-        const x = inputs(1, 15), ref = await session.run(x, {}, { context: a, queryLength: 1 });
+        const x = inputs(1, 15),
+          ref = await session.run(x, {}, { context: a, queryLength: 1 });
         const batch = await gpu.beginBatch();
         await session.enqueue(x, {
           batch,
@@ -152,7 +157,7 @@ test("batch generation: 発行時snapshotを保ち同じcontextの並行run・re
     await assertRejects(() => session.dispose());
     await assertRejects(() => session.run(inputs(1, 0), {}, { context: a, queryLength: 1 }));
     await assertRejects(() =>
-      session.enqueue(inputs(1, 0), { batch, generation: { context: a, queryLength: 1 } })
+      session.enqueue(inputs(1, 0), { batch, generation: { context: a, queryLength: 1 } }),
     );
     const read = batch.finishAndRead({ o: sink });
     await Promise.all([pending, read]);
@@ -203,10 +208,11 @@ test("batch generation: state書き込み前の入力失敗ならcontextを再�
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
   try {
-    const batch = await gpu.beginBatch(), bad = inputs(1, 0);
+    const batch = await gpu.beginBatch(),
+      bad = inputs(1, 0);
     bad.q = { dtype: "f32", shape: [1], data: Float32Array.of(0) };
     const failure = await assertRejects(() =>
-      session.enqueue(bad, { batch, generation: { context, queryLength: 1 } })
+      session.enqueue(bad, { batch, generation: { context, queryLength: 1 } }),
     );
     assertStrictEquals(await assertRejects(() => batch.finishAndRead({ o: sink })), failure);
     assertEquals(context.pastLength, 0);
@@ -238,7 +244,7 @@ test("batch generation: 後続Session失敗は書き込み済みcontextをpoison
       copyOutputs: { o: sink },
     });
     const failure = await assertRejects(() =>
-      downstream.enqueue({ x0: { dtype: "f32", shape: [1], data: Float32Array.of(1) } }, { batch })
+      downstream.enqueue({ x0: { dtype: "f32", shape: [1], data: Float32Array.of(1) } }, { batch }),
     );
     assertStrictEquals(await assertRejects(() => batch.finishAndRead({ o: sink })), failure);
     assertThrows(() => context.pastLength);
@@ -299,11 +305,13 @@ for (const fault of ["compile", "map"] as const) {
       create = gpu.device.createBuffer.bind(gpu.device),
       error = new Error(`injected ${fault}`);
     if (fault === "compile") gpu.device.createComputePipelineAsync = () => Promise.reject(error);
-    else {gpu.device.createBuffer = (desc) => {
+    else {
+      gpu.device.createBuffer = (desc) => {
         const b = create(desc);
         if (desc.label === "batch-readback") b.mapAsync = () => Promise.reject(error);
         return b;
-      };}
+      };
+    }
     try {
       const batch = await gpu.beginBatch();
       const pending = session.enqueue(inputs(1, 0), {
@@ -340,7 +348,8 @@ test("batch generation: 2つ目の確定が失敗しても全contextをpoisonし
     a = await session.createGenerationContext({ chunkLength: 4 }),
     b = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
-  const error = new Error("injected second advance"), advance = b[RUNTIME_INTERNAL].advance;
+  const error = new Error("injected second advance"),
+    advance = b[RUNTIME_INTERNAL].advance;
   try {
     const batch = await gpu.beginBatch();
     await session.enqueue(inputs(1, 0), { batch, generation: { context: a, queryLength: 1 } });
@@ -371,16 +380,19 @@ test("batch generation: 不正commitは予約前に拒否し同じbatchで回復
   try {
     const batch = await gpu.beginBatch();
     await assertRejects(() =>
-      Reflect.apply(session.enqueue, session, [inputs(1, 0), {
-        batch,
-        generation: { context, queryLength: 1, commit: "typo" },
-      }])
+      Reflect.apply(session.enqueue, session, [
+        inputs(1, 0),
+        {
+          batch,
+          generation: { context, queryLength: 1, commit: "typo" },
+        },
+      ]),
     );
     await assertRejects(() =>
       session.enqueue(inputs(4, 0), {
         batch,
         generation: { context, queryLength: 5, commit: "deferred" },
-      })
+      }),
     );
     assertEquals(context.pastLength, 0);
     // slidingは履歴0でもrewind不可。予約の返却は直後の正当なenqueueで検証する。
@@ -407,13 +419,15 @@ test("batch generation: 借り手は貸し手の予約も終端まで保ち論�
     states: Object.fromEntries(
       Object.entries(g.states ?? {}).map(([name, value]) => [name, { ...value, external: true }]),
     ),
-    nodes: [{
-      op: "attention",
-      ins: ["q"],
-      outs: ["o"],
-      attrs: { scale: .5, window: 4, readonly: true },
-      states: { k: "kslot", v: "vslot" },
-    }],
+    nodes: [
+      {
+        op: "attention",
+        ins: ["q"],
+        outs: ["o"],
+        attrs: { scale: 0.5, window: 4, readonly: true },
+        states: { k: "kslot", v: "vslot" },
+      },
+    ],
   };
   const reader = await createSessionFromContainer(
     gpu,
@@ -502,7 +516,8 @@ test("batch generation: enqueueRead は決着でだけ論理長を進め、出�
     for (let step = 1; step < 4; step++) {
       const x = inputs(1, step);
       const ref = await session.run(x, {}, { context: a, queryLength: 1 });
-      const batch = await gpu.beginBatch(), fences = countFences(gpu);
+      const batch = await gpu.beginBatch(),
+        fences = countFences(gpu);
       try {
         const read = session.enqueueRead(x, { batch, generation: { context: b, queryLength: 1 } });
         await read.admitted;

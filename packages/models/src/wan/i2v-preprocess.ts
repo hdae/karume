@@ -76,15 +76,16 @@ export const selectWanI2vSize = (
   generation: Pick<WanGenerationDescriptor, "acceptedSizes">,
 ): Size => {
   assertRgb8(image);
-  const candidates = generation.acceptedSizes.filter((size) =>
-    (requested.width === undefined || size.width === requested.width) &&
-    (requested.height === undefined || size.height === requested.height)
+  const candidates = generation.acceptedSizes.filter(
+    (size) =>
+      (requested.width === undefined || size.width === requested.width) &&
+      (requested.height === undefined || size.height === requested.height),
   );
   if (candidates.length === 0) {
     throw new ModelInputError(
-      `${describeRequested(requested)} が受理集合（${
-        generation.acceptedSizes.map((size) => `${size.width}×${size.height}`).join(" / ")
-      }）に無い`,
+      `${describeRequested(requested)} が受理集合（${generation.acceptedSizes
+        .map((size) => `${size.width}×${size.height}`)
+        .join(" / ")}）に無い`,
     );
   }
   let best = candidates[0];
@@ -267,11 +268,6 @@ export const preprocessWanI2vImage = (
     width: size.width,
     height: size.height,
     pixels,
-    shape: [
-      CHANNELS * patchSize * patchSize,
-      1,
-      size.height / patchSize,
-      size.width / patchSize,
-    ],
+    shape: [CHANNELS * patchSize * patchSize, 1, size.height / patchSize, size.width / patchSize],
   };
 };

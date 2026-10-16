@@ -104,7 +104,10 @@ test("selectionRefs: 長さ 0 の part は列に載らない（取りに行く�
   );
   // 宣言そのものには残る（添字が part の id なので、落とすと後続の添字がずれる）。
   assertEquals(resolveSelection(manifest).containers["transformer"].parts.length, 3);
-  assertEquals(refs.filter((ref) => ref.size === 0), []);
+  assertEquals(
+    refs.filter((ref) => ref.size === 0),
+    [],
+  );
 });
 
 test("selectionRefs: 同じ実体を指す 2 つの資産名は 1 本に畳まれる", () => {
@@ -215,38 +218,48 @@ test("resolveSelection: quant の一覧は指定したモデルのものにな�
 // 失敗形はもう存在しない（3 つの名前空間を 1 枚の表へ畳んでいたのがその門の理由だった）。
 
 test("resolveSelection: 部品名と資産名が同名でも衝突しない（欄が別）", () => {
-  const collide = parseManifest(JSON.stringify({
-    format: "karume/5",
-    generator: "karume/0.1.0",
-    defaultModel: "m",
-    models: {
-      m: {
-        pipeline: "anima/1",
-        weights: {
-          tokenizer: {
-            f16: {
-              container: {
-                descriptor: {
-                  graph: { length: 11, sha256: "f2".repeat(32) },
-                  model: { length: 5, sha256: "a3".repeat(32) },
+  const collide = parseManifest(
+    JSON.stringify({
+      format: "karume/5",
+      generator: "karume/0.1.0",
+      defaultModel: "m",
+      models: {
+        m: {
+          pipeline: "anima/1",
+          weights: {
+            tokenizer: {
+              f16: {
+                container: {
+                  descriptor: {
+                    graph: { length: 11, sha256: "f2".repeat(32) },
+                    model: { length: 5, sha256: "a3".repeat(32) },
+                  },
+                  parts: [
+                    {
+                      path: "tokenizer/model-00001-of-00002.krm",
+                      size: 40,
+                      sha256: "b2".repeat(32),
+                    },
+                    {
+                      path: "tokenizer/model-00002-of-00002.krm",
+                      size: 64,
+                      sha256: "c3".repeat(32),
+                    },
+                  ],
                 },
-                parts: [
-                  { path: "tokenizer/model-00001-of-00002.krm", size: 40, sha256: "b2".repeat(32) },
-                  { path: "tokenizer/model-00002-of-00002.krm", size: 64, sha256: "c3".repeat(32) },
-                ],
               },
             },
           },
+          assets: {
+            tokenizer: { path: "tokenizer/tokenizer.json", size: 12, sha256: "a1".repeat(32) },
+          },
+          quants: { q: { weights: { tokenizer: "f16" }, session: {} } },
+          defaultQuant: "q",
+          pipelineConfig: {},
         },
-        assets: {
-          tokenizer: { path: "tokenizer/tokenizer.json", size: 12, sha256: "a1".repeat(32) },
-        },
-        quants: { q: { weights: { tokenizer: "f16" }, session: {} } },
-        defaultQuant: "q",
-        pipelineConfig: {},
       },
-    },
-  }));
+    }),
+  );
   const selection = resolveSelection(collide);
   assertEquals(Object.keys(selection.containers), ["tokenizer"]);
   assertEquals(Object.keys(selection.assets), ["tokenizer"]);

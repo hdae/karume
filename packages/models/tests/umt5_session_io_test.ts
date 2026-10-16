@@ -105,7 +105,10 @@ test("padUmt5Context: 有効長の行はそのまま・後ろの行はゼロ", (
 test("padUmt5Context: 有効長が文脈の行数と同じなら詰めずに全行", () => {
   const padded = padUmt5Context(outputOf(5, 2), 5, 5, 2);
 
-  assertEquals([...padded], Array.from({ length: 10 }, (_, index) => index + 1));
+  assertEquals(
+    [...padded],
+    Array.from({ length: 10 }, (_, index) => index + 1),
+  );
 });
 
 test("padUmt5Context: 形・dtype・行数の食い違いを落とす", () => {

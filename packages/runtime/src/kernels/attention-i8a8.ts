@@ -164,27 +164,23 @@ const P_LATTICE_MAX = 127;
 const INV_P_LATTICE = 1 / P_LATTICE_MAX;
 
 /** 添字の加算オフセット（0 は省く — 生成物を読める形に保つ）。 */
-const at = (offset: number): string => offset === 0 ? "" : ` + ${offset}u`;
+const at = (offset: number): string => (offset === 0 ? "" : ` + ${offset}u`);
 
 /** 出力の行番号（`orow0` を基点に展開）。 */
 const rowDecls = (geometry: I8a8Geometry): string =>
-  Array.from(
-    { length: geometry.regM },
-    (_, row) =>
-      row === 0
-        ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${geometry.regM}u;`
-        : `  let orow${row} = orow0 + ${row}u;`,
+  Array.from({ length: geometry.regM }, (_, row) =>
+    row === 0
+      ? `  let orow0 = wid.y * ${i8a8TileM(geometry)}u + lid.y * ${geometry.regM}u;`
+      : `  let orow${row} = orow0 + ${row}u;`,
   ).join("\n");
 
 /** 出力の列 quad（v4 経路 — `ocq0` を基点に展開）。 */
 const quadDecls = (geometry: I8a8Geometry): string => {
   const quads = geometry.regN / I8A8_PACK;
-  return Array.from(
-    { length: quads },
-    (_, quad) =>
-      quad === 0
-        ? `  let ocq0 = wid.x * ${i8a8TileN(geometry) / I8A8_PACK}u + lid.x * ${quads}u;`
-        : `  let ocq${quad} = ocq0 + ${quad}u;`,
+  return Array.from({ length: quads }, (_, quad) =>
+    quad === 0
+      ? `  let ocq0 = wid.x * ${i8a8TileN(geometry) / I8A8_PACK}u + lid.x * ${quads}u;`
+      : `  let ocq${quad} = ocq0 + ${quad}u;`,
   ).join("\n");
 };
 
@@ -198,9 +194,9 @@ const prologueA = (geometry: I8a8Geometry, base: string, label: string): string 
       `  let arow${slot} = ${slot === 0 ? `wid.y * ${tileM}u + ar` : `arow0 + ${slot * stride}u`};
   let arow_base${slot} = ${base} + arow${slot} * k4;`,
   ).join("\n");
-  return `  // ${label}（${tileM} 行 × ${i8a8KPacks(geometry)} pack を ${
-    i8a8Threads(geometry)
-  } スレッドで ${i8a8ASlots(geometry)} 巡）
+  return `  // ${label}（${tileM} 行 × ${i8a8KPacks(geometry)} pack を ${i8a8Threads(
+    geometry,
+  )} スレッドで ${i8a8ASlots(geometry)} 巡）
   let ar = tid / ${i8a8KPacks(geometry)}u;
   let ap = tid % ${i8a8KPacks(geometry)}u;
   let sa_at = ap * ${tileM}u + ar;
@@ -222,9 +218,9 @@ const prologueB = (
       `  let wcol${slot} = ${slot === 0 ? `wid.x * ${tileN}u + wc` : `wcol0 + ${slot * stride}u`};
   let ${baseName}${slot} = ${base} + wcol${slot} * k4;`,
   ).join("\n");
-  return `  // B タイルの担当（${tileN} 列 × ${i8a8KPacks(geometry)} pack を ${
-    i8a8Threads(geometry)
-  } スレッドで ${i8a8BSlots(geometry)} 巡）。
+  return `  // B タイルの担当（${tileN} 列 × ${i8a8KPacks(geometry)} pack を ${i8a8Threads(
+    geometry,
+  )} スレッドで ${i8a8BSlots(geometry)} 巡）。
   // ${note}
   let wc = tid / ${i8a8KPacks(geometry)}u;
   let wp = tid % ${i8a8KPacks(geometry)}u;
@@ -235,12 +231,15 @@ ${slots}`;
 /** ①QK の A タイル充填（q をそのまま読む — linear の x と同型）。 */
 const fillA = (geometry: I8a8Geometry, name: string): string => {
   const stride = i8a8FillStride(geometry);
-  const slots = Array.from({ length: i8a8ASlots(geometry) }, (_, slot) =>
-    `    var av${slot} = 0u;
+  const slots = Array.from(
+    { length: i8a8ASlots(geometry) },
+    (_, slot) =>
+      `    var av${slot} = 0u;
     if (arow${slot} < dims.m && apack < k4) {
       av${slot} = ${name}[arow_base${slot} + apack];
     }
-    sa[sa_at${at(slot * stride)}] = av${slot};`).join("\n");
+    sa[sa_at${at(slot * stride)}] = av${slot};`,
+  ).join("\n");
   return `    let apack = t * ${i8a8KPacks(geometry)}u + ap;
 ${slots}`;
 };
@@ -283,9 +282,9 @@ export const attentionQkI8a8Key = (
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_qk"),
   rowWindow = false,
 ): string =>
-  `attention_qk:v3:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}${
-    scoreKeyPart(score)
-  }${rowWindow ? ":rwa" : ""}`;
+  `attention_qk:v3:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}${scoreKeyPart(
+    score,
+  )}${rowWindow ? ":rwa" : ""}`;
 
 /**
  * S を `vec4<f32>` で書けるか。**D 側の条件は適格判定（`D % 4 == 0`）が既に担っている**ので
@@ -304,17 +303,18 @@ const store = (geometry: I8a8Geometry, v4: boolean, score: ScoreStorage): string
   const rows = rowDecls(geometry);
   if (v4) {
     const blocks = Array.from({ length: quads }, (_, quad) => {
-      const rowStores = Array.from({ length: regM }, (_, row) =>
-        `    if (orow${row} < dims.m) {
-      ${
-          scoreStoreQuad(
-            "s",
-            score,
-            `sbase + orow${row} * n4 + ocq${quad}`,
-            `vec4<f32>(acc${row}_${quad}) * ((qscale[qsbase + orow${row}] * dims.scale) * ks)`,
-          )
-        }
-    }`).join("\n");
+      const rowStores = Array.from(
+        { length: regM },
+        (_, row) =>
+          `    if (orow${row} < dims.m) {
+      ${scoreStoreQuad(
+        "s",
+        score,
+        `sbase + orow${row} * n4 + ocq${quad}`,
+        `vec4<f32>(acc${row}_${quad}) * ((qscale[qsbase + orow${row}] * dims.scale) * ks)`,
+      )}
+    }`,
+      ).join("\n");
       return `  if (ocq${quad} < n4) {
     // n % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${I8A8_PACK - 1} < n。
     // MUST: 半スケールは dequant 側で q / k の**両方**へ（列側はここで 1 度だけ）
@@ -371,9 +371,9 @@ export const attentionQkI8a8Wgsl = (
   const qRows = rowWindow ? "dims.rows_full" : "dims.m";
   return `// karume attention_qk (S[b,m,n] = q[b,m,d] · k[b,n,d]ᵀ, q/k とも per-token i8 の整数内積${
     dp4a ? "" : "・エミュ"
-  }, 半スケールは dequant 側${scoreNote(score)}${rowWindow ? ", 行窓 a" : ""}, ${
-    i8a8GeometryNote(geometry)
-  }${v4 ? " + vec4" : ""})
+  }, 半スケールは dequant 側${scoreNote(score)}${rowWindow ? ", 行窓 a" : ""}, ${i8a8GeometryNote(
+    geometry,
+  )}${v4 ? " + vec4" : ""})
 struct Dims {
   m: u32,
   n: u32,
@@ -383,9 +383,10 @@ ${rowWindow ? ROW_WINDOW_DIMS_EXTRA : ""}}
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> qq: array<u32>;
 @group(0) @binding(2) var<storage, read> kq: array<u32>;
-@group(0) @binding(3) var<storage, read_write> s: array<${
-    scoreArrayType(score, v4 ? "vec4<f32>" : "f32")
-  }>;
+@group(0) @binding(3) var<storage, read_write> s: array<${scoreArrayType(
+    score,
+    v4 ? "vec4<f32>" : "f32",
+  )}>;
 @group(0) @binding(${ATTENTION_QK_Q_SCALE_BINDING}) var<storage, read> qscale: array<f32>;
 @group(0) @binding(${ATTENTION_QK_K_SCALE_BINDING}) var<storage, read> kscale: array<f32>;
 ${scoreStoreWgsl("s", score)}
@@ -405,10 +406,8 @@ fn main(
   // 適格条件で D % 4 == 0 なので、行頭は必ず語境界に来る（i8 ペイロードは平坦添字 4 詰め）
   let k4 = dims.k / ${I8A8_PACK}u;
 ${
-    v4
-      ? `  let n4 = dims.n / ${I8A8_PACK}u;\n`
-      : ""
-  }  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
+  v4 ? `  let n4 = dims.n / ${I8A8_PACK}u;\n` : ""
+}  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
   // 一様性要件を満たすための前提）。MUST: q / k のペイロードは **pack 単位**、scale は行数
   // 単位、S は要素${v4 ? "（v4 では quad）" : ""}単位で数える — 単位を取り違えると B·H ≥ 2 で
   // 隣の head を読み書きする（例外なしの誤値で、B=H=1 のテストには出ない）
@@ -418,14 +417,12 @@ ${
   let ksbase = wid.z * dims.n;
   let sbase = wid.z * dims.m * ${v4 ? "n4" : "dims.n"};
 ${prologueA(geometry, "qbase", "q タイルの担当")}
-${
-    prologueB(
-      geometry,
-      "kbase",
-      "krow_base",
-      "k は [N,D] のまま読む（連続方向が D = パック方向なので**転置が要らない**）",
-    )
-  }
+${prologueB(
+  geometry,
+  "kbase",
+  "krow_base",
+  "k は [N,D] のまま読む（連続方向が D = パック方向なので**転置が要らない**）",
+)}
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;
@@ -498,9 +495,9 @@ export const attentionPvI8a8Key = (
   geometry: I8a8Geometry = defaultI8a8Geometry("attention_pv"),
   rowWindow = false,
 ): string =>
-  `attention_pv:v3:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}${
-    scoreKeyPart(score)
-  }${rowWindow ? ":rwc" : ""}`;
+  `attention_pv:v3:i8a8:${i8a8GeometryKeyPart(geometry, v4)}:${dp4a ? "dp4a" : "dp4aEmu"}${scoreKeyPart(
+    score,
+  )}${rowWindow ? ":rwc" : ""}`;
 
 /**
  * O を `vec4<f32>` で書けるか。**縮約側（N）の条件は適格判定（`N % 4 == 0`）が既に担っている**
@@ -526,8 +523,10 @@ const fillPTile = (geometry: I8a8Geometry, score: ScoreStorage): string => {
   const stride = i8a8FillStride(geometry);
   const lane = (slot: number, component: string): string =>
     `round(exp(raw${slot}.${component} - row_max${slot}) * ${P_LATTICE_MAX}.0)`;
-  const slots = Array.from({ length: i8a8ASlots(geometry) }, (_, slot) =>
-    `    var av${slot} = 0u;
+  const slots = Array.from(
+    { length: i8a8ASlots(geometry) },
+    (_, slot) =>
+      `    var av${slot} = 0u;
     if (arow${slot} < dims.m && apack < k4) {
       let raw${slot} = ${scoreReadQuad("s", score, `arow_base${slot} + apack`)};
       // P̃ の scale は **1/127 固定**（行内 max が exp(0) = 1 で構造的 — amax は取らない）。
@@ -537,7 +536,8 @@ const fillPTile = (geometry: I8a8Geometry, score: ScoreStorage): string => {
       );
       av${slot} = pack4xI8(vec4<i32>(p${slot}));
     }
-    sa[sa_at${at(slot * stride)}] = av${slot};`).join("\n");
+    sa[sa_at${at(slot * stride)}] = av${slot};`,
+  ).join("\n");
   return `    // 範囲外は 0 で埋める（qP = 0 は内積に寄与しないので K 端数でも結果は厳密）
     let apack = t * ${i8a8KPacks(geometry)}u + ap;
 ${slots}`;
@@ -567,11 +567,14 @@ const pvStore = (geometry: I8a8Geometry, v4: boolean): string => {
     `${indent}let prow = stats[(rbase + orow${row}) * 2u + 1u] * ${INV_P_LATTICE};`;
   if (v4) {
     const blocks = Array.from({ length: quads }, (_, quad) => {
-      const rowStores = Array.from({ length: regM }, (_, row) =>
-        `    if (orow${row} < dims.m) {
+      const rowStores = Array.from(
+        { length: regM },
+        (_, row) =>
+          `    if (orow${row} < dims.m) {
 ${prow(row, "      ")}
       o[obase + orow${row} * n4 + ocq${quad}] = vec4<f32>(acc${row}_${quad}) * (prow * vs);
-    }`).join("\n");
+    }`,
+      ).join("\n");
       return `  if (ocq${quad} < n4) {
     // D % ${I8A8_PACK} == 0 かつ ocq${quad} < n4 なので oc + ${I8A8_PACK - 1} < D。
     // MUST: 列 scale は Vᵀ の**行** = (b, h, d)（= V の per-column scale）。行 scale の側と
@@ -627,9 +630,9 @@ export const attentionPvI8a8Wgsl = (
   const oUnit = v4 ? "n4" : "dims.n";
   return `// karume attention_pv (O[b,m,d] = P[b,m,n] · v[b,n,d], P̃ = round(127·exp(S − m)) は非実体化${
     dp4a ? "" : "・エミュ"
-  }, v は per-column i8（Vᵀ 連続）${scoreNote(score)}${rowWindow ? ", 行窓 c" : ""}, ${
-    i8a8GeometryNote(geometry)
-  }${v4 ? " + vec4" : ""})
+  }, v は per-column i8（Vᵀ 連続）${scoreNote(score)}${rowWindow ? ", 行窓 c" : ""}, ${i8a8GeometryNote(
+    geometry,
+  )}${v4 ? " + vec4" : ""})
 struct Dims {
   m: u32,
   n: u32,
@@ -659,10 +662,8 @@ fn main(
   // 縮約軸 N は S 側では quad 単位・vq 側では pack 単位（同じ 4 要素の刻み）
   let k4 = dims.k / ${I8A8_PACK}u;
 ${
-    v4
-      ? `  let n4 = dims.n / ${I8A8_PACK}u;\n`
-      : ""
-  }  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
+  v4 ? `  let n4 = dims.n / ${I8A8_PACK}u;\n` : ""
+}  // B と H を畳んだバッチ軸（workgroup 単位で一様 — 内側の workgroupBarrier が WGSL の
   // 一様性要件を満たすための前提）。MUST: S は quad 単位、vq は pack 単位、行統計は行あたり
   // 2 語、vscale は D 本、O は要素${v4 ? "（v4 では quad）" : ""}単位で数える — 単位を
   // 取り違えると B·H ≥ 2 で隣の head を読み書きする（例外なしの誤値で B=H=1 では出ない）
@@ -677,14 +678,12 @@ ${prologueA(geometry, "sbase", "P̃ タイルの担当")}
   // 行の最大 m（K タイルループ不変なので 1 度だけ引く）。端タイルでは arow >= M がありうるので
   // 添字を 0 へ倒す（読んだ値は arow < M の枝でしか使われない）
 ${prologuePvStats(geometry)}
-${
-    prologueB(
-      geometry,
-      "vbase",
-      "vrow_base",
-      "列は D。vq は [D,N] の N 連続（= パック方向）なので**転置が要らない**",
-    )
-  }
+${prologueB(
+  geometry,
+  "vbase",
+  "vrow_base",
+  "列は D。vq は [D,N] の N 連続（= パック方向）なので**転置が要らない**",
+)}
   // ループ条件は uniform（dims は uniform バッファ）— 内側の workgroupBarrier が
   // WGSL の一様性要件を満たすために必要
   let tiles = (k4 + ${kPacks - 1}u) / ${kPacks}u;

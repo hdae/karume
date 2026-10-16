@@ -93,7 +93,7 @@ export const mirrorSeats = (mirror: URL): readonly Seat[] => {
       model,
       quant,
       row: Object.keys(session).length === 0 ? "reference" : "practical",
-    }))
+    })),
   );
 };
 
@@ -156,38 +156,43 @@ export const settleSeatReference = async <Model extends string>(context: {
   readonly references: References;
   readonly results: Results;
   readonly seat: Seat<Model>;
-  readonly open: (
-    choice: { readonly model: Model; readonly quant: string },
-  ) => Promise<ChatPipeline>;
+  readonly open: (choice: {
+    readonly model: Model;
+    readonly quant: string;
+  }) => Promise<ChatPipeline>;
 }): Promise<void> => {
   const { references, results, seat, open } = context;
   const id = seatCaseId(seat);
   /** sha の決着（記録の後で不一致を落とすために外へ持ち出す）。 */
   let settlement: ReferenceSettlement | undefined;
-  await runRecordedCase(results, {
-    id,
-    failureNote: (cause) => cause instanceof Error ? cause.message : String(cause),
-  }, async () => {
-    // 参照値を書きうる経路なので、キーを採ったアダプタと実行アダプタの同一性を先に見る
-    // （pipeline は内部で acquireGpu するので、自分では GpuContext を持たない）。
-    await assertRunningAdapter();
-    const run = await runSeat(open, seat);
-    // 門の強さの前提（上限まで生成した = 固定した id 列が {@link REFERENCE_MAX_NEW_TOKENS} 本ある）。
-    // settle より前に見る — 早く EOS で閉じた走行から行を作らない。本文は診断文に載る（失敗の
-    // note になる）。
-    assert(
-      run.stop.reason === "max-tokens",
-      `${id}: 応答が ${run.ids.length} token で閉じた（${seatNote(run)}）— ` +
-        `固定プロンプトは ${REFERENCE_MAX_NEW_TOKENS} token を超える応答を出す前提`,
-    );
-    const artifact = seatArtifactName(seat);
-    settlement = await settleReference(references, results, {
+  await runRecordedCase(
+    results,
+    {
       id,
-      artifact,
-      bytes: seatArtifactBytes(run.ids),
-    });
-    return { ...referenceEntryFields(settlement, artifact), note: seatNote(run) };
-  });
+      failureNote: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    },
+    async () => {
+      // 参照値を書きうる経路なので、キーを採ったアダプタと実行アダプタの同一性を先に見る
+      // （pipeline は内部で acquireGpu するので、自分では GpuContext を持たない）。
+      await assertRunningAdapter();
+      const run = await runSeat(open, seat);
+      // 門の強さの前提（上限まで生成した = 固定した id 列が {@link REFERENCE_MAX_NEW_TOKENS} 本ある）。
+      // settle より前に見る — 早く EOS で閉じた走行から行を作らない。本文は診断文に載る（失敗の
+      // note になる）。
+      assert(
+        run.stop.reason === "max-tokens",
+        `${id}: 応答が ${run.ids.length} token で閉じた（${seatNote(run)}）— ` +
+          `固定プロンプトは ${REFERENCE_MAX_NEW_TOKENS} token を超える応答を出す前提`,
+      );
+      const artifact = seatArtifactName(seat);
+      settlement = await settleReference(references, results, {
+        id,
+        artifact,
+        bytes: seatArtifactBytes(run.ids),
+      });
+      return { ...referenceEntryFields(settlement, artifact), note: seatNote(run) };
+    },
+  );
   if (settlement?.check.status === "fail") {
     throw new Error(referenceMismatchMessage(id, settlement, references));
   }

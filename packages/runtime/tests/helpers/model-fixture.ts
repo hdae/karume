@@ -32,10 +32,7 @@ export type DeclarationJson = {
   initializers: Record<string, { shared?: true }>;
   values: Record<string, { dtype: string; shape: (number | string)[] }>;
   /** 省略可能な state スロット節（ADR 0066 決定 2）— 既定の宣言は持たない。 */
-  states?: Record<
-    string,
-    { dtype: string; shape: (number | string)[]; external?: boolean }
-  >;
+  states?: Record<string, { dtype: string; shape: (number | string)[]; external?: boolean }>;
   nodes: {
     op: string;
     ins: string[];
@@ -93,13 +90,16 @@ export const modelBytes = async (
   tensors: readonly TensorInput[] = baseTensors(),
   options?: WriteOptions,
 ): Promise<Uint8Array<ArrayBuffer>> => {
-  const written = await writeModelContainer({
-    graphs: { [GRAPH_NAME]: declarationOf(graph) },
-    consts: [],
-    weights: tensors,
-    assets: [],
-    provenance: { license: "test" },
-  }, options ?? {});
+  const written = await writeModelContainer(
+    {
+      graphs: { [GRAPH_NAME]: declarationOf(graph) },
+      consts: [],
+      weights: tensors,
+      assets: [],
+      provenance: { license: "test" },
+    },
+    options ?? {},
+  );
   return written.single;
 };
 
@@ -156,20 +156,20 @@ export const memoryModel = (
 /** 意味論 dtype ごとのホスト側 TypedArray（bool は u32 の 0/1 — ADR 0009）。 */
 export type FilledTensor =
   | {
-    readonly dtype: "f32";
-    readonly shape: readonly number[];
-    readonly data: Float32Array<ArrayBuffer>;
-  }
+      readonly dtype: "f32";
+      readonly shape: readonly number[];
+      readonly data: Float32Array<ArrayBuffer>;
+    }
   | {
-    readonly dtype: "i32";
-    readonly shape: readonly number[];
-    readonly data: Int32Array<ArrayBuffer>;
-  }
+      readonly dtype: "i32";
+      readonly shape: readonly number[];
+      readonly data: Int32Array<ArrayBuffer>;
+    }
   | {
-    readonly dtype: "bool";
-    readonly shape: readonly number[];
-    readonly data: Uint32Array<ArrayBuffer>;
-  };
+      readonly dtype: "bool";
+      readonly shape: readonly number[];
+      readonly data: Uint32Array<ArrayBuffer>;
+    };
 
 /** 決定的なデータ生成（乱数は使わない — 失敗が再現しないため）。 */
 export const fill = (
@@ -226,10 +226,12 @@ export const singleOpDeclaration = (
   })),
   outputs: outShapes.map((_, slot) => outputName(slot)),
   initializers: {},
-  values: Object.fromEntries(outShapes.map((shape, slot) => [
-    outputName(slot),
-    { dtype: options.outDtypes?.[slot] ?? "f32", shape: [...shape] },
-  ])),
+  values: Object.fromEntries(
+    outShapes.map((shape, slot) => [
+      outputName(slot),
+      { dtype: options.outDtypes?.[slot] ?? "f32", shape: [...shape] },
+    ]),
+  ),
   nodes: [
     {
       op,

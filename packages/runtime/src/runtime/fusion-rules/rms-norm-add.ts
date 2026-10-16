@@ -35,19 +35,23 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
   heads: ["rms_norm"],
   match: (nodes, index, context) => {
     if (context.fuseRmsNormAdd !== true) return undefined;
-    const norm = nodes[index], add = nodes[index + 1];
+    const norm = nodes[index],
+      add = nodes[index + 1];
     if (norm?.node.op !== "rms_norm" || add?.node.op !== "add") return undefined;
-    const chain = [norm, add], shape = norm.outputs[0].shape;
+    const chain = [norm, add],
+      shape = norm.outputs[0].shape;
     if (!allF32(chain) || !internalsArePrivate(chain, context)) return undefined;
     if (shape.some((dim) => dim < 1) || ![256, 1536, 2560].includes(shape[shape.length - 1])) {
       return undefined;
     }
     const position = add.node.ins.indexOf(norm.outputs[0].name);
     if (
-      position < 0 || !sameShape(shape, norm.inputShapes[0]) ||
+      position < 0 ||
+      !sameShape(shape, norm.inputShapes[0]) ||
       add.inputShapes.some((input) => !sameShape(input, shape)) ||
       !sameShape(shape, add.outputs[0].shape)
-    ) return undefined;
+    )
+      return undefined;
     const binds = [...norm.node.ins, add.node.ins[1 - position]];
     // 重複bindingを要求する形は今回の検収外。外部入力の延べ参照は共通の解放簿記が導く。
     if (new Set(binds).size !== 3) return undefined;
@@ -67,16 +71,18 @@ export const RMS_NORM_ADD_RULE = defineRule<RmsNormAddMatch>({
     outputName: matched.outputName,
     outputShape: matched.shape,
     temps: [],
-    dispatches: [{
-      key: matched.subgroup ? rmsNormSubgroupKey(matched.order) : rmsNormAddKey(matched.order),
-      wgsl: () =>
-        matched.subgroup ? rmsNormSubgroupWgsl(matched.order) : rmsNormAddWgsl(matched.order),
-      params: rmsNormParams(
-        numel(matched.shape.slice(0, -1)),
-        matched.shape[matched.shape.length - 1],
-        matched.eps,
-      ),
-      workgroups: { kind: "gridStride", items: numel(matched.shape.slice(0, -1)), size: 1 },
-    }],
+    dispatches: [
+      {
+        key: matched.subgroup ? rmsNormSubgroupKey(matched.order) : rmsNormAddKey(matched.order),
+        wgsl: () =>
+          matched.subgroup ? rmsNormSubgroupWgsl(matched.order) : rmsNormAddWgsl(matched.order),
+        params: rmsNormParams(
+          numel(matched.shape.slice(0, -1)),
+          matched.shape[matched.shape.length - 1],
+          matched.eps,
+        ),
+        workgroups: { kind: "gridStride", items: numel(matched.shape.slice(0, -1)), size: 1 },
+      },
+    ],
   }),
 });

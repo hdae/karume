@@ -145,15 +145,10 @@ const run = async (
   split?: number,
   budget?: number,
 ): Promise<RunResult> => {
-  const session = await createSessionFromContainer(
-    gpu,
-    await openGraphModel(graph),
-    GRAPH_NAME,
-    {
-      ...(split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split }),
-      ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
-    },
-  );
+  const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME, {
+    ...(split === undefined ? {} : { [ROW_BLOCK_SPLIT]: split }),
+    ...(budget === undefined ? {} : { attentionRowBlockMaxBytes: budget }),
+  });
   try {
     const output = (await session.run(inputs))["y"];
     const diagnostics = session.diagnostics();
@@ -185,9 +180,9 @@ const assertSameBits = (actual: Tensor, expected: Tensor, label: string): void =
   assertEquals(
     mismatches,
     [],
-    `${label}: ビット列が違う（最初の食い違い: ${
-      mismatches.map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`).join(" / ")
-    }）`,
+    `${label}: ビット列が違う（最初の食い違い: ${mismatches
+      .map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`)
+      .join(" / ")}）`,
   );
   // 恒真化の門: 出力が定数なら「一致」は何も検証していない。
   assert(new Set(a).size > 1, `${label}: 出力が定数（ビット一致が恒真になっている）`);
@@ -246,8 +241,7 @@ test({
  * 1 枚で回った形を緑にしない）。
  */
 test({
-  name:
-    "予算 attentionRowBlockMaxBytes で割った行ブロック実行は素の 9 ノード列と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  name: "予算 attentionRowBlockMaxBytes で割った行ブロック実行は素の 9 ノード列と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -287,8 +281,7 @@ const OVERSIZE: Shape = {
 };
 
 test({
-  name:
-    "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超えるグラフが行ブロックで通る（実 GPU）",
+  name: "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超えるグラフが行ブロックで通る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const scoreBytes = OVERSIZE.heads * OVERSIZE.queries * OVERSIZE.keys * 4;

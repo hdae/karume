@@ -183,11 +183,12 @@ const readMember = async (memberRoot: URL): Promise<Member> => {
   // 条件つきの exports（`{ "import": …, "types": … }`）は text が throw する —— 読めない形は推測しない。
   // exports の無い private のメンバー（テストだけの置き場）は入口 0 本 —— 門の対象でなく、他の
   // メンバーからそこへ入る辺は「公開の入口でない」で落ちる。
-  const declaredExports: [string, unknown][] = typeof config.exports === "string"
-    ? [[".", config.exports]]
-    : config.exports === undefined && isPrivate
-    ? []
-    : Object.entries(record(config.exports, `${name} の exports`));
+  const declaredExports: [string, unknown][] =
+    typeof config.exports === "string"
+      ? [[".", config.exports]]
+      : config.exports === undefined && isPrivate
+        ? []
+        : Object.entries(record(config.exports, `${name} の exports`));
   if (declaredExports.length === 0 && !isPrivate) {
     throw new Error(`依存グラフの門: ${name} の exports が空である`);
   }
@@ -198,9 +199,9 @@ const readMember = async (memberRoot: URL): Promise<Member> => {
     ]),
   );
   const dependencies = Object.fromEntries(
-    Object.entries(record(config.dependencies ?? {}, `${name} の dependencies`)).map((
-      [key, value],
-    ) => [key, text(value, `${name} の dependencies["${key}"]`)]),
+    Object.entries(record(config.dependencies ?? {}, `${name} の dependencies`)).map(
+      ([key, value]) => [key, text(value, `${name} の dependencies["${key}"]`)],
+    ),
   );
   return {
     name,
@@ -296,20 +297,22 @@ const judgeEdges = (
  *
  * MUST: メンバーの `exports` に無いサブパスは推測せず throw する（Node の解決でも失敗する形）。
  */
-const resolverOf = (members: readonly Member[]) => (from: string, written: string): string => {
-  if (schemeOf(written) !== undefined) return written;
-  const { name, subpath } = packageOf(written);
-  const member = members.find((candidate) => candidate.name === name);
-  if (member === undefined) return written;
-  const entry = member.exports.get(subpath);
-  if (entry === undefined) {
-    throw new Error(
-      `依存グラフの門: 解決できない import がある: ${from} → ${written}` +
-        `（${name} の exports に ${subpath} が無い）`,
-    );
-  }
-  return entry;
-};
+const resolverOf =
+  (members: readonly Member[]) =>
+  (from: string, written: string): string => {
+    if (schemeOf(written) !== undefined) return written;
+    const { name, subpath } = packageOf(written);
+    const member = members.find((candidate) => candidate.name === name);
+    if (member === undefined) return written;
+    const entry = member.exports.get(subpath);
+    if (entry === undefined) {
+      throw new Error(
+        `依存グラフの門: 解決できない import がある: ${from} → ${written}` +
+          `（${name} の exports に ${subpath} が無い）`,
+      );
+    }
+    return entry;
+  };
 
 /** メンバー 1 つの全ての入口のグラフを判じる。 */
 const judgeMember = async (member: Member, members: readonly Member[]): Promise<Verdict> => {
@@ -340,10 +343,7 @@ describe("パッケージの依存グラフの門", () => {
     const hub = members.find((member) => member.name === "@karume/hub");
     assert(hub !== undefined, "ワークスペースに @karume/hub が無い");
     const { external } = await judgeMember(hub, members);
-    assert(
-      external > 0,
-      "hub のグラフに許した外部の辺が 1 本も無い（ソースの辺を読めていない）",
-    );
+    assert(external > 0, "hub のグラフに許した外部の辺が 1 本も無い（ソースの辺を読めていない）");
   });
 });
 
@@ -362,24 +362,32 @@ describe("依存グラフの門の判定", () => {
     path.startsWith("file:///repo/packages/example/")
       ? owner
       : path.startsWith("file:///repo/packages/other/")
-      ? other
-      : undefined;
+        ? other
+        : undefined;
   const file = "file:///repo/packages/example/src/a.ts";
 
   it("同じメンバーの内側のファイルと、他のメンバーの公開の入口は許す", () => {
-    const verdict = judgeEdges([
-      { from: file, written: "./b.ts", resolved: "file:///repo/packages/example/src/b.ts" },
-      { from: file, written: "@karume/other", resolved: "file:///repo/packages/other/mod.ts" },
-    ], ownerOf);
+    const verdict = judgeEdges(
+      [
+        { from: file, written: "./b.ts", resolved: "file:///repo/packages/example/src/b.ts" },
+        { from: file, written: "@karume/other", resolved: "file:///repo/packages/other/mod.ts" },
+      ],
+      ownerOf,
+    );
     assertEquals(verdict, { violations: [], external: 0 });
   });
 
   it("他のメンバーの入口でないファイルへの、根をまたぐ相対 import は落とす", () => {
-    const { violations } = judgeEdges([{
-      from: file,
-      written: "../../other/src/x.ts",
-      resolved: "file:///repo/packages/other/src/x.ts",
-    }], ownerOf);
+    const { violations } = judgeEdges(
+      [
+        {
+          from: file,
+          written: "../../other/src/x.ts",
+          resolved: "file:///repo/packages/other/src/x.ts",
+        },
+      ],
+      ownerOf,
+    );
     assertEquals(violations.length, 1);
     assert(violations[0]?.includes("@karume/other の公開の入口でない"), violations[0]);
   });
@@ -411,24 +419,30 @@ describe("依存グラフの門の判定", () => {
   });
 
   it("宣言していない外部のパッケージと、宣言していないメンバーへの依存は落とす", () => {
-    const { violations } = judgeEdges([
-      { from: file, written: "jpeg-js", resolved: "jpeg-js" },
-      {
-        from: "file:///repo/packages/other/mod.ts",
-        written: "@karume/example",
-        resolved: "file:///repo/packages/example/mod.ts",
-      },
-    ], ownerOf);
+    const { violations } = judgeEdges(
+      [
+        { from: file, written: "jpeg-js", resolved: "jpeg-js" },
+        {
+          from: "file:///repo/packages/other/mod.ts",
+          written: "@karume/example",
+          resolved: "file:///repo/packages/example/mod.ts",
+        },
+      ],
+      ownerOf,
+    );
     assertEquals(violations.length, 2);
     assert(violations[0]?.includes("宣言していない外部の依存"), violations[0]);
     assert(violations[1]?.includes("宣言していないメンバーへの依存"), violations[1]);
   });
 
   it("npm: / jsr: の指定子は宣言の有無によらず落とす", () => {
-    const { violations } = judgeEdges([
-      { from: file, written: "npm:jpeg-js@^0.4.4", resolved: "npm:jpeg-js@^0.4.4" },
-      { from: file, written: "jsr:@x/y@^1.2.0", resolved: "jsr:@x/y@^1.2.0" },
-    ], () => owner);
+    const { violations } = judgeEdges(
+      [
+        { from: file, written: "npm:jpeg-js@^0.4.4", resolved: "npm:jpeg-js@^0.4.4" },
+        { from: file, written: "jsr:@x/y@^1.2.0", resolved: "jsr:@x/y@^1.2.0" },
+      ],
+      () => owner,
+    );
     assertEquals(violations.length, 2);
     assert(violations[0]?.includes("npm: の指定子"), violations[0]);
     assert(violations[1]?.includes("jsr: の指定子"), violations[1]);
@@ -436,10 +450,13 @@ describe("依存グラフの門の判定", () => {
 
   it("node: は許可の一覧のファイル（hub の node.ts）からだけ許し、ほかのファイルからは落とす", () => {
     const hubNode = new URL("packages/hub/node.ts", REPO_ROOT).href;
-    const { violations } = judgeEdges([
-      { from: hubNode, written: "node:fs/promises", resolved: "node:fs/promises" },
-      { from: file, written: "node:fs", resolved: "node:fs" },
-    ], () => owner);
+    const { violations } = judgeEdges(
+      [
+        { from: hubNode, written: "node:fs/promises", resolved: "node:fs/promises" },
+        { from: file, written: "node:fs", resolved: "node:fs" },
+      ],
+      () => owner,
+    );
     assertEquals(violations.length, 1);
     assert(violations[0]?.includes(`${file} → "node:fs"`), violations[0]);
   });
@@ -464,13 +481,18 @@ describe("依存グラフの門の判定", () => {
 
     it("同じメンバーの内側のファイルを指していれば辺として読んだうえで許す", async () => {
       const edges = await graphOf({
-        [impl]: `export type { T } from "./types.ts";\n` +
+        [impl]:
+          `export type { T } from "./types.ts";\n` +
           `export const lazy = () => import("./lazy.ts");\n`,
         "file:///repo/packages/example/src/types.ts": "export type T = number;\n",
         "file:///repo/packages/example/src/lazy.ts": "export {};\n",
       });
       assertEquals(edges, [
-        { from: impl, written: "./types.ts", resolved: "file:///repo/packages/example/src/types.ts" },
+        {
+          from: impl,
+          written: "./types.ts",
+          resolved: "file:///repo/packages/example/src/types.ts",
+        },
         { from: impl, written: "./lazy.ts", resolved: "file:///repo/packages/example/src/lazy.ts" },
       ]);
       assertEquals(judgeEdges(edges, ownerOf), { violations: [], external: 0 });

@@ -105,7 +105,7 @@ const exists = (url: URL): boolean => {
 
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, TOKEN_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every((name) =>
-  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
+  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
 );
 const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
@@ -139,7 +139,10 @@ test({
 
 /** 系列ディレクトリの名前（記録が名乗る `series` と突き合わせる側）。 */
 const seriesName = (root: URL): string =>
-  root.pathname.split("/").filter((part) => part !== "").at(-1) ?? "";
+  root.pathname
+    .split("/")
+    .filter((part) => part !== "")
+    .at(-1) ?? "";
 
 /** JSON の 1 段を「キー → 未検査の値」へ落とす（未知の形は明確な文言で落とす）。 */
 const objectAt = (value: unknown, where: string): Map<string, unknown> => {

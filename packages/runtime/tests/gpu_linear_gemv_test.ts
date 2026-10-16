@@ -121,12 +121,14 @@ const assertRanGemm = (name: string, keys: readonly string[]): void => {
 const BS = (index: number): number => ((index % 5) - 2) * 0.25;
 
 /** group ごとに振幅が違い、隣接要素の符号が交互になる重み（上の 2 つの MUST）。 */
-const weightAt = (cols: number, groupSize: number) => (index: number): number => {
-  const group = Math.floor((index % cols) / groupSize);
-  const row = Math.floor(index / cols);
-  const base = (0.125 + (index % 11) * 0.5) * (index % 2 === 0 ? 1 : -1);
-  return base * (1 + group * 0.75 + (row % 5) * 0.25);
-};
+const weightAt =
+  (cols: number, groupSize: number) =>
+  (index: number): number => {
+    const group = Math.floor((index % cols) / groupSize);
+    const row = Math.floor(index / cols);
+    const base = (0.125 + (index % 11) * 0.5) * (index % 2 === 0 ? 1 : -1);
+    return base * (1 + group * 0.75 + (row % 5) * 0.25);
+  };
 
 type GemvCase = {
   readonly name: string;
@@ -385,7 +387,8 @@ const DOOR_CASES: readonly DoorCase[] = [
 ];
 
 test({
-  name: `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 以上 × v4 でだけ開く` +
+  name:
+    `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 以上 × v4 でだけ開く` +
     "（実 GPU / 診断キー）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -445,11 +448,13 @@ type GemvI8Case = {
  * MUST: チャネルで振幅を変える — 全チャネル同じ scale だと `wscale[col]` の添字取り違えが
  * 一切値に出ない（i4 の group ごと MUST と同型の罠）。
  */
-const weightAtI8 = (k: number) => (index: number): number => {
-  const row = Math.floor(index / k);
-  const base = (0.125 + (index % 11) * 0.5) * (index % 2 === 0 ? 1 : -1);
-  return base * (1 + (row % 7) * 0.5);
-};
+const weightAtI8 =
+  (k: number) =>
+  (index: number): number => {
+    const row = Math.floor(index / k);
+    const base = (0.125 + (index % 11) * 0.5) * (index % 2 === 0 ? 1 : -1);
+    return base * (1 + (row % 7) * 0.5);
+  };
 
 /**
  * 形の選定。`units = k / 16`（重み語の本数）と `n % 32`（最終 workgroup の埋まり方）が
@@ -648,7 +653,8 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
 ];
 
 test({
-  name: `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 でだけ開く` +
+  name:
+    `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 でだけ開く` +
     "（実 GPU / 診断キー）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

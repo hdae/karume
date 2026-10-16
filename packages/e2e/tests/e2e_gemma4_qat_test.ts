@@ -3,7 +3,11 @@ import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { nodeDirectory } from "@karume/hub/node";
-import { type Gemma4Assets, Gemma4ChatSession, Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
+import {
+  type Gemma4Assets,
+  Gemma4ChatSession,
+  Gemma4QatPipeline,
+} from "../../models/gemma4-qat.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
@@ -63,7 +67,8 @@ for (const model of ["e2b", "e4b"] as const) {
             const messages = chat.turns.slice(0, -1);
             await chat.dispose();
             assertEquals(
-              await pipeline.chat(messages, { maxNewTokens: 8, sampler: { temperature: 0 } })
+              await pipeline
+                .chat(messages, { maxNewTokens: 8, sampler: { temperature: 0 } })
                 .text(),
               text,
             );
@@ -85,27 +90,40 @@ for (const model of ["e2b", "e4b"] as const) {
             await assertRejects(() => stream.text(), Error, "QAT test abort");
             assertEquals((await stream.done).reason, "aborted");
             assertEquals(
-              await chat.send("What is 2 + 2? Reply with only the number.", { maxNewTokens: 8 })
+              await chat
+                .send("What is 2 + 2? Reply with only the number.", { maxNewTokens: 8 })
                 .text(),
               "4",
             );
           } finally {
             await chat.dispose();
           }
-          const early = pipeline.chat([{
-            role: "user",
-            content: "Write a short story about a fox.",
-          }], { maxNewTokens: 32, sampler: { temperature: 0 } });
+          const early = pipeline.chat(
+            [
+              {
+                role: "user",
+                content: "Write a short story about a fox.",
+              },
+            ],
+            { maxNewTokens: 32, sampler: { temperature: 0 } },
+          );
           for await (const chunk of early) {
             assert(chunk.length > 0);
             break;
           }
           await early.done;
           assertEquals(
-            await pipeline.chat([{
-              role: "user",
-              content: "What is 2 + 2? Reply with only the number.",
-            }], { maxNewTokens: 8, sampler: { temperature: 0 } }).text(),
+            await pipeline
+              .chat(
+                [
+                  {
+                    role: "user",
+                    content: "What is 2 + 2? Reply with only the number.",
+                  },
+                ],
+                { maxNewTokens: 8, sampler: { temperature: 0 } },
+              )
+              .text(),
             "4",
           );
         });
@@ -188,10 +206,17 @@ for (const model of ["e2b", "e4b"] as const) {
         // model 名は manifest ではなくグラフと PLE の構成から判別される面なので、
         // 同じ短文で fromPretrained と同じ応答になることを見る。
         assertEquals(
-          await pipeline.chat([{
-            role: "user",
-            content: "What is 17 + 28? Reply with only the number.",
-          }], { maxNewTokens: 8, sampler: { temperature: 0 } }).text(),
+          await pipeline
+            .chat(
+              [
+                {
+                  role: "user",
+                  content: "What is 17 + 28? Reply with only the number.",
+                },
+              ],
+              { maxNewTokens: 8, sampler: { temperature: 0 } },
+            )
+            .text(),
           "45",
         );
       } finally {

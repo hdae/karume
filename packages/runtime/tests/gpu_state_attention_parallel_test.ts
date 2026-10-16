@@ -347,10 +347,14 @@ test({
         assert(ref.pass, `${spec.name} vs 参照: ${formatAllclose(ref)}`);
         worstRef = Math.max(worstRef, ref.maxAbsError);
         // ② ③ との A/B 帯
-        const ab = compareTensors({ dtype: "f32", data: parallel.out }, {
-          dtype: "f32",
-          data: sequential.out,
-        }, AB_TOLERANCE);
+        const ab = compareTensors(
+          { dtype: "f32", data: parallel.out },
+          {
+            dtype: "f32",
+            data: sequential.out,
+          },
+          AB_TOLERANCE,
+        );
         assert(ab.pass, `${spec.name} ③ vs ③': ${formatAllclose(ab)}`);
         worstAb = Math.max(worstAb, ab.maxAbsError);
 
@@ -408,9 +412,9 @@ test({
         }
       }
       console.log(
-        `③' 実測最悪: vs 参照 maxAbs ${worstRef.toExponential(2)} / vs ③ maxAbs ${
-          worstAb.toExponential(2)
-        }（帯 ${STATE_TOLERANCE.atol} / ${AB_TOLERANCE.atol}）`,
+        `③' 実測最悪: vs 参照 maxAbs ${worstRef.toExponential(2)} / vs ③ maxAbs ${worstAb.toExponential(
+          2,
+        )}（帯 ${STATE_TOLERANCE.atol} / ${AB_TOLERANCE.atol}）`,
       );
     } finally {
       gpu.destroy();
@@ -498,8 +502,7 @@ const assertQkScores = (
       const limit = spec.past + local;
       for (let cl = 0; cl < live; cl += 1) {
         const col = base + cl;
-        const inWindow = col <= limit &&
-          (!stateSliding(spec.window) || limit - col < spec.window);
+        const inWindow = col <= limit && (!stateSliding(spec.window) || limit - col < spec.window);
         const at = (plane * rows + local) * colCap + cl;
         if (inWindow) {
           assert(
@@ -578,10 +581,14 @@ test({
         assert(ref.pass, `${spec.name} vs 参照: ${formatAllclose(ref)}`);
         worstRef = Math.max(worstRef, ref.maxAbsError);
         // ② ① との A/B 帯
-        const ab = compareTensors({ dtype: "f32", data: parallel.out }, {
-          dtype: "f32",
-          data: sequential.out,
-        }, QK_AB_TOLERANCE);
+        const ab = compareTensors(
+          { dtype: "f32", data: parallel.out },
+          {
+            dtype: "f32",
+            data: sequential.out,
+          },
+          QK_AB_TOLERANCE,
+        );
         assert(ab.pass, `${spec.name} ① vs ①': ${formatAllclose(ab)}`);
         worstAb = Math.max(worstAb, ab.maxAbsError);
 
@@ -636,11 +643,7 @@ test({
           qkReduce: "parallel",
           pvReduce: "parallel",
         });
-        const seatRef = compareTensors(
-          { dtype: "f32", data: seat.out },
-          expected,
-          STATE_TOLERANCE,
-        );
+        const seatRef = compareTensors({ dtype: "f32", data: seat.out }, expected, STATE_TOLERANCE);
         assert(seatRef.pass, `${spec.name} 席 parallel vs 参照: ${formatAllclose(seatRef)}`);
         worstSeat = Math.max(worstSeat, seatRef.maxAbsError);
       }
@@ -648,11 +651,11 @@ test({
       assert(census.written > 0 && census.masked > 0, `S の門が空振り: ${JSON.stringify(census)}`);
       assert(census.beyond > 0 && census.skipped > 0, `S の門が空振り: ${JSON.stringify(census)}`);
       console.log(
-        `①' 実測最悪: vs 参照 maxAbs ${worstRef.toExponential(2)} / vs ① maxAbs ${
-          worstAb.toExponential(2)
-        } / S の差 ${worstScore.toExponential(2)} / 席 ①'+③' vs 参照 ${
-          worstSeat.toExponential(2)
-        }（帯 ${STATE_TOLERANCE.atol} / ${QK_AB_TOLERANCE.atol}）`,
+        `①' 実測最悪: vs 参照 maxAbs ${worstRef.toExponential(2)} / vs ① maxAbs ${worstAb.toExponential(
+          2,
+        )} / S の差 ${worstScore.toExponential(2)} / 席 ①'+③' vs 参照 ${worstSeat.toExponential(
+          2,
+        )}（帯 ${STATE_TOLERANCE.atol} / ${QK_AB_TOLERANCE.atol}）`,
       );
     } finally {
       gpu.destroy();

@@ -145,7 +145,13 @@ test("planPrefillChunks: T < L は 1 chunk（残りが pad 行になる）", () 
 
 test("planPrefillChunks: 位置は飛ばず重ならず、有効行の総和が T に一致する", () => {
   // 割り方の不変条件そのもの（境界を 1 つ間違えると、どれかが必ず破れる）。
-  for (const [length, chunkLength] of [[87, 32], [1, 1], [5, 7], [64, 8], [9, 4]]) {
+  for (const [length, chunkLength] of [
+    [87, 32],
+    [1, 1],
+    [5, 7],
+    [64, 8],
+    [9, 4],
+  ]) {
     const chunks = planPrefillChunks(length, chunkLength);
     let expected = 0;
     for (const chunk of chunks) {
@@ -180,18 +186,41 @@ test("generateGreedy: prefill は固定長 chunk で流し、pad 行は 0・位�
   });
 
   assertEquals(fake.calls.length, 3);
-  assertEquals(fake.calls.map((call) => call.queryLength), [32, 32, 23]);
+  assertEquals(
+    fake.calls.map((call) => call.queryLength),
+    [32, 32, 23],
+  );
   // 物理 chunk 行数は 3 本とも chunkLength 固定（ADR 0066 決定 4）。
-  assertEquals(fake.calls.map((call) => call.idsShape), [[1, 32], [1, 32], [1, 32]]);
-  assertEquals(fake.calls.map((call) => call.positionsShape), [[1, 32], [1, 32], [1, 32]]);
+  assertEquals(
+    fake.calls.map((call) => call.idsShape),
+    [
+      [1, 32],
+      [1, 32],
+      [1, 32],
+    ],
+  );
+  assertEquals(
+    fake.calls.map((call) => call.positionsShape),
+    [
+      [1, 32],
+      [1, 32],
+      [1, 32],
+    ],
+  );
 
   assertEquals(fake.calls[0].ids, prompt.slice(0, 32));
   assertEquals(fake.calls[1].ids, prompt.slice(32, 64));
   // 末尾 chunk は 23 行が有効で、残り 9 行は pad = 0（追記 6 の値契約）。
   assertEquals(fake.calls[2].ids, [...prompt.slice(64, 87), ...new Array(9).fill(0)]);
 
-  assertEquals(fake.calls[0].positions, Array.from({ length: 32 }, (_, i) => i));
-  assertEquals(fake.calls[1].positions, Array.from({ length: 32 }, (_, i) => 32 + i));
+  assertEquals(
+    fake.calls[0].positions,
+    Array.from({ length: 32 }, (_, i) => i),
+  );
+  assertEquals(
+    fake.calls[1].positions,
+    Array.from({ length: 32 }, (_, i) => 32 + i),
+  );
   assertEquals(fake.calls[2].positions, [
     ...Array.from({ length: 23 }, (_, i) => 64 + i),
     ...new Array(9).fill(0),
@@ -257,7 +286,10 @@ test("generateGreedy: decode は queryLength=1 固定で、位置が T, T+1, …
   });
 
   assertEquals(fake.calls.length, 3);
-  assertEquals(fake.calls.map((call) => call.queryLength), [4 - 1, 1, 1]);
+  assertEquals(
+    fake.calls.map((call) => call.queryLength),
+    [4 - 1, 1, 1],
+  );
   // decode の物理 chunk 行数は 1（prefill 形とは別の PreparedPlan — ADR 0066 決定 4）。
   assertEquals(fake.calls[1].idsShape, [1, 1]);
   assertEquals(fake.calls[2].idsShape, [1, 1]);
@@ -306,9 +338,15 @@ test("generateGreedy: 容量記号は createGenerationContext だけへ渡す（
   assertEquals(fake.specs.length, 1);
   assertEquals(fake.specs[0].chunkLength, 4);
   assertEquals(fake.specs[0].bindings, { C: 8 });
-  assertEquals(fake.calls.map((call) => call.bindings), [undefined, undefined]);
+  assertEquals(
+    fake.calls.map((call) => call.bindings),
+    [undefined, undefined],
+  );
   // 全 step が同じ context を使う（1 生成 = 1 context）。
-  assertEquals(fake.calls.every((call) => call.sameContext), true);
+  assertEquals(
+    fake.calls.every((call) => call.sameContext),
+    true,
+  );
 });
 
 test("generateGreedy: 正常終了で context を 1 度だけ dispose する", async () => {
@@ -507,7 +545,10 @@ test("generateGreedy(derive): 物理行数ぶんの ids / positions が渡り、
     { ids: [generated[0]], positions: [2] },
   ]);
   // 返り値のキーがそのまま run の入力に乗っている（fake は `position_ids` を必須で読む）。
-  assertEquals(fake.calls.map((call) => call.positions), [[0, 1, 0, 0], [2]]);
+  assertEquals(
+    fake.calls.map((call) => call.positions),
+    [[0, 1, 0, 0], [2]],
+  );
 });
 
 test("generateGreedy: derive 省略時は input_ids のほかに何も渡さない", async () => {

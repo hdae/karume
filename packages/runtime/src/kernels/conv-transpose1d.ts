@@ -86,16 +86,16 @@ const assertGatherWeight = (weight: WeightStorage): void => {
 
 export const convTranspose1dKey = (weight: WeightStorage): string => {
   assertGatherWeight(weight);
-  return `conv_transpose1d:v2:f32:gather:wg${CONV_TRANSPOSE1D_WORKGROUP_SIZE}${
-    weightKeyPart(weight)
-  }`;
+  return `conv_transpose1d:v2:f32:gather:wg${CONV_TRANSPOSE1D_WORKGROUP_SIZE}${weightKeyPart(
+    weight,
+  )}`;
 };
 
 export const convTranspose1dWgsl = (weight: WeightStorage): string => {
   assertGatherWeight(weight);
-  return `// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32${
-    weightNote(weight)
-  }, gather 形)
+  return `// karume conv_transpose1d (x[B,Cin,L] * W[Cin,Cout,K] + b[Cout], f32${weightNote(
+    weight,
+  )}, gather 形)
 struct Dims {
   n: u32,
   batch: u32,

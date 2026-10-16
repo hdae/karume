@@ -20,7 +20,10 @@ test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
   const second = new Randn(7).normals(64);
   const other = new Randn(8).normals(64);
   assertEquals([...first], [...second]);
-  assert([...first].some((value, index) => value !== other[index]), "seed を変えても同じ列");
+  assert(
+    [...first].some((value, index) => value !== other[index]),
+    "seed を変えても同じ列",
+  );
 });
 
 test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {

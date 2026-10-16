@@ -29,7 +29,11 @@ import {
   prepareContainer,
   type Tensor,
 } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -502,7 +506,8 @@ const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
 /** SKIP 時にそのまま貼れる生成コマンド（`sbv2/export.py` の docstring と同じもの）。 */
-const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group sbv2 python -m sbv2.export" +
+const GENERATE_COMMAND =
+  "cd tools/export-recipes && uv run --group sbv2 python -m sbv2.export" +
   " --model-dir ../../inputs/sbv2/F1";
 
 /** 格納 dtype ごとの資産系列（ADR 0018 — 同居させない）。 */
@@ -616,12 +621,15 @@ type Sbv2Case = {
  * には来ないが、ターゲットの実体はディレクトリなので **ディレクトリだけ**を見る形は据え置く。
  */
 const discoverTargets = (root: URL): readonly string[] =>
-  listDir(root).filter((entry) => entry.isDirectory).map((entry) => entry.name).sort();
+  listDir(root)
+    .filter((entry) => entry.isDirectory)
+    .map((entry) => entry.name)
+    .sort();
 
 const discoverCases = (root: URL, target: string): readonly Sbv2Case[] =>
   listDir(new URL(`${target}/`, root))
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => ({
       target,
@@ -695,8 +703,7 @@ for (const series of SERIES) {
     /** ケース ID（系列 / ターゲットが違えば同じケース名があるので組で持つ）。 */
     const caseId = `${series.name}/${target}/${caseName}`;
     test({
-      name:
-        `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
+      name: `SBV2 golden 突合: ${series.name} / ${target} / ${caseName}（実 GPU / torch CPU 期待値）`,
       ignore: !available || !GPU_AVAILABLE,
       fn: async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
@@ -729,7 +736,7 @@ for (const series of SERIES) {
             ...new Set(
               Object.values(parsed.graph.initializers)
                 .flatMap((initializer) =>
-                  initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)]
+                  initializer.storage === undefined ? [] : [codecLayout(initializer.storage.codec)],
                 )
                 .filter((layout) => layout === "f16" || layout === "i8"),
             ),

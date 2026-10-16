@@ -203,21 +203,21 @@ export class GenerationCapacityError extends ModelInputError {
 /** 生成中のイベント（ADR 0083 決定 2）。 */
 export type GenerationEvent =
   | {
-    readonly kind: "token";
-    /** 選ばれた token id。 */
-    readonly id: number;
-    /**
-     * この token が会話に置かれる絶対位置（非投機では = 直後の `context.pastLength`。投機では
-     * 1 verify で複数 token が確定するので、commit 前の `pastLength + 1 + i`）。
-     */
-    readonly position: number;
-  }
+      readonly kind: "token";
+      /** 選ばれた token id。 */
+      readonly id: number;
+      /**
+       * この token が会話に置かれる絶対位置（非投機では = 直後の `context.pastLength`。投機では
+       * 1 verify で複数 token が確定するので、commit 前の `pastLength + 1 + i`）。
+       */
+      readonly position: number;
+    }
   | {
-    readonly kind: "prefill";
-    /** **commit 済み**の prefill chunk 数（1 始まり — `chunk / chunks` がそのまま進捗）。 */
-    readonly chunk: number;
-    readonly chunks: number;
-  };
+      readonly kind: "prefill";
+      /** **commit 済み**の prefill chunk 数（1 始まり — `chunk / chunks` がそのまま進捗）。 */
+      readonly chunk: number;
+      readonly chunks: number;
+    };
 
 /**
  * 停止理由（{@link GenerationStream.done} が返す）。
@@ -231,36 +231,34 @@ export type GenerationEvent =
  *
  * `closed` は消費側が `break` / `return()` で閉じた場合（`aborted` は `AbortSignal` 経由）。
  */
-export type GenerationStop =
-  & {
-    /**
-     * このターンが**生成した** token の数（prompt は含まない）。
-     *
-     * MUST: 停止 token（`eos` / `stop-token`）も 1 個として数える。非投機では抽選 1 回 = run 1 回
-     * なので、この数がそのまま生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける
-     * （それがこの欄の目的）。投機では 1 verify run が最大 `k+1` 個を確定させるので run 数は
-     * `speculation.cycles + speculation.draftRuns`（ゲート付きのターンは `+ plainSteps`）で読む。
-     * 本文だけの数（= `token` イベントの数）が要るなら、停止 token を運ぶ 2 枝
-     * （`"eos"` / `"stop-token"`）のとき 1 引く。
-     *
-     * `max-tokens` なら要求の `maxNewTokens` に一致し、`closed` / `aborted` では打ち切りまでに
-     * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線。
-     * 投機でも配送した token までしか commit しないので、この数 = 会話に入った生成 token 数）。
-     */
-    readonly tokens: number;
-    /**
-     * 投機の勘定（`options.speculative` を持つ sequence のターンだけ載る — 非投機の sequence では
-     * 欄ごと無い）。
-     */
-    readonly speculation?: GenerationSpeculation;
-  }
-  & (
-    | { readonly reason: "eos"; readonly token: number }
-    | { readonly reason: "stop-token"; readonly token: number }
-    | { readonly reason: "max-tokens" }
-    | { readonly reason: "aborted" }
-    | { readonly reason: "closed" }
-  );
+export type GenerationStop = {
+  /**
+   * このターンが**生成した** token の数（prompt は含まない）。
+   *
+   * MUST: 停止 token（`eos` / `stop-token`）も 1 個として数える。非投機では抽選 1 回 = run 1 回
+   * なので、この数がそのまま生成に費やした run 数と一致し、`tok/s` を再エンコード無しで書ける
+   * （それがこの欄の目的）。投機では 1 verify run が最大 `k+1` 個を確定させるので run 数は
+   * `speculation.cycles + speculation.draftRuns`（ゲート付きのターンは `+ plainSteps`）で読む。
+   * 本文だけの数（= `token` イベントの数）が要るなら、停止 token を運ぶ 2 枝
+   * （`"eos"` / `"stop-token"`）のとき 1 引く。
+   *
+   * `max-tokens` なら要求の `maxNewTokens` に一致し、`closed` / `aborted` では打ち切りまでに
+   * 出した数になる（どちらも「成功した run のぶんだけ会話は進んでいる」— 上の節と同じ線。
+   * 投機でも配送した token までしか commit しないので、この数 = 会話に入った生成 token 数）。
+   */
+  readonly tokens: number;
+  /**
+   * 投機の勘定（`options.speculative` を持つ sequence のターンだけ載る — 非投機の sequence では
+   * 欄ごと無い）。
+   */
+  readonly speculation?: GenerationSpeculation;
+} & (
+  | { readonly reason: "eos"; readonly token: number }
+  | { readonly reason: "stop-token"; readonly token: number }
+  | { readonly reason: "max-tokens" }
+  | { readonly reason: "aborted" }
+  | { readonly reason: "closed" }
+);
 
 /**
  * 投機の勘定（{@link GenerationStop.speculation}）。
@@ -368,21 +366,21 @@ export type GenerationGateTrace = {
 export type GenerationRunPhase =
   | { readonly kind: "prefill"; readonly chunk: number; readonly chunks: number }
   | {
-    readonly kind: "decode";
-    readonly step: number;
-    readonly wallMs?: number;
-    readonly gate?: GenerationGateTrace;
-  }
+      readonly kind: "decode";
+      readonly step: number;
+      readonly wallMs?: number;
+      readonly gate?: GenerationGateTrace;
+    }
   | { readonly kind: "draft"; readonly cycle: number }
   | {
-    readonly kind: "verify";
-    readonly cycle: number;
-    readonly rows: number;
-    readonly accepted: number;
-    readonly delivered?: number;
-    readonly wallMs?: number;
-    readonly gate?: GenerationGateTrace;
-  };
+      readonly kind: "verify";
+      readonly cycle: number;
+      readonly rows: number;
+      readonly accepted: number;
+      readonly delivered?: number;
+      readonly wallMs?: number;
+      readonly gate?: GenerationGateTrace;
+    };
 
 /**
  * 1 回ぶんの生成リクエスト（ADR 0083 決定 1）。
@@ -688,7 +686,7 @@ export const physicalChunkRows = (
 ): number =>
   queryLength === 1
     ? 1
-    : program.chunkBuckets.find((rows) => rows >= queryLength) ?? program.chunkLength;
+    : (program.chunkBuckets.find((rows) => rows >= queryLength) ?? program.chunkLength);
 
 /**
  * 行選択入力（`[R]` の i32 — ADR 0068 決定 4）。
@@ -740,10 +738,7 @@ const readRows = (
     throw new Error(`${where}: '${name}' が f32 でない（${tensor.dtype}）`);
   }
   const shape = tensor.shape;
-  if (
-    shape.length !== 3 || shape[0] !== 1 || shape[1] !== expectedRows ||
-    shape[2] !== width
-  ) {
+  if (shape.length !== 3 || shape[0] !== 1 || shape[1] !== expectedRows || shape[2] !== width) {
     throw new Error(
       `${where}: '${name}' の形 [${shape.join(",")}] が [1,${expectedRows},${width}] でない`,
     );
@@ -862,9 +857,9 @@ const assertSpeculativeSetup = (
   }
   if (!program.chunkBuckets.some((rows) => rows >= k + 1)) {
     throw new Error(
-      `verify ${k + 1} 行を載せるバケットが無い（chunkBuckets [${
-        program.chunkBuckets.join(", ")
-      }]）`,
+      `verify ${k + 1} 行を載せるバケットが無い（chunkBuckets [${program.chunkBuckets.join(
+        ", ",
+      )}]）`,
     );
   }
 };
@@ -968,10 +963,9 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       } else if (inherited === undefined && options.speculative.gate !== undefined) {
         // ゲートの居ない席にノブを渡すのは「効かないノブ」— 黙って通さない（横断不変条件）。
         throw new Error(
-          `speculative: policy "always" にゲートのノブ ${
-            JSON.stringify(options.speculative.gate)
-          } を` +
-            `渡したが、"always" にはゲートが居ない`,
+          `speculative: policy "always" にゲートのノブ ${JSON.stringify(
+            options.speculative.gate,
+          )} を` + `渡したが、"always" にはゲートが居ない`,
         );
       }
       face = await options.speculative.open(context);
@@ -1093,12 +1087,15 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     // 抽選器は 1 生成に 1 つ（RNG 状態を step 越しに持つ）。指定の検査と、その指定の
     // スナップショット（`logitBias` の要素まで写す）も `createSampler` の中で済む。
     const sampler = createSampler(request.sampler);
-    const greedy = face === undefined && options.onRun === undefined && sampler.greedy !== undefined
-      ? options.greedy
-      : undefined;
+    const greedy =
+      face === undefined && options.onRun === undefined && sampler.greedy !== undefined
+        ? options.greedy
+        : undefined;
     const pickGreedy = (result: GreedyRunResult): number => {
       if (
-        !Number.isSafeInteger(result.index) || result.index < 0 || result.index >= program.vocabSize
+        !Number.isSafeInteger(result.index) ||
+        result.index < 0 ||
+        result.index >= program.vocabSize
       ) {
         throw new Error(`greedyの添字 ${result.index} が語彙 0..${program.vocabSize - 1} の外`);
       }
@@ -1109,9 +1106,8 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     // 同じ logits・同じ history・同じ順で 1 回ずつ呼ぶ（確定 token 1 個につき 1 回）ので、RNG の消費列も
     // token 列も非投機と厳密に一致する — 温度 > 0 では「draft と同じ token を引いたら受理」が
     // one-hot draft の speculative sampling そのものになる（受理確率 = target 分布での draft の確率）。
-    const tally: SpeculationTally | undefined = face === undefined
-      ? undefined
-      : createSpeculationTally(k);
+    const tally: SpeculationTally | undefined =
+      face === undefined ? undefined : createSpeculationTally(k);
     /** ゲートが decode 形で回した step の数（このターンぶん — 投機の勘定には入れない）。 */
     let plainSteps = 0;
     /**
@@ -1123,15 +1119,19 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
      */
     let switchesAtStart = gate?.switches ?? 0;
     const withSpeculation = (stopped: GenerationStop): GenerationStop =>
-      tally === undefined ? stopped : {
-        ...stopped,
-        speculation: {
-          ...tally,
-          acceptedHistogram: [...tally.acceptedHistogram],
-          // ゲートが居ないターンは欄ごと生やさない（0 と「ゲートが居ない」は別物）。
-          ...(gate === undefined ? {} : { plainSteps, switches: gate.switches - switchesAtStart }),
-        },
-      };
+      tally === undefined
+        ? stopped
+        : {
+            ...stopped,
+            speculation: {
+              ...tally,
+              acceptedHistogram: [...tally.acceptedHistogram],
+              // ゲートが居ないターンは欄ごと生やさない（0 と「ゲートが居ない」は別物）。
+              ...(gate === undefined
+                ? {}
+                : { plainSteps, switches: gate.switches - switchesAtStart }),
+            },
+          };
     /** 保留中の verify を frontier まで確定させる（保留が無ければ何もしない）。 */
     const settleCommit = (): void => {
       if (context.pendingCommit === undefined) return;
@@ -1341,11 +1341,14 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
               else gate.observeCycle(wall, confirmed.length);
             }
             // ゲートの状態は**観測の後**に読む（{@link GenerationGateTrace} の MUST）。
-            const gateTrace: GenerationGateTrace | undefined = gate === undefined ? undefined : {
-              mode: gate.mode,
-              switches: gate.switches - switchesAtStart,
-              measured,
-            };
+            const gateTrace: GenerationGateTrace | undefined =
+              gate === undefined
+                ? undefined
+                : {
+                    mode: gate.mode,
+                    switches: gate.switches - switchesAtStart,
+                    measured,
+                  };
             // 次 cycle の drafter 入力 = 新しい frontier b' を出した行 a（写す — 次の run で消える）。
             // ゲート由来の plain step も verify 形の 1 行なので、ここで hidden が繋がる。
             const nextHidden = copyRow(hiddenRows.row(accepted));
@@ -1361,20 +1364,20 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             onRun?.(
               gated
                 ? {
-                  kind: "decode",
-                  step: plainSteps,
-                  wallMs: wall,
-                  ...(gateTrace === undefined ? {} : { gate: gateTrace }),
-                }
+                    kind: "decode",
+                    step: plainSteps,
+                    wallMs: wall,
+                    ...(gateTrace === undefined ? {} : { gate: gateTrace }),
+                  }
                 : {
-                  kind: "verify",
-                  cycle,
-                  rows: queryLength,
-                  accepted,
-                  delivered: confirmed.length,
-                  wallMs: wall,
-                  ...(gateTrace === undefined ? {} : { gate: gateTrace }),
-                },
+                    kind: "verify",
+                    cycle,
+                    rows: queryLength,
+                    accepted,
+                    delivered: confirmed.length,
+                    wallMs: wall,
+                    ...(gateTrace === undefined ? {} : { gate: gateTrace }),
+                  },
             );
             // `confirmed` は配送列そのもの（停止 token より後ろは受理の側で列挙していない）。
             for (let index = 0; index < confirmed.length; index += 1) {
@@ -1420,24 +1423,28 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
             ...extra,
           };
           // prefillは従来runを維持し、初回から大きなbackingを確保する費用を避ける。
-          const result = greedy === undefined
-            ? {
-              kind: "logits" as const,
-              outputs: await session.run(inputs, undefined, { context, queryLength: 1 }),
-            }
-            : {
-              kind: "greedy" as const,
-              selected: await greedy(inputs, { context, queryLength: 1 }),
-            };
+          const result =
+            greedy === undefined
+              ? {
+                  kind: "logits" as const,
+                  outputs: await session.run(inputs, undefined, { context, queryLength: 1 }),
+                }
+              : {
+                  kind: "greedy" as const,
+                  selected: await greedy(inputs, { context, queryLength: 1 }),
+                };
           // MUST: run が通った時点で frontier は KV に入った（= もう連結してはならない）— prefill
           // 側の `index === 0` と同じ理由で、抽選の**前**に落とす。ここを抽選の後に置くと、logits の
           // NaN などで `sampler.next` が投げたときに旧 frontier が残り、次ターンの prompt 先頭へ
           // 連結されて**同じ token が 2 つの位置に入る**（例外にならない沈黙劣化）。
           pendingToken = undefined;
-          token = result.kind === "greedy" ? pickGreedy(result.selected) : sampler.next(
-            readLogits(result.outputs, program, `decode@${step}`, 1).row(0),
-            history,
-          );
+          token =
+            result.kind === "greedy"
+              ? pickGreedy(result.selected)
+              : sampler.next(
+                  readLogits(result.outputs, program, `decode@${step}`, 1).row(0),
+                  history,
+                );
           onRun?.({ kind: "decode", step: step + 1, wallMs: now() - startedAt });
           generated += 1;
           history.push(token);

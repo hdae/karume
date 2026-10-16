@@ -185,11 +185,9 @@ export type VowelDetectorPipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type VowelDetectorFromPretrainedOptions =
-  & VowelDetectorPipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions
-  & {
+export type VowelDetectorFromPretrainedOptions = VowelDetectorPipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
@@ -214,12 +212,7 @@ const assetBuffer = (
  * part 列（`crnn[0]` / `crnn[1]` / …）。
  */
 const assetOpener = (assets: VowelDetectorAssets["assets"]): Promise<ComponentOpener> =>
-  assetComponentOpener(
-    "vowel-detector",
-    assets,
-    (key) => assetBuffer(assets, key),
-    COMPONENT_KEYS,
-  );
+  assetComponentOpener("vowel-detector", assets, (key) => assetBuffer(assets, key), COMPONENT_KEYS);
 
 /**
  * mel 基底の資産（1 テンソルの f32 safetensors `[80, 257]`）を読む。
@@ -264,10 +257,7 @@ export const parseMelBasis = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> =>
  * NOTE: `export` は GPU 無しで拒否経路を縛るテストのため（`mod.ts` / サブパス面には出さない —
  * ADR 0008）。
  */
-export const assertGraph = (
-  model: GraphOwner,
-  config: VowelDetectorPipelineConfig,
-): string => {
+export const assertGraph = (model: GraphOwner, config: VowelDetectorPipelineConfig): string => {
   if (model.graph.inputs.length !== 1 || model.graph.outputs.length !== 1) {
     throw new Error(
       `VowelDetectorPipeline: グラフの入出力が ${model.graph.inputs.length} /` +
@@ -331,10 +321,7 @@ const seconds = (frames: number): string => (frames / FRAMES_PER_SECOND).toFixed
  *
  * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
  */
-export const assertFrameLimit = (
-  config: VowelDetectorPipelineConfig,
-  frames: number,
-): void => {
+export const assertFrameLimit = (config: VowelDetectorPipelineConfig, frames: number): void => {
   if (frames <= config.maxFrames) return;
   // 長さの出どころは呼び手の波形なので入力起因（ADR 0107 決定 2 — 区切って渡せば通る）。
   throw new ModelInputError(
@@ -356,10 +343,7 @@ export const assertFrameLimit = (
  *
  * NOTE: `export` はテストのため（境界の振る舞いを実 GPU 無しで名指しできるように）。
  */
-export const assertFrameFloor = (
-  config: VowelDetectorPipelineConfig,
-  frames: number,
-): void => {
+export const assertFrameFloor = (config: VowelDetectorPipelineConfig, frames: number): void => {
   if (frames >= config.minFrames) return;
   // 上限側と同じく呼び手の波形の寸法（ADR 0107 決定 2）。
   throw new ModelInputError(
@@ -523,7 +507,7 @@ const openVowelDetectorState = async (
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitVowelDetector} が既に同じ 1 本で見ているが、自前で取った device は
   // ここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `VowelDetectorPipeline: quant '${quantName}'`);
@@ -572,28 +556,22 @@ const runGraph = (
   rows: number,
 ): Promise<Float32Array<ArrayBuffer>> => {
   const model = state.graph;
-  return withSession(
-    state.gpu,
-    model,
-    state.sessionOptions,
-    undefined,
-    async (_run, session) => {
-      // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
-      // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
-      const outputs = await session.run({ [INPUT_NAME]: features }, { [state.symbol]: rows });
-      if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(session.diagnostics());
-      const name = model.graph.outputs[0];
-      const tensor = outputs[name];
-      if (tensor === undefined) {
-        throw new Error(`vowel-detector: グラフ出力 '${name}' が実行結果に無い`);
-      }
-      // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-      if (tensor.dtype !== "f32") {
-        throw new Error(`vowel-detector: ロジットが f32 でない（${tensor.dtype}）`);
-      }
-      return tensor.data;
-    },
-  );
+  return withSession(state.gpu, model, state.sessionOptions, undefined, async (_run, session) => {
+    // 記号 `T` は 20ms 格子の本数。入力軸は `2T` の派生次元なので実 shape からも解けるが
+    // （ADR 0057）、ホストが数えた本数を明示で渡して食い違いを実行前に落とす。
+    const outputs = await session.run({ [INPUT_NAME]: features }, { [state.symbol]: rows });
+    if (state.onRunDiagnostics !== undefined) state.onRunDiagnostics(session.diagnostics());
+    const name = model.graph.outputs[0];
+    const tensor = outputs[name];
+    if (tensor === undefined) {
+      throw new Error(`vowel-detector: グラフ出力 '${name}' が実行結果に無い`);
+    }
+    // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
+    if (tensor.dtype !== "f32") {
+      throw new Error(`vowel-detector: ロジットが f32 でない（${tensor.dtype}）`);
+    }
+    return tensor.data;
+  });
 };
 
 /**
@@ -619,12 +597,16 @@ const detectAudio = async (
   assertFrameFloor(config, usable);
   const rows = usable / TIME_STRIDE;
 
-  const logits = await runGraph(state, {
-    dtype: "f32",
-    shape: [1, usable, config.featureDim],
-    // 端数を落とした実長ぶんだけを渡す（pad は 1 要素も無い — モジュール doc）。
-    data: features.data.slice(0, usable * config.featureDim),
-  }, rows);
+  const logits = await runGraph(
+    state,
+    {
+      dtype: "f32",
+      shape: [1, usable, config.featureDim],
+      // 端数を落とした実長ぶんだけを渡す（pad は 1 要素も無い — モジュール doc）。
+      data: features.data.slice(0, usable * config.featureDim),
+    },
+    rows,
+  );
   const expected = rows * config.classes.length;
   if (logits.length !== expected) {
     throw new Error(

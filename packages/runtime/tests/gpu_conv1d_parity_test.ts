@@ -256,11 +256,12 @@ const runBoth = async (
       conv1dWgsl(testCase.storage),
     );
     const direct = bind(directLayout, conv1dParams(dims));
-    scheduler.dispatch(directPipeline, direct.group, [
-      gridStrideWorkgroups(count, CONV1D_WORKGROUP_SIZE, limit),
-      1,
-      1,
-    ], directKey);
+    scheduler.dispatch(
+      directPipeline,
+      direct.group,
+      [gridStrideWorkgroups(count, CONV1D_WORKGROUP_SIZE, limit), 1, 1],
+      directKey,
+    );
 
     // ② implicit GEMM（1 workgroup = 1 出力タイル）
     const kFlat = dims.channelsIn * dims.kernel;
@@ -274,11 +275,16 @@ const runBoth = async (
     // MUST: dispatch の辺は生成・キーと**同じ解決点**（`gemmMTileGeometry`）から導く。
     // m タイルの変種が動かすのは行の辺だけで、n の辺は幾何の tileN（両変種で同じ）。
     const geometry = gemmMTileGeometry(mTile);
-    scheduler.dispatch(igemmPipeline, igemm.group, [
-      tiledWorkgroups(dims.lengthOut, gemmTileN(geometry), limit, testCase.name),
-      tiledWorkgroups(dims.channelsOut, gemmTileM(geometry), limit, testCase.name),
-      tiledWorkgroups(dims.batch, 1, limit, testCase.name),
-    ], igemmKey);
+    scheduler.dispatch(
+      igemmPipeline,
+      igemm.group,
+      [
+        tiledWorkgroups(dims.lengthOut, gemmTileN(geometry), limit, testCase.name),
+        tiledWorkgroups(dims.channelsOut, gemmTileM(geometry), limit, testCase.name),
+        tiledWorkgroups(dims.batch, 1, limit, testCase.name),
+      ],
+      igemmKey,
+    );
 
     await scheduler.flush();
     // CPU 参照は**量子化した重みを展開し直したもの**で作る（f16 / i8 の格納誤差を
@@ -656,10 +662,7 @@ test({
  * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのカーネルも正しいので、
  * 出力の一致は踏み分けの証拠にならない。
  */
-const conv1dKeysUsed = async (
-  channels: number,
-  groups: number,
-): Promise<ReadonlySet<string>> => {
+const conv1dKeysUsed = async (channels: number, groups: number): Promise<ReadonlySet<string>> => {
   const gpu = await acquireGpu();
   const graph = singleOpDeclaration(
     "conv1d",

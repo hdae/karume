@@ -34,7 +34,15 @@
  * 配布形が無い環境は明示 SKIP（全 SKIP を FAIL にするのは門番 `distribution_gate_test.ts`）。
  */
 
-import { isNotFound, readFile, readRange, readTextFile, realPathSync, statSync, writeFile } from "@karume/test-support/fs";
+import {
+  isNotFound,
+  readFile,
+  readRange,
+  readTextFile,
+  realPathSync,
+  statSync,
+  writeFile,
+} from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import {
   assert,
@@ -124,7 +132,9 @@ if (SWAP_DIRECTORY === undefined) {
   );
 }
 
-const references = openReferences(new URL("../../models/tests/fixtures/references/wan.json", import.meta.url));
+const references = openReferences(
+  new URL("../../models/tests/fixtures/references/wan.json", import.meta.url),
+);
 const results = openResults("wan-swap");
 
 /** 実体を持つ part（長さ 0 の part は取得の対象外 — hub も取らない）。 */
@@ -171,8 +181,9 @@ type BoundBlock = {
  */
 const textEncoderBlocks = async (root: URL): Promise<readonly BoundBlock[]> => {
   const loaded = await loadManifest(nodeDirectory(root.pathname));
-  const container = resolveSelection(loaded.manifest, { weights: [TEXT_ENCODER] })
-    .containers[TEXT_ENCODER];
+  const container = resolveSelection(loaded.manifest, { weights: [TEXT_ENCODER] }).containers[
+    TEXT_ENCODER
+  ];
   assert(container !== undefined, `${root.pathname} の manifest に '${TEXT_ENCODER}' の容器が無い`);
   const opened = await openContainer(
     { kind: "source", source: openContainerSource(loaded, container) },
@@ -231,21 +242,24 @@ const recordingDirectory = (
   reads: Read[],
   phase: () => Phase,
 ): DistributionSource =>
-  localDirectory({
-    readFile: async (path, { signal }) => {
-      const abort = signal === undefined ? {} : { signal };
-      const bytes = await readFile(new URL(path, root), abort);
-      reads.push({ path, offset: 0, length: bytes.byteLength, phase: phase() });
-      return bytes;
+  localDirectory(
+    {
+      readFile: async (path, { signal }) => {
+        const abort = signal === undefined ? {} : { signal };
+        const bytes = await readFile(new URL(path, root), abort);
+        reads.push({ path, offset: 0, length: bytes.byteLength, phase: phase() });
+        return bytes;
+      },
+      // MUST: `length` ちょうどを buffer 全体を占める view で返す（`DirectoryAdapter.readFileRange` の契約）。
+      readFileRange: async (path, offset, length, { signal }) => {
+        signal?.throwIfAborted();
+        reads.push({ path, offset, length, phase: phase() });
+        const at = new URL(path, root);
+        return readRange(at, offset, length);
+      },
     },
-    // MUST: `length` ちょうどを buffer 全体を占める view で返す（`DirectoryAdapter.readFileRange` の契約）。
-    readFileRange: async (path, offset, length, { signal }) => {
-      signal?.throwIfAborted();
-      reads.push({ path, offset, length, phase: phase() });
-      const at = new URL(path, root);
-      return readRange(at, offset, length);
-    },
-  }, { label });
+    { label },
+  );
 
 /** 環境変数のパス → ディレクトリの `file:` URL（末尾 `/` つき — 無いと `new URL(path, root)` が兄弟を指す）。 */
 const directoryUrl = (path: string): URL => {
@@ -428,13 +442,16 @@ test({
           textStageReads.set(read.path, [...(textStageReads.get(read.path) ?? []), read]);
         }
         assertEquals(
-          swapBlocks.filter((block) =>
-            !covers(
-              textStageReads.get(swapParts[block.part].path) ?? [],
-              block.offset,
-              block.length,
+          swapBlocks
+            .filter(
+              (block) =>
+                !covers(
+                  textStageReads.get(swapParts[block.part].path) ?? [],
+                  block.offset,
+                  block.length,
+                ),
             )
-          ).map((block) => `${block.id}（part ${block.part}）`),
+            .map((block) => `${block.id}（part ${block.part}）`),
           [],
           "差し替え先の block のうち、text 段で差し替え先から読み切られなかったもの",
         );

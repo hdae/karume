@@ -23,11 +23,7 @@
         {
           "case": "english-list",
           "ttftMedianMs": 385.7549999952316,
-          "decodeTokensPerSecond": [
-            35.86177845949697,
-            32.23396743794724,
-            35.82283051594821
-          ],
+          "decodeTokensPerSecond": [35.86177845949697, 32.23396743794724, 35.82283051594821],
           "decodeMedian": 35.82283051594821,
           "deterministic": true,
           "firstTokenIdsSha": "cb032545685aea6d"
@@ -35,11 +31,7 @@
         {
           "case": "japanese-list",
           "ttftMedianMs": 478.0549999475479,
-          "decodeTokensPerSecond": [
-            35.81142725522729,
-            31.7696448592278,
-            35.65940177040991
-          ],
+          "decodeTokensPerSecond": [35.81142725522729, 31.7696448592278, 35.65940177040991],
           "decodeMedian": 35.65940177040991,
           "deterministic": true,
           "firstTokenIdsSha": "1108ec156457c784"
@@ -56,11 +48,7 @@
         {
           "case": "english-list",
           "ttftMedianMs": 393.80999994277954,
-          "decodeTokensPerSecond": [
-            35.886700557712125,
-            35.317464765585946,
-            35.90142494328619
-          ],
+          "decodeTokensPerSecond": [35.886700557712125, 35.317464765585946, 35.90142494328619],
           "decodeMedian": 35.886700557712125,
           "deterministic": true,
           "firstTokenIdsSha": "cb032545685aea6d"
@@ -68,11 +56,7 @@
         {
           "case": "japanese-list",
           "ttftMedianMs": 477.85000002384186,
-          "decodeTokensPerSecond": [
-            35.88792713217312,
-            30.79871329877435,
-            35.653044937986266
-          ],
+          "decodeTokensPerSecond": [35.88792713217312, 30.79871329877435, 35.653044937986266],
           "decodeMedian": 35.653044937986266,
           "deterministic": true,
           "firstTokenIdsSha": "1108ec156457c784"
@@ -89,11 +73,7 @@
         {
           "case": "english-list",
           "ttftMedianMs": 389.16999995708466,
-          "decodeTokensPerSecond": [
-            35.81183438909365,
-            35.37616657329105,
-            35.885371868603826
-          ],
+          "decodeTokensPerSecond": [35.81183438909365, 35.37616657329105, 35.885371868603826],
           "decodeMedian": 35.81183438909365,
           "deterministic": true,
           "firstTokenIdsSha": "cb032545685aea6d"
@@ -101,11 +81,7 @@
         {
           "case": "japanese-list",
           "ttftMedianMs": 479.47500002384186,
-          "decodeTokensPerSecond": [
-            33.31218274027684,
-            33.701914591094805,
-            30.089911520988956
-          ],
+          "decodeTokensPerSecond": [33.31218274027684, 33.701914591094805, 30.089911520988956],
           "decodeMedian": 33.31218274027684,
           "deterministic": true,
           "firstTokenIdsSha": "1108ec156457c784"
@@ -122,11 +98,7 @@
         {
           "case": "english-list",
           "ttftMedianMs": 391.5550000667572,
-          "decodeTokensPerSecond": [
-            34.67072442497947,
-            30.837683648771797,
-            33.311742388772245
-          ],
+          "decodeTokensPerSecond": [34.67072442497947, 30.837683648771797, 33.311742388772245],
           "decodeMedian": 33.311742388772245,
           "deterministic": true,
           "firstTokenIdsSha": "cb032545685aea6d"
@@ -134,11 +106,7 @@
         {
           "case": "japanese-list",
           "ttftMedianMs": 509.4650000333786,
-          "decodeTokensPerSecond": [
-            35.04663148986098,
-            31.232261437265308,
-            30.8136264710911
-          ],
+          "decodeTokensPerSecond": [35.04663148986098, 31.232261437265308, 30.8136264710911],
           "decodeMedian": 31.232261437265308,
           "deterministic": true,
           "firstTokenIdsSha": "1108ec156457c784"

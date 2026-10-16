@@ -113,7 +113,7 @@ const EXTRA_DIR = new URL("../../../models/karume-anima-extra/", import.meta.url
  */
 const MIRRORS: ReadonlyMap<string, URL> = new Map([["hdae/karume-anima", ANIMA_DIR]]);
 
-const EXTRA_AVAILABLE = ASSETS_AVAILABLE && await exists(new URL("karume.json", EXTRA_DIR));
+const EXTRA_AVAILABLE = ASSETS_AVAILABLE && (await exists(new URL("karume.json", EXTRA_DIR)));
 if (!EXTRA_AVAILABLE) {
   console.warn(
     `[karume] ${EXTRA_DIR.pathname} に karume.json が無い（または越境先の ${ANIMA_DIR.pathname} が` +
@@ -175,9 +175,7 @@ if (!GEMMA_AVAILABLE) {
 // ディレクトリだけを見て「資産あり」と判断すると、読めない path で FAIL する形になる。
 const IRODORI_AVAILABLE = await exists(new URL("karume.json", IRODORI_DIR));
 if (!IRODORI_AVAILABLE) {
-  console.warn(
-    `[karume] ${IRODORI_DIR.pathname} が無いため Irodori の融合ヒット数を SKIP する`,
-  );
+  console.warn(`[karume] ${IRODORI_DIR.pathname} が無いため Irodori の融合ヒット数を SKIP する`);
 }
 
 const fusionCounts = (
@@ -339,8 +337,8 @@ test({
       // extra が自己完結へ戻った日に、この門が黙って「越境を通らない門」に化けないように。
       const crossed = ["text_encoder", "text_conditioner", "transformer", "vae_decoder"].filter(
         (component) =>
-          Object.keys(manifest.models[model].weights[component]).some((dtype) =>
-            containerPart0(manifest, model, component, dtype).repo !== undefined
+          Object.keys(manifest.models[model].weights[component]).some(
+            (dtype) => containerPart0(manifest, model, component, dtype).repo !== undefined,
           ),
       );
       assertEquals(crossed, [...EXTRA_CROSS_REPO_COMPONENTS], `${model}: 越境参照で持つ部品`);
@@ -414,8 +412,8 @@ const GEMMA4_DECODE_MODEL = seriesSource("gemma4-e2b-decode");
 const GEMMA4_TOKEN_MODEL = seriesSource("gemma4-e2b-decode-token");
 const MINICPM5_DECODE_MODEL = seriesSource("minicpm5-1b-decode");
 
-const GEMMA4_DECODE_AVAILABLE = await exists(GEMMA4_DECODE_MODEL.part0) &&
-  await exists(GEMMA4_TOKEN_MODEL.part0);
+const GEMMA4_DECODE_AVAILABLE =
+  (await exists(GEMMA4_DECODE_MODEL.part0)) && (await exists(GEMMA4_TOKEN_MODEL.part0));
 if (!GEMMA4_DECODE_AVAILABLE) {
   console.warn(
     `[karume] ${GEMMA4_DECODE_MODEL.part0.pathname} と ${GEMMA4_TOKEN_MODEL.part0.pathname} が揃っていない` +
@@ -440,12 +438,10 @@ test({
   name: "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む（token-only 形も同一）",
   ignore: !GEMMA4_DECODE_AVAILABLE,
   fn: async () => {
-    for (
-      const [name, source] of [
-        ["logits opt-in", GEMMA4_DECODE_MODEL],
-        ["token-only", GEMMA4_TOKEN_MODEL],
-      ] as const
-    ) {
+    for (const [name, source] of [
+      ["logits opt-in", GEMMA4_DECODE_MODEL],
+      ["token-only", GEMMA4_TOKEN_MODEL],
+    ] as const) {
       const graph = await readContainerGraph(source.part0, source.graph);
       assertEquals(decodeFusionCounts(graph, 1), { ...NONE, rope: 50 }, `${name} decode（M=1）`);
       assertEquals(
@@ -484,12 +480,16 @@ for (const family of ["gemma4", "gemma4-qat"]) {
           { ...NONE, rope: 50, rmsNormAdd: 106 },
           `${family} fused M=${rows}`,
         );
-        assertEquals(decodeFusionCounts(graph, rows, true, true), {
-          ...NONE,
-          rope: 50,
-          rmsNormAdd: 106,
-          linearStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 275 : 0,
-        }, `${family} linear SRQ M=${rows}`);
+        assertEquals(
+          decodeFusionCounts(graph, rows, true, true),
+          {
+            ...NONE,
+            rope: 50,
+            rmsNormAdd: 106,
+            linearStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 275 : 0,
+          },
+          `${family} linear SRQ M=${rows}`,
+        );
         // packed 活性（ADR 0105）は**素のまま残った SRQ** のうち、消費先が全て
         // `packedActivations: true` の実測形（ADR 0105 追記 1）に落ちるものだけを掴む。
         // QAT decode 計画（M ≤ 8）では 70 本 — 内訳は per-key 実測の本数そのもので、
@@ -499,13 +499,17 @@ for (const family of ["gemma4", "gemma4-qat"]) {
         // （あちらの出力側の消費先には linear 以外が混ざる）。prefill 計画（M ≥ 32）は
         // 並列 GEMV に落ちないので 0 になる。融合の有無でこの数は動かない。
         for (const fuseSrq of [false, true]) {
-          assertEquals(decodeFusionCounts(graph, rows, true, fuseSrq, true), {
-            ...NONE,
-            rope: 50,
-            rmsNormAdd: 106,
-            linearStaticQuantize: fuseSrq && family === "gemma4-qat" && rows <= 8 ? 275 : 0,
-            packedStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 70 : 0,
-          }, `${family} packed SRQ M=${rows} fuse=${fuseSrq}`);
+          assertEquals(
+            decodeFusionCounts(graph, rows, true, fuseSrq, true),
+            {
+              ...NONE,
+              rope: 50,
+              rmsNormAdd: 106,
+              linearStaticQuantize: fuseSrq && family === "gemma4-qat" && rows <= 8 ? 275 : 0,
+              packedStaticQuantize: family === "gemma4-qat" && rows <= 8 ? 70 : 0,
+            },
+            `${family} packed SRQ M=${rows} fuse=${fuseSrq}`,
+          );
         }
       }
     },
@@ -579,8 +583,7 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  * 意図せず広がっていないかを見る（広げた瞬間 fallback の正しさ保証が消える）。
  */
 test({
-  name:
-    "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
+  name: "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
   ignore: !IRODORI_AVAILABLE,
   fn: async () => {
     const graph = await readIrodoriGraph("dit");
@@ -647,12 +650,10 @@ test({
     // codec は Snake 活性（`sin` 29 本 — sigmoid ではない）と `conv_transpose1d` 4 本で、
     // silu / upsample2x のどちらの形も持たない。全 0 は「掴む形が無い」の記録で、非 0 へ
     // 変わったら受理集合が広がったということ。
-    for (
-      const [name, shapes] of [
-        ["codec_decoder", { latent: [1, 750, 32] }],
-        ["codec_encoder", { wav: [1, 750, 1920] }],
-      ] as const
-    ) {
+    for (const [name, shapes] of [
+      ["codec_decoder", { latent: [1, 750, 32] }],
+      ["codec_encoder", { wav: [1, 750, 1920] }],
+    ] as const) {
       assertEquals(fusionCounts(await readIrodoriGraph(name), shapes), NONE, name);
     }
   },
@@ -677,10 +678,7 @@ const readWanGraph = async (component: string): Promise<IrGraph> => {
 };
 
 /** 入力の記号次元（DiT の `S`）を `sequence` で解いた shape（VAE は全部静的なので素通し）。 */
-const wanShapes = (
-  graph: IrGraph,
-  sequence: number,
-): Readonly<Record<string, readonly number[]>> =>
+const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, readonly number[]>> =>
   Object.fromEntries(
     graph.inputs.map((spec) => [
       spec.name,
@@ -707,8 +705,7 @@ const wanShapes = (
  * ROPE_RULE / ADALN_RULE の受理集合が意図せず広がっていないかを見る（Irodori DiT の門と同じ読み方）。
  */
 test({
-  name:
-    "実資産の Wan2.1 は run 1 回で DiT silu 2・VAE の chunk グラフ silu 29 / upsample2x 3 を掴む（rope / adaln は綴りが違って 0）",
+  name: "実資産の Wan2.1 は run 1 回で DiT silu 2・VAE の chunk グラフ silu 29 / upsample2x 3 を掴む（rope / adaln は綴りが違って 0）",
   ignore: !WAN_AVAILABLE,
   fn: async () => {
     const transformer = await readWanGraph("transformer");

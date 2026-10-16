@@ -27,16 +27,15 @@ const parseRanges = (raw: unknown, where: string): (readonly [number, number])[]
   let previousEnd = -1;
   return raw.map((entry, index) => {
     if (
-      !Array.isArray(entry) || entry.length !== 2 ||
-      typeof entry[0] !== "number" || typeof entry[1] !== "number"
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      typeof entry[1] !== "number"
     ) {
       throw new Error(`${where}[${index}]: 区間が [start, end] の数値対でない`);
     }
     const [start, end]: [number, number] = [entry[0], entry[1]];
-    if (
-      !Number.isInteger(start) || !Number.isInteger(end) ||
-      start < 0 || end > MAX_CODE_POINT
-    ) {
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > MAX_CODE_POINT) {
       throw new Error(
         `${where}[${index}]: 区間 [${start}, ${end}] が 0..${MAX_CODE_POINT} の整数対でない`,
       );
@@ -75,7 +74,11 @@ export const parseTokenizerAsset = (raw: unknown, where: string): DebertaTokeniz
   // MUST: 整数かつ i32 の範囲。id は `Int32Array` へ書かれるので、非整数は**黙って切り捨て
   // られ**、範囲外は wrap する — どちらも「別のトークンを指す」沈黙誤値になる（語彙の行数に
   // 収まることは `fromVocabText` が語彙表を持つ側で見る）。
-  for (const [name, id] of [["clsId", clsId], ["sepId", sepId], ["unkId", unkId]] as const) {
+  for (const [name, id] of [
+    ["clsId", clsId],
+    ["sepId", sepId],
+    ["unkId", unkId],
+  ] as const) {
     if (!Number.isInteger(id) || id < 0 || id > MAX_TOKEN_ID) {
       throw new Error(`${where}.special.${name}: 0..${MAX_TOKEN_ID} の整数でない（${id}）`);
     }

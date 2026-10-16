@@ -304,48 +304,54 @@ for (const series of SERIES) {
   const runnable = GPU_AVAILABLE && available;
 
   test({
-    name:
-      `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）`,
+    name: `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）`,
     ignore: !runnable,
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
       // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
-      await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-        model: MODEL,
-        quant: series.name,
-      });
+      await using pipeline = await IrodoriPipeline.fromAssets(
+        { manifest, assets },
+        {
+          model: MODEL,
+          quant: series.name,
+        },
+      );
       await runCase(series, pipeline, "full", readMeta().cases["full"]);
     },
   });
 
   test({
-    name:
-      `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）`,
+    name: `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）`,
     ignore: !runnable,
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
-      await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-        model: MODEL,
-        quant: series.name,
-      });
+      await using pipeline = await IrodoriPipeline.fromAssets(
+        { manifest, assets },
+        {
+          model: MODEL,
+          quant: series.name,
+        },
+      );
       // speaker のゼロ短絡と caption 空の CFG off が効く経路（forward が 100 → 60 に落ちる）。
       await runCase(series, pipeline, "no-ref", readMeta().cases["no-ref"]);
     },
   });
 
   test({
-    name:
-      `e2e(実GPU): 同じ seed の生成は 2 回ともバイト同一（${series.name} / 乱数もホストグルーも決定的）`,
+    name: `e2e(実GPU): 同じ seed の生成は 2 回ともバイト同一（${series.name} / 乱数もホストグルーも決定的）`,
     ignore: !runnable,
     fn: async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
-      await using pipeline = await IrodoriPipeline.fromAssets({ manifest, assets }, {
-        model: MODEL,
-        quant: series.name,
-      });
+      await using pipeline = await IrodoriPipeline.fromAssets(
+        { manifest, assets },
+        {
+          model: MODEL,
+          quant: series.name,
+        },
+      );
       // `initialNoise` を渡さない = 内部の `Randn` を通る唯一の経路。`durationSeconds` で S を
       // 固定するのは `duration` を回さず短く保つため（見たいのは長さではなく再現性）。
       const request = {

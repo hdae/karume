@@ -98,9 +98,7 @@ describe("sessionOptionsViolation", () => {
         'linearCompute: "i8a8"',
       ),
     );
-    assert(
-      sessionOptionsViolation({ planBackingBudgetBytes: -1 })?.includes("非負の安全な整数"),
-    );
+    assert(sessionOptionsViolation({ planBackingBudgetBytes: -1 })?.includes("非負の安全な整数"));
     assert(
       sessionOptionsViolation({ linearGemvRowsThreadTarget: 0 })?.includes("1 以上の安全な整数"),
     );
@@ -113,16 +111,14 @@ describe("sessionOptionsViolation", () => {
     for (const accepted of [1, 512 * 1024 * 1024, Number.MAX_SAFE_INTEGER]) {
       assertEquals(sessionOptionsViolation({ attentionRowBlockMaxBytes: accepted }), undefined);
     }
-    for (
-      const [value, shown] of [
-        [0, "0"],
-        [-1, "-1"],
-        [1.5, "1.5"],
-        [Number.NaN, "NaN"],
-        [Number.POSITIVE_INFINITY, "Infinity"],
-        [Number.MAX_SAFE_INTEGER + 1, String(Number.MAX_SAFE_INTEGER + 1)],
-      ] as const
-    ) {
+    for (const [value, shown] of [
+      [0, "0"],
+      [-1, "-1"],
+      [1.5, "1.5"],
+      [Number.NaN, "NaN"],
+      [Number.POSITIVE_INFINITY, "Infinity"],
+      [Number.MAX_SAFE_INTEGER + 1, String(Number.MAX_SAFE_INTEGER + 1)],
+    ] as const) {
       assertEquals(
         sessionOptionsViolation({ attentionRowBlockMaxBytes: value }),
         `options.attentionRowBlockMaxBytes ${shown} は正の安全な整数でなければならない`,

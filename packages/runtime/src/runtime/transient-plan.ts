@@ -206,9 +206,12 @@ export const planTransients = (
 
   program.forEach((step, stepIndex) => {
     const outputs = step.outputs.map((output) => {
-      const slot = output.kind === "alias"
-        ? (output.source === undefined ? undefined : env.get(output.source))
-        : alloc(output.byteLength, output.name);
+      const slot =
+        output.kind === "alias"
+          ? output.source === undefined
+            ? undefined
+            : env.get(output.source)
+          : alloc(output.byteLength, output.name);
       retain(slot, output.uses, output.pinned);
       if (slot === undefined) env.delete(output.name);
       else env.set(output.name, slot);
@@ -223,12 +226,12 @@ export const planTransients = (
         temps[id] = slot;
       });
       // usage scope: この dispatch で読まれる slot と書かれる slot は同じ領域に置けない。
-      const reads = dispatch.reads.map((ref) => resolve(ref, temps)).filter((s): s is number =>
-        s !== undefined
-      );
-      const writes = dispatch.writes.map((ref) => resolve(ref, temps)).filter((s): s is number =>
-        s !== undefined
-      );
+      const reads = dispatch.reads
+        .map((ref) => resolve(ref, temps))
+        .filter((s): s is number => s !== undefined);
+      const writes = dispatch.writes
+        .map((ref) => resolve(ref, temps))
+        .filter((s): s is number => s !== undefined);
       for (const r of reads) for (const w of writes) if (r !== w) conflicts.add(pairKey(r, w));
       for (let id = step.temps.length - 1; id >= 0; id -= 1) {
         if (step.temps[id].releaseAfter === index) release(temps[id]);
@@ -239,7 +242,7 @@ export const planTransients = (
     // 別名の出力は slot を持たない（束縛は ValueSource の元をそのまま解決する）。
     steps.push({
       outputs: step.outputs.map((output, index) =>
-        output.kind === "alias" ? undefined : outputs[index]
+        output.kind === "alias" ? undefined : outputs[index],
       ),
       temps,
     });
@@ -248,9 +251,9 @@ export const planTransients = (
   const leaked = [...refs].filter(([slot, count]) => count > 0 && !intervals[slot].pinned);
   if (leaked.length > 0) {
     throw new ExecutionError(
-      `transient 計画: 解放されない中間が残る（消費計数の誤り）: ${
-        leaked.map(([slot, count]) => `'${intervals[slot].label}'（refs=${count}）`).join(" / ")
-      }`,
+      `transient 計画: 解放されない中間が残る（消費計数の誤り）: ${leaked
+        .map(([slot, count]) => `'${intervals[slot].label}'（refs=${count}）`)
+        .join(" / ")}`,
     );
   }
 
@@ -260,17 +263,21 @@ export const planTransients = (
   if (oversized.length > 0) {
     throw new ExecutionError(
       `中間バッファが device の上限を超える（maxStorageBufferBindingSize ${limits.maxStorageBufferBindingSize} / ` +
-        `maxBufferSize ${limits.maxBufferSize}）: ${
-          oversized.map((iv) => `'${iv.label}' ${iv.byteLength}B`).join(" / ")
-        }`,
+        `maxBufferSize ${limits.maxBufferSize}）: ${oversized
+          .map((iv) => `'${iv.label}' ${iv.byteLength}B`)
+          .join(" / ")}`,
     );
   }
 
   // 配置: 実寸の大きい順（同寸は確保順）に first-fit。
-  const order = intervals.map((_, id) => id).sort((a, b) =>
-    intervals[b].byteLength - intervals[a].byteLength || intervals[a].start - intervals[b].start ||
-    a - b
-  );
+  const order = intervals
+    .map((_, id) => id)
+    .sort(
+      (a, b) =>
+        intervals[b].byteLength - intervals[a].byteLength ||
+        intervals[a].start - intervals[b].start ||
+        a - b,
+    );
   const regions: { placed: number[]; size: number }[] = [];
   const slots: TransientSlot[] = new Array(intervals.length);
   let sharedSlots = 0;
@@ -296,10 +303,12 @@ export const planTransients = (
       // バイト範囲を先住の slot と共有する（生存が重ならないので合法）= 配り直し 1 回。
       const end = offset + iv.byteLength;
       if (
-        entry.placed.some((other) =>
-          slots[other].offset < end && offset < slots[other].offset + slots[other].byteLength
+        entry.placed.some(
+          (other) =>
+            slots[other].offset < end && offset < slots[other].offset + slots[other].byteLength,
         )
-      ) sharedSlots += 1;
+      )
+        sharedSlots += 1;
       entry.placed.push(id);
       entry.size = Math.max(entry.size, offset + iv.byteLength);
       placed = true;

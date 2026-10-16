@@ -38,7 +38,8 @@ const asDirectory = (root: string | URL): string | URL => {
 const owned = (buffer: Uint8Array): Uint8Array<ArrayBuffer> => {
   const backing = buffer.buffer;
   if (
-    backing instanceof ArrayBuffer && buffer.byteOffset === 0 &&
+    backing instanceof ArrayBuffer &&
+    buffer.byteOffset === 0 &&
     backing.byteLength === buffer.byteLength
   ) {
     return new Uint8Array(backing);

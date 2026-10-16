@@ -171,10 +171,7 @@ type WanVaeDecodeState = {
   readonly vaeFirst: ModelComponent;
   readonly vaeNext: ModelComponent;
   readonly layout: WanVaeChunkLayout;
-  readonly onRunDiagnostics?: (
-    component: WanRunComponent,
-    diagnostics: SessionDiagnostics,
-  ) => void;
+  readonly onRunDiagnostics?: (component: WanRunComponent, diagnostics: SessionDiagnostics) => void;
 };
 
 /**
@@ -223,12 +220,7 @@ export const finishWanVaeFrames = (
     );
   }
   const patchShape = [channels, frames, height, width] as const;
-  const rgbShape = [
-    channels / area,
-    frames,
-    height * patchSize,
-    width * patchSize,
-  ];
+  const rgbShape = [channels / area, frames, height * patchSize, width * patchSize];
   const expected = [WAN_RGB_CHANNELS, plan.frames, plan.height, plan.width];
   if (rgbShape.some((dim, axis) => dim !== expected[axis])) {
     throw new Error(

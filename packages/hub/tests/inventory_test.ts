@@ -71,12 +71,7 @@ const TURBO_PATHS = [
   STYLE_VECTORS,
 ];
 /** anima-lite/w8 の参照列（既定選択の真部分集合）。 */
-const LITE_PATHS = [
-  ...TEXT_ENCODER_PARTS,
-  ...TRANSFORMER_I8_FETCHED,
-  TOKENIZER,
-  STYLE_VECTORS,
-];
+const LITE_PATHS = [...TEXT_ENCODER_PARTS, ...TRANSFORMER_I8_FETCHED, TOKENIZER, STYLE_VECTORS];
 /** 既定選択に固有の参照（anima-lite が使わないぶん）。 */
 const TURBO_ONLY = [...TEXT_CONDITIONER_PARTS, ...VAE_DECODER_PARTS];
 
@@ -93,10 +88,13 @@ const load = async (
   routes: MockRoutes = { files: serveAll() },
 ): Promise<{ loaded: LoadedManifest; mock: ReturnType<typeof createMockFetch> }> => {
   const loader = createMockFetch(routes);
-  const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: loader.fetch,
-    caches,
-  });
+  const loaded = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: loader.fetch,
+      caches,
+    },
+  );
   return { loaded, mock: createMockFetch(routes) };
 };
 
@@ -184,9 +182,7 @@ test("evictCachedAssets: 部分在庫の選択は守らない（共有ファイ�
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   // 既定選択から固有の 1 容器（vae_decoder）だけを落とさない = 部分在庫。
-  const partial = refsOf(loaded, TURBO).filter(
-    (ref) => !VAE_DECODER_PARTS.includes(ref.path),
-  );
+  const partial = refsOf(loaded, TURBO).filter((ref) => !VAE_DECODER_PARTS.includes(ref.path));
   await prefetchAssets(loaded, partial, { fetch: mock.fetch, caches });
 
   const result = await evictCachedAssets(loaded, LITE, { caches });
@@ -281,10 +277,9 @@ test("evictCachedAssets: 参照集合が同一の選択は守る側に数えな�
   assertEquals(result.alsoEvicted, [F16_C16_LABEL]);
 
   // 巻き添えの中身 — 兄弟は部分在庫に落ちる（次のロードで足りない容器だけ取り直す）。
-  assertEquals(
-    paths((await listCachedAssets(loaded, F16_C16, { caches })).missing),
-    [...TRANSFORMER_F16_PARTS],
-  );
+  assertEquals(paths((await listCachedAssets(loaded, F16_C16, { caches })).missing), [
+    ...TRANSFORMER_F16_PARTS,
+  ]);
   assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
 });
 
@@ -417,10 +412,9 @@ test("evictCachedAssets: weights を絞ると同じ選択の残りは消えな�
     hasEntry(hubCache(caches), payloadFor(TEXT_CONDITIONER_PARTS[0])),
     "絞りの外にある text_conditioner まで消えている",
   );
-  assertEquals(
-    paths((await listCachedAssets(loaded, TURBO, { caches })).missing),
-    [...VAE_DECODER_PARTS],
-  );
+  assertEquals(paths((await listCachedAssets(loaded, TURBO, { caches })).missing), [
+    ...VAE_DECODER_PARTS,
+  ]);
 });
 
 test("evictCachedAssets: protect は同じ label の部分集合を 2 つとも守る", async () => {
@@ -539,10 +533,7 @@ test("evictCachedAssets: protect の label に NUL が入っても守る側が�
   assertEquals(sharedWithOf(result.kept, COLLIDE_A_PARTS[0]), ["m/q"]);
   assertEquals(sharedWithOf(result.kept, COLLIDE_B_PARTS[0]), ["m/q", `m/${COLLIDING_QUANT}`]);
   assertEquals(result.alsoEvicted, []);
-  assert(
-    hasEntry(hubCache(caches), payloadFor(COLLIDE_A_PARTS[0])),
-    "守ったはずの a が消えている",
-  );
+  assert(hasEntry(hubCache(caches), payloadFor(COLLIDE_A_PARTS[0])), "守ったはずの a が消えている");
 });
 
 test("evictCachedAssets: 良性の label では同じ形がそのまま守られる（対照）", async () => {
@@ -717,18 +708,24 @@ test("listCachedAssets: 同じ path でも sha256 が違えば在庫にならな
     ]),
   ]);
   const previous = createMockFetch({ files });
-  const before = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
-    fetch: previous.fetch,
-    caches,
-  });
+  const before = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: SHA },
+    {
+      fetch: previous.fetch,
+      caches,
+    },
+  );
   await prefetchAssets(before, refsOf(before), { fetch: previous.fetch, caches });
   assertEquals((await listCachedAssets(before, {}, { caches })).missing, []);
 
   const next = createMockFetch({ files });
-  const updated = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: NEXT_SHA }, {
-    fetch: next.fetch,
-    caches,
-  });
+  const updated = await loadManifest(
+    { repo: REPO, hubUrl: HUB_URL, revision: NEXT_SHA },
+    {
+      fetch: next.fetch,
+      caches,
+    },
+  );
 
   const inventory = await listCachedAssets(updated, {}, { caches });
   assertEquals(inventory.cached, [], "中身が変わった path の古いエントリを在庫と答えている");
@@ -862,7 +859,10 @@ test("evictCachedAssets: 越境参照は cross-repo として残す（エント�
   const result = await evictCachedAssets(loaded, {}, { caches });
 
   assertEquals(result.evicted.map(fileRefKey), own.map(fileRefKey));
-  assertEquals(result.kept.map((entry) => fileRefKey(entry.ref)), borrowed.map(fileRefKey));
+  assertEquals(
+    result.kept.map((entry) => fileRefKey(entry.ref)),
+    borrowed.map(fileRefKey),
+  );
   for (const entry of result.kept) {
     assertEquals(entry.reason, "cross-repo", `${entry.ref.path} の理由が違う`);
     assertEquals(entry.sharedWith, []);
@@ -895,9 +895,6 @@ test("evictCachedAssets: キャッシュを持たない取得元は HubError で
   const caches = new MemoryCacheStorage();
   const loaded = await openLocal(caches);
 
-  const error = await assertRejects(
-    () => evictCachedAssets(loaded, {}, { caches }),
-    HubError,
-  );
+  const error = await assertRejects(() => evictCachedAssets(loaded, {}, { caches }), HubError);
   assert(error.message.includes(LOCAL_LABEL), `${error.message} がどの取得元か名乗っていない`);
 });

@@ -78,7 +78,7 @@ const SQUARE_GRAPH: DeclarationJson = {
 const input = (phase: number): Tensor => ({
   dtype: "f32",
   shape: [ROWS, COLS],
-  data: Float32Array.from({ length: COUNT }, (_, i) => (i + phase * 5) % 9 - 4),
+  data: Float32Array.from({ length: COUNT }, (_, i) => ((i + phase * 5) % 9) - 4),
 });
 
 /** 参照値（ノードごとに f32 へ丸めながら手計算する — 実装とは独立）。 */
@@ -110,8 +110,7 @@ const session = async (
   await createSessionFromContainer(gpu, await openGraphModel(json), "model", { submitPolicy });
 
 test({
-  name:
-    "長い run は値を変えず、ステップの間で前の印から submit 64 回ごとに完了印を 1 本置く（実 GPU）",
+  name: "長い run は値を変えず、ステップの間で前の印から submit 64 回ごとに完了印を 1 本置く（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -145,8 +144,7 @@ test({
 });
 
 test({
-  name:
-    "enqueue は待たない — 非 await で 2 周続けた別 Session の enqueue が常駐テンソル越しの順序を追い越さない（実 GPU）",
+  name: "enqueue は待たない — 非 await で 2 周続けた別 Session の enqueue が常駐テンソル越しの順序を追い越さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -192,7 +190,9 @@ test({
  * `onSubmittedWorkDone`（完了印とフェンス）の解決を手で止める。GPU の実行と `mapAsync` は止めない。
  * MUST: `release` を finally で必ず呼ぶ（開けて元の面へ戻す — 後始末の flush が固まる / 他のテストへ漏れる）。
  */
-const gateWorkDone = (gpu: GpuContext): {
+const gateWorkDone = (
+  gpu: GpuContext,
+): {
   /** 止めた `onSubmittedWorkDone` の呼び出しの回数（完了印とフェンス）。 */
   readonly calls: () => number;
   readonly open: () => void;
@@ -236,8 +236,7 @@ const watch = <T>(
 };
 
 test({
-  name:
-    "run は上限を超えたらステップの間で完了印を待ち、それまで決着せず区間ロックも離さない（実 GPU）",
+  name: "run は上限を超えたらステップの間で完了印を待ち、それまで決着せず区間ロックも離さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -278,8 +277,7 @@ test({
 });
 
 test({
-  name:
-    "enqueue は完了印を置かず待たない — 上限を超える長さでも onSubmittedWorkDone を呼ばずに決着する（実 GPU）",
+  name: "enqueue は完了印を置かず待たない — 上限を超える長さでも onSubmittedWorkDone を呼ばずに決着する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();

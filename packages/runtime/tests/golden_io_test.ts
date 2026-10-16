@@ -20,16 +20,15 @@ const i32Bytes = (values: readonly number[]): Uint8Array =>
 
 /** 意味論 3 dtype をそれぞれ 1 本ずつ持つ golden io（正常な形はここ 1 箇所）。 */
 const goldenIo = () =>
-  parseSafetensors(buildSafetensors([
-    { name: "output.0", dtype: "F32", shape: [2], data: f32Bytes([1.5, -2.5]) },
-    { name: "output.1", dtype: "I32", shape: [2], data: i32Bytes([7, -9]) },
-    { name: "output.2", dtype: "U32", shape: [2], data: i32Bytes([0, 1]) },
-  ]));
+  parseSafetensors(
+    buildSafetensors([
+      { name: "output.0", dtype: "F32", shape: [2], data: f32Bytes([1.5, -2.5]) },
+      { name: "output.1", dtype: "I32", shape: [2], data: i32Bytes([7, -9]) },
+      { name: "output.2", dtype: "U32", shape: [2], data: i32Bytes([0, 1]) },
+    ]),
+  );
 
-const viewOf = (
-  file: ReturnType<typeof goldenIo>,
-  name: string,
-): TensorView => {
+const viewOf = (file: ReturnType<typeof goldenIo>, name: string): TensorView => {
   const view = file.tensors.get(name);
   if (view === undefined) throw new Error(`${name} が無い`);
   return view;

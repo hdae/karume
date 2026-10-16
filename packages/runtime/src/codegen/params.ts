@@ -18,10 +18,7 @@ import { CodegenError } from "./errors.ts";
  * @param where 失敗文言の頭（例: `"gather params"`）。
  * @param values パラメタ名 → 値。名前は uniform の欄名か、導出式（例: `"4 * n"`）。
  */
-export const assertU32Params = (
-  where: string,
-  values: Readonly<Record<string, number>>,
-): void => {
+export const assertU32Params = (where: string, values: Readonly<Record<string, number>>): void => {
   for (const [name, value] of Object.entries(values)) {
     if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
       throw new CodegenError(`${where}: ${name} は u32 の非負整数（${value}）`);

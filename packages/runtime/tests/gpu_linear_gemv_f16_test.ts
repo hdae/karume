@@ -29,10 +29,12 @@ const activation = (length: number): Float32Array<ArrayBuffer> =>
 
 const fixture = (m: number, n: number, k: number, storage: "f16" | "f32" = "f16") => {
   // 隣接要素の符号・大きさを散らす。対の lo/hi 入れ替えを対称性で打ち消さない。
-  const weight = quantizeF16(Float32Array.from(
-    { length: n * k },
-    (_, i) => ((i % 2 === 0 ? 1 : -1) * (0.0013 + (i % 23) * 0.017)),
-  ));
+  const weight = quantizeF16(
+    Float32Array.from(
+      { length: n * k },
+      (_, i) => (i % 2 === 0 ? 1 : -1) * (0.0013 + (i % 23) * 0.017),
+    ),
+  );
   const bias = Float32Array.from({ length: n }, (_, i) => Math.sin(i * 0.37) * 0.13);
   const declaration: DeclarationJson = {
     format: "karume-ir",
@@ -109,12 +111,16 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const [n, k] of [[64, 128], [100, 40], [36, 48], [68, 56], [4, 8], [32, 24], [36, 136], [
-          100,
-          264,
-        ]]
-      ) {
+      for (const [n, k] of [
+        [64, 128],
+        [100, 40],
+        [36, 48],
+        [68, 56],
+        [4, 8],
+        [32, 24],
+        [36, 136],
+        [100, 264],
+      ]) {
         const data = fixture(1, n, k);
         const actual = await run(gpu, data);
         // f16 の門は M=1 だけ。M=2 は同じ M16N16 GEMM 骨格で、族内比較にはならない。
@@ -138,14 +144,12 @@ test({
   fn: async () => {
     const gpu = await acquireGpu();
     try {
-      for (
-        const c of [
-          { m: 2, n: 36, k: 40, storage: "f16" },
-          { m: 1, n: 36, k: 36, storage: "f16" },
-          { m: 1, n: 35, k: 40, storage: "f16" },
-          { m: 1, n: 36, k: 40, storage: "f32" },
-        ] as const
-      ) {
+      for (const c of [
+        { m: 2, n: 36, k: 40, storage: "f16" },
+        { m: 1, n: 36, k: 36, storage: "f16" },
+        { m: 1, n: 35, k: 40, storage: "f16" },
+        { m: 1, n: 36, k: 40, storage: "f32" },
+      ] as const) {
         const data = fixture(c.m, c.n, c.k, c.storage);
         const actual = await run(gpu, data);
         assertEquals(actual.keys, [

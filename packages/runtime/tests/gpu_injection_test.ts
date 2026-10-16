@@ -15,7 +15,8 @@ const fakeGpu = (): { readonly gpu: GPU; readonly requests: () => number } => {
   const adapter = {
     limits,
     features: new Set<string>(),
-    requestDevice: (): Promise<GPUDevice> => Promise.resolve(Object.assign(fakeDevice(), { limits })),
+    requestDevice: (): Promise<GPUDevice> =>
+      Promise.resolve(Object.assign(fakeDevice(), { limits })),
   };
   const gpu = {
     requestAdapter: (): Promise<GPUAdapter> => {

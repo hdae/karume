@@ -196,12 +196,14 @@ const umt5Input = (storage: "i8" | "i4", fill: number): ModelInput => ({
         out: { dtype: "f32", shape: [1, "L", EMBED_WIDTH] },
       },
       states: {},
-      nodes: [{
-        op: "embedding",
-        ins: ["embed", "input_ids"],
-        outs: ["out"],
-        attrs: { padding_idx: -1 },
-      }],
+      nodes: [
+        {
+          op: "embedding",
+          ins: ["embed", "input_ids"],
+          outs: ["out"],
+          attrs: { padding_idx: -1 },
+        },
+      ],
     }),
   },
   consts: [],
@@ -247,15 +249,18 @@ const memoryDirectory = (spec: RepoFiles) => {
     ...spec.files,
   ]);
   const reads: string[] = [];
-  const source: DistributionSource = localDirectory({
-    readFile: (path) => {
-      reads.push(path);
-      const bytes = files.get(path);
-      if (bytes === undefined) return Promise.reject(new Error(`${spec.repo}: ${path} が無い`));
-      // MUST: buffer 全体を占める view を返す（`DirectoryAdapter.readFile` の契約）。
-      return Promise.resolve(bytes.slice());
+  const source: DistributionSource = localDirectory(
+    {
+      readFile: (path) => {
+        reads.push(path);
+        const bytes = files.get(path);
+        if (bytes === undefined) return Promise.reject(new Error(`${spec.repo}: ${path} が無い`));
+        // MUST: buffer 全体を占める view を返す（`DirectoryAdapter.readFile` の契約）。
+        return Promise.resolve(bytes.slice());
+      },
     },
-  }, { label: spec.repo });
+    { label: spec.repo },
+  );
   return { source, reads };
 };
 
@@ -353,9 +358,10 @@ const prepareWanRepos = async (options: WanRigOptions = {}) => {
     },
     files: umt5.files,
   };
-  const replacementI8Entry = options.corruptReplacementGraphSha === true
-    ? withGraphSha(replacement, flipLastHex(replacement.written.descriptor.graph.sha256))
-    : replacement.entry;
+  const replacementI8Entry =
+    options.corruptReplacementGraphSha === true
+      ? withGraphSha(replacement, flipLastHex(replacement.written.descriptor.graph.sha256))
+      : replacement.entry;
   const replacementRepo: RepoFiles = {
     repo: REPLACEMENT_REPO,
     models: {

@@ -52,7 +52,7 @@ export type AlphaMatte = {
 export const MATTE_PROCEDURES = ["float-bilinear", "u8-pil-bicubic"] as const;
 
 /** {@link MATTE_PROCEDURES} の 1 つ。 */
-export type MatteProcedure = typeof MATTE_PROCEDURES[number];
+export type MatteProcedure = (typeof MATTE_PROCEDURES)[number];
 
 /** 1 つの手順の本体（logit の地図 → 入力と同じ寸法の 8bit α の画素列）。 */
 type ProcedureBody = (
@@ -141,9 +141,9 @@ export const matteFromLogits = (
   // メンバを手順として受けてしまう。名前の綴り違いなので素の `Error`（ADR 0107 決定 3）。
   if (!Object.hasOwn(PROCEDURES, procedure)) {
     throw new Error(
-      `birefnet: 後処理の手順 ${JSON.stringify(procedure)} は未対応（期待 ${
-        MATTE_PROCEDURES.map((name) => `'${name}'`).join(" / ")
-      }）`,
+      `birefnet: 後処理の手順 ${JSON.stringify(procedure)} は未対応（期待 ${MATTE_PROCEDURES.map(
+        (name) => `'${name}'`,
+      ).join(" / ")}）`,
     );
   }
   return {

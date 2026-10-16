@@ -79,9 +79,10 @@ export const caseColCap = (spec: StateCase): number =>
 export const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
 /** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
-export const seeded = (count: number, generator: (index: number) => number): Float32Array<
-  ArrayBuffer
-> => {
+export const seeded = (
+  count: number,
+  generator: (index: number) => number,
+): Float32Array<ArrayBuffer> => {
   const data = new Float32Array(count);
   for (let index = 0; index < count; index += 1) data[index] = generator(index);
   return data;
@@ -112,10 +113,7 @@ export type StatePipelineCache = Map<string, GPUComputePipeline>;
 const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 const UNIFORM = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
-const storageBuffer = (
-  device: GPUDevice,
-  data: Float32Array<ArrayBuffer>,
-): GPUBuffer => {
+const storageBuffer = (device: GPUDevice, data: Float32Array<ArrayBuffer>): GPUBuffer => {
   const buffer = device.createBuffer({ size: Math.max(4, data.byteLength), usage: STORAGE });
   device.queue.writeBuffer(buffer, 0, data);
   return buffer;
@@ -264,11 +262,19 @@ export const runStateAttention = async (
     const slotK = track(storageBuffer(device, inputs.slotK));
     const slotV = track(storageBuffer(device, inputs.slotV));
     const out = track(
-      storageBuffer(device, seeded(outCount, () => STATE_S_POISON)),
+      storageBuffer(
+        device,
+        seeded(outCount, () => STATE_S_POISON),
+      ),
     );
     const lengths = track(lengthsBuffer(device, spec.past, spec.query));
     const sCount = batchHeads * rowsBlock * colCap;
-    const scores = track(storageBuffer(device, seeded(sCount, () => STATE_S_POISON)));
+    const scores = track(
+      storageBuffer(
+        device,
+        seeded(sCount, () => STATE_S_POISON),
+      ),
+    );
     const stats = track(
       storageBuffer(
         device,
@@ -298,10 +304,7 @@ export const runStateAttention = async (
       const limit = device.limits.maxComputeWorkgroupsPerDimension;
       const params = track(uniformBuffer(device, stateAttentionParams(geometry)));
       const statsParams = track(
-        uniformBuffer(
-          device,
-          stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window),
-        ),
+        uniformBuffer(device, stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window)),
       );
       // MUST: ブロックごとに毒値へ戻す（前ブロックの S が残っていると、live 範囲を書き切らない
       // 誤りが「前ブロックの値」で塗り潰されて検出できない）
@@ -326,8 +329,8 @@ export const runStateAttention = async (
           options.statsPvFusion
             ? stateStatsPvWgsl(sliding, gqa)
             : parallel
-            ? statePvParallelWgsl(sliding, gqa)
-            : statePvWgsl(sliding, gqa),
+              ? statePvParallelWgsl(sliding, gqa)
+              : statePvWgsl(sliding, gqa),
         ),
       );
       const encoder = device.createCommandEncoder();
@@ -349,11 +352,11 @@ export const runStateAttention = async (
         0,
         options.statsPvFusion
           ? device.createBindGroup({
-            layout: pv.getBindGroupLayout(0),
-            entries: [params, scores, stats, insV, slotV, out, lengths]
-              .map((buffer, binding) => ({ binding, resource: { buffer } }))
-              .filter((entry) => entry.binding !== 2),
-          })
+              layout: pv.getBindGroupLayout(0),
+              entries: [params, scores, stats, insV, slotV, out, lengths]
+                .map((buffer, binding) => ({ binding, resource: { buffer } }))
+                .filter((entry) => entry.binding !== 2),
+            })
           : bind(device, pv, [params, scores, stats, insV, slotV, out, lengths]),
       );
       const pvGroups = parallel
@@ -405,11 +408,12 @@ export const runStateQk = async (
   const rowsBlock = spec.rowsBlock ?? spec.chunkRows;
   const batchHeads = spec.batch * spec.heads;
   const cache = options.cache ?? new Map<string, GPUComputePipeline>();
-  const source = variant === "parallel"
-    ? stateQkParallelWgsl(sliding, gqa)
-    : variant === "tiled"
-    ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows)
-    : stateQkWgsl(sliding, gqa);
+  const source =
+    variant === "parallel"
+      ? stateQkParallelWgsl(sliding, gqa)
+      : variant === "tiled"
+        ? stateQkTiledWgsl(sliding, gqa, spec.chunkRows)
+        : stateQkWgsl(sliding, gqa);
   const buffers: GPUBuffer[] = [];
   const track = <T extends GPUBuffer>(buffer: T): T => {
     buffers.push(buffer);
@@ -421,7 +425,10 @@ export const runStateQk = async (
     const slotK = track(storageBuffer(device, inputs.slotK));
     const lengths = track(lengthsBuffer(device, spec.past, spec.query));
     const scores = track(
-      storageBuffer(device, seeded(batchHeads * rowsBlock * colCap, () => STATE_S_POISON)),
+      storageBuffer(
+        device,
+        seeded(batchHeads * rowsBlock * colCap, () => STATE_S_POISON),
+      ),
     );
     const pipeline = pipelineOf(
       device,
@@ -450,24 +457,31 @@ export const runStateQk = async (
         depth: spec.depth,
         window: spec.window,
       };
-      const params = track(uniformBuffer(
-        device,
-        variant === "tiled" ? stateQkTiledParams(geometry) : stateAttentionParams(geometry),
-      ));
+      const params = track(
+        uniformBuffer(
+          device,
+          variant === "tiled" ? stateQkTiledParams(geometry) : stateAttentionParams(geometry),
+        ),
+      );
       const words = batchHeads * block * colCap;
-      device.queue.writeBuffer(scores, 0, seeded(words, () => STATE_S_POISON));
-      const groups = variant === "parallel"
-        ? stateQkParallelWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name)
-        : variant === "tiled"
-        ? stateQkTiledWorkgroups(
-          dispatchGeometry,
-          spec.chunkRows,
-          spec.past,
-          spec.query,
-          limit,
-          spec.name,
-        )
-        : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
+      device.queue.writeBuffer(
+        scores,
+        0,
+        seeded(words, () => STATE_S_POISON),
+      );
+      const groups =
+        variant === "parallel"
+          ? stateQkParallelWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name)
+          : variant === "tiled"
+            ? stateQkTiledWorkgroups(
+                dispatchGeometry,
+                spec.chunkRows,
+                spec.past,
+                spec.query,
+                limit,
+                spec.name,
+              )
+            : stateQkWorkgroups(dispatchGeometry, spec.past, spec.query, limit, spec.name);
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
@@ -516,11 +530,12 @@ export const runStatePv = async (
   const cache = options.cache ?? new Map<string, GPUComputePipeline>();
   const wgsl = (kernel: "qk" | "stats" | "pv", source: string): string =>
     mutate === undefined ? source : mutate(kernel, source);
-  const pvSource = variant === "parallel"
-    ? statePvParallelWgsl(sliding, gqa)
-    : variant === "tiled"
-    ? statePvTiledWgsl(sliding, gqa, spec.chunkRows)
-    : statePvWgsl(sliding, gqa);
+  const pvSource =
+    variant === "parallel"
+      ? statePvParallelWgsl(sliding, gqa)
+      : variant === "tiled"
+        ? statePvTiledWgsl(sliding, gqa, spec.chunkRows)
+        : statePvWgsl(sliding, gqa);
   const outCount = batchHeads * spec.chunkRows * spec.depth;
   const buffers: GPUBuffer[] = [];
   const track = <T extends GPUBuffer>(buffer: T): T => {
@@ -533,10 +548,18 @@ export const runStatePv = async (
     const insV = track(storageBuffer(device, inputs.insV));
     const slotK = track(storageBuffer(device, inputs.slotK));
     const slotV = track(storageBuffer(device, inputs.slotV));
-    const out = track(storageBuffer(device, seeded(outCount, () => STATE_S_POISON)));
+    const out = track(
+      storageBuffer(
+        device,
+        seeded(outCount, () => STATE_S_POISON),
+      ),
+    );
     const lengths = track(lengthsBuffer(device, spec.past, spec.query));
     const scores = track(
-      storageBuffer(device, seeded(batchHeads * rowsBlock * colCap, () => STATE_S_POISON)),
+      storageBuffer(
+        device,
+        seeded(batchHeads * rowsBlock * colCap, () => STATE_S_POISON),
+      ),
     );
     const stats = track(
       storageBuffer(
@@ -569,9 +592,8 @@ export const runStatePv = async (
         window: spec.window,
       };
       const params = track(uniformBuffer(device, stateAttentionParams(geometry)));
-      const pvParams = variant === "tiled"
-        ? track(uniformBuffer(device, statePvTiledParams(geometry)))
-        : params;
+      const pvParams =
+        variant === "tiled" ? track(uniformBuffer(device, statePvTiledParams(geometry))) : params;
       const statsParams = track(
         uniformBuffer(device, stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window)),
       );
@@ -599,11 +621,12 @@ export const runStatePv = async (
       pass.dispatchWorkgroups(statsGroups[0], statsGroups[1], statsGroups[2]);
       pass.setPipeline(pv);
       pass.setBindGroup(0, bind(device, pv, [pvParams, scores, stats, insV, slotV, out, lengths]));
-      const pvGroups = variant === "parallel"
-        ? statePvParallelWorkgroups(dispatchGeometry, limit, spec.name)
-        : variant === "tiled"
-        ? statePvTiledWorkgroups(dispatchGeometry, spec.chunkRows, limit, spec.name)
-        : statePvWorkgroups(dispatchGeometry, limit, spec.name);
+      const pvGroups =
+        variant === "parallel"
+          ? statePvParallelWorkgroups(dispatchGeometry, limit, spec.name)
+          : variant === "tiled"
+            ? statePvTiledWorkgroups(dispatchGeometry, spec.chunkRows, limit, spec.name)
+            : statePvWorkgroups(dispatchGeometry, limit, spec.name);
       pass.dispatchWorkgroups(pvGroups[0], pvGroups[1], pvGroups[2]);
       pass.end();
       device.queue.submit([encoder.finish()]);
@@ -724,12 +747,25 @@ export const runStateAttentionReadonly = async (
     const q = track(storageBuffer(device, inputs.q));
     const slotK = track(storageBuffer(device, inputs.slotK));
     const slotV = track(storageBuffer(device, inputs.slotV));
-    const out = track(storageBuffer(device, seeded(outCount, () => STATE_S_POISON)));
+    const out = track(
+      storageBuffer(
+        device,
+        seeded(outCount, () => STATE_S_POISON),
+      ),
+    );
     const lengths = track(lengthsBuffer(device, spec.past, 1));
     const sCount = batchHeads * colCap;
-    const scores = track(storageBuffer(device, seeded(sCount, () => STATE_S_POISON)));
+    const scores = track(
+      storageBuffer(
+        device,
+        seeded(sCount, () => STATE_S_POISON),
+      ),
+    );
     const stats = track(
-      storageBuffer(device, seeded(batchHeads * STATE_STATS_STRIDE, () => STATE_S_POISON)),
+      storageBuffer(
+        device,
+        seeded(batchHeads * STATE_STATS_STRIDE, () => STATE_S_POISON),
+      ),
     );
     const geometry = {
       rowsBlock: 1,

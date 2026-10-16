@@ -82,8 +82,8 @@ type CaseName = (typeof CASES)[number];
 const LONG_CHUNKS = 21;
 
 /** SKIP 時にそのまま貼れる生成コマンド（`tools/export-recipes/wan/export_vae.py`）。 */
-const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae";
+const GENERATE_COMMAND =
+  "cd tools/export-recipes && uv run --group wan --inexact " + "python -m wan.export_vae";
 
 /** 故障注入で外す cache（head の conv — 1 層だけを通る最も効きの小さい席）。 */
 const DROPPED_CACHE = "cache_31";
@@ -118,7 +118,11 @@ test({
   // 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
   ignore: !ANY_PRESENT,
   fn: () => {
-    assertEquals(PRESENT, PRESENT.map(() => true), `${SERIES_ROOT.pathname} の欠け`);
+    assertEquals(
+      PRESENT,
+      PRESENT.map(() => true),
+      `${SERIES_ROOT.pathname} の欠け`,
+    );
   },
 });
 

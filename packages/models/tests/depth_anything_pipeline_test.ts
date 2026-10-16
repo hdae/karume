@@ -379,7 +379,10 @@ test("後処理: 非有限の深度は resize の前に画素座標つきで落�
   // 正常値の顔で出る。BiRefNet の `matteFromLogits` と逐語同型の検査点を持つ。
   const width = 4;
   const height = 3;
-  for (const [index, bad] of [[6, Number.NaN], [11, Number.POSITIVE_INFINITY]] as const) {
+  for (const [index, bad] of [
+    [6, Number.NaN],
+    [11, Number.POSITIVE_INFINITY],
+  ] as const) {
     const plane = new Float32Array(width * height).fill(1);
     plane[index] = bad;
     // 座標まで文言に出ることを縛る — 要素数だけの検査だと resize の**後**へ移しても緑のまま

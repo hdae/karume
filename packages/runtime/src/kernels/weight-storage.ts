@@ -87,12 +87,12 @@ export const weightKeyPart = (storage: WeightStorage): string =>
   storage === "f32"
     ? ""
     : storage === "f16"
-    ? ":wf16"
-    : storage === "i8"
-    ? ":wi8"
-    : storage === "i2"
-    ? ":wi2"
-    : ":wi4";
+      ? ":wf16"
+      : storage === "i8"
+        ? ":wi8"
+        : storage === "i2"
+          ? ":wi2"
+          : ":wi4";
 
 /**
  * 重みバッファの WGSL 要素型（f16 は 2 要素・i8 は 4 要素を 1 語に詰めた格納なので u32）。
@@ -107,12 +107,12 @@ export const weightNote = (storage: WeightStorage): string =>
   storage === "f32"
     ? ""
     : storage === "f16"
-    ? ", 重み f16 格納"
-    : storage === "i8"
-    ? ", 重み i8 格納"
-    : storage === "i2"
-    ? ", 重み i2 格納"
-    : ", 重み i4 格納";
+      ? ", 重み f16 格納"
+      : storage === "i8"
+        ? ", 重み i8 格納"
+        : storage === "i2"
+          ? ", 重み i2 格納"
+          : ", 重み i4 格納";
 
 /**
  * i8 / i2 変種で per-channel scale を束ねる局所変数の**既定の**名前。
@@ -321,8 +321,8 @@ export const weightRead = (
   storage === "f32"
     ? `${name}[${index}]`
     : storage === "f16"
-    ? `dequant(${index})`
-    : `dequant(${index}, ${scale})`;
+      ? `dequant(${index})`
+      : `dequant(${index}, ${scale})`;
 
 /**
  * 重み **4 要素**（平坦添字 `index`..`index+3`）の読み出し式。
@@ -339,5 +339,5 @@ export const weightRead4 = (
   storage === "f32"
     ? `${name}[(${index}) >> 2u]`
     : storage === "f16"
-    ? `dequant4(${index})`
-    : `dequant4(${index}, ${scale})`;
+      ? `dequant4(${index})`
+      : `dequant4(${index}, ${scale})`;

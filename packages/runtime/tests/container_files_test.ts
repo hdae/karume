@@ -55,24 +55,31 @@ type InitializerSpec = { readonly shape: readonly number[]; readonly shared?: tr
 /** initializer ごとに 1 ノードで消費する最小の IR v2 グラフ。 */
 const declaration = (initializers: Readonly<Record<string, InitializerSpec>>): IrDeclaration => {
   const names = Object.keys(initializers);
-  return parseIrDeclaration(JSON.stringify({
-    format: "karume-ir",
-    version: 2,
-    requires: { ops: ["matmul"] },
-    symbols: ["T"],
-    inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
-    outputs: names.map((_, i) => `y${i}`),
-    initializers: Object.fromEntries(
-      names.map((name) => [name, initializers[name].shared ? { shared: true } : {}]),
-    ),
-    values: {
-      ...Object.fromEntries(
-        names.map((name) => [name, { dtype: "f32", shape: initializers[name].shape }]),
+  return parseIrDeclaration(
+    JSON.stringify({
+      format: "karume-ir",
+      version: 2,
+      requires: { ops: ["matmul"] },
+      symbols: ["T"],
+      inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
+      outputs: names.map((_, i) => `y${i}`),
+      initializers: Object.fromEntries(
+        names.map((name) => [name, initializers[name].shared ? { shared: true } : {}]),
       ),
-      ...Object.fromEntries(names.map((_, i) => [`y${i}`, { dtype: "f32", shape: ["T", 4] }])),
-    },
-    nodes: names.map((name, i) => ({ op: "matmul", ins: ["x", name], outs: [`y${i}`], attrs: {} })),
-  }));
+      values: {
+        ...Object.fromEntries(
+          names.map((name) => [name, { dtype: "f32", shape: initializers[name].shape }]),
+        ),
+        ...Object.fromEntries(names.map((_, i) => [`y${i}`, { dtype: "f32", shape: ["T", 4] }])),
+      },
+      nodes: names.map((name, i) => ({
+        op: "matmul",
+        ins: ["x", name],
+        outs: [`y${i}`],
+        attrs: {},
+      })),
+    }),
+  );
 };
 
 const F32 = 4;
@@ -89,12 +96,14 @@ const syntheticModel = (): ModelInput => ({
       "head.weight": { shape: [4, 4], shared: true },
     }),
   },
-  consts: [{
-    graph: GRAPH,
-    initializer: "const.rope",
-    bytes: bytesOf(16 * F32, 11),
-    encoding: { codec: "f32" },
-  }],
+  consts: [
+    {
+      graph: GRAPH,
+      initializer: "const.rope",
+      bytes: bytesOf(16 * F32, 11),
+      encoding: { codec: "f32" },
+    },
+  ],
   weights: [
     {
       graph: GRAPH,
@@ -166,7 +175,10 @@ const withContainer = async (
 test("resolveParts は分割されていない容器を代表 path 1 本として返す", async () => {
   await withFiles([REPRESENTATIVE], (dir) => {
     const representative = new URL(REPRESENTATIVE, dir);
-    assertEquals(resolveParts(representative).map((url) => url.href), [representative.href]);
+    assertEquals(
+      resolveParts(representative).map((url) => url.href),
+      [representative.href],
+    );
   });
 });
 
@@ -179,7 +191,10 @@ test("resolveParts は連番の part を番号昇順で返す（part 添字の�
   ];
   await withFiles(names, (dir) => {
     const files = resolveParts(new URL(REPRESENTATIVE, dir)).map((url) => url.href);
-    assertEquals(files, [...names].sort().map((name) => new URL(name, dir).href));
+    assertEquals(
+      files,
+      [...names].sort().map((name) => new URL(name, dir).href),
+    );
   });
 });
 
@@ -226,11 +241,7 @@ test("resolveParts は総数からはみ出した番号を fail loudly にする
 // 空リストで落ち、落ちてはいるのに何が余計なのかが読めない診断になる。
 test("resolveParts は 0 番の part も余計な番号として名指す", async () => {
   await withFiles(
-    [
-      "model-00000-of-00002.krm",
-      "model-00001-of-00002.krm",
-      "model-00002-of-00002.krm",
-    ],
+    ["model-00000-of-00002.krm", "model-00001-of-00002.krm", "model-00002-of-00002.krm"],
     (dir) => {
       const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
       assertStringIncludes(error.message, "はみ出した番号 0");
@@ -246,9 +257,10 @@ test("resolveParts は別 dtype の容器を拾わない（stem の厳密一致�
     ["model.i8-00001-of-00001.krm", "modelXi8-00002-of-00002.krm", "other-00001-of-00002.krm"],
     (dir) => {
       const files = resolveParts(new URL("model.i8.krm", dir));
-      assertEquals(files.map((url) => url.href), [
-        new URL("model.i8-00001-of-00001.krm", dir).href,
-      ]);
+      assertEquals(
+        files.map((url) => url.href),
+        [new URL("model.i8-00001-of-00001.krm", dir).href],
+      );
     },
   );
 });
@@ -299,10 +311,7 @@ test("fileBlockSource は part の途中から要求した区間だけを返す"
     const bytes = written.parts[part];
     const offset = Math.floor(bytes.byteLength / 3);
     const length = Math.min(17, bytes.byteLength - offset);
-    assertEquals(
-      await source.read(part, offset, length),
-      bytes.subarray(offset, offset + length),
-    );
+    assertEquals(await source.read(part, offset, length), bytes.subarray(offset, offset + length));
   });
 });
 

@@ -40,9 +40,7 @@ export const umt5SessionInputs = (
 ): Umt5SessionInputs => {
   const length = ids.length;
   if (length < UMT5_MIN_TOKENS || length > UMT5_MAX_LENGTH) {
-    throw new Error(
-      `umT5 の id 列の長さ ${length} が ${UMT5_MIN_TOKENS}〜${UMT5_MAX_LENGTH} の外`,
-    );
+    throw new Error(`umT5 の id 列の長さ ${length} が ${UMT5_MIN_TOKENS}〜${UMT5_MAX_LENGTH} の外`);
   }
   const [rows, columns] = buckets.shape;
   if (buckets.shape.length !== 2 || rows !== length || columns !== length) {
@@ -77,9 +75,7 @@ export const umt5HiddenStates = (
   }
   const [batch, length, channels] = output.shape;
   if (output.shape.length !== 3 || batch !== 1 || length !== tokens || channels !== width) {
-    throw new Error(
-      `umT5 の出力 [${output.shape.join(",")}] が [1,${tokens},${width}] でない`,
-    );
+    throw new Error(`umT5 の出力 [${output.shape.join(",")}] が [1,${tokens},${width}] でない`);
   }
   if (output.data.length !== tokens * width) {
     throw new Error(

@@ -110,11 +110,7 @@ const stateGraph = (model: StateModel, readers = 1): DeclarationJson => {
   };
 };
 
-const stateSession = async (
-  gpu: GpuContext,
-  model: StateModel,
-  readers = 1,
-): Promise<Session> =>
+const stateSession = async (gpu: GpuContext, model: StateModel, readers = 1): Promise<Session> =>
   await createSessionFromContainer(
     gpu,
     await openGraphModel(stateGraph(model, readers)),
@@ -146,10 +142,8 @@ const stepInputs = (
   salt: number,
   readers = 1,
 ): StepInputs => ({
-  q: Array.from(
-    { length: readers },
-    (_, index) =>
-      seeded(model.heads * chunkRows * model.depth, (i) => QUERY(i + salt + index * 97)),
+  q: Array.from({ length: readers }, (_, index) =>
+    seeded(model.heads * chunkRows * model.depth, (i) => QUERY(i + salt + index * 97)),
   ),
   k: seeded(model.kvHeads * chunkRows * model.depth, (i) => KEY(i + salt)),
   v: seeded(model.kvHeads * chunkRows * model.depth, (i) => VALUE(i + salt)),
@@ -345,7 +339,12 @@ const oneShotSession = async (gpu: GpuContext, model: StateModel): Promise<Sessi
   const { heads, depth } = model;
   const graph = singleOpDeclaration(
     "attention",
-    [[1, heads, "M", depth], [1, heads, "N", depth], [1, heads, "N", depth], [1, 1, "M", "N"]],
+    [
+      [1, heads, "M", depth],
+      [1, heads, "N", depth],
+      [1, heads, "N", depth],
+      [1, 1, "M", "N"],
+    ],
     [[1, heads, "M", depth]],
     { attrs: { scale: halfScale(depth) }, symbols: ["M", "N"] },
   );
@@ -390,28 +389,52 @@ const CROSS_SERIES: readonly CrossSeries[] = [
     name: "full r=1",
     model: { heads: 4, kvHeads: 4, depth: 4, capacity: 16 },
     chunkLength: 4,
-    steps: [[4, 4], [1, 1], [1, 1], [1, 1], [4, 2]],
+    steps: [
+      [4, 4],
+      [1, 1],
+      [1, 1],
+      [1, 1],
+      [4, 2],
+    ],
   },
   {
     // pad つき prefill から始める GQA（0 → 3 → 4 → 5 → 9）
     name: "full r=2 (GQA)",
     model: { heads: 4, kvHeads: 2, depth: 8, capacity: 16 },
     chunkLength: 4,
-    steps: [[4, 3], [1, 1], [1, 1], [4, 4]],
+    steps: [
+      [4, 3],
+      [1, 1],
+      [1, 1],
+      [4, 4],
+    ],
   },
   {
     // 0 → 3 → 4 → 5 → 6 → 7 → 9。W=4 の ring は past=4 で一周し、以後 毎 step エビクト
     name: "sliding W=4 r=1（W 跨ぎエビクション）",
     model: { heads: 2, kvHeads: 2, depth: 4, capacity: 4, window: 4 },
     chunkLength: 3,
-    steps: [[3, 3], [1, 1], [1, 1], [1, 1], [1, 1], [3, 2]],
+    steps: [
+      [3, 3],
+      [1, 1],
+      [1, 1],
+      [1, 1],
+      [1, 1],
+      [3, 2],
+    ],
   },
   {
     // 0 → 4 → 5 → 6 → 7 → 10。エビクション × GQA × 末尾 pad つき chunk
     name: "sliding W=6 r=2（GQA × エビクション）",
     model: { heads: 4, kvHeads: 2, depth: 4, capacity: 6, window: 6 },
     chunkLength: 4,
-    steps: [[4, 4], [1, 1], [1, 1], [1, 1], [4, 3]],
+    steps: [
+      [4, 4],
+      [1, 1],
+      [1, 1],
+      [1, 1],
+      [4, 3],
+    ],
   },
 ];
 
@@ -432,11 +455,14 @@ const crossSeriesReports = async (
   if (windowDelta !== 0 && (model.window === undefined || typeof capacity !== "number")) {
     throw new Error("故障注入（窓を広げる）は具体容量の sliding 系列にしか適用できない");
   }
-  const stateModel: StateModel = windowDelta === 0 ? model : {
-    ...model,
-    window: (model.window ?? 0) + windowDelta,
-    capacity: (capacity as number) + windowDelta,
-  };
+  const stateModel: StateModel =
+    windowDelta === 0
+      ? model
+      : {
+          ...model,
+          window: (model.window ?? 0) + windowDelta,
+          capacity: (capacity as number) + windowDelta,
+        };
   const states = await stateSession(gpu, stateModel);
   const oneShot = await oneShotSession(gpu, model);
   const context = await states.createGenerationContext({ chunkLength: series.chunkLength });
@@ -451,28 +477,32 @@ const crossSeriesReports = async (
       appendHistory(kHistory, inputs.k, model, chunkRows, query);
       appendHistory(vHistory, inputs.v, model, chunkRows, query);
       const total = past + query;
-      const expected = (await oneShot.run({
-        x0: tensor(
-          [1, model.heads, query, model.depth],
-          takeRows(inputs.q[0], model.heads, chunkRows, model.depth, query),
-        ),
-        x1: tensor([1, model.heads, total, model.depth], materializeHistory(kHistory, model)),
-        x2: tensor([1, model.heads, total, model.depth], materializeHistory(vHistory, model)),
-        x3: tensor([1, 1, query, total], bandMask(past, query, total, model.window ?? 0)),
-      }))["y"].data as Float32Array<ArrayBuffer>;
+      const expected = (
+        await oneShot.run({
+          x0: tensor(
+            [1, model.heads, query, model.depth],
+            takeRows(inputs.q[0], model.heads, chunkRows, model.depth, query),
+          ),
+          x1: tensor([1, model.heads, total, model.depth], materializeHistory(kHistory, model)),
+          x2: tensor([1, model.heads, total, model.depth], materializeHistory(vHistory, model)),
+          x3: tensor([1, 1, query, total], bandMask(past, query, total, model.window ?? 0)),
+        })
+      )["y"].data as Float32Array<ArrayBuffer>;
       // MUST: 期待値が自明でないこと（両側が ~0 なら突合は恒真）。
       assert(
         expected.some((value) => Math.abs(value) > 1e-3),
         `${series.name} step ${index}: 1-shot 側の期待出力が自明（全 ~0）`,
       );
-      reports.push(compareTensors(
-        {
-          dtype: "f32",
-          data: takeRows(actual, model.heads, chunkRows, model.depth, query),
-        },
-        { dtype: "f32", data: expected },
-        CROSS_TOLERANCE,
-      ));
+      reports.push(
+        compareTensors(
+          {
+            dtype: "f32",
+            data: takeRows(actual, model.heads, chunkRows, model.depth, query),
+          },
+          { dtype: "f32", data: expected },
+          CROSS_TOLERANCE,
+        ),
+      );
       past += query;
     }
     assertEquals(context.pastLength, past, `${series.name}: 論理長がホスト側の進行とずれた`);
@@ -485,8 +515,7 @@ const crossSeriesReports = async (
 };
 
 test({
-  name:
-    "states 形の多 step が帯 mask つき 1-shot 融合 attention と一致する（交差オラクル・実 GPU）",
+  name: "states 形の多 step が帯 mask つき 1-shot 融合 attention と一致する（交差オラクル・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const gpu = await acquireGpu();
@@ -526,9 +555,9 @@ test({
       assertEquals(
         failing,
         [true, true, false, false, false, false],
-        `窓 +1 の実装が検出されない step がある（突合が空振り）: ${
-          reports.map(formatAllclose).join(" / ")
-        }`,
+        `窓 +1 の実装が検出されない step がある（突合が空振り）: ${reports
+          .map(formatAllclose)
+          .join(" / ")}`,
       );
       // 検出力の余裕: 混入 1 本の効きが許容幅の 3 桁以上（実測 0.054〜2.12 — 幅を 2 桁緩めても
       // 残る）。前半 2 step が緑なのは「何でも赤くする注入ではない」ことの裏。
@@ -576,7 +605,8 @@ const paddedInputs = (
       if (row < query) {
         return generator(
           (Math.floor(i / (chunkRows * model.depth)) * query + row) * model.depth +
-            (i % model.depth) + salt,
+            (i % model.depth) +
+            salt,
         );
       }
       return padFill === undefined ? 0 : padFill(i);
@@ -613,34 +643,46 @@ test({
       // どちらの実行形でも同じ 2 点が成り立つことを併せて見る。
       for (const [index, query] of [PAD_TIGHT_ROWS, 1].entries()) {
         const salt = 11 + index * 37;
-        const wideOut = (await runStep(
-          session,
-          wide,
-          PAD_MODEL,
-          paddedInputs(PAD_MODEL, PAD_WIDE_ROWS, query, salt),
-          PAD_WIDE_ROWS,
-          query,
-        ))[0];
-        const tightOut = (await runStep(
-          session,
-          tight,
-          PAD_MODEL,
-          tightInputs(PAD_MODEL, query, salt),
-          query,
-          query,
-        ))[0];
+        const wideOut = (
+          await runStep(
+            session,
+            wide,
+            PAD_MODEL,
+            paddedInputs(PAD_MODEL, PAD_WIDE_ROWS, query, salt),
+            PAD_WIDE_ROWS,
+            query,
+          )
+        )[0];
+        const tightOut = (
+          await runStep(
+            session,
+            tight,
+            PAD_MODEL,
+            tightInputs(PAD_MODEL, query, salt),
+            query,
+            query,
+          )
+        )[0];
         // NOTE: pad 行の 0 埋めは**ホスト側の値契約**（ADR 0066 追記 6 — pad 行の k/v が非有限だと
         // 「−inf 加算 + exp」経路で valid 行へ NaN が漏れるのを値で遮断する）。KV スロットには
         // そもそも pad 行が書かれないので、この契約は KV には効いていない — それを示すのが下の
         // `garbage`（pad 行に非ゼロを詰めても KV のバイト列は 1 ビットも動かない）。
-        const garbageOut = (await runStep(
-          session,
-          garbage,
-          PAD_MODEL,
-          paddedInputs(PAD_MODEL, PAD_WIDE_ROWS, query, salt, (i) => (((i * 13) % 29) - 14) * 0.41),
-          PAD_WIDE_ROWS,
-          query,
-        ))[0];
+        const garbageOut = (
+          await runStep(
+            session,
+            garbage,
+            PAD_MODEL,
+            paddedInputs(
+              PAD_MODEL,
+              PAD_WIDE_ROWS,
+              query,
+              salt,
+              (i) => (((i * 13) % 29) - 14) * 0.41,
+            ),
+            PAD_WIDE_ROWS,
+            query,
+          )
+        )[0];
 
         const label = `step ${index}（Q=${query}）`;
         // ① KV スロットのバイト列が完全一致（pad の有無・pad の中身に依らない）
@@ -729,22 +771,29 @@ test({
       // どれも窓の外（`col + W ≤ P + row`）に落ちるため、正規に空行になる。
       for (const [index, past] of [0, 1, 2].entries()) {
         assertEquals(context.pastLength, past, `step ${index}: 前提の論理長がずれた`);
-        const out = (await runStep(
-          session,
-          context,
-          EMPTY_MODEL,
-          stepInputs(EMPTY_MODEL, chunkRows, 5 + index * 19),
-          chunkRows,
-          1,
-        ))[0];
-        const empties = Array.from({ length: chunkRows }, (_, row) => row)
-          .filter((row) => isEmptyRow(past, 1, window ?? 0, row));
+        const out = (
+          await runStep(
+            session,
+            context,
+            EMPTY_MODEL,
+            stepInputs(EMPTY_MODEL, chunkRows, 5 + index * 19),
+            chunkRows,
+            1,
+          )
+        )[0];
+        const empties = Array.from({ length: chunkRows }, (_, row) => row).filter((row) =>
+          isEmptyRow(past, 1, window ?? 0, row),
+        );
         // MUST: 空行が実在すること（この形で 0 本なら門ごと空振り）。
         assertEquals(empties, [2, 3], `step ${index}: 空行の想定が崩れている`);
         // MUST: 空行は pad 行（`row ≥ Q`）の**部分集合**（Q=1 なので pad は 1,2,3）。波 D-7 で
         // 「空行 → 厳密 0」は「pad 行 → 厳密 0」が構造的に包含する形になったので、包含が崩れて
         // いないことも併せて見る（valid 行は causal 自己参照で必ず非空）。
-        assertEquals(empties.filter((row) => row < 1), [], `step ${index}: 空行が valid 行に出た`);
+        assertEquals(
+          empties.filter((row) => row < 1),
+          [],
+          `step ${index}: 空行が valid 行に出た`,
+        );
         for (let head = 0; head < heads; head += 1) {
           // pad 行（空行を含む）は厳密 0（ADR 0067 受入条件⑤ / ADR 0066 追記 6 の値契約）。
           for (let row = 1; row < chunkRows; row += 1) {
@@ -803,9 +852,14 @@ test({
 
       // prefill（M=4 / Q=4）→ decode ×3。容量は S の列ストライドと確保サイズにしか効かない
       // ので、同じ論理長の同じ入力なら**丸め列まで含めて**同じでなければならない。
-      for (
-        const [index, [chunkRows, query]] of ([[4, 4], [1, 1], [1, 1], [1, 1]] as const).entries()
-      ) {
+      for (const [index, [chunkRows, query]] of (
+        [
+          [4, 4],
+          [1, 1],
+          [1, 1],
+          [1, 1],
+        ] as const
+      ).entries()) {
         const inputs = stepInputs(SYMBOLIC_MODEL, chunkRows, 3 + index * 41);
         const a = (await runStep(session, small, SYMBOLIC_MODEL, inputs, chunkRows, query))[0];
         const b = (await runStep(session, large, SYMBOLIC_MODEL, inputs, chunkRows, query))[0];
@@ -858,7 +912,12 @@ const SHARED_SERIES: readonly SharedSeries[] = [
     model: { heads: 2, kvHeads: 2, depth: 4, capacity: 16 },
     capacity: 16,
     chunkLength: 3,
-    steps: [[3, 3], [3, 3], [3, 3], [1, 1]],
+    steps: [
+      [3, 3],
+      [3, 3],
+      [3, 3],
+      [1, 1],
+    ],
   },
   {
     // W=4 / C=4 の ring。step 1（past=3 / Q=3）の append は物理 3,0,1 を書くので、読者が先に
@@ -867,7 +926,12 @@ const SHARED_SERIES: readonly SharedSeries[] = [
     model: { heads: 2, kvHeads: 2, depth: 4, capacity: 4, window: 4 },
     capacity: 4,
     chunkLength: 3,
-    steps: [[3, 3], [3, 3], [3, 3], [1, 1]],
+    steps: [
+      [3, 3],
+      [3, 3],
+      [3, 3],
+      [1, 1],
+    ],
     orderProbeStep: 1,
   },
 ];

@@ -34,11 +34,15 @@ describe("attentionRoute: a8 + s16 の要求", () => {
       for (let cols = 1; cols <= 12; cols++) {
         const qkOk = depth % 4 === 0;
         const pvOk = cols % 4 === 0;
-        assertEquals(attentionRoute(A8_S16, depth, cols), {
-          qk: qkOk ? "i8a8" : "dense",
-          pv: pvOk ? "i8a8" : "dense",
-          score: qkOk && pvOk ? "f16" : "f32",
-        }, `D=${depth} N=${cols}`);
+        assertEquals(
+          attentionRoute(A8_S16, depth, cols),
+          {
+            qk: qkOk ? "i8a8" : "dense",
+            pv: pvOk ? "i8a8" : "dense",
+            score: qkOk && pvOk ? "f16" : "f32",
+          },
+          `D=${depth} N=${cols}`,
+        );
       }
     }
   });

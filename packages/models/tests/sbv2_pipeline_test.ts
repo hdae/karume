@@ -161,14 +161,16 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
 test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落としても、admission が共有 GPU の shader-f16 不足を名指しで落とす", async () => {
   // 要求する feature は「宣言 ∪ 実効設定が要る feature」（`sessionGpuFeatures`）。`gpuFeatures` だけを
   // 見ると、この配布形は admission を素通りし、重みを上げた後の Session 構築まで落ちない。
-  const f16Compute = parseManifest(manifestText({
-    quants: {
-      i8: {
-        weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "i8"])),
-        session: { linearCompute: "f16" },
+  const f16Compute = parseManifest(
+    manifestText({
+      quants: {
+        i8: {
+          weights: Object.fromEntries(WEIGHT_NAMES.map((name) => [name, "i8"])),
+          session: { linearCompute: "f16" },
+        },
       },
-    },
-  }));
+    }),
+  );
   const shared = { gpu: fakeGpuContext(fakeDevice()) };
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest: f16Compute, assets: COMPONENTS }, shared),
@@ -334,7 +336,15 @@ test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る", () 
       lengthScale: 1,
     },
   });
-  assertEquals([...config.styles], [["Neutral", 0], ["high", 1], ["low", 2], ["NSFW", 3]]);
+  assertEquals(
+    [...config.styles],
+    [
+      ["Neutral", 0],
+      ["high", 1],
+      ["low", 2],
+      ["NSFW", 3],
+    ],
+  );
   assertEquals([...config.speakers], [["FN4", 0]]);
   assertEquals(config.defaults.style, "Neutral");
   assertEquals(config.defaults.lengthScale, 1);
@@ -522,22 +532,25 @@ const noiseWiringState = (calls: string[], defaultNoiseScaleW: number) => {
         lengthScale: 1,
       },
     }),
-    rules: parseJpExtraRules({
-      symbols: ["_", "a", "."],
-      pad: "_",
-      punctuations: ["."],
-      toneStart: 6,
-      languageId: 1,
-      numTones: 12,
-      numLanguages: 3,
-      addBlank: true,
-      blankId: 0,
-      samplingRate: 44100,
-      hopLength: 512,
-      bertHiddenFromEnd: 3,
-      bertRelPos: { positionBuckets: 256, maxPosition: 512 },
-      defaults: { sdpRatio: 0.2, noiseScale: 0.6, noiseScaleW: 0.8, lengthScale: 1 },
-    }, "テスト規則"),
+    rules: parseJpExtraRules(
+      {
+        symbols: ["_", "a", "."],
+        pad: "_",
+        punctuations: ["."],
+        toneStart: 6,
+        languageId: 1,
+        numTones: 12,
+        numLanguages: 3,
+        addBlank: true,
+        blankId: 0,
+        samplingRate: 44100,
+        hopLength: 512,
+        bertHiddenFromEnd: 3,
+        bertRelPos: { positionBuckets: 256, maxPosition: 512 },
+        defaults: { sdpRatio: 0.2, noiseScale: 0.6, noiseScaleW: 0.8, lengthScale: 1 },
+      },
+      "テスト規則",
+    ),
     tokenizer: DebertaTokenizer.fromVocabText(
       ["[PAD]", "[CLS]", "[SEP]", "[UNK]", "."].join("\n"),
       { removed: [], spaced: [] },
@@ -851,7 +864,16 @@ const tokenizerRanges = (clean: Record<string, unknown>): Record<string, unknown
 
 test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなければ受け付けない", () => {
   // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
-  parseTokenizerAsset(tokenizerRanges({ removed: [[0, 0], [8, 31]], spaced: [[32, 32]] }), "tok");
+  parseTokenizerAsset(
+    tokenizerRanges({
+      removed: [
+        [0, 0],
+        [8, 31],
+      ],
+      spaced: [[32, 32]],
+    }),
+    "tok",
+  );
   // `inRanges` は二分探索なので、前提が破れても例外は出ず**黙って外す**。除去/空白化の規則
   // だけが変わった bertText から input_ids と baseWord2ph が同じ壊れ方で作られるため、
   // `text/model-input.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した音がそのまま出る。
@@ -862,13 +884,32 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
   );
   assertThrows(
     () =>
-      parseTokenizerAsset(tokenizerRanges({ removed: [[127, 159], [8, 31]], spaced: [] }), "tok"),
+      parseTokenizerAsset(
+        tokenizerRanges({
+          removed: [
+            [127, 159],
+            [8, 31],
+          ],
+          spaced: [],
+        }),
+        "tok",
+      ),
     Error,
     "tok.cleanRanges.removed[1]: 区間 [8, 31] が直前の終端 159 以下から始まる",
   );
   // 端点を共有するだけの重複でも探索は外しうる（境界を 1 つ緩めていない）。
   assertThrows(
-    () => parseTokenizerAsset(tokenizerRanges({ removed: [[8, 31], [31, 40]], spaced: [] }), "tok"),
+    () =>
+      parseTokenizerAsset(
+        tokenizerRanges({
+          removed: [
+            [8, 31],
+            [31, 40],
+          ],
+          spaced: [],
+        }),
+        "tok",
+      ),
     Error,
     "tok.cleanRanges.removed[1]: 区間 [31, 40] が直前の終端 31 以下から始まる",
   );

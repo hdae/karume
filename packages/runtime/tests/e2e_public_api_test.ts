@@ -109,9 +109,12 @@ test({
 
         // 記号次元は run ごとに束縛し直される
         const wide = Array.from({ length: 9 * 3 }, (_, i) => (i % 5) - 2);
-        const outputs2 = await session.run({
-          x: { dtype: "f32", shape: [9, 3], data: Float32Array.from(wide) },
-        }, { T: 9 });
+        const outputs2 = await session.run(
+          {
+            x: { dtype: "f32", shape: [9, 3], data: Float32Array.from(wide) },
+          },
+          { T: 9 },
+        );
         assertEquals(outputs2["y"].shape, [9]);
         const expected2 = expectedRows(wide, 9);
         for (let row = 0; row < 9; row += 1) {
@@ -230,5 +233,8 @@ test("公開面が capability 照会とモデル解析の失敗型を提供す�
 test("この E2E は公開面（mod.ts）以外の実装を import しない", async () => {
   const source = await readTextFile(new URL(import.meta.url));
   const specifiers = [...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1]);
-  assertEquals(specifiers.filter((path) => path.includes("/src/")), []);
+  assertEquals(
+    specifiers.filter((path) => path.includes("/src/")),
+    [],
+  );
 });

@@ -83,7 +83,7 @@ test({
       const caught = await assertRejects(() =>
         withPipelineScope(gpu.device, "body-throws", () => {
           throw thrown;
-        })
+        }),
       );
       assertEquals(caught, thrown, "body の例外はそのまま伝播する");
 
@@ -140,16 +140,17 @@ test({
       // （PipelineCache 等）がロックを再取得すると自己デッドロックになるため、並行 run が
       // ハングせず完走すること自体が回帰の対象になる。
       const built = await Promise.allSettled(
-        (["relu", "neg"] as const).map(async (op) =>
-          await createSessionFromContainer(
-            gpu,
-            await openGraphModel(singleOpDeclaration(op, [[8, 8]], [[8, 8]])),
-            "model",
-          )
+        (["relu", "neg"] as const).map(
+          async (op) =>
+            await createSessionFromContainer(
+              gpu,
+              await openGraphModel(singleOpDeclaration(op, [[8, 8]], [[8, 8]])),
+              "model",
+            ),
         ),
       );
       const sessions = built.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : []
+        result.status === "fulfilled" ? [result.value] : [],
       );
       let failure: { readonly error: unknown } | undefined;
       try {

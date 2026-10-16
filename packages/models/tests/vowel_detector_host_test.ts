@@ -227,7 +227,10 @@ test("後処理: 非有限ロジットは座標を添えて落とす（全区間
   // 対: 汚していない同じ配列は参照どおりの `.lab` を返す（常に落ちる門になっていない）。
   assertEquals(toLab(logitsToSegments(finite, fixture.logits.length)), fixture.lab);
   const at = 7 * LIPSYNC_CLASSES.length + 5; // frame 7 / class 5 = "N"
-  for (const [poison, shown] of [[NaN, "NaN"], [Number.POSITIVE_INFINITY, "Infinity"]] as const) {
+  for (const [poison, shown] of [
+    [NaN, "NaN"],
+    [Number.POSITIVE_INFINITY, "Infinity"],
+  ] as const) {
     const logits = finite.slice();
     logits[at] = poison;
     assertThrows(
@@ -259,7 +262,7 @@ test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () 
  * 20 は切替ペナルティ 4 より十分大きいので、Viterbi は argmax に追随する。
  */
 const logitsFor = (
-  sequence: readonly (typeof LIPSYNC_CLASSES[number])[],
+  sequence: readonly (typeof LIPSYNC_CLASSES)[number][],
   overrides: Readonly<Record<number, Readonly<Record<string, number>>>> = {},
 ): Float32Array<ArrayBuffer> => {
   const classes = LIPSYNC_CLASSES.length;
@@ -267,7 +270,7 @@ const logitsFor = (
   for (let frame = 0; frame < sequence.length; frame += 1) {
     logits[frame * classes + LIPSYNC_CLASSES.indexOf(sequence[frame])] = 20;
     for (const [label, value] of Object.entries(overrides[frame] ?? {})) {
-      logits[frame * classes + LIPSYNC_CLASSES.indexOf(label as typeof LIPSYNC_CLASSES[number])] =
+      logits[frame * classes + LIPSYNC_CLASSES.indexOf(label as (typeof LIPSYNC_CLASSES)[number])] =
         value;
     }
   }
@@ -275,7 +278,7 @@ const logitsFor = (
 };
 
 const labFor = (
-  sequence: readonly (typeof LIPSYNC_CLASSES[number])[],
+  sequence: readonly (typeof LIPSYNC_CLASSES)[number][],
   overrides?: Readonly<Record<number, Readonly<Record<string, number>>>>,
 ): string => toLab(logitsToSegments(logitsFor(sequence, overrides), sequence.length));
 
@@ -342,7 +345,10 @@ test("cons 吸収: 吸収先がどちらも無ければ pau に落とす", () =>
 
 test("toLab: 秒は 7 桁固定で、行ごとに改行が付く", () => {
   assertEquals(
-    toLab([{ start: 0, end: 0.02, label: "a" }, { start: 0.02, end: 1 / 3, label: "pau" }]),
+    toLab([
+      { start: 0, end: 0.02, label: "a" },
+      { start: 0.02, end: 1 / 3, label: "pau" },
+    ]),
     "0.0000000 0.0200000 a\n0.0200000 0.3333333 pau\n",
   );
   assertEquals(toLab([]), "");

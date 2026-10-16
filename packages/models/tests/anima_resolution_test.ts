@@ -22,11 +22,8 @@ import { ModelInputError } from "../src/errors.ts";
 /** 刻みの上に並ぶ辺の候補（下限から天井まで）。 */
 const CANDIDATE_SIDES = ((): readonly number[] => {
   const sides: number[] = [];
-  for (
-    let side = MIN_RESOLUTION_SIDE;
-    side <= MAX_RESOLUTION_SIDE;
-    side += RESOLUTION_GRANULARITY
-  ) sides.push(side);
+  for (let side = MIN_RESOLUTION_SIDE; side <= MAX_RESOLUTION_SIDE; side += RESOLUTION_GRANULARITY)
+    sides.push(side);
   return sides;
 })();
 

@@ -109,8 +109,7 @@ describe("Wan の受理集合 × 実用席の attention の経路", () => {
 
       it("受理する全形で self は宣言どおり（③PV も S の f16 格納も落ちない）", () => {
         const shapes = acceptedSelfKeys(generation, layout);
-        const frameCount = (generation.maxFrames - generation.minFrames) / TEMPORAL_COMPRESSION +
-          1;
+        const frameCount = (generation.maxFrames - generation.minFrames) / TEMPORAL_COMPRESSION + 1;
         assertEquals(shapes.length, generation.acceptedSizes.length * frameCount);
         for (const { shape, keys } of shapes) {
           assertEquals(

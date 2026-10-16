@@ -71,9 +71,12 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     const neg = nodes[cursor + 2];
     const cat = nodes[cursor + 3];
     if (
-      first?.node.op !== "slice" || second?.node.op !== "slice" || neg?.node.op !== "neg" ||
+      first?.node.op !== "slice" ||
+      second?.node.op !== "slice" ||
+      neg?.node.op !== "neg" ||
       cat?.node.op !== "cat"
-    ) return undefined;
+    )
+      return undefined;
     cursor += 4;
     // 窓内 passthrough は cos / sin 表の sym_prefix_slice 1 本だけ（実測形）。ここを
     // 「任意 op の任意本数」に広げると、鎖と無関係なノードを跨いだ並べ替えまで受理してしまう。
@@ -82,9 +85,8 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     if (!directFirst) cursor += 1;
     const cross = nodes[cursor];
     const add = nodes[cursor + 1];
-    if (
-      direct?.node.op !== "mul" || cross?.node.op !== "mul" || add?.node.op !== "add"
-    ) return undefined;
+    if (direct?.node.op !== "mul" || cross?.node.op !== "mul" || add?.node.op !== "add")
+      return undefined;
     const windowEnd = cursor + 2;
 
     // MUST: use-count と解放簿記は**実際のノード順**で持つ。役割順に並べ替えた列を使うと
@@ -96,11 +98,16 @@ export const ROPE_RULE = defineRule<RopeMatch>({
 
     const xName = first.node.ins[0];
     if (
-      second.node.ins[0] !== xName || neg.node.ins[0] !== second.outputs[0].name ||
-      cat.node.ins[0] !== neg.outputs[0].name || cat.node.ins[1] !== first.outputs[0].name ||
-      direct.node.ins[0] !== xName || cross.node.ins[0] !== cat.outputs[0].name ||
-      add.node.ins[0] !== direct.outputs[0].name || add.node.ins[1] !== cross.outputs[0].name
-    ) return undefined;
+      second.node.ins[0] !== xName ||
+      neg.node.ins[0] !== second.outputs[0].name ||
+      cat.node.ins[0] !== neg.outputs[0].name ||
+      cat.node.ins[1] !== first.outputs[0].name ||
+      direct.node.ins[0] !== xName ||
+      cross.node.ins[0] !== cat.outputs[0].name ||
+      add.node.ins[0] !== direct.outputs[0].name ||
+      add.node.ins[1] !== cross.outputs[0].name
+    )
+      return undefined;
 
     const xShape = first.inputShapes[0];
     if (xShape.length !== 4 || xShape[0] !== 1) return undefined;
@@ -112,8 +119,8 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     const layout = tablesMatch([1, 1, axis2, headDim])
       ? "bhsd"
       : tablesMatch([1, axis1, 1, headDim])
-      ? "bshd"
-      : undefined;
+        ? "bshd"
+        : undefined;
     if (layout === undefined) return undefined;
     // 両レイアウトとも第2軸が表添字の除数（BHSD=S、BSHD=H）。
     const tableAxisSize = axis2;
@@ -122,21 +129,28 @@ export const ROPE_RULE = defineRule<RopeMatch>({
     const firstSlice = sliceAttrs(first.node.attrs, "RoPE first slice");
     const secondSlice = sliceAttrs(second.node.attrs, "RoPE second slice");
     if (
-      firstSlice.dim !== 3 || firstSlice.start !== 0 || firstSlice.end !== halfDim ||
-      secondSlice.dim !== 3 || secondSlice.start !== halfDim || secondSlice.end !== headDim ||
+      firstSlice.dim !== 3 ||
+      firstSlice.start !== 0 ||
+      firstSlice.end !== halfDim ||
+      secondSlice.dim !== 3 ||
+      secondSlice.start !== halfDim ||
+      secondSlice.end !== headDim ||
       catDim(cat.node.attrs, "RoPE cat") !== 3
-    ) return undefined;
+    )
+      return undefined;
 
     const halfShape = [1, axis1, axis2, halfDim];
     const fullShape = [1, axis1, axis2, headDim];
     if (
       !sameShape(first.outputs[0].shape, halfShape) ||
       !sameShape(second.outputs[0].shape, halfShape) ||
-      !sameShape(neg.outputs[0].shape, halfShape) || !sameShape(cat.outputs[0].shape, fullShape) ||
+      !sameShape(neg.outputs[0].shape, halfShape) ||
+      !sameShape(cat.outputs[0].shape, fullShape) ||
       !sameShape(direct.outputs[0].shape, fullShape) ||
       !sameShape(cross.outputs[0].shape, fullShape) ||
       !sameShape(add.outputs[0].shape, fullShape)
-    ) return undefined;
+    )
+      return undefined;
 
     if (!internalsArePrivate(chain, context)) return undefined;
 
@@ -160,12 +174,14 @@ export const ROPE_RULE = defineRule<RopeMatch>({
       outputName: matched.outputName,
       outputShape: matched.outputShape,
       temps: [],
-      dispatches: [{
-        key: matched.layout === "bhsd" ? ROPE_KEY : ROPE_BSHD_KEY,
-        wgsl: () => ropeWgsl(matched.layout),
-        params: ropeParams(count, matched.tableAxisSize, matched.headDim, matched.layout),
-        workgroups: { kind: "gridStride", items: count, size: ROPE_WORKGROUP_SIZE },
-      }],
+      dispatches: [
+        {
+          key: matched.layout === "bhsd" ? ROPE_KEY : ROPE_BSHD_KEY,
+          wgsl: () => ropeWgsl(matched.layout),
+          params: ropeParams(count, matched.tableAxisSize, matched.headDim, matched.layout),
+          workgroups: { kind: "gridStride", items: count, size: ROPE_WORKGROUP_SIZE },
+        },
+      ],
     };
   },
 });

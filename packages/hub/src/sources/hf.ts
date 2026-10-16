@@ -96,8 +96,13 @@ const stockKey = (path: string, sha256: string): string => `${path} ${sha256}`;
  * probed through optional globals only, not through any runtime API (ADR 0002).
  */
 const defaultReadStrategy = (): "stream" | undefined => {
-  const host = globalThis as { readonly Deno?: unknown; readonly process?: { readonly versions?: { readonly node?: unknown } } };
-  return host.Deno !== undefined || typeof host.process?.versions?.node === "string" ? "stream" : undefined;
+  const host = globalThis as {
+    readonly Deno?: unknown;
+    readonly process?: { readonly versions?: { readonly node?: unknown } };
+  };
+  return host.Deno !== undefined || typeof host.process?.versions?.node === "string"
+    ? "stream"
+    : undefined;
 };
 
 const pinnedHfSource = (
@@ -125,20 +130,27 @@ const pinnedHfSource = (
    */
   const warmFile = async (
     ref: FileRef,
-    { signal, onProgress }: {
+    {
+      signal,
+      onProgress,
+    }: {
       readonly signal?: AbortSignal;
       readonly onProgress?: (loaded: number) => void;
     },
   ): Promise<void> => {
-    await prefetchHfFile(target, { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size }, {
-      init: requestInit(options.headers, signal),
-      fetch: baseFetch,
-      ...(onProgress === undefined
-        ? {}
-        : { onProgress: (progress) => onProgress(progress.loaded) }),
-      ...shared,
-      ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
-    });
+    await prefetchHfFile(
+      target,
+      { path: ref.path, sha256: ref.sha256, expectedBytes: ref.size },
+      {
+        init: requestInit(options.headers, signal),
+        fetch: baseFetch,
+        ...(onProgress === undefined
+          ? {}
+          : { onProgress: (progress) => onProgress(progress.loaded) }),
+        ...shared,
+        ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
+      },
+    );
   };
   return {
     origin,
@@ -152,13 +164,17 @@ const pinnedHfSource = (
       // ManifestFormatError を返し続ける（資産側と同じ self-heal 経路に揃える）。
       // MUST NOT: このフックへ中断確認を混ぜない — フックの throw は下層で「破損」と解釈され、
       // 健全なキャッシュエントリの evict と取り直しを招く。
-      await fetchHfFile(target, { path: MANIFEST_FILENAME, validate: parse }, {
-        init: requestInit(options.headers, signal),
-        fetch: baseFetch,
-        ...shared,
-        ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
-        ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
-      });
+      await fetchHfFile(
+        target,
+        { path: MANIFEST_FILENAME, validate: parse },
+        {
+          init: requestInit(options.headers, signal),
+          fetch: baseFetch,
+          ...shared,
+          ...(options.onCacheError === undefined ? {} : { onCacheError: options.onCacheError }),
+          ...(options.onRetry === undefined ? {} : { onRetry: options.onRetry }),
+        },
+      );
     },
 
     readFile: async (ref, { signal, onProgress }) => {

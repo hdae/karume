@@ -30,8 +30,9 @@ test("settleAbort: signal 未指定なら 1 度も譲らない（マクロタス
   const order: string[] = [];
   // 対照 = 先に仕掛けたタスク 1 本。`settleAbort` が譲っていればこちらが先に決着する
   // （マイクロタスクだけで済む決着は、既に待ち行列にあるタスクより必ず先に来る）。
-  const task = new Promise<void>((resolve) => setTimeout(resolve, 0))
-    .then(() => order.push("task"));
+  const task = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() =>
+    order.push("task"),
+  );
   const settled = settleAbort(undefined).then(() => order.push("settleAbort"));
   await Promise.all([task, settled]);
   assertEquals(order, ["settleAbort", "task"]);
@@ -42,9 +43,9 @@ test("settleAbort: signal 付きならマクロタスクへ譲る（マイクロ
   const controller = new AbortController();
   const settled = settleAbort(controller.signal).then(() => order.push("settleAbort"));
   // マイクロタスクを数段挟んでも、タスクへ譲っている限りこちらが先に終わる。
-  const microtasks = Promise.resolve().then(() => Promise.resolve()).then(() =>
-    order.push("microtask")
-  );
+  const microtasks = Promise.resolve()
+    .then(() => Promise.resolve())
+    .then(() => order.push("microtask"));
   await Promise.all([microtasks, settled]);
   assertEquals(order, ["microtask", "settleAbort"]);
 });
@@ -64,14 +65,18 @@ test("settleAbort: 譲っている間に届いた abort() を観測する", asyn
   const controller = new AbortController();
   const settled = settleAbort(controller.signal);
   // 中断はマイクロタスクチェーンから届く = `settleAbort` を呼んだ時点ではまだ中断していない。
-  await Promise.resolve().then(() => Promise.resolve()).then(() => controller.abort(reason));
+  await Promise.resolve()
+    .then(() => Promise.resolve())
+    .then(() => controller.abort(reason));
   const caught = await assertRejects(() => settled, Error, "マイクロタスク経由の中断");
   assertStrictEquals(caught, reason);
 
   // 陽性対照 — マイクロタスク譲りの擬似実装は同じ中断を**拾わない**（= このケースは恒真でない）。
   const other = new AbortController();
   const missed = settleAbortViaMicrotask(other.signal);
-  await Promise.resolve().then(() => Promise.resolve()).then(() => other.abort(reason));
+  await Promise.resolve()
+    .then(() => Promise.resolve())
+    .then(() => other.abort(reason));
   await missed;
 });
 

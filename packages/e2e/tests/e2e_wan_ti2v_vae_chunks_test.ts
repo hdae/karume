@@ -175,17 +175,19 @@ const bandCandidate = async (
   if (BAND !== undefined) return;
   await t.step("帯の候補（未導出）", async () => {
     const band = observed.get("band");
-    const candidate = band === undefined
-      ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
-      : band > 0
-      ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
-        `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
-      : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
-    const accepted = CASES.filter(({ role }) => role === "accept")
-      .map(({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`);
-    const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${
-      accepted.join(" / ")
-    }`;
+    const candidate =
+      band === undefined
+        ? "band が maxAbs を出す前に落ちた — 候補にしない（落ちたケースを先に調べる）"
+        : band > 0
+          ? `band の maxAbs ${band.toExponential(3)} × 5 = ${(band * 5).toExponential(3)}` +
+            `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(band * 5)}）`
+          : "band の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
+    const accepted = CASES.filter(({ role }) => role === "accept").map(
+      ({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`,
+    );
+    const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
+      " / ",
+    )}`;
     await runRecordedCase(results, { id: "band-candidate", failureNote: () => message }, () => {
       console.log(`[wan-ti2v-vae] ${message}`);
       throw new Error(message);
@@ -202,7 +204,8 @@ const attentionPipelines = (graph: string, diagnostics: SessionDiagnostics) => {
   const pipelines = diagnostics.lastRunPipelines;
   if (pipelines === undefined) throw new Error(`${graph}: 直近 run の pipeline の census が無い`);
   const dispatches = (kernel: (typeof ATTENTION_KERNELS)[number]): number =>
-    pipelines.filter(({ key }) => key.split(":")[0] === kernel)
+    pipelines
+      .filter(({ key }) => key.split(":")[0] === kernel)
       .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
   return {
     dispatches: {
@@ -236,7 +239,7 @@ const submitGpuNote = (diagnostics: SessionDiagnostics, unitNs: number | undefin
   const time = (value: number): string =>
     unitNs === undefined
       ? `${value} tick（換算の表に無い環境）`
-      : `${(value * unitNs / 1e6).toFixed(1)} ms`;
+      : `${((value * unitNs) / 1e6).toFixed(1)} ms`;
   return [
     `1 submit の GPU 時間の最大 ${time(observed.maxNs)}（${observed.submits} 本）`,
     `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
@@ -349,8 +352,7 @@ test({
 });
 
 test({
-  name:
-    "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）",
+  name: "Wan2.2 TI2V VAE chunk 列: 常駐 cache の first → next が上流の _decode（unpatchify の前）と帯の中で一致（実 GPU）",
   ignore: !ASSETS_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     const models = await prepareModels();
@@ -399,7 +401,10 @@ test({
             [layout.latentChannels, layout.tile, layout.sampleTile, layout.sampleChannels],
             [LATENT_CHANNELS, TILE, SAMPLE_TILE, SAMPLE_CHANNELS],
           );
-          assertEquals(layout.next.caches, CACHE_TABLE.map(({ name }) => name));
+          assertEquals(
+            layout.next.caches,
+            CACHE_TABLE.map(({ name }) => name),
+          );
           assertEquals(
             layout.next.caches.filter((name) => !layout.first.caches.includes(name)),
             [...TIME_CONV_CACHES],
@@ -429,10 +434,12 @@ test({
               const fixture = fixtures[name];
               const chunks = wanVaeChunkCount(layout, fixture.latents);
               assertEquals(chunks, expectedChunks, `${name} の chunk 数`);
-              assertEquals(
-                fixture.frameShape,
-                [SAMPLE_CHANNELS, wanVaeFrameCount(chunks), SAMPLE_TILE, SAMPLE_TILE],
-              );
+              assertEquals(fixture.frameShape, [
+                SAMPLE_CHANNELS,
+                wanVaeFrameCount(chunks),
+                SAMPLE_TILE,
+                SAMPLE_TILE,
+              ]);
               await poisonFrames(chunks);
               const started = performance.now();
               const got = await decodeWanVaeTile(gpu, sessions, liveCaches, fixture.latents);
@@ -488,9 +495,9 @@ test({
               next: sessions.next.diagnostics(),
             };
             const lines = [
-              `vram ${
-                JSON.stringify(vramBreakdown(diagnostics.first, diagnostics.next, liveCaches))
-              }`,
+              `vram ${JSON.stringify(
+                vramBreakdown(diagnostics.first, diagnostics.next, liveCaches),
+              )}`,
               ...Object.entries(diagnostics).flatMap(([graph, stats]) => [
                 `attention ${graph} ${JSON.stringify(attentionPipelines(graph, stats))}`,
                 `fusions ${graph} ${JSON.stringify(stats.lastRunFusions)}`,

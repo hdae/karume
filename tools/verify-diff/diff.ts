@@ -208,16 +208,20 @@ const parseEntry = (value: unknown, where: string): ResultEntry => {
     ...(artifact === undefined ? {} : { artifact }),
     elapsedMs: requireNumber(record, "elapsedMs", at),
     ...(note === undefined ? {} : { note }),
-    ...(measurements === undefined ? {} : {
-      measurements: measurements.map((one, index) =>
-        parseMeasurement(one, `${at}.measurements[${index}]`)
-      ),
-    }),
-    ...(comparisons === undefined ? {} : {
-      comparisons: comparisons.map((one, index) =>
-        parseComparison(one, `${at}.comparisons[${index}]`)
-      ),
-    }),
+    ...(measurements === undefined
+      ? {}
+      : {
+          measurements: measurements.map((one, index) =>
+            parseMeasurement(one, `${at}.measurements[${index}]`),
+          ),
+        }),
+    ...(comparisons === undefined
+      ? {}
+      : {
+          comparisons: comparisons.map((one, index) =>
+            parseComparison(one, `${at}.comparisons[${index}]`),
+          ),
+        }),
   };
 };
 
@@ -339,7 +343,7 @@ const shortSha = (sha: string): string => sha.slice(0, 7);
 const checkoutWarnings = (selected: readonly SelectedDocument[]): string[] => {
   const warnings: string[] = [];
   const known = selected.flatMap((one) =>
-    one.checkout === null ? [] : [{ environment: one.environment, checkout: one.checkout }]
+    one.checkout === null ? [] : [{ environment: one.environment, checkout: one.checkout }],
   );
   if (new Set(known.map((one) => one.checkout.sha)).size > 1) {
     const columns = known
@@ -447,7 +451,7 @@ export const buildDiff = (
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([family, perEnvironment]): FamilyMatrix => {
       const chosen = [...perEnvironment.entries()].sort(([left], [right]) =>
-        left < right ? -1 : left > right ? 1 : 0
+        left < right ? -1 : left > right ? 1 : 0,
       );
       const environments = chosen.map(([environment]) => environment);
       const selected = chosen.map(([environment, entry]): SelectedDocument => ({

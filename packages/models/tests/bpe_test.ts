@@ -28,8 +28,8 @@ const buildModel = (
   const idOf = new Map(tokens.map((token, id) => [token, id] as const));
   return createBpeModel({
     vocab: tokens.map((token, id) => [id, token] as const),
-    merges: merges.map(([left, right], rank) =>
-      [idOf.get(left) as number, idOf.get(right) as number, rank] as const
+    merges: merges.map(
+      ([left, right], rank) => [idOf.get(left) as number, idOf.get(right) as number, rank] as const,
     ),
     byteIds: Array.from({ length: 256 }, (_, byte) => idOf.get(byteToken(byte)) as number),
   });
@@ -67,7 +67,14 @@ test("資産の門: 通すと沈黙誤値になる形を落とす", async (t) =>
 
   await t.step("同じ対の併合規則が 2 本あると落ちる（上流は後勝ちで沈黙する）", () => {
     assertThrows(
-      () => buildModel(["a", "aa"], [["a", "a"], ["a", "a"]]),
+      () =>
+        buildModel(
+          ["a", "aa"],
+          [
+            ["a", "a"],
+            ["a", "a"],
+          ],
+        ),
       Error,
       "重複",
     );
@@ -79,7 +86,15 @@ test("資産の門: 通すと沈黙誤値になる形を落とす", async (t) =>
 
   await t.step("語彙の綴りが重複すると落ちる（行番号 = id が引けなくなる）", () => {
     assertThrows(
-      () => createBpeModel({ vocab: [[0, "a"], [1, "a"]], merges: [], byteIds: [] }),
+      () =>
+        createBpeModel({
+          vocab: [
+            [0, "a"],
+            [1, "a"],
+          ],
+          merges: [],
+          byteIds: [],
+        }),
       Error,
       "重複",
     );
@@ -90,21 +105,39 @@ test("併合の順序: rank が最小のものから、同点は左から", asyn
   await t.step("左から貪欲に取るのではなく rank の小さい対が先に潰れる", () => {
     // ("b","c") が rank 0・("a","b") が rank 1。左から取ると [ab, c] になるが、正本は
     // rank 順なので [a, bc] が正しい。
-    const model = buildModel(["a", "b", "c", "ab", "bc"], [["b", "c"], ["a", "b"]]);
+    const model = buildModel(
+      ["a", "b", "c", "ab", "bc"],
+      [
+        ["b", "c"],
+        ["a", "b"],
+      ],
+    );
     assertEquals(spell(model, bpeEncode(model, "abc")), ["a", "bc"]);
   });
 
   await t.step("同じ rank が複数の位置に立つときは左が勝つ", () => {
     // "aaa" は位置 0 と 1 の両方で ("a","a") rank 0。左が勝てば [aa, a] → ("aa","a") で
     // [aaa] まで畳まれる。右を先に取ると [a, aa] で止まる（("a","aa") は規則に無い）。
-    const model = buildModel(["a", "aa", "aaa"], [["a", "a"], ["aa", "a"]]);
+    const model = buildModel(
+      ["a", "aa", "aaa"],
+      [
+        ["a", "a"],
+        ["aa", "a"],
+      ],
+    );
     assertEquals(spell(model, bpeEncode(model, "aaa")), ["aaa"]);
   });
 
   await t.step("併合で入れ替わった位置の古い項目は捨てられる", () => {
     // ("y","z") rank 0 が先に潰れると、位置 0 に積んであった ("x","y") rank 1 の相手は
     // もう `y` ではない。同一性で照合しないと `x` と `yz` を `xy` として畳んでしまう。
-    const model = buildModel(["x", "y", "z", "yz", "xy"], [["y", "z"], ["x", "y"]]);
+    const model = buildModel(
+      ["x", "y", "z", "yz", "xy"],
+      [
+        ["y", "z"],
+        ["x", "y"],
+      ],
+    );
     assertEquals(spell(model, bpeEncode(model, "xyz")), ["x", "yz"]);
   });
 
@@ -112,7 +145,12 @@ test("併合の順序: rank が最小のものから、同点は左から", asyn
     // ("a","b") → ab で位置 1 が消えるが、キューには ("b","c") が残っている。
     const model = buildModel(
       ["a", "b", "c", "d", "ab", "cd", "bc", "abcd"],
-      [["a", "b"], ["c", "d"], ["b", "c"], ["ab", "cd"]],
+      [
+        ["a", "b"],
+        ["c", "d"],
+        ["b", "c"],
+        ["ab", "cd"],
+      ],
     );
     assertEquals(spell(model, bpeEncode(model, "abcd")), ["abcd"]);
   });
@@ -231,10 +269,7 @@ test("逐次復号: byte run の畳み方は正本の String::from_utf8 に合�
   });
 
   await t.step("run が非 byte トークンで割れると別々に畳まれる", () => {
-    assertEquals(
-      detokenize(source, [200 + 0xe3, 200 + 0x81, 0, 200 + 0x82]),
-      "��hello�",
-    );
+    assertEquals(detokenize(source, [200 + 0xe3, 200 + 0x81, 0, 200 + 0x82]), "��hello�");
   });
 
   await t.step("BOM は剥がされない（TextDecoder の既定は捨てる）", () => {
@@ -257,9 +292,5 @@ test("逐次復号: skip した特殊トークンは byte run を切らない", 
 });
 
 test("逐次復号: 語彙に無い id は落とす（正本は黙って読み飛ばす）", () => {
-  assertThrows(
-    () => detokenize(buildSource(DECODE_TOKENS), [999]),
-    Error,
-    "語彙に無い",
-  );
+  assertThrows(() => detokenize(buildSource(DECODE_TOKENS), [999]), Error, "語彙に無い");
 });

@@ -155,13 +155,15 @@ const LINEAR_OP_FAMILIES: ReadonlySet<string> = new Set(
 );
 
 /** 席の非参照値のどれかの述語に当たるか。 */
-const anyVariant = (predicates: Readonly<Record<string, KeyPredicate>>): KeyPredicate => (key) =>
-  Object.values(predicates).some((predicate) => predicate(key));
+const anyVariant =
+  (predicates: Readonly<Record<string, KeyPredicate>>): KeyPredicate =>
+  (key) =>
+    Object.values(predicates).some((predicate) => predicate(key));
 
 /** 逐次の ①QK / ③PV（states 形の参照経路）の全キー（`(sliding, gqa)` の 4 通り）。 */
 const STATE_SEQUENTIAL_KEYS: ReadonlySet<string> = new Set(
   [stateQkKey, statePvKey].flatMap((key) =>
-    [false, true].flatMap((sliding) => [false, true].map((gqa) => key(sliding, gqa)))
+    [false, true].flatMap((sliding) => [false, true].map((gqa) => key(sliding, gqa))),
   ),
 );
 
@@ -191,12 +193,13 @@ const REFERENCE_SIGNATURES: { readonly [Seat in ReferenceSeat]: KeyPredicate } =
 // ---------------------------------------------------------------------------
 
 /** 席 1 つぶんの期待本数（run 1 回あたり・ちょうど）。 */
-type SeatCount<Seat extends NumericSeat> = Seat extends ReferenceSeat ? {
-    /** 束が指定した非参照値の変種キーの本数。 */
-    readonly variant: number;
-    /** その席の参照経路に残ったキーの本数（完全適格なら 0）。 */
-    readonly reference: number;
-  }
+type SeatCount<Seat extends NumericSeat> = Seat extends ReferenceSeat
+  ? {
+      /** 束が指定した非参照値の変種キーの本数。 */
+      readonly variant: number;
+      /** その席の参照経路に残ったキーの本数（完全適格なら 0）。 */
+      readonly reference: number;
+    }
   : { readonly variant: number };
 
 /**
@@ -245,9 +248,9 @@ type FamilyBundleRow<Family extends CensusFamily> = {
   readonly census: ComponentCensus<Family>;
 };
 
-export type BundleCensusRow = { readonly [Family in CensusFamily]: FamilyBundleRow<Family> }[
-  CensusFamily
-];
+export type BundleCensusRow = {
+  readonly [Family in CensusFamily]: FamilyBundleRow<Family>;
+}[CensusFamily];
 
 // ---------------------------------------------------------------------------
 // 表
@@ -686,8 +689,8 @@ export const censusRowOf = (
   effective: SessionOptions,
 ): BundleCensusRow | undefined => {
   const key = bundleKey(effective);
-  return CENSUS_TABLE.find((row) =>
-    row.family === family && row.models.includes(model) && bundleKey(row.session) === key
+  return CENSUS_TABLE.find(
+    (row) => row.family === family && row.models.includes(model) && bundleKey(row.session) === key,
   );
 };
 
@@ -736,11 +739,14 @@ export const phaseExpectations = (
     };
     if (count.reference === undefined) return [variant];
     const reference = (REFERENCE_SIGNATURES as Readonly<Record<string, KeyPredicate>>)[seat];
-    return [variant, {
-      label: `${seat} の参照経路に残った dispatch`,
-      match: reference,
-      count: count.reference,
-    }];
+    return [
+      variant,
+      {
+        label: `${seat} の参照経路に残った dispatch`,
+        match: reference,
+        count: count.reference,
+      },
+    ];
   });
 };
 
@@ -773,4 +779,5 @@ export const assertRowCensus = (
 };
 
 /** gemma の相 → 部品（投機の draft だけが drafter の Session・他は製品グラフ）。 */
-export const gemmaComponentOf = (phase: string): string => phase === "draft" ? "drafter" : "target";
+export const gemmaComponentOf = (phase: string): string =>
+  phase === "draft" ? "drafter" : "target";

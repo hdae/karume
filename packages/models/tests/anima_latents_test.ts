@@ -74,7 +74,10 @@ test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃っ�
   // 構造で止める。
   assertEquals(ANIMA_LATENTS_MEAN.length, 16);
   assertEquals(ANIMA_LATENTS_STD.length, ANIMA_LATENTS_MEAN.length);
-  assert(ANIMA_LATENTS_STD.every((value) => value > 0), "std に非正の値がある");
+  assert(
+    ANIMA_LATENTS_STD.every((value) => value > 0),
+    "std に非正の値がある",
+  );
 });
 
 test("animaLatents: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {

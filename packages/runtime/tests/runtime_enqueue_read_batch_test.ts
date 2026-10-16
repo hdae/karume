@@ -89,7 +89,10 @@ const outcomeOf = async (
   const timer = setTimeout(() => cutoff.resolve({ state: "pending" }), 500);
   try {
     return await Promise.race([
-      awaited.then(() => ({ state: "resolved" }), (cause) => ({ state: "rejected", cause })),
+      awaited.then(
+        () => ({ state: "resolved" }),
+        (cause) => ({ state: "rejected", cause }),
+      ),
       cutoff.promise,
     ]);
   } finally {
@@ -111,12 +114,15 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
     let reads = 0;
-    const read = session.enqueueRead({}, {
-      get batch(): BatchScope {
-        reads += 1;
-        return batch;
+    const read = session.enqueueRead(
+      {},
+      {
+        get batch(): BatchScope {
+          reads += 1;
+          return batch;
+        },
       },
-    });
+    );
     const finished = outcomeOf(batch.finish());
     assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
     assertEquals(await outcomeOf(read.outputs), { state: "resolved" });
@@ -134,12 +140,15 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     const entered = await gpu.beginBatch();
     const decoy = await other.beginBatch();
     let reads = 0;
-    const read = session.enqueueRead({}, {
-      get batch(): BatchScope {
-        reads += 1;
-        return reads === 1 ? entered : decoy;
+    const read = session.enqueueRead(
+      {},
+      {
+        get batch(): BatchScope {
+          reads += 1;
+          return reads === 1 ? entered : decoy;
+        },
       },
-    });
+    );
     // 入った区間が `entered` であることの観測: `decoy` で enter していれば「別の GpuContext で
     // 開いた batch には enqueue できない」で受理そのものが落ちる。
     assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
@@ -159,13 +168,16 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     const batch = await gpu.beginBatch();
     let reads = 0;
     // 同期 throw が漏れると、この呼び出し自体がここで落ちる（戻り値を受け取れない）。
-    const read = session.enqueueRead({}, {
-      get batch(): BatchScope {
-        reads += 1;
-        if (reads >= 2) throw new Error("2 度目の読み");
-        return batch;
+    const read = session.enqueueRead(
+      {},
+      {
+        get batch(): BatchScope {
+          reads += 1;
+          if (reads >= 2) throw new Error("2 度目の読み");
+          return batch;
+        },
       },
-    });
+    );
     assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
     assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
     await session.dispose();
@@ -175,11 +187,14 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
-    const read = session.enqueueRead({}, {
-      get batch(): BatchScope {
-        throw new Error("最初の読み");
+    const read = session.enqueueRead(
+      {},
+      {
+        get batch(): BatchScope {
+          throw new Error("最初の読み");
+        },
       },
-    });
+    );
     assertInstanceOf(await rejectionOf(read.admitted), Error);
     assertInstanceOf(await rejectionOf(read.outputs), Error);
     // 受理に落ちた enqueue は区間へ 1 本も入っていない（リースが残らず finish は決着する）。
@@ -192,12 +207,15 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
     const issued: Promise<unknown>[] = [];
-    const read = session.enqueueRead({}, {
-      get batch(): BatchScope {
-        if (issued.length === 0) issued.push(session.run({}));
-        return batch;
+    const read = session.enqueueRead(
+      {},
+      {
+        get batch(): BatchScope {
+          if (issued.length === 0) issued.push(session.run({}));
+          return batch;
+        },
       },
-    });
+    );
     // 未決着 run を持つ Session の enqueue は自己デッドロックなので、受け口が型付き例外へ変換する。
     const refused = await rejectionOf(read.admitted);
     assertInstanceOf(refused, BatchScopeError);

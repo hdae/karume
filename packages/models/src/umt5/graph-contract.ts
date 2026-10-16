@@ -33,9 +33,7 @@ const umt5Input = (
   const spec = textEncoder.graph.inputs.find((input) => input.name === name);
   if (spec === undefined) {
     const declared = textEncoder.graph.inputs.map((input) => input.name).join(" / ");
-    throw new Error(
-      `${owner}: text_encoder のグラフ入力 '${name}' が無い（宣言: ${declared}）`,
-    );
+    throw new Error(`${owner}: text_encoder のグラフ入力 '${name}' が無い（宣言: ${declared}）`);
   }
   return spec;
 };
@@ -93,7 +91,10 @@ export const umt5GraphContract = (
         `（${String(length)}）— ホストは有効長 L ごとに形を変えて渡す`,
     );
   }
-  for (const [spec, expected] of [[ids, [1, length]], [buckets, [length, length]]] as const) {
+  for (const [spec, expected] of [
+    [ids, [1, length]],
+    [buckets, [length, length]],
+  ] as const) {
     if (spec.dtype !== "i32") {
       throw new Error(
         `${owner}: text_encoder の '${spec.name}' の dtype ${spec.dtype} が i32 でない`,

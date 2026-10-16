@@ -63,7 +63,7 @@ const ANIMA_RESIDENCIES = Object.freeze(["per-stage", "transformer"] as const);
  * - `"per-stage"`（既定）: 段ごとに張って畳む。VRAM のピークは最大の段 1 本ぶん。
  * - `"transformer"`: DiT を**この generate の後も**持ち続ける。text / VAE の段は常駐 DiT の上に乗る。
  */
-export type AnimaResidency = typeof ANIMA_RESIDENCIES[number];
+export type AnimaResidency = (typeof ANIMA_RESIDENCIES)[number];
 
 /** 省略時の値（従来の挙動 — 既定の VRAM の前提を変えない）。 */
 export const DEFAULT_ANIMA_RESIDENCY: AnimaResidency = "per-stage";
@@ -114,9 +114,10 @@ export type ResidencyNotice = {
  * 入力起因（ADR 0107）。
  */
 export const assertAnimaResidency = (value: unknown, where: string): AnimaResidency => {
-  const accepted = typeof value === "string"
-    ? ANIMA_RESIDENCIES.find((candidate) => candidate === value)
-    : undefined;
+  const accepted =
+    typeof value === "string"
+      ? ANIMA_RESIDENCIES.find((candidate) => candidate === value)
+      : undefined;
   if (accepted === undefined) {
     throw new ModelInputError(
       `${where}: 期待 ${ANIMA_RESIDENCIES.map((name) => `'${name}'`).join(" / ")}` +
@@ -367,7 +368,7 @@ export class TransformerResidency<T> {
   async runTransformer<R>(stage: TransformerStage<T, R>): Promise<R> {
     const facts = this.#facts(stage.effective);
     const carried = this.#held;
-    const resource = carried ?? await stage.open();
+    const resource = carried ?? (await stage.open());
     let result: R;
     try {
       result = await stage.body(resource);
@@ -505,7 +506,7 @@ export class TransformerResidency<T> {
       await notify(notice);
       return;
     }
-    failures.push(...await cleanupFailures(original, [() => notify(notice)]));
+    failures.push(...(await cleanupFailures(original, [() => notify(notice)])));
     throw new AggregateError(
       cause === undefined ? failures : [cause.error, ...failures],
       CLEANUP_FAILED,

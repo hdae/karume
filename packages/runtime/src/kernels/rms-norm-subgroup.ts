@@ -21,11 +21,12 @@ const assertOrder = (order: RmsNormAddOrder | undefined): void => {
 export const rmsNormSubgroupWgsl = (order?: RmsNormAddOrder): string => {
   assertOrder(order);
   const norm = "bitcast<f32>(bitcast<u32>(x[base + o] * inv * weight[o]) ^ params.rounding_mask)";
-  const output = order === undefined
-    ? "x[base + o] * inv * weight[o]"
-    : order === "norm-residual"
-    ? `${norm} + residual[base + o]`
-    : `residual[base + o] + ${norm}`;
+  const output =
+    order === undefined
+      ? "x[base + o] * inv * weight[o]"
+      : order === "norm-residual"
+        ? `${norm} + residual[base + o]`
+        : `residual[base + o] + ${norm}`;
   return `enable subgroups, subgroup_size_control;
 struct Params {
   rows: u32,

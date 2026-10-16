@@ -49,7 +49,11 @@ import {
   prepareContainer,
   type PreparedModel,
 } from "@karume/runtime";
-import { normalizeToNchw, type ResampleFilter, resizeRgb8 } from "../../models/src/image/preprocess.ts";
+import {
+  normalizeToNchw,
+  type ResampleFilter,
+  resizeRgb8,
+} from "../../models/src/image/preprocess.ts";
 import { encodePng } from "../../models/src/image/png.ts";
 // NOTE: PNG デコーダは karume 本体が持たない設計（preprocess.ts のモジュール doc —— 入口は
 // RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
@@ -115,7 +119,8 @@ const PIXEL_MISMATCH_EPSILON = 1e-3;
 const SERIES_NAME = "depth-anything-v2-small-hf";
 
 /** SKIP 時にそのまま貼れる生成コマンド（実画像 golden まで含む形）。 */
-const GENERATE = "cd tools/export-recipes && uv run --group depth-anything-preprocess" +
+const GENERATE =
+  "cd tools/export-recipes && uv run --group depth-anything-preprocess" +
   " python -m depth_anything.export --real-images";
 
 /**
@@ -185,20 +190,20 @@ type Region = {
  */
 const REAL_REGIONS: Readonly<Record<string, readonly [Region, Region]>> = {
   "photo-portrait": [
-    { label: "subject", top: 0.85, bottom: 1.00, left: 0.35, right: 0.65 },
-    { label: "background", top: 0.30, bottom: 0.45, left: 0.02, right: 0.12 },
+    { label: "subject", top: 0.85, bottom: 1.0, left: 0.35, right: 0.65 },
+    { label: "background", top: 0.3, bottom: 0.45, left: 0.02, right: 0.12 },
   ],
   "photo-landscape": [
-    { label: "foreground-ground", top: 0.92, bottom: 1.00, left: 0.30, right: 0.70 },
-    { label: "mountain-sky", top: 0.05, bottom: 0.20, left: 0.35, right: 0.65 },
+    { label: "foreground-ground", top: 0.92, bottom: 1.0, left: 0.3, right: 0.7 },
+    { label: "mountain-sky", top: 0.05, bottom: 0.2, left: 0.35, right: 0.65 },
   ],
   "photo-corridor": [
-    { label: "floor", top: 0.92, bottom: 1.00, left: 0.40, right: 0.60 },
-    { label: "vanishing-point", top: 0.64, bottom: 0.76, left: 0.40, right: 0.56 },
+    { label: "floor", top: 0.92, bottom: 1.0, left: 0.4, right: 0.6 },
+    { label: "vanishing-point", top: 0.64, bottom: 0.76, left: 0.4, right: 0.56 },
   ],
   "photo-street": [
     { label: "person", top: 0.55, bottom: 0.85, left: 0.44, right: 0.56 },
-    { label: "sky", top: 0.02, bottom: 0.12, left: 0.40, right: 0.60 },
+    { label: "sky", top: 0.02, bottom: 0.12, left: 0.4, right: 0.6 },
   ],
 };
 
@@ -249,7 +254,7 @@ const GOLDEN_COUNT = REAL_CASES.filter((entry) => exists(goldenUrl(entry.name)))
  * MUST: NotFound 以外は伝播させる（`exists` と同じ理由）。
  */
 const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) =>
-  exists(new URL(entry.file, CORPUS_DIR))
+  exists(new URL(entry.file, CORPUS_DIR)),
 );
 
 /** 実画像の群。golden と画像の**両方**が揃ってはじめて実走する。 */
@@ -335,10 +340,7 @@ const DEPTH_COLORS: readonly (readonly [number, number, number])[] = [
 ];
 
 /** 深度地図（min-max 正規化 → {@link DEPTH_COLORS} で着色）の PNG バイト列。 */
-const depthToPng = (
-  depth: Float32Array,
-  size: number,
-): Promise<Uint8Array<ArrayBuffer>> => {
+const depthToPng = (depth: Float32Array, size: number): Promise<Uint8Array<ArrayBuffer>> => {
   let minimum = Infinity;
   let maximum = -Infinity;
   for (const value of depth) {
@@ -373,7 +375,8 @@ if (!REAL_AVAILABLE) {
 
 for (const entry of REAL_CASES) {
   test({
-    name: `Depth Anything 実画像前処理パリティ: ${entry.name}` +
+    name:
+      `Depth Anything 実画像前処理パリティ: ${entry.name}` +
       "（TS の bicubic + 畳んだ正規化 対 DPTImageProcessor）",
     ignore: !REAL_AVAILABLE,
     fn: async () => {
@@ -440,7 +443,8 @@ for (const entry of REAL_CASES) {
 }
 
 test({
-  name: "Depth Anything 実画像 判別: 構図から言える近い領域の深度が遠い領域を上回る" +
+  name:
+    "Depth Anything 実画像 判別: 構図から言える近い領域の深度が遠い領域を上回る" +
     "（深度 PNG も書く）",
   ignore: !REAL_AVAILABLE || !GPU_AVAILABLE,
   fn: async () => {
@@ -462,9 +466,9 @@ test({
     /** 画像ごとの領域平均（判別の材料。途中で落ちた回も、測れたぶんを note に残す）。 */
     const means = new Map<string, { near: number; far: number }>();
     const meansNote = (): string =>
-      [...means].map(([name, measured]) =>
-        `${name} ${measured.near.toFixed(4)}/${measured.far.toFixed(4)}`
-      ).join(" / ");
+      [...means]
+        .map(([name, measured]) => `${name} ${measured.near.toFixed(4)}/${measured.far.toFixed(4)}`)
+        .join(" / ");
     /** sha が参照と食い違った画像（全画像の決着を積み終えてからまとめて落とす）。 */
     const mismatches: { readonly label: string; readonly settlement: ReferenceSettlement }[] = [];
     try {
@@ -500,9 +504,11 @@ test({
               width,
               height,
             );
-            const output = (await session.run({
-              [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
-            }))[outputName];
+            const output = (
+              await session.run({
+                [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
+              })
+            )[outputName];
             // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
             assert(output.dtype === "f32", `${real.name}: 深度の dtype が ${output.dtype}`);
             assertEquals(output.shape, [1, height, width], `${real.name}: 深度地図の形`);
@@ -575,9 +581,10 @@ test({
       id: SERIES_NAME,
       status: mismatches.length === 0 ? "pass" : "fail",
       elapsedMs: elapsedMs(),
-      note: mismatches.length === 0
-        ? meansNote()
-        : `${meansNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
+      note:
+        mismatches.length === 0
+          ? meansNote()
+          : `${meansNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
     });
     console.log(
       `[karume] Depth Anything の深度を ${results.dir.pathname} へ書いた` +
@@ -586,9 +593,9 @@ test({
     // 決着は画像ごと・系列ごとに積み終えている（先に投げると実測 sha が結果に残らない）。
     assert(
       mismatches.length === 0,
-      mismatches.map(({ label, settlement }) =>
-        referenceMismatchMessage(label, settlement, references)
-      ).join("\n"),
+      mismatches
+        .map(({ label, settlement }) => referenceMismatchMessage(label, settlement, references))
+        .join("\n"),
     );
   },
 });

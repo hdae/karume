@@ -51,8 +51,15 @@ import {
   type SafetensorsFile,
 } from "@karume/runtime";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
-import { gemma4RopeInputNames, gemma4RopeInputs, type Gemma4RopeSpec } from "../../models/src/gemma/rope.ts";
-import { createGenerationProgram, type GenerationWiring } from "../../models/src/generation/program.ts";
+import {
+  gemma4RopeInputNames,
+  gemma4RopeInputs,
+  type Gemma4RopeSpec,
+} from "../../models/src/gemma/rope.ts";
+import {
+  createGenerationProgram,
+  type GenerationWiring,
+} from "../../models/src/generation/program.ts";
 import {
   createGenerationSequence,
   type GenerationEvent,
@@ -165,7 +172,7 @@ const exists = (url: URL): boolean => {
 
 const MODEL_PRESENT = modelPresent(new URL(MODEL_FILE, PRODUCT_ROOT));
 const GOLDENS_PRESENT = EXPECTED_CASES.every(({ name }) =>
-  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT))
+  exists(new URL(`${GREEDY_PREFIX}${name}${SUFFIX}`, GOLDEN_ROOT)),
 );
 const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
@@ -373,8 +380,7 @@ test({
           console.log(
             `[e2e] gemma4 sequence 多ターン: ${BREAK_AFTER} + ${
               GREEDY_STEPS - BREAK_AFTER
-            } token が ` +
-              `1 本走りと一致`,
+            } token が ` + `1 本走りと一致`,
           );
         },
       );
@@ -454,12 +460,16 @@ test({
           if (rows > 1 && rows < CHUNK_LENGTH) sawBucketRows = true;
 
           const started = performance.now();
-          const { events, stop } = await withSequence([], async (sequence) => {
-            const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
-            const collected: GenerationEvent[] = [];
-            for await (const event of stream) collected.push(event);
-            return { events: collected, stop: await stream.done };
-          }, CHUNK_BUCKETS);
+          const { events, stop } = await withSequence(
+            [],
+            async (sequence) => {
+              const stream = sequence.generate({ prompt, maxNewTokens: GREEDY_STEPS });
+              const collected: GenerationEvent[] = [];
+              for await (const event of stream) collected.push(event);
+              return { events: collected, stop: await stream.done };
+            },
+            CHUNK_BUCKETS,
+          );
 
           assertEquals(tokenIds(events), expected, `${name}: バケット付きの生成 token 列`);
           assertEquals(
@@ -567,8 +577,7 @@ const forkTurn = async (
 };
 
 test({
-  name:
-    "Gemma 4 E2B sequence 検収 ⑥: fork した 2 本は KV を共有しない（投機なし / always / ゲートつき・実 GPU）",
+  name: "Gemma 4 E2B sequence 検収 ⑥: fork した 2 本は KV を共有しない（投機なし / always / ゲートつき・実 GPU）",
   ignore: !MIRROR_WITH_DRAFTER || !GPU_AVAILABLE,
   fn: async (t) => {
     const started = performance.now();

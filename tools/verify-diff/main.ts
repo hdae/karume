@@ -183,8 +183,9 @@ const shortSha = (sha: string): string => sha.slice(0, 7);
 
 const describeDifference = (difference: Difference): string => {
   const values = Object.entries(difference.values)
-    .map(([environment, value]) =>
-      `${environment}=${difference.kind === "actual" ? shortSha(value) : value}`
+    .map(
+      ([environment, value]) =>
+        `${environment}=${difference.kind === "actual" ? shortSha(value) : value}`,
     )
     .join(" / ");
   if (difference.kind === "status") {
@@ -194,9 +195,9 @@ const describeDifference = (difference: Difference): string => {
     // クロスデバイスのビット同一は非保証（ADR 0106）なので、割れていても赤にはしない。
     return `\`${difference.caseId}\`: 実物の sha が違う（クロスデバイスでは非保証・差異として挙げるだけ） — ${values}`;
   }
-  return `\`${difference.caseId}\`: ${
-    (difference.missing ?? []).join(" / ")
-  } に結果が無い — ${values}`;
+  return `\`${difference.caseId}\`: ${(difference.missing ?? []).join(
+    " / ",
+  )} に結果が無い — ${values}`;
 };
 
 /** 許容差の実測（帯に対する比は rtol=0 のときだけ導ける — rtol が乗ると帯が要素ごとに動く）。 */
@@ -213,14 +214,15 @@ const measurementRows = (
   for (const output of [...outputs].sort()) {
     for (const environment of environments) {
       const cell = Object.hasOwn(cells, environment) ? cells[environment] : undefined;
-      const found: Measurement | undefined = cell?.measurements?.find((one) =>
-        one.output === output
+      const found: Measurement | undefined = cell?.measurements?.find(
+        (one) => one.output === output,
       );
       if (found === undefined) continue;
       const { tolerance, maxAbs } = found;
-      const margin = tolerance.rtol === 0 && maxAbs !== null && tolerance.atol !== 0
-        ? num(maxAbs / tolerance.atol)
-        : "-";
+      const margin =
+        tolerance.rtol === 0 && maxAbs !== null && tolerance.atol !== 0
+          ? num(maxAbs / tolerance.atol)
+          : "-";
       rows.push(
         `| ${md(output)} | ${md(environment)} | ${num(maxAbs)} | ${num(found.maxRel)} | ` +
           `atol=${num(tolerance.atol)} rtol=${num(tolerance.rtol)} | ${margin} | ${found.stage} |`,
@@ -249,14 +251,14 @@ const comparisonRows = (
       const cell = Object.hasOwn(cells, environment) ? cells[environment] : undefined;
       const found: Comparison | undefined = cell?.comparisons?.find((one) => one.output === output);
       if (found === undefined) continue;
-      const band = found.band === undefined
-        ? "未導出"
-        : `${num(found.band.floor)}〜${num(found.band.ceiling)}`;
+      const band =
+        found.band === undefined
+          ? "未導出"
+          : `${num(found.band.floor)}〜${num(found.band.ceiling)}`;
       rows.push(
-        `| ${md(output)} | ${md(environment)} | ${md(found.reference)} → ${
-          md(found.practical)
-        } | ` +
-          `${num(found.relRms)} | ${num(found.maxAbs)} | ${band} |`,
+        `| ${md(output)} | ${md(environment)} | ${md(found.reference)} → ${md(
+          found.practical,
+        )} | ` + `${num(found.relRms)} | ${num(found.maxAbs)} | ${band} |`,
       );
     }
   }
@@ -266,9 +268,10 @@ const comparisonRows = (
 const renderFamily = (matrix: FamilyMatrix): string[] => {
   const lines: string[] = [`## ${matrix.family}`, ""];
   for (const one of matrix.selected) {
-    const checkout = one.checkout === null
-      ? "checkout 無し"
-      : `${shortSha(one.checkout.sha)}${one.checkout.dirty ? "・dirty" : ""}`;
+    const checkout =
+      one.checkout === null
+        ? "checkout 無し"
+        : `${shortSha(one.checkout.sha)}${one.checkout.dirty ? "・dirty" : ""}`;
     lines.push(`- ${one.environment}: ${one.date}（${checkout}）`);
   }
   if (matrix.absent.length > 0) {
@@ -279,7 +282,7 @@ const renderFamily = (matrix: FamilyMatrix): string[] => {
   lines.push(`| --- | ${matrix.environments.map(() => "---").join(" | ")} |`);
   for (const row of matrix.rows) {
     const cells = matrix.environments.map((environment) =>
-      Object.hasOwn(row.cells, environment) ? row.cells[environment].status : "—"
+      Object.hasOwn(row.cells, environment) ? row.cells[environment].status : "—",
     );
     lines.push(`| ${md(row.id)} | ${cells.join(" | ")} |`);
   }

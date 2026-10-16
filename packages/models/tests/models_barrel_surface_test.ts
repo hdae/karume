@@ -163,7 +163,9 @@ const subpathSurfaces = async (): Promise<readonly { name: string; surface: stri
 
 /** `package.json` の `exports` から barrel（`.`）を除いたサブパス名（昇順）。 */
 const exportedSubpaths = (exports: Readonly<Record<string, string>>): string[] =>
-  Object.keys(exports).filter((name) => name !== ".").toSorted();
+  Object.keys(exports)
+    .filter((name) => name !== ".")
+    .toSorted();
 
 test("barrel: 走査するサブパスは package.json の exports のサブパスちょうど", async () => {
   const scanned = (await subpathSurfaces()).map(({ name }) => name).toSorted();
@@ -195,35 +197,29 @@ test("barrel: 取得元対応表はサブパスと barrel の両方から出る"
   const barrel = Object.keys(models);
   const subpaths = await subpathSurfaces();
   const tables = subpaths.flatMap(({ surface }) =>
-    surface.filter((exported) => exported.endsWith("_SOURCES"))
+    surface.filter((exported) => exported.endsWith("_SOURCES")),
   );
   // 陽性対照は全体で 1 回 — 表を持たない家族（vowel-detector など）は 0 本が正しい。
   assert(tables.length >= 1, "サブパスに取得元対応表が 1 本も無い");
   for (const table of tables) assert(barrel.includes(table), `barrel に ${table} が無い`);
   // サブパス側の足し忘れは上の filter では見えないので、家族の表を名指しでも縛る。
-  for (
-    const table of [
-      "ANIMA_SOURCES",
-      "IRODORI_SOURCES",
-      "SBV2_SOURCES",
-      "GEMMA4_SOURCES",
-      "SIGLIP2_SOURCES",
-      "DEPTH_ANYTHING_SOURCES",
-      "BIREFNET_SOURCES",
-      "UMT5_SOURCES",
-      "WAN_SOURCES",
-    ]
-  ) {
+  for (const table of [
+    "ANIMA_SOURCES",
+    "IRODORI_SOURCES",
+    "SBV2_SOURCES",
+    "GEMMA4_SOURCES",
+    "SIGLIP2_SOURCES",
+    "DEPTH_ANYTHING_SOURCES",
+    "BIREFNET_SOURCES",
+    "UMT5_SOURCES",
+    "WAN_SOURCES",
+  ]) {
     assert(tables.includes(table), `サブパス barrel に ${table} が無い`);
   }
   // 全家族を畳んだ表は barrel だけが出す（サブパスへ漏れると 1 家族の import が全家族を繋ぐ）。
   assert(barrel.includes("KARUME_SOURCES"), "barrel に KARUME_SOURCES が無い");
   for (const { name, surface } of subpaths) {
-    assertEquals(
-      surface.includes("KARUME_SOURCES"),
-      false,
-      `${name} に KARUME_SOURCES が出ている`,
-    );
+    assertEquals(surface.includes("KARUME_SOURCES"), false, `${name} に KARUME_SOURCES が出ている`);
   }
 });
 

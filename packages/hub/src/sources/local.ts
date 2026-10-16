@@ -124,7 +124,10 @@ const localRangeReader = (
   cost: "seek",
   read: async (offset, length, options = {}) => {
     if (
-      !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 ||
+      !Number.isInteger(offset) ||
+      !Number.isInteger(length) ||
+      offset < 0 ||
+      length < 0 ||
       offset + length > ref.size
     ) {
       throw new Error(
@@ -139,9 +142,10 @@ const localRangeReader = (
     // MUST: 長さ違いを黙って通さない（短ければ消費側が 0 埋めの行を正常な値として読み、
     // 長ければ要求の外のバイト列が混じる）。短い / 長いで原因が別なので文言を分ける。
     if (bytes.byteLength !== length) {
-      const cause = bytes.byteLength < length
-        ? `実体が宣言 size ${ref.size} より短い`
-        : "アダプターが要求より長い戻りを返した（`readFileRange` の契約違反）";
+      const cause =
+        bytes.byteLength < length
+          ? `実体が宣言 size ${ref.size} より短い`
+          : "アダプターが要求より長い戻りを返した（`readFileRange` の契約違反）";
       throw new Error(
         `hub: ${ref.path} の区間読みが offset ${offset} の ${length} バイト要求に` +
           ` ${bytes.byteLength} バイトを返した（${cause}）`,
@@ -197,11 +201,13 @@ const pinnedLocalSource = (
 
     // ⑧区間読みは、アダプターが位置読みを持つときだけ生やす（`prefetchFile` と同じ流儀で
     // optional 能力 — 持たないアダプターでは口ごと現れず、消費側は全量読みへ倒す）。
-    ...(readRange === undefined ? {} : {
-      // 開く側の中断確認は共通層（`fetch.ts` の `openAsset`）の作法なのでここには置かない。
-      // 読みごとの中断は `AssetRangeReader.read` の signal がアダプターへ透過する。
-      openFile: (ref: FileRef) => Promise.resolve(localRangeReader(readRange, ref)),
-    }),
+    ...(readRange === undefined
+      ? {}
+      : {
+          // 開く側の中断確認は共通層（`fetch.ts` の `openAsset`）の作法なのでここには置かない。
+          // 読みごとの中断は `AssetRangeReader.read` の signal がアダプターへ透過する。
+          openFile: (ref: FileRef) => Promise.resolve(localRangeReader(readRange, ref)),
+        }),
 
     originFor: (repo, revision) => {
       const mapped = settings.crossRepo;

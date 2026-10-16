@@ -51,12 +51,12 @@ const TIMESTAMP_QUERY: GPUFeatureName = "timestamp-query";
  */
 export type GeometrySweepProgress =
   | {
-    readonly kind: "started";
-    readonly adapter: ReportAdapter;
-    readonly unit: TimingUnit;
-    readonly dp4a: boolean;
-    readonly caseCount: number;
-  }
+      readonly kind: "started";
+      readonly adapter: ReportAdapter;
+      readonly unit: TimingUnit;
+      readonly dp4a: boolean;
+      readonly caseCount: number;
+    }
   | { readonly kind: "status"; readonly message: string }
   | { readonly kind: "row"; readonly row: SweepRow }
   | { readonly kind: "case"; readonly summary: CaseSummary }
@@ -120,8 +120,9 @@ const planSweep = (options: GeometrySweepOptions): SweepPlan => {
   if (!Number.isInteger(rounds) || rounds < 1) {
     throw new Error(`rounds は 1 以上の整数（${rounds}）`);
   }
-  const cases = SWEEP_CASES.filter((sweepCase) =>
-    ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id))
+  const cases = SWEEP_CASES.filter(
+    (sweepCase) =>
+      ops.includes(sweepCase.op) && (caseIds.length === 0 || caseIds.includes(sweepCase.id)),
   );
   if (cases.length === 0) {
     throw new Error(`op [${ops.join(", ")}] とケース [${caseIds.join(", ")}] に合うケースが無い`);
@@ -145,9 +146,7 @@ export const timestampUnitFor = (userAgent: string): "ns" | "deno-raw-tick" =>
  * MUST: 推論と並走させない（測定が汚れ、GPU も取り合う）— runtime は別の device の使われ方を見られない
  * ので、これは呼び手との契約（公開面の doc に書く）。
  */
-export const runGeometrySweep = async (
-  options: GeometrySweepOptions = {},
-): Promise<Report> => {
+export const runGeometrySweep = async (options: GeometrySweepOptions = {}): Promise<Report> => {
   const plan = planSweep(options);
   // 開始時刻は device を取る前（`date` は記録を組む時点 = 終了時刻 — 差が所要・ADR 0117 決定 8）
   const startedAt = new Date().toISOString();
@@ -158,9 +157,10 @@ export const runGeometrySweep = async (
   // adapter が timestamp-query を持たなければ acquireGpu が GpuFeatureError で落ちる（黙って壁時計に
   // 落とさない）。navigator.gpu が無い環境は acquireGpu が GpuUnavailableError で落とす。
   const webgpu: GPU | undefined = options.gpu ?? navigator.gpu;
-  const probe = options.timestamps === false || webgpu === undefined
-    ? null
-    : await webgpu.requestAdapter(options.adapter);
+  const probe =
+    options.timestamps === false || webgpu === undefined
+      ? null
+      : await webgpu.requestAdapter(options.adapter);
   const timestamps = probe?.features.has(TIMESTAMP_QUERY) === true;
   let deviceLost: Report["deviceLost"] = null;
   const gpu = await acquireGpu({
@@ -193,16 +193,21 @@ export const runGeometrySweep = async (
         dp4a: context.dp4a,
         caseCount: plan.cases.length,
       });
-      ({ rows, cases, aborted } = await runSweep(context, plan.cases, {
-        rounds: plan.rounds,
-        candidateSet: plan.candidateSet,
-        timestampUnit,
-      }, {
-        signal: options.signal,
-        onProgress: (message) => notify?.({ kind: "status", message }),
-        onRow: (row) => notify?.({ kind: "row", row }),
-        onCase: (summary) => notify?.({ kind: "case", summary }),
-      }));
+      ({ rows, cases, aborted } = await runSweep(
+        context,
+        plan.cases,
+        {
+          rounds: plan.rounds,
+          candidateSet: plan.candidateSet,
+          timestampUnit,
+        },
+        {
+          signal: options.signal,
+          onProgress: (message) => notify?.({ kind: "status", message }),
+          onRow: (row) => notify?.({ kind: "row", row }),
+          onCase: (summary) => notify?.({ kind: "case", summary }),
+        },
+      ));
     } finally {
       destroySweepContext(context);
     }

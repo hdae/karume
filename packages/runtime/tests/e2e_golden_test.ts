@@ -234,108 +234,115 @@ for (const model of MODELS) {
       /** 仕様帯で受理した出力名の note（無ければ持たない — 数値は measurements が持つ）。 */
       const acceptedNote = (): string | undefined =>
         accepted.length === 0 ? undefined : `仕様帯で受理: ${accepted.join(", ")}`;
-      await runRecordedCase(results, {
-        id: model,
-        // 許容差以外の失敗（資産の読み・createSession・出力キー・shape / dtype・run の例外）も
-        // 席に残す。記録が落ちても元の例外（何が壊れたかを言う唯一の診断）は置き換えない。
-        failureNote: (cause) =>
-          [
-            acceptedNote(),
-            `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
-          ].filter((part) => part !== undefined).join("; "),
-      }, async ({ measurements }) => {
-        const [opened, ioBytes] = await Promise.all([
-          openGolden(model),
-          readBuffer(model, "io.safetensors"),
-        ]);
-        const parsed = prepareContainer(opened, model);
-        const io = parseSafetensors(ioBytes);
+      await runRecordedCase(
+        results,
+        {
+          id: model,
+          // 許容差以外の失敗（資産の読み・createSession・出力キー・shape / dtype・run の例外）も
+          // 席に残す。記録が落ちても元の例外（何が壊れたかを言う唯一の診断）は置き換えない。
+          failureNote: (cause) =>
+            [acceptedNote(), `例外: ${cause instanceof Error ? cause.message : String(cause)}`]
+              .filter((part) => part !== undefined)
+              .join("; "),
+        },
+        async ({ measurements }) => {
+          const [opened, ioBytes] = await Promise.all([
+            openGolden(model),
+            readBuffer(model, "io.safetensors"),
+          ]);
+          const parsed = prepareContainer(opened, model);
+          const io = parseSafetensors(ioBytes);
 
-        // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
-        // 命名規約は tools/exporter/README.md「golden レイアウト」が正本。
-        const expectedKeys = [
-          ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
-          ...parsed.graph.outputs.map((_, index) => `output.${index}`),
-        ].sort();
-        assertEquals([...io.tensors.keys()].sort(), expectedKeys, "io.safetensors のテンソルキー");
+          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          // 命名規約は tools/exporter/README.md「golden レイアウト」が正本。
+          const expectedKeys = [
+            ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
+            ...parsed.graph.outputs.map((_, index) => `output.${index}`),
+          ].sort();
+          assertEquals(
+            [...io.tensors.keys()].sort(),
+            expectedKeys,
+            "io.safetensors のテンソルキー",
+          );
 
-        // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-        const inputs: Record<string, Tensor> = {};
-        for (const spec of parsed.graph.inputs) {
-          const view = io.tensors.get(`input.${spec.name}`);
-          assert(view !== undefined, `input.${spec.name} が io.safetensors に無い`);
-          inputs[spec.name] = ioTensor(io, view, spec.dtype);
-        }
+          // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
+          const inputs: Record<string, Tensor> = {};
+          for (const spec of parsed.graph.inputs) {
+            const view = io.tensors.get(`input.${spec.name}`);
+            assert(view !== undefined, `input.${spec.name} が io.safetensors に無い`);
+            inputs[spec.name] = ioTensor(io, view, spec.dtype);
+          }
 
-        const gpu = await acquireGpu();
-        // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
-        // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
-        // （known-issues の遅延解放）。
-        try {
-          // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-          // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
-          assertAdapterMatchesEnvironment(gpu);
-          const session = await parsed.createContainerSession(gpu);
+          const gpu = await acquireGpu();
+          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
+          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
+          // （known-issues の遅延解放）。
           try {
-            const outputs = await session.run(inputs);
-            assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
+            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+            assertAdapterMatchesEnvironment(gpu);
+            const session = await parsed.createContainerSession(gpu);
+            try {
+              const outputs = await session.run(inputs);
+              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
 
-            parsed.graph.outputs.forEach((name, index) => {
-              const view = io.tensors.get(`output.${index}`);
-              assert(view !== undefined, `output.${index} が io.safetensors に無い`);
-              const where = `${model} output.${index} ('${name}')`;
-              const declared = parsed.graph.values[name].dtype;
-              assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
-              assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
-              const expected = ioTensor(io, view, declared);
-              // f32 は allclose、i32 / bool は厳密一致（整数演算に近似の余地は無い）。
-              // MUST: `compareTensors` は f32 以外で引数の帯を捨てて {@link EXACT_TOLERANCE} で
-              // 測るので、**記録に載せる帯も同じ選び方**でここ 1 か所から採る（`measurements`
-              // の `tolerance` は「受理に使った帯」— 存在しない余裕を読み手に見せない）。
-              const band = (declaredBand: Tolerance): Tolerance =>
-                declared === "f32" ? declaredBand : EXACT_TOLERANCE;
-              const karumeBand = band(GOLDEN_TOLERANCE);
-              const karume = compareTensors(outputs[name], expected, karumeBand);
-              // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
-              const spec = karume.pass ? undefined : specTolerance(model, name);
-              if (spec === undefined) {
-                // 2 段目が無い（1 段目で受かった / この機に行が無い）= 1 段目が決着の段。
+              parsed.graph.outputs.forEach((name, index) => {
+                const view = io.tensors.get(`output.${index}`);
+                assert(view !== undefined, `output.${index} が io.safetensors に無い`);
+                const where = `${model} output.${index} ('${name}')`;
+                const declared = parsed.graph.values[name].dtype;
+                assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
+                assertEquals(outputs[name].dtype, declared, `${where}: dtype`);
+                const expected = ioTensor(io, view, declared);
+                // f32 は allclose、i32 / bool は厳密一致（整数演算に近似の余地は無い）。
+                // MUST: `compareTensors` は f32 以外で引数の帯を捨てて {@link EXACT_TOLERANCE} で
+                // 測るので、**記録に載せる帯も同じ選び方**でここ 1 か所から採る（`measurements`
+                // の `tolerance` は「受理に使った帯」— 存在しない余裕を読み手に見せない）。
+                const band = (declaredBand: Tolerance): Tolerance =>
+                  declared === "f32" ? declaredBand : EXACT_TOLERANCE;
+                const karumeBand = band(GOLDEN_TOLERANCE);
+                const karume = compareTensors(outputs[name], expected, karumeBand);
+                // 1 段目を落ちた出力だけが 2 段目（WGSL 仕様帯）へ来る。受かれば pass + warning。
+                const spec = karume.pass ? undefined : specTolerance(model, name);
+                if (spec === undefined) {
+                  // 2 段目が無い（1 段目で受かった / この機に行が無い）= 1 段目が決着の段。
+                  measurements.push({
+                    output: name,
+                    maxAbs: karume.maxAbsError,
+                    maxRel: karume.maxRelError,
+                    tolerance: karumeBand,
+                    stage: "karume",
+                  });
+                  if (!karume.pass) failures.push(`${where}: ${formatAllclose(karume)}`);
+                  return;
+                }
+                const specBand = band(spec);
+                const report = compareTensors(outputs[name], expected, specBand);
+                // 実測（maxAbs / maxRel）は帯に依らないので 2 段目の報告をそのまま採る。
                 measurements.push({
                   output: name,
-                  maxAbs: karume.maxAbsError,
-                  maxRel: karume.maxRelError,
-                  tolerance: karumeBand,
-                  stage: "karume",
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: specBand,
+                  stage: "spec",
                 });
-                if (!karume.pass) failures.push(`${where}: ${formatAllclose(karume)}`);
-                return;
-              }
-              const specBand = band(spec);
-              const report = compareTensors(outputs[name], expected, specBand);
-              // 実測（maxAbs / maxRel）は帯に依らないので 2 段目の報告をそのまま採る。
-              measurements.push({
-                output: name,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: specBand,
-                stage: "spec",
+                if (!report.pass) {
+                  failures.push(`${where}: ${formatAllclose(report)}`);
+                  return;
+                }
+                // 数値は measurements が持つので、note は受理した出力名だけにする（二重に持たない）。
+                accepted.push(name);
               });
-              if (!report.pass) {
-                failures.push(`${where}: ${formatAllclose(report)}`);
-                return;
-              }
-              // 数値は measurements が持つので、note は受理した出力名だけにする（二重に持たない）。
-              accepted.push(name);
-            });
+            } finally {
+              await session.dispose();
+            }
           } finally {
-            await session.dispose();
+            gpu.destroy();
           }
-        } finally {
-          gpu.destroy();
-        }
-        // 決着は投げる前に残す（赤で終わった回の note も手元に要る）。
-        return { status: failures.length === 0 ? "pass" : "fail", note: acceptedNote() };
-      });
+          // 決着は投げる前に残す（赤で終わった回の note も手元に要る）。
+          return { status: failures.length === 0 ? "pass" : "fail", note: acceptedNote() };
+        },
+      );
       assert(failures.length === 0, failures[0]);
     },
   });

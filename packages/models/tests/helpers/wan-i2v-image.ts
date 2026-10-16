@@ -27,10 +27,7 @@ import type { WanI2vFit } from "../../src/wan/i2v-preprocess.ts";
 import { WAN_TI2V_VAE_ROOT } from "./wan-ti2v-vae.ts";
 
 /** LANCZOS の fixture のケース表（git 追跡 — 画素の safetensors は表の `tensors` が名指す同じディレクトリのファイル）。 */
-export const WAN_I2V_LANCZOS_FIXTURE = new URL(
-  "../fixtures/wan-i2v/lanczos.json",
-  import.meta.url,
-);
+export const WAN_I2V_LANCZOS_FIXTURE = new URL("../fixtures/wan-i2v/lanczos.json", import.meta.url);
 
 /**
  * テスト画像（`inputs/wan-i2v/<名前>-832x480.png` の PNG ファイルの sha256 — recipe の `IMAGES` と同じ値の二重凍結）。
@@ -39,7 +36,7 @@ export const WAN_I2V_LANCZOS_FIXTURE = new URL(
 export const WAN_I2V_IMAGE_SHA256: Readonly<Record<string, string>> = {
   "boxing-cats": "4689f815503859b4d08b464f21239b0ab5066b4da06e7130aa32a60ef1fe5888",
   "cat-dog-baking": "75d6d9c514190806baa4fc5a9d0877e04d4c50ba940057d737915bfb354f3c0e",
-  "ferret": "a6b740a2ec936d2a102839441f9caabd787fc1d4e27126bbed4be429aef7bd54",
+  ferret: "a6b740a2ec936d2a102839441f9caabd787fc1d4e27126bbed4be429aef7bd54",
 };
 
 /** golden 1 本（recipe の `GoldenCase`）。 */
@@ -56,13 +53,19 @@ export type WanI2vGoldenCase = {
  * 256×160〈受理の外〉）× 3 枚、stretch は 1280×704 × 3 枚。
  */
 export const WAN_I2V_GOLDEN_CASES: readonly WanI2vGoldenCase[] = [
-  ...([[1280, 704], [704, 1280], [256, 160]] as const).flatMap(([width, height]) =>
+  ...(
+    [
+      [1280, 704],
+      [704, 1280],
+      [256, 160],
+    ] as const
+  ).flatMap(([width, height]) =>
     Object.keys(WAN_I2V_IMAGE_SHA256).map((image) => ({
       image,
       width,
       height,
       fit: "crop" as const,
-    }))
+    })),
   ),
   ...Object.keys(WAN_I2V_IMAGE_SHA256).map((image) => ({
     image,
@@ -80,8 +83,8 @@ export const wanI2vGoldenUrl = (testCase: WanI2vGoldenCase): URL =>
   new URL(`vae_encoder.${wanI2vGoldenName(testCase)}.safetensors`, WAN_TI2V_VAE_ROOT);
 
 /** SKIP 時にそのまま貼れる golden の生成コマンド（encoder の 3 グラフと一組で書く）。 */
-export const WAN_I2V_GOLDEN_GENERATE = "cd tools/export-recipes && uv run --group wan --inexact " +
-  "python -m wan.export_vae_encoder";
+export const WAN_I2V_GOLDEN_GENERATE =
+  "cd tools/export-recipes && uv run --group wan --inexact " + "python -m wan.export_vae_encoder";
 
 /**
  * VAE encoder の出口（mu の正規化の後 — DiT の条件の潜在）の帯（最大絶対差・絶対値）。encoder の GPU の門

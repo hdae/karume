@@ -195,11 +195,9 @@ export type Sbv2PipelineOptions = {
  * NOTE: `headers` / `fetch` / `caches` / `onRetry` が **HTTP 取得元専用**であることを含め、
  * 取得層のノブの説明は {@link FromPretrainedHubOptions} に 1 本化してある。
  */
-export type Sbv2FromPretrainedOptions =
-  & Sbv2PipelineOptions
-  & FromPretrainedHubOptions
-  & FromPretrainedComponentOptions
-  & {
+export type Sbv2FromPretrainedOptions = Sbv2PipelineOptions &
+  FromPretrainedHubOptions &
+  FromPretrainedComponentOptions & {
     readonly signal?: AbortSignal;
   };
 
@@ -444,11 +442,7 @@ type Sbv2Synthesis = {
   readonly trace: Sbv2Trace;
 };
 
-const resolveRow = (
-  names: ReadonlyMap<string, number>,
-  name: string,
-  where: string,
-): number => {
+const resolveRow = (names: ReadonlyMap<string, number>, name: string, where: string): number => {
   const row = names.get(name);
   if (row === undefined) {
     throw new Sbv2InputError(
@@ -724,7 +718,7 @@ const buildSbv2State = async (
   // MUST: 宣言された feature は device 作成時にしか要求できない（ADR 0028）。共有 GPU を
   // 渡された場合は要求できないので、能力が足りないことを名指しして落とす（共有 GPU は
   // {@link admitSbv2} が既に同じ 1 本で見ているが、自前で取った device はここが唯一の門）。
-  const gpu = options.gpu ?? await acquireGpu(toAcquireGpuOptions(gpuFeatures));
+  const gpu = options.gpu ?? (await acquireGpu(toAcquireGpuOptions(gpuFeatures)));
   const ownsGpu = options.gpu === undefined;
   try {
     assertGpuFeaturesGranted(gpuFeatures, gpu, `Sbv2Pipeline: quant '${quantName}'`);
@@ -849,7 +843,10 @@ export const synthesizeSbv2 = async (
       );
       const outputs = await run({
         input_ids: i32(input.inputIds, [1, tokens]),
-        attention_mask: i32(input.inputIds.map(() => 1), [1, tokens]),
+        attention_mask: i32(
+          input.inputIds.map(() => 1),
+          [1, tokens],
+        ),
         c2p_pos: relPos.c2pPos,
         p2c_pos: relPos.p2cPos,
       });

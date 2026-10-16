@@ -42,11 +42,7 @@ test("assertRequiredLimitsSatisfied: 要求と実測が等しい配布形は通�
 
 test("assertRequiredLimitsSatisfied: 1 でも下回る配布形は落ちる", () => {
   const spec: RequiredLimitsSpec = { maxBufferSize: LIMITS.maxBufferSize + 1 };
-  assertThrows(
-    () => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE),
-    Error,
-    "maxBufferSize",
-  );
+  assertThrows(() => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE), Error, "maxBufferSize");
 });
 
 test("assertRequiredLimitsSatisfied: spec に書かれていない limit は見ない（部分写像）", () => {
@@ -67,21 +63,16 @@ test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求値・�
     maxBufferSize: 1073741824,
     maxStorageBufferBindingSize: 134217728,
   };
-  const error = assertThrows(
-    () => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE),
-    Error,
-  );
-  for (
-    const fragment of [
-      WHERE,
-      "maxBufferSize",
-      "1073741824",
-      "268435456",
-      "maxStorageBufferBindingSize",
-      "134217728",
-      "0",
-    ]
-  ) {
+  const error = assertThrows(() => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE), Error);
+  for (const fragment of [
+    WHERE,
+    "maxBufferSize",
+    "1073741824",
+    "268435456",
+    "maxStorageBufferBindingSize",
+    "134217728",
+    "0",
+  ]) {
     if (!error.message.includes(fragment)) {
       throw new Error(`診断に '${fragment}' が無い: ${error.message}`);
     }
@@ -96,10 +87,7 @@ test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙�
   // 未知キーは index signature 経由で組む（`as unknown as` で型を殺すと、この検査が
   // 「型が緩んだこと」ではなく「実行時に何を言うか」を見ていることが読み取れなくなる）。
   const spec: Record<string, number> = { maxBufferSize: 1, karumeUnknownLimit: 1 };
-  const error = assertThrows(
-    () => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE),
-    Error,
-  );
+  const error = assertThrows(() => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE), Error);
   for (const fragment of [WHERE, "karumeUnknownLimit", "tests/limit_vocabulary_test.ts"]) {
     if (!error.message.includes(fragment)) {
       throw new Error(`診断に '${fragment}' が無い: ${error.message}`);

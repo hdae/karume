@@ -44,10 +44,19 @@ const isNode = (value: unknown): value is AstNode =>
 const literalOf = (node: unknown): string | undefined => {
   if (!isNode(node)) return undefined;
   if (node.type === "Literal" && typeof node.value === "string") return node.value;
-  if (node.type === "TemplateLiteral" && Array.isArray(node.expressions) && node.expressions.length === 0) {
+  if (
+    node.type === "TemplateLiteral" &&
+    Array.isArray(node.expressions) &&
+    node.expressions.length === 0
+  ) {
     const quasi: unknown = Array.isArray(node.quasis) ? node.quasis[0] : undefined;
     const value = isNode(quasi) ? quasi.value : undefined;
-    if (typeof value === "object" && value !== null && "cooked" in value && typeof value.cooked === "string") {
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "cooked" in value &&
+      typeof value.cooked === "string"
+    ) {
       return value.cooked;
     }
   }
@@ -83,7 +92,8 @@ export const importSpecifiersOf = (file: string, source: string): string[] => {
     );
   }
   const specifiers: string[] = [];
-  for (const statement of result.module.staticImports) specifiers.push(statement.moduleRequest.value);
+  for (const statement of result.module.staticImports)
+    specifiers.push(statement.moduleRequest.value);
   for (const statement of result.module.staticExports) {
     // `export * from` / `export { a, b } from` carry the same request on every entry of the statement.
     const requests = new Set<string>();
@@ -96,7 +106,8 @@ export const importSpecifiersOf = (file: string, source: string): string[] => {
   // `module.dynamicImports` only gives as a source span.
   visit(result.program, (node) => {
     let literal: string | undefined;
-    if (node.type === "ImportExpression" || node.type === "TSImportType") literal = literalOf(node.source);
+    if (node.type === "ImportExpression" || node.type === "TSImportType")
+      literal = literalOf(node.source);
     else if (node.type === "TSExternalModuleReference") literal = literalOf(node.expression);
     if (literal !== undefined) specifiers.push(literal);
   });
@@ -137,7 +148,9 @@ export const walkModuleGraph = async (
       throw new Error(`module graph: cannot read ${from}`, { cause: error });
     }
     for (const written of importSpecifiersOf(new URL(from).pathname, source)) {
-      const resolved = isRelative(written) ? new URL(written, from).href : resolveBare(from, written);
+      const resolved = isRelative(written)
+        ? new URL(written, from).href
+        : resolveBare(from, written);
       edges.push({ from, written, resolved });
       if (resolved.startsWith("file:") && !seen.has(resolved)) {
         seen.add(resolved);

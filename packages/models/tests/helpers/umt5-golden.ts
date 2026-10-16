@@ -166,8 +166,12 @@ const parseMeta = (file: SafetensorsFile, where: string): GoldenMeta => {
   const { format, role, prompt, cleaned, length } = meta;
   const part0Sha256 = container["part0Sha256"];
   if (
-    format !== REFERENCE_FORMAT || typeof role !== "string" || typeof prompt !== "string" ||
-    typeof cleaned !== "string" || typeof length !== "number" || typeof part0Sha256 !== "string"
+    format !== REFERENCE_FORMAT ||
+    typeof role !== "string" ||
+    typeof prompt !== "string" ||
+    typeof cleaned !== "string" ||
+    typeof length !== "number" ||
+    typeof part0Sha256 !== "string"
   ) {
     throw new Error(`${where}: メタの形が ${REFERENCE_FORMAT} でない`);
   }
@@ -212,11 +216,11 @@ export const loadGolden = async (name: string): Promise<Golden> => {
     outputShape: viewOf(file, OUTPUT_F64_KEY, name).shape,
     ...(accept
       ? {
-        unquantized: {
-          expected: floatsOf(file, OUTPUT_UNQUANTIZED_F64_KEY, name),
-          reference: floatsOf(file, OUTPUT_UNQUANTIZED_F32_KEY, name),
-        },
-      }
+          unquantized: {
+            expected: floatsOf(file, OUTPUT_UNQUANTIZED_F64_KEY, name),
+            reference: floatsOf(file, OUTPUT_UNQUANTIZED_F32_KEY, name),
+          },
+        }
       : {}),
   };
 };
@@ -271,9 +275,9 @@ export const referenceRatioOf = (golden: Golden, name: string): number => {
 };
 
 export const formatRatio = (label: string, diff: Difference, referenceRatio: number): string =>
-  `${label}: maxAbs ${diff.maxAbs.toExponential(3)} / 参照の最大絶対値 ${
-    diff.referenceMaxAbs.toFixed(3)
-  }（比 ${ratioOf(diff).toExponential(2)}）・r ${(ratioOf(diff) / referenceRatio).toPrecision(3)}`;
+  `${label}: maxAbs ${diff.maxAbs.toExponential(3)} / 参照の最大絶対値 ${diff.referenceMaxAbs.toFixed(
+    3,
+  )}（比 ${ratioOf(diff).toExponential(2)}）・r ${(ratioOf(diff) / referenceRatio).toPrecision(3)}`;
 
 /** 帯の判定（未導出なら r を出して赤 — {@link UMT5_NORMALIZED_BAND}）。 */
 export const judgeBand = (
@@ -284,19 +288,18 @@ export const judgeBand = (
 ): void => {
   if (band === undefined) {
     throw new Error(
-      `${id}: 帯が未導出（r ${
-        ratio.toPrecision(3)
-      }）— 決定用の最悪 r × 5 を UMT5_NORMALIZED_BAND へ書く` +
-        "（候補は最後の step が出す）",
+      `${id}: 帯が未導出（r ${ratio.toPrecision(
+        3,
+      )}）— 決定用の最悪 r × 5 を UMT5_NORMALIZED_BAND へ書く` + "（候補は最後の step が出す）",
     );
   }
   // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
   for (const fault of faults) {
     assert(
       fault.ratio > band,
-      `${id}: 故障注入 ${fault.label} の r ${
-        fault.ratio.toPrecision(3)
-      } が帯 ${band} の内に収まった`,
+      `${id}: 故障注入 ${fault.label} の r ${fault.ratio.toPrecision(
+        3,
+      )} が帯 ${band} の内に収まった`,
     );
   }
   assert(ratio <= band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の外`);

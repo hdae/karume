@@ -36,8 +36,8 @@ const fill = (template: string, cp: number): string =>
 
 /** 塊の先頭コードポイント（外れた塊をメッセージで名指しする）。 */
 const blockStarts = (indices: readonly number[]): string[] =>
-  indices.map((index) =>
-    `U+${(index * fixture.block).toString(16).toUpperCase().padStart(4, "0")}`
+  indices.map(
+    (index) => `U+${(index * fixture.block).toString(16).toUpperCase().padStart(4, "0")}`,
   );
 
 for (const check of fixture.badness.filter((entry) => entry.template !== undefined)) {

@@ -47,9 +47,7 @@ test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対�
     session: fake.session,
     program: programOf(fake),
   });
-  const { events, stop } = await drain(
-    sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }),
-  );
+  const { events, stop } = await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }));
 
   // 容量記号の束縛点は context 生成だけ（ADR 0066 追記 7）。
   assertEquals(fake.specs.length, 1);
@@ -57,8 +55,14 @@ test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対�
   assertEquals(fake.specs[0].chunkLength, CHUNK_LENGTH);
   // バケットを宣言しない配線は空配列を渡す（context の実行形は prefill 1 本 + decode の 2 本）。
   assertEquals(fake.specs[0].chunkBuckets, []);
-  assertEquals(fake.calls.map((call) => call.bindings), [undefined, undefined, undefined]);
-  assertEquals(fake.calls.every((call) => call.sameContext), true);
+  assertEquals(
+    fake.calls.map((call) => call.bindings),
+    [undefined, undefined, undefined],
+  );
+  assertEquals(
+    fake.calls.every((call) => call.sameContext),
+    true,
+  );
 
   // prefill: 物理 4 行に有効 3 行 + pad 0・位置は絶対値・last_row は最終有効行。
   assertEquals(fake.calls[0].idsShape, [1, CHUNK_LENGTH]);
@@ -166,10 +170,12 @@ test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケ�
     // 宣言は context 生成時にそのまま渡る（run 前検査が許す集合はここで決まる）。
     assertEquals(fake.specs[0].chunkBuckets, [...BUCKETS]);
     assertEquals(fake.specs[0].chunkLength, BUCKET_CHUNK_LENGTH);
-    await drain(sequence.generate({
-      prompt: Array.from({ length: promptLength }, (_unused, index) => index + 1),
-      maxNewTokens: 1,
-    }));
+    await drain(
+      sequence.generate({
+        prompt: Array.from({ length: promptLength }, (_unused, index) => index + 1),
+        maxNewTokens: 1,
+      }),
+    );
     return fake.calls.map((call) => {
       assertEquals(call.idsShape[0], 1);
       return call.idsShape[1];
@@ -456,7 +462,9 @@ test("GenerationSequence: 発行済みの signal は 1 本も run を出さず�
   });
   let caught: unknown;
   try {
-    for await (const _event of stream) { /* 1 個も来ない */ }
+    for await (const _event of stream) {
+      /* 1 個も来ない */
+    }
   } catch (error) {
     caught = error;
   }
@@ -469,14 +477,12 @@ test("GenerationSequence: 最終 prefill の後に届いた中断でも、計算
   // 中断は run を発行する前（段の境目）にだけ見る（ADR 0083 決定 5）。最終 prefill の run は
   // 既に logits を返しているので、その後に届いた中断でも最初の token は抽選されて届き、新しい
   // run は走らない（by-design — docs/limitations.md「生成 sequence」節）。
-  for (
-    const [name, maxNewTokens, done] of [
-      // 残りが無ければ中断を観測する境目が来ないので、正常完了で閉じる。
-      ["maxNewTokens 1", 1, { reason: "max-tokens", tokens: 1 }],
-      // 残りがあれば次の decode の run の前で中断が効く。
-      ["maxNewTokens 3", 3, { reason: "aborted", tokens: 1 }],
-    ] as const
-  ) {
+  for (const [name, maxNewTokens, done] of [
+    // 残りが無ければ中断を観測する境目が来ないので、正常完了で閉じる。
+    ["maxNewTokens 1", 1, { reason: "max-tokens", tokens: 1 }],
+    // 残りがあれば次の decode の run の前で中断が効く。
+    ["maxNewTokens 3", 3, { reason: "aborted", tokens: 1 }],
+  ] as const) {
     await t.step(name, async () => {
       const fake = fakeSession({ tokens: [5, 6, 7] });
       const sequence = await createGenerationSequence({
@@ -534,13 +540,17 @@ test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本�
     signal: controller.signal,
   });
   const consumed = (async () => {
-    for await (const _event of queued) { /* 1 個も来ない */ }
+    for await (const _event of queued) {
+      /* 1 個も来ない */
+    }
   })();
   // 順番待ちに入らせてから中断する。
   await new Promise((resolve) => setTimeout(resolve, 0));
   controller.abort(reason);
 
-  while (!(await iterator.next()).done) { /* 席を空ける */ }
+  while (!(await iterator.next()).done) {
+    /* 席を空ける */
+  }
   const callsAfterFirst = fake.calls.length;
   let caught: unknown;
   try {
@@ -571,8 +581,14 @@ test("GenerationSequence: 2 本の generate は直列化される（run が混�
   // 片方の全イベントがもう片方より前に並ぶ（混ざったら鎖が効いていない）。
   const boundary = log.findIndex((entry) => entry.startsWith("b:"));
   assert(boundary > 0, `直列化されていない: ${log.join(" ")}`);
-  assertEquals(log.slice(0, boundary).every((entry) => entry.startsWith("a:")), true);
-  assertEquals(log.slice(boundary).every((entry) => entry.startsWith("b:")), true);
+  assertEquals(
+    log.slice(0, boundary).every((entry) => entry.startsWith("a:")),
+    true,
+  );
+  assertEquals(
+    log.slice(boundary).every((entry) => entry.startsWith("b:")),
+    true,
+  );
   // b は a の frontier（6）を連結した prompt で始まる = 順番待ちの間に状態が進んでいる。
   assertEquals(fake.calls[2].ids, [6, 3, 0, 0]);
 });
@@ -691,7 +707,9 @@ test("GenerationSequence: used は pastLength + 未 commit frontier から都度
   assertEquals(sequence.used, 3, "prefill 直後");
   await iterator.next(); // 最初の token（未 commit の frontier が 1 つ立つ）。
   assertEquals(sequence.used, 4, "1 token 目の直後");
-  while (!(await iterator.next()).done) { /* 汲み切る */ }
+  while (!(await iterator.next()).done) {
+    /* 汲み切る */
+  }
 
   // pastLength は T + K − 1（最後の 1 個は未 commit）だが、会話が占めているのは T + K。
   assertEquals(fake.pastLength(), 5);
@@ -724,9 +742,7 @@ test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文�
   assertEquals(error.limit, 8);
   assertEquals(error.maxNewTokens, 2);
   // 欄どおりに縮めれば本当に通る（この 1 本が「導ける」を恒真でなくする）。
-  await drain(
-    sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: error.maxNewTokens }),
-  );
+  await drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: error.maxNewTokens }));
 });
 
 test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constraint だけが違う）", async () => {
@@ -796,15 +812,13 @@ test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力と
         names: [DERIVED],
         derive: (ids, positions) => {
           seen.push({ ids: [...ids], positions: [...positions] });
-          return Promise.resolve(
-            {
-              [DERIVED]: {
-                dtype: "f32",
-                shape: [1, ids.length, 2],
-                data: new Float32Array(ids.length * 2),
-              },
-            } satisfies RunInputs,
-          );
+          return Promise.resolve({
+            [DERIVED]: {
+              dtype: "f32",
+              shape: [1, ids.length, 2],
+              data: new Float32Array(ids.length * 2),
+            },
+          } satisfies RunInputs);
         },
       },
     }),
@@ -817,7 +831,10 @@ test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力と
     { ids: [1, 2, 3, 0], positions: [0, 1, 2, 0] },
     { ids: [5], positions: [3] },
   ]);
-  assertEquals(fake.calls.map((call) => call.extra), [[DERIVED], [DERIVED]]);
+  assertEquals(
+    fake.calls.map((call) => call.extra),
+    [[DERIVED], [DERIVED]],
+  );
 });
 
 test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effort の材料）", async () => {
@@ -830,15 +847,13 @@ test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effor
     names: [DERIVED],
     derive: (ids, _positions, options) => {
       seen.push(options?.signal);
-      return Promise.resolve(
-        {
-          [DERIVED]: {
-            dtype: "f32",
-            shape: [1, ids.length, 2],
-            data: new Float32Array(ids.length * 2),
-          },
-        } satisfies RunInputs,
-      );
+      return Promise.resolve({
+        [DERIVED]: {
+          dtype: "f32",
+          shape: [1, ids.length, 2],
+          data: new Float32Array(ids.length * 2),
+        },
+      } satisfies RunInputs);
     },
   });
 
@@ -848,7 +863,10 @@ test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effor
   });
   await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 2, signal: controller.signal }));
   assertEquals(seen.length, 2);
-  assert(seen.every((signal) => signal === controller.signal), "derive に別の signal が渡っている");
+  assert(
+    seen.every((signal) => signal === controller.signal),
+    "derive に別の signal が渡っている",
+  );
 
   // 購読していない要求には捏造しない。
   const bareFake = fakeSession();
@@ -863,7 +881,10 @@ test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effor
 test("DerivedRunInputs: derive の await 明けに届いた中断は run を出さない", async () => {
   // 中断の観測点が「ループ先頭」だけだと、派生入力を作っている間に届いた中断の後に run が
   // 1 本まるごと進む（prefill 先頭は常に cold miss なので、送信直後の停止で必ず踏む）。
-  for (const [name, maxNewTokens, tokensBefore] of [["prefill", 2, 0], ["decode", 3, 1]] as const) {
+  for (const [name, maxNewTokens, tokensBefore] of [
+    ["prefill", 2, 0],
+    ["decode", 3, 1],
+  ] as const) {
     const fake = fakeSession({ tokens: [5, 6, 7] });
     const controller = new AbortController();
     const reason = new Error(`${name} の派生入力の途中で止めた`);
@@ -1038,11 +1059,7 @@ test("受理集合の値域検査は 1 本の純関数（高レベル面と gene
       program: programOf(fake),
     });
     const request = { prompt: [1], maxNewTokens: 1, stopTokens: [2, 2] };
-    assertThrows(
-      () => assertGenerationRequestValues(VOCAB, request),
-      ModelInputError,
-      "2 度出る",
-    );
+    assertThrows(() => assertGenerationRequestValues(VOCAB, request), ModelInputError, "2 度出る");
     assertThrows(() => sequence.generate(request), ModelInputError, "2 度出る");
     assertEquals(fake.calls.length, 0);
   });
@@ -1128,7 +1145,9 @@ test("GenerationSequence: done を読まない失敗が unhandled rejection に�
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 2 });
   await assertRejects(
     async () => {
-      for await (const _event of stream) { /* 例外だけ受ける */ }
+      for await (const _event of stream) {
+        /* 例外だけ受ける */
+      }
     },
     Error,
     "run が落ちた",
@@ -1150,7 +1169,9 @@ test("GenerationSequence: dispose は走行中の生成の後に走り、2 度�
   const disposal = sequence.dispose();
   assertEquals(fake.disposals(), 0, "走行中の生成を追い越して dispose した");
   // 残りを汲み切ると席が空き、dispose が走る。
-  while (!(await iterator.next()).done) { /* 汲み切る */ }
+  while (!(await iterator.next()).done) {
+    /* 汲み切る */
+  }
   await disposal;
   assertEquals(fake.disposals(), 1);
   await sequence.dispose();
@@ -1213,9 +1234,7 @@ test("GenerationSequence: prompt の token に repetition penalty が掛かる",
     session: penalized.session,
     program: programOf(penalized),
   });
-  const hit = await drain(
-    withPenalty.generate({ prompt: [3], maxNewTokens: 1, sampler: PENALTY }),
-  );
+  const hit = await drain(withPenalty.generate({ prompt: [3], maxNewTokens: 1, sampler: PENALTY }));
   assertEquals(tokenIds(hit.events), [RUNNER_UP.id], "prompt の token に penalty が掛かっていない");
 
   // 対（penalty を外すと第 1 候補がそのまま出る = 上の反転が penalty 由来であることの実証）。
@@ -1369,7 +1388,9 @@ test("GenerationSequence.fork: 本体は走行中の generate の後に走り、
   assertEquals(settled, false, "走行中の生成を追い越して fork した");
   assertEquals(fake.forks.length, 0, "走行中の生成の途中で context を複製した");
   // 残りを汲み切ると席が空き、fork が走る（生成の後の確定値を写す）。
-  while (!(await iterator.next()).done) { /* 汲み切る */ }
+  while (!(await iterator.next()).done) {
+    /* 汲み切る */
+  }
   const forked = await forking;
   assertEquals(forked.used, 5);
   assertEquals(forked.used, sequence.used, "分岐が生成の途中の状態を写した");
@@ -1407,8 +1428,7 @@ test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の
 test("ForkableContextFace: 実 GenerationContext は自分と同じ型を返す fork を持つ（型の門）", () => {
   // 型検査だけの門（実行時は何もしない）。runtime 側で `fork` の綴りや戻りの型が変わると
   // コンパイルエラーになる（`createGenerationSequence` の F-bound が実 Session で解けなくなる）。
-  const asForkable = (
-    context: GenerationContext,
-  ): ForkableContextFace<GenerationContext> => context;
+  const asForkable = (context: GenerationContext): ForkableContextFace<GenerationContext> =>
+    context;
   assertEquals(typeof asForkable, "function");
 });

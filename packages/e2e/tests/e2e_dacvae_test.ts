@@ -36,7 +36,11 @@ import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-s
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, parseSafetensors, prepareContainer, type Tensor } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
@@ -108,8 +112,8 @@ const ENCODER_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
  * 突合する」沈黙誤りになるので、本数が IR の出力数と合っているかもケースごとに検査する。
  */
 const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
-  "decoder": [DECODER_TOLERANCE],
-  "encoder": [ENCODER_TOLERANCE],
+  decoder: [DECODER_TOLERANCE],
+  encoder: [ENCODER_TOLERANCE],
 };
 
 const SERIES_NAME = "dacvae-32dim";
@@ -144,9 +148,9 @@ const GENERATE_COMMAND =
  */
 const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
   // S = 161（実 z）/ 750（宣言上限そのもの）/ 2（記号次元の下限）/ 116（参照なしの実 z）。
-  "decoder": ["z-full", "z-max", "z-min", "z-no-ref"],
+  decoder: ["z-full", "z-max", "z-min", "z-no-ref"],
   // T = 2（記号次元の下限）/ 190（参照音声 7.6 秒の全長）。
-  "encoder": ["wav-min", "wav-ref"],
+  encoder: ["wav-min", "wav-ref"],
 };
 
 const EXPECTED_TARGETS = Object.keys(EXPECTED_CASES).sort();
@@ -184,8 +188,8 @@ const discoverTargets = (root: URL): readonly string[] =>
 
 const discoverCases = (root: URL, target: string): readonly string[] =>
   listDir(new URL(`${target}/`, root))
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();

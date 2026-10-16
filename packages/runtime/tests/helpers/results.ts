@@ -151,7 +151,12 @@ const git = async (...args: string[]): Promise<string | undefined> => {
   } catch (cause) {
     if (isNotFound(cause)) return undefined;
     // Non-zero exit (e.g. not a git checkout) rejects with the numeric exit code.
-    if (typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "number") {
+    if (
+      typeof cause === "object" &&
+      cause !== null &&
+      "code" in cause &&
+      typeof cause.code === "number"
+    ) {
       return undefined;
     }
     throw cause;
@@ -198,20 +203,18 @@ export const openResults = (
     return new URL(`${key}/${TODAY}_${family}/`, root);
   };
   const documentText = (): string =>
-    `${
-      JSON.stringify(
-        {
-          schema: 1,
-          family,
-          environment,
-          checkout: CHECKOUT ?? null,
-          startedAt: STARTED_AT,
-          cases,
-        },
-        undefined,
-        2,
-      )
-    }\n`;
+    `${JSON.stringify(
+      {
+        schema: 1,
+        family,
+        environment,
+        checkout: CHECKOUT ?? null,
+        startedAt: STARTED_AT,
+        cases,
+      },
+      undefined,
+      2,
+    )}\n`;
   // 置き場は**使うときに**作る（資産が無くて全 SKIP の機に空ディレクトリを残さない）。
   const ensureDir = (): URL => {
     const dir = directory();

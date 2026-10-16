@@ -70,8 +70,8 @@ const runOutputs = async (gpu: GpuContext, testCase: OpCase): Promise<readonly T
     testCase.outShapes,
     {
       inDtypes: testCase.inputs.map((input) => input.dtype),
-      outDtypes: testCase.outShapes.map((_, slot) =>
-        testCase.outDtypes?.[slot] ?? testCase.inputs[0].dtype
+      outDtypes: testCase.outShapes.map(
+        (_, slot) => testCase.outDtypes?.[slot] ?? testCase.inputs[0].dtype,
       ),
       attrs: testCase.attrs,
     },
@@ -151,8 +151,7 @@ test({
 });
 
 test({
-  name:
-    "波3 の数理 op（where / 比較 / clamp / leaky_relu / log1p / cumsum / bool sum）が CPU 参照と一致する（実 GPU）",
+  name: "波3 の数理 op（where / 比較 / clamp / leaky_relu / log1p / cumsum / bool sum）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(MATH_CASES),
 });
@@ -179,7 +178,10 @@ test({
         attrs: { negative_slope: 0.1 },
       });
       const values = [...actual.data];
-      assertEquals(values.map((v) => Number.isNaN(v)), [true, false, false, false]);
+      assertEquals(
+        values.map((v) => Number.isNaN(v)),
+        [true, false, false, false],
+      );
       // NaN 以外は通常経路（負側は slope 倍・正側は素通し）
       assertEquals(values[1], Math.fround(-0.2));
       assertEquals(values[2], 0);
@@ -391,9 +393,9 @@ test({
           assertEquals(
             bad,
             -1,
-            `${testCase.name}: 要素 #${bad} が 0x${(got[bad] ?? 0).toString(16)} vs 0x${
-              (want[bad] ?? 0).toString(16)
-            }（現行コーパスは丸めゼロのはず — 研究 §2）`,
+            `${testCase.name}: 要素 #${bad} が 0x${(got[bad] ?? 0).toString(16)} vs 0x${(
+              want[bad] ?? 0
+            ).toString(16)}（現行コーパスは丸めゼロのはず — 研究 §2）`,
           );
         });
       }
@@ -421,27 +423,10 @@ test({
  * ±1.0 に飲まれる（機序は src/codegen/elementwise.ts の IS_NAN_BITS_WGSL）— そこを見張る 1 本。
  */
 const TANH_SATURATION_INPUTS = [
-  0,
-  5,
-  -5,
-  9,
-  -9,
+  0, 5, -5, 9, -9,
   // 9.2 = 「打ち切らない（< 9.5）が f32 では既に 1.0（> 9.011）」の帯 — 閾値を 9.011 未満へ
   // 下げる退行と、飽和境界そのもののずれをここで検出する。9.5 は打ち切り境界ちょうど。
-  9.2,
-  -9.2,
-  9.5,
-  -9.5,
-  10.6,
-  -10.6,
-  12,
-  -12,
-  50,
-  -50,
-  88,
-  -88,
-  120,
-  -120,
+  9.2, -9.2, 9.5, -9.5, 10.6, -10.6, 12, -12, 50, -50, 88, -88, 120, -120,
 ] as const;
 
 test({
@@ -522,7 +507,7 @@ test({
       // ±Inf（打ち切りが副次的に塞いだ穴 — 素の exp 経由実装では tanh(±Inf) = Inf/Inf = NaN）。
       // gelu_tanh(−Inf) は NaN が正: 0.5·(−Inf)·0.0 の 0·Inf で、torch も NaN
       //（F.gelu(-inf) 実測 torch 2.13.0 — approximate 両方）。CPU 参照とも三者一致。
-      const infInput = fill([2], (i) => i === 0 ? Infinity : -Infinity);
+      const infInput = fill([2], (i) => (i === 0 ? Infinity : -Infinity));
       const tanhInf = await runCase(gpu, {
         name: "tanh ±Inf",
         op: "tanh",
@@ -566,7 +551,7 @@ test({
     const gpu = await acquireGpu();
     try {
       // 行 0 = 全 NaN・行 1 = 通常行（NaN 行が隣の行を汚染しないことも同時に見る）
-      const nanRows = (i: number): number => i < 4 ? Number.NaN : SIGNED(i);
+      const nanRows = (i: number): number => (i < 4 ? Number.NaN : SIGNED(i));
       for (const op of ["softmax", "safe_softmax"] as const) {
         const actual = await runCase(gpu, {
           name: `${op} 全 NaN 行`,
@@ -602,7 +587,7 @@ test({
           fill([1, 1, m, d], SIGNED),
           fill([1, 1, n, d], POSITIVE),
           fill([1, 1, n, d], SIGNED),
-          fill([1, 1, m, n], (i) => i < n ? -Infinity : 0),
+          fill([1, 1, m, n], (i) => (i < n ? -Infinity : 0)),
         ],
         outShapes: [[1, 1, m, d]],
         attrs: { scale },
@@ -703,7 +688,10 @@ test({
         outShapes: [[2, 3]],
       });
       const values = [...actual.data];
-      assertEquals(values.map((v) => Number.isNaN(v)), [false, true, false, false, true, false]);
+      assertEquals(
+        values.map((v) => Number.isNaN(v)),
+        [false, true, false, false, true, false],
+      );
       // 契約内の添字は通常どおり自分の行から引く（汚染は範囲外の要素だけ）
       assertEquals(values[0], src.data[1]);
       assertEquals(values[3], src.data[4 + 2]);
@@ -883,7 +871,10 @@ test({
       name: "topk tie-break",
       op: "topk",
       inputs: [input],
-      outShapes: [[rows.length, 4], [rows.length, 4]],
+      outShapes: [
+        [rows.length, 4],
+        [rows.length, 4],
+      ],
       outDtypes: ["f32", "i32"],
       attrs: { k: 4 },
     };
@@ -930,7 +921,10 @@ test({
         name: "topk k=1",
         op: "topk",
         inputs: [input],
-        outShapes: [[rows.length, 1], [rows.length, 1]],
+        outShapes: [
+          [rows.length, 1],
+          [rows.length, 1],
+        ],
         outDtypes: ["f32", "i32"],
         attrs: { k: 1 },
       });
@@ -1003,7 +997,10 @@ test({
       name: "topk signed-zero tie",
       op: "topk",
       inputs: [input],
-      outShapes: [[rows.length, 4], [rows.length, 4]],
+      outShapes: [
+        [rows.length, 4],
+        [rows.length, 4],
+      ],
       outDtypes: ["f32", "i32"],
       attrs: { k: 4 },
     };
@@ -1032,8 +1029,7 @@ test({
  * 拒否側の門だけなら通ってしまう。
  */
 test({
-  name:
-    "topk は workgroup storage 由来の k 上限を超えたら上限値つきで落ちる（絞った device / 実 GPU）",
+  name: "topk は workgroup storage 由来の k 上限を超えたら上限値つきで落ちる（絞った device / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // 8·W·(k+1) ≤ 1024 → 上限 k = 3
@@ -1045,7 +1041,10 @@ test({
         name: "topk k=2（上限の内側）",
         op: "topk",
         inputs: [input],
-        outShapes: [[2, 2], [2, 2]],
+        outShapes: [
+          [2, 2],
+          [2, 2],
+        ],
         outDtypes: ["f32", "i32"],
         attrs: { k: 2 },
       });
@@ -1053,21 +1052,25 @@ test({
       assertEquals([...outputs[0].data], [...expected[0].data]);
       assertEquals([...outputs[1].data], [...expected[1].data]);
       // 上限超過は縮退せず落ちる（診断に上限値 3 が出る）
-      const graph = singleOpDeclaration("topk", [[2, 8]], [[2, 4], [2, 4]], {
-        outDtypes: ["f32", "i32"],
-        attrs: { k: 4 },
-      });
+      const graph = singleOpDeclaration(
+        "topk",
+        [[2, 8]],
+        [
+          [2, 4],
+          [2, 4],
+        ],
+        {
+          outDtypes: ["f32", "i32"],
+          attrs: { k: 4 },
+        },
+      );
       const session = await createSessionFromContainer(
         gpu,
         await openModelBytes(graph, []),
         GRAPH_NAME,
       );
       try {
-        await assertRejects(
-          () => session.run({ x0: input }),
-          CodegenError,
-          "実装上限 3 を超える",
-        );
+        await assertRejects(() => session.run({ x0: input }), CodegenError, "実装上限 3 を超える");
       } finally {
         await session.dispose();
       }
@@ -1114,11 +1117,13 @@ type RankInjection = {
 };
 
 /** WGSL の該当箇所を書き換える（空振り = 文言変更で置換対象が消えた形は `assertMutated`）。 */
-const injectRank = (from: string, to: string): RankMutation => (wgsl) => {
-  const mutated = wgsl.replaceAll(from, to);
-  assertMutated(wgsl, mutated, from);
-  return mutated;
-};
+const injectRank =
+  (from: string, to: string): RankMutation =>
+  (wgsl) => {
+    const mutated = wgsl.replaceAll(from, to);
+    assertMutated(wgsl, mutated, from);
+    return mutated;
+  };
 
 /** topk の故障注入 1 件（どの入力系統で撃つかまで含めて 1 件 — 上の相補性）。 */
 type TopkInjection = RankInjection & { readonly input: TopkFaultInput };
@@ -1227,9 +1232,10 @@ const ARGMAX_INJECTIONS: readonly RankInjection[] = [
 ];
 
 /** topk の 2 出力を 1 つの比較対象へ畳む（片方だけ見る形を潰す）。 */
-const topkPair = (
-  result: { readonly values: Float32Array; readonly indices: Int32Array },
-): readonly (readonly number[])[] => [[...result.values], [...result.indices]];
+const topkPair = (result: {
+  readonly values: Float32Array;
+  readonly indices: Int32Array;
+}): readonly (readonly number[])[] => [[...result.values], [...result.indices]];
 
 const referenceTopkPair = (input: TopkFaultInput): readonly (readonly number[])[] => {
   const expected = applyReferenceOpOutputs(
@@ -1266,9 +1272,9 @@ test({
       ];
       assertEquals(
         [
-          ...await runArgmaxDirect(gpu.device, ARGMAX_FAULT_INPUT, ARGMAX_FAULT_INPUT.data, {
+          ...(await runArgmaxDirect(gpu.device, ARGMAX_FAULT_INPUT, ARGMAX_FAULT_INPUT.data, {
             cache,
-          }),
+          })),
         ],
         argmaxExpected,
         "正常版の argmax が CPU 参照と違う",
@@ -1317,8 +1323,7 @@ test({
 });
 
 test({
-  name:
-    "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
+  name: "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(FUSED_CASES),
 });
@@ -1336,8 +1341,7 @@ test({
  * 潰れない丸め列を GPU と CPU 参照の双方に踏ませる唯一のケース。
  */
 test({
-  name:
-    "双線形 resample は scale が f32 で厳密でない形でも CPU 参照と実測表の帯で一致する（実 GPU）",
+  name: "双線形 resample は scale が f32 で厳密でない形でも CPU 参照と実測表の帯で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(UPSAMPLE_FRACTIONAL_CASES),
 });
@@ -1365,8 +1369,7 @@ test({
  * 経由せず、入力テンソルの端の値そのものと突き合わせる。
  */
 test({
-  name:
-    "双線形 resample は (in−1)/(out−1) が f32 で往復する形で出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
+  name: "双線形 resample は (in−1)/(out−1) が f32 で往復する形で出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     // H≠W / Hout≠Wout（軸の取り違えが端の値に出る）。値は全て相異なる列にする。
@@ -1407,8 +1410,7 @@ test({
  * f32 で厳密なので、クランプを足しても値が 1 ビットも動かず緑のまま通る。
  */
 test({
-  name:
-    "双線形 resample は scale が f32 で往復しない形で端を厳密一致させない（クランプしない・実 GPU）",
+  name: "双線形 resample は scale が f32 で往復しない形で端を厳密一致させない（クランプしない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
     const rows = 42;
@@ -1511,12 +1513,14 @@ const prefixSliceGraph = (
     table: { dtype, shape: [...constShape] },
     y: { dtype, shape: [...outShape] },
   },
-  nodes: [{
-    op: "sym_prefix_slice",
-    ins: ["table"],
-    outs: ["y"],
-    attrs: { sym: "T", slices: slices.map((slice) => ({ ...slice })) },
-  }],
+  nodes: [
+    {
+      op: "sym_prefix_slice",
+      ins: ["table"],
+      outs: ["y"],
+      attrs: { sym: "T", slices: slices.map((slice) => ({ ...slice })) },
+    },
+  ],
 });
 
 test({
@@ -1530,7 +1534,10 @@ test({
         constShape: [6, 5],
         outShape: ["T", "T"],
         resolved: [3, 3],
-        slices: [{ dim: 0, coeff: 1, offset: 0 }, { dim: 1, coeff: 1, offset: 0 }],
+        slices: [
+          { dim: 0, coeff: 1, offset: 0 },
+          { dim: 1, coeff: 1, offset: 0 },
+        ],
         dtype: "i32" as const,
         generator: INTEGERS,
       },
@@ -1574,16 +1581,18 @@ test({
         );
         const session = await createSessionFromContainer(
           gpu,
-          await openModelBytes(graph, [{
-            graph: GRAPH_NAME,
-            initializer: "table",
-            bytes: new Uint8Array(
-              table.data.buffer,
-              table.data.byteOffset,
-              table.data.byteLength,
-            ),
-            encoding: { codec: testCase.dtype },
-          }]),
+          await openModelBytes(graph, [
+            {
+              graph: GRAPH_NAME,
+              initializer: "table",
+              bytes: new Uint8Array(
+                table.data.buffer,
+                table.data.byteOffset,
+                table.data.byteLength,
+              ),
+              encoding: { codec: testCase.dtype },
+            },
+          ]),
           GRAPH_NAME,
         );
         try {
@@ -1599,11 +1608,7 @@ test({
             testCase.resolved,
           );
           // MUST: 帯は実測表から引く（既定帯へ落とすと EXACT の op が 1e-5 級の汚れを通す）
-          const report = compareTensors(
-            outputs["y"],
-            expected,
-            opTolerance("sym_prefix_slice"),
-          );
+          const report = compareTensors(outputs["y"], expected, opTolerance("sym_prefix_slice"));
           assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
         } finally {
           await session.dispose();
@@ -1632,7 +1637,10 @@ test({
     const cases = [
       {
         name: "記号 + 定数 [1,T,4] + [1,3,4] dim=1（DiT の KV 連結と同型）",
-        inShapes: [[1, "T", 4], [1, 3, 4]] as const,
+        inShapes: [
+          [1, "T", 4],
+          [1, 3, 4],
+        ] as const,
         outShape: [1, "T+3", 4] as const,
         bound: 5,
         resolved: [1, 8, 4],
@@ -1640,7 +1648,10 @@ test({
       },
       {
         name: "同一シンボルどうし [T,3] + [T,3] dim=0",
-        inShapes: [["T", 3], ["T", 3]] as const,
+        inShapes: [
+          ["T", 3],
+          ["T", 3],
+        ] as const,
         outShape: ["2T", 3] as const,
         bound: 4,
         resolved: [8, 3],
@@ -1658,7 +1669,10 @@ test({
         );
         // 束縛は入力 shape の次元位置から取る（'T' が素の形で現れる位置）。
         const inputs = testCase.inShapes.map((shape) =>
-          fill(shape.map((dim) => (dim === "T" ? testCase.bound : dim as number)), SIGNED)
+          fill(
+            shape.map((dim) => (dim === "T" ? testCase.bound : (dim as number))),
+            SIGNED,
+          ),
         );
         const session = await createSessionFromContainer(
           gpu,

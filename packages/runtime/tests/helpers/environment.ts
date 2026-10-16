@@ -24,8 +24,10 @@ import { acquireGpu, readAdapterInfo } from "../../src/gpu/device.ts";
 /** Version of the `typescript` package the workspace type-checks with (informational, like Deno's). */
 const typescriptVersion = (): string => {
   const manifest: unknown = createRequire(import.meta.url)("typescript/package.json");
-  return typeof manifest === "object" && manifest !== null && "version" in manifest &&
-      typeof manifest.version === "string"
+  return typeof manifest === "object" &&
+    manifest !== null &&
+    "version" in manifest &&
+    typeof manifest.version === "string"
     ? manifest.version
     : "";
 };
@@ -68,11 +70,12 @@ const TRADEMARKS = ["(r)", "(tm)", "(c)"] as const;
  * 参照値を「この機の参照値」として突き合わせることになる）。
  */
 export const environmentKey = (runtime: EnvironmentRuntime, info: GPUAdapterInfo): string => {
-  const base = runtime === "node"
-    ? info.device
-    : info.description !== ""
-    ? info.description
-    : `${info.vendor}-${info.architecture}`;
+  const base =
+    runtime === "node"
+      ? info.device
+      : info.description !== ""
+        ? info.description
+        : `${info.vendor}-${info.architecture}`;
   let slug = base.toLowerCase();
   for (const mark of TRADEMARKS) slug = slug.replaceAll(mark, "");
   slug = slug.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -154,7 +157,10 @@ export const assertAdapterMatchesEnvironment = (
  */
 export const verifyRunningGpu = <
   Gpu extends { readonly adapterInfo: GPUAdapterInfo; destroy(): void },
->(gpu: Gpu, environment: Environment = ENVIRONMENT): Gpu => {
+>(
+  gpu: Gpu,
+  environment: Environment = ENVIRONMENT,
+): Gpu => {
   try {
     assertAdapterMatchesEnvironment(gpu, environment);
   } catch (error) {

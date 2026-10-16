@@ -303,9 +303,7 @@ const TURN_CASES: readonly TurnCase[] = [
   {
     name: "改行・記号を含む応答",
     head: [{ role: "user", content: "Write two lines." }],
-    turns: [
-      { answer: "line one\nline two", next: { role: "user", content: "  余白付き  " } },
-    ],
+    turns: [{ answer: "line one\nline two", next: { role: "user", content: "  余白付き  " } }],
   },
 ];
 
@@ -455,7 +453,7 @@ const sourceOf = (
   spellings: readonly string[],
   bytes: Readonly<Record<number, number>> = {},
 ): DetokenizerSource => ({
-  byteOf: (id) => Object.hasOwn(bytes, id) ? bytes[id] : undefined,
+  byteOf: (id) => (Object.hasOwn(bytes, id) ? bytes[id] : undefined),
   textOf: (id) => {
     assert(id < spellings.length, `テストの綴り表に id ${id} が無い`);
     return spellings[id];
@@ -685,11 +683,15 @@ test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も�
   const parts: string[] = [];
   for await (const part of chunks) parts.push(part);
 
-  assertEquals(seen, [
-    { chunk: 1, chunks: 3 },
-    { chunk: 2, chunks: 3 },
-    { chunk: 3, chunks: 3 },
-  ], "commit 済み chunk 数がそのまま届く");
+  assertEquals(
+    seen,
+    [
+      { chunk: 1, chunks: 3 },
+      { chunk: 2, chunks: 3 },
+      { chunk: 3, chunks: 3 },
+    ],
+    "commit 済み chunk 数がそのまま届く",
+  );
   assertEquals(parts, ["Hel", "lo "], "本文の片は観測席の有無で変わらない");
 });
 
@@ -716,7 +718,9 @@ test("chat 一括: 1 つのストリームは 1 通りにしか消費できな�
     );
   // 生成は 1 度しか走らないので、2 通り目には「残り」しか流れない（例外にならない取り違え）。
   const iterated = streamOf();
-  for await (const _part of iterated) { /* 汲み切る */ }
+  for await (const _part of iterated) {
+    /* 汲み切る */
+  }
   assertThrows(() => iterated.text(), Error, "1 通りにしか消費できない");
 
   const collected = streamOf();
@@ -738,13 +742,21 @@ test("chat 一括: 1 つのストリームは 1 通りにしか消費できな�
 test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の例外と併せて運ぶ", async (t) => {
   const failing = (error: unknown) => (): Promise<void> => Promise.reject(error);
   const caughtOf = (work: Promise<void>): Promise<unknown> =>
-    work.then(() => undefined, (error: unknown) => error);
+    work.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
 
   await t.step("成功した後始末は席を返すだけ", async () => {
     let released = 0;
-    await closeChatTurn("test", undefined, () => Promise.resolve(), () => {
-      released += 1;
-    });
+    await closeChatTurn(
+      "test",
+      undefined,
+      () => Promise.resolve(),
+      () => {
+        released += 1;
+      },
+    );
     assertEquals(released, 1);
   });
 
@@ -837,15 +849,15 @@ const diagnosticsSeat = (options: { readonly drafter?: boolean } = {}) => {
     },
     ...(options.drafter === true
       ? {
-        drafter: {
-          session: {
-            diagnostics: (): number => {
-              borrower -= 1;
-              return borrower;
+          drafter: {
+            session: {
+              diagnostics: (): number => {
+                borrower -= 1;
+                return borrower;
+              },
             },
           },
-        },
-      }
+        }
       : {}),
     onRunDiagnostics: (diagnostics: number, phase: Gemma4RunPhase): void => {
       seen.push(diagnostics);
@@ -960,11 +972,15 @@ test("観測席: draft は借り手・それ以外は貸し手の診断を引く
     [-1, 1, -2],
     "draft が貸し手の診断を引いている（直前の verify run の値が draft の名前で積算される）",
   );
-  assertEquals(phases, [
-    { kind: "draft", cycle: 1 },
-    { kind: "verify", cycle: 1, rows: 4, accepted: 2 },
-    { kind: "draft", cycle: 2 },
-  ], "phase はそのまま素通しする");
+  assertEquals(
+    phases,
+    [
+      { kind: "draft", cycle: 1 },
+      { kind: "verify", cycle: 1, rows: 4, accepted: 2 },
+      { kind: "draft", cycle: 2 },
+    ],
+    "phase はそのまま素通しする",
+  );
 });
 
 test("観測席: drafter が居ないのに draft が届いたら fail loudly", () => {
@@ -984,14 +1000,13 @@ test("chat token 通知: 停止文字列の保留より先に全 token が届く
     yield { kind: "prefill", chunk: 1, chunks: 1 };
     for (const id of [2, 4]) yield { kind: "token", id, position: id };
   })();
-  for await (
-    const text of decodeChatChunks(
-      events,
-      new StreamingDetokenizer(sourceOf(SPELLINGS)),
-      createStopStringFilter(["END"]),
-      undefined,
-      (id) => seen.push(`token:${id}`),
-    )
-  ) seen.push(`text:${text}`);
+  for await (const text of decodeChatChunks(
+    events,
+    new StreamingDetokenizer(sourceOf(SPELLINGS)),
+    createStopStringFilter(["END"]),
+    undefined,
+    (id) => seen.push(`token:${id}`),
+  ))
+    seen.push(`text:${text}`);
   assertEquals(seen, ["token:2", "token:4", "text:ENX!"]);
 });

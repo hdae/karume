@@ -211,8 +211,10 @@ test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ�
 
 /** 実配布形（base）と同じ宣言。`patch` で 1 点だけ壊す。 */
 const visionGraph = (
-  patch: { readonly inputShape?: readonly (number | string)[]; readonly outputShape?: number[] } =
-    {},
+  patch: {
+    readonly inputShape?: readonly (number | string)[];
+    readonly outputShape?: number[];
+  } = {},
 ) =>
   stubModel({
     inputs: [{ name: "pixel_values", shape: patch.inputShape ?? [1, 3, 224, 224] }],

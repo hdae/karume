@@ -22,16 +22,17 @@ import type { IrGraph } from "../../src/format/ir.ts";
 export type ContainerManifest = {
   readonly defaultModel: string;
   readonly models: Readonly<
-    Record<string, {
-      readonly weights: Readonly<
-        Record<
-          string,
-          Readonly<
-            Record<string, { readonly container: { readonly parts: readonly PartRef[] } }>
+    Record<
+      string,
+      {
+        readonly weights: Readonly<
+          Record<
+            string,
+            Readonly<Record<string, { readonly container: { readonly parts: readonly PartRef[] } }>>
           >
-        >
-      >;
-    }>
+        >;
+      }
+    >
   >;
 };
 export type PartRef = { readonly path: string; readonly repo?: string };
@@ -49,15 +50,16 @@ export const readContainerGraph = async (part0: URL, graphName: string): Promise
   const graph = parseGraphDescriptor(
     documents.slice(HEADER_BYTES, HEADER_BYTES + header.graphDescriptorLength),
   );
-  const model = header.kind === "model"
-    ? parseModelDescriptor(documents.slice(HEADER_BYTES + header.graphDescriptorLength))
-    : undefined;
+  const model =
+    header.kind === "model"
+      ? parseModelDescriptor(documents.slice(HEADER_BYTES + header.graphDescriptorLength))
+      : undefined;
   const bound = bindGraphs(graph, model)[graphName];
   if (bound === undefined) {
     throw new Error(
-      `${part0.pathname}: 容器にグラフ '${graphName}' が無い（在るのは ${
-        Object.keys(graph.graphs).join(" / ")
-      }）`,
+      `${part0.pathname}: 容器にグラフ '${graphName}' が無い（在るのは ${Object.keys(
+        graph.graphs,
+      ).join(" / ")}）`,
     );
   }
   return mergedGraph(bound, graphName);

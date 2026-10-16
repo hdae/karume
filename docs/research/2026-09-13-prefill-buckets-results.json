@@ -109,15 +109,9 @@
               "inputTokens": 31
             }
           ],
-          "BRatios": [
-            0.998626374116721,
-            0.998663102081538
-          ],
+          "BRatios": [0.998626374116721, 0.998663102081538],
           "BRatioMedian": 0.9986447380991295,
-          "CRatios": [
-            0.9837618412742971,
-            0.9946737686238533
-          ],
+          "CRatios": [0.9837618412742971, 0.9946737686238533],
           "CRatioMedian": 0.9892178049490752
         },
         {
@@ -192,15 +186,9 @@
               "inputTokens": 37
             }
           ],
-          "BRatios": [
-            1.2543668116403024,
-            1.268703898908392
-          ],
+          "BRatios": [1.2543668116403024, 1.268703898908392],
           "BRatioMedian": 1.2615353552743471,
-          "CRatios": [
-            1.4344569281143325,
-            1.468292682636075
-          ],
+          "CRatios": [1.4344569281143325, 1.468292682636075],
           "CRatioMedian": 1.4513748053752038
         },
         {
@@ -275,15 +263,9 @@
               "inputTokens": 31
             }
           ],
-          "BRatios": [
-            0.9785894200640048,
-            1.0357142846656466
-          ],
+          "BRatios": [0.9785894200640048, 1.0357142846656466],
           "BRatioMedian": 1.0071518523648257,
-          "CRatios": [
-            0.9557195569088069,
-            1.056532663341982
-          ],
+          "CRatios": [0.9557195569088069, 1.056532663341982],
           "CRatioMedian": 1.0061261101253944
         },
         {
@@ -358,15 +340,9 @@
               "inputTokens": 37
             }
           ],
-          "BRatios": [
-            1.2889812883423761,
-            1.297382199327359
-          ],
+          "BRatios": [1.2889812883423761, 1.297382199327359],
           "BRatioMedian": 1.2931817438348676,
-          "CRatios": [
-            1.451990632723866,
-            1.5036407775681113
-          ],
+          "CRatios": [1.451990632723866, 1.5036407775681113],
           "CRatioMedian": 1.4778157051459888
         },
         {
@@ -441,15 +417,9 @@
               "inputTokens": 31
             }
           ],
-          "BRatios": [
-            1.0137931033112537,
-            0.9692132270416639
-          ],
+          "BRatios": [1.0137931033112537, 0.9692132270416639],
           "BRatioMedian": 0.9915031651764588,
-          "CRatios": [
-            1.0243902434803218,
-            0.929978118404512
-          ],
+          "CRatios": [1.0243902434803218, 0.929978118404512],
           "CRatioMedian": 0.9771841809424169
         },
         {
@@ -524,15 +494,9 @@
               "inputTokens": 37
             }
           ],
-          "BRatios": [
-            1.242396312924574,
-            1.1480541455310063
-          ],
+          "BRatios": [1.242396312924574, 1.1480541455310063],
           "BRatioMedian": 1.1952252292277903,
-          "CRatios": [
-            1.4944567614307653,
-            1.429926238379043
-          ],
+          "CRatios": [1.4944567614307653, 1.429926238379043],
           "CRatioMedian": 1.4621914999049042
         },
         {
@@ -607,15 +571,9 @@
               "inputTokens": 31
             }
           ],
-          "BRatios": [
-            0.9796380082488985,
-            0.9988465978748448
-          ],
+          "BRatios": [0.9796380082488985, 0.9988465978748448],
           "BRatioMedian": 0.9892423030618716,
-          "CRatios": [
-            0.9874572403193685,
-            0.9807474520062337
-          ],
+          "CRatios": [0.9874572403193685, 0.9807474520062337],
           "CRatioMedian": 0.9841023461628011
         },
         {
@@ -690,15 +648,9 @@
               "inputTokens": 37
             }
           ],
-          "BRatios": [
-            1.2159498204219406,
-            1.2125834135042322
-          ],
+          "BRatios": [1.2159498204219406, 1.2125834135042322],
           "BRatioMedian": 1.2142666169630862,
-          "CRatios": [
-            1.4863088715264061,
-            1.3531914898689756
-          ],
+          "CRatios": [1.4863088715264061, 1.3531914898689756],
           "CRatioMedian": 1.4197501806976909
         }
       ]
@@ -721,14 +673,7 @@
             "candidate": "A"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            32,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 32, 64, 128, 256],
           "loadMs": 5071.699999988079,
           "runs": 104,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -788,16 +733,7 @@
             "candidate": "B"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64, 128, 256],
           "loadMs": 5174.300000011921,
           "runs": 104,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -857,19 +793,7 @@
             "candidate": "C"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256],
           "loadMs": 5059.900000035763,
           "runs": 104,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -929,19 +853,7 @@
             "candidate": "C"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256],
           "loadMs": 5059.399999976158,
           "runs": 104,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1001,16 +913,7 @@
             "candidate": "B"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64, 128, 256],
           "loadMs": 4979.800000011921,
           "runs": 104,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1070,14 +973,7 @@
             "candidate": "A"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            32,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 32, 64, 128, 256],
           "loadMs": 5183.300000011921,
           "runs": 104,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1137,12 +1033,7 @@
             "candidate": "A"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            32,
-            64
-          ],
+          "buckets": [4, 8, 32, 64],
           "loadMs": 7825.800000011921,
           "runs": 104,
           "maxPlanBackingMiB": 177.8104476928711,
@@ -1202,14 +1093,7 @@
             "candidate": "B"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64],
           "loadMs": 5974.100000023842,
           "runs": 104,
           "maxPlanBackingMiB": 200.7618865966797,
@@ -1269,17 +1153,7 @@
             "candidate": "C"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64],
           "loadMs": 7010.800000011921,
           "runs": 104,
           "maxPlanBackingMiB": 96.6982650756836,
@@ -1339,17 +1213,7 @@
             "candidate": "C"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64],
           "loadMs": 7069.100000023842,
           "runs": 104,
           "maxPlanBackingMiB": 96.6982650756836,
@@ -1409,14 +1273,7 @@
             "candidate": "B"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64],
           "loadMs": 7836.899999976158,
           "runs": 104,
           "maxPlanBackingMiB": 200.7618865966797,
@@ -1476,12 +1333,7 @@
             "candidate": "A"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            32,
-            64
-          ],
+          "buckets": [4, 8, 32, 64],
           "loadMs": 6022,
           "runs": 104,
           "maxPlanBackingMiB": 177.8104476928711,
@@ -1541,14 +1393,7 @@
             "candidate": "A"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            32,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 32, 64, 128, 256],
           "loadMs": 4908.899999976158,
           "runs": 52,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1594,16 +1439,7 @@
             "candidate": "B"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64, 128, 256],
           "loadMs": 6281.099999964237,
           "runs": 52,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1649,19 +1485,7 @@
             "candidate": "C"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256],
           "loadMs": 4945,
           "runs": 52,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1707,19 +1531,7 @@
             "candidate": "C"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256],
           "loadMs": 4819.800000011921,
           "runs": 52,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1765,16 +1577,7 @@
             "candidate": "B"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64, 128, 256],
           "loadMs": 4993.199999988079,
           "runs": 52,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1820,14 +1623,7 @@
             "candidate": "A"
           },
           "chunkLength": 768,
-          "buckets": [
-            4,
-            8,
-            32,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 32, 64, 128, 256],
           "loadMs": 4928.5,
           "runs": 52,
           "maxPlanBackingMiB": 335.25293350219727,
@@ -1873,12 +1669,7 @@
             "candidate": "A"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            32,
-            64
-          ],
+          "buckets": [4, 8, 32, 64],
           "loadMs": 2901.400000035763,
           "runs": 52,
           "maxPlanBackingMiB": 107.78705978393555,
@@ -1924,14 +1715,7 @@
             "candidate": "B"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64],
           "loadMs": 6993.199999988079,
           "runs": 52,
           "maxPlanBackingMiB": 136.14668655395508,
@@ -1977,17 +1761,7 @@
             "candidate": "C"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64],
           "loadMs": 7019.600000023842,
           "runs": 52,
           "maxPlanBackingMiB": 189.23309326171875,
@@ -2033,17 +1807,7 @@
             "candidate": "C"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64],
           "loadMs": 6917.800000011921,
           "runs": 52,
           "maxPlanBackingMiB": 189.23309326171875,
@@ -2089,14 +1853,7 @@
             "candidate": "B"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64],
           "loadMs": 7124.100000023842,
           "runs": 52,
           "maxPlanBackingMiB": 136.14668655395508,
@@ -2142,12 +1899,7 @@
             "candidate": "A"
           },
           "chunkLength": 128,
-          "buckets": [
-            4,
-            8,
-            32,
-            64
-          ],
+          "buckets": [4, 8, 32, 64],
           "loadMs": 7033.100000023842,
           "runs": 52,
           "maxPlanBackingMiB": 107.78705978393555,
@@ -2232,11 +1984,7 @@
             "reduce": "parallel",
             "candidate": "A"
           },
-          "buckets": [
-            4,
-            8,
-            32
-          ],
+          "buckets": [4, 8, 32],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2252,13 +2000,7 @@
             "reduce": "parallel",
             "candidate": "B"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48
-          ],
+          "buckets": [4, 8, 16, 32, 48],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2274,16 +2016,7 @@
             "reduce": "parallel",
             "candidate": "C"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2299,11 +2032,7 @@
             "reduce": "sequential",
             "candidate": "A"
           },
-          "buckets": [
-            4,
-            8,
-            32
-          ],
+          "buckets": [4, 8, 32],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2319,13 +2048,7 @@
             "reduce": "sequential",
             "candidate": "B"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48
-          ],
+          "buckets": [4, 8, 16, 32, 48],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2341,16 +2064,7 @@
             "reduce": "sequential",
             "candidate": "C"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2366,14 +2080,7 @@
             "reduce": "parallel",
             "candidate": "A"
           },
-          "buckets": [
-            4,
-            8,
-            32,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 32, 64, 128, 256],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2389,16 +2096,7 @@
             "reduce": "parallel",
             "candidate": "B"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64, 128, 256],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2414,19 +2112,7 @@
             "reduce": "parallel",
             "candidate": "C"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2442,14 +2128,7 @@
             "reduce": "sequential",
             "candidate": "A"
           },
-          "buckets": [
-            4,
-            8,
-            32,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 32, 64, 128, 256],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2465,16 +2144,7 @@
             "reduce": "sequential",
             "candidate": "B"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            32,
-            48,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 32, 48, 64, 128, 256],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2490,19 +2160,7 @@
             "reduce": "sequential",
             "candidate": "C"
           },
-          "buckets": [
-            4,
-            8,
-            16,
-            24,
-            32,
-            40,
-            48,
-            56,
-            64,
-            128,
-            256
-          ],
+          "buckets": [4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 256],
           "generations": 24,
           "verifyLogicalRows": {
             "4": 123,
@@ -2548,11 +2206,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "default",
-        "chunkBuckets": [
-          4,
-          8,
-          32
-        ],
+        "chunkBuckets": [4, 8, 32],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.4464150000214575,
@@ -2615,13 +2269,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "sparse",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          32,
-          48
-        ],
+        "chunkBuckets": [4, 8, 16, 32, 48],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 5.815014999985695,
@@ -2684,16 +2332,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "dense",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          24,
-          32,
-          40,
-          48,
-          56
-        ],
+        "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 5.987995000004768,
@@ -2756,16 +2395,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "dense",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          24,
-          32,
-          40,
-          48,
-          56
-        ],
+        "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 5.948650000035763,
@@ -2828,13 +2458,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "sparse",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          32,
-          48
-        ],
+        "chunkBuckets": [4, 8, 16, 32, 48],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 5.982665000021457,
@@ -2897,11 +2521,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "default",
-        "chunkBuckets": [
-          4,
-          8,
-          32
-        ],
+        "chunkBuckets": [4, 8, 32],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.074555000007153,
@@ -2964,11 +2584,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "default",
-        "chunkBuckets": [
-          4,
-          8,
-          32
-        ],
+        "chunkBuckets": [4, 8, 32],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 2.9186299999952316,
@@ -3031,13 +2647,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "sparse",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          32,
-          48
-        ],
+        "chunkBuckets": [4, 8, 16, 32, 48],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.926799999952316,
@@ -3100,16 +2710,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "dense",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          24,
-          32,
-          40,
-          48,
-          56
-        ],
+        "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.925544999957085,
@@ -3172,16 +2773,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "dense",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          24,
-          32,
-          40,
-          48,
-          56
-        ],
+        "chunkBuckets": [4, 8, 16, 24, 32, 40, 48, 56],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.965180000007153,
@@ -3244,13 +2836,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "sparse",
-        "chunkBuckets": [
-          4,
-          8,
-          16,
-          32,
-          48
-        ],
+        "chunkBuckets": [4, 8, 16, 32, 48],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.975894999980927,
@@ -3313,11 +2899,7 @@
         "linearGemvReduce": "parallel",
         "linearGemvReduceOverride": "parallel",
         "prefillBuckets": "default",
-        "chunkBuckets": [
-          4,
-          8,
-          32
-        ],
+        "chunkBuckets": [4, 8, 32],
         "chunkLength": 64,
         "capacity": 128,
         "loadSeconds": 6.847785000026226,

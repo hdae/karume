@@ -11,9 +11,7 @@ import { ExecutionError } from "../src/runtime/plan.ts";
  * **型の外から来る呼び手**（JS の消費者・改名前の綴りを残した古いビルド）を再現する。TS の型は
  * この経路を 1 つも守らないので、受理集合の検査はここでしか撃てない。
  */
-const jsCallerAssert = assertExecutionKnobs as unknown as (
-  ...knobs: readonly unknown[]
-) => void;
+const jsCallerAssert = assertExecutionKnobs as unknown as (...knobs: readonly unknown[]) => void;
 
 /** 受理集合の中の綴り（この並びが {@link assertExecutionKnobs} の引数順）。 */
 const VALID: readonly [string, string, string, string, string] = [
@@ -53,11 +51,7 @@ test("実行形ノブの非文字列は受理集合を引く前に落ち、診�
     for (const value of [[VALID[index]], object, false, 0, 1n, Symbol(VALID[index])]) {
       const knobs: unknown[] = [...VALID];
       knobs[index] = value;
-      const error = assertThrows(
-        () => jsCallerAssert(...knobs),
-        ExecutionError,
-        name,
-      );
+      const error = assertThrows(() => jsCallerAssert(...knobs), ExecutionError, name);
       // 型名だけを出す（利用者の `toString` の戻り値を載せない）。
       assertEquals(error.message.includes(`${name}: ${typeof value}`), true, error.message);
       assertEquals(error.message.includes("実行形ノブ 1 本"), true, error.message);

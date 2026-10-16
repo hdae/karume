@@ -80,7 +80,8 @@ const notFound = (response: ServerResponse): void => {
  * サーバなので、`..` や絶対 path をそのままファイルの open へ渡さない。
  */
 const isInsideDist = (path: string): boolean =>
-  path.length > 0 && !path.startsWith("/") &&
+  path.length > 0 &&
+  !path.startsWith("/") &&
   path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
 /** 配信表の 1 エントリ = ある repo について「名乗る revision」と「配る元ディレクトリ」。 */
 type ServedRepo = {
@@ -175,7 +176,8 @@ const handle = async (
   if (revision !== null) {
     const served = routes.get(revision[1]);
     if (served === undefined) return notFound(response);
-    response.writeHead(200, { "content-type": "application/json" })
+    response
+      .writeHead(200, { "content-type": "application/json" })
       .end(JSON.stringify({ sha: served.revision }));
     return;
   }
@@ -232,7 +234,8 @@ export const serveLocalDist = (dir: string): Promise<LocalDistServer> => {
         return;
       }
       console.error(error);
-      response.writeHead(500, { "content-type": "text/plain;charset=UTF-8" })
+      response
+        .writeHead(500, { "content-type": "text/plain;charset=UTF-8" })
         .end("Internal Server Error");
     });
   });
@@ -240,10 +243,10 @@ export const serveLocalDist = (dir: string): Promise<LocalDistServer> => {
   // Idempotent like Deno's `shutdown()`. `close()` alone waits for keep-alive sockets held by
   // the client's connection pool, so every remaining connection is closed as well.
   const close = (): Promise<void> =>
-    closing ??= new Promise((resolve, reject) => {
+    (closing ??= new Promise((resolve, reject) => {
       server.close((error) => (error === undefined ? resolve() : reject(error)));
       server.closeAllConnections();
-    });
+    }));
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {

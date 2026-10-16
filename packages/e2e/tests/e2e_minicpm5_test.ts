@@ -33,12 +33,20 @@ import {
   type PreparedModel,
   type Tensor,
 } from "../../runtime/mod.ts";
-import { compareTensors, formatAllclose, type Tolerance } from "../../runtime/src/reference/allclose.ts";
+import {
+  compareTensors,
+  formatAllclose,
+  type Tolerance,
+} from "../../runtime/src/reference/allclose.ts";
 import { assertAdapterMatchesEnvironment } from "../../runtime/tests/helpers/environment.ts";
 import { ioTensor } from "../../runtime/tests/helpers/golden-io.ts";
 import { GPU_AVAILABLE } from "../../runtime/tests/helpers/gpu.ts";
 import { requireCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
-import { openResults, recordFailure, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
+import {
+  openResults,
+  recordFailure,
+  runRecordedCase,
+} from "../../runtime/tests/helpers/results.ts";
 import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
 import { seriesGraph } from "../../runtime/tests/helpers/series-graphs.ts";
 
@@ -116,8 +124,8 @@ const listDir = (url: URL): readonly DirEntry[] => {
 
 const discoverCases = (root: URL): readonly string[] =>
   listDir(root)
-    .filter((entry) =>
-      entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX)
+    .filter(
+      (entry) => entry.isFile && entry.name.startsWith(IO_PREFIX) && entry.name.endsWith(IO_SUFFIX),
     )
     .map((entry) => entry.name.slice(IO_PREFIX.length, entry.name.length - IO_SUFFIX.length))
     .sort();
@@ -262,7 +270,11 @@ test({
         await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT)),
         GRAPH_NAME,
       );
-      assertEquals(parsed.graph.inputs.map((spec) => spec.name), ["input_ids"], "グラフ入力");
+      assertEquals(
+        parsed.graph.inputs.map((spec) => spec.name),
+        ["input_ids"],
+        "グラフ入力",
+      );
       assertEquals(parsed.graph.outputs.length, 1, "graph.outputs の本数（1-shot の logits 1 本）");
       const outputName = parsed.graph.outputs[0];
       const declared = parsed.graph.values[outputName].dtype;
@@ -284,52 +296,56 @@ test({
           /** ケースごとの最終位置 1 位（全ケース同一 = 定数出力の検出に使う）。 */
           const tops: number[] = [];
           for (const caseName of CASES) {
-            await runRecordedCase(results, {
-              id: caseName,
-              // 決着はケースの席に残る — 系列の catch で二重に積まない。
-              onFailure: () => {
-                caseSettled = true;
+            await runRecordedCase(
+              results,
+              {
+                id: caseName,
+                // 決着はケースの席に残る — 系列の catch で二重に積まない。
+                onFailure: () => {
+                  caseSettled = true;
+                },
               },
-            }, async ({ measurements }) => {
-              const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
-              const outputs = await session.run(inputs);
-              assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
-              const actual = outputs[outputName];
-              const where = `${caseName} output.0 ('${outputName}')`;
-              assertEquals(actual.shape, expected.shape, `${where}: shape`);
-              assertEquals(actual.dtype, declared, `${where}: dtype`);
+              async ({ measurements }) => {
+                const { inputs, expected } = await loadCase(caseName, parsed.graph.inputs);
+                const outputs = await session.run(inputs);
+                assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
+                const actual = outputs[outputName];
+                const where = `${caseName} output.0 ('${outputName}')`;
+                assertEquals(actual.shape, expected.shape, `${where}: shape`);
+                assertEquals(actual.dtype, declared, `${where}: dtype`);
 
-              // ① 数値
-              const report = compareTensors(actual, expected, MINICPM5_TOLERANCE);
-              measurements.push({
-                output: outputName,
-                maxAbs: report.maxAbsError,
-                maxRel: report.maxRelError,
-                tolerance: MINICPM5_TOLERANCE,
-                stage: "karume",
-              });
-              assert(report.pass, `${where}: ${formatAllclose(report)}`);
+                // ① 数値
+                const report = compareTensors(actual, expected, MINICPM5_TOLERANCE);
+                measurements.push({
+                  output: outputName,
+                  maxAbs: report.maxAbsError,
+                  maxRel: report.maxRelError,
+                  tolerance: MINICPM5_TOLERANCE,
+                  stage: "karume",
+                });
+                assert(report.pass, `${where}: ${formatAllclose(report)}`);
 
-              // ② 意味論（最終位置の 1 位）。①が緩んでも独立に残る線で、GQA の head 写像違い・
-              // mask の向き・RoPE の位置ずれはどれもここで 1 位を動かす。
-              const golden = greedyTop(expected, `${caseName} golden`);
-              const observed = greedyTop(actual, `${caseName} GPU`);
-              // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
-              // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、①の許容内の数値差で 1 位は
-              // 動けない。実測の最小余裕は context-ja の 0.188 = atol 1e-3 の 188 倍。
-              assert(
-                golden.margin > 2 * MINICPM5_TOLERANCE.atol,
-                `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
-                  `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
-              );
-              assertEquals(
-                observed.top,
-                golden.top,
-                `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
-                  `golden 余裕 ${golden.margin}）`,
-              );
-              tops.push(observed.top);
-            });
+                // ② 意味論（最終位置の 1 位）。①が緩んでも独立に残る線で、GQA の head 写像違い・
+                // mask の向き・RoPE の位置ずれはどれもここで 1 位を動かす。
+                const golden = greedyTop(expected, `${caseName} golden`);
+                const observed = greedyTop(actual, `${caseName} GPU`);
+                // 判定が成立する形であることを先に固定する（この門が運任せでないことの根拠）:
+                // golden の 1 位と 2 位の差が atol の 2 倍を超えていれば、①の許容内の数値差で 1 位は
+                // 動けない。実測の最小余裕は context-ja の 0.188 = atol 1e-3 の 188 倍。
+                assert(
+                  golden.margin > 2 * MINICPM5_TOLERANCE.atol,
+                  `${caseName}: golden の 1 位 / 2 位の差 ${golden.margin} が atol と同程度 — ` +
+                    `この形では greedy 一致が数値差で反転しうる（門として成立しない）`,
+                );
+                assertEquals(
+                  observed.top,
+                  golden.top,
+                  `${caseName}: 最終位置の 1 位が golden と違う（GPU 余裕 ${observed.margin} / ` +
+                    `golden 余裕 ${golden.margin}）`,
+                );
+                tops.push(observed.top);
+              },
+            );
           }
           // 恒真化の門: 全ケースの 1 位が同一なら定数出力（export.py の `_sanity` と同じ独立線を
           // ランタイム側にも置く）。実測は ` Paris` / `東京` の 2 種が交互に出る。
@@ -397,9 +413,9 @@ test({
         assertEquals(
           plain.map((entry) => entry.key),
           [],
-          `16:2 の GQA なのに非 GQA キーが走った（走った内訳: ${
-            [...qk, ...pv].map((entry) => `${entry.key}×${entry.dispatchCount}`).join(" / ")
-          }）`,
+          `16:2 の GQA なのに非 GQA キーが走った（走った内訳: ${[...qk, ...pv]
+            .map((entry) => `${entry.key}×${entry.dispatchCount}`)
+            .join(" / ")}）`,
         );
 
         // 全層ぶん dispatch されている（1 種のパイプラインを 24 層が共有するので実測は 24 本ずつ。

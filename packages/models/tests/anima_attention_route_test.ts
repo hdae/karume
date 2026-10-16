@@ -85,8 +85,8 @@ describe("Anima の受理集合 × 既定席の attention の経路", () => {
   });
 
   it("縮退する形は 9,409 形のうち 4,608 形", () => {
-    const degraded = ACCEPTED.filter((size) =>
-      attentionRoute(DEFAULT_SEATS, HEAD_DIM, selfKeys(size)).pv === "dense"
+    const degraded = ACCEPTED.filter(
+      (size) => attentionRoute(DEFAULT_SEATS, HEAD_DIM, selfKeys(size)).pv === "dense",
     );
     assertEquals(degraded.length, 4608);
   });
@@ -102,13 +102,11 @@ describe("Anima の受理集合 × 既定席の attention の経路", () => {
   it("具体例: 528×528（S=1,089）は縮退し、1024×1024 / 1344×768 / 896×1152 は宣言どおり", () => {
     assertEquals(selfKeys({ width: 528, height: 528 }), 1089);
     assertEquals(attentionRoute(DEFAULT_SEATS, HEAD_DIM, 1089), DEGRADED);
-    for (
-      const size of [
-        { width: 1024, height: 1024 },
-        { width: 1344, height: 768 },
-        { width: 896, height: 1152 },
-      ]
-    ) {
+    for (const size of [
+      { width: 1024, height: 1024 },
+      { width: 1344, height: 768 },
+      { width: 896, height: 1152 },
+    ]) {
       assertEquals(attentionRoute(DEFAULT_SEATS, HEAD_DIM, selfKeys(size)), REQUESTED, label(size));
     }
   });
