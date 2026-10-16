@@ -1,0 +1,27 @@
+{
+  "name": "@karume/hub",
+  "version": "0.14.0",
+  "description": "Manifest resolution, download and cache for Karume model distributions.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts",
+    "./deno": "./deno.ts",
+    "./node": "./node.ts"
+  },
+  "files": [
+    "mod.ts",
+    "deno.ts",
+    "node.ts",
+    "src"
+  ],
+  "scripts": {
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@hdae/fetch-cache": "catalog:"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

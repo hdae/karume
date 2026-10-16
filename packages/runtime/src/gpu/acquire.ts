@@ -379,7 +379,9 @@ type AdapterInfoHost = { readonly info?: GPUAdapterInfo };
  * 1 か所の書き換えが後の全 device の adapter 情報（自動選択・照合の材料）に漏れるのを防ぐ（本物の
  * `GPUAdapterInfo` も読み取り専用の属性で、書き換えられないことは同じ）。
  */
-const EMPTY_ADAPTER_INFO: GPUAdapterInfo = Object.freeze({
+// `@webgpu/types` brands the platform interface (`__brand`); the literal carries every observable
+// field, so the cast only supplies the brand.
+const EMPTY_ADAPTER_INFO: GPUAdapterInfo = Object.freeze<Omit<GPUAdapterInfo, "__brand">>({
   vendor: "",
   architecture: "",
   device: "",
@@ -387,7 +389,7 @@ const EMPTY_ADAPTER_INFO: GPUAdapterInfo = Object.freeze({
   subgroupMinSize: 0,
   subgroupMaxSize: 0,
   isFallbackAdapter: false,
-});
+}) as GPUAdapterInfo;
 
 export const readAdapterInfo = (adapter: AdapterInfoHost): GPUAdapterInfo =>
   adapter.info ?? EMPTY_ADAPTER_INFO;

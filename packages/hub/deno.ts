@@ -19,6 +19,21 @@ import {
 } from "./mod.ts";
 
 /**
+ * The slice of Deno's API this subpath uses. The repository is type-checked with Node's type set,
+ * where the `Deno` global does not exist; under Deno the real global shadows this declaration.
+ */
+declare const Deno: {
+  readFile(path: string | URL, options?: { signal?: AbortSignal }): Promise<Uint8Array<ArrayBuffer>>;
+  open(path: string | URL): Promise<DenoFsFile>;
+  readonly SeekMode: { readonly Start: 0 };
+};
+type DenoFsFile = {
+  seek(offset: number, whence: 0): Promise<number>;
+  read(buffer: Uint8Array<ArrayBuffer>): Promise<number | null>;
+  close(): void;
+};
+
+/**
  * root の下の実体を指す位置。文字列 root は**そのまま継ぐ** — manifest の path は POSIX 相対
  * （`transformer/model-00001-of-00004.krm`）で、`..` は parse 時に弾かれている（`ManifestPathError`）
  * ので、`URL` を通して正規化する必要が無い。逆に `URL` を通すと Windows のドライブ文字を
@@ -75,7 +90,7 @@ export const denoDirectory = (
       // 中断が素通しになる — 実体に触れる前に 1 度見る）。
       signal?.throwIfAborted();
       const at = locate(base, path);
-      let file: Deno.FsFile;
+      let file: DenoFsFile;
       try {
         file = await Deno.open(at);
       } catch (error) {

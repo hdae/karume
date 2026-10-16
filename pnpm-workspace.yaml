@@ -1,0 +1,51 @@
+packages:
+  - packages/*
+
+catalogMode: prefer
+
+catalog:
+  '@hdae/fetch-cache': jsr:^0.8.0
+  '@hdae/yomi': jsr:^0.4.2
+  '@std/assert': jsr:^1.0.19
+  "@types/node": ^24
+  '@webgpu/types': ^0.1.74
+  typescript: ^7.0.2
+  vite: npm:@voidzero-dev/vite-plus-core@1.2.0
+  vite-plus: 1.2.0
+  webgpu: ^0.6.2
+overrides:
+  vite@*: "catalog:"
+peerDependencyRules:
+  allowAny:
+    - vite
+  allowedVersions:
+    vite: "*"
+
+# Supply-chain guard (same intent as Deno's minimumDependencyAge): only install
+# versions that have been on the registry for at least 7 days (value is minutes).
+minimumReleaseAge: 10080
+# The Vite+ toolchain itself is exempt: its version is fixed by the installed `vp` (an explicit,
+# user-chosen pin), so the age guard cannot add protection there and would only block installs for
+# the first week after each Vite+ release. Ordinary dependencies stay under the guard.
+minimumReleaseAgeExclude:
+  - vite-plus
+  - "@voidzero-dev/*"
+  - vitest
+  - "@vitest/*"
+  - tinybench
+  - oxlint
+  - "@oxlint/*"
+  - oxlint-tsgolint
+  - "@oxlint-tsgolint/*"
+  - oxfmt
+  - "@oxfmt/*"
+  - "@oxc-project/*"
+  - yuku-core
+  - yuku-parser
+  - "@yuku-core/*"
+  - "@yuku-toolchain/*"
+# `webgpu` (Dawn) ships its prebuilt `dawn.node` in the tarball; its postinstall only strips the macOS
+# quarantine attribute. Declining the script keeps Linux installs script-free (macOS users may need
+# `xattr -d com.apple.quarantine` on dist/darwin-universal/dawn.node). This is a refusal, not approval.
+allowBuilds:
+  webgpu: false

@@ -1,0 +1,36 @@
+{
+  "name": "@karume/models",
+  "version": "0.14.0",
+  "description": "Model pipelines and tokenizers on top of @karume/runtime and @karume/hub.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./mod.ts",
+    "./anima": "./anima.ts",
+    "./birefnet": "./birefnet.ts",
+    "./depth-anything": "./depth-anything.ts",
+    "./gemma": "./gemma.ts",
+    "./irodori": "./irodori.ts",
+    "./sbv2": "./sbv2.ts",
+    "./siglip2": "./siglip2.ts",
+    "./vowel-detector": "./vowel-detector.ts",
+    "./gemma4-qat": "./gemma4-qat.ts",
+    "./umt5": "./umt5.ts",
+    "./wan": "./wan.ts"
+  },
+  "files": [
+    "*.ts",
+    "src"
+  ],
+  "scripts": {
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@hdae/yomi": "catalog:",
+    "@karume/hub": "workspace:*",
+    "@karume/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

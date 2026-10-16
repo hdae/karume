@@ -6,3 +6,8 @@ coverage/
 /models/
 *.safetensors
 .env
+
+# Node toolchain
+node_modules/
+dist/
+*.tsbuildinfo

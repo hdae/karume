@@ -1,0 +1,20 @@
+{
+  "name": "@karume/test-support",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node test harness for the Karume workspace: Dawn (WebGPU) injection, Deno-shaped test and fs helpers.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./setup": "./src/setup.ts",
+    "./test": "./src/test.ts",
+    "./fs": "./src/fs.ts",
+    "./webgpu": "./src/webgpu.ts"
+  },
+  "dependencies": {
+    "webgpu": "catalog:"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  }
+}

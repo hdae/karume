@@ -1,0 +1,28 @@
+{
+  "name": "karume",
+  "version": "0.14.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "vp check",
+    "test": "vp test",
+    "ready": "vp check && vp test"
+  },
+  "devDependencies": {
+    "@std/assert": "catalog:",
+    "@types/node": "catalog:",
+    "@webgpu/types": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.14.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
