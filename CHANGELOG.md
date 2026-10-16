@@ -114,8 +114,9 @@ measurements in `docs/research/`.
   quantization error against the unrounded f32 outputs in `quality.json`, and the export refuses to
   publish an `f16` series of an all-f16 checkpoint unless every case is bit-identical, or a lossy one
   whose worst alpha MAE reaches half an 8-bit alpha step (a provisional line). At 1024² the
-  resident weights drop from 919 MiB to 509 MiB. The published repositories pick the seats up at the
-  next release.
+  BiRefNet_HR resident weights drop from 919 MiB (`f32`) to 509 MiB (`f16`), and to 431 MiB with the
+  window-mask change under Changed. This release republishes both repositories with these seats
+  (pinned in `BIREFNET_SOURCES`).
 - `tools/flag-bench`: a Deno benchmark that compares Gemma execution flags against a reference on the
   same machine (GPU time as the primary metric, wall clock secondary) and records which kernel keys
   actually ran.
@@ -190,13 +191,17 @@ measurements in `docs/research/`.
 - `@karume/models/wan` (also in the barrel): Wan2.1 T2V 1.3B text-to-video (ADR 0118).
   `WanPipeline.fromPretrained(source, { model?, quant?, gpu?, onRunDiagnostics?, … })` loads a
   `karume/5` distribution with pipeline `wan/1` (the `karume-wan2.1` layout: model `t2v-1.3b`,
-  quant `f16`, the transformer and the two VAE chunk-graph containers `vae_decoder_first` /
-  `vae_decoder_next`, and the precomputed text-embedding asset `text_embeds`); the distribution is
-  not published on Hugging Face yet, so there is no `WAN_SOURCES` table and a local copy is passed
-  as a directory source handle. `WanPipeline.fromAssets({ manifest, assets })` builds the same
+  the transformer and the two VAE chunk-graph containers `vae_decoder_first` /
+  `vae_decoder_next`, and the precomputed text-embedding asset `text_embeds`). `karume-wan2.1` is
+  not published on Hugging Face (`WAN_SOURCES` has no Wan2.1 key), so a local copy is passed as a
+  directory source handle. `WanPipeline.fromAssets({ manifest, assets })` builds the same
   pipeline from bytes already held. The manifest's `pipelineConfig` declares the defaults for
-  `steps`, `guidance` and `shift`, and a quant that declares any session knob is rejected before
-  weights are fetched. `generate({ prompt, negativePrompt?, seed | latents, steps?, guidance?,
+  `steps`, `guidance` and `shift`, and a quant `session` key other than `linearCompute`,
+  `attentionCompute` and `attentionScoreStorage` is rejected before weights are fetched.
+  `WanRunComponent` is `text_encoder`, `transformer`, `vae_decoder_first` / `vae_decoder_next`
+  and, for Wan2.2 image-to-video only, `vae_encoder_pre` / `vae_encoder_attn` /
+  `vae_encoder_post` (the `stage` event's `component` `vae_encoder`; Wan2.1 never emits them).
+  `generate({ prompt, negativePrompt?, seed | latents, steps?, guidance?,
   shift?, frames = 33, width = 832, height = 480, onEvent? })` returns `GeneratedVideo`
   (`[3, F, H, W]` f32 in `[-1, 1]`, and `fps` — 16 for Wan2.1, a fact of the upstream model rather
   than a knob): the DiT runs with classifier-free guidance as two batch-1 passes, the flow-matching
@@ -219,12 +224,19 @@ measurements in `docs/research/`.
   modulation tables stay f32), and `dist.py --pipeline wan` adds two quants to `karume-wan2.1`:
   `f16+dit8` (int8 transformer weights, f32 compute — the reference quant) and
   `f16+dit8-a8-attn8-s16` (int8 weights with per-token int8 activations in linear and attention,
-  f16 score storage). `f16` stays the default; `WanPipeline` accepts `linearCompute`,
-  `attentionCompute` and `attentionScoreStorage` from the quant declaration. The GPU numerics gates
-  and the visual check for these quants land with ADR 0120 stages 3–6.
+  f16 score storage). `f16+dit8-a8-attn8-s16` is the default, so `WanPipeline` without `quant`
+  runs it; pass `quant: "f16"` for the f16 transformer. On an Intel Arc B570 a 50-step, 33-frame
+  clip took 952 s instead of about 30 minutes with `f16`, and an 81-frame clip 3,703 s instead of
+  about 2 hours. `WanPipeline` accepts `linearCompute`, `attentionCompute` and
+  `attentionScoreStorage` from the quant declaration.
 - `karume-umt5-xxl` (ADR 0119 / 0122): a distribution of the umT5-XXL text encoder alone (`dist.py --pipeline umt5`,
   pipeline `umt5-encoder/1`, quant `i8`, 26 parts) with the tokenizer of `google/umt5-xxl` as the asset
-  `tokenizer` (format `karume-umt5-tokenizer/1`, no prompt cleaning). The Wan distributions reference its
+  `tokenizer` (format `karume-umt5-tokenizer/1`, no prompt cleaning). It is published as
+  `hdae/karume-umt5-xxl` and pinned in `UMT5_SOURCES["umt5-xxl"]`. The containers name the original
+  `google/umt5-xxl` commit as their upstream (the Wan2.1 checkpoint's `text_encoder` holds
+  bit-identical float32 encoder weights, ADR 0122), and the exporter series is `umt5-xxl-i8-dyn`;
+  `wan.umt5_export` selects the umT5 upstream with `--upstream` and the Wan text snapshot with
+  `--model`, and rejects an option the subcommand does not use. The Wan distributions reference its
   `text_encoder` across repositories and ship their own tokenizer asset `umt5_tokenizer` with Wan's prompt
   cleaning.
 - `@karume/models/umt5` (ADR 0122): `Umt5Encoder` runs the umT5-XXL encoder on its own —
@@ -238,7 +250,10 @@ measurements in `docs/research/`.
   accepts any prompt (2–512 tokens; out-of-vocabulary characters, in-text special tokens, HTML entity
   candidates, mojibake, C1 controls and unassigned code points are rejected with a message that says how
   to fix the prompt); `"precomputed"` keeps the fixed-prompt embedding asset and does not fetch umT5.
-  `WanPipelineOptions.signal` and `WanGenerateRequest.signal` cancel loading and generation (the signal's
+  A distribution without the umT5 cross-repository reference needs `textEncoder: "precomputed"` (the
+  error says so). Every Wan quant declares `requiredLimits` of 1,050,148,864 bytes for
+  `maxBufferSize` / `maxStorageBufferBindingSize` (the vocabulary embedding), also on the
+  precomputed route. `WanPipelineOptions.signal` and `WanGenerateRequest.signal` cancel loading and generation (the signal's
   reason is thrown as is; the next `generate` works after a cancellation).
 - Exporter recipes: third-party umT5-compatible text encoders can be converted for local experiments
   (ADR 0122). `python -m wan.umt5_intake --repo <owner/name> --revision <commit> --file <name>.safetensors
@@ -267,9 +282,10 @@ measurements in `docs/research/`.
   center crop) or `fit: "stretch"` (diffusers' direct resize) picks how the image is fitted; with
   only two accepted sizes, more of a square or 4:3 image is cropped than in the official
   pipeline. `WanPipeline` (Wan2.1) rejects `image` and `fit`. The distribution now also carries the
-  VAE encoder (three f16 graphs, 108 MB), fetched for text-to-video too. The `karume-wan2.2` distribution is not published on
-  Hugging Face yet: `dist.py --pipeline wan-ti2v` assembles a local mirror for `fromPretrained`,
-  and `fromAssets` builds the pipeline from a manifest and the exported series containers. The
+  VAE encoder (three f16 graphs, 108 MB), fetched for text-to-video too. The `karume-wan2.2`
+  distribution is published as `hdae/karume-wan2.2` and pinned in `WAN_SOURCES["wan2.2"]`;
+  `dist.py --pipeline wan-ti2v` still assembles a local mirror for `fromPretrained`, and
+  `fromAssets` builds the pipeline from a manifest and the exported series containers. The
   distribution has two quants, `f16+dit8-a8-attn8-s16` (the default: int8 transformer with int8
   activations) and `f16+dit8` (int8 transformer weights, f32 compute — the reference quant), and no
   `f16` quant; its manifest declares 50 steps, guidance 5.0 and shift 5.0, and like `karume-wan2.1`
@@ -278,9 +294,8 @@ measurements in `docs/research/`.
   `--image <PNG|JPEG>` with an optional `--fit <crop|stretch>` runs image-to-video; the example
   decodes the file with fast-png and jpeg-js, which are dependencies of the examples only (PNG gives
   Pillow's pixels exactly, JPEG differs slightly). The gpu-lab Wan tab gains a generation choice
-  and, for Wan2.2, a condition image decoded by the browser (`createImageBitmap`); its JSON is
-  `karume-wan-browser/5` and records the generation and the condition image of an image-to-video
-  row. Both the example and the gpu-lab tab apply the EXIF orientation of a JPEG or PNG, so a
+  and, for Wan2.2, a condition image decoded by the browser (`createImageBitmap`); its JSON
+  records the generation and the condition image of an image-to-video row. Both the example and the gpu-lab tab apply the EXIF orientation of a JPEG or PNG, so a
   phone photo tagged to be shown upright is used upright, and both pick the same "auto" size for
   it. This intentionally differs from the official `generate.py`, which does not apply the
   orientation; an image without an orientation tag gives the same pixels either way.
@@ -310,6 +325,56 @@ measurements in `docs/research/`.
 - `EstimateOptions` accepts `attentionRowBlockMaxBytes`, `attentionCompute` and
   `attentionScoreStorage` with the same values and checks as `SessionOptions`, so the estimate splits
   attention the way the session will (omitted seats are estimated as `"f32"`, the runtime default).
+- `@karume/models`: `UMT5_SOURCES` (`@karume/models/umt5`) and `WAN_SOURCES` (`@karume/models/wan`),
+  both also in the barrel and folded into `KARUME_SOURCES`, pin the distributions first published
+  with this release: `UMT5_SOURCES["umt5-xxl"]` is `hdae/karume-umt5-xxl` and
+  `WAN_SOURCES["wan2.2"]` is `hdae/karume-wan2.2`. Pass them to `Umt5Encoder.fromPretrained` /
+  `WanTi2vPipeline.fromPretrained` to follow the revisions this package version was verified with;
+  calling those without `ref` names the table in the error. `karume-wan2.1` is not published, so
+  `WAN_SOURCES` has no Wan2.1 key and `WanPipeline` still takes a local copy.
+- Exporter (`karume`): `UnsupportedAtenOpsError` gains `reports`, one `UnsupportedOpReport` per
+  unsupported op. Each report gives the op's occurrence count and its Core ATen membership
+  (`core_aten` / `non_core_aten` / `non_aten`, read from the installed torch's `torch.Tag.core`
+  rather than a hand-kept list). It also gives the innermost modules the op came from
+  (`nn_module_stack`, grouped by class with the first path), plus the number of nodes that have no
+  module stack. The error message lists the same facts, with a legend that says when adding the op
+  to the vocabulary needs an ADR (Core ATen ops included when they break an execution-model
+  invariant). The existing `.ops` mapping keeps its shape.
+- Gemma 4 recipe: the regular (non-QAT) recipe takes `--model e2b|e4b` like the QAT recipe (default
+  `e2b`, unchanged). This builds E4B series and an `e4b` entry of `karume-gemma4`
+  (`dist.py --pipeline gemma4 --model e2b --model e4b`). E4B ships no drafter, and it reuses E2B's
+  tokenizer series once their upstream sha256 match. The checkpoint is now loaded into a model built
+  on the meta device, so loading no longer holds a second f32 copy of the weights (about 35 GiB for
+  E4B). Graphs and weights are unchanged. The published `karume-gemma4` still carries E2B only.
+- `tools/gpu-lab` (`deno task bench:gpu-lab`): a local Chrome (WebGPU) page. **1. 掃引** (sweep)
+  runs `runGeometrySweep` and saves the `karume-geometry-sweep/2` record; **2. プロファイル**
+  (profile) derives a `GeometryProfile` from one or more sweeps of one adapter (the rules of
+  `deriveGeometryProfile`) and exports it as TypeScript, injection JSON or a registration command;
+  **3. Anima** generates on an injected, built-in or stored-and-matched profile, records per-stage
+  wall and GPU time, the DiT residency and the PNG sha256, and A/Bs the default geometry against
+  the applied table; **4. Wan** runs Wan2.1 / Wan2.2 and saves a clip as a zip of numbered PNGs
+  (its JSON is `karume-wan-browser/6`). The server listens on loopback only, sends cross-origin
+  isolation headers, serves the local `models/` mirrors read-only (`--source`, `--wan-source`,
+  `--wan22-source`, `--umt5-source`) and refuses to start when an explicit directory has no
+  `karume.json`.
+- `tools/geometry-sweep`: the Deno CLI of the GEMM tile-geometry sweep
+  (`deno run -A tools/geometry-sweep/main.ts [--set quick|quick+|full] [--op …] [--case …]`,
+  default `quick+`; the record is `karume-geometry-sweep/2`) and its `profile` subcommand, which
+  derives a geometry profile from sweep records and writes the formatted table to
+  `packages/runtime/src/kernels/geometry-profiles/<id>.ts`. `tools/anima-residency/profile.ts` is
+  the Deno twin of the gpu-lab Anima tab: it builds Anima once with `residency: "transformer"`,
+  prints each stage's wall and GPU time and writes the tab's JSON format.
+- `examples/wan` (`deno task demo:wan`): a one-shot CLI for `WanPipeline` and, with
+  `--generation wan2.2`, `WanTi2vPipeline` that writes one clip as numbered PNG frames under
+  `outputs/examples/`. Without `--source` it reads the local mirror (`models/karume-wan2.1` /
+  `models/karume-wan2.2`) and prints the `dist.py` command when it is missing; `--source` takes
+  another directory or a Hugging Face repository (its `main` revision). `--quant` takes a key of
+  the manifest's `quants`, `--text-encoder gpu|precomputed` picks the route, `--prompt` /
+  `--negative` take free text or a name from the embedding asset, `--umt5-source` points at a local
+  umT5 mirror, and `--swap-text-encoder <dir | owner/name@<40-hex commit>>` replaces umT5 with a
+  compatible encoder (a bare repository name is rejected). The output directory names the quant
+  (`default` without `--quant`), the prompt and the route. Contradictory flags and out-of-range
+  values are rejected before any weight reaches the GPU.
 
 ### Changed
 
@@ -361,9 +426,10 @@ measurements in `docs/research/`.
   `chrome://flags/#enable-webgpu-developer-features`; Deno always does). Without it, Apple adapters
   keep the default geometry, which is the best on an Apple M5, and the table can still be injected
   with `acquireGpu`. NVIDIA `blackwell` under
-  Chrome gets a profile measured on an RTX 5070 Ti that changes only the i8a8 linear and attention
-  tiles (the 512² DiT stage of the default quant took 1.14 s of GPU time instead of 1.36 s); its
-  f32 kernels keep the default. Outputs stay
+  Chrome gets a profile measured on an RTX 5070 Ti that changes the i8a8 linear and attention
+  tiles (the 512² DiT stage of the default quant took 1.14 s of GPU time instead of 1.36 s) and the
+  linear / matmul / bmm rows for M 129–512; f32 attention, conv2d and M > 512 keep the default.
+  Outputs stay
   bit-identical across geometries. Both built-in profiles now carry seven `gemmRows` rules
   (M ≤ 16 / 32 / 64 / 128 / 256 / 512 / > 512, ADR 0116) instead of the default table's three,
   each measured with linear, matmul and bmm cases; the default table is unchanged. On an M2
@@ -374,22 +440,8 @@ measurements in `docs/research/`.
   the default f32 linear and QK geometries on the M2 ran faster under Chrome 154 than under
   Chrome 153 (same WGSL), so the table's gain is smaller there; the PNG bytes are still
   unchanged. On an RTX 5070 Ti the same A/B leaves the `f16` DiT stage unchanged (2.88 s of GPU
-  time either way, because the NVIDIA profile changes only the i8a8 tiles and the M 129〜512 rows)
+  time either way, because the NVIDIA profile changes only the i8a8 tiles and the M 129–512 rows)
   with identical PNG bytes.
-- `karume-wan2.1`: the default quant is now `f16+dit8-a8-attn8-s16` (int8 transformer with int8
-  activations, ADR 0120) instead of `f16`, so `WanPipeline` without `quant` runs it; pass
-  `quant: "f16"` for the f16 transformer. On an Intel Arc B570 a 50-step, 33-frame clip took 952 s
-  instead of about 30 minutes, and an 81-frame clip 3,703 s instead of about 2 hours. The gpu-lab
-  Wan tab gains a quant choice, and its JSON is `karume-wan-browser/3`. `deno task demo:wan` gains
-  `--quant` (a key of the manifest's `quants`); the output directory names the quant after the
-  family, or `default` without it.
-- `karume-umt5-xxl` (not published yet): the containers now name the original `google/umt5-xxl`
-  commit as their upstream instead of the Wan2.1 checkpoint's `text_encoder` (its encoder weights
-  are bit-identical in float32, ADR 0122), and the exporter series is renamed from
-  `wan2.1-umt5-i8-dyn` to `umt5-xxl-i8-dyn`. The weight parts are byte-identical; only the first
-  part (the model descriptor's provenance) and, in `karume-wan2.1`, the cross-repository reference
-  to it change. `wan.umt5_export` selects the umT5 upstream with `--upstream` and the Wan text
-  snapshot with `--model`, and rejects an option the subcommand does not use.
 - `@karume/runtime`: the memory estimate (`estimateGraphMemory` / `PreparedModel.estimate`) now
   counts the internal temporaries of the fused `attention` op — the score matrix and row statistics of
   each row block, and the int8 quantization buffers of `attentionCompute: "a8"` — with the same
@@ -397,10 +449,7 @@ measurements in `docs/research/`.
   that op (for example the Wan2.2 transformer). Combinations a session rejects (an additive mask or
   grouped query attention with `"a8"`, a head dimension or key length beyond the int32 accumulation
   bound of the int8 path, a non-f32 seat on the state form) are now rejected by the estimate too.
-  Without `maxStorageBufferBindingSize`, the estimate counts the fused `attention` op only when its
-  row-block count is the same on every device — the score matrix and the row statistics each fit one
-  block under the WebGPU core default (128 MiB), or `attentionRowBlockMaxBytes` is at most that
-  default — and otherwise rejects the graph, asking for `maxStorageBufferBindingSize`.
+  Without `maxStorageBufferBindingSize`, some graphs with that op are now rejected (see **Breaking**).
   The second entry of `unaccounted` now names only the linear int8 quantization buffers. The estimates
   the Anima and Gemma pipelines use are unchanged.
 - BiRefNet_HR: `segment()` now scales the matte back in the order its upstream uses — the sigmoid is
@@ -412,14 +461,46 @@ measurements in `docs/research/`.
   foreground (the eighth had none and did not change), the alpha inside the contour band moved by
   0.3–2 steps on average and by up to 25 steps (8-bit), and all eight pairs were indistinguishable
   in a blind A/B. At the model's own resolution the output is effectively unchanged (ADR 0125).
+- `@karume/runtime`: the parallel GEMV path now covers the linear shapes of Gemma 4 E4B, regular and
+  QAT. This path is `linearGemvReduce: "parallel"`, together with the `fuseLinearStaticQuantize` /
+  `packedStaticQuantize` paths that depend on it. Before, every E4B linear silently ran the
+  sequential kernel, so these options had no effect on E4B. The E4B entries reuse the lane counts
+  of E2B's matching layers; they were not tuned on E4B.
+- `@karume/models`: the pinned revisions move. `ANIMA_SOURCES` (`anima`, `anima-extra`) points at
+  revisions that only update `README.md` / `NOTICE.md` (which now carry the rights-grant text);
+  `karume.json` and the weights are byte-identical. `IRODORI_SOURCES` (both repositories, in the
+  `dit_context` layout), `GEMMA4_SOURCES["gemma4"]` (whose `i4-gemvpar` / `i4-fast` quants now
+  declare `stateAttentionReduce` `"parallel"` / `"parallel-fused"`) and `BIREFNET_SOURCES`
+  (`birefnet-hr`, `lucida`, as `birefnet/2`) point at the repositories republished with this
+  release (see **Breaking**).
+- Exporter (`karume`): with the default `include=None`, `fake_quant_int8` now also rounds
+  `nn.Conv3d` weights (per output channel, like `Conv2d`), to go with the new `conv3d` op. If a
+  model uses a `Conv3d` weight in any form other than the `conv3d` op (for example on the host),
+  narrow the targets with `include`, or that weight is rounded too.
+- BiRefNet recipe: `python -m birefnet.export` now finds the checkpoint by the revision in the
+  `--model-dir` download record, and falls back to the directory name only when that revision is
+  not in the table. It fails when the two point to different checkpoints. Before, a renamed
+  BiRefNet_HR directory could still write the retired `f32` series. `dist.py --pipeline birefnet` /
+  `--pipeline lucida` now require every container to name that checkpoint's pinned upstream
+  revision. Before, the containers only had to agree with each other. So a series from the other
+  checkpoint or from another revision is refused, even when the distribution has a single seat.
+  The default seat must be the checkpoint's own storage type, and anything else raises
+  `DistError`. The recipe functions `export_series`, `default_out_dir` and `birefnet_series_name`
+  no longer default `dtype` to `f32`.
+- Release tooling: the fragmentation table of `tools/release/hf-upload.zsh` gains `ranges=`, the
+  number of byte ranges a download actually fetches (from the reconstruction's `fetch_info`), next
+  to `terms=`, so repeated references such as all-zero chunks can be told from real
+  fragmentation. A reconstruction response without `fetch_info` is now reported as `FAILED`; the
+  MiB/term verdict is unchanged.
 
 ### Fixed
 
 - BiRefNet model cards (`karume-birefnet-hr` / `karume-lucida`): the GPU total had been converted at
-  1,000 MiB per GiB, so the `f32` seat read about 1.7 / 4.1 GiB at 1024² / 2048² where it is about
-  1.6 / 4.0 GiB. The figures were re-measured on 2026-10-11 (Lucida on `f32`, BiRefNet_HR on `f16`)
-  and now count weights, intermediates, input and output readback; the published cards pick them up
-  at the next release.
+  1,000 MiB per GiB, so the published `f32` figures (about 1.7 / 4.1 GiB at 1024² / 2048²) were
+  overstated. The figures were re-measured on 2026-10-16 after the window-mask change (Lucida `f32`
+  about 1.6 / 3.8 GiB, BiRefNet_HR `f16` about 1.2 / 3.4 GiB at 1024² / 2048²) and now count
+  weights, intermediates, input and output readback; the cards republished with this release carry
+  them.
 - `@karume/runtime`: a long `run` no longer lets the host queue an unbounded number of command
   buffers ahead of the GPU. Between steps it places a completion marker every 64 submits since the
   last fence and waits once more than two markers are outstanding (under Deno the marker itself
@@ -427,27 +508,231 @@ measurements in `docs/research/`.
   non-awaited enqueues keep their call order. This fixes a device loss midway through very long runs
   (the Wan2.2 reference quant at 1280×704×121 on an RTX 3080 Ti under Deno). Outputs are
   bit-identical.
-- `@karume/runtime`: the fused-attention i8a8 ①QK shader generator produced wrong scores (whole
-  columns silently zero) for tile geometries whose per-thread K-side fill count is 5 or more: a
-  generated fill variable (`k4`) shadowed the K pack count. The default geometry and the Apple
-  profile were not affected. The fill variable is now named independently of the caller, and a
-  codegen test rejects any shadowed declaration across all candidate geometries.
+- `@karume/runtime`: work on a lost or destroy-requested device now fails at the call instead of
+  appearing to succeed. Session construction checks the device on entry and again just before it
+  resolves; a graph that uploads no weights (no initializers, or only `sharedWeights`) used to
+  return a Session bound to a lost device. `run`, `enqueue` and `enqueueRead` reject with
+  `GpuDeviceLostError` at admission; a run or enqueue without outputs could resolve successfully on
+  a lost device. If the device is lost while `GpuContext.beginBatch` waits for an earlier batch, it
+  no longer opens a batch that holds the batch lock. If the device is lost while
+  `GpuContext.createResident` checks its allocation, it no longer returns an unusable tensor whose
+  failure only showed at the first write or read.
+- `@karume/runtime`: recovery after a non-fatal out-of-memory error. When the GPU work of a `run`
+  or batch fails, for example because an allocation ran out of memory, the runtime now drops the
+  params, execution plan and intermediate buffers that call newly cached. Before, the same `run`, or
+  a later batch of the same shape, kept failing with validation errors after memory was freed,
+  until the entry was evicted or the Session was rebuilt. Host-side failures (invalid inputs,
+  pre-run checks) keep the cache as before. The dp4a canary behind `attentionCompute: "a8"`
+  likewise no longer remembers a transient out-of-memory failure for the life of the `GpuContext`.
+  A numerical mismatch or a device loss is still remembered.
+- `@karume/runtime`: Session construction copies its `SessionOptions` (including `submitPolicy`) on
+  entry and reads only the copy. Changing the options object while construction awaits can
+  therefore no longer build a session with a combination the checks reject, such as
+  `linearGemvReduce: "sequential"` with `packedStaticQuantize: true`. The submit scheduler also
+  keeps its own copy of the policy. `DEFAULT_SUBMIT_POLICY` is now frozen: its `readonly` type
+  already disallowed assignment, which now throws in strict mode. Before, an assignment silently
+  changed every session that used the default and could remove the submit cap.
+- `@karume/runtime`: a weight borrowed through `SessionOptions.sharedWeights` must now have the same
+  declared dtype as the lender's weight. A mismatch throws `ExecutionError` at construction, before
+  any buffer is allocated. Before, a borrower could declare an f32 weight as i32 or bool and get its
+  bytes reinterpreted (1.0 read as 1065353216). The only published pair, the Gemma 4 E2B drafter's
+  `lm_head`, is f32 on both sides and is unchanged.
+- `@karume/runtime`: when a kernel's 32-bit index math would wrap, the session is no longer built
+  and it fails with an error whose `name` is `CodegenError`, naming the limit; it used to read or write the wrong elements
+  silently. This covers `linear` (including int4 `w4a8`) and `embedding` weights with ≥ 2^32
+  logical elements; conv inputs, batched outputs or weights with ≥ 2^32 elements; `conv1d` /
+  `conv2d` axes where input length + 2·padding > 2^31 − 1; and `conv_transpose1d` kernels, input
+  lengths or output length + padding > 2^31 − 1. A grid-stride dispatch whose element count +
+  stride > 2^32 (a GPU hang before) now throws `DispatchLimitError`. `upsample_bilinear2d` now
+  clamps its last source index to `in − 1`, so an axis longer than about 2^24 stops reading the
+  next plane at the edge. Published models are far below these limits, and their outputs and
+  sha256 references are unchanged.
+- `@karume/runtime`: three memory-estimate fixes. A decomposed attention window that the session
+  runs in row blocks is now counted in its fused form. A graph whose unfused score matrix exceeds
+  the binding limit therefore gets an estimate instead of an exception, and such a window adds its
+  output to `workspaceBytes`. `peakAccountedBytes` now includes every prefill bucket shape allowed
+  by `generation.chunkBuckets`; a bucket can need more than the full-length prefill and was
+  underestimated. Gemma 4's `estimateSessionMemory` passes its buckets, and the default E2B
+  estimate is unchanged. Attention row blocks, in the session and in the estimate, are now sized by
+  the larger of a score row and its row statistics. Degenerate shapes, such as key length 1 in f32
+  or below 4 in f16, that fit when split are no longer rejected at allocation.
+- `@karume/runtime`: stricter container and IR input checks. `openContainer` rejects, before
+  reading it, a `krg` whose graph descriptor declares a constant region above the 1 GiB part
+  ceiling. The container binding behind `openContainer` / `openMemoryContainer` keeps graph,
+  initializer and supply names in null-prototype maps, so a name like `__proto__` no longer
+  replaces a map's prototype in browsers: a weighted graph used to fail with a missing supply, and
+  a weightless graph vanished from the result. A quantized weight (`int8-sym` / `int4-sym-g`) whose
+  row count is 0 is rejected with an explicit message; int4 used to fail later in CPU decoding with
+  a NaN row length. `parseIrDeclarationValue` rejects arrays with holes (for example `new Array(1)`
+  as a shape) with an `IrError` naming the path. Input from `JSON.parse` has no holes, so file input
+  is unaffected.
+- `@karume/hub`: `prefetchAssets` now emits `complete` exactly once for every ref it is given,
+  including refs served by a local directory source, which it still does not read or cache. Model
+  loading measures progress against the total size of every file it fetches. From a local mirror,
+  or a setup mixing HF and local sources (swapped components, cross-repository references), the
+  last `loaded` used to fall short of that total, and a local distribution without assets sent no
+  progress at all. Progress now reaches the total.
+- `@karume/hub`: an `onProgress` listener that throws no longer fails the load. Every progress
+  notification of `fetchAssets` / `prefetchAssets` now isolates the listener and reports the
+  exception with `console.warn`. This covers the progress that `@karume/models` loads aggregate
+  through these calls. Before, an exception thrown on a `downloading` notification was only warned,
+  but one thrown on `complete` rejected the whole load and stopped the other files' downloads.
+- `@karume/hub` cancellation: `prefetchAssets` checks the `AbortSignal` again after each file is
+  warmed, so during a warm-cache prefetch, files already in flight (up to four) no longer emit
+  `complete` after the abort. `openAsset` also checks the signal after the file is opened. A
+  warm-cache hit makes no network request, so an abort during the open used to still return a
+  reader; it now rejects with the signal's reason.
+- `@karume/hub`: the reader `openAsset` returns now rejects any `read` outside the ref's declared
+  `size`, or with a negative or non-integer offset or length, from every source. Before, only the
+  local directory source checked this. On HF, a ref that declared a smaller `size` for the same
+  sha256 could read the rest of a warm cache entry beyond its declaration.
+- `@karume/hub`: an HF source copies the `repo`, `hubUrl` and `revision` of the `HubRepoRef` given
+  to `loadManifest` when it is created. Mutating that object afterwards, even while the revision is
+  still resolving, no longer sends later fetches to another repository or host while `loaded.repo`
+  still names the original.
+- `@karume/hub`: building the `available` labels for a `parseManifest` error took time quadratic in
+  the number of `weights` entries. It ran before the size-limit check, so one manifest under 1 MiB
+  could block the main thread for a long time. The scan is now linear. The `models`, `quants` and
+  `weights` lists in `available` are cut at the table size limit (32 each), and the error message
+  says so when they are cut. A manifest that passes the checks always gets complete `available`
+  lists.
+- `@karume/hub` is now free of import-time side effects. `DistributionSource` and `LoadedManifest`
+  no longer bind their internals in `static` blocks that run when the module is evaluated. A bundle
+  that imports only `parseManifest` from the barrel used to keep both classes; now they are
+  tree-shaken. A hand-built or copied handle that never went through the constructor now fails
+  with an `Error` that says so, where it used to fail with a bare `TypeError`.
+- `@karume/models`: Gemma sampler and stop settings are type-checked before use, which closes
+  silent misbehavior with untyped JS / JSON input. `logitBias` must be an array of `[token, bias]`
+  pairs whose bias is a finite number or `-Infinity`: a string bias such as `"0"` used to be
+  concatenated into the logit (`1 + "0"` = `"10"`), and `null` / `true` were read as 0 / 1.
+  `stopStrings` must be an array of strings without holes: `"END"` used to be split into
+  characters, `[123]` matched `"123"`, and holes in a sparse array were dropped. Violations throw
+  `ModelInputError`; `chat` and `Gemma4ChatSession.send` check before copying the settings.
+- `@karume/models/anima`: classifier-free guidance multiplies by the scale rounded to f32, as torch
+  does, in Euler and DPM++ 2M; a scale not exact in f32 (e.g. 1.1) now matches torch in the last
+  bit, while the published defaults (1 / 4) give byte-identical images. A `guidanceScale` finite in
+  f64 but infinite in f32 throws `ModelInputError` before GPU work, and each denoising step checks
+  the updated latent: a non-finite value (e.g. guidance 1e38 overflowing in the CFG mix) throws
+  naming the step instead of reaching the VAE, where it could be clamped into normal-looking
+  pixels.
+- `@karume/models`: `normalizeToNchw` rejects with `ModelInputError`, before allocating the output,
+  a `mean` / `std` that is finite but overflows f32 during normalization (e.g. `std` =
+  `Number.MIN_VALUE`, or `mean` = `Number.MAX_VALUE`). Such values used to return planes of
+  `Infinity` / `NaN`. Ordinary model coefficients give the same values as before.
+- `@karume/models`: tokenizer and symbol-table assets are validated more strictly at load, so a
+  malformed or tampered distribution fails instead of producing wrong ids: Irodori added tokens
+  must lie inside the vocabulary and match its spelling, and its 256 byte tokens must be
+  `<0x00>`…`<0xFF>` in order; Gemma / EmbeddingGemma added tokens may not share an id or reuse an
+  in-vocabulary id under another spelling; SBV2 `symbols.json` must keep `blankId` inside the tone
+  and language tables, and its relative-position settings must define the log buckets (an
+  undefined combination produced NaN gather indices that became 0). The published distributions
+  pass every check.
+- `@karume/models`: construction rejects more mismatched graphs and settings before any GPU work:
+  SigLIP 2, BiRefNet and Depth Anything graphs whose `pixel_values` is not f32, a SigLIP 2 pooled
+  output that is not f32 `[1, hidden]`, image mean / std declared in those manifests or an Irodori
+  `initScale` that overflows f32, and generation graphs that reuse the input-length symbol for the
+  selected rows. These used to fail only after the device, sessions and weights were set up (or
+  after a GPU run, on non-finite output).
+- `@karume/models`: `fromAssets` without a `gpu` now checks the quant's declared `requiredLimits`
+  against the device it acquired, as `fromPretrained` and a shared `gpu` already did, in Anima,
+  SBV2, Irodori, SigLIP 2, BiRefNet, Depth Anything and the vowel detector. A device below the
+  declaration fails at construction with a message naming the limit (the acquired device is
+  destroyed) instead of later in session construction with a low-level buffer error, or not at all
+  when the declaration exceeded the real need.
+- `@karume/models`: `decodeWav` rejects with `ModelInputError` a RIFF container whose chunk walk
+  does not end exactly at the RIFF logical end: a 1–7 byte fragment left before the end (such as a
+  4-byte `JUNK` header), which also catches headers misread after an odd-length chunk written
+  without its pad byte. A last chunk missing only its pad byte is still accepted.
+- `@karume/models`: text and audio front ends no longer block the thread for seconds on
+  pathological inputs; outputs are unchanged. Anima's Qwen2 BPE uses Gemma's merge queue (an
+  8,000-character unbroken piece took about 1.1 s); added-token matching uses a trie built once per
+  tokenizer (Gemma, Irodori, Anima, Wan); Irodori strips nested outer brackets in linear time; SBV2
+  spreads phonemes over characters in closed form (a 200,000-character word took about 19 s); the
+  vowel detector rejects over-limit audio before feature extraction (a 600 s clip took about 3.5 s
+  first). A single Gemma text fragment beyond about 130,000 tokens reaches the capacity check
+  instead of throwing an engine `RangeError`.
+- `@karume/models`: loading and failure paths. A manifest whose selected containers share a part
+  file now loads (the prefetch plan listed it twice and failed with `ManifestReferenceError`);
+  `components` replacements are looked up by own keys only, so inherited properties are ignored;
+  when a Gemma 4 PLE row read fails, no new reads are issued and the error is raised after the
+  in-flight reads settle, keeping the 16-read concurrency limit; a vowel-detector session dispose
+  that fails after a run error no longer replaces it (an `AggregateError` carries the run error
+  first).
+- Exporter (`karume`): constant folding no longer bakes in values that depend on the length of a
+  symbolic axis. Folding now excludes by structure the forms whose result depends on a position
+  along a symbolic axis: indexing that axis with an index tensor (`arange(T)[tensor([-1])]`),
+  slicing it with a negative start (`arange(T)[-2:]`), `cat` along it, `repeat` of it more than
+  once, and `bmm` contracting over it. The two-point check can pass by coincidence on these forms,
+  so such exports used to succeed and then silently give different values at other lengths. These
+  forms now lower to runtime ops, or fail loudly as unsupported ops. As a result, `cat` / `bmm`
+  along a symbolic axis, which the two-point check used to reject as non-commuting, now export.
+  Indexing with a boolean / uint8 mask is also excluded from folding; it already failed before,
+  and now fails as an unsupported op. In the exporter and recipe test suites, the folding of
+  existing graphs is unchanged.
+- Exporter (`karume`): after re-reading what it wrote, `publish_container` now applies the
+  whole-graph IR acceptance rules (duplicate outputs, forward references, unbound symbols). This
+  covers every path through it: `publish_model`, graph surgery and `karume migrate`. On a violation
+  it raises `PublishError` and installs nothing. Before, a graph edited after export could be
+  published as a `.krm` that the runtime rejects. Distributions were not affected, because
+  `karume dist` and `karume verify` already ran these checks. Also, `to_external_states_form` now
+  derives `symbols` again after it removes the K/V inputs. Before, a length symbol that only those
+  inputs bound was left unbound, and both the Python and the runtime parser rejected the graph.
+- Exporter (`karume`): the Python container reader and writer, and `karume verify`, now accept
+  exactly what the runtime accepts. Newly rejected: `rowAxis: 1` for the `i4` / `i2` / ternary
+  codecs (including when an explicit `Encoding` is given to the writer); piece part numbers that go
+  down; `version: true` and `packing.blockElements: true`; the JSON key `__proto__` anywhere, and
+  empty asset names; block counts (const plus weight blocks) above the runtime's limit; non-ASCII
+  digits in dimension expressions (such as `'T+２'`). The runtime already rejected all of these, so
+  such files used to pass in Python and fail only in the browser or Deno. Newly accepted:
+  integer-valued floats in integer fields (`0.0`, `1e0` in `permute` dims and in container
+  `index` / `offset` / `length` / `rowAxis`), which the runtime reads as integers and Python used to
+  reject.
+- Exporter (`karume`): `karume dist` and `karume migrate` now check names the way `@karume/hub`
+  does. Python's `$` also matches before a final newline, so model names, path segments,
+  repositories, revisions, graph names, sha256 digests, pipeline names and block ids with a
+  trailing newline (`'owner/name\n'`) used to pass, and are now rejected. The Anima recipe's
+  Civitai model names are checked the same way. Repository segments that start with `.` (including
+  `.` and `..`) in `--repo`, `--cross-repo` and cross-repository references are now rejected.
+  Quant `label` / `description` now follow the hub parser: `null` is rejected (it used to be read as
+  "not set" and produced a manifest the hub rejects), and empty, whitespace-only and multi-line
+  values are now accepted, as the hub accepts them.
+- Exporter (`karume`): the model card that `karume dist` writes now identifies a file by
+  repository, revision and path, as the hub does. Two components can reference the same relative
+  path from different repositories or revisions (own vs. borrowed); the card used to count only one
+  of the two files, so the download size was understated and a borrowed source could drop out of
+  the attribution. The per-container asset sizes are fixed the same way. In the quant table, `|` in
+  a label or description is escaped, and runs of whitespace (newlines included) are folded into
+  one space, so a row no longer splits or shifts columns. A blank field is shown as `—`.
+- Exporter (`karume`): `karume migrate` checks its input more strictly. Paths in an old
+  (`karume/4`) manifest go through the hub's path grammar, and a declared file whose real path
+  (after symlinks) is outside the input repository is refused, both before anything is written;
+  before, `../` or absolute paths could place new `.krm` files outside the output directory. Each
+  legacy tensor's safetensors dtype and shape are checked against the IR declaration (weights,
+  scales, and PLE shard values and scales); before, 4 bytes of `I32` were accepted as an f32 `[1]`
+  weight and silently reinterpreted. A stored dtype the old writer never produced is rejected with
+  a message that names it. Whole-repository migration is assembled in a staging directory and
+  installed only when every component, every copied file and the manifest succeed; before, a
+  failure left a partial output that blocked the same command from running again.
 
 ### Breaking
 
 - `@karume/models`: `GenerationSequence` gains a required `fork()` method. Code that implements the
   type itself (for example a `Gemma4ChatSessionHost` whose `sequence()` returns its own object) no
   longer type-checks until it provides `fork()`.
-- `@karume/models/wan`: `WanRunComponent` gains `vae_encoder_pre` / `vae_encoder_attn` /
-  `vae_encoder_post`, and the `stage` event's `component` gains `vae_encoder` (Wan2.2 image-to-video
-  only; Wan2.1 never emits them). An exhaustive `switch` or `Record` over these unions needs the new
-  members. A local `karume-wan2.2` mirror built before the VAE encoder was added lacks those parts
-  and is rejected by `WanTi2vPipeline`; rebuild it with `dist.py --pipeline wan-ti2v`.
+- `@karume/runtime`: `SessionDiagnostics` gains the required fields `geometryProfile` and
+  `lastRunPipelines`. Code that receives the type is unaffected; code that builds a
+  `SessionDiagnostics` itself (a test double, for example) must supply them.
+- `@karume/models`: the non-Gemma families now reject, before fetching weights, a manifest `session`
+  key their family does not accept, where 0.13.x passed it through to the runtime (see **Changed**).
+  Every published quant is accepted unchanged; only a locally built or hand-edited distribution that
+  declares such a key stops loading.
 - `@karume/hub`: the manifest `session` vocabulary gains `stateAttentionReduce` (`"sequential"` /
   `"parallel"` / `"parallel-fused"`), composed like the other quant knobs (explicit > quant
   declaration > runtime default). Readers of 0.13.x reject a manifest that declares it as an unknown
   `session` key, so a distribution rebuilt with the new recipes needs this release's hub / models.
-  Published distributions and the pinned revisions are unchanged until they are re-uploaded.
+  `karume-gemma4` is republished with this release and declares the key (`GEMMA4_SOURCES` pins that
+  revision), so 0.13.x readers reject the new revision; their own pinned revisions are unaffected.
+  `karume-gemma4-qat` is not published.
 - `@karume/models`: Gemma 4 pipelines no longer apply a built-in `stateAttentionReduce: "parallel"`
   default. The attention reduction now comes from the explicit option, else the selected quant's
   declaration, else the runtime's reference `"sequential"`. As a result the `i4` quants (regular and
@@ -467,17 +752,11 @@ measurements in `docs/research/`.
   conditioning states; `dit` now takes the conditioning keys / values it produces instead. The
   `i8+dit4` quant takes both DiT graphs from the int4 series. This release's `@karume/models` rejects a
   distribution without `dit_context` as a missing component before any weight bytes are fetched,
-  and older releases cannot run the new layout. The published Irodori repositories and the pinned
-  revisions are updated at the next release.
+  and older releases cannot run the new layout. This release republishes both Irodori repositories
+  in the new layout and pins `IRODORI_SOURCES` to them; 0.13.x keeps its own pins to the old layout.
 - `@karume/models`: `IrodoriRunComponent`, and with it the Irodori `stage` event's stage names, gain
   `"dit-context"` (run once per generation, before the DiT loop). TypeScript code that switches
   exhaustively over the previous eight names no longer type-checks.
-- `WanPipeline` defaults to the GPU text encoder: distributions without the umT5 cross-repository
-  reference need `textEncoder: "precomputed"` (the error says so). Every Wan quant now declares
-  `requiredLimits` of 1,050,148,864 bytes for `maxBufferSize` / `maxStorageBufferBindingSize` (the
-  vocabulary embedding), also on the precomputed route. `WanGenerateEvent` stages and `WanRunComponent`
-  gain `text_encoder`. `deno task demo:wan` names its output directory by route. The gpu-lab Wan JSON is
-  `karume-wan-browser/2`.
 - `@karume/models/birefnet`: the pipeline contract is now `birefnet/2`, and `pipelineConfig` gains a
   required `postprocess` (`"u8-pil-bicubic"` or `"float-bilinear"`; anything else is rejected).
   This release's `BirefnetPipeline` rejects a `birefnet/1` distribution — including the
@@ -491,6 +770,68 @@ measurements in `docs/research/`.
   `quant: "f32"` is rejected as an unknown quant; omit `quant` or pass `"f16"`. The matte logits
   of the `f16` seat are identical to the former `f32` seat's on the reference images.
   `karume-lucida` keeps `f32` (the default) and gains `f16`.
+- `@karume/runtime`: `OpenedContainer.extractGraph()` now extracts only from a container opened from
+  a `krm`. On a container opened from a `krg` it throws `ContainerFormatError`: a `krg` has no
+  document that carries the hash of its whole constant region, so the copy cannot be verified.
+  Extraction also checks, on every input, that the constant region read back has the declared
+  length. Extraction from a `krm` is unchanged.
+- `@karume/runtime`: the memory estimate (`estimateGraphMemory` / `PreparedModel.estimate`) now
+  throws in three cases where it used to return numbers. (1) Without `maxStorageBufferBindingSize`, it
+  counts the fused `attention` op only when its row-block count is the same on every device — the
+  score matrix and the row statistics each fit one block under the WebGPU core default (128 MiB),
+  or `attentionRowBlockMaxBytes` is at most that default — and otherwise rejects the graph, asking
+  for the granted `maxStorageBufferBindingSize`. (2) A state graph whose fixed physical chunk row
+  count is not in the set the generation context allows for the given `chunkLength` /
+  `chunkBuckets`, including extra `generation.scenarios`, is rejected; every `run` of such a shape
+  was already rejected. (3) A fused `attention` combination a session rejects (an additive mask or
+  grouped query attention with `"a8"`, a head dimension or key length beyond the int32 accumulation
+  bound of the int8 path, a non-f32 seat on the state form) is rejected by the estimate too; such a
+  session was already rejected at construction. The estimates the Anima and Gemma pipelines use are
+  not affected.
+- `@karume/hub`: stricter input checks reject inputs that used to load. `loadManifest` with a
+  `HubRepoRef` checks the `repo` before any request or cache cleanup: it must be exactly HF's
+  `owner/name` (two segments of `[A-Za-z0-9._-]`, no leading dot), the same rule as
+  cross-repository references. A value such as `"someone/anima?x=y"` used to load, with the query
+  swallowing the rest of the URL; it now throws `HubError`. A ref without a string `repo` (from
+  plain JS or an unchecked saved config) now also throws `HubError`, where it used to throw a bare
+  `TypeError`. When an HF source resolves a branch or tag, the response must be a 40-character
+  lowercase hex commit SHA: a non-conforming mirror or custom `fetch` that answers
+  `{ sha: "main" }` used to load with `revisionSha: "main"` and re-resolve the branch on every
+  later fetch; it now fails as a revision-resolution `HubFetchError` with the response in `cause`.
+  On an HF load, a manifest whose cross-repository reference points at the loaded repository itself
+  (at any revision) is rejected with `ManifestFormatError`; reference the file without `repo` /
+  `revision` instead. `parseManifest` rejects a `pipeline` major that is not a safe integer (for
+  example 400 digits, which used to parse as `Infinity`) with `ManifestFormatError`. The real
+  Hugging Face Hub and the published distributions are not affected.
+- `@karume/models`: a sampler spec (`SamplerSpec`, the `sampler` of Gemma 4 `generate` / `chat`,
+  `Gemma4ChatSession.send` and the QAT pipeline) with a key other than `temperature`, `topK`,
+  `topP`, `repetitionPenalty`, `logitBias` and `seed` now throws `ModelInputError`, naming the
+  unknown key and listing the accepted ones. Unknown keys used to be ignored, so a saved JSON
+  config with `minP` or a misspelled `top_p` silently sampled from the full distribution. Remove
+  the extra keys.
+- `@karume/models/anima`: `steps` must be an integer from 2 to 1,000. Larger values, which used to
+  allocate the sigma ladder and run a loop that could not be cancelled, throw `ModelInputError`
+  before GPU work; a manifest `pipelineConfig.defaults.steps` above 1,000 is rejected as an asset
+  error (`Error` with the `ModelInputError` as `cause`). `generate` also rejects with `RangeError` a
+  manifest `shift` whose f32 sigma ladder starts above 1 (55 of the 1,901 two-decimal values in
+  [1, 20], e.g. 1.32), with either sampler: DPM++ 2M used to run every step on NaN, while Euler
+  worked. The published `shift` of 3 starts exactly at 1 and is unaffected.
+- `@karume/models/irodori`: a speaker reference must give at least two speaker tokens after
+  patching: `IrodoriSpeakerInput.latent` needs `2 × speakerPatchSize` frames (8 on the published
+  v4 / v4.1 small) and `audio` needs `(2 × speakerPatchSize − 1) × hopLength + 1` samples (13,441
+  at 48 kHz). Shorter references throw `ModelInputError` at the start of `generate` /
+  `generateLatent`. Latents of 4–7 frames and audio of 5,761–13,440 samples used to run with a
+  one-token speaker sequence below the exported graph's minimum. Shape, row-count and sample-rate
+  errors of `audio` / `latent` are now also raised there, before the text stages and the codec
+  encoder run (same type and message).
+- `@karume/models`: some input-caused failures that used to be a plain `Error` now throw
+  `ModelInputError` (a subclass of `Error`; plain `catch` is unaffected): Gemma / EmbeddingGemma
+  text with an unpaired surrogate (`encode`, and so chat rendering); an Irodori reference audio too
+  short to give any speaker token, now raised before GPU work instead of after the codec encoder;
+  and an SBV2 `noiseScaleW` that overflows f32, now `Sbv2InputError` (a `ModelInputError`) raised
+  before the text encoder instead of after GPU execution (the noise is drawn earlier from the same
+  stream, so the same seed gives the same WAV). Code that branches on `instanceof ModelInputError`
+  or `err.name` classifies these differently.
 
 ## [0.13.0] - 2026-09-25
 
