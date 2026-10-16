@@ -42,9 +42,9 @@ torch.export → コンテナ `krm`〈IR v2〉・uv 管理）。pnpm workspace +
 
 ## 検証コマンド（変更後は全て）
 
-- `vp check`（= fmt + lint〈Oxlint・型認識〉+ 型検査〈TypeScript 7〉。Oxfmt への切替までは
-  `vp check --no-fmt`）と `vp test`（全レーン = フル verify）。GPU テストは実 GPU（Dawn）で実行、
-  アダプタ無し環境は明示 SKIP（リリース判定は緑必須 — ADR 0005）
+- `vp check`（= fmt〈Oxfmt〉+ lint〈Oxlint・型認識〉+ 型検査〈TypeScript 7〉）と `vp test`
+  （全レーン = フル verify）。GPU テストは実 GPU（Dawn）で実行、アダプタ無し環境は明示 SKIP
+  （リリース判定は緑必須 — ADR 0005）
 - **レーン実行**: 変更が 1 系列に閉じるならその系列だけ回す（`vp test --project models:<系列>`）。
   コア（runtime / hub / 共通層）の大きめ変更・横断変更・リリース前はフル `vp test`。
   コアだけなら `vp test --project core`（門番 3 本を含む）。レーンの表は

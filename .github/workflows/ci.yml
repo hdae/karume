@@ -32,10 +32,9 @@ jobs:
       - name: Install
         # Build scripts stay declined (pnpm-workspace.yaml allowBuilds); the lockfile must be current.
         run: pnpm install --frozen-lockfile
-      - name: Lint + type-check
-        # Formatting is checked once the Oxfmt switch lands (phase 1, last commit); until then
-        # `vp check` runs lint (Oxlint, type-aware) and the TypeScript 7 type check.
-        run: pnpm exec vp check --no-fmt
+      - name: Format + lint + type-check
+        # `vp check` runs the Oxfmt check, Oxlint (type-aware) and the TypeScript 7 type check.
+        run: pnpm exec vp check
       - name: Test (core lane, non-GPU)
         # GPU cases are skipped (no adapter) and the all-skip gates are opened explicitly. The real
         # weight assets (outputs/series/) and distribution mirrors (models/) are not on CI either,

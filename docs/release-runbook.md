@@ -294,7 +294,7 @@ Wan2.1（`karume-wan2.1`）は HF に公開しない（利用者裁定 2026-10-1
       無い機では `tools/export-recipes` で `uv run --group wan --inexact python -m wan.umt5_xxl_tokenizer`（pin した
       トークナイザのファイルが HF キャッシュに無ければ `--fetch`）。同じ実行が git 管理のフィクスチャ
       `packages/models/tests/fixtures/umt5/tokenizer-cases.json` も書くので、その後に
-      `deno fmt packages/models/tests/fixtures/umt5/` を掛ける。席が無いか形式・出所の pin が合わなければ、次の
+      `vp fmt packages/models/tests/fixtures/umt5/` を掛ける。席が無いか形式・出所の pin が合わなければ、次の
       `dist.py --pipeline umt5` が落ちる（`wan.umt5_distribution.assert_umt5_tokenizer`）
 - [ ] **umT5 リポを先に上げる（§0 の越境参照の順序）**: `tools/export-recipes` で
       `uv run python dist.py --pipeline umt5`（`--out` は既定の `models/karume-umt5-xxl`）→ §2 の台本で

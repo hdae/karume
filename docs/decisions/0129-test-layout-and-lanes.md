@@ -227,7 +227,7 @@ None. Test layout is repository-internal; no published entry point, type or beha
 
 ### For verification
 
-- CI runs `vp check --no-fmt` and `vp test --project core` with `KARUME_ALLOW_NO_GPU`,
+- CI runs `vp check` and `vp test --project core` with `KARUME_ALLOW_NO_GPU`,
   `KARUME_ALLOW_NO_ASSETS` and `KARUME_ALLOW_NO_DISTRIBUTION` set: CI runners have neither an adapter
   nor the local assets. The CI run is therefore a regression check of the non-GPU tests, not release
   evidence (ADR 0005 unchanged on this point).

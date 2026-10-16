@@ -2,6 +2,16 @@ import { defineConfig } from "vite-plus";
 import { laneProjects } from "./packages/test-support/src/lanes.ts";
 
 export default defineConfig({
+  fmt: {
+    ignorePatterns: [
+      // Documents stay hand-formatted: the formatter would add trailing commas to the JSONC
+      // manifest examples and reflow the WGSL / TS snippets that documents quote verbatim.
+      "**/*.md",
+      // The Python packages keep their own tooling (uv, ruff).
+      "tools/exporter/**",
+      "tools/export-recipes/**",
+    ],
+  },
   lint: {
     // Repository rule (ADR 0002): TypedArray types in packages/*/src must name their buffer type.
     jsPlugins: [{ name: "karume", specifier: "./tools/lint/oxlint-plugin.ts" }],
