@@ -31,8 +31,8 @@
  *
  * ## 配布形（`karume-umt5-xxl` — pipeline `umt5-encoder/1`）
  *
- * 取得元の対応表（`UMT5_SOURCES`）はまだ無い（`./config.ts`）— {@link Umt5Encoder.fromPretrained} の第 1 引数は
- * 必須で、手元の配布形は `@karume/hub/deno` の `denoDirectory` で渡す。
+ * {@link Umt5Encoder.fromPretrained} の第 1 引数は必須で、このパッケージ版が検証した取得元は
+ * {@link UMT5_SOURCES}（`./config.ts`）の `"umt5-xxl"`。手元の配布形は `@karume/hub/deno` の `denoDirectory` で渡す。
  *
  * ## MUST: 数値の正はここでは担保されない
  *
@@ -425,8 +425,9 @@ export class Umt5Encoder {
    * part 順で読まれる（ADR 0109 — `src/hub/components.ts`）。部品を別リポの同じ役割で差し替えるときは
    * {@link FromPretrainedComponentOptions.components}（役割は `text_encoder` 1 本 — トークナイザは差し替えない）。
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。配布形 `karume-umt5-xxl` は HF へ
-   * 未公開なので pin 定数も無い）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の配布形
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST）。パッケージ版が検証した取得元は
+   * {@link UMT5_SOURCES}（`./config.ts`）の `"umt5-xxl"` — 再現性を自分で固定するなら `{ repo, revision }` を
+   * 呼び手が明示する。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の配布形
    * （`models/karume-umt5-xxl`）は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）— HF の `owner/name` の綴りの門は通らず、network も CacheStorage も通らない
    * （{@link Umt5EncoderFromPretrainedOptions} の HTTP 専用ノブは効かない）。
@@ -435,7 +436,11 @@ export class Umt5Encoder {
     ref: string | HubRepoRef | DistributionSource,
     options: Umt5EncoderFromPretrainedOptions = {},
   ): Promise<Umt5Encoder> {
-    const source = toManifestSource(ref, `${OWNER}.fromPretrained`);
+    const source = toManifestSource(
+      ref,
+      `${OWNER}.fromPretrained`,
+      'UMT5_SOURCES["umt5-xxl"]（@karume/models/umt5）',
+    );
     const hubOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);
     const choice = {

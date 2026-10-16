@@ -209,6 +209,8 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
       "SIGLIP2_SOURCES",
       "DEPTH_ANYTHING_SOURCES",
       "BIREFNET_SOURCES",
+      "UMT5_SOURCES",
+      "WAN_SOURCES",
     ]
   ) {
     assert(tables.includes(table), `サブパス barrel に ${table} が無い`);

@@ -23,6 +23,7 @@
  * MUST: マップは `Object.hasOwn` 経由でのみ引く（横断不変条件）。
  */
 
+import type { HubRepoRef } from "@karume/hub";
 import { assertAllowedKeys, readNumber, readRecord } from "../config/readers.ts";
 import { WAN_UNIPC_CONFIG, wanUniPcSchedule } from "./scheduler.ts";
 
@@ -36,6 +37,38 @@ export const WAN_PIPELINE_MAJOR = 1;
  */
 export const WAN_TI2V_PIPELINE_NAME = "wan-ti2v";
 export const WAN_TI2V_PIPELINE_MAJOR = 1;
+
+/**
+ * Wan ファミリの**公開配布リポ対応表**（ADR 0092 — 家族 1 つにつき 1 表・**既定の席は無い**）。
+ * 値は**このパッケージ版が検証した取得元**（pin 済み commit SHA — ADR 0073）。
+ *
+ * キーは HF リポ名の basename から `karume-` を落とした綴り（`"karume-" + key` がリポ名の
+ * basename に戻る — この不変条件は `tests/sources_test.ts` の門が見る）。世代は別リポ（ADR 0092 決定 1）:
+ *
+ * - `"wan2.2"` = `hdae/karume-wan2.2`（Wan2.2 TI2V 5B — `WanTi2vPipeline` が読む・umT5 の text_encoder は
+ *   `karume-umt5-xxl` を越境参照する）
+ *
+ * Wan2.1（`karume-wan2.1`）は HF に公開しない（ADR 0118 追記（2026-10-15））ので**キーを持たない** — 公開リポの
+ * 無いキーは 404 にしかならない（ADR 0073 決定 1 の理由）。`WanPipeline` には手元の配布形を渡す。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン**として渡す — 再現性を自分で
+ * 固定したい場合は、この表ではなく自分の `{ repo, revision }` を書く（`fromPretrained` に
+ * 既定は無い）。
+ *
+ * MUST: revision は commit SHA で固定する — ブランチ・タグは配布側で付け替えられるので、
+ * 公開済みのこのパッケージが読むバイト列がネットワーク側の都合で黙って変わる（回復不能側の
+ * 事故）。SHA 指定は revision 解決要求そのものを消すため、完全キャッシュ時のオフライン起動も
+ * 同時に成立する（ADR 0038）。main 追従が要る利用者は
+ * `{ ...WAN_SOURCES["wan2.2"], revision: "main" }` を明示的に選ぶ。
+ */
+// NOTE: revision はリリース手順書（docs/release-runbook.md）§3 で、アップロード後の main の
+// SHA に更新する（ADR 0073 決定 3 の維持義務を継承 — 手書き + 手順書ゲート）。
+export const WAN_SOURCES = {
+  "wan2.2": {
+    repo: "hdae/karume-wan2.2",
+    revision: "791c3e92dedeb7988f6adc739a5139fbfd876823",
+  },
+} as const satisfies Record<string, HubRepoRef>;
 
 const ROOT_KEYS: readonly string[] = ["scheduler", "defaults"];
 const SCHEDULER_KEYS: readonly string[] = ["shift"];

@@ -459,6 +459,10 @@
         "kind": "class"
       },
       {
+        "name": "UMT5_SOURCES",
+        "kind": "variable"
+      },
+      {
         "name": "Umt5EncodeOptions",
         "kind": "typeAlias"
       },
@@ -501,6 +505,10 @@
       {
         "name": "VowelDetectorResult",
         "kind": "typeAlias"
+      },
+      {
+        "name": "WAN_SOURCES",
+        "kind": "variable"
       },
       {
         "name": "WanAssets",
@@ -1281,6 +1289,10 @@
         "kind": "class"
       },
       {
+        "name": "UMT5_SOURCES",
+        "kind": "variable"
+      },
+      {
         "name": "Umt5EncodeOptions",
         "kind": "typeAlias"
       },
@@ -1347,6 +1359,10 @@
       {
         "name": "Rgb8Image",
         "kind": "typeAlias"
+      },
+      {
+        "name": "WAN_SOURCES",
+        "kind": "variable"
       },
       {
         "name": "WanAssets",

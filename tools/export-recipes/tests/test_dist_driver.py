@@ -224,6 +224,10 @@ RELEASE_REPOSITORIES = [
     # `--repo` 無しで公開リポを指す（Pipeline がファミリーのリポ名を宣言する — W-RC5-2）。
     ("sbv2", ["F1", "F2", "M1", "M2"], None, "karume-sbv2-jvnv"),
     ("siglip2", ["base", "so400m"], None, "karume-siglip2"),
+    ("umt5", ["xxl"], None, "karume-umt5-xxl"),
+    # Wan2.1（`--pipeline wan` → karume-wan2.1）は HF に公開しないので載せない
+    # （ADR 0118 追記 2026-10-15）。
+    ("wan-ti2v", ["ti2v-5b"], None, "karume-wan2.2"),
 ]
 
 

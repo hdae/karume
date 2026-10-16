@@ -22,7 +22,8 @@
  * 配布形は `fromPretrained` で読む（ADR 0118 段 7）。`--source` 未指定なら手元の配布形ミラー
  * `models/karume-wan2.1`（`dist.py --pipeline wan` が組む）/ `models/karume-wan2.2`
  * （`dist.py --pipeline wan-ti2v` が組む）を取得元ハンドル（`denoDirectory`）で読む —
- * HF の公開リポはまだ無いので、ミラーが無ければ組み立てのコマンドを出して落ちる。明示した `--source` は
+ * ミラーが無ければ組み立てのコマンドを出して落ちる（Wan2.1 は HF に公開しない — ADR 0118 追記。公開済みの Wan2.2 は
+ * `--source hdae/karume-wan2.2` で HF から読める〈pin は `WAN_SOURCES["wan2.2"]`〉が、既定はミラーのまま）。明示した `--source` は
  * ローカルの配布形か HF のリポ名（`owner/name`）としてそのまま読む。
  *
  * テキストエンコーダの経路は `--text-encoder`（既定 `gpu` — パイプラインの既定と同じ・ADR 0119 決定 7）:
@@ -130,9 +131,9 @@ const number = (key: string): number | undefined => {
 /**
  * 世代ごとに違う事実だけの表（パイプラインの class・既定の配布形ミラー・ミラーが無いときに出す組み立ての
  * コマンド・既定の出力先）。取得元の越境の mapping・経路・席・ノブ・出力先の名前は両世代で共通。
- * どちらの世代の組み立ても umT5 への越境参照の 5 つの `--ref-*` が要り、参照先が未公開の間は仮の SHA と
- * `--allow-placeholder-ref` を付ける（`tools/export-recipes/dist.py` の doc の組み立て例・ADR 0121 追記「段 8a の結果」で
- * 組んだコマンド）。
+ * どちらの世代の組み立ても umT5 への越境参照の 5 つの `--ref-*` が要る。手元の開発用ミラーは仮の SHA と
+ * `--allow-placeholder-ref` で組める（公開する配布形は `karume-umt5-xxl` の main の commit で組む — release-runbook。
+ * 組み立て例は `tools/export-recipes/dist.py` の doc と ADR 0121 追記「段 8a の結果」で組んだコマンド）。
  */
 const GENERATIONS = {
   "wan2.1": {
@@ -208,7 +209,7 @@ const sizeMatch = size === undefined ? undefined : /^(\d+)x(\d+)$/.exec(size);
 if (sizeMatch === null) throw new Error(`--size ${size} が WxH の形でない`);
 const outRoot = args.get("out") ?? GENERATION.defaultOutRoot;
 
-/** 既定の取得元（手元の配布形ミラー — HF の公開リポはまだ無い）。 */
+/** 既定の取得元（手元の配布形ミラー — Wan2.1 は HF に公開しない・Wan2.2 の HF は `--source` で明示する）。 */
 const DEFAULT_SOURCE = GENERATION.defaultSource;
 const ASSEMBLE_COMMAND = GENERATION.assembleCommand;
 /** umT5 の配布形ミラーの既定（Wan の manifest の `text_encoder` が越境参照する先）。 */
@@ -226,7 +227,7 @@ const textEncoderRepo = async (dir: string): Promise<string | undefined> => {
 
 /**
  * `--source`（と `--umt5-source`）を `fromPretrained` の取得元へ写す。未指定は既定のミラーで、無ければ落とす
- * （公開リポが無いので、他所へ黙って取りに行く先が無い）。GPU の経路でローカルの配布形の umT5 が越境参照なら、
+ * （既定の取得元は手元のミラーだけで、HF へ黙って取りに行かない — HF は `--source` で明示する）。GPU の経路でローカルの配布形の umT5 が越境参照なら、
  * 越境先のミラーを mapping で渡す。
  */
 const resolveSource = async () => {

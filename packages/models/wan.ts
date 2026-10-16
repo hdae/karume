@@ -5,7 +5,7 @@
  * ADR 0008: ここは**明示的に設計した薄い面**であり、内部モジュールの素通し再輸出はしない。
  * 面は利用者ストーリーに対応する — 組む（{@link WanPipeline.fromPretrained} /
  * {@link WanPipeline.fromAssets}・Wan2.2 は {@link WanTi2vPipeline} の同名の 2 つ・テキストエンコーダの
- * 経路 `textEncoder`）/ 例示のプロンプトを引く
+ * 経路 `textEncoder`）/ 取得元を選ぶ（{@link WAN_SOURCES} — Wan2.2 だけ）/ 例示のプロンプトを引く
  * （`prompts`）/ 生成する（`generate` — Wan2.2 は条件画像からも: {@link WanTi2vGenerateRequest}）/ 生成の途中経過を
  * 購読する（`onEvent` — {@link WanGenerateEvent}）/
  * 中断する（構築と生成の `signal`）/ フレームを画素にする（{@link wanFrameToRgba}）/ 解放する（`dispose`）。
@@ -14,8 +14,8 @@
  * 越境参照）を GPU で回して任意のプロンプトを受け、`"precomputed"` は umT5 を取らずにテキスト埋め込み
  * 資産の固定プロンプトだけを受ける。
  *
- * NOTE: 取得元の対応表（`WAN_SOURCES`）はまだ無い — 配布形 `karume-wan2.1` / `karume-wan2.2` は HF へ
- * 未公開で、公開リポを持たない家族は表を持たない（ADR 0073 決定 1）。手元の配布形は `@karume/hub/deno` の
+ * 取得元の対応表（{@link WAN_SOURCES}）が持つのは Wan2.2（`karume-wan2.2`）だけ — Wan2.1 の配布形
+ * `karume-wan2.1` は HF に公開しない（ADR 0118 追記（2026-10-15））。手元の配布形は `@karume/hub/deno` の
  * `denoDirectory` で `fromPretrained` へ渡し、`"gpu"` の経路では umT5 の配布形（`karume-umt5-xxl`）を
  * その `crossRepo` の mapping で渡す。
  *
@@ -29,10 +29,25 @@ export { WanPipeline } from "./src/wan/pipeline.ts";
  * イベント・構築オプション）は {@link WanPipeline} と同じで、受理集合（1280×704 / 704×1280・5〜121 フレーム）・
  * 潜在の形・fps は世代の値（ADR 0121 決定 10）。要求の型だけは 2.2 専用（{@link WanTi2vGenerateRequest} — I2V の
  * 条件画像 `image` と寸法の合わせ方 `fit`・ADR 0121 決定 11）。配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe
- * `dist.py --pipeline wan-ti2v` が組む・HF には未公開）。
+ * `dist.py --pipeline wan-ti2v` が組む・HF の公開リポは {@link WAN_SOURCES} の `"wan2.2"`）。
  */
 export { WanTi2vPipeline } from "./src/wan/ti2v-pipeline.ts";
 export type { WanTi2vGenerateRequest } from "./src/wan/ti2v-pipeline.ts";
+/**
+ * **このパッケージ版が検証した取得元の対応表**（家族 1 つにつき 1 表・キーは HF リポ名から
+ * `karume-` を落とした綴り・値は pin 済み commit SHA — ADR 0073 / 0092）。世代は別リポで、公開しているのは
+ * Wan2.2 の 1 本だけ:
+ *
+ * - `WAN_SOURCES["wan2.2"]` = `hdae/karume-wan2.2`（{@link WanTi2vPipeline.fromPretrained} が読む — umT5 は
+ *   `karume-umt5-xxl` を越境参照する）
+ *
+ * Wan2.1 は HF に公開しないのでキーが無い（{@link WanPipeline} には手元の配布形を渡す）。
+ *
+ * **パッケージ版に合わせて自動追従したい場合のオプトイン** — {@link WanTi2vPipeline.fromPretrained}
+ * の第 1 引数へそのまま渡す。再現性を自分で固定したい場合は、この表ではなく自分の
+ * `{ repo, revision }` を書く（`fromPretrained` に既定は無い）。
+ */
+export { WAN_SOURCES } from "./src/wan/config.ts";
 /**
  * I2V の条件画像の寸法の合わせ方の語彙（{@link WanTi2vGenerateRequest} の `fit` — `"crop"` / `"stretch"`）。CLI / UI が
  * 選択肢を出すときに型で引けるように出す（{@link WanPromptRole} と同じ扱い）。

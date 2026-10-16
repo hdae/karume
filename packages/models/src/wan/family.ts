@@ -154,6 +154,11 @@ export type WanFamilySpec = {
   readonly pipeline: { readonly name: string; readonly major: number };
   /** 世代の記述子（受理集合・既定・fps・統計・VAE の照合・DiT の入力の形）。 */
   readonly generation: WanGenerationDescriptor;
+  /**
+   * `ref` を省いたときの診断が案内する対応表の綴り（`toManifestSource` の第 3 引数 — `src/hub/repo-ref.ts`）。
+   * 公開配布リポを持たない世代（Wan2.1 — `WAN_SOURCES` にキーが無い）は省く（存在しないキーを案内しない）。
+   */
+  readonly sourcesExample?: string;
 };
 
 /** Wan2.1 T2V 1.3B（`WanPipeline` — pipeline `wan/1`・{@link WAN21_GENERATION}）。 */
@@ -168,6 +173,7 @@ export const WAN22_TI2V_FAMILY: WanFamilySpec = {
   owner: "WanTi2vPipeline",
   pipeline: { name: WAN_TI2V_PIPELINE_NAME, major: WAN_TI2V_PIPELINE_MAJOR },
   generation: WAN22_TI2V_GENERATION,
+  sourcesExample: 'WAN_SOURCES["wan2.2"]（@karume/models/wan）',
 };
 
 /**
@@ -284,7 +290,7 @@ export const loadWanFromPretrained = async (
 ): Promise<WanState> => {
   // 経路は取得の前に決める（取る部品が変わる）— 綴り違いは 1 バイトも取らずに落とす。
   const route = textEncoderRouteOf(options, spec.owner);
-  const source = toManifestSource(ref, `${spec.owner}.fromPretrained`);
+  const source = toManifestSource(ref, `${spec.owner}.fromPretrained`, spec.sourcesExample);
   // signal は取得層と構築の**両方**へ渡す（DL が終わった瞬間に中断が効かなくなる窓を作らない —
   // `hubLoadOptions` が写す・anima / irodori と同じ形）。
   const hubOptions = hubLoadOptions(options);

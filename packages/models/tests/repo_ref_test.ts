@@ -26,6 +26,9 @@ import { localDirectory } from "@karume/hub";
 import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
 import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
+import { Umt5Encoder } from "../src/umt5/encoder.ts";
+import { WanPipeline } from "../src/wan/pipeline.ts";
+import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 
 Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
   // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
@@ -150,4 +153,31 @@ Deno.test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOU
     "BirefnetPipeline.fromPretrained: repo が必須",
   );
   assertStringIncludes(error.message, 'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）');
+});
+
+Deno.test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
+  // 0.14.0 で `UMT5_SOURCES` / `WAN_SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
+  // （`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 にだけ存在しないキーを
+  // 案内しない（③）ことを、共有の本体を通る公開面から見る。
+  const fetchStub: typeof globalThis.fetch = (input) =>
+    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${String(input)}）`));
+  const umt5 = await assertRejects(
+    () => Umt5Encoder.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    Error,
+    "Umt5Encoder.fromPretrained: repo が必須",
+  );
+  assertStringIncludes(umt5.message, 'UMT5_SOURCES["umt5-xxl"]（@karume/models/umt5）');
+  const wan22 = await assertRejects(
+    () => WanTi2vPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    Error,
+    "WanTi2vPipeline.fromPretrained: repo が必須",
+  );
+  assertStringIncludes(wan22.message, 'WAN_SOURCES["wan2.2"]（@karume/models/wan）');
+  const wan21 = await assertRejects(
+    () => WanPipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    Error,
+    "WanPipeline.fromPretrained: repo が必須",
+  );
+  assertStringIncludes(wan21.message, "リポ名の文字列（= main 追従）を渡す");
+  assertEquals(wan21.message.includes("WAN_SOURCES"), false, wan21.message);
 });

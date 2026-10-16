@@ -28,6 +28,8 @@ import { GEMMA4_SOURCES } from "../src/gemma/config.ts";
 import { SIGLIP2_SOURCES } from "../src/siglip2/config.ts";
 import { DEPTH_ANYTHING_SOURCES } from "../src/depth-anything/config.ts";
 import { BIREFNET_SOURCES } from "../src/birefnet/config.ts";
+import { UMT5_SOURCES } from "../src/umt5/config.ts";
+import { WAN_SOURCES } from "../src/wan/config.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { AnimaPipeline } from "../src/anima/pipeline.ts";
 import { IrodoriPipeline } from "../src/irodori/pipeline.ts";
@@ -36,6 +38,8 @@ import { Gemma4Pipeline } from "../src/gemma/pipeline.ts";
 import { Siglip2Pipeline } from "../src/siglip2/pipeline.ts";
 import { DepthAnythingPipeline } from "../src/depth-anything/pipeline.ts";
 import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";
+import { Umt5Encoder } from "../src/umt5/encoder.ts";
+import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 /** hub が解決要求を出さずに済む形（`@hdae/fetch-cache` の `isCommitSha` と同じ綴り）。 */
@@ -129,6 +133,21 @@ const FAMILIES: readonly Family[] = [
     keys: ["birefnet-hr", "lucida"],
     load: (ref, options) => BirefnetPipeline.fromPretrained(ref, options),
   },
+  {
+    name: "UMT5_SOURCES",
+    sources: UMT5_SOURCES,
+    // Wan の text_encoder の越境参照先でもあるが、単体の入口（`Umt5Encoder`）を持つ 1 家族 1 リポ。
+    keys: ["umt5-xxl"],
+    load: (ref, options) => Umt5Encoder.fromPretrained(ref, options),
+  },
+  {
+    name: "WAN_SOURCES",
+    sources: WAN_SOURCES,
+    // 世代は別リポ（ADR 0092 決定 1）。Wan2.1（`karume-wan2.1`）は HF に公開しないのでキーが無い
+    // （ADR 0118 追記（2026-10-15））— 表が持つのは `WanTi2vPipeline` が読む Wan2.2 だけ。
+    keys: ["wan2.2"],
+    load: (ref, options) => WanTi2vPipeline.fromPretrained(ref, options),
+  },
 ];
 
 // キーは repo 名から機械導出される（`"karume-" + key` === basename）ので、①の門は「キーと repo が
@@ -141,9 +160,9 @@ for (const { name, sources, keys } of FAMILIES) {
   });
 }
 
-// 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida）はここを
-// 落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-Deno.test("取得元対応表を持つのは 7 家族・公開リポは 10 本", () => {
+// 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
+// ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
+Deno.test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () => {
   assertEquals(FAMILIES.map(({ name }) => name), [
     "ANIMA_SOURCES",
     "IRODORI_SOURCES",
@@ -152,8 +171,10 @@ Deno.test("取得元対応表を持つのは 7 家族・公開リポは 10 本",
     "SIGLIP2_SOURCES",
     "DEPTH_ANYTHING_SOURCES",
     "BIREFNET_SOURCES",
+    "UMT5_SOURCES",
+    "WAN_SOURCES",
   ]);
-  assertEquals(Object.keys(KARUME_SOURCES).length, 10);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 12);
 });
 
 for (const { name, sources } of FAMILIES) {

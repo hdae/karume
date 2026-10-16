@@ -7,7 +7,7 @@
  *
  * 使い道は「公開している配布リポを全部なめる」側（疎通スモーク・キャッシュの事前取得・
  * 一覧の表示）で、1 家族しか使わない消費者はサブパスの家族表を引く方が tree-shaking に効く
- * （barrel を引くと 6 家族の config が繋がる）。
+ * （barrel を引くと 9 家族の config が繋がる）。
  *
  * MUST: 家族側の表を**そのまま**畳む — ここで綴り直すと、家族側を直しても barrel だけが古い
  * revision を配り続ける形（導出できる値の二重持ち）になる。キーが重なると後勝ちで 1 本が
@@ -24,6 +24,8 @@ import { GEMMA4_SOURCES } from "./gemma/config.ts";
 import { SIGLIP2_SOURCES } from "./siglip2/config.ts";
 import { DEPTH_ANYTHING_SOURCES } from "./depth-anything/config.ts";
 import { BIREFNET_SOURCES } from "./birefnet/config.ts";
+import { UMT5_SOURCES } from "./umt5/config.ts";
+import { WAN_SOURCES } from "./wan/config.ts";
 
 export const KARUME_SOURCES = {
   ...ANIMA_SOURCES,
@@ -33,4 +35,6 @@ export const KARUME_SOURCES = {
   ...SIGLIP2_SOURCES,
   ...DEPTH_ANYTHING_SOURCES,
   ...BIREFNET_SOURCES,
+  ...UMT5_SOURCES,
+  ...WAN_SOURCES,
 } as const satisfies Record<string, HubRepoRef>;

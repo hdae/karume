@@ -24,8 +24,8 @@ relative paths.
 ## Where the model comes from
 
 The script loads the `karume-wan2.1` distribution with `WanPipeline.fromPretrained`. The
-distribution is not published on Hugging Face yet, so there is no pinned source table
-(`WAN_SOURCES`) and the default is the local mirror:
+distribution is not published on Hugging Face, so the pinned source table (`WAN_SOURCES`) has no
+Wan2.1 entry and the default is the local mirror:
 
 - Without `--source`, the script reads `models/karume-wan2.1` through a directory source handle
   (`denoDirectory`): nothing goes over the network or into the cache. Build the mirror first from
@@ -205,9 +205,12 @@ deno task demo:wan --generation wan2.2 --image photo.jpg --fit stretch
 ### Where the model comes from
 
 The script loads the `karume-wan2.2` distribution (model `ti2v-5b`, pipeline `wan-ti2v/1`). It is
-not published on Hugging Face yet either, so without `--source` the script reads the local mirror
-`models/karume-wan2.2`. Build it under `tools/export-recipes` after the umT5 mirror (the script
-prints this command when the mirror is missing):
+published on Hugging Face as `hdae/karume-wan2.2`, and the commit this package version was verified
+against is `WAN_SOURCES["wan2.2"]` (`@karume/models/wan`). The script does not fall back to it:
+without `--source` it reads the local mirror `models/karume-wan2.2`, and `--source
+hdae/karume-wan2.2` reads the repository's `main` revision. Build the mirror under
+`tools/export-recipes` after the umT5 mirror (the script prints this command when the mirror is
+missing):
 
 ```
 uv run python dist.py --pipeline wan-ti2v \
@@ -216,9 +219,10 @@ uv run python dist.py --pipeline wan-ti2v \
     --allow-placeholder-ref
 ```
 
-The all-zero revision is a placeholder for the development mirror until `karume-umt5-xxl` is
-published; a local reader resolves the reference through the explicit mapping and does not look at
-the revision.
+The all-zero revision is a placeholder for the development mirror; a local reader resolves the
+reference through the explicit mapping and does not look at the revision. The published
+`karume-wan2.2` is built with the `main` commit of the published `hdae/karume-umt5-xxl` instead
+and without `--allow-placeholder-ref` (`docs/release-runbook.md`).
 
 The distribution itself holds 6.814 GiB of weights: the int8 transformer (4.67 GiB), the two f16
 VAE decoder graphs (2.04 GiB) and the three f16 VAE encoder graphs that image-to-video uses

@@ -50,8 +50,9 @@ the addendum on the stage 10c GPU gates and the stage 10d-4 results); Chrome has
 3. **vae_decoder** — the two chunk graphs with the resident causal cache, always tiled, then the clamp
    to `[-1, 1]`.
 
-The distributions are `karume-wan2.1` (ADR 0118 stage 7) and `karume-wan2.2` (ADR 0121 stage 8),
-neither published on Hugging Face yet, so there is no `WAN_SOURCES` table:
+The distributions are `karume-wan2.1` (ADR 0118 stage 7) and `karume-wan2.2` (ADR 0121 stage 8).
+Only `karume-wan2.2` is published on Hugging Face, so the `WAN_SOURCES` table (`config.ts`) has the
+single key `"wan2.2"` and no Wan2.1 entry (ADR 0118, addendum of 2026-10-15).
 `WanPipeline.fromPretrained` and `WanTi2vPipeline.fromPretrained` load them through `@karume/hub`
 (a local mirror is passed as a `denoDirectory` source handle), and `fromAssets` takes the manifest
 and the bytes. Both go through the same admission. The Wan2.2 distribution reuses the Wan2.1 text

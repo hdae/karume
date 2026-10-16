@@ -19,9 +19,9 @@
  * NOTE: 殻の重複（約 60 行）は受け入れている — 共有の基底 class や mixin は作らない（ADR 0121 段 6 の設計
  * §3.2。本体は `family.ts` の 1 本で、重複するのは private 状態と委譲だけ）。
  *
- * 配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe `dist.py --pipeline wan-ti2v` が組む・HF には未公開）。入口は 2.1 と
- * 同じく配布形から取得する {@link WanTi2vPipeline.fromPretrained} と、取得済みのバイト列から組む
- * {@link WanTi2vPipeline.fromAssets} の 2 つ。
+ * 配布形は `karume-wan2.2`（ADR 0121 段 8 — recipe `dist.py --pipeline wan-ti2v` が組む・HF の公開リポは
+ * `WAN_SOURCES["wan2.2"]`）。入口は 2.1 と同じく配布形から取得する {@link WanTi2vPipeline.fromPretrained} と、
+ * 取得済みのバイト列から組む {@link WanTi2vPipeline.fromAssets} の 2 つ。
  *
  * MUST: 全モジュール副作用ゼロ（import 時実行・グローバル可変状態の禁止 — CLAUDE.md）。
  */
@@ -105,10 +105,11 @@ export class WanTi2vPipeline {
    * 2.1 の部品に I2V の VAE encoder の 3 本（`vae_encoder_pre` / `vae_encoder_attn` / `vae_encoder_post` — 画像を渡さない
    * 使い方でも取る）を足したもの。manifest の pipeline は `wan-ti2v/1` を要る。
    *
-   * NOTE: 配布形（`karume-wan2.2`）は HF に未公開で pin 定数も無い。手元のミラー（`models/karume-wan2.2`）は取得元
-   * ハンドル（`localDirectory` / `@karume/hub/deno` の `denoDirectory`）で渡し、`"gpu"` の経路では umT5 の越境先
-   * （`karume-umt5-xxl`）をその取得元の `crossRepo` に mapping で渡す（キーは manifest の `text_encoder` が宣言する repo —
-   * 2.1 と同じ形）。
+   * パッケージ版が検証した取得元は `WAN_SOURCES`（`config.ts`）の `"wan2.2"` — 再現性を自分で固定するなら
+   * `{ repo, revision }` を呼び手が明示する。HF から取るとき umT5 の越境先は manifest が pin した commit で取るので、
+   * 呼び手は渡さない。手元のミラー（`models/karume-wan2.2`）は取得元ハンドル（`localDirectory` / `@karume/hub/deno` の
+   * `denoDirectory`）で渡し、`"gpu"` の経路では umT5 の越境先（`karume-umt5-xxl`）をその取得元の `crossRepo` に
+   * mapping で渡す（キーは manifest の `text_encoder` が宣言する repo — 2.1 と同じ形）。
    */
   static async fromPretrained(
     ref: string | HubRepoRef | DistributionSource,

@@ -11,7 +11,7 @@
 // 欠如の検出（ミラーごと無い形）の射程は**公開済みの全ミラー**（2026-09-25 裁定）。e2e がまだ読まないミラー（siglip2 など）も
 // 載せる — 門番の射程を「今 e2e が読むもの」に合わせると、e2e を足した日に門番の更新を忘れて
 // 無音 SKIP が戻る。未公開の vowel-detector は載せない（配布形を作ってから載せる）。未公開でも
-// e2e（と融合ヒット数の門）が根にするミラー（gemma4-qat / wan2.1 / wan2.2）は載せる。
+// e2e（と融合ヒット数の門）が根にするミラー（gemma4-qat / wan2.1）は載せる。
 //
 // 見るのは**有無だけではない**（ADR 0108 段 3 検収②）。`karume.json` はあるが中身が旧 major の
 // まま、あるいは宣言された part が 1 本足りない・長さが宣言と違う、という形は上の e2e を
@@ -53,15 +53,18 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
  * 門番が**在ることを要求する**配布形ミラー（欠如の検出の名簿 — manifest の検査の射程は
- * {@link discoverDistributions} が配置から導く）= 公開済みの 10 リポ + `karume-gemma4-qat` + `karume-wan2.1` + `karume-wan2.2` +
- * `karume-umt5-xxl`
- * （Wan の GPU 経路の e2e がこのミラーを越境参照の根にする — ADR 0119 段 10d・無いと欠如が無音の SKIP になる）。
+ * {@link discoverDistributions} が配置から導く）= 公開済みの 12 リポ（0.14.0 で初公開の `karume-umt5-xxl` と
+ * `karume-wan2.2` を含む）+ 未公開の `karume-gemma4-qat` + `karume-wan2.1`。
+ *
+ * 公開済みの 2 本は公開前から門番に載っていた: `karume-umt5-xxl` は Wan の GPU 経路の e2e が越境参照の根にし
+ * （ADR 0119 段 10d・無いと欠如が無音の SKIP になる）、`karume-wan2.2` は Wan2.2 の通しの e2e
+ * （`e2e_wan_ti2v_pipeline_test.ts`）と DiT の e2e の実用席の記録（`e2e_wan_ti2v_dit_test.ts` — 席の束を manifest から
+ * 読む）が根にする（ADR 0121 段 8）。
  *
  * `karume-gemma4-qat` は未公開だが、QAT の公開入口 e2e と融合ヒット数の門が根にするので、
  * 射程を広げる前から門番に載っていた（外すと既存の門を緩めることになる）。`karume-wan2.1` も未公開
- * だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と融合ヒット数の門が根にする（ADR 0118 段 7）。
- * `karume-wan2.2` も未公開だが、Wan2.2 の通しの e2e（`e2e_wan_ti2v_pipeline_test.ts`）と DiT の e2e の実用席の記録
- * （`e2e_wan_ti2v_dit_test.ts` — 席の束を manifest から読む）が根にする（ADR 0121 段 8）。
+ * （HF に公開しない — ADR 0118 追記（2026-10-15））だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と
+ * 融合ヒット数の門が根にする（ADR 0118 段 7）。
  */
 const DISTRIBUTIONS = [
   "karume-anima",

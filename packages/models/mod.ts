@@ -299,6 +299,11 @@ export type {
 export type { WanPrompt, WanPromptRole } from "./src/wan/text-embeds.ts";
 /** 動画の 1 フレーム → RGBA 8bit（`./wan` を参照 — uint8 化の規則の正本）。 */
 export { wanFrameToRgba } from "./src/wan/frames.ts";
+/**
+ * このパッケージ版が検証した取得元の対応表（`./wan` を参照 — 追従したい場合のオプトイン）。
+ * 公開しているのは Wan2.2 の 1 本だけで、Wan2.1 のキーは無い（ADR 0118 追記（2026-10-15））。
+ */
+export { WAN_SOURCES } from "./src/wan/config.ts";
 
 /**
  * umT5-XXL のテキスト → encoder の最終隠れ状態（`./umt5` を参照 — 配布形 `karume-umt5-xxl`・Session は構築から
@@ -312,12 +317,14 @@ export type {
   Umt5EncoderOptions,
   Umt5Encoding,
 } from "./src/umt5/encoder.ts";
+/** このパッケージ版が検証した取得元の対応表（`./umt5` を参照 — 追従したい場合のオプトイン）。 */
+export { UMT5_SOURCES } from "./src/umt5/config.ts";
 
 /**
  * 全ファミリの取得元対応表を 1 つに畳んだ表（家族ごとの `*_SOURCES` と**同じキー・同じ値** —
  * ADR 0092）。**barrel にしか無い**面で、「公開している配布リポを全部なめる」側（疎通スモーク・
  * 事前取得・一覧）のために置く。1 家族しか使わない消費者はサブパスの家族表を引く
- * （barrel を引くと 6 家族の config が繋がる）。
+ * （barrel を引くと 9 家族の config が繋がる）。
  */
 export { KARUME_SOURCES } from "./src/sources.ts";
 

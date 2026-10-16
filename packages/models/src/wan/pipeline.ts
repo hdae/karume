@@ -79,8 +79,8 @@
  * （`family.ts`）を通る。生成の既定（step 数・guidance・shift）は manifest の `pipelineConfig`
  * （`config.ts`）が持ち、UniPC の構造は上流の値（`WAN_UNIPC_CONFIG`）のまま。
  *
- * NOTE: 公開配布リポの対応表（`WAN_SOURCES`）はまだ無い — 公開リポを持たない家族は表を持たない
- * （ADR 0073 決定 1・vowel-detector と同じ）。HF 公開の pin 焼き込みの回に足す（docs/release-runbook.md）。
+ * NOTE: 配布形 `karume-wan2.1` は HF に公開しない（ADR 0118 追記（2026-10-15））ので、公開配布リポの対応表
+ * （`WAN_SOURCES` — `config.ts`）に Wan2.1 のキーは無い（表が持つのは Wan2.2 の `"wan2.2"` だけ）。
  *
  * ## MUST: 出力の「正しさ」はここでは担保されない
  *
@@ -363,8 +363,8 @@ export class WanPipeline {
    * {@link FromPretrainedComponentOptions.components}（`transformer` / `vae_decoder_first` /
    * `vae_decoder_next`、`"gpu"` の経路では `text_encoder` も）。
    *
-   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。この家族は公開配布リポを
-   * まだ持たないので pin 定数も無い）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の
+   * **`ref` は必須**（取得元に既定は無い — `src/hub/repo-ref.ts` の MUST。Wan2.1 は公開配布リポを
+   * 持たないので `WAN_SOURCES` にキーも無い）。文字列の `ref` は `{ repo }` と読む（= `main` 追従）。手元の
    * 配布形（`models/karume-wan2.1`）は**取得元ハンドル**で渡す（`localDirectory` / `@karume/hub/deno` の
    * `denoDirectory`）— HF の `owner/name` の綴りの門は通らず、network も CacheStorage も通らない
    * （{@link WanFromPretrainedOptions} の HTTP 専用ノブは効かない）。umT5 の越境先（umT5 の配布リポ）は

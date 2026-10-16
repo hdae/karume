@@ -11,7 +11,8 @@
  *    （取ったのは manifest と part 0〈descriptor〉だけ）。正の経路は「トークナイザ資産の解析」で止まる — admission と
  *    重みの part の取得・資産の取得を通り終えた（`wan_components_test.ts` と同じ「次の段の文言で通過を見る」形）。
  *    GPU は共有の模擬 GPU を渡し、アダプタにも触らない。
- * ③ 取得元に既定は無い（`UMT5_SOURCES` は HF 公開まで持たない — ADR 0073）。
+ * ③ 取得元に既定は無い（`UMT5_SOURCES` は呼び手が渡すオプトインの対応表で、既定ではない — ADR 0073。ref 欠落時の
+ *    案内の文言は `repo_ref_test.ts`）。
  */
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
