@@ -83,4 +83,6 @@ at once; it is side-effect free, so a bundler can still drop what you do not imp
 MIT — see [LICENSE](./LICENSE).
 
 Model weights are distributed separately and carry their own upstream licenses; the MIT license
-here covers this package's code only.
+here covers this package's code only. A few functions are ported from diffusers (Apache-2.0) and
+Pillow (MIT-CMU); [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) lists them with the upstream
+license texts.

@@ -45,6 +45,19 @@
  * ADR 0008）。
  */
 
+// Third-party code notice. The filters, the fixed-point coefficients and the separable passes below
+// (`PILLOW_BICUBIC`, `PILLOW_LANCZOS`, `fixedTaps`, `clip8`, `resampleHorizontal`,
+// `resampleVertical` and `resampleU8Window`) are ported from the 8-bit path of
+// `ImagingResampleInner` (its `*_8bpc` passes and the BICUBIC / LANCZOS filters) in
+// python-pillow/Pillow (`src/libImaging/Resample.c`, Pillow 12.3.0). The window-only computation
+// and the channel-count parameter are additions (see the module doc). License: MIT-CMU License — the
+// full copyright and permission notice is in `THIRD_PARTY_NOTICES.md` at the package root. Upstream
+// copyright notice, copied verbatim from Pillow's `LICENSE`:
+//
+//   Copyright © 1997-2011 by Secret Labs AB
+//   Copyright © 1995-2011 by Fredrik Lundh and contributors
+//   Copyright © 2010 by Jeffrey 'Alex' Clark and contributors
+
 /**
  * Pillow のフィルタ（`Resample.c` の `struct filter` — 重み関数と、縮尺 1 のときの台の半径）。
  * `name` は診断の文言だけに使う。

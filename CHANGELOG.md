@@ -311,6 +311,9 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `@karume/models` ships `THIRD_PARTY_NOTICES.md`: the functions ported from diffusers (Apache-2.0)
+  and Pillow (MIT-CMU) are listed with the upstream license texts, and each ported function carries
+  a notice comment naming its upstream source.
 - Every pipeline now composes its session options through one shared rule (explicit > quant
   declaration > runtime default) and rejects, before fetching weights, a manifest `session` key the
   family does not accept; previously the non-Gemma families passed any declared key through to the
