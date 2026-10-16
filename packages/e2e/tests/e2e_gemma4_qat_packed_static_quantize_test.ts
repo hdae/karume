@@ -8,7 +8,7 @@
  */
 import { assertEquals } from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { gemma4ChatPrompt } from "../../models/gemma.ts";
 import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
@@ -37,7 +37,7 @@ describe({
         const gpu = await acquireGpu();
         try {
           const phases: Record<string, number[]> = {};
-          const pipeline = await Gemma4QatPipeline.fromPretrained(denoDirectory(root), {
+          const pipeline = await Gemma4QatPipeline.fromPretrained(nodeDirectory(root), {
             gpu,
             model: "e2b",
             chunkLength: 32,

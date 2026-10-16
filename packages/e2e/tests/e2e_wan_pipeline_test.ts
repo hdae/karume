@@ -2,7 +2,7 @@
  * Wan2.1 のパイプライン（`WanPipeline` — ADR 0118 段 6 の結線・段 7 の配布形）の通しの照合（実 GPU）。
  *
  * 配布形ミラー `models/karume-wan2.1/`（`dist.py --pipeline wan` が組む — `krm` 3 本とテキスト埋め込み
- * 資産）を `denoDirectory` で `WanPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の
+ * 資産）を `nodeDirectory` で `WanPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の
  * 取得面 — manifest の解決・家族 admission・part の逐次読み）。参照（`pipeline_steps.*`）は配布しない
  * golden なので系列 `outputs/series/wan2.1-t2v-1.3b-f16-dyn/` から読む。
  *
@@ -89,7 +89,7 @@ import {
   parseManifest,
   resolveSelection,
 } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import {
   type GpuContext,
   parseSafetensors,
@@ -376,8 +376,8 @@ const loadPipeline = (
 ): Promise<WanPipeline> =>
   WanPipeline.fromPretrained(
     textEncoder === "gpu"
-      ? denoDirectory(DIST_ROOT, { crossRepo: crossRepoOf(denoDirectory(UMT5_ROOT)) })
-      : denoDirectory(DIST_ROOT),
+      ? nodeDirectory(DIST_ROOT, { crossRepo: crossRepoOf(nodeDirectory(UMT5_ROOT)) })
+      : nodeDirectory(DIST_ROOT),
     {
       gpu,
       textEncoder,

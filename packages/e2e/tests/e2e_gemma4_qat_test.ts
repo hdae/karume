@@ -2,7 +2,7 @@
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { type Gemma4Assets, Gemma4ChatSession, Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
@@ -21,7 +21,7 @@ for (const model of ["e2b", "e4b"] as const) {
     fn: async (t) => {
       let abortOnDecode: AbortController | undefined;
       const states: { contextCount: number; residentBytes: number }[] = [];
-      const pipeline = await Gemma4QatPipeline.fromPretrained(denoDirectory(root), {
+      const pipeline = await Gemma4QatPipeline.fromPretrained(nodeDirectory(root), {
         model,
         maxResidentPleBytes: 0,
         onRunDiagnostics: (d, phase) => {

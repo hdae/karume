@@ -17,13 +17,13 @@
 //
 // ## 資産と経路
 //
-// 配布形ミラー `models/karume-gemma4/` を `denoDirectory` で直読みする（HTTP も永続キャッシュ
+// 配布形ミラー `models/karume-gemma4/` を `nodeDirectory` で直読みする（HTTP も永続キャッシュ
 // も要らない — ADR 0086）。ミラーが無い環境では**明示 SKIP**。
 
 import { isNotFound, readTextFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { Gemma4Pipeline } from "../../models/gemma.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
@@ -117,7 +117,7 @@ test({
     const runs: Run[][] = [];
     for (const reduce of REDUCERS) {
       await t.step(`stateAttentionReduce = ${reduce}`, async () => {
-        const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+        const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
           maxResidentPleBytes,
           stateAttentionReduce: reduce,
         });

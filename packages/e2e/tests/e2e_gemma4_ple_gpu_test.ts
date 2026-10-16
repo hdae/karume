@@ -29,7 +29,7 @@ import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { Gemma4Pipeline } from "../../models/gemma.ts";
 import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
@@ -191,7 +191,7 @@ for (const model of ["e2b", "e4b"] as const) {
     name: `PLE GPU 常駐: QAT ${model} の greedy 生成 id 列が host と完全一致（実GPU）`,
     ignore: !QAT_PRESENT || !GPU_AVAILABLE,
     fn: async () => {
-      const source = denoDirectory(QAT_ROOT);
+      const source = nodeDirectory(QAT_ROOT);
       const expected = await generateIds(() => Gemma4QatPipeline.fromPretrained(source, { model }));
       assertEquals(
         expected.length,
@@ -210,7 +210,7 @@ test({
   name: "PLE GPU 常駐: 通常 Gemma 4 E2B は載れば parity・載らなければ不足を名乗る（実GPU）",
   ignore: !GEMMA_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
-    const source = denoDirectory(GEMMA_ROOT);
+    const source = nodeDirectory(GEMMA_ROOT);
     // 索引は配布形ミラーの `model` 容器の資産（ADR 0109 決定 4）— 開くのは part 0 と索引だけ。
     const { index } = await openGemma4Ple(GEMMA_ROOT);
     const bytes = gemma4PleGpuBytes(index);
@@ -248,7 +248,7 @@ test({
     "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
   ignore: !QAT_PRESENT || !GPU_AVAILABLE,
   fn: async () => {
-    const source = denoDirectory(QAT_ROOT);
+    const source = nodeDirectory(QAT_ROOT);
     const generate = async (
       pleResidency: "host" | "gpu",
     ): Promise<{ ids: number[]; fences: number }> => {

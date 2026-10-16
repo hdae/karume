@@ -51,7 +51,7 @@ import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-s
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { type Manifest, MANIFEST_FILENAME, parseManifest } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import {
   acquireGpu,
   type GenerationContext,
@@ -302,7 +302,7 @@ test({
   ignore: !AVAILABLE || !GPU_AVAILABLE,
   fn: async (t) => {
     const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
       speculative: { k: GEMMA4_DRAFT_STEPS },
       // 参照経路（runtime の既定）— decode も verify も同じ縮約カーネルを通る席。
       stateAttentionReduce: "sequential",
@@ -494,7 +494,7 @@ test({
     /** 観測を集める窓（step が開けている間だけ積む）。 */
     let records: PhaseRecord[] | undefined;
     const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
       speculative: { k: GEMMA4_DRAFT_STEPS },
       maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
       onRunDiagnostics: (diagnostics, phase) => {

@@ -12,13 +12,13 @@
  * 読んでも同じである。
  *
  * NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` の規律）。
- * ここが触るのは公開面（`@karume/hub` / `@karume/hub/deno` / `@karume/runtime` と models の
+ * ここが触るのは公開面（`@karume/hub` / `@karume/hub/node` / `@karume/runtime` と models の
  * 公開サブパス）だけである。
  */
 
 import { isNotFound, readFile, readTextFileSync } from "@karume/test-support/fs";
 import { loadManifest, openContainerSource, resolveSelection } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import {
   type AssetReader,
   openContainer,
@@ -42,7 +42,7 @@ export type MirrorChoice = {
 const MODEL = "model";
 
 const selectionOf = async (mirror: URL, choice: MirrorChoice) => {
-  const loaded = await loadManifest(denoDirectory(mirror.pathname));
+  const loaded = await loadManifest(nodeDirectory(mirror.pathname));
   const selection = resolveSelection(loaded.manifest, {
     ...(choice.model === undefined ? {} : { model: choice.model }),
     ...(choice.quant === undefined ? {} : { quant: choice.quant }),
@@ -85,7 +85,7 @@ export const openMirrorComponent = async (
   readonly createSession: PreparedModel["createContainerSession"];
   readonly opened: OpenedContainer;
 }> => {
-  const loaded = await loadManifest(denoDirectory(mirror.pathname));
+  const loaded = await loadManifest(nodeDirectory(mirror.pathname));
   const selection = resolveSelection(loaded.manifest, {
     ...(choice.model === undefined ? {} : { model: choice.model }),
     ...(choice.quant === undefined ? {} : { quant: choice.quant }),

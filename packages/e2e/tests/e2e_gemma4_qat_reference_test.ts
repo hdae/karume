@@ -15,7 +15,7 @@
  */
 
 import { test } from "@karume/test-support/test";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { openReferences, registerReferenceGate } from "../../runtime/tests/helpers/reference.ts";
 import { openResults } from "../../runtime/tests/helpers/results.ts";
@@ -78,7 +78,7 @@ for (const seat of SEATS) {
         references,
         results,
         seat,
-        open: (choice) => Gemma4QatPipeline.fromPretrained(denoDirectory(MIRROR_DIR), choice),
+        open: (choice) => Gemma4QatPipeline.fromPretrained(nodeDirectory(MIRROR_DIR), choice),
       }),
   });
 }

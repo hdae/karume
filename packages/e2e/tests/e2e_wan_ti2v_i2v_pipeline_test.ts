@@ -1,7 +1,7 @@
 /**
  * Wan2.2 TI2V-5B の I2V の通し（`WanTi2vPipeline` に条件画像を渡す — ADR 0121 決定 11・段 9b）の照合（実 GPU）。
  *
- * 配布形ミラー `models/karume-wan2.2/`（encoder の 3 部品を含む — `dist.py --pipeline wan-ti2v` が組む）を `denoDirectory` で
+ * 配布形ミラー `models/karume-wan2.2/`（encoder の 3 部品を含む — `dist.py --pipeline wan-ti2v` が組む）を `nodeDirectory` で
  * 読んで組み、条件画像からの生成を通す。参照（`pipeline_steps_i2v.*`）は配布しない golden なので系列から読む。配布形が無い機は
  * 明示 SKIP する（理由と組み立てのコマンドを出す — 全 SKIP を FAIL にするのは門番 `distribution_gate_test.ts`）。
  *
@@ -125,7 +125,7 @@
 import { readFile, writeFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import {
   parseSafetensors,
   type RunInputs,
@@ -1235,7 +1235,7 @@ test({
       // 参照席の 1 層内側の状態（DiT の入力を観測する回 — モジュール doc「観測と故障注入の口」）。
       const state = await loadWanFromPretrained(
         WAN22_TI2V_FAMILY,
-        denoDirectory(WAN_TI2V_DIST_ROOT),
+        nodeDirectory(WAN_TI2V_DIST_ROOT),
         { gpu, textEncoder: "precomputed", quant: WAN_TI2V_REFERENCE_QUANT, onRunDiagnostics },
       );
       const prompts: readonly WanPrompt[] = state.textEmbeds.entries;
@@ -1616,7 +1616,7 @@ test({
           let settlement: ReferenceSettlement | undefined;
           try {
             await using pipeline = await WanTi2vPipeline.fromPretrained(
-              denoDirectory(WAN_TI2V_DIST_ROOT),
+              nodeDirectory(WAN_TI2V_DIST_ROOT),
               {
                 gpu,
                 textEncoder: "precomputed",
@@ -1665,7 +1665,7 @@ test({
           let settlement: ReferenceSettlement | undefined;
           try {
             await using practical = await WanTi2vPipeline.fromPretrained(
-              denoDirectory(WAN_TI2V_DIST_ROOT),
+              nodeDirectory(WAN_TI2V_DIST_ROOT),
               {
                 gpu,
                 textEncoder: "precomputed",
@@ -1753,7 +1753,7 @@ test({
           let settlement: ReferenceSettlement | undefined;
           try {
             await using pipeline = await WanTi2vPipeline.fromPretrained(
-              denoDirectory(WAN_TI2V_DIST_ROOT),
+              nodeDirectory(WAN_TI2V_DIST_ROOT),
               {
                 gpu,
                 textEncoder: "precomputed",

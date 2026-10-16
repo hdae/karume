@@ -3,7 +3,7 @@ import { makeTempDir, readDir, readFile, readTextFile, remove, symlink, writeTex
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it } from "@karume/test-support/test";
 import { localDirectory, parseManifest } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { gemma4ChatPrompt, Gemma4Pipeline, type Gemma4RunPhase } from "../../models/gemma.ts";
 import { type Gemma4QatFromPretrainedOptions, Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
@@ -187,7 +187,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   byPhase.set(phase.kind, [...(byPhase.get(phase.kind) ?? []), d.lastRunPipelines]);
                 },
               } satisfies Gemma4QatFromPretrainedOptions;
-              const source = denoDirectory(temp);
+              const source = nodeDirectory(temp);
               const pipeline = family === "gemma4"
                 ? await Gemma4Pipeline.fromPretrained(source, options)
                 : await Gemma4QatPipeline.fromPretrained(source, options);
@@ -243,7 +243,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             const gpu = await acquireGpu();
             const phaseCensus = new Map<string, SessionDiagnostics["lastRunPipelines"][]>();
             try {
-              const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(temp), {
+              const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(temp), {
                 gpu,
                 model: "e2b",
                 chunkLength: 32,

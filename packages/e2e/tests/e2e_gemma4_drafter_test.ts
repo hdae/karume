@@ -49,7 +49,7 @@ import {
   type Session,
   type Tensor,
 } from "@karume/runtime";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import type { Gemma4Assets } from "../../models/src/gemma/pipeline.ts";
 // MUST: 入口は**公開面**から取る（`src/...` を直に掴むと、面が痩せていても門が緑のままになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
@@ -686,7 +686,7 @@ test({
     assert(chatCase !== undefined, `フィクスチャに chat ケース '${CHAT_CASE.fixture}' が無い`);
 
     const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
       speculative: { k: GEMMA4_DRAFT_STEPS },
       maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
     });

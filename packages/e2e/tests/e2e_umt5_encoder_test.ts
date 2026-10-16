@@ -1,6 +1,6 @@
 /**
  * `Umt5Encoder`（`@karume/models/umt5`）の通しの e2e（実 GPU）— 配布形ミラー `models/karume-umt5-xxl` を
- * `fromPretrained(denoDirectory(…))` で組み、Wan の umT5 の移植の門（`e2e_wan_umt5_test.ts`）と**同じ golden 10 本**を
+ * `fromPretrained(nodeDirectory(…))` で組み、Wan の umT5 の移植の門（`e2e_wan_umt5_test.ts`）と**同じ golden 10 本**を
  * **同じ判定**（正規化比 r が帯の内 — `helpers/umt5-golden.ts`）で見る。
  *
  * 入力は golden のメタの `cleaned`（上流の前処理 `prompt_clean` の後の文字列）: golden の `input_ids` はこれを
@@ -24,7 +24,7 @@
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { fetchAssets, loadManifest, resolveSelection } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { Umt5Encoder } from "../../models/umt5.ts";
 import { parseUmt5TokenizerAsset, Umt5Tokenizer } from "../../models/src/umt5/tokenizer.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
@@ -74,7 +74,7 @@ if (!DIST_PRESENT) {
 
 /** ミラーの選択（manifest の宣言 — 席は明示）。 */
 const loadMirror = async () => {
-  const loaded = await loadManifest(denoDirectory(DIST_ROOT));
+  const loaded = await loadManifest(nodeDirectory(DIST_ROOT));
   return { loaded, selection: resolveSelection(loaded.manifest, { model: MODEL, quant: QUANT }) };
 };
 
@@ -110,7 +110,7 @@ test({
 
 test({
   name:
-    "umT5 encoder（実 GPU）: fromPretrained(denoDirectory) で組み、golden 10 本の hiddenStates の正規化比 r が帯の内" +
+    "umT5 encoder（実 GPU）: fromPretrained(nodeDirectory) で組み、golden 10 本の hiddenStates の正規化比 r が帯の内" +
     "（Wan の umT5 の移植の門と同じ golden・同じ帯）・tokenize と inputIds が golden の id 列",
   ignore: !DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
@@ -121,7 +121,7 @@ test({
       },
     });
     try {
-      const encoder = await Umt5Encoder.fromPretrained(denoDirectory(DIST_ROOT), {
+      const encoder = await Umt5Encoder.fromPretrained(nodeDirectory(DIST_ROOT), {
         gpu,
         model: MODEL,
         quant: QUANT,

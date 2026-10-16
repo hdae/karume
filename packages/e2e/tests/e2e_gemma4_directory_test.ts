@@ -1,5 +1,5 @@
 // 実重み Gemma 4 E2B を**手元のディレクトリから直読み**して組む検収門 —— 取得元ハンドル
-// （`@karume/hub/deno` の `denoDirectory`）を `fromPretrained` へ渡す経路の合格線。
+// （`@karume/hub/node` の `nodeDirectory`）を `fromPretrained` へ渡す経路の合格線。
 //
 // `e2e_gemma4_pretrained_test.ts`（疑似 HF サーバ = HTTP + 永続キャッシュ + self-heal）と
 // **同じ配布形ミラーを、取得元だけ替えて**読む。門は 2 本:
@@ -22,7 +22,7 @@
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 // MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
 // 門が緑のままになる（消費者が書けない経路で検収したことになる）。
 import { type Gemma4ChatMessage, Gemma4Pipeline } from "../../models/gemma.ts";
@@ -122,7 +122,7 @@ test({
     const cacheDiagnostics: string[] = [];
     const retryDiagnostics: string[] = [];
 
-    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
       // 予算は索引から導く（= PLE 全量常駐 → 読み直しゼロ）。定数で書くと資産世代で block 幅が
       // 変わったときに別の本数を意味してしまう — helper の doc。
       maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
@@ -145,7 +145,7 @@ test({
             for await (const chunk of stream) parts.push(chunk);
             const stopped = await stream.done;
             console.log(
-              `[e2e] gemma4 denoDirectory ${name}: ${JSON.stringify(parts.join(""))} / ` +
+              `[e2e] gemma4 nodeDirectory ${name}: ${JSON.stringify(parts.join(""))} / ` +
                 `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
             );
             assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);

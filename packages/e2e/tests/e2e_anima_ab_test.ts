@@ -27,14 +27,14 @@
  *
  * MUST: 資産は `models/karume-anima/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し
  * 環境は理由を出して**明示 SKIP** する（ADR 0005）。取得は手元の配布形を取得元ハンドル
- * （`denoDirectory`）で渡す — 故障注入は同じ配布形を symlink で借りた一時 manifest
+ * （`nodeDirectory`）で渡す — 故障注入は同じ配布形を symlink で借りた一時 manifest
  * （{@link withManifestOverride}）で、元の配布形は 1 バイトも書き換えない。
  */
 
 import { test } from "@karume/test-support/test";
 import { assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { AnimaPipeline, type ImageSize } from "../../models/mod.ts";
 import { formatResolution } from "../../models/anima.ts";
@@ -180,7 +180,7 @@ for (const { resolution, band } of CASES) {
         const manifest = readManifest();
         const reference = referencePartnerOf(manifest, MODEL, PRACTICAL);
         const declared = quantOf(manifest, MODEL, PRACTICAL).session;
-        const source = denoDirectory(ASSETS_DIR);
+        const source = nodeDirectory(ASSETS_DIR);
         const referenceRun = await observeStep1(source, reference, resolution, SEED);
         const first = await observeStep1(source, PRACTICAL, resolution, SEED);
         const second = await observeStep1(source, PRACTICAL, resolution, SEED);
@@ -224,7 +224,7 @@ test({
         {},
       );
       const referenceRun = await observeStep1(
-        denoDirectory(ASSETS_DIR),
+        nodeDirectory(ASSETS_DIR),
         reference,
         resolution,
         SEED,
@@ -253,7 +253,7 @@ test({
   ignore: !RUNNABLE,
   fn: async () => {
     const { resolution } = FAULT_CASE;
-    const source = denoDirectory(ASSETS_DIR);
+    const source = nodeDirectory(ASSETS_DIR);
     const first = await observeStep1(source, PRACTICAL, resolution, SEED);
     const second = await observeStep1(source, PRACTICAL, resolution, SEED + 1);
     assertThrows(
@@ -287,7 +287,7 @@ test({
         withoutAttention,
       );
       const referenceRun = await observeStep1(
-        denoDirectory(ASSETS_DIR),
+        nodeDirectory(ASSETS_DIR),
         reference,
         resolution,
         SEED,

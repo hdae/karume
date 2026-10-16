@@ -52,7 +52,7 @@ import {
   parseManifest,
   resolveSelection,
 } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import { openContainer, type SessionDiagnostics } from "@karume/runtime";
 import {
   type GeneratedVideo,
@@ -170,7 +170,7 @@ type BoundBlock = {
  * 呼び方と同じ（model / quant は既定）。グラフ名 = manifest の weights キー（書き手の規約 — container-v1 §2.1）。
  */
 const textEncoderBlocks = async (root: URL): Promise<readonly BoundBlock[]> => {
-  const loaded = await loadManifest(denoDirectory(root.pathname));
+  const loaded = await loadManifest(nodeDirectory(root.pathname));
   const container = resolveSelection(loaded.manifest, { weights: [TEXT_ENCODER] })
     .containers[TEXT_ENCODER];
   assert(container !== undefined, `${root.pathname} の manifest に '${TEXT_ENCODER}' の容器が無い`);
@@ -214,14 +214,14 @@ const covers = (reads: readonly Read[], offset: number, length: number): boolean
 };
 
 /**
- * 手元のディレクトリを取得元にし、読んだ path と区間を `reads` に積む。読み口は `@karume/hub/deno` の
- * `denoDirectory` と同じ 2 本（全量読み + 位置読み）— 位置読みを落とすと Session の構築が区間読み（seek）から
+ * 手元のディレクトリを取得元にし、読んだ path と区間を `reads` に積む。読み口は `@karume/hub/node` の
+ * `nodeDirectory` と同じ 2 本（全量読み + 位置読み）— 位置読みを落とすと Session の構築が区間読み（seek）から
  * part の全量読み（scan）へ倒れ、利用者の経路と別の読み方を観測することになる。
  *
  * WHY 取得元ハンドル（`DistributionSource`）ではなく読み口（`DirectoryAdapter`）を包む: ハンドルは公開メンバを
  * 持たない不透明な値で（hub の `src/source.ts` の MUST）、外から委譲の包みを組めない。読み口を包んで
- * `localDirectory` に渡すのが、hub の公開面で組める唯一の委譲（`denoDirectory` 自身も同じ形）。
- * NOTE: 読み口の中身は `denoDirectory` の 2 本の写しで、読めないときの包みの文言・`readFile` の中断の扱い・
+ * `localDirectory` に渡すのが、hub の公開面で組める唯一の委譲（`nodeDirectory` 自身も同じ形）。
+ * NOTE: 読み口の中身は `nodeDirectory` の 2 本の写しで、読めないときの包みの文言・`readFile` の中断の扱い・
  * label は写していない（取得元の意味論 — 区間読み・size の境界・越境の解決 — は本物の `localDirectory` を
  * 通る）。hub が取得元ハンドルの委譲口を公開したら、ハンドルを包む形へ戻す。
  */

@@ -25,7 +25,7 @@
 import { test } from "@karume/test-support/test";
 import { assertThrows } from "@std/assert";
 import { type DistributionSource, type Manifest, parseManifest } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import type { SessionDiagnostics } from "@karume/runtime";
 import { IrodoriPipeline } from "../../models/mod.ts";
 import {
@@ -164,7 +164,7 @@ for (const input of CASES) {
         const manifest = readManifest();
         const reference = referencePartnerOf(manifest, MODEL, PRACTICAL);
         const declared = quantOf(manifest, MODEL, PRACTICAL).session;
-        const source = denoDirectory(ASSETS_DIR);
+        const source = nodeDirectory(ASSETS_DIR);
         const referenceRun = await observeStep1(source, reference, input, SEED);
         const first = await observeStep1(source, PRACTICAL, input, SEED);
         const second = await observeStep1(source, PRACTICAL, input, SEED);
@@ -207,7 +207,7 @@ test({
         {},
       );
       const referenceRun = await observeStep1(
-        denoDirectory(ASSETS_DIR),
+        nodeDirectory(ASSETS_DIR),
         reference,
         FAULT_CASE,
         SEED,
@@ -235,7 +235,7 @@ test({
   name: "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
   ignore: !RUNNABLE,
   fn: async () => {
-    const source = denoDirectory(ASSETS_DIR);
+    const source = nodeDirectory(ASSETS_DIR);
     const first = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED);
     const second = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED + 1);
     assertThrows(

@@ -2,7 +2,7 @@
  * Wan2.2 TI2V-5B の通し（`WanTi2vPipeline` の T2V — ADR 0121 段 6 の結線・段 8 の配布形）の照合（実 GPU）。
  *
  * 配布形ミラー `models/karume-wan2.2/`（`dist.py --pipeline wan-ti2v` が組む — `krm` 3 本と 2.1 の系列のテキスト資産 2 本）
- * を `denoDirectory` で `WanTi2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
+ * を `nodeDirectory` で `WanTi2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
  * 家族 admission・part の逐次読み。2.1 の段 7 と同じ入口）。参照（`pipeline_steps.*`）は配布しない golden なので系列から読む。
  *
  * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP になるのを FAIL にするのは
@@ -104,7 +104,7 @@ import { readFile, writeFile } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { type DistributionSource, parseManifest, resolveSelection } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import {
   type GpuContext,
   parseSafetensors,
@@ -322,7 +322,7 @@ const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py 
  * 参照を作った埋め込み資産（2.1 の系列のファイル — ADR 0121 決定 9）。ホストの自己整合はこのバイトの sha を参照のメタ
  * `text_embeds_sha256` と突き合わせる。配布形の写しではなく系列のファイルを読むのは、ホストの自己整合が見るのが参照と TS の
  * ホストの計算（σ / timestep・統計・CFG + UniPC）であって取得面ではないから — 配布形の無い機でも GPU 無しで回る形を保つ。
- * 配布形の写しは組み立て（`dist.py`）が同じ系列のファイルを置いたもの。この e2e の取得元（`denoDirectory`）は size だけを
+ * 配布形の写しは組み立て（`dist.py`）が同じ系列のファイルを置いたもの。この e2e の取得元（`nodeDirectory`）は size だけを
  * 照合し、sha256 は信頼する（`packages/hub/src/sources/local.ts`）。写しが参照を作った資産と違えば、GPU の帯のケース（プロンプトを
  * 配布形の資産から引く）が帯の外へ出る。
  */
@@ -377,7 +377,7 @@ const umt5CrossRepo = (): Record<string, DistributionSource> => {
         `karume-umt5-xxl から越境参照する）。組み直し: ${WAN_TI2V_ASSEMBLE_COMMAND}`,
     );
   }
-  return { [UMT5_REPO]: denoDirectory(UMT5_ROOT) };
+  return { [UMT5_REPO]: nodeDirectory(UMT5_ROOT) };
 };
 const FIXTURES_PRESENT = CASES.map(({ name }) => filePresent(fixtureUrl(name)));
 const ANY_FIXTURE = FIXTURES_PRESENT.some(Boolean);
@@ -602,8 +602,8 @@ const loadPipeline = (
 ): Promise<WanTi2vPipeline> =>
   WanTi2vPipeline.fromPretrained(
     textEncoder === "gpu"
-      ? denoDirectory(WAN_TI2V_DIST_ROOT, { crossRepo: umt5CrossRepo() })
-      : denoDirectory(WAN_TI2V_DIST_ROOT),
+      ? nodeDirectory(WAN_TI2V_DIST_ROOT, { crossRepo: umt5CrossRepo() })
+      : nodeDirectory(WAN_TI2V_DIST_ROOT),
     {
       gpu,
       textEncoder,

@@ -5,7 +5,7 @@
  * ## 消費者は「実 DL 経路そのものを通す」ものだけ
  *
  * デモの `--source <ローカルのパス>` はここを通らない — 手元の配布形は取得元ハンドル
- * （`@karume/hub/deno` の `denoDirectory` — `local-source.ts`）で直に読めるようになり、
+ * （`@karume/hub/node` の `nodeDirectory` — `local-source.ts`）で直に読めるようになり、
  * ポートも永続キャッシュへの複製も要らなくなった。残る消費者は次の 2 つで、どちらも**実 DL
  * 経路**（revision 解決 → resolve URL → 受信バイト門 → 永続キャッシュ）を通すことが目的なので、
  * 疑似 HF を喋るこのサーバでなければならない:

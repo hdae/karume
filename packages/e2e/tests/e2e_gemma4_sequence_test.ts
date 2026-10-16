@@ -43,7 +43,7 @@ import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-s
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import {
   acquireGpu,
   parseSafetensors,
@@ -572,7 +572,7 @@ test({
   ignore: !MIRROR_WITH_DRAFTER || !GPU_AVAILABLE,
   fn: async (t) => {
     const started = performance.now();
-    const pipeline = await Gemma4Pipeline.fromPretrained(denoDirectory(MIRROR_DIR), {
+    const pipeline = await Gemma4Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
       speculative: { k: GEMMA4_DRAFT_STEPS },
       maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
     });

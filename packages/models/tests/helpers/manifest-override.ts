@@ -9,7 +9,7 @@
 
 import { makeTempDir, readDir, remove, symlink, writeTextFile } from "@karume/test-support/fs";
 import type { DistributionSource } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 
 /**
  * `root` の配布形を `manifest` に差し替えた取得元で `body` を回す（一時ディレクトリは抜けたら
@@ -29,7 +29,7 @@ export const withManifestOverride = async <T>(
     await writeTextFile(`${temporary}/karume.json`, JSON.stringify(manifest), {
       createNew: true,
     });
-    return await body(denoDirectory(temporary));
+    return await body(nodeDirectory(temporary));
   } finally {
     await remove(temporary, { recursive: true });
   }

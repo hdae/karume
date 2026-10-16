@@ -23,7 +23,7 @@
 import { type TestContext } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, parseManifest, type SessionSpec } from "@karume/hub";
-import { denoDirectory } from "@karume/hub/deno";
+import { nodeDirectory } from "@karume/hub/node";
 import type { GpuContext, SessionDiagnostics, SessionOptions } from "@karume/runtime";
 import type {
   GeneratedVideo,
@@ -335,7 +335,7 @@ export const runWanAbCase = async (
     id,
   );
   const row = practicalRowOf(subject, effective, id);
-  const source = denoDirectory(subject.assetsRoot);
+  const source = nodeDirectory(subject.assetsRoot);
   const referenceRun = await observeStep1(gpu, subject, source, reference, frames, SEED);
   const first = await observeStep1(gpu, subject, source, practical, frames, SEED);
   const second = await observeStep1(gpu, subject, source, practical, frames, SEED);
@@ -406,7 +406,7 @@ export const runWanAbCase = async (
           const shifted = await observeStep1(
             gpu,
             subject,
-            denoDirectory(subject.assetsRoot),
+            nodeDirectory(subject.assetsRoot),
             practical,
             frames,
             SEED + 1,
