@@ -173,7 +173,7 @@ measurements in `docs/research/`.
   callback for that. The adapter information handed to the callback (and `GpuContext.adapterInfo`)
   is frozen, including the empty-valued record used when the adapter has no `info`. The types
   `GeometryProfile`, `GemmRowsRule`, `GemmGeometry` and `I8a8Geometry` are exported for it; the
-  built-in tables themselves are not.
+  built-in profiles are available only as the frozen values in `BUILTIN_GEOMETRY_PROFILES`.
 - IR op `conv3d` (ADR 0118): an **unbatched** 3-D convolution
   `x[Cin,T,H,W] * W[Cout,Cin/groups,Kt,Kh,Kw] + b[Cout] → [Cout,Tout,Hout,Wout]` with `stride` /
   `padding` / `dilation` as `[T, H, W]` triples and a scalar `groups`, all four mandatory. The
@@ -216,7 +216,8 @@ measurements in `docs/research/`.
 - Exporter recipes: `dist.py --pipeline wan` assembles the Wan2.1 series into the
   `karume-wan2.1` distribution (Apache-2.0 `LICENSE.md` and the change `NOTICE.md` at the root, a
   model card listing the pinned upstream revision and the fixed prompts). It refuses series whose
-  storage is not f16, whose container provenance names another upstream revision or license, a
+  storage does not match their role (f16 for the VAE and the f16 transformer, i8 for the int8
+  transformer and the text encoder), whose container provenance names another upstream revision or license, a
   transformer without its RoPE base tables, and an embedding asset made from another revision, with
   other prompts or with a width that does not match the transformer.
 - Wan2.1 int8 transformer quants (ADR 0120): `wan.export_dit --dtype i8` writes the
