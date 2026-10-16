@@ -165,25 +165,28 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         ),
         stored_dtype="f16",
         # 総確保 = runtime の見積りの `peakAccountedBytes`（重み + 中間の領域 + 入力 + 出力の
-        # readback — 1024²: 509.2 + 749.2 + 12 + 4 = 1,274.4 MiB・2048²: 706.2 + 2,948.0 + 48 +
-        # 16 = 3,718.2 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run はウォームアップの 1 回
+        # readback — 1024²: 431.2 + 750.7 + 12 + 4 = 1,198.0 MiB・2048²: 431.2 + 2,948.0 + 48 +
+        # 16 = 3,443.2 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run はウォームアップの 1 回
         # （計画の当たらない run）を除いた 5 回の範囲で、5 回の 1 回目は中間の領域の確保を含む。
-        # 中間の領域と最大の binding は f32 席と同じ（活性値は f16 席でも f32）。
+        # 中間の領域と最大の binding は f32 席と同じ（活性値は f16 席でも f32）。Swin の
+        # shifted-window attention のマスクは常駐の重みではなく実行時の中間（窓 4 種の表と窓ごとの
+        # 添字から graph の中で組む — `birefnet.patch`）なので、重みは解像度に依らずほぼ同じで、
+        # 1024² の中間の領域はその分 1.5 MiB 増えた（2048² は生存ピークの内側に収まり変わらない）。
         resources=BirefnetResourceMeasurement(
             quant="f16",
-            conditions="measured 2026-10-11 on an RTX 3080 Ti",
+            conditions="measured 2026-10-16 on an RTX 3080 Ti",
             by_resolution={
                 "1024": BirefnetResources(
                     total="about 1.2 GiB",
-                    intermediates="749 MiB",
+                    intermediates="751 MiB",
                     binding="the largest single storage buffer is 320 MiB",
                     run="about 1.4 s",
                 ),
                 "2048": BirefnetResources(
-                    total="about 3.6 GiB",
+                    total="about 3.4 GiB",
                     intermediates="2,948 MiB",
                     binding="the largest single storage buffer is 1,280 MiB",
-                    run="7.3 – 7.9 s",
+                    run="7.0 – 7.2 s",
                 ),
             },
         ),
@@ -211,24 +214,27 @@ BIREFNET_CHECKPOINTS: Mapping[str, BirefnetCheckpoint] = {
         ),
         stored_dtype="f32",
         # 総確保 = runtime の見積りの `peakAccountedBytes`（重み + 中間の領域 + 入力 + 出力の
-        # readback — 1024²: 919.2 + 749.2 + 12 + 4 = 1,684.5 MiB・2048²: 1,116.2 + 2,948.0 + 48 +
-        # 16 = 4,128.2 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run はウォームアップの 1 回
+        # readback — 1024²: 842.5 + 750.7 + 12 + 4 = 1,609.2 MiB・2048²: 842.5 + 2,948.0 + 48 +
+        # 16 = 3,854.5 MiB）を 1 GiB = 1,024 MiB で換算して丸めた値。run はウォームアップの 1 回
         # （計画の当たらない run）を除いた 5 回の範囲で、5 回の 1 回目は中間の領域の確保を含む。
+        # マスクが実行時の中間になったことの効きは HR と同じ。run は GPU を冷ましてから Lucida の
+        # 2 系列だけを続けて測った値（HR の 2 系列の直後に続けて測ると 1024² が 1.69〜2.01 s と
+        # 回ごとに遅れた — 生データは outputs/misc/birefnet-resources-2026-10-16/lucida-rerun/）。
         resources=BirefnetResourceMeasurement(
             quant="f32",
-            conditions="measured 2026-10-11 on an RTX 3080 Ti",
+            conditions="measured 2026-10-16 on an RTX 3080 Ti",
             by_resolution={
                 "1024": BirefnetResources(
                     total="about 1.6 GiB",
-                    intermediates="749 MiB",
+                    intermediates="751 MiB",
                     binding="the largest single storage buffer is 320 MiB",
                     run="about 1.4 s",
                 ),
                 "2048": BirefnetResources(
-                    total="about 4.0 GiB",
+                    total="about 3.8 GiB",
                     intermediates="2,948 MiB",
                     binding="the largest single storage buffer is 1,280 MiB",
-                    run="6.6 – 6.7 s",
+                    run="6.7 – 6.9 s",
                 ),
             },
         ),

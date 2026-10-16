@@ -284,7 +284,7 @@ class TestBirefnetResourceNote:
 
     def test_each_checkpoint_measured_the_seat_it_names(self) -> None:
         """実測した席は checkpoint ごと — HR は f16 席・Lucida は f32 席（どちらも
-        2026-10-11）。"""
+        2026-10-16）。"""
         assert {name: entry.resources.quant for name, entry in BIREFNET_CHECKPOINTS.items()} == {
             "hr": "f16",
             "lucida": "f32",

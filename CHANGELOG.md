@@ -311,6 +311,12 @@ measurements in `docs/research/`.
 
 ### Changed
 
+- `karume-birefnet-hr` / `karume-lucida` (republished with this release): the Swin shifted-window
+  attention masks are stored as a table of the 4 distinct windows plus a per-window index and built in
+  the graph, and the zero padding is no longer baked as constants. Outputs are bit-identical. The
+  resident weights drop to 431 MiB (HR `f16`, was 509 / 706 MiB at 1024² / 2048²) and 842 MiB (Lucida
+  `f32`, was 919 / 1,116 MiB), and the 1024² and 2048² models of each repository share their weight
+  parts, so a repository is less than half its former size.
 - `@karume/models` ships `THIRD_PARTY_NOTICES.md`: the functions ported from diffusers (Apache-2.0)
   and Pillow (MIT-CMU) are listed with the upstream license texts, and each ported function carries
   a notice comment naming its upstream source.

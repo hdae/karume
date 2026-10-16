@@ -13,10 +13,10 @@ entry point only.
 One graph per model × resolution — the **matte logits** (`preds[-1]`, before the sigmoid) of the
 BiRefNet family, with batch static at 1 and no symbolic axis. The series name is the `--model-dir`
 directory name plus `--resolution`, plus `-f16` for an f16 series (default `birefnet-hr-1024-f16`),
-because a BiRefNet graph is a different graph per resolution: window masks and padding constants
-are baked per resolution. `--resolution` accepts multiples of 64 only. Two checkpoints share the
-recipe (BiRefNet_HR and its fine-tune Lucida — identical structure, different weights and
-attribution), so they are one `--model-dir` axis rather than two recipes.
+because a BiRefNet graph is a different graph per resolution: every shape is static and the
+window masks' per-window index is baked per resolution. `--resolution` accepts multiples of 64
+only. Two checkpoints share the recipe (BiRefNet_HR and its fine-tune Lucida — identical structure,
+different weights and attribution), so they are one `--model-dir` axis rather than two recipes.
 
 ## Running
 
@@ -77,11 +77,20 @@ exclusive with `--verify`, whose reference is the unpatched f32 eager model.
 The weights are rounded right after loading and **before** the patch layer runs. The BatchNorm
 rewrite derives its per-channel scale and shift in f32 from the (rounded) statistics; rounding after
 it would move those f32-stored constants without saving any memory. Only the weights consumed by
-linear / convolution / embedding slots (including the relative-position tables and the deformable
-convolutions' offset / modulator convolutions) are stored as f16 — window masks, zero-padding
-constants, the deformable convolutions' sampling weights (`regular_conv`), biases and normalization
-parameters stay f32 — so the resident weights shrink to 509 MiB at 1024² rather than to half of
-919 MiB.
+linear / convolution / embedding slots (including the relative-position tables, the window-mask
+tables and the deformable convolutions' offset / modulator convolutions) are stored as f16 — the
+deformable convolutions' sampling weights (`regular_conv`), biases and normalization parameters stay
+f32 — so the resident weights are 431 MiB against 842 MiB in f32, a little more than half.
+
+Nothing large is baked as a constant. The shifted-window attention masks are stored as a table of
+the at most four kinds of window (interior, right column, bottom row, corner) plus a per-window
+index, and the graph expands them with an `embedding` lookup at run time; the zero padding in front
+of the window partition is a one-element zero widened with `expand`. Both used to be baked in full
+(248 MiB of masks and about 28 MiB of zeros at 2048²), and the long zero runs fragmented the HF xet
+transfer of the 2048² containers (ADR
+[0113](../../../docs/decisions/0113-birefnet-weight-series.md), addendum 2026-10-16). The resident
+weights are therefore essentially the same at both resolutions, and the masks moved to the run-time
+intermediates instead (the largest is `[1849, 144, 144]` f32 at 2048²).
 
 The upstream BiRefNet_HR checkpoint is itself stored in f16, so rounding to f16 changes nothing and
 its `f16` series is lossless. Lucida is stored in f32, so its `f16` series is quantized. Every
