@@ -188,7 +188,9 @@ export const readRange = async (
     const into = new Uint8Array(new ArrayBuffer(length));
     let filled = 0;
     while (filled < length) {
-      const { bytesRead } = await handle.read(into, filled, length - filled, offset + filled);
+      // One read call takes an int32 length (2 GiB − 1 at most); read in 1 GiB steps.
+      const step = Math.min(length - filled, 1 << 30);
+      const { bytesRead } = await handle.read(into, filled, step, offset + filled);
       if (bytesRead === 0) {
         throw new Error(
           `${String(path)}: could not read ${length} bytes at offset ${offset} (file ends after ${filled})`,
