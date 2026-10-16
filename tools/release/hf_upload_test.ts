@@ -36,7 +36,9 @@ const NAME = "karume-stub";
  * HF / CAS を演じる curl。part の名前で応答を決める:
  * `missing.krm` = 404（`-f` で終了コード 22）/ `small.krm`・`large-plain.krm` = xet ハッシュの無い
  * 200 / それ以外 = 名前（拡張子抜き）をハッシュに名乗る xet の part。reconstruction は
- * ハッシュ `empty` だけ term 0 本、他は 2 term（1 xorb）。`STUB_TOKEN=fail` で token が 401。
+ * ハッシュ `empty` だけ term 0 本、`nofetch` は fetch_info の無い 2 term、`spread` は 3 term が
+ * 2 xorb の 3 レンジを指す形、他は 2 term が 1 xorb の同じ 1 レンジを指す形（全ゼロの chunk の
+ * 繰り返し参照と同じ形 — terms=2 だが取得範囲は 1 つ）。`STUB_TOKEN=fail` で token が 401。
  */
 const STUB_CURL = `#!/bin/sh
 url=""
@@ -54,8 +56,12 @@ case "$url" in
   */resolve/main/*)
     name=\${url##*/}
     printf 'HTTP/2 302\\r\\nx-xet-hash: %s\\r\\n\\r\\nHTTP/2 200\\r\\n\\r\\n' "\${name%.krm}" ;;
-  */v1/reconstructions/empty) echo '{"terms":[]}' ;;
-  */v1/reconstructions/*) echo '{"terms":[{"hash":"a"},{"hash":"a"}]}' ;;
+  */v1/reconstructions/empty) echo '{"terms":[],"fetch_info":{}}' ;;
+  */v1/reconstructions/nofetch) echo '{"terms":[{"hash":"a"},{"hash":"a"}]}' ;;
+  */v1/reconstructions/spread)
+    echo '{"terms":[{"hash":"a"},{"hash":"b"},{"hash":"a"}],"fetch_info":{"a":[{"range":{"start":0,"end":4}},{"range":{"start":9,"end":12}}],"b":[{"range":{"start":0,"end":2}}]}}' ;;
+  */v1/reconstructions/*)
+    echo '{"terms":[{"hash":"a"},{"hash":"a"}],"fetch_info":{"a":[{"range":{"start":0,"end":1}}]}}' ;;
   *) echo "stub curl: 想定外の URL $url" >&2; exit 99 ;;
 esac
 `;
@@ -129,6 +135,46 @@ Deno.test({
     assert(run.stdout.includes("### FAILED empty.krm"), run.stdout);
     assert(run.stdout.includes("### FAILED large-plain.krm"), run.stdout);
     assert(!run.stdout.includes("### fragmentation"), run.stdout);
+  },
+});
+
+Deno.test({
+  name:
+    "hf-upload check: 表は terms の隣に fetch_info の取得レンジ数を出し、MiB/term は terms で割ったまま",
+  ignore: !ZSH_AVAILABLE,
+  fn: async () => {
+    const run = await runCheck({ "good.krm": 20 * MIB, "spread.krm": 30 * MIB });
+    assertEquals(run.code, 0, run.stdout);
+    // 同じレンジを 2 回指す 2 term は ranges=1（繰り返し参照は取得範囲を増やさない）。
+    assert(
+      /### fragmentation good\.krm +20 MiB terms= +2 ranges= +1 xorbs= +1 MiB\/term=10\.0$/m.test(
+        run.stdout,
+      ),
+      run.stdout,
+    );
+    // 2 xorb にまたがる 3 レンジ（xorb a に 2 本・b に 1 本）は全 xorb の合計で数える。
+    assert(
+      /### fragmentation spread\.krm +30 MiB terms= +3 ranges= +3 xorbs= +2 MiB\/term=10\.0$/m.test(
+        run.stdout,
+      ),
+      run.stdout,
+    );
+  },
+});
+
+Deno.test({
+  name:
+    "hf-upload check: fetch_info の無い reconstruction は FAILED 行で非 0 になり、健全な行に化けない",
+  ignore: !ZSH_AVAILABLE,
+  fn: async () => {
+    const run = await runCheck({ "good.krm": 20 * MIB, "nofetch.krm": 20 * MIB });
+    assertNotEquals(run.code, 0, run.stdout);
+    assert(
+      run.stdout.includes("### FAILED nofetch.krm reconstruction の応答に fetch_info が無い"),
+      run.stdout,
+    );
+    assert(!run.stdout.includes("### fragmentation nofetch.krm"), run.stdout);
+    assert(run.stdout.includes("### fragmentation good.krm"), run.stdout);
   },
 });
 

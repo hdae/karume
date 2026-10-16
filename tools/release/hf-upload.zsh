@@ -38,6 +38,10 @@ cd "$ROOT"
 NON_XET_MAX_BYTES=$(( 10 * 1048576 ))
 
 # 全 safetensors / krm の reconstruction terms 表（healthy なら 1 xorb = 1 term に近い・目安 ≥10 MiB/term）。
+# ranges = 応答の fetch_info（xorb ハッシュ → 取得レンジの配列）の要素の総数 = 実際に取りに行く範囲の数。
+# 全ゼロの chunk のように同じ範囲を何度も指す term は terms だけを増やして ranges を増やさないので、
+# terms の多さが繰り返し参照によるものか、取得範囲そのものが細切れなのかを ranges で見分ける。
+# 判定（MiB/term と FAILED / SKIP）は terms のまま — ranges は読み手のための列で、門を緩めない。
 # MUST: ローカルミラーが 0 件なら非 0 で落ちる。usage は「公開済みリポの全 safetensors / krm」を名乗る
 # 一方で列挙するのは models/<repo> なので、手元にミラーが無いと 0 周して空表を成功として出す —
 # 「検証したが問題なし」と「何も検証していない」が同じ見え方になる（runbook §2 は全件を要求する）。
@@ -45,7 +49,7 @@ NON_XET_MAX_BYTES=$(( 10 * 1048576 ))
 # terms=0 → MiB/term = size（表で最も健全な値）の行が出て、検証していない part が合格に見える。
 # 取れなかった行は `### FAILED <rel>` を出し、表を最後まで出してから非 0 で返す。
 fragmentation_table() {
-  local tok cas casUrl access f rel headers hash recon stats terms xorbs size failed=0
+  local tok cas casUrl access f rel headers hash recon stats statsCode terms ranges xorbs size failed=0
   # (N.OL) = 該当なしなら空配列 / 通常ファイルのみ / サイズ降順（`ls -S` の並びと word splitting を兼ねる）。
   local files=(models/$NAME/**/*.(safetensors|krm)(N.OL))
   if (( ${#files} == 0 )); then
@@ -83,16 +87,23 @@ fragmentation_table() {
       echo "### FAILED $rel reconstruction の取得に失敗（hash $hash）"
       failed=1; continue
     fi
-    if ! stats=$(print -r -- "$recon" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); if (!Array.isArray(t.terms)) Deno.exit(1); console.log(t.terms.length+" "+new Set(t.terms.map(x=>x.hash)).size)'); then
+    # 終了コード 1 = terms が無い（JSON として読めない場合も含む）/ 2 = fetch_info が無いか形が違う。
+    # fetch_info を読めない行も FAILED にする（ranges=0 の行を出すと取得範囲が少ない健全な行に見える）。
+    stats=$(print -r -- "$recon" | deno eval 'const t=JSON.parse(await new Response(Deno.stdin.readable).text()); if (!Array.isArray(t.terms)) Deno.exit(1); const fi=t.fetch_info; if (typeof fi!=="object"||fi===null||Array.isArray(fi)||!Object.values(fi).every(Array.isArray)) Deno.exit(2); console.log(t.terms.length+" "+Object.values(fi).reduce((n,r)=>n+r.length,0)+" "+new Set(t.terms.map(x=>x.hash)).size)')
+    statsCode=$?
+    if (( statsCode == 2 )); then
+      echo "### FAILED $rel reconstruction の応答に fetch_info が無い（hash $hash）"
+      failed=1; continue
+    elif (( statsCode != 0 )); then
       echo "### FAILED $rel reconstruction の応答に terms が無い（hash $hash）"
       failed=1; continue
     fi
-    terms=${stats%% *}; xorbs=${stats##* }
+    terms=${stats%% *}; xorbs=${stats##* }; ranges=${${stats#* }%% *}
     if (( terms <= 0 )); then
       echo "### FAILED $rel reconstruction の term が 0 本（hash $hash）"
       failed=1; continue
     fi
-    printf '### fragmentation %-52s %5d MiB terms=%4d xorbs=%3d MiB/term=%.1f\n' "$rel" $(( size / 1048576 )) $terms $xorbs $(( size / 1048576.0 / terms ))
+    printf '### fragmentation %-52s %5d MiB terms=%4d ranges=%4d xorbs=%3d MiB/term=%.1f\n' "$rel" $(( size / 1048576 )) $terms $ranges $xorbs $(( size / 1048576.0 / terms ))
   done
   return $failed
 }

@@ -217,6 +217,9 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
 ```
 
 - [ ] `terms[]` を数え **MiB/レンジ ≥ 10 目安**（健全なら 1 xorb = 1 term に近い）。
+      表は `terms=` の隣に `ranges=`（応答の `fetch_info` にある取得レンジの総数 = 実際に取りに行く範囲の数）を
+      出す。全ゼロの chunk のように同じ範囲を何度も指す term は terms だけを増やすので、terms の多さが繰り返し
+      参照によるものか取得範囲の細切れによるものかを ranges で見分ける（目安と判定は terms のまま）。
       大きく下回っていたら断片化 — **hf_xet 1.6.0 + 上の env 4 本なら回復できる**。
       手順 = shard-cache を退避 → **リポを削除して再作成** → 同一バイトを上げ直す。CAS 照会が
       0 回になり xorb を新規に書くので健全形に戻る（2026-09-04・siglip2 で 46〜61 MiB/term へ
