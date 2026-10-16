@@ -32,6 +32,7 @@ import { readTextFile, readTextFileSync } from "@karume/test-support/fs";
 import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, parseManifest } from "@karume/hub";
+import { MemoryCacheStorage } from "../../hub/tests/helpers/mock.ts";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { Gemma4Pipeline } from "../../models/src/gemma/pipeline.ts";
 import type { Gemma4ChatMessage } from "../../models/src/gemma/text/chat.ts";
@@ -140,6 +141,8 @@ test({
   fn: async (t) => {
     await using server = await serveLocalDist(new URL(".", MIRROR_DIR).pathname);
     const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
+      // Node has no CacheStorage; the HTTP source needs one (hub prefetches through it).
+      caches: new MemoryCacheStorage(),
       maxResidentPleBytes: await maxResidentPleBytes(),
     });
     try {
@@ -247,6 +250,7 @@ test({
         try {
           const pipeline = await Gemma4Pipeline.fromPretrained(server.source, {
             gpu,
+            caches: new MemoryCacheStorage(),
             maxResidentPleBytes: await maxResidentPleBytes(),
             onRunDiagnostics: (diagnostics, phase) => {
               runs.push(diagnostics.lastRunPipelines);

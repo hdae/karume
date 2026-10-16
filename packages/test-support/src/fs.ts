@@ -87,8 +87,16 @@ export const isFilesystemLoop = (error: unknown): boolean => errorCode(error) ==
 
 export type ReadOptions = { readonly signal?: AbortSignal };
 
-export const readFile = async (path: PathLike, options?: ReadOptions): Promise<Uint8Array<ArrayBuffer>> =>
-  owned(await nodeReadFile(path, { signal: options?.signal }));
+/** `fs.readFile` refuses files above this size (ERR_FS_FILE_TOO_LARGE); larger ones are read in chunks. */
+const READ_FILE_LIMIT = 2 ** 31 - 1;
+
+export const readFile = async (path: PathLike, options?: ReadOptions): Promise<Uint8Array<ArrayBuffer>> => {
+  const { size } = await nodeStat(path);
+  if (size <= READ_FILE_LIMIT) return owned(await nodeReadFile(path, { signal: options?.signal }));
+  // Deno.readFile had no size limit (the suite reads 2.6 GB reference tensors).
+  options?.signal?.throwIfAborted();
+  return readRange(path, 0, size);
+};
 export const readFileSync = (path: PathLike): Uint8Array<ArrayBuffer> => owned(nodeReadFileSync(path));
 export const readTextFile = (path: PathLike, options?: ReadOptions): Promise<string> =>
   nodeReadFile(path, { encoding: "utf8", signal: options?.signal });
