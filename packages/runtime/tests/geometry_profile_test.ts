@@ -948,10 +948,9 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
 
   it("async 関数が reject しても GpuFeatureError で拒み、その reject は unhandled rejection にならない", async () => {
     const unhandled: unknown[] = [];
-    const onUnhandled = (event: PromiseRejectionEvent): void => {
-      unhandled.push(event.reason);
-      // 捕まえた reject でテストランナーを落とさない（数えて下で assert する）
-      event.preventDefault();
+    // Node reports unhandled rejections through process events (no globalThis event target).
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
     };
     // async 関数そのものをコールバックにする（呼ばれた時点で reject 済みの Promise が生まれる — JS の呼び手の形）。
     // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
@@ -959,7 +958,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     const asyncCallback = (async () => {
       throw new Error("x");
     }) as unknown as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined;
-    globalThis.addEventListener("unhandledrejection", onUnhandled);
+    process.on("unhandledRejection", onUnhandled);
     try {
       const requests = await withFakeAdapter(FAKE_INFO, async () => {
         await assertRejects(
@@ -973,16 +972,15 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       await new Promise((resolve) => setTimeout(resolve, 0));
       assertEquals(unhandled, [], "async コールバックの reject が unhandled rejection になった");
     } finally {
-      globalThis.removeEventListener("unhandledrejection", onUnhandled);
+      process.off("unhandledRejection", onUnhandled);
     }
   });
 
   it("別 realm（iframe・node:vm）の async 関数・reject 済みの Promise も GpuFeatureError で拒み、その reject は unhandled rejection にならない", async () => {
     const unhandled: unknown[] = [];
-    const onUnhandled = (event: PromiseRejectionEvent): void => {
-      unhandled.push(event.reason);
-      // 捕まえた reject でテストランナーを落とさない（数えて下で assert する）
-      event.preventDefault();
+    // Node reports unhandled rejections through process events (no globalThis event target).
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
     };
     const realm = createContext({});
     // 別 realm の Promise はこの realm の Promise の instance ではない（instanceof では見分けられない形）
@@ -995,7 +993,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       realm,
     );
     assert(typeof foreignAsync === "function");
-    globalThis.addEventListener("unhandledrejection", onUnhandled);
+    process.on("unhandledRejection", onUnhandled);
     try {
       for (
         const [name, callback] of [
@@ -1021,7 +1019,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       await new Promise((resolve) => setTimeout(resolve, 0));
       assertEquals(unhandled, [], "別 realm の Promise の reject が unhandled rejection になった");
     } finally {
-      globalThis.removeEventListener("unhandledrejection", onUnhandled);
+      process.off("unhandledRejection", onUnhandled);
     }
   });
 

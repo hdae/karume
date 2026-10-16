@@ -111,6 +111,9 @@ const buildServed = async (): Promise<RepoSpec> => {
 };
 
 const main = async (): Promise<void> => {
+  // Node keeps the imported module sources as external strings (about 10 MiB for hub + models), so
+  // the retained bytes are measured as the growth over this baseline, not as an absolute amount.
+  const baseline = externalAfterGc();
   // MUST: `RepoSpec` を `main` の枠へ束縛しない（フィクスチャのバイト列が測定値へ乗る）。
   const mock = serveRepos([await buildServed()]);
   const { fetch } = mock;
@@ -134,7 +137,7 @@ const main = async (): Promise<void> => {
   mock.clear();
   for (const cache of caches.namespaces.values()) cache.entries.clear();
 
-  const resident = externalAfterGc();
+  const resident = externalAfterGc() - baseline;
   // `open` を gc の後まで生かす（ここで初めて到達可能性が切れる）。
   if (open("dit").graph.outputs[0] !== "y") {
     console.error("weight-block-retention: グラフ宣言が読めない（フィクスチャの誤り）");
@@ -144,12 +147,12 @@ const main = async (): Promise<void> => {
   if (resident > ALLOWED_RESIDENT_BYTES) {
     console.error(
       `weight-block-retention: 容器のバイト列が常駐している` +
-        `（external=${mib(resident)} > 許容 ${mib(ALLOWED_RESIDENT_BYTES)}` +
+        `（external の増分=${mib(resident)} > 許容 ${mib(ALLOWED_RESIDENT_BYTES)}` +
         ` / 重み 1 本 ${mib(WEIGHT_BYTES)}）`,
     );
     process.exit(1);
   }
-  console.log(`weight-block-retention: external=${mib(resident)}`);
+  console.log(`weight-block-retention: external の増分=${mib(resident)}（基準 ${mib(baseline)}）`);
 };
 
 await main();

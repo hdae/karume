@@ -1177,12 +1177,17 @@ const withGlobalCaches = async (
   body: () => Promise<void>,
 ): Promise<void> => {
   const original = Object.getOwnPropertyDescriptor(globalThis, "caches");
-  if (original === undefined) throw new Error("この環境に globalThis.caches が無い");
+  // Node has no CacheStorage: "absent" needs no swap, and a value is installed temporarily.
+  if (value === undefined && original === undefined) {
+    await body();
+    return;
+  }
   Object.defineProperty(globalThis, "caches", { value, configurable: true });
   try {
     await body();
   } finally {
-    Object.defineProperty(globalThis, "caches", original);
+    if (original === undefined) Reflect.deleteProperty(globalThis, "caches");
+    else Object.defineProperty(globalThis, "caches", original);
   }
 };
 

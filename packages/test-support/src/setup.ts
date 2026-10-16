@@ -17,6 +17,9 @@ import { create, globals } from "webgpu";
 type DawnHost = typeof globalThis & { __karumeDawnGpu?: GPU };
 
 const host = globalThis as DawnHost;
+// The namespaces and error classes exist in Deno and browsers even when no adapter does, and tests
+// read them at module scope — install them unconditionally.
+Object.assign(globalThis, globals);
 // KARUME_NO_DAWN=1 runs the suite as if the machine had no WebGPU (CPU-only cases; the all-skip
 // gates still apply) — useful next to another process that owns the GPU.
 if (host.__karumeDawnGpu === undefined && process.env.KARUME_NO_DAWN !== "1") {
@@ -29,7 +32,6 @@ if (host.__karumeDawnGpu === undefined && process.env.KARUME_NO_DAWN !== "1") {
     // all-skip gate (KARUME_ALLOW_NO_GPU) decides whether that is acceptable.
     console.warn(`[karume] Dawn could not be created; running without navigator.gpu: ${String(error)}`);
   }
-  Object.assign(globalThis, globals);
 }
 
 const current: GPU | undefined = navigator.gpu;
