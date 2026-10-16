@@ -76,7 +76,7 @@ const SWAP_RAW = process.env[SWAP_ENV];
 const SWAP_DIRECTORY = SWAP_RAW === undefined || SWAP_RAW === "" ? undefined : SWAP_RAW;
 
 /** 配布形ミラー（`dist.py --pipeline wan` の既定の出力先）。 */
-const DIST_ROOT = new URL("../../../models/karume-wan2.1", import.meta.url);
+const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
 /** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
 const TEXT_ENCODER = "text_encoder";
 /**
@@ -124,7 +124,7 @@ if (SWAP_DIRECTORY === undefined) {
   );
 }
 
-const references = openReferences(new URL("fixtures/references/wan.json", import.meta.url));
+const references = openReferences(new URL("../../models/tests/fixtures/references/wan.json", import.meta.url));
 const results = openResults("wan-swap");
 
 /** 実体を持つ part（長さ 0 の part は取得の対象外 — hub も取らない）。 */

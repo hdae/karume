@@ -57,7 +57,7 @@ const LATENT_ATOL = 2e-4;
 /** LUFS 正規化を通る golden ケース（`normalizeDb: -16` の 3 本 — この経路が持つ枝の全部）。 */
 const CASES: readonly string[] = ["ref-default", "ref-short", "ref-odd"];
 
-const GOLDEN_DIR = new URL("../../../outputs/series/dacvae-32dim/host", import.meta.url);
+const GOLDEN_DIR = new URL("../../../outputs/series/dacvae-32dim/host/", import.meta.url);
 const ENCODER_URL = new URL(
   "../../../outputs/series/dacvae-32dim/encoder/model.krm",
   import.meta.url,

@@ -257,7 +257,7 @@ const GRAPH_OUTPUTS = 25;
 const ACT_IO_PREFIX = "io-i8a8.";
 const IO_SUFFIX = ".safetensors";
 
-const ROOT = new URL("../../../outputs/series/deberta-i8/full-24layer", import.meta.url);
+const ROOT = new URL("../../../outputs/series/deberta-i8/full-24layer/", import.meta.url);
 const GRAPH = seriesGraph("deberta-i8", "full-24layer");
 const VARIANT = "i8/full-24layer";
 /** SKIP 時にそのまま貼れる生成コマンド（tools/export-recipes/deberta/README.md）。 */

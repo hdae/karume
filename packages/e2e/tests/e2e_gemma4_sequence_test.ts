@@ -78,7 +78,7 @@ import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budg
 
 const PRODUCT_NAME = "gemma4-e2b-product";
 const PRODUCT_ROOT = new URL(`../../../outputs/series/${PRODUCT_NAME}/`, import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode", import.meta.url);
+const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
 const MODEL_FILE = "model.krm";
 /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
 const MODEL_GRAPH = seriesGraph(PRODUCT_NAME);
@@ -506,7 +506,7 @@ test({
 // ゲートは壁時計で M=1 と M=4 を選ぶので、門が赤の device では基準と分岐の列が割れうる
 // （ADR 0066 追記 2026-10-11 の決定性の節）。
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
 /**
  * drafter 入りの `karume/5` ミラーか（⑥の前提 — 投機の 2 系統を回す）。

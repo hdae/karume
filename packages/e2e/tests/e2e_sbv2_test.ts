@@ -541,14 +541,14 @@ const SERIES: readonly Sbv2Series[] = [
   {
     name: "f32",
     directory: "sbv2-F1",
-    root: new URL("../../../outputs/series/sbv2-F1", import.meta.url),
+    root: new URL("../../../outputs/series/sbv2-F1/", import.meta.url),
     tolerances: TOLERANCES,
     generate: GENERATE_COMMAND,
   },
   {
     name: "f16",
     directory: "sbv2-F1-f16",
-    root: new URL("../../../outputs/series/sbv2-F1-f16", import.meta.url),
+    root: new URL("../../../outputs/series/sbv2-F1-f16/", import.meta.url),
     tolerances: F16_TOLERANCES,
     compressedStorage: "f16",
     generate: `${GENERATE_COMMAND} --dtype f16`,
@@ -556,7 +556,7 @@ const SERIES: readonly Sbv2Series[] = [
   {
     name: "i8",
     directory: "sbv2-F1-i8",
-    root: new URL("../../../outputs/series/sbv2-F1-i8", import.meta.url),
+    root: new URL("../../../outputs/series/sbv2-F1-i8/", import.meta.url),
     tolerances: I8_TOLERANCES,
     compressedStorage: "i8",
     generate: `${GENERATE_COMMAND} --dtype i8`,

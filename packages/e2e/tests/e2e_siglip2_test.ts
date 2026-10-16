@@ -213,7 +213,7 @@ const SERIES: readonly Series[] = [
   },
 ];
 
-const SERIES_PARENT = new URL("../../../outputs/series", import.meta.url);
+const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";

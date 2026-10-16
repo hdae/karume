@@ -42,7 +42,7 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 const TOKEN_NAME = "gemma4-e2b-decode-token";
 const TOKEN_ROOT = new URL(`../../../outputs/series/${TOKEN_NAME}/`, import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode", import.meta.url);
+const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-decode/", import.meta.url);
 const MODEL_FILE = "model.krm";
 /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
 const MODEL_GRAPH = seriesGraph(TOKEN_NAME);

@@ -92,7 +92,7 @@ import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { readFileIfPresent, readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
-const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
 /** 参照音声（手置きの実資産 — 48kHz mono PCM16）。 */
 const REFERENCE_AUDIO = new URL(
   "../../../inputs/irodori/v4-small/samples/clone_ref1.wav",
@@ -100,7 +100,7 @@ const REFERENCE_AUDIO = new URL(
 );
 /** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
 const references = openReferences(
-  new URL("fixtures/references/irodori.json", import.meta.url),
+  new URL("../../models/tests/fixtures/references/irodori.json", import.meta.url),
 );
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_irodori/` — 消して安全）。 */
 const results = openResults("irodori");

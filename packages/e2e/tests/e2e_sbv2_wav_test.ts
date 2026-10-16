@@ -96,9 +96,9 @@ import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { readFileIfPresent, readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
-const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
 /** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
-const references = openReferences(new URL("fixtures/references/sbv2.json", import.meta.url));
+const references = openReferences(new URL("../../models/tests/fixtures/references/sbv2.json", import.meta.url));
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_sbv2/` — 消して安全）。 */
 const results = openResults("sbv2");
 /**

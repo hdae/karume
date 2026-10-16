@@ -127,7 +127,7 @@ const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形の�
 
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 /** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
-const CORPUS_DIR = new URL("../../../outputs/misc/corpus", import.meta.url);
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 const MODEL_FILE = "model.krm";
 /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
 const MODEL_GRAPH = seriesGraph(SERIES_NAME);
@@ -146,7 +146,7 @@ const results = openResults("depth-anything");
  * 差を見逃す（加えて PNG の圧縮はランタイムの版で変わりうる）ので sha の対象にしない。
  */
 const references = openReferences(
-  new URL("fixtures/references/depth-anything.json", import.meta.url),
+  new URL("../../models/tests/fixtures/references/depth-anything.json", import.meta.url),
 );
 
 /**

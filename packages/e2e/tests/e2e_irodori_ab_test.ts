@@ -52,7 +52,7 @@ import { withManifestOverride } from "../../models/tests/helpers/manifest-overri
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 配布形の置き場（`karume dist --pipeline irodori` の v4.1 の出力先）。 */
-const ASSETS_DIR = new URL("../../../models/karume-irodori-v4.1-small", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-irodori-v4.1-small/", import.meta.url);
 /** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_irodori-ab/` — 消して安全）。 */
 const results = openResults("irodori-ab");
 

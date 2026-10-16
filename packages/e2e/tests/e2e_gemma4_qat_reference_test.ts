@@ -28,10 +28,10 @@ import {
   settleSeatReference,
 } from "../../models/tests/helpers/gemma-reference.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4-qat", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 /** token id 列の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。 */
 const references = openReferences(
-  new URL("fixtures/references/gemma4-qat.json", import.meta.url),
+  new URL("../../models/tests/fixtures/references/gemma4-qat.json", import.meta.url),
 );
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_gemma4-qat/` — 消して安全）。 */
 const results = openResults("gemma4-qat");

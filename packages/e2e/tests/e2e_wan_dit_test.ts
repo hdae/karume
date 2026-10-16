@@ -433,7 +433,7 @@ const I8_NORMALIZED_BAND: Readonly<Record<I8Group, number | undefined>> = {
 const I8_SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
 
 /** 配布形ミラー（実用席の束の正本 — `dist.py --pipeline wan` の出力先）。 */
-const DIST_ROOT = new URL("../../../models/karume-wan2.1", import.meta.url);
+const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
 /** 配布形の Wan のモデル名（manifest の models のキー）。 */
 const DIST_MODEL = "t2v-1.3b";
 /** 実用席（ADR 0120 決定 1）。 */

@@ -63,7 +63,7 @@ import {
 } from "../../models/tests/helpers/wan-ab-gate.ts";
 
 /** 配布形の置き場（`dist.py --pipeline wan` の出力先）。 */
-const ASSETS_DIR = new URL("../../../models/karume-wan2.1", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-wan2.1/", import.meta.url);
 /** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_wan-ab/` — 消して安全）。 */
 const results = openResults("wan-ab");
 

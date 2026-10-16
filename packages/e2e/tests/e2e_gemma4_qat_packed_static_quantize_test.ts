@@ -15,7 +15,7 @@ import { Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 
-const root = new URL("../../../models/karume-gemma4-qat", import.meta.url);
+const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 const available = mirrorAvailable(root);
 if (!available) {
   console.warn(

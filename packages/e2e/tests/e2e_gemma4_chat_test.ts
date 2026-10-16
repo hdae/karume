@@ -64,7 +64,7 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -127,7 +127,7 @@ type ChatFixture = {
 };
 
 const fixture = JSON.parse(
-  await readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
 ) as ChatFixture;
 
 const caseOf = (name: string) => {

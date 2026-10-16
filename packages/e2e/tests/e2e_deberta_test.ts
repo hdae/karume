@@ -186,7 +186,7 @@ type DebertaVariant = {
 const VARIANTS: readonly DebertaVariant[] = [
   {
     name: "f32/full-24layer",
-    root: new URL("../../../outputs/series/deberta/full-24layer", import.meta.url),
+    root: new URL("../../../outputs/series/deberta/full-24layer/", import.meta.url),
     graph: seriesGraph("deberta", "full-24layer"),
     tolerance: DEBERTA_TOLERANCE,
     outputs: 25,
@@ -194,7 +194,7 @@ const VARIANTS: readonly DebertaVariant[] = [
   },
   {
     name: "i8/full-24layer",
-    root: new URL("../../../outputs/series/deberta-i8/full-24layer", import.meta.url),
+    root: new URL("../../../outputs/series/deberta-i8/full-24layer/", import.meta.url),
     graph: seriesGraph("deberta-i8", "full-24layer"),
     tolerance: DEBERTA_I8_TOLERANCE,
     outputs: 25,
@@ -203,7 +203,7 @@ const VARIANTS: readonly DebertaVariant[] = [
   },
   {
     name: "i8/sbv2-22layer",
-    root: new URL("../../../outputs/series/deberta-i8/sbv2-22layer", import.meta.url),
+    root: new URL("../../../outputs/series/deberta-i8/sbv2-22layer/", import.meta.url),
     graph: seriesGraph("deberta-i8", "sbv2-22layer"),
     tolerance: DEBERTA_I8_22LAYER_TOLERANCE,
     outputs: 1,

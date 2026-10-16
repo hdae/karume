@@ -41,9 +41,9 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { countFences } from "../../runtime/tests/helpers/fences.ts";
 import { modelPresent } from "../../runtime/tests/helpers/container-files.ts";
 
-const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-qat-e2b-product", import.meta.url);
-const QAT_ROOT = new URL("../../../models/karume-gemma4-qat", import.meta.url);
-const GEMMA_ROOT = new URL("../../../models/karume-gemma4", import.meta.url);
+const PRODUCT_ROOT = new URL("../../../outputs/series/gemma4-qat-e2b-product/", import.meta.url);
+const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
+const GEMMA_ROOT = new URL("../../../models/karume-gemma4/", import.meta.url);
 const PLE_PROBE_FILE = "ple.probe.safetensors";
 const PROBE_TOKENS_KEY = "tokens";
 const PROBE_INPUTS_KEY = "per_layer_inputs";

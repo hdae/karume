@@ -122,9 +122,9 @@ const SERIES: readonly Series[] = [
   },
 ];
 
-const SERIES_PARENT = new URL("../../../outputs/series", import.meta.url);
+const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 /** 入力の実画像コーパス（凍結コピー — ホスト資産なので消すと焼き直しが要る）。 */
-const CORPUS_DIR = new URL("../../../outputs/misc/corpus", import.meta.url);
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 /** マット PNG と決着の置き場（`outputs/verify/<環境キー>/<日付>_birefnet/` — 消して安全）。 */
 const results = openResults("birefnet");
 /**
@@ -136,7 +136,7 @@ const results = openResults("birefnet");
  * またがない差を見逃す（加えて PNG の圧縮はランタイムの版で変わりうる）ので sha の対象にしない。
  */
 const references = openReferences(
-  new URL("fixtures/references/birefnet.json", import.meta.url),
+  new URL("../../models/tests/fixtures/references/birefnet.json", import.meta.url),
 );
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";

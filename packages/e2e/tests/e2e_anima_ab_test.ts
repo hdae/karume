@@ -63,7 +63,7 @@ import { withManifestOverride } from "../../models/tests/helpers/manifest-overri
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-anima/`）。 */
-const ASSETS_DIR = new URL("../../../models/karume-anima", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 /** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_anima-ab/` — 消して安全）。 */
 const results = openResults("anima-ab");
 

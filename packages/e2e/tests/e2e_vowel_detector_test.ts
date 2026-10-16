@@ -93,7 +93,7 @@ const CLASS_COUNT = 8;
  */
 const EXPECTED_GOLDEN = ["noise", "ramp", "silence", "voiced"] as const;
 
-const SERIES_PARENT = new URL("../../../outputs/series", import.meta.url);
+const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";

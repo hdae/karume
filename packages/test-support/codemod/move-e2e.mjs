@@ -14,9 +14,12 @@ const write = process.argv.includes("--write");
 const files = process.argv.slice(2).filter((a) => a !== "--write");
 if (files.length === 0) { console.error("usage: move-e2e.mjs [--write] <file.ts>..."); process.exit(2); }
 
-const relSpec = (fromDir, target) => {
-  let r = relative(fromDir, target).split(sep).join("/");
+const relSpec = (fromDir, spec, oldDir) => {
+  let r = relative(fromDir, resolve(oldDir, spec)).split(sep).join("/");
   if (!r.startsWith(".")) r = `./${r}`;
+  // `resolve` drops a trailing slash; directory URLs need it back (`new URL("x", dir)` resolves
+  // against the parent otherwise).
+  if (spec.endsWith("/") && !r.endsWith("/")) r += "/";
   return r;
 };
 
@@ -30,13 +33,14 @@ for (const file of files) {
   let text = readFileSync(abs, "utf8");
   let rewritten = 0;
   const rewrite = (spec) => {
-    const out = relSpec(destDir, resolve(oldDir, spec));
+    const out = relSpec(destDir, spec, oldDir);
     if (out !== spec) rewritten++;
     return out;
   };
   text = text.replace(/((?:from|import)\s*")(\.\.?\/[^"\n]+)(")/g, (_, a, s, b) => a + rewrite(s) + b);
   text = text.replace(/(import\(\s*")(\.\.?\/[^"\n]+)(")/g, (_, a, s, b) => a + rewrite(s) + b);
-  text = text.replace(/(new URL\(\s*")(\.\.?\/[^"\n]+)("\s*,\s*import\.meta\.url\s*\))/g, (_, a, s, b) => a + rewrite(s) + b);
+  // Any relative URL against import.meta.url, with or without a leading "./" (not scheme URLs).
+  text = text.replace(/(new URL\(\s*")((?![a-z]+:)[^"\n/][^"\n]*|\.\.?\/[^"\n]+)("\s*,\s*import\.meta\.url\s*\))/g, (_, a, s, b) => a + rewrite(s) + b);
   const leftovers = [];
   text.split("\n").forEach((line, i) => {
     if (/^\s*(\*|\/\/|\/\*)/.test(line)) return;

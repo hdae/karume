@@ -45,7 +45,7 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 配布形（`karume dist --pipeline vowel-detector` の出力）。 */
-const DIST_DIR = new URL("../../../models/karume-vowel-detector", import.meta.url);
+const DIST_DIR = new URL("../../../models/karume-vowel-detector/", import.meta.url);
 const SERIES_NAME = "vowel-detector-crnn-epoch3";
 /** 系列（`tools/export-recipes/vowel_detector/export.py` の出力 — 直接経路の相手）。 */
 const SERIES_DIR = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
@@ -54,7 +54,7 @@ const SERIES_MODEL = new URL("model.krm", SERIES_DIR);
 /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
 const SERIES_GRAPH = seriesGraph(SERIES_NAME);
 /** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
-const CORPUS_DIR = new URL("../../../outputs/misc/corpus", import.meta.url);
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 
 /** 実音声（`e2e_vowel_detector_chain_test.ts` の `CASES` と同じ 4 本）。 */
 const CASES = ["short", "vowels", "mid", "long"] as const;

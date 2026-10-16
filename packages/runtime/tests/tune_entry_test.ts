@@ -201,7 +201,9 @@ describe("runGeometrySweep: 実 GPU", () => {
         },
       });
       assertEquals(swept.settings.cases, [id]);
-      assertEquals(swept.gpuTiming.unit, timestampQuery ? "deno-raw-tick" : "wall");
+      // Deno reports raw ticks; every other runtime (Dawn on Node, browsers) reports nanoseconds.
+      const unit = navigator.userAgent.startsWith("Deno/") ? "deno-raw-tick" : "ns";
+      assertEquals(swept.gpuTiming.unit, timestampQuery ? unit : "wall");
       assert(swept.rows.length >= 2, `${swept.rows.length} 行`);
       assertEquals(swept.rows[0].isDefault, true);
       for (const row of swept.rows) {

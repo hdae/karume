@@ -177,9 +177,9 @@ const FRAME_RATIO_BAND = 8.5e-3;
 const FAULT_MARGIN = 2;
 
 /** 参照（配布しない golden）の置き場。 */
-const SERIES_ROOT = new URL("../../../outputs/series/wan2.1-t2v-1.3b-f16-dyn", import.meta.url);
+const SERIES_ROOT = new URL("../../../outputs/series/wan2.1-t2v-1.3b-f16-dyn/", import.meta.url);
 /** 配布形ミラー（`dist.py --pipeline wan` の既定の出力先）。 */
-const DIST_ROOT = new URL("../../../models/karume-wan2.1", import.meta.url);
+const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
 /** manifest の `assets` の埋め込み資産のキー（recipe `wan/distribution.py` の `WAN_TEXT_EMBEDS_ROLE`）。 */
 const TEXT_EMBEDS = "text_embeds";
 const STEPS = 2;
@@ -292,7 +292,7 @@ const GENERATE_COMMAND = "cd tools/export-recipes && uv run --group wan --inexac
 const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
 
 /** umT5 の配布形ミラー（Wan の manifest の `text_encoder` が越境参照する先 — ADR 0119 追記「段 10d の設計」D）。 */
-const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl", import.meta.url);
+const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
 /** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
 const TEXT_ENCODER = "text_encoder";
 
@@ -401,7 +401,7 @@ const rowClassOf = async (quant: string): Promise<string> => {
     : `${quant}: 実用行（session 非空 — 実用層の退行と決定性の検出器）`;
 };
 
-const references = openReferences(new URL("fixtures/references/wan.json", import.meta.url));
+const references = openReferences(new URL("../../models/tests/fixtures/references/wan.json", import.meta.url));
 const results = openResults("wan-pipeline");
 /** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
 const fullResults = openResults("wan-pipeline-full");

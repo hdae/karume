@@ -73,7 +73,7 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
-const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
 /** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_sbv2-ab/` — 消して安全）。 */
 const results = openResults("sbv2-ab");
 

@@ -533,6 +533,9 @@ test({
       );
       assert(error.message.startsWith("GenerationContext の state 確保: "), error.message);
       assertEquals(session.diagnostics().stateBacking.contextCount, 0);
+      // Dawn reclaims destroyed allocations on its next tick, not synchronously (wgpu freed them
+      // at destroy()); settle the queue so the survivor's 1 GiB measures what was returned.
+      await gpu.device.queue.onSubmittedWorkDone();
       const context = await survivor.createGenerationContext({ chunkLength: 1 });
       assertEquals(context.pastLength, 0);
       await context.dispose();

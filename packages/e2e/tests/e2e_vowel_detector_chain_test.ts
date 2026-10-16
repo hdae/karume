@@ -269,7 +269,7 @@ const CLASS_COUNT = 8;
 const SERIES_NAME = "vowel-detector-crnn-epoch3";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 /** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
-const CORPUS_DIR = new URL("../../../outputs/misc/corpus", import.meta.url);
+const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 const FIXTURE_PATH = new URL("../../models/tests/fixtures/vowel-detector/parity.json", import.meta.url);
 const MODEL_FILE = "model.krm";
 /** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
@@ -291,7 +291,7 @@ const results = openResults("vowel-detector");
  * sha はそのファイルのバイト列に対して採る。
  */
 const references = openReferences(
-  new URL("fixtures/references/vowel-detector.json", import.meta.url),
+  new URL("../../models/tests/fixtures/references/vowel-detector.json", import.meta.url),
 );
 
 /** ロジットの実物のファイル名（結果の席からの相対）。 */

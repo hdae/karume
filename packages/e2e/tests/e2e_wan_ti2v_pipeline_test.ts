@@ -332,7 +332,7 @@ const TEXT_EMBEDS_URL = new URL(
 );
 
 /** umT5 の配布形ミラー（Wan2.2 の manifest の `text_encoder` が越境参照する先 — 2.1 と同じミラー）。 */
-const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl", import.meta.url);
+const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
 /** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
 const TEXT_ENCODER = "text_encoder";
 
@@ -388,7 +388,7 @@ if (!ANY_FIXTURE) {
   );
 }
 
-const references = openReferences(new URL("fixtures/references/wan-ti2v.json", import.meta.url));
+const references = openReferences(new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url));
 const results = openResults("wan-ti2v-pipeline");
 /** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
 const fullResults = openResults("wan-ti2v-pipeline-full");

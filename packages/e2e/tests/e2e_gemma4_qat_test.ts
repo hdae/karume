@@ -6,7 +6,7 @@ import { denoDirectory } from "@karume/hub/deno";
 import { type Gemma4Assets, Gemma4ChatSession, Gemma4QatPipeline } from "../../models/gemma4-qat.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
-const root = new URL("../../../models/karume-gemma4-qat", import.meta.url);
+const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 // 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
 const available = mirrorAvailable(root);
 if (!available) {

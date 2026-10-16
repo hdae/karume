@@ -68,8 +68,8 @@ import { mirrorAvailable, openGemma4Ple, openMirrorComponent } from "../../model
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentBytes, allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4", import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
@@ -680,7 +680,7 @@ test({
   ignore: !MIRROR_PRESENT || !GPU_AVAILABLE,
   fn: async (t) => {
     const fixture: ChatFixture = JSON.parse(
-      await readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+      await readTextFile(new URL("../../models/tests/fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
     );
     const chatCase = fixture.chat.find((row) => row.name === CHAT_CASE.fixture);
     assert(chatCase !== undefined, `フィクスチャに chat ケース '${CHAT_CASE.fixture}' が無い`);

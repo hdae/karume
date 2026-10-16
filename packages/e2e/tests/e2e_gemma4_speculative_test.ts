@@ -72,8 +72,8 @@ import { mirrorAvailable, openGemma4Ple, openMirrorComponent } from "../../model
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentBytes, allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4", import.meta.url);
-const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter", import.meta.url);
+const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+const GOLDEN_ROOT = new URL("../../../outputs/series/gemma4-e2b-drafter/", import.meta.url);
 
 /** SKIP 時にそのまま貼れる組み立てコマンド（段 2 の門と同文）。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +

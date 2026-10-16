@@ -46,7 +46,7 @@ import {
 } from "../../models/tests/helpers/umt5-golden.ts";
 
 /** 配布形ミラー（`dist.py --pipeline umt5` の既定の出力先）。 */
-const DIST_ROOT = new URL("../../../models/karume-umt5-xxl", import.meta.url);
+const DIST_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
 const ASSEMBLE = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
 /** 席（明示 — 省略すると manifest の既定へ黙って移る。golden は i8 の重みから採った）。 */
 const MODEL = "xxl";

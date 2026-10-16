@@ -82,11 +82,11 @@ import { openResults } from "../../runtime/tests/helpers/results.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
 /** 資産の置き場（リポ直下 `models/karume-anima/` — 公式 5 変種同居・既定 = turbo-v1.1）。 */
-const ASSETS_DIR = new URL("../../../models/karume-anima", import.meta.url);
+const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
 /** CFG の門が選ぶモデル（素の base — 既定の turbo は CFG=1 で uncond 側を通らない）。 */
 const BASE_MODEL = "anima-v1.0";
 /** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
-const references = openReferences(new URL("fixtures/references/anima.json", import.meta.url));
+const references = openReferences(new URL("../../models/tests/fixtures/references/anima.json", import.meta.url));
 /** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_anima/` — 消して安全）。 */
 const results = openResults("anima");
 
@@ -132,7 +132,7 @@ const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
  * anima-copycat-20260610）。共有部品は公式リポへの越境参照なので、公式のミラー
  * （{@link ASSETS_DIR}）と揃って初めて走る。
  */
-const EXTRA_ASSETS_DIR = new URL("../../../models/karume-anima-extra", import.meta.url);
+const EXTRA_ASSETS_DIR = new URL("../../../models/karume-anima-extra/", import.meta.url);
 const extraManifestText = await readTextIfPresent(new URL("karume.json", EXTRA_ASSETS_DIR));
 if (extraManifestText === undefined) {
   console.warn(

@@ -387,7 +387,7 @@ if (!ANY_FIXTURE) {
   );
 }
 
-const references = openReferences(new URL("fixtures/references/wan-ti2v.json", import.meta.url));
+const references = openReferences(new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url));
 const results = openResults("wan-ti2v-i2v-pipeline");
 /** 50 ステップの通しの結果の席（`results.json` は走行ごとに丸ごと書き直されるので、別のプロセスで回す回と分ける）。 */
 const fullResults = openResults("wan-ti2v-i2v-pipeline-full");
