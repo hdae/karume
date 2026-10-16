@@ -14,6 +14,7 @@
  * 押さえる。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -197,7 +198,7 @@ const residentLoop = async (
   }
 };
 
-Deno.test("ホストで組む宣言はグラフ単体の規則を通る（前方参照は宣言の段で落ちる）", () => {
+test("ホストで組む宣言はグラフ単体の規則を通る（前方参照は宣言の段で落ちる）", () => {
   const declaration = eulerGraph(FRAMES, LATENT_DIM);
   // 陰性対照: 組んだ宣言そのものは通る（= 検出器が常に赤なわけではない）。
   assertEquals(parseIrDeclarationValue({ ...declaration }), declaration);
@@ -210,7 +211,7 @@ Deno.test("ホストで組む宣言はグラフ単体の規則を通る（前方
   );
 });
 
-Deno.test({
+test({
   name: "常駐 CFG + Euler ループは TS 正本とビット一致し、フェンスは batch の 1 本（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -234,7 +235,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "CFG 窓の外の step（変種 0 本）は cond をそのまま Euler へ渡す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

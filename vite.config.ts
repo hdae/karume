@@ -1,11 +1,13 @@
 import { defineConfig } from "vite-plus";
+import { laneProjects } from "./packages/test-support/src/lanes.ts";
 
 export default defineConfig({
   lint: {
     options: { typeAware: true, typeCheck: true },
   },
   test: {
-    include: ["packages/*/tests/**/*_test.ts"],
+    // No root `include`: the lanes (projects) define what runs; `extends: true` would otherwise
+    // concatenate a root include into every lane.
     setupFiles: ["./packages/test-support/src/setup.ts"],
     // GPU tests share one physical device and the sha256 reference rows assume one run at a time:
     // every file runs in a single forked worker, one file after another.
@@ -18,5 +20,7 @@ export default defineConfig({
     testTimeout: 0,
     hookTimeout: 0,
     passWithNoTests: false,
+    // Lanes (see packages/test-support/src/lanes.ts): `vp test --project <lane>`.
+    projects: laneProjects(),
   },
 });

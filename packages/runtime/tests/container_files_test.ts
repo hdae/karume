@@ -9,6 +9,8 @@
 // 鏡像の Python 側は `tools/exporter/tests/test_container.py` と、`tools/exporter/tests/test_dist.py`
 // の `TestPartExpansion`（連番の part 列の展開・単一形と連番の同居の拒否）。
 
+import { makeTempDir, readFileSync, remove, writeFileSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -130,13 +132,13 @@ const partName = (index: number, total: number): string =>
 
 /** 0 バイトのファイルを置いた一時ディレクトリ（末尾 `/` 付きの URL を渡す）。 */
 const withFiles = async (names: readonly string[], body: (dir: URL) => void): Promise<void> => {
-  const path = await Deno.makeTempDir({ prefix: "karume-container-files-" });
+  const path = await makeTempDir({ prefix: "karume-container-files-" });
   try {
     const dir = new URL(`file://${path}/`);
-    for (const name of names) Deno.writeFileSync(new URL(name, dir), new Uint8Array(0));
+    for (const name of names) writeFileSync(new URL(name, dir), new Uint8Array(0));
     body(dir);
   } finally {
-    await Deno.remove(path, { recursive: true });
+    await remove(path, { recursive: true });
   }
 };
 
@@ -145,15 +147,15 @@ const withContainer = async (
   body: (dir: URL, written: WrittenContainer) => Promise<void>,
 ): Promise<void> => {
   const written = await writeModelContainer(syntheticModel(), OPTIONS);
-  const path = await Deno.makeTempDir({ prefix: "karume-container-files-" });
+  const path = await makeTempDir({ prefix: "karume-container-files-" });
   try {
     const dir = new URL(`file://${path}/`);
     for (const [index, bytes] of written.parts.entries()) {
-      Deno.writeFileSync(new URL(partName(index, written.parts.length), dir), bytes);
+      writeFileSync(new URL(partName(index, written.parts.length), dir), bytes);
     }
     await body(dir, written);
   } finally {
-    await Deno.remove(path, { recursive: true });
+    await remove(path, { recursive: true });
   }
 };
 
@@ -161,14 +163,14 @@ const withContainer = async (
 // resolveParts / modelPresent（ファイルの見つけ方）
 // ---------------------------------------------------------------------------
 
-Deno.test("resolveParts は分割されていない容器を代表 path 1 本として返す", async () => {
+test("resolveParts は分割されていない容器を代表 path 1 本として返す", async () => {
   await withFiles([REPRESENTATIVE], (dir) => {
     const representative = new URL(REPRESENTATIVE, dir);
     assertEquals(resolveParts(representative).map((url) => url.href), [representative.href]);
   });
 });
 
-Deno.test("resolveParts は連番の part を番号昇順で返す（part 添字の保証）", async () => {
+test("resolveParts は連番の part を番号昇順で返す（part 添字の保証）", async () => {
   // 置く順は番号順ではない（`Deno.readDirSync` の列挙順に依らないことの検出器）。
   const names = [
     "model-00003-of-00003.krm",
@@ -181,7 +183,7 @@ Deno.test("resolveParts は連番の part を番号昇順で返す（part 添字
   });
 });
 
-Deno.test("resolveParts は単一形と連番の同居を fail loudly にする", async () => {
+test("resolveParts は単一形と連番の同居を fail loudly にする", async () => {
   await withFiles(
     [REPRESENTATIVE, "model-00001-of-00002.krm", "model-00002-of-00002.krm"],
     (dir) => {
@@ -191,21 +193,21 @@ Deno.test("resolveParts は単一形と連番の同居を fail loudly にする"
   );
 });
 
-Deno.test("resolveParts は of の総数が食い違う連番を fail loudly にする", async () => {
+test("resolveParts は of の総数が食い違う連番を fail loudly にする", async () => {
   await withFiles(["model-00001-of-00003.krm", "model-00002-of-00004.krm"], (dir) => {
     const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
     assertStringIncludes(error.message, "食い違っている");
   });
 });
 
-Deno.test("resolveParts は連番の欠番を何本目かを名指して fail loudly にする", async () => {
+test("resolveParts は連番の欠番を何本目かを名指して fail loudly にする", async () => {
   await withFiles(["model-00001-of-00003.krm", "model-00003-of-00003.krm"], (dir) => {
     const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
     assertStringIncludes(error.message, "2 本目が無い");
   });
 });
 
-Deno.test("resolveParts は総数からはみ出した番号を fail loudly にする", async () => {
+test("resolveParts は総数からはみ出した番号を fail loudly にする", async () => {
   await withFiles(
     [
       "model-00001-of-00003.krm",
@@ -222,7 +224,7 @@ Deno.test("resolveParts は総数からはみ出した番号を fail loudly に�
 
 // 0 以下の番号（1 始まりの連番の下側へのはみ出し）。上側だけを数えると「はみ出した番号 []」と
 // 空リストで落ち、落ちてはいるのに何が余計なのかが読めない診断になる。
-Deno.test("resolveParts は 0 番の part も余計な番号として名指す", async () => {
+test("resolveParts は 0 番の part も余計な番号として名指す", async () => {
   await withFiles(
     [
       "model-00000-of-00002.krm",
@@ -239,7 +241,7 @@ Deno.test("resolveParts は 0 番の part も余計な番号として名指す",
 // stem は正規表現へ埋め込まれるので、escape が外れると `.` が任意 1 文字になり別 dtype の
 // 連番を拾う（拾えば総数 {1,2} の食い違いで落ちるので、この門は「1 本だけ返る」ことで escape と
 // stem 一致の両方を縛る）。
-Deno.test("resolveParts は別 dtype の容器を拾わない（stem の厳密一致）", async () => {
+test("resolveParts は別 dtype の容器を拾わない（stem の厳密一致）", async () => {
   await withFiles(
     ["model.i8-00001-of-00001.krm", "modelXi8-00002-of-00002.krm", "other-00001-of-00002.krm"],
     (dir) => {
@@ -251,13 +253,13 @@ Deno.test("resolveParts は別 dtype の容器を拾わない（stem の厳密�
   );
 });
 
-Deno.test("modelPresent は連番だけが置かれた容器を在りと見る", async () => {
+test("modelPresent は連番だけが置かれた容器を在りと見る", async () => {
   await withFiles(["model-00001-of-00002.krm", "model-00002-of-00002.krm"], (dir) => {
     assert(modelPresent(new URL(REPRESENTATIVE, dir)));
   });
 });
 
-Deno.test("modelPresent は容器が 1 本も無いディレクトリを無しと見る", async () => {
+test("modelPresent は容器が 1 本も無いディレクトリを無しと見る", async () => {
   await withFiles(["io.ramp.safetensors"], (dir) => {
     assertEquals(modelPresent(new URL(REPRESENTATIVE, dir)), false);
   });
@@ -267,7 +269,7 @@ Deno.test("modelPresent は容器が 1 本も無いディレクトリを無し�
 // fileBlockSource（区間の読み方）
 // ---------------------------------------------------------------------------
 
-Deno.test("fileBlockSource は part の本数と長さをファイルから配る", async () => {
+test("fileBlockSource は part の本数と長さをファイルから配る", async () => {
   await withContainer((dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     assertEquals(source.partCount, written.parts.length);
@@ -282,14 +284,14 @@ Deno.test("fileBlockSource は part の本数と長さをファイルから配�
 
 // MUST: 誰も検証していない取得元が `verified: true` を名乗ると、`openContainer` は block ごとの
 // sha256 を掛けなくなる（container-v1 §7）= 改ざんが素通りする。
-Deno.test("fileBlockSource は検証済みを名乗らない", async () => {
+test("fileBlockSource は検証済みを名乗らない", async () => {
   await withContainer((dir) => {
     assertEquals(fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir))).verified, false);
     return Promise.resolve();
   });
 });
 
-Deno.test("fileBlockSource は part の途中から要求した区間だけを返す", async () => {
+test("fileBlockSource は part の途中から要求した区間だけを返す", async () => {
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     // 最後の part（資産の専用 part）の中ほどを取る — seek が効いていなければ先頭が返る。
@@ -304,7 +306,7 @@ Deno.test("fileBlockSource は part の途中から要求した区間だけを�
   });
 });
 
-Deno.test("fileBlockSource は part 長をはみ出す区間を fail loudly にする", async () => {
+test("fileBlockSource は part 長をはみ出す区間を fail loudly にする", async () => {
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     const error = await assertRejects(
@@ -315,7 +317,7 @@ Deno.test("fileBlockSource は part 長をはみ出す区間を fail loudly に�
   });
 });
 
-Deno.test("fileBlockSource は存在しない part 添字を fail loudly にする", async () => {
+test("fileBlockSource は存在しない part 添字を fail loudly にする", async () => {
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     const error = await assertRejects(() => source.read(written.parts.length, 0, 1), Error);
@@ -327,7 +329,7 @@ Deno.test("fileBlockSource は存在しない part 添字を fail loudly にす�
 // openSeriesContainer（part 列 → 開いた容器）
 // ---------------------------------------------------------------------------
 
-Deno.test("openSeriesContainer は分割形の part 列から容器を開く", async () => {
+test("openSeriesContainer は分割形の part 列から容器を開く", async () => {
   await withContainer(async (dir) => {
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     assertEquals(opened.header.kind, "model");
@@ -336,7 +338,7 @@ Deno.test("openSeriesContainer は分割形の part 列から容器を開く", a
   });
 });
 
-Deno.test("openSeriesContainer で開いた容器は block を宣言どおりのバイト列で配る", async () => {
+test("openSeriesContainer で開いた容器は block を宣言どおりのバイト列で配る", async () => {
   await withContainer(async (dir, written) => {
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     for (const block of written.model.blocks) {
@@ -351,20 +353,20 @@ Deno.test("openSeriesContainer で開いた容器は block を宣言どおりの
 
 // 誤りの注入 — ファイル 1 バイトを潰すと block の sha256 が食い違う。ここが緑のままなら
 // `verified: false` の経路が効いていない（= 区間読みの取得元で検証が抜けている）。
-Deno.test("openSeriesContainer は改ざんされた part を block の sha256 で落とす", async () => {
+test("openSeriesContainer は改ざんされた part を block の sha256 で落とす", async () => {
   await withContainer(async (dir, written) => {
     const block = written.model.blocks[0];
     const file = new URL(partName(block.part, written.parts.length), dir);
-    const bytes = Deno.readFileSync(file);
+    const bytes = readFileSync(file);
     bytes[block.offset] ^= 0xff;
-    Deno.writeFileSync(file, bytes);
+    writeFileSync(file, bytes);
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     const error = await assertRejects(() => opened.readBlock(block.id), Error);
     assertStringIncludes(error.message, "sha256");
   });
 });
 
-Deno.test("openSeriesContainer で開いた容器は資産を区間で読める", async () => {
+test("openSeriesContainer で開いた容器は資産を区間で読める", async () => {
   await withContainer(async (dir) => {
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     const reader = opened.asset("ple_index");
@@ -376,9 +378,9 @@ Deno.test("openSeriesContainer で開いた容器は資産を区間で読める"
   });
 });
 
-Deno.test("openSeriesContainer は part が 1 本欠けた系列を fail loudly にする", async () => {
+test("openSeriesContainer は part が 1 本欠けた系列を fail loudly にする", async () => {
   await withContainer(async (dir, written) => {
-    await Deno.remove(new URL(partName(1, written.parts.length), dir));
+    await remove(new URL(partName(1, written.parts.length), dir));
     const error = await assertRejects(
       () => openSeriesContainer(new URL(REPRESENTATIVE, dir)),
       Error,

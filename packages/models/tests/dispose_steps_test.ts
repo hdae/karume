@@ -15,10 +15,11 @@
 // `#disposal ??= #chain(...)` の側の性質で、実 GPU の e2e が踏む（内部取得の GPU をスタブに
 // 差し替える口が無いため、ここでは helper の振る舞いだけを縛る）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
 
-Deno.test("disposeSteps: 全段が成功すれば宣言順に 1 回ずつ走って解決する", async () => {
+test("disposeSteps: 全段が成功すれば宣言順に 1 回ずつ走って解決する", async () => {
   const order: string[] = [];
   await disposeSteps([
     async () => {
@@ -32,7 +33,7 @@ Deno.test("disposeSteps: 全段が成功すれば宣言順に 1 回ずつ走っ�
   assertEquals(order, ["session", "gpu"]);
 });
 
-Deno.test("disposeSteps: 前段が reject しても後段は必ず 1 回走り、元の失敗がそのまま投げられる", async () => {
+test("disposeSteps: 前段が reject しても後段は必ず 1 回走り、元の失敗がそのまま投げられる", async () => {
   const lost = new Error("device lost");
   let destroyCount = 0;
   const caught = await assertRejects(
@@ -51,7 +52,7 @@ Deno.test("disposeSteps: 前段が reject しても後段は必ず 1 回走り�
   assertEquals(destroyCount, 1, "後段（gpu.destroy 相当）へ到達していない");
 });
 
-Deno.test("disposeSteps: 後段が投げても前段の失敗を上書きしない（2 件は AggregateError）", async () => {
+test("disposeSteps: 後段が投げても前段の失敗を上書きしない（2 件は AggregateError）", async () => {
   const lost = new Error("device lost");
   const destroyFailed = new Error("destroy failed");
   const caught = await assertRejects(
@@ -63,7 +64,7 @@ Deno.test("disposeSteps: 後段が投げても前段の失敗を上書きしな�
   assertEquals(caught.errors, [lost, destroyFailed]);
 });
 
-Deno.test("disposeSteps: 同期 throw の段も後段を止めない", async () => {
+test("disposeSteps: 同期 throw の段も後段を止めない", async () => {
   let destroyCount = 0;
   await assertRejects(
     () =>

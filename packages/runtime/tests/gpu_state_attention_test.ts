@@ -15,6 +15,7 @@
 // MUST: 故障注入で**各門がそれぞれの変異を検出する**ことを同じテストで示す（検出しない門は
 // 何も見ていない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import {
@@ -403,7 +404,7 @@ const padRows = (spec: StateCase): readonly number[] => {
 const bitsOf = (data: Float32Array<ArrayBuffer>): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
-Deno.test({
+test({
   name: "states 形 attention が CPU 参照と一致する（実 GPU・full / sliding × GQA × 行ブロック）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -477,7 +478,7 @@ const PREDICATE_CASES: readonly StateCase[] = [
   PARITY_CASES[11],
 ];
 
-Deno.test({
+test({
   name: "①QK が書く S は述語外が厳密 −inf・live 範囲は全列が書かれる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -553,7 +554,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "state_append がスロットへ書いた値を ①③ が読み戻す（ring 往復・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -632,7 +633,7 @@ Deno.test({
  * 両側が同じ誤りを持つと突合が恒真になる）。物理行 `r` の中身は「`r` へ写る論理行のうち最後の
  * 1 本」= `Q` 未満で `col ≡ r (mod C)` の最大の `col`。
  */
-Deno.test({
+test({
   name: "Q > C の append は物理行ごとに最後の論理行だけを残す（C > W の重複排除・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -692,7 +693,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "同一入力の 2 回 dispatch はビット単位で同一（states 形の決定性・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -711,7 +712,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "容量 C と行ブロック分割は出力のビット列を動かさない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -859,7 +860,7 @@ const INJECTIONS: readonly Injection[] = [
   },
 ];
 
-Deno.test({
+test({
   name: "故障注入: 変異版はいずれも突合で赤くなる（門が実際に検出器であることの実証・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -951,7 +952,7 @@ const poisonFirstInsRow = (
  * MUST: 恒真化しないこと。NaN を入れない対照 run で同じ行が**非 0 の有限値**になることを
  * 併せて見る（「その行はもともと 0」で緑になる形を塞ぐ）。
  */
-Deno.test({
+test({
   name: "states 形は全 NaN の q 行を NaN のまま出し、他の行へ漏らさない（②の nan_max・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1019,7 +1020,7 @@ Deno.test({
  * 「値が契約上無意味」を 0 で固定する分岐）。非有限な V が混ざっても、pad 行は live を 1 度も
  * 走査しないので厳密 0 のまま — 走査してから 0 を掛ける実装だと `0 · ±Inf = NaN` になる。
  */
-Deno.test({
+test({
   name: "states 形は非有限な V を有効行だけへ伝え、pad 行 / 空行は厳密 0 のまま（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1087,7 +1088,7 @@ Deno.test({
  *
  * ガードが無いと `exp(-inf - (-inf))` = `exp(NaN)` = NaN が分母へ入り、行全体が NaN になる。
  */
-Deno.test({
+test({
   name: "①QK の述語を常に偽へ落としても ② の空行ガードで出力は厳密 0（NaN を出さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

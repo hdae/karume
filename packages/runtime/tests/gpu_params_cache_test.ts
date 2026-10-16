@@ -13,7 +13,7 @@
 // 毎 dispatch 確保に戻っても緑になる（どちらも例外は出ない）。
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import {
@@ -77,7 +77,7 @@ const input = (rows: number): Tensor => ({
   data: Float32Array.from({ length: rows * 3 }, (_, i) => ((i % 9) - 4) * 0.5),
 });
 
-Deno.test({
+test({
   name: "同じ内容の params は run 内で 1 本に畳まれ、ヒット run は 1 本も触らない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -114,7 +114,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "導出済み計画から追い出されても params キャッシュは生き残り全ヒットする（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -165,7 +165,7 @@ Deno.test({
  * 「可変 shape を長時間回すと GPU バッファが単調増加する」という制約が挙動からは見えない
  * （例外も警告も出ず、`diagnostics().weights.allocCount` が伸びるだけ）。
  */
-Deno.test({
+test({
   name: "params キャッシュは Session 寿命で無界（可変 shape の run ごとに単調増加・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

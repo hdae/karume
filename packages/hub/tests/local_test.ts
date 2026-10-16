@@ -7,6 +7,7 @@
  * 直接実装したもの）を注入する — HF 取得元のハンドルを組む公開 factory は無い。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
   fetchAssets,
@@ -80,7 +81,7 @@ const recordProgress = (): { events: AssetProgress[]; onProgress: (p: AssetProgr
   return { events, onProgress: (progress) => events.push(progress) };
 };
 
-Deno.test("localDirectory: manifest → resolveSelection → fetchAssets が実体のバイト列で完走する", async () => {
+test("localDirectory: manifest → resolveSelection → fetchAssets が実体のバイト列で完走する", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
 
@@ -101,7 +102,7 @@ Deno.test("localDirectory: manifest → resolveSelection → fetchAssets が実�
   assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS, TOKENIZER_PATH]);
 });
 
-Deno.test("localDirectory: 中断は資産の読みへ透過する", async () => {
+test("localDirectory: 中断は資産の読みへ透過する", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
   await fetchAssets(loaded, selectionFiles(loaded.manifest), {
@@ -111,7 +112,7 @@ Deno.test("localDirectory: 中断は資産の読みへ透過する", async () =>
   assertEquals(directory.signals, [false, true, true, true]);
 });
 
-Deno.test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheStorage を 1 度も開かない", async () => {
+test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheStorage を 1 度も開かない", async () => {
   const dist = await buildLocalDist();
   const caches = new MemoryCacheStorage();
   const directory = memoryDirectory(dist.files);
@@ -150,7 +151,7 @@ Deno.test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、Ca
   );
 });
 
-Deno.test("prefetchAssets: 相 1 を持たない取得元では温めずに complete だけを出す（入力検査だけは効く）", async (t) => {
+test("prefetchAssets: 相 1 を持たない取得元では温めずに complete だけを出す（入力検査だけは効く）", async (t) => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
   const files = selectionFiles(loaded.manifest);
@@ -178,7 +179,7 @@ Deno.test("prefetchAssets: 相 1 を持たない取得元では温めずに comp
   });
 });
 
-Deno.test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら越境ぶんだけ温める", async () => {
+test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら越境ぶんだけ温める", async () => {
   // セッションの取得元だけで判定すると、ローカル配布形 + 越境先がリモートという正当な構成で
   // 越境ぶんの温めが丸ごと飛ぶ（進捗も signal も届かないまま、実際の取得は後の読みの中で走る）。
   const dist = await buildLocalDist({ cross: true });
@@ -220,7 +221,7 @@ Deno.test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つ�
   assertEquals(directory.reads, [], "相 1 を持たない取得元の ref を読みに行っている");
 });
 
-Deno.test("localDirectory: size 不一致は fail loudly（path とディレクトリを名乗る）", async () => {
+test("localDirectory: size 不一致は fail loudly（path とディレクトリを名乗る）", async () => {
   const dist = await buildLocalDist();
   // 実体だけを差し替える（manifest の size / sha256 は元のまま = 途中で切れたコピーの形）。
   const tampered = new Map(dist.files);
@@ -239,7 +240,7 @@ Deno.test("localDirectory: size 不一致は fail loudly（path とディレク�
   assert(error.message.includes(LABEL), `${error.message} がディレクトリを名乗っていない`);
 });
 
-Deno.test("localDirectory: sha256 は照合しない（size が合えば読み切る）", async () => {
+test("localDirectory: sha256 は照合しない（size が合えば読み切る）", async () => {
   const dist = await buildLocalDist();
   const original = payloadFor(TOKENIZER_PATH);
   // 長さは保ったまま中身だけ変える（HF 取得元なら sha256 の門で落ちる形）。
@@ -257,7 +258,7 @@ Deno.test("localDirectory: sha256 は照合しない（size が合えば読み�
   );
 });
 
-Deno.test("localDirectory: 実体が無いファイルは実パスを cause に残して HubFetchError", async () => {
+test("localDirectory: 実体が無いファイルは実パスを cause に残して HubFetchError", async () => {
   const dist = await buildLocalDist();
   const missing = new Map(dist.files);
   missing.delete(FETCHED_PART_PATHS[1]);
@@ -277,7 +278,7 @@ Deno.test("localDirectory: 実体が無いファイルは実パスを cause に�
   );
 });
 
-Deno.test("localDirectory: 上限を超えた karume.json は ManifestFormatError", async () => {
+test("localDirectory: 上限を超えた karume.json は ManifestFormatError", async () => {
   const oversized = new Map<string, Uint8Array<ArrayBuffer>>([[
     MANIFEST_FILENAME,
     new TextEncoder().encode(" ".repeat(2 * 1024 * 1024)),
@@ -290,7 +291,7 @@ Deno.test("localDirectory: 上限を超えた karume.json は ManifestFormatErro
   assert(error.message.includes(LABEL), `${error.message} がディレクトリを名乗っていない`);
 });
 
-Deno.test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatError で落ちる", async () => {
+test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatError で落ちる", async () => {
   const broken = new Map<string, Uint8Array<ArrayBuffer>>([[
     MANIFEST_FILENAME,
     new TextEncoder().encode('{"format": "karume/5"'),
@@ -362,7 +363,7 @@ const crossAssets = async (
   return await fetchAssets(loaded, selectionFiles(loaded.manifest));
 };
 
-Deno.test("localDirectory: 越境参照は明示 mapping の取得元から取る", async () => {
+test("localDirectory: 越境参照は明示 mapping の取得元から取る", async () => {
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
   const assets = await crossAssets({
@@ -372,7 +373,7 @@ Deno.test("localDirectory: 越境参照は明示 mapping の取得元から取�
   assertEquals(crossDirectory.reads, [CROSS_PATH], "越境先から取っていない");
 });
 
-Deno.test("localDirectory: 越境の委譲先（fallback）の欄は受けない — 渡しても委譲せずに落ちる", async () => {
+test("localDirectory: 越境の委譲先（fallback）の欄は受けない — 渡しても委譲せずに落ちる", async () => {
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
   // 型の門: 欄が公開面へ戻ると `@ts-expect-error` が余って `deno check` が赤くなる（公開面で
@@ -392,7 +393,7 @@ Deno.test("localDirectory: 越境の委譲先（fallback）の欄は受けない
   assertEquals(crossDirectory.reads, [], "受けないはずの委譲先を読んだ");
 });
 
-Deno.test("localDirectory: mapping に無い越境は推測せずに落ちる", async () => {
+test("localDirectory: mapping に無い越境は推測せずに落ちる", async () => {
   const error = await assertRejects(() => crossAssets({}), HubFetchError);
   assertEquals(error.path, CROSS_PATH);
   // 診断は**宣言された越境先**を名乗る（セッションのディレクトリではない）。
@@ -405,7 +406,7 @@ Deno.test("localDirectory: mapping に無い越境は推測せずに落ちる", 
   );
 });
 
-Deno.test("localDirectory: 越境先の完全性検証の失敗は越境先の失敗元を名乗る", async () => {
+test("localDirectory: 越境先の完全性検証の失敗は越境先の失敗元を名乗る", async () => {
   const dist = await buildLocalDist({ cross: true });
 
   const error = await assertRejects(
@@ -424,7 +425,7 @@ Deno.test("localDirectory: 越境先の完全性検証の失敗は越境先の�
   assertEquals(error.source, "network");
 });
 
-Deno.test("localDirectory: 越境先の取得元は同じハンドルを使い回しても混ざらない", async () => {
+test("localDirectory: 越境先の取得元は同じハンドルを使い回しても混ざらない", async () => {
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
   const shared = localDirectory(crossDirectory.adapter, { label: "./models/共有" });
@@ -435,7 +436,7 @@ Deno.test("localDirectory: 越境先の取得元は同じハンドルを使い�
   assertEquals(crossDirectory.reads, [CROSS_PATH, CROSS_PATH]);
 });
 
-Deno.test("localDirectory: 取得元ハンドルは不透明（loadManifest が同一性で判別する）", async () => {
+test("localDirectory: 取得元ハンドルは不透明（loadManifest が同一性で判別する）", async () => {
   const dist = await buildLocalDist();
   const directory = memoryDirectory(dist.files);
   const source = localDirectory(directory.adapter, { label: LABEL });
@@ -500,7 +501,7 @@ const openRangeLocal = async (
   return { directory, loaded };
 };
 
-Deno.test("openAsset: 位置読みを持たないアダプターでは undefined（全量読みへ倒す）", async () => {
+test("openAsset: 位置読みを持たないアダプターでは undefined（全量読みへ倒す）", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
@@ -512,7 +513,7 @@ Deno.test("openAsset: 位置読みを持たないアダプターでは undefined
   assertEquals(directory.reads, [], "口を開くだけで実体を読んでいる");
 });
 
-Deno.test("openAsset: 位置読みを持つアダプターでは seek の口が開き、要求区間だけが降りる", async () => {
+test("openAsset: 位置読みを持つアダプターでは seek の口が開き、要求区間だけが降りる", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openRangeLocal(dist.files);
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
@@ -530,7 +531,7 @@ Deno.test("openAsset: 位置読みを持つアダプターでは seek の口が�
   assertEquals(directory.reads, [], "区間読みが全量読みへ降りている");
 });
 
-Deno.test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばずに落ちる", async () => {
+test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばずに落ちる", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openRangeLocal(dist.files);
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
@@ -544,7 +545,7 @@ Deno.test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばず�
   assertEquals(directory.ranges, [], "範囲外の要求がアダプターへ降りている");
 });
 
-Deno.test("openAsset: 短い戻りは throw（0 埋めの行を正常な値として配らない）", async () => {
+test("openAsset: 短い戻りは throw（0 埋めの行を正常な値として配らない）", async () => {
   const dist = await buildLocalDist();
   const { loaded } = await openRangeLocal(dist.files, {}, { short: true });
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
@@ -556,7 +557,7 @@ Deno.test("openAsset: 短い戻りは throw（0 埋めの行を正常な値と�
   assert(error.message.includes("7"), `${error.message} が実際のバイト数を名乗っていない`);
 });
 
-Deno.test("openAsset: 非 tight view を返すアダプターは fail loudly（余白つきの view を配らない）", async () => {
+test("openAsset: 非 tight view を返すアダプターは fail loudly（余白つきの view を配らない）", async () => {
   const dist = await buildLocalDist();
   const { loaded } = await openRangeLocal(dist.files, {}, { loose: true });
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
@@ -573,7 +574,7 @@ Deno.test("openAsset: 非 tight view を返すアダプターは fail loudly（�
   assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
 });
 
-Deno.test("openAsset: 越境参照は参照先の取得元の口で解決する", async () => {
+test("openAsset: 越境参照は参照先の取得元の口で解決する", async () => {
   const dist = await buildLocalDist({ cross: true });
   // セッション側は位置読みを持たず、越境先だけが持つ形（能力は取得元ごとに違う）。
   const cross = rangeDirectory(dist.crossFiles);

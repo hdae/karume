@@ -6,7 +6,7 @@
 // （`main.ts profile --check`）は tools/geometry-sweep/profile_test.ts が固定する。
 
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { gemmMTileGeometry } from "../src/kernels/gemm.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
 import { GEMM_ROWS_BUCKETS, type GemmGeometry } from "../src/kernels/gemm-geometry.ts";

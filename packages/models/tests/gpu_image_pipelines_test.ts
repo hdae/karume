@@ -23,7 +23,7 @@
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import {
   acquireGpu,
   type GpuContext,

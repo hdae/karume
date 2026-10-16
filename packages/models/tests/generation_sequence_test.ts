@@ -14,6 +14,7 @@
 // Session と context は narrow interface（`GenerationSession` / `GenerationContextFace`）で
 // 受けるので、fake は素の object 1 個で足りる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { GenerationContext, RunInputs, Session } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -40,7 +41,7 @@ import {
   VOCAB,
 } from "./helpers/generation-fake.ts";
 
-Deno.test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対値、decode は 1 行", async () => {
+test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対値、decode は 1 行", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -84,7 +85,7 @@ Deno.test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶
   assertEquals(stop, { reason: "max-tokens", tokens: 3 });
 });
 
-Deno.test("GenerationSequence: 長い prompt は chunk ごとに prefill イベントを出す", async () => {
+test("GenerationSequence: 長い prompt は chunk ごとに prefill イベントを出す", async () => {
   const fake = fakeSession({ tokens: [1, 2, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -108,7 +109,7 @@ Deno.test("GenerationSequence: 長い prompt は chunk ごとに prefill イベ�
   ]);
 });
 
-Deno.test("GenerationSequence: 頼んだ行数と返った行数の食い違いは run の直後に落ちる", async () => {
+test("GenerationSequence: 頼んだ行数と返った行数の食い違いは run の直後に落ちる", async () => {
   // 出口の行数 R はグラフでは記号なので、「1 行頼んで 2 行返る」形は**宣言としては正しい**
   // （形の検査を素通りする）。この経路が渡す添字は常に 1 本なので、返り値の行数との突合だけが
   // 「program が検証したのとは別のグラフで組まれた Session」の検出線である。
@@ -137,7 +138,7 @@ const BUCKETS = [4] as const;
 const bucketProgram = (fake: FakeSession): GenerationWiring =>
   programOf(fake, { chunkLength: BUCKET_CHUNK_LENGTH, chunkBuckets: [...BUCKETS] });
 
-Deno.test("physicalChunkRows: 有効行 1 は decode 形・他は queryLength 以上の最小バケット", () => {
+test("physicalChunkRows: 有効行 1 は decode 形・他は queryLength 以上の最小バケット", () => {
   const fake = fakeSession();
   const program = bucketProgram(fake);
   // 1 行は decode 形（バケットがあっても変わらない — 多ターン再開のビット同一性の要）。
@@ -154,7 +155,7 @@ Deno.test("physicalChunkRows: 有効行 1 は decode 形・他は queryLength �
   assertEquals(physicalChunkRows(2, plain), CHUNK_LENGTH);
 });
 
-Deno.test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケット行で流れる", async () => {
+test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケット行で流れる", async () => {
   /** prompt 長 → その生成が出した run の物理行数（`[1, rows]`）。 */
   const rowsFor = async (promptLength: number): Promise<readonly number[]> => {
     const fake = fakeSession();
@@ -185,7 +186,7 @@ Deno.test("GenerationSequence: chunkBuckets を宣言すると短い chunk が�
   assertEquals(await rowsFor(9), [BUCKET_CHUNK_LENGTH, 1]);
 });
 
-Deno.test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 のまま", async () => {
+test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 のまま", async () => {
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -203,7 +204,7 @@ Deno.test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 の
 
 // ---- 多ターン: 「直前 assistant の最後の token が落ちない」直接門（3 経路） ----
 
-Deno.test("多ターン: max-tokens 停止後の pendingToken が次ターン prompt の先頭に連結される", async () => {
+test("多ターン: max-tokens 停止後の pendingToken が次ターン prompt の先頭に連結される", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 9] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -222,7 +223,7 @@ Deno.test("多ターン: max-tokens 停止後の pendingToken が次ターン pr
   assertEquals(fake.calls[3].pastBefore, 5);
 });
 
-Deno.test("多ターン: EOS 停止でも停止 token は会話に残る（イベントには出さない）", async () => {
+test("多ターン: EOS 停止でも停止 token は会話に残る（イベントには出さない）", async () => {
   const fake = fakeSession({ tokens: [5, 11, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -243,7 +244,7 @@ Deno.test("多ターン: EOS 停止でも停止 token は会話に残る（イ�
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
 });
 
-Deno.test("要求の stopTokens: 配布形の集合が空でも、そのターンだけ停止 token を足せる", async () => {
+test("要求の stopTokens: 配布形の集合が空でも、そのターンだけ停止 token を足せる", async () => {
   const fake = fakeSession({ tokens: [5, 11, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -265,7 +266,7 @@ Deno.test("要求の stopTokens: 配布形の集合が空でも、そのター�
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
 });
 
-Deno.test("要求の stopTokens: 配布形の EOS 集合との和集合で判定する（EOS は常に効く）", async () => {
+test("要求の stopTokens: 配布形の EOS 集合との和集合で判定する（EOS は常に効く）", async () => {
   // 要求が停止集合を渡しても、配布形の EOS を上書きはしない（両方が効く = 和集合）。
   const eosFake = fakeSession({ tokens: [5, 11, 3] });
   const eos = await createGenerationSequence({
@@ -291,7 +292,7 @@ Deno.test("要求の stopTokens: 配布形の EOS 集合との和集合で判定
   );
 });
 
-Deno.test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かない停止条件を残さない）", async () => {
+test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かない停止条件を残さない）", async () => {
   // 停止 token は「出力に現れない id」なので、間違っていても生成は普通に完走する（その id が
   // 抽選されないだけ）— 出力が伸び続けることでしか気づけないので、入口で落とす。
   const fake = fakeSession();
@@ -317,7 +318,7 @@ Deno.test("要求の stopTokens: 語彙外・重複は同期に落ちる（効�
   assertEquals(fake.calls.length, 0);
 });
 
-Deno.test("要求の stopTokens: 発行後に配列へ足しても走行中の生成には効かない", async () => {
+test("要求の stopTokens: 発行後に配列へ足しても走行中の生成には効かない", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -335,7 +336,7 @@ Deno.test("要求の stopTokens: 発行後に配列へ足しても走行中の�
   assertEquals(stop, { reason: "max-tokens", tokens: 3 });
 });
 
-Deno.test("多ターン: break 中断後も pendingToken が残り、次ターンが 1 token も落とさない", async () => {
+test("多ターン: break 中断後も pendingToken が残り、次ターンが 1 token も落とさない", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -361,7 +362,7 @@ Deno.test("多ターン: break 中断後も pendingToken が残り、次ター�
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
 });
 
-Deno.test("多ターン: 続きだけのターン（prompt 空）は pendingToken を decode 形で流す", async () => {
+test("多ターン: 続きだけのターン（prompt 空）は pendingToken を decode 形で流す", async () => {
   // 有効行 1 本の chunk は物理 1 行 = decode 形。中断からの再開が「中断しなかった走り」と
   // **同じ形の run** になり、prefill 形（M=chunkLength）を余分に踏まない。
   const fake = fakeSession({ tokens: [5, 6, 7] });
@@ -383,7 +384,7 @@ Deno.test("多ターン: 続きだけのターン（prompt 空）は pendingToke
   assertEquals(fake.calls[1].queryLength, 1);
 });
 
-Deno.test("GenerationSequence: prompt が空で pendingToken も無ければ fail loudly", async () => {
+test("GenerationSequence: prompt が空で pendingToken も無ければ fail loudly", async () => {
   // prompt は公開要求そのもので、打つ手は「token を入れる」1 つ = 入力起因（ADR 0107 決定 2）。
   // 逆側（pendingToken があれば空 prompt を受理する）は直前の「続きだけのターン」が固定する。
   const fake = fakeSession();
@@ -401,7 +402,7 @@ Deno.test("GenerationSequence: prompt が空で pendingToken も無ければ fai
 
 // ---- 中断（AbortSignal）と直列化 ----
 
-Deno.test("GenerationSequence: abort は signal.reason を包まずそのまま throw する", async () => {
+test("GenerationSequence: abort は signal.reason を包まずそのまま throw する", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -439,7 +440,7 @@ Deno.test("GenerationSequence: abort は signal.reason を包まずそのまま 
   assertEquals(fake.calls[1].ids, [5, 3, 0, 0]);
 });
 
-Deno.test("GenerationSequence: 発行済みの signal は 1 本も run を出さずに落ちる", async () => {
+test("GenerationSequence: 発行済みの signal は 1 本も run を出さずに落ちる", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -464,7 +465,7 @@ Deno.test("GenerationSequence: 発行済みの signal は 1 本も run を出さ
   assertEquals(await stream.done, { reason: "aborted", tokens: 0 });
 });
 
-Deno.test("GenerationSequence: 最終 prefill の後に届いた中断でも、計算済みの logits から token が 1 個届く", async (t) => {
+test("GenerationSequence: 最終 prefill の後に届いた中断でも、計算済みの logits から token が 1 個届く", async (t) => {
   // 中断は run を発行する前（段の境目）にだけ見る（ADR 0083 決定 5）。最終 prefill の run は
   // 既に logits を返しているので、その後に届いた中断でも最初の token は抽選されて届き、新しい
   // run は走らない（by-design — docs/limitations.md「生成 sequence」節）。
@@ -511,7 +512,7 @@ Deno.test("GenerationSequence: 最終 prefill の後に届いた中断でも、�
   }
 });
 
-Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本も出さずに閉じる", async () => {
+test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本も出さずに閉じる", async () => {
   // 待っている間に abort されたリクエストは、順番が回ってきても**何も判定せずに**閉じる。
   // 予算超過を先に返すと「止めたのに容量エラーが出た」になり、呼び手は自分の中断を識別できない。
   const fake = fakeSession({ tokens: [5, 6, 7] });
@@ -552,7 +553,7 @@ Deno.test("GenerationSequence: 順番待ちの間に届いた中断は run を 1
   assertEquals(fake.calls.length, callsAfterFirst);
 });
 
-Deno.test("GenerationSequence: 2 本の generate は直列化される（run が混ざらない）", async () => {
+test("GenerationSequence: 2 本の generate は直列化される（run が混ざらない）", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -578,7 +579,7 @@ Deno.test("GenerationSequence: 2 本の generate は直列化される（run が
 
 // ---- 容量（ADR 0083 決定 10 / 可変 capacity 波の実行時ノブ） ----
 
-Deno.test("capacity ノブ: 既定は program の宣言・渡した値が context の束縛になる", async () => {
+test("capacity ノブ: 既定は program の宣言・渡した値が context の束縛になる", async () => {
   const declared = fakeSession();
   const byDefault = await createGenerationSequence({
     session: declared.session,
@@ -599,7 +600,7 @@ Deno.test("capacity ノブ: 既定は program の宣言・渡した値が contex
   assertEquals(chosen.specs[0].chunkLength, CHUNK_LENGTH, "chunk 長は program のまま");
 });
 
-Deno.test("capacity ノブ: 予算検査は program の既定ではなく選んだ容量で行う", async () => {
+test("capacity ノブ: 予算検査は program の既定ではなく選んだ容量で行う", async () => {
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -616,7 +617,7 @@ Deno.test("capacity ノブ: 予算検査は program の既定ではなく選ん�
   assertEquals(fake.calls.length, 0);
 });
 
-Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fail loudly", async () => {
+test("capacity ノブ: 関係を破る値は sequence を作る時点で fail loudly", async () => {
   // 型まで縛るのは、公開入口 `sequence({ capacity })` と `chat({ capacity })` が**同じ指定**を
   // 別の分類で返さないため。`gemma4_chat_session_test.ts` の同名 3 条件も `ModelInputError` を
   // 期待しているので、片方だけ素の Error へ戻ればどちらかが赤になる（ADR 0107 決定 2）。
@@ -656,7 +657,7 @@ Deno.test("capacity ノブ: 関係を破る値は sequence を作る時点で fa
   assertEquals(fake.specs.length, 0, "context を 1 本も確保していない");
 });
 
-Deno.test("GenerationSequence: 容量超過は GenerationCapacityError（run の前に落ちる）", async () => {
+test("GenerationSequence: 容量超過は GenerationCapacityError（run の前に落ちる）", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -674,7 +675,7 @@ Deno.test("GenerationSequence: 容量超過は GenerationCapacityError（run の
   assertEquals(fake.pastLength(), 8);
 });
 
-Deno.test("GenerationSequence: used は pastLength + 未 commit frontier から都度導出する", async () => {
+test("GenerationSequence: used は pastLength + 未 commit frontier から都度導出する", async () => {
   // 独立 counter を持たない（ADR 0066 決定 6 の二重簿記の禁止）ので、走行中に読めば
   // 「その時点で成功済みの run まで」が出る。切り詰めの判断は生成の合間に読んだ値で行う。
   const fake = fakeSession({ tokens: [5, 6, 7, 9] });
@@ -701,7 +702,7 @@ Deno.test("GenerationSequence: used は pastLength + 未 commit frontier から�
   assertEquals(sequence.used, 9, "2 ターン目の後（6 + 新規 2 + 生成 1）");
 });
 
-Deno.test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文言を読み解かせない）", async () => {
+test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文言を読み解かせない）", async () => {
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -728,7 +729,7 @@ Deno.test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ�
   );
 });
 
-Deno.test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constraint だけが違う）", async () => {
+test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constraint だけが違う）", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -749,7 +750,7 @@ Deno.test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（co
   await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: error.maxNewTokens }));
 });
 
-Deno.test("GenerationSequence: 位置表の上限超過も同じ型で落とす", async () => {
+test("GenerationSequence: 位置表の上限超過も同じ型で落とす", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -767,7 +768,7 @@ Deno.test("GenerationSequence: 位置表の上限超過も同じ型で落とす"
   assertEquals(fake.calls.length, 3);
 });
 
-Deno.test("GenerationSequence: 容量は自分の順番が来てから見る（先行ターンの進行を含める）", async () => {
+test("GenerationSequence: 容量は自分の順番が来てから見る（先行ターンの進行を含める）", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -785,7 +786,7 @@ Deno.test("GenerationSequence: 容量は自分の順番が来てから見る（�
 
 // ---- ホスト由来の per-chunk 入力（PLE の席） ----
 
-Deno.test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力として結線される", async () => {
+test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力として結線される", async () => {
   const fake = fakeSession({ tokens: [5, 6] });
   const seen: { readonly ids: readonly number[]; readonly positions: readonly number[] }[] = [];
   const sequence = await createGenerationSequence({
@@ -819,7 +820,7 @@ Deno.test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入�
   assertEquals(fake.calls.map((call) => call.extra), [[DERIVED], [DERIVED]]);
 });
 
-Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effort の材料）", async () => {
+test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effort の材料）", async () => {
   // 派生入力の材料は配布形によっては GB 級の遅延ロード（gemma4 の PLE — `model` 容器の資産の
   // block）。降ろさないと「停止を押しても block を読み終わるまで返らない」区間ができる。
   const fake = fakeSession({ tokens: [5, 6] });
@@ -859,7 +860,7 @@ Deno.test("DerivedRunInputs: 生成の signal が derive まで降りる（best-
   assertEquals(seen[2], undefined);
 });
 
-Deno.test("DerivedRunInputs: derive の await 明けに届いた中断は run を出さない", async () => {
+test("DerivedRunInputs: derive の await 明けに届いた中断は run を出さない", async () => {
   // 中断の観測点が「ループ先頭」だけだと、派生入力を作っている間に届いた中断の後に run が
   // 1 本まるごと進む（prefill 先頭は常に cold miss なので、送信直後の停止で必ず踏む）。
   for (const [name, maxNewTokens, tokensBefore] of [["prefill", 2, 0], ["decode", 3, 1]] as const) {
@@ -911,7 +912,7 @@ Deno.test("DerivedRunInputs: derive の await 明けに届いた中断は run �
   }
 });
 
-Deno.test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", async () => {
+test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", async () => {
   const cases: readonly (readonly [string, RunInputs, string])[] = [
     ["欠け", {}, "欠け: per_layer_inputs"],
     [
@@ -942,7 +943,7 @@ Deno.test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", 
 
 // ---- 受理集合・失敗・寿命 ----
 
-Deno.test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも GPU にも入らない）", async () => {
+test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも GPU にも入らない）", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -978,7 +979,7 @@ Deno.test("GenerationSequence: 受理集合は同期に落ちる（順番待ち�
   assertEquals(fake.calls.length, 0);
 });
 
-Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", async (t) => {
+test("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", async (t) => {
   // 高レベル面（`Gemma4Pipeline.chat` / `Gemma4ChatSession.send`）は `generate` を async
   // generator の本体で呼ぶので、発行時に落とすにはこの関数を自分で呼ぶしかない。式を写して
   // 2 本持つと片方だけが古くなるので、正本が 1 本であること自体をここで縛る。
@@ -1047,7 +1048,7 @@ Deno.test("受理集合の値域検査は 1 本の純関数（高レベル面と
   });
 });
 
-Deno.test("GenerationSequence: 受理できない要求は 1 つの型で捕まる（ADR 0107）", async () => {
+test("GenerationSequence: 受理できない要求は 1 つの型で捕まる（ADR 0107）", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1077,7 +1078,7 @@ Deno.test("GenerationSequence: 受理できない要求は 1 つの型で捕ま�
 /** 発行後に書き換えるための可変版（公開型は全欄 readonly）。 */
 type MutableRequest = { -readonly [Field in keyof GenerationRequest]: GenerationRequest[Field] };
 
-Deno.test("GenerationSequence: 要求は発行時に写す（発行後の書き換えは走行中の生成に効かない）", async () => {
+test("GenerationSequence: 要求は発行時に写す（発行後の書き換えは走行中の生成に効かない）", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1107,7 +1108,7 @@ Deno.test("GenerationSequence: 要求は発行時に写す（発行後の書き�
   assertEquals(stop, { reason: "max-tokens", tokens: 2 });
 });
 
-Deno.test("GenerationSequence: run の失敗は iterable と done の両方へ同じ例外で届く", async () => {
+test("GenerationSequence: run の失敗は iterable と done の両方へ同じ例外で届く", async () => {
   const fake = fakeSession({ failAt: 1 });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1118,7 +1119,7 @@ Deno.test("GenerationSequence: run の失敗は iterable と done の両方へ�
   await assertRejects(() => stream.done, Error, "run が落ちた");
 });
 
-Deno.test("GenerationSequence: done を読まない失敗が unhandled rejection にならない", async () => {
+test("GenerationSequence: done を読まない失敗が unhandled rejection にならない", async () => {
   const fake = fakeSession({ failAt: 0 });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1136,7 +1137,7 @@ Deno.test("GenerationSequence: done を読まない失敗が unhandled rejection
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
-Deno.test("GenerationSequence: dispose は走行中の生成の後に走り、2 度目も同じ完了を返す", async () => {
+test("GenerationSequence: dispose は走行中の生成の後に走り、2 度目も同じ完了を返す", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1156,7 +1157,7 @@ Deno.test("GenerationSequence: dispose は走行中の生成の後に走り、2 
   assertEquals(fake.disposals(), 1);
 });
 
-Deno.test("GenerationSequence: dispose 済みの generate は同期に落ちる（自分の文言で）", async () => {
+test("GenerationSequence: dispose 済みの generate は同期に落ちる（自分の文言で）", async () => {
   // context は外へ出さない（決定 3）ので、呼び手が寿命を確かめる術はこの検査しかない。遅らせると
   // 初反復まで落ちず、しかも `GenerationContext` 側の汎用文言になって真因が読めない。
   const fake = fakeSession();
@@ -1185,7 +1186,7 @@ Deno.test("GenerationSequence: dispose 済みの generate は同期に落ちる�
   await disposal;
 });
 
-Deno.test("GenerationSession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {
+test("GenerationSession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {
   // 型検査だけの門（実行時は何もしない）。runtime 側で `run` /
   // `createGenerationContext` / `pastLength` の綴りが変わるとコンパイルエラーになる。
   const asGenerationSession = (session: Session): GenerationSession => session;
@@ -1205,7 +1206,7 @@ Deno.test("GenerationSession: 実 Session の面を型で満たす（綴りの�
 const PENALTY = { temperature: 0, repetitionPenalty: 2 } as const;
 const RUNNER_UP = { id: 6, logit: 6 } as const;
 
-Deno.test("GenerationSequence: prompt の token に repetition penalty が掛かる", async () => {
+test("GenerationSequence: prompt の token に repetition penalty が掛かる", async () => {
   // prompt に含まれる 3 が第 1 候補（logit 10）。履歴が届いていれば 10/2 = 5 < 6 で 6 へ移る。
   const penalized = fakeSession({ tokens: [3], runnerUp: RUNNER_UP });
   const withPenalty = await createGenerationSequence({
@@ -1229,7 +1230,7 @@ Deno.test("GenerationSequence: prompt の token に repetition penalty が掛か
   assertEquals(tokenIds(control.events), [3]);
 });
 
-Deno.test("GenerationSequence: 抽選済み token が次 step の履歴に入る", async () => {
+test("GenerationSequence: 抽選済み token が次 step の履歴に入る", async () => {
   // 1 token 目は 5（履歴に無い）。2 token 目も fake の第 1 候補は 5 だが、直前に抽選した
   // ぶんが履歴へ入っていれば penalty が掛かって対抗馬へ移る。
   const fake = fakeSession({ tokens: [5, 5], runnerUp: RUNNER_UP });
@@ -1243,7 +1244,7 @@ Deno.test("GenerationSequence: 抽選済み token が次 step の履歴に入る
   assertEquals(tokenIds(events), [5, RUNNER_UP.id], "生成済み token が履歴へ入っていない");
 });
 
-Deno.test("GenerationSequence: 履歴は 1 ターンぶん（過去 turn は引きずらない）", async () => {
+test("GenerationSequence: 履歴は 1 ターンぶん（過去 turn は引きずらない）", async () => {
   // 1 ターン目に 7 → 5 を出す（停止は max-tokens なので 5 が未 commit frontier に残る）。
   const fake = fakeSession({ tokens: [7, 5, 7], runnerUp: RUNNER_UP });
   const sequence = await createGenerationSequence({
@@ -1259,7 +1260,7 @@ Deno.test("GenerationSequence: 履歴は 1 ターンぶん（過去 turn は引�
   assertEquals(tokenIds(second.events), [7], "過去 turn の履歴が残っている");
 });
 
-Deno.test("GenerationSequence: 連結される未 commit frontier はそのターンの prompt として掛かる", async () => {
+test("GenerationSequence: 連結される未 commit frontier はそのターンの prompt として掛かる", async () => {
   // 上の対。前ターンの最後の token（5）は次ターンの prompt へ**連結される**ので、履歴には
   // 入る（過去 turn を引きずるのとは別の事実 — ADR 0083 決定 4 の未 commit frontier）。
   const fake = fakeSession({ tokens: [7, 5, 5], runnerUp: RUNNER_UP });
@@ -1276,7 +1277,7 @@ Deno.test("GenerationSequence: 連結される未 commit frontier はそのタ�
   );
 });
 
-Deno.test("GenerationSequence: 未開始 return は run を発行せず done を閉じる", async () => {
+test("GenerationSequence: 未開始 return は run を発行せず done を閉じる", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1303,7 +1304,7 @@ const FORK_SUCCESSOR: readonly number[] = Array.from(
   (_unused, token) => (token * 5 + 3) % VOCAB,
 );
 
-Deno.test("GenerationSequence.fork: 分岐は frontier と論理長を引き継ぎ、元と独立に続く", async () => {
+test("GenerationSequence.fork: 分岐は frontier と論理長を引き継ぎ、元と独立に続く", async () => {
   const fake = fakeSession({ successor: FORK_SUCCESSOR });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1349,7 +1350,7 @@ Deno.test("GenerationSequence.fork: 分岐は frontier と論理長を引き継�
   await sequence.dispose();
 });
 
-Deno.test("GenerationSequence.fork: 本体は走行中の generate の後に走り、その時点の状態を写す", async () => {
+test("GenerationSequence.fork: 本体は走行中の generate の後に走り、その時点の状態を写す", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1376,7 +1377,7 @@ Deno.test("GenerationSequence.fork: 本体は走行中の generate の後に走�
   await sequence.dispose();
 });
 
-Deno.test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の前に発行した fork は先に走る", async () => {
+test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の前に発行した fork は先に走る", async () => {
   const fake = fakeSession({ tokens: [5, 6] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1403,7 +1404,7 @@ Deno.test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispos
   assertEquals(fake.disposals(), 1, "分岐の dispose が元の context を畳んだ");
 });
 
-Deno.test("ForkableContextFace: 実 GenerationContext は自分と同じ型を返す fork を持つ（型の門）", () => {
+test("ForkableContextFace: 実 GenerationContext は自分と同じ型を返す fork を持つ（型の門）", () => {
   // 型検査だけの門（実行時は何もしない）。runtime 側で `fork` の綴りや戻りの型が変わると
   // コンパイルエラーになる（`createGenerationSequence` の F-bound が実 Session で解けなくなる）。
   const asForkable = (

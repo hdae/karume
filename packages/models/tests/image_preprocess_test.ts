@@ -43,8 +43,9 @@
 // 恒等寸法で恒等になること（台の半径 2 が正しく組めている）と、階段エッジで**入力の値域を
 // 越える overshoot** が出ること（負のローブを持つ三次カーネルでしか起きない）。
 
+import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { ModelInputError } from "../src/errors.ts";
 import {
   normalizationOverflow,
@@ -77,7 +78,7 @@ type Fixture = {
 };
 
 const FIXTURE_PATH = new URL("./fixtures/image-preprocess/parity.json", import.meta.url);
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 const { imageMean, imageStd } = fixture.constants;
 
@@ -107,7 +108,7 @@ const resizedOf = (testCase: Case): Rgb8Image => ({
 
 // ---- フィクスチャ本体 -------------------------------------------------------
 
-Deno.test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
+test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
   // 1 本目に置く。読み違い / 生成失敗でケースが空になると、以降のループが 0 回になって
   // 「緑だが何も検証していない」状態が黙って成立する。
   assertEquals(fixture.cases.length, 7);
@@ -139,7 +140,7 @@ Deno.test("フィクスチャが空でない（取り違えで全ケース素通
 // ---- ① 正規化（resize と切り分けて完全一致で縛る）--------------------------
 
 for (const testCase of fixture.cases) {
-  Deno.test(`正規化パリティ [${testCase.name}] 参照 resized → pixelValues がビット同一`, () => {
+  test(`正規化パリティ [${testCase.name}] 参照 resized → pixelValues がビット同一`, () => {
     const got = normalizeToNchw(resizedOf(testCase), imageMean, imageStd);
     assertEquals(Array.from(got), testCase.pixelValues);
   });
@@ -148,7 +149,7 @@ for (const testCase of fixture.cases) {
 // ---- ② resize（1 LSB 以内）--------------------------------------------------
 
 for (const testCase of fixture.cases) {
-  Deno.test(`resize パリティ [${testCase.name}] ${testCase.why}`, () => {
+  test(`resize パリティ [${testCase.name}] ${testCase.why}`, () => {
     const got = resizeRgb8(imageOf(testCase), testCase.outWidth, testCase.outHeight);
     assertEquals(got.width, testCase.outWidth);
     assertEquals(got.height, testCase.outHeight);
@@ -162,7 +163,7 @@ for (const testCase of fixture.cases) {
   });
 }
 
-Deno.test("resize の相違率が実測の幅に収まる（全ケース合計）", () => {
+test("resize の相違率が実測の幅に収まる（全ケース合計）", () => {
   // 1 LSB 以内という上限だけだと、全画素が 1 ずつずれる実装（例: 丸めの取り違え）が通る。
   let mismatched = 0;
   let total = 0;
@@ -180,7 +181,7 @@ Deno.test("resize の相違率が実測の幅に収まる（全ケース合計�
 // ---- ③ 全経路（RGB8 → pixel_values）----------------------------------------
 
 for (const testCase of fixture.cases) {
-  Deno.test(`全経路パリティ [${testCase.name}] ${testCase.why}`, () => {
+  test(`全経路パリティ [${testCase.name}] ${testCase.why}`, () => {
     const resized = resizeRgb8(imageOf(testCase), testCase.outWidth, testCase.outHeight);
     const got = normalizeToNchw(resized, imageMean, imageStd);
     assertEquals(got.length, testCase.pixelValues.length);
@@ -192,7 +193,7 @@ for (const testCase of fixture.cases) {
 
 // ---- bicubic（DA-V2 の `resample: 3`）のカーネル署名 ------------------------
 
-Deno.test("bicubic は同寸で恒等（台の半径 2 が正しく組めている）", () => {
+test("bicubic は同寸で恒等（台の半径 2 が正しく組めている）", () => {
   // 縮尺 1 では三次カーネルが整数位置で `[…, 0, 1, 0, …]` に落ちる。台の半径を 1 のまま
   // （bilinear の値）にしたり、カーネルの分岐境界を取り違えたりすると、ここで高周波の
   // 画像が滲む。
@@ -203,7 +204,7 @@ Deno.test("bicubic は同寸で恒等（台の半径 2 が正しく組めてい�
   }
 });
 
-Deno.test("bicubic は階段エッジで入力の値域を越える（bilinear は越えない）", () => {
+test("bicubic は階段エッジで入力の値域を越える（bilinear は越えない）", () => {
   // 負のローブの直接の署名。フィルタ指定が黙って無視されて bilinear へ落ちると、overshoot が
   // 消えてここが落ちる（恒等の検査だけでは 2 つのフィルタを区別できない）。
   const low = 40;
@@ -227,7 +228,7 @@ Deno.test("bicubic は階段エッジで入力の値域を越える（bilinear �
   assertEquals(Math.max(...bilinear.data), high, "bilinear が値域を上へ外れた");
 });
 
-Deno.test("bicubic の overshoot は巻き戻らず飽和する", () => {
+test("bicubic の overshoot は巻き戻らず飽和する", () => {
   // MUST: `Uint8Array` への代入は範囲外を mod 256 で巻き戻す（黒白反転が静かに通る）。
   // 端の値を振り切らせて、飽和側に張り付くことを直に見る。
   const width = 8;
@@ -244,7 +245,7 @@ Deno.test("bicubic の overshoot は巻き戻らず飽和する", () => {
   assertEquals(Math.max(...got.data), 255);
 });
 
-Deno.test("bicubic の縮小は台を縮尺ぶん伸ばす（DA-V2 の実運用そのもの・手計算タップ突合）", () => {
+test("bicubic の縮小は台を縮尺ぶん伸ばす（DA-V2 の実運用そのもの・手計算タップ突合）", () => {
   // 資産不要の bicubic ケースは他に 3 本あるが、いずれも `filterScale === 1` の側（恒等と拡大）
   // なので、`buildTaps` の `filterScale = max(scale, 1) > 1` の枝 = **縮小**が 1 度も踏まれない。
   // Python 正本との突合は実資産の e2e にしか無いので、ここは Pillow の `ImagingResample` の式を
@@ -277,7 +278,7 @@ Deno.test("bicubic の縮小は台を縮尺ぶん伸ばす（DA-V2 の実運用�
 
 // ---- 入口の契約（想定外は fail loudly）--------------------------------------
 
-Deno.test("画素列の長さが寸法と合わなければ落ちる", () => {
+test("画素列の長さが寸法と合わなければ落ちる", () => {
   const image: Rgb8Image = { data: new Uint8Array(11), width: 2, height: 2 };
   assertThrows(() => resizeRgb8(image, 4, 4), ModelInputError, "RGB8 の長さ 11");
   assertThrows(
@@ -287,7 +288,7 @@ Deno.test("画素列の長さが寸法と合わなければ落ちる", () => {
   );
 });
 
-Deno.test("寸法が正の整数でなければ落ちる", () => {
+test("寸法が正の整数でなければ落ちる", () => {
   const empty: Rgb8Image = { data: new Uint8Array(0), width: 0, height: 3 };
   assertThrows(() => resizeRgb8(empty, 4, 4), ModelInputError, "画像サイズ 0×3");
   const image: Rgb8Image = { data: new Uint8Array(12), width: 2, height: 2 };
@@ -295,7 +296,7 @@ Deno.test("寸法が正の整数でなければ落ちる", () => {
   assertThrows(() => resizeRgb8(image, 4, 2.5), ModelInputError, "出力サイズ 4×2.5");
 });
 
-Deno.test("未知の補間フィルタ名は落ちる（Object.prototype のメンバを kernel に受けて全黒にしない）", () => {
+test("未知の補間フィルタ名は落ちる（Object.prototype のメンバを kernel に受けて全黒にしない）", () => {
   // 型は `ResampleFilter` で塞いであるが、barrel を JS から叩く呼び手には届かない。
   const image: Rgb8Image = { data: new Uint8Array(12).fill(200), width: 2, height: 2 };
   for (const filter of ["toString", "constructor", "__proto__", "lanczos"]) {
@@ -309,7 +310,7 @@ Deno.test("未知の補間フィルタ名は落ちる（Object.prototype のメ�
   }
 });
 
-Deno.test("mean / std が正規化に使えない値なら落ちる（Inf / NaN の平面を黙って返さない）", () => {
+test("mean / std が正規化に使えない値なら落ちる（Inf / NaN の平面を黙って返さない）", () => {
   const image: Rgb8Image = { data: new Uint8Array(12).fill(128), width: 2, height: 2 };
   for (const bad of [0, -0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
     assertThrows(
@@ -327,7 +328,7 @@ Deno.test("mean / std が正規化に使えない値なら落ちる（Inf / NaN 
   }
 });
 
-Deno.test("有限でも正規化の結果が f32 で溢れる mean / std は落ちる（裾の Inf / NaN を黙って返さない）", () => {
+test("有限でも正規化の結果が f32 で溢れる mean / std は落ちる（裾の Inf / NaN を黙って返さない）", () => {
   const image: Rgb8Image = { data: new Uint8Array(12).fill(128), width: 2, height: 2 };
   const max = Number.MAX_VALUE;
   const cases: readonly [
@@ -354,7 +355,7 @@ Deno.test("有限でも正規化の結果が f32 で溢れる mean / std は落�
   }
 });
 
-Deno.test("mean / std が個々に有限でも、正規化後の値が f32 で溢れる組は落ちる", () => {
+test("mean / std が個々に有限でも、正規化後の値が f32 で溢れる組は落ちる", () => {
   // 商は f64 で有限でも Float32Array へ入れた時点で ±Inf になり、平面ごと GPU へ渡る。
   const image: Rgb8Image = { data: new Uint8Array(12).fill(128), width: 2, height: 2 };
   assertThrows(

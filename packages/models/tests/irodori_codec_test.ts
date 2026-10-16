@@ -5,6 +5,7 @@
 // 末尾トリムは golden 3 ケース（`outputs/series/dacvae-32dim/host/trim.safetensors` — 上流
 // `find_flattening_point` の実測が焼かれている）との突合。golden が無い環境は明示 SKIP。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -43,7 +44,7 @@ const auditTiles = (tiles: readonly CodecTile[], frames: number, halo: number): 
   return covered;
 };
 
-Deno.test("planCodecTiles: S がタイル長以下なら 1 枚に縮退する（= 単発 decode）", () => {
+test("planCodecTiles: S がタイル長以下なら 1 枚に縮退する（= 単発 decode）", () => {
   for (const frames of [1, 2, 161, DEFAULT_CODEC_TILE_FRAMES]) {
     const tiles = planCodecTiles(frames, {
       tileFrames: DEFAULT_CODEC_TILE_FRAMES,
@@ -53,7 +54,7 @@ Deno.test("planCodecTiles: S がタイル長以下なら 1 枚に縮退する（
   }
 });
 
-Deno.test("planCodecTiles: 採用区間が隙間なく S を覆い、両側に halo ぶんの文脈がある", () => {
+test("planCodecTiles: 採用区間が隙間なく S を覆い、両側に halo ぶんの文脈がある", () => {
   for (const frames of [17, 33, 64, 161, 183, 300, 749, 750]) {
     for (const tileFrames of [17, 24, 64, 100, DEFAULT_CODEC_TILE_FRAMES]) {
       const tiles = planCodecTiles(frames, { tileFrames, haloFrames: HALO });
@@ -62,7 +63,7 @@ Deno.test("planCodecTiles: 採用区間が隙間なく S を覆い、両側に h
   }
 });
 
-Deno.test("planCodecTiles: 複数枚なら decode 長は全タイル同一（prepared plan が効き続ける）", () => {
+test("planCodecTiles: 複数枚なら decode 長は全タイル同一（prepared plan が効き続ける）", () => {
   const tiles = planCodecTiles(750, { tileFrames: 64, haloFrames: HALO });
   assertEquals(new Set(tiles.map((tile) => tile.length)), new Set([64]));
   // 採用は step = 64 − 2×8 = 48 フレームずつ（末尾だけ端数）。
@@ -72,7 +73,7 @@ Deno.test("planCodecTiles: 複数枚なら decode 長は全タイル同一（pre
   assertEquals(last.start + last.length, 750, "末尾タイルの右端は真の境界へスナップする");
 });
 
-Deno.test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（採用が 1 枚も残らない）", () => {
+test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（採用が 1 枚も残らない）", () => {
   assertThrows(
     () => planCodecTiles(300, { tileFrames: 16, haloFrames: HALO }),
     ModelInputError,
@@ -80,7 +81,7 @@ Deno.test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（�
   );
 });
 
-Deno.test("planCodecTiles: S が正の整数でなければ落とす", () => {
+test("planCodecTiles: S が正の整数でなければ落とす", () => {
   assertThrows(() => planCodecTiles(0, { tileFrames: 64, haloFrames: HALO }), Error, "frames 0");
   assertThrows(
     () => planCodecTiles(1.5, { tileFrames: 64, haloFrames: HALO }),
@@ -121,7 +122,7 @@ const equivariantDecoder = (slice: Float32Array<ArrayBuffer>, frames: number) =>
   return Promise.resolve(out);
 };
 
-Deno.test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複数枚が単発 decode と一致）", async () => {
+test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複数枚が単発 decode と一致）", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
   assertEquals(tiles.length > 1, true, "1 枚に縮退すると貼り合わせの添字算術を踏まない");
@@ -137,7 +138,7 @@ Deno.test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複�
   assertEquals([...waveform], Array.from({ length: frames * TILE_HOP }, (_, index) => index));
 });
 
-Deno.test("decodeTiles: 位置を無視する decoder では一致が破れる（門が恒真でない証拠）", async () => {
+test("decodeTiles: 位置を無視する decoder では一致が破れる（門が恒真でない証拠）", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
   // 入力フレームの値ではなく**タイル内の添字**から作る（= 平行移動同変でない）decoder。
@@ -156,7 +157,7 @@ Deno.test("decodeTiles: 位置を無視する decoder では一致が破れる�
   );
 });
 
-Deno.test("decodeTiles: run へ渡すのはタイル 1 枚ぶんの写し（view でない）", async () => {
+test("decodeTiles: run へ渡すのはタイル 1 枚ぶんの写し（view でない）", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
   let call = 0;
@@ -178,7 +179,7 @@ Deno.test("decodeTiles: run へ渡すのはタイル 1 枚ぶんの写し（view
   assertEquals(call, tiles.length);
 });
 
-Deno.test("decodeTiles: latent の要素数が latentDim で割れなければ落とす", async () => {
+test("decodeTiles: latent の要素数が latentDim で割れなければ落とす", async () => {
   const tiles = planCodecTiles(12, { tileFrames: 8, haloFrames: 2 });
   await assertRejects(
     () =>
@@ -192,7 +193,7 @@ Deno.test("decodeTiles: latent の要素数が latentDim で割れなければ�
   );
 });
 
-Deno.test("decodeTiles: decoder の出力長が合わなければ落とす（期待サンプル数つき）", async () => {
+test("decodeTiles: decoder の出力長が合わなければ落とす（期待サンプル数つき）", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
   const error = await assertRejects(
@@ -208,7 +209,7 @@ Deno.test("decodeTiles: decoder の出力長が合わなければ落とす（期
   assertStringIncludes(error.message, `${tiles[0].length * TILE_HOP} のはず`);
 });
 
-Deno.test("decodeTiles: 1 枚に縮退した計画では単発 decode の写しそのもの", async () => {
+test("decodeTiles: 1 枚に縮退した計画では単発 decode の写しそのもの", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: DEFAULT_CODEC_TILE_FRAMES, haloFrames: HALO });
   assertEquals(tiles.length, 1);
@@ -248,7 +249,7 @@ if (!GOLDEN_AVAILABLE) {
   );
 }
 
-Deno.test({
+test({
   name: "findFlatteningPoint: golden 3 ケースが上流 find_flattening_point と同じ位置を返す",
   ignore: !GOLDEN_AVAILABLE,
   fn: () => {
@@ -275,18 +276,18 @@ Deno.test({
   },
 });
 
-Deno.test("findFlatteningPoint: 全部 0 の latent は先頭で平坦（窓が全部 pad と同じ）", () => {
+test("findFlatteningPoint: 全部 0 の latent は先頭で平坦（窓が全部 pad と同じ）", () => {
   assertEquals(findFlatteningPoint(new Float32Array(10 * LATENT_DIM), 10, LATENT_DIM), 0);
 });
 
-Deno.test("findFlatteningPoint: 値が一定でも 0 近傍でなければ平坦としない（窓は pad ごと見る）", () => {
+test("findFlatteningPoint: 値が一定でも 0 近傍でなければ平坦としない（窓は pad ごと見る）", () => {
   // 全要素 1.0。末尾の窓は 0 pad で平均が薄まる（i=9 で mean 0.05 < 0.1）が、実在行と pad の
   // 差が std 0.218 を作るので通らない — 見つからず `frames` が返る。
   const flat = new Float32Array(10 * LATENT_DIM).fill(1);
   assertEquals(findFlatteningPoint(flat, 10, LATENT_DIM), 10);
 });
 
-Deno.test("findFlatteningPoint: 末尾を 0 にした位置をそのまま返す（golden 合成ケースの縮小版）", () => {
+test("findFlatteningPoint: 末尾を 0 にした位置をそのまま返す（golden 合成ケースの縮小版）", () => {
   const frames = 40;
   const silentFrom = 25;
   const latent = new Float32Array(frames * LATENT_DIM);
@@ -297,7 +298,7 @@ Deno.test("findFlatteningPoint: 末尾を 0 にした位置をそのまま返す
   assertEquals(findFlatteningPoint(latent, frames, LATENT_DIM), silentFrom);
 });
 
-Deno.test("findFlatteningPoint: 要素数が frames × latentDim と違えば落とす", () => {
+test("findFlatteningPoint: 要素数が frames × latentDim と違えば落とす", () => {
   assertThrows(
     () => findFlatteningPoint(new Float32Array(31), 1, LATENT_DIM),
     Error,
@@ -305,13 +306,13 @@ Deno.test("findFlatteningPoint: 要素数が frames × latentDim と違えば落
   );
 });
 
-Deno.test("trimmedSampleCount: 短いほうを採る（上流 max_samples）", () => {
+test("trimmedSampleCount: 短いほうを採る（上流 max_samples）", () => {
   assertEquals(trimmedSampleCount(161 * HOP, 121, HOP), 121 * HOP, "トリムが効く");
   assertEquals(trimmedSampleCount(161 * HOP, 161, HOP), 161 * HOP, "切らない");
   // 秒指定でフレーム全長より短い切り出しが要求されているときは、そちらが勝つ。
   assertEquals(trimmedSampleCount(48_192, 26, HOP), 48_192);
 });
 
-Deno.test("trimmedSampleCount: 先頭から平坦（0）のときだけ切らない（0 サンプルを返さない）", () => {
+test("trimmedSampleCount: 先頭から平坦（0）のときだけ切らない（0 サンプルを返さない）", () => {
   assertEquals(trimmedSampleCount(161 * HOP, 0, HOP), 161 * HOP);
 });

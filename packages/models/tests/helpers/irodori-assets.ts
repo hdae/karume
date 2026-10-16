@@ -10,6 +10,7 @@
  * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
  */
 
+import { readFile } from "@karume/test-support/fs";
 import { parseManifest, resolveSelection } from "@karume/hub";
 import type { FileRef, Manifest, ModelEntry } from "@karume/hub";
 import { parseSafetensors } from "@karume/runtime";
@@ -85,7 +86,7 @@ export const loadLocalAssets = async (
   let assets: Record<string, Uint8Array<ArrayBuffer>> = {};
   const read = async (key: string, ref: FileRef): Promise<void> => {
     const cached = byPath.get(ref.path);
-    const bytes = cached ?? await Deno.readFile(new URL(ref.path, ASSETS_DIR));
+    const bytes = cached ?? await readFile(new URL(ref.path, ASSETS_DIR));
     if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };
@@ -102,7 +103,7 @@ export const readCase = async (
   directory: URL,
   name: string,
 ): Promise<(tensor: string) => Float32Array<ArrayBuffer>> => {
-  const bytes = await Deno.readFile(new URL(`case.${name}.safetensors`, directory));
+  const bytes = await readFile(new URL(`case.${name}.safetensors`, directory));
   const file = parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   );

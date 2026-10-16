@@ -1,6 +1,6 @@
 // 融合前の parallel と u32 で比較し、独立 f64 参照の既存 5e-6 も維持する。
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { referenceStateAttention } from "../src/reference/state-attention.ts";
 import { stateStatsPvEligible } from "../src/kernels/state-attention-stats-pv.ts";

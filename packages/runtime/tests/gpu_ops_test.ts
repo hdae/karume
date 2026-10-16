@@ -1,6 +1,7 @@
 // 実 GPU 実行 vs CPU 参照の数値突合（ADR 0005 の段 2）。M0 の全 op を代表 shape で回す。
 // MUST: 乱数を使わない — 失敗が再現しないと原因の切り分けができない。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
@@ -131,25 +132,25 @@ const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
   }
 };
 
-Deno.test({
+test({
   name: "unary 11 種が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(UNARY_CASES),
 });
 
-Deno.test({
+test({
   name: "binary 4 種が broadcast 込みで CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(BINARY_CASES),
 });
 
-Deno.test({
+test({
   name: "i32 / bool の elementwise（mask 経路）が CPU 参照と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(DTYPE_CASES),
 });
 
-Deno.test({
+test({
   name:
     "波3 の数理 op（where / 比較 / clamp / leaky_relu / log1p / cumsum / bool sum）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -164,7 +165,7 @@ Deno.test({
  * MUST: allclose は NaN をどちらの側でも不合格にするので、この検査は checkAll に載せられない
  * — 生の値を見る専用テストとして持つ。
  */
-Deno.test({
+test({
   name: "leaky_relu は NaN を伝播する（select 形の裁定 — 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -254,7 +255,7 @@ const NAN_CASES: readonly OpCase[] = [
  * MUST: allclose は NaN をどちらの側でも不合格にするので checkAll には載せられない —
  * **CPU 参照との isNaN パターン一致**で突合する（NaN のビットパターン一致までは求めない）。
  */
-Deno.test({
+test({
   name: "clamp / clamp_min / relu / amax / amin が NaN を伝播する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -299,7 +300,7 @@ Deno.test({
  * f32 の数 ulp に収まることを実測する。素朴形なら x = 1e-8 で出力 0（相対誤差 1）になり、
  * この閾値では通らない。
  */
-Deno.test({
+test({
   name: "log1p は 1+x が丸まる領域でも相対誤差 f32 数 ulp に収まる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -339,7 +340,7 @@ Deno.test({
  * WGSL が別演算へ落ちた」— 特定ドライバで割れる場合は op 単位で門を外して理由を記録する
  * （tanh 飽和カナリアと同じ運用）。
  */
-Deno.test({
+test({
   name: "GEMM / conv / 縮約系は現行コーパスで f64 オラクルとビット同一（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -443,7 +444,7 @@ const TANH_SATURATION_INPUTS = [
   -120,
 ] as const;
 
-Deno.test({
+test({
   name: "tanh / gelu_tanh が飽和域で CPU 参照と一致する（NaN を吐かない — 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -558,7 +559,7 @@ Deno.test({
  * - 融合 attention は全マスク行（mask が全列 −inf）で `1/0` の不定値だった — v2 の空行ガード
  *   で safe_softmax と同じ「出力 0 行」に確定する（契約違反 → 正規入力への拡張）。
  */
-Deno.test({
+test({
   name: "softmax 族は全 NaN 行を 0 に潰さず、融合 attention の全マスク行は厳密 0（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -628,7 +629,7 @@ Deno.test({
  * 上のカナリアの NaN 側。`tanh` はビット列判定の外殻、`gelu_tanh` は式の外に残る因子 `x` で
  * それぞれ NaN を運ぶ（機序が違うので op ごとに見る）。
  */
-Deno.test({
+test({
   name: "tanh / gelu_tanh が NaN を伝播する（打ち切りが NaN を飲まない — 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -655,25 +656,25 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "matmul がタイル端数込みで CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(MATMUL_CASES),
 });
 
-Deno.test({
+test({
   name: "bmm が非対称形・タイル端数込みで CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(BMM_CASES),
 });
 
-Deno.test({
+test({
   name: "融合 attention が CPU 参照と一致する（軸全異・端数・D≠128 込み / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(ATTENTION_CASES),
 });
 
-Deno.test({
+test({
   name: "gather（最終次元固定）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(GATHER_CASES),
@@ -686,7 +687,7 @@ Deno.test({
  * 返さない）。オラクル側の CPU 参照は同じ入力で必ず throw する — 両者が一致してしまうと
  * 「契約違反のグラフが突合を通る」ことになるので、ここは意図的に非対称であることを固定する。
  */
-Deno.test({
+test({
   name: "gather の範囲外添字は GPU で NaN 汚染・CPU 参照で throw（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -713,13 +714,13 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "行 reduce 3 種が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(REDUCE_CASES),
 });
 
-Deno.test({
+test({
   name: "argmax（最終次元・rank 保存）が CPU 参照と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(ARGMAX_CASES),
@@ -734,7 +735,7 @@ Deno.test({
  * ここは **GPU の出力**だけを見る — 同じ表に対する CPU 参照の向きは、アダプタ無しの環境でも
  * 走る `reference_ops_test.ts` 側の門が縛る。
  */
-Deno.test({
+test({
   name: "argmax のタイブレーク / NaN / 全 −inf 行が torch の実測値と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -770,7 +771,7 @@ Deno.test({
  * 2. 全要素 −inf → 0（区間ごとの番兵が merge で全部負け、区間 0 の最小 index が残る）
  * 3. 最大が最終区間の末尾（index 19,999）→ 19,999（端数の区間の走査が末尾まで届く）
  */
-Deno.test({
+test({
   name: "2 相形 argmax の区間境界 / NaN / 全 −inf 行が 1 dispatch 形と同じ規定どおり（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -806,7 +807,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "topk（最終次元・static-k・値 + 添字の 2 出力）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(TOPK_CASES),
@@ -842,7 +843,7 @@ const nanSafe = (values: Iterable<number>): readonly (number | "NaN")[] =>
  * 5. −inf と同値の最大が混在 → 2.0 が先・−inf は index 昇順
  * 6. 同値が 2 組 → 2.0 の組が先、その中は index 昇順
  */
-Deno.test({
+test({
   name: "topk の同値 tie / NaN / 全 −inf 行が固定挙動どおり（値は torch とビット一致 — 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -909,7 +910,7 @@ Deno.test({
  * 入力は**タイと NaN と全 −inf 行**を含む形（一意な最大値だけの入力では、どちらの
  * タイブレーク規律でも同じ答えになって検出器にならない）。
  */
-Deno.test({
+test({
   name: "k=1 の topk の添字が argmax と一致する（タイ / NaN / 全 −inf 行込み・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -977,7 +978,7 @@ const f32Bits = (tensor: Tensor | RefTensor): readonly number[] => {
  * 1. 有限値 1 本 + ±0.0 の tie → 1.0 が先頭、零は添字昇順
  * 2. ±0.0 の tie + 負値 → 零 3 本が先（添字昇順）、−1.0 が最後
  */
-Deno.test({
+test({
   name: "topk は ±0.0 の tie でも選択添字どおりのビットを書く（値をビット列で固定・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1030,7 +1031,7 @@ Deno.test({
  * 上限の内側（k=2）が**同じ絞った device で緑**であることも対で見る — 全部落ちる実装でも
  * 拒否側の門だけなら通ってしまう。
  */
-Deno.test({
+test({
   name:
     "topk は workgroup storage 由来の k 上限を超えたら上限値つきで落ちる（絞った device / 実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1239,7 +1240,7 @@ const referenceTopkPair = (input: TopkFaultInput): readonly (readonly number[])[
   return [[...expected[0].data], [...expected[1].data]];
 };
 
-Deno.test({
+test({
   name: "故障注入: argmax / topk の変異版はいずれも参照突合で赤くなる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1303,26 +1304,26 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "レイアウト 3 種（別名 reshape / strided permute・expand）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(LAYOUT_CASES),
 });
 
-Deno.test({
+test({
   name: "レイアウト第 2 群（slice / cat / pad / flip）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(LAYOUT2_CASES),
 });
 
-Deno.test({
+test({
   name:
     "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(FUSED_CASES),
 });
 
-Deno.test({
+test({
   name: "双線形 resample（拡大 / 縮小 / scale 0）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(UPSAMPLE_CASES),
@@ -1334,20 +1335,20 @@ Deno.test({
  * UPSAMPLE_FRACTIONAL_CASES の MUST）。ここが見るのは実測表の帯での一致で、λ が 0 / 1 に
  * 潰れない丸め列を GPU と CPU 参照の双方に踏ませる唯一のケース。
  */
-Deno.test({
+test({
   name:
     "双線形 resample は scale が f32 で厳密でない形でも CPU 参照と実測表の帯で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(UPSAMPLE_FRACTIONAL_CASES),
 });
 
-Deno.test({
+test({
   name: "DCNv2（k の 2 形 / バッチ 2 / 非対称形）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(DEFORM_CASES),
 });
 
-Deno.test({
+test({
   name: "GRU 隠れ側スキャン（2 方向 × バッチ 1 / 3）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(GRU_SCAN_CASES),
@@ -1363,7 +1364,7 @@ Deno.test({
  * 共有していれば緑のまま**通る（CPU 参照も GPU もこのテストの対象）。ここは参照実装を
  * 経由せず、入力テンソルの端の値そのものと突き合わせる。
  */
-Deno.test({
+test({
   name:
     "双線形 resample は (in−1)/(out−1) が f32 で往復する形で出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1405,7 +1406,7 @@ Deno.test({
  * MUST: 「端をクランプして厳密化する」変更が必ず赤くなる形にする。他の全ケースは scale が
  * f32 で厳密なので、クランプを足しても値が 1 ビットも動かず緑のまま通る。
  */
-Deno.test({
+test({
   name:
     "双線形 resample は scale が f32 で往復しない形で端を厳密一致させない（クランプしない・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1442,7 +1443,7 @@ Deno.test({
  * embedding の範囲外添字の裁定（src/kernels/embedding.ts）を実 GPU で固定する。gather と
  * 同じ非対称性 — GPU は範囲外の**行だけ**を NaN で汚染し、オラクルの CPU 参照は throw する。
  */
-Deno.test({
+test({
   name: "embedding の範囲外添字は GPU で NaN 汚染・CPU 参照で throw（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1474,7 +1475,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "境界（大きめ 1 本 / 行数が workgroup 上限超え）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => checkAll(BOUNDARY_CASES),
@@ -1518,7 +1519,7 @@ const prefixSliceGraph = (
   }],
 });
 
-Deno.test({
+test({
   name: "sym_prefix_slice が Tmax 定数の先頭を切り出す（実 GPU / T < Tmax）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1624,7 +1625,7 @@ Deno.test({
  * MUST: 期待 shape は**リテラル**（`resolved`）で持つ。実出力の shape を参照側にも渡すと、
  * 束縛から連結軸長を導く経路が丸ごと壊れていても恒真で通る。
  */
-Deno.test({
+test({
   name: "記号軸 cat（T+定数 / 2T）が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

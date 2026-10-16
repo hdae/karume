@@ -1,3 +1,4 @@
+import { isNotFound, readFile, readTextFile } from "@karume/test-support/fs";
 /**
  * ローカル資産の「在れば読む」読み口（無い = `undefined` を SKIP 判定の源にする門が使う）。
  *
@@ -10,14 +11,14 @@
  */
 
 const undefinedIfNotFound = (cause: unknown): undefined => {
-  if (cause instanceof Deno.errors.NotFound) return undefined;
+  if (isNotFound(cause)) return undefined;
   throw cause;
 };
 
 /** テキストとして読む。path が無ければ `undefined`、それ以外の失敗は投げる。 */
 export const readTextIfPresent = (path: URL): Promise<string | undefined> =>
-  Deno.readTextFile(path).catch(undefinedIfNotFound);
+  readTextFile(path).catch(undefinedIfNotFound);
 
 /** バイト列として読む。path が無ければ `undefined`、それ以外の失敗は投げる。 */
 export const readFileIfPresent = (path: URL): Promise<Uint8Array<ArrayBuffer> | undefined> =>
-  Deno.readFile(path).catch(undefinedIfNotFound);
+  readFile(path).catch(undefinedIfNotFound);

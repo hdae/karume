@@ -6,6 +6,7 @@
 // `fuzz_strings` / `digest` / `sweep_blocks` の写経）。手順がずれれば digest が全部外れる（緑のまま
 // 別の列を見ることはない）。
 
+import { readTextFile } from "@karume/test-support/fs";
 import {
   cleanPrompt,
   parsePromptCleanTables,
@@ -50,7 +51,7 @@ export type SweepFixture = {
 
 export const loadSweepFixture = async (): Promise<SweepFixture> =>
   JSON.parse(
-    await Deno.readTextFile(
+    await readTextFile(
       new URL("../fixtures/wan-text/prompt-clean-sweep.json", import.meta.url),
     ),
   ) as SweepFixture;
@@ -59,7 +60,7 @@ export const loadSweepFixture = async (): Promise<SweepFixture> =>
 export const loadPromptCleanTables = async (): Promise<PromptCleanTables> =>
   parsePromptCleanTables(
     (JSON.parse(
-      await Deno.readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
+      await readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
     ) as { promptClean: unknown }).promptClean,
     "promptClean",
   );

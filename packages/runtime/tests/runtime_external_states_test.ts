@@ -11,6 +11,7 @@
 // この門の本体。通してしまうと、どれも例外ではなく「未初期化の過去を読む」「貸し手が確定した
 // KV を上書きする」という**別の値**として出る。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { IrError, type IrGraph } from "../src/format/ir.ts";
 import { OpContractError } from "../src/ops.ts";
@@ -109,7 +110,7 @@ const slotShapes = (graph: IrGraph): ReadonlyMap<string, readonly number[]> =>
     Object.entries(graph.states).map(([name, slot]) => [name, slot.shape.map(Number)]),
   );
 
-Deno.test("drafter の最小形（external 2 本 + readonly attention 1 本）は受理される", () => {
+test("drafter の最小形（external 2 本 + readonly attention 1 本）は受理される", () => {
   const graph = parse(drafterGraph());
   assertEquals(graph.states["l13.k"].external, true);
   validateGraphContracts(graph);
@@ -120,13 +121,13 @@ Deno.test("drafter の最小形（external 2 本 + readonly attention 1 本）�
   assertEquals(plan.nodes[0].inputShapes.length, 1);
 });
 
-Deno.test("貸し手（自前スロット + append）は 1 バイトも影響を受けない（external 無しは無風）", () => {
+test("貸し手（自前スロット + append）は 1 バイトも影響を受けない（external 無しは無風）", () => {
   const graph = parse(targetGraph());
   assertEquals(graph.states["l13.k"].external, false);
   validateGraphContracts(graph);
 });
 
-Deno.test("external スロットへの state_append は拒否する（書けるのは貸し手だけ）", () => {
+test("external スロットへの state_append は拒否する（書けるのは貸し手だけ）", () => {
   const graph = parse(mutated((g) => {
     g.requires.ops = ["attention", "state_append"];
     g.inputs.push({ name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] });
@@ -141,7 +142,7 @@ Deno.test("external スロットへの state_append は拒否する（書ける�
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "external なのに state_append");
 });
 
-Deno.test("external スロットを readonly でない attention が読む形は拒否する", () => {
+test("external スロットを readonly でない attention が読む形は拒否する", () => {
   // 読者を従来の states 形（ins 3 本）に戻す = 「今 step の k/v を足す」形。書き手が居ない
   // スロットに対してこれを許すと、必ず未初期化行を過去として読む。
   const graph = parse(mutated((g) => {
@@ -159,7 +160,7 @@ Deno.test("external スロットを readonly でない attention が読む形は
   );
 });
 
-Deno.test("readonly の読者が非 external スロットを読む形は拒否する", () => {
+test("readonly の読者が非 external スロットを読む形は拒否する", () => {
   const graph = parse(mutated((g) => {
     if (g.states === undefined) throw new Error("states が無い");
     delete g.states["l13.k"].external;
@@ -172,7 +173,7 @@ Deno.test("readonly の読者が非 external スロットを読む形は拒否�
   );
 });
 
-Deno.test("external と非 external の混在は拒否する（借り手は自前スロットを持たない）", () => {
+test("external と非 external の混在は拒否する（借り手は自前スロットを持たない）", () => {
   const graph = parse(mutated((g) => {
     if (g.states === undefined) throw new Error("states が無い");
     delete g.states["l13.v"].external;
@@ -181,7 +182,7 @@ Deno.test("external と非 external の混在は拒否する（借り手は自�
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "ADR 0096 段 2 §1.1");
 });
 
-Deno.test("external を宣言しつつ readonly も append も無いスロットは参照検査で落ちる", () => {
+test("external を宣言しつつ readonly も append も無いスロットは参照検査で落ちる", () => {
   // 読者がゼロのスロットは IR 層（参照完全性）が落とす — external でも例外にならない。
   const graph = mutated((g) => {
     if (g.states === undefined) throw new Error("states が無い");
@@ -190,7 +191,7 @@ Deno.test("external を宣言しつつ readonly も append も無いスロット
   assertThrows(() => parse(graph), IrError, "どのノードからも参照されない");
 });
 
-Deno.test("states[].external は true 以外を書けない（不存在と同義の綴りを 2 つ持たない）", () => {
+test("states[].external は true 以外を書けない（不存在と同義の綴りを 2 つ持たない）", () => {
   for (const value of [false, 1, "true"] as const) {
     const graph = mutated((g) => {
       if (g.states === undefined) throw new Error("states が無い");
@@ -201,7 +202,7 @@ Deno.test("states[].external は true 以外を書けない（不存在と同義
   }
 });
 
-Deno.test("readonly の attention は入力 1 本ちょうど（3 本は拒否・states 欄が要る）", () => {
+test("readonly の attention は入力 1 本ちょうど（3 本は拒否・states 欄が要る）", () => {
   const threeIns = parse(mutated((g) => {
     g.inputs.push(
       { name: "k", dtype: "f32", shape: [1, KV_HEADS, 1, DEPTH] },
@@ -228,7 +229,7 @@ Deno.test("readonly の attention は入力 1 本ちょうど（3 本は拒否�
   );
 });
 
-Deno.test("attrs.readonly は true のみ・state_append には書けない", () => {
+test("attrs.readonly は true のみ・state_append には書けない", () => {
   const falsy = parse(mutated((g) => {
     g.nodes[0].attrs = { scale: 0.5, window: WINDOW, readonly: false };
   }));
@@ -248,7 +249,7 @@ Deno.test("attrs.readonly は true のみ・state_append には書けない", ()
   assertThrows(() => validateGraphContracts(onAppend), OpContractError, "attrs.readonly は無い");
 });
 
-Deno.test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C", () => {
+test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C", () => {
   const cases: readonly (readonly [string, (graph: DeclarationJson) => void, string])[] = [
     ["M が 2", (g) => {
       g.inputs[0].shape = [1, HEADS, 2, DEPTH];
@@ -305,7 +306,7 @@ const sharedGraph = (): DeclarationJson => {
   return graph;
 };
 
-Deno.test("共有 initializer は実体も格納も持たずに受理され、席が shared になる", () => {
+test("共有 initializer は実体も格納も持たずに受理され、席が shared になる", () => {
   const graph = parse(sharedGraph());
   // 借り手の宣言名がそのまま貸し手の initializer 名（IR v2 では名前が実体の鍵）。
   assertEquals(graph.initializers[SHARED_NAME], { shared: true });
@@ -321,7 +322,7 @@ Deno.test("共有 initializer は実体も格納も持たずに受理され、�
   });
 });
 
-Deno.test("共有 initializer に実体の鍵や格納を書く形は拒否する", () => {
+test("共有 initializer に実体の鍵や格納を書く形は拒否する", () => {
   // IR v2 の initializer 宣言に書けるのは `shared` だけ（実体との対応は容器の束縛表が持つ）。
   // 旧配布形の `tensor` / `storage` をそのまま書いた形は未知のキーとして落ちる。
   for (const key of ["tensor", "storage"]) {

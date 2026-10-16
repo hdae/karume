@@ -16,8 +16,9 @@
 //
 // 実画像の鎖（PNG → … → encoder の入力）の golden とのビット一致は `wan_ti2v_i2v_preprocess_real_test.ts`。
 
+import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -116,7 +117,7 @@ const isLanczosCase = (value: unknown): value is LanczosCase => {
  * 一致を誰も見ていない状態が緑になる）。
  */
 const readLanczosFixture = async (): Promise<LanczosFixture> => {
-  const raw = JSON.parse(await Deno.readTextFile(WAN_I2V_LANCZOS_FIXTURE)) as Record<
+  const raw = JSON.parse(await readTextFile(WAN_I2V_LANCZOS_FIXTURE)) as Record<
     string,
     unknown
   >;

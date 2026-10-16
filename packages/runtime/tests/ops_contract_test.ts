@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import type { OpSupport } from "../src/ops/support.ts";
 import type { IrNode } from "../src/format/ir.ts";
@@ -56,7 +57,7 @@ const node = (
 // MUST: doc は読まない（書式依存の抽出突合は脆く、恒真化の温床にもなる）。ここは**期待値
 // リテラル**で op 集合を固定するだけで、docs/ir-v2.md の一覧との同期は op 追加時の人手仕事
 // （契約 1 セット — ops.ts / ops.py / shapes.py / fixtures / CPU 参照 / golden / ir-v2.md）。
-Deno.test("契約表の op 集合が期待値リテラル 62 本と一致する", () => {
+test("契約表の op 集合が期待値リテラル 62 本と一致する", () => {
   assertEquals(UNARY_OPS.length, 19);
   assertEquals(BINARY_OPS.length, 6);
   // argmax は reduce 族に**入らない**（attrs も出力 dtype も rank の扱いも別 — ADR 0068 決定 2）
@@ -131,7 +132,7 @@ Deno.test("契約表の op 集合が期待値リテラル 62 本と一致する"
 // 重みスロット表とチャネル軸表は対（ADR 0019）。片方だけ増えると、新しいスロットの i8 が
 // 「軸 0 の scale」として黙って実行される（shape 検査は軸 0 と軸 1 の区別を付けられない形が
 // 作れる）。
-Deno.test("WEIGHT_CHANNEL_AXES は WEIGHT_SLOTS と同じ op を覆う", () => {
+test("WEIGHT_CHANNEL_AXES は WEIGHT_SLOTS と同じ op を覆う", () => {
   assertEquals([...WEIGHT_CHANNEL_AXES.keys()].sort(), [...WEIGHT_SLOTS.keys()].sort());
   // 期待値リテラルで固定する（表を辿り直すと構造が壊れない限り絶対に落ちない検査になる）
   assertEquals([...WEIGHT_CHANNEL_AXES].sort(), [
@@ -144,7 +145,7 @@ Deno.test("WEIGHT_CHANNEL_AXES は WEIGHT_SLOTS と同じ op を覆う", () => {
   ]);
 });
 
-Deno.test("ランタイム対応表と capability 照会は契約表から導かれる", () => {
+test("ランタイム対応表と capability 照会は契約表から導かれる", () => {
   assertEquals(RUNTIME_SUPPORT.ops.size, OP_CONTRACTS.size);
   // 生の int32 格納は記号依存定数の焼き込み先として実行対象（ADR 0010）。f16（ADR 0018）・
   // i8（ADR 0019）・i4（ADR 0069 — 適格は linear / embedding 限定）は実行経路が入った（適格な重みは
@@ -214,7 +215,7 @@ Deno.test("ランタイム対応表と capability 照会は契約表から導か
 
 // MUST: 一括解禁しない（ADR 0007 の語彙 allowlist 凍結）。i32 / bool を持つのは実測グラフの
 // mask 経路に出る形（mul / sub）と、その経路のために新設した op（cast / bitwise_not）だけ。
-Deno.test("dtype の解禁は op ごとで、実測に出ない組み合わせは f32 のまま", () => {
+test("dtype の解禁は op ごとで、実測に出ない組み合わせは f32 のまま", () => {
   const dtypes = (op: string): readonly string[] => [...resolveOpContract(op).dtypes].sort();
   assertEquals(dtypes("mul"), ["f32", "i32"]);
   assertEquals(dtypes("sub"), ["f32", "i32"]);
@@ -278,7 +279,7 @@ Deno.test("dtype の解禁は op ごとで、実測に出ない組み合わせ�
 
 // ADR 0012: gather は入力スロットごとに受理集合が違う最初の op（src=f32 / index=i32）。
 // MUST: 「受理集合の和」だけを見る検査（assertDtype）と、スロット単位の検査を混同しない。
-Deno.test("gather はスロット別 dtype 契約を持ち、和との突合より狭く判定する", () => {
+test("gather はスロット別 dtype 契約を持ち、和との突合より狭く判定する", () => {
   const gather = resolveOpContract("gather");
   assertEquals(gather.slotDtypes.kind, "perSlot");
   // 和は capability 射影に出る（対応表は「この op が触れる dtype」を運ぶ）
@@ -300,7 +301,7 @@ Deno.test("gather はスロット別 dtype 契約を持ち、和との突合よ�
   assertThrows(() => assertSlotDtype(mul, 1, "bool", "t"), OpContractError);
 });
 
-Deno.test("スロット別契約の出力はスロット 0 と同型で、混合は uniform の op だけが拒否する", () => {
+test("スロット別契約の出力はスロット 0 と同型で、混合は uniform の op だけが拒否する", () => {
   const resolve = (
     op: string,
     inputDtypes: readonly ("f32" | "i32" | "bool")[],
@@ -326,7 +327,7 @@ Deno.test("スロット別契約の出力はスロット 0 と同型で、混合
 });
 
 // attrs を持つ op は 31 本。それ以外は attrs 空のままで、非空 attrs は fail loudly。
-Deno.test("attrs を持つ op は契約表が列挙する 32 本だけで、他は attrs 空", () => {
+test("attrs を持つ op は契約表が列挙する 32 本だけで、他は attrs 空", () => {
   const withAttrs = [...OP_CONTRACTS]
     .filter(([, contract]) => attrKeysOf(contract).length > 0)
     .map(([name]) => name)
@@ -418,7 +419,7 @@ Deno.test("attrs を持つ op は契約表が列挙する 32 本だけで、他�
 // deform_conv2d は **DCNv2 専業・stride/dilation/groups/offset_groups は 1 固定**（第 1' 層・
 // ADR 0055）。どちらも値の検査ではなく**欄とスロットの不存在**で表しているので、それらが
 // 生えていないことを契約側から固定する。
-Deno.test("deform_conv2d の attrs は padding 1 本だけ・アリティ 5 固定", () => {
+test("deform_conv2d の attrs は padding 1 本だけ・アリティ 5 固定", () => {
   assertEquals(attrKeysOf(resolveOpContract("deform_conv2d")), ["padding"]);
   assertEquals(
     assertNodeContract(
@@ -467,7 +468,7 @@ Deno.test("deform_conv2d の attrs は padding 1 本だけ・アリティ 5 固�
 // upsample_bilinear2d は **align_corners=True 専業**（第 1 層）。「True 以外を受理しない」を
 // 値の検査ではなく**欄の不存在**で表しているので、その欄が生えていないことを契約側から固定
 // する（ADR 0023 決定 4 の規律 — 欄ができた瞬間に False も表現できてしまう）。
-Deno.test("upsample_bilinear2d の attrs は output_size 1 本だけ（align_corners の欄が無い）", () => {
+test("upsample_bilinear2d の attrs は output_size 1 本だけ（align_corners の欄が無い）", () => {
   assertEquals(attrKeysOf(resolveOpContract("upsample_bilinear2d")), ["output_size"]);
   assertEquals(
     assertNodeContract(node("upsample_bilinear2d", ["x"], { output_size: [7, 9] }), "t").kind,
@@ -497,7 +498,7 @@ Deno.test("upsample_bilinear2d の attrs は output_size 1 本だけ（align_cor
 });
 
 // ADR 0012: attrs スキーマは「宣言キーは全て必須・宣言外は fail loudly・値も検査する」。
-Deno.test("attrs スキーマは必須キーの欠落と契約外の値を拒否する（cast の to）", () => {
+test("attrs スキーマは必須キーの欠落と契約外の値を拒否する（cast の to）", () => {
   assertEquals(attrKeysOf(resolveOpContract("cast")), ["to"]);
   assertEquals(assertNodeContract(node("cast", ["a"], { to: "i32" }), "t").kind, "cast");
   // 必須キーの欠落（M0 の「未知キーだけ見る」検査ではここが素通りした）
@@ -520,7 +521,7 @@ Deno.test("attrs スキーマは必須キーの欠落と契約外の値を拒否
 });
 
 // ADR 0011: permute の dims は非負の全単射（負の軸表記はエクスポータ境界で正規化する）。
-Deno.test("permute の dims は非負・重複無しの並べ替え表だけを受理する", () => {
+test("permute の dims は非負・重複無しの並べ替え表だけを受理する", () => {
   assertEquals(attrKeysOf(resolveOpContract("permute")), ["dims"]);
   assertEquals(
     assertNodeContract(node("permute", ["a"], { dims: [0, 2, 1] }), "t").kind,
@@ -549,7 +550,7 @@ Deno.test("permute の dims は非負・重複無しの並べ替え表だけを�
 
 // MUST: 出力 dtype は宣言を鵜呑みにせず契約から導く（cast の to と values{} の宣言が
 // 食い違ったグラフは、readback で別の TypedArray として読まれる沈黙誤値になる）。
-Deno.test("出力 dtype は契約から導かれ、宣言との食い違いを拒否する", () => {
+test("出力 dtype は契約から導かれ、宣言との食い違いを拒否する", () => {
   const resolve = (
     op: string,
     ins: readonly string[],
@@ -599,7 +600,7 @@ Deno.test("出力 dtype は契約から導かれ、宣言との食い違いを�
 
 // MUST: 写像の定義域はスロット 0 の受理集合と完全一致（部分写像は「出力が決まらない dtype」
 // の穴になる）。恒等が既定であることも同じ不変条件で担保される。
-Deno.test("出力 dtype 写像の定義域がスロット 0 の受理集合と一致する", () => {
+test("出力 dtype 写像の定義域がスロット 0 の受理集合と一致する", () => {
   for (const [name, contract] of OP_CONTRACTS) {
     const slots = contract.slotDtypes;
     const domain = slots.kind === "uniform" ? slots.accept : slots.slots[0];
@@ -634,7 +635,7 @@ Deno.test("出力 dtype 写像の定義域がスロット 0 の受理集合と�
 });
 
 // 波3 の数理 op。attrs の値域とキーを跨ぐ不変条件（clamp の min <= max）を固定する。
-Deno.test("clamp / leaky_relu / 比較の attrs スキーマが値域まで検査する", () => {
+test("clamp / leaky_relu / 比較の attrs スキーマが値域まで検査する", () => {
   assertEquals([...attrKeysOf(resolveOpContract("clamp"))].sort(), ["max", "min"]);
   assertEquals(attrKeysOf(resolveOpContract("leaky_relu")), ["negative_slope"]);
   assertEquals(attrKeysOf(resolveOpContract("ge_scalar")), ["value"]);
@@ -678,7 +679,7 @@ Deno.test("clamp / leaky_relu / 比較の attrs スキーマが値域まで検�
 
 // exporter 側の対称形（`tools/exporter/tests/test_shapes.py` の
 // `the_params_table_and_the_attrs_schema_cover_the_same_unary_ops`）。
-Deno.test("スカラ params の並び表と単項 attrs スキーマが同じ op を覆う", () => {
+test("スカラ params の並び表と単項 attrs スキーマが同じ op を覆う", () => {
   // attrs スキーマ（契約表の単項 op）と params のレイアウト（SCALAR_PARAM_ATTRS）は別々に
   // 書かれた 2 表で、片方だけに op を足しても**例外は出ない**: params 表に無い側は
   // `scalarParamValues` が空リストを返して attr の値が黙ってカーネルへ届かず、attrs スキーマに
@@ -691,7 +692,7 @@ Deno.test("スカラ params の並び表と単項 attrs スキーマが同じ op
 });
 
 // cumsum は softmax と同じ絞り方（attrs.dim を持ち、最終次元だけを受理する）。
-Deno.test("cumsum は最終次元固定で、shape を素通しにする", () => {
+test("cumsum は最終次元固定で、shape を素通しにする", () => {
   const contract = resolveOpContract("cumsum");
   assertEquals(attrKeysOf(contract), ["dim"]);
   assertEquals(cumsumDim({ dim: 2 }, "t"), 2);
@@ -709,7 +710,7 @@ Deno.test("cumsum は最終次元固定で、shape を素通しにする", () =>
 
 // argmax は reduce 族と**別の契約**（ADR 0068 決定 2）。絞りを「値の検査」ではなく
 // **欄の不存在**で表しているので、欄が生えていないことを契約側から固定する。
-Deno.test("argmax は attrs 空・最終次元固定・rank 保存で、出力は i32", () => {
+test("argmax は attrs 空・最終次元固定・rank 保存で、出力は i32", () => {
   const contract = resolveOpContract("argmax");
   // MUST: `dim` の欄が無い = 他の軸は語彙に無い / `keepdim` の欄が無い = rank 保存の 1 形だけ
   assertEquals(attrKeysOf(contract), []);
@@ -743,7 +744,7 @@ Deno.test("argmax は attrs 空・最終次元固定・rank 保存で、出力�
 
 // topk は**唯一の多出力 op**（ADR 0068 決定 3）。受理領域（1 ≤ k ≤ 最終次元）と 2 本の出力の
 // dtype / shape が 1 本の契約から出ること、`largest` / `sorted` の欄が生えていないことを固定する。
-Deno.test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32）で、受理領域は 1 ≤ k ≤ 最終次元", () => {
+test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32）で、受理領域は 1 ≤ k ≤ 最終次元", () => {
   const contract = resolveOpContract("topk");
   // MUST: 欄は `k` だけ（`dim` が無い = 最終次元固定 / `largest` `sorted` が無い = 降順の
   // 最大側 1 形だけ）
@@ -808,7 +809,7 @@ Deno.test("topk は attrs k 宣言必須・出力 2 本（値 f32 + 添字 i32�
   assertThrows(() => shapes([3, 0], 1), OpContractError);
 });
 
-Deno.test("where は三者を右詰め broadcast し、出力は値の側と同形になる", () => {
+test("where は三者を右詰め broadcast し、出力は値の側と同形になる", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(resolveOpContract("where"), ins, "t")[0];
   assertEquals(shape([[1, 4], [3, 4], [3, 1]]), [3, 4]);
@@ -820,7 +821,7 @@ Deno.test("where は三者を右詰め broadcast し、出力は値の側と同�
   assertThrows(() => shape([[2], [2]]), OpContractError);
 });
 
-Deno.test("broadcast は torch 準拠の右詰めで、長さ 0 の次元も max で潰さない", () => {
+test("broadcast は torch 準拠の右詰めで、長さ 0 の次元も max で潰さない", () => {
   assertEquals(broadcastShapes([2, 3, 4], [3, 1], "t"), [2, 3, 4]);
   assertEquals(broadcastShapes([3, 1], [2, 3, 4], "t"), [2, 3, 4]);
   assertEquals(broadcastShapes([5], [], "t"), [5]);
@@ -831,7 +832,7 @@ Deno.test("broadcast は torch 準拠の右詰めで、長さ 0 の次元も max
   assertThrows(() => broadcastShapes([0], [5], "t"), OpContractError);
 });
 
-Deno.test("出力 shape 計算が op ごとの契約どおりに決まる", () => {
+test("出力 shape 計算が op ごとの契約どおりに決まる", () => {
   const shape = (
     op: string,
     ins: readonly (readonly number[])[],
@@ -853,7 +854,7 @@ Deno.test("出力 shape 計算が op ごとの契約どおりに決まる", () =
 
 // ADR 0012: bmm は rank-3 専業（rank-2 は matmul）、gather は最終次元固定。
 // MUST: B / M / K / N を全て違う長さで確かめる — 軸の取り違えは正方形では見えない。
-Deno.test("bmm は rank-3 のバッチ一致・縮約一致だけを受理する", () => {
+test("bmm は rank-3 のバッチ一致・縮約一致だけを受理する", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(resolveOpContract("bmm"), ins, "t")[0];
   assertEquals(shape([[2, 6, 3], [2, 3, 5]]), [2, 6, 5]);
@@ -869,7 +870,7 @@ Deno.test("bmm は rank-3 のバッチ一致・縮約一致だけを受理する
   assertThrows(() => shape([[2, 6, 3], [2, 5, 3]]), OpContractError);
 });
 
-Deno.test("gather は先行次元一致を要求し、出力は index と同形になる", () => {
+test("gather は先行次元一致を要求し、出力は index と同形になる", () => {
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(resolveOpContract("gather"), ins, "t")[0];
   // 実測形（src f32[16,T,512] / index i32[16,T,T]）と同型 — 最終次元だけが違う
@@ -887,7 +888,7 @@ Deno.test("gather は先行次元一致を要求し、出力は index と同形�
 
 // ADR 0010: sym_prefix_slice は attrs（+ 束縛）から出力 shape を計算する — 宣言は照合される
 // 側で、reshape / expand のような「宣言が目標形」ではない。
-Deno.test("sym_prefix_slice は attrs と束縛から prefix 長を決める", () => {
+test("sym_prefix_slice は attrs と束縛から prefix 長を決める", () => {
   const shape = (
     ins: readonly (readonly number[])[],
     attrs: Record<string, unknown>,
@@ -944,7 +945,7 @@ Deno.test("sym_prefix_slice は attrs と束縛から prefix 長を決める", (
 });
 
 // ADR 0011: reshape / expand は「出力の宣言 shape が目標形」で、入力からは導けない。
-Deno.test("reshape / expand は宣言 shape を目標形に取り、permute は dims で決まる", () => {
+test("reshape / expand は宣言 shape を目標形に取り、permute は dims で決まる", () => {
   const shape = (
     op: string,
     ins: readonly (readonly number[])[],
@@ -972,7 +973,7 @@ Deno.test("reshape / expand は宣言 shape を目標形に取り、permute は 
 });
 
 // ADR 0012: 融合 op の attrs スキーマ（許容キー + 型 + 値域）。
-Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
+test("融合 op の attrs スキーマが値域まで検査する", () => {
   assertEquals(attrKeysOf(resolveOpContract("linear")), []);
   assertEquals([...attrKeysOf(resolveOpContract("layer_norm"))].sort(), [
     "eps",
@@ -1166,7 +1167,7 @@ Deno.test("融合 op の attrs スキーマが値域まで検査する", () => {
  * **JSON 往復で ulp 不変**であることを固定する。IR の attrs は JSON の数値リテラルとして
  * 運ばれるので、往復で 1 ulp でも動くと GPU に載る埋め値が torch と食い違う。
  */
-Deno.test("masked_fill の埋め値 −3.4e38 は JSON 往復と f32 丸めで ulp が動かない", () => {
+test("masked_fill の埋め値 −3.4e38 は JSON 往復と f32 丸めで ulp が動かない", () => {
   const value = -3.4028234663852886e+38;
   // f32 の最小有限値そのもの（f32 へ丸めても値が変わらない = ulp 不変）
   assertEquals(Math.fround(value), value);
@@ -1188,7 +1189,7 @@ Deno.test("masked_fill の埋め値 −3.4e38 は JSON 往復と f32 丸めで u
   assertThrows(() => maskedFillValue({ value: Number.NaN }, "t"), OpContractError);
 });
 
-Deno.test("融合 op の出力 shape が契約どおりに決まる", () => {
+test("融合 op の出力 shape が契約どおりに決まる", () => {
   const shape = (
     op: string,
     ins: readonly (readonly number[])[],
@@ -1321,7 +1322,7 @@ Deno.test("融合 op の出力 shape が契約どおりに決まる", () => {
   );
 });
 
-Deno.test("契約に合わない shape は全て fail loudly", () => {
+test("契約に合わない shape は全て fail loudly", () => {
   const shape = (
     op: string,
     ins: readonly (readonly number[])[],
@@ -1342,7 +1343,7 @@ Deno.test("契約に合わない shape は全て fail loudly", () => {
 // ADR 0011: strided コピー族（permute / expand / sym_prefix_slice / masked_fill）の rank 上限は
 // **契約層**で見る。codegen（stridedParams）まで落とすと、利用者には「契約検査は通ったのに
 // 実行段で内部エラー」として出て、どの op のどの値が rank 超過なのか診断に残らない。
-Deno.test("strided コピー族の rank 上限（1..4）は契約層で落ちる", () => {
+test("strided コピー族の rank 上限（1..4）は契約層で落ちる", () => {
   const shape = (
     op: string,
     ins: readonly (readonly number[])[],
@@ -1412,7 +1413,7 @@ Deno.test("strided コピー族の rank 上限（1..4）は契約層で落ちる
  * MUST: 診断は**原因の値**を名乗る（層が割れていた頃の症状は「契約は通ったのに実行段で
  * 内部エラー」で、どの attr / どの軸が域外なのかが利用者に残らなかった）。
  */
-Deno.test("params 層の値域門は契約層にも揃っている（f32 域 / カーネル長 / 幾何 / 隠れ幅）", () => {
+test("params 層の値域門は契約層にも揃っている（f32 域 / カーネル長 / 幾何 / 隠れ幅）", () => {
   const shape = (
     op: string,
     ins: readonly (readonly number[])[],
@@ -1530,7 +1531,7 @@ Deno.test("params 層の値域門は契約層にも揃っている（f32 域 / �
  * broadcast）ので、そこから外れた形は**値が静かに壊れる**（例外は出ない）。契約層が
  * 唯一の検出器なので、受理と拒否の全面をここで固定する。
  */
-Deno.test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理する", () => {
+test("attention の mask は f32・[1,1,M,N] ちょうどだけを受理する", () => {
   const contract = resolveOpContract("attention");
   const q = [2, 3, 5, 4];
   const k = [2, 3, 7, 4];
@@ -1596,7 +1597,7 @@ const appendNode = (
   states: Record<string, string> = { slot: "kv.k" },
 ): IrNode => ({ op: "state_append", ins: ["chunk"], outs: [], attrs, states });
 
-Deno.test("state_append は出力 0 本の effect op で、states 欄が必須", () => {
+test("state_append は出力 0 本の effect op で、states 欄が必須", () => {
   const contract = resolveOpContract("state_append");
   assertEquals(contract.kind, "stateAppend");
   assertEquals(contract.arity, 1);
@@ -1632,7 +1633,7 @@ Deno.test("state_append は出力 0 本の effect op で、states 欄が必須",
 });
 
 // 0 本を許すのは契約が effect を宣言する op **だけ**（パーサは本数に意味を与えない）。
-Deno.test("effect でない op の outs 空は契約層が落とす", () => {
+test("effect でない op の outs 空は契約層が落とす", () => {
   for (const [op, ins] of [["relu", ["a"]], ["add", ["a", "b"]], ["topk", ["a"]]] as const) {
     assertThrows(
       () => assertNodeContract({ ...node(op, ins, op === "topk" ? { k: 2 } : {}), outs: [] }, "t"),
@@ -1642,7 +1643,7 @@ Deno.test("effect でない op の outs 空は契約層が落とす", () => {
   }
 });
 
-Deno.test("states 欄を持たない op に states を書けない", () => {
+test("states 欄を持たない op に states を書けない", () => {
   assertThrows(
     () => assertNodeContract(node("relu", ["a"], {}, { slot: "kv.k" }), "t"),
     OpContractError,
@@ -1660,7 +1661,7 @@ Deno.test("states 欄を持たない op に states を書けない", () => {
   );
 });
 
-Deno.test("attention は B = 0 / M = 0 の退化した q を契約層で名指しして落とす（W-R8-1）", () => {
+test("attention は B = 0 / M = 0 の退化した q を契約層で名指しして落とす（W-R8-1）", () => {
   const contract = resolveOpContract("attention");
   const shape = (ins: readonly (readonly number[])[]) =>
     computeOutputShape(contract, ins, "t", { attrs: { scale: 0.5 } })[0];
@@ -1681,7 +1682,7 @@ Deno.test("attention は B = 0 / M = 0 の退化した q を契約層で名指�
   );
 });
 
-Deno.test("attention の states 形は欄の有無で判別され、従来形の受理集合は動かない", () => {
+test("attention の states 形は欄の有無で判別され、従来形の受理集合は動かない", () => {
   const contract = resolveOpContract("attention");
   const states = { k: "kv.k", v: "kv.v" };
   // 従来形（欄なし）は 3 本でも 4 本でも通る — 1 バイトも動かさない
@@ -1716,7 +1717,7 @@ Deno.test("attention の states 形は欄の有無で判別され、従来形の
   );
 });
 
-Deno.test("省略可能 attr `window` は states 欄を持つノードでのみ宣言できる", () => {
+test("省略可能 attr `window` は states 欄を持つノードでのみ宣言できる", () => {
   const states = { k: "kv.k", v: "kv.v" };
   // 必須 attrs には出ない（宣言必須の欄と混ざらない）
   assertEquals(attrKeysOf(resolveOpContract("attention")), ["scale"]);

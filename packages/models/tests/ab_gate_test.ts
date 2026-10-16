@@ -5,7 +5,7 @@
 // 実測を出して赤・参照席の候補が 0 / 2 個なら throw。
 
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { linearKey } from "../../runtime/src/kernels/linear.ts";
 import { linearI8a8Key } from "../../runtime/src/kernels/linear-i8a8.ts";
 import {

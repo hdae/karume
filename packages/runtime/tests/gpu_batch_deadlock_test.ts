@@ -13,6 +13,7 @@
 // テストランナー自体が返らない）。検出器を通った後は必ず finish() で区間を閉じてから、
 // 積んだままの run を回収する。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, BatchScopeError, type GpuContext } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type Session, type Tensor } from "../src/runtime/executor.ts";
@@ -59,7 +60,7 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
 const openSession = async (gpu: GpuContext): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(GRAPH), "model");
 
-Deno.test({
+test({
   name: "batch 区間の内側で発行した未 await run は enqueue を fail loudly にする（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -88,7 +89,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "batch を開く前に発行した未 await run でも同じ閉路になる（真陽性・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -118,7 +119,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "正しい列（区間中は enqueue のみ・run は区間の外）は検出器に掛からない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

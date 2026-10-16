@@ -6,6 +6,8 @@
 //
 // 資産（outputs/misc/sbv2-demo/）に依存するのは末尾の 1 本だけで、それ以外は資産なしで走る。
 
+import { isNotFound, readTextFile, statSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
 import { buildSbv2ModelInput } from "../src/sbv2/text/model-input.ts";
@@ -54,7 +56,7 @@ const tinyTokenizer = (tokens: readonly string[]): DebertaTokenizer =>
     { clsId: 1, sepId: 2, unkId: 3 },
   );
 
-Deno.test("intersperse: 要素間と両端に blank を挟んで 2n+1 にする", () => {
+test("intersperse: 要素間と両端に blank を挟んで 2n+1 にする", () => {
   assertEquals(intersperse([5, 7, 9], 0), [0, 5, 0, 7, 0, 9, 0]);
   // 空列でも「両端」ぶんの 1 要素は残る（参照実装 commons.intersperse と同じ）。
   assertEquals(intersperse([], 0), [0]);
@@ -62,7 +64,7 @@ Deno.test("intersperse: 要素間と両端に blank を挟んで 2n+1 にする"
   assertEquals(intersperse([5], 4), [4, 5, 4]);
 });
 
-Deno.test("addBlankWord2ph: 全要素を 2 倍し先頭にだけ 1 を足す", () => {
+test("addBlankWord2ph: 全要素を 2 倍し先頭にだけ 1 を足す", () => {
   const base = [1, 2, 3, 1];
   assertEquals(addBlankWord2ph(base), [3, 4, 6, 2]);
   // 不変条件: sum(word2ph) が add_blank 後の音素長 2n+1 に一致する。
@@ -71,7 +73,7 @@ Deno.test("addBlankWord2ph: 全要素を 2 倍し先頭にだけ 1 を足す", (
   assertEquals(total, 2 * phoneCount + 1);
 });
 
-Deno.test("addBlankWord2ph: 故障注入 — 先頭の +1 を落とすと音素長と合わなくなる", () => {
+test("addBlankWord2ph: 故障注入 — 先頭の +1 を落とすと音素長と合わなくなる", () => {
   // 上のテストが恒真でないことの実証。`[0] += 1` を落とした実装は sum が 1 少なくなり、
   // 下流（tileBertToPhoneLevel）で「音素数と違う」と落ちる。
   const base = [1, 2, 3, 1];
@@ -80,18 +82,18 @@ Deno.test("addBlankWord2ph: 故障注入 — 先頭の +1 を落とすと音素�
   assert(broken.reduce((sum, count) => sum + count, 0) !== 2 * phoneCount + 1);
 });
 
-Deno.test("addBlankWord2ph: 空の base は落とす（両端の番兵が欠落）", () => {
+test("addBlankWord2ph: 空の base は落とす（両端の番兵が欠落）", () => {
   assertThrows(() => addBlankWord2ph([]), Error, "空");
 });
 
-Deno.test("phonesToIds: 記号表の添字を返し、未知の音素は落とす", () => {
+test("phonesToIds: 記号表の添字を返し、未知の音素は落とす", () => {
   const rules = testRules();
   assertEquals(phonesToIds(rules, ["_", "k", "o", "."]), [0, 2, 3, 5]);
   // 呼び手の発話だけで到達する失敗なので入力起因（400 相当）— 素の Error では 500 に化ける。
   assertThrows(() => phonesToIds(rules, ["ky"]), Sbv2InputError, "記号表に無い音素");
 });
 
-Deno.test("phonesTonesToModelIds: tone 基点の加算・言語 ID の配布・add_blank が同時に効く", () => {
+test("phonesTonesToModelIds: tone 基点の加算・言語 ID の配布・add_blank が同時に効く", () => {
   const rules = testRules();
   const ids = phonesTonesToModelIds(rules, ["_", "k", "a", "_"], [0, 1, 1, 0]);
   assertEquals(ids.phoneIds, [0, 0, 0, 2, 0, 1, 0, 0, 0]);
@@ -101,14 +103,14 @@ Deno.test("phonesTonesToModelIds: tone 基点の加算・言語 ID の配布・a
   assertEquals(ids.languageIds, [0, 1, 0, 1, 0, 1, 0, 1, 0]);
 });
 
-Deno.test("phonesTonesToModelIds: 範囲外の tone / 長さ不一致は落とす", () => {
+test("phonesTonesToModelIds: 範囲外の tone / 長さ不一致は落とす", () => {
   const rules = testRules();
   assertThrows(() => phonesTonesToModelIds(rules, ["_"], [0, 0]), Error, "長さが不一致");
   // 12 トーンのモデルに tone=7 を渡すと 6+7=13 で範囲外。黙って別の行を引かせない。
   assertThrows(() => phonesTonesToModelIds(rules, ["_"], [7]), Error, "範囲外");
 });
 
-Deno.test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
+test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
   assertThrows(() => parseJpExtraRules({ ...TEST_RULES_JSON, symbols: [] }, "x"), Error, "空");
   assertThrows(
     () => parseJpExtraRules({ ...TEST_RULES_JSON, symbols: ["_", "_"] }, "x"),
@@ -128,7 +130,7 @@ Deno.test("parseJpExtraRules: 壊れた資産を黙って使わない", () => {
   );
 });
 
-Deno.test("parseJpExtraRules: blankId は音素・tone・language の 3 表すべての範囲内", () => {
+test("parseJpExtraRules: blankId は音素・tone・language の 3 表すべての範囲内", () => {
   // 同じ blankId が 3 本の ID 列の blank 位置に入るので、どれか 1 表の外なら埋め込みの
   // 範囲外 gather になる（記号表 7 件・blankId 5・numLanguages 3 だと languageIds が [5,1,5]）。
   assertThrows(
@@ -145,7 +147,7 @@ Deno.test("parseJpExtraRules: blankId は音素・tone・language の 3 表す�
   assertEquals(parseJpExtraRules({ ...TEST_RULES_JSON, blankId: 2 }, "x").blankId, 2);
 });
 
-Deno.test("parseJpExtraRules: bertRelPos は対数バケットの式が成立する組だけを受ける", () => {
+test("parseJpExtraRules: bertRelPos は対数バケットの式が成立する組だけを受ける", () => {
   // (2, 2) は対数の分母も係数も 0 で NaN を作り、i32 化で 0 の添字に化ける（資産の入口で落とす）。
   for (
     const bertRelPos of [{ positionBuckets: 2, maxPosition: 2 }, {
@@ -166,7 +168,7 @@ Deno.test("parseJpExtraRules: bertRelPos は対数バケットの式が成立す
   );
 });
 
-Deno.test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だけでは通さない）", () => {
+test("parseJpExtraRules: 実行定数の値域を構築時に見る（整数だけでは通さない）", () => {
   // 決め手は samplingRate — `Sbv2Pipeline.generate` の `sampleRate` として**そのまま公開結果
   // へ出る**唯一の欄なので、負値や 0 はどこでも例外にならず「正常に見える壊れた WAV」に
   // なる。残りは遅れて fail loudly するだけだが、門をここへ揃える。
@@ -195,7 +197,7 @@ Deno.test("parseJpExtraRules: 実行定数の値域を構築時に見る（整�
   assertEquals(parseJpExtraRules({ ...TEST_RULES_JSON, languageId: 0 }, "x").languageId, 0);
 });
 
-Deno.test("distributePhone: 音素を文字へ均等分配する（余りは左から）", () => {
+test("distributePhone: 音素を文字へ均等分配する（余りは左から）", () => {
   assertEquals(distributePhone(5, 2), [3, 2]);
   assertEquals(distributePhone(1, 3), [1, 0, 0]);
   assertEquals(distributePhone(0, 2), [0, 0]);
@@ -216,7 +218,7 @@ const iterativeDistribute = (phoneCount: number, wordLength: number): number[] =
   return perWord;
 };
 
-Deno.test("distributePhone: 上流の反復と全組合せで同じ分配になる（音素 0..39 × 文字 1..14）", () => {
+test("distributePhone: 上流の反復と全組合せで同じ分配になる（音素 0..39 × 文字 1..14）", () => {
   for (let phones = 0; phones < 40; phones += 1) {
     for (let chars = 1; chars < 15; chars += 1) {
       assertEquals(
@@ -228,7 +230,7 @@ Deno.test("distributePhone: 上流の反復と全組合せで同じ分配にな�
   }
 });
 
-Deno.test("distributePhone: 巨大な 1 語でも文字数に比例する時間で分配する", () => {
+test("distributePhone: 巨大な 1 語でも文字数に比例する時間で分配する", () => {
   // 反復の写経（音素数 × 文字数）だと 20 万 × 20 万で 4×10^10 回の比較になり返ってこない。
   const size = 200_000;
   const started = performance.now();
@@ -240,7 +242,7 @@ Deno.test("distributePhone: 巨大な 1 語でも文字数に比例する時間�
   assert(elapsed < 500, `${size} 文字への分配に ${elapsed.toFixed(0)} ms かかった`);
 });
 
-Deno.test("buildBaseWord2ph: 語ごとの分配を並べ、両端に番兵 1 を置く", () => {
+test("buildBaseWord2ph: 語ごとの分配を並べ、両端に番兵 1 を置く", () => {
   const tokenizer = tinyTokenizer(["こ", "ん", "に", "ち", "は", "、"]);
   const words = [
     { surface: "こんにちは", phones: ["k", "o", "N", "n", "i", "ch", "i", "w", "a"] },
@@ -252,7 +254,7 @@ Deno.test("buildBaseWord2ph: 語ごとの分配を並べ、両端に番兵 1 を
   assertEquals(word2ph.length, tokenizer.encode("こんにちは、").length);
 });
 
-Deno.test("buildBaseWord2ph: 故障注入 — given_phone 長が 1 ずれると落ちる", () => {
+test("buildBaseWord2ph: 故障注入 — given_phone 長が 1 ずれると落ちる", () => {
   // この不変条件が無いと、音素列と word2ph が別々にずれたまま front まで到達し、
   // BERT 特徴が 1 音素ぶん回転して配られる（音は出るが崩れる）。
   const tokenizer = tinyTokenizer(["こ", "ん"]);
@@ -261,7 +263,7 @@ Deno.test("buildBaseWord2ph: 故障注入 — given_phone 長が 1 ずれると�
   assertThrows(() => buildBaseWord2ph(words, tokenizer, 6), Error, "sum(word2ph)");
 });
 
-Deno.test("buildBaseWord2ph: 0 トークンへ正規化される surface は入力起因で落とす", () => {
+test("buildBaseWord2ph: 0 トークンへ正規化される surface は入力起因で落とす", () => {
   // 空白だけの surface は呼び手が words を直せば直る = Sbv2InputError（400 相当）。
   const tokenizer = tinyTokenizer(["あ"]);
   assertThrows(
@@ -279,7 +281,7 @@ Deno.test("buildBaseWord2ph: 0 トークンへ正規化される surface は入�
   assertFalse(sumError instanceof Sbv2InputError);
 });
 
-Deno.test("buildSbv2ModelInput: input_ids 長と word2ph 長の食い違いは入力起因で落とす", () => {
+test("buildSbv2ModelInput: input_ids 長と word2ph 長の食い違いは入力起因で落とす", () => {
   // 記号語の surface を「正規形と別のトークン数」に書き換えた発話でだけ到達する経路。
   // 呼び手が words を解析どおりに戻せば直るので 400 側。
   const rules = testRules();
@@ -297,7 +299,7 @@ Deno.test("buildSbv2ModelInput: input_ids 長と word2ph 長の食い違いは�
   );
 });
 
-Deno.test("DebertaTokenizer: NFKC で 1 文字が複数トークンへ割れる（… → ...）", () => {
+test("DebertaTokenizer: NFKC で 1 文字が複数トークンへ割れる（… → ...）", () => {
   const tokenizer = tinyTokenizer([".", "あ"]);
   assertEquals(tokenizer.tokenize("…"), [".", ".", "."]);
   assertEquals(tokenizer.tokenize("あ…"), ["あ", ".", ".", "."]);
@@ -306,7 +308,7 @@ Deno.test("DebertaTokenizer: NFKC で 1 文字が複数トークンへ割れる�
   assertEquals(tokenizer.encode("ん"), [1, 3, 2]);
 });
 
-Deno.test("DebertaTokenizer: clean 表の除去・スペース化が効く", () => {
+test("DebertaTokenizer: clean 表の除去・スペース化が効く", () => {
   // U+0000 を除去、U+200B（ZWSP）を空白へ。**スペース化に NBSP を使わない**のは、後段の
   // 分割 `/\s+/` が NBSP を最初から空白として拾うため — spaced 規則を丸ごと落としても
   // 同じ答えが出てしまい、門が恒真になる（ZWSP は `/\s/` が拾わない）。
@@ -325,7 +327,7 @@ Deno.test("DebertaTokenizer: clean 表の除去・スペース化が効く", () 
   assertEquals(bare.tokenize("a\u200bb"), ["a", "\u200b", "b"]);
 });
 
-Deno.test("DebertaTokenizer: CRLF 混じりの語彙でも末尾 CR が残らない", () => {
+test("DebertaTokenizer: CRLF 混じりの語彙でも末尾 CR が残らない", () => {
   // \r が残ると全 lookup が [UNK] に落ちる（エラーは出ず BERT 特徴だけ静かに壊れる）。
   const tokenizer = DebertaTokenizer.fromVocabText(
     "[PAD]\r\n[CLS]\r\n[SEP]\r\n[UNK]\r\nあ\r\n",
@@ -335,7 +337,7 @@ Deno.test("DebertaTokenizer: CRLF 混じりの語彙でも末尾 CR が残らな
   assertEquals(tokenizer.encode("あ"), [1, 4, 2]);
 });
 
-Deno.test("DebertaTokenizer: 語彙の重複行は落とす（後勝ちで別の行を引かせない）", () => {
+test("DebertaTokenizer: 語彙の重複行は落とす（後勝ちで別の行を引かせない）", () => {
   // 行番号 = ID なので、重複行は先の ID を引けなくする。例外は出ず BERT 特徴だけが
   // 「合法な別の行」に変わるため、id 列の長さ検査でも word2ph の突合でも捕まらない。
   assertThrows(
@@ -350,7 +352,7 @@ Deno.test("DebertaTokenizer: 語彙の重複行は落とす（後勝ちで別の
   );
 });
 
-Deno.test("toBertText: 記号語だけ正規形へ写して連結する", () => {
+test("toBertText: 記号語だけ正規形へ写して連結する", () => {
   const punctuations = new Set([",", "."]);
   const words = [
     { surface: "これ", phones: ["k", "o", "r", "e"] },
@@ -361,7 +363,7 @@ Deno.test("toBertText: 記号語だけ正規形へ写して連結する", () => 
   assertEquals(toBertText([{ surface: "ん", phones: ["N"] }], punctuations), "ん");
 });
 
-Deno.test("bertHiddenOutput: 末尾からの相対で選ぶ（層数が違っても同じ規則）", () => {
+test("bertHiddenOutput: 末尾からの相対で選ぶ（層数が違っても同じ規則）", () => {
   const full = Array.from({ length: 25 }, (_, index) => `h${index}`);
   assertEquals(bertHiddenOutput(full, 3), "h22");
   assertEquals(bertHiddenOutput(["h0", "h1", "h2"], 3), "h0");
@@ -369,7 +371,7 @@ Deno.test("bertHiddenOutput: 末尾からの相対で選ぶ（層数が違って
   assertThrows(() => bertHiddenOutput(full, 0), Error, "1 以上");
 });
 
-Deno.test("tileBertToPhoneLevel: トークンを word2ph 回だけ複製し、転置して [dim, P] にする", () => {
+test("tileBertToPhoneLevel: トークンを word2ph 回だけ複製し、転置して [dim, P] にする", () => {
   // 2 トークン × dim 3。値はトークンと次元の両方で違う（転置の取り違えを踏むため
   // dim ≠ P かつ非対称にする — 対称な入力では軸を入れ替えても同じ答えが出てしまう）。
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
@@ -380,7 +382,7 @@ Deno.test("tileBertToPhoneLevel: トークンを word2ph 回だけ複製し、�
   assertEquals([...data], [1, 10, 10, 2, 20, 20, 3, 30, 30]);
 });
 
-Deno.test("tileBertToPhoneLevel: 故障注入 — word2ph の配分が変わると値の並びも変わる", () => {
+test("tileBertToPhoneLevel: 故障注入 — word2ph の配分が変わると値の並びも変わる", () => {
   // 「合計さえ合えば通る」実装（配分を無視して均等に割る等）を弾くための対。
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
   const a = tileBertToPhoneLevel(hidden, 2, [1, 2]);
@@ -389,7 +391,7 @@ Deno.test("tileBertToPhoneLevel: 故障注入 — word2ph の配分が変わる�
   assert([...a.data].some((value, index) => value !== b.data[index]), "配分を変えても同じ値");
 });
 
-Deno.test("tileBertToPhoneLevel: トークン数と word2ph 長の不一致は落とす", () => {
+test("tileBertToPhoneLevel: トークン数と word2ph 長の不一致は落とす", () => {
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
   assertThrows(() => tileBertToPhoneLevel(hidden, 2, [1, 2, 1]), Error, "word2ph 長");
   assertThrows(() => tileBertToPhoneLevel(hidden, 4, [1, 1, 1, 1]), Error, "割り切れない");
@@ -400,9 +402,9 @@ Deno.test("tileBertToPhoneLevel: トークン数と word2ph 長の不一致は�
 const SYMBOLS_PATH = new URL("../../../outputs/misc/sbv2-demo/symbols.json", import.meta.url);
 const assetAvailable = (() => {
   try {
-    return Deno.statSync(SYMBOLS_PATH).isFile;
+    return statSync(SYMBOLS_PATH).isFile;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 })();
@@ -414,12 +416,12 @@ if (!assetAvailable) {
   );
 }
 
-Deno.test({
+test({
   name: "デモ資産: symbols.json が JP-Extra の規則として読める",
   ignore: !assetAvailable,
   fn: async () => {
     const rules = parseJpExtraRules(
-      JSON.parse(await Deno.readTextFile(SYMBOLS_PATH)),
+      JSON.parse(await readTextFile(SYMBOLS_PATH)),
       "symbols.json",
     );
     // 値そのものは資産が正（TS 側に期待値表を作らない — それをやると資産の意味が消える）。

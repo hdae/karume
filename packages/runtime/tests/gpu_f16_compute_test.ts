@@ -32,6 +32,7 @@
 //
 // 資産不要。`shader-f16` を列挙しないアダプタでは SKIP（既定の f32 経路の検証は無傷）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -68,7 +69,7 @@ import { requireCensus } from "./helpers/pipeline-census.ts";
 // 丸めの正本（GPU 非依存）
 // ---------------------------------------------------------------------------
 
-Deno.test("roundToF16 は独立実装の RTNE 符号化器と f32 入力の全域で一致する（丸めの正本の交差検証）", () => {
+test("roundToF16 は独立実装の RTNE 符号化器と f32 入力の全域で一致する（丸めの正本の交差検証）", () => {
   // MUST: 2 つの実装を突き合わせる。片方だけだと「両方同じ間違い方」を検出できない
   // （tests/helpers/f16.ts はビット演算の自前実装・src/format/f16.ts は Math.f16round）。
   //
@@ -270,7 +271,7 @@ const LINEAR_SHAPES: readonly {
   { name: "スカラ m5 n7 k1", m: 5, n: 7, k: 1 },
 ];
 
-Deno.test({
+test({
   name: "linear の f16 計算変種は「入力を f16 に丸めた f32 変種」とビット単位で一致する（実 GPU）",
   ignore: !F16_GPU,
   fn: async () => {
@@ -318,7 +319,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "重み f16 格納 × f16 計算の組は往復恒等（unpack2x16float の値は f16 に厳密に戻る）",
   ignore: !F16_GPU,
   fn: async () => {
@@ -453,7 +454,7 @@ const attentionOracle = async (
   return out.output;
 };
 
-Deno.test({
+test({
   name: "融合 attention の f16 変種は分解経路 + 丸め 3 点とビット単位で一致する（実 GPU）",
   ignore: !F16_GPU,
   fn: async () => {
@@ -527,7 +528,7 @@ Deno.test({
 // fail loudly（黙って f32 へ落とさない）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "f16 計算の要求は shader-f16 無しの device では Session 構築で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -552,7 +553,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "i8 常駐の重み × linearCompute 'f16'（w8a16）は fail loudly（実 GPU）",
   ignore: !F16_GPU,
   fn: async () => {

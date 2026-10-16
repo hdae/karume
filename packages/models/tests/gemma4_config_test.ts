@@ -18,6 +18,8 @@
 // ③ の資産（`models/karume-gemma4/`）はリポジトリ管理外なので、無い環境では**その 1 本だけ**
 // を明示 SKIP する（①② は常に走る）。
 
+import { isNotFound, readTextFileSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { ExecutionError } from "@karume/runtime";
@@ -77,9 +79,9 @@ const MANIFEST_FORMAT = "karume/5";
 const readMirror = (): string | undefined => {
   let text: string;
   try {
-    text = Deno.readTextFileSync(MIRROR);
+    text = readTextFileSync(MIRROR);
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
+    if (isNotFound(cause)) return undefined;
     throw cause;
   }
   const format = (JSON.parse(text) as { readonly format?: unknown }).format;
@@ -91,7 +93,7 @@ const readMirror = (): string | undefined => {
   return undefined;
 };
 
-Deno.test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読む", () => {
+test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler を読む", () => {
   assertEquals(parseGemma4PipelineConfig(MINIMAL), MINIMAL);
   assertEquals(
     parseGemma4PipelineConfig({ ...MINIMAL, sampler: { ...RECOMMENDED } }),
@@ -99,7 +101,7 @@ Deno.test("gemma4 pipelineConfig: 3 つの数 + rope と optional な sampler �
   );
 });
 
-Deno.test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (t) => {
+test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (t) => {
   await t.step("オブジェクトでない宣言（`unknown` の境界パーサ）", () => {
     for (const raw of [undefined, null, 42, "chunkLength=32", [MINIMAL]]) {
       assertThrows(() => parseGemma4PipelineConfig(raw), Error, "オブジェクトでない");
@@ -142,7 +144,7 @@ Deno.test("gemma4 pipelineConfig: 未知キーと欠落は fail loudly", async (
   });
 });
 
-Deno.test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
+test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
   const withRope = (rope: unknown): unknown => ({ ...MINIMAL, rope });
 
   await t.step("層種別は 2 本ちょうど（未知の層種別・欠落）", () => {
@@ -223,7 +225,7 @@ Deno.test("gemma4 pipelineConfig: rope の受理集合", async (t) => {
   });
 });
 
-Deno.test("gemma4 pipelineConfig: 値域", async (t) => {
+test("gemma4 pipelineConfig: 値域", async (t) => {
   await t.step("数は 1 以上の整数", () => {
     assertThrows(() => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 0 }), Error);
     assertThrows(() => parseGemma4PipelineConfig({ ...MINIMAL, maxPosition: 1.5 }), Error);
@@ -261,7 +263,7 @@ Deno.test("gemma4 pipelineConfig: 値域", async (t) => {
   });
 });
 
-Deno.test("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ maxPosition", async (t) => {
+test("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ maxPosition", async (t) => {
   await t.step("既定の chunkLength が記号 M の trace 範囲の外", () => {
     assertThrows(
       () => parseGemma4PipelineConfig({ ...MINIMAL, chunkLength: 129 }),
@@ -297,7 +299,7 @@ Deno.test("gemma4 pipelineConfig: chunkLength ≤ maxChunkLength / capacity ≤ 
 // バイト列を 1 本も開く前に通す」ことなので、`model` にはゴミを渡す（開かれていれば
 // コンテナ側の文言で落ちる = この門が抜けている）。
 
-Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイト列を開く前に通る", async (t) => {
+test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイト列を開く前に通る", async (t) => {
   const junk = new Uint8Array<ArrayBuffer>(new ArrayBuffer(8));
   const fromAssets = (config: unknown): Promise<Gemma4Pipeline> =>
     Gemma4Pipeline.fromAssets({
@@ -335,7 +337,7 @@ Deno.test("gemma4 fromAssets: config は fromPretrained と同じ門を、バイ
   });
 });
 
-Deno.test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開く前に同じ型で落ちる", async () => {
+test("gemma4 fromAssets: quant 実行ノブの明示指定も資産を開く前に同じ型で落ちる", async () => {
   // この面は manifest を持たないので `resolveGemmaSessionOptions` を通れない。門が無いと同じ
   // 誤指定が Session 構築まで降りて runtime の `ExecutionError` に化け、`fromPretrained` と
   // 分類が割れる（ADR 0107 決定 2）。`model` にゴミを渡しているので、落ちたのがこの門でないなら
@@ -385,7 +387,7 @@ const ropeGraph = (
   patch: Readonly<Record<string, readonly (number | string)[]>> = {},
 ): GenerationGraph => ropeOwner(patch).graph;
 
-Deno.test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違いは名指しで落ちる", async (t) => {
+test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食い違いは名指しで落ちる", async (t) => {
   const config = parseGemma4PipelineConfig(MINIMAL);
 
   await t.step("宣言どおり（陰性対照 — 門が全部落として緑になっていないこと）", () => {
@@ -431,7 +433,7 @@ Deno.test("gemma4 rope 突合: 宣言どおりのグラフは通り、幅の食�
   });
 });
 
-Deno.test("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入口名を名乗る", async (t) => {
+test("gemma4 家族 admission: 配下の門の文言は呼んだ家族の入口名を名乗る", async (t) => {
   const config = parseGemma4PipelineConfig(MINIMAL);
   const qat = gemmaEntryName("gemma4-qat");
 
@@ -455,7 +457,7 @@ Deno.test("gemma4 家族 admission: 配下の門の文言は呼んだ家族の�
   });
 });
 
-Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサを素通りする", () => {
+test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサを素通りする", () => {
   const text = readMirror();
   if (text === undefined) {
     console.warn(
@@ -489,7 +491,7 @@ Deno.test("gemma4 pipelineConfig: 配布形ミラーの宣言がこのパーサ�
 // （門が無かった頃、上限 768 の資産に chunkLength 1024 を渡すと例外なしで走っていた —
 // 2026-09-03 実測）そのものを守る門なので、ここで直接叩く。
 
-Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 3 本とも見る）", async (t) => {
+test("assertChunkLength: 実行時ノブの受理集合（宣言との関係を 3 本とも見る）", async (t) => {
   const config = parseGemma4PipelineConfig(MINIMAL);
 
   await t.step("decode 形の専用値（1）を prefill 形として通さない", () => {
@@ -544,7 +546,7 @@ Deno.test("assertChunkLength: 実行時ノブの受理集合（宣言との関�
 // 元の診断が `cause` で残ること）②既定の梯子が自分の規則を満たすこと。既定が規則を破ると
 // 「明示指定していないのに fromAssets が落ちる」形になり、落ちる場所が入口から遠い。
 
-Deno.test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口の名前だけを足す", async (t) => {
+test("assertGemma4ChunkBuckets: 受理集合は runtime に委ね、入口の名前だけを足す", async (t) => {
   await t.step("配布既定の chunkLength に載る指定はそのまま返る", () => {
     const buckets: readonly number[] = [32, 64];
     assertEquals(assertGemma4ChunkBuckets(buckets, SHIPPED_CHUNK_LENGTH), buckets);

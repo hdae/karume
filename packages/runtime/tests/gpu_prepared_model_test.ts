@@ -6,6 +6,7 @@
 // （f32 / f16 / int8-sym / int4-sym-g）を使う — どれか 1 codec が 2 段の経路で欠けても沈黙しない
 // ため。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import { openMemoryContainer } from "../src/format/container/memory.ts";
@@ -31,7 +32,7 @@ const bitsOf = (tensor: Tensor): readonly number[] => [
   ...new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length),
 ];
 
-Deno.test({
+test({
   name: "2 段境界は createSessionFromContainer と出力ビット同一・storage 診断一致（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -70,7 +71,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "admission は重みの block を 1 つも取る前に落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -143,7 +144,7 @@ const halfUploadedContainer = (): { readonly container: BoundContainer; reads():
   };
 };
 
-Deno.test({
+test({
   name: "構築の途中で落ちても同じ device で作り直せる（部分 Session が残らない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

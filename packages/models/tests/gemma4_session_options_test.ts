@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import type { SessionSpec } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
 import {

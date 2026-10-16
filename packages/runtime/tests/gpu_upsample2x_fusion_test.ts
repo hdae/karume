@@ -2,6 +2,7 @@
 // エクスポータと同じ expand 2 本の列を private 1-pass copy に置換しても、全ビットが
 // そのまま複製されることを固定する。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { UPSAMPLE_2X_KEY } from "../src/kernels/upsample2x.ts";
@@ -104,7 +105,7 @@ const expectedUpsampleWords = (input: Uint32Array): Uint32Array => {
   return out;
 };
 
-Deno.test({
+test({
   name: "VAE nearest x2 融合は実 export 列と同じ全要素を書き、2→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -156,7 +157,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "upsample x2 の内部値が output / 別 consumer なら、また near-shape なら融合しない（実 GPU）",
   ignore: !GPU_AVAILABLE,

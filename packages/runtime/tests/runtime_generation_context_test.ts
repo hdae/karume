@@ -3,6 +3,7 @@
 // 共有する唯一の受理集合**なので、門の正本は device を要らない側に置く — 実 GPU 経由の同じ門
 // （gpu_generation_context_test.ts）はアダプタ無しの環境では 1 本も走らない。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";
@@ -38,7 +39,7 @@ const symbolGraph = (): DeclarationJson => ({
 const parse = (graph: DeclarationJson): IrGraph =>
   mergedGraph(memoryModel(graph, []).graphs[GRAPH_NAME], GRAPH_NAME);
 
-Deno.test("assertChunkLength は 1..0xffffffff の整数だけを受理する", () => {
+test("assertChunkLength は 1..0xffffffff の整数だけを受理する", () => {
   // 0 / 負 / 小数 / u32 の 1 つ上（搬送先が u32 なので上限はここ）。
   for (const chunkLength of [0, -1, 1.5, 2 ** 32]) {
     const error = assertThrows(() => assertChunkLength(chunkLength), ExecutionError);
@@ -48,7 +49,7 @@ Deno.test("assertChunkLength は 1..0xffffffff の整数だけを受理する", 
   assertChunkLength(0xffffffff);
 });
 
-Deno.test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理する", () => {
+test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理する", () => {
   // 省略と空は「追加の実行形なし」— 従来どおり prefill 形 1 本 + decode 形。
   assertChunkBuckets(undefined, 8);
   assertChunkBuckets([], 8);
@@ -74,7 +75,7 @@ Deno.test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受�
   assertThrows(() => assertChunkBuckets([2], 1), ExecutionError);
 });
 
-Deno.test("resolveBindings は未知の記号と非負整数でない値を拒否する", () => {
+test("resolveBindings は未知の記号と非負整数でない値を拒否する", () => {
   const graph = parse(symbolGraph());
 
   const unknown = assertThrows(() => resolveBindings(graph, { D: 8 }), ExecutionError);
@@ -89,7 +90,7 @@ Deno.test("resolveBindings は未知の記号と非負整数でない値を拒�
   assertEquals(resolveBindings(graph, { T: 0 })["T"], 0);
 });
 
-Deno.test("resolveBindings の器は null プロトタイプで '__proto__' が own property として残る", () => {
+test("resolveBindings の器は null プロトタイプで '__proto__' が own property として残る", () => {
   const graph = parse(symbolGraph());
   // 計算キーで書く（`{ __proto__: 4 }` は [[Prototype]] 設定の構文で own property を作らない）。
   const resolved = resolveBindings(graph, { ["__proto__"]: 4, T: 2 });
@@ -100,7 +101,7 @@ Deno.test("resolveBindings の器は null プロトタイプで '__proto__' が 
   assertEquals(resolved["T"], 2);
 });
 
-Deno.test("resolveSlotShape は未束縛シンボルと正でない容量を拒否する", () => {
+test("resolveSlotShape は未束縛シンボルと正でない容量を拒否する", () => {
   const bound: SymbolBindings = { C: 8 };
   assertEquals(resolveSlotShape("k", [1, 2, "C", 4], bound), [1, 2, 8, 4]);
   // 数値次元だけの shape は束縛が空でもそのまま返る。

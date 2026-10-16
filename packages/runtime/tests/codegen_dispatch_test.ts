@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
@@ -9,7 +10,7 @@ const LIMIT = 65535;
 /** conv2d の implicit GEMM が n 方向に使う実タイル辺（m タイル 64 / 32 の変種で共通）。 */
 const CONV2D_N_TILE = gemmTileN(gemmMTileGeometry(GEMM_TILE));
 
-Deno.test("grid-stride カーネルは上限超過を縮退させる（カーネル側が残りを回す）", () => {
+test("grid-stride カーネルは上限超過を縮退させる（カーネル側が残りを回す）", () => {
   assertEquals(gridStrideWorkgroups(1024, 256, LIMIT), 4);
   assertEquals(gridStrideWorkgroups(1025, 256, LIMIT), 5);
   assertEquals(gridStrideWorkgroups(0, 256, LIMIT), 0);
@@ -18,7 +19,7 @@ Deno.test("grid-stride カーネルは上限超過を縮退させる（カーネ
   assertEquals(gridStrideWorkgroups(1_000_000_000, 256, LIMIT), LIMIT);
 });
 
-Deno.test("grid-stride は u32 のループ添字が末尾の加算で折り返す要素数を fail loudly にする", () => {
+test("grid-stride は u32 のループ添字が末尾の加算で折り返す要素数を fail loudly にする", () => {
   // カーネルは `i = i + stride`（stride = workgroup 数 × workgroup サイズ）を u32 で回して
   // `i < n` を見るので、`n + stride > 2^32` だと末尾の加算が折り返してループが終わらない。
   const stride = LIMIT * 256;
@@ -32,7 +33,7 @@ Deno.test("grid-stride は u32 のループ添字が末尾の加算で折り返�
   assertEquals(gridStrideWorkgroups(2 ** 32 - LIMIT, 1, LIMIT), LIMIT);
 });
 
-Deno.test("タイル分割カーネルは上限超過を fail loudly にする（タイル欠落は沈黙誤値になる）", () => {
+test("タイル分割カーネルは上限超過を fail loudly にする（タイル欠落は沈黙誤値になる）", () => {
   assertEquals(tiledWorkgroups(1024, 16, LIMIT, "matmul"), 64);
   assertEquals(tiledWorkgroups(1, 16, LIMIT, "matmul"), 1);
   assertEquals(tiledWorkgroups(0, 16, LIMIT, "matmul"), 0);

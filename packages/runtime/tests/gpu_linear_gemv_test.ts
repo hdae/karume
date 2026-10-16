@@ -58,6 +58,7 @@
 //   行ブロックのスナップショット（linear_gemv_r*.wgsl）だけ — **M=1 の緑は行ブロックの
 //   根拠にならない**ことの実証（2026-09-07 実測）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -224,7 +225,7 @@ const runLinear = async (
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-Deno.test({
+test({
   name: "M=1 の i4 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -383,7 +384,7 @@ const DOOR_CASES: readonly DoorCase[] = [
   },
 ];
 
-Deno.test({
+test({
   name: `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 以上 × v4 でだけ開く` +
     "（実 GPU / 診断キー）",
   ignore: !GPU_AVAILABLE,
@@ -514,7 +515,7 @@ const linearI8Model = (
   ]);
 };
 
-Deno.test({
+test({
   name: "M=1 の i8 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -646,7 +647,7 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
   },
 ];
 
-Deno.test({
+test({
   name: `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 でだけ開く` +
     "（実 GPU / 診断キー）",
   ignore: !GPU_AVAILABLE,
@@ -962,7 +963,7 @@ const checkRowsCase = async (
   );
 };
 
-Deno.test({
+test({
   name: "行ブロック（M ≥ 2）の i4 linear は既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -991,7 +992,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "行ブロック（M ≥ 2）の i8 linear は既定経路と 1 ビットも違わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

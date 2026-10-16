@@ -1,4 +1,5 @@
 // RMS の 128 スレッド版は、256 版の下半分の加算順序を維持する。
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
@@ -109,7 +110,7 @@ const model = (
 const bits = (data: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
-Deno.test({
+test({
   name:
     "rms_norm の 128 スレッド版は端の幅でも従来版とビット一致し、128 を超える幅は従来版を選ぶ（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -160,7 +161,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "rms_norm の空レーン削減は ±0・大きい有限値・非有限値の伝播を維持する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

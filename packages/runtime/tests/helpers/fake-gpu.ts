@@ -4,6 +4,7 @@
 // いった GpuContext の本番実装そのもので、そこを差し替えるとテストがフェイクを検証するだけに
 // なる。差し替えるのは GPU 実体（device）だけに留める。
 
+import { platformObject } from "@karume/test-support/webgpu";
 import {
   type DeviceLostHandler,
   GpuContext,
@@ -63,7 +64,10 @@ export const fakeGpuContext = (
 ): GpuContext => new GpuContext(device, readAdapterInfo({}), ZERO_LIMITS, new Set(), onDeviceLost);
 
 /** 引き金に何も渡さなかったときの消失情報（`reason` は GpuContext の分岐に使われない）。 */
-const DEFAULT_LOSS: GPUDeviceLostInfo = { reason: "destroyed", message: "テストによる消失" };
+const DEFAULT_LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({
+  reason: "destroyed",
+  message: "テストによる消失",
+});
 
 /**
  * 消失を後から起こせるフェイク device と、その引き金。

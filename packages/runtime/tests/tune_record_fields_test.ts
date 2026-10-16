@@ -9,7 +9,7 @@
 // WGSL だけが変わった runtime の古い記録を拒む）⑤ 生成器は返す表を注入の門に通す（空の id の表を作らない）。
 
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import {
   deriveGeometryProfile,
   geometryProfileJson,

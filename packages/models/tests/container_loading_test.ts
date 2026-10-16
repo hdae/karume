@@ -31,6 +31,9 @@
  * そのもの（limits を持つ GpuContext）が偽物になる）。
  */
 
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import type { AssetProgress, DistributionSource } from "@karume/hub";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
@@ -59,7 +62,7 @@ import { loadManifest, localDirectory, resolveSelection } from "@karume/hub";
 const fetched = (parts: readonly { path: string; size: number }[]): readonly string[] =>
   parts.filter((part) => part.size > 0).map((part) => part.path);
 
-Deno.test(
+test(
   "loadContainerComponents: 複数部品でも進捗はモデル全体で 1 本（単調増加・合計へ着地）",
   async () => {
     const front = await serveContainer("front/model.f32", linearComponent("front"));
@@ -134,7 +137,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: 越境参照が自リポと同じ path でも、進捗は別の 1 本として数える",
   async () => {
     // `voice` は越境先のリポから借りる容器（容器単位の越境 — 全 part が越境先の座標を名乗る）。
@@ -196,7 +199,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: 選択内の 2 部品が part を共有しても、その part は 1 回だけ温める",
   async () => {
     // manifest の parse は選択内で別の容器が同じ part ファイルを共有することを許す。取得計画を
@@ -310,7 +313,7 @@ const assertLandsOnTotal = (
   );
 };
 
-Deno.test(
+test(
   "loadContainerComponents: ローカル取得元だけのロードでも、進捗は合計へ着地する",
   async (t) => {
     // 相 1（温め）を持たない取得元の part も、温めの段で complete を 1 回出す（ADR 0086 追記
@@ -357,7 +360,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: HF とローカルが混ざっても、進捗は 1 つの規則で合計へ着地する",
   async () => {
     // 主の配布形はローカル、`voice` だけを疑似 HF のリポから差し替える（同じグラフ記述の容器）。
@@ -406,7 +409,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: capability 違反は descriptor だけで落ち、重みの part は取得されない",
   async () => {
     const rig = await prepareComponent({ op: "karume_test_unsupported_op" });
@@ -437,7 +440,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: 重みの part は Session を張る前（ロード時）に落ち切り、進捗にも現れる",
   async () => {
     const rig = await prepareComponent();
@@ -467,7 +470,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: abort 済みの signal で始めたロードは落ちる（中断契約の維持）",
   async () => {
     const rig = await prepareComponent();
@@ -488,7 +491,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "家族 admission（pipeline major 不一致）は descriptor だけで落ち、重みの part は取得されない",
   async () => {
     const rig = await prepareSiglip2({ pipeline: "siglip2/99" });
@@ -515,7 +518,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "家族 admission（pipelineConfig の schema 違反）でも重みの part は取得されない",
   async () => {
     const rig = await prepareSiglip2({
@@ -541,7 +544,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "家族 admission（requiredLimits 超過）でも重みの part は取得されない（共有 GPU）",
   async () => {
     // 全 limit が 0 の GpuContext（`fake-gpu.ts` の ZERO_LIMITS）へ、1 バイトでも要求する
@@ -573,25 +576,30 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "loadContainerComponents: 重みの block のバイト列を握らない（別プロセスで gc 観測）",
   async () => {
     // MUST: 別プロセス — 到達不能なだけの状態と握られた状態を区別するには gc の強制が要り、
     // `deno test` に `--v8-flags` を渡す口が無い。
     const script = new URL("./helpers/weight-block-retention.ts", import.meta.url);
-    const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", "--v8-flags=--expose-gc", script.href],
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    const decoder = new TextDecoder();
-    assertEquals(code, 0, `${decoder.decode(stdout)}${decoder.decode(stderr)}`);
+    const { code, stdout, stderr } = await new Promise<
+      { code: number | null; stdout: string; stderr: string }
+    >((resolve) =>
+      execFile(
+        process.execPath,
+        ["--expose-gc", fileURLToPath(script)],
+        { encoding: "utf8" },
+        (error, stdout, stderr) =>
+          resolve({ code: error === null ? 0 : (error.code as number | null ?? null), stdout, stderr }),
+      )
+    );
+    assertEquals(code, 0, `${stdout}${stderr}`);
   },
 );
 
 // ---- 選択と供給口の失敗診断（⑩）--------------------------------------------
 
-Deno.test(
+test(
   "loadContainerComponents: manifest が持たない部品名は選択の部品一覧つきで落ちる",
   async () => {
     const rig = await prepareComponent();
@@ -613,7 +621,7 @@ Deno.test(
   },
 );
 
-Deno.test("loadContainerComponents: 開いていない役割で open() すると開いた一覧つきで落ちる", async () => {
+test("loadContainerComponents: 開いていない役割で open() すると開いた一覧つきで落ちる", async () => {
   const rig = await prepareComponent();
   const { open } = await loadContainerComponents(
     "test.fromPretrained",

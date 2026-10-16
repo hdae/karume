@@ -1,6 +1,7 @@
 // SiLU = x * sigmoid(x) の strict peephole（融合ルール silu — src/runtime/fusion.ts）。
 // エクスポータが出す隣接 2 ノードだけを 1 dispatch へ畳み、掴めない形は素の列へ落ちる。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { siluKey } from "../src/kernels/silu.ts";
@@ -128,7 +129,7 @@ const testInput = (): Tensor => {
   return x;
 };
 
-Deno.test({
+test({
   name:
     "SiLU 融合は xs / sx 両順で primitive と有限ビット / NaN 分類が一致し、2→1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -180,7 +181,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "SiLU で x を 2 回 release しても後続 consumer まで入力バッファを保持する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -211,7 +212,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "SiLU の内部 sigmoid output / 別 consumer / 別名 / 別 mul 入力は strict matcher から fallback する（実 GPU）",
   ignore: !GPU_AVAILABLE,

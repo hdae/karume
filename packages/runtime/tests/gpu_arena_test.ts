@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { ArenaError, RunArena, STORAGE_USAGE, toSizeClass } from "../src/gpu/arena.ts";
 
@@ -37,7 +38,7 @@ const noopFlush = (): Promise<void> => Promise.resolve();
  * `Number.isInteger` は 2^53 以上でも真になるので、そこを通すと「要求より小さいバッファを
  * 切り上げた顔で配る」形になる（`toSizeClass` の MUST が例外なしに破れる）。
  */
-Deno.test("toSizeClass は安全整数を超えるバイト数を拒否する（切り上げで丸めない）", () => {
+test("toSizeClass は安全整数を超えるバイト数を拒否する（切り上げで丸めない）", () => {
   assertThrows(() => toSizeClass(2 ** 53), ArenaError, "0 以上の安全整数");
   assertThrows(() => toSizeClass(2 ** 53 + 4), ArenaError, "0 以上の安全整数");
   assertThrows(() => toSizeClass(-4), ArenaError, "0 以上の安全整数");
@@ -47,7 +48,7 @@ Deno.test("toSizeClass は安全整数を超えるバイト数を拒否する（
   assertEquals(toSizeClass(0), 4);
 });
 
-Deno.test("RunArena.allocRegion は計画の領域を STORAGE_USAGE で確保し、破棄まで所有する", async () => {
+test("RunArena.allocRegion は計画の領域を STORAGE_USAGE で確保し、破棄まで所有する", async () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
 
@@ -66,7 +67,7 @@ Deno.test("RunArena.allocRegion は計画の領域を STORAGE_USAGE で確保し
   assertEquals(gpu.destroyedCount(), 2, "領域の破棄はアリーナが持つ");
 });
 
-Deno.test("RunArena.recordTransients は計画の診断 3 欄を stats へ写す（確保の実数は動かない）", () => {
+test("RunArena.recordTransients は計画の診断 3 欄を stats へ写す（確保の実数は動かない）", () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
   arena.allocRegion(64);
@@ -80,7 +81,7 @@ Deno.test("RunArena.recordTransients は計画の診断 3 欄を stats へ写す
   });
 });
 
-Deno.test("RunArena.allocHostRead は staging を領域外で確保し、破棄まで所有する", async () => {
+test("RunArena.allocHostRead は staging を領域外で確保し、破棄まで所有する", async () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
 
@@ -97,7 +98,7 @@ Deno.test("RunArena.allocHostRead は staging を領域外で確保し、破棄�
   assertEquals(gpu.destroyedCount(), 1, "staging の破棄もアリーナが持つ");
 });
 
-Deno.test("RunArena.allocHostWritten は COPY_DST の無い usage を拒否する", () => {
+test("RunArena.allocHostWritten は COPY_DST の無い usage を拒否する", () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
 
@@ -112,7 +113,7 @@ Deno.test("RunArena.allocHostWritten は COPY_DST の無い usage を拒否す�
   );
 });
 
-Deno.test("RunArena.destroy は flush 完了後にのみバッファを破棄する", async () => {
+test("RunArena.destroy は flush 完了後にのみバッファを破棄する", async () => {
   const gpu = createFakeGpu();
   let releaseFlush: () => void = () => {};
   const flushed = new Promise<void>((resolve) => {
@@ -140,7 +141,7 @@ Deno.test("RunArena.destroy は flush 完了後にのみバッファを破棄す
   assertThrows(() => arena.allocRegion(32), ArenaError, "破棄済み");
 });
 
-Deno.test("RunArena.destroy は flush が失敗してもバッファを破棄し、その失敗を伝える", async () => {
+test("RunArena.destroy は flush が失敗してもバッファを破棄し、その失敗を伝える", async () => {
   const gpu = createFakeGpu();
   // 実運用の主因は device 消失（flush が GpuDeviceLostError で落ちる）
   const lost = new Error("flush 中に device が失われた");

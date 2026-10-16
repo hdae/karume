@@ -3,7 +3,7 @@
 // 実 GPU の発行（`lastRunTiming`）との突合は gpu_pipeline_census_test.ts。
 
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { pipelineCensus } from "../src/runtime/recipe.ts";
 
 /** キー列から偽のステップ 1 本を組む（census が読むのは `dispatches[].key` だけ）。 */

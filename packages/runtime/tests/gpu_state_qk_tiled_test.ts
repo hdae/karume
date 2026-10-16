@@ -19,6 +19,7 @@
 // MUST: 故障注入で門が落ちることを同じファイルで示す（B ローダの半スケール除去・列基点の
 // 2 源取り違え）。落ちない門は何も見ていない。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import {
@@ -394,7 +395,7 @@ const assertSameWords = (
   }
 };
 
-Deno.test({
+test({
   name: "①ₜ（K 行タイル共有）は ① と S バッファが語単位で完全一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -434,7 +435,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "①ₜ は 2 回 dispatch・容量 C・行ブロックの割り方のどれを変えても書いた語が動かない（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -511,7 +512,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "①ₜ の故障注入（半スケール除去 / 2 源の取り違え）が語一致の門で落ちる",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

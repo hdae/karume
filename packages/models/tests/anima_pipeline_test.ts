@@ -24,6 +24,7 @@
 // NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
 // `session_options_test.ts` にある。
 
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertAlmostEquals,
@@ -108,7 +109,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-Deno.test("fromAssets: pipeline の契約名が anima でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が anima でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -117,7 +118,7 @@ Deno.test("fromAssets: pipeline の契約名が anima でない manifest を落�
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/2" }));
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
   assertEquals(manifest.models["anima-turbo"].pipeline, { name: "anima", major: 2 });
@@ -128,7 +129,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる", async () => {
   const manifest = parseManifest(manifestText({ pipelineConfig: {} }));
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -143,7 +144,7 @@ const pipelineConfig = (scheduler: Record<string, unknown>): Record<string, unkn
   defaults: { steps: 10, guidanceScale: 1, resolution: { width: 1024, height: 1024 } },
 });
 
-Deno.test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで進む（門の順序は不変）", async () => {
+test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで進む（門の順序は不変）", async () => {
   // 席を足しても構築段の順序（manifest 契約 → 資産 → GPU）が動いていないことを見る。
   // 正しい type を宣言した manifest は契約検査を抜けて資産まで進み、「門の順序の対偶」と
   // **同じ文言**で落ちる。
@@ -159,7 +160,7 @@ Deno.test("fromAssets: scheduler.type を宣言した manifest も同じ位置�
   );
 });
 
-Deno.test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる", async () => {
+test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる", async () => {
   // 綴り違いが既定の euler へ黙って縮退すると、配布者が宣言した更新則と実行が食い違ったまま
   // 気づけない。資産が空でも**型の文言**で落ちる = 契約検査が資産解析より先にある。
   const manifest = parseManifest(
@@ -174,7 +175,7 @@ Deno.test("fromAssets: scheduler.type の未知値は資産に触る前に落ち
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => AnimaPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
@@ -183,7 +184,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   // v2 で増えた軸。モデル名を打ち間違えたときに「では何があるのか」を一次情報で返す
   // （ADR 0041 §8）。
   const manifest = parseManifest(manifestText());
@@ -194,7 +195,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
+test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
   // 上のケースが「資産が空でも manifest の文言で落ちる」ことの裏返し。正しい manifest なら
   // 検査は資産まで進み、`tokenizer` の不在で落ちる（= 契約検査も資産の解析も GPU より前）。
   // GPU の無い環境で `acquireGpu` の失敗に化けたらこの門が赤くなる。
@@ -206,7 +207,7 @@ Deno.test("fromAssets: manifest 契約を全て満たして初めて資産へ触
   );
 });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 容器が揃っていない Record では**部品の不在**で落ちる（manifest の文言では落ちない）=
   // 上の門が資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -217,7 +218,7 @@ Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落
   );
 });
 
-Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
+test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
   // UI の中止ボタンは DL 完了後の組み立て（資産解析 → acquireGpu）にも効かなければならない。
   // 入口の検査が資産解析より**先**にあることを、上の門と同じ manifest + 空資産で見る:
   // signal 無しなら「資産 'tokenizer' が無い」で落ちる形が、中断済みなら reason で落ちる。
@@ -232,7 +233,7 @@ Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そ�
   assertStrictEquals(error, reason);
 });
 
-Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
+test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
   // 上の門は「呼ぶ前に中断済み」だけを見る。中止ボタンは**組み立てが走っている最中**に
   // 押されるので、段境界の検査はイベントループへ譲ってからでなければ死文になる
   // （abort() の届き方はタスク配送 — 同期解析中は 1 度も観測されない）。
@@ -267,7 +268,7 @@ const optionsWith = (key: string, value: unknown): AnimaPipelineOptions => {
   return options;
 };
 
-Deno.test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組合せなら資産に触る前に ModelInputError", async () => {
+test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組合せなら資産に触る前に ModelInputError", async () => {
   // 宣言は s16 だけ（単独なら通る）。明示の c16 と組んで初めて runtime が受けない形になるので、
   // 打つ手は「指定を直す」= 入力起因。資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
   await assertRejects(
@@ -281,7 +282,7 @@ Deno.test("fromAssets: 明示と quant 宣言の合成が runtime の受けな�
   );
 });
 
-Deno.test("fromAssets: 不正な明示値と Anima が受けないノブは資産に触る前に ModelInputError", async () => {
+test("fromAssets: 不正な明示値と Anima が受けないノブは資産に触る前に ModelInputError", async () => {
   const manifest = parseManifest(manifestText());
   // null は quant 宣言へも runtime 既定へも戻さない。
   await assertRejects(
@@ -305,7 +306,7 @@ Deno.test("fromAssets: 不正な明示値と Anima が受けないノブは資�
   );
 });
 
-Deno.test("fromAssets: 受理される明示は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
+test("fromAssets: 受理される明示は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
@@ -318,7 +319,7 @@ Deno.test("fromAssets: 受理される明示は admission を通って資産の�
   );
 });
 
-Deno.test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産に触る前に名指しで落ちる", async () => {
+test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産に触る前に名指しで落ちる", async () => {
   // quant 宣言は shader-f16 を要求しない。要求は実効設定から導く（黙って f32 へ落とさず、
   // 重みを上げた後の Session 構築まで遅らせもしない）。
   const manifest = parseManifest(manifestText());
@@ -335,7 +336,7 @@ Deno.test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ�
 
 // ---- DiT 常駐の構築オプション（ADR 0112）---------------------------------------------------
 
-Deno.test("fromAssets: residency の未知の綴りは資産に触る前に ModelInputError", async () => {
+test("fromAssets: residency の未知の綴りは資産に触る前に ModelInputError", async () => {
   // 綴り違いが黙って段ごと運転になると、opt-in が効いていないことに速度でしか気付けない。
   // 資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
   const manifest = parseManifest(manifestText());
@@ -352,7 +353,7 @@ Deno.test("fromAssets: residency の未知の綴りは資産に触る前に Mode
   }
 });
 
-Deno.test("fromAssets: 受理される residency は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
+test("fromAssets: 受理される residency は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
   // 構築は Session を 1 本も張らない（常駐 DiT は最初の generate で作る）ので、transformer でも
   // 構築段の順序は変わらない。
   const manifest = parseManifest(manifestText());
@@ -425,7 +426,7 @@ const requestWith = (key: string, value: unknown): AnimaGenerateRequest => {
   return request;
 };
 
-Deno.test("generate: request の residency の未知の綴りは GPU に触る前に ModelInputError（入口の結線）", async () => {
+test("generate: request の residency の未知の綴りは GPU に触る前に ModelInputError（入口の結線）", async () => {
   // 綴り違いの "transformers" が入口を素通りすると、段ごと運転として走り（常駐の席の判断は
   // "transformer" との一致しか見ない）、通知も出ない = 黙って遅い経路。偽の GPU は Session を
   // 組めないので、入口を抜ければ最初の段の構築で別の例外に化ける（下の対のテスト）。
@@ -444,7 +445,7 @@ Deno.test("generate: request の residency の未知の綴りは GPU に触る�
   assertEquals(events, [], "入口の検査より先に段へ入っている");
 });
 
-Deno.test("generate: 受理される residency は入口を通って最初の段（GPU）まで進む（門が恒真でないことの対）", async () => {
+test("generate: 受理される residency は入口を通って最初の段（GPU）まで進む（門が恒真でないことの対）", async () => {
   const manifest = parseManifest(manifestText());
   await using pipeline = await AnimaPipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
@@ -466,7 +467,7 @@ Deno.test("generate: 受理される residency は入口を通って最初の段
   }
 });
 
-Deno.test("generate: f32 で有限に収まらない guidanceScale は GPU に触る前に ModelInputError", async () => {
+test("generate: f32 で有限に収まらない guidanceScale は GPU に触る前に ModelInputError", async () => {
   // CFG は倍率を f32 で掛ける。f64 で有限でも f32 で Infinity になる値は、合成を ±Inf / NaN にする。
   const manifest = parseManifest(manifestText());
   await using pipeline = await AnimaPipeline.fromAssets(
@@ -490,7 +491,7 @@ Deno.test("generate: f32 で有限に収まらない guidanceScale は GPU に�
   }
 });
 
-Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
+test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
   // 効かないノブを黙って受けると、ユーザーは指定したつもりで実際は 1 文字も使われない
   // （guidance=1 は uncond 分岐を丸ごと計算しない — `generation/dpm-solver-multistep.ts` の
   // `needsUncond`）。
@@ -514,7 +515,7 @@ Deno.test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡し�
   assertEquals(resolveNegativePrompt(undefined, undefined, 1), undefined);
 });
 
-Deno.test("resolveNegativePrompt: uncond を計算する設定で negativePrompt が無ければ落とす", () => {
+test("resolveNegativePrompt: uncond を計算する設定で negativePrompt が無ければ落とす", () => {
   // request にも manifest の defaults にも無い形。ここで落とさないと uncond 側の綴りが
   // 空のまま GPU 経路へ入る。
   assertThrows(
@@ -527,7 +528,7 @@ Deno.test("resolveNegativePrompt: uncond を計算する設定で negativePrompt
   assertEquals(resolveNegativePrompt("要求のネガ", "既定のネガ", 7), "要求のネガ");
 });
 
-Deno.test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合を通る", () => {
+test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合を通る", () => {
   // `generate` の入口はこの検査を呼ぶ（`Randn` を作るのは text encoder / conditioner を回して
   // DiT の重みを上げ切った後なので、生成器側だけに検査があると GB 級のロードの末に落ちる）。
   // 受理集合を 2 か所に書かないことを、同じ入力・同じ文言で確かめる。
@@ -543,7 +544,7 @@ Deno.test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合�
   for (const seed of [0, 42, Number.MAX_SAFE_INTEGER]) assertAcceptableSeed(seed);
 });
 
-Deno.test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で euler と dpmpp-2m が割れる）", () => {
+test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で euler と dpmpp-2m が割れる）", () => {
   // 梯子と入力は手で置いた 1 要素・4 step。`index 2` は **2 次項が実際に効く唯一の位置** —
   // 両端（0 / 3）は 1 次に落ち、`index 1` は λ_s1 = −inf（先頭 σ が厳密に 1）で 2 次項が
   // ちょうど 0 に落ちる（更新則の doc の ∓inf 節）。
@@ -577,7 +578,7 @@ Deno.test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で e
   assertEquals([...carried], [0.5]);
 });
 
-Deno.test("denoiseStep: 更新後の latent が非有限なら step を名指しして落ち、次の step へ渡さない（どちらの更新則も）", () => {
+test("denoiseStep: 更新後の latent が非有限なら step を名指しして落ち、次の step へ渡さない（どちらの更新則も）", () => {
   // f32 で有限な倍率 1e38 でも、差分 10 との積が f32 で溢れて合成が +Inf になり、更新後が -Inf になる。
   // 入口の f32 の検査だけでは防げない形（倍率と DiT の出力の組で溢れる）。
   const input = {
@@ -604,7 +605,7 @@ Deno.test("denoiseStep: 更新後の latent が非有限なら step を名指し
   }
 });
 
-Deno.test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出所を文言に出す", () => {
+test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出所を文言に出す", () => {
   // manifest 側（`where = "pipelineConfig.scheduler.type"`）は `anima_config_test.ts` が見て
   // いるが、request 側の呼び（`pipeline.ts` の `where = "sampler"`）は `generate()` の内側に
   // あり、実 GPU + 実資産が無いと踏めない。受理集合そのものは純関数として直接縛る
@@ -626,7 +627,7 @@ Deno.test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け�
   }
 });
 
-Deno.test("ANIMA_SAMPLER_TYPES: 公開した並びは受理集合そのもので、消費側からは書き換えられない", () => {
+test("ANIMA_SAMPLER_TYPES: 公開した並びは受理集合そのもので、消費側からは書き換えられない", () => {
   // CLI / UI はこの並びで引数を検査し選択肢を並べる。並びと検査が別の表を持つと「選べるのに
   // 落ちる語」ができるので、並びの全語が検査を通ることを公開面（`./anima`）から縛る。
   assertEquals([...ANIMA_SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
@@ -644,7 +645,7 @@ Deno.test("ANIMA_SAMPLER_TYPES: 公開した並びは受理集合そのもので
   assertThrows(() => assertAnimaSamplerType("dpm++", "sampler"), Error, "実際 'dpm++'");
 });
 
-Deno.test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {
+test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {
   const shape = [1, 2, 1, 1];
   // denoise ループの再現: `cfgEulerStep` は純関数なので `current` は step ごとに**新しい
   // 配列**へ差し替わる。イベントの口は step ごとに作って渡す。

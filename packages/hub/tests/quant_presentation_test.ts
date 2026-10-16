@@ -1,5 +1,6 @@
+import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { ManifestFormatError, parseManifest } from "../mod.ts";
 import { FETCH_MANIFEST_TEXT } from "./helpers/fixture.ts";
 
@@ -21,7 +22,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const loadCases = async (): Promise<readonly PresentationCase[]> => {
   const raw: unknown = JSON.parse(
-    await Deno.readTextFile(new URL("./fixtures/quant-presentation.json", import.meta.url)),
+    await readTextFile(new URL("./fixtures/quant-presentation.json", import.meta.url)),
   );
   if (!isRecord(raw) || !Array.isArray(raw["cases"])) throw new Error("fixture: cases が無い");
   const cases = raw["cases"].map((entry: unknown): PresentationCase => {

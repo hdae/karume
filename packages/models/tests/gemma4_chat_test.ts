@@ -24,8 +24,9 @@
 // 実資産（`outputs/series/gemma4-e2b-tokenizer/`）が在れば**全語彙**でも同じ id 列になること
 // を併せて見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。
 
+import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
 import {
@@ -96,7 +97,7 @@ type Fixture = {
 };
 
 const fixture = JSON.parse(
-  await Deno.readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
 ) as Fixture;
 
 /** フィクスチャの部分集合から資産表を直接組む（JSON パーサの門は tokenizer 側が見る）。 */
@@ -128,7 +129,7 @@ if (seriesBytes === undefined) {
   );
 }
 
-Deno.test("gemma4 chat 描画: 上流 apply_chat_template と文字列がビット一致", async (t) => {
+test("gemma4 chat 描画: 上流 apply_chat_template と文字列がビット一致", async (t) => {
   for (const testCase of fixture.chat) {
     await t.step(`${testCase.name} — ${testCase.why}`, () => {
       assertEquals(renderGemma4Chat(testCase.messages), testCase.rendered);
@@ -136,7 +137,7 @@ Deno.test("gemma4 chat 描画: 上流 apply_chat_template と文字列がビッ�
   }
 });
 
-Deno.test("gemma4 chat 符号化: 上流 apply_chat_template(tokenize=True) と id 列が一致", async (t) => {
+test("gemma4 chat 符号化: 上流 apply_chat_template(tokenize=True) と id 列が一致", async (t) => {
   for (const testCase of fixture.chat) {
     await t.step(`${testCase.name} — ${testCase.why}`, () => {
       assertEquals(gemma4ChatPrompt(tokenizer, testCase.messages), testCase.ids);
@@ -144,7 +145,7 @@ Deno.test("gemma4 chat 符号化: 上流 apply_chat_template(tokenize=True) と 
   }
 });
 
-Deno.test("gemma4 chat: `<bos>` の所有者は chat 関数だけ（double-BOS を作らない）", () => {
+test("gemma4 chat: `<bos>` の所有者は chat 関数だけ（double-BOS を作らない）", () => {
   // `encode` が `<bos>` を付けないこと（ADR 0084 決定 5 の MUST）と、chat が 1 個だけ付ける
   // ことを対で見る。片方だけだと「両方が付ける」形が通る。
   const bos = fixture.asset.bosId;
@@ -154,7 +155,7 @@ Deno.test("gemma4 chat: `<bos>` の所有者は chat 関数だけ（double-BOS �
   assertEquals(ids.filter((id) => id === bos).length, 1, "付けるのは 1 個だけ");
 });
 
-Deno.test("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無視しない）", async (t) => {
+test("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無視しない）", async (t) => {
   const reject = (
     label: string,
     messages: readonly unknown[],
@@ -308,7 +309,7 @@ const TURN_CASES: readonly TurnCase[] = [
   },
 ];
 
-Deno.test("gemma4 chat 増分: 差分の積み上げが全会話の描画と文字列一致（turn-local）", async (t) => {
+test("gemma4 chat 増分: 差分の積み上げが全会話の描画と文字列一致（turn-local）", async (t) => {
   for (const testCase of TURN_CASES) {
     await t.step(testCase.name, () => {
       let prefix: Gemma4ChatMessage[] = [...testCase.head];
@@ -331,7 +332,7 @@ Deno.test("gemma4 chat 増分: 差分の積み上げが全会話の描画と文�
   }
 });
 
-Deno.test("gemma4 chat 増分: 差分 token 列の連結が全会話の id 列と一致（pendingToken 込み）", async (t) => {
+test("gemma4 chat 増分: 差分 token 列の連結が全会話の id 列と一致（pendingToken 込み）", async (t) => {
   const stopId = tokenizer.addedTokenId(END_OF_TURN);
   assert(stopId !== undefined, "資産に <turn|> が無い");
   for (const testCase of TURN_CASES) {
@@ -353,7 +354,7 @@ Deno.test("gemma4 chat 増分: 差分 token 列の連結が全会話の id 列�
   }
 });
 
-Deno.test("gemma4 chat 増分: 差分に `<turn|>` を含めない（pendingToken と二重にしない）", () => {
+test("gemma4 chat 増分: 差分に `<turn|>` を含めない（pendingToken と二重にしない）", () => {
   // 前 turn を閉じる札は生成が出して sequence が握っている（ADR 0083 決定 4）。差分の先頭は
   // その**直後**の改行で、`<|turn>` から始まってはならない。
   const rendered = renderGemma4ChatTurn({ role: "user", content: "hi" });
@@ -364,7 +365,7 @@ Deno.test("gemma4 chat 増分: 差分に `<turn|>` を含めない（pendingToke
   assertEquals(rendered.includes("<bos>"), false, "差分に <bos> は入らない");
 });
 
-Deno.test("gemma4 chat 増分 射程: 素の発話の外は fail loudly", async (t) => {
+test("gemma4 chat 増分 射程: 素の発話の外は fail loudly", async (t) => {
   const reject = (label: string, message: unknown, expected: string): Promise<boolean> =>
     t.step(label, () => {
       assertThrows(
@@ -382,7 +383,7 @@ Deno.test("gemma4 chat 増分 射程: 素の発話の外は fail loudly", async 
   await reject("content が配列", { role: "user", content: [{ type: "text" }] }, "content");
 });
 
-Deno.test("gemma4 chat 停止 token: 資産から導出した集合が上流の宣言と一致", () => {
+test("gemma4 chat 停止 token: 資産から導出した集合が上流の宣言と一致", () => {
   assertEquals(fixture.stopTokenSpellings, ["<eos>", "<turn|>", "<|tool_response>"], "上流の綴り");
   assertEquals(
     [...gemma4StopTokens(tokenizer)].sort((a, b) => a - b),
@@ -391,7 +392,7 @@ Deno.test("gemma4 chat 停止 token: 資産から導出した集合が上流の�
   );
 });
 
-Deno.test("gemma4 chat 停止 token: 綴りが欠けた資産は fail loudly", () => {
+test("gemma4 chat 停止 token: 綴りが欠けた資産は fail loudly", () => {
   // 集合が痩せたまま通すと「`<turn|>` で止まらず次の turn を自分で書き始める」形になり、
   // 例外は 1 つも出ない（golden でしか気づけない沈黙劣化）。
   const assets = assetsOf(fixture);
@@ -508,7 +509,7 @@ const decodeChat = async (
 /** 綴り表: 0..3 で "Hello " + 停止文字列 "END" が **token 境界を跨いで** 現れる形。 */
 const SPELLINGS = ["Hel", "lo ", "EN", "D!", "X!", " tail"];
 
-Deno.test("chat 停止文字列: token 境界を跨いでも止まり、停止文字列は出力に入らない", async () => {
+test("chat 停止文字列: token 境界を跨いでも止まり、停止文字列は出力に入らない", async () => {
   // "EN" と "D!" の 2 token に割れた "END"。復号後の本文でしか判定できない形である。
   const { parts, matched, state } = await decodeChat(SPELLINGS, [0, 1, 2, 3, 5], ["END"]);
   assertEquals(matched, "END", "一致した停止文字列");
@@ -520,7 +521,7 @@ Deno.test("chat 停止文字列: token 境界を跨いでも止まり、停止�
   assertEquals(state.closed, true, "イベント列の return() が呼ばれていない（後始末が漏れる）");
 });
 
-Deno.test("chat 停止文字列: 一致しなければ保留ぶんが最後に流れる（1 文字も落とさない）", async () => {
+test("chat 停止文字列: 一致しなければ保留ぶんが最後に流れる（1 文字も落とさない）", async () => {
   // 保留は判定のための遅延であって出力の切り詰めではない — "EN" の次が "D" でなければ全部出る。
   const { parts, matched, state } = await decodeChat(SPELLINGS, [0, 1, 2, 4], ["END"]);
   assertEquals(matched, undefined, "止まっていない");
@@ -528,7 +529,7 @@ Deno.test("chat 停止文字列: 一致しなければ保留ぶんが最後に�
   assertEquals(state.exhausted, true, "イベント列は最後まで汲まれる");
 });
 
-Deno.test("chat 停止文字列: 保留するのは接頭辞になっている間だけ（描画を止めっぱなしにしない）", async () => {
+test("chat 停止文字列: 保留するのは接頭辞になっている間だけ（描画を止めっぱなしにしない）", async () => {
   // 片の**並び**まで見る（連結だけ見ると「最後にまとめて出す」偽 streaming が通る）。停止文字列の
   // 接頭辞になった "EN" の間だけ保留し、外れた時点でまとめて流す。
   const { parts } = await decodeChat(SPELLINGS, [0, 1, 2, 4], ["END"]);
@@ -538,7 +539,7 @@ Deno.test("chat 停止文字列: 保留するのは接頭辞になっている�
   assertEquals(bare.parts, ["Hel", "lo ", " tail"]);
 });
 
-Deno.test("chat 停止文字列: byte run の確定ぶんも判定に入る（列の終わりで止まる）", async () => {
+test("chat 停止文字列: byte run の確定ぶんも判定に入る（列の終わりで止まる）", async () => {
   // byte_fallback の run は次の非 byte token か `finish()` まで確定しない（ADR 0084 決定 4）。
   // その確定ぶんを判定へ通さないと、run の中で完成した停止文字列を取りこぼす。
   const spellings = ["Hi ", "EN", "<0x44>"];
@@ -547,7 +548,7 @@ Deno.test("chat 停止文字列: byte run の確定ぶんも判定に入る（�
   assertEquals(parts.join(""), "Hi ");
 });
 
-Deno.test("chat 停止文字列: 空文字列と重複は fail loudly", () => {
+test("chat 停止文字列: 空文字列と重複は fail loudly", () => {
   // 空文字列は「常に一致する」= 1 文字も出せない指定、重複は同じ条件の二重書き（どちらも取り違え）。
   assertThrows(() => createStopStringFilter([""]), Error, "stopStrings[0] が空文字列");
   assertThrows(
@@ -557,14 +558,14 @@ Deno.test("chat 停止文字列: 空文字列と重複は fail loudly", () => {
   );
 });
 
-Deno.test("chat 停止文字列: 複数の停止文字列は本文に先に現れた方で切る", async () => {
+test("chat 停止文字列: 複数の停止文字列は本文に先に現れた方で切る", async () => {
   // 宣言の順ではなく**流れを実際に切った方**を運ぶ（"d" を先に宣言しても本文では "b" が先）。
   const { parts, matched } = await decodeChat(["ab", "cd"], [0, 1], ["d", "b"]);
   assertEquals(matched, "b");
   assertEquals(parts.join(""), "a");
 });
 
-Deno.test("chat 停止文字列: 停止理由を差し替えても内側の勘定を写す（stopStringOf）", async (t) => {
+test("chat 停止文字列: 停止理由を差し替えても内側の勘定を写す（stopStringOf）", async (t) => {
   // `chat` と `Gemma4ChatSession.#finish` は、停止文字列で閉じたターンだけ `GenerationStop` を
   // **別の object へ組み直す**。組み直しで欄が 1 つ落ちても型は通る（`speculation` は optional）
   // ので、「停止文字列で閉じたターンだけ投機の勘定が消える」形は例外にならない。
@@ -593,7 +594,7 @@ Deno.test("chat 停止文字列: 停止理由を差し替えても内側の勘�
   });
 });
 
-Deno.test("投機の切替（speculativeSetup）: drafter 無しの pipeline に true を渡すと fail loudly", () => {
+test("投機の切替（speculativeSetup）: drafter 無しの pipeline に true を渡すと fail loudly", () => {
   // 未指定は「drafter が居れば張る」なので drafter 無しでは黙って非投機（欄も生えない）。明示の
   // 指定（`true` / `"always"`）は drafter を要求する — 黙って非投機で回すと、結果からも無視を
   // 読み取れない。
@@ -609,7 +610,7 @@ Deno.test("投機の切替（speculativeSetup）: drafter 無しの pipeline に
 // 埋めるだけの偽物を差す（`runtime/tests` が GPU 実体に対して採っている扱いと同じ）。
 const fakeDrafter = {} as unknown as Gemma4Drafter;
 
-Deno.test("投機のゲートのノブ（speculativeSetup）: auto にだけ降り、always には欄ごと生えない", () => {
+test("投機のゲートのノブ（speculativeSetup）: auto にだけ降り、always には欄ごと生えない", () => {
   const knobs = { burstAbort: 10, burstMin: 8, exploreBase: 8 };
   const gated = { drafter: fakeDrafter, speculativeK: 2, speculativeGate: knobs };
 
@@ -636,7 +637,7 @@ Deno.test("投機のゲートのノブ（speculativeSetup）: auto にだけ降�
   assertEquals(Object.hasOwn(ungated, "gate"), false, "ノブ未指定で gate 欄が生えている");
 });
 
-Deno.test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる（fromPretrained の引数検査）", async () => {
+test("投機のゲートのノブ: 不正な値は重みを読む前に落ちる（fromPretrained の引数検査）", async () => {
   // 門の**位置**がこの test の主題である。`assertSpeculative` は取得元の解釈より前に置いてあるので、
   // ノブの誤りは network も GPU も触らずに落ちる（GB 級のロードの後まで落ちない形にしない）。
   // 値域の判断そのものはゲート側（`speculation-gate.ts`）の門で、ここは素通しを確かめる。
@@ -664,7 +665,7 @@ Deno.test("投機のゲートのノブ: 不正な値は重みを読む前に落�
   );
 });
 
-Deno.test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も変わらない", async () => {
+test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文字も変わらない", async () => {
   // 長い prompt では最初の文字が出るまでの無音時間が prefill そのもので、文字列の面には
   // その進捗を運ぶ片が無い（本文はまだ 1 文字も出ていない）。観測席が唯一の経路である。
   const events = (async function* (): AsyncGenerator<GenerationEvent, void, undefined> {
@@ -692,7 +693,7 @@ Deno.test("chat prefill: 進捗は onPrefill が受け、本文の列は 1 文�
   assertEquals(parts, ["Hel", "lo "], "本文の片は観測席の有無で変わらない");
 });
 
-Deno.test("chat 一括: text() は片の連結と一致し、done も併せて読める", async () => {
+test("chat 一括: text() は片の連結と一致し、done も併せて読める", async () => {
   const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 3 };
   const chunks = (async function* (): AsyncGenerator<string, void, undefined> {
     yield "Hel";
@@ -704,7 +705,7 @@ Deno.test("chat 一括: text() は片の連結と一致し、done も併せて�
   assertEquals(await stream.done, stop, "停止理由は text() の後でも読める");
 });
 
-Deno.test("chat 一括: 1 つのストリームは 1 通りにしか消費できない（同期に落ちる）", async () => {
+test("chat 一括: 1 つのストリームは 1 通りにしか消費できない（同期に落ちる）", async () => {
   const stop: Gemma4ChatStop = { reason: "max-tokens", tokens: 1 };
   const streamOf = () =>
     chatStreamOf(
@@ -734,7 +735,7 @@ Deno.test("chat 一括: 1 つのストリームは 1 通りにしか消費でき
 // `flush` の失敗を伝播させる経路が実在する = 例外 1 つで二度と動かないパイプライン）。
 // 席の返却と例外の畳み方はこの 1 本に集めてあるので、故障注入もここで書ける（GPU 不要）。
 
-Deno.test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の例外と併せて運ぶ", async (t) => {
+test("chat 後始末: 席は無条件に返り、後始末の失敗は本体の例外と併せて運ぶ", async (t) => {
   const failing = (error: unknown) => (): Promise<void> => Promise.reject(error);
   const caughtOf = (work: Promise<void>): Promise<unknown> =>
     work.then(() => undefined, (error: unknown) => error);
@@ -782,7 +783,7 @@ Deno.test("chat 後始末: 席は無条件に返り、後始末の失敗は本�
   });
 });
 
-Deno.test({
+test({
   name: "gemma4 chat 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）",
   ignore: seriesBytes === undefined,
   fn: () => {
@@ -883,7 +884,7 @@ const runTurn = async (
   return { seen, phases, events, stop };
 };
 
-Deno.test("観測席: run 1 本につき 1 通（run を伴わない最初の token では呼ばない）", async () => {
+test("観測席: run 1 本につき 1 通（run を伴わない最初の token では呼ばない）", async () => {
   // prompt 6 token = chunk 2 本（`CHUNK_LENGTH` 4）+ 4 token 生成 = decode run 3 本。
   // 最初の token は最終 chunk の logits から抽選するだけなので、通知は 2 + 3 = 5 通。
   const { seen, phases, stop } = await runTurn({}, { prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 });
@@ -898,7 +899,7 @@ Deno.test("観測席: run 1 本につき 1 通（run を伴わない最初の to
   );
 });
 
-Deno.test("観測席: 停止 token を引いた最後の decode run も 1 通届く", async () => {
+test("観測席: 停止 token を引いた最後の decode run も 1 通届く", async () => {
   // 抽選 2 回のターン: ①prefill の logits（run 無し）②decode run 1 = 停止 token で、②は
   // `token` を yield せずに終わる。列から導出していた頃はこの 1 本が毎ターン欠けた。
   const { seen, phases, events, stop } = await runTurn(
@@ -917,7 +918,7 @@ Deno.test("観測席: 停止 token を引いた最後の decode run も 1 通届
   assertEquals(runShape(phases), [prefillPhase(1, 1), decodePhase(1)], "phase");
 });
 
-Deno.test("観測席: 消費側の break で閉じたターンは完了した run のぶんだけ届く", async () => {
+test("観測席: 消費側の break で閉じたターンは完了した run のぶんだけ届く", async () => {
   const fake = fakeSession({});
   const { seen, phases, state } = diagnosticsSeat();
   const onRun = runDiagnosticsHook(state);
@@ -937,7 +938,7 @@ Deno.test("観測席: 消費側の break で閉じたターンは完了した ru
   assertEquals(phases, [prefillPhase(1, 1)], "phase");
 });
 
-Deno.test("観測席: 席が無ければ hook を組まない（生成面は 1 回も呼ばない）", () => {
+test("観測席: 席が無ければ hook を組まない（生成面は 1 回も呼ばない）", () => {
   assertEquals(
     runDiagnosticsHook({ session: { diagnostics: (): number => 0 } }),
     undefined,
@@ -945,7 +946,7 @@ Deno.test("観測席: 席が無ければ hook を組まない（生成面は 1 �
   );
 });
 
-Deno.test("観測席: draft は借り手・それ以外は貸し手の診断を引く", () => {
+test("観測席: draft は借り手・それ以外は貸し手の診断を引く", () => {
   const { seen, phases, state } = diagnosticsSeat({ drafter: true });
   const onRun = runDiagnosticsHook(state);
   if (onRun === undefined) throw new Error("test: 観測席があるのに hook が undefined");
@@ -966,7 +967,7 @@ Deno.test("観測席: draft は借り手・それ以外は貸し手の診断を�
   ], "phase はそのまま素通しする");
 });
 
-Deno.test("観測席: drafter が居ないのに draft が届いたら fail loudly", () => {
+test("観測席: drafter が居ないのに draft が届いたら fail loudly", () => {
   const { state } = diagnosticsSeat();
   const onRun = runDiagnosticsHook(state);
   if (onRun === undefined) throw new Error("test: 観測席があるのに hook が undefined");
@@ -977,7 +978,7 @@ Deno.test("観測席: drafter が居ないのに draft が届いたら fail loud
   );
 });
 
-Deno.test("chat token 通知: 停止文字列の保留より先に全 token が届く", async () => {
+test("chat token 通知: 停止文字列の保留より先に全 token が届く", async () => {
   const seen: string[] = [];
   const events = (async function* (): AsyncGenerator<GenerationEvent> {
     yield { kind: "prefill", chunk: 1, chunks: 1 };

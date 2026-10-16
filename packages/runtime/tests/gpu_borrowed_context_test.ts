@@ -18,6 +18,7 @@
 // MUST: 参照に渡すスロットは**GPU から読み戻す**（ホスト側オラクルの再現ではない）。借り手が
 // 読むのは貸し手が実際に書いた行なので、読み戻しでしか「同じ実体を見ている」ことを示せない。
 
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -246,7 +247,7 @@ const assertDraft = async (
   assertEquals(borrowed.pastLength, past, `${label}: 借り手の pastLength は最後に写した P`);
 };
 
-Deno.test({
+test({
   name:
     "借り手 context の run が貸し手スロットの実内容と一致する（P < W / = W / ring 一周後・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -335,7 +336,7 @@ Deno.test({
  * MUST: 3 通りとも「参照側だけ」を壊す（GPU 側は正しいまま）。両側を同じだけ壊すと誤りが
  * 相殺して恒真になる。
  */
-Deno.test({
+test({
   name: "借り手 parity の故障注入（P のずれ・k/v 取り違え・live 行の欠落）は帯で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -436,7 +437,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "借り手 run は貸し手の進行中 run / commit 待ち / poison で拒否される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -513,7 +514,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "借り手が生きている間の貸し手 context dispose は拒否され、dispose 後は通る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -575,7 +576,7 @@ const draftWords = async (
   return Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
 };
 
-Deno.test({
+test({
   name: "fork: 借り手を持つ貸し手は複製でき、元の借り手は元のスロットを読み続ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -663,7 +664,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "借り手 context の spec の門（borrow と external は対・chunkLength 1・継承する束縛・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -762,7 +763,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "確保の await を跨いだ chunkLength の書き換えは借り手 context に届かない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -805,7 +806,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "external スロットの容量は計画鍵に載る（容量の違う貸し手を束ねた 2 本は別鍵・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1010,7 +1011,7 @@ const openWeightLenderModel = (table: ReturnType<typeof embedTable>) =>
     },
   ]);
 
-Deno.test({
+test({
   name: "共有 initializer: 借り手が貸し手の i8 表を読み、値がビット一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1063,7 +1064,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "共有 initializer の門: 過不足・shape・席・行の軸の不一致は fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1267,7 +1268,7 @@ const countCreateBuffer = async <T>(
   }
 };
 
-Deno.test({
+test({
   name:
     "共有 initializer の門: 貸し手と借り手の意味論 dtype の不一致は、借り手の GPU 確保より前に fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,

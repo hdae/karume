@@ -2,6 +2,7 @@
 // CPU 参照側（static_quantize_test.ts）と実 GPU 側（gpu_static_quantize_test.ts）が**同じ
 // oracle**に突き合わせるため、読み出しはこの 1 本に置く。
 import { assert } from "@std/assert";
+import { readFile } from "@karume/test-support/fs";
 import { parseSafetensors } from "../../src/format/safetensors.ts";
 
 export const bits = (data: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
@@ -10,7 +11,7 @@ export const bits = (data: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> 
 export type Case = { scale: number; x: Float32Array<ArrayBuffer>; y: Uint32Array<ArrayBuffer> };
 
 export const cases = async (): Promise<readonly Case[]> => {
-  const bytes = await Deno.readFile(
+  const bytes = await readFile(
     new URL("../fixtures/static-quantize-oracle.safetensors", import.meta.url),
   );
   const file = parseSafetensors(bytes.buffer);

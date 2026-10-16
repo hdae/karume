@@ -15,6 +15,7 @@
 // 実 GPU は使わない。上限は環境ごとに違い、実物で超過を作るには数 GiB の資産が要るので、門
 // そのものは「limits を絞ったフェイク device」でしか決定論的に固定できない。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
 import type { BoundContainer } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";
@@ -170,7 +171,7 @@ const spyGpu = (spy: AllocSpy, gpuLimits: RequiredLimits): GpuContext =>
  */
 const MAX_LOGICAL_LENGTH = 0xffffffff;
 
-Deno.test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
+test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
   // 境界の内側（下端・上端とも通る）
   assertChunkLength(1);
   assertChunkLength(MAX_LOGICAL_LENGTH);
@@ -187,7 +188,7 @@ Deno.test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
 // 寸法の取り方（純関数の門）
 // ---------------------------------------------------------------------------
 
-Deno.test("上限を超える payload は席ごとの確保寸法で名指しされる", () => {
+test("上限を超える payload は席ごとの確保寸法で名指しされる", () => {
   const residency = residencyOf(f16LinearGraph(), STORAGE);
   // w は 64 バイト（束縛上限 32 を超える）・b は 32 バイトちょうどで通る。
   const error = assertThrows(
@@ -202,7 +203,7 @@ Deno.test("上限を超える payload は席ごとの確保寸法で名指しさ
   );
 });
 
-Deno.test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見る", () => {
+test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見る", () => {
   const residency = residencyOf(f16LinearGraph(), STORAGE);
   // 束縛上限だけが緩い device（仕様が期待する大小関係が崩れた形）でも素通ししない。
   const bufferOnly = assertThrows(
@@ -225,7 +226,7 @@ Deno.test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本と�
   assertStringIncludes(both.message, "maxBufferSize 48 バイトを 16 バイト超える");
 });
 
-Deno.test("適格外席は f32 展開後の寸法で見る・companion scale も 1 本として見る", () => {
+test("適格外席は f32 展開後の寸法で見る・companion scale も 1 本として見る", () => {
   const residency = residencyOf(mixedSeatGraph(), MIXED_STORAGE);
   const error = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(16, 16)),
@@ -245,7 +246,7 @@ Deno.test("適格外席は f32 展開後の寸法で見る・companion scale も
   );
 });
 
-Deno.test("超過は全件を 1 回で列挙する（1 本ずつ落とさない）", () => {
+test("超過は全件を 1 回で列挙する（1 本ずつ落とさない）", () => {
   const error = assertThrows(
     () => assertWeightsWithinLimits(residencyOf(mixedSeatGraph(), MIXED_STORAGE), limits(16, 16)),
     ExecutionError,
@@ -259,7 +260,7 @@ Deno.test("超過は全件を 1 回で列挙する（1 本ずつ落とさない�
   );
 });
 
-Deno.test("上限ぴったりは通る（境界の内側 / 外側）", () => {
+test("上限ぴったりは通る（境界の内側 / 外側）", () => {
   const mixed = residencyOf(mixedSeatGraph(), MIXED_STORAGE);
   // 最大の確保は 32 バイト（w.scale / b / g の展開後）。
   assertWeightsWithinLimits(mixed, limits(32, 32));
@@ -290,7 +291,7 @@ const f16LinearModel = (): BoundContainer => {
   return memoryModel(graph, supplied);
 };
 
-Deno.test("createSessionFromContainer は上限超過の重みを createBuffer より前に落とす", async () => {
+test("createSessionFromContainer は上限超過の重みを createBuffer より前に落とす", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(32, 64));
   const error = await assertRejects(
@@ -305,7 +306,7 @@ Deno.test("createSessionFromContainer は上限超過の重みを createBuffer �
   );
 });
 
-Deno.test("上限に収まる重みは門を素通りして確保へ進む（門は全拒否ではない）", async () => {
+test("上限に収まる重みは門を素通りして確保へ進む（門は全拒否ではない）", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(1024, 1024));
   // 同じモデル・同じ経路で、違うのは limits だけ。確保まで進んだことは注入した失敗で分かる。
@@ -337,7 +338,7 @@ const stateHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
   adopt: (allocate) => allocate(),
 });
 
-Deno.test("state スロットの maxBufferSize 超過も createBuffer より前に落ちる", async () => {
+test("state スロットの maxBufferSize 超過も createBuffer より前に落ちる", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   // 束縛上限には収まるがバッファ上限を超える形（2 本を独立に見ていなければ素通りする）。
   const gpu = spyGpu(spy, limits(1024, 16));
@@ -353,7 +354,7 @@ Deno.test("state スロットの maxBufferSize 超過も createBuffer より前�
   assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
 });
 
-Deno.test("state スロットの maxStorageBufferBindingSize 超過も createBuffer より前に落ちる", async () => {
+test("state スロットの maxStorageBufferBindingSize 超過も createBuffer より前に落ちる", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   // バッファ上限には収まるが束縛上限を超える形（上の maxBufferSize 側と対 — 2 本を独立に
   // 見ていなければ、どちらか片方だけが検出器になる）。
@@ -369,7 +370,7 @@ Deno.test("state スロットの maxStorageBufferBindingSize 超過も createBuf
   assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
 });
 
-Deno.test("state スロットが両上限に収まれば確保へ進む（門は全拒否ではない）", async () => {
+test("state スロットが両上限に収まれば確保へ進む（門は全拒否ではない）", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(1024, 1024));
   const error = await assertRejects(
@@ -437,7 +438,7 @@ const createRejectionAt = async (
   return error.message;
 };
 
-Deno.test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回ると両方が同じ文言で落ちる）", async () => {
+test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回ると両方が同じ文言で落ちる）", async () => {
   const graph = pairedStateGraph();
   // 上限ぴったり（32 バイト）は両方とも通る — 実構築は確保へ進み、見積りは数字を返す。
   assertEquals(stateEstimateAt(graph, 32, 1024), 32 + 8, "スロット 32 + 論理長 uniform 8");
@@ -455,7 +456,7 @@ Deno.test("束縛上限の境界は見積りと実構築で同じ（1 バイト�
   );
 });
 
-Deno.test("バッファ上限の境界も見積りと実構築で同じ（束縛上限に収まる形で片側だけを割る）", async () => {
+test("バッファ上限の境界も見積りと実構築で同じ（束縛上限に収まる形で片側だけを割る）", async () => {
   const graph = pairedStateGraph();
   assertEquals(stateEstimateAt(graph, 1024, 32), 32 + 8);
   assertEquals(await createRejectionAt(graph, 1024, 32), undefined);
@@ -468,7 +469,7 @@ Deno.test("バッファ上限の境界も見積りと実構築で同じ（束縛
   );
 });
 
-Deno.test("上限を渡さない見積りは既定値を捏造しない（device を持たない呼び手は従来どおり）", () => {
+test("上限を渡さない見積りは既定値を捏造しない（device を持たない呼び手は従来どおり）", () => {
   const graph = pairedStateGraph();
   // 片側だけを渡す形も含めて、渡した欄だけが検査に効く（未指定の側は見ない）。
   assertEquals(

@@ -14,7 +14,7 @@
 // ピークは生まれない）が崩れる。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { GpuOutOfMemoryError } from "../src/gpu/error-scope.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";
@@ -102,7 +102,7 @@ const runFresh = async (
   }
 };
 
-Deno.test({
+test({
   name: "backed run の出力は非 backed 実行とビット単位で一致する（stale slot の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -134,7 +134,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "backed run のアリーナ確保は readback staging だけになる（入力固定の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -165,7 +165,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "同一 signature の並行 run は共有入力バッファでも取り違えない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -209,7 +209,7 @@ const ALIAS_GRAPH: DeclarationJson = {
   ],
 };
 
-Deno.test({
+test({
   name: "グラフ出力が入力の別名でも backed run は読み戻せる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -290,7 +290,7 @@ const backingBytes = async (
   }
 };
 
-Deno.test({
+test({
   name: "予算内の 2 signature は交互に回しても保持されたまま作り直されない（既定予算・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -359,7 +359,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "予算 0 の Session は切替のたびに作り直す（従来の容量 1 の再現・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -403,7 +403,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "新規 1 本だけで予算を超える形は保持中を全て退役させて 1 本だけ持つ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -444,7 +444,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "backed 計画が LRU から追い出されると backing も返り、後続 run は完走する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -517,7 +517,7 @@ const tempInputs = (phase: number) => ({
 /** アリーナが 1 本のバッファに配る大きさ（最小 4 バイト + 4 バイト整列）。 */
 const bufferBytes = (count: number): number => Math.max(4, count * 4);
 
-Deno.test({
+test({
   name: "slot の総バイト数は非 backed run のプール確保と一致する（footprint 不変の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -733,14 +733,14 @@ const assertPartialBackingFault = async (
   }
 };
 
-Deno.test({
+test({
   name:
     "backing 確保の途中失敗は確保済みだけを 1 回返し、旧 backing は保持したまま（既定予算・故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertPartialBackingFault(undefined, { retainsOld: true }),
 });
 
-Deno.test({
+test({
   name:
     "予算 0 では確保の前に旧 backing が退役し、確保済みと合わせてちょうど 1 回ずつ返る（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -844,13 +844,13 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
   }
 };
 
-Deno.test({
+test({
   name: "予算超過の退役は最も古く使われた 1 本（直前に触った T=4 が残る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertLruOrder(4),
 });
 
-Deno.test({
+test({
   name: "予算超過の退役は最も古く使われた 1 本（直前に触った T=9 が残る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertLruOrder(9),

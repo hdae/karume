@@ -13,6 +13,7 @@
 // MUST: 毒値は「ありえない値」ではなく **0 でない有限値**にする。ゼロ埋めの取り違えを見たいので、
 // 0 を毒値にすると pad のゼロ領域と区別できない。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type AcquireGpuOptions } from "../src/gpu/device.ts";
 import { referenceLinearI8a8 } from "../src/reference/i8a8.ts";
@@ -96,7 +97,7 @@ const runPoisoned = async (
   }
 };
 
-Deno.test({
+test({
   name: "cat はプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -120,7 +121,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "pad のゼロ領域は毒値ではなく厳密に 0 になる（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -139,7 +140,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "flip はプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -157,7 +158,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "upsample_bilinear2d は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -182,7 +183,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "deform_conv2d は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -222,7 +223,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "gru_scan は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -273,7 +274,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "conv2d 直接カーネル（groups>1）は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -348,7 +349,7 @@ const CONV2D_IGEMM_POISON_CASES: readonly {
   },
 ];
 
-Deno.test({
+test({
   name: "conv2d の implicit GEMM は毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -378,7 +379,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "rms_norm は毒値を 1 語も残さない（行カーネルの full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -462,7 +463,7 @@ const GEMM_POISON_CASES: readonly {
   },
 ];
 
-Deno.test({
+test({
   name: "GEMM 3 op は毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -487,7 +488,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "conv_transpose1d は毒値を 1 語も残さない（gather 形の full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -552,7 +553,7 @@ const i8a8PoisonGraph = (
   ],
 });
 
-Deno.test({
+test({
   name: "i8a8 linear の一時バッファ（xq / xs）が毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -624,7 +625,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "attention は 3 dispatch でも出力の全バイトを書く（毒値の残存なし / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -666,7 +667,7 @@ Deno.test({
  * MUST: 適格形（`D % 4 == 0 && N % 4 == 0`）を使う — 非適格だと f32 格納へ縮退して
  * この変種を 1 度も踏まない。
  */
-Deno.test({
+test({
   name: "S の f16 格納変種も毒値を 1 語も残さない（①QK の 2 語書き / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -711,7 +712,7 @@ Deno.test({
  * NOTE: 融合 attention の S は f16 変種では**半分のバイト数**になるためサイズクラスが変わり、
  * 毒値バッファが配り直されるのはノード出力 O だけ、という前提は f32 変種と同じまま。
  */
-Deno.test({
+test({
   name: "f16 計算変種も毒値を 1 語も残さない（タイル書き出しの full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE || !SHADER_F16_AVAILABLE,
   fn: async () => {
@@ -776,7 +777,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "軸 reduce は毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

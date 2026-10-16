@@ -14,6 +14,7 @@
  *    元リポのファイルと見分けが付かない。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import type { AssetProgress } from "@karume/hub";
 import { loadContainerComponents } from "../src/hub/components.ts";
@@ -91,7 +92,7 @@ const prepareSeats = async (
 const fetchedContainers = (paths: readonly string[]): readonly string[] =>
   paths.filter((path) => path !== MANIFEST_PATH);
 
-Deno.test("components: 差した役割だけが別リポから来る（元リポの同じ役割は取らない）", async () => {
+test("components: 差した役割だけが別リポから来る（元リポの同じ役割は取らない）", async () => {
   const rig = await prepareSeats({ sameGraph: true });
 
   const { open } = await loadContainerComponents(
@@ -122,7 +123,7 @@ Deno.test("components: 差した役割だけが別リポから来る（元リポ
   }
 });
 
-Deno.test("components: グラフ記述が違う容器は admission で落ちる（重みは 1 本も取らない）", async () => {
+test("components: グラフ記述が違う容器は admission で落ちる（重みは 1 本も取らない）", async () => {
   const rig = await prepareSeats({ sameGraph: false });
 
   const error = await assertRejects(
@@ -144,7 +145,7 @@ Deno.test("components: グラフ記述が違う容器は admission で落ちる�
   assertEquals(fetchedContainers(rig.mock.paths), []);
 });
 
-Deno.test("components: この系列が持たない役割名は差し替えられる役割つきで落ちる", async () => {
+test("components: この系列が持たない役割名は差し替えられる役割つきで落ちる", async () => {
   const rig = await prepareSeats({ sameGraph: true });
 
   const error = await assertRejects(
@@ -165,7 +166,7 @@ Deno.test("components: この系列が持たない役割名は差し替えられ
   assertEquals(fetchedContainers(rig.mock.paths), []);
 });
 
-Deno.test("components: 継承プロパティは差し替えに使わない（own の役割だけが席に座る）", async () => {
+test("components: 継承プロパティは差し替えに使わない（own の役割だけが席に座る）", async () => {
   // 役割の検査は own の列挙可能キーで行うので、継承値（`Object.create` やプロトタイプ汚染）を
   // 直接添字で読むと、検査を通っていない値が差し替えに使われる。
   const rig = await prepareSeats({ sameGraph: true });
@@ -196,7 +197,7 @@ Deno.test("components: 継承プロパティは差し替えに使わない（own
   }
 });
 
-Deno.test("components: 差し替え先の part が元リポの別部品と同じ path でも進捗は 2 本として数える", async () => {
+test("components: 差し替え先の part が元リポの別部品と同じ path でも進捗は 2 本として数える", async () => {
   // 差し替え先の `voice` を元リポの `front` と同じ stem で書く = 同じ path の part が 2 リポに並ぶ。
   const rig = await prepareSeats({ sameGraph: true, replacementStem: "front/model.f32" });
   const nonEmpty = (parts: readonly { path: string; size: number }[]) =>

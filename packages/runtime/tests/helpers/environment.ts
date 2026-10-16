@@ -14,13 +14,24 @@
  *
  * 実装差: Deno は `description` に GPU 名を入れ `architecture` が空、Chrome は
  * `vendor` / `architecture` に名前を入れ `description` が空。どちらかは必ず埋まるので、
- * 埋まっている側を基底にする。
+ * 埋まっている側を基底にする。Node（Dawn）は `description` にドライバ版が入るので、`device`
+ * （GPU 名）を基底にする（キーに版を混ぜない MUST を守る）。
  */
 
+import { createRequire } from "node:module";
 import { acquireGpu, readAdapterInfo } from "../../src/gpu/device.ts";
 
+/** Version of the `typescript` package the workspace type-checks with (informational, like Deno's). */
+const typescriptVersion = (): string => {
+  const manifest: unknown = createRequire(import.meta.url)("typescript/package.json");
+  return typeof manifest === "object" && manifest !== null && "version" in manifest &&
+      typeof manifest.version === "string"
+    ? manifest.version
+    : "";
+};
+
 /** 参照値を分ける実行系（同じ GPU でもランタイムが違えば数値は動きうる）。 */
-export type EnvironmentRuntime = "deno" | "chrome";
+export type EnvironmentRuntime = "deno" | "chrome" | "node";
 
 /** この実行環境の素性（結果 JSON にそのまま載る）。 */
 export type Environment = {
@@ -57,7 +68,11 @@ const TRADEMARKS = ["(r)", "(tm)", "(c)"] as const;
  * 参照値を「この機の参照値」として突き合わせることになる）。
  */
 export const environmentKey = (runtime: EnvironmentRuntime, info: GPUAdapterInfo): string => {
-  const base = info.description !== "" ? info.description : `${info.vendor}-${info.architecture}`;
+  const base = runtime === "node"
+    ? info.device
+    : info.description !== ""
+    ? info.description
+    : `${info.vendor}-${info.architecture}`;
   let slug = base.toLowerCase();
   for (const mark of TRADEMARKS) slug = slug.replaceAll(mark, "");
   slug = slug.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -83,12 +98,12 @@ export const describeEnvironment = async (): Promise<Environment> => {
   // 無い場合も同じ空値を通す（`{}` は `info` 欠落と同じ形）。
   const info = readAdapterInfo(adapter ?? {});
   return {
-    ...(adapter === null ? {} : { key: environmentKey("deno", info) }),
+    ...(adapter === null ? {} : { key: environmentKey("node", info) }),
     runtime: {
-      name: "deno",
-      version: Deno.version.deno,
-      v8: Deno.version.v8,
-      typescript: Deno.version.typescript,
+      name: "node",
+      version: process.versions.node,
+      v8: process.versions.v8,
+      typescript: typescriptVersion(),
     },
     adapter: {
       vendor: info.vendor,
@@ -96,7 +111,7 @@ export const describeEnvironment = async (): Promise<Environment> => {
       device: info.device,
       description: info.description,
     },
-    os: { platform: Deno.build.os, arch: Deno.build.arch },
+    os: { platform: process.platform, arch: process.arch },
   };
 };
 

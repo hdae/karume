@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { isNotFound } from "@karume/test-support/fs";
 /**
  * GPU 全体の VRAM 使用量・温度・クロックを下げた理由（`clocks_event_reasons.active`）の標本化（診断 — NVIDIA の
  * `nvidia-smi` がある機でだけ）。
@@ -75,29 +77,28 @@ export const monitorNvidiaSmi = (intervalMs = 100): {
   readonly waitForSample: (timeoutMs: number) => Promise<number>;
   readonly stop: () => Promise<NvidiaTimeline>;
 } => {
-  let child: Deno.ChildProcess;
-  try {
-    child = new Deno.Command("nvidia-smi", {
-      args: [`--query-gpu=${QUERY}`, "--format=csv,noheader,nounits", "-lms", String(intervalMs)],
-      stdout: "piped",
-      stderr: "null",
-    }).spawn();
-  } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) {
-      return {
-        enter: () => {},
-        waitForSample: () => Promise.resolve(0),
-        stop: () => Promise.resolve(undefined),
-      };
-    }
-    throw cause;
-  }
   type Accumulated = { peak: number; temperature: number; reasons: bigint; samples: number };
   const empty = (): Accumulated => ({ peak: 0, temperature: 0, reasons: 0n, samples: 0 });
   let phase = "start";
   const phases = new Map<string, Accumulated>([[phase, empty()]]);
   const errorLines: string[] = [];
   let finished = false;
+  const child = spawn(
+    "nvidia-smi",
+    [`--query-gpu=${QUERY}`, "--format=csv,noheader,nounits", "-lms", String(intervalMs)],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  // Node reports a missing binary asynchronously (`error` with ENOENT). Without nvidia-smi the
+  // monitor observes nothing — the same outcome as Deno's synchronous NotFound path.
+  let missing = false;
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("error", (cause) => {
+      if (isNotFound(cause)) missing = true;
+      else errorLines.push(String(cause));
+      resolve();
+    });
+  });
   const record = (line: string): void => {
     const sample = parseNvidiaSample(line);
     if (sample === undefined) {
@@ -115,8 +116,8 @@ export const monitorNvidiaSmi = (intervalMs = 100): {
   const reading = (async () => {
     try {
       let pending = "";
-      for await (const chunk of child.stdout.pipeThrough(new TextDecoderStream())) {
-        pending += chunk;
+      for await (const chunk of child.stdout.setEncoding("utf8")) {
+        pending += String(chunk);
         const lines = pending.split("\n");
         pending = lines.pop() ?? "";
         for (const line of lines) if (line.trim() !== "") record(line);
@@ -141,14 +142,10 @@ export const monitorNvidiaSmi = (intervalMs = 100): {
       return samplesNow();
     },
     stop: async () => {
-      try {
-        child.kill("SIGTERM");
-      } catch (cause) {
-        // 既に終わった子（nvidia-smi が自分で落ちた）は止める必要が無い。それ以外は伝える。
-        if (!(cause instanceof TypeError)) throw cause;
-      }
+      child.kill("SIGTERM"); // false when the child already exited — nothing to stop
       await reading;
-      await child.status;
+      await exited;
+      if (missing) return undefined;
       return {
         phases: new Map(
           [...phases].map(([name, value]) => [name, {

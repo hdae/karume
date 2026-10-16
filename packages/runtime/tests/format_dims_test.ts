@@ -1,3 +1,5 @@
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   DimError,
@@ -76,7 +78,7 @@ const asEvalCase = (raw: unknown): EvalCase => {
 };
 
 const loadFixture = async (): Promise<Fixture> => {
-  const text = await Deno.readTextFile(new URL("./fixtures/dim-grammar.json", import.meta.url));
+  const text = await readTextFile(new URL("./fixtures/dim-grammar.json", import.meta.url));
   const raw: unknown = JSON.parse(text);
   if (!isRecord(raw)) throw new Error("fixture: オブジェクトでない");
   return {
@@ -89,7 +91,7 @@ const loadFixture = async (): Promise<Fixture> => {
   };
 };
 
-Deno.test("dim-grammar valid: 正準表記を分解でき、format との往復が文字列同一", async () => {
+test("dim-grammar valid: 正準表記を分解でき、format との往復が文字列同一", async () => {
   const fixture = await loadFixture();
   for (const testCase of fixture.valid) {
     const expected = { coeff: testCase.coeff, sym: testCase.sym, offset: testCase.offset };
@@ -99,7 +101,7 @@ Deno.test("dim-grammar valid: 正準表記を分解でき、format との往復�
   }
 });
 
-Deno.test("dim-grammar invalid: 非正準・非該当は受理しない", async () => {
+test("dim-grammar invalid: 非正準・非該当は受理しない", async () => {
   const fixture = await loadFixture();
   for (const text of fixture.invalid) {
     assertEquals(tryParseDim(text), undefined, `tryParseDim('${text}')`);
@@ -107,7 +109,7 @@ Deno.test("dim-grammar invalid: 非正準・非該当は受理しない", async 
   }
 });
 
-Deno.test("dim-grammar eval: 束縛表の評価（prototype 汚染ケースを含む）", async () => {
+test("dim-grammar eval: 束縛表の評価（prototype 汚染ケースを含む）", async () => {
   const fixture = await loadFixture();
   for (const testCase of fixture.eval) {
     const expr = parseDim(testCase.expr);
@@ -119,24 +121,24 @@ Deno.test("dim-grammar eval: 束縛表の評価（prototype 汚染ケースを�
   }
 });
 
-Deno.test("evalDim: prototype チェーン越しの値は束縛と見なさない", () => {
+test("evalDim: prototype チェーン越しの値は束縛と見なさない", () => {
   // JSON では表現できないケース（自前プロパティではなく継承）。hasOwn 判定でのみ落ちる。
   const inherited: Record<string, number> = Object.create({ T: 5 });
   assertThrows(() => evalDim(parseDim("T"), inherited), DimError);
   assertEquals(inherited["T"], 5, "継承値自体は読める（=== undefined 判定では素通りする）");
 });
 
-Deno.test("formatDim: 非正準な分解結果は組み立てない", () => {
+test("formatDim: 非正準な分解結果は組み立てない", () => {
   assertThrows(() => formatDim({ coeff: 0, sym: "T", offset: 0 }), DimError);
   assertThrows(() => formatDim({ coeff: 1, sym: "T", offset: -1 }), DimError);
   assertThrows(() => formatDim({ coeff: 1, sym: "2T", offset: 0 }), DimError);
 });
 
-Deno.test("evalDim: 評価結果が安全整数を超えたら落とす", () => {
+test("evalDim: 評価結果が安全整数を超えたら落とす", () => {
   assertThrows(() => evalDim({ coeff: 8, sym: "T", offset: 0 }, { T: 2 ** 52 }), DimError);
 });
 
-Deno.test("solveDim: 適合ケース表の eval を逆向きに回しても同じ束縛へ戻る", async () => {
+test("solveDim: 適合ケース表の eval を逆向きに回しても同じ束縛へ戻る", async () => {
   // `evalDim` の逆関数であることを、文法の正本の表そのもので見る（第 2 の表を作らない）。
   const fixture = await loadFixture();
   for (const { expr: text, bindings, value } of fixture.eval) {
@@ -146,7 +148,7 @@ Deno.test("solveDim: 適合ケース表の eval を逆向きに回しても同�
   }
 });
 
-Deno.test("solveDim: 宣言の形をしていない実寸は解を持たない（丸めない）", () => {
+test("solveDim: 宣言の形をしていない実寸は解を持たない（丸めない）", () => {
   // 母音検出 CRNN の「10ms フレーム数は偶数」がここで落ちる（ADR 0057 決定 2）。
   assertEquals(solveDim(parseDim("2T"), 285), undefined);
   assertEquals(solveDim(parseDim("2T"), 284), 142);

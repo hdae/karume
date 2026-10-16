@@ -10,7 +10,7 @@
  * 発動する（in_w 8,650,802・out_w 34 でも末尾の源座標が in_w に届く）。
  */
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { acquireGpu, prepareContainer } from "../mod.ts";
 import { referenceUpsampleBilinear2d } from "../src/reference/ops.ts";
 import { GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";

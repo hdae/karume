@@ -20,6 +20,7 @@
  * 書き換えない。
  */
 
+import { type TestContext } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type DistributionSource, parseManifest, type SessionSpec } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
@@ -320,7 +321,7 @@ export type WanAbCase = {
  * 検査・後始末は呼び手が持つ（Deno.test 1 本で device 1 つ）。
  */
 export const runWanAbCase = async (
-  t: Deno.TestContext,
+  t: TestContext,
   gpu: GpuContext,
   subject: WanAbSubject,
   { id, frames, band, faults }: WanAbCase,

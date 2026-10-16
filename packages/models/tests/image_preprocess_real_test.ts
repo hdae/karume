@@ -53,6 +53,8 @@
 // **1 件も無ければ明示 SKIP**、**中途半端に欠けていれば FAIL**（欠けを SKIP に丸めると、
 // 採り直しの途中で落ちた資産が黙って通る）。runtime 側 e2e と同じ流儀。
 
+import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { normalizeToNchw, resizeRgb8 } from "../src/image/preprocess.ts";
@@ -135,9 +137,9 @@ const IMAGE_COMMAND = "deno task demo:eval-images --source <Anima 配布形の�
  */
 const exists = (url: URL): boolean => {
   try {
-    return Deno.statSync(url).isFile;
+    return statSync(url).isFile;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
@@ -148,7 +150,7 @@ const goldenCount = (series: string): number =>
 
 const imageCount = REAL_CASES.filter((entry) => exists(new URL(entry.file, CORPUS_DIR))).length;
 
-const readBytes = (url: URL): Promise<Uint8Array<ArrayBuffer>> => Deno.readFile(url);
+const readBytes = (url: URL): Promise<Uint8Array<ArrayBuffer>> => readFile(url);
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
@@ -169,7 +171,7 @@ for (const series of SERIES) {
     );
   }
 
-  Deno.test({
+  test({
     name: `実画像前処理 資産: ${series} — golden と PNG が揃っている`,
     // 1 件も無い環境は「生成していない」なので SKIP。1 件でもあるなら欠けは FAIL。
     ignore: !anyAsset,
@@ -188,7 +190,7 @@ for (const series of SERIES) {
   });
 
   for (const entry of REAL_CASES) {
-    Deno.test({
+    test({
       name: `実画像前処理パリティ: ${series} / ${entry.name}（TS の f64 経路 対 torchvision）`,
       ignore: !runnable,
       fn: async () => {

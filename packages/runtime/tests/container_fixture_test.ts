@@ -10,8 +10,9 @@
  * `cd tools/exporter && KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture`
  */
 
+import { readFile } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import {
   parseGraphDescriptor,
   parseModelDescriptor,
@@ -36,13 +37,13 @@ const splitFixture = (index: number): URL =>
   );
 
 const fixtureBytes = async (): Promise<Uint8Array<ArrayBuffer>> =>
-  await Deno.readFile(FIXTURE) as Uint8Array<ArrayBuffer>;
+  await readFile(FIXTURE) as Uint8Array<ArrayBuffer>;
 
 const splitParts = async (): Promise<Uint8Array<ArrayBuffer>[]> =>
   await Promise.all(
     Array.from(
       { length: SPLIT_FIXTURE_PARTS },
-      async (_, i) => await Deno.readFile(splitFixture(i)) as Uint8Array<ArrayBuffer>,
+      async (_, i) => await readFile(splitFixture(i)) as Uint8Array<ArrayBuffer>,
     ),
   );
 

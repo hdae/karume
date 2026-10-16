@@ -4,13 +4,14 @@
 // generate を待たずにここで縛る。決着の順を握るために、操作の中身は**手で決着させる
 // promise**（`Promise.withResolvers`）にしてある — タイマー待ちに頼ると順序が緩む。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { createOperationChain } from "../src/concurrency/serial.ts";
 
 /** 積まれた操作が進めるところまで進むのを待つ（microtask を全て流すマクロタスク 1 拍）。 */
 const settleMicrotasks = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-Deno.test("createOperationChain: 並行に積んでも 1 本ずつ走る（後発は先発の決着まで開始しない）", async () => {
+test("createOperationChain: 並行に積んでも 1 本ずつ走る（後発は先発の決着まで開始しない）", async () => {
   const chain = createOperationChain();
   const events: string[] = [];
   const first = Promise.withResolvers<void>();
@@ -42,7 +43,7 @@ Deno.test("createOperationChain: 並行に積んでも 1 本ずつ走る（後�
   assertEquals(events, ["a:start", "a:end", "b:start", "b:end"]);
 });
 
-Deno.test("createOperationChain: 失敗は呼び出し側へそのまま届き、鎖は次へ解放される", async () => {
+test("createOperationChain: 失敗は呼び出し側へそのまま届き、鎖は次へ解放される", async () => {
   const chain = createOperationChain();
   const events: string[] = [];
 
@@ -61,7 +62,7 @@ Deno.test("createOperationChain: 失敗は呼び出し側へそのまま届き�
   await rejected;
 });
 
-Deno.test("createOperationChain: 後から積んだ操作は先行が全て決着してから走る（dispose が待つ形）", async () => {
+test("createOperationChain: 後から積んだ操作は先行が全て決着してから走る（dispose が待つ形）", async () => {
   const chain = createOperationChain();
   const done: string[] = [];
   const gate = Promise.withResolvers<void>();

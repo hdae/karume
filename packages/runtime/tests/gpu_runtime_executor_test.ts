@@ -3,6 +3,7 @@
 // "__proto__" の 2 本で、krm 側の拒否とメモリ経路側の実行が同じ 2 つのフィクスチャを共有する
 // ため片割れ（krm 側）だけがここに GPU 無しで同居する。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
@@ -34,7 +35,7 @@ const expectedChain = (x: Tensor): ArrayLike<number> => {
   return applyReferenceOp("relu", [g]).data;
 };
 
-Deno.test({
+test({
   name: "initializer を使う鎖グラフが CPU 参照と一致し、出力はグラフ出力だけ返る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -97,7 +98,7 @@ const protoOutputGraph = (): DeclarationJson => ({
 // 「受理されない」であって「名前が届く」ではない。入力名 / シンボル名の側は JSON の値にしか
 // 現れないため krm でも受理され、名前が届くかどうかはメモリ経路と同じ経路で決まる。
 // GPU は要らないので ignore の外に置く。
-Deno.test("'__proto__' を値名に持つ宣言は krm が黙って消さずに拒否する", async () => {
+test("'__proto__' を値名に持つ宣言は krm が黙って消さずに拒否する", async () => {
   const error = await assertRejects(
     () => openGraphModel(protoOutputGraph()),
     ContainerFormatError,
@@ -105,7 +106,7 @@ Deno.test("'__proto__' を値名に持つ宣言は krm が黙って消さずに�
   assertStringIncludes(error.message, "__proto__");
 });
 
-Deno.test({
+test({
   name: "'__proto__' という入力名 / シンボル名 / 出力名がメモリ内容器で黙って消えない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -193,7 +194,7 @@ for (
     ["expand", [3, 4], 2],
   ] as const
 ) {
-  Deno.test({
+  test({
     name: `${aliasOp} の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {
@@ -279,7 +280,7 @@ const topkLifetimeGraph = (pinIndices: boolean): DeclarationJson => ({
   ],
 });
 
-Deno.test({
+test({
   name:
     "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -359,7 +360,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "同一 Session への並行 run は直列化され、全件が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -388,7 +389,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実行中の run がある間の dispose は run の完了後に重みを破棄する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -411,7 +412,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "submitPolicy でチャンクを 1 に絞ると dispatch ごとに submit される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -443,7 +444,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "診断がパイプライン数と直近 run の中間バッファ再利用を報告する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -475,7 +476,7 @@ Deno.test({
 const jsCallerOptions = (options: Readonly<Record<string, string>>): SessionOptions =>
   options as unknown as SessionOptions;
 
-Deno.test({
+test({
   name: "実行形ノブの union 外の綴りは Session 構築で全件列挙して落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -513,7 +514,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "GEMV並列加算は不正な綴りと未実装の計算精度の組を構築時に拒否する",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -541,7 +542,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "planBackingBudgetBytes は非負の安全な整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -574,7 +575,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "linearGemvRowsThreadTarget は 1 以上の安全な整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -607,7 +608,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -668,7 +669,7 @@ const deadValueGraph = (): DeclarationJson => ({
   ],
 });
 
-Deno.test({
+test({
   name: "消費者ゼロの中間出力もノード境界でプールへ戻る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -696,7 +697,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "capability 不足（非対応 op / 非対応 格納 dtype）は Session 構築で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -741,7 +742,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "契約外のグラフ（非空 attrs / op が受理しない dtype）は Session 構築で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -805,7 +806,7 @@ const maskGraph = (): DeclarationJson => ({
   ],
 });
 
-Deno.test({
+test({
   name: "i32 入力 → bool 中間 → 非 f32 出力の鎖が CPU 参照と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -842,7 +843,7 @@ Deno.test({
 
 // MUST: 要素は全型 4 バイトなので、TypedArray の取り違えは writeBuffer を素通りして
 // ビット列の読み替えになる（例外は出ない）。宣言 dtype との突合が唯一の防波堤。
-Deno.test({
+test({
   name: "宣言 dtype と食い違う入力テンソルは転送前に落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -879,7 +880,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "run の入力不整合と dispose 後の実行は fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -912,7 +913,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "宣言 shape と計算 shape の食い違いは 1 dispatch も出さずに落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -933,7 +934,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "導出相で落ちた run は GPU コマンドを 1 件も積まない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -989,7 +990,7 @@ Deno.test({
 // 値の総当たり（5 ノブ × 6 値）は tests/runtime_execution_knobs_test.ts が GPU 非依存で回す。
 // ここに残すのは「検査が実構築の経路にも繋がっている」1 本だけ（`createSession` から
 // `assertExecutionKnobs` へ届いていることの証明で、受理集合そのものの検査ではない）。
-Deno.test({
+test({
   name: "実行形設定の変換可能なオブジェクトは実構築でも文字列として受理されない",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

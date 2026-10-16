@@ -9,6 +9,7 @@
 // 「待ちの間に別 Session の本体が走り、書かれる前の常駐テンソルを読む」形だけで、例外も警告も出ない。
 // enqueue に印を置く形は、Deno では batch の生成ループを遅くする（印が GPU の完了までホストを止める）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type BatchScope, type GpuContext } from "../src/gpu/device.ts";
 import {
@@ -108,7 +109,7 @@ const session = async (
 ): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(json), "model", { submitPolicy });
 
-Deno.test({
+test({
   name:
     "長い run は値を変えず、ステップの間で前の印から submit 64 回ごとに完了印を 1 本置く（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -143,7 +144,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "enqueue は待たない — 非 await で 2 周続けた別 Session の enqueue が常駐テンソル越しの順序を追い越さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -234,7 +235,7 @@ const watch = <T>(
   return { settled: () => settled, done };
 };
 
-Deno.test({
+test({
   name:
     "run は上限を超えたらステップの間で完了印を待ち、それまで決着せず区間ロックも離さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -276,7 +277,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "enqueue は完了印を置かず待たない — 上限を超える長さでも onSubmittedWorkDone を呼ばずに決着する（実 GPU）",
   ignore: !GPU_AVAILABLE,

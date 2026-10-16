@@ -15,6 +15,7 @@
 //
 // 実 GPU の通しは e2e（系列から組む helper — ADR 0121 段 6 のコミット 6）。
 
+import { readFile } from "@karume/test-support/fs";
 import {
   assert,
   assertEquals,
@@ -23,7 +24,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { type DistributionSource, localDirectory, type Manifest, parseManifest } from "@karume/hub";
 import type { EnqueueOptions, RunInput, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -128,7 +129,7 @@ const embedsAsset = (width: number): Uint8Array<ArrayBuffer> => {
 // ---------------------------------------------------------------------------------------------
 
 /** RoPE の素表（`transformer` の容器の資産 `rope_base` — 幅 22 / 21 / 21 で head_dim 128）。 */
-const ROPE_BASE = await Deno.readFile(
+const ROPE_BASE = await readFile(
   new URL("./fixtures/wan-dit/rope_base.safetensors", import.meta.url),
 );
 

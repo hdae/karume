@@ -7,6 +7,7 @@
 // （S・行統計・i8a8 の量子化の一時）は見積りが実行と同じ純関数で数える（ADR 0124 決定 7）。それ以外の中間ピークは**近似**なので突合しない（他の融合が中間を消す — estimator
 // の unaccounted 欄が認めている差）。アダプタ無しは明示 SKIP。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import type { PreparedModel, SessionOptions } from "../src/runtime/executor.ts";
@@ -115,14 +116,14 @@ const assertPlanBackingMatchesEstimate = async (
   }
 };
 
-Deno.test({
+test({
   name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（full 変種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 列容量 = C = 16（S は容量に比例する側）。
   fn: () => assertPlanBackingMatchesEstimate({ capacity: 16 }),
 });
 
-Deno.test({
+test({
   name: "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（sliding 変種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 列容量 = W−1+M = 8−1+4 = 11（容量 C とは別の式 — full と同じ数にならない形を選ぶ）。
@@ -134,7 +135,7 @@ Deno.test({
  * 64·16·4 = 4096B なのに対し state スロットは 2·16·8·4 = 1024B なので、上限 8192B に絞ると
  * 「スロットは束縛できるが S 4 行は束縛できない」形になり、行ブロックが必ず割れる。
  */
-Deno.test({
+test({
   name: "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（full 変種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 1 枚 2 行の 2 枚（8192 ÷ 4096 = 2 行／枚・M=4）。
@@ -148,7 +149,7 @@ Deno.test({
     }),
 });
 
-Deno.test({
+test({
   name: "states 形 attention の中間総量が端数ブロックでも slot 表と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   // M=5 を 2 行／枚で割ると 3 枚（2 行 + 2 行 + 1 行）— サイズクラスが 2 種同時に生きる唯一の形。
@@ -163,7 +164,7 @@ Deno.test({
     }),
 });
 
-Deno.test({
+test({
   name: "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（sliding 変種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 列容量 = W−1+M = 8−1+4 = 11 → 1 行 64·11·4 = 2816B。上限 5632B で 2 行／枚の 2 枚。
@@ -243,21 +244,21 @@ const assertRowBlockAttentionMatchesEstimate = async (
   }
 };
 
-Deno.test({
+test({
   name: "行ブロック attention の中間総量が 1 枚の形で slot 表と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 絞らない（device の上限は全幅 32KiB を優に超える）— 分割が起きなくても窓は融合後の形で数える。
   fn: () => assertRowBlockAttentionMatchesEstimate({ expectedBlocks: 1 }),
 });
 
-Deno.test({
+test({
   name: "行ブロック attention の中間総量が複数枚でも slot 表と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 8192 ÷ 512 = 16 行／枚 → M = 64 は 16 行 × 4 枚。
   fn: () => assertRowBlockAttentionMatchesEstimate({ limitCap: 8192, expectedBlocks: 4 }),
 });
 
-Deno.test({
+test({
   name: "行ブロック attention の中間総量が不揃いの枚数でも slot 表と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   // 6144 ÷ 512 = 12 行／枚 → ceil(64 / 12) = 6 枚を等分すると 11 行 × 4 枚 + 10 行 × 2 枚。
@@ -336,13 +337,13 @@ const assertFusedAttentionMatchesEstimate = async (
   }
 };
 
-Deno.test({
+test({
   name: "融合 attention op の中間総量が slot 表と厳密一致する（f32・予算なし・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: () => assertFusedAttentionMatchesEstimate({ options: {}, expectedBlocks: 1 }),
 });
 
-Deno.test({
+test({
   name:
     "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -355,7 +356,7 @@ Deno.test({
     }),
 });
 
-Deno.test({
+test({
   name:
     "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -424,7 +425,7 @@ const gpuWeightModel = (): PreparedModel => {
   ]);
 };
 
-Deno.test({
+test({
   name: "estimator の重み・state が実測診断と厳密一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

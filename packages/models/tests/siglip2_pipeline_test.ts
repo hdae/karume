@@ -26,6 +26,8 @@
 //    届いているか」だけ。非正方のケースを使うのは、`imageWidth` / `imageHeight` の取り違えが
 //    正方形では**原理的に検出できない**ため。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseSiglip2PipelineConfig } from "../src/siglip2/config.ts";
@@ -85,7 +87,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }, { model: "nope" }),
@@ -94,7 +96,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipeline の契約名が siglip2 でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が siglip2 でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }),
@@ -103,7 +105,7 @@ Deno.test("fromAssets: pipeline の契約名が siglip2 でない manifest を�
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/2" }));
   await assertRejects(
@@ -113,7 +115,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Siglip2Pipeline.fromAssets({ manifest, assets: VISION }, { quant: "nope" }),
@@ -122,7 +124,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
   // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] }));
   await assertRejects(
@@ -132,7 +134,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ちる", async () => {
   // 欠けた欄が既定で埋まると、ホストだけが別の数を持ったまま前処理が通る（config.ts の MUST）。
   const { hiddenDim: _dropped, ...missing } = PIPELINE_CONFIG;
   const manifest = parseManifest(withConfig(missing));
@@ -143,7 +145,7 @@ Deno.test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落
   );
 });
 
-Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
+test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
   // この配布形の上流 resample は 2（PIL の BILINEAR）。前処理層は bicubic も実装しているが、
   // 受理集合を広げるのは別の判断で、bicubic を黙って bilinear で通すと resize の値が最大
   // 47/255 ずれたまま実行される（config.ts の MUST）。
@@ -155,7 +157,7 @@ Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理
   );
 });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 上の 7 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -168,7 +170,7 @@ Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落
 
 // ---- pipelineConfig のスキーマ（門を直接叩く）--------------------------------
 
-Deno.test("parseSiglip2PipelineConfig: 実物の 6 欄をそのまま読む", () => {
+test("parseSiglip2PipelineConfig: 実物の 6 欄をそのまま読む", () => {
   const config = parseSiglip2PipelineConfig(PIPELINE_CONFIG);
   assertEquals(config.imageWidth, 224);
   assertEquals(config.imageHeight, 224);
@@ -178,7 +180,7 @@ Deno.test("parseSiglip2PipelineConfig: 実物の 6 欄をそのまま読む", ()
   assertEquals(config.interpolation, "bilinear");
 });
 
-Deno.test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除算は例外を出さない）", () => {
+test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除算は例外を出さない）", () => {
   // `(x − mean·255) / (std·255)` の除数なので、0 は ±Infinity の pixel_values を静かに作る。
   assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [0.5, 0, 0.5] }),
@@ -187,7 +189,7 @@ Deno.test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除�
   );
 });
 
-Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
+test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
   // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
   const error = assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
@@ -197,7 +199,7 @@ Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる�
   assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
 
-Deno.test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ落ちる", () => {
+test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ落ちる", () => {
   assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageMean: [0.5, 0.5] }),
     Error,
@@ -218,7 +220,7 @@ const visionGraph = (
     values: { pooler_output: patch.outputShape ?? [1, 768] },
   });
 
-Deno.test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
+test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
   // so400m（384²）の資産を base（224²）の席へ置いた形。前処理は宣言の寸法へ resize するので
   // ホスト側は最後まで通り、落ちるのは Session の shape 検査 = どちらが正しいか読めない。
   assertStaticDim(visionGraph(), "pixel_values", 2, 224, "imageHeight");
@@ -237,7 +239,7 @@ Deno.test("assertStaticDim: 宣言どおりのグラフは通り、解像度違�
   assert(error.message.includes("pipelineConfig は 224"), error.message);
 });
 
-Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   assertThrows(
     () => assertStaticDim(visionGraph(), "pixel", 2, 224, "imageHeight"),
     Error,
@@ -245,7 +247,7 @@ Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () =
   );
 });
 
-Deno.test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落ちる", () => {
+test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落ちる", () => {
   // hiddenDim は前処理にも実行にも使われないので、ずれても埋め込みは何事もなく出る。
   assertOutputDim(visionGraph(), 1, 768, "hiddenDim");
   assertThrows(
@@ -255,7 +257,7 @@ Deno.test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落�
   );
 });
 
-Deno.test("assertOutputDim: 出力名の宣言が values に無ければ落とす", () => {
+test("assertOutputDim: 出力名の宣言が values に無ければ落とす", () => {
   const model = stubModel({
     inputs: [{ name: "pixel_values", shape: [1, 3, 224, 224] }],
     outputs: ["pooler_output"],
@@ -289,7 +291,7 @@ type Fixture = {
 };
 
 const FIXTURE_PATH = new URL("./fixtures/image-preprocess/parity.json", import.meta.url);
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 /** 縦は 4 倍縮小・横は 3 倍拡大の非正方ケース（24×5 → 6×15）。 */
 const MIXED_AXIS = "mixed-axis";
@@ -320,7 +322,7 @@ const configFor = (entry: ParityCase, swapped = false) =>
     interpolation: "bilinear",
   });
 
-Deno.test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
+test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
   const entry = parityCase(MIXED_AXIS);
   const got = preprocessPixelValues(configFor(entry), imageOf(entry));
   assertEquals(got.length, entry.pixelValues.length);
@@ -329,7 +331,7 @@ Deno.test("前処理の結線: 宣言の寸法・mean・std で Python 正本と
   }
 });
 
-Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
+test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
   // 上のケースが恒真でないことの担保 — 非正方の宣言を転置すると要素数から変わる
   // （`resizeRgb8` は `(width, height)` の順で受ける）。
   const entry = parityCase(MIXED_AXIS);

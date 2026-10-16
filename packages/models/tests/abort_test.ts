@@ -15,6 +15,7 @@
 // timer throttling を受け入れている — 理由の正本は `src/concurrency/abort.ts` の NOTE。ブラウザ
 // 実測の話なのでここでは縛らない。ここが縛るのは「マクロタスクへ譲っている」こと。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { settleAbort } from "../src/concurrency/abort.ts";
 
@@ -25,7 +26,7 @@ const settleAbortViaMicrotask = async (signal: AbortSignal | undefined): Promise
   signal.throwIfAborted();
 };
 
-Deno.test("settleAbort: signal 未指定なら 1 度も譲らない（マクロタスクを挟まない）", async () => {
+test("settleAbort: signal 未指定なら 1 度も譲らない（マクロタスクを挟まない）", async () => {
   const order: string[] = [];
   // 対照 = 先に仕掛けたタスク 1 本。`settleAbort` が譲っていればこちらが先に決着する
   // （マイクロタスクだけで済む決着は、既に待ち行列にあるタスクより必ず先に来る）。
@@ -36,7 +37,7 @@ Deno.test("settleAbort: signal 未指定なら 1 度も譲らない（マクロ�
   assertEquals(order, ["settleAbort", "task"]);
 });
 
-Deno.test("settleAbort: signal 付きならマクロタスクへ譲る（マイクロタスクより後に決着する）", async () => {
+test("settleAbort: signal 付きならマクロタスクへ譲る（マイクロタスクより後に決着する）", async () => {
   const order: string[] = [];
   const controller = new AbortController();
   const settled = settleAbort(controller.signal).then(() => order.push("settleAbort"));
@@ -48,7 +49,7 @@ Deno.test("settleAbort: signal 付きならマクロタスクへ譲る（マイ�
   assertEquals(order, ["microtask", "settleAbort"]);
 });
 
-Deno.test("settleAbort: 既に中断済みなら reason そのものを投げる", async () => {
+test("settleAbort: 既に中断済みなら reason そのものを投げる", async () => {
   const reason = new Error("ロードを打ち切った");
   const caught = await assertRejects(
     () => settleAbort(AbortSignal.abort(reason)),
@@ -58,7 +59,7 @@ Deno.test("settleAbort: 既に中断済みなら reason そのものを投げる
   assertStrictEquals(caught, reason);
 });
 
-Deno.test("settleAbort: 譲っている間に届いた abort() を観測する", async () => {
+test("settleAbort: 譲っている間に届いた abort() を観測する", async () => {
   const reason = new Error("マイクロタスク経由の中断");
   const controller = new AbortController();
   const settled = settleAbort(controller.signal);
@@ -74,7 +75,7 @@ Deno.test("settleAbort: 譲っている間に届いた abort() を観測する",
   await missed;
 });
 
-Deno.test("settleAbort: 中断されなければ解決する", async () => {
+test("settleAbort: 中断されなければ解決する", async () => {
   const controller = new AbortController();
   await settleAbort(controller.signal);
   assertEquals(controller.signal.aborted, false);

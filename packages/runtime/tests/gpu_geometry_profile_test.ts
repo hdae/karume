@@ -26,8 +26,9 @@
 //    コンパイルした WGSL で見る。
 //    コールバック形（ADR 0117 決定 6）で返した表も同じ 3 点で使われ、`undefined` は自動選択になる。
 
+import { platformObject } from "@karume/test-support/webgpu";
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { acquireGpu, GpuContext } from "../src/gpu/device.ts";
 import {
   DEFAULT_GEOMETRY_PROFILE,
@@ -308,7 +309,7 @@ const contextAs = (
 ): GpuContext =>
   new GpuContext(
     gpu.device,
-    {
+    platformObject<GPUAdapterInfo>({
       vendor,
       architecture,
       device: gpu.adapterInfo.device,
@@ -316,7 +317,7 @@ const contextAs = (
       subgroupMinSize: gpu.adapterInfo.subgroupMinSize,
       subgroupMaxSize: gpu.adapterInfo.subgroupMaxSize,
       isFallbackAdapter: gpu.adapterInfo.isFallbackAdapter,
-    },
+    }),
     gpu.limits,
     gpu.wgslLanguageFeatures,
     undefined,

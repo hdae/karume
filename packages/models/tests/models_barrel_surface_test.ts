@@ -9,8 +9,9 @@
 // NOTE: 型 export（`GreedySpec`）は実行時に観測できないので、ここで見るのは値 export だけ。
 // 型だけを戻した場合は「型はあるのに実装が無い」形になり、消費側の `deno check` が落ちる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
-import config from "../deno.json" with { type: "json" };
+import config from "../package.json" with { type: "json" };
 import * as models from "../mod.ts";
 import type { Gemma4FromPretrainedOptions as BarrelFromPretrained } from "../mod.ts";
 import type { ComponentSource } from "../mod.ts";
@@ -23,7 +24,7 @@ import type { Gemma4FromPretrainedOptions as SubpathFromPretrained } from "../ge
 // 突き合わせる束縛をここに置く（片方の 1 行が消えれば test 段が赤）。値の assert は
 // `noUnusedLocals` に束縛を「読まれない局所」と見なさせないためで、門の実体は型注釈と
 // `satisfies` の側。
-Deno.test("barrel: 部品差し替え席の型面は barrel とサブパスで同じ型", () => {
+test("barrel: 部品差し替え席の型面は barrel とサブパスで同じ型", () => {
   const source: ComponentSource = { source: "owner/name", quant: "i4" };
   const options: BarrelFromPretrained = {
     components: { model: source },
@@ -31,7 +32,7 @@ Deno.test("barrel: 部品差し替え席の型面は barrel とサブパスで�
   assertEquals(Object.keys(options.components ?? {}), ["model"]);
 });
 
-Deno.test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の格下げ）", () => {
+test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の格下げ）", () => {
   const surface = Object.keys(models);
   // 陽性対照 — この門が「空の名前空間を見て緑になっている」形でないことを先に確かめる。
   assert(surface.includes("encodePng"), `barrel の import が壊れている（${surface.length} 件）`);
@@ -42,7 +43,7 @@ Deno.test("barrel: 生成ループは公開面に無い（ADR 0083 決定 9 の�
   );
 });
 
-Deno.test("barrel: 内部ヘルパとしての generateGreedy は残っている（消えたのは公開面だけ）", async () => {
+test("barrel: 内部ヘルパとしての generateGreedy は残っている（消えたのは公開面だけ）", async () => {
   const greedy = await import("../src/generation/greedy.ts");
   assertEquals(typeof greedy.generateGreedy, "function");
   assertEquals(typeof greedy.planPrefillChunks, "function");
@@ -108,7 +109,7 @@ const INTERNAL_VALUES = [
   "StreamingDetokenizer",
 ];
 
-Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は出さない）", async () => {
+test("barrel: gemma の公開面（薄い面 — 組み立ての入口は出さない）", async () => {
   const gemma = await import("../gemma.ts");
   const barrel = Object.keys(models);
   const subpath = Object.keys(gemma);
@@ -134,7 +135,7 @@ Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は�
 // 表の**中身**（キーの規則・repo 名・40 桁 hex）を見るのは `sources_test.ts` で、ここで縛るのは
 // 2 点:
 //
-// ① **subpath ⊆ barrel を 11 面すべてで**見る（`deno.json` の `exports` は `.` + 11 サブパス —
+// ① **subpath ⊆ barrel を 11 面すべてで**見る（`package.json` の `exports` は `.` + 11 サブパス —
 //    走査する面の集合は `exports` のキーと突き合わせる）。
 //    `./gemma` 1 面だけに掛けていた頃は、他の面のどの値 export を `mod.ts` から落としても
 //    全テストが緑のままだった。
@@ -145,7 +146,7 @@ Deno.test("barrel: gemma の公開面（薄い面 — 組み立ての入口は�
 // 表を持たない家族（`./vowel-detector` など未配布の家族）は 1 本も出さないのが正しい状態なので、
 // 陽性対照（表が 1 本以上ある）は面ごとではなく**全体で 1 回**置く。
 
-/** `deno.json` の `exports` が持つ 11 サブパス（`.` = barrel を除く全部）。 */
+/** `package.json` の `exports` が持つ 11 サブパス（`.` = barrel を除く全部）。 */
 const subpathSurfaces = async (): Promise<readonly { name: string; surface: string[] }[]> => [
   { name: "./anima", surface: Object.keys(await import("../anima.ts")) },
   { name: "./birefnet", surface: Object.keys(await import("../birefnet.ts")) },
@@ -160,22 +161,22 @@ const subpathSurfaces = async (): Promise<readonly { name: string; surface: stri
   { name: "./wan", surface: Object.keys(await import("../wan.ts")) },
 ];
 
-/** `deno.json` の `exports` から barrel（`.`）を除いたサブパス名（昇順）。 */
+/** `package.json` の `exports` から barrel（`.`）を除いたサブパス名（昇順）。 */
 const exportedSubpaths = (exports: Readonly<Record<string, string>>): string[] =>
   Object.keys(exports).filter((name) => name !== ".").toSorted();
 
-Deno.test("barrel: 走査するサブパスは deno.json の exports のサブパスちょうど", async () => {
+test("barrel: 走査するサブパスは package.json の exports のサブパスちょうど", async () => {
   const scanned = (await subpathSurfaces()).map(({ name }) => name).toSorted();
   // 陽性対照 — exports に面が増えれば比較は割れる（hardcoded 同士の恒真な比較にしない）。
   assertNotEquals(exportedSubpaths({ ...config.exports, "./dummy": "./dummy.ts" }), scanned);
   assertEquals(
     exportedSubpaths(config.exports),
     scanned,
-    "deno.json の exports と走査するサブパス（subpathSurfaces）が食い違う — 面が増えたら走査も増やす",
+    "package.json の exports と走査するサブパス（subpathSurfaces）が食い違う — 面が増えたら走査も増やす",
   );
 });
 
-Deno.test("barrel: 11 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
+test("barrel: 11 サブパスの値 export は全部 barrel にも載る（両建ての食い違い）", async () => {
   const barrel = Object.keys(models);
   const subpaths = await subpathSurfaces();
   // 陽性対照 — 空の名前空間を並べて緑になる形にしない。
@@ -190,7 +191,7 @@ Deno.test("barrel: 11 サブパスの値 export は全部 barrel にも載る（
   }
 });
 
-Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から出る", async () => {
+test("barrel: 取得元対応表はサブパスと barrel の両方から出る", async () => {
   const barrel = Object.keys(models);
   const subpaths = await subpathSurfaces();
   const tables = subpaths.flatMap(({ surface }) =>
@@ -226,7 +227,7 @@ Deno.test("barrel: 取得元対応表はサブパスと barrel の両方から�
   }
 });
 
-Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み込み漏れ・余りの検出）", async () => {
+test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み込み漏れ・余りの検出）", async () => {
   const subpaths = await subpathSurfaces();
   // 家族表そのものを名前空間から引き、キーの和集合を作る（`src/sources.ts` のスプレッドは
   // 実行時に列挙できないので、突き合わせ相手はサブパスの走査結果で組む）。
@@ -264,7 +265,7 @@ Deno.test("barrel: KARUME_SOURCES は家族表の和集合ちょうど（畳み�
   assertEquals(subpaths.length, namespaces.length);
 });
 
-Deno.test("gemma4-qat: 別ファミリの入口を両建てし、内部構築は公開しない", async () => {
+test("gemma4-qat: 別ファミリの入口を両建てし、内部構築は公開しない", async () => {
   const qat = await import("../gemma4-qat.ts");
   for (const name of ["Gemma4QatPipeline", "gemma4QatRopeInputs"]) {
     assert(Object.hasOwn(qat, name));

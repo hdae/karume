@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";
 import { createSessionFromContainer } from "../src/runtime/executor.ts";

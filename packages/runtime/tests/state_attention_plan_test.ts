@@ -8,6 +8,7 @@
 // 期待値は**手計算した定数**で置く — 実装と同じ式で組み直すと恒真化して、算式がずれたときに
 // 1 件も落ちない。実行計画との突合（実 GPU）は estimate_test.ts の側にある。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
@@ -15,7 +16,7 @@ import { planStateAttention } from "../src/runtime/state-attention-plan.ts";
 /** 上限が効かない大きさ（行ブロックが常に 1 枚になる）。 */
 const WIDE_LIMIT = 1 << 20;
 
-Deno.test("full 変種の列容量はスロット容量 C（窓を渡さない形）", () => {
+test("full 変種の列容量はスロット容量 C（窓を渡さない形）", () => {
   // B·H = 8・M = 4・C = 16 → S = 8×4×16×4 = 2048 / 行統計 = 8×4×2×4 = 256
   const plan = planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, WIDE_LIMIT);
   assertEquals(plan.colCap, 16);
@@ -27,7 +28,7 @@ Deno.test("full 変種の列容量はスロット容量 C（窓を渡さない�
   );
 });
 
-Deno.test("sliding 変種の列容量は W−1+M で、C を上げても動かない", () => {
+test("sliding 変種の列容量は W−1+M で、C を上げても動かない", () => {
   const at = (capacity: number) =>
     planStateAttention({ batchHeads: 8, chunkRows: 4, capacity, window: 6 }, WIDE_LIMIT);
   // 列容量 = 6−1+4 = 9 → S = 8×4×9×4 = 1152（行統計は列容量に依らない）
@@ -36,7 +37,7 @@ Deno.test("sliding 変種の列容量は W−1+M で、C を上げても動か�
   assertEquals(at(64), at(16));
 });
 
-Deno.test("行ブロックは chunk 行を漏らさず重ねずに覆い、1 枚が上限に収まる", () => {
+test("行ブロックは chunk 行を漏らさず重ねずに覆い、1 枚が上限に収まる", () => {
   // 1 行 = 8×16×4 = 512B。上限 1,536B には 3 行入るが、4 行は 2 枚へ**等分**するので 2 行 + 2 行。
   const plan = planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, 1536);
   assertEquals(plan.blocks, [
@@ -49,7 +50,7 @@ Deno.test("行ブロックは chunk 行を漏らさず重ねずに覆い、1 枚
   for (const block of plan.blocks) assert(block.scoreBytes <= 1536);
 });
 
-Deno.test("端数は先頭のブロックへ寄り、1 行狭いブロックが混ざる", () => {
+test("端数は先頭のブロックへ寄り、1 行狭いブロックが混ざる", () => {
   // M = 5・1 行 512B・上限 1,024B → 1 枚 2 行では足りず 3 枚（2 + 2 + 1 行）。
   const plan = planStateAttention({ batchHeads: 8, chunkRows: 5, capacity: 16 }, 1024);
   assertEquals(plan.blocks, [
@@ -59,7 +60,7 @@ Deno.test("端数は先頭のブロックへ寄り、1 行狭いブロックが�
   ]);
 });
 
-Deno.test("枚数の明示（forced）は上限に余裕があっても割る", () => {
+test("枚数の明示（forced）は上限に余裕があっても割る", () => {
   const plan = planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, WIDE_LIMIT, 4);
   assertEquals(plan.blocks.length, 4);
   assertEquals(plan.blocks.map((block) => block.offset), [0, 1, 2, 3]);
@@ -71,7 +72,7 @@ Deno.test("枚数の明示（forced）は上限に余裕があっても割る", 
   );
 });
 
-Deno.test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
+test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
   assertThrows(
     // 1 行 = 8×16×4 = 512B > 256B
     () => planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, 256),
@@ -80,7 +81,7 @@ Deno.test("1 行でも上限に入らない形は fail loudly（行ブロック�
   );
 });
 
-Deno.test("収まらない枚数の明示は fail loudly（上限の検査を forced が迂回しない）", () => {
+test("収まらない枚数の明示は fail loudly（上限の検査を forced が迂回しない）", () => {
   assertThrows(
     // 4 行を 2 枚 = 1 枚 2 行 = 1,024B が上限 512B に入らない。
     () => planStateAttention({ batchHeads: 8, chunkRows: 4, capacity: 16 }, 512, 2),
@@ -89,7 +90,7 @@ Deno.test("収まらない枚数の明示は fail loudly（上限の検査を fo
   );
 });
 
-Deno.test("行統計/PV融合は中間statsだけを省き、列と行ブロックは維持する", () => {
+test("行統計/PV融合は中間statsだけを省き、列と行ブロックは維持する", () => {
   const extent = { batchHeads: 8, chunkRows: 4, capacity: 16 };
   const plain = planStateAttention(extent, 1536);
   const fused = planStateAttention({ ...extent, fuseStatsPv: true }, 1536);
@@ -107,7 +108,7 @@ Deno.test("行統計/PV融合は中間statsだけを省き、列と行ブロッ�
   );
 });
 
-Deno.test("列容量が 1 の形は行統計も上限に収まる枚数へ割る", () => {
+test("列容量が 1 の形は行統計も上限に収まる枚数へ割る", () => {
   // B·H = 1・M = 8・C = 1 → 1 行のスコア 4B に対し行統計は 2 語 = 8B。上限 16B でスコアだけを
   // 見ると 4 行 × 2 枚になり、1 枚の行統計 32B が上限を超える。行統計の 8B で割ると 2 行 × 4 枚。
   const plan = planStateAttention({ batchHeads: 1, chunkRows: 8, capacity: 1 }, 16);

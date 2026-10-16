@@ -15,8 +15,9 @@
 // 加えて fixture の作り方に依らない仕様（量子化は四捨五入・手順の既定は無い・未知の手順は落とす・
 // 非有限の logit は画素座標つきで落ちる）を直接縛る。
 
+import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { MATTE_PROCEDURES, matteFromLogits, type MatteProcedure } from "../src/birefnet/matte.ts";
 import { floatsOf, readBuffer, viewOf } from "./helpers/wan-ti2v-dit.ts";
@@ -65,7 +66,7 @@ const isCaseRow = (value: unknown): value is MatteCaseRow =>
  * fail loudly。MUST: 無ければ投げる（git 追跡の fixture なので、無いのは取り違えか書き損じ）。
  */
 const readFixture = async (): Promise<MatteFixture> => {
-  const raw: unknown = JSON.parse(await Deno.readTextFile(FIXTURE));
+  const raw: unknown = JSON.parse(await readTextFile(FIXTURE));
   if (
     !isRecord(raw) || !isRecord(raw.source) || !isRecord(raw.source.versions) ||
     !isRecord(raw.lucida) || typeof raw.lucida.epsilon !== "number" ||

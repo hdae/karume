@@ -8,6 +8,7 @@
  * MUST: `caches` は必ず渡す（helpers/mock.ts の MUST — 渡さないと Deno の実キャッシュに書く）。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   evictCachedAssets,
@@ -109,7 +110,7 @@ const refsOf = (loaded: LoadedManifest, selection: ResolveOptions = {}): FileRef
 
 const paths = (refs: readonly FileRef[]): string[] => refs.map((ref) => ref.path);
 
-Deno.test("listCachedAssets: 未取得なら全て missing（取りには行かない）", async () => {
+test("listCachedAssets: 未取得なら全て missing（取りには行かない）", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
 
@@ -121,7 +122,7 @@ Deno.test("listCachedAssets: 未取得なら全て missing（取りには行か�
   assertEquals(mock.calls, [], "在庫の照会が network に出ている");
 });
 
-Deno.test("listCachedAssets: 落とした選択は全て cached・共有分だけの別選択は部分 cached", async () => {
+test("listCachedAssets: 落とした選択は全て cached・共有分だけの別選択は部分 cached", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
 
@@ -138,7 +139,7 @@ Deno.test("listCachedAssets: 落とした選択は全て cached・共有分だ�
   assertEquals(paths(turbo.missing), TURBO_ONLY);
 });
 
-Deno.test("listCachedAssets: 存在しない quant は ManifestReferenceError", async () => {
+test("listCachedAssets: 存在しない quant は ManifestReferenceError", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded } = await load(caches);
 
@@ -154,7 +155,7 @@ Deno.test("listCachedAssets: 存在しない quant は ManifestReferenceError", 
   );
 });
 
-Deno.test("evictCachedAssets: 他の選択が全在庫なら共有ファイルを残し、固有分だけ消す", async () => {
+test("evictCachedAssets: 他の選択が全在庫なら共有ファイルを残し、固有分だけ消す", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   // 既定選択を落とすと、その部分集合である anima-lite/w8 も全在庫になる。
@@ -179,7 +180,7 @@ Deno.test("evictCachedAssets: 他の選択が全在庫なら共有ファイル�
   );
 });
 
-Deno.test("evictCachedAssets: 部分在庫の選択は守らない（共有ファイルも消える）", async () => {
+test("evictCachedAssets: 部分在庫の選択は守らない（共有ファイルも消える）", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   // 既定選択から固有の 1 容器（vae_decoder）だけを落とさない = 部分在庫。
@@ -243,7 +244,7 @@ const prefetchAll = async (
   await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
 };
 
-Deno.test("evictCachedAssets: 参照集合が同一の選択は守る側に数えない", async () => {
+test("evictCachedAssets: 参照集合が同一の選択は守る側に数えない", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
@@ -287,7 +288,7 @@ Deno.test("evictCachedAssets: 参照集合が同一の選択は守る側に数�
   assertEquals((await listCachedAssets(loaded, LITE, { caches })).missing, []);
 });
 
-Deno.test("evictCachedAssets: 同一集合の兄弟しか居なければ全部消える", async () => {
+test("evictCachedAssets: 同一集合の兄弟しか居なければ全部消える", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   // f16 だけを温める（w8a8-s16 と anima-lite は i8 の容器を欠くので部分在庫）。
@@ -301,7 +302,7 @@ Deno.test("evictCachedAssets: 同一集合の兄弟しか居なければ全部�
   assertEquals(result.alsoEvicted, [F16_C16_LABEL]);
 });
 
-Deno.test("evictCachedAssets: protect の一覧だけが守る（同一集合の兄弟も明示すれば守れる）", async () => {
+test("evictCachedAssets: protect の一覧だけが守る（同一集合の兄弟も明示すれば守れる）", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAssets(loaded, refsOf(loaded, F16), { fetch: mock.fetch, caches });
@@ -317,7 +318,7 @@ Deno.test("evictCachedAssets: protect の一覧だけが守る（同一集合の
   assertEquals(result.alsoEvicted, [], "1 本も消えていないのに巻き添えを名乗っている");
 });
 
-Deno.test("evictCachedAssets: protect が空なら全在庫の他の選択も守らない", async () => {
+test("evictCachedAssets: protect が空なら全在庫の他の選択も守らない", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
@@ -330,7 +331,7 @@ Deno.test("evictCachedAssets: protect が空なら全在庫の他の選択も守
   assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL, LITE_LABEL]);
 });
 
-Deno.test("evictCachedAssets: protect に対象自身を混ぜても無視される", async () => {
+test("evictCachedAssets: protect に対象自身を混ぜても無視される", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
@@ -343,7 +344,7 @@ Deno.test("evictCachedAssets: protect に対象自身を混ぜても無視され
   assertEquals(result.alsoEvicted, [W8A8_LABEL, F16_C16_LABEL, LITE_LABEL]);
 });
 
-Deno.test("evictCachedAssets: protect の存在しない quant は ManifestReferenceError", async () => {
+test("evictCachedAssets: protect の存在しない quant は ManifestReferenceError", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded } = await load(caches);
 
@@ -363,7 +364,7 @@ Deno.test("evictCachedAssets: protect の存在しない quant は ManifestRefer
 /** 既定選択の 1 役割ぶん（絞った選択も `ResolveOptions` そのもの）。 */
 const TURBO_VAE: ResolveOptions = { weights: ["vae_decoder"] };
 
-Deno.test("listCachedAssets: weights を絞ると絞ったぶんだけを数える", async () => {
+test("listCachedAssets: weights を絞ると絞ったぶんだけを数える", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAssets(loaded, refsOf(loaded, LITE), { fetch: mock.fetch, caches });
@@ -381,7 +382,7 @@ Deno.test("listCachedAssets: weights を絞ると絞ったぶんだけを数え�
   assertEquals(paths((await listCachedAssets(loaded, TURBO, { caches })).missing), TURBO_ONLY);
 });
 
-Deno.test("listCachedAssets: 存在しない weights は ManifestReferenceError", async () => {
+test("listCachedAssets: 存在しない weights は ManifestReferenceError", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded } = await load(caches);
 
@@ -397,7 +398,7 @@ Deno.test("listCachedAssets: 存在しない weights は ManifestReferenceError"
   );
 });
 
-Deno.test("evictCachedAssets: weights を絞ると同じ選択の残りは消えない", async () => {
+test("evictCachedAssets: weights を絞ると同じ選択の残りは消えない", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAssets(loaded, refsOf(loaded, TURBO), { fetch: mock.fetch, caches });
@@ -422,7 +423,7 @@ Deno.test("evictCachedAssets: weights を絞ると同じ選択の残りは消え
   );
 });
 
-Deno.test("evictCachedAssets: protect は同じ label の部分集合を 2 つとも守る", async () => {
+test("evictCachedAssets: protect は同じ label の部分集合を 2 つとも守る", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches);
   await prefetchAll(loaded, mock, caches);
@@ -517,7 +518,7 @@ const loadCollision = async (caches: MemoryCacheStorage): Promise<LoadedManifest
   return loaded;
 };
 
-Deno.test("evictCachedAssets: protect の label に NUL が入っても守る側が畳まれない", async () => {
+test("evictCachedAssets: protect の label に NUL が入っても守る側が畳まれない", async () => {
   const caches = new MemoryCacheStorage();
   const loaded = await loadCollision(caches);
 
@@ -544,7 +545,7 @@ Deno.test("evictCachedAssets: protect の label に NUL が入っても守る側
   );
 });
 
-Deno.test("evictCachedAssets: 良性の label では同じ形がそのまま守られる（対照）", async () => {
+test("evictCachedAssets: 良性の label では同じ形がそのまま守られる（対照）", async () => {
   const caches = new MemoryCacheStorage();
   const loaded = await loadCollision(caches);
 
@@ -588,7 +589,7 @@ const firstOnlyEvictSource = (): DistributionSource => {
   });
 };
 
-Deno.test("evictCachedAssets: evicted は取得元が消したと名乗ったものだけ", async () => {
+test("evictCachedAssets: evicted は取得元が消したと名乗ったものだけ", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ files: serveAll() });
   const loaded = await loadManifest(firstOnlyEvictSource(), { fetch: mock.fetch, caches });
@@ -619,7 +620,7 @@ const noEvictSource = (): DistributionSource => {
   });
 };
 
-Deno.test("evictCachedAssets: alsoEvicted は実際に消えた参照を使う選択だけ", async () => {
+test("evictCachedAssets: alsoEvicted は実際に消えた参照を使う選択だけ", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ files: serveAll() });
   const loaded = await loadManifest(firstOnlyEvictSource(), { fetch: mock.fetch, caches });
@@ -645,7 +646,7 @@ Deno.test("evictCachedAssets: alsoEvicted は実際に消えた参照を使う�
   );
 });
 
-Deno.test("evictCachedAssets: 1 本も消えなければ alsoEvicted は空", async () => {
+test("evictCachedAssets: 1 本も消えなければ alsoEvicted は空", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ files: serveAll() });
   const loaded = await loadManifest(noEvictSource(), { fetch: mock.fetch, caches });
@@ -701,7 +702,7 @@ const singleFileManifest = async (bytes: Uint8Array<ArrayBuffer>): Promise<strin
   });
 };
 
-Deno.test("listCachedAssets: 同じ path でも sha256 が違えば在庫にならない", async () => {
+test("listCachedAssets: 同じ path でも sha256 が違えば在庫にならない", async () => {
   const caches = new MemoryCacheStorage();
   const oldBytes = new TextEncoder().encode("karume-test:weights-old-generation");
   const newBytes = new TextEncoder().encode("karume-test:weights-new-generation-payload");
@@ -824,7 +825,7 @@ const crossRepoRoutes = (): MockRoutes => ({
   ]),
 });
 
-Deno.test("listCachedAssets: 越境参照の在庫は参照先 repo のキーで引く", async () => {
+test("listCachedAssets: 越境参照の在庫は参照先 repo のキーで引く", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches, crossRepoRoutes());
   const refs = refsOf(loaded);
@@ -850,7 +851,7 @@ Deno.test("listCachedAssets: 越境参照の在庫は参照先 repo のキーで
   );
 });
 
-Deno.test("evictCachedAssets: 越境参照は cross-repo として残す（エントリも消えない）", async () => {
+test("evictCachedAssets: 越境参照は cross-repo として残す（エントリも消えない）", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await load(caches, crossRepoRoutes());
   const refs = refsOf(loaded);
@@ -880,7 +881,7 @@ const openLocal = async (caches: MemoryCacheStorage): Promise<LoadedManifest> =>
   return await loadManifest(localDirectory(directory.adapter, { label: LOCAL_LABEL }), { caches });
 };
 
-Deno.test("localDirectory: 在庫は常に全て cached（温める対象が無い）", async () => {
+test("localDirectory: 在庫は常に全て cached（温める対象が無い）", async () => {
   const caches = new MemoryCacheStorage();
   const loaded = await openLocal(caches);
 
@@ -890,7 +891,7 @@ Deno.test("localDirectory: 在庫は常に全て cached（温める対象が無�
   assertEquals(inventory.cached.length, refsOf(loaded).length);
 });
 
-Deno.test("evictCachedAssets: キャッシュを持たない取得元は HubError で断る", async () => {
+test("evictCachedAssets: キャッシュを持たない取得元は HubError で断る", async () => {
   const caches = new MemoryCacheStorage();
   const loaded = await openLocal(caches);
 

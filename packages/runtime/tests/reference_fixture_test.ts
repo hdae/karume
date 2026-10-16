@@ -7,8 +7,9 @@
 //
 // 実 GPU も環境変数も要らない — 環境とモードは引数で注入する。
 
+import { makeTempDirSync, readFile, readTextFileSync, removeSync, writeTextFileSync } from "@karume/test-support/fs";
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import type { Environment } from "./helpers/environment.ts";
 import { parseSafetensors } from "../mod.ts";
 import {
@@ -42,23 +43,23 @@ const withFixture = (
   cases: Record<string, Record<string, string>>,
   body: (fixtureUrl: URL) => void,
 ): void => {
-  const dir = Deno.makeTempDirSync({ prefix: "karume-reference-" });
+  const dir = makeTempDirSync({ prefix: "karume-reference-" });
   try {
     const fixtureUrl = new URL("references.json", `file://${dir}/`);
-    Deno.writeTextFileSync(
+    writeTextFileSync(
       fixtureUrl,
       `${JSON.stringify({ schema: 1, kind: "sha256", cases }, undefined, 2)}\n`,
     );
     body(fixtureUrl);
   } finally {
-    Deno.removeSync(dir, { recursive: true });
+    removeSync(dir, { recursive: true });
   }
 };
 
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
 
-Deno.test("参照 fixture: lookup は現環境の行だけを返す", () => {
+test("参照 fixture: lookup は現環境の行だけを返す", () => {
   withFixture({ "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -74,7 +75,7 @@ Deno.test("参照 fixture: lookup は現環境の行だけを返す", () => {
   });
 });
 
-Deno.test("参照 fixture: write は無い行を足し、既存の行は上書きしない", () => {
+test("参照 fixture: write は無い行を足し、既存の行は上書きしない", () => {
   withFixture({ "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -96,7 +97,7 @@ Deno.test("参照 fixture: write は無い行を足し、既存の行は上書�
   });
 });
 
-Deno.test("参照 fixture: rewrite は現環境の行だけを上書きする", () => {
+test("参照 fixture: rewrite は現環境の行だけを上書きする", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A, [OTHER]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -109,7 +110,7 @@ Deno.test("参照 fixture: rewrite は現環境の行だけを上書きする", 
   });
 });
 
-Deno.test("参照 fixture: 先に 2 ハンドルを開いて順に書いても双方の環境の行が残る", () => {
+test("参照 fixture: 先に 2 ハンドルを開いて順に書いても双方の環境の行が残る", () => {
   withFixture({}, (fixtureUrl) => {
     // 両方を**書く前に**開く（開いた時点の写しをそのまま書き戻すと、後から書いた側が先の行を消す）。
     const current = openReferences(fixtureUrl, {
@@ -119,7 +120,7 @@ Deno.test("参照 fixture: 先に 2 ハンドルを開いて順に書いても�
     const other = openReferences(fixtureUrl, { environment: environment(OTHER), mode: "write" });
     current.check("case-1", SHA_A);
     other.check("case-1", SHA_B);
-    const document = JSON.parse(Deno.readTextFileSync(fixtureUrl)) as {
+    const document = JSON.parse(readTextFileSync(fixtureUrl)) as {
       cases: Record<string, Record<string, string>>;
     };
     assertEquals(
@@ -130,7 +131,7 @@ Deno.test("参照 fixture: 先に 2 ハンドルを開いて順に書いても�
   });
 });
 
-Deno.test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発の write は先発の行を上書きしない", () => {
+test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発の write は先発の行を上書きしない", () => {
   withFixture({}, (fixtureUrl) => {
     // 両方を**書く前に**開く。開いた時点の写しで判定すると、後発は「行が無い」と見なして
     // 先発の行を上書きする（`write` の意味論が rewrite に化ける）。
@@ -139,7 +140,7 @@ Deno.test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発�
     assertEquals(first.check("case-1", SHA_A), { status: "written" });
     // 後発は最新のディスク行と比較する側へ落ちる（違う実測なら赤）。
     assertEquals(second.check("case-1", SHA_B), { status: "fail", expected: SHA_A });
-    const document = JSON.parse(Deno.readTextFileSync(fixtureUrl)) as {
+    const document = JSON.parse(readTextFileSync(fixtureUrl)) as {
       cases: Record<string, Record<string, string>>;
     };
     assertEquals(
@@ -157,7 +158,7 @@ Deno.test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発�
 // 門が守るのは「この環境の参照値が無いケースの sha 門が SKIP された」を無音の緑にしないこと。
 // fixture 全体を横断して数えると、改名・削除で残った孤児行がその状態を隠す。
 
-Deno.test("参照門: 孤児行だけが現環境の行を持つ状態は緑にしない", () => {
+test("参照門: 孤児行だけが現環境の行を持つ状態は緑にしない", () => {
   // `retired` は登録されていないケース（改名・削除の跡）。現役 2 件は行を持たない。
   withFixture({ retired: { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
@@ -172,7 +173,7 @@ Deno.test("参照門: 孤児行だけが現環境の行を持つ状態は緑に�
   });
 });
 
-Deno.test("参照門: 現役ケースの行が 1 件も無ければ緑にしない（作るモードは別）", () => {
+test("参照門: 現役ケースの行が 1 件も無ければ緑にしない（作るモードは別）", () => {
   withFixture({ "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     const cases = ["case-1", "case-2"];
     const references = openReferences(fixtureUrl, {
@@ -192,7 +193,7 @@ Deno.test("参照門: 現役ケースの行が 1 件も無ければ緑にしな�
 // 「どれか 1 本に行があれば緑」だと、新しく足したケースの行の書き忘れが警告付き SKIP のまま
 // 緑で通る。門は登録ケースの全部に行があるか、無いケースが明示の held 行であることを求める。
 
-Deno.test("参照門: 登録ケースの 1 本でも現環境の行が無ければ赤（無いケースを名指しする）", () => {
+test("参照門: 登録ケースの 1 本でも現環境の行が無ければ赤（無いケースを名指しする）", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A }, "case-2": { [OTHER]: SHA_B } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -204,7 +205,7 @@ Deno.test("参照門: 登録ケースの 1 本でも現環境の行が無けれ�
   });
 });
 
-Deno.test("参照門: 登録ケースの全部に現環境の行があれば緑", () => {
+test("参照門: 登録ケースの全部に現環境の行があれば緑", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A }, "case-2": { [CURRENT]: SHA_B } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -214,7 +215,7 @@ Deno.test("参照門: 登録ケースの全部に現環境の行があれば緑"
   });
 });
 
-Deno.test("参照門: 行が無いケースが現環境の held 行なら緑・他環境の held 行は数えない", () => {
+test("参照門: 行が無いケースが現環境の held 行なら緑・他環境の held 行は数えない", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -230,7 +231,7 @@ Deno.test("参照門: 行が無いケースが現環境の held 行なら緑・�
   });
 });
 
-Deno.test("参照門: held 行と現環境の行が両方あるケースは赤（古い held 行を名指しする）", () => {
+test("参照門: held 行と現環境の行が両方あるケースは赤（古い held 行を名指しする）", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -245,7 +246,7 @@ Deno.test("参照門: held 行と現環境の行が両方あるケースは赤�
   });
 });
 
-Deno.test("参照門: opt-in のケースは登録から外した走行では数えない", () => {
+test("参照門: opt-in のケースは登録から外した走行では数えない", () => {
   // `opt-in` は環境変数で有効になるケース（行は別の機にしか無い）。無効の走行では呼び手が登録に
   // 含めない（e2e_wan_pipeline_test.ts の CASE_IDS の条件つき登録）— 門は fixture 全体ではなく
   // 登録した集合だけを数える。
@@ -262,7 +263,7 @@ Deno.test("参照門: opt-in のケースは登録から外した走行では数
   );
 });
 
-Deno.test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
+test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -272,7 +273,7 @@ Deno.test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
   });
 });
 
-Deno.test("参照 fixture: 未設定モードで行が無いケースを突き合わせると throw する", () => {
+test("参照 fixture: 未設定モードで行が無いケースを突き合わせると throw する", () => {
   withFixture({}, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -286,18 +287,18 @@ Deno.test("参照 fixture: 未設定モードで行が無いケースを突き�
   });
 });
 
-Deno.test("参照 fixture: 書き出しは辞書順で安定する（2 度書いてバイト同一）", () => {
+test("参照 fixture: 書き出しは辞書順で安定する（2 度書いてバイト同一）", () => {
   withFixture({ "case-2": { [OTHER]: SHA_A }, "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "write" }).check(
       "case-2",
       SHA_B,
     );
-    const first = Deno.readTextFileSync(fixtureUrl);
+    const first = readTextFileSync(fixtureUrl);
     openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "rewrite" }).check(
       "case-2",
       SHA_B,
     );
-    const second = Deno.readTextFileSync(fixtureUrl);
+    const second = readTextFileSync(fixtureUrl);
     assertEquals(second, first, "同じ内容を書き直したのにバイトが動いた");
     // JSON の鍵は挿入順で読み戻るので、並びの検査は parse した鍵の列で足りる。
     const document = JSON.parse(first) as { cases: Record<string, Record<string, string>> };
@@ -311,7 +312,7 @@ Deno.test("参照 fixture: 書き出しは辞書順で安定する（2 度書い
   });
 });
 
-Deno.test("参照 fixture: 読めない fixture は空として扱わず throw する", () => {
+test("参照 fixture: 読めない fixture は空として扱わず throw する", () => {
   withFixture({}, (fixtureUrl) => {
     assertThrows(
       () =>
@@ -322,13 +323,13 @@ Deno.test("参照 fixture: 読めない fixture は空として扱わず throw �
       Error,
       "fixture が読めない",
     );
-    Deno.writeTextFileSync(fixtureUrl, "{ broken");
+    writeTextFileSync(fixtureUrl, "{ broken");
     assertThrows(
       () => openReferences(fixtureUrl, { environment: environment(CURRENT), mode: undefined }),
       Error,
       "JSON として壊れている",
     );
-    Deno.writeTextFileSync(fixtureUrl, JSON.stringify({ schema: 2, kind: "sha256", cases: {} }));
+    writeTextFileSync(fixtureUrl, JSON.stringify({ schema: 2, kind: "sha256", cases: {} }));
     assertThrows(
       () => openReferences(fixtureUrl, { environment: environment(CURRENT), mode: undefined }),
       Error,
@@ -337,7 +338,7 @@ Deno.test("参照 fixture: 読めない fixture は空として扱わず throw �
   });
 });
 
-Deno.test("参照 fixture: KARUME_REFERENCE の未知の綴りは throw する", () => {
+test("参照 fixture: KARUME_REFERENCE の未知の綴りは throw する", () => {
   assertEquals(parseReferenceMode(undefined), undefined);
   assertEquals(parseReferenceMode("write"), "write");
   assertEquals(parseReferenceMode("rewrite"), "rewrite");
@@ -356,11 +357,11 @@ const withSeats = async (
   cases: Record<string, Record<string, string>>,
   body: (fixtureUrl: URL, results: Results) => Promise<void>,
 ): Promise<void> => {
-  const dir = Deno.makeTempDirSync({ prefix: "karume-reference-settle-" });
+  const dir = makeTempDirSync({ prefix: "karume-reference-settle-" });
   try {
     const base = new URL(`file://${dir}/`);
     const fixtureUrl = new URL("references.json", base);
-    Deno.writeTextFileSync(
+    writeTextFileSync(
       fixtureUrl,
       `${JSON.stringify({ schema: 1, kind: "sha256", cases }, undefined, 2)}\n`,
     );
@@ -370,7 +371,7 @@ const withSeats = async (
     });
     await body(fixtureUrl, results);
   } finally {
-    Deno.removeSync(dir, { recursive: true });
+    removeSync(dir, { recursive: true });
   }
 };
 
@@ -390,7 +391,7 @@ const isCasesDocument = (
 
 /** ディスク上の fixture の `cases` を読む（型ガードで絞る — 形が崩れていれば落ちる）。 */
 const readCases = (fixtureUrl: URL): Record<string, Record<string, string>> => {
-  const document: unknown = JSON.parse(Deno.readTextFileSync(fixtureUrl));
+  const document: unknown = JSON.parse(readTextFileSync(fixtureUrl));
   assert(isCasesDocument(document), `${fixtureUrl.pathname} が { cases } の形でない`);
   return document.cases;
 };
@@ -421,7 +422,7 @@ describe("settleReference", () => {
       assertEquals(settlement.sha256, expectedSha);
       assertEquals(settlement.artifactUrl.href, new URL("case-1.png", results.dir).href);
       // sha は実物ファイルのバイト列と一致する（結果の actual と実物が食い違わない）。
-      const onDisk = await Deno.readFile(settlement.artifactUrl);
+      const onDisk = await readFile(settlement.artifactUrl);
       assertEquals(onDisk, BYTES);
       assertEquals(await sha256Hex(onDisk), settlement.sha256);
       assertEquals(readCases(fixtureUrl)["case-1"], { [CURRENT]: expectedSha });
@@ -430,7 +431,7 @@ describe("settleReference", () => {
 
   it("比較モードで行と食い違えば fail を返し、実物は書かれ、行は動かない", async () => {
     await withSeats({ "case-1": { [CURRENT]: SHA_A } }, async (fixtureUrl, results) => {
-      const before = Deno.readTextFileSync(fixtureUrl);
+      const before = readTextFileSync(fixtureUrl);
       const references = openReferences(fixtureUrl, {
         environment: environment(CURRENT),
         mode: undefined,
@@ -442,11 +443,11 @@ describe("settleReference", () => {
       });
       assertEquals(settlement.check, { status: "fail", expected: SHA_A });
       assertEquals(
-        await Deno.readFile(settlement.artifactUrl),
+        await readFile(settlement.artifactUrl),
         BYTES,
         "不一致の回に実物が残っていない",
       );
-      assertEquals(Deno.readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
+      assertEquals(readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
     });
   });
 
@@ -473,7 +474,7 @@ describe("settleReference", () => {
 describe("settleOrObserve", () => {
   it("比較モードで行が無ければ突合を飛ばし、実物を書いて pass + actual + artifact（expected 無し）を返す", async () => {
     await withSeats({ "case-1": { [OTHER]: SHA_A } }, async (fixtureUrl, results) => {
-      const before = Deno.readTextFileSync(fixtureUrl);
+      const before = readTextFileSync(fixtureUrl);
       const references = openReferences(fixtureUrl, {
         environment: environment(CURRENT),
         mode: undefined,
@@ -491,12 +492,12 @@ describe("settleOrObserve", () => {
       });
       assertEquals(Object.keys(outcome.fields), ["status", "actual", "artifact"]);
       assertEquals(
-        await Deno.readFile(new URL("case-1.safetensors", results.dir)),
+        await readFile(new URL("case-1.safetensors", results.dir)),
         BYTES,
         "突合を飛ばした回に実物が残っていない",
       );
       // 他環境の行（OTHER）とは突き合わせず、この環境の行も作らない。
-      assertEquals(Deno.readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
+      assertEquals(readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
     });
   });
 

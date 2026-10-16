@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { mergedGraph } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";
 import { planAliases } from "../src/runtime/fusion.ts";

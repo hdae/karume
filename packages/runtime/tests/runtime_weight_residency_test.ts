@@ -10,6 +10,7 @@
 //    唯一の突合になる。i8 の scale は**チャネル軸の取り違えが即バイト数の違いになる**
 //    （conv_transpose1d の `[Cin,Cout,K]` は軸 1 — 軸 0 と読むと golden の実 scale と一致しない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { type InitializerSupply, mergedGraph } from "../src/format/container/bind.ts";
 import type { IrGraph } from "../src/format/ir.ts";
@@ -98,13 +99,13 @@ const assertDeclaredBytesMatchContainer = (golden: ResidencyTarget): void => {
 // 既存 fixture（実エクスポータが書いた配布形）との突合
 // ---------------------------------------------------------------------------
 
-Deno.test("golden `mlp`: 圧縮しない格納は全て生バイト常駐の席", async () => {
+test("golden `mlp`: 圧縮しない格納は全て生バイト常駐の席", async () => {
   const model = await openGoldenContainer("mlp");
   assertEquals(seats(model), { w1: "raw", b1: "raw", w2: "raw", b2: "raw" });
   assertDeclaredBytesMatchContainer(model);
 });
 
-Deno.test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常駐（bias は f32 のまま）", async () => {
+test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常駐（bias は f32 のまま）", async () => {
   const model = await openGoldenContainer("i8_weights");
   assertEquals(seats(model), {
     // embedding / linear / conv1d / conv_transpose1d / conv2d の重みスロット
@@ -125,7 +126,7 @@ Deno.test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常�
   assertDeclaredBytesMatchContainer(model);
 });
 
-Deno.test("golden `conv_transpose` / `embedding_lookup`: 宣言由来バイト数が容器と一致", async () => {
+test("golden `conv_transpose` / `embedding_lookup`: 宣言由来バイト数が容器と一致", async () => {
   assertDeclaredBytesMatchContainer(await openGoldenContainer("conv_transpose"));
   assertDeclaredBytesMatchContainer(await openGoldenContainer("embedding_lookup"));
 });
@@ -163,7 +164,7 @@ const twoPathGraph = (): DeclarationJson => ({
   ],
 });
 
-Deno.test("f16: 重みスロットだけの消費は f16 席・重みスロット以外の消費は CPU 展開の席", () => {
+test("f16: 重みスロットだけの消費は f16 席・重みスロット以外の消費は CPU 展開の席", () => {
   const model = openGraph(twoPathGraph(), { w: "f16", g: "f16" });
   const plan = planWeightResidency(model.graph);
   assertEquals(seats(model), { w: "f16", b: "raw", g: "expanded" });
@@ -174,7 +175,7 @@ Deno.test("f16: 重みスロットだけの消費は f16 席・重みスロッ�
   assertDeclaredBytesMatchContainer(model);
 });
 
-Deno.test("i8: 席は scale のバイト数とチャネル軸を伴う", () => {
+test("i8: 席は scale のバイト数とチャネル軸を伴う", () => {
   const model = openGraph(twoPathGraph(), { w: "int8-sym", g: "f16" });
   // linear の重みは `[out,in]` なので行の軸 0 → scale は 3 要素 = 12 バイト
   assertEquals(planWeightResidency(model.graph).get("w"), {
@@ -215,7 +216,7 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
 const i4Conv1dModel = (groups: number): ResidencyTarget =>
   openGraph(i4Conv1dGraph(groups), { w: { codec: "int4-sym-g", groupSize: 16 } });
 
-Deno.test("i4: 展開経路のある conv1d(groups==1) は i4 席・groups>1 は CPU 展開の席", () => {
+test("i4: 展開経路のある conv1d(groups==1) は i4 席・groups>1 は CPU 展開の席", () => {
   const direct = i4Conv1dModel(1);
   // numel 256 → packed 128 バイト / group scale は [4, 4] の 16 要素 = 64 バイト
   assertEquals(planWeightResidency(direct.graph).get("w"), {
@@ -237,7 +238,7 @@ Deno.test("i4: 展開経路のある conv1d(groups==1) は i4 席・groups>1 は
   assertDeclaredBytesMatchContainer(grouped);
 });
 
-Deno.test("グラフ出力に載った initializer は圧縮常駐しない（readback が f32 を仮定する）", () => {
+test("グラフ出力に載った initializer は圧縮常駐しない（readback が f32 を仮定する）", () => {
   const graph = twoPathGraph();
   const model = openGraph({ ...graph, outputs: ["y", "w"] }, { w: "f16", g: "f16" });
   assertEquals(seats(model)["w"], "expanded");
@@ -247,7 +248,7 @@ Deno.test("グラフ出力に載った initializer は圧縮常駐しない（re
 // fail loudly
 // ---------------------------------------------------------------------------
 
-Deno.test("チャネル軸が消費側で食い違う i8 は席を決めずに落ちる", () => {
+test("チャネル軸が消費側で食い違う i8 は席を決めずに落ちる", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,

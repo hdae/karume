@@ -5,7 +5,7 @@
 // （`e2e_gemma4_drafter_test.ts` ②）はバケットの配線を外しても割れない。配線はここで直接固定する。
 
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { gemma4EstimateGenerations } from "../src/gemma/pipeline.ts";
 import { fakeSession, programOf } from "./helpers/generation-fake.ts";
 

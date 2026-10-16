@@ -4,6 +4,7 @@
 // **その時点までの全件**で書き直されること（途中で落ちても直前までが残る）、実物の置き場が
 // 同じディレクトリ配下に閉じること。実 GPU も `outputs/` も要らない — 根と環境は注入する。
 
+import { makeTempDirSync, mkdirSync, readTextFile, removeSync, writeFile, writeTextFileSync } from "@karume/test-support/fs";
 import {
   assert,
   assertEquals,
@@ -12,7 +13,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { parseResultsDocument } from "../../../tools/verify-diff/diff.ts";
 import type { Environment } from "./helpers/environment.ts";
 import {
@@ -43,15 +44,15 @@ type ResultsDocument = {
   readonly cases: readonly ResultEntry[];
 };
 
-Deno.test("結果の書き出し: record のたびに全件で書き直され、実物は同じ席に置かれる", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("結果の書き出し: record のたびに全件で書き直され、実物は同じ席に置かれる", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("irodori", { root, environment: ENVIRONMENT });
 
     const artifact = results.artifact("voice-clone.wav");
     assert(artifact.href.startsWith(results.dir.href), "実物が結果の席の外を指している");
-    await Deno.writeFile(artifact, new Uint8Array([1, 2, 3]));
+    await writeFile(artifact, new Uint8Array([1, 2, 3]));
 
     await results.record({
       id: "voice-clone",
@@ -62,7 +63,7 @@ Deno.test("結果の書き出し: record のたびに全件で書き直され、
       elapsedMs: 12,
     });
     const afterFirst = JSON.parse(
-      await Deno.readTextFile(new URL("results.json", results.dir)),
+      await readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
     assertEquals(afterFirst.cases.length, 1, "1 件目が残っていない");
     // 席の日付は、実装が走行の開始時に確定した startedAt の日付部（UTC）と同じ時刻の源で比べる。
@@ -73,7 +74,7 @@ Deno.test("結果の書き出し: record のたびに全件で書き直され、
 
     await results.record({ id: "no-ref", status: "written", actual: "b".repeat(64), elapsedMs: 8 });
     const document = JSON.parse(
-      await Deno.readTextFile(new URL("results.json", results.dir)),
+      await readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
     assertEquals(document.schema, 1);
     assertEquals(document.family, "irodori");
@@ -89,36 +90,36 @@ Deno.test("結果の書き出し: record のたびに全件で書き直され、
       `checkout の sha が commit SHA でない: ${JSON.stringify(document.checkout)}`,
     );
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
-Deno.test("結果の書き出し: 席を作った時点で走行中（cases 空）の results.json が置かれる", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("結果の書き出し: 席を作った時点で走行中（cases 空）の results.json が置かれる", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
     // 前回の走行が同じ席（同じ日・同じ系列）に残した決着。
-    Deno.mkdirSync(results.dir, { recursive: true });
-    Deno.writeTextFileSync(
+    mkdirSync(results.dir, { recursive: true });
+    writeTextFileSync(
       new URL("results.json", results.dir),
       `${JSON.stringify({ schema: 1, cases: [{ id: "activations", status: "pass" }] })}\n`,
     );
     // 実物だけ置いて record には到達しない = 記録の前に例外で抜けた回。
-    await Deno.writeFile(results.artifact("activations.png"), new Uint8Array([1, 2, 3]));
+    await writeFile(results.artifact("activations.png"), new Uint8Array([1, 2, 3]));
     const document = JSON.parse(
-      await Deno.readTextFile(new URL("results.json", results.dir)),
+      await readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
     assertEquals(document.cases, [], "前回の走行の決着が今回の実物と同じ席に残っている");
     assertEquals(document.family, "golden");
     assert(document.startedAt.endsWith("Z"), "走行中マーカーが今回の startedAt を名乗っていない");
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
-Deno.test("結果の書き出し: 許容差の実測が record に載せたとおりの形で残る", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("結果の書き出し: 許容差の実測が record に載せたとおりの形で残る", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
@@ -141,16 +142,16 @@ Deno.test("結果の書き出し: 許容差の実測が record に載せたと�
     ];
     await results.record({ id: "activations", status: "pass", elapsedMs: 31, measurements });
     const document = JSON.parse(
-      await Deno.readTextFile(new URL("results.json", results.dir)),
+      await readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
     assertEquals(document.cases[0].measurements, measurements);
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
-Deno.test("結果の書き出し: 非有限の実測は null として書かれる", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("結果の書き出し: 非有限の実測は null として書かれる", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
@@ -168,22 +169,22 @@ Deno.test("結果の書き出し: 非有限の実測は null として書かれ�
         stage: "karume",
       }],
     });
-    const text = await Deno.readTextFile(new URL("results.json", results.dir));
+    const text = await readTextFile(new URL("results.json", results.dir));
     assertStringIncludes(text, `"maxAbs": null`);
     assertStringIncludes(text, `"maxRel": null`);
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
 // 失敗した回の決着は「残すのが務め」だが、その書き込みが落ちたときに throw すると、呼び手の
 // catch が抱えている元の検証例外（何が壊れたのかを言う唯一の診断）が I/O 例外に置き換わる。
-Deno.test("結果の書き出し: 記録できなくても recordFailure は throw せず、黙りもしない", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("結果の書き出し: 記録できなくても recordFailure は throw せず、黙りもしない", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     // 故障注入: 席の親（環境キーのディレクトリ）を通常ファイルにする = 席を作れない置き場。
-    Deno.writeTextFileSync(new URL(KEY, root), "");
+    writeTextFileSync(new URL(KEY, root), "");
     const results = openResults("golden", { root, environment: ENVIRONMENT });
     const entry: ResultEntry = { id: "activations", status: "fail", elapsedMs: 3 };
     // 故障注入が効いていることを先に固定する（素の record が通るなら下の検査は何も言わない）。
@@ -203,12 +204,12 @@ Deno.test("結果の書き出し: 記録できなくても recordFailure は thr
     assertEquals(said.length, 1, "記録できなかったことを黙って飲み込んだ");
     assertStringIncludes(said[0], "activations");
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
-Deno.test("結果の書き出し: ディレクトリ区切りを含む実物の名前は throw する", () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("結果の書き出し: ディレクトリ区切りを含む実物の名前は throw する", () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const results = openResults("anima", {
       root: new URL(`file://${temporary}/`),
@@ -216,14 +217,14 @@ Deno.test("結果の書き出し: ディレクトリ区切りを含む実物の�
     });
     assertThrows(() => results.artifact("F1/i8.wav"), Error, "ディレクトリ区切り");
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
-Deno.test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ / . / .. / % / ? / #）は throw する", () => {
+test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ / . / .. / % / ? / #）は throw する", () => {
   // file: URL ではバックスラッシュも区切りとして解決され、`..` や `%2e%2e` は親ディレクトリを指す。
   // `/` だけを拒む形だと、これらが結果の席の外（または席そのもの）へ書き込む。
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const results = openResults("anima", {
       root: new URL(`file://${temporary}/`),
@@ -249,7 +250,7 @@ Deno.test("結果の書き出し: 席の外や親を指しうる実物の名前�
       assertEquals(results.artifact(name).href, new URL(name, results.dir).href);
     }
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
@@ -294,7 +295,7 @@ const captureConsoleError = async (action: () => Promise<void>): Promise<string[
   return said;
 };
 
-Deno.test("runRecordedCase: 本体が戻った回は pass と積んだ実測を 1 件残す", async () => {
+test("runRecordedCase: 本体が戻った回は pass と積んだ実測を 1 件残す", async () => {
   const { results, entries } = fakeResults();
   await runRecordedCase(results, { id: "case0" }, ({ measurements }) => {
     measurements.push(MEASUREMENT);
@@ -309,7 +310,7 @@ Deno.test("runRecordedCase: 本体が戻った回は pass と積んだ実測を 
   assert(Number.isInteger(entry.elapsedMs) && entry.elapsedMs >= 0, "elapsedMs が整数 ms でない");
 });
 
-Deno.test("runRecordedCase: 本体が投げた回は fail を残してから同じ例外を投げ直す", async () => {
+test("runRecordedCase: 本体が投げた回は fail を残してから同じ例外を投げ直す", async () => {
   const { results, entries } = fakeResults();
   const cause = new Error("output.0: allclose 不一致");
   const order: string[] = [];
@@ -334,7 +335,7 @@ Deno.test("runRecordedCase: 本体が投げた回は fail を残してから同�
   assertEquals(order, ["onFailure（積んだ件数 0）"]);
 });
 
-Deno.test("runRecordedCase: 本体が fail を返した回は投げずに note つきで残す", async () => {
+test("runRecordedCase: 本体が fail を返した回は投げずに note つきで残す", async () => {
   const { results, entries } = fakeResults();
   await runRecordedCase(
     results,
@@ -348,7 +349,7 @@ Deno.test("runRecordedCase: 本体が fail を返した回は投げずに note �
   assertEquals(entries[0].measurements, []);
 });
 
-Deno.test("runRecordedCase: 投げた回の note は failureNote が例外から作る", async () => {
+test("runRecordedCase: 投げた回の note は failureNote が例外から作る", async () => {
   const { results, entries } = fakeResults();
   await assertRejects(
     () =>
@@ -363,7 +364,7 @@ Deno.test("runRecordedCase: 投げた回の note は failureNote が例外から
   assertEquals(entries[0].note, "例外: createSession 失敗");
 });
 
-Deno.test("runRecordedCase: 投げた回に記録が落ちても元の例外を投げ、記録できなかったと言う", async () => {
+test("runRecordedCase: 投げた回に記録が落ちても元の例外を投げ、記録できなかったと言う", async () => {
   const { results } = fakeResults(true);
   const cause = new Error("shape 不一致");
   let thrown: unknown;
@@ -377,7 +378,7 @@ Deno.test("runRecordedCase: 投げた回に記録が落ちても元の例外を�
   assertStringIncludes(said[0], "case2");
 });
 
-Deno.test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailure は呼ばない", async () => {
+test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailure は呼ばない", async () => {
   const { results } = fakeResults(true);
   let failed = false;
   await assertRejects(
@@ -397,8 +398,8 @@ Deno.test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailu
 
 // 書き手（helpers/results.ts）と読み手（tools/verify-diff）は型を別々に持つ。ADR 0106 追記の
 // 「schema は 1 のまま」は両者の一致に依存するので、書き手が実際に書いた文書を読み手へ通す。
-Deno.test("往復: runRecordedCase が書いた results.json を verify-diff の読み手がそのまま受ける", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("往復: runRecordedCase が書いた results.json を verify-diff の読み手がそのまま受ける", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
@@ -416,7 +417,7 @@ Deno.test("往復: runRecordedCase が書いた results.json を verify-diff の
         ),
     );
 
-    const text = await Deno.readTextFile(new URL("results.json", results.dir));
+    const text = await readTextFile(new URL("results.json", results.dir));
     const document = parseResultsDocument(JSON.parse(text));
     assertEquals(document.family, "golden");
     assertEquals(document.environment.key, KEY);
@@ -430,14 +431,14 @@ Deno.test("往復: runRecordedCase が書いた results.json を verify-diff の
     assertEquals(document.cases[1].measurements, []);
     assertEquals(document.cases[1].note, "Error: 測る前に落ちた");
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
 // 自機 A/B 門（ADR 0110 決定 5）の実測は任意欄 `comparisons`。積んだケースだけが欄を持ち、
 // 非有限は null・未導出の帯は欄ごと落ちた形で、読み手（tools/verify-diff）がそのまま受ける。
-Deno.test("往復: runRecordedCase が積んだ A/B の実測は comparisons として読み手まで届く", async () => {
-  const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+test("往復: runRecordedCase が積んだ A/B の実測は comparisons として読み手まで届く", async () => {
+  const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("anima-ab", { root, environment: ENVIRONMENT });
@@ -460,7 +461,7 @@ Deno.test("往復: runRecordedCase が積んだ A/B の実測は comparisons と
     // 積まなかったケースは欄を持たない（A/B 門でないケースの決着の形は変わらない）。
     await runRecordedCase(results, { id: "plain" }, () => Promise.resolve(undefined));
 
-    const text = await Deno.readTextFile(new URL("results.json", results.dir));
+    const text = await readTextFile(new URL("results.json", results.dir));
     const document = parseResultsDocument(JSON.parse(text));
     assertEquals(document.cases[0].comparisons, [comparison]);
     const { band: _dropped, ...unbanded } = comparison;
@@ -474,7 +475,7 @@ Deno.test("往復: runRecordedCase が積んだ A/B の実測は comparisons と
       "comparisons",
     ]);
   } finally {
-    Deno.removeSync(temporary, { recursive: true });
+    removeSync(temporary, { recursive: true });
   }
 });
 
@@ -536,7 +537,7 @@ describe("runRecordedCase の決着に載せた参照値の欄", () => {
   });
 
   it("rewritten の決着は verify-diff の読み手まで届く", async () => {
-    const temporary = Deno.makeTempDirSync({ prefix: "karume-verify-" });
+    const temporary = makeTempDirSync({ prefix: "karume-verify-" });
     try {
       const root = new URL(`file://${temporary}/`);
       const results = openResults("golden", { root, environment: ENVIRONMENT });
@@ -547,14 +548,14 @@ describe("runRecordedCase の決着に載せた参照値の欄", () => {
           actual: "b".repeat(64),
           artifact: "rewritten.safetensors",
         }));
-      const text = await Deno.readTextFile(new URL("results.json", results.dir));
+      const text = await readTextFile(new URL("results.json", results.dir));
       const [entry] = parseResultsDocument(JSON.parse(text)).cases;
       assertEquals(
         [entry.id, entry.status, entry.expected, entry.actual, entry.artifact],
         ["rewritten", "rewritten", "a".repeat(64), "b".repeat(64), "rewritten.safetensors"],
       );
     } finally {
-      Deno.removeSync(temporary, { recursive: true });
+      removeSync(temporary, { recursive: true });
     }
   });
 });

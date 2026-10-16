@@ -6,12 +6,13 @@
  * （一時は 1 B 以上）に掛かって入力と無関係な内部エラーで落ちる。topk(k=1) の同形
  * （gpu_topk_split_test.ts）と同じく、外側が空なら 1 dispatch 形に残ることを固定する。
  */
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, prepareContainer } from "../mod.ts";
 import { GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-Deno.test({
+test({
   name: "argmax: 外側が空なら長い行でも分割用一時を作らず空の出力を返す",
   ignore: !GPU_AVAILABLE,
   async fn() {

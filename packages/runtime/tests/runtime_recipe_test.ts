@@ -12,6 +12,7 @@
  * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { GpuDeviceLostError } from "../src/gpu/context.ts";
 import type { StorageRoles } from "../src/gpu/pipeline-cache.ts";
@@ -79,7 +80,7 @@ const dispatch = (
   access: StorageRoles = roles([], []),
 ): Dispatch => ({ key, bindings, roles: access }) as unknown as Dispatch;
 
-Deno.test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）が確保プログラムへ写る", () => {
+test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）が確保プログラムへ写る", () => {
   const program = buildTransientProgram([
     step([alloc("a", 64, 1)]),
     step([alloc("b", 64, 0)], []),
@@ -135,7 +136,7 @@ Deno.test("単一出力ステップの確保簿記（alloc / alias / pin / 消�
  * 取り違えに気づけない。だから **どの offset を掴むか**まで期待値に置く（`e` が掴むのは消費済みの
  * `v` の区間で、pin された添字 `i` の区間ではない）。
  */
-Deno.test("topk の実形（値 + 添字・同一サイズ）の計画が手計算どおり", () => {
+test("topk の実形（値 + 添字・同一サイズ）の計画が手計算どおり", () => {
   const bytes = 3 * 2 * 4;
   const plan = planRecipes([
     step([alloc("v", bytes, 1), alloc("i", bytes, 0, true)]),
@@ -151,7 +152,7 @@ Deno.test("topk の実形（値 + 添字・同一サイズ）の計画が手計�
   assertEquals(plan.peakLiveBytes, 72);
 });
 
-Deno.test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独立して retain / pin する", () => {
+test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独立して retain / pin する", () => {
   const plan = planRecipes([
     step([alloc("v", 64, 1), alloc("i", 32, 0, true)]),
     step([alloc("y", 64, 0, true)], ["v"]),
@@ -166,7 +167,7 @@ Deno.test("多出力ステップは出力 slot 昇順に確保し、slot ごと�
 // 読み書きの役割（WGSL 宣言 → 計画）
 // ---------------------------------------------------------------------------
 
-Deno.test("dispatch の読み / 書きは WGSL の役割から採り、常駐・state・論理長は計画に現れない", () => {
+test("dispatch の読み / 書きは WGSL の役割から採り、常駐・state・論理長は計画に現れない", () => {
   const program = buildTransientProgram([{
     outputs: [alloc("y", 64, 0, true)],
     temps: [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }],
@@ -189,7 +190,7 @@ Deno.test("dispatch の読み / 書きは WGSL の役割から採り、常駐・
   }]);
 });
 
-Deno.test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fail loudly", () => {
+test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fail loudly", () => {
   const recipes = [{
     outputs: [alloc("y", 64, 0, true)],
     temps: [],
@@ -206,7 +207,7 @@ Deno.test("役割の無い束縛（WGSL に storage 宣言が無い binding）�
   );
 });
 
-Deno.test("同じ dispatch で読む入力と書く出力は別領域に置かれる（計画まで通した形）", () => {
+test("同じ dispatch で読む入力と書く出力は別領域に置かれる（計画まで通した形）", () => {
   const plan = planRecipes([
     step([alloc("h", 64, 1)]),
     {
@@ -239,7 +240,7 @@ const tempStep = (temps: readonly TempRecipe[], dispatches: readonly Dispatch[])
   writesState: false,
 });
 
-Deno.test("dispatch 列の内側で閉じていない一時の寿命宣言は宣言の受け口で落ちる", () => {
+test("dispatch 列の内側で閉じていない一時の寿命宣言は宣言の受け口で落ちる", () => {
   const two = [dispatch("k0"), dispatch("k1")];
   const broken: readonly (readonly [TempRecipe, string])[] = [
     // 解放が来ないまま組み上がった一時（`releaseTemp` の呼び忘れ = 実行相で漏れる）。
@@ -260,7 +261,7 @@ Deno.test("dispatch 列の内側で閉じていない一時の寿命宣言は宣
   validateStepRecipe(tempStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 1 }], two));
 });
 
-Deno.test("宣言外の一時を束ねる dispatch は宣言の受け口で落ちる", () => {
+test("宣言外の一時を束ねる dispatch は宣言の受け口で落ちる", () => {
   const temps: readonly TempRecipe[] = [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }];
   const bind = (id: number): readonly Dispatch[] => [
     dispatch("gemm", [{ binding: 1, source: { kind: "temp", id } }]),
@@ -274,7 +275,7 @@ Deno.test("宣言外の一時を束ねる dispatch は宣言の受け口で落�
   validateStepRecipe(tempStep(temps, bind(0)));
 });
 
-Deno.test("生存区間の外で一時を束ねる dispatch は宣言の受け口で落ちる", () => {
+test("生存区間の外で一時を束ねる dispatch は宣言の受け口で落ちる", () => {
   const read = (id: number): BindingRecipe => ({ binding: 1, source: { kind: "temp", id } });
   const write = (id: number): BindingRecipe => ({ binding: 2, source: { kind: "temp", id } });
   // A を dispatch 0 で書いて解放し、B を dispatch 1 で書いて解放したあと、dispatch 2 が A を
@@ -307,7 +308,7 @@ Deno.test("生存区間の外で一時を束ねる dispatch は宣言の受け�
   );
 });
 
-Deno.test("整数でない寿命境界と一時の添字は宣言の受け口で落ちる", () => {
+test("整数でない寿命境界と一時の添字は宣言の受け口で落ちる", () => {
   const two = [dispatch("k0"), dispatch("k1")];
   // 比較だけでは素通りする値（小数は区間の内側に見え、NaN はどの大小比較も偽）。
   const broken: readonly (readonly [TempRecipe, string])[] = [
@@ -331,7 +332,7 @@ Deno.test("整数でない寿命境界と一時の添字は宣言の受け口で
   }
 });
 
-Deno.test("消費計数が実際の解放より多いレシピ列は計画の閉包検査で落ちる", () => {
+test("消費計数が実際の解放より多いレシピ列は計画の閉包検査で落ちる", () => {
   assertThrows(
     // 消費者 1 本を宣言しながら、その値を解放するステップがどこにも無い形。
     () => planRecipes([step([alloc("a", 64, 1)])], CORE_TRANSIENT_LIMITS),
@@ -345,7 +346,7 @@ Deno.test("消費計数が実際の解放より多いレシピ列は計画の閉
   );
 });
 
-Deno.test("同じ値を二重に解放するレシピ列は参照カウントが負で落ちる", () => {
+test("同じ値を二重に解放するレシピ列は参照カウントが負で落ちる", () => {
   assertThrows(
     () => planRecipes([step([alloc("a", 64, 0)]), step([], ["a", "a"])], CORE_TRANSIENT_LIMITS),
     ExecutionError,
@@ -378,7 +379,7 @@ const tempSlotsStep = (
   writesState: false,
 });
 
-Deno.test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴む", () => {
+test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴む", () => {
   // i8a8 attention と同型の「ループ外一時（0 と 2）がループ内一時（1）を挟む」形。
   const plan = planRecipes([
     tempSlotsStep([
@@ -397,7 +398,7 @@ Deno.test("同時生存する入れ子寿命の一時は 3 本とも別区間を
   assertEquals(new Set(plan.slots.map((slot) => slot.offset)).size, 3, "offset が全て異なる");
 });
 
-Deno.test("同一境界で解放された一時のバイトは、次のステップの一時が配り直される", () => {
+test("同一境界で解放された一時のバイトは、次のステップの一時が配り直される", () => {
   const plan = planRecipes([
     tempSlotsStep([
       { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
@@ -414,7 +415,7 @@ Deno.test("同一境界で解放された一時のバイトは、次のステッ
   assertEquals(plan.sharedSlots, 1);
 });
 
-Deno.test("出力と一時は同じ領域を共有し、pin された区間だけが配り直されない", () => {
+test("出力と一時は同じ領域を共有し、pin された区間だけが配り直されない", () => {
   // 消費者ゼロの出力はステップ末尾で生存を終えるので、次のステップの一時がそのバイトを掴む。
   const shared = planRecipes([
     tempSlotsStep([], 0, [alloc("a", 64, 0)]),
@@ -471,7 +472,7 @@ const recordingScheduler = (
 
 const stubGroup = (): GPUBindGroup => ({}) as unknown as GPUBindGroup;
 
-Deno.test("焼き込み経路は context 側の焼き込みを経ていない dispatch で落ちる", () => {
+test("焼き込み経路は context 側の焼き込みを経ていない dispatch で落ちる", () => {
   const recipes = [dispatchStep([runnableDispatch("attn.qk", [1, 1, 1])])];
   const log: string[] = [];
 
@@ -488,7 +489,7 @@ Deno.test("焼き込み経路は context 側の焼き込みを経ていない di
   assertEquals(log, ["attn.qk [1,1,1]"]);
 });
 
-Deno.test("workgroup 数を論理長から算出する dispatch は GenerationContext 無しで落ちる", () => {
+test("workgroup 数を論理長から算出する dispatch は GenerationContext 無しで落ちる", () => {
   const log: string[] = [];
   const derived = [dispatchStep([runnableDispatch("state.pv", (past, query) => [past, query, 1])])];
 
@@ -509,7 +510,7 @@ Deno.test("workgroup 数を論理長から算出する dispatch は GenerationCo
   assertEquals(log, ["elementwise [0,1,1]"]);
 });
 
-Deno.test("論理長から算出した workgroup 数が 0 の軸を持つ dispatch だけは積まれない", () => {
+test("論理長から算出した workgroup 数が 0 の軸を持つ dispatch だけは積まれない", () => {
   const log: string[] = [];
   const recipes = [dispatchStep([runnableDispatch("state.pv", (past, query) => [past, query, 1])])];
   const generation = (past: number, query: number): BakedGeneration => ({
@@ -548,7 +549,7 @@ const pacedScheduler = (
   }) as unknown as SubmitScheduler;
 };
 
-Deno.test("run の焼き込み実行は送り込みの待ちの間、次のステップの dispatch を積まない", async () => {
+test("run の焼き込み実行は送り込みの待ちの間、次のステップの dispatch を積まない", async () => {
   const log: string[] = [];
   const gate = Promise.withResolvers<void>();
   const recipes = [
@@ -570,7 +571,7 @@ Deno.test("run の焼き込み実行は送り込みの待ちの間、次のス�
   assertEquals(log, ["a", "b"]);
 });
 
-Deno.test("run の焼き込み実行は送り込みの待ちが reject したら、次のステップを積まずに reject を返す", async () => {
+test("run の焼き込み実行は送り込みの待ちが reject したら、次のステップを積まずに reject を返す", async () => {
   const log: string[] = [];
   const lost = new GpuDeviceLostError("模擬: 印の待ちの間の消失");
   const recipes = [
@@ -590,7 +591,7 @@ Deno.test("run の焼き込み実行は送り込みの待ちが reject したら
   assertEquals(log, ["a"], "待ちが落ちた後に次のステップを積んだ");
 });
 
-Deno.test("run の焼き込み実行は待ちの後の継続の throw を、返す Promise の reject として届け、次のステップを積まない", async () => {
+test("run の焼き込み実行は待ちの後の継続の throw を、返す Promise の reject として届け、次のステップを積まない", async () => {
   const log: string[] = [];
   const recipes = [
     dispatchStep([runnableDispatch("a", [1, 1, 1])]),
@@ -616,7 +617,7 @@ Deno.test("run の焼き込み実行は待ちの後の継続の throw を、返�
   assertEquals(log, ["a"]);
 });
 
-Deno.test("run の焼き込み実行は上限の内なら待ちを挟まず、同期の実行と同じ列を積む", () => {
+test("run の焼き込み実行は上限の内なら待ちを挟まず、同期の実行と同じ列を積む", () => {
   const recipes = [
     dispatchStep([runnableDispatch("a", [1, 1, 1]), runnableDispatch("b", [1, 1, 1])]),
     dispatchStep([runnableDispatch("c", [1, 1, 1])]),
@@ -667,7 +668,7 @@ const bakeOne = (
   );
 };
 
-Deno.test("generation 面を欠いた実行は state / 論理長の束縛で fail loudly", () => {
+test("generation 面を欠いた実行は state / 論理長の束縛で fail loudly", () => {
   const lengths = assertThrows(() => bakeOne({ kind: "lengths" }), ExecutionError);
   assert(
     lengths.message.includes("論理長 uniformを束ねる dispatch を GenerationContext 無しで"),
@@ -681,7 +682,7 @@ Deno.test("generation 面を欠いた実行は state / 論理長の束縛で fai
   );
 });
 
-Deno.test("GenerationContext が持たないスロット名は実体解決で fail loudly", () => {
+test("GenerationContext が持たないスロット名は実体解決で fail loudly", () => {
   const error = assertThrows(
     () =>
       bakeOne({ kind: "state", name: "kv.v" }, {
@@ -708,7 +709,7 @@ const chunkLimits = (rows: readonly number[]): GenerationLimits => ({
   fullCapacities: new Map(),
 });
 
-Deno.test("assertGenerationRun は許可集合の物理 chunk 行数だけを通す", () => {
+test("assertGenerationRun は許可集合の物理 chunk 行数だけを通す", () => {
   // chunkLength=8 / バケット [2,4] の context が作る集合。
   const allowed = new Set([1, 2, 4, 8]);
 
@@ -741,7 +742,7 @@ Deno.test("assertGenerationRun は許可集合の物理 chunk 行数だけを通
   }
 });
 
-Deno.test("assertGenerationRun は queryLength が物理 chunk 行数を超える run を拒否する", () => {
+test("assertGenerationRun は queryLength が物理 chunk 行数を超える run を拒否する", () => {
   const allowed = new Set([1, 4, 8]);
   // バケット行（4）の上限は 4 まで — chunkLength の 8 ではない。
   assertGenerationRun(chunkLimits([4]), allowed, 0, 4);
@@ -752,7 +753,7 @@ Deno.test("assertGenerationRun は queryLength が物理 chunk 行数を超え�
   assert(error.message.includes("物理 chunk 行数 4 を超える"), error.message);
 });
 
-Deno.test("assertGenerationRun は full スロットの容量超過を許可集合に依らず拒否する", () => {
+test("assertGenerationRun は full スロットの容量超過を許可集合に依らず拒否する", () => {
   const limits: GenerationLimits = {
     chunkRows: new Set([4]),
     fullCapacities: new Map([["kslot", 6]]),

@@ -11,7 +11,7 @@
  */
 
 import { assertEquals, assertNotEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { decodeF16 } from "../src/format/f16.ts";
 import { decodeI2 } from "../src/format/i2.ts";
 import { decodeI4 } from "../src/format/i4.ts";

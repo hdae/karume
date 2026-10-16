@@ -5,6 +5,7 @@
 // 遠い場所で出る（形の合う別の出力を掴めば、もっともらしい token 列が黙って返る）ので、
 // 検証が抜けた欄はそのまま沈黙劣化の入口になる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { PreparedModel } from "@karume/runtime";
 import {
@@ -73,7 +74,7 @@ const specOf = (
   ...override,
 });
 
-Deno.test("createGenerationProgram: 製品形の配線をそのまま通し、graph を持ち越さない", () => {
+test("createGenerationProgram: 製品形の配線をそのまま通し、graph を持ち越さない", () => {
   const program = createGenerationProgram(specOf());
   assertEquals(program.inputIds, IDS);
   assertEquals(program.logits, LOGITS);
@@ -87,14 +88,14 @@ Deno.test("createGenerationProgram: 製品形の配線をそのまま通し、gr
   assertEquals(Object.hasOwn(program, "graph"), false);
 });
 
-Deno.test("createGenerationProgram: stopTokens は複製する（呼び手の配列と縁を切る）", () => {
+test("createGenerationProgram: stopTokens は複製する（呼び手の配列と縁を切る）", () => {
   const stopTokens = [1, 7];
   const program = createGenerationProgram(specOf({ stopTokens }));
   stopTokens.push(9);
   assertEquals(program.stopTokens, [1, 7]);
 });
 
-Deno.test("createGenerationProgram: chunkBuckets は複製し、省略は空配列へ畳む", () => {
+test("createGenerationProgram: chunkBuckets は複製し、省略は空配列へ畳む", () => {
   const chunkBuckets = [2, 3];
   const program = createGenerationProgram(specOf({ chunkBuckets }));
   assertEquals(program.chunkBuckets, [2, 3]);
@@ -105,7 +106,7 @@ Deno.test("createGenerationProgram: chunkBuckets は複製し、省略は空配�
   assertEquals(createGenerationProgram(specOf()).chunkBuckets, []);
 });
 
-Deno.test("createGenerationProgram: chunkBuckets の受理集合は runtime の門をそのまま通す", () => {
+test("createGenerationProgram: chunkBuckets の受理集合は runtime の門をそのまま通す", () => {
   // 規則（2 以上 chunkLength 未満・狭義昇順）は models 側に写していないので、ここで縛るのは
   // 「context を作る前に落ちる」こと自体である（写した規則が育つと context と食い違う）。
   const cases: readonly (readonly [readonly number[], string])[] = [
@@ -122,14 +123,14 @@ Deno.test("createGenerationProgram: chunkBuckets の受理集合は runtime の�
   }
 });
 
-Deno.test("createGenerationProgram: 派生入力の無いグラフは derivedInputs 省略で通る", () => {
+test("createGenerationProgram: 派生入力の無いグラフは derivedInputs 省略で通る", () => {
   const program = createGenerationProgram(
     specOf({ graph: graphOf({ derived: false }), derivedInputs: undefined }),
   );
   assertEquals(program.derivedInputs, undefined);
 });
 
-Deno.test("createGenerationProgram: 数値の受理集合", () => {
+test("createGenerationProgram: 数値の受理集合", () => {
   const cases: readonly (readonly [Partial<GenerationProgramSpec>, string])[] = [
     [{ chunkLength: 0 }, "chunkLength 0"],
     [{ chunkLength: 2.5 }, "chunkLength 2.5"],
@@ -146,7 +147,7 @@ Deno.test("createGenerationProgram: 数値の受理集合", () => {
   }
 });
 
-Deno.test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly", () => {
+test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly", () => {
   const cases: readonly (readonly [string, Partial<GenerationProgramSpec>, string])[] = [
     ["token id 入力が無い", { inputIds: "tokens" }, "token id 入力 'tokens' がグラフ入力に無い"],
     ["last_row が無い", { lastRow: "row" }, "last_row 入力 'row' がグラフ入力に無い"],
@@ -206,7 +207,7 @@ Deno.test("createGenerationProgram: 入力名 / dtype / 形が違えば fail lou
   }
 });
 
-Deno.test("createGenerationProgram: 入力長と選択行数に同じ記号を使う誤配線は構築時に落ちる", () => {
+test("createGenerationProgram: 入力長と選択行数に同じ記号を使う誤配線は構築時に落ちる", () => {
   // `input_ids:[1,M]`・`last_row:[M]` は個別の形検査をどちらも通るが、prefill（物理行 4・
   // 選択行 1）の最初の run で M が 4 と 1 に二重束縛されて runtime に拒否される。decode（行数 1）
   // は偶然通るので、検出が GPU 構築後の最初の prefill まで遅れる。
@@ -230,7 +231,7 @@ Deno.test("createGenerationProgram: 入力長と選択行数に同じ記号を�
   );
 });
 
-Deno.test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る", () => {
+test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る", () => {
   assertThrows(
     () => createGenerationProgram(specOf({ logits: "scores" })),
     Error,
@@ -280,7 +281,7 @@ Deno.test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を�
   );
 });
 
-Deno.test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () => {
+test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () => {
   // 出口 1 本の旧配布形は「hidden がグラフ出力に無い」として落ちる（互換分岐は無い）。
   assertThrows(
     () =>
@@ -337,7 +338,7 @@ Deno.test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る",
   );
 });
 
-Deno.test("createGenerationProgram: グラフ入力の被覆を両方向で見る", () => {
+test("createGenerationProgram: グラフ入力の被覆を両方向で見る", () => {
   // 欠け: per_layer_inputs をホスト側で供給しないまま program を組む。
   assertThrows(
     () => createGenerationProgram(specOf({ derivedInputs: undefined })),
@@ -370,7 +371,7 @@ Deno.test("createGenerationProgram: グラフ入力の被覆を両方向で見�
   );
 });
 
-Deno.test("createGenerationProgram: 常駐入力の席も被覆に数える（作り手が Session 側の入力）", () => {
+test("createGenerationProgram: 常駐入力の席も被覆に数える（作り手が Session 側の入力）", () => {
   // 値を作るのは Session の包みなので derivedInputs には載らない（PLE の GPU 常駐席）。
   const wiring = createGenerationProgram(
     specOf({ derivedInputs: undefined, residentInputs: [DERIVED] }),
@@ -391,7 +392,7 @@ Deno.test("createGenerationProgram: 常駐入力の席も被覆に数える（�
   );
 });
 
-Deno.test("createGenerationProgram: 記号は入力 shape か容量記号のどちらかで決まること", () => {
+test("createGenerationProgram: 記号は入力 shape か容量記号のどちらかで決まること", () => {
   // C（state スロットの容量記号）は入力 shape に現れない = 容量記号が唯一の源。
   assertThrows(
     () => createGenerationProgram(specOf({ capacitySymbol: "K" })),
@@ -423,7 +424,7 @@ Deno.test("createGenerationProgram: 記号は入力 shape か容量記号のど�
   assertEquals(createGenerationProgram(specOf()).capacitySymbol, "C");
 });
 
-Deno.test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのドリフト検出）", () => {
+test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのドリフト検出）", () => {
   // 型検査だけの門（実行時は何もしない）。`GenerationGraph` は `PreparedModel["graph"]` を
   // **写して**いるので、IR の inputs / outputs / values / symbols の綴りが runtime 側で
   // 変わるとこの 1 行がコンパイルエラーになる。
@@ -438,7 +439,7 @@ Deno.test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのド�
 // `Object.freeze` を外す / `[...wiring.stopTokens]` を `wiring.stopTokens` に戻す変更が、
 // 資産の無い環境（CI・多くの開発機）では全部緑のまま通っていた。
 
-Deno.test("generationProgramFace: 出る欄は数 6 つだけ（内部配線を出さない）", () => {
+test("generationProgramFace: 出る欄は数 6 つだけ（内部配線を出さない）", () => {
   const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7], chunkBuckets: [2] }));
   const face = generationProgramFace(wiring);
   assertEquals(Object.keys(face).sort(), [
@@ -459,7 +460,7 @@ Deno.test("generationProgramFace: 出る欄は数 6 つだけ（内部配線を�
   });
 });
 
-Deno.test("generationProgramFace: 凍結コピーを返す（消費者の書き換えが停止集合へ届かない）", () => {
+test("generationProgramFace: 凍結コピーを返す（消費者の書き換えが停止集合へ届かない）", () => {
   const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7], chunkBuckets: [2, 3] }));
   const face = generationProgramFace(wiring);
   assertEquals(Object.isFrozen(face), true, "face が凍結されていない");

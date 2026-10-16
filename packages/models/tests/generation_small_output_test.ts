@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { createSampler, type SamplerSpec } from "../src/generation/sampler.ts";
 import {
@@ -31,7 +32,7 @@ const small = (fake: FakeSession) => {
   };
   return { greedy, calls: () => calls };
 };
-Deno.test("greedy能力は温度0・加工無しの固定snapshotからだけ得る", () => {
+test("greedy能力は温度0・加工無しの固定snapshotからだけ得る", () => {
   for (
     const spec of [{}, { temperature: 0 }, { topK: 5, topP: .1 }, {
       repetitionPenalty: 1,
@@ -57,7 +58,7 @@ Deno.test("greedy能力は温度0・加工無しの固定snapshotからだけ得
   assert(s.greedy !== undefined);
 });
 
-Deno.test("小出力でも複数chunk・複数ターン・samplingへの切替が同じtokenと履歴を返す", async () => {
+test("小出力でも複数chunk・複数ターン・samplingへの切替が同じtokenと履歴を返す", async () => {
   const a = fakeSession({ successor: Array.from({ length: 16 }, (_, i) => (i + 1) % 16) });
   const b = fakeSession({ successor: Array.from({ length: 16 }, (_, i) => (i + 1) % 16) });
   const fast = small(b),
@@ -82,7 +83,7 @@ Deno.test("小出力でも複数chunk・複数ターン・samplingへの切替�
   }
 });
 
-Deno.test("penalty・bias・診断・投機は通常runを使う", async () => {
+test("penalty・bias・診断・投機は通常runを使う", async () => {
   const noGreedy = (): Promise<GreedyRunResult> => {
     throw new Error("must not call greedy");
   };
@@ -126,7 +127,7 @@ Deno.test("penalty・bias・診断・投機は通常runを使う", async () => {
 });
 
 for (const nanAt of [0, 1]) {
-  Deno.test(`小出力のNaN失敗後も書き込み済みfrontierを重複投入しない: ${nanAt}`, async () => {
+  test(`小出力のNaN失敗後も書き込み済みfrontierを重複投入しない: ${nanAt}`, async () => {
     const options: FakeOptions = { tokens: [5, 6, 7, 8, 9], nanAt };
     const a = fakeSession(options), b = fakeSession(options), fast = small(b);
     const slow = await createGenerationSequence({ session: a.session, program: programOf(a) });
@@ -150,7 +151,7 @@ for (const nanAt of [0, 1]) {
   });
 }
 
-Deno.test("中間prefillのNaNを最後のchunkの抽選と混同しない", async () => {
+test("中間prefillのNaNを最後のchunkの抽選と混同しない", async () => {
   const f = fakeSession({ tokens: [5, 6], nanAt: 0 }), fast = small(f);
   const sequence = await createGenerationSequence({
     session: f.session,
@@ -166,7 +167,7 @@ Deno.test("中間prefillのNaNを最後のchunkの抽選と混同しない", asy
   }
 });
 
-Deno.test("小出力も早期終了・中断後の会話を通常runと同じ位置から再開する", async () => {
+test("小出力も早期終了・中断後の会話を通常runと同じ位置から再開する", async () => {
   for (const how of ["break", "abort"]) {
     const results = [];
     for (const optimized of [false, true]) {

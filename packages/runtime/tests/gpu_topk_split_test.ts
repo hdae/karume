@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, prepareContainer } from "../mod.ts";
 import {
@@ -8,7 +9,7 @@ import {
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-Deno.test({
+test({
   name: "topk k=1: 分割境界と大語彙でNaN・同点・符号付きゼロの値ビットを保つ",
   ignore: !GPU_AVAILABLE,
   async fn() {
@@ -95,7 +96,7 @@ const intermediateGraph = (rows: number, dim: number): DeclarationJson => ({
   }],
 });
 
-Deno.test({
+test({
   name: "topk k=1: 中間入力をmergeまで保ち初回とbacking再利用で同じ値を返す",
   ignore: !GPU_AVAILABLE,
   async fn() {
@@ -130,7 +131,7 @@ Deno.test({
   },
 });
 
-Deno.test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", async () => {
+test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", async () => {
   const rows = 512, dim = 16384;
   const opened = await openModelBytes(intermediateGraph(rows, dim), []);
   const estimate = prepareContainer(opened, GRAPH_NAME).estimate();
@@ -140,7 +141,7 @@ Deno.test("topk1 mergeで同時に必要な元入力・部分結果・2出力を
   assert(workspace >= minimum, `workspace ${workspace} < simultaneously live ${minimum}`);
 });
 
-Deno.test({
+test({
   name: "topk k=1: 外側が空なら分割用一時を作らず空の2出力を返す",
   ignore: !GPU_AVAILABLE,
   async fn() {

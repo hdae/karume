@@ -29,6 +29,7 @@
 // - 分解経路とのビット同一（tests/gpu_attention_parity_test.ts）は i8a8 では原理的に成立
 //   しない。同テストは f32 / f16 変種専用の門として据え置く（別キーなので構造的に混ざらない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import {
@@ -474,7 +475,7 @@ const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
     0,
   );
 
-Deno.test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れている（vq 突合の前提）", () => {
+test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れている（vq 突合の前提）", () => {
   // GPU の除算（`x/s`）は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段
   // 揺れうる。余裕を**毎回実測**して門にしないと、(a2) の atol=0 は「たまたま通っているだけ」。
   let worst = Number.POSITIVE_INFINITY;
@@ -490,7 +491,7 @@ Deno.test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離�
 // (a) 整数を受け取ってからの純関数との atol=0 / (a2) Vᵀ の量子化の atol=0
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name:
     "attention_pv i8a8 の O が TS 参照（整数の手前で割った純関数）と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -559,7 +560,7 @@ Deno.test({
 // (b) qP の生成（exp の実装差 — atol=0 は原理的に立たない）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "attention_pv i8a8: qP は TS 参照と必ず ±1 段以内で一致する（exp の実装差・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -608,7 +609,7 @@ Deno.test({
 // (c) dp4a とエミュ
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name:
     "attention_pv i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -685,7 +686,7 @@ const relativeRms = (actual: ArrayLike<number>, expected: ArrayLike<number>): nu
   return Math.sqrt(diff / norm);
 };
 
-Deno.test({
+test({
   name: "attentionCompute:'a8' は ①QK と ③PV を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -728,7 +729,7 @@ Deno.test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-Deno.test({
+test({
   name:
     "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -777,7 +778,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "attentionCompute:'a8' の両段縮退（D%4 / N%4 とも不適格）は f32 経路とビット同一（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -795,7 +796,7 @@ Deno.test({
 });
 
 /** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。空の census を落とす理由は上の census と同じ。 */
-Deno.test({
+test({
   name:
     "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -847,7 +848,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "attention_pv i8a8: N が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,

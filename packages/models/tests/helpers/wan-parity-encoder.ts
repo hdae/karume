@@ -7,6 +7,7 @@
 //
 // 表の組み方は `wan_text_tokenizer_test.ts` と同じ（あちらがパリティの正本で、ここは読み口だけ）。
 
+import { readTextFile } from "@karume/test-support/fs";
 import { parseCodeRanges } from "../../src/text/code-ranges.ts";
 import type { T5Tables, T5VocabEntry } from "../../src/text/t5-tokenizer.ts";
 import { parsePromptCleanTables } from "../../src/wan/text/prompt-clean.ts";
@@ -38,7 +39,7 @@ type WanParityFixture = {
 };
 
 const fixture = JSON.parse(
-  await Deno.readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
+  await readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
 ) as WanParityFixture;
 
 /** フィクスチャの全ケース（生成の順）。 */

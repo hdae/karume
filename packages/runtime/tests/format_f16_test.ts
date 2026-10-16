@@ -8,10 +8,11 @@
 // MUST: 期待値は実装式ではなく IEEE 754 binary16 の定義から書き下す（`2**-24` 刻みの
 // subnormal・65504 の最大有限・65520 のオーバフロー境界）。実装から引くと恒真になる。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { alignF16Payload, decodeF16, f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 
-Deno.test("f16BitsToF32: 指数 0 は ±0 と subnormal（2**-24 刻み）", () => {
+test("f16BitsToF32: 指数 0 は ±0 と subnormal（2**-24 刻み）", () => {
   // ±0 は符号まで保つ（`Object.is` で区別できる形 = -1 * 0 の符号が消えていない）
   assertEquals(Object.is(f16BitsToF32(0x0000), 0), true);
   assertEquals(Object.is(f16BitsToF32(0x8000), -0), true);
@@ -22,7 +23,7 @@ Deno.test("f16BitsToF32: 指数 0 は ±0 と subnormal（2**-24 刻み）", () 
   assertStrictEquals(f16BitsToF32(0x0400), 2 ** -14);
 });
 
-Deno.test("f16BitsToF32: 指数 31 は ±Inf と NaN、それ以外は normal の既知値", () => {
+test("f16BitsToF32: 指数 31 は ±Inf と NaN、それ以外は normal の既知値", () => {
   assertStrictEquals(f16BitsToF32(0x7bff), 65504);
   assertStrictEquals(f16BitsToF32(0x7c00), Number.POSITIVE_INFINITY);
   assertStrictEquals(f16BitsToF32(0xfc00), Number.NEGATIVE_INFINITY);
@@ -31,11 +32,11 @@ Deno.test("f16BitsToF32: 指数 31 は ±Inf と NaN、それ以外は normal �
   assertStrictEquals(f16BitsToF32(0xc000), -2);
 });
 
-Deno.test("f16BitsToF32: 上位 16bit は無視する（下位だけを見る）", () => {
+test("f16BitsToF32: 上位 16bit は無視する（下位だけを見る）", () => {
   assertStrictEquals(f16BitsToF32(0xffff0000 | 0x3c00), 1);
 });
 
-Deno.test("roundToF16: オーバフロー境界と subnormal の同点は偶数丸め", () => {
+test("roundToF16: オーバフロー境界と subnormal の同点は偶数丸め", () => {
   // 65504（最大有限）と 65536（次の格子）の中点 65520 は上へ倒れて Inf になる
   assertStrictEquals(roundToF16(65520), Number.POSITIVE_INFINITY);
   assertStrictEquals(roundToF16(65519.999), 65504);
@@ -48,7 +49,7 @@ Deno.test("roundToF16: オーバフロー境界と subnormal の同点は偶数�
   assertStrictEquals(roundToF16(5 * 2 ** -25), 2 ** -23);
 });
 
-Deno.test("decodeF16: byteOffset が 2 整列していない view でも正しく読める", () => {
+test("decodeF16: byteOffset が 2 整列していない view でも正しく読める", () => {
   // MUST の検出器: `Uint16Array` の view を張る実装はここで RangeError になる。
   const buffer = new ArrayBuffer(8);
   const bytes = new Uint8Array(buffer);
@@ -58,7 +59,7 @@ Deno.test("decodeF16: byteOffset が 2 整列していない view でも正し�
   assertEquals([...decoded], [1, -2]);
 });
 
-Deno.test("alignF16Payload: 4 整列済みはコピーせず、端数 2 バイトはゼロ詰めする", () => {
+test("alignF16Payload: 4 整列済みはコピーせず、端数 2 バイトはゼロ詰めする", () => {
   const aligned = new Uint8Array([1, 2, 3, 4]);
   // 重みは GB 級なので、整列済みは**同一参照**で返る（無条件コピーは実測に響く）
   assertStrictEquals(alignF16Payload(aligned), aligned);
@@ -71,7 +72,7 @@ Deno.test("alignF16Payload: 4 整列済みはコピーせず、端数 2 バイ�
 
 // 展開が受ける形は safetensors の宣言検査が絞っている（要素数 → バイト長）。ここは
 // 「宣言どおりのバイト列なら値が合う」ことだけを見る（f16 → f32 は常に厳密）。
-Deno.test("decodeF16: 連続したパターンを宣言どおりの本数だけ展開する", () => {
+test("decodeF16: 連続したパターンを宣言どおりの本数だけ展開する", () => {
   const bytes = new Uint8Array([0x00, 0x00, 0x00, 0x80, 0x00, 0x3c, 0xff, 0x7b]);
   const decoded = decodeF16(bytes);
   assertEquals(decoded.length, 4);
@@ -80,7 +81,7 @@ Deno.test("decodeF16: 連続したパターンを宣言どおりの本数だけ�
   assertEquals([decoded[2], decoded[3]], [1, 65504]);
 });
 
-Deno.test("decodeF16: 奇数バイトは末尾の読み出しがはみ出して落ちる（出所不明の RangeError）", () => {
+test("decodeF16: 奇数バイトは末尾の読み出しがはみ出して落ちる（出所不明の RangeError）", () => {
   // 現状は safetensors の宣言検査（bit 境界門）が上流で塞いでいるので到達しない形。専用 Error
   // を持たない（i4 / i8 は持つ — 防御の非対称）ことと、落ち方が「DataView が範囲外」という
   // 出所の分からない診断になることを記録しておく。

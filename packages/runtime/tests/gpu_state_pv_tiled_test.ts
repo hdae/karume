@@ -18,6 +18,7 @@
 // MUST: 故障注入で門が落ちることを同じファイルで示す（確率の inv 除去・V の 2 源取り違え）。
 // 落ちない門は何も見ていない。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { stateColumnBase, stateSliding } from "../src/kernels/state-attention.ts";
@@ -398,7 +399,7 @@ const assertSameWords = (
   }
 };
 
-Deno.test({
+test({
   name: "③ₜ（V 行タイル共有）は ③ と O バッファが語単位で完全一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -428,7 +429,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "③ₜ は 2 回 dispatch・容量 C・行ブロックの割り方のどれを変えても O が動かない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -514,7 +515,7 @@ const PAD_INF_CASE: StateCase = {
   query: 17,
 };
 
-Deno.test({
+test({
   name: "③ₜ の pad 行は live 列の V が非有限でも厳密 0（③ の契約・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -559,7 +560,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "③ₜ の故障注入（確率の inv 除去 / V の 2 源取り違え）が語一致の門で落ちる",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

@@ -8,6 +8,7 @@
 // ②実行できないモデルは prepareContainer の時点で落ちること — 落ちた時点で重みの block に
 //   1 つも触れていないことを、同じ取得回数で言う。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { OpContractError } from "../src/ops.ts";
 import { RuntimeSupportError } from "../src/ops/support.ts";
@@ -21,7 +22,7 @@ import {
   openModelBytes,
 } from "./helpers/model-fixture.ts";
 
-Deno.test("prepareContainer の見積りは重みの block を 1 つも取らずに出る", async () => {
+test("prepareContainer の見積りは重みの block を 1 つも取らずに出る", async () => {
   const fixture = buildFixture();
   const counted = countingContainer(await openModelBytes(fixture.declaration, fixture.tensors));
   const prepared = prepareContainer(counted.container, GRAPH_NAME);
@@ -46,7 +47,7 @@ Deno.test("prepareContainer の見積りは重みの block を 1 つも取らず
   assertEquals(prepared.estimate(), estimate);
 });
 
-Deno.test("prepareContainer は capability 不足・契約違反を重みの block を取る前に落とす", async () => {
+test("prepareContainer は capability 不足・契約違反を重みの block を取る前に落とす", async () => {
   // bf16 は容器の codec 台帳にはあるが実行経路が無い（ADR 0069 の隣 — capability 不足で列挙）
   const unsupportedCodec = countingContainer(
     await openModelBytes(baseDeclaration(), [

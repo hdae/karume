@@ -6,6 +6,7 @@
  * ここで固定する（将来ここへ「明示 mapping → fail loudly」の解決順が入る）。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertStrictEquals } from "@std/assert";
 import { type FileRef, fileRefKey } from "../src/manifest.ts";
 import { type PinnedSource, sourceForRef } from "../src/source.ts";
@@ -36,20 +37,20 @@ const ref = (extra: Partial<FileRef> = {}): FileRef => ({
   ...extra,
 });
 
-Deno.test("sourceForRef: 自リポ参照はセッションの取得元をそのまま使う", () => {
+test("sourceForRef: 自リポ参照はセッションの取得元をそのまま使う", () => {
   const { source, calls } = recordingSource();
   assertStrictEquals(sourceForRef(source, ref()), source);
   assertEquals(calls, [], "越境でないのに originFor を引いている");
 });
 
-Deno.test("sourceForRef: repo と revision が揃った参照だけが宣言された取得元へ回る", () => {
+test("sourceForRef: repo と revision が揃った参照だけが宣言された取得元へ回る", () => {
   const { source, calls } = recordingSource();
   const crossed = sourceForRef(source, ref({ repo: "someone/other", revision: SHA }));
   assertEquals(calls, [["someone/other", SHA]]);
   assertStrictEquals(crossed === source, false, "越境先がセッションの取得元と同一になっている");
 });
 
-Deno.test("sourceForRef: 片方だけの宣言では越境しない（対でのみ意味を持つ）", async (t) => {
+test("sourceForRef: 片方だけの宣言では越境しない（対でのみ意味を持つ）", async (t) => {
   // parse が対を強制するので manifest 経由では現れないが、分岐が片方だけを見ていると
   // 「越境先の revision を自リポへ効かせる」等の取り違えが黙って成立する。
   await t.step("repo だけ", () => {
@@ -68,14 +69,14 @@ Deno.test("sourceForRef: 片方だけの宣言では越境しない（対での�
 // 宣言をキー側だけが越境として数えると、同じ 1 本のファイルが 2 本の別エントリになり（全量面は
 // 同じ URL を 2 回取得し、進捗の total も二重に積む）、しかもバイト列は正しいので黙って通る。
 
-Deno.test("fileRefKey: 対が揃った越境参照だけが宣言座標つきのキーになる", () => {
+test("fileRefKey: 対が揃った越境参照だけが宣言座標つきのキーになる", () => {
   assertEquals(
     fileRefKey(ref({ repo: "someone/other", revision: SHA })),
     `someone/other@${SHA}/transformer/model.safetensors`,
   );
 });
 
-Deno.test("fileRefKey: 片方だけの宣言は自リポの path キーへ畳まれる（sourceForRef と同じ判定）", async (t) => {
+test("fileRefKey: 片方だけの宣言は自リポの path キーへ畳まれる（sourceForRef と同じ判定）", async (t) => {
   await t.step("repo だけ", () => {
     assertEquals(fileRefKey(ref({ repo: "someone/other" })), ref().path);
   });

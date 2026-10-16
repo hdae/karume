@@ -20,6 +20,7 @@
 //    2026-10-11）。写さないと分岐した会話が最初の数 cycle の投機を繰り返し、共有すると片方の
 //    分岐の壁がもう片方のモードを倒す。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -113,7 +114,7 @@ const MILD: Walls = { cycle: 110, delivered: 2, plain: 50 };
 /** 強く負ける壁（比 (130/2)/50 = 1.30 — 上の 1.16 を超える）。 */
 const STRONG_LOSS: Walls = { cycle: 130, delivered: 2, plain: 50 };
 
-Deno.test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決定で 1 回だけ採る", () => {
+test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決定で 1 回だけ採る", () => {
   // `W1`（decode の 1 token あたりの壁）を測るまでは「抜けるべきか」を判断できない。未観測の
   // まま 16 cycle 回すと、M2 自由文（0.76×）では 2% を先に失う。
   const gate = createSpeculationGate();
@@ -132,7 +133,7 @@ Deno.test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決�
   assertEquals(gate.switches, 0, "`W1` の測り直しを切替に数えている");
 });
 
-Deno.test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロック 2 本連続で初めて抜ける", () => {
+test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロック 2 本連続で初めて抜ける", () => {
   const gate = createSpeculationGate();
   // 既定の window は 16。`W1` の測り直しは決定 1 / 15 に入るので、決定 17 本で投機 cycle は
   // ちょうど 15 本 = ブロックはまだ満ちない。負けの壁でもここでは倒れない。
@@ -160,7 +161,7 @@ Deno.test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロ
   assertEquals(gate.switches, 1);
 });
 
-Deno.test("ゲート T2′ 早抜け: 既定は off（比 1.30 でも 2 ブロック）・earlyLeave の席だけ 1 本で倒れる", () => {
+test("ゲート T2′ 早抜け: 既定は off（比 1.30 でも 2 ブロック）・earlyLeave の席だけ 1 本で倒れる", () => {
   // 既定 off の根拠は机上の確率ではなく実走である。受理はターン内で定常でなく、勝つ課題
   // （対話・比 0.90）でも 16 cycle 級で受理が落ちる区間が混ざるので、sequence を使い回した会話で
   // 7 ターン中 3 ターンが誤って抜けた（research §6.5 表 11″）。利得は「抜けるまでの 1 ブロック」で
@@ -206,7 +207,7 @@ const SEED_FIRST: Walls = { cycle: 100, delivered: 1, plain: 40 };
 /** 以後の定常（比 (100/3)/40 = 0.83 = 投機が勝っている）。 */
 const SEED_REST: Walls = { cycle: 100, delivered: 3, plain: 40 };
 
-Deno.test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っている文脈では抜けない", () => {
+test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っている文脈では抜けない", () => {
   // 移動平均で `A` を持つ設計では `ewma(undefined, 1) = 1` になり、次の決定で比が
   // `(100/1)/40 = 2.5 > leave` → **3 手目で plain へ落ちる**（実走で観測した欠陥そのもの）。
   // ブロック集計では 16 本の和で見るので `1600 / (1 + 15×3) = 34.8 ms/token` < `40 × 1.01`
@@ -226,7 +227,7 @@ Deno.test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っ�
   assertEquals(losing.switches, 1);
 });
 
-Deno.test("ゲート T4 探索: plain 側はバーストで測り、外れるたび間隔が倍になる", () => {
+test("ゲート T4 探索: plain 側はバーストで測り、外れるたび間隔が倍になる", () => {
   // 1 cycle 単発の探索では受理数の sd 0.88 に埋もれて判定できない（旧設計が plain から戻れ
   // なかった理由）。バーストで測り、外れたら遠ざける（固定間隔のままだと探索そのものの
   // 損失が M2 自由文で 0.950× になり、ゲートが救った負けを探索で払い直す）。
@@ -248,7 +249,7 @@ Deno.test("ゲート T4 探索: plain 側はバーストで測り、外れるた
   assertEquals(gate.switches, 1, "探索バーストを切替に数えている");
 });
 
-Deno.test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら戻り、間隔は 16 に戻る", () => {
+test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら戻り、間隔は 16 に戻る", () => {
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
   run(gate, LOSING, 3);
   assertEquals(gate.mode, "plain", "負けの壁で plain へ落ちる前提が崩れている");
@@ -280,7 +281,7 @@ Deno.test("ゲート T4′ 戻る: バーストの集計が enter を下回っ�
   );
 });
 
-Deno.test("ゲート T4″ 打ち切り: 強い負け（burstAbort）が出たバーストは burstMin 本目で畳む", () => {
+test("ゲート T4″ 打ち切り: 強い負け（burstAbort）が出たバーストは burstMin 本目で畳む", () => {
   // 負ける文脈が払う探索費の主はここである（バースト 8 cycle × 間隔 16 → 32 → …）。当たりの
   // 判定は満ちたバーストのままなので、`burst` そのものを縮めるのとは違って戻る精度は落ちない。
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
@@ -337,7 +338,7 @@ Deno.test("ゲート T4″ 打ち切り: 強い負け（burstAbort）が出た�
   assertEquals(lenient.mode, "plain", "比 1.30 のバーストで speculate へ戻っている");
 });
 
-Deno.test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step はブロックに数えない", () => {
+test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step はブロックに数えない", () => {
   // `W1` が古いと「抜けるべきか」の判断材料が古いままになる。間隔は判定ブロックと同じ 16 で、
   // 費用は 16 cycle につき plain 価格の 1 token（always 比 1% 前後）— これは払う。
   const gate = createSpeculationGate();
@@ -361,7 +362,7 @@ Deno.test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step
   assertEquals(counted.switches, 1);
 });
 
-Deno.test("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさない", async (t) => {
+test("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさない", async (t) => {
   await t.step("周期は進む（`W1` の初回サンプルがそのぶん早く来る）", () => {
     // 呼び手が「壁の観測に混ぜない」と決めた cycle（各ターンの最初の cycle）— 決定は読むが、
     // 返すのは観測ではなく `skip()` である。混ぜない cycle でも GPU の仕事は 1 本走っている。
@@ -388,7 +389,7 @@ Deno.test("ゲート T6 skip: 周期だけ進み、W1 もブロックも動か�
   });
 });
 
-Deno.test("ゲート T7 冪等: decide は状態を動かさない（切替は観測で起きる）", async (t) => {
+test("ゲート T7 冪等: decide は状態を動かさない（切替は観測で起きる）", async (t) => {
   // `decide()` は純粋な読み取りである。ここで縛るのは 2 方向: 同じ状態での重複読みが状態を
   // 進めないことと、状態が動いた（観測 / `skip`）直後の読みが**必ず作り直される**ことである。
   // 後者を見ないと、決定をメモ化して観測でだけ捨てる実装（= `skip` した cycle の決定が 1 手
@@ -497,7 +498,7 @@ const CONDITIONS: readonly Condition[] = [
   },
 ];
 
-Deno.test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ落ちる", async (t) => {
+test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ落ちる", async (t) => {
   for (const condition of CONDITIONS) {
     await t.step(`${condition.name}（比 ${condition.ratio}）`, () => {
       // 定数が research の表と同じものであること（表を写し間違えた瞬間に赤くなる）。
@@ -567,7 +568,7 @@ Deno.test("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain 
   });
 });
 
-Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) => {
+test("ゲート T9 門: ノブの値域は生成時に fail loudly", async (t) => {
   await t.step("alpha は 0 < α ≤ 1", () => {
     assertThrows(
       () => createSpeculationGate({ alpha: 0 }),
@@ -710,7 +711,7 @@ Deno.test("ゲート T9 門: ノブの値域は生成時に fail loudly", async 
   });
 });
 
-Deno.test("ゲート T9 門: ノブの不受理は家族横断の ModelInputError で捕まる", () => {
+test("ゲート T9 門: ノブの不受理は家族横断の ModelInputError で捕まる", () => {
   // ノブ束は `speculative.gate` で呼び手が渡すもので、値域も大小関係も「渡す値を直す」で通る
   // = ADR 0107 決定 2 の入力起因。ホストの 400 / 500 の分岐に乗ることを型で縛る。
   const rejected = [
@@ -734,7 +735,7 @@ Deno.test("ゲート T9 門: ノブの不受理は家族横断の ModelInputErro
   }
 });
 
-Deno.test("ゲート T10 分岐: fork は観測状態を写した独立のゲートを返す", async (t) => {
+test("ゲート T10 分岐: fork は観測状態を写した独立のゲートを返す", async (t) => {
   await t.step("同じ観測列を与えると、元と分岐の決定列とモードの推移が一致する", () => {
     const gate = createSpeculationGate();
     // 17 本で `W1` は測り済み・ブロック 1 は満ちる直前（T2 と同じ位置）。

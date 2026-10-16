@@ -23,6 +23,8 @@
 // - `ref-default` — pad が 0 サンプルの恒等枝
 // - `ref-hot` — 振幅 3 倍（LUFS 測定そのものが値域に依らないこと）
 
+import { readFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import { integratedLoudness, kWeightingFilters } from "../src/irodori/host/loudness.ts";
@@ -110,7 +112,7 @@ const readMeta = (): GoldenMeta => JSON.parse(metaText as string) as GoldenMeta;
 const readCase = async (
   name: string,
 ): Promise<Readonly<Record<string, Float32Array<ArrayBuffer>>>> => {
-  const bytes = await Deno.readFile(new URL(`case.${name}.safetensors`, GOLDEN_DIR));
+  const bytes = await readFile(new URL(`case.${name}.safetensors`, GOLDEN_DIR));
   const file = parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   );
@@ -138,7 +140,7 @@ const maxAbsDiff = (actual: Float32Array, expected: Float32Array, where: string)
 
 // ---- K-weighting の係数（式の写し間違いの検出）----------------------------
 
-Deno.test("kWeightingFilters: 48kHz の係数が上流（pyloudnorm の RBJ 式）の数と一致する", () => {
+test("kWeightingFilters: 48kHz の係数が上流（pyloudnorm の RBJ 式）の数と一致する", () => {
   const [shelf, highPass] = kWeightingFilters(SAMPLE_RATE);
   // 値は `pyloudnorm.IIRfilter` を 48kHz で組んだときの係数（recon の実測）。係数は式から
   // 作るので、ここが合っていれば fc / Q / dB ゲインの取り違えは無い。
@@ -156,7 +158,7 @@ Deno.test("kWeightingFilters: 48kHz の係数が上流（pyloudnorm の RBJ 式�
   assertEquals([...highPass.a], [1, -1.990076284018423, 0.9901009040531438], "high pass の分母");
 });
 
-Deno.test("kWeightingFilters: 周波数を変えると係数が動く（48kHz を焼き込んでいない）", () => {
+test("kWeightingFilters: 周波数を変えると係数が動く（48kHz を焼き込んでいない）", () => {
   const [shelf] = kWeightingFilters(SAMPLE_RATE);
   const [other] = kWeightingFilters(44100);
   assertEquals(shelf.b[0] === other.b[0], false, "サンプリング周波数が係数に効いていない");
@@ -164,16 +166,16 @@ Deno.test("kWeightingFilters: 周波数を変えると係数が動く（48kHz �
 
 // ---- 無音 / 異常入力 -----------------------------------------------------
 
-Deno.test("integratedLoudness: 無音は下限 −70 に clamp される（−Infinity を返さない）", () => {
+test("integratedLoudness: 無音は下限 −70 に clamp される（−Infinity を返さない）", () => {
   assertEquals(integratedLoudness(new Float32Array(SAMPLE_RATE), SAMPLE_RATE), -70);
 });
 
-Deno.test("integratedLoudness: 空の波形と不正な周波数は落とす", () => {
+test("integratedLoudness: 空の波形と不正な周波数は落とす", () => {
   assertThrows(() => integratedLoudness(new Float32Array(0), SAMPLE_RATE), RangeError, "波形が空");
   assertThrows(() => integratedLoudness(Float32Array.of(1), 0), RangeError, "正の整数でない");
 });
 
-Deno.test("integratedLoudness: 窓が導出できない極小の周波数は落とす（正の整数だけでは足りない）", () => {
+test("integratedLoudness: 窓が導出できない極小の周波数は落とす（正の整数だけでは足りない）", () => {
   // 窓は floor 導出（kernel = trunc(0.4·sr) / stride = trunc(0.1·sr)）なので、周波数が小さいと
   // 窓そのものが消える。検査が無いと sr ≤ 9 は stride 0 でブロック数が Infinity になり
   // 「Invalid typed array length」という無関係な顔で落ち、sr ≤ 2 は kernel も 0 になる。
@@ -191,7 +193,7 @@ Deno.test("integratedLoudness: 窓が導出できない極小の周波数は落�
   assertEquals(integratedLoudness(new Float32Array(20), 10), -70);
 });
 
-Deno.test("normalizeReference: 非有限サンプルは位置付きで落とす（利得の段を素通りさせない）", () => {
+test("normalizeReference: 非有限サンプルは位置付きで落とす（利得の段を素通りさせない）", () => {
   // 検査が無いと、NaN は `magnitude > peakBeforeScale` が常に false なので peak 判定を
   // すり抜け、+Inf は `peakGain = 1/∞ = 0` で**全サンプルを 0 に潰した**上で NaN 1 点だけを
   // 残す。どちらも例外にならず「ほぼ無音の参照音声」として encoder まで届く。
@@ -208,7 +210,7 @@ Deno.test("normalizeReference: 非有限サンプルは位置付きで落とす�
   }
 });
 
-Deno.test("normalizeReference: 空の波形は入口で落とす（窓の門に化けさせない）", () => {
+test("normalizeReference: 空の波形は入口で落とす（窓の門に化けさせない）", () => {
   // 空波形は呼び手が渡した wav の寸法そのもの（ADR 0107 決定 5）。この検査が無いと
   // `integratedLoudness` の「窓が導出できない」側に落ち、導出値（周波数・窓長）の門と
   // 区別が付かなくなる。
@@ -222,7 +224,7 @@ Deno.test("normalizeReference: 空の波形は入口で落とす（窓の門に�
   assert(!(windows instanceof ModelInputError));
 });
 
-Deno.test("normalizeReference: 有限な入力は通る（検査が全部を落としていない）", () => {
+test("normalizeReference: 有限な入力は通る（検査が全部を落としていない）", () => {
   const samples = Float32Array.from(
     { length: SAMPLE_RATE },
     (_, index) => Math.sin(index / 50) * 0.1,
@@ -234,18 +236,18 @@ Deno.test("normalizeReference: 有限な入力は通る（検査が全部を落�
 
 // ---- reflect pad（golden 無しでも成り立つ形）------------------------------
 
-Deno.test("reflectPadToHop: 鏡像は端のサンプルを含まない（torch の reflect と同じ綴り）", () => {
+test("reflectPadToHop: 鏡像は端のサンプルを含まない（torch の reflect と同じ綴り）", () => {
   const samples = Float32Array.from({ length: 5 }, (_, i) => i + 1) as Float32Array<ArrayBuffer>;
   // hop 4 → 長さ 5 は 8 へ（pad 3）。[1,2,3,4,5] → [1,2,3,4,5,4,3,2]。
   assertEquals(Array.from(reflectPadToHop(samples, 4)), [1, 2, 3, 4, 5, 4, 3, 2]);
 });
 
-Deno.test("reflectPadToHop: 既に倍数なら写しも作らず入力をそのまま返す", () => {
+test("reflectPadToHop: 既に倍数なら写しも作らず入力をそのまま返す", () => {
   const samples = new Float32Array(8) as Float32Array<ArrayBuffer>;
   assertEquals(reflectPadToHop(samples, 4), samples);
 });
 
-Deno.test("reflectPadToHop: hop 未満の入力は落とす（鏡像が自分の先頭を飛び越える）", () => {
+test("reflectPadToHop: hop 未満の入力は落とす（鏡像が自分の先頭を飛び越える）", () => {
   assertThrows(
     () => reflectPadToHop(new Float32Array(3) as Float32Array<ArrayBuffer>, 1920),
     ModelInputError,
@@ -255,7 +257,7 @@ Deno.test("reflectPadToHop: hop 未満の入力は落とす（鏡像が自分の
 
 // ---- golden とのパリティ（本体）-------------------------------------------
 
-Deno.test({
+test({
   name: "参照音声のホスト前処理が golden（上流実測）と一致する — 5 ケース",
   ignore: !RUNNABLE,
   fn: async () => {
@@ -318,7 +320,7 @@ Deno.test({
 
 // ---- 枝の踏み分け（恒真化の遮断）------------------------------------------
 
-Deno.test({
+test({
   name: "golden の 5 ケースが狙った枝を実際に踏んでいる",
   ignore: !RUNNABLE,
   fn: async () => {
@@ -356,7 +358,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "ブロックのゼロ pad: ref-odd と ref-plain の LUFS が一致しない（末尾を捨てていない）",
   ignore: !RUNNABLE,
   fn: async () => {

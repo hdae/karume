@@ -18,6 +18,7 @@
 // census 門（同決定 4 ③ — 席を指定したとき ①' と ③' が実際に走る）は
 // gpu_state_execution_test.ts。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import {
@@ -323,7 +324,7 @@ const assertBitIdentical = (
   }
 };
 
-Deno.test({
+test({
   name: "states 形 ③' KV 並列縮約は f64 参照と ③ の両方の帯に収まり、構造的保証を保つ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -418,7 +419,7 @@ Deno.test({
 });
 
 /** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
-Deno.test({
+test({
   name: "states 形 ③' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -551,7 +552,7 @@ const assertQkScores = (
  * 差が ①' 由来か ③' 由来か分けられない）。席そのままの組（①' + ③'）は最後に f64 参照との
  * 帯だけ見る。
  */
-Deno.test({
+test({
   name: "states 形 ①' D 並列縮約は f64 参照と ① の両方の帯に収まり、構造的保証を保つ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -660,7 +661,7 @@ Deno.test({
 });
 
 /** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
-Deno.test({
+test({
   name: "states 形 ①' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

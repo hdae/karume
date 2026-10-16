@@ -1,7 +1,7 @@
 // テストの GPU の取得口の緩和（破棄済みの device の回収を促す — 対症療法）の振る舞い。GPU は使わない。
 
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { collectDestroyedDevices, GC_SETTLE_MS } from "./helpers/collect-destroyed-devices.ts";
 
 // タイマの発火時刻の丸め分（setTimeout が要求より早く発火することは無いが、計測側の時計の粒度を許す）。

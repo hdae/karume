@@ -17,6 +17,7 @@
 //
 // 数値のビット同一（既定 GEMM 経路との u32 完全一致）は実 GPU 側 = tests/gpu_linear_gemv_test.ts。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
@@ -95,7 +96,7 @@ const ROWS_TABLES: readonly RowsTable[] = [
   },
 ];
 
-Deno.test("行ブロックの rows は (格納, m, n) の純関数で、掃引で採った表どおりに決まる", () => {
+test("行ブロックの rows は (格納, m, n) の純関数で、掃引で採った表どおりに決まる", () => {
   for (const { storage, n, note, picks } of ROWS_TABLES) {
     for (const [m, rows] of picks) {
       const actual = linearGemvRowsForShape(storage, m, n);
@@ -112,7 +113,7 @@ Deno.test("行ブロックの rows は (格納, m, n) の純関数で、掃引�
   }
 });
 
-Deno.test("並列度の目標を下げると rows が増える（他 device 用の静的ノブ）", () => {
+test("並列度の目標を下げると rows が増える（他 device 用の静的ノブ）", () => {
   // 目標は `SessionOptions.linearGemvRowsThreadTarget` が Session 生成時に固定する限界値で、
   // 飽和点が小さい GPU では下げて `rows` を立てる（重みの読み直しを減らす）。i4・m=4・n=2048 は
   // スレッド数 = 2048 × ceil(4 / rows) なので、目標 16384 では rows=1 まで落ち、目標を半分に
@@ -141,14 +142,14 @@ Deno.test("並列度の目標を下げると rows が増える（他 device 用�
   assertEquals(defaultLinearGemvRowsVariant("i4", 4, 2048, 2048).rows, 4);
 });
 
-Deno.test("M=1 は n によらず rows=1（decode の生成物を行ブロック化しない）", () => {
+test("M=1 は n によらず rows=1（decode の生成物を行ブロック化しない）", () => {
   for (const n of [1, 256, 2048, 16384, 262144]) {
     assertEquals(linearGemvRowsForShape("i4", 1, n), 1, `i4 n=${n}`);
     assertEquals(linearGemvRowsForShape("i8", 1, n), 1, `i8 n=${n}`);
   }
 });
 
-Deno.test("門の外の (m, n) は黙って丸めず落ちる", () => {
+test("門の外の (m, n) は黙って丸めず落ちる", () => {
   // m の域: 1..LINEAR_GEMV_MAX_ROWS。上限の外は既定の GEMM 骨格が受け持つ形なので、
   // ここが黙って上限へ丸めると「門が閉じた形が行ブロックで走る」沈黙誤値になる。
   assertThrows(() => linearGemvRowsForShape("i4", 0, 2048), CodegenError, "行数 0");
@@ -167,7 +168,7 @@ Deno.test("門の外の (m, n) は黙って丸めず落ちる", () => {
   assertThrows(() => linearGemvRowsForShape("f32", 8, 2048), CodegenError, "f32 格納");
 });
 
-Deno.test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と別キーになる", () => {
+test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と別キーになる", () => {
   assertEquals(
     linearGemvRowsKey("i4", 32, defaultLinearGemvRowsVariant("i4", 32, 2048)),
     "linear_gemv:v2:f32:c32u4r4:wi4g32",
@@ -203,7 +204,7 @@ Deno.test("キーに rows が載り、rows=1 の行ブロックは M=1 変種と
   );
 });
 
-Deno.test("uniform の m は 1..上限（行ブロックの y タイルが受ける範囲）", () => {
+test("uniform の m は 1..上限（行ブロックの y タイルが受ける範囲）", () => {
   // 上限ちょうどは通る（dims.m は行ブロックの書き戻しガードが読む値そのもの）
   assertEquals(
     [...linearGemvParams("i4", LINEAR_GEMV_MAX_ROWS, 2048, 128, 32)],
@@ -225,7 +226,7 @@ Deno.test("uniform の m は 1..上限（行ブロックの y タイルが受け
   );
 });
 
-Deno.test("f16 GEMV は M=1 と 8 要素整列のみを受け、行ブロックの生成を拒否する", () => {
+test("f16 GEMV は M=1 と 8 要素整列のみを受け、行ブロックの生成を拒否する", () => {
   assertEquals([...linearGemvParams("f16", 1, 36, 40)], [1, 36, 40, 0]);
   assertEquals([...linearGemvParams("f16", 1, 4, 0)], [1, 4, 0, 0]);
   assertThrows(() => linearGemvParams("f16", 2, 36, 40), CodegenError, "m=1 のみ");
@@ -245,7 +246,7 @@ Deno.test("f16 GEMV は M=1 と 8 要素整列のみを受け、行ブロック�
   );
 });
 
-Deno.test("f32 GEMV は M=1 と 4 要素整列のみを受け、行ブロックの生成を拒否する", () => {
+test("f32 GEMV は M=1 と 4 要素整列のみを受け、行ブロックの生成を拒否する", () => {
   assertEquals([...linearGemvParams("f32", 1, 36, 40)], [1, 36, 40, 0]);
   assertEquals([...linearGemvParams("f32", 1, 4, 0)], [1, 4, 0, 0]);
   assertThrows(() => linearGemvParams("f32", 2, 36, 40), CodegenError, "m=1 のみ");
@@ -265,7 +266,7 @@ Deno.test("f32 GEMV は M=1 と 4 要素整列のみを受け、行ブロック�
   );
 });
 
-Deno.test("INT2 行ブロックは既定の全高さでシェーダーを10 KB未満に保つ", () => {
+test("INT2 行ブロックは既定の全高さでシェーダーを10 KB未満に保つ", () => {
   // 初回解析費の回帰を検出する。従来の行別展開は r4 で76 KBだった（ADR 0082 追記8）。
   for (const rows of [1, 2, 4]) {
     const variant = { cols: 32, unroll: 4, rows };
@@ -278,7 +279,7 @@ Deno.test("INT2 行ブロックは既定の全高さでシェーダーを10 KB�
   }
 });
 
-Deno.test("INT4・INT8 行ブロックは既定の全高さでシェーダーを12 KB未満に保つ", () => {
+test("INT4・INT8 行ブロックは既定の全高さでシェーダーを12 KB未満に保つ", () => {
   // 従来の最大高さは約70 KB。行展開へ戻って初回コンパイルが増える回帰を検出する。
   for (const storage of ["i4", "i8"] as const) {
     for (const rows of storage === "i4" ? [1, 2, 4, 8] : [1, 2, 4, 8, 16]) {

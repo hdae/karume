@@ -1,3 +1,4 @@
+import { test as denoTest } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -21,7 +22,7 @@ const session = async (gpu: GpuContext) =>
     "model",
   );
 const test = (name: string, fn: () => Promise<void>): void =>
-  Deno.test({ name, ignore: !GPU_AVAILABLE, fn });
+  denoTest({ name, ignore: !GPU_AVAILABLE, fn });
 
 test("batch read: 未await enqueueと出力snapshotを1map・queue待ち0回で返す", async () => {
   const gpu = await acquireGpu(),

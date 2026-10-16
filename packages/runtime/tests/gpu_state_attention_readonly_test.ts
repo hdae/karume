@@ -10,6 +10,7 @@
 //    （スロットの当該行に毒値を置いて値が動かないこと）・故障注入（live を 1 列広げる / 窓の先頭を
 //    1 列前へずらす / 写像の法を window へ戻す）が赤になること
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import {
@@ -164,7 +165,7 @@ const assertBitIdentical = (
   }
 };
 
-Deno.test({
+test({
   name:
     "states 形 readonly 変種: 参照の帯・states 形（P−1・Q=1）とビット同一・空行と決定性（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -240,7 +241,7 @@ const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutatio
   },
 ];
 
-Deno.test({
+test({
   name:
     "states 形 readonly 変種: 故障注入（live のずれ・窓の先頭のずれ・写像の法）は参照の帯で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,

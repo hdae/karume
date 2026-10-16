@@ -6,8 +6,9 @@
 // 版のそれぞれの不一致を、その欄を名指す文言で返す ③ 照合の順（最初の不一致だけを返す）④ 投げない
 // （表の幾何から掃引の shape のカーネルを組めない表も文言で返す）。
 
+import { platformObject } from "@karume/test-support/webgpu";
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { geometryProfileMismatch, sweepCaseSetId } from "../tune.ts";
 import { DEFAULT_GEOMETRY_PROFILE, type GeometryProfile } from "../src/kernels/geometry-profile.ts";
 import { geometryProfileKernelsId } from "../src/tune/fingerprint.ts";
@@ -52,12 +53,12 @@ describe("geometryProfileMismatch", () => {
   it("adapter の 4 欄・カーネルの指紋・ケース集合の版が全て一致すれば undefined", () => {
     assertEquals(geometryProfileMismatch(stored(), ADAPTER), undefined);
     // GPUAdapterInfo の他の欄（subgroup の幅など）は見ない — GpuContext.adapterInfo をそのまま渡せる
-    const info: GPUAdapterInfo = {
+    const info: GPUAdapterInfo = platformObject<GPUAdapterInfo>({
       ...ADAPTER,
       subgroupMinSize: 4,
       subgroupMaxSize: 64,
       isFallbackAdapter: false,
-    };
+    });
     assertEquals(geometryProfileMismatch(stored(), info), undefined);
   });
 

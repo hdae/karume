@@ -7,6 +7,7 @@
  * 区間の GPU 失敗が `outputs` にも出て、成功データを返さないこと ⑥出力が常駐入力の別名になる
  * enqueueRead を受理で拒むこと ⑦決着前の Session.dispose を受付終了の前に拒むこと。
  */
+import { test as denoTest } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { acquireGpu, BatchScopeError, type GpuContext, ResidentTensor } from "../src/gpu/device.ts";
 import { GpuValidationError } from "../src/gpu/error-scope.ts";
@@ -25,7 +26,7 @@ const session = async (gpu: GpuContext) =>
     "model",
   );
 const test = (name: string, fn: () => Promise<void>): void =>
-  Deno.test({ name, ignore: !GPU_AVAILABLE, fn });
+  denoTest({ name, ignore: !GPU_AVAILABLE, fn });
 /** 次のマクロタスクまで待つ（決着前の `outputs` が解決していないことを見るため）。 */
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 /** 決着の staging（label `batch-readback`）の確保数と map 数を数える。 */

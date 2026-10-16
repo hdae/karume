@@ -19,6 +19,7 @@
 // MUST: 恒真化しないこと。①と②は別のパイプライン・別の WGSL・別の生成関数で、出力が定数で
 // ないことも見る。bias は全ケース非ゼロ（符号付きゼロの領域を避ける）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { alignF16Payload } from "../src/format/f16.ts";
@@ -499,7 +500,7 @@ const runParity = async (
   });
 };
 
-Deno.test({
+test({
   name: "conv3d の implicit GEMM は CPU 参照と一致する（形 8 種 × m タイル 64 / 32・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -720,7 +721,7 @@ const IDENTITY_REAL: readonly Conv3dCase[] = [
   },
 ];
 
-Deno.test({
+test({
   name:
     "恒等門 ①: Kt = 1 の conv3d はフレームごとの conv2d と Uint32 で一致する（小形 3 種 + 実寸 4 形・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -869,7 +870,7 @@ const ZERO_FRAME_CASES: readonly Conv3dCase[] = [
   },
 ];
 
-Deno.test({
+test({
   name:
     "恒等門 ②: 先頭 2 枚がゼロの Kt = 3 は最終スライスの Kt = 1 と一致する（符号付きゼロのみ許容・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -981,7 +982,7 @@ const POISON_CASES: readonly {
   },
 ];
 
-Deno.test({
+test({
   name:
     "conv3d は毒値を 1 語も残さず、executor は既定幾何の implicit GEMM を踏む（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1026,7 +1027,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "conv3d の N タイル数が dispatch 上限を超える形は DispatchLimitError（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1066,7 +1067,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "conv3d の groups > 1 は Session の構築時に落ちる（GPU の実装済み subset — ADR 0118 決定 1）",
   ignore: !GPU_AVAILABLE,
@@ -1095,7 +1096,7 @@ Deno.test({
  * f16 格納の重み（Wan の quant 席 — ADR 0118 決定 7）が**圧縮のまま常駐**し、`:wf16` の変種が走る。
  * 適格判定（WEIGHT_SLOTS）→ 常駐 → 導出相の `weightStorage` → キーの結線を 1 本で見る。
  */
-Deno.test({
+test({
   name: "conv3d の f16 重みは圧縮のまま常駐し、w=f16 変種が CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

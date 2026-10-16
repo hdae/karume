@@ -18,8 +18,9 @@
 //    adapter の limits に対して device を作る前に）。共有メモリの導出（純関数）は codegen が書く
 //    `var<workgroup>` の宣言から数えた総量と突き合わせ、埋め込みの表と既定の表は WebGPU の既定の上限で通る。
 
+import { platformObject } from "@karume/test-support/webgpu";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 // テスト専用: 別 realm の Promise を作る手段（runtime の本体は Web 標準 API だけ — ここは tests の依存）
 import { createContext, runInContext } from "node:vm";
 import { CodegenError } from "../src/codegen/errors.ts";
@@ -782,7 +783,7 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
 });
 
 /** 偽の adapter が返す情報（apple-metal-3 が当たる 4 欄 — 自動選択の結果が既定と見分けられる）。 */
-const FAKE_INFO: GPUAdapterInfo = {
+const FAKE_INFO: GPUAdapterInfo = platformObject<GPUAdapterInfo>({
   vendor: "apple",
   architecture: "metal-3",
   device: "",
@@ -790,7 +791,7 @@ const FAKE_INFO: GPUAdapterInfo = {
   subgroupMinSize: 0,
   subgroupMaxSize: 0,
   isFallbackAdapter: false,
-};
+});
 
 /**
  * `navigator.gpu` を、requestDevice の呼び出し回数を数え、limits を満たす偽の device を返す偽物に

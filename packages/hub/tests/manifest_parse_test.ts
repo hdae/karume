@@ -1,3 +1,5 @@
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   HubError,
@@ -35,7 +37,7 @@ const matchesDeclaredClass = (error: HubError, declared: string): boolean => {
 
 const loadInvalidCases = async (): Promise<readonly InvalidCase[]> => {
   const raw: unknown = JSON.parse(
-    await Deno.readTextFile(new URL("./fixtures/manifest-invalid.json", import.meta.url)),
+    await readTextFile(new URL("./fixtures/manifest-invalid.json", import.meta.url)),
   );
   if (!isRecord(raw) || !Array.isArray(raw["cases"])) throw new Error("fixture: cases が無い");
   const cases = raw["cases"].map((entry: unknown): InvalidCase => {
@@ -54,7 +56,7 @@ const loadInvalidCases = async (): Promise<readonly InvalidCase[]> => {
 
 const invalidCases = await loadInvalidCases();
 
-const validManifestText = await Deno.readTextFile(
+const validManifestText = await readTextFile(
   new URL("./fixtures/manifest-fetch.json", import.meta.url),
 );
 
@@ -125,7 +127,7 @@ const withModel = (
 const containerOf = (text: string) =>
   parseManifest(text).models["m"].weights["net"]["f16"].container;
 
-Deno.test("parseManifest: fixture の全違反ケースが宣言どおりのエラー型で赤くなる", async (t) => {
+test("parseManifest: fixture の全違反ケースが宣言どおりのエラー型で赤くなる", async (t) => {
   for (const testCase of invalidCases) {
     await t.step(`${testCase.name} → ${testCase.error}`, () => {
       const thrown = assertThrows(
@@ -141,7 +143,7 @@ Deno.test("parseManifest: fixture の全違反ケースが宣言どおりのエ�
   }
 });
 
-Deno.test("parseManifest: JSON として壊れていれば ManifestFormatError に包んで再送出する", () => {
+test("parseManifest: JSON として壊れていれば ManifestFormatError に包んで再送出する", () => {
   const error = assertThrows(
     () => parseManifest('{"format": "karume/5",}'),
     ManifestFormatError,
@@ -149,7 +151,7 @@ Deno.test("parseManifest: JSON として壊れていれば ManifestFormatError �
   assert(error.cause instanceof SyntaxError, "元の SyntaxError を cause に残す");
 });
 
-Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major として落とす", () => {
+test("parseManifest: v1（karume/1）は読まずに未対応 major として落とす", () => {
   // ADR 0109 決定 1: hub は現行版だけを読む（2 形パースを持たない）。旧クライアントの裏返しで、
   // 新クライアントが旧 manifest を**旧解釈で黙って実行する**経路も作らない。
   const error = assertThrows(
@@ -171,7 +173,7 @@ Deno.test("parseManifest: v1（karume/1）は読まずに未対応 major とし�
   );
 });
 
-Deno.test("parseManifest: 直前版（karume/4）も読まず、現行が karume/5 であることを名指しする", () => {
+test("parseManifest: 直前版（karume/4）も読まず、現行が karume/5 であることを名指しする", () => {
   // v4 と v5 の差は dtype エントリの中身（`shards` + `extras` → `container`）だけで、他の席は
   // そのまま。構造から入ると「未知キー 'shards'」という枝葉の診断になり、本当の理由
   // （この版は karume/5 のみ読む）が隠れる。断絶は format 文字列だけが宣言する（ADR 0109 決定 1）。
@@ -208,7 +210,7 @@ Deno.test("parseManifest: 直前版（karume/4）も読まず、現行が karume
   assert(!error.message.includes("'shards'"), `${error.message} が枝葉の未知キーを主因にしている`);
 });
 
-Deno.test("parseManifest: karume/2 の綴り（dtype エントリが {file}）も版で落とす", () => {
+test("parseManifest: karume/2 の綴り（dtype エントリが {file}）も版で落とす", () => {
   // format を未知キー検査より先に見ていることの観測点（上の v4 と同じ理由を旧い綴りで踏む）。
   const error = assertThrows(
     () =>
@@ -233,7 +235,7 @@ Deno.test("parseManifest: karume/2 の綴り（dtype エントリが {file}）�
   assert(!error.message.includes("'file'"), `${error.message} が枝葉の未知キーを主因にしている`);
 });
 
-Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
+test("parseManifest: 規模上限を数値で弾く", async (t) => {
   const modelEntry = (quantName: string) => ({
     pipeline: "anima/1",
     weights: { net: { f16: { container: CONTAINER } } },
@@ -319,7 +321,7 @@ Deno.test("parseManifest: 規模上限を数値で弾く", async (t) => {
   });
 });
 
-Deno.test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラーで落とす", async (t) => {
+test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエラーで落とす", async (t) => {
   // 深さは**バイト数と独立**に伸びる（開き括弧の連続だけで数千段が数 KB）。深さ検査が無いと
   // 全域走査の再帰がスタックを食い潰し、`ManifestFormatError` ではなく素の `RangeError` が
   // 抜けて `instanceof HubError` の分岐から漏れる。ここはその型を観測値として固定する。
@@ -347,7 +349,7 @@ Deno.test("parseManifest: 1MiB 未満でも深すぎる入れ子は型付きエ�
   });
 });
 
-Deno.test("parseManifest: 規模上限を超える weights の診断は線形で、利用可能ラベルを打ち切る", async (t) => {
+test("parseManifest: 規模上限を超える weights の診断は線形で、利用可能ラベルを打ち切る", async (t) => {
   // 件数検査より先に走る診断用走査（エラーに「利用可能なラベル」を載せるためのもの）が件数の
   // 2 乗で重いと、1MiB 以内の manifest 1 本で主スレッドを十数分止められる（DoS 防波堤の抜け道）。
   /** 中身が空の weights エントリを `count` 件持つ weights 表（組み立て側も線形に保つ）。 */
@@ -425,7 +427,7 @@ Deno.test("parseManifest: 規模上限を超える weights の診断は線形で
   });
 });
 
-Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラベルが載る", () => {
+test("parseManifest: エラーに利用可能な model / quant / dtype ラベルが載る", () => {
   const container = (mark: string) => ({
     descriptor: DESCRIPTOR,
     parts: [
@@ -469,7 +471,7 @@ Deno.test("parseManifest: エラーに利用可能な model / quant / dtype ラ�
   assert(error instanceof HubError, "全て HubError で一括して捌ける");
 });
 
-Deno.test("parseManifest: トップレベルの違反にはモデル一覧だけが載る（quant 文脈が無い）", () => {
+test("parseManifest: トップレベルの違反にはモデル一覧だけが載る（quant 文脈が無い）", () => {
   const error = assertThrows(
     () => parseManifest(withModel({}, { defaultModel: "absent" })),
     ManifestReferenceError,
@@ -479,7 +481,7 @@ Deno.test("parseManifest: トップレベルの違反にはモデル一覧だけ
   assertEquals(error.available.dtypes, {});
 });
 
-Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () => {
+test("parseManifest: 正常な manifest を宣言どおりに読む", () => {
   const manifest = parseManifest(validManifestText);
   assertEquals(manifest.format, "karume/5");
   assertEquals(manifest.generator, "karume/0.1.0");
@@ -527,7 +529,7 @@ Deno.test("parseManifest: 正常な manifest を宣言どおりに読む", () =>
   assertEquals(lite.available.dtypes, { text_encoder: ["f16"], transformer: ["i8"] });
 });
 
-Deno.test("parseManifest: モデル間で同一 path を指す共有は成立する（ADR 0041 §5）", () => {
+test("parseManifest: モデル間で同一 path を指す共有は成立する（ADR 0041 §5）", () => {
   const manifest = parseManifest(validManifestText);
   const shared = manifest.models["anima-turbo"].weights["text_encoder"]["f16"].container.parts[0];
   const same = manifest.models["anima-lite"].weights["text_encoder"]["f16"].container.parts[0];
@@ -537,7 +539,7 @@ Deno.test("parseManifest: モデル間で同一 path を指す共有は成立す
   assert(same === shared, "同一 path の参照が畳まれていない");
 });
 
-Deno.test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t) => {
+test("parseManifest: weights の container 欄（ADR 0109 決定 3）", async (t) => {
   await t.step("descriptor は 2 文書それぞれの長さと sha256 を持つ", () => {
     const container = containerOf(withModel());
     assertEquals(container.descriptor.graph, DESCRIPTOR.graph);
@@ -630,7 +632,7 @@ Deno.test("parseManifest: weights の container 欄（ADR 0109 決定 3）", asy
   });
 });
 
-Deno.test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど（container-v1 §8）", async (t) => {
+test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょうど（container-v1 §8）", async (t) => {
   // 宣言どうしの整合なので、1 バイトも取らずに見られる。ここが緩いと「取得してから長さ違いに
   // 気づく」形に戻る。
   await t.step("ちょうどは通る", () => {
@@ -667,7 +669,7 @@ Deno.test("parseManifest: part 0 の size は「ヘッダ + 2 文書」ちょう
   });
 });
 
-Deno.test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10）", async (t) => {
+test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1 §10）", async (t) => {
   // 綴りは Python 正本 `tools/exporter/src/karume/container.py` の `MAX_DESCRIPTOR_BYTES` と同値。
   const LIMIT = 32 * 2 ** 20;
   const sized = (length: number) => ({
@@ -712,7 +714,7 @@ Deno.test("parseManifest: descriptor の 1 文書は 32MiB まで（container-v1
   });
 });
 
-Deno.test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — ファイル長で測る）", async (t) => {
+test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 — ファイル長で測る）", async (t) => {
   // 読み手は「器の寸法を宣言から見積る」（ADR 0089）前提で組まれているので、上限違反の part を
   // parse が黙って通すとブラウザで初めて破綻する。上限の綴りは Python 正本
   // `tools/exporter/src/karume/container.py` の `PART_MAX_BYTES` と同値。
@@ -755,7 +757,7 @@ Deno.test("parseManifest: part のバイト上限 1024MiB（container-v1 §10 �
   });
 });
 
-Deno.test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決定 3）", async (t) => {
+test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 決定 3）", async (t) => {
   const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const emptyPart = { path: "net/model-00002-of-00003.krm", size: 0, sha256: EMPTY_SHA };
 
@@ -801,7 +803,7 @@ Deno.test("parseManifest: 長さ 0 の part は添字 1 以上だけ（ADR 0109 
   });
 });
 
-Deno.test("parseManifest: pipeline の major は形だけ検査し、裁定は models 側へ渡す", () => {
+test("parseManifest: pipeline の major は形だけ検査し、裁定は models 側へ渡す", () => {
   // ADR 0038 §1: 未知 pipeline major を弾けるのは対応 major を宣言する models 実装だけ。
   // hub は綴りを検査して major を型で取り出すところまでを持つ。
   const manifest = parseManifest(withModel({ pipeline: "sbv2/7" }));
@@ -812,7 +814,7 @@ Deno.test("parseManifest: pipeline の major は形だけ検査し、裁定は m
 const withQuant = (patch: Record<string, unknown>): string =>
   withModel({ quants: { q: { weights: { net: "f16" }, session: {}, ...patch } } });
 
-Deno.test("parseManifest: quant の表示欄 label / description（ADR 0075）", async (t) => {
+test("parseManifest: quant の表示欄 label / description（ADR 0075）", async (t) => {
   await t.step("設定した文字列がそのまま型面へ出る", () => {
     const manifest = parseManifest(withQuant({
       label: "Balanced (int8)",
@@ -874,7 +876,7 @@ Deno.test("parseManifest: quant の表示欄 label / description（ADR 0075）",
   });
 });
 
-Deno.test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席）", async (t) => {
+test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置き席）", async (t) => {
   await t.step("limit 名 → 最小値の部分写像として型面へ出る", () => {
     const manifest = parseManifest(withQuant({
       requiredLimits: { maxBufferSize: 2147483648, maxStorageBufferBindingSize: 1073741824 },
@@ -945,7 +947,7 @@ Deno.test("parseManifest: quant の requiredLimits（ADR 0038 §7 の据え置�
 
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
-Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 §7）", async (t) => {
+test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0038 §7）", async (t) => {
   const cross = { repo: "other/stack", revision: COMMIT };
   /** 容器まるごとを越境させた形（ADR 0109 決定 3 — 越境は容器単位）。 */
   const foreignContainer = (patch: Record<string, unknown> = {}) => ({
@@ -1101,7 +1103,7 @@ Deno.test("parseManifest: ファイル参照の越境席 repo / revision（ADR 0
   });
 });
 
-Deno.test("parseManifest: quantのGEMV加算指定を保持し、未指定と不正値を区別する", async (t) => {
+test("parseManifest: quantのGEMV加算指定を保持し、未指定と不正値を区別する", async (t) => {
   for (const linearGemvReduce of ["sequential", "parallel"] as const) {
     await t.step(linearGemvReduce, () => {
       const manifest = parseManifest(withModel({
@@ -1119,7 +1121,7 @@ Deno.test("parseManifest: quantのGEMV加算指定を保持し、未指定と不
   }
 });
 
-Deno.test("parseManifest: quantのattention縮約形を保持し、未指定と不正値を区別する", async (t) => {
+test("parseManifest: quantのattention縮約形を保持し、未指定と不正値を区別する", async (t) => {
   for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
     await t.step(stateAttentionReduce, () => {
       const manifest = parseManifest(withModel({
@@ -1155,7 +1157,7 @@ Deno.test("parseManifest: quantのattention縮約形を保持し、未指定と�
   });
 });
 
-Deno.test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", async (t) => {
+test("parseManifest: 融合の真偽値を保持し、未指定・不正値と区別する", async (t) => {
   for (const key of ["fuseRmsNormAdd", "fuseLinearStaticQuantize", "packedStaticQuantize"]) {
     for (const value of [false, true]) {
       await t.step(`${key}=${value}`, () => {

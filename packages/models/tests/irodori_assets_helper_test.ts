@@ -4,10 +4,11 @@
 // tolerance 門が見る**唯一の数**で、資産も GPU も要る門の中に埋まっている。そのため比較子
 // 自身の退行は「門が緑のまま何も検出しない」形でしか出ない — ここが資産なしで踏める唯一の席。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { worstDifference } from "./helpers/irodori-assets.ts";
 
-Deno.test("worstDifference: 最大絶対差とその位置を返す", () => {
+test("worstDifference: 最大絶対差とその位置を返す", () => {
   const actual = Float32Array.from([1, 2, 3, 4]);
   const golden = Float32Array.from([1, 2.5, 3, 4.25]);
   const { maxAbs, at } = worstDifference(actual, golden);
@@ -15,7 +16,7 @@ Deno.test("worstDifference: 最大絶対差とその位置を返す", () => {
   assertEquals(Math.round(maxAbs * 100) / 100, 0.5);
 });
 
-Deno.test("worstDifference: 要素数が違えば落とす", () => {
+test("worstDifference: 要素数が違えば落とす", () => {
   assertThrows(
     () => worstDifference(Float32Array.from([1]), Float32Array.from([1, 2])),
     Error,
@@ -23,7 +24,7 @@ Deno.test("worstDifference: 要素数が違えば落とす", () => {
   );
 });
 
-Deno.test("worstDifference: 全要素 NaN を「差 0」として通さない", () => {
+test("worstDifference: 全要素 NaN を「差 0」として通さない", () => {
   // 素朴な `difference > maxAbs` は NaN で常に偽なので、maxAbs は初期値 0 のまま返り
   // 上流の `maxAbs > zAtol` が偽 = **全 NaN の latent が tolerance 門を通り抜ける**。
   const nan = Float32Array.from([NaN, NaN, NaN]);
@@ -34,7 +35,7 @@ Deno.test("worstDifference: 全要素 NaN を「差 0」として通さない", 
   );
 });
 
-Deno.test("worstDifference: 有限標本に紛れた 1 個の非有限も落とす（位置を添える）", () => {
+test("worstDifference: 有限標本に紛れた 1 個の非有限も落とす（位置を添える）", () => {
   // 「有限 1 標本 + 残り NaN」で maxAbs が小さく出る形（判別帯の下限では捕まらない）。
   const actual = Float32Array.from([0.1, Infinity, 0.2]);
   const error = assertThrows(

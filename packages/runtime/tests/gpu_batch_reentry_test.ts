@@ -6,6 +6,7 @@
 // Session / batch を再入すると、呼び出し時点で済ませた受け口の検査がすり抜ける。ここでは getter
 // から再入する形を意図的に作り、①拒否されること ②内側の操作が正しく決着すること を固定する。
 
+import { test as denoTest } from "@karume/test-support/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   acquireGpu,
@@ -30,7 +31,7 @@ const session = async (gpu: GpuContext) =>
     "model",
   );
 const test = (name: string, fn: () => Promise<void>): void =>
-  Deno.test({ name, ignore: !GPU_AVAILABLE, fn });
+  denoTest({ name, ignore: !GPU_AVAILABLE, fn });
 
 /**
  * 自己デッドロックの回帰は「決着しない」形で現れるので、待ちに上限を置く（timer は必ず解除して

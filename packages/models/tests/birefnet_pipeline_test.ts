@@ -33,6 +33,8 @@
 //    shape も値域も合ったまま通る（順序違いは α が数十の差でずれるだけ）ので、順序が入れ替わったら
 //    落ちる非対称なケースを置く。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertAlmostEquals,
@@ -96,7 +98,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
@@ -105,7 +107,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipeline の契約名が birefnet でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が birefnet でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/1" }));
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -114,7 +116,7 @@ Deno.test("fromAssets: pipeline の契約名が birefnet でない manifest を�
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/3" }));
   await assertRejects(
@@ -124,7 +126,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しない配布形）も落とす", async () => {
+test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しない配布形）も落とす", async () => {
   // major 1 の配布形は `postprocess` を持たない。major の門が無いと pipelineConfig の欠落で落ちる
   // だけになり、「配布形を組み直せ」という直し方が文言から読めない。
   const legacy: Record<string, unknown> = { ...PIPELINE_CONFIG };
@@ -137,7 +139,7 @@ Deno.test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言し
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => BirefnetPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
@@ -146,7 +148,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
   // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] } }),
@@ -158,7 +160,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
   );
 });
 
-Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
+test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, interpolation: "bicubic" } }),
   );
@@ -169,7 +171,7 @@ Deno.test("fromAssets: bilinear 以外の補間を宣言した配布形は受理
   );
 });
 
-Deno.test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築時に落ちる", async () => {
+test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築時に落ちる", async () => {
   const missing: Record<string, unknown> = { ...PIPELINE_CONFIG };
   delete missing.postprocess;
   const manifest = parseManifest(manifestText({ pipelineConfig: missing }));
@@ -180,7 +182,7 @@ Deno.test("fromAssets: 後処理の手順を宣言しない pipelineConfig は�
   );
 });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 上の 8 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -208,7 +210,7 @@ const matteGraph = (
 
 const birefnetConfig = parseBirefnetPipelineConfig(PIPELINE_CONFIG);
 
-Deno.test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
+test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
   // 2048² の系列を 1024² の席へ置いた形。前処理は宣言の寸法へ resize するのでホスト側は
   // 最後まで通り、落ちるのは Session の shape 検査 = どちらが正しいか読めない。
   assertStaticDim(matteGraph(), "pixel_values", 3, birefnetConfig.imageWidth, "imageWidth");
@@ -227,7 +229,7 @@ Deno.test("assertStaticDim: 宣言どおりのグラフは通り、解像度違�
   assert(error.message.includes("pipelineConfig は 1024"), error.message);
 });
 
-Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   assertThrows(
     () => assertStaticDim(matteGraph(), "pixel", 3, birefnetConfig.imageWidth, "imageWidth"),
     Error,
@@ -235,7 +237,7 @@ Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () =
   );
 });
 
-Deno.test("assertMatteShape: multi-scale で焼かれた出力は要素数でなく形で落ちる", () => {
+test("assertMatteShape: multi-scale で焼かれた出力は要素数でなく形で落ちる", () => {
   // `[1, 3, S, S]` は中間予測込みの export。要素数だけを見る門だと**別の値を α として**通る。
   assertMatteShape(matteGraph(), birefnetConfig, "マットの形");
   assertThrows(
@@ -250,7 +252,7 @@ Deno.test("assertMatteShape: multi-scale で焼かれた出力は要素数でな
   );
 });
 
-Deno.test("assertMatteShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
+test("assertMatteShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
   // `[1, 1, 1024]` は宣言されている全軸が期待と一致するので、`shape.length` を見ない門は
   // 素通しする（階数まで見る理由そのもの）。
   assertThrows(
@@ -260,7 +262,7 @@ Deno.test("assertMatteShape: 先頭が一致する短い宣言も落とす（軸
   );
 });
 
-Deno.test("assertMatteShape: 出力名の宣言が values に無ければ落とす", () => {
+test("assertMatteShape: 出力名の宣言が values に無ければ落とす", () => {
   const model = stubModel({
     inputs: [{ name: "pixel_values", shape: [1, 3, 1024, 1024] }],
     outputs: ["matte"],
@@ -294,7 +296,7 @@ type Fixture = {
 };
 
 const FIXTURE_PATH = new URL("./fixtures/image-preprocess/parity.json", import.meta.url);
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 /** 縦は 4 倍縮小・横は 3 倍拡大の非正方ケース（24×5 → 6×15）。 */
 const MIXED_AXIS = "mixed-axis";
@@ -326,7 +328,7 @@ const configFor = (entry: ParityCase, swapped = false) =>
     postprocess: "u8-pil-bicubic",
   });
 
-Deno.test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
+test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
   const entry = parityCase(MIXED_AXIS);
   const got = preprocessPixelValues(configFor(entry), imageOf(entry));
   assertEquals(got.length, entry.pixelValues.length);
@@ -335,7 +337,7 @@ Deno.test("前処理の結線: 宣言の寸法・mean・std で Python 正本と
   }
 });
 
-Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
+test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
   // 上のケースが恒真でないことの担保 — 非正方の宣言を転置すると値が変わる
   // （`resizeRgb8` は `(width, height)` の順で受ける）。
   const entry = parityCase(MIXED_AXIS);
@@ -354,7 +356,7 @@ Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別
 /** 8bit へ落ちたあとの 1 LSB。 */
 const ALPHA_LSB = 1;
 
-Deno.test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化する（両手順）", () => {
+test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化する（両手順）", () => {
   // logit 0 → 0.5 → 127.5 → 最近傍へ丸めて 128（切り捨てだと 127 になる — 両系列の上流の
   // 切り捨て〈HR は ToPILImage・Lucida は `astype("uint8")`〉ではなく丸めを採る決定が値に出る点）。
   // `u8-pil-bicubic` は寸法が同じ軸の resample を飛ばすので、恒等では両手順とも同じ値になる。
@@ -370,7 +372,7 @@ Deno.test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量�
   }
 });
 
-Deno.test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない・両手順）", () => {
+test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない・両手順）", () => {
   for (const procedure of MATTE_PROCEDURES) {
     const matte = matteFromLogits(new Float32Array(4 * 4), 4, 4, 7, 3, procedure);
     assertEquals(matte.width, 7, procedure);
@@ -379,7 +381,7 @@ Deno.test("後処理: 返るのは**入力画像の**寸法（グラフの寸法
   }
 });
 
-Deno.test("後処理: sigmoid は resize の**前**に掛かる（順序を入れ替えると落ちる）", () => {
+test("後処理: sigmoid は resize の**前**に掛かる（順序を入れ替えると落ちる）", () => {
   // 2×1 → 1×1 の縮小はどちらのカーネルも 2 点に等しい重みが掛かるので、resize は 2 点の平均そのもの。
   //   sigmoid 先（float-bilinear）: (σ(0) + σ(10)) / 2 = (0.5 + 0.9999546) / 2 = 0.7499773 → 191
   //   sigmoid 先（u8-pil-bicubic）: 8bit で (128 + 255) / 2 = 191.5 → 192（固定小数点の四捨五入）
@@ -395,13 +397,13 @@ Deno.test("後処理: sigmoid は resize の**前**に掛かる（順序を入�
   }
 });
 
-Deno.test("resizePlaneF32: 同寸法なら値をそのまま通す（丸めも縮退も挟まない）", () => {
+test("resizePlaneF32: 同寸法なら値をそのまま通す（丸めも縮退も挟まない）", () => {
   const plane = Float32Array.from([0.1, 0.25, 0.5, 0.75, 0.9, 1]);
   const out = resizePlaneF32(plane, 3, 2, 3, 2);
   assertEquals([...out], [...plane]);
 });
 
-Deno.test("resizePlaneF32: 一様な平面は寸法を変えても一様（重み総和が 1）", () => {
+test("resizePlaneF32: 一様な平面は寸法を変えても一様（重み総和が 1）", () => {
   const plane = new Float32Array(5 * 7).fill(0.375);
   for (const [width, height] of [[3, 2], [11, 13], [5, 7]] as const) {
     const out = resizePlaneF32(plane, 5, 7, width, height);
@@ -410,7 +412,7 @@ Deno.test("resizePlaneF32: 一様な平面は寸法を変えても一様（重�
   }
 });
 
-Deno.test("resizePlaneF32: 縮小の重みが Pillow の台と一致する（手計算との突合）", () => {
+test("resizePlaneF32: 縮小の重みが Pillow の台と一致する（手計算との突合）", () => {
   // 4 → 2 の縮小: scale = 2 なので台が 2 倍に伸び、出力 0 の重みは
   // triangle(-0.25) / triangle(0.25) / triangle(0.75) = 0.75 / 0.75 / 0.25 を総和 1.75 で
   // 正規化したもの。出力 1 は左右反転した並び。**非対称な入力**でないと反転を検出できない。
@@ -419,7 +421,7 @@ Deno.test("resizePlaneF32: 縮小の重みが Pillow の台と一致する（手
   assertAlmostEquals(out[1], 0.75 / 1.75, 1e-7);
 });
 
-Deno.test("resizePlaneF32: 横方向だけの勾配は resize しても横方向だけ（軸の取り違え検出）", () => {
+test("resizePlaneF32: 横方向だけの勾配は resize しても横方向だけ（軸の取り違え検出）", () => {
   const width = 6;
   const height = 4;
   const plane = new Float32Array(width * height);
@@ -435,12 +437,12 @@ Deno.test("resizePlaneF32: 横方向だけの勾配は resize しても横方向
   assert(out[0] < out[2], "横方向の単調性が失われた（軸が入れ替わっている）");
 });
 
-Deno.test("resizePlaneF32: 長さの食い違いは落とす（黙って途中まで読まない）", () => {
+test("resizePlaneF32: 長さの食い違いは落とす（黙って途中まで読まない）", () => {
   assertThrows(() => resizePlaneF32(new Float32Array(5), 3, 2, 3, 2), Error, "平面の長さ 5");
   assertThrows(() => resizePlaneF32(new Float32Array(6), 3, 2, 0, 2), RangeError, "出力幅");
 });
 
-Deno.test("後処理: α は 8bit の全域を使う（飽和側が 1 LSB で潰れていない）", () => {
+test("後処理: α は 8bit の全域を使う（飽和側が 1 LSB で潰れていない）", () => {
   // 恒真化の防止 — 上のケースが全て 128 付近でも通ってしまう形を避ける。
   for (const procedure of MATTE_PROCEDURES) {
     const matte = matteFromLogits(Float32Array.from([-20, -2, 2, 20]), 4, 1, 4, 1, procedure);
@@ -503,7 +505,7 @@ const pipelineWithFakeSession = (
   return Reflect.construct(BirefnetPipeline, [state]);
 };
 
-Deno.test("segment: logit に当てる手順は配布形の宣言どおり（matteFromLogits の明示の手順とビット一致）", async () => {
+test("segment: logit に当てる手順は配布形の宣言どおり（matteFromLogits の明示の手順とビット一致）", async () => {
   const logits = fakeLogits();
   const image: Rgb8Image = {
     data: new Uint8Array(FAKE_IMAGE.width * FAKE_IMAGE.height * 3).fill(128),

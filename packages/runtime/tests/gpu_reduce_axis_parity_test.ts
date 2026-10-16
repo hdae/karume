@@ -22,6 +22,7 @@
 // ADR 0020 決定 1 の「実 GPU で実走して確かめる」水準は、軸変種についてはここにしか無い
 // （tests/gpu_ops_test.ts の NaN ケースは rank 2 の最終次元 = 行変種しか踏まない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import {
@@ -445,7 +446,7 @@ const firstMismatches = (a: Uint32Array, b: Uint32Array): readonly string[] => {
   return found;
 };
 
-Deno.test({
+test({
   name: "軸 reduce は「permute + 行 reduce」と**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -539,7 +540,7 @@ const reduceKeysUsed = async (
   }
 };
 
-Deno.test({
+test({
   name: "executor は縮約軸で 2 カーネルを踏み分ける（最終次元 = 行 / それ以外 = 軸・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

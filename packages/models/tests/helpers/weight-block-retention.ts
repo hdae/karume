@@ -5,7 +5,7 @@
  * 立てる口が無く、旗が無いと「到達不能になったバイト列がまだ回収されていないだけ」と
  * 「握られたまま」を区別できない（測る前に必ず gc を 1 回踏む）。
  *
- * 測るのは `Deno.memoryUsage().external`（ArrayBuffer の実体の合計）。**キャッシュの中身を
+ * 測るのは `process.memoryUsage().external`（ArrayBuffer の実体の合計）。**キャッシュの中身を
  * 明示的に捨ててから**測ることで、残る外部メモリ = models 側が握っているバイト列だけになる。
  * `open(key)` は保持したまま測る（部品の供給口が生きている限り常駐する、という元の姿を
  * 再現するため）。コンテナ経路では供給口が握るのは**区間読みの口**だけで、重みの block は
@@ -77,11 +77,11 @@ const externalAfterGc = (): number => {
   const collect = (globalThis as { gc?: () => void }).gc;
   if (collect === undefined) {
     console.error("weight-block-retention: --v8-flags=--expose-gc 付きで起動していない");
-    Deno.exit(2);
+    process.exit(2);
   }
   collect();
   collect();
-  return Deno.memoryUsage().external;
+  return process.memoryUsage().external;
 };
 
 /**
@@ -138,7 +138,7 @@ const main = async (): Promise<void> => {
   // `open` を gc の後まで生かす（ここで初めて到達可能性が切れる）。
   if (open("dit").graph.outputs[0] !== "y") {
     console.error("weight-block-retention: グラフ宣言が読めない（フィクスチャの誤り）");
-    Deno.exit(2);
+    process.exit(2);
   }
 
   if (resident > ALLOWED_RESIDENT_BYTES) {
@@ -147,7 +147,7 @@ const main = async (): Promise<void> => {
         `（external=${mib(resident)} > 許容 ${mib(ALLOWED_RESIDENT_BYTES)}` +
         ` / 重み 1 本 ${mib(WEIGHT_BYTES)}）`,
     );
-    Deno.exit(1);
+    process.exit(1);
   }
   console.log(`weight-block-retention: external=${mib(resident)}`);
 };

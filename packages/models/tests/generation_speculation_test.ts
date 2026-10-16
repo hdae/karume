@@ -27,6 +27,7 @@
 // T18 は分岐（`fork`）の投機側の席である — drafter は複製した context に対して開き直し、ゲートは
 // 観測状態を写す（ADR 0083 追記 2026-10-11）。
 
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -337,7 +338,7 @@ const assertMatchesPlain = async (
 
 // ---- T1〜T3: 受理数と出力の同一性 ---------------------------------------------
 
-Deno.test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（cycle ごとに frontier 1 個だけ確定）", async () => {
+test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（cycle ごとに frontier 1 個だけ確定）", async () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 5 };
   const run = await runSpeculative({ drafter: wrongDrafter(), request });
   await assertMatchesPlain(request, run);
@@ -357,7 +358,7 @@ Deno.test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（
   assertEquals(verifyCalls(run.fake).map((call) => call.queryLength), [4, 3, 2, 1]);
 });
 
-Deno.test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 個を確定させる", async () => {
+test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 個を確定させる", async () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
   const run = await runSpeculative({ drafter: oracleDrafter(), request });
   await assertMatchesPlain(request, run);
@@ -376,7 +377,7 @@ Deno.test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 
   assertEquals((await runPlain(request)).fake.calls.length, 9);
 });
 
-Deno.test("T3 部分受理: 先頭一致で止まった位置が受理数になる（a = 1 / 2）", async (t) => {
+test("T3 部分受理: 先頭一致で止まった位置が受理数になる（a = 1 / 2）", async (t) => {
   await t.step("a = 1（1 本目だけ当たる）", async () => {
     const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 7 };
     const run = await runSpeculative({ drafter: partialDrafter(1), request });
@@ -411,7 +412,7 @@ Deno.test("T3 部分受理: 先頭一致で止まった位置が受理数にな�
   });
 });
 
-Deno.test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列は非投機と厳密一致する", async (t) => {
+test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列は非投機と厳密一致する", async (t) => {
   // 受理は行ごとに `sampler.next` を「非投機の decode が同じ位置で行う抽選」と同じ logits・
   // 同じ history・同じ順で **確定 token 1 個につき 1 回**呼ぶ。RNG の消費列が非投機と 1 対 1 に
   // 並ぶので、温度 > 0 でも token 列は変わらない（one-hot draft の speculative sampling）。
@@ -515,7 +516,7 @@ Deno.test("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列
 
 // ---- T4 / T5: 停止 token -------------------------------------------------------
 
-Deno.test("T4 停止 token が draft の途中: そこで受理を打ち切り、後ろの行は確定させない", async () => {
+test("T4 停止 token が draft の途中: そこで受理を打ち切り、後ろの行は確定させない", async () => {
   // 連鎖は 6 → 8 → 9 → 3 → 13。停止 token 9 は cycle 1 の d₂ に当たる。
   const stopTokens = [9];
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
@@ -552,7 +553,7 @@ Deno.test("T4 停止 token が draft の途中: そこで受理を打ち切り�
   assertEquals(next.positions, [4, 5, 0, 0]);
 });
 
-Deno.test("T4′ 停止 token の先の行は抽選しない（非投機が触れない logits で落ちない）", async () => {
+test("T4′ 停止 token の先の行は抽選しない（非投機が触れない logits で落ちない）", async () => {
   // 故障注入: verify（call 1）の**行 2 だけ**に NaN を混ぜる。行 2 は「停止 token 9 を確定した
   // 後の行」= 非投機なら run そのものが出ない位置である。受理を停止 token で打ち切らない実装は
   // ここでも `sampler.next` を呼ぶので `assertNoNaN` が投げる（範囲外 gather の行ごと NaN 汚染で
@@ -574,7 +575,7 @@ Deno.test("T4′ 停止 token の先の行は抽選しない（非投機が触�
   assertEquals(run.fake.commits, [2]);
 });
 
-Deno.test("T5 停止 token が b′: 受理した draft は届き、新 frontier で閉じる", async (t) => {
+test("T5 停止 token が b′: 受理した draft は届き、新 frontier で閉じる", async (t) => {
   await t.step("受理 1 本の後に b′ が停止 token", async () => {
     // 6 → 8（受理）→ b′ = 9（停止）。打ち切りは起きず、確定列がそのまま停止で閉じる形。
     const stopTokens = [9];
@@ -613,7 +614,7 @@ Deno.test("T5 停止 token が b′: 受理した draft は届き、新 frontier
 
 // ---- T6: 予算末尾 --------------------------------------------------------------
 
-Deno.test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 形の verify 1 行で閉じる", async () => {
+test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 形の verify 1 行で閉じる", async () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 6 };
   const run = await runSpeculative({ drafter: oracleDrafter(), request });
   await assertMatchesPlain(request, run);
@@ -641,7 +642,7 @@ Deno.test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 
 
 // ---- T7: 中断・例外・break ------------------------------------------------------
 
-Deno.test("T7 中断: draft の前で止めれば run も draft も 1 本増えない", async () => {
+test("T7 中断: draft の前で止めれば run も draft も 1 本増えない", async () => {
   const controller = new AbortController();
   const reason = new Error("draft の前で止めた");
   const opened = await openSpeculative({ drafter: oracleDrafter() });
@@ -681,7 +682,7 @@ Deno.test("T7 中断: draft の前で止めれば run も draft も 1 本増え�
   assertEquals(opened.fake.commits, []);
 });
 
-Deno.test("T7 中断: draft の後・verify の前で止めれば保留は 1 つも残らない", async () => {
+test("T7 中断: draft の後・verify の前で止めれば保留は 1 つも残らない", async () => {
   const controller = new AbortController();
   const reason = new Error("draft と verify の間で止めた");
   const drafter = fakeDrafter({
@@ -722,7 +723,7 @@ Deno.test("T7 中断: draft の後・verify の前で止めれば保留は 1 つ
   assertEquals(opened.fake.commits, []);
 });
 
-Deno.test("T7 中断: verify の後で止めても、その cycle の確定ぶんは配送も commit も済む", async () => {
+test("T7 中断: verify の後で止めても、その cycle の確定ぶんは配送も commit も済む", async () => {
   const controller = new AbortController();
   const reason = new Error("配送の途中で止めた");
   const opened = await openSpeculative({ drafter: oracleDrafter() });
@@ -770,7 +771,7 @@ Deno.test("T7 中断: verify の後で止めても、その cycle の確定ぶ�
   ]);
 });
 
-Deno.test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず、同じ sequence が次を通す", async () => {
+test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず、同じ sequence が次を通す", async () => {
   // 故障注入: 1 本目の verify（call 1）だけが頼んだ行数と違う行数を返す。読み口の形検査が
   // 落ちるのは「deferred run の戻り〜配送」の同期区間で、ここが保留を残す唯一の窓である。
   const opened = await openSpeculative({
@@ -800,7 +801,7 @@ Deno.test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず
   assertEquals(withoutSpeculation(next.stop), { reason: "max-tokens", tokens: 2 });
 });
 
-Deno.test("T7″ 途中 break: 配送した token までが commit され、その最後が次ターンの先頭になる", async () => {
+test("T7″ 途中 break: 配送した token までが commit され、その最後が次ターンの先頭になる", async () => {
   const opened = await openSpeculative({ drafter: oracleDrafter() });
   const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
 
@@ -844,7 +845,7 @@ Deno.test("T7″ 途中 break: 配送した token までが commit され、そ�
 
 // ---- T8: 門（sequence 生成時・sampler）-----------------------------------------
 
-Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面は全部畳まれる", async (t) => {
+test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面は全部畳まれる", async (t) => {
   /** 生成時に拒まれること + 借り手 → 貸し手の順で畳まれることを 1 本で見る。 */
   const assertRejected = async (
     options: {
@@ -972,7 +973,7 @@ Deno.test("T8 門: 投機の指定は sequence 生成時に落ち、開いた面
   });
 });
 
-Deno.test("T8 門: open は context 確保の直後に、貸し手 context そのものを受けて呼ばれる", async () => {
+test("T8 門: open は context 確保の直後に、貸し手 context そのものを受けて呼ばれる", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafter = oracleDrafter();
   const seen: unknown[] = [];
@@ -1007,7 +1008,7 @@ Deno.test("T8 門: open は context 確保の直後に、貸し手 context そ�
   await sequence.dispose();
 });
 
-Deno.test("T8 門: speculative を渡さない sequence の停止には speculation 欄が無い", async () => {
+test("T8 門: speculative を渡さない sequence の停止には speculation 欄が無い", async () => {
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
   assertEquals(Object.hasOwn(plain.stop, "speculation"), false);
   assertEquals(withoutSpeculation(plain.stop), { reason: "max-tokens", tokens: 3 });
@@ -1015,7 +1016,7 @@ Deno.test("T8 門: speculative を渡さない sequence の停止には speculat
 
 // ---- T9: onRun hook ------------------------------------------------------------
 
-Deno.test("T9 onRun: 投機は prefill → (draft, verify) × cycle（cycle は 1 始まり）", async () => {
+test("T9 onRun: 投機は prefill → (draft, verify) × cycle（cycle は 1 始まり）", async () => {
   const run = await runSpeculative({
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 9 },
@@ -1029,7 +1030,7 @@ Deno.test("T9 onRun: 投機は prefill → (draft, verify) × cycle（cycle は 
   ]);
 });
 
-Deno.test("T9 onRun: k' = 0 の cycle は draft を名乗らず verify 1 行だけを報告する", async () => {
+test("T9 onRun: k' = 0 の cycle は draft を名乗らず verify 1 行だけを報告する", async () => {
   const run = await runSpeculative({
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 6 },
@@ -1042,7 +1043,7 @@ Deno.test("T9 onRun: k' = 0 の cycle は draft を名乗らず verify 1 行だ�
   ]);
 });
 
-Deno.test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill の進捗", async () => {
+test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill の進捗", async () => {
   const prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9];
   const run = await runSpeculative({
     drafter: partialDrafter(1),
@@ -1056,7 +1057,7 @@ Deno.test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill �
   ]);
 });
 
-Deno.test("T9 onRun: 非投機は prefill → decode × (tokens − 1)（step は 1 始まり）", async () => {
+test("T9 onRun: 非投機は prefill → decode × (tokens − 1)（step は 1 始まり）", async () => {
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
   assertEquals(runShape(plain.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
@@ -1065,7 +1066,7 @@ Deno.test("T9 onRun: 非投機は prefill → decode × (tokens − 1)（step �
   ]);
 });
 
-Deno.test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の verify も報告される", async () => {
+test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の verify も報告される", async () => {
   // `onRun` は run の数を数える口である（診断・tok/s の分母）。停止 token で閉じた cycle の
   // verify を落とすと、その 1 本が観測から消える（非投機の decode は停止した step も報告する）。
   const stopTokens = [9];
@@ -1091,7 +1092,7 @@ Deno.test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の v
   ]);
 });
 
-Deno.test("T9 onRun: hook を渡さない sequence も同じ列を出す（観測席は挙動を変えない）", async () => {
+test("T9 onRun: hook を渡さない sequence も同じ列を出す（観測席は挙動を変えない）", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafter = oracleDrafter();
   const sequence = await createGenerationSequence({
@@ -1107,7 +1108,7 @@ Deno.test("T9 onRun: hook を渡さない sequence も同じ列を出す（観�
 
 // ---- T10: speculation の勘定 ---------------------------------------------------
 
-Deno.test("T10 勘定: histogram は長さ k+1・添字が受理数・合計が cycles / accepted と整合する", async (t) => {
+test("T10 勘定: histogram は長さ k+1・添字が受理数・合計が cycles / accepted と整合する", async (t) => {
   const tally = async (k: number, drafter: FakeDrafter, maxNewTokens: number) => {
     const run = await runSpeculative({
       drafter,
@@ -1167,7 +1168,7 @@ Deno.test("T10 勘定: histogram は長さ k+1・添字が受理数・合計が 
 
 // ---- T11: hidden の写し --------------------------------------------------------
 
-Deno.test("T11 hidden: 次 cycle の drafter へ渡るのは b′ を出した行（行 a）の hidden", async () => {
+test("T11 hidden: 次 cycle の drafter へ渡るのは b′ を出した行（行 a）の hidden", async () => {
   // 受理 1 本の cycle が続くので、行 0 でも行 k でもない**行 1** が正解になる配置。
   const run = await runSpeculative({
     drafter: partialDrafter(1),
@@ -1195,7 +1196,7 @@ Deno.test("T11 hidden: 次 cycle の drafter へ渡るのは b′ を出した�
   });
 });
 
-Deno.test("T11 hidden: 最初の cycle の hidden は prefill の**最終 chunk** の行 0", async () => {
+test("T11 hidden: 最初の cycle の hidden は prefill の**最終 chunk** の行 0", async () => {
   // chunk が 2 本に割れる prompt（9 token / chunkLength 8）— 先頭 chunk の hidden を掴む実装は
   // ここで割れる（末尾 chunk は有効行 1 本 = decode 形なので行 0）。
   const prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -1213,7 +1214,7 @@ Deno.test("T11 hidden: 最初の cycle の hidden は prefill の**最終 chunk*
 
 // ---- T12 / T13: draft の値域門と last_row の pad ---------------------------------
 
-Deno.test("T12 値域門: 語彙外・本数不足の draft は verify を出す前に fail loudly", async (t) => {
+test("T12 値域門: 語彙外・本数不足の draft は verify を出す前に fail loudly", async (t) => {
   const assertDraftRejected = async (
     draft: () => readonly number[],
     message: string,
@@ -1250,7 +1251,7 @@ Deno.test("T12 値域門: 語彙外・本数不足の draft は verify を出す
   });
 });
 
-Deno.test("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で pad）", async (t) => {
+test("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で pad）", async (t) => {
   const verifyOnce = async (maxNewTokens: number) => {
     const run = await runSpeculative({
       drafter: oracleDrafter(),
@@ -1319,7 +1320,7 @@ const drainAssertingUsed = async (
   return positions;
 };
 
-Deno.test("T14 used: 配送の直後は常に「その token の position + 1」", async (t) => {
+test("T14 used: 配送の直後は常に「その token の position + 1」", async (t) => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 7 };
   /** 配送される位置の列（prompt 2 token の直後から 7 個）。 */
   const expected = [2, 3, 4, 5, 6, 7, 8];
@@ -1402,7 +1403,7 @@ const placedRows = (fake: FakeSession): number[][] =>
     call.ids.slice(0, call.queryLength).map((id, row) => [call.positions[row], id])
   );
 
-Deno.test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 frontier は次ターンへ再投入されない", async () => {
+test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 frontier は次ターンへ再投入されない", async () => {
   // 故障注入: decode run（call 1）の logits に NaN を混ぜる。run 自体は**成功**しているので
   // frontier b（= 6）は位置 2 の KV に入っており、`pendingToken` に残したまま次ターンへ行くと
   // 同じ token が位置 3 にも入る（例外を出さない沈黙劣化 — 会話が 1 token 太る）。
@@ -1453,7 +1454,7 @@ const fakeClock = (
  */
 const FAST_GATE: SpeculationGateOptions = { window: 2, confirm: 1 };
 
-Deno.test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それでも列は非投機と同一", async () => {
+test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それでも列は非投機と同一", async () => {
   // 投機 cycle 100ms で 4 個確定（25ms/token）・plain step 10ms/token = 投機が 2.5 倍遅い壁。
   const drafter = oracleDrafter();
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 20 };
@@ -1499,7 +1500,7 @@ Deno.test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、そ�
   );
 });
 
-Deno.test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と frontier）が繋がる", async () => {
+test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と frontier）が繋がる", async () => {
   // ゲートの plain step は verify 形の 1 行（deferred）なので `hidden` が読める。非投機の decode
   // 経路（logits しか読まない）へ分岐すると、戻った cycle の draft が古い hidden を食う。
   // 1 ターン（20 token）の中で「倒れる → plain 2 本 → 探索」まで回すため、バーストは 1 cycle・
@@ -1521,7 +1522,7 @@ Deno.test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と
   assertEquals(last, { token: SUCCESSOR[3], position: 18, hidden: [hiddenMark(7, 0), 3, 0, 0] });
 });
 
-Deno.test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は観測に混ぜない", async (t) => {
+test("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は観測に混ぜない", async (t) => {
   // 最初の cycle は PLE gather の cold miss を含み、強制 plain は呼び手の予算で形が決まる —
   // どちらも「投機が遅い」証拠にならない。故障注入で確かめる: その 2 種類にだけ 10,000ms を
   // 置き、ゲートが 1 度も倒れないこと（混ぜる実装は即座に plain へ落ちる）。
@@ -1634,7 +1635,7 @@ const gateOf = (
   measured: boolean,
 ): GenerationGateTrace => ({ mode, switches, measured });
 
-Deno.test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消費者の遅れを含まない", async (t) => {
+test("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消費者の遅れを含まない", async (t) => {
   await t.step("T16 と同じ壁を流すと、run ごとの wallMs が偽時計の刻みと一致する", async () => {
     // T16 と**同じ設定**（投機 cycle 100ms / plain step 10ms・ブロックは 2 cycle）。あちらが
     // 「勘定と決定列」を見る席で、ここは同じ走行の**壁と局面**を見る席である。
@@ -1799,7 +1800,7 @@ Deno.test("T17 観測席の壁: 投機の cycle と plain step の壁が載り�
 
 // ---- 純関数（`src/generation/speculation.ts`）------------------------------------
 
-Deno.test("planDraftLength: 確定は最大 k'+1 個なので残り予算を超えない", () => {
+test("planDraftLength: 確定は最大 k'+1 個なので残り予算を超えない", () => {
   assertEquals(planDraftLength(3, 9), 3, "予算が余っていれば k そのもの");
   assertEquals(planDraftLength(3, 4), 3, "ちょうど k+1 個ぶん残っている");
   assertEquals(planDraftLength(3, 3), 2);
@@ -1808,7 +1809,7 @@ Deno.test("planDraftLength: 確定は最大 k'+1 個なので残り予算を超�
   assertEquals(planDraftLength(1, 5), 1);
 });
 
-Deno.test("verifyRowIndices: R は常に k+1（k' が縮む cycle も末尾添字で埋める）", () => {
+test("verifyRowIndices: R は常に k+1（k' が縮む cycle も末尾添字で埋める）", () => {
   assertEquals(verifyRowIndices(3, 3), [0, 1, 2, 3]);
   assertEquals(verifyRowIndices(2, 3), [0, 1, 2, 2]);
   assertEquals(verifyRowIndices(1, 3), [0, 1, 1, 1]);
@@ -1817,7 +1818,7 @@ Deno.test("verifyRowIndices: R は常に k+1（k' が縮む cycle も末尾添�
   assertEquals(verifyRowIndices(1, 1), [0, 1]);
 });
 
-Deno.test("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足は fail loudly", async (t) => {
+test("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足は fail loudly", async (t) => {
   await t.step("先頭 k' 本（余りは無視する）", () => {
     assertEquals(takeDrafts(Int32Array.from([8, 9, 3]), 2, VOCAB), [8, 9]);
     assertEquals(takeDrafts(Int32Array.from([8, 9, 3]), 0, VOCAB), []);
@@ -1876,7 +1877,7 @@ const recordingSampler = (): { readonly sampler: Sampler; readonly histories: nu
 /** 停止 token が 1 つも無いターン（受理は先頭一致だけで決まる）。 */
 const noStop = (): boolean => false;
 
-Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その行の抽選が b′", async (t) => {
+test("acceptDrafts: 先頭一致で止まった位置が受理数・その行の抽選が b′", async (t) => {
   await t.step("全受理（行 k' が b′ を出す）", () => {
     const { row, read } = rowsOf([8, 9, 3, 13]);
     const { sampler } = recordingSampler();
@@ -1956,7 +1957,7 @@ Deno.test("acceptDrafts: 先頭一致で止まった位置が受理数・その�
   });
 });
 
-Deno.test("投機の診断負荷は cycle の壁とゲート判断に混ざらない", async () => {
+test("投機の診断負荷は cycle の壁とゲート判断に混ざらない", async () => {
   const results = [];
   for (const observerMs of [0, 5, 50]) {
     let elapsed = 0;
@@ -1990,7 +1991,7 @@ Deno.test("投機の診断負荷は cycle の壁とゲート判断に混ざら�
   assertEquals(results[2], results[0]);
 });
 
-Deno.test("空 draft の抽選は不要な履歴の読み取りをしない", () => {
+test("空 draft の抽選は不要な履歴の読み取りをしない", () => {
   const history = new Proxy([1, 2, 6], {
     get: () => {
       throw new Error("抽選に不要な履歴をコピーした");
@@ -2022,7 +2023,7 @@ Deno.test("空 draft の抽選は不要な履歴の読み取りをしない", ()
 // 取り違えは token 列に出ない（draft は受理率にしか効かない）ので、`open` が受けた context と
 // 「どの drafter が draft したか」でしか縛れない。ゲートは観測状態を写す（判断の続きから回る）。
 
-Deno.test("T18 分岐: drafter は複製した context に対して開き直し、元の drafter を共有しない", async () => {
+test("T18 分岐: drafter は複製した context に対して開き直し、元の drafter を共有しない", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafters = [oracleDrafter(), oracleDrafter()];
   for (const drafter of drafters) drafter.watch(fake);
@@ -2068,7 +2069,7 @@ Deno.test("T18 分岐: drafter は複製した context に対して開き直し�
   assertEquals(drafters[0].disposals(), 1);
 });
 
-Deno.test("T18 分岐: drafter の開き直しに失敗したら複製した context を畳んで投げ、元は無傷", async () => {
+test("T18 分岐: drafter の開き直しに失敗したら複製した context を畳んで投げ、元は無傷", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafter = oracleDrafter();
   drafter.watch(fake);
@@ -2101,7 +2102,7 @@ Deno.test("T18 分岐: drafter の開き直しに失敗したら複製した con
   await sequence.dispose();
 });
 
-Deno.test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の cycle は元のゲートのモードで決まる）", async () => {
+test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の cycle は元のゲートのモードで決まる）", async () => {
   // T16 と同じ壁（投機が 2.5 倍遅い）で元のゲートを plain へ倒してから分岐する。
   const drafter = oracleDrafter();
   const opened = await openSpeculative({
@@ -2144,7 +2145,7 @@ Deno.test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初
   await opened.sequence.dispose();
 });
 
-Deno.test("T18 分岐: ゲートは写して共有しない（分岐だけを倒しても元のモードは動かない）", async () => {
+test("T18 分岐: ゲートは写して共有しない（分岐だけを倒しても元のモードは動かない）", async () => {
   // 投機が勝つ壁（投機 cycle 20ms で 4 個確定・plain step 10ms/token）で元を投機のまま置き、
   // 分岐のターンだけを T16 の壁（投機 100ms）にして分岐のゲートを plain へ倒す。sequence 層で
   // ゲートを写さず共有する実装（`gate?.fork()` を `gate` にする退行）では、倒れたのが元のゲート

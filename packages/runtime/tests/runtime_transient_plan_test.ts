@@ -3,6 +3,7 @@
 // 同じ dispatch で読み書きが分かれる slot は別領域）と「規則そのもの」（別名・pinned・一時の LIFO・
 // 上限の fail loudly・決定性）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   planTransients,
@@ -110,7 +111,7 @@ const assertWellFormed = (
   assert(plan.totalBytes >= plan.peakLiveBytes, "領域総和は生存ピーク以上");
 };
 
-Deno.test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが、パッキングは生存ピーク 20 に一致する", () => {
+test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが、パッキングは生存ピーク 20 に一致する", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),
     node("b", 12, ["a"], 1),
@@ -127,7 +128,7 @@ Deno.test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが�
   assertEquals(plan.pinned, new Set([c]));
 });
 
-Deno.test("同じ dispatch で読まれる入力と書かれる出力は別の領域へ置かれる（usage scope の制約）", () => {
+test("同じ dispatch で読まれる入力と書かれる出力は別の領域へ置かれる（usage scope の制約）", () => {
   // a（8B）を読みながら b（8B）を書く。時間は重なる（a は b の後で解放）ので同じ領域なら別 offset で
   // 置けるが、read + read_write の同居は validation で落ちるため別領域が要る。
   const program: TransientProgram = [node("a", 8, [], 1), node("b", 8, ["a"], 0, { pinned: true })];
@@ -138,7 +139,7 @@ Deno.test("同じ dispatch で読まれる入力と書かれる出力は別の�
   assert(plan.slots[a].region !== plan.slots[b].region, "読み側と書き側が同じ領域に居る");
 });
 
-Deno.test("読み同士は同じ領域を共有できる（3 入力の add でも領域は 2 本で足りる）", () => {
+test("読み同士は同じ領域を共有できる（3 入力の add でも領域は 2 本で足りる）", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),
     node("b", 8, [], 1),
@@ -150,7 +151,7 @@ Deno.test("読み同士は同じ領域を共有できる（3 入力の add で�
   assertEquals(plan.regions.length, 2);
 });
 
-Deno.test("別名（reshape）は確保を出さず、根の slot の生存を延ばす", () => {
+test("別名（reshape）は確保を出さず、根の slot の生存を延ばす", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),
     {
@@ -170,7 +171,7 @@ Deno.test("別名（reshape）は確保を出さず、根の slot の生存を�
   assert(a !== undefined && b !== undefined && plan.slots[a].region !== plan.slots[b].region);
 });
 
-Deno.test("グラフ出力（pinned）は末尾まで生存し、後続の確保に上書きされない", () => {
+test("グラフ出力（pinned）は末尾まで生存し、後続の確保に上書きされない", () => {
   const program: TransientProgram = [
     node("out1", 8, [], 0, { pinned: true }),
     node("x", 8, [], 1),
@@ -182,7 +183,7 @@ Deno.test("グラフ出力（pinned）は末尾まで生存し、後続の確保
   assertEquals(plan.totalBytes, 24);
 });
 
-Deno.test("一時は dispatch 境界で確保・解放され、解放済みの一時のバイトは次の一時が再利用する", () => {
+test("一時は dispatch 境界で確保・解放され、解放済みの一時のバイトは次の一時が再利用する", () => {
   // 2 dispatch: 一時 0 は dispatch 0 の間だけ、一時 1 は dispatch 1 の間だけ生きる → 同じバイト。
   const program: TransientProgram = [
     node("y", 4, [], 0, {
@@ -202,7 +203,7 @@ Deno.test("一時は dispatch 境界で確保・解放され、解放済みの�
   assertEquals(plan.peakLiveBytes, 20);
 });
 
-Deno.test("領域は maxBufferSize を超えず、収まらない slot は次の領域へ回る", () => {
+test("領域は maxBufferSize を超えず、収まらない slot は次の領域へ回る", () => {
   const limits: TransientLimits = {
     maxBufferSize: 128,
     maxStorageBufferBindingSize: 128,
@@ -219,7 +220,7 @@ Deno.test("領域は maxBufferSize を超えず、収まらない slot は次の
   assert(plan.regions.length >= 3, `a / b / c が 3 領域に分かれる（${plan.regions.length}）`);
 });
 
-Deno.test("offset は offsetAlignment に整列する（実寸は整列しない）", () => {
+test("offset は offsetAlignment に整列する（実寸は整列しない）", () => {
   const limits: TransientLimits = { ...LOOSE, offsetAlignment: 256 };
   const program: TransientProgram = [
     node("a", 4, [], 1),
@@ -233,7 +234,7 @@ Deno.test("offset は offsetAlignment に整列する（実寸は整列しない
   assert(plan.slots.every((s) => s.byteLength === 4), "束縛 size は実寸のまま");
 });
 
-Deno.test("束縛上限を超える中間は配置の前に全件列挙して落ちる", () => {
+test("束縛上限を超える中間は配置の前に全件列挙して落ちる", () => {
   const limits: TransientLimits = {
     maxBufferSize: 1 << 20,
     maxStorageBufferBindingSize: 64,
@@ -250,7 +251,7 @@ Deno.test("束縛上限を超える中間は配置の前に全件列挙して落
   );
 });
 
-Deno.test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly", () => {
+test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly", () => {
   const over: TransientProgram = [node("a", 8, [], 0), {
     outputs: [],
     temps: [],
@@ -262,7 +263,7 @@ Deno.test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly
   assertThrows(() => planTransients(leak, LOOSE), ExecutionError, "解放されない中間");
 });
 
-Deno.test("同じプログラムからは常に同じ計画が出る（決定性）", () => {
+test("同じプログラムからは常に同じ計画が出る（決定性）", () => {
   const program: TransientProgram = [
     node("a", 8, [], 2),
     node("b", 12, ["a"], 1),
@@ -271,7 +272,7 @@ Deno.test("同じプログラムからは常に同じ計画が出る（決定性
   assertEquals(planTransients(program, LOOSE), planTransients(program, LOOSE));
 });
 
-Deno.test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件を破らない（fuzz）", () => {
+test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件を破らない（fuzz）", () => {
   let seed = 20260905;
   const rand = (): number => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;

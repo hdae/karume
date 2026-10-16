@@ -8,6 +8,7 @@
 // NOTE: 文字列・数値・オブジェクトの素の型検査（`asString` / `asNumber` / `asRecord`）は id 系の
 // 門の土台なので、id の検査が「型検査を通り抜けた値」だけを見ていることが判る最小限だけ書く。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   asId,
@@ -18,7 +19,7 @@ import {
   parseAddedTokens,
 } from "../src/text/asset-gates.ts";
 
-Deno.test("asRecord / asString / asNumber: 型が違う値は読まずに落とす", () => {
+test("asRecord / asString / asNumber: 型が違う値は読まずに落とす", () => {
   assertEquals(asRecord({ a: 1 }, "表"), { a: 1 });
   // `typeof null === "object"` を通さない（`null.foo` ではなく門で落とす）。
   assertThrows(() => asRecord(null, "表"), Error, "表: オブジェクトでない");
@@ -31,7 +32,7 @@ Deno.test("asRecord / asString / asNumber: 型が違う値は読まずに落と�
   assertThrows(() => asNumber("12", "欄"), Error, "欄: 数値でない");
 });
 
-Deno.test("asId: `Int32Array` へ書くと黙って別の id になる値を全て落とす", () => {
+test("asId: `Int32Array` へ書くと黙って別の id になる値を全て落とす", () => {
   // 非整数は `Int32Array` が切り捨てる = 別のトークンを指す（門が無ければ例外は出ない）。
   assertEquals(Int32Array.of(1.5)[0], 1);
   assertThrows(() => asId(1.5, "unkId"), Error, "unkId: トークン id が 0..2147483647 の整数でない");
@@ -48,14 +49,14 @@ Deno.test("asId: `Int32Array` へ書くと黙って別の id になる値を全�
   assertEquals(asId(2147483647, "unkId"), 2147483647);
 });
 
-Deno.test("asVocabId: 語彙の行数以上の id は落とす（gather が別の行を引く前に）", () => {
+test("asVocabId: 語彙の行数以上の id は落とす（gather が別の行を引く前に）", () => {
   assertEquals(asVocabId(2, "unkId", 3), 2);
   assertThrows(() => asVocabId(3, "unkId", 3), Error, "unkId: トークン id 3 が語彙の行数 3 以上");
   // 土台の {@link asId} の規律もそのまま効く。
   assertThrows(() => asVocabId(1.5, "unkId", 3), Error, "整数でない");
 });
 
-Deno.test("parseAddedTokens: 対の列を写像にし、重複鍵は後勝ちにせず落とす", () => {
+test("parseAddedTokens: 対の列を写像にし、重複鍵は後勝ちにせず落とす", () => {
   const parsed = parseAddedTokens([["<s>", 1], ["</s>", 2]], "added");
   assertEquals([...parsed], [["<s>", 1], ["</s>", 2]]);
 
@@ -72,7 +73,7 @@ Deno.test("parseAddedTokens: 対の列を写像にし、重複鍵は後勝ちに
   assertThrows(() => parseAddedTokens([["<s>", 1.5]], "added"), Error, "added: トークン id が");
 });
 
-Deno.test("parseAddedTokens: 追加トークンは語彙の行数で縛らない（語彙表の外へ採番される形）", () => {
+test("parseAddedTokens: 追加トークンは語彙の行数で縛らない（語彙表の外へ採番される形）", () => {
   // Qwen2 の実資産がこの形（語彙 151643 行に対し追加トークンは 151643..151668）。
   const parsed = parseAddedTokens([["<|im_start|>", 151644]], "added");
   assertEquals(parsed.get("<|im_start|>"), 151644);

@@ -28,6 +28,8 @@
 // 後処理は tolerance を持たない（`.lab` の**完全一致**）。段 2 以降は離散的な区間割りなので、
 // 数値が僅かにずれても文字列は割れるか一致するかのどちらかにしかならない。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -71,7 +73,7 @@ type Fixture = {
 };
 
 const FIXTURE_PATH = new URL("./fixtures/vowel-detector/parity.json", import.meta.url);
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 /** 参照 f32 の 2 ULP（|x| ≤ 3.72 の帯で 4.768e-7）の 2 倍。導出はファイル冒頭。 */
 const FEATURE_ATOL = 1e-6;
@@ -81,7 +83,7 @@ const audio = Float32Array.from(fixture.audio);
 
 // ---- フィクスチャ本体 -------------------------------------------------------
 
-Deno.test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
+test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
   // 1 本目に置く。読み違い / 生成失敗で行数が 0 になると、以降のループが 0 回になって
   // 「緑だが何も検証していない」状態が黙って成立する。
   assertEquals(fixture.melBasis.length, N_MELS);
@@ -94,7 +96,7 @@ Deno.test("フィクスチャが空でない（取り違えで全ケース素通
   for (const row of fixture.logits) assertEquals(row.length, LIPSYNC_CLASSES.length);
 });
 
-Deno.test("学習時の定数が上流の配布 config と一致する", () => {
+test("学習時の定数が上流の配布 config と一致する", () => {
   // モジュール定数は Python の module 定数の写し。再学習で幾何が変わったら、特徴が
   // 「それらしい別の値」になる前にここで落ちる。
   const { constants } = fixture;
@@ -115,7 +117,7 @@ Deno.test("学習時の定数が上流の配布 config と一致する", () => {
 
 // ---- ① 特徴抽出のパリティ ---------------------------------------------------
 
-Deno.test("特徴パリティ: 同じ波形から Python と同じ 83 次元が出る", () => {
+test("特徴パリティ: 同じ波形から Python と同じ 83 次元が出る", () => {
   const { data, frames } = extractFeatures(audio, melBasis);
   assertEquals(frames, fixture.features.length);
   assertEquals(data.length, frames * FEATURE_DIM);
@@ -142,7 +144,7 @@ Deno.test("特徴パリティ: 同じ波形から Python と同じ 83 次元が�
   assert(worst <= FEATURE_ATOL, `特徴の max abs diff ${worst.toExponential(3)}（${worstAt}）`);
 });
 
-Deno.test("特徴: フレーム数は floor((n − N_FFT) / HOP) + 1（librosa の center=False）", () => {
+test("特徴: フレーム数は floor((n − N_FFT) / HOP) + 1（librosa の center=False）", () => {
   const at = (samples: number): number =>
     extractFeatures(new Float32Array(samples), melBasis).frames;
   assertEquals(at(N_FFT), 1, "N_FFT ちょうどで 1 フレーム");
@@ -151,7 +153,7 @@ Deno.test("特徴: フレーム数は floor((n − N_FFT) / HOP) + 1（librosa �
   assertEquals(at(SAMPLE_RATE), Math.floor((SAMPLE_RATE - N_FFT) / HOP) + 1);
 });
 
-Deno.test("特徴: 1 フレームも取れない波形は fail loudly（NaN を撒かない）", () => {
+test("特徴: 1 フレームも取れない波形は fail loudly（NaN を撒かない）", () => {
   // 波形は呼び手が渡した引数そのものなので入力起因（ADR 0107 決定 2 — 長く渡せば通る）。
   assertThrows(
     () => extractFeatures(new Float32Array(N_FFT - 1), melBasis),
@@ -160,7 +162,7 @@ Deno.test("特徴: 1 フレームも取れない波形は fail loudly（NaN を�
   );
 });
 
-Deno.test("特徴: 非有限のサンプルは位置と値を添えて入力エラーで落とす（NaN の特徴を GPU へ渡さない）", () => {
+test("特徴: 非有限のサンプルは位置と値を添えて入力エラーで落とす（NaN の特徴を GPU へ渡さない）", () => {
   // NaN 1 点で発話内 z 化の平均が NaN になり全 83 次元が汚れる。波形は呼び手の引数そのもの
   // なので入力起因（ADR 0107 決定 2）。末尾に置いて「先頭だけ見る」検査も捕まえる。
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
@@ -175,7 +177,7 @@ Deno.test("特徴: 非有限のサンプルは位置と値を添えて入力エ�
   }
 });
 
-Deno.test("特徴: mel 基底の要素数が違えば受け付けない", () => {
+test("特徴: mel 基底の要素数が違えば受け付けない", () => {
   assertThrows(
     () => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)),
     Error,
@@ -191,7 +193,7 @@ Deno.test("特徴: mel 基底の要素数が違えば受け付けない", () => 
   assert(!(basis instanceof ModelInputError));
 });
 
-Deno.test("特徴: ZCR は np.signbit と同じで −0 を負と数える", () => {
+test("特徴: ZCR は np.signbit と同じで −0 を負と数える", () => {
   // 交互に +0 / −0 を並べると、`value < 0` の実装では交差 0 本、`np.signbit` では
   // 全サンプル境界が交差になる。log-mel は全ゼロで縮退するが、82 列目だけが割れる。
   const alternating = new Float32Array(N_FFT);
@@ -207,17 +209,17 @@ Deno.test("特徴: ZCR は np.signbit と同じで −0 を負と数える", () 
 
 // ---- ② 後処理のパリティ -----------------------------------------------------
 
-Deno.test("後処理パリティ: 同じロジットから Python と同じ .lab が出る（完全一致）", () => {
+test("後処理パリティ: 同じロジットから Python と同じ .lab が出る（完全一致）", () => {
   const logits = Float32Array.from(fixture.logits.flat());
   assertEquals(toLab(logitsToSegments(logits, fixture.logits.length)), fixture.lab);
 });
 
-Deno.test("後処理: ロジットの要素数がフレーム数と合わなければ受け付けない", () => {
+test("後処理: ロジットの要素数がフレーム数と合わなければ受け付けない", () => {
   assertThrows(() => logitsToSegments(new Float32Array(8 * 3 + 1), 3), Error, "ロジットが");
   assertThrows(() => logitsToSegments(new Float32Array(0), 0), Error, "フレーム数");
 });
 
-Deno.test("後処理: 非有限ロジットは座標を添えて落とす（全区間 a の .lab に化けない）", () => {
+test("後処理: 非有限ロジットは座標を添えて落とす（全区間 a の .lab に化けない）", () => {
   // 門が無いと NaN / +Infinity は log_softmax でその行を全て NaN にし、Viterbi の比較が
   // 軒並み偽になって「発話全体が a」の**書式として正当な** `.lab` が返る（数値異常が
   // どこにも表面化しない）。落ちること自体と、座標が名指しされることを縛る。
@@ -236,7 +238,7 @@ Deno.test("後処理: 非有限ロジットは座標を添えて落とす（全�
   }
 });
 
-Deno.test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () => {
+test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () => {
   // `viterbiSmooth` は公開されていて単体で叩けるので、`logitsToSegments` の入口とは別に
   // ここでも塞ぐ（−Infinity は「あり得ないクラス」に見えて、格子全体を凍らせる）。
   const frames = 5;
@@ -277,7 +279,7 @@ const labFor = (
   overrides?: Readonly<Record<number, Readonly<Record<string, number>>>>,
 ): string => toLab(logitsToSegments(logitsFor(sequence, overrides), sequence.length));
 
-Deno.test("Viterbi: 切替ペナルティ未満の 1 フレームの揺れでは乗り換えない", () => {
+test("Viterbi: 切替ペナルティ未満の 1 フレームの揺れでは乗り換えない", () => {
   // クラス 0 が毎フレーム +3、frame 2 だけクラス 1 が +3。乗り換えは往復で 8 の損なので
   // 3 の得では引き合わない = argmax（0,0,1,0,0）ではなく全て 0 になる。
   const frames = 5;
@@ -288,7 +290,7 @@ Deno.test("Viterbi: 切替ペナルティ未満の 1 フレームの揺れでは
   assertEquals([...viterbiSmooth(logProbabilities, frames)], [0, 0, 0, 0, 0]);
 });
 
-Deno.test("Viterbi: ペナルティを上回る優位が続けば乗り換える", () => {
+test("Viterbi: ペナルティを上回る優位が続けば乗り換える", () => {
   const frames = 5;
   const logProbabilities = new Float64Array(frames * LIPSYNC_CLASSES.length);
   for (let frame = 0; frame < frames; frame += 1) {
@@ -297,11 +299,11 @@ Deno.test("Viterbi: ペナルティを上回る優位が続けば乗り換える
   assertEquals([...viterbiSmooth(logProbabilities, frames)], [0, 0, 1, 1, 1]);
 });
 
-Deno.test("Viterbi: 格子の形が合わなければ受け付けない", () => {
+test("Viterbi: 格子の形が合わなければ受け付けない", () => {
   assertThrows(() => viterbiSmooth(new Float64Array(8 * 4 - 1), 4), Error, "log 事後確率が");
 });
 
-Deno.test("短区間マージ: 最小継続長未満は事後確率の高い隣へ塗り替える", () => {
+test("短区間マージ: 最小継続長未満は事後確率の高い隣へ塗り替える", () => {
   // frame 2 は i が突出（Viterbi は i を通る）が 1 フレームしかないので隣へ。隣接候補
   // a / e のうち frame 2 での事後確率が高い e が勝つ（同点で先頭を採る形に落ちない）。
   assertEquals(
@@ -310,7 +312,7 @@ Deno.test("短区間マージ: 最小継続長未満は事後確率の高い隣�
   );
 });
 
-Deno.test("短区間マージ: pau は最小継続長未満でも残す", () => {
+test("短区間マージ: pau は最小継続長未満でも残す", () => {
   // 1 フレーム（20ms）の pau。塗り替えると無音が消えて口が閉じない = 知覚上の劣化。
   assertEquals(
     labFor(["a", "a", "pau", "i", "i"]),
@@ -318,27 +320,27 @@ Deno.test("短区間マージ: pau は最小継続長未満でも残す", () => 
   );
 });
 
-Deno.test("cons 吸収: 後続が母音なら開始を前倒しして母音区間に畳む", () => {
+test("cons 吸収: 後続が母音なら開始を前倒しして母音区間に畳む", () => {
   assertEquals(labFor(["cons", "cons", "a", "a"]), "0.0000000 0.0800000 a\n");
 });
 
-Deno.test("cons 吸収: 後続が母音/N でなければ先行区間を伸ばす", () => {
+test("cons 吸収: 後続が母音/N でなければ先行区間を伸ばす", () => {
   assertEquals(
     labFor(["a", "a", "cons", "cons", "pau", "pau"]),
     "0.0000000 0.0800000 a\n0.0800000 0.1200000 pau\n",
   );
 });
 
-Deno.test("cons 吸収: 同じラベルに挟まれた cons は 1 区間へ連結する", () => {
+test("cons 吸収: 同じラベルに挟まれた cons は 1 区間へ連結する", () => {
   // 前倒しした開始で新しい区間を作ると a が 2 本に割れる（口形は変わっていないのに）。
   assertEquals(labFor(["a", "a", "cons", "cons", "a", "a"]), "0.0000000 0.1200000 a\n");
 });
 
-Deno.test("cons 吸収: 吸収先がどちらも無ければ pau に落とす", () => {
+test("cons 吸収: 吸収先がどちらも無ければ pau に落とす", () => {
   assertEquals(labFor(["cons", "cons"]), "0.0000000 0.0400000 pau\n");
 });
 
-Deno.test("toLab: 秒は 7 桁固定で、行ごとに改行が付く", () => {
+test("toLab: 秒は 7 桁固定で、行ごとに改行が付く", () => {
   assertEquals(
     toLab([{ start: 0, end: 0.02, label: "a" }, { start: 0.02, end: 1 / 3, label: "pau" }]),
     "0.0000000 0.0200000 a\n0.0200000 0.3333333 pau\n",

@@ -13,6 +13,8 @@
 // NOTE: フェイク device は run が触る GPU の面（パイプライン・bind group・コマンド列・バッファ・queue）だけを
 // 持つ。値は計算しない — 見るのは失敗の決着と後始末で、出力の値ではない。
 
+import { platformObject } from "@karume/test-support/webgpu";
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -112,7 +114,7 @@ const STATE_THEN_CHAIN_GRAPH: DeclarationJson = {
 };
 
 /** 引き金が渡す消失情報（`reason` は GpuContext の分岐に使われない）。 */
-const LOSS: GPUDeviceLostInfo = { reason: "destroyed", message: "テストによる消失" };
+const LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" });
 
 const x = (): Tensor => ({ dtype: "f32", shape: [4, 3], data: new Float32Array(12) });
 
@@ -182,7 +184,7 @@ const session = async (gpu: GpuContext, graph: DeclarationJson): Promise<Session
     submitPolicy: ONE_PER_SUBMIT,
   });
 
-Deno.test("印の待ちの間に device が失われたら、run はハングせず GpuDeviceLostError で決着し、消失の購読を基線へ戻す", async () => {
+test("印の待ちの間に device が失われたら、run はハングせず GpuDeviceLostError で決着し、消失の購読を基線へ戻す", async () => {
   const { gpu, setWorkDone, lose } = pacedGpu();
   const chain = await session(gpu, CHAIN_GRAPH);
   const baseline = gpu.pendingLostListeners;
@@ -201,7 +203,7 @@ Deno.test("印の待ちの間に device が失われたら、run はハングせ
   assertEquals(gpu.pendingLostListeners, baseline, "消失の購読が積み残っている");
 });
 
-Deno.test("state を書く generation run が印の待ちの後で落ちたら、context を poison し、失敗をそのまま投げる", async () => {
+test("state を書く generation run が印の待ちの後で落ちたら、context を poison し、失敗をそのまま投げる", async () => {
   const { gpu, setWorkDone } = pacedGpu();
   const model = await session(gpu, STATE_THEN_CHAIN_GRAPH);
   const context = await model.createGenerationContext({ chunkLength: 2 });

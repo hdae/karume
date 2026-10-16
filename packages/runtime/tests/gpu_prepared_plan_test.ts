@@ -6,6 +6,7 @@
 // 一致する」の 2 つ。前者だけだと誤った計画を配っても緑になり、後者だけだとキャッシュが
 // 黙って外れて毎 run 導出に戻っても緑になる（どちらも例外は出ない）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
@@ -79,7 +80,7 @@ const input = (rows: number): Tensor => ({
 const bits = (tensor: Tensor): readonly number[] =>
   Array.from(new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length));
 
-Deno.test({
+test({
   name: "同一 bindings の 2 run 目は導出済み計画に当たり、出力はビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -114,7 +115,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "bindings が変わる run は導出し直し、元へ戻すと再びヒットする（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -146,7 +147,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   // MUST: 上限は定数から読む（数値の写しを持つと、上限を動かしたときに門だけが古い本数を
   // 主張して「追い出しが起きていない」ことを検出できなくなる）。
   name: "導出済み計画は上限本数で頭打ちになり、最古のものから追い出される（実 GPU）",
@@ -186,7 +187,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "ヒット run も融合回数を報告する（キャッシュで常設診断が消えない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -209,7 +210,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "導出相で落ちた run の部分レシピはキャッシュに載らない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

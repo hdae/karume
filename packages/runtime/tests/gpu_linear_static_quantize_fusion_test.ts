@@ -1,6 +1,6 @@
 import { acquireGpu } from "../src/gpu/device.ts";
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { BUFFER_USAGE as U, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 import {

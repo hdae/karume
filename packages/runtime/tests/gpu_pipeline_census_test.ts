@@ -8,6 +8,7 @@
 // ② 計測の無い常駐経路（enqueue — ADR 0054）でも埋まる（この欄の存在理由）。
 // ③ レシピ生成で落ちた run の直後は undefined（1 本前の成功 run の表を残さない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -71,7 +72,7 @@ const assertNonTrivial = (census: Census | undefined): Census => {
   return census;
 };
 
-Deno.test({
+test({
   name:
     "lastRunPipelines は計測の実発行内訳とキー集合・本数が一致する（ミス / ヒット run・実 GPU）",
   // 計測（timestamp-query）が無い device では突合の相手が居ない — 明示 SKIP。
@@ -101,7 +102,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "lastRunPipelines は計測の無い常駐経路（enqueue）でも埋まり、run と同じ表になる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -135,7 +136,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "レシピ生成で落ちた run の直後は lastRunPipelines が undefined（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

@@ -25,8 +25,9 @@
 // NOTE: 見るのは実重み e2e 11 本が共有する `outputs/series/` の 1 根だけ。配布形ミラー
 // （`models/`）は distribution_gate_test.ts の担当で、そちらの SKIP は本門番の射程外。
 
+import { isNotFound, makeTempDirSync, mkdirSync, removeSync, statSync, writeFileSync } from "@karume/test-support/fs";
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { modelPresent, openSeriesContainer } from "./helpers/container-files.ts";
 import { SERIES_GRAPHS } from "./helpers/series-graphs.ts";
 
@@ -36,7 +37,7 @@ import { SERIES_GRAPHS } from "./helpers/series-graphs.ts";
  * MUST: 既定は fail loudly。models パッケージだけを触る作業機や資産を持たない CI で通すには、
  * 意図表明としてこの環境変数を要求する。
  */
-const ALLOW_NO_ASSETS = Deno.env.get("KARUME_ALLOW_NO_ASSETS") === "1";
+const ALLOW_NO_ASSETS = process.env.KARUME_ALLOW_NO_ASSETS === "1";
 
 /** 実重み e2e が資産を探す唯一の根（各 e2e の `SERIES_ROOT` / `SERIES_PARENT` の親）。 */
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
@@ -70,15 +71,15 @@ const seriesAssetsPresent = (parent: URL): boolean =>
 /** ディレクトリが在るか（不在は偽・それ以外の I/O 異常は伝播させる）。 */
 const directoryPresent = (url: URL): boolean => {
   try {
-    const stat = Deno.statSync(url);
+    const stat = statSync(url);
     return stat.isDirectory;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
 
-Deno.test({
+test({
   name: "資産門番: 実重み系列が 1 つも無い全 SKIP は明示 FAIL（ADR 0005）",
   // opt-out は「実資産無しを承知で通す」意図表明のときだけ。既定では ignore しない。
   ignore: ALLOW_NO_ASSETS,
@@ -93,7 +94,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "資産門番: 在る系列の容器が開けて、期待の weights キーを名乗る（ADR 0108 段 3）",
   // opt-out は上の 1 本と共有する（「実資産無しを承知で通す」は同じ 1 つの意図表明）。
   ignore: ALLOW_NO_ASSETS,
@@ -133,40 +134,40 @@ Deno.test({
 describe("資産門番の判定（表の系列の容器が 1 つでも在るか）", () => {
   /** 一時ディレクトリを系列の根として判定を引き、後始末する。 */
   const judge = (arrange: (parent: URL) => void): boolean => {
-    const parent = new URL(`file://${Deno.makeTempDirSync()}/`);
+    const parent = new URL(`file://${makeTempDirSync()}/`);
     try {
       arrange(parent);
       return seriesAssetsPresent(parent);
     } finally {
-      Deno.removeSync(parent, { recursive: true });
+      removeSync(parent, { recursive: true });
     }
   };
 
   it("表に無い系列のディレクトリだけなら、容器が在っても資産無しと判定する", () => {
     assertFalse(judge((parent) => {
       const root = new URL("anima-f16/", parent);
-      Deno.mkdirSync(root);
-      Deno.writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
+      mkdirSync(root);
+      writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
     }));
   });
 
   it("表の系列のディレクトリが在っても、容器が無ければ資産無しと判定する", () => {
-    assertFalse(judge((parent) => Deno.mkdirSync(new URL("birefnet-hr-1024-f16/", parent))));
+    assertFalse(judge((parent) => mkdirSync(new URL("birefnet-hr-1024-f16/", parent))));
   });
 
   it("表の系列に容器の part が在れば資産ありと判定する", () => {
     assert(judge((parent) => {
       const root = new URL("birefnet-hr-1024-f16/", parent);
-      Deno.mkdirSync(root);
-      Deno.writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
+      mkdirSync(root);
+      writeFileSync(new URL("model-00001-of-00001.krm", root), new Uint8Array());
     }));
   });
 
   it("表の系列の部品ディレクトリに容器が在れば資産ありと判定する", () => {
     assert(judge((parent) => {
       const component = new URL("dacvae-32dim/decoder/", parent);
-      Deno.mkdirSync(component, { recursive: true });
-      Deno.writeFileSync(new URL("model-00001-of-00001.krm", component), new Uint8Array());
+      mkdirSync(component, { recursive: true });
+      writeFileSync(new URL("model-00001-of-00001.krm", component), new Uint8Array());
     }));
   });
 });

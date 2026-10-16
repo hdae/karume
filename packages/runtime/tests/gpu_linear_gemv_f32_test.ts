@@ -1,5 +1,6 @@
 // f32 格納 M=1 の GEMV を、通常 GEMM と独立 CPU 参照の両方で検収する（ADR 0082 追記 7）。
 // 実モデルは踏まない N の端、先読みの端、f32 の成分・語の境界も含める。
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { linearGemvKey } from "../src/kernels/linear-gemv.ts";
@@ -100,7 +101,7 @@ const run = async (
 const bits = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-Deno.test({
+test({
   name: "f32 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -129,7 +130,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "f32 GEMV の行数・K 整列・N 整列の門は条件を外すと通常 GEMM を選ぶ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -156,7 +157,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "f32 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
   // 検査はキーだけ（数値は上のケースが持つ）。census は計測に依らないので shader-f16 だけを見る。
   ignore: !SHADER_F16_AVAILABLE,

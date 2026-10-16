@@ -13,6 +13,8 @@
 //     cos = 1 / sin = 0・同じ入力の 2 回生成はビット同一
 //  ④ **グラフ入力の形** — 名前 4 本・shape `[1, rows, headDim]`・f32
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   assertGemma4RopeSpec,
@@ -38,7 +40,7 @@ type Fixture = {
 const FIXTURE_URL = new URL("./fixtures/gemma4-rope-upstream.json", import.meta.url);
 
 const loadFixture = async (): Promise<Fixture> =>
-  JSON.parse(await Deno.readTextFile(FIXTURE_URL)) as Fixture;
+  JSON.parse(await readTextFile(FIXTURE_URL)) as Fixture;
 
 /** base64（f32 リトルエンディアン）→ Float32Array。 */
 const decodeF32 = (base64: string): Float32Array<ArrayBuffer> => {
@@ -97,7 +99,7 @@ const passesParity = (
   return { pass, worst };
 };
 
-Deno.test("上流 transformers の RoPE 表と位置比例の許容差で一致する（fixture parity）", async () => {
+test("上流 transformers の RoPE 表と位置比例の許容差で一致する（fixture parity）", async () => {
   const fixture = await loadFixture();
   assertGemma4RopeSpec("fixture", fixture.spec);
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
@@ -117,7 +119,7 @@ Deno.test("上流 transformers の RoPE 表と位置比例の許容差で一致�
   }
 });
 
-Deno.test("故障注入 — 位置ずらし / 層種入れ替え / theta / rotaryDim の誤りは parity で落ちる", async () => {
+test("故障注入 — 位置ずらし / 層種入れ替え / theta / rotaryDim の誤りは parity で落ちる", async () => {
   const fixture = await loadFixture();
   const full = fixture.spec.full_attention;
   const sliding = fixture.spec.sliding_attention;
@@ -148,7 +150,7 @@ Deno.test("故障注入 — 位置ずらし / 層種入れ替え / theta / rotar
   }
 });
 
-Deno.test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行は parity で落ちる", async () => {
+test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行は parity で落ちる", async () => {
   // `diff > tolerance` で失敗を判定すると NaN の差は false になって合格し、同じ行の大きな有限誤差も
   // Math.max の NaN 伝播に巻き込まれて隠れる。fixture 側の 1 行を壊して、帯が非有限値を通さないことを見る。
   const fixture = await loadFixture();
@@ -178,7 +180,7 @@ Deno.test("故障注入 — NaN を含む行と、NaN と大誤差が同居す�
   }
 });
 
-Deno.test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後半は同値・位置 0 は恒等", () => {
+test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後半は同値・位置 0 は恒等", () => {
   const spec: Gemma4RopeLayerSpec = { theta: 1e6, headDim: 512, rotaryDim: 128 };
   const invFreq = gemma4RopeInverseFrequencies(spec);
   assertEquals(invFreq.length, 256);
@@ -198,7 +200,7 @@ Deno.test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後�
   }
 });
 
-Deno.test("同じ入力の 2 回生成はビット同一（決定性）", () => {
+test("同じ入力の 2 回生成はビット同一（決定性）", () => {
   const spec: Gemma4RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
   const positions = [0, 1, 2, 511, 4096, 131071];
   const a = gemma4RopeRows(spec, positions);
@@ -213,7 +215,7 @@ Deno.test("同じ入力の 2 回生成はビット同一（決定性）", () => 
   );
 });
 
-Deno.test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, rows, headDim]・f32", () => {
+test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, rows, headDim]・f32", () => {
   const spec: Gemma4RopeSpec = {
     sliding_attention: { theta: 1e4, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1e6, headDim: 512, rotaryDim: 128 },
@@ -235,7 +237,7 @@ Deno.test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape
   assert(Object.is(cos[2 * 512], 1));
 });
 
-Deno.test("パラメータの値域門 — 奇数 / 範囲外 / 非有限は fail loudly・負の位置も落ちる", () => {
+test("パラメータの値域門 — 奇数 / 範囲外 / 非有限は fail loudly・負の位置も落ちる", () => {
   const ok: Gemma4RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, headDim: 255 }), Error, "headDim");
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, rotaryDim: 258 }), Error, "rotaryDim");

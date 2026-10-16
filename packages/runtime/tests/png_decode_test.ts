@@ -10,6 +10,7 @@
 // 1 点だけ壊す（helpers/safetensors.ts と同じ規律）。
 // NOTE: チャンク CRC はデコーダが検証しないので 0 を書く。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { decodePng } from "./helpers/png-decode.ts";
 
@@ -121,25 +122,25 @@ const buildPng = async (options: PngOptions = {}): Promise<Uint8Array<ArrayBuffe
   ]);
 };
 
-Deno.test("decodePng: encodePng が書く 1 形（8bit RGB / 非インタレース / filter None）を読める", async () => {
+test("decodePng: encodePng が書く 1 形（8bit RGB / 非インタレース / filter None）を読める", async () => {
   const decoded = await decodePng(await buildPng(), "正常系");
   assertEquals(decoded.width, WIDTH);
   assertEquals(decoded.height, HEIGHT);
   assertEquals([...decoded.data], [...PIXELS]);
 });
 
-Deno.test("decodePng: IDAT が複数チャンクに割れていても連結して同じ画素を返す", async () => {
+test("decodePng: IDAT が複数チャンクに割れていても連結して同じ画素を返す", async () => {
   const decoded = await decodePng(await buildPng({ splitIdat: true }), "複数 IDAT");
   assertEquals([...decoded.data], [...PIXELS]);
 });
 
-Deno.test("decodePng: PNG でないバイト列をシグネチャで落とす", async () => {
+test("decodePng: PNG でないバイト列をシグネチャで落とす", async () => {
   const broken = await buildPng();
   broken[3] = 0x00;
   await assertRejects(() => decodePng(broken, "壊れたシグネチャ"), Error, "PNG シグネチャでない");
 });
 
-Deno.test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落とす", async () => {
+test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落とす", async () => {
   const rgba = await buildPng({ colorType: 6 });
   await assertRejects(
     () => decodePng(rgba, "RGBA"),
@@ -154,7 +155,7 @@ Deno.test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落
   );
 });
 
-Deno.test("decodePng: None 以外の行 filter を落とす（黙って近似しない）", async () => {
+test("decodePng: None 以外の行 filter を落とす（黙って近似しない）", async () => {
   const subFiltered = await buildPng({ filter: 1 });
   const error = await assertRejects(
     () => decodePng(subFiltered, "Sub フィルタ"),
@@ -164,21 +165,21 @@ Deno.test("decodePng: None 以外の行 filter を落とす（黙って近似し
   assertEquals(error.message.includes("None(0)"), true, error.message);
 });
 
-Deno.test("decodePng: IHDR / IDAT の欠落をそれぞれの帰属で落とす", async () => {
+test("decodePng: IHDR / IDAT の欠落をそれぞれの帰属で落とす", async () => {
   const noIhdr = await buildPng({ omitIhdr: true });
   await assertRejects(() => decodePng(noIhdr, "IHDR 欠落"), Error, "IHDR が無い");
   const noIdat = await buildPng({ omitIdat: true });
   await assertRejects(() => decodePng(noIdat, "IDAT 欠落"), Error, "IDAT が無い");
 });
 
-Deno.test("decodePng: チャンク宣言長がファイル末尾を越える形を落とす", async () => {
+test("decodePng: チャンク宣言長がファイル末尾を越える形を落とす", async () => {
   const bytes = await buildPng();
   // IDAT は シグネチャ 8 + IHDR チャンク 25 の直後。その長さ欄を巨大な値へ書き換える。
   new DataView(bytes.buffer).setUint32(8 + 25, 0xffff);
   await assertRejects(() => decodePng(bytes, "長さ超過"), Error, "ファイル末尾を越える");
 });
 
-Deno.test("decodePng: 展開後のバイト数が宣言した高さと食い違う形を落とす", async () => {
+test("decodePng: 展開後のバイト数が宣言した高さと食い違う形を落とす", async () => {
   // IHDR の height だけを +1 する（画素は 3 行ぶんしか無い）
   const tallerHeader = await buildPng({ height: HEIGHT + 1 });
   await assertRejects(() => decodePng(tallerHeader, "高さ不一致"), Error, "展開後が");

@@ -10,8 +10,9 @@
 // ミラーが無い機では③だけを理由つきで**明示 SKIP** する（`session_options_mirror_test.ts` と同じ
 // 規律 — ミラーごと無い形は `runtime/tests/distribution_gate_test.ts` が FAIL にする）。
 
+import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { type Manifest, parseManifest, type SessionSpec } from "@karume/hub";
 import { resolveGemmaSessionOptions } from "../src/gemma/session-options.ts";
 import {
@@ -127,9 +128,9 @@ describe("表の鍵は manifest の session を家族の合成に通した実効
  */
 const readMirror = async (dir: URL): Promise<Manifest | undefined> => {
   try {
-    return parseManifest(await Deno.readTextFile(new URL("karume.json", dir)));
+    return parseManifest(await readTextFile(new URL("karume.json", dir)));
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
+    if (isNotFound(cause)) return undefined;
     throw cause;
   }
 };
@@ -137,13 +138,13 @@ const readMirror = async (dir: URL): Promise<Manifest | undefined> => {
 const listMirrors = async (): Promise<readonly (readonly [string, Manifest])[]> => {
   const mirrors: (readonly [string, Manifest])[] = [];
   try {
-    for await (const entry of Deno.readDir(MODELS_ROOT)) {
+    for await (const entry of readDir(MODELS_ROOT)) {
       if (!entry.isDirectory) continue;
       const manifest = await readMirror(new URL(`${entry.name}/`, MODELS_ROOT));
       if (manifest !== undefined) mirrors.push([entry.name, manifest]);
     }
   } catch (cause) {
-    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
+    if (!(isNotFound(cause))) throw cause;
   }
   return mirrors.toSorted(([a], [b]) => a.localeCompare(b));
 };

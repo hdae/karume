@@ -23,6 +23,7 @@
 // NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`runtime/tests/helpers/series-graphs.ts` — 門番
 // `assets_gate_test.ts` と同じ正本）から引く。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { codecLayout, type OpenedContainer, prepareContainer } from "@karume/runtime";
 import { WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
@@ -121,7 +122,7 @@ const seriesGraphOf = (opened: OpenedContainer) => {
   return opened.graphs[name];
 };
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V DiT 資産: 容器と全ケース（S = 192・T2V 5 本 + I2V 5 本）の golden が揃っている",
   // 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
@@ -136,7 +137,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
   ignore: !MODEL_PRESENT,
@@ -158,7 +159,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
   ignore: !MODEL_PRESENT,
@@ -238,14 +239,14 @@ const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
   }
 };
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
   ignore: !ASSETS_AVAILABLE,
   fn: () => assertHostInputs(CASES),
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V DiT 実寸の資産: 全ケース（2 つの形・決定用 6 本 + 受入れ 8 本）の golden が揃っている",
   // 1 本も無ければ「まだ足していない」として SKIP。1 本でもあれば欠けは FAIL（足す途中・中断）。
@@ -260,7 +261,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V DiT 実寸のホスト（S = 8,190 / 7,920・条件フレーム P = 390 / 880）: patchify・RoPE 表・" +
     "timesteps_proj 2 本・条件マスクが golden の入力と一致する",

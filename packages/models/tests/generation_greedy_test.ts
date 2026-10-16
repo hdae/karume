@@ -7,6 +7,7 @@
 // 残骸を食っても例外を出さない）、実装の誤りが検収 e2e の 1 個の不一致に潰れてしまう位置に
 // ある。Session は narrow interface（`GreedySession`）で受けるので、fake は素の object 1 個。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type {
   GenerationContextSpec,
@@ -121,7 +122,7 @@ const fakeSession = (options: FakeOptions = {}) => {
 const promptOf = (length: number, base = 100): number[] =>
   Array.from({ length }, (_, index) => base + index);
 
-Deno.test("planPrefillChunks: T=87 / L=32 を 32 + 32 + 23 の 3 chunk に割る", () => {
+test("planPrefillChunks: T=87 / L=32 を 32 + 32 + 23 の 3 chunk に割る", () => {
   assertEquals(planPrefillChunks(87, 32), [
     { position: 0, queryLength: 32 },
     { position: 32, queryLength: 32 },
@@ -129,7 +130,7 @@ Deno.test("planPrefillChunks: T=87 / L=32 を 32 + 32 + 23 の 3 chunk に割る
   ]);
 });
 
-Deno.test("planPrefillChunks: T が L の倍数なら pad 行の出る chunk が 1 本も無い", () => {
+test("planPrefillChunks: T が L の倍数なら pad 行の出る chunk が 1 本も無い", () => {
   assertEquals(planPrefillChunks(32, 32), [{ position: 0, queryLength: 32 }]);
   assertEquals(planPrefillChunks(64, 32), [
     { position: 0, queryLength: 32 },
@@ -137,12 +138,12 @@ Deno.test("planPrefillChunks: T が L の倍数なら pad 行の出る chunk が
   ]);
 });
 
-Deno.test("planPrefillChunks: T < L は 1 chunk（残りが pad 行になる）", () => {
+test("planPrefillChunks: T < L は 1 chunk（残りが pad 行になる）", () => {
   assertEquals(planPrefillChunks(1, 32), [{ position: 0, queryLength: 1 }]);
   assertEquals(planPrefillChunks(31, 32), [{ position: 0, queryLength: 31 }]);
 });
 
-Deno.test("planPrefillChunks: 位置は飛ばず重ならず、有効行の総和が T に一致する", () => {
+test("planPrefillChunks: 位置は飛ばず重ならず、有効行の総和が T に一致する", () => {
   // 割り方の不変条件そのもの（境界を 1 つ間違えると、どれかが必ず破れる）。
   for (const [length, chunkLength] of [[87, 32], [1, 1], [5, 7], [64, 8], [9, 4]]) {
     const chunks = planPrefillChunks(length, chunkLength);
@@ -156,7 +157,7 @@ Deno.test("planPrefillChunks: 位置は飛ばず重ならず、有効行の総�
   }
 });
 
-Deno.test("planPrefillChunks: 長さ / chunkLength が 1 以上の整数でなければ落ちる", () => {
+test("planPrefillChunks: 長さ / chunkLength が 1 以上の整数でなければ落ちる", () => {
   assertThrows(() => planPrefillChunks(0, 32), Error, "prompt の長さ 0");
   assertThrows(() => planPrefillChunks(-1, 32), Error, "prompt の長さ -1");
   assertThrows(() => planPrefillChunks(1.5, 32), Error, "prompt の長さ 1.5");
@@ -164,7 +165,7 @@ Deno.test("planPrefillChunks: 長さ / chunkLength が 1 以上の整数でな�
   assertThrows(() => planPrefillChunks(8, 2.5), Error, "chunkLength 2.5");
 });
 
-Deno.test("generateGreedy: prefill は固定長 chunk で流し、pad 行は 0・位置は絶対値", async () => {
+test("generateGreedy: prefill は固定長 chunk で流し、pad 行は 0・位置は絶対値", async () => {
   const fake = fakeSession();
   const prompt = promptOf(87);
   const generated = await generateGreedy({
@@ -200,7 +201,7 @@ Deno.test("generateGreedy: prefill は固定長 chunk で流し、pad 行は 0�
   assertEquals(generated, [2022]);
 });
 
-Deno.test("generateGreedy: T = chunkLength ちょうどは 1 chunk で pad 行が出ない", async () => {
+test("generateGreedy: T = chunkLength ちょうどは 1 chunk で pad 行が出ない", async () => {
   const fake = fakeSession();
   const prompt = promptOf(4);
   const generated = await generateGreedy({
@@ -221,7 +222,7 @@ Deno.test("generateGreedy: T = chunkLength ちょうどは 1 chunk で pad 行�
   assertEquals(generated, [3]);
 });
 
-Deno.test("generateGreedy: T < chunkLength は 1 chunk・末尾が pad 0 で埋まる", async () => {
+test("generateGreedy: T < chunkLength は 1 chunk・末尾が pad 0 で埋まる", async () => {
   const fake = fakeSession();
   const generated = await generateGreedy({
     session: fake.session,
@@ -242,7 +243,7 @@ Deno.test("generateGreedy: T < chunkLength は 1 chunk・末尾が pad 0 で埋�
   assertEquals(generated, [1]);
 });
 
-Deno.test("generateGreedy: decode は queryLength=1 固定で、位置が T, T+1, … と進む", async () => {
+test("generateGreedy: decode は queryLength=1 固定で、位置が T, T+1, … と進む", async () => {
   const fake = fakeSession();
   const generated = await generateGreedy({
     session: fake.session,
@@ -269,7 +270,7 @@ Deno.test("generateGreedy: decode は queryLength=1 固定で、位置が T, T+1
   assertEquals(fake.calls[2].ids, [generated[1]]);
 });
 
-Deno.test("generateGreedy: maxNewTokens=1 は decode を 1 回も回さない", async () => {
+test("generateGreedy: maxNewTokens=1 は decode を 1 回も回さない", async () => {
   const fake = fakeSession();
   const generated = await generateGreedy({
     session: fake.session,
@@ -286,7 +287,7 @@ Deno.test("generateGreedy: maxNewTokens=1 は decode を 1 回も回さない", 
   assertEquals(fake.calls.length, 1);
 });
 
-Deno.test("generateGreedy: 容量記号は createGenerationContext だけへ渡す（run には渡さない）", async () => {
+test("generateGreedy: 容量記号は createGenerationContext だけへ渡す（run には渡さない）", async () => {
   // ADR 0066 追記 7 — states 専用記号の束縛点は context 生成だけ。run の bindings へ回すと
   // 「states は束縛源にならない」検査に引っかかるか、計画鍵に余分な記号が混ざる。
   const fake = fakeSession();
@@ -310,7 +311,7 @@ Deno.test("generateGreedy: 容量記号は createGenerationContext だけへ渡�
   assertEquals(fake.calls.every((call) => call.sameContext), true);
 });
 
-Deno.test("generateGreedy: 正常終了で context を 1 度だけ dispose する", async () => {
+test("generateGreedy: 正常終了で context を 1 度だけ dispose する", async () => {
   const fake = fakeSession();
   await generateGreedy({
     session: fake.session,
@@ -325,7 +326,7 @@ Deno.test("generateGreedy: 正常終了で context を 1 度だけ dispose す�
   assertEquals(fake.disposals(), 1);
 });
 
-Deno.test("generateGreedy: run が落ちても context を dispose し、例外はそのまま伝播する", async () => {
+test("generateGreedy: run が落ちても context を dispose し、例外はそのまま伝播する", async () => {
   // 失敗した context は poison 化して再利用できない（ADR 0066 追記 3）ので、抱えたままにすると
   // KV 容量ぶんの VRAM が生成 1 本ごとに積み上がる。prefill 側と decode 側の両方を見る。
   for (const failAt of [0, 1]) {
@@ -350,7 +351,7 @@ Deno.test("generateGreedy: run が落ちても context を dispose し、例外�
   }
 });
 
-Deno.test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail loudly", async () => {
+test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail loudly", async () => {
   const cases: readonly (readonly [string, (call: number, rows: number) => RunOutputs, string])[] =
     [
       [
@@ -413,7 +414,7 @@ Deno.test("generateGreedy: token 出力の名前 / dtype / 形が違えば fail 
   }
 });
 
-Deno.test("generateGreedy: 入口検査は context を作る前に落ちる", async () => {
+test("generateGreedy: 入口検査は context を作る前に落ちる", async () => {
   const base = {
     inputIds: IDS,
     derive: derivePositions,
@@ -452,7 +453,7 @@ Deno.test("generateGreedy: 入口検査は context を作る前に落ちる", as
   }
 });
 
-Deno.test("generateGreedy: maxPosition は排他的上限（最終位置 + 1 でちょうど通る）", async () => {
+test("generateGreedy: maxPosition は排他的上限（最終位置 + 1 でちょうど通る）", async () => {
   // T=2, K=2 の最終位置は T + K - 2 = 2（decode 1 回目が位置 2 を踏む）。上限 3 = ぎりぎり適法。
   const fake = fakeSession();
   const generated = await generateGreedy({
@@ -470,7 +471,7 @@ Deno.test("generateGreedy: maxPosition は排他的上限（最終位置 + 1 で
   assertEquals(fake.calls[1].positions, [2]);
 });
 
-Deno.test("GreedySession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {
+test("GreedySession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {
   // 型検査だけの門（実行時は何もしない）。`GreedySession` は fake を差せるように実 Session の
   // 面を**写して**いるので、`run` / `createGenerationContext` の綴りや引数が runtime 側で
   // 変わると、この 1 行がコンパイルエラーになる（写しがずれたまま単体テストだけ緑、という
@@ -479,7 +480,7 @@ Deno.test("GreedySession: 実 Session の面を型で満たす（綴りのドリ
   assertEquals(typeof asGreedySession, "function");
 });
 
-Deno.test("generateGreedy(derive): 物理行数ぶんの ids / positions が渡り、返り値が run の入力になる", async () => {
+test("generateGreedy(derive): 物理行数ぶんの ids / positions が渡り、返り値が run の入力になる", async () => {
   // 位置依存のグラフ入力（gemma4 の RoPE cos / sin — ADR 0091 決定 1）はこの席**だけ**から
   // run へ入る。2 本が同じ物理行数で、pad 行が両方 0 であることは他のどの門でも見えない
   // （グラフ側は pad 行の値を黙って食う — ADR 0066 追記 6）。
@@ -509,7 +510,7 @@ Deno.test("generateGreedy(derive): 物理行数ぶんの ids / positions が渡�
   assertEquals(fake.calls.map((call) => call.positions), [[0, 1, 0, 0], [2]]);
 });
 
-Deno.test("generateGreedy: derive 省略時は input_ids のほかに何も渡さない", async () => {
+test("generateGreedy: derive 省略時は input_ids のほかに何も渡さない", async () => {
   // 派生入力を持たない資産（1 入力のグラフ）で余分な入力を送ると、ランタイムは「結線されて
   // いない入力」として落とす。省略が無風であることをキーの集合で固定する。
   const keys: (readonly string[])[] = [];
@@ -567,7 +568,7 @@ const tokenOnlySession = () => {
   return { session, lastRows, rows, disposals: () => disposals };
 };
 
-Deno.test("generateGreedy(lastRow): prefill は最終有効行の添字・decode は 0 を [1] i32 で渡す", async () => {
+test("generateGreedy(lastRow): prefill は最終有効行の添字・decode は 0 を [1] i32 で渡す", async () => {
   const fake = tokenOnlySession();
 
   const generated = await generateGreedy({
@@ -591,7 +592,7 @@ Deno.test("generateGreedy(lastRow): prefill は最終有効行の添字・decode
   assertEquals(fake.disposals(), 1);
 });
 
-Deno.test("generateGreedy(lastRow): token 出力が [1,1,1] でなければ fail loudly", async () => {
+test("generateGreedy(lastRow): token 出力が [1,1,1] でなければ fail loudly", async () => {
   const session: GreedySession<FakeContext> = {
     createGenerationContext: () => Promise.resolve({ dispose: () => Promise.resolve() }),
     run: () =>
@@ -619,7 +620,7 @@ Deno.test("generateGreedy(lastRow): token 出力が [1,1,1] でなければ fail
   );
 });
 
-Deno.test("generateGreedy: lastRow 省略時は last_row 入力を渡さない（現行形は無風）", async () => {
+test("generateGreedy: lastRow 省略時は last_row 入力を渡さない（現行形は無風）", async () => {
   const seen: boolean[] = [];
   const fake = fakeSession({
     outputs: (call, rows) => defaultOutputs(call, rows),

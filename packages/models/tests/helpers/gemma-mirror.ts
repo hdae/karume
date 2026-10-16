@@ -16,6 +16,7 @@
  * 公開サブパス）だけである。
  */
 
+import { isNotFound, readFile, readTextFileSync } from "@karume/test-support/fs";
 import { loadManifest, openContainerSource, resolveSelection } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 import {
@@ -152,9 +153,9 @@ export const gemma4MirrorAssets = async (
   return {
     config: parseGemma4PipelineConfig(loaded.manifest.models[modelName].pipelineConfig),
     model: await Promise.all(
-      container.parts.map((part) => Deno.readFile(new URL(part.path, mirror))),
+      container.parts.map((part) => readFile(new URL(part.path, mirror))),
     ),
-    tokenizer: await Deno.readFile(new URL(tokenizer.path, mirror)),
+    tokenizer: await readFile(new URL(tokenizer.path, mirror)),
   };
 };
 
@@ -171,9 +172,9 @@ export const MIRROR_FORMAT = "karume/5";
 export const mirrorAvailable = (mirror: URL): boolean => {
   let text: string;
   try {
-    text = Deno.readTextFileSync(new URL("karume.json", mirror));
+    text = readTextFileSync(new URL("karume.json", mirror));
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
   return (JSON.parse(text) as { readonly format?: unknown }).format === MIRROR_FORMAT;

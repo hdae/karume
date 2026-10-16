@@ -15,6 +15,7 @@
 // 対称パターンでは値が合う — ADR 0069 決定 4 ①）。
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { OpenedContainer } from "../src/format/container/open.ts";
 import { decodeI4 } from "../src/format/i4.ts";
@@ -147,7 +148,7 @@ const CASES: readonly I4Case[] = [
   },
 ];
 
-Deno.test({
+test({
   name: "w=i4 の linear が CPU 参照（丸め後の重み）と一致する（v4 / スカラ / group 2 種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -190,7 +191,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "同一グラフ内の group 16 / 32 が別パイプラインで正しく走る（キーの g 部の分離・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -280,7 +281,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "適格（GPU dequant）と適格外（CPU 展開）の出力がビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -354,7 +355,7 @@ const i4EmbeddingModel = (
   }]);
 };
 
-Deno.test({
+test({
   name: "w=i4 の embedding が CPU 参照（丸め後の表）と一致する（group 2 種・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -420,7 +421,7 @@ Deno.test({
  * group で割り切れる〉から来る不変で、i8 / f16 の「行長が語の倍数でない罠」は i4 には存在しない）。
  * 振幅は行 × group で変えるので、scale 添字の誤りも同時に検出できる。
  */
-Deno.test({
+test({
   name: "GPU の unpack4xU8 と CPU 展開が全 15 nibble 値 × 語内 8 位置でビット一致（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -478,7 +479,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "embedding も適格（GPU dequant）と適格外（CPU 展開）でビット一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -664,7 +665,7 @@ const CONV_CASES: readonly ConvCase[] = [
   },
 ];
 
-Deno.test({
+test({
   name: "w=i4 の conv1d(igemm) が f32 双子（丸め後の重み）とビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -734,7 +735,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "conv1d(i4) も適格（GPU dequant）と適格外（CPU 展開 rank3）でビット一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -780,7 +781,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "groups > 1 の conv1d は i4 を常駐させず CPU 展開へ落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -842,7 +843,7 @@ Deno.test({
  * 変えるので scale 添字の誤りも同時に検出できる。
  * MUST: v4（`dequant4`）とスカラ（`dequant`）の**両方**を踏む — 分けるのは `Lout % 4` だけ。
  */
-Deno.test({
+test({
   name: "conv1d の A 側 i4 展開が全 15 nibble 値 × 語内 8 位置で CPU 展開とビット一致（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -930,7 +931,7 @@ Deno.test({
 /** conv1d の attrs（`groups` は既定値補完されない — ADR 0015）。 */
 const convAttrs = (groups: number) => ({ stride: 1, padding: 0, dilation: 1, groups });
 
-Deno.test("i4 の適格は linear / embedding / groups==1 の conv1d の重みスロット限定", () => {
+test("i4 の適格は linear / embedding / groups==1 の conv1d の重みスロット限定", () => {
   // 展開経路（`unpack4xU8` + group scale）を持つカーネルは linear（GEMM の B タイル）・
   // embedding・conv1d の implicit GEMM（GEMM の A タイル）だけ。それ以外にも食われる重みを
   // 常駐させると、そちらのカーネルが packed バイトを f32 として読む（例外は出ない沈黙誤値）。
@@ -1007,7 +1008,7 @@ Deno.test("i4 の適格は linear / embedding / groups==1 の conv1d の重み�
   assertEquals(eligible([{ op: "add", ins: ["w", "w"], outs: ["y"], attrs: {} }]), []);
 });
 
-Deno.test({
+test({
   name: "i4 常駐の重み × linearCompute 'f16'（w4a16）は fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1038,7 +1039,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "linearCompute 'a8' × i4 常駐は w4a8 経路（整数内積）で走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

@@ -22,6 +22,7 @@
 // NOTE: 容器のグラフ名は綴らず、系列のグラフ名の表（`runtime/tests/helpers/series-graphs.ts` — 門番
 // `assets_gate_test.ts` と同じ正本）から引く。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { wanVaeChunkLayout, wanVaeFrameCount } from "../src/wan/vae-chunks.ts";
@@ -137,7 +138,7 @@ const irViolations = (graph: Graph): readonly string[] => {
   return violations;
 };
 
-Deno.test({
+test({
   name: "Wan2.2 TI2V VAE chunk 資産: 2 グラフとフィクスチャ 3 本が揃っている",
   // 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL。
   ignore: !ANY_PRESENT,
@@ -150,7 +151,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V VAE chunk 宣言（GPU 不要）: 潜在 48 ch・タイル 16・出口 12 ch・cache は表の 32 本" +
     "（first は time_conv の 2 本を除く 30 本）・フレーム [12,1,128,128] / [12,4,128,128]",
@@ -197,7 +198,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V VAE chunk IR（GPU 不要）: rank 5 は conv3d の重みだけ・op は語彙の 15 種の中・attention は" +
     "各グラフ 1 本",
@@ -217,7 +218,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "Wan2.2 TI2V VAE chunk IR の検査自身（GPU 不要）: 書き換えた宣言を 1 件ずつ拒む" +
     "（initializer でない conv3d の重み・rank 5 のグラフ入力・rank 5 の conv2d の重み・語彙外の op・attention 0 本）",
   ignore: !ALL_PRESENT,
@@ -299,7 +300,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V VAE chunk フィクスチャ（GPU 不要）: メタ（タイル 16・chunk 数・役割・f16 の丸め・参照の素性）と" +
     "形（latents [48,F,16,16]・frames [12,1+4(F−1),128,128]）が表どおり・seed は 3 本で互いに違う",

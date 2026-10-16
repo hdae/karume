@@ -10,7 +10,7 @@
 // 直せ」と呼び手へ返す。型を広げすぎた退行は入力側のテストでは捕まらない。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { imageToRgba } from "../src/anima/image.ts";
 import { Randn } from "../src/anima/random.ts";
 import { assertAcceptableResolution, parseResolution } from "../src/anima/resolution.ts";

@@ -7,7 +7,7 @@
 // リーダが int16 の両端で実測した値）とも突き合わせる（無ければその 1 本だけ SKIP）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { decodeWav, encodeWav } from "../src/audio/wav.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { readTextIfPresent } from "./helpers/read-if-present.ts";
@@ -89,7 +89,7 @@ const float32Payload = (values: readonly number[]): Uint8Array => {
 
 // ---- int16 のスケール（規約そのもの）------------------------------------
 
-Deno.test("decodeWav: int16 は 32768 で割る（下端 −32768 が厳密に −1.0）", () => {
+test("decodeWav: int16 は 32768 で割る（下端 −32768 が厳密に −1.0）", () => {
   const probe = [-32768, -32767, -1, 0, 1, 16384, 32767];
   const decoded = decodeWav(
     buildWav({ format: 1, channels: 1, sampleRate: 48000, bits: 16, payload: int16Payload(probe) }),
@@ -103,7 +103,7 @@ Deno.test("decodeWav: int16 は 32768 で割る（下端 −32768 が厳密に �
   );
 });
 
-Deno.test({
+test({
   name: "decodeWav: int16 のスケールが golden の上流リーダ実測（wavScale）と一致する",
   ignore: goldenText === undefined,
   fn: () => {
@@ -132,7 +132,7 @@ Deno.test({
 
 // ---- 往復（読みと書きのスケールが非対称であること自体を固定する）--------
 
-Deno.test("encodeWav → decodeWav: 往復は ×32767 と /32768 の非対称で 1LSB 級ずれる", () => {
+test("encodeWav → decodeWav: 往復は ×32767 と /32768 の非対称で 1LSB 級ずれる", () => {
   const original = Float32Array.of(-1, -0.5, 0, 0.5, 1);
   const decoded = decodeWav(encodeWav(original, 48000));
   assertEquals(decoded.sampleRate, 48000);
@@ -152,7 +152,7 @@ Deno.test("encodeWav → decodeWav: 往復は ×32767 と /32768 の非対称で
 
 // ---- f32 WAV / ステレオ --------------------------------------------------
 
-Deno.test("decodeWav: IEEE float 32bit は恒等（丸めも割り算も挟まない）", () => {
+test("decodeWav: IEEE float 32bit は恒等（丸めも割り算も挟まない）", () => {
   // 値は全て f32 で厳密に表せるものを選ぶ（丸めが挟まらないことを見たいので）。
   const values = [-1, -0.3333333432674408, 0, 3.0517578125e-5, 0.75, 2.5];
   const decoded = decodeWav(
@@ -169,7 +169,7 @@ Deno.test("decodeWav: IEEE float 32bit は恒等（丸めも割り算も挟ま�
   assertEquals(Array.from(decoded.data), values);
 });
 
-Deno.test("decodeWav: 複数チャネルはチャネル平均で mono 化する", () => {
+test("decodeWav: 複数チャネルはチャネル平均で mono 化する", () => {
   // 2ch のインターリーブ（L, R, L, R, …）。
   const decoded = decodeWav(
     buildWav({
@@ -183,7 +183,7 @@ Deno.test("decodeWav: 複数チャネルはチャネル平均で mono 化する"
   assertEquals(Array.from(decoded.data), [0.5, 0, -1]);
 });
 
-Deno.test("decodeWav: 未知チャンク（LIST 等）は読み飛ばす", () => {
+test("decodeWav: 未知チャンク（LIST 等）は読み飛ばす", () => {
   const decoded = decodeWav(
     buildWav({
       format: 1,
@@ -198,7 +198,7 @@ Deno.test("decodeWav: 未知チャンク（LIST 等）は読み飛ばす", () =>
   assertEquals(Array.from(decoded.data), [0.5]);
 });
 
-Deno.test("decodeWav: RIFF が宣言した境界の外に余った物理バイトは走査しない", () => {
+test("decodeWav: RIFF が宣言した境界の外に余った物理バイトは走査しない", () => {
   const complete = buildWav({
     format: 1,
     channels: 1,
@@ -218,7 +218,7 @@ Deno.test("decodeWav: RIFF が宣言した境界の外に余った物理バイ�
 
 // ---- fail loudly ---------------------------------------------------------
 
-Deno.test("decodeWav: RIFF/WAVE でないバイト列は落とす", () => {
+test("decodeWav: RIFF/WAVE でないバイト列は落とす", () => {
   const bytes = new Uint8Array(64);
   ascii(bytes, 0, "RIFX");
   ascii(bytes, 8, "WAVE");
@@ -226,7 +226,7 @@ Deno.test("decodeWav: RIFF/WAVE でないバイト列は落とす", () => {
   assertThrows(() => decodeWav(new Uint8Array(8)), ModelInputError, "バイトしかない");
 });
 
-Deno.test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似しない）", () => {
+test("decodeWav: 未対応の format / bit 深度は落とす（黙って近似しない）", () => {
   // 24bit PCM。
   assertThrows(
     () =>
@@ -268,7 +268,7 @@ Deno.test("decodeWav: 未対応の format / bit 深度は落とす（黙って�
   );
 });
 
-Deno.test("decodeWav: 'data' が無い / 長さが宣言と食い違うファイルは落とす", () => {
+test("decodeWav: 'data' が無い / 長さが宣言と食い違うファイルは落とす", () => {
   const complete = buildWav({
     format: 1,
     channels: 1,
@@ -398,7 +398,7 @@ describe("decodeWav がチャンクの走査を RIFF の論理終端ちょうど
   });
 });
 
-Deno.test("decodeWav: フレーム境界で割り切れない data は落とす", () => {
+test("decodeWav: フレーム境界で割り切れない data は落とす", () => {
   assertThrows(
     () =>
       decodeWav(
@@ -416,7 +416,7 @@ Deno.test("decodeWav: フレーム境界で割り切れない data は落とす"
   );
 });
 
-Deno.test("decodeWav: RIFF の宣言サイズが物理長を超える器は落とす（切り詰め）", () => {
+test("decodeWav: RIFF の宣言サイズが物理長を超える器は落とす（切り詰め）", () => {
   const complete = buildWav({
     format: 1,
     channels: 1,
@@ -434,7 +434,7 @@ Deno.test("decodeWav: RIFF の宣言サイズが物理長を超える器は落�
   );
 });
 
-Deno.test("decodeWav: data の宣言が RIFF の論理終端をはみ出すファイルは落とす", () => {
+test("decodeWav: data の宣言が RIFF の論理終端をはみ出すファイルは落とす", () => {
   const complete = buildWav({
     format: 1,
     channels: 1,
@@ -451,7 +451,7 @@ Deno.test("decodeWav: data の宣言が RIFF の論理終端をはみ出すフ�
   assertThrows(() => decodeWav(padded), ModelInputError, "チャンク 'data' が 16 バイトを宣言");
 });
 
-Deno.test("decodeWav: fmt の block align / byte rate が導出値と矛盾するファイルは落とす", () => {
+test("decodeWav: fmt の block align / byte rate が導出値と矛盾するファイルは落とす", () => {
   const build = () =>
     buildWav({
       format: 1,
@@ -478,7 +478,7 @@ Deno.test("decodeWav: fmt の block align / byte rate が導出値と矛盾す�
   );
 });
 
-Deno.test("encodeWav: 非有限サンプルは位置と値付きで落とす（無音・クリップに化けさせない）", () => {
+test("encodeWav: 非有限サンプルは位置と値付きで落とす（無音・クリップに化けさせない）", () => {
   // クリップの `Math.max` / `Math.min` は NaN を素通しし、`Math.round(NaN)` → `setInt16` が
   // 0 を書く。±Infinity はフルスケールへ張り付く。どちらも例外にならない。
   for (
@@ -497,7 +497,7 @@ Deno.test("encodeWav: 非有限サンプルは位置と値付きで落とす（�
   assertEquals(clipped.getInt16(46, true), -32767);
 });
 
-Deno.test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす", () => {
+test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす", () => {
   const samples = Float32Array.of(0, 0.5);
   // 上限ちょうど（byte rate = 0xffff_fffe）は通り、ヘッダにその値がそのまま載る。
   const view = new DataView(encodeWav(samples, 0x7fff_ffff).buffer);
@@ -510,7 +510,7 @@ Deno.test("encodeWav: u32 に収まらない sampleRate / byte rate は落とす
   assertThrows(() => encodeWav(samples, 0x1_0000_0000), ModelInputError, "u32 に収まらない");
 });
 
-Deno.test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は落とす", () => {
+test("encodeWav: RIFF チャンク長が u32 を超えるサンプル数は落とす", () => {
   // 上限は (0xffff_ffff − 36) / 2 = 2147483629 サンプル。実物は 8GB を超えて確保できないので、
   // 長さだけを名乗る器で境界計算を叩く（`encodeWav` は出力を確保する**前**に長さを見る）。
   // 上限ちょうど側は 4GB の確保が要るので置かない（通る側は既存の往復テストが押さえている）。

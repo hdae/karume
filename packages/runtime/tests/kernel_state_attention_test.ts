@@ -6,6 +6,7 @@
 // 同じ誤りを共有していても両方緑になる）。窓の集合が値に出る形（in-window の V を col 番号に
 // して平均を作る）で、述語の上限・下限・リング写像の 3 つが 1 つの数値に畳まれる。
 
+import { test } from "@karume/test-support/test";
 import { assertAlmostEquals, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { DispatchLimitError } from "../src/codegen/errors.ts";
@@ -74,7 +75,7 @@ const VARIANTS: readonly (readonly [boolean, boolean])[] = [
   [true, true],
 ];
 
-Deno.test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれる（並び順は 1 箇所）", () => {
+test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれる（並び順は 1 箇所）", () => {
   assertEquals(stateQkKey(false, false), "attention_state_qk:v1:f32:wg16x4");
   assertEquals(stateQkKey(true, false), "attention_state_qk:v1:f32:wg16x4:sliding");
   assertEquals(stateQkKey(false, true), "attention_state_qk:v1:f32:wg16x4:gqa");
@@ -108,7 +109,7 @@ Deno.test("states 形のキーは :sliding / :gqa の 2 ビットだけで分か
   assertEquals(new Set(keys).size, keys.length);
 });
 
-Deno.test("readonly 形のキーは live 形と別の綴りで、states 形の全キーと衝突しない", () => {
+test("readonly 形のキーは live 形と別の綴りで、states 形の全キーと衝突しない", () => {
   // readonly は束縛が 1 本少なく、② の live の式も違う。drafter と target が同じ device の
   // パイプラインキャッシュを共有するので、キーが live 形と衝突すると他方の WGSL が配られ、
   // 例外なしに窓がずれる。綴りをここで固定する。
@@ -139,7 +140,7 @@ Deno.test("readonly 形のキーは live 形と別の綴りで、states 形の�
   assertEquals(new Set(keys).size, keys.length);
 });
 
-Deno.test("論理 col → スロット物理行の写像は読み（①③）と書き（state_append）で同一文字列", () => {
+test("論理 col → スロット物理行の写像は読み（①③）と書き（state_append）で同一文字列", () => {
   for (const sliding of [false, true]) {
     const fragment = stateSlotRowWgsl(sliding);
     // MUST: 逐語で含まれること。片方だけ別式にすると ring が一周した後の全読みが黙って
@@ -160,7 +161,7 @@ Deno.test("論理 col → スロット物理行の写像は読み（①③）と
   assertEquals(stateSlotRowWgsl(false).includes("%"), false);
 });
 
-Deno.test("同じ生成入力からは常に同一の WGSL が出る（states 形の決定性）", () => {
+test("同じ生成入力からは常に同一の WGSL が出る（states 形の決定性）", () => {
   for (const [sliding, gqa] of VARIANTS) {
     assertEquals(stateQkWgsl(sliding, gqa), stateQkWgsl(sliding, gqa));
     assertEquals(statePvWgsl(sliding, gqa), statePvWgsl(sliding, gqa));
@@ -175,7 +176,7 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（states �
   assertNotEquals(stateAppendWgsl(false), stateAppendWgsl(true));
 });
 
-Deno.test("sliding 変種は causal 上限に**下限**を AND する（上限だけの実装を文字列で拒む）", () => {
+test("sliding 変種は causal 上限に**下限**を AND する（上限だけの実装を文字列で拒む）", () => {
   // ADR 0067 決定 4 の第 5 巡 high: 上限だけだと row > 0 が窓外 key を row ぶん沈黙混入する
   assertEquals(stateQkWgsl(true, false).includes("(limit - col) < params.window"), true);
   assertEquals(stateQkWgsl(false, false).includes("(limit - col) < params.window"), false);
@@ -194,7 +195,7 @@ Deno.test("sliding 変種は causal 上限に**下限**を AND する（上限�
   assertEquals(STATE_NEG_INF_BITS, 0xff800000);
 });
 
-Deno.test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行の扱いが 3 者で割れない）", () => {
+test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行の扱いが 3 者で割れない）", () => {
   // ホスト（dispatch 数）: `clamp(Q − rowOffset, 0, rowsBlock)`
   assertEquals(stateEffectiveRows(4, 0, 1), 1, "decode は 1 行だけ");
   assertEquals(stateEffectiveRows(4, 0, 4), 4, "pad 無しの prefill は全行");
@@ -215,7 +216,7 @@ Deno.test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行
   assertEquals(statePvWgsl(false, false).includes("out[at] = 0.0;"), true);
 });
 
-Deno.test("KV 並列縮約の PV 3 変種は pad 行の 0 を lane 0 だけが書く（同じ要素への同期なし書き込みを拒む）", () => {
+test("KV 並列縮約の PV 3 変種は pad 行の 0 を lane 0 だけが書く（同じ要素への同期なし書き込みを拒む）", () => {
   // 1 workgroup の KV_LANES 本は同じ `out[at]` を指す。lane のガード無しで全レーンが 0 を書くと、
   // 値が同じでも WGSL のメモリモデルではデータ競合になる — 出力の値比較では検出できないので
   // 生成文字列の pad 分岐の中身で縛る（通常行の書き込みと同じガードに揃っていること）。
@@ -257,7 +258,7 @@ const GEOMETRY = {
   scale: 0.5,
 };
 
-Deno.test("①③ の params は語順どおりに詰まる（同じ幾何を 2 つの表で持たない）", () => {
+test("①③ の params は語順どおりに詰まる（同じ幾何を 2 つの表で持たない）", () => {
   const params = stateAttentionParams({ ...GEOMETRY, rowOffset: 4 });
   assertEquals(params.length, 12, "uniform struct の整列で 48 バイト");
   assertEquals([...params.subarray(0, 9)], [4, 4, 8, 6, 2, 0, 32, 32, STATE_NEG_INF_BITS]);
@@ -268,7 +269,7 @@ Deno.test("①③ の params は語順どおりに詰まる（同じ幾何を 2 
   assertEquals([...stats.subarray(0, 6)], [6, 4, 4, 32, 0, STATE_NEG_INF_BITS]);
 });
 
-Deno.test("①③ の params 門が沈黙誤値になる幾何を全て拒否する", () => {
+test("①③ の params 門が沈黙誤値になる幾何を全て拒否する", () => {
   // r = 0（WGSL の u32 ゼロ除算は trap せず実装依存値 = kv 平面が化ける）
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, kvRepeat: 0 }),
@@ -327,7 +328,7 @@ Deno.test("①③ の params 門が沈黙誤値になる幾何を全て拒否す
   assertEquals(stateStatsParams(6, 4, 0, 8, 0).length, 8);
 });
 
-Deno.test("state_append の params 門（容量・正整数・u32 域）", () => {
+test("state_append の params 門（容量・正整数・u32 域）", () => {
   const base = { kvPlanes: 2, chunkRows: 4, depth: 3, capacity: 16, window: 0 };
   assertEquals([...stateAppendParams(base)], [2, 4, 3, 16, 0, 0, 0, 0]);
   assertEquals([...stateAppendParams({ ...base, window: 8 }).subarray(0, 5)], [2, 4, 3, 16, 8]);
@@ -343,7 +344,7 @@ Deno.test("state_append の params 門（容量・正整数・u32 域）", () =>
 const DISPATCH = { batchHeads: 6, rowsBlock: 4, rowOffset: 0, depth: 32, window: 0 };
 const LIMIT = 65535;
 
-Deno.test("dispatch 幾何は live 列に比例し、容量には依らない（ADR 0066 決定 3 の機構）", () => {
+test("dispatch 幾何は live 列に比例し、容量には依らない（ADR 0066 決定 3 の機構）", () => {
   // ①QK の x 軸 = ⌈live / 16⌉。full は P に比例して伸びる
   assertEquals(stateQkWorkgroups(DISPATCH, 0, 16, LIMIT, "t")[0], 1);
   assertEquals(stateQkWorkgroups(DISPATCH, 16, 16, LIMIT, "t")[0], 2);
@@ -371,7 +372,7 @@ Deno.test("dispatch 幾何は live 列に比例し、容量には依らない（
   );
 });
 
-Deno.test("①② の行方向 dispatch は M ではなく Q に比例する（pad だけのブロックは 0）", () => {
+test("①② の行方向 dispatch は M ではなく Q に比例する（pad だけのブロックは 0）", () => {
   // 固定 M=8 を 4 行 × 2 ブロックに割り、Q だけを動かす（容量も colCap も 1 語も動かない）
   const first = { ...DISPATCH, rowsBlock: 4, rowOffset: 0 };
   const second = { ...DISPATCH, rowsBlock: 4, rowOffset: 4 };
@@ -391,7 +392,7 @@ Deno.test("①② の行方向 dispatch は M ではなく Q に比例する（p
   assertEquals(statePvWorkgroups(second, LIMIT, "t")[1], 1);
 });
 
-Deno.test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 65536 でも同一）", () => {
+test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 65536 でも同一）", () => {
   // 型として容量欄が無いことの実測版: 同じ (P, Q) で容量だけ違う params を作っても、
   // dispatch へ渡す幾何は 1 語も変わらない（= 容量比例の workgroup 数を書きようがない）
   const small = stateAttentionParams({ ...GEOMETRY, capacity: 64, colCap: 64 });
@@ -425,7 +426,7 @@ Deno.test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 �
   assertEquals(Object.keys(DISPATCH).includes("chunkRows"), false, "M も渡らない");
 });
 
-Deno.test("dispatch の上限超過はタイル系が fail loudly・grid-stride 系が縮退", () => {
+test("dispatch の上限超過はタイル系が fail loudly・grid-stride 系が縮退", () => {
   assertThrows(
     () => stateQkWorkgroups(DISPATCH, 100000, 1, 16, "t"),
     DispatchLimitError,
@@ -441,7 +442,7 @@ Deno.test("dispatch の上限超過はタイル系が fail loudly・grid-stride 
   assertThrows(() => stateQkWorkgroups(DISPATCH, -1, 1, LIMIT, "t"), CodegenError, "past");
 });
 
-Deno.test("state_append の dispatch は Q に比例し P には依らない", () => {
+test("state_append の dispatch は Q に比例し P には依らない", () => {
   const geometry = { kvPlanes: 4, depth: 64 };
   assertEquals(stateAppendWorkgroups(geometry, 1, LIMIT, "t"), [1, 1, 1]);
   assertEquals(stateAppendWorkgroups(geometry, 16, LIMIT, "t"), [16, 1, 1]);
@@ -451,7 +452,7 @@ Deno.test("state_append の dispatch は Q に比例し P には依らない", (
   assertThrows(() => stateAppendWorkgroups(geometry, 0, LIMIT, "t"), CodegenError, "正整数");
 });
 
-Deno.test("live 範囲の純関数（full は P+Q・sliding は W で頭打ち）", () => {
+test("live 範囲の純関数（full は P+Q・sliding は W で頭打ち）", () => {
   assertEquals(stateSliding(0), false);
   assertEquals(stateSliding(1), true);
   // full
@@ -511,7 +512,7 @@ const windowProbe = (
   };
 };
 
-Deno.test("CPU 参照: sliding の窓は両側で切られる（手計算 — 上限だけなら値が跳ねる）", () => {
+test("CPU 参照: sliding の窓は両側で切られる（手計算 — 上限だけなら値が跳ねる）", () => {
   // W=4 / P=5 / Q=1: row 0 が見るのは col ∈ {2,3,4,5}（下限 = 5−4+1 = 2）。平均 = 3.5。
   // 上限だけの実装なら col 0,1 相当（= 物理行 0,1 の残骸）が混ざって値が跳ねる
   const probe = windowProbe({
@@ -527,7 +528,7 @@ Deno.test("CPU 参照: sliding の窓は両側で切られる（手計算 — �
   assertAlmostEquals(out.data[0], 3.5, 1e-6);
 });
 
-Deno.test("CPU 参照: full は先頭から causal 上限まで（pad 行は厳密 0）", () => {
+test("CPU 参照: full は先頭から causal 上限まで（pad 行は厳密 0）", () => {
   // P=3 / Q=2 / M=3: 論理 col 空間は [0, P+Q) = {0..4}（pad 行の key は**論理 col 空間に
   // 入らない** — 足されるのは Q 本だけ）。row 0 → 上限 3 で {0,1,2,3}（平均 1.5）・
   // row 1 → 上限 4 で {0..4}（平均 2）・row 2 は pad 行なので**厳密 0**
@@ -546,7 +547,7 @@ Deno.test("CPU 参照: full は先頭から causal 上限まで（pad 行は厳�
   assertEquals(Object.is(out.data[2], 0), true, "pad 行は厳密 0（−0 でも NaN でもない）");
 });
 
-Deno.test("CPU 参照: 空行（述語を満たす col が無い pad 行）の出力は厳密 0", () => {
+test("CPU 参照: 空行（述語を満たす col が無い pad 行）の出力は厳密 0", () => {
   // W=2 / P=0 / Q=1 / M=3: row 2 は下限 col ≥ 1 に対し live が {0} だけ = 空行
   const probe = windowProbe({
     window: 2,
@@ -563,7 +564,7 @@ Deno.test("CPU 参照: 空行（述語を満たす col が無い pad 行）の�
   assertAlmostEquals(out.data[0], 0, 1e-6);
 });
 
-Deno.test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓の下限の外に NaN を置いても値が変わらない）", () => {
+test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓の下限の外に NaN を置いても値が変わらない）", () => {
   // 数式 O[row] = Σ_{述語内の col} P · V(col) のとおり、述語外の V は和に入らない。live 範囲を
   // 走って 0 × V を足す形だと、述語外の NaN が 0 × NaN でその行を NaN にする。
   // 共通: K / q は全て 1（述語内の重みが一様）・V(col) = col・D=1。wrap 済みの古い物理行と
@@ -690,7 +691,7 @@ const liveRangeAttention = (input: StateAttentionRefInput): Float32Array<ArrayBu
   return out;
 };
 
-Deno.test("CPU 参照: 有限の V では、live 範囲で述語外にも 0 × V を足す形とビット同一", () => {
+test("CPU 参照: 有限の V では、live 範囲で述語外にも 0 × V を足す形とビット同一", () => {
   // 掃引: full / sliding（容量 = 窓・窓 + 2 で wrap 済みの古い行を作る）× P × Q。全ての物理行
   // （窓の外・論理長より先を含む）に有限の乱数を置く — 述語外の V が値に出ないことを縛る。
   // P には u32 の上端付近も置く（論理列番号が 2^31 を超え、[0, P+Q) を 0 まで歩けない形）。
@@ -741,7 +742,7 @@ Deno.test("CPU 参照: 有限の V では、live 範囲で述語外にも 0 × V
   assertEquals(compared, 30 + 264);
 });
 
-Deno.test("CPU 参照: GQA は kv 平面を ⌊z/r⌋ で写す（剰余写像だと値が変わる）", () => {
+test("CPU 参照: GQA は kv 平面を ⌊z/r⌋ で写す（剰余写像だと値が変わる）", () => {
   const [batch, heads, kvHeads, chunkRows, depth, capacity] = [2, 4, 2, 1, 1, 1];
   const repeat = heads / kvHeads;
   // kv 平面ごとに違う V を置く（z=0,1 → 平面 0 / z=2,3 → 平面 1 / …）
@@ -769,7 +770,7 @@ Deno.test("CPU 参照: GQA は kv 平面を ⌊z/r⌋ で写す（剰余写像�
   }
 });
 
-Deno.test("CPU 参照 state_append: 先頭 Q 行だけ書き・wrap で旧行を潰し・入力を破壊しない", () => {
+test("CPU 参照 state_append: 先頭 Q 行だけ書き・wrap で旧行を潰し・入力を破壊しない", () => {
   const spec = { kvPlanes: 1, chunkRows: 4, depth: 1, capacity: 4, window: 4 };
   const slot = Float32Array.from([-1, -2, -3, -4]);
   const x = Float32Array.from([100, 200, 300, 400]);
@@ -793,7 +794,7 @@ Deno.test("CPU 参照 state_append: 先頭 Q 行だけ書き・wrap で旧行を
   assertEquals([...collide.data], [300, 400]);
 });
 
-Deno.test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
+test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
   const probe = windowProbe({
     window: 0,
     past: 1,
@@ -824,7 +825,7 @@ Deno.test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
   );
 });
 
-Deno.test("CPU 参照: 負・非整数の pastLength / window は full 扱いや空行へ化けずに突合の前で落ちる", () => {
+test("CPU 参照: 負・非整数の pastLength / window は full 扱いや空行へ化けずに突合の前で落ちる", () => {
   // 門が無いと window = -1 は stateSliding が false で黙って full 扱いになり、past = -1 は
   // live 列が 0 本になって厳密 0（append は範囲外の物理行 -1 への黙った書き捨て）を返す。
   const probe = windowProbe({
@@ -882,7 +883,7 @@ Deno.test("CPU 参照: 負・非整数の pastLength / window は full 扱いや
   }
 });
 
-Deno.test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待値へ化けずに突合の前で落ちる", () => {
+test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待値へ化けずに突合の前で落ちる", () => {
   // 範囲比較だけだと NaN は全ての比較が偽で素通りし（行ループが 0 回 → 出力が全 0）、1.5 は
   // 半端な live 列数で NaN を返す — どちらも「オラクルが黙って別の数を返す」形。
   const probe = {
@@ -929,7 +930,7 @@ Deno.test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待
   }
 });
 
-Deno.test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化けずに形の誤りとして落ちる", () => {
+test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化けずに形の誤りとして落ちる", () => {
   // 非整数は次元の積が整数になると配列長の検査も通る（D=1.5・M=2 なら q は 3 要素）。NaN は
   // 配列長の検査が偶然拾うが、文言が形の誤りを名乗らない — どちらも次元の検査で落とす。
   const filled = (count: number): Float32Array<ArrayBuffer> => new Float32Array(count).fill(1);
@@ -969,7 +970,7 @@ Deno.test("CPU 参照: NaN・非整数の次元は半端な shape の期待値�
   }
 });
 
-Deno.test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
+test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
   // 席の目印（census 門がこの `:par` を見る）。幾何は `wg16x16` = TILE_X × D レーン
   assertEquals(stateQkParallelKey(false, false), "attention_state_qk:v1:f32:wg16x16:par");
   assertEquals(
@@ -993,7 +994,7 @@ Deno.test("①' の並列縮約変種はキーに `:par` を持ち、① の契�
   assertEquals(stateQkParallelWgsl(false, false).includes("(limit - col) < params.window"), false);
 });
 
-Deno.test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 有効行）で、行のタイル幅だけが 1", () => {
+test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 有効行）で、行のタイル幅だけが 1", () => {
   // 列軸は ① と同じ ⌈live / TILE_X⌉（D 方向は workgroup 内のレーンなので dispatch に出ない）
   assertEquals(stateQkParallelWorkgroups(DISPATCH, 1008, 16, LIMIT, "t")[0], 64);
   const first = { ...DISPATCH, rowsBlock: 4, rowOffset: 0 };
@@ -1013,7 +1014,7 @@ Deno.test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 
   );
 });
 
-Deno.test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外へ外挿しない", () => {
+test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外へ外挿しない", () => {
   // decode 計画（M=1）と投機の verify 計画（M = k+1 ≤ 8）が適格。ここが唯一の適用条件で、
   // 席の判定は runtime 側が AND する。M=1 は効く（2026-09-06）・M=4 は中立（2026-09-09・
   // 既定席で verify の行 0 と decode の縮約順が揃う）と測ってあり、8 は verify のバケット上限
@@ -1030,7 +1031,7 @@ Deno.test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲�
 
 const TILED_DISPATCH = { batchHeads: 6, rowsBlock: 40, rowOffset: 0, depth: 32, window: 0 };
 
-Deno.test("①ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
+test("①ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
   // 綴りは gemm の幾何断片（`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`）と同一。変種ビットは
   // ① と同じ順で後置する
   assertEquals(stateQkTiledKey(false, false, 16), "attention_state_qk:v1:f32:reg16x16r1x4w4");
@@ -1056,7 +1057,7 @@ Deno.test("①ₜ のキーは M の幾何バケットを載せる（辺だけ�
   assertEquals(new Set(keys).size, keys.length);
 });
 
-Deno.test("①ₜ は ① の契約断片（読み書き同式・述語・有効行・−inf）を uniform 名だけ替えて共有する", () => {
+test("①ₜ は ① の契約断片（読み書き同式・述語・有効行・−inf）を uniform 名だけ替えて共有する", () => {
   for (const [sliding, gqa] of VARIANTS) {
     const wgsl = stateQkTiledWgsl(sliding, gqa, 16);
     assertEquals(stateQkTiledWgsl(sliding, gqa, 16), wgsl, "決定性");
@@ -1084,7 +1085,7 @@ Deno.test("①ₜ は ① の契約断片（読み書き同式・述語・有効
   assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(false, false, 768));
 });
 
-Deno.test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / col_cap / depth）", () => {
+test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / col_cap / depth）", () => {
   const params = stateQkTiledParams({ ...GEOMETRY, rowOffset: 4 });
   assertEquals(params.length, 12, "uniform 整列で 48 バイト");
   assertEquals([...params.slice(0, 9)], [
@@ -1117,7 +1118,7 @@ Deno.test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k �
   );
 });
 
-Deno.test("①ₜ の dispatch の辺は M の幾何バケットから出る（定数で持ち回らない）", () => {
+test("①ₜ の dispatch の辺は M の幾何バケットから出る（定数で持ち回らない）", () => {
   // M ≤ 64 → M16N16。列 ⌈40/16⌉ = 3・行 ⌈40/16⌉ = 3
   assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 40, 0, 40, LIMIT, "t"), [3, 3, 6]);
   // 65..512 → M64N32。列 ⌈40/32⌉ = 2・行 ⌈40/64⌉ = 1
@@ -1136,7 +1137,7 @@ Deno.test("①ₜ の dispatch の辺は M の幾何バケットから出る（�
   );
 });
 
-Deno.test("①ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ①' の M=1 とは重ならない", () => {
+test("①ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ①' の M=1 とは重ならない", () => {
   // 最小バケット M16N16 の tileM が 16。それ未満はタイルの大半が空振りして ① と同じ traffic の
   // まま barrier と共有メモリのぶんだけ損になる
   for (const chunkRows of [1, 2, 4, 8, 15]) {
@@ -1155,7 +1156,7 @@ Deno.test("①ₜ の適用条件は M ≥ 16（最小の行タイル辺）— �
   }
 });
 
-Deno.test("③ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
+test("③ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
   // 綴りは gemm の幾何断片（`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`）と同一で、①ₜ と族名
   // だけが違う。変種ビットは ③ と同じ順で後置する
   assertEquals(statePvTiledKey(false, false, 16), "attention_state_pv:v1:f32:reg16x16r1x4w4");
@@ -1183,7 +1184,7 @@ Deno.test("③ₜ のキーは M の幾何バケットを載せる（辺だけ�
   assertNotEquals(statePvTiledKey(false, false, 16), stateQkTiledKey(false, false, 16));
 });
 
-Deno.test("③ₜ は ③ の契約断片（読み書き同式・有効行・確率の式）を uniform 名だけ替えて共有する", () => {
+test("③ₜ は ③ の契約断片（読み書き同式・有効行・確率の式）を uniform 名だけ替えて共有する", () => {
   for (const [sliding, gqa] of VARIANTS) {
     const wgsl = statePvTiledWgsl(sliding, gqa, 16);
     assertEquals(statePvTiledWgsl(sliding, gqa, 16), wgsl, "決定性");
@@ -1213,7 +1214,7 @@ Deno.test("③ₜ は ③ の契約断片（読み書き同式・有効行・確
   assertNotEquals(statePvTiledWgsl(false, false, 16), statePvTiledWgsl(false, false, 768));
 });
 
-Deno.test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / depth / col_cap）", () => {
+test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / depth / col_cap）", () => {
   const params = statePvTiledParams({ ...GEOMETRY, rowOffset: 4 });
   assertEquals(params.length, 8, "uniform 整列で 32 バイト");
   assertEquals([...params], [
@@ -1236,7 +1237,7 @@ Deno.test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k �
   assertThrows(() => statePvTiledParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
 });
 
-Deno.test("③ₜ の dispatch の辺は M の幾何バケットから出て、行軸は rows_block 全て", () => {
+test("③ₜ の dispatch の辺は M の幾何バケットから出て、行軸は rows_block 全て", () => {
   // M ≤ 64 → M16N16。列 ⌈32/16⌉ = 2・行 ⌈40/16⌉ = 3
   assertEquals(statePvTiledWorkgroups(TILED_DISPATCH, 40, LIMIT, "t"), [2, 3, 6]);
   // 65..512 → M64N32。列 ⌈32/32⌉ = 1・行 ⌈40/64⌉ = 1
@@ -1254,7 +1255,7 @@ Deno.test("③ₜ の dispatch の辺は M の幾何バケットから出て、�
   );
 });
 
-Deno.test("③ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ③' は M < 16 の計画だけに残る", () => {
+test("③ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ③' は M < 16 の計画だけに残る", () => {
   // 最小バケット M16N16 の tileM が 16。それ未満はタイルの大半が空振りして ③ と同じ traffic の
   // まま barrier と共有メモリのぶんだけ損になる
   for (const chunkRows of [1, 2, 4, 8, 15]) {

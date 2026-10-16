@@ -14,6 +14,7 @@
 // ⑦ が無いと、波 D で context を鍵に混ぜる実装が「値は正しいまま decode が毎 step 再導出」と
 // いう形で通ってしまう（例外も警告も出ない）。
 
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -245,7 +246,7 @@ const injectedHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost =>
   adopt: (allocate) => allocate(),
 });
 
-Deno.test({
+test({
   name: "createGenerationContext はスロットごとに物理確保し、dispose で返す（診断つき・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -327,7 +328,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "確保の await を跨いで dispose された Session は context を握らせない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -355,7 +356,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "states 宣言を持たないグラフでは GenerationContext を作れない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -379,7 +380,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "spec の検査: chunkLength は 1 以上の整数・記号容量は bindings だけで決まる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -436,7 +437,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "スロット単体が maxStorageBufferBindingSize を超える容量は fail loudly（絞った device・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -508,7 +509,7 @@ if (GPU_AVAILABLE && BINDING_LIMIT < OOM_SLOT_BYTES) {
   );
 }
 
-Deno.test({
+test({
   name: "state 確保の失敗は out-of-memory errorScope で fail loudly（実 GPU）",
   ignore: !GPU_AVAILABLE || BINDING_LIMIT < OOM_SLOT_BYTES,
   fn: async () => {
@@ -543,7 +544,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "確保途中の失敗は確保済みバッファをちょうど 1 回ずつ返す（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -586,7 +587,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "確保中の device 消失は GpuDeviceLostError にして全確保物を返す（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -609,7 +610,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "spec の chunkBuckets は凍結コピーで公開され、許可集合を組む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -663,7 +664,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "確保の await を跨いだ chunkBuckets の push は許可集合に届かない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -691,7 +692,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "確保の await を跨いだ chunkLength の書き換えは context に届かない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -720,7 +721,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "論理長は run の成功で進み、rewind は 0..pastLength の整数だけを受ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -774,7 +775,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "論理長は u32 の上限で fail loudly（Uint32Array への沈黙切り詰めの遮断・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -819,7 +820,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "汚染後は dispose 以外の全操作を拒否する（読みも含む・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -863,7 +864,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "device 消失後の GenerationContext は全操作が GpuDeviceLostError（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -891,7 +892,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "device.destroy() 直後（lost の反応前）から全操作を拒否する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -923,7 +924,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "論理長 uniform は毎回全域が書き直され、書いた値が GPU 上に載る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -986,7 +987,7 @@ Deno.test({
 // ②state 参照ノードを持つグラフの 1-shot 実行は fail loudly（黙って state 抜きで走らない）
 // NOTE: 「同じ鍵に当たる（hit: true）」= ADR 0066 受入条件③の run 側は波 D-3 で結線され、
 // tests/gpu_state_execution_test.ts が「別 context・同容量なら 2 本目が hit」の形で持っている。
-Deno.test({
+test({
   name: "context 生成は計画導出を走らせず、state 参照グラフの 1-shot 実行は拒否される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1047,7 +1048,7 @@ const RUN_INPUT: Tensor = {
   data: Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8]),
 };
 
-Deno.test({
+test({
   name: "run の queryLength は発行時に固定される（発行後の書き換えを読まない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1070,7 +1071,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "run の context は発行時に固定され、リースも同じ写しに立つ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1099,7 +1100,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "同一 context への未 await 並行発行は 2 本目を拒否する（別 context は通る・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1145,7 +1146,7 @@ Deno.test({
 // deferred commit（投機デコードの verify 形 — 論理長を run の成功では進めず、受理行数で確定する）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "deferred run は論理長を保留し、commit(rows) が受理行数だけ進める（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1238,7 +1239,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "pendingCommit は凍結して返り、受理行数の上限は外から書き換えられない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1272,7 +1273,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "失敗した deferred run は保留を作らない / dispose は保留ごと畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1309,7 +1310,7 @@ const slidingGraph = (): DeclarationJson =>
     { window: 8 },
   );
 
-Deno.test({
+test({
   name: "slidingSlack は sliding スロットの capacity − window の最小（sliding 無しは undefined）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1352,7 +1353,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "deferred run の queryLength は sliding の余裕まで（超える発行は同期区間で拒否・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1519,7 +1520,7 @@ const readSlotWords = async (
   return words;
 };
 
-Deno.test({
+test({
   name: "fork は全スロットの全バイトと論理長を写し、分岐は独立に進む（u32・診断つき・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1618,7 +1619,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "fork() を await せず同じ tick に元へ run を発行しても、複製は呼んだ時点の状態を持つ（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1650,7 +1651,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "fork() の直後（await 前）の rewind / 2 本目の fork / dispose は通る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1691,7 +1692,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "fork の拒否: 汚染・進行中 run・batch の予約中・commit 待ち・dispose 済み Session（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1769,7 +1770,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "device 消失後の fork は GpuDeviceLostError（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1852,7 +1853,7 @@ const armableFaults = (
   };
 };
 
-Deno.test({
+test({
   name: "fork の確保途中の失敗は確保物をちょうど 1 回ずつ返し、元は無傷（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1893,7 +1894,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "分岐の独立の門は空振りでない — 複製の dispatch が元のスロットを束ねると元が動く（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1959,7 +1960,7 @@ const delayedAdoptHost = (
   },
 });
 
-Deno.test({
+test({
   name:
     "同期区間の門は空振りでない — 複製の前に await を挟む host では後続の書き込みを写す（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -2022,7 +2023,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "実 Session の fork も同期区間で複製する — 同じ区間の後続の書き込みは複製に入らない（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -2060,7 +2061,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "fork の所要時間を記録する（スロット 2 本 × 64 MiB・記録のみ・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

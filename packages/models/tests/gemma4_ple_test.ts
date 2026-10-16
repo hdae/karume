@@ -17,6 +17,7 @@
 //   LRU の追い出し順・0（常駐なし）・1 本すら載らない予算の拒否を凍結する。
 // - **解放**: `dispose()` で常駐が空になり、以後の gather は fail loudly。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { createGemma4Ple } from "../src/gemma/ple.ts";
@@ -96,7 +97,7 @@ const tensorOf = async (
 
 // ---- 索引の受理集合 --------------------------------------------------------
 
-Deno.test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) => {
+test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async (t) => {
   const raw = fixture().document;
 
   await t.step("正常系（陰性対照 — 常に落ちる門になっていない）", () => {
@@ -214,7 +215,7 @@ Deno.test("parseGemma4PleIndex: 壊れた索引を黙って読まない", async 
 
 // ---- 索引と容器の資産の突合（admission の席）-------------------------------
 
-Deno.test("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全件列挙で突合する", async (t) => {
+test("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全件列挙で突合する", async (t) => {
   const rig = fixture();
 
   await t.step("正常系（陰性対照）", async () => {
@@ -275,7 +276,7 @@ Deno.test("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
 
 // ---- 行の翻訳（block 境界と block 跨ぎ）------------------------------------
 
-Deno.test("Gemma4Ple.gather: token → (block, 行 offset) の翻訳が境界で正しい", async () => {
+test("Gemma4Ple.gather: token → (block, 行 offset) の翻訳が境界で正しい", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 0);
   // 3 本の block の境界をまたぐ列（先頭・末尾・跨ぎ）。
@@ -303,7 +304,7 @@ Deno.test("Gemma4Ple.gather: token → (block, 行 offset) の翻訳が境界で
   );
 });
 
-Deno.test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行を引く", async () => {
+test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行を引く", async () => {
   // `values` は 2 行 / `scales` は 3 行で切る（実資産では 1 行の byte 数が違うので普通に起きる）。
   const spec: PleFixtureSpec = { ...SPEC, valueRows: 2, scaleRows: 3 };
   const rig = pleFixture(spec);
@@ -340,7 +341,7 @@ Deno.test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行
   );
 });
 
-Deno.test("Gemma4Ple.gather: 同じ id が並ぶ列でも各行は単発 gather とビット一致する", async () => {
+test("Gemma4Ple.gather: 同じ id が並ぶ列でも各行は単発 gather とビット一致する", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 0);
   const single = await tensorOf(ple, [3]);
@@ -357,7 +358,7 @@ Deno.test("Gemma4Ple.gather: 同じ id が並ぶ列でも各行は単発 gather 
 
 // ---- 方針表（全量読み ↔ 行読み）-------------------------------------------
 
-Deno.test("Gemma4Ple.gather: 1 行だけの gather は block 全量を読まない（decode 1 token）", async () => {
+test("Gemma4Ple.gather: 1 行だけの gather は block 全量を読まない（decode 1 token）", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   assertRows(await tensorOf(ple, [0]), [0]);
@@ -371,7 +372,7 @@ Deno.test("Gemma4Ple.gather: 1 行だけの gather は block 全量を読まな�
   );
 });
 
-Deno.test("Gemma4Ple.gather: block の全行を触る gather は全量読みへ倒れる", async () => {
+test("Gemma4Ple.gather: block の全行を触る gather は全量読みへ倒れる", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   // block は 2 行なので、2 行触れば下限（= min(32, 行数)）に届く。
@@ -388,7 +389,7 @@ Deno.test("Gemma4Ple.gather: block の全行を触る gather は全量読みへ�
   );
 });
 
-Deno.test("Gemma4Ple.gather: 行読みと全量読みの値はビット同一", async () => {
+test("Gemma4Ple.gather: 行読みと全量読みの値はビット同一", async () => {
   const ids = [0, 1];
   const rows = await tensorOf(pleOf(fixture(), 0), ids);
   const blocks = await tensorOf(pleOf(fixture()), ids);
@@ -400,7 +401,7 @@ Deno.test("Gemma4Ple.gather: 行読みと全量読みの値はビット同一", 
   assertRows(rows, ids);
 });
 
-Deno.test("Gemma4Ple.gather: 全量読みは予算に追い出し無しで載るときだけ", async () => {
+test("Gemma4Ple.gather: 全量読みは予算に追い出し無しで載るときだけ", async () => {
   const rig = fixture();
   // 予算は block 1 本ぶん。values が載った時点で scales は載らない（同じ gather の中で
   // 自分が載せたものを追い出さない）。
@@ -412,7 +413,7 @@ Deno.test("Gemma4Ple.gather: 全量読みは予算に追い出し無しで載る
   assertEquals(stats.rowReads, 2, "載らなかった表は行読みへ倒れる");
 });
 
-Deno.test("Gemma4Ple.gather: 32 行未満でも block が細ければ全量へ倒れる（端数 block）", async () => {
+test("Gemma4Ple.gather: 32 行未満でも block が細ければ全量へ倒れる（端数 block）", async () => {
   // 64 行の block 1 本（下限は 32 行）— 31 行なら行読み・32 行なら全量。
   const wide: PleFixtureSpec = { tokens: 64, layers: 1, dim: 4, embedScale: 4 };
   const ids = Array.from({ length: 31 }, (_row, index) => index);
@@ -439,7 +440,7 @@ Deno.test("Gemma4Ple.gather: 32 行未満でも block が細ければ全量へ�
   assertEquals(fullPle.stats().rowReads, 0);
 });
 
-Deno.test("Gemma4Ple.gather: 行読みの同時発行は上限を超えない（fd を枯らさない）", async () => {
+test("Gemma4Ple.gather: 行読みの同時発行は上限を超えない（fd を枯らさない）", async () => {
   // 1 block 1 行（= 常に行読み）の索引を 128 行ぶん引く。
   const spec: PleFixtureSpec = { tokens: 128, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
   const rig = pleFixture(spec, { defer: true });
@@ -457,7 +458,7 @@ Deno.test("Gemma4Ple.gather: 行読みの同時発行は上限を超えない（
 
 // ---- 行キャッシュ ----------------------------------------------------------
 
-Deno.test("Gemma4Ple.gather: 行読みで引いた行は予算の空きぶん再利用される", async () => {
+test("Gemma4Ple.gather: 行読みで引いた行は予算の空きぶん再利用される", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   await ple.gather([0]);
@@ -468,7 +469,7 @@ Deno.test("Gemma4Ple.gather: 行読みで引いた行は予算の空きぶん再
   assertEquals(ple.stats().rowReads, 2);
 });
 
-Deno.test("Gemma4Ple.gather: 予算 0 は行も保持しない（毎回読み直す）", async () => {
+test("Gemma4Ple.gather: 予算 0 は行も保持しない（毎回読み直す）", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 0);
   await ple.gather([0]);
@@ -479,7 +480,7 @@ Deno.test("Gemma4Ple.gather: 予算 0 は行も保持しない（毎回読み直
 
 // ---- 予算と LRU ------------------------------------------------------------
 
-Deno.test("Gemma4Ple: 常駐バイトは索引だけから決まる（block 幅に依らない意味）", () => {
+test("Gemma4Ple: 常駐バイトは索引だけから決まる（block 幅に依らない意味）", () => {
   const rig = fixture();
   assertEquals(gemma4PleBlockBytes(rig.index.values, rig.index.values.blocks[0]), BLOCK_BYTES);
   assertEquals(gemma4PleTotalBytes(rig.index), 6 * BLOCK_BYTES);
@@ -489,7 +490,7 @@ Deno.test("Gemma4Ple: 常駐バイトは索引だけから決まる（block 幅�
   assertEquals(defaultGemma4PleResidentBytes(wide), 2 * 3 * SPEC.layers * SPEC.dim);
 });
 
-Deno.test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block から落ちる）", async () => {
+test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block から落ちる）", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 2 * BLOCK_BYTES);
   await ple.gather([0, 1]);
@@ -508,7 +509,7 @@ Deno.test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block か
   assertEquals(ple.stats().loads, after, "常駐している block を読み直している");
 });
 
-Deno.test("Gemma4Ple.gather: 1 回の gather は自分の hit を追い出さない", async () => {
+test("Gemma4Ple.gather: 1 回の gather は自分の hit を追い出さない", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 2 * BLOCK_BYTES);
   await ple.gather([0, 1]);
@@ -522,7 +523,7 @@ Deno.test("Gemma4Ple.gather: 1 回の gather は自分の hit を追い出さな
   assertEquals(ple.stats().rowReads, 2 * 2, "載らなかった miss は行読みへ倒れる");
 });
 
-Deno.test("Gemma4Ple: block 1 本すら載らない予算は構築時に fail loudly", () => {
+test("Gemma4Ple: block 1 本すら載らない予算は構築時に fail loudly", () => {
   const rig = fixture();
   const error = assertThrows(
     () => pleOf(rig, BLOCK_BYTES - 1),
@@ -537,7 +538,7 @@ Deno.test("Gemma4Ple: block 1 本すら載らない予算は構築時に fail lo
 
 // ---- id 空間の相互照合と値域 -----------------------------------------------
 
-Deno.test("createGemma4Ple: vocab の相互照合は読み口に触る前に落ちる", () => {
+test("createGemma4Ple: vocab の相互照合は読み口に触る前に落ちる", () => {
   const rig = fixture();
   const error = assertThrows(
     () =>
@@ -555,7 +556,7 @@ Deno.test("createGemma4Ple: vocab の相互照合は読み口に触る前に落�
   assert(!(error instanceof ModelInputError));
 });
 
-Deno.test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有効な行を引かせない）", async () => {
+test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有効な行を引かせない）", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   for (const bad of [SPEC.tokens, -1, 1.5]) {
@@ -571,7 +572,7 @@ Deno.test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token �
 
 // ---- 中断と解放 ------------------------------------------------------------
 
-Deno.test("Gemma4Ple.gather: 中断済みの signal では block を 1 本も開かない", async () => {
+test("Gemma4Ple.gather: 中断済みの signal では block を 1 本も開かない", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   const controller = new AbortController();
@@ -584,7 +585,7 @@ Deno.test("Gemma4Ple.gather: 中断済みの signal では block を 1 本も開
   assertEquals(rig.opens.length, 0);
 });
 
-Deno.test("Gemma4Ple.gather: 走行中の中断は段の境目で効き、読めた行は残さない", async () => {
+test("Gemma4Ple.gather: 走行中の中断は段の境目で効き、読めた行は残さない", async () => {
   // 1 block 1 行の索引（= 常に行読み）。1 本目の読みが決着した後の境目で中断が効く。
   const spec: PleFixtureSpec = { tokens: 64, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
   const rig = pleFixture(spec, { defer: true });
@@ -605,7 +606,7 @@ Deno.test("Gemma4Ple.gather: 走行中の中断は段の境目で効き、読め
   assert(rig.reads.length > 0, "そもそも 1 本も読んでいない（中断の門が空振り）");
 });
 
-Deno.test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止め、開始済みの読みを待ってから落ちる", async () => {
+test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止め、開始済みの読みを待ってから落ちる", async () => {
   // 1 block 1 行・予算 0（= 全 40 区間が行読み）。最初の読み 1 本だけを reject させる。
   // 失敗の後も他の worker が発行を続けると、呼び手の retry と重なって同時発行の上限 16 を超える。
   const spec: PleFixtureSpec = { tokens: 20, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
@@ -649,7 +650,7 @@ Deno.test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止
   assertEquals(calls, callsAtReject, "reject の後に読みが新規発行された");
 });
 
-Deno.test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fail loudly", async () => {
+test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fail loudly", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   await ple.gather([0, 1]);
@@ -662,7 +663,7 @@ Deno.test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fa
   assertEquals(ple.stats().residentBytes, 0);
 });
 
-Deno.test("Gemma4Ple: 先行読みが dispose 後に完了しても常駐を復活させない", async () => {
+test("Gemma4Ple: 先行読みが dispose 後に完了しても常駐を復活させない", async () => {
   const rig = fixture({ defer: true });
   const ple = pleOf(rig);
   const pending = ple.gather([0, 1]);

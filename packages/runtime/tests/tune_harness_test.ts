@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
 import { acquireGpu } from "../mod.ts";
 import { parseStorageRoles } from "../src/gpu/pipeline-cache.ts";
@@ -132,7 +133,7 @@ const sweepPair = async (
   }
 };
 
-Deno.test("束縛表は WGSL の storage の役割（本数と書き込み先の位置）と突き合わせて通る", () => {
+test("束縛表は WGSL の storage の役割（本数と書き込み先の位置）と突き合わせて通る", () => {
   const roles = parseStorageRoles(linearWgsl("f16", true, "f32", 1024));
   assertBindingRoles(
     { key: "linear", bindings: ["x", "w", "bias", "out"], writes: ["out"] },
@@ -140,7 +141,7 @@ Deno.test("束縛表は WGSL の storage の役割（本数と書き込み先の
   );
 });
 
-Deno.test("束縛表の書き込み先の位置が WGSL と違えば落ちる（位置束縛の取り違えの検出）", () => {
+test("束縛表の書き込み先の位置が WGSL と違えば落ちる（位置束縛の取り違えの検出）", () => {
   const roles = parseStorageRoles(linearWgsl("f16", true, "f32", 1024));
   assertThrows(
     () =>
@@ -153,7 +154,7 @@ Deno.test("束縛表の書き込み先の位置が WGSL と違えば落ちる（
   );
 });
 
-Deno.test("matmul / bmm の全ケースの束縛表は、既定幾何の WGSL の storage の役割と噛み合う", () => {
+test("matmul / bmm の全ケースの束縛表は、既定幾何の WGSL の storage の役割と噛み合う", () => {
   const dense = SWEEP_CASES.filter((target) => target.op === "matmul" || target.op === "bmm");
   assertEquals(new Set(dense.map((target) => target.op)), new Set(["matmul", "bmm"]));
   for (const target of dense) {
@@ -167,7 +168,7 @@ Deno.test("matmul / bmm の全ケースの束縛表は、既定幾何の WGSL �
   }
 });
 
-Deno.test("束縛表の本数が WGSL と違えば落ちる", () => {
+test("束縛表の本数が WGSL と違えば落ちる", () => {
   const roles = parseStorageRoles(linearWgsl("f16", true, "f32", 1024));
   assertThrows(
     () =>
@@ -177,7 +178,7 @@ Deno.test("束縛表の本数が WGSL と違えば落ちる", () => {
   );
 });
 
-Deno.test("1 dispatch 15 µs の小さいケースでも、掃引の反復は opbench の上限 1024 を超えて pass が目標長に届く", () => {
+test("1 dispatch 15 µs の小さいケースでも、掃引の反復は opbench の上限 1024 を超えて pass が目標長に届く", () => {
   const nsPerDispatch = 15e3;
   const reps = calibrateReps(nsPerDispatch, TARGET_PASS_MS, SWEEP_MAX_REPS);
   assertEquals(reps, 5334);
@@ -185,7 +186,7 @@ Deno.test("1 dispatch 15 µs の小さいケースでも、掃引の反復は op
   assert(reps * nsPerDispatch >= TARGET_PASS_MS * 1e6);
 });
 
-Deno.test({
+test({
   name: "実 GPU: f32 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
   ignore: adapter === null,
   fn: async () => {
@@ -197,7 +198,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実 GPU: i8a8 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
   ignore: adapter === null,
   fn: async () => {
@@ -209,7 +210,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実 GPU: timestamp-query の無い device は壁時計（wall）で同じ規約を回す",
   ignore: adapter === null,
   fn: async () => {
@@ -220,7 +221,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実 GPU: f32 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
   ignore: adapter === null,
   fn: async () => {
@@ -232,7 +233,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "実 GPU: f32 融合 attention の ③PV（前段 ①QK → ② 行統計）を既定と 64×64/256 で測ると出力が一致する",
   ignore: adapter === null,
@@ -245,7 +246,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実 GPU: i8a8 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
   ignore: adapter === null,
   fn: async () => {
@@ -257,7 +258,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実 GPU: i8a8 融合 attention の ③PV を既定と 64×64/256 で測ると出力が一致する",
   ignore: adapter === null,
   fn: async () => {
@@ -269,7 +270,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実 GPU: conv2d の implicit GEMM を既定と 64×64/256 で測ると出力が一致する",
   ignore: adapter === null,
   fn: async () => {
@@ -340,7 +341,7 @@ const resourceWords = (target: SweepCase, name: string): Uint32Array<ArrayBuffer
   return words;
 };
 
-Deno.test({
+test({
   name:
     "実 GPU: f32 linear の既定幾何の出力は CPU 参照（K 昇順の逐次積和 + 末尾の bias・非融合か fma 縮約のどちらか）とビット同一",
   ignore: adapter === null,
@@ -457,7 +458,7 @@ const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promis
   }
 };
 
-Deno.test({
+test({
   name:
     "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
   ignore: adapter === null,
@@ -476,7 +477,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
   ignore: adapter === null,

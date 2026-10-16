@@ -9,13 +9,14 @@
 // でも区別しない — 2026-09-21 実測）。値として出ていないことは実行時にしか観測できないので、
 // 名指しの門をここに置く。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import * as runtime from "../mod.ts";
 
 /** 型としてのみ公開する綴り（構築口を塞ぐために値を出していない面）。 */
 const TYPE_ONLY = ["BatchScope", "GpuContext", "ResidentTensor"];
 
-Deno.test("barrel: 構築口を塞いでいる面は値として出ていない", () => {
+test("barrel: 構築口を塞いでいる面は値として出ていない", () => {
   const surface = Object.keys(runtime);
   // 陽性対照 — 空の名前空間を見て緑になっている形でないことを先に確かめる。
   assert(surface.includes("acquireGpu"), `barrel の import が壊れている（${surface.length} 件）`);

@@ -21,6 +21,7 @@
 // 縛れる純関数なので、最後の 1 本で同じく直接叩く — ここが壊れると購読側へ**別 step の潜在が
 // 黙って**届き、実 GPU の WAV 門は観測席を通らないので緑のままになる。
 
+import { test } from "@karume/test-support/test";
 import {
   assertEquals,
   assertNotStrictEquals,
@@ -132,7 +133,7 @@ for (const name of WEIGHT_NAMES) {
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "nope" }),
@@ -141,7 +142,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipeline の契約名が irodori でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が irodori でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -150,7 +151,7 @@ Deno.test("fromAssets: pipeline の契約名が irodori でない manifest を�
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "irodori/2" }));
   await assertRejects(
@@ -160,7 +161,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => IrodoriPipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "nope" }),
@@ -169,7 +170,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
   // 綴り違い（`steps` に対する `step`）が黙って既定へ縮退する経路を作らない（config.ts の MUST）。
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, step: 40 }));
   await assertRejects(
@@ -179,7 +180,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ちる", async () => {
   // 欠けた欄が既定で埋まると、ホストだけが別の数を持ったまま **shape は合う**形で沈黙誤値になる
   // （config.ts 冒頭の MUST — モデル固有の数は manifest が正本）。
   const { hopLength: _dropped, ...missing } = PIPELINE_CONFIG;
@@ -191,7 +192,7 @@ Deno.test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落
   );
 });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 上の 6 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -208,7 +209,7 @@ Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落
 // 上の門と同じ manifest + 空資産で見る: signal 無しなら「資産 'backbone' が無い」で落ちる形が、
 // 中断済み / 実行中の中断では `signal.reason` で落ちる。
 
-Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
+test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
   const manifest = parseManifest(manifestText());
   const controller = new AbortController();
   const reason = new Error("中止ボタン");
@@ -220,7 +221,7 @@ Deno.test("fromAssets: 中断済み signal は資産へ触る前に reason そ�
   assertStrictEquals(error, reason);
 });
 
-Deno.test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
+test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
   // 上の門は「呼ぶ前に中断済み」だけを見る。中止ボタンは**組み立てが走っている最中**に
   // 押されるので、段境界の検査はイベントループへ譲ってからでなければ死文になる
   // （abort() の届き方はタスク配送 — 同期解析中は 1 度も観測されない）。
@@ -247,7 +248,7 @@ const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
     ...new TextEncoder().encode("}"),
   ]);
 
-Deno.test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
   const broken = brokenUtf8Asset();
   // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
   // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
@@ -263,7 +264,7 @@ Deno.test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる�
   );
 });
 
-Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
   const truncated = new TextEncoder().encode('{"unkId":');
   assertThrows(
     () => assetJson({ tokenizer: truncated }, "tokenizer"),
@@ -275,7 +276,7 @@ Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる
   assertEquals(assetJson({ tokenizer: valid }, "tokenizer"), { unkId: 0, space: "あ" });
 });
 
-Deno.test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に入る前に落ちる", () => {
+test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に入る前に落ちる", () => {
   // これらの門は本来 latent 生成の**後**（`planCodecTiles` は decode 直前・`Randn` は段 ⑦）に
   // しかなく、重み 1.26GB のロードと DiT の全 step を消費してから落ちていた。入口で同じ
   // 受理集合を借りることで、綴り違いの代償が計算時間にならない。
@@ -309,7 +310,7 @@ Deno.test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に�
   assertIrodoriRequest({ text }, config);
 });
 
-Deno.test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim(min=2)）に満たなければ GPU を回す前に落ちる", () => {
+test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim(min=2)）に満たなければ GPU を回す前に落ちる", () => {
   // 参照は段 ④ で patch される（hop 1920 サンプル = codec の 1 フレーム・patch 幅 4 フレーム =
   // 1 トークン）。入口で落とさないと、text / caption の段と codec encoder を GPU で回してから
   // 0 トークンなら素の Error、1 トークンなら下限の外の S = 1 が speaker グラフへ届く。
@@ -349,7 +350,7 @@ Deno.test("assertIrodoriRequest: speaker の参照が 2 トークン（export �
   assertIrodoriRequest({ text, speaker: latent(8) }, config);
 });
 
-Deno.test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タイルを検査する", () => {
+test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タイルを検査する", () => {
   // 呼び手は `codecTileFrames` を渡す義務を負っていないので、「渡さなければ通る」形にすると
   // 既定タイルと `codecHaloFrames` の関係が壊れた配布形が**必ず** DiT ループ後に落ちる。
   const config = parseIrodoriPipelineConfig({ ...PIPELINE_CONFIG, codecHaloFrames: 91 });
@@ -360,7 +361,7 @@ Deno.test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既�
   );
 });
 
-Deno.test("latentSnapshot: 束縛した時点の潜在を写す（step を進めても写しは変わらない）", () => {
+test("latentSnapshot: 束縛した時点の潜在を写す（step を進めても写しは変わらない）", () => {
   const shape = [2, 2];
   // DiT ループの再現: `eulerStep` は純関数なので `x` は step ごとに**新しい配列**へ
   // 差し替わる。イベントの口は step ごとに作って渡す。

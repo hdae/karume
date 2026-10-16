@@ -5,11 +5,12 @@
 // `ModelInputError`（HTTP サーバーなら 400）で落ちる。型が家族ごとに割れていると、複数家族を
 // 載せたホストは 400 を切り出すのに**メッセージの綴りを読む**しかなくなる。
 
+import { test } from "@karume/test-support/test";
 import { assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { createStopStringFilter } from "../src/text/detokenizer.ts";
 
-Deno.test("createStopStringFilter: 受理できない停止文字列は入力起因で落ちる", async (t) => {
+test("createStopStringFilter: 受理できない停止文字列は入力起因で落ちる", async (t) => {
   await t.step("空文字列（常に一致する = 1 文字も出せない指定）", () => {
     assertThrows(
       () => createStopStringFilter(["END", ""]),
@@ -32,7 +33,7 @@ Deno.test("createStopStringFilter: 受理できない停止文字列は入力起
   });
 });
 
-Deno.test("createStopStringFilter: 型を外した指定は暗黙変換せずに入力起因で落ちる", async (t) => {
+test("createStopStringFilter: 型を外した指定は暗黙変換せずに入力起因で落ちる", async (t) => {
   /** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
   const untyped = (value: unknown): readonly string[] => value as readonly string[];
 

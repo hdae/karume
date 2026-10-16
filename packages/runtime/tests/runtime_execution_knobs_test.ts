@@ -2,6 +2,7 @@
 // アダプタ無し環境でも回帰を撃てる位置に置く。`createSessionFromContainer` 経由の GPU テストは「実構築でも
 // 拒否される」1 本だけを残し、値の総当たりはここが正本。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { assertExecutionKnobs } from "../src/runtime/session-options-check.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
@@ -30,11 +31,11 @@ const NAMES: readonly [string, string, string, string, string] = [
   "linearGemvReduce",
 ];
 
-Deno.test("受理集合の中の綴りは 5 ノブとも通る（下が「何を渡しても落ちる」ではない証明）", () => {
+test("受理集合の中の綴りは 5 ノブとも通る（下が「何を渡しても落ちる」ではない証明）", () => {
   assertExecutionKnobs("f32", "f32", "f32", "parallel-fused", "parallel");
 });
 
-Deno.test("実行形ノブの非文字列は受理集合を引く前に落ち、診断で利用者の変換を呼ばない", () => {
+test("実行形ノブの非文字列は受理集合を引く前に落ち、診断で利用者の変換を呼ばない", () => {
   for (const [index, name] of NAMES.entries()) {
     let conversions = 0;
     // 受理集合の中の綴りへ**変換できる**オブジェクト。`Object.hasOwn` のキー変換や診断の
@@ -65,7 +66,7 @@ Deno.test("実行形ノブの非文字列は受理集合を引く前に落ち、
   }
 });
 
-Deno.test("union 外の綴りは全件列挙して 1 回で落ちる", () => {
+test("union 外の綴りは全件列挙して 1 回で落ちる", () => {
   // `"i8a8"` は 0.5.0 で `"a8"` へ改名した綴り（ADR 0074 決定 3・互換シム無し）。
   const error = assertThrows(
     () => jsCallerAssert("i8a8", "f32", "s16", "parallel-fused", "parallel"),

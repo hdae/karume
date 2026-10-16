@@ -27,6 +27,8 @@
  * 拾えるようになったぶん。
  */
 
+import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import type { IrGraph } from "../src/format/ir.ts";
 import { type FusionCounts, type FusionWeightLayout, planFusions } from "../src/runtime/fusion.ts";
@@ -68,7 +70,7 @@ const IRODORI_DIR = new URL("../../../models/karume-irodori-v4-small/", import.m
  */
 const readIrodoriGraph = async (name: string): Promise<IrGraph> => {
   const manifest: ContainerManifest = JSON.parse(
-    await Deno.readTextFile(new URL("karume.json", IRODORI_DIR)),
+    await readTextFile(new URL("karume.json", IRODORI_DIR)),
   );
   const head = containerPart0(manifest, "v4-small", name, "f32");
   return await readContainerGraph(new URL(head.path, IRODORI_DIR), name);
@@ -82,10 +84,10 @@ const readIrodoriGraph = async (name: string): Promise<IrGraph> => {
  */
 const exists = async (url: URL): Promise<boolean> => {
   try {
-    await Deno.stat(url);
+    await stat(url);
     return true;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
@@ -124,10 +126,10 @@ if (!EXTRA_AVAILABLE) {
 // 焼かず manifest から引く — 焼くと分割数が動いた瞬間に融合ヒット数の門が NotFound で落ちて、
 // 退行検出そのものが止まる。
 const ANIMA_MANIFEST: ContainerManifest | undefined = ASSETS_AVAILABLE
-  ? JSON.parse(await Deno.readTextFile(new URL("karume.json", ANIMA_DIR)))
+  ? JSON.parse(await readTextFile(new URL("karume.json", ANIMA_DIR)))
   : undefined;
 const EXTRA_MANIFEST: ContainerManifest | undefined = EXTRA_AVAILABLE
-  ? JSON.parse(await Deno.readTextFile(new URL("karume.json", EXTRA_DIR)))
+  ? JSON.parse(await readTextFile(new URL("karume.json", EXTRA_DIR)))
   : undefined;
 
 /**
@@ -271,7 +273,7 @@ const NONE: FusionCounts = {
   packedStaticQuantize: 0,
 };
 
-Deno.test({
+test({
   name: "実資産の DiT は run 1 回で adaln 85 / rope 56 / silu 2 を掴む（w8a8 と f16 で同一）",
   ignore: !ASSETS_AVAILABLE,
   fn: async () => {
@@ -285,7 +287,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実資産の text encoder / conditioner / VAE decoder の融合ヒット数",
   ignore: !ASSETS_AVAILABLE,
   fn: async () => {
@@ -326,7 +328,7 @@ Deno.test({
 const EXTRA_MODELS = ["anima-copycat-20260610", "anima-wai-v1.0"] as const;
 const EXTRA_CROSS_REPO_COMPONENTS = ["text_encoder", "vae_decoder"] as const;
 
-Deno.test({
+test({
   name: "実資産の extra は 2 変種とも manifest の変種表と一致し、共有部品を越境参照で持つ",
   ignore: !EXTRA_AVAILABLE,
   fn: () => {
@@ -347,7 +349,7 @@ Deno.test({
 });
 
 for (const model of EXTRA_MODELS) {
-  Deno.test({
+  test({
     name: `実資産の extra ${model} の融合ヒット数（越境先の共有部品を含む）`,
     ignore: !EXTRA_AVAILABLE,
     fn: async () => {
@@ -391,7 +393,7 @@ for (const model of EXTRA_MODELS) {
  * identityExpand は **0**。SDPA を保存した資産（ADR 0023 改訂 — mask 付き attention）では
  * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
  */
-Deno.test({
+test({
   name: "実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む",
   ignore: !GEMMA_AVAILABLE,
   fn: async () => {
@@ -434,7 +436,7 @@ if (!MINICPM5_DECODE_AVAILABLE) {
  * 旧BHSD matcherではM=1・H=1のkだけが一致し、decode=15 / prefill=0だった。
  * BSHDの専用添字を追加したため、両方で全50鎖を固定する（ADR 0040追記2026-09-12）。
  */
-Deno.test({
+test({
   name: "実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む（token-only 形も同一）",
   ignore: !GEMMA4_DECODE_AVAILABLE,
   fn: async () => {
@@ -463,11 +465,11 @@ for (const family of ["gemma4", "gemma4-qat"]) {
   if (!available) {
     console.warn(`[karume] ${manifestUrl.pathname} が無いため配布形のRoPE検査をSKIPする`);
   }
-  Deno.test({
+  test({
     name: `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
     ignore: !available,
     fn: async () => {
-      const manifest: ContainerManifest = JSON.parse(await Deno.readTextFile(manifestUrl));
+      const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
       // MUST: quant は名指しする（下の SRQ の期待値は i2 / i4 の格納と group 長に依存する —
       // manifest の並びの先頭を採ると、quant を足した日に並び順で期待値が割れる）。
       const head = containerPart0(manifest, "e2b", "model", "i4");
@@ -516,7 +518,7 @@ for (const family of ["gemma4", "gemma4-qat"]) {
  * （片方だけ動いたら、どちらの発行形が変わったのかがこの対で割れる）。silu 24 は 24 層の
  * gate MLP。
  */
-Deno.test({
+test({
   name: "実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）",
   ignore: !MINICPM5_DECODE_AVAILABLE,
   fn: async () => {
@@ -576,7 +578,7 @@ const irodoriDitShapes = (sequence: number): Readonly<Record<string, readonly nu
  * ここが動く**こと」の両方。0 が非 0 に変わったら、まず ROPE_RULE / ADALN_RULE の受理集合が
  * 意図せず広がっていないかを見る（広げた瞬間 fallback の正しさ保証が消える）。
  */
-Deno.test({
+test({
   name:
     "実資産の Irodori DiT は run 1 回で rowBlockAttention 12 / silu 17 / identityExpand 24 を掴む（rope / adaln は綴りが違って 0）",
   ignore: !IRODORI_AVAILABLE,
@@ -603,7 +605,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "実資産の Irodori 条件経路と codec の融合ヒット数",
   ignore: !IRODORI_AVAILABLE,
   fn: async () => {
@@ -669,7 +671,7 @@ if (!WAN_AVAILABLE) {
 /** 既定モデル（`t2v-1.3b`）の部品のグラフ（f16 席だけの配布形）。 */
 const readWanGraph = async (component: string): Promise<IrGraph> => {
   const manifest: ContainerManifest = JSON.parse(
-    await Deno.readTextFile(new URL("karume.json", WAN_DIR)),
+    await readTextFile(new URL("karume.json", WAN_DIR)),
   );
   return await readDistributionGraph(WAN_DIR, manifest, manifest.defaultModel, component, "f16");
 };
@@ -704,7 +706,7 @@ const wanShapes = (
  * ヒット数は S に依存しない（DiT は S = 192 と実寸 14,040 の 2 点）。0 が非 0 に変わったら、まず
  * ROPE_RULE / ADALN_RULE の受理集合が意図せず広がっていないかを見る（Irodori DiT の門と同じ読み方）。
  */
-Deno.test({
+test({
   name:
     "実資産の Wan2.1 は run 1 回で DiT silu 2・VAE の chunk グラフ silu 29 / upsample2x 3 を掴む（rope / adaln は綴りが違って 0）",
   ignore: !WAN_AVAILABLE,

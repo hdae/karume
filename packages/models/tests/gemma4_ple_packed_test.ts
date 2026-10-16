@@ -21,6 +21,8 @@
  * 「境界が揃っていないこと」自体は下で名指しの断定を置く。
  */
 
+import { readFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { type OpenedContainer, parseSafetensors } from "@karume/runtime";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -43,12 +45,12 @@ const readIndexDocument = async (
 };
 
 for (const dtype of ["i2", "i4"] as const) {
-  Deno.test(`PLE ${dtype}: 行読みと全量読みの結果が独立 CPU 参照とビット一致する`, async () => {
+  test(`PLE ${dtype}: 行読みと全量読みの結果が独立 CPU 参照とビット一致する`, async () => {
     const dir = new URL(`./fixtures/gemma4-ple-packed/${dtype}/`, import.meta.url);
     const opened = await openSeriesContainer(new URL(SERIES_MODEL_FILE, dir));
     const { index, openBlock } = await seriesPleHandle(opened, `test: ${dtype} fixture`);
     const oracle = parseSafetensors(
-      (await Deno.readFile(new URL("oracle.safetensors", dir))).buffer,
+      (await readFile(new URL("oracle.safetensors", dir))).buffer,
     );
     const iv = oracle.tensors.get("ids")!, ev = oracle.tensors.get("expected")!;
     const ids = Array.from(new Int32Array(oracle.buffer, iv.byteOffset, iv.byteLength / 4));
@@ -143,7 +145,7 @@ for (const dtype of ["i2", "i4"] as const) {
    * 焼き直した配布形を**重みの block を 1 バイトも取る前に**落とせる。ここは資産の宣言を
    * 間引いた面を渡して、恒真でないことを確かめる。
    */
-  Deno.test(`PLE ${dtype}: 索引と容器の資産が食い違えば読む前に落ちる`, async () => {
+  test(`PLE ${dtype}: 索引と容器の資産が食い違えば読む前に落ちる`, async () => {
     const dir = new URL(`./fixtures/gemma4-ple-packed/${dtype}/`, import.meta.url);
     const opened = await openSeriesContainer(new URL(SERIES_MODEL_FILE, dir));
     const source = gemma4PleAssetSource(opened);

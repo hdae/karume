@@ -15,6 +15,7 @@
 //    `[9,5,1]`、先頭 2 lag の自己相関が共に `[5,2]`）。向きは公開 API から観測できないので、
 //    そのための API は足さない。
 
+import { test } from "@karume/test-support/test";
 import { assertAlmostEquals, assertThrows } from "@std/assert";
 import { Fft } from "../src/vowel-detector/fft.ts";
 
@@ -57,13 +58,13 @@ const pseudoRandom = (length: number, seed: number): Float32Array<ArrayBuffer> =
   return values;
 };
 
-Deno.test("Fft: 2 冪でない変換長は作れない", () => {
+test("Fft: 2 冪でない変換長は作れない", () => {
   for (const size of [3, 1, 0, -4, 2.5]) {
     assertThrows(() => new Fft(size), RangeError, "2 以上の 2 冪でない", `size=${size}`);
   }
 });
 
-Deno.test("Fft.powerSpectrum: 入力が変換長を超えたら落ちる（黙って切り詰めない）", () => {
+test("Fft.powerSpectrum: 入力が変換長を超えたら落ちる（黙って切り詰めない）", () => {
   assertThrows(
     () => new Fft(8).powerSpectrum(new Float32Array(9), new Float64Array(5)),
     RangeError,
@@ -71,7 +72,7 @@ Deno.test("Fft.powerSpectrum: 入力が変換長を超えたら落ちる（黙�
   );
 });
 
-Deno.test("Fft.powerSpectrum: 出力が rfft のビン数に足りなければ落ちる", () => {
+test("Fft.powerSpectrum: 出力が rfft のビン数に足りなければ落ちる", () => {
   // `bins = size/2 + 1` = 5（`np.fft.rfft` と同じ並び）。
   assertThrows(
     () => new Fft(8).powerSpectrum(new Float32Array(4), new Float64Array(4)),
@@ -80,7 +81,7 @@ Deno.test("Fft.powerSpectrum: 出力が rfft のビン数に足りなければ�
   );
 });
 
-Deno.test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ちる（巡回相関に化ける条件）", () => {
+test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ちる（巡回相関に化ける条件）", () => {
   assertThrows(
     () => new Fft(8).autocorrelation(new Float32Array(5), new Float64Array(4)),
     RangeError,
@@ -88,7 +89,7 @@ Deno.test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ち
   );
 });
 
-Deno.test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（線形では 0 か、負の lag が回り込む添字）", () => {
+test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（線形では 0 か、負の lag が回り込む添字）", () => {
   // `[1, 2]` を変換長 4 で通すと逆変換は [5, 2, 0, 2] で、添字 2 は線形どおり 0、添字 3 は
   // lag −1 の値（線形なら 0）。両者を区別せず、lag 2 の時点で落とす。
   assertThrows(
@@ -103,7 +104,7 @@ Deno.test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる�
   assertAlmostEquals(out[1], 2, 1e-12);
 });
 
-Deno.test("Fft.powerSpectrum: 素朴 DFT と一致する（長さ 8 の実信号）", () => {
+test("Fft.powerSpectrum: 素朴 DFT と一致する（長さ 8 の実信号）", () => {
   const size = 8;
   const input = pseudoRandom(size, 20260904);
   const out = new Float64Array(size / 2 + 1);
@@ -120,7 +121,7 @@ Deno.test("Fft.powerSpectrum: 素朴 DFT と一致する（長さ 8 の実信号
   }
 });
 
-Deno.test("Fft.autocorrelation: 素朴な線形自己相関と一致する（長さ 4・変換長 8）", () => {
+test("Fft.autocorrelation: 素朴な線形自己相関と一致する（長さ 4・変換長 8）", () => {
   const input = pseudoRandom(4, 20260905);
   const out = new Float64Array(4);
   new Fft(8).autocorrelation(input, out);
@@ -135,7 +136,7 @@ Deno.test("Fft.autocorrelation: 素朴な線形自己相関と一致する（長
   }
 });
 
-Deno.test("Fft: 変換長に足りない信号をゼロ詰めしてもパワーと線形自己相関が正しい", () => {
+test("Fft: 変換長に足りない信号をゼロ詰めしてもパワーと線形自己相関が正しい", () => {
   // `[1, 0]` を変換長 4 で通すと全ビンが 1（単位インパルスのパワー）。
   const out = new Float64Array(3);
   new Fft(4).powerSpectrum(Float32Array.from([1, 0]), out);

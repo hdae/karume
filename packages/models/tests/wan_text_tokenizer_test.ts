@@ -11,6 +11,8 @@
 //
 // 縛るのは振る舞い 1 つ: 「同じ文字列を入れたら、上流と同じ id 列が出るか、同じ理由で拒む」。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertInstanceOf, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { parseCodeRanges } from "../src/text/code-ranges.ts";
@@ -51,7 +53,7 @@ type Fixture = {
 };
 
 const fixture = JSON.parse(
-  await Deno.readTextFile(new URL("./fixtures/wan-text/parity.json", import.meta.url)),
+  await readTextFile(new URL("./fixtures/wan-text/parity.json", import.meta.url)),
 ) as Fixture;
 
 const t5Tables: T5Tables = {
@@ -100,7 +102,7 @@ const caseById = (id: string): FixtureCase => {
 
 // ---- フィクスチャ本体 -------------------------------------------------------
 
-Deno.test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
+test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
   // 1 本目に置く。読み違い / 生成失敗で cases が空になると、以降のループが 0 回になって
   // 「緑だが何も検証していない」状態が黙って成立する。
   assert(fixture.cases.length >= 200, `ケース数 ${fixture.cases.length} が少なすぎる`);
@@ -114,7 +116,7 @@ Deno.test("フィクスチャが空でない（取り違えで全ケース素通
 });
 
 for (const testCase of fixture.cases) {
-  Deno.test(`パリティ [${testCase.id}] ${testCase.why}`, () => {
+  test(`パリティ [${testCase.id}] ${testCase.why}`, () => {
     if (testCase.cleaned !== undefined) {
       assertEquals(encoder.clean(testCase.text), testCase.cleaned, "前処理の出力");
     }
@@ -142,7 +144,7 @@ for (const testCase of fixture.cases) {
 
 // ---- 固定プロンプトと境界（フィクスチャのケースが実際に叩いているもの）--------
 
-Deno.test("固定 4 本は長さ 28 / 118 / 50 / 126 で受理され、2 経路で同じ id 列", () => {
+test("固定 4 本は長さ 28 / 118 / 50 / 126 で受理され、2 経路で同じ id 列", () => {
   const lengths = ["boxing-cats", "ferret", "cat-dog-baking", "negative"].map((name) => {
     const fixed = caseById(`fixed-${name}`);
     assertEquals(fixed.ids, fixed.tokenizerJsonIds);
@@ -151,28 +153,28 @@ Deno.test("固定 4 本は長さ 28 / 118 / 50 / 126 で受理され、2 経路�
   assertEquals(lengths, [28, 118, 50, 126]);
 });
 
-Deno.test("公式 negative の全角読点 `，` は `,` になる（fix_character_width）", () => {
+test("公式 negative の全角読点 `，` は `,` になる（fix_character_width）", () => {
   const negative = caseById("fixed-negative");
   assert(negative.text.includes("，"));
   const cleaned = encoder.clean(negative.text);
   assert(!cleaned.includes("，") && cleaned.includes(","), cleaned);
 });
 
-Deno.test("上限: 512 トークンちょうどは受理・513 は拒む（黙って切り詰めない）", () => {
+test("上限: 512 トークンちょうどは受理・513 は拒む（黙って切り詰めない）", () => {
   const max = encoder.encode(caseById("max-512").text);
   assertEquals(max.length, 512);
   assertEquals(max.at(-1), fixture.t5.eosId, "末尾は </s>");
   assertThrows(() => encoder.encode(caseById("over-513").text), ModelInputError, "上限 512");
 });
 
-Deno.test("下限: 2 トークンは受理・空文字と空白だけ（</s> だけ）は拒む", () => {
+test("下限: 2 トークンは受理・空文字と空白だけ（</s> だけ）は拒む", () => {
   assertEquals(encoder.encode("cat").length, WAN_PROMPT_MIN_TOKENS);
   for (const text of ["", " \n\t　 "]) {
     assertThrows(() => encoder.encode(text), ModelInputError, `最低 ${WAN_PROMPT_MIN_TOKENS}`);
   }
 });
 
-Deno.test("拒否のメッセージに正 / ネガティブのラベルが出る", () => {
+test("拒否のメッセージに正 / ネガティブのラベルが出る", () => {
   assertThrows(() => encoder.encode("𠀋", "ネガティブプロンプト"), ModelInputError, "ネガティブ");
   assertThrows(
     () => encoder.encode("cafÃ©", "ネガティブプロンプト"),
@@ -181,7 +183,7 @@ Deno.test("拒否のメッセージに正 / ネガティブのラベルが出る
   );
 });
 
-Deno.test("孤立サロゲートは前処理の前に入力起因で拒む", () => {
+test("孤立サロゲートは前処理の前に入力起因で拒む", () => {
   assertThrows(() => encoder.encode("a\ud800b"), ModelInputError, "サロゲート");
 });
 
@@ -203,21 +205,21 @@ const tinyTables = (maxLength: number): T5Tables => ({
   maxLength,
 });
 
-Deno.test("語彙外: unk の方針は unk 1 個へ融合・拒む方針は ModelInputError", () => {
+test("語彙外: unk の方針は unk 1 個へ融合・拒む方針は ModelInputError", () => {
   const unk = new T5UnigramTokenizer(tinyTables(512), { unknown: "unk", overflow: "truncate" });
   assertEquals(unk.encode("axyb"), [3, 4, 2, 5, 1], "▁ a <unk> b </s>");
   const reject = new T5UnigramTokenizer(tinyTables(512), { unknown: "reject", overflow: "reject" });
   assertThrows(() => reject.encode("axyb", "検査"), ModelInputError, '"xy"');
 });
 
-Deno.test("語彙外の判定は id ではなく格子の未知ノード（unk_id と同じ id の追加語彙を通す）", () => {
+test("語彙外の判定は id ではなく格子の未知ノード（unk_id と同じ id の追加語彙を通す）", () => {
   // umT5 の unk_id 2 は `<s>` の id でもある。id 列に 2 があるかで語彙外を判定すると、本文中の
   // `<s>`（追加語彙）まで拒むか、逆に未知を見逃す。
   const reject = new T5UnigramTokenizer(tinyTables(512), { unknown: "reject", overflow: "reject" });
   assertEquals(reject.encode("a<s>b"), [3, 4, 2, 3, 5, 1]);
 });
 
-Deno.test("上限: 拒む方針は `</s>` を含めてちょうど maxLength まで受け、1 つ超えたら投げる", () => {
+test("上限: 拒む方針は `</s>` を含めてちょうど maxLength まで受け、1 つ超えたら投げる", () => {
   const reject = new T5UnigramTokenizer(tinyTables(5), { unknown: "reject", overflow: "reject" });
   // `▁a` は ▁ + a の 2 id。"a a" = 4 id + </s> = 5（ちょうど上限）。
   assertEquals(reject.encode("a a"), [3, 4, 3, 4, 1]);
@@ -228,14 +230,14 @@ Deno.test("上限: 拒む方針は `</s>` を含めてちょうど maxLength ま
   assertThrows(() => reject.encode("a a</s>"), ModelInputError, "上限 5");
 });
 
-Deno.test("上限: 予算ちょうどの後ろが空白だけの chunk なら id は増えないので拒まない", () => {
+test("上限: 予算ちょうどの後ろが空白だけの chunk なら id は増えないので拒まない", () => {
   // `a a`（4 id）+ `</s>`（1 id）で予算 5 ちょうど。後ろの " " は追加語彙でない chunk だが
   // 断片を出さない — chunk の手前で拒むと、受理すべき入力を落とす。
   const reject = new T5UnigramTokenizer(tinyTables(6), { unknown: "reject", overflow: "reject" });
   assertEquals(reject.encode("a a</s> "), [3, 4, 3, 4, 1, 1]);
 });
 
-Deno.test("上限: 切り詰める方針は `</s>` の分を空けて切る（anima の上流どおり）", () => {
+test("上限: 切り詰める方針は `</s>` の分を空けて切る（anima の上流どおり）", () => {
   const truncate = new T5UnigramTokenizer(tinyTables(5), { unknown: "unk", overflow: "truncate" });
   assertEquals(truncate.encode("a a b b"), [3, 4, 3, 4, 1]);
 });
@@ -256,7 +258,7 @@ const minimalAsset = (patch: Record<string, unknown> = {}): Record<string, unkno
   ...patch,
 });
 
-Deno.test("parseWanTokenizerAsset: 資産 JSON から組んだ encoder が符号化できる", () => {
+test("parseWanTokenizerAsset: 資産 JSON から組んだ encoder が符号化できる", () => {
   const assets = parseWanTokenizerAsset(minimalAsset());
   const tiny = new WanPromptEncoder(assets);
   assertEquals(tiny.maxLength, 512);
@@ -264,7 +266,7 @@ Deno.test("parseWanTokenizerAsset: 資産 JSON から組んだ encoder が符号
   assertThrows(() => tiny.encode("dog"), ModelInputError, "語彙に無い文字列");
 });
 
-Deno.test("parseWanTokenizerAsset: 知らない形式の版は読まない", () => {
+test("parseWanTokenizerAsset: 知らない形式の版は読まない", () => {
   assertThrows(
     () => parseWanTokenizerAsset(minimalAsset({ format: "karume-wan-umt5-tokenizer/2" })),
     Error,
@@ -272,7 +274,7 @@ Deno.test("parseWanTokenizerAsset: 知らない形式の版は読まない", () 
   );
 });
 
-Deno.test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙って別の分類にしない）", () => {
+test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙って別の分類にしない）", () => {
   const clean = fixture.promptClean as Record<string, unknown>;
   const broken = (patch: Record<string, unknown>): Record<string, unknown> =>
     minimalAsset({ promptClean: { ...clean, ...patch } });
@@ -299,7 +301,7 @@ Deno.test("parseWanTokenizerAsset: 壊れた前処理の表は落とす（黙っ
   );
 });
 
-Deno.test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻訳と違えば、式を実行せずに落とす", () => {
+test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻訳と違えば、式を実行せずに落とす", () => {
   // 資産は信用できない外部入力（任意の repo を指せる）。構文が正しいだけの式を受けると、`(a+)+$` のような
   // 式が前処理（構築時の既定の negative の検査を含む）でバックトラッキングを指数的に伸ばし、イベント
   // ループを止める。翻訳は固定（ADR 0119 決定 2）なので、1 文字でも違う式は受けない。
@@ -325,7 +327,7 @@ Deno.test("parseWanTokenizerAsset: badness の式が ftfy 6.3.1 の固定の翻�
   parseWanTokenizerAsset(withBadness(source));
 });
 
-Deno.test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（重複行・非有限スコア）", () => {
+test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（重複行・非有限スコア）", () => {
   assertThrows(
     () =>
       parseWanTokenizerAsset(
@@ -346,7 +348,7 @@ Deno.test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同�
 
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
-Deno.test({
+test({
   name: "実資産: 全語彙の資産から組んだ encoder もフィクスチャの全ケースと同じ決着になる",
   ignore: seriesAsset === undefined,
   fn: () => {

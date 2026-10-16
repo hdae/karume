@@ -8,7 +8,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { type Conv1dDims, conv1dIgemmParams, conv1dParams } from "../src/kernels/conv1d.ts";
 import { type Conv2dDims, conv2dIgemmParams, conv2dParams } from "../src/kernels/conv2d.ts";

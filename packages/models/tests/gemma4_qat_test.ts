@@ -1,3 +1,5 @@
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "../src/gemma/qat.ts";
 import { gemma4QatRopeInputs, gemma4RopeInputs, type Gemma4RopeSpec } from "../src/gemma/rope.ts";
@@ -155,7 +157,7 @@ const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleIndex =>
     storage: model === "e2b" ? "i4" : "i2",
   }).index;
 
-Deno.test("固定 QAT の family admission", async (t) => {
+test("固定 QAT の family admission", async (t) => {
   for (const model of ["e2b", "e4b"] as const) {
     await t.step(`${model} の固定混成と共有 head を受ける`, () => {
       const graph = graphOf(model);
@@ -235,7 +237,7 @@ Deno.test("固定 QAT の family admission", async (t) => {
   });
 });
 
-Deno.test("固定 QAT は MTP 指定を資産取得より前に拒否する", async (t) => {
+test("固定 QAT は MTP 指定を資産取得より前に拒否する", async (t) => {
   // 型側は `speculative?: never` で塞いであるが、JS の呼び手・`as` 経由・動的に組んだ option には
   // 効かない。実行時の拒否が**資産を 1 byte も取る前**に出ることを、存在しない取得元で確かめる。
   await t.step("fromPretrained", async () => {
@@ -254,7 +256,7 @@ Deno.test("固定 QAT は MTP 指定を資産取得より前に拒否する", as
   });
 });
 
-Deno.test("QAT のホスト RoPE", async (t) => {
+test("QAT のホスト RoPE", async (t) => {
   const spec = {
     sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
@@ -298,7 +300,7 @@ Deno.test("QAT のホスト RoPE", async (t) => {
     // （ADR 0097 追記 5 が全ビット一致を保証していない）。丸め契約を意図して変える
     // ときだけ焼き直す。
     const golden = JSON.parse(
-      await Deno.readTextFile(
+      await readTextFile(
         new URL("./fixtures/gemma4-qat-rope-golden.json", import.meta.url),
       ),
     ) as {

@@ -11,6 +11,8 @@
 // 縛るのは振る舞い 1 つ: 「同じ文字列を入れたら、上流と同じ id 列が出るか、同じ理由で拒む」。併せて、資産の
 // 読み口の拒否と、Wan（前処理の後に同じトークナイザを通す）で空白の拒否が起きないことを見る。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertInstanceOf, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges } from "../src/text/code-ranges.ts";
@@ -52,7 +54,7 @@ type Fixture = {
 };
 
 const fixture = JSON.parse(
-  await Deno.readTextFile(new URL("./fixtures/umt5/tokenizer-cases.json", import.meta.url)),
+  await readTextFile(new URL("./fixtures/umt5/tokenizer-cases.json", import.meta.url)),
 ) as Fixture;
 
 const space: CodeRanges = parseCodeRanges(fixture.t5.space, "space");
@@ -113,7 +115,7 @@ const assertRejected = (
 
 // ---- フィクスチャ本体 -------------------------------------------------------
 
-Deno.test("フィクスチャが空でなく、資産の形式・上下限・全ての決着を持つ", () => {
+test("フィクスチャが空でなく、資産の形式・上下限・全ての決着を持つ", () => {
   // 1 本目に置く。読み違い / 生成失敗で cases が空になると、以降のループが 0 回になって
   // 「緑だが何も検証していない」状態が黙って成立する。
   assert(fixture.cases.length >= 60, `ケース数 ${fixture.cases.length} が少なすぎる`);
@@ -128,7 +130,7 @@ Deno.test("フィクスチャが空でなく、資産の形式・上下限・全
 });
 
 for (const testCase of fixture.cases) {
-  Deno.test(`パリティ [${testCase.id}] ${testCase.why}`, () => {
+  test(`パリティ [${testCase.id}] ${testCase.why}`, () => {
     if (testCase.ids !== undefined) {
       const ids = tokenizer.tokenize(testCase.text);
       assertInstanceOf(ids, Int32Array);
@@ -142,19 +144,19 @@ for (const testCase of fixture.cases) {
 
 // ---- 境界（フィクスチャのケースが実際に叩いているもの）-----------------------
 
-Deno.test("上限: 512 トークンちょうどは受理・513 は拒む（黙って切り詰めない）", () => {
+test("上限: 512 トークンちょうどは受理・513 は拒む（黙って切り詰めない）", () => {
   const max = tokenizer.tokenize(caseById("max-512").text);
   assertEquals(max.length, UMT5_MAX_LENGTH);
   assertEquals(max.at(-1), fixture.t5.eosId, "末尾は </s>");
   assertRejected(() => tokenizer.tokenize(caseById("over-513").text), "too-long");
 });
 
-Deno.test("下限: 2 トークンは受理・空文字（</s> だけ）は拒む", () => {
+test("下限: 2 トークンは受理・空文字（</s> だけ）は拒む", () => {
   assertEquals(tokenizer.tokenize("cat").length, UMT5_MIN_TOKENS);
   assertRejected(() => tokenizer.tokenize(""), "too-short");
 });
 
-Deno.test("空白: 先頭と語の間の U+0020 は受け、末尾の U+0020 と U+0020 以外の空白は拒む", () => {
+test("空白: 先頭と語の間の U+0020 は受け、末尾の U+0020 と U+0020 以外の空白は拒む", () => {
   assertEquals(
     [...tokenizer.tokenize("  a cat")],
     caseById("leading-spaces").ids,
@@ -172,14 +174,14 @@ Deno.test("空白: 先頭と語の間の U+0020 は受け、末尾の U+0020 と
   assertThrows(() => tokenizer.tokenize("a\tcat"), ModelInputError, "U+0009");
 });
 
-Deno.test("拒否の順: 追加語彙 → 空白の直後の ▁ → 空白 → 語彙外（recipe の生成と同じ順）", () => {
+test("拒否の順: 追加語彙 → 空白の直後の ▁ → 空白 → 語彙外（recipe の生成と同じ順）", () => {
   // 1 本に 2 つの違反を持たせ、先の理由で落ちることを見る（順が入れ替わると理由だけが変わる）。
   assertRejected(() => tokenizer.tokenize("a </s> ▁b\t"), "added-token");
   assertRejected(() => tokenizer.tokenize("a ▁b\tcat"), "metaspace");
   assertRejected(() => tokenizer.tokenize("a\t\u{2000b}"), "whitespace");
 });
 
-Deno.test("拒否の文言に呼び手のラベルが出る・孤立サロゲートは入力起因で拒む", () => {
+test("拒否の文言に呼び手のラベルが出る・孤立サロゲートは入力起因で拒む", () => {
   assertThrows(() => tokenizer.tokenize("\u{2000b}", "negative"), ModelInputError, "negative:");
   assertThrows(() => tokenizer.tokenize("a\ud800b"), ModelInputError, "サロゲート");
 });
@@ -189,12 +191,12 @@ Deno.test("拒否の文言に呼び手のラベルが出る・孤立サロゲー
 /** Wan のパリティ用フィクスチャの空白集合（Wan の資産の `space` — 前処理の後に通すトークナイザの表）。 */
 const wanSpace: CodeRanges = parseCodeRanges(
   (JSON.parse(
-    await Deno.readTextFile(new URL("./fixtures/wan-text/parity.json", import.meta.url)),
+    await readTextFile(new URL("./fixtures/wan-text/parity.json", import.meta.url)),
   ) as { readonly t5: { readonly space: unknown } }).t5.space,
   "wan.space",
 );
 
-Deno.test("Wan: 前処理の後の文字列には U+0020 以外の空白も末尾の空白も残らない（空白の拒否は起きない）", () => {
+test("Wan: 前処理の後の文字列には U+0020 以外の空白も末尾の空白も残らない（空白の拒否は起きない）", () => {
   // `Umt5Tokenizer` の空白の拒否は前処理を持たない経路のためのもので、Wan は `prompt_clean` の鏡像を通してから
   // 同じトークナイザへ渡す。前処理が資産の空白集合の全ての文字を U+0020 1 個へ畳んで両端を落とすなら、Wan の
   // 受理集合は共有の前と同じ（Wan の資産の空白の表で全文字を当てる）。
@@ -238,7 +240,7 @@ const minimalAsset = (patch: Record<string, unknown> = {}): Record<string, unkno
   ...patch,
 });
 
-Deno.test("parseUmt5TokenizerAsset: 資産 JSON から組んだトークナイザが符号化できる", () => {
+test("parseUmt5TokenizerAsset: 資産 JSON から組んだトークナイザが符号化できる", () => {
   const tiny = new Umt5Tokenizer(parseUmt5TokenizerAsset(minimalAsset()));
   assertEquals(tiny.maxLength, 512);
   assertEquals([...tiny.tokenize("cat cat")], [4, 4, 1]);
@@ -246,7 +248,7 @@ Deno.test("parseUmt5TokenizerAsset: 資産 JSON から組んだトークナイ�
   assertThrows(() => tiny.tokenize("cat\tcat"), ModelInputError, "U+0009");
 });
 
-Deno.test("parseUmt5TokenizerAsset: 知らない形式の版は読まない（Wan の資産の形式も）", () => {
+test("parseUmt5TokenizerAsset: 知らない形式の版は読まない（Wan の資産の形式も）", () => {
   for (const format of ["karume-umt5-tokenizer/2", WAN_TOKENIZER_FORMAT]) {
     assertThrows(
       () => parseUmt5TokenizerAsset(minimalAsset({ format })),
@@ -262,7 +264,7 @@ Deno.test("parseUmt5TokenizerAsset: 知らない形式の版は読まない（Wa
   assertThrows(() => parseUmt5TokenizerAsset("tokenizer"), Error, "オブジェクトでない");
 });
 
-Deno.test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではない素の Error）", () => {
+test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではない素の Error）", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
     ["スコアの本数違い", { scores: [0, 0, 0, 0, -1] }, "scores の長さ"],
     [
@@ -288,7 +290,7 @@ Deno.test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因で�
 
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
-Deno.test({
+test({
   name: "実資産: 全語彙の資産から組んだトークナイザもフィクスチャの全ケースと同じ決着になる",
   ignore: seriesAsset === undefined,
   fn: () => {

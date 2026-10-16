@@ -4,6 +4,7 @@
 // 不成立 / Dim("S") の上限）ので、入口で条件を名指しできていることをここで固定する。
 // 資産も GPU も要らない純関数。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import {
@@ -73,7 +74,7 @@ const tilesOf = (side: number): number =>
     MIN_TILE_OVERLAP_LATENT,
   ).starts.length;
 
-Deno.test("parseResolution: WxH と正方の略記を受ける（往復は恒等）", () => {
+test("parseResolution: WxH と正方の略記を受ける（往復は恒等）", () => {
   assertEquals(parseResolution("1344x768"), { width: 1344, height: 768 });
   assertEquals(parseResolution("768x1344"), { width: 768, height: 1344 });
   assertEquals(parseResolution("512"), { width: 512, height: 512 });
@@ -83,7 +84,7 @@ Deno.test("parseResolution: WxH と正方の略記を受ける（往復は恒等
   }
 });
 
-Deno.test("parseResolution: 綴りでない入力を落とす（既定へ縮退させない）", () => {
+test("parseResolution: 綴りでない入力を落とす（既定へ縮退させない）", () => {
   for (const raw of ["", "1344*768", "1344x", "x768", "1344x768x1", "-512", "51 2", "1e3"]) {
     assertThrows(
       () => parseResolution(raw),
@@ -94,7 +95,7 @@ Deno.test("parseResolution: 綴りでない入力を落とす（既定へ縮退�
   }
 });
 
-Deno.test("受理集合: 4 条件をそれぞれ名指しで落とす", () => {
+test("受理集合: 4 条件をそれぞれ名指しで落とす", () => {
   // ①刻み（16 の倍数）— 8 の倍数でも latent が patch 2 で割り切れない。
   assertThrows(
     () => parseResolution("1352x768"),
@@ -110,7 +111,7 @@ Deno.test("受理集合: 4 条件をそれぞれ名指しで落とす", () => {
   assertEquals(parseResolution("2048x2048"), { width: 2048, height: 2048 });
 });
 
-Deno.test("assertAcceptableResolution: 構造体で渡す経路も同じ 4 条件で見る", () => {
+test("assertAcceptableResolution: 構造体で渡す経路も同じ 4 条件で見る", () => {
   // manifest の `pipelineConfig.defaults.resolution` と `generate` の request はここを通る
   // （綴りを経由しないので、綴り側だけに検査があると素通しになる）。
   assertAcceptableResolution({ width: 1024, height: 1024 });
@@ -136,7 +137,7 @@ Deno.test("assertAcceptableResolution: 構造体で渡す経路も同じ 4 条�
   );
 });
 
-Deno.test("受理集合: 4 パターン（16:9 / 3:4 の縦横）が全て S=4,032 で受理される", () => {
+test("受理集合: 4 パターン（16:9 / 3:4 の縦横）が全て S=4,032 で受理される", () => {
   // **縦横の対を両方**受けることと、S が Dim("S") の内側であることを、literal を置かずに
   // 数で押さえる。
   const patterns = ["1344x768", "768x1344", "1152x896", "896x1152"];
@@ -148,7 +149,7 @@ Deno.test("受理集合: 4 パターン（16:9 / 3:4 の縦横）が全て S=4,0
   }
 });
 
-Deno.test("受理集合: 刻みの上に並ぶ辺を 1 つも落とさない（タイル本数の門は撤廃）", () => {
+test("受理集合: 刻みの上に並ぶ辺を 1 つも落とさない（タイル本数の門は撤廃）", () => {
   // 旧規則では本数が跳ねる 8 通りを入口で拒否していた（対症の門 — P-3 で根治）。落ちる集合が
   // 空であることを両軸で見るので、拒否がどこかへ復活すればここで割れる。
   for (const axis of ["width", "height"] as const) {
@@ -166,7 +167,7 @@ Deno.test("受理集合: 刻みの上に並ぶ辺を 1 つも落とさない（�
   }
 });
 
-Deno.test("タイル本数: 全 97 辺で 5 本以下（本数が跳ねる辺はもう存在しない）", () => {
+test("タイル本数: 全 97 辺で 5 本以下（本数が跳ねる辺はもう存在しない）", () => {
   // 入口から本数の門を外せる根拠そのもの。`decodeTiled` は decode 出力を全枚数ぶん抱えるので
   // 本数の上限がホスト RAM の上限になる — 跳ねる辺が復活したら（= 配置規則が退行したら）
   // 拒否ではなく OOM で出る。ここで先に割れるようにしておく。
@@ -174,7 +175,7 @@ Deno.test("タイル本数: 全 97 辺で 5 本以下（本数が跳ねる辺は
   assertEquals(worst, 5, `辺あたりの最大タイル本数（両辺最悪でも ${worst * worst} 枚）`);
 });
 
-Deno.test("タイル本数: 旧規則から変わる 24 辺の新しい本数を実測で凍結する", () => {
+test("タイル本数: 旧規則から変わる 24 辺の新しい本数を実測で凍結する", () => {
   // 変わらない 73 辺は配置まで旧規則と同一 = 出荷バイト不変。変わる辺は**値で**凍結する
   // （式で書くと `tilesOf` の写しになって門が空虚になる）。
   const recounted = new Map(RECOUNTED_SIDES.map(([side, , after]) => [side, after]));
@@ -188,7 +189,7 @@ Deno.test("タイル本数: 旧規則から変わる 24 辺の新しい本数を
   for (const side of restored) assertAcceptableResolution({ width: side, height: 1024 });
 });
 
-Deno.test("タイル枚数: 1824×1248 は 4×3 = 12 枚（旧規則は 5×3 = 15 枚）", () => {
+test("タイル枚数: 1824×1248 は 4×3 = 12 枚（旧規則は 5×3 = 15 枚）", () => {
   // P-3 の測定対象そのもの。枚数がそのまま VAE decode の実行時間に効くので、外挿の前提を
   // 数で押さえる（実 GPU の A/B は e2e 側）。
   assertAcceptableResolution({ width: 1824, height: 1248 });
@@ -196,7 +197,7 @@ Deno.test("タイル枚数: 1824×1248 は 4×3 = 12 枚（旧規則は 5×3 = 1
   assertEquals(tilesOf(1248), 3, "高さ 1248px");
 });
 
-Deno.test('定数関係: 各辺の天井を使い切っても S は Dim("S") の上限に収まる', () => {
+test('定数関係: 各辺の天井を使い切っても S は Dim("S") の上限に収まる', () => {
   // `resolution.ts` の S 上限分岐は現行定数では**到達しない**（各辺 2048 = 格子 128 →
   // S ≤ 128² = 16,384）。分岐は定数を動かしたときの保険として残してあるので、「今は到達しない」
   // ことをここで固定する — 辺の天井 / 刻み / S の上限のどれかを動かした瞬間に赤くなる。

@@ -4,7 +4,7 @@
 // 無い環境で明示 SKIP。
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import {
   deriveGeometryProfile,
   type GeometrySweepCaseSummary,

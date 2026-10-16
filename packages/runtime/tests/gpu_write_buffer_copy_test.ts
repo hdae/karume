@@ -14,7 +14,7 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { type MemoryContainerInput, openMemoryContainer } from "../src/format/container/memory.ts";
 import { type IrDeclaration, parseIrDeclarationValue } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";

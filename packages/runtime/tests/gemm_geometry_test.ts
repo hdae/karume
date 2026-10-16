@@ -10,6 +10,7 @@
 // 3. **幾何を変えても数値契約は動かない**（K タイル 16・外側 t 昇順・内側 kk 昇順・積和の字面）。
 //    ここは字面の固定で、値のビット一致そのものは tests/gpu_gemm_skinny_test.ts が実 GPU で見る。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
@@ -39,7 +40,7 @@ const BUCKET_ROWS = [1, 4, 16, 17, 64, 65, 128, 4096] as const;
 
 const geometryOf = (rows: number): GemmGeometry => gemmGeometryForRows(rows);
 
-Deno.test("gemmGeometryForRows のバケット境界は 64 / 512 で、M >= 513 は既定幾何へ落ちる", () => {
+test("gemmGeometryForRows のバケット境界は 64 / 512 で、M >= 513 は既定幾何へ落ちる", () => {
   // 小 M バケット（2026-08-11 掃引: M=1/4/64 とも M16N16 が対既定 ×3.0〜3.2 の最良。
   // M=64 は行タイル 4 枚 = 重みを 4 回読み直してもなお workgroup 数の勝ち）
   for (const rows of [0, 1, 2, 4, 16, 17, 32, 63, 64]) {
@@ -55,7 +56,7 @@ Deno.test("gemmGeometryForRows のバケット境界は 64 / 512 で、M >= 513 
   }
 });
 
-Deno.test("バケットの幾何は全て充填の整除条件を満たす（穴の空くタイル形を表に置けない）", () => {
+test("バケットの幾何は全て充填の整除条件を満たす（穴の空くタイル形を表に置けない）", () => {
   for (const rows of BUCKET_ROWS) {
     const geometry = geometryOf(rows);
     // 落ちる組み合わせは「充填が届かない語が 0 のまま内積へ入る」= 例外の出ない誤値
@@ -76,13 +77,13 @@ Deno.test("バケットの幾何は全て充填の整除条件を満たす（穴
   }
 });
 
-Deno.test("gemmGeometryForRows は非負整数以外を fail loudly にする", () => {
+test("gemmGeometryForRows は非負整数以外を fail loudly にする", () => {
   for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
     assertThrows(() => gemmGeometryForRows(rows), CodegenError, "行数 M は u32 の非負整数");
   }
 });
 
-Deno.test("行数はキーに載り、バケットが違えば別パイプラインになる", () => {
+test("行数はキーに載り、バケットが違えば別パイプラインになる", () => {
   // 幾何判別子 `r{regM}x{regN}w{wgX}` はタイル辺と併せて幾何を一意に決める（wgY は tileM/regM）
   assertEquals(linearKey("f32", true, "f32", 4), "linear:v2:f32:reg16x16r1x4w4v4");
   assertEquals(linearKey("f32", true, "f32", 64), "linear:v2:f32:reg16x16r1x4w4v4");
@@ -94,7 +95,7 @@ Deno.test("行数はキーに載り、バケットが違えば別パイプライ
   assertEquals(new Set(keys).size, keys.length, keys.join(", "));
 });
 
-Deno.test("行数を渡さない呼び出しと M >= 513 は既存のキー・生成物をバイト単位で保つ", () => {
+test("行数を渡さない呼び出しと M >= 513 は既存のキー・生成物をバイト単位で保つ", () => {
   // 融合 attention とスナップショットが通る経路（行数を持たない）
   assertEquals(linearKey("f32", true), "linear:v2:f32:reg128x128r8x8w16v4");
   assertEquals(matmulKey(true), "matmul:v2:f32:reg128x128r8x8w16v4");
@@ -107,7 +108,7 @@ Deno.test("行数を渡さない呼び出しと M >= 513 は既存のキー・�
   }
 });
 
-Deno.test("生成物の workgroup 形・共有タイル・出力タイル原点はキーの幾何と一致する", () => {
+test("生成物の workgroup 形・共有タイル・出力タイル原点はキーの幾何と一致する", () => {
   for (const rows of BUCKET_ROWS) {
     const geometry = geometryOf(rows);
     const tileM = gemmTileM(geometry);
@@ -151,7 +152,7 @@ Deno.test("生成物の workgroup 形・共有タイル・出力タイル原点�
   }
 });
 
-Deno.test("幾何を変えても K 縮約の刻みと積和の字面は動かない（ADR 0022 の数値契約）", () => {
+test("幾何を変えても K 縮約の刻みと積和の字面は動かない（ADR 0022 の数値契約）", () => {
   for (const rows of BUCKET_ROWS) {
     const wgsl = linearWgsl("f32", true, "f32", rows);
     const where = `linear M=${rows}`;
@@ -169,7 +170,7 @@ Deno.test("幾何を変えても K 縮約の刻みと積和の字面は動かな
   }
 });
 
-Deno.test("同じ行数からは常にバイト単位で同じ WGSL が出る（決定性）", () => {
+test("同じ行数からは常にバイト単位で同じ WGSL が出る（決定性）", () => {
   for (const rows of BUCKET_ROWS) {
     assertEquals(linearWgsl("f32", true, "f32", rows), linearWgsl("f32", true, "f32", rows));
     assertEquals(matmulWgsl(false, rows), matmulWgsl(false, rows));
@@ -187,7 +188,7 @@ Deno.test("同じ行数からは常にバイト単位で同じ WGSL が出る（
 // キーと WGSL が**同じ幾何**を名乗ること（片方だけ読み落とすとキャッシュに載った別幾何の WGSL が
 // dispatch 数と噛み合わずタイルが欠ける）。
 
-Deno.test("明示の幾何に本番の解決と同じ幾何を渡すと、キーも WGSL も省略時とバイト同一", () => {
+test("明示の幾何に本番の解決と同じ幾何を渡すと、キーも WGSL も省略時とバイト同一", () => {
   for (const rows of BUCKET_ROWS) {
     const geometry = geometryOf(rows);
     assertEquals(
@@ -220,7 +221,7 @@ Deno.test("明示の幾何に本番の解決と同じ幾何を渡すと、キー
   }
 });
 
-Deno.test("明示の幾何は op 別の解決より優先し、キーと WGSL が同じ幾何を名乗る", () => {
+test("明示の幾何は op 別の解決より優先し、キーと WGSL が同じ幾何を名乗る", () => {
   const explicit: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 8 };
   const workgroup = `@compute @workgroup_size(${explicit.wgX}, ${explicit.wgY})`;
   // linear: M=4096 のバケット（既定 128×128）を上書きする

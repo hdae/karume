@@ -19,6 +19,7 @@
 // - w4a8 の group 整除の門を外す → ⑤d が落ちる（端数の k が NaN / 隣の行の混入を返す）
 // - `roundTiesToEven` を `Math.round` にする → ⑦が落ちる（同点が +∞ 方向へ倒れる）
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import {
   I8a8Error,
@@ -41,7 +42,7 @@ const F32_TINY = 1.1754943508222875e-38;
 // ① quantizeRowsReference — 全ゼロ行の scale 床
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: 全ゼロ行の scale は f32 tiny（床が無いと 0/0 = NaN になる）", () => {
+test("i8a8 参照: 全ゼロ行の scale は f32 tiny（床が無いと 0/0 = NaN になる）", () => {
   const { q, scale } = quantizeRowsReference([0, 0, 0, 0], 1, 4);
   assertEquals(scale[0], F32_TINY, "全ゼロ行の scale");
   // 床があるので x/s は 0/tiny = 0 で厳密に復元される（床が無いと NaN → i8 化で 0 に化け、
@@ -53,7 +54,7 @@ Deno.test("i8a8 参照: 全ゼロ行の scale は f32 tiny（床が無いと 0/0
 // ② quantizeRowsReference — 非有限の伝播（行の独立性込み）
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: 入力長が rows × dim と合わない・次元が非負整数でない入力は計算に入る前に落ちる", () => {
+test("i8a8 参照: 入力長が rows × dim と合わない・次元が非負整数でない入力は計算に入る前に落ちる", () => {
   // 長さを見ないと、足りない要素は undefined → NaN として行の scale へ伝播し、契約外の
   // 「NaN 行」を期待値として返す（[1] を 1×2 で読むと scale=[NaN]）。
   assertThrows(() => quantizeRowsReference([1], 1, 2), I8a8Error, "要素数");
@@ -62,7 +63,7 @@ Deno.test("i8a8 参照: 入力長が rows × dim と合わない・次元が非�
   assertThrows(() => quantizeRowsReference([1, 2], 1, 2.5), I8a8Error, "dim");
 });
 
-Deno.test("i8a8 参照: NaN / ±Inf は行 scale へ伝播し、隣の行を汚さない", () => {
+test("i8a8 参照: NaN / ±Inf は行 scale へ伝播し、隣の行を汚さない", () => {
   // 行 0 = NaN 混じり / 行 1 = +Inf / 行 2 = −Inf / 行 3 = 通常
   const x = [
     1,
@@ -93,7 +94,7 @@ Deno.test("i8a8 参照: NaN / ±Inf は行 scale へ伝播し、隣の行を汚�
 // ③ quantizeRowsReference — 格子の端（±127）
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: 絶対値最大の要素は ±127 へちょうど乗る（±128 の格子では割れる）", () => {
+test("i8a8 参照: 絶対値最大の要素は ±127 へちょうど乗る（±128 の格子では割れる）", () => {
   // amax = 127 にすると s = f32(127 · (1/127)) = 1.0 ちょうどになり、x/s が入力そのもの
   // （除数 1.0 の除算は厳密）なので格子の端だけを切り出せる。
   const { q, scale } = quantizeRowsReference([127, -127, 3, 0], 1, 4);
@@ -106,7 +107,7 @@ Deno.test("i8a8 参照: 絶対値最大の要素は ±127 へちょうど乗る�
 // ④⑤ referenceLinearI8a8 — 既知値と乗算順序
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: linear の既知値（整数内積 → f32 dequant → bias）", () => {
+test("i8a8 参照: linear の既知値（整数内積 → f32 dequant → bias）", () => {
   // x = [8, 3] → amax = 8・s = f32(8/127) = 0.06299212574958801・q = [127, 48]
   const x = [8, 3];
   const quantized = quantizeRowsReference(x, 1, 2);
@@ -127,7 +128,7 @@ Deno.test("i8a8 参照: linear の既知値（整数内積 → f32 dequant → b
   assertEquals([...out], [8.023621559143066, -3.9763779640197754], "w8a8 linear の出力");
 });
 
-Deno.test("i8a8 参照: linear は xs·wscale を先に畳む（逐次形と値が割れるデータで固定）", () => {
+test("i8a8 参照: linear は xs·wscale を先に畳む（逐次形と値が割れるデータで固定）", () => {
   // acc = 127・s = f32(0.001/127)・wscale = f32(0.001) の組は、
   //   畳み形 f32(127 · f32(s·w))   = 9.999999974752427e-7
   //   逐次形 f32(f32(127·s) · w)   = 1.0000001111620804e-6
@@ -149,7 +150,7 @@ Deno.test("i8a8 参照: linear は xs·wscale を先に畳む（逐次形と値�
 // ⑤b⑤c referenceLinearW4a8 — 既知値と group ごとの畳み順
 // ---------------------------------------------------------------------------
 
-Deno.test("w4a8 参照: linear の既知値（group ごとに i32 → group 境界で f32 flush → xs）", () => {
+test("w4a8 参照: linear の既知値（group ごとに i32 → group 境界で f32 flush → xs）", () => {
   // x = [8, 3, −2, 5] → amax = 8・s = f32(8 · f32(1/127)) = 0.06299212574958801
   //   q = [127, 48, −32, 79]（半整数から十分離れているので偶数丸めの分岐は踏まない）
   // group_size 2 なので行内は 2 group。scale は 2 冪だけを使い、flush までの算術を
@@ -173,7 +174,7 @@ Deno.test("w4a8 参照: linear の既知値（group ごとに i32 → group 境�
   assertEquals([...out], [14.511811256408691, -76.51968383789062], "w4a8 linear の出力");
 });
 
-Deno.test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の和にした形と値が割れる）", () => {
+test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の和にした形と値が割れる）", () => {
   // amax = 127 の行は s = f32(127 · f32(1/127)) = 1.0 ちょうど（除数 1.0 の除算は厳密）
   // なので q = x そのもの・最後の `accf · xs` も恒等になり、**畳み順だけ**が出力に残る。
   //   g0 acc = 127·(−7) + 37·(−3) = −1000 / g1 acc = 121·(−7) + 20·(−6) = −967
@@ -196,7 +197,7 @@ Deno.test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の�
 });
 
 // ⑤d group 整除の門
-Deno.test("w4a8 参照: k が group 長で割り切れない入力は計算に入る前に落ちる", () => {
+test("w4a8 参照: k が group 長で割り切れない入力は計算に入る前に落ちる", () => {
   // groups = 48 / 32 = 1.5。門が無いと group ループが `group = 1` まで回り、内側が
   // `q[row·48 + 32..63]` を読む — 実測では m=1 で全要素 NaN（q の範囲外 = undefined）、
   // m ≥ 2 では row 0 / col 0 だけが**次の行の活性**を足し込んだ有限の誤値になる
@@ -218,7 +219,7 @@ Deno.test("w4a8 参照: k が group 長で割り切れない入力は計算に�
   );
 });
 
-Deno.test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算に入る前に落ちる", () => {
+test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算に入る前に落ちる", () => {
   const input = {
     weightScale: new Array(4).fill(1),
     bias: [0, 0],
@@ -257,7 +258,7 @@ Deno.test("w4a8 参照: 非整数・負の group 長は k を割り切っても�
 // ⑥ referenceAttentionQkI8a8 — 半スケールが q / k の両側へ掛かる
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: QK の半スケールは q と k の双方へ掛かる（scale 2 倍 → 出力 4 倍）", () => {
+test("i8a8 参照: QK の半スケールは q と k の双方へ掛かる（scale 2 倍 → 出力 4 倍）", () => {
   // q = k = [8, 3] → 両側とも q̂ = [127, 48]・s = f32(8/127)
   //   acc = 127² + 48² = 18433 / S = f32(acc · f32((s·scale)·(s·scale)))
   const input = { q: [8, 3], k: [8, 3], batch: 1, m: 1, n: 1, d: 2 };
@@ -273,7 +274,7 @@ Deno.test("i8a8 参照: QK の半スケールは q と k の双方へ掛かる�
 // ⑦ referenceAttentionPvQuant — 127·exp(0) と偶数丸め
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: P̃ の量子化は round(127·exp(S−m)) で、同点は偶数側へ倒れる", () => {
+test("i8a8 参照: P̃ の量子化は round(127·exp(S−m)) で、同点は偶数側へ倒れる", () => {
   // 行の最大 m を引いた位置は exp(0) = 1 → 127 ちょうど（格子の上端に張り付く）
   const qp = referenceAttentionPvQuant([5, 4], [5], 1, 2);
   assertEquals([...qp], [127, 47], "exp(0) → 127 / exp(−1)·127 ≈ 46.7 → 47");
@@ -287,7 +288,7 @@ Deno.test("i8a8 参照: P̃ の量子化は round(127·exp(S−m)) で、同点�
 // ⑧ referenceAttentionPvI8a8Core — 既知値（整数を受け取ってからの純関数）
 // ---------------------------------------------------------------------------
 
-Deno.test("i8a8 参照: ③PV は f32(Σ qP·vq) · ((inv·(1/127))·vs) の既知値と一致する", () => {
+test("i8a8 参照: ③PV は f32(Σ qP·vq) · ((inv·(1/127))·vs) の既知値と一致する", () => {
   //   acc  = 127·100 + 64·(−50) = 9500
   //   prow = f32(0.5 · f32(1/127)) = 0.003937007859349251
   //   O    = f32(9500 · f32(prow · 2)) ≈ 74.803149

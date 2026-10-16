@@ -16,6 +16,7 @@
  *     取り直す。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import {
   type DirectoryAdapter,
@@ -198,7 +199,7 @@ const openLocal = async (
   return { loaded, directory };
 };
 
-Deno.test("openContainerSource: 開くだけでは 1 バイトも取りに行かない", async () => {
+test("openContainerSource: 開くだけでは 1 バイトも取りに行かない", async () => {
   // 温めは呼び手の順序（descriptor で admission → prefetchAssets → open）に属する。面の中で
   // 全 part を温めると、実行できないモデルの重みが先に落ちる（ADR 0108 決定 19 / 0070 決定 5）。
   const caches = new MemoryCacheStorage();
@@ -213,7 +214,7 @@ Deno.test("openContainerSource: 開くだけでは 1 バイトも取りに行か
   assertEquals(source.partCount, NET_PARTS.length);
 });
 
-Deno.test("openContainerSource: 温めていなければ初回の読みが触れた part だけを温める", async () => {
+test("openContainerSource: 温めていなければ初回の読みが触れた part だけを温める", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -233,7 +234,7 @@ Deno.test("openContainerSource: 温めていなければ初回の読みが触れ
   assertEquals(mock.calls.length, warmed, "同じ part の 2 度目の読みが network を起こしている");
 });
 
-Deno.test("openContainerSource: 先に温めてあれば読みは 1 度も network に出ない", async () => {
+test("openContainerSource: 先に温めてあれば読みは 1 度も network に出ない", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   await warmParts(loaded, "net", { fetch: mock.fetch, caches });
@@ -247,7 +248,7 @@ Deno.test("openContainerSource: 先に温めてあれば読みは 1 度も netwo
   assertEquals(second.calls, [], "温め済みなのに network へ出ている");
 });
 
-Deno.test("openContainerSource: partCount / partLength は宣言をそのまま答える", async () => {
+test("openContainerSource: partCount / partLength は宣言をそのまま答える", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -262,7 +263,7 @@ Deno.test("openContainerSource: partCount / partLength は宣言をそのまま�
   assertEquals(source.partLength(2), payloadFor(NET_PARTS[2]).byteLength);
 });
 
-Deno.test("openContainerSource: scan 型の read は保持枠の part の器を写さずに view で返す", async () => {
+test("openContainerSource: scan 型の read は保持枠の part の器を写さずに view で返す", async () => {
   // 写すと part ごとに器と写しで part 長を 2 重に持つ（container-v1 §11）。消費側は byteOffset を
   // 尊重して読む（整列は器が tight + block 開始の 64 B 整列で成り立つ — container.ts の MUST）。
   const caches = new MemoryCacheStorage();
@@ -297,7 +298,7 @@ Deno.test("openContainerSource: scan 型の read は保持枠の part の器を�
   }
 });
 
-Deno.test("openContainerSource: scan 型は次の part を読んでも前の part の view が化けない", async () => {
+test("openContainerSource: scan 型は次の part を読んでも前の part の view が化けない", async () => {
   // 保持枠が別の part へ移っても、手放した器は上書きしない。器を part 間で使い回す実装
   // （全量読みの受け皿を 1 本だけ確保して次の part を読み込む形）を入れると、呼び手がまだ握って
   // いる view の中身が黙って次の part に化ける — この門で赤にする。
@@ -322,7 +323,7 @@ Deno.test("openContainerSource: scan 型は次の part を読んでも前の par
   assertEquals(again, snapshot);
 });
 
-Deno.test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fail loudly", async () => {
+test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fail loudly", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -360,7 +361,7 @@ Deno.test("openContainerSource: 範囲外・長さ 0 の part・未知の添字�
   assertEquals(mock.calls, [], "不正な区間の読みが network に出ている");
 });
 
-Deno.test("openContainerSource: verified は取得元が全量を検証したかを答える", async (t) => {
+test("openContainerSource: verified は取得元が全量を検証したかを答える", async (t) => {
   await t.step("HF セッションは取得層が part 全量を流しながら照合する", async () => {
     const caches = new MemoryCacheStorage();
     const { loaded, mock } = await openRemote(caches);
@@ -401,7 +402,7 @@ Deno.test("openContainerSource: verified は取得元が全量を検証したか
   });
 });
 
-Deno.test("openContainerSource: scan 型は同じ part を何度読んでも全量読みが 1 回", async () => {
+test("openContainerSource: scan 型は同じ part を何度読んでも全量読みが 1 回", async () => {
   // 区間読み（`readFileRange`）を持たないアダプター = 全量読みへ倒れる経路。同じ part の block を
   // 順に読むたびに全量を読み直すと、読み飛ばしが二次になる（ADR 0109 決定 7）。
   const { loaded, directory } = await openLocal();
@@ -423,7 +424,7 @@ Deno.test("openContainerSource: scan 型は同じ part を何度読んでも全�
   assertEquals(directory.reads, [NET_PARTS[2], NET_PARTS[0], NET_PARTS[2]]);
 });
 
-Deno.test("openContainerSource: scan 型は同じ part への並行 read も全量読み 1 回に畳む", async () => {
+test("openContainerSource: scan 型は同じ part への並行 read も全量読み 1 回に畳む", async () => {
   // 決着したバイト列だけを枠に置くと、並行 read が全員 readFile へ入り、その瞬間だけ
   // 「part 長 × 本数」が同時に生きる（保持枠 1 part ぶんの RAM 契約 — container-v1 §11 — が破れる）。
   const { loaded, directory } = await openLocal();
@@ -440,7 +441,7 @@ Deno.test("openContainerSource: scan 型は同じ part への並行 read も全�
   assertEquals(directory.reads, [NET_PARTS[2]], "並行 read が全量読みを重ねている");
 });
 
-Deno.test("openContainerSource: HF の scan 経路も 2 区間目で取得層を叩き直さない", async () => {
+test("openContainerSource: HF の scan 経路も 2 区間目で取得層を叩き直さない", async () => {
   // Deno の HF 読み口は cost "scan"（取得層の戦略 "stream"）なので、実運用の経路はこちら。
   // network 呼び出し数だけを数えると、保持枠を外した実装でも緑のまま通る（温め済みなら
   // どちらも 0 回）ので、キャッシュ読出しの回数で観測する。
@@ -471,7 +472,7 @@ Deno.test("openContainerSource: HF の scan 経路も 2 区間目で取得層を
   assertEquals(thrice, once, "同じ part の 2 区間目以降が取得層の読出しを起こしている");
 });
 
-Deno.test("openContainerSource: seek 型は要求した区間だけをアダプターへ降ろす", async () => {
+test("openContainerSource: seek 型は要求した区間だけをアダプターへ降ろす", async () => {
   // 位置読みを持つアダプター = block ごとに引く経路（全量読みへ降りない）。
   const base = memoryDirectory(localFiles());
   const ranges: [string, number, number][] = [];
@@ -498,7 +499,7 @@ Deno.test("openContainerSource: seek 型は要求した区間だけをアダプ�
   assertEquals(base.reads, [], "区間読みが全量読みへ降りている");
 });
 
-Deno.test("openContainerSource: 越境した容器は越境先の取得元から読む", async () => {
+test("openContainerSource: 越境した容器は越境先の取得元から読む", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
 
@@ -521,7 +522,7 @@ Deno.test("openContainerSource: 越境した容器は越境先の取得元から
   assertEquals(source.verified, true, "越境先でも検証済みの名乗りが継がれていない");
 });
 
-Deno.test("openContainerSource: 未 mapping の越境は開くときに HubFetchError で落ちる", async () => {
+test("openContainerSource: 未 mapping の越境は開くときに HubFetchError で落ちる", async () => {
   // 同じ設定不足が面ごとに別の見え方（素の Error / 無言の成功）になると、呼び手は診断から
   // 「crossRepo を渡せ」へ辿れない。全量面 fetchAssets と同じ構造化欄を名乗る。
   const { loaded } = await openLocal();
@@ -540,7 +541,7 @@ Deno.test("openContainerSource: 未 mapping の越境は開くときに HubFetch
   );
 });
 
-Deno.test("openContainerSource: 読みの失敗は取得元の素の Error（取得の文脈に包まない）", async () => {
+test("openContainerSource: 読みの失敗は取得元の素の Error（取得の文脈に包まない）", async () => {
   // この面は取得ではないので `openAsset` と同じ扱い（包むのは取得元の解決までで、読みは素通し）。
   const caches = new MemoryCacheStorage();
   const served = serveAll();
@@ -555,7 +556,7 @@ Deno.test("openContainerSource: 読みの失敗は取得元の素の Error（取
   assert(!(error instanceof HubFetchError), `${error.name} が取得の文脈に包まれている`);
 });
 
-Deno.test("openContainerSource: 読み口を開けなかった part も次の読みで開き直す", async () => {
+test("openContainerSource: 読み口を開けなかった part も次の読みで開き直す", async () => {
   // Deno の HF 経由は、part ごとの初回の読みで区間読み口を開く（温め直しつき）。その失敗を
   // 経路の決定として覚えると、一過性の 404・切断で開けなかった part が以後の読みで同じ reject を
   // 返し続け、Session 構築が恒久的に失敗する（container.ts の planFor の MUST）。
@@ -579,7 +580,7 @@ Deno.test("openContainerSource: 読み口を開けなかった part も次の読
   );
 });
 
-Deno.test("openContainerSource: scan 型は全量読みに失敗した part を次の読みで読み直す", async () => {
+test("openContainerSource: scan 型は全量読みに失敗した part を次の読みで読み直す", async () => {
   // 失敗した全量読みを保持枠に残すと、一過性の読み失敗で落ちた part が以後の読みで同じ reject を
   // 返し続ける（container.ts の readWhole の MUST）。区間読みを持たないアダプター = 全量読みの経路。
   const base = memoryDirectory(localFiles());
@@ -609,7 +610,7 @@ Deno.test("openContainerSource: scan 型は全量読みに失敗した part を�
   assertEquals(base.reads, [path], "2 度目の読みが全量読みをやり直していない");
 });
 
-Deno.test("openContainerSource: 中断済みの signal では口を返さない", async () => {
+test("openContainerSource: 中断済みの signal では口を返さない", async () => {
   // 開いた後の読みには効かない（読み口は消費側が寿命ぶん掴む — `source.ts` ⑧）が、面の境界では
   // 明示的に見る。
   const caches = new MemoryCacheStorage();

@@ -10,6 +10,7 @@
 //    `normalize("NFC")` が `unicodedata.normalize` と一致する。外れたら、その塊の文字を前処理の表で
 //    拒む / 焼く対応が要る（ADR 0119 決定 2 — 実行エンジンの Unicode の版が変わったときの門）
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { inCodeRanges } from "../src/text/code-ranges.ts";
 import {
@@ -40,7 +41,7 @@ const blockStarts = (indices: readonly number[]): string[] =>
   );
 
 for (const check of fixture.badness.filter((entry) => entry.template !== undefined)) {
-  Deno.test(`BADNESS_RE の JS 訳 [掃引 ${check.name}: ${check.template}] が is_bad と全件一致`, async () => {
+  test(`BADNESS_RE の JS 訳 [掃引 ${check.name}: ${check.template}] が is_bad と全件一致`, async () => {
     const template = check.template as string;
     let bits = "";
     for (const cp of everyCodePoint) {
@@ -52,7 +53,7 @@ for (const check of fixture.badness.filter((entry) => entry.template !== undefin
 }
 
 for (const sweep of fixture.cleanSweeps) {
-  Deno.test(`前処理の掃引 [${sweep.name}: ${sweep.template}] が上流 prompt_clean と全件一致`, async () => {
+  test(`前処理の掃引 [${sweep.name}: ${sweep.template}] が上流 prompt_clean と全件一致`, async () => {
     const blocks = await sweepBlocks(
       everyCodePoint,
       (cp) => recordOf(tables, fill(sweep.template, cp)),
@@ -65,7 +66,7 @@ for (const sweep of fixture.cleanSweeps) {
 const assigned = everyCodePoint.filter((cp) => inCodeRanges(tables.assigned, cp));
 
 for (const sweep of fixture.nfcSweeps) {
-  Deno.test(`NFC の掃引 [${sweep.name}] が Python（UCD 16.0.0）と全件一致`, async () => {
+  test(`NFC の掃引 [${sweep.name}] が Python（UCD 16.0.0）と全件一致`, async () => {
     const blocks = await sweepBlocks(
       assigned,
       (cp) => fill(sweep.template, cp).normalize("NFC"),

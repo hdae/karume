@@ -7,6 +7,7 @@
 // MUST: 期待値は実装の走査式ではなく「軸ごとの座標 → scale の添字」を手で書き下したもので
 // 持つ（同じ桁上がり式を写すと添字バグが両側で相殺する）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
 
@@ -14,7 +15,7 @@ import { alignI8Payload, decodeI8, I8Error } from "../src/format/i8.ts";
 const i8Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Int8Array.from(values).buffer);
 
-Deno.test("decodeI8: 3 軸の keepdim scale [2,1,1] は先頭軸で桁上がりする", () => {
+test("decodeI8: 3 軸の keepdim scale [2,1,1] は先頭軸で桁上がりする", () => {
   // shape [2,3,4] の 24 要素。q は位置ごとに違う値にして、添字がずれたら必ず値が動く形にする。
   const q = Array.from({ length: 24 }, (_, i) => i - 12);
   const scale = Float32Array.from([0.5, 0.25]);
@@ -28,7 +29,7 @@ Deno.test("decodeI8: 3 軸の keepdim scale [2,1,1] は先頭軸で桁上がり�
   }
 });
 
-Deno.test("decodeI8: 中央軸の keepdim scale [1,3,1] は stride 0 の軸を跨いで配られる", () => {
+test("decodeI8: 中央軸の keepdim scale [1,3,1] は stride 0 の軸を跨いで配られる", () => {
   const q = Array.from({ length: 24 }, (_, i) => i - 12);
   const scale = Float32Array.from([1, 2, 4]);
   const decoded = decodeI8(i8Bytes(q), [2, 3, 4], scale, [1, 3, 1]);
@@ -39,14 +40,14 @@ Deno.test("decodeI8: 中央軸の keepdim scale [1,3,1] は stride 0 の軸を�
   }
 });
 
-Deno.test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
+test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
   // 0.1 は f32 で表せないので、f64 のまま掛けた値とは下位ビットが割れる
   const scale = Float32Array.from([0.1]);
   const decoded = decodeI8(i8Bytes([127]), [1, 1], scale, [1, 1]);
   assertStrictEquals(decoded[0], Math.fround(127 * scale[0]));
 });
 
-Deno.test("decodeI8: バイト長・rank・broadcast・scale 要素数の違反を拒否する", () => {
+test("decodeI8: バイト長・rank・broadcast・scale 要素数の違反を拒否する", () => {
   const scale = Float32Array.from([1, 1]);
   // 実バイト数が shape の要素数と違う
   assertThrows(
@@ -74,7 +75,7 @@ Deno.test("decodeI8: バイト長・rank・broadcast・scale 要素数の違反�
   );
 });
 
-Deno.test("alignI8Payload: 端数 1 / 2 / 3 を 4 の倍数までゼロ詰めし、整列済みはコピーしない", () => {
+test("alignI8Payload: 端数 1 / 2 / 3 を 4 の倍数までゼロ詰めし、整列済みはコピーしない", () => {
   for (const [length, padded] of [[5, 8], [6, 8], [7, 8]] as const) {
     const bytes = new Uint8Array(Array.from({ length }, (_, i) => i + 1));
     const result = alignI8Payload(bytes);

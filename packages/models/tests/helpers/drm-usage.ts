@@ -1,3 +1,4 @@
+import { type DirEntry, isNotFound, readDirSync, readLinkSync, readTextFileSync } from "@karume/test-support/fs";
 /**
  * この process の GPU メモリの使用量の標本化（診断 — Linux の DRM fdinfo）。
  *
@@ -18,22 +19,22 @@ export type DrmUsage = ReadonlyMap<string, number>;
  * fd は `drm-client-id` で 1 度だけ数える。
  */
 export const sampleDrmUsage = (): DrmUsage | undefined => {
-  let fds: Deno.DirEntry[];
+  let fds: DirEntry[];
   try {
-    fds = [...Deno.readDirSync("/proc/self/fd")];
+    fds = [...readDirSync("/proc/self/fd")];
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
+    if (isNotFound(cause)) return undefined;
     throw cause;
   }
   const clients = new Map<string, DrmUsage>();
   for (const { name } of fds) {
     let info: string;
     try {
-      if (!RENDER_NODE.test(Deno.readLinkSync(`/proc/self/fd/${name}`))) continue;
-      info = Deno.readTextFileSync(`/proc/self/fdinfo/${name}`);
+      if (!RENDER_NODE.test(readLinkSync(`/proc/self/fd/${name}`))) continue;
+      info = readTextFileSync(`/proc/self/fdinfo/${name}`);
     } catch (cause) {
       // 列挙と読みの間に閉じた fd（標本化の自分の readDir の fd など）は数えない。
-      if (cause instanceof Deno.errors.NotFound) continue;
+      if (isNotFound(cause)) continue;
       throw cause;
     }
     const client = /^drm-client-id:\s*(\d+)/m.exec(info)?.[1];

@@ -8,6 +8,7 @@
  * グラフ名がずれた容器で「別の部品を数えた表」が静かに出る）。
  */
 
+import { readRange } from "@karume/test-support/fs";
 import { bindGraphs, mergedGraph } from "../../src/format/container/bind.ts";
 import {
   parseGraphDescriptor,
@@ -35,20 +36,8 @@ export type ContainerManifest = {
 };
 export type PartRef = { readonly path: string; readonly repo?: string };
 
-const readPrefix = async (source: URL, length: number): Promise<Uint8Array<ArrayBuffer>> => {
-  const file = await Deno.open(source, { read: true });
-  try {
-    const bytes = new Uint8Array(new ArrayBuffer(length));
-    for (let read = 0; read < length;) {
-      const chunk = await file.read(bytes.subarray(read));
-      if (chunk === null) throw new Error(`${source.pathname}: ${length} バイトを読み切れない`);
-      read += chunk;
-    }
-    return bytes;
-  } finally {
-    file.close();
-  }
-};
+const readPrefix = (source: URL, length: number): Promise<Uint8Array<ArrayBuffer>> =>
+  readRange(source, 0, length);
 
 /** 容器の part 0（`…-00001-of-NNNNN.krm` または単一形）から `graphName` の合流済み IR を読む。 */
 export const readContainerGraph = async (part0: URL, graphName: string): Promise<IrGraph> => {

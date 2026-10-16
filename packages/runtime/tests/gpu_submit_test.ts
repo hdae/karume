@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertLess, assertRejects, assertThrows } from "@std/assert";
 import { type GpuContext, GpuDeviceLostError } from "../src/gpu/device.ts";
 import {
@@ -176,7 +177,7 @@ const adaptivePolicy: SubmitPolicy = {
   maxChunkSize: 1024,
 };
 
-Deno.test("SubmitScheduler は dispatch 列をチャンクサイズごとに分割して submit する", async () => {
+test("SubmitScheduler は dispatch 列をチャンクサイズごとに分割して submit する", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
 
@@ -189,7 +190,7 @@ Deno.test("SubmitScheduler は dispatch 列をチャンクサイズごとに分�
   assertEquals(scheduler.stats.dispatchCount, 10);
 });
 
-Deno.test("SubmitScheduler の flush は未 submit が無ければ何も submit しない", async () => {
+test("SubmitScheduler の flush は未 submit が無ければ何も submit しない", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
 
@@ -207,7 +208,7 @@ Deno.test("SubmitScheduler の flush は未 submit が無ければ何も submit 
 // 案 1 の唯一の構造検出器（{@link FakeGpu.calls} の MUST）。submit ごとに
 // onSubmittedWorkDone を呼ぶ実装に戻しても、出力も統計も 1 ビットも変わらない —
 // 呼び出し回数を数えるここだけが赤くなる。
-Deno.test("onSubmittedWorkDone を呼ぶのは flush の 1 回だけ（submit ごとには呼ばない）", async () => {
+test("onSubmittedWorkDone を呼ぶのは flush の 1 回だけ（submit ごとには呼ばない）", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4), () => 0);
 
@@ -227,7 +228,7 @@ Deno.test("onSubmittedWorkDone を呼ぶのは flush の 1 回だけ（submit �
   assertEquals(gpu.calls.workDone, 2, "flush 1 回につき 1 回");
 });
 
-Deno.test("SubmitScheduler はチャンクサイズ 0 相当の政策を構築時に拒否する", () => {
+test("SubmitScheduler はチャンクサイズ 0 相当の政策を構築時に拒否する", () => {
   const gpu = createFakeGpu();
 
   for (const key of ["initialChunkSize", "minChunkSize", "maxChunkSize"] as const) {
@@ -256,7 +257,7 @@ Deno.test("SubmitScheduler はチャンクサイズ 0 相当の政策を構築�
   );
 });
 
-Deno.test("SubmitScheduler は構築時に政策を写し、検査の後の元の object の書き換えで上限が外れない", async () => {
+test("SubmitScheduler は構築時に政策を写し、検査の後の元の object の書き換えで上限が外れない", async () => {
   // 検査した値と実際に効く値が別になると、チャンクサイズ 0 の拒否（ハングの門）も、submit 本数の
   // 上限（TDR の門）も、構築後の 1 行の書き換えで外れる。
   const gpu = createFakeGpu();
@@ -271,7 +272,7 @@ Deno.test("SubmitScheduler は構築時に政策を写し、検査の後の元�
   await scheduler.flush();
 });
 
-Deno.test("SubmitScheduler の政策の写しは継承・非列挙の欄も読む（写す前と同じく受理する）", () => {
+test("SubmitScheduler の政策の写しは継承・非列挙の欄も読む（写す前と同じく受理する）", () => {
   // 写しを spread で取ると自前の列挙可能な欄しか写らず、写す前は通った政策が 0 の拒否に化ける。
   const gpu = createFakeGpu();
   const inherited: SubmitPolicy = Object.create(fixedPolicy(4));
@@ -285,7 +286,7 @@ Deno.test("SubmitScheduler の政策の写しは継承・非列挙の欄も読�
   }
 });
 
-Deno.test("DEFAULT_SUBMIT_POLICY は凍結されていて、書き換えで既定を使う全 Session に波及しない", () => {
+test("DEFAULT_SUBMIT_POLICY は凍結されていて、書き換えで既定を使う全 Session に波及しない", () => {
   assertThrows(() => {
     (DEFAULT_SUBMIT_POLICY as { initialChunkSize: number }).initialChunkSize = Infinity;
   }, TypeError);
@@ -295,7 +296,7 @@ Deno.test("DEFAULT_SUBMIT_POLICY は凍結されていて、書き換えで既�
 // 計測有効時の querySet 容量（チャンクの dispatch 数 × 2）は構築時に落とす。エンコード時の
 // 門だけだと、実測の裏付けが付いて上限が maxChunkSize へ切り替わった**後の run**で初めて
 // 落ちる（動いていたものが途中から落ちる形）。
-Deno.test("計測が有効な device では querySet 容量を超える maxChunkSize を構築時に拒否する", () => {
+test("計測が有効な device では querySet 容量を超える maxChunkSize を構築時に拒否する", () => {
   const timed = createFakeGpu({ timestamps: [] });
 
   assertThrows(
@@ -319,7 +320,7 @@ Deno.test("計測が有効な device では querySet 容量を超える maxChunk
 // copy は仕事量 0（時間予算には効かない）だが、チャンクの dispatch 数上限には 1 件として
 // 数えられる（submit.ts の copyBuffer の NOTE）。落としても出力は正しいままなので、
 // 「チャンクが想定より育つ」退行は submit の**本数**でしか捉えられない。
-Deno.test("copyBuffer は仕事量 0 のままチャンクの件数上限に 1 件として数えられる", async () => {
+test("copyBuffer は仕事量 0 のままチャンクの件数上限に 1 件として数えられる", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
 
@@ -336,7 +337,7 @@ Deno.test("copyBuffer は仕事量 0 のままチャンクの件数上限に 1 �
   assertEquals(gpu.submitted, [1, 1], "flush が端数を出し切る");
 });
 
-Deno.test("discard は copy を discardedDispatches に数えない", () => {
+test("discard は copy を discardedDispatches に数えない", () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
 
@@ -354,7 +355,7 @@ Deno.test("discard は copy を discardedDispatches に数えない", () => {
 
 // 非単調な timestamp（begin > end）は実 GPU では作れないため、この分岐は実測 0 の assert
 // （gpu_timing_test.ts）では 1 度も踏まれない。丸めた側を踏むのはこのフェイクだけ。
-Deno.test("非単調な timestamp は 0 に丸めたうえで丸めた件数を残す", async () => {
+test("非単調な timestamp は 0 に丸めたうえで丸めた件数を残す", async () => {
   // 2 dispatch のチャンク = query 4 件。1 本目が begin > end（負）、2 本目が 60ns。
   const gpu = createFakeGpu({ timestamps: [[100n, 50n, 200n, 260n]] });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
@@ -369,7 +370,7 @@ Deno.test("非単調な timestamp は 0 に丸めたうえで丸めた件数を�
   assertEquals(timing?.entries.length, 1, "同じキーの 2 本は 1 エントリへ畳む");
 });
 
-Deno.test("計測資源の確保の途中で同期例外が出ても、確保済みの資源は破棄される", async () => {
+test("計測資源の確保の途中で同期例外が出ても、確保済みの資源は破棄される", async () => {
   // querySet → resolve 用 → 読み戻し用の順に確保する。3 件目で落ちると、先の 2 件は回収一覧に
   // 載る前なので discard からも届かない（GC 任せになる）。
   const gpu = createFakeGpu({ timestamps: [], failCreateAt: 3 });
@@ -381,7 +382,7 @@ Deno.test("計測資源の確保の途中で同期例外が出ても、確保済
   assertEquals(gpu.destroys, [1, 1], "確保済みの querySet と resolve 用バッファが破棄されていない");
 });
 
-Deno.test("計測付きのエンコードの途中で同期例外が出ても、discard で 3 資源とも破棄される", async () => {
+test("計測付きのエンコードの途中で同期例外が出ても、discard で 3 資源とも破棄される", async () => {
   const gpu = createFakeGpu({ timestamps: [], failTimedPass: true });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
 
@@ -391,7 +392,7 @@ Deno.test("計測付きのエンコードの途中で同期例外が出ても、
   assertEquals(gpu.destroys, [1, 1, 1], "エンコードの途中で落ちたチャンクの計測資源が残っている");
 });
 
-Deno.test("計測資源は正常経路で 1 度だけ破棄され、後の discard で二重に破棄されない", async () => {
+test("計測資源は正常経路で 1 度だけ破棄され、後の discard で二重に破棄されない", async () => {
   const gpu = createFakeGpu({ timestamps: [[0n, 1_000n]] });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
 
@@ -402,7 +403,7 @@ Deno.test("計測資源は正常経路で 1 度だけ破棄され、後の disca
   assertEquals(gpu.destroys, [1, 1, 1], "回収済みの資源を discard が二重に破棄した");
 });
 
-Deno.test("SubmitScheduler の flush は device 消失を待ち続けずに例外にする", async () => {
+test("SubmitScheduler の flush は device 消失を待ち続けずに例外にする", async () => {
   const lostInfo = { reason: "unknown", message: "test" } as unknown as GPUDeviceLostInfo;
   const gpu = createFakeGpu({
     lost: Promise.resolve(lostInfo),
@@ -417,7 +418,7 @@ Deno.test("SubmitScheduler の flush は device 消失を待ち続けずに例�
 
 // 窓の定義そのものの門: 起点は「窓で**最初に** submit した時刻」（直近の submit ではない）、
 // 仕事量は「窓に積んだ**全チャンク**の workgroup 合計」（最後のチャンクぶんではない）。
-Deno.test("計測窓は最初の submit から flush 完了までで、推定は窓の合計 workgroup で割る", async () => {
+test("計測窓は最初の submit から flush 完了までで、推定は窓の合計 workgroup で割る", async () => {
   const clock = gpuTimeClock(() => 11);
   const gpu = createFakeGpu({ workDone: clock.workDone });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2), clock.now);
@@ -439,7 +440,7 @@ Deno.test("計測窓は最初の submit から flush 完了までで、推定は
   assertEquals(scheduler.stats.discardedDispatches, 0, "成功経路では 1 件も捨てていない");
 });
 
-Deno.test("measuredMs は直近 MEASURED_HISTORY 件で頭打ちになり、累積は measuredCount に出る", async () => {
+test("measuredMs は直近 MEASURED_HISTORY 件で頭打ちになり、累積は measuredCount に出る", async () => {
   let elapsed = 0;
   const clock = gpuTimeClock(() => elapsed);
   const gpu = createFakeGpu({ workDone: clock.workDone });
@@ -461,7 +462,7 @@ Deno.test("measuredMs は直近 MEASURED_HISTORY 件で頭打ちになり、累�
   assertEquals(stats.measuredMs[MEASURED_HISTORY - 1], total, "最新の実測が末尾に残る");
 });
 
-Deno.test("discard は未 submit のエンコードを submit せずに捨て、件数を診断に出す", async () => {
+test("discard は未 submit のエンコードを submit せずに捨て、件数を診断に出す", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(4));
 
@@ -481,7 +482,7 @@ Deno.test("discard は未 submit のエンコードを submit せずに捨て、
 // 不変条件 1（submit.ts のモジュール doc）: 実測 0 は「速い」ではなく「情報が無い」。
 // これを成長の根拠にすると、タイマ分解能の粗い環境でチャンクが無条件に膨らみ、
 // dispatch 数がグラフ全体に届いた時点で 1 submit 全積み（= TDR 域）になる。
-Deno.test("実測 0 が続く限りチャンクは初期上限から成長しない", async () => {
+test("実測 0 が続く限りチャンクは初期上限から成長しない", async () => {
   const gpu = createFakeGpu();
   // 時刻が 1 度も進まない = 窓の実測が 0（分解能未満の再現）。
   const scheduler = new SubmitScheduler(gpu.context, adaptivePolicy, () => 0);
@@ -504,7 +505,7 @@ Deno.test("実測 0 が続く限りチャンクは初期上限から成長しな
 // 不変条件 1 の裏面（0 除算側）。仕事量 0 の窓で更新すると msPerWorkgroup が Infinity に
 // なり、以後どんな dispatch も予算超過と判定されて minChunkSize へ張り付く（成長の暴走とは
 // 逆向きだが、同じ「情報の無い実測を根拠にした」故障）。
-Deno.test("仕事量 0 の窓では推定を更新しない", async () => {
+test("仕事量 0 の窓では推定を更新しない", async () => {
   const clock = gpuTimeClock(() => 5);
   const gpu = createFakeGpu({ workDone: clock.workDone });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2), clock.now);
@@ -522,7 +523,7 @@ Deno.test("仕事量 0 の窓では推定を更新しない", async () => {
 
 // 不変条件 2: 1 チャンクの推定時間が予算を超えない。切れ目は
 // `timeBudgetMs * CHUNK_TIME_SAFETY / msPerWorkgroup` = 100 * 0.5 / 2 = 25 workgroup。
-Deno.test("実測の裏付けが付いたら workgroup 予算でチャンクを切る", async () => {
+test("実測の裏付けが付いたら workgroup 予算でチャンクを切る", async () => {
   const clock = gpuTimeClock(() => 8);
   const gpu = createFakeGpu({ workDone: clock.workDone });
   const scheduler = new SubmitScheduler(gpu.context, adaptivePolicy, clock.now);
@@ -538,7 +539,7 @@ Deno.test("実測の裏付けが付いたら workgroup 予算でチャンクを�
 
 // 不変条件 2 の続き: 予算判定は**積む前**。積んでから縮めると、超過したチャンクは既に
 // submit 済みで「毎回 1 度は予算を踏む」が定常になる（不変条件 3）。
-Deno.test("単独で予算を超える dispatch は、積む前にチャンクを閉じて 1 本で出す", async () => {
+test("単独で予算を超える dispatch は、積む前にチャンクを閉じて 1 本で出す", async () => {
   const clock = gpuTimeClock(() => 8);
   const gpu = createFakeGpu({ workDone: clock.workDone });
   const scheduler = new SubmitScheduler(gpu.context, adaptivePolicy, clock.now);
@@ -557,7 +558,7 @@ Deno.test("単独で予算を超える dispatch は、積む前にチャンク�
 });
 
 // 不変条件 3 の裏面: 遅い実測は次のチャンクへフィードフォワードされる（縮む）。
-Deno.test("遅いチャンクを踏んだら次のチャンクが縮む", async () => {
+test("遅いチャンクを踏んだら次のチャンクが縮む", async () => {
   // 4 workgroup で 200ms = 予算 100ms の 2 倍。
   const clock = gpuTimeClock(() => 200);
   const gpu = createFakeGpu({ workDone: clock.workDone });
@@ -574,7 +575,7 @@ Deno.test("遅いチャンクを踏んだら次のチャンクが縮む", async 
 
 // chunkBudget（推定側）: cost proxy 起票の着手条件「予算超過チャンクが観測されたか」を
 // 数える席。切りようが無かったチャンク（単独で予算を超える dispatch）だけが上がる。
-Deno.test("チャンク診断は推定時間の最大と予算超過チャンク数を数える", async () => {
+test("チャンク診断は推定時間の最大と予算超過チャンク数を数える", async () => {
   const clock = gpuTimeClock(() => 8);
   const gpu = createFakeGpu({ workDone: clock.workDone });
   const scheduler = new SubmitScheduler(gpu.context, adaptivePolicy, clock.now);
@@ -612,7 +613,7 @@ Deno.test("チャンク診断は推定時間の最大と予算超過チャンク
 // 予算内だと言い続ける（同じプロキシで見積もった値を比べているだけなので原理的に見えない）。
 // 窓平均は帰属に依存せず求まるので、そのずれを拾う信号になる（ホスト時間を含むので GPU の
 // チャンク時間の下界ではない — 下の「ホストが止まった窓」のテスト）。
-Deno.test("窓平均チャンク時間は推定が見落とすプロキシのずれを信号として捉える", async () => {
+test("窓平均チャンク時間は推定が見落とすプロキシのずれを信号として捉える", async () => {
   let elapsed = 1;
   const clock = gpuTimeClock(() => elapsed);
   const gpu = createFakeGpu({ workDone: clock.workDone });
@@ -641,7 +642,7 @@ Deno.test("窓平均チャンク時間は推定が見落とすプロキシのず
 // 窓平均は「最初の submit → flush 後」の壁時計なので、ホスト側の停止・エンコード・待ちを含む。
 // GPU が速くてもホストが止まれば予算を超えるので、窓平均は GPU のチャンク時間の下界ではない
 // — GPU 側の超過の判定は 1 submit ごとの GPU 時間（submitGpuTime）で行う。
-Deno.test("ホストが止まった窓では、GPU の 1 本が予算内でも窓平均が予算を超える", async () => {
+test("ホストが止まった窓では、GPU の 1 本が予算内でも窓平均が予算を超える", async () => {
   const clock = gpuTimeClock(() => 1);
   // GPU の 1 チャンクの幅 = 1,000,000 ns = 1 ms。
   const gpu = createFakeGpu({ workDone: clock.workDone, timestamps: [[0n, 1_000_000n]] });
@@ -667,7 +668,7 @@ Deno.test("ホストが止まった窓では、GPU の 1 本が予算内でも�
 // 1 submit ずつの幅で数える
 // （ADR 0118 決定 6 の追記 — OS の submit 単位のタイムアウトに対して言えるのは 1 本ずつの最大だけ）。
 // 幅は pass の timestamp の最小 → 最大で、pass 間の隙間も含む（dispatch の差の和ではない）。
-Deno.test("1 submit ごとの GPU 時間は timestamp の幅で数え、裏付け前のチャンクを別に数える", async () => {
+test("1 submit ごとの GPU 時間は timestamp の幅で数え、裏付け前のチャンクを別に数える", async () => {
   const clock = gpuTimeClock(() => 8);
   const gpu = createFakeGpu({
     workDone: clock.workDone,
@@ -715,7 +716,7 @@ Deno.test("1 submit ごとの GPU 時間は timestamp の幅で数え、裏付�
   assertEquals(gpu.calls.workDone, 2, "新しい完了待ちを足していない");
 });
 
-Deno.test("submit の GPU 時間の幅は非単調なサンプルが混じっても負にならない", async () => {
+test("submit の GPU 時間の幅は非単調なサンプルが混じっても負にならない", async () => {
   // dispatch 1 本目が begin > end（負）。幅は最小 50 → 最大 260、単発の最大は 2 本目の 60。
   const gpu = createFakeGpu({ timestamps: [[100n, 50n, 200n, 260n]] });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
@@ -728,7 +729,7 @@ Deno.test("submit の GPU 時間の幅は非単調なサンプルが混じって
   assertEquals(observed?.maxDispatchNs, 60, "負の差は 0 として比べる");
 });
 
-Deno.test("単発 dispatch の差分が全て 0 の間は最大の dispatch のキーを名乗らない", async () => {
+test("単発 dispatch の差分が全て 0 の間は最大の dispatch のキーを名乗らない", async () => {
   // チャンク 1 は 2 dispatch とも差 0（幅は pass 間の隙間だけ）。チャンク 2 で初めて正の差が来る。
   const gpu = createFakeGpu({ timestamps: [[100n, 100n, 200n, 200n], [0n, 5n]] });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
@@ -751,7 +752,7 @@ Deno.test("単発 dispatch の差分が全て 0 の間は最大の dispatch の�
   assertEquals(observed?.maxDispatchKey, "test:heavy", "最初の正の差分で埋まる");
 });
 
-Deno.test("計測が無効な device では submit の GPU 時間を持たない", async () => {
+test("計測が無効な device では submit の GPU 時間を持たない", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
 
@@ -793,7 +794,7 @@ const step = (scheduler: SubmitScheduler, count: number): Promise<void> | undefi
   return scheduler.backpressure();
 };
 
-Deno.test("完了印は run が歩調を問うたとき、前の印から submit が 64 回に届いていれば 1 本だけ置き、フェンスで数え直す", async () => {
+test("完了印は run が歩調を問うたとき、前の印から submit が 64 回に届いていれば 1 本だけ置き、フェンスで数え直す", async () => {
   const gpu = createFakeGpu();
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1));
 
@@ -836,7 +837,7 @@ Deno.test("完了印は run が歩調を問うたとき、前の印から submit
   assertEquals(gpu.calls.workDone, 7);
 });
 
-Deno.test("未完了の印が上限までは待ちを作らず、超えたら最も古い印を待ってその完了で解ける", async () => {
+test("未完了の印が上限までは待ちを作らず、超えたら最も古い印を待ってその完了で解ける", async () => {
   const done = manualWorkDone();
   const gpu = createFakeGpu({ workDone: done.workDone });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(1));
@@ -862,7 +863,7 @@ Deno.test("未完了の印が上限までは待ちを作らず、超えたら最
   assertEquals(gpu.context.pendingLostListeners, baseline, "消失の購読を積み残さない");
 });
 
-Deno.test("待ちを返すときだけ、その前に未 submit を出し切る", () => {
+test("待ちを返すときだけ、その前に未 submit を出し切る", () => {
   const gpu = createFakeGpu({ workDone: () => new Promise<void>(() => {}) });
   const scheduler = new SubmitScheduler(gpu.context, fixedPolicy(2));
 
@@ -888,7 +889,7 @@ Deno.test("待ちを返すときだけ、その前に未 submit を出し切る"
   assertEquals(gpu.submitted.at(-1), 1);
 });
 
-Deno.test("印の待ちの間に device が失われると GpuDeviceLostError で落ちる（ハングしない）", async () => {
+test("印の待ちの間に device が失われると GpuDeviceLostError で落ちる（ハングしない）", async () => {
   const lost = Promise.withResolvers<GPUDeviceLostInfo>();
   const gpu = createFakeGpu({
     lost: lost.promise,

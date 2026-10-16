@@ -3,6 +3,7 @@
 // 出所・テキスト埋め込み資産の検査・潜在の逆正規化・フレームの RGBA 化・乱数・模擬 Session で回す `generate`
 // （text 段の順序と畳み方・後始末と非有限の門・中断）。実 GPU の通しは e2e_wan_pipeline_test.ts。
 
+import { readTextFile } from "@karume/test-support/fs";
 import {
   assert,
   assertEquals,
@@ -13,7 +14,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { parseManifest } from "@karume/hub";
 import type { CodecName, RunInputs, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -998,7 +999,7 @@ describe("モデルカードの受理集合（fixture を挟んだ突き合わ�
   // 反対側は recipe の `wan/tests/test_distribution.py`（card.py の表を同じ fixture と比べる）。
   it("受理する寸法とフレーム数の範囲は fixture wan-card-limits.json と同じ", async () => {
     const fixture: unknown = JSON.parse(
-      await Deno.readTextFile(new URL("./fixtures/wan-card-limits.json", import.meta.url)),
+      await readTextFile(new URL("./fixtures/wan-card-limits.json", import.meta.url)),
     );
     const { acceptedSizes, minFrames, maxFrames } = WAN21_GENERATION;
     assertEquals(
@@ -1012,7 +1013,7 @@ describe("モデルカードの受理集合（fixture を挟んだ突き合わ�
   // card.py の `WAN22_ACCEPTED_SIZES` / `WAN22_FRAMES` を同じ fixture と比べる）。
   it("Wan2.2 TI2V の受理する寸法とフレーム数の範囲は fixture wan-ti2v-card-limits.json と同じ", async () => {
     const fixture: unknown = JSON.parse(
-      await Deno.readTextFile(new URL("./fixtures/wan-ti2v-card-limits.json", import.meta.url)),
+      await readTextFile(new URL("./fixtures/wan-ti2v-card-limits.json", import.meta.url)),
     );
     const { acceptedSizes, minFrames, maxFrames } = WAN22_TI2V_GENERATION;
     assertEquals(
@@ -1608,7 +1609,7 @@ if (textEmbedsSeries === undefined) {
   );
 }
 
-Deno.test({
+test({
   name:
     "既定の negative: テキスト埋め込み資産の negative の行の原文とビット同一（2 つの経路の既定が同じ文字列）",
   ignore: textEmbedsSeries === undefined,
@@ -1943,7 +1944,7 @@ if (distManifestText === undefined) {
 /** 既定席（ADR 0120 裁定 2026-10-04 の 4 — 今いちばん実用的な席。正本は recipe の `WAN_DEFAULT_QUANT`）。 */
 const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
 
-Deno.test({
+test({
   name:
     "配布形の既定席: quant を省いた構築は実用席へ解決する（manifest の karume.json だけを読む）",
   ignore: distManifestText === undefined,

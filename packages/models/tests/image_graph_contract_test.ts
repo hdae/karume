@@ -12,7 +12,7 @@
  */
 
 import { assertRejects } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { type IrDeclaration, parseIrDeclarationValue } from "@karume/runtime";
 import { type Manifest, parseManifest } from "@karume/hub";
 import { BirefnetPipeline } from "../src/birefnet/pipeline.ts";

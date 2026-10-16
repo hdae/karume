@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import {
@@ -10,7 +11,7 @@ import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 
 // 大語彙形で選ばれるWGSLはNを焼かない。端の列・先読み語の端を小さい形で検査し、
 // 実形262144×1536はChrome実重み比較とGemmaの既存logits/golden門で検証する。
-Deno.test({
+test({
   name: "INT8のc16変種はc32とビット一致し、列と先読みの端を正しく書く（実GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

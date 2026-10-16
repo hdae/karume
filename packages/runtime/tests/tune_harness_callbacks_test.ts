@@ -13,7 +13,7 @@
 // pass が最後に set したパイプライン（= パイプラインキー）ごとに、テストが決める。
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { GpuContext, readAdapterInfo, type RequiredLimits } from "../src/gpu/device.ts";
 import { SWEEP_CASES, type SweepCase } from "../src/tune/cases.ts";
 import { deriveProfile, parseSweepReport } from "../src/tune/derive.ts";

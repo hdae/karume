@@ -17,7 +17,7 @@
 // **一部だけなら FAIL**（採り直しの途中で落ちた資産を SKIP に丸めない）。置き場と形の正本は `helpers/wan-i2v-image.ts`。
 
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { WAN22_TI2V_GENERATION } from "../src/wan/descriptor.ts";
 import { fitWanI2vImage, patchifyWanImage, wanI2vPixels } from "../src/wan/i2v-preprocess.ts";

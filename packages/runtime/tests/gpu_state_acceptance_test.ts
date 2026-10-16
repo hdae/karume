@@ -14,6 +14,7 @@
 // MUST: 各群は「門が空振りしていない」ことを自前で持つ（期待値の非自明性・対照・故障注入）。
 // states 形は厳密 0 が正規に出る形なので、確認が無いと「何も計算していない」実装が緑で通る。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { compareTensors, formatAllclose, type Tolerance } from "../src/reference/allclose.ts";
 import { referenceStateAppend, referenceStateAttention } from "../src/reference/state-attention.ts";
@@ -483,7 +484,7 @@ const crossSeriesReports = async (
   return reports;
 };
 
-Deno.test({
+test({
   name:
     "states 形の多 step が帯 mask つき 1-shot 融合 attention と一致する（交差オラクル・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -511,7 +512,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "窓を 1 広げた states 形は交差オラクルと一致しない（故障注入・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -591,7 +592,7 @@ const paddedInputs = (
 const tightInputs = (model: StateModel, query: number, salt: number): StepInputs =>
   paddedInputs(model, query, query, salt);
 
-Deno.test({
+test({
   name: "pad 行は KV スロットのバイト列にも出力にも現れない（ADR 0066 受入条件②・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -714,7 +715,7 @@ const isEmptyRow = (past: number, query: number, window: number, row: number): b
   return Math.min(limit, past + query - 1) < lower;
 };
 
-Deno.test({
+test({
   name: "pad 行が窓から落ちた出力行は厳密 0（ADR 0067 受入条件⑤・Session.run 経由・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -785,7 +786,7 @@ Deno.test({
 
 const SYMBOLIC_MODEL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "C" };
 
-Deno.test({
+test({
   name: "容量 C=8 と C=4096 で全 step の出力がビット同一（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -871,7 +872,7 @@ const SHARED_SERIES: readonly SharedSeries[] = [
   },
 ];
 
-Deno.test({
+test({
   name: "KV 共有層（読者 2 本 → append 1 本）が実行できる（ADR 0067 決定 4 / 5b・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

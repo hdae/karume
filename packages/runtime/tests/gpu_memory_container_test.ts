@@ -49,7 +49,7 @@ import {
   writeModelContainer,
   type WrittenContainer,
 } from "./helpers/container-write.ts";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 
 const M = 4;
 const K = 32;

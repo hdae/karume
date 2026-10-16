@@ -9,7 +9,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { gemmGeometryForRows } from "../src/kernels/gemm-geometry.ts";
 import {
   assertGeometryProfile,

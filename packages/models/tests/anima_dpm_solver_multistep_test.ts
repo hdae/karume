@@ -11,6 +11,7 @@
 // tolerance（{@link TOLERANCE}）の導出根拠はモジュール側の doc（「参照とビット一致しない」の
 // MUST 節）が正本 —— ここに数値の由来を二重に書かない。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { dpmSolverMultistepStep, needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 
@@ -164,7 +165,7 @@ const worstDeviation = (series: Series, velocityOrder?: readonly number[]): numb
   return worst;
 };
 
-Deno.test("dpmSolverMultistepStep: リグ golden とパリティする（steps=8・1 次/2 次/1 次 の全分岐）", () => {
+test("dpmSolverMultistepStep: リグ golden とパリティする（steps=8・1 次/2 次/1 次 の全分岐）", () => {
   // step ごとに突き合わせるので「最後だけ合っている」では通らない（途中の x0 も見る）。
   const sigmas = Float32Array.from(SERIES_8.sigmas);
   let sample = Float32Array.from(SERIES_8.initial);
@@ -199,7 +200,7 @@ Deno.test("dpmSolverMultistepStep: リグ golden とパリティする（steps=8
   }
 });
 
-Deno.test("dpmSolverMultistepStep: 最終 step は x0 をそのまま返す（終端 σ=0 の 1 次落ち）", () => {
+test("dpmSolverMultistepStep: 最終 step は x0 をそのまま返す（終端 σ=0 の 1 次落ち）", () => {
   // `final_sigmas_type="zero"` の帰結。係数が (0, −1) になるのでビット同一で一致する。
   const sigmas = Float32Array.from(SERIES_8.sigmas);
   const last = SERIES_8.steps.length - 1;
@@ -215,7 +216,7 @@ Deno.test("dpmSolverMultistepStep: 最終 step は x0 をそのまま返す（�
   assertEquals([...update.sample], [...update.x0]);
 });
 
-Deno.test("dpmSolverMultistepStep: 境界 — 梯子が最小長（steps=2）でも参照と一致する", () => {
+test("dpmSolverMultistepStep: 境界 — 梯子が最小長（steps=2）でも参照と一致する", () => {
   // 2 step しか無いと 2 次の分岐に一度も入らない（step 0 と最終 step が全て）。この経路が
   // 落ちていると 2 次側だけ見ているテストは素通りする。
   assert(
@@ -224,7 +225,7 @@ Deno.test("dpmSolverMultistepStep: 境界 — 梯子が最小長（steps=2）で
   );
 });
 
-Deno.test("dpmSolverMultistepStep: 境界 — guidance=1 は cond を速度としてそのまま使う", () => {
+test("dpmSolverMultistepStep: 境界 — guidance=1 は cond を速度としてそのまま使う", () => {
   // σ0=1・σ1=0 の 1 step 梯子なら更新は x0 = x − 1·v そのもの。
   const sigmas = Float32Array.from([1, 0]);
   const update = dpmSolverMultistepStep({
@@ -240,7 +241,7 @@ Deno.test("dpmSolverMultistepStep: 境界 — guidance=1 は cond を速度と�
   assertEquals([...update.sample], [0.75, 2.5, 2.875]);
 });
 
-Deno.test("dpmSolverMultistepStep: guidance≠1 は uncond + scale·(cond − uncond) を速度にする", () => {
+test("dpmSolverMultistepStep: guidance≠1 は uncond + scale·(cond − uncond) を速度にする", () => {
   const update = dpmSolverMultistepStep({
     sample: Float32Array.from([0]),
     cond: Float32Array.from([1]),
@@ -254,13 +255,13 @@ Deno.test("dpmSolverMultistepStep: guidance≠1 は uncond + scale·(cond − un
   assertEquals([...update.x0], [-2.5]);
 });
 
-Deno.test("needsUncond: CFG=1 だけが uncond 不要", () => {
+test("needsUncond: CFG=1 だけが uncond 不要", () => {
   assertEquals(needsUncond(1), false);
   assertEquals(needsUncond(4), true);
   assertEquals(needsUncond(0), true);
 });
 
-Deno.test("dpmSolverMultistepStep: uncond の有無が needsUncond と食い違ったら落とす", () => {
+test("dpmSolverMultistepStep: uncond の有無が needsUncond と食い違ったら落とす", () => {
   const common = {
     sample: Float32Array.from([0, 0]),
     cond: Float32Array.from([1, 1]),
@@ -280,7 +281,7 @@ Deno.test("dpmSolverMultistepStep: uncond の有無が needsUncond と食い違�
   );
 });
 
-Deno.test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと食い違ったら落とす", () => {
+test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと食い違ったら落とす", () => {
   // 状態の受け渡しが切れたまま黙って 1 次へ落ちるのを禁じる（1 次と 2 次は別の絵になる）。
   const sigmas = Float32Array.from(SERIES_8.sigmas);
   const common = {
@@ -307,7 +308,7 @@ Deno.test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと
   );
 });
 
-Deno.test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => {
+test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => {
   const sample = Float32Array.from([0]);
   const cond = Float32Array.from([1]);
   const common = { sample, cond, uncond: undefined, guidance: 1, previousX0: undefined };
@@ -334,7 +335,7 @@ Deno.test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => 
   );
 });
 
-Deno.test("dpmSolverMultistepStep: 故障注入 — step 順序の入れ替えはパリティ閾値を大きく超える", () => {
+test("dpmSolverMultistepStep: 故障注入 — step 順序の入れ替えはパリティ閾値を大きく超える", () => {
   // 検出力の証明。閾値（4e-6）に丸め差を吸わせても、順序を 1 組入れ替えるだけで
   // 最大絶対差は 2.03e+00（実測）まで跳ね、5.7 桁の余裕で赤くなる。
   const flipped = [0, 2, 1, 3, 4, 5, 6, 7];
@@ -345,7 +346,7 @@ Deno.test("dpmSolverMultistepStep: 故障注入 — step 順序の入れ替え�
   );
 });
 
-Deno.test("dpmSolverMultistepStep: 故障注入 — shift の取り違えはパリティ閾値を大きく超える", () => {
+test("dpmSolverMultistepStep: 故障注入 — shift の取り違えはパリティ閾値を大きく超える", () => {
   // 梯子そのものの取り違え（`sigmaSchedule` の shift 違い）も同じ閾値で割れることの確認。
   // 中身の係数は全て梯子から導くので、梯子が 1 段ずれれば全 step の係数がずれる。
   // 実測（shift 3 → 4）: 最大絶対差 1.568e-01 = 閾値の 4.6 桁上。
@@ -379,7 +380,7 @@ function sigmaLadder(steps: number, shift: number): number[] {
   return ladder;
 }
 
-Deno.test("dpmSolverMultistepStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
+test("dpmSolverMultistepStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
   // `cfgEulerStep` と同じ組（torch 2.13.0 の CPU で f32 テンソルの合成 = −0.03790003061294556）。
   // x0 = 0 − 1·v なので、合成の符号を返した値になる。f64 のまま掛けると 0.03789997100830078。
   const update = dpmSolverMultistepStep({

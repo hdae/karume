@@ -8,6 +8,7 @@
 //  ③ 区間の宣言（cfgMinT/cfgMaxT・minSeconds/maxSeconds）が逆順なら落とす — 逆順は
 //     「CFG が 1 度も掛からない」形で沈黙し、forward 数が減るだけで例外が出ない
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   IRODORI_PIPELINE_MAJOR,
@@ -52,12 +53,12 @@ const without = (key: string): Record<string, unknown> => {
   return rest;
 };
 
-Deno.test("契約名と major はこの実装が固定する（manifest 側の綴りと突き合わせる先）", () => {
+test("契約名と major はこの実装が固定する（manifest 側の綴りと突き合わせる先）", () => {
   assertEquals(IRODORI_PIPELINE_NAME, "irodori");
   assertEquals(IRODORI_PIPELINE_MAJOR, 1);
 });
 
-Deno.test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
+test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
   const config = parseIrodoriPipelineConfig(BASE);
   assertEquals(config.maxTextLen, 256);
   assertEquals(config.speakerRows, 751);
@@ -66,7 +67,7 @@ Deno.test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
   assertEquals(config.cfgGuidanceMode, "independent");
 });
 
-Deno.test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違いの黙認を作らない）", () => {
+test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違いの黙認を作らない）", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ step: 40 })),
     Error,
@@ -74,7 +75,7 @@ Deno.test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違い�
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", () => {
+test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: 3, speaker: 5, style: 3 } })),
     Error,
@@ -82,7 +83,7 @@ Deno.test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", (
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: 欠落は欄名を添えて落とす", () => {
+test("parseIrodoriPipelineConfig: 欠落は欄名を添えて落とす", () => {
   for (const key of Object.keys(BASE)) {
     assertThrows(
       () => parseIrodoriPipelineConfig(without(key)),
@@ -92,7 +93,7 @@ Deno.test("parseIrodoriPipelineConfig: 欠落は欄名を添えて落とす", ()
   }
 });
 
-Deno.test("parseIrodoriPipelineConfig: 対応外の speakerUncondMode は拒否する（ADR 0047 決定 1）", () => {
+test("parseIrodoriPipelineConfig: 対応外の speakerUncondMode は拒否する（ADR 0047 決定 1）", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ speakerUncondMode: "noise" })),
     Error,
@@ -100,7 +101,7 @@ Deno.test("parseIrodoriPipelineConfig: 対応外の speakerUncondMode は拒否�
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: 対応外の cfgGuidanceMode は拒否する（ADR 0047 決定 1）", () => {
+test("parseIrodoriPipelineConfig: 対応外の cfgGuidanceMode は拒否する（ADR 0047 決定 1）", () => {
   for (const mode of ["joint", "alternating"]) {
     assertThrows(
       () => parseIrodoriPipelineConfig(withPatch({ cfgGuidanceMode: mode })),
@@ -110,7 +111,7 @@ Deno.test("parseIrodoriPipelineConfig: 対応外の cfgGuidanceMode は拒否す
   }
 });
 
-Deno.test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
+test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
   // token 列は BOS を必ず 1 本置くので、本文の予算が残らない 1 は組めない。
   assertThrows(() => parseIrodoriPipelineConfig(withPatch({ maxTextLen: 1 })), Error, "2 以上");
   // t_embed は前半 cos / 後半 sin に割るので奇数幅は組めない。
@@ -133,7 +134,7 @@ Deno.test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: initScale は f32 へ丸めても有限な値だけを受ける", () => {
+test("parseIrodoriPipelineConfig: initScale は f32 へ丸めても有限な値だけを受ける", () => {
   // 倍精度では有限でも f32 の最大値（約 3.4e38）を超えると、t 列の先頭側が ±Inf のまま GPU へ
   // 渡り、DiT を回し切った後の出力検査まで表面化しない（t 列の各値は f32(initScale) 以下）。
   assertThrows(
@@ -146,7 +147,7 @@ Deno.test("parseIrodoriPipelineConfig: initScale は f32 へ丸めても有限�
   assertEquals(parseIrodoriPipelineConfig(withPatch({ initScale: largest })).initScale, largest);
 });
 
-Deno.test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈黙で CFG が消える）", () => {
+test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈黙で CFG が消える）", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgMinT: 1, cfgMaxT: 0.5 })),
     Error,
@@ -154,7 +155,7 @@ Deno.test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈�
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: 秒の範囲が逆順なら落とす", () => {
+test("parseIrodoriPipelineConfig: 秒の範囲が逆順なら落とす", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ minSeconds: 30, maxSeconds: 0.5 })),
     Error,
@@ -162,7 +163,7 @@ Deno.test("parseIrodoriPipelineConfig: 秒の範囲が逆順なら落とす", ()
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: codec の 3 欄は正の整数（0 も小数も落とす）", () => {
+test("parseIrodoriPipelineConfig: codec の 3 欄は正の整数（0 も小数も落とす）", () => {
   for (const key of ["sampleRate", "hopLength", "codecHaloFrames"]) {
     for (const value of [0, -1, 1.5, "48000"]) {
       assertThrows(
@@ -174,7 +175,7 @@ Deno.test("parseIrodoriPipelineConfig: codec の 3 欄は正の整数（0 も小
   }
 });
 
-Deno.test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と違えば落とす", () => {
+test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と違えば落とす", () => {
   // 秒 → フレームと 秒 → サンプル → フレームの 2 系統が独立に動く形を作らない。
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ hopLength: 1000 })),
@@ -188,7 +189,7 @@ Deno.test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と
   );
 });
 
-Deno.test("parseIrodoriPipelineConfig: speakerRows 1 は落とす（参照 latent が 0 行になる）", () => {
+test("parseIrodoriPipelineConfig: speakerRows 1 は落とす（参照 latent が 0 行になる）", () => {
   // speaker 条件は「平均トークン 1 本 + patch した参照」なので、1 行では参照が 1 行も載らない。
   // 素通しすると参照音声の上限サンプル数が 0 になり、`integratedLoudness` の「波形が空」という
   // **無関係な文言**で生成の途中に落ちる。maxTextLen / maxCaptionLen と同じ理屈・同じ受理集合。
@@ -196,7 +197,7 @@ Deno.test("parseIrodoriPipelineConfig: speakerRows 1 は落とす（参照 laten
   assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 0 })), Error, "2 以上");
 });
 
-Deno.test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が ditSymMax を超えたら落とす", () => {
+test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が ditSymMax を超えたら落とす", () => {
   // 素通しすると、長い発話のときだけ「決まった latent 長が dit の宣言上限を超えている」で
   // duration 段まで走ってから落ちる（短い発話では永久に露見しない）。
   assertThrows(
@@ -215,14 +216,14 @@ Deno.test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が di
   assertEquals(parseIrodoriPipelineConfig(withPatch({})).ditSymMax, 750);
 });
 
-Deno.test("parseIrodoriPipelineConfig: cfgScales 0 は正規の値（その条件の CFG を回さない）", () => {
+test("parseIrodoriPipelineConfig: cfgScales 0 は正規の値（その条件の CFG を回さない）", () => {
   const config = parseIrodoriPipelineConfig(
     withPatch({ cfgScales: { text: 3, speaker: 0, caption: 0 } }),
   );
   assertEquals(config.cfgScales.speaker, 0);
 });
 
-Deno.test("parseIrodoriPipelineConfig: f32 で厳密に表せない cfgScale は宣言段で落とす", () => {
+test("parseIrodoriPipelineConfig: f32 で厳密に表せない cfgScale は宣言段で落とす", () => {
   // 1.3 は f64 と f32 で値が違う。ホスト経路（f64 乗算）と常駐経路（f32 乗算）が 1〜2 ulp
   // 割れ、「2 経路の出力は同じ」MUST が条件付きになるので、配布形の宣言側で落とす。
   assertThrows(

@@ -4,6 +4,7 @@
 // 高さ / 幅 / チャネル数を全部違う値にして、巡回長 3 以上の並べ替えでしか通らない形にしてある。
 // 実重み・実 GPU での門は E2E（P3 波 2）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   ditPatchGeometry,
@@ -18,21 +19,21 @@ import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 /** 非正方 patch（2×3）・チャネル 3 の幾何。C = ph = pw のどれも一致しない。 */
 const TOKEN_GEOMETRY = { channels: 3, patchHeight: 2, patchWidth: 3 } as const;
 
-Deno.test("ditPatchGeometry: グラフの入出力幅から patch とチャネル数を割り出す", () => {
+test("ditPatchGeometry: グラフの入出力幅から patch とチャネル数を割り出す", () => {
   // Anima の実形（tokens 68 = 17·2·2 / 出力 64 = 2·2·16）。
   assertEquals(ditPatchGeometry(68, 64), { channels: 16, patchHeight: 2, patchWidth: 2 });
   // 差 = patch 体積、商 = チャネル数（呼び出し側に literal を置かないための割り出し）。
   assertEquals(ditPatchGeometry(45, 36), { channels: 4, patchHeight: 3, patchWidth: 3 });
 });
 
-Deno.test("ditPatchGeometry: 割り出せない幅は落とす（黙って正方 patch を仮定しない）", () => {
+test("ditPatchGeometry: 割り出せない幅は落とす（黙って正方 patch を仮定しない）", () => {
   assertThrows(() => ditPatchGeometry(64, 68), Error, "割り出せない");
   assertThrows(() => ditPatchGeometry(70, 64), Error, "割り出せない");
   // 差が平方数でない = pt=1・正方 patch の前提が崩れている。
   assertThrows(() => ditPatchGeometry(72, 64), Error, "平方数");
 });
 
-Deno.test("tokenCount: latent を patch で割った格子の積（S）", () => {
+test("tokenCount: latent を patch で割った格子の積（S）", () => {
   assertEquals(tokenCount([1, 3, 4, 9], TOKEN_GEOMETRY), 2 * 3);
   // 1024px（latent 128・patch 2）は S = 4,096。
   assertEquals(
@@ -41,7 +42,7 @@ Deno.test("tokenCount: latent を patch で割った格子の積（S）", () => 
   );
 });
 
-Deno.test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は h·W'+w・padding は全ゼロ", () => {
+test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は h·W'+w・padding は全ゼロ", () => {
   const { channels, patchHeight, patchWidth } = TOKEN_GEOMETRY;
   const [height, width] = [4, 9];
   const rows = height / patchHeight;
@@ -81,7 +82,7 @@ Deno.test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は 
   }
 });
 
-Deno.test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順ではない", () => {
+test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順ではない", () => {
   const { channels, patchHeight, patchWidth } = TOKEN_GEOMETRY;
   const [height, width] = [4, 9];
   const rows = height / patchHeight;
@@ -114,7 +115,7 @@ Deno.test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順�
   }
 });
 
-Deno.test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にしない）", () => {
+test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にしない）", () => {
   const shape = [1, TOKEN_GEOMETRY.channels, 4, 9];
   assertThrows(
     () => patchifyLatents(new Float32Array(4), shape, TOKEN_GEOMETRY),
@@ -155,7 +156,7 @@ const syntheticRopeBase = (rows: number): RopeBase => {
   };
 };
 
-Deno.test("ropeTables: 1 行は [t,h,w,t,h,w]・位置は t=0 / h=行 / w=列", () => {
+test("ropeTables: 1 行は [t,h,w,t,h,w]・位置は t=0 / h=行 / w=列", () => {
   const base = syntheticRopeBase(8);
   const geometry = { channels: 2, patchHeight: 2, patchWidth: 2 } as const;
   const [height, width] = [6, 8];
@@ -188,7 +189,7 @@ Deno.test("ropeTables: 1 行は [t,h,w,t,h,w]・位置は t=0 / h=行 / w=列", 
   }
 });
 
-Deno.test("ropeTables: 素表の行数を超える解像度は落とす（モデル側の位置表の天井）", () => {
+test("ropeTables: 素表の行数を超える解像度は落とす（モデル側の位置表の天井）", () => {
   const base = syntheticRopeBase(3);
   const geometry = { channels: 2, patchHeight: 2, patchWidth: 2 } as const;
 
@@ -201,7 +202,7 @@ const ropeTable = (rows: number, width: number, seed: number) => ({
   data: f32Bytes(Array.from({ length: rows * width }, (_, i) => seed + i)),
 });
 
-Deno.test("parseRopeBase: 6 本の素表を軸順（t → h → w）で読む", () => {
+test("parseRopeBase: 6 本の素表を軸順（t → h → w）で読む", () => {
   const buffer = buildSafetensors([
     { name: "cos_t", ...ropeTable(4, 1, 100) },
     { name: "sin_t", ...ropeTable(4, 1, 200) },
@@ -220,7 +221,7 @@ Deno.test("parseRopeBase: 6 本の素表を軸順（t → h → w）で読む", 
   assertEquals([...base.sin[2]].slice(0, 3), [600, 601, 602]);
 });
 
-Deno.test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（黙って別軸の行を読ませない）", () => {
+test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（黙って別軸の行を読ませない）", () => {
   const buffer = buildSafetensors([
     { name: "cos_t", ...ropeTable(4, 1, 0) },
     { name: "sin_t", ...ropeTable(4, 1, 0) },
@@ -234,7 +235,7 @@ Deno.test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（
   assertThrows(() => parseRopeBase(buffer), Error, "行数");
 });
 
-Deno.test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす", () => {
+test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす", () => {
   // 余分な 1 本（`karume-anima-extra` のミラーを焼き直すときに踏みうる形）。読み飛ばすと
   // 「素表と別物の表を同じ資産に同居させたまま気づかない」経路ができる。
   const buffer = buildSafetensors([
@@ -250,7 +251,7 @@ Deno.test("parseRopeBase: 想定外のテンソルが混ざった素表は落と
   assertThrows(() => parseRopeBase(buffer), Error, "想定外のテンソル 'cos_x'");
 });
 
-Deno.test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行数一致では捕まらない）", () => {
+test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行数一致では捕まらない）", () => {
   // 行数は全軸 4 で揃えたまま、h 軸の対だけ列幅を割る。行数の門は通り抜けるので、対ごとの
   // shape 突合が無いと「cos は 2 列 / sin は 3 列」の表が黙って通る。
   const buffer = buildSafetensors([
@@ -265,7 +266,7 @@ Deno.test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす�
   assertThrows(() => parseRopeBase(buffer), Error, "cos / sin で shape が違う");
 });
 
-Deno.test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
+test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
   assertThrows(
     () =>
       parseRopeBase(buildSafetensors([

@@ -9,6 +9,7 @@
  * 黙ってずれる形を作らないため。
  */
 
+import { readFile } from "@karume/test-support/fs";
 import { assert } from "@std/assert";
 import {
   type GpuContext,
@@ -38,7 +39,7 @@ export type Fixture = {
 };
 
 export const readFixture = async (url: URL): Promise<Fixture> => {
-  const bytes = await Deno.readFile(url);
+  const bytes = await readFile(url);
   const file = parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   );

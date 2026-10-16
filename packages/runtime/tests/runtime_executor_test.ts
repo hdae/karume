@@ -1,6 +1,8 @@
 // Session の構築・実行の受け口のうち、GPU を取らずに回る門（実 GPU 側は
 // gpu_runtime_executor_test.ts）と、容器の読み手が束縛の取れないシンボルを拒否する門。
 
+import { platformObject } from "@karume/test-support/webgpu";
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertInstanceOf, assertRejects, assertStringIncludes } from "@std/assert";
 import { ContainerFormatError, writeHeader } from "../src/format/container/header.ts";
 import { HEADER_BYTES } from "../src/format/container/limits.ts";
@@ -25,7 +27,7 @@ import { writeModelContainer } from "./helpers/container-write.ts";
 // deno-lint-ignore no-explicit-any
 const anyOf = (value: unknown): any => value;
 
-Deno.test({
+test({
   name: "束縛が取れないシンボルは容器の読み手が受理しない（入力 shape に素の形で現れない）",
   fn: async () => {
     // 書き手は宣言をパースしてから書くので、壊れた宣言は容器に入らない。読み手の側の門
@@ -139,7 +141,7 @@ const convertible = (): { readonly value: object; readonly conversions: () => nu
   };
 };
 
-Deno.test("構築オプションの数値ノブの診断は利用者の変換を呼ばず、型外の値を ExecutionError で拒否する", async () => {
+test("構築オプションの数値ノブの診断は利用者の変換を呼ばず、型外の値を ExecutionError で拒否する", async () => {
   for (
     const knob of [
       "planBackingBudgetBytes",
@@ -168,7 +170,7 @@ Deno.test("構築オプションの数値ノブの診断は利用者の変換を
   }
 });
 
-Deno.test("run の generation.commit の診断は利用者の変換を呼ばず、symbol でも ExecutionError で拒否する", async () => {
+test("run の generation.commit の診断は利用者の変換を呼ばず、symbol でも ExecutionError で拒否する", async () => {
   const session = await buildSession(fakeGpu(), emptyGraph(), {});
   try {
     const object = convertible();
@@ -187,7 +189,7 @@ Deno.test("run の generation.commit の診断は利用者の変換を呼ばず�
   }
 });
 
-Deno.test("run の generation の読みと context の内部面の取り出しは、同期 throw ではなく戻り Promise の reject になる", async () => {
+test("run の generation の読みと context の内部面の取り出しは、同期 throw ではなく戻り Promise の reject になる", async () => {
   const session = await buildSession(fakeGpu(), emptyGraph(), {});
   try {
     const failure = new Error("getter が throw した");
@@ -217,7 +219,7 @@ Deno.test("run の generation の読みと context の内部面の取り出し�
   }
 });
 
-Deno.test("sharedWeights に SharedWeight でない値を渡すと、内部面を読む前に ExecutionError で拒否する", async () => {
+test("sharedWeights に SharedWeight でない値を渡すと、内部面を読む前に ExecutionError で拒否する", async () => {
   const graph = mergeGraph({
     format: "karume-ir",
     version: 2,
@@ -258,7 +260,7 @@ const losableFakeGpu = (): { readonly gpu: GpuContext; readonly lose: () => void
       LIMITS,
       new Set(),
     ),
-    lose: (): void => lost.resolve({ reason: "destroyed", message: "テストによる消失" }),
+    lose: (): void => lost.resolve(platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" })),
   };
 };
 
@@ -304,7 +306,7 @@ const countedSharedWeight = (
   return { weight, borrowed: () => borrowed };
 };
 
-Deno.test("消失済み・破棄要求済みの device では、重みを上げないグラフでも Session の構築が GpuDeviceLostError で reject する", async () => {
+test("消失済み・破棄要求済みの device では、重みを上げないグラフでも Session の構築が GpuDeviceLostError で reject する", async () => {
   const destroyed = fakeGpu();
   destroyed.destroy();
   await assertRejects(
@@ -334,7 +336,7 @@ Deno.test("消失済み・破棄要求済みの device では、重みを上げ�
   assertEquals(borrowed(), 0, "落ちた構築が借用を積んだまま");
 });
 
-Deno.test("構築の途中（重みの供給待ち）で device が失われたら、構築は成功で返らず借用を返す", async () => {
+test("構築の途中（重みの供給待ち）で device が失われたら、構築は成功で返らず借用を返す", async () => {
   const { gpu, lose } = losableFakeGpu();
   const { weight, borrowed } = countedSharedWeight(gpu);
   const gate = Promise.withResolvers<void>();
@@ -359,7 +361,7 @@ Deno.test("構築の途中（重みの供給待ち）で device が失われた�
   assertEquals(borrowed(), 0, "落ちた構築が借用を返していない");
 });
 
-Deno.test("構築の後に device が失われたら、出力 0 本の run / enqueue も成功に化けず GpuDeviceLostError で reject する", async () => {
+test("構築の後に device が失われたら、出力 0 本の run / enqueue も成功に化けず GpuDeviceLostError で reject する", async () => {
   // 出力 0 本のグラフは読み戻しを持たないので、本体の失敗判定（errorScope・完了待ち）だけでは
   // 消失を拾える保証が無い。受付の同期区間で device を見る。
   const destroyed = fakeGpu();
@@ -396,7 +398,7 @@ Deno.test("構築の後に device が失われたら、出力 0 本の run / enq
   await onLost.dispose();
 });
 
-Deno.test("構築は入口時点の options で決まり、構築中の書き換えは検査を経ない state を作らない", async () => {
+test("構築は入口時点の options で決まり、構築中の書き換えは検査を経ない state を作らない", async () => {
   // 組合せの検査（ADR 0105 決定 1）は入口で 1 回だけ走る。構築は await を跨ぐので、待つ前に
   // 呼び手が options を書き換えると、検査では拒否される組合せ（sequential + packedStaticQuantize）の
   // state ができていた。submitPolicy は中身の書き換えも同じ形で効いていた。
@@ -429,7 +431,7 @@ Deno.test("構築は入口時点の options で決まり、構築中の書き換
   );
 });
 
-Deno.test("attentionRowBlockMaxBytes は入口の写しから Session の状態へ届き、検査の後の書き換えは届かない", async () => {
+test("attentionRowBlockMaxBytes は入口の写しから Session の状態へ届き、検査の後の書き換えは届かない", async () => {
   // 予算は行ブロックの枚数を決める Session 単位の不変値（ADR 0124）。導出済み計画のキーは予算を含まない
   // ので、構築の後で値が動くと同じキーが別の枚数の計画を指す。
   const options: { -readonly [K in keyof SessionOptions]: SessionOptions[K] } = {
@@ -444,7 +446,7 @@ Deno.test("attentionRowBlockMaxBytes は入口の写しから Session の状態�
   assertEquals(plain.attentionRowBlockMaxBytes, undefined);
 });
 
-Deno.test("構築の入口の写しは非列挙・prototype 由来の欄も読み、写す前と同じ値を拒否する", async () => {
+test("構築の入口の写しは非列挙・prototype 由来の欄も読み、写す前と同じ値を拒否する", async () => {
   // 写しを spread で取ると自前の列挙可能な欄しか写らず、非列挙・継承の欄が黙って既定に化けて通る。
   const nonEnumerable: SessionOptions = {};
   Object.defineProperty(nonEnumerable, "stateAttentionReduce", { value: "bogus" });

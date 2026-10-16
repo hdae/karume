@@ -22,7 +22,12 @@
  */
 
 import type { Tolerance } from "../../src/reference/allclose.ts";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
+import { isNotFound, mkdirSync, writeTextFile, writeTextFileSync } from "@karume/test-support/fs";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
+
+const execFile = promisify(execFileCallback);
 
 /** 結果の根（`outputs/verify/`）。 */
 const DEFAULT_ROOT = new URL("../../../../outputs/verify/", import.meta.url);
@@ -141,15 +146,14 @@ type Checkout = { readonly sha: string; readonly dirty: boolean };
  */
 const git = async (...args: string[]): Promise<string | undefined> => {
   try {
-    const { success, stdout } = await new Deno.Command("git", {
-      args,
-      cwd: REPO_ROOT,
-      stdout: "piped",
-      stderr: "null",
-    }).output();
-    return success ? new TextDecoder().decode(stdout) : undefined;
+    const { stdout } = await execFile("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
+    return stdout;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
+    if (isNotFound(cause)) return undefined;
+    // Non-zero exit (e.g. not a git checkout) rejects with the numeric exit code.
+    if (typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "number") {
+      return undefined;
+    }
     throw cause;
   }
 };
@@ -212,10 +216,10 @@ export const openResults = (
   const ensureDir = (): URL => {
     const dir = directory();
     if (!created) {
-      Deno.mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true });
       // 「走行中」を先に置く（`cases` 空・この走行の startedAt）。記録の前に例外で抜けても、
       // 同じ席に居る前回の決着が今回の実物と組で読まれることが無くなる。
-      Deno.writeTextFileSync(new URL("results.json", dir), documentText());
+      writeTextFileSync(new URL("results.json", dir), documentText());
       created = true;
     }
     return dir;
@@ -248,7 +252,7 @@ export const openResults = (
     record: async (entry: ResultEntry): Promise<void> => {
       const dir = ensureDir();
       cases.push(entry);
-      await Deno.writeTextFile(new URL("results.json", dir), documentText());
+      await writeTextFile(new URL("results.json", dir), documentText());
     },
   };
 };

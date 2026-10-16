@@ -12,13 +12,14 @@
  * に置く。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu } from "@karume/runtime";
 import { openerOf, parts, single } from "./helpers/asset-container-fixture.ts";
 import { LINEAR_PROBE_Y, runLinearProbe } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-Deno.test({
+test({
   name: "assetComponentOpener: 分割形の Record から Session が張れる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -45,7 +46,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "assetComponentOpener: 単一形の 1 本からも Session が張れる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

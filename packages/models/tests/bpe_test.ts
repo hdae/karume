@@ -5,6 +5,7 @@
 // `tokenizers` と一致するか）はファミリ側（gemma4_tokenizer_test.ts）の担当で、ここは
 // **規則そのもの**と**計算量**を落とせる形に置く。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { bpeEncode, type BpeModel, createBpeModel } from "../src/text/bpe.ts";
 import { detokenize, StreamingDetokenizer } from "../src/text/detokenizer.ts";
@@ -38,7 +39,7 @@ const buildModel = (
 const spell = (model: BpeModel, ids: readonly number[]): string[] =>
   ids.map((id) => model.tokenOf.get(id) as string);
 
-Deno.test("資産の門: 通すと沈黙誤値になる形を落とす", async (t) => {
+test("資産の門: 通すと沈黙誤値になる形を落とす", async (t) => {
   await t.step("byteIds が 256 本でないと落ちる", () => {
     assertThrows(
       () => createBpeModel({ vocab: [[0, "a"]], merges: [], byteIds: [0] }),
@@ -85,7 +86,7 @@ Deno.test("資産の門: 通すと沈黙誤値になる形を落とす", async (
   });
 });
 
-Deno.test("併合の順序: rank が最小のものから、同点は左から", async (t) => {
+test("併合の順序: rank が最小のものから、同点は左から", async (t) => {
   await t.step("左から貪欲に取るのではなく rank の小さい対が先に潰れる", () => {
     // ("b","c") が rank 0・("a","b") が rank 1。左から取ると [ab, c] になるが、正本は
     // rank 順なので [a, bc] が正しい。
@@ -117,7 +118,7 @@ Deno.test("併合の順序: rank が最小のものから、同点は左から",
   });
 });
 
-Deno.test("byte_fallback: 語彙に無い文字は UTF-8 バイトへ割れる", async (t) => {
+test("byte_fallback: 語彙に無い文字は UTF-8 バイトへ割れる", async (t) => {
   const model = buildModel(["a"]);
 
   await t.step("多バイト文字は 1 バイト 1 記号になる", () => {
@@ -137,7 +138,7 @@ Deno.test("byte_fallback: 語彙に無い文字は UTF-8 バイトへ割れる",
   });
 });
 
-Deno.test("併合キュー: 長文で計算量が線形に近い（O(n²) の全走査は落ちる）", () => {
+test("併合キュー: 長文で計算量が線形に近い（O(n²) の全走査は落ちる）", () => {
   // 2 のべき乗で倍化する語彙を合成し、日本語 1 文字 65,536 個を 1 断片として食わせる。
   // 併合回数は 65,535 回で、素朴な「全隣接ペアを走査 → 最小 rank を splice」は
   // 併合ごとに記号列を舐めるので 10^9 回規模の探索になる（分単位）。merge queue なら
@@ -193,7 +194,7 @@ const DECODE_TOKENS = new Map<number, string>([
   ...Array.from({ length: 256 }, (_, byte) => [200 + byte, byteToken(byte)] as const),
 ]);
 
-Deno.test("逐次復号: byte run 以外は 1 トークンも溜めない", async (t) => {
+test("逐次復号: byte run 以外は 1 トークンも溜めない", async (t) => {
   await t.step("byte でないトークンは push のたびに確定して出る", () => {
     // `finish()` まで溜めてから返す「偽 streaming」はここで落ちる（ADR 0084 決定 4）。
     const detokenizer = new StreamingDetokenizer(buildSource(DECODE_TOKENS));
@@ -221,7 +222,7 @@ Deno.test("逐次復号: byte run 以外は 1 トークンも溜めない", asyn
   });
 });
 
-Deno.test("逐次復号: byte run の畳み方は正本の String::from_utf8 に合わせる", async (t) => {
+test("逐次復号: byte run の畳み方は正本の String::from_utf8 に合わせる", async (t) => {
   const source = buildSource(DECODE_TOKENS);
 
   await t.step("run 全体が不正なら 1 バイトにつき 1 個の置換文字", () => {
@@ -248,14 +249,14 @@ Deno.test("逐次復号: byte run の畳み方は正本の String::from_utf8 に
   });
 });
 
-Deno.test("逐次復号: skip した特殊トークンは byte run を切らない", () => {
+test("逐次復号: skip した特殊トークンは byte run を切らない", () => {
   // 正本は「id 列 → 綴り列」を作る段で skip し、デコーダ鎖はその後で走る。切ってしまうと
   // 特殊トークンを挟んだだけで文字が置換文字 2 個に化ける。
   const source = buildSource(DECODE_TOKENS, new Set([1]));
   assertEquals(detokenize(source, [200 + 0xe3, 1, 200 + 0x81, 200 + 0x82]), "あ");
 });
 
-Deno.test("逐次復号: 語彙に無い id は落とす（正本は黙って読み飛ばす）", () => {
+test("逐次復号: 語彙に無い id は落とす（正本は黙って読み飛ばす）", () => {
   assertThrows(
     () => detokenize(buildSource(DECODE_TOKENS), [999]),
     Error,

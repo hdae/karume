@@ -12,6 +12,7 @@
 //  - 1 軸だけ壊す → その軸名・期待値・実測値を含む文言で reject
 // の対偶で、門そのものと門の位置（GPU を取りに行く前）を同時に縛る。GPU へは 1 度も触らない。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { admitIrodori, assetOpener } from "../src/irodori/admission.ts";
@@ -318,13 +319,13 @@ const breakOutput = (
   };
 };
 
-Deno.test("admitIrodori: 突合を全て満たすグラフは資産の段まで進む（門の位置の対偶）", async () => {
+test("admitIrodori: 突合を全て満たすグラフは資産の段まで進む（門の位置の対偶）", async () => {
   // `tokenizer` を渡していないので、突合を全部通れば落ちるのはその 1 本。ここが
   // 「グラフ入力 '…' の軸 …」で落ちるなら、正常系のはずの宣言が門に引っかかっている。
   await assertRejects(() => build(), Error, "irodori: 資産 'tokenizer' が無い");
 });
 
-Deno.test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を出して落ちる（12 点）", async () => {
+test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を出して落ちる（12 点）", async () => {
   // 各ケースは 1 軸だけを現行値の近傍へずらす（shape の rank は保つ）— rank を変えると
   // 別の門に当たって「この軸の突合が生きている」ことを示せない。
   const cases: readonly {
@@ -416,7 +417,7 @@ Deno.test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を�
   assertEquals(cases.length, 12);
 });
 
-Deno.test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見る", async () => {
+test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見る", async () => {
   // 入力幅（latentDim）。
   const width = await assertRejects(
     () => build(breakInput("codec_decoder", "latent", 2, 31)),
@@ -437,7 +438,7 @@ Deno.test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に
   assertStringIncludes(scale.message, "期待は '1920S'");
 });
 
-Deno.test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 幅を別々に見る", async () => {
+test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 幅を別々に見る", async () => {
   const frame = await assertRejects(
     () => build(breakInput("codec_encoder", "wav", 2, 1919)),
     Error,
@@ -453,7 +454,7 @@ Deno.test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 
   assertStringIncludes(latent.message, "グラフ出力 'latent' の軸 2 が 31");
 });
 
-Deno.test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経路に依らず同じ文言）", async () => {
+test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経路に依らず同じ文言）", async () => {
   // 常駐経路は毎 enqueue この記号名で S を束縛する。実行時に置くと ①重みを落とした後にしか
   // 落ちない ②ホスト経路（`gpuTiming` 有効 device / `onEvent` 購読）では走らない、の 2 つが
   // 起きる（同じ配布形が観測経路ごとに違う文言で落ちる）。
@@ -481,7 +482,7 @@ Deno.test("admitIrodori: dit の記号次元が 1 本でなければ落とす（
 // 常駐入力は runtime 側で**大きさしか**検査されない（`RunInput` の doc）。形や dtype の食い違いは
 // バイト数が合う限り沈黙で通るので、admission の門がここでの唯一の検出器になる。
 
-Deno.test("admitIrodori: 実物と同じ宣言から K / V 24 本の名前と常駐バイト数を導く（178 MiB）", async () => {
+test("admitIrodori: 実物と同じ宣言から K / V 24 本の名前と常駐バイト数を導く（178 MiB）", async () => {
   // 資産の段（tokenizer）より前で止まる admission を直接呼ぶ — 導出値は公開面から見えない。
   const admitted = await admitIrodori(
     parseManifest(manifestText()),
@@ -500,7 +501,7 @@ Deno.test("admitIrodori: 実物と同じ宣言から K / V 24 本の名前と常
   );
 });
 
-Deno.test("admitIrodori: dit_context が記号次元を持てば落とす（常駐テンソルは確保時に大きさが要る）", async () => {
+test("admitIrodori: dit_context が記号次元を持てば落とす（常駐テンソルは確保時に大きさが要る）", async () => {
   const spec = contextSpec();
   const symbolic: ContextSpec = {
     ...spec,
@@ -514,7 +515,7 @@ Deno.test("admitIrodori: dit_context が記号次元を持てば落とす（常�
   );
 });
 
-Deno.test("admitIrodori: dit_context の出力が K / V の対にならなければ落とす", async () => {
+test("admitIrodori: dit_context の出力が K / V の対にならなければ落とす", async () => {
   const spec = contextSpec();
   // 最後の V を落とした 23 本（dit 側も同じ 23 本にそろえ、名前の門より先にここで落ちることを見る）。
   const odd = spec.outputs.slice(0, -1);
@@ -530,7 +531,7 @@ Deno.test("admitIrodori: dit_context の出力が K / V の対にならなけれ
   );
 });
 
-Deno.test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の出力と違えば両側の差分を出して落ちる", async () => {
+test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の出力と違えば両側の差分を出して落ちる", async () => {
   const dit = graphSpecs().dit;
   // dit 側だけ V を 1 本取り違える（K / V の対の取り違え = 条件側の配線ずれ）。
   const renamed = await assertRejects(
@@ -567,7 +568,7 @@ Deno.test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_contex
   assertStringIncludes(legacy.message, "context_k_0");
 });
 
-Deno.test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype が違えば落とす（大きさが同じでも）", async () => {
+test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype が違えば落とす（大きさが同じでも）", async () => {
   const spec = contextSpec();
   // head と head_dim を入れ替えた形（要素数は同じ = 常駐入力の大きさ検査は通ってしまう形）。
   const transposed: ContextSpec = {
@@ -599,7 +600,7 @@ Deno.test("admitIrodori: dit_context の出力と dit の同名入力の形・dt
   );
 });
 
-Deno.test("fromPretrained: components で差した dit の次元が違えば重みを取る前に落ちる（差し替え席が配線されている）", async () => {
+test("fromPretrained: components で差した dit の次元が違えば重みを取る前に落ちる（差し替え席が配線されている）", async () => {
   // 差し替え先の dit だけ latentDim を 64 に焼く（元リポの 9 本は突合を全て通る）。
   // 差し替え席を配線し忘れると、元リポのまま突合を通って資産の取得へ進み、別の文言で落ちる。
   const specs = graphSpecs();
@@ -675,7 +676,7 @@ const optionsWith = (key: string, value: unknown): IrodoriPipelineOptions => {
   return options;
 };
 
-Deno.test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突合より前に ModelInputError", async () => {
+test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突合より前に ModelInputError", async () => {
   // dit の宣言を 1 軸壊してある — 合成がグラフ突合より後ろなら、突合の文言で落ちる。
   const manifest = parseManifest(manifestText());
   const broken = await assetsWith(breakInput("dit", "x_t", 2, CONFIG.latentDim + 1));
@@ -697,7 +698,7 @@ Deno.test("admitIrodori: 不正な明示値と attention 系のノブはグラ�
   );
 });
 
-Deno.test("admitIrodori: 受理される linearCompute の明示は突合を通って資産の段まで進む", async () => {
+test("admitIrodori: 受理される linearCompute の明示は突合を通って資産の段まで進む", async () => {
   await assertRejects(
     async () =>
       await IrodoriPipeline.fromAssets({
@@ -709,7 +710,7 @@ Deno.test("admitIrodori: 受理される linearCompute の明示は突合を通�
   );
 });
 
-Deno.test("admitIrodori: 明示の f16 を共有 GPU が持たなければ GPU 取得前に名指しで落ちる", async () => {
+test("admitIrodori: 明示の f16 を共有 GPU が持たなければ GPU 取得前に名指しで落ちる", async () => {
   // quant 宣言は shader-f16 を要求しない。要求は実効設定から導く（黙って f32 へ落とさず、
   // 重みを上げた後の Session 構築まで遅らせもしない）。
   await assertRejects(

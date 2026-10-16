@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { samplerDistribution } from "../src/generation/sampler.ts";
 
@@ -30,7 +31,7 @@ const assertNucleus = (logits: Float32Array<ArrayBuffer>, topP: number): void =>
   assertEquals(new Uint32Array(logits.buffer, logits.byteOffset, logits.length), before);
 };
 
-Deno.test("top-p 単独指定の全語彙順位", async (t) => {
+test("top-p 単独指定の全語彙順位", async (t) => {
   await t.step("正負の同値、符号付きゼロ、subnormal、禁止 token を比較ソートと同じ順に残す", () => {
     const bits = Uint32Array.of(
       0x7fc00000, // 入力 view の外の NaN を読まない。

@@ -1,7 +1,8 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { closeableGenerator } from "../src/concurrency/closeable-generator.ts";
 
-Deno.test("未開始の終了は本体を実行せず、一度だけ通知する", async () => {
+test("未開始の終了は本体を実行せず、一度だけ通知する", async () => {
   for (const method of ["return", "throw"] as const) {
     let entered = 0;
     let finalized = 0;
@@ -26,7 +27,7 @@ Deno.test("未開始の終了は本体を実行せず、一度だけ通知する
   }
 });
 
-Deno.test("開始直後の return は実行中の next を追い越さず本体の finally を通す", async () => {
+test("開始直後の return は実行中の next を追い越さず本体の finally を通す", async () => {
   const ready = Promise.withResolvers<void>();
   let finalized = 0;
   let unstarted = 0;
@@ -51,7 +52,7 @@ Deno.test("開始直後の return は実行中の next を追い越さず本体�
   assertEquals({ finalized, unstarted }, { finalized: 1, unstarted: 0 });
 });
 
-Deno.test("未開始 return の終了値が拒否されても所有者を解放し、次の終了は成功する", async () => {
+test("未開始 return の終了値が拒否されても所有者を解放し、次の終了は成功する", async () => {
   const value = Promise.withResolvers<void>();
   const cleanup = Promise.withResolvers<void>();
   const error = new Error("return value failed");

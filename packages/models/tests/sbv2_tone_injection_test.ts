@@ -7,6 +7,8 @@
 // 変換と門は karume の純関数なので辞書なしで走る。呼び手側の解析（`@hdae/yomi`）を通した
 // 経路は、実辞書があるときだけ走らせる（0.6.0 以降、解析はパッケージの外側にある）。
 
+import { isNotFound, readDirSync, readFileSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { analyzeWithWords, JtdDictionary, OverlayDictionary, type OverlayEntry } from "@hdae/yomi";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";
@@ -81,7 +83,7 @@ const karumePhrases = (accentNucleus: number, punctuations: string[] = []): Sbv2
 
 const tonesOf = (utterance: Sbv2Utterance): number[] => utterance.moras.map((mora) => mora.tone);
 
-Deno.test("toSbv2Utterance: 核をモーラごとの 2 値トーンへ展開する（平板 / 頭高 / 中高 / 尾高）", () => {
+test("toSbv2Utterance: 核をモーラごとの 2 値トーンへ展開する（平板 / 頭高 / 中高 / 尾高）", () => {
   // 上流 SBV2 の g2p と同じ規則。1 段でもずれると「別のアクセントで合成される」沈黙誤値。
   assertEquals(tonesOf(toSbv2Utterance(karumePhrases(0))), [0, 1, 1], "平板");
   assertEquals(tonesOf(toSbv2Utterance(karumePhrases(1))), [1, 0, 0], "頭高");
@@ -89,7 +91,7 @@ Deno.test("toSbv2Utterance: 核をモーラごとの 2 値トーンへ展開す�
   assertEquals(tonesOf(toSbv2Utterance(karumePhrases(3))), [0, 1, 1], "尾高");
 });
 
-Deno.test("toSbv2Utterance: 核の上端はモーラ数へ丸める（往復不能を作らない）", () => {
+test("toSbv2Utterance: 核の上端はモーラ数へ丸める（往復不能を作らない）", () => {
   // 範囲外核は辞書差・修正辞書由来で普通に出る。落とすと「解析どおりの発話が通らない」に
   // なるので、上端だけは丸める（丸めてもトーン列は変わらない = 音は同じ）。
   assertEquals(
@@ -98,13 +100,13 @@ Deno.test("toSbv2Utterance: 核の上端はモーラ数へ丸める（往復不�
   );
 });
 
-Deno.test("toSbv2Utterance: 負の核・非整数の核は落とす（下端は丸めない）", () => {
+test("toSbv2Utterance: 負の核・非整数の核は落とす（下端は丸めない）", () => {
   // 黙って平板へ倒すと、指定したものと別のアクセントで合成される。
   assertThrows(() => toSbv2Utterance(karumePhrases(-1)), Sbv2InputError, "accentNucleus = -1");
   assertThrows(() => toSbv2Utterance(karumePhrases(1.5)), Sbv2InputError, "accentNucleus = 1.5");
 });
 
-Deno.test("toSbv2Utterance: 句の記号は句末尾モーラへ、句より前の記号は先頭欄へ", () => {
+test("toSbv2Utterance: 句の記号は句末尾モーラへ、句より前の記号は先頭欄へ", () => {
   const withPunct = toSbv2Utterance(karumePhrases(1, ["."]));
   assertEquals(withPunct.moras[2].punctuations, ["."], "句末尾モーラに付いていない");
   assertEquals(withPunct.moras[0].punctuations, undefined, "無関係なモーラに欄が生えた");
@@ -159,7 +161,7 @@ const twoPhrases = (
   ],
 });
 
-Deno.test("toSbv2Utterance: 核は句ごとに独立して展開される（句 2 が句 1 の核に汚されない）", () => {
+test("toSbv2Utterance: 核は句ごとに独立して展開される（句 2 が句 1 の核に汚されない）", () => {
   // `tones[at]` の `at` を発話全体の添字にしてしまう退行は、1 句のテストでは一度も踏めない。
   assertEquals(tonesOf(toSbv2Utterance(twoPhrases([1, 0]))), [1, 0, 0, 0, 1]);
   assertEquals(tonesOf(toSbv2Utterance(twoPhrases([0, 0]))), [0, 1, 1, 0, 1]);
@@ -173,7 +175,7 @@ Deno.test("toSbv2Utterance: 核は句ごとに独立して展開される（句 
   assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
 });
 
-Deno.test("toSbv2Utterance: 記号は**その句の**末尾モーラへ付く（中間句の記号が末尾句へ流れない）", () => {
+test("toSbv2Utterance: 記号は**その句の**末尾モーラへ付く（中間句の記号が末尾句へ流れない）", () => {
   const utterance = toSbv2Utterance(twoPhrases([1, 0], [[","], ["."]]));
   assertEquals(utterance.moras.length, 5, "句を跨いでモーラが落ちている");
   assertEquals(utterance.moras[2].punctuations, [","], "中間句の記号が句 1 の末尾モーラに無い");
@@ -188,7 +190,7 @@ Deno.test("toSbv2Utterance: 記号は**その句の**末尾モーラへ付く（
   assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
 });
 
-Deno.test("toSbv2Utterance: モーラを持たない句の記号は直前モーラへ寄る（先頭なら先頭欄へ）", () => {
+test("toSbv2Utterance: モーラを持たない句の記号は直前モーラへ寄る（先頭なら先頭欄へ）", () => {
   // `utterance.ts` の doc が明示している 2 分岐。1 句フィクスチャは必ず 3 モーラを持つので、
   // どちらの分岐にも到達しない。
   const emptyPhrase = { moras: [], accentNucleus: 0, punctuations: ["…"] };
@@ -221,7 +223,7 @@ Deno.test("toSbv2Utterance: モーラを持たない句の記号は直前モー�
   assertWordPhones(toSbv2PhoneTone(leading, "_").phones, leading.words);
 });
 
-Deno.test("toSbv2Utterance: 促音は音素へ畳む（`Sbv2Mora.vowel` は音素そのもの）", () => {
+test("toSbv2Utterance: 促音は音素へ畳む（`Sbv2Mora.vowel` は音素そのもの）", () => {
   // 上流の解析は促音を "cl" で表すが、語アライメントの音素は "q"。畳まずに運ぶと、
   // 音素列と words の突合がその 1 個だけで割れる（= 促音を含む入力が全部落ちる）。
   const utterance = toSbv2Utterance({
@@ -245,7 +247,7 @@ Deno.test("toSbv2Utterance: 促音は音素へ畳む（`Sbv2Mora.vowel` は音�
   assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
 });
 
-Deno.test("toSbv2Utterance: 子音なしモーラは consonant 欄そのものを出さない（撥音・促音・母音単独）", () => {
+test("toSbv2Utterance: 子音なしモーラは consonant 欄そのものを出さない（撥音・促音・母音単独）", () => {
   // `Sbv2Mora.consonant` は optional property であって `string | undefined` ではない。
   // 欄が生えると「渡せるのに効かない欄を作らない」責務が破れる（撥音 N は通常経路）。
   const utterance = toSbv2Utterance({
@@ -270,7 +272,7 @@ Deno.test("toSbv2Utterance: 子音なしモーラは consonant 欄そのもの�
 
 // ---- 音素・トーン列の梱包（辞書なし）----------------------------------------
 
-Deno.test("toSbv2PhoneTone: 両端 PAD・記号 tone 0・モーラ内は同一トーン", () => {
+test("toSbv2PhoneTone: 両端 PAD・記号 tone 0・モーラ内は同一トーン", () => {
   const utterance = toSbv2Utterance(karumePhrases(1, ["."]));
   const { phones, tones } = toSbv2PhoneTone(utterance, "_");
   assertEquals(phones, ["_", "k", "a", "r", "u", "m", "e", ".", "_"]);
@@ -278,7 +280,7 @@ Deno.test("toSbv2PhoneTone: 両端 PAD・記号 tone 0・モーラ内は同一�
   assertEquals(tones, [0, 1, 1, 0, 0, 0, 0, 0, 0]);
 });
 
-Deno.test("toSbv2PhoneTone: 0/1 以外の tone は落とす（JS からの呼び出しを型で守れない）", () => {
+test("toSbv2PhoneTone: 0/1 以外の tone は落とす（JS からの呼び出しを型で守れない）", () => {
   // 2 も -1 も toneStart を足せば記号表の範囲に収まる（`phonesTonesToModelIds` は素通り）。
   const utterance = toSbv2Utterance(karumePhrases(1));
   const broken = (tone: number): Sbv2Utterance => ({
@@ -292,7 +294,7 @@ Deno.test("toSbv2PhoneTone: 0/1 以外の tone は落とす（JS からの呼び
 
 // ---- 合成入口の門（moras と words の突合）-----------------------------------
 
-Deno.test("assertWordPhones: 長さが合っていても内容が違えば落とす", () => {
+test("assertWordPhones: 長さが合っていても内容が違えば落とす", () => {
   const words: Sbv2Word[] = [{ surface: TEXT, phones: ["k", "a", "r", "u", "m", "e"] }];
   const phones = ["_", "k", "a", "r", "u", "m", "e", "_"];
   assertWordPhones(phones, words);
@@ -308,7 +310,7 @@ Deno.test("assertWordPhones: 長さが合っていても内容が違えば落と
   );
 });
 
-Deno.test("tone の直編集は合成入力の tone ID まで届く（音素側は動かない）", () => {
+test("tone の直編集は合成入力の tone ID まで届く（音素側は動かない）", () => {
   const rules = testRules();
   const tokenizer = textTokenizer();
   const base = toSbv2Utterance(karumePhrases(1));
@@ -337,7 +339,7 @@ Deno.test("tone の直編集は合成入力の tone ID まで届く（音素側�
   }
 });
 
-Deno.test("音素を変える編集・記号の増減・words の取り違えは入口で落ちる", () => {
+test("音素を変える編集・記号の増減・words の取り違えは入口で落ちる", () => {
   const rules = testRules();
   const tokenizer = textTokenizer();
   const base = toSbv2Utterance(karumePhrases(1));
@@ -402,12 +404,12 @@ const DICT_DIR = new URL("../../../outputs/misc/yomi/", import.meta.url);
 const dictUrl = ((): URL | undefined => {
   let found: string | undefined;
   try {
-    for (const entry of Deno.readDirSync(DICT_DIR)) {
+    for (const entry of readDirSync(DICT_DIR)) {
       if (!entry.isFile || !entry.name.endsWith(".jtd")) continue;
       if (found === undefined || entry.name < found) found = entry.name;
     }
   } catch (cause) {
-    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
+    if (!(isNotFound(cause))) throw cause;
   }
   return found === undefined ? undefined : new URL(found, DICT_DIR);
 })();
@@ -422,7 +424,7 @@ if (dictUrl === undefined) {
 /** 19MB を読むのは資産があるときだけ（この節の全テストが同じ 1 本を使い回す）。 */
 const dictionary = dictUrl === undefined
   ? undefined
-  : JtdDictionary.load(Deno.readFileSync(dictUrl).buffer);
+  : JtdDictionary.load(readFileSync(dictUrl).buffer);
 
 /** ignore の外で undefined を潰す（`ignore: !available` が守るので実際には来ない）。 */
 const jtd = (): JtdDictionary => {
@@ -436,7 +438,7 @@ const entry = (reading: string, accentType: number): OverlayEntry => ({
   accentType,
 });
 
-Deno.test({
+test({
   name: "解析器の返り値はそのまま発話になる（修正辞書は呼び手側で効かせる）",
   ignore: dictUrl === undefined,
   fn: () => {
@@ -486,7 +488,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "解析どおりの発話は門を素通りし、tone だけを直した発話も通る",
   ignore: dictUrl === undefined,
   fn: () => {

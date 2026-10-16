@@ -9,7 +9,7 @@
 //   `Number.MAX_SAFE_INTEGER` を通し、その外を落とす）を値で固定する。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { ModelInputError } from "../src/errors.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
 import { Sbv2InputError } from "../src/sbv2/errors.ts";

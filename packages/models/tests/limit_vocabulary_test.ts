@@ -21,6 +21,7 @@
  * と同じ流儀。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import type { RequiredLimitName } from "@karume/hub";
 import { REQUIRED_LIMIT_KEYS } from "../../runtime/src/gpu/device.ts";
@@ -40,7 +41,7 @@ const HUB_LIMIT_NAMES = {
   maxComputeWorkgroupsPerDimension: true,
 } as const satisfies Record<RequiredLimitName, true>;
 
-Deno.test("requiredLimits の limit 名は hub の allowlist と runtime の要求キーで完全一致する", () => {
+test("requiredLimits の limit 名は hub の allowlist と runtime の要求キーで完全一致する", () => {
   assertEquals(
     Object.keys(HUB_LIMIT_NAMES).toSorted(),
     [...REQUIRED_LIMIT_KEYS].toSorted(),

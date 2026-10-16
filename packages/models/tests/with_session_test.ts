@@ -9,7 +9,7 @@
  */
 
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import type { ModelComponent } from "../src/hub/components.ts";
 import { withSession } from "../src/session/with-session.ts";

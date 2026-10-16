@@ -7,6 +7,7 @@
  * のみ — 横断不変条件）。
  */
 
+import { makeTempDir, readDir, remove, symlink, writeTextFile } from "@karume/test-support/fs";
 import type { DistributionSource } from "@karume/hub";
 import { denoDirectory } from "@karume/hub/deno";
 
@@ -19,17 +20,17 @@ export const withManifestOverride = async <T>(
   manifest: unknown,
   body: (source: DistributionSource) => Promise<T>,
 ): Promise<T> => {
-  const temporary = await Deno.makeTempDir({ prefix: "karume-ab-manifest-" });
+  const temporary = await makeTempDir({ prefix: "karume-ab-manifest-" });
   try {
-    for await (const entry of Deno.readDir(root)) {
+    for await (const entry of readDir(root)) {
       if (entry.name === "karume.json") continue;
-      await Deno.symlink(new URL(entry.name, root), `${temporary}/${entry.name}`);
+      await symlink(new URL(entry.name, root), `${temporary}/${entry.name}`);
     }
-    await Deno.writeTextFile(`${temporary}/karume.json`, JSON.stringify(manifest), {
+    await writeTextFile(`${temporary}/karume.json`, JSON.stringify(manifest), {
       createNew: true,
     });
     return await body(denoDirectory(temporary));
   } finally {
-    await Deno.remove(temporary, { recursive: true });
+    await remove(temporary, { recursive: true });
   }
 };

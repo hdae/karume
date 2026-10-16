@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, createSessionFromContainer } from "../mod.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
@@ -19,7 +20,7 @@ const graph = (): DeclarationJson => ({
   }],
 });
 for (const fail of [false, true]) {
-  Deno.test({
+  test({
     name: `レシピ並列準備: ${fail ? "失敗時も全件を待つ" : "完了順が逆でも依存順に実行する"}`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {

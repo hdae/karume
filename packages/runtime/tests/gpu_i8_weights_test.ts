@@ -14,6 +14,7 @@
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。丸め前の f32 で比較すると
 // 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
 import { ContainerFormatError } from "../src/format/container/header.ts";
@@ -106,7 +107,7 @@ const mergedI8 = (
 // CPU 側の展開（ホスト鏡像の仕様）
 // ---------------------------------------------------------------------------
 
-Deno.test("decodeI8: 符号付き 8bit を per-channel scale で展開する（keepdim broadcast）", () => {
+test("decodeI8: 符号付き 8bit を per-channel scale で展開する（keepdim broadcast）", () => {
   // [2,3] の重み。チャネル軸 0 の scale [2,1] が行ごとに掛かる。
   const bytes = i8BytesFrom([127, -128, 0, 1, -1, 64]);
   const scale = Float32Array.from([0.5, 0.25]);
@@ -126,7 +127,7 @@ Deno.test("decodeI8: 符号付き 8bit を per-channel scale で展開する（k
   );
 });
 
-Deno.test("decodeI8: rank 3 以上でも軸ごとに正しく broadcast する", () => {
+test("decodeI8: rank 3 以上でも軸ごとに正しく broadcast する", () => {
   // [2,3,2]（conv1d の [Cout,Cin,K] 形）。チャネル軸 0 = 出力チャネル。
   const q = [1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6];
   const bytes = i8BytesFrom(q);
@@ -141,7 +142,7 @@ Deno.test("decodeI8: rank 3 以上でも軸ごとに正しく broadcast する",
   assertEquals(middle, [1, 2, 6, 8, 20, 24, -1, -2, -6, -8, -20, -24]);
 });
 
-Deno.test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
+test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
   // 0.1 は f32 で丸められる値。q·s は f64 で厳密（7bit × 24bit）なので、f32 へ 1 度だけ
   // 丸めた結果が GPU の f32 乗算の正しい丸めと一致する。
   const scale = Float32Array.from([0.1]);
@@ -152,7 +153,7 @@ Deno.test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算
   }
 });
 
-Deno.test("decodeI8: broadcast できない scale と要素数不一致を拒否する", () => {
+test("decodeI8: broadcast できない scale と要素数不一致を拒否する", () => {
   const bytes = i8BytesFrom([1, 2, 3, 4, 5, 6]);
   assertThrows(
     () => decodeI8(bytes, [2, 3], Float32Array.from([1, 2]), [2]),
@@ -172,7 +173,7 @@ Deno.test("decodeI8: broadcast できない scale と要素数不一致を拒否
   );
 });
 
-Deno.test("alignI8Payload: 4 バイト境界までゼロ詰めし、整列済みはコピーしない", () => {
+test("alignI8Payload: 4 バイト境界までゼロ詰めし、整列済みはコピーしない", () => {
   const aligned = i8BytesFrom([1, 2, 3, 4]);
   assertEquals(alignI8Payload(aligned), aligned);
   assert(alignI8Payload(aligned) === aligned, "整列済みは同じ view を返す");
@@ -188,7 +189,7 @@ Deno.test("alignI8Payload: 4 バイト境界までゼロ詰めし、整列済み
 // 適格判定（f16 と共用）とチャネル軸（GPU 非依存）
 // ---------------------------------------------------------------------------
 
-Deno.test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設していない）", () => {
+test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設していない）", () => {
   const eligible = (declaration: DeclarationJson): readonly string[] =>
     [...eligibleCompressedInitializers(mergedI8(declaration))].sort();
   assertEquals(eligible(linearDeclaration()), ["w"]);
@@ -203,14 +204,14 @@ Deno.test("i8 の適格判定は f16 と同じ 1 本の判定を通る（新設�
   );
 });
 
-Deno.test("graph 出力になった i8 initializer も同じ 1 本の判定で適格外", () => {
+test("graph 出力になった i8 initializer も同じ 1 本の判定で適格外", () => {
   // MUST: readback は semantic f32（4 バイト / 要素）を仮定して重みバッファから写すので、
   // i8（1 バイト / 要素 + scale）のまま常駐させると copy が実バッファをはみ出す。
   const eligible = eligibleCompressedInitializers(mergedI8(linearDeclaration([], {}, ["w"])));
   assertEquals([...eligible], []);
 });
 
-Deno.test("チャネル軸は消費側 op から決まる（conv_transpose1d だけ 1）", () => {
+test("チャネル軸は消費側 op から決まる（conv_transpose1d だけ 1）", () => {
   const axisOf = (op: string, ins: readonly string[]): number | undefined => {
     const graph = {
       initializers: { w: { storage: { codec: "int8-sym", groupSize: 4, rowAxis: 0 } } },
@@ -229,7 +230,7 @@ Deno.test("チャネル軸は消費側 op から決まる（conv_transpose1d だ
   assertEquals(axisOf("embedding", ["x", "w"]), undefined);
 });
 
-Deno.test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => {
+test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => {
   const graph = {
     initializers: { w: { storage: { codec: "int8-sym", groupSize: 4, rowAxis: 0 } } },
     nodes: [
@@ -247,7 +248,7 @@ Deno.test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => 
 // group 量子化を受理する codec は int4-sym-g だけ（ADR 0069 決定 2）— per-channel codec に
 // 行長と違う groupSize を付けた形は合流層が落とす（group ごとの scale を per-channel として
 // 読む沈黙誤値）。
-Deno.test("per-channel codec に行長と違う groupSize を付けると合流で落とす（ADR 0069）", () => {
+test("per-channel codec に行長と違う groupSize を付けると合流で落とす（ADR 0069）", () => {
   const error = assertThrows(
     () =>
       mergedI8(linearDeclaration(), {
@@ -261,7 +262,7 @@ Deno.test("per-channel codec に行長と違う groupSize を付けると合流�
   assertEquals(error.message.includes("initializer 'w'"), true, error.message);
 });
 
-Deno.test("bf16 は従来どおり capability 不足で fail loudly（i8 の門が開いても変わらない）", () => {
+test("bf16 は従来どおり capability 不足で fail loudly（i8 の門が開いても変わらない）", () => {
   const error = assertThrows(
     () =>
       assertRuntimeSupport(
@@ -414,7 +415,7 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
   },
 ];
 
-Deno.test({
+test({
   name: "w=i8 変種 5 種が CPU 参照（丸め後の重み）と一致する（行長 4 の倍数でない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -487,7 +488,7 @@ Deno.test({
  * MUST: v4 経路でも scale は**成分ごとの f32 乗算**（`vec4 * scalar`）— 縮約の外へ出すと
  * ADR 0019 の「(Σ x·q)·s は CPU 展開とのビット一致を失う」に触れる。
  */
-Deno.test({
+test({
   name: "w=i8 の linear が GEMM タイル境界（v4 / スカラ）で CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -573,7 +574,7 @@ Deno.test({
  * scale は行ごとに違う非 2 冪の値にする（scale を掛け忘れる誤り・行を取り違える誤りの検出器で、
  * 同時に「f32 乗算の丸め 1 回」がホストと一致することの検証になる）。
  */
-Deno.test({
+test({
   name: "GPU の unpack4xI8 と CPU 展開が全 256 値 × 4 レーンでビット一致（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -690,7 +691,7 @@ const poisonedI8Graph = (
 /** 毒値 0xDEADBEEF を f32 として読んだもの（0 でない有限値）。 */
 const POISON = new Float32Array(new Uint32Array([0xDEADBEEF]).buffer)[0];
 
-Deno.test({
+test({
   name: "w=i8 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -800,7 +801,7 @@ Deno.test({
  * MUST: 2 経路の出力を突き合わせる。片方だけを CPU 参照と比べると、両経路が同じだけ
  * ずれている形（例: 展開が誤っていて GPU 側も同じ誤りを持つ）を見逃す。
  */
-Deno.test({
+test({
   name: "混在消費の i8 は CPU 展開へ落ち、適格経路とビット単位で同じ値を出す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -888,7 +889,7 @@ Deno.test({
  * まま常駐していると copy が実バッファ（1 バイト / 要素）をはみ出す。適格判定が
  * `graph.outputs` を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま読める。
  */
-Deno.test({
+test({
   name:
     "graph 出力にした i8 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -948,7 +949,7 @@ Deno.test({
  * bias を i8 で宣言しても**必ず CPU 展開**に落ちる（bias スロットは適格判定に載らない —
  * プロトタイプの降格バグの逆）。
  */
-Deno.test({
+test({
   name: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（scale 込み・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -1039,7 +1040,7 @@ Deno.test({
  * なだけの形（重み `[3,4]` に対する `[1,4]`）はカーネルが `wscale[col]` と読むので沈黙誤値に
  * なる — 消費側 op の軸と突き合わせる admission（`planWeightResidency`）で落ちることを固定する。
  */
-Deno.test("消費側の軸と食い違う rowAxis は admission（prepareContainer）で fail loudly", async () => {
+test("消費側の軸と食い違う rowAxis は admission（prepareContainer）で fail loudly", async () => {
   // 重み [3,4] の軸 1 を行と宣言した形。容器としては整合するが、消費側（linear）の
   // チャネル軸は 0 — 通すとカーネルが別の軸の scale を引く沈黙誤値になる。
   const opened = await openModelBytes(

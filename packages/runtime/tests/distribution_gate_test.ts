@@ -29,6 +29,7 @@
 // この門番自身は資産がある環境では**通る（緑の 1 件として見える）**。ignore にすると
 // 「門番が効いているのか、門番ごと消えているのか」が区別できなくなるため（他の 2 門番と同じ理由）。
 
+import { type DirEntry, isFilesystemLoop, isNotFound, makeTempDirSync, mkdirSync, readDirSync, readTextFile, removeSync, statSync, symlinkSync, writeFileSync, writeTextFileSync } from "@karume/test-support/fs";
 import {
   assert,
   assertEquals,
@@ -37,7 +38,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { parseManifest, resolveSelection } from "@karume/hub";
 
 /**
@@ -46,7 +47,7 @@ import { parseManifest, resolveSelection } from "@karume/hub";
  * MUST: 既定は fail loudly。配布形を持たない作業機や CI で通すには、意図表明としてこの環境変数を
  * 要求する（実重み系列側の opt-out とは別に持つ — 片方だけ持つ機が実在する）。
  */
-const ALLOW_NO_DISTRIBUTION = Deno.env.get("KARUME_ALLOW_NO_DISTRIBUTION") === "1";
+const ALLOW_NO_DISTRIBUTION = process.env.KARUME_ALLOW_NO_DISTRIBUTION === "1";
 
 /** 配布形ミラーを置く根（上記の検査が `karume.json` を読む先と同じ URL の組み立て方）。 */
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
@@ -107,11 +108,11 @@ const distributionRoot = (models: URL, series: string): URL => new URL(`${series
  * 子の stat の異常は {@link isMirrorCandidate} が一覧に残し、per-mirror の test の中で名指しで落とす。
  */
 const discoverDistributions = (models: URL): readonly string[] => {
-  let entries: Deno.DirEntry[];
+  let entries: DirEntry[];
   try {
-    entries = [...Deno.readDirSync(models)];
+    entries = [...readDirSync(models)];
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return [];
+    if (isNotFound(cause)) return [];
     throw cause;
   }
   return entries
@@ -131,7 +132,7 @@ const discoverDistributions = (models: URL): readonly string[] => {
  */
 const isMirrorCandidate = (child: URL): boolean => {
   try {
-    return Deno.statSync(child).isDirectory;
+    return statSync(child).isDirectory;
   } catch {
     return true;
   }
@@ -146,9 +147,9 @@ const isMirrorCandidate = (child: URL): boolean => {
  */
 const manifestPresent = (root: URL): boolean => {
   try {
-    return Deno.statSync(new URL("karume.json", root)).isFile;
+    return statSync(new URL("karume.json", root)).isFile;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
@@ -171,10 +172,10 @@ const manifestKnownAbsent = (root: URL): boolean => {
 /** ファイル長（不在は `undefined`・それ以外の I/O 異常は伝播させる）。 */
 const fileBytes = (url: URL): number | undefined => {
   try {
-    const stat = Deno.statSync(url);
+    const stat = statSync(url);
     return stat.isFile ? stat.size : undefined;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return undefined;
+    if (isNotFound(cause)) return undefined;
     throw cause;
   }
 };
@@ -211,7 +212,7 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
     `models/${series}/ に karume.json が無い。models/ は配布形だけを置く根なので、` +
       "これは焼きかけか残骸のディレクトリ。tools/export-recipes の dist.py で作り直すか、取り除くこと。",
   );
-  const manifest = parseManifest(await Deno.readTextFile(new URL("karume.json", root)));
+  const manifest = parseManifest(await readTextFile(new URL("karume.json", root)));
   // parse 自身も major を見るが、`karume/5` を**名指しで**断言しておく — hub が受ける major を
   // 増やした日に、この門番が「旧 major のミラーを据えたまま」を素通しするのを防ぐ。
   assertEquals(manifest.format, MANIFEST_FORMAT, `${series}: manifest の format`);
@@ -243,7 +244,7 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
   );
 };
 
-Deno.test({
+test({
   name: "配布門番: 配布形ミラーが欠けた全 SKIP は明示 FAIL（ADR 0005）",
   // opt-out は「配布形ミラー無しを承知で通す」意図表明のときだけ。既定では ignore しない。
   ignore: ALLOW_NO_DISTRIBUTION,
@@ -252,7 +253,7 @@ Deno.test({
 
 for (const series of discoverDistributions(MODELS_ROOT)) {
   const root = distributionRoot(MODELS_ROOT, series);
-  Deno.test({
+  test({
     name:
       `配布門番: ${series} の manifest が hub の parser を通り（karume/5）、既定 quant の part が宣言どおり在る`,
     // 名簿にあるミラーの不在は上の 1 本が名指しで落とす（同じ壊れで 2 本赤くしても読み手の仕事は
@@ -267,11 +268,11 @@ for (const series of discoverDistributions(MODELS_ROOT)) {
 
 /** 一時ディレクトリを根として `run` を引き、後始末する。 */
 const withTemporaryRoot = async (run: (root: URL) => Promise<void> | void): Promise<void> => {
-  const root = new URL(`file://${Deno.makeTempDirSync({ prefix: "karume-distribution-" })}/`);
+  const root = new URL(`file://${makeTempDirSync({ prefix: "karume-distribution-" })}/`);
   try {
     await run(root);
   } finally {
-    Deno.removeSync(root, { recursive: true });
+    removeSync(root, { recursive: true });
   }
 };
 
@@ -280,8 +281,8 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
   const arrangeAll = (models: URL): void => {
     for (const series of DISTRIBUTIONS) {
       const root = distributionRoot(models, series);
-      Deno.mkdirSync(root, { recursive: true });
-      Deno.writeTextFileSync(new URL("karume.json", root), "{}");
+      mkdirSync(root, { recursive: true });
+      writeTextFileSync(new URL("karume.json", root), "{}");
     }
   };
 
@@ -297,13 +298,13 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
       arrangeAll(models);
       for (const series of DISTRIBUTIONS) {
         const manifest = new URL("karume.json", distributionRoot(models, series));
-        Deno.removeSync(manifest);
+        removeSync(manifest);
         const error = assertThrows(
           () => assertNoDistributionMissing(models, DISTRIBUTIONS),
           AssertionError,
         );
         assertStringIncludes(error.message, `無い系列がある: ${series}。`);
-        Deno.writeTextFileSync(manifest, "{}");
+        writeTextFileSync(manifest, "{}");
       }
     });
   });
@@ -312,8 +313,8 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
     await withTemporaryRoot((models) => {
       arrangeAll(models);
       const manifest = new URL("karume.json", distributionRoot(models, "karume-lucida"));
-      Deno.removeSync(manifest);
-      Deno.mkdirSync(manifest);
+      removeSync(manifest);
+      mkdirSync(manifest);
       const error = assertThrows(
         () => assertNoDistributionMissing(models, DISTRIBUTIONS),
         AssertionError,
@@ -327,9 +328,9 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
   it("子ディレクトリを名前順に全て拾い、dist の作業席とファイルは拾わない", async () => {
     await withTemporaryRoot((models) => {
       for (const name of ["karume-b", "karume-a", "karume-a.staging", "karume-b.old"]) {
-        Deno.mkdirSync(new URL(`${name}/`, models));
+        mkdirSync(new URL(`${name}/`, models));
       }
-      Deno.writeTextFileSync(new URL("README.md", models), "");
+      writeTextFileSync(new URL("README.md", models), "");
       assertEquals(discoverDistributions(models), ["karume-a", "karume-b"]);
     });
   });
@@ -338,7 +339,7 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
     await withTemporaryRoot((models) => {
       const unlisted = "karume-vowel-detector";
       assert(!REQUIRED.has(unlisted), "被験体の前提: 名簿に無い名前");
-      Deno.mkdirSync(new URL(`${unlisted}/`, models));
+      mkdirSync(new URL(`${unlisted}/`, models));
       assertEquals(discoverDistributions(models), [unlisted]);
     });
   });
@@ -347,27 +348,27 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
     await withTemporaryRoot((root) => {
       const models = new URL("models/", root);
       const target = new URL("elsewhere/", root);
-      Deno.mkdirSync(models);
-      Deno.mkdirSync(target);
-      Deno.symlinkSync(target.pathname, new URL("karume-linked", models).pathname);
+      mkdirSync(models);
+      mkdirSync(target);
+      symlinkSync(target.pathname, new URL("karume-linked", models).pathname);
       assertEquals(discoverDistributions(models), ["karume-linked"]);
     });
   });
 
   it("壊れたリンクと辿れないリンクも投げずに拾う（登録時に落ちてファイルごと消えない）", async () => {
     await withTemporaryRoot((models) => {
-      Deno.symlinkSync(
+      symlinkSync(
         new URL("nowhere", models).pathname,
         new URL("karume-broken", models).pathname,
       );
-      Deno.symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
+      symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
       assertEquals(discoverDistributions(models), ["karume-broken", "karume-loop"]);
     });
   });
 
   it("壊れたリンクのミラーは、そのディレクトリを名指しして FAIL する", async () => {
     await withTemporaryRoot(async (models) => {
-      Deno.symlinkSync(
+      symlinkSync(
         new URL("nowhere", models).pathname,
         new URL("karume-broken", models).pathname,
       );
@@ -381,14 +382,15 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
 
   it("辿れないリンクは ignore の判定で投げずに test を走らせ、test の中でそのパスを名指しして投げる", async () => {
     await withTemporaryRoot(async (models) => {
-      Deno.symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
+      symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
       const root = distributionRoot(models, "karume-loop");
       assertEquals(manifestKnownAbsent(root), false);
-      await assertRejects(
+      const error = await assertRejects(
         () => assertDistributionIntact(root, "karume-loop"),
-        Deno.errors.FilesystemLoop,
+        Error,
         "karume-loop/karume.json",
       );
+      assert(isFilesystemLoop(error), `expected ELOOP, got ${String(error)}`);
     });
   });
 
@@ -447,10 +449,10 @@ describe("配布門番の判定（manifest の宣言と配布形の食い違い�
 
   /** 宣言どおりのミラー（format だけ差し替えられる）を根に置く。 */
   const arrange = (root: URL, format = MANIFEST_FORMAT): void => {
-    Deno.writeTextFileSync(new URL("karume.json", root), manifestText(format));
-    Deno.mkdirSync(new URL("m/depth/", root), { recursive: true });
+    writeTextFileSync(new URL("karume.json", root), manifestText(format));
+    mkdirSync(new URL("m/depth/", root), { recursive: true });
     for (const part of parts) {
-      Deno.writeFileSync(new URL(part.path, root), new Uint8Array(part.size));
+      writeFileSync(new URL(part.path, root), new Uint8Array(part.size));
     }
   };
 
@@ -464,7 +466,7 @@ describe("配布門番の判定（manifest の宣言と配布形の食い違い�
   it("宣言された part が 1 本無ければ、その part を名指しして FAIL する", async () => {
     await withTemporaryRoot(async (root) => {
       arrange(root);
-      Deno.removeSync(new URL(parts[1].path, root));
+      removeSync(new URL(parts[1].path, root));
       await assertRejects(
         () => assertDistributionIntact(root, "synthetic"),
         AssertionError,
@@ -476,7 +478,7 @@ describe("配布門番の判定（manifest の宣言と配布形の食い違い�
   it("part の長さが宣言と違えば、実長と宣言長を並べて FAIL する", async () => {
     await withTemporaryRoot(async (root) => {
       arrange(root);
-      Deno.writeFileSync(new URL(parts[1].path, root), new Uint8Array(parts[1].size - 1));
+      writeFileSync(new URL(parts[1].path, root), new Uint8Array(parts[1].size - 1));
       await assertRejects(
         () => assertDistributionIntact(root, "synthetic"),
         AssertionError,

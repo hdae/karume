@@ -4,6 +4,7 @@
 // 展開」を直接見る。実資産との突合（id 列が Python と一致するか）はファミリ側のパリティテスト
 // （anima_tokenizer_test.ts）の担当で、ここは**規則そのもの**を落とせる形に置く。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { toCodePoints } from "../src/text/code-points.ts";
 import { type UnigramModel, unigramTokenize } from "../src/text/unigram.ts";
@@ -27,7 +28,7 @@ const buildModel = (
 const tokenize = (model: UnigramModel, text: string): number[] =>
   unigramTokenize(model, toCodePoints(text));
 
-Deno.test("格子探索: 経路はスコアの和で決まる", async (t) => {
+test("格子探索: 経路はスコアの和で決まる", async (t) => {
   await t.step("同点なら長い断片が勝つ（比較は厳密な `>`）", () => {
     // a(-1) + b(-1) と ab(-2) がちょうど同点。正本（tokenizers の Unigram）は同じ位置で終わる
     // ノードを開始位置の昇順に積み、同点なら先に積まれた = 長い方を残す。`>=` にすると
@@ -44,7 +45,7 @@ Deno.test("格子探索: 経路はスコアの和で決まる", async (t) => {
   });
 });
 
-Deno.test("未知の扱い: byte_fallback なし", async (t) => {
+test("未知の扱い: byte_fallback なし", async (t) => {
   const model = buildModel([["a", 4, -1]]);
 
   await t.step("連続する未知は 1 つの unk に融合される（fuse_unk）", () => {
@@ -61,7 +62,7 @@ Deno.test("未知の扱い: byte_fallback なし", async (t) => {
   });
 });
 
-Deno.test("未知の扱い: byte_fallback あり", async (t) => {
+test("未知の扱い: byte_fallback あり", async (t) => {
   const model = buildModel([["a", 4, -1]], { byteBaseId: BYTE_BASE });
 
   await t.step("3 バイト文字は UTF-8 の 3 バイトぶんの id に展開される", () => {
@@ -85,7 +86,7 @@ Deno.test("未知の扱い: byte_fallback あり", async (t) => {
   });
 });
 
-Deno.test("縮退: 空入力と空語彙", async (t) => {
+test("縮退: 空入力と空語彙", async (t) => {
   await t.step("空文字列は空の id 列（unk も出ない）", () => {
     assertEquals(tokenize(buildModel([["a", 4, -1]]), ""), []);
     assertEquals(tokenize(buildModel([], { byteBaseId: BYTE_BASE }), ""), []);
@@ -101,7 +102,7 @@ Deno.test("縮退: 空入力と空語彙", async (t) => {
   });
 });
 
-Deno.test("長い未知断片: 引数展開の上限を超える byte 列でも id 列になる", () => {
+test("長い未知断片: 引数展開の上限を超える byte 列でも id 列になる", () => {
   // 「あ」× 50,000 = 150,000 byte の未知断片 1 片。展開を可変長引数（`push(...ids)`）で渡すと
   // V8 の引数上限（約 13 万）で素の RangeError になり、入力の長さとは無関係な形で落ちる。
   const model = buildModel([["a", 4, -1]], { byteBaseId: BYTE_BASE });

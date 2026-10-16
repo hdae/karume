@@ -6,7 +6,7 @@
 // 切り出して commit してある — `anima_latents_test.ts`）。
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { cfgEulerStep, sigmaSchedule, timestepsProj } from "../src/anima/sampler.ts";
 import { ModelInputError } from "../src/errors.ts";
 // `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
@@ -16,7 +16,7 @@ import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 const SHIFT = 3;
 const NUM_TRAIN_TIMESTEPS = 1000;
 
-Deno.test("sigmaSchedule: 長さ steps+1・終端 0・単調減少", () => {
+test("sigmaSchedule: 長さ steps+1・終端 0・単調減少", () => {
   const sigmas = sigmaSchedule(8, SHIFT);
   assertEquals(sigmas.length, 9);
   assertEquals(sigmas[0], 1, "始点は linspace の start=1（shift を掛けても 3/3 = 1）");
@@ -26,12 +26,12 @@ Deno.test("sigmaSchedule: 長さ steps+1・終端 0・単調減少", () => {
   }
 });
 
-Deno.test("sigmaSchedule: steps < 2 は linspace の分母が 0 になるので落とす", () => {
+test("sigmaSchedule: steps < 2 は linspace の分母が 0 になるので落とす", () => {
   assertThrows(() => sigmaSchedule(1, SHIFT), ModelInputError);
   assertThrows(() => sigmaSchedule(2.5, SHIFT), ModelInputError);
 });
 
-Deno.test("sigmaSchedule: shift は manifest の値で効く（1 なら素の linspace）", () => {
+test("sigmaSchedule: shift は manifest の値で効く（1 なら素の linspace）", () => {
   // shift=1 では `1·σ / (0·σ + 1) = σ` に潰れる。scheduler の値を manifest から取る配線が
   // 死んで定数に固定されていたら、この 1 本が落ちる。
   const plain = sigmaSchedule(4, 1);
@@ -45,7 +45,7 @@ Deno.test("sigmaSchedule: shift は manifest の値で効く（1 なら素の li
   assert(shifted[1] !== plain[1], "shift が効いていない");
 });
 
-Deno.test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 2M の前提）", () => {
+test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 2M の前提）", () => {
   // `dpm-solver-multistep.ts` は「先頭が厳密に 1」から step 0 の `alphaS0 = 0` を導き、自身は
   // 例外を出さない。上側のずれは `sigmaSchedule` の門が拒否し、下側の ulp 級のずれは受理する
   // （下の describe）。代表 shift のこの 4 値は先頭が厳密に 1 になることを固定する。
@@ -54,7 +54,7 @@ Deno.test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 
   }
 });
 
-Deno.test("sigmaSchedule: 梯子の成立域の外は fail loudly（黙って別軌道を走らせない）", () => {
+test("sigmaSchedule: 梯子の成立域の外は fail loudly（黙って別軌道を走らせない）", () => {
   // 分母 `f32(shift−1)+1` が f32 で厳密に 0 へ潰れる域 → 先頭が +Inf。
   assertThrows(() => sigmaSchedule(8, 1e-8), RangeError, "梯子の成立域の外");
   // 潰れはしないが先頭が 1 でなくなる域（実測 0.8388…）。
@@ -86,34 +86,34 @@ describe("sigmaSchedule: 先頭が 1 から ulp 級にずれる小数 shift", ()
   });
 });
 
-Deno.test("timestepsProj: 前半 cos・後半 sin（flip_sin_to_cos=true）", () => {
+test("timestepsProj: 前半 cos・後半 sin（flip_sin_to_cos=true）", () => {
   // sigma=0 → timestep=0 → 全周波数で angle=0 なので cos 側が 1・sin 側が 0 になる。
   // 反転していると前半が 0・後半が 1 になり、この 1 本で落ちる。
   const proj = timestepsProj(0, 8, NUM_TRAIN_TIMESTEPS);
   assertEquals([...proj], [1, 1, 1, 1, 0, 0, 0, 0]);
 });
 
-Deno.test("timestepsProj: 幅と num_train_timesteps の受理集合", () => {
+test("timestepsProj: 幅と num_train_timesteps の受理集合", () => {
   assertThrows(() => timestepsProj(0.5, 7, NUM_TRAIN_TIMESTEPS), RangeError);
   assertThrows(() => timestepsProj(0.5, 0, NUM_TRAIN_TIMESTEPS), RangeError);
   assertThrows(() => timestepsProj(0.5, 8, 0), RangeError);
   assertThrows(() => timestepsProj(0.5, 8, 1000.5), RangeError);
 });
 
-Deno.test("needsUncond: CFG=1 だけが uncond 不要", () => {
+test("needsUncond: CFG=1 だけが uncond 不要", () => {
   assertEquals(needsUncond(1), false);
   assertEquals(needsUncond(4), true);
   assertEquals(needsUncond(0), true);
 });
 
-Deno.test("cfgEulerStep: CFG=1 は cond をそのまま使う（uncond を経由しない）", () => {
+test("cfgEulerStep: CFG=1 は cond をそのまま使う（uncond を経由しない）", () => {
   const previous = Float32Array.from([1, 2, 3]);
   const cond = Float32Array.from([0.25, -0.5, 0.125]);
   const got = cfgEulerStep(previous, cond, undefined, -0.5, 1);
   assertEquals([...got], [1 - 0.125, 2 + 0.25, 3 - 0.0625]);
 });
 
-Deno.test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら落とす", () => {
+test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら落とす", () => {
   const previous = Float32Array.from([0, 0]);
   const cond = Float32Array.from([1, 1]);
   const uncond = Float32Array.from([2, 2]);
@@ -129,7 +129,7 @@ Deno.test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら�
   );
 });
 
-Deno.test("cfgEulerStep: CFG!=1 は uncond + scale·(cond − uncond) を Euler へ渡す", () => {
+test("cfgEulerStep: CFG!=1 は uncond + scale·(cond − uncond) を Euler へ渡す", () => {
   const previous = Float32Array.from([0]);
   const got = cfgEulerStep(
     previous,
@@ -142,7 +142,7 @@ Deno.test("cfgEulerStep: CFG!=1 は uncond + scale·(cond − uncond) を Euler 
   assertEquals([...got], [-5]);
 });
 
-Deno.test("cfgEulerStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
+test("cfgEulerStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
   // torch は Python float の倍率を f32 テンソルとの積の前に f32 へ落とす。f64 のまま掛けると、
   // この組では合成が 1 ulp ずれる（0.03789997100830078）。期待値は torch 2.13.0 の CPU で
   // `uncond + 1.1 * (cond - uncond)` を f32 テンソルで評価した値。

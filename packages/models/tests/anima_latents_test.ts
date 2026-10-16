@@ -1,5 +1,7 @@
 // latent / 条件テンソルの整形と RGBA 化の挙動テスト。GPU も資産も要らない純関数。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -23,9 +25,9 @@ type LatentsFixture = {
 };
 
 const FIXTURE_PATH = new URL("./fixtures/anima-latents/parity.json", import.meta.url);
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as LatentsFixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as LatentsFixture;
 
-Deno.test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", () => {
+test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", () => {
   const latents = new Float32Array(2 * 2 * 1 * 1);
   const mean = Float32Array.from([0, 0]);
   const std = Float32Array.from([1, 1]);
@@ -42,7 +44,7 @@ Deno.test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", 
   );
 });
 
-Deno.test("denormalizeLatents: std の逆数で割る（掛け算に直すと最終桁が変わる）", () => {
+test("denormalizeLatents: std の逆数で割る（掛け算に直すと最終桁が変わる）", () => {
   const latents = Float32Array.from([1, 1]);
   const mean = Float32Array.from([0, 0]);
   const std = Float32Array.from([3, 7]);
@@ -57,7 +59,7 @@ Deno.test("denormalizeLatents: std の逆数で割る（掛け算に直すと最
   );
 });
 
-Deno.test("デモ定数: latents_mean / latents_std が参照フィクスチャとビット一致する", () => {
+test("デモ定数: latents_mean / latents_std が参照フィクスチャとビット一致する", () => {
   // `latents.ts` の MUST（手写しの数を検証なしで置かない）の実体。この 32 個は VAE の config
   // にしかなく IR にも配布資産にも入らないので、写し間違いを捕まえる門はここだけになる
   // （実 GPU の PNG sha256 門は資産と GPU が揃った参照環境でしか走らない）。
@@ -67,7 +69,7 @@ Deno.test("デモ定数: latents_mean / latents_std が参照フィクスチャ�
   assertEquals([...ANIMA_LATENTS_STD], [...Float32Array.from(fixture.std)]);
 });
 
-Deno.test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃っている", () => {
+test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃っている", () => {
   // 値そのものは上のビット一致が固定する。ここは「片方だけ差し替えた」形の取りこぼしを
   // 構造で止める。
   assertEquals(ANIMA_LATENTS_MEAN.length, 16);
@@ -75,7 +77,7 @@ Deno.test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃
   assert(ANIMA_LATENTS_STD.every((value) => value > 0), "std に非正の値がある");
 });
 
-Deno.test("animaLatents: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {
+test("animaLatents: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {
   // 公開面が出すのはこのアクセサだけ。実体を配ると、消費側が 1 要素書き換えただけで
   // 以後の全 `generate` の逆正規化が黙って変わる（グローバル可変状態）。
   const first = animaLatents();
@@ -97,7 +99,7 @@ Deno.test("animaLatents: 呼ぶたびに独立した写し（消費側の書き�
   assertNotStrictEquals(second.std, first.std);
 });
 
-Deno.test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
+test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
   const hidden = { dtype: "f32", shape: [1, 2, 3], data: Float32Array.from([1, 2, 3, 4, 5, 6]) };
   const padded = padSequence(hidden as never, 4);
   assertEquals([...padded], [1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0]);
@@ -115,7 +117,7 @@ Deno.test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () =
   );
 });
 
-Deno.test("imageToRgba: [-1,1] → [0,255]・planar から interleave・アルファ 255", () => {
+test("imageToRgba: [-1,1] → [0,255]・planar から interleave・アルファ 255", () => {
   // 1×2 の画像。R 面 / G 面 / B 面がこの順に並ぶ。
   const image = Float32Array.from([
     -1,
@@ -129,18 +131,18 @@ Deno.test("imageToRgba: [-1,1] → [0,255]・planar から interleave・アル�
   assertEquals([...rgba], [0, 128, 255, 255, 255, 0, 191, 255]);
 });
 
-Deno.test("imageToRgba: 要素数とサイズの食い違いを落とす", () => {
+test("imageToRgba: 要素数とサイズの食い違いを落とす", () => {
   assertThrows(() => imageToRgba(new Float32Array(5), 2, 1), Error, "要素数");
   assertThrows(() => imageToRgba(new Float32Array(6), 0, 1), RangeError);
 });
 
-Deno.test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wanFrameToRgba と同じ入口契約）", () => {
+test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wanFrameToRgba と同じ入口契約）", () => {
   // どれも `image.length === 3·width·height` は満たす（長さの照合だけでは通る形）。
   assertThrows(() => imageToRgba(new Float32Array(3), 0.5, 2), RangeError, "正の整数でない");
   assertThrows(() => imageToRgba(new Float32Array(3), -1, -1), RangeError, "正の整数でない");
 });
 
-Deno.test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙変換しない）", () => {
+test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙変換しない）", () => {
   // 2×2 の 3 面。土台は全て有限（clamp 対象の範囲外値も混ぜる）で、1 要素だけ壊す。
   const base = new Float32Array(2 * 2 * 3);
   base.set([-2, -1, 0, 1], 0); // R
@@ -171,7 +173,7 @@ Deno.test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ�
   assertStringIncludes(negativeInfinity.message, "channel 2");
 });
 
-Deno.test("imageToRgba: 非正方（H≠W）でも行優先で走る", () => {
+test("imageToRgba: 非正方（H≠W）でも行優先で走る", () => {
   // 2×3（幅 2 / 高さ 3）。転置した実装だと同じ長さのまま画素の並びだけが変わるので、
   // **面ごとに違う値**を配って位置で捕まえる（正方では検出できない取り違え）。
   const plane = Float32Array.from([-1, 1, 1, -1, -1, 1]);

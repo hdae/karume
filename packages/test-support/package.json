@@ -9,9 +9,13 @@
     "./setup": "./src/setup.ts",
     "./test": "./src/test.ts",
     "./fs": "./src/fs.ts",
-    "./webgpu": "./src/webgpu.ts"
+    "./webgpu": "./src/webgpu.ts",
+    "./local-dist-server": "./src/local-dist-server.ts",
+    "./module-graph": "./src/module-graph.ts",
+    "./lanes": "./src/lanes.ts"
   },
   "dependencies": {
+    "oxc-parser": "catalog:",
     "webgpu": "catalog:"
   },
   "devDependencies": {

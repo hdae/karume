@@ -21,6 +21,7 @@
 // MUST: 変種（v4 / スカラ）と格納（f32 / f16 / i8）を全て踏む。踏んだ変種は `expectVec4` で
 // 明示的に固定する（判定の取り違えが「両方とも同じ変種で緑」に紛れないため）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { alignF16Payload } from "../src/format/f16.ts";
@@ -672,7 +673,7 @@ const assertParity = (
   assert(new Set(direct).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
 };
 
-Deno.test({
+test({
   name: "conv2d の implicit GEMM は直接カーネルと**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -702,7 +703,7 @@ Deno.test({
  * 33〜64 の帯（33 / 70 の 2 枚目）/ M < 32（20 / 12 / 5 / 4 / 3）/ **m タイル 2 枚以上 × i8**
  * （96 = 3 枚・70 = 3 枚・66 = 3 枚 — scale 軸取り違えの唯一の検出器）。
  */
-Deno.test({
+test({
   name: "conv2d の 32 行 m タイル変種も直接カーネルとビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -764,7 +765,7 @@ const conv2dKeysUsed = async (
   }
 };
 
-Deno.test({
+test({
   name: "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -786,7 +787,7 @@ Deno.test({
  * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのタイル形も出力はビット
  * 同一なので、値の一致は結線の証拠にならない（述語を潰しても数値テストは全て緑のまま）。
  */
-Deno.test({
+test({
   name: "executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

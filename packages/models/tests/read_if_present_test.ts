@@ -7,20 +7,21 @@
 // NOTE: ディレクトリ読込の例外型は OS で違う（`Deno.errors.IsADirectory` が無い環境もある）
 // ので、型ではなく「`undefined` を返さずに投げた」ことで観測する。
 
+import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import { assertEquals, assertRejects } from "@std/assert";
-import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
+import { afterAll, beforeAll, describe, it } from "@karume/test-support/test";
 import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
 describe("readTextIfPresent / readFileIfPresent", () => {
   let root: URL;
   beforeAll(async () => {
-    const dir = await Deno.makeTempDir({ prefix: "karume-read-if-present-" });
+    const dir = await makeTempDir({ prefix: "karume-read-if-present-" });
     root = new URL(`file://${dir}/`);
-    await Deno.writeTextFile(new URL("present.txt", root), "中身");
-    await Deno.mkdir(new URL("directory/", root));
+    await writeTextFile(new URL("present.txt", root), "中身");
+    await mkdir(new URL("directory/", root));
   });
   afterAll(async () => {
-    await Deno.remove(root, { recursive: true });
+    await remove(root, { recursive: true });
   });
 
   describe("path が存在しないとき", () => {

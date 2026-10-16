@@ -12,6 +12,7 @@
 // 有効側の対照（feature を持つ device では通る）だけは helper に features を渡す口が要るので
 // まだ書けない（runtime テスト担当へ依頼済み — `fakeGpuContext` の第 3 引数）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import type { GpuFeaturesSpec } from "@karume/hub";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
@@ -21,7 +22,7 @@ import {
   toAcquireGpuOptions,
 } from "../src/session/gpu-features.ts";
 
-Deno.test("toAcquireGpuOptions: 宣言された feature だけを要求する", () => {
+test("toAcquireGpuOptions: 宣言された feature だけを要求する", () => {
   // 宣言が無い / 明示的に false の配布形で feature を要求しにいくと、持たないアダプタでは
   // `acquireGpu` 自体が落ちる（= 動くはずの環境で動かなくなる）。
   assertEquals(toAcquireGpuOptions(undefined), {});
@@ -30,7 +31,7 @@ Deno.test("toAcquireGpuOptions: 宣言された feature だけを要求する", 
   assertEquals(toAcquireGpuOptions({ shaderF16: true }), { shaderF16: true });
 });
 
-Deno.test("toAcquireGpuOptions: GpuFeaturesSpec の全キーを写す（キー追加の取り残しを検出）", () => {
+test("toAcquireGpuOptions: GpuFeaturesSpec の全キーを写す（キー追加の取り残しを検出）", () => {
   // 写像の網羅は `src/session/gpu-features.ts` の `FEATURES`（`Required<GpuFeaturesSpec>` の
   // 網羅表）が型で固定しており、キーが増えれば**コンパイルエラー**になる。ここはその型門が
   // 生きていることを実行時からも見る対（型を緩めた改変は型検査を通ってしまうため）—
@@ -47,7 +48,7 @@ const WHERE = "TestPipeline: quant 'f16'";
 /** shader-f16 を持たない device（`fakeGpuContext` は features を空 `Set` で作る）。 */
 const noFeatureGpu = () => fakeGpuContext(fakeDevice());
 
-Deno.test("assertGpuFeaturesGranted: 要求された feature が無効な共有 GPU は名指しで落ちる", () => {
+test("assertGpuFeaturesGranted: 要求された feature が無効な共有 GPU は名指しで落ちる", () => {
   // 共有 GPU（`options.gpu`）を渡された経路では device 生成後なので feature を取り直せない
   // （ADR 0028）。ここを通すと Session 構築まで進んでから落ちるか、黙って別経路へ縮退する。
   const error = assertThrows(
@@ -60,7 +61,7 @@ Deno.test("assertGpuFeaturesGranted: 要求された feature が無効な共有 
   assertStringIncludes(error.message, "acquireGpu({ shaderF16: true })");
 });
 
-Deno.test("assertGpuFeaturesGranted: 要求していない配布形は no-op（門が恒真でないことの対）", () => {
+test("assertGpuFeaturesGranted: 要求していない配布形は no-op（門が恒真でないことの対）", () => {
   const gpu = noFeatureGpu();
   assertGpuFeaturesGranted(undefined, gpu, WHERE);
   assertGpuFeaturesGranted({}, gpu, WHERE);
@@ -69,7 +70,7 @@ Deno.test("assertGpuFeaturesGranted: 要求していない配布形は no-op（�
 
 // ---- 実効 SessionOptions から導く要求（上書き口を持つ家族の席）--------------------
 
-Deno.test("sessionGpuFeatures: f16 計算を実効設定が選べば shader-f16 を要求に足す", () => {
+test("sessionGpuFeatures: f16 計算を実効設定が選べば shader-f16 を要求に足す", () => {
   // 明示の `linearCompute: "f16"` を quant 宣言（shader-f16 を要求しない）に重ねた形。足さないと
   // 自前で取る device が feature を持たず、重みを全部上げた後の Session 構築で落ちる。
   assertEquals(sessionGpuFeatures(undefined, { linearCompute: "f16" }), { shaderF16: true });
@@ -89,7 +90,7 @@ Deno.test("sessionGpuFeatures: f16 計算を実効設定が選べば shader-f16 
   );
 });
 
-Deno.test("sessionGpuFeatures: 要らない・宣言済みなら宣言をそのまま返す（要求を増やさない）", () => {
+test("sessionGpuFeatures: 要らない・宣言済みなら宣言をそのまま返す（要求を増やさない）", () => {
   // s16（`attentionScoreStorage: "f16"`）は shader-f16 に依らない格納形（ADR 0030 決定 1）。
   assertEquals(sessionGpuFeatures(undefined, {}), undefined);
   assertEquals(sessionGpuFeatures(undefined, { attentionScoreStorage: "f16" }), undefined);

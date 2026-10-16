@@ -13,6 +13,8 @@
 // GPU は使わない。資産（`outputs/series/sbv2-F1/{flow,voice}/`）が無い環境では該当ケースを
 // SKIP し、生成器そのものの性質を見るテスト（故障注入）は常に走る。
 
+import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, prepareContainer } from "@karume/runtime";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -36,11 +38,11 @@ const TABLE_INPUT_TARGETS = ["flow", "voice"] as const;
 const IDX_K_KEY = "input.idx_k";
 const VALID_KEY = "input.valid";
 
-const listDir = (url: URL): readonly Deno.DirEntry[] => {
+const listDir = (url: URL): readonly DirEntry[] => {
   try {
-    return [...Deno.readDirSync(url)];
+    return [...readDirSync(url)];
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) {
+    if (isNotFound(cause)) {
       return [];
     }
     throw cause;
@@ -85,8 +87,8 @@ const assertSameElements = (
 };
 
 for (const { target, ioFile } of AVAILABLE) {
-  Deno.test(`相対位置表パリティ: ${target} / ${ioFile}（TS 生成 ↔ golden の Python 生成）`, async () => {
-    const bytes = await Deno.readFile(new URL(`${target}/${ioFile}`, MODELS_ROOT));
+  test(`相対位置表パリティ: ${target} / ${ioFile}（TS 生成 ↔ golden の Python 生成）`, async () => {
+    const bytes = await readFile(new URL(`${target}/${ioFile}`, MODELS_ROOT));
     const io = parseSafetensors(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     );
@@ -119,7 +121,7 @@ for (const { target, ioFile } of AVAILABLE) {
 }
 
 for (const target of TABLE_INPUT_TARGETS) {
-  Deno.test({
+  test({
     name: `相対位置表の窓幅: ${target} の焼き込み表と TS 定数が一致する`,
     ignore: discoverCases(target).length === 0,
     fn: async () => {
@@ -145,7 +147,7 @@ for (const target of TABLE_INPUT_TARGETS) {
   });
 }
 
-Deno.test("相対位置表: 窓幅が違えば表も違う（パリティ検査が恒真でない）", () => {
+test("相対位置表: 窓幅が違えば表も違う（パリティ検査が恒真でない）", () => {
   // 故障注入 — 上のパリティ検査は「両側が同じ定数を見ている」ことに依存する。窓幅が
   // 1 ずれても表が同じなら、検査は誤りを通す形になっている。
   const correct = buildRelattnTables(9, RELATTN_WINDOW_SIZE);
@@ -162,7 +164,7 @@ Deno.test("相対位置表: 窓幅が違えば表も違う（パリティ検査�
   );
 });
 
-Deno.test("相対位置表: 窓の内外で idx_k と valid が対で効く", () => {
+test("相対位置表: 窓の内外で idx_k と valid が対で効く", () => {
   // 表の意味そのものの固定（Python 側の写しではなく、gather の前提を式で書く）:
   // 窓内は `w + (j − i)` を素直に指し valid=1、窓外は clamp で端へ張り付き valid=0。
   const length = 12;
@@ -183,7 +185,7 @@ Deno.test("相対位置表: 窓の内外で idx_k と valid が対で効く", ()
   }
 });
 
-Deno.test("相対位置表: 不正な長さ・窓幅は落とす", () => {
+test("相対位置表: 不正な長さ・窓幅は落とす", () => {
   assertThrows(() => buildRelattnTables(0), RangeError, "長さ");
   assertThrows(() => buildRelattnTables(1.5), RangeError, "長さ");
   assertThrows(() => buildRelattnTables(4, -1), RangeError, "窓幅");

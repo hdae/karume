@@ -3,6 +3,7 @@
 // 実 GPU での参照照合と縮退門は `e2e_wan_vae_tiles_test.ts`。ここは**幾何の凍結表**（Python 側と
 // 同じ値 — ADR 0033 追記 9a の二重凍結）・配置の不変条件・貼り合わせの解析解を押さえる。
 
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -50,7 +51,7 @@ const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
   [104, [0, 24, 48, 72]],
 ];
 
-Deno.test("planWanVaeTileAxis: 開始位置を値で凍結する（Python 側と同じ表）", () => {
+test("planWanVaeTileAxis: 開始位置を値で凍結する（Python 側と同じ表）", () => {
   for (const [extent, starts] of AXIS_STARTS) {
     assertEquals(
       [...planWanVaeTileAxis(extent, TILE, MIN_OVERLAP).starts],
@@ -60,7 +61,7 @@ Deno.test("planWanVaeTileAxis: 開始位置を値で凍結する（Python 側と
   }
 });
 
-Deno.test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブレンド 144 / 64 px", () => {
+test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブレンド 144 / 64 px", () => {
   const plan = planWanVaeTiles(LAYOUT, 60, 104, MIN_OVERLAP);
   assertEquals(plan.scale, SCALE);
   assertEquals(wanVaeTileCount(plan), 12);
@@ -77,7 +78,7 @@ Deno.test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブ�
   assertEquals([...portrait.cols.starts], [0, 14, 28]);
 });
 
-Deno.test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り立つ", () => {
+test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り立つ", () => {
   for (const extent of [32, 33, 40, 56, 57, 60, 64, 80, 104, 128, 135, 256]) {
     const axis = planWanVaeTileAxis(extent, TILE, MIN_OVERLAP);
     const where = `extent=${extent}`;
@@ -101,7 +102,7 @@ Deno.test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り�
   }
 });
 
-Deno.test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", () => {
+test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", () => {
   assertThrows(() => planWanVaeTileAxis(31, TILE, MIN_OVERLAP), Error, "タイル幅");
   assertThrows(() => planWanVaeTileAxis(60, TILE, TILE), Error, "重なり");
   assertThrows(
@@ -122,7 +123,7 @@ Deno.test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落と�
   );
 });
 
-Deno.test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラフの比 × unpatchify — Python 側と同じ式）", () => {
+test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラフの比 × unpatchify — Python 側と同じ式）", () => {
   // 2 点で式を縛る（Python 側 test_vae_tiling.py と同じ行）。unpatchify の倍率を無視する退行は
   // (8, 2) で割れる（グラフの比だけなら 8）。
   for (const [scale, patchSize, expected] of [[8, 1, 8], [8, 2, 4]] as const) {
@@ -131,7 +132,7 @@ Deno.test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラ�
   assertEquals(wanVaeSpatialCompression(8, 2), 16);
 });
 
-Deno.test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数でない因子は丸めずに落とす", () => {
+test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数でない因子は丸めずに落とす", () => {
   assertThrows(
     () => wanVaeMinTileOverlap(8, 3),
     Error,
@@ -155,7 +156,7 @@ const smallPlan = (height: number, width: number, scale: number, channels = 2): 
     2,
   );
 
-Deno.test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り出す（軸とフレームの取り違え検出）", () => {
+test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り出す（軸とフレームの取り違え検出）", () => {
   // [2,3,10,12]・値は `平面*1000 + y*12 + x`（平面 = c*3 + f）で全要素が識別できる。
   const plan = smallPlan(10, 12, 1);
   assertEquals([...plan.rows.starts], [0, 2]);
@@ -180,7 +181,7 @@ Deno.test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り�
   assertThrows(() => wanVaeLatentTile(plan, latents.subarray(1), 0, 0), Error, "要素数");
 });
 
-Deno.test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
+test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
   // 大小比較だけの範囲検査は 0.5 と NaN を通し、`starts[0.5]` が undefined → ゼロのタイルを黙って返す
   // （`wanVaeLatentChunk` の chunk の添字と同じ穴）。
   const plan = smallPlan(10, 12, 1);
@@ -198,7 +199,7 @@ Deno.test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタ
 const bits = (values: Float32Array): Uint32Array =>
   new Uint32Array(values.buffer, values.byteOffset, values.length);
 
-Deno.test("assembleWanVaeTiles: 1 枚（縮退）はタイルの素の写し（ビット同一）", () => {
+test("assembleWanVaeTiles: 1 枚（縮退）はタイルの素の写し（ビット同一）", () => {
   const plan = smallPlan(8, 8, 1);
   assertEquals(wanVaeTileCount(plan), 1);
   const tile = new Float32Array(3 * 5 * 64).map((_, index) => Math.sin(index) * 3);
@@ -212,7 +213,7 @@ const rampTile = (axis: "rows" | "cols"): Float32Array<ArrayBuffer> =>
     return axis === "rows" ? Math.floor(offset / 8) : offset % 8;
   });
 
-Deno.test("assembleWanVaeTiles: 位置依存のタイルを線形ランプが解析解どおりに畳む（全平面）", () => {
+test("assembleWanVaeTiles: 位置依存のタイルを線形ランプが解析解どおりに畳む（全平面）", () => {
   // 全長 16・タイル 8・開始 0 / 4 / 8（重なり 4）。傾斜 0..7 は貼り合わせ後 0,1,2,3 → 中間は
   // 全て 4 → 末尾 4,5,6,7。ブレンドの向き反転・間隔の off-by-one・末端のスナップ落とし・
   // 担当領域の取り違えは全てここで割れる（同じ値が重なる作りだと向きの反転が緑のまま通る）。
@@ -232,7 +233,7 @@ Deno.test("assembleWanVaeTiles: 位置依存のタイルを線形ランプが解
   }
 });
 
-Deno.test("assembleWanVaeTiles: 角は縦 → 横の順で畳む（上流と同じ）", () => {
+test("assembleWanVaeTiles: 角は縦 → 横の順で畳む（上流と同じ）", () => {
   // 全長 6・タイル 4・開始 0 / 2（ブレンド幅 2）・定数タイル a=1（左上）/ b=2 / c=3 / d=4。
   // 右下タイルの 2 行目（出力の行 3）: 左下は上と縦ブレンド済みで行 1 = (a + c) / 2 = 2、
   // 右上は左と横ブレンド済みで行 3 = [1, 1.5, 2, 2]。右下は縦が先で行 1 = 0.5·右上の行 3 + 0.5·d
@@ -252,7 +253,7 @@ Deno.test("assembleWanVaeTiles: 角は縦 → 横の順で畳む（上流と同�
   }
 });
 
-Deno.test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊しない", () => {
+test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊しない", () => {
   const plan = smallPlan(16, 26, 2);
   assertEquals(wanVaeTileCount(plan), 12);
   const tiles = Array.from({ length: 12 }, () => new Float32Array(3 * 2 * 256).fill(7));
@@ -264,7 +265,7 @@ Deno.test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊
   assertEquals(tiles.map((tile) => [...tile]), before, "渡したタイルが書き換わった");
 });
 
-Deno.test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落とす", () => {
+test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落とす", () => {
   const plan = smallPlan(16, 16, 1);
   const tile = new Float32Array(3 * 64);
   assertThrows(() => assembleWanVaeTiles([tile], plan), Error, "計画");
@@ -276,7 +277,7 @@ Deno.test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落
   assertThrows(() => assembleWanVaeTiles(Array(9).fill(new Float32Array(64)), plan), Error, "3,F");
 });
 
-Deno.test("assembleWanVaeTiles: 平面はグラフの出口のチャネル数（計画の sampleChannels）で割る — 3 を仮定しない", () => {
+test("assembleWanVaeTiles: 平面はグラフの出口のチャネル数（計画の sampleChannels）で割る — 3 を仮定しない", () => {
   // 出口 12 チャネルの計画（合成の値 — 縮退の 1 枚なので貼り付けは素の写し）。12 × 1 フレームは
   // そのまま通り、3 × 1 フレーム（RGB 1 枚ぶん）は出口の形に合わないので落ちる。
   const plan = planWanVaeTiles(
@@ -290,7 +291,7 @@ Deno.test("assembleWanVaeTiles: 平面はグラフの出口のチャネル数（
   assertThrows(() => assembleWanVaeTiles([new Float32Array(3 * 64)], plan), Error, "[12,F,8,8]");
 });
 
-Deno.test("clampWanVaeFrames: [-1, 1] へ in-place（NaN と -0 はそのまま — torch.clamp と同じ）", () => {
+test("clampWanVaeFrames: [-1, 1] へ in-place（NaN と -0 はそのまま — torch.clamp と同じ）", () => {
   const frames = new Float32Array([-3, -1, -0, 0, 0.5, 1, 1.25, Number.NaN]);
   clampWanVaeFrames(frames);
   assertEquals([...frames.subarray(0, 7)], [-1, -1, -0, 0, 0.5, 1, 1]);
@@ -312,7 +313,7 @@ Deno.test("clampWanVaeFrames: [-1, 1] へ in-place（NaN と -0 はそのまま 
  */
 const ABSOLUTE_POSITION_TOLERANCE = 20 * 2 ** -14;
 
-Deno.test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶対位置のタイルが絶対位置に戻る（入れ子のブレンド）", () => {
+test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶対位置のタイルが絶対位置に戻る（入れ子のブレンド）", () => {
   // 行の重なり 18 潜在（144 px）はタイル幅の半分（16 潜在）を超える。タイル 1 の「上と縦ブレンドした
   // 行」[0, 144) px と「下のタイルが読む行」[112, 256) px が重なり、出力の一部は 3 枚のタイルの寄与に
   // なる（上流の既定〈ブレンド 64 px < stride 192 px〉では起きない入れ子）。既存の解析解のテストは
@@ -409,12 +410,12 @@ const arange = (length: number): Float32Array<ArrayBuffer> =>
 /** patchify 空間の `[12, 2, 3, 5]`（RGB にすると `[3, 2, 6, 10]`）。 */
 const PATCH_SHAPE: Shape4 = [12, 2, 3, 5];
 
-Deno.test("unpatchifyWanVaeFrames: p = 1 は入力の同じインスタンスを返す（写さない — unpatchify の無い世代の経路）", () => {
+test("unpatchifyWanVaeFrames: p = 1 は入力の同じインスタンスを返す（写さない — unpatchify の無い世代の経路）", () => {
   const frames = arange(3 * 2 * 3 * 5);
   assertStrictEquals(unpatchifyWanVaeFrames(frames, [3, 2, 3, 5], 1), frames);
 });
 
-Deno.test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx と dy を入れ替えた表とは一致しない", () => {
+test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx と dy を入れ替えた表とは一致しない", () => {
   const input = arange(12 * 2 * 3 * 5);
   const got = unpatchifyWanVaeFrames(input, PATCH_SHAPE, 2);
   assertEquals(got.length, input.length);
@@ -427,7 +428,7 @@ Deno.test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx 
   assertEquals([...input], [...arange(input.length)], "入力を書き換えた");
 });
 
-Deno.test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い違いは落とす（p = 1 でも）", () => {
+test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い違いは落とす（p = 1 でも）", () => {
   const input = arange(12 * 2 * 3 * 5);
   assertThrows(
     () => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 0),
@@ -475,7 +476,7 @@ const finishTiles = (
 const RGB = { frames: 2, height: 8, width: 12 } as const;
 const PATCHED = { ...RGB, tiles: finishTiles(12, 2, 3) };
 
-Deno.test("finishWanVaeFrames: unpatchify の無い世代（p = 1）は旧来の末尾（有限性 + クランプ）と同じ値・同じインスタンス", () => {
+test("finishWanVaeFrames: unpatchify の無い世代（p = 1）は旧来の末尾（有限性 + クランプ）と同じ値・同じインスタンス", () => {
   const assembled = new Float32Array(3 * 2 * 8 * 12).map((_, index) => Math.sin(index) * 2);
   assembled[5] = -0;
   const legacy = Float32Array.from(assembled);
@@ -490,7 +491,7 @@ Deno.test("finishWanVaeFrames: unpatchify の無い世代（p = 1）は旧来の
   assertEquals(bits(got), bits(legacy));
 });
 
-Deno.test("finishWanVaeFrames: p = 2 は clamp(表で組んだ unpatchify)（ビット一致）", () => {
+test("finishWanVaeFrames: p = 2 は clamp(表で組んだ unpatchify)（ビット一致）", () => {
   const assembled = new Float32Array(12 * 2 * 4 * 6).map((_, index) => (index - 288) / 160);
   const expected = unpatchifyByTable(assembled, [12, 2, 4, 6], UNPATCHIFY_SOURCE_CHANNEL);
   clampWanVaeFrames(expected);
@@ -499,7 +500,7 @@ Deno.test("finishWanVaeFrames: p = 2 は clamp(表で組んだ unpatchify)（ビ
   assert(got.includes(1) && got.includes(-1), "クランプが 1 度も効いていない（入力の値域が狭い）");
 });
 
-Deno.test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標で名指す（patchify 空間の座標ではない）", () => {
+test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標で名指す（patchify 空間の座標ではない）", () => {
   // 入力チャネル 6 = c 1・dx 1・dy 0、フレーム 1・(y 2, x 3) → RGB の channel 1・フレーム 1・(x 7, y 4)。
   const assembled = new Float32Array(12 * 2 * 4 * 6);
   assembled[((6 * 2 + 1) * 4 + 2) * 6 + 3] = Number.POSITIVE_INFINITY;
@@ -510,7 +511,7 @@ Deno.test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標�
   );
 });
 
-Deno.test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じでも unpatchify の倍率・フレーム数の食い違いを落とす）", () => {
+test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じでも unpatchify の倍率・フレーム数の食い違いを落とす）", () => {
   const assembled = new Float32Array(12 * 2 * 4 * 6);
   // 出口 12 ch の資産を unpatchify の無い記述子で閉じる（要素数は RGB の [3, 2, 8, 12] と同じ 576）。
   assertThrows(
@@ -531,7 +532,7 @@ Deno.test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じ�
   );
 });
 
-Deno.test("finishWanVaeFrames: 0 要素と、出口のチャネル数が p² で割り切れない計画は、その理由で落とす", () => {
+test("finishWanVaeFrames: 0 要素と、出口のチャネル数が p² で割り切れない計画は、その理由で落とす", () => {
   assertThrows(
     () => finishWanVaeFrames(new Float32Array(0), PATCHED, { vaePatchSize: 2 }, OWNER),
     Error,

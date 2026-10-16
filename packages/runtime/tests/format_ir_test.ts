@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   type IrDeclaration,
@@ -33,7 +34,7 @@ const assertRejects = (
 
 // IR v2 の宣言は**計算契約**だけを持つ（格納は容器の束縛表 — docs/ir-v2.md）。initializer 名が
 // そのまま実体の鍵なので、v1 にあった「実体のテンソルキーへの改名」はもう起きない。
-Deno.test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
+test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
   const graph = parseIrDeclaration(JSON.stringify(baseDeclaration()));
   assertEquals(graph.format, "karume-ir");
   assertEquals(graph.version, 2);
@@ -49,7 +50,7 @@ Deno.test("parseIrDeclaration: 最小の正常系グラフを受理する", () =
   assertEquals(graph.values["h"], { dtype: "f32", shape: ["T", 3] });
 });
 
-Deno.test("parseIrDeclaration: format / version の固定値", () => {
+test("parseIrDeclaration: format / version の固定値", () => {
   assertRejects("format 不一致", "graph.format が 'karume-ir' でない", (g) => {
     g.format = "karume";
   });
@@ -58,7 +59,7 @@ Deno.test("parseIrDeclaration: format / version の固定値", () => {
   });
 });
 
-Deno.test("parseIrDeclaration: トップレベルのキー集合", () => {
+test("parseIrDeclaration: トップレベルのキー集合", () => {
   assertThrows(
     () => parseIrDeclaration(JSON.stringify({ ...baseDeclaration(), extra: 1 })),
     IrError,
@@ -73,7 +74,7 @@ Deno.test("parseIrDeclaration: トップレベルのキー集合", () => {
   );
 });
 
-Deno.test("parseIrDeclaration: requires.ops は使用 op 集合と一致する", () => {
+test("parseIrDeclaration: requires.ops は使用 op 集合と一致する", () => {
   assertRejects("宣言漏れ", "宣言漏れ [add]", (g) => {
     g.requires.ops = ["matmul"];
   });
@@ -85,7 +86,7 @@ Deno.test("parseIrDeclaration: requires.ops は使用 op 集合と一致する",
   });
 });
 
-Deno.test("parseIrDeclaration: SSA 単一代入", () => {
+test("parseIrDeclaration: SSA 単一代入", () => {
   assertRejects(
     "ノード出力の二重定義",
     "graph.nodes[1] (add): 値 'h' が二重に定義されている",
@@ -106,7 +107,7 @@ Deno.test("parseIrDeclaration: SSA 単一代入", () => {
   );
 });
 
-Deno.test("parseIrDeclaration: トポロジカル順（前方参照拒否）", () => {
+test("parseIrDeclaration: トポロジカル順（前方参照拒否）", () => {
   assertRejects("ノード順の逆転", "graph.nodes[0] (add): 入力 'h' が未定義（前方参照", (g) => {
     g.nodes.reverse();
   });
@@ -121,7 +122,7 @@ Deno.test("parseIrDeclaration: トポロジカル順（前方参照拒否）", (
   });
 });
 
-Deno.test("parseIrDeclaration: 宣言の完全性", () => {
+test("parseIrDeclaration: 宣言の完全性", () => {
   assertRejects("ノード出力が values に無い", "ノード出力 'y' の dtype/shape 宣言が無い", (g) => {
     delete g.values["y"];
   });
@@ -159,7 +160,7 @@ Deno.test("parseIrDeclaration: 宣言の完全性", () => {
  * `(グラフ名, initializer 名)` で持つ — docs/ir-v2.md）。旧配布形の `tensor` / `storage` を
  * そのまま書いた形は未知のキーとして落ちる。
  */
-Deno.test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ", () => {
+test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ", () => {
   // 実体を持つ宣言は空オブジェクト、借り物は `{ shared: true }` の 2 形きり。
   assertEquals(parseMutated(() => {}).initializers["w"], { shared: false });
   const borrowed = parseMutated((g) => {
@@ -193,7 +194,7 @@ Deno.test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だ
  * （`format/container/bind.ts` の `allowedLayouts`）の担当になった。宣言だけを見るこの層では
  * `values` の意味論 dtype が i32 でも f32 でも受理する。
  */
-Deno.test("parseIrDeclaration: 意味論 i32 の initializer を宣言として受理する", () => {
+test("parseIrDeclaration: 意味論 i32 の initializer を宣言として受理する", () => {
   const graph = parseMutated((g) => {
     g.values["w"] = { dtype: "i32", shape: [4, 3] };
   });
@@ -201,7 +202,7 @@ Deno.test("parseIrDeclaration: 意味論 i32 の initializer を宣言として�
   assertEquals(graph.initializers["w"], { shared: false });
 });
 
-Deno.test("parseIrDeclaration: dtype 語彙", () => {
+test("parseIrDeclaration: dtype 語彙", () => {
   assertRejects(
     "意味論 dtype に f16",
     "graph.values['h'].dtype: 意味論 dtype 'f16' は語彙外",
@@ -217,7 +218,7 @@ Deno.test("parseIrDeclaration: dtype 語彙", () => {
     },
   );
 });
-Deno.test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
+test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
   assertRejects("未宣言シンボルの使用", "シンボル 'S' が graph.symbols で宣言されていない", (g) => {
     g.inputs[0].shape = ["S", 4];
   });
@@ -242,7 +243,7 @@ Deno.test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
   assertEquals(derived.inputs[0].shape, ["2T", 4]);
 });
 
-Deno.test("parseIrDeclaration: shape 要素", () => {
+test("parseIrDeclaration: shape 要素", () => {
   assertRejects("非正準な次元式", "次元式 '1T' が正準文法", (g) => {
     g.inputs[0].shape = ["1T", 4];
   });
@@ -256,7 +257,7 @@ Deno.test("parseIrDeclaration: shape 要素", () => {
   assertThrows(() => parseIrDeclaration(boolDim), IrError, "数値でも文字列でもない");
 });
 
-Deno.test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否する", () => {
+test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否する", () => {
   // JSON.parse は穴を作らないが、ホストが組む宣言（new Array(n) や delete）は作れる。map / some /
   // reduce は穴を飛ばすので、次元の欠けた宣言が検査を素通りして先で undefined の次元になる。
   const holeAt = (index: number, length: number): number[] => {
@@ -286,7 +287,7 @@ Deno.test("parseIrDeclarationValue: ホストの配列の穴を path つきで�
   );
 });
 
-Deno.test("parseIrDeclaration: ノードの構造", () => {
+test("parseIrDeclaration: ノードの構造", () => {
   assertRejects("attrs がオブジェクトでない", "graph.nodes[0].attrs: オブジェクトでない", (g) => {
     g.nodes[0].attrs = 5;
   });
@@ -301,7 +302,7 @@ Deno.test("parseIrDeclaration: ノードの構造", () => {
 // ADR 0067 決定 5: `outs` の本数に意味を与えるのは**契約層**（0 本を許すのは契約が effect を
 // 宣言する op だけ）。パーサは本数を見ない — ここで見るのは「見ていないこと」そのもので、
 // 非 effect op の `outs: []` が落ちるのは**別の規則**（出力の宣言が孤立する）による。
-Deno.test("parseIrDeclaration: outs の本数はパーサの担当ではない", () => {
+test("parseIrDeclaration: outs の本数はパーサの担当ではない", () => {
   // 出力宣言ごと消せばパーサは通る（本数の執行は tests/ops_contract_test.ts が固定する）
   const graph = parseMutated((g) => {
     g.nodes[1].outs = [];
@@ -343,7 +344,7 @@ const protoNameGraph = `{
   "nodes": [{ "op": "matmul", "ins": ["x", "__proto__"], "outs": ["y"], "attrs": {} }]
 }`;
 
-Deno.test("parseIrDeclaration: '__proto__' という名前の宣言を own property として保全する", () => {
+test("parseIrDeclaration: '__proto__' という名前の宣言を own property として保全する", () => {
   const graph = parseIrDeclaration(protoNameGraph);
 
   // 実行系によっては `o["__proto__"] = v` でも own property が作られるため、hasOwn だけでは
@@ -359,7 +360,7 @@ Deno.test("parseIrDeclaration: '__proto__' という名前の宣言を own prope
   assertEquals(graph.nodes[0].ins, ["x", "__proto__"]);
 });
 
-Deno.test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は黙って消えず拒否される", () => {
+test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は黙って消えず拒否される", () => {
   const orphan = `{
     "format": "karume-ir",
     "version": 2,
@@ -382,7 +383,7 @@ Deno.test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は�
 // ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。参照側の欄（ADR 0067 の
 // states 欄 / state_append）が入ったので、**宣言だけのグラフは参照完全性で落ちる** —
 // 宣言そのものを見るテストは withStateReaders で参照側を用意する。
-Deno.test("parseIrDeclaration: states 節を持たないグラフは空のスロット集合になる", () => {
+test("parseIrDeclaration: states 節を持たないグラフは空のスロット集合になる", () => {
   const graph = parseIrDeclaration(JSON.stringify(baseDeclaration()));
 
   assertEquals(Object.keys(graph.states), []);
@@ -390,7 +391,7 @@ Deno.test("parseIrDeclaration: states 節を持たないグラフは空のスロ
   assertEquals(Object.getPrototypeOf(graph.states), null);
 });
 
-Deno.test("parseIrDeclaration: state スロットの宣言を受理する", () => {
+test("parseIrDeclaration: state スロットの宣言を受理する", () => {
   const empty = parseMutated((g) => {
     g.states = {};
   });
@@ -449,7 +450,7 @@ const assertStatesReject = (states: unknown, includes: string): void => {
   );
 };
 
-Deno.test("parseIrDeclaration: state スロットの dtype は f32 のみ", () => {
+test("parseIrDeclaration: state スロットの dtype は f32 のみ", () => {
   // f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」として落ちる。
   assertStatesReject({ cache: { dtype: "f16", shape: [4] } }, "は未対応");
   for (const dtype of ["i32", "bool", "bf16", "i8"]) {
@@ -457,7 +458,7 @@ Deno.test("parseIrDeclaration: state スロットの dtype は f32 のみ", () =
   }
 });
 
-Deno.test("parseIrDeclaration: state スロットの shape は容量込みの具体形", () => {
+test("parseIrDeclaration: state スロットの shape は容量込みの具体形", () => {
   assertStatesReject({ cache: { dtype: "f32", shape: [1, 1, 1, 1, 1] } }, "rank 5 は 1..4 の外");
   assertStatesReject({ cache: { dtype: "f32", shape: [] } }, "rank 0 は 1..4 の外");
   assertStatesReject({ cache: { dtype: "f32", shape: [1, 0, 4] } }, "正整数でない");
@@ -483,7 +484,7 @@ const parseRawDim = (
 // （tools/exporter/src/karume/verify.py の _parse_shape）は int / float が別型なので、この形が
 // **両側で同じ受理集合**であることを固定しないと「ランタイムは読めるが exporter の検証が落ちる」
 // 乖離になる（鏡像は tools/exporter/tests/test_verify.py の TestIntegralFloatDimensions）。
-Deno.test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数は拒否する", () => {
+test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数は拒否する", () => {
   for (const raw of ["4.0", "4e0", "0.4e1"]) {
     const values = parseRawDim(raw, (g, dim) => {
       g.values["w"].shape = [dim];
@@ -534,7 +535,7 @@ Deno.test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非�
  * 定義集合に入って孤立宣言検査も逆参照検査も満たす — 参照不能な実テンソル 1 本が配布形に
  * 居座る。この組が門の唯一の検出対象。
  */
-Deno.test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する", () => {
+test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する", () => {
   assertThrows(
     () =>
       parseMutated((g) => {
@@ -562,7 +563,7 @@ Deno.test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否�
   assertEquals(graph.initializers["ghost"], { shared: false });
 });
 
-Deno.test("parseIrDeclaration: states の構造", () => {
+test("parseIrDeclaration: states の構造", () => {
   assertStatesReject([], "graph.states: オブジェクトでない");
   assertStatesReject({ cache: 4 }, "graph.states['cache']: オブジェクトでない");
   assertStatesReject({ cache: { dtype: "f32", shape: 4 } }, "shape: 配列でない");
@@ -574,7 +575,7 @@ Deno.test("parseIrDeclaration: states の構造", () => {
 
 // スロット名は値名前空間と別（ins / outs で参照されない）だが、同名は「スロット名の欄に値名を
 // 書いた / その逆」を検出できなくするだけなので拒否する。
-Deno.test("parseIrDeclaration: state スロット名は値名と衝突できない", () => {
+test("parseIrDeclaration: state スロット名は値名と衝突できない", () => {
   // 入力 / initializer / 中間値 / グラフ出力の 4 役すべて。
   for (const name of ["x", "w", "h", "y"]) {
     assertStatesReject(
@@ -584,7 +585,7 @@ Deno.test("parseIrDeclaration: state スロット名は値名と衝突できな�
   }
 });
 
-Deno.test("parseIrDeclaration: '__proto__' という名前の state スロットを own property として保全する", () => {
+test("parseIrDeclaration: '__proto__' という名前の state スロットを own property として保全する", () => {
   const graph = parseIrDeclaration(`{
     "format": "karume-ir",
     "version": 2,
@@ -654,7 +655,7 @@ const parseStateful = (mutate: (graph: DeclarationJson) => void = () => {}): IrD
 };
 
 // ADR 0067 決定 4: ノードは `ins` / `outs` と**別の欄**でスロットを名前参照する。
-Deno.test("parseIrDeclaration: ノードの states 欄を読む", () => {
+test("parseIrDeclaration: ノードの states 欄を読む", () => {
   const graph = parseStateful();
 
   assertEquals(graph.nodes.map((node) => node.op), [
@@ -672,7 +673,7 @@ Deno.test("parseIrDeclaration: ノードの states 欄を読む", () => {
   assertEquals(graph.nodes[3].outs, []);
 });
 
-Deno.test("parseIrDeclaration: states 欄は宣言済みスロットしか参照できない", () => {
+test("parseIrDeclaration: states 欄は宣言済みスロットしか参照できない", () => {
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -692,7 +693,7 @@ Deno.test("parseIrDeclaration: states 欄は宣言済みスロットしか参照
   );
 });
 
-Deno.test("parseIrDeclaration: 誰も参照しない state スロットを拒否する", () => {
+test("parseIrDeclaration: 誰も参照しない state スロットを拒否する", () => {
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -710,7 +711,7 @@ Deno.test("parseIrDeclaration: 誰も参照しない state スロットを拒否
   assertEquals(Object.keys(readerOnly.states), ["kv.k", "kv.v"]);
 });
 
-Deno.test("parseIrDeclaration: states 欄の構造", () => {
+test("parseIrDeclaration: states 欄の構造", () => {
   const reject = (states: unknown, includes: string): void => {
     assertThrows(
       () =>
@@ -728,7 +729,7 @@ Deno.test("parseIrDeclaration: states 欄の構造", () => {
 });
 
 // ADR 0066 追記 7: 束縛点は 2 つ（入力 shape / states shape）だが、**効く範囲は非対称**。
-Deno.test("parseIrDeclaration: states 専用記号は宣言できるが値 shape には現れない", () => {
+test("parseIrDeclaration: states 専用記号は宣言できるが値 shape には現れない", () => {
   // 容量記号 C は入力のどこにも現れない（context 生成時に決まる）— それでも宣言できる
   const graph = parseStateful((g) => {
     g.symbols.push("C");
@@ -769,7 +770,7 @@ Deno.test("parseIrDeclaration: states 専用記号は宣言できるが値 shape
   assertEquals(shared.values["att"].shape, ["T", 3]);
 });
 
-Deno.test("parseIrDeclaration: JSON の受理集合", () => {
+test("parseIrDeclaration: JSON の受理集合", () => {
   assertThrows(() => parseIrDeclaration("{"), IrError, "解析できない");
   assertThrows(
     () => parseIrDeclaration('{"format":"karume-ir","version":NaN}'),

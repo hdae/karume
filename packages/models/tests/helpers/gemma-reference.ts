@@ -25,6 +25,7 @@
  * 本文は id 列から導かれる（同じ変化を 2 度数えない）ので、実物には入れない。
  */
 
+import { readTextFileSync } from "@karume/test-support/fs";
 import { assert } from "@std/assert";
 import type {
   Gemma4ChatMessage,
@@ -86,7 +87,7 @@ export const seatArtifactName = (seat: Pick<Seat, "model" | "quant">): string =>
  */
 export const mirrorSeats = (mirror: URL): readonly Seat[] => {
   if (!mirrorAvailable(mirror)) return [];
-  const manifest = parseManifest(Deno.readTextFileSync(new URL("karume.json", mirror)));
+  const manifest = parseManifest(readTextFileSync(new URL("karume.json", mirror)));
   return Object.entries(manifest.models).flatMap(([model, entry]) =>
     Object.entries(entry.quants).map(([quant, { session }]): Seat => ({
       model,

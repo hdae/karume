@@ -16,6 +16,7 @@
 // MUST: B / H / M / N / D は複数形状（端数込み）を回す。カーネルは B と H を 1 本のバッチ軸へ
 // 畳むので、B=1 だけでは軸の取り違えが値に出ない。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { createSessionFromContainer, type Tensor } from "../src/runtime/executor.ts";
@@ -198,7 +199,7 @@ const bandMask = (
   return data;
 };
 
-Deno.test({
+test({
   name: "attention 1 ノードの出力が分解経路（bmm/softmax/bmm）と**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -256,7 +257,7 @@ Deno.test({
  * mask の値は **0 と大きい負値の混在**（実測の band mask）で、最後の 1 形だけ `-Infinity`
  * （エクスポータが −inf を折り込む形）を通す。
  */
-Deno.test({
+test({
   name:
     "加算 mask 付き attention の出力が分解経路（bmm → add → softmax → bmm）とビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -369,7 +370,7 @@ const maskedAttention = (): {
   return { graph, inputs: { x0: q, x1: k, x2: v, x3: mask } };
 };
 
-Deno.test({
+test({
   name: "加算 mask は i8a8 とは組めない（黙って縮退しない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -399,7 +400,7 @@ Deno.test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-Deno.test({
+test({
   name: "加算 mask は ①QK のキーと束縛だけを増やす（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -439,7 +440,7 @@ Deno.test({
  * 恒真化の門: **同じ形の mask 無し**は i8a8 で走ること（拒否の原因が mask であって
  * 「その形が i8a8 で走らない」ではないことを固定する）。
  */
-Deno.test({
+test({
   name: "mask × attentionCompute 'a8' は D%4 / N%4 に依らず一貫して拒否される（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

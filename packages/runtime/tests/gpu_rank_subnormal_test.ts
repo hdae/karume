@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, createSessionFromContainer } from "../mod.ts";
 import { GRAPH_NAME, openModelBytes, singleOpDeclaration } from "./helpers/model-fixture.ts";
@@ -12,7 +13,7 @@ const rank = (data: Float32Array<ArrayBuffer>, base: number, dim: number): numbe
     return va > vb ? -1 : va < vb ? 1 : a - b;
   });
 
-Deno.test({
+test({
   name: "argmax/topk: 非正規数をゼロと区別し、短い行と分割境界でCPUと同じ値・添字を返す",
   ignore: !GPU_AVAILABLE,
   async fn() {
@@ -80,7 +81,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "topk: 非正規数・NaN・符号付きゼロの複数候補をCPUと同じ順序・値ビットで返す",
   ignore: !GPU_AVAILABLE,
   async fn() {

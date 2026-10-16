@@ -18,6 +18,8 @@
 // 資産の在否は chunk グラフ 2 本の組で分ける（1 本も無ければ明示 SKIP・片方だけなら FAIL — ADR 0005）。タイル参照
 // `vae_tiles.*` の在否はここでは見ない（GPU の照合の側の組）。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { prepareContainer, type PreparedModel } from "@karume/runtime";
 import { ModelInputError } from "../src/errors.ts";
@@ -70,18 +72,18 @@ const AXIS_STARTS_TI2V: readonly (readonly [number, readonly number[]])[] = [
 const rowStarts = (extent: number, generation = WAN22_TI2V_GENERATION): readonly number[] =>
   planWanGenerationTiles(LAYOUT, extent, LAYOUT.tile, generation).rows.starts;
 
-Deno.test("Wan2.2 のタイル計画: 開始位置を値で凍結する（Python 側と同じ表・本番の入口を通す）", () => {
+test("Wan2.2 のタイル計画: 開始位置を値で凍結する（Python 側と同じ表・本番の入口を通す）", () => {
   for (const [extent, starts] of AXIS_STARTS_TI2V) {
     assertEquals([...rowStarts(extent)], [...starts], `潜在 ${extent}`);
   }
 });
 
-Deno.test("Wan2.2 のタイル計画: 空間の圧縮は 16（グラフの比 8 × unpatchify 2）・受理する 2 寸法はタイルで覆える", () => {
+test("Wan2.2 のタイル計画: 空間の圧縮は 16（グラフの比 8 × unpatchify 2）・受理する 2 寸法はタイルで覆える", () => {
   assertEquals(wanSpatialCompression(LAYOUT, WAN22_TI2V_GENERATION), 16);
   assertWanVaeTilesCover(LAYOUT, WAN22_TI2V_GENERATION, OWNER);
 });
 
-Deno.test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを通し、832×480 と 125 フレームは受理集合の文言で落とす", () => {
+test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを通し、832×480 と 125 フレームは受理集合の文言で落とす", () => {
   const gate: PromptGate<string> = { resolve: (text) => text, defaultNegative: () => "negative" };
   const config: WanPipelineConfig = {
     scheduler: { shift: 5 },
@@ -176,7 +178,7 @@ const SIZES: readonly {
   },
 ];
 
-Deno.test("Wan2.2 のタイル計画: 832×480 / 480×832 は 12 枚・1280×704 / 704×1280 は 28 枚（枚数・開始位置・対ごとのブレンド幅）", () => {
+test("Wan2.2 のタイル計画: 832×480 / 480×832 は 12 枚・1280×704 / 704×1280 は 28 枚（枚数・開始位置・対ごとのブレンド幅）", () => {
   const compression = wanSpatialCompression(LAYOUT, WAN22_TI2V_GENERATION);
   for (const { width, height, count, rows, cols, rowBlend, colBlend } of SIZES) {
     const where = `${width}×${height}`;
@@ -207,7 +209,7 @@ Deno.test("Wan2.2 のタイル計画: 832×480 / 480×832 は 12 枚・1280×704
   }
 });
 
-Deno.test("Wan2.2 のタイル計画の故障注入: 重なりをグラフの比 8 だけで導く（unpatchify を無視して 8）と潜在 44 / 52 / 80 の行が割れる", () => {
+test("Wan2.2 のタイル計画の故障注入: 重なりをグラフの比 8 だけで導く（unpatchify を無視して 8）と潜在 44 / 52 / 80 の行が割れる", () => {
   // unpatchify の倍率を落とした記述子 = 圧縮 8・重なり 8。潜在 16 / 30 は重なり 4 でも 8 でも同じ開始位置になる
   // ので、この注入を区別するのは 44 / 52 / 80 の行だけ（そこを名指す）。
   const graphScaleOnly = { ...WAN22_TI2V_GENERATION, vaePatchSize: 1 };
@@ -229,9 +231,9 @@ type LatentStatsFixture = {
   readonly std: readonly number[];
 };
 
-Deno.test("WAN22_LATENTS_MEAN / STD: fixture wan22-ti2v.json とビット一致（48 本ずつ・fixture の値は f32 そのもの）", async () => {
+test("WAN22_LATENTS_MEAN / STD: fixture wan22-ti2v.json とビット一致（48 本ずつ・fixture の値は f32 そのもの）", async () => {
   const fixture = JSON.parse(
-    await Deno.readTextFile(new URL("./fixtures/wan-latents/wan22-ti2v.json", import.meta.url)),
+    await readTextFile(new URL("./fixtures/wan-latents/wan22-ti2v.json", import.meta.url)),
   ) as LatentStatsFixture;
   assertEquals(fixture.source.repo, "Wan-AI/Wan2.2-TI2V-5B-Diffusers");
   for (
@@ -275,7 +277,7 @@ const prepared = async (component: string): Promise<PreparedModel> =>
     seriesGraph(SERIES, component),
   );
 
-Deno.test({
+test({
   name: "Wan2.2 TI2V VAE のタイルの実資産: chunk グラフ 2 本が揃っている",
   // 1 本も無い環境は「生成していない」なので SKIP。1 本でもあるなら欠けは FAIL。
   ignore: !ANY_GRAPH,
@@ -288,7 +290,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "Wan2.2 TI2V VAE のタイルの実資産（GPU 不要）: layout は計画のリテラルと一致・2.2 の記述子の admission を通り" +
     "・2.1 の記述子では落ちる",

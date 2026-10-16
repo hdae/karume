@@ -7,6 +7,7 @@
 // 1 dispatch の近似）が実行相とずれたときの症状は沈黙（例外も警告も出ず、数字だけがずれる）
 // なので、算式そのものを手計算の定数で押さえる。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import type { PreparedModel } from "../src/runtime/executor.ts";
 import { openGraph, weight } from "./helpers/estimate-graphs.ts";
@@ -50,7 +51,7 @@ const chainModel = (): PreparedModel =>
     weight("w3", f32Bytes(new Array(3).fill(1))),
   ]);
 
-Deno.test("中間の総量は領域の総和（読み書きの同居禁止で領域が割れ、配り直しはサイズに依らない）", () => {
+test("中間の総量は領域の総和（読み書きの同居禁止で領域が割れ、配り直しはサイズに依らない）", () => {
   // 8（h1）+ 12（h2）+ 4（h3）。h2 は h1 を読む dispatch が書くので別領域（12 / 8）。h3 は h2 を
   // 読むので h2 の領域には置けず、生存を終えた h1 の区間（8 バイト）を掴む = 12 + 8 = 20
   // （旧 exact-size プールでは 3 本累積の 24 だった）。
@@ -82,20 +83,20 @@ const reluChainModel = (outputs: readonly string[]): PreparedModel =>
     ],
   });
 
-Deno.test("生存を終えた区間は配り直され、総量が増えない", () => {
+test("生存を終えた区間は配り直され、総量が増えない", () => {
   // 中間 3 本（8B × 3）。h2 は h1 を読むので別領域、h3 は h2 を読むので h1 側の領域へ戻り、
   // 生存を終えた h1 の区間を掴む = 領域 2 本 × 8 = 16。
   assertEquals(workspaceBytes(reluChainModel(["h3"])), 16);
 });
 
-Deno.test("グラフ出力（pinned）は生存を終えず、後続は整列した次の区間へ回る", () => {
+test("グラフ出力（pinned）は生存を終えず、後続は整列した次の区間へ回る", () => {
   // h1 も出力にすると、その区間は refs が 0 になっても生存を終えない。h3 は h1 側の領域で
   // h1 と重なるので 256 整列の次の offset（256）へ置かれ、領域は 264 + h2 の 8 = 272
   // （offset 整列は device の minStorageBufferOffsetAlignment・仕様既定 256 — ADR 0093 決定 1）。
   assertEquals(workspaceBytes(reluChainModel(["h1", "h3"])), 272);
 });
 
-Deno.test("渡された maxBufferSize を中間の領域の上限に使う（実行相と同じ granted 値 — ADR 0093 決定 4）", () => {
+test("渡された maxBufferSize を中間の領域の上限に使う（実行相と同じ granted 値 — ADR 0093 決定 4）", () => {
   // 上と同じ形。無指定なら領域の上限は束縛上限と core 既定の大きいほう（256 MiB）なので、h3 は h1 の
   // 領域の offset 256 に入る = 272。maxBufferSize 256 を渡すと offset 256 + 8 が領域の上限を超え、
   // h3 は h2 の領域（読む相手なので置けない）でもない 3 本目の領域へ回る = 8 × 3 = 24。

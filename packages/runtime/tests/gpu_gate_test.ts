@@ -7,6 +7,7 @@
 // この門番自身は GPU がある環境では**通る（緑の 1 件として見える）**。ignore にすると
 // 「門番が効いているのか、門番ごと消えているのか」が区別できなくなるため。
 
+import { test } from "@karume/test-support/test";
 import { assert } from "@std/assert";
 import {
   ALLOW_NO_GPU,
@@ -17,7 +18,7 @@ import {
   TIMESTAMP_QUERY_AVAILABLE,
 } from "./helpers/gpu.ts";
 
-Deno.test({
+test({
   name: "GPU 門番: アダプタ無しの全 SKIP は明示 FAIL（ADR 0005）",
   // opt-out は「GPU 無しを承知で通す」意図表明のときだけ。既定では ignore しない。
   ignore: ALLOW_NO_GPU,
@@ -35,7 +36,7 @@ Deno.test({
 // `helpers/gpu.ts` の console.warn 1 行だけになる（verify は緑）。アダプタ不在と同じ性格の
 // 「無音の見かけ成功」なので、同じ形の opt-out つき門番を feature ごとに置く。
 // アダプタ自体が無い機では上の門番が既に落ちているので、ここは二重に鳴らさない。
-Deno.test({
+test({
   name: "GPU 門番: shader-f16 不在の SKIP は明示 FAIL（ADR 0005）",
   ignore: ALLOW_NO_SHADER_F16 || !GPU_AVAILABLE,
   fn: () => {
@@ -49,7 +50,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "GPU 門番: timestamp-query 不在の SKIP は明示 FAIL（ADR 0005）",
   ignore: ALLOW_NO_TIMESTAMP_QUERY || !GPU_AVAILABLE,
   fn: () => {

@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertInstanceOf, assertRejects } from "@std/assert";
 import { acquireGpu, RUNTIME_INTERNAL } from "../src/gpu/device.ts";
 import {
@@ -20,7 +21,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-Deno.test({
+test({
   name: "workgroup サイズ超過のパイプラインは errorScope 経由で例外になる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -61,7 +62,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "withPipelineScope は body の同期例外でも 2 本とも pop する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -99,7 +100,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "無効パイプラインは internal ではなく validation として返る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -126,7 +127,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "同一 device 上の複数 Session の並行 run が互いに干渉せず完走する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -178,7 +179,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "Session.run は自分のスコープ区間を device 単位ロックで守る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

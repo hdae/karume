@@ -10,6 +10,7 @@
 // 全コードポイントの掃引（BADNESS_RE の `\w` / `\s` / `.`・前処理の 1 文字・NFC の版差）は
 // `wan_text_prompt_clean_sweep_test.ts`。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { cleanPrompt, PromptCleanError } from "../src/wan/text/prompt-clean.ts";
@@ -41,7 +42,7 @@ const rejectReason = (text: string): string => {
 
 // ---- 決定的な処理（期待は recipe の上流 prompt_clean で確かめた値）-------------
 
-Deno.test("表引き: 全角・曲がった引用符・合字・端末エスケープ・改行が上流と同じ文字列になる", () => {
+test("表引き: 全角・曲がった引用符・合字・端末エスケープ・改行が上流と同じ文字列になる", () => {
   assertEquals(clean("色调艳丽，过曝"), "色调艳丽,过曝", "公式 negative の全角読点");
   assertEquals(clean("“quoted” it’s"), '"quoted" it\'s');
   // `ŉ` は合字表で `ʼn`（U+02BC）になり、同じ周の uncurl_quotes で `'n` になる（表の順が効く）。
@@ -54,7 +55,7 @@ Deno.test("表引き: 全角・曲がった引用符・合字・端末エスケ�
   assertEquals(clean("x​y"), "x​y", "ゼロ幅空白は空白ではない");
 });
 
-Deno.test("端末エスケープの数字は Python の `\\d`（Unicode の Nd・面をまたぐ）", () => {
+test("端末エスケープの数字は Python の `\\d`（Unicode の Nd・面をまたぐ）", () => {
   // ASCII の数字だけで判定すると ESC と `[` を消し残し、制御文字の削除で `[` が残る。
   assertEquals(clean("\x1b[١mred"), "red", "アラビア・インド数字");
   assertEquals(clean("\x1b[\u{1D7CE}mred"), "red", "数学用の太字数字（U+1D7CE）");
@@ -62,14 +63,14 @@ Deno.test("端末エスケープの数字は Python の `\\d`（Unicode の Nd�
   assertEquals(clean("\x1b[1;2xok\x1b["), "ok[");
 });
 
-Deno.test("区切り: 1,000,000 コードポイントで切れた所では NFC が合成しない（ftfy の区切りどおり）", () => {
+test("区切り: 1,000,000 コードポイントで切れた所では NFC が合成しない（ftfy の区切りどおり）", () => {
   // 上流（実測）: 空白 999,999 個 + e + U+0301 は 1 区切り目が e で終わり、U+0301 が次の区切りに
   // 落ちるので合成されない。1 個少なければ同じ区切りに入って é になる。
   assertEquals(clean(" ".repeat(999_999) + "é"), "é");
   assertEquals(clean(" ".repeat(999_998) + "é"), "é");
 });
 
-Deno.test("各周の先頭で門を見る: NFC や全角の表が作った並びも拒む", () => {
+test("各周の先頭で門を見る: NFC や全角の表が作った並びも拒む", () => {
   // 1 周目の入力には当たらないが、NFC が à À を作った 2 周目で BADNESS_RE が当たる
   // （上流は fix_encoding が試して戻すだけ = 黙って通すが、ここは推定を移植しないので拒む）。
   assertEquals(rejectReason("àÀ"), "mojibake");
@@ -77,7 +78,7 @@ Deno.test("各周の先頭で門を見る: NFC や全角の表が作った並び
   assertEquals(rejectReason("＆amp;"), "entity");
 });
 
-Deno.test("entity の門: `&` の直後が文字なら拒み、空白・改行なら受ける", () => {
+test("entity の門: `&` の直後が文字なら拒み、空白・改行なら受ける", () => {
   assertEquals(rejectReason("salt &amp; pepper"), "entity");
   assertEquals(rejectReason("R&D"), "entity", "entity にならない並びも拒む側へ倒す");
   assertEquals(rejectReason("x &#65 y"), "entity", "セミコロン無しの数値参照（上流は A に解く）");
@@ -86,7 +87,7 @@ Deno.test("entity の門: `&` の直後が文字なら拒み、空白・改行�
   assertEquals(clean("a &　b"), "a & b");
 });
 
-Deno.test("拒否: mojibake・C1・未割り当ては PromptCleanError（入力起因）で理由を運ぶ", () => {
+test("拒否: mojibake・C1・未割り当ては PromptCleanError（入力起因）で理由を運ぶ", () => {
   assertEquals(rejectReason("cafÃ©"), "mojibake");
   assertEquals(rejectReason("a\x85b"), "c1");
   assertEquals(rejectReason("a͸b"), "unassigned");
@@ -96,12 +97,12 @@ Deno.test("拒否: mojibake・C1・未割り当ては PromptCleanError（入力�
   assert(error.message.includes("U+0085"), error.message);
 });
 
-Deno.test("孤立サロゲートは前処理の前に拒む（PromptCleanError ではなく ModelInputError）", () => {
+test("孤立サロゲートは前処理の前に拒む（PromptCleanError ではなく ModelInputError）", () => {
   const error = assertThrows(() => clean("a\ud800b"), ModelInputError, "サロゲート");
   assert(!(error instanceof PromptCleanError));
 });
 
-Deno.test("壊れた表で不動点に届かなければ素の Error で落ちる（無限に回さない）", () => {
+test("壊れた表で不動点に届かなければ素の Error で落ちる（無限に回さない）", () => {
   // 全角 A ↔ A の循環（上流の表には無い — 資産の破損だけが作る形）。
   const cyclic = {
     ...tables,
@@ -113,13 +114,13 @@ Deno.test("壊れた表で不動点に届かなければ素の Error で落ち�
 
 // ---- 乱択（recipe と同じ列を再生して digest を突き合わせる）--------------------
 
-Deno.test("PRNG: xorshift32 が recipe と同じ列を出す", () => {
+test("PRNG: xorshift32 が recipe と同じ列を出す", () => {
   const next = xorshift32(fixture.prng.seed);
   assertEquals(Array.from({ length: fixture.prng.first.length }, next), fixture.prng.first);
 });
 
 for (const run of fixture.clean) {
-  Deno.test(`乱択 [${run.name}] ${run.count} 本の決着が上流 prompt_clean と一致`, async () => {
+  test(`乱択 [${run.name}] ${run.count} 本の決着が上流 prompt_clean と一致`, async () => {
     const pool = expandRanges(fixture.pools[run.pool]);
     const records: string[] = [];
     for (const text of fuzzStrings(pool, run.seed, run.count, run.maxLength)) {
@@ -136,13 +137,13 @@ for (const run of fixture.clean) {
   });
 }
 
-Deno.test("安全な池は全件受理（拒否の門が普通のプロンプトを落とさない）", () => {
+test("安全な池は全件受理（拒否の門が普通のプロンプトを落とさない）", () => {
   const safe = fixture.clean.find((run) => run.name === "safe");
   assertEquals(safe?.outcomes, { accepted: safe?.count ?? -1 });
 });
 
 for (const check of fixture.badness.filter((entry) => entry.template === undefined)) {
-  Deno.test(`BADNESS_RE の JS 訳 [乱択 ${check.name}] が上流の is_bad と全件一致`, async () => {
+  test(`BADNESS_RE の JS 訳 [乱択 ${check.name}] が上流の is_bad と全件一致`, async () => {
     const pool = expandRanges(fixture.pools[check.pool as string]);
     let bits = "";
     for (

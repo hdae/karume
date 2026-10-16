@@ -17,6 +17,7 @@
  * 0 / 1）、T2V は全て 0。golden の `input.condition_mask` とのビット一致はホストテストが縛る。
  */
 
+import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
 import { assertEquals } from "@std/assert";
 import { type OpenedContainer, parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import type { WanPatchGeometry, WanTokenGrid } from "../../src/wan/dit-tokens.ts";
@@ -104,9 +105,9 @@ export const isAccept = ({ role }: Ti2vCase): boolean =>
 /** ファイルの有無（NotFound 以外は伝播させる — 権限エラーを「資産が無い」に読み替えない）。 */
 export const filePresent = (url: URL): boolean => {
   try {
-    return Deno.statSync(url).isFile;
+    return statSync(url).isFile;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
@@ -118,7 +119,7 @@ export const caseFiles = (name: string): readonly URL[] => [
 ];
 
 export const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
-  const bytes = await Deno.readFile(url);
+  const bytes = await readFile(url);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 };
 

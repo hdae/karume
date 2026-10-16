@@ -1,3 +1,5 @@
+import { platformObject } from "@karume/test-support/webgpu";
+import { test } from "@karume/test-support/test";
 import {
   assert,
   assertEquals,
@@ -53,7 +55,7 @@ const fakeAdapterLimits = (overrides: Partial<RequiredLimits> = {}): GPUSupporte
   return { ...base, ...overrides } as unknown as GPUSupportedLimits;
 };
 
-Deno.test("planRequiredLimits は maxStorageBufferBindingSize を maxBufferSize 以下に収める", () => {
+test("planRequiredLimits は maxStorageBufferBindingSize を maxBufferSize 以下に収める", () => {
   const planned = planRequiredLimits(
     fakeAdapterLimits({ maxBufferSize: 512, maxStorageBufferBindingSize: 4096 }),
   );
@@ -64,7 +66,7 @@ Deno.test("planRequiredLimits は maxStorageBufferBindingSize を maxBufferSize 
 
 // LIMIT_CAPS（テスト専用の絞り）は「core 既定機の再現」に使う。maxBufferSize だけを絞った
 // caps で束縛上限が絞られないままだと、絞ったつもりの機が再現されず試験目的が黙って外れる。
-Deno.test("planRequiredLimits は caps が maxBufferSize だけを絞っても束縛上限を超えさせない", () => {
+test("planRequiredLimits は caps が maxBufferSize だけを絞っても束縛上限を超えさせない", () => {
   const adapter = fakeAdapterLimits({
     maxBufferSize: 256 * 1024 * 1024,
     maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -87,7 +89,7 @@ Deno.test("planRequiredLimits は caps が maxBufferSize だけを絞っても�
   assertEquals(narrowBinding.maxStorageBufferBindingSize, 32 * 1024 * 1024);
 });
 
-Deno.test("planRequiredLimits は compute 系をアダプタ値まで引き上げる", () => {
+test("planRequiredLimits は compute 系をアダプタ値まで引き上げる", () => {
   const planned = planRequiredLimits(fakeAdapterLimits());
 
   assertEquals(planned.maxComputeInvocationsPerWorkgroup, 1024, "仕様既定値 256 に落とさない");
@@ -96,7 +98,7 @@ Deno.test("planRequiredLimits は compute 系をアダプタ値まで引き上�
   assertEquals(planned.maxComputeWorkgroupsPerDimension, 65535);
 });
 
-Deno.test("assertLimitsGranted は要求を下回る limit を fail loudly にする", () => {
+test("assertLimitsGranted は要求を下回る limit を fail loudly にする", () => {
   const planned = planRequiredLimits(fakeAdapterLimits());
   const granted = fakeAdapterLimits({ maxComputeInvocationsPerWorkgroup: 256 });
 
@@ -108,7 +110,7 @@ Deno.test("assertLimitsGranted は要求を下回る limit を fail loudly に�
   assertLimitsGranted(planned, fakeAdapterLimits());
 });
 
-Deno.test({
+test({
   name: "acquireGpu は引き上げ済み limits の device を返す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -127,7 +129,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "readAdapterLimits は acquireGpu が計画する limits と同じ値を返す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -144,7 +146,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "acquireGpu は features / wgslLanguageFeatures を集合に正規化する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -163,7 +165,7 @@ Deno.test({
 
 // 「true × feature 不在」だけは実機で作れない（アダプタの feature は消せない）ため、
 // 判定を切り出した純関数で全 6 通りを固定する。ADR 0028。
-Deno.test("planShaderF16Feature は undefined を「要求しない」に倒し、必須指定の不足は fail loudly", () => {
+test("planShaderF16Feature は undefined を「要求しない」に倒し、必須指定の不足は fail loudly", () => {
   const present = new Set(["shader-f16", "timestamp-query"]);
   const absent = new Set(["timestamp-query"]);
 
@@ -185,7 +187,7 @@ Deno.test("planShaderF16Feature は undefined を「要求しない」に倒し�
   assert(error.message.includes("f32"), error.message);
 });
 
-Deno.test({
+test({
   name:
     "acquireGpu({shaderF16}) は feature を要求し、実走カナリアを通したときだけ有効になる（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -273,7 +275,7 @@ const CANARY_SOLUTION = [4.0029296875, 1] as const;
 
 /** 決着済みの消失（`reason` はカナリアの分岐に使われないため固定値でよい）。 */
 const loss = (): Promise<GPUDeviceLostInfo> =>
-  Promise.resolve({ reason: "destroyed", message: "テストによる消失" });
+  Promise.resolve(platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }));
 
 /**
  * マクロタスクで決着する消失。マイクロタスクだけで進む段（パイプライン生成の errorScope pop
@@ -282,10 +284,10 @@ const loss = (): Promise<GPUDeviceLostInfo> =>
  */
 const lossAfterMacrotask = (): Promise<GPUDeviceLostInfo> =>
   new Promise((resolve) =>
-    setTimeout(() => resolve({ reason: "destroyed", message: "テストによる消失" }), 0)
+    setTimeout(() => resolve(platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" })), 0)
   );
 
-Deno.test("shader-f16 カナリアは既知解と一致したときだけ通る", async () => {
+test("shader-f16 カナリアは既知解と一致したときだけ通る", async () => {
   await assertShaderF16Executes(canaryDevice({ mapped: CANARY_SOLUTION }));
 
   // denoland/deno#23125 の沈黙全 0 と、丸めが起きない実装（共有タイルの素通り）
@@ -298,7 +300,7 @@ Deno.test("shader-f16 カナリアは既知解と一致したときだけ通る"
   }
 });
 
-Deno.test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（acquireGpu をハングさせない）", async () => {
+test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（acquireGpu をハングさせない）", async () => {
   // このフェイク device は「解決しない待ち」を**作って**いる。実測（Deno + wgpu / NVIDIA・
   // 2026-08-16）では destroy 由来の消失後も popErrorScope は null で resolve し mapAsync は
   // reject するので、これは実挙動の再現ではなく「未検証の実装（実 TDR / ブラウザ）が解決を
@@ -315,7 +317,7 @@ Deno.test("shader-f16 カナリアは device 消失で待ち続けずに落ち�
   assert(validationError.message.includes("パイプライン生成"), validationError.message);
 });
 
-Deno.test("readAdapterInfo は info を持たないアダプタでも安全な空値に正規化する", () => {
+test("readAdapterInfo は info を持たないアダプタでも安全な空値に正規化する", () => {
   // 古い Chromium（requestAdapterInfo() 時代）は adapter.info を持たない。
   const empty = readAdapterInfo({});
   assertEquals(empty.vendor, "");
@@ -328,7 +330,7 @@ Deno.test("readAdapterInfo は info を持たないアダプタでも安全な�
   assertEquals(readAdapterInfo({ info: present as GPUAdapterInfo }).vendor, "acme");
 });
 
-Deno.test("withScopeLock は errorScope 区間を device 単位で直列化する", async () => {
+test("withScopeLock は errorScope 区間を device 単位で直列化する", async () => {
   const gpu = fakeGpuContext(fakeDevice());
   const trace: string[] = [];
   let active = 0;
@@ -356,7 +358,7 @@ Deno.test("withScopeLock は errorScope 区間を device 単位で直列化す�
   assertEquals(results, ["a", "b", "c"], "戻り値は各呼び出し自身の結果");
 });
 
-Deno.test("withScopeLock は 1 本の区間の失敗を後続に伝播しない", async () => {
+test("withScopeLock は 1 本の区間の失敗を後続に伝播しない", async () => {
   const gpu = fakeGpuContext(fakeDevice());
   const failure = new Error("区間内の失敗");
 
@@ -367,7 +369,7 @@ Deno.test("withScopeLock は 1 本の区間の失敗を後続に伝播しない"
   assertEquals(await following, "ok", "チェーンは決着だけを繋ぐので後続は巻き添えにならない");
 });
 
-Deno.test("onLost は解除でき、購読時点で消失済みなら即時通知する", async () => {
+test("onLost は解除でき、購読時点で消失済みなら即時通知する", async () => {
   const { gpu, lose } = losableGpuContext();
   const seen: string[] = [];
 
@@ -384,7 +386,7 @@ Deno.test("onLost は解除でき、購読時点で消失済みなら即時通�
   assertEquals(seen, ["kept", "late"]);
 });
 
-Deno.test("raceDeviceLost は消失を例外にし、決着時に購読を解除する", async () => {
+test("raceDeviceLost は消失を例外にし、決着時に購読を解除する", async () => {
   const { gpu, lose } = losableGpuContext();
   assertEquals(gpu.pendingLostListeners, 0);
 
@@ -404,16 +406,16 @@ Deno.test("raceDeviceLost は消失を例外にし、決着時に購読を解除
   assertEquals(gpu.pendingLostListeners, 0);
 });
 
-Deno.test("device 消失の例外はバックエンドが入れた reason / message を文言に載せる", async () => {
+test("device 消失の例外はバックエンドが入れた reason / message を文言に載せる", async () => {
   // 真因（Metal の counter sample buffer 確保失敗など）は `GPUDeviceLostInfo.message` にしか
   // 残らない — 消失済み device のエラーは errorScope へ入らないので、ここで落とすと karume の
   // どこにも真因が残らない（docs/limitations.md の Metal timestamp 節）。
   // NOTE: `reason` は仕様上 "unknown" も取るが、Deno の型宣言は "destroyed" しか持たない。
   // 検証の要点は message 側（真因文字列）なので、型が受ける値のまま組む。
-  const loss: GPUDeviceLostInfo = {
+  const loss: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({
     reason: "destroyed",
     message: "Device::create_query_set: Not enough memory left.",
-  };
+  });
   const { gpu, lose } = losableGpuContext();
 
   const hanging = gpu[RUNTIME_INTERNAL].raceDeviceLost(new Promise<void>(() => {}), "flush");
@@ -437,7 +439,7 @@ Deno.test("device 消失の例外はバックエンドが入れた reason / mess
   assert(gated.message.includes("Device::create_query_set"), gated.message);
 });
 
-Deno.test("消失通知は listener の例外で止まらず、その例外も握り潰さない", async () => {
+test("消失通知は listener の例外で止まらず、その例外も握り潰さない", async () => {
   const failure = new Error("user callback の失敗");
   // 公開 onDeviceLost はコンストラクタが登録するため挿入順の先頭に来る。隔離が無いと、この
   // throw で後続の内部購読（raceDeviceLost の待ち）へ通知が届かず、下の await が永久に返らずに
@@ -482,7 +484,7 @@ const poppingDevice = (scopes: readonly (string | undefined)[]): GPUDevice => {
   } as unknown as GPUDevice;
 };
 
-Deno.test("popFailureScopes は両スコープ捕捉時に OOM を返す（validation は派生）", async () => {
+test("popFailureScopes は両スコープ捕捉時に OOM を返す（validation は派生）", async () => {
   // 余力切れの createBuffer は無効バッファを返し、それを使う後続の操作が
   // `Buffer with '' label is invalid` を validation に立てる。validation を先に返すと根因の
   // OOM が捨てられ、破棄後使用と区別のつかない報告になる（実測事故の再発防止）。
@@ -505,7 +507,7 @@ Deno.test("popFailureScopes は両スコープ捕捉時に OOM を返す（valid
   assertEquals(await popFailureScopes(poppingDevice([]), "clean"), undefined);
 });
 
-Deno.test({
+test({
   name: "並行する errorScope 区間で validation 失敗が正しい側に帰属する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -553,7 +555,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   },
 });
 
-Deno.test({
+test({
   name: "GpuContext は device.lost を購読し、意図的な破棄と区別して記録する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -574,7 +576,7 @@ Deno.test({
   },
 });
 
-Deno.test("subgroup32は明示要求と必要な全機能を要求し、既定では要求しない", () => {
+test("subgroup32は明示要求と必要な全機能を要求し、既定では要求しない", () => {
   const present = new Set(["subgroups", "subgroup-size-control"]),
     language = new Set(["subgroup_id"]);
   assertEquals(planSubgroup32Features(present, language, undefined), []);
@@ -595,7 +597,7 @@ Deno.test("subgroup32は明示要求と必要な全機能を要求し、既定�
   );
 });
 
-Deno.test("subgroup32カナリアは全レーンの既知解だけを受理し、消失で待ち続けない", async () => {
+test("subgroup32カナリアは全レーンの既知解だけを受理し、消失で待ち続けない", async () => {
   await assertSubgroup32Executes(canaryDevice({ mapped: Array<number>(256).fill(32896) }));
   for (const mapped of [[], Array<number>(256).fill(0), [...Array<number>(255).fill(32896), 0]]) {
     await assertRejects(() => assertSubgroup32Executes(canaryDevice({ mapped })), GpuFeatureError);
@@ -613,7 +615,7 @@ Deno.test("subgroup32カナリアは全レーンの既知解だけを受理し�
   );
 });
 
-Deno.test("batch finish: errorScope の pop 待ちの間に消失した区間は成功で返さない", async () => {
+test("batch finish: errorScope の pop 待ちの間に消失した区間は成功で返さない", async () => {
   // 読み戻しの無い finish は `onSubmittedWorkDone` だけを消失と競わせ、その後の pop 待ちは競わせない
   // （消失後の pop は null で決着する — docs/research/2026-08-16-device-lost-wait-settlement.md）。
   // 消失を跨いだ finish が成功で返ると「区間は無事に閉じた」と誤読されるので、pop の後に消失を見る。
@@ -636,7 +638,7 @@ Deno.test("batch finish: errorScope の pop 待ちの間に消失した区間は
   await assertRejects(() => finished, GpuDeviceLostError, "batch の完了");
 });
 
-Deno.test("createResident: errorScope の pop 待ちの間に消失した device では成功で返さず、確保したバッファを破棄する", async () => {
+test("createResident: errorScope の pop 待ちの間に消失した device では成功で返さず、確保したバッファを破棄する", async () => {
   // 入口の同期判定を通った後、pop を待つ間に消失すると pop は null で決着する
   // （docs/research/2026-08-16-device-lost-wait-settlement.md）。ここで成功を返すと、使えない常駐
   // テンソルが確保の成功として出回り、失敗地点が初回の write / read へずれる。
@@ -665,7 +667,7 @@ Deno.test("createResident: errorScope の pop 待ちの間に消失した device
   assertEquals(destroyed, 1, "確保したバッファを破棄せずに捨てている");
 });
 
-Deno.test("beginBatch は破棄要求済み・消失済みの device で開かず、区間ロックも取らない", async () => {
+test("beginBatch は破棄要求済み・消失済みの device で開かず、区間ロックも取らない", async () => {
   // 開いてしまうと区間ロックを握ったまま enqueue を受理し続け、失敗が finish まで遅れる。
   // `destroy()` はフラグを同期に立てるので、`device.lost` の reaction を待たずに落ちる。
   const destroyed = fakeGpuContext(fakeDevice());
@@ -683,7 +685,7 @@ Deno.test("beginBatch は破棄要求済み・消失済みの device で開か�
   await assertRejects(() => gpu.beginBatch(), GpuDeviceLostError, "batch の開始");
 });
 
-Deno.test("beginBatch: ロック待ちの間に消失した device では区間を開かず、ロックをすぐ返す", async () => {
+test("beginBatch: ロック待ちの間に消失した device では区間を開かず、ロックをすぐ返す", async () => {
   // 呼んだ時点の同期判定は通るが、先行区間がロックを返すまで待つ間に消失した形。開いてしまうと
   // 消失済み device の上で区間ロックを握り続け、利用者が finish するまで後続が待たされる。
   const { gpu, lose } = losableGpuContext();

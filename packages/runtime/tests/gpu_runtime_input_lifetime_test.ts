@@ -10,6 +10,7 @@
 // ①〜③ が無いと、退行は「たまたま fail loudly」か「沈黙誤値」のどちらかに割れる形で戻る
 // （どちらも run の戻り値の見た目は正常）。④ は負の門で、契約を clone 側へ倒したら赤くなる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext, type ResidentTensor } from "../src/gpu/device.ts";
 import {
@@ -71,7 +72,7 @@ const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
 const openSession = async (gpu: GpuContext): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(GRAPH), "model");
 
-Deno.test({
+test({
   name: "run 直後の shape 書き換えは解決 shape に届かない（発行時 snapshot・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -95,7 +96,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "run 直後の inputs member 差し替えは実行に届かない（発行時 snapshot・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -120,7 +121,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "run 直後の bindings 書き換えは束縛衝突を起こさない（発行時 snapshot・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -143,7 +144,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "run 直後の data 書き換えは実行に届く（borrowed の負の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -171,7 +172,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "enqueue も発行時 snapshot で走る（inputs / shape / copyOutputs・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

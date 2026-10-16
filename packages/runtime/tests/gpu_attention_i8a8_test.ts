@@ -26,6 +26,7 @@
 // - 分解経路とのビット同一（tests/gpu_attention_parity_test.ts）は i8a8 では原理的に成立
 //   しない。同テストは f32 / f16 変種専用の門として据え置く（別キーなので構造的に混ざらない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { RunArena } from "../src/gpu/arena.ts";
@@ -314,7 +315,7 @@ const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
     0,
   );
 
-Deno.test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れている（atol=0 の前提）", () => {
+test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れている（atol=0 の前提）", () => {
   // GPU の除算は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段揺れうる。
   // 余裕を**毎回実測**して門にしないと、atol=0 は「たまたま通っているだけ」になる。
   let worst = Number.POSITIVE_INFINITY;
@@ -331,7 +332,7 @@ Deno.test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離�
 // GPU vs TS 参照（atol=0）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name:
     "attention_qk i8a8 の S が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -360,7 +361,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -401,7 +402,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "attention_qk i8a8: NaN 行は行全体・NaN 列は列全体へ伝播し、ゼロ行は厳密に 0（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -455,7 +456,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "attention_qk i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -518,7 +519,7 @@ const runAttention = async (
   }
 };
 
-Deno.test({
+test({
   name: "attentionCompute:'a8' は ①QK を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -557,7 +558,7 @@ Deno.test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-Deno.test({
+test({
   name:
     "attentionCompute:'a8' の変種選択（①QK i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -603,7 +604,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "attentionCompute:'a8' は D % 4 != 0 で f32 経路へ縮退する（出力はビット同一・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -625,7 +626,7 @@ Deno.test({
 });
 
 /** 縮退が**沈黙**である以上キー検査が 2 本目の検出器。無条件 assert の理由は上の census と同じ。 */
-Deno.test({
+test({
   name: "attentionCompute:'a8' の D % 4 != 0 縮退は i8a8 も量子化も 1 本も走らせない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -654,7 +655,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "attention i8a8: D が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,

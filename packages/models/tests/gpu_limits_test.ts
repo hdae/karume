@@ -7,6 +7,7 @@
 // アダプタ実測値か）は GPU / ロード経路が要るので `container_loading_test.ts` の⑧と
 // `gpu_container_loading_test.ts` の⑨が縛る。
 
+import { test } from "@karume/test-support/test";
 import { assertThrows } from "@std/assert";
 import type { RequiredLimitsSpec } from "@karume/hub";
 import type { RequiredLimits } from "@karume/runtime";
@@ -32,14 +33,14 @@ const LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 0,
 };
 
-Deno.test("assertRequiredLimitsSatisfied: 要求と実測が等しい配布形は通る", () => {
+test("assertRequiredLimitsSatisfied: 要求と実測が等しい配布形は通る", () => {
   // 境界は「不足 = 実測 < 要求」— ここを `<=` で書くと、要求ちょうどの device（exporter が
   // 焼く値は現物の最大テンソルそのもの）が全て誤拒否される。
   const spec: RequiredLimitsSpec = { maxBufferSize: LIMITS.maxBufferSize };
   assertRequiredLimitsSatisfied(spec, LIMITS, WHERE);
 });
 
-Deno.test("assertRequiredLimitsSatisfied: 1 でも下回る配布形は落ちる", () => {
+test("assertRequiredLimitsSatisfied: 1 でも下回る配布形は落ちる", () => {
   const spec: RequiredLimitsSpec = { maxBufferSize: LIMITS.maxBufferSize + 1 };
   assertThrows(
     () => assertRequiredLimitsSatisfied(spec, LIMITS, WHERE),
@@ -48,18 +49,18 @@ Deno.test("assertRequiredLimitsSatisfied: 1 でも下回る配布形は落ちる
   );
 });
 
-Deno.test("assertRequiredLimitsSatisfied: spec に書かれていない limit は見ない（部分写像）", () => {
+test("assertRequiredLimitsSatisfied: spec に書かれていない limit は見ない（部分写像）", () => {
   // 実測は 10 本が 0 だが、配布形が主張しているのは `maxBufferSize` だけ。書かれていない
   // limit まで見ると「欄なし = WebGPU 保証既定で動く」（ADR 0089 決定 3）の意味論が壊れる。
   const spec: RequiredLimitsSpec = { maxBufferSize: 1 };
   assertRequiredLimitsSatisfied(spec, LIMITS, WHERE);
 });
 
-Deno.test("assertRequiredLimitsSatisfied: 宣言の無い配布形は no-op", () => {
+test("assertRequiredLimitsSatisfied: 宣言の無い配布形は no-op", () => {
   assertRequiredLimitsSatisfied(undefined, LIMITS, WHERE);
 });
 
-Deno.test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求値・実測値を全部載せる", () => {
+test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求値・実測値を全部載せる", () => {
   // 落ちた利用者が次に打つ手（別の quant / 別の機械）を決めるのに、4 つとも要る。不足は
   // **全件を 1 回で**出す（1 本ずつ潰させると、環境が足りないことの全体像が出ない）。
   const spec: RequiredLimitsSpec = {
@@ -87,7 +88,7 @@ Deno.test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求�
   }
 });
 
-Deno.test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙のずれとして落ちる", () => {
+test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙のずれとして落ちる", () => {
   // hub が受理した名前を runtime が持たない形（防御の二段目）。黙って読み飛ばすと「宣言された
   // limit が誰にも見られない」= 静かな頭打ちに戻る。`limit_vocabulary_test.ts` が緑である限り
   // 構造的には到達しないが、その門が外れたときにここが受け止める。

@@ -2,6 +2,8 @@
 // MUST: src/ を直接 import しない — 内部直参照で書くと、公開面から落ちた機能を検出できない。
 // テスト補助の helper も引かない（helper が src/ を引いていると、この門の検出力がそのぶん減る）。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   acquireGpu,
@@ -83,7 +85,7 @@ const expectedRows = (x: readonly number[], rows: number): Float32Array<ArrayBuf
   return out;
 };
 
-Deno.test({
+test({
   name: "公開面だけでモデルを開き、記号次元込みのグラフを実行できる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -153,7 +155,7 @@ Deno.test({
  * 生み、各所の下限クランプ（最小 4 バイト）に乗って通っている。shape を保ったまま長さ 0 の
  * data が返ること、そして同じ Session の後続 run が壊れないことをここで固定する。
  */
-Deno.test({
+test({
   name: "0 要素テンソル（記号次元 T=0）が shape を保ったまま長さ 0 で返る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -190,7 +192,7 @@ Deno.test({
   },
 });
 
-Deno.test("ランタイム内部の直列化プリミティブは公開型面に現れない（ADR 0008）", () => {
+test("ランタイム内部の直列化プリミティブは公開型面に現れない（ADR 0008）", () => {
   // 型レベルの門。`withScopeLock` / `raceDeviceLost` が素の名前で GpuContext に載っていると
   // 下の代入が型エラーになる（実行時の assert は恒真で、検出するのは deno check）。
   // 素で見えると `gpu.withScopeLock(() => session.run(...))` が書けてしまい、run が同じロックを
@@ -203,7 +205,7 @@ Deno.test("ランタイム内部の直列化プリミティブは公開型面に
   assertEquals([scopeLockHidden, raceDeviceLostHidden], [true, true]);
 });
 
-Deno.test("生成 run の第 3 引数が公開型で名指しできる（ADR 0066 決定 6 の呼び出し形）", () => {
+test("生成 run の第 3 引数が公開型で名指しできる（ADR 0066 決定 6 の呼び出し形）", () => {
   // 型レベルの門。`GenerationRun` が mod.ts の輸出列から落ちると deno check で落ちる
   // （構造的部分型でオブジェクトリテラルは渡せてしまうので、公開メソッドのシグネチャに
   // 現れる型を**名前で**書く下の 1 行が輸出漏れの機械検出になる）。
@@ -211,7 +213,7 @@ Deno.test("生成 run の第 3 引数が公開型で名指しできる（ADR 006
   assertEquals(typeof asThirdArgument, "function");
 });
 
-Deno.test("公開面が capability 照会とモデル解析の失敗型を提供する", async () => {
+test("公開面が capability 照会とモデル解析の失敗型を提供する", async () => {
   const ops = capabilities().ops;
   for (const op of ["matmul", "add", "sum", "gelu", "amax"]) {
     assertEquals(ops.includes(op), true, op);
@@ -225,8 +227,8 @@ Deno.test("公開面が capability 照会とモデル解析の失敗型を提供
   assertThrows(() => parseSafetensors(new ArrayBuffer(4)), SafetensorsError);
 });
 
-Deno.test("この E2E は公開面（mod.ts）以外の実装を import しない", async () => {
-  const source = await Deno.readTextFile(new URL(import.meta.url));
+test("この E2E は公開面（mod.ts）以外の実装を import しない", async () => {
+  const source = await readTextFile(new URL(import.meta.url));
   const specifiers = [...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1]);
   assertEquals(specifiers.filter((path) => path.includes("/src/")), []);
 });

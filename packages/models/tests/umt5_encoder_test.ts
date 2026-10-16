@@ -16,7 +16,7 @@
  */
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { type FileRef, parseManifest } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
 import type { GraphOwner } from "../src/hub/components.ts";

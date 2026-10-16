@@ -56,7 +56,7 @@ export type DirEntry = {
   readonly isSymlink: boolean;
 };
 
-export type WriteOptions = { readonly append?: boolean };
+export type WriteOptions = { readonly append?: boolean; readonly createNew?: boolean };
 export type MkdirOptions = { readonly recursive?: boolean };
 export type RemoveOptions = { readonly recursive?: boolean };
 export type TempDirOptions = { readonly prefix?: string; readonly dir?: string };
@@ -86,13 +86,18 @@ export const isADirectory = (error: unknown): boolean => errorCode(error) === "E
 /** `error instanceof Deno.errors.FilesystemLoop` */
 export const isFilesystemLoop = (error: unknown): boolean => errorCode(error) === "ELOOP";
 
-export const readFile = async (path: PathLike): Promise<Uint8Array<ArrayBuffer>> =>
-  owned(await nodeReadFile(path));
+export type ReadOptions = { readonly signal?: AbortSignal };
+
+export const readFile = async (path: PathLike, options?: ReadOptions): Promise<Uint8Array<ArrayBuffer>> =>
+  owned(await nodeReadFile(path, { signal: options?.signal }));
 export const readFileSync = (path: PathLike): Uint8Array<ArrayBuffer> => owned(nodeReadFileSync(path));
-export const readTextFile = (path: PathLike): Promise<string> => nodeReadFile(path, "utf8");
+export const readTextFile = (path: PathLike, options?: ReadOptions): Promise<string> =>
+  nodeReadFile(path, { encoding: "utf8", signal: options?.signal });
 export const readTextFileSync = (path: PathLike): string => nodeReadFileSync(path, "utf8");
 
-const flag = (options: WriteOptions | undefined): "a" | "w" => options?.append === true ? "a" : "w";
+/** `createNew` fails when the file exists (Deno semantics; Node flag `wx`). */
+const flag = (options: WriteOptions | undefined): "a" | "w" | "wx" =>
+  options?.createNew === true ? "wx" : options?.append === true ? "a" : "w";
 
 export const writeFile = (path: PathLike, data: Uint8Array, options?: WriteOptions): Promise<void> =>
   nodeWriteFile(path, data, { flag: flag(options) });

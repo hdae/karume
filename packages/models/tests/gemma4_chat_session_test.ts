@@ -31,6 +31,8 @@
 // ⑪ **分岐（`fork`）**: 履歴と KV を引き継いだ独立のセッション・KV が空の会話は複製を出さない・
 //    走行中 / dispose 済みは同期に throw・写しは呼んだ同期区間（直後の send が分岐に入らない）
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -74,7 +76,7 @@ type Fixture = {
 };
 
 const fixture = JSON.parse(
-  await Deno.readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
+  await readTextFile(new URL("fixtures/gemma-text/gemma4-chat.json", import.meta.url)),
 ) as Fixture;
 
 /** フィクスチャの部分集合から資産表を組む（`gemma4_chat_test.ts` と同じ形）。 */
@@ -303,7 +305,7 @@ const fakeHost = (
   };
 };
 
-Deno.test("ChatSession: 2 ターン目は差分だけを流し、sequence を作り直さない", async () => {
+test("ChatSession: 2 ターン目は差分だけを流し、sequence を作り直さない", async () => {
   const host = fakeHost(
     [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
     programOf(640),
@@ -333,7 +335,7 @@ Deno.test("ChatSession: 2 ターン目は差分だけを流し、sequence を作
   ]);
 });
 
-Deno.test("ChatSession: 停止 token で閉じなかったターンの次は全体を描き直す", async () => {
+test("ChatSession: 停止 token で閉じなかったターンの次は全体を描き直す", async () => {
   // max-tokens で打ち切ったターンの後ろは model turn が閉じていない = 差分の前提が無い。
   const host = fakeHost(
     [{ text: "Blue", closes: false }, { text: "Red.", closes: true }],
@@ -363,7 +365,7 @@ Deno.test("ChatSession: 停止 token で閉じなかったターンの次は全�
   );
 });
 
-Deno.test("ChatSession: 汲むのをやめたターンは内側まで畳み、出た本文だけを残す", async () => {
+test("ChatSession: 汲むのをやめたターンは内側まで畳み、出た本文だけを残す", async () => {
   // 消費側の `break` は「中断と同じ後始末」で内側のイベント列まで届く必要がある（届かないと
   // sequence が走行中のまま残り、`done` も決着しない）。
   const host = fakeHost(
@@ -389,7 +391,7 @@ Deno.test("ChatSession: 汲むのをやめたターンは内側まで畳み、�
   assertEquals(host.created(), 2, "閉じていないターンの後は sequence を作り直す");
 });
 
-Deno.test("ChatSession 溢れ: 既定ポリシーが最古の対を落とし、system を残して組み直す", async () => {
+test("ChatSession 溢れ: 既定ポリシーが最古の対を落とし、system を残して組み直す", async () => {
   const answers: readonly Answer[] = [
     { text: "Blue.", closes: true },
     { text: "Red.", closes: true },
@@ -430,7 +432,7 @@ Deno.test("ChatSession 溢れ: 既定ポリシーが最古の対を落とし、s
   );
 });
 
-Deno.test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙って縮めない）", async () => {
+test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（黙って縮めない）", async () => {
   // system + 今の発話しか無い = 既定ポリシーには落とせるものが無い。
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
   const session = new Gemma4ChatSession(host, { system: SYSTEM, maxNewTokens: MAX_NEW_TOKENS });
@@ -450,7 +452,7 @@ Deno.test("ChatSession 溢れ: 落とせるものが尽きたら fail loudly（�
   assertEquals(host.created(), 0, "確保してから捨てる形になっていない");
 });
 
-Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / throw を素通しする）", async (t) => {
+test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す / throw を素通しする）", async (t) => {
   await t.step("返した履歴で撃ち直す（system も落とせる）", async () => {
     const asked = { role: "user", content: "Name a color." } as const;
     // system 込みでは 1 だけ足りず、system を落とせば通る容量。
@@ -549,7 +551,7 @@ Deno.test("ChatSession 溢れ: ポリシーの注入が効く（履歴を返す 
   });
 });
 
-Deno.test("ChatSession capacity: 省略時は program の既定・渡せばそれが sequence と溢れ判定の物差し", async (t) => {
+test("ChatSession capacity: 省略時は program の既定・渡せばそれが sequence と溢れ判定の物差し", async (t) => {
   await t.step("省略時は配布形の既定がそのまま降りる", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
@@ -590,7 +592,7 @@ Deno.test("ChatSession capacity: 省略時は program の既定・渡せばそ�
   });
 });
 
-Deno.test("ChatSession speculative: 指定はそのまま sequence へ降り、未指定は欄ごと渡さない", async (t) => {
+test("ChatSession speculative: 指定はそのまま sequence へ降り、未指定は欄ごと渡さない", async (t) => {
   // 投機はセッション単位の席（借り手 context が sequence の寿命に束ねられているので、ターン
   // ごとには切り替えられない）。この層がするのは「降ろすかどうか」だけで、判定は pipeline 側に
   // ある — `speculative: undefined` を**渡してしまう**退行は、pipeline の既定（drafter が居れば
@@ -637,7 +639,7 @@ Deno.test("ChatSession speculative: 指定はそのまま sequence へ降り、�
   });
 });
 
-Deno.test("ChatSession: onPrefill が chunk ごとの進捗を運ぶ（本文には出ない情報）", async () => {
+test("ChatSession: onPrefill が chunk ごとの進捗を運ぶ（本文には出ない情報）", async () => {
   const host = fakeHost(
     [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
     programOf(640),
@@ -656,7 +658,7 @@ Deno.test("ChatSession: onPrefill が chunk ごとの進捗を運ぶ（本文に
   assertEquals(seen.length, 1);
 });
 
-Deno.test("ChatSession: 1 セッション = 1 生成（同時 send と dispose 後は同期に throw）", async () => {
+test("ChatSession: 1 セッション = 1 生成（同時 send と dispose 後は同期に throw）", async () => {
   const host = fakeHost(
     [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
     programOf(640),
@@ -679,7 +681,7 @@ Deno.test("ChatSession: 1 セッション = 1 生成（同時 send と dispose �
   assertThrows(() => session.send("hi"), Error, "dispose 済み");
 });
 
-Deno.test("ChatSession: この層で起きた失敗は done も reject する（成功を名乗らない）", async () => {
+test("ChatSession: この層で起きた失敗は done も reject する（成功を名乗らない）", async () => {
   // `onPrefill` が投げると内側のイベント列は `return()` で閉じられ `closed` で resolve する
   // ので、そのまま運ぶと `done` だけを読む呼び手（進捗 UI・ログ）が失敗を成功として記録する。
   const host = fakeHost(
@@ -705,7 +707,7 @@ Deno.test("ChatSession: この層で起きた失敗は done も reject する（
   assertEquals(host.created(), 2, "失敗したターンの sequence は継がない");
 });
 
-Deno.test("ChatSession: sequence.dispose が失敗してもセッションは次のターンを受ける", async () => {
+test("ChatSession: sequence.dispose が失敗してもセッションは次のターンを受ける", async () => {
   // 後始末の失敗で `#busy` が立ったままになると、例外 1 つでセッションが二度と使えなくなる。
   const boom = new Error("context.dispose が flush の失敗を伝播した");
   const host = fakeHost(
@@ -738,7 +740,7 @@ Deno.test("ChatSession: sequence.dispose が失敗してもセッションは次
   assertEquals(both.errors, [body, boom], "errors[0] が本体・errors[1] が後始末");
 });
 
-Deno.test("ChatSession: 受理集合は同期に落ち、セッションの状態を汚さない", async () => {
+test("ChatSession: 受理集合は同期に落ち、セッションの状態を汚さない", async () => {
   // 検査が本体（async generator）の中だと、不正な要求が履歴へ発話を積み `#busy` を立てたまま
   // 「汲み始めるまで落ちない」= 1 度の取り違えでセッションが使えなくなる。
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
@@ -760,7 +762,7 @@ Deno.test("ChatSession: 受理集合は同期に落ち、セッションの状�
   assertEquals(await session.send("Name a color.").text(), "Blue.");
 });
 
-Deno.test("ChatSession: dispose 済みでは発行済みの stream も生成しない", async () => {
+test("ChatSession: dispose 済みでは発行済みの stream も生成しない", async () => {
   // `send` は発行時に見るが、本体が走り出すのはその後。セッションだけを dispose した後に
   // 汲み始めると、生きた pipeline から新しい容量ぶんの sequence を取れてしまう。
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
@@ -772,7 +774,7 @@ Deno.test("ChatSession: dispose 済みでは発行済みの stream も生成し�
   assertEquals(host.created(), 0, "dispose の後に sequence を取らない");
 });
 
-Deno.test("ChatSession: 停止文字列で切ったターンは chat() と同じ理由を運び、KV を継がない", async () => {
+test("ChatSession: 停止文字列で切ったターンは chat() と同じ理由を運び、KV を継がない", async () => {
   const host = fakeHost(
     [{ text: "Blue.\nUser: hi", closes: true }, { text: "Red.", closes: true }],
     programOf(640),
@@ -797,7 +799,7 @@ Deno.test("ChatSession: 停止文字列で切ったターンは chat() と同じ
   assertEquals(host.created(), 2, "停止文字列で切ったターンの後は sequence を作り直す");
 });
 
-Deno.test("ChatSession capacity: 容量の関係は構築時に見る（設定した場所で落ちる）", async (t) => {
+test("ChatSession capacity: 容量の関係は構築時に見る（設定した場所で落ちる）", async (t) => {
   // 検査を sequence 側だけに任せると、長いターンでは `#shrink` が履歴を実際に切り詰めてから
   // 容量エラーになり、真因（宣言ミス）がどの診断にも出ない。式は `sequence.ts` と同じ 2 本。
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
@@ -838,7 +840,7 @@ Deno.test("ChatSession capacity: 容量の関係は構築時に見る（設定�
   );
 });
 
-Deno.test("ChatSession: sequence 確保の await 中に dispose されたら、その sequence を畳んで落ちる", async () => {
+test("ChatSession: sequence 確保の await 中に dispose されたら、その sequence を畳んで落ちる", async () => {
   // `dispose()` は `#sequence` がまだ undefined の状態で走るので何も畳まず、その直後に
   // `this.#sequence = created` が入る — この窓を塞げるのは `await` 明けの再検査だけ。
   let release!: () => void;
@@ -870,7 +872,7 @@ Deno.test("ChatSession: sequence 確保の await 中に dispose されたら、�
   assertEquals(host.disposed(), 1, "確保できてしまった sequence は畳んでから落とす");
 });
 
-Deno.test("ChatSession sampler: ターン → セッション → 配布形の既定の順に解決する", async (t) => {
+test("ChatSession sampler: ターン → セッション → 配布形の既定の順に解決する", async (t) => {
   // 退行すると配布形の推奨サンプラが黙って温度 0（greedy）へ落ちる — 例外は出ず、出力が
   // 「妙に決定的」になることでしか気づけない。
   const recommended: Gemma4DefaultSampler = { temperature: 1, topK: 64, topP: 0.95 };
@@ -915,7 +917,7 @@ Deno.test("ChatSession sampler: ターン → セッション → 配布形の�
   });
 });
 
-Deno.test("ChatSession: 中断したターンは done が aborted で resolve し、KV を継がない", async () => {
+test("ChatSession: 中断したターンは done が aborted で resolve し、KV を継がない", async () => {
   // 中断も `fail()` する退行が入ると「自分で止めたのに done が reject する」になり、
   // `error === signal.reason` による中断の識別（ADR 0083 決定 5）が壊れる。逆に中断ターンで
   // `stop` を立てる退行が入ると、閉じていない model turn の後ろへ差分を継いで会話が静かに壊れる。
@@ -958,7 +960,7 @@ Deno.test("ChatSession: 中断したターンは done が aborted で resolve �
   assertEquals(host.created(), 2, "中断ターンの後は sequence を作り直す");
 });
 
-Deno.test("ChatSession: 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
+test("ChatSession: 要求は発行時に写す（汲み始める前の書き換えは効かない）", async () => {
   // 型 doc の MUST。受け手の複製（`createSampler` / `GenerationSequence.generate`）は
   // async generator の本体 = 最初の `next()` なので、それに任せると「発行してから汲み始める
   // まで」の窓で書き換えた抽選指定・停止集合が黙って効く。
@@ -979,7 +981,7 @@ Deno.test("ChatSession: 要求は発行時に写す（汲み始める前の書�
   assertEquals(sampler.temperature, 2, "呼び手の object は写しの側から触らない");
 });
 
-Deno.test("ChatSession: 未開始 return は仮発話だけを戻し、前ターンの KV を継げる", async () => {
+test("ChatSession: 未開始 return は仮発話だけを戻し、前ターンの KV を継げる", async () => {
   const host = fakeHost(
     [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
     programOf(640),
@@ -999,7 +1001,7 @@ Deno.test("ChatSession: 未開始 return は仮発話だけを戻し、前ター
   await session.dispose();
 });
 
-Deno.test("ChatSession: 未開始 throw は done に同じ例外を通知し、次の送信を妨げない", async () => {
+test("ChatSession: 未開始 throw は done に同じ例外を通知し、次の送信を妨げない", async () => {
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   const stream = session.send("Cancelled.");
@@ -1014,7 +1016,7 @@ Deno.test("ChatSession: 未開始 throw は done に同じ例外を通知し、�
   await session.dispose();
 });
 
-Deno.test("ChatSession: done は cleanup を待ち、その直後に次の送信ができる", async () => {
+test("ChatSession: done は cleanup を待ち、その直後に次の送信ができる", async () => {
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const host = fakeHost(
@@ -1045,7 +1047,7 @@ Deno.test("ChatSession: done は cleanup を待ち、その直後に次の送信
   await session.dispose();
 });
 
-Deno.test("ChatSession: 履歴スナップショットの各発話は外部から変更できない", async () => {
+test("ChatSession: 履歴スナップショットの各発話は外部から変更できない", async () => {
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   const session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   await session.send("Name a color.").text();
@@ -1055,7 +1057,7 @@ Deno.test("ChatSession: 履歴スナップショットの各発話は外部か�
   await session.dispose();
 });
 
-Deno.test("ChatSession token 通知: 発行時の関数を保持し、本文と停止 token 数を変えない", async () => {
+test("ChatSession token 通知: 発行時の関数を保持し、本文と停止 token 数を変えない", async () => {
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
   await using session = new Gemma4ChatSession(host, { maxNewTokens: MAX_NEW_TOKENS });
   const seen: number[] = [];
@@ -1072,7 +1074,7 @@ Deno.test("ChatSession token 通知: 発行時の関数を保持し、本文と�
   assertEquals(seen, tokenizer.encode("Blue."));
   assertEquals((await stream.done).tokens, seen.length + 1);
 });
-Deno.test("ChatSession token 通知: callback の失敗を伝え、次の会話を妨げない", async () => {
+test("ChatSession token 通知: callback の失敗を伝え、次の会話を妨げない", async () => {
   const host = fakeHost(
     [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
     programOf(640),
@@ -1089,7 +1091,7 @@ Deno.test("ChatSession token 通知: callback の失敗を伝え、次の会話�
   assertEquals(await session.send("Another color.").text(), "Red.");
 });
 
-Deno.test("ChatSession 溢れ: 引数展開の上限を超える長さの発話も容量エラーで返る", async () => {
+test("ChatSession 溢れ: 引数展開の上限を超える長さの発話も容量エラーで返る", async () => {
   // 15 万文字の 1 断片（added token で割れない本文）。BPE の結果を可変長引数で積むと、容量の
   // 判定より前に tokenizer が素の RangeError で落ち、呼び手には内部障害に見える。
   const host = fakeHost([{ text: "Blue.", closes: true }], programOf(TIGHT_CAPACITY));
@@ -1110,7 +1112,7 @@ Deno.test("ChatSession 溢れ: 引数展開の上限を超える長さの発話�
 // KV が空の会話は履歴だけを写す（GPU の複製を出さない）。台本は host 全体で 1 本なので、分岐と元の
 // どちらで送っても台本の次の答えが返る。
 
-Deno.test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と独立に進む", async () => {
+test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は元と独立に進む", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -1163,7 +1165,7 @@ Deno.test("ChatSession.fork: 分岐は履歴と KV を引き継ぎ、以後は�
   assertEquals(host.disposed(), 2);
 });
 
-Deno.test("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴と設定だけを写す", async (t) => {
+test("ChatSession.fork: KV が空の会話は GPU の複製を出さず、履歴と設定だけを写す", async (t) => {
   await t.step("まだ送っていない会話", async () => {
     const host = fakeHost([{ text: "Blue.", closes: true }], programOf(640));
     const session = new Gemma4ChatSession(host, {
@@ -1214,7 +1216,7 @@ Deno.test("ChatSession.fork: KV が空の会話は GPU の複製を出さず、�
   });
 });
 
-Deno.test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落ち、直後の send は分岐に入らない", async () => {
+test("ChatSession.fork: 走行中のターンと dispose 済みは同期に落ち、直後の send は分岐に入らない", async () => {
   const host = fakeHost(
     [
       { text: "Blue.", closes: true },
@@ -1252,7 +1254,7 @@ Deno.test("ChatSession.fork: 走行中のターンと dispose 済みは同期に
   await branch.dispose();
 });
 
-Deno.test("ChatSession.fork: KV の複製が失敗したら reject し、元はそのまま続けられる", async () => {
+test("ChatSession.fork: KV の複製が失敗したら reject し、元はそのまま続けられる", async () => {
   const host = fakeHost(
     [{ text: "Blue.", closes: true }, { text: "Red.", closes: true }],
     programOf(640),

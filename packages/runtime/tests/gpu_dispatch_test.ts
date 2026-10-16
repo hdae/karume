@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { RunArena } from "../src/gpu/arena.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
@@ -25,7 +26,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 }
 `;
 
-Deno.test({
+test({
   name: "device / cache / scheduler / arena を通した compute dispatch が正しい値を返す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -87,7 +88,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "領域の offset 束縛で中間と出力を 1 本のバッファに同居させ、配り直しても結果が壊れない（実 GPU）",
   ignore: !GPU_AVAILABLE,

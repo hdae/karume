@@ -9,7 +9,7 @@
  */
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { fitsHeadroom, probePieces } from "../src/gpu/headroom.ts";
 import { BUFFER_USAGE } from "../src/gpu/webgpu-constants.ts";

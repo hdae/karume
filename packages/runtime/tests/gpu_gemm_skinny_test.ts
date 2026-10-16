@@ -14,6 +14,7 @@
 //    「幾何を差し替えても PNG / WAV の sha256 門が割れない」という実測命題の単体版にあたる。
 //    MUST: 割れたら幾何の選択ではなく**命題そのもの**を疑う（設計判断へ戻す）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
 import { compareTensors, formatAllclose } from "../src/reference/allclose.ts";
@@ -113,7 +114,7 @@ const SHAPE_CASES: readonly ShapeCase[] = [
   bmmCase(2, 65, 16, 16),
 ];
 
-Deno.test({
+test({
   name: "小 M の GEMM 3 op はバケット境界を跨いで CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -157,7 +158,7 @@ const assertRowsBitEqual = (
   }
 };
 
-Deno.test({
+test({
   name: "バケットが違っても同じ行の出力は 1 ビットも違わない（幾何は担当割りのみ / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

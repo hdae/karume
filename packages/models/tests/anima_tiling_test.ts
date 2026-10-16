@@ -4,6 +4,7 @@
 // **幾何の不変条件**（固定形の decoder が食える配置であること）と**貼り合わせの解析解**を
 // 押さえる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ANIMA_SPATIAL_COMPRESSION } from "../src/anima/dit-tokens.ts";
 import {
@@ -22,7 +23,7 @@ import {
   tileCount,
 } from "../src/anima/tiling.ts";
 
-Deno.test("planTileAxis: 1024px（latent 128）は 3 タイル・開始 [0,32,64]・ブレンド 256px", () => {
+test("planTileAxis: 1024px（latent 128）は 3 タイル・開始 [0,32,64]・ブレンド 256px", () => {
   // 旧規則（整除スナップ）と同じ配置になる辺。**出荷解像度のバイト不変**がここに乗って
   // いるので、値は literal で凍結する（1824×1248 の枚数変更で巻き添えにしない）。
   const axis = planTileAxis(128, 64, 8);
@@ -146,7 +147,7 @@ const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
   [2048, [0, 48, 96, 144, 192]],
 ];
 
-Deno.test("planTileAxis: 受理集合の全 97 辺の開始位置を値で凍結する（丸めの寄せ方まで）", () => {
+test("planTileAxis: 受理集合の全 97 辺の開始位置を値で凍結する（丸めの寄せ方まで）", () => {
   // 表が受理集合を**覆っている**ことを先に見る。辺の下限 / 天井 / 刻みが動いたとき、表が
   // 黙って部分被覆になるのではなくここで割れる。
   const sides: number[] = [];
@@ -164,13 +165,13 @@ Deno.test("planTileAxis: 受理集合の全 97 辺の開始位置を値で凍結
   }
 });
 
-Deno.test("planTileAxis: latent 64（512px）は 1 タイルに縮退しブレンド対が無い", () => {
+test("planTileAxis: latent 64（512px）は 1 タイルに縮退しブレンド対が無い", () => {
   const axis = planTileAxis(64, 64, 8);
   assertEquals([...axis.starts], [0]);
   assertThrows(() => blendExtentAt(axis, 8, 1), RangeError, "範囲外");
 });
 
-Deno.test("planTileAxis: どの latent 全長でも配置の不変条件が成り立つ", () => {
+test("planTileAxis: どの latent 全長でも配置の不変条件が成り立つ", () => {
   // 182 / 228 / 242 は旧規則で本数が跳ねた辺（1456 / 1824 / 1936px）— 撤廃の対象そのもの。
   for (const extent of [64, 80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512]) {
     const axis = planTileAxis(extent, 64, 8);
@@ -202,12 +203,12 @@ Deno.test("planTileAxis: どの latent 全長でも配置の不変条件が成�
   }
 });
 
-Deno.test("planTileAxis: タイルより短い latent と広すぎる重なりは落とす", () => {
+test("planTileAxis: タイルより短い latent と広すぎる重なりは落とす", () => {
   assertThrows(() => planTileAxis(32, 64, 8), Error, "タイル幅");
   assertThrows(() => planTileAxis(128, 64, 64), Error, "重なり");
 });
 
-Deno.test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸は独立に配置する", () => {
+test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸は独立に配置する", () => {
   const geometry = planVaeTiling([1, 16, 128, 64], [1, 16, 64, 64], [1, 3, 512, 512]);
   assertEquals(geometry.scale, 8);
   assertEquals(geometry.channels, 16);
@@ -232,7 +233,7 @@ Deno.test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸
   );
 });
 
-Deno.test("latentTile: 平面ごとに正しい矩形を切り出す（軸とチャネルの取り違え検出）", () => {
+test("latentTile: 平面ごとに正しい矩形を切り出す（軸とチャネルの取り違え検出）", () => {
   // [1,2,4,4]。値は `channel*100 + y*10 + x` で全要素が識別可能。
   const geometry = planVaeTiling([1, 2, 4, 4], [1, 2, 2, 2], [1, 1, 2, 2], 1);
   assertEquals([...geometry.rows.starts], [0, 1, 2]);
@@ -247,7 +248,7 @@ Deno.test("latentTile: 平面ごとに正しい矩形を切り出す（軸とチ
   assertThrows(() => latentTile(latents, geometry, 3, 0), RangeError);
 });
 
-Deno.test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
+test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
   // 大小比較だけの範囲検査は 0.5 と NaN を通し、`starts[0.5]` が undefined → 空の subarray でゼロの
   // タイルを黙って返す。
   const geometry = planVaeTiling([1, 2, 4, 4], [1, 2, 2, 2], [1, 1, 2, 2], 1);
@@ -262,7 +263,7 @@ Deno.test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイル
   }
 });
 
-Deno.test("assembleTiles: 1 枚（縮退）は decode 出力の素の写し（ビット同一）", () => {
+test("assembleTiles: 1 枚（縮退）は decode 出力の素の写し（ビット同一）", () => {
   const geometry = planVaeTiling([1, 2, 8, 8], [1, 2, 8, 8], [1, 3, 8, 8], 2);
   assertEquals(tileCount(geometry), 1);
   const decoded = new Float32Array(3 * 64);
@@ -274,7 +275,7 @@ Deno.test("assembleTiles: 1 枚（縮退）は decode 出力の素の写し（�
   );
 });
 
-Deno.test("assembleTiles: 位置依存の decode 出力を線形ランプが解析解どおりに畳む", () => {
+test("assembleTiles: 位置依存の decode 出力を線形ランプが解析解どおりに畳む", () => {
   // extent 16 / tile 8 / stride 4（重なり 4）で開始位置は 0,4,8。タイル内の値が行番号
   // `0..7` の傾斜のとき、貼り合わせ後は `0,1,2,3` → 中間は全て 4 → 末尾が `4,5,6,7`。
   // 重なりの値がタイルごとに**違う**ので、ブレンドの向き反転 / stride の off-by-one /
@@ -297,7 +298,7 @@ Deno.test("assembleTiles: 位置依存の decode 出力を線形ランプが解�
   assertEquals([...cols.subarray(0, 16)], expected, "列方向");
 });
 
-Deno.test("assembleTiles: 末端まで覆う（stride 幅で切り詰めるだけだと欠ける）", () => {
+test("assembleTiles: 末端まで覆う（stride 幅で切り詰めるだけだと欠ける）", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const flat = new Float32Array(64).fill(7);
   const image = assembleTiles(Array.from({ length: 9 }, () => flat), geometry);
@@ -305,7 +306,7 @@ Deno.test("assembleTiles: 末端まで覆う（stride 幅で切り詰めるだ�
   assert(image.every((value) => value === 7), "覆われていない画素が残っている");
 });
 
-Deno.test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレンドは写しの上）", () => {
+test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレンドは写しの上）", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const tiles = Array.from({ length: 9 }, (_, index) => new Float32Array(64).fill(index + 1));
   const before = tiles.map((tile) => [...tile]);
@@ -313,7 +314,7 @@ Deno.test("assembleTiles: 渡されたタイルを破壊しない（in-place ブ
   assertEquals(tiles.map((tile) => [...tile]), before);
 });
 
-Deno.test("assembleTiles: タイル枚数と要素数の食い違いを落とす", () => {
+test("assembleTiles: タイル枚数と要素数の食い違いを落とす", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const flat = new Float32Array(64);
   assertThrows(() => assembleTiles([flat], geometry), Error, "幾何の");
@@ -328,7 +329,7 @@ Deno.test("assembleTiles: タイル枚数と要素数の食い違いを落とす
   );
 });
 
-Deno.test("decodeTiled: 行優先で全タイルを 1 度ずつ回す", async () => {
+test("decodeTiled: 行優先で全タイルを 1 度ずつ回す", async () => {
   const geometry = planVaeTiling([1, 1, 16, 16], [1, 1, 8, 8], [1, 1, 8, 8], 2);
   const visited: string[] = [];
   await decodeTiled(new Float32Array(256), geometry, (_tile, row, col) => {
@@ -338,7 +339,7 @@ Deno.test("decodeTiled: 行優先で全タイルを 1 度ずつ回す", async ()
   assertEquals(visited, ["0,0", "0,1", "0,2", "1,0", "1,1", "1,2", "2,0", "2,1", "2,2"]);
 });
 
-Deno.test("decodeTiled: decode の返り値は所有権ごと受け取り、写しを挟まず畳む", async () => {
+test("decodeTiled: decode の返り値は所有権ごと受け取り、写しを挟まず畳む", async () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const colCount = geometry.cols.starts.length;
   // タイルごとに・タイル内でも値が違う（重なりの両側が同値だとブレンドが恒等になり、

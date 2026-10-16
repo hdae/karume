@@ -4,7 +4,7 @@
 // pipeline テストへ 2 本に割れていて、残り 5 家族は写像を直接叩く門を持っていなかった）。
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import type { SessionSpec } from "@karume/hub";
 import { sessionOptionsViolation } from "@karume/runtime";
 import { ANIMA_SESSION_POLICY } from "../src/anima/pipeline.ts";
@@ -26,7 +26,7 @@ import { UMT5_ENCODER_SESSION_POLICY } from "../src/umt5/encoder.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 
-Deno.test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
+test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
   assertEquals(toSessionOptions({}), {});
   assertEquals(toSessionOptions({ linearGemvReduce: "parallel" }), {
     linearGemvReduce: "parallel",
@@ -55,7 +55,7 @@ Deno.test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定
   );
 });
 
-Deno.test("toSessionOptions: manifest 側に無いノブ（submitPolicy）は写さない", () => {
+test("toSessionOptions: manifest 側に無いノブ（submitPolicy）は写さない", () => {
   // `SessionOptions.submitPolicy` は TDR 予算 = **ホスト政策**なので配布者に書かせない
   // （ADR 0038 §3 の理由 ③）。スプレッド素通しに書き換えるとここが素通りしうる。
   const mapped = toSessionOptions({ linearCompute: "a8" }) as Record<string, unknown>;
@@ -63,7 +63,7 @@ Deno.test("toSessionOptions: manifest 側に無いノブ（submitPolicy）は写
   assertEquals(Object.keys(mapped), ["linearCompute"]);
 });
 
-Deno.test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取り残しを検出）", () => {
+test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取り残しを検出）", () => {
   // 写像の網羅は `src/session/options.ts` の `WRITERS`（`Required<SessionSpec>` の網羅表）が
   // 型で固定しており、キーが増えれば**コンパイルエラー**になる。ここはその型門が生きている
   // ことを実行時からも見る対（型を緩めた改変は型検査を通ってしまうため）—
@@ -82,7 +82,7 @@ Deno.test("toSessionOptions: SessionSpec の全キーを写す（キー追加の
   assertEquals(Object.keys(mapped).sort(), Object.keys(full).sort());
 });
 
-Deno.test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
+test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
   for (const value of [false, true]) {
     const spec = {
       fuseRmsNormAdd: value,

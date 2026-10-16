@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { decodeI2, I2Error } from "../src/format/i2.ts";
@@ -39,7 +40,7 @@ const i2Weight = (
   encoding: { codec: "int2-off", groupSize, scale: { bytes: scaleBytes, dtype: "f32" } },
 });
 
-Deno.test("INT2 の全符号値・byte内位置と行別scaleを解釈する", async () => {
+test("INT2 の全符号値・byte内位置と行別scaleを解釈する", async () => {
   const expected = [
     -2,
     -1,
@@ -82,7 +83,7 @@ Deno.test("INT2 の全符号値・byte内位置と行別scaleを解釈する", a
   assertEquals(buffers.map((b) => b.seat), ["i2", "i2"]);
 });
 
-Deno.test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
+test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
   // 宣言 shape の門は**合流層**（宣言 shape × codec）— IR v2 の宣言は格納を持たないので、
   // 「i2 なのに rank 1 / 行長が 16 の倍数でない」は供給と突き合わせて初めて決まる。
   for (const shape of [[32], [2, 15], [2, 20], [0, 16], [2, 0], [1, 2, 16]]) {
@@ -125,7 +126,7 @@ Deno.test("INT2 は不正な形・scale・端数バイトを拒否する", () =>
   assertThrows(() => decodeI2(bytes, [2, 16], scales, [1, 2]), I2Error, "scale");
 });
 
-Deno.test("INT2 と同じ重みを graph 出力へ出すと f32 展開分を見積もる", () => {
+test("INT2 と同じ重みを graph 出力へ出すと f32 展開分を見積もる", () => {
   const g = graph();
   g.outputs.push("w");
   const plan = planWeightResidency(

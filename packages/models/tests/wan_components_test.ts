@@ -23,6 +23,7 @@
  * 「次の段の文言で通過を見る」形）。GPU は共有の模擬 GPU を渡し、アダプタにも触らない。
  */
 
+import { readFile } from "@karume/test-support/fs";
 import {
   assertEquals,
   assertInstanceOf,
@@ -30,7 +31,7 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { SafetensorsError } from "@karume/runtime";
 import {
   type DistributionSource,
@@ -72,7 +73,7 @@ const REPLACEMENT_REPO = "karume-test/umt5-compatible";
 const STOPPED_AT_EMBEDS = "ヘッダ JSON を解析できない";
 
 /** RoPE の素表（`transformer` の容器の資産 `rope_base` — 実物の 1.3B と同じ幅 22 / 21 / 21）。 */
-const ROPE_BASE = await Deno.readFile(
+const ROPE_BASE = await readFile(
   new URL("./fixtures/wan-dit/rope_base.safetensors", import.meta.url),
 );
 

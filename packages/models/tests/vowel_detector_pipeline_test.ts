@@ -35,6 +35,7 @@
 // ⑥ **検出の実行経路の例外**（偽の Session）— run や診断コールバックの失敗の後に Session の
 //    解放まで落ちても、呼び手の例外から最初の失敗を辿れる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { ModelInputError } from "../src/errors.ts";
@@ -118,7 +119,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
@@ -127,7 +128,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipeline の契約名が vowel-detector でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が vowel-detector でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -136,7 +137,7 @@ Deno.test("fromAssets: pipeline の契約名が vowel-detector でない manifes
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "vowel-detector/2" }));
   await assertRejects(
@@ -146,7 +147,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => VowelDetectorPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
@@ -155,7 +156,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
   // 綴り違い（`maxFrames` に対する `max_frames`）が黙って既定へ縮退する経路を作らない。
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, max_frames: 200 } }),
@@ -167,7 +168,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
   );
 });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 上の 5 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -178,7 +179,7 @@ Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落
   );
 });
 
-Deno.test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在まで進む", async () => {
+test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在まで進む", async () => {
   // 家族の門を全部通った先に残るのは manifest の `assets`（全量面）— ここで初めて
   // `mel_basis` の不在が見える（門の順序が資産の解析より前であることの対偶）。
   const manifest = parseManifest(manifestText());
@@ -213,11 +214,11 @@ const crnnGraph = (
     values: { logits: patch.outputShape ?? [1, "T", LIPSYNC_CLASSES.length] },
   });
 
-Deno.test("assertGraph: 記号長で焼かれたグラフは時間軸の記号名を返す", () => {
+test("assertGraph: 記号長で焼かれたグラフは時間軸の記号名を返す", () => {
   assertEquals(assertGraph(crnnGraph(), graphConfig), "T");
 });
 
-Deno.test("assertGraph: 長さを固定して焼いた古い形は記号次元で落ちる", () => {
+test("assertGraph: 長さを固定して焼いた古い形は記号次元で落ちる", () => {
   // 入出力の名前も階数も同じなので、同じ席に置かれても構築は通ってしまう形。
   assertThrows(
     () =>
@@ -234,7 +235,7 @@ Deno.test("assertGraph: 長さを固定して焼いた古い形は記号次元�
   );
 });
 
-Deno.test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落とす", () => {
+test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落とす", () => {
   // 係数が抜けた配布形は `.lab` の時間が 2 倍に伸びるだけで、形は成立する。
   assertThrows(
     () => assertGraph(crnnGraph({ inputShape: [1, "T", FEATURE_DIM] }), graphConfig),
@@ -243,7 +244,7 @@ Deno.test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら�
   );
 });
 
-Deno.test("assertGraph: 入力名が features でなければ落とす", () => {
+test("assertGraph: 入力名が features でなければ落とす", () => {
   assertThrows(
     () => assertGraph(crnnGraph({ inputName: "input" }), graphConfig),
     Error,
@@ -251,7 +252,7 @@ Deno.test("assertGraph: 入力名が features でなければ落とす", () => {
   );
 });
 
-Deno.test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
+test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
   // クラス数がずれると `.lab` は成立したままラベルの割り当てだけが崩れる。
   assertThrows(
     () => assertGraph(crnnGraph({ outputShape: [1, "T", 5] }), graphConfig),
@@ -265,7 +266,7 @@ Deno.test("assertGraph: 出力のクラス数が宣言と違えば落とす", ()
 const config = (patch: Record<string, unknown> = {}): VowelDetectorPipelineConfig =>
   parseVowelDetectorPipelineConfig({ ...PIPELINE_CONFIG, ...patch });
 
-Deno.test("pipelineConfig: 実物の 5 欄をそのまま読める", () => {
+test("pipelineConfig: 実物の 5 欄をそのまま読める", () => {
   const parsed = config();
   assertEquals(parsed.sampleRate, SAMPLE_RATE);
   assertEquals(parsed.featureDim, FEATURE_DIM);
@@ -274,7 +275,7 @@ Deno.test("pipelineConfig: 実物の 5 欄をそのまま読める", () => {
   assertEquals(parsed.maxFrames, MAX_FRAMES);
 });
 
-Deno.test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサンプラを持たない）", () => {
+test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサンプラを持たない）", () => {
   assertThrows(
     () => config({ sampleRate: 22050 }),
     Error,
@@ -282,7 +283,7 @@ Deno.test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサ�
   );
 });
 
-Deno.test("pipelineConfig: 特徴次元が 83 でない配布形は受理しない", () => {
+test("pipelineConfig: 特徴次元が 83 でない配布形は受理しない", () => {
   assertThrows(
     () => config({ featureDim: 80 }),
     Error,
@@ -290,7 +291,7 @@ Deno.test("pipelineConfig: 特徴次元が 83 でない配布形は受理しな�
   );
 });
 
-Deno.test("pipelineConfig: クラスの**並び**が違う配布形は受理しない（並びが id）", () => {
+test("pipelineConfig: クラスの**並び**が違う配布形は受理しない（並びが id）", () => {
   // 集合としては同じで並びだけが違う = ラベルが置換されるだけで .lab は完全に成立する形。
   const swapped = [...LIPSYNC_CLASSES];
   [swapped[0], swapped[1]] = [swapped[1], swapped[0]];
@@ -301,7 +302,7 @@ Deno.test("pipelineConfig: クラスの**並び**が違う配布形は受理し�
   );
 });
 
-Deno.test("pipelineConfig: 奇数・非整数・非正の上限宣言は落とす", () => {
+test("pipelineConfig: 奇数・非整数・非正の上限宣言は落とす", () => {
   // グラフ入力は `2T` なので、奇数の上限は「その 1 本だけ通らない上限」= 意味が壊れている。
   for (const value of [251, 0, -2, 2.5, "2000"]) {
     assertThrows(
@@ -313,7 +314,7 @@ Deno.test("pipelineConfig: 奇数・非整数・非正の上限宣言は落と�
   }
 });
 
-Deno.test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しない）", () => {
+test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しない）", () => {
   const { maxFrames: _dropped, ...rest } = PIPELINE_CONFIG;
   assertThrows(
     () => parseVowelDetectorPipelineConfig(rest),
@@ -322,7 +323,7 @@ Deno.test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しな�
   );
 });
 
-Deno.test("pipelineConfig: 奇数・非整数・非正の下限宣言は落とす", () => {
+test("pipelineConfig: 奇数・非整数・非正の下限宣言は落とす", () => {
   // 下限も 10ms フレーム数（グラフ入力は `2T`）なので、上限と同じ刻みの検査が掛かる。
   for (const value of [3, 0, -2, 2.5, "4"]) {
     assertThrows(
@@ -334,7 +335,7 @@ Deno.test("pipelineConfig: 奇数・非整数・非正の下限宣言は落と�
   }
 });
 
-Deno.test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）", () => {
+test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）", () => {
   const { minFrames: _dropped, ...rest } = PIPELINE_CONFIG;
   assertThrows(
     () => parseVowelDetectorPipelineConfig(rest),
@@ -343,7 +344,7 @@ Deno.test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しな�
   );
 });
 
-Deno.test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集合が空になる）", () => {
+test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集合が空になる）", () => {
   assertThrows(
     () => config({ minFrames: MAX_FRAMES + 2 }),
     Error,
@@ -353,7 +354,7 @@ Deno.test("pipelineConfig: 下限が上限を超える宣言は落とす（受�
 
 // ---- 運用範囲（入力長の門・両側）---------------------------------------------
 
-Deno.test("運用上限: ちょうどの長さは通り、1 フレーム超過で落ちる（境界は上側に閉じる）", () => {
+test("運用上限: ちょうどの長さは通り、1 フレーム超過で落ちる（境界は上側に閉じる）", () => {
   const parsed = config();
   assertFrameLimit(parsed, 2);
   assertFrameLimit(parsed, MAX_FRAMES);
@@ -368,7 +369,7 @@ Deno.test("運用上限: ちょうどの長さは通り、1 フレーム超過�
   assert(error.message.includes("600.00 秒"), error.message);
 });
 
-Deno.test("運用下限: ちょうどの長さは通り、1 フレーム不足で落ちる（境界は下側に閉じる）", () => {
+test("運用下限: ちょうどの長さは通り、1 フレーム不足で落ちる（境界は下側に閉じる）", () => {
   const parsed = config();
   // 焼き込み下限ちょうど（10ms フレーム 4 本 = 記号 T が 2）は通る。
   assertFrameFloor(parsed, MIN_FRAMES);
@@ -386,7 +387,7 @@ Deno.test("運用下限: ちょうどの長さは通り、1 フレーム不足�
   }
 });
 
-Deno.test("運用下限: 下限は配布形の宣言から来る（TS 側の定数ではない）", () => {
+test("運用下限: 下限は配布形の宣言から来る（TS 側の定数ではない）", () => {
   // 同じ入力長が、宣言の下限が違う配布形では通ったり落ちたりする = 数の出所が manifest 側。
   const strict = config({ minFrames: 8 });
   assertThrows(() => assertFrameFloor(strict, 6), ModelInputError, "8 フレーム");
@@ -408,12 +409,12 @@ const melBasisBytes = (
     {},
   );
 
-Deno.test("mel 基底: [80, 257] の f32 を 1 テンソルだけ読む", () => {
+test("mel 基底: [80, 257] の f32 を 1 テンソルだけ読む", () => {
   const basis = parseMelBasis(melBasisBytes().buffer);
   assertEquals(basis.length, N_MELS * MEL_BINS);
 });
 
-Deno.test("mel 基底: テンソル名が違えば入っているものを添えて落とす", () => {
+test("mel 基底: テンソル名が違えば入っているものを添えて落とす", () => {
   assertThrows(
     () => parseMelBasis(melBasisBytes("mel").buffer),
     Error,
@@ -421,7 +422,7 @@ Deno.test("mel 基底: テンソル名が違えば入っているものを添え
   );
 });
 
-Deno.test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸とも見る）", () => {
+test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸とも見る）", () => {
   assertThrows(
     () => parseMelBasis(melBasisBytes("mel_basis", [MEL_BINS, N_MELS]).buffer),
     Error,
@@ -429,7 +430,7 @@ Deno.test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸
   );
 });
 
-Deno.test("mel 基底: f32 でない格納形は落とす", () => {
+test("mel 基底: f32 でない格納形は落とす", () => {
   const bytes = writeSafetensors(
     new Map([["mel_basis", {
       dtype: "I32" as const,
@@ -506,7 +507,7 @@ const pipelineWithFakeSession = (
   return { pipeline, disposeCalls: () => disposeCalls };
 };
 
-Deno.test("detect: run が落ちた後に Session の解放も落ちたら、run の例外を先頭に両方を運ぶ", async () => {
+test("detect: run が落ちた後に Session の解放も落ちたら、run の例外を先頭に両方を運ぶ", async () => {
   const runFailure = new Error("run の途中で device lost");
   const disposeFailure = new Error("flush に失敗した");
   const { pipeline, disposeCalls } = pipelineWithFakeSession({
@@ -522,7 +523,7 @@ Deno.test("detect: run が落ちた後に Session の解放も落ちたら、run
   assertEquals(disposeCalls(), 1);
 });
 
-Deno.test("detect: 診断コールバックが落ちた後に Session の解放も落ちたら、コールバックの例外を先頭に運ぶ", async () => {
+test("detect: 診断コールバックが落ちた後に Session の解放も落ちたら、コールバックの例外を先頭に運ぶ", async () => {
   const callbackFailure = new Error("診断コールバックが投げた");
   const disposeFailure = new Error("flush に失敗した");
   const { pipeline, disposeCalls } = pipelineWithFakeSession({
@@ -539,7 +540,7 @@ Deno.test("detect: 診断コールバックが落ちた後に Session の解放�
   assertEquals(disposeCalls(), 1);
 });
 
-Deno.test("detect: run だけが落ちたら、その例外をそのまま運び Session は 1 回だけ解放する", async () => {
+test("detect: run だけが落ちたら、その例外をそのまま運び Session は 1 回だけ解放する", async () => {
   const runFailure = new Error("run の途中で落ちた");
   const { pipeline, disposeCalls } = pipelineWithFakeSession({ runError: runFailure });
 
@@ -560,7 +561,7 @@ Deno.test("detect: run だけが落ちたら、その例外をそのまま運び
 const silenceOfFrames = (frames: number): Float32Array<ArrayBuffer> =>
   new Float32Array(N_FFT + (frames - 1) * HOP);
 
-Deno.test("フレーム数: 長さから数えた本数は特徴抽出の本数と一致する", () => {
+test("フレーム数: 長さから数えた本数は特徴抽出の本数と一致する", () => {
   const melBasis = new Float32Array(N_MELS * MEL_BINS);
   for (const samples of [N_FFT, N_FFT + HOP - 1, N_FFT + HOP, SAMPLE_RATE, SAMPLE_RATE + 77]) {
     assertEquals(
@@ -573,7 +574,7 @@ Deno.test("フレーム数: 長さから数えた本数は特徴抽出の本数�
   assert(featureFrameCount(N_FFT - 1) < 1);
 });
 
-Deno.test("detect: 上限を超える音声は特徴を作る前に入力エラーで落とす", async () => {
+test("detect: 上限を超える音声は特徴を作る前に入力エラーで落とす", async () => {
   const { pipeline } = pipelineWithFakeSession({
     config: config({ maxFrames: 8 }),
     melBasis: new Float32Array(0),
@@ -587,7 +588,7 @@ Deno.test("detect: 上限を超える音声は特徴を作る前に入力エラ�
   );
 });
 
-Deno.test("detect: 端数を落として上限ちょうどになる音声は上限を通って特徴抽出へ進む", async () => {
+test("detect: 端数を落として上限ちょうどになる音声は上限を通って特徴抽出へ進む", async () => {
   const { pipeline } = pipelineWithFakeSession({
     config: config({ maxFrames: 8 }),
     melBasis: new Float32Array(0),

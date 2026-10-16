@@ -4,6 +4,7 @@
 // （SubmitStats.dispatchCount / pipelineCount）との**相互検算**で固定する。内訳だけを単体で
 // 見ると、集計が空でも 0 件でも緑になってしまう（計測が黙って死んでいる形が素通りする）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertGreater, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { acquireGpu, GpuFeatureError, planTimestampFeature } from "../src/gpu/device.ts";
@@ -93,7 +94,7 @@ const runOnce = async (
 
 // 三値のうち「true × feature 不在」だけは実機で作れない（アダプタの feature は消せない）ため、
 // 判定を切り出した純関数で全 6 通りを固定する。
-Deno.test("planTimestampFeature が gpuTiming の三値を判定し、必須指定の不足は fail loudly", () => {
+test("planTimestampFeature が gpuTiming の三値を判定し、必須指定の不足は fail loudly", () => {
   const present = new Set(["shader-f16", "timestamp-query"]);
   const absent = new Set(["shader-f16"]);
 
@@ -114,7 +115,7 @@ Deno.test("planTimestampFeature が gpuTiming の三値を判定し、必須指�
   assert(error.message.includes("shader-f16"), error.message);
 });
 
-Deno.test({
+test({
   name: "gpuTiming: true の内訳が dispatch 数・キー集合と相互に一致する（実 GPU）",
   ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {
@@ -159,7 +160,7 @@ Deno.test({
 
 // 既定（undefined）と明示 false が**同じ**であることの門。ここが割れると、計測の代価が
 // アダプタ次第で既定経路に乗る（1 dispatch = 1 pass — ADR 0021 / 案 3）。
-Deno.test({
+test({
   name: "gpuTiming の既定と false は feature を要求せず、内訳も出さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -173,7 +174,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "計測モードは実行結果を変えない（同一グラフの出力がバイト一致・実 GPU）",
   ignore: !GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE,
   fn: async () => {

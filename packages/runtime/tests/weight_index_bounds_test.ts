@@ -9,7 +9,7 @@
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { CodegenError } from "../src/codegen/errors.ts";
 import { embeddingParams } from "../src/kernels/embedding.ts";
 import { linearParams } from "../src/kernels/linear.ts";

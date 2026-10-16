@@ -14,6 +14,7 @@
 //
 // torch（torchvision）そのものとの突合は golden `deform_conv2d_block`（e2e_golden_test.ts）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import { RunArena } from "../src/gpu/arena.ts";
@@ -261,7 +262,7 @@ const runBoth = async (
   }
 };
 
-Deno.test({
+test({
   name: "deform_conv2d は offset 0・mask 1 で conv2d 直接カーネルとビット同一（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -317,7 +318,7 @@ const runDeform = async (
   }
 };
 
-Deno.test({
+test({
   name: "deform_conv2d の境界は clamp ではなくゼロ埋め（手計算値と厳密一致 / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -348,7 +349,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "deform_conv2d の NaN offset は 0 に落ちず出力へ伝播する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

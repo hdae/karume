@@ -15,6 +15,7 @@
 //     素通りの席を作ったことで HF 側の門が緩んでいないこと。
 // 正常系（文字列 = main 追従 / オブジェクトはそのまま）も同じ 1 本が担うので合わせて縛る。
 
+import { test } from "@karume/test-support/test";
 import {
   assertEquals,
   assertRejects,
@@ -30,7 +31,7 @@ import { Umt5Encoder } from "../src/umt5/encoder.ts";
 import { WanPipeline } from "../src/wan/pipeline.ts";
 import { WanTi2vPipeline } from "../src/wan/ti2v-pipeline.ts";
 
-Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
+test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
   // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
   const error = assertThrows(
     () => toRepoRef(undefined, "AnimaPipeline.fromPretrained", 'ANIMA_SOURCES["anima"]'),
@@ -43,7 +44,7 @@ Deno.test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 
   assertStringIncludes(error.message, 'ANIMA_SOURCES["anima"]');
 });
 
-Deno.test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
+test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
   // 存在しない識別子を案内すると、読んだ人は import できないものを探しに行く。
   const error = assertThrows(
     () => toRepoRef(undefined, "VowelDetectorPipeline.fromPretrained"),
@@ -55,12 +56,12 @@ Deno.test("toRepoRef: 公開配布リポを持たないファミリには対応�
   assertEquals(error.message.includes("_SOURCES"), false);
 });
 
-Deno.test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {
+test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {
   assertThrows(() => toRepoRef("", "Sbv2Pipeline.fromPretrained"), Error, "repo が必須");
   assertThrows(() => toRepoRef({ repo: "" }, "Sbv2Pipeline.fromPretrained"), Error, "repo が必須");
 });
 
-Deno.test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落ちる", () => {
+test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落ちる", () => {
   // ローカルのディレクトリを渡した呼び出しは、門が無いとその文字列が URL へ綴り込まれ、
   // 返るのは 401 / 404 —「取得先が存在しない」という原因の遠い診断になる。
   const paths = [
@@ -84,7 +85,7 @@ Deno.test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に
   }
 });
 
-Deno.test("toRepoRef: `owner/name` に見えるローカルパスは救えない（仕様）", () => {
+test("toRepoRef: `owner/name` に見えるローカルパスは救えない（仕様）", () => {
   // 綴りとして完全に合法な HF repo 名なので、この引数の中に区別できる情報が無い。
   // 「実在するか」は取得層の仕事で、ここが見るのは綴りだけである。
   assertEquals(toRepoRef("models/karume-gemma4", "Gemma4Pipeline.fromPretrained"), {
@@ -92,7 +93,7 @@ Deno.test("toRepoRef: `owner/name` に見えるローカルパスは救えない
   });
 });
 
-Deno.test("toRepoRef: 文字列は `{ repo }`（= main 追従）・オブジェクトはそのまま通す", () => {
+test("toRepoRef: 文字列は `{ repo }`（= main 追従）・オブジェクトはそのまま通す", () => {
   // 文字列 ref の意味は ref 必須化でも変えない（revision を書かない = main 追従）。
   assertEquals(toRepoRef("someone/karume-fork", "X.fromPretrained"), {
     repo: "someone/karume-fork",
@@ -102,7 +103,7 @@ Deno.test("toRepoRef: 文字列は `{ repo }`（= main 追従）・オブジェ�
   assertEquals(toRepoRef(pinned, "X.fromPretrained"), pinned);
 });
 
-Deno.test("toManifestSource: 取得元ハンドルは綴りの門を通さずそのまま渡る", () => {
+test("toManifestSource: 取得元ハンドルは綴りの門を通さずそのまま渡る", () => {
   // ローカルの配布形は HF の repo ではないので、`owner/name` を要求する門に掛けてはならない
   // （掛けると「repo が必須」で落ち、手元のディレクトリからは 1 バイトも読めない）。
   // 実体は 1 度も読まないので、アダプターは読まれたら落ちる形で十分。
@@ -112,7 +113,7 @@ Deno.test("toManifestSource: 取得元ハンドルは綴りの門を通さずそ
   assertStrictEquals(toManifestSource(source, "Gemma4Pipeline.fromPretrained"), source);
 });
 
-Deno.test("toManifestSource: 取得元ハンドルでない値は従来どおり綴りの門を通る", () => {
+test("toManifestSource: 取得元ハンドルでない値は従来どおり綴りの門を通る", () => {
   // union を足しても HF 側の門が緩まないこと（取得元ハンドルの判別は同一性なので、
   // 「repo を持つオブジェクト」が取得元として素通りする形にはならない）。
   assertEquals(toManifestSource("someone/karume-fork", "X.fromPretrained"), {
@@ -126,7 +127,7 @@ Deno.test("toManifestSource: 取得元ハンドルでない値は従来どおり
   assertThrows(() => toManifestSource(undefined, "X.fromPretrained"), Error, "repo が必須");
 });
 
-Deno.test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばずに落ちる", async () => {
+test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばずに落ちる", async () => {
   // 公開面から見た対。門が取得層より**前**にあることを、fetch 席へ「呼ばれたら失敗する」
   // スタブを置いて見る（呼ばれてしまうと文言がネットワーク側の失敗に化ける）。
   let calls = 0;
@@ -142,7 +143,7 @@ Deno.test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼�
   assertEquals(calls, 0);
 });
 
-Deno.test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOURCES）を案内する", async () => {
+test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOURCES）を案内する", async () => {
   // 0.10.0 で公開 pin（`BIREFNET_SOURCES`）が入ったのに、案内だけが「公開リポを持たない」時代の
   // ままだった（下流の報告）。他家族と同じ文言に揃っていることを公開面から見る。
   const fetchStub: typeof globalThis.fetch = (input) =>
@@ -155,7 +156,7 @@ Deno.test("fromPretrained: birefnet も ref 欠落時に対応表（BIREFNET_SOU
   assertStringIncludes(error.message, 'BIREFNET_SOURCES["birefnet-hr"]（@karume/models/birefnet）');
 });
 
-Deno.test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
+test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
   // 0.14.0 で `UMT5_SOURCES` / `WAN_SOURCES` が入った（家族の初公開）。Wan2.1 と 2.2 は取得の本体
   // （`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 にだけ存在しないキーを
   // 案内しない（③）ことを、共有の本体を通る公開面から見る。

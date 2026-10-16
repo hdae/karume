@@ -29,6 +29,7 @@
 // （docs/limitations.md に記載）。量子化値 `xq` そのものは、行 scale が非有限のとき
 // `vec4<i32>(NaN)` が不定値になるので**契約の外**（突合は scale と最終出力だけ）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { gridStrideWorkgroups } from "../src/codegen/dispatch.ts";
 import { perChannelGroupSize } from "../src/format/container/codecs.ts";
@@ -124,7 +125,7 @@ const assertExact = (
 // 丸めの同点規則（GPU 非依存の側）
 // ---------------------------------------------------------------------------
 
-Deno.test("roundTiesToEven は偶数丸め（Math.round の half-up と割れる点を固定する）", () => {
+test("roundTiesToEven は偶数丸め（Math.round の half-up と割れる点を固定する）", () => {
   const cases: readonly (readonly [number, number])[] = [
     [0.5, 0],
     [1.5, 2],
@@ -232,7 +233,7 @@ const runQuantizeRows = async (
   }
 };
 
-Deno.test({
+test({
   name: "quantize_rows: WGSL の round は偶数丸め（同点 3 点をカーネル内で実測固定・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -255,7 +256,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -302,7 +303,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "quantize_rows が TS 参照と一致する（絶対値最大の厳密復元 / 全ゼロ行 / 行別 scale / 端数・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -355,7 +356,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "quantize_rows は NaN / Inf を行 scale へ伝播する（素の max では消える・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -534,7 +535,7 @@ const LINEAR_CASES: readonly LinearCase[] = [
   { name: "i8a8 v4 小 [3,4] × W[8,4]", m: 3, n: 8, k: 4 },
 ];
 
-Deno.test({
+test({
   name:
     "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -565,7 +566,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "i8a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -611,7 +612,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -644,7 +645,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "i8a8 は opt-in × i8 常駐 × k%4==0 のときだけ効く（既定は従来経路のまま・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -687,7 +688,7 @@ Deno.test({
  * 落ちる。K=0 自体は既定の f32 経路でも 0 バイト束縛の最小サイズ違反で落ちる（linearCompute
  * とは無関係の別要因）ので、ここは 2 経路の一致だけを見る。
  */
-Deno.test({
+test({
   name:
     "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -727,7 +728,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "i8a8: k が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -909,7 +910,7 @@ const prepareW4a8 = (
   return { model: i4LinearModel(m, n, k, groupSize, quantized, bias), x, expected };
 };
 
-Deno.test({
+test({
   name:
     "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -950,7 +951,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "w4a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -998,7 +999,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -1037,7 +1038,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
   ignore: !GPU_AVAILABLE,

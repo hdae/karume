@@ -13,7 +13,7 @@
 //     ホスト側の `(T, T)` 表は 8·T² bytes 級なので、上限の無い配布形は無制限に膨らむ。
 
 import { assert, assertEquals, assertFalse, assertRejects, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { parseManifest } from "@karume/hub";
 import {
   assertBertWidth,
@@ -108,7 +108,7 @@ const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 容器が揃っていない Record では**部品の不在**で落ちる（manifest の文言では落ちない）=
   // 下の門が資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -119,7 +119,7 @@ Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落
   );
 });
 
-Deno.test("fromAssets: pipeline の契約名が sbv2 でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が sbv2 でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -128,7 +128,7 @@ Deno.test("fromAssets: pipeline の契約名が sbv2 でない manifest を落�
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/2" }));
   // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
   assertEquals(manifest.models["FN4"].pipeline, { name: "sbv2", major: 2 });
@@ -139,7 +139,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Sbv2Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16" }),
@@ -148,7 +148,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   // v2 で増えた軸（ファミリーリポの別話者を打ち間違えたときの一次情報 — ADR 0041 §8）。
   const manifest = parseManifest(manifestText());
   await assertRejects(
@@ -158,7 +158,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落としても、admission が共有 GPU の shader-f16 不足を名指しで落とす", async () => {
+test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落としても、admission が共有 GPU の shader-f16 不足を名指しで落とす", async () => {
   // 要求する feature は「宣言 ∪ 実効設定が要る feature」（`sessionGpuFeatures`）。`gpuFeatures` だけを
   // 見ると、この配布形は admission を素通りし、重みを上げた後の Session 構築まで落ちない。
   const f16Compute = parseManifest(manifestText({
@@ -188,7 +188,7 @@ Deno.test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き
   assertFalse(error.message.includes("shader-f16"), error.message);
 });
 
-Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0 },
@@ -215,7 +215,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
   );
 });
 
-Deno.test("fromAssets: defaults.style が styles に無ければ構築時に落ちる", async () => {
+test("fromAssets: defaults.style が styles に無ければ構築時に落ちる", async () => {
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0, high: 1 },
@@ -241,7 +241,7 @@ Deno.test("fromAssets: defaults.style が styles に無ければ構築時に落�
   );
 });
 
-Deno.test("fromAssets: defaults.speaker が speakers に無ければ構築時に落ちる", async () => {
+test("fromAssets: defaults.speaker が speakers に無ければ構築時に落ちる", async () => {
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0 },
@@ -266,7 +266,7 @@ Deno.test("fromAssets: defaults.speaker が speakers に無ければ構築時に
   );
 });
 
-Deno.test("fromAssets: 行番号が順列でない styles は構築時に落ちる（沈黙誤値クラス）", async () => {
+test("fromAssets: 行番号が順列でない styles は構築時に落ちる（沈黙誤値クラス）", async () => {
   // 件数 2 に対して行番号が {0, 5}。表の行数（2）に対して 5 行目は無いので、通せば
   // 「範囲外の行を引く」か「別の行を引く」のどちらかになる。
   const manifest = parseManifest(
@@ -293,7 +293,7 @@ Deno.test("fromAssets: 行番号が順列でない styles は構築時に落ち�
   );
 });
 
-Deno.test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と行が 1 対 1 でない）", () => {
+test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と行が 1 対 1 でない）", () => {
   // 範囲内に収まっていても重複していれば表の 1 行が誰からも指されない = 別のスタイルの声。
   assertThrows(
     () =>
@@ -317,7 +317,7 @@ Deno.test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と�
   );
 });
 
-Deno.test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る", () => {
+test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る", () => {
   // `models/karume-sbv2-jvnv/karume.json` の実物と同じ形。名前 → 行番号が Map で引けること。
   const config = parseSbv2PipelineConfig({
     styles: { Neutral: 0, high: 1, low: 2, NSFW: 3 },
@@ -342,7 +342,7 @@ Deno.test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る"
   assertEquals(config.maxFrames, 4096);
 });
 
-Deno.test("parseSbv2PipelineConfig: lengthScale 0 は落とす（総フレーム数が 0 になる）", () => {
+test("parseSbv2PipelineConfig: lengthScale 0 は落とす（総フレーム数が 0 になる）", () => {
   assertThrows(
     () =>
       parseSbv2PipelineConfig({
@@ -390,7 +390,7 @@ const configWithLimits = (limits: Record<string, unknown>): Record<string, unkno
   defaults: LIMIT_KNOBS,
 });
 
-Deno.test("parseSbv2PipelineConfig: maxTokens / maxFrames が無い配布形は読めない", () => {
+test("parseSbv2PipelineConfig: maxTokens / maxFrames が無い配布形は読めない", () => {
   assertThrows(
     () => parseSbv2PipelineConfig(configWithLimits({ maxFrames: 4096 })),
     Error,
@@ -403,7 +403,7 @@ Deno.test("parseSbv2PipelineConfig: maxTokens / maxFrames が無い配布形は�
   );
 });
 
-Deno.test("parseSbv2PipelineConfig: 上限が正の安全整数でなければ落とす", () => {
+test("parseSbv2PipelineConfig: 上限が正の安全整数でなければ落とす", () => {
   // 0 / 負 / 小数 / 安全整数の外。どれも「確保サイズの比較に使える数」ではない。
   for (const bad of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2, Infinity, "512"]) {
     assertThrows(
@@ -415,7 +415,7 @@ Deno.test("parseSbv2PipelineConfig: 上限が正の安全整数でなければ�
   }
 });
 
-Deno.test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通る", () => {
+test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通る", () => {
   // `generate` はこの門を **buildRelPosTables（各 4·T² bytes）と Session 確保の前**に呼ぶ。
   assertTokenLimit(512, 512);
   assertThrows(
@@ -425,7 +425,7 @@ Deno.test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通
   );
 });
 
-Deno.test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る", () => {
+test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る", () => {
   // 音素次元 P は front の記号次元で、上限は T と同じ 1 つ（`maxTokens`）。P と T のどちらが
   // 大きいかは発話依存（0 配分が出る記号語がある）なので、片方の門では超過を通す。
   assertPhonemeLimit(512, 512);
@@ -438,7 +438,7 @@ Deno.test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は�
   assertThrows(() => assertTokenLimit(513, 512), Error, "トークン数 513");
 });
 
-Deno.test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は Sbv2InputError）", () => {
+test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は Sbv2InputError）", () => {
   // `generate` はこの門を他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn`
   // のコンストラクタだけだと、text_encoder（DeBERTa）を 1 run 払ってから落ちる。
   assertSeed(0);
@@ -459,7 +459,7 @@ Deno.test("assertSeed: 受理集合は非負の安全整数（Randn と同一条
   }
 });
 
-Deno.test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を分けて落とす", () => {
+test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を分けて落とす", () => {
   // noiseScaleW は倍精度で有限なだけで通っていたので、1e39 では乱数が ±Inf のまま front へ渡った。
   const overflowing = new Randn(0).normals(4, 1e39);
   assert(!overflowing.every(Number.isFinite), "前提: 1e39 倍の乱数は f32 で ±Inf になる");
@@ -618,7 +618,7 @@ const tileWithShortRepeat = (
   return { data: out, dim, columns: column };
 };
 
-Deno.test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確保サイズとの差で捕まえる", () => {
+test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確保サイズとの差で捕まえる", () => {
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
   const word2ph = [1, 2];
   const good = tileBertToPhoneLevel(hidden, 2, word2ph);
@@ -667,7 +667,7 @@ describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", (
 const rowNames = (count: number): Map<string, number> =>
   new Map(Array.from({ length: count }, (_, index) => [`s${index}`, index]));
 
-Deno.test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合う表だけを通す", () => {
+test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合う表だけを通す", () => {
   const names = rowNames(7);
   // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
   assertTableFits(
@@ -727,7 +727,7 @@ const textEncoderStub = (
   });
 };
 
-Deno.test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引きの前提）", () => {
+test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引きの前提）", () => {
   // 正常系（陰性対照）。
   assertFrontOutputs(frontStub());
   // 不足は `outputAt` が run の後に落とす — 構築時に前倒しする。
@@ -744,7 +744,7 @@ Deno.test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引�
   );
 });
 
-Deno.test("assertBertWidth: text_encoder の hidden 幅と front の 'bert' 入力幅を構築時に突き合わせる", () => {
+test("assertBertWidth: text_encoder の hidden 幅と front の 'bert' 入力幅を構築時に突き合わせる", () => {
   // 正常系（陰性対照）。
   assertBertWidth(textEncoderStub(), frontStub(), 1);
   // 幅の食い違い = 別の BERT で焼いた 2 本を組み合わせた配布形。実行時まで残すと
@@ -781,7 +781,7 @@ const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
     ...new TextEncoder().encode("}"),
   ]);
 
-Deno.test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
   const broken = brokenUtf8Asset();
   // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
   // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
@@ -797,7 +797,7 @@ Deno.test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる�
   );
 });
 
-Deno.test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
   const truncated = new TextEncoder().encode('{"unkId":');
   assertThrows(
     () => assetJson({ symbols: truncated }, "symbols"),
@@ -818,7 +818,7 @@ const tokenizerAsset = (special: Record<string, unknown>): Record<string, unknow
   cleanRanges: { removed: [], spaced: [] },
 });
 
-Deno.test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () => {
+test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () => {
   // 正常系（この形が通ることを先に固定 — 下の 3 本が「常に落ちる」門にならないように）。
   parseTokenizerAsset(tokenizerAsset({}), "tokenizer");
   // 非整数は `Int32Array` 代入で切り捨てられ、範囲外は wrap する。どちらも「別のトークンを
@@ -849,7 +849,7 @@ const tokenizerRanges = (clean: Record<string, unknown>): Record<string, unknown
   cleanRanges: clean,
 });
 
-Deno.test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなければ受け付けない", () => {
+test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなければ受け付けない", () => {
   // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
   parseTokenizerAsset(tokenizerRanges({ removed: [[0, 0], [8, 31]], spaced: [[32, 32]] }), "tok");
   // `inRanges` は二分探索なので、前提が破れても例外は出ず**黙って外す**。除去/空白化の規則

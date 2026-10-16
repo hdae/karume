@@ -14,7 +14,7 @@
 // GPU が要る。そちらは `e2e_sbv2_wav_test.ts` が持つ。
 
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import {
   assertFiniteStyleWeight,
   parseSbv2Table,
@@ -59,7 +59,7 @@ const styleTableAsset = (
     data: f32Bytes(rows.flat()),
   }]);
 
-Deno.test("スタイル表の解釈: 行数・列数は現物の safetensors が決める", async (t) => {
+test("スタイル表の解釈: 行数・列数は現物の safetensors が決める", async (t) => {
   await t.step("shape をそのまま [行, 列] として読み、値は行優先で並ぶ", () => {
     const table = parseSbv2Table(styleTableAsset(STYLE_ROWS), STYLE_TENSOR);
     assertEquals(table.rows, 4);
@@ -112,7 +112,7 @@ Deno.test("スタイル表の解釈: 行数・列数は現物の safetensors が
   });
 });
 
-Deno.test("スタイル混合 mean + (picked − mean)·weight: mean は行 0", async (t) => {
+test("スタイル混合 mean + (picked − mean)·weight: mean は行 0", async (t) => {
   const mix = (
     index: number,
     weight: number,
@@ -161,7 +161,7 @@ Deno.test("スタイル混合 mean + (picked − mean)·weight: mean は行 0", 
   });
 });
 
-Deno.test("話者埋め込み: 表から行を引いて [1, cols, 1] にする", async (t) => {
+test("話者埋め込み: 表から行を引いて [1, cols, 1] にする", async (t) => {
   const pick = (index: number) => speakerEmbedding(SPEAKER_TABLE, SPEAKER_ROWS.length, 4, index);
 
   await t.step("選んだ行をそのまま返す（front / voice が受ける g の形）", () => {
@@ -188,7 +188,7 @@ Deno.test("話者埋め込み: 表から行を引いて [1, cols, 1] にする",
   });
 });
 
-Deno.test("行番号・weight・表の食い違いは fail loudly", async (t) => {
+test("行番号・weight・表の食い違いは fail loudly", async (t) => {
   const rows = STYLE_ROWS.length;
 
   await t.step("範囲外の行番号は落ちる（スタイル・話者とも）", () => {

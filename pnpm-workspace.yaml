@@ -9,6 +9,7 @@ catalog:
   '@std/assert': jsr:^1.0.19
   "@types/node": ^24
   '@webgpu/types': ^0.1.74
+  oxc-parser: ^0.153.0
   typescript: ^7.0.2
   vite: npm:@voidzero-dev/vite-plus-core@1.2.0
   vite-plus: 1.2.0

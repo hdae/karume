@@ -10,6 +10,8 @@
 // 出力 slot 別の dtype 写像（ADR 0068 決定 1）/ 出力 shape 規則（strided コピー族の rank
 // 上限を含む）/ 低精度格納の適格スロット（ADR 0018）。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { STRIDED_RANK } from "../src/codegen/strided.ts";
 import { evalDim, parseDim } from "../src/format/dims.ts";
@@ -261,7 +263,7 @@ const asShapeCase = (raw: unknown): ShapeCase => {
 };
 
 const loadFixture = async (): Promise<Fixture> => {
-  const text = await Deno.readTextFile(new URL("./fixtures/op-contracts.json", import.meta.url));
+  const text = await readTextFile(new URL("./fixtures/op-contracts.json", import.meta.url));
   const raw: unknown = JSON.parse(text);
   if (!isRecord(raw)) throw new Error("fixture: オブジェクトでない");
   const max = field(raw, "strided_rank_max");
@@ -284,7 +286,7 @@ const resolveDims = (
 const label = (testCase: ShapeCase): string =>
   `${testCase.op}(${testCase.ins.map((shape) => `[${shape.join(",")}]`).join(", ")})`;
 
-Deno.test("適合表の op 集合が契約表と完全一致する", async () => {
+test("適合表の op 集合が契約表と完全一致する", async () => {
   const fixture = await loadFixture();
   assertEquals(
     fixture.ops.map((entry) => entry.op).sort(),
@@ -294,12 +296,12 @@ Deno.test("適合表の op 集合が契約表と完全一致する", async () =>
   assertEquals(new Set(fixture.ops.map((entry) => entry.op)).size, fixture.ops.length);
 });
 
-Deno.test("適合表の strided rank 上限が実装の定数と一致する", async () => {
+test("適合表の strided rank 上限が実装の定数と一致する", async () => {
   const fixture = await loadFixture();
   assertEquals(fixture.stridedRankMax, STRIDED_RANK);
 });
 
-Deno.test("適合表のアリティ / スロット dtype / attrs キーが契約表と一致する", async () => {
+test("適合表のアリティ / スロット dtype / attrs キーが契約表と一致する", async () => {
   const fixture = await loadFixture();
   for (const entry of fixture.ops) {
     const contract = resolveOpContract(entry.op);
@@ -354,7 +356,7 @@ Deno.test("適合表のアリティ / スロット dtype / attrs キーが契約
 // 出力 dtype の導出は「対応表では実行可、実行で別の TypedArray として読まれる」を作る軸。
 // 比較（f32 → bool）・bool の sum（→ i32）・where（bool → f32）が両側で揃っていることを、
 // 表の側から固定する（cast は attrs.to で決まるので対象外）。
-Deno.test("適合表の出力 dtype 写像が契約表と一致する", async () => {
+test("適合表の出力 dtype 写像が契約表と一致する", async () => {
   const fixture = await loadFixture();
   for (const entry of fixture.ops) {
     if (entry.op === "cast") {
@@ -389,7 +391,7 @@ Deno.test("適合表の出力 dtype 写像が契約表と一致する", async ()
 // 割れると「エクスポータが f16 で書いた重みをランタイムが適格外と見なして CPU 展開する」
 // （= VRAM 削減が黙って消える）か、その逆の「f32 golden と対応しない丸め」が起きる。
 // どちらも例外にならないので、表の側から両実装を突き合わせて固定する。
-Deno.test("適合表の weight_slot が WEIGHT_SLOTS と一致する", async () => {
+test("適合表の weight_slot が WEIGHT_SLOTS と一致する", async () => {
   const fixture = await loadFixture();
   for (const entry of fixture.ops) {
     assertEquals(WEIGHT_SLOTS.get(entry.op), entry.weightSlot, `${entry.op}: 重みスロット`);
@@ -406,7 +408,7 @@ Deno.test("適合表の weight_slot が WEIGHT_SLOTS と一致する", async () 
 // per-channel scale の軸（ADR 0019）。割れると「エクスポータが軸 0 で作った scale を
 // カーネルが軸 1 として引く」形になり、**例外は出ずに値だけが壊れる**（conv_transpose1d の
 // [Cin,Cout,K] は Cin == Cout のとき shape 検査も通ってしまう）。
-Deno.test("適合表の channel_axis が WEIGHT_CHANNEL_AXES と一致する", async () => {
+test("適合表の channel_axis が WEIGHT_CHANNEL_AXES と一致する", async () => {
   const fixture = await loadFixture();
   for (const entry of fixture.ops) {
     assertEquals(
@@ -429,7 +431,7 @@ Deno.test("適合表の channel_axis が WEIGHT_CHANNEL_AXES と一致する", a
   );
 });
 
-Deno.test("適合表の attrs 値域を契約表の検査関数がそのとおりに判定する", async () => {
+test("適合表の attrs 値域を契約表の検査関数がそのとおりに判定する", async () => {
   const fixture = await loadFixture();
   // 必須と省略可能を同じ土俵で見る（値域の正本は 1 本 — 省略可能だからといって値域が
   // 緩んでよい理由は無い）。
@@ -471,7 +473,7 @@ Deno.test("適合表の attrs 値域を契約表の検査関数がそのとお�
   }
 });
 
-Deno.test("適合表の出力 shape 規則を computeOutputShape がそのとおりに計算する", async () => {
+test("適合表の出力 shape 規則を computeOutputShape がそのとおりに計算する", async () => {
   const fixture = await loadFixture();
   for (const testCase of fixture.shapes) {
     const contract = resolveOpContract(testCase.op);
@@ -510,7 +512,7 @@ Deno.test("適合表の出力 shape 規則を computeOutputShape がそのとお
   }
 });
 
-Deno.test("適合表の shape 節が全 op を受理ケースで踏む", async () => {
+test("適合表の shape 節が全 op を受理ケースで踏む", async () => {
   const fixture = await loadFixture();
   const accepted = new Set(
     fixture.shapes.filter((testCase) => !testCase.throws).map((testCase) => testCase.op),

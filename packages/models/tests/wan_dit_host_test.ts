@@ -8,6 +8,8 @@
 // - patchify / unpatchify / RoPE の表: **ビット一致**（Uint32）。どれもデータ移動だけ。
 // - `timesteps_proj`: atol（下の `TIMESTEPS_PROJ_ATOL` の doc に実測）。
 
+import { readFile, readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import {
@@ -58,12 +60,12 @@ type HostMeta = {
 };
 
 const readBuffer = async (name: string): Promise<ArrayBuffer> => {
-  const bytes = await Deno.readFile(new URL(name, FIXTURE_DIR));
+  const bytes = await readFile(new URL(name, FIXTURE_DIR));
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 };
 
 const meta = JSON.parse(
-  await Deno.readTextFile(new URL("host.json", FIXTURE_DIR)),
+  await readTextFile(new URL("host.json", FIXTURE_DIR)),
 ) as HostMeta;
 const host = parseSafetensors(await readBuffer("host.safetensors"));
 const ropeBaseBuffer = await readBuffer("rope_base.safetensors");
@@ -98,7 +100,7 @@ const maxAbsDiff = (actual: ArrayLike<number>, expected: ArrayLike<number>): num
   return worst;
 };
 
-Deno.test("fixture: 上流の patch と潜在の形が TS の前提（Wan2.1 T2V 1.3B）と一致する", () => {
+test("fixture: 上流の patch と潜在の形が TS の前提（Wan2.1 T2V 1.3B）と一致する", () => {
   assertEquals(meta.patch_size, [
     WAN_GEOMETRY.patchFrames,
     WAN_GEOMETRY.patchHeight,
@@ -108,7 +110,7 @@ Deno.test("fixture: 上流の patch と潜在の形が TS の前提（Wan2.1 T2V
   assertEquals([...shapeOf(host, "patchify.latents")], [...meta.latent_shape]);
 });
 
-Deno.test("wanTokenGrid: 潜在 [C,F,H,W] を patch で割った格子と S = F'·H'·W'", () => {
+test("wanTokenGrid: 潜在 [C,F,H,W] を patch で割った格子と S = F'·H'·W'", () => {
   assertEquals(wanTokenGrid([16, 9, 60, 104], WAN_GEOMETRY), {
     frames: 9,
     rows: 30,
@@ -118,13 +120,13 @@ Deno.test("wanTokenGrid: 潜在 [C,F,H,W] を patch で割った格子と S = F'
   assertEquals(wanTokenGrid([16, 21, 60, 104], WAN_GEOMETRY).count, 32_760);
 });
 
-Deno.test("wanTokenGrid: patch で割り切れない潜在・チャネル数違い・rank 違いは落とす", () => {
+test("wanTokenGrid: patch で割り切れない潜在・チャネル数違い・rank 違いは落とす", () => {
   assertThrows(() => wanTokenGrid([16, 3, 15, 16], WAN_GEOMETRY), Error, "割り切れない");
   assertThrows(() => wanTokenGrid([4, 3, 16, 16], WAN_GEOMETRY), Error, "チャネル数");
   assertThrows(() => wanTokenGrid([1, 16, 3, 16, 16], WAN_GEOMETRY), Error, "[C,F,H,W]");
 });
 
-Deno.test("patchifyLatents: 上流の patch 埋め込みの並び（1-hot conv3d）とビット一致する", () => {
+test("patchifyLatents: 上流の patch 埋め込みの並び（1-hot conv3d）とビット一致する", () => {
   const tokens = patchifyLatents(
     floats(host, "patchify.latents"),
     meta.latent_shape,
@@ -134,7 +136,7 @@ Deno.test("patchifyLatents: 上流の patch 埋め込みの並び（1-hot conv3d
   assertEquals(firstBitMismatch(tokens, expected), -1, "patchify の並びが上流と割れる");
 });
 
-Deno.test("unpatchifyTokens: 上流の出口（reshape / permute）とビット一致する", () => {
+test("unpatchifyTokens: 上流の出口（reshape / permute）とビット一致する", () => {
   const latents = unpatchifyTokens(
     floats(host, "unpatchify.tokens"),
     meta.latent_shape,
@@ -153,7 +155,7 @@ const ODD_GEOMETRY: WanPatchGeometry = {
 };
 const ODD_LATENT = [2, 4, 6, 8] as const;
 
-Deno.test("patchify / unpatchify: 添字の式（独立オラクル）どおりに並べる", () => {
+test("patchify / unpatchify: 添字の式（独立オラクル）どおりに並べる", () => {
   const { channels, patchFrames, patchHeight, patchWidth } = ODD_GEOMETRY;
   const [, frames, height, width] = ODD_LATENT;
   const grid = wanTokenGrid(ODD_LATENT, ODD_GEOMETRY);
@@ -186,7 +188,7 @@ Deno.test("patchify / unpatchify: 添字の式（独立オラクル）どおり�
   }
 });
 
-Deno.test("patchify → 最終次元を (c,v) から (v,c) へ並べ替え → unpatchify は恒等（往復）", () => {
+test("patchify → 最終次元を (c,v) から (v,c) へ並べ替え → unpatchify は恒等（往復）", () => {
   const { channels } = ODD_GEOMETRY;
   const volume = wanTokenWidth(ODD_GEOMETRY) / channels;
   const [, frames, height, width] = ODD_LATENT;
@@ -210,7 +212,7 @@ Deno.test("patchify → 最終次元を (c,v) から (v,c) へ並べ替え → u
   assert(firstBitMismatch(unpatchifyTokens(tokens, ODD_LATENT, ODD_GEOMETRY), latents) !== -1);
 });
 
-Deno.test("unpatchifyTokens: 要素数の食い違いは落とす", () => {
+test("unpatchifyTokens: 要素数の食い違いは落とす", () => {
   assertThrows(
     () => unpatchifyTokens(new Float32Array(10), meta.latent_shape, WAN_GEOMETRY),
     Error,
@@ -223,7 +225,7 @@ Deno.test("unpatchifyTokens: 要素数の食い違いは落とす", () => {
   );
 });
 
-Deno.test("wanRopeTables: 素表からの並べ替えが上流 model.rope の表とビット一致する", () => {
+test("wanRopeTables: 素表からの並べ替えが上流 model.rope の表とビット一致する", () => {
   const base = parseWanRopeBase(ropeBaseBuffer);
   assertEquals(base.rows, meta.rope_base_rows);
   assertEquals(base.widths, [22, 21, 21]);
@@ -237,14 +239,14 @@ Deno.test("wanRopeTables: 素表からの並べ替えが上流 model.rope の表
   assertEquals(firstBitMismatch(tables.sin, floats(host, "rope.sin")), -1, "sin 表が割れる");
 });
 
-Deno.test("wanRopeTables: h と w の位置を取り違えた格子は上流の表と割れる（非正方の格子）", () => {
+test("wanRopeTables: h と w の位置を取り違えた格子は上流の表と割れる（非正方の格子）", () => {
   const base = parseWanRopeBase(ropeBaseBuffer);
   const grid = wanTokenGrid(meta.latent_shape, WAN_GEOMETRY);
   const swapped = wanRopeTables(base, { ...grid, rows: grid.cols, cols: grid.rows });
   assert(firstBitMismatch(swapped.cos, floats(host, "rope.cos")) !== -1);
 });
 
-Deno.test("wanRopeTables: 素表の行数を超える格子は落とす（上流の位置表の天井）", () => {
+test("wanRopeTables: 素表の行数を超える格子は落とす（上流の位置表の天井）", () => {
   const base = parseWanRopeBase(ropeBaseBuffer);
   assertThrows(
     () => wanRopeTables(base, { frames: 1, rows: base.rows + 1, cols: 1, count: base.rows + 1 }),
@@ -264,14 +266,14 @@ const ropeSpecs = (): TensorSpec[] =>
     }))
   );
 
-Deno.test("parseWanRopeBase: 正しい形は軸ごとの行数・幅を返す", () => {
+test("parseWanRopeBase: 正しい形は軸ごとの行数・幅を返す", () => {
   const base = parseWanRopeBase(buildSafetensors(ropeSpecs()));
   assertEquals(base.rows, 2);
   assertEquals(base.widths, [1, 2, 3]);
   assertEquals(wanRopeWidth(base), 12);
 });
 
-Deno.test("parseWanRopeBase: 想定外のキー・欠け・行数違い・F32 以外は落とす", () => {
+test("parseWanRopeBase: 想定外のキー・欠け・行数違い・F32 以外は落とす", () => {
   const extra = [...ropeSpecs(), { name: "cos_x", dtype: "F32", shape: [1], data: f32Bytes([0]) }];
   assertThrows(() => parseWanRopeBase(buildSafetensors(extra)), Error, "想定外");
   assertThrows(
@@ -303,7 +305,7 @@ const timestepRows = (): { readonly values: Int32Array; readonly proj: Float32Ar
   };
 };
 
-Deno.test("timestepsProj: 上流の timesteps_proj と atol 内で一致する（cos 先・sin 後）", () => {
+test("timestepsProj: 上流の timesteps_proj と atol 内で一致する（cos 先・sin 後）", () => {
   const { values, proj } = timestepRows();
   const width = shapeOf(host, "timesteps.proj")[1];
   assertEquals(width, 256);
@@ -319,7 +321,7 @@ Deno.test("timestepsProj: 上流の timesteps_proj と atol 内で一致する�
   );
 });
 
-Deno.test("timestepsProj: timestep の 1 ずれと cos / sin の前後反転は atol の外へ出る（故障注入）", () => {
+test("timestepsProj: timestep の 1 ずれと cos / sin の前後反転は atol の外へ出る（故障注入）", () => {
   const { values, proj } = timestepRows();
   const width = 256;
   const half = width / 2;
@@ -336,7 +338,7 @@ Deno.test("timestepsProj: timestep の 1 ずれと cos / sin の前後反転は 
   assert(swappedHalves > 1e3 * TIMESTEPS_PROJ_ATOL, `前後反転の差 ${swappedHalves}`);
 });
 
-Deno.test("timestepsProj: 幅が正の偶数でない・timestep が負や非整数は落とす", () => {
+test("timestepsProj: 幅が正の偶数でない・timestep が負や非整数は落とす", () => {
   assertThrows(() => timestepsProj(10, 255), RangeError, "偶数");
   assertThrows(() => timestepsProj(10, 0), RangeError, "偶数");
   assertThrows(() => timestepsProj(-1, 256), RangeError, "整数");

@@ -12,6 +12,7 @@
 //    配布形を通すと `pixel_values` が uint8 1 LSB の 34 倍ずれる。受理集合がファミリごとに
 //    違うことが、スキーマを共有しない理由そのものなので、両向きに固定する。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
@@ -36,7 +37,7 @@ const without = (key: string): Record<string, unknown> => {
   return copy;
 };
 
-Deno.test("配布形の pipelineConfig をそのまま読める（5 欄・値はそのまま）", () => {
+test("配布形の pipelineConfig をそのまま読める（5 欄・値はそのまま）", () => {
   const config = parseDepthAnythingPipelineConfig(CONFIG);
   assertEquals(config.imageWidth, 518);
   assertEquals(config.imageHeight, 518);
@@ -45,7 +46,7 @@ Deno.test("配布形の pipelineConfig をそのまま読める（5 欄・値は
   assertEquals(config.interpolation, "bicubic");
 });
 
-Deno.test("未知キーは落とす（綴り違いが黙って既定へ縮退しない）", () => {
+test("未知キーは落とす（綴り違いが黙って既定へ縮退しない）", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ image_mean: [0.5, 0.5, 0.5] })),
     Error,
@@ -53,7 +54,7 @@ Deno.test("未知キーは落とす（綴り違いが黙って既定へ縮退し
   );
 });
 
-Deno.test("上流 config の余った欄も落とす（keep_aspect_ratio / ensure_multiple_of）", () => {
+test("上流 config の余った欄も落とす（keep_aspect_ratio / ensure_multiple_of）", () => {
   // 上流 `preprocessor_config.json` にはこの 2 欄があるが、焼かれたグラフは正方 1 点しか
   // 受け取らないので宣言に席は無い。素通しで写した配布形はここで止まる。
   for (const key of ["keepAspectRatio", "ensureMultipleOf"]) {
@@ -66,7 +67,7 @@ Deno.test("上流 config の余った欄も落とす（keep_aspect_ratio / ensur
 });
 
 for (const key of Object.keys(CONFIG)) {
-  Deno.test(`欄の欠落は落とす: ${key}`, () => {
+  test(`欄の欠落は落とす: ${key}`, () => {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(without(key)),
       Error,
@@ -75,7 +76,7 @@ for (const key of Object.keys(CONFIG)) {
   });
 }
 
-Deno.test("寸法は正の整数だけ（0 / 小数 / 文字列を落とす）", () => {
+test("寸法は正の整数だけ（0 / 小数 / 文字列を落とす）", () => {
   for (const bad of [0, -518, 518.5, "518"]) {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(withPatch({ imageWidth: bad })),
@@ -85,7 +86,7 @@ Deno.test("寸法は正の整数だけ（0 / 小数 / 文字列を落とす）",
   }
 });
 
-Deno.test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作る）", () => {
+test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作る）", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ imageStd: [0.229, 0, 0.225] })),
     Error,
@@ -93,7 +94,7 @@ Deno.test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作�
   );
 });
 
-Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
+test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
   // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
   const error = assertThrows(
     () => parseDepthAnythingPipelineConfig({ ...CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
@@ -103,7 +104,7 @@ Deno.test("imageMean / imageStd の組で正規化後の値が f32 で溢れる�
   assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
 });
 
-Deno.test("チャネル定数は長さ 3 の数の配列だけ", () => {
+test("チャネル定数は長さ 3 の数の配列だけ", () => {
   for (const bad of [[0.485, 0.456], [0.485, 0.456, 0.406, 0.5], [0.485, "0.456", 0.406], 0.485]) {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(withPatch({ imageMean: bad })),
@@ -113,14 +114,14 @@ Deno.test("チャネル定数は長さ 3 の数の配列だけ", () => {
   }
 });
 
-Deno.test("imageMean は負も受ける（平行移動なので値域を狭めない）", () => {
+test("imageMean は負も受ける（平行移動なので値域を狭めない）", () => {
   assertEquals(
     parseDepthAnythingPipelineConfig(withPatch({ imageMean: [-0.5, 0, 0.5] })).imageMean,
     [-0.5, 0, 0.5],
   );
 });
 
-Deno.test("非有限な定数は落とす（全画素が NaN になる）", () => {
+test("非有限な定数は落とす（全画素が NaN になる）", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ imageMean: [0.485, Number.NaN, 0.406] })),
     Error,
@@ -136,7 +137,7 @@ Deno.test("非有限な定数は落とす（全画素が NaN になる）", () =
   );
 });
 
-Deno.test("bilinear を宣言した配布形は受理しない（BiRefNet / SigLIP2 と逆向き）", () => {
+test("bilinear を宣言した配布形は受理しない（BiRefNet / SigLIP2 と逆向き）", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ interpolation: "bilinear" })),
     Error,

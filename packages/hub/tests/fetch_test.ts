@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
   type AssetPhase,
@@ -117,7 +118,7 @@ const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => 
   return warnings;
 };
 
-Deno.test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA に固定される", async () => {
+test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA に固定される", async () => {
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   const caches = new MemoryCacheStorage();
   // revision を渡さない経路なので pin の案内が出る（文言の検査は専用テスト側）。
@@ -137,7 +138,7 @@ Deno.test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 S
   }
 });
 
-Deno.test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する", async (t) => {
+test("loadManifest: revision 未指定の main 解決だけを 1 回 warn する", async (t) => {
   const load = async (revision?: string): Promise<string[]> => {
     const mock = createMockFetch({ sha: SHA, files: serveAll() });
     const caches = new MemoryCacheStorage();
@@ -189,7 +190,7 @@ Deno.test("loadManifest: revision 未指定の main 解決だけを 1 回 warn �
   });
 });
 
-Deno.test("loadManifest: revision に SHA を渡すと解決リクエストが発生しない", async () => {
+test("loadManifest: revision に SHA を渡すと解決リクエストが発生しない", async () => {
   const mock = createMockFetch({ files: serveAll() }); // sha 無し = 解決 API は 404
   const caches = new MemoryCacheStorage();
   const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
@@ -200,7 +201,7 @@ Deno.test("loadManifest: revision に SHA を渡すと解決リクエストが�
   assertEquals(mock.calls, [resolveUrl(MANIFEST_PATH)]);
 });
 
-Deno.test("loadManifest: 可変 ref の解決失敗はオフライン不可として HubFetchError で報告する", async () => {
+test("loadManifest: 可変 ref の解決失敗はオフライン不可として HubFetchError で報告する", async () => {
   const mock = createMockFetch({ files: serveAll() });
   const caches = new MemoryCacheStorage();
   const error = await assertRejects(
@@ -212,7 +213,7 @@ Deno.test("loadManifest: 可変 ref の解決失敗はオフライン不可と�
   assert(error.message.includes("オフライン"), "オフライン不可であることを明示する");
 });
 
-Deno.test("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", async (t) => {
+test("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", async (t) => {
   // repo は取得層で percent-encode されずに URL へ綴り込まれる（`/` が構造要素）ので、`?` `#` は
   // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` と 3 セグメント以上は別の path を指す。
   const cases: readonly [string, string][] = [
@@ -245,7 +246,7 @@ Deno.test("loadManifest: URL の構造を壊す repo 名は取得に出る前に
   }
 });
 
-Deno.test("loadManifest: repo が文字列でない参照は素の TypeError でなく HubError で断る", async () => {
+test("loadManifest: repo が文字列でない参照は素の TypeError でなく HubError で断る", async () => {
   // 型の外（JS からの呼び出し・未検証の設定値）から来る形を再現するため、意図して型を外す。
   const ref = { hubUrl: HUB_URL } as unknown as HubRepoRef;
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
@@ -256,7 +257,7 @@ Deno.test("loadManifest: repo が文字列でない参照は素の TypeError で
   assertEquals(mock.calls, [], "repo の無い参照のまま取得へ出ている");
 });
 
-Deno.test("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", async (t) => {
+test("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", async (t) => {
   // 非準拠ミラー・カスタム fetch が可変 ref や短縮形を返すと、それを「固定済みの世代」として
   // 以後の全取得が解決し直す形になり、1 つの commit に固定する契約が成り立たない。
   const cases: readonly [string, string][] = [
@@ -286,7 +287,7 @@ Deno.test("loadManifest: revision 解決の応答が commit SHA でなければ�
   }
 });
 
-Deno.test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾く（判定は全量受信後）", async () => {
+test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾く（判定は全量受信後）", async () => {
   const oversized = new TextEncoder().encode(" ".repeat(2 * 1024 * 1024));
   const mock = createMockFetch({
     sha: SHA,
@@ -304,7 +305,7 @@ Deno.test("loadManifest: 1MiB を超える karume.json は ManifestFormatError �
   });
 });
 
-Deno.test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付けて透過する", async () => {
+test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付けて透過する", async () => {
   const files = serveAll();
   files.delete(MANIFEST_PATH);
   const mock = createMockFetch({ sha: SHA, files });
@@ -325,7 +326,7 @@ Deno.test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付�
   assert(error.cause instanceof Error, "取得層のエラーを cause に残す");
 });
 
-Deno.test("loadManifest: revision 解決の 429 は onRetry で届き、取り直して manifest が揃う", async () => {
+test("loadManifest: revision 解決の 429 は onRetry で届き、取り直して manifest が揃う", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   const retries: RetryDiagnostic[] = [];
@@ -345,7 +346,7 @@ Deno.test("loadManifest: revision 解決の 429 は onRetry で届き、取り�
   );
 });
 
-Deno.test("loadManifest: karume.json の 429 も onRetry で届く", async () => {
+test("loadManifest: karume.json の 429 も onRetry で届く", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ files: serveAll() });
   const target = resolveUrl(MANIFEST_PATH);
@@ -362,7 +363,7 @@ Deno.test("loadManifest: karume.json の 429 も onRetry で届く", async () =>
   assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
 });
 
-Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往復だけ取り直す", async () => {
+test("loadManifest: 破損した cached karume.json は self-heal で 1 往復だけ取り直す", async () => {
   const caches = new MemoryCacheStorage();
   const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
   const first = createMockFetch({ files: serveAll() });
@@ -402,7 +403,7 @@ Deno.test("loadManifest: 破損した cached karume.json は self-heal で 1 往
   );
 });
 
-Deno.test("loadManifest: 真実源の karume.json が壊れていれば ManifestFormatError（キャッシュにも残さない）", async () => {
+test("loadManifest: 真実源の karume.json が壊れていれば ManifestFormatError（キャッシュにも残さない）", async () => {
   const caches = new MemoryCacheStorage();
   const broken = new TextEncoder().encode('{"format": "karume/5"');
   const mock = createMockFetch({ files: serveAll(new Map([[MANIFEST_PATH, broken]])) });
@@ -418,7 +419,7 @@ Deno.test("loadManifest: 真実源の karume.json が壊れていれば Manifest
   );
 });
 
-Deno.test("loadManifest: 完全キャッシュ済みでも中断済み signal なら manifest を返さない", async () => {
+test("loadManifest: 完全キャッシュ済みでも中断済み signal なら manifest を返さない", async () => {
   const caches = new MemoryCacheStorage();
   const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
   const first = createMockFetch({ files: serveAll() });
@@ -440,7 +441,7 @@ Deno.test("loadManifest: 完全キャッシュ済みでも中断済み signal �
   );
 });
 
-Deno.test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", async (t) => {
+test("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", async (t) => {
   // 呼び出し側の値を読み直す実装だと、表示用の `loaded.repo` は旧値のまま、取得は旧 SHA で
   // 新しい repo・ホストへ出る（名乗りと取得先が食い違う）。
   const OTHER_HUB = "https://another.test";
@@ -484,7 +485,7 @@ Deno.test("loadManifest: 渡した HubRepoRef を後から書き換えても取�
   });
 });
 
-Deno.test("loadManifest: 旧名前空間（karume/1 系）を入口で回収する", async () => {
+test("loadManifest: 旧名前空間（karume/1 系）を入口で回収する", async () => {
   const caches = new MemoryCacheStorage();
   // 取得層 0.4 以前が残した写し。新コードは二度と読まないので容量を占めるだけ。
   await caches.open("karume/1");
@@ -518,7 +519,7 @@ const load = async (routes: MockRoutes, caches: MemoryCacheStorage) => {
   return { mock, loaded };
 };
 
-Deno.test("fetchAssets: 全キーを返し、同一 path は 1 回しか取りに行かない", async () => {
+test("fetchAssets: 全キーを返し、同一 path は 1 回しか取りに行かない", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -545,7 +546,7 @@ Deno.test("fetchAssets: 全キーを返し、同一 path は 1 回しか取り�
   }
 });
 
-Deno.test("fetchAssets: 進捗総量は manifest の size 合計（path 一意化）", async () => {
+test("fetchAssets: 進捗総量は manifest の size 合計（path 一意化）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -585,7 +586,7 @@ Deno.test("fetchAssets: 進捗総量は manifest の size 合計（path 一意�
   assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
 });
 
-Deno.test("fetchAssets: ファイル別の進捗は全体合計とは別に 1 ファイルぶんを表す", async () => {
+test("fetchAssets: ファイル別の進捗は全体合計とは別に 1 ファイルぶんを表す", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -638,7 +639,7 @@ const assertMonotonic = (phases: readonly AssetPhase[], path: string): void => {
   );
 };
 
-Deno.test("fetchAssets: network 取得の phase は downloading → complete と単調に進む", async () => {
+test("fetchAssets: network 取得の phase は downloading → complete と単調に進む", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -661,7 +662,7 @@ Deno.test("fetchAssets: network 取得の phase は downloading → complete と
   }
 });
 
-Deno.test("fetchAssets: キャッシュヒットの phase 列は complete の 1 点だけ", async () => {
+test("fetchAssets: キャッシュヒットの phase 列は complete の 1 点だけ", async () => {
   const caches = new MemoryCacheStorage();
   const first = await load({ files: serveAll() }, caches);
   const files = selectionFiles(first.loaded.manifest);
@@ -702,7 +703,7 @@ Deno.test("fetchAssets: キャッシュヒットの phase 列は complete の 1 
 // 律速は「本数」ではなく「in-flight の size 合計」（バイト予算）。予算そのものの境界挙動は
 // tests/concurrency_test.ts が単体で凍結し、ここは面としての観測 — 予算に収まる限り本数では
 // 絞らないこと・送出順が選択の宣言順に決まることを見る。
-Deno.test("fetchAssets: 予算に収まる限り本数では絞らない（律速はバイト予算）", async () => {
+test("fetchAssets: 予算に収まる限り本数では絞らない（律速はバイト予算）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -716,7 +717,7 @@ Deno.test("fetchAssets: 予算に収まる限り本数では絞らない（律�
   );
 });
 
-Deno.test("fetchAssets: 送出順は選択の宣言順（予算待ちを後続に追い越させない）", async () => {
+test("fetchAssets: 送出順は選択の宣言順（予算待ちを後続に追い越させない）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -734,7 +735,7 @@ Deno.test("fetchAssets: 送出順は選択の宣言順（予算待ちを後続�
 // 上の 2 本は fixture の全量が予算（1.5GiB）に届かないので、待つ場面が生まれない — 本番の律速
 // （admission）を外しても、追い越しを許しても緑のまま通る。ここは内部口で予算を数十バイトへ絞り、
 // 「先行の未完了要求・予算待ちの大きな要求・後続の小さな要求」の 3 本で本番の結線を踏む。
-Deno.test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に追い越させず、in-flight は予算に収まる", async () => {
+test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に追い越させず、in-flight は予算に収まる", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const unique = new Map<string, FileRef>();
@@ -791,7 +792,7 @@ const dispatchOrder = (files: Readonly<Record<string, { path: string }>>): strin
   return order;
 };
 
-Deno.test("fetchAssets: 巻き添えではなく真の第一失敗が表面化する", async () => {
+test("fetchAssets: 巻き添えではなく真の第一失敗が表面化する", async () => {
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   const { mock, loaded } = await load({ files: served, delayMs: 5 }, caches);
@@ -814,7 +815,7 @@ Deno.test("fetchAssets: 巻き添えではなく真の第一失敗が表面化�
   assert(error.message.includes(victim), `${error.message} が落ちた path を名乗っていない`);
 });
 
-Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出ない", async () => {
+test("fetchAssets: 2 回目はキャッシュから返り network に出ない", async () => {
   const caches = new MemoryCacheStorage();
   const first = await load({ files: serveAll() }, caches);
   const files = selectionFiles(first.loaded.manifest);
@@ -836,7 +837,7 @@ Deno.test("fetchAssets: 2 回目はキャッシュから返り network に出な
   );
 });
 
-Deno.test("fetchAssets: 記録ハッシュが一致するヒットは中身を読み直さずに信じる", async () => {
+test("fetchAssets: 記録ハッシュが一致するヒットは中身を読み直さずに信じる", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -856,7 +857,7 @@ Deno.test("fetchAssets: 記録ハッシュが一致するヒットは中身を�
   assertEquals(second.calls, [], "記録が一致しているのに取り直している");
 });
 
-Deno.test("fetchAssets: 記録の無い破損エントリは実ハッシュが捕まえ、1 往復で治る", async () => {
+test("fetchAssets: 記録の無い破損エントリは実ハッシュが捕まえ、1 往復で治る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -877,7 +878,7 @@ Deno.test("fetchAssets: 記録の無い破損エントリは実ハッシュが�
   assertEquals(second.calls.length, 1, "壊れていないファイルまで取り直している");
 });
 
-Deno.test("fetchAssets: 記録が一致してもバイト数が manifest と違えば取り直す", async () => {
+test("fetchAssets: 記録が一致してもバイト数が manifest と違えば取り直す", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -895,7 +896,7 @@ Deno.test("fetchAssets: 記録が一致してもバイト数が manifest と違�
   assertEquals(countCalls(second.calls, resolveUrl(path)), 1, "self-heal は 1 往復だけ");
 });
 
-Deno.test("fetchAssets: content-length は正しいのに body が足りない取得は fail loudly", async () => {
+test("fetchAssets: content-length は正しいのに body が足りない取得は fail loudly", async () => {
   const caches = new MemoryCacheStorage();
   const path = TEXT_CONDITIONER_PARTS[1];
   const full = payloadFor(path);
@@ -915,7 +916,7 @@ Deno.test("fetchAssets: content-length は正しいのに body が足りない�
   assertEquals(hasEntry(hubCache(caches), short), false, "検証を通らないバイト列を格納している");
 });
 
-Deno.test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバイト列が返る", async () => {
+test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバイト列が返る", async () => {
   const caches = new MemoryCacheStorage();
   const path = VAE_DECODER_PARTS[1];
   const target = resolveUrl(path);
@@ -933,7 +934,7 @@ Deno.test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバ
   assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
 });
 
-Deno.test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら資産を返さない", async () => {
+test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら資産を返さない", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -956,7 +957,7 @@ Deno.test("fetchAssets: 完全キャッシュ済みでも中断済み signal な
   );
 });
 
-Deno.test("fetchAssets: キャッシュ読出し中の中断でも資産を返さずに素通しする", async () => {
+test("fetchAssets: キャッシュ読出し中の中断でも資産を返さずに素通しする", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -988,7 +989,7 @@ Deno.test("fetchAssets: キャッシュ読出し中の中断でも資産を返�
   );
 });
 
-Deno.test("fetchAssets: 認証の有無でキャッシュを分けない（ヘッダは取得へ透過する）", async () => {
+test("fetchAssets: 認証の有無でキャッシュを分けない（ヘッダは取得へ透過する）", async () => {
   const caches = new MemoryCacheStorage();
   const authed = createMockFetch({ files: serveAll() });
   const loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
@@ -1016,7 +1017,7 @@ Deno.test("fetchAssets: 認証の有無でキャッシュを分けない（ヘ�
   assertEquals(anonymous.calls, [], "認証の有無でキャッシュが分かれている");
 });
 
-Deno.test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊れていれば残さない）", async () => {
+test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊れていれば残さない）", async () => {
   const caches = new MemoryCacheStorage();
   const path = VAE_DECODER_PARTS[1];
   // 長さは宣言どおり・中身だけ別物（size の門ではなく sha256 の門を踏ませる）。
@@ -1038,7 +1039,7 @@ Deno.test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊�
   assertEquals(hasEntry(hubCache(caches), corrupt), false, "不一致のバイト列を格納している");
 });
 
-Deno.test("fetchAssets: 受信バイトが size を超えれば取得層の上限で fail loudly（キャッシュに残さない）", async () => {
+test("fetchAssets: 受信バイトが size を超えれば取得層の上限で fail loudly（キャッシュに残さない）", async () => {
   const caches = new MemoryCacheStorage();
   const path = TEXT_ENCODER_PARTS[1];
   const declared = payloadFor(path).byteLength;
@@ -1063,7 +1064,7 @@ Deno.test("fetchAssets: 受信バイトが size を超えれば取得層の上�
   assertEquals(hasEntry(hubCache(caches), bloated), false, "上限を超えたバイト列を格納している");
 });
 
-Deno.test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
+test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
@@ -1078,7 +1079,7 @@ Deno.test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
   assert(error instanceof DOMException && error.name === "AbortError", `${error} が中断でない`);
 });
 
-Deno.test("fetchAssets: abort(reason) の custom Error はそのまま伝播する（取得失敗に化けない）", async () => {
+test("fetchAssets: abort(reason) の custom Error はそのまま伝播する（取得失敗に化けない）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
@@ -1094,7 +1095,7 @@ Deno.test("fetchAssets: abort(reason) の custom Error はそのまま伝播す�
   assertStrictEquals(error, reason, "呼び出し側が渡した reason が別のエラーに包まれている");
 });
 
-Deno.test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", async () => {
+test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
@@ -1109,7 +1110,7 @@ Deno.test("fetchAssets: abort(reason) が primitive でもそのまま伝播す�
   assertStrictEquals(error, "app:cancelled");
 });
 
-Deno.test("onProgress の例外は通知の段に依らず取得を落とさない（warn で届く）", async (t) => {
+test("onProgress の例外は通知の段に依らず取得を落とさない（warn で届く）", async (t) => {
   // downloading は取得層が隔離して warn だけで続行する。complete まで同じ扱いでないと、同じ UI 側の
   // 例外が「受信中なら無害・終端ならロード全体の失敗」と段で意味を変える。
   const failure = new Error("ui: 描画の不具合");
@@ -1147,7 +1148,7 @@ Deno.test("onProgress の例外は通知の段に依らず取得を落とさな�
   });
 });
 
-Deno.test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる（取得は落とさない）", async () => {
+test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる（取得は落とさない）", async () => {
   const caches = new MemoryCacheStorage({ failPut: true });
 
   const mock = createMockFetch({ files: serveAll() });
@@ -1290,7 +1291,7 @@ const crossRepoFiles = (
 
 const foreignUrl = `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${CROSS_PATH}`;
 
-Deno.test("fetchAssets: 越境参照は宣言された (repo, revision) から取る", async () => {
+test("fetchAssets: 越境参照は宣言された (repo, revision) から取る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -1306,7 +1307,7 @@ Deno.test("fetchAssets: 越境参照は宣言された (repo, revision) から�
   assert(hasEntry(hubCache(caches), foreignBytes), "越境ぶんのエントリが無い");
 });
 
-Deno.test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA を名乗る", async () => {
+test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA を名乗る", async () => {
   const caches = new MemoryCacheStorage();
   const corrupt = tamper(foreignBytes);
   const { mock, loaded } = await load({
@@ -1322,7 +1323,7 @@ Deno.test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA �
   assertEquals(error.path, CROSS_PATH);
 });
 
-Deno.test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の URL を名乗る）", async () => {
+test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の URL を名乗る）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const retries: RetryDiagnostic[] = [];
@@ -1336,7 +1337,7 @@ Deno.test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の UR
   assertEquals(countCalls(mock.calls, foreignUrl), 2, "429 の後に取り直していない");
 });
 
-Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本として数える", async () => {
+test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本として数える", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -1362,7 +1363,7 @@ Deno.test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1
   );
 });
 
-Deno.test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) を名乗る", async () => {
+test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) を名乗る", async () => {
   // 同じ path の 2 本を消費側が見分けられること — path だけでファイル別の進捗をキーにすると
   // 2 本が 1 本に混ざる（公開イベントが識別子を運ばないと、取得層の一意化が消費側で崩れる）。
   const caches = new MemoryCacheStorage();
@@ -1393,7 +1394,7 @@ Deno.test("fetchAssets: 進捗は実際に取りに行った先の (repo, revisi
   }
 });
 
-Deno.test("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", async (t) => {
+test("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", async (t) => {
   // 自リポの別 revision を越境で指す形は、参照の同一性（repo と revision を含む）とキャッシュの
   // 実体（HF では revision を含まない）がずれる — 片方を保護しても共有の実体ごと消える。
   for (const [label, revision] of [["同じ revision", SHA], ["別の revision", FOREIGN_SHA]]) {
@@ -1474,7 +1475,7 @@ const splitShardFiles = (): Map<string, Uint8Array<ArrayBuffer>> =>
     ),
   ]);
 
-Deno.test("fetchAssets: 越境した容器は part ごとに越境先の URL から取る", async () => {
+test("fetchAssets: 越境した容器は part ごとに越境先の URL から取る", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: splitShardFiles() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -1498,7 +1499,7 @@ Deno.test("fetchAssets: 越境した容器は part ごとに越境先の URL か
   }
 });
 
-Deno.test("clearHubCache: 温めた資産を消す（次の取得は network に出る）", async () => {
+test("clearHubCache: 温めた資産を消す（次の取得は network に出る）", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -1514,19 +1515,19 @@ Deno.test("clearHubCache: 温めた資産を消す（次の取得は network に
   assert(after.calls.length > 0, "消した後の取得が network に出ていない");
 });
 
-Deno.test("clearHubCache: 旧名前空間（karume/1 系）も残さず消す", async () => {
+test("clearHubCache: 旧名前空間（karume/1 系）も残さず消す", async () => {
   const caches = await populated("karume/1", "karume/1:auth:0123456789abcdef", "other/1");
   assertEquals(await clearHubCache({ caches }), true);
   assertEquals([...caches.namespaces.keys()], ["other/1"], "他コードの名前空間まで消している");
 });
 
-Deno.test("clearHubCache: 消すものが 1 つも無ければ false", async () => {
+test("clearHubCache: 消すものが 1 つも無ければ false", async () => {
   const caches = await populated("other/1");
   assertEquals(await clearHubCache({ caches }), false);
   assertEquals([...caches.namespaces.keys()], ["other/1"]);
 });
 
-Deno.test("clearHubCache: caches を渡すとそちらだけを消す（globalThis には触らない）", async () => {
+test("clearHubCache: caches を渡すとそちらだけを消す（globalThis には触らない）", async () => {
   const injected = await populated("karume/1");
   const global = await populated("karume/1");
   await withGlobalCaches(global, async () => {
@@ -1536,7 +1537,7 @@ Deno.test("clearHubCache: caches を渡すとそちらだけを消す（globalTh
   assertEquals([...global.namespaces.keys()], ["karume/1"]);
 });
 
-Deno.test("clearHubCache: caches 省略時は globalThis.caches を消す", async () => {
+test("clearHubCache: caches 省略時は globalThis.caches を消す", async () => {
   const global = await populated("karume/1", "karume/1:auth");
   await withGlobalCaches(global, async () => {
     assertEquals(await clearHubCache(), true);
@@ -1544,7 +1545,7 @@ Deno.test("clearHubCache: caches 省略時は globalThis.caches を消す", asyn
   assertEquals([...global.namespaces.keys()], []);
 });
 
-Deno.test("clearHubCache: CacheStorage が無い環境は fail loudly（黙って no-op にしない）", async () => {
+test("clearHubCache: CacheStorage が無い環境は fail loudly（黙って no-op にしない）", async () => {
   await withGlobalCaches(undefined, async () => {
     const error = await assertRejects(() => clearHubCache(), Error);
     assert(error.message.includes("CacheStorage"), `${error.message} が原因を名指ししていない`);
@@ -1571,7 +1572,7 @@ const openable = async (): Promise<{
   return { mock, caches, loaded, ref: selectionFiles(loaded.manifest)["tokenizer"] };
 };
 
-Deno.test("openAsset: 温め済みの参照は取得を起こさずに区間だけを返す", async () => {
+test("openAsset: 温め済みの参照は取得を起こさずに区間だけを返す", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   await prefetchAssets(loaded, [ref], access);
@@ -1599,7 +1600,7 @@ Deno.test("openAsset: 温め済みの参照は取得を起こさずに区間だ�
   assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
 });
 
-Deno.test("openAsset: 未取得の参照は開く側が 1 度だけ温めてから開く", async () => {
+test("openAsset: 未取得の参照は開く側が 1 度だけ温めてから開く", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   const calls = mock.calls.length;
@@ -1614,7 +1615,7 @@ Deno.test("openAsset: 未取得の参照は開く側が 1 度だけ温めてか�
   assertEquals(mock.calls.length - calls, 1, "読みが取得を起こしている");
 });
 
-Deno.test("openAsset: 記録ハッシュを持たないエントリは読まずに取り直す", async () => {
+test("openAsset: 記録ハッシュを持たないエントリは読まずに取り直す", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   await prefetchAssets(loaded, [ref], access);
@@ -1629,7 +1630,7 @@ Deno.test("openAsset: 記録ハッシュを持たないエントリは読まず�
   assertEquals(await reader.read(0, ref.size), payload, "壊れたバイト列がそのまま読めている");
 });
 
-Deno.test("openAsset: 記録ハッシュが宣言と食い違うエントリも読まずに取り直す", async () => {
+test("openAsset: 記録ハッシュが宣言と食い違うエントリも読まずに取り直す", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   const other = selectionFiles(loaded.manifest)["vae_decoder[0]"];
@@ -1647,7 +1648,7 @@ Deno.test("openAsset: 記録ハッシュが宣言と食い違うエントリも�
   assertEquals(await reader.read(0, ref.size), payload, "取り直した中身が読めていない");
 });
 
-Deno.test("openAsset: 越境参照は宣言された (repo, revision) の口で開く", async () => {
+test("openAsset: 越境参照は宣言された (repo, revision) の口で開く", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const access = { fetch: mock.fetch, caches };
@@ -1663,7 +1664,7 @@ Deno.test("openAsset: 越境参照は宣言された (repo, revision) の口で�
   assertEquals(await reader.read(0, ref.size), foreignBytes, "自リポのバイト列が読めている");
 });
 
-Deno.test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読めない", async (t) => {
+test("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読めない", async (t) => {
   // 区間読み口が見る境界は**宣言 size**（`openAsset` の doc）。HF の取得層は宣言 size を読み出しの
   // 境界に使わないので、同じ sha256 に短い size を宣言した参照が warm エントリを開くと、宣言の外
   // （実体の残り）が読めてしまう — ローカルは宣言 size で拒否するので取得元で挙動が割れる。
@@ -1726,7 +1727,7 @@ Deno.test("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
   }
 });
 
-Deno.test("openAsset: 温め済みの口を開いている最中の中断でも読み口を返さない", async () => {
+test("openAsset: 温め済みの口を開いている最中の中断でも読み口を返さない", async () => {
   // warm cache のヒットは network に出ない＝取得元の signal 監視が効かない区間なので、開いた後に
   // 中断を見ないと「取り消したのに読み口が返る」（loadManifest / prefetchAssets と不揃い）。
   const { mock, caches, loaded, ref } = await openable();
@@ -1744,7 +1745,7 @@ Deno.test("openAsset: 温め済みの口を開いている最中の中断でも�
   assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
 });
 
-Deno.test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
+test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
   const mock = createMockFetch({ files: serveAll() });
   const remote = await loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, {
     fetch: mock.fetch,
@@ -1781,7 +1782,7 @@ Deno.test("openAsset: abort 済み signal は口の有無に依らず reason を
   }
 });
 
-Deno.test("fetchAssets: 特殊キーも own property で返し、同じ参照の bytes を共有する", async () => {
+test("fetchAssets: 特殊キーも own property で返し、同じ参照の bytes を共有する", async () => {
   const served = serveAll();
   const reads: string[] = [];
   const loaded = await loadManifest(localDirectory({

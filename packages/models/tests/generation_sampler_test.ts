@@ -10,6 +10,7 @@
 // Philox と別物 — ADR 0083 決定 7）。したがって期待値はすべて**この門が手で書き下した理論値**で、
 // 実装から採った fixture は 1 つも無い。分布そのものは χ² 門（下段）で縛る。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import {
@@ -55,7 +56,7 @@ const BASE_LOGITS = f32(BASE_PROBABILITIES.map((probability) => Math.log(probabi
 // 温度 0 = greedy 縮退（ADR 0083 決定 7 — parity 門が生き続ける経路）
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: 既定（指定なし）は温度 0 の greedy で argmax と厳密一致", () => {
+test("sampler: 既定（指定なし）は温度 0 の greedy で argmax と厳密一致", () => {
   const logits = f32([-1, 4.5, 0, 4.25, -3]);
   assertEquals(createSampler().next(logits, []), 1);
   assertEquals(createSampler({}).next(logits, []), 1);
@@ -64,13 +65,13 @@ Deno.test("sampler: 既定（指定なし）は温度 0 の greedy で argmax �
   assertEquals([...distribution.probabilities], [1]);
 });
 
-Deno.test("sampler: 温度 0 の tie-break は先に出た方（torch の argmax と同じ）", () => {
+test("sampler: 温度 0 の tie-break は先に出た方（torch の argmax と同じ）", () => {
   // 同値が並ぶ列で `>=` 更新の実装（後勝ち）を落とす。
   assertEquals(createSampler().next(f32([1, 3, 3, 2]), []), 1);
   assertEquals(createSampler().next(f32([3, 3, 3]), []), 0);
 });
 
-Deno.test("sampler: 温度 0 は seed に依らず同じ列（抽選が走らない）", () => {
+test("sampler: 温度 0 は seed に依らず同じ列（抽選が走らない）", () => {
   const logits = f32([0.1, 0.9, 0.4]);
   const first = createSampler({ seed: 1 });
   const second = createSampler({ seed: 999 });
@@ -79,7 +80,7 @@ Deno.test("sampler: 温度 0 は seed に依らず同じ列（抽選が走らな
   }
 });
 
-Deno.test("sampler: NaN は最大値でなくても落ちる（比較が全部 false になる値を通さない）", () => {
+test("sampler: NaN は最大値でなくても落ちる（比較が全部 false になる値を通さない）", () => {
   // NaN はあらゆる比較が false なので、素通しすると①argmax が別 token を返し、②top-k の閾値が
   // 一度 NaN になった後の候補を全部弾き、③softmax の分母が NaN になる。どれも例外を出さない。
   const poisoned = f32([1, NaN, 3, 2]);
@@ -96,7 +97,7 @@ Deno.test("sampler: NaN は最大値でなくても落ちる（比較が全部 f
   );
 });
 
-Deno.test("sampler: greedy は範囲内の最初の NaN を最大値より優先して拒否する", () => {
+test("sampler: greedy は範囲内の最初の NaN を最大値より優先して拒否する", () => {
   for (const values of [[NaN, 3, 2], [Infinity, 3, NaN], [NaN, NaN, Infinity]]) {
     // 外側の NaN は view の対象外。最大値を見つけても末尾まで検査する。
     const backing = f32([NaN, ...values, NaN]);
@@ -112,7 +113,7 @@ Deno.test("sampler: greedy は範囲内の最初の NaN を最大値より優先
   assertThrows(() => createSampler().next(f32([0, Infinity, -1]), []), Error, "最大値が非有限");
 });
 
-Deno.test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", () => {
+test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", () => {
   for (const topK of [1, 2, 4, 8]) {
     for (const values of [[NaN, 3, 2, 1], [3, NaN, 2, NaN], [Infinity, 3, 2, NaN]]) {
       const backing = f32([NaN, ...values, NaN]);
@@ -141,7 +142,7 @@ Deno.test("sampler: topK は候補の範囲外でも最初の NaN を拒否す�
   );
 });
 
-Deno.test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる", () => {
+test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる", () => {
   // 位置表の外の gather は行ごと NaN 汚染する（known-issues）ので、最終行 logits は**丸ごと**
   // 非有限になる。argmax はそれを「もっともらしい token id」（NaN 比較が常に false なので
   // 先頭 = token 0）へ畳むため、畳まれる前がここしかない。
@@ -159,7 +160,7 @@ Deno.test("sampler: 最大 logit が非有限なら token id へ畳まずに落�
 // top-k（上限なし — 最終行 logits 出口だから。ADR 0083 決定 6 の裏返し）
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: topK = 1 は温度に依らず greedy と一致する（候補 1 件で抽選が自明）", () => {
+test("sampler: topK = 1 は温度に依らず greedy と一致する（候補 1 件で抽選が自明）", () => {
   const spec = { temperature: 1, topK: 1, seed: 3 } satisfies SamplerSpec;
   const distribution = samplerDistribution(BASE_LOGITS, spec, []);
   assertEquals([...distribution.tokens], [0]);
@@ -173,19 +174,19 @@ Deno.test("sampler: topK = 1 は温度に依らず greedy と一致する（候�
   }
 });
 
-Deno.test("sampler: topK は上位 k 件だけを残し、確率をその中で正規化する", () => {
+test("sampler: topK は上位 k 件だけを残し、確率をその中で正規化する", () => {
   const distribution = samplerDistribution(BASE_LOGITS, { temperature: 1, topK: 2 }, []);
   assertEquals([...distribution.tokens], [0, 1], "上位 2 件（確率降順）");
   // 落とした 0.15 + 0.05 の質量は分母から消える。
   assertProbabilities(distribution.probabilities, [0.5 / 0.8, 0.3 / 0.8], "topK 2");
 });
 
-Deno.test("sampler: topK の同値は token id の小さい方を残す", () => {
+test("sampler: topK の同値は token id の小さい方を残す", () => {
   const distribution = samplerDistribution(f32([2, 2, 1]), { temperature: 1, topK: 1 }, []);
   assertEquals([...distribution.tokens], [0]);
 });
 
-Deno.test("sampler: topK が語彙数以上なら全件（HF の min(top_k, vocab)）", () => {
+test("sampler: topK が語彙数以上なら全件（HF の min(top_k, vocab)）", () => {
   for (const topK of [4, 5, 1_000_000]) {
     const distribution = samplerDistribution(BASE_LOGITS, { temperature: 1, topK }, []);
     assertEquals([...distribution.tokens], [0, 1, 2, 3], `topK ${topK}`);
@@ -229,7 +230,7 @@ const SELECTION_LOGITS = (() => {
   };
 })();
 
-Deno.test("sampler: topK はどの k でも参照（全件を並べた先頭 k）と中身も並びも一致する", () => {
+test("sampler: topK はどの k でも参照（全件を並べた先頭 k）と中身も並びも一致する", () => {
   // 選び方が k で切り替わる形（k の境界の前後で並びや tie-break が変わりうる）への逆戻りを縛る
   // ため、離れた k と隣接する 2 値（1024 / 1025）を並べて同じ参照と突き合わせる。
   for (const [shape, logits] of Object.entries(SELECTION_LOGITS)) {
@@ -244,7 +245,7 @@ Deno.test("sampler: topK はどの k でも参照（全件を並べた先頭 k�
   }
 });
 
-Deno.test("sampler: 大きな topK の確率は参照の上位 k 件だけで正規化される", () => {
+test("sampler: 大きな topK の確率は参照の上位 k 件だけで正規化される", () => {
   const logits = SELECTION_LOGITS.uniform;
   const topK = 1025;
   const distribution = samplerDistribution(logits, { temperature: 1, topK }, []);
@@ -256,13 +257,13 @@ Deno.test("sampler: 大きな topK の確率は参照の上位 k 件だけで正
 // top-p（nucleus — 累積が p に達する最小の集合・最上位 1 件は必ず残す）
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: topP = 1 は絞らない", () => {
+test("sampler: topP = 1 は絞らない", () => {
   const distribution = samplerDistribution(BASE_LOGITS, { temperature: 1, topP: 1 }, []);
   assertEquals([...distribution.tokens], [0, 1, 2, 3]);
   assertProbabilities(distribution.probabilities, [...BASE_PROBABILITIES], "topP 1");
 });
 
-Deno.test("sampler: topP は累積が p に達した 1 件までを残す", () => {
+test("sampler: topP は累積が p に達した 1 件までを残す", () => {
   // 累積は 0.5 / 0.8 / 0.95 / 1.0。境界の読み方（「達した件を含む」）をここで固定する。
   // NOTE: 累積とちょうど等しい p（ここでは 0.5 / 0.8 / 0.95）は f32 の丸めで両側に振れるので
   // 門にしない — 固定するのは「達した件を含む」の読み方であって、境界での丸めではない。
@@ -284,7 +285,7 @@ Deno.test("sampler: topP は累積が p に達した 1 件までを残す", () =
   }
 });
 
-Deno.test("sampler: topP は topK の後に効く（残った集合の中で累積を取る）", () => {
+test("sampler: topP は topK の後に効く（残った集合の中で累積を取る）", () => {
   // topK 3 で {0.5, 0.3, 0.15} が残り、その中の正規化確率は 0.5263 / 0.3158 / 0.1579。
   // 最上位の累積 0.5263 は 0.52 に達するので 1 件だけ残る — 語彙全体（0.5 < 0.52）で累積を
   // 取る実装なら 2 件残って落ちる。
@@ -300,7 +301,7 @@ Deno.test("sampler: topP は topK の後に効く（残った集合の中で累�
 // repetition penalty（HF `RepetitionPenaltyLogitsProcessor` の符号規約）
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: repetition penalty は負 logit に掛け・非負 logit で割る", () => {
+test("sampler: repetition penalty は負 logit に掛け・非負 logit で割る", () => {
   const logits = f32([2, -2, 0, 1]);
   const distribution = samplerDistribution(
     logits,
@@ -312,7 +313,7 @@ Deno.test("sampler: repetition penalty は負 logit に掛け・非負 logit で
   assertProbabilities(distribution.probabilities, softmax([1, -4, 0, 1]), "penalty 2");
 });
 
-Deno.test("sampler: repetition penalty < 1 は逆向きに効く（既出を持ち上げる）", () => {
+test("sampler: repetition penalty < 1 は逆向きに効く（既出を持ち上げる）", () => {
   const distribution = samplerDistribution(
     f32([2, -2, 0]),
     { temperature: 1, repetitionPenalty: 0.5 },
@@ -321,7 +322,7 @@ Deno.test("sampler: repetition penalty < 1 は逆向きに効く（既出を持�
   assertProbabilities(distribution.probabilities, softmax([4, -1, 0]), "penalty 0.5");
 });
 
-Deno.test("sampler: repetition penalty は履歴に何度出ても 1 回だけ効く", () => {
+test("sampler: repetition penalty は履歴に何度出ても 1 回だけ効く", () => {
   const once = samplerDistribution(f32([2, 0]), { temperature: 1, repetitionPenalty: 2 }, [0]);
   const many = samplerDistribution(
     f32([2, 0]),
@@ -332,13 +333,13 @@ Deno.test("sampler: repetition penalty は履歴に何度出ても 1 回だけ�
   assertProbabilities(once.probabilities, softmax([1, 0]), "1 回ぶんの適用");
 });
 
-Deno.test("sampler: repetitionPenalty = 1（既定）は履歴を読まない", () => {
+test("sampler: repetitionPenalty = 1（既定）は履歴を読まない", () => {
   const plain = samplerDistribution(BASE_LOGITS, { temperature: 1 }, []);
   const withHistory = samplerDistribution(BASE_LOGITS, { temperature: 1 }, [0, 1, 2, 3]);
   assertProbabilities(withHistory.probabilities, [...plain.probabilities], "履歴あり");
 });
 
-Deno.test("sampler: 履歴の token id が語彙の外なら fail loudly", () => {
+test("sampler: 履歴の token id が語彙の外なら fail loudly", () => {
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, repetitionPenalty: 2 }, [5]),
     RangeError,
@@ -350,7 +351,7 @@ Deno.test("sampler: 履歴の token id が語彙の外なら fail loudly", () =>
 // logit bias
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: logit bias は温度の前に加算される", () => {
+test("sampler: logit bias は温度の前に加算される", () => {
   const logits = f32([2, 1, 0]);
   const distribution = samplerDistribution(
     logits,
@@ -366,7 +367,7 @@ Deno.test("sampler: logit bias は温度の前に加算される", () => {
   );
 });
 
-Deno.test("sampler: logit bias の -Infinity はその token を候補から外す", () => {
+test("sampler: logit bias の -Infinity はその token を候補から外す", () => {
   const logits = f32([5, 1, 2]);
   const spec = { logitBias: [[0, Number.NEGATIVE_INFINITY]] } satisfies SamplerSpec;
   assertEquals(createSampler(spec).next(logits, []), 2, "温度 0");
@@ -375,7 +376,7 @@ Deno.test("sampler: logit bias の -Infinity はその token を候補から外�
   assertEquals(distribution.probabilities[0], 0, "禁止した token の確率");
 });
 
-Deno.test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さない）", () => {
+test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さない）", () => {
   const banned: SamplerSpec["logitBias"] = [[0, -Infinity], [1, -Infinity]];
   // 加工前の logits の最大値は有限なので、候補を消したのは呼び手の `logitBias` で確定する
   // = 入力起因（ADR 0107 決定 2 — 打つ手は「禁止指定を外す」）。温度 0 / 温度ありの 2 経路とも。
@@ -396,7 +397,7 @@ Deno.test("sampler: 全 token を禁止したら fail loudly（黙って 0 を�
   );
 });
 
-Deno.test("sampler: 加工前から非有限な logits は入力起因ではない（bias と出所を分ける）", () => {
+test("sampler: 加工前から非有限な logits は入力起因ではない（bias と出所を分ける）", () => {
   // 同じ 2 行が「モデル出力が元から全 −Infinity」でも通る。そちらは呼び手が `logitBias` を
   // どう直しても直らない配線・重みの破れなので、素の `Error` のまま（ADR 0107 決定 2）。
   for (const spec of [{ temperature: 0 }, { temperature: 1 }, { temperature: 1, topK: 1 }]) {
@@ -416,7 +417,7 @@ Deno.test("sampler: 加工前から非有限な logits は入力起因ではな�
   assert(!(withBias instanceof ModelInputError));
 });
 
-Deno.test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
+test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
   assertThrows(
     () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
     ModelInputError,
@@ -424,7 +425,7 @@ Deno.test("sampler: logit bias の token が語彙の外なら fail loudly", () 
   );
 });
 
-Deno.test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（後勝ちで畳まない）", () => {
+test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（後勝ちで畳まない）", () => {
   // `Map` なら黙って後勝ちで畳んでいた形（`[[2,6],[2,-1]]`）— 配列では「2 つ書いた bias の
   // 片方だけが効く」ことになるので落とす。値が同じでも落とす（畳み方の疑義は同じ）。
   assertThrows(
@@ -439,7 +440,7 @@ Deno.test("sampler: 同じ token の logit bias を 2 度書いたら fail loudl
   );
 });
 
-Deno.test("sampler: 発行後に logitBias 配列を書き換えても抽選は変わらない（防御コピー）", () => {
+test("sampler: 発行後に logitBias 配列を書き換えても抽選は変わらない（防御コピー）", () => {
   const logits = f32([5, 1, 2]);
   // 呼び手が握ったままの可変配列（外側も内側のタプルも書き換えられる形）で発行する。
   const bias: [number, number][] = [[0, Number.NEGATIVE_INFINITY]];
@@ -458,7 +459,7 @@ Deno.test("sampler: 発行後に logitBias 配列を書き換えても抽選は�
 // 指定の受理集合（黙って丸めない）
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: 受理できない指定は構築時に落ちる", () => {
+test("sampler: 受理できない指定は構築時に落ちる", () => {
   const rejected: readonly SamplerSpec[] = [
     { temperature: -1 },
     { temperature: Number.NaN },
@@ -488,7 +489,7 @@ Deno.test("sampler: 受理できない指定は構築時に落ちる", () => {
 /** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
 const untypedSpec = (value: unknown): SamplerSpec => value as SamplerSpec;
 
-Deno.test("sampler: 未知のキーは黙って無視せず、許可キーを並べて落ちる", () => {
+test("sampler: 未知のキーは黙って無視せず、許可キーを並べて落ちる", () => {
   // `minP: 1` で最大確率の候補だけに絞ったつもりでも、無視されれば全分布から抽選される。
   // 綴り違い（`top_p`）も同じく「効いていないノブ」として静かに残る。
   for (const spec of [{ temperature: 1, minP: 1, seed: 1 }, { top_p: 0.9 }]) {
@@ -515,7 +516,7 @@ Deno.test("sampler: 未知のキーは黙って無視せず、許可キーを並
   });
 });
 
-Deno.test("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", async (t) => {
+test("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", async (t) => {
   await t.step("文字列の bias は文字列連結にならない（temperature 0 の選択を変えない）", () => {
     // `1 + "0"` は `"10"` — f32 へ 10 として書かれ、bias なしなら選ばれる token 1 が 0 に化ける。
     assertThrows(
@@ -566,7 +567,7 @@ Deno.test("sampler: 型を外した logitBias は加算せずに入力の誤り�
 // 失敗の分類（ADR 0107 — 呼び手の分岐先で型を割る）
 // ---------------------------------------------------------------------------
 
-Deno.test("sampler: 失敗の分類は呼び手の分岐先で決まる", async (t) => {
+test("sampler: 失敗の分類は呼び手の分岐先で決まる", async (t) => {
   await t.step("指定の値域は入力起因（呼び手が値を直せば通る）", () => {
     assertThrows(() => createSampler({ topP: 0 }), ModelInputError, "topP 0");
     // seed の受理集合の所有者は `request-gates.ts` の 1 本（ADR 0107 決定 6）。ここが
@@ -636,7 +637,7 @@ const chiSquare = (counts: readonly number[], probabilities: readonly number[]):
   }, 0);
 };
 
-Deno.test("sampler: 温度 1 の抽選が理論分布に従う（χ² 門・自由度 3・α = 1e-4）", () => {
+test("sampler: 温度 1 の抽選が理論分布に従う（χ² 門・自由度 3・α = 1e-4）", () => {
   for (const seed of [20_260_831, 7]) {
     const counts = drawCounts({ temperature: 1, seed }, DRAWS);
     assertEquals(counts.reduce((sum, count) => sum + count, 0), DRAWS, `seed ${seed}: 総数`);
@@ -649,7 +650,7 @@ Deno.test("sampler: 温度 1 の抽選が理論分布に従う（χ² 門・自�
   }
 });
 
-Deno.test("sampler: 温度が分布を鋭くする（温度 0.5 の理論分布と一致）", () => {
+test("sampler: 温度が分布を鋭くする（温度 0.5 の理論分布と一致）", () => {
   // 温度 T の理論分布は p^(1/T) を正規化したもの。T = 0.5 なら p² / Σp²。
   const squared = BASE_PROBABILITIES.map((probability) => probability ** 2);
   const total = squared.reduce((sum, weight) => sum + weight, 0);
@@ -665,7 +666,7 @@ Deno.test("sampler: 温度が分布を鋭くする（温度 0.5 の理論分布�
   );
 });
 
-Deno.test("sampler: 同じ seed は同じ列・違う seed は違う列", () => {
+test("sampler: 同じ seed は同じ列・違う seed は違う列", () => {
   const draw = (seed: number): number[] => {
     const sampler = createSampler({ temperature: 1, seed });
     return Array.from({ length: 64 }, () => sampler.next(BASE_LOGITS, []));
@@ -674,7 +675,7 @@ Deno.test("sampler: 同じ seed は同じ列・違う seed は違う列", () => 
   assert(draw(5).join() !== draw(6).join(), "違う seed で同じ列が出た");
 });
 
-Deno.test("sampler: topK / topP で落とした token は一度も引かれない", () => {
+test("sampler: topK / topP で落とした token は一度も引かれない", () => {
   // 分布門の対（頻度ではなく**集合**を見る）。境界の実装が緩むと必ず落ちる。
   const sampler = createSampler({ temperature: 1, topK: 2, seed: 31 });
   const seen = new Set<number>();
@@ -686,7 +687,7 @@ Deno.test("sampler: topK / topP で落とした token は一度も引かれな�
 // 停止判定（ADR 0083 決定 8 — EOS は単数ではなく集合）
 // ---------------------------------------------------------------------------
 
-Deno.test("isStopToken: 集合のどれでも止まり、集合外では止まらない", () => {
+test("isStopToken: 集合のどれでも止まり、集合外では止まらない", () => {
   // 実資産の集合（gemma-4-E2B-it の `generation_config.json` は eos_token_id = [1, 106, 50]）。
   const stopTokens = [1, 106, 50] as const;
   for (const token of stopTokens) {
@@ -697,6 +698,6 @@ Deno.test("isStopToken: 集合のどれでも止まり、集合外では止ま�
   }
 });
 
-Deno.test("isStopToken: 空の集合では止まらない（EOS を宣言しない資産）", () => {
+test("isStopToken: 空の集合では止まらない（EOS を宣言しない資産）", () => {
   for (const token of [0, 1, 106]) assert(!isStopToken(token, []));
 });

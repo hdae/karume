@@ -13,6 +13,7 @@
 // MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。丸め前の f32 で比較すると
 // 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { CodecName } from "../src/format/container/codecs.ts";
 import type { OpenedContainer } from "../src/format/container/open.ts";
@@ -85,7 +86,7 @@ const linearDeclaration = (
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }, ...extra],
 });
 
-Deno.test("適格判定は WEIGHT_SLOTS の op の weight スロット消費だけを通す", () => {
+test("適格判定は WEIGHT_SLOTS の op の weight スロット消費だけを通す", () => {
   const eligible = (declaration: DeclarationJson): readonly string[] =>
     [...eligibleCompressedInitializers(mergedFor(declaration))].sort();
 
@@ -111,7 +112,7 @@ Deno.test("適格判定は WEIGHT_SLOTS の op の weight スロット消費だ�
   assertEquals(eligible(unused), ["w"]);
 });
 
-Deno.test("適格判定は WEIGHT_SLOTS の op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
+test("適格判定は WEIGHT_SLOTS の op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
   // op → (ins の並び, weight の位置)。embedding だけスロット 0（他は 1）。
   const cases: readonly (readonly [string, readonly string[], readonly string[]])[] = [
     ["linear", ["x", "w", "b"], ["w"]],
@@ -148,7 +149,7 @@ Deno.test("適格判定は WEIGHT_SLOTS の op それぞれの weight スロッ�
   }
 });
 
-Deno.test("graph 出力になった initializer は weight スロット消費だけでも適格外", () => {
+test("graph 出力になった initializer は weight スロット消費だけでも適格外", () => {
   const eligible = (declaration: DeclarationJson): readonly string[] =>
     [...eligibleCompressedInitializers(mergedFor(declaration))].sort();
 
@@ -174,7 +175,7 @@ Deno.test("graph 出力になった initializer は weight スロット消費だ
 // CPU 側の展開（ホスト鏡像の仕様）
 // ---------------------------------------------------------------------------
 
-Deno.test("f16 → f32 の展開は ±0 / subnormal / ±Inf / NaN / 最大最小 normal を正しく扱う", () => {
+test("f16 → f32 の展開は ±0 / subnormal / ±Inf / NaN / 最大最小 normal を正しく扱う", () => {
   assert(Object.is(f16BitsToF32(0x0000), 0), "+0");
   assert(Object.is(f16BitsToF32(0x8000), -0), "-0");
   // subnormal: 最小（2^-24）と最大（2^-14 に 1 ulp 足りない）
@@ -344,7 +345,7 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
   },
 ];
 
-Deno.test({
+test({
   name: "w=f16 変種 5 種が CPU 参照（丸め後の重み）と一致する（奇数長・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -399,7 +400,7 @@ Deno.test({
  *   「行長が 2 の倍数でない」形が唯一の検出器（k=37）。v4 経路では行頭が常に語境界に来るので
  *   この罠を**踏めない** — スカラ側のケースを削ると検出力が消える。
  */
-Deno.test({
+test({
   name: "w=f16 の linear が GEMM タイル境界（v4 / スカラ）で CPU 参照と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -460,7 +461,7 @@ Deno.test({
  * MUST: NaN だけは**双方 NaN**で見る。WGSL は NaN のペイロード伝播を保証しないため、
  * ビット列の一致を要求すると仕様外の性質に依存したテストになる。
  */
-Deno.test({
+test({
   name: "GPU の unpack2x16float と CPU 展開が全 65,536 パターンでビット一致（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -579,7 +580,7 @@ const poisonedF16Graph = (
 /** 毒値 0xDEADBEEF を f32 として読んだもの（0 でない有限値）。 */
 const POISON = new Float32Array(new Uint32Array([0xDEADBEEF]).buffer)[0];
 
-Deno.test({
+test({
   name: "w=f16 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -680,7 +681,7 @@ Deno.test({
  * MUST: 2 経路の出力を突き合わせる。片方だけを CPU 参照と比べると、両経路が同じだけ
  * ずれている形（例: 展開表が誤っていて GPU 側も同じ誤りを持つ）を見逃す。
  */
-Deno.test({
+test({
   name: "混在消費の f16 は CPU 展開へ落ち、適格経路とビット単位で同じ値を出す（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -763,7 +764,7 @@ Deno.test({
  * bias を f16 で宣言しても**必ず CPU 展開**に落ちる（bias スロットは適格判定に載らない —
  * プロトタイプの降格バグの逆）。
  */
-Deno.test({
+test({
   name: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -836,7 +837,7 @@ Deno.test({
  * まま常駐していると copy が実バッファ（2 バイト / 要素）をはみ出す。適格判定が `graph.outputs`
  * を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま読める。
  */
-Deno.test({
+test({
   name:
     "graph 出力にした f16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -888,7 +889,7 @@ Deno.test({
  * bf16 は宣言としては valid なまま**実行できない**ので、capability 不足として initializer
  * 名つきで列挙される（i8 は ADR 0019 で門が開いた — tests/gpu_i8_weights_test.ts）。
  */
-Deno.test("bf16 は capability 不足で fail loudly（f16 の門は bf16 まで開かない）", () => {
+test("bf16 は capability 不足で fail loudly（f16 の門は bf16 まで開かない）", () => {
   const error = assertThrows(
     // 圧縮重み + f32 bias（`b` を省くと `mergedFor` の既定 f16 になり、fixture の意図が変わる）。
     () =>

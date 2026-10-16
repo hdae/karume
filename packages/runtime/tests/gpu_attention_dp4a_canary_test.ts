@@ -27,6 +27,7 @@
 // 通して、判定の分岐そのものを実 GPU 上で踏む。MUST: 注入が効いていること自体を先に門にする
 // （置換が空振りすると「壊したのに一致した」= 恒真テストになる）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 import {
@@ -137,7 +138,7 @@ const NUDGE_BOTH_BREAK_DP4A: CanaryWgslPatch = (wgsl) => BREAK_DP4A(NUDGE_BOTH(w
 // (0) 固定入力の性質（既知解が atol=0 で立つ前提 — GPU 不要）
 // ---------------------------------------------------------------------------
 
-Deno.test("カナリアの形は production 幾何の 1 タイル全域 × K タイル 2 枚以上を埋める", () => {
+test("カナリアの形は production 幾何の 1 タイル全域 × K タイル 2 枚以上を埋める", () => {
   const qkGeometry = defaultI8a8Geometry("attention_qk");
   const qk = buildQkCase(qkGeometry);
   assertEquals(qk.rows, i8a8TileM(qkGeometry), "①QK の M がタイル辺と違う");
@@ -156,7 +157,7 @@ Deno.test("カナリアの形は production 幾何の 1 タイル全域 × K タ
   );
 });
 
-Deno.test("③PV の固定 S は f16 ちょうどで表せ、往復で 1 ビットも動かない（s16 変種の前提）", () => {
+test("③PV の固定 S は f16 ちょうどで表せ、往復で 1 ビットも動かない（s16 変種の前提）", () => {
   const pv = buildPvCase(DEFAULT_CANARY_GEOMETRY.pv);
   const words = packScoresF16(pv.scores);
   assertEquals(words.length, pv.scores.length / 2, "詰め直しの語数");
@@ -171,7 +172,7 @@ Deno.test("③PV の固定 S は f16 ちょうどで表せ、往復で 1 ビッ�
   }
 });
 
-Deno.test("③PV の qP は丸め境界から十分離れている（GPU の exp 誤差では段が動かない）", () => {
+test("③PV の qP は丸め境界から十分離れている（GPU の exp 誤差では段が動かない）", () => {
   const pv = buildPvCase(DEFAULT_CANARY_GEOMETRY.pv);
   let worst = Number.POSITIVE_INFINITY;
   const seen = new Set<number>();
@@ -189,7 +190,7 @@ Deno.test("③PV の qP は丸め境界から十分離れている（GPU の exp
   assert(seen.size >= 8, `qP の段が ${seen.size} 種類しかない`);
 });
 
-Deno.test("①QK の既知解は f16 格納の可視域に収まり、定数に潰れていない", () => {
+test("①QK の既知解は f16 格納の可視域に収まり、定数に潰れていない", () => {
   const qk = buildQkCase(DEFAULT_CANARY_GEOMETRY.qk);
   let distinct = 0;
   const values = new Set<number>();
@@ -204,7 +205,7 @@ Deno.test("①QK の既知解は f16 格納の可視域に収まり、定数に�
   assert(distinct > 100, `既知解 S が ${distinct} 種類しかない（比較が恒真になりうる）`);
 });
 
-Deno.test("①QK の既知解は f16 の丸め境界から sanity 帯より遠い（s16 変種で帯が閉じる前提）", () => {
+test("①QK の既知解は f16 の丸め境界から sanity 帯より遠い（s16 変種で帯が閉じる前提）", () => {
   // s16 変種は「既知解をホストで f16 に丸めた列」と突き合わせるので、既知解が丸め境界の
   // 近くにあると **帯の内側の差が f16 の 1 段（帯の 55 倍）へ増幅されて両腕とも帯外**になる。
   // 全要素でこの門が立つと「帯内の f32 差 ⇒ f16 の段は同じ」が固定入力に対する定理になる。
@@ -225,7 +226,7 @@ Deno.test("①QK の既知解は f16 の丸め境界から sanity 帯より遠�
   );
 });
 
-Deno.test("故障注入の置換は狙った変種にだけ効く（注入の空振りを先に塞ぐ）", () => {
+test("故障注入の置換は狙った変種にだけ効く（注入の空振りを先に塞ぐ）", () => {
   const geometry = defaultI8a8Geometry("attention_qk");
   const dp4aWgsl = attentionQkI8a8Wgsl(true, true, "f32", geometry);
   const emuWgsl = attentionQkI8a8Wgsl(true, false, "f32", geometry);
@@ -235,7 +236,7 @@ Deno.test("故障注入の置換は狙った変種にだけ効く（注入の空
   assert(BREAK_BOTH(emuWgsl) !== emuWgsl, "両変種注入がエミュに効いていない");
 });
 
-Deno.test("エピローグ摂動は ③PV の 3 変種すべてに、両腕へ等しく効く（①QK は素通し）", () => {
+test("エピローグ摂動は ③PV の 3 変種すべてに、両腕へ等しく効く（①QK は素通し）", () => {
   const pvGeometry = defaultI8a8Geometry("attention_pv");
   for (const patch of [NUDGE_BOTH, SKEW_BOTH]) {
     for (const score of ["f32", "f16"] as const) {
@@ -252,7 +253,7 @@ Deno.test("エピローグ摂動は ③PV の 3 変種すべてに、両腕へ�
   }
 });
 
-Deno.test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言がそのまま使う本文）", () => {
+test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言がそのまま使う本文）", () => {
   const decision: AttentionI8a8Decision = {
     dot: "dp4a",
     exact: false,
@@ -280,7 +281,7 @@ const memoDecision: AttentionI8a8Decision = {
   maxBandRatio: 0,
 };
 
-Deno.test("メモ: 一過性の OOM で落ちた判定は保持せず、次の要求でカナリアを走らせ直す", async () => {
+test("メモ: 一過性の OOM で落ちた判定は保持せず、次の要求でカナリアを走らせ直す", async () => {
   // カナリアの一時バッファは KB 級だが、他の Session で VRAM が天井付近まで埋まっていると非致命
   // OOM になりうる。空きが戻っても同じ失敗を配り続けると、同じ GpuContext では a8 の Session を
   // 作れなくなる（device の性質ではないので、走らせ直せば結論が変わりうる）。
@@ -303,7 +304,7 @@ Deno.test("メモ: 一過性の OOM で落ちた判定は保持せず、次の�
   assertEquals(extra, 0, "成功した判定をメモから外している");
 });
 
-Deno.test("メモ: 数値の不一致と device 消失で落ちた判定は保持し、走らせ直さない", async () => {
+test("メモ: 数値の不一致と device 消失で落ちた判定は保持し、走らせ直さない", async () => {
   // どちらも device の性質（または device 自体が使えない）なので、走らせ直しても同じ結論を得る
   // ためだけに 1 submit を払うことになる。
   for (
@@ -326,7 +327,7 @@ Deno.test("メモ: 数値の不一致と device 消失で落ちた判定は保�
   }
 });
 
-Deno.test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちたときも同じ失敗を配る", async () => {
+test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちたときも同じ失敗を配る", async () => {
   const gpu = fakeGpuContext(fakeDevice());
   const pending = Promise.withResolvers<AttentionI8a8Decision>();
   let runs = 0;
@@ -356,7 +357,7 @@ Deno.test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ち
 // (1) 健全な device（この Linux / NVIDIA）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "素の判定は dp4a を選び、分岐と厳密一致フラグが整合する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -402,7 +403,7 @@ Deno.test({
  */
 const PROFILE_GEOMETRY: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
 
-Deno.test({
+test({
   name: "プロファイルの幾何を渡すとカナリアはその幾何の生成物を撃ち、判定が得られる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -460,7 +461,7 @@ Deno.test({
 // (2) 故障注入（不一致経路の分岐）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "dp4a 変種だけが既知解を外すと attention は emu へ落ちる（実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -485,7 +486,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "両変種が既知解を外すと GpuFeatureError で落ちる（縮退先が無い・実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -511,7 +512,7 @@ Deno.test({
 // (2') 故障注入（判定則 v2 の帯の分岐 — Apple M2 の実測が要求した経路）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "両腕が同一の微小エピローグ摂動で帯内に留まると dp4a のまま通る（実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -533,7 +534,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "両腕が同一でも帯外の摂動なら GpuFeatureError（ビット同一は免罪符でない・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -550,7 +551,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "片腕だけが帯内ならその腕を採る（M2 + dp4a 故障の姿・実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -614,7 +615,7 @@ const runAttention = async (
   }
 };
 
-Deno.test({
+test({
   name: "カナリアの判定は device 単位に 1 度で、a8 Session はその席を読む（実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -656,7 +657,7 @@ Deno.test({
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  * `acquireGpu` は呼ぶたび新しい device を作るのでメモの席もこのテスト専用。
  */
-Deno.test({
+test({
   name: "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU・故障注入）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -683,7 +684,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "attentionCompute が 'a8' でない Session はカナリアを 1 dispatch も払わない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

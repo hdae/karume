@@ -7,6 +7,7 @@
  * gpu_ops_test.ts の argmax 門が 2 相形のケースも含めて見る。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
@@ -18,7 +19,7 @@ import {
   topkOneSplitGroups,
 } from "../src/kernels/argmax.ts";
 
-Deno.test("argmax 2 相分割の経路選択は行長の純関数", async (t) => {
+test("argmax 2 相分割の経路選択は行長の純関数", async (t) => {
   await t.step("閾値未満は 1 dispatch 形（区間 0）", () => {
     for (const dim of [1, 256, 4096, ARGMAX_SPLIT_MIN_DIM - 1]) {
       assertEquals(argmaxSplitGroups(dim), 0, `dim=${dim}`);
@@ -37,7 +38,7 @@ Deno.test("argmax 2 相分割の経路選択は行長の純関数", async (t) =>
   });
 });
 
-Deno.test("argmax 2 相分割の params は分割の形と一致しないと落ちる", async (t) => {
+test("argmax 2 相分割の params は分割の形と一致しないと落ちる", async (t) => {
   await t.step("正しい形は 4 語（rows, dim, groups, −inf）", () => {
     const params = argmaxSplitParams(2, 262144, 64);
     assertEquals([...params.slice(0, 3)], [2, 262144, 64]);
@@ -51,7 +52,7 @@ Deno.test("argmax 2 相分割の params は分割の形と一致しないと落�
   });
 });
 
-Deno.test("topk k=1の分割は閾値とdispatch上限を守り、巨大な行は既存経路へ残す", () => {
+test("topk k=1の分割は閾値とdispatch上限を守り、巨大な行は既存経路へ残す", () => {
   assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM - 1), 0);
   assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM), 4);
   assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM + 1), 5);

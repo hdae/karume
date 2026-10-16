@@ -9,6 +9,7 @@
 //  ⑤ `weights` の部分集合を渡すとその役割だけが選択に出る（assets は常に全数）。
 //  ⑥ 未知の model / quant / weights は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
 import {
   type FileRef,
@@ -32,7 +33,7 @@ import {
 
 const paths = (refs: readonly FileRef[]): string[] => refs.map((ref) => ref.path);
 
-Deno.test("resolveSelection: 省略時は defaultModel / defaultQuant の組を実名で返す", () => {
+test("resolveSelection: 省略時は defaultModel / defaultQuant の組を実名で返す", () => {
   const selection = resolveSelection(manifest);
   assertEquals(selection.model, "anima-turbo");
   assertEquals(selection.quant, "w8a8-s16");
@@ -48,7 +49,7 @@ Deno.test("resolveSelection: 省略時は defaultModel / defaultQuant の組を�
   assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_I8_PARTS]);
 });
 
-Deno.test("resolveSelection: quant 指定で dtype の選択が切り替わる", () => {
+test("resolveSelection: quant 指定で dtype の選択が切り替わる", () => {
   const selection = resolveSelection(manifest, { quant: "f16" });
   assertEquals(selection.quant, "f16");
   assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_F16_PARTS]);
@@ -59,7 +60,7 @@ Deno.test("resolveSelection: quant 指定で dtype の選択が切り替わる",
   assertEquals(selection.containers["transformer"].descriptor.model.length, 5);
 });
 
-Deno.test("resolveSelection: assets は quant を切り替えても動かない", () => {
+test("resolveSelection: assets は quant を切り替えても動かない", () => {
   const defaults = resolveSelection(manifest);
   const f16 = resolveSelection(manifest, { quant: "f16" });
   assertEquals(f16.assets, defaults.assets);
@@ -69,7 +70,7 @@ Deno.test("resolveSelection: assets は quant を切り替えても動かない"
   assertNotStrictEquals(f16.assets, defaults.assets);
 });
 
-Deno.test("resolveSelection: model 指定でそのモデルの選択に切り替わる", () => {
+test("resolveSelection: model 指定でそのモデルの選択に切り替わる", () => {
   const selection = resolveSelection(manifest, { model: "anima-lite" });
   assertEquals(selection.model, "anima-lite");
   assertEquals(selection.quant, "w8");
@@ -82,7 +83,7 @@ Deno.test("resolveSelection: model 指定でそのモデルの選択に切り替
   );
 });
 
-Deno.test("selectionRefs: 全容器の全 part + assets を宣言順で並べる", () => {
+test("selectionRefs: 全容器の全 part + assets を宣言順で並べる", () => {
   const refs = selectionRefs(resolveSelection(manifest));
   assertEquals(paths(refs), [
     ...TEXT_ENCODER_PARTS,
@@ -94,7 +95,7 @@ Deno.test("selectionRefs: 全容器の全 part + assets を宣言順で並べる
   ]);
 });
 
-Deno.test("selectionRefs: 長さ 0 の part は列に載らない（取りに行く中身が無い）", () => {
+test("selectionRefs: 長さ 0 の part は列に載らない（取りに行く中身が無い）", () => {
   const refs = selectionRefs(resolveSelection(manifest));
   assertEquals(
     refs.filter((ref) => ref.path === TRANSFORMER_I8_EMPTY),
@@ -106,7 +107,7 @@ Deno.test("selectionRefs: 長さ 0 の part は列に載らない（取りに行
   assertEquals(refs.filter((ref) => ref.size === 0), []);
 });
 
-Deno.test("selectionRefs: 同じ実体を指す 2 つの資産名は 1 本に畳まれる", () => {
+test("selectionRefs: 同じ実体を指す 2 つの資産名は 1 本に畳まれる", () => {
   const selection = resolveSelection(manifest);
   // 表の席は 3 つ（tokenizer / style_vectors / style_alias）だが、実体は 2 本。
   assertEquals(Object.keys(selection.assets).length, 3);
@@ -115,7 +116,7 @@ Deno.test("selectionRefs: 同じ実体を指す 2 つの資産名は 1 本に畳
   assertEquals(new Set(paths(refs)).size, refs.length, "列に重複が残っている");
 });
 
-Deno.test("selectionRefs: 容器を跨いで同じ part を共有しても 1 本に畳まれる", () => {
+test("selectionRefs: 容器を跨いで同じ part を共有しても 1 本に畳まれる", () => {
   // anima-lite の 2 容器は anima-turbo と同じ実体を指すので、列は turbo 既定の部分集合になる。
   const lite = new Set(paths(selectionRefs(resolveSelection(manifest, { model: "anima-lite" }))));
   const turbo = new Set(paths(selectionRefs(resolveSelection(manifest))));
@@ -128,7 +129,7 @@ Deno.test("selectionRefs: 容器を跨いで同じ part を共有しても 1 本
 // ---- ⑤ weights の部分集合（`ResolveOptions.weights`）。1 つのモデルが「本体だけでも動き、
 // 追加の役割を足すこともできる」形（gemma4 の model + drafter）を、配布形を割らずに扱う軸。
 
-Deno.test("resolveSelection: weights を絞ると指定した役割だけが選択に出る（assets は全数）", () => {
+test("resolveSelection: weights を絞ると指定した役割だけが選択に出る（assets は全数）", () => {
   const selection = resolveSelection(manifest, { weights: ["transformer"] });
   assertEquals(Object.keys(selection.containers), ["transformer"]);
   assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors", "style_alias"]);
@@ -141,19 +142,19 @@ Deno.test("resolveSelection: weights を絞ると指定した役割だけが選�
   ]);
 });
 
-Deno.test("resolveSelection: weights の並びは宣言順（指定した順ではない）", () => {
+test("resolveSelection: weights の並びは宣言順（指定した順ではない）", () => {
   const selection = resolveSelection(manifest, { weights: ["vae_decoder", "text_encoder"] });
   // 呼び手が逆順に並べても、選択は manifest の宣言順のまま（取得の送出順を呼び手が動かさない）。
   assertEquals(Object.keys(selection.containers), ["text_encoder", "vae_decoder"]);
 });
 
-Deno.test("resolveSelection: weights の空配列は 1 本も取らない（assets だけ）", () => {
+test("resolveSelection: weights の空配列は 1 本も取らない（assets だけ）", () => {
   const selection = resolveSelection(manifest, { weights: [] });
   assertEquals(Object.keys(selection.containers), []);
   assertEquals(paths(selectionRefs(selection)), [TOKENIZER, STYLE_VECTORS]);
 });
 
-Deno.test("resolveSelection: 実在しない weights 名は利用可能一覧つきで拒否する", () => {
+test("resolveSelection: 実在しない weights 名は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { weights: ["transformer", "drafter"] }),
     ManifestReferenceError,
@@ -162,7 +163,7 @@ Deno.test("resolveSelection: 実在しない weights 名は利用可能一覧つ
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
-Deno.test("resolveSelection: weights の重複は拒否する", () => {
+test("resolveSelection: weights の重複は拒否する", () => {
   assertThrows(
     () => resolveSelection(manifest, { weights: ["transformer", "transformer"] }),
     ManifestReferenceError,
@@ -170,7 +171,7 @@ Deno.test("resolveSelection: weights の重複は拒否する", () => {
   );
 });
 
-Deno.test("resolveSelection: weights の実在はモデルごとに見る", () => {
+test("resolveSelection: weights の実在はモデルごとに見る", () => {
   // anima-lite に text_conditioner は無い（anima-turbo にはある）。
   assertThrows(
     () => resolveSelection(manifest, { model: "anima-lite", weights: ["text_conditioner"] }),
@@ -179,7 +180,7 @@ Deno.test("resolveSelection: weights の実在はモデルごとに見る", () =
   );
 });
 
-Deno.test("resolveSelection: 実在しない model は利用可能一覧つきで拒否する", () => {
+test("resolveSelection: 実在しない model は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { model: "anima-xl" }),
     ManifestReferenceError,
@@ -187,7 +188,7 @@ Deno.test("resolveSelection: 実在しない model は利用可能一覧つき�
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
-Deno.test("resolveSelection: 実在しない quant は利用可能一覧つきで拒否する", () => {
+test("resolveSelection: 実在しない quant は利用可能一覧つきで拒否する", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { quant: "q4" }),
     ManifestReferenceError,
@@ -201,7 +202,7 @@ Deno.test("resolveSelection: 実在しない quant は利用可能一覧つき�
   });
 });
 
-Deno.test("resolveSelection: quant の一覧は指定したモデルのものになる", () => {
+test("resolveSelection: quant の一覧は指定したモデルのものになる", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { model: "anima-lite", quant: "w8a8-s16" }),
     ManifestReferenceError,
@@ -213,7 +214,7 @@ Deno.test("resolveSelection: quant の一覧は指定したモデルのものに
 // ---- 部品名と資産名は**別の欄**に入るので、`karume/4` にあった「取得キーの衝突」という
 // 失敗形はもう存在しない（3 つの名前空間を 1 枚の表へ畳んでいたのがその門の理由だった）。
 
-Deno.test("resolveSelection: 部品名と資産名が同名でも衝突しない（欄が別）", () => {
+test("resolveSelection: 部品名と資産名が同名でも衝突しない（欄が別）", () => {
   const collide = parseManifest(JSON.stringify({
     format: "karume/5",
     generator: "karume/0.1.0",

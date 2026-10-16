@@ -8,11 +8,12 @@
 //
 // 表の中身が実物と合っているかは `assets_gate_test.ts` が実資産で見る（この門の射程外）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { GRAPH_NAME_PATTERN } from "../src/format/container/limits.ts";
 import { SERIES_GRAPHS, seriesComponents, seriesGraph } from "./helpers/series-graphs.ts";
 
-Deno.test("seriesGraph は表どおりのグラフ名を返す（根直下と部品ディレクトリの両方）", () => {
+test("seriesGraph は表どおりのグラフ名を返す（根直下と部品ディレクトリの両方）", () => {
   assertEquals(seriesGraph("gemma4-e2b-product"), "model");
   assertEquals(seriesGraph("depth-anything-v2-small-hf"), "depth");
   // ディレクトリ名と綴りが割れる代表 2 つ（この割れが表を要求している理由そのもの）。
@@ -20,7 +21,7 @@ Deno.test("seriesGraph は表どおりのグラフ名を返す（根直下と部
   assertEquals(seriesGraph("irodori-v4-small", "caption-proj"), "caption_proj");
 });
 
-Deno.test("seriesGraph は表に無い系列を名指しで落とす", () => {
+test("seriesGraph は表に無い系列を名指しで落とす", () => {
   const error = assertThrows(
     () => seriesGraph("gemma4-e2b-produkt"),
     Error,
@@ -30,7 +31,7 @@ Deno.test("seriesGraph は表に無い系列を名指しで落とす", () => {
   assertEquals(error.message.includes("gemma4-e2b-product"), true, error.message);
 });
 
-Deno.test("seriesGraph は表に在る系列でも、表に無い部品を落とす", () => {
+test("seriesGraph は表に在る系列でも、表に無い部品を落とす", () => {
   const error = assertThrows(
     () => seriesGraph("dacvae-32dim", "decoders"),
     Error,
@@ -39,14 +40,14 @@ Deno.test("seriesGraph は表に在る系列でも、表に無い部品を落と
   assertEquals(error.message.includes("decoder"), true, error.message);
 });
 
-Deno.test("seriesGraph は部品の有無を取り違えた引き方を落とす", () => {
+test("seriesGraph は部品の有無を取り違えた引き方を落とす", () => {
   // 部品ディレクトリを持つ系列を根直下として引く（`""` は表に無い）。
   assertThrows(() => seriesGraph("dacvae-32dim"), Error, "<根直下>");
   // 根直下の系列に部品名を渡す（在る部品として `<根直下>` を挙げる）。
   assertThrows(() => seriesGraph("gemma4-e2b-product", "model"), Error, "<根直下>");
 });
 
-Deno.test("seriesComponents は表に無い系列を落とし、在る系列では部品の表をそのまま配る", () => {
+test("seriesComponents は表に無い系列を落とし、在る系列では部品の表をそのまま配る", () => {
   assertThrows(() => seriesComponents("sbv2-F9"), Error, "sbv2-F9");
   assertEquals(Object.keys(seriesComponents("deberta-i8")).sort(), [
     "full-24layer",
@@ -54,7 +55,7 @@ Deno.test("seriesComponents は表に無い系列を落とし、在る系列で�
   ]);
 });
 
-Deno.test("表のグラフ名はすべて容器のグラフ名語彙に収まる", () => {
+test("表のグラフ名はすべて容器のグラフ名語彙に収まる", () => {
   // `codec decoder` のような空白混じりの綴りは `prepareContainer` まで行かないと落ちない
   // （そこまで行くには実資産が要る）。表を足した時点で落ちる形にしておく。
   const outside = Object.entries(SERIES_GRAPHS).flatMap(([series, components]) =>

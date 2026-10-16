@@ -13,6 +13,8 @@
 //  ・有効長 2〜512 の全表の digest（表ごとの SHA-256 を昇順に連ねたものの SHA-256）
 // GPU も実資産も要らない。
 
+import { readFile, readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors } from "@karume/runtime";
 import {
@@ -36,9 +38,9 @@ type RelativePositionMeta = {
 };
 
 const meta = JSON.parse(
-  await Deno.readTextFile(new URL("relative-position.json", FIXTURE_DIR)),
+  await readTextFile(new URL("relative-position.json", FIXTURE_DIR)),
 ) as RelativePositionMeta;
-const fixtureBytes = await Deno.readFile(new URL("relative-position.safetensors", FIXTURE_DIR));
+const fixtureBytes = await readFile(new URL("relative-position.safetensors", FIXTURE_DIR));
 const tensors = parseSafetensors(
   fixtureBytes.buffer.slice(
     fixtureBytes.byteOffset,
@@ -76,7 +78,7 @@ const assertSameElements = (
 const hex = (bytes: ArrayBuffer): string =>
   [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-Deno.test("umT5 のバケットの構成と有効長の範囲が fixture（pin した config）と一致", () => {
+test("umT5 のバケットの構成と有効長の範囲が fixture（pin した config）と一致", () => {
   assertEquals(
     {
       numBuckets: UMT5_RELATIVE_POSITION.numBuckets,
@@ -95,7 +97,7 @@ Deno.test("umT5 のバケットの構成と有効長の範囲が fixture（pin �
   );
 });
 
-Deno.test("umT5 の距離 −511〜511 のバケットが上流の式と一致", () => {
+test("umT5 の距離 −511〜511 のバケットが上流の式と一致", () => {
   // 上限の表の 0 行目は距離 0〜511、0 列目は距離 0〜−511（table[i][j] = bucket(j − i)）。
   const table = buildUmt5RelativePositionBuckets(UMT5_MAX_LENGTH).data;
   const expected = fixtureInt32("bucket_by_distance");
@@ -114,7 +116,7 @@ Deno.test("umT5 の距離 −511〜511 のバケットが上流の式と一致",
 });
 
 for (const length of meta.representative_lengths) {
-  Deno.test(`umT5 のバケット表 L=${length} が Python の表とバイト一致`, () => {
+  test(`umT5 のバケット表 L=${length} が Python の表とバイト一致`, () => {
     const built = buildUmt5RelativePositionBuckets(length);
     const expected = fixtureInt32(`table.l${String(length).padStart(3, "0")}`);
     assertEquals(built.dtype, "i32");
@@ -128,7 +130,7 @@ for (const length of meta.representative_lengths) {
   });
 }
 
-Deno.test("umT5 のバケット表: 有効長 2〜512 の全表の digest が Python と一致", async () => {
+test("umT5 のバケット表: 有効長 2〜512 の全表の digest が Python と一致", async () => {
   // digest は表の i32 リトルエンディアンのバイト列で定義される（fixture の doc）。Int32Array の
   // 中身はエンジンのバイト順なので、ビッグエンディアンの機では比べる前に止める。
   assertEquals(new Uint8Array(new Uint32Array([1]).buffer)[0], 1, "リトルエンディアンの機ではない");
@@ -142,7 +144,7 @@ Deno.test("umT5 のバケット表: 有効長 2〜512 の全表の digest が Py
   assertEquals(hex(await crypto.subtle.digest("SHA-256", chained)), meta.digest);
 });
 
-Deno.test("buildUmt5RelativePositionBuckets: 有効長の受理集合（グラフの記号次元と同じ 2〜512）", () => {
+test("buildUmt5RelativePositionBuckets: 有効長の受理集合（グラフの記号次元と同じ 2〜512）", () => {
   for (const length of [0, 1, UMT5_MAX_LENGTH + 1, 2.5, Number.NaN]) {
     assertThrows(
       () => buildUmt5RelativePositionBuckets(length),

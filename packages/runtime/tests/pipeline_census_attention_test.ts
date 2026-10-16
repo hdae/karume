@@ -7,7 +7,7 @@
  */
 
 import { assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { attentionPvKey, attentionQkKey, attentionStatsKey } from "../src/kernels/attention.ts";
 import { attentionPvI8a8Key, attentionQkI8a8Key } from "../src/kernels/attention-i8a8.ts";
 import { linearI8a8Key } from "../src/kernels/linear-i8a8.ts";

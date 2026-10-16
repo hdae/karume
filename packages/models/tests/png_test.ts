@@ -6,11 +6,11 @@
 // 中身を保証する）。
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it, test } from "@karume/test-support/test";
 import { ModelInputError } from "../src/errors.ts";
 import { crc32, encodePng } from "../src/image/png.ts";
 
-Deno.test("crc32: 既知ベクタ（CRC-32/ISO-HDLC の check 値と IEND チャンク）", () => {
+test("crc32: 既知ベクタ（CRC-32/ISO-HDLC の check 値と IEND チャンク）", () => {
   const ascii = (text: string) => Uint8Array.from(text, (c) => c.charCodeAt(0));
   // CRC-32/ISO-HDLC の標準 check 値。
   assertEquals(crc32(ascii("123456789")), 0xcbf43926);
@@ -37,7 +37,7 @@ const walkChunks = (
   return chunks;
 };
 
-Deno.test("encodePng: シグネチャ + IHDR/IDAT/IEND の順で、全チャンクの CRC が合う", async () => {
+test("encodePng: シグネチャ + IHDR/IDAT/IEND の順で、全チャンクの CRC が合う", async () => {
   const width = 3;
   const height = 2;
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -69,7 +69,7 @@ Deno.test("encodePng: シグネチャ + IHDR/IDAT/IEND の順で、全チャン�
   assertEquals(chunks[2].data.length, 0, "IEND はデータを持たない");
 });
 
-Deno.test("encodePng: IDAT を DecompressionStream で戻すと元の画素列に一致する", async () => {
+test("encodePng: IDAT を DecompressionStream で戻すと元の画素列に一致する", async () => {
   const width = 5;
   const height = 4;
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -110,7 +110,7 @@ Deno.test("encodePng: IDAT を DecompressionStream で戻すと元の画素列�
   }
 });
 
-Deno.test("encodePng: サイズが正の整数でなければ落とす（長さ検査より先）", async () => {
+test("encodePng: サイズが正の整数でなければ落とす（長さ検査より先）", async () => {
   // `imageToRgba` 側には同型の門のテストがある（`anima_latents_test.ts`）ので、こちら側だけが
   // 裸だった。0 / 負 / 端数は行ストライドの計算が破綻するので、長さが合っていても通さない。
   for (const bad of [0, -1, 1.5]) {
@@ -134,7 +134,7 @@ Deno.test("encodePng: サイズが正の整数でなければ落とす（長さ�
   );
 });
 
-Deno.test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
+test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 254]);
   await assertRejects(() => encodePng(rgba, 1, 1), ModelInputError, "アルファ");
   await assertRejects(
@@ -164,7 +164,7 @@ describe("encodePng の失敗をホストが 400 / 500 に振り分けるとき"
   });
 });
 
-Deno.test("encodePng: deflate が効いている（一様画像が生バイト列より十分小さい）", async () => {
+test("encodePng: deflate が効いている（一様画像が生バイト列より十分小さい）", async () => {
   const width = 64;
   const height = 64;
   const rgba = new Uint8ClampedArray(width * height * 4).fill(255);
@@ -175,7 +175,7 @@ Deno.test("encodePng: deflate が効いている（一様画像が生バイト�
   );
 });
 
-Deno.test("encodePng: 同じ入力からバイト単位で同じ PNG が出る（決定性）", async () => {
+test("encodePng: 同じ入力からバイト単位で同じ PNG が出る（決定性）", async () => {
   const width = 7;
   const height = 5;
   const rgba = new Uint8ClampedArray(width * height * 4);

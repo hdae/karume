@@ -5,6 +5,7 @@
  * 触らない（2.1 のレーンの凍結 — ADR 0121 段 6 の裁定）ので、重複の解消は範囲外として別に扱う。
  */
 
+import { writeFile } from "@karume/test-support/fs";
 import type { Results } from "../../../runtime/tests/helpers/results.ts";
 import { encodePng } from "../../mod.ts";
 import { type GeneratedVideo, wanFrameToRgba } from "../../wan.ts";
@@ -16,7 +17,7 @@ export const writeWanFrames = async (
   video: GeneratedVideo,
 ): Promise<void> => {
   for (let frame = 0; frame < video.frames; frame += 1) {
-    await Deno.writeFile(
+    await writeFile(
       results.artifact(`${id}-frame-${String(frame).padStart(2, "0")}.png`),
       await encodePng(wanFrameToRgba(video, frame), video.width, video.height),
     );

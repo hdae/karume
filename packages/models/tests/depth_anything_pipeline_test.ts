@@ -33,6 +33,7 @@
 //    （`pipeline.ts` のモジュール doc）は、畳んでも shape も非負性も合ったまま通るので、
 //    「畳んだら落ちる」形の検査を置く。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { parseManifest } from "@karume/hub";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
@@ -87,7 +88,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-Deno.test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
@@ -96,7 +97,7 @@ Deno.test("fromAssets: 存在しない model は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipeline の契約名が depth-anything でない manifest を落とす", async () => {
+test("fromAssets: pipeline の契約名が depth-anything でない manifest を落とす", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/1" }));
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -105,7 +106,7 @@ Deno.test("fromAssets: pipeline の契約名が depth-anything でない manifes
   );
 });
 
-Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
   // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
   const manifest = parseManifest(manifestText({ pipeline: "depth-anything/2" }));
   await assertRejects(
@@ -115,7 +116,7 @@ Deno.test("fromAssets: 未知 major は fail loudly（検査責務は models 側
   );
 });
 
-Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => DepthAnythingPipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
@@ -124,7 +125,7 @@ Deno.test("fromAssets: 存在しない quant は利用可能な一覧を添え�
   );
 });
 
-Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
   // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] } }),
@@ -136,7 +137,7 @@ Deno.test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", 
   );
 });
 
-Deno.test("fromAssets: bicubic 以外の補間を宣言した配布形は受理しない", async () => {
+test("fromAssets: bicubic 以外の補間を宣言した配布形は受理しない", async () => {
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, interpolation: "bilinear" } }),
   );
@@ -147,7 +148,7 @@ Deno.test("fromAssets: bicubic 以外の補間を宣言した配布形は受理�
   );
 });
 
-Deno.test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
+test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
   // 上の 6 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
   // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
   const manifest = parseManifest(manifestText());
@@ -175,7 +176,7 @@ const depthGraph = (
 
 const depthConfig = parseDepthAnythingPipelineConfig(PIPELINE_CONFIG);
 
-Deno.test("assertStaticDim: 宣言どおりのグラフは通り、事前学習解像度違いは名指しで落ちる", () => {
+test("assertStaticDim: 宣言どおりのグラフは通り、事前学習解像度違いは名指しで落ちる", () => {
   // DINOv2 の位置埋め込みはパッチ数に紐づくので、ここで落ちるのは常に**資産の取り違え**。
   assertStaticDim(depthGraph(), "pixel_values", 2, depthConfig.imageHeight, "imageHeight");
   const error = assertThrows(
@@ -193,7 +194,7 @@ Deno.test("assertStaticDim: 宣言どおりのグラフは通り、事前学習�
   assert(error.message.includes("pipelineConfig は 518"), error.message);
 });
 
-Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   assertThrows(
     () => assertStaticDim(depthGraph(), "pixel", 2, depthConfig.imageHeight, "imageHeight"),
     Error,
@@ -201,7 +202,7 @@ Deno.test("assertStaticDim: 入力名そのものが無ければ落とす", () =
   );
 });
 
-Deno.test("assertDepthShape: 宣言どおりなら通り、チャネル軸を持ったままの出力は落ちる", () => {
+test("assertDepthShape: 宣言どおりなら通り、チャネル軸を持ったままの出力は落ちる", () => {
   // `[1, 1, S, S]` は中間段まで出す別 export の形で、要素数では `[1, S, S]` と区別できない。
   assertDepthShape(depthGraph(), depthConfig, "深度地図の形");
   assertThrows(
@@ -212,7 +213,7 @@ Deno.test("assertDepthShape: 宣言どおりなら通り、チャネル軸を持
   );
 });
 
-Deno.test("assertDepthShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
+test("assertDepthShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
   // `[1, 518]` は宣言されている全軸が期待と一致するので、`shape.length` を見ない門は素通しする。
   assertThrows(
     () => assertDepthShape(depthGraph({ outputShape: [1, 518] }), depthConfig, "深度地図の形"),
@@ -221,7 +222,7 @@ Deno.test("assertDepthShape: 先頭が一致する短い宣言も落とす（軸
   );
 });
 
-Deno.test("assertDepthShape: 出力名の宣言が values に無ければ落とす", () => {
+test("assertDepthShape: 出力名の宣言が values に無ければ落とす", () => {
   const model = stubModel({
     inputs: [{ name: "pixel_values", shape: [1, 3, 518, 518] }],
     outputs: ["depth"],
@@ -276,7 +277,7 @@ const textured = (width: number, height: number): Rgb8Image => {
   return { data, width, height };
 };
 
-Deno.test("前処理の結線: 一様な画像は宣言の mean / std がチャネルごとに掛かる", () => {
+test("前処理の結線: 一様な画像は宣言の mean / std がチャネルごとに掛かる", () => {
   // resize の重みは総和 1 なので一様入力は一様のまま通り、残るのは正規化だけ。RGB を別々の
   // 値にしてあるので、統計の順序違い（BGR / mean と std の入れ替え）はここで落ちる。
   const color = [10, 200, 90] as const;
@@ -290,7 +291,7 @@ Deno.test("前処理の結線: 一様な画像は宣言の mean / std がチャ�
   }
 });
 
-Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
+test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
   // 宣言の 2 欄が正しい引数の位置へ届いていることの担保（`resizeRgb8` は `(width, height)`
   // の順）。正方形では原理的に検出できないので非正方で見る。
   const image = textured(12, 9);
@@ -304,7 +305,7 @@ Deno.test("前処理の結線: imageWidth / imageHeight を入れ替えると別
   assert(matched < got.length, "転置しても全標本が一致した（門が効いていない）");
 });
 
-Deno.test("前処理の結線: bicubic で通る（既定の bilinear へ落ちていない）", () => {
+test("前処理の結線: bicubic で通る（既定の bilinear へ落ちていない）", () => {
   // `resizeRgb8` の `filter` 引数の既定は bilinear（既存 2 ファミリの値）なので、渡し忘れは
   // 型検査を通り、shape も値域も合ったまま `pixel_values` がずれる（実測 0.59 = uint8 1 LSB
   // の 34 倍）。同じ経路を bilinear で組んだ結果と**一致しない**ことがフィルタ選択の証拠。
@@ -322,7 +323,7 @@ Deno.test("前処理の結線: bicubic で通る（既定の bilinear へ落ち�
 
 // ---- 後処理（深度地図 → 元解像度・値には触らない）----------------------------
 
-Deno.test("後処理: 恒等寸法では値をそのまま通す（丸めも正規化も挟まない）", () => {
+test("後処理: 恒等寸法では値をそのまま通す（丸めも正規化も挟まない）", () => {
   const depth = Float32Array.from([0, 0.25, 1.5, 4.75, 2, 0]);
   const map = resampleDepth(depth, 3, 2, 3, 2);
   assertEquals(map.width, 3);
@@ -330,14 +331,14 @@ Deno.test("後処理: 恒等寸法では値をそのまま通す（丸めも正�
   assertEquals([...map.data], [...depth]);
 });
 
-Deno.test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない）", () => {
+test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない）", () => {
   const map = resampleDepth(new Float32Array(4 * 4), 4, 4, 7, 3);
   assertEquals(map.width, 7);
   assertEquals(map.height, 3);
   assertEquals(map.data.length, 21);
 });
 
-Deno.test("後処理: 相対深度の尺度を保つ（[0, 1] へ畳まない — 公開 API の決定）", () => {
+test("後処理: 相対深度の尺度を保つ（[0, 1] へ畳まない — 公開 API の決定）", () => {
   // 正規化を足しても shape も非負性も合ったまま通るので、「畳んだら落ちる」形で固定する。
   // min-max で畳んだ地図は必ず 0 と 1 を含み、上端 4.75 は残らない。
   const depth = Float32Array.from([2, 2.5, 3, 4.75]);
@@ -346,7 +347,7 @@ Deno.test("後処理: 相対深度の尺度を保つ（[0, 1] へ畳まない �
   assertEquals(map.data[3], 4.75, "上端が 1 へ落ちている（min-max 正規化が掛かっている）");
 });
 
-Deno.test("後処理: 拡大しても非負のまま（重みが非負・総和 1）", () => {
+test("後処理: 拡大しても非負のまま（重みが非負・総和 1）", () => {
   // head 末尾の ReLU が出す「遠景は厳密に 0」という性質が、後処理で負へ潜らないこと。
   // 負のローブを持つカーネル（bicubic）へ差し替えるとここが落ちる — モジュール doc の
   // 「元解像度へ戻す段は bilinear」が値に出る唯一の点。
@@ -356,7 +357,7 @@ Deno.test("後処理: 拡大しても非負のまま（重みが非負・総和 
   assert(map.data[15] > map.data[0], "単調性が失われた（左右が入れ替わっている）");
 });
 
-Deno.test("後処理: 横方向だけの勾配は拡大しても横方向だけ（軸の取り違え検出）", () => {
+test("後処理: 横方向だけの勾配は拡大しても横方向だけ（軸の取り違え検出）", () => {
   const width = 6;
   const height = 4;
   const plane = new Float32Array(width * height);
@@ -372,7 +373,7 @@ Deno.test("後処理: 横方向だけの勾配は拡大しても横方向だけ�
   assert(map.data[0] < map.data[2], "横方向の単調性が失われた（軸が入れ替わっている）");
 });
 
-Deno.test("後処理: 非有限の深度は resize の前に画素座標つきで落ちる（真っ黒な地図にしない）", () => {
+test("後処理: 非有限の深度は resize の前に画素座標つきで落ちる（真っ黒な地図にしない）", () => {
   // モジュール doc が配っている可視化レシピは `value < min` / `value > max` で走査するので、
   // NaN は比較を素通りして `span` が非正になり、**全画素 0 = 一様な真っ黒の深度地図**が
   // 正常値の顔で出る。BiRefNet の `matteFromLogits` と逐語同型の検査点を持つ。

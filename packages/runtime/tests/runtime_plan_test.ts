@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { DimError } from "../src/format/dims.ts";
 import { OpContractError } from "../src/ops.ts";
@@ -44,7 +45,7 @@ const linearGraph = (): DeclarationJson => ({
 /** 宣言 → 合流後のグラフ（格納は宣言 dtype どおり・中身は見ない — helpers/merged-graph.ts）。 */
 const parse = mergeGraph;
 
-Deno.test("シンボル束縛は入力 shape の次元位置から取る", () => {
+test("シンボル束縛は入力 shape の次元位置から取る", () => {
   const graph = parse(linearGraph());
   assertEquals(bindSymbols(graph, { x: [7, 4] }), { T: 7 });
   assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
@@ -59,7 +60,7 @@ const derivedGraph = (): DeclarationJson => {
   return graph;
 };
 
-Deno.test("派生次元だけの入力からもシンボルを解く（解は一意 — ADR 0057）", () => {
+test("派生次元だけの入力からもシンボルを解く（解は一意 — ADR 0057）", () => {
   const graph = parse(derivedGraph());
   assertEquals(bindSymbols(graph, { x: [284, 4] }), { T: 142 });
   assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
@@ -68,7 +69,7 @@ Deno.test("派生次元だけの入力からもシンボルを解く（解は一
   assertThrows(() => bindSymbols(graph, { x: [284, 4] }, { T: 284 }), ExecutionError);
 });
 
-Deno.test("宣言の形をしていない実寸は fail loudly（丸めない）", () => {
+test("宣言の形をしていない実寸は fail loudly（丸めない）", () => {
   // 母音検出 CRNN の「10ms フレーム数は偶数」がここで落ちる（黙って 142 や 143 に丸めない）。
   const graph = parse(derivedGraph());
   const error = assertThrows(
@@ -79,7 +80,7 @@ Deno.test("宣言の形をしていない実寸は fail loudly（丸めない）
   assert(error.message.includes("実測 285"), error.message);
 });
 
-Deno.test("束縛と実 shape・宣言の食い違いは全て fail loudly", () => {
+test("束縛と実 shape・宣言の食い違いは全て fail loudly", () => {
   const graph = parse(linearGraph());
   // 数値次元の不一致
   assertThrows(() => bindSymbols(graph, { x: [7, 5] }), ExecutionError);
@@ -96,12 +97,12 @@ Deno.test("束縛と実 shape・宣言の食い違いは全て fail loudly", () 
   assertThrows(() => bindSymbols(graph, { x: [7, 4] }, { S: 8 }), ExecutionError);
 });
 
-Deno.test("明示束縛が入力 shape と一致していれば受理する", () => {
+test("明示束縛が入力 shape と一致していれば受理する", () => {
   const graph = parse(linearGraph());
   assertEquals(bindSymbols(graph, { x: [7, 4] }, { T: 7 }), { T: 7 });
 });
 
-Deno.test("束縛の有無は Object.hasOwn で見る（prototype 由来の名前は束縛済みにしない）", () => {
+test("束縛の有無は Object.hasOwn で見る（prototype 由来の名前は束縛済みにしない）", () => {
   const source = linearGraph();
   source.symbols = ["toString"];
   source.inputs = [{ name: "x", dtype: "f32", shape: ["toString", 4] }];
@@ -111,7 +112,7 @@ Deno.test("束縛の有無は Object.hasOwn で見る（prototype 由来の名�
   assertEquals(bindSymbols(graph, { x: [6, 4] }), { toString: 6 });
 });
 
-Deno.test("bindSymbols は '__proto__' というシンボル名の束縛を own property として保全する", () => {
+test("bindSymbols は '__proto__' というシンボル名の束縛を own property として保全する", () => {
   const source = linearGraph();
   source.symbols = ["__proto__"];
   source.inputs = [{ name: "x", dtype: "f32", shape: ["__proto__", 4] }];
@@ -137,7 +138,7 @@ Deno.test("bindSymbols は '__proto__' というシンボル名の束縛を own 
   assertThrows(() => bindSymbols(graph, { x: [6, 4] }, { ["__proto__"]: 5 }), ExecutionError);
 });
 
-Deno.test("素の形と派生形が同居しても束縛は 1 つ（食い違いは fail loudly）", () => {
+test("素の形と派生形が同居しても束縛は 1 つ（食い違いは fail loudly）", () => {
   const source = linearGraph();
   // 入力は inputs[] だけで宣言される（values{} に置くと二重宣言で IR が落ちる）
   source.inputs = [
@@ -152,7 +153,7 @@ Deno.test("素の形と派生形が同居しても束縛は 1 つ（食い違い
   assertThrows(() => bindSymbols(graph, { x: [3, 4], m: [6] }), ExecutionError);
 });
 
-Deno.test("planGraph が全値の shape を解決し、ノード出力を契約から照合する", () => {
+test("planGraph が全値の shape を解決し、ノード出力を契約から照合する", () => {
   const graph = parse(linearGraph());
   const plan = planGraph(graph, { T: 5 });
   assertEquals(plan.shapes.get("x"), [5, 4]);
@@ -163,7 +164,7 @@ Deno.test("planGraph が全値の shape を解決し、ノード出力を契約�
   assertEquals(plan.nodes[1].contract.kind, "binary");
 });
 
-Deno.test("宣言 shape と計算 shape の不一致・未束縛シンボルは fail loudly", () => {
+test("宣言 shape と計算 shape の不一致・未束縛シンボルは fail loudly", () => {
   const source = linearGraph();
   source.values.h = { dtype: "f32", shape: ["T", 4] };
   assertThrows(() => planGraph(parse(source), { T: 5 }), ExecutionError);
@@ -177,7 +178,7 @@ Deno.test("宣言 shape と計算 shape の不一致・未束縛シンボルは 
  * 返し、確保バイト数と dispatch 数がその丸め値で組まれる（例外は 1 つも出ないまま宣言範囲の
  * 外を読み書きする）。
  */
-Deno.test("要素数が安全整数を超える shape は planGraph が fail loudly（丸めない）", () => {
+test("要素数が安全整数を超える shape は planGraph が fail loudly（丸めない）", () => {
   const graph = parse(linearGraph());
   // T·4 = 2^54（束縛 1 つが大きいだけで、次元それぞれは安全整数のまま）。
   assertThrows(
@@ -189,7 +190,7 @@ Deno.test("要素数が安全整数を超える shape は planGraph が fail lou
   assertEquals(planGraph(graph, { T: 2 ** 50 }).shapes.get("x"), [2 ** 50, 4]);
 });
 
-Deno.test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回取れば 2）", () => {
+test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回取れば 2）", () => {
   const source = linearGraph();
   source.requires.ops = ["matmul", "add", "mul"];
   source.nodes.push({ op: "mul", ins: ["y", "y"], outs: ["z"], attrs: {} });
@@ -201,7 +202,7 @@ Deno.test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回�
   assertEquals(counts.get("z"), undefined);
 });
 
-Deno.test("契約検査は未対応 op・非空 attrs・非 f32 dtype を構築時に落とす", () => {
+test("契約検査は未対応 op・非空 attrs・非 f32 dtype を構築時に落とす", () => {
   assertEquals(validateGraphContracts(parse(linearGraph())), undefined);
 
   const foreignOp = linearGraph();
@@ -244,7 +245,7 @@ const prefixSliceGraph = (overrides: Partial<DeclarationJson> = {}): Declaration
 });
 
 // ADR 0010: sym_prefix_slice の「グラフ全体を見ないと判定できない」契約は束縛前に落とす。
-Deno.test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に落ちる", () => {
+test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に落ちる", () => {
   validateGraphContracts(parse(prefixSliceGraph()));
 
   // sym が graph.symbols に無い（実行時に束縛が取れず prefix 長が決まらない）
@@ -273,7 +274,7 @@ Deno.test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に�
 });
 
 // prefix 長は attrs（+ 束縛）から計算し、宣言と照合する（宣言が目標形の reshape とは違う）。
-Deno.test("sym_prefix_slice の出力 shape は束縛から計算されて宣言と突合される", () => {
+test("sym_prefix_slice の出力 shape は束縛から計算されて宣言と突合される", () => {
   const graph = parse(prefixSliceGraph());
   const plan = planGraph(graph, bindSymbols(graph, { bind: [3] }));
   assertEquals(plan.nodes[0].outputs[0].shape, [3, 3]);
@@ -304,7 +305,7 @@ const layoutAxisGraph = (
   nodes: [{ op, ins: ins.map((spec) => spec.name), outs: ["y"], attrs }],
 });
 
-Deno.test("slice / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
+test("slice / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
   // 受理: 対象軸は静的で、他の軸が記号なのは構わない
   validateGraphContracts(
     parse(layoutAxisGraph("slice", { dim: 1, start: 1, end: 3 }, [{
@@ -340,7 +341,7 @@ Deno.test("slice / flip の記号軸は Session 構築時に落ちる（静的�
 // `cat([self | context], dim=1)` で self 側の軸長が記号（`S+1519`）— 記号 1 本 + 定数は
 // 次元言語 `coeff·sym+offset` にそのまま載るので、旧規則の拒否理由（和が載らない）が
 // 成り立たない。残る拒否は**異なるシンボルの混在**だけ。
-Deno.test("cat の連結軸は同一シンボルの一次和まで受理し、異シンボルの混在で落ちる", () => {
+test("cat の連結軸は同一シンボルの一次和まで受理し、異シンボルの混在で落ちる", () => {
   // 受理: 連結軸が静的（他の軸が記号なのは構わない）
   validateGraphContracts(
     parse(layoutAxisGraph("cat", { dim: 1 }, [
@@ -378,7 +379,7 @@ Deno.test("cat の連結軸は同一シンボルの一次和まで受理し、�
 });
 
 // cat のアリティは**下限** 2（可変アリティ — ADR 0014）。1 本は恒等コピーで語彙に無い。
-Deno.test("cat の入力は 2 本以上で、3 本以上も契約検査を通る", () => {
+test("cat の入力は 2 本以上で、3 本以上も契約検査を通る", () => {
   validateGraphContracts(
     parse(layoutAxisGraph("cat", { dim: 1 }, [
       { name: "a", shape: [2, 1] },
@@ -438,7 +439,7 @@ const stateGraph = (
 const stateShapes = (capacity = 16): ReadonlyMap<string, readonly number[]> =>
   new Map([["kv.k", [1, 2, capacity, 4]], ["kv.v", [1, 2, capacity, 4]]]);
 
-Deno.test("state 参照グラフは契約検査を通り、スロット shape を渡せば計画できる", () => {
+test("state 参照グラフは契約検査を通り、スロット shape を渡せば計画できる", () => {
   const graph = parse(stateGraph());
   validateGraphContracts(graph);
 
@@ -450,7 +451,7 @@ Deno.test("state 参照グラフは契約検査を通り、スロット shape �
   assertEquals(plan.nodes[2].outputs, []);
 });
 
-Deno.test("スロット shape を渡さない計画は state 参照ノードで fail loudly", () => {
+test("スロット shape を渡さない計画は state 参照ノードで fail loudly", () => {
   const graph = parse(stateGraph());
   const error = assertThrows(
     () => planGraph(graph, { M: 3, C: 16 }),
@@ -461,7 +462,7 @@ Deno.test("スロット shape を渡さない計画は state 参照ノードで 
 });
 
 // ADR 0067 決定 5b: state 参照はデータ辺を張らないので、順序の契約は nodes 配列順そのもの。
-Deno.test("同一スロットへの state_append は 1 step に 1 本まで", () => {
+test("同一スロットへの state_append は 1 step に 1 本まで", () => {
   const nodes = stateGraph().nodes;
   assertThrows(
     () =>
@@ -479,7 +480,7 @@ Deno.test("同一スロットへの state_append は 1 step に 1 本まで", ()
 // append ゼロのスロットは「未初期化（ゼロ）行を過去として読み、pastLength だけ進む」形で、
 // 誤りが値にしか出ない（実行前のここでしか止められない）。KV 共有（ADR 0067 決定 5 — スロット
 // 単位で 1 本の append を複数読者が共有）はこの検査と両立しなければならない。
-Deno.test("state を読むスロットには終端 state_append がちょうど 1 本要る", () => {
+test("state を読むスロットには終端 state_append がちょうど 1 本要る", () => {
   const base = stateGraph();
   const reader = base.nodes[0];
   const error = assertThrows(
@@ -503,7 +504,7 @@ Deno.test("state を読むスロットには終端 state_append がちょうど 
   }));
 });
 
-Deno.test("state_append より後に同じスロットの読者を置けない", () => {
+test("state_append より後に同じスロットの読者を置けない", () => {
   const nodes = stateGraph().nodes;
   const error = assertThrows(
     () => validateGraphContracts(parse(stateGraph([nodes[1], nodes[2], nodes[0]]))),
@@ -515,7 +516,7 @@ Deno.test("state_append より後に同じスロットの読者を置けない",
   assert(error.message.includes("kv.k") || error.message.includes("kv.v"), error.message);
 });
 
-Deno.test("同一スロットに触れるノードの window は存在有無も値も一致する", () => {
+test("同一スロットに触れるノードの window は存在有無も値も一致する", () => {
   const nodes = stateGraph().nodes;
   const windowed = (window: number | undefined): DeclarationJson["nodes"] => [
     {
@@ -541,7 +542,7 @@ Deno.test("同一スロットに触れるノードの window は存在有無も�
   validateGraphContracts(parse(stateGraph(windowed(8))));
 });
 
-Deno.test("sliding の window はスロット容量を超えられない（読み書きの両側）", () => {
+test("sliding の window はスロット容量を超えられない（読み書きの両側）", () => {
   const nodes = stateGraph().nodes;
   const windowed: DeclarationJson["nodes"] = [
     { ...nodes[0], attrs: { scale: 0.5, window: 32 } },
@@ -561,7 +562,7 @@ Deno.test("sliding の window はスロット容量を超えられない（読�
 
 // ADR 0066 追記 7 の「効く範囲の分担」: states 専用記号（KV 容量 `C`）の束縛点は
 // createGenerationContext だけで、run / enqueue の bindSymbols は要求も受理もしない。
-Deno.test("states 専用記号は bindSymbols が要求せず、seed に来たら拒否する", () => {
+test("states 専用記号は bindSymbols が要求せず、seed に来たら拒否する", () => {
   const graph = parse(stateGraph());
   assertEquals([...statesOnlySymbols(graph)], ["C"]);
   // 入力 shape だけで束縛が閉じる（C が無くても「束縛できなかった」にならない）
@@ -589,7 +590,7 @@ Deno.test("states 専用記号は bindSymbols が要求せず、seed に来た�
 // ADR 0097: i2 は linear / embedding の重みだけが packed のまま実行できる。同じ initializer を
 // それ以外の重みスロット（conv1d 等）も食うなら、そちらのカーネルが packed の 2bit バイトを
 // f32 として読むので、適格集合から外れて展開席へ落ちなければならない。
-Deno.test("i2 の適格集合は linear / embedding だけに食われる重みで、conv1d と共有すると外れる", () => {
+test("i2 の適格集合は linear / embedding だけに食われる重みで、conv1d と共有すると外れる", () => {
   const source: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -653,7 +654,7 @@ const conv3dGraph = (groups: number): DeclarationJson => ({
 // 意味論（契約・CPU 参照）は groups 一般を受けるが、GPU の実装済み subset は groups == 1 だけ
 // （ADR 0118 決定 1）。MUST: Session の構築時（= 計画時）に落とす — 契約検査を通したまま初回 run の
 // 導出相まで持ち越さない。
-Deno.test("conv3d の groups > 1 は計画時に fail loudly（意味論は通る・GPU の subset で落ちる）", () => {
+test("conv3d の groups > 1 は計画時に fail loudly（意味論は通る・GPU の subset で落ちる）", () => {
   const grouped = parse(conv3dGraph(3));
   // 契約と shape（意味論）は groups 一般を受ける
   assertEquals(planGraph(grouped, {}).nodes[0].outputs[0].shape, [6, 2, 6, 6]);
@@ -668,7 +669,7 @@ Deno.test("conv3d の groups > 1 は計画時に fail loudly（意味論は通�
 
 // conv3d の重みは f16 / i8 の適格（重みスロット 1・チャネル軸 0 — 出力チャネル）で、bias は適格外。
 // i4 の展開経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。
-Deno.test("conv3d の重み [Cout,Cin,Kt,Kh,Kw] は圧縮格納の適格・軸 0 で、i4 / i2 の適格には入らない", () => {
+test("conv3d の重み [Cout,Cin,Kt,Kh,Kw] は圧縮格納の適格・軸 0 で、i4 / i2 の適格には入らない", () => {
   const graph = parse(conv3dGraph(1));
   assertEquals([...eligibleCompressedInitializers(graph)], ["w"]);
   assertEquals(weightChannelAxes(graph).get("w"), 0);

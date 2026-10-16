@@ -1,0 +1,18 @@
+{
+  "name": "@karume/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Real-weight end-to-end tests of the Karume packages (local model assets + GPU), run per model family before a release.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "vp test"
+  },
+  "devDependencies": {
+    "@hdae/yomi": "catalog:",
+    "@karume/hub": "workspace:*",
+    "@karume/models": "workspace:*",
+    "@karume/runtime": "workspace:*",
+    "@karume/test-support": "workspace:*"
+  }
+}

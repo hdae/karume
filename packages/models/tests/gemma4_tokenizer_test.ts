@@ -18,6 +18,8 @@
 // 実資産（`outputs/series/*-tokenizer/`）が在れば**全語彙**でも同じ id 列になることを併せて
 // 見る（部分集合と full の食い違いを塞ぐ門）。無い環境では SKIP する。GPU は使わない。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { createBpeModel } from "../src/text/bpe.ts";
@@ -79,7 +81,7 @@ const assetsOf = (fixture: Fixture): GemmaTokenizerAssets => ({
 
 const readFixture = async (name: string): Promise<Fixture> =>
   JSON.parse(
-    await Deno.readTextFile(new URL(`fixtures/gemma-text/${name}-parity.json`, import.meta.url)),
+    await readTextFile(new URL(`fixtures/gemma-text/${name}-parity.json`, import.meta.url)),
   ) as Fixture;
 
 /** 系列側の実資産（無ければ undefined = compile していない）。 */
@@ -158,7 +160,7 @@ const parseAsset = (asset: Record<string, unknown>): void => {
   parseGemmaTokenizerAsset(new TextEncoder().encode(JSON.stringify(asset)));
 };
 
-Deno.test("資産 JSON の門: 信用できない外部入力として扱う", async (t) => {
+test("資産 JSON の門: 信用できない外部入力として扱う", async (t) => {
   await t.step("最小形は通る", () => {
     parseAsset(minimalAsset());
   });
@@ -279,7 +281,7 @@ for (
   const fixture = await readFixture(fixtureName);
   const tokenizer = new GemmaTokenizer(assetsOf(fixture));
 
-  Deno.test(`${family} 符号化パリティ: 上流 tokenizers と id 列がビット一致`, async (t) => {
+  test(`${family} 符号化パリティ: 上流 tokenizers と id 列がビット一致`, async (t) => {
     for (const testCase of fixture.encode) {
       await t.step(`${testCase.name} — ${testCase.why}`, () => {
         assertEquals(tokenizer.encode(testCase.text), testCase.ids, "add_special_tokens=False");
@@ -292,7 +294,7 @@ for (
     }
   });
 
-  Deno.test(`${family} 復号パリティ: 上流 tokenizers と文字列がビット一致`, async (t) => {
+  test(`${family} 復号パリティ: 上流 tokenizers と文字列がビット一致`, async (t) => {
     for (const testCase of fixture.decode) {
       await t.step(`${testCase.name} — ${testCase.why}`, () => {
         assertEquals(
@@ -309,7 +311,7 @@ for (
     }
   });
 
-  Deno.test(`${family} 逐次復号: どう区切って push しても一括復号と一致`, () => {
+  test(`${family} 逐次復号: どう区切って push しても一括復号と一致`, () => {
     // 突き合わせ先は**上流が返した文字列**（自前の一括復号ではない）— 逐次と一括は同じ
     // 状態機械を通るので、自前同士の比較では何も落とせない。
     for (const testCase of fixture.decode) {
@@ -325,14 +327,14 @@ for (
     }
   });
 
-  Deno.test(`${family} 資産の宣言: compile が確かめた構成と一致`, () => {
+  test(`${family} 資産の宣言: compile が確かめた構成と一致`, () => {
     assertEquals(fixture.spec.normalizer, "replace-space-with-metaspace");
     assertEquals(fixture.spec.preTokenizer, "split-space-merged-with-previous");
     assertEquals(fixture.spec.decoder, "metaspace-byte-fallback-fuse");
     assertEquals(tokenizer.postProcessor, fixture.spec.postProcessor);
   });
 
-  Deno.test(`${family} 本文の門: 対にならないサロゲートは入力の誤り（ModelInputError）`, () => {
+  test(`${family} 本文の門: 対にならないサロゲートは入力の誤り（ModelInputError）`, () => {
     // 呼び手が本文を直せば解消する誤りなので、内部障害（素の Error）に見せない（ADR 0107）。
     // chat の描画も encode を通るので、ここ 1 箇所で chat まで覆う。
     for (const text of ["\uD800", "a\uDC00b"]) {
@@ -357,7 +359,7 @@ for (
     );
   }
 
-  Deno.test({
+  test({
     name: `${family} 実資産突合: 全語彙でもフィクスチャと同じ id 列（部分集合の穴を塞ぐ）`,
     ignore: seriesBytes === undefined,
     fn: () => {
@@ -380,7 +382,7 @@ for (
     },
   });
 
-  Deno.test({
+  test({
     name: `${family} 実資産の日本語長文: 併合キューが実用時間で終わる`,
     ignore: seriesBytes === undefined,
     fn: () => {

@@ -19,6 +19,7 @@
 // 公開リポを持たないファミリ（vowel-detector）は表自体を持たないので、この門の対象外
 // （ADR 0073 決定 1）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
 import type { HubRepoRef } from "@karume/hub";
 import { ANIMA_SOURCES } from "../src/anima/config.ts";
@@ -155,14 +156,14 @@ const FAMILIES: readonly Family[] = [
 // `karume-gemma4` の類）は素通りする。集合をここで外部の期待として固定すると、repo の綴りも
 // 間接的に固定される（改名はこのテストを落として初めて通る = リリース手順を踏ませる席になる）。
 for (const { name, sources, keys } of FAMILIES) {
-  Deno.test(`${name}: キー集合が期待どおり`, () => {
+  test(`${name}: キー集合が期待どおり`, () => {
     assertEquals(Object.keys(sources).toSorted(), [...keys].toSorted());
   });
 }
 
 // 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
 // ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-Deno.test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () => {
+test("取得元対応表を持つのは 9 家族・公開リポは 12 本", () => {
   assertEquals(FAMILIES.map(({ name }) => name), [
     "ANIMA_SOURCES",
     "IRODORI_SOURCES",
@@ -179,7 +180,7 @@ Deno.test("取得元対応表を持つのは 9 家族・公開リポは 12 本",
 
 for (const { name, sources } of FAMILIES) {
   for (const [key, source] of Object.entries(sources)) {
-    Deno.test(`${name}["${key}"]: キーが repo から導ける + 40 桁 hex の commit SHA`, () => {
+    test(`${name}["${key}"]: キーが repo から導ける + 40 桁 hex の commit SHA`, () => {
       const segments = source.repo.split("/");
       assertEquals(segments.length, 2, `repo が 'owner/name' でない: ${source.repo}`);
       assertEquals(segments[0], "hdae");
@@ -191,7 +192,7 @@ for (const { name, sources } of FAMILIES) {
 
 // 畳み込みはスプレッドなので、キーが重なると後勝ちで 1 本が黙って消える（同じリポを 2 家族が
 // 持っていない限り起きないが、起きたときに気づく手段が他に無い）。
-Deno.test("KARUME_SOURCES: 家族表の和集合でキーの重複が無い", () => {
+test("KARUME_SOURCES: 家族表の和集合でキーの重複が無い", () => {
   // リテラル型のままだとエントリ同士の比較が「別のキーの値」で型エラーになるので、表として
   // 引ける形（キー = 任意の綴り）へ広げてから中身を突き合わせる。
   const merged: Record<string, HubRepoRef> = KARUME_SOURCES;
@@ -210,7 +211,7 @@ Deno.test("KARUME_SOURCES: 家族表の和集合でキーの重複が無い", ()
 // `/api/models/.../revision/...` から始まったら pin が可変 ref へ戻っている。
 for (const { name, sources, load } of FAMILIES) {
   for (const [key, source] of Object.entries(sources)) {
-    Deno.test(`${name}["${key}"]: pin がそのまま取得 URL に載る`, async () => {
+    test(`${name}["${key}"]: pin がそのまま取得 URL に載る`, async () => {
       const paths = await requestedPaths((options) => load(source, options));
       assertEquals(paths, [manifestPath({ repo: source.repo, revision: source.revision ?? "" })]);
     });
@@ -219,7 +220,7 @@ for (const { name, sources, load } of FAMILIES) {
 
 // 文字列 ref の意味（`{ repo }` = main 追従）は pin 導入後も ref 必須化後も不変。main は
 // commit SHA ではないので、manifest を取る**前に** revision 解決 API を 1 往復する。
-Deno.test("sbv2: 文字列 ref は main 追従のまま（revision 解決 API を経由する）", async () => {
+test("sbv2: 文字列 ref は main 追従のまま（revision 解決 API を経由する）", async () => {
   const paths = await requestedPaths((options) =>
     Sbv2Pipeline.fromPretrained("someone/karume-sbv2-fork", options)
   );

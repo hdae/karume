@@ -9,12 +9,13 @@
 // 故障注入の口（差し替え可能な一様乱数源）も無いので**直接は踏めない** — この分岐だけは
 // テスト不能として明記する（塞ぐには生成器の面を広げるしかなく、それは値の正本を緩める）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { nextUint64, Randn } from "../src/anima/random.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
 
-Deno.test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
+test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
   const first = new Randn(7).normals(64);
   const second = new Randn(7).normals(64);
   const other = new Randn(8).normals(64);
@@ -22,7 +23,7 @@ Deno.test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
   assert([...first].some((value, index) => value !== other[index]), "seed を変えても同じ列");
 });
 
-Deno.test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
+test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
   // 持ち越すと「同じ seed でも呼び出し順で列が変わる」形になり、seed を渡した再現性が崩れる。
   // 奇数長 → 次の呼び出し、が取り直した生成器の同じ 2 回と一致することで固定する。
   const split = new Randn(5);
@@ -33,7 +34,7 @@ Deno.test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () 
   assertEquals([...tail], [...fresh.normals(2)]);
 });
 
-Deno.test("Randn: 奇数長の呼び出しは対の余り（sin 側）を捨て、次の呼び出しは新しい対から始まる", () => {
+test("Randn: 奇数長の呼び出しは対の余り（sin 側）を捨て、次の呼び出しは新しい対から始まる", () => {
   // 同じ実装の 2 インスタンスを比べるだけでは、余りを持ち越す実装に変えても通る（両方が同じく持ち越す）。
   // 一続きに引いた 6 要素の列と照合し、3 要素目の後の 1 個（対の sin 側）が捨てられることを縛る。
   const split = new Randn(5);
@@ -44,7 +45,7 @@ Deno.test("Randn: 奇数長の呼び出しは対の余り（sin 側）を捨て�
   assertEquals([...tail], [...whole.subarray(4, 6)]);
 });
 
-Deno.test("nextUint64: splitmix64 の既知の列（state 0 → 0xe220a8397b1dcdaf …）", () => {
+test("nextUint64: splitmix64 の既知の列（state 0 → 0xe220a8397b1dcdaf …）", () => {
   // 正規乱数（f32）は `Math.cos/sin/log` の実装差でエンジンごとにずれうるので、環境に依存しない
   // 整数部で splitmix64 の 1 ステップ（混合の定数と計算）を固定する。seed から内部状態への写像と
   // 一様乱数の導出はここでは縛らない。期待値は splitmix64 の公開の参照実装を Python の整数で評価した値。
@@ -63,7 +64,7 @@ Deno.test("nextUint64: splitmix64 の既知の列（state 0 → 0xe220a8397b1dcd
   ]);
 });
 
-Deno.test("Randn: scale は同じ列に線形に効く（列そのものは seed で決まる）", () => {
+test("Randn: scale は同じ列に線形に効く（列そのものは seed で決まる）", () => {
   const plain = new Randn(3).normals(16);
   const scaled = new Randn(3).normals(16, 2);
   for (const [index, value] of plain.entries()) {
@@ -71,7 +72,7 @@ Deno.test("Randn: scale は同じ列に線形に効く（列そのものは seed
   }
 });
 
-Deno.test("Randn: seed の受理集合は assertAcceptableSeed と同じ（生成器側の入口）", () => {
+test("Randn: seed の受理集合は assertAcceptableSeed と同じ（生成器側の入口）", () => {
   // 受理集合は 1 本しか持たない（`generate` の入口と生成器で条件が割れると、片方だけ緩む）。
   for (const seed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     assertThrows(() => assertAcceptableSeed(seed), ModelInputError, "非負の安全整数でない");

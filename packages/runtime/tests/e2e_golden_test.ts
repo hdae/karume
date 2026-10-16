@@ -8,6 +8,8 @@
 // ランタイム面は公開 API（mod.ts）だけで呼ぶ。io.safetensors の読み出しは配布形ではなく
 // テスト側のフィクスチャ読みなので src/format/safetensors.ts を直に使う。
 
+import { readDirSync, readFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import {
   acquireGpu,
@@ -120,7 +122,7 @@ const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
 
 /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
 const goldenModels = (): readonly string[] =>
-  [...Deno.readDirSync(GOLDEN_ROOT)]
+  [...readDirSync(GOLDEN_ROOT)]
     .filter((entry) => entry.isDirectory)
     .map((entry) => entry.name)
     .sort();
@@ -128,7 +130,7 @@ const goldenModels = (): readonly string[] =>
 const MODELS = goldenModels();
 
 const readBuffer = async (model: string, file: string): Promise<ArrayBuffer> => {
-  const bytes = await Deno.readFile(new URL(`${model}/${file}`, GOLDEN_ROOT));
+  const bytes = await readFile(new URL(`${model}/${file}`, GOLDEN_ROOT));
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
@@ -144,7 +146,7 @@ const MODEL_FILE = "model.krm";
 const openGolden = async (model: string): Promise<OpenedContainer> =>
   await openSeriesContainer(new URL(`${model}/${MODEL_FILE}`, GOLDEN_ROOT));
 
-Deno.test("golden fixtures が 1 件以上あり、全件がテストとして登録される", () => {
+test("golden fixtures が 1 件以上あり、全件がテストとして登録される", () => {
   // 列挙が空でも「テストが 0 本で緑」になるだけなので、ここで下限を固定する（ADR 0005）。
   assert(MODELS.length > 0, `${GOLDEN_ROOT.pathname} に golden モデルが 1 件も無い`);
 });
@@ -168,7 +170,7 @@ Deno.test("golden fixtures が 1 件以上あり、全件がテストとして�
  */
 const OPS_WITHOUT_GOLDEN: readonly string[] = ["state_append", "topk"];
 
-Deno.test("全 golden の requires.ops が実行可能な op 集合を覆う", async () => {
+test("全 golden の requires.ops が実行可能な op 集合を覆う", async () => {
   const covered = new Set<string>();
   for (const model of MODELS) {
     const graph = prepareContainer(await openGolden(model), model).graph;
@@ -192,7 +194,7 @@ const ENVIRONMENT_KEY_PATTERN = /^(deno|chrome)-[a-z0-9]+(-[a-z0-9]+)*$/;
 // 再 export での出力名の改名）や環境キーの綴り違いは「行が無い機」と同じ扱いになり、黙って残る。
 // 行が実体を指していることを、GPU アダプタに依らずここで固定する（ADR 0106 追記決定 1 の台帳を
 // 実体とずらさない）。
-Deno.test("OUTPUT_TOLERANCE の各行は実在する golden の出力と正しい綴りの環境キーを指す", async () => {
+test("OUTPUT_TOLERANCE の各行は実在する golden の出力と正しい綴りの環境キーを指す", async () => {
   for (const [key, byEnvironment] of Object.entries(OUTPUT_TOLERANCE)) {
     const slash = key.indexOf("/");
     assert(slash > 0, `${key}: キーが <model>/<出力名> の形でない`);
@@ -221,7 +223,7 @@ Deno.test("OUTPUT_TOLERANCE の各行は実在する golden の出力と正し�
 });
 
 for (const model of MODELS) {
-  Deno.test({
+  test({
     name: `golden 突合: ${model}（実 GPU / torch CPU 期待値）`,
     ignore: !GPU_AVAILABLE,
     fn: async () => {

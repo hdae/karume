@@ -17,6 +17,7 @@
 // （`packages/models/tests/e2e_wan_ti2v_vae_encoder_test.ts`）に任せる — 既定のレーンで同じ Session を 3 寸法
 // （1280×704 → 704×1280 → 256×160）に束縛し直し、束縛ごとに golden と突き合わせる。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu } from "../src/gpu/device.ts";
 import { conv2dIgemmMTile } from "../src/kernels/conv2d.ts";
@@ -130,7 +131,7 @@ const BINDINGS: readonly { readonly h: number; readonly w: number; readonly v4: 
   { h: 3, w: 5, v4: false },
 ];
 
-Deno.test({
+test({
   name:
     "記号の空間の conv3d → 非対称 pad → stride 2 の conv2d は、同じ Session の束縛 3 回で CPU 参照と一致し、" +
     "束縛で conv3d の変種を踏み分け、戻りの回は 1 回目とビット一致（実 GPU）",

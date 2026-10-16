@@ -8,6 +8,7 @@
 // GPU も実資産も要らない（helpers/safetensors.ts の `buildSafetensors` で組んだ最小の
 // safetensors を `parseSafetensors` で読む）。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, AssertionError, assertStrictEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type TensorView } from "../src/format/safetensors.ts";
 import { IO_ENCODING, ioTensor } from "./helpers/golden-io.ts";
@@ -34,11 +35,11 @@ const viewOf = (
   return view;
 };
 
-Deno.test("IO_ENCODING は意味論 3 dtype の格納形を全て宣言する（ADR 0009 の写し）", () => {
+test("IO_ENCODING は意味論 3 dtype の格納形を全て宣言する（ADR 0009 の写し）", () => {
   assertEquals(IO_ENCODING, { f32: "F32", i32: "I32", bool: "U32" });
 });
 
-Deno.test("ioTensor は宣言 dtype どおりの型で読み、バイト列をコピーしない", () => {
+test("ioTensor は宣言 dtype どおりの型で読み、バイト列をコピーしない", () => {
   const file = goldenIo();
   const f32 = ioTensor(file, viewOf(file, "output.0"), "f32");
   assertEquals([f32.dtype, f32.shape], ["f32", [2]]);
@@ -57,7 +58,7 @@ Deno.test("ioTensor は宣言 dtype どおりの型で読み、バイト列を�
   assertStrictEquals(f32.data[0], 42);
 });
 
-Deno.test("ioTensor は格納 dtype が宣言と食い違う組を落とす（ビット列の再解釈を通さない）", () => {
+test("ioTensor は格納 dtype が宣言と食い違う組を落とす（ビット列の再解釈を通さない）", () => {
   const file = goldenIo();
   // 要素は全型 4 バイトなので、この門が無ければ 3 本とも「数値として読めて」しまう
   const cases: readonly (readonly ["f32" | "i32" | "bool", string])[] = [

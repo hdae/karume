@@ -1,5 +1,6 @@
 // 途中 latent → RGB プレビュー近似の挙動テスト。GPU も資産も要らない純関数。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { approximatePreview } from "../src/anima/preview.ts";
 
@@ -14,7 +15,7 @@ const syntheticLatents = (): Float32Array<ArrayBuffer> =>
     (_, at) => ((Math.floor(at / 4) + (at % 4)) % 5 - 2) * 0.5,
   );
 
-Deno.test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 / 要素数）", () => {
+test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 / 要素数）", () => {
   assertThrows(
     () => approximatePreview(new Float32Array(16), [16, 2, 2]),
     Error,
@@ -37,7 +38,7 @@ Deno.test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 
   );
 });
 
-Deno.test("approximatePreview: 寸法は latent の H/W・アルファ 255", () => {
+test("approximatePreview: 寸法は latent の H/W・アルファ 255", () => {
   // 幅と高さを取り違えても要素数は合ってしまうので、非正方（2×3）で位置を縛る。
   const got = approximatePreview(new Float32Array(16 * 6), [1, 16, 3, 2]);
   assertEquals([got.width, got.height], [2, 3]);
@@ -47,7 +48,7 @@ Deno.test("approximatePreview: 寸法は latent の H/W・アルファ 255", () 
   }
 });
 
-Deno.test("approximatePreview: 合成 latent の RGBA golden（係数表の書き換わりを止める）", () => {
+test("approximatePreview: 合成 latent の RGBA golden（係数表の書き換わりを止める）", () => {
   // 係数表は非公開の内部定数なので、外から縛れるのは出力だけ。この golden が係数の門。
   //
   // フォールト注入（2026-08-24 実測・注入は即座に戻した）:

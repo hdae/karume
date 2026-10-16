@@ -9,6 +9,7 @@
 // 名前空間は WebGPU 非対応環境に存在しないので、判定は `Object.hasOwn(globalThis, ...)`
 // （裸の識別子参照はこのファイルの内側でも評価時に落ちる）。無い環境は明示 SKIP する。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { BUFFER_USAGE, MAP_MODE } from "../src/gpu/webgpu-constants.ts";
 
@@ -22,7 +23,7 @@ if (!BUFFER_USAGE_NAMESPACE || !MAP_MODE_NAMESPACE) {
   );
 }
 
-Deno.test({
+test({
   name: "BUFFER_USAGE は GPUBufferUsage の全ビットを仕様どおり写している",
   ignore: !BUFFER_USAGE_NAMESPACE,
   fn: () => {
@@ -41,7 +42,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "MAP_MODE は GPUMapMode の全ビットを仕様どおり写している",
   ignore: !MAP_MODE_NAMESPACE,
   fn: () => {

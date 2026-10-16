@@ -13,6 +13,8 @@
 // GPU は使わない。系列資産（`outputs/series/deberta-i8/sbv2-22layer/`）と配布形の
 // `symbols.json` が無い環境では SKIP する。
 
+import { type DirEntry, isNotFound, readDirSync, readFile, readTextFileSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, prepareContainer } from "@karume/runtime";
 import { openSeriesContainer } from "../../runtime/tests/helpers/container-files.ts";
@@ -43,11 +45,11 @@ const SYMBOLS_FILE = new URL(
 const C2P_KEY = "input.c2p_pos";
 const P2C_KEY = "input.p2c_pos";
 
-const listDir = (url: URL): readonly Deno.DirEntry[] => {
+const listDir = (url: URL): readonly DirEntry[] => {
   try {
-    return [...Deno.readDirSync(url)];
+    return [...readDirSync(url)];
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) {
+    if (isNotFound(cause)) {
       return [];
     }
     throw cause;
@@ -56,10 +58,10 @@ const listDir = (url: URL): readonly Deno.DirEntry[] => {
 
 const readSymbols = (): { positionBuckets: number; maxPosition: number } | undefined => {
   try {
-    const raw = JSON.parse(Deno.readTextFileSync(SYMBOLS_FILE));
+    const raw = JSON.parse(readTextFileSync(SYMBOLS_FILE));
     return parseJpExtraRules(raw, SYMBOLS_FILE.pathname).bertRelPos;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) {
+    if (isNotFound(cause)) {
       return undefined;
     }
     throw cause;
@@ -102,8 +104,8 @@ const assertSameElements = (
 const PARITY_CASES = RULE === undefined ? [] : CASES.map((ioFile) => ({ ioFile, rule: RULE }));
 
 for (const { ioFile, rule } of PARITY_CASES) {
-  Deno.test(`DeBERTa 相対位置表パリティ: ${ioFile}（TS 生成 ↔ golden の Python 生成）`, async () => {
-    const bytes = await Deno.readFile(new URL(ioFile, SERIES_ROOT));
+  test(`DeBERTa 相対位置表パリティ: ${ioFile}（TS 生成 ↔ golden の Python 生成）`, async () => {
+    const bytes = await readFile(new URL(ioFile, SERIES_ROOT));
     const io = parseSafetensors(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     );
@@ -135,7 +137,7 @@ for (const { ioFile, rule } of PARITY_CASES) {
   });
 }
 
-Deno.test({
+test({
   name: "DeBERTa の添字表はコンテナに 1 本も焼き込まれていない",
   ignore: CASES.length === 0,
   fn: async () => {
@@ -164,7 +166,7 @@ Deno.test({
 // 未検証のまま緑）。Python 側とのバイト一致は上のパリティにしか置けないが、式が満たす
 // べき構造（引数の受理集合・転置・Toeplitz）は資産なしで縛れる。
 
-Deno.test("buildRelPosTables: 引数の受理集合（式が成立する下限を割る値は落とす）", () => {
+test("buildRelPosTables: 引数の受理集合（式が成立する下限を割る値は落とす）", () => {
   // 長さ 0 は表が空になるだけでなく、対角配列 `2·length-1` が負長になる。
   assertThrows(() => buildRelPosTables(0, 256, 512), RangeError, "1 以上の整数でない");
   // bucketSize 1 は mid = 0 で対数の分母（log((maxPosition-1)/mid)）が壊れる。
@@ -173,7 +175,7 @@ Deno.test("buildRelPosTables: 引数の受理集合（式が成立する下限�
   assertThrows(() => buildRelPosTables(4, 256, 1), RangeError, "maxPosition 1 が 2 以上");
 });
 
-Deno.test("buildRelPosTables: 対数バケットの式が成立しない組は NaN 経由の誤った添字を作らずに落ちる", () => {
+test("buildRelPosTables: 対数バケットの式が成立しない組は NaN 経由の誤った添字を作らずに落ちる", () => {
   // (bucket 2, maxPosition 2): mid = 1 で対数の分母 log(1) = 0、係数 mid − 1 = 0 →
   // `Infinity × 0 = NaN`。NaN は clamp の比較をすり抜け、Int32Array で 0 になって形の合った
   // 誤った gather 添字になる（|d| = 2 の位置が 0 に化ける）。
@@ -183,7 +185,7 @@ Deno.test("buildRelPosTables: 対数バケットの式が成立しない組は N
   assertThrows(() => buildRelPosTables(4, 3, 512), RangeError, "対数バケット");
 });
 
-Deno.test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のまま d + 256", () => {
+test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のまま d + 256", () => {
   // |d| < mid = 128 は対数で圧縮しない（`make_log_bucket_position` の近傍分岐）。入口の
   // 検査を足しても配布値の表が 1 要素も変わらないことの対。
   const length = 7;
@@ -195,7 +197,7 @@ Deno.test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のま�
   }
 });
 
-Deno.test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関数であることの帰結）", () => {
+test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関数であることの帰結）", () => {
   const length = 7;
   const { c2pPos, p2cPos } = buildRelPosTables(length, 256, 512);
   for (let i = 0; i < length; i += 1) {
@@ -209,7 +211,7 @@ Deno.test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関�
   }
 });
 
-Deno.test("buildRelPosTables: 表は i−j にしか依存しない（Toeplitz）", () => {
+test("buildRelPosTables: 表は i−j にしか依存しない（Toeplitz）", () => {
   const length = 7;
   const { c2pPos } = buildRelPosTables(length, 256, 512);
   for (let i = 0; i + 1 < length; i += 1) {

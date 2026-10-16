@@ -19,11 +19,12 @@
  * 配るしかない）ので、これらは `open(key)` ではなく**供給口を作る時点**で落ちる。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { ContainerFormatError } from "@karume/runtime";
 import { openerOf, part, parts, single } from "./helpers/asset-container-fixture.ts";
 
-Deno.test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", async () => {
+test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", async () => {
   const error = await assertRejects(
     () => openerOf({ "dit[0]": part(0), "dit[2]": part(2) }),
     Error,
@@ -33,7 +34,7 @@ Deno.test("assetComponentOpener: 添字の欠番は part を名乗って落ち�
   assertStringIncludes(error.message, "dit[0] / dit[2]");
 });
 
-Deno.test("assetComponentOpener: 単一形キーと分割形キーの混在は落ちる", async () => {
+test("assetComponentOpener: 単一形キーと分割形キーの混在は落ちる", async () => {
   const error = await assertRejects(
     () => openerOf({ dit: single(), ...parts("dit") }),
     Error,
@@ -42,7 +43,7 @@ Deno.test("assetComponentOpener: 単一形キーと分割形キーの混在は�
   assertStringIncludes(error.message, "dit / dit[0]");
 });
 
-Deno.test("assetComponentOpener: 単一形キーと [0] 以外の分割形キーの混在も落ちる（[0] 欠落で門を素通りしない）", async () => {
+test("assetComponentOpener: 単一形キーと [0] 以外の分割形キーの混在も落ちる（[0] 欠落で門を素通りしない）", async () => {
   // `[0]` から連続する範囲だけを拾う実装だと、`[0]` が無いときに混在検査を飛ばして「単一形の
   // 1 本」として組んでしまう（`dit[1]` を黙って無視する = 分割配布のつもりで組んだ Record が
   // 遠くの層から「part が足りない」で落ちる）。
@@ -54,7 +55,7 @@ Deno.test("assetComponentOpener: 単一形キーと [0] 以外の分割形キー
   assertStringIncludes(error.message, "dit / dit[1]");
 });
 
-Deno.test("assetComponentOpener: 添字が [0] から始まらない列は始点を名指しして落ちる", async () => {
+test("assetComponentOpener: 添字が [0] から始まらない列は始点を名指しして落ちる", async () => {
   const error = await assertRejects(
     () => openerOf({ "dit[1]": part(1), "dit[2]": part(2) }),
     Error,
@@ -63,17 +64,17 @@ Deno.test("assetComponentOpener: 添字が [0] から始まらない列は始点
   assertStringIncludes(error.message, "dit[1] / dit[2]");
 });
 
-Deno.test("assetComponentOpener: [0] から連続する列は part 列のまま開ける", async () => {
+test("assetComponentOpener: [0] から連続する列は part 列のまま開ける", async () => {
   const open = await openerOf(parts("dit"));
   assertEquals(open("dit").graph.outputs, ["y"]);
 });
 
-Deno.test("assetComponentOpener: 単一形の 1 本も同じ供給口から開ける", async () => {
+test("assetComponentOpener: 単一形の 1 本も同じ供給口から開ける", async () => {
   const open = await openerOf({ dit: single() });
   assertEquals(open("dit").graph.outputs, ["y"]);
 });
 
-Deno.test("assetComponentOpener: キーがどちらの形でも無ければ 2 形の綴りを添えて落ちる", async () => {
+test("assetComponentOpener: キーがどちらの形でも無ければ 2 形の綴りを添えて落ちる", async () => {
   const error = await assertRejects(
     () => openerOf(parts("dit"), ["dit", "vae"]),
     Error,
@@ -82,7 +83,7 @@ Deno.test("assetComponentOpener: キーがどちらの形でも無ければ 2 �
   assertStringIncludes(error.message, "分割形なら 'vae[0]' から添字順");
 });
 
-Deno.test("assetComponentOpener: 重みの part が欠けた列は part 数と宣言の食い違いを名乗って落ちる", async () => {
+test("assetComponentOpener: 重みの part が欠けた列は part 数と宣言の食い違いを名乗って落ちる", async () => {
   // 末尾の part（重みの block を持つ）を落とした列 — descriptor が宣言する part 数と合わない。
   const error = await assertRejects(
     () => openerOf({ "dit[0]": part(0), "dit[1]": part(1) }),

@@ -7,6 +7,7 @@
  * 重複させない。ローカル取得元（相 1 を持たない取得元）側の no-op は `local_test.ts`。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import {
   type AssetPhase,
@@ -120,7 +121,7 @@ const rateLimitOnce = (
   };
 };
 
-Deno.test("prefetchAssets: complete をファイル 1 本につき 1 回出し、loaded は合計へ着地する", async () => {
+test("prefetchAssets: complete をファイル 1 本につき 1 回出し、loaded は合計へ着地する", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   const events: AssetProgress[] = [];
@@ -153,7 +154,7 @@ Deno.test("prefetchAssets: complete をファイル 1 本につき 1 回出し�
   }
 });
 
-Deno.test("prefetchAssets: 落とした後の fetchAssets は 1 度も network に出ない", async () => {
+test("prefetchAssets: 落とした後の fetchAssets は 1 度も network に出ない", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
 
@@ -170,7 +171,7 @@ Deno.test("prefetchAssets: 落とした後の fetchAssets は 1 度も network �
   assertEquals(mock.calls.length, warmed, "1 回目の mock も追加で呼ばれている");
 });
 
-Deno.test("prefetchAssets: キャッシュ済みのファイルは complete 1 点だけを出す", async () => {
+test("prefetchAssets: キャッシュ済みのファイルは complete 1 点だけを出す", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
@@ -188,7 +189,7 @@ Deno.test("prefetchAssets: キャッシュ済みのファイルは complete 1 �
   assertEquals(new Set(events.map((event) => event.phase)), new Set<AssetPhase>(["complete"]));
 });
 
-Deno.test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 ファイルごとに効く", async () => {
+test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 ファイルごとに効く", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
@@ -223,7 +224,7 @@ Deno.test("prefetchAssets: 全ファイルがキャッシュ済みでも中断�
   );
 });
 
-Deno.test("prefetchAssets: 中断の後には complete を 1 つも出さない（全量面と同じ終わり方）", async () => {
+test("prefetchAssets: 中断の後には complete を 1 つも出さない（全量面と同じ終わり方）", async () => {
   // 上のテストは「舐め切らない」だけを見るので、中断の前に飛び込み済みのファイル（最大 4 本）が
   // 中断の後に complete を出す形を通してしまう。全量面 fetchAssets は取得を抜けた直後に中断を
   // 見るので 0 件 — 2 つの面で通知の終わり方を揃える。
@@ -252,7 +253,7 @@ Deno.test("prefetchAssets: 中断の後には complete を 1 つも出さない�
   assertEquals(afterAbort, [], "中断の後にも通知が届いている");
 });
 
-Deno.test("prefetchAssets: 取得中の中断は HubFetchError に包まれず素通しする", async () => {
+test("prefetchAssets: 取得中の中断は HubFetchError に包まれず素通しする", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
@@ -272,7 +273,7 @@ Deno.test("prefetchAssets: 取得中の中断は HubFetchError に包まれず�
   assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
 });
 
-Deno.test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError で上がる", async () => {
+test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError で上がる", async () => {
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   const { loaded, refs, mock } = await prepare({ files: served, delayMs: 5 }, caches);
@@ -297,7 +298,7 @@ Deno.test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError 
   assert(error.message.includes(victim), `${error.message} が落ちた path を名乗っていない`);
 });
 
-Deno.test("prefetchAssets: 429 は onRetry で届き、温め直したバイト列が後続の全量面で揃う", async () => {
+test("prefetchAssets: 429 は onRetry で届き、温め直したバイト列が後続の全量面で揃う", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   const target = resolveUrl(refs[0].path);
@@ -321,7 +322,7 @@ Deno.test("prefetchAssets: 429 は onRetry で届き、温め直したバイト�
   assertEquals(second.calls, [], "温めきれていない（全量面が取り直している）");
 });
 
-Deno.test("prefetchAssets: sha256 不一致は fail loud で、キャッシュにエントリを残さない", async () => {
+test("prefetchAssets: sha256 不一致は fail loud で、キャッシュにエントリを残さない", async () => {
   const caches = new MemoryCacheStorage();
   const path = TOKENIZER;
   const { loaded, refs, mock } = await prepare(
@@ -348,7 +349,7 @@ Deno.test("prefetchAssets: sha256 不一致は fail loud で、キャッシュ�
   );
 });
 
-Deno.test("prefetchAssets: キャッシュを開けない環境では素 fetch へ縮退せず fail loud", async () => {
+test("prefetchAssets: キャッシュを開けない環境では素 fetch へ縮退せず fail loud", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   // この面はバイト列を手元に持たないので、キャッシュが使えないなら「温めたつもりで何も残って
@@ -365,7 +366,7 @@ Deno.test("prefetchAssets: キャッシュを開けない環境では素 fetch �
   assertEquals(mock.calls, [], "キャッシュを開けないのに本体の DL が走っている");
 });
 
-Deno.test("prefetchAssets: 空・重複は network に出る前に ManifestReferenceError", async () => {
+test("prefetchAssets: 空・重複は network に出る前に ManifestReferenceError", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
 
@@ -387,7 +388,7 @@ Deno.test("prefetchAssets: 空・重複は network に出る前に ManifestRefer
   assertEquals(mock.calls, [], "入力検査より先に network へ出ている");
 });
 
-Deno.test("prefetchAssets: 重複判定は fileRefKey で見る（同じ path でも revision が違えば別の 1 本）", async () => {
+test("prefetchAssets: 重複判定は fileRefKey で見る（同じ path でも revision が違えば別の 1 本）", async () => {
   const caches = new MemoryCacheStorage();
   const path = ASSET_PATHS[0];
   // 同じ path を別世代からも配る。中身は変えておく — 同一バイト列だと取得層の内容キーで

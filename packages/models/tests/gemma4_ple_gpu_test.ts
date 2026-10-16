@@ -6,6 +6,7 @@
  * dtype → codec、piece の並びと part 割り、繋ぎ直したバイト列が原本と一致すること）④block が
  * 1 本の索引の供給形。実 GPU での値の一致は `e2e_gemma4_ple_gpu_test.ts` が持つ。
  */
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   type IrDeclaration,
@@ -40,7 +41,7 @@ const WEIGHT_ROWS = SPEC.tokens * SPEC.layers;
 const rig = pleFixture(SPEC);
 const index = rig.index;
 
-Deno.test("pleResidency: 受理と、併用できないノブの拒否", () => {
+test("pleResidency: 受理と、併用できないノブの拒否", () => {
   assertEquals(resolveGemma4PleResidency("T", {}), "host");
   assertEquals(resolveGemma4PleResidency("T", { pleResidency: "host" }), "host");
   assertEquals(resolveGemma4PleResidency("T", { pleResidency: "gpu" }), "gpu");
@@ -68,7 +69,7 @@ Deno.test("pleResidency: 受理と、併用できないノブの拒否", () => {
   assert(!(misspelled instanceof ModelInputError));
 });
 
-Deno.test("gather IR: embedding → mul の 2 ノードで、添字の形がそのまま per-layer の形になる", () => {
+test("gather IR: embedding → mul の 2 ノードで、添字の形がそのまま per-layer の形になる", () => {
   const graph = gemma4PleGatherGraph(index);
   assertEquals(graph.nodes.map((node) => node.op), ["embedding", "mul"]);
   assertEquals(graph.nodes[0].ins, ["ple", "ple_index"]);
@@ -82,7 +83,7 @@ Deno.test("gather IR: embedding → mul の 2 ノードで、添字の形がそ�
   assertEquals(graph.initializers.ple, { shared: false });
 });
 
-Deno.test("メモリ内容器: 格納 dtype が codec 台帳の登録名と group 長に写る", async () => {
+test("メモリ内容器: 格納 dtype が codec 台帳の登録名と group 長に写る", async () => {
   const mapping = [["i8", "int8-sym"], ["i4", "int4-sym-g"], ["i2", "int2-off"]] as const;
   for (const [storage, codec] of mapping) {
     const fixture = pleFixture({ ...SPEC, storage });
@@ -102,7 +103,7 @@ Deno.test("メモリ内容器: 格納 dtype が codec 台帳の登録名と grou
   }
 });
 
-Deno.test("メモリ内容器: block 1 本の索引は piece に割らず丸ごと 1 本で供給される", async () => {
+test("メモリ内容器: block 1 本の索引は piece に割らず丸ごと 1 本で供給される", async () => {
   // `valueRows` を省くと block は 1 本（`pieces` は 2 本以上 MUST なので `bytes` の分岐）。
   // 旧実装はここを「PLE の行数が 2 行未満」で落としていたので、通ることを縛る。
   const fixture = pleFixture({ ...SPEC, storage: "i8", valueRows: undefined });
@@ -132,7 +133,7 @@ const documentOf = (declaration: IrDeclaration): Record<string, unknown> => ({
   ),
 });
 
-Deno.test("gather IR: グラフ単体の規則を通る（嘘の requires.ops は宣言の段で落ちる）", () => {
+test("gather IR: グラフ単体の規則を通る（嘘の requires.ops は宣言の段で落ちる）", () => {
   const document = documentOf(gemma4PleGatherGraph(index));
   // 陰性対照: 仕込みの無い文書はそのまま通り、同じ宣言に戻る。
   assertEquals(parseIrDeclarationValue(document), gemma4PleGatherGraph(index));
@@ -145,7 +146,7 @@ Deno.test("gather IR: グラフ単体の規則を通る（嘘の requires.ops �
   );
 });
 
-Deno.test("gather IR: ランタイムの op 契約と格納を通る", async () => {
+test("gather IR: ランタイムの op 契約と格納を通る", async () => {
   const bound = await buildGemma4PleGatherContainer(index, rig.openBlock, "T");
   // prepareContainer は非対応 op / 格納 codec と IR 契約を全件見る（GPU は触らない）。
   const prepared = prepareContainer(bound, "ple");
@@ -153,7 +154,7 @@ Deno.test("gather IR: ランタイムの op 契約と格納を通る", async () 
   assertEquals(prepared.graph.symbols, ["M"]);
 });
 
-Deno.test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）", () => {
+test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）", () => {
   const e2b = pleFixture({ storage: "i4", tokens: 4096, layers: 35, dim: 256, embedScale: 16 })
     .index;
   assertEquals(gemma4PleGpuBytes(e2b), {
@@ -170,7 +171,7 @@ Deno.test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）",
   assertEquals(gemma4PleGpuBytes(i2).values, 4096 * 35 * 256 / 4);
 });
 
-Deno.test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の values と一致する", async () => {
+test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の values と一致する", async () => {
   const bound = await buildGemma4PleGatherContainer(index, rig.openBlock, "T");
   const supply = bound.graphs.ple.supplies.get("ple");
   assert(supply !== undefined, "initializer 'ple' の供給が無い");

@@ -12,6 +12,7 @@
  *    `readAdapterLimits()` のアダプタ実測値に変わる側 — ADR 0089 決定 5）。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import type { AssetProgress } from "@karume/hub";
 import { acquireGpu } from "@karume/runtime";
@@ -29,7 +30,7 @@ import {
   SHA,
 } from "./helpers/container-loading-fixture.ts";
 
-Deno.test({
+test({
   name: "loadContainerComponents: Session 構築は進捗を 1 イベントも動かさない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -64,7 +65,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "loadContainerComponents: 同じ供給口から Session を 2 本続けて張れる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -94,7 +95,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "loadContainerComponents: ロード時の signal は Session 構築へ持ち越さない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -124,7 +125,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "requiredLimits 超過は自前 GPU 取得の経路でも重みの part を取らない（アダプタ実測）",
   // MUST: アダプタ無し環境は明示 SKIP（ADR 0005）。この経路の突き合わせ相手は
   // `readAdapterLimits()` なので、アダプタが無いと GpuUnavailableError に化けて門が見えない。

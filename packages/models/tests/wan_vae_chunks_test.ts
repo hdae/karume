@@ -7,7 +7,7 @@
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import type { ResidentTensor } from "@karume/runtime";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import {
   concatWanVaeFrames,
   WanVaeChunkCaches,

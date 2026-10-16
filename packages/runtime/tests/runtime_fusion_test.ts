@@ -6,6 +6,7 @@
  * 値のビット parity を見る役で、こちらは反例を GPU 抜きで細かく積む役。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { elementwiseKey } from "../src/codegen/elementwise.ts";
 import { ADALN_NORM_KEY, adalnNormParams } from "../src/kernels/adaln-norm.ts";
@@ -60,7 +61,7 @@ const fusedAt = (plan: FusionPlan, index: number) => {
   return step;
 };
 
-Deno.test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
+test("ルール表の先頭 op は互いに素で、適用順が結果に効かない", () => {
   assertEquals(FUSION_RULES.map((rule) => rule.name), [
     "linearStaticQuantize",
     "rmsNormAdd",
@@ -154,7 +155,7 @@ const siluInputs = (options: SiluOptions = {}): Readonly<Record<string, readonly
   ...(options.broadcast ? { x2: [4, 8] } : {}),
 });
 
-Deno.test("SiLU は sigmoid→mul の両順を掴み、x を延べ 2 回消費するステップにする", () => {
+test("SiLU は sigmoid→mul の両順を掴み、x を延べ 2 回消費するステップにする", () => {
   for (const order of ["x-sigmoid", "sigmoid-x"] as const) {
     const plan = fuse(siluGraph({ order }), siluInputs());
     assertEquals(outline(plan.steps), ["fused:silu"], order);
@@ -168,7 +169,7 @@ Deno.test("SiLU は sigmoid→mul の両順を掴み、x を延べ 2 回消費�
   }
 });
 
-Deno.test("SiLU の反例（別名 / 内部 output / 別 consumer / 別 gate / broadcast）は素の列へ落ちる", () => {
+test("SiLU の反例（別名 / 内部 output / 別 consumer / 別 gate / broadcast）は素の列へ落ちる", () => {
   const cases: readonly (readonly [string, SiluOptions])[] = [
     ["interposed alias", { interpose: true }],
     ["internal output", { sigmoidOutput: true }],
@@ -199,7 +200,7 @@ Deno.test("SiLU の反例（別名 / 内部 output / 別 consumer / 別 gate / b
  * 仕組み側の不変条件として置いてある門なので、掴めることが確定している窓（SiLU）の片方に
  * `states` 欄を差した合成ノードで、判定点が実際に効いていることを固定する。
  */
-Deno.test("state を触るノードを含む窓はどのルールも掴まない（窓の仕組み側の不変条件）", () => {
+test("state を触るノードを含む窓はどのルールも掴まない（窓の仕組み側の不変条件）", () => {
   const ir = parse(siluGraph());
   const plan = planGraph(ir, bindSymbols(ir, siluInputs()));
   const context = {
@@ -281,7 +282,7 @@ const upsampleGraph = (options: UpsampleOptions = {}): DeclarationJson => {
   };
 };
 
-Deno.test("VAE nearest x2 は 6 ノード鎖を掴み、外部入力 1 本だけを消費する", () => {
+test("VAE nearest x2 は 6 ノード鎖を掴み、外部入力 1 本だけを消費する", () => {
   const plan = fuse(upsampleGraph(), { x: [2, 3, 5, 7] });
   assertEquals(outline(plan.steps), ["fused:upsample2x"]);
   const step = fusedAt(plan, 0);
@@ -294,7 +295,7 @@ Deno.test("VAE nearest x2 は 6 ノード鎖を掴み、外部入力 1 本だけ
   assertEquals(plan.counts.upsample2x, 1);
 });
 
-Deno.test("upsample x2 の反例（near-shape / 別名 / 内部 output / 別 consumer / dtype）は掴まない", () => {
+test("upsample x2 の反例（near-shape / 別名 / 内部 output / 別 consumer / dtype）は掴まない", () => {
   const cases: readonly (readonly [string, UpsampleOptions])[] = [
     ["x3 near-shape", { scaleWidth: 3 }],
     ["interposed alias", { interpose: true }],
@@ -461,7 +462,7 @@ const ropeInputs = (options: RopeOptions = {}): Readonly<Record<string, readonly
     : { x: full, cos: table, sin: table };
 };
 
-Deno.test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin を 1 回ずつ消費する", () => {
+test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin を 1 回ずつ消費する", () => {
   for (
     const [order, expectedIns] of [
       ["slice-first", ["x", "x", "x", "cos", "sin"]],
@@ -485,7 +486,7 @@ Deno.test("half-split RoPE は 2 順序を掴み、x を延べ 3 回・cos / sin
 // 半分割の位置は head 幅から導く（カーネルは head_dim / half_dim を uniform で受けるので、
 // 幅が変わっても WGSL は 1 バイトも変わらない）。実測は Anima の 128 と Gemma 系の 256 だが、
 // 「掴める幅」が実測 2 点の決め打ちに戻っていないことは別幅の 64 で押さえる。
-Deno.test("half-split RoPE は head 幅を分割位置から導き、幅ごとに params だけが変わる", () => {
+test("half-split RoPE は head 幅を分割位置から導き、幅ごとに params だけが変わる", () => {
   for (const headDim of [64, 128, 256]) {
     const options: RopeOptions = { order: "direct-first", heads: 4, headDim };
     const plan = fuse(ropeGraph(options), ropeInputs(options));
@@ -503,7 +504,7 @@ Deno.test("half-split RoPE は head 幅を分割位置から導き、幅ごと�
 // 実測形: cos / sin の表は θ 系統ごとに 1 度だけ Tmax 定数から切り出すので、その初出だけが
 // 鎖の隙間（cat と cross mul の間）に落ちる。窓内 passthrough として融合ステップの**前**へ
 // 動かせなければ、その 1 箇所だけ黙って融合が外れる。
-Deno.test("RoPE は cat 直後の sym_prefix_slice を窓内 passthrough として跨ぐ", () => {
+test("RoPE は cat 直後の sym_prefix_slice を窓内 passthrough として跨ぐ", () => {
   const options: RopeOptions = { order: "direct-first", heads: 4, prefixSlicedSin: true };
   const plan = fuse(ropeGraph(options), ropeInputs(options));
   // MUST: passthrough が先（融合ステップは その出力 `sin` を入力に取る）。
@@ -516,7 +517,7 @@ Deno.test("RoPE は cat 直後の sym_prefix_slice を窓内 passthrough とし�
   assertEquals(plan.counts.rope, 1);
 });
 
-Deno.test("RoPE の反例（別名 / 内部 output / 別 consumer / 分割位置 / batch / add 順 / table 形 / 隙間の別 op）は掴まない", () => {
+test("RoPE の反例（別名 / 内部 output / 別 consumer / 分割位置 / batch / add 順 / table 形 / 隙間の別 op）は掴まない", () => {
   const cases: readonly (readonly [string, RopeOptions])[] = [
     ["interposed alias", { interpose: true }],
     ["internal output", { internalOutput: true }],
@@ -557,7 +558,7 @@ const expandGraph = (outShape: readonly number[]): DeclarationJson => ({
   ],
 });
 
-Deno.test("恒等 expand だけが 0 dispatch の別名になり、複製軸があれば実体化コピーへ戻る", () => {
+test("恒等 expand だけが 0 dispatch の別名になり、複製軸があれば実体化コピーへ戻る", () => {
   const identity = fuse(expandGraph([3, 1]), { x: [3, 1] });
   assertEquals(identity.steps.map((step) => step.kind === "node" && step.aliasesInput), [
     false, // neg
@@ -705,7 +706,7 @@ const fuseAdaln = (options: AdalnOptions = {}): FusionPlan => {
   return fuse(graph, adalnInputs(graph));
 };
 
-Deno.test("adaLN は窓 7 / 窓 6 を掴み、reshape は融合ステップの前に素のまま並ぶ", () => {
+test("adaLN は窓 7 / 窓 6 を掴み、reshape は融合ステップの前に素のまま並ぶ", () => {
   for (const gaps of [3, 2] as const) {
     const label = `窓 ${gaps + 4}`;
     const plan = fuseAdaln({ gaps });
@@ -730,7 +731,7 @@ Deno.test("adaLN は窓 7 / 窓 6 を掴み、reshape は融合ステップの�
   }
 });
 
-Deno.test("adaLN の窓内 passthrough は他ルールの受理位置を潰さない", () => {
+test("adaLN の窓内 passthrough は他ルールの受理位置を潰さない", () => {
   const graph = adalnGraph();
   const ir = parse(graph);
   const plan = planGraph(ir, bindSymbols(ir, adalnInputs(graph)));
@@ -758,7 +759,7 @@ Deno.test("adaLN の窓内 passthrough は他ルールの受理位置を潰さ�
 // NOTE: dtype 違いの反例は**構成できない** — layer_norm の契約が f32 専業で、続く
 // add / mul も dtype 一様を要求するので、planGraph が融合パスより先に落とす。
 // `allF32` は全ルール共通の適格条件として残す（層が変われば効き始める）。
-Deno.test("adaLN の反例（gap の本数 / gap が norm を消費 / 内部 output / 別 consumer / 入力順 / 定数形 / near-shape / bind 重複）は掴まない", () => {
+test("adaLN の反例（gap の本数 / gap が norm を消費 / 内部 output / 別 consumer / 入力順 / 定数形 / near-shape / bind 重複）は掴まない", () => {
   const cases: readonly (readonly [string, AdalnOptions])[] = [
     ["gap 無し（隣接鎖）", { gaps: 0 }],
     ["gap 1 本", { gaps: 1 }],
@@ -784,7 +785,7 @@ Deno.test("adaLN の反例（gap の本数 / gap が norm を消費 / 内部 out
   }
 });
 
-Deno.test("カウンタは融合が並んだグラフでルール別に積み上がる", () => {
+test("カウンタは融合が並んだグラフでルール別に積み上がる", () => {
   const graph = ropeGraph({ heads: 2 });
   // RoPE 鎖の直後に SiLU 鎖を継ぎ足す（先頭 op が互いに素なので順に掴まれる）。
   graph.values.sig = { dtype: "f32", shape: [1, 2, 5, 128] };
@@ -924,7 +925,7 @@ const attentionInputs = (
   };
 };
 
-Deno.test("分解 attention の 9 ノード窓を 1 ステップへ畳み、外部入力を延べ 4 回だけ消費する", () => {
+test("分解 attention の 9 ノード窓を 1 ステップへ畳み、外部入力を延べ 4 回だけ消費する", () => {
   const plan = fuse(attentionGraph(), attentionInputs());
   assertEquals(outline(plan.steps), ["fused:rowBlockAttention"]);
   const step = fusedAt(plan, 0);
@@ -950,7 +951,7 @@ Deno.test("分解 attention の 9 ノード窓を 1 ステップへ畳み、外�
   );
 });
 
-Deno.test("行ブロックは上限に収まる最小枚数で等分され、一時は 1 枚ぶんまで縮む", () => {
+test("行ブロックは上限に収まる最小枚数で等分され、一時は 1 枚ぶんまで縮む", () => {
   const shape: AttentionShape = { heads: 2, queries: 100, keys: 64, headDim: 8 };
   // 1 行 = 2·64·4 = 512B。上限を 1 行 30 枚ぶんに絞ると ceil(100/30) = 4 枚（25 行 × 4）。
   const ir = parse(attentionGraph(shape));
@@ -979,7 +980,7 @@ Deno.test("行ブロックは上限に収まる最小枚数で等分され、一
   );
 });
 
-Deno.test("予算 attentionRowBlockMaxBytes は束縛上限との小さいほうで分解 attention を割る（ADR 0124）", () => {
+test("予算 attentionRowBlockMaxBytes は束縛上限との小さいほうで分解 attention を割る（ADR 0124）", () => {
   const shape: AttentionShape = { heads: 2, queries: 100, keys: 64, headDim: 8 };
   const ir = parse(attentionGraph(shape));
   const nodes = planGraph(ir, bindSymbols(ir, attentionInputs(shape))).nodes;
@@ -1007,7 +1008,7 @@ Deno.test("予算 attentionRowBlockMaxBytes は束縛上限との小さいほう
   assertThrows(() => planWith(511), ExecutionError, "予算を 1 行ぶん以上にすること");
 });
 
-Deno.test("行ブロック分割は上限に収まる最小枚数を等分で返し、収まらない形は fail loudly", () => {
+test("行ブロック分割は上限に収まる最小枚数を等分で返し、収まらない形は fail loudly", () => {
   // ちょうど上限（10 行 × 100B = 1000B）は 1 枚。
   assertEquals(planRowBlocks(10, 100, 1000), [{ offset: 0, rows: 10 }]);
   // 1 要素ぶん超えたら 2 枚（5 / 5）。
@@ -1037,7 +1038,7 @@ Deno.test("行ブロック分割は上限に収まる最小枚数を等分で返
   assertThrows(() => planRowBlocks(10, 100, 1000, 0), ExecutionError);
 });
 
-Deno.test("行ブロック attention の反例（隣接 / mask 形 / op 違い / 非恒等 expand / 入力順 / 内部 output / 別 consumer / bind 重複）は掴まない", () => {
+test("行ブロック attention の反例（隣接 / mask 形 / op 違い / 非恒等 expand / 入力順 / 内部 output / 別 consumer / bind 重複）は掴まない", () => {
   // 正方形（M = N = D）だけが「PV の入力順を入れ替える」「q と kᵀ を同じ入力にする」を
   // 契約違反にせず作れる。**その土台自体が掴めること**を先に見ないと、下の 2 件が
   // 「元から掴めない形」を見ているだけの恒真になる。
@@ -1161,7 +1162,7 @@ const allocatedOutputs = (plan: FusionPlan): ReadonlyMap<string, number> => {
   return bytes;
 };
 
-Deno.test("birefnet 形の分解 attention は掴めず、S がノード出力スロットとして実体化する", () => {
+test("birefnet 形の分解 attention は掴めず、S がノード出力スロットとして実体化する", () => {
   const plan = fuse(birefnetAttentionGraph(), birefnetInputs);
   assertEquals(plan.counts.rowBlockAttention, 0, outline(plan.steps).join(","));
 
@@ -1182,7 +1183,7 @@ Deno.test("birefnet 形の分解 attention は掴めず、S がノード出力�
   assertEquals(allocatedOutputs(fused).has("scores3"), false, "S がノード出力として残っている");
 });
 
-Deno.test("BSHD RoPEは両発行順でhead数をuniformへ渡し、私有中間だけを畳む", () => {
+test("BSHD RoPEは両発行順でhead数をuniformへ渡し、私有中間だけを畳む", () => {
   for (const order of ["slice-first", "direct-first"] as const) {
     const options: RopeOptions = { layout: "bshd", heads: 4, headDim: 256, order };
     const plan = fuse(ropeGraph(options), ropeInputs(options));
@@ -1214,7 +1215,7 @@ Deno.test("BSHD RoPEは両発行順でhead数をuniformへ渡し、私有中間�
   }
 });
 
-Deno.test("BSHD RoPEはcos/sinの軸が別なら掴まず、共通の位置表のsliceは保持する", () => {
+test("BSHD RoPEはcos/sinの軸が別なら掴まず、共通の位置表のsliceは保持する", () => {
   const options: RopeOptions = { layout: "bshd", heads: 4, headDim: 128, order: "direct-first" };
   const graph = ropeGraph(options);
   graph.inputs[1].shape = [1, 1, 4, 128];

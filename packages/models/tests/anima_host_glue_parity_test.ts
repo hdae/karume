@@ -25,6 +25,7 @@
  * SKIP** する（ADR 0005）。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type Tensor } from "@karume/runtime";
 import { cfgEulerStep, sigmaSchedule } from "../src/anima/sampler.ts";
@@ -130,7 +131,7 @@ for (const variant of VARIANTS) {
   }
   const ignore = fixture === undefined;
 
-  Deno.test({
+  test({
     name: `${variant}: sigmaSchedule が参照の sigma 列（終端 0 込み）とビット一致する`,
     ignore,
     fn: () => {
@@ -140,7 +141,7 @@ for (const variant of VARIANTS) {
     },
   });
 
-  Deno.test({
+  test({
     name: `${variant}: cfgEulerStep を ref_steps 回つなぐと参照の latent 列とビット一致する`,
     ignore,
     fn: () => {
@@ -175,7 +176,7 @@ for (const variant of VARIANTS) {
     },
   });
 
-  Deno.test({
+  test({
     name: `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する`,
     ignore,
     fn: () => {
@@ -197,7 +198,7 @@ for (const variant of VARIANTS) {
     },
   });
 
-  Deno.test({
+  test({
     name: `${variant}: padSequence が参照の 512 行ゼロ詰め（正・ネガティブ）とビット一致する`,
     ignore,
     fn: () => {

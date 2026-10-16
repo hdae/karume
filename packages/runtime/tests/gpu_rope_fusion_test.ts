@@ -1,6 +1,7 @@
 // half-split RoPE の exact peephole（融合ルール rope — src/runtime/fusion.ts）:
 // 既存 primitive 列とのビット parity と dispatch 削減を直接固定する。
 
+import { test } from "@karume/test-support/test";
 import { assertEquals } from "@std/assert";
 import { acquireGpu, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { ROPE_BSHD_KEY, ROPE_KEY } from "../src/kernels/rope.ts";
@@ -143,7 +144,7 @@ const ropeInputs = (heads: number, sequence: number): Readonly<Record<string, Te
   };
 };
 
-Deno.test({
+test({
   name:
     "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -196,7 +197,7 @@ Deno.test({
  * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。census は無条件に
  * 検査する（空・undefined は tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
  */
-Deno.test({
+test({
   name: "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -227,7 +228,7 @@ Deno.test({
 
 // H=1 だけでは `row / sequence` の head 方向の畳み込みが 1 度も踏まれない（row < sequence の
 // ままなので token = row になってしまう）。実配布は H=16 なのでここが本番の添字。
-Deno.test({
+test({
   name: "RoPE 融合は H≥2 でも head 方向の添字が primitive 列とビット一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -263,7 +264,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "RoPE の内部値が graph output または別 consumer を持てば融合しない（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -365,7 +366,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "BSHD RoPEはtoken/head軸・端数・幅・特殊値をprimitive列とビット一致で処理する（実GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -430,7 +431,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "BSHD RoPEはgrid-strideの複数巡回でもprimitive列とビット一致する（実GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -466,7 +467,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name: "BSHD RoPEは専用キーだけで走る（実GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

@@ -54,6 +54,7 @@
 // 資産不要。**`shader-f16` も不要**（core WGSL の pack2x16float — ADR 0030 決定 1 が無傷で
 // あることの実行側の証拠）。アダプタ無し環境は明示 SKIP。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { tiledWorkgroups } from "../src/codegen/dispatch.ts";
 import { roundToF16 } from "../src/format/f16.ts";
@@ -381,7 +382,7 @@ const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
     0,
   );
 
-Deno.test({
+test({
   name:
     "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -467,7 +468,7 @@ Deno.test({
 // (2) atol=0（s16 変種 ≡ S をホストで f16 に丸めた f32 変種）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name:
     "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -526,7 +527,7 @@ Deno.test({
  * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
  * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
  */
-Deno.test({
+test({
   name: "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -567,7 +568,7 @@ Deno.test({
 // (3) 適格判定の 2 方向（適格 → s16 キー / 非適格 → f32 キー + ビット同一）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name:
     "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -590,7 +591,7 @@ Deno.test({
 });
 
 /** 非適格形の縮退を見る唯一の検出器（キー検査）。無条件 assert の理由は上の census と同じ。 */
-Deno.test({
+test({
   name: "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -620,7 +621,7 @@ Deno.test({
 // (4) fail loudly（c16 との併用は黙ってどちらかに解釈しない）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "attentionScoreStorage 'f16' × attentionCompute 'f16' は Session 構築で落ちる（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -663,7 +664,7 @@ Deno.test({
 
 const A8_S16_SHAPE: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
 
-Deno.test({
+test({
   name:
     "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -692,7 +693,7 @@ Deno.test({
 });
 
 /** 直交（3 軸が同時に立つ）を見る唯一の検出器。無条件 assert の理由は上の census と同じ。 */
-Deno.test({
+test({
   name:
     "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -849,7 +850,7 @@ const observeQpS16 = async (
   }
 };
 
-Deno.test({
+test({
   name:
     "③PV i8a8 × s16: qP は「f16 に丸めた S」から作った TS 参照と必ず ±1 段以内で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -921,7 +922,7 @@ Deno.test({
 // (7) NaN 行の伝播（格納形が変わっても非有限値の扱いが動かない）
 // ---------------------------------------------------------------------------
 
-Deno.test({
+test({
   name: "s16 でも NaN を含む行はそのまま NaN を伝播する（f32 格納と同じ行が NaN になる・実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {

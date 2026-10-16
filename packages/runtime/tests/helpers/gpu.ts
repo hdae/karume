@@ -58,7 +58,7 @@ export const TIMESTAMP_QUERY_AVAILABLE: boolean = await detectTimestampQuery();
  * 緑になる状態は、検証していないことを検証済みと誤読させる無音の見かけ成功そのもの。門番は
  * `tests/gpu_gate_test.ts` に置き、抜けるには意図表明としてこの環境変数を要求する。
  */
-export const ALLOW_NO_GPU: boolean = Deno.env.get("KARUME_ALLOW_NO_GPU") === "1";
+export const ALLOW_NO_GPU: boolean = process.env.KARUME_ALLOW_NO_GPU === "1";
 
 /**
  * 「`shader-f16` 不在での SKIP」を明示的に許可する opt-out（{@link ALLOW_NO_GPU} と同型）。
@@ -67,7 +67,7 @@ export const ALLOW_NO_GPU: boolean = Deno.env.get("KARUME_ALLOW_NO_GPU") === "1"
  * 丸ごと消え、書き出しガードを 1 度も検証しないまま verify が緑になる。機を替えた瞬間に
  * 検証範囲が黙って縮むのを止めるのがこの門（門番は `tests/gpu_gate_test.ts`）。
  */
-export const ALLOW_NO_SHADER_F16: boolean = Deno.env.get("KARUME_ALLOW_NO_SHADER_F16") === "1";
+export const ALLOW_NO_SHADER_F16: boolean = process.env.KARUME_ALLOW_NO_SHADER_F16 === "1";
 
 /**
  * 「`timestamp-query` 不在での SKIP」を明示的に許可する opt-out（同上）。
@@ -76,7 +76,7 @@ export const ALLOW_NO_SHADER_F16: boolean = Deno.env.get("KARUME_ALLOW_NO_SHADER
  * 依らないので残る）。
  */
 export const ALLOW_NO_TIMESTAMP_QUERY: boolean =
-  Deno.env.get("KARUME_ALLOW_NO_TIMESTAMP_QUERY") === "1";
+  process.env.KARUME_ALLOW_NO_TIMESTAMP_QUERY === "1";
 
 if (!GPU_AVAILABLE) {
   console.warn(

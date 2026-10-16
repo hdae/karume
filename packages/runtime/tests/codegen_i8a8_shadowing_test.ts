@@ -9,6 +9,7 @@
  * いないことを、候補の全幾何 × 3 カーネル × 変種で見る。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { attentionPvI8a8Wgsl, attentionQkI8a8Wgsl } from "../src/kernels/attention-i8a8.ts";
 import { linearI8a8Wgsl } from "../src/kernels/linear-i8a8.ts";
@@ -94,7 +95,7 @@ export const shadowedDeclarations = (wgsl: string): string[] => {
   return shadowed;
 };
 
-Deno.test("shadowedDeclarations は覆い隠しを見つけ、兄弟ブロックの同名は許す", () => {
+test("shadowedDeclarations は覆い隠しを見つけ、兄弟ブロックの同名は許す", () => {
   const shadowing = `fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   let k4 = 4u;
   for (var t = 0u; t < 2u; t = t + 1u) {
@@ -112,7 +113,7 @@ Deno.test("shadowedDeclarations は覆い隠しを見つけ、兄弟ブロック
   assertEquals(shadowedDeclarations(`fn main(a: u32) { var a = 1u; }`), ["a@1"]);
 });
 
-Deno.test("shadowedDeclarations は属性付きの引数（実カーネルと同じ形）も外側スコープに入れる", () => {
+test("shadowedDeclarations は属性付きの引数（実カーネルと同じ形）も外側スコープに入れる", () => {
   // 実カーネルの `fn main` は `@builtin(workgroup_id) wid` で始まる。引数リストの終端を最初の `)` で
   // 決めると属性の閉じ括弧で打ち切られ、引数名が 1 つも記録されない（引数の覆い隠しを丸ごと見逃す）。
   const attributed = (body: string): string =>
@@ -128,7 +129,7 @@ Deno.test("shadowedDeclarations は属性付きの引数（実カーネルと同
   assertEquals(shadowedDeclarations(attributed("let tile = wid.x + lid.y;")), []);
 });
 
-Deno.test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコープの名前を宣言し直さない", () => {
+test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコープの名前を宣言し直さない", () => {
   const geometries = candidateGeometries();
   assert(geometries.length >= 48, `候補が ${geometries.length} 本しか無い`);
   // 欠陥を踏む形（K 側の充填スロット = regN · tileK / 4 / wgY が 5 以上）が格子に含まれていること

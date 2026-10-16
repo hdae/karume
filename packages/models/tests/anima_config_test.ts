@@ -3,6 +3,7 @@
 // hub は `pipelineConfig` を素通しするので、**ここが唯一の門**。主に縛るのは 2 つ:
 // ①必須欄の欠落・型違いを名指しで落とす ②未知キーを fail loudly（黙って既定へ縮退させない）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
 import { ModelInputError } from "../src/errors.ts";
@@ -23,7 +24,7 @@ const withDefaults = (patch: Record<string, unknown>): Record<string, unknown> =
   defaults: { ...VALID.defaults, ...patch },
 });
 
-Deno.test("parseAnimaPipelineConfig: 実配布物の形を読む", () => {
+test("parseAnimaPipelineConfig: 実配布物の形を読む", () => {
   const config = parseAnimaPipelineConfig(VALID);
   // `type` を持たない実配布物は既定の `"euler"` に落ちる（下の「省略時は euler」も参照）。
   assertEquals(config.scheduler, { type: "euler", shift: 3, numTrainTimesteps: 1000 });
@@ -33,7 +34,7 @@ Deno.test("parseAnimaPipelineConfig: 実配布物の形を読む", () => {
   assertEquals(config.defaults.negativePrompt, VALID.defaults.negativePrompt);
 });
 
-Deno.test("parseAnimaPipelineConfig: negativePrompt は任意（欄ごと無くてよい）", () => {
+test("parseAnimaPipelineConfig: negativePrompt は任意（欄ごと無くてよい）", () => {
   const config = parseAnimaPipelineConfig({
     scheduler: VALID.scheduler,
     defaults: {
@@ -46,7 +47,7 @@ Deno.test("parseAnimaPipelineConfig: negativePrompt は任意（欄ごと無く�
   assertEquals(config.defaults.resolution, { width: 1344, height: 768 });
 });
 
-Deno.test("parseAnimaPipelineConfig: scheduler.type は省略時 euler（配布済み manifest の挙動を固定）", () => {
+test("parseAnimaPipelineConfig: scheduler.type は省略時 euler（配布済み manifest の挙動を固定）", () => {
   // `type` は additive に足した optional 席（ADR 0038 §1）。既に配られたリポは migrate
   // できないので、欄が無い manifest が別の更新則へ動いた瞬間に出力画像が黙って変わる。
   assertEquals(parseAnimaPipelineConfig(VALID).scheduler.type, "euler");
@@ -59,7 +60,7 @@ Deno.test("parseAnimaPipelineConfig: scheduler.type は省略時 euler（配布�
   );
 });
 
-Deno.test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () => {
+test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () => {
   assertEquals(
     parseAnimaPipelineConfig({
       ...VALID,
@@ -88,7 +89,7 @@ Deno.test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける"
   );
 });
 
-Deno.test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違いを既定へ縮退させない）", () => {
+test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違いを既定へ縮退させない）", () => {
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, sampler: {} }),
     Error,
@@ -112,7 +113,7 @@ Deno.test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違い�
   );
 });
 
-Deno.test("parseAnimaPipelineConfig: 必須欄の欠落を名指しで落とす", () => {
+test("parseAnimaPipelineConfig: 必須欄の欠落を名指しで落とす", () => {
   assertThrows(() => parseAnimaPipelineConfig({}), Error, "pipelineConfig.scheduler: 無い");
   assertThrows(
     () => parseAnimaPipelineConfig({ scheduler: VALID.scheduler }),
@@ -131,7 +132,7 @@ Deno.test("parseAnimaPipelineConfig: 必須欄の欠落を名指しで落とす"
   );
 });
 
-Deno.test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
+test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { shift: 0, numTrainTimesteps: 1000 } }),
     Error,
@@ -171,7 +172,7 @@ Deno.test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
   );
 });
 
-Deno.test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側であることを要求する", () => {
+test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側であることを要求する", () => {
   // 配布時に外れていたら構築で落とす — 「生成を 1 回走らせて初めて分かる」を作らない。
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } })),

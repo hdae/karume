@@ -7,7 +7,7 @@
 // 呼び手が shader-f16 を持つ device でも f16 を拒否する）。
 
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { type SessionOptions, sessionOptionsViolation } from "../mod.ts";
 
 /** 型の外から来る呼び手（JS の消費者）の欄を再現する — TS の型はこの経路を守らない。 */

@@ -1,5 +1,6 @@
+import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import type { CodecName } from "../src/format/container/codecs.ts";
 import type { IrGraph } from "../src/format/ir.ts";
 import { acquireGpu } from "../src/gpu/device.ts";
@@ -162,10 +163,10 @@ const QAT_MANIFEST = new URL("karume.json", QAT_ROOT);
 /** 資産の有無（NotFound 以外は伝播 — マウント異常を SKIP に化かさない）。 */
 const exists = async (url: URL): Promise<boolean> => {
   try {
-    await Deno.stat(url);
+    await stat(url);
     return true;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
@@ -230,7 +231,7 @@ describe({
   ignore: !QAT_AVAILABLE,
   fn: () => {
     it("i2 の lm_head と f32 の per_layer_model_projection を除く全 linear が E4B の行に載る", async () => {
-      const manifest: ContainerManifest = JSON.parse(await Deno.readTextFile(QAT_MANIFEST));
+      const manifest: ContainerManifest = JSON.parse(await readTextFile(QAT_MANIFEST));
       const head = containerPart0(manifest, "e4b", "model", "i4");
       const graph = await readContainerGraph(new URL(head.path, QAT_ROOT), "model");
       // 本数の内訳（42 層・full 7 層）: i4 g512 l4 = q 35 + q(full) 7 + gate/up 84 /

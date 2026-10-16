@@ -13,6 +13,7 @@
 // 最後に、公開面から見た対として「anima の `fromPretrained` が `onRetry` を `loadManifest` まで
 // 運ぶ」ことを mock fetch の 429 で見る（1 家族で足りる — 運ぶ経路は 9 家族とも同じ 1 本）。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import type { AssetProgress, CacheDiagnostic, RetryDiagnostic } from "@karume/hub";
 import { hubLoadOptions } from "../src/hub/load-options.ts";
@@ -30,7 +31,7 @@ import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 const noopRetry = (diagnostic: RetryDiagnostic): void => void diagnostic;
 
-Deno.test("hubLoadOptions: 定義済みの 6 欄が同じ参照のまま写る", () => {
+test("hubLoadOptions: 定義済みの 6 欄が同じ参照のまま写る", () => {
   const signal = AbortSignal.abort();
   const headers = new Headers({ authorization: "Bearer test" });
   const onCacheError = (diagnostic: CacheDiagnostic): void => void diagnostic;
@@ -56,7 +57,7 @@ Deno.test("hubLoadOptions: 定義済みの 6 欄が同じ参照のまま写る",
   assertEquals(Object.keys(hubOptions).length, 6, "写した欄が 6 つでない");
 });
 
-Deno.test("hubLoadOptions: 未定義の欄はキーごと無い（`key: undefined` を作らない）", () => {
+test("hubLoadOptions: 未定義の欄はキーごと無い（`key: undefined` を作らない）", () => {
   // 明示的な `undefined` を置くと、取得層の `options.fetch ?? globalThis.fetch` のような
   // 既定の当て方は救うが、`Object.hasOwn` や分割代入の既定値で分岐する側は救えない。
   // 「無指定」と「undefined を指定」は別物のまま届けるのが写しの契約。
@@ -69,7 +70,7 @@ Deno.test("hubLoadOptions: 未定義の欄はキーごと無い（`key: undefine
   }
 });
 
-Deno.test("hubLoadOptions: onProgress は写さない（進捗は家族側が別途載せる）", () => {
+test("hubLoadOptions: onProgress は写さない（進捗は家族側が別途載せる）", () => {
   // manifest 取得に進捗は無く、資産取得の進捗は家族ごとに集約してから
   // `loadContainerComponents` へ渡す。ここで写すと集約前の生の進捗が二重に流れる。
   const onProgress = (progress: AssetProgress): void => void progress;
@@ -78,7 +79,7 @@ Deno.test("hubLoadOptions: onProgress は写さない（進捗は家族側が別
   assertEquals(Object.keys(hubOptions), ["onRetry"]);
 });
 
-Deno.test("型の門: 9 家族の fromPretrained オプションが onRetry を受ける", () => {
+test("型の門: 9 家族の fromPretrained オプションが onRetry を受ける", () => {
   // `satisfies` が本体（`deno task check` が門）。1 家族でも共有型から外れると赤くなる。
   const perFamily = [
     { onRetry: noopRetry } satisfies AnimaFromPretrainedOptions,
@@ -185,7 +186,7 @@ const createRateLimitedManifestFetch = (): { fetch: typeof globalThis.fetch; cal
   return { fetch, calls };
 };
 
-Deno.test("AnimaPipeline.fromPretrained: onRetry が loadManifest まで届く（429 で 1 回）", async () => {
+test("AnimaPipeline.fromPretrained: onRetry が loadManifest まで届く（429 で 1 回）", async () => {
   const { fetch, calls } = createRateLimitedManifestFetch();
   const retries: RetryDiagnostic[] = [];
   // manifest の後（容器の part 0）は 404 なので落ちる。ここで見たいのは「家族の

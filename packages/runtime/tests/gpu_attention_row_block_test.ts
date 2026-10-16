@@ -29,6 +29,7 @@
  * 同時に見る（予算が導出に届かないまま 1 枚で回った形を緑にしない）。出力が定数でないことも毎回確かめる。
  */
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, type GpuContext, LIMIT_CAPS } from "../src/gpu/device.ts";
 import { planRowBlocks } from "../src/runtime/fusion.ts";
@@ -300,7 +301,7 @@ const assertBudgetSplitParity = async (
   }
 };
 
-Deno.test({
+test({
   name:
     "融合 attention の行ブロック実行は枚数を変えても 1 枚実行と**ビット単位で一致**する（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -314,7 +315,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "予算 attentionRowBlockMaxBytes で割った融合 attention は 1 枚実行と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
   ignore: !GPU_AVAILABLE,
@@ -328,7 +329,7 @@ Deno.test({
   },
 });
 
-Deno.test({
+test({
   name:
     "f16 計算（f16 / f16 + mask・GQA 形を含む）の行ブロック実行も、強制分割と予算分割の両方で 1 枚実行と**ビット単位で一致**する（実 GPU・shader-f16）",
   // feature の無い機の SKIP は門番（gpu_gate_test.ts の shader-f16）が FAIL にする。
@@ -352,7 +353,7 @@ Deno.test({
  * アリーナ経路と食い違うと「2 run 目だけ別のバッファへ書く」形の沈黙誤値になる — 例外は
  * 出ないので、ビット比較でしか見えない。
  */
-Deno.test({
+test({
   name: "行ブロック実行はヒット run（導出済み計画）でもミス run とビット単位で一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -386,7 +387,7 @@ Deno.test({
  * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る — 空の census は
  * tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
  */
-Deno.test({
+test({
   name: "行窓のキーは n ≥ 2 でだけ立ち、dispatch 回数が枚数と一致する（実 GPU）",
   ignore: !GPU_AVAILABLE,
   fn: async () => {
@@ -438,7 +439,7 @@ const OVERSIZE: Shape = {
   d: 8,
 };
 
-Deno.test({
+test({
   name:
     "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超える融合 attention が行ブロックで通る（実 GPU）",
   ignore: !GPU_AVAILABLE,

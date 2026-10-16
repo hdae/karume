@@ -3,7 +3,7 @@
 // 見分けられる」ことの 2 点（ADR 0124 の段 4b の記録が、古いドライバの機で黙って空の基準を名乗らないため）。
 
 import { assertEquals } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { formatNvidiaTimeline, parseNvidiaSample } from "./helpers/nvidia-smi.ts";
 
 describe("parseNvidiaSample", () => {

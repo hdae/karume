@@ -14,6 +14,8 @@
 // NOTE: フィクスチャの置き場は `packages/models/tests/fixtures/anima-text/`（消費者が本テスト
 // なので models 側が正 — 2026-08-16 移設済み）。exporter 側の生成・参照も同じ path を指す。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   normalizeNfc,
@@ -72,7 +74,7 @@ const FIXTURE_PATH = new URL(
   "./fixtures/anima-text/parity.json",
   import.meta.url,
 );
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 const qwenAssets: Qwen2Assets = {
   vocab: new Map(Object.entries(fixture.qwen.vocab)),
@@ -114,7 +116,7 @@ const caseById = (id: string): FixtureCase => {
 
 // ---- フィクスチャ本体 -------------------------------------------------------
 
-Deno.test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
+test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
   // 1 本目に置く。読み違い / 生成失敗で cases が空になると、以降のループが 0 回になって
   // 「緑だが何も検証していない」状態が黙って成立する。
   assert(fixture.cases.length >= 28, `ケース数 ${fixture.cases.length} が少なすぎる`);
@@ -124,13 +126,13 @@ Deno.test("フィクスチャが空でない（取り違えで全ケース素通
 });
 
 for (const testCase of fixture.cases) {
-  Deno.test(`パリティ [${testCase.id}] ${testCase.why}`, () => {
+  test(`パリティ [${testCase.id}] ${testCase.why}`, () => {
     assertEquals(qwen.encode(testCase.text), testCase.qwenIds, "Qwen2 id 列");
     assertEquals(t5.encode(testCase.text), testCase.t5Ids, "T5 id 列");
   });
 }
 
-Deno.test("T5 の正規化結果そのものが正本と一致する（id 列の手前で切り分ける）", () => {
+test("T5 の正規化結果そのものが正本と一致する（id 列の手前で切り分ける）", () => {
   for (const testCase of fixture.cases) {
     assertEquals(
       normalizeSpm(t5Assets.normalizer, testCase.text),
@@ -142,7 +144,7 @@ Deno.test("T5 の正規化結果そのものが正本と一致する（id 列の
 
 // ---- NFC（正本と JS エンジンが割れる領域）-----------------------------------
 
-Deno.test("NFC: 正本と割れる入力を分節表で再現する（素の normalize では作れない値）", () => {
+test("NFC: 正本と割れる入力を分節表で再現する（素の normalize では作れない値）", () => {
   // フィクスチャの各対は `tokenizers.normalizers.NFC` の実測値。①分節 cp ごとに 1 本
   // （素の NFC では必ず外れる文脈）②乱択 — ②は分節の外側で ICU が Python とずれた場合の網。
   assert(
@@ -158,7 +160,7 @@ Deno.test("NFC: 正本と割れる入力を分節表で再現する（素の nor
   }
 });
 
-Deno.test("NFC: 分節表を 1 区間落とすと素の normalize と同じ（= 別 id 列）に戻る", () => {
+test("NFC: 分節表を 1 区間落とすと素の normalize と同じ（= 別 id 列）に戻る", () => {
   // 実測（`tokenizers` の NFC に同じ文字列を投げた結果）: 正本は U+089A を結合クラス 0 と
   // 見なすので**並べ替えない**。ICU（V8）は ccc 220 < 230 で並べ替える。
   const text = "\u0818\u089A";
@@ -172,7 +174,7 @@ Deno.test("NFC: 分節表を 1 区間落とすと素の normalize と同じ（= 
 
 // ---- 境界（フィクスチャのケースが実際に叩いているもの）----------------------
 
-Deno.test("512 を超える入力は切り詰められ、T5 は必ず `</s>` で終わる", () => {
+test("512 を超える入力は切り詰められ、T5 は必ず `</s>` で終わる", () => {
   const long = caseById("long");
   assertEquals(long.qwenIds.length, fixture.maxLength);
   const ids = t5.encode(long.text);
@@ -181,13 +183,13 @@ Deno.test("512 を超える入力は切り詰められ、T5 は必ず `</s>` で
   assertEquals(ids.at(-1), fixture.t5.eosId);
 });
 
-Deno.test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
+test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
   assertThrows(() => toCodePoints("a\ud800b"), Error, "サロゲート");
   assertThrows(() => qwen.encode("a\ud800b"), Error, "サロゲート");
   assertThrows(() => t5.encode("a\ud800b"), Error, "サロゲート");
 });
 
-Deno.test("追加語彙は leftmost-longest（途中まで一致する文字列は切り出さない）", () => {
+test("追加語彙は leftmost-longest（途中まで一致する文字列は切り出さない）", () => {
   const added = ["<|endoftext|>", "<|im_start|>"];
   assertEquals(splitAddedTokens("a<|endoftext|>b", added), [
     { text: "a", added: false },
@@ -204,7 +206,7 @@ Deno.test("追加語彙は leftmost-longest（途中まで一致する文字列�
   assertThrows(() => splitAddedTokens("abc", ["", "<|a"]), Error, "空文字");
 });
 
-Deno.test("区間表: 昇順・非重複でない表は受け付けない（黙って別の分類にしない）", () => {
+test("区間表: 昇順・非重複でない表は受け付けない（黙って別の分類にしない）", () => {
   // `inCodeRanges` は二分探索なので、順序が崩れた表は例外にならず判定だけが変わる。
   assertEquals(parseCodeRanges([[1, 2], [4, 9]], "表"), [[1, 2], [4, 9]]);
   assertThrows(() => parseCodeRanges([[5, 1]], "表"), Error, "始端が終端より大きい");
@@ -213,7 +215,7 @@ Deno.test("区間表: 昇順・非重複でない表は受け付けない（黙�
   assertThrows(() => parseCodeRanges([[1, 2], [4]], "表"), Error, "数値対でない");
 });
 
-Deno.test("正規化: 結合文字クラスタは最短の一致接頭辞だけを出して残りを捨てる", () => {
+test("正規化: 結合文字クラスタは最短の一致接頭辞だけを出して残りを捨てる", () => {
   const normalize = (text: string): string => normalizeSpm(t5Assets.normalizer, text);
   // A + U+0301 は規則があるので U+00C1。さらに U+0301 を足しても U+00C1 のまま
   // （3 文字目は捨てられる）。**合成済み文字を書かない** — 入力は必ず分解形で綴る。
@@ -223,7 +225,7 @@ Deno.test("正規化: 結合文字クラスタは最短の一致接頭辞だけ�
   assertEquals(normalize("A\u0302\u0301"), "\u00C2");
 });
 
-Deno.test("正規化: クラスタが 6 バイト以上になると丸ごと置換の経路に入らない", () => {
+test("正規化: クラスタが 6 バイト以上になると丸ごと置換の経路に入らない", () => {
   // A(1) + U+0302(2) + U+0301(2) + U+0301(2) = 7 バイト → 1 文字ずつ（何も合成されない）。
   assertEquals(
     normalizeSpm(t5Assets.normalizer, "A\u0302\u0301\u0301"),
@@ -231,7 +233,7 @@ Deno.test("正規化: クラスタが 6 バイト以上になると丸ごと置�
   );
 });
 
-Deno.test("正規化: クラスタがちょうど 6 バイトでも丸ごと置換の経路に入らない（境界そのもの）", () => {
+test("正規化: クラスタがちょうど 6 バイトでも丸ごと置換の経路に入らない（境界そのもの）", () => {
   // U+00A0(2) + U+0300(2) + U+0300(2) = **ちょうど 6 バイト**。`<` を `<=` に書き換えると
   // 「U+00A0 → 空白」の 1cp 規則が丸ごと置換として発火し、結合文字 2 個が黙って消える。
   // 既存の直叩き 2 本は 5 バイトと 7 バイトしか持たず、この 1 文字の書き換えを素通しする
@@ -242,7 +244,7 @@ Deno.test("正規化: クラスタがちょうど 6 バイトでも丸ごと置�
   );
 });
 
-Deno.test("正規化: 制御文字の直後ではクラスタが切れる（結合文字を巻き込まない）", () => {
+test("正規化: 制御文字の直後ではクラスタが切れる（結合文字を巻き込まない）", () => {
   const normalize = (text: string): string => normalizeSpm(t5Assets.normalizer, text);
   // U+0009 は空白へ写る。直後の U+0301 は別クラスタなのでそのまま残る。
   assertEquals(normalize("\t\u0301"), " \u0301");
@@ -259,7 +261,7 @@ Deno.test("正規化: 制御文字の直後ではクラスタが切れる（結�
 // ③④は実プロンプトでは踏まない。どれも正本に合わせてある規則なので、合成入力で直接叩かないと
 // 書き換えが静かに通る。
 
-Deno.test("pre-token: `(?i:)` の同一視は焼いた表で引く（ASCII 相当ではない）", () => {
+test("pre-token: `(?i:)` の同一視は焼いた表で引く（ASCII 相当ではない）", () => {
   // 実測（`tokenizers` の Split に同じ文字列を投げた結果）: 正本は `it'ſs` を
   // `it` / `'ſ` / `s` に切る — Rust の `(?i:)` は simple case folding で U+017F ≡ s。
   // **id 列では捕まらない**（byte-level BPE が結合し直して同じ列になる）ので、分割そのものを
@@ -273,7 +275,7 @@ Deno.test("pre-token: `(?i:)` の同一視は焼いた表で引く（ASCII 相�
   assertEquals(qwenAssets.caseFold.get(0x017f), "s".codePointAt(0));
 });
 
-Deno.test("pre-token: `\\p{N}` は 1 文字ずつ切れる（`+` が無い）", () => {
+test("pre-token: `\\p{N}` は 1 文字ずつ切れる（`+` が無い）", () => {
   // **id 列では捕まらない**（Qwen2 の merges に数字結合が無いので、貪欲化しても実資産で
   // 同じ列になると故障注入で実測）。分割そのものを見ないと書き換えが静かに通る。
   const split = (text: string): string[] =>
@@ -282,7 +284,7 @@ Deno.test("pre-token: `\\p{N}` は 1 文字ずつ切れる（`+` が無い）", 
   assertEquals(split("1.5x"), ["1", ".", "5", "x"]);
 });
 
-Deno.test("Viterbi: 同点なら長い断片が勝つ（比較は厳密な `>`）", () => {
+test("Viterbi: 同点なら長い断片が勝つ（比較は厳密な `>`）", () => {
   // a(-1) + b(-1) と ab(-2) がちょうど同点。正本（tokenizers の Unigram）を同じ語彙で
   // 実測すると `ab` 1 個になる（同じ位置で終わるノードは開始位置の昇順に積まれ、同点なら
   // 先に積まれた = 長い方が残る）。`>=` にすると a, b の 2 個へ黙って変わる。
@@ -340,14 +342,14 @@ class TrapVocab extends Map<string, T5VocabEntry> {
   }
 }
 
-Deno.test("T5: 空白を含まない巨大な 1 断片でも引数上限で落ちず、512 に切り詰める", () => {
+test("T5: 空白を含まない巨大な 1 断片でも引数上限で落ちず、512 に切り詰める", () => {
   // 1 断片が約 10 万 id を超えると `push(...ids)` は V8 の引数上限で RangeError になる。
   const ids = tinyT5(new Map(tinyVocabEntries())).encode("a".repeat(300_000));
   assertEquals(ids.length, 512);
   assertEquals(ids, [3, ...Array.from({ length: 510 }, () => 4), 1], "▁ + a × 510 + </s>");
 });
 
-Deno.test("T5: 切り詰めで捨てる後続の断片は符号化しない", () => {
+test("T5: 切り詰めで捨てる後続の断片は符号化しない", () => {
   const trap = tinyT5(new TrapVocab(tinyVocabEntries()));
   // 前提: 番兵の断片を符号化すれば投げる（語彙の罠が効いている）。
   assertThrows(() => trap.encode("z"), Error, "切り詰めの後ろ");
@@ -357,7 +359,7 @@ Deno.test("T5: 切り詰めで捨てる後続の断片は符号化しない", ()
   assertEquals(ids.at(-1), 1);
 });
 
-Deno.test("Qwen2: 切り詰めで捨てる後続の pre-token は符号化しない", () => {
+test("Qwen2: 切り詰めで捨てる後続の pre-token は符号化しない", () => {
   // 番兵 `ק` は語彙の部分集合に無いので、符号化すれば「語彙に無いトークン」で投げる。
   const sentinel = " ק";
   assertThrows(() => qwen.encode(sentinel), Error, "語彙に無いトークン");
@@ -365,7 +367,7 @@ Deno.test("Qwen2: 切り詰めで捨てる後続の pre-token は符号化しな
   assertEquals(qwen.encode(long.text + sentinel), long.qwenIds);
 });
 
-Deno.test("Metaspace: 区切りの ▁ は次の断片の先頭に付く（MergedWithNext）", () => {
+test("Metaspace: 区切りの ▁ は次の断片の先頭に付く（MergedWithNext）", () => {
   const space: readonly (readonly [number, number])[] = [[0x20, 0x20]];
   // 先頭には必ず ▁ が付き（prepend_scheme=always）、入力中の ▁ は**その位置で切って次へ**。
   assertEquals(t5PreTokenize("under▁score", space), ["▁under", "▁score"]);
@@ -377,7 +379,7 @@ Deno.test("Metaspace: 区切りの ▁ は次の断片の先頭に付く（Merge
 
 // ---- 受理集合（Dim(min=2)）--------------------------------------------------
 
-Deno.test("受理集合: 空文字・空白だけのプロンプトは fail loudly", () => {
+test("受理集合: 空文字・空白だけのプロンプトは fail loudly", () => {
   // T5 は空文字でも `</s>` だけの長さ 1 になり Dim("Ttgt", min=2) を外れる。
   assertEquals(t5.encode(""), [fixture.t5.eosId]);
   assertEquals(caseById("only_space").t5Ids.length, 1);
@@ -388,7 +390,7 @@ Deno.test("受理集合: 空文字・空白だけのプロンプトは fail loud
   );
 });
 
-Deno.test("受理集合: 1 文字のプロンプトは Qwen2 側が 1 トークンで外れる", () => {
+test("受理集合: 1 文字のプロンプトは Qwen2 側が 1 トークンで外れる", () => {
   const single = caseById("single_char");
   assertEquals(single.qwenIds.length, 1);
   // T5 側は `▁a` + `</s>` などで 2 以上になり得るので、**両側を見ないと**捕まらない。
@@ -406,7 +408,7 @@ Deno.test("受理集合: 1 文字のプロンプトは Qwen2 側が 1 トーク�
   );
 });
 
-Deno.test("受理集合: 通常のタグ列は受理し、上限超過は拒否する", () => {
+test("受理集合: 通常のタグ列は受理し、上限超過は拒否する", () => {
   const tags = caseById("tags");
   assertPromptTokenLengths("プロンプト", tags.qwenIds.length, tags.t5Ids.length, fixture.maxLength);
   // 上限側は切り詰めが壊れたときにしか届かない内部不変条件なので、入力起因の型では飛ばない。
@@ -419,7 +421,7 @@ Deno.test("受理集合: 通常のタグ列は受理し、上限超過は拒否�
 
 // ---- 2 本組の入口（AnimaTokenizers / createTokenizers）------------------------
 
-Deno.test("AnimaTokenizers: 片方だけ古い資産（maxLength の食い違い）を落とす", () => {
+test("AnimaTokenizers: 片方だけ古い資産（maxLength の食い違い）を落とす", () => {
   // 切り詰め長が違うと長いプロンプトで id 列の長さだけが食い違い、conditioner の
   // 512 パディング検査まで表面化しない。
   assertThrows(
@@ -429,7 +431,7 @@ Deno.test("AnimaTokenizers: 片方だけ古い資産（maxLength の食い違い
   );
 });
 
-Deno.test("AnimaTokenizers: 正 / ネガティブのどちらで落ちたかがメッセージに出る", () => {
+test("AnimaTokenizers: 正 / ネガティブのどちらで落ちたかがメッセージに出る", () => {
   const tokenizers = new AnimaTokenizers(qwenAssets, t5Assets);
   assertEquals(tokenizers.maxLength, fixture.maxLength);
   const tags = caseById("tags");
@@ -443,7 +445,7 @@ Deno.test("AnimaTokenizers: 正 / ネガティブのどちらで落ちたかが�
   );
 });
 
-Deno.test("AnimaTokenizers: 対にならないサロゲートは両トークナイザへ渡す前に落とす", () => {
+test("AnimaTokenizers: 対にならないサロゲートは両トークナイザへ渡す前に落とす", () => {
   // 生成要求の本文として通るので入力起因（ADR 0107 決定 2 — 文字を直せば通る）。受理条件の
   // 正本は `toCodePoints` 1 本のままなので、所有者の診断は `cause` に残る。
   const tokenizers = new AnimaTokenizers(qwenAssets, t5Assets);
@@ -460,7 +462,7 @@ Deno.test("AnimaTokenizers: 対にならないサロゲートは両トークナ�
   assert(tokenizers.encode(caseById("tags").text).qwenIds.length >= PROMPT_MIN_TOKENS);
 });
 
-Deno.test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）から組む", () => {
+test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）から組む", () => {
   // 実資産の JSON 形は「行区切りの語彙 + 件数」なので、**件数の食い違いを落とす**ところまでが
   // 入口の契約（merges が欠けても BPE は落ちず、id 列だけが静かに別物になる）。
   const encode = (value: unknown): Uint8Array<ArrayBuffer> =>
@@ -582,7 +584,7 @@ const brokenT5 = (
   gateEncode({ ...gateT5Json, ...patch }),
 ];
 
-Deno.test("資産の値域門: maxLength は正の安全整数（壊れた資産が別の診断に化けない）", () => {
+test("資産の値域門: maxLength は正の安全整数（壊れた資産が別の診断に化けない）", () => {
   // maxLength: 0 は Qwen2 の id 列を空にするので、届く診断は「プロンプトが空」= **嘘**に
   // なる（壊れているのは資産）。maxLength を名指しして parse 時に落とす。
   assertThrows(
@@ -609,7 +611,7 @@ Deno.test("資産の値域門: maxLength は正の安全整数（壊れた資産
   );
 });
 
-Deno.test("資産の値域門: T5 の scores は有限（minScore が汚染されると Viterbi が潰れる）", () => {
+test("資産の値域門: T5 の scores は有限（minScore が汚染されると Viterbi が潰れる）", () => {
   // NaN / ±Infinity は minScore を汚し、未知ノードの重みが「全経路同値」へ潰れる。
   for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
     assertThrows(
@@ -620,7 +622,7 @@ Deno.test("資産の値域門: T5 の scores は有限（minScore が汚染さ�
   }
 });
 
-Deno.test("資産の値域門: 行番号 = id の表に重複行があれば落とす（後勝ちで別の行を引く）", () => {
+test("資産の値域門: 行番号 = id の表に重複行があれば落とす（後勝ちで別の行を引く）", () => {
   // 行数の突合（vocabCount / scores の本数）では重複を捕まえられない — 重複は行数を変えない。
   assertThrows(
     () => createTokenizers(...brokenQwen2({ vocabText: "a\nb\na", vocabCount: 3 })),
@@ -643,7 +645,7 @@ Deno.test("資産の値域門: 行番号 = id の表に重複行があれば落�
   );
 });
 
-Deno.test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens / caseFold）", () => {
+test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTokens / caseFold）", () => {
   assertThrows(
     () => createTokenizers(...brokenQwen2({ addedTokens: [["<|x|>", 3], ["<|x|>", 4]] })),
     Error,
@@ -667,7 +669,7 @@ Deno.test("資産の値域門: 鍵つき写像の重複鍵は落とす（addedTo
   );
 });
 
-Deno.test("区間表: 非整数・コードポイント域外は受け付けない（sbv2 の parseRanges と同じ規律）", () => {
+test("区間表: 非整数・コードポイント域外は受け付けない（sbv2 の parseRanges と同じ規律）", () => {
   // `[65.5, 90]` は二分探索を例外にせず境界だけ半端にずらす → 文字分類が変わり、pre-token の
   // 切れ目 → id 列が黙って別物になる。
   assertThrows(() => parseCodeRanges([[65.5, 90]], "表"), Error, "コードポイントが");
@@ -677,7 +679,7 @@ Deno.test("区間表: 非整数・コードポイント域外は受け付けな�
   assertEquals(parseCodeRanges([[0, 0x10FFFF]], "表"), [[0, 0x10FFFF]]);
 });
 
-Deno.test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は落とす", () => {
+test("正規化表: 重複鍵・域外コードポイント・tuple 長違反は落とす", () => {
   const tables = (patch: Record<string, unknown>): unknown => ({
     single: [],
     multi: [],
@@ -733,7 +735,7 @@ const tinyQwen = (
     addedTokens: new Map(),
   });
 
-Deno.test("Qwen2 BPE: rank の小さい対が先・同じ rank なら左の対が先に併合される", () => {
+test("Qwen2 BPE: rank の小さい対が先・同じ rank なら左の対が先に併合される", () => {
   const vocab = { a: 0, aa: 1, b: 2, c: 3, bc: 4, ab: 5 };
   // 同率（同じ対が並ぶ）なら左から: aaa → aa + a（a + aa ではない）。
   assertEquals(tinyQwen(vocab, [["a", "a", 0]]).encode("aaa"), [1, 0]);
@@ -742,7 +744,7 @@ Deno.test("Qwen2 BPE: rank の小さい対が先・同じ rank なら左の対�
   assertEquals(tinyQwen(vocab, [["b", "c", 1], ["a", "b", 0]]).encode("abc"), [5, 3]);
 });
 
-Deno.test("Qwen2 BPE: 区切りの無い長い 1 片でも併合は二次時間にならない", () => {
+test("Qwen2 BPE: 区切りの無い長い 1 片でも併合は二次時間にならない", () => {
   // 切り詰め（512）は片単位でしか効かないので、1 片の BPE は最後まで回る。区切りの無い英字列や
   // 句読点の無い日本語は文字クラス上 1 片になる。全隣接の走査と splice を併合のたびに繰り返す形は
   // 8,000 文字で 1 秒を超える。

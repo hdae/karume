@@ -42,6 +42,8 @@
  * 実物が f32 テンソルなら {@link f32ArtifactBytes}（safetensors 1 本・metadata なし）で作る。
  */
 
+import { readTextFileSync, writeFile, writeTextFileSync } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { fail } from "@std/assert";
 import { ENVIRONMENT, type Environment } from "./environment.ts";
 import type { ResultEntry, Results } from "./results.ts";
@@ -67,14 +69,14 @@ export const parseReferenceMode = (raw: string | undefined): ReferenceMode | und
 
 /** この実行の参照モード（モジュール評価時に 1 回だけ確定）。 */
 export const REFERENCE_MODE: ReferenceMode | undefined = parseReferenceMode(
-  Deno.env.get("KARUME_REFERENCE"),
+  process.env.KARUME_REFERENCE,
 );
 
 /**
  * 「この環境の参照値が 1 つも無いままの SKIP」を明示的に許可する opt-out
  * （`helpers/gpu.ts` の `ALLOW_NO_GPU` と同型）。
  */
-export const ALLOW_NO_REFERENCE: boolean = Deno.env.get("KARUME_ALLOW_NO_REFERENCE") === "1";
+export const ALLOW_NO_REFERENCE: boolean = process.env.KARUME_ALLOW_NO_REFERENCE === "1";
 
 /** 1 ケースぶんの突合の決着。 */
 export type ReferenceCheck =
@@ -135,7 +137,7 @@ type ReferenceDocument = {
 const readDocument = (fixtureUrl: URL): ReferenceDocument => {
   let text: string;
   try {
-    text = Deno.readTextFileSync(fixtureUrl);
+    text = readTextFileSync(fixtureUrl);
   } catch (cause) {
     throw new Error(`参照値の fixture が読めない: ${fixtureUrl.pathname}`, { cause });
   }
@@ -250,7 +252,7 @@ export const openReferences = (
     // 旧値も同じ読み直しから採る（写しから採ると、別ハンドルが足した行を「無かった」と報告する）。
     const previous = onDisk[caseId]?.[current];
     onDisk[caseId] = { ...onDisk[caseId], [current]: sha256 };
-    Deno.writeTextFileSync(fixtureUrl, serialize(onDisk));
+    writeTextFileSync(fixtureUrl, serialize(onDisk));
     cases[caseId] = { ...cases[caseId], [current]: sha256 };
     return previous === undefined ? "written" : "rewritten";
   };
@@ -391,7 +393,7 @@ export const registerReferenceGate = (
         heldHere.join(" / "),
     );
   }
-  Deno.test({
+  test({
     name: `参照門: この環境（${environment}）の参照値が登録した全ケースにある`,
     // GPU も資産も無い環境では sha 門自体が走らない（この門番も鳴らさない）。
     ignore: ALLOW_NO_REFERENCE || !options.runnable,
@@ -473,7 +475,7 @@ export const settleReference = async (
   },
 ): Promise<ReferenceSettlement> => {
   const artifactUrl = results.artifact(settled.artifact);
-  await Deno.writeFile(artifactUrl, settled.bytes);
+  await writeFile(artifactUrl, settled.bytes);
   const sha256 = await sha256Hex(settled.bytes);
   const check = references.check(settled.id, sha256);
   announceCheck(settled.id, check, sha256);
@@ -529,7 +531,7 @@ export const settleOrObserve = async (
   },
 ): Promise<ReferenceOutcome> => {
   if (references.lacksReference(settled.id)) {
-    await Deno.writeFile(results.artifact(settled.artifact), settled.bytes);
+    await writeFile(results.artifact(settled.artifact), settled.bytes);
     return {
       fields: {
         status: "pass",

@@ -16,6 +16,8 @@
 // 縛るのは振る舞い: 「同じ生テキストを入れたら Python と同じ id 列が出る」。表の持ち方や
 // 内部の分割の仕方は縛らない。
 
+import { readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { packCaptionIds, packIds } from "../src/irodori/host/pack.ts";
@@ -84,7 +86,7 @@ type Fixture = {
 };
 
 const FIXTURE_PATH = new URL("./fixtures/irodori-text/parity.json", import.meta.url);
-const fixture = JSON.parse(await Deno.readTextFile(FIXTURE_PATH)) as Fixture;
+const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
 const assets: IrodoriTokenizerAssets = {
   vocab: new Map(fixture.asset.vocab.map(([token, id, score]) => [token, { id, score }])),
@@ -102,7 +104,7 @@ const tokenizer = new IrodoriTokenizer(assets);
 
 // ---- フィクスチャ本体 -------------------------------------------------------
 
-Deno.test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
+test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
   // 1 本目に置く。読み違い / 生成失敗でケースが空になると、以降のループが 0 回になって
   // 「緑だが何も検証していない」状態が黙って成立する。
   assertEquals(fixture.encode.cases.length, 14);
@@ -124,7 +126,7 @@ Deno.test("フィクスチャが空でない（取り違えで全ケース素通
 // ---- ① 正規化（トークナイザの手前で切り分ける）------------------------------
 
 for (const testCase of fixture.normalize.cases) {
-  Deno.test(`正規化パリティ [${testCase.name}] ${testCase.why}`, () => {
+  test(`正規化パリティ [${testCase.name}] ${testCase.why}`, () => {
     assertEquals(normalizeText(testCase.raw), testCase.normalized);
   });
 }
@@ -132,7 +134,7 @@ for (const testCase of fixture.normalize.cases) {
 // ---- ② 符号化（生テキスト → id 列）------------------------------------------
 
 for (const testCase of fixture.encode.cases) {
-  Deno.test(`符号化パリティ [${testCase.name}] ${testCase.why}`, () => {
+  test(`符号化パリティ [${testCase.name}] ${testCase.why}`, () => {
     // 中間（正規化後の文字列）でも突き合わせる — 全経路だけを見ると、正規化と符号化の
     // 取り違えが打ち消し合った場合に気づけない。
     assertEquals(normalizeText(testCase.raw), testCase.normalized, "正規化後の文字列");
@@ -141,7 +143,7 @@ for (const testCase of fixture.encode.cases) {
   });
 }
 
-Deno.test("符号化: byte_fallback は UTF-8 バイト列そのもの（語彙を見ずに再現できる）", () => {
+test("符号化: byte_fallback は UTF-8 バイト列そのもの（語彙を見ずに再現できる）", () => {
   // c ケース（語彙外絵文字）の期待値を、フィクスチャの id 列とは独立に UTF-8 から組む。
   // `byteBaseId` の取り違えはここで落ちる。
   const byteCase = fixture.encode.cases.find((entry) => entry.name === "emoji-byte-fallback");
@@ -150,7 +152,7 @@ Deno.test("符号化: byte_fallback は UTF-8 バイト列そのもの（語彙�
   assertEquals(byteCase.ids, [...bytes].map((byte) => fixture.asset.byteBaseId + byte));
 });
 
-Deno.test("資産: バイトトークン 256 本の id が byteBaseId + バイト値で連番になっている", () => {
+test("資産: バイトトークン 256 本の id が byteBaseId + バイト値で連番になっている", () => {
   // byte_fallback の id 算術（`unigram.ts` の展開）が成立する前提そのもの。
   for (let byte = 0; byte < 256; byte++) {
     const token = `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`;
@@ -163,14 +165,14 @@ Deno.test("資産: バイトトークン 256 本の id が byteBaseId + バイ�
 // ---- ③ batch_encode の最終形（BOS 前置 + 切り詰め + 右 pad + マスク）---------
 
 for (const testCase of fixture.encode.batch) {
-  Deno.test(`組み立てパリティ [${testCase.name}] ${testCase.why}`, () => {
+  test(`組み立てパリティ [${testCase.name}] ${testCase.why}`, () => {
     const padded = tokenizer.encodePadded(testCase.normalized, testCase.maxLength);
     assertEquals([...padded.ids], testCase.idsPadded, "idsPadded");
     assertEquals([...padded.mask], testCase.mask.map(Number), "mask");
   });
 }
 
-Deno.test("組み立て: truncation が実際に発火し、BOS が残って全長は max_length になる", () => {
+test("組み立て: truncation が実際に発火し、BOS が残って全長は max_length になる", () => {
   const truncated = fixture.encode.batch.find((entry) => entry.name === "batch-truncated");
   assert(truncated !== undefined, "truncation ケースがフィクスチャに無い");
   // 本体の予算を `max_length` と取り違える故障は、このケースの id 列パリティが落とす
@@ -184,7 +186,7 @@ Deno.test("組み立て: truncation が実際に発火し、BOS が残って全�
   assertEquals(truncated.mask.filter(Boolean).length, truncated.maxLength);
 });
 
-Deno.test("組み立て: 短い入力は pad で右詰めされ、マスクが有効長を指す", () => {
+test("組み立て: 短い入力は pad で右詰めされ、マスクが有効長を指す", () => {
   const short = fixture.encode.batch.find((entry) => entry.name === "batch-short");
   assert(short !== undefined, "短いケースがフィクスチャに無い");
   const used = tokenizer.encode(short.normalized).length + 1;
@@ -203,7 +205,7 @@ Deno.test("組み立て: 短い入力は pad で右詰めされ、マスクが�
 // id 列**をフィクスチャに持たせ、両方を突き合わせる。
 
 for (const testCase of fixture.encode.caption) {
-  Deno.test(`caption パリティ [${testCase.name}] ${testCase.why}`, () => {
+  test(`caption パリティ [${testCase.name}] ${testCase.why}`, () => {
     assertEquals(
       [...packCaptionIds(tokenizer, testCase.raw, testCase.maxLength)],
       testCase.idsPacked,
@@ -218,7 +220,7 @@ for (const testCase of fixture.encode.caption) {
   });
 }
 
-Deno.test("caption: 2 経路の id 列が実際に割れる（門が恒真でない証拠）", () => {
+test("caption: 2 経路の id 列が実際に割れる（門が恒真でない証拠）", () => {
   // ケースが空だとループが 0 回になって「緑だが何も検証していない」状態が黙って成立する。
   assertEquals(fixture.encode.caption.length, 6);
   const sensitive = fixture.encode.caption.filter((entry) => entry.normalizeSensitive);
@@ -236,7 +238,7 @@ Deno.test("caption: 2 経路の id 列が実際に割れる（門が恒真でな
 
 // ---- ④ NFKC（正本 = Python の unicodedata / こちら = JS エンジンの ICU）-------
 
-Deno.test("NFKC: サロゲートを除く全コードポイントで正本の差分表と完全一致する", () => {
+test("NFKC: サロゲートを除く全コードポイントで正本の差分表と完全一致する", () => {
   // 両方向を見る: 表にあるのに JS が変えない（= 正本の方が新しい）ケースと、表に無いのに
   // JS が変える（= JS の方が新しい）ケースのどちらも、正規化結果を静かに割る。
   // 1 件ずつ assert すると 1.1M 回の呼び出しになるので、突合はループ内で行い件数だけ集める。
@@ -277,7 +279,7 @@ const padVocabForByteBase = (
   byteBaseId: realTokens.length,
 });
 
-Deno.test("資産パーサ: 素の JSON から資産表を組み、id / スコアを行番号で対応付ける", () => {
+test("資産パーサ: 素の JSON から資産表を組み、id / スコアを行番号で対応付ける", () => {
   const { vocabText, scores, byteBaseId } = padVocabForByteBase(
     ["<unk>", "<s>", "<pad>", "▁こんにちは", "世界"],
     [0, 0, 0, -1.5, -2.5],
@@ -299,7 +301,7 @@ Deno.test("資産パーサ: 素の JSON から資産表を組み、id / スコ�
   assertEquals([...parsed.addedTokens.keys()], ["<unk>", "<s>", "<pad>"]);
 });
 
-Deno.test("資産パーサ: 行数不一致と必須キー欠落は fail loudly", () => {
+test("資産パーサ: 行数不一致と必須キー欠落は fail loudly", () => {
   const { vocabText, scores, byteBaseId } = padVocabForByteBase(
     ["<unk>", "<s>", "<pad>"],
     [0, 0, 0],
@@ -335,7 +337,7 @@ Deno.test("資産パーサ: 行数不一致と必須キー欠落は fail loudly"
   assertThrows(() => parseIrodoriTokenizerAsset(undefined), Error, "オブジェクトでない");
 });
 
-Deno.test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int32Array で沈黙切り捨てになる前に落とす）", () => {
+test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int32Array で沈黙切り捨てになる前に落とす）", () => {
   const { vocabText, scores, byteBaseId } = padVocabForByteBase(
     ["<unk>", "<s>", "<pad>"],
     [0, 0, 0],
@@ -375,7 +377,7 @@ Deno.test("資産パーサ: 特殊 id は整数かつ語彙の行数未満（Int
   );
 });
 
-Deno.test("資産パーサ: 追加トークンの id は語彙の行数未満で、同じ綴りの語彙行と一致する", () => {
+test("資産パーサ: 追加トークンの id は語彙の行数未満で、同じ綴りの語彙行と一致する", () => {
   // 追加トークンの id は encode がそのままグラフ入力へ積む。範囲外は embedding gather の OOB まで、
   // 同綴り別 id は「別の行を指す」沈黙誤値のまま表面化しない。
   const VOCAB_SIZE = 300;
@@ -413,7 +415,7 @@ Deno.test("資産パーサ: 追加トークンの id は語彙の行数未満で
   assertEquals([...parsed.addedTokens], [["<s>", 0], ["<pad>", 1], ["<x>", VOCAB_SIZE - 1]]);
 });
 
-Deno.test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語彙内にあることを要求する（G4-02）", () => {
+test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語彙内にあることを要求する（G4-02）", () => {
   const VOCAB_SIZE = 300;
   const base = {
     vocabText: [...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`), ...BYTE_TOKENS]
@@ -435,7 +437,7 @@ Deno.test("資産パーサ: byteBaseId はバイト 256 本の連番全体が語
   assertEquals(parsed.byteBaseId, 44);
 });
 
-Deno.test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の綴りが順に並ぶ", () => {
+test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の綴りが順に並ぶ", () => {
   // 未知文字は `byteBaseId + バイト値` へ展開されるので、行が入れ替わった資産では HF（名前で
   // id を引く）と別の id が出る（"A" = 0x41 が `<0x42>` の行の id になる）。
   const VOCAB_SIZE = 300;
@@ -468,7 +470,7 @@ Deno.test("資産パーサ: byteBaseId からの 256 行は <0x00>..<0xFF> の�
   );
 });
 
-Deno.test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす（`Map` の後勝ちを禁じる）", () => {
+test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落とす（`Map` の後勝ちを禁じる）", () => {
   const VOCAB_SIZE = 300;
   const base = {
     vocabText: [...Array.from({ length: VOCAB_SIZE - 256 }, (_, i) => `t${i}`), ...BYTE_TOKENS]
@@ -503,7 +505,7 @@ Deno.test("資産パーサ: 語彙の重複行・追加語彙の重複鍵は落�
   );
 });
 
-Deno.test("資産パーサ: scores は有限（minScore が汚れると未知ノードの重みが潰れる）", () => {
+test("資産パーサ: scores は有限（minScore が汚れると未知ノードの重みが潰れる）", () => {
   const VOCAB_SIZE = 300;
   const scores = Array.from({ length: VOCAB_SIZE }, () => 0);
   const base = {
@@ -533,7 +535,7 @@ Deno.test("資産パーサ: scores は有限（minScore が汚れると未知ノ
 
 // ---- 境界（golden のケースが実際に叩いているもの）----------------------------
 
-Deno.test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
+test("対にならないサロゲートは受け付けない（正本に無い入力を黙って通さない）", () => {
   // 生成要求の本文として通るので入力起因（ADR 0107 決定 2 — 文字を直せば通る）。受理条件の
   // 正本は `toCodePoints` 1 本のままなので、所有者の診断は `cause` に残る。
   const error = assertThrows(() => tokenizer.encode("a\ud800b"), ModelInputError, "サロゲート");
@@ -543,7 +545,7 @@ Deno.test("対にならないサロゲートは受け付けない（正本に無
   assert(tokenizer.encode("a\ud83d\ude00b").length > 0);
 });
 
-Deno.test("追加語彙は格子の**前**に切り出される（語彙側の分割に負けない）", () => {
+test("追加語彙は格子の**前**に切り出される（語彙側の分割に負けない）", () => {
   // 実資産の 18 本は語彙にも同じ綴り・同じ id で載っているので、g ケースの id 列では
   // この規則を捕まえられない（切り出しを外しても同じ列になると故障注入で実測）。合成資産で
   // 「格子に流すと別の列になる」形を作って直接叩く。
@@ -569,7 +571,7 @@ Deno.test("追加語彙は格子の**前**に切り出される（語彙側の�
   assertEquals(plain.encode("<|x|>"), [6, 7, 8], "格子はスコアの和で 3 分割を選ぶ");
 });
 
-Deno.test("Metaspace: 先頭に ▁ を足さない（prepend_scheme=never）", () => {
+test("Metaspace: 先頭に ▁ を足さない（prepend_scheme=never）", () => {
   // i ケース（先頭が半角空白）は置換で ▁ が付く。足す実装だと ▁▁ になって別の id 列になる。
   const leading = fixture.encode.cases.find((entry) => entry.name === "leading-space");
   const withSpaces = fixture.encode.cases.find((entry) => entry.name === "with-spaces");
@@ -583,7 +585,7 @@ Deno.test("Metaspace: 先頭に ▁ を足さない（prepend_scheme=never）", 
 
 // ---- 外側括弧の剥がし（③）の意味論と計算量 ------------------------------------
 
-Deno.test("外側括弧の剥がし: 混在・途中で閉じる括弧の意味論", () => {
+test("外側括弧の剥がし: 混在・途中で閉じる括弧の意味論", () => {
   // パリティのフィクスチャ（brackets-*）に無い形を、Python 正本 `strip_outer_brackets` と同じ
   // 規則（全体を囲む同種の対だけを剥がし、剥がせたら先頭から試し直す）で固定する。
   // NFKC は剥がしの後に掛かるので、残った全角括弧は ASCII になる。
@@ -605,7 +607,7 @@ Deno.test("外側括弧の剥がし: 混在・途中で閉じる括弧の意味�
   for (const [raw, normalized] of cases) assertEquals(normalizeText(raw), normalized, raw);
 });
 
-Deno.test("外側括弧の剥がし: 深い入れ子でも入力長に線形の時間で剥がす", () => {
+test("外側括弧の剥がし: 深い入れ子でも入力長に線形の時間で剥がす", () => {
   // 1 段剥がすたびに残り全体を走査して切り出す形は入れ子 n 段で二次時間になり、
   // n = 32,000（約 64 KB）で数秒メインスレッドを占有する。token 数の切り詰めは正規化の後なので、
   // 長い入力がそのまま届く。
@@ -617,7 +619,7 @@ Deno.test("外側括弧の剥がし: 深い入れ子でも入力長に線形の�
   assert(elapsed < 1_000, `入れ子 ${depth} 段の剥がしに ${elapsed.toFixed(0)} ms かかった`);
 });
 
-Deno.test("外側括弧の剥がし: 正本の逐次の形と乱択の入力で一致する", () => {
+test("外側括弧の剥がし: 正本の逐次の形と乱択の入力で一致する", () => {
   // 期待側は正本 `strip_outer_brackets` の形をそのまま写したもの（1 段ずつ全体を走査して
   // 剥がす — 二次時間だが短い入力なら問題ない）。実装は対応表で線形に求めるので、2 つの形が
   // 括弧の混在・途中で閉じる・閉じない入力で割れないことを乱択で見る。

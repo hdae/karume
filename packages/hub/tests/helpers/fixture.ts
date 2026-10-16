@@ -9,9 +9,10 @@
  * （写すと「fixture を直したのにテストが古い path を配信し続ける」が黙って起きる）。
  */
 
+import { readTextFile } from "@karume/test-support/fs";
 import { type FileRef, type Manifest, parseManifest } from "../../mod.ts";
 
-export const FETCH_MANIFEST_TEXT = await Deno.readTextFile(
+export const FETCH_MANIFEST_TEXT = await readTextFile(
   new URL("../fixtures/manifest-fetch.json", import.meta.url),
 );
 

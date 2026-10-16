@@ -9,6 +9,7 @@
  * runtime のテストから tools を import しない（ADR 0008 追記 2026-09-03）。
  */
 
+import { test } from "@karume/test-support/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import type { IrGraph } from "../src/format/ir.ts";
 import {
@@ -102,7 +103,7 @@ const chainGraph = (options: {
 
 const CHAIN_INPUTS = { x: [4, 8], w: [4, 8] } as const;
 
-Deno.test("素のノード列から長さ 2〜maxWindow の窓を全て列挙する", () => {
+test("素のノード列から長さ 2〜maxWindow の窓を全て列挙する", () => {
   const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
   assertEquals(planFusions(nodes, context).steps.length, 3, "前提: どのルールも掴まない");
   assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 3)), [
@@ -117,7 +118,7 @@ Deno.test("素のノード列から長さ 2〜maxWindow の窓を全て列挙す
   ]);
 });
 
-Deno.test("鎖の内部値が外へ出る窓は候補にならない（別 consumer / graph output）", () => {
+test("鎖の内部値が外へ出る窓は候補にならない（別 consumer / graph output）", () => {
   for (
     const [label, graph] of [
       ["別 consumer", chainGraph({ extraConsumer: true })],
@@ -138,7 +139,7 @@ Deno.test("鎖の内部値が外へ出る窓は候補にならない（別 consu
  * `sym_prefix_slice` と同じ形 — 鎖の `add` へ流れ込むが、他でも読まれる（消費者 2 本）ので
  * 鎖には入らず、窓幅だけが鎖より 1 大きくなる。
  */
-Deno.test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大きくなる", () => {
+test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大きくなる", () => {
   const shape = [4, 8];
   const graph: DeclarationJson = {
     format: "karume-ir",
@@ -176,7 +177,7 @@ Deno.test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大�
   );
 });
 
-Deno.test("多出力 op を含む窓は候補にならない", () => {
+test("多出力 op を含む窓は候補にならない", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -201,7 +202,7 @@ Deno.test("多出力 op を含む窓は候補にならない", () => {
   assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 3)), []);
 });
 
-Deno.test("state を触るノードを含む窓は候補にならない", () => {
+test("state を触るノードを含む窓は候補にならない", () => {
   const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
   // 現行の op 語彙では `states` 欄を持てるのが `attention` / `state_append` だけで、この綴りの
   // 窓は実グラフから踏めない。窓の仕組み側の不変条件として、合成ノードで判定点を固定する。
@@ -211,7 +212,7 @@ Deno.test("state を触るノードを含む窓は候補にならない", () => 
   assertEquals(outline(enumerateUnfusedWindows(unfused(tainted), context, 3)), []);
 });
 
-Deno.test("f32 でない鎖は候補にならない", () => {
+test("f32 でない鎖は候補にならない", () => {
   const reshapeGraph = (dtype: "f32" | "i32"): DeclarationJson => ({
     format: "karume-ir",
     version: 2,
@@ -238,7 +239,7 @@ Deno.test("f32 でない鎖は候補にならない", () => {
   assertEquals(enumerateUnfusedWindows(unfused(i32.nodes), i32.context, 3), []);
 });
 
-Deno.test("融合ステップを跨いだ窓は作らない（掴めている鎖の二重計上なし）", () => {
+test("融合ステップを跨いだ窓は作らない（掴めている鎖の二重計上なし）", () => {
   const shape = [4, 8];
   const graph: DeclarationJson = {
     format: "karume-ir",
@@ -275,7 +276,7 @@ Deno.test("融合ステップを跨いだ窓は作らない（掴めている鎖
   assertEquals(outline(enumerateUnfusedWindows(fused.steps, context, 2)), ["neg,add@2+2=o"]);
 });
 
-Deno.test("窓幅の上限が 2 未満なら fail loudly", () => {
+test("窓幅の上限が 2 未満なら fail loudly", () => {
   const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
   for (const maxWindow of [1, 0, -1, 2.5, Number.NaN]) {
     assertThrows(

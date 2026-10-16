@@ -23,6 +23,13 @@
  */
 
 import {
+  type DirEntry,
+  isNotFound,
+  readDirSync,
+  readRange,
+  statSync,
+} from "@karume/test-support/fs";
+import {
   type BlockSource,
   type DescriptorExpectation,
   openContainer,
@@ -61,19 +68,19 @@ const baseName = (url: URL): string => decodeURIComponent(url.pathname).split("/
  */
 const isFile = (url: URL): boolean => {
   try {
-    return Deno.statSync(url).isFile;
+    return statSync(url).isFile;
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return false;
+    if (isNotFound(cause)) return false;
     throw cause;
   }
 };
 
 /** ディレクトリの列挙（不在は空 — 中身の異常は伝播させる）。 */
-const listDir = (url: URL): readonly Deno.DirEntry[] => {
+const listDir = (url: URL): readonly DirEntry[] => {
   try {
-    return [...Deno.readDirSync(url)];
+    return readDirSync(url);
   } catch (cause) {
-    if (cause instanceof Deno.errors.NotFound) return [];
+    if (isNotFound(cause)) return [];
     throw cause;
   }
 };
@@ -147,7 +154,7 @@ export const modelPresent = (representative: URL): boolean =>
  * `openContainer` が宣言長との突合に使う）。
  */
 export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
-  const lengths = parts.map((part) => Deno.statSync(part).size);
+  const lengths = parts.map((part) => statSync(part).size);
   const at = (index: number): { readonly url: URL; readonly length: number } => {
     const url = parts[index];
     const length = lengths[index];
@@ -170,23 +177,7 @@ export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
           }) が part 長 ${partBytes} の外`,
         );
       }
-      const handle = await Deno.open(url, { read: true });
-      try {
-        await handle.seek(offset, Deno.SeekMode.Start);
-        const into = new Uint8Array(new ArrayBuffer(length));
-        for (let filled = 0; filled < length;) {
-          const read = await handle.read(into.subarray(filled));
-          if (read === null) {
-            throw new Error(
-              `test: ${url.pathname}: offset ${offset} からの ${length} バイトを読み切れない`,
-            );
-          }
-          filled += read;
-        }
-        return into;
-      } finally {
-        handle.close();
-      }
+      return readRange(url, offset, length);
     },
   };
 };

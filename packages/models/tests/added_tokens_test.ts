@@ -8,6 +8,7 @@
 // - **計算量**: 全候補が同じ文字（`<`）で始まる語彙でも、照合は入力長 × 最長の候補長に収まる。
 //   先頭 1 文字で束ねるだけだと、本文の `<` ごとに全候補を走査する。
 
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { createAddedTokenMatcher, splitAddedTokens } from "../src/text/added-tokens.ts";
 
@@ -48,7 +49,7 @@ const randomIndex = (() => {
   };
 })();
 
-Deno.test("追加語彙の切り出し: 共通接頭辞の多い語彙でも leftmost-longest が総当たりと一致する", () => {
+test("追加語彙の切り出し: 共通接頭辞の多い語彙でも leftmost-longest が総当たりと一致する", () => {
   // 接頭辞が入れ子（`<a` ⊂ `<ab` ⊂ `<abc>`）・途中まで一致して外れる候補・BMP 外の文字を含む。
   const added = ["<a", "<ab", "<abc>", "<b>", "<", "ab>", "<😀>", "c<a"];
   const alphabet = ["<", "a", "b", "c", ">", "😀", "x"];
@@ -66,7 +67,7 @@ Deno.test("追加語彙の切り出し: 共通接頭辞の多い語彙でも lef
   assert(addedChunks >= 1_000, `切り出した断片が ${addedChunks} 件しかない`);
 });
 
-Deno.test("追加語彙の切り出し: 全候補が同じ文字で始まっても照合は入力長に比例する", () => {
+test("追加語彙の切り出し: 全候補が同じ文字で始まっても照合は入力長に比例する", () => {
   // EmbeddingGemma 級（6,400 本）の追加語彙が全て `<` で始まる形。先頭 1 文字で束ねるだけだと
   // 本文の `<` ごとに 6,400 本へ startsWith を回す（`<` × 65,536 で数秒）。
   const added = Array.from({ length: 6_400 }, (_, index) => `<unused${index}>`);

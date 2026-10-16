@@ -1,3 +1,5 @@
+import { readDirSync, readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { stateStatsPvWgsl } from "../src/kernels/state-attention-stats-pv.ts";
 import { rmsNormSubgroupWgsl } from "../src/kernels/rms-norm-subgroup.ts";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
@@ -275,7 +277,7 @@ import { attentionScoreUsesF16 } from "../src/kernels/score-storage.ts";
 import { BINARY_OPS, OP_CONTRACTS, REDUCE_OPS, UNARY_OPS, WHERE_OP } from "../src/ops.ts";
 
 const fixture = (name: string): Promise<string> =>
-  Deno.readTextFile(new URL(`./fixtures/wgsl/${name}`, import.meta.url));
+  readTextFile(new URL(`./fixtures/wgsl/${name}`, import.meta.url));
 
 // 融合 5 カーネルは重み格納の変種を持つ（ADR 0018）。既存の不変条件は **w=f32 変種**に
 // 掛かっているので、従来の名前をその変種に束ねる（f16 変種は専用テストが別に見る）。
@@ -350,7 +352,7 @@ const elementwiseDtypes = (): readonly (readonly [string, IrDtype])[] =>
     return accept.map((dtype): [string, IrDtype] => [op, dtype]);
   });
 
-Deno.test("生成した WGSL がスナップショットとバイト単位で一致する（codegen 決定性の固定）", async () => {
+test("生成した WGSL がスナップショットとバイト単位で一致する（codegen 決定性の固定）", async () => {
   const cases: readonly (readonly [string, string])[] = [
     ["static_quantize.wgsl", STATIC_QUANTIZE_WGSL],
     ["static_quantize_packed.wgsl", STATIC_QUANTIZE_PACKED_WGSL],
@@ -814,14 +816,14 @@ Deno.test("生成した WGSL がスナップショットとバイト単位で一
   // .wgsl は「置いてあるのに 1 度も比較されない」死んだ固定になり、逆にディレクトリに
   // 無い名前は上の readTextFile で落ちる（= 片側だけ足した状態を両方向で塞ぐ）。
   assertEquals(
-    [...Deno.readDirSync(new URL("./fixtures/wgsl/", import.meta.url))]
+    [...readDirSync(new URL("./fixtures/wgsl/", import.meta.url))]
       .map((entry) => entry.name).sort(),
     cases.map(([name]) => name).sort(),
     "fixtures/wgsl の中身とスナップショット列挙が食い違う",
   );
 });
 
-Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtype × rank）", () => {
+test("同じ生成入力からは常に同一の WGSL が出る（全 op × dtype × rank）", () => {
   for (const [op, dtype] of elementwiseDtypes()) {
     for (const rank of [1, 2, 3, 4]) {
       const spec = { op, rank, dtype } as ElementwiseSpec;
@@ -1045,7 +1047,7 @@ Deno.test("同じ生成入力からは常に同一の WGSL が出る（全 op ×
   }
 });
 
-Deno.test("パイプラインキーは生成入力ごとに一意（別カーネルが同じキーに割り当たらない）", () => {
+test("パイプラインキーは生成入力ごとに一意（別カーネルが同じキーに割り当たらない）", () => {
   const keys: string[] = [
     // GEMM 3 op × 重み格納 × v4 の直積（漏れを作らないために列挙を 1 本にまとめてある）
     ...GEMM_VARIANTS.map(([, key]) => key),
@@ -1176,7 +1178,7 @@ Deno.test("パイプラインキーは生成入力ごとに一意（別カーネ
 
 // permute / expand は 1 カーネル族（ADR 0011）。同じ WGSL なので op ごとに別キーにはならず、
 // 要素型だけが別パイプラインの軸になる。
-Deno.test("strided copy は要素型ごとに別カーネルで、rank は固定でキーに載る", () => {
+test("strided copy は要素型ごとに別カーネルで、rank は固定でキーに載る", () => {
   assertEquals(stridedWgsl({ dtype: "f32" }).includes("array<f32>"), true);
   assertEquals(stridedWgsl({ dtype: "i32" }).includes("array<i32>"), true);
   // bool は u32 の 0/1 で格納する（ADR 0009）
@@ -1189,7 +1191,7 @@ Deno.test("strided copy は要素型ごとに別カーネルで、rank は固定
   }
 });
 
-Deno.test("permute の stride は軸の並べ替えで、expand の複製軸は stride 0", () => {
+test("permute の stride は軸の並べ替えで、expand の複製軸は stride 0", () => {
   // 連続 [2,3,4] の stride は [12,4,1]。dims=[0,2,1] は出力軸 1 が入力軸 2 を取る。
   assertEquals(permuteSrcStrides([2, 3, 4], [0, 2, 1]), [12, 1, 4]);
   assertEquals(permuteSrcStrides([1, 16, 5, 64], [0, 2, 1, 3]), [5120, 64, 320, 1]);
@@ -1204,7 +1206,7 @@ Deno.test("permute の stride は軸の並べ替えで、expand の複製軸は 
   assertEquals(expandSrcStrides([4], [3, 4]), [0, 1]);
 });
 
-Deno.test("strided params は rank 不足を左詰めで 1 / 0 に埋める", () => {
+test("strided params は rank 不足を左詰めで 1 / 0 に埋める", () => {
   // 出力 [3,4]（rank2）→ dims は [1,1,3,4]、strides は [0,0,...]
   const params = stridedParams([3, 4], [1, 3], 0);
   assertEquals(params.length, 2 + 2 * STRIDED_RANK);
@@ -1225,7 +1227,7 @@ Deno.test("strided params は rank 不足を左詰めで 1 / 0 に埋める", ()
 });
 
 // ADR 0014: slice は既存の読み族の流用で、可変点は **params の offset 1 語**だけ。
-Deno.test("slice の読み出しは入力の連続 stride と start × その軸の stride", () => {
+test("slice の読み出しは入力の連続 stride と start × その軸の stride", () => {
   assertEquals(sliceSrcStrides([2, 3, 4]), [12, 4, 1]);
   // enc_p の m_p / logs_p 分割と同型（チャネル軸の後半を取る形）
   assertEquals(sliceSrcOffset([1, 8, 5], 1, 4), 20);
@@ -1241,7 +1243,7 @@ Deno.test("slice の読み出しは入力の連続 stride と start × その軸
 
 // ADR 0014: cat は書き族。offset を取り違えると出力の一部が二重書きされ、残りが未書き込みの
 // まま（プール再利用なら前の値）残る。
-Deno.test("cat の書き込みは出力の連続 stride と、先行入力の長さ × その軸の stride", () => {
+test("cat の書き込みは出力の連続 stride と、先行入力の長さ × その軸の stride", () => {
   assertEquals(catOutStrides([2, 6, 4]), [24, 4, 1]);
   // coupling reverse の 96/96 分割と同型: 2 本目は軸 1 の 96 要素目から書く
   assertEquals(catOutOffset([1, 8, 5], 1, 0), 0);
@@ -1251,7 +1253,7 @@ Deno.test("cat の書き込みは出力の連続 stride と、先行入力の長
   assertThrows(() => catOutOffset([1, 8, 5], 1, 9), CodegenError, undefined, "軸長超過");
 });
 
-Deno.test("strided 書き params は入力 dims と出力 strides を同じレイアウトで運ぶ", () => {
+test("strided 書き params は入力 dims と出力 strides を同じレイアウトで運ぶ", () => {
   // 入力 [3,4]（rank2）→ dims は左詰めで [1,1,3,4]、strides も左詰めで 0 埋め
   const params = stridedWriteParams([3, 4], [7, 1], 21);
   assertEquals(params.length, 2 + 2 * STRIDED_RANK);
@@ -1263,7 +1265,7 @@ Deno.test("strided 書き params は入力 dims と出力 strides を同じレ�
   assertThrows(() => stridedWriteParams([3, 4], [4, 1], -1), CodegenError);
 });
 
-Deno.test("pad / flip の params は行と軸の 3 分割をそのまま運ぶ", () => {
+test("pad / flip の params は行と軸の 3 分割をそのまま運ぶ", () => {
   // [2,3] を最終次元に [1,2] で pad → 出力 [2,6]、n=12
   assertEquals([...padParams(2, 3, 1, 2)], [12, 6, 3, 1]);
   // pad 0 幅（恒等コピー）も表現できる
@@ -1277,7 +1279,7 @@ Deno.test("pad / flip の params は行と軸の 3 分割をそのまま運ぶ",
   assertThrows(() => flipParams(2, -1, 4), CodegenError);
 });
 
-Deno.test("strided codegen は契約外の生成入力を fail loudly にする", () => {
+test("strided codegen は契約外の生成入力を fail loudly にする", () => {
   const foreign: { dtype: string } = { dtype: "f16" };
   assertThrows(() => stridedWgsl(foreign as StridedSpec), CodegenError);
   assertThrows(() => stridedKey(foreign as StridedSpec), CodegenError);
@@ -1293,7 +1295,7 @@ Deno.test("strided codegen は契約外の生成入力を fail loudly にする"
 
 // 要素型は bindings の array<T> に埋まる。キーに載っていないと、i32 の dispatch に f32 で
 // コンパイル済みのパイプラインが同じキーで割り当たり、ビット列の読み替えが例外なしに通る。
-Deno.test("要素型は WGSL とキーの両方に現れる（f32 と i32 が別カーネルになる）", () => {
+test("要素型は WGSL とキーの両方に現れる（f32 と i32 が別カーネルになる）", () => {
   const f32 = elementwiseWgsl({ op: "mul", rank: 2, dtype: "f32" });
   const i32 = elementwiseWgsl({ op: "mul", rank: 2, dtype: "i32" });
   assertNotEquals(f32, i32);
@@ -1319,7 +1321,7 @@ Deno.test("要素型は WGSL とキーの両方に現れる（f32 と i32 が別
 });
 
 // 契約（src/ops.ts）: f32 → 整数は 0 方向切り捨て、x → bool は x != 0。
-Deno.test("cast の値式は契約どおり（i32() の切り捨て / != 0 の真偽化）", () => {
+test("cast の値式は契約どおり（i32() の切り捨て / != 0 の真偽化）", () => {
   assertEquals(
     elementwiseWgsl({ op: "cast", rank: 1, dtype: "f32", to: "i32" }).includes("out[i] = i32(v0);"),
     true,
@@ -1338,14 +1340,14 @@ Deno.test("cast の値式は契約どおり（i32() の切り捨て / != 0 の�
   );
 });
 
-Deno.test("パイプラインキーは WGSL に埋まる workgroup サイズを含む", () => {
+test("パイプラインキーは WGSL に埋まる workgroup サイズを含む", () => {
   for (const rank of [1, 2, 3, 4]) {
     const key = elementwiseKey({ op: "relu", rank, dtype: "f32" });
     assertEquals(key.includes(`wg${ELEMENTWISE_WORKGROUP_SIZE}`), true, key);
   }
 });
 
-Deno.test("elementwise の生成 WGSL は補助関数を使う op にだけ注入する", () => {
+test("elementwise の生成 WGSL は補助関数を使う op にだけ注入する", () => {
   const gelu = elementwiseWgsl({ op: "gelu", rank: 1, dtype: "f32" });
   const relu = elementwiseWgsl({ op: "relu", rank: 1, dtype: "f32" });
   assertEquals(gelu.includes("fn erf_approx"), true);
@@ -1389,7 +1391,7 @@ Deno.test("elementwise の生成 WGSL は補助関数を使う op にだけ注�
  *
  * MUST: 恒真化しないこと — 閾値**未満**では条件 1 が実際に破れる（下に対照を置く）。
  */
-Deno.test("tanh の飽和打ち切り閾値が「飽和済み × オーバーフローから遠い」帯に入っている", () => {
+test("tanh の飽和打ち切り閾値が「飽和済み × オーバーフローから遠い」帯に入っている", () => {
   // 条件 1: 閾値と、その符号反転側の両方で f32 の tanh が厳密な ±1.0。
   assertEquals(Math.fround(Math.tanh(TANH_SATURATION)), 1);
   assertEquals(Math.fround(Math.tanh(-TANH_SATURATION)), -1);
@@ -1405,7 +1407,7 @@ Deno.test("tanh の飽和打ち切り閾値が「飽和済み × オーバーフ
 
 // M1-P3 波3 で足した数理 op 群。カーネル固有の不変条件を生成物の側から固定する
 // （値の突合は tests/gpu_ops_test.ts、契約は tests/ops_contract_test.ts）。
-Deno.test("where / 比較 / clamp / leaky_relu の値式が契約どおりの形を生成する", () => {
+test("where / 比較 / clamp / leaky_relu の値式が契約どおりの形を生成する", () => {
   // MUST: torch の where(cond, a, b) = cond ? a : b。WGSL の select(f, t, cond) は引数順が
   // 逆なので、写し間違えると分岐が入れ替わったまま shape も dtype も合ってしまう。
   const where = elementwiseWgsl({ op: WHERE_OP, rank: 2, dtype: "f32" });
@@ -1473,7 +1475,7 @@ Deno.test("where / 比較 / clamp / leaky_relu の値式が契約どおりの形
  * 固定する — 比較形はシェーダコンパイラが `max` イディオムへ畳み、ドライバの `max` が
  * NaN を飲む（実 GPU での伝播そのものは tests/gpu_ops_test.ts が見る）。
  */
-Deno.test("clamp / clamp_min / relu / amax / amin は NaN を比較ではなくビット列で判定する", () => {
+test("clamp / clamp_min / relu / amax / amin は NaN を比較ではなくビット列で判定する", () => {
   const bits = "return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;";
   for (const op of ["clamp", "clamp_min", "relu"] as const) {
     const wgsl = elementwiseWgsl({ op, rank: 1, dtype: "f32" });
@@ -1515,7 +1517,7 @@ Deno.test("clamp / clamp_min / relu / amax / amin は NaN を比較ではなく�
  * 側から算術で突き合わせる。GPU パリティ門（tests/gpu_reduce_axis_parity_test.ts）と違い
  * アダプタ無し環境でも走ることがこの門の目的。
  */
-Deno.test("軸 reduce の段数とビット反転幅は workgroup サイズから導かれる", () => {
+test("軸 reduce の段数とビット反転幅は workgroup サイズから導かれる", () => {
   const size = AXIS_REDUCE_WORKGROUP_SIZE;
   const bits = Math.log2(size);
   assertEquals(Number.isInteger(bits), true, "2 冪でないと行 reduce の木も成立しない");
@@ -1532,7 +1534,7 @@ Deno.test("軸 reduce の段数とビット反転幅は workgroup サイズか�
 
 // MUST: 素朴な log(1 + x) は |x| ≪ 1 で有効桁が消える。補正式が入っていることを生成物で
 // 固定する（数値の実測は tests/gpu_ops_test.ts の CPU 参照突合）。
-Deno.test("log1p は級数と log を切り替える補助関数を注入し、他の op には漏れない", () => {
+test("log1p は級数と log を切り替える補助関数を注入し、他の op には漏れない", () => {
   const log1p = elementwiseWgsl({ op: "log1p", rank: 1, dtype: "f32" });
   assertEquals(log1p.includes("fn log1p_series(x: f32) -> f32 {"), true);
   // 係数 1/k の Horner 形（先頭 3 項と末項）と切り替え点
@@ -1548,7 +1550,7 @@ Deno.test("log1p は級数と log を切り替える補助関数を注入し、�
 
 // MUST: 累積の向きは値でしか検出できない（shape も要素数も変わらない）。生成物の側では
 // 「前の要素を足してから書く」順序を固定する。
-Deno.test("cumsum は 1 invocation = 1 行の前縁和で、行方向を grid-stride で回す", () => {
+test("cumsum は 1 invocation = 1 行の前縁和で、行方向を grid-stride で回す", () => {
   assertEquals(CUMSUM_WGSL.includes("acc = acc + x[base + j];"), true);
   assertEquals(CUMSUM_WGSL.includes("out[base + j] = acc;"), true);
   // 行ループは grid-stride（1 次元の dispatch 上限を超える行数がありうる）
@@ -1571,7 +1573,7 @@ Deno.test("cumsum は 1 invocation = 1 行の前縁和で、行方向を grid-st
  * 3. **NaN 判定がビット列** — 素の比較に戻すと NaN が黙って負け、`amax` は NaN・`argmax` は
  *    別要素という族内の食い違いになる。
  */
-Deno.test("argmax は最小 index を保存する比較式・−inf identity・ビット列 NaN 判定を持つ", () => {
+test("argmax は最小 index を保存する比較式・−inf identity・ビット列 NaN 判定を持つ", () => {
   assertEquals(ARGMAX_KEY, `argmax:v2:f32>i32:lastdim:minindex:wg${ARGMAX_WORKGROUP_SIZE}`);
   assertEquals(ARGMAX_WORKGROUP_SIZE, 256);
   // ① タイブレーク: 同値なら小さい index が勝つ（辞書式順序の 1 本の述語）
@@ -1629,7 +1631,7 @@ Deno.test("argmax は最小 index を保存する比較式・−inf identity・�
  *    要素が k 回出る / 別の要素が飛ばされるが、shape も dtype も合ったままになる。
  * 6. **k の実装上限が workgroup storage から静的に決まる**こと（縮退しない）。
  */
-Deno.test("topk は 2 相（レーン局所 top-k → トーナメント merge）で、最小 index を保存する述語を共有する", () => {
+test("topk は 2 相（レーン局所 top-k → トーナメント merge）で、最小 index を保存する述語を共有する", () => {
   assertEquals(TOPK_WORKGROUP_SIZE, 32);
   assertEquals(
     topkKey(4),
@@ -1726,7 +1728,7 @@ Deno.test("topk は 2 相（レーン局所 top-k → トーナメント merge�
   assertThrows(() => topkParams(-1, 3), CodegenError);
 });
 
-Deno.test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に加算する", () => {
+test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier 後に加算する", () => {
   const ROPE_WGSL = ropeWgsl("bhsd");
   assertEquals(ROPE_KEY, `rope:v1:half:f32:wg${ROPE_WORKGROUP_SIZE}`);
   assertEquals(ROPE_WORKGROUP_SIZE, 256);
@@ -1751,7 +1753,7 @@ Deno.test("half-split RoPE は積を workgroup u32 へ丸め、一様 barrier �
   assertThrows(() => ropeParams(0x1_0000_0000, 1, 128), CodegenError, "u32");
 });
 
-Deno.test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の行境界を検査する", () => {
+test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の行境界を検査する", () => {
   assertEquals(UPSAMPLE_2X_KEY, `upsample2x:v1:nchw:f32:wg${UPSAMPLE_2X_WORKGROUP_SIZE}`);
   assertEquals(UPSAMPLE_2X_WORKGROUP_SIZE, 256);
   assertEquals(
@@ -1771,7 +1773,7 @@ Deno.test("NCHW 2x upsample は入力要素ごとに 2x2 を書き、params の�
   assertThrows(() => upsample2xParams(0, 0x8000_0000), CodegenError, "2 * width");
 });
 
-Deno.test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タップを整数比較で決める", () => {
+test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タップを整数比較で決める", () => {
   assertEquals(
     UPSAMPLE_BILINEAR2D_KEY,
     `upsample_bilinear2d:v2:nchw:f32:align_corners:wg${UPSAMPLE_BILINEAR2D_WORKGROUP_SIZE}`,
@@ -1822,7 +1824,7 @@ Deno.test("双線形 resample は出力 1 要素 = 1 スレッドで、末尾タ
   assertThrows(() => upsampleBilinear2dParams(64, 4, 5, 7, 9), CodegenError, "整数倍");
 });
 
-Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分けて伝播させる", () => {
+test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で分けて伝播させる", () => {
   assertEquals(
     DEFORM_CONV2D_KEY,
     `deform_conv2d:v2:nchw:f32:dcnv2:wg${DEFORM_CONV2D_WORKGROUP_SIZE}`,
@@ -1923,7 +1925,7 @@ Deno.test("DCNv2 は範囲判定を正の形で書き、NaN をビット列で�
 // GRU 隠れ側スキャン（ADR 0056）。この op のビット同一門（tests/gpu_gru_scan_parity_test.ts）は
 // 「更新式が分解形の逐語であること」と「fma 縮約を丸め障壁で止めていること」に全面的に
 // 依存しているので、生成物の側でもその 2 点を固定する（実 GPU が無い環境でも赤くなる形）。
-Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の間に丸め障壁を挟む", () => {
+test("gru_scan は更新式を分解形の逐語で書き、mul と add の間に丸め障壁を挟む", () => {
   assertEquals(GRU_SCAN_WORKGROUP_SIZE, 256);
   assertEquals(GRU_SCAN_MAX_HIDDEN, 256);
   assertEquals(
@@ -1999,7 +2001,7 @@ Deno.test("gru_scan は更新式を分解形の逐語で書き、mul と add の
   );
 });
 
-Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち、mul 順をキーへ残す", () => {
+test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保ち、mul 順をキーへ残す", () => {
   assertEquals(SILU_WORKGROUP_SIZE, 256);
   assertEquals(siluKey("x-sigmoid"), `silu:v1:x-sigmoid:f32:wg${SILU_WORKGROUP_SIZE}`);
   assertEquals(siluKey("sigmoid-x"), `silu:v1:sigmoid-x:f32:wg${SILU_WORKGROUP_SIZE}`);
@@ -2040,7 +2042,7 @@ Deno.test("SiLU は sigmoid の f32 格納境界を u32 workgroup staging で保
   assertThrows(() => siluParams(0x1_0000_0000), CodegenError, "u32");
 });
 
-Deno.test("adaLN は正規化本体を素の layer_norm と共有し、変調と積を u32 staging で 2 段に区切る", () => {
+test("adaLN は正規化本体を素の layer_norm と共有し、変調と積を u32 staging で 2 段に区切る", () => {
   assertEquals(ADALN_NORM_WORKGROUP_SIZE, 256);
   // MUST: 素の layer_norm と同じ幅（本文を共有している以上、片方だけ動かすと WGSL が壊れる —
   // src/kernels/adaln-norm.ts の MUST）。導出関係を門に出す。
@@ -2082,7 +2084,7 @@ Deno.test("adaLN は正規化本体を素の layer_norm と共有し、変調と
   assertThrows(() => adalnNormParams(4, 8, 0), CodegenError, "eps");
 });
 
-Deno.test("elementwise params はスカラ attr を末尾に f32 のビット列で載せる", () => {
+test("elementwise params はスカラ attr を末尾に f32 のビット列で載せる", () => {
   // 出力 [2,3]（rank2）+ 入力 1 本 → dims 2 語・strides 2 語のあとにスカラが並ぶ
   const clamp: ElementwiseSpec = { op: "clamp", rank: 2, dtype: "f32" };
   const params = elementwiseParams(clamp, [2, 3], [[2, 3]], [-1.5, 2.25]);
@@ -2130,7 +2132,7 @@ Deno.test("elementwise params はスカラ attr を末尾に f32 のビット列
   assertThrows(() => elementwiseParams(clamp, [6], [[6]], [-1.5, 2.25]), CodegenError, "rank");
 });
 
-Deno.test("elementwise params は右詰め broadcast の stride を 0 にする", () => {
+test("elementwise params は右詰め broadcast の stride を 0 にする", () => {
   // 出力 [2,3,4] に対し in0=[2,3,4]（連続）、in1=[3,1]（右詰めで [1,3,1]）
   const params = elementwiseParams({ op: "add", rank: 3, dtype: "f32" }, [2, 3, 4], [
     [2, 3, 4],
@@ -2141,7 +2143,7 @@ Deno.test("elementwise params は右詰め broadcast の stride を 0 にする"
   assertEquals([...params.slice(7, 10)], [0, 1, 0]);
 });
 
-Deno.test("elementwise params はスカラ入力を右詰めで吸収する", () => {
+test("elementwise params はスカラ入力を右詰めで吸収する", () => {
   const params = elementwiseParams({ op: "add", rank: 1, dtype: "f32" }, [5], [[5], [1]]);
   assertEquals([...params], [5, 5, 1, 0]);
 });
@@ -2152,7 +2154,7 @@ Deno.test("elementwise params はスカラ入力を右詰めで吸収する", ()
  * 黙って作られる（WebGPU の境界付きアクセスは例外を出さずクランプ値を返す）。契約層
  * （src/ops/shapes.ts の broadcastShapes）が 1 段抜けたときの検出器はこの 1 本だけ。
  */
-Deno.test("elementwise params は broadcast 不能な軸長を受理しない", () => {
+test("elementwise params は broadcast 不能な軸長を受理しない", () => {
   assertThrows(
     () => elementwiseParams({ op: "neg", rank: 1, dtype: "f32" }, [5], [[3]]),
     CodegenError,
@@ -2170,7 +2172,7 @@ Deno.test("elementwise params は broadcast 不能な軸長を受理しない", 
   );
 });
 
-Deno.test("uniform で渡す params は 16 バイト整列を満たす", () => {
+test("uniform で渡す params は 16 バイト整列を満たす", () => {
   // WGSL の uniform アドレス空間では struct の整列が 16 バイトになる
   assertEquals(reduceParams(7, 3).byteLength, 16);
   assertEquals(matmulParams(2, 3, 4).byteLength, 16);
@@ -2193,7 +2195,7 @@ Deno.test("uniform で渡す params は 16 バイト整列を満たす", () => {
 });
 
 // MUST: bmm は matmul と**別キーの別カーネル**（骨格は共有だがバッチ軸の断片が違う）。
-Deno.test("bmm は matmul と別カーネルで、バッチ軸のオフセットを持つ", () => {
+test("bmm は matmul と別カーネルで、バッチ軸のオフセットを持つ", () => {
   for (const v4 of [false, true]) {
     const where = `v4=${v4}`;
     assertNotEquals(bmmKey(v4), matmulKey(v4), where);
@@ -2221,7 +2223,7 @@ Deno.test("bmm は matmul と別カーネルで、バッチ軸のオフセット
  * 4 点（半スケールが q/k の両側 / 行統計が softmax のパス①② と逐語同一 / ③ が
  * `exp(S−m)·inv` を成分ごとに評価 / 行統計の添字がバッチ base 込み）を生成物の側で固定する。
  */
-Deno.test("融合 attention の 3 カーネルは分解経路とビット同一になる形を生成する", async () => {
+test("融合 attention の 3 カーネルは分解経路とビット同一になる形を生成する", async () => {
   for (const v4 of [false, true]) {
     const qk = attentionQkWgsl(v4);
     const where = `v4=${v4}`;
@@ -2380,7 +2382,7 @@ Deno.test("融合 attention の 3 カーネルは分解経路とビット同一�
  * 加算 mask 変種（ADR 0023 改訂）。**ビット同一の根拠は「丸めが増えるのは書き出しの 1 加算
  * だけ」**なので、生成物の側で ① epilogue の形と ②③ のバイト不変を固定する。
  */
-Deno.test("attention の加算 mask は ①QK の epilogue だけを変え、②③ を 1 バイトも動かさない", () => {
+test("attention の加算 mask は ①QK の epilogue だけを変え、②③ を 1 バイトも動かさない", () => {
   for (const v4 of [false, true]) {
     const where = `v4=${v4}`;
     const plain = attentionQkWgsl(v4);
@@ -2473,7 +2475,7 @@ const undoGqa = (text: string, side: "k" | "v", mapped: string, plain: string): 
  * （既存スナップショット 133 本とビット同一門を凍結したまま席を足す MUST）と、GQA 変種の差分が
  * 「K / V の base 1 行 + uniform 1 語」に閉じていることを生成物の側で固定する。
  */
-Deno.test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だけを変える", () => {
+test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だけを変える", () => {
   for (const v4 of [false, true]) {
     // 格納 / 計算 / mask の他の軸と**同時に立ちうる**ので、組み合わせごとに差分を見る
     // （s16 は v4 側しか存在しない — src/kernels/score-storage.ts）。
@@ -2620,7 +2622,7 @@ Deno.test("attention の GQA 変種は K / V の base 1 行と uniform 1 語だ�
  * MUST: mask の**行**だけが base 算術の外で `row_offset` を要る（S はブロック相対の実体・
  * mask は全 M ぶんの実体）。
  */
-Deno.test("融合 attention の行窓変種は片側の base と mask の行添字だけを変える", () => {
+test("融合 attention の行窓変種は片側の base と mask の行添字だけを変える", () => {
   for (const v4 of [false, true]) {
     const kUnit = v4 ? "k4" : "dims.k";
     const nUnit = v4 ? "n4" : "dims.n";
@@ -2782,7 +2784,7 @@ Deno.test("融合 attention の行窓変種は片側の base と mask の行添�
  * 4 本と**同じ 2 語・同じ門**を使うのに params 側の観測点が無く、検出器は実 GPU 経由の
  * tests/gpu_row_block_attention_test.ts だけだった（アダプタ無し環境では素通りする）。
  */
-Deno.test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を fail loudly にする", () => {
+test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を fail loudly にする", () => {
   const params = bmmRowWindowParams(4, 7, 8, 2, 9);
   assertEquals([...params.slice(0, 5)], [4, 7, 8, 2, 9]);
   // 5 語 = 20 バイトを uniform struct の 16 バイト整列で 32 バイトへ切り上げる
@@ -2811,7 +2813,7 @@ Deno.test("bmm の行窓 params は 5 語 32 バイトで、はみ出す窓を f
  * 生成物に埋まった辺と幾何を同じテストで突き合わせる（executor は dispatch の辺を
  * `gemmTileM` / `gemmTileN` で幾何から導くので、両者がずれるのは生成側の事故だけ）。
  */
-Deno.test("GEMM 骨格 8 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
+test("GEMM 骨格 8 op のタイル辺・キー・TS 定数が既定幾何と一致する", () => {
   // conv の m タイルヒューリスティックの基準値（実タイル辺ではない — gemm-geometry.ts の MUST）
   assertEquals(GEMM_TILE, 64);
   // 既定幾何（src/kernels/gemm-geometry.ts）。**キーと生成物の両方に効く**ので、
@@ -2875,7 +2877,7 @@ Deno.test("GEMM 骨格 8 op のタイル辺・キー・TS 定数が既定幾何�
  * ここでは**タイル幾何と担当割りだけ**を固定する（数値の一致は実 GPU のビット比較が見る —
  * tests/gpu_conv2d_parity_test.ts）。
  */
-Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n タイル 128・8×8 レジスタは不変）", () => {
+test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n タイル 128・8×8 レジスタは不変）", () => {
   assertEquals(GEMM_MTILE_SMALL, 32);
   for (const weight of WEIGHT_STORAGES) {
     for (const v4 of [false, true]) {
@@ -2930,7 +2932,7 @@ Deno.test("conv2d の 32 行 m タイル変種は幾何だけが変わる（n �
  * 64 行のまま残り、本変種の動機そのものが消える。`M % 64 == 0` は 64 行が無駄ゼロなので
  * 32 行に割ると B タイル（x の暗黙 gather）を 2 倍読むだけ損。
  */
-Deno.test("conv2dIgemmMTile は M%64 が 1..32 のときだけ 32 行を選ぶ", () => {
+test("conv2dIgemmMTile は M%64 が 1..32 のときだけ 32 行を選ぶ", () => {
   // census（VAE decoder）の実形状
   assertEquals(conv2dIgemmMTile(96), 32, "Cout=96（96%64==32 — 本変種の本命）");
   assertEquals(conv2dIgemmMTile(3), 32, "Cout=3（無駄 21.33× → 10.67×）");
@@ -2957,7 +2959,7 @@ Deno.test("conv2dIgemmMTile は M%64 が 1..32 のときだけ 32 行を選ぶ",
  * **生成物の側から**固定する。どれも「実測形では絶対に露見しない」種類の誤りで、
  * 数値テスト（parity / CPU 参照）と対で持つことに意味がある。
  */
-Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生成物に持つ", () => {
+test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生成物に持つ", () => {
   for (const v4 of [false, true]) {
     const wgsl = conv2dIgemmWgsl("f32", v4);
     const where = `conv2d igemm v4=${v4}`;
@@ -3023,7 +3025,7 @@ Deno.test("conv2d の implicit GEMM は bias-first / 0 埋め / 行 scale を生
  * quad が出力行をまたいだまま v4 が選ばれる。census の実形状は Wout が全て 4 の倍数なので
  * **実モデルでは絶対に露見しない**。
  */
-Deno.test("conv2dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る", () => {
+test("conv2dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る", () => {
   assertEquals(conv2dUsesVec4(1728, 512, 1), true, "census の実形状");
   assertEquals(conv2dUsesVec4(4, 2, 1), false, "Wout=2（N%4==0 でも quad が行をまたぐ）");
   assertEquals(conv2dUsesVec4(18, 8, 1), false, "kFlat=18（Cin=2 の 3×3）");
@@ -3036,7 +3038,7 @@ Deno.test("conv2dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る
  * （2D 版と同じ 4 点 + 1D 固有の「2 次元の概念を持ち込まない」）。数値の一致は実 GPU の
  * ビット比較が見る（tests/gpu_conv1d_parity_test.ts）。
  */
-Deno.test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 軸 Dims を生成物に持つ", () => {
+test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 軸 Dims を生成物に持つ", () => {
   for (const v4 of [false, true]) {
     const wgsl = conv1dIgemmWgsl("f32", v4);
     const where = `conv1d igemm v4=${v4}`;
@@ -3124,7 +3126,7 @@ Deno.test("conv1d の implicit GEMM は bias-first / 0 埋め / 行 scale / 1 �
  * MUST: 変えるのは「どの workgroup がどの出力を担当するか」だけ。1 出力要素の K 縮約順・
  * 丸め列・bias-first・0 埋めは 64 行版と共通の骨格が持つ。
  */
-Deno.test("conv1d の 32 行 m タイル変種は幾何だけが変わる（n タイル 128・8×8 レジスタは不変）", () => {
+test("conv1d の 32 行 m タイル変種は幾何だけが変わる（n タイル 128・8×8 レジスタは不変）", () => {
   for (const weight of WEIGHT_STORAGES) {
     for (const v4 of [false, true]) {
       const wgsl = conv1dIgemmWgsl(weight, v4, GEMM_MTILE_SMALL);
@@ -3160,7 +3162,7 @@ Deno.test("conv1d の 32 行 m タイル変種は幾何だけが変わる（n �
  * MUST: 3 条件を全て見る。1D では出力平面が 1 行なので 2D の `Wout % 4` と `N % 4` の
  * 区別は消えるが、**`Cin % 4` で代用しない**ことと **stride を見る**ことは 2D と同じ理由で要る。
  */
-Deno.test("conv1dUsesVec4 は kFlat / Lout / stride の 3 条件を全て見る", () => {
+test("conv1dUsesVec4 は kFlat / Lout / stride の 3 条件を全て見る", () => {
   assertEquals(conv1dUsesVec4(1024, 512, 1), true, "dacvae 系の実形状");
   assertEquals(conv1dUsesVec4(7, 8, 1), false, "kFlat=7（Cin=1 の K=7 — Cin%4 では捕まらない）");
   assertEquals(conv1dUsesVec4(8, 170, 1), false, "Lout=170（実測形のスカラ変種）");
@@ -3174,7 +3176,7 @@ Deno.test("conv1dUsesVec4 は kFlat / Lout / stride の 3 条件を全て見る"
  * MUST: **両方**見る。片方だけの判定は「k のみ 4 の倍数 / n のみ 4 の倍数」の形で
  * vec4 束縛と実バイト数が食い違い、例外なしの誤値になる。
  */
-Deno.test("gemmUsesVec4 は k と n の両方が 4 の倍数のときだけ真", () => {
+test("gemmUsesVec4 は k と n の両方が 4 の倍数のときだけ真", () => {
   assertEquals(gemmUsesVec4(20, 64), true);
   assertEquals(gemmUsesVec4(4, 4), true);
   assertEquals(gemmUsesVec4(20, 19), false, "k のみ 4 の倍数");
@@ -3192,7 +3194,7 @@ Deno.test("gemmUsesVec4 は k と n の両方が 4 の倍数のときだけ真",
  * 生成物の側で固定する。どれも実測形の数値テストでは 1 ULP 差にしかならず、
  * atol=0 の突合と対で持って初めて検出器になる。
  */
-Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生成物に持つ", () => {
+test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を生成物に持つ", () => {
   // ---- quantize_rows -------------------------------------------------------
   // MUST: scale は 127 の**除算ではなく 1/127 との乗算**（WGSL の除算は 2.5 ULP まで許され、
   // 実測でも 1 ULP 割れる。定数畳み込みに頼るとドライバ次第で参照と食い違う）
@@ -3358,7 +3360,7 @@ Deno.test("i8a8 linear と quantize_rows は丸めの位置を決める 3 点を
  * 3 点しかないので、値ではなく生成物の構造の側で固定する（実 GPU の atol=0 突合は
  * tests/gpu_i8a8_test.ts の w4a8 節）。
  */
-Deno.test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の fma まで持ち越す", () => {
+test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最後の fma まで持ち越す", () => {
   for (const v4 of [false, true]) {
     for (const dp4a of [false, true]) {
       const wgsl = linearI8a8Wgsl(v4, dp4a, undefined, "i4", 32);
@@ -3506,7 +3508,7 @@ Deno.test("w4a8 linear は group 境界でだけ f32 へ flush し、xs を最�
  * 3 点（半スケールを dequant 側へ / `qs'·ks'` を先に畳む / 整数内積の実体は 1 本）と、
  * **バッチ base の単位**（scale は行数単位・ペイロードは pack 単位）を生成物の側で固定する。
  */
-Deno.test("i8a8 attention_qk は半スケールを dequant 側に持ち、バッチ base を単位ごとに分ける", () => {
+test("i8a8 attention_qk は半スケールを dequant 側に持ち、バッチ base を単位ごとに分ける", () => {
   for (const v4 of [false, true]) {
     for (const dp4a of [false, true]) {
       const wgsl = attentionQkI8a8Wgsl(v4, dp4a);
@@ -3617,7 +3619,7 @@ Deno.test("i8a8 attention_qk は半スケールを dequant 側に持ち、バッ
  * ② 範囲外は変換を掛けずに 0 ③ dequant は `prow·vs` を先に畳む・`1/127` は乗算
  * ④ 行統計は `rbase + orow` / `rbase + arow`（バッチ base 込み）。
  */
-Deno.test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale と行 inv を別の軸で引く", () => {
+test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale と行 inv を別の軸で引く", () => {
   for (const v4 of [false, true]) {
     for (const dp4a of [false, true]) {
       const wgsl = attentionPvI8a8Wgsl(v4, dp4a);
@@ -3766,7 +3768,7 @@ Deno.test("i8a8 attention_pv は P̃ を非実体化のまま作り、列 scale 
  * を 1 本で固定する。値そのものは i32 の厳密加算なので幾何を変えても 1 ビットも動かない
  * （それを実機で見るのは tests/gpu_i8a8_test.ts 側）。
  */
-Deno.test("i8a8 の幾何はキーと生成物に反映され、割り切れない組み合わせは fail loudly", () => {
+test("i8a8 の幾何はキーと生成物に反映され、割り切れない組み合わせは fail loudly", () => {
   // ① 既定: linear / ①QK は M128N64、③PV だけ M64N128（N = D = 128 の 1 タイル化が勝つ）
   assertEquals(defaultI8a8Geometry("linear"), { regM: 8, regN: 8, wgX: 8, wgY: 16, tileK: 16 });
   assertEquals(defaultI8a8Geometry("attention_qk"), defaultI8a8Geometry("linear"));
@@ -3849,7 +3851,7 @@ Deno.test("i8a8 の幾何はキーと生成物に反映され、割り切れな�
  * 2 回読み版と**完全に同一**。ここが動くと ADR 0023 のビット同一（② は softmax のパス①② と
  * 逐語一致）が崩れるので、生成物の側で走査順と範囲外の扱いを固定する。
  */
-Deno.test("attention_stats の regcache 変種は割当と縮約順を変えずに S を 1 回だけ読む", () => {
+test("attention_stats の regcache 変種は割当と縮約順を変えずに S を 1 回だけ読む", () => {
   const loop = attentionStatsWgsl();
   const cached = attentionStatsWgsl("f32", "f32", 3);
   // 2 回読み版の生成物は 1 バイトも動かない（既定経路の保護 — スナップショットと対）
@@ -3897,7 +3899,7 @@ Deno.test("attention_stats の regcache 変種は割当と縮約順を変えず�
 });
 
 // 裁定（src/kernels/gather.ts）: 範囲外添字は別要素を返さず NaN で汚染する。
-Deno.test("gather は範囲外添字を NaN で汚染し、通常経路は行オフセットで読む", () => {
+test("gather は範囲外添字を NaN で汚染し、通常経路は行オフセットで読む", () => {
   assertEquals(GATHER_WGSL.includes("if (pick < 0 || u32(pick) >= dims.src_cols) {"), true);
   assertEquals(GATHER_WGSL.includes("out[i] = bitcast<f32>(dims.oob);"), true);
   // MUST: NaN のビット列は params で運ぶ（定数式の `bitcast<f32>(0x…)` は「const-expression が
@@ -3914,7 +3916,7 @@ Deno.test("gather は範囲外添字を NaN で汚染し、通常経路は行オ
 });
 
 // ADR 0012 の融合 op。カーネル固有の不変条件を生成物の側から固定する。
-Deno.test("融合カーネルは既存カーネルと別物で、契約どおりの形を生成する", () => {
+test("融合カーネルは既存カーネルと別物で、契約どおりの形を生成する", () => {
   // linear は重みを [n,k] の転置レイアウトのまま読む（連続方向が k なので k 連続 4 要素）
   assertEquals(LINEAR_WGSL.includes("let wrow_base0 = wcol0 * dims.k;"), true);
   assertEquals(LINEAR_WGSL.includes("wv0.x = w[wbase];"), true);
@@ -4135,7 +4137,7 @@ Deno.test("融合カーネルは既存カーネルと別物で、契約どおり
  */
 const dropHeader = (wgsl: string): string => wgsl.slice(wgsl.indexOf("\n") + 1);
 
-Deno.test("w=f16 変種は重みだけを array<u32> + unpack2x16float で読み、他は f32 変種と同一", () => {
+test("w=f16 変種は重みだけを array<u32> + unpack2x16float で読み、他は f32 変種と同一", () => {
   // (f32 変種, f16 変種, 重み配列名, f32 変種での読み出し式（複数可）)
   const variants: readonly (readonly [string, string, string, readonly string[]])[] = [
     [LINEAR_WGSL, linearWgsl("f16", false), "w", [
@@ -4187,7 +4189,7 @@ Deno.test("w=f16 変種は重みだけを array<u32> + unpack2x16float で読み
  * v4 経路はその罠を踏まない代わりに検出もできない — **スカラ側のテストを削らない**ことが
  * 検出力の条件。
  */
-Deno.test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4 変種と同一", () => {
+test("linear の v4 変種は重みを quad 展開で読み、他は f32 v4 変種と同一", () => {
   const f32Wgsl = linearWgsl("f32", true);
   // f32 は vec4<f32> 配列の quad 添字（平坦添字 >> 2）
   assertEquals(f32Wgsl.includes("read> w: array<vec4<f32>>;"), true);
@@ -4266,7 +4268,7 @@ const COMPUTE_F16_VARIANTS: readonly (readonly [string, string])[] = [
   ["linear wf16 c16 v4", linearWgsl("f16", true, "f16")],
 ];
 
-Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡幅の位置を 1 箇所に閉じる", () => {
+test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡幅の位置を 1 箇所に閉じる", () => {
   for (const [where, wgsl] of COMPUTE_F16_VARIANTS) {
     const lines = wgsl.split("\n");
     // enable はモジュール先頭（コメント 1 行の直後 = 全ての global 宣言より前）
@@ -4315,7 +4317,7 @@ Deno.test("f16 計算変種は共有タイルだけを f16 にし、丸めと拡
   assertEquals(stats16.includes("var<workgroup> scratch: array<f32, 256>;"), true, "縮約は f32");
 });
 
-Deno.test("既定（f32 計算）の生成物には f16 が 1 文字も現れない", () => {
+test("既定（f32 計算）の生成物には f16 が 1 文字も現れない", () => {
   // 格納 f16（ADR 0018）は但し書きコメントに "f16" を含むので、ここは**格納も f32** の変種で見る。
   const defaults: readonly (readonly [string, string])[] = [
     ["attention_qk", attentionQkWgsl(false)],
@@ -4333,7 +4335,7 @@ Deno.test("既定（f32 計算）の生成物には f16 が 1 文字も現れな
   }
 });
 
-Deno.test("計算変種の判別子はキーの f16 側だけに付き、格納の wf16 とは別語になる", () => {
+test("計算変種の判別子はキーの f16 側だけに付き、格納の wf16 とは別語になる", () => {
   // 計算変種の語は幾何判別子の**後ろ**に付く（キーの語順そのものが固定対象）
   assertEquals(linearKey("f32", false), "linear:v2:f32:reg128x128r8x8w16");
   assertEquals(linearKey("f16", true), "linear:v2:f32:reg128x128r8x8w16v4:wf16");
@@ -4349,7 +4351,7 @@ Deno.test("計算変種の判別子はキーの f16 側だけに付き、格納�
 
 // `acc[i]` の動的添字はアドレス可能な関数ローカル領域を要求し、accumulator がレジスタから
 // ローカルメモリへ落ちる。**骨格を共有する 6 op すべて**が既定経路でこの静的展開になる。
-Deno.test("GEMM 骨格の accumulator は acc{行}_{列 quad} の静的展開で、動的添字を残さない", () => {
+test("GEMM 骨格の accumulator は acc{行}_{列 quad} の静的展開で、動的添字を残さない", () => {
   for (const [where, , wgsl] of GEMM_VARIANTS) {
     assertEquals(wgsl.includes("var acc = array<"), false, where);
     // MUST: 動的添字が 1 つも残っていない（残ると展開の動機がそのまま消える）
@@ -4376,7 +4378,7 @@ Deno.test("GEMM 骨格の accumulator は acc{行}_{列 quad} の静的展開で
   }
 });
 
-Deno.test("重み i8 格納 × f16 計算（w8a16）は生成の入口で fail loudly", () => {
+test("重み i8 格納 × f16 計算（w8a16）は生成の入口で fail loudly", () => {
   assertThrows(
     () => linearWgsl("i8", true, "f16"),
     CodegenError,
@@ -4407,7 +4409,7 @@ const SCORE_F16_VARIANTS: readonly (readonly [string, string, "read" | "write"])
   ["attention_pv i8a8 emu s16 v4", attentionPvI8a8Wgsl(true, false, "f16"), "read"],
 ];
 
-Deno.test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader-f16 を要求しない", () => {
+test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader-f16 を要求しない", () => {
   for (const [where, wgsl, side] of SCORE_F16_VARIANTS) {
     // ② core WGSL のまま（feature 非依存 — ここが崩れると i8a8 が feature に縛られる）
     assertEquals(wgsl.includes("enable f16;"), false, `${where}: enable f16 が出ている`);
@@ -4463,7 +4465,7 @@ Deno.test("S の f16 格納変種は pack2x16float 1 点だけで丸め、shader
   );
 });
 
-Deno.test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 と別語になる", () => {
+test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 と別語になる", () => {
   // 既定（f32 格納）のキーは幾何判別子までで終わる
   assertEquals(attentionQkKey(true), "attention_qk:v1:f32:reg128x128r8x8w16v4");
   assertEquals(attentionPvKey(true), "attention_pv:v1:f32:reg128x128r8x8w16v4");
@@ -4515,7 +4517,7 @@ Deno.test("格納 S の判別子 s16 はキーの末尾に付き、wf16 / c16 �
   assertEquals(new Set(keys).size, keys.length, "attention のキーに重複がある");
 });
 
-Deno.test("S の f16 格納は「スカラ経路」と「c16 との併用」を生成の入口で fail loudly", () => {
+test("S の f16 格納は「スカラ経路」と「c16 との併用」を生成の入口で fail loudly", () => {
   // スカラ経路の部分書きは同じ u32 語への read-modify-write（黙って f32 格納へ落とさない）
   for (
     const [where, generate] of [
@@ -4557,7 +4559,7 @@ Deno.test("S の f16 格納は「スカラ経路」と「c16 との併用」を�
   }
 });
 
-Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 キーはバイト単位で不変）", () => {
+test("格納判別子はキーの f16 側だけに付く（既存の f32 キーはバイト単位で不変）", () => {
   const pairs: readonly (readonly [string, (weight: "f32" | "f16") => string])[] = [
     ["linear:v2:f32:reg128x128r8x8w16", (weight) => linearKey(weight, false)],
     ["embedding:v1:f32:i32:wg256", embeddingKey],
@@ -4597,7 +4599,7 @@ Deno.test("格納判別子はキーの f16 側だけに付く（既存の f32 �
  * ③ 直接カーネル（groups > 1）と conv2d には展開経路が無く、**生成の入口が落とす**
  *    — 適格判定（plan.ts）が閉じている前提に乗らず、直呼び経路も塞ぐ
  */
-Deno.test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗る", () => {
+test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗る", () => {
   // ① f32 / i8 のキーは変種導入の前後で完全に同じ（実キーを直書きして固定する）
   assertEquals(conv1dIgemmKey("f32", false), "conv1d:v4:f32:igemm64x128:wg16x8");
   assertEquals(conv1dIgemmKey("i8", true), "conv1d:v4:f32:igemm64x128v4:wg16x8:wi8");
@@ -4638,7 +4640,7 @@ Deno.test("conv1d の i4 は implicit GEMM 限定で、キーに group 部が乗
  * `dequant(…, wscale_v)` が出て、**未定義識別子の不成立 WGSL** が遠くのシェーダコンパイルで
  * 割れる（診断が生成の入口から離れる）。f32 / f16 / i8 の 3 変種は従来どおり通る。
  */
-Deno.test("i4 の展開経路が無い conv2d 直接 / conv_transpose1d は生成の入口で落とす", () => {
+test("i4 の展開経路が無い conv2d 直接 / conv_transpose1d は生成の入口で落とす", () => {
   assertThrows(() => conv2dKey("i4"), CodegenError, "i4");
   assertThrows(() => conv2dWgsl("i4"), CodegenError, "i4");
   assertThrows(() => convTranspose1dKey("i4"), CodegenError, "i4");
@@ -4665,7 +4667,7 @@ Deno.test("i4 の展開経路が無い conv2d 直接 / conv_transpose1d は生�
  * 動かない。無条件に `dequant4` を足すと fixture が一斉に動き、パイプラインキャッシュの
  * 同一性（同一キー ⇔ 同一バイト列）も崩れる。
  */
-Deno.test("weight-storage の quad 拡張は既存 4 op の生成物を 1 バイトも動かさない", async () => {
+test("weight-storage の quad 拡張は既存 4 op の生成物を 1 バイトも動かさない", async () => {
   const existing: readonly (readonly [string, string])[] = WEIGHT_STORAGES.flatMap((weight) => {
     const suffix = weight === "f32" ? "" : weight === "f16" ? "_wf16" : "_wi8";
     return [
@@ -4684,7 +4686,7 @@ Deno.test("weight-storage の quad 拡張は既存 4 op の生成物を 1 バイ
   }
 });
 
-Deno.test("融合カーネルの params は契約外の値を fail loudly にする", () => {
+test("融合カーネルの params は契約外の値を fail loudly にする", () => {
   assertThrows(() => linearParams(-1, 2, 3), CodegenError);
   assertEquals([...linearParams(5, 3, 7)], [5, 3, 7, 0]);
 
@@ -4988,7 +4990,7 @@ Deno.test("融合カーネルの params は契約外の値を fail loudly にす
   );
 });
 
-Deno.test("bmm / gather の params は契約外の値を fail loudly にする", () => {
+test("bmm / gather の params は契約外の値を fail loudly にする", () => {
   assertThrows(() => bmmParams(-1, 2, 3), CodegenError);
   assertThrows(() => bmmParams(1, 2, 1.5), CodegenError);
   assertThrows(() => gatherParams(-1, 2, 3), CodegenError);
@@ -4997,7 +4999,7 @@ Deno.test("bmm / gather の params は契約外の値を fail loudly にする",
   assertEquals([...gatherParams(0, 0, 3)], [0, 0, 3, GATHER_OOB_BITS]);
 });
 
-Deno.test("codegen は契約外の生成入力を fail loudly にする", () => {
+test("codegen は契約外の生成入力を fail loudly にする", () => {
   assertThrows(() => elementwiseWgsl({ op: "relu", rank: 0, dtype: "f32" }), CodegenError);
   // 語彙外 op は型で弾かれるので、実行時ガードを試すには広い型からの明示的な絞り込みが要る
   const foreignElementwise: { op: string; rank: number; dtype: string } = {
@@ -5031,7 +5033,7 @@ Deno.test("codegen は契約外の生成入力を fail loudly にする", () => 
   assertThrows(() => axisReduceParams(4, 2, -1), CodegenError);
 });
 
-Deno.test("INT2 は対応外の畳み込み・計算精度の生成を拒否する", () => {
+test("INT2 は対応外の畳み込み・計算精度の生成を拒否する", () => {
   const cases = [
     () => conv1dWgsl("i2"),
     () => conv2dWgsl("i2"),
@@ -5044,7 +5046,7 @@ Deno.test("INT2 は対応外の畳み込み・計算精度の生成を拒否す�
   for (const generate of cases) assertThrows(generate, CodegenError);
 });
 
-Deno.test("BSHD RoPE は head 数で位置表を引き、異なるキーと uniform を使う", () => {
+test("BSHD RoPE は head 数で位置表を引き、異なるキーと uniform を使う", () => {
   assertEquals(ROPE_BSHD_KEY, `rope:v1:half:bshd:f32:wg${ROPE_WORKGROUP_SIZE}`);
   assertEquals(ropeWgsl("bshd").includes("let token = row / params.heads;"), true);
   assertEquals([...ropeParams(3 * 5 * 128, 3, 128, "bshd")], [1920, 3, 128, 64]);
@@ -5059,7 +5061,7 @@ Deno.test("BSHD RoPE は head 数で位置表を引き、異なるキーと unif
  * 数値（CPU 参照との照合・恒等門）は実 GPU が見る（tests/gpu_conv3d_parity_test.ts）ので、ここは
  * キー・uniform・断片の並びと生成の門をアダプタ無しで固定する。
  */
-Deno.test("conv3d の implicit GEMM は unbatched の 3D gather を共有骨格に差す（キー・uniform・断片）", () => {
+test("conv3d の implicit GEMM は unbatched の 3D gather を共有骨格に差す（キー・uniform・断片）", () => {
   // キーは新系統 v1。m タイル 64 / 32 の辺と workgroup 形は幾何から（conv1d / conv2d と同じ規律）
   assertEquals(conv3dIgemmKey("f32", true), "conv3d:v1:f32:igemm64x128v4:wg16x8");
   assertEquals(conv3dIgemmKey("f16", false), "conv3d:v1:f32:igemm64x128:wg16x8:wf16");
@@ -5118,7 +5120,7 @@ Deno.test("conv3d の implicit GEMM は unbatched の 3D gather を共有骨格�
   assertThrows(() => conv3dIgemmWgsl("i2", true), CodegenError, "i2");
 });
 
-Deno.test("conv3dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る", () => {
+test("conv3dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る", () => {
   assertEquals(conv3dUsesVec4(16 * 27, 32, 1), true, "chunk グラフ conv_in（16→384 k3・潜在 32）");
   // MUST: Wout%4 は Hout·Wout%4 で代用できない（Hout=2・Wout=2 は N%4==0 だが quad が行をまたぐ）
   assertEquals(conv3dUsesVec4(8, 2, 1), false, "Wout=2");
@@ -5127,7 +5129,7 @@ Deno.test("conv3dUsesVec4 は kFlat / Wout / strideW の 3 条件を全て見る
   assertEquals(conv3dUsesVec4(4, 4, 1), true);
 });
 
-Deno.test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、契約外を fail loudly にする", () => {
+test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、契約外を fail loudly にする", () => {
   const base = {
     channelsIn: 3,
     channelsOut: 7,
@@ -5207,7 +5209,7 @@ Deno.test("conv3d igemm params は {m,n,k} + 幾何 18 語を 24 語に詰め、
   );
 });
 
-Deno.test("conv3d igemm params は入力長 + 2·padding が i32 に収まらない軸を落とす", () => {
+test("conv3d igemm params は入力長 + 2·padding が i32 に収まらない軸を落とす", () => {
   // 全軸 長さ 1・K 1・stride 1・dilation 1・padding 0 の形から、1 軸だけ長さと padding を差し替える。
   // 出力長は shapes.ts の式どおり（K = 1・stride 1 なので 入力長 + 2·padding）に揃える。
   const unit = {

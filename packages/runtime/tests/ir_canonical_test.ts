@@ -2,8 +2,9 @@
  * IR v2 の宣言パーサと正準直列化（docs/ir-v2.md「正準直列化」）— 同じグラフは同じバイト列になる。
  */
 
+import { readTextFileSync } from "@karume/test-support/fs";
 import { assertEquals, assertThrows } from "@std/assert";
-import { describe, it } from "@std/testing/bdd";
+import { describe, it } from "@karume/test-support/test";
 import { ContainerFormatError } from "../src/format/container/header.ts";
 import { sortedObject } from "../src/format/container/json.ts";
 import {
@@ -124,7 +125,7 @@ describe("canonicalIrJson", () => {
     // JS のオブジェクトは整数に見えるキーを先に昇順で列挙するので、並べた順に代入して
     // JSON.stringify へ渡すと "0","2","10" の順に戻る。期待値は Python の書き手
     // （tools/exporter の test_container.py）と共有する fixture。
-    const expected = Deno.readTextFileSync(
+    const expected = readTextFileSync(
       new URL("./fixtures/ir/canonical-name-order.txt", import.meta.url),
     );
     assertEquals(canonicalIrJson(parseIrDeclaration(expected)), expected);

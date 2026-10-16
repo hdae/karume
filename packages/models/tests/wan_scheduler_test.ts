@@ -13,6 +13,8 @@
 // σ / timestep のビット一致の門が落とし、更新則の故障（bh2 → bh1・1 次に落とす・step の順序の取り違え）は
 // 軌跡の atol の門が落とす。
 
+import { readFile, readTextFile } from "@karume/test-support/fs";
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import {
@@ -84,9 +86,9 @@ type Meta = {
   readonly schedules: Readonly<Record<string, Schedule>>;
 };
 
-const meta = JSON.parse(await Deno.readTextFile(new URL("unipc.json", FIXTURE_DIR))) as Meta;
+const meta = JSON.parse(await readTextFile(new URL("unipc.json", FIXTURE_DIR))) as Meta;
 const fixture: SafetensorsFile = await (async () => {
-  const bytes = await Deno.readFile(new URL("unipc.safetensors", FIXTURE_DIR));
+  const bytes = await readFile(new URL("unipc.safetensors", FIXTURE_DIR));
   return parseSafetensors(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   );
@@ -146,7 +148,7 @@ const trajectoryDifference = (
   return { maxAbs, nonFinite };
 };
 
-Deno.test("UniPC: fixture の scheduler config がこの移植の対象の分岐（flow・bh2・2 次・x0 予測）", () => {
+test("UniPC: fixture の scheduler config がこの移植の対象の分岐（flow・bh2・2 次・x0 予測）", () => {
   const config = meta.scheduler_config;
   assertEquals(
     {
@@ -173,7 +175,7 @@ Deno.test("UniPC: fixture の scheduler config がこの移植の対象の分岐
 });
 
 for (const steps of [2, STEPS]) {
-  Deno.test(`UniPC: ${steps} step の σ 列は上流とビット一致・timestep は完全一致`, () => {
+  test(`UniPC: ${steps} step の σ 列は上流とビット一致・timestep は完全一致`, () => {
     const expected = meta.schedules[String(steps)];
     const schedule = wanUniPcSchedule(steps, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
     assertEquals(
@@ -189,7 +191,7 @@ for (const steps of [2, STEPS]) {
   });
 }
 
-Deno.test("UniPC: σ 列と timestep は safetensors の F32 / I64 の列とも一致する（JSON と二重の出所）", () => {
+test("UniPC: σ 列と timestep は safetensors の F32 / I64 の列とも一致する（JSON と二重の出所）", () => {
   const schedule = wanUniPcSchedule(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
   assertEquals([...bitsOf(schedule.sigmas)], [...bitsOf(floats("sigmas"))]);
   const view = fixture.tensors.get("timesteps");
@@ -198,7 +200,7 @@ Deno.test("UniPC: σ 列と timestep は safetensors の F32 / I64 の列とも�
   assertEquals(schedule.timesteps, [...timesteps].map(Number));
 });
 
-Deno.test("UniPC: 固定のモデル出力列の軌跡が上流の step と atol の内（次数 1 → 2 → 1・修正子は 2 step 目から）", () => {
+test("UniPC: 固定のモデル出力列の軌跡が上流の step と atol の内（次数 1 → 2 → 1・修正子は 2 step 目から）", () => {
   // 次数と修正子の有無が上流の記録と同じ形であることは fixture のメタで先に見る（数値の門の前提）。
   assertEquals(meta.orders, [1, ...Array(STEPS - 2).fill(2), 1]);
   assertEquals(meta.correctors, [false, ...Array(STEPS - 1).fill(true)]);
@@ -219,7 +221,7 @@ Deno.test("UniPC: 固定のモデル出力列の軌跡が上流の step と atol
   }
 });
 
-Deno.test("UniPC 故障注入（σ 列の門）: σ[0] の補正を落とす・σ 列を 1 つずらす・shift 5.0 は σ / timestep の一致が割れる", () => {
+test("UniPC 故障注入（σ 列の門）: σ[0] の補正を落とす・σ 列を 1 つずらす・shift 5.0 は σ / timestep の一致が割れる", () => {
   const expected = meta.schedules[String(STEPS)];
   const want = [...bitsOf(Float32Array.from(expected.sigmas_f32))];
   const noEpsilon = Float32Array.from([
@@ -255,7 +257,7 @@ Deno.test("UniPC 故障注入（σ 列の門）: σ[0] の補正を落とす・�
   assertEquals(expected.timesteps[0], 999);
 });
 
-Deno.test("UniPC 故障注入（軌跡の門）: bh2 → bh1・1 次に落とす・step の順序の取り違えは atol の外", () => {
+test("UniPC 故障注入（軌跡の門）: bh2 → bh1・1 次に落とす・step の順序の取り違えは atol の外", () => {
   const sigmas = wanUniPcSchedule(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps).sigmas;
   const swapped = (a: number, b: number): number[] => {
     const order = [...Array(STEPS).keys()];
@@ -296,7 +298,7 @@ Deno.test("UniPC 故障注入（軌跡の門）: bh2 → bh1・1 次に落とす
   }
 });
 
-Deno.test("UniPC: σ 列の外の step と長さ違いの入力は fail loudly", () => {
+test("UniPC: σ 列の外の step と長さ違いの入力は fail loudly", () => {
   const schedule = wanUniPcSchedule(1, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
   assertEquals(schedule.timesteps, [999]);
   const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
@@ -313,7 +315,7 @@ Deno.test("UniPC: σ 列の外の step と長さ違いの入力は fail loudly",
   assertThrows(() => wanUniPcSchedule(2, Number.NaN, 1000), RangeError, "shift");
 });
 
-Deno.test("UniPC: steps の上限は num_train_timesteps（ちょうどは受け、超えると σ 列を作る前に落ちる）", () => {
+test("UniPC: steps の上限は num_train_timesteps（ちょうどは受け、超えると σ 列を作る前に落ちる）", () => {
   // 整数の timestep は trunc(σ·N) で 0〜N−1 の N 通りしか無いので、N を超える steps は必ず重複する。
   const limit = WAN_UNIPC_CONFIG.numTrainTimesteps;
   const schedule = wanUniPcSchedule(limit, SHIFT, limit);
@@ -323,7 +325,7 @@ Deno.test("UniPC: steps の上限は num_train_timesteps（ちょうどは受け
   assertThrows(() => wanUniPcSchedule(Number.MAX_SAFE_INTEGER, SHIFT, limit), RangeError, "steps");
 });
 
-Deno.test("CFG: uncond + g·(cond − uncond) は上流の式とビット一致（guide 5.0）", () => {
+test("CFG: uncond + g·(cond − uncond) は上流の式とビット一致（guide 5.0）", () => {
   assertEquals(meta.guidance_scale, 5);
   const got = wanClassifierFreeGuidance(
     floats("cfg.cond"),

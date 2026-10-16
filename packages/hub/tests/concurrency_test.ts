@@ -1,3 +1,4 @@
+import { test } from "@karume/test-support/test";
 import { assert, assertEquals } from "@std/assert";
 import { createByteAdmission } from "../src/concurrency.ts";
 
@@ -29,27 +30,27 @@ const dispatch = async (
   return { peak, order };
 };
 
-Deno.test("createByteAdmission: in-flight の合計が予算を超えない", async () => {
+test("createByteAdmission: in-flight の合計が予算を超えない", async () => {
   const { peak, order } = await dispatch(100, [40, 40, 40, 40, 40]);
   assert(peak <= 100, `in-flight が ${peak} バイトまで膨らんだ`);
   assert(peak > 40, "1 本ずつしか通していない（予算に収まる 2 本目を待たせている）");
   assertEquals(order.length, 5, "全部が送出されていない");
 });
 
-Deno.test("createByteAdmission: in-flight 0 なら予算超の単独要求も通す（詰まらせない）", async () => {
+test("createByteAdmission: in-flight 0 なら予算超の単独要求も通す（詰まらせない）", async () => {
   // 席を返す相手が居ないのに待てば永久に詰まる。予算 100 に対する単独 250 が通ること。
   const { peak, order } = await dispatch(100, [250]);
   assertEquals(order, [0]);
   assertEquals(peak, 250);
 });
 
-Deno.test("createByteAdmission: 予算超の巨大要求は他の 1 本とも重ならない", async () => {
+test("createByteAdmission: 予算超の巨大要求は他の 1 本とも重ならない", async () => {
   // 「in-flight 0 なら通す」の例外が、周りを巻き込んで予算を二重に破らないこと。
   const { peak } = await dispatch(100, [60, 250, 60]);
   assertEquals(peak, 250, `巨大要求が他と重なって ${peak} バイトになった`);
 });
 
-Deno.test("createByteAdmission: release が 2 連続でも待機者を取りこぼさない", async () => {
+test("createByteAdmission: release が 2 連続でも待機者を取りこぼさない", async () => {
   const admission = createByteAdmission(100);
   await admission.admit(50);
   await admission.admit(50);
