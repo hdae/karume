@@ -533,8 +533,11 @@ test({
       );
       assert(error.message.startsWith("GenerationContext の state 確保: "), error.message);
       assertEquals(session.diagnostics().stateBacking.contextCount, 0);
-      // Dawn reclaims destroyed allocations on its next tick, not synchronously (wgpu freed them
-      // at destroy()); settle the queue so the survivor's 1 GiB measures what was returned.
+      // Dawn releases a destroyed allocation only once the submission serial that follows the
+      // destroy() has completed (wgpu freed it at destroy()); with nothing submitted since, the
+      // memory would stay reserved. Submit an empty command buffer and wait for it so the survivor's
+      // 1 GiB measures what the failure path actually returned.
+      gpu.device.queue.submit([gpu.device.createCommandEncoder().finish()]);
       await gpu.device.queue.onSubmittedWorkDone();
       const context = await survivor.createGenerationContext({ chunkLength: 1 });
       assertEquals(context.pastLength, 0);
