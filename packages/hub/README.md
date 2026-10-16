@@ -5,7 +5,7 @@ neural-network inference stack that runs on WebGPU. This package reads a Karume 
 manifest (`karume.json`, format `karume/5`), picks one model and one quantization out of it,
 fetches the referenced containers (`krm`) and assets with integrity checking, and caches them. Sources are Hugging Face
 repositories (pinned to a resolved revision) or a local directory. It depends only on packages
-built from Web-standard APIs, so the same code runs in Deno and in the browser. The other packages
+built from Web-standard APIs, so the same code runs in the browser, on Node and on Deno. The other packages
 of the stack are `@karume/runtime` (IR execution) and `@karume/models` (pipelines and tokenizers).
 
 Status: pre-1.0. Manifests of an older major are not read — the JSR packages and the `karume`
@@ -70,7 +70,8 @@ const head = reader === undefined ? undefined : await reader.read(0, 64);
 ```
 
 A distribution that already sits on disk is passed as a source handle instead of a repository
-reference. The Deno reader lives on its own subpath, so the browser build never pulls it in.
+reference. The Deno and Node readers live on their own subpaths (`@karume/hub/deno`, `@karume/hub/node`),
+so the browser build never pulls them in.
 
 ```ts
 import { loadManifest } from "@karume/hub";
@@ -78,6 +79,8 @@ import { denoDirectory } from "@karume/hub/deno";
 
 const local = await loadManifest(denoDirectory("./models/karume-gemma4"));
 ```
+
+On Node the reader is `nodeDirectory` from `@karume/hub/node` (same arguments, `node:fs` underneath).
 
 ## Requirements
 
