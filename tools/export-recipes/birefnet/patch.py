@@ -14,12 +14,21 @@
      相対位置バイアスの表引き `table[index.view(-1)]`（`aten.index.Tensor` = 未対応）は
      同値な `nn.functional.embedding(index, table)` へ。窓マスクの加算は rank-5 view +
      broadcast から rank-4 の broadcast へ（**B = 1 でのみ同値** — 外れたら fail loudly）
-  ③ `SwinTransformerBlock` の H/W 方向 `F.pad`（IR の pad は最終次元のみ）をゼロ定数との
-     `cat` へ、`torch.roll`（ハンドラ無し・分解形は `index_select` + `fmod`）を静的
-     シフトの slice + cat へ
+  ③ `SwinTransformerBlock` の H/W 方向 `F.pad`（IR の pad は最終次元のみ）を 1 要素の
+     ゼロを `expand` で広げたものとの `cat` へ（{@link _pad_zero}）、`torch.roll`（ハンドラ
+     無し・分解形は `index_select` + `fmod`）を静的シフトの slice + cat へ
   ④ `BasicLayer` の shifted-window マスク（`zeros` への in-place 代入 = `slice_scatter` /
-     `select` / `copy` の列）を**焼いた定数バッファ**へ。値の作り方は元実装の逐語
-     （{@link _build_attn_mask}）で、実行の場所が export の外に移るだけ
+     `select` / `copy` の列）を**焼いた小さな 2 本**（窓の種類の表 + 窓ごとの添字）と、
+     グラフ内の `embedding` での組み立てへ（{@link _compact_attn_mask}）。値の作り方は元実装の
+     逐語（{@link _build_attn_mask}）で、実行の場所が export の外に移るだけ
+
+③ と ④ が巨大な定数を焼かない形になっているのは、配布形の転送のため（調査記録
+`outputs/diag/birefnet-xet-2026-10-16/`）。以前は ④ のマスクを `[nW, 144, 144]` の f32 で丸ごと
+焼き（2048² で計 248 MiB・値は {0, −100} だけ・窓の種類は 1 枚あたり 4 つ）、③ のゼロ pad も
+エクスポータの定数畳み込みが全ゼロの initializer へ焼いていた（2048² で計 ~29 MB）。2048² の容器は
+~86% がゼロのバイトになり、HF xet の content-defined chunking が長いゼロ列の中を切れないので、
+同一の 128 KiB ゼロチャンクを参照する term が数百本に割れた（転送の断片化）。中身はどちらも冗長な
+バイトなので、値を 1 ビットも変えずに焼く量そのものを減らす。
   ⑤ `PatchMerging` の `x[:, 0::2, 0::2, :]`（step 2 の slice = IR の slice は連続窓のみ）を
      reshape + 連続 slice へ
   ⑥ `image2patches` の einops `rearrange`（rank-6）を rank-4 の隣接転置へ
@@ -46,9 +55,9 @@ MUST: どのパッチも fallback を持たない（`siglip2.patch` / `deberta.p
 前提（B = 1 / 偶数解像度 / `dec_att='ASPPDeformable'` 等）を外したモデルは黙って別の数値
 経路へ落ちるのではなく、その場で落ちる。
 
-MUST: {@link apply} の後に {@link prepare} を**必ず**通す。④ のマスクは解像度依存の定数で、
+MUST: {@link apply} の後に {@link prepare} を**必ず**通す。④ の表と添字は解像度依存の定数で、
 export の中では作れない（`register_buffer` がグラフに乗らない）。`prepare` は eager の
-1 forward でマスクを焼き、そのまま**パッチ後の参照出力**を返す。
+1 forward で表と添字を焼き、そのまま**パッチ後の参照出力**を返す。
 
 NOTE: 動的モジュールのクラス属性をプロセス全域で差し替えるので、「パッチ前の参照」を採れる
 のは 1 プロセスにつき 1 回だけ（{@link patches_applied} が門）。
@@ -56,6 +65,7 @@ NOTE: 動的モジュールのクラス属性をプロセス全域で差し替�
 
 from __future__ import annotations
 
+import math
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -203,14 +213,20 @@ def _window_attention_forward(
 def _pad_zero(x: torch.Tensor, dim: int, width: int) -> torch.Tensor:
     """`x` の軸 `dim` の末尾へゼロを `width` 本足す（`F.pad` の同値形）。
 
-    IR の `pad` は最終次元専業なので、H/W 方向の padding は**ゼロ定数との `cat`** で書く。
-    ゼロ定数は入力に依存しないため、エクスポータの定数畳み込みが initializer へ焼く。
+    IR の `pad` は最終次元専業なので、H/W 方向の padding は**ゼロとの `cat`** で書く。
+
+    ゼロは「1 要素のゼロを `expand` で広げたもの」にする。`torch.zeros(shape)` で書くと、入力に
+    依存しない部分木としてエクスポータの定数畳み込みが `[1, pad, W, C]` の全ゼロを initializer へ
+    焼く（2048² で計 ~29 MB — 長いゼロ列は HF xet の転送を断片化させる。モジュール docstring の
+    調査記録）。形の変わる `expand` は定数畳み込みの frontier（`karume.convert` の
+    `_classify_foldable` が止める）なので、焼かれるのは 1 要素の定数だけで、広げるのは実行時に
+    なる。値は `F.pad` のゼロ（+0.0）と同じ。
     """
     if width == 0:
         return x
     shape = list(x.shape)
     shape[dim] = width
-    zeros = torch.zeros(shape, dtype=x.dtype, device=x.device)
+    zeros = x.new_zeros((1,) * x.dim()).expand(shape)
     return torch.cat([x, zeros], dim=dim)
 
 
@@ -275,7 +291,12 @@ def _swin_block_forward(
     return x + self.drop_path(self.mlp(self.norm2(x)))
 
 
-# ---- ④shifted-window マスク（焼いた定数） ----------------------------------
+# ---- ④shifted-window マスク（窓の種類の表 + 窓ごとの添字） ------------------
+
+#: 1 枚のマスクが持ちうる窓の種類の上限。マスクの元は画像を行 / 列とも 3 帯（`slice(0, -ws)` /
+#: `slice(-ws, -shift)` / `slice(-shift, None)`）に割った 9 領域の番号で、窓の格子は最後の帯
+#: 2 本だけをまたぐ — 窓の中身は「内部 / 右端の列 / 下端の行 / 右下の角」の 4 通りにしかならない。
+MAX_MASK_WINDOW_KINDS = 4
 
 
 def _build_attn_mask(
@@ -309,25 +330,96 @@ def _build_attn_mask(
     return attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(attn_mask == 0, 0.0).to(dtype)
 
 
+def _expand_attn_mask(table: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """窓の種類の表 `[K, N·N]` と窓の格子 `[nH, nW]` 上の添字から `[nH·nW, N, N]` のマスクを組む。
+
+    行 gather そのもので、IR では `embedding` 1 本になる（② の相対位置バイアスと同じ形 —
+    添字が lifted 定数・表がバッファ）。
+
+    添字を格子の形で持ち、ここで行優先に平坦化するのも ② と同じ理由: `reshape` は定数畳み込みの
+    対象なので、平坦化した添字はエクスポータが i32 の定数として焼く
+    （`karume.convert._add_const` — ADR 0009 / 0010）。lifted 定数を `embedding` へ直に渡すと
+    initializer の経路（意味論 f32 のみ）に落ちて i64 で止まる（実測）。窓の並びは
+    {@link _window_partition} と同じ行優先。
+    """
+    tokens = math.isqrt(table.shape[1])
+    if tokens * tokens != table.shape[1]:
+        raise ValueError(f"表の行長 {table.shape[1]} が窓の要素数の 2 乗でない")
+    return nn.functional.embedding(index.reshape(-1), table).view(index.numel(), tokens, tokens)
+
+
+def _compact_attn_mask(
+    mask: torch.Tensor, grid: tuple[int, int]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """`[nW, N, N]` のマスクを（窓の種類の表 `[K, N·N]`, 窓の格子 `grid` 上の添字 i64）へ畳む。
+
+    なぜ畳むか: マスクを丸ごと焼くと 2048² で計 248 MiB になるが、中身は {0, −100} だけで、窓の
+    種類は高々 {@link MAX_MASK_WINDOW_KINDS} 通り — 残りは同じ窓の繰り返しで、HF xet の転送を
+    断片化させる長いゼロ列にもなる（モジュール docstring の調査記録）。
+
+    表の行は上流のマスクの窓の並び（`window_partition` の行優先）で**初めて現れた順**。表の dtype
+    は `mask` と同じ。添字の dtype は i64 — ② の `relative_position_index` と同じく素の属性
+    （lifted 定数）として持ち、エクスポータが i32 へ境界正規化して焼く（i64 のバッファは
+    initializer にできない — {@link _lift_relative_position_index}）。
+
+    MUST: 種類が上限を超えたら、または組み立て直した値が元のマスクとビット列で一致しなければ
+    落とす（前提の 3 帯分割から外れたマスクを黙って別の値にしない）。
+    """
+    windows = mask.shape[0]
+    if grid[0] * grid[1] != windows:
+        raise ValueError(f"窓の格子 {grid} がマスクの窓数 {windows} と合わない")
+    flat = mask.reshape(windows, -1)
+    # ビット列で比べる（値の `==` は `0.0` と `-0.0` を同一視する）。
+    bits = flat.contiguous().view(torch.uint8)
+    kinds: list[int] = []
+    index = torch.empty(windows, dtype=torch.long)
+    for window in range(windows):
+        for kind, first in enumerate(kinds):
+            if torch.equal(bits[first], bits[window]):
+                index[window] = kind
+                break
+        else:
+            index[window] = len(kinds)
+            kinds.append(window)
+    if len(kinds) > MAX_MASK_WINDOW_KINDS:
+        raise NotImplementedError(
+            f"窓マスクの種類が {len(kinds)} 通り（上限 {MAX_MASK_WINDOW_KINDS}）—"
+            " 3 帯分割の shifted-window マスクではない"
+        )
+    table = flat[kinds]
+    index = index.reshape(grid)
+    rebuilt = _expand_attn_mask(table, index)
+    if not torch.equal(rebuilt.contiguous().view(torch.uint8), mask.contiguous().view(torch.uint8)):
+        raise AssertionError("表と添字から組み立て直した窓マスクが元のマスクとビット一致しない")
+    return table, index
+
+
 def _basic_layer_forward(
     self: nn.Module, x: torch.Tensor, height: int, width: int
 ) -> tuple[Any, ...]:
-    """`BasicLayer.forward` の同値実装（マスクは焼いたバッファから引く）。"""
+    """`BasicLayer.forward` の同値実装（マスクは焼いた表と添字からグラフ内で組み立てる）。"""
     window_size = self.window_size
     padded_height = -(-height // window_size) * window_size
     padded_width = -(-width // window_size) * window_size
-    name = f"karume_attn_mask_{padded_height}x{padded_width}"
-    attn_mask = getattr(self, name, None)
-    if attn_mask is None:
+    table_name = f"karume_attn_mask_table_{padded_height}x{padded_width}"
+    index_name = f"karume_attn_mask_index_{padded_height}x{padded_width}"
+    table = getattr(self, table_name, None)
+    if table is None:
         if not _MASK_BUILD_ENABLED:
             raise RuntimeError(
                 f"{padded_height}×{padded_width} の窓マスクが焼かれていない —"
                 " export の前に birefnet.patch.prepare(model, x) を通すこと"
             )
-        attn_mask = _build_attn_mask(
-            padded_height, padded_width, window_size, self.shift_size, x.dtype, x.device
+        table, index = _compact_attn_mask(
+            _build_attn_mask(
+                padded_height, padded_width, window_size, self.shift_size, x.dtype, x.device
+            ),
+            (padded_height // window_size, padded_width // window_size),
         )
-        self.register_buffer(name, attn_mask)
+        self.register_buffer(table_name, table)
+        # 添字はバッファにせず素の属性へ置く（lifted 定数 — 理由は _compact_attn_mask）。
+        object.__setattr__(self, index_name, index)
+    attn_mask = _expand_attn_mask(table, getattr(self, index_name))
 
     if self.use_checkpoint:
         raise NotImplementedError("use_checkpoint=True は差し替え版が持たない経路")

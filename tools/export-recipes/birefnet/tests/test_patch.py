@@ -106,6 +106,15 @@ def ref_attn_mask(
     return attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(attn_mask == 0, 0.0)
 
 
+def _bits_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
+    """dtype・形・ビット列の一致（`torch.equal` は `0.0` と `-0.0` を等しいとみなす）。"""
+    return (
+        left.dtype == right.dtype
+        and left.shape == right.shape
+        and torch.equal(left.contiguous().view(torch.uint8), right.contiguous().view(torch.uint8))
+    )
+
+
 def ref_decoder_tail(
     conv: nn.Conv2d, head: torch.Tensor, size: tuple[int, int], ipt: torch.Tensor
 ) -> torch.Tensor:
@@ -301,6 +310,47 @@ def test_pad_zero_matches_functional_pad(dim: int, width: int) -> None:
     assert torch.equal(patch_birefnet._pad_zero(x, dim, width), nn.functional.pad(x, pads))
 
 
+class TestPadZeroAtExportSizes:
+    """③ のゼロ pad は実寸でも `F.pad` と値・形がビット一致し、export で巨大な定数を焼かない。"""
+
+    @pytest.mark.parametrize(
+        ("shape", "dim", "width"),
+        [
+            ((1, 256, 256, 2), 1, 8),  # 1024² の stage 0（256 → 264）
+            ((1, 264, 256, 2), 2, 8),
+            ((1, 512, 512, 1), 1, 4),  # 2048² の stage 0（512 → 516）
+            ((1, 516, 512, 1), 2, 4),
+        ],
+    )
+    def test_the_padding_matches_functional_pad_bit_for_bit(
+        self, shape: tuple[int, ...], dim: int, width: int
+    ) -> None:
+        x = torch.randn(shape)
+        pads = [0, 0, 0, 0, 0, 0]
+        pads[2 * (3 - dim) + 1] = width
+        assert _bits_equal(patch_birefnet._pad_zero(x, dim, width), nn.functional.pad(x, pads))
+
+    def test_the_exported_graph_bakes_no_zero_block(self) -> None:
+        """ゼロは 1 要素の定数を実行時に `expand` で広げる（全ゼロの initializer を焼かない）。
+
+        以前の `torch.zeros(shape)` は定数畳み込みで `[1, pad, W, C]` の全ゼロへ焼かれ、2048² の
+        容器の長いゼロ列（HF xet の転送の断片化）の一因だった（`birefnet.patch` の docstring）。
+        """
+        from karume.pipeline import export_module
+
+        class Padded(nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return patch_birefnet._pad_zero(patch_birefnet._pad_zero(x, 1, 8), 2, 8)
+
+        graph, tensors = export_module(
+            Padded().eval(), (torch.randn(1, 64, 56, 4),), symbol_names=()
+        )
+
+        assert [node.op for node in graph.nodes].count("expand") == 2
+        largest = max(tensors[init.tensor].numel() for init in graph.initializers.values())
+        assert largest == 1
+
+
 # ---- ②窓 attention ---------------------------------------------------------
 
 
@@ -362,6 +412,111 @@ def test_attn_mask_matches_reference(padded_height: int, padded_width: int, wind
         padded_height, padded_width, window, window // 2, torch.float32, torch.device("cpu")
     )
     assert torch.equal(got, ref_attn_mask(padded_height, padded_width, window, window // 2))
+
+
+#: 実モデルの `BasicLayer` が窓マスクを引く padding 後の一辺（window 12・shift 6）。本体側は
+#: S/4・S/8・S/16・S/32、`mul_scl_ipt='cat'` の半解像度枝は S/8〜S/64 を 12 の倍数へ切り上げる。
+#: 1024² = {264, 132, 72, 36, 24}、2048² = {516, 264, 132, 72, 36}（再 export した容器の
+#: initializer 名で実測 — 2026-10-16）。
+EXPORT_PADDED_SIZES = (516, 264, 132, 72, 36, 24)
+
+#: 実モデルの窓（`swin_v1_l` の window_size）。shift はその半分。
+EXPORT_WINDOW = 12
+
+
+class TestCompactAttnMask:
+    """④ の表 + 添字は上流のマスクを 1 ビットも変えずに組み立て直す / 種類は高々 4。"""
+
+    @staticmethod
+    def _compact(height: int, width: int, window: int) -> tuple[torch.Tensor, torch.Tensor]:
+        mask = patch_birefnet._build_attn_mask(
+            height, width, window, window // 2, torch.float32, torch.device("cpu")
+        )
+        return patch_birefnet._compact_attn_mask(mask, (height // window, width // window))
+
+    @pytest.mark.parametrize("size", EXPORT_PADDED_SIZES)
+    def test_it_reproduces_the_upstream_mask_at_export_sizes(self, size: int) -> None:
+        table, index = self._compact(size, size, EXPORT_WINDOW)
+
+        got = patch_birefnet._expand_attn_mask(table, index)
+
+        assert _bits_equal(got, ref_attn_mask(size, size, EXPORT_WINDOW, EXPORT_WINDOW // 2))
+
+    @pytest.mark.parametrize(("height", "width"), [(24, 36), (36, 24), (24, 60)])
+    def test_it_reproduces_the_upstream_mask_off_square(self, height: int, width: int) -> None:
+        """非正方（H/W の取り違えと格子の行 / 列の取り違えはここでしか落ちない）。"""
+        table, index = self._compact(height, width, EXPORT_WINDOW)
+
+        got = patch_birefnet._expand_attn_mask(table, index)
+
+        assert _bits_equal(got, ref_attn_mask(height, width, EXPORT_WINDOW, EXPORT_WINDOW // 2))
+
+    @pytest.mark.parametrize("size", EXPORT_PADDED_SIZES)
+    def test_the_baked_tensors_are_small(self, size: int) -> None:
+        """焼くのは `[K ≤ 4, N·N]` の f32 表と窓の格子上の i64 添字だけ（N = 144）。"""
+        table, index = self._compact(size, size, EXPORT_WINDOW)
+        tokens = EXPORT_WINDOW * EXPORT_WINDOW
+
+        assert table.dtype is torch.float32
+        assert table.shape[0] <= patch_birefnet.MAX_MASK_WINDOW_KINDS
+        assert table.shape[1] == tokens * tokens
+        assert index.dtype is torch.int64
+        assert tuple(index.shape) == (size // EXPORT_WINDOW, size // EXPORT_WINDOW)
+
+    def test_table_rows_follow_the_upstream_window_order(self) -> None:
+        """表の行は窓の行優先の並びで初めて現れた順（内部 → 右端の列 → 下端の行 → 右下の角）。"""
+        table, index = self._compact(36, 48, EXPORT_WINDOW)
+
+        flat = index.reshape(-1).tolist()
+        first_seen = sorted(range(table.shape[0]), key=flat.index)
+        assert first_seen == list(range(table.shape[0]))
+        assert index.tolist() == [[0, 0, 0, 1], [0, 0, 0, 1], [2, 2, 2, 3]]
+        assert not table[0].any()
+
+    def test_more_than_four_window_kinds_fail_loudly(self) -> None:
+        """3 帯分割から外れたマスク（種類が 5 通り以上）は黙って畳まない。"""
+        mask = torch.zeros(5, 4, 4)
+        for window in range(5):
+            mask[window, 0, window % 4] = -100.0
+        mask[4, 1, 0] = -100.0
+
+        with pytest.raises(NotImplementedError, match="5 通り"):
+            patch_birefnet._compact_attn_mask(mask, (1, 5))
+
+    def test_the_exported_graph_bakes_the_table_and_an_i32_index(self) -> None:
+        """export で焼かれるのは表と i32 添字だけで、`[nW, N, N]` の塊は焼かれない。
+
+        組み立ては `embedding` 1 本（② の相対位置バイアスと同じ形）。添字は格子から平坦化する
+        `reshape` が定数畳み込みを通って i32 の定数になる。
+        """
+        from karume.pipeline import export_module
+
+        size = 36
+        table, index = self._compact(size, size, EXPORT_WINDOW)
+        windows = index.numel()
+        tokens = EXPORT_WINDOW * EXPORT_WINDOW
+
+        class Masked(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer("table", table)
+                object.__setattr__(self, "index", index)
+
+            def forward(self, attn: torch.Tensor) -> torch.Tensor:
+                mask = patch_birefnet._expand_attn_mask(self.table, self.index)
+                return attn + mask.unsqueeze(1)
+
+        graph, tensors = export_module(
+            Masked().eval(), (torch.randn(windows, 2, tokens, tokens),), symbol_names=()
+        )
+
+        assert [node.op for node in graph.nodes].count("embedding") == 1
+        baked = {name: tensors[init.tensor] for name, init in graph.initializers.items()}
+        shapes = sorted((str(t.dtype), tuple(t.shape)) for t in baked.values())
+        assert shapes == [
+            ("torch.float32", tuple(table.shape)),
+            ("torch.int32", (windows,)),
+        ]
 
 
 # ---- ⑤PatchMerging ---------------------------------------------------------
@@ -730,26 +885,29 @@ class TestBasicLayerForward:
             patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
 
     def test_the_build_window_bakes_the_reference_mask(self, monkeypatch) -> None:
-        """ビルド窓を開けた 1 回だけバッファが生え、値は `_build_attn_mask` と一致する。"""
+        """ビルド窓を開けた 1 回だけ表（バッファ）と添字（素の属性）が生え、組み立てた値は
+        `_build_attn_mask` とビット一致する。"""
         monkeypatch.setattr(patch_birefnet, "_MASK_BUILD_ENABLED", True)
         layer = _MinimalBasicLayer()
 
         with torch.no_grad():
             patch_birefnet._basic_layer_forward(layer, self._input(), self.HEIGHT, self.WIDTH)
 
-        name = f"karume_attn_mask_{self.PADDED_HEIGHT}x{self.PADDED_WIDTH}"
-        baked = getattr(layer, name)
-        assert torch.equal(
-            baked,
-            patch_birefnet._build_attn_mask(
-                self.PADDED_HEIGHT,
-                self.PADDED_WIDTH,
-                layer.window_size,
-                layer.shift_size,
-                baked.dtype,
-                baked.device,
-            ),
+        suffix = f"{self.PADDED_HEIGHT}x{self.PADDED_WIDTH}"
+        buffers = dict(layer.named_buffers())
+        table = buffers[f"karume_attn_mask_table_{suffix}"]
+        # 添字はバッファにしない（i64 のバッファは initializer にできない — lifted 定数で運ぶ）。
+        assert f"karume_attn_mask_index_{suffix}" not in buffers
+        index = getattr(layer, f"karume_attn_mask_index_{suffix}")
+        expected = patch_birefnet._build_attn_mask(
+            self.PADDED_HEIGHT,
+            self.PADDED_WIDTH,
+            layer.window_size,
+            layer.shift_size,
+            table.dtype,
+            table.device,
         )
+        assert _bits_equal(patch_birefnet._expand_attn_mask(table, index), expected)
 
     def test_checkpointing_is_rejected(self, monkeypatch) -> None:
         """`use_checkpoint=True` は差し替え版が持たない経路（黙って通さない）。"""
