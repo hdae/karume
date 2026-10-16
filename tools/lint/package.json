@@ -1,0 +1,14 @@
+{
+  "name": "@karume/lint-plugin",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Repository lint rules (Oxlint JS plugin): karume/typed-array-buffer.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "vp test"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

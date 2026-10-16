@@ -7,7 +7,7 @@
 // `--expose-gc` を worker に渡していること（テストの GPU の取得口の緩和が要る — 下の
 // EXPOSE_GC_FLAG）を見る:
 //
-// - **被覆**: core ∪ 全レーン = リポの全 `*_test.ts`（`packages/*/tests` 配下）。
+// - **被覆**: core ∪ 全レーン = リポの全 `*_test.ts`（`packages/*/tests` と `tools/*/tests` 配下）。
 // - **重複なし**: core と系列レーンは互いに素（同じ重い e2e を 2 度払わない）。系列レーン
 //   どうしの重複は許す —— 通常配布形と QAT 配布形の両方を要るファイルが実在する。
 // - **空でない**: 各レーンは 1 本以上。綴りを間違えたレーンは Vitest が "No test files found" で
@@ -81,10 +81,12 @@ const walkFiles = (dir: string): string[] => {
   return found;
 };
 
-/** テストの置き場の全ファイル（`packages/<pkg>/tests` 配下）。 */
-const TEST_DIRS = readDirSync(new URL("packages/", REPO_ROOT))
-  .filter((entry) => entry.isDirectory)
-  .map((entry) => `packages/${entry.name}/tests`)
+/** テストの置き場の全ファイル（`packages/<pkg>/tests` と `tools/<tool>/tests` 配下）。 */
+const TEST_DIRS = ["packages", "tools"].flatMap((parent) =>
+  readDirSync(new URL(`${parent}/`, REPO_ROOT))
+    .filter((entry) => entry.isDirectory)
+    .map((entry) => `${parent}/${entry.name}/tests`)
+)
   .filter((dir) => {
     try {
       readDirSync(new URL(`${dir}/`, REPO_ROOT));

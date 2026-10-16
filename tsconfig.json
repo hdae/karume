@@ -28,6 +28,7 @@
     "packages/*/*.ts",
     "packages/*/src/**/*.ts",
     "packages/*/tests/**/*.ts",
+    "tools/{lint,published-smoke,verify-diff,release}/**/*.ts",
     "vite.config.ts"
   ]
 }

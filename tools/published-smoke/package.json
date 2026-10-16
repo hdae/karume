@@ -1,0 +1,14 @@
+{
+  "name": "@karume/published-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Smoke test against the published @karume packages (registry, not the workspace).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "vp test"
+  },
+  "devDependencies": {
+    "@karume/test-support": "workspace:*"
+  }
+}

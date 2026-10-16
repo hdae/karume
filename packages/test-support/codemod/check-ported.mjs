@@ -21,9 +21,9 @@ const usesDeno = (text) =>
   /from "@std\/testing\/bdd"/.test(text);
 const ported = [];
 const pending = new Set();
-for (const pkg of readdirSync(join(root, "packages"))) {
+for (const [parent, pkg] of ["packages", "tools"].flatMap((p) => readdirSync(join(root, p)).map((d) => [p, d]))) {
   let files;
-  try { files = walk(join(root, "packages", pkg, "tests")); } catch { continue; }
+  try { files = walk(join(root, parent, pkg, "tests")); } catch { continue; }
   for (const file of files) {
     const rel = relative(root, file);
     (usesDeno(readFileSync(file, "utf8")) ? pending : ported).push?.(rel) ?? pending.add(rel);
@@ -32,7 +32,7 @@ for (const pkg of readdirSync(join(root, "packages"))) {
 const config = join(root, `tsconfig.check-${process.pid}.json`);
 writeFileSync(config, JSON.stringify({
   extends: "./tsconfig.json",
-  include: ["packages/*/*.ts", "packages/*/src/**/*.ts", "packages/test-support/src/**/*.ts", "vite.config.ts", ...ported.sort()],
+  include: ["packages/*/*.ts", "packages/*/src/**/*.ts", "packages/test-support/src/**/*.ts", "tools/{lint,published-smoke,verify-diff,release}/*.ts", "tools/{lint,published-smoke,verify-diff,release}/src/**/*.ts", "vite.config.ts", ...ported.sort()],
 }, null, 2));
 let lines;
 try {

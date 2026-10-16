@@ -51,7 +51,7 @@ export const FAMILY_LANES: readonly Lane[] = [
 ];
 
 /** Every test file of the workspace. */
-export const ALL_TESTS = "packages/*/tests/**/*_test.ts";
+export const ALL_TESTS = "{packages,tools}/*/tests/**/*_test.ts";
 
 export const CORE_LANE: Lane = {
   name: "core",
