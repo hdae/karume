@@ -64,6 +64,8 @@ export type GeometrySweepProgress =
 
 /** {@link runGeometrySweep} の options（全て省略可）。 */
 export type GeometrySweepOptions = {
+  /** The `GPU` instance to use (default `navigator.gpu` — same as `acquireGpu({ gpu })`). */
+  readonly gpu?: GPU;
   /** `requestAdapter` に渡す（`powerPreference` 等 — `acquireGpu({ adapter })` と同じ）。 */
   readonly adapter?: GPURequestAdapterOptions;
   /** 候補集合（既定 `quick+`）。 */
@@ -155,13 +157,14 @@ export const runGeometrySweep = async (
   // NOTE: requestAdapter を 2 回呼んで同じ物理 adapter が選ばれる保証は仕様に無い — 選び直された
   // adapter が timestamp-query を持たなければ acquireGpu が GpuFeatureError で落ちる（黙って壁時計に
   // 落とさない）。navigator.gpu が無い環境は acquireGpu が GpuUnavailableError で落とす。
-  const webgpu: GPU | undefined = navigator.gpu;
+  const webgpu: GPU | undefined = options.gpu ?? navigator.gpu;
   const probe = options.timestamps === false || webgpu === undefined
     ? null
     : await webgpu.requestAdapter(options.adapter);
   const timestamps = probe?.features.has(TIMESTAMP_QUERY) === true;
   let deviceLost: Report["deviceLost"] = null;
   const gpu = await acquireGpu({
+    ...(options.gpu === undefined ? {} : { gpu: options.gpu }),
     ...(options.adapter === undefined ? {} : { adapter: options.adapter }),
     ...(timestamps ? { gpuTiming: true } : {}),
     onDeviceLost: (info) => {

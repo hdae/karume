@@ -500,6 +500,12 @@ fn main(@builtin(local_invocation_index) lid: u32,
 export type DeviceLostHandler = (info: GPUDeviceLostInfo) => void;
 
 export type AcquireGpuOptions = {
+  /**
+   * The `GPU` instance to request the adapter from. Default: `navigator.gpu`. Node applications
+   * pass the instance of a WebGPU implementation here (e.g. Dawn via the npm package `webgpu`:
+   * `create([])`) instead of defining `navigator.gpu` themselves; browsers and Deno leave it unset.
+   */
+  readonly gpu?: GPU;
   /** requestAdapter にそのまま渡す（powerPreference 等）。 */
   readonly adapter?: GPURequestAdapterOptions;
   /** 予期しない device 消失の通知先。`destroy()` 由来の消失では呼ばれない。 */
@@ -590,15 +596,18 @@ export type AcquireGpuOptions = {
 export const LIMIT_CAPS: unique symbol = Symbol("karume.limitCaps");
 
 /**
- * `navigator.gpu` とアダプタを取る（{@link acquireGpu} と {@link readAdapterLimits} の共通部）。
+ * `host`（省略時は `navigator.gpu`）からアダプタを取る（{@link acquireGpu} と {@link readAdapterLimits} の共通部）。
  * 無い環境は {@link GpuUnavailableError} — 2 つの入口で診断文言を揃えるためにここ 1 本にする。
  */
 const requestAdapterOrThrow = async (
   options: GPURequestAdapterOptions | undefined,
+  host: GPU | undefined,
 ): Promise<{ readonly gpu: GPU; readonly adapter: GPUAdapter }> => {
-  const gpu: GPU | undefined = navigator.gpu;
+  const gpu: GPU | undefined = host ?? navigator.gpu;
   if (gpu === undefined) {
-    throw new GpuUnavailableError("navigator.gpu が存在しない（WebGPU 非対応環境）");
+    throw new GpuUnavailableError(
+      "navigator.gpu が存在しない（WebGPU 非対応環境。Node では AcquireGpuOptions.gpu に実装を渡す）",
+    );
   }
   const adapter = await gpu.requestAdapter(options);
   if (adapter === null) {
@@ -619,7 +628,7 @@ export const acquireGpu = async (options: AcquireGpuOptions = {}): Promise<GpuCo
   const givenProfile = source === undefined || typeof source === "function"
     ? undefined
     : cloneCheckedGeometryProfile(source, DIRECT_PROFILE_LABEL);
-  const { gpu, adapter } = await requestAdapterOrThrow(options.adapter);
+  const { gpu, adapter } = await requestAdapterOrThrow(options.adapter, options.gpu);
   // コールバックに渡す値と GpuContext.adapterInfo を同じ 1 回の読みにする（別々に読むと、コールバックが
   // 引いた adapter と device の adapter の情報が食い違う形を作れてしまう）
   const adapterInfo = readAdapterInfo(adapter);
@@ -767,8 +776,8 @@ const profileFromCallback = (
  * （`assertWeightsWithinLimits`）が担う。
  */
 export const readAdapterLimits = async (
-  options: Pick<AcquireGpuOptions, "adapter"> = {},
+  options: Pick<AcquireGpuOptions, "adapter" | "gpu"> = {},
 ): Promise<RequiredLimits> => {
-  const { adapter } = await requestAdapterOrThrow(options.adapter);
+  const { adapter } = await requestAdapterOrThrow(options.adapter, options.gpu);
   return planRequiredLimits(adapter.limits);
 };
