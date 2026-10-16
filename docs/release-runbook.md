@@ -80,7 +80,7 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
 
 ## 1. 事前検証
 
-- [ ] `deno task verify` 緑（GPU テスト込み — アダプタ無し環境の SKIP はリリース判定では不可・
+- [ ] `vp check && vp test` 緑（フル verify = 全レーン・GPU テスト込み — アダプタ無し環境の SKIP はリリース判定では不可・
       ADR 0005）。**リリース判定機の条件**: アダプタが `shader-f16` と `timestamp-query` を
       **列挙する**実 HW であること（ソフトウェアアダプタ〈lavapipe 等〉は f16 を f32 で計算する
       ので実 HW レーンと区別する）と、実重み系列（`outputs/series/`）が置いてあること。
@@ -96,8 +96,9 @@ NOTE（次リリース限り）: 旧 `hdae/karume-anima-turbo` は ADR 0087 で�
       `written` で緑になる**。両方とも未設定で回した緑だけをリリース判定に使う
 - [ ] subgroup 変種（`rmsNormReduce: "subgroup32"` / `linearGemvReduce: "parallel-subgroup32"`）の WGSL か
       選択条件を変えたリリースでは、Chrome の `/check.html`（GEMV）と RMS の往復比較を回す。
-      `deno task verify` ではこの実走検査は常に SKIP で、SKIP を赤にする門も無い（limitations の
-      「subgroup 変種の実走検査は自動では走らない」節 — 手順は `tools/llm-speed/browser/README.md`）
+      `vp test` ではこの実走検査は常に SKIP で、SKIP を赤にする門も無い（limitations の
+      「subgroup 変種の実走検査は自動では走らない」節 — 手順は 0.14.0（main）の `tools/llm-speed/browser/README.md`。
+      ブラウザの道具の作り直しまではそちらを使う — ADR 0127）
 - [ ] exporter: `uv run --no-sync pytest` + `uv run --no-sync ruff check` +
       `uv run --no-sync ruff format --check` を
       **tools/exporter と tools/export-recipes の両方**で緑（CI は lint と format を
@@ -168,7 +169,7 @@ export HF_XET_DEDUPLICATION_GLOBAL_DEDUP_QUERY_ENABLED=false
       容器が 1 本も無いディレクトリのどれかがあれば `### FAILED 公開前の門` を出して 1 バイトも上げずに非 0 で
       終わる。置き場ではなく容器の中身で閉じるので、手で `models/` の下へ写した手元の実験用ミラー
       （取り込み由来 — assets-layout）も止まる。**台本を通さない `hf upload` はこの門を通らない** — 手で打つときは
-      先に `deno run --no-config --allow-read tools/release/container_license.ts models/<repo>` を回して終了コード 0 を
+      先に `node tools/release/container_license.ts models/<repo>` を回して終了コード 0 を
       確かめる
 - [ ] アップロード: `tools/release/hf-upload.zsh upload <repo>`（中身は
       `tools/.venv/bin/hf upload hdae/<repo> models/<repo> . --repo-type model` —
@@ -247,7 +248,7 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       ので、リポ名を見れば書き先が一意に決まる
 - [ ] **`KARUME_SOURCES` の網羅を確認**: 今回上げたリポが全て表に載っていること。
       不変条件（`"karume-" + key === repo の basename`・owner `hdae`・`revision` は 40hex）は
-      テストが門になっているので、`deno task test` で落ちる
+      テストが門になっているので、`vp test --project core` で落ちる
 - [ ] **初公開リポのエントリはこの時点で新設**（ADR 0073 決定 1 の理由を継承 — 公開前に置くと
       404 にしかならないキーが公開面に生える）。手順は各 family の `config.ts` の
       `<FAMILY>_SOURCES` へ 1 エントリ足すだけで、barrel の re-export は表単位なので追随不要
@@ -256,13 +257,13 @@ curl -sS -H "Authorization: Bearer <accessToken>" "<casUrl>/v1/reconstructions/<
       動作テストまで通してから「検証した」と名乗る
 - [ ] 疎通: 記入した SHA での `fromPretrained` が実 URL で通ること（SHA 指定は revision 解決
       リクエストが発生しない = オフライン起動可 — ADR 0038）。**表の全エントリを横断する疎通は
-      §5 の `deno task smoke:published`** — 公開版 `@karume/hub` で `KARUME_SOURCES` を総なめ
+      §5 の `node tools/published-smoke/main.ts`** — 公開版 `@karume/hub` で `KARUME_SOURCES` を総なめ
       するので、JSR publish 後にしか打てない（§0 の順序）
 - [ ] **対応表の値が公開 revision の唯一の在処**であること: `rg '\b[0-9a-f]{8,40}\b' docs
       .claude/ACTIVE_DESIGN.md` 相当で、docs 側へ SHA を写していないか確認する（写しは焼き直しの
       たびに古びる — 記録は `ANIMA_SOURCES["anima"]` のようなキーで綴る。2 リリース連続で
       食い違った 2026-08-24 / 08-29 の再発防止）
-- [ ] `deno task verify` → コミット
+- [ ] `vp check && vp test` → コミット
 
 ### 家族の初公開（対応表そのものの新設 — 現行の該当: 0.14.0 の umT5 = `karume-umt5-xxl` と Wan2.2 = `karume-wan2.2`）
 
@@ -277,8 +278,8 @@ Wan2.1（`karume-wan2.1`）は HF に公開しない（利用者裁定 2026-10-1
 `--allow-placeholder-ref`、公開後はその main の SHA。`--out` は既定の `models/karume-wan2.1`）。`WAN_SOURCES` に
 `"wan2.1"` は足さず、`karume-wan2.1` は上げない。
 
-- [ ] **公開前の確認（Wan2.2）**: 50 ステップの通し（`KARUME_WAN_TI2V_FULL_PIPELINE=1 deno test -A
-      --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_pipeline_test.ts --filter "50 ステップ"` —
+- [ ] **公開前の確認（Wan2.2）**: 50 ステップの通し（`KARUME_WAN_TI2V_FULL_PIPELINE=1 vp test
+      packages/e2e/tests/e2e_wan_ti2v_pipeline_test.ts -t "50 ステップ"` —
       事前計算の経路・1280×704・33 フレームを参照席と実用席で 1 本ずつ。RTX 3080 Ti で約 35 分）が緑で、
       sha256 の環境行が一致すること（既定のレーンは 2 ステップだけ）。ミラー `models/karume-wan2.2` が要る
 - [ ] **umT5 の系列は出所を本家へ移したもので組む**（ADR [0122](decisions/0122-umt5-upstream-and-compatible-encoders.md)
@@ -366,7 +367,9 @@ PyPI `karume`（tools/exporter）は**未リリース**。公開を始める時�
       リリース記録・プロジェクトメモリ。**この項目が済むまでリリースは「完了」ではない** —
       台帳の同期はここ 1 か所を唯一の門として扱う（0.9.0 では backlog だけが更新され
       ACTIVE_DESIGN が「publish はユーザー」のまま残った。同型の漏れは 2 度目）
-- [ ] 公開パッケージからの疎通: `deno task smoke:published`（tools/published-smoke — 公開版
+- [ ] 公開パッケージからの疎通: `node tools/published-smoke/main.ts`（tools/published-smoke — 公開版。
+      Deno からの import の確認は `deno run -A tools/published-smoke/main.ts`〈ADR 0127〉。公開した版を
+      `tools/published-smoke/package.json` と `deno.json` に書いて `pnpm install` してから回す
       `@karume/hub` で `KARUME_SOURCES` 全エントリの manifest を解決し、sbv2 を
       `fromPretrained` まで通す。GPU が
       無い機体は `--manifests-only`）。ワークスペース配下の `jsr:@karume/*` はローカル member に
