@@ -259,10 +259,16 @@ differs only where intended (phase 3).
   ADR 0005's manual real-browser acceptance stage, which used the examples harness, needs a new
   home in the same step.
 - **Maintenance of the release-age exclusion list** when Vite+ adds or renames its packages.
-- **A CacheStorage for Node.** Node has no Cache API, and hub's HTTP source (Hugging Face) prefetches
-  through one, so a Node application can read local distributions (`@karume/hub/node`) but cannot
-  fetch from the hub today. The tests pass an in-memory `CacheStorage`. A file-backed implementation
-  for Node (or an alternative download path) is needed before Node is a complete host.
+- **A CacheStorage for Node — resolved 2026-10-17.** Node has no Cache API, and hub's HTTP source
+  (Hugging Face) prefetches through one, so a Node application could read local distributions
+  (`@karume/hub/node`) but not fetch from the hub. `nodeCacheStorage(root)` on the same subpath is a
+  file-backed `CacheStorage` for the fetch layer: one directory per namespace, one file per entry (a
+  JSON header line with the URL, status and headers, then the body), written to a temporary file and
+  renamed over the entry, so a failed or aborted transfer never replaces a complete one and the header
+  can never belong to another body than the one it is read with. Hub's own tests keep passing an
+  in-memory `CacheStorage`; `node_cache_storage_test.ts` drives the real fetch layer through the
+  file-backed one against the local HF-shaped server, and once against huggingface.co when
+  `KARUME_NETWORK=1`.
 - **The fetch layer's read strategy on Node.** `@hdae/fetch-cache` defaults to the "blob" strategy
   unless a Deno global exists; hub asks for "stream" on Deno and Node itself (Node's Blob is
   in-memory). The default belongs in the fetch layer.

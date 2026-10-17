@@ -487,6 +487,8 @@ initializer にだけ掛かり、食い違えば重みを取る前に `prepareCo
 `prefetchAssets` の相 1 はバイト列を手元に持たない面なので、CacheStorage が使えない環境で
 素 fetch へ縮退する余地が構造的に無く、fail loud で落ちる（ADR
 [0070](decisions/0070-shard-loading-admission.md) 追記）。`onCacheError` 診断が届くのは相 2 のみ。
+Node には Cache Storage が無いので、`@karume/hub/node` の `nodeCacheStorage(dir)` を `caches` で渡す
+（渡さなければ同じく fail loud — 2026-10-17）。
 
 ## hub: 別々のロードが同じファイルを同時に温めると、両方がダウンロードする（by-design）
 

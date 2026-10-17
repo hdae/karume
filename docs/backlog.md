@@ -17,7 +17,7 @@
   結果: 全レーン緑（core 2,929 + 家族 16 レーン 2,119 passed・17 skipped〈opt-in のケース〉・0 failed — 2026-10-16〜17・`26053ef2`〈core はタイマーの空振り 1 件を直した `1c8f6f8b` で再走〉）・Deno 基線との成果物の突合は数値の差 0（[research](research/2026-10-16-node-port-results.md)）。
   **フェーズ 2（整理 — 0.15.0 の中身）**: ① テスト選別（[一覧](research/2026-10-16-test-triage.md): keep 306 / move 16 / drop 4 / merge 42 / review 24 — 利用者の裁定で実施）
   ② ADR の整理と英訳・コメントの英語化（ADR 0130）③ 数値プロファイル（ADR 0126: 既定 = practical・reference は opt-in）④ 既定のプリセット = オリジナルの重み（ADR 0128・breaking）
-  ⑤ Node 向けの CacheStorage（hub の HTTP 取得元が Node で動く条件 — ADR 0127 未決）⑥ PNG の sha 行を画素の sha に（ADR 0127 未決）⑦ lint の規則集合（既定規則の警告 331 件）
+  ⑤ ✅ Node 向けの CacheStorage（`@karume/hub/node` の `nodeCacheStorage`・2026-10-17・ステップ 2-4）⑥ PNG の sha 行を画素の sha に（ADR 0127 未決）⑦ lint の規則集合（既定規則の警告 331 件）
   ⑧ ✅ `Deno.test` 形の shim を Vitest 本来の形へ（2026-10-17・ステップ 2-2）。**フェーズ 3**: 0.15.0 のリリース（JSR のみか npm も — ADR 0127 未決）。
   同乗の候補（判断はリリース前）: irodori 2 リポの重複の越境参照・sbv2 のサブパス面の再設計・hub ≤ 0.4 の旧名前空間の回収グルーの撤去・HTTP Range 取得。
 

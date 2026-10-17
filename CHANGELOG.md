@@ -15,6 +15,15 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `nodeCacheStorage(root)` in `@karume/hub/node`: a `CacheStorage` on the Node.js file system for
+  the fetch layer behind the Hugging Face source. Node has no Cache API, so until now a Node
+  application could read a local distribution but not load from the hub; pass the result as
+  `caches` to `loadManifest` / `fetchAssets` / `prefetchAssets` / `openAsset`, and to
+  `clearHubCache` to clear it. Entries are written to a temporary file and renamed into place, so an
+  aborted or failed transfer never replaces a complete entry.
+
 ## [0.14.0] - 2026-10-16
 
 ### Added

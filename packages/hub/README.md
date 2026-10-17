@@ -82,11 +82,26 @@ const local = await loadManifest(denoDirectory("./models/karume-gemma4"));
 
 On Node the reader is `nodeDirectory` from `@karume/hub/node` (same arguments, `node:fs` underneath).
 
+Node has no Cache API, so a Hugging Face source on Node needs a `CacheStorage` for the fetch layer:
+`nodeCacheStorage` from the same subpath keeps one on disk (one directory per namespace, one file per
+entry, written atomically). Pass it as `caches` to every call that may download; `clearHubCache`
+takes it too.
+
+```ts
+import { loadManifest, prefetchAssets, resolveSelection, selectionRefs } from "@karume/hub";
+import { nodeCacheStorage } from "@karume/hub/node";
+
+const caches = nodeCacheStorage("./cache/karume");
+const loaded = await loadManifest({ repo: "hdae/karume-gemma4" }, { caches });
+await prefetchAssets(loaded, selectionRefs(resolveSelection(loaded.manifest)), { caches });
+```
+
 ## Requirements
 
-- Deno 2 (tested on 2.9.6) or a browser. Network access for Hugging Face sources; the local
-  directory source needs read access only.
+- Node 24, Deno 2 or a browser. Network access for Hugging Face sources; the local directory
+  source needs read access only.
 - The browser cache path uses the `CacheStorage` API, which is available in a secure context only.
+  On Node, `nodeCacheStorage` from `@karume/hub/node` provides one on disk; Deno has its own.
 - No WebGPU is needed here — this package never touches a GPU device. Executing what it fetches is
   `@karume/runtime`'s job.
 
