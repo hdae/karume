@@ -294,12 +294,14 @@ class TestFixture:
     """TS 側へ渡すフィクスチャが**いま**の上流と同じであること。"""
 
     def test_the_checked_in_fixture_is_what_the_generator_writes(self, e2b_config) -> None:
-        """MUST: 再生成して**バイト単位で**同じ — 古びたフィクスチャは TS 側の門を静かに
-        無意味にし、整形だけずれた版は `deno fmt --check` を落とす。
+        """MUST: 再生成して**同じ内容** — 古びたフィクスチャは TS 側の門を静かに無意味にする。
+
+        整形はリポのフォーマッタが正（2026-10-16 以降は Oxfmt が JSON も整形し、短い配列を
+        1 行に畳む）なので、バイト列ではなく JSON の値で比べる。書き直したら `vp fmt` を掛ける。
         """
         stored = rope_fixture.FIXTURE_PATH.read_text(encoding="utf-8")
 
-        assert stored == rope_fixture.fixture_json()
+        assert json.loads(stored) == json.loads(rope_fixture.fixture_json())
 
     def test_the_declaration_is_the_e2b_one(self) -> None:
         stored = json.loads(rope_fixture.FIXTURE_PATH.read_text(encoding="utf-8"))
