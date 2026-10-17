@@ -390,7 +390,7 @@ def quants(
     lines += [
         "Per-file `size` and `sha256` live in `karume.json` — verify against that at the fetch"
         " layer.",
-        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `i8` / `i4` /"
+        "Dtype labels use the runtime's **storage dtype vocabulary** (`f16` / `bf16` / `i8` / `i4` /"
         " `i2`), not the `fp16` spelling common elsewhere in the ecosystem.",
         "Weights ship as Karume container files (`.krm`), split into numbered parts;"
         " a part is fetched and verified on its own.",
